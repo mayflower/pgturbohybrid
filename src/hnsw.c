@@ -3,23 +3,39 @@
 #include <float.h>
 #include <limits.h>
 #include <math.h>
+#include <string.h>
 
 #include "access/amapi.h"
 #include "access/genam.h"
 #include "access/reloptions.h"
+#include "access/sysattr.h"
+#if PG_VERSION_NUM >= 150000
+#include "access/rmgr.h"
+#include "access/xloginsert.h"
+#include "access/xlog_internal.h"
+#include "access/xlogreader.h"
+#endif
 #include "commands/progress.h"
 #include "commands/vacuum.h"
 #include "fmgr.h"
 #include "hnsw.h"
+#include "lib/stringinfo.h"
 #include "miscadmin.h"
+#include "nodes/bitmapset.h"
 #include "nodes/pg_list.h"
+#include "optimizer/cost.h"
+#include "optimizer/optimizer.h"
+#include "storage/bufmgr.h"
 #include "storage/lwlock.h"
 #include "utils/float.h"
+#include "utils/fmgrprotos.h"
 #include "utils/guc.h"
+#include "utils/rel.h"
 #include "utils/relcache.h"
 #include "utils/selfuncs.h"
 #include "utils/spccache.h"
 #include "vector.h"
+#include "tqgraph.h"
 
 #if PG_VERSION_NUM < 150000
 #define MarkGUCPrefixReserved(x) EmitWarningsOnPlaceholders(x)
@@ -32,12 +48,72 @@ static const struct config_enum_entry hnsw_iterative_scan_options[] = {
 	{NULL, 0, false}
 };
 
+static relopt_enum_elt_def tq_routing_relopt_options[] = {
+	{"auto", TQ_ROUTING_AUTO},
+	{"graph", TQ_ROUTING_GRAPH},
+	{"flat", TQ_ROUTING_FLAT},
+	{NULL, 0}
+};
+
 int			hnsw_ef_search;
 int			hnsw_iterative_scan;
 int			hnsw_max_scan_tuples;
 double		hnsw_scan_mem_multiplier;
+bool		hnsw_tq_graph_prefetch = true;
+bool		hnsw_tq_graph_stack_scratch = true;
+bool		hnsw_tq_graph_lowbit_popcnt = true;
+bool		hnsw_tq_graph_i8mm = false;
+bool		hnsw_tq_graph_avxvnni = true;
+bool		hnsw_tq_graph_avx512vnni = true;
+bool		hnsw_tq_graph_avx512vpopcntdq = true;
+bool		hnsw_tq_weighted = false;
+bool		hnsw_tq_renorm = false;
+bool		hnsw_tq_query_1bit_asymmetric = false;
+int			hnsw_tq_query_1bit_asymmetric_bits = 8;
+bool		hnsw_tq_build_exact_distances = false;
+bool		hnsw_tq_hadamard_simd = true;
+bool		hnsw_tq_exact_avx512 = false;
+int			hnsw_tq_simd_force = TQ_SIMD_FORCE_AUTO;
+int			hnsw_tq_exact_simd_force = TQ_EXACT_SIMD_FORCE_AUTO;
+int			hnsw_tq_graph_batch_scoring = TQ_GRAPH_BATCH_AUTO;
+int			hnsw_tq_graph_batch_size = 4;
+int			hnsw_tq_graph_avx512_weighted = TQ_GRAPH_AVX512_WEIGHTED_OFF;
+int			hnsw_tq_graph_lookahead_prefetch = TQ_GRAPH_LOOKAHEAD_AUTO;
+int			hnsw_tq_graph_lookahead_threshold_kb = 24576;
+int			hnsw_tq_dense_budget_policy = TQ_DENSE_BUDGET_AUTO;
+int			hnsw_tq_dense_max_candidate_multiplier = 4;
+double		hnsw_tq_dense_latency_multiplier = 1.5;
+int			hnsw_tq_dense_max_rescore_multiplier = 2;
+int			hnsw_tq_rescore_band_policy = TQ_RESCORE_BAND_POLICY_AUTO;
 int			hnsw_lock_tranche_id;
 static relopt_kind hnsw_relopt_kind;
+static relopt_kind tq_relopt_kind;
+#define TQ_GRAPH_OP_COUNT				(HNSW_GRAPH_OP_VACUUM_REPAIR + 1)
+#define TQ_GRAPH_CUSTOM_RMGR_NAME		"TurboQuantGraph"
+
+#if PG_VERSION_NUM >= 150000
+#define TQ_GRAPH_RMGR_ID				RM_EXPERIMENTAL_ID
+#define XLOG_TQ_GRAPH_OP				0x00
+
+typedef struct HnswGraphWalRecord
+{
+	RelFileLocator locator;
+	ForkNumber	forknum;
+	BlockNumber blkno;
+	uint16		graphOpKind;
+	uint16		storageKind;
+} HnswGraphWalRecord;
+
+static bool tq_graph_custom_wal_registered = false;
+static bool tq_graph_custom_wal_collision = false;
+#endif
+
+static bool HnswPathHasFilter(IndexPath *path);
+static bytea *hnswoptions(Datum reloptions, bool validate);
+static bytea *turboquantoptions(Datum reloptions, bool validate);
+static IndexAmRoutine *BuildHnswAmRoutine(amoptions_function amoptions, bool turboquant);
+static const char *HnswGraphOpName(uint16 graphOpKind);
+static void HnswRegisterGraphWalRmgr(void);
 
 /*
  * Assign a tranche ID for our LWLocks. This only needs to be done by one
@@ -75,12 +151,173 @@ HnswInitLockTranche(void)
 #endif
 }
 
+static const char *
+HnswGraphOpName(uint16 graphOpKind)
+{
+	switch (graphOpKind)
+	{
+		case HNSW_GRAPH_OP_NONE:
+			return "none";
+		case HNSW_GRAPH_OP_PAGE_INIT:
+			return "page_init";
+		case HNSW_GRAPH_OP_PAGE_LINK:
+			return "page_link";
+		case HNSW_GRAPH_OP_META_UPDATE:
+			return "meta_update";
+		case HNSW_GRAPH_OP_ELEMENT_INSERT:
+			return "element_insert";
+		case HNSW_GRAPH_OP_NEIGHBOR_INSERT:
+			return "neighbor_insert";
+		case HNSW_GRAPH_OP_NEIGHBOR_UPDATE:
+			return "neighbor_update";
+		case HNSW_GRAPH_OP_DUPLICATE_HEAPTID:
+			return "duplicate_heaptid";
+		case HNSW_GRAPH_OP_VACUUM_DELETE:
+			return "vacuum_delete";
+		case HNSW_GRAPH_OP_VACUUM_REPAIR:
+			return "vacuum_repair";
+		default:
+			return "unknown";
+	}
+}
+
+#if PG_VERSION_NUM >= 150000
+static void
+HnswGraphWalRedo(XLogReaderState *record)
+{
+	(void) record;
+}
+
+static void
+HnswGraphWalDesc(StringInfo buf, XLogReaderState *record)
+{
+	char	   *data = XLogRecGetData(record);
+	uint32		len = XLogRecGetDataLen(record);
+
+	if (len == sizeof(HnswGraphWalRecord))
+	{
+		HnswGraphWalRecord *xlrec = (HnswGraphWalRecord *) data;
+
+		appendStringInfo(buf,
+						 "op=%s locator=%u/%u/%u fork=%d blk=%u storage=%u",
+						 HnswGraphOpName(xlrec->graphOpKind),
+						 xlrec->locator.spcOid,
+						 xlrec->locator.dbOid,
+						 xlrec->locator.relNumber,
+						 xlrec->forknum,
+						 xlrec->blkno,
+						 xlrec->storageKind);
+	}
+	else
+		appendStringInfo(buf, "malformed graph WAL record length %u", len);
+}
+
+static const char *
+HnswGraphWalIdentify(uint8 info)
+{
+	if ((info & ~XLR_INFO_MASK) == XLOG_TQ_GRAPH_OP)
+		return "GRAPH_OP";
+
+	return NULL;
+}
+
+static const RmgrData HnswGraphRmgrData = {
+	.rm_name = TQ_GRAPH_CUSTOM_RMGR_NAME,
+	.rm_redo = HnswGraphWalRedo,
+	.rm_desc = HnswGraphWalDesc,
+	.rm_identify = HnswGraphWalIdentify,
+	.rm_startup = NULL,
+	.rm_cleanup = NULL,
+	.rm_mask = NULL,
+	.rm_decode = NULL
+};
+#endif
+
+static void
+HnswRegisterGraphWalRmgr(void)
+{
+#if PG_VERSION_NUM >= 150000
+	if (RmgrIdExists(TQ_GRAPH_RMGR_ID))
+	{
+		if (strcmp(RmgrTable[TQ_GRAPH_RMGR_ID].rm_name, TQ_GRAPH_CUSTOM_RMGR_NAME) == 0)
+			tq_graph_custom_wal_registered = true;
+		else
+			tq_graph_custom_wal_collision = true;
+		return;
+	}
+
+	/*
+	 * Custom WAL records must be replayable during crash recovery. Only emit
+	 * them when the resource manager was installed from shared_preload_libraries.
+	 */
+	if (!process_shared_preload_libraries_in_progress)
+		return;
+
+	RegisterCustomRmgr(TQ_GRAPH_RMGR_ID, &HnswGraphRmgrData);
+	tq_graph_custom_wal_registered = true;
+	tq_graph_custom_wal_collision = false;
+#endif
+}
+
+bool
+HnswGraphCustomWalEnabled(void)
+{
+#if PG_VERSION_NUM >= 150000
+	return tq_graph_custom_wal_registered && !tq_graph_custom_wal_collision;
+#else
+	return false;
+#endif
+}
+
+const char *
+HnswGraphWalModeName(void)
+{
+	if (HnswGraphCustomWalEnabled())
+		return "generic_xlog_page_ops_plus_custom_graph_records";
+
+	return "generic_xlog_page_ops";
+}
+
+void
+HnswLogGraphWalRecord(Relation index, ForkNumber forkNum, BlockNumber blkno, uint16 graphOpKind)
+{
+#if PG_VERSION_NUM >= 150000
+	HnswGraphWalRecord xlrec;
+
+	if (!HnswGraphCustomWalEnabled())
+		return;
+
+	if (!HnswUseTqGraph(index))
+		return;
+
+	if (!RelationNeedsWAL(index))
+		return;
+
+	xlrec.locator = index->rd_locator;
+	xlrec.forknum = forkNum;
+	xlrec.blkno = blkno;
+	xlrec.graphOpKind = graphOpKind;
+	xlrec.storageKind = HNSW_STORAGE_TURBOQUANT_GRAPH;
+
+	XLogBeginInsert();
+	XLogRegisterData((char *) &xlrec, sizeof(xlrec));
+	XLogInsert(TQ_GRAPH_RMGR_ID, XLOG_TQ_GRAPH_OP);
+#else
+	(void) index;
+	(void) forkNum;
+	(void) blkno;
+	(void) graphOpKind;
+#endif
+}
+
 /*
  * Initialize index options and variables
  */
 void
 HnswInit(void)
 {
+	HnswRegisterGraphWalRmgr();
+
 	if (!process_shared_preload_libraries_in_progress)
 		HnswInitLockTranche();
 
@@ -89,6 +326,25 @@ HnswInit(void)
 					  HNSW_DEFAULT_M, HNSW_MIN_M, HNSW_MAX_M, AccessExclusiveLock);
 	add_int_reloption(hnsw_relopt_kind, "ef_construction", "Size of the dynamic candidate list for construction",
 					  HNSW_DEFAULT_EF_CONSTRUCTION, HNSW_MIN_EF_CONSTRUCTION, HNSW_MAX_EF_CONSTRUCTION, AccessExclusiveLock);
+
+	tq_relopt_kind = add_reloption_kind();
+	add_enum_reloption(tq_relopt_kind, "routing", "Turboquant routing mode",
+					   tq_routing_relopt_options, TQ_ROUTING_AUTO,
+					   "Valid values are \"auto\", \"graph\", and \"flat\".",
+					   AccessExclusiveLock);
+	add_int_reloption(tq_relopt_kind, "graph_m", "Max number of graph connections",
+					  TQ_DEFAULT_GRAPH_M, HNSW_MIN_M, HNSW_MAX_M, AccessExclusiveLock);
+	add_int_reloption(tq_relopt_kind, "graph_ef_construction", "Size of the dynamic graph candidate list for construction",
+					  TQ_DEFAULT_GRAPH_EF_CONSTRUCTION, HNSW_MIN_EF_CONSTRUCTION, HNSW_MAX_EF_CONSTRUCTION, AccessExclusiveLock);
+	add_int_reloption(tq_relopt_kind, "graph_ef_search", "Size of the dynamic graph candidate list for search",
+					  TQ_DEFAULT_GRAPH_EF_SEARCH, HNSW_MIN_EF_SEARCH, HNSW_MAX_EF_SEARCH, AccessExclusiveLock);
+	add_int_reloption(tq_relopt_kind, "graph_oversampling", "Candidate oversampling multiplier for graph scans",
+					  TQ_DEFAULT_GRAPH_OVERSAMPLING, 1, 1000, AccessExclusiveLock);
+		add_int_reloption(tq_relopt_kind, "tq_bits", "Turboquant code bit width",
+						  TQ_DEFAULT_INDEX_BITS, 1, TQ_DEFAULT_BITS, AccessExclusiveLock);
+		add_bool_reloption(tq_relopt_kind, "tq_exact_storage",
+						   "Store exact vectors in native TurboQuant graph indexes for final exact rescoring. Set off for compact exact-free quantized-only storage.",
+						   TQ_DEFAULT_EXACT_STORAGE, AccessExclusiveLock);
 
 	DefineCustomIntVariable("hnsw.ef_search", "Sets the size of the dynamic candidate list for search",
 							"Valid range is 1..1000.", &hnsw_ef_search,
@@ -107,6 +363,8 @@ HnswInit(void)
 	DefineCustomRealVariable("hnsw.scan_mem_multiplier", "Sets the multiple of work_mem to use for iterative scans",
 							 NULL, &hnsw_scan_mem_multiplier,
 							 1, 1, 1000, PGC_USERSET, 0, NULL, NULL, NULL);
+
+		TqGraphControlInit();
 
 	MarkGUCPrefixReserved("hnsw");
 }
@@ -132,10 +390,11 @@ hnswbuildphasename(int64 phasenum)
  * Estimate the cost of an index scan
  */
 static void
-hnswcostestimate(PlannerInfo *root, IndexPath *path, double loop_count,
-				 Cost *indexStartupCost, Cost *indexTotalCost,
-				 Selectivity *indexSelectivity, double *indexCorrelation,
-				 double *indexPages)
+hnswcostestimate_internal(PlannerInfo *root, IndexPath *path, double loop_count,
+						  int efSearch, bool penalizeFilteredPath,
+						  Cost *indexStartupCost, Cost *indexTotalCost,
+						  Selectivity *indexSelectivity, double *indexCorrelation,
+						  double *indexPages)
 {
 	GenericCosts costs;
 	int			m;
@@ -198,8 +457,8 @@ hnswcostestimate(PlannerInfo *root, IndexPath *path, double loop_count,
 	{
 		double		scalingFactor = 0.55;
 		int			entryLevel = (int) (log(path->indexinfo->tuples) * HnswGetMl(m));
-		int			layer0TuplesMax = HnswGetLayerM(m, 0) * hnsw_ef_search;
-		double		layer0Selectivity = scalingFactor * log(path->indexinfo->tuples) / (log(m) * (1 + log(hnsw_ef_search)));
+		int			layer0TuplesMax = HnswGetLayerM(m, 0) * efSearch;
+		double		layer0Selectivity = scalingFactor * log(path->indexinfo->tuples) / (log(m) * (1 + log(efSearch)));
 
 		ratio = (entryLevel * m + layer0TuplesMax * layer0Selectivity) / path->indexinfo->tuples;
 
@@ -232,6 +491,75 @@ hnswcostestimate(PlannerInfo *root, IndexPath *path, double loop_count,
 	*indexPages = costs.numIndexPages;
 }
 
+static void
+hnswcostestimate(PlannerInfo *root, IndexPath *path, double loop_count,
+				 Cost *indexStartupCost, Cost *indexTotalCost,
+				 Selectivity *indexSelectivity, double *indexCorrelation,
+				 double *indexPages)
+{
+	hnswcostestimate_internal(root, path, loop_count, hnsw_ef_search, true,
+							  indexStartupCost, indexTotalCost,
+							  indexSelectivity, indexCorrelation, indexPages);
+}
+
+static void
+turboquantcostestimate(PlannerInfo *root, IndexPath *path, double loop_count,
+					   Cost *indexStartupCost, Cost *indexTotalCost,
+					   Selectivity *indexSelectivity, double *indexCorrelation,
+					   double *indexPages)
+{
+	Relation	index = index_open(path->indexinfo->indexoid, NoLock);
+	bool		useNativeGraph = HnswUseTqNativeGraph(index);
+	int			efSearch = HnswGetEfSearch(index);
+
+	index_close(index, NoLock);
+
+	hnswcostestimate_internal(root, path, loop_count, efSearch, !useNativeGraph,
+							  indexStartupCost, indexTotalCost,
+							  indexSelectivity, indexCorrelation, indexPages);
+
+	if (useNativeGraph)
+	{
+		double		costMultiplier = HnswPathHasFilter(path) ? 0.02 : 0.2;
+
+		/*
+		 * Native TurboQuant graph scans traverse compact cached codes and
+		 * adjacency lists, then exact-rescore only the final candidate band.
+		 * The physical index also stores exact vector bytes for rescore, so
+		 * generic page costs overstate the startup work for ordered scans.
+		 * With scalar filters, the scan widens its final candidate band using
+		 * planner selectivity instead of falling back to a bitmap filter plus
+		 * full sort, so discount those ordered top-k paths further.
+		 */
+		*indexStartupCost *= costMultiplier;
+		*indexTotalCost *= costMultiplier;
+	}
+}
+
+static bool
+HnswPathHasFilter(IndexPath *path)
+{
+	int			indexAttno = path->indexinfo->indexkeys[0];
+	ListCell   *lc;
+
+	foreach(lc, path->indexinfo->indrestrictinfo)
+	{
+		RestrictInfo *rinfo = lfirst_node(RestrictInfo, lc);
+		Bitmapset  *attrs = NULL;
+
+		pull_varattnos((Node *) rinfo->clause, path->indexinfo->rel->relid, &attrs);
+
+		if (attrs == NULL)
+			continue;
+
+		if (bms_membership(attrs) != BMS_SINGLETON ||
+			!bms_is_member(indexAttno - FirstLowInvalidHeapAttributeNumber, attrs))
+			return true;
+	}
+
+	return false;
+}
+
 /*
  * Parse and validate the reloptions
  */
@@ -247,6 +575,101 @@ hnswoptions(Datum reloptions, bool validate)
 									  hnsw_relopt_kind,
 									  sizeof(HnswOptions),
 									  tab, lengthof(tab));
+}
+
+/*
+ * Parse and validate turboquant reloptions. The first fields intentionally
+ * map graph_m and graph_ef_construction onto HnswOptions-compatible storage
+ * so the native HNSW graph code can build and maintain the index.
+ */
+static bytea *
+turboquantoptions(Datum reloptions, bool validate)
+{
+	static const relopt_parse_elt tab[] = {
+		{"graph_m", RELOPT_TYPE_INT, offsetof(TqOptions, m)},
+		{"graph_ef_construction", RELOPT_TYPE_INT, offsetof(TqOptions, efConstruction)},
+		{"routing", RELOPT_TYPE_ENUM, offsetof(TqOptions, routing)},
+		{"graph_ef_search", RELOPT_TYPE_INT, offsetof(TqOptions, graphEfSearch)},
+		{"graph_oversampling", RELOPT_TYPE_INT, offsetof(TqOptions, graphOversampling)},
+		{"tq_bits", RELOPT_TYPE_INT, offsetof(TqOptions, tqBits)},
+		{"tq_exact_storage", RELOPT_TYPE_BOOL, offsetof(TqOptions, tqExactStorage)},
+	};
+
+	TqOptions  *opts = (TqOptions *) build_reloptions(reloptions, validate,
+													  tq_relopt_kind,
+													  sizeof(TqOptions),
+													  tab, lengthof(tab));
+
+	if (validate && opts != NULL &&
+		opts->tqBits != 1 && opts->tqBits != 2 && opts->tqBits != TQ_DEFAULT_BITS)
+		ereport(ERROR,
+				(errcode(ERRCODE_INVALID_PARAMETER_VALUE),
+				 errmsg("invalid value %d for option \"tq_bits\"", opts->tqBits),
+				 errdetail("Valid values are \"1\", \"2\", and \"4\".")));
+
+	if (validate && opts != NULL &&
+		(opts->m < HNSW_MIN_M || opts->m > HNSW_MAX_M))
+		ereport(ERROR,
+				(errcode(ERRCODE_INVALID_PARAMETER_VALUE),
+				 errmsg("value %d out of bounds for option \"graph_m\"", opts->m),
+				 errdetail("Valid values are between \"%d\" and \"%d\".",
+						   HNSW_MIN_M, HNSW_MAX_M)));
+
+	return (bytea *) opts;
+}
+
+static IndexBulkDeleteResult *
+turboquantbulkdelete(IndexVacuumInfo *info, IndexBulkDeleteResult *stats,
+					 IndexBulkDeleteCallback callback, void *callback_state)
+{
+	if (HnswUseTqNativeGraph(info->index))
+		return tqgraphbulkdelete(info, stats, callback, callback_state);
+	if (!HnswUseTqFlat(info->index))
+		ereport(ERROR,
+				(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
+				 errmsg("turboquant requires a native graph-compatible opclass"),
+				 errhint("Use the hnsw or ivfflat access method directly for this opclass.")));
+
+	return hnswbulkdelete(info, stats, callback, callback_state);
+}
+
+static IndexBulkDeleteResult *
+turboquantvacuumcleanup(IndexVacuumInfo *info, IndexBulkDeleteResult *stats)
+{
+	if (HnswUseTqNativeGraph(info->index))
+		return tqgraphvacuumcleanup(info, stats);
+	if (!HnswUseTqFlat(info->index))
+		ereport(ERROR,
+				(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
+				 errmsg("turboquant requires a native graph-compatible opclass"),
+				 errhint("Use the hnsw or ivfflat access method directly for this opclass.")));
+
+	return hnswvacuumcleanup(info, stats);
+}
+
+void
+HnswRecordGraphScanStats(HnswScanOpaque so)
+{
+}
+
+void
+HnswRecordNonGraphScanStats(void)
+{
+}
+
+void
+HnswRecordFlatScanStats(void)
+{
+}
+
+void
+HnswRecordExactVectorKernel(int kernel)
+{
+}
+
+void
+HnswRecordWeightedCodeCodeKernel(int kernel)
+{
 }
 
 /*
@@ -267,68 +690,23 @@ FUNCTION_PREFIX PG_FUNCTION_INFO_V1(hnswhandler);
 Datum
 hnswhandler(PG_FUNCTION_ARGS)
 {
-#if PG_VERSION_NUM >= 190000
-	static const IndexAmRoutine amroutine = {
-		.type = T_IndexAmRoutine,
-		.amstrategies = 0,
-		.amsupport = 3,
-		.amoptsprocnum = 0,
-		.amcanorder = false,
-		.amcanorderbyop = true,
-		.amcanhash = false,
-		.amconsistentequality = false,
-		.amconsistentordering = false,
-		.amcanbackward = false,
-		.amcanunique = false,
-		.amcanmulticol = false,
-		.amoptionalkey = true,
-		.amsearcharray = false,
-		.amsearchnulls = false,
-		.amstorage = false,
-		.amclusterable = false,
-		.ampredlocks = false,
-		.amcanparallel = false,
-		.amcanbuildparallel = true,
-		.amcaninclude = false,
-		.amusemaintenanceworkmem = false,
-		.amsummarizing = false,
-		.amparallelvacuumoptions = VACUUM_OPTION_PARALLEL_BULKDEL,
-		.amkeytype = InvalidOid,
+	PG_RETURN_POINTER(BuildHnswAmRoutine(hnswoptions, false));
+}
 
-		.ambuild = hnswbuild,
-		.ambuildempty = hnswbuildempty,
-		.aminsert = hnswinsert,
-		.aminsertcleanup = NULL,
-		.ambulkdelete = hnswbulkdelete,
-		.amvacuumcleanup = hnswvacuumcleanup,
-		.amcanreturn = NULL,
-		.amcostestimate = hnswcostestimate,
-		.amgettreeheight = NULL,
-		.amoptions = hnswoptions,
-		.amproperty = NULL,
-		.ambuildphasename = hnswbuildphasename,
-		.amvalidate = hnswvalidate,
-		.amadjustmembers = NULL,
-		.ambeginscan = hnswbeginscan,
-		.amrescan = hnswrescan,
-		.amgettuple = hnswgettuple,
-		.amgetbitmap = NULL,
-		.amendscan = hnswendscan,
-		.ammarkpos = NULL,
-		.amrestrpos = NULL,
-		.amestimateparallelscan = NULL,
-		.aminitparallelscan = NULL,
-		.amparallelrescan = NULL,
-		.amtranslatestrategy = NULL,
-		.amtranslatecmptype = NULL,
-	};
+FUNCTION_PREFIX PG_FUNCTION_INFO_V1(turboquanthandler);
+Datum
+turboquanthandler(PG_FUNCTION_ARGS)
+{
+	PG_RETURN_POINTER(BuildHnswAmRoutine(turboquantoptions, true));
+}
 
-	PG_RETURN_POINTER(&amroutine);
-#else
+static IndexAmRoutine *
+BuildHnswAmRoutine(amoptions_function amoptions, bool turboquant)
+{
 	IndexAmRoutine *amroutine = makeNode(IndexAmRoutine);
 
 	amroutine->amstrategies = 0;
-	amroutine->amsupport = 3;
+	amroutine->amsupport = turboquant ? 5 : 3;
 	amroutine->amoptsprocnum = 0;
 	amroutine->amcanorder = false;
 	amroutine->amcanorderbyop = true;
@@ -350,7 +728,7 @@ hnswhandler(PG_FUNCTION_ARGS)
 #if PG_VERSION_NUM >= 170000
 	amroutine->amcanbuildparallel = true;
 #endif
-	amroutine->amcaninclude = false;
+	amroutine->amcaninclude = turboquant;
 	amroutine->amusemaintenanceworkmem = false; /* not used during VACUUM */
 #if PG_VERSION_NUM >= 160000
 	amroutine->amsummarizing = false;
@@ -359,31 +737,31 @@ hnswhandler(PG_FUNCTION_ARGS)
 	amroutine->amkeytype = InvalidOid;
 
 	/* Interface functions */
-	amroutine->ambuild = hnswbuild;
-	amroutine->ambuildempty = hnswbuildempty;
-	amroutine->aminsert = hnswinsert;
+	amroutine->ambuild = turboquant ? turboquantbuild : hnswbuild;
+	amroutine->ambuildempty = turboquant ? turboquantbuildempty : hnswbuildempty;
+	amroutine->aminsert = turboquant ? turboquantinsert : hnswinsert;
 #if PG_VERSION_NUM >= 170000
 	amroutine->aminsertcleanup = NULL;
 #endif
-	amroutine->ambulkdelete = hnswbulkdelete;
-	amroutine->amvacuumcleanup = hnswvacuumcleanup;
+	amroutine->ambulkdelete = turboquant ? turboquantbulkdelete : hnswbulkdelete;
+	amroutine->amvacuumcleanup = turboquant ? turboquantvacuumcleanup : hnswvacuumcleanup;
 	amroutine->amcanreturn = NULL;
-	amroutine->amcostestimate = hnswcostestimate;
+	amroutine->amcostestimate = turboquant ? turboquantcostestimate : hnswcostestimate;
 #if PG_VERSION_NUM >= 180000
 	amroutine->amgettreeheight = NULL;
 #endif
-	amroutine->amoptions = hnswoptions;
+	amroutine->amoptions = amoptions;
 	amroutine->amproperty = NULL;	/* TODO AMPROP_DISTANCE_ORDERABLE */
 	amroutine->ambuildphasename = hnswbuildphasename;
 	amroutine->amvalidate = hnswvalidate;
 #if PG_VERSION_NUM >= 140000
 	amroutine->amadjustmembers = NULL;
 #endif
-	amroutine->ambeginscan = hnswbeginscan;
-	amroutine->amrescan = hnswrescan;
-	amroutine->amgettuple = hnswgettuple;
+	amroutine->ambeginscan = turboquant ? turboquantbeginscan : hnswbeginscan;
+	amroutine->amrescan = turboquant ? turboquantrescan : hnswrescan;
+	amroutine->amgettuple = turboquant ? turboquantgettuple : hnswgettuple;
 	amroutine->amgetbitmap = NULL;
-	amroutine->amendscan = hnswendscan;
+	amroutine->amendscan = turboquant ? turboquantendscan : hnswendscan;
 	amroutine->ammarkpos = NULL;
 	amroutine->amrestrpos = NULL;
 
@@ -397,6 +775,5 @@ hnswhandler(PG_FUNCTION_ARGS)
 	amroutine->amtranslatecmptype = NULL;
 #endif
 
-	PG_RETURN_POINTER(amroutine);
-#endif
+	return amroutine;
 }
