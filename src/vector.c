@@ -15,6 +15,7 @@
 #include "libpq/pqformat.h"
 #include "port.h"				/* for strtof() */
 #include "sparsevec.h"
+#include "tqhybrid.h"
 #include "utils/array.h"
 #include "utils/float.h"
 #include "utils/fmgrprotos.h"
@@ -77,6 +78,7 @@ _PG_init(void)
 	HalfvecInit();
 	HnswInit();
 	IvfflatInit();
+	TqHybridInit();
 }
 
 /*

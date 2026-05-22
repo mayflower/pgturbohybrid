@@ -4,8 +4,8 @@ EXTVERSION = 0.8.2
 MODULE_big = vector
 DATA = $(wildcard sql/*--*--*.sql)
 DATA_built = sql/$(EXTENSION)--$(EXTVERSION).sql
-OBJS = src/bitutils.o src/bitvec.o src/halfutils.o src/halfvec.o src/hnsw.o src/hnswbuild.o src/hnswinsert.o src/hnswscan.o src/hnswutils.o src/hnswvacuum.o src/ivfbuild.o src/ivfflat.o src/ivfinsert.o src/ivfkmeans.o src/ivfscan.o src/ivfutils.o src/ivfvacuum.o src/sparsevec.o src/tqgraph.o src/tqgraph_cache.o src/tqgraph_exact.o src/tqgraph_insert.o src/tqgraph_psquare.o src/tqgraph_scan_cache.o src/tqgraph_score.o src/tqgraph_storage.o src/tqgraphcontrol.o src/vector.o
-HEADERS = src/halfvec.h src/sparsevec.h src/vector.h
+OBJS = src/bitutils.o src/bitvec.o src/halfutils.o src/halfvec.o src/hnsw.o src/hnswbuild.o src/hnswinsert.o src/hnswscan.o src/hnswutils.o src/hnswvacuum.o src/hybrid_query.o src/ivfbuild.o src/ivfflat.o src/ivfinsert.o src/ivfkmeans.o src/ivfscan.o src/ivfutils.o src/ivfvacuum.o src/sparsevec.o src/tqgraph.o src/tqgraph_cache.o src/tqgraph_diag.o src/tqgraph_exact.o src/tqgraph_insert.o src/tqgraph_psquare.o src/tqgraph_scan_cache.o src/tqgraph_score.o src/tqgraph_storage.o src/tqgraphcontrol.o src/tqhybrid.o src/tqhybrid_bm25_build.o src/tqhybrid_bm25_query.o src/tqstats.o src/vector.o
+HEADERS = src/halfvec.h src/hybrid_query.h src/sparsevec.h src/tqhybrid.h src/tqhybrid_bm25.h src/vector.h
 
 TESTS = $(wildcard test/sql/*.sql)
 REGRESS = $(patsubst test/sql/%.sql,%,$(TESTS))

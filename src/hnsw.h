@@ -89,6 +89,14 @@ typedef Pointer Item;
 #define HNSW_PAGE_KIND_TQ_ADJ			4
 #define HNSW_PAGE_KIND_TQ_EXACT			5
 #define HNSW_PAGE_KIND_TQ_CORRECTION	6
+#define HNSW_PAGE_KIND_TQ_BM25_META		7
+#define HNSW_PAGE_KIND_TQ_BM25_DOCSTATS	8
+#define HNSW_PAGE_KIND_TQ_BM25_LEXICON	9
+#define HNSW_PAGE_KIND_TQ_BM25_POSTINGS	10
+#define HNSW_PAGE_KIND_TQ_BM25_BLOCKMAX	11
+#define HNSW_PAGE_KIND_TQ_BM25_DELTA	12
+#define HNSW_PAGE_KIND_TQ_BM25_IMPACT	13
+#define HNSW_PAGE_KIND_TQ_BM25_DELTA_TERM 14
 #define HNSW_PAGE_KIND_MASK				0x00ff
 #define HNSW_PAGE_GRAPH_OP_SHIFT		8
 
@@ -609,6 +617,7 @@ typedef struct HnswMetaPageData
 	BlockNumber tqAdjStartBlkno;
 	BlockNumber tqExactStartBlkno;
 	BlockNumber tqCorrectionStartBlkno;
+	BlockNumber tqBm25MetaStartBlkno;
 }			HnswMetaPageData;
 
 typedef HnswMetaPageData * HnswMetaPage;
@@ -718,6 +727,7 @@ typedef struct HnswScanOpaqueData
 	void	   *tqGraphResults;
 	int			tqGraphResultCount;
 	int			tqGraphResultIndex;
+	void	   *tqHybridState;
 
 	/* Support functions */
 	HnswSupport support;
@@ -883,6 +893,10 @@ bool		tqgraphgettuple(IndexScanDesc scan, ScanDirection dir);
 void		tqgraphendscan(IndexScanDesc scan);
 
 Datum		turboquanthandler(PG_FUNCTION_ARGS);
+Datum		tq_last_scan_stats(PG_FUNCTION_ARGS);
+Datum		tq_index_stats(PG_FUNCTION_ARGS);
+Datum		tq_simd_capabilities(PG_FUNCTION_ARGS);
+Datum		tq_last_simd_stats(PG_FUNCTION_ARGS);
 void		HnswRecordExactVectorKernel(int kernel);
 void		HnswRecordWeightedCodeCodeKernel(int kernel);
 
