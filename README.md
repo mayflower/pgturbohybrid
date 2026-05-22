@@ -202,6 +202,17 @@ Supported index types are:
 
 - [HNSW](#hnsw)
 - [IVFFlat](#ivfflat)
+- [TurboQuant](#turboquant)
+
+## TurboQuant
+
+TurboQuant is a quantized graph index for `vector` columns.
+
+```sql
+CREATE INDEX ON items USING turboquant (embedding vector_l2_ops);
+```
+
+It also supports `vector_ip_ops`, `vector_cosine_ops`, and `vector_l1_ops`.
 
 ## HNSW
 

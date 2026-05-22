@@ -261,6 +261,13 @@ CREATE ACCESS METHOD hnsw TYPE INDEX HANDLER hnswhandler;
 
 COMMENT ON ACCESS METHOD hnsw IS 'hnsw index access method';
 
+CREATE FUNCTION turboquanthandler(internal) RETURNS index_am_handler
+	AS 'MODULE_PATHNAME' LANGUAGE C;
+
+CREATE ACCESS METHOD turboquant TYPE INDEX HANDLER turboquanthandler;
+
+COMMENT ON ACCESS METHOD turboquant IS 'turboquant graph index access method';
+
 -- access method private functions
 
 CREATE FUNCTION ivfflat_halfvec_support(internal) RETURNS internal
@@ -328,6 +335,32 @@ CREATE OPERATOR CLASS vector_cosine_ops
 
 CREATE OPERATOR CLASS vector_l1_ops
 	FOR TYPE vector USING hnsw AS
+	OPERATOR 1 <+> (vector, vector) FOR ORDER BY float_ops,
+	FUNCTION 1 l1_distance(vector, vector);
+
+CREATE OPERATOR CLASS vector_l2_ops
+	DEFAULT FOR TYPE vector USING turboquant AS
+	OPERATOR 1 <-> (vector, vector) FOR ORDER BY float_ops,
+	FUNCTION 1 vector_l2_squared_distance(vector, vector),
+	FUNCTION 3 l2_distance(vector, vector);
+
+CREATE OPERATOR CLASS vector_ip_ops
+	FOR TYPE vector USING turboquant AS
+	OPERATOR 1 <#> (vector, vector) FOR ORDER BY float_ops,
+	FUNCTION 1 vector_negative_inner_product(vector, vector),
+	FUNCTION 3 vector_spherical_distance(vector, vector),
+	FUNCTION 4 vector_norm(vector);
+
+CREATE OPERATOR CLASS vector_cosine_ops
+	FOR TYPE vector USING turboquant AS
+	OPERATOR 1 <=> (vector, vector) FOR ORDER BY float_ops,
+	FUNCTION 1 vector_negative_inner_product(vector, vector),
+	FUNCTION 2 vector_norm(vector),
+	FUNCTION 3 vector_spherical_distance(vector, vector),
+	FUNCTION 4 vector_norm(vector);
+
+CREATE OPERATOR CLASS vector_l1_ops
+	FOR TYPE vector USING turboquant AS
 	OPERATOR 1 <+> (vector, vector) FOR ORDER BY float_ops,
 	FUNCTION 1 l1_distance(vector, vector);
 
