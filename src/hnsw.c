@@ -36,6 +36,7 @@
 #include "utils/spccache.h"
 #include "vector.h"
 #include "tqgraph.h"
+#include "tqhybrid_bm25.h"
 
 #if PG_VERSION_NUM < 150000
 #define MarkGUCPrefixReserved(x) EmitWarningsOnPlaceholders(x)
@@ -647,29 +648,298 @@ turboquantvacuumcleanup(IndexVacuumInfo *info, IndexBulkDeleteResult *stats)
 	return hnswvacuumcleanup(info, stats);
 }
 
-void
-HnswRecordGraphScanStats(HnswScanOpaque so)
+FUNCTION_PREFIX PG_FUNCTION_INFO_V1(tq_index_stats);
+Datum
+tq_index_stats(PG_FUNCTION_ARGS)
 {
-}
+	Oid			indexOid = PG_GETARG_OID(0);
+	Relation	index;
+	Buffer		buf;
+	Page		page;
+	HnswMetaPage metap;
+	HnswPageOpaque opaque;
+	BlockNumber nblocks;
+	uint16		storageKind;
+	uint16		graphM;
+	uint16		graphEfConstruction;
+	uint16		graphEfSearch;
+	uint16		graphOversampling;
+	uint16		graphRescoreBand;
+	uint16		graphMaxLevel;
+	uint16		graphFlags;
+	uint16		tqFlags;
+	uint16		tqBits;
+	BlockNumber tqCorrectionStartBlkno;
+	BlockNumber tqBm25MetaStartBlkno;
+	HnswMetaPageData metaSnapshot;
+	int16		entryLevel;
+	uint16		metaPageKind;
+	uint16		metaLastGraphOp;
+	uint16		firstGraphPageKind = 0;
+	uint16		firstGraphLastGraphOp = 0;
+	int64		graphPageCount = 0;
+	int64		graphTaggedPageCount = 0;
+	int64		graphUnknownLastOpCount = 0;
+	int64		graphLastOpCounts[TQ_GRAPH_OP_COUNT] = {0};
+	int64		tqLiveNodeCount = 0;
+	int64		tqDeadNodeCount = 0;
+	int64		graphAdjacencyRefCount = 0;
+	int64		graphDeadNeighborRefCount = 0;
+	bool		hasBm25Meta = false;
+	TqHybridBm25MetaTupleData bm25Meta;
+	StringInfoData json;
 
-void
-HnswRecordNonGraphScanStats(void)
-{
-}
+	index = index_open(indexOid, AccessShareLock);
 
-void
-HnswRecordFlatScanStats(void)
-{
-}
+	nblocks = RelationGetNumberOfBlocks(index);
+	buf = ReadBuffer(index, HNSW_METAPAGE_BLKNO);
+	LockBuffer(buf, BUFFER_LOCK_SHARE);
+	page = BufferGetPage(buf);
+	metap = HnswPageGetMeta(page);
+	opaque = HnswPageGetOpaque(page);
 
-void
-HnswRecordExactVectorKernel(int kernel)
-{
-}
+	if (unlikely(metap->magicNumber != HNSW_MAGIC_NUMBER))
+		elog(ERROR, "hnsw index is not valid");
 
-void
-HnswRecordWeightedCodeCodeKernel(int kernel)
-{
+	metaSnapshot = *metap;
+	storageKind = metap->storageKind;
+	graphM = metap->m;
+	graphEfConstruction = metap->efConstruction;
+	graphEfSearch = metap->graphEfSearch;
+	graphOversampling = metap->graphOversampling;
+	graphRescoreBand = metap->graphRescoreBand;
+	graphMaxLevel = metap->graphMaxLevel;
+	graphFlags = metap->graphFlags;
+	tqFlags = metap->tqFlags;
+	tqBits = metap->tqBits != 0 ? metap->tqBits : TQ_DEFAULT_BITS;
+	tqCorrectionStartBlkno = metap->tqCorrectionStartBlkno;
+	tqBm25MetaStartBlkno = metap->tqBm25MetaStartBlkno > HNSW_METAPAGE_BLKNO ?
+		metap->tqBm25MetaStartBlkno : InvalidBlockNumber;
+	entryLevel = metap->entryLevel;
+	metaPageKind = opaque->pageKind & HNSW_PAGE_KIND_MASK;
+	metaLastGraphOp = opaque->pageKind >> HNSW_PAGE_GRAPH_OP_SHIFT;
+
+	UnlockReleaseBuffer(buf);
+
+	if (nblocks > HNSW_METAPAGE_BLKNO + 1)
+	{
+		buf = ReadBuffer(index, HNSW_METAPAGE_BLKNO + 1);
+		LockBuffer(buf, BUFFER_LOCK_SHARE);
+		page = BufferGetPage(buf);
+		opaque = HnswPageGetOpaque(page);
+		if (opaque->page_id == HNSW_PAGE_ID)
+		{
+			firstGraphPageKind = opaque->pageKind & HNSW_PAGE_KIND_MASK;
+			firstGraphLastGraphOp = opaque->pageKind >> HNSW_PAGE_GRAPH_OP_SHIFT;
+		}
+		UnlockReleaseBuffer(buf);
+	}
+
+	if (BlockNumberIsValid(tqBm25MetaStartBlkno))
+	{
+		bool		foundBm25Tuple = false;
+
+		if (tqBm25MetaStartBlkno >= nblocks)
+			ereport(ERROR,
+					(errcode(ERRCODE_DATA_CORRUPTED),
+					 errmsg("turbohybrid BM25 metadata pointer is invalid"),
+					 errdetail("Metapage points to block %u, but the index has only %u blocks.",
+							   tqBm25MetaStartBlkno, nblocks)));
+
+		buf = ReadBuffer(index, tqBm25MetaStartBlkno);
+		LockBuffer(buf, BUFFER_LOCK_SHARE);
+		page = BufferGetPage(buf);
+		opaque = HnswPageGetOpaque(page);
+
+		if (opaque->page_id != HNSW_PAGE_ID ||
+			(opaque->pageKind & HNSW_PAGE_KIND_MASK) != HNSW_PAGE_KIND_TQ_BM25_META)
+		{
+			UnlockReleaseBuffer(buf);
+			ereport(ERROR,
+					(errcode(ERRCODE_DATA_CORRUPTED),
+					 errmsg("turbohybrid BM25 metadata pointer is invalid"),
+					 errdetail("Metapage points to block %u, which is not a BM25 metadata page.",
+							   tqBm25MetaStartBlkno)));
+		}
+
+		for (OffsetNumber off = FirstOffsetNumber;
+			 off <= PageGetMaxOffsetNumber(page);
+			 off = OffsetNumberNext(off))
+		{
+			ItemId		iid = PageGetItemId(page, off);
+			TqHybridBm25MetaTuple tuple;
+
+			if (!ItemIdIsUsed(iid))
+				continue;
+
+			tuple = (TqHybridBm25MetaTuple) PageGetItem(page, iid);
+			if (tuple->type == TQHYBRID_BM25_META_TUPLE_TYPE)
+			{
+				bm25Meta = *tuple;
+				hasBm25Meta = true;
+				foundBm25Tuple = true;
+				break;
+			}
+		}
+
+		UnlockReleaseBuffer(buf);
+		if (!foundBm25Tuple)
+			ereport(ERROR,
+					(errcode(ERRCODE_DATA_CORRUPTED),
+					 errmsg("turbohybrid BM25 metadata tuple is missing"),
+					 errdetail("Metapage points to BM25 metadata block %u, but no metadata tuple was found.",
+							   tqBm25MetaStartBlkno)));
+	}
+
+	for (BlockNumber blkno = HNSW_METAPAGE_BLKNO; blkno < nblocks; blkno++)
+	{
+		uint16		lastGraphOp;
+
+		buf = ReadBuffer(index, blkno);
+		LockBuffer(buf, BUFFER_LOCK_SHARE);
+		page = BufferGetPage(buf);
+		opaque = HnswPageGetOpaque(page);
+
+		if (opaque->page_id == HNSW_PAGE_ID)
+		{
+			graphPageCount++;
+			lastGraphOp = opaque->pageKind >> HNSW_PAGE_GRAPH_OP_SHIFT;
+			if (lastGraphOp != HNSW_GRAPH_OP_NONE)
+				graphTaggedPageCount++;
+			if (lastGraphOp < TQ_GRAPH_OP_COUNT)
+				graphLastOpCounts[lastGraphOp]++;
+			else
+				graphUnknownLastOpCount++;
+		}
+
+		UnlockReleaseBuffer(buf);
+	}
+
+	if (storageKind == HNSW_STORAGE_TURBOQUANT_GRAPH_NATIVE)
+		TqGraphCollectVacuumStats(index, &metaSnapshot,
+								  &tqLiveNodeCount,
+								  &tqDeadNodeCount,
+								  &graphAdjacencyRefCount,
+								  &graphDeadNeighborRefCount);
+
+	initStringInfo(&json);
+	appendStringInfo(&json,
+					 "{\"storage_kind\":\"%s\","
+					 "\"graph_m\":%u,"
+					 "\"graph_ef_construction\":%u,"
+					 "\"graph_ef_search\":%u,"
+					 "\"graph_oversampling\":%u,"
+					 "\"graph_rescore_band\":%u,"
+					 "\"graph_max_level\":%u,"
+					 "\"graph_flags\":%u,"
+					 "\"tq_flags\":%u,"
+					 "\"tq_bits\":%u,"
+					 "\"tq_plus\":%s,"
+					 "\"tq_exact_storage\":%s,"
+					 "\"tq_correction_start_block\":%u,"
+					 "\"entry_level\":%d,"
+					 "\"meta_page_kind\":%u,"
+					 "\"meta_last_graph_op\":%u,"
+					 "\"first_graph_page_kind\":%u,"
+					 "\"first_graph_last_graph_op\":%u,"
+					 "\"graph_page_count\":" INT64_FORMAT ","
+					 "\"graph_tagged_page_count\":" INT64_FORMAT ","
+					 "\"tq_live_node_count\":" INT64_FORMAT ","
+					 "\"tq_dead_node_count\":" INT64_FORMAT ","
+					 "\"graph_adjacency_ref_count\":" INT64_FORMAT ","
+					 "\"graph_dead_neighbor_refs\":" INT64_FORMAT ","
+					 "\"hybrid\":%s,"
+					 "\"bm25_meta_start_block\":%u,"
+					 "\"bm25_doc_count\":%u,"
+					 "\"bm25_live_doc_count\":" INT64_FORMAT ","
+					 "\"bm25_dead_doc_count\":" INT64_FORMAT ","
+					 "\"bm25_avgdl\":%.6g,"
+					 "\"bm25_term_count\":%u,"
+					 "\"bm25_postings_pages\":%u,"
+					 "\"bm25_blockmax_pages\":%u,"
+					 "\"bm25_delta_pages\":%u,"
+					 "\"bm25_delta_term_pages\":%u,"
+					 "\"bm25_delta_generation\":" UINT64_FORMAT ","
+					 "\"bm25_last_compaction\":\"%s\","
+					 "\"graph_page_last_op_counts\":{"
+					 "\"none\":" INT64_FORMAT ","
+					 "\"page_init\":" INT64_FORMAT ","
+					 "\"page_link\":" INT64_FORMAT ","
+					 "\"meta_update\":" INT64_FORMAT ","
+					 "\"element_insert\":" INT64_FORMAT ","
+					 "\"neighbor_insert\":" INT64_FORMAT ","
+					 "\"neighbor_update\":" INT64_FORMAT ","
+					 "\"duplicate_heaptid\":" INT64_FORMAT ","
+					 "\"vacuum_delete\":" INT64_FORMAT ","
+					 "\"vacuum_repair\":" INT64_FORMAT ","
+					 "\"unknown\":" INT64_FORMAT "},"
+					 "\"graph_page_op_tag_mode\":\"page_opaque_high_bits\","
+					 "\"graph_wal_mode\":\"%s\","
+					 "\"graph_custom_wal_records\":%s}",
+					 HnswStorageKindName(storageKind),
+					 graphM,
+					 graphEfConstruction,
+					 graphEfSearch,
+					 graphOversampling,
+					 graphRescoreBand,
+					 graphMaxLevel,
+					 graphFlags,
+					 tqFlags,
+					 tqBits,
+					 tqFlags != 0 && tqCorrectionStartBlkno != InvalidBlockNumber ? "true" : "false",
+					 (tqFlags & TQ_GRAPH_EXACT_FREE) != 0 ? "false" : "true",
+					 tqCorrectionStartBlkno,
+					 entryLevel,
+					 metaPageKind,
+					 metaLastGraphOp,
+					 firstGraphPageKind,
+					 firstGraphLastGraphOp,
+					 graphPageCount,
+					 graphTaggedPageCount,
+					 tqLiveNodeCount,
+					 tqDeadNodeCount,
+					 graphAdjacencyRefCount,
+					 graphDeadNeighborRefCount,
+					 hasBm25Meta ? "true" : "false",
+					 tqBm25MetaStartBlkno,
+					 hasBm25Meta ? bm25Meta.docCount + bm25Meta.deltaDocCount : 0,
+					 hasBm25Meta ? (bm25Meta.lastCompactionGeneration > 0 &&
+									bm25Meta.deltaDocCount == 0 ?
+									(int64) bm25Meta.docCount :
+									Max((int64) (bm25Meta.docCount + bm25Meta.deltaDocCount) -
+										Min((int64) (bm25Meta.docCount + bm25Meta.deltaDocCount),
+											tqDeadNodeCount), 0)) : 0,
+					 hasBm25Meta ? (bm25Meta.lastCompactionGeneration > 0 &&
+									bm25Meta.deltaDocCount == 0 ? 0 :
+									Min((int64) (bm25Meta.docCount + bm25Meta.deltaDocCount),
+										tqDeadNodeCount)) : 0,
+					 hasBm25Meta ? (double) (bm25Meta.totalDocLen + bm25Meta.deltaTotalDocLen) /
+					 Max((double) (bm25Meta.docCount + bm25Meta.deltaDocCount), 1.0) : 0.0,
+					 hasBm25Meta ? bm25Meta.termCount : 0,
+					 hasBm25Meta ? bm25Meta.postingsPages : 0,
+					 hasBm25Meta ? bm25Meta.blockMaxPages : 0,
+					 hasBm25Meta ? bm25Meta.deltaPages : 0,
+					 hasBm25Meta ? bm25Meta.deltaTermPages : 0,
+					 hasBm25Meta ? bm25Meta.deltaGeneration : 0,
+					 hasBm25Meta && bm25Meta.lastCompactionGeneration > 0 ?
+					 psprintf("generation " UINT64_FORMAT,
+							  bm25Meta.lastCompactionGeneration) : "never",
+					 graphLastOpCounts[HNSW_GRAPH_OP_NONE],
+					 graphLastOpCounts[HNSW_GRAPH_OP_PAGE_INIT],
+					 graphLastOpCounts[HNSW_GRAPH_OP_PAGE_LINK],
+					 graphLastOpCounts[HNSW_GRAPH_OP_META_UPDATE],
+					 graphLastOpCounts[HNSW_GRAPH_OP_ELEMENT_INSERT],
+					 graphLastOpCounts[HNSW_GRAPH_OP_NEIGHBOR_INSERT],
+					 graphLastOpCounts[HNSW_GRAPH_OP_NEIGHBOR_UPDATE],
+					 graphLastOpCounts[HNSW_GRAPH_OP_DUPLICATE_HEAPTID],
+					 graphLastOpCounts[HNSW_GRAPH_OP_VACUUM_DELETE],
+					 graphLastOpCounts[HNSW_GRAPH_OP_VACUUM_REPAIR],
+					 graphUnknownLastOpCount,
+					 HnswGraphWalModeName(),
+					 HnswGraphCustomWalEnabled() ? "true" : "false");
+	index_close(index, AccessShareLock);
+
+	PG_RETURN_DATUM(DirectFunctionCall1(jsonb_in, CStringGetDatum(json.data)));
 }
 
 /*

@@ -203,6 +203,7 @@ Supported index types are:
 - [HNSW](#hnsw)
 - [IVFFlat](#ivfflat)
 - [TurboQuant](#turboquant)
+- [TurboHybrid](#turbohybrid)
 
 ## TurboQuant
 
@@ -213,6 +214,44 @@ CREATE INDEX ON items USING turboquant (embedding vector_l2_ops);
 ```
 
 It also supports `vector_ip_ops`, `vector_cosine_ops`, and `vector_l1_ops`.
+
+## TurboHybrid
+
+TurboHybrid stores dense vector search and BM25 lexical search in one index.
+Use one `vector` column and one `tsvector` column.
+
+```sql
+CREATE TABLE documents (
+    id bigserial PRIMARY KEY,
+    embedding vector(3),
+    body text,
+    body_tsv tsvector GENERATED ALWAYS AS (to_tsvector('english', body)) STORED
+);
+
+CREATE INDEX ON documents
+USING turbohybrid (
+    embedding vector_cosine_hybrid_ops,
+    body_tsv bm25_tsvector_ops
+);
+
+SELECT id, body
+FROM documents
+ORDER BY embedding <~> hybrid_query(
+    vector_query => '[1,0,0]'::vector,
+    text_query => websearch_to_tsquery('english', 'postgres search'),
+    dense_k => 100,
+    bm25_k => 100,
+    final_k => 10
+)
+LIMIT 10;
+```
+
+Use `<~->` with `vector_l2_hybrid_ops` for L2 distance, `<~#>` with
+`vector_ip_hybrid_ops` for inner product, and `<~>` with
+`vector_cosine_hybrid_ops` for cosine distance. See
+[`turbohybrid.md`](turbohybrid.md) for index options and session defaults such
+as `hybrid.default_dense_k`, `hybrid.default_bm25_k`, and
+`hybrid.default_rrf_k`.
 
 ## HNSW
 

@@ -1364,6 +1364,7 @@ TqGraphCreateMetaPage(Relation index, ForkNumber forkNum)
 	metap->tqAdjStartBlkno = InvalidBlockNumber;
 	metap->tqExactStartBlkno = InvalidBlockNumber;
 	metap->tqCorrectionStartBlkno = InvalidBlockNumber;
+	metap->tqBm25MetaStartBlkno = InvalidBlockNumber;
 	((PageHeader) page)->pd_lower =
 		((char *) metap + sizeof(HnswMetaPageData)) - (char *) page;
 
@@ -2265,6 +2266,8 @@ TqGraphReadMeta(Relation index, HnswMetaPageData *meta)
 	memcpy(meta, metap, sizeof(HnswMetaPageData));
 	if (meta->tqBits != 1 && meta->tqBits != 2 && meta->tqBits != TQ_DEFAULT_BITS)
 		meta->tqBits = TQ_DEFAULT_BITS;
+	if (meta->tqBm25MetaStartBlkno <= HNSW_METAPAGE_BLKNO)
+		meta->tqBm25MetaStartBlkno = InvalidBlockNumber;
 	UnlockReleaseBuffer(buf);
 	return true;
 }

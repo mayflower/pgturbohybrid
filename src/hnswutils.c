@@ -423,7 +423,8 @@ HnswAmOidUsesNativeTqGraph(Oid amoid)
 		return false;
 
 	amform = (Form_pg_am) GETSTRUCT(amtuple);
-	result = strcmp(NameStr(amform->amname), "turboquant") == 0;
+	result = strcmp(NameStr(amform->amname), "turboquant") == 0 ||
+		strcmp(NameStr(amform->amname), "turbohybrid") == 0;
 	ReleaseSysCache(amtuple);
 
 	return result;
