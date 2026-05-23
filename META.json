@@ -1,49 +1,28 @@
 {
-	"name": "vector",
-	"abstract": "Open-source vector similarity search for Postgres",
-	"description": "Supports L2 distance, inner product, and cosine distance",
-	"version": "0.8.2",
-	"maintainer": [
-		"Andrew Kane <andrew@ankane.org>"
-	],
-	"license": {
-		"PostgreSQL": "http://www.postgresql.org/about/licence"
-	},
-	"prereqs": {
-		"runtime": {
-			"requires": {
-				"PostgreSQL": "13.0.0"
-			}
-		}
-	},
-	"provides": {
-		"vector": {
-			"file": "sql/vector.sql",
-			"docfile": "README.md",
-			"version": "0.8.2",
-			"abstract": "Open-source vector similarity search for Postgres"
-		}
-	},
-	"resources": {
-		"homepage": "https://github.com/pgvector/pgvector",
-		"bugtracker": {
-			"web": "https://github.com/pgvector/pgvector/issues"
-		},
-		"repository": {
-			"url":  "https://github.com/pgvector/pgvector.git",
-			"web":  "https://github.com/pgvector/pgvector",
-			"type": "git"
-		}
-	},
-	"generated_by": "Andrew Kane",
-	"meta-spec": {
-		"version": "1.0.0",
-		"url": "http://pgxn.org/meta/spec.txt"
-	},
-	"tags": [
-		"vectors",
-		"datatype",
-		"nearest neighbor search",
-		"approximate nearest neighbors"
-	]
+  "name": "pgturbohybrid",
+  "abstract": "Hybrid dense vector and BM25 search for pgvector",
+  "description": "Standalone PostgreSQL extension for experimental dense vector and BM25 hybrid retrieval on top of pgvector.",
+  "version": "0.1.0",
+  "maintainer": "mayflower",
+  "license": "postgresql",
+  "provides": {
+    "pgturbohybrid": {
+      "file": "sql/pgturbohybrid--0.1.0.sql",
+      "docfile": "README.md",
+      "version": "0.1.0"
+    }
+  },
+  "prereqs": {
+    "runtime": {
+      "requires": {
+        "PostgreSQL": "14.0.0",
+        "vector": "0.8.2"
+      }
+    }
+  },
+  "resources": {
+    "repository": {
+      "url": "https://github.com/mayflower/pgvector.git"
+    }
+  }
 }

@@ -1,9 +1,19 @@
 /dist/
+/.deps/
 /log/
 /results/
+/benchmarks/results/
+/benchmarks/output/
+/benchmarks/*.json
+/benchmarks/*.md
+!/benchmarks/README.md
+/benchmarks/**/*.json
+!/benchmarks/config/*.json
 /tmp_check/
-/sql/vector--?.?.?.sql
-regression.*
+/tmp_check_iso/
+/output_iso/
+/regression.*
+/pgturbohybrid-*/
 *.o
 *.so
 *.bc
@@ -12,3 +22,5 @@ regression.*
 *.obj
 *.lib
 *.exp
+*.pyc
+__pycache__/

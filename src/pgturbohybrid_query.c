@@ -1,0 +1,625 @@
+#include "postgres.h"
+
+#include <math.h>
+
+#include "fmgr.h"
+#include "lib/stringinfo.h"
+#include "nodes/execnodes.h"
+#include "nodes/nodes.h"
+#include "nodes/plannodes.h"
+#include "nodes/primnodes.h"
+#include "utils/builtins.h"
+#include "utils/float.h"
+#include "utils/memutils.h"
+
+#include "pgturbohybrid_query.h"
+#include "pgturbohybrid_am.h"
+
+#if PG_VERSION_NUM >= 160000
+#include "varatt.h"
+#endif
+
+FUNCTION_PREFIX PG_FUNCTION_INFO_V1(pgturbohybrid_query_in);
+FUNCTION_PREFIX PG_FUNCTION_INFO_V1(pgturbohybrid_query_out);
+FUNCTION_PREFIX PG_FUNCTION_INFO_V1(pgturbohybrid_query_constructor);
+FUNCTION_PREFIX PG_FUNCTION_INFO_V1(pgturbohybrid_distance);
+FUNCTION_PREFIX PG_FUNCTION_INFO_V1(pgturbohybrid_l2_distance);
+FUNCTION_PREFIX PG_FUNCTION_INFO_V1(pgturbohybrid_negative_inner_product);
+FUNCTION_PREFIX PG_FUNCTION_INFO_V1(pgturbohybrid_cosine_distance);
+
+static Size PgturbohybridQueryVectorOffset(void);
+static Size PgturbohybridQueryTsQueryOffset(PgturbohybridQueryHeader *query);
+static uint16 PgturbohybridQueryParseFusion(text *fusion);
+static void PgturbohybridQueryCheckPositiveInt(const char *name, int32 value);
+static void PgturbohybridQueryCheckNonNegativeInt(const char *name, int32 value);
+static void PgturbohybridQueryRejectTextFallback(void);
+static bool PgturbohybridQueryTextIndexOrderByContext(FunctionCallInfo fcinfo);
+
+static Size
+PgturbohybridQueryVectorOffset(void)
+{
+	return MAXALIGN(sizeof(PgturbohybridQueryHeader));
+}
+
+static Size
+PgturbohybridQueryTsQueryOffset(PgturbohybridQueryHeader *query)
+{
+	return PgturbohybridQueryVectorOffset() + MAXALIGN(query->vectorBytes);
+}
+
+Vector *
+PgturbohybridQueryGetVector(PgturbohybridQueryHeader *query)
+{
+	PgturbohybridQueryValidate(query);
+
+	if ((query->flags & HYBRID_QUERY_FLAG_HAS_VECTOR) == 0)
+		return NULL;
+
+	return (Vector *) ((char *) query + PgturbohybridQueryVectorOffset());
+}
+
+TSQuery
+PgturbohybridQueryGetTsQuery(PgturbohybridQueryHeader *query)
+{
+	PgturbohybridQueryValidate(query);
+
+	if ((query->flags & HYBRID_QUERY_FLAG_HAS_TSQUERY) == 0)
+		return NULL;
+
+	return (TSQuery) ((char *) query + PgturbohybridQueryTsQueryOffset(query));
+}
+
+const char *
+PgturbohybridQueryFusionName(uint16 fusion)
+{
+	switch ((HybridFusionMode) fusion)
+	{
+		case HYBRID_FUSION_RRF:
+			return "rrf";
+		case HYBRID_FUSION_WEIGHTED:
+			return "weighted";
+	}
+
+	return "unknown";
+}
+
+void
+PgturbohybridQueryValidate(PgturbohybridQueryHeader *query)
+{
+	Size		expected;
+
+	if (query == NULL)
+		ereport(ERROR,
+				(errcode(ERRCODE_DATA_EXCEPTION),
+				 errmsg("turbohybrid_query cannot be null")));
+
+	if (query->version != HYBRID_QUERY_VERSION)
+		ereport(ERROR,
+				(errcode(ERRCODE_DATA_EXCEPTION),
+				 errmsg("unsupported turbohybrid_query version %u", query->version)));
+
+	if (query->fusion != HYBRID_FUSION_RRF &&
+		query->fusion != HYBRID_FUSION_WEIGHTED)
+		ereport(ERROR,
+				(errcode(ERRCODE_DATA_EXCEPTION),
+				 errmsg("invalid turbohybrid_query fusion mode %u", query->fusion)));
+
+	if (query->vectorBytes < 0 || query->tsqueryBytes < 0)
+		ereport(ERROR,
+				(errcode(ERRCODE_DATA_EXCEPTION),
+				 errmsg("invalid turbohybrid_query payload size")));
+
+	if ((query->flags & HYBRID_QUERY_FLAG_HAS_VECTOR) == 0 &&
+		query->vectorBytes != 0)
+		ereport(ERROR,
+				(errcode(ERRCODE_DATA_EXCEPTION),
+				 errmsg("turbohybrid_query vector payload is inconsistent")));
+
+	if ((query->flags & HYBRID_QUERY_FLAG_HAS_VECTOR) != 0)
+	{
+		Vector	   *vector = (Vector *) ((char *) query + PgturbohybridQueryVectorOffset());
+		Size		vectorBytes;
+
+		PgturbohybridCheckVector(vector);
+		vectorBytes = PGTURBOHYBRID_VECTOR_SIZE(PgturbohybridVectorDims(vector));
+		if (query->vectorBytes != vectorBytes)
+			ereport(ERROR,
+					(errcode(ERRCODE_DATA_EXCEPTION),
+					 errmsg("turbohybrid_query vector payload is inconsistent")));
+	}
+
+	if ((query->flags & HYBRID_QUERY_FLAG_HAS_TSQUERY) == 0 &&
+		query->tsqueryBytes != 0)
+		ereport(ERROR,
+				(errcode(ERRCODE_DATA_EXCEPTION),
+				 errmsg("turbohybrid_query tsquery payload is inconsistent")));
+
+	expected = PgturbohybridQueryTsQueryOffset(query) + MAXALIGN(query->tsqueryBytes);
+	if (VARSIZE_ANY(query) < expected)
+		ereport(ERROR,
+				(errcode(ERRCODE_DATA_EXCEPTION),
+				 errmsg("truncated turbohybrid_query payload")));
+}
+
+Datum
+pgturbohybrid_query_in(PG_FUNCTION_ARGS)
+{
+	char	   *input = PG_GETARG_CSTRING(0);
+
+	(void) input;
+
+	ereport(ERROR,
+			(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
+			 errmsg("text input is not supported for turbohybrid_query"),
+			 errhint("Use the turbohybrid_query(...) constructor.")));
+
+	PG_RETURN_NULL();
+}
+
+Datum
+pgturbohybrid_query_out(PG_FUNCTION_ARGS)
+{
+	PgturbohybridQueryHeader *query = PG_GETARG_HYBRID_QUERY_P(0);
+	StringInfoData buf;
+
+	PgturbohybridQueryValidate(query);
+
+	initStringInfo(&buf);
+	appendStringInfo(&buf,
+					 "turbohybrid_query(fusion=%s,vector=%s,tsquery=%s,dense_weight=%g,bm25_weight=%g,alpha=",
+					 PgturbohybridQueryFusionName(query->fusion),
+					 (query->flags & HYBRID_QUERY_FLAG_HAS_VECTOR) ? "true" : "false",
+					 (query->flags & HYBRID_QUERY_FLAG_HAS_TSQUERY) ? "true" : "false",
+					 query->denseWeight,
+					 query->bm25Weight);
+	if (query->flags & HYBRID_QUERY_FLAG_ALPHA_IS_SET)
+		appendStringInfo(&buf, "%g", query->alpha);
+	else
+		appendStringInfoString(&buf, "null");
+
+	appendStringInfo(&buf,
+					 ",rrf_k=%d,dense_k=%d,bm25_k=%d,final_k=",
+					 query->rrfK,
+					 query->denseK,
+					 query->bm25K);
+	if (query->flags & HYBRID_QUERY_FLAG_FINAL_K_IS_SET)
+		appendStringInfo(&buf, "%d", query->finalK);
+	else
+		appendStringInfoString(&buf, "null");
+
+	appendStringInfo(&buf,
+					 ",require_bm25_match=%s)",
+					 (query->flags & HYBRID_QUERY_FLAG_REQUIRE_BM25_MATCH) ? "true" : "false");
+
+	PG_RETURN_CSTRING(buf.data);
+}
+
+static uint16
+PgturbohybridQueryParseFusion(text *fusion)
+{
+	char	   *name;
+	uint16		result;
+
+	if (fusion == NULL)
+		return HYBRID_FUSION_RRF;
+
+	name = text_to_cstring(fusion);
+	if (pg_strcasecmp(name, "rrf") == 0)
+		result = HYBRID_FUSION_RRF;
+	else if (pg_strcasecmp(name, "weighted") == 0)
+		result = HYBRID_FUSION_WEIGHTED;
+	else
+		ereport(ERROR,
+				(errcode(ERRCODE_INVALID_PARAMETER_VALUE),
+				 errmsg("invalid hybrid fusion mode \"%s\"", name),
+				 errdetail("Valid values are \"rrf\" and \"weighted\".")));
+
+	pfree(name);
+	return result;
+}
+
+static void
+PgturbohybridQueryCheckPositiveInt(const char *name, int32 value)
+{
+	if (value <= 0)
+		ereport(ERROR,
+				(errcode(ERRCODE_INVALID_PARAMETER_VALUE),
+				 errmsg("%s must be greater than zero", name)));
+}
+
+static void
+PgturbohybridQueryCheckNonNegativeInt(const char *name, int32 value)
+{
+	if (value < 0)
+		ereport(ERROR,
+				(errcode(ERRCODE_INVALID_PARAMETER_VALUE),
+				 errmsg("%s must be greater than or equal to zero", name)));
+}
+
+typedef struct PgturbohybridQueryPlanCheck
+{
+	Node	   *expr;
+	Oid			fnOid;
+	bool		hasUserVisibleExpr;
+	bool		hasIndexOrderByResjunkExpr;
+} PgturbohybridQueryPlanCheck;
+
+typedef struct PgturbohybridQueryPlanCheckCache
+{
+	PlannedStmt *plannedstmt;
+	Node	   *expr;
+	Oid			fnOid;
+	bool		result;
+} PgturbohybridQueryPlanCheckCache;
+
+static List *
+PgturbohybridQueryDistanceCallArgs(Node *expr, Oid *fnOid)
+{
+	if (expr == NULL)
+		return NIL;
+
+	if (IsA(expr, OpExpr))
+	{
+		OpExpr	   *op = (OpExpr *) expr;
+
+		*fnOid = op->opfuncid;
+		return op->args;
+	}
+
+	if (IsA(expr, FuncExpr))
+	{
+		FuncExpr   *func = (FuncExpr *) expr;
+
+		*fnOid = func->funcid;
+		return func->args;
+	}
+
+	return NIL;
+}
+
+static bool
+PgturbohybridQueryDistanceCallMatches(Node *candidate, PgturbohybridQueryPlanCheck *check)
+{
+	Oid			candidateFnOid = InvalidOid;
+	Oid			exprFnOid = InvalidOid;
+	List	   *candidateArgs;
+	List	   *exprArgs;
+
+	if (candidate == NULL || check->expr == NULL)
+		return false;
+
+	if (equal(candidate, check->expr))
+		return true;
+
+	candidateArgs = PgturbohybridQueryDistanceCallArgs(candidate, &candidateFnOid);
+	exprArgs = PgturbohybridQueryDistanceCallArgs(check->expr, &exprFnOid);
+
+	return OidIsValid(candidateFnOid) &&
+		candidateFnOid == check->fnOid &&
+		OidIsValid(exprFnOid) &&
+		exprFnOid == check->fnOid &&
+		equal(candidateArgs, exprArgs);
+}
+
+static bool
+PgturbohybridQueryExprListContains(List *exprs, PgturbohybridQueryPlanCheck *check)
+{
+	ListCell   *lc;
+
+	foreach(lc, exprs)
+	{
+		Node	   *candidate = (Node *) lfirst(lc);
+
+		if (PgturbohybridQueryDistanceCallMatches(candidate, check))
+			return true;
+	}
+
+	return false;
+}
+
+static void
+PgturbohybridQueryInspectPlan(Plan *plan, PgturbohybridQueryPlanCheck *check)
+{
+	ListCell   *lc;
+
+	if (plan == NULL)
+		return;
+
+	foreach(lc, plan->targetlist)
+	{
+		TargetEntry *tle = (TargetEntry *) lfirst(lc);
+
+		if (tle == NULL || !IsA(tle, TargetEntry) ||
+			!PgturbohybridQueryDistanceCallMatches((Node *) tle->expr, check))
+			continue;
+
+		if (!tle->resjunk)
+		{
+			check->hasUserVisibleExpr = true;
+			continue;
+		}
+
+		if (IsA(plan, IndexScan) &&
+			PgturbohybridQueryExprListContains(((IndexScan *) plan)->indexorderbyorig,
+										check))
+			check->hasIndexOrderByResjunkExpr = true;
+	}
+
+	PgturbohybridQueryInspectPlan(plan->lefttree, check);
+	PgturbohybridQueryInspectPlan(plan->righttree, check);
+}
+
+static bool
+PgturbohybridQueryTextIndexOrderByContext(FunctionCallInfo fcinfo)
+{
+	PlannedStmt *plannedstmt;
+	PgturbohybridQueryPlanCheckCache *cache;
+	PgturbohybridQueryPlanCheck check;
+
+	if (fcinfo->flinfo == NULL || fcinfo->flinfo->fn_expr == NULL)
+		return false;
+
+	plannedstmt = PgturbohybridCurrentPlannedStmt();
+	if (plannedstmt == NULL || plannedstmt->planTree == NULL)
+		return false;
+
+	cache = (PgturbohybridQueryPlanCheckCache *) fcinfo->flinfo->fn_extra;
+	if (cache != NULL &&
+		cache->plannedstmt == plannedstmt &&
+		cache->expr == fcinfo->flinfo->fn_expr &&
+		cache->fnOid == fcinfo->flinfo->fn_oid)
+		return cache->result;
+
+	check.expr = fcinfo->flinfo->fn_expr;
+	check.fnOid = fcinfo->flinfo->fn_oid;
+	check.hasUserVisibleExpr = false;
+	check.hasIndexOrderByResjunkExpr = false;
+
+	PgturbohybridQueryInspectPlan(plannedstmt->planTree, &check);
+
+	if (cache == NULL)
+	{
+		MemoryContext cacheCtx = fcinfo->flinfo->fn_mcxt != NULL ?
+			fcinfo->flinfo->fn_mcxt : TopMemoryContext;
+		MemoryContext oldCtx = MemoryContextSwitchTo(cacheCtx);
+
+		cache = palloc0(sizeof(PgturbohybridQueryPlanCheckCache));
+		fcinfo->flinfo->fn_extra = cache;
+		MemoryContextSwitchTo(oldCtx);
+	}
+
+	cache->plannedstmt = plannedstmt;
+	cache->expr = fcinfo->flinfo->fn_expr;
+	cache->fnOid = fcinfo->flinfo->fn_oid;
+	cache->result = check.hasIndexOrderByResjunkExpr && !check.hasUserVisibleExpr;
+
+	return cache->result;
+}
+
+static void
+PgturbohybridQueryRejectTextFallback(void)
+{
+	ereport(ERROR,
+			(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
+			 errmsg("hybrid text queries require a turbohybrid index scan"),
+			 errdetail("The scalar hybrid distance function can only evaluate the vector payload.")));
+}
+
+Datum
+pgturbohybrid_query_constructor(PG_FUNCTION_ARGS)
+{
+	struct varlena *vectorDatum = NULL;
+	struct varlena *tsqueryDatum = NULL;
+	int32		vectorBytes = 0;
+	int32		tsqueryBytes = 0;
+	uint16		flags = 0;
+	uint16		fusion;
+	float8		denseWeight;
+	float8		bm25Weight;
+	float8		alpha = 0.0;
+	int32		rrfK;
+	int32		denseK;
+	int32		bm25K;
+	int32		finalK = 0;
+	bool		requireBm25Match;
+	Size		totalSize;
+	PgturbohybridQueryHeader *result;
+
+	if (!PG_ARGISNULL(0))
+	{
+		vectorDatum = PG_DETOAST_DATUM_COPY(PG_GETARG_DATUM(0));
+		vectorBytes = VARSIZE_ANY(vectorDatum);
+		flags |= HYBRID_QUERY_FLAG_HAS_VECTOR;
+	}
+
+	if (!PG_ARGISNULL(1))
+	{
+		tsqueryDatum = PG_DETOAST_DATUM_COPY(PG_GETARG_DATUM(1));
+		tsqueryBytes = VARSIZE_ANY(tsqueryDatum);
+		flags |= HYBRID_QUERY_FLAG_HAS_TSQUERY;
+	}
+
+	if ((flags & (HYBRID_QUERY_FLAG_HAS_VECTOR | HYBRID_QUERY_FLAG_HAS_TSQUERY)) == 0)
+		ereport(ERROR,
+				(errcode(ERRCODE_INVALID_PARAMETER_VALUE),
+				 errmsg("turbohybrid_query requires a vector_query or text_query")));
+
+	fusion = PgturbohybridQueryParseFusion(PG_ARGISNULL(2) ? NULL : PG_GETARG_TEXT_PP(2));
+
+	if (PG_ARGISNULL(3))
+		ereport(ERROR,
+				(errcode(ERRCODE_INVALID_PARAMETER_VALUE),
+				 errmsg("dense_weight cannot be null")));
+	denseWeight = PG_GETARG_FLOAT8(3);
+	if (denseWeight < 0 || isnan(denseWeight) || isinf(denseWeight))
+		ereport(ERROR,
+				(errcode(ERRCODE_INVALID_PARAMETER_VALUE),
+				 errmsg("dense_weight must be a finite non-negative value")));
+
+	if (PG_ARGISNULL(4))
+		ereport(ERROR,
+				(errcode(ERRCODE_INVALID_PARAMETER_VALUE),
+				 errmsg("bm25_weight cannot be null")));
+	bm25Weight = PG_GETARG_FLOAT8(4);
+	if (bm25Weight < 0 || isnan(bm25Weight) || isinf(bm25Weight))
+		ereport(ERROR,
+				(errcode(ERRCODE_INVALID_PARAMETER_VALUE),
+				 errmsg("bm25_weight must be a finite non-negative value")));
+
+	if (!PG_ARGISNULL(5))
+	{
+		alpha = PG_GETARG_FLOAT8(5);
+		if (alpha < 0.0 || alpha > 1.0 || isnan(alpha) || isinf(alpha))
+			ereport(ERROR,
+					(errcode(ERRCODE_INVALID_PARAMETER_VALUE),
+					 errmsg("alpha must be between 0 and 1")));
+		flags |= HYBRID_QUERY_FLAG_ALPHA_IS_SET;
+	}
+
+	if (PG_ARGISNULL(6))
+	{
+		rrfK = pgturbohybrid_default_rrf_k;
+		flags |= HYBRID_QUERY_FLAG_RRF_K_DEFAULTED;
+	}
+	else
+		rrfK = PG_GETARG_INT32(6);
+	PgturbohybridQueryCheckPositiveInt("rrf_k", rrfK);
+
+	if (PG_ARGISNULL(7))
+	{
+		denseK = pgturbohybrid_default_dense_k;
+		flags |= HYBRID_QUERY_FLAG_DENSE_K_DEFAULTED;
+	}
+	else
+		denseK = PG_GETARG_INT32(7);
+	PgturbohybridQueryCheckNonNegativeInt("dense_k", denseK);
+
+	if (PG_ARGISNULL(8))
+	{
+		bm25K = pgturbohybrid_default_bm25_k;
+		flags |= HYBRID_QUERY_FLAG_BM25_K_DEFAULTED;
+	}
+	else
+		bm25K = PG_GETARG_INT32(8);
+	PgturbohybridQueryCheckNonNegativeInt("bm25_k", bm25K);
+
+	if (!PG_ARGISNULL(9))
+	{
+		finalK = PG_GETARG_INT32(9);
+		PgturbohybridQueryCheckPositiveInt("final_k", finalK);
+		flags |= HYBRID_QUERY_FLAG_FINAL_K_IS_SET;
+	}
+
+	if (PG_ARGISNULL(10))
+		ereport(ERROR,
+				(errcode(ERRCODE_INVALID_PARAMETER_VALUE),
+				 errmsg("require_bm25_match cannot be null")));
+	requireBm25Match = PG_GETARG_BOOL(10);
+	if (requireBm25Match)
+		flags |= HYBRID_QUERY_FLAG_REQUIRE_BM25_MATCH;
+
+	totalSize = PgturbohybridQueryVectorOffset() +
+		MAXALIGN(vectorBytes) +
+		MAXALIGN(tsqueryBytes);
+	result = palloc0(totalSize);
+	SET_VARSIZE(result, totalSize);
+	result->version = HYBRID_QUERY_VERSION;
+	result->flags = flags;
+	result->fusion = fusion;
+	result->denseWeight = denseWeight;
+	result->bm25Weight = bm25Weight;
+	result->alpha = alpha;
+	result->rrfK = rrfK;
+	result->denseK = denseK;
+	result->bm25K = bm25K;
+	result->finalK = finalK;
+	result->vectorBytes = vectorBytes;
+	result->tsqueryBytes = tsqueryBytes;
+
+	if (vectorDatum != NULL)
+	{
+		memcpy((char *) result + PgturbohybridQueryVectorOffset(), vectorDatum, vectorBytes);
+		pfree(vectorDatum);
+	}
+	if (tsqueryDatum != NULL)
+	{
+		memcpy((char *) result + PgturbohybridQueryTsQueryOffset(result), tsqueryDatum, tsqueryBytes);
+		pfree(tsqueryDatum);
+	}
+
+	PgturbohybridQueryValidate(result);
+
+	PG_RETURN_HYBRID_QUERY_P(result);
+}
+
+Datum
+pgturbohybrid_l2_distance(PG_FUNCTION_ARGS)
+{
+	Vector	   *value = PG_GETARG_PGTURBOHYBRID_VECTOR_P(0);
+	PgturbohybridQueryHeader *query = PG_GETARG_HYBRID_QUERY_P(1);
+	Vector	   *vectorQuery;
+
+	PgturbohybridQueryValidate(query);
+	if (PgturbohybridQueryGetTsQuery(query) != NULL)
+	{
+		if (!PgturbohybridQueryTextIndexOrderByContext(fcinfo))
+			PgturbohybridQueryRejectTextFallback();
+		PG_RETURN_FLOAT8(0.0);
+	}
+	vectorQuery = PgturbohybridQueryGetVector(query);
+
+	if (vectorQuery == NULL)
+		PG_RETURN_FLOAT8(0.0);
+
+	PG_RETURN_FLOAT8(PgturbohybridL2Distance(value, vectorQuery));
+}
+
+Datum
+pgturbohybrid_negative_inner_product(PG_FUNCTION_ARGS)
+{
+	Vector	   *value = PG_GETARG_PGTURBOHYBRID_VECTOR_P(0);
+	PgturbohybridQueryHeader *query = PG_GETARG_HYBRID_QUERY_P(1);
+	Vector	   *vectorQuery;
+
+	PgturbohybridQueryValidate(query);
+	if (PgturbohybridQueryGetTsQuery(query) != NULL)
+	{
+		if (!PgturbohybridQueryTextIndexOrderByContext(fcinfo))
+			PgturbohybridQueryRejectTextFallback();
+		PG_RETURN_FLOAT8(0.0);
+	}
+	vectorQuery = PgturbohybridQueryGetVector(query);
+
+	if (vectorQuery == NULL)
+		PG_RETURN_FLOAT8(0.0);
+
+	PG_RETURN_FLOAT8(PgturbohybridNegativeInnerProduct(value, vectorQuery));
+}
+
+Datum
+pgturbohybrid_cosine_distance(PG_FUNCTION_ARGS)
+{
+	Vector	   *value = PG_GETARG_PGTURBOHYBRID_VECTOR_P(0);
+	PgturbohybridQueryHeader *query = PG_GETARG_HYBRID_QUERY_P(1);
+	Vector	   *vectorQuery;
+
+	PgturbohybridQueryValidate(query);
+	if (PgturbohybridQueryGetTsQuery(query) != NULL)
+	{
+		if (!PgturbohybridQueryTextIndexOrderByContext(fcinfo))
+			PgturbohybridQueryRejectTextFallback();
+		PG_RETURN_FLOAT8(0.0);
+	}
+	vectorQuery = PgturbohybridQueryGetVector(query);
+
+	if (vectorQuery == NULL)
+		PG_RETURN_FLOAT8(0.0);
+
+	PG_RETURN_FLOAT8(PgturbohybridCosineDistance(value, vectorQuery));
+}
+
+Datum
+pgturbohybrid_distance(PG_FUNCTION_ARGS)
+{
+	return pgturbohybrid_cosine_distance(fcinfo);
+}
