@@ -1,0 +1,91 @@
+use strict;
+use warnings FATAL => 'all';
+use Test::More;
+
+BEGIN
+{
+	eval {
+		require PostgreSQL::Test::Cluster;
+		PostgreSQL::Test::Cluster->import();
+		1;
+	} or plan skip_all => 'PostgreSQL TAP test modules are not available';
+}
+
+my $node = PostgreSQL::Test::Cluster->new('wal_restart');
+$node->init;
+$node->start;
+
+sub top_ids
+{
+	return $node->safe_psql('pgturbohybrid_wal', q(
+		SET enable_seqscan = off;
+		SELECT string_agg(id::text, ',' ORDER BY ord)
+		FROM (
+			SELECT id, row_number() OVER () AS ord
+			FROM (
+				SELECT id
+				FROM wal_docs
+				ORDER BY embedding <~-> turbohybrid_query(
+					vector_query => '[0,0,0]'::vector,
+					dense_k => 16,
+					bm25_k => 0,
+					final_k => 3
+				)
+				LIMIT 3
+			) q
+		) s;
+	));
+}
+
+$node->safe_psql('postgres', 'CREATE DATABASE pgturbohybrid_wal;');
+$node->safe_psql('pgturbohybrid_wal', q(
+	CREATE EXTENSION vector;
+	CREATE EXTENSION pgturbohybrid;
+));
+
+unlike($node->safe_psql('pgturbohybrid_wal', 'SHOW shared_preload_libraries;'),
+	qr/(^|,)pgturbohybrid(,|$)/,
+	'pgturbohybrid works without shared_preload_libraries');
+
+$node->safe_psql('pgturbohybrid_wal', q(
+	CREATE TABLE wal_docs (
+		id int PRIMARY KEY,
+		embedding vector(3),
+		body_tsv tsvector
+	);
+	INSERT INTO wal_docs VALUES
+		(1, '[0,0,0]', to_tsvector('english', 'zero')),
+		(2, '[1,0,0]', to_tsvector('english', 'one')),
+		(3, '[2,0,0]', to_tsvector('english', 'two')),
+		(4, '[3,0,0]', to_tsvector('english', 'three'));
+	CREATE INDEX wal_docs_idx ON wal_docs
+	USING turbohybrid (
+		embedding vector_l2_turbohybrid_ops,
+		body_tsv bm25_tsvector_turbohybrid_ops
+	)
+	WITH (quantization_bits = 4, exact_storage = on);
+));
+
+$node->restart;
+is(top_ids(), '1,2,3', 'index remains correct after build and restart');
+
+$node->safe_psql('pgturbohybrid_wal',
+	"INSERT INTO wal_docs VALUES (5, '[0.5,0,0]', to_tsvector('english', 'half'));");
+$node->restart;
+is(top_ids(), '1,5,2', 'index remains correct after insert and restart');
+
+$node->safe_psql('pgturbohybrid_wal', 'DELETE FROM wal_docs WHERE id = 1;');
+$node->restart;
+is(top_ids(), '5,2,3', 'index remains correct after delete and restart');
+
+$node->safe_psql('pgturbohybrid_wal', 'VACUUM wal_docs;');
+$node->restart;
+is(top_ids(), '5,2,3', 'index remains correct after vacuum and restart');
+
+$node->safe_psql('pgturbohybrid_wal',
+	"INSERT INTO wal_docs VALUES (6, '[0.25,0,0]', to_tsvector('english', 'quarter'));");
+$node->stop('immediate');
+$node->start;
+is(top_ids(), '6,5,2', 'index remains correct after immediate stop and recovery');
+
+done_testing();

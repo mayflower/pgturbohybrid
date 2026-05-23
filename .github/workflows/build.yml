@@ -1,143 +1,274 @@
 name: build
-on: [push, pull_request]
+
+on:
+  push:
+  pull_request:
+
 jobs:
-  ubuntu:
-    runs-on: ${{ matrix.os }}
-    if: ${{ !startsWith(github.ref_name, 'mac') && !startsWith(github.ref_name, 'windows') }}
+  linux:
+    name: linux pg${{ matrix.postgres }} pgvector-${{ matrix.pgvector_ref }}
+    runs-on: ubuntu-24.04
     strategy:
       fail-fast: false
       matrix:
-        include:
-          - postgres: 19
-            os: ubuntu-24.04
-          - postgres: 18
-            os: ubuntu-24.04
-          - postgres: 17
-            os: ubuntu-24.04
-          - postgres: 16
-            os: ubuntu-24.04-arm
-          - postgres: 15
-            os: ubuntu-22.04
-          - postgres: 14
-            os: ubuntu-22.04-arm
-          - postgres: 13
-            os: ubuntu-22.04
+        postgres: [14, 15, 16, 17, 18, 19]
+        pgvector_ref: [v0.8.2, master]
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v4
+
       - uses: ankane/setup-postgres@v1
         with:
           postgres-version: ${{ matrix.postgres }}
           dev-files: true
-      - run: make
+
+      - name: Build and install upstream pgvector
         env:
-          PG_CFLAGS: -DUSE_ASSERT_CHECKING -Wall -Wextra -Werror -Wno-unused-parameter -Wno-sign-compare ${{ matrix.postgres >= 18 && '-Wno-missing-field-initializers' || '' }}
-      - run: |
-          export PG_CONFIG=`which pg_config`
+          PGVECTOR_REF: ${{ matrix.pgvector_ref }}
+        run: |
+          git clone --depth 1 --branch "$PGVECTOR_REF" https://github.com/pgvector/pgvector.git /tmp/pgvector
+          make -C /tmp/pgvector
+          sudo --preserve-env=PG_CONFIG make -C /tmp/pgvector install
+          createdb pgturbohybrid_pgvector_sanity
+          psql -d pgturbohybrid_pgvector_sanity -v ON_ERROR_STOP=1 -c "CREATE EXTENSION vector;"
+          psql -d pgturbohybrid_pgvector_sanity -v ON_ERROR_STOP=1 -c "SELECT '[1,2,3]'::vector;"
+          dropdb pgturbohybrid_pgvector_sanity
+
+      - name: Build pgturbohybrid
+        run: make clean && make
+        env:
+          PG_CFLAGS: -DUSE_ASSERT_CHECKING -Wall -Wextra -Werror -Wno-unused-parameter -Wno-sign-compare
+
+      - name: Install pgturbohybrid
+        run: sudo --preserve-env=PG_CONFIG make install
+
+      - name: Smoke test extensions
+        run: |
+          createdb pgturbohybrid_smoke
+          psql -d pgturbohybrid_smoke -v ON_ERROR_STOP=1 -c "CREATE EXTENSION vector;"
+          psql -d pgturbohybrid_smoke -v ON_ERROR_STOP=1 -c "CREATE EXTENSION pgturbohybrid;"
+          psql -d pgturbohybrid_smoke -v ON_ERROR_STOP=1 -c "SELECT '[1,0,0]'::vector <#~-> pgturbohybrid_query(vector_query => '[1,0,0]'::vector);"
+          dropdb pgturbohybrid_smoke
+
+      - name: Run SQL regression tests
+        run: make installcheck
+
+      - name: Run TAP tests
+        run: make prove_installcheck
+
+      - name: Run benchmark smoke
+        if: matrix.postgres == 18 && matrix.pgvector_ref == 'v0.8.2'
+        run: |
+          createdb pgturbohybrid_benchmark
+          python3 benchmarks/suite.py run-system-synthetic \
+            --database pgturbohybrid_benchmark \
+            --rows 100 \
+            --dimensions 8 \
+            --runs 1 \
+            --warmup 0 \
+            --output /tmp/pgturbohybrid_benchmark_smoke.json
+          dropdb pgturbohybrid_benchmark
+
+      - uses: actions/upload-artifact@v4
+        if: failure()
+        with:
+          name: linux-pg${{ matrix.postgres }}-${{ matrix.pgvector_ref }}-regression
+          path: |
+            regression.diffs
+            regression.out
+            log/
+          if-no-files-found: ignore
+
+  macos:
+    name: ${{ matrix.os }} pg${{ matrix.postgres }} pgvector-${{ matrix.pgvector_ref }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: macos-26
+            postgres: 18
+            pgvector_ref: v0.8.2
+          - os: macos-26
+            postgres: 18
+            pgvector_ref: master
+          - os: macos-15-intel
+            postgres: 17
+            pgvector_ref: v0.8.2
+          - os: macos-15-intel
+            postgres: 17
+            pgvector_ref: master
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: ankane/setup-postgres@v1
+        with:
+          postgres-version: ${{ matrix.postgres }}
+          dev-files: true
+
+      - name: Build and install upstream pgvector
+        env:
+          PGVECTOR_REF: ${{ matrix.pgvector_ref }}
+        run: |
+          git clone --depth 1 --branch "$PGVECTOR_REF" https://github.com/pgvector/pgvector.git /tmp/pgvector
+          make -C /tmp/pgvector
+          sudo --preserve-env=PG_CONFIG make -C /tmp/pgvector install
+          createdb pgturbohybrid_pgvector_sanity
+          psql -d pgturbohybrid_pgvector_sanity -v ON_ERROR_STOP=1 -c "CREATE EXTENSION vector;"
+          dropdb pgturbohybrid_pgvector_sanity
+
+      - name: Build and install pgturbohybrid
+        run: |
+          make clean
+          make
           sudo --preserve-env=PG_CONFIG make install
-      - run: make installcheck
-      - if: ${{ failure() }}
-        run: cat regression.diffs
-      - run: |
-          sudo apt-get update
-          sudo apt-get install libipc-run-perl
-      - run: make prove_installcheck
-  mac:
-    runs-on: ${{ matrix.os }}
-    if: ${{ !startsWith(github.ref_name, 'windows') }}
-    strategy:
-      fail-fast: false
-      matrix:
-        include:
-          - postgres: 18
-            os: macos-26
-          - postgres: 14
-            os: macos-15-intel
-    steps:
-      - uses: actions/checkout@v6
-      - uses: ankane/setup-postgres@v1
+
+      - name: Run tests
+        run: |
+          make installcheck
+          make prove_installcheck
+
+      - uses: actions/upload-artifact@v4
+        if: failure()
         with:
-          postgres-version: ${{ matrix.postgres }}
-      - run: make
-        env:
-          PG_CFLAGS: -DUSE_ASSERT_CHECKING -Wall -Wextra -Werror -Wno-unused-parameter -Wno-unknown-warning-option ${{ matrix.postgres >= 18 && '-Wno-missing-field-initializers' || '' }}
-      - run: make install
-      - run: make installcheck
-      - if: ${{ failure() }}
-        run: cat regression.diffs
-      # Homebrew Postgres does not enable TAP tests, so need to download
-      - run: |
-          brew install cpanm
-          cpanm --notest IPC::Run
-          wget -q https://github.com/postgres/postgres/archive/refs/tags/$TAG.tar.gz
-          tar xf $TAG.tar.gz
-          mv postgres-$TAG postgres
-        env:
-          TAG: ${{ matrix.postgres == 18 && 'REL_18_2' || 'REL_14_21' }}
-      - run: make prove_installcheck PROVE_FLAGS="-I ./postgres/src/test/perl -I ./test/perl"
-        env:
-          PERL5LIB: /Users/runner/perl5/lib/perl5
-      - run: make clean && $(brew --prefix llvm@$LLVM_VERSION)/bin/scan-build --status-bugs make
-        env:
-          LLVM_VERSION: ${{ matrix.os == 'macos-26' && 20 || 18 }}
-          PG_CFLAGS: -DUSE_ASSERT_CHECKING
-  windows:
-    runs-on: ${{ matrix.os }}
-    if: ${{ !startsWith(github.ref_name, 'mac') }}
-    strategy:
-      fail-fast: false
-      matrix:
-        include:
-          - postgres: 17
-            os: windows-2025
-          - postgres: 14
-            os: windows-2022
-    steps:
-      - uses: actions/checkout@v6
-      - uses: ankane/setup-postgres@v1
-        with:
-          postgres-version: ${{ matrix.postgres }}
-      - run: |
-          call "C:\Program Files\Microsoft Visual Studio\2022\Enterprise\VC\Auxiliary\Build\vcvars64.bat" && ^
-          nmake /NOLOGO /F Makefile.win && ^
-          nmake /NOLOGO /F Makefile.win install && ^
-          nmake /NOLOGO /F Makefile.win installcheck ${{ matrix.postgres != 17 && 'PG_REGRESS=$(PGROOT)\bin\pg_regress' || '' }} && ^
-          nmake /NOLOGO /F Makefile.win clean && ^
-          nmake /NOLOGO /F Makefile.win uninstall
-        shell: cmd
-      - if: ${{ failure() }}
-        run: cat regression.diffs
+          name: ${{ matrix.os }}-pg${{ matrix.postgres }}-${{ matrix.pgvector_ref }}-regression
+          path: |
+            regression.diffs
+            regression.out
+            log/
+          if-no-files-found: ignore
+
   i386:
-    if: ${{ !startsWith(github.ref_name, 'mac') && !startsWith(github.ref_name, 'windows') }}
-    runs-on: ubuntu-latest
+    name: linux i386 pgvector-v0.8.2
+    runs-on: ubuntu-24.04
     container:
       image: debian:12
       options: --platform linux/386
     steps:
-      - run: apt-get update && apt-get install -y build-essential git libipc-run-perl postgresql-15 postgresql-server-dev-15 sudo
-      - run: service postgresql start
-      - run: |
-          git clone https://github.com/${{ github.repository }}.git pgvector
-          cd pgvector
+      - name: Install PostgreSQL build dependencies
+        run: |
+          apt-get update
+          apt-get install -y build-essential ca-certificates git libipc-run-perl postgresql-15 postgresql-server-dev-15 sudo
+          service postgresql start
+
+      - name: Checkout pgturbohybrid
+        run: |
+          git clone https://github.com/${{ github.repository }}.git pgturbohybrid
+          cd pgturbohybrid
           git fetch origin ${{ github.ref }}
           git reset --hard FETCH_HEAD
+
+      - name: Build and install upstream pgvector
+        run: |
+          git clone --depth 1 --branch v0.8.2 https://github.com/pgvector/pgvector.git /tmp/pgvector
+          make -C /tmp/pgvector
+          make -C /tmp/pgvector install
+          sudo -u postgres createdb pgturbohybrid_pgvector_sanity
+          sudo -u postgres psql -d pgturbohybrid_pgvector_sanity -v ON_ERROR_STOP=1 -c "CREATE EXTENSION vector;"
+          sudo -u postgres dropdb pgturbohybrid_pgvector_sanity
+
+      - name: Build and install pgturbohybrid
+        working-directory: pgturbohybrid
+        run: |
+          make clean
           make
           make install
           chown -R postgres .
+
+      - name: Run tests
+        working-directory: pgturbohybrid
+        run: |
           sudo -u postgres make installcheck
           sudo -u postgres make prove_installcheck
-        env:
-          PG_CFLAGS: -DUSE_ASSERT_CHECKING -Wall -Wextra -Werror -Wno-unused-parameter -Wno-sign-compare
-      - if: ${{ failure() }}
-        run: cat pgvector/regression.diffs
+
+      - uses: actions/upload-artifact@v4
+        if: failure()
+        with:
+          name: linux-i386-regression
+          path: |
+            pgturbohybrid/regression.diffs
+            pgturbohybrid/regression.out
+            pgturbohybrid/log/
+          if-no-files-found: ignore
+
   valgrind:
-    if: ${{ !startsWith(github.ref_name, 'mac') && !startsWith(github.ref_name, 'windows') }}
-    runs-on: ubuntu-latest
+    name: valgrind pg18 pgvector-v0.8.2
+    runs-on: ubuntu-24.04
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v4
+
       - uses: ankane/setup-postgres-valgrind@v1
         with:
           postgres-version: 18
           check-ub: yes
-      - run: make OPTFLAGS=""
-      - run: sudo --preserve-env=PG_CONFIG make install
-      - run: make installcheck
+
+      - name: Build and install upstream pgvector
+        run: |
+          git clone --depth 1 --branch v0.8.2 https://github.com/pgvector/pgvector.git /tmp/pgvector
+          make -C /tmp/pgvector OPTFLAGS=""
+          sudo --preserve-env=PG_CONFIG make -C /tmp/pgvector install
+          createdb pgturbohybrid_pgvector_sanity
+          psql -d pgturbohybrid_pgvector_sanity -v ON_ERROR_STOP=1 -c "CREATE EXTENSION vector;"
+          dropdb pgturbohybrid_pgvector_sanity
+
+      - name: Build and install pgturbohybrid
+        run: |
+          make clean
+          make OPTFLAGS=""
+          sudo --preserve-env=PG_CONFIG make install
+
+      - name: Run regression tests under valgrind
+        run: make installcheck
+
+      - uses: actions/upload-artifact@v4
+        if: failure()
+        with:
+          name: valgrind-regression
+          path: |
+            regression.diffs
+            regression.out
+            log/
+          if-no-files-found: ignore
+
+  windows:
+    name: windows pg${{ matrix.postgres }} pgvector-${{ matrix.pgvector_ref }}
+    runs-on: windows-2025
+    strategy:
+      fail-fast: false
+      matrix:
+        postgres: [16, 17]
+        pgvector_ref: [v0.8.2, master]
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: ankane/setup-postgres@v1
+        with:
+          postgres-version: ${{ matrix.postgres }}
+
+      - name: Build and install upstream pgvector
+        shell: cmd
+        env:
+          PGVECTOR_REF: ${{ matrix.pgvector_ref }}
+        run: |
+          git clone --depth 1 --branch %PGVECTOR_REF% https://github.com/pgvector/pgvector.git %TEMP%\pgvector
+          cd %TEMP%\pgvector
+          call "C:\Program Files\Microsoft Visual Studio\2022\Enterprise\VC\Auxiliary\Build\vcvars64.bat" && ^
+          nmake /NOLOGO /F Makefile.win && ^
+          nmake /NOLOGO /F Makefile.win install
+
+      - name: Build, install, and test pgturbohybrid
+        shell: cmd
+        run: |
+          call "C:\Program Files\Microsoft Visual Studio\2022\Enterprise\VC\Auxiliary\Build\vcvars64.bat" && ^
+          nmake /NOLOGO /F Makefile.win && ^
+          nmake /NOLOGO /F Makefile.win install && ^
+          nmake /NOLOGO /F Makefile.win installcheck
+
+      - uses: actions/upload-artifact@v4
+        if: failure()
+        with:
+          name: windows-pg${{ matrix.postgres }}-${{ matrix.pgvector_ref }}-regression
+          path: |
+            regression.diffs
+            regression.out
+            log/
+          if-no-files-found: ignore

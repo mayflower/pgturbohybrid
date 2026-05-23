@@ -1,0 +1,6 @@
+comment = 'hybrid dense vector and BM25 search for pgvector'
+default_version = '0.1.0'
+module_pathname = '$libdir/pgturbohybrid'
+requires = 'vector'
+no_relocate = 'vector'
+relocatable = true

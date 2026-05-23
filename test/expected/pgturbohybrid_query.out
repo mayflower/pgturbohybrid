@@ -1,0 +1,245 @@
+DO $$
+BEGIN
+	IF EXISTS (SELECT 1 FROM pg_extension WHERE extname = 'pgturbohybrid') THEN
+		EXECUTE 'DROP EXTENSION pgturbohybrid CASCADE';
+	END IF;
+	IF EXISTS (SELECT 1 FROM pg_extension WHERE extname = 'vector') THEN
+		EXECUTE 'DROP EXTENSION vector CASCADE';
+	END IF;
+END
+$$;
+CREATE EXTENSION vector;
+CREATE EXTENSION pgturbohybrid;
+DO $$
+DECLARE
+	settings text[];
+BEGIN
+	SELECT array_agg(name ORDER BY name) INTO settings
+	FROM pg_settings
+	WHERE name LIKE 'turbohybrid.%';
+
+	IF settings <> ARRAY[
+		'turbohybrid.default_bm25_k',
+		'turbohybrid.default_dense_k',
+		'turbohybrid.default_rrf_k',
+		'turbohybrid.enable_wand',
+		'turbohybrid.max_union_candidates',
+		'turbohybrid.simd'
+	] THEN
+		RAISE EXCEPTION 'unexpected pgturbohybrid settings: %', settings;
+	END IF;
+END
+$$;
+SET turbohybrid.enable_wand = off;
+SET turbohybrid.max_union_candidates = 64;
+SET turbohybrid.simd = off;
+RESET turbohybrid.enable_wand;
+RESET turbohybrid.max_union_candidates;
+RESET turbohybrid.simd;
+DO $$
+BEGIN
+	IF turbohybrid_query_out(turbohybrid_query(
+		vector_query => '[1,0,0]'::vector,
+		text_query => websearch_to_tsquery('english', 'postgres vector search'),
+		fusion => 'rrf',
+		dense_k => 12,
+		bm25_k => 34,
+		rrf_k => 60
+	))::text != 'turbohybrid_query(fusion=rrf,vector=true,tsquery=true,dense_weight=1,bm25_weight=1,alpha=null,rrf_k=60,dense_k=12,bm25_k=34,final_k=null,require_bm25_match=false)' THEN
+		RAISE EXCEPTION 'unexpected turbohybrid_query output';
+	END IF;
+END
+$$;
+DO $$
+BEGIN
+	IF turbohybrid_query_out(turbohybrid_query(
+		text_query => websearch_to_tsquery('english', 'postgres'),
+		fusion => 'weighted',
+		alpha => 0.25,
+		final_k => 10,
+		require_bm25_match => true
+	))::text != 'turbohybrid_query(fusion=weighted,vector=false,tsquery=true,dense_weight=1,bm25_weight=1,alpha=0.25,rrf_k=60,dense_k=400,bm25_k=400,final_k=10,require_bm25_match=true)' THEN
+		RAISE EXCEPTION 'unexpected weighted turbohybrid_query output';
+	END IF;
+END
+$$;
+DO $$
+BEGIN
+	IF turbohybrid_query_out(turbohybrid_query(
+		vector_query => '[1,0,0]'::vector,
+		final_k => NULL
+	))::text != 'turbohybrid_query(fusion=rrf,vector=true,tsquery=false,dense_weight=1,bm25_weight=1,alpha=null,rrf_k=60,dense_k=400,bm25_k=400,final_k=null,require_bm25_match=false)' THEN
+		RAISE EXCEPTION 'unexpected explicit NULL final_k output';
+	END IF;
+END
+$$;
+SET turbohybrid.default_dense_k = 7;
+SET turbohybrid.default_bm25_k = 8;
+SET turbohybrid.default_rrf_k = 9;
+DO $$
+BEGIN
+	IF turbohybrid_query_out(turbohybrid_query(
+		vector_query => '[1,0,0]'::vector,
+		rrf_k => NULL,
+		dense_k => NULL,
+		bm25_k => NULL
+	))::text != 'turbohybrid_query(fusion=rrf,vector=true,tsquery=false,dense_weight=1,bm25_weight=1,alpha=null,rrf_k=9,dense_k=7,bm25_k=8,final_k=null,require_bm25_match=false)' THEN
+		RAISE EXCEPTION 'unexpected explicit NULL GUC default output';
+	END IF;
+END
+$$;
+DO $$
+BEGIN
+	IF turbohybrid_query_out(turbohybrid_query(
+		vector_query => '[1,0,0]'::vector
+	))::text != 'turbohybrid_query(fusion=rrf,vector=true,tsquery=false,dense_weight=1,bm25_weight=1,alpha=null,rrf_k=9,dense_k=7,bm25_k=8,final_k=null,require_bm25_match=false)' THEN
+		RAISE EXCEPTION 'unexpected omitted GUC default output';
+	END IF;
+END
+$$;
+RESET turbohybrid.default_dense_k;
+RESET turbohybrid.default_bm25_k;
+RESET turbohybrid.default_rrf_k;
+CREATE TABLE hq_items (id int, val vector(3));
+INSERT INTO hq_items VALUES
+	(1, '[1,0,0]'),
+	(2, '[1,1,0]'),
+	(3, '[0,1,0]');
+DO $$
+DECLARE
+	ids int[];
+BEGIN
+	SELECT array_agg(id ORDER BY val <~> turbohybrid_query(vector_query => '[1,0,0]'::vector)) INTO ids
+	FROM hq_items;
+
+	IF ids != ARRAY[1, 2, 3] THEN
+		RAISE EXCEPTION 'unexpected vector-only hybrid ordering: %', ids;
+	END IF;
+END
+$$;
+DO $$
+BEGIN
+	IF NOT (
+		('[2,0,0]'::vector <~-> turbohybrid_query(vector_query => '[1,0,0]'::vector)) = 1 AND
+		('[2,0,0]'::vector <~#> turbohybrid_query(vector_query => '[1,0,0]'::vector)) = -2 AND
+		('[2,0,0]'::vector <~> turbohybrid_query(vector_query => '[1,0,0]'::vector)) = 0
+	) THEN
+		RAISE EXCEPTION 'unexpected hybrid distance operator results';
+	END IF;
+END
+$$;
+DO $$
+BEGIN
+	IF NOT (
+		turbohybrid_vector_l2_squared_distance('[2,0,0]'::vector, '[1,0,0]'::vector) = 1 AND
+		turbohybrid_vector_l2_distance('[2,0,0]'::vector, '[1,0,0]'::vector) = 1 AND
+		turbohybrid_vector_negative_inner_product('[2,0,0]'::vector, '[1,0,0]'::vector) = -2 AND
+		turbohybrid_vector_cosine_distance('[2,0,0]'::vector, '[1,0,0]'::vector) = 0 AND
+		turbohybrid_vector_norm('[3,4,0]'::vector) = 5
+	) THEN
+		RAISE EXCEPTION 'unexpected pgturbohybrid vector support function results';
+	END IF;
+END
+$$;
+DO $$
+BEGIN
+	PERFORM turbohybrid_vector_l2_distance('[1,0]'::vector, '[1,0,0]'::vector);
+	RAISE EXCEPTION 'expected vector dimension mismatch error';
+EXCEPTION WHEN data_exception THEN
+END
+$$;
+DO $$
+DECLARE
+	ok bool;
+BEGIN
+	SELECT bool_and(provolatile = 's' AND proparallel = 's') INTO ok
+	FROM pg_proc
+	WHERE oid IN (
+		'turbohybrid_distance(vector,turbohybrid_query)'::regprocedure,
+		'turbohybrid_l2_distance(vector,turbohybrid_query)'::regprocedure,
+		'turbohybrid_negative_inner_product(vector,turbohybrid_query)'::regprocedure,
+		'turbohybrid_cosine_distance(vector,turbohybrid_query)'::regprocedure
+	);
+
+	IF NOT ok THEN
+		RAISE EXCEPTION 'pgturbohybrid distance functions should be stable and parallel safe';
+	END IF;
+END
+$$;
+DO $$
+DECLARE
+	ok bool;
+BEGIN
+	SELECT bool_and(provolatile = 'i' AND proparallel = 's') INTO ok
+	FROM pg_proc
+	WHERE oid IN (
+		'turbohybrid_vector_l2_squared_distance(vector,vector)'::regprocedure,
+		'turbohybrid_vector_l2_distance(vector,vector)'::regprocedure,
+		'turbohybrid_vector_negative_inner_product(vector,vector)'::regprocedure,
+		'turbohybrid_vector_cosine_distance(vector,vector)'::regprocedure,
+		'turbohybrid_vector_norm(vector)'::regprocedure
+	);
+
+	IF NOT ok THEN
+		RAISE EXCEPTION 'pgturbohybrid vector support functions should be immutable and parallel safe';
+	END IF;
+END
+$$;
+DO $$
+BEGIN
+	PERFORM turbohybrid_distance('[1,0,0]'::vector, turbohybrid_query(
+		text_query => websearch_to_tsquery('english', 'postgres')
+	));
+	RAISE EXCEPTION 'expected hybrid text fallback rejection';
+EXCEPTION WHEN feature_not_supported THEN
+END
+$$;
+DO $$
+BEGIN
+	PERFORM id
+	FROM hq_items
+	ORDER BY val <~> turbohybrid_query(
+		vector_query => '[1,0,0]'::vector,
+		text_query => websearch_to_tsquery('english', 'postgres')
+	)
+	LIMIT 1;
+	RAISE EXCEPTION 'expected scalar hybrid ordering fallback rejection';
+EXCEPTION WHEN feature_not_supported THEN
+END
+$$;
+DO $$
+BEGIN
+	PERFORM turbohybrid_query(vector_query => '[1]'::vector, dense_k => -1);
+	RAISE EXCEPTION 'expected dense_k validation error';
+EXCEPTION WHEN invalid_parameter_value THEN
+END
+$$;
+DO $$
+BEGIN
+	PERFORM turbohybrid_query(vector_query => '[1]'::vector, fusion => 'bogus');
+	RAISE EXCEPTION 'expected fusion validation error';
+EXCEPTION WHEN invalid_parameter_value THEN
+END
+$$;
+DO $$
+BEGIN
+	PERFORM turbohybrid_query(vector_query => '[1]'::vector, alpha => 1.5);
+	RAISE EXCEPTION 'expected alpha validation error';
+EXCEPTION WHEN invalid_parameter_value THEN
+END
+$$;
+DO $$
+BEGIN
+	PERFORM turbohybrid_query(vector_query => '[1]'::vector, rrf_k => 0);
+	RAISE EXCEPTION 'expected rrf_k validation error';
+EXCEPTION WHEN invalid_parameter_value THEN
+END
+$$;
+DO $$
+BEGIN
+	PERFORM 'anything'::turbohybrid_query;
+	RAISE EXCEPTION 'expected turbohybrid_query input rejection';
+EXCEPTION WHEN feature_not_supported THEN
+END
+$$;
+DROP TABLE hq_items;

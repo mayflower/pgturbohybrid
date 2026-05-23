@@ -1,44 +1,71 @@
-EXTENSION = vector
-EXTVERSION = 0.8.2
+EXTENSION = pgturbohybrid
+EXTVERSION = 0.1.0
 
-MODULE_big = vector
-DATA = $(wildcard sql/*--*--*.sql)
-DATA_built = sql/$(EXTENSION)--$(EXTVERSION).sql
-OBJS = src/bitutils.o src/bitvec.o src/halfutils.o src/halfvec.o src/hnsw.o src/hnswbuild.o src/hnswinsert.o src/hnswscan.o src/hnswutils.o src/hnswvacuum.o src/hybrid_query.o src/ivfbuild.o src/ivfflat.o src/ivfinsert.o src/ivfkmeans.o src/ivfscan.o src/ivfutils.o src/ivfvacuum.o src/sparsevec.o src/tqgraph.o src/tqgraph_cache.o src/tqgraph_diag.o src/tqgraph_exact.o src/tqgraph_insert.o src/tqgraph_psquare.o src/tqgraph_scan_cache.o src/tqgraph_score.o src/tqgraph_storage.o src/tqgraphcontrol.o src/tqhybrid.o src/tqhybrid_bm25_build.o src/tqhybrid_bm25_query.o src/tqstats.o src/vector.o
-HEADERS = src/halfvec.h src/hybrid_query.h src/sparsevec.h src/tqhybrid.h src/tqhybrid_bm25.h src/vector.h
+MODULE_big = pgturbohybrid
+DATA = sql/pgturbohybrid--0.1.0.sql
 
-TESTS = $(wildcard test/sql/*.sql)
-REGRESS = $(patsubst test/sql/%.sql,%,$(TESTS))
-REGRESS_OPTS = --inputdir=test --load-extension=$(EXTENSION)
+PG_CONFIG ?= pg_config
+
+OBJS = \
+	src/pgturbohybrid.o \
+	src/pgturbohybrid_am.o \
+	src/pgturbohybrid_bm25.o \
+	src/pgturbohybrid_bm25_build.o \
+	src/pgturbohybrid_bm25_query.o \
+	src/pgturbohybrid_build.o \
+	src/pgturbohybrid_graph.o \
+	src/pgturbohybrid_graph_utils.o \
+	src/pgturbohybrid_insert.o \
+	src/pgturbohybrid_quant.o \
+	src/pgturbohybrid_quant_cache.o \
+	src/pgturbohybrid_quant_exact.o \
+	src/pgturbohybrid_quant_insert.o \
+	src/pgturbohybrid_quant_psquare.o \
+	src/pgturbohybrid_quant_scan_cache.o \
+	src/pgturbohybrid_quant_score.o \
+	src/pgturbohybrid_quant_storage.o \
+	src/pgturbohybrid_query.o \
+	src/pgturbohybrid_scan.o \
+	src/pgturbohybrid_stats.o \
+	src/pgturbohybrid_vacuum.o \
+	src/pgturbohybrid_vector_compat.o
+
+HEADERS =
+
+REGRESS = extension pgturbohybrid pgturbohybrid_query
+REGRESS_OPTS = --inputdir=test
 
 SIMD_BUILD ?= portable
+PGTURBOHYBRID_REQUIRE_VECTOR_HEADER ?= 0
+
+PGVECTOR_SERVER_INCLUDE := $(shell $(PG_CONFIG) --includedir-server)
+PGVECTOR_INSTALLED_INCLUDE := $(PGVECTOR_SERVER_INCLUDE)/extension/vector
+PGVECTOR_INSTALLED_HEADER := $(PGVECTOR_INSTALLED_INCLUDE)/vector.h
+
+ifneq ($(wildcard $(PGVECTOR_INSTALLED_HEADER)),)
+	PG_CPPFLAGS += -I$(PGVECTOR_INSTALLED_INCLUDE)
+	PGTURBOHYBRID_VECTOR_HEADER := $(PGVECTOR_INSTALLED_HEADER)
+else ifneq ($(VECTOR_INCLUDE),)
+	ifeq ($(wildcard $(VECTOR_INCLUDE)/vector.h),)
+$(error VECTOR_INCLUDE must point to a directory containing vector.h)
+	endif
+	PG_CPPFLAGS += -I$(VECTOR_INCLUDE)
+	PGTURBOHYBRID_VECTOR_HEADER := $(VECTOR_INCLUDE)/vector.h
+endif
+
+ifeq ($(PGTURBOHYBRID_REQUIRE_VECTOR_HEADER),1)
+	ifeq ($(PGTURBOHYBRID_VECTOR_HEADER),)
+$(error pgvector header vector.h not found; install pgvector headers or set VECTOR_INCLUDE=/path/to/pgvector/include/extension/vector)
+	endif
+	PG_CPPFLAGS += -DPGTURBOHYBRID_USE_PGVECTOR_HEADER=1
+endif
 
 ifeq ($(SIMD_BUILD),native)
-	# Benchmark-only: may emit instructions unsupported on other hosts.
 	OPTFLAGS = -march=native
 else ifeq ($(SIMD_BUILD),none)
 	OPTFLAGS =
-	PG_CFLAGS += -DTQ_DISABLE_SIMD=1
+	PG_CFLAGS += -DPGTURBOHYBRID_DISABLE_SIMD=1
 else
-	# Portable release/package default: rely on target attributes and runtime dispatch.
-	OPTFLAGS =
-endif
-
-# Mac ARM doesn't always support -march=native
-ifeq ($(shell uname -s), Darwin)
-	ifeq ($(shell uname -p), arm)
-		# no difference with -march=armv8.5-a
-		OPTFLAGS =
-	endif
-endif
-
-# PowerPC doesn't support -march=native
-ifneq ($(filter ppc64%, $(shell uname -m)), )
-	OPTFLAGS =
-endif
-
-# RISC-V64 doesn't support -march=native
-ifeq ($(shell uname -m), riscv64)
 	OPTFLAGS =
 endif
 
@@ -46,32 +73,15 @@ ifneq ($(filter-out portable native none,$(SIMD_BUILD)),)
 $(error unsupported SIMD_BUILD=$(SIMD_BUILD); expected portable, native, or none)
 endif
 
-# For auto-vectorization:
-# - GCC (needs -ftree-vectorize OR -O3) - https://gcc.gnu.org/projects/tree-ssa/vectorization.html
-# - Clang (could use pragma instead) - https://llvm.org/docs/Vectorizers.html
 PG_CFLAGS += $(OPTFLAGS) -ftree-vectorize -fassociative-math -fno-signed-zeros -fno-trapping-math
 
-# Debug GCC auto-vectorization
-# PG_CFLAGS += -fopt-info-vec
-
-# Debug Clang auto-vectorization
-# PG_CFLAGS += -Rpass=loop-vectorize -Rpass-analysis=loop-vectorize
-
-all: sql/$(EXTENSION)--$(EXTVERSION).sql
-
-sql/$(EXTENSION)--$(EXTVERSION).sql: sql/$(EXTENSION).sql
-	cp $< $@
-
-PG_CONFIG ?= pg_config
 PGXS := $(shell $(PG_CONFIG) --pgxs)
 include $(PGXS)
 
-# for Mac
 ifeq ($(PROVE),)
 	PROVE = prove
 endif
 
-# for Postgres < 15
 PROVE_FLAGS += -I ./test/perl
 
 prove_installcheck:
@@ -81,23 +91,13 @@ prove_installcheck:
 .PHONY: dist
 
 dist:
-	mkdir -p dist
-	git archive --format zip --prefix=$(EXTENSION)-$(EXTVERSION)/ --output dist/$(EXTENSION)-$(EXTVERSION).zip master
-
-# for Docker
-PG_MAJOR ?= 17
-
-.PHONY: docker
-
-docker:
-	docker build --pull --no-cache --build-arg PG_MAJOR=$(PG_MAJOR) -t pgvector/pgvector:pg$(PG_MAJOR) -t pgvector/pgvector:$(EXTVERSION)-pg$(PG_MAJOR) .
-
-.PHONY: docker-release
-
-docker-release:
-	docker buildx build --push --pull --no-cache --platform linux/amd64,linux/arm64 --build-arg PG_MAJOR=$(PG_MAJOR) --build-arg DEBIAN_CODENAME=bookworm -t pgvector/pgvector:pg$(PG_MAJOR) -t pgvector/pgvector:pg$(PG_MAJOR)-bookworm -t pgvector/pgvector:$(EXTVERSION)-pg$(PG_MAJOR) -t pgvector/pgvector:$(EXTVERSION)-pg$(PG_MAJOR)-bookworm .
-
-.PHONY: docker-release-trixie
-
-docker-release-trixie:
-	docker buildx build --push --pull --no-cache --platform linux/amd64,linux/arm64 --build-arg PG_MAJOR=$(PG_MAJOR) --build-arg DEBIAN_CODENAME=trixie -t pgvector/pgvector:pg$(PG_MAJOR)-trixie -t pgvector/pgvector:$(EXTVERSION)-pg$(PG_MAJOR)-trixie .
+	rm -rf dist/$(EXTENSION)-$(EXTVERSION) dist/$(EXTENSION)-$(EXTVERSION).zip dist/$(EXTENSION)-$(EXTVERSION).tar.gz
+	mkdir -p dist/$(EXTENSION)-$(EXTVERSION)
+	git ls-files -co --exclude-standard | while IFS= read -r file; do \
+		if [ -f "$$file" ]; then \
+			mkdir -p "dist/$(EXTENSION)-$(EXTVERSION)/$$(dirname "$$file")"; \
+			cp "$$file" "dist/$(EXTENSION)-$(EXTVERSION)/$$file"; \
+		fi; \
+	done
+	cd dist && zip -qr $(EXTENSION)-$(EXTVERSION).zip $(EXTENSION)-$(EXTVERSION)
+	cd dist && tar -czf $(EXTENSION)-$(EXTVERSION).tar.gz $(EXTENSION)-$(EXTVERSION)
