@@ -33,12 +33,8 @@ StaticAssertDecl(offsetof(Vector, unused) == sizeof(int32) + sizeof(int16),
 StaticAssertDecl(offsetof(Vector, x) == sizeof(int32) + sizeof(int16) + sizeof(int16),
 				 "pgvector vector data offset changed");
 
-/* Export marker for platforms that require explicit symbol export. */
-#if defined(_MSC_VER)
+/* SQL-callable functions must stay visible even with -fvisibility=hidden. */
 #define FUNCTION_PREFIX PGDLLEXPORT
-#else
-#define FUNCTION_PREFIX
-#endif
 
 #define PG_GETARG_PGTURBOHYBRID_VECTOR_P(_n) \
 	PgturbohybridDatumGetVector(PG_GETARG_DATUM(_n))

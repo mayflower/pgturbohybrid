@@ -3825,36 +3825,43 @@ PgturbohybridGraphCollectVacuumStats(Relation index, PgturbohybridGraphMetaPageD
 	pfree(deadBitmap);
 }
 
+typedef struct PgturbohybridGraphBulkDeleteState
+{
+	double		liveTuples;
+	bool		changedAny;
+	bool		repairAny;
+	bool		hasDeadNodes;
+} PgturbohybridGraphBulkDeleteState;
+
 IndexBulkDeleteResult *
 tqgraphbulkdelete(IndexVacuumInfo *info, IndexBulkDeleteResult *stats,
 				  IndexBulkDeleteCallback callback, void *callback_state)
 {
 	Relation	index = info->index;
+	IndexBulkDeleteResult *result = stats;
 	PgturbohybridGraphMetaPageData meta;
+	PgturbohybridGraphBulkDeleteState *deleteState;
 	int			codeTuplesPerPage;
 	int			codePageCount;
 	int			tqBits;
-	double		liveTuples = 0;
-	bool		changedAny = false;
-	bool		repairAny = false;
-	bool		hasDeadNodes = false;
 	bool	   *deadNodes = NULL;
 
-	if (stats == NULL)
-		stats = palloc0(sizeof(IndexBulkDeleteResult));
+	if (result == NULL)
+		result = palloc0(sizeof(IndexBulkDeleteResult));
 
 	if (callback == NULL || !PgturbohybridGraphReadMeta(index, &meta) ||
 		meta.tqNodeCount == 0 ||
 		!BlockNumberIsValid(meta.tqCodeStartBlkno))
-		return stats;
+		return result;
 
 	tqBits = meta.tqBits != 0 ? meta.tqBits : PGTURBOHYBRID_DEFAULT_BITS;
 	codeTuplesPerPage =
 		PgturbohybridGraphTuplesPerPage(PgturbohybridGraphCodeTupleSize(meta.dimensions,
-												  meta.tqPayloadCount,
-												  tqBits,
-												  (meta.tqFlags & PGTURBOHYBRID_GRAPH_TQ_WEIGHTED) != 0));
+													  meta.tqPayloadCount,
+													  tqBits,
+													  (meta.tqFlags & PGTURBOHYBRID_GRAPH_TQ_WEIGHTED) != 0));
 	codePageCount = PgturbohybridGraphPageCount(meta.tqNodeCount, codeTuplesPerPage);
+	deleteState = palloc0(sizeof(PgturbohybridGraphBulkDeleteState));
 	deadNodes = palloc0(sizeof(bool) * meta.tqNodeCount);
 
 	LockPage(index, PGTURBOHYBRID_GRAPH_SCAN_LOCK, ExclusiveLock);
@@ -3915,7 +3922,7 @@ tqgraphbulkdelete(IndexVacuumInfo *info, IndexBulkDeleteResult *stats,
 				if (tuple->flags & PGTURBOHYBRID_GRAPH_NODE_DEAD)
 				{
 					deadNodes[tuple->nodeId] = true;
-					hasDeadNodes = true;
+					deleteState->hasDeadNodes = true;
 					continue;
 				}
 
@@ -3923,12 +3930,12 @@ tqgraphbulkdelete(IndexVacuumInfo *info, IndexBulkDeleteResult *stats,
 				{
 					tuple->flags |= PGTURBOHYBRID_GRAPH_NODE_DEAD;
 					deadNodes[tuple->nodeId] = true;
-					hasDeadNodes = true;
-					stats->tuples_removed += 1;
+					deleteState->hasDeadNodes = true;
+					result->tuples_removed += 1;
 					changed = true;
 				}
 				else
-					liveTuples += 1;
+					deleteState->liveTuples += 1;
 			}
 
 			if (changed)
@@ -3943,17 +3950,17 @@ tqgraphbulkdelete(IndexVacuumInfo *info, IndexBulkDeleteResult *stats,
 
 			if (changed)
 			{
-				changedAny = true;
+				deleteState->changedAny = true;
 				PgturbohybridGraphLogGraphWalRecord(index, MAIN_FORKNUM, blkno, PGTURBOHYBRID_GRAPH_GRAPH_OP_VACUUM_DELETE);
 			}
 
 			blkno = nextblkno;
 		}
 
-		if (hasDeadNodes)
-			repairAny = PgturbohybridGraphRepairAdjacencyForDeadNodes(index, &meta, deadNodes);
+		if (deleteState->hasDeadNodes)
+			deleteState->repairAny = PgturbohybridGraphRepairAdjacencyForDeadNodes(index, &meta, deadNodes);
 
-		if (changedAny || repairAny)
+		if (deleteState->changedAny || deleteState->repairAny)
 			PgturbohybridGraphBumpMetaGeneration(index);
 	}
 	PG_CATCH();
@@ -3964,11 +3971,12 @@ tqgraphbulkdelete(IndexVacuumInfo *info, IndexBulkDeleteResult *stats,
 	PG_END_TRY();
 	UnlockPage(index, PGTURBOHYBRID_GRAPH_SCAN_LOCK, ExclusiveLock);
 	pfree(deadNodes);
+	result->num_index_tuples = deleteState->liveTuples;
+	pfree(deleteState);
 
-	stats->num_index_tuples = liveTuples;
-	stats->estimated_count = false;
+	result->estimated_count = false;
 
-	return stats;
+	return result;
 }
 
 IndexBulkDeleteResult *
