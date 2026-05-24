@@ -1,3 +1,7 @@
+<p align="center">
+  <img src="logo.png" alt="pgturbohybrid" width="720">
+</p>
+
 # pgturbohybrid
 
 `pgturbohybrid` is an experimental PostgreSQL extension for dense vector and
