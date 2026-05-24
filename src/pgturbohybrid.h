@@ -208,14 +208,14 @@ extern int	pgturbohybrid_dense_max_rescore_multiplier;
 extern int	pgturbohybrid_dense_rescore_band_policy;
 extern int	pgturbohybrid_graph_lock_tranche_id;
 
-typedef enum TqRoutingMode
+typedef enum PgturbohybridRoutingMode
 {
 	PGTURBOHYBRID_ROUTING_AUTO = 0,
 	PGTURBOHYBRID_ROUTING_GRAPH = 1,
 	PGTURBOHYBRID_ROUTING_IVF = 2,
 	PGTURBOHYBRID_ROUTING_FLAT = 3,
 	PGTURBOHYBRID_ROUTING_LEGACY_GRAPH = 4
-}			TqRoutingMode;
+}			PgturbohybridRoutingMode;
 
 typedef enum PgturbohybridGraphRescoreBand
 {
@@ -224,13 +224,13 @@ typedef enum PgturbohybridGraphRescoreBand
 	PGTURBOHYBRID_GRAPH_RESCORE_BAND_EXACT
 }			PgturbohybridGraphRescoreBand;
 
-typedef enum TqDenseBudgetPolicy
+typedef enum PgturbohybridDenseBudgetPolicy
 {
 	PGTURBOHYBRID_DENSE_BUDGET_QUALITY,
 	PGTURBOHYBRID_DENSE_BUDGET_BALANCED,
 	PGTURBOHYBRID_DENSE_BUDGET_LATENCY,
 	PGTURBOHYBRID_DENSE_BUDGET_AUTO
-}			TqDenseBudgetPolicy;
+}			PgturbohybridDenseBudgetPolicy;
 
 typedef enum TqRescoreBandPolicy
 {

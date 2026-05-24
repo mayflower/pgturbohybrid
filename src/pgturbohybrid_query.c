@@ -52,7 +52,7 @@ PgturbohybridQueryGetVector(PgturbohybridQueryHeader *query)
 {
 	PgturbohybridQueryValidate(query);
 
-	if ((query->flags & HYBRID_QUERY_FLAG_HAS_VECTOR) == 0)
+	if ((query->flags & PGTURBOHYBRID_QUERY_FLAG_HAS_VECTOR) == 0)
 		return NULL;
 
 	return (Vector *) ((char *) query + PgturbohybridQueryVectorOffset());
@@ -63,7 +63,7 @@ PgturbohybridQueryGetTsQuery(PgturbohybridQueryHeader *query)
 {
 	PgturbohybridQueryValidate(query);
 
-	if ((query->flags & HYBRID_QUERY_FLAG_HAS_TSQUERY) == 0)
+	if ((query->flags & PGTURBOHYBRID_QUERY_FLAG_HAS_TSQUERY) == 0)
 		return NULL;
 
 	return (TSQuery) ((char *) query + PgturbohybridQueryTsQueryOffset(query));
@@ -72,11 +72,11 @@ PgturbohybridQueryGetTsQuery(PgturbohybridQueryHeader *query)
 const char *
 PgturbohybridQueryFusionName(uint16 fusion)
 {
-	switch ((HybridFusionMode) fusion)
+	switch ((PgturbohybridFusionMode) fusion)
 	{
-		case HYBRID_FUSION_RRF:
+		case PGTURBOHYBRID_FUSION_RRF:
 			return "rrf";
-		case HYBRID_FUSION_WEIGHTED:
+		case PGTURBOHYBRID_FUSION_WEIGHTED:
 			return "weighted";
 	}
 
@@ -93,13 +93,13 @@ PgturbohybridQueryValidate(PgturbohybridQueryHeader *query)
 				(errcode(ERRCODE_DATA_EXCEPTION),
 				 errmsg("turbohybrid_query cannot be null")));
 
-	if (query->version != HYBRID_QUERY_VERSION)
+	if (query->version != PGTURBOHYBRID_QUERY_VERSION)
 		ereport(ERROR,
 				(errcode(ERRCODE_DATA_EXCEPTION),
 				 errmsg("unsupported turbohybrid_query version %u", query->version)));
 
-	if (query->fusion != HYBRID_FUSION_RRF &&
-		query->fusion != HYBRID_FUSION_WEIGHTED)
+	if (query->fusion != PGTURBOHYBRID_FUSION_RRF &&
+		query->fusion != PGTURBOHYBRID_FUSION_WEIGHTED)
 		ereport(ERROR,
 				(errcode(ERRCODE_DATA_EXCEPTION),
 				 errmsg("invalid turbohybrid_query fusion mode %u", query->fusion)));
@@ -109,13 +109,13 @@ PgturbohybridQueryValidate(PgturbohybridQueryHeader *query)
 				(errcode(ERRCODE_DATA_EXCEPTION),
 				 errmsg("invalid turbohybrid_query payload size")));
 
-	if ((query->flags & HYBRID_QUERY_FLAG_HAS_VECTOR) == 0 &&
+	if ((query->flags & PGTURBOHYBRID_QUERY_FLAG_HAS_VECTOR) == 0 &&
 		query->vectorBytes != 0)
 		ereport(ERROR,
 				(errcode(ERRCODE_DATA_EXCEPTION),
 				 errmsg("turbohybrid_query vector payload is inconsistent")));
 
-	if ((query->flags & HYBRID_QUERY_FLAG_HAS_VECTOR) != 0)
+	if ((query->flags & PGTURBOHYBRID_QUERY_FLAG_HAS_VECTOR) != 0)
 	{
 		Vector	   *vector = (Vector *) ((char *) query + PgturbohybridQueryVectorOffset());
 		Size		vectorBytes;
@@ -128,7 +128,7 @@ PgturbohybridQueryValidate(PgturbohybridQueryHeader *query)
 					 errmsg("turbohybrid_query vector payload is inconsistent")));
 	}
 
-	if ((query->flags & HYBRID_QUERY_FLAG_HAS_TSQUERY) == 0 &&
+	if ((query->flags & PGTURBOHYBRID_QUERY_FLAG_HAS_TSQUERY) == 0 &&
 		query->tsqueryBytes != 0)
 		ereport(ERROR,
 				(errcode(ERRCODE_DATA_EXCEPTION),
@@ -159,7 +159,7 @@ pgturbohybrid_query_in(PG_FUNCTION_ARGS)
 Datum
 pgturbohybrid_query_out(PG_FUNCTION_ARGS)
 {
-	PgturbohybridQueryHeader *query = PG_GETARG_HYBRID_QUERY_P(0);
+	PgturbohybridQueryHeader *query = PG_GETARG_PGTURBOHYBRID_QUERY_P(0);
 	StringInfoData buf;
 
 	PgturbohybridQueryValidate(query);
@@ -168,11 +168,11 @@ pgturbohybrid_query_out(PG_FUNCTION_ARGS)
 	appendStringInfo(&buf,
 					 "turbohybrid_query(fusion=%s,vector=%s,tsquery=%s,dense_weight=%g,bm25_weight=%g,alpha=",
 					 PgturbohybridQueryFusionName(query->fusion),
-					 (query->flags & HYBRID_QUERY_FLAG_HAS_VECTOR) ? "true" : "false",
-					 (query->flags & HYBRID_QUERY_FLAG_HAS_TSQUERY) ? "true" : "false",
+					 (query->flags & PGTURBOHYBRID_QUERY_FLAG_HAS_VECTOR) ? "true" : "false",
+					 (query->flags & PGTURBOHYBRID_QUERY_FLAG_HAS_TSQUERY) ? "true" : "false",
 					 query->denseWeight,
 					 query->bm25Weight);
-	if (query->flags & HYBRID_QUERY_FLAG_ALPHA_IS_SET)
+	if (query->flags & PGTURBOHYBRID_QUERY_FLAG_ALPHA_IS_SET)
 		appendStringInfo(&buf, "%g", query->alpha);
 	else
 		appendStringInfoString(&buf, "null");
@@ -182,14 +182,14 @@ pgturbohybrid_query_out(PG_FUNCTION_ARGS)
 					 query->rrfK,
 					 query->denseK,
 					 query->bm25K);
-	if (query->flags & HYBRID_QUERY_FLAG_FINAL_K_IS_SET)
+	if (query->flags & PGTURBOHYBRID_QUERY_FLAG_FINAL_K_IS_SET)
 		appendStringInfo(&buf, "%d", query->finalK);
 	else
 		appendStringInfoString(&buf, "null");
 
 	appendStringInfo(&buf,
 					 ",require_bm25_match=%s)",
-					 (query->flags & HYBRID_QUERY_FLAG_REQUIRE_BM25_MATCH) ? "true" : "false");
+					 (query->flags & PGTURBOHYBRID_QUERY_FLAG_REQUIRE_BM25_MATCH) ? "true" : "false");
 
 	PG_RETURN_CSTRING(buf.data);
 }
@@ -201,13 +201,13 @@ PgturbohybridQueryParseFusion(text *fusion)
 	uint16		result;
 
 	if (fusion == NULL)
-		return HYBRID_FUSION_RRF;
+		return PGTURBOHYBRID_FUSION_RRF;
 
 	name = text_to_cstring(fusion);
 	if (pg_strcasecmp(name, "rrf") == 0)
-		result = HYBRID_FUSION_RRF;
+		result = PGTURBOHYBRID_FUSION_RRF;
 	else if (pg_strcasecmp(name, "weighted") == 0)
-		result = HYBRID_FUSION_WEIGHTED;
+		result = PGTURBOHYBRID_FUSION_WEIGHTED;
 	else
 		ereport(ERROR,
 				(errcode(ERRCODE_INVALID_PARAMETER_VALUE),
@@ -429,17 +429,17 @@ pgturbohybrid_query_constructor(PG_FUNCTION_ARGS)
 	{
 		vectorDatum = PG_DETOAST_DATUM_COPY(PG_GETARG_DATUM(0));
 		vectorBytes = VARSIZE_ANY(vectorDatum);
-		flags |= HYBRID_QUERY_FLAG_HAS_VECTOR;
+		flags |= PGTURBOHYBRID_QUERY_FLAG_HAS_VECTOR;
 	}
 
 	if (!PG_ARGISNULL(1))
 	{
 		tsqueryDatum = PG_DETOAST_DATUM_COPY(PG_GETARG_DATUM(1));
 		tsqueryBytes = VARSIZE_ANY(tsqueryDatum);
-		flags |= HYBRID_QUERY_FLAG_HAS_TSQUERY;
+		flags |= PGTURBOHYBRID_QUERY_FLAG_HAS_TSQUERY;
 	}
 
-	if ((flags & (HYBRID_QUERY_FLAG_HAS_VECTOR | HYBRID_QUERY_FLAG_HAS_TSQUERY)) == 0)
+	if ((flags & (PGTURBOHYBRID_QUERY_FLAG_HAS_VECTOR | PGTURBOHYBRID_QUERY_FLAG_HAS_TSQUERY)) == 0)
 		ereport(ERROR,
 				(errcode(ERRCODE_INVALID_PARAMETER_VALUE),
 				 errmsg("turbohybrid_query requires a vector_query or text_query")));
@@ -473,13 +473,13 @@ pgturbohybrid_query_constructor(PG_FUNCTION_ARGS)
 			ereport(ERROR,
 					(errcode(ERRCODE_INVALID_PARAMETER_VALUE),
 					 errmsg("alpha must be between 0 and 1")));
-		flags |= HYBRID_QUERY_FLAG_ALPHA_IS_SET;
+		flags |= PGTURBOHYBRID_QUERY_FLAG_ALPHA_IS_SET;
 	}
 
 	if (PG_ARGISNULL(6))
 	{
 		rrfK = pgturbohybrid_default_rrf_k;
-		flags |= HYBRID_QUERY_FLAG_RRF_K_DEFAULTED;
+		flags |= PGTURBOHYBRID_QUERY_FLAG_RRF_K_DEFAULTED;
 	}
 	else
 		rrfK = PG_GETARG_INT32(6);
@@ -488,7 +488,7 @@ pgturbohybrid_query_constructor(PG_FUNCTION_ARGS)
 	if (PG_ARGISNULL(7))
 	{
 		denseK = pgturbohybrid_default_dense_k;
-		flags |= HYBRID_QUERY_FLAG_DENSE_K_DEFAULTED;
+		flags |= PGTURBOHYBRID_QUERY_FLAG_DENSE_K_DEFAULTED;
 	}
 	else
 		denseK = PG_GETARG_INT32(7);
@@ -497,7 +497,7 @@ pgturbohybrid_query_constructor(PG_FUNCTION_ARGS)
 	if (PG_ARGISNULL(8))
 	{
 		bm25K = pgturbohybrid_default_bm25_k;
-		flags |= HYBRID_QUERY_FLAG_BM25_K_DEFAULTED;
+		flags |= PGTURBOHYBRID_QUERY_FLAG_BM25_K_DEFAULTED;
 	}
 	else
 		bm25K = PG_GETARG_INT32(8);
@@ -507,7 +507,7 @@ pgturbohybrid_query_constructor(PG_FUNCTION_ARGS)
 	{
 		finalK = PG_GETARG_INT32(9);
 		PgturbohybridQueryCheckPositiveInt("final_k", finalK);
-		flags |= HYBRID_QUERY_FLAG_FINAL_K_IS_SET;
+		flags |= PGTURBOHYBRID_QUERY_FLAG_FINAL_K_IS_SET;
 	}
 
 	if (PG_ARGISNULL(10))
@@ -516,14 +516,14 @@ pgturbohybrid_query_constructor(PG_FUNCTION_ARGS)
 				 errmsg("require_bm25_match cannot be null")));
 	requireBm25Match = PG_GETARG_BOOL(10);
 	if (requireBm25Match)
-		flags |= HYBRID_QUERY_FLAG_REQUIRE_BM25_MATCH;
+		flags |= PGTURBOHYBRID_QUERY_FLAG_REQUIRE_BM25_MATCH;
 
 	totalSize = PgturbohybridQueryVectorOffset() +
 		MAXALIGN(vectorBytes) +
 		MAXALIGN(tsqueryBytes);
 	result = palloc0(totalSize);
 	SET_VARSIZE(result, totalSize);
-	result->version = HYBRID_QUERY_VERSION;
+	result->version = PGTURBOHYBRID_QUERY_VERSION;
 	result->flags = flags;
 	result->fusion = fusion;
 	result->denseWeight = denseWeight;
@@ -549,14 +549,14 @@ pgturbohybrid_query_constructor(PG_FUNCTION_ARGS)
 
 	PgturbohybridQueryValidate(result);
 
-	PG_RETURN_HYBRID_QUERY_P(result);
+	PG_RETURN_PGTURBOHYBRID_QUERY_P(result);
 }
 
 Datum
 pgturbohybrid_l2_distance(PG_FUNCTION_ARGS)
 {
 	Vector	   *value = PG_GETARG_PGTURBOHYBRID_VECTOR_P(0);
-	PgturbohybridQueryHeader *query = PG_GETARG_HYBRID_QUERY_P(1);
+	PgturbohybridQueryHeader *query = PG_GETARG_PGTURBOHYBRID_QUERY_P(1);
 	Vector	   *vectorQuery;
 
 	PgturbohybridQueryValidate(query);
@@ -578,7 +578,7 @@ Datum
 pgturbohybrid_negative_inner_product(PG_FUNCTION_ARGS)
 {
 	Vector	   *value = PG_GETARG_PGTURBOHYBRID_VECTOR_P(0);
-	PgturbohybridQueryHeader *query = PG_GETARG_HYBRID_QUERY_P(1);
+	PgturbohybridQueryHeader *query = PG_GETARG_PGTURBOHYBRID_QUERY_P(1);
 	Vector	   *vectorQuery;
 
 	PgturbohybridQueryValidate(query);
@@ -600,7 +600,7 @@ Datum
 pgturbohybrid_cosine_distance(PG_FUNCTION_ARGS)
 {
 	Vector	   *value = PG_GETARG_PGTURBOHYBRID_VECTOR_P(0);
-	PgturbohybridQueryHeader *query = PG_GETARG_HYBRID_QUERY_P(1);
+	PgturbohybridQueryHeader *query = PG_GETARG_PGTURBOHYBRID_QUERY_P(1);
 	Vector	   *vectorQuery;
 
 	PgturbohybridQueryValidate(query);

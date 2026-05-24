@@ -27,11 +27,13 @@ This checklist records the local release gate for the standalone
 - [x] SQL regression tests pass locally
 - [ ] TAP tests pass locally
 - [ ] restart/WAL tests pass locally
-- [ ] Windows build passes
-- [ ] macOS matrix passes
+- [x] TAP tests pass in GitHub Actions
+- [x] restart/WAL tests pass in GitHub Actions
+- [x] Windows build passes in GitHub Actions
+- [x] macOS matrix passes in GitHub Actions
 - [x] local macOS build passes
-- [ ] Linux matrix passes
-- [ ] valgrind/UBSan passes where available
+- [x] Linux matrix passes in GitHub Actions
+- [x] valgrind/UBSan passes in GitHub Actions
 - [x] README is standalone and does not claim to be official pgvector
 - [x] benchmark results are reproducible but not committed as generated artifacts
 - [x] compatibility with pgvector versions is documented
@@ -41,10 +43,8 @@ This checklist records the local release gate for the standalone
 
 - Local TAP tests are present but skipped because this PostgreSQL PGXS
   installation does not include PostgreSQL TAP Perl modules.
-- Windows, Linux matrix, and valgrind/UBSan results still need to be proven by
-  GitHub Actions or equivalent platform runners.
 - Restart/WAL TAP behavior is implemented as a test target but is not locally
-  proven until TAP modules are available.
+  proven until TAP modules are available. It is covered by GitHub Actions.
 
 ## Remaining Risks
 
@@ -60,10 +60,12 @@ This checklist records the local release gate for the standalone
 
 ## Release Readiness Verdict
 
-Release is blocked until CI proves TAP/restart, Windows, Linux, and
-valgrind/UBSan coverage. The local PostgreSQL 16/macOS source build,
-installation, regression suite, benchmark smoke, package archive, and standalone
-SQL smoke all pass.
+Release remains alpha/WIP because the on-disk format and companion-extension
+ABI policy are not stable yet. GitHub Actions run 26353030378 proved TAP,
+restart/WAL, Windows, macOS, Linux, i386, and valgrind coverage for commit
+7eabb1229ee9c3c14cc83810836104fe995a6216. The local PostgreSQL 16/macOS source
+build, installation, regression suite, benchmark smoke, package archive, and
+standalone SQL smoke all pass.
 
 ## Exact Release Tag Name
 

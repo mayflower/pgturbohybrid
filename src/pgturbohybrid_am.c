@@ -51,8 +51,8 @@
 #endif
 
 static relopt_kind pgturbohybrid_relopt_kind;
-static ExecutorStart_hook_type prev_tqhybrid_ExecutorStart_hook = NULL;
-static ExecutorEnd_hook_type prev_tqhybrid_ExecutorEnd_hook = NULL;
+static ExecutorStart_hook_type prev_pgturbohybrid_ExecutorStart_hook = NULL;
+static ExecutorEnd_hook_type prev_pgturbohybrid_ExecutorEnd_hook = NULL;
 static List *pgturbohybrid_plannedstmt_stack = NIL;
 static PlannedStmt *pgturbohybrid_current_plannedstmt = NULL;
 
@@ -182,6 +182,7 @@ PgturbohybridBm25RuntimeStrategyName(int strategy)
 	}
 }
 
+#ifdef PGTURBOHYBRID_DEV_DIAGNOSTICS
 static const char *
 PgturbohybridBm25HybridBoundModeName(int mode)
 {
@@ -197,6 +198,7 @@ PgturbohybridBm25HybridBoundModeName(int mode)
 			return "unknown";
 	}
 }
+#endif
 
 static void
 PgturbohybridAssignSimd(bool newval, void *extra)
@@ -215,25 +217,25 @@ static void PgturbohybridXactCallback(XactEvent event, void *arg);
 static void PgturbohybridSubXactCallback(SubXactEvent event, SubTransactionId mySubid,
 								 SubTransactionId parentSubid, void *arg);
 
-static IndexBuildResult *tqhybridbuild(Relation heap, Relation index, IndexInfo *indexInfo);
-static void tqhybridbuildempty(Relation index);
-static bool tqhybridinsert(Relation index, Datum *values, bool *isnull, ItemPointer heap_tid, Relation heap, IndexUniqueCheck checkUnique
+static IndexBuildResult *pgturbohybridambuild(Relation heap, Relation index, IndexInfo *indexInfo);
+static void pgturbohybridambuildempty(Relation index);
+static bool pgturbohybridaminsert(Relation index, Datum *values, bool *isnull, ItemPointer heap_tid, Relation heap, IndexUniqueCheck checkUnique
 #if PG_VERSION_NUM >= 140000
 						   , bool indexUnchanged
 #endif
 						   , IndexInfo *indexInfo);
-static IndexBulkDeleteResult *tqhybridbulkdelete(IndexVacuumInfo *info, IndexBulkDeleteResult *stats, IndexBulkDeleteCallback callback, void *callback_state);
-static IndexBulkDeleteResult *tqhybridvacuumcleanup(IndexVacuumInfo *info, IndexBulkDeleteResult *stats);
-static IndexScanDesc tqhybridbeginscan(Relation index, int nkeys, int norderbys);
-static void tqhybridrescan(IndexScanDesc scan, ScanKey keys, int nkeys, ScanKey orderbys, int norderbys);
-static bool tqhybridgettuple(IndexScanDesc scan, ScanDirection dir);
-static void tqhybridendscan(IndexScanDesc scan);
-static void tqhybridcostestimate(PlannerInfo *root, IndexPath *path, double loop_count,
+static IndexBulkDeleteResult *pgturbohybridambulkdelete(IndexVacuumInfo *info, IndexBulkDeleteResult *stats, IndexBulkDeleteCallback callback, void *callback_state);
+static IndexBulkDeleteResult *pgturbohybridamvacuumcleanup(IndexVacuumInfo *info, IndexBulkDeleteResult *stats);
+static IndexScanDesc pgturbohybridambeginscan(Relation index, int nkeys, int norderbys);
+static void pgturbohybridamrescan(IndexScanDesc scan, ScanKey keys, int nkeys, ScanKey orderbys, int norderbys);
+static bool pgturbohybridamgettuple(IndexScanDesc scan, ScanDirection dir);
+static void pgturbohybridamendscan(IndexScanDesc scan);
+static void pgturbohybridamcostestimate(PlannerInfo *root, IndexPath *path, double loop_count,
 								 Cost *indexStartupCost, Cost *indexTotalCost,
 								 Selectivity *indexSelectivity, double *indexCorrelation,
 								 double *indexPages);
-static bytea *tqhybridoptions(Datum reloptions, bool validate);
-static bool tqhybridvalidate(Oid opclassoid);
+static bytea *pgturbohybridamoptions(Datum reloptions, bool validate);
+static bool pgturbohybridamvalidate(Oid opclassoid);
 static void PgturbohybridEnsureOrderByStorage(IndexScanDesc scan, MemoryContext scanCtx);
 static bool PgturbohybridPathHasFilter(IndexPath *path);
 static bool PgturbohybridFindConstQueryWalker(Node *node, void *context);
@@ -398,7 +400,9 @@ PgturbohybridElapsedUs(instr_time start)
 	return (uint64) INSTR_TIME_GET_MICROSEC(duration);
 }
 
+#ifdef PGTURBOHYBRID_DEV_DIAGNOSTICS
 static Datum PgturbohybridHybridLastScanStats(PG_FUNCTION_ARGS) pg_attribute_unused();
+#endif
 
 PlannedStmt *
 PgturbohybridCurrentPlannedStmt(void)
@@ -443,8 +447,8 @@ PgturbohybridClearPlannedStmtStack(void)
 static void
 PgturbohybridExecutorStartHook(QueryDesc *queryDesc, int eflags)
 {
-	if (prev_tqhybrid_ExecutorStart_hook)
-		prev_tqhybrid_ExecutorStart_hook(queryDesc, eflags);
+	if (prev_pgturbohybrid_ExecutorStart_hook)
+		prev_pgturbohybrid_ExecutorStart_hook(queryDesc, eflags);
 	else
 		standard_ExecutorStart(queryDesc, eflags);
 
@@ -456,8 +460,8 @@ PgturbohybridExecutorEndHook(QueryDesc *queryDesc)
 {
 	PgturbohybridPopPlannedStmt();
 
-	if (prev_tqhybrid_ExecutorEnd_hook)
-		prev_tqhybrid_ExecutorEnd_hook(queryDesc);
+	if (prev_pgturbohybrid_ExecutorEnd_hook)
+		prev_pgturbohybrid_ExecutorEnd_hook(queryDesc);
 	else
 		standard_ExecutorEnd(queryDesc);
 }
@@ -545,7 +549,7 @@ PgturbohybridDenseOrderBys(ScanKey orderbys, int norderbys)
 		if (denseOrderbys[i].sk_flags & SK_ISNULL)
 			continue;
 
-		query = DatumGetHybridQuery(denseOrderbys[i].sk_argument);
+		query = DatumGetPgturbohybridQuery(denseOrderbys[i].sk_argument);
 		PgturbohybridQueryValidate(query);
 
 		vectorQuery = PgturbohybridQueryGetVector(query);
@@ -673,7 +677,7 @@ PgturbohybridFinalTarget(PgturbohybridQueryHeader *query, int mergedCount)
 
 	if (pgturbohybrid_max_union_candidates > 0)
 		finalCount = Min(finalCount, pgturbohybrid_max_union_candidates);
-	if ((query->flags & HYBRID_QUERY_FLAG_FINAL_K_IS_SET) != 0)
+	if ((query->flags & PGTURBOHYBRID_QUERY_FLAG_FINAL_K_IS_SET) != 0)
 		finalCount = Min(finalCount, query->finalK);
 	return finalCount;
 }
@@ -775,20 +779,20 @@ PgturbohybridEffectiveQuery(PgturbohybridQueryHeader *query, int limit,
 	PgturbohybridQueryHeader *effective;
 	Size		querySize = VARSIZE_ANY(query);
 	bool		hasVector =
-		(query->flags & HYBRID_QUERY_FLAG_HAS_VECTOR) != 0;
+		(query->flags & PGTURBOHYBRID_QUERY_FLAG_HAS_VECTOR) != 0;
 	bool		hasTsQuery =
-		(query->flags & HYBRID_QUERY_FLAG_HAS_TSQUERY) != 0;
+		(query->flags & PGTURBOHYBRID_QUERY_FLAG_HAS_TSQUERY) != 0;
 
 	effective = MemoryContextAlloc(memoryContext, querySize);
 	memcpy(effective, query, querySize);
 
 	effective->denseK = PgturbohybridApplyAutoBudget(query->denseK, limit,
 												pgturbohybrid_auto_budget_min_dense_k,
-												(query->flags & HYBRID_QUERY_FLAG_DENSE_K_DEFAULTED) != 0,
+												(query->flags & PGTURBOHYBRID_QUERY_FLAG_DENSE_K_DEFAULTED) != 0,
 												hasVector);
 	effective->bm25K = PgturbohybridApplyAutoBudget(query->bm25K, limit,
 											   pgturbohybrid_auto_budget_min_bm25_k,
-											   (query->flags & HYBRID_QUERY_FLAG_BM25_K_DEFAULTED) != 0,
+											   (query->flags & PGTURBOHYBRID_QUERY_FLAG_BM25_K_DEFAULTED) != 0,
 											   hasTsQuery);
 
 	return effective;
@@ -797,7 +801,7 @@ PgturbohybridEffectiveQuery(PgturbohybridQueryHeader *query, int limit,
 static int
 PgturbohybridBudgetFinalTarget(PgturbohybridQueryHeader *query, int limit)
 {
-	if ((query->flags & HYBRID_QUERY_FLAG_FINAL_K_IS_SET) != 0 &&
+	if ((query->flags & PGTURBOHYBRID_QUERY_FLAG_FINAL_K_IS_SET) != 0 &&
 		query->finalK > 0)
 		return query->finalK;
 	if (limit > 0)
@@ -828,11 +832,11 @@ PgturbohybridMaybeApplyDenseBm25Budget(PgturbohybridQueryHeader *query,
 								  double *denseConfidence)
 {
 	bool		hasVector =
-		(query->flags & HYBRID_QUERY_FLAG_HAS_VECTOR) != 0;
+		(query->flags & PGTURBOHYBRID_QUERY_FLAG_HAS_VECTOR) != 0;
 	bool		hasTsQuery =
-		(query->flags & HYBRID_QUERY_FLAG_HAS_TSQUERY) != 0;
+		(query->flags & PGTURBOHYBRID_QUERY_FLAG_HAS_TSQUERY) != 0;
 	bool		bm25Defaulted =
-		(query->flags & HYBRID_QUERY_FLAG_BM25_K_DEFAULTED) != 0;
+		(query->flags & PGTURBOHYBRID_QUERY_FLAG_BM25_K_DEFAULTED) != 0;
 	int			finalTarget;
 	int			target;
 
@@ -865,7 +869,7 @@ PgturbohybridMaybeApplyDenseBm25Budget(PgturbohybridQueryHeader *query,
 			strlcpy(reason, "not_hybrid", reasonSize);
 		return;
 	}
-	if (query->fusion != HYBRID_FUSION_RRF)
+	if (query->fusion != PGTURBOHYBRID_FUSION_RRF)
 	{
 		if (reason != NULL && reasonSize > 0)
 			strlcpy(reason, "non_rrf", reasonSize);
@@ -918,11 +922,11 @@ PgturbohybridMaybeApplyBm25HybridBound(PgturbohybridQueryHeader *query, int dens
 								  double *threshold, bool *safe)
 {
 	bool		hasVector =
-		(query->flags & HYBRID_QUERY_FLAG_HAS_VECTOR) != 0;
+		(query->flags & PGTURBOHYBRID_QUERY_FLAG_HAS_VECTOR) != 0;
 	bool		hasTsQuery =
-		(query->flags & HYBRID_QUERY_FLAG_HAS_TSQUERY) != 0;
+		(query->flags & PGTURBOHYBRID_QUERY_FLAG_HAS_TSQUERY) != 0;
 	bool		bm25Defaulted =
-		(query->flags & HYBRID_QUERY_FLAG_BM25_K_DEFAULTED) != 0;
+		(query->flags & PGTURBOHYBRID_QUERY_FLAG_BM25_K_DEFAULTED) != 0;
 	int			finalTarget;
 	double		currentThreshold;
 	double		rawStopRank;
@@ -940,7 +944,7 @@ PgturbohybridMaybeApplyBm25HybridBound(PgturbohybridQueryHeader *query, int dens
 
 	if (pgturbohybrid_bm25_hybrid_bound == PGTURBOHYBRID_BM25_HYBRID_BOUND_OFF ||
 		!hasVector || !hasTsQuery ||
-		query->fusion != HYBRID_FUSION_RRF ||
+		query->fusion != PGTURBOHYBRID_FUSION_RRF ||
 		query->denseWeight <= 0.0 || query->bm25Weight <= 0.0 ||
 		query->bm25K <= 0 || denseCount <= 0)
 		return;
@@ -1106,7 +1110,7 @@ PgturbohybridCheckBm25OnlyExactRescore(PgturbohybridScanState *state,
 {
 	if (!pgturbohybrid_enable_exact_rescore_for_bm25_only)
 		return;
-	if ((state->query->flags & HYBRID_QUERY_FLAG_HAS_VECTOR) == 0)
+	if ((state->query->flags & PGTURBOHYBRID_QUERY_FLAG_HAS_VECTOR) == 0)
 		return;
 
 	for (int i = 0; i < count; i++)
@@ -1129,12 +1133,12 @@ PgturbohybridScoreResults(PgturbohybridScanState *state, PgturbohybridResult *re
 	double		maxDense = -get_float8_infinity();
 	double		minBm25 = get_float8_infinity();
 	double		maxBm25 = -get_float8_infinity();
-	double		alpha = (query->flags & HYBRID_QUERY_FLAG_ALPHA_IS_SET) != 0 ?
+	double		alpha = (query->flags & PGTURBOHYBRID_QUERY_FLAG_ALPHA_IS_SET) != 0 ?
 		query->alpha : 0.5;
 	uint16		fusion = pgturbohybrid_force_fusion != 0 ?
 		pgturbohybrid_force_fusion : query->fusion;
 
-	if (fusion == HYBRID_FUSION_WEIGHTED)
+	if (fusion == PGTURBOHYBRID_FUSION_WEIGHTED)
 	{
 		for (int i = 0; i < count; i++)
 		{
@@ -1153,7 +1157,7 @@ PgturbohybridScoreResults(PgturbohybridScanState *state, PgturbohybridResult *re
 
 	for (int i = 0; i < count; i++)
 	{
-		if (fusion == HYBRID_FUSION_WEIGHTED)
+		if (fusion == PGTURBOHYBRID_FUSION_WEIGHTED)
 		{
 			double		denseNorm = results[i].hasDense ?
 				PgturbohybridNormalize(results[i].denseSimilarity, minDense, maxDense) : 0.0;
@@ -1216,7 +1220,7 @@ PgturbohybridCollectScanResults(IndexScanDesc scan, PgturbohybridScanState *stat
 	autoBudgetLimit = PgturbohybridCurrentLimit();
 	scanQuery = PgturbohybridEffectiveQuery(originalQuery, autoBudgetLimit, so->tmpCtx);
 	state->query = scanQuery;
-	if ((scanQuery->flags & HYBRID_QUERY_FLAG_HAS_VECTOR) != 0 &&
+	if ((scanQuery->flags & PGTURBOHYBRID_QUERY_FLAG_HAS_VECTOR) != 0 &&
 		scanQuery->denseK > 0)
 	{
 		INSTR_TIME_SET_CURRENT(phaseStart);
@@ -1237,7 +1241,7 @@ PgturbohybridCollectScanResults(IndexScanDesc scan, PgturbohybridScanState *stat
 									  &bm25HybridBoundThreshold,
 									  &bm25HybridBoundSafe);
 
-	if ((scanQuery->flags & HYBRID_QUERY_FLAG_HAS_TSQUERY) != 0 &&
+	if ((scanQuery->flags & PGTURBOHYBRID_QUERY_FLAG_HAS_TSQUERY) != 0 &&
 		scanQuery->bm25K > 0)
 	{
 		PgturbohybridOptions *opts = (PgturbohybridOptions *) scan->indexRelation->rd_options;
@@ -1293,7 +1297,7 @@ PgturbohybridCollectScanResults(IndexScanDesc scan, PgturbohybridScanState *stat
 				if (!slots[i].used)
 					continue;
 				item = slots[i].result;
-				if ((scanQuery->flags & HYBRID_QUERY_FLAG_REQUIRE_BM25_MATCH) != 0 &&
+				if ((scanQuery->flags & PGTURBOHYBRID_QUERY_FLAG_REQUIRE_BM25_MATCH) != 0 &&
 					!item.hasBm25)
 					continue;
 			if (item.hasDense && item.hasBm25)
@@ -1358,7 +1362,7 @@ PgturbohybridCollectScanResults(IndexScanDesc scan, PgturbohybridScanState *stat
 				i++;
 			}
 
-			if ((scanQuery->flags & HYBRID_QUERY_FLAG_REQUIRE_BM25_MATCH) != 0 &&
+			if ((scanQuery->flags & PGTURBOHYBRID_QUERY_FLAG_REQUIRE_BM25_MATCH) != 0 &&
 				!item.hasBm25)
 				continue;
 			if (item.hasDense && item.hasBm25)
@@ -1395,7 +1399,7 @@ PgturbohybridCollectScanResults(IndexScanDesc scan, PgturbohybridScanState *stat
 	lastStats.denseCandidatesRequested = originalQuery->denseK;
 	lastStats.denseCandidatesEffective = scanQuery->denseK;
 	lastStats.denseKDefaulted =
-		(originalQuery->flags & HYBRID_QUERY_FLAG_DENSE_K_DEFAULTED) != 0;
+		(originalQuery->flags & PGTURBOHYBRID_QUERY_FLAG_DENSE_K_DEFAULTED) != 0;
 	lastStats.denseCandidates = denseCount;
 	lastStats.denseEffectiveResultTarget = denseStats.effectiveResultTarget;
 	lastStats.denseEffectiveSearchEf = denseStats.effectiveSearchEf;
@@ -1408,7 +1412,7 @@ PgturbohybridCollectScanResults(IndexScanDesc scan, PgturbohybridScanState *stat
 	lastStats.bm25CandidatesRequested = originalQuery->bm25K;
 	lastStats.bm25CandidatesEffective = scanQuery->bm25K;
 	lastStats.bm25KDefaulted =
-		(originalQuery->flags & HYBRID_QUERY_FLAG_BM25_K_DEFAULTED) != 0;
+		(originalQuery->flags & PGTURBOHYBRID_QUERY_FLAG_BM25_K_DEFAULTED) != 0;
 	lastStats.bm25Candidates = bm25Count;
 	strlcpy(lastStats.bm25BudgetReason, bm25BudgetReason,
 			sizeof(lastStats.bm25BudgetReason));
@@ -1422,7 +1426,7 @@ PgturbohybridCollectScanResults(IndexScanDesc scan, PgturbohybridScanState *stat
 	lastStats.rrfKRequested = originalQuery->rrfK;
 	lastStats.rrfKEffective = scanQuery->rrfK;
 	lastStats.rrfKDefaulted =
-		(originalQuery->flags & HYBRID_QUERY_FLAG_RRF_K_DEFAULTED) != 0;
+		(originalQuery->flags & PGTURBOHYBRID_QUERY_FLAG_RRF_K_DEFAULTED) != 0;
 	lastStats.autoBudgetLimit = autoBudgetLimit;
 	lastStats.unionCandidates = mergedCount;
 	lastStats.finalResults = finalCount;
@@ -1510,7 +1514,7 @@ PgturbohybridCollectScanResults(IndexScanDesc scan, PgturbohybridScanState *stat
 	}
 
 static IndexBuildResult *
-tqhybridbuild(Relation heap, Relation index, IndexInfo *indexInfo)
+pgturbohybridambuild(Relation heap, Relation index, IndexInfo *indexInfo)
 {
 	IndexBuildResult *result;
 
@@ -1523,14 +1527,14 @@ tqhybridbuild(Relation heap, Relation index, IndexInfo *indexInfo)
 }
 
 static void
-tqhybridbuildempty(Relation index)
+pgturbohybridambuildempty(Relation index)
 {
 	PgturbohybridValidateIndex(index, NULL);
 	pgturbohybridbuildempty(index);
 }
 
 static bool
-tqhybridinsert(Relation index, Datum *values, bool *isnull, ItemPointer heap_tid, Relation heap, IndexUniqueCheck checkUnique
+pgturbohybridaminsert(Relation index, Datum *values, bool *isnull, ItemPointer heap_tid, Relation heap, IndexUniqueCheck checkUnique
 #if PG_VERSION_NUM >= 140000
 			   , bool indexUnchanged
 #endif
@@ -1578,7 +1582,7 @@ tqhybridinsert(Relation index, Datum *values, bool *isnull, ItemPointer heap_tid
 }
 
 static IndexBulkDeleteResult *
-tqhybridbulkdelete(IndexVacuumInfo *info, IndexBulkDeleteResult *stats, IndexBulkDeleteCallback callback, void *callback_state)
+pgturbohybridambulkdelete(IndexVacuumInfo *info, IndexBulkDeleteResult *stats, IndexBulkDeleteCallback callback, void *callback_state)
 {
 	IndexBulkDeleteResult *result;
 
@@ -1594,7 +1598,7 @@ tqhybridbulkdelete(IndexVacuumInfo *info, IndexBulkDeleteResult *stats, IndexBul
 }
 
 static IndexBulkDeleteResult *
-tqhybridvacuumcleanup(IndexVacuumInfo *info, IndexBulkDeleteResult *stats)
+pgturbohybridamvacuumcleanup(IndexVacuumInfo *info, IndexBulkDeleteResult *stats)
 {
 	IndexBulkDeleteResult *result;
 
@@ -1611,7 +1615,7 @@ tqhybridvacuumcleanup(IndexVacuumInfo *info, IndexBulkDeleteResult *stats)
 }
 
 static IndexScanDesc
-tqhybridbeginscan(Relation index, int nkeys, int norderbys)
+pgturbohybridambeginscan(Relation index, int nkeys, int norderbys)
 {
 	IndexScanDesc scan;
 
@@ -1622,7 +1626,7 @@ tqhybridbeginscan(Relation index, int nkeys, int norderbys)
 }
 
 static void
-tqhybridrescan(IndexScanDesc scan, ScanKey keys, int nkeys, ScanKey orderbys, int norderbys)
+pgturbohybridamrescan(IndexScanDesc scan, ScanKey keys, int nkeys, ScanKey orderbys, int norderbys)
 {
 	ScanKey		denseOrderbys = PgturbohybridDenseOrderBys(orderbys, norderbys);
 	PgturbohybridQueryHeader *hybridQuery = NULL;
@@ -1634,8 +1638,8 @@ tqhybridrescan(IndexScanDesc scan, ScanKey keys, int nkeys, ScanKey orderbys, in
 	{
 		hybridQuery = (PgturbohybridQueryHeader *) PG_DETOAST_DATUM_COPY(orderbys[0].sk_argument);
 		PgturbohybridQueryValidate(hybridQuery);
-		hasTextQuery = (hybridQuery->flags & HYBRID_QUERY_FLAG_HAS_TSQUERY) != 0;
-		hasVectorQuery = (hybridQuery->flags & HYBRID_QUERY_FLAG_HAS_VECTOR) != 0;
+		hasTextQuery = (hybridQuery->flags & PGTURBOHYBRID_QUERY_FLAG_HAS_TSQUERY) != 0;
+		hasVectorQuery = (hybridQuery->flags & PGTURBOHYBRID_QUERY_FLAG_HAS_VECTOR) != 0;
 	}
 
 	pgturbohybridrescan(scan, keys, nkeys,
@@ -1665,7 +1669,7 @@ tqhybridrescan(IndexScanDesc scan, ScanKey keys, int nkeys, ScanKey orderbys, in
 }
 
 static bool
-tqhybridgettuple(IndexScanDesc scan, ScanDirection dir)
+pgturbohybridamgettuple(IndexScanDesc scan, ScanDirection dir)
 {
 	PgturbohybridGraphScanOpaque so = (PgturbohybridGraphScanOpaque) scan->opaque;
 	PgturbohybridScanState *state = so != NULL ?
@@ -1702,7 +1706,7 @@ tqhybridgettuple(IndexScanDesc scan, ScanDirection dir)
 }
 
 static void
-tqhybridendscan(IndexScanDesc scan)
+pgturbohybridamendscan(IndexScanDesc scan)
 {
 	pgturbohybridendscan(scan);
 }
@@ -1790,7 +1794,7 @@ PgturbohybridFindConstQueryWalker(Node *node, void *context)
 		hybridQueryOid = PgturbohybridQueryTypeOid();
 		if (OidIsValid(hybridQueryOid) && constant->consttype == hybridQueryOid)
 		{
-			*query = DatumGetHybridQuery(constant->constvalue);
+			*query = DatumGetPgturbohybridQuery(constant->constvalue);
 			PgturbohybridQueryValidate(*query);
 			return true;
 		}
@@ -1834,7 +1838,7 @@ PgturbohybridEstimateTsQueryTerms(TSQuery query)
 }
 
 static void
-tqhybridcostestimate(PlannerInfo *root, IndexPath *path, double loop_count,
+pgturbohybridamcostestimate(PlannerInfo *root, IndexPath *path, double loop_count,
 					 Cost *indexStartupCost, Cost *indexTotalCost,
 					 Selectivity *indexSelectivity, double *indexCorrelation,
 					 double *indexPages)
@@ -1899,7 +1903,7 @@ tqhybridcostestimate(PlannerInfo *root, IndexPath *path, double loop_count,
 	{
 		denseK = PgturbohybridQueryGetVector(query) != NULL ? query->denseK : 0;
 		bm25K = PgturbohybridQueryGetTsQuery(query) != NULL ? query->bm25K : 0;
-		finalK = (query->flags & HYBRID_QUERY_FLAG_FINAL_K_IS_SET) != 0 ?
+		finalK = (query->flags & PGTURBOHYBRID_QUERY_FLAG_FINAL_K_IS_SET) != 0 ?
 			query->finalK : Max(denseK + bm25K, 1);
 		termCount = PgturbohybridEstimateTsQueryTerms(PgturbohybridQueryGetTsQuery(query));
 	}
@@ -1975,7 +1979,7 @@ tqhybridcostestimate(PlannerInfo *root, IndexPath *path, double loop_count,
 }
 
 static bytea *
-tqhybridoptions(Datum reloptions, bool validate)
+pgturbohybridamoptions(Datum reloptions, bool validate)
 {
 #if PG_VERSION_NUM >= 180000 && PG_VERSION_NUM < 190000
 #define PGTURBOHYBRID_RELOPT_PARSE(name, type, field) \
@@ -2015,7 +2019,7 @@ tqhybridoptions(Datum reloptions, bool validate)
 		opts->bm25ImpactMinDf = 1024;
 		opts->bm25ImpactHeadK = 2048;
 		opts->bm25DeltaCompactionThreshold = 25;
-		opts->hybridDefaultFusion = HYBRID_FUSION_RRF;
+		opts->hybridDefaultFusion = PGTURBOHYBRID_FUSION_RRF;
 		opts->hybridDefaultDenseK = PGTURBOHYBRID_DEFAULT_DENSE_K;
 		opts->hybridDefaultBm25K = PGTURBOHYBRID_DEFAULT_BM25_K;
 		opts->hybridDefaultRrfK = PGTURBOHYBRID_DEFAULT_RRF_K;
@@ -2032,7 +2036,7 @@ tqhybridoptions(Datum reloptions, bool validate)
 }
 
 static bool
-tqhybridvalidate(Oid opclassoid)
+pgturbohybridamvalidate(Oid opclassoid)
 {
 	HeapTuple	opclasstuple;
 	Form_pg_opclass opclass;
@@ -2061,9 +2065,9 @@ void
 PgturbohybridInit(void)
 {
 	pgturbohybrid_relopt_kind = add_reloption_kind();
-	prev_tqhybrid_ExecutorStart_hook = ExecutorStart_hook;
+	prev_pgturbohybrid_ExecutorStart_hook = ExecutorStart_hook;
 	ExecutorStart_hook = PgturbohybridExecutorStartHook;
-	prev_tqhybrid_ExecutorEnd_hook = ExecutorEnd_hook;
+	prev_pgturbohybrid_ExecutorEnd_hook = ExecutorEnd_hook;
 	ExecutorEnd_hook = PgturbohybridExecutorEndHook;
 	RegisterXactCallback(PgturbohybridXactCallback, NULL);
 	RegisterSubXactCallback(PgturbohybridSubXactCallback, NULL);
@@ -2107,6 +2111,7 @@ PgturbohybridInit(void)
 	MarkGUCPrefixReserved("turbohybrid");
 }
 
+#ifdef PGTURBOHYBRID_DEV_DIAGNOSTICS
 static Datum
 PgturbohybridHybridLastScanStats(PG_FUNCTION_ARGS)
 {
@@ -2351,6 +2356,7 @@ PgturbohybridHybridLastScanStats(PG_FUNCTION_ARGS)
 
 	PG_RETURN_DATUM(DirectFunctionCall1(jsonb_in, CStringGetDatum(json.data)));
 }
+#endif
 
 FUNCTION_PREFIX PG_FUNCTION_INFO_V1(pgturbohybrid_handler);
 Datum
@@ -2389,31 +2395,31 @@ pgturbohybrid_handler(PG_FUNCTION_ARGS)
 	amroutine->amparallelvacuumoptions = VACUUM_OPTION_PARALLEL_BULKDEL;
 	amroutine->amkeytype = InvalidOid;
 
-	amroutine->ambuild = tqhybridbuild;
-	amroutine->ambuildempty = tqhybridbuildempty;
-	amroutine->aminsert = tqhybridinsert;
+	amroutine->ambuild = pgturbohybridambuild;
+	amroutine->ambuildempty = pgturbohybridambuildempty;
+	amroutine->aminsert = pgturbohybridaminsert;
 #if PG_VERSION_NUM >= 170000
 	amroutine->aminsertcleanup = NULL;
 #endif
-	amroutine->ambulkdelete = tqhybridbulkdelete;
-	amroutine->amvacuumcleanup = tqhybridvacuumcleanup;
+	amroutine->ambulkdelete = pgturbohybridambulkdelete;
+	amroutine->amvacuumcleanup = pgturbohybridamvacuumcleanup;
 	amroutine->amcanreturn = NULL;
-	amroutine->amcostestimate = tqhybridcostestimate;
+	amroutine->amcostestimate = pgturbohybridamcostestimate;
 #if PG_VERSION_NUM >= 180000
 	amroutine->amgettreeheight = NULL;
 #endif
-	amroutine->amoptions = tqhybridoptions;
+	amroutine->amoptions = pgturbohybridamoptions;
 	amroutine->amproperty = NULL;
 	amroutine->ambuildphasename = NULL;
-	amroutine->amvalidate = tqhybridvalidate;
+	amroutine->amvalidate = pgturbohybridamvalidate;
 #if PG_VERSION_NUM >= 140000
 	amroutine->amadjustmembers = NULL;
 #endif
-	amroutine->ambeginscan = tqhybridbeginscan;
-	amroutine->amrescan = tqhybridrescan;
-	amroutine->amgettuple = tqhybridgettuple;
+	amroutine->ambeginscan = pgturbohybridambeginscan;
+	amroutine->amrescan = pgturbohybridamrescan;
+	amroutine->amgettuple = pgturbohybridamgettuple;
 	amroutine->amgetbitmap = NULL;
-	amroutine->amendscan = tqhybridendscan;
+	amroutine->amendscan = pgturbohybridamendscan;
 	amroutine->ammarkpos = NULL;
 	amroutine->amrestrpos = NULL;
 	amroutine->amestimateparallelscan = NULL;
