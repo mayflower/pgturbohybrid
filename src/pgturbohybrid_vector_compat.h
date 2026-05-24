@@ -33,6 +33,13 @@ StaticAssertDecl(offsetof(Vector, unused) == sizeof(int32) + sizeof(int16),
 StaticAssertDecl(offsetof(Vector, x) == sizeof(int32) + sizeof(int16) + sizeof(int16),
 				 "pgvector vector data offset changed");
 
+/* Export marker for PostgreSQL versions that require explicit symbol export. */
+#if PG_VERSION_NUM >= 160000
+#define FUNCTION_PREFIX
+#else
+#define FUNCTION_PREFIX PGDLLEXPORT
+#endif
+
 #define PG_GETARG_PGTURBOHYBRID_VECTOR_P(_n) \
 	PgturbohybridDatumGetVector(PG_GETARG_DATUM(_n))
 #define PG_RETURN_PGTURBOHYBRID_VECTOR_P(_x) PG_RETURN_POINTER(_x)
@@ -47,13 +54,6 @@ double		PgturbohybridL2Distance(const Vector *a, const Vector *b);
 double		PgturbohybridNegativeInnerProduct(const Vector *a, const Vector *b);
 double		PgturbohybridCosineDistance(const Vector *a, const Vector *b);
 double		PgturbohybridVectorNorm(const Vector *vector);
-Datum		pgturbohybrid_l2_normalize(PG_FUNCTION_ARGS);
-
-/* Export marker for PostgreSQL versions that require explicit symbol export. */
-#if PG_VERSION_NUM >= 160000
-#define FUNCTION_PREFIX
-#else
-#define FUNCTION_PREFIX PGDLLEXPORT
-#endif
+FUNCTION_PREFIX Datum pgturbohybrid_l2_normalize(PG_FUNCTION_ARGS);
 
 #endif
