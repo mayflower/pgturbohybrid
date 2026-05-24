@@ -61,19 +61,6 @@ jobs:
       - name: Run TAP tests
         run: make prove_installcheck
 
-      - name: Run benchmark smoke
-        if: matrix.postgres == 18 && matrix.pgvector_ref == 'v0.8.2'
-        run: |
-          createdb pgturbohybrid_benchmark
-          python3 benchmarks/suite.py run-system-synthetic \
-            --database pgturbohybrid_benchmark \
-            --rows 100 \
-            --dimensions 8 \
-            --runs 1 \
-            --warmup 0 \
-            --output /tmp/pgturbohybrid_benchmark_smoke.json
-          dropdb pgturbohybrid_benchmark
-
       - uses: actions/upload-artifact@v4
         if: failure()
         with:

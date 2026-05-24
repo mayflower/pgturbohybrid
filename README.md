@@ -160,29 +160,11 @@ register a custom resource manager and does not require
 
 ## Benchmarks
 
-Benchmark instructions and reproducible baselines live in
-[benchmarks/README.md](benchmarks/README.md). Generated result JSON and
-Markdown files should be written outside the repository or under ignored
-benchmark output directories.
-
-Fresh standalone benchmark, run on 2026-05-24 with PostgreSQL 16.13,
-pgvector 0.8.2, `pgturbohybrid` 0.1.0, Apple M4, 10 cores, 24 GiB memory,
-100,000 synthetic rows, 1,536 dimensions, `dense_k = 100`, `bm25_k = 100`,
-`final_k = 10`, 5 warmup runs, and 30 measured runs:
-
-| Method | Build s | Index MiB | p50 ms | p95 ms | p99 ms | QPS |
-|---|---:|---:|---:|---:|---:|---:|
-| pgvector HNSW + PostgreSQL FTS SQL RRF | 17.692 | 191.3 | 18.407 | 21.675 | 22.408 | 53.26 |
-| pgturbohybrid, 4-bit, exact storage on | 132.511 | 687.0 | 41.834 | 51.643 | 59.286 | 23.22 |
-| pgturbohybrid, 4-bit, exact storage off | 166.342 | 96.5 | 51.655 | 64.689 | 72.456 | 19.25 |
-
-The baseline plan used pgvector HNSW for the dense branch and a GIN index for
-PostgreSQL full-text search. The pgturbohybrid plans used the standalone
-`turbohybrid` access method. This synthetic run is a systems benchmark, not a
-RAG quality benchmark; it reports latency, build time, and index size only.
-Here, `exact_storage = off` cuts index size by about 49.5% versus the HNSW plus
-GIN baseline, but current standalone pgturbohybrid latency is slower than the
-baseline.
+Benchmark methodology and reproducibility requirements live in
+[benchmarks/README.md](benchmarks/README.md). Performance claims should use
+real embedding datasets with relevance labels, not synthetic vector generators.
+Generated result JSON and Markdown files should be written outside the
+repository or under ignored benchmark output directories.
 
 ## Compatibility Notes
 

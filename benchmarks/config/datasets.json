@@ -73,15 +73,6 @@
       "metrics": ["context_recall@10", "answer_exact_match", "answer_f1", "groundedness"]
     },
     {
-      "name": "synthetic-postgres-systems",
-      "layer": "systems",
-      "family": "PostgreSQL synthetic",
-      "scale": "configurable",
-      "purpose": "Fast branch-local systems benchmark for hot/cold latency, QPS, build, storage, WAL, mutation, vacuum, and filter selectivity.",
-      "inputs": ["generated table"],
-      "metrics": ["p50_ms", "p95_ms", "p99_ms", "qps", "build_ms", "index_bytes", "wal_bytes", "vacuum_ms"]
-    },
-    {
       "name": "stackoverflow-latency",
       "layer": "systems",
       "family": "Stack Overflow",
