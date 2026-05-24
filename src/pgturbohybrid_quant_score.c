@@ -2957,6 +2957,14 @@ PgturbohybridGraphExactHighdimEntryDistance(PgturbohybridGraphScanOpaque so, Dat
 	return true;
 }
 
+static inline int
+PgturbohybridGraphPopcount8(uint8 value)
+{
+	value = value - ((value >> 1) & 0x55);
+	value = (value & 0x33) + ((value >> 2) & 0x33);
+	return (value + (value >> 4)) & 0x0F;
+}
+
 static int
 PgturbohybridGraphBit1PopcntRawCodes(const uint8 *a, const uint8 *b, int dim)
 {
@@ -2965,13 +2973,13 @@ PgturbohybridGraphBit1PopcntRawCodes(const uint8 *a, const uint8 *b, int dim)
 	int			same = 0;
 
 	for (int i = 0; i < fullBytes; i++)
-		same += pg_number_of_ones[(uint8) ~(a[i] ^ b[i])];
+		same += PgturbohybridGraphPopcount8((uint8) ~(a[i] ^ b[i]));
 
 	if (tailBits != 0)
 	{
 		uint8		mask = (uint8) ((1U << tailBits) - 1U);
 
-		same += pg_number_of_ones[(uint8) (~(a[fullBytes] ^ b[fullBytes]) & mask)];
+		same += PgturbohybridGraphPopcount8((uint8) (~(a[fullBytes] ^ b[fullBytes]) & mask));
 	}
 
 	return (2 * same) - dim;
@@ -3020,7 +3028,7 @@ PgturbohybridGraphAsymBit1ScalarRawScore(const PgturbohybridGraphTqQuery *tq, co
 			int			pop = 0;
 
 			for (int i = 0; i < PGTURBOHYBRID_QUERY_ASYM_BLOCK_BYTES_LOCAL; i++)
-				pop += pg_number_of_ones[(uint8) (dataBlock[i] & plane[i])];
+				pop += PgturbohybridGraphPopcount8((uint8) (dataBlock[i] & plane[i]));
 
 			if (b == BITS - 1)
 				vDotQ -= (int64) (1 << (BITS - 1)) * pop;
@@ -3044,7 +3052,7 @@ PgturbohybridGraphAsymBit1ScalarRawScore(const PgturbohybridGraphTqQuery *tq, co
 			int			pop = 0;
 
 			for (int i = 0; i < PGTURBOHYBRID_QUERY_ASYM_BLOCK_BYTES_LOCAL; i++)
-				pop += pg_number_of_ones[(uint8) (dataScratch[i] & plane[i])];
+				pop += PgturbohybridGraphPopcount8((uint8) (dataScratch[i] & plane[i]));
 
 			if (b == BITS - 1)
 				vDotQ -= (int64) (1 << (BITS - 1)) * pop;

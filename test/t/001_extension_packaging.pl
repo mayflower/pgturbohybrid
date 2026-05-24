@@ -98,7 +98,12 @@ is($node->safe_psql('pgturbohybrid_create', q(
 		NOT EXISTS (SELECT 1 FROM pg_am WHERE amname = 'turbohybrid'),
 		NOT EXISTS (SELECT 1 FROM pg_proc WHERE proname LIKE 'pgturbohybrid%'),
 		NOT EXISTS (SELECT 1 FROM pg_opclass WHERE opcname LIKE '%pgturbohybrid%'),
-		NOT EXISTS (SELECT 1 FROM pg_operator WHERE oprname IN ('<~>', '<~->', '<~#>')),
+		NOT EXISTS (
+			SELECT 1
+			FROM pg_operator o
+			JOIN pg_proc p ON p.oid = o.oprcode
+			WHERE p.proname LIKE 'pgturbohybrid%'
+		),
 		EXISTS (SELECT 1 FROM pg_extension WHERE extname = 'vector'),
 		to_regtype('vector') IS NOT NULL,
 		('[1,2,3]'::vector <-> '[1,2,4]'::vector) = 1
