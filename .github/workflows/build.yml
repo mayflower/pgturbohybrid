@@ -8,6 +8,8 @@ jobs:
   linux:
     name: linux pg${{ matrix.postgres }} pgvector-${{ matrix.pgvector_ref }}
     runs-on: ubuntu-24.04
+    env:
+      PG_CONFIG: /usr/lib/postgresql/${{ matrix.postgres }}/bin/pg_config
     strategy:
       fail-fast: false
       matrix:
@@ -235,7 +237,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        postgres: [16, 17]
+        postgres: [17]
         pgvector_ref: [v0.8.2, master]
     steps:
       - uses: actions/checkout@v4
@@ -249,8 +251,8 @@ jobs:
         env:
           PGVECTOR_REF: ${{ matrix.pgvector_ref }}
         run: |
-          git clone --depth 1 --branch %PGVECTOR_REF% https://github.com/pgvector/pgvector.git %TEMP%\pgvector
-          cd %TEMP%\pgvector
+          git clone --depth 1 --branch %PGVECTOR_REF% https://github.com/pgvector/pgvector.git "%RUNNER_TEMP%\pgvector-upstream"
+          cd /d "%RUNNER_TEMP%\pgvector-upstream"
           call "C:\Program Files\Microsoft Visual Studio\2022\Enterprise\VC\Auxiliary\Build\vcvars64.bat" && ^
           nmake /NOLOGO /F Makefile.win && ^
           nmake /NOLOGO /F Makefile.win install
