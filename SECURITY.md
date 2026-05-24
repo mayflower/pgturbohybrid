@@ -4,6 +4,13 @@
 trust and only into PostgreSQL installations where loading C extensions is an
 accepted operational risk.
 
+## Reporting Vulnerabilities
+
+Report security issues privately to the maintainers before opening a public
+issue. If this code is published under the Mayflower organization, use the
+repository's GitHub security advisory workflow or contact the repository owner
+listed on GitHub.
+
 ## Extension SQL
 
 - The install script creates only extension objects.

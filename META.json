@@ -22,7 +22,7 @@
   },
   "resources": {
     "repository": {
-      "url": "https://github.com/mayflower/pgvector.git"
+      "url": "https://github.com/mayflower/pgturbohybrid.git"
     }
   }
 }

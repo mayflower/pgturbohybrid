@@ -31,8 +31,8 @@ typedef Pointer Item;
 #define PGTURBOHYBRID_GRAPH_TYPE_INFO_PROC 3
 
 #define PGTURBOHYBRID_VERSION	1
-#define PGTURBOHYBRID_MAGIC_NUMBER 0xA953A953
-#define PGTURBOHYBRID_PAGE_ID	0xFF90
+#define PGTURBOHYBRID_MAGIC_NUMBER 0x54525944
+#define PGTURBOHYBRID_PAGE_ID	0x5459
 #define PGTURBOHYBRID_GRAPH_VERSION PGTURBOHYBRID_VERSION
 #define PGTURBOHYBRID_GRAPH_MAGIC_NUMBER PGTURBOHYBRID_MAGIC_NUMBER
 #define PGTURBOHYBRID_GRAPH_PAGE_ID PGTURBOHYBRID_PAGE_ID
@@ -461,16 +461,16 @@ typedef struct PgturbohybridGraphShared
 	PgturbohybridGraphGraph	graphData;
 }			PgturbohybridGraphShared;
 
-#define ParallelTableScanFromHnswShared(shared) \
+#define ParallelTableScanFromPgturbohybridGraphShared(shared) \
 	(ParallelTableScanDesc) ((char *) (shared) + BUFFERALIGN(sizeof(PgturbohybridGraphShared)))
 
 typedef struct PgturbohybridGraphLeader
 {
 	ParallelContext *pcxt;
 	int			nparticipanttuplesorts;
-	PgturbohybridGraphShared *hnswshared;
+	PgturbohybridGraphShared *graphShared;
 	Snapshot	snapshot;
-	char	   *hnswarea;
+	char	   *graphArea;
 }			PgturbohybridGraphLeader;
 
 typedef struct PgturbohybridGraphAllocator
@@ -587,9 +587,9 @@ typedef struct PgturbohybridGraphBuildState
 	PgturbohybridGraphAllocator allocator;
 
 	/* Parallel builds */
-	PgturbohybridGraphLeader *hnswleader;
-	PgturbohybridGraphShared *hnswshared;
-	char	   *hnswarea;
+	PgturbohybridGraphLeader *graphLeader;
+	PgturbohybridGraphShared *graphShared;
+	char	   *graphArea;
 }			PgturbohybridGraphBuildState;
 
 typedef struct PgturbohybridGraphMetaPageData
@@ -852,11 +852,11 @@ const		PgturbohybridGraphTypeInfo *PgturbohybridGraphGetTypeInfo(Relation index)
 PGDLLEXPORT void PgturbohybridParallelBuildMain(dsm_segment *seg, shm_toc *toc);
 
 /* Index access methods */
-IndexBuildResult *hnswbuild(Relation heap, Relation index, IndexInfo *indexInfo);
+IndexBuildResult *pgturbohybrid_graph_build(Relation heap, Relation index, IndexInfo *indexInfo);
 IndexBuildResult *pgturbohybridbuild(Relation heap, Relation index, IndexInfo *indexInfo);
-void		hnswbuildempty(Relation index);
+void		pgturbohybrid_graph_build_empty(Relation index);
 void		pgturbohybridbuildempty(Relation index);
-bool		hnswinsert(Relation index, Datum *values, bool *isnull, ItemPointer heap_tid, Relation heap, IndexUniqueCheck checkUnique
+bool		pgturbohybrid_graph_insert(Relation index, Datum *values, bool *isnull, ItemPointer heap_tid, Relation heap, IndexUniqueCheck checkUnique
 #if PG_VERSION_NUM >= 140000
 					   ,bool indexUnchanged
 #endif
@@ -868,15 +868,15 @@ bool		pgturbohybridinsert(Relation index, Datum *values, bool *isnull, ItemPoint
 #endif
 					   ,IndexInfo *indexInfo
 );
-IndexBulkDeleteResult *hnswbulkdelete(IndexVacuumInfo *info, IndexBulkDeleteResult *stats, IndexBulkDeleteCallback callback, void *callback_state);
-IndexBulkDeleteResult *hnswvacuumcleanup(IndexVacuumInfo *info, IndexBulkDeleteResult *stats);
-IndexScanDesc hnswbeginscan(Relation index, int nkeys, int norderbys);
+IndexBulkDeleteResult *pgturbohybrid_graph_bulkdelete(IndexVacuumInfo *info, IndexBulkDeleteResult *stats, IndexBulkDeleteCallback callback, void *callback_state);
+IndexBulkDeleteResult *pgturbohybrid_graph_vacuum_cleanup(IndexVacuumInfo *info, IndexBulkDeleteResult *stats);
+IndexScanDesc pgturbohybrid_graph_begin_scan(Relation index, int nkeys, int norderbys);
 IndexScanDesc pgturbohybridbeginscan(Relation index, int nkeys, int norderbys);
-void		hnswrescan(IndexScanDesc scan, ScanKey keys, int nkeys, ScanKey orderbys, int norderbys);
+void		pgturbohybrid_graph_rescan(IndexScanDesc scan, ScanKey keys, int nkeys, ScanKey orderbys, int norderbys);
 void		pgturbohybridrescan(IndexScanDesc scan, ScanKey keys, int nkeys, ScanKey orderbys, int norderbys);
-bool		hnswgettuple(IndexScanDesc scan, ScanDirection dir);
+bool		pgturbohybrid_graph_get_tuple(IndexScanDesc scan, ScanDirection dir);
 bool		pgturbohybridgettuple(IndexScanDesc scan, ScanDirection dir);
-void		hnswendscan(IndexScanDesc scan);
+void		pgturbohybrid_graph_end_scan(IndexScanDesc scan);
 void		pgturbohybridendscan(IndexScanDesc scan);
 
 IndexBuildResult *tqgraphbuild(Relation heap, Relation index, IndexInfo *indexInfo);

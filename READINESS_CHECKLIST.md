@@ -55,8 +55,8 @@ This checklist records the local release gate for the standalone
 - The current smoke query forces index usage with `SET enable_seqscan = off`
   because scalar hybrid text distance intentionally rejects text-aware fallback
   evaluation.
-- The source archive target packages the current non-ignored working tree. A
-  tagged release should be built from a clean committed tree.
+- The source archive target requires a clean committed tree and packages only
+  files tracked at `HEAD`.
 
 ## Release Readiness Verdict
 
@@ -132,11 +132,15 @@ DROP EXTENSION vector;
 ## Local Validation Run
 
 - `PGVECTOR_REF=v0.8.2 ./scripts/install-pgvector.sh`: passed.
-- `make clean && make && make install && make installcheck`: passed.
+- `make clean && make PG_CFLAGS='-DUSE_ASSERT_CHECKING -Wall -Wextra -Werror
+  -Wno-unused-parameter -Wno-sign-compare'`: passed.
+- `make install && make installcheck`: passed.
 - `make prove_installcheck`: TAP tests discovered but skipped with `NOTESTS`
   because PostgreSQL TAP modules are unavailable in this local PGXS install.
 - Standalone smoke SQL in a clean database: passed.
+- `make clean && make SIMD_BUILD=none`: passed.
 - `python3 benchmarks/suite.py run-system-synthetic --rows 100 --dimensions 8
   --runs 1 --warmup 0`: passed.
-- `make dist`: passed; archive sweep found no pgvector control, SQL upgrade, or
-  pgvector source files in the generated source archives.
+- `make dist`: passed from a clean committed tree; archive sweep found no
+  pgvector control file, pgvector SQL install/upgrade scripts, or pgvector type
+  source files.

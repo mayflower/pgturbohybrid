@@ -334,7 +334,7 @@ ShowMemoryUsage(PgturbohybridGraphScanOpaque so)
  * Prepare for an index scan
  */
 IndexScanDesc
-hnswbeginscan(Relation index, int nkeys, int norderbys)
+pgturbohybrid_graph_begin_scan(Relation index, int nkeys, int norderbys)
 {
 	IndexScanDesc scan;
 	PgturbohybridGraphScanOpaque so;
@@ -392,7 +392,7 @@ pgturbohybridbeginscan(Relation index, int nkeys, int norderbys)
 	PgturbohybridGraphSetForcepgturbohybridIndex(true);
 	PG_TRY();
 	{
-		scan = hnswbeginscan(index, nkeys, norderbys);
+		scan = pgturbohybrid_graph_begin_scan(index, nkeys, norderbys);
 	}
 	PG_CATCH();
 	{
@@ -413,7 +413,7 @@ pgturbohybridbeginscan(Relation index, int nkeys, int norderbys)
  * Start or restart an index scan
  */
 void
-hnswrescan(IndexScanDesc scan, ScanKey keys, int nkeys, ScanKey orderbys, int norderbys)
+pgturbohybrid_graph_rescan(IndexScanDesc scan, ScanKey keys, int nkeys, ScanKey orderbys, int norderbys)
 {
 	PgturbohybridGraphScanOpaque so = (PgturbohybridGraphScanOpaque) scan->opaque;
 
@@ -472,7 +472,7 @@ pgturbohybridrescan(IndexScanDesc scan, ScanKey keys, int nkeys, ScanKey orderby
 	PgturbohybridGraphSetForcepgturbohybridIndex(true);
 	PG_TRY();
 	{
-		hnswrescan(scan, keys, nkeys, orderbys, norderbys);
+		pgturbohybrid_graph_rescan(scan, keys, nkeys, orderbys, norderbys);
 	}
 	PG_CATCH();
 	{
@@ -491,7 +491,7 @@ pgturbohybridrescan(IndexScanDesc scan, ScanKey keys, int nkeys, ScanKey orderby
  * Fetch the next tuple in the given scan
  */
 bool
-hnswgettuple(IndexScanDesc scan, ScanDirection dir)
+pgturbohybrid_graph_get_tuple(IndexScanDesc scan, ScanDirection dir)
 {
 	PgturbohybridGraphScanOpaque so = (PgturbohybridGraphScanOpaque) scan->opaque;
 	MemoryContext oldCtx = MemoryContextSwitchTo(so->tmpCtx);
@@ -675,7 +675,7 @@ pgturbohybridgettuple(IndexScanDesc scan, ScanDirection dir)
 		else if (so != NULL)
 			so->pgturbohybridFlatScan = PgturbohybridGraphUseTqFlat(scan->indexRelation);
 
-		result = hnswgettuple(scan, dir);
+		result = pgturbohybrid_graph_get_tuple(scan, dir);
 	}
 	PG_CATCH();
 	{
@@ -692,7 +692,7 @@ pgturbohybridgettuple(IndexScanDesc scan, ScanDirection dir)
  * End a scan and release resources
  */
 void
-hnswendscan(IndexScanDesc scan)
+pgturbohybrid_graph_end_scan(IndexScanDesc scan)
 {
 	PgturbohybridGraphScanOpaque so = (PgturbohybridGraphScanOpaque) scan->opaque;
 
@@ -717,5 +717,5 @@ pgturbohybridendscan(IndexScanDesc scan)
 				 errmsg("turbohybrid requires a native graph-compatible opclass"),
 				 errhint("Use a turbohybrid vector opclass.")));
 
-	hnswendscan(scan);
+	pgturbohybrid_graph_end_scan(scan);
 }

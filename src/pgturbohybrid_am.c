@@ -10,7 +10,9 @@
 #include "access/xact.h"
 #include "catalog/namespace.h"
 #include "catalog/pg_opclass.h"
+#include "catalog/pg_type.h"
 #include "catalog/pg_type_d.h"
+#include "commands/extension.h"
 #include "commands/vacuum.h"
 #include "executor/executor.h"
 #include "fmgr.h"
@@ -95,7 +97,7 @@ static relopt_enum_elt_def pgturbohybrid_routing_relopt_options[] = {
 	{"auto", PGTURBOHYBRID_ROUTING_AUTO},
 	{"graph", PGTURBOHYBRID_ROUTING_GRAPH},
 	{"flat", PGTURBOHYBRID_ROUTING_FLAT},
-	{(const char *) NULL}
+	{NULL, 0}
 };
 
 const char *
@@ -1585,7 +1587,7 @@ tqhybridbulkdelete(IndexVacuumInfo *info, IndexBulkDeleteResult *stats, IndexBul
 		PgturbohybridBm25InvalidateCache(info->index);
 	}
 	else
-		result = hnswbulkdelete(info, stats, callback, callback_state);
+		result = pgturbohybrid_graph_bulkdelete(info, stats, callback, callback_state);
 
 	return result;
 }
@@ -1602,7 +1604,7 @@ tqhybridvacuumcleanup(IndexVacuumInfo *info, IndexBulkDeleteResult *stats)
 		PgturbohybridBm25InvalidateCache(info->index);
 	}
 	else
-		result = hnswvacuumcleanup(info, stats);
+		result = pgturbohybrid_graph_vacuum_cleanup(info, stats);
 
 	return result;
 }
@@ -1731,6 +1733,25 @@ PgturbohybridPathHasFilter(IndexPath *path)
 	return false;
 }
 
+static Oid
+PgturbohybridQueryTypeOid(void)
+{
+	Oid			extensionOid;
+	Oid			schemaOid;
+
+	extensionOid = get_extension_oid("pgturbohybrid", true);
+	if (!OidIsValid(extensionOid))
+		return InvalidOid;
+
+	schemaOid = get_extension_schema(extensionOid);
+	if (!OidIsValid(schemaOid))
+		return InvalidOid;
+
+	return GetSysCacheOid2(TYPENAMENSP, Anum_pg_type_oid,
+						   CStringGetDatum("turbohybrid_query"),
+						   ObjectIdGetDatum(schemaOid));
+}
+
 static bool
 PgturbohybridFindConstQueryWalker(Node *node, void *context)
 {
@@ -1747,7 +1768,7 @@ PgturbohybridFindConstQueryWalker(Node *node, void *context)
 		if (constant->constisnull)
 			return false;
 
-		hybridQueryOid = TypenameGetTypid("turbohybrid_query");
+		hybridQueryOid = PgturbohybridQueryTypeOid();
 		if (OidIsValid(hybridQueryOid) && constant->consttype == hybridQueryOid)
 		{
 			*query = DatumGetHybridQuery(constant->constvalue);

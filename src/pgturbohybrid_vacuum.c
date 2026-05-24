@@ -639,7 +639,7 @@ FreeVacuumState(PgturbohybridGraphVacuumState * vacuumstate)
  * Bulk delete tuples from the index
  */
 IndexBulkDeleteResult *
-hnswbulkdelete(IndexVacuumInfo *info, IndexBulkDeleteResult *stats,
+pgturbohybrid_graph_bulkdelete(IndexVacuumInfo *info, IndexBulkDeleteResult *stats,
 			   IndexBulkDeleteCallback callback, void *callback_state)
 {
 	PgturbohybridGraphVacuumState vacuumstate;
@@ -664,7 +664,7 @@ hnswbulkdelete(IndexVacuumInfo *info, IndexBulkDeleteResult *stats,
  * Clean up after a VACUUM operation
  */
 IndexBulkDeleteResult *
-hnswvacuumcleanup(IndexVacuumInfo *info, IndexBulkDeleteResult *stats)
+pgturbohybrid_graph_vacuum_cleanup(IndexVacuumInfo *info, IndexBulkDeleteResult *stats)
 {
 	Relation	rel = info->index;
 

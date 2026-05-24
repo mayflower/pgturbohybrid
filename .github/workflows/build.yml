@@ -46,7 +46,7 @@ jobs:
           createdb pgturbohybrid_smoke
           psql -d pgturbohybrid_smoke -v ON_ERROR_STOP=1 -c "CREATE EXTENSION vector;"
           psql -d pgturbohybrid_smoke -v ON_ERROR_STOP=1 -c "CREATE EXTENSION pgturbohybrid;"
-          psql -d pgturbohybrid_smoke -v ON_ERROR_STOP=1 -c "SELECT '[1,0,0]'::vector <#~-> pgturbohybrid_query(vector_query => '[1,0,0]'::vector);"
+          psql -d pgturbohybrid_smoke -v ON_ERROR_STOP=1 -c "SELECT '[1,0,0]'::vector <~-> turbohybrid_query(vector_query => '[1,0,0]'::vector);"
           dropdb pgturbohybrid_smoke
 
       - name: Run SQL regression tests

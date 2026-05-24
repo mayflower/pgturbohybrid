@@ -115,7 +115,7 @@ The public index options are:
 - `dense_k`: dense branch candidate budget.
 - `bm25_k`: BM25 branch candidate budget.
 - `final_k`: final result target.
-- `allow_approx`: allow latency-first approximate paths where supported.
+- `require_bm25_match`: only return rows with a BM25 lexical match.
 
 ## Settings
 
@@ -166,6 +166,24 @@ compatibility error rather than silently reading malformed data.
 See [COMPATIBILITY.md](COMPATIBILITY.md) for the tested PostgreSQL and pgvector
 matrix.
 
+## Known Limitations
+
+- Alpha status: SQL APIs and the on-disk index format may change before a
+  stable release.
+- On-disk format: incompatible storage changes require `REINDEX`; see
+  [RELEASE.md](RELEASE.md) for the current policy.
+- pgvector ABI: the extension depends on pgvector's SQL `vector` type and uses
+  a private compatibility copy of its varlena layout. Tested compatibility
+  starts at pgvector 0.8.2.
+- Dimensions: the compatibility layer supports pgvector vector payloads up to
+  16000 dimensions; index build paths validate their supported limits before
+  writing index pages.
+- Text-aware scalar fallback: hybrid queries with a `text_query` are intended
+  for indexed `ORDER BY ... LIMIT` retrieval. Scalar projection without an
+  index path fails with a `feature_not_supported` error.
+- Production support: treat this as evaluation software until the release
+  checklist is green for your target platform and PostgreSQL version.
+
 ## Attribution
 
 This project depends on pgvector and contains code derived from pgvector's HNSW
@@ -173,4 +191,5 @@ implementation. pgvector is an excellent PostgreSQL vector search extension;
 `pgturbohybrid` is a separate experimental extension built on top of it and is
 not an official pgvector project.
 
-The license is preserved in [LICENSE](LICENSE).
+The license is preserved in [LICENSE](LICENSE), with attribution notes in
+[NOTICE](NOTICE).
