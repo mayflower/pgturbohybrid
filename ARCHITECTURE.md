@@ -207,6 +207,10 @@ the same SQL install contract.
 It may reference pgvector's `vector` type because `pgturbohybrid.control`
 requires `vector`, but it must not create that type.
 
+The script intentionally uses the unqualified `vector` type. PostgreSQL makes
+required extension schemas available during `CREATE EXTENSION`, and regression
+tests cover `vector` and `pgturbohybrid` installed in different schemas.
+
 The install script may create:
 
 - `pgturbohybrid` access method objects

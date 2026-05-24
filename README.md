@@ -24,6 +24,13 @@ green on your target PostgreSQL and pgvector versions.
 `pgturbohybrid` uses pgvector's SQL `vector` type but does not link against
 private pgvector C symbols.
 
+## Why This Exists
+
+`pgturbohybrid` is a companion extension for pgvector. It is not a fork of
+pgvector and is not an official pgvector project. The goal is to experiment with
+hybrid dense-vector and BM25 retrieval while keeping pgvector itself
+unmodified.
+
 ## Installation
 
 Install pgvector first:
@@ -37,6 +44,8 @@ make -C /tmp/pgvector install
 Then build and install `pgturbohybrid`:
 
 ```sh
+git clone https://github.com/mayflower/pgturbohybrid.git
+cd pgturbohybrid
 make
 make install
 ```
