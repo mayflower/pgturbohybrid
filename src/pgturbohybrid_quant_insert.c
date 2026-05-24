@@ -835,7 +835,7 @@ PgturbohybridGraphInsertValueInPlace(Relation index, IndexInfo *indexInfo,
 								 values, isnull);
 	}
 	(void) PgturbohybridGraphLoadCorrection(index, vector->dim, &ecShift, &ecScale);
-	code = palloc(PgturbohybridGraphCodeBytesForBits(vector->dim, meta.tqBits));
+	code = palloc0(PgturbohybridGraphCodeBytesForBits(vector->dim, meta.tqBits));
 	insertTqWeighted = (meta.tqFlags & PGTURBOHYBRID_GRAPH_TQ_WEIGHTED) != 0;
 	insertTqRenorm = (meta.tqFlags & PGTURBOHYBRID_GRAPH_TQ_RENORM) != 0;
 	insertExactStorage = (meta.tqFlags & PGTURBOHYBRID_GRAPH_EXACT_FREE) == 0;
