@@ -267,7 +267,7 @@ pgturbohybrid_vector_norm(PG_FUNCTION_ARGS)
 	PG_RETURN_FLOAT8(PgturbohybridVectorNorm(vector));
 }
 
-Datum
+FUNCTION_PREFIX Datum
 pgturbohybrid_l2_normalize(PG_FUNCTION_ARGS)
 {
 	Vector	   *vector = PG_GETARG_PGTURBOHYBRID_VECTOR_P(0);
