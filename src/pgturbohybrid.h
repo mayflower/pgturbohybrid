@@ -894,9 +894,9 @@ void		tqgraphrescan(IndexScanDesc scan, ScanKey keys, int nkeys, ScanKey orderby
 bool		tqgraphgettuple(IndexScanDesc scan, ScanDirection dir);
 void		tqgraphendscan(IndexScanDesc scan);
 
-Datum		pgturbohybrid_last_scan_stats(PG_FUNCTION_ARGS);
-Datum		pgturbohybrid_index_stats(PG_FUNCTION_ARGS);
-Datum		pgturbohybrid_simd_capabilities(PG_FUNCTION_ARGS);
+FUNCTION_PREFIX Datum pgturbohybrid_last_scan_stats(PG_FUNCTION_ARGS);
+FUNCTION_PREFIX Datum pgturbohybrid_index_stats(PG_FUNCTION_ARGS);
+FUNCTION_PREFIX Datum pgturbohybrid_simd_capabilities(PG_FUNCTION_ARGS);
 void		PgturbohybridGraphRecordExactVectorKernel(int kernel);
 void		PgturbohybridGraphRecordWeightedCodeCodeKernel(int kernel);
 
