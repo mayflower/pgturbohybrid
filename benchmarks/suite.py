@@ -19,7 +19,7 @@ CONFIG_DIR = ROOT / "config"
 
 
 def run_psql(database: str, sql: str) -> str:
-    cmd = ["psql", "-X", "-A", "-t", "-v", "ON_ERROR_STOP=1", "-d", database, "-c", sql]
+    cmd = ["psql", "-q", "-X", "-A", "-t", "-v", "ON_ERROR_STOP=1", "-d", database, "-c", sql]
     return subprocess.run(cmd, check=True, text=True, capture_output=True).stdout.strip()
 
 
@@ -47,9 +47,13 @@ def summarize_ms(samples: list[float]) -> dict[str, float]:
 
 
 def timed_psql(database: str, sql: str) -> float:
-    start = time.perf_counter()
-    run_psql(database, sql)
-    return (time.perf_counter() - start) * 1000.0
+    query = sql.strip().removesuffix(";")
+    explained = run_psql(
+        database,
+        "SET enable_seqscan = off;\n"
+        f"EXPLAIN (ANALYZE, FORMAT JSON, TIMING OFF) {query};",
+    )
+    return float(json.loads(explained)[0]["Execution Time"])
 
 
 def write_output(path: str, payload: dict[str, Any]) -> None:
@@ -157,15 +161,12 @@ def query_sql(method: str, dimensions: int, dense_k: int, bm25_k: int, final_k: 
     qv = query_vector(dimensions)
     if method == "postgres_sql_rrf":
         return f"""
-WITH q AS MATERIALIZED (
-    SELECT {qv} AS v, websearch_to_tsquery('english', 'postgres hybrid search') AS t
-),
-dense AS MATERIALIZED (
+WITH dense AS MATERIALIZED (
     SELECT id, row_number() OVER () AS rank
     FROM (
         SELECT d.id
-        FROM pgturbohybrid_bench_docs d, q
-        ORDER BY d.embedding <=> q.v
+        FROM pgturbohybrid_bench_docs d
+        ORDER BY d.embedding <=> {qv}
         LIMIT {dense_k}
     ) s
 ),
@@ -173,9 +174,9 @@ lexical AS MATERIALIZED (
     SELECT id, row_number() OVER () AS rank
     FROM (
         SELECT d.id
-        FROM pgturbohybrid_bench_docs d, q
-        WHERE d.body_tsv @@ q.t
-        ORDER BY ts_rank_cd(d.body_tsv, q.t) DESC, d.id
+        FROM pgturbohybrid_bench_docs d
+        WHERE d.body_tsv @@ websearch_to_tsquery('english', 'postgres hybrid search')
+        ORDER BY ts_rank_cd(d.body_tsv, websearch_to_tsquery('english', 'postgres hybrid search')) DESC, d.id
         LIMIT {bm25_k}
     ) s
 )
@@ -204,9 +205,9 @@ LIMIT {final_k};
 def run_method(database: str, method: str, dimensions: int, dense_k: int, bm25_k: int, final_k: int,
                warmup: int, runs: int) -> dict[str, Any]:
     build = build_index(database, method)
-    sql = "SET enable_seqscan = off;\n" + query_sql(method, dimensions, dense_k, bm25_k, final_k)
+    sql = query_sql(method, dimensions, dense_k, bm25_k, final_k)
     for _ in range(warmup):
-        run_psql(database, sql)
+        run_psql(database, "SET enable_seqscan = off;\n" + sql)
     samples = [timed_psql(database, sql) for _ in range(runs)]
     return {
         "method": method,

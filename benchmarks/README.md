@@ -38,6 +38,72 @@ python3 benchmarks/suite.py run-system-synthetic \
 
 The smoke run creates a synthetic table, builds both baseline indexes, runs a
 hybrid query, and reports build time, index size, and p50/p95/p99 latency.
+Latency is measured inside PostgreSQL with `EXPLAIN (ANALYZE, FORMAT JSON,
+TIMING OFF)` so results exclude Python and `psql` process startup time.
+
+The SQL RRF baseline intentionally keeps the dense query vector as a literal in
+the `ORDER BY` clause. This lets PostgreSQL pick the pgvector HNSW index path;
+passing the vector through a materialized CTE can make the planner choose a
+sequential scan and invalidates the comparison.
+
+## Latest Standalone Synthetic Result
+
+This result was run from the standalone `pgturbohybrid` extension architecture,
+not from the earlier patched pgvector tree.
+
+Environment:
+
+- Date: 2026-05-24
+- Hardware: Apple M4, 10 cores, 24 GiB memory
+- OS: macOS 26.5 arm64
+- PostgreSQL: 16.13 (Homebrew)
+- pgvector: 0.8.2
+- pgturbohybrid: 0.1.0
+- Python: 3.14.5
+
+Command:
+
+```sh
+dropdb --if-exists pgturbohybrid_benchmark
+createdb pgturbohybrid_benchmark
+python3 benchmarks/suite.py run-system-synthetic \
+  --database pgturbohybrid_benchmark \
+  --rows 100000 \
+  --dimensions 1536 \
+  --runs 30 \
+  --warmup 5 \
+  --dense-k 100 \
+  --bm25-k 100 \
+  --final-k 10 \
+  --methods postgres_sql_rrf,pgturbohybrid,pgturbohybrid_exact_storage_off \
+  --output /tmp/pgturbohybrid_benchmark_100k_1536_standalone.json
+```
+
+Plan check:
+
+- `postgres_sql_rrf` used `pgturbohybrid_bench_hnsw_idx` for dense vector
+  search and `pgturbohybrid_bench_fts_idx` for full-text search.
+- `pgturbohybrid` and `pgturbohybrid_exact_storage_off` used
+  `pgturbohybrid_bench_idx` through the `turbohybrid` access method.
+
+Results:
+
+| Method | Build s | Index MiB | p50 ms | p95 ms | p99 ms | QPS |
+|---|---:|---:|---:|---:|---:|---:|
+| pgvector HNSW + PostgreSQL FTS SQL RRF | 17.692 | 191.3 | 18.407 | 21.675 | 22.408 | 53.26 |
+| pgturbohybrid, 4-bit, exact storage on | 132.511 | 687.0 | 41.834 | 51.643 | 59.286 | 23.22 |
+| pgturbohybrid, 4-bit, exact storage off | 166.342 | 96.5 | 51.655 | 64.689 | 72.456 | 19.25 |
+
+Interpretation:
+
+- This synthetic standalone result does not reproduce the earlier patched-tree
+  latency advantage. The corrected HNSW-backed baseline is faster on p50, p95,
+  and p99.
+- `pgturbohybrid` with `exact_storage = off` is about 49.5% smaller than the
+  HNSW plus GIN baseline in this run.
+- This is a systems benchmark only. It does not report recall, nDCG, MRR, or
+  MAP. Use a real RAG dataset such as FIQA or BEIR before making quality
+  claims.
 
 ## Publishable Run Metadata
 
