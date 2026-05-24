@@ -1939,7 +1939,7 @@ static bool
 PgturbohybridGraphUseLatencyDenseBudget(PgturbohybridGraphMetaPageData *meta, bool hasPayloadFilter,
 							 double estimatedSelectivity)
 {
-	switch ((TqDenseBudgetPolicy) pgturbohybrid_dense_budget_policy)
+	switch ((PgturbohybridDenseBudgetPolicy) pgturbohybrid_dense_budget_policy)
 	{
 		case PGTURBOHYBRID_DENSE_BUDGET_QUALITY:
 			return false;
@@ -1956,7 +1956,7 @@ PgturbohybridGraphUseLatencyDenseBudget(PgturbohybridGraphMetaPageData *meta, bo
 static double
 PgturbohybridGraphDenseBudgetMultiplier(void)
 {
-	switch ((TqDenseBudgetPolicy) pgturbohybrid_dense_budget_policy)
+	switch ((PgturbohybridDenseBudgetPolicy) pgturbohybrid_dense_budget_policy)
 	{
 		case PGTURBOHYBRID_DENSE_BUDGET_BALANCED:
 			return Max(2.0, pgturbohybrid_dense_latency_multiplier);
@@ -1972,7 +1972,7 @@ PgturbohybridGraphDenseBudgetMultiplier(void)
 static const char *
 PgturbohybridGraphDenseBudgetPolicyName(int policy)
 {
-	switch ((TqDenseBudgetPolicy) policy)
+	switch ((PgturbohybridDenseBudgetPolicy) policy)
 	{
 		case PGTURBOHYBRID_DENSE_BUDGET_QUALITY:
 			return "quality";

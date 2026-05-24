@@ -6,22 +6,22 @@
 #include "tsearch/ts_type.h"
 #include "pgturbohybrid_vector_compat.h"
 
-#define HYBRID_QUERY_VERSION 1
+#define PGTURBOHYBRID_QUERY_VERSION 1
 
-#define HYBRID_QUERY_FLAG_HAS_VECTOR			0x0001
-#define HYBRID_QUERY_FLAG_HAS_TSQUERY			0x0002
-#define HYBRID_QUERY_FLAG_ALPHA_IS_SET			0x0004
-#define HYBRID_QUERY_FLAG_FINAL_K_IS_SET		0x0008
-#define HYBRID_QUERY_FLAG_REQUIRE_BM25_MATCH	0x0010
-#define HYBRID_QUERY_FLAG_DENSE_K_DEFAULTED		0x0020
-#define HYBRID_QUERY_FLAG_BM25_K_DEFAULTED		0x0040
-#define HYBRID_QUERY_FLAG_RRF_K_DEFAULTED		0x0080
+#define PGTURBOHYBRID_QUERY_FLAG_HAS_VECTOR			0x0001
+#define PGTURBOHYBRID_QUERY_FLAG_HAS_TSQUERY			0x0002
+#define PGTURBOHYBRID_QUERY_FLAG_ALPHA_IS_SET			0x0004
+#define PGTURBOHYBRID_QUERY_FLAG_FINAL_K_IS_SET		0x0008
+#define PGTURBOHYBRID_QUERY_FLAG_REQUIRE_BM25_MATCH	0x0010
+#define PGTURBOHYBRID_QUERY_FLAG_DENSE_K_DEFAULTED		0x0020
+#define PGTURBOHYBRID_QUERY_FLAG_BM25_K_DEFAULTED		0x0040
+#define PGTURBOHYBRID_QUERY_FLAG_RRF_K_DEFAULTED		0x0080
 
-typedef enum HybridFusionMode
+typedef enum PgturbohybridFusionMode
 {
-	HYBRID_FUSION_RRF = 1,
-	HYBRID_FUSION_WEIGHTED = 2
-} HybridFusionMode;
+	PGTURBOHYBRID_FUSION_RRF = 1,
+	PGTURBOHYBRID_FUSION_WEIGHTED = 2
+} PgturbohybridFusionMode;
 
 typedef struct PgturbohybridQueryHeader
 {
@@ -42,9 +42,9 @@ typedef struct PgturbohybridQueryHeader
 	/* payload starts at MAXALIGN(sizeof(PgturbohybridQueryHeader)) */
 } PgturbohybridQueryHeader;
 
-#define DatumGetHybridQuery(x) ((PgturbohybridQueryHeader *) PG_DETOAST_DATUM(x))
-#define PG_GETARG_HYBRID_QUERY_P(x) DatumGetHybridQuery(PG_GETARG_DATUM(x))
-#define PG_RETURN_HYBRID_QUERY_P(x) PG_RETURN_POINTER(x)
+#define DatumGetPgturbohybridQuery(x) ((PgturbohybridQueryHeader *) PG_DETOAST_DATUM(x))
+#define PG_GETARG_PGTURBOHYBRID_QUERY_P(x) DatumGetPgturbohybridQuery(PG_GETARG_DATUM(x))
+#define PG_RETURN_PGTURBOHYBRID_QUERY_P(x) PG_RETURN_POINTER(x)
 
 Vector	   *PgturbohybridQueryGetVector(PgturbohybridQueryHeader *query);
 TSQuery		PgturbohybridQueryGetTsQuery(PgturbohybridQueryHeader *query);

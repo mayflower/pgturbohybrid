@@ -3423,7 +3423,7 @@ PgturbohybridBm25HotPostingsCacheHash(PgturbohybridBm25Cache *cache)
 
 	oldCtx = MemoryContextSwitchTo(cache->ctx);
 	cache->hotPostingsHash =
-		hash_create("tqhybrid BM25 hot postings cache", 256, &ctl,
+		hash_create("pgturbohybrid BM25 hot postings cache", 256, &ctl,
 					HASH_ELEM | HASH_BLOBS | HASH_CONTEXT);
 	MemoryContextSwitchTo(oldCtx);
 	return cache->hotPostingsHash;
