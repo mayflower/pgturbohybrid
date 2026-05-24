@@ -3838,7 +3838,7 @@ tqgraphbulkdelete(IndexVacuumInfo *info, IndexBulkDeleteResult *stats,
 				  IndexBulkDeleteCallback callback, void *callback_state)
 {
 	Relation	index = info->index;
-	IndexBulkDeleteResult *result = stats;
+	IndexBulkDeleteResult *volatile result = stats;
 	PgturbohybridGraphMetaPageData meta;
 	PgturbohybridGraphBulkDeleteState *deleteState;
 	int			codeTuplesPerPage;
@@ -3852,7 +3852,7 @@ tqgraphbulkdelete(IndexVacuumInfo *info, IndexBulkDeleteResult *stats,
 	if (callback == NULL || !PgturbohybridGraphReadMeta(index, &meta) ||
 		meta.tqNodeCount == 0 ||
 		!BlockNumberIsValid(meta.tqCodeStartBlkno))
-		return result;
+		return (IndexBulkDeleteResult *) result;
 
 	tqBits = meta.tqBits != 0 ? meta.tqBits : PGTURBOHYBRID_DEFAULT_BITS;
 	codeTuplesPerPage =
@@ -3976,7 +3976,7 @@ tqgraphbulkdelete(IndexVacuumInfo *info, IndexBulkDeleteResult *stats,
 
 	result->estimated_count = false;
 
-	return result;
+	return (IndexBulkDeleteResult *) result;
 }
 
 IndexBulkDeleteResult *
