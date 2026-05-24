@@ -241,7 +241,7 @@ static Datum pgturbohybrid_last_simd_stats(PG_FUNCTION_ARGS) pg_attribute_unused
 #endif
 
 FUNCTION_PREFIX PG_FUNCTION_INFO_V1(pgturbohybrid_last_scan_stats);
-Datum
+FUNCTION_PREFIX Datum
 pgturbohybrid_last_scan_stats(PG_FUNCTION_ARGS)
 {
 	StringInfoData json;
@@ -280,7 +280,7 @@ pgturbohybrid_last_scan_stats(PG_FUNCTION_ARGS)
 }
 
 FUNCTION_PREFIX PG_FUNCTION_INFO_V1(pgturbohybrid_simd_capabilities);
-Datum
+FUNCTION_PREFIX Datum
 pgturbohybrid_simd_capabilities(PG_FUNCTION_ARGS)
 {
 	StringInfoData json;

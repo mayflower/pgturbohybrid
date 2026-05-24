@@ -167,7 +167,7 @@ PgturbohybridGraphInit(void)
 }
 
 FUNCTION_PREFIX PG_FUNCTION_INFO_V1(pgturbohybrid_index_stats);
-Datum
+FUNCTION_PREFIX Datum
 pgturbohybrid_index_stats(PG_FUNCTION_ARGS)
 {
 	Oid			indexOid = PG_GETARG_OID(0);
