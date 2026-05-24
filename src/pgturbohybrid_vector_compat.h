@@ -33,11 +33,11 @@ StaticAssertDecl(offsetof(Vector, unused) == sizeof(int32) + sizeof(int16),
 StaticAssertDecl(offsetof(Vector, x) == sizeof(int32) + sizeof(int16) + sizeof(int16),
 				 "pgvector vector data offset changed");
 
-/* Export marker for PostgreSQL versions that require explicit symbol export. */
-#if PG_VERSION_NUM >= 160000
-#define FUNCTION_PREFIX
-#else
+/* Export marker for platforms that require explicit symbol export. */
+#if defined(_MSC_VER)
 #define FUNCTION_PREFIX PGDLLEXPORT
+#else
+#define FUNCTION_PREFIX
 #endif
 
 #define PG_GETARG_PGTURBOHYBRID_VECTOR_P(_n) \

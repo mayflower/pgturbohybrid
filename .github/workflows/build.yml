@@ -15,6 +15,9 @@ jobs:
       matrix:
         postgres: [14, 15, 16, 17, 18, 19]
         pgvector_ref: [v0.8.2, master]
+        exclude:
+          - postgres: 19
+            pgvector_ref: v0.8.2
     steps:
       - uses: actions/checkout@v4
 
