@@ -497,7 +497,7 @@ PgturbohybridGraphAppendBuildNode(PgturbohybridQuantBuildState *state, ItemPoint
 	{
 		node->vector = palloc(vectorSize);
 		memcpy(node->vector, vector, vectorSize);
-		node->code = palloc(PgturbohybridGraphCodeBytesForBits(vector->dim, state->tqBits));
+		node->code = palloc0(PgturbohybridGraphCodeBytesForBits(vector->dim, state->tqBits));
 	}
 	if (state->payloadCount > 0)
 	{
