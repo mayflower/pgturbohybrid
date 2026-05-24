@@ -155,8 +155,8 @@ benchmark output directories.
 ## Compatibility Notes
 
 `pgturbohybrid` requires pgvector at build and install time. It refers to
-pgvector's type with PostgreSQL extension schema substitution, so pgvector can
-be installed outside `public`.
+pgvector's `vector` type through the extension dependency search path, so
+pgvector can be installed outside `public` on supported PostgreSQL versions.
 
 The compatibility layer validates that the `vector` extension is installed and
 that vector dimensions are valid before accessing vector payloads. If pgvector's

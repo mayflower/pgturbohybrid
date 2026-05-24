@@ -118,7 +118,8 @@ The remaining matches for pgvector and historical names are intentional:
 
 - tests and docs use `CREATE EXTENSION vector` because pgvector is the required
   dependency.
-- SQL signatures use `@extschema:vector@.vector` to reference pgvector's type.
+- SQL signatures use the unqualified `vector` type because PostgreSQL 14 and
+  15 do not support cross-extension schema placeholders in extension scripts.
 - migration notes mention removed files such as `vector.control`,
   `sql/vector.sql`, and `sql/vector--*.sql` as historical inventory.
 - architecture notes mention forbidden prefixes only to document the naming

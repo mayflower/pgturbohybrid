@@ -61,7 +61,7 @@ CREATE TYPE turbohybrid_query (
 );
 
 CREATE FUNCTION turbohybrid_query(
-	vector_query @extschema:vector@.vector DEFAULT NULL,
+	vector_query vector DEFAULT NULL,
 	text_query pg_catalog.tsquery DEFAULT NULL,
 	fusion pg_catalog.text DEFAULT 'rrf',
 	dense_weight pg_catalog.float8 DEFAULT 1.0,
@@ -76,52 +76,52 @@ CREATE FUNCTION turbohybrid_query(
 	AS 'MODULE_PATHNAME', 'pgturbohybrid_query_constructor'
 	LANGUAGE C STABLE PARALLEL SAFE;
 
-CREATE FUNCTION turbohybrid_distance(@extschema:vector@.vector, turbohybrid_query) RETURNS pg_catalog.float8
+CREATE FUNCTION turbohybrid_distance(vector, turbohybrid_query) RETURNS pg_catalog.float8
 	AS 'MODULE_PATHNAME', 'pgturbohybrid_distance'
 	LANGUAGE C STABLE STRICT PARALLEL SAFE;
 
-CREATE FUNCTION turbohybrid_l2_distance(@extschema:vector@.vector, turbohybrid_query) RETURNS pg_catalog.float8
+CREATE FUNCTION turbohybrid_l2_distance(vector, turbohybrid_query) RETURNS pg_catalog.float8
 	AS 'MODULE_PATHNAME', 'pgturbohybrid_l2_distance'
 	LANGUAGE C STABLE STRICT PARALLEL SAFE;
 
-CREATE FUNCTION turbohybrid_negative_inner_product(@extschema:vector@.vector, turbohybrid_query) RETURNS pg_catalog.float8
+CREATE FUNCTION turbohybrid_negative_inner_product(vector, turbohybrid_query) RETURNS pg_catalog.float8
 	AS 'MODULE_PATHNAME', 'pgturbohybrid_negative_inner_product'
 	LANGUAGE C STABLE STRICT PARALLEL SAFE;
 
-CREATE FUNCTION turbohybrid_cosine_distance(@extschema:vector@.vector, turbohybrid_query) RETURNS pg_catalog.float8
+CREATE FUNCTION turbohybrid_cosine_distance(vector, turbohybrid_query) RETURNS pg_catalog.float8
 	AS 'MODULE_PATHNAME', 'pgturbohybrid_cosine_distance'
 	LANGUAGE C STABLE STRICT PARALLEL SAFE;
 
-CREATE FUNCTION turbohybrid_vector_l2_squared_distance(@extschema:vector@.vector, @extschema:vector@.vector) RETURNS pg_catalog.float8
+CREATE FUNCTION turbohybrid_vector_l2_squared_distance(vector, vector) RETURNS pg_catalog.float8
 	AS 'MODULE_PATHNAME', 'pgturbohybrid_vector_l2_squared_distance'
 	LANGUAGE C IMMUTABLE STRICT PARALLEL SAFE;
 
-CREATE FUNCTION turbohybrid_vector_l2_distance(@extschema:vector@.vector, @extschema:vector@.vector) RETURNS pg_catalog.float8
+CREATE FUNCTION turbohybrid_vector_l2_distance(vector, vector) RETURNS pg_catalog.float8
 	AS 'MODULE_PATHNAME', 'pgturbohybrid_vector_l2_distance'
 	LANGUAGE C IMMUTABLE STRICT PARALLEL SAFE;
 
-CREATE FUNCTION turbohybrid_vector_negative_inner_product(@extschema:vector@.vector, @extschema:vector@.vector) RETURNS pg_catalog.float8
+CREATE FUNCTION turbohybrid_vector_negative_inner_product(vector, vector) RETURNS pg_catalog.float8
 	AS 'MODULE_PATHNAME', 'pgturbohybrid_vector_negative_inner_product'
 	LANGUAGE C IMMUTABLE STRICT PARALLEL SAFE;
 
-CREATE FUNCTION turbohybrid_vector_cosine_distance(@extschema:vector@.vector, @extschema:vector@.vector) RETURNS pg_catalog.float8
+CREATE FUNCTION turbohybrid_vector_cosine_distance(vector, vector) RETURNS pg_catalog.float8
 	AS 'MODULE_PATHNAME', 'pgturbohybrid_vector_cosine_distance'
 	LANGUAGE C IMMUTABLE STRICT PARALLEL SAFE;
 
-CREATE FUNCTION turbohybrid_vector_norm(@extschema:vector@.vector) RETURNS pg_catalog.float8
+CREATE FUNCTION turbohybrid_vector_norm(vector) RETURNS pg_catalog.float8
 	AS 'MODULE_PATHNAME', 'pgturbohybrid_vector_norm'
 	LANGUAGE C IMMUTABLE STRICT PARALLEL SAFE;
 
 CREATE OPERATOR <~-> (
-	LEFTARG = @extschema:vector@.vector, RIGHTARG = turbohybrid_query, PROCEDURE = turbohybrid_l2_distance
+	LEFTARG = vector, RIGHTARG = turbohybrid_query, PROCEDURE = turbohybrid_l2_distance
 );
 
 CREATE OPERATOR <~#> (
-	LEFTARG = @extschema:vector@.vector, RIGHTARG = turbohybrid_query, PROCEDURE = turbohybrid_negative_inner_product
+	LEFTARG = vector, RIGHTARG = turbohybrid_query, PROCEDURE = turbohybrid_negative_inner_product
 );
 
 CREATE OPERATOR <~> (
-	LEFTARG = @extschema:vector@.vector, RIGHTARG = turbohybrid_query, PROCEDURE = turbohybrid_cosine_distance
+	LEFTARG = vector, RIGHTARG = turbohybrid_query, PROCEDURE = turbohybrid_cosine_distance
 );
 
 CREATE FUNCTION turbohybrid_handler(pg_catalog.internal) RETURNS pg_catalog.index_am_handler
@@ -131,23 +131,23 @@ CREATE FUNCTION turbohybrid_handler(pg_catalog.internal) RETURNS pg_catalog.inde
 CREATE ACCESS METHOD turbohybrid TYPE INDEX HANDLER turbohybrid_handler;
 
 CREATE OPERATOR CLASS vector_l2_turbohybrid_ops
-	DEFAULT FOR TYPE @extschema:vector@.vector USING turbohybrid AS
-	OPERATOR 1 <~-> (@extschema:vector@.vector, turbohybrid_query) FOR ORDER BY pg_catalog.float_ops,
-	FUNCTION 1 turbohybrid_vector_l2_squared_distance(@extschema:vector@.vector, @extschema:vector@.vector),
-	FUNCTION 3 turbohybrid_vector_l2_distance(@extschema:vector@.vector, @extschema:vector@.vector);
+	DEFAULT FOR TYPE vector USING turbohybrid AS
+	OPERATOR 1 <~-> (vector, turbohybrid_query) FOR ORDER BY pg_catalog.float_ops,
+	FUNCTION 1 turbohybrid_vector_l2_squared_distance(vector, vector),
+	FUNCTION 3 turbohybrid_vector_l2_distance(vector, vector);
 
 CREATE OPERATOR CLASS vector_ip_turbohybrid_ops
-	FOR TYPE @extschema:vector@.vector USING turbohybrid AS
-	OPERATOR 1 <~#> (@extschema:vector@.vector, turbohybrid_query) FOR ORDER BY pg_catalog.float_ops,
-	FUNCTION 1 turbohybrid_vector_negative_inner_product(@extschema:vector@.vector, @extschema:vector@.vector),
-	FUNCTION 4 turbohybrid_vector_norm(@extschema:vector@.vector);
+	FOR TYPE vector USING turbohybrid AS
+	OPERATOR 1 <~#> (vector, turbohybrid_query) FOR ORDER BY pg_catalog.float_ops,
+	FUNCTION 1 turbohybrid_vector_negative_inner_product(vector, vector),
+	FUNCTION 4 turbohybrid_vector_norm(vector);
 
 CREATE OPERATOR CLASS vector_cosine_turbohybrid_ops
-	FOR TYPE @extschema:vector@.vector USING turbohybrid AS
-	OPERATOR 1 <~> (@extschema:vector@.vector, turbohybrid_query) FOR ORDER BY pg_catalog.float_ops,
-	FUNCTION 1 turbohybrid_vector_negative_inner_product(@extschema:vector@.vector, @extschema:vector@.vector),
-	FUNCTION 2 turbohybrid_vector_norm(@extschema:vector@.vector),
-	FUNCTION 4 turbohybrid_vector_norm(@extschema:vector@.vector);
+	FOR TYPE vector USING turbohybrid AS
+	OPERATOR 1 <~> (vector, turbohybrid_query) FOR ORDER BY pg_catalog.float_ops,
+	FUNCTION 1 turbohybrid_vector_negative_inner_product(vector, vector),
+	FUNCTION 2 turbohybrid_vector_norm(vector),
+	FUNCTION 4 turbohybrid_vector_norm(vector);
 
 CREATE OPERATOR CLASS bm25_tsvector_turbohybrid_ops
 	FOR TYPE pg_catalog.tsvector USING turbohybrid AS
@@ -171,24 +171,24 @@ COMMENT ON TYPE turbohybrid_query IS 'TurboHybrid query payload for dense vector
 
 COMMENT ON FUNCTION turbohybrid_query_in(pg_catalog.cstring) IS 'Input function for turbohybrid_query';
 COMMENT ON FUNCTION turbohybrid_query_out(turbohybrid_query) IS 'Output function for turbohybrid_query';
-COMMENT ON FUNCTION turbohybrid_query(@extschema:vector@.vector, pg_catalog.tsquery, pg_catalog.text, pg_catalog.float8, pg_catalog.float8, pg_catalog.float8, pg_catalog.int4, pg_catalog.int4, pg_catalog.int4, pg_catalog.int4, pg_catalog.bool) IS 'Constructs a TurboHybrid query payload';
-COMMENT ON FUNCTION turbohybrid_distance(@extschema:vector@.vector, turbohybrid_query) IS 'Default TurboHybrid distance between a vector and a query';
-COMMENT ON FUNCTION turbohybrid_l2_distance(@extschema:vector@.vector, turbohybrid_query) IS 'L2 TurboHybrid distance between a vector and a query';
-COMMENT ON FUNCTION turbohybrid_negative_inner_product(@extschema:vector@.vector, turbohybrid_query) IS 'Negative inner product TurboHybrid distance between a vector and a query';
-COMMENT ON FUNCTION turbohybrid_cosine_distance(@extschema:vector@.vector, turbohybrid_query) IS 'Cosine TurboHybrid distance between a vector and a query';
-COMMENT ON FUNCTION turbohybrid_vector_l2_squared_distance(@extschema:vector@.vector, @extschema:vector@.vector) IS 'Squared L2 support function used by TurboHybrid vector opclasses';
-COMMENT ON FUNCTION turbohybrid_vector_l2_distance(@extschema:vector@.vector, @extschema:vector@.vector) IS 'L2 support function used by TurboHybrid vector opclasses';
-COMMENT ON FUNCTION turbohybrid_vector_negative_inner_product(@extschema:vector@.vector, @extschema:vector@.vector) IS 'Negative inner product support function used by TurboHybrid vector opclasses';
-COMMENT ON FUNCTION turbohybrid_vector_cosine_distance(@extschema:vector@.vector, @extschema:vector@.vector) IS 'Cosine support function used by TurboHybrid vector opclasses';
-COMMENT ON FUNCTION turbohybrid_vector_norm(@extschema:vector@.vector) IS 'Vector norm support function used by TurboHybrid vector opclasses';
+COMMENT ON FUNCTION turbohybrid_query(vector, pg_catalog.tsquery, pg_catalog.text, pg_catalog.float8, pg_catalog.float8, pg_catalog.float8, pg_catalog.int4, pg_catalog.int4, pg_catalog.int4, pg_catalog.int4, pg_catalog.bool) IS 'Constructs a TurboHybrid query payload';
+COMMENT ON FUNCTION turbohybrid_distance(vector, turbohybrid_query) IS 'Default TurboHybrid distance between a vector and a query';
+COMMENT ON FUNCTION turbohybrid_l2_distance(vector, turbohybrid_query) IS 'L2 TurboHybrid distance between a vector and a query';
+COMMENT ON FUNCTION turbohybrid_negative_inner_product(vector, turbohybrid_query) IS 'Negative inner product TurboHybrid distance between a vector and a query';
+COMMENT ON FUNCTION turbohybrid_cosine_distance(vector, turbohybrid_query) IS 'Cosine TurboHybrid distance between a vector and a query';
+COMMENT ON FUNCTION turbohybrid_vector_l2_squared_distance(vector, vector) IS 'Squared L2 support function used by TurboHybrid vector opclasses';
+COMMENT ON FUNCTION turbohybrid_vector_l2_distance(vector, vector) IS 'L2 support function used by TurboHybrid vector opclasses';
+COMMENT ON FUNCTION turbohybrid_vector_negative_inner_product(vector, vector) IS 'Negative inner product support function used by TurboHybrid vector opclasses';
+COMMENT ON FUNCTION turbohybrid_vector_cosine_distance(vector, vector) IS 'Cosine support function used by TurboHybrid vector opclasses';
+COMMENT ON FUNCTION turbohybrid_vector_norm(vector) IS 'Vector norm support function used by TurboHybrid vector opclasses';
 COMMENT ON FUNCTION turbohybrid_handler(pg_catalog.internal) IS 'Index access method handler for TurboHybrid';
 COMMENT ON FUNCTION turbohybrid_index_stats(pg_catalog.regclass) IS 'Return stable TurboHybrid index metadata as jsonb';
 COMMENT ON FUNCTION turbohybrid_last_scan_stats() IS 'Return stable summary information for the last TurboHybrid scan in this backend as jsonb';
 COMMENT ON FUNCTION turbohybrid_simd_capabilities() IS 'Return pgturbohybrid build and architecture SIMD capability information as jsonb';
 
-COMMENT ON OPERATOR <~-> (@extschema:vector@.vector, turbohybrid_query) IS 'L2 distance operator for TurboHybrid vector queries';
-COMMENT ON OPERATOR <~#> (@extschema:vector@.vector, turbohybrid_query) IS 'Negative inner product distance operator for TurboHybrid vector queries';
-COMMENT ON OPERATOR <~> (@extschema:vector@.vector, turbohybrid_query) IS 'Cosine distance operator for TurboHybrid vector queries';
+COMMENT ON OPERATOR <~-> (vector, turbohybrid_query) IS 'L2 distance operator for TurboHybrid vector queries';
+COMMENT ON OPERATOR <~#> (vector, turbohybrid_query) IS 'Negative inner product distance operator for TurboHybrid vector queries';
+COMMENT ON OPERATOR <~> (vector, turbohybrid_query) IS 'Cosine distance operator for TurboHybrid vector queries';
 
 COMMENT ON OPERATOR CLASS vector_l2_turbohybrid_ops USING turbohybrid IS 'TurboHybrid L2 vector operator class';
 COMMENT ON OPERATOR CLASS vector_ip_turbohybrid_ops USING turbohybrid IS 'TurboHybrid inner product vector operator class';
