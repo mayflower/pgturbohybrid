@@ -2,6 +2,8 @@
 
 #include <math.h>
 
+#include "access/htup_details.h"
+#include "catalog/pg_extension.h"
 #include "catalog/pg_type.h"
 #include "commands/extension.h"
 #include "utils/syscache.h"
@@ -19,11 +21,30 @@ FUNCTION_PREFIX PG_FUNCTION_INFO_V1(pgturbohybrid_vector_cosine_distance);
 FUNCTION_PREFIX PG_FUNCTION_INFO_V1(pgturbohybrid_vector_norm);
 
 static void PgturbohybridEnsureVectorType(void);
+static Oid PgturbohybridExtensionSchema(Oid extensionOid);
 
 static void
 PgturbohybridEnsureVectorType(void)
 {
 	(void) PgturbohybridVectorTypeOid();
+}
+
+static Oid
+PgturbohybridExtensionSchema(Oid extensionOid)
+{
+	Form_pg_extension extensionForm;
+	HeapTuple	tuple;
+	Oid			schemaOid;
+
+	tuple = SearchSysCache1(EXTENSIONOID, ObjectIdGetDatum(extensionOid));
+	if (!HeapTupleIsValid(tuple))
+		return InvalidOid;
+
+	extensionForm = (Form_pg_extension) GETSTRUCT(tuple);
+	schemaOid = extensionForm->extnamespace;
+	ReleaseSysCache(tuple);
+
+	return schemaOid;
 }
 
 Oid
@@ -40,7 +61,7 @@ PgturbohybridVectorTypeOid(void)
 				 errmsg("vector extension is required by pgturbohybrid"),
 				 errhint("Run CREATE EXTENSION vector before using pgturbohybrid.")));
 
-	schemaOid = get_extension_schema(extensionOid);
+	schemaOid = PgturbohybridExtensionSchema(extensionOid);
 	if (!OidIsValid(schemaOid))
 		ereport(ERROR,
 				(errcode(ERRCODE_UNDEFINED_SCHEMA),
