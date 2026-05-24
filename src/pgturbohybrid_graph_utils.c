@@ -6,10 +6,12 @@
 
 #include "access/genam.h"
 #include "access/generic_xlog.h"
+#include "access/htup_details.h"
 #include "catalog/pg_am.h"
 #include "catalog/pg_class.h"
 #include "catalog/pg_index.h"
 #include "catalog/pg_opclass.h"
+#include "catalog/pg_type_d.h"
 #include "common/hashfn.h"
 #include "fmgr.h"
 #include "pgturbohybrid.h"

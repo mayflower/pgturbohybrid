@@ -19,7 +19,8 @@ listed on GitHub.
 - It does not use `SECURITY DEFINER`.
 - It does not mark functions `LEAKPROOF`.
 - It uses `MODULE_PATHNAME` for C functions.
-- It references pgvector's `vector` type with `@extschema:vector@`.
+- It references pgvector's `vector` type through the extension dependency
+  search path.
 - PostgreSQL built-in types and catalogs are schema-qualified where ambiguity
   would matter.
 
