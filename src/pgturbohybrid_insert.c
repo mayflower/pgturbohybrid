@@ -814,7 +814,7 @@ PgturbohybridGraphInsertTuple(Relation index, Datum *values, bool *isnull, ItemP
  * Insert a tuple into the index
  */
 bool
-hnswinsert(Relation index, Datum *values, bool *isnull, ItemPointer heap_tid,
+pgturbohybrid_graph_insert(Relation index, Datum *values, bool *isnull, ItemPointer heap_tid,
 		   Relation heap, IndexUniqueCheck checkUnique
 #if PG_VERSION_NUM >= 140000
 		   ,bool indexUnchanged
@@ -872,7 +872,7 @@ pgturbohybridinsert(Relation index, Datum *values, bool *isnull, ItemPointer hea
 	PgturbohybridGraphSetForcepgturbohybridIndex(true);
 	PG_TRY();
 	{
-		result = hnswinsert(index, values, isnull, heap_tid, heap, checkUnique
+		result = pgturbohybrid_graph_insert(index, values, isnull, heap_tid, heap, checkUnique
 #if PG_VERSION_NUM >= 140000
 							,indexUnchanged
 #endif

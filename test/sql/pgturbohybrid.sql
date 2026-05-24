@@ -201,6 +201,124 @@ BEGIN
 END
 $$;
 
+DO $$
+DECLARE
+	top_id int;
+BEGIN
+	EXECUTE 'PREPARE tqh_prepared(vector) AS
+		SELECT id
+		FROM tqh_docs
+		ORDER BY embedding <~> turbohybrid_query(
+			vector_query => $1,
+			dense_k => 4,
+			final_k => 1
+		)
+		LIMIT 1';
+	EXECUTE 'EXECUTE tqh_prepared(''[1,0,0]''::vector)' INTO top_id;
+	EXECUTE 'DEALLOCATE tqh_prepared';
+
+	IF top_id <> 1 THEN
+		RAISE EXCEPTION 'unexpected prepared statement result: %', top_id;
+	END IF;
+END
+$$;
+
+DO $$
+DECLARE
+	top_id int;
+BEGIN
+	WITH q AS (
+		SELECT turbohybrid_query(
+			vector_query => '[1,0,0]'::vector,
+			dense_k => 4,
+			final_k => 1
+		) AS query
+	)
+	SELECT id INTO top_id
+	FROM tqh_docs, q
+	ORDER BY embedding <~> q.query
+	LIMIT 1;
+
+	IF top_id <> 1 THEN
+		RAISE EXCEPTION 'unexpected CTE query result: %', top_id;
+	END IF;
+END
+$$;
+
+DO $$
+DECLARE
+	top_id int;
+BEGIN
+	SELECT id INTO top_id
+	FROM (
+		SELECT *
+		FROM tqh_docs
+	) d
+	ORDER BY d.embedding <~> turbohybrid_query(
+		vector_query => '[1,0,0]'::vector,
+		dense_k => 4,
+		final_k => 1
+	)
+	LIMIT 1;
+
+	IF top_id <> 1 THEN
+		RAISE EXCEPTION 'unexpected subquery result: %', top_id;
+	END IF;
+END
+$$;
+
+CREATE TEMP TABLE tqh_filter (id int PRIMARY KEY);
+INSERT INTO tqh_filter VALUES (1), (3);
+
+DO $$
+DECLARE
+	top_id int;
+BEGIN
+	SELECT d.id INTO top_id
+	FROM tqh_docs d
+	JOIN tqh_filter f USING (id)
+	ORDER BY d.embedding <~> turbohybrid_query(
+		vector_query => '[1,0,0]'::vector,
+		dense_k => 4,
+		final_k => 1
+	)
+	LIMIT 1;
+
+	IF top_id <> 1 THEN
+		RAISE EXCEPTION 'unexpected join query result: %', top_id;
+	END IF;
+END
+$$;
+
+DO $$
+DECLARE
+	distance float8;
+BEGIN
+	SELECT embedding <~-> turbohybrid_query(
+		vector_query => '[1,0,0]'::vector
+	) INTO distance
+	FROM tqh_docs
+	WHERE id = 1;
+
+	IF distance <> 0 THEN
+		RAISE EXCEPTION 'unexpected projected dense distance: %', distance;
+	END IF;
+END
+$$;
+
+DO $$
+BEGIN
+	PERFORM embedding <~> turbohybrid_query(
+		vector_query => '[1,0,0]'::vector,
+		text_query => websearch_to_tsquery('english', 'postgres')
+	)
+	FROM tqh_docs
+	WHERE id = 1;
+	RAISE EXCEPTION 'expected text-aware scalar projection rejection';
+EXCEPTION WHEN feature_not_supported THEN
+END
+$$;
+
 INSERT INTO tqh_docs VALUES
 	(5, '[1,0,1]', to_tsvector('english', 'fresh delta term'));
 
@@ -254,6 +372,80 @@ BEGIN
 	PERFORM turbohybrid_index_stats('tqh_docs_idx'::regclass);
 	PERFORM turbohybrid_last_scan_stats();
 	PERFORM turbohybrid_simd_capabilities();
+END
+$$;
+
+CREATE TABLE tqh_empty_docs (
+	id int,
+	embedding vector(3),
+	body_tsv tsvector
+);
+
+CREATE INDEX tqh_empty_docs_idx ON tqh_empty_docs
+USING turbohybrid (
+	embedding vector_l2_turbohybrid_ops,
+	body_tsv bm25_tsvector_turbohybrid_ops
+);
+
+DO $$
+DECLARE
+	result_count int;
+BEGIN
+	SELECT count(*) INTO result_count
+	FROM (
+		SELECT id
+		FROM tqh_empty_docs
+		ORDER BY embedding <~-> turbohybrid_query(
+			vector_query => '[1,0,0]'::vector,
+			dense_k => 4,
+			final_k => 1
+		)
+		LIMIT 1
+	) s;
+
+	IF result_count <> 0 THEN
+		RAISE EXCEPTION 'unexpected empty index result count: %', result_count;
+	END IF;
+END
+$$;
+
+DROP TABLE tqh_empty_docs;
+
+DO $$
+DECLARE
+	simd_on_ids int[];
+	simd_off_ids int[];
+BEGIN
+	SET LOCAL turbohybrid.simd = on;
+	SELECT array_agg(id) INTO simd_on_ids
+	FROM (
+		SELECT id
+		FROM tqh_docs
+		ORDER BY embedding <~> turbohybrid_query(
+			vector_query => '[1,0,0]'::vector,
+			dense_k => 4,
+			final_k => 3
+		)
+		LIMIT 3
+	) s;
+
+	SET LOCAL turbohybrid.simd = off;
+	SELECT array_agg(id) INTO simd_off_ids
+	FROM (
+		SELECT id
+		FROM tqh_docs
+		ORDER BY embedding <~> turbohybrid_query(
+			vector_query => '[1,0,0]'::vector,
+			dense_k => 4,
+			final_k => 3
+		)
+		LIMIT 3
+	) s;
+
+	IF simd_on_ids <> simd_off_ids THEN
+		RAISE EXCEPTION 'SIMD result parity failed: on %, off %',
+			simd_on_ids, simd_off_ids;
+	END IF;
 END
 $$;
 

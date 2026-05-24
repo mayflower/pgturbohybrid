@@ -384,7 +384,7 @@ PgturbohybridGraphEstimateFilterSelectivity(IndexScanState *indexstate)
 		indexstate->ss.ps.state != NULL &&
 		indexstate->ss.ps.plan != NULL)
 	{
-		scanrelid = castNode(Scan, indexstate->ss.ps.plan)->scanrelid;
+		scanrelid = ((Scan *) indexstate->ss.ps.plan)->scanrelid;
 		if (scanrelid > 0)
 		{
 			rte = exec_rt_fetch(scanrelid, indexstate->ss.ps.state);

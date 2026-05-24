@@ -49,7 +49,7 @@ double		PgturbohybridCosineDistance(const Vector *a, const Vector *b);
 double		PgturbohybridVectorNorm(const Vector *vector);
 Datum		pgturbohybrid_l2_normalize(PG_FUNCTION_ARGS);
 
-/* TODO Move to better place */
+/* Export marker for PostgreSQL versions that require explicit symbol export. */
 #if PG_VERSION_NUM >= 160000
 #define FUNCTION_PREFIX
 #else

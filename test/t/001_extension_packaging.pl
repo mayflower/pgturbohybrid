@@ -22,7 +22,7 @@ sub feature_objects
 	return $node->safe_psql($db, q(
 		SELECT concat_ws(',',
 			to_regtype('turbohybrid_query') IS NOT NULL,
-			EXISTS (SELECT 1 FROM pg_am WHERE amname = 'pgturbohybrid'),
+			EXISTS (SELECT 1 FROM pg_am WHERE amname = 'turbohybrid'),
 			EXISTS (SELECT 1 FROM pg_proc WHERE proname = 'turbohybrid_query'),
 			EXISTS (SELECT 1 FROM pg_opclass WHERE opcname = 'vector_l2_turbohybrid_ops'),
 			EXISTS (SELECT 1 FROM pg_opclass WHERE opcname = 'vector_ip_turbohybrid_ops'),
@@ -62,7 +62,7 @@ is($node->safe_psql('pgturbohybrid_create', q(
 			  AND d.classid = 'pg_type'::regclass
 			  AND d.objid = 'vector'::regtype::oid
 		),
-		NOT EXISTS (
+		EXISTS (
 			SELECT 1
 			FROM pg_depend d
 			JOIN pg_extension e ON e.oid = d.refobjid
@@ -83,7 +83,7 @@ is($node->safe_psql('pgturbohybrid_create', q(
 			  AND p.proname LIKE '%debug%'
 		)
 	);
-)), 't,t,t', 'pgturbohybrid owns no vector type, pgvector operators, or debug functions');
+)), 't,t,t', 'pgturbohybrid owns no vector type, owns its hybrid operators, and exposes no debug functions');
 
 is($node->safe_psql('pgturbohybrid_create',
 	"SELECT extversion FROM pg_extension WHERE extname = 'vector';"),
@@ -95,7 +95,7 @@ is($node->safe_psql('pgturbohybrid_create', q(
 	SELECT concat_ws(',',
 		NOT EXISTS (SELECT 1 FROM pg_extension WHERE extname = 'pgturbohybrid'),
 		to_regtype('turbohybrid_query') IS NULL,
-		NOT EXISTS (SELECT 1 FROM pg_am WHERE amname = 'pgturbohybrid'),
+		NOT EXISTS (SELECT 1 FROM pg_am WHERE amname = 'turbohybrid'),
 		NOT EXISTS (SELECT 1 FROM pg_proc WHERE proname LIKE 'pgturbohybrid%'),
 		NOT EXISTS (SELECT 1 FROM pg_opclass WHERE opcname LIKE '%pgturbohybrid%'),
 		NOT EXISTS (SELECT 1 FROM pg_operator WHERE oprname IN ('<~>', '<~->', '<~#>')),

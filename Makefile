@@ -91,13 +91,8 @@ prove_installcheck:
 .PHONY: dist
 
 dist:
-	rm -rf dist/$(EXTENSION)-$(EXTVERSION) dist/$(EXTENSION)-$(EXTVERSION).zip dist/$(EXTENSION)-$(EXTVERSION).tar.gz
-	mkdir -p dist/$(EXTENSION)-$(EXTVERSION)
-	git ls-files -co --exclude-standard | while IFS= read -r file; do \
-		if [ -f "$$file" ]; then \
-			mkdir -p "dist/$(EXTENSION)-$(EXTVERSION)/$$(dirname "$$file")"; \
-			cp "$$file" "dist/$(EXTENSION)-$(EXTVERSION)/$$file"; \
-		fi; \
-	done
-	cd dist && zip -qr $(EXTENSION)-$(EXTVERSION).zip $(EXTENSION)-$(EXTVERSION)
-	cd dist && tar -czf $(EXTENSION)-$(EXTVERSION).tar.gz $(EXTENSION)-$(EXTVERSION)
+	git diff-index --quiet HEAD -- || (echo "make dist requires a clean committed tree" >&2; exit 1)
+	rm -rf dist/$(EXTENSION)-$(EXTVERSION).zip dist/$(EXTENSION)-$(EXTVERSION).tar.gz
+	mkdir -p dist
+	git archive --format=zip --prefix=$(EXTENSION)-$(EXTVERSION)/ -o dist/$(EXTENSION)-$(EXTVERSION).zip HEAD
+	git archive --format=tar --prefix=$(EXTENSION)-$(EXTVERSION)/ HEAD | gzip -n > dist/$(EXTENSION)-$(EXTVERSION).tar.gz

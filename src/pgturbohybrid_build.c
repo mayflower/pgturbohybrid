@@ -13,9 +13,9 @@
  * private memory, which contains information that doesn't change throughout
  * the build, and pointers to the shared structs in shared memory. The shared
  * memory area is mapped to a different address in each worker process, and
- * 'PgturbohybridGraphBuildState.hnswarea' points to the beginning of the shared area in the
+ * 'PgturbohybridGraphBuildState.graphArea' points to the beginning of the shared area in the
  * worker process's address space. All pointers used in the graph are
- * "relative pointers", stored as an offset from 'hnswarea'.
+ * "relative pointers", stored as an offset from 'graphArea'.
  *
  * Each element is protected by an LWLock. It must be held when reading or
  * modifying the element's neighbors or 'heaptids'.
@@ -178,7 +178,7 @@ CreateGraphPages(PgturbohybridGraphBuildState * buildstate)
 	Buffer		buf;
 	Page		page;
 	PgturbohybridGraphElementPtr iter = buildstate->graph->head;
-	char	   *base = buildstate->hnswarea;
+	char	   *base = buildstate->graphArea;
 
 	/* Calculate sizes */
 	maxSize = PGTURBOHYBRID_GRAPH_MAX_SIZE;
@@ -277,7 +277,7 @@ WriteNeighborTuples(PgturbohybridGraphBuildState * buildstate)
 	ForkNumber	forkNum = buildstate->forkNum;
 	int			m = buildstate->m;
 	PgturbohybridGraphElementPtr iter = buildstate->graph->head;
-	char	   *base = buildstate->hnswarea;
+	char	   *base = buildstate->graphArea;
 	PgturbohybridGraphNeighborTuple ntup;
 
 	/* Allocate once */
@@ -435,7 +435,7 @@ static void
 UpdateGraphInMemory(PgturbohybridGraphSupport * support, PgturbohybridGraphElement element, int m, PgturbohybridGraphElement entryPoint, PgturbohybridGraphBuildState * buildstate)
 {
 	PgturbohybridGraphGraph  *graph = buildstate->graph;
-	char	   *base = buildstate->hnswarea;
+	char	   *base = buildstate->graphArea;
 
 	/* Look for duplicate */
 	if (FindDuplicateInMemory(base, element))
@@ -465,7 +465,7 @@ InsertTupleInMemory(PgturbohybridGraphBuildState * buildstate, PgturbohybridGrap
 	LWLock	   *entryWaitLock = &graph->entryWaitLock;
 	int			efConstruction = buildstate->efConstruction;
 	int			m = buildstate->m;
-	char	   *base = buildstate->hnswarea;
+	char	   *base = buildstate->graphArea;
 
 	/* Wait if another process needs exclusive lock on entry lock */
 	LWLockAcquire(entryWaitLock, LW_EXCLUSIVE);
@@ -513,7 +513,7 @@ InsertTuple(Relation index, Datum *values, bool *isnull, ItemPointer heaptid, Pg
 	Size		valueSize;
 	Pointer		valuePtr;
 	LWLock	   *flushLock = &graph->flushLock;
-	char	   *base = buildstate->hnswarea;
+	char	   *base = buildstate->graphArea;
 	Datum		value;
 	Size		memoryMargin;
 
@@ -691,7 +691,7 @@ PgturbohybridGraphSharedMemoryAlloc(Size size, void *state)
 	if (buildstate->graph->memoryUsed + alignedSize > buildstate->graph->memoryTotal)
 		elog(ERROR, "pgturbohybrid allocator out of memory");
 
-	chunk = buildstate->hnswarea + buildstate->graph->memoryUsed;
+	chunk = buildstate->graphArea + buildstate->graph->memoryUsed;
 	buildstate->graph->memoryUsed += alignedSize;
 	return chunk;
 }
@@ -757,9 +757,9 @@ InitBuildState(PgturbohybridGraphBuildState * buildstate, Relation heap, Relatio
 
 	InitAllocator(&buildstate->allocator, &PgturbohybridGraphMemoryContextAlloc, buildstate);
 
-	buildstate->hnswleader = NULL;
-	buildstate->hnswshared = NULL;
-	buildstate->hnswarea = NULL;
+	buildstate->graphLeader = NULL;
+	buildstate->graphShared = NULL;
+	buildstate->graphArea = NULL;
 }
 
 /*
@@ -778,25 +778,25 @@ FreeBuildState(PgturbohybridGraphBuildState * buildstate)
 static double
 ParallelHeapScan(PgturbohybridGraphBuildState * buildstate)
 {
-	PgturbohybridGraphShared *hnswshared = buildstate->hnswleader->hnswshared;
+	PgturbohybridGraphShared *graphShared = buildstate->graphLeader->graphShared;
 	int			nparticipanttuplesorts;
 	double		reltuples;
 
-	nparticipanttuplesorts = buildstate->hnswleader->nparticipanttuplesorts;
+	nparticipanttuplesorts = buildstate->graphLeader->nparticipanttuplesorts;
 	for (;;)
 	{
-		SpinLockAcquire(&hnswshared->mutex);
-		if (hnswshared->nparticipantsdone == nparticipanttuplesorts)
+		SpinLockAcquire(&graphShared->mutex);
+		if (graphShared->nparticipantsdone == nparticipanttuplesorts)
 		{
-			buildstate->graph = &hnswshared->graphData;
-			buildstate->hnswarea = buildstate->hnswleader->hnswarea;
-			reltuples = hnswshared->reltuples;
-			SpinLockRelease(&hnswshared->mutex);
+			buildstate->graph = &graphShared->graphData;
+			buildstate->graphArea = buildstate->graphLeader->graphArea;
+			reltuples = graphShared->reltuples;
+			SpinLockRelease(&graphShared->mutex);
 			break;
 		}
-		SpinLockRelease(&hnswshared->mutex);
+		SpinLockRelease(&graphShared->mutex);
 
-		ConditionVariableSleep(&hnswshared->workersdonecv,
+		ConditionVariableSleep(&graphShared->workersdonecv,
 							   WAIT_EVENT_PARALLEL_CREATE_INDEX_SCAN);
 	}
 
@@ -809,7 +809,7 @@ ParallelHeapScan(PgturbohybridGraphBuildState * buildstate)
  * Perform a worker's portion of a parallel insert
  */
 static void
-PgturbohybridGraphParallelScanAndInsert(Relation heapRel, Relation indexRel, PgturbohybridGraphShared * hnswshared, char *hnswarea, bool progress)
+PgturbohybridGraphParallelScanAndInsert(Relation heapRel, Relation indexRel, PgturbohybridGraphShared * graphShared, char *graphArea, bool progress)
 {
 	PgturbohybridGraphBuildState buildstate;
 	TableScanDesc scan;
@@ -818,13 +818,13 @@ PgturbohybridGraphParallelScanAndInsert(Relation heapRel, Relation indexRel, Pgt
 
 	/* Join parallel scan */
 	indexInfo = BuildIndexInfo(indexRel);
-	indexInfo->ii_Concurrent = hnswshared->isconcurrent;
+	indexInfo->ii_Concurrent = graphShared->isconcurrent;
 	InitBuildState(&buildstate, heapRel, indexRel, indexInfo, MAIN_FORKNUM);
-	buildstate.graph = &hnswshared->graphData;
-	buildstate.hnswarea = hnswarea;
+	buildstate.graph = &graphShared->graphData;
+	buildstate.graphArea = graphArea;
 	InitAllocator(&buildstate.allocator, &PgturbohybridGraphSharedMemoryAlloc, &buildstate);
 	scan = table_beginscan_parallel(heapRel,
-									ParallelTableScanFromHnswShared(hnswshared)
+									ParallelTableScanFromPgturbohybridGraphShared(graphShared)
 #if PG_VERSION_NUM >= 190000
 									,SO_NONE
 #endif
@@ -834,10 +834,10 @@ PgturbohybridGraphParallelScanAndInsert(Relation heapRel, Relation indexRel, Pgt
 									   (void *) &buildstate, scan);
 
 	/* Record statistics */
-	SpinLockAcquire(&hnswshared->mutex);
-	hnswshared->nparticipantsdone++;
-	hnswshared->reltuples += reltuples;
-	SpinLockRelease(&hnswshared->mutex);
+	SpinLockAcquire(&graphShared->mutex);
+	graphShared->nparticipantsdone++;
+	graphShared->reltuples += reltuples;
+	SpinLockRelease(&graphShared->mutex);
 
 	/* Log statistics */
 	if (progress)
@@ -846,7 +846,7 @@ PgturbohybridGraphParallelScanAndInsert(Relation heapRel, Relation indexRel, Pgt
 		ereport(DEBUG1, (errmsg("worker processed " INT64_FORMAT " tuples", (int64) reltuples)));
 
 	/* Notify leader */
-	ConditionVariableSignal(&hnswshared->workersdonecv);
+	ConditionVariableSignal(&graphShared->workersdonecv);
 
 	FreeBuildState(&buildstate);
 }
@@ -858,8 +858,8 @@ void
 PgturbohybridParallelBuildMain(dsm_segment *seg, shm_toc *toc)
 {
 	char	   *sharedquery;
-	PgturbohybridGraphShared *hnswshared;
-	char	   *hnswarea;
+	PgturbohybridGraphShared *graphShared;
+	char	   *graphArea;
 	Relation	heapRel;
 	Relation	indexRel;
 	LOCKMODE	heapLockmode;
@@ -873,10 +873,10 @@ PgturbohybridParallelBuildMain(dsm_segment *seg, shm_toc *toc)
 	pgstat_report_activity(STATE_RUNNING, debug_query_string);
 
 	/* Look up shared state */
-	hnswshared = shm_toc_lookup(toc, PARALLEL_KEY_PGTURBOHYBRID_SHARED, false);
+	graphShared = shm_toc_lookup(toc, PARALLEL_KEY_PGTURBOHYBRID_SHARED, false);
 
 	/* Open relations using lock modes known to be obtained by index.c */
-	if (!hnswshared->isconcurrent)
+	if (!graphShared->isconcurrent)
 	{
 		heapLockmode = ShareLock;
 		indexLockmode = AccessExclusiveLock;
@@ -888,13 +888,13 @@ PgturbohybridParallelBuildMain(dsm_segment *seg, shm_toc *toc)
 	}
 
 	/* Open relations within worker */
-	heapRel = table_open(hnswshared->heaprelid, heapLockmode);
-	indexRel = index_open(hnswshared->indexrelid, indexLockmode);
+	heapRel = table_open(graphShared->heaprelid, heapLockmode);
+	indexRel = index_open(graphShared->indexrelid, indexLockmode);
 
-	hnswarea = shm_toc_lookup(toc, PARALLEL_KEY_PGTURBOHYBRID_AREA, false);
+	graphArea = shm_toc_lookup(toc, PARALLEL_KEY_PGTURBOHYBRID_AREA, false);
 
 	/* Perform inserts */
-	PgturbohybridGraphParallelScanAndInsert(heapRel, indexRel, hnswshared, hnswarea, false);
+	PgturbohybridGraphParallelScanAndInsert(heapRel, indexRel, graphShared, graphArea, false);
 
 	/* Close relations within worker */
 	index_close(indexRel, indexLockmode);
@@ -905,15 +905,15 @@ PgturbohybridParallelBuildMain(dsm_segment *seg, shm_toc *toc)
  * End parallel build
  */
 static void
-PgturbohybridGraphEndParallel(PgturbohybridGraphLeader * hnswleader)
+PgturbohybridGraphEndParallel(PgturbohybridGraphLeader * graphLeader)
 {
 	/* Shutdown worker processes */
-	WaitForParallelWorkersToFinish(hnswleader->pcxt);
+	WaitForParallelWorkersToFinish(graphLeader->pcxt);
 
 	/* Free last reference to MVCC snapshot, if one was used */
-	if (IsMVCCSnapshot(hnswleader->snapshot))
-		UnregisterSnapshot(hnswleader->snapshot);
-	DestroyParallelContext(hnswleader->pcxt);
+	if (IsMVCCSnapshot(graphLeader->snapshot))
+		UnregisterSnapshot(graphLeader->snapshot);
+	DestroyParallelContext(graphLeader->pcxt);
 	ExitParallelMode();
 }
 
@@ -932,10 +932,10 @@ ParallelEstimateShared(Relation heap, Snapshot snapshot)
 static void
 PgturbohybridGraphLeaderParticipateAsWorker(PgturbohybridGraphBuildState * buildstate)
 {
-	PgturbohybridGraphLeader *hnswleader = buildstate->hnswleader;
+	PgturbohybridGraphLeader *graphLeader = buildstate->graphLeader;
 
 	/* Perform work common to all participants */
-	PgturbohybridGraphParallelScanAndInsert(buildstate->heap, buildstate->index, hnswleader->hnswshared, hnswleader->hnswarea, true);
+	PgturbohybridGraphParallelScanAndInsert(buildstate->heap, buildstate->index, graphLeader->graphShared, graphLeader->graphArea, true);
 }
 
 /*
@@ -949,9 +949,9 @@ PgturbohybridGraphBeginParallel(PgturbohybridGraphBuildState * buildstate, bool 
 	Size		esthnswshared;
 	Size		esthnswarea;
 	Size		estother;
-	PgturbohybridGraphShared *hnswshared;
-	char	   *hnswarea;
-	PgturbohybridGraphLeader *hnswleader = (PgturbohybridGraphLeader *) palloc0(sizeof(PgturbohybridGraphLeader));
+	PgturbohybridGraphShared *graphShared;
+	char	   *graphArea;
+	PgturbohybridGraphLeader *graphLeader = (PgturbohybridGraphLeader *) palloc0(sizeof(PgturbohybridGraphLeader));
 	bool		leaderparticipates = true;
 	int			querylen;
 
@@ -1011,33 +1011,33 @@ PgturbohybridGraphBeginParallel(PgturbohybridGraphBuildState * buildstate, bool 
 	}
 
 	/* Store shared build state, for which we reserved space */
-	hnswshared = (PgturbohybridGraphShared *) shm_toc_allocate(pcxt->toc, esthnswshared);
+	graphShared = (PgturbohybridGraphShared *) shm_toc_allocate(pcxt->toc, esthnswshared);
 	/* Initialize immutable state */
-	hnswshared->heaprelid = RelationGetRelid(buildstate->heap);
-	hnswshared->indexrelid = RelationGetRelid(buildstate->index);
-	hnswshared->isconcurrent = isconcurrent;
-	ConditionVariableInit(&hnswshared->workersdonecv);
-	SpinLockInit(&hnswshared->mutex);
+	graphShared->heaprelid = RelationGetRelid(buildstate->heap);
+	graphShared->indexrelid = RelationGetRelid(buildstate->index);
+	graphShared->isconcurrent = isconcurrent;
+	ConditionVariableInit(&graphShared->workersdonecv);
+	SpinLockInit(&graphShared->mutex);
 	/* Initialize mutable state */
-	hnswshared->nparticipantsdone = 0;
-	hnswshared->reltuples = 0;
+	graphShared->nparticipantsdone = 0;
+	graphShared->reltuples = 0;
 	table_parallelscan_initialize(buildstate->heap,
-								  ParallelTableScanFromHnswShared(hnswshared),
+								  ParallelTableScanFromPgturbohybridGraphShared(graphShared),
 								  snapshot);
 
-	hnswarea = (char *) shm_toc_allocate(pcxt->toc, esthnswarea);
-	InitGraph(&hnswshared->graphData, hnswarea, esthnswarea);
+	graphArea = (char *) shm_toc_allocate(pcxt->toc, esthnswarea);
+	InitGraph(&graphShared->graphData, graphArea, esthnswarea);
 
 	/*
 	 * Avoid base address for relptr for Postgres < 14.5
 	 * https://github.com/postgres/postgres/commit/7201cd18627afc64850537806da7f22150d1a83b
 	 */
 #if PG_VERSION_NUM < 140005
-	hnswshared->graphData.memoryUsed += MAXALIGN(1);
+	graphShared->graphData.memoryUsed += MAXALIGN(1);
 #endif
 
-	shm_toc_insert(pcxt->toc, PARALLEL_KEY_PGTURBOHYBRID_SHARED, hnswshared);
-	shm_toc_insert(pcxt->toc, PARALLEL_KEY_PGTURBOHYBRID_AREA, hnswarea);
+	shm_toc_insert(pcxt->toc, PARALLEL_KEY_PGTURBOHYBRID_SHARED, graphShared);
+	shm_toc_insert(pcxt->toc, PARALLEL_KEY_PGTURBOHYBRID_AREA, graphArea);
 
 	/* Store query string for workers */
 	if (debug_query_string)
@@ -1051,18 +1051,18 @@ PgturbohybridGraphBeginParallel(PgturbohybridGraphBuildState * buildstate, bool 
 
 	/* Launch workers, saving status for leader/caller */
 	LaunchParallelWorkers(pcxt);
-	hnswleader->pcxt = pcxt;
-	hnswleader->nparticipanttuplesorts = pcxt->nworkers_launched;
+	graphLeader->pcxt = pcxt;
+	graphLeader->nparticipanttuplesorts = pcxt->nworkers_launched;
 	if (leaderparticipates)
-		hnswleader->nparticipanttuplesorts++;
-	hnswleader->hnswshared = hnswshared;
-	hnswleader->snapshot = snapshot;
-	hnswleader->hnswarea = hnswarea;
+		graphLeader->nparticipanttuplesorts++;
+	graphLeader->graphShared = graphShared;
+	graphLeader->snapshot = snapshot;
+	graphLeader->graphArea = graphArea;
 
 	/* If no workers were successfully launched, back out (do serial build) */
 	if (pcxt->nworkers_launched == 0)
 	{
-		PgturbohybridGraphEndParallel(hnswleader);
+		PgturbohybridGraphEndParallel(graphLeader);
 		return;
 	}
 
@@ -1070,7 +1070,7 @@ PgturbohybridGraphBeginParallel(PgturbohybridGraphBuildState * buildstate, bool 
 	ereport(DEBUG1, (errmsg("using %d parallel workers", pcxt->nworkers_launched)));
 
 	/* Save leader state now that it's clear build will be parallel */
-	buildstate->hnswleader = hnswleader;
+	buildstate->graphLeader = graphLeader;
 
 	/* Join heap scan ourselves */
 	if (leaderparticipates)
@@ -1122,7 +1122,7 @@ BuildGraph(PgturbohybridGraphBuildState * buildstate)
 	/* Add tuples to graph */
 	if (buildstate->heap != NULL)
 	{
-		if (buildstate->hnswleader)
+		if (buildstate->graphLeader)
 			buildstate->reltuples = ParallelHeapScan(buildstate);
 		else
 			buildstate->reltuples = table_index_build_scan(buildstate->heap, buildstate->index, buildstate->indexInfo,
@@ -1136,8 +1136,8 @@ BuildGraph(PgturbohybridGraphBuildState * buildstate)
 		FlushPages(buildstate);
 
 	/* End parallel build */
-	if (buildstate->hnswleader)
-		PgturbohybridGraphEndParallel(buildstate->hnswleader);
+	if (buildstate->graphLeader)
+		PgturbohybridGraphEndParallel(buildstate->graphLeader);
 }
 
 /*
@@ -1165,7 +1165,7 @@ BuildIndex(Relation heap, Relation index, IndexInfo *indexInfo,
  * Build the index for a logged table
  */
 IndexBuildResult *
-hnswbuild(Relation heap, Relation index, IndexInfo *indexInfo)
+pgturbohybrid_graph_build(Relation heap, Relation index, IndexInfo *indexInfo)
 {
 	IndexBuildResult *result;
 	PgturbohybridGraphBuildState buildstate;
@@ -1196,7 +1196,7 @@ pgturbohybridbuild(Relation heap, Relation index, IndexInfo *indexInfo)
 	PgturbohybridGraphSetForcepgturbohybridIndex(true);
 	PG_TRY();
 	{
-		result = hnswbuild(heap, index, indexInfo);
+		result = pgturbohybrid_graph_build(heap, index, indexInfo);
 	}
 	PG_CATCH();
 	{
@@ -1224,14 +1224,14 @@ pgturbohybridbuildempty(Relation index)
 				 errmsg("turbohybrid requires a native graph-compatible opclass"),
 				 errhint("Use a turbohybrid vector opclass.")));
 
-	hnswbuildempty(index);
+	pgturbohybrid_graph_build_empty(index);
 }
 
 /*
  * Build the index for an unlogged table
  */
 void
-hnswbuildempty(Relation index)
+pgturbohybrid_graph_build_empty(Relation index)
 {
 	IndexInfo  *indexInfo = BuildIndexInfo(index);
 	PgturbohybridGraphBuildState buildstate;
