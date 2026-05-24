@@ -7,6 +7,7 @@
 
 #include "access/genam.h"
 #include "access/parallel.h"
+#include "common/relpath.h"
 #include "lib/pairingheap.h"
 #include "nodes/execnodes.h"
 #include "port.h"				/* for random() */
