@@ -34,5 +34,16 @@ At install time, `sql/pgturbohybrid--0.1.0.sql` checks:
 - `vector` is installed.
 - pgvector version is 0.8.2 or newer.
 
+## Extension Dependency Search Path
+
+The SQL install script intentionally uses the unqualified `vector` type in
+function signatures and operator class declarations. During `CREATE EXTENSION`,
+PostgreSQL makes prerequisite extension schemas available to the script for
+extensions listed in `pgturbohybrid.control` with `requires = 'vector'`.
+
+The regression suite covers pgvector installed outside `public` and
+`pgturbohybrid` installed in a separate schema. This keeps the SQL portable
+without hard-coding either extension schema.
+
 At runtime, vector access goes through the compatibility layer, which validates
 dimensions, varlena size, reserved header fields, and finite float payloads.

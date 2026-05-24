@@ -8,8 +8,8 @@ accepted operational risk.
 
 Report security issues privately to the maintainers before opening a public
 issue. If this code is published under the Mayflower organization, use the
-repository's GitHub security advisory workflow or contact the repository owner
-listed on GitHub.
+repository's GitHub security advisory workflow or email
+security@mayflower.de.
 
 ## Extension SQL
 
