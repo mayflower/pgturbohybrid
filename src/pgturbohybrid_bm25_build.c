@@ -101,6 +101,17 @@ static BlockNumber pgturbohybrid_bm25_delta_cursor_tail = InvalidBlockNumber;
 static uint64 pgturbohybrid_bm25_delta_cursor_generation = 0;
 static uint32 pgturbohybrid_bm25_delta_cursor_pages = 0;
 
+static void
+PgturbohybridBufFileReadExact(BufFile *file, void *ptr, size_t size)
+{
+#if PG_VERSION_NUM >= 160000
+	BufFileReadExact(file, ptr, size);
+#else
+	if (BufFileRead(file, ptr, size) != size)
+		elog(ERROR, "could not read pgturbohybrid BM25 spill file");
+#endif
+}
+
 static bool PgturbohybridBm25PageIsKind(Page page, uint16 pageKind);
 static bool PgturbohybridBm25ReadMeta(Relation index, PgturbohybridBm25MetaTupleData *meta,
 								 BlockNumber *metaBlkno);
@@ -2065,15 +2076,17 @@ PgturbohybridSpillCursorRead(PgturbohybridBm25SpillCursor *cursor)
 	if (cursor->remaining == 0)
 		return false;
 
-	BufFileReadExact(cursor->run->file, &cursor->termHash,
-					 sizeof(cursor->termHash));
-	BufFileReadExact(cursor->run->file, &cursor->nodeId,
-					 sizeof(cursor->nodeId));
-	BufFileReadExact(cursor->run->file, &cursor->tf, sizeof(cursor->tf));
-	BufFileReadExact(cursor->run->file, &cursor->termLen,
-					 sizeof(cursor->termLen));
+	PgturbohybridBufFileReadExact(cursor->run->file, &cursor->termHash,
+								  sizeof(cursor->termHash));
+	PgturbohybridBufFileReadExact(cursor->run->file, &cursor->nodeId,
+								  sizeof(cursor->nodeId));
+	PgturbohybridBufFileReadExact(cursor->run->file, &cursor->tf,
+								  sizeof(cursor->tf));
+	PgturbohybridBufFileReadExact(cursor->run->file, &cursor->termLen,
+								  sizeof(cursor->termLen));
 	cursor->termBytes = palloc(cursor->termLen);
-	BufFileReadExact(cursor->run->file, cursor->termBytes, cursor->termLen);
+	PgturbohybridBufFileReadExact(cursor->run->file, cursor->termBytes,
+								  cursor->termLen);
 	cursor->remaining--;
 	cursor->valid = true;
 	return true;

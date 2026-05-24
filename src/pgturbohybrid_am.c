@@ -9,6 +9,7 @@
 #include "access/sysattr.h"
 #include "access/xact.h"
 #include "catalog/namespace.h"
+#include "catalog/pg_extension.h"
 #include "catalog/pg_opclass.h"
 #include "catalog/pg_type.h"
 #include "catalog/pg_type_d.h"
@@ -1734,6 +1735,24 @@ PgturbohybridPathHasFilter(IndexPath *path)
 }
 
 static Oid
+PgturbohybridExtensionSchema(Oid extensionOid)
+{
+	Form_pg_extension extensionForm;
+	HeapTuple	tuple;
+	Oid			schemaOid;
+
+	tuple = SearchSysCache1(EXTENSIONOID, ObjectIdGetDatum(extensionOid));
+	if (!HeapTupleIsValid(tuple))
+		return InvalidOid;
+
+	extensionForm = (Form_pg_extension) GETSTRUCT(tuple);
+	schemaOid = extensionForm->extnamespace;
+	ReleaseSysCache(tuple);
+
+	return schemaOid;
+}
+
+static Oid
 PgturbohybridQueryTypeOid(void)
 {
 	Oid			extensionOid;
@@ -1743,7 +1762,7 @@ PgturbohybridQueryTypeOid(void)
 	if (!OidIsValid(extensionOid))
 		return InvalidOid;
 
-	schemaOid = get_extension_schema(extensionOid);
+	schemaOid = PgturbohybridExtensionSchema(extensionOid);
 	if (!OidIsValid(schemaOid))
 		return InvalidOid;
 
@@ -1958,19 +1977,27 @@ tqhybridcostestimate(PlannerInfo *root, IndexPath *path, double loop_count,
 static bytea *
 tqhybridoptions(Datum reloptions, bool validate)
 {
+#if PG_VERSION_NUM >= 180000
+#define PGTURBOHYBRID_RELOPT_PARSE(name, type, field) \
+	{name, type, offsetof(PgturbohybridOptions, field), 0}
+#else
+#define PGTURBOHYBRID_RELOPT_PARSE(name, type, field) \
+	{name, type, offsetof(PgturbohybridOptions, field)}
+#endif
 	static const relopt_parse_elt tab[] = {
-		{"graph_m", RELOPT_TYPE_INT, offsetof(PgturbohybridOptions, m)},
-		{"graph_ef_construction", RELOPT_TYPE_INT, offsetof(PgturbohybridOptions, efConstruction)},
-		{"routing", RELOPT_TYPE_ENUM, offsetof(PgturbohybridOptions, routing)},
-		{"graph_ef_search", RELOPT_TYPE_INT, offsetof(PgturbohybridOptions, graphEfSearch)},
-		{"graph_oversampling", RELOPT_TYPE_INT, offsetof(PgturbohybridOptions, graphOversampling)},
-		{"quantization_bits", RELOPT_TYPE_INT, offsetof(PgturbohybridOptions, tqBits)},
-		{"exact_storage", RELOPT_TYPE_BOOL, offsetof(PgturbohybridOptions, tqExactStorage)},
+		PGTURBOHYBRID_RELOPT_PARSE("graph_m", RELOPT_TYPE_INT, m),
+		PGTURBOHYBRID_RELOPT_PARSE("graph_ef_construction", RELOPT_TYPE_INT, efConstruction),
+		PGTURBOHYBRID_RELOPT_PARSE("routing", RELOPT_TYPE_ENUM, routing),
+		PGTURBOHYBRID_RELOPT_PARSE("graph_ef_search", RELOPT_TYPE_INT, graphEfSearch),
+		PGTURBOHYBRID_RELOPT_PARSE("graph_oversampling", RELOPT_TYPE_INT, graphOversampling),
+		PGTURBOHYBRID_RELOPT_PARSE("quantization_bits", RELOPT_TYPE_INT, tqBits),
+		PGTURBOHYBRID_RELOPT_PARSE("exact_storage", RELOPT_TYPE_BOOL, tqExactStorage),
 	};
 	PgturbohybridOptions *opts = (PgturbohybridOptions *) build_reloptions(reloptions, validate,
 																 pgturbohybrid_relopt_kind,
 																 sizeof(PgturbohybridOptions),
 																 tab, lengthof(tab));
+#undef PGTURBOHYBRID_RELOPT_PARSE
 
 	if (opts != NULL)
 	{

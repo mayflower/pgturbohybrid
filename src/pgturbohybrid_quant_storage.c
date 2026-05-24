@@ -10,7 +10,7 @@
 Oid
 PgturbohybridGraphRelFileNumber(Relation index)
 {
-#if PG_VERSION_NUM >= 150000
+#if PG_VERSION_NUM >= 160000
 	return index->rd_locator.relNumber;
 #else
 	return index->rd_node.relNode;

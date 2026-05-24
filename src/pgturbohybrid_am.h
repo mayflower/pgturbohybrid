@@ -118,6 +118,5 @@ const char *PgturbohybridBm25RuntimeStrategyName(int strategy);
 
 void		PgturbohybridInit(void);
 PlannedStmt *PgturbohybridCurrentPlannedStmt(void);
-Datum		pgturbohybrid_handler(PG_FUNCTION_ARGS);
 
 #endif
