@@ -1977,7 +1977,7 @@ tqhybridcostestimate(PlannerInfo *root, IndexPath *path, double loop_count,
 static bytea *
 tqhybridoptions(Datum reloptions, bool validate)
 {
-#if PG_VERSION_NUM >= 180000
+#if PG_VERSION_NUM >= 180000 && PG_VERSION_NUM < 190000
 #define PGTURBOHYBRID_RELOPT_PARSE(name, type, field) \
 	{name, type, offsetof(PgturbohybridOptions, field), 0}
 #else
