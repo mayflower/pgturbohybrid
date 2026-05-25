@@ -1,4 +1,4 @@
-comment = 'hybrid dense vector and BM25 search for pgvector'
+comment = 'hybrid vector and BM25 search for PostgreSQL on top of pgvector'
 default_version = '0.1.0'
 module_pathname = '$libdir/pgturbohybrid'
 requires = 'vector'

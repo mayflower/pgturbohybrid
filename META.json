@@ -1,15 +1,17 @@
 {
   "name": "pgturbohybrid",
-  "abstract": "Hybrid dense vector and BM25 search for pgvector",
+  "abstract": "Hot-hatch hybrid vector + BM25 search for PostgreSQL on top of pgvector",
   "description": "Standalone PostgreSQL extension for experimental dense vector and BM25 hybrid retrieval on top of pgvector.",
   "version": "0.1.0",
-  "maintainer": "mayflower",
+  "maintainer": "Mayflower",
   "license": "postgresql",
+  "release_status": "unstable",
   "provides": {
     "pgturbohybrid": {
       "file": "sql/pgturbohybrid--0.1.0.sql",
       "docfile": "README.md",
-      "version": "0.1.0"
+      "version": "0.1.0",
+      "abstract": "Hot-hatch hybrid vector + BM25 search for PostgreSQL on top of pgvector"
     }
   },
   "prereqs": {
@@ -21,8 +23,27 @@
     }
   },
   "resources": {
+    "homepage": "https://github.com/mayflower/pgturbohybrid#readme",
+    "bugtracker": {
+      "web": "https://github.com/mayflower/pgturbohybrid/issues"
+    },
     "repository": {
-      "url": "https://github.com/mayflower/pgturbohybrid.git"
+      "url": "https://github.com/mayflower/pgturbohybrid.git",
+      "web": "https://github.com/mayflower/pgturbohybrid",
+      "type": "git"
     }
-  }
+  },
+  "meta-spec": {
+    "version": "1.0.0",
+    "url": "https://pgxn.org/meta/spec.txt"
+  },
+  "tags": [
+    "postgresql",
+    "pgvector",
+    "vector search",
+    "hybrid search",
+    "bm25",
+    "rag",
+    "postgres extension"
+  ]
 }

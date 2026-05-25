@@ -1,11 +1,10 @@
 # pgturbohybrid Standalone Extension Architecture
 
-This document describes the target design for converting the cleaned
-pgturbohybrid work into a standalone PostgreSQL extension. The goal is a package
-that can be built and installed beside pgvector, without patching pgvector or
+This document describes the current `pgturbohybrid` alpha architecture. The
+extension is built and installed beside pgvector, without patching pgvector or
 claiming pgvector-owned release metadata.
 
-## Target Package Identity
+## Package Identity
 
 - Extension name: `pgturbohybrid`
 - Shared library name: `pgturbohybrid`
@@ -56,11 +55,11 @@ The preferred model is:
   `pgturbohybrid_*` C names
 
 If a pgvector header is used, the supported pgvector versions and ABI risk must
-be documented in the release notes and build documentation. The initial support
-target should be a narrow pgvector version range, such as pgvector `0.8.x`, until
-CI proves a wider range. The build should include compile-time checks for the
-expected `Vector` layout where possible. If the header is unavailable, any local
-compatibility struct must be explicitly gated and documented as ABI-sensitive.
+be documented in the compatibility and release notes. The current compatibility
+target is pgvector 0.8.2 through current pgvector `master`, backed by CI. The
+build should include compile-time checks for the expected `Vector` layout where
+possible. If the header is unavailable, any local compatibility struct must be
+explicitly gated and documented as ABI-sensitive.
 
 SQL-level pgvector behavior, such as the existence of the `vector` type, is
 safe to depend on through `CREATE EXTENSION vector`. Private pgvector C symbols
@@ -81,8 +80,7 @@ shorter `turbohybrid` name:
   inner product
 - operator classes: `vector_l2_turbohybrid_ops`,
   `vector_ip_turbohybrid_ops`, `vector_cosine_turbohybrid_ops`
-- optional text/BM25 operator classes, if retained in this extension:
-  `bm25_tsvector_turbohybrid_ops`
+- text/BM25 operator class: `bm25_tsvector_turbohybrid_ops`
 
 The extension must not create generic names such as `hybrid_query` or opclasses
 whose names could reasonably be mistaken for pgvector-owned objects.
@@ -114,30 +112,41 @@ pgvector.
 All GUCs must use the `turbohybrid.*` prefix. The extension must not create
 `pgturbohybrid.*`, `hybrid.*`, or `hnsw.tq_*` GUCs.
 
-Only stable user-facing settings should be exposed as GUCs. The initial public
-set is:
+The current alpha exposes these user-facing GUCs:
 
+- `turbohybrid.profile`: retrieval profile. Current values are `latency`,
+  `balanced`, `quality`, and `debug`; the default profile is `latency`.
 - `turbohybrid.default_dense_k`
 - `turbohybrid.default_bm25_k`
 - `turbohybrid.default_rrf_k`
 - `turbohybrid.enable_wand`
+- `turbohybrid.bm25_strategy`
+- `turbohybrid.bm25_impact_or_mode`
+- `turbohybrid.bm25_hot_postings_cache_mb`
+- `turbohybrid.bm25_hot_postings_cache_min_df`
+- `turbohybrid.bm25_hybrid_bound`
+- `turbohybrid.bm25_accumulator_mode`
 - `turbohybrid.max_union_candidates`
 - `turbohybrid.simd`
 
-Internal tuning, debug switches, benchmark controls, SIMD forcing, cache knobs,
-and temporary experiments should be constants or private implementation choices
-unless there is a clear user story and test coverage.
+Profile assignment updates the dynamic defaults for the candidate budgets, BM25
+strategy knobs, hot postings cache, hybrid bound mode, and SIMD setting unless a
+GUC has been explicitly set by the user. The latency profile is the default fast
+path documented in the README and setup guide.
 
 Reloptions are scoped to the `turbohybrid` index access method, but should
-still use stable descriptive names. Candidate names:
+still use stable descriptive names. The current alpha reloptions are:
 
-- `quantization_bits`
-- `exact_storage`
-- `m`
-- `ef_construction`
-- `dense_k`
-- `bm25_k`
-- `rrf_k`
+- `graph_m`: maximum graph connections. Default: `16`.
+- `graph_ef_construction`: graph candidate list size during build. Default:
+  `128`.
+- `graph_ef_search`: graph candidate list size during scans. Default: `64`.
+- `graph_oversampling`: graph candidate oversampling multiplier. Default: `4`.
+- `quantization_bits`: quantized dense-vector code width. Default: `4`.
+- `exact_storage`: store exact vectors in the index for final exact rescoring.
+  Default: `off`.
+- `routing`: dense routing mode. Default: `auto`; current values are `auto`,
+  `graph`, and `flat`.
 
 Prototype names such as `tq_*` should not appear in user-facing reloptions.
 
@@ -154,9 +163,8 @@ must not collide with pgvector access methods:
 
 Block 0 is the metapage. It stores the access-method identity, format version,
 index dimensions, dense graph options, quantization options, entry/start block
-pointers, and BM25 metadata pointers when the text branch is present. All other
-pages carry the pgturbohybrid page identifier and a page-kind tag before their
-format-specific payload.
+pointers, and BM25 metadata pointers. Other pages carry the pgturbohybrid page
+identifier and a page-kind tag before their format-specific payload.
 
 Current page kinds are:
 
@@ -175,7 +183,7 @@ from generic WAL and new-page WAL records alone.
 
 ## Build Layout
 
-The standalone PGXS build should use:
+The PGXS build uses:
 
 ```make
 EXTENSION = pgturbohybrid
@@ -188,15 +196,22 @@ The build may use `PG_CPPFLAGS` to include pgvector's installed server header
 directory when available, but it must not compile pgvector `.c` files or depend
 on pgvector private object files.
 
-Source files should be renamed or wrapped so their ownership is clear, for
-example:
+Source ownership is kept explicit with `pgturbohybrid_*` file names, including:
 
 - `src/pgturbohybrid.c`
-- `src/pgturbohybrid_index.c`
+- `src/pgturbohybrid_am.c`
+- `src/pgturbohybrid_build.c`
 - `src/pgturbohybrid_scan.c`
+- `src/pgturbohybrid_insert.c`
+- `src/pgturbohybrid_vacuum.c`
+- `src/pgturbohybrid_graph.c`
 - `src/pgturbohybrid_quant.c`
-- `src/pgturbohybrid_bm25.c`, if BM25 remains part of this extension
-- `src/pgturbohybrid_distance.c`
+- `src/pgturbohybrid_bm25.c`
+- `src/pgturbohybrid_bm25_build.c`
+- `src/pgturbohybrid_bm25_query.c`
+- `src/pgturbohybrid_query.c`
+- `src/pgturbohybrid_stats.c`
+- `src/pgturbohybrid_vector_compat.c`
 
 Windows and Unix builds must compile the same required source objects and expose
 the same SQL install contract.
@@ -228,21 +243,6 @@ sql/pgturbohybrid--0.1.0--0.1.1.sql
 
 They must not use pgvector upgrade script names.
 
-## Migration Plan From The Cleaned Tree
-
-1. Add `pgturbohybrid.control` with `requires = 'vector'`.
-2. Add `sql/pgturbohybrid--0.1.0.sql`.
-3. Change the PGXS package identity from `vector` to `pgturbohybrid`.
-4. Remove pgvector source files from the `pgturbohybrid` build.
-5. Rename SQL-visible functions, C symbols, access method objects, operator
-   classes, and GUCs to the `pgturbohybrid` namespace.
-6. Replace any pgvector private C symbol usage with internal
-   `pgturbohybrid_*` helpers.
-7. Keep only tests that install `vector`, install `pgturbohybrid`, and validate
-   standalone behavior.
-8. Keep benchmark scripts and reproducibility notes only; do not commit
-   generated benchmark result artifacts.
-
 ## Testing And CI
 
 The minimum test matrix should validate:
@@ -256,8 +256,7 @@ The minimum test matrix should validate:
 - all public GUCs use the `turbohybrid.*` prefix
 - index creation and scans using `USING turbohybrid`
 - insert, update, delete, vacuum, and restart behavior for the new access method
-- supported pgvector versions, initially focused on the documented compatibility
-  range
+- supported pgvector versions across the documented compatibility range
 
 Regression tests should validate user-visible behavior, not internal counters or
 benchmark-only diagnostics.
@@ -268,10 +267,11 @@ Benchmark scripts and reproducibility configuration may live in the repository
 when they are deterministic and useful for users. Generated benchmark JSON, MD,
 CSV, logs, host-specific outputs, and result directories must not be vendored.
 
-Benchmark claims should live in a reproducible appendix such as `BENCHMARKS.md`,
-including hardware, OS, PostgreSQL version, pgvector version, dataset, commands,
-warmup policy, run count, latency, build time, index size, WAL generated, and
-quality metrics.
+Benchmark methodology lives in [benchmarks/README.md](../benchmarks/README.md).
+The public FIQA/OpenAI validation snapshot lives in
+[docs/benchmarks/fiqa-openai.md](benchmarks/fiqa-openai.md). Architecture docs
+should describe benchmark surfaces and artifact policy, not include benchmark
+results.
 
 ## Non-goals
 

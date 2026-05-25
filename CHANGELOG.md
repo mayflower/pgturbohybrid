@@ -37,24 +37,20 @@ tradeoff unless they explicitly select a conservative profile.
 
 ### Benchmark Snapshot
 
-Recovered FIQA/OpenAI latency-profile result:
+On the FIQA/OpenAI validation setup documented in
+`docs/benchmarks/fiqa-openai.md` (57,638 corpus rows, 648 queries,
+1,536-dimensional OpenAI `text-embedding-3-small` embeddings, one warmup pass,
+one measured pass), the `latency` profile with 4-bit quantization,
+`exact_storage = off`, 100 dense candidates, and 100 BM25 candidates reported
+0.910 ms p95 and 0.421540 nDCG@10 for `pgturbohybrid` default, compared with
+3.254 ms p95 and 0.423341 nDCG@10 for the SQL RRF hybrid baseline using
+pgvector HNSW default reloptions plus PostgreSQL GIN FTS. Results vary by
+dataset and hardware.
 
-- dataset: FIQA/OpenAI
-- corpus rows: 57,638
-- queries: 648
-- embedding dimensions: 1,536
-- profile/settings: `latency`, 4-bit, `exact_storage = off`, `dense_k = 100`,
-  `bm25_k = 100`, `final_k = 10`
-- p50: 0.770 ms
-- p95: 1.006 ms
-- p99: 1.265 ms
-- nDCG@10: 0.421540
-- SQL RRF baseline p95: 3.988 ms
-- pgvector HNSW dense-only p95: 3.361 ms
-
-Generated benchmark artifacts are not committed. Reproduce results using the
-commands in `PERF_RECOVERY_SUMMARY.md` and publish profile, index options,
-query budgets, and relevance metrics with any benchmark claim.
+Generated benchmark artifacts are not committed. Reproduction guidance lives in
+`docs/benchmarks/fiqa-openai.md`; publish dataset, dimensions, query count,
+profile, index options, query budgets, baseline, and relevance metrics with any
+benchmark claim.
 
 ### Migration Notes
 

@@ -4,8 +4,10 @@ set -euo pipefail
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 cd "$ROOT_DIR"
 
-DATASET="${FIQA_DATASET:-/Volumes/CrucialMusic/src/pgvector/.cache/beir/fiqa}"
+DATASET="${FIQA_DATASET:-}"
 DATABASE="${PGDATABASE:-pgturbohybrid_perf}"
+PG_CONFIG="${PG_CONFIG:-pg_config}"
+PGVECTOR_REF="${PGVECTOR_REF:-v0.8.2}"
 RESULT_DIR="${RESULT_DIR:-benchmarks/results}"
 DENSE_K="${DENSE_K:-100}"
 BM25_K="${BM25_K:-100}"
@@ -15,10 +17,21 @@ WARMUP="${WARMUP:-1}"
 MEASURE="${MEASURE:-5}"
 PLANNER_DEBUG="${PLANNER_DEBUG:-1}"
 PROFILE="${PROFILE:-latency}"
-DEV_DIAGNOSTICS="${DEV_DIAGNOSTICS:-1}"
+DEV_DIAGNOSTICS="${DEV_DIAGNOSTICS:-0}"
+DEV_DIAGNOSTICS_SQL="${DEV_DIAGNOSTICS_SQL:-sql/pgturbohybrid_dev_diagnostics.sql}"
+INSTALL_PGVECTOR="${INSTALL_PGVECTOR:-0}"
 STAMP="$(date -u +%Y%m%dT%H%M%SZ)"
-SUMMARY_JSON="$RESULT_DIR/fiqa_perf_matrix_${STAMP}.json"
-CATEGORY_TXT="$RESULT_DIR/fiqa_perf_categories_${STAMP}.txt"
+SUMMARY_JSON="${OUTPUT:-$RESULT_DIR/fiqa_perf_matrix_${STAMP}.json}"
+if [[ -n "${OUTPUT:-}" ]]; then
+	CATEGORY_TXT="${OUTPUT%.*}_categories.txt"
+else
+	CATEGORY_TXT="$RESULT_DIR/fiqa_perf_categories_${STAMP}.txt"
+fi
+
+if [[ -z "$DATASET" ]]; then
+	echo "set FIQA_DATASET to a FIQA/OpenAI dataset directory" >&2
+	exit 1
+fi
 
 for file in corpus.jsonl corpus_embeddings.jsonl queries.jsonl query_embeddings.jsonl qrels/test.tsv; do
 	if [[ ! -f "$DATASET/$file" ]]; then
@@ -28,33 +41,38 @@ for file in corpus.jsonl corpus_embeddings.jsonl queries.jsonl query_embeddings.
 done
 
 mkdir -p "$RESULT_DIR"
+mkdir -p "$(dirname "$SUMMARY_JSON")" "$(dirname "$CATEGORY_TXT")"
+
+if [[ "$INSTALL_PGVECTOR" == "1" ]]; then
+	PG_CONFIG="$PG_CONFIG" PGVECTOR_REF="$PGVECTOR_REF" scripts/install-pgvector.sh
+fi
 
 if [[ "${SKIP_BUILD:-0}" != "1" ]]; then
-	if [[ "$DEV_DIAGNOSTICS" == "1" ]]; then
-		make dev-diagnostics-install
-	else
-		make install
-	fi
+	make PG_CONFIG="$PG_CONFIG" install
 fi
 
 dropdb --if-exists "$DATABASE"
 createdb "$DATABASE"
 
 PYTHON_ARGS=(
-	--database "$DATABASE" \
-	--dataset "$DATASET" \
-	--dense-k "$DENSE_K" \
-	--bm25-k "$BM25_K" \
-	--final-k "$FINAL_K" \
-	--profile "$PROFILE" \
-	--warmup "$WARMUP" \
-	--methods pgvector_hnsw_dense_only,postgres_sql_rrf,pgturbohybrid,pgturbohybrid_recovered_explicit \
-	--explain \
+	--database "$DATABASE"
+	--dataset "$DATASET"
+	--dense-k "$DENSE_K"
+	--bm25-k "$BM25_K"
+	--final-k "$FINAL_K"
+	--profile "$PROFILE"
+	--warmup "$WARMUP"
+	--methods "pgvector_hnsw_dense_only,postgres_sql_rrf,pgturbohybrid,pgturbohybrid_recovered_explicit"
+	--explain
 	--output "$SUMMARY_JSON"
 )
 
 if [[ "$DEV_DIAGNOSTICS" == "1" ]]; then
-	PYTHON_ARGS+=(--bm25-cache-probe --dev-diagnostics-sql sql/pgturbohybrid_dev_diagnostics.sql)
+	if [[ ! -f "$DEV_DIAGNOSTICS_SQL" ]]; then
+		echo "DEV_DIAGNOSTICS=1 requires DEV_DIAGNOSTICS_SQL to point to an existing SQL file" >&2
+		exit 1
+	fi
+	PYTHON_ARGS+=(--bm25-cache-probe --dev-diagnostics-sql "$DEV_DIAGNOSTICS_SQL")
 fi
 
 python3 benchmarks/fiqa_openai.py "${PYTHON_ARGS[@]}"

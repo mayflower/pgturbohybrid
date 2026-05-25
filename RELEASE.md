@@ -17,14 +17,22 @@ The next public alpha release tag is `v0.1.0-alpha.2`. This tag keeps the
 extension SQL version at `0.1.0`; it documents changed defaults and diagnostics
 without adding an extension upgrade path.
 
-Before publishing `v0.1.0-alpha.2`, ensure `CHANGELOG.md` clearly calls out:
+Release notes for this alpha live in
+`docs/release-notes/v0.1.0-alpha.2.md`.
 
-- latency profile as the default,
-- 100/100 default dense and BM25 budgets,
-- 4-bit exact-free default indexes,
-- BM25 fast paths enabled by default,
-- the quality-profile migration path for conservative behavior,
-- whether generated benchmark artifacts are attached outside the repository.
+## Release Command
+
+Run releases from a clean committed tree:
+
+```sh
+scripts/release-check.sh
+git tag -a v0.1.0-alpha.2 -m "pgturbohybrid v0.1.0-alpha.2"
+git push origin v0.1.0-alpha.2
+```
+
+The tag push triggers `.github/workflows/release.yml`, which rebuilds against
+upstream pgvector, runs SQL and TAP checks, runs `make dist`, and uploads the
+tracked-source archives as workflow artifacts.
 
 ## Semantic Versioning
 
@@ -42,6 +50,8 @@ the CI setup image supports it. The pgvector compatibility target is pgvector
 
 The build and CI matrix must install unmodified pgvector before building
 `pgturbohybrid`.
+
+See `docs/compatibility.md` for the public compatibility matrix.
 
 ## Upgrade Script Policy
 

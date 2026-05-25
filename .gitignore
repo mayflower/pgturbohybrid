@@ -1,19 +1,39 @@
-/dist/
+# OS and editor files
+.DS_Store
+Thumbs.db
+*.swp
+*.swo
+*~
+.#*
+
+# Local dependency checkouts and release archives
 /.deps/
+/pgvector/
+/pgvector-*/
+/pgvector-upstream/
+/pgturbohybrid-*/
+/dist/
+
+# Test clusters and regression output
 /log/
-/results/
-/benchmarks/results/
-/benchmarks/output/
-/benchmarks/*.json
-/benchmarks/*.md
-!/benchmarks/README.md
-/benchmarks/**/*.json
-!/benchmarks/config/*.json
 /tmp_check/
 /tmp_check_iso/
 /output_iso/
 /regression.*
-/pgturbohybrid-*/
+
+# Benchmark and generated result output
+/results/
+/benchmarks/results/
+/benchmarks/output/
+/benchmarks/**/*.json
+!/benchmarks/config/*.json
+/benchmarks/**/*.csv
+/benchmarks/**/*.md
+!/benchmarks/README.md
+!/benchmarks/dev/README.md
+/perf-smoke-results.json
+
+# Build artifacts
 *.o
 *.so
 *.bc

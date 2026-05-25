@@ -6,6 +6,8 @@ cd "$ROOT_DIR"
 
 DATASET="${FIQA_DATASET:?set FIQA_DATASET to a real FIQA/OpenAI-compatible dataset directory}"
 DATABASE="${PGDATABASE:-pgturbohybrid_fiqa_quick}"
+PG_CONFIG="${PG_CONFIG:-pg_config}"
+PGVECTOR_REF="${PGVECTOR_REF:-v0.8.2}"
 RESULT_DIR="${RESULT_DIR:-benchmarks/results}"
 MAX_DOCS="${MAX_DOCS:-5000}"
 MAX_QUERIES="${MAX_QUERIES:-50}"
@@ -21,8 +23,21 @@ FORCE_TURBOHYBRID_INDEX="${FORCE_TURBOHYBRID_INDEX:-0}"
 STAMP="$(date -u +%Y%m%dT%H%M%SZ)"
 OUTPUT="${OUTPUT:-$RESULT_DIR/fiqa_openai_quick_${STAMP}.json}"
 CREATE_DATABASE="${CREATE_DATABASE:-1}"
+INSTALL_PGVECTOR="${INSTALL_PGVECTOR:-0}"
+BUILD_PGTURBOHYBRID="${BUILD_PGTURBOHYBRID:-0}"
 
 mkdir -p "$RESULT_DIR"
+mkdir -p "$(dirname "$OUTPUT")"
+
+if [[ "$INSTALL_PGVECTOR" == "1" ]]; then
+	PG_CONFIG="$PG_CONFIG" PGVECTOR_REF="$PGVECTOR_REF" scripts/install-pgvector.sh
+fi
+
+if [[ "$BUILD_PGTURBOHYBRID" == "1" ]]; then
+	make PG_CONFIG="$PG_CONFIG" clean
+	make PG_CONFIG="$PG_CONFIG"
+	make PG_CONFIG="$PG_CONFIG" install
+fi
 
 if [[ "$CREATE_DATABASE" == "1" ]]; then
 	dropdb --if-exists "$DATABASE"

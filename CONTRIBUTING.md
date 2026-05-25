@@ -1,5 +1,8 @@
 # Contributing
 
+This file helps you set up a local development checkout, run the expected
+checks, and send useful changes to `pgturbohybrid`.
+
 `pgturbohybrid` is developed as a standalone PostgreSQL extension that depends
 on an unmodified pgvector installation.
 
@@ -55,3 +58,8 @@ make prove_installcheck
 The tests should validate stable user-visible behavior: extension install/drop,
 index creation, query ordering, restart/recovery behavior, and compatibility
 with pgvector as a required extension.
+
+If your change includes a benchmark claim, include the dataset, embedding
+dimensions, query count, index settings, candidate budgets, baseline, and
+quality metrics. Generated benchmark JSON, CSV, and Markdown outputs should
+stay out of the repository.

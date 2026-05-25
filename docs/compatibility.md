@@ -1,7 +1,10 @@
 # Compatibility Matrix
 
-`pgturbohybrid` depends on the pgvector SQL extension and its `vector` type.
-It does not link against private pgvector C symbols.
+This file helps you check whether your PostgreSQL and pgvector versions are in
+the current public compatibility range for `pgturbohybrid`.
+
+`pgturbohybrid` depends on the pgvector SQL extension and its `vector` type. It
+does not link against private pgvector C symbols.
 
 ## Supported Range
 
@@ -17,6 +20,9 @@ The build can use pgvector's installed `vector.h` only through
 `src/pgturbohybrid_vector_compat.h` when `PGTURBOHYBRID_REQUIRE_VECTOR_HEADER=1`
 is set. By default, the extension uses its private compatibility struct and
 static layout assertions for the pgvector `vector` varlena layout.
+
+Most users do not need this option. It is mainly for developers who want the
+build to prove that pgvector headers are available.
 
 Use:
 

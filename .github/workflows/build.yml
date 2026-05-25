@@ -31,9 +31,11 @@ jobs:
         env:
           PGVECTOR_REF: ${{ matrix.pgvector_ref }}
         run: |
-          git clone --depth 1 --branch "$PGVECTOR_REF" https://github.com/pgvector/pgvector.git /tmp/pgvector
-          make -C /tmp/pgvector
-          sudo --preserve-env=PG_CONFIG make -C /tmp/pgvector install
+          PGVECTOR_DIR="${RUNNER_TEMP:-$PWD/.deps}/pgvector-$PGVECTOR_REF"
+          rm -rf "$PGVECTOR_DIR"
+          git clone --depth 1 --branch "$PGVECTOR_REF" https://github.com/pgvector/pgvector.git "$PGVECTOR_DIR"
+          make -C "$PGVECTOR_DIR"
+          sudo --preserve-env=PG_CONFIG make -C "$PGVECTOR_DIR" install
           createdb pgturbohybrid_pgvector_sanity
           psql -d pgturbohybrid_pgvector_sanity -v ON_ERROR_STOP=1 -c "CREATE EXTENSION vector;"
           psql -d pgturbohybrid_pgvector_sanity -v ON_ERROR_STOP=1 -c "SELECT '[1,2,3]'::vector;"
@@ -86,9 +88,11 @@ jobs:
 
       - name: Build and install upstream pgvector
         run: |
-          git clone --depth 1 --branch v0.8.2 https://github.com/pgvector/pgvector.git /tmp/pgvector
-          make -C /tmp/pgvector
-          sudo --preserve-env=PG_CONFIG make -C /tmp/pgvector install
+          PGVECTOR_DIR="${RUNNER_TEMP:-$PWD/.deps}/pgvector-v0.8.2"
+          rm -rf "$PGVECTOR_DIR"
+          git clone --depth 1 --branch v0.8.2 https://github.com/pgvector/pgvector.git "$PGVECTOR_DIR"
+          make -C "$PGVECTOR_DIR"
+          sudo --preserve-env=PG_CONFIG make -C "$PGVECTOR_DIR" install
 
       - name: Build and install pgturbohybrid
         run: |
@@ -145,9 +149,11 @@ jobs:
         env:
           PGVECTOR_REF: ${{ matrix.pgvector_ref }}
         run: |
-          git clone --depth 1 --branch "$PGVECTOR_REF" https://github.com/pgvector/pgvector.git /tmp/pgvector
-          make -C /tmp/pgvector
-          sudo --preserve-env=PG_CONFIG make -C /tmp/pgvector install
+          PGVECTOR_DIR="${RUNNER_TEMP:-$PWD/.deps}/pgvector-$PGVECTOR_REF"
+          rm -rf "$PGVECTOR_DIR"
+          git clone --depth 1 --branch "$PGVECTOR_REF" https://github.com/pgvector/pgvector.git "$PGVECTOR_DIR"
+          make -C "$PGVECTOR_DIR"
+          sudo --preserve-env=PG_CONFIG make -C "$PGVECTOR_DIR" install
           createdb pgturbohybrid_pgvector_sanity
           psql -d pgturbohybrid_pgvector_sanity -v ON_ERROR_STOP=1 -c "CREATE EXTENSION vector;"
           dropdb pgturbohybrid_pgvector_sanity
@@ -195,9 +201,11 @@ jobs:
 
       - name: Build and install upstream pgvector
         run: |
-          git clone --depth 1 --branch v0.8.2 https://github.com/pgvector/pgvector.git /tmp/pgvector
-          make -C /tmp/pgvector
-          make -C /tmp/pgvector install
+          PGVECTOR_DIR="${RUNNER_TEMP:-$PWD/.deps}/pgvector-v0.8.2"
+          rm -rf "$PGVECTOR_DIR"
+          git clone --depth 1 --branch v0.8.2 https://github.com/pgvector/pgvector.git "$PGVECTOR_DIR"
+          make -C "$PGVECTOR_DIR"
+          make -C "$PGVECTOR_DIR" install
           sudo -u postgres createdb pgturbohybrid_pgvector_sanity
           sudo -u postgres psql -d pgturbohybrid_pgvector_sanity -v ON_ERROR_STOP=1 -c "CREATE EXTENSION vector;"
           sudo -u postgres dropdb pgturbohybrid_pgvector_sanity
@@ -239,9 +247,11 @@ jobs:
 
       - name: Build and install upstream pgvector
         run: |
-          git clone --depth 1 --branch v0.8.2 https://github.com/pgvector/pgvector.git /tmp/pgvector
-          make -C /tmp/pgvector OPTFLAGS=""
-          sudo --preserve-env=PG_CONFIG make -C /tmp/pgvector install
+          PGVECTOR_DIR="${RUNNER_TEMP:-$PWD/.deps}/pgvector-v0.8.2"
+          rm -rf "$PGVECTOR_DIR"
+          git clone --depth 1 --branch v0.8.2 https://github.com/pgvector/pgvector.git "$PGVECTOR_DIR"
+          make -C "$PGVECTOR_DIR" OPTFLAGS=""
+          sudo --preserve-env=PG_CONFIG make -C "$PGVECTOR_DIR" install
           createdb pgturbohybrid_pgvector_sanity
           psql -d pgturbohybrid_pgvector_sanity -v ON_ERROR_STOP=1 -c "CREATE EXTENSION vector;"
           dropdb pgturbohybrid_pgvector_sanity

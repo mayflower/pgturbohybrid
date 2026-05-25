@@ -1,0 +1,70 @@
+name: release
+
+on:
+  push:
+    tags:
+      - 'v*'
+
+permissions:
+  contents: write
+
+jobs:
+  source-archive:
+    name: source archive
+    runs-on: ubuntu-24.04
+    env:
+      PG_CONFIG: /usr/lib/postgresql/18/bin/pg_config
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          clean: true
+          fetch-depth: 0
+
+      - uses: ankane/setup-postgres@v1
+        with:
+          postgres-version: 18
+          dev-files: true
+
+      - name: Build and install upstream pgvector
+        run: |
+          PGVECTOR_DIR="${RUNNER_TEMP:-$PWD/.deps}/pgvector-v0.8.2"
+          rm -rf "$PGVECTOR_DIR"
+          git clone --depth 1 --branch v0.8.2 https://github.com/pgvector/pgvector.git "$PGVECTOR_DIR"
+          make -C "$PGVECTOR_DIR"
+          sudo --preserve-env=PG_CONFIG make -C "$PGVECTOR_DIR" install
+          createdb pgturbohybrid_pgvector_sanity
+          psql -d pgturbohybrid_pgvector_sanity -v ON_ERROR_STOP=1 -c "CREATE EXTENSION vector;"
+          dropdb pgturbohybrid_pgvector_sanity
+
+      - name: Build pgturbohybrid
+        run: make clean && make
+
+      - name: Install pgturbohybrid
+        run: sudo --preserve-env=PG_CONFIG make install
+
+      - name: Run installcheck
+        run: make installcheck
+
+      - name: Run TAP tests
+        run: make prove_installcheck
+
+      - name: Build source archive
+        run: make dist
+
+      - name: Upload source archive to GitHub Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          if gh release view "$GITHUB_REF_NAME" >/dev/null 2>&1; then
+            gh release upload "$GITHUB_REF_NAME" \
+              dist/pgturbohybrid-0.1.0.tar.gz \
+              dist/pgturbohybrid-0.1.0.zip \
+              --clobber
+          else
+            gh release create "$GITHUB_REF_NAME" \
+              dist/pgturbohybrid-0.1.0.tar.gz \
+              dist/pgturbohybrid-0.1.0.zip \
+              --title "$GITHUB_REF_NAME" \
+              --generate-notes \
+              --verify-tag
+          fi

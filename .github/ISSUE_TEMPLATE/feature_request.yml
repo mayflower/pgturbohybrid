@@ -1,0 +1,44 @@
+name: Feature request
+description: Suggest an improvement or new capability
+title: "[Feature]: "
+labels: ["enhancement"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for suggesting an improvement. Please keep requests scoped to pgturbohybrid as a standalone PostgreSQL extension.
+  - type: textarea
+    id: problem
+    attributes:
+      label: Problem
+      description: What user problem or workflow does this address?
+    validations:
+      required: true
+  - type: textarea
+    id: proposal
+    attributes:
+      label: Proposed solution
+      description: Describe the behavior, SQL surface, setting, or documentation change you want.
+    validations:
+      required: true
+  - type: textarea
+    id: alternatives
+    attributes:
+      label: Alternatives considered
+      description: Existing PostgreSQL, pgvector, SQL RRF, or application-level approaches you considered.
+    validations:
+      required: false
+  - type: textarea
+    id: compatibility
+    attributes:
+      label: Compatibility impact
+      description: Note any expected SQL API, on-disk format, pgvector compatibility, or REINDEX impact.
+    validations:
+      required: false
+  - type: textarea
+    id: benchmark-impact
+    attributes:
+      label: Benchmark or relevance impact
+      description: If this affects performance or ranking quality, describe the expected evidence.
+    validations:
+      required: false
