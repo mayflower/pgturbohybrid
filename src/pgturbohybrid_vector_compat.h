@@ -26,6 +26,14 @@ typedef struct Vector
 	float		x[FLEXIBLE_ARRAY_MEMBER];
 }			Vector;
 
+typedef struct PgturbohybridValidationStats
+{
+	uint64		strictVectorValidations;
+	uint64		fastVectorChecks;
+	uint64		vectorTypeCacheHits;
+	uint64		vectorTypeCacheMisses;
+}			PgturbohybridValidationStats;
+
 StaticAssertDecl(offsetof(Vector, dim) == sizeof(int32),
 				 "pgvector vector dim offset changed");
 StaticAssertDecl(offsetof(Vector, unused) == sizeof(int32) + sizeof(int16),
@@ -45,11 +53,16 @@ Oid			PgturbohybridVectorTypeOid(void);
 int			PgturbohybridVectorDims(const Vector *vector);
 void		PgturbohybridCheckVector(const Vector *vector);
 void		PgturbohybridCheckSameDims(const Vector *a, const Vector *b);
+int			PgturbohybridVectorDimsFast(const Vector *vector);
+void		PgturbohybridCheckVectorFast(const Vector *vector);
+void		PgturbohybridCheckSameDimsFast(const Vector *a, const Vector *b);
 double		PgturbohybridL2SquaredDistance(const Vector *a, const Vector *b);
 double		PgturbohybridL2Distance(const Vector *a, const Vector *b);
 double		PgturbohybridNegativeInnerProduct(const Vector *a, const Vector *b);
 double		PgturbohybridCosineDistance(const Vector *a, const Vector *b);
 double		PgturbohybridVectorNorm(const Vector *vector);
+Vector	   *PgturbohybridL2NormalizeFast(const Vector *vector);
+void		PgturbohybridGetValidationStats(PgturbohybridValidationStats *stats);
 FUNCTION_PREFIX Datum pgturbohybrid_l2_normalize(PG_FUNCTION_ARGS);
 
 #endif

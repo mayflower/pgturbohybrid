@@ -20,8 +20,15 @@ FUNCTION_PREFIX PG_FUNCTION_INFO_V1(pgturbohybrid_vector_negative_inner_product)
 FUNCTION_PREFIX PG_FUNCTION_INFO_V1(pgturbohybrid_vector_cosine_distance);
 FUNCTION_PREFIX PG_FUNCTION_INFO_V1(pgturbohybrid_vector_norm);
 
+static Oid	pgturbohybrid_vector_type_oid = InvalidOid;
+static uint64 pgturbohybrid_strict_vector_validations = 0;
+static uint64 pgturbohybrid_fast_vector_checks = 0;
+static uint64 pgturbohybrid_vector_type_cache_hits = 0;
+static uint64 pgturbohybrid_vector_type_cache_misses = 0;
+
 static void PgturbohybridEnsureVectorType(void);
 static Oid PgturbohybridExtensionSchema(Oid extensionOid);
+static int PgturbohybridCheckVectorInternal(const Vector *vector, bool strict);
 
 static void
 PgturbohybridEnsureVectorType(void)
@@ -54,6 +61,13 @@ PgturbohybridVectorTypeOid(void)
 	Oid			schemaOid;
 	Oid			typeOid;
 
+	if (OidIsValid(pgturbohybrid_vector_type_oid))
+	{
+		pgturbohybrid_vector_type_cache_hits++;
+		return pgturbohybrid_vector_type_oid;
+	}
+
+	pgturbohybrid_vector_type_cache_misses++;
 	extensionOid = get_extension_oid("vector", true);
 	if (!OidIsValid(extensionOid))
 		ereport(ERROR,
@@ -75,6 +89,7 @@ PgturbohybridVectorTypeOid(void)
 				(errcode(ERRCODE_UNDEFINED_OBJECT),
 				 errmsg("could not find vector type installed by vector extension")));
 
+	pgturbohybrid_vector_type_oid = typeOid;
 	return typeOid;
 }
 
@@ -95,14 +110,20 @@ PgturbohybridVectorDims(const Vector *vector)
 	return vector->dim;
 }
 
-void
-PgturbohybridCheckVector(const Vector *vector)
+static int
+PgturbohybridCheckVectorInternal(const Vector *vector, bool strict)
 {
 	Size		size;
 	Size		expected;
 	int			dim;
 
-	PgturbohybridEnsureVectorType();
+	if (strict)
+	{
+		pgturbohybrid_strict_vector_validations++;
+		PgturbohybridEnsureVectorType();
+	}
+	else
+		pgturbohybrid_fast_vector_checks++;
 
 	if (vector == NULL)
 		ereport(ERROR,
@@ -136,13 +157,36 @@ PgturbohybridCheckVector(const Vector *vector)
 				 errdetail("Vector payload size is %zu bytes but %zu bytes were expected.",
 						   size, expected)));
 
-	for (int i = 0; i < dim; i++)
+	if (strict)
 	{
-		if (!isfinite(vector->x[i]))
-			ereport(ERROR,
-					(errcode(ERRCODE_DATA_EXCEPTION),
-					 errmsg("vector cannot contain NaN or infinite values")));
+		for (int i = 0; i < dim; i++)
+		{
+			if (!isfinite(vector->x[i]))
+				ereport(ERROR,
+						(errcode(ERRCODE_DATA_EXCEPTION),
+						 errmsg("vector cannot contain NaN or infinite values")));
+		}
 	}
+
+	return dim;
+}
+
+void
+PgturbohybridCheckVector(const Vector *vector)
+{
+	(void) PgturbohybridCheckVectorInternal(vector, true);
+}
+
+int
+PgturbohybridVectorDimsFast(const Vector *vector)
+{
+	return PgturbohybridCheckVectorInternal(vector, false);
+}
+
+void
+PgturbohybridCheckVectorFast(const Vector *vector)
+{
+	(void) PgturbohybridCheckVectorInternal(vector, false);
 }
 
 void
@@ -160,13 +204,28 @@ PgturbohybridCheckSameDims(const Vector *a, const Vector *b)
 				 errmsg("different vector dimensions %d and %d", adim, bdim)));
 }
 
+void
+PgturbohybridCheckSameDimsFast(const Vector *a, const Vector *b)
+{
+	int			adim;
+	int			bdim;
+
+	adim = PgturbohybridVectorDimsFast(a);
+	bdim = PgturbohybridVectorDimsFast(b);
+
+	if (adim != bdim)
+		ereport(ERROR,
+				(errcode(ERRCODE_DATA_EXCEPTION),
+				 errmsg("different vector dimensions %d and %d", adim, bdim)));
+}
+
 double
 PgturbohybridL2SquaredDistance(const Vector *a, const Vector *b)
 {
 	double		distance = 0.0;
 	int			dim;
 
-	PgturbohybridCheckSameDims(a, b);
+	PgturbohybridCheckSameDimsFast(a, b);
 	dim = a->dim;
 
 	for (int i = 0; i < dim; i++)
@@ -191,7 +250,7 @@ PgturbohybridNegativeInnerProduct(const Vector *a, const Vector *b)
 	double		distance = 0.0;
 	int			dim;
 
-	PgturbohybridCheckSameDims(a, b);
+	PgturbohybridCheckSameDimsFast(a, b);
 	dim = a->dim;
 
 	for (int i = 0; i < dim; i++)
@@ -208,7 +267,7 @@ PgturbohybridCosineDistance(const Vector *a, const Vector *b)
 	double		normb = 0.0;
 	int			dim;
 
-	PgturbohybridCheckSameDims(a, b);
+	PgturbohybridCheckSameDimsFast(a, b);
 	dim = a->dim;
 
 	for (int i = 0; i < dim; i++)
@@ -236,12 +295,50 @@ PgturbohybridVectorNorm(const Vector *vector)
 	double		norm = 0.0;
 	int			dim;
 
-	dim = PgturbohybridVectorDims(vector);
+	dim = PgturbohybridVectorDimsFast(vector);
 
 	for (int i = 0; i < dim; i++)
 		norm += (double) vector->x[i] * (double) vector->x[i];
 
 	return sqrt(norm);
+}
+
+Vector *
+PgturbohybridL2NormalizeFast(const Vector *vector)
+{
+	Vector	   *result;
+	double		norm = 0.0;
+	int			dim;
+	Size		size;
+
+	dim = PgturbohybridVectorDimsFast(vector);
+
+	for (int i = 0; i < dim; i++)
+		norm += (double) vector->x[i] * (double) vector->x[i];
+
+	norm = sqrt(norm);
+	size = PGTURBOHYBRID_VECTOR_SIZE(dim);
+
+	result = palloc0(size);
+	SET_VARSIZE(result, size);
+	result->dim = dim;
+
+	if (norm > 0.0)
+	{
+		for (int i = 0; i < dim; i++)
+			result->x[i] = (float) ((double) vector->x[i] / norm);
+	}
+
+	return result;
+}
+
+void
+PgturbohybridGetValidationStats(PgturbohybridValidationStats *stats)
+{
+	stats->strictVectorValidations = pgturbohybrid_strict_vector_validations;
+	stats->fastVectorChecks = pgturbohybrid_fast_vector_checks;
+	stats->vectorTypeCacheHits = pgturbohybrid_vector_type_cache_hits;
+	stats->vectorTypeCacheMisses = pgturbohybrid_vector_type_cache_misses;
 }
 
 Datum
@@ -292,24 +389,6 @@ FUNCTION_PREFIX Datum
 pgturbohybrid_l2_normalize(PG_FUNCTION_ARGS)
 {
 	Vector	   *vector = PG_GETARG_PGTURBOHYBRID_VECTOR_P(0);
-	Vector	   *result;
-	double		norm;
-	int			dim;
-	Size		size;
 
-	norm = PgturbohybridVectorNorm(vector);
-	dim = PgturbohybridVectorDims(vector);
-	size = PGTURBOHYBRID_VECTOR_SIZE(dim);
-
-	result = palloc0(size);
-	SET_VARSIZE(result, size);
-	result->dim = dim;
-
-	if (norm > 0.0)
-	{
-		for (int i = 0; i < dim; i++)
-			result->x[i] = (float) ((double) vector->x[i] / norm);
-	}
-
-	PG_RETURN_PGTURBOHYBRID_VECTOR_P(result);
+	PG_RETURN_PGTURBOHYBRID_VECTOR_P(PgturbohybridL2NormalizeFast(vector));
 }

@@ -14,8 +14,38 @@ Every publishable run should include at least:
 - `pgturbohybrid`: one pgturbohybrid index over the same `vector` and
   `tsvector` columns.
 
-When relevant, also compare `pgturbohybrid_exact_storage_off` to document the
-latency, storage, and quality tradeoff from disabling exact vector storage.
+When relevant, also compare `pgturbohybrid_recovered_explicit` to document the
+latency, storage, and quality tradeoff from the recovered fast settings: 4-bit,
+`exact_storage = off`, 100/100/60, and `final_k = 10`. The harness still accepts
+`pgturbohybrid_exact_storage_off` as a legacy alias for older artifacts.
+
+## Profile Matrix
+
+Publishable FIQA/OpenAI results should include all of:
+
+- `pgturbohybrid`: latency profile, default index options, omitted query
+  budgets, and LIMIT-inferred `final_k`.
+- `pgturbohybrid_recovered_explicit`: latency profile, 4-bit index,
+  `exact_storage = off`, effective `dense_k = 100`, `bm25_k = 100`, and
+  `final_k = 10`.
+- `pgturbohybrid_quality`: quality profile, effective `dense_k = 400`,
+  `bm25_k = 400`, exact-safe BM25 paths, SIMD enabled, and a documented
+  `exact_storage` choice. Prefer `exact_storage = on` when evaluating final
+  quality-sensitive settings.
+- `postgres_sql_rrf`: pgvector HNSW plus PostgreSQL full-text search fused in
+  SQL.
+
+The result summary must compare quality profile against latency profile for
+both relevance and latency. Do not infer quality-profile relevance from the
+latency-profile artifact.
+
+Validate a generated matrix artifact with:
+
+```sh
+python3 benchmarks/tools/check_acceptance.py \
+  /tmp/fiqa_full_profile_matrix.json \
+  --suite fiqa_openai_profile_matrix
+```
 
 ## Publishable Run Metadata
 
@@ -36,6 +66,27 @@ Record the following with any published result:
 - index size, build time, and WAL generated
 - recall, nDCG, MRR, and MAP for quality datasets
 - baseline definitions and index options
+
+## Acceptance Checks
+
+Fast defaults must pass the FIQA/OpenAI quality gate before they are used for a
+published claim. The gate is configured in
+`config/acceptance_thresholds.json` and is intended for a full manual or
+nightly FIQA run, not for per-PR perf smoke.
+
+Run it against the generated full benchmark artifact:
+
+```sh
+python3 benchmarks/tools/check_acceptance.py \
+  /tmp/pgturbohybrid-fiqa-canonicalized-with-baseline.json \
+  --suite fiqa_openai_fast_defaults
+```
+
+The artifact must include `pgturbohybrid_recovered_explicit` latency-profile
+results and the SQL RRF baseline with `nDCG@10`, `MRR@10`, `p95_ms`, and either
+`Recall@10` or `overlap@10` versus SQL RRF. If the gate fails, evaluate
+`quality` profile, `exact_storage = on`, or larger dense/BM25 budgets before
+publishing the fast default result.
 
 ## Dataset Notes
 

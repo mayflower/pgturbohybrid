@@ -32,8 +32,10 @@
 
 
 #include "pgturbohybrid_quant.h"
+#include "pgturbohybrid_am.h"
 #include "pgturbohybrid_quant_psquare.h"
 #include "pgturbohybrid_quant_score.h"
+#include "pgturbohybrid_vector_compat.h"
 
 static int	PgturbohybridGraphResultCompare(const void *a, const void *b);
 static bool PgturbohybridGraphEntryAlreadySelected(PgturbohybridGraphFrontierItem *entries, int entryCount,
@@ -2091,7 +2093,16 @@ PgturbohybridGraphGetScanValue(IndexScanDesc scan, PgturbohybridGraphScanOpaque 
 
 	if (so->support.normprocinfo != NULL)
 	{
-		if (!PgturbohybridGraphCheckNorm(&so->support, value))
+		if (so->typeInfo->normalize == pgturbohybrid_l2_normalize)
+		{
+			Vector	   *vector = (Vector *) DatumGetPointer(value);
+
+			if (PgturbohybridVectorNorm(vector) <= 0.0)
+				value = PointerGetDatum(NULL);
+			else
+				value = PointerGetDatum(PgturbohybridL2NormalizeFast(vector));
+		}
+		else if (!PgturbohybridGraphCheckNorm(&so->support, value))
 			value = PointerGetDatum(NULL);
 		else
 			value = PgturbohybridGraphNormValue(so->typeInfo, so->support.collation, value);
@@ -3142,10 +3153,18 @@ PgturbohybridGraphCollectResults(IndexScanDesc scan, PgturbohybridGraphScanOpaqu
 
 	exactFree = (meta.tqFlags & PGTURBOHYBRID_GRAPH_EXACT_FREE) != 0 ||
 		!BlockNumberIsValid(meta.tqExactStartBlkno);
+	so->graphExactStorage = !exactFree;
 	PgturbohybridGraphPrepareTqQueryWithBits(scan->indexRelation, &so->support, query,
 							   &so->tq,
 							   meta.tqBits != 0 ? meta.tqBits : PGTURBOHYBRID_DEFAULT_BITS);
 	activeTarget = PgturbohybridGraphGetActiveLimitTupleTarget();
+	if (activeTarget < 0)
+	{
+		int			plannedLimit = PgturbohybridCurrentLimit();
+
+		if (plannedLimit > 0)
+			activeTarget = plannedLimit;
+	}
 	estimatedSelectivity = PgturbohybridGraphGetActiveEstimatedFilterSelectivity();
 	if (PgturbohybridGraphGetActivePayloadInt4Filter(&payloadHeapAttno, &payloadValue))
 	{
@@ -3190,7 +3209,8 @@ PgturbohybridGraphCollectResults(IndexScanDesc scan, PgturbohybridGraphScanOpaqu
 		}
 	}
 	else
-		resultTarget = effectiveEf;
+		resultTarget = minResultTarget > 0 ?
+			minResultTarget : PGTURBOHYBRID_DEFAULT_FINAL_K;
 
 	if (minResultTarget > 0)
 		resultTarget = (int) Min((int64) INT_MAX,
@@ -3235,7 +3255,10 @@ PgturbohybridGraphCollectResults(IndexScanDesc scan, PgturbohybridGraphScanOpaqu
 		so->graphWideningReason = PGTURBOHYBRID_DENSE_WIDENING_FILTER;
 	}
 
-	requestedBaseTarget = Max((int64) 1, (int64) minResultTarget);
+	requestedBaseTarget = Max((int64) 1,
+							  minResultTarget > 0 ?
+							  (int64) minResultTarget :
+							  (int64) PGTURBOHYBRID_DEFAULT_FINAL_K);
 	if (so->hasTupleTargetRows)
 		requestedBaseTarget = Max(requestedBaseTarget,
 								  Max((int64) 1, so->tupleTargetRows));

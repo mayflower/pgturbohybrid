@@ -8,6 +8,8 @@
 #include "nodes/pathnodes.h"
 #include "utils/rel.h"
 
+#define PGTURBOHYBRID_DEFAULT_FINAL_K 10
+
 typedef struct PgturbohybridOptions
 {
 	int32		vl_len_;
@@ -38,11 +40,32 @@ typedef struct PgturbohybridOptions
 	int			hybridDefaultRrfK;
 }			PgturbohybridOptions;
 
+typedef struct PgturbohybridScanStatsSnapshot
+{
+	uint32		denseCandidatesEffective;
+	bool		denseKDefaulted;
+	uint32		bm25CandidatesEffective;
+	bool		bm25KDefaulted;
+	bool		bm25CacheHit;
+	uint64		bm25CacheBuildUs;
+	uint64		bm25HotPostingsCacheHits;
+	uint64		bm25HotPostingsCacheMisses;
+	uint32		bm25Terms;
+	uint64		denseElapsedUs;
+	uint64		bm25ElapsedUs;
+	uint64		fusionElapsedUs;
+	uint64		elapsedUs;
+}			PgturbohybridScanStatsSnapshot;
+
 extern bool pgturbohybrid_enable_wand;
 extern int	pgturbohybrid_max_union_candidates;
 extern int	pgturbohybrid_default_dense_k;
 extern int	pgturbohybrid_default_bm25_k;
 extern int	pgturbohybrid_default_rrf_k;
+extern int	pgturbohybrid_last_final_k_requested;
+extern int	pgturbohybrid_last_final_k_effective;
+extern int	pgturbohybrid_last_sql_limit;
+extern bool pgturbohybrid_last_final_k_inferred;
 extern int	pgturbohybrid_force_fusion;
 extern int	pgturbohybrid_fusion_hash_threshold;
 extern bool pgturbohybrid_enable_exact_rescore_for_bm25_only;
@@ -57,6 +80,7 @@ extern int	pgturbohybrid_bm25_dense_accumulator_threshold;
 extern double pgturbohybrid_bm25_dense_accumulator_df_ratio;
 extern int	pgturbohybrid_bm25_strategy;
 extern int	pgturbohybrid_bm25_impact_or_mode;
+extern int	pgturbohybrid_bm25_hybrid_bound;
 extern bool pgturbohybrid_auto_budget;
 extern int	pgturbohybrid_auto_budget_min_dense_k;
 extern int	pgturbohybrid_auto_budget_min_bm25_k;
@@ -66,6 +90,15 @@ extern bool pgturbohybrid_auto_bm25_budget;
 extern int	pgturbohybrid_auto_bm25_budget_min;
 extern int	pgturbohybrid_auto_bm25_budget_max;
 extern bool pgturbohybrid_auto_bm25_budget_dense_confidence;
+extern int	pgturbohybrid_profile;
+
+typedef enum PgturbohybridProfile
+{
+	PGTURBOHYBRID_PROFILE_LATENCY,
+	PGTURBOHYBRID_PROFILE_BALANCED,
+	PGTURBOHYBRID_PROFILE_QUALITY,
+	PGTURBOHYBRID_PROFILE_DEBUG
+}			PgturbohybridProfile;
 
 typedef enum PgturbohybridBm25SimdForce
 {
@@ -114,9 +147,15 @@ typedef enum PgturbohybridBm25RuntimeStrategy
 const char *PgturbohybridBm25SimdForceName(int force);
 const char *PgturbohybridBm25AccumulatorModeName(int mode);
 const char *PgturbohybridBm25StrategyName(int strategy);
+const char *PgturbohybridBm25ImpactOrModeName(int mode);
+const char *PgturbohybridBm25HybridBoundModeName(int mode);
 const char *PgturbohybridBm25RuntimeStrategyName(int strategy);
+const char *PgturbohybridProfileName(int profile);
+void		PgturbohybridApplyProfileDefaults(void);
 
 void		PgturbohybridInit(void);
 PlannedStmt *PgturbohybridCurrentPlannedStmt(void);
+int			PgturbohybridCurrentLimit(void);
+void		PgturbohybridGetLastScanStatsSnapshot(PgturbohybridScanStatsSnapshot *stats);
 
 #endif

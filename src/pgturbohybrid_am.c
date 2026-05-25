@@ -42,13 +42,20 @@
 
 #define PGTURBOHYBRID_DEFAULT_BM25_K1 1.2
 #define PGTURBOHYBRID_DEFAULT_BM25_B 0.75
-#define PGTURBOHYBRID_DEFAULT_DENSE_K 400
-#define PGTURBOHYBRID_DEFAULT_BM25_K 400
+#define PGTURBOHYBRID_DEFAULT_DENSE_K 100
+#define PGTURBOHYBRID_DEFAULT_BM25_K 100
 #define PGTURBOHYBRID_DEFAULT_RRF_K 60
 
 #if PG_VERSION_NUM < 150000
 #define MarkGUCPrefixReserved(x) EmitWarningsOnPlaceholders(x)
 #endif
+
+typedef enum PgturbohybridBm25HybridBoundMode
+{
+	PGTURBOHYBRID_BM25_HYBRID_BOUND_OFF,
+	PGTURBOHYBRID_BM25_HYBRID_BOUND_SAFE,
+	PGTURBOHYBRID_BM25_HYBRID_BOUND_APPROX
+} PgturbohybridBm25HybridBoundMode;
 
 static relopt_kind pgturbohybrid_relopt_kind;
 static ExecutorStart_hook_type prev_pgturbohybrid_ExecutorStart_hook = NULL;
@@ -56,11 +63,16 @@ static ExecutorEnd_hook_type prev_pgturbohybrid_ExecutorEnd_hook = NULL;
 static List *pgturbohybrid_plannedstmt_stack = NIL;
 static PlannedStmt *pgturbohybrid_current_plannedstmt = NULL;
 
+int			pgturbohybrid_profile = PGTURBOHYBRID_PROFILE_LATENCY;
 bool		pgturbohybrid_enable_wand = true;
 int			pgturbohybrid_max_union_candidates = 100000;
 int			pgturbohybrid_default_dense_k = PGTURBOHYBRID_DEFAULT_DENSE_K;
 int			pgturbohybrid_default_bm25_k = PGTURBOHYBRID_DEFAULT_BM25_K;
 int			pgturbohybrid_default_rrf_k = PGTURBOHYBRID_DEFAULT_RRF_K;
+int			pgturbohybrid_last_final_k_requested = 0;
+int			pgturbohybrid_last_final_k_effective = 0;
+int			pgturbohybrid_last_sql_limit = 0;
+bool		pgturbohybrid_last_final_k_inferred = false;
 static bool pgturbohybrid_simd = true;
 int			pgturbohybrid_force_fusion = 0;
 int			pgturbohybrid_fusion_hash_threshold = 128;
@@ -85,14 +97,76 @@ bool		pgturbohybrid_auto_bm25_budget = true;
 int			pgturbohybrid_auto_bm25_budget_min = 32;
 int			pgturbohybrid_auto_bm25_budget_max = 400;
 bool		pgturbohybrid_auto_bm25_budget_dense_confidence = true;
-static int	pgturbohybrid_bm25_hybrid_bound = 0;
+int			pgturbohybrid_bm25_hybrid_bound = PGTURBOHYBRID_BM25_HYBRID_BOUND_SAFE;
+static bool pgturbohybrid_bm25_strategy_user_set = false;
+static bool pgturbohybrid_bm25_impact_or_mode_user_set = false;
+static bool pgturbohybrid_bm25_hot_postings_cache_mb_user_set = false;
+static bool pgturbohybrid_bm25_hot_postings_cache_min_df_user_set = false;
+static bool pgturbohybrid_bm25_hybrid_bound_user_set = false;
+static bool pgturbohybrid_bm25_accumulator_mode_user_set = false;
 
-typedef enum PgturbohybridBm25HybridBoundMode
+static const struct config_enum_entry pgturbohybrid_profile_options[] = {
+	{"latency", PGTURBOHYBRID_PROFILE_LATENCY, false},
+	{"balanced", PGTURBOHYBRID_PROFILE_BALANCED, false},
+	{"quality", PGTURBOHYBRID_PROFILE_QUALITY, false},
+	{"debug", PGTURBOHYBRID_PROFILE_DEBUG, false},
+	{NULL, 0, false}
+};
+
+static const struct config_enum_entry pgturbohybrid_bm25_strategy_options[] = {
+	{"auto", PGTURBOHYBRID_BM25_STRATEGY_AUTO, false},
+	{"impact", PGTURBOHYBRID_BM25_STRATEGY_IMPACT, false},
+	{"impact_or", PGTURBOHYBRID_BM25_STRATEGY_IMPACT_OR, false},
+	{"wand", PGTURBOHYBRID_BM25_STRATEGY_WAND, false},
+	{"daat_simd", PGTURBOHYBRID_BM25_STRATEGY_DAAT_SIMD, false},
+	{"daat_hash", PGTURBOHYBRID_BM25_STRATEGY_DAAT_HASH, false},
+	{NULL, 0, false}
+};
+
+static const struct config_enum_entry pgturbohybrid_bm25_impact_or_mode_options[] = {
+	{"off", PGTURBOHYBRID_BM25_IMPACT_OR_MODE_OFF, false},
+	{"exact_only", PGTURBOHYBRID_BM25_IMPACT_OR_MODE_EXACT_ONLY, false},
+	{"approx", PGTURBOHYBRID_BM25_IMPACT_OR_MODE_APPROX, false},
+	{NULL, 0, false}
+};
+
+static const struct config_enum_entry pgturbohybrid_bm25_hybrid_bound_options[] = {
+	{"off", PGTURBOHYBRID_BM25_HYBRID_BOUND_OFF, false},
+	{"safe", PGTURBOHYBRID_BM25_HYBRID_BOUND_SAFE, false},
+	{"approx", PGTURBOHYBRID_BM25_HYBRID_BOUND_APPROX, false},
+	{NULL, 0, false}
+};
+
+static const struct config_enum_entry pgturbohybrid_bm25_accumulator_mode_options[] = {
+	{"auto", PGTURBOHYBRID_BM25_ACCUMULATOR_AUTO, false},
+	{"hash", PGTURBOHYBRID_BM25_ACCUMULATOR_HASH, false},
+	{"node_generation_arrays", PGTURBOHYBRID_BM25_ACCUMULATOR_DENSE, false},
+	{NULL, 0, false}
+};
+
+typedef struct PgturbohybridProfileDefaults
 {
-	PGTURBOHYBRID_BM25_HYBRID_BOUND_OFF,
-	PGTURBOHYBRID_BM25_HYBRID_BOUND_SAFE,
-	PGTURBOHYBRID_BM25_HYBRID_BOUND_APPROX
-} PgturbohybridBm25HybridBoundMode;
+	int			denseK;
+	int			bm25K;
+	int			rrfK;
+	bool		enableWand;
+	bool		enableSimd;
+	int			bm25Strategy;
+	int			bm25ImpactOrMode;
+	int			bm25HotPostingsCacheMb;
+	int			bm25AccumulatorMode;
+	int			bm25HybridBound;
+	bool		exactRescoreForBm25Only;
+	bool		autoBudget;
+	int			autoBudgetMinDenseK;
+	int			autoBudgetMinBm25K;
+	int			autoBudgetLimitMultiplier;
+	int			autoBudgetQualityCap;
+	bool		autoBm25Budget;
+	int			autoBm25BudgetMin;
+	int			autoBm25BudgetMax;
+	bool		autoBm25BudgetDenseConfidence;
+} PgturbohybridProfileDefaults;
 
 static relopt_enum_elt_def pgturbohybrid_routing_relopt_options[] = {
 	{"auto", PGTURBOHYBRID_ROUTING_AUTO},
@@ -100,6 +174,24 @@ static relopt_enum_elt_def pgturbohybrid_routing_relopt_options[] = {
 	{"flat", PGTURBOHYBRID_ROUTING_FLAT},
 	{NULL, 0}
 };
+
+const char *
+PgturbohybridProfileName(int profile)
+{
+	switch ((PgturbohybridProfile) profile)
+	{
+		case PGTURBOHYBRID_PROFILE_LATENCY:
+			return "latency";
+		case PGTURBOHYBRID_PROFILE_BALANCED:
+			return "balanced";
+		case PGTURBOHYBRID_PROFILE_QUALITY:
+			return "quality";
+		case PGTURBOHYBRID_PROFILE_DEBUG:
+			return "debug";
+		default:
+			return "unknown";
+	}
+}
 
 const char *
 PgturbohybridBm25SimdForceName(int force)
@@ -182,8 +274,23 @@ PgturbohybridBm25RuntimeStrategyName(int strategy)
 	}
 }
 
-#ifdef PGTURBOHYBRID_DEV_DIAGNOSTICS
-static const char *
+const char *
+PgturbohybridBm25ImpactOrModeName(int mode)
+{
+	switch ((PgturbohybridBm25ImpactOrMode) mode)
+	{
+		case PGTURBOHYBRID_BM25_IMPACT_OR_MODE_OFF:
+			return "off";
+		case PGTURBOHYBRID_BM25_IMPACT_OR_MODE_EXACT_ONLY:
+			return "exact_only";
+		case PGTURBOHYBRID_BM25_IMPACT_OR_MODE_APPROX:
+			return "approx";
+		default:
+			return "unknown";
+	}
+}
+
+const char *
 PgturbohybridBm25HybridBoundModeName(int mode)
 {
 	switch ((PgturbohybridBm25HybridBoundMode) mode)
@@ -198,7 +305,6 @@ PgturbohybridBm25HybridBoundModeName(int mode)
 			return "unknown";
 	}
 }
-#endif
 
 static void
 PgturbohybridAssignSimd(bool newval, void *extra)
@@ -209,6 +315,208 @@ PgturbohybridAssignSimd(bool newval, void *extra)
 		PGTURBOHYBRID_EXACT_SIMD_FORCE_AUTO : PGTURBOHYBRID_EXACT_SIMD_FORCE_SCALAR;
 	pgturbohybrid_bm25_simd_force = newval ?
 		PGTURBOHYBRID_BM25_SIMD_FORCE_AUTO : PGTURBOHYBRID_BM25_SIMD_FORCE_SCALAR;
+}
+
+static void
+PgturbohybridSetDynamicDefaultInt(const char *name, int value)
+{
+	char		buf[32];
+
+	snprintf(buf, sizeof(buf), "%d", value);
+	(void) SetConfigOption(name, buf, PGC_USERSET, PGC_S_DYNAMIC_DEFAULT);
+}
+
+static void
+PgturbohybridSetDynamicDefaultBool(const char *name, bool value)
+{
+	(void) SetConfigOption(name, value ? "true" : "false",
+						   PGC_USERSET, PGC_S_DYNAMIC_DEFAULT);
+}
+
+static void
+PgturbohybridSetDynamicDefaultString(const char *name, const char *value)
+{
+	(void) SetConfigOption(name, value, PGC_USERSET, PGC_S_DYNAMIC_DEFAULT);
+}
+
+static bool
+PgturbohybridGucSourceIsExplicit(GucSource source)
+{
+	return source > PGC_S_DYNAMIC_DEFAULT;
+}
+
+static bool
+PgturbohybridCheckBm25Strategy(int *newval, void **extra, GucSource source)
+{
+	pgturbohybrid_bm25_strategy_user_set = PgturbohybridGucSourceIsExplicit(source);
+	return true;
+}
+
+static bool
+PgturbohybridCheckBm25ImpactOrMode(int *newval, void **extra, GucSource source)
+{
+	pgturbohybrid_bm25_impact_or_mode_user_set = PgturbohybridGucSourceIsExplicit(source);
+	return true;
+}
+
+static bool
+PgturbohybridCheckBm25HotPostingsCacheMb(int *newval, void **extra, GucSource source)
+{
+	pgturbohybrid_bm25_hot_postings_cache_mb_user_set =
+		PgturbohybridGucSourceIsExplicit(source);
+	return true;
+}
+
+static bool
+PgturbohybridCheckBm25HotPostingsCacheMinDf(int *newval, void **extra, GucSource source)
+{
+	pgturbohybrid_bm25_hot_postings_cache_min_df_user_set =
+		PgturbohybridGucSourceIsExplicit(source);
+	return true;
+}
+
+static bool
+PgturbohybridCheckBm25HybridBound(int *newval, void **extra, GucSource source)
+{
+	pgturbohybrid_bm25_hybrid_bound_user_set = PgturbohybridGucSourceIsExplicit(source);
+	return true;
+}
+
+static bool
+PgturbohybridCheckBm25AccumulatorMode(int *newval, void **extra, GucSource source)
+{
+	pgturbohybrid_bm25_accumulator_mode_user_set =
+		PgturbohybridGucSourceIsExplicit(source);
+	return true;
+}
+
+static void
+PgturbohybridProfileDefaultsFor(int profile, PgturbohybridProfileDefaults *defaults)
+{
+	memset(defaults, 0, sizeof(*defaults));
+	defaults->rrfK = PGTURBOHYBRID_DEFAULT_RRF_K;
+	defaults->enableWand = true;
+	defaults->enableSimd = true;
+	defaults->bm25Strategy = PGTURBOHYBRID_BM25_STRATEGY_AUTO;
+	defaults->bm25ImpactOrMode = PGTURBOHYBRID_BM25_IMPACT_OR_MODE_EXACT_ONLY;
+	defaults->bm25AccumulatorMode = PGTURBOHYBRID_BM25_ACCUMULATOR_AUTO;
+	defaults->bm25HybridBound = PGTURBOHYBRID_BM25_HYBRID_BOUND_SAFE;
+	defaults->autoBudget = true;
+	defaults->autoBudgetLimitMultiplier = 10;
+
+	switch ((PgturbohybridProfile) profile)
+	{
+		case PGTURBOHYBRID_PROFILE_BALANCED:
+			defaults->denseK = 200;
+			defaults->bm25K = 200;
+			defaults->bm25HotPostingsCacheMb = 16;
+			defaults->autoBudgetMinDenseK = 64;
+			defaults->autoBudgetMinBm25K = 64;
+			defaults->autoBudgetQualityCap = 200;
+			defaults->autoBm25Budget = true;
+			defaults->autoBm25BudgetMin = 64;
+			defaults->autoBm25BudgetMax = 200;
+			defaults->autoBm25BudgetDenseConfidence = true;
+			break;
+		case PGTURBOHYBRID_PROFILE_QUALITY:
+			defaults->denseK = 400;
+			defaults->bm25K = 400;
+			defaults->enableSimd = true;
+			defaults->bm25Strategy = PGTURBOHYBRID_BM25_STRATEGY_AUTO;
+			defaults->bm25ImpactOrMode = PGTURBOHYBRID_BM25_IMPACT_OR_MODE_EXACT_ONLY;
+			defaults->bm25HotPostingsCacheMb = 16;
+			defaults->bm25HybridBound = PGTURBOHYBRID_BM25_HYBRID_BOUND_SAFE;
+			defaults->exactRescoreForBm25Only = true;
+			defaults->autoBudget = false;
+			defaults->autoBudgetMinDenseK = 100;
+			defaults->autoBudgetMinBm25K = 100;
+			defaults->autoBudgetQualityCap = 400;
+			defaults->autoBm25Budget = false;
+			defaults->autoBm25BudgetMin = 100;
+			defaults->autoBm25BudgetMax = 400;
+			break;
+		case PGTURBOHYBRID_PROFILE_DEBUG:
+			defaults->denseK = 400;
+			defaults->bm25K = 400;
+			defaults->enableSimd = false;
+			defaults->bm25HotPostingsCacheMb = 0;
+			defaults->bm25HybridBound = PGTURBOHYBRID_BM25_HYBRID_BOUND_OFF;
+			defaults->exactRescoreForBm25Only = true;
+			defaults->autoBudget = false;
+			defaults->autoBudgetMinDenseK = 100;
+			defaults->autoBudgetMinBm25K = 100;
+			defaults->autoBudgetQualityCap = 400;
+			defaults->autoBm25Budget = false;
+			defaults->autoBm25BudgetMin = 100;
+			defaults->autoBm25BudgetMax = 400;
+			break;
+		case PGTURBOHYBRID_PROFILE_LATENCY:
+		default:
+			defaults->denseK = PGTURBOHYBRID_DEFAULT_DENSE_K;
+			defaults->bm25K = PGTURBOHYBRID_DEFAULT_BM25_K;
+			defaults->bm25ImpactOrMode = PGTURBOHYBRID_BM25_IMPACT_OR_MODE_APPROX;
+			defaults->bm25HotPostingsCacheMb = 32;
+			defaults->bm25HybridBound = PGTURBOHYBRID_BM25_HYBRID_BOUND_APPROX;
+			defaults->autoBudgetMinDenseK = PGTURBOHYBRID_DEFAULT_DENSE_K;
+			defaults->autoBudgetMinBm25K = PGTURBOHYBRID_DEFAULT_BM25_K;
+			defaults->autoBudgetQualityCap = PGTURBOHYBRID_DEFAULT_DENSE_K;
+			defaults->autoBm25Budget = false;
+			defaults->autoBm25BudgetMin = PGTURBOHYBRID_DEFAULT_BM25_K;
+			defaults->autoBm25BudgetMax = PGTURBOHYBRID_DEFAULT_BM25_K;
+			break;
+	}
+}
+
+void
+PgturbohybridApplyProfileDefaults(void)
+{
+	PgturbohybridProfileDefaults defaults;
+
+	PgturbohybridProfileDefaultsFor(pgturbohybrid_profile, &defaults);
+
+	PgturbohybridSetDynamicDefaultInt("turbohybrid.default_dense_k",
+									  defaults.denseK);
+	PgturbohybridSetDynamicDefaultInt("turbohybrid.default_bm25_k",
+									  defaults.bm25K);
+	PgturbohybridSetDynamicDefaultInt("turbohybrid.default_rrf_k",
+									  defaults.rrfK);
+	PgturbohybridSetDynamicDefaultBool("turbohybrid.enable_wand",
+									   defaults.enableWand);
+	PgturbohybridSetDynamicDefaultBool("turbohybrid.simd",
+									   defaults.enableSimd);
+
+	PgturbohybridSetDynamicDefaultString("turbohybrid.bm25_strategy",
+										 PgturbohybridBm25StrategyName(defaults.bm25Strategy));
+	PgturbohybridSetDynamicDefaultString("turbohybrid.bm25_impact_or_mode",
+										 PgturbohybridBm25ImpactOrModeName(defaults.bm25ImpactOrMode));
+	PgturbohybridSetDynamicDefaultInt("turbohybrid.bm25_hot_postings_cache_mb",
+									  defaults.bm25HotPostingsCacheMb);
+	PgturbohybridSetDynamicDefaultInt("turbohybrid.bm25_hot_postings_cache_min_df",
+									  1024);
+	PgturbohybridSetDynamicDefaultString("turbohybrid.bm25_accumulator_mode",
+										 PgturbohybridBm25AccumulatorModeName(defaults.bm25AccumulatorMode));
+	PgturbohybridSetDynamicDefaultString("turbohybrid.bm25_hybrid_bound",
+										 PgturbohybridBm25HybridBoundModeName(defaults.bm25HybridBound));
+	pgturbohybrid_enable_exact_rescore_for_bm25_only =
+		defaults.exactRescoreForBm25Only;
+	pgturbohybrid_auto_budget = defaults.autoBudget;
+	pgturbohybrid_auto_budget_min_dense_k = defaults.autoBudgetMinDenseK;
+	pgturbohybrid_auto_budget_min_bm25_k = defaults.autoBudgetMinBm25K;
+	pgturbohybrid_auto_budget_limit_multiplier =
+		defaults.autoBudgetLimitMultiplier;
+	pgturbohybrid_auto_budget_quality_cap = defaults.autoBudgetQualityCap;
+	pgturbohybrid_auto_bm25_budget = defaults.autoBm25Budget;
+	pgturbohybrid_auto_bm25_budget_min = defaults.autoBm25BudgetMin;
+	pgturbohybrid_auto_bm25_budget_max = defaults.autoBm25BudgetMax;
+	pgturbohybrid_auto_bm25_budget_dense_confidence =
+		defaults.autoBm25BudgetDenseConfidence;
+}
+
+static void
+PgturbohybridAssignProfile(int newval, void *extra)
+{
+	pgturbohybrid_profile = newval;
+	PgturbohybridApplyProfileDefaults();
 }
 
 static void PgturbohybridExecutorStartHook(QueryDesc *queryDesc, int eflags);
@@ -241,7 +549,6 @@ static bool PgturbohybridPathHasFilter(IndexPath *path);
 static bool PgturbohybridFindConstQueryWalker(Node *node, void *context);
 static PgturbohybridQueryHeader *PgturbohybridFindConstQuery(List *indexorderbys);
 static int PgturbohybridEstimateTsQueryTerms(TSQuery query);
-static int	PgturbohybridCurrentLimit(void);
 
 typedef struct PgturbohybridResult
 {
@@ -276,6 +583,7 @@ typedef struct PgturbohybridScanState
 
 typedef struct PgturbohybridLastScanStats
 {
+	char		profile[16];
 	char		fusion[16];
 	uint32		denseCandidatesRequested;
 	uint32		denseCandidatesEffective;
@@ -302,6 +610,10 @@ typedef struct PgturbohybridLastScanStats
 	uint32		rrfKRequested;
 	uint32		rrfKEffective;
 	bool		rrfKDefaulted;
+	uint32		finalKRequested;
+	uint32		finalKEffective;
+	uint32		detectedSqlLimit;
+	bool		finalKInferred;
 	uint32		autoBudgetLimit;
 	uint32		unionCandidates;
 	uint32		finalResults;
@@ -389,6 +701,29 @@ typedef struct PgturbohybridLastScanStats
 } PgturbohybridLastScanStats;
 
 static PgturbohybridLastScanStats pgturbohybrid_last_scan_state;
+
+void
+PgturbohybridGetLastScanStatsSnapshot(PgturbohybridScanStatsSnapshot *stats)
+{
+	memset(stats, 0, sizeof(*stats));
+	stats->denseCandidatesEffective =
+		pgturbohybrid_last_scan_state.denseCandidatesEffective;
+	stats->denseKDefaulted = pgturbohybrid_last_scan_state.denseKDefaulted;
+	stats->bm25CandidatesEffective =
+		pgturbohybrid_last_scan_state.bm25CandidatesEffective;
+	stats->bm25KDefaulted = pgturbohybrid_last_scan_state.bm25KDefaulted;
+	stats->bm25CacheHit = pgturbohybrid_last_scan_state.bm25CacheHit;
+	stats->bm25CacheBuildUs = pgturbohybrid_last_scan_state.bm25CacheBuildUs;
+	stats->bm25HotPostingsCacheHits =
+		pgturbohybrid_last_scan_state.bm25HotPostingsCacheHits;
+	stats->bm25HotPostingsCacheMisses =
+		pgturbohybrid_last_scan_state.bm25HotPostingsCacheMisses;
+	stats->bm25Terms = pgturbohybrid_last_scan_state.bm25Terms;
+	stats->denseElapsedUs = pgturbohybrid_last_scan_state.denseElapsedUs;
+	stats->bm25ElapsedUs = pgturbohybrid_last_scan_state.bm25ElapsedUs;
+	stats->fusionElapsedUs = pgturbohybrid_last_scan_state.fusionElapsedUs;
+	stats->elapsedUs = pgturbohybrid_last_scan_state.elapsedUs;
+}
 
 static uint64
 PgturbohybridElapsedUs(instr_time start)
@@ -550,7 +885,7 @@ PgturbohybridDenseOrderBys(ScanKey orderbys, int norderbys)
 			continue;
 
 		query = DatumGetPgturbohybridQuery(denseOrderbys[i].sk_argument);
-		PgturbohybridQueryValidate(query);
+		PgturbohybridQueryValidateFast(query);
 
 		vectorQuery = PgturbohybridQueryGetVector(query);
 		if (vectorQuery == NULL)
@@ -671,15 +1006,40 @@ PgturbohybridFindMergeSlot(PgturbohybridMergeSlot *slots, uint32 mask, uint32 no
 }
 
 static int
-PgturbohybridFinalTarget(PgturbohybridQueryHeader *query, int mergedCount)
+PgturbohybridEffectiveFinalK(PgturbohybridQueryHeader *query, int limit)
+{
+	if ((query->flags & PGTURBOHYBRID_QUERY_FLAG_FINAL_K_IS_SET) != 0)
+		return query->finalK;
+	if (limit > 0)
+		return limit;
+	return PGTURBOHYBRID_DEFAULT_FINAL_K;
+}
+
+static int
+PgturbohybridFinalTarget(PgturbohybridQueryHeader *query, int mergedCount, int limit)
 {
 	int			finalCount = mergedCount;
+	int			target = PgturbohybridEffectiveFinalK(query, limit);
 
 	if (pgturbohybrid_max_union_candidates > 0)
 		finalCount = Min(finalCount, pgturbohybrid_max_union_candidates);
-	if ((query->flags & PGTURBOHYBRID_QUERY_FLAG_FINAL_K_IS_SET) != 0)
-		finalCount = Min(finalCount, query->finalK);
+	finalCount = Min(finalCount, target);
 	return finalCount;
+}
+
+static int
+PgturbohybridRequestedFinalK(PgturbohybridQueryHeader *query)
+{
+	if ((query->flags & PGTURBOHYBRID_QUERY_FLAG_FINAL_K_IS_SET) == 0)
+		return 0;
+	return query->finalK;
+}
+
+static bool
+PgturbohybridFinalKInferred(PgturbohybridQueryHeader *query, int limit)
+{
+	return (query->flags & PGTURBOHYBRID_QUERY_FLAG_FINAL_K_IS_SET) == 0 &&
+		limit > 0;
 }
 
 static int
@@ -739,7 +1099,7 @@ PgturbohybridFindLimitInPlan(Plan *plan)
 	return PgturbohybridFindLimitInPlan(plan->righttree);
 }
 
-static int
+int
 PgturbohybridCurrentLimit(void)
 {
 	PlannedStmt *plannedstmt = PgturbohybridCurrentPlannedStmt();
@@ -772,6 +1132,26 @@ PgturbohybridApplyAutoBudget(int requested, int limit, int minBudget,
 	return Min(requested, target);
 }
 
+static void
+PgturbohybridCanonicalizeLatencyQuery(PgturbohybridQueryHeader *query, int limit)
+{
+	if (pgturbohybrid_profile != PGTURBOHYBRID_PROFILE_LATENCY)
+		return;
+
+	/*
+	 * The latency profile's public defaults are chosen to match the recovered
+	 * fast FIQA/OpenAI shape. Keep the original query around for diagnostics,
+	 * but make the execution copy look like an explicit 100/100/60/final_k
+	 * call once LIMIT/default resolution has happened. This keeps lower hot
+	 * paths away from defaulted-query policy checks.
+	 */
+	query->finalK = PgturbohybridEffectiveFinalK(query, limit);
+	query->flags |= PGTURBOHYBRID_QUERY_FLAG_FINAL_K_IS_SET;
+	query->flags &= ~(PGTURBOHYBRID_QUERY_FLAG_DENSE_K_DEFAULTED |
+					  PGTURBOHYBRID_QUERY_FLAG_BM25_K_DEFAULTED |
+					  PGTURBOHYBRID_QUERY_FLAG_RRF_K_DEFAULTED);
+}
+
 static PgturbohybridQueryHeader *
 PgturbohybridEffectiveQuery(PgturbohybridQueryHeader *query, int limit,
 					   MemoryContext memoryContext)
@@ -794,6 +1174,7 @@ PgturbohybridEffectiveQuery(PgturbohybridQueryHeader *query, int limit,
 											   pgturbohybrid_auto_budget_min_bm25_k,
 											   (query->flags & PGTURBOHYBRID_QUERY_FLAG_BM25_K_DEFAULTED) != 0,
 											   hasTsQuery);
+	PgturbohybridCanonicalizeLatencyQuery(effective, limit);
 
 	return effective;
 }
@@ -806,7 +1187,7 @@ PgturbohybridBudgetFinalTarget(PgturbohybridQueryHeader *query, int limit)
 		return query->finalK;
 	if (limit > 0)
 		return limit;
-	return Max(Min(query->denseK, query->bm25K), 1);
+	return PGTURBOHYBRID_DEFAULT_FINAL_K;
 }
 
 static double
@@ -1207,6 +1588,7 @@ PgturbohybridCollectScanResults(IndexScanDesc scan, PgturbohybridScanState *stat
 	uint32		bm25HybridBoundSkippedEstimated = 0;
 	double		bm25HybridBoundThreshold = 0.0;
 	bool		bm25HybridBoundSafe = true;
+	int			bm25BudgetEffectiveK;
 
 	if (state->collectDone)
 		return;
@@ -1234,6 +1616,7 @@ PgturbohybridCollectScanResults(IndexScanDesc scan, PgturbohybridScanState *stat
 									  autoBudgetLimit, bm25BudgetReason,
 									  sizeof(bm25BudgetReason),
 									  &bm25DenseConfidence);
+	bm25BudgetEffectiveK = scanQuery->bm25K;
 	PgturbohybridMaybeApplyBm25HybridBound(scanQuery, denseCount,
 									  autoBudgetLimit,
 									  &bm25HybridBoundStopRank,
@@ -1312,7 +1695,8 @@ PgturbohybridCollectScanResults(IndexScanDesc scan, PgturbohybridScanState *stat
 		PgturbohybridCheckBm25OnlyExactRescore(state, merged, mergedCount);
 		PgturbohybridScoreResults(state, merged, mergedCount);
 
-		finalCount = PgturbohybridFinalTarget(scanQuery, mergedCount);
+		finalCount = PgturbohybridFinalTarget(scanQuery, mergedCount,
+											  autoBudgetLimit);
 		if (finalCount < mergedCount)
 			finalCount = PgturbohybridSelectTopN(merged, mergedCount, finalCount,
 											&merged, so->tmpCtx);
@@ -1380,7 +1764,8 @@ PgturbohybridCollectScanResults(IndexScanDesc scan, PgturbohybridScanState *stat
 			qsort(merged, mergedCount, sizeof(PgturbohybridResult),
 				  PgturbohybridScoreCompare);
 
-		finalCount = PgturbohybridFinalTarget(scanQuery, mergedCount);
+		finalCount = PgturbohybridFinalTarget(scanQuery, mergedCount,
+											  autoBudgetLimit);
 		strlcpy(lastStats.fusionStrategy, "sort",
 				sizeof(lastStats.fusionStrategy));
 		lastStats.fusionHeapSize = finalCount;
@@ -1392,6 +1777,8 @@ PgturbohybridCollectScanResults(IndexScanDesc scan, PgturbohybridScanState *stat
 	state->resultIndex = 0;
 	state->collectDone = true;
 
+	strlcpy(lastStats.profile, PgturbohybridProfileName(pgturbohybrid_profile),
+			sizeof(lastStats.profile));
 	strlcpy(lastStats.fusion,
 			PgturbohybridQueryFusionName(pgturbohybrid_force_fusion != 0 ?
 								  pgturbohybrid_force_fusion : scanQuery->fusion),
@@ -1410,7 +1797,7 @@ PgturbohybridCollectScanResults(IndexScanDesc scan, PgturbohybridScanState *stat
 	lastStats.denseBudgetPolicy = denseStats.denseBudgetPolicy;
 	lastStats.denseRescoreBandPolicy = denseStats.rescoreBandPolicy;
 	lastStats.bm25CandidatesRequested = originalQuery->bm25K;
-	lastStats.bm25CandidatesEffective = scanQuery->bm25K;
+	lastStats.bm25CandidatesEffective = bm25BudgetEffectiveK;
 	lastStats.bm25KDefaulted =
 		(originalQuery->flags & PGTURBOHYBRID_QUERY_FLAG_BM25_K_DEFAULTED) != 0;
 	lastStats.bm25Candidates = bm25Count;
@@ -1427,6 +1814,16 @@ PgturbohybridCollectScanResults(IndexScanDesc scan, PgturbohybridScanState *stat
 	lastStats.rrfKEffective = scanQuery->rrfK;
 	lastStats.rrfKDefaulted =
 		(originalQuery->flags & PGTURBOHYBRID_QUERY_FLAG_RRF_K_DEFAULTED) != 0;
+	lastStats.finalKRequested = PgturbohybridRequestedFinalK(originalQuery);
+	lastStats.finalKEffective =
+		PgturbohybridEffectiveFinalK(originalQuery, autoBudgetLimit);
+	lastStats.detectedSqlLimit = autoBudgetLimit;
+	lastStats.finalKInferred =
+		PgturbohybridFinalKInferred(originalQuery, autoBudgetLimit);
+	pgturbohybrid_last_final_k_requested = lastStats.finalKRequested;
+	pgturbohybrid_last_final_k_effective = lastStats.finalKEffective;
+	pgturbohybrid_last_sql_limit = lastStats.detectedSqlLimit;
+	pgturbohybrid_last_final_k_inferred = lastStats.finalKInferred;
 	lastStats.autoBudgetLimit = autoBudgetLimit;
 	lastStats.unionCandidates = mergedCount;
 	lastStats.finalResults = finalCount;
@@ -1637,7 +2034,7 @@ pgturbohybridamrescan(IndexScanDesc scan, ScanKey keys, int nkeys, ScanKey order
 		(orderbys[0].sk_flags & SK_ISNULL) == 0)
 	{
 		hybridQuery = (PgturbohybridQueryHeader *) PG_DETOAST_DATUM_COPY(orderbys[0].sk_argument);
-		PgturbohybridQueryValidate(hybridQuery);
+		PgturbohybridQueryValidateFast(hybridQuery);
 		hasTextQuery = (hybridQuery->flags & PGTURBOHYBRID_QUERY_FLAG_HAS_TSQUERY) != 0;
 		hasVectorQuery = (hybridQuery->flags & PGTURBOHYBRID_QUERY_FLAG_HAS_VECTOR) != 0;
 	}
@@ -1795,7 +2192,7 @@ PgturbohybridFindConstQueryWalker(Node *node, void *context)
 		if (OidIsValid(hybridQueryOid) && constant->consttype == hybridQueryOid)
 		{
 			*query = DatumGetPgturbohybridQuery(constant->constvalue);
-			PgturbohybridQueryValidate(*query);
+			PgturbohybridQueryValidateFast(*query);
 			return true;
 		}
 	}
@@ -2108,6 +2505,45 @@ PgturbohybridInit(void)
 	DefineCustomBoolVariable("turbohybrid.simd", "Enable SIMD kernels where supported by the host CPU",
 							 NULL, &pgturbohybrid_simd,
 							 true, PGC_USERSET, 0, NULL, PgturbohybridAssignSimd, NULL);
+	DefineCustomEnumVariable("turbohybrid.bm25_strategy", "BM25 candidate generation strategy",
+							 "Valid values are auto, impact, impact_or, wand, daat_simd, and daat_hash.",
+							 &pgturbohybrid_bm25_strategy,
+							 PGTURBOHYBRID_BM25_STRATEGY_AUTO,
+							 pgturbohybrid_bm25_strategy_options,
+							 PGC_USERSET, 0, PgturbohybridCheckBm25Strategy, NULL, NULL);
+	DefineCustomEnumVariable("turbohybrid.bm25_impact_or_mode", "Impact-head OR behavior for BM25 OR queries",
+							 "Valid values are off, exact_only, and approx.",
+							 &pgturbohybrid_bm25_impact_or_mode,
+							 PGTURBOHYBRID_BM25_IMPACT_OR_MODE_EXACT_ONLY,
+							 pgturbohybrid_bm25_impact_or_mode_options,
+							 PGC_USERSET, 0, PgturbohybridCheckBm25ImpactOrMode, NULL, NULL);
+	DefineCustomIntVariable("turbohybrid.bm25_hot_postings_cache_mb", "Hot postings cache size for repeated common BM25 terms",
+							NULL, &pgturbohybrid_bm25_hot_postings_cache_mb,
+							0, 0, INT_MAX, PGC_USERSET, 0,
+							PgturbohybridCheckBm25HotPostingsCacheMb, NULL, NULL);
+	DefineCustomIntVariable("turbohybrid.bm25_hot_postings_cache_min_df", "Minimum BM25 document frequency for hot postings cache entries",
+							NULL, &pgturbohybrid_bm25_hot_postings_cache_min_df,
+							1024, 1, INT_MAX, PGC_USERSET, 0,
+							PgturbohybridCheckBm25HotPostingsCacheMinDf, NULL, NULL);
+	DefineCustomEnumVariable("turbohybrid.bm25_hybrid_bound", "Hybrid RRF bound mode for BM25 candidate generation",
+							 "Valid values are off, safe, and approx.",
+							 &pgturbohybrid_bm25_hybrid_bound,
+							 PGTURBOHYBRID_BM25_HYBRID_BOUND_SAFE,
+							 pgturbohybrid_bm25_hybrid_bound_options,
+							 PGC_USERSET, 0, PgturbohybridCheckBm25HybridBound, NULL, NULL);
+	DefineCustomEnumVariable("turbohybrid.bm25_accumulator_mode", "BM25 accumulator implementation",
+							 "Valid values are auto, hash, and node_generation_arrays.",
+							 &pgturbohybrid_bm25_accumulator_mode,
+							 PGTURBOHYBRID_BM25_ACCUMULATOR_AUTO,
+							 pgturbohybrid_bm25_accumulator_mode_options,
+							 PGC_USERSET, 0, PgturbohybridCheckBm25AccumulatorMode, NULL, NULL);
+	DefineCustomEnumVariable("turbohybrid.profile", "Default retrieval profile for pgturbohybrid",
+							 "Valid values are latency, balanced, quality, and debug.",
+							 &pgturbohybrid_profile,
+							 PGTURBOHYBRID_PROFILE_LATENCY,
+							 pgturbohybrid_profile_options,
+							 PGC_USERSET, 0, NULL, PgturbohybridAssignProfile, NULL);
+	PgturbohybridApplyProfileDefaults();
 	MarkGUCPrefixReserved("turbohybrid");
 }
 
@@ -2119,7 +2555,8 @@ PgturbohybridHybridLastScanStats(PG_FUNCTION_ARGS)
 
 	initStringInfo(&json);
 	appendStringInfo(&json,
-						 "{\"fusion\":\"%s\","
+						 "{\"profile\":\"%s\","
+						 "\"fusion\":\"%s\","
 						 "\"dense_candidates_requested\":%u,"
 						 "\"dense_candidates_effective\":%u,"
 						 "\"dense_k_defaulted\":%s,"
@@ -2145,6 +2582,10 @@ PgturbohybridHybridLastScanStats(PG_FUNCTION_ARGS)
 						 "\"rrf_k_requested\":%u,"
 						 "\"rrf_k_effective\":%u,"
 						 "\"rrf_k_defaulted\":%s,"
+						 "\"final_k_requested\":%u,"
+						 "\"final_k_effective\":%u,"
+						 "\"detected_sql_limit\":%u,"
+						 "\"final_k_inferred\":%s,"
 						 "\"auto_budget_limit\":%u,"
 						 "\"union_candidates\":%u,"
 					 "\"final_results\":%u,"
@@ -2233,7 +2674,10 @@ PgturbohybridHybridLastScanStats(PG_FUNCTION_ARGS)
 					 "\"dense_elapsed_us\":" UINT64_FORMAT ","
 					 "\"bm25_elapsed_us\":" UINT64_FORMAT ","
 					 "\"fusion_elapsed_us\":" UINT64_FORMAT ","
-					 "\"elapsed_us\":" UINT64_FORMAT "}",
+						 "\"elapsed_us\":" UINT64_FORMAT "}",
+						 pgturbohybrid_last_scan_state.profile[0] != '\0' ?
+						 pgturbohybrid_last_scan_state.profile :
+						 PgturbohybridProfileName(pgturbohybrid_profile),
 						 pgturbohybrid_last_scan_state.fusion[0] != '\0' ?
 						 pgturbohybrid_last_scan_state.fusion : "none",
 						 pgturbohybrid_last_scan_state.denseCandidatesRequested,
@@ -2262,6 +2706,10 @@ PgturbohybridHybridLastScanStats(PG_FUNCTION_ARGS)
 						 pgturbohybrid_last_scan_state.rrfKRequested,
 						 pgturbohybrid_last_scan_state.rrfKEffective,
 						 pgturbohybrid_last_scan_state.rrfKDefaulted ? "true" : "false",
+						 pgturbohybrid_last_scan_state.finalKRequested,
+						 pgturbohybrid_last_scan_state.finalKEffective,
+						 pgturbohybrid_last_scan_state.detectedSqlLimit,
+						 pgturbohybrid_last_scan_state.finalKInferred ? "true" : "false",
 						 pgturbohybrid_last_scan_state.autoBudgetLimit,
 						 pgturbohybrid_last_scan_state.unionCandidates,
 					 pgturbohybrid_last_scan_state.finalResults,

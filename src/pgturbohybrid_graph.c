@@ -28,6 +28,7 @@
 #include "utils/relcache.h"
 #include "utils/selfuncs.h"
 #include "utils/spccache.h"
+#include "pgturbohybrid_am.h"
 #include "pgturbohybrid_vector_compat.h"
 #include "pgturbohybrid_quant.h"
 #include "pgturbohybrid_bm25.h"
@@ -42,6 +43,24 @@ static relopt_enum_elt_def pgturbohybrid_routing_relopt_options[] = {
 	{"flat", PGTURBOHYBRID_ROUTING_FLAT},
 	{NULL, 0}
 };
+
+static const char *
+PgturbohybridRoutingName(int routing)
+{
+	switch (routing)
+	{
+		case PGTURBOHYBRID_ROUTING_AUTO:
+			return "auto";
+		case PGTURBOHYBRID_ROUTING_GRAPH:
+			return "graph";
+		case PGTURBOHYBRID_ROUTING_FLAT:
+			return "flat";
+		case PGTURBOHYBRID_ROUTING_LEGACY_GRAPH:
+			return "legacy_graph";
+		default:
+			return "unknown";
+	}
+}
 
 int			pgturbohybrid_ef_search = PGTURBOHYBRID_GRAPH_DEFAULT_EF_SEARCH;
 int			pgturbohybrid_iterative_scan = PGTURBOHYBRID_GRAPH_ITERATIVE_SCAN_OFF;
@@ -184,12 +203,15 @@ pgturbohybrid_index_stats(PG_FUNCTION_ARGS)
 	uint16		graphOversampling;
 	uint16		tqFlags;
 	uint16		tqBits;
+	int			routing;
 	BlockNumber tqBm25MetaStartBlkno;
 	bool		hasBm25Meta = false;
 	PgturbohybridBm25MetaTupleData bm25Meta;
+	TqOptions  *opts;
 	StringInfoData json;
 
 	index = index_open(indexOid, AccessShareLock);
+	opts = (TqOptions *) index->rd_options;
 
 	nblocks = RelationGetNumberOfBlocks(index);
 	buf = ReadBuffer(index, PGTURBOHYBRID_GRAPH_METAPAGE_BLKNO);
@@ -207,6 +229,7 @@ pgturbohybrid_index_stats(PG_FUNCTION_ARGS)
 	graphOversampling = metap->graphOversampling;
 	tqFlags = metap->tqFlags;
 	tqBits = metap->tqBits != 0 ? metap->tqBits : PGTURBOHYBRID_DEFAULT_BITS;
+	routing = opts != NULL ? opts->routing : PGTURBOHYBRID_ROUTING_AUTO;
 	tqBm25MetaStartBlkno = metap->tqBm25MetaStartBlkno > PGTURBOHYBRID_GRAPH_METAPAGE_BLKNO ?
 		metap->tqBm25MetaStartBlkno : InvalidBlockNumber;
 
@@ -271,23 +294,27 @@ pgturbohybrid_index_stats(PG_FUNCTION_ARGS)
 	initStringInfo(&json);
 	appendStringInfo(&json,
 					 "{\"version\":1,"
+					 "\"profile\":\"%s\","
 					 "\"storage_kind\":\"%s\","
 					 "\"blocks\":%u,"
 					 "\"graph_m\":%u,"
 					 "\"graph_ef_construction\":%u,"
 					 "\"graph_ef_search\":%u,"
 					 "\"graph_oversampling\":%u,"
+					 "\"routing\":\"%s\","
 					 "\"quantization_bits\":%u,"
 					 "\"exact_storage\":%s,"
 					 "\"hybrid\":%s,"
 					 "\"bm25_document_count\":%u,"
 					 "\"bm25_average_document_length\":%.6g}",
+					 PgturbohybridProfileName(pgturbohybrid_profile),
 					 PgturbohybridGraphStorageKindName(storageKind),
 					 nblocks,
 					 graphM,
 					 graphEfConstruction,
 					 graphEfSearch,
 					 graphOversampling,
+					 PgturbohybridRoutingName(routing),
 					 tqBits,
 					 (tqFlags & PGTURBOHYBRID_GRAPH_EXACT_FREE) != 0 ? "false" : "true",
 					 hasBm25Meta ? "true" : "false",

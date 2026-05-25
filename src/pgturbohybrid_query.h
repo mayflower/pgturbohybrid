@@ -49,6 +49,7 @@ typedef struct PgturbohybridQueryHeader
 Vector	   *PgturbohybridQueryGetVector(PgturbohybridQueryHeader *query);
 TSQuery		PgturbohybridQueryGetTsQuery(PgturbohybridQueryHeader *query);
 void		PgturbohybridQueryValidate(PgturbohybridQueryHeader *query);
+void		PgturbohybridQueryValidateFast(PgturbohybridQueryHeader *query);
 const char *PgturbohybridQueryFusionName(uint16 fusion);
 
 #endif

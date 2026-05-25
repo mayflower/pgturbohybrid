@@ -71,6 +71,49 @@ jobs:
             log/
           if-no-files-found: ignore
 
+  perf-smoke:
+    name: perf smoke fast defaults
+    runs-on: ubuntu-24.04
+    env:
+      PG_CONFIG: /usr/lib/postgresql/18/bin/pg_config
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: ankane/setup-postgres@v1
+        with:
+          postgres-version: 18
+          dev-files: true
+
+      - name: Build and install upstream pgvector
+        run: |
+          git clone --depth 1 --branch v0.8.2 https://github.com/pgvector/pgvector.git /tmp/pgvector
+          make -C /tmp/pgvector
+          sudo --preserve-env=PG_CONFIG make -C /tmp/pgvector install
+
+      - name: Build and install pgturbohybrid
+        run: |
+          make clean
+          make
+          sudo --preserve-env=PG_CONFIG make install
+        env:
+          PG_CFLAGS: -DUSE_ASSERT_CHECKING -Wall -Wextra -Werror -Wno-unused-parameter -Wno-sign-compare
+
+      - name: Verify fast default path
+        run: |
+          createdb pgturbohybrid_perf_smoke
+          psql -q -X -A -t -v ON_ERROR_STOP=1 \
+            -d pgturbohybrid_perf_smoke \
+            -f test/perf/perf_smoke_fast_defaults.sql \
+            > perf-smoke-results.json
+          python3 -m json.tool perf-smoke-results.json >/dev/null
+
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: perf-smoke-results
+          path: perf-smoke-results.json
+          if-no-files-found: error
+
   macos:
     name: ${{ matrix.os }} pg${{ matrix.postgres }} pgvector-${{ matrix.pgvector_ref }}
     runs-on: ${{ matrix.os }}

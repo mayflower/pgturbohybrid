@@ -34,6 +34,11 @@ static void PgturbohybridQueryCheckPositiveInt(const char *name, int32 value);
 static void PgturbohybridQueryCheckNonNegativeInt(const char *name, int32 value);
 static void PgturbohybridQueryRejectTextFallback(void);
 static bool PgturbohybridQueryTextIndexOrderByContext(FunctionCallInfo fcinfo);
+static void PgturbohybridQueryValidateInternal(PgturbohybridQueryHeader *query,
+											   bool strict);
+static PgturbohybridQueryHeader *PgturbohybridQueryConstructorCached(FunctionCallInfo fcinfo);
+static void PgturbohybridQueryConstructorStoreCache(FunctionCallInfo fcinfo,
+												   PgturbohybridQueryHeader *query);
 
 static Size
 PgturbohybridQueryVectorOffset(void)
@@ -50,7 +55,7 @@ PgturbohybridQueryTsQueryOffset(PgturbohybridQueryHeader *query)
 Vector *
 PgturbohybridQueryGetVector(PgturbohybridQueryHeader *query)
 {
-	PgturbohybridQueryValidate(query);
+	PgturbohybridQueryValidateFast(query);
 
 	if ((query->flags & PGTURBOHYBRID_QUERY_FLAG_HAS_VECTOR) == 0)
 		return NULL;
@@ -61,7 +66,7 @@ PgturbohybridQueryGetVector(PgturbohybridQueryHeader *query)
 TSQuery
 PgturbohybridQueryGetTsQuery(PgturbohybridQueryHeader *query)
 {
-	PgturbohybridQueryValidate(query);
+	PgturbohybridQueryValidateFast(query);
 
 	if ((query->flags & PGTURBOHYBRID_QUERY_FLAG_HAS_TSQUERY) == 0)
 		return NULL;
@@ -85,6 +90,18 @@ PgturbohybridQueryFusionName(uint16 fusion)
 
 void
 PgturbohybridQueryValidate(PgturbohybridQueryHeader *query)
+{
+	PgturbohybridQueryValidateInternal(query, true);
+}
+
+void
+PgturbohybridQueryValidateFast(PgturbohybridQueryHeader *query)
+{
+	PgturbohybridQueryValidateInternal(query, false);
+}
+
+static void
+PgturbohybridQueryValidateInternal(PgturbohybridQueryHeader *query, bool strict)
 {
 	Size		expected;
 
@@ -120,8 +137,11 @@ PgturbohybridQueryValidate(PgturbohybridQueryHeader *query)
 		Vector	   *vector = (Vector *) ((char *) query + PgturbohybridQueryVectorOffset());
 		Size		vectorBytes;
 
-		PgturbohybridCheckVector(vector);
-		vectorBytes = PGTURBOHYBRID_VECTOR_SIZE(PgturbohybridVectorDims(vector));
+		if (strict)
+			PgturbohybridCheckVector(vector);
+		else
+			PgturbohybridCheckVectorFast(vector);
+		vectorBytes = PGTURBOHYBRID_VECTOR_SIZE(vector->dim);
 		if (query->vectorBytes != vectorBytes)
 			ereport(ERROR,
 					(errcode(ERRCODE_DATA_EXCEPTION),
@@ -251,6 +271,12 @@ typedef struct PgturbohybridQueryPlanCheckCache
 	Oid			fnOid;
 	bool		result;
 } PgturbohybridQueryPlanCheckCache;
+
+typedef struct PgturbohybridQueryConstructorCache
+{
+	Node	   *expr;
+	PgturbohybridQueryHeader *query;
+} PgturbohybridQueryConstructorCache;
 
 static List *
 PgturbohybridQueryDistanceCallArgs(Node *expr, Oid *fnOid)
@@ -405,9 +431,85 @@ PgturbohybridQueryRejectTextFallback(void)
 			 errdetail("The scalar hybrid distance function can only evaluate the vector payload.")));
 }
 
+static bool
+PgturbohybridQueryConstructorConstArg(Node *node)
+{
+	if (node == NULL)
+		return false;
+
+	if (IsA(node, NamedArgExpr))
+		node = (Node *) ((NamedArgExpr *) node)->arg;
+
+	return IsA(node, Const);
+}
+
+static bool
+PgturbohybridQueryConstructorCacheable(FunctionCallInfo fcinfo)
+{
+	FuncExpr   *func;
+	ListCell   *lc;
+
+	if (fcinfo->flinfo == NULL || fcinfo->flinfo->fn_expr == NULL ||
+		!IsA(fcinfo->flinfo->fn_expr, FuncExpr))
+		return false;
+
+	func = (FuncExpr *) fcinfo->flinfo->fn_expr;
+	foreach(lc, func->args)
+	{
+		if (!PgturbohybridQueryConstructorConstArg((Node *) lfirst(lc)))
+			return false;
+	}
+
+	return true;
+}
+
+static PgturbohybridQueryHeader *
+PgturbohybridQueryConstructorCached(FunctionCallInfo fcinfo)
+{
+	PgturbohybridQueryConstructorCache *cache;
+
+	if (!PgturbohybridQueryConstructorCacheable(fcinfo))
+		return NULL;
+
+	cache = (PgturbohybridQueryConstructorCache *) fcinfo->flinfo->fn_extra;
+	if (cache == NULL ||
+		cache->expr != fcinfo->flinfo->fn_expr ||
+		cache->query == NULL)
+		return NULL;
+
+	return cache->query;
+}
+
+static void
+PgturbohybridQueryConstructorStoreCache(FunctionCallInfo fcinfo,
+										PgturbohybridQueryHeader *query)
+{
+	PgturbohybridQueryConstructorCache *cache;
+	MemoryContext cacheCtx;
+	MemoryContext oldCtx;
+	Size		size;
+
+	if (!PgturbohybridQueryConstructorCacheable(fcinfo))
+		return;
+
+	cacheCtx = fcinfo->flinfo->fn_mcxt != NULL ?
+		fcinfo->flinfo->fn_mcxt : TopMemoryContext;
+	oldCtx = MemoryContextSwitchTo(cacheCtx);
+
+	cache = palloc0(sizeof(PgturbohybridQueryConstructorCache));
+	size = VARSIZE_ANY(query);
+	cache->query = palloc(size);
+	memcpy(cache->query, query, size);
+	cache->expr = fcinfo->flinfo->fn_expr;
+	fcinfo->flinfo->fn_extra = cache;
+
+	MemoryContextSwitchTo(oldCtx);
+}
+
 Datum
 pgturbohybrid_query_constructor(PG_FUNCTION_ARGS)
 {
+	PgturbohybridQueryHeader *cached;
 	struct varlena *vectorDatum = NULL;
 	struct varlena *tsqueryDatum = NULL;
 	int32		vectorBytes = 0;
@@ -424,6 +526,10 @@ pgturbohybrid_query_constructor(PG_FUNCTION_ARGS)
 	bool		requireBm25Match;
 	Size		totalSize;
 	PgturbohybridQueryHeader *result;
+
+	cached = PgturbohybridQueryConstructorCached(fcinfo);
+	if (cached != NULL)
+		PG_RETURN_PGTURBOHYBRID_QUERY_P(cached);
 
 	if (!PG_ARGISNULL(0))
 	{
@@ -548,6 +654,7 @@ pgturbohybrid_query_constructor(PG_FUNCTION_ARGS)
 	}
 
 	PgturbohybridQueryValidate(result);
+	PgturbohybridQueryConstructorStoreCache(fcinfo, result);
 
 	PG_RETURN_PGTURBOHYBRID_QUERY_P(result);
 }
@@ -555,10 +662,26 @@ pgturbohybrid_query_constructor(PG_FUNCTION_ARGS)
 Datum
 pgturbohybrid_l2_distance(PG_FUNCTION_ARGS)
 {
-	Vector	   *value = PG_GETARG_PGTURBOHYBRID_VECTOR_P(0);
 	PgturbohybridQueryHeader *query = PG_GETARG_PGTURBOHYBRID_QUERY_P(1);
 	Vector	   *vectorQuery;
+	Vector	   *value;
 
+	if (PgturbohybridQueryTextIndexOrderByContext(fcinfo))
+	{
+		PgturbohybridQueryValidateFast(query);
+		if (PgturbohybridQueryGetTsQuery(query) != NULL)
+			PG_RETURN_FLOAT8(0.0);
+
+		vectorQuery = PgturbohybridQueryGetVector(query);
+		if (vectorQuery == NULL)
+			PG_RETURN_FLOAT8(0.0);
+
+		value = (Vector *) PG_DETOAST_DATUM(PG_GETARG_DATUM(0));
+		PgturbohybridCheckVectorFast(value);
+		PG_RETURN_FLOAT8(PgturbohybridL2Distance(value, vectorQuery));
+	}
+
+	value = PG_GETARG_PGTURBOHYBRID_VECTOR_P(0);
 	PgturbohybridQueryValidate(query);
 	if (PgturbohybridQueryGetTsQuery(query) != NULL)
 	{
@@ -577,10 +700,26 @@ pgturbohybrid_l2_distance(PG_FUNCTION_ARGS)
 Datum
 pgturbohybrid_negative_inner_product(PG_FUNCTION_ARGS)
 {
-	Vector	   *value = PG_GETARG_PGTURBOHYBRID_VECTOR_P(0);
 	PgturbohybridQueryHeader *query = PG_GETARG_PGTURBOHYBRID_QUERY_P(1);
 	Vector	   *vectorQuery;
+	Vector	   *value;
 
+	if (PgturbohybridQueryTextIndexOrderByContext(fcinfo))
+	{
+		PgturbohybridQueryValidateFast(query);
+		if (PgturbohybridQueryGetTsQuery(query) != NULL)
+			PG_RETURN_FLOAT8(0.0);
+
+		vectorQuery = PgturbohybridQueryGetVector(query);
+		if (vectorQuery == NULL)
+			PG_RETURN_FLOAT8(0.0);
+
+		value = (Vector *) PG_DETOAST_DATUM(PG_GETARG_DATUM(0));
+		PgturbohybridCheckVectorFast(value);
+		PG_RETURN_FLOAT8(PgturbohybridNegativeInnerProduct(value, vectorQuery));
+	}
+
+	value = PG_GETARG_PGTURBOHYBRID_VECTOR_P(0);
 	PgturbohybridQueryValidate(query);
 	if (PgturbohybridQueryGetTsQuery(query) != NULL)
 	{
@@ -599,10 +738,26 @@ pgturbohybrid_negative_inner_product(PG_FUNCTION_ARGS)
 Datum
 pgturbohybrid_cosine_distance(PG_FUNCTION_ARGS)
 {
-	Vector	   *value = PG_GETARG_PGTURBOHYBRID_VECTOR_P(0);
 	PgturbohybridQueryHeader *query = PG_GETARG_PGTURBOHYBRID_QUERY_P(1);
 	Vector	   *vectorQuery;
+	Vector	   *value;
 
+	if (PgturbohybridQueryTextIndexOrderByContext(fcinfo))
+	{
+		PgturbohybridQueryValidateFast(query);
+		if (PgturbohybridQueryGetTsQuery(query) != NULL)
+			PG_RETURN_FLOAT8(0.0);
+
+		vectorQuery = PgturbohybridQueryGetVector(query);
+		if (vectorQuery == NULL)
+			PG_RETURN_FLOAT8(0.0);
+
+		value = (Vector *) PG_DETOAST_DATUM(PG_GETARG_DATUM(0));
+		PgturbohybridCheckVectorFast(value);
+		PG_RETURN_FLOAT8(PgturbohybridCosineDistance(value, vectorQuery));
+	}
+
+	value = PG_GETARG_PGTURBOHYBRID_VECTOR_P(0);
 	PgturbohybridQueryValidate(query);
 	if (PgturbohybridQueryGetTsQuery(query) != NULL)
 	{

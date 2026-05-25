@@ -19,21 +19,60 @@ BEGIN
 	WHERE name LIKE 'turbohybrid.%';
 
 	IF settings <> ARRAY[
+		'turbohybrid.bm25_accumulator_mode',
+		'turbohybrid.bm25_hot_postings_cache_mb',
+		'turbohybrid.bm25_hot_postings_cache_min_df',
+		'turbohybrid.bm25_hybrid_bound',
+		'turbohybrid.bm25_impact_or_mode',
+		'turbohybrid.bm25_strategy',
 		'turbohybrid.default_bm25_k',
 		'turbohybrid.default_dense_k',
 		'turbohybrid.default_rrf_k',
 		'turbohybrid.enable_wand',
 		'turbohybrid.max_union_candidates',
+		'turbohybrid.profile',
 		'turbohybrid.simd'
 	] THEN
 		RAISE EXCEPTION 'unexpected pgturbohybrid settings: %', settings;
 	END IF;
+
+	IF current_setting('turbohybrid.profile') != 'latency' THEN
+		RAISE EXCEPTION 'unexpected default turbohybrid profile: %',
+			current_setting('turbohybrid.profile');
+	END IF;
+
+	IF current_setting('turbohybrid.bm25_strategy') != 'auto' OR
+		current_setting('turbohybrid.bm25_impact_or_mode') != 'approx' OR
+		current_setting('turbohybrid.bm25_hot_postings_cache_mb') != '32' OR
+		current_setting('turbohybrid.bm25_hot_postings_cache_min_df') != '1024' OR
+		current_setting('turbohybrid.bm25_hybrid_bound') != 'approx' OR
+		current_setting('turbohybrid.bm25_accumulator_mode') != 'auto' THEN
+		RAISE EXCEPTION 'unexpected latency BM25 defaults: strategy %, impact_or %, cache %, min_df %, bound %, accumulator %',
+			current_setting('turbohybrid.bm25_strategy'),
+			current_setting('turbohybrid.bm25_impact_or_mode'),
+			current_setting('turbohybrid.bm25_hot_postings_cache_mb'),
+			current_setting('turbohybrid.bm25_hot_postings_cache_min_df'),
+			current_setting('turbohybrid.bm25_hybrid_bound'),
+			current_setting('turbohybrid.bm25_accumulator_mode');
+	END IF;
 END
 $$;
 SET turbohybrid.enable_wand = off;
+SET turbohybrid.bm25_strategy = wand;
+SET turbohybrid.bm25_impact_or_mode = off;
+SET turbohybrid.bm25_hot_postings_cache_mb = 7;
+SET turbohybrid.bm25_hot_postings_cache_min_df = 2048;
+SET turbohybrid.bm25_hybrid_bound = off;
+SET turbohybrid.bm25_accumulator_mode = hash;
 SET turbohybrid.max_union_candidates = 64;
 SET turbohybrid.simd = off;
 RESET turbohybrid.enable_wand;
+RESET turbohybrid.bm25_strategy;
+RESET turbohybrid.bm25_impact_or_mode;
+RESET turbohybrid.bm25_hot_postings_cache_mb;
+RESET turbohybrid.bm25_hot_postings_cache_min_df;
+RESET turbohybrid.bm25_hybrid_bound;
+RESET turbohybrid.bm25_accumulator_mode;
 RESET turbohybrid.max_union_candidates;
 RESET turbohybrid.simd;
 DO $$
@@ -58,7 +97,7 @@ BEGIN
 		alpha => 0.25,
 		final_k => 10,
 		require_bm25_match => true
-	))::text != 'turbohybrid_query(fusion=weighted,vector=false,tsquery=true,dense_weight=1,bm25_weight=1,alpha=0.25,rrf_k=60,dense_k=400,bm25_k=400,final_k=10,require_bm25_match=true)' THEN
+	))::text != 'turbohybrid_query(fusion=weighted,vector=false,tsquery=true,dense_weight=1,bm25_weight=1,alpha=0.25,rrf_k=60,dense_k=100,bm25_k=100,final_k=10,require_bm25_match=true)' THEN
 		RAISE EXCEPTION 'unexpected weighted turbohybrid_query output';
 	END IF;
 END
@@ -68,11 +107,104 @@ BEGIN
 	IF turbohybrid_query_out(turbohybrid_query(
 		vector_query => '[1,0,0]'::vector,
 		final_k => NULL
-	))::text != 'turbohybrid_query(fusion=rrf,vector=true,tsquery=false,dense_weight=1,bm25_weight=1,alpha=null,rrf_k=60,dense_k=400,bm25_k=400,final_k=null,require_bm25_match=false)' THEN
+	))::text != 'turbohybrid_query(fusion=rrf,vector=true,tsquery=false,dense_weight=1,bm25_weight=1,alpha=null,rrf_k=60,dense_k=100,bm25_k=100,final_k=null,require_bm25_match=false)' THEN
 		RAISE EXCEPTION 'unexpected explicit NULL final_k output';
 	END IF;
 END
 $$;
+DO $$
+BEGIN
+	IF turbohybrid_query_out(turbohybrid_query(
+		vector_query => '[1,0,0]'::vector,
+		text_query => websearch_to_tsquery('english', 'postgres')
+	))::text != 'turbohybrid_query(fusion=rrf,vector=true,tsquery=true,dense_weight=1,bm25_weight=1,alpha=null,rrf_k=60,dense_k=100,bm25_k=100,final_k=null,require_bm25_match=false)' THEN
+		RAISE EXCEPTION 'unexpected default hybrid query output';
+	END IF;
+END
+$$;
+SET turbohybrid.profile = balanced;
+DO $$
+BEGIN
+	IF turbohybrid_query_out(turbohybrid_query(
+		vector_query => '[1,0,0]'::vector
+	))::text != 'turbohybrid_query(fusion=rrf,vector=true,tsquery=false,dense_weight=1,bm25_weight=1,alpha=null,rrf_k=60,dense_k=200,bm25_k=200,final_k=null,require_bm25_match=false)' THEN
+		RAISE EXCEPTION 'unexpected balanced profile defaults';
+	END IF;
+
+	IF current_setting('turbohybrid.bm25_strategy') != 'auto' OR
+		current_setting('turbohybrid.bm25_impact_or_mode') != 'exact_only' OR
+		current_setting('turbohybrid.bm25_hot_postings_cache_mb') != '16' OR
+		current_setting('turbohybrid.bm25_hybrid_bound') != 'safe' OR
+		current_setting('turbohybrid.bm25_accumulator_mode') != 'auto' THEN
+		RAISE EXCEPTION 'unexpected balanced BM25 defaults';
+	END IF;
+END
+$$;
+SET turbohybrid.profile = quality;
+DO $$
+BEGIN
+	IF turbohybrid_query_out(turbohybrid_query(
+		vector_query => '[1,0,0]'::vector
+	))::text != 'turbohybrid_query(fusion=rrf,vector=true,tsquery=false,dense_weight=1,bm25_weight=1,alpha=null,rrf_k=60,dense_k=400,bm25_k=400,final_k=null,require_bm25_match=false)' THEN
+		RAISE EXCEPTION 'unexpected quality profile defaults';
+	END IF;
+
+	IF current_setting('turbohybrid.bm25_strategy') != 'auto' OR
+		current_setting('turbohybrid.bm25_impact_or_mode') != 'exact_only' OR
+		current_setting('turbohybrid.bm25_hot_postings_cache_mb') != '16' OR
+		current_setting('turbohybrid.bm25_hot_postings_cache_min_df') != '1024' OR
+		current_setting('turbohybrid.bm25_hybrid_bound') != 'safe' OR
+		current_setting('turbohybrid.bm25_accumulator_mode') != 'auto' OR
+		current_setting('turbohybrid.enable_wand') != 'on' OR
+		current_setting('turbohybrid.simd') != 'on' THEN
+		RAISE EXCEPTION 'unexpected quality BM25 defaults';
+	END IF;
+
+	IF turbohybrid_last_scan_stats()->>'exact_rescore_for_bm25_only' != 'true' OR
+		turbohybrid_last_scan_stats()->>'auto_budget' != 'false' THEN
+		RAISE EXCEPTION 'unexpected quality internal defaults: %',
+			turbohybrid_last_scan_stats();
+	END IF;
+END
+$$;
+SET turbohybrid.default_dense_k = 7;
+SET turbohybrid.default_bm25_k = 8;
+SET turbohybrid.default_rrf_k = 9;
+SET turbohybrid.bm25_strategy = wand;
+SET turbohybrid.bm25_impact_or_mode = off;
+SET turbohybrid.bm25_hot_postings_cache_mb = 7;
+SET turbohybrid.bm25_hybrid_bound = off;
+SET turbohybrid.bm25_accumulator_mode = hash;
+SET turbohybrid.simd = off;
+SET turbohybrid.profile = quality;
+DO $$
+BEGIN
+	IF turbohybrid_query_out(turbohybrid_query(
+		vector_query => '[1,0,0]'::vector
+	))::text != 'turbohybrid_query(fusion=rrf,vector=true,tsquery=false,dense_weight=1,bm25_weight=1,alpha=null,rrf_k=9,dense_k=7,bm25_k=8,final_k=null,require_bm25_match=false)' THEN
+		RAISE EXCEPTION 'explicit budget GUCs did not override profile default';
+	END IF;
+
+	IF current_setting('turbohybrid.bm25_strategy') != 'wand' OR
+		current_setting('turbohybrid.bm25_impact_or_mode') != 'off' OR
+		current_setting('turbohybrid.bm25_hot_postings_cache_mb') != '7' OR
+		current_setting('turbohybrid.bm25_hybrid_bound') != 'off' OR
+		current_setting('turbohybrid.bm25_accumulator_mode') != 'hash' OR
+		current_setting('turbohybrid.simd') != 'off' THEN
+		RAISE EXCEPTION 'explicit BM25 GUCs did not override profile defaults';
+	END IF;
+END
+$$;
+RESET turbohybrid.default_dense_k;
+RESET turbohybrid.default_bm25_k;
+RESET turbohybrid.default_rrf_k;
+RESET turbohybrid.bm25_strategy;
+RESET turbohybrid.bm25_impact_or_mode;
+RESET turbohybrid.bm25_hot_postings_cache_mb;
+RESET turbohybrid.bm25_hybrid_bound;
+RESET turbohybrid.bm25_accumulator_mode;
+RESET turbohybrid.simd;
+RESET turbohybrid.profile;
 SET turbohybrid.default_dense_k = 7;
 SET turbohybrid.default_bm25_k = 8;
 SET turbohybrid.default_rrf_k = 9;
