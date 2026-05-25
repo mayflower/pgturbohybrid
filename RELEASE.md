@@ -4,7 +4,7 @@
 
 ## Current Version
 
-The initial extension version is `0.1.0`.
+The current extension SQL version is `0.1.0`.
 
 - Control file: `pgturbohybrid.control`
 - Install script: `sql/pgturbohybrid--0.1.0.sql`
@@ -12,6 +12,19 @@ The initial extension version is `0.1.0`.
 
 There is no upgrade script for `0.1.0` because it is the first installable
 version.
+
+The next public alpha release tag is `v0.1.0-alpha.2`. This tag keeps the
+extension SQL version at `0.1.0`; it documents changed defaults and diagnostics
+without adding an extension upgrade path.
+
+Before publishing `v0.1.0-alpha.2`, ensure `CHANGELOG.md` clearly calls out:
+
+- latency profile as the default,
+- 100/100 default dense and BM25 budgets,
+- 4-bit exact-free default indexes,
+- BM25 fast paths enabled by default,
+- the quality-profile migration path for conservative behavior,
+- whether generated benchmark artifacts are attached outside the repository.
 
 ## Semantic Versioning
 

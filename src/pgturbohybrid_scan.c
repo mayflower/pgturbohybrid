@@ -22,6 +22,8 @@
 #include "varatt.h"
 #endif
 
+#include "pgturbohybrid_vector_compat.h"
+
 /*
  * Get the initial iterative scan batch size
  */
@@ -313,7 +315,12 @@ GetScanValue(IndexScanDesc scan)
 
 		/* Normalize if needed */
 		if (so->support.normprocinfo != NULL)
-			value = PgturbohybridGraphNormValue(so->typeInfo, so->support.collation, value);
+		{
+			if (so->typeInfo->normalize == pgturbohybrid_l2_normalize)
+				value = PointerGetDatum(PgturbohybridL2NormalizeFast((Vector *) DatumGetPointer(value)));
+			else
+				value = PgturbohybridGraphNormValue(so->typeInfo, so->support.collation, value);
+		}
 	}
 
 	return value;

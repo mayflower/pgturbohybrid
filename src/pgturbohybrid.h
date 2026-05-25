@@ -726,6 +726,7 @@ typedef struct PgturbohybridGraphScanOpaqueData
 	int			graphDenseBudgetPolicy;
 	int			graphRescoreBandPolicy;
 	int			graphStorageKind;
+	bool		graphExactStorage;
 	bool		pgturbohybridGraphScan;
 	bool		pgturbohybridFlatScan;
 	void	   *tqGraphResults;

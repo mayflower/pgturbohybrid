@@ -1,11 +1,14 @@
 #include "postgres.h"
 
+#include <limits.h>
+
 #include "fmgr.h"
 #include "pgturbohybrid.h"
 #include "lib/stringinfo.h"
 #include "pgturbohybrid_quant.h"
 #include "pgturbohybrid_am.h"
 #include "pgturbohybrid_bm25.h"
+#include "pgturbohybrid_vector_compat.h"
 #include "utils/fmgrprotos.h"
 
 #define PGTURBOHYBRID_SCAN_ORCHESTRATION_NONE		0
@@ -48,9 +51,12 @@ static bool pgturbohybrid_last_exact_vector_kernel_recorded = false;
 static int pgturbohybrid_last_graph_storage_kind = PGTURBOHYBRID_GRAPH_STORAGE_GRAPH;
 static int pgturbohybrid_last_scan_orchestration = PGTURBOHYBRID_SCAN_ORCHESTRATION_NONE;
 static int pgturbohybrid_last_graph_quantization_bits = 0;
+static bool pgturbohybrid_last_graph_exact_storage = false;
+static bool pgturbohybrid_last_graph_exact_storage_known = false;
 static bool pgturbohybrid_last_graph_query_split_active = false;
 
 static const char *TqScanOrchestrationName(void);
+static const char *PgturbohybridFinalKSourceName(void);
 #ifdef PGTURBOHYBRID_DEV_DIAGNOSTICS
 static const char *TqExactKernelName(int kernel);
 static const char *PgturbohybridGraphAvx512WeightedModeName(int mode);
@@ -127,6 +133,24 @@ PgturbohybridGraphRecordGraphScanStats(PgturbohybridGraphScanOpaque so)
 		pgturbohybrid_last_exact_vector_kernel = TqExpectedExactKernel();
 	pgturbohybrid_last_graph_storage_kind = so->graphStorageKind;
 	pgturbohybrid_last_graph_quantization_bits = so->tq.enabled ? so->tq.bits : 0;
+	pgturbohybrid_last_graph_exact_storage = so->graphExactStorage;
+	pgturbohybrid_last_graph_exact_storage_known = so->tq.enabled;
+	if (so->hasTupleTargetRows && so->tupleTargetRows > 0)
+	{
+		int			limit = (int) Min(so->tupleTargetRows, (int64) INT_MAX);
+
+		pgturbohybrid_last_final_k_requested = 0;
+		pgturbohybrid_last_final_k_effective = limit;
+		pgturbohybrid_last_sql_limit = limit;
+		pgturbohybrid_last_final_k_inferred = true;
+	}
+	else
+	{
+		pgturbohybrid_last_final_k_requested = 0;
+		pgturbohybrid_last_final_k_effective = PGTURBOHYBRID_DEFAULT_FINAL_K;
+		pgturbohybrid_last_sql_limit = 0;
+		pgturbohybrid_last_final_k_inferred = false;
+	}
 #if defined(__aarch64__) || defined(_M_ARM64) || \
 	defined(__x86_64__) || defined(_M_X64) || defined(__i386) || defined(_M_IX86)
 	pgturbohybrid_last_graph_query_split_active = so->tq.enabled && so->tq.querySplitEnabled;
@@ -175,6 +199,8 @@ PgturbohybridGraphRecordNonGraphScanStats(void)
 	pgturbohybrid_last_exact_vector_kernel_recorded = false;
 	pgturbohybrid_last_graph_storage_kind = PGTURBOHYBRID_GRAPH_STORAGE_GRAPH;
 	pgturbohybrid_last_graph_quantization_bits = 0;
+	pgturbohybrid_last_graph_exact_storage = false;
+	pgturbohybrid_last_graph_exact_storage_known = false;
 	pgturbohybrid_last_graph_query_split_active = false;
 }
 
@@ -199,6 +225,16 @@ TqScanOrchestrationName(void)
 		default:
 			return "none";
 	}
+}
+
+static const char *
+PgturbohybridFinalKSourceName(void)
+{
+	if (pgturbohybrid_last_final_k_requested > 0)
+		return "explicit";
+	if (pgturbohybrid_last_final_k_inferred)
+		return "limit";
+	return "default";
 }
 
 #ifdef PGTURBOHYBRID_DEV_DIAGNOSTICS
@@ -245,32 +281,119 @@ FUNCTION_PREFIX Datum
 pgturbohybrid_last_scan_stats(PG_FUNCTION_ARGS)
 {
 	StringInfoData json;
+	PgturbohybridScanStatsSnapshot scanStats;
+	PgturbohybridValidationStats validationStats;
+	uint64		denseElapsedUs;
+	uint64		bm25ElapsedUs;
+	uint64		fusionElapsedUs;
+	uint64		elapsedUs;
+	bool		indexUsed;
+
+	PgturbohybridGetLastScanStatsSnapshot(&scanStats);
+	PgturbohybridGetValidationStats(&validationStats);
+	denseElapsedUs = scanStats.denseElapsedUs != 0 ? scanStats.denseElapsedUs :
+		pgturbohybrid_last_graph_total_us;
+	bm25ElapsedUs = scanStats.bm25ElapsedUs;
+	fusionElapsedUs = scanStats.fusionElapsedUs;
+	elapsedUs = scanStats.elapsedUs != 0 ? scanStats.elapsedUs :
+		denseElapsedUs + bm25ElapsedUs + fusionElapsedUs;
+	indexUsed = pgturbohybrid_last_scan_orchestration != PGTURBOHYBRID_SCAN_ORCHESTRATION_NONE ||
+		scanStats.bm25Terms > 0 || bm25ElapsedUs > 0;
 
 	initStringInfo(&json);
 	appendStringInfo(&json,
 					 "{\"version\":1,"
+					 "\"profile\":\"%s\","
+					 "\"index_used\":%s,"
 					 "\"scan_orchestration\":\"%s\","
 					 "\"graph_storage_kind\":\"%s\","
 					 "\"quantization_bits\":%d,"
+					 "\"exact_storage\":%s,"
 					 "\"graph_candidate_count\":" INT64_FORMAT ","
 					 "\"graph_rescore_count\":" INT64_FORMAT ","
 					 "\"graph_dense_requested_k\":" INT64_FORMAT ","
 					 "\"graph_effective_result_target\":" INT64_FORMAT ","
 					 "\"graph_effective_search_ef\":" INT64_FORMAT ","
 					 "\"graph_effective_rescore_band\":" INT64_FORMAT ","
+					 "\"final_k_requested\":%d,"
+					 "\"final_k_effective\":%d,"
+					 "\"detected_sql_limit\":%d,"
+					 "\"final_k_inferred\":%s,"
+					 "\"final_k_source\":\"%s\","
+					 "\"bm25_strategy\":\"%s\","
+					 "\"bm25_impact_or_mode\":\"%s\","
+					 "\"bm25_hot_postings_cache_mb\":%d,"
+					 "\"bm25_hybrid_bound\":\"%s\","
+					 "\"bm25_accumulator_mode\":\"%s\","
+					 "\"exact_rescore_for_bm25_only\":%s,"
+					 "\"auto_budget\":%s,"
+					 "\"dense_candidates_effective\":%u,"
+					 "\"dense_k_effective\":%u,"
+					 "\"dense_k_defaulted\":%s,"
+					 "\"bm25_candidates_effective\":%u,"
+					 "\"bm25_k_effective\":%u,"
+					 "\"bm25_k_defaulted\":%s,"
+					 "\"bm25_cache_hit\":%s,"
+					 "\"bm25_cache_build_us\":" UINT64_FORMAT ","
+					 "\"bm25_hot_postings_cache_hit\":%s,"
+					 "\"bm25_hot_postings_cache_hits\":" UINT64_FORMAT ","
+					 "\"bm25_hot_postings_cache_misses\":" UINT64_FORMAT ","
+					 "\"strict_vector_validations\":" UINT64_FORMAT ","
+					 "\"fast_vector_checks\":" UINT64_FORMAT ","
+					 "\"vector_type_cache_hits\":" UINT64_FORMAT ","
+					 "\"vector_type_cache_misses\":" UINT64_FORMAT ","
+					 "\"dense_elapsed_us\":" UINT64_FORMAT ","
+					 "\"bm25_elapsed_us\":" UINT64_FORMAT ","
+					 "\"fusion_elapsed_us\":" UINT64_FORMAT ","
+					 "\"elapsed_us\":" UINT64_FORMAT ","
 					 "\"graph_highdim_widening_multiplier\":%.3f,"
 					 "\"graph_widening_reason\":\"%s\","
 					 "\"graph_dense_budget_policy\":\"%s\","
 					 "\"graph_rescore_band_policy\":\"%s\"}",
+					 PgturbohybridProfileName(pgturbohybrid_profile),
+					 indexUsed ? "true" : "false",
 					 TqScanOrchestrationName(),
 					 PgturbohybridGraphStorageKindName(pgturbohybrid_last_graph_storage_kind),
 					 pgturbohybrid_last_graph_quantization_bits,
+					 pgturbohybrid_last_graph_exact_storage_known ?
+					 (pgturbohybrid_last_graph_exact_storage ? "true" : "false") : "null",
 					 pgturbohybrid_last_graph_candidate_count,
 					 pgturbohybrid_last_graph_rescore_count,
 					 pgturbohybrid_last_graph_dense_requested_k,
 					 pgturbohybrid_last_graph_effective_result_target,
 					 pgturbohybrid_last_graph_effective_search_ef,
 					 pgturbohybrid_last_graph_effective_rescore_band,
+					 pgturbohybrid_last_final_k_requested,
+					 pgturbohybrid_last_final_k_effective,
+					 pgturbohybrid_last_sql_limit,
+					 pgturbohybrid_last_final_k_inferred ? "true" : "false",
+					 PgturbohybridFinalKSourceName(),
+					 PgturbohybridBm25StrategyName(pgturbohybrid_bm25_strategy),
+					 PgturbohybridBm25ImpactOrModeName(pgturbohybrid_bm25_impact_or_mode),
+					 pgturbohybrid_bm25_hot_postings_cache_mb,
+					 PgturbohybridBm25HybridBoundModeName(pgturbohybrid_bm25_hybrid_bound),
+					 PgturbohybridBm25AccumulatorModeName(pgturbohybrid_bm25_accumulator_mode),
+					 pgturbohybrid_enable_exact_rescore_for_bm25_only ? "true" : "false",
+					 pgturbohybrid_auto_budget ? "true" : "false",
+					 scanStats.denseCandidatesEffective,
+					 scanStats.denseCandidatesEffective,
+					 scanStats.denseKDefaulted ? "true" : "false",
+					 scanStats.bm25CandidatesEffective,
+					 scanStats.bm25CandidatesEffective,
+					 scanStats.bm25KDefaulted ? "true" : "false",
+					 scanStats.bm25CacheHit ? "true" : "false",
+					 scanStats.bm25CacheBuildUs,
+					 scanStats.bm25HotPostingsCacheHits > 0 ? "true" : "false",
+					 scanStats.bm25HotPostingsCacheHits,
+					 scanStats.bm25HotPostingsCacheMisses,
+					 validationStats.strictVectorValidations,
+					 validationStats.fastVectorChecks,
+					 validationStats.vectorTypeCacheHits,
+					 validationStats.vectorTypeCacheMisses,
+					 denseElapsedUs,
+					 bm25ElapsedUs,
+					 fusionElapsedUs,
+					 elapsedUs,
 					 pgturbohybrid_last_graph_highdim_widening_multiplier,
 					 PgturbohybridGraphDenseWideningReasonName(pgturbohybrid_last_graph_widening_reason),
 					 PgturbohybridGraphDenseBudgetPolicyNameExternal(pgturbohybrid_last_graph_dense_budget_policy),

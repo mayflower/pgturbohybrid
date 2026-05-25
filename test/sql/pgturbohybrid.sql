@@ -33,6 +33,90 @@ USING turbohybrid (
 )
 WITH (quantization_bits = 4, exact_storage = on);
 
+CREATE TABLE tqh_default_docs (
+	id int,
+	embedding vector(3),
+	body_tsv tsvector
+);
+
+INSERT INTO tqh_default_docs VALUES
+	(1, '[1,0,0]', to_tsvector('english', 'postgres vector search')),
+	(2, '[1,1,0]', to_tsvector('english', 'hybrid bm25 search')),
+	(3, '[0,1,0]', to_tsvector('english', 'lexical search')),
+	(4, '[0,0,1]', to_tsvector('english', 'unrelated document'));
+
+CREATE INDEX tqh_default_docs_idx ON tqh_default_docs
+USING turbohybrid (
+	embedding vector_cosine_turbohybrid_ops,
+	body_tsv bm25_tsvector_turbohybrid_ops
+);
+
+DO $$
+DECLARE
+	stats jsonb;
+BEGIN
+	stats := turbohybrid_index_stats('tqh_default_docs_idx'::regclass);
+
+	IF stats->>'profile' <> 'latency' OR
+		(stats->>'graph_m')::int <> 16 OR
+		(stats->>'graph_ef_construction')::int <> 128 OR
+		(stats->>'graph_ef_search')::int <> 64 OR
+		(stats->>'graph_oversampling')::int <> 4 OR
+		stats->>'routing' <> 'auto' OR
+		stats->>'storage_kind' <> 'pgturbohybrid_graph_native' OR
+		(stats->>'quantization_bits')::int <> 4 OR
+		(stats->>'exact_storage')::boolean IS DISTINCT FROM false THEN
+		RAISE EXCEPTION 'unexpected default index stats: %', stats;
+	END IF;
+END
+$$;
+
+DROP INDEX tqh_default_docs_idx;
+
+CREATE INDEX tqh_default_docs_idx ON tqh_default_docs
+USING turbohybrid (
+	embedding vector_cosine_turbohybrid_ops,
+	body_tsv bm25_tsvector_turbohybrid_ops
+)
+WITH (exact_storage = on);
+
+DO $$
+DECLARE
+	stats jsonb;
+BEGIN
+	stats := turbohybrid_index_stats('tqh_default_docs_idx'::regclass);
+
+	IF (stats->>'exact_storage')::boolean IS DISTINCT FROM true OR
+		(stats->>'quantization_bits')::int <> 4 THEN
+		RAISE EXCEPTION 'unexpected exact-storage override stats: %', stats;
+	END IF;
+END
+$$;
+
+DROP INDEX tqh_default_docs_idx;
+
+CREATE INDEX tqh_default_docs_idx ON tqh_default_docs
+USING turbohybrid (
+	embedding vector_cosine_turbohybrid_ops,
+	body_tsv bm25_tsvector_turbohybrid_ops
+)
+WITH (quantization_bits = 2);
+
+DO $$
+DECLARE
+	stats jsonb;
+BEGIN
+	stats := turbohybrid_index_stats('tqh_default_docs_idx'::regclass);
+
+	IF (stats->>'quantization_bits')::int <> 2 OR
+		(stats->>'exact_storage')::boolean IS DISTINCT FROM false THEN
+		RAISE EXCEPTION 'unexpected quantization override stats: %', stats;
+	END IF;
+END
+$$;
+
+DROP TABLE tqh_default_docs;
+
 DO $$
 DECLARE
 	opclasses text[];
@@ -200,6 +284,243 @@ BEGIN
 	END IF;
 END
 $$;
+
+CREATE TABLE tqh_limit_docs (
+	id int,
+	embedding vector(3),
+	body_tsv tsvector
+);
+
+INSERT INTO tqh_limit_docs VALUES
+	(1, '[1,0,0]', to_tsvector('english', 'postgres hybrid search')),
+	(2, '[1,0.1,0]', to_tsvector('english', 'postgres hybrid search')),
+	(3, '[1,0.2,0]', to_tsvector('english', 'postgres hybrid search')),
+	(4, '[1,0.3,0]', to_tsvector('english', 'postgres hybrid search')),
+	(5, '[1,0.4,0]', to_tsvector('english', 'postgres hybrid search')),
+	(6, '[1,0.5,0]', to_tsvector('english', 'postgres hybrid search')),
+	(7, '[1,0.6,0]', to_tsvector('english', 'postgres hybrid search')),
+	(8, '[1,0.7,0]', to_tsvector('english', 'postgres hybrid search')),
+	(9, '[1,0.8,0]', to_tsvector('english', 'postgres hybrid search')),
+	(10, '[1,0.9,0]', to_tsvector('english', 'postgres hybrid search')),
+	(11, '[1,1,0]', to_tsvector('english', 'postgres hybrid search')),
+	(12, '[1,1.1,0]', to_tsvector('english', 'postgres hybrid search'));
+
+CREATE INDEX tqh_limit_docs_idx ON tqh_limit_docs
+USING turbohybrid (
+	embedding vector_cosine_turbohybrid_ops,
+	body_tsv bm25_tsvector_turbohybrid_ops
+)
+WITH (quantization_bits = 4, exact_storage = on);
+
+DO $$
+DECLARE
+	result_count int;
+	stats jsonb;
+BEGIN
+	SELECT count(*) INTO result_count
+	FROM (
+		SELECT id
+		FROM tqh_limit_docs
+		ORDER BY embedding <~> turbohybrid_query(
+			vector_query => '[1,0,0]'::vector
+		)
+		LIMIT 10
+	) s;
+
+	stats := turbohybrid_last_scan_stats();
+	IF result_count <> 10 OR
+		(stats->>'final_k_requested')::int <> 0 OR
+		(stats->>'final_k_effective')::int <> 10 OR
+		(stats->>'detected_sql_limit')::int <> 10 OR
+		(stats->>'final_k_inferred')::boolean IS DISTINCT FROM true OR
+		stats->>'final_k_source' <> 'limit' THEN
+		RAISE EXCEPTION 'unexpected LIMIT 10 inferred final_k: count %, stats %',
+			result_count, stats;
+	END IF;
+END
+$$;
+
+DO $$
+DECLARE
+	result_count int;
+	stats jsonb;
+BEGIN
+	SELECT count(*) INTO result_count
+	FROM (
+		SELECT id
+		FROM tqh_limit_docs
+		ORDER BY embedding <~> turbohybrid_query(
+			vector_query => '[1,0,0]'::vector
+		)
+	) s;
+
+	stats := turbohybrid_last_scan_stats();
+	IF result_count <> 10 OR
+		(stats->>'final_k_requested')::int <> 0 OR
+		(stats->>'final_k_effective')::int <> 10 OR
+		(stats->>'detected_sql_limit')::int <> 0 OR
+		(stats->>'final_k_inferred')::boolean IS DISTINCT FROM false OR
+		stats->>'final_k_source' <> 'default' THEN
+		RAISE EXCEPTION 'unexpected dense no-LIMIT default final_k: count %, stats %',
+			result_count, stats;
+	END IF;
+END
+$$;
+
+DO $$
+DECLARE
+	result_count int;
+	stats jsonb;
+BEGIN
+	SELECT count(*) INTO result_count
+	FROM (
+		SELECT id
+		FROM tqh_limit_docs
+		ORDER BY embedding <~> turbohybrid_query(
+			text_query => websearch_to_tsquery('english', 'postgres')
+		)
+		LIMIT 3
+	) s;
+
+	stats := turbohybrid_last_scan_stats();
+	IF result_count <> 3 OR
+		(stats->>'final_k_requested')::int <> 0 OR
+		(stats->>'final_k_effective')::int <> 3 OR
+		(stats->>'detected_sql_limit')::int <> 3 OR
+		(stats->>'final_k_inferred')::boolean IS DISTINCT FROM true OR
+		stats->>'final_k_source' <> 'limit' THEN
+		RAISE EXCEPTION 'unexpected LIMIT 3 inferred final_k: count %, stats %',
+			result_count, stats;
+	END IF;
+END
+$$;
+
+DO $$
+DECLARE
+	result_count int;
+	stats jsonb;
+BEGIN
+	SELECT count(*) INTO result_count
+	FROM (
+		SELECT id
+		FROM tqh_limit_docs
+		ORDER BY embedding <~> turbohybrid_query(
+			vector_query => '[1,0,0]'::vector,
+			text_query => websearch_to_tsquery('english', 'postgres')
+		)
+	) s;
+
+	stats := turbohybrid_last_scan_stats();
+	IF result_count <> 10 OR
+		(stats->>'final_k_requested')::int <> 0 OR
+		(stats->>'final_k_effective')::int <> 10 OR
+		(stats->>'detected_sql_limit')::int <> 0 OR
+		(stats->>'final_k_inferred')::boolean IS DISTINCT FROM false OR
+		stats->>'final_k_source' <> 'default' THEN
+		RAISE EXCEPTION 'unexpected no-LIMIT default final_k: count %, stats %',
+			result_count, stats;
+	END IF;
+END
+$$;
+
+DO $$
+DECLARE
+	result_count int;
+	stats jsonb;
+BEGIN
+	SELECT count(*) INTO result_count
+	FROM (
+		SELECT id
+		FROM tqh_limit_docs
+		ORDER BY embedding <~> turbohybrid_query(
+			vector_query => '[1,0,0]'::vector,
+			text_query => websearch_to_tsquery('english', 'postgres'),
+			final_k => 20
+		)
+		LIMIT 10
+	) s;
+
+	stats := turbohybrid_last_scan_stats();
+	IF result_count <> 10 OR
+		(stats->>'final_k_requested')::int <> 20 OR
+		(stats->>'final_k_effective')::int <> 20 OR
+		(stats->>'detected_sql_limit')::int <> 10 OR
+		(stats->>'final_k_inferred')::boolean IS DISTINCT FROM false OR
+		stats->>'final_k_source' <> 'explicit' THEN
+		RAISE EXCEPTION 'unexpected explicit final_k with LIMIT: count %, stats %',
+			result_count, stats;
+	END IF;
+END
+$$;
+
+DROP TABLE tqh_limit_docs;
+
+CREATE TABLE tqh_validation_docs (
+	id int,
+	embedding vector(3),
+	body_tsv tsvector
+);
+
+INSERT INTO tqh_validation_docs
+SELECT g,
+	('[' || 1 || ',' || (g::float8 / 1000.0) || ',0]')::vector,
+	to_tsvector('english', 'validation overhead')
+FROM generate_series(1, 150) g;
+
+CREATE INDEX tqh_validation_docs_idx ON tqh_validation_docs
+USING turbohybrid (
+	embedding vector_cosine_turbohybrid_ops,
+	body_tsv bm25_tsvector_turbohybrid_ops
+)
+WITH (quantization_bits = 4, exact_storage = off);
+
+SET enable_seqscan = off;
+
+DO $$
+DECLARE
+	before_stats jsonb;
+	after_stats jsonb;
+	result_count int;
+	strict_delta bigint;
+	fast_delta bigint;
+BEGIN
+	before_stats := turbohybrid_last_scan_stats();
+
+	SELECT count(*) INTO result_count
+	FROM (
+		SELECT id
+		FROM tqh_validation_docs
+		ORDER BY embedding <~> turbohybrid_query(
+			vector_query => '[1,0,0]'::vector,
+			dense_k => 100,
+			final_k => 100
+		)
+		LIMIT 100
+	) s;
+
+	after_stats := turbohybrid_last_scan_stats();
+	strict_delta := (after_stats->>'strict_vector_validations')::bigint -
+		(before_stats->>'strict_vector_validations')::bigint;
+	fast_delta := (after_stats->>'fast_vector_checks')::bigint -
+		(before_stats->>'fast_vector_checks')::bigint;
+
+	IF result_count <> 100 THEN
+		RAISE EXCEPTION 'unexpected validation guard result count: %', result_count;
+	END IF;
+
+	IF strict_delta >= 100 THEN
+		RAISE EXCEPTION 'strict vector validations scaled with candidates: before %, after %, delta %',
+			before_stats, after_stats, strict_delta;
+	END IF;
+
+	IF fast_delta <= 0 THEN
+		RAISE EXCEPTION 'expected fast vector checks during indexed scan: before %, after %',
+			before_stats, after_stats;
+	END IF;
+END
+$$;
+
+DROP TABLE tqh_validation_docs;
 
 DO $$
 DECLARE
@@ -502,7 +823,9 @@ BEGIN
 		'graph_m',
 		'graph_oversampling',
 		'hybrid',
+		'profile',
 		'quantization_bits',
+		'routing',
 		'storage_kind',
 		'version'
 	] THEN
@@ -513,6 +836,35 @@ BEGIN
 	FROM jsonb_object_keys(turbohybrid_last_scan_stats()) AS key;
 
 	IF keys <> ARRAY[
+		'auto_budget',
+		'bm25_accumulator_mode',
+		'bm25_cache_build_us',
+		'bm25_cache_hit',
+		'bm25_candidates_effective',
+		'bm25_elapsed_us',
+		'bm25_hot_postings_cache_hit',
+		'bm25_hot_postings_cache_hits',
+		'bm25_hot_postings_cache_mb',
+		'bm25_hot_postings_cache_misses',
+		'bm25_hybrid_bound',
+		'bm25_impact_or_mode',
+		'bm25_k_defaulted',
+		'bm25_k_effective',
+		'bm25_strategy',
+		'dense_candidates_effective',
+		'dense_elapsed_us',
+		'dense_k_defaulted',
+		'dense_k_effective',
+		'detected_sql_limit',
+		'elapsed_us',
+		'exact_rescore_for_bm25_only',
+		'exact_storage',
+		'fast_vector_checks',
+		'final_k_effective',
+		'final_k_inferred',
+		'final_k_requested',
+		'final_k_source',
+		'fusion_elapsed_us',
 		'graph_candidate_count',
 		'graph_dense_budget_policy',
 		'graph_dense_requested_k',
@@ -524,11 +876,21 @@ BEGIN
 		'graph_rescore_count',
 		'graph_storage_kind',
 		'graph_widening_reason',
+		'index_used',
+		'profile',
 		'quantization_bits',
 		'scan_orchestration',
+		'strict_vector_validations',
+		'vector_type_cache_hits',
+		'vector_type_cache_misses',
 		'version'
 	] THEN
 		RAISE EXCEPTION 'unexpected pgturbohybrid last scan stats keys: %', keys;
+	END IF;
+
+	IF turbohybrid_last_scan_stats()->>'profile' != 'latency' THEN
+		RAISE EXCEPTION 'unexpected pgturbohybrid last scan profile: %',
+			turbohybrid_last_scan_stats()->>'profile';
 	END IF;
 
 	SELECT array_agg(key ORDER BY key) INTO keys

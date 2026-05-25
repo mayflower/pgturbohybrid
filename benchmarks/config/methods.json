@@ -13,10 +13,22 @@
       "description": "Postgres GIN FTS plus pgvector HNSW, fused with SQL-level reciprocal rank fusion."
     },
     {
+      "name": "pgturbohybrid_recovered_explicit",
+      "layer": "systems",
+      "kind": "postgres_index_am",
+      "description": "pgturbohybrid latency profile with explicit recovered FIQA/OpenAI settings: 4-bit quantization, exact_storage off, dense_k 100, bm25_k 100, rrf_k 60, and final_k 10."
+    },
+    {
       "name": "pgturbohybrid_exact_storage_off",
       "layer": "reference",
       "kind": "postgres_index_am",
-      "description": "pgturbohybrid with exact vector storage disabled to expose storage and latency tradeoffs."
+      "description": "Legacy benchmark alias for pgturbohybrid_recovered_explicit; retained for comparing older artifacts."
+    },
+    {
+      "name": "pgturbohybrid_quality",
+      "layer": "systems",
+      "kind": "postgres_index_am",
+      "description": "pgturbohybrid quality profile with 400 dense and 400 BM25 candidates, exact-safe BM25 paths, SIMD enabled, and documented exact_storage choice."
     },
     {
       "name": "pyserini_lucene_bm25",
