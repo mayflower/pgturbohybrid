@@ -23,7 +23,11 @@
 typedef Pointer Item;
 #endif
 
-#define PGTURBOHYBRID_GRAPH_MAX_DIM 2000
+/*
+ * TurboHybrid stores quantized graph codes instead of full pgvector HNSW
+ * tuples, so its dense dimension limit should track the vector type limit.
+ */
+#define PGTURBOHYBRID_GRAPH_MAX_DIM PGTURBOHYBRID_VECTOR_MAX_DIM
 #define PGTURBOHYBRID_GRAPH_MAX_NNZ 1000
 
 /* Support functions */
