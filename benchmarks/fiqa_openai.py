@@ -950,6 +950,8 @@ def run_benchmark(args: argparse.Namespace) -> dict[str, Any]:
             "host_cpu_count": os.cpu_count(),
             "host_load_average": list(os.getloadavg()) if hasattr(os, "getloadavg") else [],
             "commit": subprocess.run(["git", "rev-parse", "HEAD"], text=True, capture_output=True).stdout.strip(),
+            "pg_config": os.environ.get("PG_CONFIG", "pg_config"),
+            "pgvector_ref": os.environ.get("PGVECTOR_REF", ""),
         },
     }
 
@@ -961,19 +963,25 @@ def run_benchmark(args: argparse.Namespace) -> dict[str, Any]:
 
 def write_output(path: str, payload: dict[str, Any]) -> None:
     text = json.dumps(payload, indent=2, sort_keys=True) + "\n"
-    if path:
+    if path == "-":
+        print(text)
+    else:
         out = Path(path)
         out.parent.mkdir(parents=True, exist_ok=True)
         out.write_text(text, encoding="utf-8")
         print(out)
-    else:
-        print(text)
+
+
+def default_output_path() -> str:
+    stamp = time.strftime("%Y%m%dT%H%M%SZ", time.gmtime())
+    return str(Path("benchmarks/results") / f"fiqa_openai_{stamp}.json")
 
 
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--database", default=os.environ.get("PGDATABASE", "pgturbohybrid_fiqa"))
-    parser.add_argument("--dataset", default="/Volumes/CrucialMusic/src/pgvector/.cache/beir/fiqa")
+    parser.add_argument("--dataset", default=os.environ.get("FIQA_DATASET"),
+                        help="FIQA/OpenAI dataset directory, or set FIQA_DATASET")
     parser.add_argument("--methods",
                         default="pgvector_hnsw_dense_only,postgres_sql_rrf,pgturbohybrid,pgturbohybrid_recovered_explicit")
     parser.add_argument("--dense-k", type=int, default=400)
@@ -999,9 +1007,12 @@ def main() -> None:
     parser.add_argument("--extension-mode", default="pgturbohybrid",
                         choices=("pgturbohybrid", "patched_pgvector"),
                         help="pgturbohybrid creates vector plus pgturbohybrid; patched_pgvector creates only vector and expects TurboHybrid SQL objects there")
-    parser.add_argument("--output", default="")
+    parser.add_argument("--output", default=os.environ.get("OUTPUT", default_output_path()),
+                        help="result JSON path, or set OUTPUT; defaults to benchmarks/results/")
     args = parser.parse_args()
 
+    if not args.dataset:
+        parser.error("--dataset is required unless FIQA_DATASET is set")
     if args.final_k != FINAL_K:
         print("warning: FIQA metrics are usually reported at k=10", file=sys.stderr)
     if not args.budget_matrix and args.dense_k == 400 and args.bm25_k == 400:

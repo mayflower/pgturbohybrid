@@ -5,6 +5,10 @@ documented relevance metrics. The benchmark setup treats pgvector as an
 upstream dependency and installs `pgturbohybrid` as a separate extension. It
 does not require a patched pgvector checkout.
 
+Public benchmark explanations live under `docs/benchmarks/`. This directory is
+for reproducible tooling, acceptance thresholds, and developer benchmark
+helpers. Developer-only workflows are documented in `benchmarks/dev/README.md`.
+
 ## Baselines
 
 Every publishable run should include at least:
@@ -42,15 +46,18 @@ latency-profile artifact.
 Validate a generated matrix artifact with:
 
 ```sh
+FIQA_DATASET=/path/to/fiqa
+PGDATABASE=pgturbohybrid_fiqa
+OUTPUT=benchmarks/results/pgturbohybrid-fiqa.json
 python3 benchmarks/tools/check_acceptance.py \
-  /tmp/fiqa_full_profile_matrix.json \
+  "$OUTPUT" \
   --suite fiqa_openai_profile_matrix
 ```
 
 ## Publishable Run Metadata
 
-Do not commit generated benchmark outputs. Store JSON/Markdown under `/tmp`, an
-external artifact store, or ignored directories such as `benchmarks/results/`.
+Do not commit generated benchmark outputs. Store JSON/Markdown in an external
+artifact store or ignored directories such as `benchmarks/results/`.
 
 Record the following with any published result:
 
@@ -60,12 +67,17 @@ Record the following with any published result:
 - pgvector ref or release
 - pgturbohybrid commit
 - dataset and embedding model
+- corpus size, query count, and embedding dimensions
+- retrieval profile
+- index settings and reloptions
+- candidate budgets, fusion settings, and final result target
 - exact commands
 - warmup policy and measured run count
 - p50, p95, p99, QPS
 - index size, build time, and WAL generated
-- recall, nDCG, MRR, and MAP for quality datasets
+- quality metrics such as recall, nDCG, MRR, MAP, or overlap
 - baseline definitions and index options
+- note that results vary by dataset and hardware
 
 ## Acceptance Checks
 
@@ -77,8 +89,9 @@ nightly FIQA run, not for per-PR perf smoke.
 Run it against the generated full benchmark artifact:
 
 ```sh
+OUTPUT=benchmarks/results/pgturbohybrid-fiqa.json
 python3 benchmarks/tools/check_acceptance.py \
-  /tmp/pgturbohybrid-fiqa-canonicalized-with-baseline.json \
+  "$OUTPUT" \
   --suite fiqa_openai_fast_defaults
 ```
 

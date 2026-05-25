@@ -542,8 +542,7 @@ UpdateNeighborOnDisk(PgturbohybridGraphElement element, PgturbohybridGraphElemen
 		idx = -1;
 	else if (idx == -2)
 	{
-		/* Find free offset if still exists */
-		/* TODO Retry updating connections if not */
+		/* Find free offset if it still exists; retry can be added later. */
 		for (int j = 0; j < lm; j++)
 		{
 			if (!ItemPointerIsValid(&ntup->indextids[startIdx + j]))

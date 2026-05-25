@@ -1,12 +1,28 @@
-# Easy Fast Setup
+# Fast Setup
 
-This guide creates the default fast `pgturbohybrid` path: latency profile,
-4-bit quantized index, exact storage off, SQL `LIMIT` as the final result
-target, and no manual candidate-budget arguments.
+This file helps you get from a fresh checkout to one working fast TurboHybrid
+query in a few minutes.
 
-## Install
+It uses tiny `vector(3)` example data so you can copy and paste the SQL by hand.
+For real embeddings, use the dimension from your model, such as `vector(1536)`.
+TurboHybrid combines dense vector search with BM25-style keyword search; BM25
+means Best Matching 25, a common text-ranking method for exact terms.
 
-Install pgvector first, then build and install `pgturbohybrid` with PGXS:
+## 1. Install pgvector
+
+Install pgvector first. `pgturbohybrid` depends on the pgvector SQL `vector`
+type.
+
+```sh
+git clone --depth 1 --branch v0.8.2 https://github.com/pgvector/pgvector.git ../pgvector
+make -C ../pgvector
+make -C ../pgvector install
+```
+
+## 2. Install pgturbohybrid
+
+Build and install this extension with PGXS, PostgreSQL's extension build
+system:
 
 ```sh
 git clone https://github.com/mayflower/pgturbohybrid.git
@@ -15,26 +31,31 @@ make
 make install
 ```
 
-## Database Setup
+For repeatable local setup, the helper script wraps the same idea:
 
-Create pgvector and pgturbohybrid in the database:
+```sh
+PG_CONFIG=pg_config PGVECTOR_REF=v0.8.2 scripts/dev-install.sh
+```
+
+## 3. Create Extensions
+
+Create pgvector first, then `pgturbohybrid`:
 
 ```sql
 CREATE EXTENSION vector;
 CREATE EXTENSION pgturbohybrid;
 ```
 
-The default profile is `latency`. You can verify it with:
+The default TurboHybrid profile is `latency`:
 
 ```sql
 SHOW turbohybrid.profile;
 ```
 
-## Table Schema
+## 4. Create Table
 
-Use a pgvector `vector` column for embeddings and a generated `tsvector` column
-for lexical search. This local smoke test uses `vector(3)` so it can be run by
-hand; use `vector(1536)` for OpenAI `text-embedding-3-small` data.
+Use one pgvector column for dense embeddings and one generated `tsvector`
+column for text search:
 
 ```sql
 CREATE TABLE documents (
@@ -45,25 +66,26 @@ CREATE TABLE documents (
         to_tsvector('english', body)
     ) STORED
 );
+```
 
+## 5. Insert Tiny Example Data
+
+```sql
 INSERT INTO documents (embedding, body)
 VALUES
     ('[1,0,0]', 'postgres vector search'),
     ('[1,1,0]', 'hybrid search with bm25'),
     ('[0,1,0]', 'lexical search in postgres'),
     ('[0,0,1]', 'unrelated document');
-```
 
-Run `ANALYZE` after loading data:
-
-```sql
 ANALYZE documents;
 ```
 
-## Default Fast Index
+## 6. Create Default TurboHybrid Index
 
-Create the index without manual fast options. The defaults use 4-bit
-quantization and `exact_storage = off`.
+Create the index without manual tuning options. The default fast path uses the
+`latency` profile, 4-bit quantization, exact storage off, and SQL `LIMIT` as the
+final result target when possible.
 
 ```sql
 CREATE INDEX documents_turbohybrid_idx ON documents
@@ -75,11 +97,9 @@ USING turbohybrid (
 ANALYZE documents;
 ```
 
-## Default Fast Query
+## 7. Query
 
-Omit `dense_k`, `bm25_k`, and `final_k`. The latency profile supplies
-100 dense candidates, 100 BM25 candidates, and RRF constant 60. SQL `LIMIT`
-becomes the final result target when available.
+Omit `dense_k`, `bm25_k`, and `final_k` for the normal fast path:
 
 ```sql
 SELECT id, body
@@ -91,12 +111,12 @@ ORDER BY embedding <~> turbohybrid_query(
 LIMIT 10;
 ```
 
-Use the correct vector dimension for your table in real data, for example
+Use the vector dimension that matches your table in real code, for example
 `$1::vector(1536)` for OpenAI `text-embedding-3-small` embeddings.
 
-## Verify The Fast Path
+## 8. Verify Fast Path
 
-First inspect the plan:
+First inspect the query plan:
 
 ```sql
 EXPLAIN (ANALYZE, BUFFERS)
@@ -109,7 +129,7 @@ ORDER BY embedding <~> turbohybrid_query(
 LIMIT 10;
 ```
 
-Then inspect the stable diagnostics for the last scan and the index:
+Then inspect TurboHybrid diagnostics:
 
 ```sql
 SELECT turbohybrid_last_scan_stats();
@@ -132,24 +152,30 @@ Useful fast-path indicators:
 }
 ```
 
-## Common Fixes
+If those values line up, you are on the normal fast path: PostgreSQL used the
+TurboHybrid index, the latency profile is active, and the SQL `LIMIT` drove the
+final top-k result size.
+
+## 9. Common Fixes
 
 | Problem | Check | Fix |
 | --- | --- | --- |
 | Plan does not use the index | `EXPLAIN (ANALYZE, BUFFERS)` and `scan_orchestration` | Ensure the `turbohybrid` index exists and the query uses `ORDER BY embedding <~> turbohybrid_query(...) LIMIT n`. |
-| Planner has stale table stats | Last `ANALYZE` time and row estimates in `EXPLAIN` | Run `ANALYZE documents;` after loading data and after large changes. |
+| Planner has stale table stats | Row estimates in `EXPLAIN` | Run `ANALYZE documents;` after loading data and after large changes. |
 | `final_k_source` is `default` | Query has no SQL `LIMIT` | Add `LIMIT 10` or another explicit top-k limit. |
 | `profile` is not `latency` | `SHOW turbohybrid.profile;` | Run `SET turbohybrid.profile = 'latency';` or reset role/database settings. |
-| SIMD is unavailable or disabled | `SELECT turbohybrid_simd_capabilities();` | Build with the portable default and avoid `SIMD_BUILD=none`; check host CPU support. |
-| Relevance drops on your dataset | Compare against SQL RRF or a labeled benchmark | Use `SET turbohybrid.profile = 'quality';`, rebuild with `WITH (exact_storage = on)`, or pass larger `dense_k` and `bm25_k`. |
+| SIMD is unavailable or disabled | `SELECT turbohybrid_simd_capabilities();` | SIMD means single instruction, multiple data; build with the portable default and avoid `SIMD_BUILD=none`; check host CPU support. |
+| Relevance drops on your dataset | Compare against a SQL RRF (reciprocal-rank fusion) baseline or labeled relevance data | Use quality mode, rebuild with `WITH (exact_storage = on)`, or pass larger `dense_k` and `bm25_k`. |
 
-Quality mode is the simple relevance-first escape hatch:
+## 10. Quality Mode
+
+Use quality mode when relevance matters more than the lowest latency:
 
 ```sql
 SET turbohybrid.profile = 'quality';
 ```
 
-For quality-sensitive production evaluation, benchmark an exact-storage index:
+For quality-sensitive evaluation, also benchmark an exact-storage index:
 
 ```sql
 CREATE INDEX documents_turbohybrid_quality_idx ON documents
@@ -160,19 +186,5 @@ USING turbohybrid (
 WITH (exact_storage = on);
 ```
 
-## FIQA/OpenAI Validation
-
-The final fast-default validation used the real FIQA/OpenAI benchmark: 57,638
-corpus rows, 648 qrels-backed queries, OpenAI `text-embedding-3-small`
-embeddings, 1,536 dimensions, one warmup pass, and one measured pass.
-
-| Method | Settings | p50 | p95 | p99 | nDCG@10 |
-| --- | --- | ---: | ---: | ---: | ---: |
-| pgturbohybrid default | default index, omitted budgets, LIMIT-inferred final_k | 0.729 ms | 0.910 ms | 1.096 ms | 0.421540 |
-| pgturbohybrid explicit recovered | 4-bit, exact_storage=off, 100/100/60, final_k=10 | 0.793 ms | 1.030 ms | 1.361 ms | 0.421540 |
-| SQL RRF | pgvector HNSW + PostgreSQL FTS, 100/100 | 1.635 ms | 3.254 ms | 5.579 ms | 0.423341 |
-
-The easy default path is index-backed and uses the intended effective settings.
-It is canonicalized internally after LIMIT/default resolution so it follows the
-same hot-path shape as the explicit recovered query while still reporting
-`final_k_source = limit` in diagnostics.
+Quality mode does more work per query. Measure latency and relevance on your
+own data before choosing production settings.

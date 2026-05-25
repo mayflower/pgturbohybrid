@@ -91,7 +91,13 @@ prove_installcheck:
 .PHONY: dist
 
 dist:
-	git diff-index --quiet HEAD -- || (echo "make dist requires a clean committed tree" >&2; exit 1)
+	@test -z "$$(git status --porcelain --untracked-files=all)" || (echo "make dist requires a clean working tree" >&2; git status --short --untracked-files=all >&2; exit 1)
+	@tracked_artifacts="$$(git ls-files | grep -E '(^|/)regression\.(diffs|out)$$|(^|/)\.DS_Store$$|(^|/)(benchmarks/(results|output)|results)/|(^|/)perf-smoke-results\.json$$|(^|/).*\.(o|so|bc|dll|dylib|obj|lib|exp|pyc)$$|(^|/)__pycache__/|^benchmarks/.*\.(csv|md|json)$$' | grep -v '^benchmarks/README\.md$$' | grep -v '^benchmarks/config/.*\.json$$' || true)"; \
+	if test -n "$$tracked_artifacts"; then \
+		echo "make dist refuses to package generated artifacts:" >&2; \
+		printf '%s\n' "$$tracked_artifacts" >&2; \
+		exit 1; \
+	fi
 	rm -rf dist/$(EXTENSION)-$(EXTVERSION).zip dist/$(EXTENSION)-$(EXTVERSION).tar.gz
 	mkdir -p dist
 	git archive --format=zip --prefix=$(EXTENSION)-$(EXTVERSION)/ -o dist/$(EXTENSION)-$(EXTVERSION).zip HEAD

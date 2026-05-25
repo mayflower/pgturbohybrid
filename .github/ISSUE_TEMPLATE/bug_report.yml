@@ -1,0 +1,83 @@
+name: Bug report
+description: Report a reproducible pgturbohybrid bug
+title: "[Bug]: "
+labels: ["bug"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for reporting a bug. Please include enough detail for maintainers to reproduce the issue.
+  - type: input
+    id: postgres-version
+    attributes:
+      label: PostgreSQL version
+      description: Output of `SELECT version();` or `pg_config --version`.
+      placeholder: "PostgreSQL 16.3"
+    validations:
+      required: true
+  - type: input
+    id: pgvector-version
+    attributes:
+      label: pgvector version
+      description: pgvector release or commit.
+      placeholder: "v0.8.2"
+    validations:
+      required: true
+  - type: input
+    id: pgturbohybrid-version
+    attributes:
+      label: pgturbohybrid version or commit
+      placeholder: "v0.1.0-alpha.2 or commit SHA"
+    validations:
+      required: true
+  - type: input
+    id: os-architecture
+    attributes:
+      label: OS and architecture
+      placeholder: "Ubuntu 24.04 x86_64, macOS arm64, etc."
+    validations:
+      required: true
+  - type: textarea
+    id: build-flags
+    attributes:
+      label: Build flags and environment
+      description: Include PG_CONFIG, SIMD_BUILD, VECTOR_INCLUDE, PGTURBOHYBRID_REQUIRE_VECTOR_HEADER, compiler, and relevant install commands.
+      render: sh
+    validations:
+      required: false
+  - type: textarea
+    id: exact-sql
+    attributes:
+      label: Exact SQL
+      description: Minimal SQL needed to reproduce the issue.
+      render: sql
+    validations:
+      required: true
+  - type: textarea
+    id: explain-output
+    attributes:
+      label: EXPLAIN output
+      description: Include `EXPLAIN (ANALYZE, BUFFERS)` when the bug involves query planning or execution.
+      render: text
+    validations:
+      required: false
+  - type: textarea
+    id: scan-stats
+    attributes:
+      label: turbohybrid_last_scan_stats()
+      description: Paste the JSON output when available.
+      render: json
+    validations:
+      required: false
+  - type: textarea
+    id: expected-behavior
+    attributes:
+      label: Expected behavior
+    validations:
+      required: true
+  - type: textarea
+    id: actual-behavior
+    attributes:
+      label: Actual behavior
+    validations:
+      required: true

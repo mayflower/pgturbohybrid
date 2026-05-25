@@ -1329,9 +1329,10 @@ PgturbohybridGraphQuerySplit2RawAvx2(const PgturbohybridGraphTqQuery *tq, const 
  *
  * No pruning (unlike the unweighted kernel) — every coord must
  * contribute its weight, otherwise the formula degenerates.  At
- * dim=1536 this is ~3× the unweighted kernel's per-pair cost (32
- * chunks vs 96 chunks scanned, plus the widen-mul-madd overhead);
- * still ~50× faster than the scalar fallback.
+ * dim=1536 this does more work than the unweighted kernel (32
+ * chunks vs 96 chunks scanned, plus the widen-mul-madd overhead).
+ * Keep benchmark claims about this path in benchmark artifacts, not
+ * source comments.
  */
 static inline int64 PGTURBOHYBRID_GRAPH_AVX2_TARGET
 PgturbohybridGraphHorizontalSumI64Avx2(__m256i v)
