@@ -16,6 +16,7 @@
 #include "storage/lwlock.h"
 #include "storage/s_lock.h"
 #include "utils/relptr.h"
+#include "utils/memutils.h"
 #include "utils/sampling.h"
 #include "pgturbohybrid_vector_compat.h"
 
@@ -138,6 +139,16 @@ typedef Pointer Item;
 #define PGTURBOHYBRID_GRAPH_NEIGHBOR_ARRAY_SIZE(lm)	(offsetof(PgturbohybridGraphNeighborArray, items) + sizeof(PgturbohybridGraphCandidate) * (lm))
 
 #define PgturbohybridGraphPageGetOpaque(page)	((PgturbohybridGraphPageOpaque) PageGetSpecialPointer(page))
+
+static inline Size
+PgturbohybridCheckedArrayBytes(Size elemSize, Size count, const char *what)
+{
+	if (elemSize != 0 && count > MaxAllocSize / elemSize)
+		ereport(ERROR,
+				(errcode(ERRCODE_PROGRAM_LIMIT_EXCEEDED),
+				 errmsg("%s is too large", what)));
+	return elemSize * count;
+}
 #define PgturbohybridGraphPageGetMeta(page)	((PgturbohybridGraphMetaPageData *) PageGetContents(page))
 
 #if PG_VERSION_NUM >= 150000

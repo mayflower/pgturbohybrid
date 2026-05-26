@@ -654,6 +654,34 @@ PgturbohybridHashTerm(const char *term, uint16 len)
 	return hash;
 }
 
+static Size
+PgturbohybridBm25BuildArrayAllocSize(Size elemSize, Size count)
+{
+	if (elemSize != 0 && count > MaxAllocSize / elemSize)
+		ereport(ERROR,
+				(errcode(ERRCODE_PROGRAM_LIMIT_EXCEEDED),
+				 errmsg("pgturbohybrid BM25 build array is too large")));
+	return elemSize * count;
+}
+
+static uint32
+PgturbohybridBm25BuildGrowCapacity32(uint32 capacity, uint32 needed, Size elemSize)
+{
+	uint32		newCapacity = capacity == 0 ? 1 : capacity;
+
+	while (newCapacity < needed)
+	{
+		if (newCapacity > PG_UINT32_MAX / 2)
+			ereport(ERROR,
+					(errcode(ERRCODE_PROGRAM_LIMIT_EXCEEDED),
+					 errmsg("pgturbohybrid BM25 build capacity is too large")));
+		newCapacity += newCapacity;
+	}
+
+	(void) PgturbohybridBm25BuildArrayAllocSize(elemSize, newCapacity);
+	return newCapacity;
+}
+
 static void PgturbohybridSpillTermRun(PgturbohybridBm25Collector *collector);
 
 static void
@@ -686,15 +714,18 @@ PgturbohybridEnsureSpillRunCapacity(PgturbohybridBm25Collector *collector)
 	if (collector->spillRunCount < collector->spillRunCapacity)
 		return;
 
-	collector->spillRunCapacity = collector->spillRunCapacity == 0 ? 8 :
-		collector->spillRunCapacity * 2;
+	collector->spillRunCapacity =
+		PgturbohybridBm25BuildGrowCapacity32(collector->spillRunCapacity,
+											 collector->spillRunCount + 1,
+											 sizeof(PgturbohybridBm25SpillRun));
 	if (collector->spillRuns == NULL)
-		collector->spillRuns = palloc(sizeof(PgturbohybridBm25SpillRun) *
-									   collector->spillRunCapacity);
+		collector->spillRuns =
+			palloc(PgturbohybridBm25BuildArrayAllocSize(sizeof(PgturbohybridBm25SpillRun),
+														collector->spillRunCapacity));
 	else
 		collector->spillRuns = repalloc(collector->spillRuns,
-										sizeof(PgturbohybridBm25SpillRun) *
-										collector->spillRunCapacity);
+										PgturbohybridBm25BuildArrayAllocSize(sizeof(PgturbohybridBm25SpillRun),
+																			 collector->spillRunCapacity));
 }
 
 static void
@@ -761,12 +792,19 @@ PgturbohybridEnsureDocCapacity(PgturbohybridBm25Collector *collector)
 	if (collector->docCount < collector->docCapacity)
 		return;
 
-	collector->docCapacity = collector->docCapacity == 0 ? 1024 : collector->docCapacity * 2;
+	collector->docCapacity =
+		PgturbohybridBm25BuildGrowCapacity32(collector->docCapacity == 0 ? 1024 :
+											 collector->docCapacity,
+											 collector->docCount + 1,
+											 sizeof(PgturbohybridBm25BuildDoc));
 	if (collector->docs == NULL)
-		collector->docs = palloc(sizeof(PgturbohybridBm25BuildDoc) * collector->docCapacity);
+		collector->docs =
+			palloc(PgturbohybridBm25BuildArrayAllocSize(sizeof(PgturbohybridBm25BuildDoc),
+														collector->docCapacity));
 	else
 		collector->docs = repalloc(collector->docs,
-								   sizeof(PgturbohybridBm25BuildDoc) * collector->docCapacity);
+								   PgturbohybridBm25BuildArrayAllocSize(sizeof(PgturbohybridBm25BuildDoc),
+																		collector->docCapacity));
 	PgturbohybridCheckBudget(collector);
 }
 
@@ -776,12 +814,19 @@ PgturbohybridEnsureTermCapacity(PgturbohybridBm25Collector *collector)
 	if (collector->termCount < collector->termCapacity)
 		return;
 
-	collector->termCapacity = collector->termCapacity == 0 ? 4096 : collector->termCapacity * 2;
+	collector->termCapacity =
+		PgturbohybridBm25BuildGrowCapacity32(collector->termCapacity == 0 ? 4096 :
+											 collector->termCapacity,
+											 collector->termCount + 1,
+											 sizeof(PgturbohybridBm25TermTuple));
 	if (collector->terms == NULL)
-		collector->terms = palloc(sizeof(PgturbohybridBm25TermTuple) * collector->termCapacity);
+		collector->terms =
+			palloc(PgturbohybridBm25BuildArrayAllocSize(sizeof(PgturbohybridBm25TermTuple),
+														collector->termCapacity));
 	else
 		collector->terms = repalloc(collector->terms,
-									sizeof(PgturbohybridBm25TermTuple) * collector->termCapacity);
+									PgturbohybridBm25BuildArrayAllocSize(sizeof(PgturbohybridBm25TermTuple),
+																		 collector->termCapacity));
 	PgturbohybridCheckBudget(collector);
 }
 
@@ -798,8 +843,12 @@ PgturbohybridAppendTermBytes(PgturbohybridBm25Collector *collector, const char *
 
 	while (collector->termBytesUsed + len > collector->termBytesCapacity)
 	{
-		collector->termBytesCapacity = collector->termBytesCapacity == 0 ? 64 * 1024 :
-			collector->termBytesCapacity * 2;
+		uint32		needed = collector->termBytesUsed + len;
+
+		collector->termBytesCapacity =
+			PgturbohybridBm25BuildGrowCapacity32(collector->termBytesCapacity == 0 ?
+												 64 * 1024 : collector->termBytesCapacity,
+												 needed, 1);
 		if (collector->termBytes == NULL)
 			collector->termBytes = palloc(collector->termBytesCapacity);
 		else
@@ -1034,7 +1083,9 @@ PgturbohybridReadNodeMap(Relation index, uint32 *count)
 		return NULL;
 	}
 
-	map = palloc0(sizeof(PgturbohybridTidNode) * meta->tqNodeCount);
+	map = palloc0(PgturbohybridCheckedArrayBytes(sizeof(PgturbohybridTidNode),
+												 meta->tqNodeCount,
+												 "pgturbohybrid BM25 TID map"));
 	tqWeighted = (meta->tqFlags & PGTURBOHYBRID_GRAPH_TQ_WEIGHTED) != 0;
 	codeTuplesPerPage =
 		PgturbohybridGraphTuplesPerPage(PgturbohybridGraphCodeTupleSize(meta->dimensions,
@@ -1042,7 +1093,9 @@ PgturbohybridReadNodeMap(Relation index, uint32 *count)
 												  meta->tqBits,
 												  tqWeighted));
 	codePageCount = PgturbohybridGraphPageCount(meta->tqNodeCount, codeTuplesPerPage);
-	codeBlknos = palloc(sizeof(BlockNumber) * codePageCount);
+	codeBlknos = palloc(PgturbohybridCheckedArrayBytes(sizeof(BlockNumber),
+													   codePageCount,
+													   "pgturbohybrid BM25 code block map"));
 	PgturbohybridGraphInitBlockMap(codeBlknos, codePageCount);
 
 	for (int pageNo = 0; pageNo < codePageCount; pageNo++)
@@ -1117,7 +1170,9 @@ PgturbohybridReadNodeStates(Relation index, PgturbohybridGraphMetaPageData *meta
 		return NULL;
 	}
 
-	states = palloc0(sizeof(PgturbohybridNodeState) * meta->tqNodeCount);
+	states = palloc0(PgturbohybridCheckedArrayBytes(sizeof(PgturbohybridNodeState),
+													meta->tqNodeCount,
+													"pgturbohybrid BM25 node state map"));
 	tqWeighted = (meta->tqFlags & PGTURBOHYBRID_GRAPH_TQ_WEIGHTED) != 0;
 	codeTuplesPerPage =
 		PgturbohybridGraphTuplesPerPage(PgturbohybridGraphCodeTupleSize(meta->dimensions,
@@ -1125,7 +1180,9 @@ PgturbohybridReadNodeStates(Relation index, PgturbohybridGraphMetaPageData *meta
 												  meta->tqBits,
 												  tqWeighted));
 	codePageCount = PgturbohybridGraphPageCount(meta->tqNodeCount, codeTuplesPerPage);
-	codeBlknos = palloc(sizeof(BlockNumber) * codePageCount);
+	codeBlknos = palloc(PgturbohybridCheckedArrayBytes(sizeof(BlockNumber),
+													   codePageCount,
+													   "pgturbohybrid BM25 code block map"));
 	PgturbohybridGraphInitBlockMap(codeBlknos, codePageCount);
 
 	for (int pageNo = 0; pageNo < codePageCount; pageNo++)
@@ -1426,14 +1483,19 @@ PgturbohybridWriteDocStats(PgturbohybridBm25Collector *collector)
 		return;
 	}
 
-	dense = palloc0(sizeof(TqBm25DocStat) * collector->tidNodeCount);
+	dense = palloc0(PgturbohybridCheckedArrayBytes(sizeof(TqBm25DocStat),
+												   collector->tidNodeCount,
+												   "pgturbohybrid BM25 dense doc stats"));
 	for (uint32 i = 0; i < collector->docCount; i++)
 	{
 		if (collector->docs[i].nodeId >= collector->tidNodeCount)
 			elog(ERROR, "pgturbohybrid BM25 doc nodeId out of range");
 		dense[collector->docs[i].nodeId].docLen = collector->docs[i].docLen;
 	}
-	collector->denseDocLens = palloc0(sizeof(uint32) * collector->tidNodeCount);
+	collector->denseDocLens =
+		palloc0(PgturbohybridCheckedArrayBytes(sizeof(uint32),
+											   collector->tidNodeCount,
+											   "pgturbohybrid BM25 dense doc lengths"));
 	collector->denseDocLensCount = collector->tidNodeCount;
 	for (uint32 i = 0; i < collector->tidNodeCount; i++)
 		collector->denseDocLens[i] = dense[i].docLen;
@@ -2268,12 +2330,17 @@ PgturbohybridWriteLexiconAndPostingsFromRuns(PgturbohybridBm25Collector *collect
 	uint16		maxPerChunk = PgturbohybridBm25MaxPostingsPerChunk();
 	uint32		termId = 0;
 
-	cursors = palloc0(sizeof(PgturbohybridBm25SpillCursor) *
-					  collector->spillRunCount);
+	cursors = palloc0(PgturbohybridCheckedArrayBytes(sizeof(PgturbohybridBm25SpillCursor),
+													collector->spillRunCount,
+													"pgturbohybrid BM25 spill cursors"));
 	heap.cursors = cursors;
-	heap.items = palloc(sizeof(int) * collector->spillRunCount);
+	heap.items = palloc(PgturbohybridCheckedArrayBytes(sizeof(int),
+													   collector->spillRunCount,
+													   "pgturbohybrid BM25 spill heap"));
 	heap.count = 0;
-	chunk = palloc(sizeof(PgturbohybridBm25Posting) * maxPerChunk);
+	chunk = palloc(PgturbohybridCheckedArrayBytes(sizeof(PgturbohybridBm25Posting),
+												  maxPerChunk,
+												  "pgturbohybrid BM25 posting chunk"));
 
 	for (uint32 i = 0; i < collector->spillRunCount; i++)
 	{
@@ -2338,14 +2405,17 @@ PgturbohybridWriteLexiconAndPostingsFromRuns(PgturbohybridBm25Collector *collect
 			maxTf = Max(maxTf, tf);
 			if (impactEntryCount >= impactEntryCapacity)
 			{
-				impactEntryCapacity = impactEntryCapacity == 0 ? 64 :
-					impactEntryCapacity * 2;
+				impactEntryCapacity =
+					PgturbohybridBm25BuildGrowCapacity32(impactEntryCapacity == 0 ? 64 :
+														 impactEntryCapacity,
+														 impactEntryCount + 1,
+														 sizeof(PgturbohybridBm25ImpactTupleEntry));
 				impactEntries = impactEntries == NULL ?
-					palloc(sizeof(PgturbohybridBm25ImpactTupleEntry) *
-						   impactEntryCapacity) :
+					palloc(PgturbohybridBm25BuildArrayAllocSize(sizeof(PgturbohybridBm25ImpactTupleEntry),
+																impactEntryCapacity)) :
 					repalloc(impactEntries,
-							 sizeof(PgturbohybridBm25ImpactTupleEntry) *
-							 impactEntryCapacity);
+							 PgturbohybridBm25BuildArrayAllocSize(sizeof(PgturbohybridBm25ImpactTupleEntry),
+																  impactEntryCapacity));
 			}
 			impactEntries[impactEntryCount].nodeId = nodeId;
 			impactEntries[impactEntryCount].tfNormQ16 =
@@ -2527,8 +2597,10 @@ PgturbohybridWriteLexiconAndPostings(PgturbohybridBm25Collector *collector)
 											  &blockMaxBuf, &blockMaxPage,
 											  &blockMaxBlkno);
 		impactEntryCount = i - startIndex;
-		impactEntries = palloc(sizeof(PgturbohybridBm25ImpactTupleEntry) *
-							   Max(impactEntryCount, 1));
+		impactEntries =
+			palloc(PgturbohybridCheckedArrayBytes(sizeof(PgturbohybridBm25ImpactTupleEntry),
+												  Max(impactEntryCount, 1),
+												  "pgturbohybrid BM25 impact entries"));
 		for (uint32 j = startIndex; j < i; j++)
 		{
 			PgturbohybridBm25TermTuple *term = &collector->terms[j];
@@ -2805,8 +2877,10 @@ PgturbohybridBm25CollectBasePostings(Relation index,
 					}
 						nextBlkno = postings->nextBlkno;
 						nextOffno = postings->nextOffno;
-						decoded = palloc(sizeof(PgturbohybridBm25Posting) *
-										 postings->count);
+						decoded =
+							palloc(PgturbohybridCheckedArrayBytes(sizeof(PgturbohybridBm25Posting),
+																  postings->count,
+																  "pgturbohybrid BM25 decoded postings"));
 						if (!PgturbohybridBm25DecodePostingsTuple(postings,
 															ItemIdGetLength(postIid),
 															decoded))
@@ -3012,8 +3086,12 @@ PgturbohybridBm25MaybeCompact(Relation index)
 				(errcode(ERRCODE_DATA_CORRUPTED),
 				 errmsg("pgturbohybrid native graph metadata is missing during BM25 compaction")));
 
-	docLens = palloc0(sizeof(uint32) * nodeCount);
-	docSeen = palloc0(sizeof(bool) * nodeCount);
+	docLens = palloc0(PgturbohybridCheckedArrayBytes(sizeof(uint32),
+													 nodeCount,
+													 "pgturbohybrid BM25 compacted doc lengths"));
+	docSeen = palloc0(PgturbohybridCheckedArrayBytes(sizeof(bool),
+													 nodeCount,
+													 "pgturbohybrid BM25 compacted doc visibility"));
 	PgturbohybridBm25ReadDocLens(index, &oldMeta, nodeCount, docLens);
 
 	memset(&collector, 0, sizeof(collector));

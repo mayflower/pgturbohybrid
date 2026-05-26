@@ -1,6 +1,7 @@
 #include "postgres.h"
 
 #include <limits.h>
+#include <string.h>
 
 #include "fmgr.h"
 #include "pgturbohybrid.h"
@@ -10,6 +11,8 @@
 #include "pgturbohybrid_bm25.h"
 #include "pgturbohybrid_vector_compat.h"
 #include "utils/fmgrprotos.h"
+#include "utils/jsonb.h"
+#include "utils/numeric.h"
 
 #define PGTURBOHYBRID_SCAN_ORCHESTRATION_NONE		0
 #define PGTURBOHYBRID_SCAN_ORCHESTRATION_GRAPH		1
@@ -54,6 +57,90 @@ static int pgturbohybrid_last_graph_quantization_bits = 0;
 static bool pgturbohybrid_last_graph_exact_storage = false;
 static bool pgturbohybrid_last_graph_exact_storage_known = false;
 static bool pgturbohybrid_last_graph_query_split_active = false;
+
+static void
+PgturbohybridJsonbAddKey(JsonbParseState **state, const char *key)
+{
+	JsonbValue	value;
+
+	value.type = jbvString;
+	value.val.string.val = (char *) key;
+	value.val.string.len = strlen(key);
+	pushJsonbValue(state, WJB_KEY, &value);
+}
+
+static void
+PgturbohybridJsonbAddString(JsonbParseState **state, const char *key, const char *val)
+{
+	JsonbValue	value;
+
+	PgturbohybridJsonbAddKey(state, key);
+	value.type = jbvString;
+	value.val.string.val = (char *) val;
+	value.val.string.len = strlen(val);
+	pushJsonbValue(state, WJB_VALUE, &value);
+}
+
+static void
+PgturbohybridJsonbAddBool(JsonbParseState **state, const char *key, bool val)
+{
+	JsonbValue	value;
+
+	PgturbohybridJsonbAddKey(state, key);
+	value.type = jbvBool;
+	value.val.boolean = val;
+	pushJsonbValue(state, WJB_VALUE, &value);
+}
+
+static void
+PgturbohybridJsonbAddNull(JsonbParseState **state, const char *key)
+{
+	JsonbValue	value;
+
+	PgturbohybridJsonbAddKey(state, key);
+	value.type = jbvNull;
+	pushJsonbValue(state, WJB_VALUE, &value);
+}
+
+static void
+PgturbohybridJsonbAddInt64(JsonbParseState **state, const char *key, int64 val)
+{
+	JsonbValue	value;
+
+	PgturbohybridJsonbAddKey(state, key);
+	value.type = jbvNumeric;
+	value.val.numeric = DatumGetNumeric(DirectFunctionCall1(int8_numeric,
+															Int64GetDatum(val)));
+	pushJsonbValue(state, WJB_VALUE, &value);
+}
+
+static void
+PgturbohybridJsonbAddUint64(JsonbParseState **state, const char *key, uint64 val)
+{
+	char		buf[32];
+	JsonbValue	value;
+
+	snprintf(buf, sizeof(buf), UINT64_FORMAT, val);
+	PgturbohybridJsonbAddKey(state, key);
+	value.type = jbvNumeric;
+	value.val.numeric = DatumGetNumeric(DirectFunctionCall3(numeric_in,
+															CStringGetDatum(buf),
+															ObjectIdGetDatum(InvalidOid),
+															Int32GetDatum(-1)));
+	pushJsonbValue(state, WJB_VALUE, &value);
+}
+
+static void
+PgturbohybridJsonbAddFloat8(JsonbParseState **state, const char *key, double val)
+{
+	JsonbValue	value;
+
+	PgturbohybridJsonbAddKey(state, key);
+	value.type = jbvNumeric;
+	value.val.numeric = DatumGetNumeric(DirectFunctionCall1(float8_numeric,
+															Float8GetDatum(val)));
+	pushJsonbValue(state, WJB_VALUE, &value);
+}
 
 static const char *TqScanOrchestrationName(void);
 static const char *PgturbohybridFinalKSourceName(void);
@@ -280,7 +367,8 @@ FUNCTION_PREFIX PG_FUNCTION_INFO_V1(pgturbohybrid_last_scan_stats);
 FUNCTION_PREFIX Datum
 pgturbohybrid_last_scan_stats(PG_FUNCTION_ARGS)
 {
-	StringInfoData json;
+	JsonbParseState *state = NULL;
+	JsonbValue *result;
 	PgturbohybridScanStatsSnapshot scanStats;
 	PgturbohybridValidationStats validationStats;
 	uint64		denseElapsedUs;
@@ -300,173 +388,179 @@ pgturbohybrid_last_scan_stats(PG_FUNCTION_ARGS)
 	indexUsed = pgturbohybrid_last_scan_orchestration != PGTURBOHYBRID_SCAN_ORCHESTRATION_NONE ||
 		scanStats.bm25Terms > 0 || bm25ElapsedUs > 0;
 
-	initStringInfo(&json);
-	appendStringInfo(&json,
-					 "{\"version\":1,"
-					 "\"profile\":\"%s\","
-					 "\"index_used\":%s,"
-					 "\"scan_orchestration\":\"%s\","
-					 "\"graph_storage_kind\":\"%s\","
-					 "\"quantization_bits\":%d,"
-					 "\"exact_storage\":%s,"
-					 "\"graph_candidate_count\":" INT64_FORMAT ","
-					 "\"graph_rescore_count\":" INT64_FORMAT ","
-					 "\"graph_dense_requested_k\":" INT64_FORMAT ","
-					 "\"graph_effective_result_target\":" INT64_FORMAT ","
-					 "\"graph_effective_search_ef\":" INT64_FORMAT ","
-					 "\"graph_effective_rescore_band\":" INT64_FORMAT ","
-					 "\"final_k_requested\":%d,"
-					 "\"final_k_effective\":%d,"
-					 "\"detected_sql_limit\":%d,"
-					 "\"final_k_inferred\":%s,"
-					 "\"final_k_source\":\"%s\","
-					 "\"bm25_strategy\":\"%s\","
-					 "\"bm25_impact_or_mode\":\"%s\","
-					 "\"bm25_hot_postings_cache_mb\":%d,"
-					 "\"bm25_hybrid_bound\":\"%s\","
-					 "\"bm25_accumulator_mode\":\"%s\","
-					 "\"exact_rescore_for_bm25_only\":%s,"
-					 "\"auto_budget\":%s,"
-					 "\"dense_candidates_effective\":%u,"
-					 "\"dense_k_effective\":%u,"
-					 "\"dense_k_defaulted\":%s,"
-					 "\"bm25_candidates_effective\":%u,"
-					 "\"bm25_k_effective\":%u,"
-					 "\"bm25_k_defaulted\":%s,"
-					 "\"bm25_cache_hit\":%s,"
-					 "\"bm25_cache_build_us\":" UINT64_FORMAT ","
-					 "\"bm25_hot_postings_cache_hit\":%s,"
-					 "\"bm25_hot_postings_cache_hits\":" UINT64_FORMAT ","
-					 "\"bm25_hot_postings_cache_misses\":" UINT64_FORMAT ","
-					 "\"strict_vector_validations\":" UINT64_FORMAT ","
-					 "\"fast_vector_checks\":" UINT64_FORMAT ","
-					 "\"vector_type_cache_hits\":" UINT64_FORMAT ","
-					 "\"vector_type_cache_misses\":" UINT64_FORMAT ","
-					 "\"dense_elapsed_us\":" UINT64_FORMAT ","
-					 "\"bm25_elapsed_us\":" UINT64_FORMAT ","
-					 "\"fusion_elapsed_us\":" UINT64_FORMAT ","
-					 "\"elapsed_us\":" UINT64_FORMAT ","
-					 "\"graph_highdim_widening_multiplier\":%.3f,"
-					 "\"graph_widening_reason\":\"%s\","
-					 "\"graph_dense_budget_policy\":\"%s\","
-					 "\"graph_rescore_band_policy\":\"%s\"}",
-					 PgturbohybridProfileName(pgturbohybrid_profile),
-					 indexUsed ? "true" : "false",
-					 TqScanOrchestrationName(),
-					 PgturbohybridGraphStorageKindName(pgturbohybrid_last_graph_storage_kind),
-					 pgturbohybrid_last_graph_quantization_bits,
-					 pgturbohybrid_last_graph_exact_storage_known ?
-					 (pgturbohybrid_last_graph_exact_storage ? "true" : "false") : "null",
-					 pgturbohybrid_last_graph_candidate_count,
-					 pgturbohybrid_last_graph_rescore_count,
-					 pgturbohybrid_last_graph_dense_requested_k,
-					 pgturbohybrid_last_graph_effective_result_target,
-					 pgturbohybrid_last_graph_effective_search_ef,
-					 pgturbohybrid_last_graph_effective_rescore_band,
-					 pgturbohybrid_last_final_k_requested,
-					 pgturbohybrid_last_final_k_effective,
-					 pgturbohybrid_last_sql_limit,
-					 pgturbohybrid_last_final_k_inferred ? "true" : "false",
-					 PgturbohybridFinalKSourceName(),
-					 PgturbohybridBm25StrategyName(pgturbohybrid_bm25_strategy),
-					 PgturbohybridBm25ImpactOrModeName(pgturbohybrid_bm25_impact_or_mode),
-					 pgturbohybrid_bm25_hot_postings_cache_mb,
-					 PgturbohybridBm25HybridBoundModeName(pgturbohybrid_bm25_hybrid_bound),
-					 PgturbohybridBm25AccumulatorModeName(pgturbohybrid_bm25_accumulator_mode),
-					 pgturbohybrid_enable_exact_rescore_for_bm25_only ? "true" : "false",
-					 pgturbohybrid_auto_budget ? "true" : "false",
-					 scanStats.denseCandidatesEffective,
-					 scanStats.denseCandidatesEffective,
-					 scanStats.denseKDefaulted ? "true" : "false",
-					 scanStats.bm25CandidatesEffective,
-					 scanStats.bm25CandidatesEffective,
-					 scanStats.bm25KDefaulted ? "true" : "false",
-					 scanStats.bm25CacheHit ? "true" : "false",
-					 scanStats.bm25CacheBuildUs,
-					 scanStats.bm25HotPostingsCacheHits > 0 ? "true" : "false",
-					 scanStats.bm25HotPostingsCacheHits,
-					 scanStats.bm25HotPostingsCacheMisses,
-					 validationStats.strictVectorValidations,
-					 validationStats.fastVectorChecks,
-					 validationStats.vectorTypeCacheHits,
-					 validationStats.vectorTypeCacheMisses,
-					 denseElapsedUs,
-					 bm25ElapsedUs,
-					 fusionElapsedUs,
-					 elapsedUs,
-					 pgturbohybrid_last_graph_highdim_widening_multiplier,
-					 PgturbohybridGraphDenseWideningReasonName(pgturbohybrid_last_graph_widening_reason),
-					 PgturbohybridGraphDenseBudgetPolicyNameExternal(pgturbohybrid_last_graph_dense_budget_policy),
-					 PgturbohybridGraphRescoreBandPolicyNameExternal(pgturbohybrid_last_graph_rescore_band_policy));
+	pushJsonbValue(&state, WJB_BEGIN_OBJECT, NULL);
+	PgturbohybridJsonbAddInt64(&state, "version", 1);
+	PgturbohybridJsonbAddString(&state, "profile",
+								PgturbohybridProfileName(pgturbohybrid_profile));
+	PgturbohybridJsonbAddBool(&state, "index_used", indexUsed);
+	PgturbohybridJsonbAddString(&state, "scan_orchestration",
+								TqScanOrchestrationName());
+	PgturbohybridJsonbAddString(&state, "graph_storage_kind",
+								PgturbohybridGraphStorageKindName(pgturbohybrid_last_graph_storage_kind));
+	PgturbohybridJsonbAddInt64(&state, "quantization_bits",
+							   pgturbohybrid_last_graph_quantization_bits);
+	if (pgturbohybrid_last_graph_exact_storage_known)
+		PgturbohybridJsonbAddBool(&state, "exact_storage",
+								  pgturbohybrid_last_graph_exact_storage);
+	else
+		PgturbohybridJsonbAddNull(&state, "exact_storage");
+	PgturbohybridJsonbAddInt64(&state, "graph_candidate_count",
+							   pgturbohybrid_last_graph_candidate_count);
+	PgturbohybridJsonbAddInt64(&state, "graph_rescore_count",
+							   pgturbohybrid_last_graph_rescore_count);
+	PgturbohybridJsonbAddInt64(&state, "graph_dense_requested_k",
+							   pgturbohybrid_last_graph_dense_requested_k);
+	PgturbohybridJsonbAddInt64(&state, "graph_effective_result_target",
+							   pgturbohybrid_last_graph_effective_result_target);
+	PgturbohybridJsonbAddInt64(&state, "graph_effective_search_ef",
+							   pgturbohybrid_last_graph_effective_search_ef);
+	PgturbohybridJsonbAddInt64(&state, "graph_effective_rescore_band",
+							   pgturbohybrid_last_graph_effective_rescore_band);
+	PgturbohybridJsonbAddInt64(&state, "final_k_requested",
+							   pgturbohybrid_last_final_k_requested);
+	PgturbohybridJsonbAddInt64(&state, "final_k_effective",
+							   pgturbohybrid_last_final_k_effective);
+	PgturbohybridJsonbAddInt64(&state, "detected_sql_limit",
+							   pgturbohybrid_last_sql_limit);
+	PgturbohybridJsonbAddBool(&state, "final_k_inferred",
+							  pgturbohybrid_last_final_k_inferred);
+	PgturbohybridJsonbAddString(&state, "final_k_source",
+								PgturbohybridFinalKSourceName());
+	PgturbohybridJsonbAddString(&state, "bm25_strategy",
+								PgturbohybridBm25StrategyName(pgturbohybrid_bm25_strategy));
+	PgturbohybridJsonbAddString(&state, "bm25_impact_or_mode",
+								PgturbohybridBm25ImpactOrModeName(pgturbohybrid_bm25_impact_or_mode));
+	PgturbohybridJsonbAddInt64(&state, "bm25_hot_postings_cache_mb",
+							   pgturbohybrid_bm25_hot_postings_cache_mb);
+	PgturbohybridJsonbAddString(&state, "bm25_hybrid_bound",
+								PgturbohybridBm25HybridBoundModeName(pgturbohybrid_bm25_hybrid_bound));
+	PgturbohybridJsonbAddString(&state, "bm25_accumulator_mode",
+								PgturbohybridBm25AccumulatorModeName(pgturbohybrid_bm25_accumulator_mode));
+	PgturbohybridJsonbAddBool(&state, "exact_rescore_for_bm25_only",
+							  pgturbohybrid_enable_exact_rescore_for_bm25_only);
+	PgturbohybridJsonbAddBool(&state, "auto_budget", pgturbohybrid_auto_budget);
+	PgturbohybridJsonbAddInt64(&state, "dense_candidates_effective",
+							   scanStats.denseCandidatesEffective);
+	PgturbohybridJsonbAddInt64(&state, "dense_k_effective",
+							   scanStats.denseCandidatesEffective);
+	PgturbohybridJsonbAddBool(&state, "dense_k_defaulted",
+							  scanStats.denseKDefaulted);
+	PgturbohybridJsonbAddInt64(&state, "bm25_candidates_effective",
+							   scanStats.bm25CandidatesEffective);
+	PgturbohybridJsonbAddInt64(&state, "bm25_k_effective",
+							   scanStats.bm25CandidatesEffective);
+	PgturbohybridJsonbAddBool(&state, "bm25_k_defaulted",
+							  scanStats.bm25KDefaulted);
+	PgturbohybridJsonbAddBool(&state, "bm25_cache_hit",
+							  scanStats.bm25CacheHit);
+	PgturbohybridJsonbAddUint64(&state, "bm25_cache_build_us",
+								scanStats.bm25CacheBuildUs);
+	PgturbohybridJsonbAddBool(&state, "bm25_hot_postings_cache_hit",
+							  scanStats.bm25HotPostingsCacheHits > 0);
+	PgturbohybridJsonbAddUint64(&state, "bm25_hot_postings_cache_hits",
+								scanStats.bm25HotPostingsCacheHits);
+	PgturbohybridJsonbAddUint64(&state, "bm25_hot_postings_cache_misses",
+								scanStats.bm25HotPostingsCacheMisses);
+	PgturbohybridJsonbAddUint64(&state, "strict_vector_validations",
+								validationStats.strictVectorValidations);
+	PgturbohybridJsonbAddUint64(&state, "fast_vector_checks",
+								validationStats.fastVectorChecks);
+	PgturbohybridJsonbAddUint64(&state, "vector_type_cache_hits",
+								validationStats.vectorTypeCacheHits);
+	PgturbohybridJsonbAddUint64(&state, "vector_type_cache_misses",
+								validationStats.vectorTypeCacheMisses);
+	PgturbohybridJsonbAddUint64(&state, "dense_elapsed_us", denseElapsedUs);
+	PgturbohybridJsonbAddUint64(&state, "bm25_elapsed_us", bm25ElapsedUs);
+	PgturbohybridJsonbAddUint64(&state, "fusion_elapsed_us", fusionElapsedUs);
+	PgturbohybridJsonbAddUint64(&state, "elapsed_us", elapsedUs);
+	PgturbohybridJsonbAddFloat8(&state, "graph_highdim_widening_multiplier",
+								pgturbohybrid_last_graph_highdim_widening_multiplier);
+	PgturbohybridJsonbAddString(&state, "graph_widening_reason",
+								PgturbohybridGraphDenseWideningReasonName(pgturbohybrid_last_graph_widening_reason));
+	PgturbohybridJsonbAddString(&state, "graph_dense_budget_policy",
+								PgturbohybridGraphDenseBudgetPolicyNameExternal(pgturbohybrid_last_graph_dense_budget_policy));
+	PgturbohybridJsonbAddString(&state, "graph_rescore_band_policy",
+								PgturbohybridGraphRescoreBandPolicyNameExternal(pgturbohybrid_last_graph_rescore_band_policy));
+	result = pushJsonbValue(&state, WJB_END_OBJECT, NULL);
 
-	PG_RETURN_DATUM(DirectFunctionCall1(jsonb_in, CStringGetDatum(json.data)));
+	PG_RETURN_JSONB_P(JsonbValueToJsonb(result));
 }
 
 FUNCTION_PREFIX PG_FUNCTION_INFO_V1(pgturbohybrid_simd_capabilities);
 FUNCTION_PREFIX Datum
 pgturbohybrid_simd_capabilities(PG_FUNCTION_ARGS)
 {
-	StringInfoData json;
+	JsonbParseState *state = NULL;
+	JsonbValue *result;
+	const char *architecture;
+	bool		simdBuildDisabled;
+	bool		compileAvx2;
+	bool		compileAvx512Vnni;
+	bool		compileAvx512Vpopcntdq;
+	bool		compileAvx512Weighted;
+	bool		compileAvxvnni;
+	bool		compileArmDotprod;
+	bool		compileArmI8mm;
 
-	initStringInfo(&json);
-	appendStringInfo(&json,
-					 "{\"version\":1,"
-					 "\"architecture\":\"%s\","
-					 "\"simd_build_disabled\":%s,"
-					 "\"compile_avx2\":%s,"
-					 "\"compile_avx512vnni\":%s,"
-					 "\"compile_avx512vpopcntdq\":%s,"
-					 "\"compile_avx512_weighted\":%s,"
-					 "\"compile_avxvnni\":%s,"
-					 "\"compile_arm_dotprod\":%s,"
-					 "\"compile_arm_i8mm\":%s}",
 #if defined(__aarch64__) || defined(_M_ARM64)
-					 "arm64",
+	architecture = "arm64";
 #elif defined(__x86_64__) || defined(_M_X64) || defined(__i386) || defined(_M_IX86)
-					 "amd64",
+	architecture = "amd64";
 #else
-					 "unknown",
+	architecture = "unknown";
 #endif
 #if defined(PGTURBOHYBRID_DISABLE_SIMD)
-					 "true",
+	simdBuildDisabled = true;
 #else
-					 "false",
+	simdBuildDisabled = false;
 #endif
 #if !defined(PGTURBOHYBRID_DISABLE_SIMD) && (defined(__AVX2__) || (defined(__x86_64__) && (defined(__GNUC__) || defined(__clang__))))
-					 "true",
+	compileAvx2 = true;
 #else
-					 "false",
+	compileAvx2 = false;
 #endif
 #if !defined(PGTURBOHYBRID_DISABLE_SIMD) && (defined(__AVX512VNNI__) || (defined(__x86_64__) && (defined(__GNUC__) || defined(__clang__))))
-					 "true",
+	compileAvx512Vnni = true;
 #else
-					 "false",
+	compileAvx512Vnni = false;
 #endif
 #if !defined(PGTURBOHYBRID_DISABLE_SIMD) && (defined(__AVX512VPOPCNTDQ__) || (defined(__x86_64__) && (defined(__GNUC__) || defined(__clang__))))
-					 "true",
+	compileAvx512Vpopcntdq = true;
 #else
-					 "false",
+	compileAvx512Vpopcntdq = false;
 #endif
 #if !defined(PGTURBOHYBRID_DISABLE_SIMD) && defined(__x86_64__) && (defined(__GNUC__) || defined(__clang__))
-					 "true",
+	compileAvx512Weighted = true;
 #else
-					 "false",
+	compileAvx512Weighted = false;
 #endif
 #if !defined(PGTURBOHYBRID_DISABLE_SIMD) && (defined(__AVXVNNI__) || (defined(__x86_64__) && (defined(__GNUC__) || defined(__clang__))))
-					 "true",
+	compileAvxvnni = true;
 #else
-					 "false",
+	compileAvxvnni = false;
 #endif
 #if !defined(PGTURBOHYBRID_DISABLE_SIMD) && (defined(__aarch64__) || defined(_M_ARM64))
-					 "true",
-					 "true"
+	compileArmDotprod = true;
+	compileArmI8mm = true;
 #else
-					 "false",
-					 "false"
+	compileArmDotprod = false;
+	compileArmI8mm = false;
 #endif
-		);
 
-	PG_RETURN_DATUM(DirectFunctionCall1(jsonb_in, CStringGetDatum(json.data)));
+	pushJsonbValue(&state, WJB_BEGIN_OBJECT, NULL);
+	PgturbohybridJsonbAddInt64(&state, "version", 1);
+	PgturbohybridJsonbAddString(&state, "architecture", architecture);
+	PgturbohybridJsonbAddBool(&state, "simd_build_disabled", simdBuildDisabled);
+	PgturbohybridJsonbAddBool(&state, "compile_avx2", compileAvx2);
+	PgturbohybridJsonbAddBool(&state, "compile_avx512vnni", compileAvx512Vnni);
+	PgturbohybridJsonbAddBool(&state, "compile_avx512vpopcntdq", compileAvx512Vpopcntdq);
+	PgturbohybridJsonbAddBool(&state, "compile_avx512_weighted", compileAvx512Weighted);
+	PgturbohybridJsonbAddBool(&state, "compile_avxvnni", compileAvxvnni);
+	PgturbohybridJsonbAddBool(&state, "compile_arm_dotprod", compileArmDotprod);
+	PgturbohybridJsonbAddBool(&state, "compile_arm_i8mm", compileArmI8mm);
+	result = pushJsonbValue(&state, WJB_END_OBJECT, NULL);
+
+	PG_RETURN_JSONB_P(JsonbValueToJsonb(result));
 }
 
 #ifdef PGTURBOHYBRID_DEV_DIAGNOSTICS

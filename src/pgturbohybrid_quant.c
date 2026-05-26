@@ -382,6 +382,16 @@ PgturbohybridGraphInitialFrontierCapacity(uint32 nodeCount, int searchEf, int en
 	return capacity;
 }
 
+static Size
+PgturbohybridGraphArrayAllocSize(Size elemSize, Size count)
+{
+	if (elemSize != 0 && count > MaxAllocSize / elemSize)
+		ereport(ERROR,
+				(errcode(ERRCODE_PROGRAM_LIMIT_EXCEEDED),
+				 errmsg("pgturbohybrid graph array is too large")));
+	return elemSize * count;
+}
+
 static void
 PgturbohybridGraphFrontierHeapPushGrowing(PgturbohybridGraphFrontierItem **heap, int *count,
 							   int *capacity, int maxCapacity,
@@ -394,11 +404,16 @@ PgturbohybridGraphFrontierHeapPushGrowing(PgturbohybridGraphFrontierItem **heap,
 		if (*capacity >= maxCapacity)
 			elog(ERROR, "pgturbohybrid graph frontier capacity exceeded");
 
-		newCapacity = Max(8, *capacity * 2);
+		if (*capacity > PG_INT32_MAX / 2)
+			newCapacity = maxCapacity;
+		else
+			newCapacity = Max(8, *capacity + *capacity);
 		if (newCapacity < *capacity || newCapacity > maxCapacity)
 			newCapacity = maxCapacity;
 
-		*heap = repalloc(*heap, sizeof(PgturbohybridGraphFrontierItem) * newCapacity);
+		*heap = repalloc(*heap,
+						 PgturbohybridGraphArrayAllocSize(sizeof(PgturbohybridGraphFrontierItem),
+														  newCapacity));
 		*capacity = newCapacity;
 	}
 
@@ -488,8 +503,19 @@ PgturbohybridGraphEnsureNodeCapacity(PgturbohybridQuantBuildState *state)
 	if (state->nodeCount < state->nodeCapacity)
 		return;
 
-	state->nodeCapacity = state->nodeCapacity == 0 ? 1024 : state->nodeCapacity * 2;
-	state->nodes = repalloc(state->nodes, sizeof(PgturbohybridGraphBuildNode) * state->nodeCapacity);
+	if (state->nodeCapacity == 0)
+		state->nodeCapacity = 1024;
+	else
+	{
+		if (state->nodeCapacity > PG_UINT32_MAX / 2)
+			ereport(ERROR,
+					(errcode(ERRCODE_PROGRAM_LIMIT_EXCEEDED),
+					 errmsg("pgturbohybrid graph build node capacity is too large")));
+		state->nodeCapacity += state->nodeCapacity;
+	}
+	state->nodes = repalloc(state->nodes,
+							PgturbohybridGraphArrayAllocSize(sizeof(PgturbohybridGraphBuildNode),
+															 state->nodeCapacity));
 }
 
 static uint8 *

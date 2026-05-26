@@ -58,8 +58,6 @@ typedef enum PgturbohybridBm25HybridBoundMode
 } PgturbohybridBm25HybridBoundMode;
 
 static relopt_kind pgturbohybrid_relopt_kind;
-static ExecutorStart_hook_type prev_pgturbohybrid_ExecutorStart_hook = NULL;
-static ExecutorEnd_hook_type prev_pgturbohybrid_ExecutorEnd_hook = NULL;
 static List *pgturbohybrid_plannedstmt_stack = NIL;
 static PlannedStmt *pgturbohybrid_current_plannedstmt = NULL;
 
@@ -578,8 +576,6 @@ PgturbohybridAssignProfile(int newval, void *extra)
 	PgturbohybridApplyProfileDefaults();
 }
 
-static void PgturbohybridExecutorStartHook(QueryDesc *queryDesc, int eflags);
-static void PgturbohybridExecutorEndHook(QueryDesc *queryDesc);
 static void PgturbohybridXactCallback(XactEvent event, void *arg);
 static void PgturbohybridSubXactCallback(SubXactEvent event, SubTransactionId mySubid,
 								 SubTransactionId parentSubid, void *arg);
@@ -838,26 +834,26 @@ PgturbohybridClearPlannedStmtStack(void)
 	pgturbohybrid_current_plannedstmt = NULL;
 }
 
-static void
-PgturbohybridExecutorStartHook(QueryDesc *queryDesc, int eflags)
+void
+PgturbohybridAmExecutorStart(QueryDesc *queryDesc, int eflags)
 {
-	if (prev_pgturbohybrid_ExecutorStart_hook)
-		prev_pgturbohybrid_ExecutorStart_hook(queryDesc, eflags);
-	else
-		standard_ExecutorStart(queryDesc, eflags);
+	(void) eflags;
 
 	PgturbohybridPushPlannedStmt(queryDesc->plannedstmt);
 }
 
-static void
-PgturbohybridExecutorEndHook(QueryDesc *queryDesc)
+void
+PgturbohybridAmExecutorEnd(QueryDesc *queryDesc)
 {
-	PgturbohybridPopPlannedStmt();
+	(void) queryDesc;
 
-	if (prev_pgturbohybrid_ExecutorEnd_hook)
-		prev_pgturbohybrid_ExecutorEnd_hook(queryDesc);
-	else
-		standard_ExecutorEnd(queryDesc);
+	PgturbohybridPopPlannedStmt();
+}
+
+void
+PgturbohybridAmExecutorAbort(void)
+{
+	PgturbohybridClearPlannedStmtStack();
 }
 
 static void
@@ -2517,10 +2513,6 @@ void
 PgturbohybridInit(void)
 {
 	pgturbohybrid_relopt_kind = add_reloption_kind();
-	prev_pgturbohybrid_ExecutorStart_hook = ExecutorStart_hook;
-	ExecutorStart_hook = PgturbohybridExecutorStartHook;
-	prev_pgturbohybrid_ExecutorEnd_hook = ExecutorEnd_hook;
-	ExecutorEnd_hook = PgturbohybridExecutorEndHook;
 	RegisterXactCallback(PgturbohybridXactCallback, NULL);
 	RegisterSubXactCallback(PgturbohybridSubXactCallback, NULL);
 

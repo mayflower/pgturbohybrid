@@ -198,12 +198,13 @@ context that PostgreSQL does not pass directly to an access method callback:
   distance functions can reject scalar fallback when a query is not using the
   intended index-backed `ORDER BY` path.
 
-The hook chain is installed once during `_PG_init()`: graph scan wrapping is
-registered first, then the access-method planned-statement tracker wraps that
-hook. Executor end and transaction/subtransaction abort callbacks clear backend
-state. Scan wrapper state lives only for the current executor invocation; the
-planned-statement stack lives in `TopMemoryContext` and is popped or cleared on
-normal executor end and abort paths.
+One hook manager is installed during `_PG_init()` after graph and access-method
+initialization. It calls any previously installed executor hook exactly once,
+then records the current `PlannedStmt` and wraps eligible graph index scans.
+Executor end clears scan wrapper state, pops the planned-statement stack, and
+then delegates to the previous end hook or PostgreSQL's standard executor end.
+Transaction and subtransaction abort callbacks clear the planned-statement stack
+so failed statements do not leave backend-global state behind.
 
 ## Build Layout
 
