@@ -326,6 +326,74 @@ GetScanValue(IndexScanDesc scan)
 	return value;
 }
 
+static pg_noinline List *
+PgturbohybridGraphGetInitialScanItemsLocked(IndexScanDesc scan, Datum value,
+											bool flatScan)
+{
+	List	   *items;
+	bool		scanLockHeld = false;
+
+	/*
+	 * Get a shared lock. This allows vacuum to ensure no in-flight scans
+	 * before marking tuples as deleted.
+	 */
+	LockPage(scan->indexRelation, PGTURBOHYBRID_GRAPH_SCAN_LOCK, ShareLock);
+	scanLockHeld = true;
+
+	PG_TRY();
+	{
+		if (flatScan)
+			items = GetFlatScanItems(scan, value);
+		else
+			items = GetScanItems(scan, value);
+	}
+	PG_CATCH();
+	{
+		if (scanLockHeld)
+			UnlockPage(scan->indexRelation, PGTURBOHYBRID_GRAPH_SCAN_LOCK, ShareLock);
+		PG_RE_THROW();
+	}
+	PG_END_TRY();
+
+	UnlockPage(scan->indexRelation, PGTURBOHYBRID_GRAPH_SCAN_LOCK, ShareLock);
+
+	return items;
+}
+
+static pg_noinline List *
+PgturbohybridGraphResumeScanItemsLocked(IndexScanDesc scan)
+{
+	List	   *items;
+	bool		scanLockHeld = false;
+
+	/*
+	 * Locking ensures when neighbors are read, the elements they reference will
+	 * not be deleted (and replaced) during the iteration.
+	 *
+	 * Elements loaded into memory on previous iterations may have been deleted
+	 * (and replaced), so when reading neighbors, the element version must be
+	 * checked.
+	 */
+	LockPage(scan->indexRelation, PGTURBOHYBRID_GRAPH_SCAN_LOCK, ShareLock);
+	scanLockHeld = true;
+
+	PG_TRY();
+	{
+		items = ResumeScanItems(scan);
+	}
+	PG_CATCH();
+	{
+		if (scanLockHeld)
+			UnlockPage(scan->indexRelation, PGTURBOHYBRID_GRAPH_SCAN_LOCK, ShareLock);
+		PG_RE_THROW();
+	}
+	PG_END_TRY();
+
+	UnlockPage(scan->indexRelation, PGTURBOHYBRID_GRAPH_SCAN_LOCK, ShareLock);
+
+	return items;
+}
+
 #if defined(PGTURBOHYBRID_GRAPH_MEMORY)
 /*
  * Show memory usage
@@ -512,7 +580,6 @@ pgturbohybrid_graph_get_tuple(IndexScanDesc scan, ScanDirection dir)
 	if (so->first)
 	{
 		Datum		value;
-		bool		scanLockHeld = false;
 
 		/* Count index scan for stats */
 		pgstat_count_index_scan(scan->indexRelation);
@@ -537,31 +604,8 @@ pgturbohybrid_graph_get_tuple(IndexScanDesc scan, ScanDirection dir)
 		else if (!so->pgturbohybridGraphScan)
 			PgturbohybridGraphRecordNonGraphScanStats();
 
-		/*
-		 * Get a shared lock. This allows vacuum to ensure no in-flight scans
-		 * before marking tuples as deleted.
-		 */
-		LockPage(scan->indexRelation, PGTURBOHYBRID_GRAPH_SCAN_LOCK, ShareLock);
-		scanLockHeld = true;
-
-		PG_TRY();
-		{
-			if (so->pgturbohybridFlatScan)
-				so->w = GetFlatScanItems(scan, value);
-			else
-				so->w = GetScanItems(scan, value);
-		}
-		PG_CATCH();
-		{
-			if (scanLockHeld)
-				UnlockPage(scan->indexRelation, PGTURBOHYBRID_GRAPH_SCAN_LOCK, ShareLock);
-			PG_RE_THROW();
-		}
-		PG_END_TRY();
-
-		/* Release shared lock */
-		UnlockPage(scan->indexRelation, PGTURBOHYBRID_GRAPH_SCAN_LOCK, ShareLock);
-		scanLockHeld = false;
+		so->w = PgturbohybridGraphGetInitialScanItemsLocked(scan, value,
+															so->pgturbohybridFlatScan);
 
 		so->first = false;
 
@@ -600,34 +644,7 @@ pgturbohybrid_graph_get_tuple(IndexScanDesc scan, ScanDirection dir)
 			}
 			else
 			{
-				bool		scanLockHeld = false;
-
-				/*
-				 * Locking ensures when neighbors are read, the elements they
-				 * reference will not be deleted (and replaced) during the
-				 * iteration.
-				 *
-				 * Elements loaded into memory on previous iterations may have
-				 * been deleted (and replaced), so when reading neighbors, the
-				 * element version must be checked.
-				 */
-				LockPage(scan->indexRelation, PGTURBOHYBRID_GRAPH_SCAN_LOCK, ShareLock);
-				scanLockHeld = true;
-
-				PG_TRY();
-				{
-					so->w = ResumeScanItems(scan);
-				}
-				PG_CATCH();
-				{
-					if (scanLockHeld)
-						UnlockPage(scan->indexRelation, PGTURBOHYBRID_GRAPH_SCAN_LOCK, ShareLock);
-					PG_RE_THROW();
-				}
-				PG_END_TRY();
-
-				UnlockPage(scan->indexRelation, PGTURBOHYBRID_GRAPH_SCAN_LOCK, ShareLock);
-				scanLockHeld = false;
+				so->w = PgturbohybridGraphResumeScanItemsLocked(scan);
 
 #if defined(PGTURBOHYBRID_GRAPH_MEMORY)
 				ShowMemoryUsage(so);
