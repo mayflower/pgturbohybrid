@@ -1,6 +1,18 @@
 {
   "methods": [
     {
+      "name": "postgres_sql_rrf_halfvec",
+      "layer": "reference",
+      "kind": "postgres_sql",
+      "description": "Postgres GIN FTS plus pgvector halfvec HNSW over 3072-dimensional embeddings, fused with SQL-level reciprocal rank fusion."
+    },
+    {
+      "name": "pgvector_halfvec_dense_only",
+      "layer": "reference",
+      "kind": "postgres_sql",
+      "description": "Dense-only pgvector halfvec HNSW reference for 3072-dimensional embeddings."
+    },
+    {
       "name": "pgturbohybrid",
       "layer": "systems",
       "kind": "postgres_index_am",

@@ -11,6 +11,14 @@
 
 static PgturbohybridGraphNativeCache *pgturbohybridGraphCacheList = NULL;
 
+/*
+ * The native graph cache is intentionally a small/medium-index accelerator.
+ * Large exact-free 4-bit indexes can still have very large code arenas
+ * (1M x 3072 dims => 1.5GB), which exceeds PostgreSQL's single-allocation
+ * limit and is the wrong thing to pin in backend cache memory anyway.
+ */
+#define PGTURBOHYBRID_GRAPH_NATIVE_CACHE_MAX_BYTES ((Size) 512 * 1024 * 1024)
+
 static int
 PgturbohybridGraphPayloadRefCompare(const void *a, const void *b)
 {
@@ -51,21 +59,90 @@ PgturbohybridGraphShouldCacheExactVectors(Relation index, PgturbohybridGraphMeta
 	return totalBytes <= PGTURBOHYBRID_GRAPH_EXACT_CACHE_AUTO_MAX_BYTES;
 }
 
+static bool
+PgturbohybridGraphArenaBytes(uint32 count, Size itemBytes, Size *totalBytes)
+{
+	if (totalBytes != NULL)
+		*totalBytes = 0;
+	if (count == 0 || itemBytes == 0)
+		return true;
+	if ((Size) count > SIZE_MAX / itemBytes)
+		return false;
+	if (totalBytes != NULL)
+		*totalBytes = (Size) count * itemBytes;
+	return AllocSizeIsValid((Size) count * itemBytes);
+}
+
+static bool
+PgturbohybridGraphShouldUseNativeCache(PgturbohybridGraphMetaPageData *meta, bool cacheExactVectors)
+{
+	Size		totalBytes = sizeof(PgturbohybridGraphNativeCache);
+	Size		bytes;
+	Size		baseNeighborsPerNode;
+
+	if (!PgturbohybridGraphArenaBytes(meta->tqNodeCount,
+									  sizeof(PgturbohybridGraphScanNode), &bytes))
+		return false;
+	totalBytes += bytes;
+	if (PgturbohybridGraphArenaBytes(meta->tqNodeCount,
+									 meta->tqCodeBytes, &bytes) &&
+		bytes <= PGTURBOHYBRID_GRAPH_NATIVE_CACHE_MAX_BYTES)
+		totalBytes += bytes;
+	if (PgturbohybridGraphArenaBytes(meta->tqNodeCount,
+									 meta->tqPayloadBytes, &bytes) &&
+		bytes <= PGTURBOHYBRID_GRAPH_NATIVE_CACHE_MAX_BYTES)
+		totalBytes += bytes;
+	if (cacheExactVectors && meta->dimensions > 0)
+	{
+		if (PgturbohybridGraphArenaBytes(meta->tqNodeCount,
+										 PGTURBOHYBRID_VECTOR_SIZE(meta->dimensions),
+										 &bytes) &&
+			bytes <= PGTURBOHYBRID_GRAPH_EXACT_CACHE_AUTO_MAX_BYTES)
+			totalBytes += bytes;
+	}
+	if (!PgturbohybridGraphArenaBytes(PgturbohybridGraphAdjRecordCount(meta),
+									  sizeof(uint32 *), &bytes))
+		return false;
+	totalBytes += bytes;
+	if (!PgturbohybridGraphArenaBytes(PgturbohybridGraphAdjRecordCount(meta),
+									  sizeof(uint16), &bytes))
+		return false;
+	totalBytes += bytes;
+	baseNeighborsPerNode = (Size) PgturbohybridGraphLevelM(meta->m, 0) * sizeof(uint32);
+	if (!PgturbohybridGraphArenaBytes(meta->tqNodeCount,
+									  baseNeighborsPerNode, &bytes))
+		return false;
+	totalBytes += bytes;
+
+	return totalBytes <= PGTURBOHYBRID_GRAPH_NATIVE_CACHE_MAX_BYTES;
+}
+
 static void
 PgturbohybridGraphInitScanStorageUncached(PgturbohybridGraphMetaPageData *meta, PgturbohybridGraphScanStorage *storage,
 							   bool cacheExactVectors)
 {
+	Size		arenaBytes;
+
 	memset(storage, 0, sizeof(PgturbohybridGraphScanStorage));
 	storage->ctx = CurrentMemoryContext;
 	storage->nodes = palloc0(sizeof(PgturbohybridGraphScanNode) * meta->tqNodeCount);
-	if (meta->tqNodeCount > 0 && meta->tqCodeBytes > 0)
-		storage->codeArena = palloc0((Size) meta->tqNodeCount * meta->tqCodeBytes);
-	if (meta->tqNodeCount > 0 && meta->tqPayloadBytes > 0)
-		storage->payloadArena = palloc0((Size) meta->tqNodeCount * meta->tqPayloadBytes);
+	if (meta->tqNodeCount > 0 && meta->tqCodeBytes > 0 &&
+		PgturbohybridGraphArenaBytes(meta->tqNodeCount, meta->tqCodeBytes,
+									 &arenaBytes) &&
+		arenaBytes <= PGTURBOHYBRID_GRAPH_NATIVE_CACHE_MAX_BYTES)
+		storage->codeArena = palloc0(arenaBytes);
+	if (meta->tqNodeCount > 0 && meta->tqPayloadBytes > 0 &&
+		PgturbohybridGraphArenaBytes(meta->tqNodeCount, meta->tqPayloadBytes,
+									 &arenaBytes) &&
+		arenaBytes <= PGTURBOHYBRID_GRAPH_NATIVE_CACHE_MAX_BYTES)
+		storage->payloadArena = palloc0(arenaBytes);
 	if (cacheExactVectors && meta->tqNodeCount > 0 && meta->dimensions > 0)
 	{
 		storage->exactBytes = PGTURBOHYBRID_VECTOR_SIZE(meta->dimensions);
-		storage->exactArena = palloc0((Size) meta->tqNodeCount * storage->exactBytes);
+		if (PgturbohybridGraphArenaBytes(meta->tqNodeCount, storage->exactBytes,
+										 &arenaBytes) &&
+			arenaBytes <= PGTURBOHYBRID_GRAPH_EXACT_CACHE_AUTO_MAX_BYTES)
+			storage->exactArena = palloc0(arenaBytes);
 	}
 	storage->levelCount = PgturbohybridGraphLevelCapacity(meta->m);
 	storage->neighbors = palloc0(sizeof(uint32 *) * PgturbohybridGraphAdjRecordCount(meta));
@@ -101,7 +178,7 @@ PgturbohybridGraphLoadCodePage(Relation index, PgturbohybridGraphScanOpaque so, 
 	if (nodeId >= meta->tqNodeCount || !BlockNumberIsValid(meta->tqCodeStartBlkno))
 		return false;
 
-	if (storage->cached)
+	if (storage->cached && storage->nodes[nodeId].loaded)
 		return storage->nodes[nodeId].loaded;
 
 	pageNo = nodeId / storage->codeTuplesPerPage;
@@ -171,16 +248,27 @@ retry:
 				node->codeNorm = tuple->correction;
 				node->ecCorrection = PgturbohybridGraphTupleEcCorrection(tuple, tqWeighted);
 				node->flags = tuple->flags;
-				if (meta->tqPayloadBytes > 0 && storage->payloadArena != NULL)
+				if (meta->tqPayloadBytes > 0)
 				{
-					node->payloads = (int32 *) (storage->payloadArena +
-												((Size) tuple->nodeId * meta->tqPayloadBytes));
+					if (storage->payloadArena != NULL)
+						node->payloads = (int32 *) (storage->payloadArena +
+													((Size) tuple->nodeId * meta->tqPayloadBytes));
+					else if (node->payloads == NULL)
+						node->payloads = (int32 *) MemoryContextAlloc(storage->ctx,
+																	  meta->tqPayloadBytes);
 					memcpy(node->payloads, PgturbohybridGraphTuplePayloads(tuple, tqWeighted),
 						   meta->tqPayloadBytes);
 				}
-				node->code = storage->codeArena + ((Size) tuple->nodeId * meta->tqCodeBytes);
-				memcpy(node->code, PgturbohybridGraphTupleCode(tuple, meta->tqPayloadBytes, tqWeighted),
-					   meta->tqCodeBytes);
+				if (meta->tqCodeBytes > 0)
+				{
+					if (storage->codeArena != NULL)
+						node->code = storage->codeArena + ((Size) tuple->nodeId * meta->tqCodeBytes);
+					else if (node->code == NULL)
+						node->code = (uint8 *) MemoryContextAlloc(storage->ctx,
+																  meta->tqCodeBytes);
+					memcpy(node->code, PgturbohybridGraphTupleCode(tuple, meta->tqPayloadBytes, tqWeighted),
+						   meta->tqCodeBytes);
+				}
 				node->loaded = true;
 			}
 		}
@@ -534,9 +622,12 @@ PgturbohybridGraphBuildCache(Relation index, PgturbohybridGraphMetaPageData *met
 		cache->storage.visitGeneration = palloc0(sizeof(uint32));
 	}
 
-	for (uint32 nodeId = 0; nodeId < meta->tqNodeCount;
-		 nodeId += cache->storage.codeTuplesPerPage)
-		(void) PgturbohybridGraphLoadCodePage(index, NULL, meta, &cache->storage, nodeId);
+	if (cache->storage.codeArena != NULL)
+	{
+		for (uint32 nodeId = 0; nodeId < meta->tqNodeCount;
+			 nodeId += cache->storage.codeTuplesPerPage)
+			(void) PgturbohybridGraphLoadCodePage(index, NULL, meta, &cache->storage, nodeId);
+	}
 
 	PgturbohybridGraphBuildPayloadRefs(meta, &cache->storage);
 
@@ -559,6 +650,13 @@ PgturbohybridGraphInitScanStorage(Relation index, PgturbohybridGraphMetaPageData
 					   PgturbohybridGraphScanStorage *storage)
 {
 	PgturbohybridGraphNativeCache *cache;
+	bool		cacheExactVectors = PgturbohybridGraphShouldCacheExactVectors(index, meta);
+
+	if (!PgturbohybridGraphShouldUseNativeCache(meta, cacheExactVectors))
+	{
+		PgturbohybridGraphInitScanStorageUncached(meta, storage, cacheExactVectors);
+		return;
+	}
 
 	cache = PgturbohybridGraphFindCache(index, meta);
 	if (cache == NULL)
@@ -573,6 +671,13 @@ PgturbohybridGraphInitInsertStorage(Relation index, PgturbohybridGraphMetaPageDa
 						 PgturbohybridGraphScanStorage *storage)
 {
 	PgturbohybridGraphNativeCache *cache;
+	bool		cacheExactVectors = PgturbohybridGraphShouldCacheExactVectors(index, meta);
+
+	if (!PgturbohybridGraphShouldUseNativeCache(meta, cacheExactVectors))
+	{
+		PgturbohybridGraphInitScanStorageUncached(meta, storage, cacheExactVectors);
+		return NULL;
+	}
 
 	cache = PgturbohybridGraphFindCache(index, meta);
 	if (cache == NULL)

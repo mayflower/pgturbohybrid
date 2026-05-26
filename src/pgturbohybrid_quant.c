@@ -40,6 +40,12 @@
 static int	PgturbohybridGraphResultCompare(const void *a, const void *b);
 static bool PgturbohybridGraphEntryAlreadySelected(PgturbohybridGraphFrontierItem *entries, int entryCount,
 										uint32 nodeId);
+static void PgturbohybridGraphEncodeBuildNode(PgturbohybridQuantBuildState *state,
+								 PgturbohybridGraphBuildNode *node,
+								 Vector *vector);
+static void PgturbohybridGraphStreamFitVector(PgturbohybridQuantBuildState *state,
+								Vector *vector);
+static void PgturbohybridGraphFinishStreamingFit(PgturbohybridQuantBuildState *state);
 
 
 static bool
@@ -54,10 +60,27 @@ PgturbohybridGraphBuildVectorsEqual(PgturbohybridQuantBuildState *state, uint32 
 
 	leftVector = state->nodes[left].vector;
 	rightVector = state->nodes[right].vector;
-	if (leftVector == rightVector)
+	if (leftVector == rightVector && leftVector != NULL)
 		return true;
-	if (leftVector == NULL || rightVector == NULL ||
-		leftVector->dim != rightVector->dim)
+	if (leftVector == NULL || rightVector == NULL)
+	{
+		Size		codeBytes;
+
+		if (state->dimensions <= 0 ||
+			state->nodes[left].code == NULL ||
+			state->nodes[right].code == NULL)
+			return false;
+
+		codeBytes = PgturbohybridGraphCodeBytesForBits(state->dimensions,
+											 state->tqBits);
+		return state->nodes[left].scale == state->nodes[right].scale &&
+			state->nodes[left].norm == state->nodes[right].norm &&
+			state->nodes[left].correction == state->nodes[right].correction &&
+			state->nodes[left].ecCorrection == state->nodes[right].ecCorrection &&
+			memcmp(state->nodes[left].code, state->nodes[right].code,
+				   codeBytes) == 0;
+	}
+	if (leftVector->dim != rightVector->dim)
 		return false;
 
 	vectorSize = PGTURBOHYBRID_VECTOR_SIZE(leftVector->dim);
@@ -77,6 +100,21 @@ PgturbohybridGraphBuildVectorHash(Vector *vector)
 		hash *= UINT64CONST(1099511628211);
 	}
 	return hash;
+}
+
+static bool
+PgturbohybridGraphCanBuildCodeOnly(PgturbohybridQuantBuildState *state)
+{
+	TqScoreMode mode = (TqScoreMode) state->scoreMode;
+
+	if (state->tqExactStorage || state->buildExactDistances)
+		return false;
+	if (state->tqBits != 1 && state->tqBits != 2 &&
+		state->tqBits != PGTURBOHYBRID_DEFAULT_BITS)
+		return false;
+	return mode == PGTURBOHYBRID_SCORE_L2 ||
+		mode == PGTURBOHYBRID_SCORE_COSINE ||
+		mode == PGTURBOHYBRID_SCORE_IP;
 }
 
 
@@ -454,6 +492,53 @@ PgturbohybridGraphEnsureNodeCapacity(PgturbohybridQuantBuildState *state)
 	state->nodes = repalloc(state->nodes, sizeof(PgturbohybridGraphBuildNode) * state->nodeCapacity);
 }
 
+static uint8 *
+PgturbohybridGraphAllocBuildCode(PgturbohybridQuantBuildState *state, int dimensions)
+{
+	return palloc0(PgturbohybridGraphCodeBytesForBits(dimensions,
+													  state->tqBits));
+}
+
+static void
+PgturbohybridGraphAllocateBuildNeighbors(PgturbohybridQuantBuildState *state,
+							   PgturbohybridGraphBuildNode *node)
+{
+	int			levelCount = node->level + 1;
+	Size		pointerBytes = MAXALIGN(sizeof(uint32 *) * levelCount);
+	Size		distancePointerBytes = MAXALIGN(sizeof(double *) * levelCount);
+	Size		countBytes = MAXALIGN(sizeof(int) * levelCount);
+	Size		slotBytes = 0;
+	Size		distanceSlotBytes = 0;
+	char	   *storage;
+	char	   *cursor;
+	char	   *distanceCursor;
+
+	for (int i = 0; i <= node->level; i++)
+	{
+		slotBytes += sizeof(uint32) * (PgturbohybridGraphLevelM(state->m, i) + 1);
+		distanceSlotBytes += sizeof(double) * (PgturbohybridGraphLevelM(state->m, i) + 1);
+	}
+	slotBytes = MAXALIGN(slotBytes);
+	distanceSlotBytes = MAXALIGN(distanceSlotBytes);
+
+	storage = palloc0(pointerBytes + distancePointerBytes + countBytes +
+					  slotBytes + distanceSlotBytes);
+	node->neighbors = (uint32 **) storage;
+	node->neighborDistances = (double **) (storage + pointerBytes);
+	node->neighborCounts = (int *) (storage + pointerBytes + distancePointerBytes);
+	cursor = storage + pointerBytes + distancePointerBytes + countBytes;
+	distanceCursor = cursor + slotBytes;
+	for (int i = 0; i <= node->level; i++)
+	{
+		int			levelSlots = PgturbohybridGraphLevelM(state->m, i) + 1;
+
+		node->neighbors[i] = (uint32 *) cursor;
+		node->neighborDistances[i] = (double *) distanceCursor;
+		cursor += sizeof(uint32) * levelSlots;
+		distanceCursor += sizeof(double) * levelSlots;
+	}
+}
+
 static void
 PgturbohybridGraphAppendBuildNode(PgturbohybridQuantBuildState *state, ItemPointer tid, Datum value,
 					   Datum *values, bool *isnull)
@@ -481,6 +566,7 @@ PgturbohybridGraphAppendBuildNode(PgturbohybridQuantBuildState *state, ItemPoint
 	{
 		prev = &state->nodes[state->nodeCount - 1];
 		duplicatePrevious =
+			!state->buildCodeOnly &&
 			prev->vectorHash == vectorHash &&
 			prev->vector != NULL &&
 			prev->vector->dim == vector->dim &&
@@ -497,9 +583,14 @@ PgturbohybridGraphAppendBuildNode(PgturbohybridQuantBuildState *state, ItemPoint
 	}
 	else
 	{
-		node->vector = palloc(vectorSize);
-		memcpy(node->vector, vector, vectorSize);
-		node->code = palloc0(PgturbohybridGraphCodeBytesForBits(vector->dim, state->tqBits));
+		if (state->buildCodeOnly)
+			node->vector = NULL;
+		else
+		{
+			node->vector = palloc(vectorSize);
+			memcpy(node->vector, vector, vectorSize);
+		}
+		node->code = PgturbohybridGraphAllocBuildCode(state, vector->dim);
 	}
 	if (state->payloadCount > 0)
 	{
@@ -511,11 +602,11 @@ PgturbohybridGraphAppendBuildNode(PgturbohybridQuantBuildState *state, ItemPoint
 	node->norm = PgturbohybridGraphVectorNorm(vector);
 	node->flags = 0;
 	node->heaptid = *tid;
-	node->neighbors = palloc0(sizeof(uint32 *) * (level + 1));
-	node->neighborCounts = palloc0(sizeof(int) * (level + 1));
-	for (int i = 0; i <= level; i++)
-		node->neighbors[i] = palloc0(sizeof(uint32) * (PgturbohybridGraphLevelM(state->m, i) + 1));
+	PgturbohybridGraphAllocateBuildNeighbors(state, node);
 	state->maxLevel = Max(state->maxLevel, level);
+
+	if (state->buildEncodeOnAppend)
+		PgturbohybridGraphEncodeBuildNode(state, node, vector);
 }
 
 static void
@@ -525,6 +616,7 @@ PgturbohybridGraphBuildCallback(Relation index, ItemPointer tid, Datum *values,
 	PgturbohybridQuantBuildState *state = (PgturbohybridQuantBuildState *) opaque;
 	MemoryContext oldCtx;
 	Datum		value;
+	bool		formed;
 
 	(void) index;
 	(void) tupleIsAlive;
@@ -534,11 +626,30 @@ PgturbohybridGraphBuildCallback(Relation index, ItemPointer tid, Datum *values,
 	if (isnull[0])
 		return;
 
-	oldCtx = MemoryContextSwitchTo(state->ctx);
-	if (PgturbohybridGraphFormIndexValue(&value, values, isnull, state->typeInfo, &state->support))
+	oldCtx = CurrentMemoryContext;
+	if (state->buildTupleCtx == NULL)
+		state->buildTupleCtx = AllocSetContextCreate(state->ctx,
+													 "pgturbohybrid graph build tuple context",
+													 ALLOCSET_DEFAULT_SIZES);
+	MemoryContextReset(state->buildTupleCtx);
+	MemoryContextSwitchTo(state->buildTupleCtx);
+	formed = PgturbohybridGraphFormIndexValue(&value, values, isnull,
+											   state->typeInfo, &state->support);
+	if (formed)
 	{
-		PgturbohybridGraphAppendBuildNode(state, tid, value, values, isnull);
-		pgstat_progress_update_param(PROGRESS_CREATEIDX_TUPLES_DONE, state->nodeCount);
+		Vector	   *vector = (Vector *) DatumGetPointer(value);
+
+		MemoryContextSwitchTo(state->ctx);
+		if (state->buildFitPass)
+		{
+			PgturbohybridGraphStreamFitVector(state, vector);
+			pgstat_progress_update_param(PROGRESS_CREATEIDX_TUPLES_DONE, state->fitCount);
+		}
+		else
+		{
+			PgturbohybridGraphAppendBuildNode(state, tid, value, values, isnull);
+			pgstat_progress_update_param(PROGRESS_CREATEIDX_TUPLES_DONE, state->nodeCount);
+		}
 	}
 	MemoryContextSwitchTo(oldCtx);
 }
@@ -590,6 +701,188 @@ static double
 PgturbohybridGraphPhi(double x)
 {
 	return 0.5 * (1.0 + erf(x / 1.41421356237309504880));
+}
+
+static void
+PgturbohybridGraphEnsureStreamingFit(PgturbohybridQuantBuildState *state, Vector *vector)
+{
+	if (state->dimensions == 0)
+		state->dimensions = vector->dim;
+	else if (state->dimensions != vector->dim)
+		ereport(ERROR,
+				(errcode(ERRCODE_DATA_EXCEPTION),
+				 errmsg("different vector dimensions are not supported in the same pgturbohybrid graph")));
+
+	if (state->fitBuffer != NULL)
+		return;
+
+	state->fitBuffer = MemoryContextAlloc(state->ctx, sizeof(double) * state->dimensions);
+	if (state->tqQuantileFit)
+	{
+		double		pOuter;
+		double		qLoTarget;
+		double		qHiTarget;
+
+		state->fitCOuter = PgturbohybridGraphCodebookOuter(state->tqBits);
+		state->fitMinQuantileWidth = 1e-3;
+		pOuter = PgturbohybridGraphPhi(state->fitCOuter);
+		qLoTarget = 1.0 - pOuter;
+		qHiTarget = pOuter;
+		state->fitQLo = MemoryContextAllocZero(state->ctx,
+											   sizeof(TqPSquareState) * state->dimensions);
+		state->fitQHi = MemoryContextAllocZero(state->ctx,
+											   sizeof(TqPSquareState) * state->dimensions);
+		for (int dim = 0; dim < state->dimensions; dim++)
+		{
+			TqPSquareInit(&state->fitQLo[dim], qLoTarget);
+			TqPSquareInit(&state->fitQHi[dim], qHiTarget);
+		}
+	}
+	else
+	{
+		state->fitMean = MemoryContextAllocZero(state->ctx,
+											   sizeof(double) * state->dimensions);
+		state->fitM2 = MemoryContextAllocZero(state->ctx,
+											 sizeof(double) * state->dimensions);
+	}
+}
+
+static void
+PgturbohybridGraphStreamFitVector(PgturbohybridQuantBuildState *state, Vector *vector)
+{
+	double		priorN;
+	double		newN;
+
+	if (vector == NULL ||
+		(state->scoreMode != PGTURBOHYBRID_SCORE_COSINE &&
+		 state->scoreMode != PGTURBOHYBRID_SCORE_IP))
+		return;
+
+	PgturbohybridGraphEnsureStreamingFit(state, vector);
+	TqPreprocessVector(vector, state->fitBuffer);
+
+	if (state->tqQuantileFit)
+	{
+		for (int dim = 0; dim < state->dimensions; dim++)
+		{
+			TqPSquarePush(&state->fitQLo[dim], state->fitBuffer[dim]);
+			TqPSquarePush(&state->fitQHi[dim], state->fitBuffer[dim]);
+		}
+		state->fitCount++;
+		return;
+	}
+
+	priorN = (double) state->fitCount;
+	newN = priorN + 1.0;
+	for (int dim = 0; dim < state->dimensions; dim++)
+	{
+		double		value = state->fitBuffer[dim];
+		double		delta = value - state->fitMean[dim];
+
+		state->fitMean[dim] += delta / newN;
+		state->fitM2[dim] += delta * (value - state->fitMean[dim]);
+	}
+	state->fitCount++;
+}
+
+static void
+PgturbohybridGraphFinishCorrectionFit(PgturbohybridQuantBuildState *state)
+{
+	/*
+	 * cache mm_const = Σ ecShift² so build-time TQ+ scoring
+	 * doesn't recompute it per neighbor-distance call.
+	 */
+	state->mmConst = PgturbohybridGraphMmConstScalar(state->ecShift, state->dimensions);
+
+	if (state->tqWeighted)
+	{
+		double		dPrimeSqMax = 0.0;
+		double		weightScale;
+
+		for (int dim = 0; dim < state->dimensions; dim++)
+		{
+			double		s = (double) state->ecScale[dim];
+
+			if (fabs(s) > FLT_EPSILON)
+			{
+				double		w = 1.0 / (s * s);
+
+				if (w > dPrimeSqMax)
+					dPrimeSqMax = w;
+			}
+		}
+
+		/*
+		 * Quantize per-coord D'² to i16 so the AVX2 SIMD
+		 * weighted-dot kernel can use _mm256_madd_epi16 directly.
+		 * weight_scale = (INT16_MAX - 1) / max(D'²) keeps the largest
+		 * weight at INT16_MAX-1; relative quantization error on the
+		 * smallest non-zero weight is (min/max) · 1/32766 — well below
+		 * the 4-bit code precision floor.
+		 */
+		weightScale = dPrimeSqMax > FLT_EPSILON
+			? ((double) INT16_MAX - 1.0) / dPrimeSqMax
+			: 1.0;
+		state->weightScale = (float) weightScale;
+		state->dPrimeSqI16 = MemoryContextAlloc(state->ctx,
+												 sizeof(int16) * state->dimensions);
+		for (int dim = 0; dim < state->dimensions; dim++)
+		{
+			double		s = (double) state->ecScale[dim];
+			double		w = (fabs(s) > FLT_EPSILON) ? 1.0 / (s * s) : 0.0;
+			double		q = round(w * weightScale);
+
+			if (q < 0.0)
+				q = 0.0;
+			if (q > (double) (INT16_MAX - 1))
+				q = (double) (INT16_MAX - 1);
+			state->dPrimeSqI16[dim] = (int16) q;
+		}
+
+		elog(DEBUG2, "pgturbohybrid TQ+ fit: dim=%d mm_const=%g max_dprime_sq=%g weight_scale=%g (fit=%s)",
+			 state->dimensions, state->mmConst, dPrimeSqMax, weightScale,
+			 state->tqQuantileFit ? "quantile" : "welford");
+	}
+}
+
+static void
+PgturbohybridGraphFinishStreamingFit(PgturbohybridQuantBuildState *state)
+{
+	if (state->fitCount == 0 || state->dimensions <= 0 ||
+		(state->scoreMode != PGTURBOHYBRID_SCORE_COSINE &&
+		 state->scoreMode != PGTURBOHYBRID_SCORE_IP))
+		return;
+
+	state->ecShift = MemoryContextAlloc(state->ctx, sizeof(float) * state->dimensions);
+	state->ecScale = MemoryContextAlloc(state->ctx, sizeof(float) * state->dimensions);
+	if (state->tqQuantileFit)
+	{
+		for (int dim = 0; dim < state->dimensions; dim++)
+		{
+			double		qLo = TqPSquareEstimate(&state->fitQLo[dim]);
+			double		qHi = TqPSquareEstimate(&state->fitQHi[dim]);
+			double		denom = qHi - qLo;
+
+			state->ecShift[dim] = (float) (-0.5 * (qLo + qHi));
+			state->ecScale[dim] = denom > state->fitMinQuantileWidth ?
+				(float) ((2.0 * state->fitCOuter) / denom) : 1.0f;
+		}
+	}
+	else
+	{
+		for (int dim = 0; dim < state->dimensions; dim++)
+		{
+			double		variance = state->fitCount > 1 ?
+				state->fitM2[dim] / ((double) state->fitCount - 1.0) : 0.0;
+			double		stddev = variance > 0 ? sqrt(variance) : 0.0;
+
+			state->ecShift[dim] = (float) -state->fitMean[dim];
+			state->ecScale[dim] = stddev > FLT_EPSILON ?
+				(float) (1.0 / stddev) : 1.0f;
+		}
+	}
+
+	PgturbohybridGraphFinishCorrectionFit(state);
 }
 
 /*
@@ -730,61 +1023,34 @@ PgturbohybridGraphFitCorrection(PgturbohybridQuantBuildState *state)
 
 post_fit:
 
-	/*
-	 * cache mm_const = Σ ecShift² so build-time TQ+ scoring
-	 * doesn't recompute it per neighbor-distance call.
-	 */
-	state->mmConst = PgturbohybridGraphMmConstScalar(state->ecShift, state->dimensions);
+	PgturbohybridGraphFinishCorrectionFit(state);
+}
 
+static void
+PgturbohybridGraphEncodeBuildNode(PgturbohybridQuantBuildState *state,
+							PgturbohybridGraphBuildNode *node,
+							Vector *vector)
+{
 	if (state->tqWeighted)
 	{
-		double		dPrimeSqMax = 0.0;
-		double		weightScale;
+		float		xm = 0.0f;
 
-		for (int dim = 0; dim < state->dimensions; dim++)
-		{
-			double		s = (double) state->ecScale[dim];
-
-			if (fabs(s) > FLT_EPSILON)
-			{
-				double		w = 1.0 / (s * s);
-
-				if (w > dPrimeSqMax)
-					dPrimeSqMax = w;
-			}
-		}
-
-		/*
-		 * Quantize per-coord D'² to i16 so the AVX2 SIMD
-		 * weighted-dot kernel can use _mm256_madd_epi16 directly.
-		 * weight_scale = (INT16_MAX - 1) / max(D'²) keeps the largest
-		 * weight at INT16_MAX-1; relative quantization error on the
-		 * smallest non-zero weight is (min/max) · 1/32766 — well below
-		 * the 4-bit code precision floor.
-		 */
-		weightScale = dPrimeSqMax > FLT_EPSILON
-			? ((double) INT16_MAX - 1.0) / dPrimeSqMax
-			: 1.0;
-		state->weightScale = (float) weightScale;
-		state->dPrimeSqI16 = MemoryContextAlloc(state->ctx,
-												 sizeof(int16) * state->dimensions);
-		for (int dim = 0; dim < state->dimensions; dim++)
-		{
-			double		s = (double) state->ecScale[dim];
-			double		w = (fabs(s) > FLT_EPSILON) ? 1.0 / (s * s) : 0.0;
-			double		q = round(w * weightScale);
-
-			if (q < 0.0)
-				q = 0.0;
-			if (q > (double) (INT16_MAX - 1))
-				q = (double) (INT16_MAX - 1);
-			state->dPrimeSqI16[dim] = (int16) q;
-		}
-
-		elog(DEBUG2, "pgturbohybrid TQ+ fit: dim=%d mm_const=%g max_dprime_sq=%g weight_scale=%g (fit=%s)",
-			 state->dimensions, state->mmConst, dPrimeSqMax, weightScale,
-			 state->tqQuantileFit ? "quantile" : "welford");
+		if (state->tqRenorm)
+			node->scale = PgturbohybridGraphEncodeVectorWithXmRenorm(state, vector,
+														  node->code, &xm);
+		else
+			node->scale = PgturbohybridGraphEncodeVectorWithXm(state, vector,
+												 node->code, &xm);
+		node->ecCorrection = xm;
 	}
+	else
+	{
+		node->scale = PgturbohybridGraphEncodeVector(state, vector, node->code);
+		node->ecCorrection = 0.0f;
+	}
+
+	node->correction = PgturbohybridGraphCodeNorm(node->code, state->dimensions,
+												 state->tqBits);
 }
 
 static void
@@ -810,25 +1076,7 @@ PgturbohybridGraphEncodeBuildNodes(PgturbohybridQuantBuildState *state)
 			continue;
 		}
 
-		if (state->tqWeighted)
-		{
-			float		xm = 0.0f;
-
-			if (state->tqRenorm)
-				node->scale = PgturbohybridGraphEncodeVectorWithXmRenorm(state, node->vector,
-															  node->code, &xm);
-			else
-				node->scale = PgturbohybridGraphEncodeVectorWithXm(state, node->vector,
-														 node->code, &xm);
-			node->ecCorrection = xm;
-		}
-		else
-		{
-			node->scale = PgturbohybridGraphEncodeVector(state, node->vector, node->code);
-			node->ecCorrection = 0.0f;
-		}
-
-		node->correction = PgturbohybridGraphCodeNorm(node->code, state->dimensions, state->tqBits);
+		PgturbohybridGraphEncodeBuildNode(state, node, node->vector);
 	}
 }
 
@@ -850,12 +1098,52 @@ PgturbohybridGraphHasNeighbor(PgturbohybridQuantBuildState *state, uint32 src, u
 }
 
 static int
+PgturbohybridGraphSelectNeighborsSimple(PgturbohybridQuantBuildState *state, uint32 src,
+							 PgturbohybridGraphFrontierItem *candidates,
+							 int candidateCount, int level, uint32 *selected)
+{
+	int			selectedCount = 0;
+	int			maxNeighbors = PgturbohybridGraphLevelM(state->m, level);
+
+	qsort(candidates, candidateCount, sizeof(PgturbohybridGraphFrontierItem),
+		  PgturbohybridGraphFrontierCompare);
+
+	for (int i = 0; i < candidateCount && selectedCount < maxNeighbors; i++)
+	{
+		uint32		candidate = candidates[i].nodeId;
+		bool		seen = false;
+
+		if (candidate == src)
+			continue;
+
+		for (int j = 0; j < selectedCount; j++)
+		{
+			if (selected[j] == candidate)
+			{
+				seen = true;
+				break;
+			}
+		}
+
+		if (!seen)
+			selected[selectedCount++] = candidate;
+	}
+
+	return selectedCount;
+}
+
+static int
 PgturbohybridGraphSelectNeighbors(PgturbohybridQuantBuildState *state, uint32 src,
 					   PgturbohybridGraphFrontierItem *candidates, int candidateCount,
 					   int level, uint32 *selected)
 {
 	int			selectedCount = 0;
 	int			maxNeighbors = PgturbohybridGraphLevelM(state->m, level);
+
+	if (state->buildFastEdges)
+		return PgturbohybridGraphSelectNeighborsSimple(state, src, candidates,
+													   candidateCount, level,
+													   selected);
 
 	qsort(candidates, candidateCount, sizeof(PgturbohybridGraphFrontierItem), PgturbohybridGraphFrontierCompare);
 
@@ -902,6 +1190,19 @@ PgturbohybridGraphSelectNeighbors(PgturbohybridQuantBuildState *state, uint32 sr
 	return selectedCount;
 }
 
+static double
+PgturbohybridGraphCandidateDistance(PgturbohybridGraphFrontierItem *candidates,
+						 int candidateCount, uint32 nodeId)
+{
+	for (int i = 0; i < candidateCount; i++)
+	{
+		if (candidates[i].nodeId == nodeId)
+			return candidates[i].distance;
+	}
+
+	return DBL_MAX;
+}
+
 static void
 PgturbohybridGraphPruneNeighbors(PgturbohybridQuantBuildState *state, uint32 src, int level)
 {
@@ -928,7 +1229,13 @@ PgturbohybridGraphPruneNeighbors(PgturbohybridQuantBuildState *state, uint32 src
 	}
 
 	selectedCount = PgturbohybridGraphSelectNeighbors(state, src, candidates, count, level, selected);
-	memcpy(node->neighbors[level], selected, sizeof(uint32) * selectedCount);
+	for (int i = 0; i < selectedCount; i++)
+	{
+		node->neighbors[level][i] = selected[i];
+		if (node->neighborDistances != NULL)
+			node->neighborDistances[level][i] =
+				PgturbohybridGraphCandidateDistance(candidates, count, selected[i]);
+	}
 	node->neighborCounts[level] = selectedCount;
 
 	pfree(candidates);
@@ -936,7 +1243,8 @@ PgturbohybridGraphPruneNeighbors(PgturbohybridQuantBuildState *state, uint32 src
 }
 
 static void
-PgturbohybridGraphAddNeighbor(PgturbohybridQuantBuildState *state, uint32 src, uint32 dst, int level)
+PgturbohybridGraphAddNeighbor(PgturbohybridQuantBuildState *state, uint32 src, uint32 dst,
+					int level, double distance)
 {
 	PgturbohybridGraphBuildNode *node = &state->nodes[src];
 	int			maxNeighbors = PgturbohybridGraphLevelM(state->m, level);
@@ -948,17 +1256,41 @@ PgturbohybridGraphAddNeighbor(PgturbohybridQuantBuildState *state, uint32 src, u
 
 	if (node->neighborCounts[level] < maxNeighbors)
 	{
-		node->neighbors[level][node->neighborCounts[level]++] = dst;
+		int			slot = node->neighborCounts[level]++;
+
+		node->neighbors[level][slot] = dst;
+		if (node->neighborDistances != NULL)
+			node->neighborDistances[level][slot] = distance;
+		return;
+	}
+
+	if (state->buildFastEdges && node->neighborDistances != NULL)
+	{
+		int			worst = 0;
+
+		for (int i = 1; i < node->neighborCounts[level]; i++)
+		{
+			if (node->neighborDistances[level][i] > node->neighborDistances[level][worst])
+				worst = i;
+		}
+
+		if (distance < node->neighborDistances[level][worst])
+		{
+			node->neighbors[level][worst] = dst;
+			node->neighborDistances[level][worst] = distance;
+		}
 		return;
 	}
 
 	node->neighbors[level][node->neighborCounts[level]++] = dst;
+	if (node->neighborDistances != NULL)
+		node->neighborDistances[level][node->neighborCounts[level] - 1] = distance;
 	PgturbohybridGraphPruneNeighbors(state, src, level);
 }
 
 static void
 PgturbohybridGraphAddNeighborIfRoom(PgturbohybridQuantBuildState *state, uint32 src, uint32 dst,
-						 int level)
+						 int level, double distance)
 {
 	PgturbohybridGraphBuildNode *node = &state->nodes[src];
 	int			maxNeighbors = PgturbohybridGraphLevelM(state->m, level);
@@ -969,7 +1301,10 @@ PgturbohybridGraphAddNeighborIfRoom(PgturbohybridQuantBuildState *state, uint32 
 		node->neighborCounts[level] >= maxNeighbors)
 		return;
 
-	node->neighbors[level][node->neighborCounts[level]++] = dst;
+	node->neighbors[level][node->neighborCounts[level]] = dst;
+	if (node->neighborDistances != NULL)
+		node->neighborDistances[level][node->neighborCounts[level]] = distance;
+	node->neighborCounts[level]++;
 }
 
 static uint32
@@ -997,8 +1332,12 @@ PgturbohybridGraphLinkAdjacentBuildNode(PgturbohybridQuantBuildState *state, uin
 		return;
 
 	node->neighbors[0][0] = prevId;
+	if (node->neighborDistances != NULL)
+		node->neighborDistances[0][0] =
+			PgturbohybridGraphBuildDistance(state, nodeId, prevId);
 	node->neighborCounts[0] = 1;
-	PgturbohybridGraphAddNeighborIfRoom(state, prevId, nodeId, 0);
+	PgturbohybridGraphAddNeighborIfRoom(state, prevId, nodeId, 0,
+							 PgturbohybridGraphBuildDistance(state, prevId, nodeId));
 }
 
 static PgturbohybridGraphFrontierItem
@@ -1197,11 +1536,20 @@ PgturbohybridGraphBuildEdges(PgturbohybridQuantBuildState *state)
 			selectedCount = PgturbohybridGraphSelectNeighbors(state, i, nearest, nearestCount,
 												  level, selected);
 
-			memcpy(state->nodes[i].neighbors[level], selected,
-				   sizeof(uint32) * selectedCount);
+			for (int j = 0; j < selectedCount; j++)
+			{
+				state->nodes[i].neighbors[level][j] = selected[j];
+				if (state->nodes[i].neighborDistances != NULL)
+					state->nodes[i].neighborDistances[level][j] =
+						PgturbohybridGraphCandidateDistance(nearest, nearestCount,
+															selected[j]);
+			}
 			state->nodes[i].neighborCounts[level] = selectedCount;
 			for (int j = 0; j < selectedCount; j++)
-				PgturbohybridGraphAddNeighbor(state, selected[j], i, level);
+				PgturbohybridGraphAddNeighbor(state, selected[j], i, level,
+											  PgturbohybridGraphCandidateDistance(nearest,
+																				  nearestCount,
+																				  selected[j]));
 
 			if (nearestCount > 0)
 			{
@@ -1715,11 +2063,12 @@ tqgraphbuild(Relation heap, Relation index, IndexInfo *indexInfo)
 	instr_time	totalStart;
 	instr_time	phaseStart;
 	int64		scanUs = 0;
-	int64		correctionUs;
-	int64		encodeUs;
+	int64		correctionUs = 0;
+	int64		encodeUs = 0;
 	int64		edgesUs;
 	int64		writeUs;
 	int64		walUs = 0;
+	bool		needsCorrectionFit;
 
 	memset(&state, 0, sizeof(state));
 	INSTR_TIME_SET_CURRENT(totalStart);
@@ -1750,33 +2099,55 @@ tqgraphbuild(Relation heap, Relation index, IndexInfo *indexInfo)
 	state.payloadBytes = PgturbohybridGraphPayloadBytes(state.payloadCount);
 	PgturbohybridGraphInitSupport(&state.support, index);
 	state.scoreMode = PgturbohybridGraphGetScoreMode(&state.support);
+	state.buildCodeOnly = PgturbohybridGraphCanBuildCodeOnly(&state);
+	state.buildFastEdges = state.buildCodeOnly;
+	needsCorrectionFit = state.scoreMode == PGTURBOHYBRID_SCORE_COSINE ||
+		state.scoreMode == PGTURBOHYBRID_SCORE_IP;
 	state.ctx = AllocSetContextCreate(CurrentMemoryContext,
 									  "pgturbohybrid native graph build context",
 									  ALLOCSET_DEFAULT_SIZES);
 	state.nodes = MemoryContextAllocZero(state.ctx, sizeof(PgturbohybridGraphBuildNode) * 1024);
 	state.nodeCapacity = 1024;
 
+	if (heap != NULL && state.buildCodeOnly && needsCorrectionFit)
+	{
+		PgturbohybridGraphDebugBuildPhaseStart(&state, "fit_correction_scan");
+		INSTR_TIME_SET_CURRENT(phaseStart);
+		state.buildFitPass = true;
+		(void) table_index_build_scan(heap, index, indexInfo,
+									  true, true, PgturbohybridGraphBuildCallback, &state, NULL);
+		PgturbohybridGraphFinishStreamingFit(&state);
+		state.buildFitPass = false;
+		correctionUs = PgturbohybridGraphElapsedUs(phaseStart);
+		PgturbohybridGraphDebugBuildPhaseDone(&state, "fit_correction_scan", phaseStart);
+	}
+
 	if (heap != NULL)
 	{
 		PgturbohybridGraphDebugBuildPhaseStart(&state, "scan");
 		INSTR_TIME_SET_CURRENT(phaseStart);
+		state.buildEncodeOnAppend = state.buildCodeOnly;
 		state.reltuples = table_index_build_scan(heap, index, indexInfo,
 												 true, true, PgturbohybridGraphBuildCallback, &state, NULL);
+		state.buildEncodeOnAppend = false;
 		scanUs = PgturbohybridGraphElapsedUs(phaseStart);
 		PgturbohybridGraphDebugBuildPhaseDone(&state, "scan", phaseStart);
 	}
 
-	PgturbohybridGraphDebugBuildPhaseStart(&state, "fit_correction");
-	INSTR_TIME_SET_CURRENT(phaseStart);
-	PgturbohybridGraphFitCorrection(&state);
-	correctionUs = PgturbohybridGraphElapsedUs(phaseStart);
-	PgturbohybridGraphDebugBuildPhaseDone(&state, "fit_correction", phaseStart);
+	if (!state.buildCodeOnly)
+	{
+		PgturbohybridGraphDebugBuildPhaseStart(&state, "fit_correction");
+		INSTR_TIME_SET_CURRENT(phaseStart);
+		PgturbohybridGraphFitCorrection(&state);
+		correctionUs = PgturbohybridGraphElapsedUs(phaseStart);
+		PgturbohybridGraphDebugBuildPhaseDone(&state, "fit_correction", phaseStart);
 
-	PgturbohybridGraphDebugBuildPhaseStart(&state, "encode");
-	INSTR_TIME_SET_CURRENT(phaseStart);
-	PgturbohybridGraphEncodeBuildNodes(&state);
-	encodeUs = PgturbohybridGraphElapsedUs(phaseStart);
-	PgturbohybridGraphDebugBuildPhaseDone(&state, "encode", phaseStart);
+		PgturbohybridGraphDebugBuildPhaseStart(&state, "encode");
+		INSTR_TIME_SET_CURRENT(phaseStart);
+		PgturbohybridGraphEncodeBuildNodes(&state);
+		encodeUs = PgturbohybridGraphElapsedUs(phaseStart);
+		PgturbohybridGraphDebugBuildPhaseDone(&state, "encode", phaseStart);
+	}
 
 	PgturbohybridGraphDebugBuildPhaseStart(&state, "build_edges");
 	INSTR_TIME_SET_CURRENT(phaseStart);

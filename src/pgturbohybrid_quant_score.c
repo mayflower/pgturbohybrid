@@ -3599,9 +3599,7 @@ PgturbohybridGraphBuildExactVectorDistance(PgturbohybridQuantBuildState *state, 
 	if (av == NULL || bv == NULL || av->dim != bv->dim)
 	{
 		state->buildDistanceFallback++;
-		return PgturbohybridGraphExactDistance(&state->support,
-								PointerGetDatum(av),
-								PointerGetDatum(bv));
+		return DBL_MAX;
 	}
 
 	state->buildDistanceExact++;

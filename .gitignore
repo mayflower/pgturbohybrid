@@ -31,6 +31,7 @@ Thumbs.db
 /benchmarks/**/*.md
 !/benchmarks/README.md
 !/benchmarks/dev/README.md
+!/benchmarks/dbpedia_openai3_large.md
 /perf-smoke-results.json
 
 # Build artifacts

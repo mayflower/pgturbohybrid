@@ -4,6 +4,7 @@
 #include "postgres.h"
 
 #include "pgturbohybrid.h"
+#include "pgturbohybrid_quant_psquare.h"
 
 #define PGTURBOHYBRID_GRAPH_CODE_TUPLE_TYPE		0x51
 #define PGTURBOHYBRID_GRAPH_ADJ_TUPLE_TYPE			0x52
@@ -132,6 +133,7 @@ typedef struct PgturbohybridGraphBuildNode
 	OffsetNumber exactOffno;
 	uint16		flags;
 	uint32	  **neighbors;
+	double	  **neighborDistances;
 	int		   *neighborCounts;
 } PgturbohybridGraphBuildNode;
 
@@ -144,6 +146,7 @@ typedef struct PgturbohybridQuantBuildState
 	const PgturbohybridGraphTypeInfo *typeInfo;
 	PgturbohybridGraphSupport support;
 	MemoryContext ctx;
+	MemoryContext buildTupleCtx;
 	PgturbohybridGraphBuildNode *nodes;
 	uint32		nodeCount;
 	uint32		nodeCapacity;
@@ -156,6 +159,10 @@ typedef struct PgturbohybridQuantBuildState
 	bool		tqRenorm;
 	bool		tqExactStorage;
 	bool		buildExactDistances;	/* short-circuit quantized fast paths during build */
+	bool		buildCodeOnly;	/* avoid retaining raw vectors during exact-free builds */
+	bool		buildFitPass;	/* table scan is only collecting correction statistics */
+	bool		buildEncodeOnAppend;	/* encode node immediately during collection scan */
+	bool		buildFastEdges; /* use bounded simple edge selection for code-only builds */
 	int			scoreMode;
 	int			maxLevel;
 	uint32		entryNodeId;
@@ -168,6 +175,14 @@ typedef struct PgturbohybridQuantBuildState
 	int16	   *dPrimeSqI16;	/* TQ+ per-coord weights, quantized to i16 (SIMD path) */
 	float		weightScale;	/* TQ+ quantization scale: D'² / max(D'²) · (INT16_MAX-1) */
 	double		mmConst;		/* TQ+ Σ ecShift[d]², cached at fit time */
+	TqPSquareState *fitQLo;
+	TqPSquareState *fitQHi;
+	double	   *fitMean;
+	double	   *fitM2;
+	double	   *fitBuffer;
+	uint64		fitCount;
+	double		fitCOuter;
+	double		fitMinQuantileWidth;
 	uint64		buildDistanceWeighted;
 	uint32	   *buildVisitedGeneration;
 	uint32		buildVisitGeneration;
