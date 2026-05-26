@@ -24,6 +24,8 @@
 #include "utils/float.h"
 #include "utils/fmgrprotos.h"
 #include "utils/guc.h"
+#include "utils/jsonb.h"
+#include "utils/numeric.h"
 #include "utils/rel.h"
 #include "utils/relcache.h"
 #include "utils/selfuncs.h"
@@ -43,6 +45,68 @@ static relopt_enum_elt_def pgturbohybrid_routing_relopt_options[] = {
 	{"flat", PGTURBOHYBRID_ROUTING_FLAT},
 	{NULL, 0}
 };
+
+static void
+PgturbohybridIndexStatsJsonbAddKey(JsonbParseState **state, const char *key)
+{
+	JsonbValue	value;
+
+	value.type = jbvString;
+	value.val.string.val = (char *) key;
+	value.val.string.len = strlen(key);
+	pushJsonbValue(state, WJB_KEY, &value);
+}
+
+static void
+PgturbohybridIndexStatsJsonbAddString(JsonbParseState **state, const char *key,
+							 const char *val)
+{
+	JsonbValue	value;
+
+	PgturbohybridIndexStatsJsonbAddKey(state, key);
+	value.type = jbvString;
+	value.val.string.val = (char *) val;
+	value.val.string.len = strlen(val);
+	pushJsonbValue(state, WJB_VALUE, &value);
+}
+
+static void
+PgturbohybridIndexStatsJsonbAddBool(JsonbParseState **state, const char *key,
+						   bool val)
+{
+	JsonbValue	value;
+
+	PgturbohybridIndexStatsJsonbAddKey(state, key);
+	value.type = jbvBool;
+	value.val.boolean = val;
+	pushJsonbValue(state, WJB_VALUE, &value);
+}
+
+static void
+PgturbohybridIndexStatsJsonbAddUInt32(JsonbParseState **state, const char *key,
+							 uint32 val)
+{
+	JsonbValue	value;
+
+	PgturbohybridIndexStatsJsonbAddKey(state, key);
+	value.type = jbvNumeric;
+	value.val.numeric = DatumGetNumeric(DirectFunctionCall1(int8_numeric,
+															Int64GetDatum((int64) val)));
+	pushJsonbValue(state, WJB_VALUE, &value);
+}
+
+static void
+PgturbohybridIndexStatsJsonbAddFloat8(JsonbParseState **state, const char *key,
+							 double val)
+{
+	JsonbValue	value;
+
+	PgturbohybridIndexStatsJsonbAddKey(state, key);
+	value.type = jbvNumeric;
+	value.val.numeric = DatumGetNumeric(DirectFunctionCall1(float8_numeric,
+															Float8GetDatum(val)));
+	pushJsonbValue(state, WJB_VALUE, &value);
+}
 
 static const char *
 PgturbohybridRoutingName(int routing)
@@ -208,7 +272,8 @@ pgturbohybrid_index_stats(PG_FUNCTION_ARGS)
 	bool		hasBm25Meta = false;
 	PgturbohybridBm25MetaTupleData bm25Meta;
 	TqOptions  *opts;
-	StringInfoData json;
+	JsonbParseState *jsonState = NULL;
+	JsonbValue *jsonResult;
 
 	index = index_open(indexOid, AccessShareLock);
 	opts = (TqOptions *) index->rd_options;
@@ -291,37 +356,34 @@ pgturbohybrid_index_stats(PG_FUNCTION_ARGS)
 						   tqBm25MetaStartBlkno)));
 	}
 
-	initStringInfo(&json);
-	appendStringInfo(&json,
-					 "{\"version\":1,"
-					 "\"profile\":\"%s\","
-					 "\"storage_kind\":\"%s\","
-					 "\"blocks\":%u,"
-					 "\"graph_m\":%u,"
-					 "\"graph_ef_construction\":%u,"
-					 "\"graph_ef_search\":%u,"
-					 "\"graph_oversampling\":%u,"
-					 "\"routing\":\"%s\","
-					 "\"quantization_bits\":%u,"
-					 "\"exact_storage\":%s,"
-					 "\"hybrid\":%s,"
-					 "\"bm25_document_count\":%u,"
-					 "\"bm25_average_document_length\":%.6g}",
-					 PgturbohybridProfileName(pgturbohybrid_profile),
-					 PgturbohybridGraphStorageKindName(storageKind),
-					 nblocks,
-					 graphM,
-					 graphEfConstruction,
-					 graphEfSearch,
-					 graphOversampling,
-					 PgturbohybridRoutingName(routing),
-					 tqBits,
-					 (tqFlags & PGTURBOHYBRID_GRAPH_EXACT_FREE) != 0 ? "false" : "true",
-					 hasBm25Meta ? "true" : "false",
-					 hasBm25Meta ? bm25Meta.docCount + bm25Meta.deltaDocCount : 0,
-					 hasBm25Meta ? (double) (bm25Meta.totalDocLen + bm25Meta.deltaTotalDocLen) /
-					 Max((double) (bm25Meta.docCount + bm25Meta.deltaDocCount), 1.0) : 0.0);
+	pushJsonbValue(&jsonState, WJB_BEGIN_OBJECT, NULL);
+	PgturbohybridIndexStatsJsonbAddUInt32(&jsonState, "version", 1);
+	PgturbohybridIndexStatsJsonbAddString(&jsonState, "profile",
+										  PgturbohybridProfileName(pgturbohybrid_profile));
+	PgturbohybridIndexStatsJsonbAddString(&jsonState, "storage_kind",
+										  PgturbohybridGraphStorageKindName(storageKind));
+	PgturbohybridIndexStatsJsonbAddUInt32(&jsonState, "blocks", nblocks);
+	PgturbohybridIndexStatsJsonbAddUInt32(&jsonState, "graph_m", graphM);
+	PgturbohybridIndexStatsJsonbAddUInt32(&jsonState, "graph_ef_construction",
+										  graphEfConstruction);
+	PgturbohybridIndexStatsJsonbAddUInt32(&jsonState, "graph_ef_search",
+										  graphEfSearch);
+	PgturbohybridIndexStatsJsonbAddUInt32(&jsonState, "graph_oversampling",
+										  graphOversampling);
+	PgturbohybridIndexStatsJsonbAddString(&jsonState, "routing",
+										  PgturbohybridRoutingName(routing));
+	PgturbohybridIndexStatsJsonbAddUInt32(&jsonState, "quantization_bits", tqBits);
+	PgturbohybridIndexStatsJsonbAddBool(&jsonState, "exact_storage",
+										(tqFlags & PGTURBOHYBRID_GRAPH_EXACT_FREE) == 0);
+	PgturbohybridIndexStatsJsonbAddBool(&jsonState, "hybrid", hasBm25Meta);
+	PgturbohybridIndexStatsJsonbAddUInt32(&jsonState, "bm25_document_count",
+										  hasBm25Meta ? bm25Meta.docCount + bm25Meta.deltaDocCount : 0);
+	PgturbohybridIndexStatsJsonbAddFloat8(&jsonState, "bm25_average_document_length",
+										  hasBm25Meta ?
+										  (double) (bm25Meta.totalDocLen + bm25Meta.deltaTotalDocLen) /
+										  Max((double) (bm25Meta.docCount + bm25Meta.deltaDocCount), 1.0) : 0.0);
+	jsonResult = pushJsonbValue(&jsonState, WJB_END_OBJECT, NULL);
 	index_close(index, AccessShareLock);
 
-	PG_RETURN_DATUM(DirectFunctionCall1(jsonb_in, CStringGetDatum(json.data)));
+	PG_RETURN_JSONB_P(JsonbValueToJsonb(jsonResult));
 }

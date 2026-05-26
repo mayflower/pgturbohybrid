@@ -20,7 +20,8 @@ release-hardening pass.
   change.
 - Query varlena validation rejects trailing bytes and overflowed sizes.
 - Graph scan page locks now release locally on errors.
-- Executor hook state is restored on scan errors.
+- Executor hooks are installed through one hook manager; planned-statement and
+  graph-wrapper state are cleaned up on executor end, start failure, and abort.
 - BM25 query/cache allocation paths now use overflow and metadata caps.
 - BM25 queries with more than 64 terms fail explicitly.
 - Fast math is opt-in; strict math is the default build mode.
@@ -51,9 +52,6 @@ archive hash.
 
 ## Remaining Alpha Risks
 
-- Diagnostics JSON is still manually assembled from fixed enum strings and
-  numeric fields. It is covered by public SQL regression behavior, but a JSON
-  builder rewrite remains future hardening.
 - Full corruption fuzzing for every graph and BM25 page type remains follow-up
   work. This pass hardened the release-facing allocation and metadata paths.
 - The new `hardening` workflow could not be manually dispatched from this branch

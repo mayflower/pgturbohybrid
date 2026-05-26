@@ -48,8 +48,11 @@ static bool tqgraph_active_payload_filter_valid = false;
 static AttrNumber tqgraph_active_payload_filter_attno = InvalidAttrNumber;
 static int32 tqgraph_active_payload_filter_value = 0;
 
-static void PgturbohybridGraphExecutorStartHook(QueryDesc *queryDesc, int eflags);
-static void PgturbohybridGraphExecutorEndHook(QueryDesc *queryDesc);
+static void PgturbohybridExecutorHooksInit(void);
+static void PgturbohybridExecutorStartHook(QueryDesc *queryDesc, int eflags);
+static void PgturbohybridExecutorEndHook(QueryDesc *queryDesc);
+static void PgturbohybridGraphExecutorStart(QueryDesc *queryDesc, int eflags);
+static void PgturbohybridGraphExecutorEnd(QueryDesc *queryDesc);
 static TupleTableSlot *PgturbohybridGraphExecIndexScanWithController(PlanState *planstate);
 static void PgturbohybridGraphWrapControlledIndexScans(PlanState *planstate, LimitState *limitstate);
 static PgturbohybridGraphExecWrapperState *PgturbohybridGraphFindWrapperState(PlanState *planstate);
@@ -70,6 +73,7 @@ _PG_init(void)
 {
 	PgturbohybridGraphInit();
 	PgturbohybridInit();
+	PgturbohybridExecutorHooksInit();
 }
 
 int64
@@ -101,34 +105,78 @@ PgturbohybridGraphGetActivePayloadInt4Filter(AttrNumber *heap_attno, int32 *valu
 void
 PgturbohybridGraphControlInit(void)
 {
-	prev_ExecutorStart_hook = ExecutorStart_hook;
-	ExecutorStart_hook = PgturbohybridGraphExecutorStartHook;
-
-	prev_ExecutorEnd_hook = ExecutorEnd_hook;
-	ExecutorEnd_hook = PgturbohybridGraphExecutorEndHook;
+	/*
+	 * Executor hooks are installed once by PgturbohybridExecutorHooksInit()
+	 * after graph and AM initialization. This entry point remains because the
+	 * graph initializer owns other graph setup and older code paths call it.
+	 */
 }
 
 static void
-PgturbohybridGraphExecutorStartHook(QueryDesc *queryDesc, int eflags)
+PgturbohybridExecutorHooksInit(void)
 {
+	prev_ExecutorStart_hook = ExecutorStart_hook;
+	ExecutorStart_hook = PgturbohybridExecutorStartHook;
+
+	prev_ExecutorEnd_hook = ExecutorEnd_hook;
+	ExecutorEnd_hook = PgturbohybridExecutorEndHook;
+}
+
+static void
+PgturbohybridExecutorStartHook(QueryDesc *queryDesc, int eflags)
+{
+	bool		am_started = false;
+
 	if (prev_ExecutorStart_hook)
 		prev_ExecutorStart_hook(queryDesc, eflags);
 	else
 		standard_ExecutorStart(queryDesc, eflags);
+
+	PG_TRY();
+	{
+		PgturbohybridAmExecutorStart(queryDesc, eflags);
+		am_started = true;
+		PgturbohybridGraphExecutorStart(queryDesc, eflags);
+	}
+	PG_CATCH();
+	{
+		tqgraph_exec_wrapper_states = NIL;
+		if (am_started)
+			PgturbohybridAmExecutorEnd(queryDesc);
+		else
+			PgturbohybridAmExecutorAbort();
+		PG_RE_THROW();
+	}
+	PG_END_TRY();
+}
+
+static void
+PgturbohybridGraphExecutorStart(QueryDesc *queryDesc, int eflags)
+{
+	(void) eflags;
 
 	tqgraph_exec_wrapper_states = NIL;
 	PgturbohybridGraphWrapControlledIndexScans(queryDesc->planstate, NULL);
 }
 
 static void
-PgturbohybridGraphExecutorEndHook(QueryDesc *queryDesc)
+PgturbohybridExecutorEndHook(QueryDesc *queryDesc)
 {
-	tqgraph_exec_wrapper_states = NIL;
+	PgturbohybridGraphExecutorEnd(queryDesc);
+	PgturbohybridAmExecutorEnd(queryDesc);
 
 	if (prev_ExecutorEnd_hook)
 		prev_ExecutorEnd_hook(queryDesc);
 	else
 		standard_ExecutorEnd(queryDesc);
+}
+
+static void
+PgturbohybridGraphExecutorEnd(QueryDesc *queryDesc)
+{
+	(void) queryDesc;
+
+	tqgraph_exec_wrapper_states = NIL;
 }
 
 static TupleTableSlot *

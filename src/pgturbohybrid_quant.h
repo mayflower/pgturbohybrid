@@ -431,7 +431,13 @@ PgturbohybridGraphLevelCapacity(int m)
 static inline int
 PgturbohybridGraphAdjRecordCount(PgturbohybridGraphMetaPageData *meta)
 {
-	return meta->tqNodeCount * PgturbohybridGraphLevelCapacity(meta->m);
+	int			levelCapacity = PgturbohybridGraphLevelCapacity(meta->m);
+
+	if (levelCapacity > 0 && meta->tqNodeCount > (uint32) (PG_INT32_MAX / levelCapacity))
+		ereport(ERROR,
+				(errcode(ERRCODE_PROGRAM_LIMIT_EXCEEDED),
+				 errmsg("pgturbohybrid graph adjacency metadata is too large")));
+	return meta->tqNodeCount * levelCapacity;
 }
 
 static inline int

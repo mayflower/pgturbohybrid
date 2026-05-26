@@ -122,10 +122,14 @@ PgturbohybridGraphInitScanStorageUncached(PgturbohybridGraphMetaPageData *meta, 
 							   bool cacheExactVectors)
 {
 	Size		arenaBytes;
+	int			adjRecordCount;
 
 	memset(storage, 0, sizeof(PgturbohybridGraphScanStorage));
 	storage->ctx = CurrentMemoryContext;
-	storage->nodes = palloc0(sizeof(PgturbohybridGraphScanNode) * meta->tqNodeCount);
+	storage->nodes =
+		palloc0(PgturbohybridCheckedArrayBytes(sizeof(PgturbohybridGraphScanNode),
+											   meta->tqNodeCount,
+											   "pgturbohybrid graph scan node cache"));
 	if (meta->tqNodeCount > 0 && meta->tqCodeBytes > 0 &&
 		PgturbohybridGraphArenaBytes(meta->tqNodeCount, meta->tqCodeBytes,
 									 &arenaBytes) &&
@@ -145,8 +149,15 @@ PgturbohybridGraphInitScanStorageUncached(PgturbohybridGraphMetaPageData *meta, 
 			storage->exactArena = palloc0(arenaBytes);
 	}
 	storage->levelCount = PgturbohybridGraphLevelCapacity(meta->m);
-	storage->neighbors = palloc0(sizeof(uint32 *) * PgturbohybridGraphAdjRecordCount(meta));
-	storage->neighborCounts = palloc0(sizeof(uint16) * PgturbohybridGraphAdjRecordCount(meta));
+	adjRecordCount = PgturbohybridGraphAdjRecordCount(meta);
+	storage->neighbors =
+		palloc0(PgturbohybridCheckedArrayBytes(sizeof(uint32 *),
+											   adjRecordCount,
+											   "pgturbohybrid graph neighbor cache"));
+	storage->neighborCounts =
+		palloc0(PgturbohybridCheckedArrayBytes(sizeof(uint16),
+											   adjRecordCount,
+											   "pgturbohybrid graph neighbor count cache"));
 	storage->codeTuplesPerPage =
 		PgturbohybridGraphTuplesPerPage(PgturbohybridGraphCodeTupleSize(meta->dimensions,
 												  meta->tqPayloadCount,
@@ -154,14 +165,29 @@ PgturbohybridGraphInitScanStorageUncached(PgturbohybridGraphMetaPageData *meta, 
 												  (meta->tqFlags & PGTURBOHYBRID_GRAPH_TQ_WEIGHTED) != 0));
 	storage->codePageCount = PgturbohybridGraphPageCount(meta->tqNodeCount, storage->codeTuplesPerPage);
 	storage->adjPageCount = BlockNumberIsValid(meta->tqAdjStartBlkno) ? 1 : 0;
-	storage->codePagesLoaded = palloc0(sizeof(bool) * storage->codePageCount);
+	storage->codePagesLoaded =
+		palloc0(PgturbohybridCheckedArrayBytes(sizeof(bool),
+											   storage->codePageCount,
+											   "pgturbohybrid graph code page cache"));
 	if (storage->adjPageCount > 0)
-		storage->adjPagesLoaded = palloc0(sizeof(bool) * storage->adjPageCount);
-	storage->codeBlknos = palloc(sizeof(BlockNumber) * storage->codePageCount);
+		storage->adjPagesLoaded =
+			palloc0(PgturbohybridCheckedArrayBytes(sizeof(bool),
+												   storage->adjPageCount,
+												   "pgturbohybrid graph adjacency page cache"));
+	storage->codeBlknos =
+		palloc(PgturbohybridCheckedArrayBytes(sizeof(BlockNumber),
+											  storage->codePageCount,
+											  "pgturbohybrid graph code block map"));
 	PgturbohybridGraphInitBlockMap(storage->codeBlknos, storage->codePageCount);
-	storage->adjBlknos = palloc(sizeof(BlockNumber) * PgturbohybridGraphAdjRecordCount(meta));
-	storage->adjOffnos = palloc(sizeof(OffsetNumber) * PgturbohybridGraphAdjRecordCount(meta));
-	for (int i = 0; i < PgturbohybridGraphAdjRecordCount(meta); i++)
+	storage->adjBlknos =
+		palloc(PgturbohybridCheckedArrayBytes(sizeof(BlockNumber),
+											  adjRecordCount,
+											  "pgturbohybrid graph adjacency block map"));
+	storage->adjOffnos =
+		palloc(PgturbohybridCheckedArrayBytes(sizeof(OffsetNumber),
+											  adjRecordCount,
+											  "pgturbohybrid graph adjacency offset map"));
+	for (int i = 0; i < adjRecordCount; i++)
 	{
 		storage->adjBlknos[i] = InvalidBlockNumber;
 		storage->adjOffnos[i] = InvalidOffsetNumber;
@@ -742,19 +768,25 @@ PgturbohybridGraphAppendInsertCacheNode(PgturbohybridGraphNativeCache *cache, Pg
 	oldCtx = MemoryContextSwitchTo(cache->ctx);
 
 	storage->nodes = repalloc(storage->nodes,
-							  sizeof(PgturbohybridGraphScanNode) * newNodeCount);
+							  PgturbohybridCheckedArrayBytes(sizeof(PgturbohybridGraphScanNode),
+															 newNodeCount,
+															 "pgturbohybrid graph scan node cache"));
 	memset(&storage->nodes[nodeId], 0, sizeof(PgturbohybridGraphScanNode));
 	if (codeBytes > 0)
 	{
 		storage->codeArena = repalloc(storage->codeArena,
-									  (Size) newNodeCount * codeBytes);
+									  PgturbohybridCheckedArrayBytes(codeBytes,
+																	 newNodeCount,
+																	 "pgturbohybrid graph code arena"));
 		memcpy(storage->codeArena + ((Size) nodeId * codeBytes),
 			   code, codeBytes);
 	}
 	if (payloadBytes > 0)
 	{
 		storage->payloadArena = repalloc(storage->payloadArena,
-										 (Size) newNodeCount * payloadBytes);
+										 PgturbohybridCheckedArrayBytes(payloadBytes,
+																		newNodeCount,
+																		"pgturbohybrid graph payload arena"));
 		if (payloads != NULL)
 			memcpy(storage->payloadArena + ((Size) nodeId * payloadBytes),
 				   payloads, payloadBytes);
@@ -765,22 +797,30 @@ PgturbohybridGraphAppendInsertCacheNode(PgturbohybridGraphNativeCache *cache, Pg
 	if (storage->exactArena != NULL)
 	{
 		storage->exactArena = repalloc(storage->exactArena,
-									   (Size) newNodeCount * storage->exactBytes);
+									   PgturbohybridCheckedArrayBytes(storage->exactBytes,
+																	  newNodeCount,
+																	  "pgturbohybrid graph exact-vector arena"));
 		memcpy(storage->exactArena + ((Size) nodeId * storage->exactBytes),
 			   vector, storage->exactBytes);
 	}
 	if (storage->visitedGeneration != NULL)
 	{
 		storage->visitedGeneration = repalloc(storage->visitedGeneration,
-											  sizeof(uint32) * newNodeCount);
+											  PgturbohybridCheckedArrayBytes(sizeof(uint32),
+																			 newNodeCount,
+																			 "pgturbohybrid graph visited generation cache"));
 		storage->visitedGeneration[nodeId] = 0;
 	}
 	if (newCodePageCount != oldCodePageCount)
 	{
 		storage->codePagesLoaded = repalloc(storage->codePagesLoaded,
-											sizeof(bool) * newCodePageCount);
+											PgturbohybridCheckedArrayBytes(sizeof(bool),
+																		   newCodePageCount,
+																		   "pgturbohybrid graph code page cache"));
 		storage->codeBlknos = repalloc(storage->codeBlknos,
-									   sizeof(BlockNumber) * newCodePageCount);
+									   PgturbohybridCheckedArrayBytes(sizeof(BlockNumber),
+																	  newCodePageCount,
+																	  "pgturbohybrid graph code block map"));
 		for (int i = oldCodePageCount; i < newCodePageCount; i++)
 		{
 			storage->codePagesLoaded[i] = true;
@@ -790,13 +830,21 @@ PgturbohybridGraphAppendInsertCacheNode(PgturbohybridGraphNativeCache *cache, Pg
 	}
 
 	storage->neighbors = repalloc(storage->neighbors,
-								  sizeof(uint32 *) * newAdjRecordCount);
+								  PgturbohybridCheckedArrayBytes(sizeof(uint32 *),
+																 newAdjRecordCount,
+																 "pgturbohybrid graph neighbor cache"));
 	storage->neighborCounts = repalloc(storage->neighborCounts,
-									   sizeof(uint16) * newAdjRecordCount);
+									   PgturbohybridCheckedArrayBytes(sizeof(uint16),
+																	  newAdjRecordCount,
+																	  "pgturbohybrid graph neighbor count cache"));
 	storage->adjBlknos = repalloc(storage->adjBlknos,
-								  sizeof(BlockNumber) * newAdjRecordCount);
+								  PgturbohybridCheckedArrayBytes(sizeof(BlockNumber),
+																 newAdjRecordCount,
+																 "pgturbohybrid graph adjacency block map"));
 	storage->adjOffnos = repalloc(storage->adjOffnos,
-								  sizeof(OffsetNumber) * newAdjRecordCount);
+								  PgturbohybridCheckedArrayBytes(sizeof(OffsetNumber),
+																 newAdjRecordCount,
+																 "pgturbohybrid graph adjacency offset map"));
 	memset(&storage->neighbors[oldAdjRecordCount], 0,
 		   sizeof(uint32 *) * (newAdjRecordCount - oldAdjRecordCount));
 	memset(&storage->neighborCounts[oldAdjRecordCount], 0,

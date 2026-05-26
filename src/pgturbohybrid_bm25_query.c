@@ -624,7 +624,7 @@ PgturbohybridBm25GrowCapacity32(uint32 capacity, uint32 needed, Size elemSize)
 			ereport(ERROR,
 					(errcode(ERRCODE_PROGRAM_LIMIT_EXCEEDED),
 					 errmsg("pgturbohybrid BM25 array capacity is too large")));
-		newCapacity *= 2;
+		newCapacity += newCapacity;
 	}
 
 	(void) PgturbohybridBm25ArrayAllocSize(elemSize, newCapacity);

@@ -25,7 +25,7 @@ evidence.
 | Parallel and concurrent build behavior needs proof or explicit restriction | Medium priority | Fixed for alpha |
 | Insert/delta node-ID and crash behavior needs stronger evidence | Medium priority | Fixed for alpha |
 | BM25 large-tsquery bitmask handling needs a defined limit or dynamic bitmap | Medium priority | Fixed with 64-term cap |
-| Diagnostics JSON construction should move away from manual string assembly | Alpha accepted risk | Open |
+| Diagnostics JSON construction should move away from manual string assembly | Alpha accepted risk | Fixed |
 
 ## Severity
 
@@ -87,15 +87,16 @@ This section is updated as tests land.
 
 ## Remaining Accepted Alpha Risks
 
-- Executor hooks remain split between graph scan wrapping and access-method
-  planned-statement tracking, but the hook chain and cleanup behavior are now
-  documented. Error cleanup was added around scan wrapper state restoration.
+- Executor hook installation now has one owner. The unified hook manager records
+  planned statements and wraps graph scans after the previous executor-start hook
+  has run, then clears wrapper state and planned-statement stack entries on
+  executor end and abort paths.
 - Full corruption fuzzing for every on-disk BM25 and graph page type remains a
   follow-up. This branch adds cache metadata caps and overflow checks on the
   release-facing BM25 cache/query paths.
-- Diagnostics JSON is still manually assembled from fixed enum strings and
-  numeric fields. Public diagnostics are covered by existing SQL use, but a JSON
-  builder rewrite remains future hardening.
+- Public diagnostics now use PostgreSQL JSONB builder APIs instead of
+  hand-assembled JSON text. Developer-only diagnostics remain behind
+  `PGTURBOHYBRID_DEV_DIAGNOSTICS`.
 - TAP restart tests are present but skipped on this local machine because the
   PostgreSQL TAP modules are unavailable in the installed PGXS tree.
 - The new manual/nightly `hardening` workflow is present on this branch, but

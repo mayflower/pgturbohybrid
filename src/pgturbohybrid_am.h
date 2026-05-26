@@ -4,6 +4,7 @@
 #include "postgres.h"
 
 #include "access/genam.h"
+#include "executor/execdesc.h"
 #include "nodes/plannodes.h"
 #include "nodes/pathnodes.h"
 #include "utils/rel.h"
@@ -160,6 +161,9 @@ const char *PgturbohybridProfileName(int profile);
 void		PgturbohybridApplyProfileDefaults(void);
 
 void		PgturbohybridInit(void);
+void		PgturbohybridAmExecutorStart(QueryDesc *queryDesc, int eflags);
+void		PgturbohybridAmExecutorEnd(QueryDesc *queryDesc);
+void		PgturbohybridAmExecutorAbort(void);
 PlannedStmt *PgturbohybridCurrentPlannedStmt(void);
 int			PgturbohybridCurrentLimit(void);
 void		PgturbohybridGetLastScanStatsSnapshot(PgturbohybridScanStatsSnapshot *stats);
