@@ -1,6 +1,15 @@
 {
   "datasets": [
     {
+      "name": "qdrant-dbpedia-openai3-large-1m",
+      "layer": "ir_quality_and_systems",
+      "family": "Qdrant/DBPedia Entity",
+      "scale": "large",
+      "purpose": "Large 1M-row hybrid retrieval benchmark using Qdrant's DBPedia corpus embeddings with deterministic self-queries by default.",
+      "inputs": ["Qdrant DBPedia parquet shards", "optional BEIR DBPedia queries", "optional BEIR DBPedia qrels", "optional OpenAI text-embedding-3-large query embeddings"],
+      "metrics": ["nDCG@10", "Recall@10", "Recall@100", "MRR@10", "MAP@10", "overlap@10", "p50", "p95", "p99"]
+    },
+    {
       "name": "beir-fiqa",
       "layer": "ir_quality",
       "family": "BEIR/MTEB",

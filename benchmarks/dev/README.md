@@ -64,6 +64,29 @@ Set `DEV_DIAGNOSTICS=1` only when you also provide a valid
 `DEV_DIAGNOSTICS_SQL` file for local diagnostic objects. The default path does
 not require developer-only SQL objects.
 
+## DBPedia OpenAI3 Large Benchmark
+
+The DBPedia/OpenAI3-large benchmark is documented in
+`benchmarks/dbpedia_openai3_large.md`. It uses the Qdrant 1M DBPedia corpus,
+the embeddings already present in that dataset, native pgvector `halfvec` HNSW
+plus PostgreSQL full-text SQL RRF, and TurboHybrid. BEIR DBPedia queries are
+optional; the default run uses Qdrant self-queries.
+
+Run a smoke subset first:
+
+```sh
+DBPEDIA_DATASET=/path/to/qdrant-dbpedia-openai3-large-1m \
+PGDATABASE=pgturbohybrid_dbpedia_smoke \
+OUTPUT=benchmarks/results/dbpedia-openai3-large-smoke.json \
+python3 benchmarks/dbpedia_openai3_large.py \
+  --max-docs 10000 \
+  --max-queries 25 \
+  --methods postgres_sql_rrf_halfvec,pgturbohybrid \
+  --measured-runs 1 \
+  --force-turbohybrid-index \
+  --explain
+```
+
 ## Old-Branch Comparison
 
 `compare_old_branch.sh` is for development comparisons against an older patched

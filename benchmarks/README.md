@@ -9,6 +9,11 @@ Public benchmark explanations live under `docs/benchmarks/`. This directory is
 for reproducible tooling, acceptance thresholds, and developer benchmark
 helpers. Developer-only workflows are documented in `benchmarks/dev/README.md`.
 
+The DBPedia OpenAI3-large benchmark spec lives in
+[`dbpedia_openai3_large.md`](dbpedia_openai3_large.md). It covers the
+1M-row Qdrant DBPedia corpus, BEIR DBPedia queries/qrels, the native pgvector
+`halfvec` + PostgreSQL full-text SQL RRF baseline, and the TurboHybrid runs.
+
 ## Baselines
 
 Every publishable run should include at least:
@@ -106,6 +111,12 @@ publishing the fast default result.
 `config/datasets.json` lists intended quality and systems datasets. FIQA, BEIR,
 MS MARCO, MIRACL, LoTTE, and RAG sets should be run as reproducible
 experiments with committed commands and external result artifacts.
+
+For 3,072-dimensional DBPedia/OpenAI3-large runs, use
+`benchmarks/dbpedia_openai3_large.py` rather than the FIQA harness. The native
+PostgreSQL hybrid baseline uses pgvector `halfvec(3072)` HNSW plus PostgreSQL
+full-text search because standard pgvector `vector` HNSW is not the intended
+ANN path for this dimensionality.
 
 Synthetic vector generators are intentionally not part of the benchmark suite.
 They are too far from real retrieval workloads for project performance claims.
