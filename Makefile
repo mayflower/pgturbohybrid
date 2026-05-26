@@ -109,5 +109,5 @@ dist:
 	fi
 	rm -rf dist/$(EXTENSION)-$(EXTVERSION).zip dist/$(EXTENSION)-$(EXTVERSION).tar.gz
 	mkdir -p dist
-	git archive --format=zip --prefix=$(EXTENSION)-$(EXTVERSION)/ -o dist/$(EXTENSION)-$(EXTVERSION).zip HEAD
-	git archive --format=tar --prefix=$(EXTENSION)-$(EXTVERSION)/ HEAD | gzip -n > dist/$(EXTENSION)-$(EXTVERSION).tar.gz
+	git archive --format=zip --prefix=$(EXTENSION)-$(EXTVERSION)/ -o dist/$(EXTENSION)-$(EXTVERSION).zip HEAD^{tree}
+	git archive --format=tar --prefix=$(EXTENSION)-$(EXTVERSION)/ HEAD^{tree} | gzip -n > dist/$(EXTENSION)-$(EXTVERSION).tar.gz
