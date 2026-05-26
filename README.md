@@ -334,5 +334,6 @@ HNSW implementation. pgvector is an excellent PostgreSQL vector search
 extension; `pgturbohybrid` is a separate experimental companion project, not an
 official pgvector project.
 
-The license is preserved in [LICENSE](LICENSE), with attribution notes in
-[NOTICE](NOTICE).
+`pgturbohybrid` is distributed under the PostgreSQL License. See
+[LICENSE](LICENSE) for the license text and [NOTICE](NOTICE) for pgvector
+attribution.
