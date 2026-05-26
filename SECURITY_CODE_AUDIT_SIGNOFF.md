@@ -6,8 +6,8 @@ release-hardening pass.
 ## Branch State
 
 - Branch: `security-hardening-alpha2`
-- Latest pushed code evidence commit:
-  `3003d0b41c3540390d98fc0d00394c524de60684`
+- Latest release archive implementation commit:
+  `cb0ad4717b523d0aab796d6536703f80ba793cc1`
 - Final tag commit: verify with `git rev-parse HEAD` immediately before
   tagging. This tracked signoff file cannot contain its own commit hash without
   changing that hash.
@@ -48,8 +48,8 @@ release-hardening pass.
 `git archive`, so ignored generated benchmark outputs and local build products
 are not included.
 
-- `cf2a3d3a078c671769140002004e8a32ea885c483dbfde8ced3531f61e04121c  dist/pgturbohybrid-0.1.0.tar.gz`
-- `707a07c306c05afbc4775c46157ce931451bc6ce1b461bc14ae1460dd58af8d2  dist/pgturbohybrid-0.1.0.zip`
+- `2d3e2324532b5acbbfcff2d57a16471c2730f8b7a43ef2cc03a1d06c9add9d56  dist/pgturbohybrid-0.1.0.tar.gz`
+- `c081ba04d41e0d1649112b574da78b02d811bb2a3b5b33f304b0dec4d2e1a977  dist/pgturbohybrid-0.1.0.zip`
 
 Recompute these after the final signoff commit with:
 
