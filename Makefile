@@ -32,10 +32,11 @@ OBJS = \
 
 HEADERS =
 
-REGRESS = extension pgturbohybrid pgturbohybrid_query
+REGRESS = extension pgturbohybrid pgturbohybrid_query security
 REGRESS_OPTS = --inputdir=test
 
 SIMD_BUILD ?= portable
+MATH_MODE ?= strict
 PGTURBOHYBRID_REQUIRE_VECTOR_HEADER ?= 0
 
 PGVECTOR_SERVER_INCLUDE := $(shell $(PG_CONFIG) --includedir-server)
@@ -73,7 +74,15 @@ ifneq ($(filter-out portable native none,$(SIMD_BUILD)),)
 $(error unsupported SIMD_BUILD=$(SIMD_BUILD); expected portable, native, or none)
 endif
 
-PG_CFLAGS += $(OPTFLAGS) -ftree-vectorize -fassociative-math -fno-signed-zeros -fno-trapping-math
+ifeq ($(MATH_MODE),fast)
+	MATHFLAGS = -fassociative-math -fno-signed-zeros -fno-trapping-math
+else ifeq ($(MATH_MODE),strict)
+	MATHFLAGS =
+else
+$(error unsupported MATH_MODE=$(MATH_MODE); expected strict or fast)
+endif
+
+PG_CFLAGS += $(OPTFLAGS) -ftree-vectorize $(MATHFLAGS)
 
 PGXS := $(shell $(PG_CONFIG) --pgxs)
 include $(PGXS)
@@ -92,7 +101,7 @@ prove_installcheck:
 
 dist:
 	@test -z "$$(git status --porcelain --untracked-files=all)" || (echo "make dist requires a clean working tree" >&2; git status --short --untracked-files=all >&2; exit 1)
-	@tracked_artifacts="$$(git ls-files | grep -E '(^|/)regression\.(diffs|out)$$|(^|/)\.DS_Store$$|(^|/)(benchmarks/(results|output)|results)/|(^|/)perf-smoke-results\.json$$|(^|/).*\.(o|so|bc|dll|dylib|obj|lib|exp|pyc)$$|(^|/)__pycache__/|^benchmarks/.*\.(csv|md|json)$$' | grep -v '^benchmarks/README\.md$$' | grep -v '^benchmarks/config/.*\.json$$' || true)"; \
+	@tracked_artifacts="$$(git ls-files | grep -E '(^|/)regression\.(diffs|out)$$|(^|/)\.DS_Store$$|(^|/)(benchmarks/(results|output)|results)/|(^|/)perf-smoke-results\.json$$|(^|/).*\.(o|so|bc|dll|dylib|obj|lib|exp|pyc)$$|(^|/)__pycache__/|^benchmarks/.*\.(csv|md|json)$$' | grep -v '^benchmarks/README\.md$$' | grep -v '^benchmarks/dev/README\.md$$' | grep -v '^benchmarks/dbpedia_openai3_large\.md$$' | grep -v '^benchmarks/config/.*\.json$$' || true)"; \
 	if test -n "$$tracked_artifacts"; then \
 		echo "make dist refuses to package generated artifacts:" >&2; \
 		printf '%s\n' "$$tracked_artifacts" >&2; \

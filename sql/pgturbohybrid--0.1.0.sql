@@ -78,19 +78,19 @@ CREATE FUNCTION turbohybrid_query(
 
 CREATE FUNCTION turbohybrid_distance(vector, turbohybrid_query) RETURNS pg_catalog.float8
 	AS 'MODULE_PATHNAME', 'pgturbohybrid_distance'
-	LANGUAGE C STABLE STRICT PARALLEL SAFE;
+	LANGUAGE C STABLE STRICT PARALLEL RESTRICTED;
 
 CREATE FUNCTION turbohybrid_l2_distance(vector, turbohybrid_query) RETURNS pg_catalog.float8
 	AS 'MODULE_PATHNAME', 'pgturbohybrid_l2_distance'
-	LANGUAGE C STABLE STRICT PARALLEL SAFE;
+	LANGUAGE C STABLE STRICT PARALLEL RESTRICTED;
 
 CREATE FUNCTION turbohybrid_negative_inner_product(vector, turbohybrid_query) RETURNS pg_catalog.float8
 	AS 'MODULE_PATHNAME', 'pgturbohybrid_negative_inner_product'
-	LANGUAGE C STABLE STRICT PARALLEL SAFE;
+	LANGUAGE C STABLE STRICT PARALLEL RESTRICTED;
 
 CREATE FUNCTION turbohybrid_cosine_distance(vector, turbohybrid_query) RETURNS pg_catalog.float8
 	AS 'MODULE_PATHNAME', 'pgturbohybrid_cosine_distance'
-	LANGUAGE C STABLE STRICT PARALLEL SAFE;
+	LANGUAGE C STABLE STRICT PARALLEL RESTRICTED;
 
 CREATE FUNCTION turbohybrid_vector_l2_squared_distance(vector, vector) RETURNS pg_catalog.float8
 	AS 'MODULE_PATHNAME', 'pgturbohybrid_vector_l2_squared_distance'
@@ -159,7 +159,7 @@ CREATE FUNCTION turbohybrid_index_stats(pg_catalog.regclass) RETURNS pg_catalog.
 
 CREATE FUNCTION turbohybrid_last_scan_stats() RETURNS pg_catalog.jsonb
 	AS 'MODULE_PATHNAME', 'pgturbohybrid_last_scan_stats'
-	LANGUAGE C PARALLEL SAFE;
+	LANGUAGE C PARALLEL RESTRICTED;
 
 CREATE FUNCTION turbohybrid_simd_capabilities() RETURNS pg_catalog.jsonb
 	AS 'MODULE_PATHNAME', 'pgturbohybrid_simd_capabilities'
@@ -183,7 +183,7 @@ COMMENT ON FUNCTION turbohybrid_vector_cosine_distance(vector, vector) IS 'Cosin
 COMMENT ON FUNCTION turbohybrid_vector_norm(vector) IS 'Vector norm support function used by TurboHybrid vector opclasses';
 COMMENT ON FUNCTION turbohybrid_handler(pg_catalog.internal) IS 'Index access method handler for TurboHybrid';
 COMMENT ON FUNCTION turbohybrid_index_stats(pg_catalog.regclass) IS 'Return stable TurboHybrid index metadata as jsonb';
-COMMENT ON FUNCTION turbohybrid_last_scan_stats() IS 'Return stable summary information for the last TurboHybrid scan in this backend as jsonb';
+COMMENT ON FUNCTION turbohybrid_last_scan_stats() IS 'Return backend-local summary information for the last TurboHybrid scan as jsonb; parallel restricted because it reads mutable scan state';
 COMMENT ON FUNCTION turbohybrid_simd_capabilities() IS 'Return pgturbohybrid build and architecture SIMD capability information as jsonb';
 
 COMMENT ON OPERATOR <~-> (vector, turbohybrid_query) IS 'L2 distance operator for TurboHybrid vector queries';

@@ -1,0 +1,248 @@
+DO $$
+BEGIN
+	IF EXISTS (SELECT 1 FROM pg_extension WHERE extname = 'pgturbohybrid') THEN
+		EXECUTE 'DROP EXTENSION pgturbohybrid CASCADE';
+	END IF;
+	IF EXISTS (SELECT 1 FROM pg_extension WHERE extname = 'vector') THEN
+		EXECUTE 'DROP EXTENSION vector CASCADE';
+	END IF;
+END
+$$;
+CREATE EXTENSION vector;
+CREATE EXTENSION pgturbohybrid;
+DO $$
+BEGIN
+	BEGIN
+		EXECUTE 'SET turbohybrid.default_dense_k = 2147483647';
+		RAISE EXCEPTION 'expected default_dense_k cap error';
+	EXCEPTION WHEN invalid_parameter_value THEN
+	END;
+
+	BEGIN
+		EXECUTE 'SET turbohybrid.default_bm25_k = 2147483647';
+		RAISE EXCEPTION 'expected default_bm25_k cap error';
+	EXCEPTION WHEN invalid_parameter_value THEN
+	END;
+
+	BEGIN
+		EXECUTE 'SET turbohybrid.max_union_candidates = 2147483647';
+		RAISE EXCEPTION 'expected max_union_candidates cap error';
+	EXCEPTION WHEN invalid_parameter_value THEN
+	END;
+
+	BEGIN
+		EXECUTE 'SET turbohybrid.bm25_hot_postings_cache_mb = 2147483647';
+		RAISE EXCEPTION 'expected bm25_hot_postings_cache_mb cap error';
+	EXCEPTION WHEN invalid_parameter_value THEN
+	END;
+END
+$$;
+DO $$
+BEGIN
+	IF EXISTS (
+		SELECT 1
+		FROM pg_proc
+		WHERE oid IN (
+			'turbohybrid_distance(vector,turbohybrid_query)'::regprocedure,
+			'turbohybrid_l2_distance(vector,turbohybrid_query)'::regprocedure,
+			'turbohybrid_negative_inner_product(vector,turbohybrid_query)'::regprocedure,
+			'turbohybrid_cosine_distance(vector,turbohybrid_query)'::regprocedure,
+			'turbohybrid_last_scan_stats()'::regprocedure
+		)
+		AND proparallel = 's'
+	) THEN
+		RAISE EXCEPTION 'stateful or planner-aware pgturbohybrid functions must not be parallel safe';
+	END IF;
+
+	IF NOT EXISTS (
+		SELECT 1
+		FROM pg_proc
+		WHERE oid = 'turbohybrid_vector_l2_distance(vector,vector)'::regprocedure
+			AND provolatile = 'i'
+			AND proparallel = 's'
+	) THEN
+		RAISE EXCEPTION 'pure vector support functions should remain immutable and parallel safe';
+	END IF;
+END
+$$;
+CREATE TEMP TABLE sec_constructor_cache_results (
+	id int GENERATED ALWAYS AS IDENTITY,
+	value text
+);
+PREPARE sec_constructor_cache AS
+INSERT INTO sec_constructor_cache_results (value)
+SELECT turbohybrid_query_out(turbohybrid_query(vector_query => '[1]'::vector))::text;
+EXECUTE sec_constructor_cache;
+SET turbohybrid.default_dense_k = 11;
+EXECUTE sec_constructor_cache;
+DO $$
+DECLARE
+	values text[];
+BEGIN
+	SELECT array_agg(value ORDER BY id) INTO values
+	FROM sec_constructor_cache_results;
+
+	IF values[1] NOT LIKE '%dense_k=100%' OR values[2] NOT LIKE '%dense_k=11%' THEN
+		RAISE EXCEPTION 'constructor cache hid changed GUC defaults: %', values;
+	END IF;
+END
+$$;
+DEALLOCATE sec_constructor_cache;
+DROP TABLE sec_constructor_cache_results;
+RESET turbohybrid.default_dense_k;
+CREATE TABLE sec_docs (
+	id int,
+	embedding vector(3),
+	body_tsv tsvector
+);
+INSERT INTO sec_docs VALUES
+	(1, '[1,0,0]', to_tsvector('simple', 'term1 term2 term3')),
+	(2, '[0,1,0]', to_tsvector('simple', 'term4 term5 term6'));
+CREATE INDEX sec_docs_idx ON sec_docs
+USING turbohybrid (
+	embedding vector_cosine_turbohybrid_ops,
+	body_tsv bm25_tsvector_turbohybrid_ops
+)
+WITH (quantization_bits = 4, exact_storage = on);
+SET enable_seqscan = off;
+DO $$
+DECLARE
+	too_many_terms tsquery;
+	top_id int;
+BEGIN
+	SELECT to_tsquery('simple', string_agg('term' || g::text, ' | '))
+	INTO too_many_terms
+	FROM generate_series(1, 65) g;
+
+	BEGIN
+		SELECT id INTO top_id
+		FROM sec_docs
+		ORDER BY embedding <~> turbohybrid_query(
+			vector_query => '[1,0,0]'::vector,
+			text_query => too_many_terms,
+			dense_k => 2,
+			bm25_k => 2,
+			final_k => 1
+		)
+		LIMIT 1;
+
+		RAISE EXCEPTION 'expected large BM25 query term cap error';
+	EXCEPTION WHEN program_limit_exceeded THEN
+	END;
+
+	SELECT id INTO top_id
+	FROM sec_docs
+	ORDER BY embedding <~> turbohybrid_query(
+		vector_query => '[1,0,0]'::vector,
+		text_query => to_tsquery('simple', 'term1'),
+		dense_k => 2,
+		bm25_k => 2,
+		final_k => 1
+	)
+	LIMIT 1;
+
+	IF top_id <> 1 THEN
+		RAISE EXCEPTION 'hybrid query failed after handled error: %', top_id;
+	END IF;
+END
+$$;
+DO $$
+DECLARE
+	index_stats jsonb;
+	scan_stats jsonb;
+BEGIN
+	index_stats := turbohybrid_index_stats('sec_docs_idx'::regclass);
+	IF jsonb_typeof(index_stats) <> 'object' OR
+		NOT index_stats ? 'version' OR
+		NOT index_stats ? 'quantization_bits' THEN
+		RAISE EXCEPTION 'index diagnostics JSON shape is invalid: %', index_stats;
+	END IF;
+
+	PERFORM id
+	FROM sec_docs
+	ORDER BY embedding <~> turbohybrid_query(
+		vector_query => '[1,0,0]'::vector,
+		text_query => to_tsquery('simple', 'term1'),
+		dense_k => 2,
+		bm25_k => 2,
+		final_k => 1
+	)
+	LIMIT 1;
+
+	scan_stats := turbohybrid_last_scan_stats();
+	IF jsonb_typeof(scan_stats) <> 'object' OR
+		NOT scan_stats ? 'profile' OR
+		NOT scan_stats ? 'dense_candidates_effective' OR
+		NOT scan_stats ? 'bm25_candidates_effective' THEN
+		RAISE EXCEPTION 'scan diagnostics JSON shape is invalid: %', scan_stats;
+	END IF;
+END
+$$;
+INSERT INTO sec_docs VALUES
+	(3, '[0,0,1]', to_tsvector('simple', 'freshalpha'));
+DO $$
+DECLARE
+	top_id int;
+BEGIN
+	SELECT id INTO top_id
+	FROM sec_docs
+	ORDER BY embedding <~> turbohybrid_query(
+		vector_query => '[0,0,1]'::vector,
+		text_query => to_tsquery('simple', 'freshalpha'),
+		dense_k => 3,
+		bm25_k => 3,
+		final_k => 1
+	)
+	LIMIT 1;
+
+	IF top_id <> 3 THEN
+		RAISE EXCEPTION 'inserted dense/BM25 row was not visible through hybrid scan: %', top_id;
+	END IF;
+END
+$$;
+CREATE TABLE sec_build (
+	id int,
+	embedding vector(3),
+	body_tsv tsvector
+);
+INSERT INTO sec_build
+SELECT g,
+	format('[%s,%s,%s]', (g % 10)::float8 / 10.0,
+		   (g % 7)::float8 / 7.0,
+		   (g % 5)::float8 / 5.0)::vector,
+	to_tsvector('simple', 'parallel term' || g::text)
+FROM generate_series(1, 128) g;
+SET max_parallel_maintenance_workers = 2;
+CREATE INDEX sec_build_parallel_idx ON sec_build
+USING turbohybrid (
+	embedding vector_cosine_turbohybrid_ops,
+	body_tsv bm25_tsvector_turbohybrid_ops
+)
+WITH (quantization_bits = 4, exact_storage = off);
+DROP INDEX sec_build_parallel_idx;
+CREATE INDEX CONCURRENTLY sec_build_concurrent_idx ON sec_build
+USING turbohybrid (
+	embedding vector_cosine_turbohybrid_ops,
+	body_tsv bm25_tsvector_turbohybrid_ops
+)
+WITH (quantization_bits = 4, exact_storage = off);
+DO $$
+DECLARE
+	top_id int;
+BEGIN
+	SELECT id INTO top_id
+	FROM sec_build
+	ORDER BY embedding <~> turbohybrid_query(
+		vector_query => '[0.1,0.142857142857143,0.2]'::vector,
+		text_query => to_tsquery('simple', 'term1'),
+		dense_k => 16,
+		bm25_k => 16,
+		final_k => 1
+	)
+	LIMIT 1;
+
+	IF top_id IS NULL THEN
+		RAISE EXCEPTION 'concurrent build did not return a result';
+	END IF;
+END
+$$;

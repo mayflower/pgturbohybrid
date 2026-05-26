@@ -69,6 +69,7 @@ int			pgturbohybrid_max_union_candidates = 100000;
 int			pgturbohybrid_default_dense_k = PGTURBOHYBRID_DEFAULT_DENSE_K;
 int			pgturbohybrid_default_bm25_k = PGTURBOHYBRID_DEFAULT_BM25_K;
 int			pgturbohybrid_default_rrf_k = PGTURBOHYBRID_DEFAULT_RRF_K;
+uint64		pgturbohybrid_guc_generation = 1;
 int			pgturbohybrid_last_final_k_requested = 0;
 int			pgturbohybrid_last_final_k_effective = 0;
 int			pgturbohybrid_last_sql_limit = 0;
@@ -345,6 +346,59 @@ PgturbohybridGucSourceIsExplicit(GucSource source)
 	return source > PGC_S_DYNAMIC_DEFAULT;
 }
 
+static void
+PgturbohybridBumpGucGeneration(void)
+{
+	if (++pgturbohybrid_guc_generation == 0)
+		pgturbohybrid_guc_generation = 1;
+}
+
+static bool
+PgturbohybridCheckMaxIntGuc(const char *name, int value, int maxValue)
+{
+	if (value > maxValue)
+	{
+		GUC_check_errmsg("%s must not exceed %d", name, maxValue);
+		return false;
+	}
+
+	return true;
+}
+
+static bool
+PgturbohybridCheckDefaultDenseK(int *newval, void **extra, GucSource source)
+{
+	return PgturbohybridCheckMaxIntGuc("turbohybrid.default_dense_k", *newval,
+									  PGTURBOHYBRID_MAX_DEFAULT_DENSE_K);
+}
+
+static bool
+PgturbohybridCheckDefaultBm25K(int *newval, void **extra, GucSource source)
+{
+	return PgturbohybridCheckMaxIntGuc("turbohybrid.default_bm25_k", *newval,
+									  PGTURBOHYBRID_MAX_DEFAULT_BM25_K);
+}
+
+static bool
+PgturbohybridCheckDefaultRrfK(int *newval, void **extra, GucSource source)
+{
+	return PgturbohybridCheckMaxIntGuc("turbohybrid.default_rrf_k", *newval,
+									  PGTURBOHYBRID_MAX_RRF_K);
+}
+
+static bool
+PgturbohybridCheckMaxUnionCandidates(int *newval, void **extra, GucSource source)
+{
+	return PgturbohybridCheckMaxIntGuc("turbohybrid.max_union_candidates", *newval,
+									  PGTURBOHYBRID_MAX_UNION_CANDIDATES);
+}
+
+static void
+PgturbohybridAssignQueryDefaultInt(int newval, void *extra)
+{
+	PgturbohybridBumpGucGeneration();
+}
+
 static bool
 PgturbohybridCheckBm25Strategy(int *newval, void **extra, GucSource source)
 {
@@ -362,6 +416,10 @@ PgturbohybridCheckBm25ImpactOrMode(int *newval, void **extra, GucSource source)
 static bool
 PgturbohybridCheckBm25HotPostingsCacheMb(int *newval, void **extra, GucSource source)
 {
+	if (!PgturbohybridCheckMaxIntGuc("turbohybrid.bm25_hot_postings_cache_mb", *newval,
+									PGTURBOHYBRID_MAX_HOT_POSTINGS_CACHE_MB))
+		return false;
+
 	pgturbohybrid_bm25_hot_postings_cache_mb_user_set =
 		PgturbohybridGucSourceIsExplicit(source);
 	return true;
@@ -516,6 +574,7 @@ static void
 PgturbohybridAssignProfile(int newval, void *extra)
 {
 	pgturbohybrid_profile = newval;
+	PgturbohybridBumpGucGeneration();
 	PgturbohybridApplyProfileDefaults();
 }
 
@@ -1939,7 +1998,6 @@ pgturbohybridaminsert(Relation index, Datum *values, bool *isnull, ItemPointer h
 {
 	Datum		value;
 	const PgturbohybridGraphTypeInfo *typeInfo = PgturbohybridGraphGetTypeInfo(index);
-	PgturbohybridGraphMetaPageData meta;
 	PgturbohybridGraphSupport support;
 	uint32		nodeId;
 
@@ -1959,11 +2017,8 @@ pgturbohybridaminsert(Relation index, Datum *values, bool *isnull, ItemPointer h
 	LockPage(index, PGTURBOHYBRID_GRAPH_UPDATE_LOCK, ExclusiveLock);
 	PG_TRY();
 	{
-		if (!PgturbohybridGraphReadMeta(index, &meta))
-			elog(ERROR, "pgturbohybrid native graph metapage is missing or invalid");
-		nodeId = meta.tqNodeCount;
-		PgturbohybridGraphInsertValueInPlace(index, indexInfo, heap_tid, value,
-								  values, isnull);
+		nodeId = PgturbohybridGraphInsertValueInPlace(index, indexInfo, heap_tid,
+													  value, values, isnull);
 		if (!isnull[1])
 			PgturbohybridBm25AppendDelta(index, nodeId, heap_tid, values[1]);
 	}
@@ -2489,19 +2544,31 @@ PgturbohybridInit(void)
 
 	DefineCustomIntVariable("turbohybrid.default_dense_k", "Default dense candidate budget for turbohybrid_query callers",
 							NULL, &pgturbohybrid_default_dense_k,
-							PGTURBOHYBRID_DEFAULT_DENSE_K, 0, INT_MAX, PGC_USERSET, 0, NULL, NULL, NULL);
+							PGTURBOHYBRID_DEFAULT_DENSE_K, 0,
+							PGTURBOHYBRID_MAX_DEFAULT_DENSE_K,
+							PGC_USERSET, 0, PgturbohybridCheckDefaultDenseK,
+							PgturbohybridAssignQueryDefaultInt, NULL);
 	DefineCustomIntVariable("turbohybrid.default_bm25_k", "Default BM25 candidate budget for turbohybrid_query callers",
 							NULL, &pgturbohybrid_default_bm25_k,
-							PGTURBOHYBRID_DEFAULT_BM25_K, 0, INT_MAX, PGC_USERSET, 0, NULL, NULL, NULL);
+							PGTURBOHYBRID_DEFAULT_BM25_K, 0,
+							PGTURBOHYBRID_MAX_DEFAULT_BM25_K,
+							PGC_USERSET, 0, PgturbohybridCheckDefaultBm25K,
+							PgturbohybridAssignQueryDefaultInt, NULL);
 	DefineCustomIntVariable("turbohybrid.default_rrf_k", "Default RRF constant for turbohybrid_query callers",
 							NULL, &pgturbohybrid_default_rrf_k,
-							PGTURBOHYBRID_DEFAULT_RRF_K, 1, INT_MAX, PGC_USERSET, 0, NULL, NULL, NULL);
+							PGTURBOHYBRID_DEFAULT_RRF_K, 1,
+							PGTURBOHYBRID_MAX_RRF_K,
+							PGC_USERSET, 0, PgturbohybridCheckDefaultRrfK,
+							PgturbohybridAssignQueryDefaultInt, NULL);
 	DefineCustomBoolVariable("turbohybrid.enable_wand", "Enable WAND pruning for BM25 candidate generation",
 							 NULL, &pgturbohybrid_enable_wand,
 							 true, PGC_USERSET, 0, NULL, NULL, NULL);
 	DefineCustomIntVariable("turbohybrid.max_union_candidates", "Maximum candidates retained while fusing dense and BM25 branches",
 							NULL, &pgturbohybrid_max_union_candidates,
-							100000, 0, INT_MAX, PGC_USERSET, 0, NULL, NULL, NULL);
+							100000, 0,
+							PGTURBOHYBRID_MAX_UNION_CANDIDATES,
+							PGC_USERSET, 0, PgturbohybridCheckMaxUnionCandidates,
+							NULL, NULL);
 	DefineCustomBoolVariable("turbohybrid.simd", "Enable SIMD kernels where supported by the host CPU",
 							 NULL, &pgturbohybrid_simd,
 							 true, PGC_USERSET, 0, NULL, PgturbohybridAssignSimd, NULL);
@@ -2519,7 +2586,8 @@ PgturbohybridInit(void)
 							 PGC_USERSET, 0, PgturbohybridCheckBm25ImpactOrMode, NULL, NULL);
 	DefineCustomIntVariable("turbohybrid.bm25_hot_postings_cache_mb", "Hot postings cache size for repeated common BM25 terms",
 							NULL, &pgturbohybrid_bm25_hot_postings_cache_mb,
-							0, 0, INT_MAX, PGC_USERSET, 0,
+							0, 0, PGTURBOHYBRID_MAX_HOT_POSTINGS_CACHE_MB,
+							PGC_USERSET, 0,
 							PgturbohybridCheckBm25HotPostingsCacheMb, NULL, NULL);
 	DefineCustomIntVariable("turbohybrid.bm25_hot_postings_cache_min_df", "Minimum BM25 document frequency for hot postings cache entries",
 							NULL, &pgturbohybrid_bm25_hot_postings_cache_min_df,

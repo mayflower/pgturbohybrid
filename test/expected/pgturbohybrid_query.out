@@ -77,6 +77,39 @@ RESET turbohybrid.max_union_candidates;
 RESET turbohybrid.simd;
 DO $$
 BEGIN
+	BEGIN
+		EXECUTE 'SET turbohybrid.default_dense_k = 2147483647';
+		RAISE EXCEPTION 'expected default_dense_k cap error';
+	EXCEPTION WHEN invalid_parameter_value THEN
+	END;
+
+	BEGIN
+		EXECUTE 'SET turbohybrid.default_bm25_k = 2147483647';
+		RAISE EXCEPTION 'expected default_bm25_k cap error';
+	EXCEPTION WHEN invalid_parameter_value THEN
+	END;
+
+	BEGIN
+		EXECUTE 'SET turbohybrid.default_rrf_k = 2147483647';
+		RAISE EXCEPTION 'expected default_rrf_k cap error';
+	EXCEPTION WHEN invalid_parameter_value THEN
+	END;
+
+	BEGIN
+		EXECUTE 'SET turbohybrid.max_union_candidates = 2147483647';
+		RAISE EXCEPTION 'expected max_union_candidates cap error';
+	EXCEPTION WHEN invalid_parameter_value THEN
+	END;
+
+	BEGIN
+		EXECUTE 'SET turbohybrid.bm25_hot_postings_cache_mb = 2147483647';
+		RAISE EXCEPTION 'expected bm25_hot_postings_cache_mb cap error';
+	EXCEPTION WHEN invalid_parameter_value THEN
+	END;
+END
+$$;
+DO $$
+BEGIN
 	IF turbohybrid_query_out(turbohybrid_query(
 		vector_query => '[1,0,0]'::vector,
 		text_query => websearch_to_tsquery('english', 'postgres vector search'),
@@ -232,6 +265,35 @@ $$;
 RESET turbohybrid.default_dense_k;
 RESET turbohybrid.default_bm25_k;
 RESET turbohybrid.default_rrf_k;
+CREATE TEMP TABLE tq_constructor_cache_results (
+	id int GENERATED ALWAYS AS IDENTITY,
+	value text
+);
+PREPARE tq_constructor_cache AS
+INSERT INTO tq_constructor_cache_results (value)
+SELECT turbohybrid_query_out(turbohybrid_query(vector_query => '[1]'::vector))::text;
+EXECUTE tq_constructor_cache;
+SET turbohybrid.default_dense_k = 7;
+EXECUTE tq_constructor_cache;
+DO $$
+DECLARE
+	values text[];
+BEGIN
+	SELECT array_agg(value ORDER BY id) INTO values
+	FROM tq_constructor_cache_results;
+
+	IF values[1] NOT LIKE '%dense_k=100%' THEN
+		RAISE EXCEPTION 'prepared query did not use original dense_k default: %', values[1];
+	END IF;
+
+	IF values[2] NOT LIKE '%dense_k=7%' THEN
+		RAISE EXCEPTION 'prepared query reused stale dense_k default after GUC change: %', values[2];
+	END IF;
+END
+$$;
+DEALLOCATE tq_constructor_cache;
+DROP TABLE tq_constructor_cache_results;
+RESET turbohybrid.default_dense_k;
 CREATE TABLE hq_items (id int, val vector(3));
 INSERT INTO hq_items VALUES
 	(1, '[1,0,0]'),
@@ -284,7 +346,7 @@ DO $$
 DECLARE
 	ok bool;
 BEGIN
-	SELECT bool_and(provolatile = 's' AND proparallel = 's') INTO ok
+	SELECT bool_and(provolatile = 's' AND proparallel = 'r') INTO ok
 	FROM pg_proc
 	WHERE oid IN (
 		'turbohybrid_distance(vector,turbohybrid_query)'::regprocedure,
@@ -294,7 +356,19 @@ BEGIN
 	);
 
 	IF NOT ok THEN
-		RAISE EXCEPTION 'pgturbohybrid distance functions should be stable and parallel safe';
+		RAISE EXCEPTION 'pgturbohybrid distance functions should be stable and parallel restricted';
+	END IF;
+END
+$$;
+DO $$
+BEGIN
+	IF NOT EXISTS (
+		SELECT 1
+		FROM pg_proc
+		WHERE oid = 'turbohybrid_last_scan_stats()'::regprocedure
+			AND proparallel = 'r'
+	) THEN
+		RAISE EXCEPTION 'turbohybrid_last_scan_stats should be parallel restricted';
 	END IF;
 END
 $$;

@@ -61,6 +61,14 @@ Performance reports are most useful when they include:
 Generated benchmark artifacts should be attached to issues, releases, or CI
 runs. Do not add full benchmark outputs to the repository.
 
+## Resource Limits
+
+The public `turbohybrid.*` candidate-budget and BM25 cache settings are capped
+on purpose in this alpha. The caps protect shared PostgreSQL servers from
+accidental or unprivileged resource exhaustion while the extension is still
+maturing. If a legitimate workload needs higher limits, include the exact
+settings, `work_mem`, dataset size, and benchmark command in the report.
+
 ## Supported Versions
 
 The current public compatibility target is:

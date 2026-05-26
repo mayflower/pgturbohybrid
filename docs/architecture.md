@@ -129,6 +129,12 @@ The current alpha exposes these user-facing GUCs:
 - `turbohybrid.max_union_candidates`
 - `turbohybrid.simd`
 
+Candidate-budget and cache GUCs have conservative public caps in this alpha:
+`default_dense_k` and `default_bm25_k` are capped at 10,000, `default_rrf_k` at
+100,000, `max_union_candidates` at 1,000,000, and
+`bm25_hot_postings_cache_mb` at 1,024 MB. These are resource-safety limits, not
+quality recommendations.
+
 Profile assignment updates the dynamic defaults for the candidate budgets, BM25
 strategy knobs, hot postings cache, hybrid bound mode, and SIMD setting unless a
 GUC has been explicitly set by the user. The latency profile is the default fast
@@ -180,6 +186,24 @@ Index page changes are WAL-logged with PostgreSQL generic WAL. pgturbohybrid
 does not register a custom resource manager and does not require
 `shared_preload_libraries`. Crash recovery and replicas recover index changes
 from generic WAL and new-page WAL records alone.
+
+## Executor Hooks
+
+pgturbohybrid installs executor hooks because the index scan needs planner
+context that PostgreSQL does not pass directly to an access method callback:
+
+- the graph controller wraps `turbohybrid` index scans so LIMIT-aware scan
+  budgets can be derived from the surrounding plan;
+- the access method records the current `PlannedStmt` so planner-aware hybrid
+  distance functions can reject scalar fallback when a query is not using the
+  intended index-backed `ORDER BY` path.
+
+The hook chain is installed once during `_PG_init()`: graph scan wrapping is
+registered first, then the access-method planned-statement tracker wraps that
+hook. Executor end and transaction/subtransaction abort callbacks clear backend
+state. Scan wrapper state lives only for the current executor invocation; the
+planned-statement stack lives in `TopMemoryContext` and is popped or cleared on
+normal executor end and abort paths.
 
 ## Build Layout
 

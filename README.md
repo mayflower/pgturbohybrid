@@ -164,6 +164,11 @@ final result target when possible. In plain terms: create the default index,
 query with `ORDER BY ... turbohybrid_query(...) LIMIT n`, then inspect the scan
 stats below.
 
+Public candidate and cache settings are intentionally capped in this alpha so a
+user cannot set runaway per-query budgets in a shared PostgreSQL server. If you
+hit a cap during evaluation, please open an issue with the dataset size, query
+shape, and the settings you tried.
+
 For the normal fast path, keep the query simple:
 
 ```sql

@@ -487,7 +487,7 @@ void		PgturbohybridGraphExactRescore(Relation index, PgturbohybridGraphScanOpaqu
 								 PgturbohybridGraphMetaPageData *meta,
 								 PgturbohybridGraphScanNode *nodes,
 								 PgturbohybridGraphResult *results, int count);
-bool		PgturbohybridGraphInsertValueInPlace(Relation index, IndexInfo *indexInfo,
+uint32		PgturbohybridGraphInsertValueInPlace(Relation index, IndexInfo *indexInfo,
 									  ItemPointer heap_tid, Datum value,
 									  Datum *values, bool *isnull);
 int			PgturbohybridGraphPickLevel(uint32 nodeId, int m);

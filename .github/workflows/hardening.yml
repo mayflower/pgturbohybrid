@@ -1,0 +1,120 @@
+name: hardening
+
+on:
+  workflow_dispatch:
+  schedule:
+    - cron: '17 3 * * 1'
+
+jobs:
+  strict-simd-disabled:
+    name: strict math, SIMD disabled
+    runs-on: ubuntu-24.04
+    env:
+      PG_CONFIG: /usr/lib/postgresql/18/bin/pg_config
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: ankane/setup-postgres@v1
+        with:
+          postgres-version: 18
+          dev-files: true
+
+      - name: Build and install upstream pgvector
+        run: |
+          PGVECTOR_DIR="${RUNNER_TEMP:-$PWD/.deps}/pgvector-v0.8.2"
+          rm -rf "$PGVECTOR_DIR"
+          git clone --depth 1 --branch v0.8.2 https://github.com/pgvector/pgvector.git "$PGVECTOR_DIR"
+          make -C "$PGVECTOR_DIR"
+          sudo --preserve-env=PG_CONFIG make -C "$PGVECTOR_DIR" install
+
+      - name: Build pgturbohybrid without SIMD
+        run: make clean && make SIMD_BUILD=none MATH_MODE=strict
+        env:
+          PG_CFLAGS: -DUSE_ASSERT_CHECKING -Wall -Wextra -Werror -Wno-unused-parameter -Wno-sign-compare
+
+      - name: Run regression tests
+        run: |
+          sudo --preserve-env=PG_CONFIG make install
+          make installcheck
+
+      - uses: actions/upload-artifact@v4
+        if: failure()
+        with:
+          name: strict-simd-disabled-regression
+          path: |
+            regression.diffs
+            regression.out
+            log/
+          if-no-files-found: ignore
+
+  gcc:
+    name: gcc strict build
+    runs-on: ubuntu-24.04
+    env:
+      PG_CONFIG: /usr/lib/postgresql/18/bin/pg_config
+      CC: gcc
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: ankane/setup-postgres@v1
+        with:
+          postgres-version: 18
+          dev-files: true
+
+      - name: Build and install upstream pgvector
+        run: |
+          PGVECTOR_DIR="${RUNNER_TEMP:-$PWD/.deps}/pgvector-v0.8.2"
+          rm -rf "$PGVECTOR_DIR"
+          git clone --depth 1 --branch v0.8.2 https://github.com/pgvector/pgvector.git "$PGVECTOR_DIR"
+          make -C "$PGVECTOR_DIR"
+          sudo --preserve-env=PG_CONFIG make -C "$PGVECTOR_DIR" install
+
+      - name: Build and test with gcc
+        run: |
+          make clean
+          make MATH_MODE=strict
+          sudo --preserve-env=PG_CONFIG make install
+          make installcheck
+        env:
+          PG_CFLAGS: -DUSE_ASSERT_CHECKING -Wall -Wextra -Werror -Wno-unused-parameter -Wno-sign-compare
+
+      - uses: actions/upload-artifact@v4
+        if: failure()
+        with:
+          name: gcc-regression
+          path: |
+            regression.diffs
+            regression.out
+            log/
+          if-no-files-found: ignore
+
+  scan-build:
+    name: clang static analyzer
+    runs-on: ubuntu-24.04
+    env:
+      PG_CONFIG: /usr/lib/postgresql/18/bin/pg_config
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: ankane/setup-postgres@v1
+        with:
+          postgres-version: 18
+          dev-files: true
+
+      - name: Install analyzer
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y clang-tools
+
+      - name: Build and install upstream pgvector
+        run: |
+          PGVECTOR_DIR="${RUNNER_TEMP:-$PWD/.deps}/pgvector-v0.8.2"
+          rm -rf "$PGVECTOR_DIR"
+          git clone --depth 1 --branch v0.8.2 https://github.com/pgvector/pgvector.git "$PGVECTOR_DIR"
+          make -C "$PGVECTOR_DIR"
+          sudo --preserve-env=PG_CONFIG make -C "$PGVECTOR_DIR" install
+
+      - name: Run scan-build
+        run: |
+          make clean
+          scan-build --status-bugs --keep-going make MATH_MODE=strict

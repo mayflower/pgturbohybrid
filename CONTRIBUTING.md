@@ -63,3 +63,11 @@ If your change includes a benchmark claim, include the dataset, embedding
 dimensions, query count, index settings, candidate budgets, baseline, and
 quality metrics. Generated benchmark JSON, CSV, and Markdown outputs should
 stay out of the repository.
+
+Default builds use `MATH_MODE=strict` so floating-point validation and ranking
+behavior stay conservative. Use `MATH_MODE=fast` only for explicit performance
+experiments, and state that build setting in any benchmark claim.
+
+The `hardening` GitHub Actions workflow is manual/nightly. Use it for release
+preparation or memory-safety work; it covers a strict SIMD-disabled build, gcc,
+and clang static analysis without slowing every push.

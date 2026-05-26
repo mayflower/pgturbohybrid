@@ -158,7 +158,20 @@ PgturbohybridGraphExecIndexScanWithController(PlanState *planstate)
 	tqgraph_active_payload_filter_attno = payload_filter_attno;
 	tqgraph_active_payload_filter_value = payload_filter_value;
 
-	slot = wrapper_state->original_exec_proc_node(planstate);
+	PG_TRY();
+	{
+		slot = wrapper_state->original_exec_proc_node(planstate);
+	}
+	PG_CATCH();
+	{
+		tqgraph_active_limit_tuple_target = prev_limit_tuple_target;
+		tqgraph_active_estimated_filter_selectivity = prev_estimated_filter_selectivity;
+		tqgraph_active_payload_filter_valid = prev_payload_filter_valid;
+		tqgraph_active_payload_filter_attno = prev_payload_filter_attno;
+		tqgraph_active_payload_filter_value = prev_payload_filter_value;
+		PG_RE_THROW();
+	}
+	PG_END_TRY();
 	tqgraph_active_limit_tuple_target = prev_limit_tuple_target;
 	tqgraph_active_estimated_filter_selectivity = prev_estimated_filter_selectivity;
 	tqgraph_active_payload_filter_valid = prev_payload_filter_valid;
