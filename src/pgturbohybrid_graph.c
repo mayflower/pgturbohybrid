@@ -34,6 +34,7 @@
 #include "pgturbohybrid_vector_compat.h"
 #include "pgturbohybrid_quant.h"
 #include "pgturbohybrid_bm25.h"
+#include "pgturbohybrid_jsonb_compat.h"
 
 #if PG_VERSION_NUM < 150000
 #define MarkGUCPrefixReserved(x) EmitWarningsOnPlaceholders(x)
@@ -47,19 +48,19 @@ static relopt_enum_elt_def pgturbohybrid_routing_relopt_options[] = {
 };
 
 static void
-PgturbohybridIndexStatsJsonbAddKey(JsonbParseState **state, const char *key)
+PgturbohybridIndexStatsJsonbAddKey(PgturbohybridJsonbState *state, const char *key)
 {
 	JsonbValue	value;
 
 	value.type = jbvString;
 	value.val.string.val = (char *) key;
 	value.val.string.len = strlen(key);
-	pushJsonbValue(state, WJB_KEY, &value);
+	PgturbohybridJsonbPush(state, WJB_KEY, &value);
 }
 
 static void
-PgturbohybridIndexStatsJsonbAddString(JsonbParseState **state, const char *key,
-							 const char *val)
+PgturbohybridIndexStatsJsonbAddString(PgturbohybridJsonbState *state, const char *key,
+								 const char *val)
 {
 	JsonbValue	value;
 
@@ -67,24 +68,24 @@ PgturbohybridIndexStatsJsonbAddString(JsonbParseState **state, const char *key,
 	value.type = jbvString;
 	value.val.string.val = (char *) val;
 	value.val.string.len = strlen(val);
-	pushJsonbValue(state, WJB_VALUE, &value);
+	PgturbohybridJsonbPush(state, WJB_VALUE, &value);
 }
 
 static void
-PgturbohybridIndexStatsJsonbAddBool(JsonbParseState **state, const char *key,
-						   bool val)
+PgturbohybridIndexStatsJsonbAddBool(PgturbohybridJsonbState *state, const char *key,
+							   bool val)
 {
 	JsonbValue	value;
 
 	PgturbohybridIndexStatsJsonbAddKey(state, key);
 	value.type = jbvBool;
 	value.val.boolean = val;
-	pushJsonbValue(state, WJB_VALUE, &value);
+	PgturbohybridJsonbPush(state, WJB_VALUE, &value);
 }
 
 static void
-PgturbohybridIndexStatsJsonbAddUInt32(JsonbParseState **state, const char *key,
-							 uint32 val)
+PgturbohybridIndexStatsJsonbAddUInt32(PgturbohybridJsonbState *state, const char *key,
+								 uint32 val)
 {
 	JsonbValue	value;
 
@@ -92,12 +93,12 @@ PgturbohybridIndexStatsJsonbAddUInt32(JsonbParseState **state, const char *key,
 	value.type = jbvNumeric;
 	value.val.numeric = DatumGetNumeric(DirectFunctionCall1(int8_numeric,
 															Int64GetDatum((int64) val)));
-	pushJsonbValue(state, WJB_VALUE, &value);
+	PgturbohybridJsonbPush(state, WJB_VALUE, &value);
 }
 
 static void
-PgturbohybridIndexStatsJsonbAddFloat8(JsonbParseState **state, const char *key,
-							 double val)
+PgturbohybridIndexStatsJsonbAddFloat8(PgturbohybridJsonbState *state, const char *key,
+								 double val)
 {
 	JsonbValue	value;
 
@@ -105,7 +106,7 @@ PgturbohybridIndexStatsJsonbAddFloat8(JsonbParseState **state, const char *key,
 	value.type = jbvNumeric;
 	value.val.numeric = DatumGetNumeric(DirectFunctionCall1(float8_numeric,
 															Float8GetDatum(val)));
-	pushJsonbValue(state, WJB_VALUE, &value);
+	PgturbohybridJsonbPush(state, WJB_VALUE, &value);
 }
 
 static const char *
@@ -272,8 +273,7 @@ pgturbohybrid_index_stats(PG_FUNCTION_ARGS)
 	bool		hasBm25Meta = false;
 	PgturbohybridBm25MetaTupleData bm25Meta;
 	TqOptions  *opts;
-	JsonbParseState *jsonState = NULL;
-	JsonbValue *jsonResult;
+	PgturbohybridJsonbState jsonState;
 
 	index = index_open(indexOid, AccessShareLock);
 	opts = (TqOptions *) index->rd_options;
@@ -356,7 +356,8 @@ pgturbohybrid_index_stats(PG_FUNCTION_ARGS)
 						   tqBm25MetaStartBlkno)));
 	}
 
-	pushJsonbValue(&jsonState, WJB_BEGIN_OBJECT, NULL);
+	PgturbohybridJsonbStateInit(&jsonState);
+	PgturbohybridJsonbBeginObject(&jsonState);
 	PgturbohybridIndexStatsJsonbAddUInt32(&jsonState, "version", 1);
 	PgturbohybridIndexStatsJsonbAddString(&jsonState, "profile",
 										  PgturbohybridProfileName(pgturbohybrid_profile));
@@ -382,8 +383,7 @@ pgturbohybrid_index_stats(PG_FUNCTION_ARGS)
 										  hasBm25Meta ?
 										  (double) (bm25Meta.totalDocLen + bm25Meta.deltaTotalDocLen) /
 										  Max((double) (bm25Meta.docCount + bm25Meta.deltaDocCount), 1.0) : 0.0);
-	jsonResult = pushJsonbValue(&jsonState, WJB_END_OBJECT, NULL);
 	index_close(index, AccessShareLock);
 
-	PG_RETURN_JSONB_P(JsonbValueToJsonb(jsonResult));
+	PG_RETURN_JSONB_P(PgturbohybridJsonbEndObject(&jsonState));
 }
