@@ -7,6 +7,23 @@ Checked items have been verified by repository inspection or static checks in
 this release-prep branch. Unchecked items are still release gates and include a
 known alpha limitation note.
 
+## Evidence Snapshot
+
+- Branch: `security-hardening-alpha2`
+- Latest pushed code evidence commit:
+  `3003d0b41c3540390d98fc0d00394c524de60684`
+- CI build workflow:
+  https://github.com/mayflower/pgturbohybrid/actions/runs/26472545673
+- Local release gate:
+  `PG_CONFIG=/opt/homebrew/opt/postgresql@16/bin/pg_config scripts/release-check.sh`
+- Source archive SHA256 from the clean local release gate:
+  - `cf2a3d3a078c671769140002004e8a32ea885c483dbfde8ced3531f61e04121c  dist/pgturbohybrid-0.1.0.tar.gz`
+  - `707a07c306c05afbc4775c46157ce931451bc6ce1b461bc14ae1460dd58af8d2  dist/pgturbohybrid-0.1.0.zip`
+
+The final tag commit should be confirmed with `git rev-parse HEAD` immediately
+before tagging. A tracked signoff file cannot contain its own commit hash without
+changing that hash.
+
 ## Repository Hygiene
 
 - [x] no generated benchmark JSON/Markdown artifacts tracked
