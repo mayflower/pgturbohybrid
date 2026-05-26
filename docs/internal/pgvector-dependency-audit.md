@@ -117,10 +117,11 @@ symbols. They are covered by the later final rename sweep.
 
 ## Licensing And Attribution
 
-This repository preserves the pgvector license in `LICENSE`. Code derived from
-pgvector remains under that license. Documentation and release materials should
-continue to state that pgturbohybrid depends on pgvector and contains code
-derived from pgvector's HNSW implementation.
+This repository uses the PostgreSQL License in `LICENSE`. Code derived from
+pgvector remains under that license, with attribution preserved in `NOTICE`.
+Documentation and release materials should continue to state that pgturbohybrid
+depends on pgvector and contains code derived from pgvector's HNSW
+implementation.
 
 ## Compatibility Testing Plan
 

@@ -1,9 +1,15 @@
 pgturbohybrid
 
-This project depends on pgvector and contains code derived from pgvector's
-HNSW index implementation.
+Copyright (c) 2026, Mayflower
+
+This project is distributed under the PostgreSQL License. See LICENSE.
+
+pgturbohybrid depends on pgvector and contains code derived from pgvector's
+HNSW index implementation. The derived portions retain the PostgreSQL License
+terms and attribution from the upstream project.
 
 pgvector is maintained by Andrew Kane and pgvector contributors and is
-distributed under the PostgreSQL License. pgturbohybrid preserves this
-attribution for pgvector-derived code. pgturbohybrid is a separate experimental
-extension and is not an official pgvector project.
+distributed under the PostgreSQL License.
+
+pgturbohybrid is a separate experimental extension and is not an official
+pgvector project.
