@@ -3900,7 +3900,16 @@ tqgraphgettuple(IndexScanDesc scan, ScanDirection dir)
 			elog(ERROR, "non-MVCC snapshots are not supported with pgturbohybrid graph");
 
 		LockPage(scan->indexRelation, PGTURBOHYBRID_GRAPH_SCAN_LOCK, ShareLock);
-		PgturbohybridGraphCollectResults(scan, so, 0);
+		PG_TRY();
+		{
+			PgturbohybridGraphCollectResults(scan, so, 0);
+		}
+		PG_CATCH();
+		{
+			UnlockPage(scan->indexRelation, PGTURBOHYBRID_GRAPH_SCAN_LOCK, ShareLock);
+			PG_RE_THROW();
+		}
+		PG_END_TRY();
 		UnlockPage(scan->indexRelation, PGTURBOHYBRID_GRAPH_SCAN_LOCK, ShareLock);
 		so->first = false;
 	}

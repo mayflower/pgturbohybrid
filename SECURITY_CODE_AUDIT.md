@@ -22,7 +22,7 @@ evidence.
 | Executor hook ownership and cleanup need a deliberate audit pass | High priority | Fixed for alpha |
 | `turbohybrid_query` varlena validation should reject trailing bytes and overflowed sizes | High priority | Fixed |
 | Global fast-math compiler flags should become opt-in | Medium priority | Fixed |
-| Parallel and concurrent build behavior needs proof or explicit restriction | Medium priority | Fixed for alpha |
+| Parallel and concurrent build behavior needs proof or explicit restriction | Medium priority | Parallel build disabled for alpha; concurrent build tested |
 | Insert/delta node-ID and crash behavior needs stronger evidence | Medium priority | Fixed for alpha |
 | BM25 large-tsquery bitmask handling needs a defined limit or dynamic bitmap | Medium priority | Fixed with 64-term cap |
 | Diagnostics JSON construction should move away from manual string assembly | Alpha accepted risk | Fixed |
@@ -76,8 +76,9 @@ This section is updated as tests land.
   usability after a handled error.
 - Security regression for diagnostics JSON shape.
 - Security regression for inserted-row hybrid visibility after build.
-- Security regression for parallel-maintenance index build and
-  `CREATE INDEX CONCURRENTLY`.
+- Security regression for `CREATE INDEX` with parallel maintenance settings and
+  `CREATE INDEX CONCURRENTLY`; the access method does not advertise parallel
+  build for alpha.
 - Existing `installcheck` suite now includes `security`.
 - TAP restart tests cover build, concurrent build, insert, delete, vacuum,
   reindex, unlogged tables, immediate stop, and restart when PostgreSQL TAP
