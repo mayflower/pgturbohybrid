@@ -30,10 +30,11 @@ OBJS = \
 
 HEADERS =
 
-REGRESS = extension pgturbohybrid pgturbohybrid_query
+REGRESS = extension pgturbohybrid pgturbohybrid_query security
 REGRESS_OPTS = --inputdir=test
 
 SIMD_BUILD = portable
+MATH_MODE = strict
 PGTURBOHYBRID_REQUIRE_VECTOR_HEADER = 0
 
 !ifndef PGROOT
@@ -79,7 +80,15 @@ SIMD_CFLAGS =
 !error unsupported SIMD_BUILD=$(SIMD_BUILD); expected portable or none
 !endif
 
-PG_CFLAGS = $(PG_CFLAGS) /O2 /fp:fast $(SIMD_CFLAGS)
+!if "$(MATH_MODE)" == "fast"
+MATH_CFLAGS = /fp:fast
+!elseif "$(MATH_MODE)" == "strict"
+MATH_CFLAGS = /fp:precise
+!else
+!error unsupported MATH_MODE=$(MATH_MODE); expected strict or fast
+!endif
+
+PG_CFLAGS = $(PG_CFLAGS) /O2 $(MATH_CFLAGS) $(SIMD_CFLAGS)
 
 CFLAGS = /nologo /I"$(INCLUDEDIR_SERVER)\port\win32_msvc" /I"$(INCLUDEDIR_SERVER)\port\win32" /I"$(INCLUDEDIR_SERVER)" /I"$(INCLUDEDIR)" $(PGVECTOR_CFLAGS)
 CFLAGS = $(CFLAGS) $(PG_CFLAGS)

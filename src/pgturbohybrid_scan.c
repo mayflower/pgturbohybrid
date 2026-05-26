@@ -512,6 +512,7 @@ pgturbohybrid_graph_get_tuple(IndexScanDesc scan, ScanDirection dir)
 	if (so->first)
 	{
 		Datum		value;
+		bool		scanLockHeld = false;
 
 		/* Count index scan for stats */
 		pgstat_count_index_scan(scan->indexRelation);
@@ -541,14 +542,26 @@ pgturbohybrid_graph_get_tuple(IndexScanDesc scan, ScanDirection dir)
 		 * before marking tuples as deleted.
 		 */
 		LockPage(scan->indexRelation, PGTURBOHYBRID_GRAPH_SCAN_LOCK, ShareLock);
+		scanLockHeld = true;
 
-		if (so->pgturbohybridFlatScan)
-			so->w = GetFlatScanItems(scan, value);
-		else
-			so->w = GetScanItems(scan, value);
+		PG_TRY();
+		{
+			if (so->pgturbohybridFlatScan)
+				so->w = GetFlatScanItems(scan, value);
+			else
+				so->w = GetScanItems(scan, value);
+		}
+		PG_CATCH();
+		{
+			if (scanLockHeld)
+				UnlockPage(scan->indexRelation, PGTURBOHYBRID_GRAPH_SCAN_LOCK, ShareLock);
+			PG_RE_THROW();
+		}
+		PG_END_TRY();
 
 		/* Release shared lock */
 		UnlockPage(scan->indexRelation, PGTURBOHYBRID_GRAPH_SCAN_LOCK, ShareLock);
+		scanLockHeld = false;
 
 		so->first = false;
 
@@ -587,6 +600,8 @@ pgturbohybrid_graph_get_tuple(IndexScanDesc scan, ScanDirection dir)
 			}
 			else
 			{
+				bool		scanLockHeld = false;
+
 				/*
 				 * Locking ensures when neighbors are read, the elements they
 				 * reference will not be deleted (and replaced) during the
@@ -597,10 +612,22 @@ pgturbohybrid_graph_get_tuple(IndexScanDesc scan, ScanDirection dir)
 				 * element version must be checked.
 				 */
 				LockPage(scan->indexRelation, PGTURBOHYBRID_GRAPH_SCAN_LOCK, ShareLock);
+				scanLockHeld = true;
 
-				so->w = ResumeScanItems(scan);
+				PG_TRY();
+				{
+					so->w = ResumeScanItems(scan);
+				}
+				PG_CATCH();
+				{
+					if (scanLockHeld)
+						UnlockPage(scan->indexRelation, PGTURBOHYBRID_GRAPH_SCAN_LOCK, ShareLock);
+					PG_RE_THROW();
+				}
+				PG_END_TRY();
 
 				UnlockPage(scan->indexRelation, PGTURBOHYBRID_GRAPH_SCAN_LOCK, ShareLock);
+				scanLockHeld = false;
 
 #if defined(PGTURBOHYBRID_GRAPH_MEMORY)
 				ShowMemoryUsage(so);

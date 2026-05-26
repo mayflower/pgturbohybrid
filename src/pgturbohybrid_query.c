@@ -29,6 +29,8 @@ FUNCTION_PREFIX PG_FUNCTION_INFO_V1(pgturbohybrid_cosine_distance);
 
 static Size PgturbohybridQueryVectorOffset(void);
 static Size PgturbohybridQueryTsQueryOffset(PgturbohybridQueryHeader *query);
+static Size PgturbohybridQueryAlignedSize(Size value);
+static Size PgturbohybridQuerySizeAdd(Size a, Size b);
 static uint16 PgturbohybridQueryParseFusion(text *fusion);
 static void PgturbohybridQueryCheckPositiveInt(const char *name, int32 value);
 static void PgturbohybridQueryCheckNonNegativeInt(const char *name, int32 value);
@@ -49,7 +51,30 @@ PgturbohybridQueryVectorOffset(void)
 static Size
 PgturbohybridQueryTsQueryOffset(PgturbohybridQueryHeader *query)
 {
-	return PgturbohybridQueryVectorOffset() + MAXALIGN(query->vectorBytes);
+	return PgturbohybridQuerySizeAdd(PgturbohybridQueryVectorOffset(),
+									 PgturbohybridQueryAlignedSize(query->vectorBytes));
+}
+
+static Size
+PgturbohybridQueryAlignedSize(Size value)
+{
+	if (value > MaxAllocSize - (MAXIMUM_ALIGNOF - 1))
+		ereport(ERROR,
+				(errcode(ERRCODE_PROGRAM_LIMIT_EXCEEDED),
+				 errmsg("turbohybrid_query payload is too large")));
+
+	return MAXALIGN(value);
+}
+
+static Size
+PgturbohybridQuerySizeAdd(Size a, Size b)
+{
+	if (a > MaxAllocSize - b)
+		ereport(ERROR,
+				(errcode(ERRCODE_PROGRAM_LIMIT_EXCEEDED),
+				 errmsg("turbohybrid_query payload is too large")));
+
+	return a + b;
 }
 
 Vector *
@@ -103,12 +128,22 @@ PgturbohybridQueryValidateFast(PgturbohybridQueryHeader *query)
 static void
 PgturbohybridQueryValidateInternal(PgturbohybridQueryHeader *query, bool strict)
 {
+	Size		actual;
+	Size		vectorOffset;
+	Size		tsqueryOffset;
 	Size		expected;
 
 	if (query == NULL)
 		ereport(ERROR,
 				(errcode(ERRCODE_DATA_EXCEPTION),
 				 errmsg("turbohybrid_query cannot be null")));
+
+	actual = VARSIZE_ANY(query);
+	vectorOffset = PgturbohybridQueryVectorOffset();
+	if (actual < vectorOffset)
+		ereport(ERROR,
+				(errcode(ERRCODE_DATA_EXCEPTION),
+				 errmsg("truncated turbohybrid_query payload")));
 
 	if (query->version != PGTURBOHYBRID_QUERY_VERSION)
 		ereport(ERROR,
@@ -137,6 +172,11 @@ PgturbohybridQueryValidateInternal(PgturbohybridQueryHeader *query, bool strict)
 		Vector	   *vector = (Vector *) ((char *) query + PgturbohybridQueryVectorOffset());
 		Size		vectorBytes;
 
+		if (PgturbohybridQuerySizeAdd(vectorOffset, query->vectorBytes) > actual)
+			ereport(ERROR,
+					(errcode(ERRCODE_DATA_EXCEPTION),
+					 errmsg("truncated turbohybrid_query payload")));
+
 		if (strict)
 			PgturbohybridCheckVector(vector);
 		else
@@ -154,11 +194,17 @@ PgturbohybridQueryValidateInternal(PgturbohybridQueryHeader *query, bool strict)
 				(errcode(ERRCODE_DATA_EXCEPTION),
 				 errmsg("turbohybrid_query tsquery payload is inconsistent")));
 
-	expected = PgturbohybridQueryTsQueryOffset(query) + MAXALIGN(query->tsqueryBytes);
-	if (VARSIZE_ANY(query) < expected)
+	tsqueryOffset = PgturbohybridQueryTsQueryOffset(query);
+	if (PgturbohybridQuerySizeAdd(tsqueryOffset, query->tsqueryBytes) > actual)
 		ereport(ERROR,
 				(errcode(ERRCODE_DATA_EXCEPTION),
 				 errmsg("truncated turbohybrid_query payload")));
+	expected = PgturbohybridQuerySizeAdd(tsqueryOffset,
+										 PgturbohybridQueryAlignedSize(query->tsqueryBytes));
+	if (actual != expected)
+		ereport(ERROR,
+				(errcode(ERRCODE_DATA_EXCEPTION),
+				 errmsg("malformed turbohybrid_query payload")));
 }
 
 Datum
@@ -275,6 +321,7 @@ typedef struct PgturbohybridQueryPlanCheckCache
 typedef struct PgturbohybridQueryConstructorCache
 {
 	Node	   *expr;
+	uint64		gucGeneration;
 	PgturbohybridQueryHeader *query;
 } PgturbohybridQueryConstructorCache;
 
@@ -474,6 +521,7 @@ PgturbohybridQueryConstructorCached(FunctionCallInfo fcinfo)
 	cache = (PgturbohybridQueryConstructorCache *) fcinfo->flinfo->fn_extra;
 	if (cache == NULL ||
 		cache->expr != fcinfo->flinfo->fn_expr ||
+		cache->gucGeneration != pgturbohybrid_guc_generation ||
 		cache->query == NULL)
 		return NULL;
 
@@ -501,6 +549,7 @@ PgturbohybridQueryConstructorStoreCache(FunctionCallInfo fcinfo,
 	cache->query = palloc(size);
 	memcpy(cache->query, query, size);
 	cache->expr = fcinfo->flinfo->fn_expr;
+	cache->gucGeneration = pgturbohybrid_guc_generation;
 	fcinfo->flinfo->fn_extra = cache;
 
 	MemoryContextSwitchTo(oldCtx);
@@ -514,6 +563,8 @@ pgturbohybrid_query_constructor(PG_FUNCTION_ARGS)
 	struct varlena *tsqueryDatum = NULL;
 	int32		vectorBytes = 0;
 	int32		tsqueryBytes = 0;
+	Size		vectorSize = 0;
+	Size		tsquerySize = 0;
 	uint16		flags = 0;
 	uint16		fusion;
 	float8		denseWeight;
@@ -534,14 +585,24 @@ pgturbohybrid_query_constructor(PG_FUNCTION_ARGS)
 	if (!PG_ARGISNULL(0))
 	{
 		vectorDatum = PG_DETOAST_DATUM_COPY(PG_GETARG_DATUM(0));
-		vectorBytes = VARSIZE_ANY(vectorDatum);
+		vectorSize = VARSIZE_ANY(vectorDatum);
+		if (vectorSize > PG_INT32_MAX)
+			ereport(ERROR,
+					(errcode(ERRCODE_PROGRAM_LIMIT_EXCEEDED),
+					 errmsg("turbohybrid_query vector payload is too large")));
+		vectorBytes = (int32) vectorSize;
 		flags |= PGTURBOHYBRID_QUERY_FLAG_HAS_VECTOR;
 	}
 
 	if (!PG_ARGISNULL(1))
 	{
 		tsqueryDatum = PG_DETOAST_DATUM_COPY(PG_GETARG_DATUM(1));
-		tsqueryBytes = VARSIZE_ANY(tsqueryDatum);
+		tsquerySize = VARSIZE_ANY(tsqueryDatum);
+		if (tsquerySize > PG_INT32_MAX)
+			ereport(ERROR,
+					(errcode(ERRCODE_PROGRAM_LIMIT_EXCEEDED),
+					 errmsg("turbohybrid_query tsquery payload is too large")));
+		tsqueryBytes = (int32) tsquerySize;
 		flags |= PGTURBOHYBRID_QUERY_FLAG_HAS_TSQUERY;
 	}
 
@@ -624,9 +685,10 @@ pgturbohybrid_query_constructor(PG_FUNCTION_ARGS)
 	if (requireBm25Match)
 		flags |= PGTURBOHYBRID_QUERY_FLAG_REQUIRE_BM25_MATCH;
 
-	totalSize = PgturbohybridQueryVectorOffset() +
-		MAXALIGN(vectorBytes) +
-		MAXALIGN(tsqueryBytes);
+	totalSize = PgturbohybridQuerySizeAdd(PgturbohybridQueryVectorOffset(),
+										  PgturbohybridQueryAlignedSize(vectorBytes));
+	totalSize = PgturbohybridQuerySizeAdd(totalSize,
+										  PgturbohybridQueryAlignedSize(tsqueryBytes));
 	result = palloc0(totalSize);
 	SET_VARSIZE(result, totalSize);
 	result->version = PGTURBOHYBRID_QUERY_VERSION;

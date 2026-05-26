@@ -32,6 +32,9 @@
 #include "pgturbohybrid_am.h"
 #include "pgturbohybrid_bm25.h"
 
+#define PGTURBOHYBRID_BM25_MAX_NODE_COUNT_FOR_CACHE 10000000U
+#define PGTURBOHYBRID_BM25_MAX_TERM_COUNT_FOR_CACHE 10000000U
+
 int			pgturbohybrid_last_bm25_decode_kernel = PGTURBOHYBRID_BM25_KERNEL_SCALAR;
 int			pgturbohybrid_last_bm25_score_kernel = PGTURBOHYBRID_BM25_KERNEL_SCALAR;
 uint64		pgturbohybrid_last_bm25_simd_blocks = 0;
@@ -599,6 +602,126 @@ static int PgturbohybridBm25FindQueryTerm(PgturbohybridBm25QueryTerm *terms,
 									 int termCount, const char *term,
 									 uint16 termLen);
 
+static Size
+PgturbohybridBm25ArrayAllocSize(Size elemSize, Size count)
+{
+	if (elemSize != 0 && count > MaxAllocSize / elemSize)
+		ereport(ERROR,
+				(errcode(ERRCODE_PROGRAM_LIMIT_EXCEEDED),
+				 errmsg("pgturbohybrid BM25 allocation request is too large")));
+
+	return elemSize * count;
+}
+
+static uint32
+PgturbohybridBm25GrowCapacity32(uint32 capacity, uint32 needed, Size elemSize)
+{
+	uint32		newCapacity = Max(capacity, 1);
+
+	while (newCapacity < needed)
+	{
+		if (newCapacity > PG_UINT32_MAX / 2)
+			ereport(ERROR,
+					(errcode(ERRCODE_PROGRAM_LIMIT_EXCEEDED),
+					 errmsg("pgturbohybrid BM25 array capacity is too large")));
+		newCapacity *= 2;
+	}
+
+	(void) PgturbohybridBm25ArrayAllocSize(elemSize, newCapacity);
+	return newCapacity;
+}
+
+static void *
+PgturbohybridBm25MemoryContextAllocArray(MemoryContext context,
+									Size elemSize, Size count)
+{
+	return MemoryContextAlloc(context,
+							  PgturbohybridBm25ArrayAllocSize(elemSize, count));
+}
+
+static void *
+PgturbohybridBm25MemoryContextAllocZeroArray(MemoryContext context,
+										Size elemSize, Size count)
+{
+	return MemoryContextAllocZero(context,
+								  PgturbohybridBm25ArrayAllocSize(elemSize, count));
+}
+
+static void *
+PgturbohybridBm25PallocArray(Size elemSize, Size count)
+{
+	return palloc(PgturbohybridBm25ArrayAllocSize(elemSize, count));
+}
+
+static void *
+PgturbohybridBm25Palloc0Array(Size elemSize, Size count)
+{
+	return palloc0(PgturbohybridBm25ArrayAllocSize(elemSize, count));
+}
+
+static void *
+PgturbohybridBm25RepallocArray(void *pointer, Size elemSize, Size count)
+{
+	return repalloc(pointer, PgturbohybridBm25ArrayAllocSize(elemSize, count));
+}
+
+static void
+PgturbohybridBm25ValidateBlockPointer(const char *name, BlockNumber blkno,
+								 BlockNumber nblocks)
+{
+	if (BlockNumberIsValid(blkno) && blkno >= nblocks)
+		ereport(ERROR,
+				(errcode(ERRCODE_DATA_CORRUPTED),
+				 errmsg("pgturbohybrid BM25 metadata block pointer is invalid"),
+				 errdetail("%s points to block %u, but the index has only %u blocks.",
+						   name, blkno, nblocks)));
+}
+
+static void
+PgturbohybridBm25ValidateCacheMeta(Relation index,
+							  const PgturbohybridBm25MetaTupleData *bm25Meta,
+							  const PgturbohybridGraphMetaPageData *graphMeta)
+{
+	BlockNumber nblocks = RelationGetNumberOfBlocks(index);
+	Size		maxTuplesFromBlocks = (Size) Max(nblocks, 1) * MaxOffsetNumber;
+
+	if (graphMeta->tqNodeCount > PGTURBOHYBRID_BM25_MAX_NODE_COUNT_FOR_CACHE ||
+		(Size) graphMeta->tqNodeCount > maxTuplesFromBlocks)
+		ereport(ERROR,
+				(errcode(ERRCODE_DATA_CORRUPTED),
+				 errmsg("pgturbohybrid BM25 metadata node count is invalid"),
+				 errdetail("Metadata reports %u nodes for an index with %u blocks.",
+						   graphMeta->tqNodeCount, nblocks)));
+
+	if (bm25Meta->docCount > graphMeta->tqNodeCount)
+		ereport(ERROR,
+				(errcode(ERRCODE_DATA_CORRUPTED),
+				 errmsg("pgturbohybrid BM25 metadata document count is invalid"),
+				 errdetail("BM25 metadata reports %u documents but graph metadata reports %u nodes.",
+						   bm25Meta->docCount, graphMeta->tqNodeCount)));
+
+	if (bm25Meta->termCount > PGTURBOHYBRID_BM25_MAX_TERM_COUNT_FOR_CACHE ||
+		(Size) bm25Meta->termCount > maxTuplesFromBlocks)
+		ereport(ERROR,
+				(errcode(ERRCODE_DATA_CORRUPTED),
+				 errmsg("pgturbohybrid BM25 metadata term count is invalid"),
+				 errdetail("BM25 metadata reports %u terms for an index with %u blocks.",
+						   bm25Meta->termCount, nblocks)));
+
+	PgturbohybridBm25ValidateBlockPointer("docStatsStartBlkno",
+										  bm25Meta->docStatsStartBlkno, nblocks);
+	PgturbohybridBm25ValidateBlockPointer("lexiconStartBlkno",
+										  bm25Meta->lexiconStartBlkno, nblocks);
+	PgturbohybridBm25ValidateBlockPointer("postingsStartBlkno",
+										  bm25Meta->postingsStartBlkno, nblocks);
+	PgturbohybridBm25ValidateBlockPointer("blockMaxStartBlkno",
+										  bm25Meta->blockMaxStartBlkno, nblocks);
+	PgturbohybridBm25ValidateBlockPointer("deltaStartBlkno",
+										  bm25Meta->deltaStartBlkno, nblocks);
+	PgturbohybridBm25ValidateBlockPointer("deltaTermDirectoryBlkno",
+										  bm25Meta->deltaTermDirectoryBlkno, nblocks);
+}
+
 static uint64
 PgturbohybridBm25ElapsedUs(instr_time start)
 {
@@ -667,31 +790,36 @@ PgturbohybridBm25AccumulatorInit(PgturbohybridBm25Accumulator *acc,
 
 			if (pgturbohybrid_bm25_dense_accumulator.entries == NULL)
 				pgturbohybrid_bm25_dense_accumulator.entries =
-					MemoryContextAlloc(CacheMemoryContext,
-									   sizeof(PgturbohybridBm25AccumulatorEntry) *
-									   nodeCount);
+					PgturbohybridBm25MemoryContextAllocArray(CacheMemoryContext,
+															 sizeof(PgturbohybridBm25AccumulatorEntry),
+															 nodeCount);
 			else
 				pgturbohybrid_bm25_dense_accumulator.entries =
-					repalloc(pgturbohybrid_bm25_dense_accumulator.entries,
-							 sizeof(PgturbohybridBm25AccumulatorEntry) * nodeCount);
+					PgturbohybridBm25RepallocArray(pgturbohybrid_bm25_dense_accumulator.entries,
+												   sizeof(PgturbohybridBm25AccumulatorEntry),
+												   nodeCount);
 			if (pgturbohybrid_bm25_dense_accumulator.generations == NULL)
 				pgturbohybrid_bm25_dense_accumulator.generations =
-					MemoryContextAllocZero(CacheMemoryContext,
-										   sizeof(uint32) * nodeCount);
+					PgturbohybridBm25MemoryContextAllocZeroArray(CacheMemoryContext,
+																 sizeof(uint32),
+																 nodeCount);
 			else
 			{
 				pgturbohybrid_bm25_dense_accumulator.generations =
-					repalloc(pgturbohybrid_bm25_dense_accumulator.generations,
-							 sizeof(uint32) * nodeCount);
+					PgturbohybridBm25RepallocArray(pgturbohybrid_bm25_dense_accumulator.generations,
+												   sizeof(uint32),
+												   nodeCount);
 				memset(pgturbohybrid_bm25_dense_accumulator.generations + oldCapacity,
-					   0, sizeof(uint32) * (nodeCount - oldCapacity));
+					   0, PgturbohybridBm25ArrayAllocSize(sizeof(uint32),
+														 nodeCount - oldCapacity));
 			}
 			pgturbohybrid_bm25_dense_accumulator.capacity = nodeCount;
 		}
 		if (++pgturbohybrid_bm25_dense_accumulator.generation == 0)
 		{
 			memset(pgturbohybrid_bm25_dense_accumulator.generations, 0,
-				   sizeof(uint32) * pgturbohybrid_bm25_dense_accumulator.capacity);
+				   PgturbohybridBm25ArrayAllocSize(sizeof(uint32),
+												   pgturbohybrid_bm25_dense_accumulator.capacity));
 			pgturbohybrid_bm25_dense_accumulator.generation = 1;
 		}
 		MemoryContextSwitchTo(oldCtx);
@@ -713,14 +841,14 @@ PgturbohybridBm25AccumulatorInit(PgturbohybridBm25Accumulator *acc,
 								   HASH_ELEM | HASH_BLOBS | HASH_CONTEXT);
 	}
 	acc->touchedCapacity = Max(initialSize, 16);
-	acc->touched = MemoryContextAllocZero(memoryContext,
-										  sizeof(PgturbohybridBm25NodeScore) *
-										  acc->touchedCapacity);
+	acc->touched = PgturbohybridBm25MemoryContextAllocZeroArray(memoryContext,
+															   sizeof(PgturbohybridBm25NodeScore),
+															   acc->touchedCapacity);
 	acc->topHeapCapacity = topK;
 	if (topK > 0)
-		acc->topHeap = MemoryContextAllocZero(memoryContext,
-											  sizeof(PgturbohybridBm25AccumulatorEntry *) *
-											  topK);
+		acc->topHeap = PgturbohybridBm25MemoryContextAllocZeroArray(memoryContext,
+																	sizeof(PgturbohybridBm25AccumulatorEntry *),
+																	topK);
 	acc->memoryContext = memoryContext;
 	acc->stats = stats;
 	if (stats != NULL)
@@ -877,10 +1005,13 @@ PgturbohybridBm25AccumulatorLookup(PgturbohybridBm25Accumulator *acc, uint32 nod
 
 	if (acc->touchedCount >= acc->touchedCapacity)
 	{
-		acc->touchedCapacity *= 2;
-		acc->touched = repalloc(acc->touched,
-								 sizeof(PgturbohybridBm25NodeScore) *
-								 acc->touchedCapacity);
+		acc->touchedCapacity =
+			PgturbohybridBm25GrowCapacity32(acc->touchedCapacity,
+											acc->touchedCount + 1,
+											sizeof(PgturbohybridBm25NodeScore));
+		acc->touched = PgturbohybridBm25RepallocArray(acc->touched,
+													  sizeof(PgturbohybridBm25NodeScore),
+													  acc->touchedCapacity);
 	}
 	acc->touched[acc->touchedCount].nodeId = nodeId;
 	acc->touched[acc->touchedCount].score = 0.0;
@@ -1064,7 +1195,7 @@ PgturbohybridBm25LoadDocStats(Relation index, const PgturbohybridBm25MetaTupleDa
 {
 	BlockNumber blkno = meta->docStatsStartBlkno;
 
-	memset(docLens, 0, sizeof(uint32) * nodeCount);
+	memset(docLens, 0, PgturbohybridBm25ArrayAllocSize(sizeof(uint32), nodeCount));
 	while (BlockNumberIsValid(blkno))
 	{
 		Buffer		buf;
@@ -1124,9 +1255,12 @@ PgturbohybridBm25LoadHeapTids(Relation index, const PgturbohybridGraphMetaPageDa
 												 codeTuplesPerPage);
 	BlockNumber *codeBlknos;
 
-	memset(heapTids, 0, sizeof(ItemPointerData) * meta->tqNodeCount);
-	memset(liveNodes, 0, sizeof(bool) * meta->tqNodeCount);
-	codeBlknos = palloc(sizeof(BlockNumber) * codePageCount);
+	memset(heapTids, 0,
+		   PgturbohybridBm25ArrayAllocSize(sizeof(ItemPointerData),
+										   meta->tqNodeCount));
+	memset(liveNodes, 0,
+		   PgturbohybridBm25ArrayAllocSize(sizeof(bool), meta->tqNodeCount));
+	codeBlknos = PgturbohybridBm25PallocArray(sizeof(BlockNumber), codePageCount);
 	PgturbohybridGraphInitBlockMap(codeBlknos, codePageCount);
 
 	for (int pageNo = 0; pageNo < codePageCount; pageNo++)
@@ -1246,19 +1380,25 @@ PgturbohybridBm25CacheAppendTermBytes(PgturbohybridBm25Cache *cache,
 								 const char *termBytes, uint16 termLen)
 {
 	uint32		offset = cache->termBytesArenaUsed;
-	uint32		required = offset + termLen;
+	uint32		required;
+
+	if (offset > PG_UINT32_MAX - termLen)
+		ereport(ERROR,
+				(errcode(ERRCODE_PROGRAM_LIMIT_EXCEEDED),
+				 errmsg("pgturbohybrid BM25 term byte arena is too large")));
+	required = offset + termLen;
 
 	if (required > cache->termBytesArenaCapacity)
 	{
 		uint32		newCapacity = Max(cache->termBytesArenaCapacity, 1024);
 
-		while (newCapacity < required)
-			newCapacity *= 2;
+		newCapacity = PgturbohybridBm25GrowCapacity32(newCapacity, required, 1);
 		if (cache->termBytesArena == NULL)
-			cache->termBytesArena = palloc(newCapacity);
+			cache->termBytesArena = PgturbohybridBm25PallocArray(1, newCapacity);
 		else
-			cache->termBytesArena = repalloc(cache->termBytesArena,
-											 newCapacity);
+			cache->termBytesArena =
+				PgturbohybridBm25RepallocArray(cache->termBytesArena, 1,
+											   newCapacity);
 		cache->termBytesArenaCapacity = newCapacity;
 	}
 
@@ -1274,8 +1414,9 @@ PgturbohybridBm25LoadLexiconDirectory(Relation index,
 {
 	BlockNumber blkno = meta->lexiconStartBlkno;
 
-	cache->lexicon = palloc0(sizeof(PgturbohybridBm25CacheLexiconEntry) *
-							 Max(meta->termCount, 1));
+	cache->lexicon =
+		PgturbohybridBm25Palloc0Array(sizeof(PgturbohybridBm25CacheLexiconEntry),
+									  Max(meta->termCount, 1));
 	while (BlockNumberIsValid(blkno))
 	{
 		Buffer		buf;
@@ -1361,6 +1502,7 @@ PgturbohybridBm25BuildCache(Relation index,
 	MemoryContext oldCtx;
 	PgturbohybridBm25Cache *cache;
 
+	PgturbohybridBm25ValidateCacheMeta(index, bm25Meta, graphMeta);
 	cacheCtx = AllocSetContextCreate(CacheMemoryContext,
 									 "pgturbohybrid BM25 reader cache",
 									 ALLOCSET_DEFAULT_SIZES);
@@ -1402,7 +1544,8 @@ PgturbohybridBm25EnsureDocStats(Relation index, PgturbohybridBm25Cache *cache,
 		return;
 
 	oldCtx = MemoryContextSwitchTo(cache->ctx);
-	cache->docLens = palloc0(sizeof(uint32) * Max(cache->nodeCount, 1));
+	cache->docLens = PgturbohybridBm25Palloc0Array(sizeof(uint32),
+												   Max(cache->nodeCount, 1));
 	PgturbohybridBm25LoadDocStats(index, bm25Meta, graphMeta->tqNodeCount,
 							 cache->docLens);
 	cache->docStatsLoaded = true;
@@ -1419,9 +1562,10 @@ PgturbohybridBm25EnsureLiveness(Relation index, PgturbohybridBm25Cache *cache,
 		return;
 
 	oldCtx = MemoryContextSwitchTo(cache->ctx);
-	cache->heapTids = palloc0(sizeof(ItemPointerData) *
-							  Max(cache->nodeCount, 1));
-	cache->liveNodes = palloc0(sizeof(bool) * Max(cache->nodeCount, 1));
+	cache->heapTids = PgturbohybridBm25Palloc0Array(sizeof(ItemPointerData),
+													Max(cache->nodeCount, 1));
+	cache->liveNodes = PgturbohybridBm25Palloc0Array(sizeof(bool),
+													 Max(cache->nodeCount, 1));
 	PgturbohybridBm25LoadHeapTids(index, graphMeta, cache->heapTids,
 							 cache->liveNodes);
 	cache->livenessLoaded = true;
@@ -1586,9 +1730,12 @@ PgturbohybridBm25FinalizeDeltaBuildEntries(PgturbohybridBm25DeltaBuildEntry *bui
 			i = j;
 		}
 
-		*outTerms = palloc0(sizeof(PgturbohybridBm25DeltaCacheEntry) *
-							 termCount);
-		finalBytes += sizeof(PgturbohybridBm25DeltaCacheEntry) * termCount;
+		*outTerms =
+			PgturbohybridBm25Palloc0Array(sizeof(PgturbohybridBm25DeltaCacheEntry),
+										  termCount);
+		finalBytes +=
+			PgturbohybridBm25ArrayAllocSize(sizeof(PgturbohybridBm25DeltaCacheEntry),
+											termCount);
 		for (uint32 i = 0; i < buildCount;)
 		{
 			uint32		j = i + 1;
@@ -1609,10 +1756,11 @@ PgturbohybridBm25FinalizeDeltaBuildEntries(PgturbohybridBm25DeltaBuildEntry *bui
 			memcpy(termEntry->termBytes, buildEntries[i].termBytes,
 				   termEntry->termLen);
 			termEntry->postings =
-				palloc0(sizeof(PgturbohybridBm25DeltaCachePosting) *
-						termEntry->postingCount);
-			finalBytes += sizeof(PgturbohybridBm25DeltaCachePosting) *
-				termEntry->postingCount;
+				PgturbohybridBm25Palloc0Array(sizeof(PgturbohybridBm25DeltaCachePosting),
+											  termEntry->postingCount);
+			finalBytes +=
+				PgturbohybridBm25ArrayAllocSize(sizeof(PgturbohybridBm25DeltaCachePosting),
+												termEntry->postingCount);
 			for (uint32 k = i; k < j; k++)
 			{
 				PgturbohybridBm25DeltaCachePosting *posting =
@@ -1768,10 +1916,14 @@ PgturbohybridBm25BuildDeltaCacheFromTermSegments(Relation index,
 						continue;
 					if (*outBuildCount >= *outBuildCapacity)
 					{
-						*outBuildCapacity *= 2;
-						*outBuildEntries = repalloc(*outBuildEntries,
-													 sizeof(PgturbohybridBm25DeltaBuildEntry) *
-													 *outBuildCapacity);
+						*outBuildCapacity =
+							PgturbohybridBm25GrowCapacity32(*outBuildCapacity,
+															*outBuildCount + 1,
+															sizeof(PgturbohybridBm25DeltaBuildEntry));
+						*outBuildEntries =
+							PgturbohybridBm25RepallocArray(*outBuildEntries,
+														   sizeof(PgturbohybridBm25DeltaBuildEntry),
+														   *outBuildCapacity);
 					}
 					entry = &(*outBuildEntries)[(*outBuildCount)++];
 					entry->termLen = tuple->termLen;
@@ -1823,8 +1975,9 @@ PgturbohybridBm25BuildDeltaCacheEntries(Relation index,
 	*outPostingCount = 0;
 	*outBytes = 0;
 	oldCtx = MemoryContextSwitchTo(memoryContext);
-	buildEntries = palloc0(sizeof(PgturbohybridBm25DeltaBuildEntry) *
-						   buildCapacity);
+	buildEntries =
+		PgturbohybridBm25Palloc0Array(sizeof(PgturbohybridBm25DeltaBuildEntry),
+									  buildCapacity);
 
 	if (filterTerms != NULL && filterTermCount > 0 &&
 		BlockNumberIsValid(meta->deltaTermDirectoryBlkno))
@@ -1889,10 +2042,14 @@ PgturbohybridBm25BuildDeltaCacheEntries(Relation index,
 					continue;
 				if (buildCount >= buildCapacity)
 				{
-					buildCapacity *= 2;
-					buildEntries = repalloc(buildEntries,
-											sizeof(PgturbohybridBm25DeltaBuildEntry) *
-											buildCapacity);
+					buildCapacity =
+						PgturbohybridBm25GrowCapacity32(buildCapacity,
+														buildCount + 1,
+														sizeof(PgturbohybridBm25DeltaBuildEntry));
+					buildEntries =
+						PgturbohybridBm25RepallocArray(buildEntries,
+													   sizeof(PgturbohybridBm25DeltaBuildEntry),
+													   buildCapacity);
 				}
 				entry = &buildEntries[buildCount++];
 				entry->termLen = term->termLen;
@@ -2248,8 +2405,9 @@ PgturbohybridBm25ExtractTerms(TSQuery query, PgturbohybridBm25QueryTerm **terms,
 					 errmsg("pgturbohybrid BM25 supports OR/AND tsquery terms only")));
 	}
 
-	out = MemoryContextAllocZero(memoryContext,
-								 sizeof(PgturbohybridBm25QueryTerm) * Max(count, 1));
+	out = PgturbohybridBm25MemoryContextAllocZeroArray(memoryContext,
+													   sizeof(PgturbohybridBm25QueryTerm),
+													   Max(count, 1));
 	count = 0;
 	for (int i = 0; i < query->size; i++)
 	{
@@ -2265,8 +2423,8 @@ PgturbohybridBm25ExtractTerms(TSQuery query, PgturbohybridBm25QueryTerm **terms,
 			continue;
 		if (count >= 64)
 			ereport(ERROR,
-					(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
-					 errmsg("pgturbohybrid BM25 supports up to 64 distinct query terms")));
+					(errcode(ERRCODE_PROGRAM_LIMIT_EXCEEDED),
+					 errmsg("turbohybrid BM25 queries currently support at most 64 terms")));
 		out[count].term = term;
 		out[count].termLen = item->qoperand.length;
 		out[count].termHash = PgturbohybridBm25HashTerm(term,
@@ -2410,7 +2568,9 @@ PgturbohybridBm25SelectFinalTopK(PgturbohybridBm25Accumulator *acc, TSQuery quer
 		return Min(k, acc->touchedCount);
 	}
 
-	heap = MemoryContextAlloc(memoryContext, sizeof(PgturbohybridBm25NodeScore) * k);
+	heap = PgturbohybridBm25MemoryContextAllocArray(memoryContext,
+													sizeof(PgturbohybridBm25NodeScore),
+													k);
 	for (uint32 i = 0; i < oldTouchedCount; i++)
 	{
 		PgturbohybridBm25AccumulatorEntry *entry;
@@ -2637,10 +2797,14 @@ PgturbohybridBm25EnsureImpactHead(Relation index,
 	}
 
 	oldCtx = MemoryContextSwitchTo(cache->ctx);
-	impact = MemoryContextAlloc(cache->ctx,
-								sizeof(PgturbohybridBm25ImpactEntry) *
-								Max(term->baseDf, 1));
-	scratch = MemoryContextAlloc(cache->ctx, sizeof(PgturbohybridBm25Posting) * 1);
+	impact =
+		PgturbohybridBm25MemoryContextAllocArray(cache->ctx,
+												 sizeof(PgturbohybridBm25ImpactEntry),
+												 Max(term->baseDf, 1));
+	scratch =
+		PgturbohybridBm25MemoryContextAllocArray(cache->ctx,
+												 sizeof(PgturbohybridBm25Posting),
+												 1);
 	scratchCapacity = 1;
 	MemoryContextSwitchTo(oldCtx);
 
@@ -2700,8 +2864,10 @@ PgturbohybridBm25EnsureImpactHead(Relation index,
 		if (scratchCapacity < postings->count)
 		{
 			oldCtx = MemoryContextSwitchTo(cache->ctx);
-			scratch = repalloc(scratch,
-							   sizeof(PgturbohybridBm25Posting) * postings->count);
+			scratch =
+				PgturbohybridBm25RepallocArray(scratch,
+											   sizeof(PgturbohybridBm25Posting),
+											   postings->count);
 			scratchCapacity = postings->count;
 			MemoryContextSwitchTo(oldCtx);
 		}
@@ -3496,17 +3662,20 @@ PgturbohybridBm25HotPostingsCacheLookup(PgturbohybridBm25PostingIterator *it,
 		if (it->postingsCapacity < entry->count)
 		{
 			if (it->postings == NULL)
-				it->postings = MemoryContextAlloc(it->memoryContext,
-												  sizeof(PgturbohybridBm25Posting) *
-												  entry->count);
+				it->postings =
+					PgturbohybridBm25MemoryContextAllocArray(it->memoryContext,
+															 sizeof(PgturbohybridBm25Posting),
+															 entry->count);
 			else
-				it->postings = repalloc(it->postings,
-										sizeof(PgturbohybridBm25Posting) *
-										entry->count);
+				it->postings =
+					PgturbohybridBm25RepallocArray(it->postings,
+												   sizeof(PgturbohybridBm25Posting),
+												   entry->count);
 			it->postingsCapacity = entry->count;
 		}
 		memcpy(it->postings, entry->postings,
-			   sizeof(PgturbohybridBm25Posting) * entry->count);
+			   PgturbohybridBm25ArrayAllocSize(sizeof(PgturbohybridBm25Posting),
+											   entry->count));
 		it->count = entry->count;
 		it->lastNodeId = entry->lastNodeId;
 		it->maxTf = entry->maxTf;
@@ -3586,7 +3755,8 @@ PgturbohybridBm25HotPostingsCacheStore(PgturbohybridBm25PostingIterator *it,
 		return;
 
 	bytes = MAXALIGN(sizeof(PgturbohybridBm25HotPostingsEntry)) +
-		MAXALIGN(sizeof(PgturbohybridBm25Posting) * it->count);
+		MAXALIGN(PgturbohybridBm25ArrayAllocSize(sizeof(PgturbohybridBm25Posting),
+												 it->count));
 	if ((uint64) bytes > limitBytes)
 		return;
 
@@ -3615,9 +3785,12 @@ PgturbohybridBm25HotPostingsCacheStore(PgturbohybridBm25PostingIterator *it,
 	entry->nextOffno = it->nextOffno;
 	entry->bytes = bytes;
 	entry->lastUsed = ++cache->hotPostingsClock;
-	entry->postings = palloc(sizeof(PgturbohybridBm25Posting) * it->count);
+	entry->postings =
+		PgturbohybridBm25PallocArray(sizeof(PgturbohybridBm25Posting),
+									 it->count);
 	memcpy(entry->postings, it->postings,
-		   sizeof(PgturbohybridBm25Posting) * it->count);
+		   PgturbohybridBm25ArrayAllocSize(sizeof(PgturbohybridBm25Posting),
+										   it->count));
 	hashEntry = hash_search(cache->hotPostingsHash, &key, HASH_ENTER, &found);
 	hashEntry->entry = entry;
 	PgturbohybridBm25HotPostingsCacheLruPushHead(cache, entry);
@@ -3704,13 +3877,15 @@ PgturbohybridBm25IteratorLoadChunk(PgturbohybridBm25PostingIterator *it)
 			if (it->postingsCapacity < it->count)
 			{
 				if (it->postings == NULL)
-					it->postings = MemoryContextAlloc(it->memoryContext,
-													  sizeof(PgturbohybridBm25Posting) *
-													  it->count);
+					it->postings =
+						PgturbohybridBm25MemoryContextAllocArray(it->memoryContext,
+																 sizeof(PgturbohybridBm25Posting),
+																 it->count);
 				else
-					it->postings = repalloc(it->postings,
-											sizeof(PgturbohybridBm25Posting) *
-											it->count);
+					it->postings =
+						PgturbohybridBm25RepallocArray(it->postings,
+													   sizeof(PgturbohybridBm25Posting),
+													   it->count);
 				it->postingsCapacity = it->count;
 			}
 			if (!PgturbohybridBm25DecodePostingsTuple(tuple, ItemIdGetLength(iid),
@@ -4174,10 +4349,13 @@ PgturbohybridBm25ScoreBaseAndRarestDriver(Relation index,
 	if (driver < 0)
 		return true;
 
-	iterators = MemoryContextAllocZero(memoryContext,
-									   sizeof(PgturbohybridBm25PostingIterator) *
-									   termCount);
-	idfs = MemoryContextAllocZero(memoryContext, sizeof(double) * termCount);
+	iterators =
+		PgturbohybridBm25MemoryContextAllocZeroArray(memoryContext,
+													 sizeof(PgturbohybridBm25PostingIterator),
+													 termCount);
+	idfs = PgturbohybridBm25MemoryContextAllocZeroArray(memoryContext,
+														sizeof(double),
+														termCount);
 
 	for (int termNo = 0; termNo < termCount; termNo++)
 	{
@@ -4586,13 +4764,15 @@ PgturbohybridBm25TopK(Relation index, TSQuery query, int32 k, bool useWand,
 				if (decodedScratchCapacity < postings->count)
 				{
 					if (decodedScratch == NULL)
-						decodedScratch = MemoryContextAlloc(memoryContext,
-															sizeof(PgturbohybridBm25Posting) *
-															postings->count);
+						decodedScratch =
+							PgturbohybridBm25MemoryContextAllocArray(memoryContext,
+																	 sizeof(PgturbohybridBm25Posting),
+																	 postings->count);
 					else
-						decodedScratch = repalloc(decodedScratch,
-												  sizeof(PgturbohybridBm25Posting) *
-												  postings->count);
+						decodedScratch =
+							PgturbohybridBm25RepallocArray(decodedScratch,
+														   sizeof(PgturbohybridBm25Posting),
+														   postings->count);
 					decodedScratchCapacity = postings->count;
 				}
 				if (!PgturbohybridBm25DecodePostingsTuple(postings,

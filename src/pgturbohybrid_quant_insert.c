@@ -766,7 +766,7 @@ PgturbohybridGraphAppendInsertedAdj(Relation index, BlockNumber *adjStart, int m
 	pfree(tuple);
 }
 
-bool
+uint32
 PgturbohybridGraphInsertValueInPlace(Relation index, IndexInfo *indexInfo,
 						  ItemPointer heap_tid, Datum value,
 						  Datum *values, bool *isnull)
@@ -989,5 +989,5 @@ PgturbohybridGraphInsertValueInPlace(Relation index, IndexInfo *indexInfo,
 		pfree(ecScale);
 	pfree(code);
 
-	return true;
+	return newNodeId;
 }

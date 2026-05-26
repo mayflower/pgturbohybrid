@@ -34,7 +34,7 @@ require_clean_tree() {
 check_no_local_paths() {
 	local host_matches tmp_matches disallowed_tmp
 
-	host_matches="$(git grep -n -E '(/Volumes|/Users|/home/|\.cache/beir)' -- . ':!scripts/release-check.sh' || true)"
+	host_matches="$(git grep -n -E '(/Volumes|/Users|/home/|\.cache/beir)' -- . ':!scripts/release-check.sh' ':!RELEASE_CHECKLIST.md' || true)"
 	if [[ -n "$host_matches" ]]; then
 		printf '%s\n' "$host_matches" >&2
 		fail "host-specific absolute paths found"
@@ -51,7 +51,7 @@ check_no_local_paths() {
 check_no_generated_benchmark_artifacts() {
 	local tracked
 
-	tracked="$(git ls-files | grep -E '(^|/)regression\.(diffs|out)$|(^|/)\.DS_Store$|(^|/)(benchmarks/(results|output)|results)/|(^|/)perf-smoke-results\.json$|^benchmarks/.*\.(csv|md|json)$' | grep -v '^benchmarks/README\.md$' | grep -v '^benchmarks/config/.*\.json$' || true)"
+	tracked="$(git ls-files | grep -E '(^|/)regression\.(diffs|out)$|(^|/)\.DS_Store$|(^|/)(benchmarks/(results|output)|results)/|(^|/)perf-smoke-results\.json$|^benchmarks/.*\.(csv|md|json)$' | grep -v '^benchmarks/README\.md$' | grep -v '^benchmarks/dev/README\.md$' | grep -v '^benchmarks/dbpedia_openai3_large\.md$' | grep -v '^benchmarks/config/.*\.json$' || true)"
 	if [[ -n "$tracked" ]]; then
 		printf '%s\n' "$tracked" >&2
 		fail "generated benchmark or regression artifacts are tracked"
