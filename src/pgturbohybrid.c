@@ -294,7 +294,7 @@ PgturbohybridGraphIndexScanUsespgturbohybrid(IndexScanState *indexstate)
 		indexstate->iss_RelationDesc->rd_indam->amgettuple == pgturbohybridgettuple;
 }
 
-static int64
+static pg_noinline int64
 PgturbohybridGraphGetLimitTupleTarget(LimitState *limitstate)
 {
 	int64		tuple_target;
