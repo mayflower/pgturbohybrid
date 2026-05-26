@@ -18,7 +18,7 @@ evidence.
 | Graph scan page locks need local error cleanup | Release blocker | Fixed |
 | `turbohybrid_query(...)` constructor caching can hide changed GUC defaults | Release blocker | Fixed |
 | BM25 dynamic allocation and metadata-derived allocation paths need overflow/corruption guards | Release blocker | Fixed |
-| Release check, source archive verification, and CI gates need final evidence | Release blocker | Open |
+| Release check, source archive verification, and CI gates need final evidence | Release blocker | Fixed for branch |
 | Executor hook ownership and cleanup need a deliberate audit pass | High priority | Fixed for alpha |
 | `turbohybrid_query` varlena validation should reject trailing bytes and overflowed sizes | High priority | Fixed |
 | Global fast-math compiler flags should become opt-in | Medium priority | Fixed |
@@ -98,3 +98,7 @@ This section is updated as tests land.
   builder rewrite remains future hardening.
 - TAP restart tests are present but skipped on this local machine because the
   PostgreSQL TAP modules are unavailable in the installed PGXS tree.
+- The new manual/nightly `hardening` workflow is present on this branch, but
+  GitHub cannot manually dispatch workflows that are not yet known on the
+  default branch. The release build matrix is green on this branch; run the
+  hardening workflow after the workflow file lands on the default branch.
