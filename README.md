@@ -245,10 +245,30 @@ approximate nearest-neighbor vector search.
 | pgturbohybrid default | default 4-bit exact-free index, LIMIT-inferred `final_k` | 0.910 ms | 0.421540 |
 | SQL RRF baseline | pgvector HNSW default reloptions plus PostgreSQL GIN (Generalized Inverted Index) full-text search, 100/100 candidates | 3.254 ms | 0.423341 |
 
-This is a specific benchmark snapshot, not a global pgvector comparison.
-Results vary by dataset and hardware. Benchmark details, baselines, and
-reproduction notes are in
-[docs/benchmarks/fiqa-openai.md](docs/benchmarks/fiqa-openai.md) and
+For a larger systems benchmark, we also ran the Qdrant DBPedia OpenAI3-large
+1M corpus with the existing corpus embeddings. This run used 1,000 deterministic
+self-queries from the loaded Qdrant rows, 3,072-dimensional
+`text-embedding-3-large` vectors, one warmup pass, three measured passes,
+`dense_k=100`, `bm25_k=100`, `final_k=10`, and the TurboHybrid `latency`
+profile. The pgvector baseline used `halfvec(3072)` HNSW plus PostgreSQL GIN
+full-text search with SQL-level RRF. The HNSW build used
+`maintenance_work_mem=8GB`.
+
+| Method | Settings | p95 | self-qrel nDCG@10 | index size |
+| --- | --- | ---: | ---: | ---: |
+| pgturbohybrid default | default 4-bit exact-free index, LIMIT-inferred `final_k` | 5.942 ms | 0.934457 | 2.38 GB |
+| SQL RRF baseline | pgvector `halfvec(3072)` HNSW plus PostgreSQL GIN full-text search, 100/100 candidates | 234.473 ms | 0.972702 | 8.41 GB |
+
+The DBPedia run is a systems comparison, not an external relevance benchmark:
+the query embedding and positive document come from the same Qdrant row. It is
+useful for latency, build, and index-size behavior at 1M rows, but it should not
+be read as a universal quality result.
+
+These are specific benchmark snapshots, not global pgvector comparisons.
+Results vary by dataset, hardware, PostgreSQL settings, and query workload.
+Benchmark details, baselines, and reproduction notes are in
+[docs/benchmarks/fiqa-openai.md](docs/benchmarks/fiqa-openai.md),
+[benchmarks/dbpedia_openai3_large.md](benchmarks/dbpedia_openai3_large.md), and
 [benchmarks/README.md](benchmarks/README.md).
 
 ## How It Works, Short Version
@@ -271,6 +291,7 @@ see [NOTICE](NOTICE) and [docs/architecture.md](docs/architecture.md).
 - [How TurboHybrid works](docs/how-it-works.md)
 - [Easy fast setup](docs/fast_setup.md)
 - [FIQA/OpenAI benchmark snapshot](docs/benchmarks/fiqa-openai.md)
+- [DBPedia OpenAI3-large benchmark spec](benchmarks/dbpedia_openai3_large.md)
 - [Benchmark methodology](benchmarks/README.md)
 - [Compatibility notes](docs/compatibility.md)
 - [Architecture notes](docs/architecture.md)
