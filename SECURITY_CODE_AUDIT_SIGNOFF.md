@@ -6,9 +6,11 @@ release-hardening pass.
 ## Branch State
 
 - Branch: `security-hardening-alpha2`
-- Code evidence commit: `7b38761b230b53d60e698018b148976d8371a49f`
-- Final branch tip: compute with `git rev-parse HEAD` after the final
-  signoff commit.
+- Latest pushed code evidence commit:
+  `3003d0b41c3540390d98fc0d00394c524de60684`
+- Final tag commit: verify with `git rev-parse HEAD` immediately before
+  tagging. This tracked signoff file cannot contain its own commit hash without
+  changing that hash.
 - Date: 2026-05-26
 
 ## Fixed Release Blockers
@@ -36,7 +38,7 @@ release-hardening pass.
 - Local TAP: `prove_installcheck` reported `NOTESTS` because PostgreSQL TAP
   Perl modules were unavailable in the local PGXS installation.
 - GitHub build workflow: passed on the pushed branch.
-- GitHub build run: https://github.com/mayflower/pgturbohybrid/actions/runs/26470284780
+- GitHub build run: https://github.com/mayflower/pgturbohybrid/actions/runs/26472545673
 - CI coverage included Linux PostgreSQL 14-19, pgvector v0.8.2 and master,
   Linux i386, macOS, Windows, perf smoke, and valgrind.
 
@@ -46,9 +48,15 @@ release-hardening pass.
 `git archive`, so ignored generated benchmark outputs and local build products
 are not included.
 
-Archive checksums should be computed after the final release commit. They are
-not recorded in this tracked file because changing this file changes the release
-archive hash.
+- `cf2a3d3a078c671769140002004e8a32ea885c483dbfde8ced3531f61e04121c  dist/pgturbohybrid-0.1.0.tar.gz`
+- `707a07c306c05afbc4775c46157ce931451bc6ce1b461bc14ae1460dd58af8d2  dist/pgturbohybrid-0.1.0.zip`
+
+Recompute these after the final signoff commit with:
+
+```sh
+sha256sum dist/pgturbohybrid-0.1.0.tar.gz
+sha256sum dist/pgturbohybrid-0.1.0.zip
+```
 
 ## Remaining Alpha Risks
 

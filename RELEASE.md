@@ -32,7 +32,7 @@ git push origin v0.1.0-alpha.2
 
 The tag push triggers `.github/workflows/release.yml`, which rebuilds against
 upstream pgvector, runs SQL and TAP checks, runs `make dist`, and uploads the
-tracked-source archives as workflow artifacts.
+tracked-source archives to the GitHub Release.
 
 ## Semantic Versioning
 
