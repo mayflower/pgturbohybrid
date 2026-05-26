@@ -10,6 +10,7 @@
 #include "pgturbohybrid_am.h"
 #include "pgturbohybrid_bm25.h"
 #include "pgturbohybrid_vector_compat.h"
+#include "pgturbohybrid_jsonb_compat.h"
 #include "utils/fmgrprotos.h"
 #include "utils/jsonb.h"
 #include "utils/numeric.h"
@@ -59,18 +60,18 @@ static bool pgturbohybrid_last_graph_exact_storage_known = false;
 static bool pgturbohybrid_last_graph_query_split_active = false;
 
 static void
-PgturbohybridJsonbAddKey(JsonbParseState **state, const char *key)
+PgturbohybridJsonbAddKey(PgturbohybridJsonbState *state, const char *key)
 {
 	JsonbValue	value;
 
 	value.type = jbvString;
 	value.val.string.val = (char *) key;
 	value.val.string.len = strlen(key);
-	pushJsonbValue(state, WJB_KEY, &value);
+	PgturbohybridJsonbPush(state, WJB_KEY, &value);
 }
 
 static void
-PgturbohybridJsonbAddString(JsonbParseState **state, const char *key, const char *val)
+PgturbohybridJsonbAddString(PgturbohybridJsonbState *state, const char *key, const char *val)
 {
 	JsonbValue	value;
 
@@ -78,32 +79,32 @@ PgturbohybridJsonbAddString(JsonbParseState **state, const char *key, const char
 	value.type = jbvString;
 	value.val.string.val = (char *) val;
 	value.val.string.len = strlen(val);
-	pushJsonbValue(state, WJB_VALUE, &value);
+	PgturbohybridJsonbPush(state, WJB_VALUE, &value);
 }
 
 static void
-PgturbohybridJsonbAddBool(JsonbParseState **state, const char *key, bool val)
+PgturbohybridJsonbAddBool(PgturbohybridJsonbState *state, const char *key, bool val)
 {
 	JsonbValue	value;
 
 	PgturbohybridJsonbAddKey(state, key);
 	value.type = jbvBool;
 	value.val.boolean = val;
-	pushJsonbValue(state, WJB_VALUE, &value);
+	PgturbohybridJsonbPush(state, WJB_VALUE, &value);
 }
 
 static void
-PgturbohybridJsonbAddNull(JsonbParseState **state, const char *key)
+PgturbohybridJsonbAddNull(PgturbohybridJsonbState *state, const char *key)
 {
 	JsonbValue	value;
 
 	PgturbohybridJsonbAddKey(state, key);
 	value.type = jbvNull;
-	pushJsonbValue(state, WJB_VALUE, &value);
+	PgturbohybridJsonbPush(state, WJB_VALUE, &value);
 }
 
 static void
-PgturbohybridJsonbAddInt64(JsonbParseState **state, const char *key, int64 val)
+PgturbohybridJsonbAddInt64(PgturbohybridJsonbState *state, const char *key, int64 val)
 {
 	JsonbValue	value;
 
@@ -111,11 +112,11 @@ PgturbohybridJsonbAddInt64(JsonbParseState **state, const char *key, int64 val)
 	value.type = jbvNumeric;
 	value.val.numeric = DatumGetNumeric(DirectFunctionCall1(int8_numeric,
 															Int64GetDatum(val)));
-	pushJsonbValue(state, WJB_VALUE, &value);
+	PgturbohybridJsonbPush(state, WJB_VALUE, &value);
 }
 
 static void
-PgturbohybridJsonbAddUint64(JsonbParseState **state, const char *key, uint64 val)
+PgturbohybridJsonbAddUint64(PgturbohybridJsonbState *state, const char *key, uint64 val)
 {
 	char		buf[32];
 	JsonbValue	value;
@@ -127,11 +128,11 @@ PgturbohybridJsonbAddUint64(JsonbParseState **state, const char *key, uint64 val
 															CStringGetDatum(buf),
 															ObjectIdGetDatum(InvalidOid),
 															Int32GetDatum(-1)));
-	pushJsonbValue(state, WJB_VALUE, &value);
+	PgturbohybridJsonbPush(state, WJB_VALUE, &value);
 }
 
 static void
-PgturbohybridJsonbAddFloat8(JsonbParseState **state, const char *key, double val)
+PgturbohybridJsonbAddFloat8(PgturbohybridJsonbState *state, const char *key, double val)
 {
 	JsonbValue	value;
 
@@ -139,7 +140,7 @@ PgturbohybridJsonbAddFloat8(JsonbParseState **state, const char *key, double val
 	value.type = jbvNumeric;
 	value.val.numeric = DatumGetNumeric(DirectFunctionCall1(float8_numeric,
 															Float8GetDatum(val)));
-	pushJsonbValue(state, WJB_VALUE, &value);
+	PgturbohybridJsonbPush(state, WJB_VALUE, &value);
 }
 
 static const char *TqScanOrchestrationName(void);
@@ -367,8 +368,7 @@ FUNCTION_PREFIX PG_FUNCTION_INFO_V1(pgturbohybrid_last_scan_stats);
 FUNCTION_PREFIX Datum
 pgturbohybrid_last_scan_stats(PG_FUNCTION_ARGS)
 {
-	JsonbParseState *state = NULL;
-	JsonbValue *result;
+	PgturbohybridJsonbState state;
 	PgturbohybridScanStatsSnapshot scanStats;
 	PgturbohybridValidationStats validationStats;
 	uint64		denseElapsedUs;
@@ -388,7 +388,8 @@ pgturbohybrid_last_scan_stats(PG_FUNCTION_ARGS)
 	indexUsed = pgturbohybrid_last_scan_orchestration != PGTURBOHYBRID_SCAN_ORCHESTRATION_NONE ||
 		scanStats.bm25Terms > 0 || bm25ElapsedUs > 0;
 
-	pushJsonbValue(&state, WJB_BEGIN_OBJECT, NULL);
+	PgturbohybridJsonbStateInit(&state);
+	PgturbohybridJsonbBeginObject(&state);
 	PgturbohybridJsonbAddInt64(&state, "version", 1);
 	PgturbohybridJsonbAddString(&state, "profile",
 								PgturbohybridProfileName(pgturbohybrid_profile));
@@ -481,17 +482,14 @@ pgturbohybrid_last_scan_stats(PG_FUNCTION_ARGS)
 								PgturbohybridGraphDenseBudgetPolicyNameExternal(pgturbohybrid_last_graph_dense_budget_policy));
 	PgturbohybridJsonbAddString(&state, "graph_rescore_band_policy",
 								PgturbohybridGraphRescoreBandPolicyNameExternal(pgturbohybrid_last_graph_rescore_band_policy));
-	result = pushJsonbValue(&state, WJB_END_OBJECT, NULL);
-
-	PG_RETURN_JSONB_P(JsonbValueToJsonb(result));
+	PG_RETURN_JSONB_P(PgturbohybridJsonbEndObject(&state));
 }
 
 FUNCTION_PREFIX PG_FUNCTION_INFO_V1(pgturbohybrid_simd_capabilities);
 FUNCTION_PREFIX Datum
 pgturbohybrid_simd_capabilities(PG_FUNCTION_ARGS)
 {
-	JsonbParseState *state = NULL;
-	JsonbValue *result;
+	PgturbohybridJsonbState state;
 	const char *architecture;
 	bool		simdBuildDisabled;
 	bool		compileAvx2;
@@ -547,7 +545,8 @@ pgturbohybrid_simd_capabilities(PG_FUNCTION_ARGS)
 	compileArmI8mm = false;
 #endif
 
-	pushJsonbValue(&state, WJB_BEGIN_OBJECT, NULL);
+	PgturbohybridJsonbStateInit(&state);
+	PgturbohybridJsonbBeginObject(&state);
 	PgturbohybridJsonbAddInt64(&state, "version", 1);
 	PgturbohybridJsonbAddString(&state, "architecture", architecture);
 	PgturbohybridJsonbAddBool(&state, "simd_build_disabled", simdBuildDisabled);
@@ -558,9 +557,7 @@ pgturbohybrid_simd_capabilities(PG_FUNCTION_ARGS)
 	PgturbohybridJsonbAddBool(&state, "compile_avxvnni", compileAvxvnni);
 	PgturbohybridJsonbAddBool(&state, "compile_arm_dotprod", compileArmDotprod);
 	PgturbohybridJsonbAddBool(&state, "compile_arm_i8mm", compileArmI8mm);
-	result = pushJsonbValue(&state, WJB_END_OBJECT, NULL);
-
-	PG_RETURN_JSONB_P(JsonbValueToJsonb(result));
+	PG_RETURN_JSONB_P(PgturbohybridJsonbEndObject(&state));
 }
 
 #ifdef PGTURBOHYBRID_DEV_DIAGNOSTICS
