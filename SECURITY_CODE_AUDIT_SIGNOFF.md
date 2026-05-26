@@ -6,7 +6,9 @@ release-hardening pass.
 ## Branch State
 
 - Branch: `security-hardening-alpha2`
-- Commit: `7b38761b230b53d60e698018b148976d8371a49f`
+- Code evidence commit: `7b38761b230b53d60e698018b148976d8371a49f`
+- Final branch tip: compute with `git rev-parse HEAD` after the final
+  signoff commit.
 - Date: 2026-05-26
 
 ## Fixed Release Blockers
