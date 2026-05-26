@@ -149,6 +149,9 @@ For a copy-paste local walkthrough, see the
   project.
 - pgvector must be installed first.
 - Incompatible storage changes may require `REINDEX`.
+- Parallel index build is disabled for this alpha while dense graph and BM25
+  build-path correctness evidence is hardened. `CREATE INDEX CONCURRENTLY` is
+  covered by the release tests.
 - Generated benchmark artifacts are not committed to the repository; attach
   full artifacts to releases, CI runs, or issues when publishing benchmark
   claims.

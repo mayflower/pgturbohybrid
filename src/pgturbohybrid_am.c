@@ -2893,7 +2893,7 @@ pgturbohybrid_handler(PG_FUNCTION_ARGS)
 	amroutine->ampredlocks = false;
 	amroutine->amcanparallel = false;
 #if PG_VERSION_NUM >= 170000
-	amroutine->amcanbuildparallel = true;
+	amroutine->amcanbuildparallel = false;
 #endif
 	amroutine->amcaninclude = true;
 	amroutine->amusemaintenanceworkmem = false;
