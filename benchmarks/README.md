@@ -9,6 +9,11 @@ Public benchmark explanations live under `docs/benchmarks/`. This directory is
 for reproducible tooling, acceptance thresholds, and developer benchmark
 helpers. Developer-only workflows are documented in `benchmarks/dev/README.md`.
 
+If you already have a PostgreSQL RAG database and want a quick local comparison,
+use `benchmarks/rag_existing.py`. It compares TurboHybrid with your own
+retrieval SQL and is documented in
+[`docs/benchmarks/bring-your-own-rag.md`](../docs/benchmarks/bring-your-own-rag.md).
+
 The DBPedia OpenAI3-large benchmark spec lives in
 [`dbpedia_openai3_large.md`](dbpedia_openai3_large.md). It covers the
 1M-row Qdrant DBPedia corpus, BEIR DBPedia queries/qrels, the native pgvector
@@ -120,3 +125,5 @@ ANN path for this dimensionality.
 
 Synthetic vector generators are intentionally not part of the benchmark suite.
 They are too far from real retrieval workloads for project performance claims.
+The bring-your-own RAG benchmark is different: it is a local evaluation helper
+for existing user data, not a source of public project benchmark claims.

@@ -276,6 +276,11 @@ Benchmark details, baselines, and reproduction notes are in
 [benchmarks/dbpedia_openai3_large.md](benchmarks/dbpedia_openai3_large.md), and
 [benchmarks/README.md](benchmarks/README.md).
 
+If you already have a PostgreSQL RAG database, the bring-your-own benchmark
+compares TurboHybrid with your existing retrieval SQL on your own rows and
+query embeddings. See
+[docs/benchmarks/bring-your-own-rag.md](docs/benchmarks/bring-your-own-rag.md).
+
 ## How It Works, Short Version
 
 `pgturbohybrid` defines a `turbohybrid` PostgreSQL index access method over:
@@ -296,6 +301,7 @@ see [NOTICE](NOTICE) and [docs/architecture.md](docs/architecture.md).
 - [How TurboHybrid works](docs/how-it-works.md)
 - [Easy fast setup](docs/fast_setup.md)
 - [FIQA/OpenAI benchmark snapshot](docs/benchmarks/fiqa-openai.md)
+- [Bring-your-own RAG benchmark](docs/benchmarks/bring-your-own-rag.md)
 - [DBPedia OpenAI3-large benchmark spec](benchmarks/dbpedia_openai3_large.md)
 - [Benchmark methodology](benchmarks/README.md)
 - [Compatibility notes](docs/compatibility.md)
