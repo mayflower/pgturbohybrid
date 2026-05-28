@@ -1,7 +1,8 @@
-# DBPedia OpenAI3 Large Hybrid Benchmark
+# DBPedia OpenAI3 Large Benchmark
 
-This file helps you implement and run a 1M-row DBPedia hybrid retrieval
-benchmark for `pgturbohybrid`.
+This file helps you implement and run 1M-row DBPedia retrieval benchmarks for
+`pgturbohybrid`, including both hybrid retrieval and a dense-only default
+comparison against pgvector.
 
 The benchmark uses Qdrant's DBPedia entity corpus with OpenAI
 `text-embedding-3-large` embeddings and compares PostgreSQL-native hybrid
@@ -32,6 +33,11 @@ BM25 means Best Matching 25, a text-ranking method for exact term matching.
 FTS means PostgreSQL full-text search. ANN means approximate nearest-neighbor
 search. HNSW means Hierarchical Navigable Small World, pgvector's graph index
 type for ANN search.
+
+The dense-only comparison is separate. It compares pgvector HNSW dense retrieval
+against TurboHybrid with only `vector_query` supplied to `turbohybrid_query(...)`.
+No text query is passed, so PostgreSQL full-text search, BM25, and SQL RRF are
+not part of that run.
 
 ## Why the pgvector baseline uses halfvec
 
@@ -153,6 +159,31 @@ defaults and infer `final_k` from SQL `LIMIT`.
 - `final_k = 10`
 - `exact_storage = on`
 
+For the dense-only default comparison, run:
+
+- `pgvector_halfvec_dense_only`
+- `pgturbohybrid_dense_only`
+
+`pgvector_halfvec_dense_only` uses only the pgvector HNSW expression index over
+`embedding::halfvec(3072)`.
+
+`pgturbohybrid_dense_only` uses the default TurboHybrid index definition, but
+the query supplies only `vector_query`:
+
+```sql
+SELECT doc_id
+FROM dbpedia_docs
+ORDER BY embedding <~> turbohybrid_query(
+    vector_query => $1::vector(3072)
+)
+LIMIT 10;
+```
+
+The current TurboHybrid access method still expects a vector column plus a
+`tsvector` column in the index definition. That does not make this a hybrid
+retrieval run: without `text_query`, the benchmark is measuring the dense
+TurboHybrid path.
+
 ## Primary values
 
 Use these values for the main latency run:
@@ -190,6 +221,50 @@ For budget sweeps, use:
 ```
 
 ## Commands
+
+Dense-only default 1M comparison:
+
+```sh
+export PGDATABASE=pgturbohybrid_dbpedia_dense_1m
+export OUTPUT=benchmarks/results/dbpedia-openai3-large-dense-defaults.json
+
+python3 benchmarks/dbpedia_openai3_large.py \
+  --database "$PGDATABASE" \
+  --dataset "$DBPEDIA_DATASET" \
+  --methods pgvector_halfvec_dense_only,pgturbohybrid_dense_only \
+  --final-k 10 \
+  --warmup 1 \
+  --measured-runs 3 \
+  --hnsw-ef-search 0 \
+  --reuse-data \
+  --explain \
+  --output "$OUTPUT"
+```
+
+For a quick dense-only smoke run before the full 1M pass:
+
+```sh
+export PGDATABASE=pgturbohybrid_dbpedia_dense_smoke
+export OUTPUT=benchmarks/results/dbpedia-openai3-large-dense-smoke.json
+
+python3 benchmarks/dbpedia_openai3_large.py \
+  --database "$PGDATABASE" \
+  --dataset "$DBPEDIA_DATASET" \
+  --max-docs 10000 \
+  --max-queries 25 \
+  --methods pgvector_halfvec_dense_only,pgturbohybrid_dense_only \
+  --final-k 10 \
+  --warmup 1 \
+  --measured-runs 1 \
+  --hnsw-ef-search 0 \
+  --force-turbohybrid-index \
+  --explain \
+  --output "$OUTPUT"
+```
+
+Use `--hnsw-ef-search 0` for the default pgvector runtime setting. If you also
+want an equalized-depth experiment, run a separate artifact with an explicit
+value such as `--hnsw-ef-search 100` and label it separately.
 
 Smoke run:
 
@@ -265,6 +340,8 @@ Every artifact must include:
 - MAP@10
 - Recall@10
 - overlap@10 versus the native SQL RRF baseline when both methods are present
+- overlap@10 versus `pgvector_halfvec_dense_only` when the dense-only baseline
+  is present
 - loaded row count
 - loaded query count
 - filtered positive qrel count
@@ -303,3 +380,8 @@ Any public claim must include:
 Do not summarize this benchmark as a global comparison against pgvector or
 Qdrant. The direct claim is limited to this DBPedia/OpenAI3 setup, these
 settings, and the native SQL RRF halfvec baseline.
+
+For dense-only runs, the direct claim is limited to the Qdrant DBPedia/OpenAI3
+setup, 3,072-dimensional embeddings, 1M loaded rows, qdrant-self queries,
+default index definitions, the stated pgvector `hnsw.ef_search` setting, and
+the recorded hardware. Do not describe it as a hybrid retrieval comparison.

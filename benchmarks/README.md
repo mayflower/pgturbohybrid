@@ -17,7 +17,8 @@ retrieval SQL and is documented in
 The DBPedia OpenAI3-large benchmark spec lives in
 [`dbpedia_openai3_large.md`](dbpedia_openai3_large.md). It covers the
 1M-row Qdrant DBPedia corpus, BEIR DBPedia queries/qrels, the native pgvector
-`halfvec` + PostgreSQL full-text SQL RRF baseline, and the TurboHybrid runs.
+`halfvec` + PostgreSQL full-text SQL RRF baseline, the TurboHybrid hybrid runs,
+and a dense-only default comparison between pgvector HNSW and TurboHybrid.
 
 ## Baselines
 
@@ -122,6 +123,11 @@ For 3,072-dimensional DBPedia/OpenAI3-large runs, use
 PostgreSQL hybrid baseline uses pgvector `halfvec(3072)` HNSW plus PostgreSQL
 full-text search because standard pgvector `vector` HNSW is not the intended
 ANN path for this dimensionality.
+
+For the DBPedia dense-only default comparison, use
+`--methods pgvector_halfvec_dense_only,pgturbohybrid_dense_only`. That run does
+not pass a text query to TurboHybrid and should not be reported as hybrid
+retrieval.
 
 Synthetic vector generators are intentionally not part of the benchmark suite.
 They are too far from real retrieval workloads for project performance claims.

@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Run the DBPedia OpenAI3-large hybrid benchmark."""
+"""Run DBPedia OpenAI3-large hybrid and dense-only benchmarks."""
 
 from __future__ import annotations
 
@@ -24,6 +24,7 @@ EMBEDDING_MODEL = "text-embedding-3-large"
 CORPUS_EMBEDDING_FIELD = "text-embedding-3-large-3072-embedding"
 DEFAULT_METHODS = "postgres_sql_rrf_halfvec,pgturbohybrid,pgturbohybrid_quality"
 DEFAULT_QUERY_SOURCE = "qdrant-self"
+DENSE_ONLY_METHODS = {"pgvector_halfvec_dense_only", "pgturbohybrid_dense_only"}
 
 
 def run_psql(database: str, sql: str, *, quiet: bool = True) -> str:
@@ -293,11 +294,12 @@ def setup_database_beir(args: argparse.Namespace, qrels: dict[str, dict[str, int
     if args.reuse_data:
         exists = run_psql(args.database, "SELECT to_regclass('dbpedia_docs') IS NOT NULL;")
         if exists == "t":
-            return {
-                "rows": int(run_psql(args.database, "SELECT count(*) FROM dbpedia_docs;")),
-                "queries": int(run_psql(args.database, "SELECT count(*) FROM dbpedia_queries;")),
-                "qrels": int(run_psql(args.database, "SELECT count(*) FROM dbpedia_qrels;")),
-            }
+            rows = int(run_psql(args.database, "SELECT count(*) FROM dbpedia_docs;"))
+            query_count = int(run_psql(args.database, "SELECT count(*) FROM dbpedia_queries;"))
+            qrel_count = int(run_psql(args.database, "SELECT count(*) FROM dbpedia_qrels;"))
+            if rows > 0 and query_count > 0 and qrel_count > 0:
+                return {"rows": rows, "queries": query_count, "qrels": qrel_count}
+            print("ignoring empty reused DBPedia tables and reloading data", file=sys.stderr)
 
     qids = choose_query_ids(qrels, queries, embeddings, args.max_queries)
     run_psql(args.database, f"""
@@ -359,11 +361,12 @@ def setup_database_qdrant_self(args: argparse.Namespace) -> dict[str, int]:
     if args.reuse_data:
         exists = run_psql(args.database, "SELECT to_regclass('dbpedia_docs') IS NOT NULL;")
         if exists == "t":
-            return {
-                "rows": int(run_psql(args.database, "SELECT count(*) FROM dbpedia_docs;")),
-                "queries": int(run_psql(args.database, "SELECT count(*) FROM dbpedia_queries;")),
-                "qrels": int(run_psql(args.database, "SELECT count(*) FROM dbpedia_qrels;")),
-            }
+            rows = int(run_psql(args.database, "SELECT count(*) FROM dbpedia_docs;"))
+            query_count = int(run_psql(args.database, "SELECT count(*) FROM dbpedia_queries;"))
+            qrel_count = int(run_psql(args.database, "SELECT count(*) FROM dbpedia_qrels;"))
+            if rows > 0 and query_count > 0 and qrel_count > 0:
+                return {"rows": rows, "queries": query_count, "qrels": qrel_count}
+            print("ignoring empty reused DBPedia tables and reloading data", file=sys.stderr)
 
     run_psql(args.database, f"""
 CREATE EXTENSION IF NOT EXISTS vector;
@@ -464,8 +467,9 @@ DROP INDEX IF EXISTS dbpedia_hnsw_halfvec_idx;
 DROP INDEX IF EXISTS dbpedia_fts_idx;
 DROP INDEX IF EXISTS dbpedia_turbohybrid_idx;
 """
+    run_psql(database, common_drop)
     if method in {"pgvector_halfvec_dense_only", "postgres_sql_rrf_halfvec"}:
-        sql = common_drop + """
+        sql = """
 CREATE INDEX dbpedia_hnsw_halfvec_idx ON dbpedia_docs
 USING hnsw ((embedding::halfvec(3072)) halfvec_cosine_ops);
 """
@@ -473,8 +477,8 @@ USING hnsw ((embedding::halfvec(3072)) halfvec_cosine_ops);
         if method == "postgres_sql_rrf_halfvec":
             sql += "CREATE INDEX dbpedia_fts_idx ON dbpedia_docs USING gin (body_tsv);\n"
             indexes.append("dbpedia_fts_idx")
-    elif method == "pgturbohybrid":
-        sql = common_drop + """
+    elif method in {"pgturbohybrid", "pgturbohybrid_dense_only"}:
+        sql = """
 CREATE INDEX dbpedia_turbohybrid_idx ON dbpedia_docs
 USING turbohybrid (
     embedding vector_cosine_turbohybrid_ops,
@@ -483,7 +487,7 @@ USING turbohybrid (
 """
         indexes = ["dbpedia_turbohybrid_idx"]
     elif method in {"pgturbohybrid_latency_explicit", "pgturbohybrid_exact_storage_off"}:
-        sql = common_drop + """
+        sql = """
 CREATE INDEX dbpedia_turbohybrid_idx ON dbpedia_docs
 USING turbohybrid (
     embedding vector_cosine_turbohybrid_ops,
@@ -493,7 +497,7 @@ WITH (quantization_bits = 4, exact_storage = off);
 """
         indexes = ["dbpedia_turbohybrid_idx"]
     elif method == "pgturbohybrid_quality":
-        sql = common_drop + """
+        sql = """
 CREATE INDEX dbpedia_turbohybrid_idx ON dbpedia_docs
 USING turbohybrid (
     embedding vector_cosine_turbohybrid_ops,
@@ -580,6 +584,16 @@ FROM dbpedia_docs
 ORDER BY embedding <~> turbohybrid_query(
     vector_query => %L::vector({DIMENSIONS}),
     text_query => plainto_tsquery('english', %L)
+)
+LIMIT {final_k}
+"""
+
+    if method == "pgturbohybrid_dense_only":
+        return f"""
+SELECT doc_id
+FROM dbpedia_docs
+ORDER BY embedding <~> turbohybrid_query(
+    vector_query => %L::vector({DIMENSIONS})
 )
 LIMIT {final_k}
 """
@@ -876,6 +890,7 @@ CREATE TABLE dbpedia_run_timings(
         result = {
             "method": label,
             "base_method": method,
+            "retrieval_mode": "dense_only" if method in DENSE_ONLY_METHODS else "hybrid",
             "profile": profile,
             "dense_k": dense_k,
             "bm25_k": bm25_k,
@@ -895,6 +910,13 @@ CREATE TABLE dbpedia_run_timings(
         for result in results:
             run = runs_by_label.get(result["method"], {})
             result.setdefault("metrics", {})["overlap@10_vs_postgres_sql_rrf_halfvec"] = overlap_at_k(run, baseline, 10)
+    dense_baseline = runs_by_label.get("pgvector_halfvec_dense_only")
+    if dense_baseline:
+        for result in results:
+            run = runs_by_label.get(result["method"], {})
+            result.setdefault("metrics", {})["overlap@10_vs_pgvector_halfvec_dense_only"] = overlap_at_k(
+                run, dense_baseline, 10
+            )
 
     payload: dict[str, Any] = {
         "suite": "pgturbohybrid_dbpedia_openai3_large_1m",

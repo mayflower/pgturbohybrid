@@ -264,6 +264,23 @@ full-text search with SQL-level RRF. The HNSW build used
 | pgturbohybrid default | default 4-bit exact-free index, LIMIT-inferred `final_k` | 5.942 ms | 0.934457 | 2.38 GB |
 | SQL RRF baseline | pgvector `halfvec(3072)` HNSW plus PostgreSQL GIN full-text search, 100/100 candidates | 234.473 ms | 0.972702 | 8.41 GB |
 
+We also ran a dense-only DBPedia 1M comparison on the same Qdrant corpus shape:
+1,000 deterministic self-queries, 3,072-dimensional
+`text-embedding-3-large` vectors, one warmup pass, three measured passes, and
+`final_k=10`. This run did not pass a text query to TurboHybrid and did not use
+BM25, PostgreSQL full-text search, or SQL RRF. The pgvector baseline used a
+default `halfvec(3072)` HNSW expression index with `hnsw.ef_search` left at the
+PostgreSQL session default.
+
+| Dense-only method | Settings | p95 | self-qrel nDCG@10 | index size |
+| --- | --- | ---: | ---: | ---: |
+| pgturbohybrid dense-only | default TurboHybrid index, `vector_query` only, LIMIT-inferred `final_k` | 4.234 ms | 0.935 | 2.21 GiB |
+| pgvector dense-only | default pgvector HNSW over `embedding::halfvec(3072)` | 178.749 ms | 0.969 | 7.63 GiB |
+
+Top-10 overlap between the dense-only result sets was `0.870600` on this run.
+The quality numbers here are self-qrel checks, not external relevance labels:
+they mostly confirm whether the source row was recovered for its own embedding.
+
 The DBPedia run is a systems comparison, not an external relevance benchmark:
 the query embedding and positive document come from the same Qdrant row. It is
 useful for latency, build, and index-size behavior at 1M rows, but it should not
