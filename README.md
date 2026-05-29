@@ -277,6 +277,23 @@ reproduction notes are in
 [benchmarks/dbpedia_openai3_large.md](benchmarks/dbpedia_openai3_large.md), and
 [benchmarks/README.md](benchmarks/README.md).
 
+The same DBPedia/OpenAI3-large corpus can also be used as a dense-only systems
+comparison. This is not a hybrid-search benchmark: it uses the dataset's
+existing 3,072-dimensional embeddings, no BM25 branch, no full-text search, and
+no SQL RRF fusion. Turbovec is an in-process dense vector library, so treat this
+as a useful reference point rather than a PostgreSQL access-method comparison.
+
+| Dense-only method | p50 | p95 | p99 | nDCG@10 | recall@10 |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| pgturbohybrid dense-only | 1.595 ms | 19.540 ms | 47.754 ms | 0.947 | 0.947 |
+| Turbovec TurboQuant 4-bit | 75.160 ms | 107.219 ms | 158.685 ms | 1.000 | 1.000 |
+
+In this qdrant-self setup, Turbovec recovers the source document for every
+sampled query, while `pgturbohybrid` trades some dense-only recovery for much
+lower PostgreSQL-backed query latency. The top-10 overlap between the two runs
+was 0.8989. As with the hybrid numbers above, repeat this on your own hardware
+and query mix before drawing conclusions.
+
 If you already have a PostgreSQL RAG database, the bring-your-own benchmark
 compares TurboHybrid with your existing retrieval SQL on your own rows and
 query embeddings. See
