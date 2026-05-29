@@ -2167,7 +2167,15 @@ PgturbohybridBm25EvalTsQueryItem(QueryItem *items, QueryItem *item, char *operan
 		QueryItem  *right = item + 1;
 		QueryItem  *left = item + item->qoperator.left;
 
-		if (item->qoperator.oper == OP_AND)
+		/*
+		 * A NOT branch does not constrain bag-of-words matching: its operands
+		 * were dropped from the term list, so treat it as satisfied. This keeps
+		 * "A & !B" matching on A alone.
+		 */
+		if (item->qoperator.oper == OP_NOT)
+			return true;
+		/* Phrase has no positional model here, so match it like AND. */
+		if (item->qoperator.oper == OP_AND || item->qoperator.oper == OP_PHRASE)
 			return PgturbohybridBm25EvalTsQueryItem(items, left, operands, terms,
 											   termCount, matchedTerms) &&
 				PgturbohybridBm25EvalTsQueryItem(items, right, operands, terms,
@@ -2181,7 +2189,7 @@ PgturbohybridBm25EvalTsQueryItem(QueryItem *items, QueryItem *item, char *operan
 
 	ereport(ERROR,
 			(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
-			 errmsg("pgturbohybrid BM25 supports OR/AND tsquery terms only")));
+			 errmsg("pgturbohybrid BM25 encountered an unsupported tsquery operator")));
 }
 
 static bool
@@ -2373,6 +2381,83 @@ PgturbohybridBm25ScoreDelta(const PgturbohybridBm25MetaTupleData *meta,
 	}
 }
 
+/*
+ * Recursively collect the positive (non-negated) operand lexemes of a tsquery
+ * into the term list, in tsquery prefix order.
+ *
+ * pgturbohybrid BM25 is bag-of-words: it scores the distinct operand lexemes and
+ * ignores boolean structure for scoring, so AND, OR, and phrase operators all
+ * contribute their operands the same way. Two structural cases need care:
+ *
+ *   - Phrase operators (<->, <N>) appear routinely from English compound and
+ *     hyphenated-word normalization (e.g. "self-employed" ->
+ *     'self-employ' <-> 'self' <-> 'employ'). Their operands are scored as
+ *     ordinary terms; BM25 has no positional model, so the adjacency is dropped.
+ *   - NOT operands (which websearch_to_tsquery also emits from "word - word"
+ *     dashes) are dropped from scoring: a negated term must never contribute a
+ *     positive BM25 score. Because they are dropped here, the AND/OR match masks
+ *     built from this list also exclude them; the recursive matcher treats a NOT
+ *     branch as non-constraining (see PgturbohybridBm25EvalTsQueryItem).
+ *
+ * Returns the index just past the subtree rooted at idx so the caller can walk
+ * sibling subtrees. Weighted operands keep their lexeme and ignore the weight
+ * label; prefix operands remain unsupported.
+ */
+static int
+PgturbohybridBm25CollectPositiveTerms(QueryItem *items, char *operands, int idx,
+								 int size, bool negated,
+								 PgturbohybridBm25QueryTerm *out, int *count)
+{
+	QueryItem  *item;
+
+	if (idx >= size)
+		return idx;
+
+	item = &items[idx];
+
+	if (item->type == QI_VAL)
+	{
+		char	   *term;
+
+		if (item->qoperand.prefix)
+			ereport(ERROR,
+					(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
+					 errmsg("pgturbohybrid BM25 prefix tsquery terms are not supported yet")));
+		if (negated)
+			return idx + 1;
+
+		term = operands + item->qoperand.distance;
+		if (PgturbohybridBm25FindQueryTerm(out, *count, term,
+									  item->qoperand.length) >= 0)
+			return idx + 1;
+		if (*count >= 64)
+			ereport(ERROR,
+					(errcode(ERRCODE_PROGRAM_LIMIT_EXCEEDED),
+					 errmsg("turbohybrid BM25 queries currently support at most 64 terms")));
+		out[*count].term = term;
+		out[*count].termLen = item->qoperand.length;
+		out[*count].termHash = PgturbohybridBm25HashTerm(term,
+													item->qoperand.length);
+		out[*count].matchBit = UINT64CONST(1) << *count;
+		out[*count].qitemIndex = idx;
+		(*count)++;
+		return idx + 1;
+	}
+
+	/* QI_OPR: NOT is unary and flips parity; AND/OR/PHRASE are binary. */
+	if (item->qoperator.oper == OP_NOT)
+		return PgturbohybridBm25CollectPositiveTerms(items, operands, idx + 1,
+												size, !negated, out, count);
+	{
+		int			next = PgturbohybridBm25CollectPositiveTerms(items, operands,
+																 idx + 1, size,
+																 negated, out, count);
+
+		return PgturbohybridBm25CollectPositiveTerms(items, operands, next, size,
+												negated, out, count);
+	}
+}
+
 static int
 PgturbohybridBm25ExtractTerms(TSQuery query, PgturbohybridBm25QueryTerm **terms,
 						 MemoryContext memoryContext)
@@ -2382,58 +2467,13 @@ PgturbohybridBm25ExtractTerms(TSQuery query, PgturbohybridBm25QueryTerm **terms,
 	int			count = 0;
 	PgturbohybridBm25QueryTerm *out;
 
-	for (int i = 0; i < query->size; i++)
-	{
-		QueryItem  *item = &items[i];
-
-		if (item->type == QI_VAL)
-		{
-			if (item->qoperand.prefix)
-				ereport(ERROR,
-						(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
-						 errmsg("pgturbohybrid BM25 prefix tsquery terms are not supported yet")));
-			if (item->qoperand.weight != 0)
-				ereport(ERROR,
-						(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
-						 errmsg("pgturbohybrid BM25 weighted tsquery terms are not supported yet")));
-			count++;
-		}
-		else if (item->type == QI_OPR &&
-				 (item->qoperator.oper == OP_NOT ||
-				  item->qoperator.oper == OP_PHRASE))
-			ereport(ERROR,
-					(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
-					 errmsg("pgturbohybrid BM25 supports OR/AND tsquery terms only")));
-	}
-
+	/* query->size bounds the operand count, so it is a safe slot upper bound. */
 	out = PgturbohybridBm25MemoryContextAllocZeroArray(memoryContext,
 													   sizeof(PgturbohybridBm25QueryTerm),
-													   Max(count, 1));
-	count = 0;
-	for (int i = 0; i < query->size; i++)
-	{
-		QueryItem  *item = &items[i];
-		char	   *term;
-
-		if (item->type != QI_VAL)
-			continue;
-
-		term = operands + item->qoperand.distance;
-		if (PgturbohybridBm25FindQueryTerm(out, count, term,
-									  item->qoperand.length) >= 0)
-			continue;
-		if (count >= 64)
-			ereport(ERROR,
-					(errcode(ERRCODE_PROGRAM_LIMIT_EXCEEDED),
-					 errmsg("turbohybrid BM25 queries currently support at most 64 terms")));
-		out[count].term = term;
-		out[count].termLen = item->qoperand.length;
-		out[count].termHash = PgturbohybridBm25HashTerm(term,
-												   item->qoperand.length);
-		out[count].matchBit = UINT64CONST(1) << count;
-		out[count].qitemIndex = i;
-		count++;
-	}
+													   Max(query->size, 1));
+	if (query->size > 0)
+		PgturbohybridBm25CollectPositiveTerms(items, operands, 0, query->size,
+										 false, out, &count);
 
 	*terms = out;
 	return count;
