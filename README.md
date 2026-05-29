@@ -234,28 +234,35 @@ For troubleshooting examples, see [docs/fast_setup.md](docs/fast_setup.md).
 
 ## Benchmark Snapshot
 
-On this FIQA/OpenAI setup, the public `v0.1.0-alpha.2` snapshot used 57,638
-corpus rows, 648 qrels-backed queries, 1,536-dimensional OpenAI
-`text-embedding-3-small` embeddings, one warmup pass, one measured pass, and the
-`latency` profile. The default TurboHybrid index used 4-bit quantization with
-`exact_storage = off`; both hybrid rows used 100 dense candidates, 100 BM25
-candidates, and nDCG@10 as the quality metric. nDCG means normalized discounted
-cumulative gain, a relevance metric for ranked results.
+These are current local benchmark snapshots from commit `9caef97`, not global
+claims. Results vary by dataset, hardware, PostgreSQL settings, cache state, and
+query workload. nDCG means normalized discounted cumulative gain, a relevance
+metric for ranked results. HNSW means Hierarchical Navigable Small World,
+pgvector's graph index type for approximate nearest-neighbor vector search.
 
-HNSW means Hierarchical Navigable Small World, pgvector's graph index type for
-approximate nearest-neighbor vector search.
+On this FIQA/OpenAI setup, the run used 57,638 corpus rows, 648 qrels-backed
+queries, 1,536-dimensional OpenAI `text-embedding-3-small` embeddings, the
+`latency` profile, 100 dense candidates, 100 BM25 candidates, `final_k = 10`,
+and three warmup passes. The TurboHybrid index used 4-bit quantization with
+`exact_storage = off`.
 
 | Method | Settings | p95 | nDCG@10 |
 | --- | --- | ---: | ---: |
-| pgturbohybrid default | default 4-bit exact-free index, LIMIT-inferred `final_k` | 0.910 ms | 0.421540 |
-| SQL RRF baseline | pgvector HNSW default reloptions plus PostgreSQL GIN (Generalized Inverted Index) full-text search, 100/100 candidates | 3.254 ms | 0.423341 |
+| pgturbohybrid default | default 4-bit exact-free index, LIMIT-inferred `final_k` | 1.627 ms | 0.421465 |
+| SQL RRF baseline | pgvector HNSW plus PostgreSQL GIN full-text search, 100/100 candidates | 2.146 ms | 0.421887 |
+| pgvector dense-only reference | pgvector HNSW, no lexical branch | 1.245 ms | 0.441839 |
 
-There is also a larger Qdrant DBPedia OpenAI3-large 1M developer benchmark for
-systems testing with the dataset's existing 3,072-dimensional embeddings. It is
-useful for build time, memory, index-size, and retrieval-path experiments, but
-the default self-query setup is not an external relevance benchmark. We keep
-those results out of the README until the quality story is backed by a
-reproducible, externally labeled run.
+On the Qdrant DBPedia OpenAI3-large 1M developer benchmark, the run used the
+dataset's existing 3,072-dimensional embeddings, 1,000 self-query probes, the
+`latency` profile, `dense_k = 100`, `final_k = 10`, 8 GB PostgreSQL shared
+buffers, prewarmed benchmark relations, three warmup passes, and three measured
+passes. This is a dense-only retrieval-path stress test, not an externally
+labeled relevance benchmark.
+
+| Method | Settings | p95 | nDCG@10 |
+| --- | --- | ---: | ---: |
+| pgturbohybrid dense default | current default adaptive widening `auto` | 3.689 ms | 0.970000 |
+| pgturbohybrid dense adaptive off | same index, adaptive widening disabled | 3.541 ms | 0.947000 |
 
 These are specific benchmark snapshots, not global pgvector comparisons.
 Results vary by dataset, hardware, PostgreSQL settings, and query workload.
