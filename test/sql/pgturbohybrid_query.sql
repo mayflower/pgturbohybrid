@@ -30,6 +30,14 @@ BEGIN
 		'turbohybrid.default_bm25_k',
 		'turbohybrid.default_dense_k',
 		'turbohybrid.default_rrf_k',
+		'turbohybrid.dense_adaptive_min_gap',
+		'turbohybrid.dense_adaptive_widening',
+		'turbohybrid.dense_adaptive_widening_max_multiplier',
+		'turbohybrid.dense_adaptive_widening_multiplier',
+		'turbohybrid.dense_build_exact_distances',
+		'turbohybrid.dense_local_expansion',
+		'turbohybrid.dense_local_expansion_max_neighbors',
+		'turbohybrid.dense_local_expansion_topn',
 		'turbohybrid.enable_wand',
 		'turbohybrid.max_union_candidates',
 		'turbohybrid.profile',
@@ -41,6 +49,15 @@ BEGIN
 	IF current_setting('turbohybrid.profile') != 'latency' THEN
 		RAISE EXCEPTION 'unexpected default turbohybrid profile: %',
 			current_setting('turbohybrid.profile');
+	END IF;
+
+	IF current_setting('turbohybrid.dense_adaptive_widening') != 'off' OR
+		current_setting('turbohybrid.dense_local_expansion') != 'off' OR
+		current_setting('turbohybrid.dense_build_exact_distances') != 'off' THEN
+		RAISE EXCEPTION 'unexpected latency dense defaults: adaptive %, local %, exact build %',
+			current_setting('turbohybrid.dense_adaptive_widening'),
+			current_setting('turbohybrid.dense_local_expansion'),
+			current_setting('turbohybrid.dense_build_exact_distances');
 	END IF;
 
 	IF current_setting('turbohybrid.bm25_strategy') != 'auto' OR

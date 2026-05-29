@@ -2617,7 +2617,7 @@ PgturbohybridInit(void)
 							 "Adaptive dense graph widening mode",
 							 "Valid values are off, auto, and on. Non-off modes may run one bounded second graph pass.",
 							 &pgturbohybrid_dense_adaptive_widening,
-							 PGTURBOHYBRID_DENSE_ADAPTIVE_WIDENING_AUTO,
+							 PGTURBOHYBRID_DENSE_ADAPTIVE_WIDENING_OFF,
 							 pgturbohybrid_dense_adaptive_widening_options,
 							 PGC_USERSET, 0, NULL, NULL, NULL);
 	DefineCustomRealVariable("turbohybrid.dense_adaptive_widening_multiplier",

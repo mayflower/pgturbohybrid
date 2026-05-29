@@ -168,13 +168,17 @@ For the dense-only default comparison, run:
 
 - `pgvector_halfvec_dense_only`
 - `pgturbohybrid_dense_only`
+- `pgturbohybrid_dense_adaptive_auto_1_25` or another adaptive variant when
+  explicitly testing the experimental widening path
 - `pgturbohybrid_dense_exact_storage_on`
 
 `pgvector_halfvec_dense_only` uses only the pgvector HNSW expression index over
 `embedding::halfvec(3072)`.
 
-`pgturbohybrid_dense_only` uses the default TurboHybrid index definition, but
-the query supplies only `vector_query`:
+`pgturbohybrid_dense_only` uses the default TurboHybrid index definition and the
+release-facing fast path: 4-bit quantization, `exact_storage = off`, adaptive
+dense widening off, and local expansion off. The query supplies only
+`vector_query`:
 
 ```sql
 SELECT doc_id
@@ -198,14 +202,16 @@ in the index.
 
 The harness also includes DBPedia-only experimental variants for diagnosing
 where dense-only recovery is lost. `pgturbohybrid_dense_only` follows the
-package defaults; use `pgturbohybrid_dense_adaptive_off` when an explicit
-no-widening baseline is needed. These variants should not be promoted in public
-README claims without a full labeled benchmark run:
+package default, which keeps adaptive widening off. Use
+`pgturbohybrid_dense_adaptive_off` as an explicit no-widening guardrail, and use
+the adaptive methods only when measuring opt-in behavior. These variants should
+not be promoted in public README claims without a full labeled benchmark run:
 
 - `pgturbohybrid_dense_exact_build`
 - `pgturbohybrid_dense_exact_storage_on`
 - `pgturbohybrid_dense_adaptive_off`
 - `pgturbohybrid_dense_backbone`
+- `pgturbohybrid_dense_adaptive_auto_1_25`
 - `pgturbohybrid_dense_adaptive_auto_1_5`
 - `pgturbohybrid_dense_adaptive_auto_2_0`
 - `pgturbohybrid_dense_adaptive_on_2_0`
@@ -300,7 +306,7 @@ export OUTPUT=benchmarks/results/dbpedia-openai3-large-dense-defaults.json
 python3 benchmarks/dbpedia_openai3_large.py \
   --database "$PGDATABASE" \
   --dataset "$DBPEDIA_DATASET" \
-  --methods pgvector_halfvec_dense_only,pgturbohybrid_dense_only \
+  --methods pgvector_halfvec_dense_only,pgturbohybrid_dense_only,pgturbohybrid_dense_adaptive_auto_1_25,pgturbohybrid_dense_adaptive_auto_2_0 \
   --final-k 10 \
   --warmup 1 \
   --measured-runs 3 \
@@ -322,7 +328,7 @@ python3 benchmarks/dbpedia_openai3_large.py \
   --dataset "$DBPEDIA_DATASET" \
   --max-docs 10000 \
   --max-queries 25 \
-  --methods pgvector_halfvec_dense_only,pgturbohybrid_dense_only \
+  --methods pgvector_halfvec_dense_only,pgturbohybrid_dense_only,pgturbohybrid_dense_adaptive_auto_1_25,pgturbohybrid_dense_adaptive_auto_2_0 \
   --final-k 10 \
   --warmup 1 \
   --measured-runs 1 \

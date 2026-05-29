@@ -129,10 +129,10 @@ full-text search because standard pgvector `vector` HNSW is not the intended
 ANN path for this dimensionality.
 
 For the DBPedia dense-only default comparison, use
-`--methods pgvector_halfvec_dense_only,pgturbohybrid_dense_only,pgturbohybrid_dense_exact_storage_on`.
+`--methods pgvector_halfvec_dense_only,pgturbohybrid_dense_only,pgturbohybrid_dense_adaptive_auto_1_25,pgturbohybrid_dense_exact_storage_on`.
 That run does not pass a text query to TurboHybrid and should not be reported as
-hybrid retrieval. The exact-storage row is an upper-bound reference, not a
-compact default candidate.
+hybrid retrieval. The adaptive row is opt-in diagnostic behavior, and the
+exact-storage row is an upper-bound reference, not a compact default candidate.
 
 For an optional external-library reference, use
 `benchmarks/dbpedia_turbovec.py` against the same loaded DBPedia query set. It

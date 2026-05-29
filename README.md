@@ -158,11 +158,12 @@ Fresh sessions use the `latency` profile:
 SHOW turbohybrid.profile;
 ```
 
-The default path uses a 4-bit quantized index, exact vector storage off, dense
-and BM25 candidate budgets of 100, RRF constant 60, and the SQL `LIMIT` as the
-final result target when possible. In plain terms: create the default index,
-query with `ORDER BY ... turbohybrid_query(...) LIMIT n`, then inspect the scan
-stats below.
+The default path uses a 4-bit quantized index, exact vector storage off,
+adaptive dense widening off, dense and BM25 candidate budgets of 100, RRF
+constant 60, and the SQL `LIMIT` as the final result target when possible. In
+plain terms: create the default index, query with
+`ORDER BY ... turbohybrid_query(...) LIMIT n`, then inspect the scan stats
+below.
 
 Public candidate and cache settings are intentionally capped in this alpha so a
 user cannot set runaway per-query budgets in a shared PostgreSQL server. If you
@@ -206,7 +207,9 @@ WITH (exact_storage = on);
 ```
 
 Do not treat either profile as universally best. Measure latency and relevance
-on your dataset.
+on your dataset. Experimental dense diagnostics such as adaptive widening,
+local expansion, exact-build distances, entry sidecars, and residual rerank are
+opt-in knobs for benchmark work, not release defaults.
 
 ## Diagnostics
 
@@ -234,11 +237,11 @@ For troubleshooting examples, see [docs/fast_setup.md](docs/fast_setup.md).
 
 ## Benchmark Snapshot
 
-These are current local benchmark snapshots from commit `9caef97`, not global
-claims. Results vary by dataset, hardware, PostgreSQL settings, cache state, and
-query workload. nDCG means normalized discounted cumulative gain, a relevance
-metric for ranked results. HNSW means Hierarchical Navigable Small World,
-pgvector's graph index type for approximate nearest-neighbor vector search.
+These are local benchmark snapshots, not global claims. Results vary by
+dataset, hardware, PostgreSQL settings, cache state, and query workload. nDCG
+means normalized discounted cumulative gain, a relevance metric for ranked
+results. HNSW means Hierarchical Navigable Small World, pgvector's graph index
+type for approximate nearest-neighbor vector search.
 
 On this FIQA/OpenAI setup, the run used 57,638 corpus rows, 648 qrels-backed
 queries, 1,536-dimensional OpenAI `text-embedding-3-small` embeddings, the
@@ -252,21 +255,11 @@ and three warmup passes. The TurboHybrid index used 4-bit quantization with
 | SQL RRF baseline | pgvector HNSW plus PostgreSQL GIN full-text search, 100/100 candidates | 2.146 ms | 0.421887 |
 | pgvector dense-only reference | pgvector HNSW, no lexical branch | 1.245 ms | 0.441839 |
 
-On the Qdrant DBPedia OpenAI3-large 1M developer benchmark, the run used the
-dataset's existing 3,072-dimensional embeddings, 1,000 self-query probes, the
-`latency` profile, `dense_k = 100`, `final_k = 10`, 8 GB PostgreSQL shared
-buffers, prewarmed benchmark relations, three warmup passes, and three measured
-passes. This is a dense-only retrieval-path stress test, not an externally
-labeled relevance benchmark.
-
-| Method | Settings | p95 | nDCG@10 |
-| --- | --- | ---: | ---: |
-| pgturbohybrid dense default | current default adaptive widening `auto` | 3.689 ms | 0.970000 |
-| pgturbohybrid dense adaptive off | same index, adaptive widening disabled | 3.541 ms | 0.947000 |
-
-These are specific benchmark snapshots, not global pgvector comparisons.
-Results vary by dataset, hardware, PostgreSQL settings, and query workload.
-Benchmark details, baselines, and reproduction notes are in
+DBPedia/OpenAI3-large 1M dense-only runs are developer diagnostics for graph
+reachability, not release-facing relevance claims. The package default keeps
+adaptive dense widening off; adaptive widening variants remain available in the
+benchmark harness for controlled experiments. Benchmark details, baselines, and
+reproduction notes are in
 [docs/benchmarks/fiqa-openai.md](docs/benchmarks/fiqa-openai.md),
 [benchmarks/dbpedia_openai3_large.md](benchmarks/dbpedia_openai3_large.md), and
 [benchmarks/README.md](benchmarks/README.md).
