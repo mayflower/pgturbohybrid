@@ -60,8 +60,10 @@ Do not publish:
 
 | Variant | Rows | Queries | nDCG@10 | Source top10 | p50 ms | p95 ms | p99 ms | Index bytes | Build ms | Decision |
 |---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---|
-| historical adaptive auto run | 1,000,000 | 1,000 | 0.970 | 0.970 | 1.965 | 5.491 | 8.624 | 2,377,760,768 | reused | keep as opt-in diagnostic |
-| current default fast path, adaptive off | 1,000,000 | 1,000 | 0.947 | 0.947 | 1.742 | 15.665 | 23.508 | 2,377,760,768 | reused | keep as default guardrail |
+| current default fast path, adaptive off | 1,000,000 | 1,000 | 0.947 | 0.947 | 1.481 | 3.842 | 8.747 | 2,377,760,768 | reused | keep as default guardrail |
+| adaptive auto 2.0 opt-in recovery | 1,000,000 | 1,000 | 0.970 | 0.970 | 1.621 | 3.926 | 6.183 | 2,377,760,768 | reused | keep as opt-in diagnostic |
+| adaptive auto 1.25 opt-in recovery | 1,000,000 | 1,000 | 0.962 | 0.962 | 1.557 | 4.209 | 7.490 | 2,377,760,768 | reused | keep as opt-in diagnostic |
+| historical adaptive auto run | 1,000,000 | 1,000 | 0.970 | 0.970 | 1.965 | 5.491 | 8.624 | 2,377,760,768 | reused | stale default-candidate artifact |
 | bounded routing full, adaptive off before scan rerun | 1,000,000 | 1,000 | 0.947 | 0.947 | 7.979 | 21.972 | 28.564 | 2,377,760,768 | 764,249 | stale tail-latency artifact |
 | current default compact path, before bounded routing entries | 1,000,000 | 1,000 | 1.000 | 1.000 | 15.471 | 567.737 | 1751.226 | 2,368,987,136 | reused | stale tail-latency artifact |
 | current default compact path, bounded routing smoke | 2,000 | 20 | 1.000 | 1.000 | 0.985 | 2.234 | 4.528 | 6,455,296 | 839 | kept as routing smoke |
@@ -174,20 +176,19 @@ entry-sidecar variants, and residual-rerank variants. All rows completed with
 `residual_rerank_bytes=0`. The forced adaptive widening row was slower on this
 smoke, so it remains experimental and off by default.
 
-Latest full default-vs-explicit-off artifact after choosing adaptive auto as
-the default:
+Latest full default-off versus explicit adaptive-auto recovery artifact:
 
-- `benchmarks/results/dbpedia-current-default-auto-final.json`
-- `benchmarks/results/dbpedia-current-default-auto-final.jsonl`
-- `benchmarks/results/dbpedia-current-default-auto-final-index.json`
-- `benchmarks/results/dbpedia-current-default-auto-final.md`
+- `benchmarks/results/dbpedia-current-default-off-recovered-20260529.json`
+- `benchmarks/results/dbpedia-current-default-off-recovered-20260529.jsonl`
+- `benchmarks/results/dbpedia-current-default-off-recovered-20260529-index.json`
+- `benchmarks/results/dbpedia-current-default-off-recovered-20260529.md`
 
 That run uses the same 1,000,000-row compact bounded-routing index for both
-methods. `pgturbohybrid_dense_adaptive_off` recovered 947 of 1,000 sources in
-the top 10. The adaptive-auto variant recovered 970 of 1,000 sources, widened
-37 queries, and kept `entry_sidecar_count=0`, `residual_rerank_bytes=0`, and
-`exact_storage=false`. In current benchmark semantics, `pgturbohybrid_dense_only`
-means the package default fast path with adaptive widening off.
+methods. `pgturbohybrid_dense_only` is the package default fast path with
+adaptive widening off and recovered 947 of 1,000 sources in the top 10. The
+explicit adaptive-auto 2.0 variant recovered 970 of 1,000 sources, widened 37
+queries, and kept `entry_sidecar_count=0`, `residual_rerank_bytes=0`, and
+`exact_storage=false`.
 
 Latest smoke provenance after the default-drift audit:
 
@@ -229,9 +230,9 @@ Current findings:
   collect high-level routing starts. Current builds store a bounded routing
   table on the metapage instead. The full 1M bounded-routing run proves the
   new table is present and used.
-- Adaptive widening now has enough same-index DBPedia evidence to become the
-  dense default in `auto` mode. It is still bounded to one second pass and does
-  not change index storage.
+- Adaptive widening has useful same-index DBPedia evidence, but not enough
+  broader workload evidence to become the dense default. It remains bounded to
+  one second pass, does not change index storage, and stays opt-in.
 - Forced adaptive widening and forced local expansion did not improve quality
   because the current default was already at full self-query recovery, and the
   forced variants add tail-latency risk.
@@ -482,6 +483,10 @@ Relevant generated artifacts from this investigation:
 - `benchmarks/results/dbpedia-current-routing-query-variants.jsonl`
 - `benchmarks/results/dbpedia-current-routing-query-variants-index.json`
 - `benchmarks/results/dbpedia-current-routing-query-variants.md`
+- `benchmarks/results/dbpedia-current-default-off-recovered-20260529.json`
+- `benchmarks/results/dbpedia-current-default-off-recovered-20260529.jsonl`
+- `benchmarks/results/dbpedia-current-default-off-recovered-20260529-index.json`
+- `benchmarks/results/dbpedia-current-default-off-recovered-20260529.md`
 - `benchmarks/results/dbpedia-current-default-auto-final.json`
 - `benchmarks/results/dbpedia-current-default-auto-final.jsonl`
 - `benchmarks/results/dbpedia-current-default-auto-final-index.json`

@@ -246,14 +246,15 @@ type for approximate nearest-neighbor vector search.
 On this FIQA/OpenAI setup, the run used 57,638 corpus rows, 648 qrels-backed
 queries, 1,536-dimensional OpenAI `text-embedding-3-small` embeddings, the
 `latency` profile, 100 dense candidates, 100 BM25 candidates, `final_k = 10`,
-and three warmup passes. The TurboHybrid index used 4-bit quantization with
-`exact_storage = off`.
+three warmup passes, and one measured pass. The TurboHybrid index used 4-bit
+quantization with `exact_storage = off`.
 
 | Method | Settings | p95 | nDCG@10 |
 | --- | --- | ---: | ---: |
-| pgturbohybrid default | default 4-bit exact-free index, LIMIT-inferred `final_k` | 1.627 ms | 0.421465 |
-| SQL RRF baseline | pgvector HNSW plus PostgreSQL GIN full-text search, 100/100 candidates | 2.146 ms | 0.421887 |
-| pgvector dense-only reference | pgvector HNSW, no lexical branch | 1.245 ms | 0.441839 |
+| pgturbohybrid default | default 4-bit exact-free index, adaptive widening off, LIMIT-inferred `final_k` | 1.628 ms | 0.415535 |
+| pgturbohybrid adaptive auto 2.0 | explicit diagnostic setting, adaptive dense widening opt-in | 1.552 ms | 0.421465 |
+| SQL RRF baseline | pgvector HNSW plus PostgreSQL GIN full-text search, 100/100 candidates | 2.009 ms | 0.423430 |
+| pgvector dense-only reference | pgvector HNSW, no lexical branch | 1.412 ms | 0.442786 |
 
 DBPedia/OpenAI3-large 1M dense-only runs are developer diagnostics for graph
 reachability, not release-facing relevance claims. The package default keeps
