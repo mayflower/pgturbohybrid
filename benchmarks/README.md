@@ -33,7 +33,9 @@ Every publishable run should include at least:
 
 When relevant, also compare `pgturbohybrid_recovered_explicit` to document the
 latency, storage, and quality tradeoff from the recovered fast settings: 4-bit,
-`exact_storage = off`, 100/100/60, and `final_k = 10`. The harness still accepts
+`exact_storage = off`, 100/100/60, and `final_k = 10`. The package default keeps
+adaptive dense widening off; the harness includes explicit adaptive variants for
+controlled recovery experiments. The harness still accepts
 `pgturbohybrid_exact_storage_off` as a legacy alias for older artifacts.
 
 ## Profile Matrix
@@ -45,6 +47,10 @@ Publishable FIQA/OpenAI results should include all of:
 - `pgturbohybrid_recovered_explicit`: latency profile, 4-bit index,
   `exact_storage = off`, effective `dense_k = 100`, `bm25_k = 100`, and
   `final_k = 10`.
+- `pgturbohybrid_adaptive_auto_2_0`: same FIQA/OpenAI latency-profile index
+  and budgets, with adaptive dense widening explicitly enabled in `auto` mode
+  at multiplier `2.0`. Use this as an opt-in quality recovery diagnostic, not
+  as the package default.
 - `pgturbohybrid_quality`: quality profile, effective `dense_k = 400`,
   `bm25_k = 400`, exact-safe BM25 paths, SIMD enabled, and a documented
   `exact_storage` choice. Prefer `exact_storage = on` when evaluating final

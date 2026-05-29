@@ -145,6 +145,12 @@
       "description": "pgturbohybrid latency profile with explicit recovered FIQA/OpenAI settings: 4-bit quantization, exact_storage off, dense_k 100, bm25_k 100, rrf_k 60, and final_k 10."
     },
     {
+      "name": "pgturbohybrid_adaptive_auto_2_0",
+      "layer": "systems",
+      "kind": "postgres_index_am",
+      "description": "pgturbohybrid FIQA/OpenAI diagnostic variant with adaptive dense widening explicitly set to auto and multiplier 2.0. This is an opt-in recovery method, not the package default."
+    },
+    {
       "name": "pgturbohybrid_exact_storage_off",
       "layer": "reference",
       "kind": "postgres_index_am",

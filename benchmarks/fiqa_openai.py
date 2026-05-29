@@ -21,6 +21,10 @@ from typing import Any
 DIMENSIONS = 1536
 FINAL_K = 10
 RRF_K = 60
+TURBOHYBRID_DEFAULT_QUERY_METHODS = {
+    "pgturbohybrid",
+    "pgturbohybrid_adaptive_auto_2_0",
+}
 DEFAULT_BUDGET_MATRIX = ((50, 50), (100, 100), (400, 400))
 REQUIRED_DATASET_FILES = (
     "corpus.jsonl",
@@ -289,7 +293,7 @@ CREATE INDEX fiqa_hnsw_idx ON fiqa_docs USING hnsw (embedding vector_cosine_ops)
 CREATE INDEX fiqa_fts_idx ON fiqa_docs USING gin (body_tsv);
 """
         indexes = ["fiqa_hnsw_idx", "fiqa_fts_idx"]
-    elif method == "pgturbohybrid":
+    elif method in TURBOHYBRID_DEFAULT_QUERY_METHODS:
         sql = """
 DROP INDEX IF EXISTS fiqa_hnsw_idx;
 DROP INDEX IF EXISTS fiqa_fts_idx;
@@ -562,6 +566,21 @@ WHERE probe_id = {sql_literal(probe_id)};
     return json.loads(text) if text else []
 
 
+def method_runtime_settings(method: str) -> dict[str, str]:
+    if method == "pgturbohybrid_adaptive_auto_2_0":
+        return {
+            "turbohybrid.dense_adaptive_widening": "auto",
+            "turbohybrid.dense_adaptive_widening_multiplier": "2.0",
+            "turbohybrid.dense_local_expansion": "off",
+        }
+    if method.startswith("pgturbohybrid"):
+        return {
+            "turbohybrid.dense_adaptive_widening": "off",
+            "turbohybrid.dense_local_expansion": "off",
+        }
+    return {}
+
+
 def method_query(method: str, dense_k: int, bm25_k: int, final_k: int) -> str:
     if method == "pgvector_hnsw_dense_only":
         return f"""
@@ -601,7 +620,7 @@ ORDER BY COALESCE(1.0 / ({RRF_K} + dense.rank), 0.0) +
 LIMIT {final_k}
 """
 
-    if method == "pgturbohybrid":
+    if method in TURBOHYBRID_DEFAULT_QUERY_METHODS:
         return f"""
 SELECT doc_id
 FROM fiqa_docs
@@ -649,6 +668,10 @@ BEGIN
     IF '{extension_mode}' = 'pgturbohybrid' THEN
         PERFORM set_config('turbohybrid.profile', '{profile}', false);
     END IF;
+"""
+    for name, value in method_runtime_settings(method).items():
+        sql += f"    PERFORM set_config('{name}', '{value}', false);\n"
+    sql += f"""
     IF {is_turbohybrid} AND {force_index_sql} THEN
         PERFORM set_config('enable_seqscan', 'off', true);
     END IF;
@@ -827,6 +850,8 @@ def explain_probe(database: str, method: str, dense_k: int, bm25_k: int, final_k
     settings = "SET enable_seqscan = off; "
     if extension_mode == "pgturbohybrid":
         settings += f"SET turbohybrid.profile = '{profile}'; "
+        for name, value in method_runtime_settings(method).items():
+            settings += f"SET {name} = '{value}'; "
     plan_text = run_psql(
         database,
         settings + "EXPLAIN (FORMAT JSON, ANALYZE, BUFFERS, SETTINGS, VERBOSE) " + sql_literal + ";",
