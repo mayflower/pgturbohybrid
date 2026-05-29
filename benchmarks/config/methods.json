@@ -19,6 +19,108 @@
       "description": "Standalone pgturbohybrid graph plus in-index BM25 with turbohybrid_query fusion."
     },
     {
+      "name": "pgturbohybrid_dense_exact_build",
+      "layer": "systems",
+      "kind": "postgres_index_am",
+      "description": "Dense-only pgturbohybrid variant that uses exact f32 distances while building graph edges, then scans the compact 4-bit index with exact_storage off."
+    },
+    {
+      "name": "pgturbohybrid_dense_adaptive_off",
+      "layer": "systems",
+      "kind": "postgres_index_am",
+      "description": "Dense-only pgturbohybrid default index with adaptive query-time widening explicitly disabled for baseline attribution."
+    },
+    {
+      "name": "pgturbohybrid_dense_backbone",
+      "layer": "systems",
+      "kind": "postgres_index_am",
+      "description": "Dense-only pgturbohybrid experimental topology variant that forces adjacent level-0 backbone edges during graph build, with exact_storage off."
+    },
+    {
+      "name": "pgturbohybrid_dense_exact_storage_on",
+      "layer": "systems",
+      "kind": "postgres_index_am",
+      "description": "Dense-only pgturbohybrid upper-bound reference with exact vector storage enabled for final rescoring."
+    },
+    {
+      "name": "pgturbohybrid_dense_adaptive_auto_1_5",
+      "layer": "systems",
+      "kind": "postgres_index_am",
+      "description": "Dense-only pgturbohybrid variant with experimental adaptive query-time widening in auto mode and a 1.5x second-pass target cap."
+    },
+    {
+      "name": "pgturbohybrid_dense_adaptive_auto_2_0",
+      "layer": "systems",
+      "kind": "postgres_index_am",
+      "description": "Dense-only pgturbohybrid variant with experimental adaptive query-time widening in auto mode and a 2.0x second-pass target cap."
+    },
+    {
+      "name": "pgturbohybrid_dense_adaptive_on_2_0",
+      "layer": "systems",
+      "kind": "postgres_index_am",
+      "description": "Dense-only pgturbohybrid upper-bound variant that forces one bounded 2.0x adaptive query-time widening pass."
+    },
+    {
+      "name": "pgturbohybrid_dense_local_expansion_on_4",
+      "layer": "systems",
+      "kind": "postgres_index_am",
+      "description": "Dense-only pgturbohybrid variant that scores level-0 neighbors of the top 4 approximate candidates after normal traversal."
+    },
+    {
+      "name": "pgturbohybrid_dense_local_expansion_on_8",
+      "layer": "systems",
+      "kind": "postgres_index_am",
+      "description": "Dense-only pgturbohybrid variant that scores level-0 neighbors of the top 8 approximate candidates after normal traversal."
+    },
+    {
+      "name": "pgturbohybrid_dense_local_expansion_on_16",
+      "layer": "systems",
+      "kind": "postgres_index_am",
+      "description": "Dense-only pgturbohybrid variant that scores level-0 neighbors of the top 16 approximate candidates after normal traversal."
+    },
+    {
+      "name": "pgturbohybrid_dense_local_expansion_auto_8",
+      "layer": "systems",
+      "kind": "postgres_index_am",
+      "description": "Dense-only pgturbohybrid variant that scores level-0 neighbors of the top 8 approximate candidates only when the first-pass band is ambiguous."
+    },
+    {
+      "name": "pgturbohybrid_dense_entry_sidecar_64",
+      "layer": "systems",
+      "kind": "postgres_index_am",
+      "description": "Dense-only pgturbohybrid variant with a tiny build-time data-aware entry sidecar storing up to 64 representative node IDs."
+    },
+    {
+      "name": "pgturbohybrid_dense_entry_sidecar_128",
+      "layer": "systems",
+      "kind": "postgres_index_am",
+      "description": "Dense-only pgturbohybrid variant with a tiny build-time data-aware entry sidecar storing up to 128 representative node IDs."
+    },
+    {
+      "name": "pgturbohybrid_dense_entry_sidecar_256",
+      "layer": "systems",
+      "kind": "postgres_index_am",
+      "description": "Dense-only pgturbohybrid variant with a tiny build-time data-aware entry sidecar storing up to 256 representative node IDs."
+    },
+    {
+      "name": "pgturbohybrid_dense_residual_rerank_16",
+      "layer": "systems",
+      "kind": "postgres_index_am",
+      "description": "Dense-only pgturbohybrid variant with experimental 16-byte per-vector residual sketches for final-band reranking while keeping exact_storage off."
+    },
+    {
+      "name": "pgturbohybrid_dense_residual_rerank_32",
+      "layer": "systems",
+      "kind": "postgres_index_am",
+      "description": "Dense-only pgturbohybrid variant with experimental 32-byte per-vector residual sketches for final-band reranking while keeping exact_storage off."
+    },
+    {
+      "name": "pgturbohybrid_dense_residual_rerank_64",
+      "layer": "systems",
+      "kind": "postgres_index_am",
+      "description": "Dense-only pgturbohybrid variant with experimental 64-byte per-vector residual sketches for final-band reranking while keeping exact_storage off."
+    },
+    {
       "name": "postgres_sql_rrf",
       "layer": "reference",
       "kind": "postgres_sql",

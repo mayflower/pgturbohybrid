@@ -143,6 +143,20 @@ static const struct config_enum_entry pgturbohybrid_bm25_accumulator_mode_option
 	{NULL, 0, false}
 };
 
+static const struct config_enum_entry pgturbohybrid_dense_adaptive_widening_options[] = {
+	{"off", PGTURBOHYBRID_DENSE_ADAPTIVE_WIDENING_OFF, false},
+	{"auto", PGTURBOHYBRID_DENSE_ADAPTIVE_WIDENING_AUTO, false},
+	{"on", PGTURBOHYBRID_DENSE_ADAPTIVE_WIDENING_ON, false},
+	{NULL, 0, false}
+};
+
+static const struct config_enum_entry pgturbohybrid_dense_local_expansion_options[] = {
+	{"off", PGTURBOHYBRID_DENSE_LOCAL_EXPANSION_OFF, false},
+	{"auto", PGTURBOHYBRID_DENSE_LOCAL_EXPANSION_AUTO, false},
+	{"on", PGTURBOHYBRID_DENSE_LOCAL_EXPANSION_ON, false},
+	{NULL, 0, false}
+};
+
 typedef struct PgturbohybridProfileDefaults
 {
 	int			denseK;
@@ -935,18 +949,24 @@ PgturbohybridDenseOrderBys(ScanKey orderbys, int norderbys)
 	{
 		PgturbohybridQueryHeader *query;
 		Vector	   *vectorQuery;
+		Vector	   *vectorCopy;
+		Size		vectorSize;
 
 		if (denseOrderbys[i].sk_flags & SK_ISNULL)
 			continue;
 
-		query = DatumGetPgturbohybridQuery(denseOrderbys[i].sk_argument);
+		query = (PgturbohybridQueryHeader *) PG_DETOAST_DATUM_COPY(denseOrderbys[i].sk_argument);
 		PgturbohybridQueryValidateFast(query);
 
 		vectorQuery = PgturbohybridQueryGetVector(query);
 		if (vectorQuery == NULL)
 			continue;
 
-		denseOrderbys[i].sk_argument = PointerGetDatum(vectorQuery);
+		vectorSize = VARSIZE_ANY(vectorQuery);
+		vectorCopy = palloc(vectorSize);
+		memcpy(vectorCopy, vectorQuery, vectorSize);
+		denseOrderbys[i].sk_argument = PointerGetDatum(vectorCopy);
+		pfree(query);
 	}
 
 	return denseOrderbys;
@@ -2094,7 +2114,7 @@ pgturbohybridamrescan(IndexScanDesc scan, ScanKey keys, int nkeys, ScanKey order
 					 hasVectorQuery ? denseOrderbys : NULL,
 					 hasVectorQuery ? norderbys : 0);
 
-	if (hasTextQuery)
+	if (hasTextQuery || hasVectorQuery)
 	{
 		PgturbohybridGraphScanOpaque so = (PgturbohybridGraphScanOpaque) scan->opaque;
 		MemoryContext oldCtx = MemoryContextSwitchTo(so->tmpCtx);
@@ -2287,9 +2307,9 @@ PgturbohybridEstimateTsQueryTerms(TSQuery query)
 
 static void
 pgturbohybridamcostestimate(PlannerInfo *root, IndexPath *path, double loop_count,
-					 Cost *indexStartupCost, Cost *indexTotalCost,
-					 Selectivity *indexSelectivity, double *indexCorrelation,
-					 double *indexPages)
+				 Cost *indexStartupCost, Cost *indexTotalCost,
+				 Selectivity *indexSelectivity, double *indexCorrelation,
+				 double *indexPages)
 {
 	GenericCosts costs;
 	Relation	index;
@@ -2358,8 +2378,8 @@ pgturbohybridamcostestimate(PlannerInfo *root, IndexPath *path, double loop_coun
 	else
 	{
 		denseK = opts != NULL ? opts->hybridDefaultDenseK : PGTURBOHYBRID_DEFAULT_DENSE_K;
-		bm25K = opts != NULL ? opts->hybridDefaultBm25K : PGTURBOHYBRID_DEFAULT_BM25_K;
-		finalK = Max(denseK + bm25K, 1);
+		bm25K = 0;
+		finalK = Max(denseK, 1);
 		termCount = 2;
 	}
 	if (bm25K > 0)
@@ -2444,6 +2464,11 @@ pgturbohybridamoptions(Datum reloptions, bool validate)
 		PGTURBOHYBRID_RELOPT_PARSE("graph_oversampling", RELOPT_TYPE_INT, graphOversampling),
 		PGTURBOHYBRID_RELOPT_PARSE("quantization_bits", RELOPT_TYPE_INT, tqBits),
 		PGTURBOHYBRID_RELOPT_PARSE("exact_storage", RELOPT_TYPE_BOOL, tqExactStorage),
+		PGTURBOHYBRID_RELOPT_PARSE("entry_sidecar", RELOPT_TYPE_BOOL, entrySidecar),
+		PGTURBOHYBRID_RELOPT_PARSE("entry_sidecar_representatives", RELOPT_TYPE_INT, entrySidecarRepresentatives),
+		PGTURBOHYBRID_RELOPT_PARSE("graph_backbone", RELOPT_TYPE_BOOL, graphBackbone),
+		PGTURBOHYBRID_RELOPT_PARSE("residual_rerank", RELOPT_TYPE_BOOL, residualRerank),
+		PGTURBOHYBRID_RELOPT_PARSE("residual_rerank_bytes", RELOPT_TYPE_INT, residualRerankBytes),
 	};
 	PgturbohybridOptions *opts = (PgturbohybridOptions *) build_reloptions(reloptions, validate,
 																 pgturbohybrid_relopt_kind,
@@ -2533,6 +2558,25 @@ PgturbohybridInit(void)
 	add_bool_reloption(pgturbohybrid_relopt_kind, "exact_storage",
 					   "Store exact vectors in the dense pgturbohybrid index for final exact rescoring.",
 					   PGTURBOHYBRID_DEFAULT_EXACT_STORAGE, AccessExclusiveLock);
+	add_bool_reloption(pgturbohybrid_relopt_kind, "entry_sidecar",
+					   "Store a small build-time list of data-aware representative entry node IDs.",
+					   PGTURBOHYBRID_DEFAULT_ENTRY_SIDECAR, AccessExclusiveLock);
+	add_int_reloption(pgturbohybrid_relopt_kind, "entry_sidecar_representatives",
+					  "Maximum representative node IDs stored when entry_sidecar is enabled.",
+					  PGTURBOHYBRID_DEFAULT_ENTRY_SIDECAR_REPRESENTATIVES, 0,
+					  PGTURBOHYBRID_GRAPH_MAX_ENTRY_SIDECAR_REPRESENTATIVES,
+					  AccessExclusiveLock);
+	add_bool_reloption(pgturbohybrid_relopt_kind, "graph_backbone",
+					   "Force adjacent level-0 graph edges during experimental dense graph builds.",
+					   PGTURBOHYBRID_DEFAULT_GRAPH_BACKBONE, AccessExclusiveLock);
+	add_bool_reloption(pgturbohybrid_relopt_kind, "residual_rerank",
+					   "Store tiny per-vector sketches for experimental final-band dense reranking.",
+					   PGTURBOHYBRID_DEFAULT_RESIDUAL_RERANK, AccessExclusiveLock);
+	add_int_reloption(pgturbohybrid_relopt_kind, "residual_rerank_bytes",
+					  "Per-vector sketch bytes stored when residual_rerank is enabled.",
+					  PGTURBOHYBRID_DEFAULT_RESIDUAL_RERANK_BYTES, 0,
+					  PGTURBOHYBRID_GRAPH_MAX_RESIDUAL_RERANK_BYTES,
+					  AccessExclusiveLock);
 
 	DefineCustomIntVariable("turbohybrid.default_dense_k", "Default dense candidate budget for turbohybrid_query callers",
 							NULL, &pgturbohybrid_default_dense_k,
@@ -2564,6 +2608,45 @@ PgturbohybridInit(void)
 	DefineCustomBoolVariable("turbohybrid.simd", "Enable SIMD kernels where supported by the host CPU",
 							 NULL, &pgturbohybrid_simd,
 							 true, PGC_USERSET, 0, NULL, PgturbohybridAssignSimd, NULL);
+	DefineCustomBoolVariable("turbohybrid.dense_build_exact_distances",
+							 "Use exact f32 vector distances while building dense graph edges",
+							 "This can improve graph topology for experiments without storing exact vectors at scan time.",
+							 &pgturbohybrid_dense_build_exact_distances,
+							 false, PGC_USERSET, 0, NULL, NULL, NULL);
+	DefineCustomEnumVariable("turbohybrid.dense_adaptive_widening",
+							 "Adaptive dense graph widening mode",
+							 "Valid values are off, auto, and on. Non-off modes may run one bounded second graph pass.",
+							 &pgturbohybrid_dense_adaptive_widening,
+							 PGTURBOHYBRID_DENSE_ADAPTIVE_WIDENING_AUTO,
+							 pgturbohybrid_dense_adaptive_widening_options,
+							 PGC_USERSET, 0, NULL, NULL, NULL);
+	DefineCustomRealVariable("turbohybrid.dense_adaptive_widening_multiplier",
+							 "Multiplier for one adaptive dense graph widening pass",
+							 NULL, &pgturbohybrid_dense_adaptive_widening_multiplier,
+							 2.0, 1.0, 16.0, PGC_USERSET, 0, NULL, NULL, NULL);
+	DefineCustomRealVariable("turbohybrid.dense_adaptive_widening_max_multiplier",
+							 "Maximum multiplier cap for adaptive dense graph widening",
+							 NULL, &pgturbohybrid_dense_adaptive_widening_max_multiplier,
+							 4.0, 1.0, 32.0, PGC_USERSET, 0, NULL, NULL, NULL);
+	DefineCustomRealVariable("turbohybrid.dense_adaptive_min_gap",
+							 "Normalized score-gap threshold for automatic dense graph widening; 0 uses the built-in threshold",
+							 NULL, &pgturbohybrid_dense_adaptive_min_gap,
+							 0.0, 0.0, 1.0, PGC_USERSET, 0, NULL, NULL, NULL);
+	DefineCustomEnumVariable("turbohybrid.dense_local_expansion",
+							 "Experimental bounded one-hop dense graph expansion mode",
+							 "Valid values are off, auto, and on. Non-off modes score neighbors of top approximate candidates.",
+							 &pgturbohybrid_dense_local_expansion,
+							 PGTURBOHYBRID_DENSE_LOCAL_EXPANSION_OFF,
+							 pgturbohybrid_dense_local_expansion_options,
+							 PGC_USERSET, 0, NULL, NULL, NULL);
+	DefineCustomIntVariable("turbohybrid.dense_local_expansion_topn",
+							"Number of top approximate dense candidates to expand locally",
+							NULL, &pgturbohybrid_dense_local_expansion_topn,
+							8, 1, 64, PGC_USERSET, 0, NULL, NULL, NULL);
+	DefineCustomIntVariable("turbohybrid.dense_local_expansion_max_neighbors",
+							"Maximum level-0 neighbors to score during local dense expansion",
+							NULL, &pgturbohybrid_dense_local_expansion_max_neighbors,
+							256, 1, 4096, PGC_USERSET, 0, NULL, NULL, NULL);
 	DefineCustomEnumVariable("turbohybrid.bm25_strategy", "BM25 candidate generation strategy",
 							 "Valid values are auto, impact, impact_or, wand, daat_simd, and daat_hash.",
 							 &pgturbohybrid_bm25_strategy,

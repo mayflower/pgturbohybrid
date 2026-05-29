@@ -1250,7 +1250,8 @@ PgturbohybridBm25LoadHeapTids(Relation index, const PgturbohybridGraphMetaPageDa
 		PgturbohybridGraphTuplesPerPage(PgturbohybridGraphCodeTupleSize(meta->dimensions,
 												  meta->tqPayloadCount,
 												  meta->tqBits,
-												  tqWeighted));
+												  tqWeighted,
+												  meta->tqResidualRerankBytes));
 	int			codePageCount = PgturbohybridGraphPageCount(meta->tqNodeCount,
 												 codeTuplesPerPage);
 	BlockNumber *codeBlknos;

@@ -31,6 +31,13 @@ static int64 pgturbohybrid_last_graph_rescore_pages = 0;
 static int64 pgturbohybrid_last_graph_code_pages_read = 0;
 static int64 pgturbohybrid_last_graph_adj_pages_read = 0;
 static int64 pgturbohybrid_last_graph_entry_point_count = 0;
+static int64 pgturbohybrid_last_graph_entry_sidecar_count = 0;
+static int64 pgturbohybrid_last_graph_entry_sidecar_scored = 0;
+static int64 pgturbohybrid_last_graph_entry_sidecar_selected = 0;
+static int64 pgturbohybrid_last_graph_entry_sidecar_us = 0;
+static int64 pgturbohybrid_last_graph_residual_rerank_count = 0;
+static int64 pgturbohybrid_last_graph_residual_rerank_bytes = 0;
+static int64 pgturbohybrid_last_graph_residual_rerank_us = 0;
 static int64 pgturbohybrid_last_graph_prepare_us = 0;
 static int64 pgturbohybrid_last_graph_traverse_us = 0;
 static int64 pgturbohybrid_last_graph_entry_us = 0;
@@ -47,6 +54,21 @@ static int64 pgturbohybrid_last_graph_effective_search_ef = 0;
 static int64 pgturbohybrid_last_graph_effective_rescore_band = 0;
 static double pgturbohybrid_last_graph_highdim_widening_multiplier = 1.0;
 static int pgturbohybrid_last_graph_widening_reason = PGTURBOHYBRID_DENSE_WIDENING_NONE;
+static int pgturbohybrid_last_graph_adaptive_widening_mode = PGTURBOHYBRID_DENSE_ADAPTIVE_WIDENING_OFF;
+static bool pgturbohybrid_last_graph_adaptive_triggered = false;
+static int pgturbohybrid_last_graph_adaptive_trigger_reason = PGTURBOHYBRID_DENSE_ADAPTIVE_REASON_NONE;
+static int64 pgturbohybrid_last_graph_adaptive_initial_result_target = 0;
+static int64 pgturbohybrid_last_graph_adaptive_final_result_target = 0;
+static int64 pgturbohybrid_last_graph_adaptive_initial_search_ef = 0;
+static int64 pgturbohybrid_last_graph_adaptive_final_search_ef = 0;
+static double pgturbohybrid_last_graph_adaptive_gap_top10 = 0.0;
+static double pgturbohybrid_last_graph_adaptive_gap_boundary = 0.0;
+static int pgturbohybrid_last_graph_local_expansion_mode = PGTURBOHYBRID_DENSE_LOCAL_EXPANSION_OFF;
+static bool pgturbohybrid_last_graph_local_expansion_triggered = false;
+static int64 pgturbohybrid_last_graph_local_expansion_seed_count = 0;
+static int64 pgturbohybrid_last_graph_local_expansion_neighbors_scored = 0;
+static int64 pgturbohybrid_last_graph_local_expansion_candidates_added = 0;
+static int64 pgturbohybrid_last_graph_local_expansion_us = 0;
 static int pgturbohybrid_last_graph_dense_budget_policy = PGTURBOHYBRID_DENSE_BUDGET_AUTO;
 static int pgturbohybrid_last_graph_rescore_band_policy = PGTURBOHYBRID_RESCORE_BAND_POLICY_AUTO;
 static int pgturbohybrid_last_graph_scoring_kernel = PGTURBOHYBRID_SCORING_SCALAR;
@@ -198,6 +220,13 @@ PgturbohybridGraphRecordGraphScanStats(PgturbohybridGraphScanOpaque so)
 	pgturbohybrid_last_graph_code_pages_read = so->graphCodePagesRead;
 	pgturbohybrid_last_graph_adj_pages_read = so->graphAdjPagesRead;
 	pgturbohybrid_last_graph_entry_point_count = so->graphEntryPointCount;
+	pgturbohybrid_last_graph_entry_sidecar_count = so->graphEntrySidecarCount;
+	pgturbohybrid_last_graph_entry_sidecar_scored = so->graphEntrySidecarScored;
+	pgturbohybrid_last_graph_entry_sidecar_selected = so->graphEntrySidecarSelected;
+	pgturbohybrid_last_graph_entry_sidecar_us = so->graphEntrySidecarUs;
+	pgturbohybrid_last_graph_residual_rerank_count = so->graphResidualRerankCount;
+	pgturbohybrid_last_graph_residual_rerank_bytes = so->graphResidualRerankBytes;
+	pgturbohybrid_last_graph_residual_rerank_us = so->graphResidualRerankUs;
 	pgturbohybrid_last_graph_prepare_us = so->graphPrepareUs;
 	pgturbohybrid_last_graph_traverse_us = so->graphTraverseUs;
 	pgturbohybrid_last_graph_entry_us = so->graphEntryUs;
@@ -214,6 +243,21 @@ PgturbohybridGraphRecordGraphScanStats(PgturbohybridGraphScanOpaque so)
 	pgturbohybrid_last_graph_effective_rescore_band = so->graphEffectiveRescoreBand;
 	pgturbohybrid_last_graph_highdim_widening_multiplier = so->graphHighdimWideningMultiplier;
 	pgturbohybrid_last_graph_widening_reason = so->graphWideningReason;
+	pgturbohybrid_last_graph_adaptive_widening_mode = so->graphAdaptiveWideningMode;
+	pgturbohybrid_last_graph_adaptive_triggered = so->graphAdaptiveTriggered;
+	pgturbohybrid_last_graph_adaptive_trigger_reason = so->graphAdaptiveTriggerReason;
+	pgturbohybrid_last_graph_adaptive_initial_result_target = so->graphAdaptiveInitialResultTarget;
+	pgturbohybrid_last_graph_adaptive_final_result_target = so->graphAdaptiveFinalResultTarget;
+	pgturbohybrid_last_graph_adaptive_initial_search_ef = so->graphAdaptiveInitialSearchEf;
+	pgturbohybrid_last_graph_adaptive_final_search_ef = so->graphAdaptiveFinalSearchEf;
+	pgturbohybrid_last_graph_adaptive_gap_top10 = so->graphAdaptiveGapTop10;
+	pgturbohybrid_last_graph_adaptive_gap_boundary = so->graphAdaptiveGapBoundary;
+	pgturbohybrid_last_graph_local_expansion_mode = so->graphLocalExpansionMode;
+	pgturbohybrid_last_graph_local_expansion_triggered = so->graphLocalExpansionTriggered;
+	pgturbohybrid_last_graph_local_expansion_seed_count = so->graphLocalExpansionSeedCount;
+	pgturbohybrid_last_graph_local_expansion_neighbors_scored = so->graphLocalExpansionNeighborsScored;
+	pgturbohybrid_last_graph_local_expansion_candidates_added = so->graphLocalExpansionCandidatesAdded;
+	pgturbohybrid_last_graph_local_expansion_us = so->graphLocalExpansionUs;
 	pgturbohybrid_last_graph_dense_budget_policy = so->graphDenseBudgetPolicy;
 	pgturbohybrid_last_graph_rescore_band_policy = so->graphRescoreBandPolicy;
 	pgturbohybrid_last_graph_scoring_kernel = so->tq.enabled ? so->tq.scoringKernel : PGTURBOHYBRID_SCORING_SCALAR;
@@ -264,6 +308,13 @@ PgturbohybridGraphRecordNonGraphScanStats(void)
 	pgturbohybrid_last_graph_code_pages_read = 0;
 	pgturbohybrid_last_graph_adj_pages_read = 0;
 	pgturbohybrid_last_graph_entry_point_count = 0;
+	pgturbohybrid_last_graph_entry_sidecar_count = 0;
+	pgturbohybrid_last_graph_entry_sidecar_scored = 0;
+	pgturbohybrid_last_graph_entry_sidecar_selected = 0;
+	pgturbohybrid_last_graph_entry_sidecar_us = 0;
+	pgturbohybrid_last_graph_residual_rerank_count = 0;
+	pgturbohybrid_last_graph_residual_rerank_bytes = 0;
+	pgturbohybrid_last_graph_residual_rerank_us = 0;
 	pgturbohybrid_last_graph_prepare_us = 0;
 	pgturbohybrid_last_graph_traverse_us = 0;
 	pgturbohybrid_last_graph_entry_us = 0;
@@ -280,6 +331,21 @@ PgturbohybridGraphRecordNonGraphScanStats(void)
 	pgturbohybrid_last_graph_effective_rescore_band = 0;
 	pgturbohybrid_last_graph_highdim_widening_multiplier = 1.0;
 	pgturbohybrid_last_graph_widening_reason = PGTURBOHYBRID_DENSE_WIDENING_NONE;
+	pgturbohybrid_last_graph_adaptive_widening_mode = PGTURBOHYBRID_DENSE_ADAPTIVE_WIDENING_OFF;
+	pgturbohybrid_last_graph_adaptive_triggered = false;
+	pgturbohybrid_last_graph_adaptive_trigger_reason = PGTURBOHYBRID_DENSE_ADAPTIVE_REASON_NONE;
+	pgturbohybrid_last_graph_adaptive_initial_result_target = 0;
+	pgturbohybrid_last_graph_adaptive_final_result_target = 0;
+	pgturbohybrid_last_graph_adaptive_initial_search_ef = 0;
+	pgturbohybrid_last_graph_adaptive_final_search_ef = 0;
+	pgturbohybrid_last_graph_adaptive_gap_top10 = 0.0;
+	pgturbohybrid_last_graph_adaptive_gap_boundary = 0.0;
+	pgturbohybrid_last_graph_local_expansion_mode = PGTURBOHYBRID_DENSE_LOCAL_EXPANSION_OFF;
+	pgturbohybrid_last_graph_local_expansion_triggered = false;
+	pgturbohybrid_last_graph_local_expansion_seed_count = 0;
+	pgturbohybrid_last_graph_local_expansion_neighbors_scored = 0;
+	pgturbohybrid_last_graph_local_expansion_candidates_added = 0;
+	pgturbohybrid_last_graph_local_expansion_us = 0;
 	pgturbohybrid_last_graph_dense_budget_policy = PGTURBOHYBRID_DENSE_BUDGET_AUTO;
 	pgturbohybrid_last_graph_rescore_band_policy = PGTURBOHYBRID_RESCORE_BAND_POLICY_AUTO;
 	pgturbohybrid_last_graph_scoring_kernel = PGTURBOHYBRID_SCORING_SCALAR;
@@ -407,6 +473,30 @@ pgturbohybrid_last_scan_stats(PG_FUNCTION_ARGS)
 		PgturbohybridJsonbAddNull(&state, "exact_storage");
 	PgturbohybridJsonbAddInt64(&state, "graph_candidate_count",
 							   pgturbohybrid_last_graph_candidate_count);
+	PgturbohybridJsonbAddInt64(&state, "graph_visited_nodes",
+							   pgturbohybrid_last_graph_visited_nodes);
+	PgturbohybridJsonbAddInt64(&state, "graph_scored_codes",
+							   pgturbohybrid_last_graph_scored_codes);
+	PgturbohybridJsonbAddInt64(&state, "graph_code_pages_read",
+							   pgturbohybrid_last_graph_code_pages_read);
+	PgturbohybridJsonbAddInt64(&state, "graph_adj_pages_read",
+							   pgturbohybrid_last_graph_adj_pages_read);
+	PgturbohybridJsonbAddInt64(&state, "graph_entry_point_count",
+							   pgturbohybrid_last_graph_entry_point_count);
+	PgturbohybridJsonbAddInt64(&state, "graph_entry_sidecar_count",
+							   pgturbohybrid_last_graph_entry_sidecar_count);
+	PgturbohybridJsonbAddInt64(&state, "graph_entry_sidecar_scored",
+							   pgturbohybrid_last_graph_entry_sidecar_scored);
+	PgturbohybridJsonbAddInt64(&state, "graph_entry_sidecar_selected",
+							   pgturbohybrid_last_graph_entry_sidecar_selected);
+	PgturbohybridJsonbAddInt64(&state, "graph_entry_sidecar_us",
+							   pgturbohybrid_last_graph_entry_sidecar_us);
+	PgturbohybridJsonbAddInt64(&state, "dense_residual_rerank_count",
+							   pgturbohybrid_last_graph_residual_rerank_count);
+	PgturbohybridJsonbAddInt64(&state, "dense_residual_rerank_bytes",
+							   pgturbohybrid_last_graph_residual_rerank_bytes);
+	PgturbohybridJsonbAddInt64(&state, "dense_residual_rerank_us",
+							   pgturbohybrid_last_graph_residual_rerank_us);
 	PgturbohybridJsonbAddInt64(&state, "graph_rescore_count",
 							   pgturbohybrid_last_graph_rescore_count);
 	PgturbohybridJsonbAddInt64(&state, "graph_dense_requested_k",
@@ -478,6 +568,36 @@ pgturbohybrid_last_scan_stats(PG_FUNCTION_ARGS)
 								pgturbohybrid_last_graph_highdim_widening_multiplier);
 	PgturbohybridJsonbAddString(&state, "graph_widening_reason",
 								PgturbohybridGraphDenseWideningReasonName(pgturbohybrid_last_graph_widening_reason));
+	PgturbohybridJsonbAddString(&state, "dense_adaptive_widening_mode",
+								PgturbohybridGraphDenseAdaptiveWideningModeName(pgturbohybrid_last_graph_adaptive_widening_mode));
+	PgturbohybridJsonbAddBool(&state, "dense_adaptive_triggered",
+							  pgturbohybrid_last_graph_adaptive_triggered);
+	PgturbohybridJsonbAddString(&state, "dense_adaptive_trigger_reason",
+								PgturbohybridGraphDenseAdaptiveWideningReasonName(pgturbohybrid_last_graph_adaptive_trigger_reason));
+	PgturbohybridJsonbAddInt64(&state, "dense_adaptive_initial_result_target",
+							   pgturbohybrid_last_graph_adaptive_initial_result_target);
+	PgturbohybridJsonbAddInt64(&state, "dense_adaptive_final_result_target",
+							   pgturbohybrid_last_graph_adaptive_final_result_target);
+	PgturbohybridJsonbAddInt64(&state, "dense_adaptive_initial_search_ef",
+							   pgturbohybrid_last_graph_adaptive_initial_search_ef);
+	PgturbohybridJsonbAddInt64(&state, "dense_adaptive_final_search_ef",
+							   pgturbohybrid_last_graph_adaptive_final_search_ef);
+	PgturbohybridJsonbAddFloat8(&state, "dense_adaptive_gap_top10",
+								pgturbohybrid_last_graph_adaptive_gap_top10);
+	PgturbohybridJsonbAddFloat8(&state, "dense_adaptive_gap_boundary",
+								pgturbohybrid_last_graph_adaptive_gap_boundary);
+	PgturbohybridJsonbAddString(&state, "dense_local_expansion_mode",
+								PgturbohybridGraphDenseLocalExpansionModeName(pgturbohybrid_last_graph_local_expansion_mode));
+	PgturbohybridJsonbAddBool(&state, "dense_local_expansion_triggered",
+							  pgturbohybrid_last_graph_local_expansion_triggered);
+	PgturbohybridJsonbAddInt64(&state, "dense_local_expansion_seed_count",
+							   pgturbohybrid_last_graph_local_expansion_seed_count);
+	PgturbohybridJsonbAddInt64(&state, "dense_local_expansion_neighbors_scored",
+							   pgturbohybrid_last_graph_local_expansion_neighbors_scored);
+	PgturbohybridJsonbAddInt64(&state, "dense_local_expansion_candidates_added",
+							   pgturbohybrid_last_graph_local_expansion_candidates_added);
+	PgturbohybridJsonbAddInt64(&state, "dense_local_expansion_us",
+							   pgturbohybrid_last_graph_local_expansion_us);
 	PgturbohybridJsonbAddString(&state, "graph_dense_budget_policy",
 								PgturbohybridGraphDenseBudgetPolicyNameExternal(pgturbohybrid_last_graph_dense_budget_policy));
 	PgturbohybridJsonbAddString(&state, "graph_rescore_band_policy",

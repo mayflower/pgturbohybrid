@@ -210,6 +210,38 @@ PgturbohybridGraphMix64(uint64 x)
 	return x ^ (x >> 31);
 }
 
+static uint64
+PgturbohybridGraphBuildCodeHash(PgturbohybridQuantBuildState *state, uint32 nodeId)
+{
+	PgturbohybridGraphBuildNode *node = &state->nodes[nodeId];
+	Size		codeBytes = state->dimensions > 0 ?
+		PgturbohybridGraphCodeBytesForBits(state->dimensions, state->tqBits) : 0;
+	uint64		hash = UINT64CONST(1469598103934665603);
+	const unsigned char *bytes;
+
+#define PGTURBOHYBRID_GRAPH_FNV_BYTES(ptr, len) \
+	do { \
+		bytes = (const unsigned char *) (ptr); \
+		for (Size _i = 0; _i < (Size) (len); _i++) \
+		{ \
+			hash ^= bytes[_i]; \
+			hash *= UINT64CONST(1099511628211); \
+		} \
+	} while (0)
+
+	if (node->code != NULL && codeBytes > 0)
+		PGTURBOHYBRID_GRAPH_FNV_BYTES(node->code, codeBytes);
+	PGTURBOHYBRID_GRAPH_FNV_BYTES(&node->scale, sizeof(node->scale));
+	PGTURBOHYBRID_GRAPH_FNV_BYTES(&node->norm, sizeof(node->norm));
+	PGTURBOHYBRID_GRAPH_FNV_BYTES(&node->correction, sizeof(node->correction));
+	if (state->tqWeighted)
+		PGTURBOHYBRID_GRAPH_FNV_BYTES(&node->ecCorrection, sizeof(node->ecCorrection));
+
+#undef PGTURBOHYBRID_GRAPH_FNV_BYTES
+
+	return hash;
+}
+
 int
 PgturbohybridGraphPickLevel(uint32 nodeId, int m)
 {
@@ -606,6 +638,7 @@ PgturbohybridGraphAppendBuildNode(PgturbohybridQuantBuildState *state, ItemPoint
 	{
 		node->vector = prev->vector;
 		node->code = prev->code;
+		node->residualSketch = prev->residualSketch;
 	}
 	else
 	{
@@ -617,6 +650,13 @@ PgturbohybridGraphAppendBuildNode(PgturbohybridQuantBuildState *state, ItemPoint
 			memcpy(node->vector, vector, vectorSize);
 		}
 		node->code = PgturbohybridGraphAllocBuildCode(state, vector->dim);
+		if (state->residualRerankBytes > 0)
+		{
+			node->residualSketch = palloc0(state->residualRerankBytes);
+			PgturbohybridGraphBuildResidualSketch(vector->x, vector->dim,
+												  node->residualSketch,
+												  state->residualRerankBytes);
+		}
 	}
 	if (state->payloadCount > 0)
 	{
@@ -1096,6 +1136,10 @@ PgturbohybridGraphEncodeBuildNodes(PgturbohybridQuantBuildState *state)
 
 			if (node->code != prev->code)
 				memcpy(node->code, prev->code, codeBytes);
+			if (state->residualRerankBytes > 0 && node->residualSketch != NULL &&
+				prev->residualSketch != NULL && node->residualSketch != prev->residualSketch)
+				memcpy(node->residualSketch, prev->residualSketch,
+					   state->residualRerankBytes);
 			node->scale = prev->scale;
 			node->ecCorrection = prev->ecCorrection;
 			node->correction = prev->correction;
@@ -1139,6 +1183,7 @@ PgturbohybridGraphSelectNeighborsSimple(PgturbohybridQuantBuildState *state, uin
 		uint32		candidate = candidates[i].nodeId;
 		bool		seen = false;
 
+		CHECK_FOR_INTERRUPTS();
 		if (candidate == src)
 			continue;
 
@@ -1178,6 +1223,7 @@ PgturbohybridGraphSelectNeighbors(PgturbohybridQuantBuildState *state, uint32 sr
 		uint32		candidate = candidates[i].nodeId;
 		bool		good = true;
 
+		CHECK_FOR_INTERRUPTS();
 		if (candidate == src)
 			continue;
 
@@ -1200,6 +1246,7 @@ PgturbohybridGraphSelectNeighbors(PgturbohybridQuantBuildState *state, uint32 sr
 	{
 		bool		seen = false;
 
+		CHECK_FOR_INTERRUPTS();
 		for (int j = 0; j < selectedCount; j++)
 		{
 			if (selected[j] == candidates[i].nodeId)
@@ -1250,6 +1297,7 @@ PgturbohybridGraphPruneNeighbors(PgturbohybridQuantBuildState *state, uint32 src
 
 	for (int i = 0; i < count; i++)
 	{
+		CHECK_FOR_INTERRUPTS();
 		candidates[i].nodeId = node->neighbors[level][i];
 		candidates[i].distance = PgturbohybridGraphBuildDistance(state, src, candidates[i].nodeId);
 	}
@@ -1333,6 +1381,87 @@ PgturbohybridGraphAddNeighborIfRoom(PgturbohybridQuantBuildState *state, uint32 
 	node->neighborCounts[level]++;
 }
 
+static bool
+PgturbohybridGraphIsBackboneNeighbor(PgturbohybridQuantBuildState *state, uint32 src,
+						 uint32 neighbor)
+{
+	(void) state;
+
+	return (src > 0 && neighbor == src - 1) ||
+		(src + 1 < state->nodeCount && neighbor == src + 1);
+}
+
+static void
+PgturbohybridGraphForceNeighbor(PgturbohybridQuantBuildState *state, uint32 src, uint32 dst,
+					 int level)
+{
+	PgturbohybridGraphBuildNode *node = &state->nodes[src];
+	int			maxNeighbors = PgturbohybridGraphLevelM(state->m, level);
+
+	if (src == dst || !PgturbohybridGraphBuildNodeHasLevel(state, src, level) ||
+		!PgturbohybridGraphBuildNodeHasLevel(state, dst, level) ||
+		PgturbohybridGraphHasNeighbor(state, src, dst, level))
+		return;
+
+	if (node->neighborCounts[level] < maxNeighbors)
+	{
+		int			slot = node->neighborCounts[level]++;
+
+		node->neighbors[level][slot] = dst;
+		if (node->neighborDistances != NULL)
+			node->neighborDistances[level][slot] = DBL_MAX;
+		return;
+	}
+
+	{
+		int			worst = -1;
+		double		worstDistance = -DBL_MAX;
+
+		for (int i = 0; i < node->neighborCounts[level]; i++)
+		{
+			uint32		neighbor = node->neighbors[level][i];
+			double		distance;
+
+			if (PgturbohybridGraphIsBackboneNeighbor(state, src, neighbor))
+				continue;
+
+			if (node->neighborDistances != NULL)
+				distance = node->neighborDistances[level][i];
+			else
+				distance = PgturbohybridGraphBuildDistance(state, src, neighbor);
+
+			if (worst < 0 || distance > worstDistance)
+			{
+				worst = i;
+				worstDistance = distance;
+			}
+		}
+
+		if (worst < 0)
+			worst = 0;
+
+		node->neighbors[level][worst] = dst;
+		if (node->neighborDistances != NULL)
+			node->neighborDistances[level][worst] = DBL_MAX;
+	}
+}
+
+static void
+PgturbohybridGraphEnsureLevel0Backbone(PgturbohybridQuantBuildState *state)
+{
+	if (state->nodeCount < 2)
+		return;
+
+	for (uint32 nodeId = 1; nodeId < state->nodeCount; nodeId++)
+	{
+		uint32		prevId = nodeId - 1;
+
+		CHECK_FOR_INTERRUPTS();
+		PgturbohybridGraphForceNeighbor(state, prevId, nodeId, 0);
+		PgturbohybridGraphForceNeighbor(state, nodeId, prevId, 0);
+	}
+}
+
 static uint32
 PgturbohybridGraphAdjacentDuplicateCount(PgturbohybridQuantBuildState *state)
 {
@@ -1340,6 +1469,7 @@ PgturbohybridGraphAdjacentDuplicateCount(PgturbohybridQuantBuildState *state)
 
 	for (uint32 i = 1; i < state->nodeCount; i++)
 	{
+		CHECK_FOR_INTERRUPTS();
 		if (PgturbohybridGraphBuildVectorsEqual(state, i - 1, i))
 			duplicates++;
 	}
@@ -1380,6 +1510,7 @@ PgturbohybridGraphBuildGreedySearch(PgturbohybridQuantBuildState *state, uint32 
 	{
 		PgturbohybridGraphBuildNode *node = &state->nodes[current.nodeId];
 
+		CHECK_FOR_INTERRUPTS();
 		changed = false;
 		if (!PgturbohybridGraphBuildNodeHasLevel(state, current.nodeId, level))
 			break;
@@ -1389,6 +1520,7 @@ PgturbohybridGraphBuildGreedySearch(PgturbohybridQuantBuildState *state, uint32 
 			uint32		neighbor = node->neighbors[level][i];
 			double		distance;
 
+			CHECK_FOR_INTERRUPTS();
 			if (!inserted[neighbor] ||
 				!PgturbohybridGraphBuildNodeHasLevel(state, neighbor, level))
 				continue;
@@ -1438,6 +1570,7 @@ PgturbohybridGraphBuildSearchLayer(PgturbohybridQuantBuildState *state, uint32 q
 		PgturbohybridGraphFrontierItem item = PgturbohybridGraphFrontierHeapPop(frontier, &frontierCount, true);
 		PgturbohybridGraphBuildNode *node = &state->nodes[item.nodeId];
 
+		CHECK_FOR_INTERRUPTS();
 		if (nearestCount >= ef && PgturbohybridGraphFrontierGreater(item, nearest[0]))
 			break;
 
@@ -1449,6 +1582,7 @@ PgturbohybridGraphBuildSearchLayer(PgturbohybridQuantBuildState *state, uint32 q
 			uint32		neighbor = node->neighbors[level][i];
 			double		distance;
 
+			CHECK_FOR_INTERRUPTS();
 			if (!inserted[neighbor] ||
 				state->buildVisitedGeneration[neighbor] == visitGeneration ||
 				!PgturbohybridGraphBuildNodeHasLevel(state, neighbor, level))
@@ -1524,25 +1658,26 @@ PgturbohybridGraphBuildEdges(PgturbohybridQuantBuildState *state)
 		int			nodeLevel = state->nodes[i].level;
 		int			linkingLevel = Min(nodeLevel, entryLevel);
 
-			CHECK_FOR_INTERRUPTS();
-			if (preserveScanOrder && i > 0 && inserted[i - 1])
+		CHECK_FOR_INTERRUPTS();
+		if (preserveScanOrder && i > 0 && inserted[i - 1])
+		{
+			PgturbohybridGraphLinkAdjacentBuildNode(state, i, i - 1);
+			if (nodeLevel > entryLevel)
 			{
-				PgturbohybridGraphLinkAdjacentBuildNode(state, i, i - 1);
-				if (nodeLevel > entryLevel)
-				{
-					entryNodeId = i;
-					entryLevel = nodeLevel;
-				}
-				inserted[i] = true;
-				continue;
+				entryNodeId = i;
+				entryLevel = nodeLevel;
 			}
-			PgturbohybridGraphPrepareBuildQuery(state, i);
+			inserted[i] = true;
+			continue;
+		}
+		PgturbohybridGraphPrepareBuildQuery(state, i);
 
-			levelEntry.nodeId = entryNodeId;
-			levelEntry.distance = PgturbohybridGraphBuildDistance(state, i, entryNodeId);
+		levelEntry.nodeId = entryNodeId;
+		levelEntry.distance = PgturbohybridGraphBuildDistance(state, i, entryNodeId);
 
 		for (int level = entryLevel; level > nodeLevel; level--)
 		{
+			CHECK_FOR_INTERRUPTS();
 			if (PgturbohybridGraphBuildNodeHasLevel(state, levelEntry.nodeId, level))
 				levelEntry = PgturbohybridGraphBuildGreedySearch(state, i,
 													  levelEntry.nodeId,
@@ -1554,6 +1689,7 @@ PgturbohybridGraphBuildEdges(PgturbohybridQuantBuildState *state)
 			int			nearestCount;
 			int			selectedCount;
 
+			CHECK_FOR_INTERRUPTS();
 			if (!PgturbohybridGraphBuildNodeHasLevel(state, levelEntry.nodeId, level))
 				continue;
 
@@ -1606,6 +1742,25 @@ PgturbohybridGraphBuildEdges(PgturbohybridQuantBuildState *state)
 }
 
 static void
+PgturbohybridGraphFreeExactBuildVectors(PgturbohybridQuantBuildState *state)
+{
+	Vector	   *lastVector = NULL;
+
+	if (!state->buildExactDistances || state->tqExactStorage)
+		return;
+
+	for (uint32 nodeId = 0; nodeId < state->nodeCount; nodeId++)
+	{
+		Vector	   *vector = state->nodes[nodeId].vector;
+
+		if (vector != NULL && vector != lastVector)
+			pfree(vector);
+		lastVector = vector;
+		state->nodes[nodeId].vector = NULL;
+	}
+}
+
+static void
 PgturbohybridGraphReorderBuildNodesForLocality(PgturbohybridQuantBuildState *state)
 {
 	PgturbohybridGraphBuildNode *reordered;
@@ -1645,6 +1800,7 @@ PgturbohybridGraphReorderBuildNodesForLocality(PgturbohybridQuantBuildState *sta
 		uint32		oldId = queue[head++];
 		PgturbohybridGraphBuildNode *node = &state->nodes[oldId];
 
+		CHECK_FOR_INTERRUPTS();
 		if (node->level < 0 || node->neighborCounts == NULL ||
 			node->neighbors == NULL)
 			continue;
@@ -1654,7 +1810,10 @@ PgturbohybridGraphReorderBuildNodesForLocality(PgturbohybridQuantBuildState *sta
 	}
 
 	for (uint32 i = 0; i < state->nodeCount; i++)
+	{
+		CHECK_FOR_INTERRUPTS();
 		PGTURBOHYBRID_GRAPH_ENQUEUE_OLD_NODE(i);
+	}
 
 #undef PGTURBOHYBRID_GRAPH_ENQUEUE_OLD_NODE
 
@@ -1678,12 +1837,16 @@ PgturbohybridGraphReorderBuildNodesForLocality(PgturbohybridQuantBuildState *sta
 	reordered = MemoryContextAllocZero(state->ctx,
 									   sizeof(PgturbohybridGraphBuildNode) * state->nodeCount);
 	for (uint32 newId = 0; newId < state->nodeCount; newId++)
+	{
+		CHECK_FOR_INTERRUPTS();
 		reordered[newId] = state->nodes[newToOld[newId]];
+	}
 
 	for (uint32 newId = 0; newId < state->nodeCount; newId++)
 	{
 		PgturbohybridGraphBuildNode *node = &reordered[newId];
 
+		CHECK_FOR_INTERRUPTS();
 		for (int level = 0; level <= node->level; level++)
 		{
 			for (int i = 0; i < node->neighborCounts[level]; i++)
@@ -1703,6 +1866,131 @@ PgturbohybridGraphReorderBuildNodesForLocality(PgturbohybridQuantBuildState *sta
 	pfree(oldToNew);
 	pfree(newToOld);
 	pfree(queue);
+}
+
+static void
+PgturbohybridGraphBuildEntrySidecar(PgturbohybridQuantBuildState *state)
+{
+	uint32		target;
+	uint32	   *bucketNodeIds;
+	uint64	   *bucketKeys;
+
+	state->entrySidecarCount = 0;
+	state->entrySidecarBytes = 0;
+	memset(state->entrySidecarNodeIds, 0, sizeof(state->entrySidecarNodeIds));
+
+	if (!state->entrySidecar || state->nodeCount == 0 ||
+		state->entrySidecarRepresentatives <= 0)
+		return;
+
+	target = Min((uint32) state->entrySidecarRepresentatives,
+				 Min(state->nodeCount,
+					 (uint32) PGTURBOHYBRID_GRAPH_MAX_ENTRY_SIDECAR_REPRESENTATIVES));
+	if (target == 0)
+		return;
+
+	bucketNodeIds = palloc(sizeof(uint32) * target);
+	bucketKeys = palloc(sizeof(uint64) * target);
+	for (uint32 i = 0; i < target; i++)
+	{
+		bucketNodeIds[i] = UINT_MAX;
+		bucketKeys[i] = UINT64_MAX;
+	}
+
+	for (uint32 nodeId = 0; nodeId < state->nodeCount; nodeId++)
+	{
+		PgturbohybridGraphBuildNode *node = &state->nodes[nodeId];
+		uint64		hash;
+		uint64		key;
+		uint32		bucket;
+
+		CHECK_FOR_INTERRUPTS();
+		if ((node->flags & PGTURBOHYBRID_GRAPH_NODE_DEAD) != 0 ||
+			node->code == NULL)
+			continue;
+
+		hash = PgturbohybridGraphBuildCodeHash(state, nodeId);
+		bucket = (uint32) (hash % target);
+		key = PgturbohybridGraphMix64(hash ^ ((uint64) nodeId << 32) ^ nodeId);
+		if (bucketNodeIds[bucket] == UINT_MAX ||
+			key < bucketKeys[bucket] ||
+			(key == bucketKeys[bucket] && nodeId < bucketNodeIds[bucket]))
+		{
+			bucketNodeIds[bucket] = nodeId;
+			bucketKeys[bucket] = key;
+		}
+	}
+
+	for (uint32 i = 0; i < target; i++)
+	{
+		if (bucketNodeIds[i] != UINT_MAX)
+			state->entrySidecarNodeIds[state->entrySidecarCount++] = bucketNodeIds[i];
+	}
+	state->entrySidecarBytes = state->entrySidecarCount * sizeof(uint32);
+
+	pfree(bucketNodeIds);
+	pfree(bucketKeys);
+}
+
+static void
+PgturbohybridGraphOfferRoutingEntry(PgturbohybridQuantBuildState *state,
+						 int *routingLevels, uint32 nodeId, int level)
+{
+	int			worst = 0;
+
+	if (state->routingEntryCount < PGTURBOHYBRID_GRAPH_MAX_ROUTING_ENTRIES)
+	{
+		int			slot = state->routingEntryCount++;
+
+		state->routingEntryNodeIds[slot] = nodeId;
+		routingLevels[slot] = level;
+		return;
+	}
+
+	for (uint32 i = 1; i < state->routingEntryCount; i++)
+	{
+		if (routingLevels[i] < routingLevels[worst] ||
+			(routingLevels[i] == routingLevels[worst] &&
+			 state->routingEntryNodeIds[i] > state->routingEntryNodeIds[worst]))
+			worst = i;
+	}
+
+	if (level > routingLevels[worst] ||
+		(level == routingLevels[worst] && nodeId < state->routingEntryNodeIds[worst]))
+	{
+		state->routingEntryNodeIds[worst] = nodeId;
+		routingLevels[worst] = level;
+	}
+}
+
+static void
+PgturbohybridGraphBuildRoutingEntries(PgturbohybridQuantBuildState *state)
+{
+	int			routingLevels[PGTURBOHYBRID_GRAPH_MAX_ROUTING_ENTRIES];
+
+	state->routingEntryCount = 0;
+	state->routingEntryBytes = 0;
+	memset(state->routingEntryNodeIds, 0, sizeof(state->routingEntryNodeIds));
+	memset(routingLevels, 0, sizeof(routingLevels));
+
+	if (state->nodeCount == 0 || state->entryNodeId >= state->nodeCount)
+		return;
+
+	for (uint32 nodeId = 0; nodeId < state->nodeCount; nodeId++)
+	{
+		PgturbohybridGraphBuildNode *node = &state->nodes[nodeId];
+
+		CHECK_FOR_INTERRUPTS();
+		if (nodeId == state->entryNodeId ||
+			(node->flags & PGTURBOHYBRID_GRAPH_NODE_DEAD) != 0 ||
+			node->level <= 0)
+			continue;
+
+		PgturbohybridGraphOfferRoutingEntry(state, routingLevels, nodeId,
+											node->level);
+	}
+
+	state->routingEntryBytes = state->routingEntryCount * sizeof(uint32);
 }
 
 
@@ -1741,6 +2029,10 @@ PgturbohybridGraphCreateMetaPage(Relation index, ForkNumber forkNum)
 	metap->tqExactStartBlkno = InvalidBlockNumber;
 	metap->tqCorrectionStartBlkno = InvalidBlockNumber;
 	metap->tqBm25MetaStartBlkno = InvalidBlockNumber;
+	metap->tqEntrySidecarCount = 0;
+	metap->tqEntrySidecarBytes = 0;
+	metap->tqRoutingEntryCount = 0;
+	metap->tqRoutingEntryBytes = 0;
 	((PageHeader) page)->pd_lower =
 		((char *) metap + sizeof(PgturbohybridGraphMetaPageData)) - (char *) page;
 
@@ -1794,11 +2086,30 @@ PgturbohybridQuantUpdateMetaPage(Relation index, PgturbohybridQuantBuildState *s
 		metap->tqFlags |= PGTURBOHYBRID_GRAPH_TQ_RENORM;
 	if (!state->tqExactStorage)
 		metap->tqFlags |= PGTURBOHYBRID_GRAPH_EXACT_FREE;
+	if (state->residualRerankBytes > 0)
+		metap->tqFlags |= PGTURBOHYBRID_GRAPH_TQ_RESIDUAL_RERANK;
+	if (state->buildExactDistances)
+		metap->tqFlags |= PGTURBOHYBRID_GRAPH_TQ_EXACT_BUILD;
+	if (state->graphBackbone)
+		metap->tqFlags |= PGTURBOHYBRID_GRAPH_TQ_BACKBONE;
 	metap->tqBits = state->tqBits != 0 ? state->tqBits : PGTURBOHYBRID_DEFAULT_BITS;
 	metap->tqCodeStartBlkno = codeStart;
 	metap->tqAdjStartBlkno = adjStart;
 	metap->tqExactStartBlkno = exactStart;
 	metap->tqCorrectionStartBlkno = correctionStart;
+	metap->tqEntrySidecarCount = state->entrySidecarCount;
+	metap->tqEntrySidecarBytes = state->entrySidecarBytes;
+	metap->tqResidualRerankBytes = state->residualRerankBytes;
+	memset(metap->tqEntrySidecarNodeIds, 0, sizeof(metap->tqEntrySidecarNodeIds));
+	if (state->entrySidecarCount > 0)
+		memcpy(metap->tqEntrySidecarNodeIds, state->entrySidecarNodeIds,
+			   sizeof(uint32) * state->entrySidecarCount);
+	metap->tqRoutingEntryCount = state->routingEntryCount;
+	metap->tqRoutingEntryBytes = state->routingEntryBytes;
+	memset(metap->tqRoutingEntryNodeIds, 0, sizeof(metap->tqRoutingEntryNodeIds));
+	if (state->routingEntryCount > 0)
+		memcpy(metap->tqRoutingEntryNodeIds, state->routingEntryNodeIds,
+			   sizeof(uint32) * state->routingEntryCount);
 	PgturbohybridGraphMarkPageGraphOp(page, PGTURBOHYBRID_GRAPH_GRAPH_OP_META_UPDATE);
 
 	if (xlogState != NULL)
@@ -1849,7 +2160,8 @@ PgturbohybridGraphWriteCodePages(PgturbohybridQuantBuildState *state)
 	Page		page = NULL;
 	BlockNumber start = InvalidBlockNumber;
 	Size		tupleSize = PgturbohybridGraphCodeTupleSize(state->dimensions, state->payloadCount,
-												 state->tqBits, state->tqWeighted);
+												 state->tqBits, state->tqWeighted,
+												 state->residualRerankBytes);
 	PgturbohybridGraphCodeTuple tuple = palloc0(tupleSize);
 
 	for (uint32 i = 0; i < state->nodeCount; i++)
@@ -1880,7 +2192,14 @@ PgturbohybridGraphWriteCodePages(PgturbohybridQuantBuildState *state)
 		PgturbohybridGraphTupleSetEcCorrection(tuple, state->tqWeighted, node->ecCorrection);
 		if (state->payloadCount > 0 && node->payloads != NULL)
 			memcpy(PgturbohybridGraphTuplePayloads(tuple, state->tqWeighted), node->payloads, state->payloadBytes);
-		memcpy(PgturbohybridGraphTupleCode(tuple, state->payloadBytes, state->tqWeighted), node->code,
+		if (state->residualRerankBytes > 0 && node->residualSketch != NULL)
+			memcpy(PgturbohybridGraphTupleResidual(tuple, state->payloadBytes,
+												   state->residualRerankBytes,
+												   state->tqWeighted),
+				   node->residualSketch, state->residualRerankBytes);
+		memcpy(PgturbohybridGraphTupleCode(tuple, state->payloadBytes,
+										   state->residualRerankBytes,
+										   state->tqWeighted), node->code,
 			   PgturbohybridGraphCodeBytesForBits(state->dimensions, state->tqBits));
 
 		if (PageAddItem(page, (Item) tuple, tupleSize, InvalidOffsetNumber, false, false) == InvalidOffsetNumber)
@@ -2111,6 +2430,11 @@ tqgraphbuild(Relation heap, Relation index, IndexInfo *indexInfo)
 	state.tqQuantileFit = PgturbohybridGraphGetTqQuantileFitOption(index);
 	state.tqRenorm = PgturbohybridGraphGetTqRenormOption(index);
 	state.tqExactStorage = PgturbohybridGraphGetTqExactStorageOption(index);
+	state.entrySidecar = PgturbohybridGraphGetEntrySidecarOption(index);
+	state.entrySidecarRepresentatives = PgturbohybridGraphGetEntrySidecarRepresentatives(index);
+	state.graphBackbone = PgturbohybridGraphGetBackboneOption(index);
+	state.residualRerank = PgturbohybridGraphGetResidualRerankOption(index);
+	state.residualRerankBytes = PgturbohybridGraphGetResidualRerankBytes(index);
 	state.buildExactDistances = pgturbohybrid_dense_build_exact_distances;
 	if (state.tqRenorm && state.tqBits >= PGTURBOHYBRID_DEFAULT_BITS)
 		ereport(NOTICE,
@@ -2181,10 +2505,29 @@ tqgraphbuild(Relation heap, Relation index, IndexInfo *indexInfo)
 	edgesUs = PgturbohybridGraphElapsedUs(phaseStart);
 	PgturbohybridGraphDebugBuildPhaseDone(&state, "build_edges", phaseStart);
 
+	PgturbohybridGraphDebugBuildPhaseStart(&state, "free_exact_build_vectors");
+	INSTR_TIME_SET_CURRENT(phaseStart);
+	PgturbohybridGraphFreeExactBuildVectors(&state);
+	PgturbohybridGraphDebugBuildPhaseDone(&state, "free_exact_build_vectors", phaseStart);
+
 	PgturbohybridGraphDebugBuildPhaseStart(&state, "reorder_nodes");
 	INSTR_TIME_SET_CURRENT(phaseStart);
 	PgturbohybridGraphReorderBuildNodesForLocality(&state);
 	PgturbohybridGraphDebugBuildPhaseDone(&state, "reorder_nodes", phaseStart);
+
+	if (state.graphBackbone)
+	{
+		PgturbohybridGraphDebugBuildPhaseStart(&state, "connect_backbone");
+		INSTR_TIME_SET_CURRENT(phaseStart);
+		PgturbohybridGraphEnsureLevel0Backbone(&state);
+		PgturbohybridGraphDebugBuildPhaseDone(&state, "connect_backbone", phaseStart);
+	}
+
+	PgturbohybridGraphDebugBuildPhaseStart(&state, "entry_sidecar");
+	INSTR_TIME_SET_CURRENT(phaseStart);
+	PgturbohybridGraphBuildRoutingEntries(&state);
+	PgturbohybridGraphBuildEntrySidecar(&state);
+	PgturbohybridGraphDebugBuildPhaseDone(&state, "entry_sidecar", phaseStart);
 
 	PgturbohybridGraphDebugBuildPhaseStart(&state, "write_pages");
 	INSTR_TIME_SET_CURRENT(phaseStart);
@@ -2245,6 +2588,11 @@ tqgraphbuildempty(Relation index)
 	state.tqQuantileFit = PgturbohybridGraphGetTqQuantileFitOption(index);
 	state.tqRenorm = PgturbohybridGraphGetTqRenormOption(index);
 	state.tqExactStorage = PgturbohybridGraphGetTqExactStorageOption(index);
+	state.entrySidecar = PgturbohybridGraphGetEntrySidecarOption(index);
+	state.entrySidecarRepresentatives = PgturbohybridGraphGetEntrySidecarRepresentatives(index);
+	state.graphBackbone = PgturbohybridGraphGetBackboneOption(index);
+	state.residualRerank = PgturbohybridGraphGetResidualRerankOption(index);
+	state.residualRerankBytes = PgturbohybridGraphGetResidualRerankBytes(index);
 	state.buildExactDistances = pgturbohybrid_dense_build_exact_distances;
 	if (state.tqRenorm && state.tqBits >= PGTURBOHYBRID_DEFAULT_BITS)
 		ereport(NOTICE,
@@ -2296,6 +2644,13 @@ PgturbohybridGraphResetScan(PgturbohybridGraphScanOpaque so)
 	so->graphCodePagesRead = 0;
 	so->graphAdjPagesRead = 0;
 	so->graphEntryPointCount = 0;
+	so->graphEntrySidecarCount = 0;
+	so->graphEntrySidecarScored = 0;
+	so->graphEntrySidecarSelected = 0;
+	so->graphEntrySidecarUs = 0;
+	so->graphResidualRerankCount = 0;
+	so->graphResidualRerankBytes = 0;
+	so->graphResidualRerankUs = 0;
 	so->graphPrepareUs = 0;
 	so->graphTraverseUs = 0;
 	so->graphEntryUs = 0;
@@ -2312,6 +2667,21 @@ PgturbohybridGraphResetScan(PgturbohybridGraphScanOpaque so)
 	so->graphEffectiveRescoreBand = 0;
 	so->graphHighdimWideningMultiplier = 1.0;
 	so->graphWideningReason = PGTURBOHYBRID_DENSE_WIDENING_NONE;
+	so->graphAdaptiveWideningMode = pgturbohybrid_dense_adaptive_widening;
+	so->graphAdaptiveTriggered = false;
+	so->graphAdaptiveTriggerReason = PGTURBOHYBRID_DENSE_ADAPTIVE_REASON_NONE;
+	so->graphAdaptiveInitialResultTarget = 0;
+	so->graphAdaptiveFinalResultTarget = 0;
+	so->graphAdaptiveInitialSearchEf = 0;
+	so->graphAdaptiveFinalSearchEf = 0;
+	so->graphAdaptiveGapTop10 = 0.0;
+	so->graphAdaptiveGapBoundary = 0.0;
+	so->graphLocalExpansionMode = pgturbohybrid_dense_local_expansion;
+	so->graphLocalExpansionTriggered = false;
+	so->graphLocalExpansionSeedCount = 0;
+	so->graphLocalExpansionNeighborsScored = 0;
+	so->graphLocalExpansionCandidatesAdded = 0;
+	so->graphLocalExpansionUs = 0;
 	so->graphDenseBudgetPolicy = pgturbohybrid_dense_budget_policy;
 	so->graphRescoreBandPolicy = pgturbohybrid_dense_rescore_band_policy;
 	so->tqGraphResults = NULL;
@@ -2416,6 +2786,55 @@ PgturbohybridGraphDenseWideningReasonName(int reason)
 		case PGTURBOHYBRID_DENSE_WIDENING_NONE:
 		default:
 			return "none";
+	}
+}
+
+const char *
+PgturbohybridGraphDenseAdaptiveWideningModeName(int mode)
+{
+	switch ((TqDenseAdaptiveWideningMode) mode)
+	{
+		case PGTURBOHYBRID_DENSE_ADAPTIVE_WIDENING_AUTO:
+			return "auto";
+		case PGTURBOHYBRID_DENSE_ADAPTIVE_WIDENING_ON:
+			return "on";
+		case PGTURBOHYBRID_DENSE_ADAPTIVE_WIDENING_OFF:
+		default:
+			return "off";
+	}
+}
+
+const char *
+PgturbohybridGraphDenseAdaptiveWideningReasonName(int reason)
+{
+	switch ((TqDenseAdaptiveWideningReason) reason)
+	{
+		case PGTURBOHYBRID_DENSE_ADAPTIVE_REASON_FORCED:
+			return "forced";
+		case PGTURBOHYBRID_DENSE_ADAPTIVE_REASON_UNDERFILLED:
+			return "underfilled";
+		case PGTURBOHYBRID_DENSE_ADAPTIVE_REASON_FLAT_TOP10:
+			return "flat_top10";
+		case PGTURBOHYBRID_DENSE_ADAPTIVE_REASON_FLAT_BOUNDARY:
+			return "flat_boundary";
+		case PGTURBOHYBRID_DENSE_ADAPTIVE_REASON_NONE:
+		default:
+			return "none";
+	}
+}
+
+const char *
+PgturbohybridGraphDenseLocalExpansionModeName(int mode)
+{
+	switch ((TqDenseLocalExpansionMode) mode)
+	{
+		case PGTURBOHYBRID_DENSE_LOCAL_EXPANSION_AUTO:
+			return "auto";
+		case PGTURBOHYBRID_DENSE_LOCAL_EXPANSION_ON:
+			return "on";
+		case PGTURBOHYBRID_DENSE_LOCAL_EXPANSION_OFF:
+		default:
+			return "off";
 	}
 }
 
@@ -2653,11 +3072,15 @@ PgturbohybridGraphReadMeta(Relation index, PgturbohybridGraphMetaPageData *meta)
 {
 	Buffer		buf;
 	Page		page;
+	PageHeader	pageHeader;
 	PgturbohybridGraphMetaPage metap;
+	Size		metaBytes;
+	Size		metaStart;
 
 	buf = ReadBuffer(index, PGTURBOHYBRID_GRAPH_METAPAGE_BLKNO);
 	LockBuffer(buf, BUFFER_LOCK_SHARE);
 	page = BufferGetPage(buf);
+	pageHeader = (PageHeader) page;
 	metap = PgturbohybridGraphPageGetMeta(page);
 
 	if (metap->magicNumber != PGTURBOHYBRID_GRAPH_MAGIC_NUMBER ||
@@ -2667,11 +3090,43 @@ PgturbohybridGraphReadMeta(Relation index, PgturbohybridGraphMetaPageData *meta)
 		return false;
 	}
 
-	memcpy(meta, metap, sizeof(PgturbohybridGraphMetaPageData));
+	memset(meta, 0, sizeof(PgturbohybridGraphMetaPageData));
+	metaStart = (Size) ((char *) metap - (char *) page);
+	metaBytes = pageHeader->pd_lower > metaStart ? pageHeader->pd_lower - metaStart : 0;
+	if (metaBytes > sizeof(PgturbohybridGraphMetaPageData))
+		metaBytes = sizeof(PgturbohybridGraphMetaPageData);
+	memcpy(meta, metap, metaBytes);
 	if (meta->tqBits != 1 && meta->tqBits != 2 && meta->tqBits != PGTURBOHYBRID_DEFAULT_BITS)
 		meta->tqBits = PGTURBOHYBRID_DEFAULT_BITS;
 	if (meta->tqBm25MetaStartBlkno <= PGTURBOHYBRID_GRAPH_METAPAGE_BLKNO)
 		meta->tqBm25MetaStartBlkno = InvalidBlockNumber;
+	if (meta->tqEntrySidecarCount > PGTURBOHYBRID_GRAPH_MAX_ENTRY_SIDECAR_REPRESENTATIVES)
+		meta->tqEntrySidecarCount = 0;
+	if (meta->tqEntrySidecarBytes != meta->tqEntrySidecarCount * sizeof(uint32))
+	{
+		meta->tqEntrySidecarCount = 0;
+		meta->tqEntrySidecarBytes = 0;
+	}
+	if (meta->tqRoutingEntryCount > PGTURBOHYBRID_GRAPH_MAX_ROUTING_ENTRIES)
+		meta->tqRoutingEntryCount = 0;
+	if (meta->tqRoutingEntryBytes != meta->tqRoutingEntryCount * sizeof(uint32))
+	{
+		meta->tqRoutingEntryCount = 0;
+		meta->tqRoutingEntryBytes = 0;
+	}
+	for (uint16 i = 0; i < meta->tqRoutingEntryCount; i++)
+	{
+		if (meta->tqRoutingEntryNodeIds[i] >= meta->tqNodeCount)
+		{
+			meta->tqRoutingEntryCount = 0;
+			meta->tqRoutingEntryBytes = 0;
+			break;
+		}
+	}
+	if ((meta->tqFlags & PGTURBOHYBRID_GRAPH_TQ_RESIDUAL_RERANK) == 0)
+		meta->tqResidualRerankBytes = 0;
+	if (meta->tqResidualRerankBytes > PGTURBOHYBRID_GRAPH_MAX_RESIDUAL_RERANK_BYTES)
+		meta->tqResidualRerankBytes = 0;
 	UnlockReleaseBuffer(buf);
 	return true;
 }
@@ -2800,6 +3255,7 @@ PgturbohybridGraphScanGreedySearch(Relation index, PgturbohybridGraphScanOpaque 
 		int			slot;
 		int			batchCount = 0;
 
+		CHECK_FOR_INTERRUPTS();
 		changed = false;
 		if (!PgturbohybridGraphLoadAdjPage(index, so, meta, storage, current.nodeId, level))
 			break;
@@ -2809,6 +3265,7 @@ PgturbohybridGraphScanGreedySearch(Relation index, PgturbohybridGraphScanOpaque 
 		{
 			uint32		neighbor = storage->neighbors[slot][i];
 
+			CHECK_FOR_INTERRUPTS();
 			if (lookaheadPrefetch && i + 1 < storage->neighborCounts[slot])
 			{
 				uint32		la = storage->neighbors[slot][i + 1];
@@ -2956,6 +3413,7 @@ PgturbohybridGraphSearchBaseLayer(Relation index, PgturbohybridGraphScanOpaque s
 		uint32		nodeId = item.nodeId;
 		int			slot;
 
+		CHECK_FOR_INTERRUPTS();
 		if (!PgturbohybridGraphLoadCodePage(index, so, meta, storage, nodeId))
 			continue;
 
@@ -2975,6 +3433,7 @@ PgturbohybridGraphSearchBaseLayer(Relation index, PgturbohybridGraphScanOpaque s
 			{
 				uint32		neighbor = storage->neighbors[slot][i];
 
+				CHECK_FOR_INTERRUPTS();
 				/*
 				 * Look-ahead prefetch — issue a HW prefetch
 				 * for the *next* iteration's storage->nodes[] and
@@ -3117,17 +3576,20 @@ PgturbohybridGraphTraverse(Relation index, PgturbohybridGraphScanOpaque so, Pgtu
 
 	/*
 	 * Keep alternative high-level entry points instead of relying on one
-	 * global entry. Build that shape from the compact native graph: score the
-	 * best level-bearing nodes, then let deterministic sampled candidates
-	 * replace weak high-level entries when the graph topology is not yet
-	 * strong enough for pure hierarchical routing.
+	 * global entry. The best level-bearing node IDs are stored at build time
+	 * so the scan path stays bounded on large corpora.
 	 */
-	for (uint32 nodeId = 0; nodeId < meta->tqNodeCount; nodeId++)
+	for (uint16 i = 0; i < meta->tqRoutingEntryCount; i++)
 	{
-		PgturbohybridGraphScanNode *node = &storage->nodes[nodeId];
+		uint32		nodeId = meta->tqRoutingEntryNodeIds[i];
+		PgturbohybridGraphScanNode *node;
 
-		if (nodeId == entry.nodeId || node->flags & PGTURBOHYBRID_GRAPH_NODE_DEAD ||
-			node->level <= 0)
+		CHECK_FOR_INTERRUPTS();
+		if (nodeId == entry.nodeId || nodeId >= meta->tqNodeCount ||
+			!PgturbohybridGraphLoadCodePage(index, so, meta, storage, nodeId))
+			continue;
+		node = &storage->nodes[nodeId];
+		if (node->flags & PGTURBOHYBRID_GRAPH_NODE_DEAD || node->level <= 0)
 			continue;
 
 		PgturbohybridGraphOfferLevelEntry(entries, &entryCount, entryLevels, nodeId,
@@ -3186,6 +3648,7 @@ PgturbohybridGraphTraverse(Relation index, PgturbohybridGraphScanOpaque so, Pgtu
 			bool		seen = PgturbohybridGraphEntryAlreadySelected(entries, entryCount,
 															nodeId);
 
+			CHECK_FOR_INTERRUPTS();
 			for (int j = 0; j < sampledCount; j++)
 			{
 				if (sampled[j].nodeId == nodeId)
@@ -3220,6 +3683,59 @@ PgturbohybridGraphTraverse(Relation index, PgturbohybridGraphScanOpaque so, Pgtu
 			  PgturbohybridGraphFrontierCompare);
 		for (int i = 0; i < sampledCount; i++)
 			PgturbohybridGraphOfferDistanceEntry(entries, &entryCount, sampled[i]);
+	}
+
+	if (meta->tqEntrySidecarCount > 0)
+	{
+		uint32		sidecarNodeIds[PGTURBOHYBRID_GRAPH_MAX_ENTRY_SIDECAR_REPRESENTATIVES];
+		double		sidecarDistances[PGTURBOHYBRID_GRAPH_MAX_ENTRY_SIDECAR_REPRESENTATIVES];
+		int			sidecarScored = 0;
+		int			sidecarSelected = 0;
+		instr_time	sidecarStart;
+
+		INSTR_TIME_SET_CURRENT(sidecarStart);
+		so->graphEntrySidecarCount = meta->tqEntrySidecarCount;
+		for (int i = 0; i < meta->tqEntrySidecarCount; i++)
+		{
+			uint32		nodeId = meta->tqEntrySidecarNodeIds[i];
+			bool		seen = PgturbohybridGraphEntryAlreadySelected(entries, entryCount,
+														 nodeId);
+
+			CHECK_FOR_INTERRUPTS();
+			for (int j = 0; j < sidecarScored; j++)
+			{
+				if (sidecarNodeIds[j] == nodeId)
+				{
+					seen = true;
+					break;
+				}
+			}
+
+			if (seen || nodeId >= meta->tqNodeCount ||
+				!PgturbohybridGraphLoadCodePage(index, so, meta, storage, nodeId))
+				continue;
+			sidecarNodeIds[sidecarScored++] = nodeId;
+		}
+
+		PgturbohybridGraphScoreNodeBatchTimed(so, storage, sidecarNodeIds,
+								   sidecarScored, sidecarDistances, query);
+		for (int i = 0; i < sidecarScored; i++)
+		{
+			PgturbohybridGraphFrontierItem sidecarEntry;
+
+			sidecarEntry.nodeId = sidecarNodeIds[i];
+			sidecarEntry.distance = sidecarDistances[i];
+			PgturbohybridGraphOfferDistanceEntry(entries, &entryCount, sidecarEntry);
+		}
+		for (int i = 0; i < sidecarScored; i++)
+		{
+			if (PgturbohybridGraphEntryAlreadySelected(entries, entryCount,
+											sidecarNodeIds[i]))
+				sidecarSelected++;
+		}
+		so->graphEntrySidecarScored = sidecarScored;
+		so->graphEntrySidecarSelected = sidecarSelected;
+		PgturbohybridGraphAddElapsedUs(&so->graphEntrySidecarUs, sidecarStart);
 	}
 
 	so->graphEntryPointCount = entryCount;
@@ -3272,6 +3788,7 @@ PgturbohybridGraphFillCandidateBand(Relation index, PgturbohybridGraphScanOpaque
 			storage->payloadRefs[payloadFirst + i].nodeId : i;
 		PgturbohybridGraphScanNode *node;
 
+		CHECK_FOR_INTERRUPTS();
 		if (selected[nodeId])
 			continue;
 		if (!PgturbohybridGraphLoadCodePage(index, so, meta, storage, nodeId))
@@ -3355,6 +3872,7 @@ PgturbohybridGraphCollectPayloadExactBand(PgturbohybridGraphScanOpaque so, Pgtur
 		double		distance;
 		bool		exactScored = false;
 
+		CHECK_FOR_INTERRUPTS();
 		if (nodeId >= meta->tqNodeCount)
 			continue;
 
@@ -3503,6 +4021,339 @@ PgturbohybridGraphExactRescore(Relation index, PgturbohybridGraphScanOpaque so, 
 	pfree(vectorScratch);
 	if (refsAllocated)
 		pfree(refs);
+}
+
+static double
+PgturbohybridGraphNormalizedGap(double best, double boundary)
+{
+	double		gap = boundary - best;
+	double		scale = Max(Max(fabs(best), fabs(boundary)), 1.0);
+
+	if (gap < 0)
+		gap = 0;
+	return gap / scale;
+}
+
+static bool
+PgturbohybridGraphShouldAdaptiveWiden(PgturbohybridGraphScanOpaque so,
+						   PgturbohybridGraphResult *results, int count,
+						   int resultTarget, int64 requestedBaseTarget)
+{
+	double		threshold;
+	int			top10Index;
+
+	so->graphAdaptiveWideningMode = pgturbohybrid_dense_adaptive_widening;
+	so->graphAdaptiveInitialResultTarget = resultTarget;
+	so->graphAdaptiveFinalResultTarget = resultTarget;
+	so->graphAdaptiveTriggerReason = PGTURBOHYBRID_DENSE_ADAPTIVE_REASON_NONE;
+	so->graphAdaptiveGapTop10 = 0.0;
+	so->graphAdaptiveGapBoundary = 0.0;
+
+	if (pgturbohybrid_dense_adaptive_widening == PGTURBOHYBRID_DENSE_ADAPTIVE_WIDENING_OFF ||
+		resultTarget <= 0 || count <= 0)
+		return false;
+
+	top10Index = Min(count, 10) - 1;
+	so->graphAdaptiveGapTop10 =
+		PgturbohybridGraphNormalizedGap(results[0].distance,
+										 results[top10Index].distance);
+	so->graphAdaptiveGapBoundary =
+		PgturbohybridGraphNormalizedGap(results[0].distance,
+										 results[count - 1].distance);
+
+	if (pgturbohybrid_dense_adaptive_widening == PGTURBOHYBRID_DENSE_ADAPTIVE_WIDENING_ON)
+	{
+		so->graphAdaptiveTriggerReason = PGTURBOHYBRID_DENSE_ADAPTIVE_REASON_FORCED;
+		return true;
+	}
+
+	if (count < Min(resultTarget, (int) Max(requestedBaseTarget, (int64) 1)))
+	{
+		so->graphAdaptiveTriggerReason = PGTURBOHYBRID_DENSE_ADAPTIVE_REASON_UNDERFILLED;
+		return true;
+	}
+
+	threshold = pgturbohybrid_dense_adaptive_min_gap > 0.0 ?
+		pgturbohybrid_dense_adaptive_min_gap : 0.05;
+
+	if (top10Index >= 1 && so->graphAdaptiveGapTop10 <= threshold)
+	{
+		so->graphAdaptiveTriggerReason = PGTURBOHYBRID_DENSE_ADAPTIVE_REASON_FLAT_TOP10;
+		return true;
+	}
+
+	if (count >= resultTarget && so->graphAdaptiveGapBoundary <= threshold * 4.0)
+	{
+		so->graphAdaptiveTriggerReason = PGTURBOHYBRID_DENSE_ADAPTIVE_REASON_FLAT_BOUNDARY;
+		return true;
+	}
+
+	return false;
+}
+
+static bool
+PgturbohybridGraphLocalExpansionShouldTrigger(PgturbohybridGraphResult *results, int count,
+								   int resultTarget)
+{
+	double		threshold;
+	double		gapTop10;
+	double		gapBoundary;
+	int			top10Index;
+
+	if (pgturbohybrid_dense_local_expansion == PGTURBOHYBRID_DENSE_LOCAL_EXPANSION_OFF ||
+		resultTarget <= 0 || count <= 0)
+		return false;
+	if (pgturbohybrid_dense_local_expansion == PGTURBOHYBRID_DENSE_LOCAL_EXPANSION_ON)
+		return true;
+
+	top10Index = Min(count, 10) - 1;
+	gapTop10 = PgturbohybridGraphNormalizedGap(results[0].distance,
+											   results[top10Index].distance);
+	gapBoundary = PgturbohybridGraphNormalizedGap(results[0].distance,
+												  results[count - 1].distance);
+	threshold = pgturbohybrid_dense_adaptive_min_gap > 0.0 ?
+		pgturbohybrid_dense_adaptive_min_gap : 0.05;
+
+	if (count < resultTarget)
+		return true;
+	if (top10Index >= 1 && gapTop10 <= threshold)
+		return true;
+	if (count >= resultTarget && gapBoundary <= threshold * 4.0)
+		return true;
+	return false;
+}
+
+static bool
+PgturbohybridGraphResultContainsNode(PgturbohybridGraphResult *results, int count,
+						  uint32 nodeId)
+{
+	for (int i = 0; i < count; i++)
+	{
+		if (results[i].nodeId == nodeId)
+			return true;
+	}
+	return false;
+}
+
+static bool
+PgturbohybridGraphNodeIdArrayContains(uint32 *nodeIds, int count, uint32 nodeId)
+{
+	for (int i = 0; i < count; i++)
+	{
+		if (nodeIds[i] == nodeId)
+			return true;
+	}
+	return false;
+}
+
+static bool
+PgturbohybridGraphOfferCandidateSorted(PgturbohybridGraphResult *results, int target,
+							int *count, uint32 nodeId, ItemPointer heaptid,
+							double distance)
+{
+	PgturbohybridGraphResult item;
+
+	if (target <= 0)
+		return false;
+	item.nodeId = nodeId;
+	item.heaptid = *heaptid;
+	item.distance = distance;
+	item.exactScored = false;
+
+	if (*count < target)
+	{
+		results[*count] = item;
+		(*count)++;
+		return true;
+	}
+	if (*count > 0 && PgturbohybridGraphResultLess(item, results[*count - 1]))
+	{
+		results[*count - 1] = item;
+		return true;
+	}
+	return false;
+}
+
+static int
+PgturbohybridGraphApplyLocalExpansion(Relation index, PgturbohybridGraphScanOpaque so,
+						   PgturbohybridGraphMetaPageData *meta,
+						   PgturbohybridGraphScanStorage *storage,
+						   PgturbohybridGraphResult *results, int resultTarget,
+						   int count, Datum query, int payloadSlot,
+						   int32 payloadValue)
+{
+	uint32	   *candidateNodeIds;
+	uint32	   *batchNodeIds;
+	double	   *batchDistances;
+	int			maxNeighbors;
+	int			seedCount;
+	int			candidateCount = 0;
+	int			batchCount = 0;
+	int			acceptedCount = 0;
+	instr_time	start;
+
+	so->graphLocalExpansionMode = pgturbohybrid_dense_local_expansion;
+	if (!PgturbohybridGraphLocalExpansionShouldTrigger(results, count, resultTarget))
+		return count;
+
+	maxNeighbors = Max(1, pgturbohybrid_dense_local_expansion_max_neighbors);
+	seedCount = Min(count, Max(1, pgturbohybrid_dense_local_expansion_topn));
+	candidateNodeIds = palloc(sizeof(uint32) * maxNeighbors);
+	batchNodeIds = palloc(sizeof(uint32) * Min(maxNeighbors, PGTURBOHYBRID_GRAPH_MAX_NEIGHBORS));
+	batchDistances = palloc(sizeof(double) * Min(maxNeighbors, PGTURBOHYBRID_GRAPH_MAX_NEIGHBORS));
+
+	INSTR_TIME_SET_CURRENT(start);
+	for (int seedIndex = 0; seedIndex < seedCount && candidateCount < maxNeighbors; seedIndex++)
+	{
+		uint32		seedNodeId = results[seedIndex].nodeId;
+		int			slot;
+
+		CHECK_FOR_INTERRUPTS();
+		if (seedNodeId >= meta->tqNodeCount ||
+			!PgturbohybridGraphLoadAdjPage(index, so, meta, storage, seedNodeId, 0))
+			continue;
+		slot = PgturbohybridGraphScanAdjSlot(meta, seedNodeId, 0);
+		for (int i = 0; i < storage->neighborCounts[slot] && candidateCount < maxNeighbors; i++)
+		{
+			uint32		neighbor = storage->neighbors[slot][i];
+			PgturbohybridGraphScanNode *node;
+
+			CHECK_FOR_INTERRUPTS();
+			if (neighbor >= meta->tqNodeCount ||
+				PgturbohybridGraphResultContainsNode(results, count, neighbor) ||
+				PgturbohybridGraphNodeIdArrayContains(candidateNodeIds, candidateCount, neighbor) ||
+				!PgturbohybridGraphLoadCodePage(index, so, meta, storage, neighbor))
+				continue;
+
+			node = &storage->nodes[neighbor];
+			if (node->flags & PGTURBOHYBRID_GRAPH_NODE_DEAD ||
+				!PgturbohybridGraphNodeMatchesPayload(node, payloadSlot, payloadValue))
+				continue;
+			candidateNodeIds[candidateCount++] = neighbor;
+		}
+	}
+
+	for (int i = 0; i < candidateCount; i++)
+	{
+		CHECK_FOR_INTERRUPTS();
+		batchNodeIds[batchCount++] = candidateNodeIds[i];
+		if (batchCount == PGTURBOHYBRID_GRAPH_MAX_NEIGHBORS)
+		{
+			PgturbohybridGraphScoreNodeBatchTimed(so, storage, batchNodeIds,
+										   batchCount, batchDistances, query);
+			for (int j = 0; j < batchCount; j++)
+			{
+				PgturbohybridGraphScanNode *node = &storage->nodes[batchNodeIds[j]];
+
+				if (PgturbohybridGraphOfferCandidateSorted(results, resultTarget,
+												&count, batchNodeIds[j],
+												&node->heaptid, batchDistances[j]))
+					acceptedCount++;
+			}
+			batchCount = 0;
+		}
+	}
+	if (batchCount > 0)
+	{
+		PgturbohybridGraphScoreNodeBatchTimed(so, storage, batchNodeIds,
+									   batchCount, batchDistances, query);
+		for (int j = 0; j < batchCount; j++)
+		{
+			PgturbohybridGraphScanNode *node = &storage->nodes[batchNodeIds[j]];
+
+			if (PgturbohybridGraphOfferCandidateSorted(results, resultTarget,
+											&count, batchNodeIds[j],
+											&node->heaptid, batchDistances[j]))
+				acceptedCount++;
+		}
+	}
+
+	so->graphLocalExpansionTriggered = true;
+	so->graphLocalExpansionSeedCount = seedCount;
+	so->graphLocalExpansionNeighborsScored = candidateCount;
+	so->graphLocalExpansionCandidatesAdded = acceptedCount;
+	PgturbohybridGraphAddElapsedUs(&so->graphLocalExpansionUs, start);
+	pfree(candidateNodeIds);
+	pfree(batchNodeIds);
+	pfree(batchDistances);
+	return count;
+}
+
+static double
+PgturbohybridGraphResidualSketchSimilarity(const uint8 *querySketch,
+								const uint8 *nodeSketch, int bytes)
+{
+	double		dot = 0.0;
+	double		queryNorm = 0.0;
+	double		nodeNorm = 0.0;
+
+	for (int i = 0; i < bytes; i++)
+	{
+		double		q = (double) ((int) querySketch[i] - 128);
+		double		n = (double) ((int) nodeSketch[i] - 128);
+
+		dot += q * n;
+		queryNorm += q * q;
+		nodeNorm += n * n;
+	}
+
+	if (queryNorm <= 0.0 || nodeNorm <= 0.0)
+		return 0.0;
+	return dot / sqrt(queryNorm * nodeNorm);
+}
+
+static int
+PgturbohybridGraphApplyResidualRerank(PgturbohybridGraphScanOpaque so,
+						   PgturbohybridGraphMetaPageData *meta,
+						   PgturbohybridGraphScanStorage *storage,
+						   PgturbohybridGraphResult *results, int count)
+{
+	uint8		querySketch[PGTURBOHYBRID_GRAPH_MAX_RESIDUAL_RERANK_BYTES];
+	int			bytes = meta->tqResidualRerankBytes;
+	int			band;
+	int64		baseTarget;
+	instr_time	start;
+	TqScoreMode mode = (TqScoreMode) so->tq.scoreMode;
+
+	if (bytes <= 0 || bytes > PGTURBOHYBRID_GRAPH_MAX_RESIDUAL_RERANK_BYTES ||
+		count <= 1 || so->tq.rawQueryValues == NULL)
+		return count;
+	if (mode != PGTURBOHYBRID_SCORE_COSINE && mode != PGTURBOHYBRID_SCORE_IP)
+		return count;
+
+	baseTarget = so->hasTupleTargetRows ?
+		Max((int64) 1, so->tupleTargetRows) :
+		Max((int64) 1, so->graphDenseRequestedK);
+	band = (int) Min((int64) count, Max(baseTarget * 2, (int64) 20));
+	if (band <= 1)
+		return count;
+
+	INSTR_TIME_SET_CURRENT(start);
+	PgturbohybridGraphBuildResidualSketch(so->tq.rawQueryValues, meta->dimensions,
+										  querySketch, bytes);
+	for (int i = 0; i < band; i++)
+	{
+		PgturbohybridGraphScanNode *node;
+		double		similarity;
+
+		CHECK_FOR_INTERRUPTS();
+		if (results[i].nodeId >= meta->tqNodeCount)
+			continue;
+		node = &storage->nodes[results[i].nodeId];
+		if (node->residualSketch == NULL)
+			continue;
+
+		similarity = PgturbohybridGraphResidualSketchSimilarity(querySketch,
+														 node->residualSketch,
+														 bytes);
+		results[i].distance -= 0.03 * similarity;
+		results[i].exactScored = false;
+	}
+	qsort(results, band, sizeof(PgturbohybridGraphResult), PgturbohybridGraphResultCompare);
+	so->graphResidualRerankCount = band;
+	so->graphResidualRerankBytes = bytes;
+	PgturbohybridGraphAddElapsedUs(&so->graphResidualRerankUs, start);
+	return count;
 }
 
 
@@ -3711,6 +4562,15 @@ PgturbohybridGraphCollectResults(IndexScanDesc scan, PgturbohybridGraphScanOpaqu
 							resultTarget, searchEf, query, payloadSlot,
 							payloadValue);
 	PgturbohybridGraphAddElapsedUs(&so->graphTraverseUs, phaseStart);
+	if (!hasPayloadFilter && count < resultTarget &&
+		resultTarget >= (int) meta.tqNodeCount)
+	{
+		INSTR_TIME_SET_CURRENT(phaseStart);
+		count = PgturbohybridGraphFillCandidateBand(scan->indexRelation, so, &meta,
+										 &storage, results, resultTarget, count,
+										 payloadSlot, payloadValue, query);
+		PgturbohybridGraphAddElapsedUs(&so->graphFillUs, phaseStart);
+	}
 	if (estimatedSelectivity > 0 && estimatedSelectivity < 1 && count < resultTarget)
 	{
 		INSTR_TIME_SET_CURRENT(phaseStart);
@@ -3722,6 +4582,72 @@ PgturbohybridGraphCollectResults(IndexScanDesc scan, PgturbohybridGraphScanOpaqu
 	INSTR_TIME_SET_CURRENT(phaseStart);
 	qsort(results, count, sizeof(PgturbohybridGraphResult), PgturbohybridGraphResultCompare);
 	PgturbohybridGraphAddElapsedUs(&so->graphSortUs, phaseStart);
+
+	count = PgturbohybridGraphApplyLocalExpansion(scan->indexRelation, so, &meta,
+									   &storage, results, resultTarget, count,
+									   query, payloadSlot, payloadValue);
+	if (so->graphLocalExpansionTriggered)
+	{
+		INSTR_TIME_SET_CURRENT(phaseStart);
+		qsort(results, count, sizeof(PgturbohybridGraphResult), PgturbohybridGraphResultCompare);
+		PgturbohybridGraphAddElapsedUs(&so->graphSortUs, phaseStart);
+	}
+
+	so->graphAdaptiveInitialSearchEf = searchEf;
+	so->graphAdaptiveFinalSearchEf = searchEf;
+	so->graphAdaptiveInitialResultTarget = resultTarget;
+	so->graphAdaptiveFinalResultTarget = resultTarget;
+	if (PgturbohybridGraphShouldAdaptiveWiden(so, results, count, resultTarget,
+								   requestedBaseTarget))
+	{
+		int64		adaptiveTarget =
+			(int64) ceil((double) resultTarget *
+						 pgturbohybrid_dense_adaptive_widening_multiplier);
+		int64		adaptiveMax =
+			(int64) ceil((double) resultTarget *
+						 pgturbohybrid_dense_adaptive_widening_max_multiplier);
+		int64		scanCap = pgturbohybrid_max_scan_tuples > 0 ?
+			(int64) pgturbohybrid_max_scan_tuples : (int64) meta.tqNodeCount;
+		int			wideTarget;
+
+		adaptiveMax = Max(adaptiveMax, (int64) resultTarget + 1);
+		adaptiveTarget = Min(adaptiveTarget, adaptiveMax);
+		adaptiveTarget = Min(adaptiveTarget, scanCap);
+		adaptiveTarget = Min(adaptiveTarget, (int64) meta.tqNodeCount);
+		wideTarget = (int) Min((int64) INT_MAX,
+							   Max(adaptiveTarget, (int64) resultTarget + 1));
+		if (wideTarget > resultTarget)
+		{
+			pfree(results);
+			resultTarget = wideTarget;
+			searchEf = Min(Max(searchEf + 1, resultTarget), (int) meta.tqNodeCount);
+			so->graphAdaptiveTriggered = true;
+			so->graphAdaptiveFinalResultTarget = resultTarget;
+			so->graphAdaptiveFinalSearchEf = searchEf;
+			so->graphEffectiveResultTarget = resultTarget;
+			so->graphEffectiveSearchEf = searchEf;
+			so->graphHighdimWideningMultiplier =
+				requestedBaseTarget > 0 ?
+				((double) resultTarget / (double) requestedBaseTarget) : 1.0;
+			results = palloc(sizeof(PgturbohybridGraphResult) * resultTarget);
+			INSTR_TIME_SET_CURRENT(phaseStart);
+			count = PgturbohybridGraphTraverse(scan->indexRelation, so, &meta, &storage,
+									results, resultTarget, searchEf, query,
+									payloadSlot, payloadValue);
+			PgturbohybridGraphAddElapsedUs(&so->graphTraverseUs, phaseStart);
+			if (estimatedSelectivity > 0 && estimatedSelectivity < 1 && count < resultTarget)
+			{
+				INSTR_TIME_SET_CURRENT(phaseStart);
+				count = PgturbohybridGraphFillCandidateBand(scan->indexRelation, so, &meta,
+											 &storage, results, resultTarget, count,
+											 payloadSlot, payloadValue, query);
+				PgturbohybridGraphAddElapsedUs(&so->graphFillUs, phaseStart);
+			}
+			INSTR_TIME_SET_CURRENT(phaseStart);
+			qsort(results, count, sizeof(PgturbohybridGraphResult), PgturbohybridGraphResultCompare);
+			PgturbohybridGraphAddElapsedUs(&so->graphSortUs, phaseStart);
+		}
+	}
 
 	if (!latencyBudgetActive &&
 		so->graphRescoreBand == PGTURBOHYBRID_GRAPH_RESCORE_BAND_AUTO &&
@@ -3771,6 +4697,8 @@ PgturbohybridGraphCollectResults(IndexScanDesc scan, PgturbohybridGraphScanOpaqu
 	so->graphCandidateCount = count;
 	if (exactFree)
 	{
+		count = PgturbohybridGraphApplyResidualRerank(so, &meta, &storage,
+										   results, count);
 		so->graphEffectiveRescoreBand = 0;
 		so->tqGraphResults = results;
 		so->tqGraphResultCount = count;
@@ -4132,7 +5060,8 @@ PgturbohybridGraphCollectVacuumStats(Relation index, PgturbohybridGraphMetaPageD
 		PgturbohybridGraphTuplesPerPage(PgturbohybridGraphCodeTupleSize(meta->dimensions,
 												  meta->tqPayloadCount,
 												  tqBits,
-												  (meta->tqFlags & PGTURBOHYBRID_GRAPH_TQ_WEIGHTED) != 0));
+												  (meta->tqFlags & PGTURBOHYBRID_GRAPH_TQ_WEIGHTED) != 0,
+												  meta->tqResidualRerankBytes));
 	codePageCount = PgturbohybridGraphPageCount(meta->tqNodeCount, codeTuplesPerPage);
 	blkno = meta->tqCodeStartBlkno;
 
@@ -4286,9 +5215,10 @@ tqgraphbulkdelete(IndexVacuumInfo *info, IndexBulkDeleteResult *stats,
 	tqBits = meta.tqBits != 0 ? meta.tqBits : PGTURBOHYBRID_DEFAULT_BITS;
 	codeTuplesPerPage =
 		PgturbohybridGraphTuplesPerPage(PgturbohybridGraphCodeTupleSize(meta.dimensions,
-													  meta.tqPayloadCount,
-													  tqBits,
-													  (meta.tqFlags & PGTURBOHYBRID_GRAPH_TQ_WEIGHTED) != 0));
+														  meta.tqPayloadCount,
+														  tqBits,
+														  (meta.tqFlags & PGTURBOHYBRID_GRAPH_TQ_WEIGHTED) != 0,
+														  meta.tqResidualRerankBytes));
 	codePageCount = PgturbohybridGraphPageCount(meta.tqNodeCount, codeTuplesPerPage);
 	deleteState = palloc0(sizeof(PgturbohybridGraphBulkDeleteState));
 	deadNodes = palloc0(sizeof(bool) * meta.tqNodeCount);

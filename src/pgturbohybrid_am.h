@@ -32,6 +32,11 @@ typedef struct PgturbohybridOptions
 	bool		tqQuantileFit;
 	bool		tqRenorm;
 	bool		tqExactStorage;
+	bool		entrySidecar;
+	int			entrySidecarRepresentatives;
+	bool		graphBackbone;
+	bool		residualRerank;
+	int			residualRerankBytes;
 	float8		bm25K1;
 	float8		bm25B;
 	bool		bm25BlockMax;

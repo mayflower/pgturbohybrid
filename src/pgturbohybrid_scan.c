@@ -702,7 +702,9 @@ pgturbohybridgettuple(IndexScanDesc scan, ScanDirection dir)
 	bool		result;
 
 	if (PgturbohybridGraphUseTqNativeGraph(scan->indexRelation))
+	{
 		return tqgraphgettuple(scan, dir);
+	}
 
 	if (!PgturbohybridGraphUseTqFlat(scan->indexRelation))
 		ereport(ERROR,

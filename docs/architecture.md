@@ -129,6 +129,24 @@ The current alpha exposes these user-facing GUCs:
 - `turbohybrid.max_union_candidates`
 - `turbohybrid.simd`
 
+The DBPedia dense-quality work also exposes experimental diagnostics. Adaptive
+widening defaults to `auto` after the DBPedia 1M self-query run showed a
+quality gain without a p95 regression. The other diagnostics remain off by
+default and should be used only for controlled benchmark runs:
+
+- `turbohybrid.dense_build_exact_distances`: use exact vector distances while
+  building dense graph edges, while still allowing `exact_storage = off`.
+- `turbohybrid.dense_adaptive_widening`: `off`, `auto`, or `on`; defaults to
+  `auto` and controls one bounded second graph-search pass for ambiguous
+  dense-only scans.
+- `turbohybrid.dense_adaptive_widening_multiplier`
+- `turbohybrid.dense_adaptive_widening_max_multiplier`
+- `turbohybrid.dense_adaptive_min_gap`
+- `turbohybrid.dense_local_expansion`: `off`, `auto`, or `on`; controls bounded
+  one-hop scoring from top approximate dense candidates.
+- `turbohybrid.dense_local_expansion_topn`
+- `turbohybrid.dense_local_expansion_max_neighbors`
+
 Candidate-budget and cache GUCs have conservative public caps in this alpha:
 `default_dense_k` and `default_bm25_k` are capped at 10,000, `default_rrf_k` at
 100,000, `max_union_candidates` at 1,000,000, and
@@ -154,6 +172,21 @@ still use stable descriptive names. The current alpha reloptions are:
 - `routing`: dense routing mode. Default: `auto`; current values are `auto`,
   `graph`, and `flat`.
 
+The DBPedia dense-quality work adds experimental reloptions. They are explicit,
+off by default where applicable, and should not be documented as stable public
+storage format without a release note and `REINDEX` guidance:
+
+- `graph_backbone`: force adjacent level-0 graph edges during build. Default:
+  `off`.
+- `entry_sidecar`: store a tiny list of representative node IDs in metadata.
+  Default: `off`.
+- `entry_sidecar_representatives`: maximum representative node IDs when
+  `entry_sidecar` is enabled. Default: `128`; maximum: `256`.
+- `residual_rerank`: store small per-vector sketches for final-band dense
+  reranking. Default: `off`.
+- `residual_rerank_bytes`: sketch bytes per vector when `residual_rerank` is
+  enabled. Default: `32`; maximum: `64`.
+
 Prototype names such as `tq_*` should not appear in user-facing reloptions.
 
 ## Access Method Storage
@@ -168,9 +201,10 @@ must not collide with pgvector access methods:
 - `PGTURBOHYBRID_VERSION`
 
 Block 0 is the metapage. It stores the access-method identity, format version,
-index dimensions, dense graph options, quantization options, entry/start block
-pointers, and BM25 metadata pointers. Other pages carry the pgturbohybrid page
-identifier and a page-kind tag before their format-specific payload.
+index dimensions, dense graph options, quantization options, bounded routing
+entry IDs, optional entry-sidecar IDs, entry/start block pointers, and BM25
+metadata pointers. Older metapage tails are zero-filled by metadata readers so
+default compact indexes do not get misread as having sidecars.
 
 Current page kinds are:
 
@@ -179,6 +213,7 @@ Current page kinds are:
 - quantized adjacency pages
 - optional exact-vector pages for final rescoring
 - quantization correction pages
+- optional residual-rerank bytes embedded in quantized code tuples
 - BM25 metadata, document statistics, lexicon, postings, block-max, delta,
   impact, and delta-term pages
 

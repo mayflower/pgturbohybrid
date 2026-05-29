@@ -689,14 +689,15 @@ PgturbohybridGraphAppendTupleWithCursor(Relation index, BlockNumber *startBlkno,
 static void
 PgturbohybridGraphAppendInsertedCode(Relation index, BlockNumber *codeStart,
 						  uint32 nodeId, ItemPointer heapTid, int nodeLevel,
-						  Vector *vector, uint8 *code, float scale,
+						  Vector *vector, uint8 *code, uint8 *residualSketch,
+						  float scale,
 						  int32 *payloads, uint16 payloadMask, int payloadCount,
 						  int bits, BlockNumber exactBlkno, OffsetNumber exactOffno,
-						  bool tqWeighted, float ecCorrection)
+						  bool tqWeighted, float ecCorrection, Size residualBytes)
 {
 	Size		payloadBytes = PgturbohybridGraphPayloadBytes(payloadCount);
 	Size		tupleSize = PgturbohybridGraphCodeTupleSize(vector->dim, payloadCount,
-												 bits, tqWeighted);
+												 bits, tqWeighted, residualBytes);
 	PgturbohybridGraphCodeTuple tuple = palloc0(tupleSize);
 	BlockNumber codeBlkno;
 
@@ -714,7 +715,11 @@ PgturbohybridGraphAppendInsertedCode(Relation index, BlockNumber *codeStart,
 	PgturbohybridGraphTupleSetEcCorrection(tuple, tqWeighted, ecCorrection);
 	if (payloadBytes > 0 && payloads != NULL)
 		memcpy(PgturbohybridGraphTuplePayloads(tuple, tqWeighted), payloads, payloadBytes);
-	memcpy(PgturbohybridGraphTupleCode(tuple, payloadBytes, tqWeighted), code,
+	if (residualBytes > 0 && residualSketch != NULL)
+		memcpy(PgturbohybridGraphTupleResidual(tuple, payloadBytes, residualBytes,
+											   tqWeighted),
+			   residualSketch, residualBytes);
+	memcpy(PgturbohybridGraphTupleCode(tuple, payloadBytes, residualBytes, tqWeighted), code,
 		   PgturbohybridGraphCodeBytesForBits(vector->dim, bits));
 
 	(void) PgturbohybridGraphAppendTupleWithCursor(index, codeStart,
@@ -807,6 +812,7 @@ PgturbohybridGraphInsertValueInPlace(Relation index, IndexInfo *indexInfo,
 	float		insertXm;
 	float		insertNorm;
 	float		insertCodeNorm;
+	uint8	   *residualSketch = NULL;
 
 	if (!PgturbohybridGraphReadMeta(index, &meta))
 		elog(ERROR, "pgturbohybrid native graph metapage is missing or invalid");
@@ -867,6 +873,13 @@ PgturbohybridGraphInsertValueInPlace(Relation index, IndexInfo *indexInfo,
 		scale = TqEncodeVectorBits(vector, code, meta.tqBits);
 	insertNorm = PgturbohybridGraphVectorNorm(vector);
 	insertCodeNorm = PgturbohybridGraphCodeNorm(code, vector->dim, meta.tqBits);
+	if (meta.tqResidualRerankBytes > 0)
+	{
+		residualSketch = palloc0(meta.tqResidualRerankBytes);
+		PgturbohybridGraphBuildResidualSketch(vector->x, vector->dim,
+											  residualSketch,
+											  meta.tqResidualRerankBytes);
+	}
 	selected = palloc0(sizeof(uint32 *) * levelCapacity);
 	selectedCounts = palloc0(sizeof(int) * levelCapacity);
 	adjBlknos = palloc(sizeof(BlockNumber) * levelCapacity);
@@ -930,9 +943,10 @@ PgturbohybridGraphInsertValueInPlace(Relation index, IndexInfo *indexInfo,
 		exactOffno = InvalidOffsetNumber;
 	}
 	PgturbohybridGraphAppendInsertedCode(index, &codeStart, newNodeId, heap_tid, nodeLevel,
-							  vector, code, scale, payloads, payloadMask,
+							  vector, code, residualSketch, scale, payloads, payloadMask,
 							  payloadCount, meta.tqBits, exactBlkno, exactOffno,
-							  insertTqWeighted, insertXm);
+							  insertTqWeighted, insertXm,
+							  meta.tqResidualRerankBytes);
 	PgturbohybridGraphAppendInsertedAdj(index, &adjStart, meta.m, newNodeId, nodeLevel,
 							 selected, selectedCounts, adjBlknos, adjOffnos);
 
@@ -951,8 +965,15 @@ PgturbohybridGraphInsertValueInPlace(Relation index, IndexInfo *indexInfo,
 	metaState.tqWeighted = (meta.tqFlags & PGTURBOHYBRID_GRAPH_TQ_WEIGHTED) != 0;
 	metaState.tqRenorm = (meta.tqFlags & PGTURBOHYBRID_GRAPH_TQ_RENORM) != 0;
 	metaState.tqExactStorage = insertExactStorage;
+	metaState.graphBackbone = (meta.tqFlags & PGTURBOHYBRID_GRAPH_TQ_BACKBONE) != 0;
+	metaState.residualRerank = meta.tqResidualRerankBytes > 0;
+	metaState.residualRerankBytes = meta.tqResidualRerankBytes;
 	metaState.payloadCount = payloadCount;
 	metaState.payloadBytes = payloadBytes;
+	metaState.entrySidecarCount = meta.tqEntrySidecarCount;
+	metaState.entrySidecarBytes = meta.tqEntrySidecarBytes;
+	memcpy(metaState.entrySidecarNodeIds, meta.tqEntrySidecarNodeIds,
+		   sizeof(metaState.entrySidecarNodeIds));
 	metaState.ecShift = ecShift;
 	metaState.ecScale = ecScale;
 	metaState.nodeCount = meta.tqNodeCount + 1;
@@ -965,7 +986,7 @@ PgturbohybridGraphInsertValueInPlace(Relation index, IndexInfo *indexInfo,
 						  meta.tqCorrectionStartBlkno);
 	if (insertCache != NULL)
 		PgturbohybridGraphAppendInsertCacheNode(insertCache, &meta, newNodeId, heap_tid,
-									 nodeLevel, vector, code, scale,
+									 nodeLevel, vector, code, residualSketch, scale,
 									 insertNorm, insertCodeNorm, insertXm,
 									 payloads, payloadMask, exactBlkno,
 									 exactOffno, selected, selectedCounts,
@@ -987,6 +1008,8 @@ PgturbohybridGraphInsertValueInPlace(Relation index, IndexInfo *indexInfo,
 		pfree(ecShift);
 	if (ecScale != NULL)
 		pfree(ecScale);
+	if (residualSketch != NULL)
+		pfree(residualSketch);
 	pfree(code);
 
 	return newNodeId;

@@ -250,41 +250,12 @@ approximate nearest-neighbor vector search.
 | pgturbohybrid default | default 4-bit exact-free index, LIMIT-inferred `final_k` | 0.910 ms | 0.421540 |
 | SQL RRF baseline | pgvector HNSW default reloptions plus PostgreSQL GIN (Generalized Inverted Index) full-text search, 100/100 candidates | 3.254 ms | 0.423341 |
 
-For a larger systems benchmark, we also ran the Qdrant DBPedia OpenAI3-large
-1M corpus with the existing corpus embeddings. This run used 1,000 deterministic
-self-queries from the loaded Qdrant rows, 3,072-dimensional
-`text-embedding-3-large` vectors, one warmup pass, three measured passes,
-`dense_k=100`, `bm25_k=100`, `final_k=10`, and the TurboHybrid `latency`
-profile. The pgvector baseline used `halfvec(3072)` HNSW plus PostgreSQL GIN
-full-text search with SQL-level RRF. The HNSW build used
-`maintenance_work_mem=8GB`.
-
-| Method | Settings | p95 | self-qrel nDCG@10 | index size |
-| --- | --- | ---: | ---: | ---: |
-| pgturbohybrid default | default 4-bit exact-free index, LIMIT-inferred `final_k` | 5.942 ms | 0.934457 | 2.38 GB |
-| SQL RRF baseline | pgvector `halfvec(3072)` HNSW plus PostgreSQL GIN full-text search, 100/100 candidates | 234.473 ms | 0.972702 | 8.41 GB |
-
-We also ran a dense-only DBPedia 1M comparison on the same Qdrant corpus shape:
-1,000 deterministic self-queries, 3,072-dimensional
-`text-embedding-3-large` vectors, one warmup pass, three measured passes, and
-`final_k=10`. This run did not pass a text query to TurboHybrid and did not use
-BM25, PostgreSQL full-text search, or SQL RRF. The pgvector baseline used a
-default `halfvec(3072)` HNSW expression index with `hnsw.ef_search` left at the
-PostgreSQL session default.
-
-| Dense-only method | Settings | p95 | self-qrel nDCG@10 | index size |
-| --- | --- | ---: | ---: | ---: |
-| pgturbohybrid dense-only | default TurboHybrid index, `vector_query` only, LIMIT-inferred `final_k` | 4.234 ms | 0.935 | 2.21 GiB |
-| pgvector dense-only | default pgvector HNSW over `embedding::halfvec(3072)` | 178.749 ms | 0.969 | 7.63 GiB |
-
-Top-10 overlap between the dense-only result sets was `0.870600` on this run.
-The quality numbers here are self-qrel checks, not external relevance labels:
-they mostly confirm whether the source row was recovered for its own embedding.
-
-The DBPedia run is a systems comparison, not an external relevance benchmark:
-the query embedding and positive document come from the same Qdrant row. It is
-useful for latency, build, and index-size behavior at 1M rows, but it should not
-be read as a universal quality result.
+There is also a larger Qdrant DBPedia OpenAI3-large 1M developer benchmark for
+systems testing with the dataset's existing 3,072-dimensional embeddings. It is
+useful for build time, memory, index-size, and retrieval-path experiments, but
+the default self-query setup is not an external relevance benchmark. We keep
+those results out of the README until the quality story is backed by a
+reproducible, externally labeled run.
 
 These are specific benchmark snapshots, not global pgvector comparisons.
 Results vary by dataset, hardware, PostgreSQL settings, and query workload.

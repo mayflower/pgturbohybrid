@@ -32,6 +32,8 @@ OBJS = \
 
 HEADERS =
 
+$(OBJS): src/*.h
+
 REGRESS = extension pgturbohybrid pgturbohybrid_query security
 REGRESS_OPTS = --inputdir=test
 
