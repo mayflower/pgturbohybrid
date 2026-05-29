@@ -37,6 +37,7 @@
 #include "pgturbohybrid.h"
 #include "pgturbohybrid_query.h"
 #include "pgturbohybrid_quant.h"
+#include "pgturbohybrid_quant_score.h"
 #include "pgturbohybrid_am.h"
 #include "pgturbohybrid_bm25.h"
 
@@ -1560,25 +1561,113 @@ PgturbohybridNormalize(double value, double minValue, double maxValue)
 	return (value - minValue) / (maxValue - minValue);
 }
 
+/*
+ * Give BM25-only candidates a dense score so fusion can rank them on both
+ * signals.
+ *
+ * A candidate that matched the lexical (BM25) branch but fell outside the dense
+ * graph candidate set has no dense rank, so by default it contributes nothing to
+ * the dense side of fusion. When the active profile enables exact rescoring for
+ * BM25-only candidates, score each such candidate's stored quantized code
+ * against the already-prepared query (so->tq) and slot it into the dense ranking
+ * by its distance. This recovers true dense neighbours that the approximate
+ * graph search missed (an ANN recall miss) and stops BM25-only candidates from
+ * aborting quality/debug-profile scans.
+ *
+ * The distance comes from the same quantized scorer that produced the dense
+ * candidates' distances, so the values are on one comparable scale for
+ * exact-free indexes (the common case). The dense rank is assigned by insertion
+ * against the original dense candidate distances, leaving existing dense ranks
+ * untouched.
+ */
 static void
-PgturbohybridCheckBm25OnlyExactRescore(PgturbohybridScanState *state,
+PgturbohybridApplyBm25OnlyExactRescore(IndexScanDesc scan,
+								  PgturbohybridScanState *state,
 								  PgturbohybridResult *results, int count)
 {
+	PgturbohybridGraphScanOpaque so = (PgturbohybridGraphScanOpaque) scan->opaque;
+	PgturbohybridGraphMetaPageData meta;
+	PgturbohybridGraphScanStorage storage;
+	double	   *denseDistances;
+	int			denseDistanceCount = 0;
+	bool		haveBm25Only = false;
+
 	if (!pgturbohybrid_enable_exact_rescore_for_bm25_only)
 		return;
 	if ((state->query->flags & PGTURBOHYBRID_QUERY_FLAG_HAS_VECTOR) == 0)
+		return;
+	if (so == NULL || !so->tq.enabled)
 		return;
 
 	for (int i = 0; i < count; i++)
 	{
 		if (results[i].hasBm25 && !results[i].hasDense)
-			ereport(ERROR,
-					(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
-					 errmsg("exact rescoring for BM25-only pgturbohybrid candidates is not implemented yet"),
-					 errdetail("Candidate node %u matched BM25 but was outside the dense candidate set.",
-							   results[i].nodeId),
-					 errhint("Increase dense_k so candidates are scored by the dense branch.")));
+		{
+			haveBm25Only = true;
+			break;
+		}
 	}
+	if (!haveBm25Only)
+		return;
+
+	if (!PgturbohybridGraphReadMeta(scan->indexRelation, &meta) ||
+		meta.tqNodeCount == 0 ||
+		!BlockNumberIsValid(meta.tqCodeStartBlkno))
+		return;
+
+	/* Snapshot the dense candidates' distances for insertion ranking. */
+	denseDistances = palloc(sizeof(double) * Max(count, 1));
+	for (int i = 0; i < count; i++)
+	{
+		if (results[i].hasDense)
+			denseDistances[denseDistanceCount++] = results[i].denseDistance;
+	}
+
+	LockPage(scan->indexRelation, PGTURBOHYBRID_GRAPH_SCAN_LOCK, ShareLock);
+	PG_TRY();
+	{
+		PgturbohybridGraphInitScanStorage(scan->indexRelation, &meta, &storage);
+
+		for (int i = 0; i < count; i++)
+		{
+			PgturbohybridGraphScanNode *node;
+			double		distance;
+			int32		denseRank = 1;
+
+			if (!(results[i].hasBm25 && !results[i].hasDense))
+				continue;
+			if (results[i].nodeId >= meta.tqNodeCount)
+				continue;
+			if (!PgturbohybridGraphLoadCodePage(scan->indexRelation, so, &meta,
+												&storage, results[i].nodeId))
+				continue;
+
+			node = &storage.nodes[results[i].nodeId];
+			if (node->code == NULL)
+				continue;
+
+			distance = PgturbohybridGraphScoreNode(so, node);
+
+			for (int j = 0; j < denseDistanceCount; j++)
+			{
+				if (denseDistances[j] < distance)
+					denseRank++;
+			}
+
+			results[i].denseDistance = distance;
+			results[i].denseSimilarity = -distance;
+			results[i].denseRank = denseRank;
+			results[i].hasDense = true;
+			results[i].exactScored = false;
+		}
+	}
+	PG_CATCH();
+	{
+		UnlockPage(scan->indexRelation, PGTURBOHYBRID_GRAPH_SCAN_LOCK, ShareLock);
+		PG_RE_THROW();
+	}
+	PG_END_TRY();
+	UnlockPage(scan->indexRelation, PGTURBOHYBRID_GRAPH_SCAN_LOCK, ShareLock);
 }
 
 static void
@@ -1767,7 +1856,7 @@ PgturbohybridCollectScanResults(IndexScanDesc scan, PgturbohybridScanState *stat
 			merged[mergedCount++] = item;
 		}
 
-		PgturbohybridCheckBm25OnlyExactRescore(state, merged, mergedCount);
+		PgturbohybridApplyBm25OnlyExactRescore(scan, state, merged, mergedCount);
 		PgturbohybridScoreResults(state, merged, mergedCount);
 
 		finalCount = PgturbohybridFinalTarget(scanQuery, mergedCount,
@@ -1833,7 +1922,7 @@ PgturbohybridCollectScanResults(IndexScanDesc scan, PgturbohybridScanState *stat
 			merged[mergedCount++] = item;
 		}
 
-		PgturbohybridCheckBm25OnlyExactRescore(state, merged, mergedCount);
+		PgturbohybridApplyBm25OnlyExactRescore(scan, state, merged, mergedCount);
 		PgturbohybridScoreResults(state, merged, mergedCount);
 		if (mergedCount > 1)
 			qsort(merged, mergedCount, sizeof(PgturbohybridResult),
