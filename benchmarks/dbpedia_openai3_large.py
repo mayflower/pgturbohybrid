@@ -32,6 +32,7 @@ DENSE_ONLY_METHODS = {
     "pgturbohybrid_dense_exact_storage_on",
     "pgturbohybrid_dense_exact_build",
     "pgturbohybrid_dense_backbone",
+    "pgturbohybrid_dense_adaptive_auto_1_25",
     "pgturbohybrid_dense_adaptive_auto_1_5",
     "pgturbohybrid_dense_adaptive_auto_2_0",
     "pgturbohybrid_dense_adaptive_on_2_0",
@@ -51,6 +52,7 @@ TURBOHYBRID_DEFAULT_INDEX_METHODS = {
     "pgturbohybrid",
     "pgturbohybrid_dense_only",
     "pgturbohybrid_dense_adaptive_off",
+    "pgturbohybrid_dense_adaptive_auto_1_25",
     "pgturbohybrid_dense_adaptive_auto_1_5",
     "pgturbohybrid_dense_adaptive_auto_2_0",
     "pgturbohybrid_dense_adaptive_on_2_0",
@@ -904,6 +906,12 @@ LIMIT {final_k}
 
 
 def method_runtime_settings(method: str) -> dict[str, str]:
+    if method == "pgturbohybrid_dense_adaptive_auto_1_25":
+        return {
+            "turbohybrid.dense_adaptive_widening": "auto",
+            "turbohybrid.dense_adaptive_widening_multiplier": "1.25",
+            "turbohybrid.dense_local_expansion": "off",
+        }
     if method == "pgturbohybrid_dense_adaptive_auto_1_5":
         return {
             "turbohybrid.dense_adaptive_widening": "auto",

@@ -19,6 +19,12 @@
       "description": "Standalone pgturbohybrid graph plus in-index BM25 with turbohybrid_query fusion."
     },
     {
+      "name": "pgturbohybrid_dense_only",
+      "layer": "systems",
+      "kind": "postgres_index_am",
+      "description": "Dense-only pgturbohybrid default fast path using the compact 4-bit index, exact_storage off, and adaptive query-time widening off."
+    },
+    {
       "name": "pgturbohybrid_dense_exact_build",
       "layer": "systems",
       "kind": "postgres_index_am",
@@ -28,7 +34,7 @@
       "name": "pgturbohybrid_dense_adaptive_off",
       "layer": "systems",
       "kind": "postgres_index_am",
-      "description": "Dense-only pgturbohybrid default index with adaptive query-time widening explicitly disabled for baseline attribution."
+      "description": "Dense-only pgturbohybrid default index with adaptive query-time widening explicitly disabled; this should match pgturbohybrid_dense_only unless the package default changes deliberately."
     },
     {
       "name": "pgturbohybrid_dense_backbone",
@@ -41,6 +47,12 @@
       "layer": "systems",
       "kind": "postgres_index_am",
       "description": "Dense-only pgturbohybrid upper-bound reference with exact vector storage enabled for final rescoring."
+    },
+    {
+      "name": "pgturbohybrid_dense_adaptive_auto_1_25",
+      "layer": "systems",
+      "kind": "postgres_index_am",
+      "description": "Dense-only pgturbohybrid experimental variant with adaptive query-time widening in auto mode and a conservative 1.25x second-pass target cap."
     },
     {
       "name": "pgturbohybrid_dense_adaptive_auto_1_5",

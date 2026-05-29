@@ -84,8 +84,8 @@ ANALYZE documents;
 ## 6. Create Default TurboHybrid Index
 
 Create the index without manual tuning options. The default fast path uses the
-`latency` profile, 4-bit quantization, exact storage off, and SQL `LIMIT` as the
-final result target when possible.
+`latency` profile, 4-bit quantization, exact storage off, adaptive dense
+widening off, and SQL `LIMIT` as the final result target when possible.
 
 ```sql
 CREATE INDEX documents_turbohybrid_idx ON documents

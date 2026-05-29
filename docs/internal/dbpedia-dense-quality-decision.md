@@ -28,7 +28,8 @@ Keep:
 
 - vector-only scan option handling for `turbohybrid_query(...)`
 - benchmark harness improvements
-- adaptive latency widening in `auto` mode as the dense default
+- adaptive latency widening as an explicit experimental GUC and benchmark
+  method, not as the dense default
 - `turbohybrid.dense_build_exact_distances` as an experimental quality mode
 - exact-build provenance in `turbohybrid_index_stats(...)`
 - failed-method recording in benchmark artifacts
@@ -59,9 +60,9 @@ Do not publish:
 
 | Variant | Rows | Queries | nDCG@10 | Source top10 | p50 ms | p95 ms | p99 ms | Index bytes | Build ms | Decision |
 |---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---|
-| current dense default, adaptive auto | 1,000,000 | 1,000 | 0.970 | 0.970 | 1.965 | 5.491 | 8.624 | 2,377,760,768 | reused | keep as default |
-| explicit adaptive off baseline | 1,000,000 | 1,000 | 0.947 | 0.947 | 1.742 | 15.665 | 23.508 | 2,377,760,768 | reused | keep as attribution baseline |
-| bounded routing full, adaptive off before default change | 1,000,000 | 1,000 | 0.947 | 0.947 | 7.979 | 21.972 | 28.564 | 2,377,760,768 | 764,249 | superseded by adaptive auto |
+| historical adaptive auto run | 1,000,000 | 1,000 | 0.970 | 0.970 | 1.965 | 5.491 | 8.624 | 2,377,760,768 | reused | keep as opt-in diagnostic |
+| current default fast path, adaptive off | 1,000,000 | 1,000 | 0.947 | 0.947 | 1.742 | 15.665 | 23.508 | 2,377,760,768 | reused | keep as default guardrail |
+| bounded routing full, adaptive off before scan rerun | 1,000,000 | 1,000 | 0.947 | 0.947 | 7.979 | 21.972 | 28.564 | 2,377,760,768 | 764,249 | stale tail-latency artifact |
 | current default compact path, before bounded routing entries | 1,000,000 | 1,000 | 1.000 | 1.000 | 15.471 | 567.737 | 1751.226 | 2,368,987,136 | reused | stale tail-latency artifact |
 | current default compact path, bounded routing smoke | 2,000 | 20 | 1.000 | 1.000 | 0.985 | 2.234 | 4.528 | 6,455,296 | 839 | kept as routing smoke |
 | broad prompt-pack smoke, default compact path | 2,000 | 20 | 1.000 | 1.000 | 1.054 | 3.019 | 3.627 | 6,455,296 | 597 | kept as prompt-pack smoke |
@@ -80,20 +81,22 @@ Do not publish:
 | residual rerank 64 bytes | 1,000,000 | 1,000 | 0.951 | 0.951 | 25.328 | 158.917 | 918.029 | 2,778,578,944 | 1,492,007 | reject as default |
 | exact storage on | 1,000,000 | 1,000 | failed | failed | failed | failed | failed | failed | failed | not feasible on this host |
 
-The current default artifact is
+The historical adaptive-auto artifact is
 `benchmarks/results/dbpedia-current-default-auto-final.json`. It reuses the
 fresh bounded-routing 1M compact TurboHybrid index and compares the explicit
-adaptive-off baseline with the package default. The package default now uses
-`turbohybrid.dense_adaptive_widening=auto`; it widened 37 of 1,000 queries,
-improved self-query nDCG@10 and recall@10 from `0.947000` to `0.970000`, and
-kept the index at `2,377,760,768` bytes with `exact_storage=false`.
+adaptive-off baseline with adaptive `auto`. Adaptive `auto` widened 37 of 1,000
+queries, improved self-query nDCG@10 and recall@10 from `0.947000` to
+`0.970000`, and kept the index at `2,377,760,768` bytes with
+`exact_storage=false`. This was useful diagnostic evidence, but it is not the
+release-facing default because the default latency profile should remain
+simple, compact, and predictable across workloads.
 
 The fresh bounded-routing index build artifact is
 `benchmarks/results/dbpedia-current-routing-full.json`. It records
 `routing_entry_count=15`, `routing_entry_bytes=60`, `exact_storage=false`,
 `quantization_bits=4`, `graph_m=16`, `graph_ef_construction=128`,
 `graph_ef_search=64`, p50 `7.979 ms`, p95 `21.972 ms`, p99 `28.564 ms`, and
-build time `764,248.682 ms` before the adaptive-auto default change.
+build time `764,248.682 ms` before the adaptive-auto diagnostic rerun.
 
 The older no-storage full artifact is
 `benchmarks/results/dbpedia-openai3-large-current-no-storage-full.json`. It
@@ -181,9 +184,10 @@ the default:
 
 That run uses the same 1,000,000-row compact bounded-routing index for both
 methods. `pgturbohybrid_dense_adaptive_off` recovered 947 of 1,000 sources in
-the top 10. `pgturbohybrid_dense_only`, now following the package default,
-recovered 970 of 1,000 sources, widened 37 queries, and kept
-`entry_sidecar_count=0`, `residual_rerank_bytes=0`, and `exact_storage=false`.
+the top 10. The adaptive-auto variant recovered 970 of 1,000 sources, widened
+37 queries, and kept `entry_sidecar_count=0`, `residual_rerank_bytes=0`, and
+`exact_storage=false`. In current benchmark semantics, `pgturbohybrid_dense_only`
+means the package default fast path with adaptive widening off.
 
 Latest smoke provenance after the default-drift audit:
 
@@ -293,11 +297,25 @@ so it stays off by default.
 
 Decision:
 
-- make adaptive widening `auto` the default
+- keep adaptive widening off by default
 - keep local expansion off by default
 - keep scan stats and benchmark variants
-- revisit the adaptive trigger only if another workload shows p95 regression or
-  poor quality response
+- revisit adaptive widening only with broader workload evidence and an explicit
+  release decision
+
+## Why Adaptive Auto Is Not The Latency Default
+
+The adaptive-auto DBPedia run is useful evidence that a bounded second graph
+pass can recover missed dense neighbors on this self-query diagnostic. It is not
+enough to make `auto` the release default. The benchmark is unlabeled
+self-recovery, not human relevance, and it exercises a dense-only path rather
+than the normal hybrid retrieval path.
+
+The public latency default should be easy to reason about: one graph traversal,
+compact 4-bit storage, no exact vectors, no sidecars, no residual rerank, no
+local expansion, and no adaptive second pass. Adaptive widening stays available
+as an explicit GUC and benchmark method until p95/p99 acceptance holds across
+broader workloads.
 
 ## Level-0 Backbone
 
@@ -475,7 +493,7 @@ Relevant generated artifacts from this investigation:
 |---|---|---|---|
 | 01 baseline failure attribution | implemented | per-query JSONL includes query/source IDs, source rank, top-10 IDs, probe rank, latency, and scan stats | the probe is SQL-visible top-k based, not a full internal reached/dropped trace |
 | 02 exact build distances | implemented as explicit GUC | `turbohybrid.dense_build_exact_distances`, metapage provenance, regression test, broad prompt-pack smoke, earlier full DBPedia artifact, 2h31m full provenance timeout evidence | repeat full 1M provenance run only after build-time improvement or on a quieter host |
-| 03 adaptive widening | implemented as explicit GUCs, default auto | scan stats, harness variants, regression GUC checks, broad prompt-pack smoke, full 1M same-index default-vs-off run | broader workload evidence before claiming general quality |
+| 03 adaptive widening | implemented as explicit GUCs, default off | scan stats, harness variants, regression GUC checks, broad prompt-pack smoke, full 1M same-index default-vs-auto run | broader workload evidence before enabling by default |
 | 04 local expansion | implemented as explicit GUCs, default off | scan stats, harness variants, regression stats checks, broad prompt-pack smoke, full 1M current-code sweep | broader workload evidence before enabling by default |
 | 05 entry sidecar | implemented as explicit reloptions, default off | metapage stats, insert preservation, regression test, broad prompt-pack smoke, sidecar storage-format decision | broader workload evidence before documenting as a supported public format |
 | 06 residual rerank sidecar | implemented as explicit reloptions, default off | sketch storage stats, scan stats, regression test, broad prompt-pack smoke, full residual artifacts, sidecar storage-format decision | broader workload evidence before documenting as a supported public format |

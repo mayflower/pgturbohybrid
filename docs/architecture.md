@@ -129,16 +129,16 @@ The current alpha exposes these user-facing GUCs:
 - `turbohybrid.max_union_candidates`
 - `turbohybrid.simd`
 
-The DBPedia dense-quality work also exposes experimental diagnostics. Adaptive
-widening defaults to `auto` after the DBPedia 1M self-query run showed a
-quality gain without a p95 regression. The other diagnostics remain off by
-default and should be used only for controlled benchmark runs:
+The DBPedia dense-quality work also exposes experimental diagnostics. These
+diagnostics remain off by default in the public `latency` profile so the package
+default stays compact and predictable. Enable them explicitly for controlled
+benchmark runs:
 
 - `turbohybrid.dense_build_exact_distances`: use exact vector distances while
   building dense graph edges, while still allowing `exact_storage = off`.
 - `turbohybrid.dense_adaptive_widening`: `off`, `auto`, or `on`; defaults to
-  `auto` and controls one bounded second graph-search pass for ambiguous
-  dense-only scans.
+  `off` and controls one bounded second graph-search pass for ambiguous
+  dense-only scans when explicitly enabled.
 - `turbohybrid.dense_adaptive_widening_multiplier`
 - `turbohybrid.dense_adaptive_widening_max_multiplier`
 - `turbohybrid.dense_adaptive_min_gap`

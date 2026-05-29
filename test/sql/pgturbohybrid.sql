@@ -16,9 +16,19 @@ SET enable_seqscan = off;
 
 DO $$
 BEGIN
-	IF current_setting('turbohybrid.dense_adaptive_widening') <> 'auto' THEN
+	IF current_setting('turbohybrid.profile') <> 'latency' THEN
+		RAISE EXCEPTION 'unexpected profile default: %',
+			current_setting('turbohybrid.profile');
+	END IF;
+
+	IF current_setting('turbohybrid.dense_adaptive_widening') <> 'off' THEN
 		RAISE EXCEPTION 'unexpected dense_adaptive_widening default: %',
 			current_setting('turbohybrid.dense_adaptive_widening');
+	END IF;
+
+	IF current_setting('turbohybrid.dense_local_expansion') <> 'off' THEN
+		RAISE EXCEPTION 'unexpected dense_local_expansion default: %',
+			current_setting('turbohybrid.dense_local_expansion');
 	END IF;
 END
 $$;
@@ -74,9 +84,44 @@ BEGIN
 		stats->>'routing' <> 'auto' OR
 		stats->>'storage_kind' <> 'pgturbohybrid_graph_native' OR
 		(stats->>'quantization_bits')::int <> 4 OR
+		(stats->>'entry_sidecar_count')::int <> 0 OR
+		(stats->>'residual_rerank_bytes')::int <> 0 OR
 		(stats->>'dense_build_exact_distances')::boolean IS DISTINCT FROM false OR
 		(stats->>'exact_storage')::boolean IS DISTINCT FROM false THEN
 		RAISE EXCEPTION 'unexpected default index stats: %', stats;
+	END IF;
+END
+$$;
+
+DO $$
+DECLARE
+	stats jsonb;
+	top_id int;
+BEGIN
+	SELECT id INTO top_id
+	FROM tqh_default_docs
+	ORDER BY embedding <~> turbohybrid_query(
+		vector_query => '[1,0,0]'::vector,
+		dense_k => 3,
+		final_k => 1
+	)
+	LIMIT 1;
+
+	IF top_id <> 1 THEN
+		RAISE EXCEPTION 'unexpected default dense-only result: %', top_id;
+	END IF;
+
+	stats := turbohybrid_last_scan_stats();
+
+	IF stats->>'dense_adaptive_widening_mode' <> 'off' OR
+		(stats->>'dense_adaptive_triggered')::boolean IS DISTINCT FROM false OR
+		stats->>'dense_local_expansion_mode' <> 'off' OR
+		(stats->>'dense_local_expansion_triggered')::boolean IS DISTINCT FROM false OR
+		(stats->>'dense_adaptive_initial_result_target')::int <>
+			(stats->>'dense_adaptive_final_result_target')::int OR
+		(stats->>'dense_adaptive_initial_search_ef')::int <>
+			(stats->>'dense_adaptive_final_search_ef')::int THEN
+		RAISE EXCEPTION 'unexpected default dense-only scan stats: %', stats;
 	END IF;
 END
 $$;
@@ -1080,7 +1125,17 @@ BEGIN
 
 	PERFORM set_config('turbohybrid.dense_adaptive_widening', 'auto', true);
 	IF current_setting('turbohybrid.dense_adaptive_widening') <> 'auto' THEN
-		RAISE EXCEPTION 'dense_adaptive_widening GUC did not stick';
+		RAISE EXCEPTION 'dense_adaptive_widening auto GUC did not stick';
+	END IF;
+
+	PERFORM set_config('turbohybrid.dense_adaptive_widening', 'on', true);
+	IF current_setting('turbohybrid.dense_adaptive_widening') <> 'on' THEN
+		RAISE EXCEPTION 'dense_adaptive_widening on GUC did not stick';
+	END IF;
+
+	PERFORM set_config('turbohybrid.dense_adaptive_widening', 'off', true);
+	IF current_setting('turbohybrid.dense_adaptive_widening') <> 'off' THEN
+		RAISE EXCEPTION 'dense_adaptive_widening off GUC did not stick';
 	END IF;
 
 	PERFORM set_config('turbohybrid.dense_adaptive_widening_multiplier', '1.5', true);
@@ -1100,7 +1155,17 @@ BEGIN
 
 	PERFORM set_config('turbohybrid.dense_local_expansion', 'auto', true);
 	IF current_setting('turbohybrid.dense_local_expansion') <> 'auto' THEN
-		RAISE EXCEPTION 'dense_local_expansion GUC did not stick';
+		RAISE EXCEPTION 'dense_local_expansion auto GUC did not stick';
+	END IF;
+
+	PERFORM set_config('turbohybrid.dense_local_expansion', 'on', true);
+	IF current_setting('turbohybrid.dense_local_expansion') <> 'on' THEN
+		RAISE EXCEPTION 'dense_local_expansion on GUC did not stick';
+	END IF;
+
+	PERFORM set_config('turbohybrid.dense_local_expansion', 'off', true);
+	IF current_setting('turbohybrid.dense_local_expansion') <> 'off' THEN
+		RAISE EXCEPTION 'dense_local_expansion off GUC did not stick';
 	END IF;
 
 	PERFORM set_config('turbohybrid.dense_local_expansion_topn', '8', true);
@@ -1111,6 +1176,35 @@ BEGIN
 	PERFORM set_config('turbohybrid.dense_local_expansion_max_neighbors', '128', true);
 	IF current_setting('turbohybrid.dense_local_expansion_max_neighbors') <> '128' THEN
 		RAISE EXCEPTION 'dense_local_expansion_max_neighbors GUC did not stick';
+	END IF;
+END
+$$;
+
+DO $$
+DECLARE
+	stats jsonb;
+	top_id int;
+BEGIN
+	SET LOCAL turbohybrid.dense_adaptive_widening = on;
+	SET LOCAL turbohybrid.dense_local_expansion = off;
+
+	SELECT id INTO top_id
+	FROM tqh_docs
+	ORDER BY embedding <~> turbohybrid_query(
+		vector_query => '[1,0,0]'::vector,
+		dense_k => 3,
+		final_k => 1
+	)
+	LIMIT 1;
+
+	IF top_id <> 1 THEN
+		RAISE EXCEPTION 'unexpected explicit adaptive dense-only result: %', top_id;
+	END IF;
+
+	stats := turbohybrid_last_scan_stats();
+
+	IF stats->>'dense_adaptive_widening_mode' <> 'on' THEN
+		RAISE EXCEPTION 'expected explicit adaptive mode in scan stats: %', stats;
 	END IF;
 END
 $$;

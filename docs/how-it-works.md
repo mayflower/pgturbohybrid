@@ -102,6 +102,8 @@ The default fast path is designed to be small and predictable:
 - `turbohybrid.profile = 'latency'`
 - 4-bit dense-vector quantization
 - exact vector storage off in the index
+- adaptive dense widening off
+- local dense expansion off
 - 100 dense candidates
 - 100 BM25/text candidates
 - RRF constant 60
