@@ -16,6 +16,9 @@
 #define PGTURBOHYBRID_GRAPH_TQ_WEIGHTED			0x0002	/* metapage: code tuples carry per-vector ec_correction */
 #define PGTURBOHYBRID_GRAPH_TQ_RENORM				0x0004	/* metapage: per-vector scale field stores renormalized l2 / centroid_norm instead of plain l2 */
 #define PGTURBOHYBRID_GRAPH_EXACT_FREE				0x0008	/* metapage: exact vector slabs are omitted */
+#define PGTURBOHYBRID_GRAPH_TQ_RESIDUAL_RERANK	0x0010	/* metapage: code tuples carry residual rerank sketch bytes */
+#define PGTURBOHYBRID_GRAPH_TQ_EXACT_BUILD		0x0020	/* metapage: graph edges were built using exact distances */
+#define PGTURBOHYBRID_GRAPH_TQ_BACKBONE			0x0040	/* metapage: level-0 adjacent backbone edges were forced at build */
 #define PGTURBOHYBRID_GRAPH_MAX_ENTRY_POINTS		16
 #define PGTURBOHYBRID_GRAPH_ENTRY_SAMPLE_COUNT		608
 #define PGTURBOHYBRID_GRAPH_MAX_NEIGHBORS			(PGTURBOHYBRID_GRAPH_MAX_M * 2)
@@ -121,6 +124,7 @@ typedef struct PgturbohybridGraphBuildNode
 	ItemPointerData heaptid;
 	Vector	   *vector;
 	uint8	   *code;
+	uint8	   *residualSketch;
 	int32	   *payloads;
 	uint16		payloadMask;
 	int			level;
@@ -158,6 +162,11 @@ typedef struct PgturbohybridQuantBuildState
 	bool		tqQuantileFit;
 	bool		tqRenorm;
 	bool		tqExactStorage;
+	bool		entrySidecar;
+	int			entrySidecarRepresentatives;
+	bool		graphBackbone;
+	bool		residualRerank;
+	int			residualRerankBytes;
 	bool		buildExactDistances;	/* short-circuit quantized fast paths during build */
 	bool		buildCodeOnly;	/* avoid retaining raw vectors during exact-free builds */
 	bool		buildFitPass;	/* table scan is only collecting correction statistics */
@@ -166,6 +175,12 @@ typedef struct PgturbohybridQuantBuildState
 	int			scoreMode;
 	int			maxLevel;
 	uint32		entryNodeId;
+	uint32		routingEntryCount;
+	uint16		routingEntryBytes;
+	uint32		routingEntryNodeIds[PGTURBOHYBRID_GRAPH_MAX_ROUTING_ENTRIES];
+	uint32		entrySidecarCount;
+	uint16		entrySidecarBytes;
+	uint32		entrySidecarNodeIds[PGTURBOHYBRID_GRAPH_MAX_ENTRY_SIDECAR_REPRESENTATIVES];
 	int			payloadCount;
 	Size		payloadBytes;
 	double		reltuples;
@@ -247,6 +262,7 @@ typedef struct PgturbohybridGraphScanNode
 {
 	ItemPointerData heaptid;
 	uint8	   *code;
+	uint8	   *residualSketch;
 	int32	   *payloads;
 	uint16		payloadMask;
 	char	   *exactVector;
@@ -272,6 +288,7 @@ typedef struct PgturbohybridGraphScanStorage
 {
 	PgturbohybridGraphScanNode *nodes;
 	uint8	   *codeArena;
+	uint8	   *residualArena;
 	uint8	   *payloadArena;
 	char	   *exactArena;
 	Size		exactBytes;
@@ -308,6 +325,7 @@ typedef struct PgturbohybridGraphNativeCache
 	uint16		tqBits;
 	uint16		tqPayloadCount;
 	uint16		tqPayloadBytes;
+	uint16		tqResidualRerankBytes;
 	BlockNumber tqCodeStartBlkno;
 	BlockNumber tqAdjStartBlkno;
 	BlockNumber tqExactStartBlkno;
@@ -396,18 +414,78 @@ PgturbohybridGraphTuplePayloads(PgturbohybridGraphCodeTuple tuple, bool tqWeight
 }
 
 static inline uint8 *
-PgturbohybridGraphTupleCode(PgturbohybridGraphCodeTuple tuple, Size payloadBytes, bool tqWeighted)
+PgturbohybridGraphTupleResidual(PgturbohybridGraphCodeTuple tuple, Size payloadBytes,
+								Size residualBytes, bool tqWeighted)
 {
 	return tuple->data + PgturbohybridGraphTupleExtraHeaderBytes(tqWeighted) + payloadBytes;
 }
 
 static inline Size
-PgturbohybridGraphCodeTupleSize(int dimensions, int payloadCount, int bits, bool tqWeighted)
+PgturbohybridGraphTupleResidualBytes(Size residualBytes)
+{
+	return MAXALIGN(residualBytes);
+}
+
+static inline uint8 *
+PgturbohybridGraphTupleCode(PgturbohybridGraphCodeTuple tuple, Size payloadBytes,
+							Size residualBytes, bool tqWeighted)
+{
+	return PgturbohybridGraphTupleResidual(tuple, payloadBytes, residualBytes,
+										   tqWeighted) +
+		PgturbohybridGraphTupleResidualBytes(residualBytes);
+}
+
+static inline Size
+PgturbohybridGraphCodeTupleSize(int dimensions, int payloadCount, int bits,
+								bool tqWeighted, Size residualBytes)
 {
 	return MAXALIGN(offsetof(PgturbohybridGraphCodeTupleData, data) +
 					PgturbohybridGraphTupleExtraHeaderBytes(tqWeighted) +
 					PgturbohybridGraphPayloadBytes(payloadCount) +
+					PgturbohybridGraphTupleResidualBytes(residualBytes) +
 					PgturbohybridGraphCodeBytesForBits(dimensions, bits));
+}
+
+static inline uint32
+PgturbohybridGraphResidualMix32(uint32 x)
+{
+	x ^= x >> 16;
+	x *= UINT32_C(0x7feb352d);
+	x ^= x >> 15;
+	x *= UINT32_C(0x846ca68b);
+	x ^= x >> 16;
+	return x;
+}
+
+static inline void
+PgturbohybridGraphBuildResidualSketch(const float *values, int dimensions,
+									  uint8 *out, int bytes)
+{
+	if (values == NULL || out == NULL || dimensions <= 0 || bytes <= 0)
+		return;
+
+	for (int byte = 0; byte < bytes; byte++)
+	{
+		double		acc = 0.0;
+
+		for (int lane = 0; lane < 16; lane++)
+		{
+			uint32		hash = PgturbohybridGraphResidualMix32((uint32) byte * 0x9e3779b1U ^
+															  (uint32) lane * 0x85ebca6bU ^
+															  0x51ed270bU);
+			int			dim = (int) (hash % (uint32) dimensions);
+			double		sign = (hash & 0x80000000U) ? 1.0 : -1.0;
+
+			acc += sign * (double) values[dim];
+		}
+
+		acc *= 24.0;
+		if (acc > 127.0)
+			acc = 127.0;
+		else if (acc < -127.0)
+			acc = -127.0;
+		out[byte] = (uint8) ((int) lrint(acc) + 128);
+	}
 }
 
 static inline Size
@@ -542,8 +620,9 @@ void		PgturbohybridGraphAppendInsertCacheNode(PgturbohybridGraphNativeCache *cac
 										 PgturbohybridGraphMetaPageData *meta,
 										 uint32 nodeId, ItemPointer heapTid,
 										 int nodeLevel, Vector *vector,
-										 uint8 *code, float scale, float norm,
-										 float codeNorm, float ecCorrection,
+										 uint8 *code, uint8 *residualSketch,
+										 float scale, float norm, float codeNorm,
+										 float ecCorrection,
 										 int32 *payloads, uint16 payloadMask,
 										 BlockNumber exactBlkno,
 										 OffsetNumber exactOffno,
@@ -566,6 +645,9 @@ int			PgturbohybridGraphCollectDenseCandidates(IndexScanDesc scan, int targetK,
 										  MemoryContext resultCtx,
 										  TqDenseCandidateStats *stats);
 const char *PgturbohybridGraphDenseWideningReasonName(int reason);
+const char *PgturbohybridGraphDenseAdaptiveWideningModeName(int mode);
+const char *PgturbohybridGraphDenseAdaptiveWideningReasonName(int reason);
+const char *PgturbohybridGraphDenseLocalExpansionModeName(int mode);
 const char *PgturbohybridGraphDenseBudgetPolicyNameExternal(int policy);
 const char *PgturbohybridGraphRescoreBandPolicyNameExternal(int policy);
 

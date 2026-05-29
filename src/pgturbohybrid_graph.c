@@ -157,6 +157,13 @@ int			pgturbohybrid_dense_max_candidate_multiplier = 4;
 double		pgturbohybrid_dense_latency_multiplier = 1.5;
 int			pgturbohybrid_dense_max_rescore_multiplier = 2;
 int			pgturbohybrid_dense_rescore_band_policy = PGTURBOHYBRID_RESCORE_BAND_POLICY_AUTO;
+int			pgturbohybrid_dense_adaptive_widening = PGTURBOHYBRID_DENSE_ADAPTIVE_WIDENING_AUTO;
+double		pgturbohybrid_dense_adaptive_widening_multiplier = 2.0;
+double		pgturbohybrid_dense_adaptive_widening_max_multiplier = 4.0;
+double		pgturbohybrid_dense_adaptive_min_gap = 0.0;
+int			pgturbohybrid_dense_local_expansion = PGTURBOHYBRID_DENSE_LOCAL_EXPANSION_OFF;
+int			pgturbohybrid_dense_local_expansion_topn = 8;
+int			pgturbohybrid_dense_local_expansion_max_neighbors = 256;
 int			pgturbohybrid_graph_lock_tranche_id;
 static relopt_kind pgturbohybrid_graph_relopt_kind;
 static relopt_kind pgturbohybrid_relopt_kind;
@@ -241,11 +248,30 @@ PgturbohybridGraphInit(void)
 					  PGTURBOHYBRID_DEFAULT_GRAPH_EF_SEARCH, PGTURBOHYBRID_GRAPH_MIN_EF_SEARCH, PGTURBOHYBRID_GRAPH_MAX_EF_SEARCH, AccessExclusiveLock);
 	add_int_reloption(pgturbohybrid_relopt_kind, "graph_oversampling", "Candidate oversampling multiplier for graph scans",
 					  PGTURBOHYBRID_DEFAULT_GRAPH_OVERSAMPLING, 1, 1000, AccessExclusiveLock);
-		add_int_reloption(pgturbohybrid_relopt_kind, "quantization_bits", "pgturbohybrid code bit width",
-						  PGTURBOHYBRID_DEFAULT_INDEX_BITS, 1, PGTURBOHYBRID_DEFAULT_BITS, AccessExclusiveLock);
-		add_bool_reloption(pgturbohybrid_relopt_kind, "exact_storage",
-						   "Store exact vectors in native pgturbohybrid graph indexes for final exact rescoring. Set off for compact exact-free quantized-only storage.",
-						   PGTURBOHYBRID_DEFAULT_EXACT_STORAGE, AccessExclusiveLock);
+	add_int_reloption(pgturbohybrid_relopt_kind, "quantization_bits", "pgturbohybrid code bit width",
+					  PGTURBOHYBRID_DEFAULT_INDEX_BITS, 1, PGTURBOHYBRID_DEFAULT_BITS, AccessExclusiveLock);
+	add_bool_reloption(pgturbohybrid_relopt_kind, "exact_storage",
+					   "Store exact vectors in native pgturbohybrid graph indexes for final exact rescoring. Set off for compact exact-free quantized-only storage.",
+					   PGTURBOHYBRID_DEFAULT_EXACT_STORAGE, AccessExclusiveLock);
+	add_bool_reloption(pgturbohybrid_relopt_kind, "entry_sidecar",
+					   "Store a small build-time list of data-aware representative entry node IDs.",
+					   PGTURBOHYBRID_DEFAULT_ENTRY_SIDECAR, AccessExclusiveLock);
+	add_int_reloption(pgturbohybrid_relopt_kind, "entry_sidecar_representatives",
+					  "Maximum representative node IDs stored when entry_sidecar is enabled.",
+					  PGTURBOHYBRID_DEFAULT_ENTRY_SIDECAR_REPRESENTATIVES, 0,
+					  PGTURBOHYBRID_GRAPH_MAX_ENTRY_SIDECAR_REPRESENTATIVES,
+					  AccessExclusiveLock);
+	add_bool_reloption(pgturbohybrid_relopt_kind, "graph_backbone",
+					   "Force adjacent level-0 graph edges during experimental dense graph builds.",
+					   PGTURBOHYBRID_DEFAULT_GRAPH_BACKBONE, AccessExclusiveLock);
+	add_bool_reloption(pgturbohybrid_relopt_kind, "residual_rerank",
+					   "Store tiny per-vector sketches for experimental final-band dense reranking.",
+					   PGTURBOHYBRID_DEFAULT_RESIDUAL_RERANK, AccessExclusiveLock);
+	add_int_reloption(pgturbohybrid_relopt_kind, "residual_rerank_bytes",
+					  "Per-vector sketch bytes stored when residual_rerank is enabled.",
+					  PGTURBOHYBRID_DEFAULT_RESIDUAL_RERANK_BYTES, 0,
+					  PGTURBOHYBRID_GRAPH_MAX_RESIDUAL_RERANK_BYTES,
+					  AccessExclusiveLock);
 
 	PgturbohybridGraphControlInit();
 }
@@ -258,7 +284,7 @@ pgturbohybrid_index_stats(PG_FUNCTION_ARGS)
 	Relation	index;
 	Buffer		buf;
 	Page		page;
-	PgturbohybridGraphMetaPage metap;
+	PgturbohybridGraphMetaPageData meta;
 	PgturbohybridGraphPageOpaque opaque;
 	BlockNumber nblocks;
 	uint16		storageKind;
@@ -268,6 +294,11 @@ pgturbohybrid_index_stats(PG_FUNCTION_ARGS)
 	uint16		graphOversampling;
 	uint16		tqFlags;
 	uint16		tqBits;
+	uint16		entrySidecarCount;
+	uint16		entrySidecarBytes;
+	uint16		routingEntryCount;
+	uint16		routingEntryBytes;
+	uint16		residualRerankBytes;
 	int			routing;
 	BlockNumber tqBm25MetaStartBlkno;
 	bool		hasBm25Meta = false;
@@ -279,26 +310,23 @@ pgturbohybrid_index_stats(PG_FUNCTION_ARGS)
 	opts = (TqOptions *) index->rd_options;
 
 	nblocks = RelationGetNumberOfBlocks(index);
-	buf = ReadBuffer(index, PGTURBOHYBRID_GRAPH_METAPAGE_BLKNO);
-	LockBuffer(buf, BUFFER_LOCK_SHARE);
-	page = BufferGetPage(buf);
-	metap = PgturbohybridGraphPageGetMeta(page);
-
-	if (unlikely(metap->magicNumber != PGTURBOHYBRID_GRAPH_MAGIC_NUMBER))
+	if (!PgturbohybridGraphReadMeta(index, &meta))
 		elog(ERROR, "pgturbohybrid index is not valid");
 
-	storageKind = metap->storageKind;
-	graphM = metap->m;
-	graphEfConstruction = metap->efConstruction;
-	graphEfSearch = metap->graphEfSearch;
-	graphOversampling = metap->graphOversampling;
-	tqFlags = metap->tqFlags;
-	tqBits = metap->tqBits != 0 ? metap->tqBits : PGTURBOHYBRID_DEFAULT_BITS;
+	storageKind = meta.storageKind;
+	graphM = meta.m;
+	graphEfConstruction = meta.efConstruction;
+	graphEfSearch = meta.graphEfSearch;
+	graphOversampling = meta.graphOversampling;
+	tqFlags = meta.tqFlags;
+	tqBits = meta.tqBits != 0 ? meta.tqBits : PGTURBOHYBRID_DEFAULT_BITS;
+	entrySidecarCount = meta.tqEntrySidecarCount;
+	entrySidecarBytes = meta.tqEntrySidecarBytes;
+	routingEntryCount = meta.tqRoutingEntryCount;
+	routingEntryBytes = meta.tqRoutingEntryBytes;
+	residualRerankBytes = meta.tqResidualRerankBytes;
 	routing = opts != NULL ? opts->routing : PGTURBOHYBRID_ROUTING_AUTO;
-	tqBm25MetaStartBlkno = metap->tqBm25MetaStartBlkno > PGTURBOHYBRID_GRAPH_METAPAGE_BLKNO ?
-		metap->tqBm25MetaStartBlkno : InvalidBlockNumber;
-
-	UnlockReleaseBuffer(buf);
+	tqBm25MetaStartBlkno = meta.tqBm25MetaStartBlkno;
 
 	if (BlockNumberIsValid(tqBm25MetaStartBlkno))
 	{
@@ -376,6 +404,22 @@ pgturbohybrid_index_stats(PG_FUNCTION_ARGS)
 	PgturbohybridIndexStatsJsonbAddUInt32(&jsonState, "quantization_bits", tqBits);
 	PgturbohybridIndexStatsJsonbAddBool(&jsonState, "exact_storage",
 										(tqFlags & PGTURBOHYBRID_GRAPH_EXACT_FREE) == 0);
+	PgturbohybridIndexStatsJsonbAddBool(&jsonState, "dense_build_exact_distances",
+										(tqFlags & PGTURBOHYBRID_GRAPH_TQ_EXACT_BUILD) != 0);
+	PgturbohybridIndexStatsJsonbAddBool(&jsonState, "graph_backbone",
+										(tqFlags & PGTURBOHYBRID_GRAPH_TQ_BACKBONE) != 0);
+	PgturbohybridIndexStatsJsonbAddUInt32(&jsonState, "entry_sidecar_count",
+										  entrySidecarCount);
+	PgturbohybridIndexStatsJsonbAddUInt32(&jsonState, "entry_sidecar_bytes",
+										  entrySidecarBytes);
+	PgturbohybridIndexStatsJsonbAddUInt32(&jsonState, "routing_entry_count",
+										  routingEntryCount);
+	PgturbohybridIndexStatsJsonbAddUInt32(&jsonState, "routing_entry_bytes",
+										  routingEntryBytes);
+	PgturbohybridIndexStatsJsonbAddUInt32(&jsonState, "residual_rerank_bytes",
+										  residualRerankBytes);
+	PgturbohybridIndexStatsJsonbAddUInt32(&jsonState, "residual_rerank_storage_bytes",
+										  (uint32) residualRerankBytes * meta.tqNodeCount);
 	PgturbohybridIndexStatsJsonbAddBool(&jsonState, "hybrid", hasBm25Meta);
 	PgturbohybridIndexStatsJsonbAddUInt32(&jsonState, "bm25_document_count",
 										  hasBm25Meta ? bm25Meta.docCount + bm25Meta.deltaDocCount : 0);

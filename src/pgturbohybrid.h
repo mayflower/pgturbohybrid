@@ -68,6 +68,14 @@ typedef Pointer Item;
 #define PGTURBOHYBRID_DEFAULT_GRAPH_EF_SEARCH 64
 #define PGTURBOHYBRID_DEFAULT_GRAPH_OVERSAMPLING 4
 #define PGTURBOHYBRID_GRAPH_EXACT_CACHE_AUTO_MAX_BYTES (16 * 1024 * 1024)
+#define PGTURBOHYBRID_GRAPH_MAX_ROUTING_ENTRIES 15
+#define PGTURBOHYBRID_GRAPH_MAX_ENTRY_SIDECAR_REPRESENTATIVES 256
+#define PGTURBOHYBRID_DEFAULT_ENTRY_SIDECAR false
+#define PGTURBOHYBRID_DEFAULT_ENTRY_SIDECAR_REPRESENTATIVES 128
+#define PGTURBOHYBRID_DEFAULT_GRAPH_BACKBONE false
+#define PGTURBOHYBRID_GRAPH_MAX_RESIDUAL_RERANK_BYTES 64
+#define PGTURBOHYBRID_DEFAULT_RESIDUAL_RERANK false
+#define PGTURBOHYBRID_DEFAULT_RESIDUAL_RERANK_BYTES 32
 #define PGTURBOHYBRID_DEFAULT_INDEX_BITS 4
 #define PGTURBOHYBRID_DEFAULT_EXACT_STORAGE false
 #define PGTURBOHYBRID_DEFAULT_BITS 4
@@ -221,6 +229,13 @@ extern int	pgturbohybrid_dense_max_candidate_multiplier;
 extern double pgturbohybrid_dense_latency_multiplier;
 extern int	pgturbohybrid_dense_max_rescore_multiplier;
 extern int	pgturbohybrid_dense_rescore_band_policy;
+extern int	pgturbohybrid_dense_adaptive_widening;
+extern double pgturbohybrid_dense_adaptive_widening_multiplier;
+extern double pgturbohybrid_dense_adaptive_widening_max_multiplier;
+extern double pgturbohybrid_dense_adaptive_min_gap;
+extern int	pgturbohybrid_dense_local_expansion;
+extern int	pgturbohybrid_dense_local_expansion_topn;
+extern int	pgturbohybrid_dense_local_expansion_max_neighbors;
 extern int	pgturbohybrid_graph_lock_tranche_id;
 
 typedef enum PgturbohybridRoutingMode
@@ -262,6 +277,29 @@ typedef enum TqDenseWideningReason
 	PGTURBOHYBRID_DENSE_WIDENING_FILTER,
 	PGTURBOHYBRID_DENSE_WIDENING_EXACT_POLICY
 }			TqDenseWideningReason;
+
+typedef enum TqDenseAdaptiveWideningMode
+{
+	PGTURBOHYBRID_DENSE_ADAPTIVE_WIDENING_OFF,
+	PGTURBOHYBRID_DENSE_ADAPTIVE_WIDENING_AUTO,
+	PGTURBOHYBRID_DENSE_ADAPTIVE_WIDENING_ON
+}			TqDenseAdaptiveWideningMode;
+
+typedef enum TqDenseAdaptiveWideningReason
+{
+	PGTURBOHYBRID_DENSE_ADAPTIVE_REASON_NONE,
+	PGTURBOHYBRID_DENSE_ADAPTIVE_REASON_FORCED,
+	PGTURBOHYBRID_DENSE_ADAPTIVE_REASON_UNDERFILLED,
+	PGTURBOHYBRID_DENSE_ADAPTIVE_REASON_FLAT_TOP10,
+	PGTURBOHYBRID_DENSE_ADAPTIVE_REASON_FLAT_BOUNDARY
+}			TqDenseAdaptiveWideningReason;
+
+typedef enum TqDenseLocalExpansionMode
+{
+	PGTURBOHYBRID_DENSE_LOCAL_EXPANSION_OFF,
+	PGTURBOHYBRID_DENSE_LOCAL_EXPANSION_AUTO,
+	PGTURBOHYBRID_DENSE_LOCAL_EXPANSION_ON
+}			TqDenseLocalExpansionMode;
 
 typedef enum PgturbohybridGraphExactCache
 {
@@ -434,6 +472,11 @@ typedef struct TqOptions
 	bool		tqQuantileFit;	/* internal quantile-anchored correction fit flag */
 	bool		tqRenorm;		/* internal quantized renormalization residual flag */
 	bool		tqExactStorage; /* exact_storage: store full exact vectors for final rescoring, or omit them for exact-free quantized-only storage. */
+	bool		entrySidecar;	/* entry_sidecar: store data-aware representative node IDs in metadata. */
+	int			entrySidecarRepresentatives;
+	bool		graphBackbone;	/* graph_backbone: force adjacent level-0 graph edges at build time. */
+	bool		residualRerank; /* residual_rerank: store tiny per-vector sketches for final-band reranking. */
+	int			residualRerankBytes;
 }			TqOptions;
 
 typedef struct PgturbohybridGraphGraph
@@ -637,6 +680,14 @@ typedef struct PgturbohybridGraphMetaPageData
 	BlockNumber tqExactStartBlkno;
 	BlockNumber tqCorrectionStartBlkno;
 	BlockNumber tqBm25MetaStartBlkno;
+	uint16		tqEntrySidecarCount;
+	uint16		tqEntrySidecarBytes;
+	uint16		tqResidualRerankBytes;
+	uint16		tqReserved;
+	uint32		tqEntrySidecarNodeIds[PGTURBOHYBRID_GRAPH_MAX_ENTRY_SIDECAR_REPRESENTATIVES];
+	uint16		tqRoutingEntryCount;
+	uint16		tqRoutingEntryBytes;
+	uint32		tqRoutingEntryNodeIds[PGTURBOHYBRID_GRAPH_MAX_ROUTING_ENTRIES];
 }			PgturbohybridGraphMetaPageData;
 
 typedef PgturbohybridGraphMetaPageData * PgturbohybridGraphMetaPage;
@@ -722,6 +773,10 @@ typedef struct PgturbohybridGraphScanOpaqueData
 	int64		graphCodePagesRead;
 	int64		graphAdjPagesRead;
 	int64		graphEntryPointCount;
+	int64		graphEntrySidecarCount;
+	int64		graphEntrySidecarScored;
+	int64		graphEntrySidecarSelected;
+	int64		graphEntrySidecarUs;
 	int64		graphPrepareUs;
 	int64		graphTraverseUs;
 	int64		graphEntryUs;
@@ -738,6 +793,24 @@ typedef struct PgturbohybridGraphScanOpaqueData
 	int64		graphEffectiveRescoreBand;
 	double		graphHighdimWideningMultiplier;
 	int			graphWideningReason;
+	int			graphAdaptiveWideningMode;
+	bool		graphAdaptiveTriggered;
+	int			graphAdaptiveTriggerReason;
+	int64		graphAdaptiveInitialResultTarget;
+	int64		graphAdaptiveFinalResultTarget;
+	int64		graphAdaptiveInitialSearchEf;
+	int64		graphAdaptiveFinalSearchEf;
+	double		graphAdaptiveGapTop10;
+	double		graphAdaptiveGapBoundary;
+	int			graphLocalExpansionMode;
+	bool		graphLocalExpansionTriggered;
+	int64		graphLocalExpansionSeedCount;
+	int64		graphLocalExpansionNeighborsScored;
+	int64		graphLocalExpansionCandidatesAdded;
+	int64		graphLocalExpansionUs;
+	int64		graphResidualRerankCount;
+	int64		graphResidualRerankBytes;
+	int64		graphResidualRerankUs;
 	int			graphDenseBudgetPolicy;
 	int			graphRescoreBandPolicy;
 	int			graphStorageKind;
@@ -819,6 +892,11 @@ bool		PgturbohybridGraphGetTqWeightedOption(Relation index);
 bool		PgturbohybridGraphGetTqRenormOption(Relation index);
 bool		PgturbohybridGraphGetTqQuantileFitOption(Relation index);
 bool		PgturbohybridGraphGetTqExactStorageOption(Relation index);
+bool		PgturbohybridGraphGetEntrySidecarOption(Relation index);
+int			PgturbohybridGraphGetEntrySidecarRepresentatives(Relation index);
+bool		PgturbohybridGraphGetBackboneOption(Relation index);
+bool		PgturbohybridGraphGetResidualRerankOption(Relation index);
+int			PgturbohybridGraphGetResidualRerankBytes(Relation index);
 void		PgturbohybridGraphPrepareTqQuery(Relation index, PgturbohybridGraphSupport * support, Datum value, PgturbohybridGraphTqQuery * tq);
 void		PgturbohybridGraphPrepareTqQueryWithBits(Relation index, PgturbohybridGraphSupport * support, Datum value, PgturbohybridGraphTqQuery * tq, int tqBits);
 void		PgturbohybridGraphPrepareTqBuildQuery(Relation index, PgturbohybridGraphSupport * support, Datum value, PgturbohybridGraphTqQuery * tq);

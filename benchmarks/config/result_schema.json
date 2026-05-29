@@ -8,13 +8,55 @@
       "type": "string"
     },
     "layer": {
-      "enum": ["ir_quality", "systems", "reference"]
+      "enum": ["ir_quality", "systems", "reference", "ir_quality_and_systems", "external_dense_vector_library"]
     },
     "generated_at_unix": {
       "type": "integer"
     },
+    "command": {
+      "type": "object",
+      "properties": {
+        "executable": { "type": "string" },
+        "argv": {
+          "type": "array",
+          "items": { "type": "string" }
+        },
+        "full_argv": {
+          "type": "array",
+          "items": { "type": "string" }
+        },
+        "shell": { "type": "string" },
+        "cwd": { "type": "string" },
+        "env": {
+          "type": "object",
+          "additionalProperties": { "type": "string" }
+        }
+      },
+      "additionalProperties": true
+    },
     "dataset": {
       "type": "string"
+    },
+    "dataset_name": {
+      "type": "string"
+    },
+    "dataset_path": {
+      "type": "string"
+    },
+    "query_source": {
+      "type": "string"
+    },
+    "rows": {
+      "type": "integer"
+    },
+    "queries": {
+      "type": "integer"
+    },
+    "warmup": {
+      "type": "integer"
+    },
+    "measured_runs": {
+      "type": "integer"
     },
     "method": {
       "type": "string"
@@ -22,7 +64,77 @@
     "results": {
       "type": "array",
       "items": {
-        "type": "object"
+        "type": "object",
+        "properties": {
+          "method": { "type": "string" },
+          "variant": { "type": "string" },
+          "retrieval_mode": { "type": "string" },
+          "profile": { "type": "string" },
+          "dense_k": { "type": "integer" },
+          "bm25_k": { "type": "integer" },
+          "rrf_k": { "type": "integer" },
+          "final_k": { "type": "integer" },
+          "failure_probe_k": { "type": "integer" },
+          "status": { "enum": ["ok", "failed", "partial"] },
+          "error": {
+            "type": "object",
+            "additionalProperties": true
+          },
+          "index_bytes": { "type": "integer" },
+          "bytes_per_vector": { "type": "number" },
+          "build_ms": { "type": "number" },
+          "build_seconds": { "type": "number" },
+          "build_provenance": {
+            "type": "object",
+            "properties": {
+              "build_source": { "type": "string" },
+              "build_key": { "type": "string" },
+              "provenance_confidence": { "type": "string" },
+              "dense_build_exact_distances": { "type": ["boolean", "null"] },
+              "index_dense_build_exact_distances": { "type": ["boolean", "null"] },
+              "exact_storage": { "type": ["boolean", "null"] },
+              "quantization_bits": { "type": ["integer", "null"] },
+              "graph_backbone": { "type": ["boolean", "null"] },
+              "index_graph_backbone": { "type": ["boolean", "null"] },
+              "entry_sidecar": { "type": ["boolean", "null"] },
+              "residual_rerank": { "type": ["boolean", "null"] }
+            },
+            "additionalProperties": true
+          },
+          "latency": {
+            "type": "object",
+            "properties": {
+              "p50_ms": { "type": "number" },
+              "p95_ms": { "type": "number" },
+              "p99_ms": { "type": "number" },
+              "mean_ms": { "type": "number" },
+              "qps": { "type": "number" },
+              "runs": { "type": "integer" }
+            },
+            "additionalProperties": true
+          },
+          "metrics": {
+            "type": "object",
+            "additionalProperties": { "type": "number" }
+          },
+          "source_rank_summary": {
+            "type": "object",
+            "additionalProperties": true
+          },
+          "failure_attribution": {
+            "type": "object",
+            "additionalProperties": true
+          },
+          "scan_summary": {
+            "type": "object",
+            "additionalProperties": true
+          },
+          "index_stats": {
+            "type": ["object", "null"],
+            "additionalProperties": true
+          }
+        },
+        "additionalProperties": true
       }
     },
     "metrics": {
@@ -31,8 +143,21 @@
         "type": "number"
       }
     },
+    "per_query_recovery_overlap": {
+      "type": "object",
+      "additionalProperties": true
+    },
     "environment": {
       "type": "object"
+    },
+    "per_query_jsonl": {
+      "type": "string"
+    },
+    "index_report": {
+      "type": "string"
+    },
+    "markdown_report": {
+      "type": "string"
     },
     "notes": {
       "type": "string"

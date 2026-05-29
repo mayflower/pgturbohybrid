@@ -590,6 +590,69 @@ PgturbohybridGraphGetTqExactStorageOption(Relation index)
 	return opts != NULL ? opts->tqExactStorage : PGTURBOHYBRID_DEFAULT_EXACT_STORAGE;
 }
 
+bool
+PgturbohybridGraphGetEntrySidecarOption(Relation index)
+{
+	TqOptions  *opts;
+
+	if (!PgturbohybridGraphIspgturbohybridIndex(index))
+		return false;
+
+	opts = (TqOptions *) index->rd_options;
+	return opts != NULL ? opts->entrySidecar : PGTURBOHYBRID_DEFAULT_ENTRY_SIDECAR;
+}
+
+int
+PgturbohybridGraphGetEntrySidecarRepresentatives(Relation index)
+{
+	TqOptions  *opts;
+
+	if (!PgturbohybridGraphIspgturbohybridIndex(index))
+		return 0;
+
+	opts = (TqOptions *) index->rd_options;
+	return opts != NULL ? opts->entrySidecarRepresentatives :
+		PGTURBOHYBRID_DEFAULT_ENTRY_SIDECAR_REPRESENTATIVES;
+}
+
+bool
+PgturbohybridGraphGetBackboneOption(Relation index)
+{
+	TqOptions  *opts;
+
+	if (!PgturbohybridGraphIspgturbohybridIndex(index))
+		return false;
+
+	opts = (TqOptions *) index->rd_options;
+	return opts != NULL ? opts->graphBackbone : PGTURBOHYBRID_DEFAULT_GRAPH_BACKBONE;
+}
+
+bool
+PgturbohybridGraphGetResidualRerankOption(Relation index)
+{
+	TqOptions  *opts;
+
+	if (!PgturbohybridGraphIspgturbohybridIndex(index))
+		return false;
+
+	opts = (TqOptions *) index->rd_options;
+	return opts != NULL ? opts->residualRerank : PGTURBOHYBRID_DEFAULT_RESIDUAL_RERANK;
+}
+
+int
+PgturbohybridGraphGetResidualRerankBytes(Relation index)
+{
+	TqOptions  *opts;
+
+	if (!PgturbohybridGraphIspgturbohybridIndex(index))
+		return 0;
+
+	opts = (TqOptions *) index->rd_options;
+	if (opts == NULL || !opts->residualRerank)
+		return 0;
+	return opts->residualRerankBytes;
+}
+
 static bool
 PgturbohybridGraphTqSupportsPackedCodes(Relation index)
 {

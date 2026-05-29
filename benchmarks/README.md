@@ -19,6 +19,8 @@ The DBPedia OpenAI3-large benchmark spec lives in
 1M-row Qdrant DBPedia corpus, BEIR DBPedia queries/qrels, the native pgvector
 `halfvec` + PostgreSQL full-text SQL RRF baseline, the TurboHybrid hybrid runs,
 and a dense-only default comparison between pgvector HNSW and TurboHybrid.
+Internal dense-only experiment decisions from the prompt-pack work live in
+[`docs/internal/dbpedia-dense-quality-decision.md`](../docs/internal/dbpedia-dense-quality-decision.md).
 
 ## Baselines
 
@@ -86,6 +88,8 @@ Record the following with any published result:
 - warmup policy and measured run count
 - p50, p95, p99, QPS
 - index size, build time, and WAL generated
+- build provenance for fresh, shared, and existing-index runs
+- exact-build provenance from TurboHybrid index stats when applicable
 - quality metrics such as recall, nDCG, MRR, MAP, or overlap
 - baseline definitions and index options
 - note that results vary by dataset and hardware
@@ -125,9 +129,18 @@ full-text search because standard pgvector `vector` HNSW is not the intended
 ANN path for this dimensionality.
 
 For the DBPedia dense-only default comparison, use
-`--methods pgvector_halfvec_dense_only,pgturbohybrid_dense_only`. That run does
-not pass a text query to TurboHybrid and should not be reported as hybrid
-retrieval.
+`--methods pgvector_halfvec_dense_only,pgturbohybrid_dense_only,pgturbohybrid_dense_exact_storage_on`.
+That run does not pass a text query to TurboHybrid and should not be reported as
+hybrid retrieval. The exact-storage row is an upper-bound reference, not a
+compact default candidate.
+
+For an optional external-library reference, use
+`benchmarks/dbpedia_turbovec.py` against the same loaded DBPedia query set. It
+builds a Turbovec `TurboQuantIndex(dim=3072, bit_width=4)` from the Qdrant
+Parquet embeddings and reports dense-only latency and quality metrics. Keep
+that row separate from PostgreSQL-native comparisons because Turbovec runs
+in-process and does not exercise PostgreSQL storage, MVCC, indexing, or SQL
+execution.
 
 Synthetic vector generators are intentionally not part of the benchmark suite.
 They are too far from real retrieval workloads for project performance claims.

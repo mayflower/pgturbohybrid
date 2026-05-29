@@ -11,6 +11,14 @@ $$;
 CREATE EXTENSION vector;
 CREATE EXTENSION pgturbohybrid;
 SET enable_seqscan = off;
+DO $$
+BEGIN
+	IF current_setting('turbohybrid.dense_adaptive_widening') <> 'auto' THEN
+		RAISE EXCEPTION 'unexpected dense_adaptive_widening default: %',
+			current_setting('turbohybrid.dense_adaptive_widening');
+	END IF;
+END
+$$;
 CREATE TABLE tqh_docs (
 	id int,
 	embedding vector(3),
@@ -56,8 +64,29 @@ BEGIN
 		stats->>'routing' <> 'auto' OR
 		stats->>'storage_kind' <> 'pgturbohybrid_graph_native' OR
 		(stats->>'quantization_bits')::int <> 4 OR
+		(stats->>'dense_build_exact_distances')::boolean IS DISTINCT FROM false OR
 		(stats->>'exact_storage')::boolean IS DISTINCT FROM false THEN
 		RAISE EXCEPTION 'unexpected default index stats: %', stats;
+	END IF;
+END
+$$;
+DROP INDEX tqh_default_docs_idx;
+SET turbohybrid.dense_build_exact_distances = on;
+CREATE INDEX tqh_default_docs_idx ON tqh_default_docs
+USING turbohybrid (
+	embedding vector_cosine_turbohybrid_ops,
+	body_tsv bm25_tsvector_turbohybrid_ops
+);
+RESET turbohybrid.dense_build_exact_distances;
+DO $$
+DECLARE
+	stats jsonb;
+BEGIN
+	stats := turbohybrid_index_stats('tqh_default_docs_idx'::regclass);
+
+	IF (stats->>'dense_build_exact_distances')::boolean IS DISTINCT FROM true OR
+		(stats->>'exact_storage')::boolean IS DISTINCT FROM false THEN
+		RAISE EXCEPTION 'unexpected exact-build stats: %', stats;
 	END IF;
 END
 $$;
@@ -96,6 +125,36 @@ BEGIN
 	IF (stats->>'quantization_bits')::int <> 2 OR
 		(stats->>'exact_storage')::boolean IS DISTINCT FROM false THEN
 		RAISE EXCEPTION 'unexpected quantization override stats: %', stats;
+	END IF;
+END
+$$;
+DROP INDEX tqh_default_docs_idx;
+CREATE INDEX tqh_default_docs_idx ON tqh_default_docs
+USING turbohybrid (
+	embedding vector_cosine_turbohybrid_ops,
+	body_tsv bm25_tsvector_turbohybrid_ops
+)
+WITH (
+	entry_sidecar = on,
+	entry_sidecar_representatives = 8,
+	graph_backbone = on,
+	residual_rerank = on,
+	residual_rerank_bytes = 16
+);
+DO $$
+DECLARE
+	stats jsonb;
+BEGIN
+	stats := turbohybrid_index_stats('tqh_default_docs_idx'::regclass);
+
+	IF (stats->>'entry_sidecar_count')::int <= 0 OR
+		(stats->>'entry_sidecar_count')::int > 8 OR
+		(stats->>'entry_sidecar_bytes')::int <>
+			(stats->>'entry_sidecar_count')::int * 4 OR
+		(stats->>'graph_backbone')::boolean IS DISTINCT FROM true OR
+		(stats->>'residual_rerank_bytes')::int <> 16 OR
+		(stats->>'residual_rerank_storage_bytes')::int <> 16 * 4 THEN
+		RAISE EXCEPTION 'unexpected sidecar stats: %', stats;
 	END IF;
 END
 $$;
@@ -807,7 +866,11 @@ BEGIN
 		'blocks',
 		'bm25_average_document_length',
 		'bm25_document_count',
+		'dense_build_exact_distances',
+		'entry_sidecar_bytes',
+		'entry_sidecar_count',
 		'exact_storage',
+		'graph_backbone',
 		'graph_ef_construction',
 		'graph_ef_search',
 		'graph_m',
@@ -815,7 +878,11 @@ BEGIN
 		'hybrid',
 		'profile',
 		'quantization_bits',
+		'residual_rerank_bytes',
+		'residual_rerank_storage_bytes',
 		'routing',
+		'routing_entry_bytes',
+		'routing_entry_count',
 		'storage_kind',
 		'version'
 	] THEN
@@ -841,10 +908,28 @@ BEGIN
 		'bm25_k_defaulted',
 		'bm25_k_effective',
 		'bm25_strategy',
+		'dense_adaptive_final_result_target',
+		'dense_adaptive_final_search_ef',
+		'dense_adaptive_gap_boundary',
+		'dense_adaptive_gap_top10',
+		'dense_adaptive_initial_result_target',
+		'dense_adaptive_initial_search_ef',
+		'dense_adaptive_trigger_reason',
+		'dense_adaptive_triggered',
+		'dense_adaptive_widening_mode',
 		'dense_candidates_effective',
 		'dense_elapsed_us',
 		'dense_k_defaulted',
 		'dense_k_effective',
+		'dense_local_expansion_candidates_added',
+		'dense_local_expansion_mode',
+		'dense_local_expansion_neighbors_scored',
+		'dense_local_expansion_seed_count',
+		'dense_local_expansion_triggered',
+		'dense_local_expansion_us',
+		'dense_residual_rerank_bytes',
+		'dense_residual_rerank_count',
+		'dense_residual_rerank_us',
 		'detected_sql_limit',
 		'elapsed_us',
 		'exact_rescore_for_bm25_only',
@@ -855,16 +940,25 @@ BEGIN
 		'final_k_requested',
 		'final_k_source',
 		'fusion_elapsed_us',
+		'graph_adj_pages_read',
 		'graph_candidate_count',
+		'graph_code_pages_read',
 		'graph_dense_budget_policy',
 		'graph_dense_requested_k',
 		'graph_effective_rescore_band',
 		'graph_effective_result_target',
 		'graph_effective_search_ef',
+		'graph_entry_point_count',
+		'graph_entry_sidecar_count',
+		'graph_entry_sidecar_scored',
+		'graph_entry_sidecar_selected',
+		'graph_entry_sidecar_us',
 		'graph_highdim_widening_multiplier',
 		'graph_rescore_band_policy',
 		'graph_rescore_count',
+		'graph_scored_codes',
 		'graph_storage_kind',
+		'graph_visited_nodes',
 		'graph_widening_reason',
 		'index_used',
 		'profile',
@@ -899,6 +993,49 @@ BEGIN
 		'version'
 	] THEN
 		RAISE EXCEPTION 'unexpected pgturbohybrid SIMD capability keys: %', keys;
+	END IF;
+END
+$$;
+DO $$
+BEGIN
+	PERFORM set_config('turbohybrid.dense_build_exact_distances', 'on', true);
+	IF current_setting('turbohybrid.dense_build_exact_distances') <> 'on' THEN
+		RAISE EXCEPTION 'dense_build_exact_distances GUC did not stick';
+	END IF;
+
+	PERFORM set_config('turbohybrid.dense_adaptive_widening', 'auto', true);
+	IF current_setting('turbohybrid.dense_adaptive_widening') <> 'auto' THEN
+		RAISE EXCEPTION 'dense_adaptive_widening GUC did not stick';
+	END IF;
+
+	PERFORM set_config('turbohybrid.dense_adaptive_widening_multiplier', '1.5', true);
+	IF current_setting('turbohybrid.dense_adaptive_widening_multiplier') <> '1.5' THEN
+		RAISE EXCEPTION 'dense_adaptive_widening_multiplier GUC did not stick';
+	END IF;
+
+	PERFORM set_config('turbohybrid.dense_adaptive_widening_max_multiplier', '3.0', true);
+	IF current_setting('turbohybrid.dense_adaptive_widening_max_multiplier') <> '3' THEN
+		RAISE EXCEPTION 'dense_adaptive_widening_max_multiplier GUC did not stick';
+	END IF;
+
+	PERFORM set_config('turbohybrid.dense_adaptive_min_gap', '0.05', true);
+	IF current_setting('turbohybrid.dense_adaptive_min_gap') <> '0.05' THEN
+		RAISE EXCEPTION 'dense_adaptive_min_gap GUC did not stick';
+	END IF;
+
+	PERFORM set_config('turbohybrid.dense_local_expansion', 'auto', true);
+	IF current_setting('turbohybrid.dense_local_expansion') <> 'auto' THEN
+		RAISE EXCEPTION 'dense_local_expansion GUC did not stick';
+	END IF;
+
+	PERFORM set_config('turbohybrid.dense_local_expansion_topn', '8', true);
+	IF current_setting('turbohybrid.dense_local_expansion_topn') <> '8' THEN
+		RAISE EXCEPTION 'dense_local_expansion_topn GUC did not stick';
+	END IF;
+
+	PERFORM set_config('turbohybrid.dense_local_expansion_max_neighbors', '128', true);
+	IF current_setting('turbohybrid.dense_local_expansion_max_neighbors') <> '128' THEN
+		RAISE EXCEPTION 'dense_local_expansion_max_neighbors GUC did not stick';
 	END IF;
 END
 $$;

@@ -92,6 +92,14 @@ PgturbohybridGraphShouldUseNativeCache(PgturbohybridGraphMetaPageData *meta, boo
 									 meta->tqPayloadBytes, &bytes) &&
 		bytes <= PGTURBOHYBRID_GRAPH_NATIVE_CACHE_MAX_BYTES)
 		totalBytes += bytes;
+	if (meta->tqResidualRerankBytes > 0)
+	{
+		if (!PgturbohybridGraphArenaBytes(meta->tqNodeCount,
+										  meta->tqResidualRerankBytes, &bytes) ||
+			bytes > PGTURBOHYBRID_GRAPH_NATIVE_CACHE_MAX_BYTES)
+			return false;
+		totalBytes += bytes;
+	}
 	if (cacheExactVectors && meta->dimensions > 0)
 	{
 		if (PgturbohybridGraphArenaBytes(meta->tqNodeCount,
@@ -135,6 +143,11 @@ PgturbohybridGraphInitScanStorageUncached(PgturbohybridGraphMetaPageData *meta, 
 									 &arenaBytes) &&
 		arenaBytes <= PGTURBOHYBRID_GRAPH_NATIVE_CACHE_MAX_BYTES)
 		storage->codeArena = palloc0(arenaBytes);
+	if (meta->tqNodeCount > 0 && meta->tqResidualRerankBytes > 0 &&
+		PgturbohybridGraphArenaBytes(meta->tqNodeCount, meta->tqResidualRerankBytes,
+									 &arenaBytes) &&
+		arenaBytes <= PGTURBOHYBRID_GRAPH_NATIVE_CACHE_MAX_BYTES)
+		storage->residualArena = palloc0(arenaBytes);
 	if (meta->tqNodeCount > 0 && meta->tqPayloadBytes > 0 &&
 		PgturbohybridGraphArenaBytes(meta->tqNodeCount, meta->tqPayloadBytes,
 									 &arenaBytes) &&
@@ -162,7 +175,8 @@ PgturbohybridGraphInitScanStorageUncached(PgturbohybridGraphMetaPageData *meta, 
 		PgturbohybridGraphTuplesPerPage(PgturbohybridGraphCodeTupleSize(meta->dimensions,
 												  meta->tqPayloadCount,
 												  meta->tqBits,
-												  (meta->tqFlags & PGTURBOHYBRID_GRAPH_TQ_WEIGHTED) != 0));
+												  (meta->tqFlags & PGTURBOHYBRID_GRAPH_TQ_WEIGHTED) != 0,
+												  meta->tqResidualRerankBytes));
 	storage->codePageCount = PgturbohybridGraphPageCount(meta->tqNodeCount, storage->codeTuplesPerPage);
 	storage->adjPageCount = BlockNumberIsValid(meta->tqAdjStartBlkno) ? 1 : 0;
 	storage->codePagesLoaded =
@@ -292,8 +306,24 @@ retry:
 					else if (node->code == NULL)
 						node->code = (uint8 *) MemoryContextAlloc(storage->ctx,
 																  meta->tqCodeBytes);
-					memcpy(node->code, PgturbohybridGraphTupleCode(tuple, meta->tqPayloadBytes, tqWeighted),
+					memcpy(node->code, PgturbohybridGraphTupleCode(tuple, meta->tqPayloadBytes,
+																   meta->tqResidualRerankBytes,
+																   tqWeighted),
 						   meta->tqCodeBytes);
+				}
+				if (meta->tqResidualRerankBytes > 0)
+				{
+					if (storage->residualArena != NULL)
+						node->residualSketch = storage->residualArena +
+							((Size) tuple->nodeId * meta->tqResidualRerankBytes);
+					else if (node->residualSketch == NULL)
+						node->residualSketch = (uint8 *) MemoryContextAlloc(storage->ctx,
+																			meta->tqResidualRerankBytes);
+					memcpy(node->residualSketch,
+						   PgturbohybridGraphTupleResidual(tuple, meta->tqPayloadBytes,
+														   meta->tqResidualRerankBytes,
+														   tqWeighted),
+						   meta->tqResidualRerankBytes);
 				}
 				node->loaded = true;
 			}
@@ -546,6 +576,7 @@ PgturbohybridGraphCacheMatches(PgturbohybridGraphNativeCache *cache, Relation in
 		cache->tqBits == meta->tqBits &&
 		cache->tqPayloadCount == meta->tqPayloadCount &&
 		cache->tqPayloadBytes == meta->tqPayloadBytes &&
+		cache->tqResidualRerankBytes == meta->tqResidualRerankBytes &&
 		cache->tqCodeStartBlkno == meta->tqCodeStartBlkno &&
 		cache->tqAdjStartBlkno == meta->tqAdjStartBlkno &&
 		cache->tqExactStartBlkno == meta->tqExactStartBlkno &&
@@ -633,6 +664,7 @@ PgturbohybridGraphBuildCache(Relation index, PgturbohybridGraphMetaPageData *met
 	cache->tqBits = meta->tqBits;
 	cache->tqPayloadCount = meta->tqPayloadCount;
 	cache->tqPayloadBytes = meta->tqPayloadBytes;
+	cache->tqResidualRerankBytes = meta->tqResidualRerankBytes;
 	cache->tqCodeStartBlkno = meta->tqCodeStartBlkno;
 	cache->tqAdjStartBlkno = meta->tqAdjStartBlkno;
 	cache->tqExactStartBlkno = meta->tqExactStartBlkno;
@@ -732,6 +764,7 @@ void
 PgturbohybridGraphAppendInsertCacheNode(PgturbohybridGraphNativeCache *cache, PgturbohybridGraphMetaPageData *meta,
 							 uint32 nodeId, ItemPointer heapTid,
 							 int nodeLevel, Vector *vector, uint8 *code,
+							 uint8 *residualSketch,
 							 float scale, float norm, float codeNorm,
 							 float ecCorrection, int32 *payloads,
 							 uint16 payloadMask, BlockNumber exactBlkno,
@@ -750,6 +783,7 @@ PgturbohybridGraphAppendInsertCacheNode(PgturbohybridGraphNativeCache *cache, Pg
 	int			newCodePageCount;
 	Size		codeBytes;
 	Size		payloadBytes;
+	Size		residualBytes;
 	MemoryContext oldCtx;
 
 	if (cache == NULL || nodeId != cache->tqNodeCount)
@@ -764,6 +798,7 @@ PgturbohybridGraphAppendInsertCacheNode(PgturbohybridGraphNativeCache *cache, Pg
 	newCodePageCount = PgturbohybridGraphPageCount(newNodeCount, storage->codeTuplesPerPage);
 	codeBytes = meta->tqCodeBytes;
 	payloadBytes = meta->tqPayloadBytes;
+	residualBytes = meta->tqResidualRerankBytes;
 
 	oldCtx = MemoryContextSwitchTo(cache->ctx);
 
@@ -793,6 +828,19 @@ PgturbohybridGraphAppendInsertCacheNode(PgturbohybridGraphNativeCache *cache, Pg
 		else
 			memset(storage->payloadArena + ((Size) nodeId * payloadBytes),
 				   0, payloadBytes);
+	}
+	if (residualBytes > 0)
+	{
+		storage->residualArena = repalloc(storage->residualArena,
+										  PgturbohybridCheckedArrayBytes(residualBytes,
+																		 newNodeCount,
+																		 "pgturbohybrid graph residual rerank arena"));
+		if (residualSketch != NULL)
+			memcpy(storage->residualArena + ((Size) nodeId * residualBytes),
+				   residualSketch, residualBytes);
+		else
+			memset(storage->residualArena + ((Size) nodeId * residualBytes),
+				   0, residualBytes);
 	}
 	if (storage->exactArena != NULL)
 	{
@@ -888,6 +936,9 @@ PgturbohybridGraphAppendInsertCacheNode(PgturbohybridGraphNativeCache *cache, Pg
 	if (payloadBytes > 0)
 		storage->nodes[nodeId].payloads =
 			(int32 *) (storage->payloadArena + ((Size) nodeId * payloadBytes));
+	if (residualBytes > 0)
+		storage->nodes[nodeId].residualSketch =
+			storage->residualArena + ((Size) nodeId * residualBytes);
 	if (storage->exactArena != NULL)
 		storage->nodes[nodeId].exactVector =
 			storage->exactArena + ((Size) nodeId * storage->exactBytes);
@@ -931,6 +982,7 @@ PgturbohybridGraphAppendInsertCacheNode(PgturbohybridGraphNativeCache *cache, Pg
 	cache->tqNodeCount = newNodeCount;
 	cache->tqEntryNodeId = entryNodeId;
 	cache->graphMaxLevel = graphMaxLevel;
+	cache->tqResidualRerankBytes = meta->tqResidualRerankBytes;
 	cache->tqCodeStartBlkno = codeStart;
 	cache->tqAdjStartBlkno = adjStart;
 	cache->tqExactStartBlkno = exactStart;

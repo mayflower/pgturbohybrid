@@ -32,6 +32,9 @@ Thumbs.db
 !/benchmarks/README.md
 !/benchmarks/dev/README.md
 !/benchmarks/dbpedia_openai3_large.md
+/benchmarks/**/*.tq
+/benchmarks/**/*.tv
+/benchmarks/**/*.tvim
 /perf-smoke-results.json
 
 # Build artifacts

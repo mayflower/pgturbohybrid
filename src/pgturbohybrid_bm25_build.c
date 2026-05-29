@@ -12,6 +12,7 @@
 #include "storage/buffile.h"
 #include "storage/lmgr.h"
 #include "tsearch/ts_type.h"
+#include "utils/guc.h"
 #include "utils/memutils.h"
 #include "utils/rel.h"
 
@@ -684,6 +685,25 @@ PgturbohybridBm25BuildGrowCapacity32(uint32 capacity, uint32 needed, Size elemSi
 
 static void PgturbohybridSpillTermRun(PgturbohybridBm25Collector *collector);
 
+static Size
+PgturbohybridBm25MaintenanceWorkMemBytes(void)
+{
+	int			kilobytes = maintenance_work_mem;
+
+	if (kilobytes <= 0)
+	{
+		const char *value = GetConfigOptionByName("maintenance_work_mem",
+												  NULL, false);
+
+		if (value == NULL ||
+			!parse_int(value, &kilobytes, GUC_UNIT_KB, NULL) ||
+			kilobytes <= 0)
+			kilobytes = 64 * 1024;
+	}
+
+	return (Size) kilobytes * (Size) 1024;
+}
+
 static void
 PgturbohybridCheckBudget(PgturbohybridBm25Collector *collector)
 {
@@ -1058,9 +1078,7 @@ PgturbohybridBm25BuildCallback(Relation index, ItemPointer tid, Datum *values,
 static PgturbohybridTidNode *
 PgturbohybridReadNodeMap(Relation index, uint32 *count)
 {
-	Buffer		metaBuf;
-	Page		metaPage;
-	PgturbohybridGraphMetaPage meta;
+	PgturbohybridGraphMetaPageData meta;
 	uint32		seen = 0;
 	PgturbohybridTidNode *map;
 	int			codeTuplesPerPage;
@@ -1068,31 +1086,26 @@ PgturbohybridReadNodeMap(Relation index, uint32 *count)
 	BlockNumber *codeBlknos;
 	bool		tqWeighted;
 
-	metaBuf = ReadBuffer(index, PGTURBOHYBRID_GRAPH_METAPAGE_BLKNO);
-	LockBuffer(metaBuf, BUFFER_LOCK_SHARE);
-	metaPage = BufferGetPage(metaBuf);
-	meta = PgturbohybridGraphPageGetMeta(metaPage);
-
-	if (meta->magicNumber != PGTURBOHYBRID_GRAPH_MAGIC_NUMBER ||
-		meta->storageKind != PGTURBOHYBRID_GRAPH_STORAGE_QUANT_GRAPH_NATIVE ||
-		meta->tqNodeCount == 0 ||
-		!BlockNumberIsValid(meta->tqCodeStartBlkno))
+	if (!PgturbohybridGraphReadMeta(index, &meta) ||
+		meta.storageKind != PGTURBOHYBRID_GRAPH_STORAGE_QUANT_GRAPH_NATIVE ||
+		meta.tqNodeCount == 0 ||
+		!BlockNumberIsValid(meta.tqCodeStartBlkno))
 	{
-		UnlockReleaseBuffer(metaBuf);
 		*count = 0;
 		return NULL;
 	}
 
 	map = palloc0(PgturbohybridCheckedArrayBytes(sizeof(PgturbohybridTidNode),
-												 meta->tqNodeCount,
+												 meta.tqNodeCount,
 												 "pgturbohybrid BM25 TID map"));
-	tqWeighted = (meta->tqFlags & PGTURBOHYBRID_GRAPH_TQ_WEIGHTED) != 0;
+	tqWeighted = (meta.tqFlags & PGTURBOHYBRID_GRAPH_TQ_WEIGHTED) != 0;
 	codeTuplesPerPage =
-		PgturbohybridGraphTuplesPerPage(PgturbohybridGraphCodeTupleSize(meta->dimensions,
-												  meta->tqPayloadCount,
-												  meta->tqBits,
-												  tqWeighted));
-	codePageCount = PgturbohybridGraphPageCount(meta->tqNodeCount, codeTuplesPerPage);
+		PgturbohybridGraphTuplesPerPage(PgturbohybridGraphCodeTupleSize(meta.dimensions,
+												  meta.tqPayloadCount,
+												  meta.tqBits,
+												  tqWeighted,
+												  meta.tqResidualRerankBytes));
+	codePageCount = PgturbohybridGraphPageCount(meta.tqNodeCount, codeTuplesPerPage);
 	codeBlknos = palloc(PgturbohybridCheckedArrayBytes(sizeof(BlockNumber),
 													   codePageCount,
 													   "pgturbohybrid BM25 code block map"));
@@ -1106,7 +1119,7 @@ PgturbohybridReadNodeMap(Relation index, uint32 *count)
 		OffsetNumber maxoff;
 		BlockNumber blkno;
 
-		if (!PgturbohybridGraphResolveChainBlockNumber(index, meta->tqCodeStartBlkno,
+		if (!PgturbohybridGraphResolveChainBlockNumber(index, meta.tqCodeStartBlkno,
 											 pageNo, codePageCount,
 											 PGTURBOHYBRID_GRAPH_PAGE_KIND_QUANT_CODE,
 											 codeBlknos, &blkno))
@@ -1133,7 +1146,7 @@ PgturbohybridReadNodeMap(Relation index, uint32 *count)
 
 			tuple = (PgturbohybridGraphCodeTuple) PageGetItem(page, iid);
 			if (tuple->type != PGTURBOHYBRID_GRAPH_CODE_TUPLE_TYPE ||
-				tuple->nodeId >= meta->tqNodeCount)
+				tuple->nodeId >= meta.tqNodeCount)
 				continue;
 
 			map[seen].tid = tuple->heaptid;
@@ -1145,7 +1158,6 @@ PgturbohybridReadNodeMap(Relation index, uint32 *count)
 	}
 
 	pfree(codeBlknos);
-	UnlockReleaseBuffer(metaBuf);
 
 	qsort(map, seen, sizeof(PgturbohybridTidNode), PgturbohybridTidNodeCompare);
 	*count = seen;
@@ -1178,7 +1190,8 @@ PgturbohybridReadNodeStates(Relation index, PgturbohybridGraphMetaPageData *meta
 		PgturbohybridGraphTuplesPerPage(PgturbohybridGraphCodeTupleSize(meta->dimensions,
 												  meta->tqPayloadCount,
 												  meta->tqBits,
-												  tqWeighted));
+												  tqWeighted,
+												  meta->tqResidualRerankBytes));
 	codePageCount = PgturbohybridGraphPageCount(meta->tqNodeCount, codeTuplesPerPage);
 	codeBlknos = palloc(PgturbohybridCheckedArrayBytes(sizeof(BlockNumber),
 													   codePageCount,
@@ -3096,7 +3109,7 @@ PgturbohybridBm25MaybeCompact(Relation index)
 
 	memset(&collector, 0, sizeof(collector));
 	collector.index = index;
-	collector.softBudget = (Size) maintenance_work_mem * (Size) 1024;
+	collector.softBudget = PgturbohybridBm25MaintenanceWorkMemBytes();
 	collector.allowSpill = true;
 	collector.walLoggedWrites = RelationNeedsWAL(index);
 	collector.tidNodeCount = nodeCount;
@@ -3154,7 +3167,7 @@ PgturbohybridBm25BuildCollect(Relation heap, Relation index, IndexInfo *indexInf
 
 	memset(&collector, 0, sizeof(collector));
 	collector.index = index;
-	collector.softBudget = (Size) maintenance_work_mem * (Size) 1024;
+	collector.softBudget = PgturbohybridBm25MaintenanceWorkMemBytes();
 	collector.allowSpill = true;
 
 	if (!PgturbohybridGraphReadMeta(index, &graphMeta))
@@ -3503,7 +3516,7 @@ PgturbohybridBm25AppendDelta(Relation index, uint32 nodeId,
 
 	memset(&collector, 0, sizeof(collector));
 	collector.index = index;
-	collector.softBudget = (Size) maintenance_work_mem * (Size) 1024;
+	collector.softBudget = PgturbohybridBm25MaintenanceWorkMemBytes();
 	vector = PgturbohybridDetoastTSVector(tsvectorDatum, &mustFree);
 	PgturbohybridValidateTSVector(vector);
 	PgturbohybridCollectVectorTerms(&collector, nodeId, vector);
