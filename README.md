@@ -256,10 +256,22 @@ quantization with `exact_storage = off`.
 | SQL RRF baseline | pgvector HNSW plus PostgreSQL GIN full-text search, 100/100 candidates | 2.009 ms | 0.423430 |
 | pgvector dense-only reference | pgvector HNSW, no lexical branch | 1.412 ms | 0.442786 |
 
-DBPedia/OpenAI3-large 1M dense-only runs are developer diagnostics for graph
-reachability, not release-facing relevance claims. The package default keeps
-adaptive dense widening off; adaptive widening variants remain available in the
-benchmark harness for controlled experiments. Benchmark details, baselines, and
+On a larger DBPedia/OpenAI3-large 1M qdrant-self setup, the run used 1,000,000
+rows, 1,000 sampled self-queries, 3,072-dimensional
+`text-embedding-3-large` embeddings, the `latency` profile, 100 dense
+candidates, 100 BM25 candidates, `final_k = 10`, one warmup pass, and three
+measured passes.
+
+| Method | p95 | p99 | nDCG@10 | recall@10 | Index size |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| pgturbohybrid | 3.978 ms | 7.386 ms | 0.940439 | 0.980 | 2.38 GB |
+| pgvector halfvec HNSW + GIN FTS SQL RRF | 79.799 ms | 219.576 ms | 0.971086 | 0.992 | 8.41 GB |
+
+That DBPedia result is a tradeoff, not a victory lap: TurboHybrid was much
+faster and smaller on this machine, while the pgvector + FTS SQL RRF baseline
+kept higher nDCG@10 and recall@10. The package default keeps adaptive dense
+widening off; adaptive widening variants remain available in the benchmark
+harness for controlled experiments. Benchmark details, baselines, and
 reproduction notes are in
 [docs/benchmarks/fiqa-openai.md](docs/benchmarks/fiqa-openai.md),
 [benchmarks/dbpedia_openai3_large.md](benchmarks/dbpedia_openai3_large.md), and
