@@ -514,9 +514,15 @@ static int64 PgturbohybridGraphQuerySplitU8RawScalar(const PgturbohybridGraphTqQ
 													 const uint8 *code);
 static int64 PGTURBOHYBRID_GRAPH_AVX2_TARGET
 PgturbohybridGraphQuerySplitU8RawAvx2(const PgturbohybridGraphTqQuery *tq, const uint8 *code);
+static void PGTURBOHYBRID_GRAPH_AVX2_TARGET
+PgturbohybridGraphQuerySplitU8RawAvx2x4(const PgturbohybridGraphTqQuery *tq,
+										const uint8 *codes[4], int64 raw[4]);
 #if PGTURBOHYBRID_GRAPH_COMPILE_AVX512VNNI
 static int64 PGTURBOHYBRID_GRAPH_AVX512VNNI_TARGET
 PgturbohybridGraphQuerySplitU8RawAvx512Vnni(const PgturbohybridGraphTqQuery *tq, const uint8 *code);
+static void PGTURBOHYBRID_GRAPH_AVX512VNNI_TARGET
+PgturbohybridGraphQuerySplitU8RawAvx512Vnnix4(const PgturbohybridGraphTqQuery *tq,
+											  const uint8 *codes[4], int64 raw[4]);
 #endif
 #endif
 
@@ -698,6 +704,38 @@ PgturbohybridGraphPackedDistanceU8Split(const PgturbohybridGraphTqQuery *tq, con
 		return false;
 
 	*distance = PgturbohybridGraphU8DistanceFromRaw(tq, valueScale, rawDot);
+	return true;
+}
+
+/*
+ * 4-candidate u8 split: one x4 raw kernel call (shared query loads) + per-code
+ * postprocess.  Same gate and result as four PgturbohybridGraphPackedDistanceU8Split
+ * calls; used by the batch-of-4 native scorer.
+ */
+static bool
+PgturbohybridGraphPackedDistanceU8Splitx4(const PgturbohybridGraphTqQuery *tq,
+										  const uint8 *codes[4], const float scales[4],
+										  double dist[4])
+{
+	int64		raw[4];
+	TqScoreMode mode = (TqScoreMode) tq->scoreMode;
+
+	if (!tq->u8SplitEnabled || tq->dimensions < 1024 ||
+		tq->bits != PGTURBOHYBRID_DEFAULT_BITS || mode == PGTURBOHYBRID_SCORE_L1)
+		return false;
+
+#if PGTURBOHYBRID_GRAPH_COMPILE_AVX512VNNI
+	if (PgturbohybridGraphAvx512VnniAvailable())
+		PgturbohybridGraphQuerySplitU8RawAvx512Vnnix4(tq, codes, raw);
+	else
+#endif
+	if (PgturbohybridGraphAvx2Available())
+		PgturbohybridGraphQuerySplitU8RawAvx2x4(tq, codes, raw);
+	else
+		return false;
+
+	for (int c = 0; c < 4; c++)
+		dist[c] = PgturbohybridGraphU8DistanceFromRaw(tq, scales[c], raw[c]);
 	return true;
 }
 #endif
@@ -949,6 +987,53 @@ PgturbohybridGraphTqCodeU8SimdDistance(const PgturbohybridGraphTqQuery *tq,
 									   const uint8 *valueCode, float valueScale, double *distance)
 {
 	return PgturbohybridGraphPackedDistanceU8Split(tq, valueCode, valueScale, distance);
+}
+
+/*
+ * Score a single code through the x4 batch kernel (4 identical copies), for
+ * parity testing that the x4 path equals the single-node path bit-for-bit.
+ */
+bool
+PgturbohybridGraphTqCodeU8Simdx4Distance(const PgturbohybridGraphTqQuery *tq,
+										 const uint8 *valueCode, float valueScale, double *distance)
+{
+#if PGTURBOHYBRID_GRAPH_COMPILE_AVX2
+	const uint8 *codes[4] = {valueCode, valueCode, valueCode, valueCode};
+	float		scales[4] = {valueScale, valueScale, valueScale, valueScale};
+	double		dist[4];
+
+	if (PgturbohybridGraphPackedDistanceU8Splitx4(tq, codes, scales, dist))
+	{
+		*distance = dist[0];
+		return true;
+	}
+#endif
+	(void) tq;
+	(void) valueCode;
+	(void) valueScale;
+	(void) distance;
+	return false;
+}
+
+/*
+ * Score four distinct codes through the x4 batch kernel in one call (shared
+ * query loads).  Diagnostic/bench entry point that drives the real 4-candidate
+ * batch the native scorer uses, rather than four single-node calls.
+ */
+bool
+PgturbohybridGraphTqCodeU8Simdx4Batch(const PgturbohybridGraphTqQuery *tq,
+									  const uint8 *codes[4], const float scales[4],
+									  double dist[4])
+{
+#if PGTURBOHYBRID_GRAPH_COMPILE_AVX2
+	return PgturbohybridGraphPackedDistanceU8Splitx4(tq, codes, scales, dist);
+#else
+	(void) tq;
+	(void) codes;
+	(void) scales;
+	(void) dist;
+	return false;
+#endif
 }
 
 bool
@@ -1645,6 +1730,91 @@ PgturbohybridGraphQuerySplitU8RawAvx2(const PgturbohybridGraphTqQuery *tq, const
 	return dotLow + (int64) PGTURBOHYBRID_U8_SPLIT_HIGH_COEF * dotHigh;
 }
 
+/*
+ * True 4-candidate AVX2 u8 batch: loads each query [low|high] chunk once and
+ * decodes/accumulates four codes against it (4 accumulators), instead of
+ * walking the whole query four times.  Bit-identical to four single-node
+ * PgturbohybridGraphQuerySplitU8RawAvx2() calls.
+ */
+static void PGTURBOHYBRID_GRAPH_AVX2_TARGET
+PgturbohybridGraphQuerySplitU8RawAvx2x4(const PgturbohybridGraphTqQuery *tq,
+										const uint8 *codes[4], int64 raw[4])
+{
+	const __m128i mask = _mm_set1_epi8(0x0f);
+	const __m128i cbU8 = _mm_loadu_si128((const __m128i *) PgturbohybridGraphCodebookU8);
+	const __m256i ones = _mm256_set1_epi16(1);
+	const __m128i ones128 = _mm_set1_epi16(1);
+	__m256i		acc[4];
+	__m128i		accLow128[4];
+	__m128i		accHigh128[4];
+
+	for (int c = 0; c < 4; c++)
+	{
+		acc[c] = _mm256_setzero_si256();
+		accLow128[c] = _mm_setzero_si128();
+		accHigh128[c] = _mm_setzero_si128();
+	}
+
+	for (int chunk = 0; chunk < tq->querySplitChunks; chunk++)
+	{
+		__m256i		lh = _mm256_loadu_si256((const __m256i *) (tq->u8SplitData + chunk * 32));
+
+		for (int c = 0; c < 4; c++)
+		{
+			__m128i		packed = _mm_loadl_epi64((const __m128i *) (codes[c] + chunk * 8));
+			__m128i		lo = _mm_and_si128(packed, mask);
+			__m128i		hi = _mm_and_si128(_mm_srli_epi16(packed, 4), mask);
+			__m128i		idx = _mm_unpacklo_epi8(lo, hi);
+			__m128i		cvals = _mm_shuffle_epi8(cbU8, idx);
+			__m256i		c256 = _mm256_broadcastsi128_si256(cvals);
+
+			acc[c] = _mm256_add_epi32(acc[c], _mm256_madd_epi16(_mm256_maddubs_epi16(c256, lh), ones));
+		}
+	}
+
+	if (tq->querySplitTailDims != 0)
+	{
+		int			tailBytes = (tq->querySplitTailDims + 1) / 2;
+		__m128i		lowv = _mm_loadu_si128((const __m128i *) tq->u8SplitTailLow);
+		__m128i		highv = _mm_loadu_si128((const __m128i *) tq->u8SplitTailHigh);
+
+		for (int c = 0; c < 4; c++)
+		{
+			uint8		scratch[8] = {0};
+			__m128i		packed;
+			__m128i		lo;
+			__m128i		hi;
+			__m128i		idx;
+			__m128i		cvals;
+
+			memcpy(scratch, codes[c] + tq->querySplitChunks * 8, tailBytes);
+			packed = _mm_loadl_epi64((const __m128i *) scratch);
+			lo = _mm_and_si128(packed, mask);
+			hi = _mm_and_si128(_mm_srli_epi16(packed, 4), mask);
+			idx = _mm_unpacklo_epi8(lo, hi);
+			cvals = _mm_shuffle_epi8(cbU8, idx);
+			accLow128[c] = _mm_add_epi32(accLow128[c], _mm_madd_epi16(_mm_maddubs_epi16(cvals, lowv), ones128));
+			accHigh128[c] = _mm_add_epi32(accHigh128[c], _mm_madd_epi16(_mm_maddubs_epi16(cvals, highv), ones128));
+		}
+	}
+
+	for (int c = 0; c < 4; c++)
+	{
+		int32		s[8];
+		int32		sl[4];
+		int32		sh[4];
+		int64		dotLow;
+		int64		dotHigh;
+
+		_mm256_storeu_si256((__m256i *) s, acc[c]);
+		_mm_storeu_si128((__m128i *) sl, accLow128[c]);
+		_mm_storeu_si128((__m128i *) sh, accHigh128[c]);
+		dotLow = (int64) s[0] + s[1] + s[2] + s[3] + sl[0] + sl[1] + sl[2] + sl[3];
+		dotHigh = (int64) s[4] + s[5] + s[6] + s[7] + sh[0] + sh[1] + sh[2] + sh[3];
+		raw[c] = dotLow + (int64) PGTURBOHYBRID_U8_SPLIT_HIGH_COEF * dotHigh;
+	}
+}
+
 #if PGTURBOHYBRID_GRAPH_COMPILE_AVX512VNNI
 /*
  * AVX-512 VNNI: two [low|high] chunks (64 bytes) per VPDPBUSD.  ZMM 128-lanes
@@ -1736,6 +1906,116 @@ PgturbohybridGraphQuerySplitU8RawAvx512Vnni(const PgturbohybridGraphTqQuery *tq,
 	_mm_storeu_si128((__m128i *) sh, sumHigh);
 	return ((int64) sl[0] + sl[1] + sl[2] + sl[3]) +
 		(int64) PGTURBOHYBRID_U8_SPLIT_HIGH_COEF * ((int64) sh[0] + sh[1] + sh[2] + sh[3]);
+}
+
+/*
+ * True 4-candidate AVX-512 VNNI u8 batch: each 64-byte query pair is loaded once
+ * and dpbusd'd against four decoded codes (4 accumulators).  Bit-identical to
+ * four single-node PgturbohybridGraphQuerySplitU8RawAvx512Vnni() calls.
+ */
+static void PGTURBOHYBRID_GRAPH_AVX512VNNI_TARGET
+PgturbohybridGraphQuerySplitU8RawAvx512Vnnix4(const PgturbohybridGraphTqQuery *tq,
+											  const uint8 *codes[4], int64 raw[4])
+{
+	const __m128i mask = _mm_set1_epi8(0x0f);
+	const __m128i cbU8 = _mm_loadu_si128((const __m128i *) PgturbohybridGraphCodebookU8);
+	const __m512i cb512 = _mm512_broadcast_i32x4(cbU8);
+	const __m128i ones128 = _mm_set1_epi16(1);
+	__m512i		acc[4];
+	__m128i		sumLow[4];
+	__m128i		sumHigh[4];
+	int			chunks = tq->querySplitChunks;
+	int			nPairs = chunks / 2;
+
+	for (int c = 0; c < 4; c++)
+		acc[c] = _mm512_setzero_si512();
+
+	for (int i = 0; i < nPairs; i++)
+	{
+		__m512i		lh = _mm512_loadu_si512((const __m512i *) (tq->u8SplitData + i * 64));
+
+		for (int c = 0; c < 4; c++)
+		{
+			__m128i		packed = _mm_loadu_si128((const __m128i *) (codes[c] + i * 16));
+			__m128i		lo = _mm_and_si128(packed, mask);
+			__m128i		hi = _mm_and_si128(_mm_srli_epi16(packed, 4), mask);
+			__m128i		va = _mm_unpacklo_epi8(lo, hi);
+			__m128i		vb = _mm_unpackhi_epi8(lo, hi);
+			__m256i		vaDup = _mm256_broadcastsi128_si256(va);
+			__m256i		vbDup = _mm256_broadcastsi128_si256(vb);
+			__m512i		v512 = _mm512_inserti64x4(_mm512_castsi256_si512(vaDup), vbDup, 1);
+			__m512i		c512 = _mm512_shuffle_epi8(cb512, v512);
+
+			acc[c] = _mm512_dpbusd_epi32(acc[c], c512, lh);
+		}
+	}
+
+	for (int c = 0; c < 4; c++)
+	{
+		__m256i		lo256 = _mm512_castsi512_si256(acc[c]);
+		__m256i		hi256 = _mm512_extracti64x4_epi64(acc[c], 1);
+
+		sumLow[c] = _mm_add_epi32(_mm256_castsi256_si128(lo256),
+								  _mm256_castsi256_si128(hi256));
+		sumHigh[c] = _mm_add_epi32(_mm256_extracti128_si256(lo256, 1),
+								   _mm256_extracti128_si256(hi256, 1));
+	}
+
+	if (chunks & 1)
+	{
+		int			chunk = nPairs * 2;
+		__m128i		lowv = _mm_loadu_si128((const __m128i *) (tq->u8SplitData + chunk * 32));
+		__m128i		highv = _mm_loadu_si128((const __m128i *) (tq->u8SplitData + chunk * 32 + 16));
+
+		for (int c = 0; c < 4; c++)
+		{
+			__m128i		packed = _mm_loadl_epi64((const __m128i *) (codes[c] + chunk * 8));
+			__m128i		lo = _mm_and_si128(packed, mask);
+			__m128i		hi = _mm_and_si128(_mm_srli_epi16(packed, 4), mask);
+			__m128i		idx = _mm_unpacklo_epi8(lo, hi);
+			__m128i		cvals = _mm_shuffle_epi8(cbU8, idx);
+
+			sumLow[c] = _mm_add_epi32(sumLow[c], _mm_madd_epi16(_mm_maddubs_epi16(cvals, lowv), ones128));
+			sumHigh[c] = _mm_add_epi32(sumHigh[c], _mm_madd_epi16(_mm_maddubs_epi16(cvals, highv), ones128));
+		}
+	}
+
+	if (tq->querySplitTailDims != 0)
+	{
+		int			tailBytes = (tq->querySplitTailDims + 1) / 2;
+		__m128i		lowv = _mm_loadu_si128((const __m128i *) tq->u8SplitTailLow);
+		__m128i		highv = _mm_loadu_si128((const __m128i *) tq->u8SplitTailHigh);
+
+		for (int c = 0; c < 4; c++)
+		{
+			uint8		scratch[8] = {0};
+			__m128i		packed;
+			__m128i		lo;
+			__m128i		hi;
+			__m128i		idx;
+			__m128i		cvals;
+
+			memcpy(scratch, codes[c] + tq->querySplitChunks * 8, tailBytes);
+			packed = _mm_loadl_epi64((const __m128i *) scratch);
+			lo = _mm_and_si128(packed, mask);
+			hi = _mm_and_si128(_mm_srli_epi16(packed, 4), mask);
+			idx = _mm_unpacklo_epi8(lo, hi);
+			cvals = _mm_shuffle_epi8(cbU8, idx);
+			sumLow[c] = _mm_add_epi32(sumLow[c], _mm_madd_epi16(_mm_maddubs_epi16(cvals, lowv), ones128));
+			sumHigh[c] = _mm_add_epi32(sumHigh[c], _mm_madd_epi16(_mm_maddubs_epi16(cvals, highv), ones128));
+		}
+	}
+
+	for (int c = 0; c < 4; c++)
+	{
+		int32		sl[4];
+		int32		sh[4];
+
+		_mm_storeu_si128((__m128i *) sl, sumLow[c]);
+		_mm_storeu_si128((__m128i *) sh, sumHigh[c]);
+		raw[c] = ((int64) sl[0] + sl[1] + sl[2] + sl[3]) +
+			(int64) PGTURBOHYBRID_U8_SPLIT_HIGH_COEF * ((int64) sh[0] + sh[1] + sh[2] + sh[3]);
+	}
 }
 #endif
 
@@ -5162,12 +5442,25 @@ PgturbohybridGraphScoreNodeBatchQuerySplit2(PgturbohybridGraphScanOpaque so,
 #if PGTURBOHYBRID_GRAPH_COMPILE_AVX2
 /*
  * Batch (groups of 4) unsigned-codebook scorer.  Used when the u8 split was
- * prepared for this query.  The raw maddubs/VPDPBUSD kernel is resolved once
- * for the whole batch (AVX-512 VNNI when available, else AVX2 maddubs), and the
- * postprocess multiplies by the query-side reciprocals precomputed in
- * TqPrepareQueryU8Split.  So the per-node loop has no sqrt(), no gating
- * re-check, and no per-node kernel branch -- unlike the old path that called
- * the single-node PgturbohybridGraphPackedDistanceU8Split four times.
+ * prepared for this query.  The raw maddubs/VPDPBUSD kernel and the
+ * query-side reciprocal postprocess (precomputed in TqPrepareQueryU8Split) are
+ * resolved once per node, so the loop carries no sqrt(), no gating re-check,
+ * and no per-node kernel branch.
+ *
+ * By default (turbohybrid.dense_u8_batch_x4) the four codes are scored by the
+ * true 4-candidate x4 kernel in a single pass: the query [low|high] data is
+ * loaded once rather than four times, and the four code loads -- which in a
+ * real scan point at four scattered graph neighbours -- are issued together so
+ * their memory latency overlaps (memory-level parallelism) instead of being
+ * serialized one full code at a time.  Kernel ns/code on amd64 (Ice Lake VNNI)
+ * over a scattered access pattern (turbohybrid_scorer_bench): ~tied in the
+ * compute-bound 10k regime (~1.0-1.05x, codes cache-resident) and ~1.4x faster
+ * in the memory-bound 1M regime, where the win comes from.  At the 10k scan
+ * level the two are within measurement noise, as expected when codes are
+ * cache-resident and the kernel is a small slice of total scan latency.
+ * Turning the knob off falls back to four single-node passes; that path is kept
+ * for parity testing and as an escape hatch for microarchitectures where the
+ * batch does not win.
  */
 static bool
 PgturbohybridGraphScoreNodeBatchU8Split(PgturbohybridGraphScanOpaque so,
@@ -5175,36 +5468,37 @@ PgturbohybridGraphScoreNodeBatchU8Split(PgturbohybridGraphScanOpaque so,
 										uint32 *nodeIds, double *distances)
 {
 	const PgturbohybridGraphTqQuery *tq = &so->tq;
+	const uint8 *codes[4];
+	float		scales[4];
 
 	if (!tq->u8SplitEnabled)
 		return false;
 
 	/* All four must carry a packed code, else let the caller fall back. */
 	for (int j = 0; j < 4; j++)
-		if (storage->nodes[nodeIds[j]].code == NULL)
-			return false;
-
-#if PGTURBOHYBRID_GRAPH_COMPILE_AVX512VNNI
-	if (PgturbohybridGraphAvx512VnniAvailable())
 	{
-		for (int j = 0; j < 4; j++)
-		{
-			PgturbohybridGraphScanNode *node = &storage->nodes[nodeIds[j]];
+		PgturbohybridGraphScanNode *node = &storage->nodes[nodeIds[j]];
 
-			distances[j] = PgturbohybridGraphU8DistanceFromRaw(tq, node->scale,
-				PgturbohybridGraphQuerySplitU8RawAvx512Vnni(tq, node->code));
-		}
+		if (node->code == NULL)
+			return false;
+		codes[j] = node->code;
+		scales[j] = node->scale;
+	}
+
+	if (pgturbohybrid_dense_u8_batch_x4)
+	{
+		/* Experimental x4 batch: one kernel pass, query loads shared. */
+		if (!PgturbohybridGraphPackedDistanceU8Splitx4(tq, codes, scales, distances))
+			return false;
 	}
 	else
-#endif
 	{
-		/* u8SplitEnabled implies AVX2 is available (PgturbohybridGraphTqUseU8Split). */
+		/* Default: four single-node passes (faster -- see header comment). */
 		for (int j = 0; j < 4; j++)
 		{
-			PgturbohybridGraphScanNode *node = &storage->nodes[nodeIds[j]];
-
-			distances[j] = PgturbohybridGraphU8DistanceFromRaw(tq, node->scale,
-				PgturbohybridGraphQuerySplitU8RawAvx2(tq, node->code));
+			if (!PgturbohybridGraphPackedDistanceU8Split(tq, codes[j], scales[j],
+														 &distances[j]))
+				return false;
 		}
 	}
 
