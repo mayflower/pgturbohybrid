@@ -144,7 +144,6 @@ bool		pgturbohybrid_dense_query_1bit_asymmetric = false;
 int			pgturbohybrid_dense_query_1bit_asymmetric_bits = 8;
 bool		pgturbohybrid_dense_build_exact_distances = false;
 bool		pgturbohybrid_dense_hadamard_simd = true;
-bool		pgturbohybrid_dense_exact_avx512 = false;
 int			pgturbohybrid_dense_simd_force = PGTURBOHYBRID_SIMD_FORCE_AUTO;
 int			pgturbohybrid_dense_exact_simd_force = PGTURBOHYBRID_EXACT_SIMD_FORCE_AUTO;
 int			pgturbohybrid_dense_graph_batch_scoring = PGTURBOHYBRID_GRAPH_BATCH_AUTO;

@@ -228,6 +228,8 @@ Useful fields include:
 - `scan_orchestration`
 - `quantization_bits`
 - `exact_storage`
+- SIMD fields such as `runtime_avx2`, `enabled_avx512vnni`, and
+  `simd_force`
 - `dense_candidates_effective`
 - `bm25_candidates_effective`
 - `final_k_source`

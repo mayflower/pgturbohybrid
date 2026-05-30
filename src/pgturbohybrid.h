@@ -216,7 +216,6 @@ extern bool pgturbohybrid_dense_query_1bit_asymmetric;
 extern int	pgturbohybrid_dense_query_1bit_asymmetric_bits;
 extern bool pgturbohybrid_dense_build_exact_distances;
 extern bool pgturbohybrid_dense_hadamard_simd;
-extern bool pgturbohybrid_dense_exact_avx512;
 extern int	pgturbohybrid_dense_simd_force;
 extern int	pgturbohybrid_dense_exact_simd_force;
 extern int	pgturbohybrid_dense_graph_batch_scoring;
@@ -357,8 +356,7 @@ typedef enum TqExactSimdForce
 {
 	PGTURBOHYBRID_EXACT_SIMD_FORCE_AUTO,
 	PGTURBOHYBRID_EXACT_SIMD_FORCE_SCALAR,
-	PGTURBOHYBRID_EXACT_SIMD_FORCE_NEON,
-	PGTURBOHYBRID_EXACT_SIMD_FORCE_AVX512F
+	PGTURBOHYBRID_EXACT_SIMD_FORCE_NEON
 }			TqExactSimdForce;
 
 typedef enum TqExactKernel
@@ -366,8 +364,7 @@ typedef enum TqExactKernel
 	PGTURBOHYBRID_EXACT_KERNEL_SCALAR,
 	PGTURBOHYBRID_EXACT_KERNEL_AUTOVEC_FMA,
 	PGTURBOHYBRID_EXACT_KERNEL_NEON,
-	PGTURBOHYBRID_EXACT_KERNEL_AVX2,
-	PGTURBOHYBRID_EXACT_KERNEL_AVX512F
+	PGTURBOHYBRID_EXACT_KERNEL_AVX2
 }			TqExactKernel;
 
 typedef enum PgturbohybridGraphBatchScoringMode

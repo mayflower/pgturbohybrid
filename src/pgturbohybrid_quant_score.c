@@ -914,8 +914,8 @@ PgturbohybridGraphBuildCodeCodeDistanceScalar(PgturbohybridQuantBuildState *stat
  * width is 2 or 4.  Falls
  * through to the unweighted scorer otherwise.
  *
- * Build-time weighted scoring uses the scalar path.  SIMD kernels are kept
- * on the scan path where they affect query latency.
+ * Build-time weighted scoring may use SIMD when the private weighted scorer
+ * policy is enabled and the host supports the selected kernel.
  */
 static bool
 PgturbohybridGraphBuildCodeCodeWeighted(PgturbohybridQuantBuildState *state, uint32 a, uint32 b,
@@ -2733,8 +2733,7 @@ PgturbohybridGraphExactVectorDistance(PgturbohybridGraphScanOpaque so, Datum que
 	}
 #endif
 #if !defined(PGTURBOHYBRID_DISABLE_SIMD) && (defined(__aarch64__) || defined(_M_ARM64))
-	if (pgturbohybrid_dense_exact_simd_force == PGTURBOHYBRID_EXACT_SIMD_FORCE_SCALAR ||
-		pgturbohybrid_dense_exact_simd_force == PGTURBOHYBRID_EXACT_SIMD_FORCE_AVX512F)
+	if (pgturbohybrid_dense_exact_simd_force == PGTURBOHYBRID_EXACT_SIMD_FORCE_SCALAR)
 		goto scalar_exact_distance;
 
 	if (mode == PGTURBOHYBRID_SCORE_L2)
@@ -3164,19 +3163,14 @@ PgturbohybridGraphAsymBit1Avx2RawScore(const PgturbohybridGraphTqQuery *tq, cons
 
 #if PGTURBOHYBRID_GRAPH_COMPILE_AVX512VPOPCNTDQ
 /*
- * AVX-512 VPOPCNTDQ kernel — native `_mm512_popcnt_epi8`
- * processes 64 bytes per cycle (~1 cycle throughput on Ice Lake / SPR).
+ * AVX-512 VPOPCNTDQ kernel for 1-bit asymmetric scoring.
  *
  * Layout: one block is 16 bytes of data and `BITS` × 16 bytes of plane.
  * For BITS = 8 the planes fit in one 128-byte chunk = two ZMM loads;
  * we process each plane as a single 16-byte load broadcast / AND with
  * data, popcount, accumulate.  This is the same per-plane work as the
- * AVX2 path but `_mm512_popcnt_epi8` replaces the pshufb nibble-lookup
- * popcount with a single uop.
- *
- * Hardware validation: compile + scalar parity only on this i7-12800H
- * (Alder Lake doesn't have AVX-512).  Runtime exercise needs an
- * Ice Lake / SPR / Tiger Lake-H35 host.
+ * AVX2 path, but VPOPCNTDQ replaces the pshufb nibble-lookup popcount
+ * with per-qword popcount over the two meaningful qword lanes.
  */
 static float PGTURBOHYBRID_GRAPH_AVX512VPOPCNTDQ_TARGET
 PgturbohybridGraphAsymBit1Avx512VpopcntdqRawScore(const PgturbohybridGraphTqQuery *tq, const uint8 *code)
@@ -3278,14 +3272,16 @@ PgturbohybridGraphAvx512VpopcntdqAvailable(void)
 	if (available >= 0)
 		return available != 0;
 
-#if defined(__AVX512VPOPCNTDQ__)
+#if defined(__AVX512VPOPCNTDQ__) && defined(__AVX512BW__) && defined(__AVX512F__)
 	available = 1;
 #elif PGTURBOHYBRID_GRAPH_X86 && (defined(__GNUC__) || defined(__clang__))
 	/*
-	 * __builtin_cpu_supports("avx512vpopcntdq") needs GCC 8+/Clang 8+;
-	 * both gates the parent COMPILE flag already requires.
+	 * The runtime probe mirrors the target attribute so the dispatcher only
+	 * enters code that the host can execute.
 	 */
-	available = __builtin_cpu_supports("avx512vpopcntdq") ? 1 : 0;
+	available = __builtin_cpu_supports("avx512vpopcntdq") &&
+		__builtin_cpu_supports("avx512bw") &&
+		__builtin_cpu_supports("avx512f") ? 1 : 0;
 #else
 	available = 0;
 #endif

@@ -1101,6 +1101,7 @@ BEGIN
 
 	IF keys <> ARRAY[
 		'architecture',
+		'avx512_weighted_policy',
 		'compile_arm_dotprod',
 		'compile_arm_i8mm',
 		'compile_avx2',
@@ -1108,7 +1109,15 @@ BEGIN
 		'compile_avx512vnni',
 		'compile_avx512vpopcntdq',
 		'compile_avxvnni',
+		'enabled_avx512_weighted',
+		'enabled_avx512vnni',
+		'enabled_avx512vpopcntdq',
+		'runtime_avx2',
+		'runtime_avx512_weighted',
+		'runtime_avx512vnni',
+		'runtime_avx512vpopcntdq',
 		'simd_build_disabled',
+		'simd_force',
 		'version'
 	] THEN
 		RAISE EXCEPTION 'unexpected pgturbohybrid SIMD capability keys: %', keys;

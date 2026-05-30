@@ -191,12 +191,9 @@ TqExpectedExactKernel(void)
 	if (pgturbohybrid_dense_exact_simd_force == PGTURBOHYBRID_EXACT_SIMD_FORCE_SCALAR)
 		return PGTURBOHYBRID_EXACT_KERNEL_SCALAR;
 #if !defined(PGTURBOHYBRID_DISABLE_SIMD) && (defined(__aarch64__) || defined(_M_ARM64))
-	if (pgturbohybrid_dense_exact_simd_force != PGTURBOHYBRID_EXACT_SIMD_FORCE_AVX512F)
-		return PGTURBOHYBRID_EXACT_KERNEL_NEON;
+	return PGTURBOHYBRID_EXACT_KERNEL_NEON;
 #endif
 #if !defined(PGTURBOHYBRID_DISABLE_SIMD) && defined(__x86_64__)
-	if (pgturbohybrid_dense_exact_simd_force == PGTURBOHYBRID_EXACT_SIMD_FORCE_AVX512F)
-		return PGTURBOHYBRID_EXACT_KERNEL_AVX512F;
 	return PGTURBOHYBRID_EXACT_KERNEL_AVX2;
 #endif
 	return PGTURBOHYBRID_EXACT_KERNEL_AUTOVEC_FMA;
@@ -405,12 +402,11 @@ TqExactKernelName(int kernel)
 			return "neon";
 		case PGTURBOHYBRID_EXACT_KERNEL_AVX2:
 			return "avx2";
-		case PGTURBOHYBRID_EXACT_KERNEL_AVX512F:
-			return "avx512f";
 		default:
 			return "unknown";
 	}
 }
+#endif
 
 static const char *
 PgturbohybridGraphAvx512WeightedModeName(int mode)
@@ -427,6 +423,7 @@ PgturbohybridGraphAvx512WeightedModeName(int mode)
 	}
 }
 
+#ifdef PGTURBOHYBRID_DEV_DIAGNOSTICS
 static Datum pgturbohybrid_last_simd_stats(PG_FUNCTION_ARGS) pg_attribute_unused();
 #endif
 
@@ -619,6 +616,13 @@ pgturbohybrid_simd_capabilities(PG_FUNCTION_ARGS)
 	bool		compileAvxvnni;
 	bool		compileArmDotprod;
 	bool		compileArmI8mm;
+	bool		runtimeAvx2 = false;
+	bool		runtimeAvx512Vnni = false;
+	bool		runtimeAvx512Vpopcntdq = false;
+	bool		runtimeAvx512Weighted = false;
+	bool		enabledAvx512Vnni = false;
+	bool		enabledAvx512Vpopcntdq = false;
+	bool		enabledAvx512Weighted = false;
 
 #if defined(__aarch64__) || defined(_M_ARM64)
 	architecture = "arm64";
@@ -664,11 +668,59 @@ pgturbohybrid_simd_capabilities(PG_FUNCTION_ARGS)
 	compileArmDotprod = false;
 	compileArmI8mm = false;
 #endif
+#if !defined(PGTURBOHYBRID_DISABLE_SIMD) && defined(__x86_64__) && (defined(__GNUC__) || defined(__clang__))
+#if defined(__AVX2__)
+	runtimeAvx2 = compileAvx2;
+#else
+	runtimeAvx2 = compileAvx2 && __builtin_cpu_supports("avx2");
+#endif
+#if defined(__AVX512VNNI__) && defined(__AVX512VL__) && defined(__AVX512BW__)
+	runtimeAvx512Vnni = compileAvx512Vnni;
+#else
+	runtimeAvx512Vnni = compileAvx512Vnni &&
+		__builtin_cpu_supports("avx512vnni") &&
+		__builtin_cpu_supports("avx512vl") &&
+		__builtin_cpu_supports("avx512bw");
+#endif
+#if defined(__AVX512VPOPCNTDQ__) && defined(__AVX512BW__) && defined(__AVX512F__)
+	runtimeAvx512Vpopcntdq = compileAvx512Vpopcntdq;
+#else
+	runtimeAvx512Vpopcntdq = compileAvx512Vpopcntdq &&
+		__builtin_cpu_supports("avx512vpopcntdq") &&
+		__builtin_cpu_supports("avx512bw") &&
+		__builtin_cpu_supports("avx512f");
+#endif
+#if defined(__AVX512F__) && defined(__AVX512BW__) && defined(__AVX512DQ__) && defined(__AVX512VL__)
+	runtimeAvx512Weighted = compileAvx512Weighted;
+#else
+	runtimeAvx512Weighted = compileAvx512Weighted &&
+		__builtin_cpu_supports("avx512f") &&
+		__builtin_cpu_supports("avx512bw") &&
+		__builtin_cpu_supports("avx512dq") &&
+		__builtin_cpu_supports("avx512vl");
+#endif
+#endif
+	enabledAvx512Vnni = runtimeAvx512Vnni &&
+		pgturbohybrid_dense_graph_avx512vnni &&
+		(pgturbohybrid_dense_simd_force == PGTURBOHYBRID_SIMD_FORCE_AUTO ||
+		 pgturbohybrid_dense_simd_force == PGTURBOHYBRID_SIMD_FORCE_AVX512VNNI);
+	enabledAvx512Vpopcntdq = runtimeAvx512Vpopcntdq &&
+		pgturbohybrid_dense_graph_avx512vpopcntdq &&
+		(pgturbohybrid_dense_simd_force == PGTURBOHYBRID_SIMD_FORCE_AUTO ||
+		 pgturbohybrid_dense_simd_force == PGTURBOHYBRID_SIMD_FORCE_AVX512VNNI);
+	enabledAvx512Weighted = runtimeAvx512Weighted &&
+		pgturbohybrid_dense_graph_avx512_weighted != PGTURBOHYBRID_GRAPH_AVX512_WEIGHTED_OFF &&
+		(pgturbohybrid_dense_simd_force == PGTURBOHYBRID_SIMD_FORCE_AUTO ||
+		 pgturbohybrid_dense_simd_force == PGTURBOHYBRID_SIMD_FORCE_AVX512VNNI);
 
 	PgturbohybridJsonbStateInit(&state);
 	PgturbohybridJsonbBeginObject(&state);
 	PgturbohybridJsonbAddInt64(&state, "version", 1);
 	PgturbohybridJsonbAddString(&state, "architecture", architecture);
+	PgturbohybridJsonbAddString(&state, "simd_force",
+								PgturbohybridGraphTqSimdForceName(pgturbohybrid_dense_simd_force));
+	PgturbohybridJsonbAddString(&state, "avx512_weighted_policy",
+								PgturbohybridGraphAvx512WeightedModeName(pgturbohybrid_dense_graph_avx512_weighted));
 	PgturbohybridJsonbAddBool(&state, "simd_build_disabled", simdBuildDisabled);
 	PgturbohybridJsonbAddBool(&state, "compile_avx2", compileAvx2);
 	PgturbohybridJsonbAddBool(&state, "compile_avx512vnni", compileAvx512Vnni);
@@ -677,6 +729,13 @@ pgturbohybrid_simd_capabilities(PG_FUNCTION_ARGS)
 	PgturbohybridJsonbAddBool(&state, "compile_avxvnni", compileAvxvnni);
 	PgturbohybridJsonbAddBool(&state, "compile_arm_dotprod", compileArmDotprod);
 	PgturbohybridJsonbAddBool(&state, "compile_arm_i8mm", compileArmI8mm);
+	PgturbohybridJsonbAddBool(&state, "runtime_avx2", runtimeAvx2);
+	PgturbohybridJsonbAddBool(&state, "runtime_avx512vnni", runtimeAvx512Vnni);
+	PgturbohybridJsonbAddBool(&state, "runtime_avx512vpopcntdq", runtimeAvx512Vpopcntdq);
+	PgturbohybridJsonbAddBool(&state, "runtime_avx512_weighted", runtimeAvx512Weighted);
+	PgturbohybridJsonbAddBool(&state, "enabled_avx512vnni", enabledAvx512Vnni);
+	PgturbohybridJsonbAddBool(&state, "enabled_avx512vpopcntdq", enabledAvx512Vpopcntdq);
+	PgturbohybridJsonbAddBool(&state, "enabled_avx512_weighted", enabledAvx512Weighted);
 	PG_RETURN_JSONB_P(PgturbohybridJsonbEndObject(&state));
 }
 
