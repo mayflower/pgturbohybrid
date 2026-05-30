@@ -967,13 +967,17 @@ PgturbohybridGraphBuildCodeCodeDistance2(PgturbohybridQuantBuildState *state, ui
 }
 #endif
 
-#if PGTURBOHYBRID_GRAPH_COMPILE_AVX2
 /*
  * Diagnostic/test entry points: score one code under a specific 4-bit scorer
- * for an already-prepared tq (signed split, unsigned-codebook SIMD, or the
- * unsigned-codebook scalar reference).  Used by turbohybrid_scorer_distances
- * to prove cross-kernel and cross-representation parity.
+ * for an already-prepared tq, to prove cross-kernel and cross-representation
+ * parity from turbohybrid_scorer_distances.
+ *
+ * The signed-split entry is gated on QUERY_SPLIT (any of ARM dotprod / AVX2 /
+ * AVX-VNNI / AVX-512), not AVX2 alone: it calls the query-split helpers, which
+ * are compiled under that same gate and run on arm64 (NEON dotprod) too, and
+ * turbohybrid_scorer_distances references it on arm64.
  */
+#if PGTURBOHYBRID_GRAPH_COMPILE_QUERY_SPLIT
 bool
 PgturbohybridGraphTqCodeSignedSplitDistance(const PgturbohybridGraphTqQuery *tq,
 											const uint8 *valueCode, float valueScale, double *distance)
@@ -981,7 +985,14 @@ PgturbohybridGraphTqCodeSignedSplitDistance(const PgturbohybridGraphTqQuery *tq,
 	return PgturbohybridGraphPackedDistanceQuerySplit4(tq, valueCode, valueScale, distance) ||
 		PgturbohybridGraphPackedDistanceQuerySplit2(tq, valueCode, valueScale, distance);
 }
+#endif
 
+/*
+ * The unsigned-codebook (U8) split entry points wrap the x86-only U8 kernel
+ * (PgturbohybridGraphPackedDistanceU8Split / ...U8DistanceFromRaw), so they stay
+ * AVX2-gated; on non-x86 they are simply absent.
+ */
+#if PGTURBOHYBRID_GRAPH_COMPILE_AVX2
 bool
 PgturbohybridGraphTqCodeU8SimdDistance(const PgturbohybridGraphTqQuery *tq,
 									   const uint8 *valueCode, float valueScale, double *distance)
@@ -4633,7 +4644,10 @@ PgturbohybridGraphSignedSplitBatchBucket(int scoringKernel)
 }
 
 /* The unsigned-codebook split runs the maddubs (AVX2) or VPDPBUSD
- * (AVX-512-VNNI) kernel; map by the selected SIMD kernel. */
+ * (AVX-512-VNNI) kernel; map by the selected SIMD kernel.  Gated to the AVX2
+ * compile path -- its only caller is the U8-split batch scorer below, which is
+ * AVX2-only -- so non-x86 builds don't carry it as an unused function. */
+#if PGTURBOHYBRID_GRAPH_COMPILE_AVX2
 static inline int
 PgturbohybridGraphU8SplitBatchBucket(int scoringKernel)
 {
@@ -4641,6 +4655,7 @@ PgturbohybridGraphU8SplitBatchBucket(int scoringKernel)
 		? PGTURBOHYBRID_SCORE_KERNEL_BATCH_U8_SPLIT_AVX512VNNI
 		: PGTURBOHYBRID_SCORE_KERNEL_BATCH_U8_SPLIT_AVX2;
 }
+#endif
 
 double
 PgturbohybridGraphScoreNode(PgturbohybridGraphScanOpaque so, PgturbohybridGraphScanNode *node)
