@@ -439,6 +439,7 @@ pgturbohybrid_graph_begin_scan(Relation index, int nkeys, int norderbys)
 	so->efSearch = PgturbohybridGraphGetEfSearch(index);
 	so->graphOversampling = PgturbohybridGraphGetGraphOversampling(index);
 	so->graphRescoreBand = PgturbohybridGraphGetGraphRescoreBand(index);
+	so->graphExactCache = PgturbohybridGraphGetGraphExactCache(index);
 	so->graphStorageKind = PgturbohybridGraphGetMetaPageStorageKind(index);
 	so->pgturbohybridGraphScan = PgturbohybridGraphUseTqGraph(index);
 	so->pgturbohybridFlatScan = PgturbohybridGraphUseTqFlat(index);
