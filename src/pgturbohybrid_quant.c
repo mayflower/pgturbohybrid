@@ -2866,6 +2866,7 @@ tqgraphbeginscan(Relation index, int nkeys, int norderbys)
 	so->efSearch = PgturbohybridGraphGetEfSearch(index);
 	so->graphOversampling = PgturbohybridGraphGetGraphOversampling(index);
 	so->graphRescoreBand = PgturbohybridGraphGetGraphRescoreBand(index);
+	so->graphExactCache = PgturbohybridGraphGetGraphExactCache(index);
 	so->graphStorageKind = PGTURBOHYBRID_GRAPH_STORAGE_QUANT_GRAPH_NATIVE;
 	so->pgturbohybridGraphScan = true;
 	PgturbohybridGraphResetScan(so);
@@ -4862,6 +4863,9 @@ void
 tqgraphendscan(IndexScanDesc scan)
 {
 	PgturbohybridGraphScanOpaque so = (PgturbohybridGraphScanOpaque) scan->opaque;
+
+	if (so->pgturbohybridGraphScan)
+		PgturbohybridGraphRecordReturnedRows(so->returnedRows);
 
 	MemoryContextDelete(so->tmpCtx);
 	pfree(so);

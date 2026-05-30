@@ -751,6 +751,7 @@ typedef struct PgturbohybridGraphScanOpaqueData
 	int			efSearch;
 	int			graphOversampling;
 	int			graphRescoreBand;
+	int			graphExactCache;
 	int64		tuples;
 	int64		returnedRows;
 	int64		tupleTargetRows;
@@ -881,6 +882,7 @@ void		PgturbohybridGraphControlInit(void);
 void		PgturbohybridGraphLogGraphWalRecord(Relation index, ForkNumber forkNum, BlockNumber blkno, uint16 graphOpKind);
 const char *PgturbohybridGraphGraphWalModeName(void);
 void		PgturbohybridGraphRecordGraphScanStats(PgturbohybridGraphScanOpaque so);
+void		PgturbohybridGraphRecordReturnedRows(int64 returnedRows);
 void		PgturbohybridGraphRecordNonGraphScanStats(void);
 void		PgturbohybridGraphRecordFlatScanStats(void);
 const char *PgturbohybridGraphTqScoringKernelName(int scoringKernel);
