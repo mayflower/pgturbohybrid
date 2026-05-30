@@ -164,7 +164,7 @@ final top-k result size.
 | Planner has stale table stats | Row estimates in `EXPLAIN` | Run `ANALYZE documents;` after loading data and after large changes. |
 | `final_k_source` is `default` | Query has no SQL `LIMIT` | Add `LIMIT 10` or another explicit top-k limit. |
 | `profile` is not `latency` | `SHOW turbohybrid.profile;` | Run `SET turbohybrid.profile = 'latency';` or reset role/database settings. |
-| SIMD is unavailable or disabled | `SELECT turbohybrid_simd_capabilities();` | SIMD means single instruction, multiple data; build with the portable default and avoid `SIMD_BUILD=none`; check host CPU support. |
+| SIMD is unavailable or disabled | `SELECT turbohybrid_simd_capabilities();` | SIMD means single instruction, multiple data; build with the portable default and avoid `SIMD_BUILD=none`; check `runtime_*`, `enabled_*`, and `simd_force` fields. |
 | Relevance drops on your dataset | Compare against a SQL RRF (reciprocal-rank fusion) baseline or labeled relevance data | Use quality mode, rebuild with `WITH (exact_storage = on)`, or pass larger `dense_k` and `bm25_k`. |
 
 ## 10. Quality Mode

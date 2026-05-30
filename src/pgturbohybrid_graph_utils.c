@@ -213,8 +213,6 @@ PgturbohybridGraphTqExactSimdForceName(int force)
 			return "scalar";
 		case PGTURBOHYBRID_EXACT_SIMD_FORCE_NEON:
 			return "neon";
-		case PGTURBOHYBRID_EXACT_SIMD_FORCE_AVX512F:
-			return "avx512f";
 		default:
 			return "unknown";
 	}
@@ -2396,6 +2394,10 @@ TqCodeDistance(const PgturbohybridGraphTqQuery *tq, const uint8 *valueCode, floa
 		case PGTURBOHYBRID_SCORING_AVX2:
 		case PGTURBOHYBRID_SCORING_AVX512VNNI:
 		case PGTURBOHYBRID_SCORING_AVXVNNI:
+			/*
+			 * The generic LUT scorer has an AVX2 implementation.  AVX-VNNI
+			 * and AVX-512 VNNI are used by the query-split/batch scorers.
+			 */
 			return TqCodeDistanceAvx2(tq, valueCode, valueScale);
 #elif defined(__aarch64__) || defined(_M_ARM64)
 		case PGTURBOHYBRID_SCORING_ARM_I8MM:
