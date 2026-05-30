@@ -5614,8 +5614,21 @@ PgturbohybridGraphScoreNodeBatch(PgturbohybridGraphScanOpaque so, PgturbohybridG
 		{
 			PgturbohybridGraphScanNode *node = &storage->nodes[nodeIds[j]];
 
+			/*
+			 * When the code arena exceeds CPU cache, each code is a scattered
+			 * RAM read and the scoring kernel streams all codeBytes — prefetch
+			 * every cache line to hide the full-code latency.  For cache-resident
+			 * (small/medium) arenas the codes are already hot, so the extra
+			 * prefetches are pure overhead: just touch the first line.
+			 */
 			if (node->code != NULL)
-				PGTURBOHYBRID_GRAPH_PREFETCH_READ(node->code);
+			{
+				if (so->graphLargeCodeArena)
+					for (Size off = 0; off < so->tq.codeBytes; off += 64)
+						PGTURBOHYBRID_GRAPH_PREFETCH_READ(node->code + off);
+				else
+					PGTURBOHYBRID_GRAPH_PREFETCH_READ(node->code);
+			}
 		}
 
 		if (i + 4 <= nodeCount)

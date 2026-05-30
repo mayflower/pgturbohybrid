@@ -858,6 +858,9 @@ typedef struct PgturbohybridGraphScanOpaqueData
 	int64		graphBaseBatchCalls;
 	int64		graphBaseBatchNodes;
 	int64		graphBaseMaxFrontier;
+	/* True when the code arena exceeds CPU cache (scoring is RAM-bound) -> the
+	 * batch scorer prefetches whole codes, not just their first cache line. */
+	bool		graphLargeCodeArena;
 	/* Code-page cache effectiveness (PgturbohybridGraphLoadCodePage). */
 	int64		graphCodePageAttempts;
 	int64		graphCodePageHits;
