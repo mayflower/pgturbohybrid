@@ -204,7 +204,6 @@ extern int	pgturbohybrid_iterative_scan;
 extern int	pgturbohybrid_max_scan_tuples;
 extern double pgturbohybrid_scan_mem_multiplier;
 extern bool pgturbohybrid_dense_graph_prefetch;
-extern bool pgturbohybrid_graph_block_grouped_load;
 extern bool pgturbohybrid_dense_graph_stack_scratch;
 extern bool pgturbohybrid_dense_graph_lowbit_popcnt;
 extern bool pgturbohybrid_dense_graph_i8mm;
@@ -220,6 +219,7 @@ extern bool pgturbohybrid_dense_hadamard_simd;
 extern bool pgturbohybrid_dense_exact_avx512;
 extern int	pgturbohybrid_dense_simd_force;
 extern int	pgturbohybrid_dense_query_split_impl;
+extern int	pgturbohybrid_dense_u8_split;
 extern int	pgturbohybrid_dense_exact_simd_force;
 extern int	pgturbohybrid_dense_graph_batch_scoring;
 extern int	pgturbohybrid_dense_graph_batch_size;
@@ -344,6 +344,28 @@ typedef enum TqScoringKernel
 }			TqScoringKernel;
 
 /*
+ * Exact scoring-kernel paths inside PgturbohybridGraphScoreNodeBatch() and
+ * PgturbohybridGraphScoreNode(), counted per native scan so the scan stats can
+ * prove which kernel actually did the dense scoring work (and, when the slow
+ * scalar/LUT path runs, make that obvious).  Order matters: it indexes the
+ * counter arrays on the scan opaque and the name table in graph_utils.c.
+ */
+typedef enum PgturbohybridGraphScoreKernelBucket
+{
+	PGTURBOHYBRID_SCORE_KERNEL_BATCH_U8_SPLIT_AVX2,
+	PGTURBOHYBRID_SCORE_KERNEL_BATCH_U8_SPLIT_AVX512VNNI,
+	PGTURBOHYBRID_SCORE_KERNEL_BATCH_SIGNED_SPLIT_AVX2,
+	PGTURBOHYBRID_SCORE_KERNEL_BATCH_SIGNED_SPLIT_AVXVNNI,
+	PGTURBOHYBRID_SCORE_KERNEL_BATCH_SIGNED_SPLIT_AVX512VNNI,
+	PGTURBOHYBRID_SCORE_KERNEL_BATCH_1BIT_ASYM,
+	PGTURBOHYBRID_SCORE_KERNEL_BATCH_SCALAR_OR_LUT,
+	PGTURBOHYBRID_SCORE_KERNEL_SINGLE_U8_SPLIT,
+	PGTURBOHYBRID_SCORE_KERNEL_SINGLE_SIGNED_SPLIT,
+	PGTURBOHYBRID_SCORE_KERNEL_SINGLE_SCALAR_OR_LUT,
+	PGTURBOHYBRID_SCORE_KERNEL_BUCKET_COUNT
+}			PgturbohybridGraphScoreKernelBucket;
+
+/*
  * Query-split representation for 4-bit dense scoring.  SIGNED is the original
  * signed-codebook split (HIGH_COEF 256); UNSIGNED is the x86 unsigned-codebook
  * split (maddubs/VPDPBUSD, HIGH_COEF 128); AUTO picks UNSIGNED on x86 when the
@@ -355,6 +377,20 @@ typedef enum TqQuerySplitImpl
 	PGTURBOHYBRID_QUERY_SPLIT_IMPL_SIGNED,
 	PGTURBOHYBRID_QUERY_SPLIT_IMPL_UNSIGNED
 }			TqQuerySplitImpl;
+
+/*
+ * Dedicated control for the unsigned-codebook (u8) 4-bit split scorer, for
+ * controlled benchmarking.  AUTO defers to dense_query_split_impl; ON forces
+ * the u8 split whenever its hard requirements are met (bits == 4, dim >= 1024,
+ * mode != L1, AVX2+ available, SIMD not forced scalar); OFF disables it so the
+ * signed split (or scalar/LUT) runs instead.
+ */
+typedef enum TqU8Split
+{
+	PGTURBOHYBRID_U8_SPLIT_AUTO,
+	PGTURBOHYBRID_U8_SPLIT_ON,
+	PGTURBOHYBRID_U8_SPLIT_OFF
+}			TqU8Split;
 
 typedef enum TqSimdForce
 {
@@ -639,6 +675,15 @@ typedef struct PgturbohybridGraphTqQuery
 	int			scoringKernel;
 	double		queryNorm;
 	double		ecCorrection;
+	/*
+	 * Precomputed query-side postprocess reciprocals (set in
+	 * TqPrepareQueryU8Split), so the hot scoring loop multiplies instead of
+	 * recomputing sqrt(dim) / sqrt(queryNorm) per node.
+	 *   invDimSqrt          = 1 / sqrt(dim)
+	 *   invQueryNormDimSqrt = 1 / (sqrt(queryNorm) * sqrt(dim))   [0 if queryNorm == 0]
+	 */
+	double		invDimSqrt;
+	double		invQueryNormDimSqrt;
 	bool		enabled;
 }			PgturbohybridGraphTqQuery;
 
@@ -767,19 +812,6 @@ typedef union
 	ItemPointerData indextid;
 }			PgturbohybridGraphUnvisited;
 
-/*
- * Per-scan counters for the disk-backed graph search buffer accesses.
- * candidatesScored counts every neighbor we computed a distance for;
- * elementPagesLocked counts how many times we acquired a content lock on an
- * element page.  With block-grouped loading several candidates share a single
- * locked page, so elementPagesLocked is much lower than candidatesScored.
- */
-typedef struct PgturbohybridGraphBufferStats
-{
-	int64		candidatesScored;
-	int64		elementPagesLocked;
-}			PgturbohybridGraphBufferStats;
-
 typedef struct PgturbohybridGraphScanOpaqueData
 {
 	const		PgturbohybridGraphTypeInfo *typeInfo;
@@ -810,12 +842,26 @@ typedef struct PgturbohybridGraphScanOpaqueData
 	int64		graphBatchScoredCodes;
 	int64		graphScalarScoredCodes;
 	int			graphBatchKernel;
+	/* Per-kernel scoring attribution (indexed by PgturbohybridGraphScoreKernelBucket). */
+	int64		graphScoreKernelNodes[PGTURBOHYBRID_SCORE_KERNEL_BUCKET_COUNT];
+	int64		graphScoreKernelCalls[PGTURBOHYBRID_SCORE_KERNEL_BUCKET_COUNT];
+	/* PgturbohybridGraphScoreNodeBatch() invocations and total nodes fed to them. */
+	int64		graphBatchCalls;
+	int64		graphBatchNodes;
+	/* Base-layer traversal counters (PgturbohybridGraphSearchBaseLayer). */
+	int64		graphBaseFrontierPushes;
+	int64		graphBaseFrontierPops;
+	int64		graphBaseNearestOffers;
+	int64		graphBaseVisitedChecks;
+	int64		graphBaseDuplicateSkips;
+	int64		graphBaseBatchCalls;
+	int64		graphBaseBatchNodes;
+	int64		graphBaseMaxFrontier;
 	int64		graphCandidateCount;
 	int64		graphRescoreCount;
 	int64		graphRescorePages;
 	int64		graphCodePagesRead;
 	int64		graphAdjPagesRead;
-	PgturbohybridGraphBufferStats graphBufferStats;
 	int64		graphEntryPointCount;
 	int64		graphEntrySidecarCount;
 	int64		graphEntrySidecarScored;
@@ -929,6 +975,9 @@ void		PgturbohybridGraphRecordReturnedRows(int64 returnedRows);
 void		PgturbohybridGraphRecordNonGraphScanStats(void);
 void		PgturbohybridGraphRecordFlatScanStats(void);
 const char *PgturbohybridGraphTqScoringKernelName(int scoringKernel);
+const char *PgturbohybridGraphTqScoreModeName(int scoreMode);
+const char *PgturbohybridGraphRescoreBandName(int band);
+const char *PgturbohybridGraphScoreKernelBucketName(int bucket);
 const char *PgturbohybridGraphTqSimdForceName(int force);
 const char *PgturbohybridGraphTqExactSimdForceName(int force);
 const char *PgturbohybridGraphStorageKindName(int storageKind);
@@ -972,7 +1021,7 @@ bool		PgturbohybridGraphTqCodeU8SimdDistance(const PgturbohybridGraphTqQuery *tq
 bool		PgturbohybridGraphTqCodeU8ScalarDistance(const PgturbohybridGraphTqQuery *tq, const uint8 *valueCode, float valueScale, double *distance);
 const char *PgturbohybridGraphU8SplitKernelName(void);
 int64		PgturbohybridGraphRescoreSearchCandidates(Relation index, PgturbohybridGraphSupport * support, PgturbohybridGraphQuery * q, List *items);
-List	   *PgturbohybridGraphSearchLayer(char *base, PgturbohybridGraphQuery * q, List *ep, int ef, int lc, Relation index, PgturbohybridGraphSupport * support, int m, bool inserting, PgturbohybridGraphElement skipElement, visited_hash * v, pairingheap **discarded, bool initVisited, int64 *tuples, int64 tupleLimit, int64 *scoredCodes, PgturbohybridGraphTqQuery * tq, PgturbohybridGraphBufferStats * bufStats);
+List	   *PgturbohybridGraphSearchLayer(char *base, PgturbohybridGraphQuery * q, List *ep, int ef, int lc, Relation index, PgturbohybridGraphSupport * support, int m, bool inserting, PgturbohybridGraphElement skipElement, visited_hash * v, pairingheap **discarded, bool initVisited, int64 *tuples, int64 tupleLimit, int64 *scoredCodes, PgturbohybridGraphTqQuery * tq);
 PgturbohybridGraphElement PgturbohybridGraphGetEntryPoint(Relation index);
 void		PgturbohybridGraphGetMetaPageInfo(Relation index, int *m, PgturbohybridGraphElement * entryPoint);
 int			PgturbohybridGraphGetMetaPageStorageKind(Relation index);

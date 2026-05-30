@@ -158,6 +158,21 @@ static const struct config_enum_entry pgturbohybrid_dense_query_split_impl_optio
 	{NULL, 0, false}
 };
 
+static const struct config_enum_entry pgturbohybrid_dense_u8_split_options[] = {
+	{"auto", PGTURBOHYBRID_U8_SPLIT_AUTO, false},
+	{"on", PGTURBOHYBRID_U8_SPLIT_ON, false},
+	{"off", PGTURBOHYBRID_U8_SPLIT_OFF, false},
+	{NULL, 0, false}
+};
+
+static const struct config_enum_entry pgturbohybrid_dense_rescore_band_options[] = {
+	{"auto", PGTURBOHYBRID_RESCORE_BAND_POLICY_AUTO, false},
+	{"off", PGTURBOHYBRID_RESCORE_BAND_POLICY_OFF, false},
+	{"exact", PGTURBOHYBRID_RESCORE_BAND_POLICY_EXACT, false},
+	{"limited", PGTURBOHYBRID_RESCORE_BAND_POLICY_LIMITED, false},
+	{NULL, 0, false}
+};
+
 static const struct config_enum_entry pgturbohybrid_dense_local_expansion_options[] = {
 	{"off", PGTURBOHYBRID_DENSE_LOCAL_EXPANSION_OFF, false},
 	{"auto", PGTURBOHYBRID_DENSE_LOCAL_EXPANSION_AUTO, false},
@@ -2714,17 +2729,26 @@ PgturbohybridInit(void)
 							 "Diagnostic knob: turn off (with avx512vnni off) to force the AVX2 query-split scorer for parity testing.",
 							 &pgturbohybrid_dense_graph_avxvnni,
 							 true, PGC_USERSET, 0, NULL, NULL, NULL);
-	DefineCustomBoolVariable("turbohybrid.graph_block_grouped_load",
-							 "Group disk-backed graph candidates by index block and lock each page once",
-							 "Temporary diagnostic knob: turn off to fall back to the per-candidate ReadBuffer/LockBuffer path for parity comparison.",
-							 &pgturbohybrid_graph_block_grouped_load,
-							 true, PGC_USERSET, 0, NULL, NULL, NULL);
 	DefineCustomEnumVariable("turbohybrid.dense_query_split_impl",
 							 "4-bit dense query-split representation",
 							 "signed uses the signed-codebook split; unsigned uses the x86 unsigned-codebook maddubs/VPDPBUSD split; auto picks unsigned on x86 when available.",
 							 &pgturbohybrid_dense_query_split_impl,
 							 PGTURBOHYBRID_QUERY_SPLIT_IMPL_AUTO,
 							 pgturbohybrid_dense_query_split_impl_options,
+							 PGC_USERSET, 0, NULL, NULL, NULL);
+	DefineCustomEnumVariable("turbohybrid.dense_u8_split",
+							 "Use the unsigned-codebook (u8) 4-bit split dense scorer",
+							 "on forces the u8 maddubs/VPDPBUSD split whenever its hard requirements hold (4-bit, dim>=1024, mode!=L1, AVX2+); off disables it (signed split or scalar/LUT); auto defers to dense_query_split_impl. For controlled benchmarking.",
+							 &pgturbohybrid_dense_u8_split,
+							 PGTURBOHYBRID_U8_SPLIT_AUTO,
+							 pgturbohybrid_dense_u8_split_options,
+							 PGC_USERSET, 0, NULL, NULL, NULL);
+	DefineCustomEnumVariable("turbohybrid.dense_rescore_band",
+							 "Exact f32 dense rescore policy for native graph scans",
+							 "auto rescores only when the budget/quality policy or exact storage requires it (latency-profile exact-free scans resolve to 0); off never exact-rescores; exact rescores the full candidate band; limited caps it. Exact-free (code-only) indexes never exact-rescore regardless. For controlled benchmarking.",
+							 &pgturbohybrid_dense_rescore_band_policy,
+							 PGTURBOHYBRID_RESCORE_BAND_POLICY_AUTO,
+							 pgturbohybrid_dense_rescore_band_options,
 							 PGC_USERSET, 0, NULL, NULL, NULL);
 	DefineCustomBoolVariable("turbohybrid.dense_build_exact_distances",
 							 "Use exact f32 vector distances while building dense graph edges",
