@@ -532,6 +532,8 @@ PgturbohybridGraphEntryDistance(PgturbohybridGraphScanOpaque so, Datum query, Pg
 static void
 PgturbohybridGraphEnsureNodeCapacity(PgturbohybridQuantBuildState *state)
 {
+	uint32		oldCapacity = state->nodeCapacity;
+
 	if (state->nodeCount < state->nodeCapacity)
 		return;
 
@@ -545,9 +547,20 @@ PgturbohybridGraphEnsureNodeCapacity(PgturbohybridQuantBuildState *state)
 					 errmsg("pgturbohybrid graph build node capacity is too large")));
 		state->nodeCapacity += state->nodeCapacity;
 	}
-	state->nodes = repalloc(state->nodes,
-							PgturbohybridGraphArrayAllocSize(sizeof(PgturbohybridGraphBuildNode),
-															 state->nodeCapacity));
+
+	/*
+	 * Zero the newly grown slots.  Build nodes are written verbatim into index
+	 * code pages (PgturbohybridGraphWriteCodePages), and not every field is set
+	 * for every node -- e.g. payloadMask is only assigned when the row carries
+	 * payloads -- so a plain repalloc would leak uninitialized bytes onto disk
+	 * (caught by valgrind's PageAddItem check).  The initial block is
+	 * MemoryContextAllocZero'd; repalloc0 keeps that invariant as it doubles.
+	 */
+	state->nodes = repalloc0(state->nodes,
+							 PgturbohybridGraphArrayAllocSize(sizeof(PgturbohybridGraphBuildNode),
+															  oldCapacity),
+							 PgturbohybridGraphArrayAllocSize(sizeof(PgturbohybridGraphBuildNode),
+															  state->nodeCapacity));
 }
 
 static uint8 *
