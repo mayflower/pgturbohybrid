@@ -280,19 +280,28 @@ reproduction notes are in
 The same DBPedia/OpenAI3-large corpus can also be used as a dense-only systems
 comparison. This is not a hybrid-search benchmark: it uses the dataset's
 existing 3,072-dimensional embeddings, no BM25 branch, no full-text search, and
-no SQL RRF fusion. Turbovec is an in-process dense vector library, so treat this
-as a useful reference point rather than a PostgreSQL access-method comparison.
+no SQL RRF fusion. Turbovec is an in-process dense vector library that runs a
+flat (brute-force) 4-bit scan over all rows, so treat this as a useful
+reference point rather than a PostgreSQL access-method comparison. The run below
+is a fresh local snapshot (Ice Lake Xeon, current build, 200 qdrant-self
+queries, one warmup pass plus measured passes); the pgturbohybrid percentiles
+are end-to-end SQL latency while the Turbovec percentiles are in-process,
+single-threaded `index.search()` timings.
 
 | Dense-only method | p50 | p95 | p99 | nDCG@10 | recall@10 |
 | --- | ---: | ---: | ---: | ---: | ---: |
-| pgturbohybrid dense-only | 1.595 ms | 19.540 ms | 47.754 ms | 0.947 | 0.947 |
-| Turbovec TurboQuant 4-bit | 75.160 ms | 107.219 ms | 158.685 ms | 1.000 | 1.000 |
+| pgturbohybrid dense-only | 1.848 ms | 2.287 ms | 2.443 ms | 0.965 | 0.965 |
+| Turbovec TurboQuant 4-bit | 174.176 ms | 181.312 ms | 190.260 ms | 1.000 | 1.000 |
 
-In this qdrant-self setup, Turbovec recovers the source document for every
-sampled query, while `pgturbohybrid` trades some dense-only recovery for much
-lower PostgreSQL-backed query latency. The top-10 overlap between the two runs
-was 0.8989. As with the hybrid numbers above, repeat this on your own hardware
-and query mix before drawing conclusions.
+In this qdrant-self setup each query has a single positive qrel, so recall@10 is
+"is the source document in the top 10." Turbovec's flat scan is exact over the
+4-bit codes and recovers that document for every query (recall@10 = 1.000), but
+pays O(n) latency (~174 ms p50). `pgturbohybrid` uses a sub-linear graph index:
+~94x lower latency (1.848 ms p50) while still recovering the source document for
+96.5% of queries. The top-10 overlap between the two runs was 0.922 — i.e. the
+graph reproduces ~92% of Turbovec's exact-over-codes top-10. As with the hybrid
+numbers above, repeat this on your own hardware and query mix before drawing
+conclusions.
 
 If you already have a PostgreSQL RAG database, the bring-your-own benchmark
 compares TurboHybrid with your existing retrieval SQL on your own rows and
