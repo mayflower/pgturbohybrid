@@ -19,6 +19,18 @@
 #include "nodes/pg_list.h"
 #include "port/atomics.h"
 #include "portability/instr_time.h"
+
+/*
+ * INSTR_TIME_GET_NANOSEC() was introduced in PostgreSQL 16.  On 14/15 derive it
+ * from the microsecond accessor, which exists on every supported pre-16
+ * platform; the diagnostic timers that use it tolerate microsecond resolution.
+ */
+#if PG_VERSION_NUM < 160000
+#ifndef INSTR_TIME_GET_NANOSEC
+#define INSTR_TIME_GET_NANOSEC(t) (INSTR_TIME_GET_MICROSEC(t) * INT64CONST(1000))
+#endif
+#endif
+
 #include "storage/bufmgr.h"
 #include "utils/datum.h"
 #include "utils/lsyscache.h"
