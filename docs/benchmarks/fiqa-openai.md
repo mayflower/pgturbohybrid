@@ -107,7 +107,7 @@ python3 benchmarks/fiqa_openai.py \
   --final-k 10 \
   --warmup 3 \
   --reuse-data \
-  --methods pgturbohybrid,pgturbohybrid_adaptive_auto_2_0,postgres_sql_rrf,pgvector_hnsw_dense_only \
+  --methods pgturbohybrid,pgturbohybrid_recovered_explicit,pgturbohybrid_adaptive_auto_2_0,postgres_sql_rrf,pgvector_hnsw_dense_only \
   --explain \
   --bm25-cache-probe \
   --output "$OUTPUT"
@@ -126,8 +126,10 @@ fast-default acceptance pass.
 
 The release acceptance gate is defined in
 [`benchmarks/config/acceptance_thresholds.json`](../../benchmarks/config/acceptance_thresholds.json).
-For the FIQA/OpenAI fast-default suite, the generated artifact must include the
-configured `pgturbohybrid` method row and the `postgres_sql_rrf` baseline row.
+For the FIQA/OpenAI fast-default suite (`fiqa_openai_fast_defaults`), the
+generated artifact must include the configured `pgturbohybrid_recovered_explicit`
+method row and the `postgres_sql_rrf` baseline row (the run above includes both
+in `--methods`).
 The current default-off versus adaptive-auto artifact should be read as a
 recovery diagnostic unless the threshold file is intentionally updated and the
 gate passes.

@@ -39,7 +39,8 @@ This internal checklist records release-readiness criteria for the standalone
 - [x] Windows build passes in CI
 - [x] macOS matrix passes in CI
 - [x] Linux matrix passes in CI
-- [x] valgrind/UBSan passes in CI
+- [x] valgrind passes in CI
+- [x] clang static analyzer and strict (gcc `-Werror`) hardening build pass in CI
 - [x] perf-smoke coverage checks the default fast path
 - [ ] local TAP tests require PostgreSQL TAP Perl modules to be installed
 

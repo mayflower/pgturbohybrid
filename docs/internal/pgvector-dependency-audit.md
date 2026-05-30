@@ -125,8 +125,12 @@ implementation.
 
 ## Compatibility Testing Plan
 
-Future pgvector compatibility should be tested with a matrix that installs
-pgvector first, then builds and installs `pgturbohybrid` with PGXS:
+CI exercises pgvector compatibility with a matrix that installs pgvector first,
+then builds and installs `pgturbohybrid` with PGXS. The matrix
+(`.github/workflows/build.yml`) covers PostgreSQL 14–19 against both pgvector
+`v0.8.2` and `master` (PostgreSQL 19 against `master` only), plus the macOS,
+linux/i386, valgrind, and Windows jobs. The steps below describe one matrix
+cell:
 
 1. Install supported PostgreSQL and pgvector versions.
 2. Build `pgturbohybrid` with `make clean && make`.
@@ -143,5 +147,5 @@ pgvector first, then builds and installs `pgturbohybrid` with PGXS:
    insert/update/delete, vacuum, and dependency handling.
 7. Repeat across the documented pgvector compatibility range.
 
-The initial compatibility target remains pgvector `0.8.x` until CI proves a
-wider range.
+The compatibility target is pgvector `0.8.2` through current `master`, which is
+the range CI exercises.

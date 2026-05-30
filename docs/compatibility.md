@@ -10,7 +10,7 @@ does not link against private pgvector C symbols.
 
 | Dependency | Supported versions | Notes |
 | --- | --- | --- |
-| PostgreSQL | 14, 15, 16, 17, 18 | CI builds and runs regression tests. PostgreSQL 19 is added when available in the setup action. |
+| PostgreSQL | 14, 15, 16, 17, 18, 19 | CI builds and runs regression tests on every version. PostgreSQL 19 is tested against pgvector `master` (it has no tagged pgvector 0.8.2 build). |
 | pgvector | 0.8.2 and newer compatible 0.8.x releases | 0.8.2 is the minimum runtime version. |
 | pgvector master | tested | CI installs upstream `pgvector/pgvector` master as a forward-compatibility signal. |
 
