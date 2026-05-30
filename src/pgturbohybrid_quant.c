@@ -4594,6 +4594,14 @@ PgturbohybridGraphCollectResults(IndexScanDesc scan, PgturbohybridGraphScanOpaqu
 	so->graphEffectiveSearchEf = searchEf;
 	results = palloc(sizeof(PgturbohybridGraphResult) * resultTarget);
 	PgturbohybridGraphInitScanStorage(scan->indexRelation, &meta, &storage);
+	/*
+	 * Whole-code prefetch in the batch scorer pays off only once the code arena
+	 * is too big for CPU cache (codes become scattered RAM reads); below that
+	 * the extra prefetches are wasted work.  64MB is comfortably above typical
+	 * L3 and below large indexes (1M x 3072-dim 4-bit ~= 1.5GB).
+	 */
+	so->graphLargeCodeArena =
+		((Size) meta.tqNodeCount * (Size) meta.tqCodeBytes) > ((Size) 64 * 1024 * 1024);
 	PgturbohybridGraphAddElapsedUs(&so->graphPrepareUs, phaseStart);
 
 	if (hasPayloadFilter &&
