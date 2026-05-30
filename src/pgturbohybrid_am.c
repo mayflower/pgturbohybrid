@@ -2743,6 +2743,11 @@ PgturbohybridInit(void)
 							 PGTURBOHYBRID_U8_SPLIT_AUTO,
 							 pgturbohybrid_dense_u8_split_options,
 							 PGC_USERSET, 0, NULL, NULL, NULL);
+	DefineCustomBoolVariable("turbohybrid.dense_u8_batch_x4",
+							 "Use the 4-candidate (x4) u8 split batch kernel instead of four single-node calls",
+							 "On (default) scores a batch's four scattered codes in one kernel pass: the query [low|high] data is loaded once instead of four times, and the four scattered code loads are issued together so their memory latency overlaps (memory-level parallelism). Kernel ns/code on amd64 (Ice Lake VNNI): ~tied with single-node when codes are cache-resident (compute-bound), ~1.4x faster when they stream from RAM (memory-bound, the regime that dominates the 1M index). Off forces four single-node passes for parity/benchmarking.",
+							 &pgturbohybrid_dense_u8_batch_x4,
+							 true, PGC_USERSET, 0, NULL, NULL, NULL);
 	DefineCustomEnumVariable("turbohybrid.dense_rescore_band",
 							 "Exact f32 dense rescore policy for native graph scans",
 							 "auto rescores only when the budget/quality policy or exact storage requires it (latency-profile exact-free scans resolve to 0); off never exact-rescores; exact rescores the full candidate band; limited caps it. Exact-free (code-only) indexes never exact-rescore regardless. For controlled benchmarking.",

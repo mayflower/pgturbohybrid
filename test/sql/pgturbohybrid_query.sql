@@ -42,6 +42,7 @@ BEGIN
 		'turbohybrid.dense_local_expansion_topn',
 		'turbohybrid.dense_query_split_impl',
 		'turbohybrid.dense_rescore_band',
+		'turbohybrid.dense_u8_batch_x4',
 		'turbohybrid.dense_u8_split',
 		'turbohybrid.enable_wand',
 		'turbohybrid.max_union_candidates',

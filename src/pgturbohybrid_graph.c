@@ -148,6 +148,7 @@ bool		pgturbohybrid_dense_exact_avx512 = false;
 int			pgturbohybrid_dense_simd_force = PGTURBOHYBRID_SIMD_FORCE_AUTO;
 int			pgturbohybrid_dense_query_split_impl = PGTURBOHYBRID_QUERY_SPLIT_IMPL_AUTO;
 int			pgturbohybrid_dense_u8_split = PGTURBOHYBRID_U8_SPLIT_AUTO;
+bool		pgturbohybrid_dense_u8_batch_x4 = true;
 int			pgturbohybrid_native_cache_max_mb = 512;
 int			pgturbohybrid_dense_exact_simd_force = PGTURBOHYBRID_EXACT_SIMD_FORCE_AUTO;
 int			pgturbohybrid_dense_graph_batch_scoring = PGTURBOHYBRID_GRAPH_BATCH_AUTO;

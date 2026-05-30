@@ -65,6 +65,15 @@ BEGIN
         RAISE EXCEPTION '%: bits=% dim=% unsigned_split_simd=% diverges from scalar_lut=% (kernel %)',
             p_label, p_bits, p_dim, u8, a, r ->> 'unsigned_split_kernel';
     END IF;
+    -- The x4 batch kernel must reproduce the single-node SIMD result bit-for-bit.
+    -- Both are formatted as %.9g of the underlying double, so identical doubles
+    -- yield identical text; any divergence means the 4-candidate decode/accumulate
+    -- drifted from the proven single-node kernel.  Checked for both the AVX2 and
+    -- AVX-512 VNNI x4 kernels via the kernel-forcing GUCs in ng_check_all().
+    IF p_bits = 4 AND (r ->> 'unsigned_split_x4') IS DISTINCT FROM (r ->> 'unsigned_split_simd') THEN
+        RAISE EXCEPTION '%: bits=% dim=% unsigned_split_x4=% != unsigned_split_simd=% (x4 batch parity)',
+            p_label, p_bits, p_dim, r ->> 'unsigned_split_x4', r ->> 'unsigned_split_simd';
+    END IF;
 
     -- C far from A: a linear raw-nibble score is grossly wrong, proving the
     -- guard is meaningful, and it must diverge far more than the SIMD scorer.
