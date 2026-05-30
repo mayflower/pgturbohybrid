@@ -3869,7 +3869,6 @@ PgturbohybridGraphScoreNode(PgturbohybridGraphScanOpaque so, PgturbohybridGraphS
 		return 0;
 
 	so->graphScoredCodes++;
-	so->graphScalarScoredCodes++;
 
 	/*
 	 * Asymmetric 1-bit single-node fast path.  Mirrors the
@@ -3887,6 +3886,7 @@ PgturbohybridGraphScoreNode(PgturbohybridGraphScanOpaque so, PgturbohybridGraphS
 		double		dimSqrt = sqrt((double) so->tq.dimensions);
 		double		dot;
 
+		so->graphScalarScoredCodes++;
 		dot = so->tq.ecCorrection +
 			(double) PgturbohybridGraphAsymBit1Score(&so->tq, node->code);
 
@@ -3908,6 +3908,23 @@ PgturbohybridGraphScoreNode(PgturbohybridGraphScanOpaque so, PgturbohybridGraphS
 		}
 	}
 
+#if PGTURBOHYBRID_GRAPH_COMPILE_QUERY_SPLIT
+	/*
+	 * Single-node 4-bit query-split VNNI fast path.  Mirrors the batch-of-4
+	 * dispatch so tail nodes (< 4 left over) and small frontier expansions use
+	 * the same int8 VNNI kernel and scoring math as the batch path instead of
+	 * falling back to the scalar LUT-gather float path.
+	 */
+	{
+		double		querySplitDistance;
+
+		if (PgturbohybridGraphPackedDistanceQuerySplit4(&so->tq, node->code,
+												node->scale, &querySplitDistance))
+			return querySplitDistance;
+	}
+#endif
+
+	so->graphScalarScoredCodes++;
 	return PgturbohybridGraphPackedDistance(&so->tq, node->code, node->scale,
 								 node->codeNorm, node->norm);
 }
