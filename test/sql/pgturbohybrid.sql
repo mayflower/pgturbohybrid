@@ -126,6 +126,41 @@ BEGIN
 END
 $$;
 
+-- A normal vector-order SQL scan on a (vector + tsvector) turbohybrid index must
+-- run the NATIVE quantized graph path (tqgraphgettuple ->
+-- PgturbohybridGraphCollectResults), never the legacy graph_hnsw
+-- PgturbohybridGraphSearchLayer scan path.  scan_orchestration = 'graph_native'
+-- is emitted only when the native storage path records the scan; the legacy
+-- full-vector element-tuple path would report 'graph_hnsw' and a flat index
+-- 'flat'.  This guards against treating SearchLayer as the native hot path.
+DO $$
+DECLARE
+	stats jsonb;
+	top_id int;
+BEGIN
+	SELECT id INTO top_id
+	FROM tqh_default_docs
+	ORDER BY embedding <~> turbohybrid_query(vector_query => '[1,0,0]'::vector)
+	LIMIT 1;
+
+	stats := turbohybrid_last_scan_stats();
+
+	IF stats->>'scan_orchestration' <> 'graph_native' THEN
+		RAISE EXCEPTION 'expected native graph scan path (tqgraphgettuple/CollectResults), got scan_orchestration=%: %',
+			stats->>'scan_orchestration', stats;
+	END IF;
+
+	IF stats->>'graph_storage_kind' <> 'pgturbohybrid_graph_native' THEN
+		RAISE EXCEPTION 'expected native graph storage kind, got %: %',
+			stats->>'graph_storage_kind', stats;
+	END IF;
+
+	IF (stats->>'graph_visited_nodes')::bigint <= 0 THEN
+		RAISE EXCEPTION 'native graph scan visited no nodes: %', stats;
+	END IF;
+END
+$$;
+
 DROP INDEX tqh_default_docs_idx;
 
 SET turbohybrid.dense_build_exact_distances = on;
@@ -1027,6 +1062,7 @@ BEGIN
 		'bm25_k_defaulted',
 		'bm25_k_effective',
 		'bm25_strategy',
+		'candidate_objects_allocated',
 		'dense_adaptive_final_result_target',
 		'dense_adaptive_final_search_ef',
 		'dense_adaptive_gap_boundary',
@@ -1036,8 +1072,10 @@ BEGIN
 		'dense_adaptive_trigger_reason',
 		'dense_adaptive_triggered',
 		'dense_adaptive_widening_mode',
+		'dense_batch_kernel',
 		'dense_candidates_effective',
 		'dense_elapsed_us',
+		'dense_exact_kernel',
 		'dense_k_defaulted',
 		'dense_k_effective',
 		'dense_local_expansion_candidates_added',
@@ -1049,8 +1087,15 @@ BEGIN
 		'dense_residual_rerank_bytes',
 		'dense_residual_rerank_count',
 		'dense_residual_rerank_us',
+		'dense_scalar_fallback_kernel',
+		'dense_scorer',
+		'dense_scoring_kernel',
+		'dense_simd_force',
 		'detected_sql_limit',
+		'dimensions',
 		'elapsed_us',
+		'exact_free',
+		'exact_rescore_count',
 		'exact_rescore_for_bm25_only',
 		'exact_storage',
 		'fast_vector_checks',
@@ -1060,7 +1105,14 @@ BEGIN
 		'final_k_source',
 		'fusion_elapsed_us',
 		'graph_adj_pages_read',
+		'graph_avg_batch_size',
+		'graph_base_layer',
+		'graph_batch_calls',
+		'graph_batch_nodes',
+		'graph_batch_scored_codes',
+		'graph_batch_us',
 		'graph_candidate_count',
+		'graph_code_pages',
 		'graph_code_pages_read',
 		'graph_dense_budget_policy',
 		'graph_dense_requested_k',
@@ -1072,18 +1124,38 @@ BEGIN
 		'graph_entry_sidecar_scored',
 		'graph_entry_sidecar_selected',
 		'graph_entry_sidecar_us',
+		'graph_exact_cache',
+		'graph_exact_cache_active',
+		'graph_heap_us',
 		'graph_highdim_widening_multiplier',
+		'graph_oversampling',
+		'graph_prepare_us',
+		'graph_rescore_band',
+		'graph_rescore_band_active',
 		'graph_rescore_band_policy',
 		'graph_rescore_count',
+		'graph_rescore_pages',
+		'graph_rescore_us',
+		'graph_scalar_scored_codes',
+		'graph_score_kernels',
 		'graph_scored_codes',
+		'graph_simd_scored_codes',
+		'graph_sort_us',
 		'graph_storage_kind',
+		'graph_total_us',
+		'graph_traverse_us',
 		'graph_visited_nodes',
 		'graph_widening_reason',
+		'heap_tuples_returned',
 		'index_used',
 		'profile',
 		'quantization_bits',
+		'query_split_enabled',
+		'residual_rerank_active',
 		'scan_orchestration',
+		'score_mode',
 		'strict_vector_validations',
+		'u8_split_enabled',
 		'vector_type_cache_hits',
 		'vector_type_cache_misses',
 		'version'

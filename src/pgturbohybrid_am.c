@@ -151,6 +151,28 @@ static const struct config_enum_entry pgturbohybrid_dense_adaptive_widening_opti
 	{NULL, 0, false}
 };
 
+static const struct config_enum_entry pgturbohybrid_dense_query_split_impl_options[] = {
+	{"auto", PGTURBOHYBRID_QUERY_SPLIT_IMPL_AUTO, false},
+	{"signed", PGTURBOHYBRID_QUERY_SPLIT_IMPL_SIGNED, false},
+	{"unsigned", PGTURBOHYBRID_QUERY_SPLIT_IMPL_UNSIGNED, false},
+	{NULL, 0, false}
+};
+
+static const struct config_enum_entry pgturbohybrid_dense_u8_split_options[] = {
+	{"auto", PGTURBOHYBRID_U8_SPLIT_AUTO, false},
+	{"on", PGTURBOHYBRID_U8_SPLIT_ON, false},
+	{"off", PGTURBOHYBRID_U8_SPLIT_OFF, false},
+	{NULL, 0, false}
+};
+
+static const struct config_enum_entry pgturbohybrid_dense_rescore_band_options[] = {
+	{"auto", PGTURBOHYBRID_RESCORE_BAND_POLICY_AUTO, false},
+	{"off", PGTURBOHYBRID_RESCORE_BAND_POLICY_OFF, false},
+	{"exact", PGTURBOHYBRID_RESCORE_BAND_POLICY_EXACT, false},
+	{"limited", PGTURBOHYBRID_RESCORE_BAND_POLICY_LIMITED, false},
+	{NULL, 0, false}
+};
+
 static const struct config_enum_entry pgturbohybrid_dense_local_expansion_options[] = {
 	{"off", PGTURBOHYBRID_DENSE_LOCAL_EXPANSION_OFF, false},
 	{"auto", PGTURBOHYBRID_DENSE_LOCAL_EXPANSION_AUTO, false},
@@ -2697,6 +2719,48 @@ PgturbohybridInit(void)
 	DefineCustomBoolVariable("turbohybrid.simd", "Enable SIMD kernels where supported by the host CPU",
 							 NULL, &pgturbohybrid_simd,
 							 true, PGC_USERSET, 0, NULL, PgturbohybridAssignSimd, NULL);
+	DefineCustomBoolVariable("turbohybrid.dense_graph_avx512vnni",
+							 "Allow the AVX-512 VNNI query-split dense scorer",
+							 "Diagnostic knob: turn off to fall back to AVX-VNNI/AVX2 query split for kernel parity testing.",
+							 &pgturbohybrid_dense_graph_avx512vnni,
+							 true, PGC_USERSET, 0, NULL, NULL, NULL);
+	DefineCustomBoolVariable("turbohybrid.dense_graph_avxvnni",
+							 "Allow the AVX-VNNI query-split dense scorer",
+							 "Diagnostic knob: turn off (with avx512vnni off) to force the AVX2 query-split scorer for parity testing.",
+							 &pgturbohybrid_dense_graph_avxvnni,
+							 true, PGC_USERSET, 0, NULL, NULL, NULL);
+	DefineCustomEnumVariable("turbohybrid.dense_query_split_impl",
+							 "4-bit dense query-split representation",
+							 "signed uses the signed-codebook split; unsigned uses the x86 unsigned-codebook maddubs/VPDPBUSD split; auto picks unsigned on x86 when available.",
+							 &pgturbohybrid_dense_query_split_impl,
+							 PGTURBOHYBRID_QUERY_SPLIT_IMPL_AUTO,
+							 pgturbohybrid_dense_query_split_impl_options,
+							 PGC_USERSET, 0, NULL, NULL, NULL);
+	DefineCustomEnumVariable("turbohybrid.dense_u8_split",
+							 "Use the unsigned-codebook (u8) 4-bit split dense scorer",
+							 "on forces the u8 maddubs/VPDPBUSD split whenever its hard requirements hold (4-bit, dim>=1024, mode!=L1, AVX2+); off disables it (signed split or scalar/LUT); auto defers to dense_query_split_impl. For controlled benchmarking.",
+							 &pgturbohybrid_dense_u8_split,
+							 PGTURBOHYBRID_U8_SPLIT_AUTO,
+							 pgturbohybrid_dense_u8_split_options,
+							 PGC_USERSET, 0, NULL, NULL, NULL);
+	DefineCustomBoolVariable("turbohybrid.dense_u8_batch_x4",
+							 "Use the 4-candidate (x4) u8 split batch kernel instead of four single-node calls",
+							 "On (default) scores a batch's four scattered codes in one kernel pass: the query [low|high] data is loaded once instead of four times, and the four scattered code loads are issued together so their memory latency overlaps (memory-level parallelism). Kernel ns/code on amd64 (Ice Lake VNNI): ~tied with single-node when codes are cache-resident (compute-bound), ~1.4x faster when they stream from RAM (memory-bound, the regime that dominates the 1M index). Off forces four single-node passes for parity/benchmarking.",
+							 &pgturbohybrid_dense_u8_batch_x4,
+							 true, PGC_USERSET, 0, NULL, NULL, NULL);
+	DefineCustomEnumVariable("turbohybrid.dense_rescore_band",
+							 "Exact f32 dense rescore policy for native graph scans",
+							 "auto rescores only when the budget/quality policy or exact storage requires it (latency-profile exact-free scans resolve to 0); off never exact-rescores; exact rescores the full candidate band; limited caps it. Exact-free (code-only) indexes never exact-rescore regardless. For controlled benchmarking.",
+							 &pgturbohybrid_dense_rescore_band_policy,
+							 PGTURBOHYBRID_RESCORE_BAND_POLICY_AUTO,
+							 pgturbohybrid_dense_rescore_band_options,
+							 PGC_USERSET, 0, NULL, NULL, NULL);
+	DefineCustomIntVariable("turbohybrid.native_cache_max_mb",
+							"Max size (MB) of the per-backend in-memory native scan cache",
+							"An index whose resident code/node/adjacency working set fits under this cap is fully loaded into a per-backend codeArena, so warm scans read 0 code pages. Larger indexes fall back to per-scan page loading. This is a per-backend allocation: size it to host RAM and connection count. Default 512.",
+							&pgturbohybrid_native_cache_max_mb,
+							512, 0, 1048576,
+							PGC_USERSET, GUC_UNIT_MB, NULL, NULL, NULL);
 	DefineCustomBoolVariable("turbohybrid.dense_build_exact_distances",
 							 "Use exact f32 vector distances while building dense graph edges",
 							 "This can improve graph topology for experiments without storing exact vectors at scan time.",

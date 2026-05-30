@@ -192,7 +192,15 @@ GetFlatScanItems(IndexScanDesc scan, Datum value)
 }
 
 /*
- * Algorithm 5 from paper
+ * Algorithm 5 from paper.
+ *
+ * Legacy graph_hnsw scan entry: drives PgturbohybridGraphSearchLayer over
+ * full-vector element tuples.  This is NOT the native scan path -- a native
+ * (quantized graph) index is dispatched to tqgraphgettuple in
+ * pgturbohybridgettuple before pgturbohybrid_graph_get_tuple ever selects this
+ * routine, and a flat index uses GetFlatScanItems.  Reached only by the
+ * dormant legacy element-tuple storage; native scans use
+ * tqgraphgettuple -> PgturbohybridGraphCollectResults.
  */
 static List *
 GetScanItems(IndexScanDesc scan, Datum value)
@@ -439,6 +447,7 @@ pgturbohybrid_graph_begin_scan(Relation index, int nkeys, int norderbys)
 	so->efSearch = PgturbohybridGraphGetEfSearch(index);
 	so->graphOversampling = PgturbohybridGraphGetGraphOversampling(index);
 	so->graphRescoreBand = PgturbohybridGraphGetGraphRescoreBand(index);
+	so->graphExactCache = PgturbohybridGraphGetGraphExactCache(index);
 	so->graphStorageKind = PgturbohybridGraphGetMetaPageStorageKind(index);
 	so->pgturbohybridGraphScan = PgturbohybridGraphUseTqGraph(index);
 	so->pgturbohybridFlatScan = PgturbohybridGraphUseTqFlat(index);

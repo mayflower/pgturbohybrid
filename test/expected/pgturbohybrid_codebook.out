@@ -1,0 +1,171 @@
+-- Codebook correctness: prove the dense approximate scorers expand 4-bit codes
+-- through the non-uniform codebook (PgturbohybridGraphCodebookI8 =
+-- {-127,-96,-75,-58,-44,-31,-18,-6,6,18,31,44,58,75,96,127}), NOT as raw 0..15
+-- nibbles.  turbohybrid_scorer_distances() scores one (query, doc) pair
+-- under each scorer plus a linear/uniform-quantizer reference:
+--   * signed query split (the SIMD path) must match the scalar/LUT reference
+--     within query-quantization tolerance;
+--   * the linear_reference value must be grossly different, which proves the
+--     data exercises the codebook non-uniformity and that the parity check
+--     above would fail if a SIMD kernel ever scored nibbles linearly.
+-- (Verified: temporarily making signed_split return linear_reference makes this
+-- test fail, confirming it catches a raw-nibble scoring regression.)
+CREATE EXTENSION IF NOT EXISTS vector;
+NOTICE:  extension "vector" already exists, skipping
+CREATE EXTENSION IF NOT EXISTS pgturbohybrid;
+NOTICE:  extension "pgturbohybrid" already exists, skipping
+SET enable_seqscan = off;
+SET jit = off;
+-- (1) Per-kernel scorer parity on deliberately non-linear 1536-dim pairs.
+-- Vectors come from sin/cos so values span the codebook's full non-uniform
+-- range; a raw-0..15 scorer cannot reproduce the signed, non-uniform centres.
+CREATE OR REPLACE FUNCTION cb_check(p_label text) RETURNS void
+LANGUAGE plpgsql AS $$
+DECLARE
+    q vector;
+    d vector;
+    r jsonb;
+    s float8;
+    sp float8;
+    raw float8;
+    rel float8;
+    i int;
+BEGIN
+    FOR i IN 1..6 LOOP
+        q := (SELECT array_agg(sin(i * 0.7 + g * 0.013))::real[]::vector
+              FROM generate_series(1, 1536) g);
+        d := (SELECT array_agg(cos(i * 1.1 + g * 0.017))::real[]::vector
+              FROM generate_series(1, 1536) g);
+        r := turbohybrid_scorer_distances(q, d);
+        s := (r ->> 'scalar_lut')::float8;
+        sp := (r ->> 'signed_split')::float8;
+        raw := (r ->> 'linear_reference')::float8;
+
+        -- The SIMD signed query split must reproduce the scalar/LUT codebook
+        -- distance within query-quantization tolerance.
+        rel := abs(sp - s) / (abs(s) + abs(sp) + 0.01);
+        IF rel > 0.05 THEN
+            RAISE EXCEPTION '%: pair % signed_split=% diverges from scalar_lut=% (rel %, kernel %)',
+                p_label, i, sp, s, rel, r ->> 'split_kernel';
+        END IF;
+
+        -- Teeth check: a linear (raw 0..15) interpretation of the nibbles must
+        -- be grossly wrong, proving this pair distinguishes the codebook from
+        -- raw nibbles (so the parity check above would catch a raw-nibble bug).
+        IF abs(raw - s) < 0.5 * (abs(s) + 1.0) THEN
+            RAISE EXCEPTION '%: pair % linear_reference=% too close to scalar_lut=% -- test cannot catch a raw-nibble bug',
+                p_label, i, raw, s;
+        END IF;
+    END LOOP;
+END;
+$$;
+-- Default (best available query-split kernel).
+SET turbohybrid.simd = on;
+SET turbohybrid.dense_graph_avx512vnni = on;
+SET turbohybrid.dense_graph_avxvnni = on;
+SELECT cb_check('auto');
+ cb_check 
+----------
+ 
+(1 row)
+
+-- Force the AVX2 query-split kernel (disable both VNNI scorers); still codebook.
+SET turbohybrid.dense_graph_avx512vnni = off;
+SET turbohybrid.dense_graph_avxvnni = off;
+SELECT cb_check('avx2');
+ cb_check 
+----------
+ 
+(1 row)
+
+-- Drop AVX-512 VNNI only (AVX-VNNI / AVX2 fallback).
+SET turbohybrid.dense_graph_avx512vnni = off;
+SET turbohybrid.dense_graph_avxvnni = on;
+SELECT cb_check('no512');
+ cb_check 
+----------
+ 
+(1 row)
+
+-- The scalar/LUT path itself (no SIMD) must also stay codebook-correct.
+SET turbohybrid.simd = off;
+SELECT cb_check('scalar');
+ cb_check 
+----------
+ 
+(1 row)
+
+RESET turbohybrid.simd;
+RESET turbohybrid.dense_graph_avx512vnni;
+RESET turbohybrid.dense_graph_avxvnni;
+-- (2) A real 1536-dim 4-bit dense scan must report which scorer it used.
+DROP TABLE IF EXISTS cb_docs;
+NOTICE:  table "cb_docs" does not exist, skipping
+CREATE TABLE cb_docs (id int PRIMARY KEY, embedding vector(1536), body_tsv tsvector);
+INSERT INTO cb_docs(id, embedding, body_tsv)
+SELECT i,
+       (SELECT array_agg(sin(i * 0.31 + g * 0.011))::real[]::vector FROM generate_series(1, 1536) g),
+       to_tsvector('english', 'document ' || i)
+FROM generate_series(1, 200) AS i;
+CREATE INDEX cb_idx ON cb_docs
+    USING turbohybrid (embedding vector_cosine_turbohybrid_ops, body_tsv bm25_tsvector_turbohybrid_ops)
+    WITH (quantization_bits = 4);
+ANALYZE cb_docs;
+DO $$
+DECLARE
+    qv vector;
+    scorer text;
+    scalar_codes int;
+    split_used bool;
+BEGIN
+    qv := (SELECT array_agg(cos(g * 0.019))::real[]::vector FROM generate_series(1, 1536) g);
+
+    -- Default scan: report the scorer and confirm it never used the LUT gather
+    -- when the integer query split is available on this build/CPU.
+    SET turbohybrid.simd = on;
+    PERFORM id FROM cb_docs
+    ORDER BY embedding <~> turbohybrid_query(vector_query => qv) LIMIT 10;
+    scorer := turbohybrid_last_scan_stats() ->> 'dense_scorer';
+    scalar_codes := (turbohybrid_last_scan_stats() ->> 'graph_scalar_scored_codes')::int;
+    split_used := (turbohybrid_scorer_distances(qv, qv) ->> 'query_split_used')::bool;
+
+    IF scorer NOT IN ('scalar_lut', 'avx2_lut_gather',
+                      'signed_split_avx2', 'signed_split_avxvnni',
+                      'signed_split_avx512vnni', 'signed_split_neon',
+                      'unsigned_split_avx2', 'unsigned_split_avx512vnni') THEN
+        RAISE EXCEPTION 'unexpected dense_scorer % for 1536-dim 4-bit scan', scorer;
+    END IF;
+
+    IF split_used THEN
+        -- Query split available: the scan must use a query-split kernel
+        -- (signed or unsigned codebook), never the scalar/LUT gather.
+        IF scorer NOT LIKE 'signed_split_%' AND scorer NOT LIKE 'unsigned_split_%' THEN
+            RAISE EXCEPTION 'query split available but scan reported scorer % (expected *_split_*)', scorer;
+        END IF;
+        IF scalar_codes <> 0 THEN
+            RAISE EXCEPTION 'query split available but % codes used the scalar/LUT path', scalar_codes;
+        END IF;
+    END IF;
+
+    -- With SIMD forced off the scan must report the scalar LUT scorer.
+    SET turbohybrid.simd = off;
+    PERFORM id FROM cb_docs
+    ORDER BY embedding <~> turbohybrid_query(vector_query => qv) LIMIT 10;
+    scorer := turbohybrid_last_scan_stats() ->> 'dense_scorer';
+    IF scorer <> 'scalar_lut' THEN
+        RAISE EXCEPTION 'simd=off scan reported scorer % (expected scalar_lut)', scorer;
+    END IF;
+    RESET turbohybrid.simd;
+END;
+$$;
+SELECT 'codebook scorer parity ok' AS result;
+          result           
+---------------------------
+ codebook scorer parity ok
+(1 row)
+
+DROP FUNCTION cb_check(text);
+DROP INDEX cb_idx;
+DROP TABLE cb_docs;
+RESET enable_seqscan;
+RESET jit;

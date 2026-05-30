@@ -217,6 +217,10 @@ extern int	pgturbohybrid_dense_query_1bit_asymmetric_bits;
 extern bool pgturbohybrid_dense_build_exact_distances;
 extern bool pgturbohybrid_dense_hadamard_simd;
 extern int	pgturbohybrid_dense_simd_force;
+extern int	pgturbohybrid_dense_query_split_impl;
+extern int	pgturbohybrid_dense_u8_split;
+extern bool pgturbohybrid_dense_u8_batch_x4;
+extern int	pgturbohybrid_native_cache_max_mb;
 extern int	pgturbohybrid_dense_exact_simd_force;
 extern int	pgturbohybrid_dense_graph_batch_scoring;
 extern int	pgturbohybrid_dense_graph_batch_size;
@@ -339,6 +343,55 @@ typedef enum TqScoringKernel
 	PGTURBOHYBRID_SCORING_ARM_I8MM,
 	PGTURBOHYBRID_SCORING_NEON
 }			TqScoringKernel;
+
+/*
+ * Exact scoring-kernel paths inside PgturbohybridGraphScoreNodeBatch() and
+ * PgturbohybridGraphScoreNode(), counted per native scan so the scan stats can
+ * prove which kernel actually did the dense scoring work (and, when the slow
+ * scalar/LUT path runs, make that obvious).  Order matters: it indexes the
+ * counter arrays on the scan opaque and the name table in graph_utils.c.
+ */
+typedef enum PgturbohybridGraphScoreKernelBucket
+{
+	PGTURBOHYBRID_SCORE_KERNEL_BATCH_U8_SPLIT_AVX2,
+	PGTURBOHYBRID_SCORE_KERNEL_BATCH_U8_SPLIT_AVX512VNNI,
+	PGTURBOHYBRID_SCORE_KERNEL_BATCH_SIGNED_SPLIT_AVX2,
+	PGTURBOHYBRID_SCORE_KERNEL_BATCH_SIGNED_SPLIT_AVXVNNI,
+	PGTURBOHYBRID_SCORE_KERNEL_BATCH_SIGNED_SPLIT_AVX512VNNI,
+	PGTURBOHYBRID_SCORE_KERNEL_BATCH_1BIT_ASYM,
+	PGTURBOHYBRID_SCORE_KERNEL_BATCH_SCALAR_OR_LUT,
+	PGTURBOHYBRID_SCORE_KERNEL_SINGLE_U8_SPLIT,
+	PGTURBOHYBRID_SCORE_KERNEL_SINGLE_SIGNED_SPLIT,
+	PGTURBOHYBRID_SCORE_KERNEL_SINGLE_SCALAR_OR_LUT,
+	PGTURBOHYBRID_SCORE_KERNEL_BUCKET_COUNT
+}			PgturbohybridGraphScoreKernelBucket;
+
+/*
+ * Query-split representation for 4-bit dense scoring.  SIGNED is the original
+ * signed-codebook split (HIGH_COEF 256); UNSIGNED is the x86 unsigned-codebook
+ * split (maddubs/VPDPBUSD, HIGH_COEF 128); AUTO picks UNSIGNED on x86 when the
+ * required SIMD is available, otherwise SIGNED.
+ */
+typedef enum TqQuerySplitImpl
+{
+	PGTURBOHYBRID_QUERY_SPLIT_IMPL_AUTO,
+	PGTURBOHYBRID_QUERY_SPLIT_IMPL_SIGNED,
+	PGTURBOHYBRID_QUERY_SPLIT_IMPL_UNSIGNED
+}			TqQuerySplitImpl;
+
+/*
+ * Dedicated control for the unsigned-codebook (u8) 4-bit split scorer, for
+ * controlled benchmarking.  AUTO defers to dense_query_split_impl; ON forces
+ * the u8 split whenever its hard requirements are met (bits == 4, dim >= 1024,
+ * mode != L1, AVX2+ available, SIMD not forced scalar); OFF disables it so the
+ * signed split (or scalar/LUT) runs instead.
+ */
+typedef enum TqU8Split
+{
+	PGTURBOHYBRID_U8_SPLIT_AUTO,
+	PGTURBOHYBRID_U8_SPLIT_ON,
+	PGTURBOHYBRID_U8_SPLIT_OFF
+}			TqU8Split;
 
 typedef enum TqSimdForce
 {
@@ -594,6 +647,20 @@ typedef struct PgturbohybridGraphTqQuery
 	int			querySplitTailDims;
 	float		querySplitPostprocessScale;
 	bool		querySplitEnabled;
+	/*
+	 * Unsigned-codebook query-split representation (x86 maddubs / VPDPBUSD).
+	 * Separate from the signed path above: query halves are stored signed
+	 * (no +128 XOR) because the unsigned u8 codebook is the unsigned operand,
+	 * and the +128 codebook shift is unwound by u8SplitBias.  u8SplitData
+	 * holds [low0..15, high0..15] per 16-dim chunk (32 bytes/chunk) so one
+	 * AVX2 load is a [low|high] pair and one ZMM load is two chunks.
+	 */
+	int8	   *u8SplitData;
+	int8		u8SplitTailLow[16];
+	int8		u8SplitTailHigh[16];
+	int64		u8SplitBias;	/* OFFSET * Sum(q_signed); subtract from raw dot */
+	float		u8SplitPostprocessScale;
+	bool		u8SplitEnabled;
 #endif
 #if PGTURBOHYBRID_GRAPH_ENABLE_SYMMETRIC_I8_DOT
 	float		queryScale;
@@ -607,6 +674,15 @@ typedef struct PgturbohybridGraphTqQuery
 	int			scoringKernel;
 	double		queryNorm;
 	double		ecCorrection;
+	/*
+	 * Precomputed query-side postprocess reciprocals (set in
+	 * TqPrepareQueryU8Split), so the hot scoring loop multiplies instead of
+	 * recomputing sqrt(dim) / sqrt(queryNorm) per node.
+	 *   invDimSqrt          = 1 / sqrt(dim)
+	 *   invQueryNormDimSqrt = 1 / (sqrt(queryNorm) * sqrt(dim))   [0 if queryNorm == 0]
+	 */
+	double		invDimSqrt;
+	double		invQueryNormDimSqrt;
 	bool		enabled;
 }			PgturbohybridGraphTqQuery;
 
@@ -748,6 +824,7 @@ typedef struct PgturbohybridGraphScanOpaqueData
 	int			efSearch;
 	int			graphOversampling;
 	int			graphRescoreBand;
+	int			graphExactCache;
 	int64		tuples;
 	int64		returnedRows;
 	int64		tupleTargetRows;
@@ -764,6 +841,31 @@ typedef struct PgturbohybridGraphScanOpaqueData
 	int64		graphBatchScoredCodes;
 	int64		graphScalarScoredCodes;
 	int			graphBatchKernel;
+	/* Per-kernel scoring attribution (indexed by PgturbohybridGraphScoreKernelBucket). */
+	int64		graphScoreKernelNodes[PGTURBOHYBRID_SCORE_KERNEL_BUCKET_COUNT];
+	int64		graphScoreKernelCalls[PGTURBOHYBRID_SCORE_KERNEL_BUCKET_COUNT];
+	/* PgturbohybridGraphScoreNodeBatch() invocations and total nodes fed to them. */
+	int64		graphBatchCalls;
+	int64		graphBatchNodes;
+	/* Base-layer traversal counters (PgturbohybridGraphSearchBaseLayer). */
+	int64		graphBaseFrontierPushes;
+	int64		graphBaseFrontierPops;
+	int64		graphBaseNearestOffers;
+	int64		graphBaseVisitedChecks;
+	int64		graphBaseDuplicateSkips;
+	int64		graphBaseBatchCalls;
+	int64		graphBaseBatchNodes;
+	int64		graphBaseMaxFrontier;
+	/* True when the code arena exceeds CPU cache (scoring is RAM-bound) -> the
+	 * batch scorer prefetches whole codes, not just their first cache line. */
+	bool		graphLargeCodeArena;
+	/* Code-page cache effectiveness (PgturbohybridGraphLoadCodePage). */
+	int64		graphCodePageAttempts;
+	int64		graphCodePageHits;
+	int64		graphCodePageMisses;
+	int64		graphCodeTuplesCopied;
+	int64		graphCodeArenaAllocatedBytes;
+	int64		graphCodeArenaUsedBytes;
 	int64		graphCandidateCount;
 	int64		graphRescoreCount;
 	int64		graphRescorePages;
@@ -878,9 +980,13 @@ void		PgturbohybridGraphControlInit(void);
 void		PgturbohybridGraphLogGraphWalRecord(Relation index, ForkNumber forkNum, BlockNumber blkno, uint16 graphOpKind);
 const char *PgturbohybridGraphGraphWalModeName(void);
 void		PgturbohybridGraphRecordGraphScanStats(PgturbohybridGraphScanOpaque so);
+void		PgturbohybridGraphRecordReturnedRows(int64 returnedRows);
 void		PgturbohybridGraphRecordNonGraphScanStats(void);
 void		PgturbohybridGraphRecordFlatScanStats(void);
 const char *PgturbohybridGraphTqScoringKernelName(int scoringKernel);
+const char *PgturbohybridGraphTqScoreModeName(int scoreMode);
+const char *PgturbohybridGraphRescoreBandName(int band);
+const char *PgturbohybridGraphScoreKernelBucketName(int bucket);
 const char *PgturbohybridGraphTqSimdForceName(int force);
 const char *PgturbohybridGraphTqExactSimdForceName(int force);
 const char *PgturbohybridGraphStorageKindName(int storageKind);
@@ -916,6 +1022,15 @@ float		TqEncodeVector(Vector *vector, uint8 *code);
 float		TqEncodeVectorWithCorrection(Vector *vector, uint8 *code,
 										const float *ecShift, const float *ecScale);
 double		TqCodeDistance(const PgturbohybridGraphTqQuery *tq, const uint8 *valueCode, float valueScale);
+bool		PgturbohybridGraphTqCodeQuerySplitDistance(const PgturbohybridGraphTqQuery *tq, const uint8 *valueCode, float valueScale, double *distance);
+bool		PgturbohybridGraphTqQuerySplitActive(const PgturbohybridGraphTqQuery *tq);
+bool		PgturbohybridGraphTqUseU8Split(const PgturbohybridGraphTqQuery *tq);
+bool		PgturbohybridGraphTqCodeSignedSplitDistance(const PgturbohybridGraphTqQuery *tq, const uint8 *valueCode, float valueScale, double *distance);
+bool		PgturbohybridGraphTqCodeU8SimdDistance(const PgturbohybridGraphTqQuery *tq, const uint8 *valueCode, float valueScale, double *distance);
+bool		PgturbohybridGraphTqCodeU8Simdx4Distance(const PgturbohybridGraphTqQuery *tq, const uint8 *valueCode, float valueScale, double *distance);
+bool		PgturbohybridGraphTqCodeU8Simdx4Batch(const PgturbohybridGraphTqQuery *tq, const uint8 *codes[4], const float scales[4], double dist[4]);
+bool		PgturbohybridGraphTqCodeU8ScalarDistance(const PgturbohybridGraphTqQuery *tq, const uint8 *valueCode, float valueScale, double *distance);
+const char *PgturbohybridGraphU8SplitKernelName(void);
 int64		PgturbohybridGraphRescoreSearchCandidates(Relation index, PgturbohybridGraphSupport * support, PgturbohybridGraphQuery * q, List *items);
 List	   *PgturbohybridGraphSearchLayer(char *base, PgturbohybridGraphQuery * q, List *ep, int ef, int lc, Relation index, PgturbohybridGraphSupport * support, int m, bool inserting, PgturbohybridGraphElement skipElement, visited_hash * v, pairingheap **discarded, bool initVisited, int64 *tuples, int64 tupleLimit, int64 *scoredCodes, PgturbohybridGraphTqQuery * tq);
 PgturbohybridGraphElement PgturbohybridGraphGetEntryPoint(Relation index);
