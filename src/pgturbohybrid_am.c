@@ -2750,6 +2750,12 @@ PgturbohybridInit(void)
 							 PGTURBOHYBRID_RESCORE_BAND_POLICY_AUTO,
 							 pgturbohybrid_dense_rescore_band_options,
 							 PGC_USERSET, 0, NULL, NULL, NULL);
+	DefineCustomIntVariable("turbohybrid.native_cache_max_mb",
+							"Max size (MB) of the per-backend in-memory native scan cache",
+							"An index whose resident code/node/adjacency working set fits under this cap is fully loaded into a per-backend codeArena, so warm scans read 0 code pages. Larger indexes fall back to per-scan page loading. This is a per-backend allocation: size it to host RAM and connection count. Default 512.",
+							&pgturbohybrid_native_cache_max_mb,
+							512, 0, 1048576,
+							PGC_USERSET, GUC_UNIT_MB, NULL, NULL, NULL);
 	DefineCustomBoolVariable("turbohybrid.dense_build_exact_distances",
 							 "Use exact f32 vector distances while building dense graph edges",
 							 "This can improve graph topology for experiments without storing exact vectors at scan time.",

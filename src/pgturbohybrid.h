@@ -220,6 +220,7 @@ extern bool pgturbohybrid_dense_exact_avx512;
 extern int	pgturbohybrid_dense_simd_force;
 extern int	pgturbohybrid_dense_query_split_impl;
 extern int	pgturbohybrid_dense_u8_split;
+extern int	pgturbohybrid_native_cache_max_mb;
 extern int	pgturbohybrid_dense_exact_simd_force;
 extern int	pgturbohybrid_dense_graph_batch_scoring;
 extern int	pgturbohybrid_dense_graph_batch_size;
