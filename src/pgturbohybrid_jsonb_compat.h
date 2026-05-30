@@ -40,6 +40,19 @@ PgturbohybridJsonbBeginObject(PgturbohybridJsonbState *state)
 	PgturbohybridJsonbPush(state, WJB_BEGIN_OBJECT, NULL);
 }
 
+/*
+ * Close a nested object.  Unlike PgturbohybridJsonbEndObject this does NOT
+ * materialise a Jsonb: on PG19 pushJsonbValue() only populates state->result
+ * when the *top-level* container closes, so reading it after a nested close
+ * yields NULL and JsonbValueToJsonb(NULL) segfaults.  Use this for every
+ * non-top-level object; use PgturbohybridJsonbEndObject only for the outermost.
+ */
+static inline void
+PgturbohybridJsonbCloseObject(PgturbohybridJsonbState *state)
+{
+	PgturbohybridJsonbPush(state, WJB_END_OBJECT, NULL);
+}
+
 static inline Jsonb *
 PgturbohybridJsonbEndObject(PgturbohybridJsonbState *state)
 {

@@ -792,7 +792,7 @@ pgturbohybrid_last_scan_stats(PG_FUNCTION_ARGS)
 								pgturbohybrid_last_graph_scored_codes > 0 ?
 								(double) pgturbohybrid_last_graph_code_pages_read /
 								(double) pgturbohybrid_last_graph_scored_codes : 0.0);
-	PgturbohybridJsonbEndObject(&state);
+	PgturbohybridJsonbCloseObject(&state);
 	PgturbohybridJsonbAddInt64(&state, "graph_entry_point_count",
 							   pgturbohybrid_last_graph_entry_point_count);
 	PgturbohybridJsonbAddInt64(&state, "graph_entry_sidecar_count",
@@ -834,9 +834,9 @@ pgturbohybrid_last_scan_stats(PG_FUNCTION_ARGS)
 								   pgturbohybrid_last_graph_score_kernel_nodes[b]);
 		PgturbohybridJsonbAddInt64(&state, "calls",
 								   pgturbohybrid_last_graph_score_kernel_calls[b]);
-		PgturbohybridJsonbEndObject(&state);
+		PgturbohybridJsonbCloseObject(&state);
 	}
-	PgturbohybridJsonbEndObject(&state);
+	PgturbohybridJsonbCloseObject(&state);
 	PgturbohybridJsonbAddInt64(&state, "graph_batch_calls",
 							   pgturbohybrid_last_graph_batch_calls);
 	PgturbohybridJsonbAddInt64(&state, "graph_batch_nodes",
@@ -870,7 +870,7 @@ pgturbohybrid_last_scan_stats(PG_FUNCTION_ARGS)
 							   pgturbohybrid_last_graph_base_batch_nodes);
 	PgturbohybridJsonbAddInt64(&state, "max_frontier_size",
 							   pgturbohybrid_last_graph_base_max_frontier);
-	PgturbohybridJsonbEndObject(&state);
+	PgturbohybridJsonbCloseObject(&state);
 	PgturbohybridJsonbAddString(&state, "score_mode",
 								PgturbohybridGraphTqScoreModeName(pgturbohybrid_last_graph_score_mode));
 	PgturbohybridJsonbAddString(&state, "dense_simd_force",
