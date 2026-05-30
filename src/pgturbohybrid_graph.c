@@ -132,6 +132,7 @@ int			pgturbohybrid_iterative_scan = PGTURBOHYBRID_GRAPH_ITERATIVE_SCAN_OFF;
 int			pgturbohybrid_max_scan_tuples = 20000;
 double		pgturbohybrid_scan_mem_multiplier = 1;
 bool		pgturbohybrid_dense_graph_prefetch = true;
+bool		pgturbohybrid_graph_block_grouped_load = true;
 bool		pgturbohybrid_dense_graph_stack_scratch = true;
 bool		pgturbohybrid_dense_graph_lowbit_popcnt = true;
 bool		pgturbohybrid_dense_graph_i8mm = false;

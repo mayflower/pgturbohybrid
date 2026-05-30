@@ -42,6 +42,7 @@ BEGIN
 		'turbohybrid.dense_local_expansion_topn',
 		'turbohybrid.dense_query_split_impl',
 		'turbohybrid.enable_wand',
+		'turbohybrid.graph_block_grouped_load',
 		'turbohybrid.max_union_candidates',
 		'turbohybrid.profile',
 		'turbohybrid.simd'

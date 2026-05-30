@@ -30,6 +30,8 @@ static int64 pgturbohybrid_last_graph_rescore_count = 0;
 static int64 pgturbohybrid_last_graph_rescore_pages = 0;
 static int64 pgturbohybrid_last_graph_code_pages_read = 0;
 static int64 pgturbohybrid_last_graph_adj_pages_read = 0;
+static int64 pgturbohybrid_last_graph_candidates_scored = 0;
+static int64 pgturbohybrid_last_graph_element_pages_locked = 0;
 static int64 pgturbohybrid_last_graph_entry_point_count = 0;
 static int64 pgturbohybrid_last_graph_entry_sidecar_count = 0;
 static int64 pgturbohybrid_last_graph_entry_sidecar_scored = 0;
@@ -236,6 +238,8 @@ PgturbohybridGraphRecordGraphScanStats(PgturbohybridGraphScanOpaque so)
 	pgturbohybrid_last_graph_rescore_pages = so->graphRescorePages;
 	pgturbohybrid_last_graph_code_pages_read = so->graphCodePagesRead;
 	pgturbohybrid_last_graph_adj_pages_read = so->graphAdjPagesRead;
+	pgturbohybrid_last_graph_candidates_scored = so->graphBufferStats.candidatesScored;
+	pgturbohybrid_last_graph_element_pages_locked = so->graphBufferStats.elementPagesLocked;
 	pgturbohybrid_last_graph_entry_point_count = so->graphEntryPointCount;
 	pgturbohybrid_last_graph_entry_sidecar_count = so->graphEntrySidecarCount;
 	pgturbohybrid_last_graph_entry_sidecar_scored = so->graphEntrySidecarScored;
@@ -337,6 +341,8 @@ PgturbohybridGraphRecordNonGraphScanStats(void)
 	pgturbohybrid_last_graph_rescore_pages = 0;
 	pgturbohybrid_last_graph_code_pages_read = 0;
 	pgturbohybrid_last_graph_adj_pages_read = 0;
+	pgturbohybrid_last_graph_candidates_scored = 0;
+	pgturbohybrid_last_graph_element_pages_locked = 0;
 	pgturbohybrid_last_graph_entry_point_count = 0;
 	pgturbohybrid_last_graph_entry_sidecar_count = 0;
 	pgturbohybrid_last_graph_entry_sidecar_scored = 0;
@@ -687,6 +693,14 @@ pgturbohybrid_last_scan_stats(PG_FUNCTION_ARGS)
 							   pgturbohybrid_last_graph_code_pages_read);
 	PgturbohybridJsonbAddInt64(&state, "graph_adj_pages_read",
 							   pgturbohybrid_last_graph_adj_pages_read);
+	PgturbohybridJsonbAddInt64(&state, "candidates_scored",
+							   pgturbohybrid_last_graph_candidates_scored);
+	PgturbohybridJsonbAddInt64(&state, "element_pages_locked",
+							   pgturbohybrid_last_graph_element_pages_locked);
+	PgturbohybridJsonbAddFloat8(&state, "candidates_per_locked_page",
+								pgturbohybrid_last_graph_element_pages_locked > 0 ?
+								(double) pgturbohybrid_last_graph_candidates_scored /
+								(double) pgturbohybrid_last_graph_element_pages_locked : 0.0);
 	PgturbohybridJsonbAddInt64(&state, "graph_entry_point_count",
 							   pgturbohybrid_last_graph_entry_point_count);
 	PgturbohybridJsonbAddInt64(&state, "graph_entry_sidecar_count",

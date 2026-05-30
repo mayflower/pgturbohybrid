@@ -2549,6 +2549,101 @@ TqGetApproximateDistance(PgturbohybridGraphElementTuple etup, Size tupleSize, Pg
 }
 
 /*
+ * Compute the distance between the query and an element tuple already pinned
+ * on a locked page.  Shared by the per-candidate loader and the block-grouped
+ * loader so both paths score codes identically.
+ */
+static double
+PgturbohybridGraphScoreElementTuple(PgturbohybridGraphElementTuple etup, Size tupleSize,
+									PgturbohybridGraphQuery *q, PgturbohybridGraphSupport *support,
+									bool useTqCodeScoring, const PgturbohybridGraphTqQuery *tq,
+									int64 *scoredCodes)
+{
+	double		distance;
+
+	if (DatumGetPointer(q->value) == NULL)
+		return 0;
+
+	if (useTqCodeScoring && TqGetApproximateDistance(etup, tupleSize, q, tq, &distance))
+	{
+		if (scoredCodes != NULL)
+			(*scoredCodes)++;
+		return distance;
+	}
+
+	return PgturbohybridGraphGetDistance(q->value, PointerGetDatum(&etup->data), support);
+}
+
+/*
+ * Lightweight per-candidate scratch captured while an element page is locked,
+ * so the search layer can score every candidate on a page under a single lock
+ * and then lazily instantiate only the elements that survive the W threshold,
+ * without re-locking the page.
+ */
+typedef struct PgturbohybridGraphScoredNeighbor
+{
+	double		distance;
+	BlockNumber blkno;
+	OffsetNumber offno;
+	bool		valid;
+	uint8		level;
+	uint8		deleted;
+	uint8		version;
+	BlockNumber neighborPage;
+	OffsetNumber neighborOffno;
+	uint8		heaptidsLength;
+	ItemPointerData heaptids[PGTURBOHYBRID_GRAPH_HEAPTIDS];
+}			PgturbohybridGraphScoredNeighbor;
+
+/* (blkno, offno) plus original neighbor-order index, sorted to group reads */
+typedef struct PgturbohybridGraphPageOrder
+{
+	BlockNumber blkno;
+	OffsetNumber offno;
+	int			idx;
+}			PgturbohybridGraphPageOrder;
+
+static int
+PgturbohybridGraphCmpPageOrder(const void *a, const void *b)
+{
+	const PgturbohybridGraphPageOrder *pa = (const PgturbohybridGraphPageOrder *) a;
+	const PgturbohybridGraphPageOrder *pb = (const PgturbohybridGraphPageOrder *) b;
+
+	if (pa->blkno < pb->blkno)
+		return -1;
+	if (pa->blkno > pb->blkno)
+		return 1;
+	/* Deterministic ordering within a page (does not affect results) */
+	if (pa->offno < pb->offno)
+		return -1;
+	if (pa->offno > pb->offno)
+		return 1;
+	return 0;
+}
+
+/*
+ * Instantiate an element from previously captured page scratch, without
+ * touching the buffer again.  Mirrors PgturbohybridGraphLoadElementFromTuple
+ * with loadHeaptids = true and loadVec = false (the disk read-only scan path).
+ */
+static PgturbohybridGraphElement
+PgturbohybridGraphInstantiateScored(PgturbohybridGraphScoredNeighbor *sn)
+{
+	PgturbohybridGraphElement element = PgturbohybridGraphInitElementFromBlock(sn->blkno, sn->offno);
+
+	element->level = sn->level;
+	element->deleted = sn->deleted;
+	element->version = sn->version;
+	element->neighborPage = sn->neighborPage;
+	element->neighborOffno = sn->neighborOffno;
+	element->heaptidsLength = 0;
+	for (int i = 0; i < sn->heaptidsLength; i++)
+		PgturbohybridGraphAddHeapTid(element, &sn->heaptids[i]);
+
+	return element;
+}
+
+/*
  * Load an element and optionally get its distance from q
  */
 static void
@@ -2573,18 +2668,8 @@ PgturbohybridGraphLoadElementImpl(BlockNumber blkno, OffsetNumber offno, double 
 
 	/* Calculate distance */
 	if (distance != NULL)
-	{
-		if (DatumGetPointer(q->value) == NULL)
-			*distance = 0;
-		else if (useTqCodeScoring &&
-				 TqGetApproximateDistance(etup, tupleSize, q, tq, distance))
-		{
-			if (scoredCodes != NULL)
-				(*scoredCodes)++;
-		}
-		else
-			*distance = PgturbohybridGraphGetDistance(q->value, PointerGetDatum(&etup->data), support);
-	}
+		*distance = PgturbohybridGraphScoreElementTuple(etup, tupleSize, q, support,
+														useTqCodeScoring, tq, scoredCodes);
 
 	/* Load element */
 	if (distance == NULL || maxDistance == NULL || *distance < *maxDistance)
@@ -2919,7 +3004,7 @@ PgturbohybridGraphLoadUnvisitedFromDisk(PgturbohybridGraphElement element, Pgtur
  * Algorithm 2 from paper
  */
 List *
-PgturbohybridGraphSearchLayer(char *base, PgturbohybridGraphQuery * q, List *ep, int ef, int lc, Relation index, PgturbohybridGraphSupport * support, int m, bool inserting, PgturbohybridGraphElement skipElement, visited_hash * v, pairingheap **discarded, bool initVisited, int64 *tuples, int64 tupleLimit, int64 *scoredCodes, PgturbohybridGraphTqQuery *tq)
+PgturbohybridGraphSearchLayer(char *base, PgturbohybridGraphQuery * q, List *ep, int ef, int lc, Relation index, PgturbohybridGraphSupport * support, int m, bool inserting, PgturbohybridGraphElement skipElement, visited_hash * v, pairingheap **discarded, bool initVisited, int64 *tuples, int64 tupleLimit, int64 *scoredCodes, PgturbohybridGraphTqQuery *tq, PgturbohybridGraphBufferStats *bufStats)
 {
 	List	   *w = NIL;
 	pairingheap *C = pairingheap_allocate(CompareNearestCandidates, NULL);
@@ -2936,6 +3021,35 @@ PgturbohybridGraphSearchLayer(char *base, PgturbohybridGraphQuery * q, List *ep,
 	bool		tupleLimitReached = false;
 	bool		useTqCodeScoring = !inserting && !inMemory && scoredCodes != NULL &&
 		tq != NULL && tq->enabled;
+
+	/*
+	 * On the disk-backed read-only search path, score a node's unvisited
+	 * neighbors grouped by index block: one ReadBuffer/LockBuffer per page
+	 * rather than per candidate.  Inserts (which also need the vector) and the
+	 * in-memory build keep the per-candidate path.
+	 *
+	 * Reachability note: this is the legacy "graph_hnsw" storage that keeps a
+	 * full PgturbohybridGraphElementTuple (vector + code) per node and locks an
+	 * element page per candidate in PgturbohybridGraphLoadElementImpl.  The
+	 * native quantized scan (PGTURBOHYBRID_GRAPH_STORAGE_QUANT_GRAPH_NATIVE,
+	 * tqgraphgettuple -> PgturbohybridGraphCollectResults) does NOT come through
+	 * here: it loads a whole code page once into codeArena
+	 * (PgturbohybridGraphLoadCodePage) and serves every later candidate on that
+	 * page from memory, so it has no per-candidate buffer overhead to group.
+	 * This grouping therefore benefits the graph_hnsw element-tuple path; the
+	 * turbohybrid.graph_block_grouped_load GUC selects it vs. the per-candidate
+	 * path for parity comparison.
+	 */
+	bool		useBatchedLoad = !inMemory && !inserting &&
+		pgturbohybrid_graph_block_grouped_load;
+	PgturbohybridGraphScoredNeighbor *scored = NULL;
+	PgturbohybridGraphPageOrder *pageOrder = NULL;
+
+	if (useBatchedLoad)
+	{
+		scored = palloc(lm * sizeof(PgturbohybridGraphScoredNeighbor));
+		pageOrder = palloc(lm * sizeof(PgturbohybridGraphPageOrder));
+	}
 
 	if (v == NULL)
 	{
@@ -3008,6 +3122,102 @@ PgturbohybridGraphSearchLayer(char *base, PgturbohybridGraphQuery * q, List *ep,
 		else
 			PgturbohybridGraphLoadUnvisitedFromDisk(cElement, unvisited, &unvisitedLength, v, index, m, lm, lc);
 
+		/*
+		 * Disk fast path: score all of this node's unvisited neighbors grouped
+		 * by index block, taking one content lock per page rather than one per
+		 * candidate.  We capture just enough per candidate to make the C/W
+		 * decision and to instantiate the element later, so the page is never
+		 * locked twice.  The decision loop below runs in neighbor order and is
+		 * byte-for-byte identical to the per-candidate path.
+		 */
+		if (useBatchedLoad)
+		{
+			int			scoreLen = unvisitedLength;
+			int			gi;
+
+			/* Honor the tuple budget so we never score past the break point */
+			if (tuples != NULL && tupleLimit >= 0)
+			{
+				int64		budget = tupleLimit - *tuples;
+
+				if (budget < 0)
+					budget = 0;
+				if (budget < scoreLen)
+					scoreLen = (int) budget;
+			}
+
+			for (gi = 0; gi < unvisitedLength; gi++)
+				scored[gi].valid = false;
+
+			for (gi = 0; gi < scoreLen; gi++)
+			{
+				pageOrder[gi].blkno = ItemPointerGetBlockNumber(&unvisited[gi].indextid);
+				pageOrder[gi].offno = ItemPointerGetOffsetNumber(&unvisited[gi].indextid);
+				pageOrder[gi].idx = gi;
+			}
+
+			if (scoreLen > 1)
+				qsort(pageOrder, scoreLen, sizeof(PgturbohybridGraphPageOrder),
+					  PgturbohybridGraphCmpPageOrder);
+
+			gi = 0;
+			while (gi < scoreLen)
+			{
+				BlockNumber blk = pageOrder[gi].blkno;
+				Buffer		buf = ReadBuffer(index, blk);
+				Page		page;
+				int			gj = gi;
+
+				LockBuffer(buf, BUFFER_LOCK_SHARE);
+				page = BufferGetPage(buf);
+
+				if (bufStats != NULL)
+					bufStats->elementPagesLocked++;
+
+				while (gj < scoreLen && pageOrder[gj].blkno == blk)
+				{
+					OffsetNumber off = pageOrder[gj].offno;
+					int			oi = pageOrder[gj].idx;
+					ItemId		iid = PageGetItemId(page, off);
+					PgturbohybridGraphScoredNeighbor *sn = &scored[oi];
+
+					if (ItemIdIsUsed(iid) && ItemIdGetLength(iid) > 0)
+					{
+						PgturbohybridGraphElementTuple etup = (PgturbohybridGraphElementTuple) PageGetItem(page, iid);
+						Size		tupleSize = ItemIdGetLength(iid);
+
+						Assert(PgturbohybridGraphIsElementTuple(etup));
+
+						sn->distance = PgturbohybridGraphScoreElementTuple(etup, tupleSize, q, support,
+																		  useTqCodeScoring, tq, scoredCodes);
+						sn->blkno = blk;
+						sn->offno = off;
+						sn->level = etup->level;
+						sn->deleted = etup->deleted;
+						sn->version = etup->version;
+						sn->neighborPage = ItemPointerGetBlockNumber(&etup->neighbortid);
+						sn->neighborOffno = ItemPointerGetOffsetNumber(&etup->neighbortid);
+						sn->heaptidsLength = 0;
+						for (int hk = 0; hk < PGTURBOHYBRID_GRAPH_HEAPTIDS; hk++)
+						{
+							if (!ItemPointerIsValid(&etup->heaptids[hk]))
+								break;
+							sn->heaptids[sn->heaptidsLength++] = etup->heaptids[hk];
+						}
+						sn->valid = true;
+
+						if (bufStats != NULL)
+							bufStats->candidatesScored++;
+					}
+
+					gj++;
+				}
+
+				UnlockReleaseBuffer(buf);
+				gi = gj;
+			}
+		}
+
 		for (int i = 0; i < unvisitedLength; i++)
 		{
 			PgturbohybridGraphElement eElement;
@@ -3033,6 +3243,29 @@ PgturbohybridGraphSearchLayer(char *base, PgturbohybridGraphQuery * q, List *ep,
 				eElement = unvisited[i].element;
 				eDistance = GetElementDistance(base, eElement, q, support);
 			}
+			else if (useBatchedLoad)
+			{
+				PgturbohybridGraphScoredNeighbor *sn = &scored[i];
+
+				/* Tuple was unreadable while grouped scoring; skip it */
+				if (!sn->valid)
+					continue;
+
+				eDistance = sn->distance;
+
+				/*
+				 * Instantiate only when the candidate can enter W, or must be
+				 * remembered for the discarded/rescore heap.  This reproduces
+				 * the per-candidate path's maxDistance gate exactly.
+				 */
+				if (alwaysAdd || eDistance < f->distance || discarded != NULL)
+					eElement = PgturbohybridGraphInstantiateScored(sn);
+				else
+					eElement = NULL;
+
+				if (eElement == NULL)
+					continue;
+			}
 			else
 			{
 				ItemPointer indextid = &unvisited[i].indextid;
@@ -3042,6 +3275,16 @@ PgturbohybridGraphSearchLayer(char *base, PgturbohybridGraphQuery * q, List *ep,
 				/* Avoid any allocations if not adding */
 				eElement = NULL;
 				PgturbohybridGraphLoadElementImpl(blkno, offno, &eDistance, q, index, support, inserting, alwaysAdd || discarded != NULL ? NULL : &f->distance, &eElement, useTqCodeScoring, tq, scoredCodes);
+
+				/*
+				 * Legacy per-candidate path: one page lock per candidate, so
+				 * the lock count tracks the scored count (ratio ~1.0).
+				 */
+				if (bufStats != NULL)
+				{
+					bufStats->candidatesScored++;
+					bufStats->elementPagesLocked++;
+				}
 
 				if (eElement == NULL)
 					continue;
@@ -3419,7 +3662,7 @@ PgturbohybridGraphFindElementNeighbors(char *base, PgturbohybridGraphElement ele
 	/* 1st phase: greedy search to insert level */
 	for (int lc = entryLevel; lc >= level + 1; lc--)
 	{
-		w = PgturbohybridGraphSearchLayer(base, &q, ep, 1, lc, index, support, m, true, skipElement, NULL, NULL, true, NULL, -1, NULL, NULL);
+		w = PgturbohybridGraphSearchLayer(base, &q, ep, 1, lc, index, support, m, true, skipElement, NULL, NULL, true, NULL, -1, NULL, NULL, NULL);
 		ep = w;
 	}
 
@@ -3438,7 +3681,7 @@ PgturbohybridGraphFindElementNeighbors(char *base, PgturbohybridGraphElement ele
 		List	   *lw = NIL;
 		ListCell   *lc2;
 
-		w = PgturbohybridGraphSearchLayer(base, &q, ep, efConstruction, lc, index, support, m, true, skipElement, NULL, NULL, true, NULL, -1, NULL, NULL);
+		w = PgturbohybridGraphSearchLayer(base, &q, ep, efConstruction, lc, index, support, m, true, skipElement, NULL, NULL, true, NULL, -1, NULL, NULL, NULL);
 
 		/* Convert search candidates to candidates */
 		foreach(lc2, w)

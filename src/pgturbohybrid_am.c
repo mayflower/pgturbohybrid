@@ -2714,6 +2714,11 @@ PgturbohybridInit(void)
 							 "Diagnostic knob: turn off (with avx512vnni off) to force the AVX2 query-split scorer for parity testing.",
 							 &pgturbohybrid_dense_graph_avxvnni,
 							 true, PGC_USERSET, 0, NULL, NULL, NULL);
+	DefineCustomBoolVariable("turbohybrid.graph_block_grouped_load",
+							 "Group disk-backed graph candidates by index block and lock each page once",
+							 "Temporary diagnostic knob: turn off to fall back to the per-candidate ReadBuffer/LockBuffer path for parity comparison.",
+							 &pgturbohybrid_graph_block_grouped_load,
+							 true, PGC_USERSET, 0, NULL, NULL, NULL);
 	DefineCustomEnumVariable("turbohybrid.dense_query_split_impl",
 							 "4-bit dense query-split representation",
 							 "signed uses the signed-codebook split; unsigned uses the x86 unsigned-codebook maddubs/VPDPBUSD split; auto picks unsigned on x86 when available.",

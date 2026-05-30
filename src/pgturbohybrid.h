@@ -204,6 +204,7 @@ extern int	pgturbohybrid_iterative_scan;
 extern int	pgturbohybrid_max_scan_tuples;
 extern double pgturbohybrid_scan_mem_multiplier;
 extern bool pgturbohybrid_dense_graph_prefetch;
+extern bool pgturbohybrid_graph_block_grouped_load;
 extern bool pgturbohybrid_dense_graph_stack_scratch;
 extern bool pgturbohybrid_dense_graph_lowbit_popcnt;
 extern bool pgturbohybrid_dense_graph_i8mm;
@@ -766,6 +767,19 @@ typedef union
 	ItemPointerData indextid;
 }			PgturbohybridGraphUnvisited;
 
+/*
+ * Per-scan counters for the disk-backed graph search buffer accesses.
+ * candidatesScored counts every neighbor we computed a distance for;
+ * elementPagesLocked counts how many times we acquired a content lock on an
+ * element page.  With block-grouped loading several candidates share a single
+ * locked page, so elementPagesLocked is much lower than candidatesScored.
+ */
+typedef struct PgturbohybridGraphBufferStats
+{
+	int64		candidatesScored;
+	int64		elementPagesLocked;
+}			PgturbohybridGraphBufferStats;
+
 typedef struct PgturbohybridGraphScanOpaqueData
 {
 	const		PgturbohybridGraphTypeInfo *typeInfo;
@@ -801,6 +815,7 @@ typedef struct PgturbohybridGraphScanOpaqueData
 	int64		graphRescorePages;
 	int64		graphCodePagesRead;
 	int64		graphAdjPagesRead;
+	PgturbohybridGraphBufferStats graphBufferStats;
 	int64		graphEntryPointCount;
 	int64		graphEntrySidecarCount;
 	int64		graphEntrySidecarScored;
@@ -957,7 +972,7 @@ bool		PgturbohybridGraphTqCodeU8SimdDistance(const PgturbohybridGraphTqQuery *tq
 bool		PgturbohybridGraphTqCodeU8ScalarDistance(const PgturbohybridGraphTqQuery *tq, const uint8 *valueCode, float valueScale, double *distance);
 const char *PgturbohybridGraphU8SplitKernelName(void);
 int64		PgturbohybridGraphRescoreSearchCandidates(Relation index, PgturbohybridGraphSupport * support, PgturbohybridGraphQuery * q, List *items);
-List	   *PgturbohybridGraphSearchLayer(char *base, PgturbohybridGraphQuery * q, List *ep, int ef, int lc, Relation index, PgturbohybridGraphSupport * support, int m, bool inserting, PgturbohybridGraphElement skipElement, visited_hash * v, pairingheap **discarded, bool initVisited, int64 *tuples, int64 tupleLimit, int64 *scoredCodes, PgturbohybridGraphTqQuery * tq);
+List	   *PgturbohybridGraphSearchLayer(char *base, PgturbohybridGraphQuery * q, List *ep, int ef, int lc, Relation index, PgturbohybridGraphSupport * support, int m, bool inserting, PgturbohybridGraphElement skipElement, visited_hash * v, pairingheap **discarded, bool initVisited, int64 *tuples, int64 tupleLimit, int64 *scoredCodes, PgturbohybridGraphTqQuery * tq, PgturbohybridGraphBufferStats * bufStats);
 PgturbohybridGraphElement PgturbohybridGraphGetEntryPoint(Relation index);
 void		PgturbohybridGraphGetMetaPageInfo(Relation index, int *m, PgturbohybridGraphElement * entryPoint);
 int			PgturbohybridGraphGetMetaPageStorageKind(Relation index);

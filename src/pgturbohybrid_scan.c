@@ -227,7 +227,7 @@ GetScanItems(IndexScanDesc scan, Datum value)
 
 	for (int lc = entryPoint->level; lc >= 1; lc--)
 	{
-		w = PgturbohybridGraphSearchLayer(base, q, ep, 1, lc, index, support, m, false, NULL, NULL, NULL, true, NULL, -1, so->pgturbohybridGraphScan ? &so->graphScoredCodes : NULL, so->pgturbohybridGraphScan ? &so->tq : NULL);
+		w = PgturbohybridGraphSearchLayer(base, q, ep, 1, lc, index, support, m, false, NULL, NULL, NULL, true, NULL, -1, so->pgturbohybridGraphScan ? &so->graphScoredCodes : NULL, so->pgturbohybridGraphScan ? &so->tq : NULL, &so->graphBufferStats);
 		ep = w;
 	}
 
@@ -244,7 +244,7 @@ GetScanItems(IndexScanDesc scan, Datum value)
 	}
 
 	beforeTuples = so->tuples;
-	items = PgturbohybridGraphSearchLayer(base, q, ep, searchEf, 0, index, support, m, false, NULL, &so->v, pgturbohybrid_iterative_scan != PGTURBOHYBRID_GRAPH_ITERATIVE_SCAN_OFF ? &so->discarded : NULL, true, &so->tuples, -1, so->pgturbohybridGraphScan ? &so->graphScoredCodes : NULL, so->pgturbohybridGraphScan ? &so->tq : NULL);
+	items = PgturbohybridGraphSearchLayer(base, q, ep, searchEf, 0, index, support, m, false, NULL, &so->v, pgturbohybrid_iterative_scan != PGTURBOHYBRID_GRAPH_ITERATIVE_SCAN_OFF ? &so->discarded : NULL, true, &so->tuples, -1, so->pgturbohybridGraphScan ? &so->graphScoredCodes : NULL, so->pgturbohybridGraphScan ? &so->tq : NULL, &so->graphBufferStats);
 	afterTuples = so->tuples;
 	RescoreScanItems(scan, items);
 
@@ -285,7 +285,7 @@ ResumeScanItems(IndexScanDesc scan)
 	}
 
 	beforeTuples = so->tuples;
-	items = PgturbohybridGraphSearchLayer(base, &so->q, ep, batch_size, 0, index, &so->support, so->m, false, NULL, &so->v, &so->discarded, false, &so->tuples, -1, so->pgturbohybridGraphScan ? &so->graphScoredCodes : NULL, so->pgturbohybridGraphScan ? &so->tq : NULL);
+	items = PgturbohybridGraphSearchLayer(base, &so->q, ep, batch_size, 0, index, &so->support, so->m, false, NULL, &so->v, &so->discarded, false, &so->tuples, -1, so->pgturbohybridGraphScan ? &so->graphScoredCodes : NULL, so->pgturbohybridGraphScan ? &so->tq : NULL, &so->graphBufferStats);
 	afterTuples = so->tuples;
 	RescoreScanItems(scan, items);
 
@@ -513,6 +513,8 @@ pgturbohybrid_graph_rescan(IndexScanDesc scan, ScanKey keys, int nkeys, ScanKey 
 	so->tuples = 0;
 	so->graphVisitedNodes = 0;
 	so->graphScoredCodes = 0;
+	so->graphBufferStats.candidatesScored = 0;
+	so->graphBufferStats.elementPagesLocked = 0;
 	so->graphCandidateCount = 0;
 	so->graphRescoreCount = 0;
 	so->graphRescorePages = 0;
