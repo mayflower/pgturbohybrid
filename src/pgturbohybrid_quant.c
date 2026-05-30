@@ -2653,6 +2653,12 @@ PgturbohybridGraphResetScan(PgturbohybridGraphScanOpaque so)
 	so->graphBaseBatchCalls = 0;
 	so->graphBaseBatchNodes = 0;
 	so->graphBaseMaxFrontier = 0;
+	so->graphCodePageAttempts = 0;
+	so->graphCodePageHits = 0;
+	so->graphCodePageMisses = 0;
+	so->graphCodeTuplesCopied = 0;
+	so->graphCodeArenaAllocatedBytes = 0;
+	so->graphCodeArenaUsedBytes = 0;
 	so->graphCandidateCount = 0;
 	so->graphRescoreCount = 0;
 	so->graphRescorePages = 0;
