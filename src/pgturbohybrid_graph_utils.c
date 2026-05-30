@@ -18,12 +18,16 @@
 #include "lib/pairingheap.h"
 #include "nodes/pg_list.h"
 #include "port/atomics.h"
+#include "portability/instr_time.h"
 #include "storage/bufmgr.h"
 #include "utils/datum.h"
 #include "utils/lsyscache.h"
 #include "utils/memdebug.h"
 #include "utils/rel.h"
 #include "utils/syscache.h"
+#include "lib/stringinfo.h"
+#include "utils/jsonb.h"
+#include "utils/fmgrprotos.h"
 #include "pgturbohybrid_quant.h"
 #include "pgturbohybrid_vector_compat.h"
 
@@ -118,6 +122,11 @@ static const float TqCodeCenters[PGTURBOHYBRID_LUT_WIDTH] = {
 #define PGTURBOHYBRID_QUERY_SPLIT_ABS_MAX 32639.0f
 #define PGTURBOHYBRID_CODEBOOK_ABS_MAX 2.733f
 #define PGTURBOHYBRID_CODEBOOK_SCALE (127.0f / PGTURBOHYBRID_CODEBOOK_ABS_MAX)
+/* x86 unsigned-codebook query split: 7-bit signed halves, HIGH_COEF 128,
+ * codebook shifted by +128 (bias = 128 * Sum(q_signed)). */
+#define PGTURBOHYBRID_U8_SPLIT_HIGH_COEF 128
+#define PGTURBOHYBRID_U8_SPLIT_ABS_MAX 8127.0f
+#define PGTURBOHYBRID_U8_CODEBOOK_OFFSET 128
 #define PGTURBOHYBRID_CODEBOOK2_ABS_MAX 1.510f
 #define PGTURBOHYBRID_CODEBOOK2_SCALE (127.0f / PGTURBOHYBRID_CODEBOOK2_ABS_MAX)
 #endif
@@ -174,6 +183,75 @@ PgturbohybridGraphTqScoringKernelName(int scoringKernel)
 		default:
 			return "scalar";
 	}
+}
+
+const char *
+PgturbohybridGraphRescoreBandName(int band)
+{
+	switch (band)
+	{
+		case PGTURBOHYBRID_GRAPH_RESCORE_BAND_NONE:
+			return "none";
+		case PGTURBOHYBRID_GRAPH_RESCORE_BAND_EXACT:
+			return "exact";
+		case PGTURBOHYBRID_GRAPH_RESCORE_BAND_AUTO:
+		default:
+			return "auto";
+	}
+}
+
+const char *
+PgturbohybridGraphTqScoreModeName(int scoreMode)
+{
+	switch ((TqScoreMode) scoreMode)
+	{
+		case PGTURBOHYBRID_SCORE_L2:
+			return "l2";
+		case PGTURBOHYBRID_SCORE_IP:
+			return "ip";
+		case PGTURBOHYBRID_SCORE_COSINE:
+			return "cosine";
+		case PGTURBOHYBRID_SCORE_L1:
+			return "l1";
+		default:
+			return "unknown";
+	}
+}
+
+/*
+ * Stable JSON names for the native scoring-kernel buckets (see
+ * PgturbohybridGraphScoreKernelBucket).  Used by turbohybrid_last_scan_stats()
+ * to report which kernel scored how many nodes.
+ */
+const char *
+PgturbohybridGraphScoreKernelBucketName(int bucket)
+{
+	switch ((PgturbohybridGraphScoreKernelBucket) bucket)
+	{
+		case PGTURBOHYBRID_SCORE_KERNEL_BATCH_U8_SPLIT_AVX2:
+			return "batch_u8_split_avx2";
+		case PGTURBOHYBRID_SCORE_KERNEL_BATCH_U8_SPLIT_AVX512VNNI:
+			return "batch_u8_split_avx512vnni";
+		case PGTURBOHYBRID_SCORE_KERNEL_BATCH_SIGNED_SPLIT_AVX2:
+			return "batch_signed_split_avx2";
+		case PGTURBOHYBRID_SCORE_KERNEL_BATCH_SIGNED_SPLIT_AVXVNNI:
+			return "batch_signed_split_avxvnni";
+		case PGTURBOHYBRID_SCORE_KERNEL_BATCH_SIGNED_SPLIT_AVX512VNNI:
+			return "batch_signed_split_avx512vnni";
+		case PGTURBOHYBRID_SCORE_KERNEL_BATCH_1BIT_ASYM:
+			return "batch_1bit_asym";
+		case PGTURBOHYBRID_SCORE_KERNEL_BATCH_SCALAR_OR_LUT:
+			return "batch_scalar_or_lut";
+		case PGTURBOHYBRID_SCORE_KERNEL_SINGLE_U8_SPLIT:
+			return "single_u8_split";
+		case PGTURBOHYBRID_SCORE_KERNEL_SINGLE_SIGNED_SPLIT:
+			return "single_signed_split";
+		case PGTURBOHYBRID_SCORE_KERNEL_SINGLE_SCALAR_OR_LUT:
+			return "single_scalar_or_lut";
+		case PGTURBOHYBRID_SCORE_KERNEL_BUCKET_COUNT:
+			break;
+	}
+	return "unknown";
 }
 
 const char *
@@ -1525,6 +1603,95 @@ TqPrepareQuerySplit4(PgturbohybridGraphTqQuery *tq)
 
 	tq->querySplitEnabled = true;
 }
+
+#if PGTURBOHYBRID_COMPILE_AVX2
+/*
+ * Prepare the x86 unsigned-codebook query split (4-bit only).  Mirrors
+ * TqPrepareQuerySplit4 but stores SIGNED 7-bit query halves (no +128 XOR --
+ * the codebook is the unsigned operand here), uses HIGH_COEF 128 and
+ * QUERY_ABS_MAX 8127, and precomputes the +OFFSET codebook-shift bias
+ * (128 * Sum(q_signed)).  Query data is laid out as [low0..15, high0..15] per
+ * 16-dim chunk so one AVX2 load is a [low|high] pair.
+ */
+static void
+TqPrepareQueryU8Split(PgturbohybridGraphTqQuery *tq)
+{
+	float		qAbsMax = 0;
+	float		qScale;
+	int			fullDims;
+	int64		sumSigned = 0;
+
+	if (!tq->enabled || tq->bits != PGTURBOHYBRID_DEFAULT_BITS ||
+		tq->scoreMode == PGTURBOHYBRID_SCORE_L1 || tq->dimensions <= 0)
+		return;
+
+	for (int i = 0; i < tq->dimensions; i++)
+		qAbsMax = Max(qAbsMax, fabsf(tq->queryValues[i]));
+	if (qAbsMax < FLT_EPSILON)
+		qAbsMax = FLT_EPSILON;
+
+	tq->querySplitChunks = tq->dimensions / 16;
+	tq->querySplitTailDims = tq->dimensions - (tq->querySplitChunks * 16);
+	tq->u8SplitData = palloc0(Max(tq->querySplitChunks, 1) * 32);
+	memset(tq->u8SplitTailLow, 0, sizeof(tq->u8SplitTailLow));
+	memset(tq->u8SplitTailHigh, 0, sizeof(tq->u8SplitTailHigh));
+	qScale = PGTURBOHYBRID_U8_SPLIT_ABS_MAX / qAbsMax;
+	tq->u8SplitPostprocessScale = 1.0f / (qScale * PGTURBOHYBRID_CODEBOOK_SCALE);
+	fullDims = tq->querySplitChunks * 16;
+
+	for (int i = 0; i < tq->dimensions; i++)
+	{
+		int			qSigned;
+		int			lowMod;
+		int8		low;
+		int8		high;
+		float		scaled = tq->queryValues[i] * qScale;
+
+		if (scaled < -PGTURBOHYBRID_U8_SPLIT_ABS_MAX)
+			scaled = -PGTURBOHYBRID_U8_SPLIT_ABS_MAX;
+		else if (scaled > PGTURBOHYBRID_U8_SPLIT_ABS_MAX)
+			scaled = PGTURBOHYBRID_U8_SPLIT_ABS_MAX;
+
+		qSigned = (int) lrintf(scaled);
+		lowMod = qSigned % PGTURBOHYBRID_U8_SPLIT_HIGH_COEF;
+		if (lowMod < 0)
+			lowMod += PGTURBOHYBRID_U8_SPLIT_HIGH_COEF;
+		low = (int8) (lowMod >= PGTURBOHYBRID_U8_SPLIT_HIGH_COEF / 2 ?
+					  lowMod - PGTURBOHYBRID_U8_SPLIT_HIGH_COEF : lowMod);
+		high = (int8) ((qSigned - (int) low) / PGTURBOHYBRID_U8_SPLIT_HIGH_COEF);
+		sumSigned += qSigned;
+
+		if (i < fullDims)
+		{
+			int			chunk = i / 16;
+			int			lane = i % 16;
+
+			tq->u8SplitData[chunk * 32 + lane] = low;
+			tq->u8SplitData[chunk * 32 + 16 + lane] = high;
+		}
+		else
+		{
+			int			tail = i - fullDims;
+
+			tq->u8SplitTailLow[tail] = low;
+			tq->u8SplitTailHigh[tail] = high;
+		}
+	}
+
+	tq->u8SplitBias = (int64) PGTURBOHYBRID_U8_CODEBOOK_OFFSET * sumSigned;
+
+	/*
+	 * Precompute the postprocess reciprocals once per query so the per-node
+	 * scoring loop multiplies instead of calling sqrt() (dimensions > 0 here:
+	 * the function returns early otherwise).
+	 */
+	tq->invDimSqrt = 1.0 / sqrt((double) tq->dimensions);
+	tq->invQueryNormDimSqrt = tq->queryNorm > 0 ?
+		1.0 / (sqrt(tq->queryNorm) * sqrt((double) tq->dimensions)) : 0.0;
+
+	tq->u8SplitEnabled = true;
+}
+#endif
 #endif
 
 Size
@@ -2088,21 +2255,42 @@ PgturbohybridGraphPrepareTqQueryInternal(Relation index, PgturbohybridGraphSuppo
 	}
 #if PGTURBOHYBRID_GRAPH_ENABLE_SYMMETRIC_I8_DOT
 	tq->queryI8 = palloc(sizeof(int8) * query->dim);
-#endif
-	tq->lut = palloc(PGTURBOHYBRID_LUT_SIZE(query->dim));
-
-#if PGTURBOHYBRID_GRAPH_ENABLE_SYMMETRIC_I8_DOT
 	tq->queryScale = TqEncodeQueryInt8(query, tq->queryI8,
 									   &tq->queryCodeNorm);
 #endif
-	TqBuildQueryLut(tq);
 	tq->enabled = true;
 	TqPrepareQuerySignBits(tq);
 	TqPrepareQueryAsymBit1(tq);
 #if defined(__aarch64__) || defined(_M_ARM64) || PGTURBOHYBRID_COMPILE_AVX2
 	if (prepareSplit)
-		TqPrepareQuerySplit4(tq);
+	{
+#if PGTURBOHYBRID_COMPILE_AVX2
+		/*
+		 * Build exactly one query-split representation.  The unsigned-codebook
+		 * (u8) split is the x86 default for 4-bit; otherwise (2-bit, forced
+		 * signed, no AVX2) fall back to the signed split, which also serves as
+		 * the LUT-skip fallback.
+		 */
+		if (PgturbohybridGraphTqUseU8Split(tq))
+			TqPrepareQueryU8Split(tq);
+		else
 #endif
+			TqPrepareQuerySplit4(tq);
+	}
+#endif
+
+	/*
+	 * Build the LUT-gather scoring table only when the integer query-split
+	 * scorers will not handle this query.  When query split is active every
+	 * scoring path (scan and build) tries QuerySplit before the LUT fallback,
+	 * so tq->lut is never read -- skip allocating and filling it.  tq->lut
+	 * stays NULL (zeroed by the memset above) in that case.
+	 */
+	if (!PgturbohybridGraphTqQuerySplitActive(tq))
+	{
+		tq->lut = palloc(PGTURBOHYBRID_LUT_SIZE(query->dim));
+		TqBuildQueryLut(tq);
+	}
 }
 
 void
@@ -2388,6 +2576,19 @@ TqCodeDistanceNeon(const PgturbohybridGraphTqQuery *tq, const uint8 *valueCode, 
 PGTURBOHYBRID_TARGET_CLONES double
 TqCodeDistance(const PgturbohybridGraphTqQuery *tq, const uint8 *valueCode, float valueScale)
 {
+	double		querySplitDistance;
+
+	/*
+	 * Prefer the integer query-split SIMD scorers for 4-bit and 2-bit packed
+	 * codes (dim >= 1024, not L1).  This keeps dense scan scoring off the
+	 * AVX2 per-dimension LUT-gather path (TqCodeDistanceAvx2), which is far
+	 * slower per code.  Falls through to the LUT/scalar kernels when query
+	 * split is unavailable for this query.
+	 */
+	if (PgturbohybridGraphTqCodeQuerySplitDistance(tq, valueCode, valueScale,
+												   &querySplitDistance))
+		return querySplitDistance;
+
 	switch ((TqScoringKernel) tq->scoringKernel)
 	{
 #if PGTURBOHYBRID_COMPILE_AVX2
@@ -2797,7 +2998,26 @@ PgturbohybridGraphLoadUnvisitedFromDisk(PgturbohybridGraphElement element, Pgtur
 }
 
 /*
- * Algorithm 2 from paper
+ * Algorithm 2 from paper.
+ *
+ * NOT the native scan hot path.  This walks the legacy "graph_hnsw" storage
+ * (PGTURBOHYBRID_GRAPH_STORAGE_GRAPH), where every node is a full
+ * PgturbohybridGraphElementTuple (vector + code) and a candidate's distance is
+ * read via PgturbohybridGraphLoadElementImpl, locking one element page per
+ * candidate.  On the shipped AM this is reached only during index build/insert
+ * (PgturbohybridGraphFindElementNeighbors, inserting = true): the read-only
+ * scan callers (GetScanItems/ResumeScanItems) only fire when so->pgturbohybridGraphScan
+ * is set, which never coincides with a native index because such indexes
+ * dispatch to tqgraphgettuple before reaching here.
+ *
+ * Native SQL scans (PGTURBOHYBRID_GRAPH_STORAGE_QUANT_GRAPH_NATIVE) go through
+ * tqgraphgettuple -> PgturbohybridGraphCollectResults
+ * (PgturbohybridGraphScoreNodeBatch in pgturbohybrid_quant.c) and never call
+ * this function.  That path loads whole code pages once into codeArena
+ * (PgturbohybridGraphLoadCodePage) and scores from memory, so it has no
+ * per-candidate buffer overhead.  Do not measure native scan performance from
+ * anything in here; check turbohybrid_last_scan_stats()->scan_orchestration
+ * ('graph_native') and the graph_*pages_read counters instead.
  */
 List *
 PgturbohybridGraphSearchLayer(char *base, PgturbohybridGraphQuery * q, List *ep, int ef, int lc, Relation index, PgturbohybridGraphSupport * support, int m, bool inserting, PgturbohybridGraphElement skipElement, visited_hash * v, pairingheap **discarded, bool initVisited, int64 *tuples, int64 tupleLimit, int64 *scoredCodes, PgturbohybridGraphTqQuery *tq)
@@ -3373,4 +3593,459 @@ PgturbohybridGraphGetTypeInfo(Relation index)
 	}
 	else
 		return (const PgturbohybridGraphTypeInfo *) DatumGetPointer(FunctionCall0Coll(procinfo, InvalidOid));
+}
+
+/*
+ * turbohybrid_scorer_distances(query vector, doc vector) -> jsonb
+ *
+ * Diagnostic that scores a single (query, doc) pair as a 4-bit packed code
+ * under each dense approximate scorer.  Lets operators inspect quantization
+ * error and lets regression tests prove the SIMD query-split path expands
+ * nibbles through the non-uniform codebook (PgturbohybridGraphCodebookI8 =
+ * {-127,-96,-75,-58,-44,-31,-18,-6,6,18,31,44,58,75,96,127}) rather than as
+ * raw 0..15 values.
+ *
+ *   scalar_lut       : codebook via the scalar LUT reference (TqCodeDistanceScalar)
+ *   signed_split     : codebook via the integer signed query-split SIMD kernel
+ *   linear_reference : the same inner product but with each code nibble scored
+ *                      as its raw 0..15 quantization level instead of the
+ *                      codebook centre.  This is a reference value only -- it
+ *                      quantifies how much the non-uniform codebook matters and
+ *                      is NOT a selectable scan scorer (no kernel dispatch ever
+ *                      references it).  A correct scorer must match scalar_lut,
+ *                      not linear_reference.
+ *
+ * Inner-product scoring, no EC correction, 4-bit codes.  Use dim >= 1024 to
+ * exercise the query-split path (otherwise signed_split falls back to scalar).
+ */
+FUNCTION_PREFIX PG_FUNCTION_INFO_V1(turbohybrid_scorer_distances);
+FUNCTION_PREFIX Datum
+turbohybrid_scorer_distances(PG_FUNCTION_ARGS)
+{
+	Vector	   *query = PgturbohybridDatumGetVector(PG_GETARG_DATUM(0));
+	Vector	   *doc = PgturbohybridDatumGetVector(PG_GETARG_DATUM(1));
+	int			bits = PGTURBOHYBRID_DEFAULT_BITS;
+	int			dim;
+	PgturbohybridGraphTqQuery tq;
+	uint8	   *code;
+	float		scale;
+	double		dimSqrt;
+	double		dScalar;
+	double		dSplit;
+	double		dRaw;
+	double		dotRaw = 0;
+	bool		splitUsed;
+	double		dU8Simd;
+	double		dU8Scalar;
+	double		dU8x4;
+	bool		u8Used = false;
+	const char *u8Kernel = "none";
+	int			distinctNibbles = 0;
+	bool		nibbleSeen[16] = {false};
+	StringInfoData json;
+
+	PgturbohybridCheckVector(query);
+	PgturbohybridCheckVector(doc);
+	dim = query->dim;
+	if (doc->dim != dim)
+		ereport(ERROR,
+				(errcode(ERRCODE_DATA_EXCEPTION),
+				 errmsg("query and doc vectors must have equal dimension")));
+
+	/* Optional third argument selects the quantization bit width (2 or 4). */
+	if (PG_NARGS() >= 3 && !PG_ARGISNULL(2))
+		bits = PG_GETARG_INT32(2);
+	if (bits != PGTURBOHYBRID_DEFAULT_BITS && bits != 2)
+		ereport(ERROR,
+				(errcode(ERRCODE_DATA_EXCEPTION),
+				 errmsg("turbohybrid_scorer_distances: bits must be 2 or 4")));
+
+	/* Prepare a minimal inner-product query (no index, no EC correction). */
+	memset(&tq, 0, sizeof(tq));
+	tq.dimensions = dim;
+	tq.bits = bits;
+	tq.lutWidth = 1 << bits;
+	tq.codeBytes = TqCodeSizeForBits(dim, bits);
+	tq.scoreMode = PGTURBOHYBRID_SCORE_IP;
+	tq.scoringKernel = TqSelectScoringKernel();
+	tq.rawQueryValues = query->x;
+	tq.queryValues = palloc(sizeof(float) * dim);
+	TqRotateVectorFloat(query->x, dim, tq.queryValues);
+	for (int i = 0; i < dim; i++)
+		tq.queryNorm += (double) query->x[i] * (double) query->x[i];
+	tq.lut = palloc(PGTURBOHYBRID_LUT_SIZE(dim));
+	TqBuildQueryLut(&tq);
+	tq.enabled = true;
+#if defined(__aarch64__) || defined(_M_ARM64) || PGTURBOHYBRID_COMPILE_AVX2
+	TqPrepareQuerySplit4(&tq);
+#endif
+
+	code = palloc0(tq.codeBytes);
+	scale = TqEncodeVectorBits(doc, code, bits);
+	dimSqrt = sqrt((double) dim);
+
+	/* (1) scalar/LUT codebook reference. */
+	dScalar = TqCodeDistanceScalar(&tq, code, scale);
+
+	/* (2) signed integer query-split SIMD kernel (codebook via shuffle). */
+	splitUsed = PgturbohybridGraphTqCodeSignedSplitDistance(&tq, code, scale, &dSplit);
+	if (!splitUsed)
+		dSplit = dScalar;
+
+	/* (2b) unsigned-codebook split: scalar reference + SIMD (maddubs/VPDPBUSD). */
+	dU8Simd = dScalar;
+	dU8Scalar = dScalar;
+	dU8x4 = dScalar;
+#if PGTURBOHYBRID_COMPILE_AVX2
+	TqPrepareQueryU8Split(&tq);
+	if (tq.u8SplitEnabled)
+	{
+		PgturbohybridGraphTqCodeU8ScalarDistance(&tq, code, scale, &dU8Scalar);
+		if (PgturbohybridGraphTqCodeU8SimdDistance(&tq, code, scale, &dU8Simd))
+		{
+			u8Used = true;
+			u8Kernel = PgturbohybridGraphU8SplitKernelName();
+		}
+		else
+			dU8Simd = dU8Scalar;
+		/* x4 batch kernel must match the single-node SIMD result bit-for-bit. */
+		if (!PgturbohybridGraphTqCodeU8Simdx4Distance(&tq, code, scale, &dU8x4))
+			dU8x4 = dU8Simd;
+	}
+#endif
+
+	/*
+	 * (3) Linear/uniform reference: score each code nibble as its raw 0..15
+	 * quantization level instead of the non-uniform codebook centre.  A correct
+	 * scorer must match scalar_lut, not this; the gap shows the codebook effect.
+	 */
+	for (int i = 0; i < dim; i++)
+	{
+		int			vc = TqGetCodeComponentBits(code, i, bits);
+
+		dotRaw += (double) tq.queryValues[i] * (double) vc;
+		if (vc >= 0 && vc < 16 && !nibbleSeen[vc])
+		{
+			nibbleSeen[vc] = true;
+			distinctNibbles++;
+		}
+	}
+	dRaw = -((double) scale * dotRaw / dimSqrt);
+
+	initStringInfo(&json);
+	appendStringInfo(&json,
+					 "{\"scalar_lut\":%.9g,\"signed_split\":%.9g,"
+					 "\"unsigned_split_scalar\":%.9g,\"unsigned_split_simd\":%.9g,"
+					 "\"unsigned_split_x4\":%.9g,"
+					 "\"linear_reference\":%.9g,\"split_kernel\":\"%s\","
+					 "\"unsigned_split_kernel\":\"%s\","
+					 "\"query_split_used\":%s,\"unsigned_split_used\":%s,"
+					 "\"distinct_nibbles\":%d,\"dimensions\":%d,\"bits\":%d}",
+					 dScalar, dSplit, dU8Scalar, dU8Simd, dU8x4, dRaw,
+					 PgturbohybridGraphTqScoringKernelName(tq.scoringKernel),
+					 u8Kernel,
+					 splitUsed ? "true" : "false", u8Used ? "true" : "false",
+					 distinctNibbles, dim, bits);
+
+	PG_RETURN_DATUM(DirectFunctionCall1(jsonb_in, CStringGetDatum(json.data)));
+}
+
+/*
+ * turbohybrid_scorer_bench(query vector, doc vector, bits int, ncodes int,
+ *                          iters int) -> jsonb
+ *
+ * Tight-loop microbenchmark of the dense 4-bit scoring kernels, isolating raw
+ * per-code compute cost (ns/code) from the scan machinery and the memory wall.
+ * It encodes one base code, fans it out into `ncodes` distinct codes resident
+ * in cache, and times scoring all of them under each kernel, repeating `iters`
+ * passes and reporting the minimum (cleanest, least-noisy) ns/code per kernel:
+ *
+ *   scalar_lut       : per-dim float LUT gather (TqCodeDistanceScalar)
+ *   signed_split     : signed-codebook query-split SIMD (the fallback kernel)
+ *   u8_single        : unsigned-codebook split, one code per kernel call
+ *   u8_x4            : unsigned-codebook split, true 4-candidate batch (shared
+ *                      query loads) -- the kernel Prompt 2 adds
+ *
+ * The current SIMD tier (AVX2 vs AVX-512 VNNI) follows the dense_graph_avx*
+ * GUCs, so callers can compare tiers.  ns/code is content-independent for these
+ * branch-free SIMD kernels, so a synthetic code fan-out is a faithful proxy for
+ * the real hot loop's compute; it deliberately does NOT model RAM traffic (that
+ * is what the 1M scan benchmark measures).
+ */
+FUNCTION_PREFIX PG_FUNCTION_INFO_V1(turbohybrid_scorer_bench);
+FUNCTION_PREFIX Datum
+turbohybrid_scorer_bench(PG_FUNCTION_ARGS)
+{
+	Vector	   *query;
+	Vector	   *doc;
+	int			bits = PGTURBOHYBRID_DEFAULT_BITS;
+	int			n = 10000;
+	int			iters = 25;
+	int			dim;
+	Size		cb;
+	PgturbohybridGraphTqQuery tq;
+	uint8	   *base;
+	uint8	   *arena;
+	float	   *scales;
+	int		   *idx;
+	float		baseScale;
+	volatile double sink = 0;
+	double		nsScalar = -1,
+				nsSigned = -1,
+				nsU8 = -1,
+				nsU8x4 = -1;
+	bool		signedOk = false,
+				u8Ok = false,
+				u8x4Ok = false;
+	const char *u8Kernel = "none";
+	StringInfoData json;
+
+	if (PG_ARGISNULL(0) || PG_ARGISNULL(1))
+		ereport(ERROR,
+				(errcode(ERRCODE_NULL_VALUE_NOT_ALLOWED),
+				 errmsg("turbohybrid_scorer_bench: query and doc must not be NULL")));
+	query = PgturbohybridDatumGetVector(PG_GETARG_DATUM(0));
+	doc = PgturbohybridDatumGetVector(PG_GETARG_DATUM(1));
+	PgturbohybridCheckVector(query);
+	PgturbohybridCheckVector(doc);
+	dim = query->dim;
+	if (doc->dim != dim)
+		ereport(ERROR,
+				(errcode(ERRCODE_DATA_EXCEPTION),
+				 errmsg("query and doc vectors must have equal dimension")));
+
+	if (PG_NARGS() >= 3 && !PG_ARGISNULL(2))
+		bits = PG_GETARG_INT32(2);
+	if (bits != PGTURBOHYBRID_DEFAULT_BITS && bits != 2)
+		ereport(ERROR,
+				(errcode(ERRCODE_DATA_EXCEPTION),
+				 errmsg("turbohybrid_scorer_bench: bits must be 2 or 4")));
+	if (PG_NARGS() >= 4 && !PG_ARGISNULL(3))
+		n = PG_GETARG_INT32(3);
+	if (PG_NARGS() >= 5 && !PG_ARGISNULL(4))
+		iters = PG_GETARG_INT32(4);
+	if (n < 4)
+		n = 4;
+	n -= n % 4;					/* x4 needs a multiple of 4 */
+	if (iters < 1)
+		iters = 1;
+
+	/* Prepare the inner-product query exactly as turbohybrid_scorer_distances. */
+	memset(&tq, 0, sizeof(tq));
+	tq.dimensions = dim;
+	tq.bits = bits;
+	tq.lutWidth = 1 << bits;
+	tq.codeBytes = TqCodeSizeForBits(dim, bits);
+	tq.scoreMode = PGTURBOHYBRID_SCORE_IP;
+	tq.scoringKernel = TqSelectScoringKernel();
+	tq.rawQueryValues = query->x;
+	tq.queryValues = palloc(sizeof(float) * dim);
+	TqRotateVectorFloat(query->x, dim, tq.queryValues);
+	for (int i = 0; i < dim; i++)
+		tq.queryNorm += (double) query->x[i] * (double) query->x[i];
+	tq.lut = palloc(PGTURBOHYBRID_LUT_SIZE(dim));
+	TqBuildQueryLut(&tq);
+	tq.enabled = true;
+#if defined(__aarch64__) || defined(_M_ARM64) || PGTURBOHYBRID_COMPILE_AVX2
+	TqPrepareQuerySplit4(&tq);
+#endif
+#if PGTURBOHYBRID_COMPILE_AVX2
+	TqPrepareQueryU8Split(&tq);
+#endif
+
+	cb = tq.codeBytes;
+	base = palloc0(cb);
+	baseScale = TqEncodeVectorBits(doc, base, bits);
+
+	/*
+	 * Fan the base code out into n distinct codes (perturb one byte each) so the
+	 * kernels cannot be collapsed by CSE and a realistic byte distribution is
+	 * preserved.  At the default 10k * codeBytes the arena stays cache-resident
+	 * (compute-bound); larger n spills to RAM (memory-bound).
+	 *
+	 * idx[] is a scattered visiting order (large coprime stride), so every kernel
+	 * touches codes the way a real native scan does -- four scattered graph
+	 * neighbours per batch, NOT a contiguous sweep.  A contiguous sweep would
+	 * hand the single-node path an unrealistic sequential-prefetch advantage and
+	 * understate the x4 batch's shared-query-load win, which is exactly the
+	 * effect that matters in the real scattered scan.
+	 */
+	arena = (uint8 *) palloc((Size) n * cb);
+	scales = (float *) palloc(sizeof(float) * n);
+	idx = (int *) palloc(sizeof(int) * n);
+	for (int i = 0; i < n; i++)
+	{
+		memcpy(arena + (Size) i * cb, base, cb);
+		arena[(Size) i * cb + (i % (int) cb)] ^= (uint8) (i & 0xFF);
+		scales[i] = baseScale;
+		idx[i] = (int) (((int64) i * 7919 + 104729) % n);
+	}
+
+	/* (1) scalar/LUT: always available. */
+	{
+		int64		best = PG_INT64_MAX;
+
+		for (int pass = -1; pass < iters; pass++)
+		{
+			instr_time	t0,
+						t1;
+
+			INSTR_TIME_SET_CURRENT(t0);
+			for (int i = 0; i < n; i++)
+				sink += TqCodeDistanceScalar(&tq, arena + (Size) idx[i] * cb, scales[idx[i]]);
+			INSTR_TIME_SET_CURRENT(t1);
+			INSTR_TIME_SUBTRACT(t1, t0);
+			if (pass >= 0)		/* pass -1 is warmup */
+			{
+				int64		ns = INSTR_TIME_GET_NANOSEC(t1);
+
+				if (ns < best)
+					best = ns;
+			}
+		}
+		nsScalar = (double) best / (double) n;
+	}
+
+#if PGTURBOHYBRID_COMPILE_AVX2
+	/* (2) signed-codebook query split. */
+	{
+		double		probe;
+
+		signedOk = PgturbohybridGraphTqCodeSignedSplitDistance(&tq, arena, scales[0], &probe);
+	}
+	if (signedOk)
+	{
+		int64		best = PG_INT64_MAX;
+
+		for (int pass = -1; pass < iters; pass++)
+		{
+			instr_time	t0,
+						t1;
+
+			INSTR_TIME_SET_CURRENT(t0);
+			for (int i = 0; i < n; i++)
+			{
+				double		d;
+
+				PgturbohybridGraphTqCodeSignedSplitDistance(&tq, arena + (Size) idx[i] * cb, scales[idx[i]], &d);
+				sink += d;
+			}
+			INSTR_TIME_SET_CURRENT(t1);
+			INSTR_TIME_SUBTRACT(t1, t0);
+			if (pass >= 0)
+			{
+				int64		ns = INSTR_TIME_GET_NANOSEC(t1);
+
+				if (ns < best)
+					best = ns;
+			}
+		}
+		nsSigned = (double) best / (double) n;
+	}
+
+	/* (3) unsigned-codebook split, single node per call. */
+	{
+		double		probe;
+
+		u8Ok = PgturbohybridGraphTqCodeU8SimdDistance(&tq, arena, scales[0], &probe);
+	}
+	if (u8Ok)
+	{
+		int64		best = PG_INT64_MAX;
+
+		u8Kernel = PgturbohybridGraphU8SplitKernelName();
+		for (int pass = -1; pass < iters; pass++)
+		{
+			instr_time	t0,
+						t1;
+
+			INSTR_TIME_SET_CURRENT(t0);
+			for (int i = 0; i < n; i++)
+			{
+				double		d;
+
+				PgturbohybridGraphTqCodeU8SimdDistance(&tq, arena + (Size) idx[i] * cb, scales[idx[i]], &d);
+				sink += d;
+			}
+			INSTR_TIME_SET_CURRENT(t1);
+			INSTR_TIME_SUBTRACT(t1, t0);
+			if (pass >= 0)
+			{
+				int64		ns = INSTR_TIME_GET_NANOSEC(t1);
+
+				if (ns < best)
+					best = ns;
+			}
+		}
+		nsU8 = (double) best / (double) n;
+	}
+
+	/* (4) unsigned-codebook split, true 4-candidate batch (shared query loads). */
+	{
+		const uint8 *probeCodes[4] = {arena, arena, arena, arena};
+		float		probeScales[4] = {scales[0], scales[0], scales[0], scales[0]};
+		double		probeDist[4];
+
+		u8x4Ok = PgturbohybridGraphTqCodeU8Simdx4Batch(&tq, probeCodes, probeScales, probeDist);
+	}
+	if (u8x4Ok)
+	{
+		int64		best = PG_INT64_MAX;
+
+		for (int pass = -1; pass < iters; pass++)
+		{
+			instr_time	t0,
+						t1;
+
+			INSTR_TIME_SET_CURRENT(t0);
+			for (int i = 0; i < n; i += 4)
+			{
+				const uint8 *codes[4];
+				float		sc[4];
+				double		dist[4];
+
+				for (int c = 0; c < 4; c++)
+				{
+					codes[c] = arena + (Size) idx[i + c] * cb;
+					sc[c] = scales[idx[i + c]];
+				}
+				PgturbohybridGraphTqCodeU8Simdx4Batch(&tq, codes, sc, dist);
+				sink += dist[0] + dist[1] + dist[2] + dist[3];
+			}
+			INSTR_TIME_SET_CURRENT(t1);
+			INSTR_TIME_SUBTRACT(t1, t0);
+			if (pass >= 0)
+			{
+				int64		ns = INSTR_TIME_GET_NANOSEC(t1);
+
+				if (ns < best)
+					best = ns;
+			}
+		}
+		nsU8x4 = (double) best / (double) n;
+	}
+#endif
+
+	/* Touch sink so the compiler cannot elide the scoring loops. */
+	if (sink == 0x1.0p-1074)
+		elog(DEBUG5, "scorer_bench sink sentinel");
+
+	initStringInfo(&json);
+	appendStringInfo(&json,
+					 "{\"ns_per_code\":{\"scalar_lut\":%.4g,\"signed_split\":%.4g,"
+					 "\"u8_single\":%.4g,\"u8_x4\":%.4g},"
+					 "\"u8_x4_vs_single\":%.4g,\"u8_x4_vs_signed\":%.4g,"
+					 "\"u8_x4_vs_scalar\":%.4g,"
+					 "\"signed_split_used\":%s,\"u8_used\":%s,\"u8_x4_used\":%s,"
+					 "\"u8_kernel\":\"%s\","
+					 "\"codes\":%d,\"iters\":%d,\"dimensions\":%d,\"bits\":%d}",
+					 nsScalar, nsSigned, nsU8, nsU8x4,
+					 (u8x4Ok && u8Ok && nsU8x4 > 0) ? nsU8 / nsU8x4 : -1.0,
+					 (u8x4Ok && signedOk && nsU8x4 > 0) ? nsSigned / nsU8x4 : -1.0,
+					 (u8x4Ok && nsU8x4 > 0) ? nsScalar / nsU8x4 : -1.0,
+					 signedOk ? "true" : "false", u8Ok ? "true" : "false",
+					 u8x4Ok ? "true" : "false", u8Kernel,
+					 n, iters, dim, bits);
+
+	PG_RETURN_DATUM(DirectFunctionCall1(jsonb_in, CStringGetDatum(json.data)));
 }

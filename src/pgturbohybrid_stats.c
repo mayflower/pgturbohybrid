@@ -26,10 +26,17 @@ static int64 pgturbohybrid_last_graph_scalar_scored_codes = 0;
 static int pgturbohybrid_last_graph_batch_kernel = PGTURBOHYBRID_SCORING_SCALAR;
 static int pgturbohybrid_last_weighted_code_code_kernel = PGTURBOHYBRID_SCORING_SCALAR;
 static int64 pgturbohybrid_last_graph_candidate_count = 0;
+static int pgturbohybrid_last_graph_rescore_band = PGTURBOHYBRID_GRAPH_RESCORE_BAND_AUTO;
 static int64 pgturbohybrid_last_graph_rescore_count = 0;
 static int64 pgturbohybrid_last_graph_rescore_pages = 0;
 static int64 pgturbohybrid_last_graph_code_pages_read = 0;
 static int64 pgturbohybrid_last_graph_adj_pages_read = 0;
+static int64 pgturbohybrid_last_graph_code_page_attempts = 0;
+static int64 pgturbohybrid_last_graph_code_page_hits = 0;
+static int64 pgturbohybrid_last_graph_code_page_misses = 0;
+static int64 pgturbohybrid_last_graph_code_tuples_copied = 0;
+static int64 pgturbohybrid_last_graph_code_arena_allocated_bytes = 0;
+static int64 pgturbohybrid_last_graph_code_arena_used_bytes = 0;
 static int64 pgturbohybrid_last_graph_entry_point_count = 0;
 static int64 pgturbohybrid_last_graph_entry_sidecar_count = 0;
 static int64 pgturbohybrid_last_graph_entry_sidecar_scored = 0;
@@ -80,6 +87,26 @@ static int pgturbohybrid_last_graph_quantization_bits = 0;
 static bool pgturbohybrid_last_graph_exact_storage = false;
 static bool pgturbohybrid_last_graph_exact_storage_known = false;
 static bool pgturbohybrid_last_graph_query_split_active = false;
+static bool pgturbohybrid_last_graph_querysplit_used = false;
+static bool pgturbohybrid_last_graph_u8_split_used = false;
+static int64 pgturbohybrid_last_graph_dimensions = 0;
+static int64 pgturbohybrid_last_graph_returned_rows = 0;
+static int64 pgturbohybrid_last_graph_oversampling = 0;
+static int pgturbohybrid_last_graph_exact_cache = PGTURBOHYBRID_GRAPH_EXACT_CACHE_AUTO;
+static int64 pgturbohybrid_last_graph_score_kernel_nodes[PGTURBOHYBRID_SCORE_KERNEL_BUCKET_COUNT];
+static int64 pgturbohybrid_last_graph_score_kernel_calls[PGTURBOHYBRID_SCORE_KERNEL_BUCKET_COUNT];
+static int64 pgturbohybrid_last_graph_batch_calls = 0;
+static int64 pgturbohybrid_last_graph_batch_nodes = 0;
+static int64 pgturbohybrid_last_graph_base_frontier_pushes = 0;
+static int64 pgturbohybrid_last_graph_base_frontier_pops = 0;
+static int64 pgturbohybrid_last_graph_base_nearest_offers = 0;
+static int64 pgturbohybrid_last_graph_base_visited_checks = 0;
+static int64 pgturbohybrid_last_graph_base_duplicate_skips = 0;
+static int64 pgturbohybrid_last_graph_base_batch_calls = 0;
+static int64 pgturbohybrid_last_graph_base_batch_nodes = 0;
+static int64 pgturbohybrid_last_graph_base_max_frontier = 0;
+static int pgturbohybrid_last_graph_score_mode = PGTURBOHYBRID_SCORE_L2;
+static int pgturbohybrid_last_graph_simd_force = PGTURBOHYBRID_SIMD_FORCE_AUTO;
 
 static void
 PgturbohybridJsonbAddKey(PgturbohybridJsonbState *state, const char *key)
@@ -167,8 +194,8 @@ PgturbohybridJsonbAddFloat8(PgturbohybridJsonbState *state, const char *key, dou
 
 static const char *TqScanOrchestrationName(void);
 static const char *PgturbohybridFinalKSourceName(void);
-#ifdef PGTURBOHYBRID_DEV_DIAGNOSTICS
 static const char *TqExactKernelName(int kernel);
+#ifdef PGTURBOHYBRID_DEV_DIAGNOSTICS
 static const char *PgturbohybridGraphAvx512WeightedModeName(int mode);
 #endif
 
@@ -183,6 +210,17 @@ void
 PgturbohybridGraphRecordWeightedCodeCodeKernel(int kernel)
 {
 	pgturbohybrid_last_weighted_code_code_kernel = kernel;
+}
+
+/*
+ * Update the heap-tuples-returned counter at end of scan.  The bulk scan stats
+ * are captured when the graph search completes (before any tuple is emitted),
+ * so returnedRows is still zero then; this records the final tally.
+ */
+void
+PgturbohybridGraphRecordReturnedRows(int64 returnedRows)
+{
+	pgturbohybrid_last_graph_returned_rows = returnedRows;
 }
 
 static int
@@ -212,10 +250,17 @@ PgturbohybridGraphRecordGraphScanStats(PgturbohybridGraphScanOpaque so)
 	pgturbohybrid_last_graph_scalar_scored_codes = so->graphScalarScoredCodes;
 	pgturbohybrid_last_graph_batch_kernel = so->graphBatchKernel;
 	pgturbohybrid_last_graph_candidate_count = so->graphCandidateCount;
+	pgturbohybrid_last_graph_rescore_band = so->graphRescoreBand;
 	pgturbohybrid_last_graph_rescore_count = so->graphRescoreCount;
 	pgturbohybrid_last_graph_rescore_pages = so->graphRescorePages;
 	pgturbohybrid_last_graph_code_pages_read = so->graphCodePagesRead;
 	pgturbohybrid_last_graph_adj_pages_read = so->graphAdjPagesRead;
+	pgturbohybrid_last_graph_code_page_attempts = so->graphCodePageAttempts;
+	pgturbohybrid_last_graph_code_page_hits = so->graphCodePageHits;
+	pgturbohybrid_last_graph_code_page_misses = so->graphCodePageMisses;
+	pgturbohybrid_last_graph_code_tuples_copied = so->graphCodeTuplesCopied;
+	pgturbohybrid_last_graph_code_arena_allocated_bytes = so->graphCodeArenaAllocatedBytes;
+	pgturbohybrid_last_graph_code_arena_used_bytes = so->graphCodeArenaUsedBytes;
 	pgturbohybrid_last_graph_entry_point_count = so->graphEntryPointCount;
 	pgturbohybrid_last_graph_entry_sidecar_count = so->graphEntrySidecarCount;
 	pgturbohybrid_last_graph_entry_sidecar_scored = so->graphEntrySidecarScored;
@@ -258,10 +303,30 @@ PgturbohybridGraphRecordGraphScanStats(PgturbohybridGraphScanOpaque so)
 	pgturbohybrid_last_graph_dense_budget_policy = so->graphDenseBudgetPolicy;
 	pgturbohybrid_last_graph_rescore_band_policy = so->graphRescoreBandPolicy;
 	pgturbohybrid_last_graph_scoring_kernel = so->tq.enabled ? so->tq.scoringKernel : PGTURBOHYBRID_SCORING_SCALAR;
+	memcpy(pgturbohybrid_last_graph_score_kernel_nodes, so->graphScoreKernelNodes,
+		   sizeof(pgturbohybrid_last_graph_score_kernel_nodes));
+	memcpy(pgturbohybrid_last_graph_score_kernel_calls, so->graphScoreKernelCalls,
+		   sizeof(pgturbohybrid_last_graph_score_kernel_calls));
+	pgturbohybrid_last_graph_batch_calls = so->graphBatchCalls;
+	pgturbohybrid_last_graph_batch_nodes = so->graphBatchNodes;
+	pgturbohybrid_last_graph_base_frontier_pushes = so->graphBaseFrontierPushes;
+	pgturbohybrid_last_graph_base_frontier_pops = so->graphBaseFrontierPops;
+	pgturbohybrid_last_graph_base_nearest_offers = so->graphBaseNearestOffers;
+	pgturbohybrid_last_graph_base_visited_checks = so->graphBaseVisitedChecks;
+	pgturbohybrid_last_graph_base_duplicate_skips = so->graphBaseDuplicateSkips;
+	pgturbohybrid_last_graph_base_batch_calls = so->graphBaseBatchCalls;
+	pgturbohybrid_last_graph_base_batch_nodes = so->graphBaseBatchNodes;
+	pgturbohybrid_last_graph_base_max_frontier = so->graphBaseMaxFrontier;
+	pgturbohybrid_last_graph_score_mode = so->tq.enabled ? so->tq.scoreMode : PGTURBOHYBRID_SCORE_L2;
+	pgturbohybrid_last_graph_simd_force = pgturbohybrid_dense_simd_force;
 	if (!pgturbohybrid_last_exact_vector_kernel_recorded && so->graphRescoreCount > 0)
 		pgturbohybrid_last_exact_vector_kernel = TqExpectedExactKernel();
 	pgturbohybrid_last_graph_storage_kind = so->graphStorageKind;
 	pgturbohybrid_last_graph_quantization_bits = so->tq.enabled ? so->tq.bits : 0;
+	pgturbohybrid_last_graph_dimensions = so->tq.enabled ? so->tq.dimensions : 0;
+	pgturbohybrid_last_graph_returned_rows = so->returnedRows;
+	pgturbohybrid_last_graph_oversampling = so->graphOversampling;
+	pgturbohybrid_last_graph_exact_cache = so->graphExactCache;
 	pgturbohybrid_last_graph_exact_storage = so->graphExactStorage;
 	pgturbohybrid_last_graph_exact_storage_known = so->tq.enabled;
 	if (so->hasTupleTargetRows && so->tupleTargetRows > 0)
@@ -283,9 +348,18 @@ PgturbohybridGraphRecordGraphScanStats(PgturbohybridGraphScanOpaque so)
 #if defined(__aarch64__) || defined(_M_ARM64) || \
 	defined(__x86_64__) || defined(_M_X64) || defined(__i386) || defined(_M_IX86)
 	pgturbohybrid_last_graph_query_split_active = so->tq.enabled && so->tq.querySplitEnabled;
+	pgturbohybrid_last_graph_u8_split_used = so->tq.enabled && so->tq.u8SplitEnabled;
 #else
 	pgturbohybrid_last_graph_query_split_active = false;
+	pgturbohybrid_last_graph_u8_split_used = false;
 #endif
+	/*
+	 * Whether the integer query-split scorer will actually run for this query
+	 * (full gate incl. dim >= 1024 and runtime SIMD availability), as opposed
+	 * to querySplitEnabled which only reflects the per-query prep.  Used to
+	 * report the exact approximate scorer (query split vs LUT gather).
+	 */
+	pgturbohybrid_last_graph_querysplit_used = PgturbohybridGraphTqQuerySplitActive(&so->tq);
 	pgturbohybrid_last_exact_vector_kernel_recorded = false;
 }
 
@@ -299,11 +373,34 @@ PgturbohybridGraphRecordNonGraphScanStats(void)
 	pgturbohybrid_last_graph_scalar_scored_codes = 0;
 	pgturbohybrid_last_graph_batch_kernel = PGTURBOHYBRID_SCORING_SCALAR;
 	pgturbohybrid_last_weighted_code_code_kernel = PGTURBOHYBRID_SCORING_SCALAR;
+	memset(pgturbohybrid_last_graph_score_kernel_nodes, 0,
+		   sizeof(pgturbohybrid_last_graph_score_kernel_nodes));
+	memset(pgturbohybrid_last_graph_score_kernel_calls, 0,
+		   sizeof(pgturbohybrid_last_graph_score_kernel_calls));
+	pgturbohybrid_last_graph_batch_calls = 0;
+	pgturbohybrid_last_graph_batch_nodes = 0;
+	pgturbohybrid_last_graph_base_frontier_pushes = 0;
+	pgturbohybrid_last_graph_base_frontier_pops = 0;
+	pgturbohybrid_last_graph_base_nearest_offers = 0;
+	pgturbohybrid_last_graph_base_visited_checks = 0;
+	pgturbohybrid_last_graph_base_duplicate_skips = 0;
+	pgturbohybrid_last_graph_base_batch_calls = 0;
+	pgturbohybrid_last_graph_base_batch_nodes = 0;
+	pgturbohybrid_last_graph_base_max_frontier = 0;
+	pgturbohybrid_last_graph_score_mode = PGTURBOHYBRID_SCORE_L2;
+	pgturbohybrid_last_graph_simd_force = pgturbohybrid_dense_simd_force;
 	pgturbohybrid_last_graph_candidate_count = 0;
+	pgturbohybrid_last_graph_rescore_band = PGTURBOHYBRID_GRAPH_RESCORE_BAND_AUTO;
 	pgturbohybrid_last_graph_rescore_count = 0;
 	pgturbohybrid_last_graph_rescore_pages = 0;
 	pgturbohybrid_last_graph_code_pages_read = 0;
 	pgturbohybrid_last_graph_adj_pages_read = 0;
+	pgturbohybrid_last_graph_code_page_attempts = 0;
+	pgturbohybrid_last_graph_code_page_hits = 0;
+	pgturbohybrid_last_graph_code_page_misses = 0;
+	pgturbohybrid_last_graph_code_tuples_copied = 0;
+	pgturbohybrid_last_graph_code_arena_allocated_bytes = 0;
+	pgturbohybrid_last_graph_code_arena_used_bytes = 0;
 	pgturbohybrid_last_graph_entry_point_count = 0;
 	pgturbohybrid_last_graph_entry_sidecar_count = 0;
 	pgturbohybrid_last_graph_entry_sidecar_scored = 0;
@@ -353,6 +450,12 @@ PgturbohybridGraphRecordNonGraphScanStats(void)
 	pgturbohybrid_last_graph_exact_storage = false;
 	pgturbohybrid_last_graph_exact_storage_known = false;
 	pgturbohybrid_last_graph_query_split_active = false;
+	pgturbohybrid_last_graph_querysplit_used = false;
+	pgturbohybrid_last_graph_u8_split_used = false;
+	pgturbohybrid_last_graph_dimensions = 0;
+	pgturbohybrid_last_graph_returned_rows = 0;
+	pgturbohybrid_last_graph_oversampling = 0;
+	pgturbohybrid_last_graph_exact_cache = PGTURBOHYBRID_GRAPH_EXACT_CACHE_AUTO;
 }
 
 void
@@ -388,7 +491,6 @@ PgturbohybridFinalKSourceName(void)
 	return "default";
 }
 
-#ifdef PGTURBOHYBRID_DEV_DIAGNOSTICS
 static const char *
 TqExactKernelName(int kernel)
 {
@@ -408,6 +510,7 @@ TqExactKernelName(int kernel)
 }
 #endif
 
+#ifdef PGTURBOHYBRID_DEV_DIAGNOSTICS
 static const char *
 PgturbohybridGraphAvx512WeightedModeName(int mode)
 {
@@ -426,6 +529,109 @@ PgturbohybridGraphAvx512WeightedModeName(int mode)
 #ifdef PGTURBOHYBRID_DEV_DIAGNOSTICS
 static Datum pgturbohybrid_last_simd_stats(PG_FUNCTION_ARGS) pg_attribute_unused();
 #endif
+
+/*
+ * Name of the approximate dense scorer (the query-split SIMD kernel selected
+ * for batch and single-node code scoring).  Uses the diagnostic taxonomy:
+ * "query_split_avx2" disambiguates the int8 query-split AVX2 path from the
+ * "avx2_lut_gather" scalar-fallback path reported separately below.
+ */
+static const char *
+PgturbohybridDenseScorerName(int scoringKernel)
+{
+	switch ((TqScoringKernel) scoringKernel)
+	{
+		case PGTURBOHYBRID_SCORING_AVX512VNNI:
+			return "avx512vnni";
+		case PGTURBOHYBRID_SCORING_AVXVNNI:
+			return "avxvnni";
+		case PGTURBOHYBRID_SCORING_AVX512BW_DQ:
+			return "avx512bw_dq";
+		case PGTURBOHYBRID_SCORING_AVX2:
+			return "query_split_avx2";
+		case PGTURBOHYBRID_SCORING_ARM_I8MM:
+			return "arm_i8mm";
+		case PGTURBOHYBRID_SCORING_NEON:
+			return "neon";
+		case PGTURBOHYBRID_SCORING_SCALAR:
+		default:
+			return "scalar";
+	}
+}
+
+/*
+ * Name of the fallback scorer used for codes that miss the query-split path
+ * (single-node / sub-batch-of-4 remainders).  On x86 this is the per-dimension
+ * AVX2 LUT-gather kernel (TqCodeDistanceAvx2); otherwise the scalar kernel.
+ * A nonzero graph_scalar_scored_codes means this slow path actually ran.
+ */
+static const char *
+PgturbohybridDenseScalarFallbackName(void)
+{
+	if (pgturbohybrid_dense_simd_force == PGTURBOHYBRID_SIMD_FORCE_SCALAR)
+		return "scalar";
+#if !defined(PGTURBOHYBRID_DISABLE_SIMD) && (defined(__x86_64__) || defined(_M_X64))
+	return "avx2_lut_gather";
+#else
+	return "scalar";
+#endif
+}
+
+/*
+ * The exact approximate-distance scorer that the dense scan actually used.
+ * Distinguishes the scalar/LUT and AVX2 LUT-gather paths from the integer
+ * signed query-split kernels (and from a pure exact-function rescore).  The
+ * qdrant_u8_* taxonomy values are reserved for a future unsigned-codebook
+ * kernel and are intentionally never emitted by the current implementation.
+ */
+static const char *
+PgturbohybridDenseScorerUsedName(bool querySplitUsed, int scoringKernel,
+								 int64 approxCodes, int64 rescoreCount)
+{
+	if (approxCodes == 0 && rescoreCount > 0)
+		return "exact_function_call";
+
+	if (querySplitUsed)
+	{
+		switch ((TqScoringKernel) scoringKernel)
+		{
+			case PGTURBOHYBRID_SCORING_AVX512VNNI:
+				return "signed_split_avx512vnni";
+			case PGTURBOHYBRID_SCORING_AVXVNNI:
+				return "signed_split_avxvnni";
+			case PGTURBOHYBRID_SCORING_NEON:
+			case PGTURBOHYBRID_SCORING_ARM_I8MM:
+				return "signed_split_neon";
+			case PGTURBOHYBRID_SCORING_AVX2:
+			default:
+				return "signed_split_avx2";
+		}
+	}
+
+	/* Approximate scoring fell back to the per-dimension LUT path. */
+	if ((TqScoringKernel) scoringKernel == PGTURBOHYBRID_SCORING_SCALAR)
+		return "scalar_lut";
+#if !defined(PGTURBOHYBRID_DISABLE_SIMD) && (defined(__x86_64__) || defined(_M_X64))
+	return "avx2_lut_gather";
+#else
+	return "scalar_lut";
+#endif
+}
+
+static const char *
+PgturbohybridGraphExactCacheName(int mode)
+{
+	switch ((PgturbohybridGraphExactCache) mode)
+	{
+		case PGTURBOHYBRID_GRAPH_EXACT_CACHE_ON:
+			return "on";
+		case PGTURBOHYBRID_GRAPH_EXACT_CACHE_OFF:
+			return "off";
+		case PGTURBOHYBRID_GRAPH_EXACT_CACHE_AUTO:
+		default:
+			return "auto";
+	}
+}
 
 FUNCTION_PREFIX PG_FUNCTION_INFO_V1(pgturbohybrid_last_scan_stats);
 FUNCTION_PREFIX Datum
@@ -464,10 +670,88 @@ pgturbohybrid_last_scan_stats(PG_FUNCTION_ARGS)
 	PgturbohybridJsonbAddInt64(&state, "quantization_bits",
 							   pgturbohybrid_last_graph_quantization_bits);
 	if (pgturbohybrid_last_graph_exact_storage_known)
+	{
 		PgturbohybridJsonbAddBool(&state, "exact_storage",
 								  pgturbohybrid_last_graph_exact_storage);
+		/* exact_free = code-only index: no stored f32 vectors to rescore. */
+		PgturbohybridJsonbAddBool(&state, "exact_free",
+								  !pgturbohybrid_last_graph_exact_storage);
+	}
 	else
+	{
 		PgturbohybridJsonbAddNull(&state, "exact_storage");
+		PgturbohybridJsonbAddNull(&state, "exact_free");
+	}
+
+	/*
+	 * Dense scan diagnostics: which scorer ran, the approximate-vs-exact and
+	 * SIMD-vs-scalar code-scoring split, page/tuple overhead, candidate
+	 * budgets, and per-phase timing.  Together these distinguish SIMD scoring
+	 * cost (dense_scoring_kernel + graph_batch_us) from page/tuple/heap
+	 * overhead (graph_*_pages_read + heap_tuples_returned + graph_heap_us).
+	 */
+	PgturbohybridJsonbAddInt64(&state, "dimensions",
+							   pgturbohybrid_last_graph_dimensions);
+	PgturbohybridJsonbAddBool(&state, "query_split_enabled",
+							  pgturbohybrid_last_graph_query_split_active);
+	/* Exact approximate scorer actually used (scalar_lut / avx2_lut_gather /
+	 * signed_split_*); the authoritative answer to "did this scan use the LUT
+	 * gather or the integer query split?". */
+	PgturbohybridJsonbAddString(&state, "dense_scorer",
+								pgturbohybrid_last_graph_u8_split_used ?
+								PgturbohybridGraphU8SplitKernelName() :
+								PgturbohybridDenseScorerUsedName(
+									pgturbohybrid_last_graph_querysplit_used,
+									pgturbohybrid_last_graph_scoring_kernel,
+									pgturbohybrid_last_graph_scored_codes,
+									pgturbohybrid_last_graph_rescore_count));
+	PgturbohybridJsonbAddString(&state, "dense_scoring_kernel",
+								PgturbohybridDenseScorerName(pgturbohybrid_last_graph_scoring_kernel));
+	PgturbohybridJsonbAddString(&state, "dense_batch_kernel",
+								PgturbohybridDenseScorerName(pgturbohybrid_last_graph_batch_kernel));
+	PgturbohybridJsonbAddString(&state, "dense_scalar_fallback_kernel",
+								PgturbohybridDenseScalarFallbackName());
+	PgturbohybridJsonbAddString(&state, "dense_exact_kernel",
+								TqExactKernelName(pgturbohybrid_last_exact_vector_kernel));
+	PgturbohybridJsonbAddInt64(&state, "graph_batch_scored_codes",
+							   pgturbohybrid_last_graph_batch_scored_codes);
+	PgturbohybridJsonbAddInt64(&state, "graph_simd_scored_codes",
+							   Max(0, pgturbohybrid_last_graph_scored_codes -
+								   pgturbohybrid_last_graph_scalar_scored_codes));
+	PgturbohybridJsonbAddInt64(&state, "graph_scalar_scored_codes",
+							   pgturbohybrid_last_graph_scalar_scored_codes);
+	PgturbohybridJsonbAddInt64(&state, "heap_tuples_returned",
+							   pgturbohybrid_last_graph_returned_rows);
+	PgturbohybridJsonbAddInt64(&state, "candidate_objects_allocated",
+							   pgturbohybrid_last_graph_candidate_count);
+	PgturbohybridJsonbAddInt64(&state, "graph_oversampling",
+							   pgturbohybrid_last_graph_oversampling);
+	PgturbohybridJsonbAddString(&state, "graph_exact_cache",
+								PgturbohybridGraphExactCacheName(pgturbohybrid_last_graph_exact_cache));
+	PgturbohybridJsonbAddBool(&state, "graph_exact_cache_active",
+							  pgturbohybrid_last_graph_exact_cache != PGTURBOHYBRID_GRAPH_EXACT_CACHE_OFF);
+	PgturbohybridJsonbAddBool(&state, "residual_rerank_active",
+							  pgturbohybrid_last_graph_residual_rerank_count > 0);
+	PgturbohybridJsonbAddBool(&state, "graph_rescore_band_active",
+							  pgturbohybrid_last_graph_effective_rescore_band > 0);
+	/* The index's configured rescore band (auto/none/exact). */
+	PgturbohybridJsonbAddString(&state, "graph_rescore_band",
+								PgturbohybridGraphRescoreBandName(pgturbohybrid_last_graph_rescore_band));
+	PgturbohybridJsonbAddUint64(&state, "graph_prepare_us",
+								(uint64) pgturbohybrid_last_graph_prepare_us);
+	PgturbohybridJsonbAddUint64(&state, "graph_traverse_us",
+								(uint64) pgturbohybrid_last_graph_traverse_us);
+	PgturbohybridJsonbAddUint64(&state, "graph_batch_us",
+								(uint64) pgturbohybrid_last_graph_batch_us);
+	PgturbohybridJsonbAddUint64(&state, "graph_heap_us",
+								(uint64) pgturbohybrid_last_graph_heap_us);
+	PgturbohybridJsonbAddUint64(&state, "graph_rescore_us",
+								(uint64) pgturbohybrid_last_graph_rescore_us);
+	PgturbohybridJsonbAddUint64(&state, "graph_sort_us",
+								(uint64) pgturbohybrid_last_graph_sort_us);
+	PgturbohybridJsonbAddUint64(&state, "graph_total_us",
+								(uint64) pgturbohybrid_last_graph_total_us);
+
 	PgturbohybridJsonbAddInt64(&state, "graph_candidate_count",
 							   pgturbohybrid_last_graph_candidate_count);
 	PgturbohybridJsonbAddInt64(&state, "graph_visited_nodes",
@@ -478,6 +762,41 @@ pgturbohybrid_last_scan_stats(PG_FUNCTION_ARGS)
 							   pgturbohybrid_last_graph_code_pages_read);
 	PgturbohybridJsonbAddInt64(&state, "graph_adj_pages_read",
 							   pgturbohybrid_last_graph_adj_pages_read);
+	/*
+	 * Native code-page cache effectiveness (PgturbohybridGraphLoadCodePage).
+	 * A warm scan should be served almost entirely from already-loaded code
+	 * pages / the in-memory codeArena: cache_hits dominate load_attempts,
+	 * cache_misses ~ code_pages_read ~ 0, and pages_read_per_scored_code ~ 0.
+	 * arena_used_bytes is the code copied into storage THIS scan (0 when fully
+	 * served from the cross-scan native cache); arena_allocated_bytes is the
+	 * contiguous code-arena size (0 when the index exceeds the native-cache
+	 * cap and falls back to per-node code buffers).
+	 */
+	PgturbohybridJsonbAddKey(&state, "graph_code_pages");
+	PgturbohybridJsonbBeginObject(&state);
+	PgturbohybridJsonbAddInt64(&state, "load_attempts",
+							   pgturbohybrid_last_graph_code_page_attempts);
+	PgturbohybridJsonbAddInt64(&state, "cache_hits",
+							   pgturbohybrid_last_graph_code_page_hits);
+	PgturbohybridJsonbAddInt64(&state, "cache_misses",
+							   pgturbohybrid_last_graph_code_page_misses);
+	PgturbohybridJsonbAddInt64(&state, "code_pages_read",
+							   pgturbohybrid_last_graph_code_pages_read);
+	PgturbohybridJsonbAddInt64(&state, "code_tuples_copied",
+							   pgturbohybrid_last_graph_code_tuples_copied);
+	PgturbohybridJsonbAddInt64(&state, "arena_used_bytes",
+							   pgturbohybrid_last_graph_code_arena_used_bytes);
+	PgturbohybridJsonbAddInt64(&state, "arena_allocated_bytes",
+							   pgturbohybrid_last_graph_code_arena_allocated_bytes);
+	PgturbohybridJsonbAddFloat8(&state, "hit_rate",
+								pgturbohybrid_last_graph_code_page_attempts > 0 ?
+								(double) pgturbohybrid_last_graph_code_page_hits /
+								(double) pgturbohybrid_last_graph_code_page_attempts : 0.0);
+	PgturbohybridJsonbAddFloat8(&state, "pages_read_per_scored_code",
+								pgturbohybrid_last_graph_scored_codes > 0 ?
+								(double) pgturbohybrid_last_graph_code_pages_read /
+								(double) pgturbohybrid_last_graph_scored_codes : 0.0);
+	PgturbohybridJsonbEndObject(&state);
 	PgturbohybridJsonbAddInt64(&state, "graph_entry_point_count",
 							   pgturbohybrid_last_graph_entry_point_count);
 	PgturbohybridJsonbAddInt64(&state, "graph_entry_sidecar_count",
@@ -496,6 +815,72 @@ pgturbohybrid_last_scan_stats(PG_FUNCTION_ARGS)
 							   pgturbohybrid_last_graph_residual_rerank_us);
 	PgturbohybridJsonbAddInt64(&state, "graph_rescore_count",
 							   pgturbohybrid_last_graph_rescore_count);
+	PgturbohybridJsonbAddInt64(&state, "graph_rescore_pages",
+							   pgturbohybrid_last_graph_rescore_pages);
+	/* Exact rescore count == graph_rescore_count; named explicitly so the
+	 * scoring-kernel diagnostic is self-contained. */
+	PgturbohybridJsonbAddInt64(&state, "exact_rescore_count",
+							   pgturbohybrid_last_graph_rescore_count);
+	/*
+	 * Per-kernel attribution of the native dense scoring work: which exact
+	 * kernel inside PgturbohybridGraphScoreNodeBatch()/PgturbohybridGraphScoreNode()
+	 * scored how many nodes (and how many kernel calls).  This is the
+	 * authoritative answer to "is the hot path u8-split, signed-split, or
+	 * scalar/LUT?".  Nodes summed across buckets == graph_scored_codes.
+	 */
+	PgturbohybridJsonbAddKey(&state, "graph_score_kernels");
+	PgturbohybridJsonbBeginObject(&state);
+	for (int b = 0; b < PGTURBOHYBRID_SCORE_KERNEL_BUCKET_COUNT; b++)
+	{
+		PgturbohybridJsonbAddKey(&state, PgturbohybridGraphScoreKernelBucketName(b));
+		PgturbohybridJsonbBeginObject(&state);
+		PgturbohybridJsonbAddInt64(&state, "nodes",
+								   pgturbohybrid_last_graph_score_kernel_nodes[b]);
+		PgturbohybridJsonbAddInt64(&state, "calls",
+								   pgturbohybrid_last_graph_score_kernel_calls[b]);
+		PgturbohybridJsonbEndObject(&state);
+	}
+	PgturbohybridJsonbEndObject(&state);
+	PgturbohybridJsonbAddInt64(&state, "graph_batch_calls",
+							   pgturbohybrid_last_graph_batch_calls);
+	PgturbohybridJsonbAddInt64(&state, "graph_batch_nodes",
+							   pgturbohybrid_last_graph_batch_nodes);
+	PgturbohybridJsonbAddFloat8(&state, "graph_avg_batch_size",
+								pgturbohybrid_last_graph_batch_calls > 0 ?
+								(double) pgturbohybrid_last_graph_batch_nodes /
+								(double) pgturbohybrid_last_graph_batch_calls : 0.0);
+	/*
+	 * Base-layer (PgturbohybridGraphSearchBaseLayer) traversal volume: frontier
+	 * heap push/pop, nearest offers, visited checks and how many were duplicate
+	 * (already-visited) skips, the per-pop batch scoring calls/nodes, and the
+	 * peak frontier size.  Diagnoses heap / visited-check / batch-formation
+	 * overhead in the hot native traversal.
+	 */
+	PgturbohybridJsonbAddKey(&state, "graph_base_layer");
+	PgturbohybridJsonbBeginObject(&state);
+	PgturbohybridJsonbAddInt64(&state, "frontier_pushes",
+							   pgturbohybrid_last_graph_base_frontier_pushes);
+	PgturbohybridJsonbAddInt64(&state, "frontier_pops",
+							   pgturbohybrid_last_graph_base_frontier_pops);
+	PgturbohybridJsonbAddInt64(&state, "nearest_offers",
+							   pgturbohybrid_last_graph_base_nearest_offers);
+	PgturbohybridJsonbAddInt64(&state, "visited_checks",
+							   pgturbohybrid_last_graph_base_visited_checks);
+	PgturbohybridJsonbAddInt64(&state, "duplicate_skips",
+							   pgturbohybrid_last_graph_base_duplicate_skips);
+	PgturbohybridJsonbAddInt64(&state, "batch_calls",
+							   pgturbohybrid_last_graph_base_batch_calls);
+	PgturbohybridJsonbAddInt64(&state, "batch_nodes",
+							   pgturbohybrid_last_graph_base_batch_nodes);
+	PgturbohybridJsonbAddInt64(&state, "max_frontier_size",
+							   pgturbohybrid_last_graph_base_max_frontier);
+	PgturbohybridJsonbEndObject(&state);
+	PgturbohybridJsonbAddString(&state, "score_mode",
+								PgturbohybridGraphTqScoreModeName(pgturbohybrid_last_graph_score_mode));
+	PgturbohybridJsonbAddString(&state, "dense_simd_force",
+								PgturbohybridGraphTqSimdForceName(pgturbohybrid_last_graph_simd_force));
+	PgturbohybridJsonbAddBool(&state, "u8_split_enabled",
+							  pgturbohybrid_last_graph_u8_split_used);
 	PgturbohybridJsonbAddInt64(&state, "graph_dense_requested_k",
 							   pgturbohybrid_last_graph_dense_requested_k);
 	PgturbohybridJsonbAddInt64(&state, "graph_effective_result_target",

@@ -165,6 +165,28 @@ CREATE FUNCTION turbohybrid_simd_capabilities() RETURNS pg_catalog.jsonb
 	AS 'MODULE_PATHNAME', 'pgturbohybrid_simd_capabilities'
 	LANGUAGE C STABLE PARALLEL SAFE;
 
+-- Diagnostic: score one (query, doc) pair under each dense approximate scorer
+-- (scalar/LUT and signed query split) plus a linear/uniform-quantizer
+-- reference, so operators can inspect quantization error and tests can prove
+-- the SIMD path uses the non-uniform codebook rather than raw nibbles.
+CREATE FUNCTION turbohybrid_scorer_distances(vector, vector) RETURNS pg_catalog.jsonb
+	AS 'MODULE_PATHNAME', 'turbohybrid_scorer_distances'
+	LANGUAGE C STABLE STRICT PARALLEL SAFE;
+
+-- Same diagnostic at a chosen quantization bit width (2 or 4).
+CREATE FUNCTION turbohybrid_scorer_distances(vector, vector, integer) RETURNS pg_catalog.jsonb
+	AS 'MODULE_PATHNAME', 'turbohybrid_scorer_distances'
+	LANGUAGE C STABLE STRICT PARALLEL SAFE;
+
+-- Tight-loop ns/code microbenchmark of the dense 4-bit scoring kernels
+-- (scalar/LUT, signed split, single-node u8 split, x4 u8 split batch).  Times
+-- scoring `ncodes` cache-resident codes over `iters` passes, reporting the
+-- minimum ns/code per kernel -- isolating raw per-code compute from the scan
+-- machinery and the memory wall.  Non-strict so ncodes/iters may default.
+CREATE FUNCTION turbohybrid_scorer_bench(vector, vector, integer, integer, integer) RETURNS pg_catalog.jsonb
+	AS 'MODULE_PATHNAME', 'turbohybrid_scorer_bench'
+	LANGUAGE C VOLATILE CALLED ON NULL INPUT PARALLEL SAFE;
+
 COMMENT ON EXTENSION pgturbohybrid IS 'TurboHybrid dense vector and BM25 search extension for pgvector';
 COMMENT ON ACCESS METHOD turbohybrid IS 'TurboHybrid dense vector and BM25 hybrid index access method';
 COMMENT ON TYPE turbohybrid_query IS 'TurboHybrid query payload for dense vector and BM25 hybrid search';
