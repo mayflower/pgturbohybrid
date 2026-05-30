@@ -24,6 +24,9 @@
 #include "utils/memdebug.h"
 #include "utils/rel.h"
 #include "utils/syscache.h"
+#include "lib/stringinfo.h"
+#include "utils/jsonb.h"
+#include "utils/fmgrprotos.h"
 #include "pgturbohybrid_quant.h"
 #include "pgturbohybrid_vector_compat.h"
 
@@ -2090,14 +2093,9 @@ PgturbohybridGraphPrepareTqQueryInternal(Relation index, PgturbohybridGraphSuppo
 	}
 #if PGTURBOHYBRID_GRAPH_ENABLE_SYMMETRIC_I8_DOT
 	tq->queryI8 = palloc(sizeof(int8) * query->dim);
-#endif
-	tq->lut = palloc(PGTURBOHYBRID_LUT_SIZE(query->dim));
-
-#if PGTURBOHYBRID_GRAPH_ENABLE_SYMMETRIC_I8_DOT
 	tq->queryScale = TqEncodeQueryInt8(query, tq->queryI8,
 									   &tq->queryCodeNorm);
 #endif
-	TqBuildQueryLut(tq);
 	tq->enabled = true;
 	TqPrepareQuerySignBits(tq);
 	TqPrepareQueryAsymBit1(tq);
@@ -2105,6 +2103,19 @@ PgturbohybridGraphPrepareTqQueryInternal(Relation index, PgturbohybridGraphSuppo
 	if (prepareSplit)
 		TqPrepareQuerySplit4(tq);
 #endif
+
+	/*
+	 * Build the LUT-gather scoring table only when the integer query-split
+	 * scorers will not handle this query.  When query split is active every
+	 * scoring path (scan and build) tries QuerySplit before the LUT fallback,
+	 * so tq->lut is never read -- skip allocating and filling it.  tq->lut
+	 * stays NULL (zeroed by the memset above) in that case.
+	 */
+	if (!PgturbohybridGraphTqQuerySplitActive(tq))
+	{
+		tq->lut = palloc(PGTURBOHYBRID_LUT_SIZE(query->dim));
+		TqBuildQueryLut(tq);
+	}
 }
 
 void
@@ -2390,6 +2401,19 @@ TqCodeDistanceNeon(const PgturbohybridGraphTqQuery *tq, const uint8 *valueCode, 
 PGTURBOHYBRID_TARGET_CLONES double
 TqCodeDistance(const PgturbohybridGraphTqQuery *tq, const uint8 *valueCode, float valueScale)
 {
+	double		querySplitDistance;
+
+	/*
+	 * Prefer the integer query-split SIMD scorers for 4-bit and 2-bit packed
+	 * codes (dim >= 1024, not L1).  This keeps dense scan scoring off the
+	 * AVX2 per-dimension LUT-gather path (TqCodeDistanceAvx2), which is far
+	 * slower per code.  Falls through to the LUT/scalar kernels when query
+	 * split is unavailable for this query.
+	 */
+	if (PgturbohybridGraphTqCodeQuerySplitDistance(tq, valueCode, valueScale,
+												   &querySplitDistance))
+		return querySplitDistance;
+
 	switch ((TqScoringKernel) tq->scoringKernel)
 	{
 #if PGTURBOHYBRID_COMPILE_AVX2
@@ -3371,4 +3395,111 @@ PgturbohybridGraphGetTypeInfo(Relation index)
 	}
 	else
 		return (const PgturbohybridGraphTypeInfo *) DatumGetPointer(FunctionCall0Coll(procinfo, InvalidOid));
+}
+
+/*
+ * turbohybrid_scorer_distances(query vector, doc vector) -> jsonb
+ *
+ * Diagnostic that scores a single (query, doc) pair as a 4-bit packed code
+ * under each dense approximate scorer.  Lets operators inspect quantization
+ * error and lets regression tests prove the SIMD query-split path expands
+ * nibbles through the non-uniform codebook (PgturbohybridGraphCodebookI8 =
+ * {-127,-96,-75,-58,-44,-31,-18,-6,6,18,31,44,58,75,96,127}) rather than as
+ * raw 0..15 values.
+ *
+ *   scalar_lut       : codebook via the scalar LUT reference (TqCodeDistanceScalar)
+ *   signed_split     : codebook via the integer signed query-split SIMD kernel
+ *   linear_reference : the same inner product but with each code nibble scored
+ *                      as its raw 0..15 quantization level instead of the
+ *                      codebook centre.  This is a reference value only -- it
+ *                      quantifies how much the non-uniform codebook matters and
+ *                      is NOT a selectable scan scorer (no kernel dispatch ever
+ *                      references it).  A correct scorer must match scalar_lut,
+ *                      not linear_reference.
+ *
+ * Inner-product scoring, no EC correction, 4-bit codes.  Use dim >= 1024 to
+ * exercise the query-split path (otherwise signed_split falls back to scalar).
+ */
+FUNCTION_PREFIX PG_FUNCTION_INFO_V1(turbohybrid_scorer_distances);
+FUNCTION_PREFIX Datum
+turbohybrid_scorer_distances(PG_FUNCTION_ARGS)
+{
+	Vector	   *query = PgturbohybridDatumGetVector(PG_GETARG_DATUM(0));
+	Vector	   *doc = PgturbohybridDatumGetVector(PG_GETARG_DATUM(1));
+	int			bits = PGTURBOHYBRID_DEFAULT_BITS;
+	int			dim;
+	PgturbohybridGraphTqQuery tq;
+	uint8	   *code;
+	float		scale;
+	double		dimSqrt;
+	double		dScalar;
+	double		dSplit;
+	double		dRaw;
+	double		dotRaw = 0;
+	bool		splitUsed;
+	StringInfoData json;
+
+	PgturbohybridCheckVector(query);
+	PgturbohybridCheckVector(doc);
+	dim = query->dim;
+	if (doc->dim != dim)
+		ereport(ERROR,
+				(errcode(ERRCODE_DATA_EXCEPTION),
+				 errmsg("query and doc vectors must have equal dimension")));
+
+	/* Prepare a minimal inner-product query (no index, no EC correction). */
+	memset(&tq, 0, sizeof(tq));
+	tq.dimensions = dim;
+	tq.bits = bits;
+	tq.lutWidth = 1 << bits;
+	tq.codeBytes = TqCodeSizeForBits(dim, bits);
+	tq.scoreMode = PGTURBOHYBRID_SCORE_IP;
+	tq.scoringKernel = TqSelectScoringKernel();
+	tq.rawQueryValues = query->x;
+	tq.queryValues = palloc(sizeof(float) * dim);
+	TqRotateVectorFloat(query->x, dim, tq.queryValues);
+	for (int i = 0; i < dim; i++)
+		tq.queryNorm += (double) query->x[i] * (double) query->x[i];
+	tq.lut = palloc(PGTURBOHYBRID_LUT_SIZE(dim));
+	TqBuildQueryLut(&tq);
+	tq.enabled = true;
+#if defined(__aarch64__) || defined(_M_ARM64) || PGTURBOHYBRID_COMPILE_AVX2
+	TqPrepareQuerySplit4(&tq);
+#endif
+
+	code = palloc0(tq.codeBytes);
+	scale = TqEncodeVectorBits(doc, code, bits);
+	dimSqrt = sqrt((double) dim);
+
+	/* (1) scalar/LUT codebook reference. */
+	dScalar = TqCodeDistanceScalar(&tq, code, scale);
+
+	/* (2) signed integer query-split SIMD kernel (codebook via shuffle). */
+	splitUsed = PgturbohybridGraphTqCodeQuerySplitDistance(&tq, code, scale, &dSplit);
+	if (!splitUsed)
+		dSplit = dScalar;
+
+	/*
+	 * (3) Linear/uniform reference: score each code nibble as its raw 0..15
+	 * quantization level instead of the non-uniform codebook centre.  A correct
+	 * scorer must match scalar_lut, not this; the gap shows the codebook effect.
+	 */
+	for (int i = 0; i < dim; i++)
+	{
+		int			vc = TqGetCodeComponentBits(code, i, bits);
+
+		dotRaw += (double) tq.queryValues[i] * (double) vc;
+	}
+	dRaw = -((double) scale * dotRaw / dimSqrt);
+
+	initStringInfo(&json);
+	appendStringInfo(&json,
+					 "{\"scalar_lut\":%.9g,\"signed_split\":%.9g,"
+					 "\"linear_reference\":%.9g,\"split_kernel\":\"%s\","
+					 "\"query_split_used\":%s,\"dimensions\":%d,\"bits\":%d}",
+					 dScalar, dSplit, dRaw,
+					 PgturbohybridGraphTqScoringKernelName(tq.scoringKernel),
+					 splitUsed ? "true" : "false", dim, bits);
+
+	PG_RETURN_DATUM(DirectFunctionCall1(jsonb_in, CStringGetDatum(json.data)));
 }

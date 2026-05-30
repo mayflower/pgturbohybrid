@@ -80,6 +80,7 @@ static int pgturbohybrid_last_graph_quantization_bits = 0;
 static bool pgturbohybrid_last_graph_exact_storage = false;
 static bool pgturbohybrid_last_graph_exact_storage_known = false;
 static bool pgturbohybrid_last_graph_query_split_active = false;
+static bool pgturbohybrid_last_graph_querysplit_used = false;
 static int64 pgturbohybrid_last_graph_dimensions = 0;
 static int64 pgturbohybrid_last_graph_returned_rows = 0;
 static int64 pgturbohybrid_last_graph_oversampling = 0;
@@ -308,6 +309,13 @@ PgturbohybridGraphRecordGraphScanStats(PgturbohybridGraphScanOpaque so)
 #else
 	pgturbohybrid_last_graph_query_split_active = false;
 #endif
+	/*
+	 * Whether the integer query-split scorer will actually run for this query
+	 * (full gate incl. dim >= 1024 and runtime SIMD availability), as opposed
+	 * to querySplitEnabled which only reflects the per-query prep.  Used to
+	 * report the exact approximate scorer (query split vs LUT gather).
+	 */
+	pgturbohybrid_last_graph_querysplit_used = PgturbohybridGraphTqQuerySplitActive(&so->tq);
 	pgturbohybrid_last_exact_vector_kernel_recorded = false;
 }
 
@@ -375,6 +383,7 @@ PgturbohybridGraphRecordNonGraphScanStats(void)
 	pgturbohybrid_last_graph_exact_storage = false;
 	pgturbohybrid_last_graph_exact_storage_known = false;
 	pgturbohybrid_last_graph_query_split_active = false;
+	pgturbohybrid_last_graph_querysplit_used = false;
 	pgturbohybrid_last_graph_dimensions = 0;
 	pgturbohybrid_last_graph_returned_rows = 0;
 	pgturbohybrid_last_graph_oversampling = 0;
@@ -500,6 +509,47 @@ PgturbohybridDenseScalarFallbackName(void)
 #endif
 }
 
+/*
+ * The exact approximate-distance scorer that the dense scan actually used.
+ * Distinguishes the scalar/LUT and AVX2 LUT-gather paths from the integer
+ * signed query-split kernels (and from a pure exact-function rescore).  The
+ * qdrant_u8_* taxonomy values are reserved for a future unsigned-codebook
+ * kernel and are intentionally never emitted by the current implementation.
+ */
+static const char *
+PgturbohybridDenseScorerUsedName(bool querySplitUsed, int scoringKernel,
+								 int64 approxCodes, int64 rescoreCount)
+{
+	if (approxCodes == 0 && rescoreCount > 0)
+		return "exact_function_call";
+
+	if (querySplitUsed)
+	{
+		switch ((TqScoringKernel) scoringKernel)
+		{
+			case PGTURBOHYBRID_SCORING_AVX512VNNI:
+				return "signed_split_avx512vnni";
+			case PGTURBOHYBRID_SCORING_AVXVNNI:
+				return "signed_split_avxvnni";
+			case PGTURBOHYBRID_SCORING_NEON:
+			case PGTURBOHYBRID_SCORING_ARM_I8MM:
+				return "signed_split_neon";
+			case PGTURBOHYBRID_SCORING_AVX2:
+			default:
+				return "signed_split_avx2";
+		}
+	}
+
+	/* Approximate scoring fell back to the per-dimension LUT path. */
+	if ((TqScoringKernel) scoringKernel == PGTURBOHYBRID_SCORING_SCALAR)
+		return "scalar_lut";
+#if !defined(PGTURBOHYBRID_DISABLE_SIMD) && (defined(__x86_64__) || defined(_M_X64))
+	return "avx2_lut_gather";
+#else
+	return "scalar_lut";
+#endif
+}
+
 static const char *
 PgturbohybridGraphExactCacheName(int mode)
 {
@@ -568,6 +618,15 @@ pgturbohybrid_last_scan_stats(PG_FUNCTION_ARGS)
 							   pgturbohybrid_last_graph_dimensions);
 	PgturbohybridJsonbAddBool(&state, "query_split_enabled",
 							  pgturbohybrid_last_graph_query_split_active);
+	/* Exact approximate scorer actually used (scalar_lut / avx2_lut_gather /
+	 * signed_split_*); the authoritative answer to "did this scan use the LUT
+	 * gather or the integer query split?". */
+	PgturbohybridJsonbAddString(&state, "dense_scorer",
+								PgturbohybridDenseScorerUsedName(
+									pgturbohybrid_last_graph_querysplit_used,
+									pgturbohybrid_last_graph_scoring_kernel,
+									pgturbohybrid_last_graph_scored_codes,
+									pgturbohybrid_last_graph_rescore_count));
 	PgturbohybridJsonbAddString(&state, "dense_scoring_kernel",
 								PgturbohybridDenseScorerName(pgturbohybrid_last_graph_scoring_kernel));
 	PgturbohybridJsonbAddString(&state, "dense_batch_kernel",
