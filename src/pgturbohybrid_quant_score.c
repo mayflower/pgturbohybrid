@@ -189,6 +189,29 @@ static const int8 PgturbohybridGraphCodebook2PairOddI8[16] = {
 #define PGTURBOHYBRID_GRAPH_COMPILE_QUERY_SPLIT 0
 #endif
 
+/*
+ * x86 unsigned-codebook query-split representation.
+ *
+ * The codebook is the signed 4-bit codebook shifted by +OFFSET (=128) so the
+ * un-shifted value equals the signed centre the stored codes were encoded with
+ * (PgturbohybridGraphCodebookI8): codebook_u8[k] == PgturbohybridGraphCodebookI8[k] + 128.
+ * This keeps scores numerically identical (codebook-wise) to the scalar/LUT
+ * reference, while letting _mm256_maddubs_epi16 / _mm512_dpbusd_epi32 consume
+ * it directly as their unsigned operand.  Query halves are signed 7-bit
+ * (|low|,|high| <= 64) combined as q_signed = 128*high + low, keeping the
+ * maddubs pair sum <= 2*255*64 = 32640 < 32767.  The +OFFSET shift contributes
+ * a per-query bias OFFSET*Sum(q_signed) that the scorer subtracts once.
+ */
+#define PGTURBOHYBRID_U8_SPLIT_HIGH_COEF 128
+#define PGTURBOHYBRID_U8_SPLIT_ABS_MAX 8127.0
+#define PGTURBOHYBRID_U8_CODEBOOK_OFFSET 128
+#if PGTURBOHYBRID_GRAPH_COMPILE_AVX2
+static const uint8 PgturbohybridGraphCodebookU8[PGTURBOHYBRID_LUT_WIDTH] = {
+	1, 32, 53, 70, 84, 97, 110, 122,
+	134, 146, 159, 172, 186, 203, 224, 255
+};
+#endif
+
 
 static inline float
 PgturbohybridGraphCodeCenter(int code, int bits)
@@ -484,6 +507,19 @@ static int64 PGTURBOHYBRID_GRAPH_AVXVNNI_TARGET
 PgturbohybridGraphCodeCode2RawAvxVnni(const uint8 *a, const uint8 *b, int dim,
 						   int *sampleDims);
 #endif
+#if PGTURBOHYBRID_GRAPH_COMPILE_AVX2
+/* x86 unsigned-codebook query-split raw scorers (return the integer dot before
+ * bias removal and postprocess scaling). */
+static int64 PgturbohybridGraphQuerySplitU8RawScalar(const PgturbohybridGraphTqQuery *tq,
+													 const uint8 *code);
+static int64 PGTURBOHYBRID_GRAPH_AVX2_TARGET
+PgturbohybridGraphQuerySplitU8RawAvx2(const PgturbohybridGraphTqQuery *tq, const uint8 *code);
+#if PGTURBOHYBRID_GRAPH_COMPILE_AVX512VNNI
+static int64 PGTURBOHYBRID_GRAPH_AVX512VNNI_TARGET
+PgturbohybridGraphQuerySplitU8RawAvx512Vnni(const PgturbohybridGraphTqQuery *tq, const uint8 *code);
+#endif
+#endif
+
 #if PGTURBOHYBRID_GRAPH_ENABLE_SYMMETRIC_I8_DOT
 static inline int32 PgturbohybridGraphInt8Int8DotScalar(const int8 *query,
 											 const int8 *components, int dim);
@@ -563,6 +599,88 @@ PgturbohybridGraphPackedDistanceQuerySplit4(const PgturbohybridGraphTqQuery *tq,
 
 	return true;
 }
+
+#if PGTURBOHYBRID_GRAPH_COMPILE_AVX2
+/*
+ * Whether the unsigned-codebook (u8) split should be used for this query.
+ * 4-bit only, dim >= 1024, not L1, not SIMD-forced-scalar, impl != signed, and
+ * AVX2 (maddubs) available.  Pure function of GUCs + query shape; used by the
+ * query prep (which representation to build), the scorer, and the LUT-skip
+ * predicate.
+ */
+bool
+PgturbohybridGraphTqUseU8Split(const PgturbohybridGraphTqQuery *tq)
+{
+	if (tq == NULL ||
+		pgturbohybrid_dense_query_split_impl == PGTURBOHYBRID_QUERY_SPLIT_IMPL_SIGNED ||
+		pgturbohybrid_dense_simd_force == PGTURBOHYBRID_SIMD_FORCE_SCALAR ||
+		tq->bits != PGTURBOHYBRID_DEFAULT_BITS ||
+		tq->dimensions < 1024 ||
+		(TqScoreMode) tq->scoreMode == PGTURBOHYBRID_SCORE_L1)
+		return false;
+	return PgturbohybridGraphAvx2Available();
+}
+
+/*
+ * Unsigned-codebook (maddubs / VPDPBUSD) 4-bit query-to-code scorer.  The raw
+ * kernel returns Sum(q_signed * codebook_u8[code]); subtracting u8SplitBias
+ * (= OFFSET * Sum(q_signed)) recovers Sum(q_signed * codebook_signed[code]),
+ * after which the postprocess matches the signed path exactly.
+ */
+/* Shared u8 postprocess: bias removal, postprocess scale, IP/cosine/L2. */
+static double
+PgturbohybridGraphU8DistanceFromRaw(const PgturbohybridGraphTqQuery *tq, float valueScale,
+									int64 rawDot)
+{
+	double		dimSqrt = sqrt((double) tq->dimensions);
+	double		dot;
+	TqScoreMode mode = (TqScoreMode) tq->scoreMode;
+
+	rawDot -= tq->u8SplitBias;
+	dot = (double) tq->u8SplitPostprocessScale * (double) rawDot;
+	dot += tq->ecCorrection;
+
+	if (mode == PGTURBOHYBRID_SCORE_IP)
+		return -(valueScale * dot / dimSqrt);
+	if (mode == PGTURBOHYBRID_SCORE_COSINE)
+	{
+		if (tq->queryNorm == 0 || valueScale == 0)
+			return 1;
+		return 1 - (dot / (sqrt(tq->queryNorm) * dimSqrt));
+	}
+	{
+		double		distance = tq->queryNorm + ((double) valueScale * valueScale) -
+			(2 * valueScale * dot / dimSqrt);
+
+		return distance < 0 ? 0 : distance;
+	}
+}
+
+static bool
+PgturbohybridGraphPackedDistanceU8Split(const PgturbohybridGraphTqQuery *tq, const uint8 *valueCode,
+										float valueScale, double *distance)
+{
+	int64		rawDot;
+	TqScoreMode mode = (TqScoreMode) tq->scoreMode;
+
+	if (!tq->u8SplitEnabled || tq->dimensions < 1024 ||
+		tq->bits != PGTURBOHYBRID_DEFAULT_BITS || mode == PGTURBOHYBRID_SCORE_L1)
+		return false;
+
+#if PGTURBOHYBRID_GRAPH_COMPILE_AVX512VNNI
+	if (PgturbohybridGraphAvx512VnniAvailable())
+		rawDot = PgturbohybridGraphQuerySplitU8RawAvx512Vnni(tq, valueCode);
+	else
+#endif
+	if (PgturbohybridGraphAvx2Available())
+		rawDot = PgturbohybridGraphQuerySplitU8RawAvx2(tq, valueCode);
+	else
+		return false;
+
+	*distance = PgturbohybridGraphU8DistanceFromRaw(tq, valueScale, rawDot);
+	return true;
+}
+#endif
 
 static bool
 PgturbohybridGraphPackedDistanceQuerySplit2(const PgturbohybridGraphTqQuery *tq, const uint8 *valueCode,
@@ -791,6 +909,61 @@ PgturbohybridGraphBuildCodeCodeDistance2(PgturbohybridQuantBuildState *state, ui
 }
 #endif
 
+#if PGTURBOHYBRID_GRAPH_COMPILE_AVX2
+/*
+ * Diagnostic/test entry points: score one code under a specific 4-bit scorer
+ * for an already-prepared tq (signed split, unsigned-codebook SIMD, or the
+ * unsigned-codebook scalar reference).  Used by turbohybrid_scorer_distances
+ * to prove cross-kernel and cross-representation parity.
+ */
+bool
+PgturbohybridGraphTqCodeSignedSplitDistance(const PgturbohybridGraphTqQuery *tq,
+											const uint8 *valueCode, float valueScale, double *distance)
+{
+	return PgturbohybridGraphPackedDistanceQuerySplit4(tq, valueCode, valueScale, distance) ||
+		PgturbohybridGraphPackedDistanceQuerySplit2(tq, valueCode, valueScale, distance);
+}
+
+bool
+PgturbohybridGraphTqCodeU8SimdDistance(const PgturbohybridGraphTqQuery *tq,
+									   const uint8 *valueCode, float valueScale, double *distance)
+{
+	return PgturbohybridGraphPackedDistanceU8Split(tq, valueCode, valueScale, distance);
+}
+
+bool
+PgturbohybridGraphTqCodeU8ScalarDistance(const PgturbohybridGraphTqQuery *tq,
+										 const uint8 *valueCode, float valueScale, double *distance)
+{
+	TqScoreMode mode = (TqScoreMode) tq->scoreMode;
+
+	if (!tq->u8SplitEnabled || tq->dimensions < 1024 ||
+		tq->bits != PGTURBOHYBRID_DEFAULT_BITS || mode == PGTURBOHYBRID_SCORE_L1)
+		return false;
+	*distance = PgturbohybridGraphU8DistanceFromRaw(tq, valueScale,
+													PgturbohybridGraphQuerySplitU8RawScalar(tq, valueCode));
+	return true;
+}
+
+#endif
+
+/* Name of the unsigned-codebook SIMD kernel that would run (for scan stats).
+ * Always compiled so stats.c can name it; internal guards skip unavailable
+ * checks on non-x86. */
+const char *
+PgturbohybridGraphU8SplitKernelName(void)
+{
+#if PGTURBOHYBRID_GRAPH_COMPILE_AVX512VNNI
+	if (PgturbohybridGraphAvx512VnniAvailable())
+		return "unsigned_split_avx512vnni";
+#endif
+#if PGTURBOHYBRID_GRAPH_COMPILE_AVX2
+	if (PgturbohybridGraphAvx2Available())
+		return "unsigned_split_avx2";
+#endif
+	return "unsigned_split_scalar";
+}
+
 /*
  * Public single-code query-split entry point.  Tries the integer query-split
  * SIMD scorers (4-bit then 2-bit) for one packed code; returns true and sets
@@ -804,6 +977,12 @@ PgturbohybridGraphTqCodeQuerySplitDistance(const PgturbohybridGraphTqQuery *tq,
 										   double *distance)
 {
 #if PGTURBOHYBRID_GRAPH_COMPILE_QUERY_SPLIT
+#if PGTURBOHYBRID_GRAPH_COMPILE_AVX2
+	/* Prefer the unsigned-codebook split when it was prepared for this query. */
+	if (tq->u8SplitEnabled &&
+		PgturbohybridGraphPackedDistanceU8Split(tq, valueCode, valueScale, distance))
+		return true;
+#endif
 	return PgturbohybridGraphPackedDistanceQuerySplit4(tq, valueCode, valueScale, distance) ||
 		PgturbohybridGraphPackedDistanceQuerySplit2(tq, valueCode, valueScale, distance);
 #else
@@ -824,6 +1003,11 @@ bool
 PgturbohybridGraphTqQuerySplitActive(const PgturbohybridGraphTqQuery *tq)
 {
 #if PGTURBOHYBRID_GRAPH_COMPILE_QUERY_SPLIT
+#if PGTURBOHYBRID_GRAPH_COMPILE_AVX2
+	/* Unsigned-codebook split prepared -> it will run; LUT not needed. */
+	if (tq != NULL && tq->u8SplitEnabled)
+		return true;
+#endif
 	if (tq == NULL || !tq->querySplitEnabled || tq->dimensions < 1024 ||
 		(tq->bits != PGTURBOHYBRID_DEFAULT_BITS && tq->bits != 2) ||
 		(TqScoreMode) tq->scoreMode == PGTURBOHYBRID_SCORE_L1)
@@ -1337,6 +1521,203 @@ PgturbohybridGraphQuerySplitRawAvx2(const PgturbohybridGraphTqQuery *tq, const u
 	return PgturbohybridGraphHorizontalSumI32Avx2(accLow) +
 		(int64) PGTURBOHYBRID_QUERY_SPLIT_HIGH_COEF * PgturbohybridGraphHorizontalSumI32Avx2(accHigh);
 }
+
+/*
+ * Unsigned-codebook (u8) 4-bit query-split raw scorers.  Return
+ *   D = Sum_i q_signed[i] * codebook_u8[code[i]]   (= dotLow + 128 * dotHigh)
+ * with q_signed = 128*high + low.  The +128 codebook-shift bias is removed by
+ * the caller (PgturbohybridGraphPackedDistanceU8Split) via u8SplitBias.
+ *
+ * Scalar reference -- the SIMD kernels below must match this exactly.
+ */
+static int64
+PgturbohybridGraphQuerySplitU8RawScalar(const PgturbohybridGraphTqQuery *tq, const uint8 *code)
+{
+	int64		dotLow = 0;
+	int64		dotHigh = 0;
+	int			chunks = tq->querySplitChunks;
+	int			fullDims = chunks * 16;
+
+	for (int i = 0; i < fullDims; i++)
+	{
+		int			nib = TqGetCodeComponentBits(code, i, PGTURBOHYBRID_DEFAULT_BITS);
+		int			cu = PgturbohybridGraphCodebookU8[nib];
+		int			chunk = i / 16;
+		int			lane = i % 16;
+
+		dotLow += (int64) tq->u8SplitData[chunk * 32 + lane] * cu;
+		dotHigh += (int64) tq->u8SplitData[chunk * 32 + 16 + lane] * cu;
+	}
+	for (int j = 0; j < tq->querySplitTailDims; j++)
+	{
+		int			nib = TqGetCodeComponentBits(code, fullDims + j, PGTURBOHYBRID_DEFAULT_BITS);
+		int			cu = PgturbohybridGraphCodebookU8[nib];
+
+		dotLow += (int64) tq->u8SplitTailLow[j] * cu;
+		dotHigh += (int64) tq->u8SplitTailHigh[j] * cu;
+	}
+	return dotLow + (int64) PGTURBOHYBRID_U8_SPLIT_HIGH_COEF * dotHigh;
+}
+
+/*
+ * AVX2: codebook (u8) broadcast to both 128-bit lanes; the [low|high] query
+ * pair fills the 256-bit register so one _mm256_maddubs_epi16 produces c*low in
+ * the low lane and c*high in the high lane.
+ */
+static int64 PGTURBOHYBRID_GRAPH_AVX2_TARGET
+PgturbohybridGraphQuerySplitU8RawAvx2(const PgturbohybridGraphTqQuery *tq, const uint8 *code)
+{
+	const __m128i mask = _mm_set1_epi8(0x0f);
+	const __m128i cbU8 = _mm_loadu_si128((const __m128i *) PgturbohybridGraphCodebookU8);
+	const __m256i ones = _mm256_set1_epi16(1);
+	const __m128i ones128 = _mm_set1_epi16(1);
+	__m256i		acc = _mm256_setzero_si256();
+	__m128i		accLow128 = _mm_setzero_si128();
+	__m128i		accHigh128 = _mm_setzero_si128();
+	int32		s[8];
+	int32		sl[4];
+	int32		sh[4];
+	int64		dotLow;
+	int64		dotHigh;
+
+	for (int chunk = 0; chunk < tq->querySplitChunks; chunk++)
+	{
+		__m128i		packed = _mm_loadl_epi64((const __m128i *) (code + chunk * 8));
+		__m128i		lo = _mm_and_si128(packed, mask);
+		__m128i		hi = _mm_and_si128(_mm_srli_epi16(packed, 4), mask);
+		__m128i		idx = _mm_unpacklo_epi8(lo, hi);
+		__m128i		cvals = _mm_shuffle_epi8(cbU8, idx);
+		__m256i		c256 = _mm256_broadcastsi128_si256(cvals);
+		__m256i		lh = _mm256_loadu_si256((const __m256i *) (tq->u8SplitData + chunk * 32));
+
+		acc = _mm256_add_epi32(acc, _mm256_madd_epi16(_mm256_maddubs_epi16(c256, lh), ones));
+	}
+
+	if (tq->querySplitTailDims != 0)
+	{
+		uint8		scratch[8] = {0};
+		int			tailBytes = (tq->querySplitTailDims + 1) / 2;
+		__m128i		packed;
+		__m128i		lo;
+		__m128i		hi;
+		__m128i		idx;
+		__m128i		cvals;
+		__m128i		lowv;
+		__m128i		highv;
+
+		memcpy(scratch, code + tq->querySplitChunks * 8, tailBytes);
+		packed = _mm_loadl_epi64((const __m128i *) scratch);
+		lo = _mm_and_si128(packed, mask);
+		hi = _mm_and_si128(_mm_srli_epi16(packed, 4), mask);
+		idx = _mm_unpacklo_epi8(lo, hi);
+		cvals = _mm_shuffle_epi8(cbU8, idx);
+		lowv = _mm_loadu_si128((const __m128i *) tq->u8SplitTailLow);
+		highv = _mm_loadu_si128((const __m128i *) tq->u8SplitTailHigh);
+		accLow128 = _mm_add_epi32(accLow128, _mm_madd_epi16(_mm_maddubs_epi16(cvals, lowv), ones128));
+		accHigh128 = _mm_add_epi32(accHigh128, _mm_madd_epi16(_mm_maddubs_epi16(cvals, highv), ones128));
+	}
+
+	_mm256_storeu_si256((__m256i *) s, acc);
+	_mm_storeu_si128((__m128i *) sl, accLow128);
+	_mm_storeu_si128((__m128i *) sh, accHigh128);
+	dotLow = (int64) s[0] + s[1] + s[2] + s[3] + sl[0] + sl[1] + sl[2] + sl[3];
+	dotHigh = (int64) s[4] + s[5] + s[6] + s[7] + sh[0] + sh[1] + sh[2] + sh[3];
+	return dotLow + (int64) PGTURBOHYBRID_U8_SPLIT_HIGH_COEF * dotHigh;
+}
+
+#if PGTURBOHYBRID_GRAPH_COMPILE_AVX512VNNI
+/*
+ * AVX-512 VNNI: two [low|high] chunks (64 bytes) per VPDPBUSD.  ZMM 128-lanes
+ * carry [a.low, a.high, b.low, b.high]; the codebook is broadcast per chunk so
+ * dpbusd's u8*i8 fused dot lands a.low/a.high in the low 256 and b.low/b.high
+ * in the high 256.
+ */
+static int64 PGTURBOHYBRID_GRAPH_AVX512VNNI_TARGET
+PgturbohybridGraphQuerySplitU8RawAvx512Vnni(const PgturbohybridGraphTqQuery *tq, const uint8 *code)
+{
+	const __m128i mask = _mm_set1_epi8(0x0f);
+	const __m128i cbU8 = _mm_loadu_si128((const __m128i *) PgturbohybridGraphCodebookU8);
+	const __m512i cb512 = _mm512_broadcast_i32x4(cbU8);
+	const __m128i ones128 = _mm_set1_epi16(1);
+	__m512i		acc = _mm512_setzero_si512();
+	__m128i		sumLow;
+	__m128i		sumHigh;
+	int			chunks = tq->querySplitChunks;
+	int			nPairs = chunks / 2;
+	int32		sl[4];
+	int32		sh[4];
+
+	for (int i = 0; i < nPairs; i++)
+	{
+		__m512i		lh = _mm512_loadu_si512((const __m512i *) (tq->u8SplitData + i * 64));
+		__m128i		packed = _mm_loadu_si128((const __m128i *) (code + i * 16));
+		__m128i		lo = _mm_and_si128(packed, mask);
+		__m128i		hi = _mm_and_si128(_mm_srli_epi16(packed, 4), mask);
+		__m128i		va = _mm_unpacklo_epi8(lo, hi);
+		__m128i		vb = _mm_unpackhi_epi8(lo, hi);
+		__m256i		vaDup = _mm256_broadcastsi128_si256(va);
+		__m256i		vbDup = _mm256_broadcastsi128_si256(vb);
+		__m512i		v512 = _mm512_inserti64x4(_mm512_castsi256_si512(vaDup), vbDup, 1);
+		__m512i		c512 = _mm512_shuffle_epi8(cb512, v512);
+
+		acc = _mm512_dpbusd_epi32(acc, c512, lh);
+	}
+
+	{
+		__m256i		lo256 = _mm512_castsi512_si256(acc);
+		__m256i		hi256 = _mm512_extracti64x4_epi64(acc, 1);
+
+		sumLow = _mm_add_epi32(_mm256_castsi256_si128(lo256),
+							   _mm256_castsi256_si128(hi256));
+		sumHigh = _mm_add_epi32(_mm256_extracti128_si256(lo256, 1),
+								_mm256_extracti128_si256(hi256, 1));
+	}
+
+	if (chunks & 1)
+	{
+		int			chunk = nPairs * 2;
+		__m128i		packed = _mm_loadl_epi64((const __m128i *) (code + chunk * 8));
+		__m128i		lo = _mm_and_si128(packed, mask);
+		__m128i		hi = _mm_and_si128(_mm_srli_epi16(packed, 4), mask);
+		__m128i		idx = _mm_unpacklo_epi8(lo, hi);
+		__m128i		cvals = _mm_shuffle_epi8(cbU8, idx);
+		__m128i		lowv = _mm_loadu_si128((const __m128i *) (tq->u8SplitData + chunk * 32));
+		__m128i		highv = _mm_loadu_si128((const __m128i *) (tq->u8SplitData + chunk * 32 + 16));
+
+		sumLow = _mm_add_epi32(sumLow, _mm_madd_epi16(_mm_maddubs_epi16(cvals, lowv), ones128));
+		sumHigh = _mm_add_epi32(sumHigh, _mm_madd_epi16(_mm_maddubs_epi16(cvals, highv), ones128));
+	}
+
+	if (tq->querySplitTailDims != 0)
+	{
+		uint8		scratch[8] = {0};
+		int			tailBytes = (tq->querySplitTailDims + 1) / 2;
+		__m128i		packed;
+		__m128i		lo;
+		__m128i		hi;
+		__m128i		idx;
+		__m128i		cvals;
+		__m128i		lowv;
+		__m128i		highv;
+
+		memcpy(scratch, code + tq->querySplitChunks * 8, tailBytes);
+		packed = _mm_loadl_epi64((const __m128i *) scratch);
+		lo = _mm_and_si128(packed, mask);
+		hi = _mm_and_si128(_mm_srli_epi16(packed, 4), mask);
+		idx = _mm_unpacklo_epi8(lo, hi);
+		cvals = _mm_shuffle_epi8(cbU8, idx);
+		lowv = _mm_loadu_si128((const __m128i *) tq->u8SplitTailLow);
+		highv = _mm_loadu_si128((const __m128i *) tq->u8SplitTailHigh);
+		sumLow = _mm_add_epi32(sumLow, _mm_madd_epi16(_mm_maddubs_epi16(cvals, lowv), ones128));
+		sumHigh = _mm_add_epi32(sumHigh, _mm_madd_epi16(_mm_maddubs_epi16(cvals, highv), ones128));
+	}
+
+	_mm_storeu_si128((__m128i *) sl, sumLow);
+	_mm_storeu_si128((__m128i *) sh, sumHigh);
+	return ((int64) sl[0] + sl[1] + sl[2] + sl[3]) +
+		(int64) PGTURBOHYBRID_U8_SPLIT_HIGH_COEF * ((int64) sh[0] + sh[1] + sh[2] + sh[3]);
+}
+#endif
 
 static int64 PGTURBOHYBRID_GRAPH_AVX2_TARGET
 PgturbohybridGraphQuerySplit2RawAvx2(const PgturbohybridGraphTqQuery *tq, const uint8 *code)
@@ -3978,6 +4359,12 @@ PgturbohybridGraphScoreNode(PgturbohybridGraphScanOpaque so, PgturbohybridGraphS
 	{
 		double		querySplitDistance;
 
+#if PGTURBOHYBRID_GRAPH_COMPILE_AVX2
+		if (so->tq.u8SplitEnabled &&
+			PgturbohybridGraphPackedDistanceU8Split(&so->tq, node->code,
+													node->scale, &querySplitDistance))
+			return querySplitDistance;
+#endif
 		if (PgturbohybridGraphPackedDistanceQuerySplit4(&so->tq, node->code,
 												node->scale, &querySplitDistance) ||
 			PgturbohybridGraphPackedDistanceQuerySplit2(&so->tq, node->code,
@@ -4695,6 +5082,38 @@ PgturbohybridGraphScoreNodeBatchQuerySplit2(PgturbohybridGraphScanOpaque so,
 	return true;
 }
 
+#if PGTURBOHYBRID_GRAPH_COMPILE_AVX2
+/*
+ * Batch (groups of 4) unsigned-codebook scorer.  Used when the u8 split was
+ * prepared for this query; mirrors the signed batch path but scores each code
+ * with the maddubs/VPDPBUSD u8 kernel via PgturbohybridGraphPackedDistanceU8Split.
+ */
+static bool
+PgturbohybridGraphScoreNodeBatchU8Split(PgturbohybridGraphScanOpaque so,
+										PgturbohybridGraphScanStorage *storage,
+										uint32 *nodeIds, double *distances)
+{
+	if (!so->tq.u8SplitEnabled)
+		return false;
+
+	for (int j = 0; j < 4; j++)
+	{
+		PgturbohybridGraphScanNode *node = &storage->nodes[nodeIds[j]];
+
+		if (node->code == NULL)
+			return false;
+		if (!PgturbohybridGraphPackedDistanceU8Split(&so->tq, node->code, node->scale,
+													 &distances[j]))
+			return false;
+	}
+
+	so->graphScoredCodes += 4;
+	so->graphBatchScoredCodes += 4;
+	so->graphBatchKernel = so->tq.scoringKernel;
+	return true;
+}
+#endif
+
 #endif
 
 static bool
@@ -5091,6 +5510,10 @@ PgturbohybridGraphScoreNodeBatch(PgturbohybridGraphScanOpaque so, PgturbohybridG
 		{
 			bool		batchScored =
 #if PGTURBOHYBRID_GRAPH_COMPILE_QUERY_SPLIT
+#if PGTURBOHYBRID_GRAPH_COMPILE_AVX2
+				PgturbohybridGraphScoreNodeBatchU8Split(so, storage, nodeIds + i,
+												distances + i) ||
+#endif
 				PgturbohybridGraphScoreNodeBatchQuerySplit4(so, storage, nodeIds + i,
 												 distances + i) ||
 				PgturbohybridGraphScoreNodeBatchQuerySplit2(so, storage, nodeIds + i,

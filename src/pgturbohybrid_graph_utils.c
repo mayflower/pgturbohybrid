@@ -121,6 +121,11 @@ static const float TqCodeCenters[PGTURBOHYBRID_LUT_WIDTH] = {
 #define PGTURBOHYBRID_QUERY_SPLIT_ABS_MAX 32639.0f
 #define PGTURBOHYBRID_CODEBOOK_ABS_MAX 2.733f
 #define PGTURBOHYBRID_CODEBOOK_SCALE (127.0f / PGTURBOHYBRID_CODEBOOK_ABS_MAX)
+/* x86 unsigned-codebook query split: 7-bit signed halves, HIGH_COEF 128,
+ * codebook shifted by +128 (bias = 128 * Sum(q_signed)). */
+#define PGTURBOHYBRID_U8_SPLIT_HIGH_COEF 128
+#define PGTURBOHYBRID_U8_SPLIT_ABS_MAX 8127.0f
+#define PGTURBOHYBRID_U8_CODEBOOK_OFFSET 128
 #define PGTURBOHYBRID_CODEBOOK2_ABS_MAX 1.510f
 #define PGTURBOHYBRID_CODEBOOK2_SCALE (127.0f / PGTURBOHYBRID_CODEBOOK2_ABS_MAX)
 #endif
@@ -1530,6 +1535,85 @@ TqPrepareQuerySplit4(PgturbohybridGraphTqQuery *tq)
 
 	tq->querySplitEnabled = true;
 }
+
+#if PGTURBOHYBRID_COMPILE_AVX2
+/*
+ * Prepare the x86 unsigned-codebook query split (4-bit only).  Mirrors
+ * TqPrepareQuerySplit4 but stores SIGNED 7-bit query halves (no +128 XOR --
+ * the codebook is the unsigned operand here), uses HIGH_COEF 128 and
+ * QUERY_ABS_MAX 8127, and precomputes the +OFFSET codebook-shift bias
+ * (128 * Sum(q_signed)).  Query data is laid out as [low0..15, high0..15] per
+ * 16-dim chunk so one AVX2 load is a [low|high] pair.
+ */
+static void
+TqPrepareQueryU8Split(PgturbohybridGraphTqQuery *tq)
+{
+	float		qAbsMax = 0;
+	float		qScale;
+	int			fullDims;
+	int64		sumSigned = 0;
+
+	if (!tq->enabled || tq->bits != PGTURBOHYBRID_DEFAULT_BITS ||
+		tq->scoreMode == PGTURBOHYBRID_SCORE_L1 || tq->dimensions <= 0)
+		return;
+
+	for (int i = 0; i < tq->dimensions; i++)
+		qAbsMax = Max(qAbsMax, fabsf(tq->queryValues[i]));
+	if (qAbsMax < FLT_EPSILON)
+		qAbsMax = FLT_EPSILON;
+
+	tq->querySplitChunks = tq->dimensions / 16;
+	tq->querySplitTailDims = tq->dimensions - (tq->querySplitChunks * 16);
+	tq->u8SplitData = palloc0(Max(tq->querySplitChunks, 1) * 32);
+	memset(tq->u8SplitTailLow, 0, sizeof(tq->u8SplitTailLow));
+	memset(tq->u8SplitTailHigh, 0, sizeof(tq->u8SplitTailHigh));
+	qScale = PGTURBOHYBRID_U8_SPLIT_ABS_MAX / qAbsMax;
+	tq->u8SplitPostprocessScale = 1.0f / (qScale * PGTURBOHYBRID_CODEBOOK_SCALE);
+	fullDims = tq->querySplitChunks * 16;
+
+	for (int i = 0; i < tq->dimensions; i++)
+	{
+		int			qSigned;
+		int			lowMod;
+		int8		low;
+		int8		high;
+		float		scaled = tq->queryValues[i] * qScale;
+
+		if (scaled < -PGTURBOHYBRID_U8_SPLIT_ABS_MAX)
+			scaled = -PGTURBOHYBRID_U8_SPLIT_ABS_MAX;
+		else if (scaled > PGTURBOHYBRID_U8_SPLIT_ABS_MAX)
+			scaled = PGTURBOHYBRID_U8_SPLIT_ABS_MAX;
+
+		qSigned = (int) lrintf(scaled);
+		lowMod = qSigned % PGTURBOHYBRID_U8_SPLIT_HIGH_COEF;
+		if (lowMod < 0)
+			lowMod += PGTURBOHYBRID_U8_SPLIT_HIGH_COEF;
+		low = (int8) (lowMod >= PGTURBOHYBRID_U8_SPLIT_HIGH_COEF / 2 ?
+					  lowMod - PGTURBOHYBRID_U8_SPLIT_HIGH_COEF : lowMod);
+		high = (int8) ((qSigned - (int) low) / PGTURBOHYBRID_U8_SPLIT_HIGH_COEF);
+		sumSigned += qSigned;
+
+		if (i < fullDims)
+		{
+			int			chunk = i / 16;
+			int			lane = i % 16;
+
+			tq->u8SplitData[chunk * 32 + lane] = low;
+			tq->u8SplitData[chunk * 32 + 16 + lane] = high;
+		}
+		else
+		{
+			int			tail = i - fullDims;
+
+			tq->u8SplitTailLow[tail] = low;
+			tq->u8SplitTailHigh[tail] = high;
+		}
+	}
+
+	tq->u8SplitBias = (int64) PGTURBOHYBRID_U8_CODEBOOK_OFFSET * sumSigned;
+	tq->u8SplitEnabled = true;
+}
+#endif
 #endif
 
 Size
@@ -2101,7 +2185,20 @@ PgturbohybridGraphPrepareTqQueryInternal(Relation index, PgturbohybridGraphSuppo
 	TqPrepareQueryAsymBit1(tq);
 #if defined(__aarch64__) || defined(_M_ARM64) || PGTURBOHYBRID_COMPILE_AVX2
 	if (prepareSplit)
-		TqPrepareQuerySplit4(tq);
+	{
+#if PGTURBOHYBRID_COMPILE_AVX2
+		/*
+		 * Build exactly one query-split representation.  The unsigned-codebook
+		 * (u8) split is the x86 default for 4-bit; otherwise (2-bit, forced
+		 * signed, no AVX2) fall back to the signed split, which also serves as
+		 * the LUT-skip fallback.
+		 */
+		if (PgturbohybridGraphTqUseU8Split(tq))
+			TqPrepareQueryU8Split(tq);
+		else
+#endif
+			TqPrepareQuerySplit4(tq);
+	}
 #endif
 
 	/*
@@ -3437,6 +3534,10 @@ turbohybrid_scorer_distances(PG_FUNCTION_ARGS)
 	double		dRaw;
 	double		dotRaw = 0;
 	bool		splitUsed;
+	double		dU8Simd;
+	double		dU8Scalar;
+	bool		u8Used = false;
+	const char *u8Kernel = "none";
 	StringInfoData json;
 
 	PgturbohybridCheckVector(query);
@@ -3475,9 +3576,27 @@ turbohybrid_scorer_distances(PG_FUNCTION_ARGS)
 	dScalar = TqCodeDistanceScalar(&tq, code, scale);
 
 	/* (2) signed integer query-split SIMD kernel (codebook via shuffle). */
-	splitUsed = PgturbohybridGraphTqCodeQuerySplitDistance(&tq, code, scale, &dSplit);
+	splitUsed = PgturbohybridGraphTqCodeSignedSplitDistance(&tq, code, scale, &dSplit);
 	if (!splitUsed)
 		dSplit = dScalar;
+
+	/* (2b) unsigned-codebook split: scalar reference + SIMD (maddubs/VPDPBUSD). */
+	dU8Simd = dScalar;
+	dU8Scalar = dScalar;
+#if PGTURBOHYBRID_COMPILE_AVX2
+	TqPrepareQueryU8Split(&tq);
+	if (tq.u8SplitEnabled)
+	{
+		PgturbohybridGraphTqCodeU8ScalarDistance(&tq, code, scale, &dU8Scalar);
+		if (PgturbohybridGraphTqCodeU8SimdDistance(&tq, code, scale, &dU8Simd))
+		{
+			u8Used = true;
+			u8Kernel = PgturbohybridGraphU8SplitKernelName();
+		}
+		else
+			dU8Simd = dU8Scalar;
+	}
+#endif
 
 	/*
 	 * (3) Linear/uniform reference: score each code nibble as its raw 0..15
@@ -3495,11 +3614,16 @@ turbohybrid_scorer_distances(PG_FUNCTION_ARGS)
 	initStringInfo(&json);
 	appendStringInfo(&json,
 					 "{\"scalar_lut\":%.9g,\"signed_split\":%.9g,"
+					 "\"unsigned_split_scalar\":%.9g,\"unsigned_split_simd\":%.9g,"
 					 "\"linear_reference\":%.9g,\"split_kernel\":\"%s\","
-					 "\"query_split_used\":%s,\"dimensions\":%d,\"bits\":%d}",
-					 dScalar, dSplit, dRaw,
+					 "\"unsigned_split_kernel\":\"%s\","
+					 "\"query_split_used\":%s,\"unsigned_split_used\":%s,"
+					 "\"dimensions\":%d,\"bits\":%d}",
+					 dScalar, dSplit, dU8Scalar, dU8Simd, dRaw,
 					 PgturbohybridGraphTqScoringKernelName(tq.scoringKernel),
-					 splitUsed ? "true" : "false", dim, bits);
+					 u8Kernel,
+					 splitUsed ? "true" : "false", u8Used ? "true" : "false",
+					 dim, bits);
 
 	PG_RETURN_DATUM(DirectFunctionCall1(jsonb_in, CStringGetDatum(json.data)));
 }

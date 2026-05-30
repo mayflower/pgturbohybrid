@@ -117,14 +117,16 @@ BEGIN
 
     IF scorer NOT IN ('scalar_lut', 'avx2_lut_gather',
                       'signed_split_avx2', 'signed_split_avxvnni',
-                      'signed_split_avx512vnni', 'signed_split_neon') THEN
+                      'signed_split_avx512vnni', 'signed_split_neon',
+                      'unsigned_split_avx2', 'unsigned_split_avx512vnni') THEN
         RAISE EXCEPTION 'unexpected dense_scorer % for 1536-dim 4-bit scan', scorer;
     END IF;
 
     IF split_used THEN
-        -- Query split available: the scan must use it, not the LUT gather.
-        IF scorer NOT LIKE 'signed_split_%' THEN
-            RAISE EXCEPTION 'query split available but scan reported scorer % (expected signed_split_*)', scorer;
+        -- Query split available: the scan must use a query-split kernel
+        -- (signed or unsigned codebook), never the scalar/LUT gather.
+        IF scorer NOT LIKE 'signed_split_%' AND scorer NOT LIKE 'unsigned_split_%' THEN
+            RAISE EXCEPTION 'query split available but scan reported scorer % (expected *_split_*)', scorer;
         END IF;
         IF scalar_codes <> 0 THEN
             RAISE EXCEPTION 'query split available but % codes used the scalar/LUT path', scalar_codes;

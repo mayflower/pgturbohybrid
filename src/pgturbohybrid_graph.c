@@ -146,6 +146,7 @@ bool		pgturbohybrid_dense_build_exact_distances = false;
 bool		pgturbohybrid_dense_hadamard_simd = true;
 bool		pgturbohybrid_dense_exact_avx512 = false;
 int			pgturbohybrid_dense_simd_force = PGTURBOHYBRID_SIMD_FORCE_AUTO;
+int			pgturbohybrid_dense_query_split_impl = PGTURBOHYBRID_QUERY_SPLIT_IMPL_AUTO;
 int			pgturbohybrid_dense_exact_simd_force = PGTURBOHYBRID_EXACT_SIMD_FORCE_AUTO;
 int			pgturbohybrid_dense_graph_batch_scoring = PGTURBOHYBRID_GRAPH_BATCH_AUTO;
 int			pgturbohybrid_dense_graph_batch_size = 4;

@@ -218,6 +218,7 @@ extern bool pgturbohybrid_dense_build_exact_distances;
 extern bool pgturbohybrid_dense_hadamard_simd;
 extern bool pgturbohybrid_dense_exact_avx512;
 extern int	pgturbohybrid_dense_simd_force;
+extern int	pgturbohybrid_dense_query_split_impl;
 extern int	pgturbohybrid_dense_exact_simd_force;
 extern int	pgturbohybrid_dense_graph_batch_scoring;
 extern int	pgturbohybrid_dense_graph_batch_size;
@@ -340,6 +341,19 @@ typedef enum TqScoringKernel
 	PGTURBOHYBRID_SCORING_ARM_I8MM,
 	PGTURBOHYBRID_SCORING_NEON
 }			TqScoringKernel;
+
+/*
+ * Query-split representation for 4-bit dense scoring.  SIGNED is the original
+ * signed-codebook split (HIGH_COEF 256); UNSIGNED is the x86 unsigned-codebook
+ * split (maddubs/VPDPBUSD, HIGH_COEF 128); AUTO picks UNSIGNED on x86 when the
+ * required SIMD is available, otherwise SIGNED.
+ */
+typedef enum TqQuerySplitImpl
+{
+	PGTURBOHYBRID_QUERY_SPLIT_IMPL_AUTO,
+	PGTURBOHYBRID_QUERY_SPLIT_IMPL_SIGNED,
+	PGTURBOHYBRID_QUERY_SPLIT_IMPL_UNSIGNED
+}			TqQuerySplitImpl;
 
 typedef enum TqSimdForce
 {
@@ -597,6 +611,20 @@ typedef struct PgturbohybridGraphTqQuery
 	int			querySplitTailDims;
 	float		querySplitPostprocessScale;
 	bool		querySplitEnabled;
+	/*
+	 * Unsigned-codebook query-split representation (x86 maddubs / VPDPBUSD).
+	 * Separate from the signed path above: query halves are stored signed
+	 * (no +128 XOR) because the unsigned u8 codebook is the unsigned operand,
+	 * and the +128 codebook shift is unwound by u8SplitBias.  u8SplitData
+	 * holds [low0..15, high0..15] per 16-dim chunk (32 bytes/chunk) so one
+	 * AVX2 load is a [low|high] pair and one ZMM load is two chunks.
+	 */
+	int8	   *u8SplitData;
+	int8		u8SplitTailLow[16];
+	int8		u8SplitTailHigh[16];
+	int64		u8SplitBias;	/* OFFSET * Sum(q_signed); subtract from raw dot */
+	float		u8SplitPostprocessScale;
+	bool		u8SplitEnabled;
 #endif
 #if PGTURBOHYBRID_GRAPH_ENABLE_SYMMETRIC_I8_DOT
 	float		queryScale;
@@ -923,6 +951,11 @@ float		TqEncodeVectorWithCorrection(Vector *vector, uint8 *code,
 double		TqCodeDistance(const PgturbohybridGraphTqQuery *tq, const uint8 *valueCode, float valueScale);
 bool		PgturbohybridGraphTqCodeQuerySplitDistance(const PgturbohybridGraphTqQuery *tq, const uint8 *valueCode, float valueScale, double *distance);
 bool		PgturbohybridGraphTqQuerySplitActive(const PgturbohybridGraphTqQuery *tq);
+bool		PgturbohybridGraphTqUseU8Split(const PgturbohybridGraphTqQuery *tq);
+bool		PgturbohybridGraphTqCodeSignedSplitDistance(const PgturbohybridGraphTqQuery *tq, const uint8 *valueCode, float valueScale, double *distance);
+bool		PgturbohybridGraphTqCodeU8SimdDistance(const PgturbohybridGraphTqQuery *tq, const uint8 *valueCode, float valueScale, double *distance);
+bool		PgturbohybridGraphTqCodeU8ScalarDistance(const PgturbohybridGraphTqQuery *tq, const uint8 *valueCode, float valueScale, double *distance);
+const char *PgturbohybridGraphU8SplitKernelName(void);
 int64		PgturbohybridGraphRescoreSearchCandidates(Relation index, PgturbohybridGraphSupport * support, PgturbohybridGraphQuery * q, List *items);
 List	   *PgturbohybridGraphSearchLayer(char *base, PgturbohybridGraphQuery * q, List *ep, int ef, int lc, Relation index, PgturbohybridGraphSupport * support, int m, bool inserting, PgturbohybridGraphElement skipElement, visited_hash * v, pairingheap **discarded, bool initVisited, int64 *tuples, int64 tupleLimit, int64 *scoredCodes, PgturbohybridGraphTqQuery * tq);
 PgturbohybridGraphElement PgturbohybridGraphGetEntryPoint(Relation index);

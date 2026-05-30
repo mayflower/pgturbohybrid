@@ -151,6 +151,13 @@ static const struct config_enum_entry pgturbohybrid_dense_adaptive_widening_opti
 	{NULL, 0, false}
 };
 
+static const struct config_enum_entry pgturbohybrid_dense_query_split_impl_options[] = {
+	{"auto", PGTURBOHYBRID_QUERY_SPLIT_IMPL_AUTO, false},
+	{"signed", PGTURBOHYBRID_QUERY_SPLIT_IMPL_SIGNED, false},
+	{"unsigned", PGTURBOHYBRID_QUERY_SPLIT_IMPL_UNSIGNED, false},
+	{NULL, 0, false}
+};
+
 static const struct config_enum_entry pgturbohybrid_dense_local_expansion_options[] = {
 	{"off", PGTURBOHYBRID_DENSE_LOCAL_EXPANSION_OFF, false},
 	{"auto", PGTURBOHYBRID_DENSE_LOCAL_EXPANSION_AUTO, false},
@@ -2707,6 +2714,13 @@ PgturbohybridInit(void)
 							 "Diagnostic knob: turn off (with avx512vnni off) to force the AVX2 query-split scorer for parity testing.",
 							 &pgturbohybrid_dense_graph_avxvnni,
 							 true, PGC_USERSET, 0, NULL, NULL, NULL);
+	DefineCustomEnumVariable("turbohybrid.dense_query_split_impl",
+							 "4-bit dense query-split representation",
+							 "signed uses the signed-codebook split; unsigned uses the x86 unsigned-codebook maddubs/VPDPBUSD split; auto picks unsigned on x86 when available.",
+							 &pgturbohybrid_dense_query_split_impl,
+							 PGTURBOHYBRID_QUERY_SPLIT_IMPL_AUTO,
+							 pgturbohybrid_dense_query_split_impl_options,
+							 PGC_USERSET, 0, NULL, NULL, NULL);
 	DefineCustomBoolVariable("turbohybrid.dense_build_exact_distances",
 							 "Use exact f32 vector distances while building dense graph edges",
 							 "This can improve graph topology for experiments without storing exact vectors at scan time.",
