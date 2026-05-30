@@ -52,8 +52,14 @@ jobs:
         run: make dist
 
       - name: Upload source archive to GitHub Release
+        # Create the release with a PAT (RELEASE_PAT) so the resulting
+        # "release: published" event triggers downstream workflows such as
+        # homebrew.yml. A release created with the built-in GITHUB_TOKEN does
+        # not trigger other workflows. Falls back to GITHUB_TOKEN when no PAT is
+        # configured -- the release is still created, but homebrew.yml must then
+        # be run manually via workflow_dispatch.
         env:
-          GH_TOKEN: ${{ github.token }}
+          GH_TOKEN: ${{ secrets.RELEASE_PAT || github.token }}
         run: |
           if gh release view "$GITHUB_REF_NAME" >/dev/null 2>&1; then
             gh release edit "$GITHUB_REF_NAME" \

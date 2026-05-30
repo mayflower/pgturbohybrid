@@ -42,6 +42,11 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          gh release upload "$GITHUB_REF_NAME" ./*.zip --clobber || \
-            gh release create "$GITHUB_REF_NAME" ./*.zip \
-              --title "$GITHUB_REF_NAME" --generate-notes --verify-tag
+          # Wait for release.yml to create the release (with its PAT) rather than
+          # creating it here -- a GITHUB_TOKEN-created release would not trigger
+          # homebrew.yml.
+          for _ in $(seq 1 60); do
+            gh release view "$GITHUB_REF_NAME" >/dev/null 2>&1 && break
+            echo "waiting for release $GITHUB_REF_NAME ..."; sleep 10
+          done
+          gh release upload "$GITHUB_REF_NAME" ./*.zip --clobber
