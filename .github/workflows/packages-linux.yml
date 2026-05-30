@@ -1,0 +1,135 @@
+name: packages-linux
+
+on:
+  push:
+    tags:
+      - 'v*'
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  deb:
+    name: deb pg${{ matrix.pg_major }}
+    runs-on: ubuntu-24.04
+    strategy:
+      fail-fast: false
+      matrix:
+        pg_major: ['15', '16', '17', '18']
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up PGDG repo and build dependencies
+        run: |
+          sudo install -d /usr/share/postgresql-common/pgdg
+          curl -fsSL https://www.postgresql.org/media/keys/ACCC4CF8.asc \
+            | sudo gpg --dearmor -o /usr/share/postgresql-common/pgdg/apt.postgresql.org.gpg
+          echo "deb [signed-by=/usr/share/postgresql-common/pgdg/apt.postgresql.org.gpg] https://apt.postgresql.org/pub/repos/apt $(lsb_release -cs)-pgdg main" \
+            | sudo tee /etc/apt/sources.list.d/pgdg.list
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            build-essential "postgresql-server-dev-${{ matrix.pg_major }}" ruby ruby-dev
+          sudo gem install --no-document fpm
+
+      - name: Build (portable SIMD) and stage install
+        env:
+          PG_CONFIG: /usr/lib/postgresql/${{ matrix.pg_major }}/bin/pg_config
+        run: |
+          make clean
+          make SIMD_BUILD=portable
+          make install DESTDIR="$PWD/stage"
+
+      - name: Resolve package version
+        id: ver
+        run: |
+          if [ "${GITHUB_REF_TYPE}" = "tag" ]; then v="${GITHUB_REF_NAME#v}"; else
+            v="$(grep -E '^EXTVERSION' Makefile | head -1 | awk '{print $3}')"; fi
+          echo "deb=${v//-/\~}" >> "$GITHUB_OUTPUT"
+
+      - name: Build .deb
+        run: |
+          fpm -s dir -t deb \
+            -n "postgresql-${{ matrix.pg_major }}-pgturbohybrid" \
+            -v "${{ steps.ver.outputs.deb }}" \
+            --architecture amd64 \
+            --license PostgreSQL \
+            --maintainer "Mayflower" \
+            --url "https://github.com/mayflower/pgturbohybrid" \
+            --description "Hybrid vector + BM25 search for PostgreSQL on top of pgvector" \
+            --depends "postgresql-${{ matrix.pg_major }}" \
+            --depends "postgresql-${{ matrix.pg_major }}-pgvector" \
+            -C stage usr
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: deb-pg${{ matrix.pg_major }}
+          path: ./*.deb
+          if-no-files-found: error
+
+      - name: Attach to GitHub release
+        if: github.ref_type == 'tag'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh release upload "$GITHUB_REF_NAME" ./*.deb --clobber
+
+  rpm:
+    name: rpm pg${{ matrix.pg_major }}
+    runs-on: ubuntu-24.04
+    container:
+      image: rockylinux:9
+    strategy:
+      fail-fast: false
+      matrix:
+        pg_major: ['15', '16', '17', '18']
+    steps:
+      - name: Install PGDG repo and build dependencies
+        run: |
+          dnf -y install "https://download.postgresql.org/pub/repos/yum/reporpms/EL-9-x86_64/pgdg-redhat-repo-latest.noarch.rpm"
+          dnf -qy module disable postgresql || true
+          dnf -y install gcc make redhat-rpm-config rpm-build git tar gzip \
+            ruby ruby-devel rubygems "postgresql${{ matrix.pg_major }}-devel"
+          gem install --no-document fpm
+
+      - uses: actions/checkout@v4
+
+      - name: Build (portable SIMD) and stage install
+        env:
+          PG_CONFIG: /usr/pgsql-${{ matrix.pg_major }}/bin/pg_config
+        run: |
+          make clean
+          make SIMD_BUILD=portable
+          make install DESTDIR="$PWD/stage"
+
+      - name: Resolve package version
+        id: ver
+        run: |
+          if [ "${GITHUB_REF_TYPE}" = "tag" ]; then v="${GITHUB_REF_NAME#v}"; else
+            v="$(grep -E '^EXTVERSION' Makefile | head -1 | awk '{print $3}')"; fi
+          echo "rpm=${v//-/\~}" >> "$GITHUB_OUTPUT"
+
+      - name: Build .rpm
+        run: |
+          fpm -s dir -t rpm \
+            -n "pgturbohybrid_${{ matrix.pg_major }}" \
+            -v "${{ steps.ver.outputs.rpm }}" \
+            --architecture x86_64 \
+            --license PostgreSQL \
+            --maintainer "Mayflower" \
+            --url "https://github.com/mayflower/pgturbohybrid" \
+            --description "Hybrid vector + BM25 search for PostgreSQL on top of pgvector" \
+            --depends "postgresql${{ matrix.pg_major }}-server" \
+            --depends "pgvector_${{ matrix.pg_major }}" \
+            -C stage usr
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: rpm-pg${{ matrix.pg_major }}
+          path: ./*.rpm
+          if-no-files-found: error
+
+      - name: Attach to GitHub release
+        if: github.ref_type == 'tag'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh release upload "$GITHUB_REF_NAME" ./*.rpm --clobber

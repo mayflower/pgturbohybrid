@@ -1,0 +1,96 @@
+name: homebrew
+
+on:
+  release:
+    types: [published]
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: 'Release tag to build the formula from (e.g. v0.1.0-alpha.2)'
+        required: true
+
+permissions:
+  contents: write
+
+jobs:
+  formula:
+    name: render and publish formula
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Resolve tag and source tarball
+        id: src
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          tag="${{ github.event.inputs.tag }}"
+          [ -z "$tag" ] && tag="${GITHUB_REF_NAME}"
+          version="${tag#v}"
+          # Use the release's source tarball asset (produced by release.yml: make dist).
+          asset="pgturbohybrid-$(grep -E '^EXTVERSION' Makefile | head -1 | awk '{print $3}').tar.gz"
+          url="https://github.com/${GITHUB_REPOSITORY}/releases/download/${tag}/${asset}"
+          tmp="$(mktemp -d)"
+          gh release download "$tag" --pattern "$asset" --dir "$tmp"
+          sha="$(sha256sum "$tmp/$asset" | awk '{print $1}')"
+          {
+            echo "tag=$tag"
+            echo "version=$version"
+            echo "url=$url"
+            echo "sha=$sha"
+          } >> "$GITHUB_OUTPUT"
+
+      - name: Render formula
+        run: |
+          mkdir -p Formula
+          cat > Formula/pgturbohybrid.rb <<RUBY
+          class Pgturbohybrid < Formula
+            desc "Hybrid vector + BM25 search for PostgreSQL on top of pgvector"
+            homepage "https://github.com/mayflower/pgturbohybrid"
+            url "${{ steps.src.outputs.url }}"
+            sha256 "${{ steps.src.outputs.sha }}"
+            license "PostgreSQL"
+
+            depends_on "postgresql@17"
+            depends_on "pgvector"
+
+            def install
+              pg = Formula["postgresql@17"]
+              ENV["PG_CONFIG"] = pg.opt_bin/"pg_config"
+              system "make", "SIMD_BUILD=portable"
+              # Stage via DESTDIR, then relocate the extension files under our prefix.
+              system "make", "install", "DESTDIR=#{buildpath}/stage"
+              staged = Pathname.glob("#{buildpath}/stage/**/postgresql*").first
+              prefix.install Dir["#{staged}/*"] if staged
+            end
+
+            test do
+              assert_predicate prefix, :exist?
+            end
+          end
+          RUBY
+          cat Formula/pgturbohybrid.rb
+
+      - name: Upload formula to the release
+        if: github.ref_type == 'tag' || github.event_name == 'release'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh release upload "${{ steps.src.outputs.tag }}" Formula/pgturbohybrid.rb --clobber
+
+      # Optional: push the formula to an external Homebrew tap repo when a tap and
+      # token are configured (HOMEBREW_TAP_REPO like "mayflower/homebrew-tap").
+      - name: Publish to Homebrew tap
+        if: env.HOMEBREW_TAP_REPO != '' && env.HOMEBREW_TAP_TOKEN != ''
+        env:
+          HOMEBREW_TAP_REPO: ${{ secrets.HOMEBREW_TAP_REPO }}
+          HOMEBREW_TAP_TOKEN: ${{ secrets.HOMEBREW_TAP_TOKEN }}
+        run: |
+          git clone "https://x-access-token:${HOMEBREW_TAP_TOKEN}@github.com/${HOMEBREW_TAP_REPO}.git" tap
+          mkdir -p tap/Formula
+          cp Formula/pgturbohybrid.rb tap/Formula/pgturbohybrid.rb
+          cd tap
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add Formula/pgturbohybrid.rb
+          git commit -m "pgturbohybrid ${{ steps.src.outputs.version }}" || exit 0
+          git push

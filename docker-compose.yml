@@ -1,0 +1,30 @@
+# Quickstart: a Postgres with pgvector + pgturbohybrid ready to use.
+#
+#   docker compose up -d
+#   psql "postgresql://postgres:postgres@localhost:5432/pgturbohybrid" -c '\dx'
+#
+# By default this pulls the published image. To build locally instead, comment
+# out `image:` and uncomment the `build:` block.
+services:
+  db:
+    image: ghcr.io/mayflower/pgturbohybrid:${PGTURBOHYBRID_TAG:-0.1.0-pg17}
+    # build:
+    #   context: .
+    #   args:
+    #     PG_MAJOR: "17"
+    #     PGVECTOR_REF: v0.8.2
+    environment:
+      POSTGRES_PASSWORD: postgres
+      POSTGRES_DB: pgturbohybrid
+    ports:
+      - "5432:5432"
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres -d pgturbohybrid"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+volumes:
+  pgdata:
