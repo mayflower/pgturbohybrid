@@ -972,20 +972,28 @@ PgturbohybridGraphBuildCodeCodeDistance2(PgturbohybridQuantBuildState *state, ui
  * for an already-prepared tq, to prove cross-kernel and cross-representation
  * parity from turbohybrid_scorer_distances.
  *
- * The signed-split entry is gated on QUERY_SPLIT (any of ARM dotprod / AVX2 /
- * AVX-VNNI / AVX-512), not AVX2 alone: it calls the query-split helpers, which
- * are compiled under that same gate and run on arm64 (NEON dotprod) too, and
- * turbohybrid_scorer_distances references it on arm64.
+ * The signed-split entry is always defined so turbohybrid_scorer_distances --
+ * which references it unconditionally -- links on every target.  The query-split
+ * body is compiled only where the split helpers exist (QUERY_SPLIT: ARM dotprod
+ * / AVX2 / AVX-VNNI / AVX-512); elsewhere (e.g. MSVC without /arch:AVX2, or a
+ * scalar build) it reports "no split scorer ran" by returning false, mirroring
+ * the U8 batch entry below.
  */
-#if PGTURBOHYBRID_GRAPH_COMPILE_QUERY_SPLIT
 bool
 PgturbohybridGraphTqCodeSignedSplitDistance(const PgturbohybridGraphTqQuery *tq,
 											const uint8 *valueCode, float valueScale, double *distance)
 {
+#if PGTURBOHYBRID_GRAPH_COMPILE_QUERY_SPLIT
 	return PgturbohybridGraphPackedDistanceQuerySplit4(tq, valueCode, valueScale, distance) ||
 		PgturbohybridGraphPackedDistanceQuerySplit2(tq, valueCode, valueScale, distance);
-}
+#else
+	(void) tq;
+	(void) valueCode;
+	(void) valueScale;
+	(void) distance;
+	return false;
 #endif
+}
 
 /*
  * The unsigned-codebook (U8) split entry points wrap the x86-only U8 kernel
