@@ -341,9 +341,10 @@ see [NOTICE](NOTICE) and [docs/architecture.md](docs/architecture.md).
 
 ## Compatibility
 
-The release target is PostgreSQL 14 through 18, with PostgreSQL 19 included
-when the CI setup action provides it. The pgvector compatibility target is
-pgvector 0.8.2 through current pgvector `master`.
+The release target is PostgreSQL 14 through 19 (CI builds and runs the
+regression tests on every version; PostgreSQL 19 is tested against pgvector
+`master`). The pgvector compatibility target is pgvector 0.8.2 through current
+pgvector `master`.
 
 See [docs/compatibility.md](docs/compatibility.md) for the tested matrix and
 boundary notes. If pgvector changes its internal vector layout, `pgturbohybrid`

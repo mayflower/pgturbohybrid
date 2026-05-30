@@ -103,8 +103,8 @@ TurboHybrid options:
 | Metric | TurboHybrid opclass | TurboHybrid operator | pgvector baseline operator |
 | --- | --- | --- | --- |
 | cosine | `vector_cosine_turbohybrid_ops` | `<~>` | `<=>` |
-| L2 | `vector_l2_turbohybrid_ops` | `<->` | `<->` |
-| inner product | `vector_ip_turbohybrid_ops` | `<#>` | `<#>` |
+| L2 | `vector_l2_turbohybrid_ops` | `<~->` | `<->` |
+| inner product | `vector_ip_turbohybrid_ops` | `<~#>` | `<#>` |
 
 ## Run It
 

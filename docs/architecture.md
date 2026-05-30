@@ -147,6 +147,27 @@ benchmark runs:
 - `turbohybrid.dense_local_expansion_topn`
 - `turbohybrid.dense_local_expansion_max_neighbors`
 
+The native dense-scoring hot path also exposes SIMD-tier, scoring-kernel,
+rescore, and cache diagnostics. These pick the same results by default; they
+exist to force a specific kernel for parity testing or to measure tiers:
+
+- `turbohybrid.dense_graph_avx512vnni`, `turbohybrid.dense_graph_avxvnni`:
+  allow the AVX-512 VNNI / AVX-VNNI dense scorers (default on where the CPU
+  supports them; turn off to force a lower SIMD tier).
+- `turbohybrid.dense_query_split_impl`: `signed`, `unsigned`, or `auto` 4-bit
+  query-split representation (`auto` picks the unsigned-codebook maddubs/VPDPBUSD
+  split on capable x86).
+- `turbohybrid.dense_u8_split`: `auto`, `on`, or `off` for the unsigned-codebook
+  (u8) 4-bit split scorer.
+- `turbohybrid.dense_u8_batch_x4`: use the 4-candidate (x4) u8 batch kernel
+  (default on) versus four single-node passes.
+- `turbohybrid.dense_rescore_band`: exact f32 rescore policy (`auto`, `off`,
+  `exact`, `limited`); the latency profile resolves to exact-free for 4-bit
+  code-only indexes.
+- `turbohybrid.native_cache_max_mb`: per-backend in-memory native scan cache
+  cap (default 512 MB); indexes whose working set fits are fully resident so
+  warm scans read zero code pages.
+
 Candidate-budget and cache GUCs have conservative public caps in this alpha:
 `default_dense_k` and `default_bm25_k` are capped at 10,000, `default_rrf_k` at
 100,000, `max_union_candidates` at 1,000,000, and
