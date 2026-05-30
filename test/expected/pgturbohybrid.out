@@ -1036,6 +1036,7 @@ BEGIN
 		'graph_batch_scored_codes',
 		'graph_batch_us',
 		'graph_candidate_count',
+		'graph_code_pages',
 		'graph_code_pages_read',
 		'graph_dense_budget_policy',
 		'graph_dense_requested_k',

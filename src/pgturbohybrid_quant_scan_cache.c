@@ -218,15 +218,36 @@ PgturbohybridGraphLoadCodePage(Relation index, PgturbohybridGraphScanOpaque so, 
 	if (nodeId >= meta->tqNodeCount || !BlockNumberIsValid(meta->tqCodeStartBlkno))
 		return false;
 
+	if (so != NULL)
+	{
+		so->graphCodePageAttempts++;
+		so->graphCodeArenaAllocatedBytes = storage->codeArena != NULL ?
+			(int64) meta->tqNodeCount * (int64) meta->tqCodeBytes : 0;
+	}
+
+	/* Cache hit: code already resident (cross-scan native cache or this scan). */
 	if (storage->cached && storage->nodes[nodeId].loaded)
+	{
+		if (so != NULL)
+			so->graphCodePageHits++;
 		return storage->nodes[nodeId].loaded;
+	}
 
 	pageNo = nodeId / storage->codeTuplesPerPage;
 	if (pageNo < 0 || pageNo >= storage->codePageCount)
 		return false;
 
+	/* Cache hit: this candidate's code page was already loaded this scan. */
 	if (storage->codePagesLoaded[pageNo])
+	{
+		if (so != NULL)
+			so->graphCodePageHits++;
 		return storage->nodes[nodeId].loaded;
+	}
+
+	/* Cache miss: must read and copy the code page. */
+	if (so != NULL)
+		so->graphCodePageMisses++;
 
 	blkno = PgturbohybridGraphGetMappedBlockNumber(meta->tqCodeStartBlkno, pageNo,
 										 storage->codeBlknos);
@@ -326,6 +347,11 @@ retry:
 						   meta->tqResidualRerankBytes);
 				}
 				node->loaded = true;
+				if (so != NULL)
+				{
+					so->graphCodeTuplesCopied++;
+					so->graphCodeArenaUsedBytes += (int64) meta->tqCodeBytes;
+				}
 			}
 		}
 

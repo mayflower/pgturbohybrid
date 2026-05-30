@@ -31,6 +31,12 @@ static int64 pgturbohybrid_last_graph_rescore_count = 0;
 static int64 pgturbohybrid_last_graph_rescore_pages = 0;
 static int64 pgturbohybrid_last_graph_code_pages_read = 0;
 static int64 pgturbohybrid_last_graph_adj_pages_read = 0;
+static int64 pgturbohybrid_last_graph_code_page_attempts = 0;
+static int64 pgturbohybrid_last_graph_code_page_hits = 0;
+static int64 pgturbohybrid_last_graph_code_page_misses = 0;
+static int64 pgturbohybrid_last_graph_code_tuples_copied = 0;
+static int64 pgturbohybrid_last_graph_code_arena_allocated_bytes = 0;
+static int64 pgturbohybrid_last_graph_code_arena_used_bytes = 0;
 static int64 pgturbohybrid_last_graph_entry_point_count = 0;
 static int64 pgturbohybrid_last_graph_entry_sidecar_count = 0;
 static int64 pgturbohybrid_last_graph_entry_sidecar_scored = 0;
@@ -252,6 +258,12 @@ PgturbohybridGraphRecordGraphScanStats(PgturbohybridGraphScanOpaque so)
 	pgturbohybrid_last_graph_rescore_pages = so->graphRescorePages;
 	pgturbohybrid_last_graph_code_pages_read = so->graphCodePagesRead;
 	pgturbohybrid_last_graph_adj_pages_read = so->graphAdjPagesRead;
+	pgturbohybrid_last_graph_code_page_attempts = so->graphCodePageAttempts;
+	pgturbohybrid_last_graph_code_page_hits = so->graphCodePageHits;
+	pgturbohybrid_last_graph_code_page_misses = so->graphCodePageMisses;
+	pgturbohybrid_last_graph_code_tuples_copied = so->graphCodeTuplesCopied;
+	pgturbohybrid_last_graph_code_arena_allocated_bytes = so->graphCodeArenaAllocatedBytes;
+	pgturbohybrid_last_graph_code_arena_used_bytes = so->graphCodeArenaUsedBytes;
 	pgturbohybrid_last_graph_entry_point_count = so->graphEntryPointCount;
 	pgturbohybrid_last_graph_entry_sidecar_count = so->graphEntrySidecarCount;
 	pgturbohybrid_last_graph_entry_sidecar_scored = so->graphEntrySidecarScored;
@@ -386,6 +398,12 @@ PgturbohybridGraphRecordNonGraphScanStats(void)
 	pgturbohybrid_last_graph_rescore_pages = 0;
 	pgturbohybrid_last_graph_code_pages_read = 0;
 	pgturbohybrid_last_graph_adj_pages_read = 0;
+	pgturbohybrid_last_graph_code_page_attempts = 0;
+	pgturbohybrid_last_graph_code_page_hits = 0;
+	pgturbohybrid_last_graph_code_page_misses = 0;
+	pgturbohybrid_last_graph_code_tuples_copied = 0;
+	pgturbohybrid_last_graph_code_arena_allocated_bytes = 0;
+	pgturbohybrid_last_graph_code_arena_used_bytes = 0;
 	pgturbohybrid_last_graph_entry_point_count = 0;
 	pgturbohybrid_last_graph_entry_sidecar_count = 0;
 	pgturbohybrid_last_graph_entry_sidecar_scored = 0;
@@ -747,6 +765,41 @@ pgturbohybrid_last_scan_stats(PG_FUNCTION_ARGS)
 							   pgturbohybrid_last_graph_code_pages_read);
 	PgturbohybridJsonbAddInt64(&state, "graph_adj_pages_read",
 							   pgturbohybrid_last_graph_adj_pages_read);
+	/*
+	 * Native code-page cache effectiveness (PgturbohybridGraphLoadCodePage).
+	 * A warm scan should be served almost entirely from already-loaded code
+	 * pages / the in-memory codeArena: cache_hits dominate load_attempts,
+	 * cache_misses ~ code_pages_read ~ 0, and pages_read_per_scored_code ~ 0.
+	 * arena_used_bytes is the code copied into storage THIS scan (0 when fully
+	 * served from the cross-scan native cache); arena_allocated_bytes is the
+	 * contiguous code-arena size (0 when the index exceeds the native-cache
+	 * cap and falls back to per-node code buffers).
+	 */
+	PgturbohybridJsonbAddKey(&state, "graph_code_pages");
+	PgturbohybridJsonbBeginObject(&state);
+	PgturbohybridJsonbAddInt64(&state, "load_attempts",
+							   pgturbohybrid_last_graph_code_page_attempts);
+	PgturbohybridJsonbAddInt64(&state, "cache_hits",
+							   pgturbohybrid_last_graph_code_page_hits);
+	PgturbohybridJsonbAddInt64(&state, "cache_misses",
+							   pgturbohybrid_last_graph_code_page_misses);
+	PgturbohybridJsonbAddInt64(&state, "code_pages_read",
+							   pgturbohybrid_last_graph_code_pages_read);
+	PgturbohybridJsonbAddInt64(&state, "code_tuples_copied",
+							   pgturbohybrid_last_graph_code_tuples_copied);
+	PgturbohybridJsonbAddInt64(&state, "arena_used_bytes",
+							   pgturbohybrid_last_graph_code_arena_used_bytes);
+	PgturbohybridJsonbAddInt64(&state, "arena_allocated_bytes",
+							   pgturbohybrid_last_graph_code_arena_allocated_bytes);
+	PgturbohybridJsonbAddFloat8(&state, "hit_rate",
+								pgturbohybrid_last_graph_code_page_attempts > 0 ?
+								(double) pgturbohybrid_last_graph_code_page_hits /
+								(double) pgturbohybrid_last_graph_code_page_attempts : 0.0);
+	PgturbohybridJsonbAddFloat8(&state, "pages_read_per_scored_code",
+								pgturbohybrid_last_graph_scored_codes > 0 ?
+								(double) pgturbohybrid_last_graph_code_pages_read /
+								(double) pgturbohybrid_last_graph_scored_codes : 0.0);
+	PgturbohybridJsonbEndObject(&state);
 	PgturbohybridJsonbAddInt64(&state, "graph_entry_point_count",
 							   pgturbohybrid_last_graph_entry_point_count);
 	PgturbohybridJsonbAddInt64(&state, "graph_entry_sidecar_count",

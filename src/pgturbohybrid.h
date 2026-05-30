@@ -857,6 +857,13 @@ typedef struct PgturbohybridGraphScanOpaqueData
 	int64		graphBaseBatchCalls;
 	int64		graphBaseBatchNodes;
 	int64		graphBaseMaxFrontier;
+	/* Code-page cache effectiveness (PgturbohybridGraphLoadCodePage). */
+	int64		graphCodePageAttempts;
+	int64		graphCodePageHits;
+	int64		graphCodePageMisses;
+	int64		graphCodeTuplesCopied;
+	int64		graphCodeArenaAllocatedBytes;
+	int64		graphCodeArenaUsedBytes;
 	int64		graphCandidateCount;
 	int64		graphRescoreCount;
 	int64		graphRescorePages;
