@@ -339,7 +339,7 @@ PgturbohybridGraphIndexScanUsespgturbohybrid(IndexScanState *indexstate)
 {
 	return indexstate->iss_RelationDesc != NULL &&
 		indexstate->iss_RelationDesc->rd_indam != NULL &&
-		indexstate->iss_RelationDesc->rd_indam->amgettuple == pgturbohybridgettuple;
+		indexstate->iss_RelationDesc->rd_indam->amgettuple == pgturbohybridamgettuple;
 }
 
 static pg_noinline int64

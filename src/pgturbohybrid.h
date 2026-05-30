@@ -1083,6 +1083,7 @@ void		pgturbohybrid_graph_rescan(IndexScanDesc scan, ScanKey keys, int nkeys, Sc
 void		pgturbohybridrescan(IndexScanDesc scan, ScanKey keys, int nkeys, ScanKey orderbys, int norderbys);
 bool		pgturbohybrid_graph_get_tuple(IndexScanDesc scan, ScanDirection dir);
 bool		pgturbohybridgettuple(IndexScanDesc scan, ScanDirection dir);
+bool		pgturbohybridamgettuple(IndexScanDesc scan, ScanDirection dir);
 void		pgturbohybrid_graph_end_scan(IndexScanDesc scan);
 void		pgturbohybridendscan(IndexScanDesc scan);
 
