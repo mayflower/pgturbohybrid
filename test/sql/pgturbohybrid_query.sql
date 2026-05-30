@@ -45,6 +45,7 @@ BEGIN
 		'turbohybrid.dense_u8_split',
 		'turbohybrid.enable_wand',
 		'turbohybrid.max_union_candidates',
+		'turbohybrid.native_cache_max_mb',
 		'turbohybrid.profile',
 		'turbohybrid.simd'
 	] THEN

@@ -12,12 +12,19 @@
 static PgturbohybridGraphNativeCache *pgturbohybridGraphCacheList = NULL;
 
 /*
- * The native graph cache is intentionally a small/medium-index accelerator.
- * Large exact-free 4-bit indexes can still have very large code arenas
- * (1M x 3072 dims => 1.5GB), which exceeds PostgreSQL's single-allocation
- * limit and is the wrong thing to pin in backend cache memory anyway.
+ * Per-backend in-memory native scan cache size cap, in bytes, from the
+ * turbohybrid.native_cache_max_mb GUC (default 512 MB).  An index whose
+ * resident working set fits under the cap is fully loaded into a per-backend
+ * codeArena so warm scans read 0 code pages; larger indexes fall back to
+ * per-scan page loading.  Raising the cap past ~1 GB requires the huge
+ * allocations below (the code arena for 1M x 3072 dims is ~1.5 GB).  Because
+ * the cache is per-backend, size the cap to host RAM and connection count.
  */
-#define PGTURBOHYBRID_GRAPH_NATIVE_CACHE_MAX_BYTES ((Size) 512 * 1024 * 1024)
+static inline Size
+PgturbohybridGraphNativeCacheMaxBytes(void)
+{
+	return (Size) pgturbohybrid_native_cache_max_mb * 1024 * 1024;
+}
 
 static int
 PgturbohybridGraphPayloadRefCompare(const void *a, const void *b)
@@ -73,6 +80,28 @@ PgturbohybridGraphArenaBytes(uint32 count, Size itemBytes, Size *totalBytes)
 	return AllocSizeIsValid((Size) count * itemBytes);
 }
 
+/*
+ * Same, but allows huge (> MaxAllocSize) sizes, for the contiguous data arenas
+ * (code / residual / payload) that are allocated with palloc_extended(HUGE).
+ * The per-node metadata arrays keep the 1 GB AllocSize bound, which caps a
+ * cacheable index at the point where those arrays would exceed it (graceful
+ * fallback to uncached scanning); the code arena is the only one that grows
+ * past 1 GB in the realistic range (1M x 3072 dims => ~1.5 GB).
+ */
+static bool
+PgturbohybridGraphArenaBytesHuge(uint32 count, Size itemBytes, Size *totalBytes)
+{
+	if (totalBytes != NULL)
+		*totalBytes = 0;
+	if (count == 0 || itemBytes == 0)
+		return true;
+	if ((Size) count > SIZE_MAX / itemBytes)
+		return false;
+	if (totalBytes != NULL)
+		*totalBytes = (Size) count * itemBytes;
+	return AllocHugeSizeIsValid((Size) count * itemBytes);
+}
+
 static bool
 PgturbohybridGraphShouldUseNativeCache(PgturbohybridGraphMetaPageData *meta, bool cacheExactVectors)
 {
@@ -84,19 +113,19 @@ PgturbohybridGraphShouldUseNativeCache(PgturbohybridGraphMetaPageData *meta, boo
 									  sizeof(PgturbohybridGraphScanNode), &bytes))
 		return false;
 	totalBytes += bytes;
-	if (PgturbohybridGraphArenaBytes(meta->tqNodeCount,
-									 meta->tqCodeBytes, &bytes) &&
-		bytes <= PGTURBOHYBRID_GRAPH_NATIVE_CACHE_MAX_BYTES)
+	if (PgturbohybridGraphArenaBytesHuge(meta->tqNodeCount,
+										 meta->tqCodeBytes, &bytes) &&
+		bytes <= PgturbohybridGraphNativeCacheMaxBytes())
 		totalBytes += bytes;
-	if (PgturbohybridGraphArenaBytes(meta->tqNodeCount,
-									 meta->tqPayloadBytes, &bytes) &&
-		bytes <= PGTURBOHYBRID_GRAPH_NATIVE_CACHE_MAX_BYTES)
+	if (PgturbohybridGraphArenaBytesHuge(meta->tqNodeCount,
+										 meta->tqPayloadBytes, &bytes) &&
+		bytes <= PgturbohybridGraphNativeCacheMaxBytes())
 		totalBytes += bytes;
 	if (meta->tqResidualRerankBytes > 0)
 	{
-		if (!PgturbohybridGraphArenaBytes(meta->tqNodeCount,
-										  meta->tqResidualRerankBytes, &bytes) ||
-			bytes > PGTURBOHYBRID_GRAPH_NATIVE_CACHE_MAX_BYTES)
+		if (!PgturbohybridGraphArenaBytesHuge(meta->tqNodeCount,
+											  meta->tqResidualRerankBytes, &bytes) ||
+			bytes > PgturbohybridGraphNativeCacheMaxBytes())
 			return false;
 		totalBytes += bytes;
 	}
@@ -122,7 +151,7 @@ PgturbohybridGraphShouldUseNativeCache(PgturbohybridGraphMetaPageData *meta, boo
 		return false;
 	totalBytes += bytes;
 
-	return totalBytes <= PGTURBOHYBRID_GRAPH_NATIVE_CACHE_MAX_BYTES;
+	return totalBytes <= PgturbohybridGraphNativeCacheMaxBytes();
 }
 
 static void
@@ -139,20 +168,20 @@ PgturbohybridGraphInitScanStorageUncached(PgturbohybridGraphMetaPageData *meta, 
 											   meta->tqNodeCount,
 											   "pgturbohybrid graph scan node cache"));
 	if (meta->tqNodeCount > 0 && meta->tqCodeBytes > 0 &&
-		PgturbohybridGraphArenaBytes(meta->tqNodeCount, meta->tqCodeBytes,
-									 &arenaBytes) &&
-		arenaBytes <= PGTURBOHYBRID_GRAPH_NATIVE_CACHE_MAX_BYTES)
-		storage->codeArena = palloc0(arenaBytes);
+		PgturbohybridGraphArenaBytesHuge(meta->tqNodeCount, meta->tqCodeBytes,
+										 &arenaBytes) &&
+		arenaBytes <= PgturbohybridGraphNativeCacheMaxBytes())
+		storage->codeArena = palloc_extended(arenaBytes, MCXT_ALLOC_HUGE | MCXT_ALLOC_ZERO);
 	if (meta->tqNodeCount > 0 && meta->tqResidualRerankBytes > 0 &&
-		PgturbohybridGraphArenaBytes(meta->tqNodeCount, meta->tqResidualRerankBytes,
-									 &arenaBytes) &&
-		arenaBytes <= PGTURBOHYBRID_GRAPH_NATIVE_CACHE_MAX_BYTES)
-		storage->residualArena = palloc0(arenaBytes);
+		PgturbohybridGraphArenaBytesHuge(meta->tqNodeCount, meta->tqResidualRerankBytes,
+										 &arenaBytes) &&
+		arenaBytes <= PgturbohybridGraphNativeCacheMaxBytes())
+		storage->residualArena = palloc_extended(arenaBytes, MCXT_ALLOC_HUGE | MCXT_ALLOC_ZERO);
 	if (meta->tqNodeCount > 0 && meta->tqPayloadBytes > 0 &&
-		PgturbohybridGraphArenaBytes(meta->tqNodeCount, meta->tqPayloadBytes,
-									 &arenaBytes) &&
-		arenaBytes <= PGTURBOHYBRID_GRAPH_NATIVE_CACHE_MAX_BYTES)
-		storage->payloadArena = palloc0(arenaBytes);
+		PgturbohybridGraphArenaBytesHuge(meta->tqNodeCount, meta->tqPayloadBytes,
+										 &arenaBytes) &&
+		arenaBytes <= PgturbohybridGraphNativeCacheMaxBytes())
+		storage->payloadArena = palloc_extended(arenaBytes, MCXT_ALLOC_HUGE | MCXT_ALLOC_ZERO);
 	if (cacheExactVectors && meta->tqNodeCount > 0 && meta->dimensions > 0)
 	{
 		storage->exactBytes = PGTURBOHYBRID_VECTOR_SIZE(meta->dimensions);
@@ -835,19 +864,16 @@ PgturbohybridGraphAppendInsertCacheNode(PgturbohybridGraphNativeCache *cache, Pg
 	memset(&storage->nodes[nodeId], 0, sizeof(PgturbohybridGraphScanNode));
 	if (codeBytes > 0)
 	{
-		storage->codeArena = repalloc(storage->codeArena,
-									  PgturbohybridCheckedArrayBytes(codeBytes,
-																	 newNodeCount,
-																	 "pgturbohybrid graph code arena"));
+		/* repalloc_huge: the code arena may exceed 1 GB (see ArenaBytesHuge). */
+		storage->codeArena = repalloc_huge(storage->codeArena,
+										   (Size) codeBytes * (Size) newNodeCount);
 		memcpy(storage->codeArena + ((Size) nodeId * codeBytes),
 			   code, codeBytes);
 	}
 	if (payloadBytes > 0)
 	{
-		storage->payloadArena = repalloc(storage->payloadArena,
-										 PgturbohybridCheckedArrayBytes(payloadBytes,
-																		newNodeCount,
-																		"pgturbohybrid graph payload arena"));
+		storage->payloadArena = repalloc_huge(storage->payloadArena,
+											  (Size) payloadBytes * (Size) newNodeCount);
 		if (payloads != NULL)
 			memcpy(storage->payloadArena + ((Size) nodeId * payloadBytes),
 				   payloads, payloadBytes);
@@ -857,10 +883,8 @@ PgturbohybridGraphAppendInsertCacheNode(PgturbohybridGraphNativeCache *cache, Pg
 	}
 	if (residualBytes > 0)
 	{
-		storage->residualArena = repalloc(storage->residualArena,
-										  PgturbohybridCheckedArrayBytes(residualBytes,
-																		 newNodeCount,
-																		 "pgturbohybrid graph residual rerank arena"));
+		storage->residualArena = repalloc_huge(storage->residualArena,
+											   (Size) residualBytes * (Size) newNodeCount);
 		if (residualSketch != NULL)
 			memcpy(storage->residualArena + ((Size) nodeId * residualBytes),
 				   residualSketch, residualBytes);
