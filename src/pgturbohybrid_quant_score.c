@@ -23,6 +23,49 @@
 #define PGTURBOHYBRID_GRAPH_X86 0
 #endif
 
+#if PGTURBOHYBRID_GRAPH_X86 && defined(__linux__)
+/*
+ * Detect whether the backend is running under Valgrind.  Valgrind passes the
+ * host CPUID through, so the AVX-512 / AVX-VNNI feature probes below would
+ * report the feature "available" -- but Valgrind's JIT cannot execute many
+ * AVX-512 (EVEX) and AVX-VNNI instructions and raises SIGILL on them, which
+ * crashes the backend (the CI valgrind job dies at the SIMD-forcing tests).
+ * The AVX-512/AVX-VNNI availability probes treat Valgrind as "not available"
+ * so dispatch falls back to AVX2/scalar, which Valgrind fully supports; AVX2
+ * stays enabled.  Detected once via /proc/self/maps (Valgrind always maps its
+ * vgpreload core); no libvalgrind build dependency.
+ */
+static bool pg_attribute_unused()
+PgturbohybridGraphRunningUnderValgrind(void)
+{
+	static int	under = -1;
+	FILE	   *f;
+	char		line[256];
+
+	if (under >= 0)
+		return under != 0;
+
+	under = 0;
+	f = fopen("/proc/self/maps", "r");
+	if (f != NULL)
+	{
+		while (fgets(line, sizeof(line), f) != NULL)
+		{
+			if (strstr(line, "/valgrind/") != NULL ||
+				strstr(line, "vgpreload") != NULL)
+			{
+				under = 1;
+				break;
+			}
+		}
+		fclose(f);
+	}
+	return under != 0;
+}
+#else
+#define PgturbohybridGraphRunningUnderValgrind() (false)
+#endif
+
 #define PGTURBOHYBRID_QUERY_SPLIT_HIGH_COEF 256
 #define PGTURBOHYBRID_GRAPH_CODEBOOK_SCALE (127.0 / 2.733)
 #define PGTURBOHYBRID_GRAPH_CODEBOOK2_SCALE (127.0 / 1.510)
@@ -2198,6 +2241,10 @@ PgturbohybridGraphAvx512WeightedAvailable(void)
 {
 	static int	available = -1;
 
+	/* Valgrind cannot execute AVX-512; fall back to AVX2/scalar. */
+	if (PgturbohybridGraphRunningUnderValgrind())
+		return false;
+
 	if (pgturbohybrid_dense_graph_avx512_weighted == PGTURBOHYBRID_GRAPH_AVX512_WEIGHTED_OFF ||
 		pgturbohybrid_dense_simd_force == PGTURBOHYBRID_SIMD_FORCE_SCALAR)
 		return false;
@@ -2428,6 +2475,10 @@ static bool
 PgturbohybridGraphAvx512VnniAvailable(void)
 {
 	static int	available = -1;
+
+	/* Valgrind cannot execute AVX-512 VNNI; fall back to AVX2/scalar. */
+	if (PgturbohybridGraphRunningUnderValgrind())
+		return false;
 
 	/*
 	 * The private AVX-512 VNNI policy is consulted on every call.  The
@@ -2916,6 +2967,10 @@ static bool
 PgturbohybridGraphAvxVnniAvailable(void)
 {
 	static int	available = -1;
+
+	/* Valgrind cannot execute AVX-VNNI; fall back to AVX2/scalar. */
+	if (PgturbohybridGraphRunningUnderValgrind())
+		return false;
 
 	/* Private policy switch for AVX VNNI dispatch. */
 	if (!pgturbohybrid_dense_graph_avxvnni)
@@ -4023,6 +4078,10 @@ PgturbohybridGraphAvx512VpopcntdqAvailable(void)
 	 * the hardware capability — flipping the GUC doesn't require
 	 * resetting `available`.
 	 */
+	/* Valgrind cannot execute AVX-512 VPOPCNTDQ; fall back to AVX2/scalar. */
+	if (PgturbohybridGraphRunningUnderValgrind())
+		return false;
+
 	if (!pgturbohybrid_dense_graph_avx512vpopcntdq)
 		return false;
 	if (pgturbohybrid_dense_simd_force != PGTURBOHYBRID_SIMD_FORCE_AUTO &&
