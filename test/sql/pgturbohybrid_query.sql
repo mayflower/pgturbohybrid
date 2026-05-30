@@ -41,8 +41,9 @@ BEGIN
 		'turbohybrid.dense_local_expansion_max_neighbors',
 		'turbohybrid.dense_local_expansion_topn',
 		'turbohybrid.dense_query_split_impl',
+		'turbohybrid.dense_rescore_band',
+		'turbohybrid.dense_u8_split',
 		'turbohybrid.enable_wand',
-		'turbohybrid.graph_block_grouped_load',
 		'turbohybrid.max_union_candidates',
 		'turbohybrid.profile',
 		'turbohybrid.simd'

@@ -2638,6 +2638,21 @@ PgturbohybridGraphResetScan(PgturbohybridGraphScanOpaque so)
 	so->returnedRows = 0;
 	so->graphVisitedNodes = 0;
 	so->graphScoredCodes = 0;
+	so->graphBatchScoredCodes = 0;
+	so->graphScalarScoredCodes = 0;
+	so->graphBatchKernel = PGTURBOHYBRID_SCORING_SCALAR;
+	memset(so->graphScoreKernelNodes, 0, sizeof(so->graphScoreKernelNodes));
+	memset(so->graphScoreKernelCalls, 0, sizeof(so->graphScoreKernelCalls));
+	so->graphBatchCalls = 0;
+	so->graphBatchNodes = 0;
+	so->graphBaseFrontierPushes = 0;
+	so->graphBaseFrontierPops = 0;
+	so->graphBaseNearestOffers = 0;
+	so->graphBaseVisitedChecks = 0;
+	so->graphBaseDuplicateSkips = 0;
+	so->graphBaseBatchCalls = 0;
+	so->graphBaseBatchNodes = 0;
+	so->graphBaseMaxFrontier = 0;
 	so->graphCandidateCount = 0;
 	so->graphRescoreCount = 0;
 	so->graphRescorePages = 0;
@@ -3323,6 +3338,19 @@ PgturbohybridGraphSearchBaseLayer(Relation index, PgturbohybridGraphScanOpaque s
 	int			frontierCount = 0;
 	int			nearestCount = 0;
 	int			resultCount = 0;
+	/*
+	 * Traversal counters accumulated in locals (kept in registers) and flushed
+	 * to so-> once at the end -- a per-neighbor so->field RMW in this hot loop
+	 * (thousands of visited checks/query) measurably hurts p50.
+	 */
+	int64		cFrontierPushes = 0;
+	int64		cFrontierPops = 0;
+	int64		cNearestOffers = 0;
+	int64		cVisitedChecks = 0;
+	int64		cDuplicateSkips = 0;
+	int64		cBatchCalls = 0;
+	int64		cBatchNodes = 0;
+	int64		cMaxFrontier = 0;
 	int			maxNeighbors = PgturbohybridGraphLevelM(meta->m, 0);
 	int			frontierCapacity = PgturbohybridGraphInitialFrontierCapacity(meta->tqNodeCount,
 																 searchEf,
@@ -3388,31 +3416,42 @@ PgturbohybridGraphSearchBaseLayer(Relation index, PgturbohybridGraphScanOpaque s
 	for (int i = 0; i < entryCount; i++)
 	{
 		PgturbohybridGraphFrontierItem entry = entries[i];
-		instr_time	heapStart;
 
-		if (entry.nodeId >= meta->tqNodeCount ||
-			(useVisitGeneration ?
-			 storage->visitedGeneration[entry.nodeId] == visitGeneration :
-			 visited[entry.nodeId]))
+		cVisitedChecks++;
+		if (entry.nodeId >= meta->tqNodeCount)
 			continue;
+		if (useVisitGeneration ?
+			storage->visitedGeneration[entry.nodeId] == visitGeneration :
+			visited[entry.nodeId])
+		{
+			cDuplicateSkips++;
+			continue;
+		}
 
 		if (useVisitGeneration)
 			storage->visitedGeneration[entry.nodeId] = visitGeneration;
 		else
 			visited[entry.nodeId] = true;
 
-		INSTR_TIME_SET_CURRENT(heapStart);
 		PgturbohybridGraphFrontierHeapPushGrowing(&frontier, &frontierCount, &frontierCapacity,
 									   maxFrontierCapacity, entry, true);
+		cFrontierPushes++;
 		(void) PgturbohybridGraphOfferNearest(nearest, searchEf, &nearestCount, entry.nodeId, entry.distance);
-		PgturbohybridGraphAddElapsedUs(&so->graphHeapUs, heapStart);
+		cNearestOffers++;
 	}
 
 	while (frontierCount > 0)
 	{
-		PgturbohybridGraphFrontierItem item = PgturbohybridGraphFrontierHeapPop(frontier, &frontierCount, true);
-		uint32		nodeId = item.nodeId;
+		PgturbohybridGraphFrontierItem item;
+		uint32		nodeId;
 		int			slot;
+
+		if (frontierCount > cMaxFrontier)
+			cMaxFrontier = frontierCount;
+
+		item = PgturbohybridGraphFrontierHeapPop(frontier, &frontierCount, true);
+		nodeId = item.nodeId;
+		cFrontierPops++;
 
 		CHECK_FOR_INTERRUPTS();
 		if (!PgturbohybridGraphLoadCodePage(index, so, meta, storage, nodeId))
@@ -3456,11 +3495,16 @@ PgturbohybridGraphSearchBaseLayer(Relation index, PgturbohybridGraphScanOpaque s
 					}
 				}
 
-				if (neighbor >= meta->tqNodeCount ||
-					(useVisitGeneration ?
-					 storage->visitedGeneration[neighbor] == visitGeneration :
-					 visited[neighbor]))
+				cVisitedChecks++;
+				if (neighbor >= meta->tqNodeCount)
 					continue;
+				if (useVisitGeneration ?
+					storage->visitedGeneration[neighbor] == visitGeneration :
+					visited[neighbor])
+				{
+					cDuplicateSkips++;
+					continue;
+				}
 
 				if (!PgturbohybridGraphLoadCodePage(index, so, meta, storage, neighbor))
 					continue;
@@ -3474,16 +3518,17 @@ PgturbohybridGraphSearchBaseLayer(Relation index, PgturbohybridGraphScanOpaque s
 
 			PgturbohybridGraphScoreNodeBatchTimed(so, storage, batchNodeIds, batchCount,
 									   batchDistances, query);
+			cBatchCalls++;
+			cBatchNodes += batchCount;
 			for (int i = 0; i < batchCount; i++)
 			{
 				uint32		neighbor = batchNodeIds[i];
 				double		neighborDistance = batchDistances[i];
 				bool		accepted;
-				instr_time	heapStart;
 
-				INSTR_TIME_SET_CURRENT(heapStart);
 				accepted = PgturbohybridGraphOfferNearest(nearest, searchEf, &nearestCount,
 											   neighbor, neighborDistance);
+				cNearestOffers++;
 				if (accepted)
 				{
 					PgturbohybridGraphFrontierItem frontierItem;
@@ -3494,8 +3539,8 @@ PgturbohybridGraphSearchBaseLayer(Relation index, PgturbohybridGraphScanOpaque s
 												   &frontierCapacity,
 												   maxFrontierCapacity,
 												   frontierItem, true);
+					cFrontierPushes++;
 				}
-				PgturbohybridGraphAddElapsedUs(&so->graphHeapUs, heapStart);
 			}
 		}
 	}
@@ -3519,15 +3564,9 @@ PgturbohybridGraphSearchBaseLayer(Relation index, PgturbohybridGraphScanOpaque s
 		resultDistance = PgturbohybridGraphResultDistance(so, query, node,
 											  nearest[i].distance,
 											  &exactScored);
-		{
-			instr_time	heapStart;
-
-			INSTR_TIME_SET_CURRENT(heapStart);
-			PgturbohybridGraphOfferCandidate(so, results, resultTarget, &resultCount,
-								  nodeId, &node->heaptid, resultDistance,
-								  exactScored);
-			PgturbohybridGraphAddElapsedUs(&so->graphHeapUs, heapStart);
-		}
+		PgturbohybridGraphOfferCandidate(so, results, resultTarget, &resultCount,
+							  nodeId, &node->heaptid, resultDistance,
+							  exactScored);
 	}
 
 	if (visited != NULL)
@@ -3536,6 +3575,17 @@ PgturbohybridGraphSearchBaseLayer(Relation index, PgturbohybridGraphScanOpaque s
 		pfree(frontier);
 	if (nearestAllocated)
 		pfree(nearest);
+
+	/* Flush traversal counters once (accumulates across re-traversals). */
+	so->graphBaseFrontierPushes += cFrontierPushes;
+	so->graphBaseFrontierPops += cFrontierPops;
+	so->graphBaseNearestOffers += cNearestOffers;
+	so->graphBaseVisitedChecks += cVisitedChecks;
+	so->graphBaseDuplicateSkips += cDuplicateSkips;
+	so->graphBaseBatchCalls += cBatchCalls;
+	so->graphBaseBatchNodes += cBatchNodes;
+	if (cMaxFrontier > so->graphBaseMaxFrontier)
+		so->graphBaseMaxFrontier = cMaxFrontier;
 	return resultCount;
 }
 

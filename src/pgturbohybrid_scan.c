@@ -192,7 +192,15 @@ GetFlatScanItems(IndexScanDesc scan, Datum value)
 }
 
 /*
- * Algorithm 5 from paper
+ * Algorithm 5 from paper.
+ *
+ * Legacy graph_hnsw scan entry: drives PgturbohybridGraphSearchLayer over
+ * full-vector element tuples.  This is NOT the native scan path -- a native
+ * (quantized graph) index is dispatched to tqgraphgettuple in
+ * pgturbohybridgettuple before pgturbohybrid_graph_get_tuple ever selects this
+ * routine, and a flat index uses GetFlatScanItems.  Reached only by the
+ * dormant legacy element-tuple storage; native scans use
+ * tqgraphgettuple -> PgturbohybridGraphCollectResults.
  */
 static List *
 GetScanItems(IndexScanDesc scan, Datum value)
@@ -227,7 +235,7 @@ GetScanItems(IndexScanDesc scan, Datum value)
 
 	for (int lc = entryPoint->level; lc >= 1; lc--)
 	{
-		w = PgturbohybridGraphSearchLayer(base, q, ep, 1, lc, index, support, m, false, NULL, NULL, NULL, true, NULL, -1, so->pgturbohybridGraphScan ? &so->graphScoredCodes : NULL, so->pgturbohybridGraphScan ? &so->tq : NULL, &so->graphBufferStats);
+		w = PgturbohybridGraphSearchLayer(base, q, ep, 1, lc, index, support, m, false, NULL, NULL, NULL, true, NULL, -1, so->pgturbohybridGraphScan ? &so->graphScoredCodes : NULL, so->pgturbohybridGraphScan ? &so->tq : NULL);
 		ep = w;
 	}
 
@@ -244,7 +252,7 @@ GetScanItems(IndexScanDesc scan, Datum value)
 	}
 
 	beforeTuples = so->tuples;
-	items = PgturbohybridGraphSearchLayer(base, q, ep, searchEf, 0, index, support, m, false, NULL, &so->v, pgturbohybrid_iterative_scan != PGTURBOHYBRID_GRAPH_ITERATIVE_SCAN_OFF ? &so->discarded : NULL, true, &so->tuples, -1, so->pgturbohybridGraphScan ? &so->graphScoredCodes : NULL, so->pgturbohybridGraphScan ? &so->tq : NULL, &so->graphBufferStats);
+	items = PgturbohybridGraphSearchLayer(base, q, ep, searchEf, 0, index, support, m, false, NULL, &so->v, pgturbohybrid_iterative_scan != PGTURBOHYBRID_GRAPH_ITERATIVE_SCAN_OFF ? &so->discarded : NULL, true, &so->tuples, -1, so->pgturbohybridGraphScan ? &so->graphScoredCodes : NULL, so->pgturbohybridGraphScan ? &so->tq : NULL);
 	afterTuples = so->tuples;
 	RescoreScanItems(scan, items);
 
@@ -285,7 +293,7 @@ ResumeScanItems(IndexScanDesc scan)
 	}
 
 	beforeTuples = so->tuples;
-	items = PgturbohybridGraphSearchLayer(base, &so->q, ep, batch_size, 0, index, &so->support, so->m, false, NULL, &so->v, &so->discarded, false, &so->tuples, -1, so->pgturbohybridGraphScan ? &so->graphScoredCodes : NULL, so->pgturbohybridGraphScan ? &so->tq : NULL, &so->graphBufferStats);
+	items = PgturbohybridGraphSearchLayer(base, &so->q, ep, batch_size, 0, index, &so->support, so->m, false, NULL, &so->v, &so->discarded, false, &so->tuples, -1, so->pgturbohybridGraphScan ? &so->graphScoredCodes : NULL, so->pgturbohybridGraphScan ? &so->tq : NULL);
 	afterTuples = so->tuples;
 	RescoreScanItems(scan, items);
 
@@ -513,8 +521,6 @@ pgturbohybrid_graph_rescan(IndexScanDesc scan, ScanKey keys, int nkeys, ScanKey 
 	so->tuples = 0;
 	so->graphVisitedNodes = 0;
 	so->graphScoredCodes = 0;
-	so->graphBufferStats.candidatesScored = 0;
-	so->graphBufferStats.elementPagesLocked = 0;
 	so->graphCandidateCount = 0;
 	so->graphRescoreCount = 0;
 	so->graphRescorePages = 0;

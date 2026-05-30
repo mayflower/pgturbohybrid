@@ -100,7 +100,7 @@ INSERT INTO u8_docs(id, embedding, body_tsv)
 SELECT i,
        (SELECT array_agg(sin(i * 0.29 + g * 0.011))::real[]::vector FROM generate_series(1, 1536) g),
        to_tsvector('english', 'document ' || i)
-FROM generate_series(1, 200) AS i;
+FROM generate_series(1, 1500) AS i;  -- enough nodes that batch-of-4 scoring fires
 CREATE INDEX u8_idx ON u8_docs
     USING turbohybrid (embedding vector_cosine_turbohybrid_ops, body_tsv bm25_tsvector_turbohybrid_ops)
     WITH (quantization_bits = 4);
@@ -111,6 +111,10 @@ DECLARE
     scorer text;
     scalar_codes int;
     simd_avail bool;
+    ks jsonb;
+    u8_batch bigint;
+    signed_batch bigint;
+    scalar_batch bigint;
 BEGIN
     qv := (SELECT array_agg(cos(g * 0.017))::real[]::vector FROM generate_series(1, 1536) g);
     -- Does an unsigned-codebook SIMD kernel actually run on this build/CPU?
@@ -118,15 +122,34 @@ BEGIN
 
     -- Default (auto): u8 selected when available; never the scalar/LUT gather.
     SET turbohybrid.dense_query_split_impl = auto;
+    SET turbohybrid.dense_u8_split = auto;
     PERFORM id FROM u8_docs ORDER BY embedding <~> turbohybrid_query(vector_query => qv) LIMIT 10;
     scorer := turbohybrid_last_scan_stats() ->> 'dense_scorer';
     scalar_codes := (turbohybrid_last_scan_stats() ->> 'graph_scalar_scored_codes')::int;
+    ks := turbohybrid_last_scan_stats() -> 'graph_score_kernels';
     IF simd_avail THEN
         IF scorer NOT LIKE 'unsigned_split_%' THEN
             RAISE EXCEPTION 'auto: 1536-dim 4-bit scan used % (expected unsigned_split_*)', scorer;
         END IF;
         IF scalar_codes <> 0 THEN
             RAISE EXCEPTION 'auto: % codes used the scalar/LUT gather', scalar_codes;
+        END IF;
+
+        -- Acceptance: the hot native batch scorer reports a u8-split kernel
+        -- bucket (batch_u8_split_avx2 or _avx512vnni), and no batch nodes go
+        -- through the signed split or scalar/LUT.
+        u8_batch := (ks->'batch_u8_split_avx2'->>'nodes')::bigint
+                  + (ks->'batch_u8_split_avx512vnni'->>'nodes')::bigint;
+        signed_batch := (ks->'batch_signed_split_avx2'->>'nodes')::bigint
+                      + (ks->'batch_signed_split_avxvnni'->>'nodes')::bigint
+                      + (ks->'batch_signed_split_avx512vnni'->>'nodes')::bigint;
+        scalar_batch := (ks->'batch_scalar_or_lut'->>'nodes')::bigint;
+        IF u8_batch <= 0 THEN
+            RAISE EXCEPTION 'auto: native batch scorer reported no u8-split nodes: %', ks;
+        END IF;
+        IF signed_batch <> 0 OR scalar_batch <> 0 THEN
+            RAISE EXCEPTION 'auto: native batch used signed/scalar nodes (signed=%, scalar=%): %',
+                signed_batch, scalar_batch, ks;
         END IF;
     END IF;
 
@@ -146,6 +169,27 @@ BEGIN
         RAISE EXCEPTION 'unsigned: scan used % (expected unsigned_split_*)', scorer;
     END IF;
     RESET turbohybrid.dense_query_split_impl;
+
+    -- (3) Dedicated dense_u8_split control (for controlled benchmarking).
+    -- off: disable the u8 split even under impl=auto -> signed split runs.
+    SET turbohybrid.dense_u8_split = off;
+    PERFORM id FROM u8_docs ORDER BY embedding <~> turbohybrid_query(vector_query => qv) LIMIT 10;
+    scorer := turbohybrid_last_scan_stats() ->> 'dense_scorer';
+    IF simd_avail AND scorer LIKE 'unsigned_split_%' THEN
+        RAISE EXCEPTION 'dense_u8_split=off: scan still used u8 scorer %', scorer;
+    END IF;
+
+    -- on: force the u8 split even when impl asks for the signed split.
+    SET turbohybrid.dense_query_split_impl = signed;
+    SET turbohybrid.dense_u8_split = on;
+    PERFORM id FROM u8_docs ORDER BY embedding <~> turbohybrid_query(vector_query => qv) LIMIT 10;
+    scorer := turbohybrid_last_scan_stats() ->> 'dense_scorer';
+    IF simd_avail AND scorer NOT LIKE 'unsigned_split_%' THEN
+        RAISE EXCEPTION 'dense_u8_split=on: scan used % (expected unsigned_split_*)', scorer;
+    END IF;
+
+    RESET turbohybrid.dense_query_split_impl;
+    RESET turbohybrid.dense_u8_split;
 END;
 $$;
 SELECT 'u8 split parity ok' AS result;
