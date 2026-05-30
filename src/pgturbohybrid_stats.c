@@ -195,9 +195,7 @@ PgturbohybridJsonbAddFloat8(PgturbohybridJsonbState *state, const char *key, dou
 static const char *TqScanOrchestrationName(void);
 static const char *PgturbohybridFinalKSourceName(void);
 static const char *TqExactKernelName(int kernel);
-#ifdef PGTURBOHYBRID_DEV_DIAGNOSTICS
 static const char *PgturbohybridGraphAvx512WeightedModeName(int mode);
-#endif
 
 void
 PgturbohybridGraphRecordExactVectorKernel(int kernel)
@@ -508,9 +506,7 @@ TqExactKernelName(int kernel)
 			return "unknown";
 	}
 }
-#endif
 
-#ifdef PGTURBOHYBRID_DEV_DIAGNOSTICS
 static const char *
 PgturbohybridGraphAvx512WeightedModeName(int mode)
 {
