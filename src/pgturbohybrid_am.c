@@ -628,7 +628,6 @@ static IndexBulkDeleteResult *pgturbohybridambulkdelete(IndexVacuumInfo *info, I
 static IndexBulkDeleteResult *pgturbohybridamvacuumcleanup(IndexVacuumInfo *info, IndexBulkDeleteResult *stats);
 static IndexScanDesc pgturbohybridambeginscan(Relation index, int nkeys, int norderbys);
 static void pgturbohybridamrescan(IndexScanDesc scan, ScanKey keys, int nkeys, ScanKey orderbys, int norderbys);
-static bool pgturbohybridamgettuple(IndexScanDesc scan, ScanDirection dir);
 static void pgturbohybridamendscan(IndexScanDesc scan);
 static void pgturbohybridamcostestimate(PlannerInfo *root, IndexPath *path, double loop_count,
 								 Cost *indexStartupCost, Cost *indexTotalCost,
@@ -1118,10 +1117,38 @@ PgturbohybridFinalTarget(PgturbohybridQueryHeader *query, int mergedCount, int l
 {
 	int			finalCount = mergedCount;
 	int			target = PgturbohybridEffectiveFinalK(query, limit);
+	int64		activeLimit = PgturbohybridGraphGetActiveLimitTupleTarget();
+
+	/*
+	 * Resolve whether the scan sits under an executor LIMIT.  Prefer the
+	 * plan-walked tuple target (set by the ExecutorStart hook), which sees a
+	 * LIMIT even when the scan is nested inside a subquery/aggregate -- the
+	 * 002_wal_restart query wraps the LIMIT in string_agg(... LIMIT 3), where
+	 * PgturbohybridCurrentLimit() (passed as `limit`) reads 0.  Fall back to
+	 * `limit` when the hook target is unset (< 0).
+	 */
+	if (activeLimit < 0 && limit > 0)
+		activeLimit = limit;
 
 	if (pgturbohybrid_max_union_candidates > 0)
 		finalCount = Min(finalCount, pgturbohybrid_max_union_candidates);
-	finalCount = Min(finalCount, target);
+
+	/*
+	 * Hard-cap the emitted candidates at final_k only when the scan carries no
+	 * executor LIMIT.  With a LIMIT the executor re-applies it after heap
+	 * visibility checks, so the access method must over-return its (already
+	 * oversampled) candidate band: a plain DELETE leaves the index node live
+	 * (only VACUUM marks it dead), so the deleted nearest neighbour is still a
+	 * candidate and the executor needs the candidates behind it to backfill the
+	 * LIMIT.  Capping at exactly final_k/limit here silently dropped a row when
+	 * the nearest tuple had been deleted (test/t/002_wal_restart.pl); 9caef97
+	 * exposed it by routing dense-only queries through this fusion path.
+	 * Without a LIMIT, final_k (explicit or default) is the output size, so the
+	 * cap still applies.  The executor LIMIT bounds the real output either way,
+	 * so over-returning costs only buffered candidates, not extra heap fetches.
+	 */
+	if (activeLimit <= 0)
+		finalCount = Min(finalCount, target);
 	return finalCount;
 }
 
@@ -2247,7 +2274,7 @@ pgturbohybridamrescan(IndexScanDesc scan, ScanKey keys, int nkeys, ScanKey order
 	}
 }
 
-static bool
+bool
 pgturbohybridamgettuple(IndexScanDesc scan, ScanDirection dir)
 {
 	PgturbohybridGraphScanOpaque so = (PgturbohybridGraphScanOpaque) scan->opaque;
