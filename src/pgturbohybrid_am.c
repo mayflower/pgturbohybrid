@@ -2697,6 +2697,16 @@ PgturbohybridInit(void)
 	DefineCustomBoolVariable("turbohybrid.simd", "Enable SIMD kernels where supported by the host CPU",
 							 NULL, &pgturbohybrid_simd,
 							 true, PGC_USERSET, 0, NULL, PgturbohybridAssignSimd, NULL);
+	DefineCustomBoolVariable("turbohybrid.dense_graph_avx512vnni",
+							 "Allow the AVX-512 VNNI query-split dense scorer",
+							 "Diagnostic knob: turn off to fall back to AVX-VNNI/AVX2 query split for kernel parity testing.",
+							 &pgturbohybrid_dense_graph_avx512vnni,
+							 true, PGC_USERSET, 0, NULL, NULL, NULL);
+	DefineCustomBoolVariable("turbohybrid.dense_graph_avxvnni",
+							 "Allow the AVX-VNNI query-split dense scorer",
+							 "Diagnostic knob: turn off (with avx512vnni off) to force the AVX2 query-split scorer for parity testing.",
+							 &pgturbohybrid_dense_graph_avxvnni,
+							 true, PGC_USERSET, 0, NULL, NULL, NULL);
 	DefineCustomBoolVariable("turbohybrid.dense_build_exact_distances",
 							 "Use exact f32 vector distances while building dense graph edges",
 							 "This can improve graph topology for experiments without storing exact vectors at scan time.",

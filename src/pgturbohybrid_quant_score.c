@@ -791,6 +791,66 @@ PgturbohybridGraphBuildCodeCodeDistance2(PgturbohybridQuantBuildState *state, ui
 }
 #endif
 
+/*
+ * Public single-code query-split entry point.  Tries the integer query-split
+ * SIMD scorers (4-bit then 2-bit) for one packed code; returns true and sets
+ * *distance when a query-split kernel handled it, false to fall back to the
+ * LUT-gather / scalar path.  Always compiled so callers in other translation
+ * units (e.g. TqCodeDistance) need no SIMD-detection macros.
+ */
+bool
+PgturbohybridGraphTqCodeQuerySplitDistance(const PgturbohybridGraphTqQuery *tq,
+										   const uint8 *valueCode, float valueScale,
+										   double *distance)
+{
+#if PGTURBOHYBRID_GRAPH_COMPILE_QUERY_SPLIT
+	return PgturbohybridGraphPackedDistanceQuerySplit4(tq, valueCode, valueScale, distance) ||
+		PgturbohybridGraphPackedDistanceQuerySplit2(tq, valueCode, valueScale, distance);
+#else
+	(void) tq;
+	(void) valueCode;
+	(void) valueScale;
+	(void) distance;
+	return false;
+#endif
+}
+
+/*
+ * True iff query-split integer scoring will actually be used for this query
+ * (so the LUT-gather table is unnecessary).  Mirrors the per-query gating and
+ * runtime SIMD availability of the QuerySplit4/QuerySplit2 kernels.
+ */
+bool
+PgturbohybridGraphTqQuerySplitActive(const PgturbohybridGraphTqQuery *tq)
+{
+#if PGTURBOHYBRID_GRAPH_COMPILE_QUERY_SPLIT
+	if (tq == NULL || !tq->querySplitEnabled || tq->dimensions < 1024 ||
+		(tq->bits != PGTURBOHYBRID_DEFAULT_BITS && tq->bits != 2) ||
+		(TqScoreMode) tq->scoreMode == PGTURBOHYBRID_SCORE_L1)
+		return false;
+#if PGTURBOHYBRID_GRAPH_COMPILE_ARM_DOT
+	if (PgturbohybridGraphArmDotprodAvailable())
+		return true;
+#endif
+#if PGTURBOHYBRID_GRAPH_COMPILE_AVX512VNNI
+	if (PgturbohybridGraphAvx512VnniAvailable())
+		return true;
+#endif
+#if PGTURBOHYBRID_GRAPH_COMPILE_AVXVNNI
+	if (PgturbohybridGraphAvxVnniAvailable())
+		return true;
+#endif
+#if PGTURBOHYBRID_GRAPH_COMPILE_AVX2
+	if (PgturbohybridGraphAvx2Available())
+		return true;
+#endif
+	return false;
+#else
+	(void) tq;
+	return false;
+#endif
+}
+
 static double
 PgturbohybridGraphBuildCodeCodeRawScalarRange(const uint8 *a, const uint8 *b,
 								   int startDim, int dimCount, int bits)
@@ -3910,15 +3970,17 @@ PgturbohybridGraphScoreNode(PgturbohybridGraphScanOpaque so, PgturbohybridGraphS
 
 #if PGTURBOHYBRID_GRAPH_COMPILE_QUERY_SPLIT
 	/*
-	 * Single-node 4-bit query-split VNNI fast path.  Mirrors the batch-of-4
-	 * dispatch so tail nodes (< 4 left over) and small frontier expansions use
-	 * the same int8 VNNI kernel and scoring math as the batch path instead of
-	 * falling back to the scalar LUT-gather float path.
+	 * Single-node query-split fast path for 4-bit and 2-bit codes.  Mirrors the
+	 * batch-of-4 dispatch so tail nodes (< 4 left over) and small frontier
+	 * expansions use the same int8 SIMD kernel and scoring math as the batch
+	 * path instead of falling back to the scalar LUT-gather float path.
 	 */
 	{
 		double		querySplitDistance;
 
 		if (PgturbohybridGraphPackedDistanceQuerySplit4(&so->tq, node->code,
+												node->scale, &querySplitDistance) ||
+			PgturbohybridGraphPackedDistanceQuerySplit2(&so->tq, node->code,
 												node->scale, &querySplitDistance))
 			return querySplitDistance;
 	}

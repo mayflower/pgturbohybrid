@@ -1053,6 +1053,7 @@ BEGIN
 		'dense_residual_rerank_count',
 		'dense_residual_rerank_us',
 		'dense_scalar_fallback_kernel',
+		'dense_scorer',
 		'dense_scoring_kernel',
 		'detected_sql_limit',
 		'dimensions',
