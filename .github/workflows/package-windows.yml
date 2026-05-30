@@ -1,0 +1,72 @@
+name: package-windows
+
+on:
+  push:
+    tags:
+      - 'v*'
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  zip:
+    name: windows zip pg${{ matrix.postgres }}
+    runs-on: windows-2025
+    strategy:
+      fail-fast: false
+      matrix:
+        postgres: ['16', '17', '18']
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: ankane/setup-postgres@v1
+        with:
+          postgres-version: ${{ matrix.postgres }}
+
+      - name: Build and install pgvector (provides vector.h for the build)
+        shell: cmd
+        run: |
+          git clone --depth 1 --branch v0.8.2 https://github.com/pgvector/pgvector.git "%RUNNER_TEMP%\pgvector"
+          cd /d "%RUNNER_TEMP%\pgvector"
+          call "C:\Program Files\Microsoft Visual Studio\2022\Enterprise\VC\Auxiliary\Build\vcvars64.bat" && ^
+          nmake /NOLOGO /F Makefile.win && ^
+          nmake /NOLOGO /F Makefile.win install
+
+      - name: Build pgturbohybrid
+        shell: cmd
+        run: |
+          call "C:\Program Files\Microsoft Visual Studio\2022\Enterprise\VC\Auxiliary\Build\vcvars64.bat" && ^
+          nmake /NOLOGO /F Makefile.win
+
+      - name: Stage and zip
+        shell: pwsh
+        run: |
+          if ($env:GITHUB_REF_TYPE -eq 'tag') {
+            $version = $env:GITHUB_REF_NAME -replace '^v',''
+          } else {
+            $version = (Select-String -Path Makefile -Pattern '^EXTVERSION' | Select-Object -First 1).Line.Split('=')[1].Trim()
+          }
+          $stage = "stage/pgturbohybrid"
+          New-Item -ItemType Directory -Force "$stage/lib" | Out-Null
+          New-Item -ItemType Directory -Force "$stage/share/extension" | Out-Null
+          Copy-Item pgturbohybrid.dll "$stage/lib/"
+          Copy-Item pgturbohybrid.control "$stage/share/extension/"
+          Copy-Item sql/pgturbohybrid--*.sql "$stage/share/extension/"
+          Copy-Item README.md "$stage/"
+          $zip = "pgturbohybrid-$version-pg${{ matrix.postgres }}-windows-x64.zip"
+          Compress-Archive -Path "$stage/*" -DestinationPath $zip -Force
+          "ZIP=$zip" | Out-File -FilePath $env:GITHUB_ENV -Append
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: windows-pg${{ matrix.postgres }}-x64
+          path: ./*.zip
+          if-no-files-found: error
+
+      - name: Attach to GitHub release
+        if: github.ref_type == 'tag'
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh release upload "$GITHUB_REF_NAME" "$ZIP" --clobber

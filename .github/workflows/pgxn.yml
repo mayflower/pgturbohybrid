@@ -1,0 +1,47 @@
+name: pgxn
+
+on:
+  push:
+    tags:
+      - 'v*'
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  bundle:
+    name: bundle and release
+    runs-on: ubuntu-24.04
+    container: pgxn/pgxn-tools
+    env:
+      # Releasing to PGXN only happens when these manager.pgxn.org creds exist.
+      PGXN_USERNAME: ${{ secrets.PGXN_USERNAME }}
+      PGXN_PASSWORD: ${{ secrets.PGXN_PASSWORD }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Validate META.json and build the PGXN bundle
+        run: |
+          pgxn-bundle
+          ls -l ./*.zip
+
+      - name: Release to PGXN
+        if: github.ref_type == 'tag' && env.PGXN_USERNAME != ''
+        run: pgxn-release
+
+      - name: Upload bundle as a workflow artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: pgxn-bundle
+          path: ./*.zip
+          if-no-files-found: error
+
+      - name: Attach bundle to the GitHub release
+        if: github.ref_type == 'tag'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release upload "$GITHUB_REF_NAME" ./*.zip --clobber || \
+            gh release create "$GITHUB_REF_NAME" ./*.zip \
+              --title "$GITHUB_REF_NAME" --generate-notes --verify-tag

@@ -1,0 +1,23 @@
+# Keep the build context small and the build hermetic.
+.git
+.github
+.deps
+benchmarks/results
+benchmarks/output
+results
+dist
+tmp_check
+tmp_check_iso
+log
+*.o
+*.bc
+*.so
+*.dylib
+*.dll
+*.obj
+*.lib
+*.exp
+__pycache__
+*.pyc
+.DS_Store
+node_modules
