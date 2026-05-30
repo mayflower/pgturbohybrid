@@ -34,7 +34,7 @@ HEADERS =
 
 $(OBJS): src/*.h
 
-REGRESS = extension pgturbohybrid pgturbohybrid_query pgturbohybrid_querysplit pgturbohybrid_codebook pgturbohybrid_u8split security
+REGRESS = extension pgturbohybrid pgturbohybrid_query pgturbohybrid_querysplit pgturbohybrid_codebook pgturbohybrid_u8split pgturbohybrid_nibble_guard security
 REGRESS_OPTS = --inputdir=test
 
 SIMD_BUILD ?= portable

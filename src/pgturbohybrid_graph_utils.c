@@ -3538,6 +3538,8 @@ turbohybrid_scorer_distances(PG_FUNCTION_ARGS)
 	double		dU8Scalar;
 	bool		u8Used = false;
 	const char *u8Kernel = "none";
+	int			distinctNibbles = 0;
+	bool		nibbleSeen[16] = {false};
 	StringInfoData json;
 
 	PgturbohybridCheckVector(query);
@@ -3547,6 +3549,14 @@ turbohybrid_scorer_distances(PG_FUNCTION_ARGS)
 		ereport(ERROR,
 				(errcode(ERRCODE_DATA_EXCEPTION),
 				 errmsg("query and doc vectors must have equal dimension")));
+
+	/* Optional third argument selects the quantization bit width (2 or 4). */
+	if (PG_NARGS() >= 3 && !PG_ARGISNULL(2))
+		bits = PG_GETARG_INT32(2);
+	if (bits != PGTURBOHYBRID_DEFAULT_BITS && bits != 2)
+		ereport(ERROR,
+				(errcode(ERRCODE_DATA_EXCEPTION),
+				 errmsg("turbohybrid_scorer_distances: bits must be 2 or 4")));
 
 	/* Prepare a minimal inner-product query (no index, no EC correction). */
 	memset(&tq, 0, sizeof(tq));
@@ -3608,6 +3618,11 @@ turbohybrid_scorer_distances(PG_FUNCTION_ARGS)
 		int			vc = TqGetCodeComponentBits(code, i, bits);
 
 		dotRaw += (double) tq.queryValues[i] * (double) vc;
+		if (vc >= 0 && vc < 16 && !nibbleSeen[vc])
+		{
+			nibbleSeen[vc] = true;
+			distinctNibbles++;
+		}
 	}
 	dRaw = -((double) scale * dotRaw / dimSqrt);
 
@@ -3618,12 +3633,12 @@ turbohybrid_scorer_distances(PG_FUNCTION_ARGS)
 					 "\"linear_reference\":%.9g,\"split_kernel\":\"%s\","
 					 "\"unsigned_split_kernel\":\"%s\","
 					 "\"query_split_used\":%s,\"unsigned_split_used\":%s,"
-					 "\"dimensions\":%d,\"bits\":%d}",
+					 "\"distinct_nibbles\":%d,\"dimensions\":%d,\"bits\":%d}",
 					 dScalar, dSplit, dU8Scalar, dU8Simd, dRaw,
 					 PgturbohybridGraphTqScoringKernelName(tq.scoringKernel),
 					 u8Kernel,
 					 splitUsed ? "true" : "false", u8Used ? "true" : "false",
-					 dim, bits);
+					 distinctNibbles, dim, bits);
 
 	PG_RETURN_DATUM(DirectFunctionCall1(jsonb_in, CStringGetDatum(json.data)));
 }

@@ -173,6 +173,11 @@ CREATE FUNCTION turbohybrid_scorer_distances(vector, vector) RETURNS pg_catalog.
 	AS 'MODULE_PATHNAME', 'turbohybrid_scorer_distances'
 	LANGUAGE C STABLE STRICT PARALLEL SAFE;
 
+-- Same diagnostic at a chosen quantization bit width (2 or 4).
+CREATE FUNCTION turbohybrid_scorer_distances(vector, vector, integer) RETURNS pg_catalog.jsonb
+	AS 'MODULE_PATHNAME', 'turbohybrid_scorer_distances'
+	LANGUAGE C STABLE STRICT PARALLEL SAFE;
+
 COMMENT ON EXTENSION pgturbohybrid IS 'TurboHybrid dense vector and BM25 search extension for pgvector';
 COMMENT ON ACCESS METHOD turbohybrid IS 'TurboHybrid dense vector and BM25 hybrid index access method';
 COMMENT ON TYPE turbohybrid_query IS 'TurboHybrid query payload for dense vector and BM25 hybrid search';
