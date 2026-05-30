@@ -81,6 +81,7 @@ static bool pgturbohybrid_last_graph_exact_storage = false;
 static bool pgturbohybrid_last_graph_exact_storage_known = false;
 static bool pgturbohybrid_last_graph_query_split_active = false;
 static bool pgturbohybrid_last_graph_querysplit_used = false;
+static bool pgturbohybrid_last_graph_u8_split_used = false;
 static int64 pgturbohybrid_last_graph_dimensions = 0;
 static int64 pgturbohybrid_last_graph_returned_rows = 0;
 static int64 pgturbohybrid_last_graph_oversampling = 0;
@@ -306,8 +307,10 @@ PgturbohybridGraphRecordGraphScanStats(PgturbohybridGraphScanOpaque so)
 #if defined(__aarch64__) || defined(_M_ARM64) || \
 	defined(__x86_64__) || defined(_M_X64) || defined(__i386) || defined(_M_IX86)
 	pgturbohybrid_last_graph_query_split_active = so->tq.enabled && so->tq.querySplitEnabled;
+	pgturbohybrid_last_graph_u8_split_used = so->tq.enabled && so->tq.u8SplitEnabled;
 #else
 	pgturbohybrid_last_graph_query_split_active = false;
+	pgturbohybrid_last_graph_u8_split_used = false;
 #endif
 	/*
 	 * Whether the integer query-split scorer will actually run for this query
@@ -384,6 +387,7 @@ PgturbohybridGraphRecordNonGraphScanStats(void)
 	pgturbohybrid_last_graph_exact_storage_known = false;
 	pgturbohybrid_last_graph_query_split_active = false;
 	pgturbohybrid_last_graph_querysplit_used = false;
+	pgturbohybrid_last_graph_u8_split_used = false;
 	pgturbohybrid_last_graph_dimensions = 0;
 	pgturbohybrid_last_graph_returned_rows = 0;
 	pgturbohybrid_last_graph_oversampling = 0;
@@ -622,6 +626,8 @@ pgturbohybrid_last_scan_stats(PG_FUNCTION_ARGS)
 	 * signed_split_*); the authoritative answer to "did this scan use the LUT
 	 * gather or the integer query split?". */
 	PgturbohybridJsonbAddString(&state, "dense_scorer",
+								pgturbohybrid_last_graph_u8_split_used ?
+								PgturbohybridGraphU8SplitKernelName() :
 								PgturbohybridDenseScorerUsedName(
 									pgturbohybrid_last_graph_querysplit_used,
 									pgturbohybrid_last_graph_scoring_kernel,

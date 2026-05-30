@@ -38,6 +38,7 @@ BEGIN
 		'turbohybrid.dense_local_expansion',
 		'turbohybrid.dense_local_expansion_max_neighbors',
 		'turbohybrid.dense_local_expansion_topn',
+		'turbohybrid.dense_query_split_impl',
 		'turbohybrid.enable_wand',
 		'turbohybrid.max_union_candidates',
 		'turbohybrid.profile',

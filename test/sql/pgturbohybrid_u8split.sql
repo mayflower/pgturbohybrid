@@ -1,0 +1,152 @@
+-- Unsigned-codebook (u8) 4-bit query-split scorer: parity, codebook
+-- correctness, and default selection.
+--
+-- The u8 scorer feeds _mm256_maddubs_epi16 / _mm512_dpbusd_epi32 an unsigned
+-- codebook (the signed codebook shifted by +128, so the un-shifted values equal
+-- the centres the codes were encoded with) and signed 7-bit query halves, then
+-- removes the +128 bias.  It must:
+--   * agree with its own scalar reference bit-for-bit (integer-derived);
+--   * stay very close to the scalar/LUT reference (codebook-correct);
+--   * be far from a raw 0..15 nibble interpretation (adversarial control);
+--   * be selected by default on amd64 when the SIMD is available.
+CREATE EXTENSION IF NOT EXISTS vector;
+CREATE EXTENSION IF NOT EXISTS pgturbohybrid;
+
+SET enable_seqscan = off;
+SET jit = off;
+
+-- (1) Per-kernel parity on deliberately non-linear 1536-dim pairs.
+CREATE OR REPLACE FUNCTION u8_check(p_label text) RETURNS void
+LANGUAGE plpgsql AS $$
+DECLARE
+    q vector;
+    d vector;
+    r jsonb;
+    lut float8;
+    sgn float8;
+    u8s float8;
+    u8v float8;
+    lin float8;
+    i int;
+BEGIN
+    FOR i IN 1..6 LOOP
+        q := (SELECT array_agg(sin(i * 0.7 + g * 0.013))::real[]::vector
+              FROM generate_series(1, 1536) g);
+        d := (SELECT array_agg(cos(i * 1.1 + g * 0.017))::real[]::vector
+              FROM generate_series(1, 1536) g);
+        r := turbohybrid_scorer_distances(q, d);
+        lut := (r ->> 'scalar_lut')::float8;
+        sgn := (r ->> 'signed_split')::float8;
+        u8s := (r ->> 'unsigned_split_scalar')::float8;
+        u8v := (r ->> 'unsigned_split_simd')::float8;
+        lin := (r ->> 'linear_reference')::float8;
+
+        -- u8 SIMD must equal its scalar reference exactly (integer derived).
+        IF (r ->> 'unsigned_split_simd') <> (r ->> 'unsigned_split_scalar') THEN
+            RAISE EXCEPTION '%: pair % u8 simd=% != u8 scalar=% (kernel %)',
+                p_label, i, u8v, u8s, r ->> 'unsigned_split_kernel';
+        END IF;
+
+        -- u8 must reproduce the scalar/LUT codebook distance within the
+        -- query-quantization tolerance (7-bit halves -> ~few %).
+        IF abs(u8v - lut) / (abs(lut) + abs(u8v) + 0.01) > 0.05 THEN
+            RAISE EXCEPTION '%: pair % unsigned_split=% diverges from scalar_lut=%',
+                p_label, i, u8v, lut;
+        END IF;
+        -- signed split likewise (sanity that both representations track LUT).
+        IF abs(sgn - lut) / (abs(sgn) + abs(lut) + 0.01) > 0.05 THEN
+            RAISE EXCEPTION '%: pair % signed_split=% diverges from scalar_lut=%',
+                p_label, i, sgn, lut;
+        END IF;
+
+        -- Adversarial: a raw 0..15 nibble interpretation must be grossly wrong,
+        -- and u8 must be much closer to the LUT reference than raw nibbles are.
+        IF abs(lin - lut) < 0.5 * (abs(lut) + 1.0) THEN
+            RAISE EXCEPTION '%: pair % linear_reference=% too close to scalar_lut=% (no adversarial signal)',
+                p_label, i, lin, lut;
+        END IF;
+        IF abs(u8v - lut) >= abs(lin - lut) THEN
+            RAISE EXCEPTION '%: pair % u8 (%) not closer to scalar_lut (%) than raw nibble (%)',
+                p_label, i, u8v, lut, lin;
+        END IF;
+    END LOOP;
+END;
+$$;
+
+-- Best available u8 kernel (AVX-512 VNNI on capable amd64).
+SET turbohybrid.dense_graph_avx512vnni = on;
+SET turbohybrid.dense_graph_avxvnni = on;
+SELECT u8_check('u8_auto');
+
+-- Force the AVX2 maddubs u8 kernel (disable AVX-512 VNNI).
+SET turbohybrid.dense_graph_avx512vnni = off;
+SELECT u8_check('u8_avx2');
+
+RESET turbohybrid.dense_graph_avx512vnni;
+RESET turbohybrid.dense_graph_avxvnni;
+
+-- (2) Selection: a real 1536-dim 4-bit dense scan must use the u8 scorer by
+-- default on amd64 (never the LUT gather), and honor the impl GUC.
+DROP TABLE IF EXISTS u8_docs;
+CREATE TABLE u8_docs (id int PRIMARY KEY, embedding vector(1536), body_tsv tsvector);
+INSERT INTO u8_docs(id, embedding, body_tsv)
+SELECT i,
+       (SELECT array_agg(sin(i * 0.29 + g * 0.011))::real[]::vector FROM generate_series(1, 1536) g),
+       to_tsvector('english', 'document ' || i)
+FROM generate_series(1, 200) AS i;
+CREATE INDEX u8_idx ON u8_docs
+    USING turbohybrid (embedding vector_cosine_turbohybrid_ops, body_tsv bm25_tsvector_turbohybrid_ops)
+    WITH (quantization_bits = 4);
+ANALYZE u8_docs;
+
+DO $$
+DECLARE
+    qv vector;
+    scorer text;
+    scalar_codes int;
+    simd_avail bool;
+BEGIN
+    qv := (SELECT array_agg(cos(g * 0.017))::real[]::vector FROM generate_series(1, 1536) g);
+    -- Does an unsigned-codebook SIMD kernel actually run on this build/CPU?
+    simd_avail := (turbohybrid_scorer_distances(qv, qv) ->> 'unsigned_split_used')::bool;
+
+    -- Default (auto): u8 selected when available; never the scalar/LUT gather.
+    SET turbohybrid.dense_query_split_impl = auto;
+    PERFORM id FROM u8_docs ORDER BY embedding <~> turbohybrid_query(vector_query => qv) LIMIT 10;
+    scorer := turbohybrid_last_scan_stats() ->> 'dense_scorer';
+    scalar_codes := (turbohybrid_last_scan_stats() ->> 'graph_scalar_scored_codes')::int;
+    IF simd_avail THEN
+        IF scorer NOT LIKE 'unsigned_split_%' THEN
+            RAISE EXCEPTION 'auto: 1536-dim 4-bit scan used % (expected unsigned_split_*)', scorer;
+        END IF;
+        IF scalar_codes <> 0 THEN
+            RAISE EXCEPTION 'auto: % codes used the scalar/LUT gather', scalar_codes;
+        END IF;
+    END IF;
+
+    -- Forced signed fallback.
+    SET turbohybrid.dense_query_split_impl = signed;
+    PERFORM id FROM u8_docs ORDER BY embedding <~> turbohybrid_query(vector_query => qv) LIMIT 10;
+    scorer := turbohybrid_last_scan_stats() ->> 'dense_scorer';
+    IF simd_avail AND scorer NOT LIKE 'signed_split_%' THEN
+        RAISE EXCEPTION 'signed: scan used % (expected signed_split_*)', scorer;
+    END IF;
+
+    -- Forced unsigned.
+    SET turbohybrid.dense_query_split_impl = unsigned;
+    PERFORM id FROM u8_docs ORDER BY embedding <~> turbohybrid_query(vector_query => qv) LIMIT 10;
+    scorer := turbohybrid_last_scan_stats() ->> 'dense_scorer';
+    IF simd_avail AND scorer NOT LIKE 'unsigned_split_%' THEN
+        RAISE EXCEPTION 'unsigned: scan used % (expected unsigned_split_*)', scorer;
+    END IF;
+    RESET turbohybrid.dense_query_split_impl;
+END;
+$$;
+
+SELECT 'u8 split parity ok' AS result;
+
+DROP FUNCTION u8_check(text);
+DROP INDEX u8_idx;
+DROP TABLE u8_docs;
+RESET enable_seqscan;
+RESET jit;
