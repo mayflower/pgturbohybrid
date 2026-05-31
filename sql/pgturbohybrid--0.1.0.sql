@@ -161,6 +161,104 @@ CREATE FUNCTION turbohybrid_last_scan_stats() RETURNS pg_catalog.jsonb
 	AS 'MODULE_PATHNAME', 'pgturbohybrid_last_scan_stats'
 	LANGUAGE C PARALLEL RESTRICTED;
 
+-- Compact bottleneck diagnosis for the last TurboHybrid scan.  Pulls the key
+-- dense hot-path fields out of turbohybrid_last_scan_stats(), adds a few derived
+-- ratios, and reduces them to a single 'diagnosis' label, so one SELECT explains
+-- a slow query without parsing the full stats JSON.  Strictly read-only: it only
+-- reads the stats the previous scan already recorded and never alters scan
+-- execution (hence VOLATILE / PARALLEL RESTRICTED, matching the underlying
+-- backend-local scan state).
+--
+-- Timer note: graph_traverse_us is the umbrella phase that already contains
+-- graph_base_us, and base contains graph_batch_us and graph_heap_us.  The
+-- traversal-overhead test therefore compares the useful SIMD scoring time
+-- (graph_batch_us) against the rest of the traverse (graph_traverse_us minus
+-- graph_batch_us); summing the nested timers would double-count batch scoring.
+-- graph_base_us has no flat stats key, so it is read from the nested
+-- dense.timing_us.base section.
+CREATE FUNCTION turbohybrid_last_scan_diagnosis() RETURNS pg_catalog.jsonb
+	LANGUAGE plpgsql PARALLEL RESTRICTED AS $turbohybrid_diag$
+DECLARE
+	s             jsonb := turbohybrid_last_scan_stats();
+	orchestration text   := s ->> 'scan_orchestration';
+	u8_mode       text   := s ->> 'graph_u8_batch_mode';
+	scored        bigint := COALESCE((s ->> 'graph_scored_codes')::bigint, 0);
+	scalar_codes  bigint := COALESCE((s ->> 'graph_scalar_scored_codes')::bigint, 0);
+	visited       bigint := COALESCE((s ->> 'graph_visited_nodes')::bigint, 0);
+	batch_us      bigint := COALESCE((s ->> 'graph_batch_us')::bigint, 0);
+	heap_us       bigint := COALESCE((s ->> 'graph_heap_us')::bigint, 0);
+	base_us       bigint := COALESCE((s -> 'dense' -> 'timing_us' ->> 'base')::bigint, 0);
+	traverse_us   bigint := COALESCE((s ->> 'graph_traverse_us')::bigint, 0);
+	rescore_us    bigint := COALESCE((s ->> 'graph_rescore_us')::bigint, 0);
+	ef            bigint := COALESCE((s ->> 'graph_effective_search_ef')::bigint, 0);
+	result_target bigint := COALESCE((s ->> 'graph_effective_result_target')::bigint, 0);
+	large_arena   boolean := COALESCE((s ->> 'graph_large_code_arena')::boolean, false);
+	hit_rate      float8 := COALESCE((s -> 'graph_code_pages' ->> 'hit_rate')::float8, 0);
+	target_floor  bigint := GREATEST(result_target, 1);
+	batch_per_code   float8 := CASE WHEN scored  > 0 THEN batch_us::float8 / scored  ELSE 0 END;
+	heap_per_visited float8 := CASE WHEN visited > 0 THEN heap_us::float8  / visited ELSE 0 END;
+	overhead_us   bigint := GREATEST(traverse_us - batch_us, 0);  -- traverse work that is not SIMD scoring
+	diagnosis     text;
+BEGIN
+	-- Priority-ordered single label: configuration red flags first, then the
+	-- dominant time component, then the healthy/expected case.
+	IF orchestration IS DISTINCT FROM 'graph_native' OR (scored = 0 AND traverse_us = 0) THEN
+		diagnosis := 'no_native_dense_scan';
+	ELSIF scalar_codes > 0 AND scalar_codes * 10 >= scored THEN
+		-- >=10% of scored codes took the scalar/LUT path: the SIMD scorer did not engage.
+		diagnosis := 'scalar_lut_fallback';
+	ELSIF u8_mode = 'single' THEN
+		-- u8 batch path ran but not as x4 (dense_u8_batch_x4 off, or x4 unavailable).
+		diagnosis := 'u8_x4_disabled';
+	ELSIF rescore_us > 0 AND rescore_us > batch_us AND rescore_us > overhead_us THEN
+		-- exact f32 rescore is the largest of {batch scoring, traversal, rescore}.
+		diagnosis := 'rescore_dominated';
+	ELSIF large_arena AND batch_per_code > 0.5 THEN
+		-- code working set exceeds CPU cache and per-code scoring is slow: RAM-bound.
+		diagnosis := 'memory_bound';
+	ELSIF overhead_us::float8 > batch_us * 1.5 AND traverse_us > 0 THEN
+		-- graph walk / heap / frontier bookkeeping clearly outweighs SIMD scoring.
+		diagnosis := 'traversal_dominated';
+	ELSIF (ef > 16 * target_floor AND ef > 256)
+		  OR (scored > 64 * target_floor AND scored > 4096) THEN
+		-- candidate budget far exceeds the requested result target.
+		diagnosis := 'candidate_budget_high';
+	ELSIF u8_mode = 'x4' THEN
+		-- u8 x4 batch active and SIMD scoring dominates within the expected range.
+		diagnosis := 'healthy_u8_x4';
+	ELSE
+		diagnosis := 'ok';
+	END IF;
+
+	RETURN jsonb_build_object(
+		'scan_orchestration', orchestration,
+		'graph_storage_kind', s ->> 'graph_storage_kind',
+		'dimensions', s -> 'dimensions',
+		'quantization_bits', s -> 'quantization_bits',
+		'score_mode', s ->> 'score_mode',
+		'dense_scorer', s ->> 'dense_scorer',
+		'graph_u8_batch_mode', u8_mode,
+		'u8_kernel_batch', s ->> 'u8_kernel_batch',
+		'dense_u8_batch_x4_enabled', s -> 'dense_u8_batch_x4_enabled',
+		'graph_large_code_arena', s -> 'graph_large_code_arena',
+		'graph_whole_code_prefetch_active', s -> 'graph_whole_code_prefetch_active',
+		'graph_scored_codes', scored,
+		'graph_batch_us', batch_us,
+		'graph_heap_us', heap_us,
+		'graph_base_us', base_us,
+		'graph_traverse_us', traverse_us,
+		'graph_rescore_us', rescore_us,
+		'graph_effective_search_ef', ef,
+		'graph_effective_result_target', result_target,
+		'graph_effective_rescore_band', s -> 'graph_effective_rescore_band',
+		'code_page_hit_rate', round(hit_rate::numeric, 4),
+		'batch_us_per_code', round(batch_per_code::numeric, 4),
+		'heap_us_per_visited_node', round(heap_per_visited::numeric, 4),
+		'diagnosis', diagnosis
+	);
+END;
+$turbohybrid_diag$;
+
 CREATE FUNCTION turbohybrid_simd_capabilities() RETURNS pg_catalog.jsonb
 	AS 'MODULE_PATHNAME', 'pgturbohybrid_simd_capabilities'
 	LANGUAGE C STABLE PARALLEL SAFE;
@@ -221,6 +319,7 @@ COMMENT ON FUNCTION turbohybrid_vector_norm(vector) IS 'Vector norm support func
 COMMENT ON FUNCTION turbohybrid_handler(pg_catalog.internal) IS 'Index access method handler for TurboHybrid';
 COMMENT ON FUNCTION turbohybrid_index_stats(pg_catalog.regclass) IS 'Return stable TurboHybrid index metadata as jsonb';
 COMMENT ON FUNCTION turbohybrid_last_scan_stats() IS 'Return backend-local summary information for the last TurboHybrid scan as jsonb; parallel restricted because it reads mutable scan state';
+COMMENT ON FUNCTION turbohybrid_last_scan_diagnosis() IS 'Return a compact bottleneck diagnosis of the last TurboHybrid scan as jsonb: key dense hot-path fields, derived ratios, and a single diagnosis label; read-only over turbohybrid_last_scan_stats()';
 COMMENT ON FUNCTION turbohybrid_simd_capabilities() IS 'Return pgturbohybrid build and architecture SIMD capability information as jsonb';
 
 COMMENT ON OPERATOR <~-> (vector, turbohybrid_query) IS 'L2 distance operator for TurboHybrid vector queries';

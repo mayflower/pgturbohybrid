@@ -112,48 +112,74 @@ pgvector.
 All GUCs must use the `turbohybrid.*` prefix. The extension must not create
 `pgturbohybrid.*`, `hybrid.*`, or `hnsw.tq_*` GUCs.
 
-The current alpha exposes these user-facing GUCs:
+The current alpha groups its `turbohybrid.*` GUCs by how safe each is to tune in
+production. Every GUC keeps the same name across categories; the
+developer/benchmark knobs additionally carry a `(developer/benchmark)` tag in
+their `pg_settings` description, so the category is visible from `SHOW` /
+`pg_settings` as well as here.
+
+### Stable public
+
+Stable names and semantics -- this is the supported tuning surface. The
+`latency` / `balanced` / `quality` profiles set sensible defaults for these, so
+override only for a specific need.
 
 - `turbohybrid.profile`: retrieval profile. Current values are `latency`,
   `balanced`, `quality`, and `debug`; the default profile is `latency`.
-- `turbohybrid.default_dense_k`
-- `turbohybrid.default_bm25_k`
-- `turbohybrid.default_rrf_k`
-- `turbohybrid.enable_wand`
-- `turbohybrid.bm25_strategy`
-- `turbohybrid.bm25_impact_or_mode`
-- `turbohybrid.bm25_hot_postings_cache_mb`
-- `turbohybrid.bm25_hot_postings_cache_min_df`
-- `turbohybrid.bm25_hybrid_bound`
-- `turbohybrid.bm25_accumulator_mode`
-- `turbohybrid.max_union_candidates`
-- `turbohybrid.simd`
+- `turbohybrid.default_dense_k`, `turbohybrid.default_bm25_k`,
+  `turbohybrid.default_rrf_k`: default dense/BM25 candidate budgets and the RRF
+  fusion constant for `turbohybrid_query` callers.
+- `turbohybrid.max_union_candidates`: cap on candidates retained while fusing the
+  dense and BM25 branches.
+- `turbohybrid.enable_wand`: WAND pruning for BM25 candidate generation.
+- `turbohybrid.simd`: master switch for SIMD kernels; turn off for the portable
+  scalar fallback (troubleshooting, or a non-SIMD baseline).
+- `turbohybrid.native_cache_max_mb`: per-backend in-memory native scan cache cap
+  (default 512 MB); indexes whose working set fits are fully resident, so warm
+  scans read zero code pages. This is a per-backend allocation -- size it to host
+  RAM and connection count.
+- `turbohybrid.bm25_strategy`, `turbohybrid.bm25_impact_or_mode`,
+  `turbohybrid.bm25_hybrid_bound`, `turbohybrid.bm25_accumulator_mode`: BM25
+  candidate-generation strategy and bound/accumulator modes. `auto` is robust;
+  the profiles set these.
+- `turbohybrid.bm25_hot_postings_cache_mb`,
+  `turbohybrid.bm25_hot_postings_cache_min_df`: hot-postings cache size and the
+  minimum document frequency for a cached entry.
 
-The DBPedia dense-quality work also exposes experimental diagnostics. These
-diagnostics remain off by default in the public `latency` profile so the package
-default stays compact and predictable. Enable them explicitly for controlled
-benchmark runs:
+### Experimental public
 
-- `turbohybrid.dense_build_exact_distances`: use exact vector distances while
-  building dense graph edges, while still allowing `exact_storage = off`.
-- `turbohybrid.dense_adaptive_widening`: `off`, `auto`, or `on`; defaults to
-  `off` and controls one bounded second graph-search pass for ambiguous
-  dense-only scans when explicitly enabled.
-- `turbohybrid.dense_adaptive_widening_multiplier`
-- `turbohybrid.dense_adaptive_widening_max_multiplier`
-- `turbohybrid.dense_adaptive_min_gap`
-- `turbohybrid.dense_local_expansion`: `off`, `auto`, or `on`; controls bounded
-  one-hop scoring from top approximate dense candidates.
-- `turbohybrid.dense_local_expansion_topn`
-- `turbohybrid.dense_local_expansion_max_neighbors`
+Real query-time behavior controls that are `off` or `auto` by default and change
+recall/latency. Their names and semantics may still change, so they are not part
+of the stable surface; enable them after measuring on your data. They stay off
+in the public `latency` profile so the package default stays compact and
+predictable.
 
-The native dense-scoring hot path also exposes SIMD-tier, scoring-kernel,
-rescore, and cache diagnostics. These pick the same results by default; they
-exist to force a specific kernel for parity testing or to measure tiers:
+- `turbohybrid.dense_rescore_band`: exact f32 rescore policy (`auto`, `off`,
+  `exact`, `limited`); the latency profile resolves to exact-free for 4-bit
+  code-only indexes.
+- `turbohybrid.dense_adaptive_widening` (`off` / `auto` / `on`, default `off`):
+  controls one bounded second graph-search pass for ambiguous dense-only scans,
+  tuned by `turbohybrid.dense_adaptive_widening_multiplier`,
+  `turbohybrid.dense_adaptive_widening_max_multiplier`, and
+  `turbohybrid.dense_adaptive_min_gap`.
+- `turbohybrid.dense_local_expansion` (`off` / `auto` / `on`, default `off`):
+  bounded one-hop scoring from the top approximate dense candidates, tuned by
+  `turbohybrid.dense_local_expansion_topn` and
+  `turbohybrid.dense_local_expansion_max_neighbors`.
 
-- `turbohybrid.dense_graph_avx512vnni`, `turbohybrid.dense_graph_avxvnni`:
-  allow the AVX-512 VNNI / AVX-VNNI dense scorers (default on where the CPU
-  supports them; turn off to force a lower SIMD tier).
+### Developer / benchmark
+
+These force a specific SIMD tier or scoring-kernel implementation, or change
+build-time graph construction, so kernels can be compared for parity and
+benchmarking. The defaults already auto-select the best path for the host;
+setting these does not improve production performance, and they are tagged
+`(developer/benchmark)` in `pg_settings`. They pick identical results by default
+-- only the kernel that produces them changes. See
+[Benchmarking dense kernels](../benchmarks/README.md#benchmarking-dense-kernels).
+
+- `turbohybrid.dense_graph_avx512vnni`, `turbohybrid.dense_graph_avxvnni`: allow
+  the AVX-512 VNNI / AVX-VNNI dense scorers (default `on` where the CPU supports
+  them; turn off to force a lower SIMD tier for parity testing).
 - `turbohybrid.dense_query_split_impl`: `signed`, `unsigned`, or `auto` 4-bit
   query-split representation (`auto` picks the unsigned-codebook maddubs/VPDPBUSD
   split on capable x86).
@@ -167,12 +193,10 @@ exist to force a specific kernel for parity testing or to measure tiers:
   default). `turbohybrid_last_scan_stats()` reports which path a scan actually
   took as `graph_u8_batch_mode` (`x4`, `single`, or `none`), with
   `dense_u8_batch_x4_enabled` echoing the knob.
-- `turbohybrid.dense_rescore_band`: exact f32 rescore policy (`auto`, `off`,
-  `exact`, `limited`); the latency profile resolves to exact-free for 4-bit
-  code-only indexes.
-- `turbohybrid.native_cache_max_mb`: per-backend in-memory native scan cache
-  cap (default 512 MB); indexes whose working set fits are fully resident so
-  warm scans read zero code pages.
+- `turbohybrid.dense_build_exact_distances`: use exact f32 vector distances while
+  building dense graph edges, while still allowing `exact_storage = off`. Can
+  improve graph topology for experiments without storing exact vectors at scan
+  time.
 
 The batch scorer adapts its prefetch to index size automatically (no GUC). Once
 the estimated code working set (`tqNodeCount * codeBytes`) exceeds 64 MB -- large
@@ -182,9 +206,17 @@ the full-code latency; below that threshold it touches only the first line, sinc
 the codes are already hot. `turbohybrid_last_scan_stats()` surfaces this as
 `graph_large_code_arena` (was the arena over the threshold),
 `graph_whole_code_prefetch_active` (whole-code prefetch actually ran, i.e. the
-arena was large and `turbohybrid.dense_graph_prefetch` was on), `graph_code_bytes`
+arena was large; prefetch is always enabled, with no GUC), `graph_code_bytes`
 (per-code width), and `graph_code_arena_estimated_bytes` (the working-set
 estimate used for the decision).
+
+Alongside the flat keys, `turbohybrid_last_scan_stats()` also emits a grouped
+view of the same numbers under nested sections so bottleneck diagnosis reads
+top-down: `dense` (with `dense.kernels`, `dense.cache`, `dense.traversal`, and
+`dense.timing_us` sub-objects), `bm25`, `fusion`, and `query`. The hot-path flags
+above appear inside `dense.kernels` / `dense.cache`; the nested values are built
+from a single consolidated struct, so they always agree with their flat
+counterparts. The flat keys remain for backwards compatibility.
 
 Candidate-budget and cache GUCs have conservative public caps in this alpha:
 `default_dense_k` and `default_bm25_k` are capped at 10,000, `default_rrf_k` at

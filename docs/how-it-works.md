@@ -76,6 +76,7 @@ It adds the TurboHybrid feature surface:
   - `bm25_tsvector_turbohybrid_ops`
 - diagnostics:
   - `turbohybrid_last_scan_stats()`
+  - `turbohybrid_last_scan_diagnosis()`
   - `turbohybrid_index_stats(regclass)`
   - `turbohybrid_simd_capabilities()`
 

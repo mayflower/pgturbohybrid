@@ -464,6 +464,217 @@ BEGIN
     RESET turbohybrid.dense_query_split_impl;
 END $$;
 
+-- ----------------------------------------------------------------------------
+-- Part 5: the consolidated nested last-scan stats view.  turbohybrid_last_scan_stats()
+-- now emits grouped sections -- dense{kernels,cache,traversal,timing_us}, bm25,
+-- fusion, query -- alongside the legacy flat keys, all built from one struct.  A
+-- native dense scan must populate every section, and the hot-path flags inside
+-- the nested view must agree value-for-value with their flat counterparts, so a
+-- newly added scan-opaque flag cannot drift out of the structured diagnostics.
+-- ----------------------------------------------------------------------------
+DO $$
+DECLARE
+    qv vector;
+    s jsonb;
+    d jsonb;
+    k jsonb;
+    c jsonb;
+BEGIN
+    qv := (SELECT array_agg(cos(g * 0.017))::real[]::vector FROM generate_series(1, 1536) g);
+    SET turbohybrid.dense_u8_split = auto;
+    SET turbohybrid.dense_query_split_impl = auto;
+    SET turbohybrid.dense_u8_batch_x4 = on;
+
+    PERFORM id FROM x4s_docs1536
+        ORDER BY embedding <~> turbohybrid_query(vector_query => qv) LIMIT 10;
+    s := turbohybrid_last_scan_stats();
+
+    IF (s ->> 'scan_orchestration') <> 'graph_native' THEN
+        RAISE EXCEPTION 'expected native graph scan, got %', s ->> 'scan_orchestration';
+    END IF;
+
+    -- The four nested sections exist and are objects.
+    IF jsonb_typeof(s -> 'dense') <> 'object' THEN RAISE EXCEPTION 'missing dense section: %', s -> 'dense'; END IF;
+    IF jsonb_typeof(s -> 'bm25') <> 'object' THEN RAISE EXCEPTION 'missing bm25 section'; END IF;
+    IF jsonb_typeof(s -> 'fusion') <> 'object' THEN RAISE EXCEPTION 'missing fusion section'; END IF;
+    IF jsonb_typeof(s -> 'query') <> 'object' THEN RAISE EXCEPTION 'missing query section'; END IF;
+
+    d := s -> 'dense';
+    IF jsonb_typeof(d -> 'kernels') <> 'object' THEN RAISE EXCEPTION 'missing dense.kernels'; END IF;
+    IF jsonb_typeof(d -> 'cache') <> 'object' THEN RAISE EXCEPTION 'missing dense.cache'; END IF;
+    IF jsonb_typeof(d -> 'traversal') <> 'object' THEN RAISE EXCEPTION 'missing dense.traversal'; END IF;
+    IF jsonb_typeof(d -> 'timing_us') <> 'object' THEN RAISE EXCEPTION 'missing dense.timing_us'; END IF;
+
+    k := d -> 'kernels';
+    c := d -> 'cache';
+
+    -- The Prompt-1 / resolve-once hot-path flags live inside the nested view and
+    -- must equal their flat counterparts (single source of truth).
+    IF (k ->> 'u8_batch_x4_enabled') IS DISTINCT FROM (s ->> 'dense_u8_batch_x4_enabled') THEN
+        RAISE EXCEPTION 'nested u8_batch_x4_enabled=% != flat=%',
+            k ->> 'u8_batch_x4_enabled', s ->> 'dense_u8_batch_x4_enabled';
+    END IF;
+    IF (k ->> 'u8_batch_mode') IS DISTINCT FROM (s ->> 'graph_u8_batch_mode') THEN
+        RAISE EXCEPTION 'nested u8_batch_mode=% != flat=%',
+            k ->> 'u8_batch_mode', s ->> 'graph_u8_batch_mode';
+    END IF;
+    IF (k ->> 'u8_kernel_single') IS DISTINCT FROM (s ->> 'u8_kernel_single')
+       OR (k ->> 'u8_kernel_batch') IS DISTINCT FROM (s ->> 'u8_kernel_batch') THEN
+        RAISE EXCEPTION 'nested u8 kernels diverge from flat (single %/%, batch %/%)',
+            k ->> 'u8_kernel_single', s ->> 'u8_kernel_single',
+            k ->> 'u8_kernel_batch', s ->> 'u8_kernel_batch';
+    END IF;
+    IF (k ->> 'scoring_kernel') IS DISTINCT FROM (s ->> 'dense_scoring_kernel')
+       OR (d ->> 'dense_scorer') IS DISTINCT FROM (s ->> 'dense_scorer') THEN
+        RAISE EXCEPTION 'nested dense kernel names diverge from flat keys';
+    END IF;
+    IF (c ->> 'code_bytes') IS DISTINCT FROM (s ->> 'graph_code_bytes')
+       OR (c ->> 'code_arena_estimated_bytes') IS DISTINCT FROM (s ->> 'graph_code_arena_estimated_bytes')
+       OR (c ->> 'large_code_arena') IS DISTINCT FROM (s ->> 'graph_large_code_arena')
+       OR (c ->> 'whole_code_prefetch_active') IS DISTINCT FROM (s ->> 'graph_whole_code_prefetch_active') THEN
+        RAISE EXCEPTION 'nested dense.cache hot-path flags diverge from flat keys';
+    END IF;
+
+    -- A real native scan populates the timing/traversal sections.
+    IF (d -> 'timing_us' ->> 'total') IS NULL THEN RAISE EXCEPTION 'dense.timing_us.total missing'; END IF;
+    IF (d -> 'traversal' ->> 'scored_codes')::bigint <= 0 THEN
+        RAISE EXCEPTION 'dense.traversal.scored_codes=% (expected > 0 on a native scan)',
+            d -> 'traversal' ->> 'scored_codes';
+    END IF;
+
+    -- query / bm25 / fusion carry their headline fields, consistent with flat.
+    IF (s -> 'query' ->> 'dimensions') IS DISTINCT FROM (s ->> 'dimensions') THEN
+        RAISE EXCEPTION 'query.dimensions=% != flat dimensions=%',
+            s -> 'query' ->> 'dimensions', s ->> 'dimensions';
+    END IF;
+    IF (s -> 'bm25' ->> 'strategy') IS DISTINCT FROM (s ->> 'bm25_strategy') THEN
+        RAISE EXCEPTION 'bm25.strategy != flat bm25_strategy';
+    END IF;
+    IF (s -> 'fusion' ->> 'elapsed_us') IS DISTINCT FROM (s ->> 'fusion_elapsed_us') THEN
+        RAISE EXCEPTION 'fusion.elapsed_us != flat fusion_elapsed_us';
+    END IF;
+
+    RESET turbohybrid.dense_u8_batch_x4;
+    RESET turbohybrid.dense_query_split_impl;
+    RESET turbohybrid.dense_u8_split;
+END $$;
+
+-- ----------------------------------------------------------------------------
+-- Part 6: turbohybrid_last_scan_diagnosis() summarizes the last scan into the
+-- documented field set plus a single bottleneck label.  It is read-only over
+-- turbohybrid_last_scan_stats() (this asserts its fields agree with the stats),
+-- and it labels the two deterministic misconfigurations -- u8 x4 off and SIMD
+-- off -- exactly, on any host where the u8 kernel runs.
+-- ----------------------------------------------------------------------------
+DO $$
+DECLARE
+    qv vector;
+    simd_avail bool;
+    s jsonb;
+    d jsonb;
+    expect_keys text[] := ARRAY[
+        'scan_orchestration','graph_storage_kind','dimensions','quantization_bits',
+        'score_mode','dense_scorer','graph_u8_batch_mode','u8_kernel_batch',
+        'dense_u8_batch_x4_enabled','graph_large_code_arena','graph_whole_code_prefetch_active',
+        'graph_scored_codes','graph_batch_us','graph_heap_us','graph_base_us',
+        'graph_traverse_us','graph_rescore_us','graph_effective_search_ef',
+        'graph_effective_result_target','graph_effective_rescore_band',
+        'code_page_hit_rate','batch_us_per_code','heap_us_per_visited_node','diagnosis'];
+    kk text;
+BEGIN
+    qv := (SELECT array_agg(cos(g * 0.017))::real[]::vector FROM generate_series(1, 1536) g);
+    simd_avail := (turbohybrid_scorer_distances(qv, qv) ->> 'unsigned_split_used')::bool;
+    SET turbohybrid.dense_u8_split = auto;
+    SET turbohybrid.dense_query_split_impl = auto;
+
+    -- (a) Healthy native x4 scan: every documented field present and consistent.
+    SET turbohybrid.dense_u8_batch_x4 = on;
+    PERFORM id FROM x4s_docs1536
+        ORDER BY embedding <~> turbohybrid_query(vector_query => qv) LIMIT 10;
+    s := turbohybrid_last_scan_stats();
+    d := turbohybrid_last_scan_diagnosis();
+
+    FOREACH kk IN ARRAY expect_keys LOOP
+        IF NOT (d ? kk) THEN
+            RAISE EXCEPTION 'diagnosis missing key %: %', kk, d;
+        END IF;
+    END LOOP;
+
+    -- Passthrough fields agree with the underlying stats (single source of
+    -- truth).  graph_base_us has no flat key, so it comes from dense.timing_us.
+    IF (d ->> 'scan_orchestration') <> 'graph_native' THEN
+        RAISE EXCEPTION 'diagnosis orchestration=% (expected graph_native)', d ->> 'scan_orchestration';
+    END IF;
+    IF (d ->> 'dense_scorer') IS DISTINCT FROM (s ->> 'dense_scorer')
+       OR (d ->> 'graph_u8_batch_mode') IS DISTINCT FROM (s ->> 'graph_u8_batch_mode')
+       OR (d ->> 'u8_kernel_batch') IS DISTINCT FROM (s ->> 'u8_kernel_batch')
+       OR (d ->> 'graph_scored_codes') IS DISTINCT FROM (s ->> 'graph_scored_codes')
+       OR (d ->> 'graph_batch_us') IS DISTINCT FROM (s ->> 'graph_batch_us')
+       OR (d ->> 'graph_traverse_us') IS DISTINCT FROM (s ->> 'graph_traverse_us')
+       OR (d ->> 'graph_base_us') IS DISTINCT FROM (s -> 'dense' -> 'timing_us' ->> 'base') THEN
+        RAISE EXCEPTION 'diagnosis passthrough fields diverge from stats: % vs %', d, s;
+    END IF;
+
+    -- Derived ratios match their inputs (to 4 decimals; tolerance absorbs the
+    -- float-vs-numeric rounding nuance).
+    IF (s ->> 'graph_scored_codes')::bigint > 0 AND
+       abs((d ->> 'batch_us_per_code')::float8
+           - (s ->> 'graph_batch_us')::float8 / (s ->> 'graph_scored_codes')::float8) > 0.001 THEN
+        RAISE EXCEPTION 'batch_us_per_code=% wrong (batch=% scored=%)',
+            d ->> 'batch_us_per_code', s ->> 'graph_batch_us', s ->> 'graph_scored_codes';
+    END IF;
+    IF (s ->> 'graph_visited_nodes')::bigint > 0 AND
+       abs((d ->> 'heap_us_per_visited_node')::float8
+           - (s ->> 'graph_heap_us')::float8 / (s ->> 'graph_visited_nodes')::float8) > 0.001 THEN
+        RAISE EXCEPTION 'heap_us_per_visited_node wrong';
+    END IF;
+
+    -- On a SIMD host this is u8 x4; timing decides healthy vs (on this tiny
+    -- index where bookkeeping can outweigh scoring) traversal_dominated.  Either
+    -- is a valid, non-misconfiguration label.
+    IF simd_avail THEN
+        IF (d ->> 'graph_u8_batch_mode') <> 'x4' THEN
+            RAISE EXCEPTION 'expected x4 batch mode, got %', d ->> 'graph_u8_batch_mode';
+        END IF;
+        IF (d ->> 'diagnosis') NOT IN ('healthy_u8_x4', 'traversal_dominated') THEN
+            RAISE EXCEPTION 'unexpected x4 diagnosis: %', d ->> 'diagnosis';
+        END IF;
+    END IF;
+    IF (d ->> 'diagnosis') = 'no_native_dense_scan' THEN
+        RAISE EXCEPTION 'native scan misclassified as no_native_dense_scan: %', d;
+    END IF;
+
+    -- (b) u8 x4 off -> 'u8_x4_disabled' (config-based, not timing-dependent).
+    SET turbohybrid.dense_u8_batch_x4 = off;
+    PERFORM id FROM x4s_docs1536
+        ORDER BY embedding <~> turbohybrid_query(vector_query => qv) LIMIT 10;
+    IF simd_avail AND (turbohybrid_last_scan_diagnosis() ->> 'diagnosis') <> 'u8_x4_disabled' THEN
+        RAISE EXCEPTION 'x4 off: diagnosis=% (expected u8_x4_disabled)',
+            turbohybrid_last_scan_diagnosis() ->> 'diagnosis';
+    END IF;
+    RESET turbohybrid.dense_u8_batch_x4;
+
+    -- (c) SIMD off -> 'scalar_lut_fallback'.
+    SET turbohybrid.simd = off;
+    PERFORM id FROM x4s_docs1536
+        ORDER BY embedding <~> turbohybrid_query(vector_query => qv) LIMIT 10;
+    IF simd_avail AND (turbohybrid_last_scan_diagnosis() ->> 'diagnosis') <> 'scalar_lut_fallback' THEN
+        RAISE EXCEPTION 'simd off: diagnosis=% (expected scalar_lut_fallback)',
+            turbohybrid_last_scan_diagnosis() ->> 'diagnosis';
+    END IF;
+    RESET turbohybrid.simd;
+
+    -- Reads backend-local scan state, so it must be parallel restricted.
+    IF NOT EXISTS (SELECT 1 FROM pg_proc
+                   WHERE oid = 'turbohybrid_last_scan_diagnosis()'::regprocedure
+                     AND proparallel = 'r') THEN
+        RAISE EXCEPTION 'turbohybrid_last_scan_diagnosis should be parallel restricted';
+    END IF;
+
+    RESET turbohybrid.dense_u8_split;
+    RESET turbohybrid.dense_query_split_impl;
+END $$;
+
 -- Same distinct-code x4 parity at a larger 3072-dim index (fewer rows to bound
 -- build time); proves the equality is not specific to 1536.
 CREATE TABLE x4s_docs3072 (id int PRIMARY KEY, embedding vector(3072), body_tsv tsvector);
