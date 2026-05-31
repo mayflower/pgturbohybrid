@@ -554,13 +554,20 @@ PgturbohybridGraphEnsureNodeCapacity(PgturbohybridQuantBuildState *state)
 	 * for every node -- e.g. payloadMask is only assigned when the row carries
 	 * payloads -- so a plain repalloc would leak uninitialized bytes onto disk
 	 * (caught by valgrind's PageAddItem check).  The initial block is
-	 * MemoryContextAllocZero'd; repalloc0 keeps that invariant as it doubles.
+	 * MemoryContextAllocZero'd; keep that invariant as the array doubles.
+	 *
+	 * repalloc0() would do this in one call but only exists on PostgreSQL 16+;
+	 * repalloc + memset of the grown range works on every supported version.
 	 */
-	state->nodes = repalloc0(state->nodes,
-							 PgturbohybridGraphArrayAllocSize(sizeof(PgturbohybridGraphBuildNode),
-															  oldCapacity),
-							 PgturbohybridGraphArrayAllocSize(sizeof(PgturbohybridGraphBuildNode),
-															  state->nodeCapacity));
+	{
+		Size		oldBytes = PgturbohybridGraphArrayAllocSize(sizeof(PgturbohybridGraphBuildNode),
+																oldCapacity);
+		Size		newBytes = PgturbohybridGraphArrayAllocSize(sizeof(PgturbohybridGraphBuildNode),
+																state->nodeCapacity);
+
+		state->nodes = repalloc(state->nodes, newBytes);
+		memset((char *) state->nodes + oldBytes, 0, newBytes - oldBytes);
+	}
 }
 
 static uint8 *
