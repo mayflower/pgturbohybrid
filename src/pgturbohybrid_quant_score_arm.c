@@ -46,6 +46,22 @@
 #define PGTURBOHYBRID_GRAPH_ARM_I8MM_TARGET
 #define PGTURBOHYBRID_GRAPH_COMPILE_ARM_I8MM 0
 #endif
+#else
+#define PGTURBOHYBRID_GRAPH_COMPILE_ARM_DOT 0
+#define PGTURBOHYBRID_GRAPH_COMPILE_ARM_I8MM 0
+#endif
+
+#include "pgturbohybrid_quant_score.h"
+#include "pgturbohybrid_quant_score_internal.h"
+
+/*
+ * Signed 4-bit/2-bit codebooks for the NEON query-split scorers.  Defined after
+ * the score headers so PGTURBOHYBRID_LUT_WIDTH (pgturbohybrid.h) is in scope,
+ * and only under COMPILE_ARM_DOT -- the same guard the scorers below sit under,
+ * matching the x86 sibling files (so non-dotprod targets don't warn on unused
+ * statics).
+ */
+#if PGTURBOHYBRID_GRAPH_COMPILE_ARM_DOT
 static const int8 PgturbohybridGraphCodebookI8[PGTURBOHYBRID_LUT_WIDTH] = {
 	-127, -96, -75, -58, -44, -31, -18, -6,
 	6, 18, 31, 44, 58, 75, 96, 127
@@ -54,13 +70,7 @@ static const int8 PgturbohybridGraphCodebook2I8[PGTURBOHYBRID_LUT_WIDTH] = {
 	-127, -38, 38, 127, 0, 0, 0, 0,
 	0, 0, 0, 0, 0, 0, 0, 0
 };
-#else
-#define PGTURBOHYBRID_GRAPH_COMPILE_ARM_DOT 0
-#define PGTURBOHYBRID_GRAPH_COMPILE_ARM_I8MM 0
 #endif
-
-#include "pgturbohybrid_quant_score.h"
-#include "pgturbohybrid_quant_score_internal.h"
 
 #if PGTURBOHYBRID_GRAPH_COMPILE_ARM_DOT
 bool
