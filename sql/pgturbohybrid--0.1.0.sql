@@ -178,6 +178,14 @@ CREATE FUNCTION turbohybrid_scorer_distances(vector, vector, integer) RETURNS pg
 	AS 'MODULE_PATHNAME', 'turbohybrid_scorer_distances'
 	LANGUAGE C STABLE STRICT PARALLEL SAFE;
 
+-- Diagnostic that scores four DISTINCT docs both through the x4 u8 batch kernel
+-- (one pass) and through four single-node u8 kernel calls, returning both result
+-- arrays and a bit-exact match flag.  Proves the 4-candidate batch equals four
+-- single-code calls for distinct codes -- the case the native scorer runs.
+CREATE FUNCTION turbohybrid_scorer_x4_batch_parity(vector, vector, vector, vector, vector, integer) RETURNS pg_catalog.jsonb
+	AS 'MODULE_PATHNAME', 'turbohybrid_scorer_x4_batch_parity'
+	LANGUAGE C STABLE CALLED ON NULL INPUT PARALLEL SAFE;
+
 -- Tight-loop ns/code microbenchmark of the dense 4-bit scoring kernels
 -- (scalar/LUT, signed split, single-node u8 split, x4 u8 split batch).  Times
 -- scoring `ncodes` cache-resident codes over `iters` passes, reporting the
