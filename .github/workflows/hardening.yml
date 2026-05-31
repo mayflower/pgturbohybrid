@@ -27,15 +27,22 @@ jobs:
           make -C "$PGVECTOR_DIR"
           sudo --preserve-env=PG_CONFIG make -C "$PGVECTOR_DIR" install
 
+      # Build the WHOLE extension without SIMD.  Bare `make` only builds the
+      # first object (the Makefile's first rule, $(OBJS): src/*.h, becomes the
+      # default goal), so it never compiled the no-SIMD path -- use `make all`.
       - name: Build pgturbohybrid without SIMD
-        run: make clean && make SIMD_BUILD=none MATH_MODE=strict
+        run: make clean && make all SIMD_BUILD=none MATH_MODE=strict
         env:
           PG_CFLAGS: -DUSE_ASSERT_CHECKING -Wall -Wextra -Werror -Wno-unused-parameter -Wno-sign-compare
 
+      # Install and test the no-SIMD build (carry SIMD_BUILD=none so the tested
+      # library is the one just built, not a default portable rebuild).
       - name: Run regression tests
         run: |
-          sudo --preserve-env=PG_CONFIG make install
-          make installcheck
+          sudo --preserve-env=PG_CONFIG make install SIMD_BUILD=none MATH_MODE=strict
+          make installcheck SIMD_BUILD=none MATH_MODE=strict
+        env:
+          PG_CFLAGS: -DUSE_ASSERT_CHECKING -Wall -Wextra -Werror -Wno-unused-parameter -Wno-sign-compare
 
       - uses: actions/upload-artifact@v4
         if: failure()
