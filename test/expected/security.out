@@ -47,6 +47,7 @@ BEGIN
 			'turbohybrid_l2_distance(vector,turbohybrid_query)'::regprocedure,
 			'turbohybrid_negative_inner_product(vector,turbohybrid_query)'::regprocedure,
 			'turbohybrid_cosine_distance(vector,turbohybrid_query)'::regprocedure,
+			'turbohybrid_last_build_stats()'::regprocedure,
 			'turbohybrid_last_scan_stats()'::regprocedure
 		)
 		AND proparallel = 's'
@@ -62,6 +63,18 @@ BEGIN
 			AND proparallel = 's'
 	) THEN
 		RAISE EXCEPTION 'pure vector support functions should remain immutable and parallel safe';
+	END IF;
+END
+$$;
+DO $$
+BEGIN
+	IF NOT EXISTS (
+		SELECT 1
+		FROM pg_proc
+		WHERE oid = 'turbohybrid_last_build_stats()'::regprocedure
+			AND proparallel = 'r'
+	) THEN
+		RAISE EXCEPTION 'turbohybrid_last_build_stats should be parallel restricted';
 	END IF;
 END
 $$;

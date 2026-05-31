@@ -71,6 +71,7 @@ typedef Pointer Item;
 #define PGTURBOHYBRID_GRAPH_MAX_ROUTING_ENTRIES 15
 #define PGTURBOHYBRID_GRAPH_MAX_ENTRY_SIDECAR_REPRESENTATIVES 256
 #define PGTURBOHYBRID_GRAPH_MAX_NATIVE_SEGMENTS 16
+#define PGTURBOHYBRID_NATIVE_BUILD_STATS_MAX_WORKERS 16
 #define PGTURBOHYBRID_DEFAULT_ENTRY_SIDECAR false
 #define PGTURBOHYBRID_DEFAULT_ENTRY_SIDECAR_REPRESENTATIVES 128
 #define PGTURBOHYBRID_DEFAULT_GRAPH_BACKBONE false
@@ -1075,6 +1076,8 @@ typedef struct PgturbohybridGraphScanOpaqueData
 	int64		graphRescorePages;
 	int64		graphCodePagesRead;
 	int64		graphAdjPagesRead;
+	int64		graphSegmentCount;
+	int64		graphSegmentsSearched;
 	int64		graphEntryPointCount;
 	int64		graphEntrySidecarCount;
 	int64		graphEntrySidecarScored;
@@ -1195,6 +1198,64 @@ void		PgturbohybridGraphRecordGraphScanStats(PgturbohybridGraphScanOpaque so);
 void		PgturbohybridGraphRecordReturnedRows(int64 returnedRows);
 void		PgturbohybridGraphRecordNonGraphScanStats(void);
 void		PgturbohybridGraphRecordFlatScanStats(void);
+
+typedef struct PgturbohybridNativeBuildStatsSnapshot
+{
+	Oid			relid;
+	char		relationName[NAMEDATALEN];
+	char		indexShape[16];
+	uint64		nodeCount;
+	uint32		dimensions;
+	int			quantizationBits;
+	int			m;
+	int			efConstruction;
+	bool		exactStorage;
+	bool		buildCodeOnly;
+	bool		buildFastEdges;
+	uint64		buildDistanceCalls;
+	uint64		buildDistanceQuerySplit;
+	uint64		buildDistancePacked;
+	uint64		buildDistanceWeighted;
+	uint64		buildDistanceCodeCode;
+	uint64		buildDistanceExact;
+	uint64		buildDistanceFallback;
+	uint64		buildEdgeDistanceCalls;
+	uint64		buildEdgeSearchLayerUs;
+	uint64		buildEdgeSelectNeighborUs;
+	uint64		buildEdgeAddNeighborUs;
+	uint64		buildEdgePruneNeighborUs;
+	uint64		buildEdgeEntryUpdateUs;
+	uint64		buildEdgeNearestTotal;
+	uint64		buildEdgeNearestSamples;
+	uint32		buildEdgeMaxFrontierSize;
+	uint64		fitCorrectionScanUs;
+	uint64		scanUs;
+	uint64		fitCorrectionUs;
+	uint64		encodeUs;
+	uint64		buildEdgesUs;
+	uint64		freeExactVectorsUs;
+	uint64		reorderNodesUs;
+	uint64		connectBackboneUs;
+	uint64		entrySidecarUs;
+	uint64		writePagesUs;
+	uint64		walUs;
+	uint64		totalUs;
+	uint32		workerCount;
+	uint32		nativeSegmentCount;
+	uint32		nativeSegmentBytes;
+	bool		parallelSegmentBuildEnabled;
+	char		segmentBuildMode[16];
+	uint32		nativeBuildWorkersRequested;
+	uint32		nativeBuildWorkersLaunched;
+	bool		parallelFitEnabled;
+	bool		parallelScanEnabled;
+	bool		parallelEncodeEnabled;
+	uint64		workerMergeUs;
+	uint32		workerScanUsCount;
+	uint64		workerScanUs[PGTURBOHYBRID_NATIVE_BUILD_STATS_MAX_WORKERS];
+} PgturbohybridNativeBuildStatsSnapshot;
+
+void		PgturbohybridGraphRecordNativeBuildStats(const PgturbohybridNativeBuildStatsSnapshot *stats);
 const char *PgturbohybridGraphTqScoringKernelName(int scoringKernel);
 const char *PgturbohybridGraphTqScoreModeName(int scoreMode);
 const char *PgturbohybridGraphRescoreBandName(int band);
@@ -1317,6 +1378,7 @@ bool		tqgraphgettuple(IndexScanDesc scan, ScanDirection dir);
 void		tqgraphendscan(IndexScanDesc scan);
 
 FUNCTION_PREFIX Datum pgturbohybrid_last_scan_stats(PG_FUNCTION_ARGS);
+FUNCTION_PREFIX Datum pgturbohybrid_last_build_stats(PG_FUNCTION_ARGS);
 FUNCTION_PREFIX Datum pgturbohybrid_index_stats(PG_FUNCTION_ARGS);
 FUNCTION_PREFIX Datum pgturbohybrid_simd_capabilities(PG_FUNCTION_ARGS);
 void		PgturbohybridGraphRecordExactVectorKernel(int kernel);

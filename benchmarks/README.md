@@ -162,9 +162,10 @@ Ready-made harnesses live next to this README:
   oversampling, scored codes, exact rescore count, heap rescore count, and exact
   rescore source.
 - `native_segments_bench.sql` -- native graph segment-count sweep
-  (`native_segments = 1,2,4,8,10` by default). It records build time, index
-  size, precision@K against exact ordering, p50/p95, and scan stats so the
-  build-speed, recall, and query-cost tradeoff is visible.
+  (`native_segments = 1,2,4,8` by default). It records build time, index
+  size, precision@K against exact ordering, p50/p95, segment count/search
+  stats, and page/scoring stats so the build-speed, recall, and query-cost
+  tradeoff is visible.
 - `concurrency_dense_bench.sql` / `concurrency_dense_bench.sh` -- concurrent-client
   scaling diagnostics (see below).
 

@@ -153,6 +153,77 @@ BEGIN
 	IF result_count <> 4 THEN
 		RAISE EXCEPTION 'segmented native dense query returned % rows', result_count;
 	END IF;
+
+	stats := turbohybrid_last_scan_stats();
+	IF (stats->>'graph_segment_count')::int <> 2 OR
+		(stats->>'graph_segments_searched')::int <> 2 THEN
+		RAISE EXCEPTION 'unexpected segmented scan stats: %', stats;
+	END IF;
+END
+$$;
+
+DELETE FROM tqh_segment_docs WHERE id = 6;
+VACUUM tqh_segment_docs;
+
+DO $$
+DECLARE
+	result_count int;
+BEGIN
+	SELECT count(*) INTO result_count
+	FROM (
+		SELECT id
+		FROM tqh_segment_docs
+		ORDER BY embedding <~> turbohybrid_query(
+			vector_query => '[1,0,0]'::vector,
+			dense_k => 4,
+			final_k => 4
+		)
+		LIMIT 4
+	) s;
+
+	IF result_count <> 4 THEN
+		RAISE EXCEPTION 'segmented dense query after vacuum returned % rows',
+			result_count;
+	END IF;
+END
+$$;
+
+DROP INDEX tqh_segment_docs_idx;
+
+CREATE INDEX tqh_segment_docs_idx ON tqh_segment_docs
+USING turbohybrid (embedding vector_cosine_turbohybrid_ops)
+WITH (native_segments = 4, quantization_bits = 4, exact_storage = off);
+
+DO $$
+DECLARE
+	stats jsonb;
+	result_count int;
+BEGIN
+	stats := turbohybrid_index_stats('tqh_segment_docs_idx'::regclass);
+	IF (stats->>'native_segments')::int <> 4 THEN
+		RAISE EXCEPTION 'unexpected native_segments=4 index stats: %', stats;
+	END IF;
+
+	SELECT count(*) INTO result_count
+	FROM (
+		SELECT id
+		FROM tqh_segment_docs
+		ORDER BY embedding <~> turbohybrid_query(
+			vector_query => '[1,0,0]'::vector,
+			dense_k => 4,
+			final_k => 4
+		)
+		LIMIT 4
+	) s;
+
+	IF result_count <> 4 THEN
+		RAISE EXCEPTION 'segmented native_segments=4 query returned % rows', result_count;
+	END IF;
+
+	stats := turbohybrid_last_scan_stats();
+	IF (stats->>'graph_segment_count')::int <> 4 THEN
+		RAISE EXCEPTION 'unexpected native_segments=4 scan stats: %', stats;
+	END IF;
 END
 $$;
 
@@ -285,6 +356,18 @@ BEGIN
 		RAISE EXCEPTION 'unexpected dense-only index stats: %', stats;
 	END IF;
 
+	stats := turbohybrid_last_build_stats();
+	IF stats->>'available' <> 'true' OR
+		stats->>'relation_name' <> 'tqh_dense_only_docs_idx' OR
+		stats->>'index_shape' <> 'dense_only' OR
+		(stats->>'node_count')::int <> 2 OR
+		(stats->>'dimensions')::int <> 3 OR
+		(stats->>'worker_count')::int < 0 OR
+		NOT (stats ? 'build_edges_us') OR
+		NOT (stats ? 'build_distance_calls') THEN
+		RAISE EXCEPTION 'unexpected dense-only build stats: %', stats;
+	END IF;
+
 	SELECT array_agg(id) INTO ids
 	FROM (
 		SELECT id
@@ -344,6 +427,178 @@ BEGIN
 	END;
 END
 $$;
+
+SET max_parallel_maintenance_workers = 2;
+SET turbohybrid.native_build_workers = '2';
+
+CREATE TABLE tqh_parallel_build_docs (
+	id int PRIMARY KEY,
+	embedding vector(3),
+	body text,
+	body_tsv tsvector GENERATED ALWAYS AS (to_tsvector('simple', body)) STORED
+);
+
+INSERT INTO tqh_parallel_build_docs (id, embedding, body)
+SELECT i,
+	('[' ||
+		((i % 7)::float8 / 7.0)::text || ',' ||
+		((i % 11)::float8 / 11.0)::text || ',' ||
+		((i % 13)::float8 / 13.0)::text || ']')::vector(3),
+	CASE WHEN i % 5 = 0 THEN 'alpha identifier' ELSE 'beta natural text' END
+FROM generate_series(1, 200) AS i;
+
+CREATE INDEX tqh_parallel_dense_idx ON tqh_parallel_build_docs
+USING turbohybrid (embedding vector_cosine_turbohybrid_ops)
+WITH (quantization_bits = 4, exact_storage = off);
+
+DO $$
+DECLARE
+	ids int[];
+	stats jsonb;
+BEGIN
+	stats := turbohybrid_last_build_stats();
+	IF stats->>'relation_name' <> 'tqh_parallel_dense_idx' OR
+		stats->>'index_shape' <> 'dense_only' OR
+		(stats->>'native_build_workers_requested')::int <> 2 OR
+		(stats->>'native_build_workers_launched')::int < 1 OR
+		(stats->>'parallel_fit_enabled')::boolean IS DISTINCT FROM true OR
+		(stats->>'parallel_scan_enabled')::boolean IS DISTINCT FROM true OR
+		(stats->>'parallel_encode_enabled')::boolean IS DISTINCT FROM true OR
+		jsonb_array_length(stats->'worker_scan_us') < 2 THEN
+		RAISE EXCEPTION 'unexpected parallel dense build stats: %', stats;
+	END IF;
+
+	SELECT array_agg(id) INTO ids
+	FROM (
+		SELECT id
+		FROM tqh_parallel_build_docs
+		ORDER BY embedding <~> turbohybrid_query(
+			vector_query => '[0.1,0.2,0.3]'::vector,
+			dense_k => 20,
+			final_k => 5
+		)
+		LIMIT 5
+	) s;
+
+	IF cardinality(ids) <> 5 THEN
+		RAISE EXCEPTION 'unexpected parallel dense query results: %', ids;
+	END IF;
+END
+$$;
+
+CREATE INDEX tqh_parallel_hybrid_idx ON tqh_parallel_build_docs
+USING turbohybrid (
+	embedding vector_cosine_turbohybrid_ops,
+	body_tsv bm25_tsvector_turbohybrid_ops
+)
+WITH (quantization_bits = 4, exact_storage = off);
+
+DO $$
+DECLARE
+	row_count int;
+	stats jsonb;
+BEGIN
+	stats := turbohybrid_last_build_stats();
+	IF stats->>'relation_name' <> 'tqh_parallel_hybrid_idx' OR
+		stats->>'index_shape' <> 'hybrid' OR
+		(stats->>'native_build_workers_requested')::int <> 2 OR
+		(stats->>'native_build_workers_launched')::int < 1 THEN
+		RAISE EXCEPTION 'unexpected parallel hybrid build stats: %', stats;
+	END IF;
+
+	SELECT count(*) INTO row_count
+	FROM (
+		SELECT id
+		FROM tqh_parallel_build_docs
+		ORDER BY embedding <~> turbohybrid_query(
+			vector_query => '[0.1,0.2,0.3]'::vector,
+			text_query => to_tsquery('simple', 'alpha'),
+			dense_k => 20,
+			bm25_k => 20,
+			final_k => 5
+		)
+		LIMIT 5
+	) s;
+
+	IF row_count <> 5 THEN
+		RAISE EXCEPTION 'unexpected parallel hybrid query count: %', row_count;
+	END IF;
+END
+$$;
+
+CREATE INDEX tqh_parallel_lowbit_idx ON tqh_parallel_build_docs
+USING turbohybrid (embedding vector_cosine_turbohybrid_ops)
+WITH (quantization_bits = 2, exact_storage = off);
+
+DO $$
+DECLARE
+	row_count int;
+	stats jsonb;
+BEGIN
+	stats := turbohybrid_last_build_stats();
+	IF stats->>'relation_name' <> 'tqh_parallel_lowbit_idx' OR
+		(stats->>'quantization_bits')::int <> 2 OR
+		(stats->>'native_build_workers_launched')::int < 1 THEN
+		RAISE EXCEPTION 'unexpected parallel low-bit build stats: %', stats;
+	END IF;
+
+	SELECT count(*) INTO row_count
+	FROM (
+		SELECT id
+		FROM tqh_parallel_build_docs
+		ORDER BY embedding <~> turbohybrid_query(
+			vector_query => '[0.1,0.2,0.3]'::vector,
+			dense_k => 20,
+			final_k => 5
+		)
+		LIMIT 5
+	) s;
+
+	IF row_count <> 5 THEN
+		RAISE EXCEPTION 'unexpected parallel low-bit query count: %', row_count;
+	END IF;
+END
+$$;
+
+CREATE INDEX tqh_parallel_exact_idx ON tqh_parallel_build_docs
+USING turbohybrid (embedding vector_cosine_turbohybrid_ops)
+WITH (quantization_bits = 4, exact_storage = on);
+
+DO $$
+DECLARE
+	row_count int;
+	stats jsonb;
+BEGIN
+	stats := turbohybrid_last_build_stats();
+	IF stats->>'relation_name' <> 'tqh_parallel_exact_idx' OR
+		(stats->>'exact_storage')::boolean IS DISTINCT FROM true OR
+		(stats->>'native_build_workers_requested')::int <> 2 OR
+		(stats->>'native_build_workers_launched')::int <> 0 OR
+		(stats->>'parallel_scan_enabled')::boolean IS DISTINCT FROM false THEN
+		RAISE EXCEPTION 'unexpected exact-storage serial fallback stats: %', stats;
+	END IF;
+
+	SELECT count(*) INTO row_count
+	FROM (
+		SELECT id
+		FROM tqh_parallel_build_docs
+		ORDER BY embedding <~> turbohybrid_query(
+			vector_query => '[0.1,0.2,0.3]'::vector,
+			dense_k => 20,
+			final_k => 5
+		)
+		LIMIT 5
+	) s;
+
+	IF row_count <> 5 THEN
+		RAISE EXCEPTION 'unexpected exact-storage fallback query count: %', row_count;
+	END IF;
+END
+$$;
+
+RESET turbohybrid.native_build_workers;
+RESET max_parallel_maintenance_workers;
+DROP TABLE tqh_parallel_build_docs CASCADE;
 
 INSERT INTO tqh_dense_only_docs VALUES (4, '[0.9,0.1,0]', 'keep');
 INSERT INTO tqh_dense_only_docs VALUES (5, NULL, 'keep');
@@ -1805,6 +2060,7 @@ BEGIN
 	WHERE e.extname = 'pgturbohybrid'
 		AND p.proname IN (
 			'turbohybrid_index_stats',
+			'turbohybrid_last_build_stats',
 			'turbohybrid_last_scan_diagnosis',
 			'turbohybrid_last_scan_stats',
 			'turbohybrid_simd_capabilities'
@@ -1812,6 +2068,7 @@ BEGIN
 
 	IF funcs <> ARRAY[
 		'turbohybrid_index_stats',
+		'turbohybrid_last_build_stats',
 		'turbohybrid_last_scan_diagnosis',
 		'turbohybrid_last_scan_stats',
 		'turbohybrid_simd_capabilities'
@@ -1882,6 +2139,66 @@ BEGIN
 		'write_us'
 	] THEN
 		RAISE EXCEPTION 'unexpected pgturbohybrid index stats keys: %', keys;
+	END IF;
+
+	SELECT array_agg(key ORDER BY key) INTO keys
+	FROM jsonb_object_keys(turbohybrid_last_build_stats()) AS key;
+
+	IF keys <> ARRAY[
+		'available',
+		'build_code_only',
+		'build_distance_calls',
+		'build_distance_code_code',
+		'build_distance_exact',
+		'build_distance_fallback',
+		'build_distance_packed',
+		'build_distance_query_split',
+		'build_distance_weighted',
+		'build_edges_add_neighbor_us',
+		'build_edges_average_nearest_count',
+		'build_edges_distance_calls',
+		'build_edges_entry_update_us',
+		'build_edges_max_frontier_size',
+		'build_edges_prune_neighbor_us',
+		'build_edges_search_layer_us',
+		'build_edges_select_neighbor_us',
+		'build_edges_us',
+		'build_fast_edges',
+		'connect_backbone_us',
+		'dimensions',
+		'ef_construction',
+		'encode_us',
+		'entry_sidecar_us',
+		'exact_storage',
+		'fit_correction_scan_us',
+		'fit_correction_us',
+		'free_exact_vectors_us',
+		'index_shape',
+		'm',
+		'native_build_workers_launched',
+		'native_build_workers_requested',
+		'native_segment_bytes',
+		'native_segments',
+		'node_count',
+		'parallel_encode_enabled',
+		'parallel_fit_enabled',
+		'parallel_scan_enabled',
+		'parallel_segment_build_enabled',
+		'quantization_bits',
+		'relation_name',
+		'relid',
+		'reorder_nodes_us',
+		'scan_us',
+		'segment_build_mode',
+		'total_us',
+		'version',
+		'wal_us',
+		'worker_count',
+		'worker_merge_us',
+		'worker_scan_us',
+		'write_pages_us'
+	] THEN
+		RAISE EXCEPTION 'unexpected pgturbohybrid build stats keys: %', keys;
 	END IF;
 
 	SELECT array_agg(key ORDER BY key) INTO keys
@@ -2006,6 +2323,8 @@ BEGIN
 		'graph_scan_lock_wait_us',
 		'graph_score_kernels',
 		'graph_scored_codes',
+		'graph_segment_count',
+		'graph_segments_searched',
 		'graph_simd_scored_codes',
 		'graph_sort_us',
 		'graph_storage_kind',

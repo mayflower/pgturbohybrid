@@ -242,6 +242,15 @@ static relopt_enum_elt_def pgturbohybrid_routing_relopt_options[] = {
 	{NULL, 0}
 };
 
+static relopt_enum_elt_def pgturbohybrid_native_segments_relopt_options[] = {
+	{"auto", 0},
+	{"1", 1},
+	{"2", 2},
+	{"4", 4},
+	{"8", 8},
+	{NULL, 0}
+};
+
 const char *
 PgturbohybridHybridBudgetPolicyName(int policy)
 {
@@ -655,6 +664,28 @@ PgturbohybridAssignProfile(int newval, void *extra)
 	pgturbohybrid_profile = newval;
 	PgturbohybridBumpGucGeneration();
 	PgturbohybridApplyProfileDefaults();
+}
+
+static bool
+PgturbohybridNativeBuildWorkersCheck(char **newval, void **extra, GucSource source)
+{
+	char	   *setting = *newval;
+
+	(void) extra;
+	(void) source;
+
+	if (setting == NULL)
+		return false;
+	if (pg_strcasecmp(setting, "auto") == 0 ||
+		strcmp(setting, "0") == 0 ||
+		strcmp(setting, "1") == 0 ||
+		strcmp(setting, "2") == 0 ||
+		strcmp(setting, "4") == 0 ||
+		strcmp(setting, "8") == 0)
+		return true;
+
+	GUC_check_errdetail("Use \"auto\", 0, 1, 2, 4, or 8.");
+	return false;
 }
 
 static void PgturbohybridXactCallback(XactEvent event, void *arg);
@@ -3408,7 +3439,7 @@ pgturbohybridamoptions(Datum reloptions, bool validate)
 		PGTURBOHYBRID_RELOPT_PARSE("routing", RELOPT_TYPE_ENUM, routing),
 		PGTURBOHYBRID_RELOPT_PARSE("graph_ef_search", RELOPT_TYPE_INT, graphEfSearch),
 		PGTURBOHYBRID_RELOPT_PARSE("graph_oversampling", RELOPT_TYPE_INT, graphOversampling),
-		PGTURBOHYBRID_RELOPT_PARSE("native_segments", RELOPT_TYPE_INT, nativeSegments),
+		PGTURBOHYBRID_RELOPT_PARSE("native_segments", RELOPT_TYPE_ENUM, nativeSegments),
 		PGTURBOHYBRID_RELOPT_PARSE("quantization_bits", RELOPT_TYPE_INT, tqBits),
 		PGTURBOHYBRID_RELOPT_PARSE("exact_storage", RELOPT_TYPE_BOOL, tqExactStorage),
 		PGTURBOHYBRID_RELOPT_PARSE("entry_sidecar", RELOPT_TYPE_BOOL, entrySidecar),
@@ -3500,10 +3531,11 @@ PgturbohybridInit(void)
 					  PGTURBOHYBRID_DEFAULT_GRAPH_EF_SEARCH, PGTURBOHYBRID_GRAPH_MIN_EF_SEARCH, PGTURBOHYBRID_GRAPH_MAX_EF_SEARCH, AccessExclusiveLock);
 	add_int_reloption(pgturbohybrid_relopt_kind, "graph_oversampling", "Candidate oversampling multiplier for graph scans",
 					  PGTURBOHYBRID_DEFAULT_GRAPH_OVERSAMPLING, 1, 1000, AccessExclusiveLock);
-	add_int_reloption(pgturbohybrid_relopt_kind, "native_segments",
-					  "Native graph segment count; 0 means auto, 1 keeps the legacy single graph.",
-					  1, 0, PGTURBOHYBRID_GRAPH_MAX_NATIVE_SEGMENTS,
-					  AccessExclusiveLock);
+	add_enum_reloption(pgturbohybrid_relopt_kind, "native_segments",
+					   "Native graph segment count; 1 keeps the legacy single graph.",
+					   pgturbohybrid_native_segments_relopt_options, 1,
+					   "Valid values are \"1\", \"2\", \"4\", \"8\", and \"auto\".",
+					   AccessExclusiveLock);
 	add_int_reloption(pgturbohybrid_relopt_kind, "quantization_bits", "Quantized vector code bit width",
 					  PGTURBOHYBRID_DEFAULT_INDEX_BITS, 1, PGTURBOHYBRID_DEFAULT_BITS, AccessExclusiveLock);
 	add_bool_reloption(pgturbohybrid_relopt_kind, "exact_storage",
@@ -3629,9 +3661,11 @@ PgturbohybridInit(void)
 							PGC_USERSET, GUC_UNIT_MB, NULL, NULL, NULL);
 	DefineCustomStringVariable("turbohybrid.native_build_workers",
 							   "Parallel worker count for native dense graph build scan and encoding",
-							   "auto uses PostgreSQL's parallel CREATE INDEX worker choice; 0 disables native parallel build; positive integers request up to that many workers. Edge construction remains serial.",
+							   "auto uses PostgreSQL's parallel CREATE INDEX worker choice; 0 disables native parallel build; 1, 2, 4, or 8 requests that many workers. Edge construction remains serial.",
 							   &pgturbohybrid_native_build_workers,
-							   "auto", PGC_USERSET, 0, NULL, NULL, NULL);
+							   "auto", PGC_USERSET, 0,
+							   PgturbohybridNativeBuildWorkersCheck,
+							   NULL, NULL);
 	DefineCustomBoolVariable("turbohybrid.dense_build_exact_distances",
 							 "(developer/benchmark) Use exact f32 vector distances while building dense graph edges",
 							 "This can improve graph topology for experiments without storing exact vectors at scan time.",

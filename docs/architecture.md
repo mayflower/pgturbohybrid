@@ -277,10 +277,11 @@ still use stable descriptive names. The current alpha reloptions are:
 - `graph_ef_search`: graph candidate list size during scans. Default: `64`.
 - `graph_oversampling`: graph candidate oversampling multiplier. Default: `4`.
 - `native_segments`: number of independent native dense graph segments to build.
-  Default: `1` for single-graph compatibility. `0` means auto and currently
-  resolves from PostgreSQL's parallel maintenance worker setting, capped at 16.
-  More segments can reduce build-edge work, but scans seed all segment entries
-  and merge one candidate set, so measure recall and latency together.
+  Valid values are `1`, `2`, `4`, `8`, and `auto`. Default: `1` for
+  single-graph compatibility. `auto` currently resolves from PostgreSQL's
+  parallel maintenance worker setting and is capped internally. More segments
+  can reduce build-edge work, but scans seed all segment entries and merge one
+  candidate set, so measure recall and latency together.
 - `quantization_bits`: quantized dense-vector code width. Default: `4`.
 - `exact_storage`: store exact vectors in the index for final exact rescoring.
   Default: `off`. When it is off, users can instead benchmark

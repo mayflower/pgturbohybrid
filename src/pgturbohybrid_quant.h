@@ -214,6 +214,15 @@ typedef struct PgturbohybridQuantBuildState
 	uint64		buildDistanceCodeCode;
 	uint64		buildDistanceExact;
 	uint64		buildDistanceFallback;
+	uint64		buildEdgeDistanceCalls;
+	uint64		buildEdgeSearchLayerUs;
+	uint64		buildEdgeSelectNeighborUs;
+	uint64		buildEdgeAddNeighborUs;
+	uint64		buildEdgePruneNeighborUs;
+	uint64		buildEdgeEntryUpdateUs;
+	uint64		buildEdgeNearestTotal;
+	uint64		buildEdgeNearestSamples;
+	uint32		buildEdgeMaxFrontierSize;
 	uint64		parallelEncodeUs;
 	void	   *parallelShared;
 	uint64		buildScanUs;
@@ -346,6 +355,7 @@ typedef struct PgturbohybridGraphNativeCache
 	BlockNumber tqAdjStartBlkno;
 	BlockNumber tqExactStartBlkno;
 	BlockNumber tqCorrectionStartBlkno;
+	PgturbohybridGraphSegmentMetaData tqSegments[PGTURBOHYBRID_GRAPH_MAX_NATIVE_SEGMENTS];
 	PgturbohybridGraphScanStorage storage;
 	MemoryContext ctx;
 	/*
