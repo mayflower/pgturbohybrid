@@ -159,14 +159,32 @@ exist to force a specific kernel for parity testing or to measure tiers:
   split on capable x86).
 - `turbohybrid.dense_u8_split`: `auto`, `on`, or `off` for the unsigned-codebook
   (u8) 4-bit split scorer.
-- `turbohybrid.dense_u8_batch_x4`: use the 4-candidate (x4) u8 batch kernel
-  (default on) versus four single-node passes.
+- `turbohybrid.dense_u8_batch_x4`: scores each batch of four codes with the true
+  4-candidate (x4) u8 kernel in a single pass, sharing the query `[low|high]`
+  loads and issuing the four scattered code loads together so their memory
+  latency overlaps. This is the default (`on`); turning it `off` falls back to
+  four single-node u8 passes, kept as a parity/benchmark escape hatch (not the
+  default). `turbohybrid_last_scan_stats()` reports which path a scan actually
+  took as `graph_u8_batch_mode` (`x4`, `single`, or `none`), with
+  `dense_u8_batch_x4_enabled` echoing the knob.
 - `turbohybrid.dense_rescore_band`: exact f32 rescore policy (`auto`, `off`,
   `exact`, `limited`); the latency profile resolves to exact-free for 4-bit
   code-only indexes.
 - `turbohybrid.native_cache_max_mb`: per-backend in-memory native scan cache
   cap (default 512 MB); indexes whose working set fits are fully resident so
   warm scans read zero code pages.
+
+The batch scorer adapts its prefetch to index size automatically (no GUC). Once
+the estimated code working set (`tqNodeCount * codeBytes`) exceeds 64 MB -- large
+enough that each code is a scattered RAM read rather than cache-resident -- the
+scorer prefetches every cache line of each code ("whole-code prefetch") to hide
+the full-code latency; below that threshold it touches only the first line, since
+the codes are already hot. `turbohybrid_last_scan_stats()` surfaces this as
+`graph_large_code_arena` (was the arena over the threshold),
+`graph_whole_code_prefetch_active` (whole-code prefetch actually ran, i.e. the
+arena was large and `turbohybrid.dense_graph_prefetch` was on), `graph_code_bytes`
+(per-code width), and `graph_code_arena_estimated_bytes` (the working-set
+estimate used for the decision).
 
 Candidate-budget and cache GUCs have conservative public caps in this alpha:
 `default_dense_k` and `default_bm25_k` are capped at 10,000, `default_rrf_k` at
