@@ -223,6 +223,16 @@ SELECT turbohybrid_index_stats('documents_turbohybrid_idx'::regclass);
 SELECT turbohybrid_simd_capabilities();
 ```
 
+For a slow query, `turbohybrid_last_scan_diagnosis()` reduces the full stats
+JSON to the key dense hot-path fields, a few derived ratios, and a single
+`diagnosis` label (for example `healthy_u8_x4`, `traversal_dominated`,
+`rescore_dominated`, or `scalar_lut_fallback`):
+
+```sql
+SELECT turbohybrid_last_scan_diagnosis();
+SELECT turbohybrid_last_scan_diagnosis() ->> 'diagnosis';
+```
+
 Useful fields include:
 
 - `profile`

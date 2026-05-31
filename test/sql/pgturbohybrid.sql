@@ -984,12 +984,14 @@ BEGIN
 	WHERE e.extname = 'pgturbohybrid'
 		AND p.proname IN (
 			'turbohybrid_index_stats',
+			'turbohybrid_last_scan_diagnosis',
 			'turbohybrid_last_scan_stats',
 			'turbohybrid_simd_capabilities'
 		);
 
 	IF funcs <> ARRAY[
 		'turbohybrid_index_stats',
+		'turbohybrid_last_scan_diagnosis',
 		'turbohybrid_last_scan_stats',
 		'turbohybrid_simd_capabilities'
 	] THEN
@@ -1048,6 +1050,7 @@ BEGIN
 
 	IF keys <> ARRAY[
 		'auto_budget',
+		'bm25',
 		'bm25_accumulator_mode',
 		'bm25_cache_build_us',
 		'bm25_cache_hit',
@@ -1063,6 +1066,7 @@ BEGIN
 		'bm25_k_effective',
 		'bm25_strategy',
 		'candidate_objects_allocated',
+		'dense',
 		'dense_adaptive_final_result_target',
 		'dense_adaptive_final_search_ef',
 		'dense_adaptive_gap_boundary',
@@ -1104,6 +1108,7 @@ BEGIN
 		'final_k_inferred',
 		'final_k_requested',
 		'final_k_source',
+		'fusion',
 		'fusion_elapsed_us',
 		'graph_adj_pages_read',
 		'graph_avg_batch_size',
@@ -1156,6 +1161,7 @@ BEGIN
 		'index_used',
 		'profile',
 		'quantization_bits',
+		'query',
 		'query_split_enabled',
 		'residual_rerank_active',
 		'scan_orchestration',

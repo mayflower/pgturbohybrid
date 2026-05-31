@@ -100,6 +100,48 @@ Record the following with any published result:
 - baseline definitions and index options
 - note that results vary by dataset and hardware
 
+## Benchmarking dense kernels
+
+The dense scoring kernel is auto-selected per host (the best available SIMD tier
+plus the u8 x4 batch path). To compare kernels apples-to-apples, pin the
+implementation with the developer/benchmark GUCs (the "Developer / benchmark"
+category in
+[`docs/architecture.md`](../docs/architecture.md#gucs-and-reloptions)) and
+confirm the kernel that actually ran with `turbohybrid_last_scan_stats()`. All
+combinations below return identical results; only the kernel that produces them
+changes -- so a difference in timing is a kernel difference, not a recall one.
+
+`dense_query_split_impl` and `dense_u8_split` default to `auto`; set them only to
+override the auto choice. Apply the `SET`s per session, then run the workload.
+
+| Target kernel | GUCs to set |
+| --- | --- |
+| Host best (default) | leave all unset (`auto` -> best tier + u8 x4) |
+| AVX-512 VNNI, u8 x4 | `dense_graph_avx512vnni=on; dense_graph_avxvnni=on; dense_u8_split=auto; dense_u8_batch_x4=on` |
+| AVX2, u8 x4 | `dense_graph_avx512vnni=off; dense_graph_avxvnni=off; dense_u8_split=auto; dense_u8_batch_x4=on` |
+| u8 x4 off (four single-node u8 passes) | same as the chosen tier, but `dense_u8_batch_x4=off` |
+| Signed split (no u8) | `dense_u8_split=off` (signed-codebook split at the host's tier) |
+| Scalar / LUT fallback | `turbohybrid.simd=off` (the non-SIMD reference) |
+
+Forcing AVX-512 off always selects the AVX2 kernels on any AVX2 host; on a host
+without AVX-512 VNNI the AVX-512-on row resolves to those same AVX2 kernels.
+
+Verify the active kernel after a scan:
+
+```sql
+SELECT turbohybrid_last_scan_stats() ->> 'dense_scorer';      -- e.g. unsigned_split_avx512vnni
+SELECT turbohybrid_last_scan_stats() -> 'dense' -> 'kernels'; -- u8_batch_mode, u8_kernel_single/_batch
+```
+
+Ready-made harnesses live next to this README:
+
+- `native_hotpath_bench.sql` -- live native-scan latency, u8 x4 on vs off.
+- `u8_x4_kernel_microbench.sql`, `u8_split_microbench.sql` -- kernel-level
+  ns/code microbenchmarks.
+- `native_scan_kernel_stats.sql` -- per-bucket kernel attribution from a real
+  scan.
+- `rescore_band_latency.sql` -- exact-rescore (`dense_rescore_band`) latency.
+
 ## Acceptance Checks
 
 Fast defaults must pass the FIQA/OpenAI quality gate before they are used for a
