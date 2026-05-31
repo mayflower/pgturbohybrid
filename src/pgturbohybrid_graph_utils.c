@@ -3763,6 +3763,151 @@ turbohybrid_scorer_distances(PG_FUNCTION_ARGS)
 }
 
 /*
+ * turbohybrid_scorer_x4_batch_parity(query vector, d0, d1, d2, d3 vector,
+ *                                    bits int) -> jsonb
+ *
+ * Diagnostic that proves the true 4-candidate (x4) u8 batch kernel returns the
+ * same distance as four single-code u8 kernel calls for FOUR DISTINCT codes --
+ * the case the native batch scorer actually runs, and which
+ * turbohybrid_scorer_distances() (four identical copies of one code) does not
+ * cover.  The four docs are encoded to four distinct packed codes, scored both
+ * by PgturbohybridGraphTqCodeU8Simdx4Batch (one x4 pass, shared query loads) and
+ * by four PgturbohybridGraphTqCodeU8SimdDistance calls; the per-slot results
+ * must be bit-identical.  The kernel-forcing GUCs (dense_graph_avx512vnni /
+ * dense_graph_avxvnni) select which kernel both paths use, so this checks the
+ * AVX2 and AVX-512 VNNI x4 kernels in turn.
+ *
+ *   single   : [d0..d3] scored one code at a time (single-node u8 kernel)
+ *   x4       : [d0..d3] scored together through the x4 batch kernel
+ *   match    : true iff every slot is bit-identical (exact double equality)
+ *   u8_used  : whether an unsigned-codebook SIMD kernel actually ran (else the
+ *              scalar reference fills both arrays and match is trivially true)
+ *
+ * Inner-product scoring, no EC correction.  Developer-facing; like
+ * turbohybrid_scorer_distances it exposes internal scorer values.
+ */
+FUNCTION_PREFIX PG_FUNCTION_INFO_V1(turbohybrid_scorer_x4_batch_parity);
+FUNCTION_PREFIX Datum
+turbohybrid_scorer_x4_batch_parity(PG_FUNCTION_ARGS)
+{
+	Vector	   *query;
+	Vector	   *docs[4];
+	int			bits = PGTURBOHYBRID_DEFAULT_BITS;
+	int			dim;
+	PgturbohybridGraphTqQuery tq;
+	const uint8 *codes[4];
+	float		scales[4];
+	double		single[4];
+	double		batch[4];
+	bool		u8Used = false;
+	bool		match = true;
+	const char *u8Kernel = "none";
+	StringInfoData json;
+
+	for (int a = 0; a < 5; a++)
+		if (PG_ARGISNULL(a))
+			ereport(ERROR,
+					(errcode(ERRCODE_NULL_VALUE_NOT_ALLOWED),
+					 errmsg("turbohybrid_scorer_x4_batch_parity: query and four docs must not be NULL")));
+
+	query = PgturbohybridDatumGetVector(PG_GETARG_DATUM(0));
+	PgturbohybridCheckVector(query);
+	dim = query->dim;
+	for (int c = 0; c < 4; c++)
+	{
+		docs[c] = PgturbohybridDatumGetVector(PG_GETARG_DATUM(1 + c));
+		PgturbohybridCheckVector(docs[c]);
+		if (docs[c]->dim != dim)
+			ereport(ERROR,
+					(errcode(ERRCODE_DATA_EXCEPTION),
+					 errmsg("query and doc vectors must have equal dimension")));
+	}
+
+	if (PG_NARGS() >= 6 && !PG_ARGISNULL(5))
+		bits = PG_GETARG_INT32(5);
+	if (bits != PGTURBOHYBRID_DEFAULT_BITS && bits != 2)
+		ereport(ERROR,
+				(errcode(ERRCODE_DATA_EXCEPTION),
+				 errmsg("turbohybrid_scorer_x4_batch_parity: bits must be 2 or 4")));
+
+	/* Prepare a minimal inner-product query (no index, no EC correction). */
+	memset(&tq, 0, sizeof(tq));
+	tq.dimensions = dim;
+	tq.bits = bits;
+	tq.lutWidth = 1 << bits;
+	tq.codeBytes = TqCodeSizeForBits(dim, bits);
+	tq.scoreMode = PGTURBOHYBRID_SCORE_IP;
+	tq.scoringKernel = TqSelectScoringKernel();
+	tq.rawQueryValues = query->x;
+	tq.queryValues = palloc(sizeof(float) * dim);
+	TqRotateVectorFloat(query->x, dim, tq.queryValues);
+	for (int i = 0; i < dim; i++)
+		tq.queryNorm += (double) query->x[i] * (double) query->x[i];
+	tq.lut = palloc(PGTURBOHYBRID_LUT_SIZE(dim));
+	TqBuildQueryLut(&tq);
+	tq.enabled = true;
+#if defined(__aarch64__) || defined(_M_ARM64) || PGTURBOHYBRID_COMPILE_AVX2
+	TqPrepareQuerySplit4(&tq);
+#endif
+
+	/* Encode four distinct codes and default both arrays to the scalar ref.
+	 * codes[]/scales[] are read here (scalar ref) so they are used on every
+	 * platform, not only inside the AVX2 block below. */
+	for (int c = 0; c < 4; c++)
+	{
+		uint8	   *code = palloc0(tq.codeBytes);
+
+		scales[c] = TqEncodeVectorBits(docs[c], code, bits);
+		codes[c] = code;
+		single[c] = TqCodeDistanceScalar(&tq, codes[c], scales[c]);
+		batch[c] = single[c];
+	}
+
+#if PGTURBOHYBRID_COMPILE_AVX2
+	TqPrepareQueryU8Split(&tq);
+	if (tq.u8SplitEnabled)
+	{
+		double		b[4];
+
+		/* Single-node u8 kernel, one code at a time. */
+		for (int c = 0; c < 4; c++)
+		{
+			double		s;
+
+			if (PgturbohybridGraphTqCodeU8SimdDistance(&tq, codes[c], scales[c], &s))
+			{
+				single[c] = s;
+				u8Used = true;
+				u8Kernel = PgturbohybridGraphU8SplitKernelName();
+			}
+		}
+		/* True 4-candidate x4 batch over the four distinct codes. */
+		if (PgturbohybridGraphTqCodeU8Simdx4Batch(&tq, codes, scales, b))
+			for (int c = 0; c < 4; c++)
+				batch[c] = b[c];
+	}
+#endif
+
+	for (int c = 0; c < 4; c++)
+		if (batch[c] != single[c])
+			match = false;
+
+	initStringInfo(&json);
+	appendStringInfo(&json,
+					 "{\"single\":[%.9g,%.9g,%.9g,%.9g],"
+					 "\"x4\":[%.9g,%.9g,%.9g,%.9g],"
+					 "\"match\":%s,\"u8_used\":%s,"
+					 "\"unsigned_split_kernel\":\"%s\","
+					 "\"dimensions\":%d,\"bits\":%d}",
+					 single[0], single[1], single[2], single[3],
+					 batch[0], batch[1], batch[2], batch[3],
+					 match ? "true" : "false", u8Used ? "true" : "false",
+					 u8Kernel, dim, bits);
+
+	PG_RETURN_DATUM(DirectFunctionCall1(jsonb_in, CStringGetDatum(json.data)));
+}
+
+/*
  * turbohybrid_scorer_bench(query vector, doc vector, bits int, ncodes int,
  *                          iters int) -> jsonb
  *

@@ -1,0 +1,382 @@
+-- Pre-refactor safety net for the dense scoring kernels.
+--
+-- This file pins the invariants the upcoming dense-scoring refactor must
+-- preserve.  It adds tests and uses existing diagnostics only -- it changes no
+-- production scoring behavior.  Every check raises on violation, so the file's
+-- only output is the trailing 'ok'.
+--
+-- Invariants pinned here:
+--   (1) The x4 (4-candidate) u8 batch kernel produces bit-identical scores to
+--       four single-code u8 kernel calls, under BOTH the AVX2 and the AVX-512
+--       VNNI kernel (whichever the host provides), at 1024 / 1536 / 3072 and a
+--       non-multiple-of-16 tail dimension, for mixed-sign and extreme-magnitude
+--       queries.
+--   (2) The x4 batch over four DISTINCT scattered neighbour codes inside a real
+--       index scan equals four single-node passes bit-for-bit
+--       (turbohybrid.dense_u8_batch_x4 on vs off).
+--   (3) The u8/x4 codebook score stays within the documented query-split
+--       quantization tolerance of the scalar/LUT reference, and a raw 0..15
+--       nibble interpretation stays grossly far from it -- if raw-nibble scoring
+--       ever reappeared in a kernel, the u8 score would land near the raw value
+--       and these checks would fail.
+--   (4) The signed-split fallback still runs when turbohybrid.dense_u8_split=off.
+--   (5) The scalar/LUT fallback still runs when turbohybrid.simd=off.
+--
+-- On platforms without the x86 u8 SIMD kernel (e.g. ARM, or x86 without AVX2)
+-- the diagnostic reports the scalar reference for every u8 field, so the
+-- bit-exact equalities hold trivially and the scan-path assertions are gated on
+-- whether the kernel actually runs; the file never falsely fails.
+CREATE EXTENSION IF NOT EXISTS vector;
+CREATE EXTENSION IF NOT EXISTS pgturbohybrid;
+
+SET jit = off;
+SET enable_seqscan = off;
+
+-- ----------------------------------------------------------------------------
+-- Part 1: per-kernel x4 == single bit-exact parity + codebook correctness.
+-- ----------------------------------------------------------------------------
+
+-- Mixed-sign, moderate-dynamic-range query/doc.  The doc spans the whole
+-- codebook (low / centre / high bins) so raw-vs-codebook scoring diverges.
+CREATE OR REPLACE FUNCTION x4s_q_mixed(p_dim int) RETURNS vector
+LANGUAGE sql IMMUTABLE AS $$
+    SELECT array_agg((sin(g * 0.013) + 0.3 * cos(g * 0.05))::double precision)::real[]::vector
+    FROM generate_series(1, p_dim) g;
+$$;
+CREATE OR REPLACE FUNCTION x4s_d_mixed(p_dim int) RETURNS vector
+LANGUAGE sql IMMUTABLE AS $$
+    SELECT array_agg((cos(g * 0.017) * sin(g * 0.003) + 0.5 * sin(g * 0.001))::double precision)::real[]::vector
+    FROM generate_series(1, p_dim) g;
+$$;
+
+-- Extreme query: high dynamic range, alternating signs, periodic spikes.  After
+-- the per-query rescale this drives the scaled query across the whole
+-- [-127, 127] range, so the low and high split halves and their boundary are
+-- all exercised.  Extreme magnitudes plus a non-16-aligned tail incur more 7-bit
+-- query-split quantization error, hence the looser codebook tolerance below; the
+-- hard invariant under stress remains the bit-exact x4 == single equality.
+CREATE OR REPLACE FUNCTION x4s_q_extreme(p_dim int) RETURNS vector
+LANGUAGE sql IMMUTABLE AS $$
+    SELECT array_agg(((CASE WHEN g % 2 = 0 THEN 1 ELSE -1 END)
+                      * (3.0 + 12.0 * abs(sin(g * 0.031)))
+                      * (CASE WHEN g % 37 = 0 THEN 9.0 ELSE 1.0 END))::double precision)::real[]::vector
+    FROM generate_series(1, p_dim) g;
+$$;
+CREATE OR REPLACE FUNCTION x4s_d_extreme(p_dim int) RETURNS vector
+LANGUAGE sql IMMUTABLE AS $$
+    SELECT array_agg((sin(g * 0.019) * cos(g * 0.007) + 0.4 * sin(g * 0.0013)
+                      + (CASE WHEN g % 53 = 0 THEN 0.9 ELSE 0.0 END))::double precision)::real[]::vector
+    FROM generate_series(1, p_dim) g;
+$$;
+
+-- A family of four phase-shifted docs (k = 1..4) that encode to four DISTINCT
+-- packed codes -- the input the x4 batch kernel runs in production.
+CREATE OR REPLACE FUNCTION x4s_d_phase(p_dim int, p_k int) RETURNS vector
+LANGUAGE sql IMMUTABLE AS $$
+    SELECT array_agg((cos(p_k * 0.37 + g * 0.017) * sin(g * 0.003)
+                      + 0.5 * sin(p_k * 0.9 + g * 0.001))::double precision)::real[]::vector
+    FROM generate_series(1, p_dim) g;
+$$;
+
+-- Score one (query, doc) pair under every dense scorer and assert the invariants.
+CREATE OR REPLACE FUNCTION x4s_kernel_check(p_label text, q vector, d vector, p_lut_tol float8)
+RETURNS void LANGUAGE plpgsql AS $$
+DECLARE
+    r jsonb;
+    lut float8;   -- scalar/LUT codebook reference (always available)
+    u8s float8;   -- unsigned-split scalar reference (integer-derived)
+    u8v float8;   -- unsigned-split single-node SIMD
+    lin float8;   -- raw 0..15 nibble interpretation (adversarial control)
+    dn  int;
+BEGIN
+    r := turbohybrid_scorer_distances(q, d, 4);
+    lut := (r ->> 'scalar_lut')::float8;
+    u8s := (r ->> 'unsigned_split_scalar')::float8;
+    u8v := (r ->> 'unsigned_split_simd')::float8;
+    lin := (r ->> 'linear_reference')::float8;
+    dn  := (r ->> 'distinct_nibbles')::int;
+
+    -- The doc must span many codebook bins, else raw vs codebook would not
+    -- diverge and the guard below would be vacuous.
+    IF dn < 12 THEN
+        RAISE EXCEPTION '%: only % distinct code bins (< 12)', p_label, dn;
+    END IF;
+
+    -- CORE INVARIANT: the x4 batch kernel reproduces the single-node u8 SIMD
+    -- result bit-for-bit (identical %.9g text of the same double).  The kernel
+    -- GUCs force both the single and x4 paths onto the same kernel, so under the
+    -- 'best' run this proves x4-AVX512VNNI == 4x single-AVX512VNNI and under the
+    -- 'avx2' run x4-AVX2 == 4x single-AVX2.  Any drift in the 4-candidate
+    -- decode/accumulate fails here.
+    IF (r ->> 'unsigned_split_x4') IS DISTINCT FROM (r ->> 'unsigned_split_simd') THEN
+        RAISE EXCEPTION '%: x4=% != single u8 simd=% (kernel %)',
+            p_label, r ->> 'unsigned_split_x4', r ->> 'unsigned_split_simd',
+            r ->> 'unsigned_split_kernel';
+    END IF;
+
+    -- The u8 SIMD kernel equals its own integer-derived scalar reference exactly.
+    IF (r ->> 'unsigned_split_simd') IS DISTINCT FROM (r ->> 'unsigned_split_scalar') THEN
+        RAISE EXCEPTION '%: u8 simd=% != u8 scalar=%', p_label, u8v, u8s;
+    END IF;
+
+    -- The x4/u8 codebook score tracks the scalar/LUT reference within the 7-bit
+    -- query-split quantization tolerance.
+    IF abs(u8v - lut) / (abs(lut) + 1.0) > p_lut_tol THEN
+        RAISE EXCEPTION '%: u8/x4=% diverges from scalar_lut=% (rel > %)',
+            p_label, u8v, lut, p_lut_tol;
+    END IF;
+
+    -- A raw 0..15 nibble interpretation must be grossly wrong (proves the guard
+    -- is meaningful) and diverge far more than the codebook scorer does.
+    IF abs(lin - lut) / (abs(lut) + 1.0) < 0.05 THEN
+        RAISE EXCEPTION '%: raw-nibble=% too close to scalar_lut=% (guard vacuous)',
+            p_label, lin, lut;
+    END IF;
+    IF abs(lin - lut) < 10.0 * abs(u8v - lut) THEN
+        RAISE EXCEPTION '%: raw-nibble gap (%) not >> codebook gap (%)',
+            p_label, abs(lin - lut), abs(u8v - lut);
+    END IF;
+END;
+$$;
+
+-- Bit-exact parity of the x4 batch kernel over four DISTINCT codes (the input
+-- the native scorer actually runs) versus four single-node u8 kernel calls.
+CREATE OR REPLACE FUNCTION x4s_batch_parity_check(p_label text, p_dim int)
+RETURNS void LANGUAGE plpgsql AS $$
+DECLARE
+    r jsonb;
+BEGIN
+    r := turbohybrid_scorer_x4_batch_parity(
+            x4s_q_mixed(p_dim),
+            x4s_d_phase(p_dim, 1), x4s_d_phase(p_dim, 2),
+            x4s_d_phase(p_dim, 3), x4s_d_phase(p_dim, 4), 4);
+
+    -- CORE: the x4 batch must equal four single-node calls bit-for-bit per slot.
+    IF NOT (r ->> 'match')::bool THEN
+        RAISE EXCEPTION '% dim=%: x4 batch != single (single=%, x4=%, kernel %)',
+            p_label, p_dim, r -> 'single', r -> 'x4', r ->> 'unsigned_split_kernel';
+    END IF;
+
+    -- Guard against a vacuous check: where the u8 kernel runs the four codes
+    -- must actually differ, else parity over identical codes would be trivial.
+    IF (r ->> 'u8_used')::bool AND NOT (
+            (r -> 'single' ->> 0) <> (r -> 'single' ->> 1)
+        AND (r -> 'single' ->> 1) <> (r -> 'single' ->> 2)
+        AND (r -> 'single' ->> 2) <> (r -> 'single' ->> 3)) THEN
+        RAISE EXCEPTION '% dim=%: four docs did not encode to distinct codes: %',
+            p_label, p_dim, r -> 'single';
+    END IF;
+END;
+$$;
+
+CREATE OR REPLACE FUNCTION x4s_kernel_check_all(p_label text)
+RETURNS void LANGUAGE plpgsql AS $$
+DECLARE
+    dims int[] := ARRAY[1024, 1536, 3072, 1540];  -- incl. non-multiple-of-16 tail
+    dim int;
+BEGIN
+    FOREACH dim IN ARRAY dims LOOP
+        PERFORM x4s_kernel_check(p_label || ' mixed dim=' || dim,
+                                 x4s_q_mixed(dim), x4s_d_mixed(dim), 0.05);
+        PERFORM x4s_kernel_check(p_label || ' extreme dim=' || dim,
+                                 x4s_q_extreme(dim), x4s_d_extreme(dim), 0.10);
+        PERFORM x4s_batch_parity_check(p_label || ' distinct-x4', dim);
+    END LOOP;
+END;
+$$;
+
+-- Best available kernel (AVX-512 VNNI on a capable amd64 host).
+SET turbohybrid.dense_graph_avx512vnni = on;
+SET turbohybrid.dense_graph_avxvnni = on;
+SELECT x4s_kernel_check_all('best');
+
+-- Forced AVX2 (no AVX-512 VNNI / AVX-VNNI): exercises the AVX2 x4 kernel.
+SET turbohybrid.dense_graph_avx512vnni = off;
+SET turbohybrid.dense_graph_avxvnni = off;
+SELECT x4s_kernel_check_all('avx2');
+
+RESET turbohybrid.dense_graph_avx512vnni;
+RESET turbohybrid.dense_graph_avxvnni;
+
+-- ----------------------------------------------------------------------------
+-- Part 2: x4 over DISTINCT scattered codes == four single-node passes, inside a
+-- real index scan; plus the signed-split and scalar/LUT fallbacks.
+-- ----------------------------------------------------------------------------
+CREATE TABLE x4s_docs1536 (id int PRIMARY KEY, embedding vector(1536), body_tsv tsvector);
+INSERT INTO x4s_docs1536(id, embedding, body_tsv)
+SELECT i,
+       (SELECT array_agg(sin(i * 0.29 + g * 0.011))::real[]::vector FROM generate_series(1, 1536) g),
+       to_tsvector('english', 'document ' || i)
+FROM generate_series(1, 1500) AS i;  -- enough nodes that batch-of-4 scoring fires
+CREATE INDEX x4s_idx1536 ON x4s_docs1536
+    USING turbohybrid (embedding vector_cosine_turbohybrid_ops, body_tsv bm25_tsvector_turbohybrid_ops)
+    WITH (quantization_bits = 4);
+ANALYZE x4s_docs1536;
+
+DO $$
+DECLARE
+    qv vector;
+    simd_avail bool;
+    scorer_on text;
+    scorer_off text;
+    scorer text;
+    diff bigint;
+    scalar_codes bigint;
+    nrows int;
+BEGIN
+    -- A plpgsql variable (not a volatile function) so the ORDER BY can be an
+    -- index-ordering key -- otherwise the planner falls back to a seq scan and
+    -- the quantized scorer never runs.
+    qv := (SELECT array_agg(cos(g * 0.017))::real[]::vector FROM generate_series(1, 1536) g);
+    simd_avail := (turbohybrid_scorer_distances(qv, qv) ->> 'unsigned_split_used')::bool;
+
+    SET turbohybrid.dense_query_split_impl = auto;
+    SET turbohybrid.dense_u8_split = auto;
+
+    -- (2) x4 ON: the true 4-candidate batch over four distinct scattered codes.
+    SET turbohybrid.dense_u8_batch_x4 = on;
+    CREATE TEMP TABLE x4s_on AS
+        SELECT id, (embedding <~> turbohybrid_query(vector_query => qv)) AS dist
+        FROM x4s_docs1536
+        ORDER BY embedding <~> turbohybrid_query(vector_query => qv) LIMIT 30;
+    scorer_on := turbohybrid_last_scan_stats() ->> 'dense_scorer';
+
+    -- x4 OFF: four single-node passes over the same four codes.
+    SET turbohybrid.dense_u8_batch_x4 = off;
+    CREATE TEMP TABLE x4s_off AS
+        SELECT id, (embedding <~> turbohybrid_query(vector_query => qv)) AS dist
+        FROM x4s_docs1536
+        ORDER BY embedding <~> turbohybrid_query(vector_query => qv) LIMIT 30;
+    scorer_off := turbohybrid_last_scan_stats() ->> 'dense_scorer';
+    RESET turbohybrid.dense_u8_batch_x4;
+
+    SELECT count(*) INTO diff FROM (
+        (SELECT id, dist FROM x4s_on EXCEPT SELECT id, dist FROM x4s_off)
+        UNION ALL
+        (SELECT id, dist FROM x4s_off EXCEPT SELECT id, dist FROM x4s_on)) z;
+    IF diff <> 0 THEN
+        RAISE EXCEPTION 'dim=1536 x4 on/off differ by % rows (on=%, off=%)',
+            diff, scorer_on, scorer_off;
+    END IF;
+    -- Non-vacuous only where the u8 SIMD kernel actually runs.
+    IF simd_avail AND (scorer_on NOT LIKE 'unsigned_split_%'
+                       OR scorer_off NOT LIKE 'unsigned_split_%') THEN
+        RAISE EXCEPTION 'dim=1536 x4 parity vacuous: on=%, off=%', scorer_on, scorer_off;
+    END IF;
+    DROP TABLE x4s_on;
+    DROP TABLE x4s_off;
+
+    -- (4) Signed-split fallback: dense_u8_split=off drops off the u8 kernel; the
+    -- scan must still return results, through the signed split where available.
+    SET turbohybrid.dense_u8_split = off;
+    SELECT count(*) INTO nrows FROM (
+        SELECT id FROM x4s_docs1536
+        ORDER BY embedding <~> turbohybrid_query(vector_query => qv) LIMIT 10) z;
+    scorer := turbohybrid_last_scan_stats() ->> 'dense_scorer';
+    IF nrows <> 10 THEN
+        RAISE EXCEPTION 'dense_u8_split=off returned % rows (expected 10)', nrows;
+    END IF;
+    IF simd_avail AND scorer LIKE 'unsigned_split_%' THEN
+        RAISE EXCEPTION 'dense_u8_split=off still used the u8 scorer %', scorer;
+    END IF;
+    IF simd_avail AND scorer NOT LIKE 'signed_split_%' THEN
+        RAISE EXCEPTION 'dense_u8_split=off used % (expected signed_split_*)', scorer;
+    END IF;
+    RESET turbohybrid.dense_u8_split;
+
+    -- (5) Scalar/LUT fallback: simd=off drops every SIMD kernel; the scan must
+    -- still return results, scored through the scalar/LUT path.
+    SET turbohybrid.simd = off;
+    SELECT count(*) INTO nrows FROM (
+        SELECT id FROM x4s_docs1536
+        ORDER BY embedding <~> turbohybrid_query(vector_query => qv) LIMIT 10) z;
+    scorer := turbohybrid_last_scan_stats() ->> 'dense_scorer';
+    scalar_codes := (turbohybrid_last_scan_stats() ->> 'graph_scalar_scored_codes')::bigint;
+    IF nrows <> 10 THEN
+        RAISE EXCEPTION 'simd=off returned % rows (expected 10)', nrows;
+    END IF;
+    IF simd_avail AND scorer NOT IN ('scalar_lut', 'avx2_lut_gather', 'scalar') THEN
+        RAISE EXCEPTION 'simd=off used % (expected scalar/LUT)', scorer;
+    END IF;
+    IF simd_avail AND scalar_codes <= 0 THEN
+        RAISE EXCEPTION 'simd=off scored no codes through the scalar/LUT path';
+    END IF;
+    RESET turbohybrid.simd;
+
+    RESET turbohybrid.dense_query_split_impl;
+END $$;
+
+-- Same distinct-code x4 parity at a larger 3072-dim index (fewer rows to bound
+-- build time); proves the equality is not specific to 1536.
+CREATE TABLE x4s_docs3072 (id int PRIMARY KEY, embedding vector(3072), body_tsv tsvector);
+INSERT INTO x4s_docs3072(id, embedding, body_tsv)
+SELECT i,
+       (SELECT array_agg(sin(i * 0.41 + g * 0.009))::real[]::vector FROM generate_series(1, 3072) g),
+       to_tsvector('english', 'document ' || i)
+FROM generate_series(1, 600) AS i;
+CREATE INDEX x4s_idx3072 ON x4s_docs3072
+    USING turbohybrid (embedding vector_cosine_turbohybrid_ops, body_tsv bm25_tsvector_turbohybrid_ops)
+    WITH (quantization_bits = 4);
+ANALYZE x4s_docs3072;
+
+DO $$
+DECLARE
+    qv vector;
+    simd_avail bool;
+    scorer_on text;
+    scorer_off text;
+    diff bigint;
+BEGIN
+    qv := (SELECT array_agg(cos(g * 0.023))::real[]::vector FROM generate_series(1, 3072) g);
+    simd_avail := (turbohybrid_scorer_distances(qv, qv) ->> 'unsigned_split_used')::bool;
+
+    SET turbohybrid.dense_u8_split = auto;
+
+    SET turbohybrid.dense_u8_batch_x4 = on;
+    CREATE TEMP TABLE x4s_on3 AS
+        SELECT id, (embedding <~> turbohybrid_query(vector_query => qv)) AS dist
+        FROM x4s_docs3072
+        ORDER BY embedding <~> turbohybrid_query(vector_query => qv) LIMIT 30;
+    scorer_on := turbohybrid_last_scan_stats() ->> 'dense_scorer';
+
+    SET turbohybrid.dense_u8_batch_x4 = off;
+    CREATE TEMP TABLE x4s_off3 AS
+        SELECT id, (embedding <~> turbohybrid_query(vector_query => qv)) AS dist
+        FROM x4s_docs3072
+        ORDER BY embedding <~> turbohybrid_query(vector_query => qv) LIMIT 30;
+    scorer_off := turbohybrid_last_scan_stats() ->> 'dense_scorer';
+    RESET turbohybrid.dense_u8_batch_x4;
+
+    SELECT count(*) INTO diff FROM (
+        (SELECT id, dist FROM x4s_on3 EXCEPT SELECT id, dist FROM x4s_off3)
+        UNION ALL
+        (SELECT id, dist FROM x4s_off3 EXCEPT SELECT id, dist FROM x4s_on3)) z;
+    IF diff <> 0 THEN
+        RAISE EXCEPTION 'dim=3072 x4 on/off differ by % rows (on=%, off=%)',
+            diff, scorer_on, scorer_off;
+    END IF;
+    IF simd_avail AND (scorer_on NOT LIKE 'unsigned_split_%'
+                       OR scorer_off NOT LIKE 'unsigned_split_%') THEN
+        RAISE EXCEPTION 'dim=3072 x4 parity vacuous: on=%, off=%', scorer_on, scorer_off;
+    END IF;
+    DROP TABLE x4s_on3;
+    DROP TABLE x4s_off3;
+    RESET turbohybrid.dense_u8_split;
+END $$;
+
+SELECT 'x4 safety net ok' AS result;
+
+DROP INDEX x4s_idx3072;
+DROP TABLE x4s_docs3072;
+DROP INDEX x4s_idx1536;
+DROP TABLE x4s_docs1536;
+DROP FUNCTION x4s_kernel_check_all(text);
+DROP FUNCTION x4s_batch_parity_check(text, int);
+DROP FUNCTION x4s_kernel_check(text, vector, vector, float8);
+DROP FUNCTION x4s_q_mixed(int);
+DROP FUNCTION x4s_d_mixed(int);
+DROP FUNCTION x4s_q_extreme(int);
+DROP FUNCTION x4s_d_extreme(int);
+DROP FUNCTION x4s_d_phase(int, int);
+RESET enable_seqscan;
+RESET jit;
