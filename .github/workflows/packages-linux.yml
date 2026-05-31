@@ -18,7 +18,7 @@ jobs:
       matrix:
         pg_major: ['15', '16', '17', '18']
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
 
       - name: Set up PGDG repo and build dependencies
         run: |
@@ -96,7 +96,7 @@ jobs:
             ruby ruby-devel rubygems "postgresql${{ matrix.pg_major }}-devel"
           gem install --no-document fpm
 
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
 
       - name: Build (portable SIMD) and stage install
         env:

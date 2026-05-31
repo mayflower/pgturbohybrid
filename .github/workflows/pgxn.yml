@@ -19,7 +19,7 @@ jobs:
       PGXN_USERNAME: ${{ secrets.PGXN_USERNAME }}
       PGXN_PASSWORD: ${{ secrets.PGXN_PASSWORD }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
 
       - name: Validate META.json and build the PGXN bundle
         run: |

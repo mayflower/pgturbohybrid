@@ -15,7 +15,7 @@ jobs:
     env:
       PG_CONFIG: /usr/lib/postgresql/18/bin/pg_config
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
         with:
           clean: true
           fetch-depth: 0
