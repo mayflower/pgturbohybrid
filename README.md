@@ -11,7 +11,9 @@ whether the fast path is working.
 > The hot hatch of pgvector hybrid search: practical PostgreSQL retrieval with
 > a surprising turn of speed.
 
+[![build](https://github.com/mayflower/pgturbohybrid/actions/workflows/build.yml/badge.svg)](https://github.com/mayflower/pgturbohybrid/actions/workflows/build.yml)
 ![Status: alpha](https://img.shields.io/badge/status-alpha-orange)
+![PostgreSQL 14–19](https://img.shields.io/badge/PostgreSQL-14--19-336791)
 ![PostgreSQL extension](https://img.shields.io/badge/PostgreSQL-extension-336791)
 
 `pgturbohybrid` is a PostgreSQL extension for hybrid dense-vector + lexical
