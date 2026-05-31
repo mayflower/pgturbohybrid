@@ -31,6 +31,8 @@ static int64 pgturbohybrid_last_graph_rescore_count = 0;
 static int64 pgturbohybrid_last_graph_rescore_pages = 0;
 static int64 pgturbohybrid_last_graph_code_pages_read = 0;
 static int64 pgturbohybrid_last_graph_adj_pages_read = 0;
+static int64 pgturbohybrid_last_graph_segment_count = 0;
+static int64 pgturbohybrid_last_graph_segments_searched = 0;
 static int64 pgturbohybrid_last_graph_code_page_attempts = 0;
 static int64 pgturbohybrid_last_graph_code_page_hits = 0;
 static int64 pgturbohybrid_last_graph_code_page_misses = 0;
@@ -137,6 +139,8 @@ static int64 pgturbohybrid_last_graph_base_batch_nodes = 0;
 static int64 pgturbohybrid_last_graph_base_max_frontier = 0;
 static int pgturbohybrid_last_graph_score_mode = PGTURBOHYBRID_SCORE_L2;
 static int pgturbohybrid_last_graph_simd_force = PGTURBOHYBRID_SIMD_FORCE_AUTO;
+static PgturbohybridNativeBuildStatsSnapshot pgturbohybrid_last_native_build_stats;
+static bool pgturbohybrid_last_native_build_stats_valid = false;
 
 static void
 PgturbohybridJsonbAddKey(PgturbohybridJsonbState *state, const char *key)
@@ -211,6 +215,29 @@ PgturbohybridJsonbAddUint64(PgturbohybridJsonbState *state, const char *key, uin
 }
 
 static void
+PgturbohybridJsonbAddUint64Array(PgturbohybridJsonbState *state,
+								 const char *key, const uint64 *vals,
+								 uint32 count)
+{
+	PgturbohybridJsonbAddKey(state, key);
+	PgturbohybridJsonbPush(state, WJB_BEGIN_ARRAY, NULL);
+	for (uint32 i = 0; i < count; i++)
+	{
+		char		buf[32];
+		JsonbValue	value;
+
+		snprintf(buf, sizeof(buf), UINT64_FORMAT, vals[i]);
+		value.type = jbvNumeric;
+		value.val.numeric = DatumGetNumeric(DirectFunctionCall3(numeric_in,
+																CStringGetDatum(buf),
+																ObjectIdGetDatum(InvalidOid),
+																Int32GetDatum(-1)));
+		PgturbohybridJsonbPush(state, WJB_ELEM, &value);
+	}
+	PgturbohybridJsonbPush(state, WJB_END_ARRAY, NULL);
+}
+
+static void
 PgturbohybridJsonbAddFloat8(PgturbohybridJsonbState *state, const char *key, double val)
 {
 	JsonbValue	value;
@@ -220,6 +247,17 @@ PgturbohybridJsonbAddFloat8(PgturbohybridJsonbState *state, const char *key, dou
 	value.val.numeric = DatumGetNumeric(DirectFunctionCall1(float8_numeric,
 															Float8GetDatum(val)));
 	PgturbohybridJsonbPush(state, WJB_VALUE, &value);
+}
+
+void
+PgturbohybridGraphRecordNativeBuildStats(const PgturbohybridNativeBuildStatsSnapshot *stats)
+{
+	if (stats == NULL)
+		return;
+
+	memcpy(&pgturbohybrid_last_native_build_stats, stats,
+		   sizeof(pgturbohybrid_last_native_build_stats));
+	pgturbohybrid_last_native_build_stats_valid = true;
 }
 
 static const char *TqScanOrchestrationName(void);
@@ -283,6 +321,8 @@ PgturbohybridGraphRecordGraphScanStats(PgturbohybridGraphScanOpaque so)
 	pgturbohybrid_last_graph_rescore_pages = so->graphRescorePages;
 	pgturbohybrid_last_graph_code_pages_read = so->graphCodePagesRead;
 	pgturbohybrid_last_graph_adj_pages_read = so->graphAdjPagesRead;
+	pgturbohybrid_last_graph_segment_count = so->graphSegmentCount;
+	pgturbohybrid_last_graph_segments_searched = so->graphSegmentsSearched;
 	pgturbohybrid_last_graph_code_page_attempts = so->graphCodePageAttempts;
 	pgturbohybrid_last_graph_code_page_hits = so->graphCodePageHits;
 	pgturbohybrid_last_graph_code_page_misses = so->graphCodePageMisses;
@@ -457,6 +497,8 @@ PgturbohybridGraphRecordNonGraphScanStats(void)
 	pgturbohybrid_last_graph_rescore_pages = 0;
 	pgturbohybrid_last_graph_code_pages_read = 0;
 	pgturbohybrid_last_graph_adj_pages_read = 0;
+	pgturbohybrid_last_graph_segment_count = 0;
+	pgturbohybrid_last_graph_segments_searched = 0;
 	pgturbohybrid_last_graph_code_page_attempts = 0;
 	pgturbohybrid_last_graph_code_page_hits = 0;
 	pgturbohybrid_last_graph_code_page_misses = 0;
@@ -921,6 +963,8 @@ typedef struct TqLastScanTraversal
 	int64		baseBatchCalls;
 	int64		baseBatchNodes;
 	int64		baseMaxFrontier;
+	int64		segmentCount;
+	int64		segmentsSearched;
 	int64		entryPointCount;
 	int64		entrySidecarCount;
 	int64		entrySidecarScored;
@@ -1126,6 +1170,8 @@ PgturbohybridCollectLastScanStats(TqLastScanStats *s,
 	d->traversal.baseBatchCalls = pgturbohybrid_last_graph_base_batch_calls;
 	d->traversal.baseBatchNodes = pgturbohybrid_last_graph_base_batch_nodes;
 	d->traversal.baseMaxFrontier = pgturbohybrid_last_graph_base_max_frontier;
+	d->traversal.segmentCount = pgturbohybrid_last_graph_segment_count;
+	d->traversal.segmentsSearched = pgturbohybrid_last_graph_segments_searched;
 	d->traversal.entryPointCount = pgturbohybrid_last_graph_entry_point_count;
 	d->traversal.entrySidecarCount = pgturbohybrid_last_graph_entry_sidecar_count;
 	d->traversal.entrySidecarScored = pgturbohybrid_last_graph_entry_sidecar_scored;
@@ -1355,6 +1401,8 @@ PgturbohybridEmitNestedScanStats(PgturbohybridJsonbState *state,
 	PgturbohybridJsonbAddInt64(state, "candidate_count", t->candidateCount);
 	PgturbohybridJsonbAddInt64(state, "rescore_count", t->rescoreCount);
 	PgturbohybridJsonbAddInt64(state, "rescore_pages", t->rescorePages);
+	PgturbohybridJsonbAddInt64(state, "segment_count", t->segmentCount);
+	PgturbohybridJsonbAddInt64(state, "segments_searched", t->segmentsSearched);
 	PgturbohybridJsonbAddInt64(state, "entry_point_count", t->entryPointCount);
 	PgturbohybridJsonbAddInt64(state, "entry_sidecar_count", t->entrySidecarCount);
 	PgturbohybridJsonbAddInt64(state, "entry_sidecar_scored", t->entrySidecarScored);
@@ -1512,6 +1560,116 @@ PgturbohybridEmitNestedScanStats(PgturbohybridJsonbState *state,
 	PgturbohybridJsonbCloseObject(state);	/* query */
 }
 
+FUNCTION_PREFIX PG_FUNCTION_INFO_V1(pgturbohybrid_last_build_stats);
+FUNCTION_PREFIX Datum
+pgturbohybrid_last_build_stats(PG_FUNCTION_ARGS)
+{
+	PgturbohybridJsonbState state;
+	const PgturbohybridNativeBuildStatsSnapshot *s =
+		&pgturbohybrid_last_native_build_stats;
+
+	PgturbohybridJsonbStateInit(&state);
+	PgturbohybridJsonbBeginObject(&state);
+	PgturbohybridJsonbAddInt64(&state, "version", 1);
+	PgturbohybridJsonbAddBool(&state, "available",
+							  pgturbohybrid_last_native_build_stats_valid);
+
+	if (!pgturbohybrid_last_native_build_stats_valid)
+		PG_RETURN_JSONB_P(PgturbohybridJsonbEndObject(&state));
+
+	PgturbohybridJsonbAddString(&state, "relation_name", s->relationName);
+	PgturbohybridJsonbAddInt64(&state, "relid", (int64) s->relid);
+	PgturbohybridJsonbAddString(&state, "index_shape", s->indexShape);
+	PgturbohybridJsonbAddUint64(&state, "node_count", s->nodeCount);
+	PgturbohybridJsonbAddInt64(&state, "dimensions", s->dimensions);
+	PgturbohybridJsonbAddInt64(&state, "quantization_bits",
+							   s->quantizationBits);
+	PgturbohybridJsonbAddInt64(&state, "m", s->m);
+	PgturbohybridJsonbAddInt64(&state, "ef_construction",
+							   s->efConstruction);
+	PgturbohybridJsonbAddBool(&state, "exact_storage", s->exactStorage);
+	PgturbohybridJsonbAddBool(&state, "build_code_only", s->buildCodeOnly);
+	PgturbohybridJsonbAddBool(&state, "build_fast_edges", s->buildFastEdges);
+	PgturbohybridJsonbAddUint64(&state, "build_distance_calls",
+								s->buildDistanceCalls);
+	PgturbohybridJsonbAddUint64(&state, "build_distance_query_split",
+								s->buildDistanceQuerySplit);
+	PgturbohybridJsonbAddUint64(&state, "build_distance_packed",
+								s->buildDistancePacked);
+	PgturbohybridJsonbAddUint64(&state, "build_distance_weighted",
+								s->buildDistanceWeighted);
+	PgturbohybridJsonbAddUint64(&state, "build_distance_code_code",
+								s->buildDistanceCodeCode);
+	PgturbohybridJsonbAddUint64(&state, "build_distance_exact",
+								s->buildDistanceExact);
+	PgturbohybridJsonbAddUint64(&state, "build_distance_fallback",
+								s->buildDistanceFallback);
+	PgturbohybridJsonbAddUint64(&state, "build_edges_distance_calls",
+								s->buildEdgeDistanceCalls);
+	PgturbohybridJsonbAddUint64(&state, "build_edges_search_layer_us",
+								s->buildEdgeSearchLayerUs);
+	PgturbohybridJsonbAddUint64(&state, "build_edges_select_neighbor_us",
+								s->buildEdgeSelectNeighborUs);
+	PgturbohybridJsonbAddUint64(&state, "build_edges_add_neighbor_us",
+								s->buildEdgeAddNeighborUs);
+	PgturbohybridJsonbAddUint64(&state, "build_edges_prune_neighbor_us",
+								s->buildEdgePruneNeighborUs);
+	PgturbohybridJsonbAddUint64(&state, "build_edges_entry_update_us",
+								s->buildEdgeEntryUpdateUs);
+	PgturbohybridJsonbAddInt64(&state, "build_edges_max_frontier_size",
+							   s->buildEdgeMaxFrontierSize);
+	PgturbohybridJsonbAddFloat8(&state, "build_edges_average_nearest_count",
+								s->buildEdgeNearestSamples > 0 ?
+								(double) s->buildEdgeNearestTotal /
+								(double) s->buildEdgeNearestSamples : 0.0);
+	PgturbohybridJsonbAddUint64(&state, "fit_correction_scan_us",
+								s->fitCorrectionScanUs);
+	PgturbohybridJsonbAddUint64(&state, "scan_us", s->scanUs);
+	PgturbohybridJsonbAddUint64(&state, "fit_correction_us",
+								s->fitCorrectionUs);
+	PgturbohybridJsonbAddUint64(&state, "encode_us", s->encodeUs);
+	PgturbohybridJsonbAddUint64(&state, "build_edges_us",
+								s->buildEdgesUs);
+	PgturbohybridJsonbAddUint64(&state, "free_exact_vectors_us",
+								s->freeExactVectorsUs);
+	PgturbohybridJsonbAddUint64(&state, "reorder_nodes_us",
+								s->reorderNodesUs);
+	PgturbohybridJsonbAddUint64(&state, "connect_backbone_us",
+								s->connectBackboneUs);
+	PgturbohybridJsonbAddUint64(&state, "entry_sidecar_us",
+								s->entrySidecarUs);
+	PgturbohybridJsonbAddUint64(&state, "write_pages_us",
+								s->writePagesUs);
+	PgturbohybridJsonbAddUint64(&state, "wal_us", s->walUs);
+	PgturbohybridJsonbAddUint64(&state, "total_us", s->totalUs);
+	PgturbohybridJsonbAddInt64(&state, "worker_count", s->workerCount);
+	PgturbohybridJsonbAddInt64(&state, "native_segments",
+							   s->nativeSegmentCount);
+	PgturbohybridJsonbAddInt64(&state, "native_segment_bytes",
+							   s->nativeSegmentBytes);
+	PgturbohybridJsonbAddBool(&state, "parallel_segment_build_enabled",
+							  s->parallelSegmentBuildEnabled);
+	PgturbohybridJsonbAddString(&state, "segment_build_mode",
+								s->segmentBuildMode);
+	PgturbohybridJsonbAddInt64(&state, "native_build_workers_requested",
+							   s->nativeBuildWorkersRequested);
+	PgturbohybridJsonbAddInt64(&state, "native_build_workers_launched",
+							   s->nativeBuildWorkersLaunched);
+	PgturbohybridJsonbAddBool(&state, "parallel_fit_enabled",
+							  s->parallelFitEnabled);
+	PgturbohybridJsonbAddBool(&state, "parallel_scan_enabled",
+							  s->parallelScanEnabled);
+	PgturbohybridJsonbAddBool(&state, "parallel_encode_enabled",
+							  s->parallelEncodeEnabled);
+	PgturbohybridJsonbAddUint64(&state, "worker_merge_us",
+								s->workerMergeUs);
+	PgturbohybridJsonbAddUint64Array(&state, "worker_scan_us",
+									 s->workerScanUs,
+									 s->workerScanUsCount);
+
+	PG_RETURN_JSONB_P(PgturbohybridJsonbEndObject(&state));
+}
+
 FUNCTION_PREFIX PG_FUNCTION_INFO_V1(pgturbohybrid_last_scan_stats);
 FUNCTION_PREFIX Datum
 pgturbohybrid_last_scan_stats(PG_FUNCTION_ARGS)
@@ -1652,6 +1810,10 @@ pgturbohybrid_last_scan_stats(PG_FUNCTION_ARGS)
 							   pgturbohybrid_last_graph_code_pages_read);
 	PgturbohybridJsonbAddInt64(&state, "graph_adj_pages_read",
 							   pgturbohybrid_last_graph_adj_pages_read);
+	PgturbohybridJsonbAddInt64(&state, "graph_segment_count",
+							   pgturbohybrid_last_graph_segment_count);
+	PgturbohybridJsonbAddInt64(&state, "graph_segments_searched",
+							   pgturbohybrid_last_graph_segments_searched);
 	/*
 	 * Native code-page cache effectiveness (PgturbohybridGraphLoadCodePage).
 	 * A warm scan should be served almost entirely from already-loaded code

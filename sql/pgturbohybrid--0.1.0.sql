@@ -161,6 +161,10 @@ CREATE FUNCTION turbohybrid_last_scan_stats() RETURNS pg_catalog.jsonb
 	AS 'MODULE_PATHNAME', 'pgturbohybrid_last_scan_stats'
 	LANGUAGE C PARALLEL RESTRICTED;
 
+CREATE FUNCTION turbohybrid_last_build_stats() RETURNS pg_catalog.jsonb
+	AS 'MODULE_PATHNAME', 'pgturbohybrid_last_build_stats'
+	LANGUAGE C PARALLEL RESTRICTED;
+
 -- Compact bottleneck diagnosis for the last TurboHybrid scan.  Pulls the key
 -- dense hot-path fields out of turbohybrid_last_scan_stats(), adds a few derived
 -- ratios, and reduces them to a single 'diagnosis' label, so one SELECT explains
@@ -319,6 +323,7 @@ COMMENT ON FUNCTION turbohybrid_vector_norm(vector) IS 'Vector norm support func
 COMMENT ON FUNCTION turbohybrid_handler(pg_catalog.internal) IS 'Index access method handler for TurboHybrid';
 COMMENT ON FUNCTION turbohybrid_index_stats(pg_catalog.regclass) IS 'Return stable TurboHybrid index metadata as jsonb';
 COMMENT ON FUNCTION turbohybrid_last_scan_stats() IS 'Return backend-local summary information for the last TurboHybrid scan as jsonb; parallel restricted because it reads mutable scan state';
+COMMENT ON FUNCTION turbohybrid_last_build_stats() IS 'Return backend-local summary information for the last native TurboHybrid graph build as jsonb; parallel restricted because it reads mutable build state';
 COMMENT ON FUNCTION turbohybrid_last_scan_diagnosis() IS 'Return a compact bottleneck diagnosis of the last TurboHybrid scan as jsonb: key dense hot-path fields, derived ratios, and a single diagnosis label; read-only over turbohybrid_last_scan_stats()';
 COMMENT ON FUNCTION turbohybrid_simd_capabilities() IS 'Return pgturbohybrid build and architecture SIMD capability information as jsonb';
 

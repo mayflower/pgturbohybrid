@@ -898,7 +898,9 @@ PgturbohybridGraphCacheMatches(PgturbohybridGraphNativeCache *cache, Relation in
 		cache->tqCodeStartBlkno == meta->tqCodeStartBlkno &&
 		cache->tqAdjStartBlkno == meta->tqAdjStartBlkno &&
 		cache->tqExactStartBlkno == meta->tqExactStartBlkno &&
-		cache->tqCorrectionStartBlkno == meta->tqCorrectionStartBlkno;
+		cache->tqCorrectionStartBlkno == meta->tqCorrectionStartBlkno &&
+		memcmp(cache->tqSegments, meta->tqSegments,
+			   sizeof(PgturbohybridGraphSegmentMetaData) * meta->tqSegmentCount) == 0;
 }
 
 static void
@@ -1043,6 +1045,8 @@ PgturbohybridGraphBuildCache(Relation index, PgturbohybridGraphMetaPageData *met
 	cache->tqAdjStartBlkno = meta->tqAdjStartBlkno;
 	cache->tqExactStartBlkno = meta->tqExactStartBlkno;
 	cache->tqCorrectionStartBlkno = meta->tqCorrectionStartBlkno;
+	memcpy(cache->tqSegments, meta->tqSegments,
+		   sizeof(PgturbohybridGraphSegmentMetaData) * meta->tqSegmentCount);
 	cache->ctx = cacheCtx;
 
 	PgturbohybridGraphInitScanStorageUncached(meta, &cache->storage,

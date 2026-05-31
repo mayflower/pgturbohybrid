@@ -99,6 +99,12 @@ SET turbohybrid.bm25_hybrid_bound = off;
 SET turbohybrid.bm25_accumulator_mode = hash;
 SET turbohybrid.max_union_candidates = 64;
 SET turbohybrid.simd = off;
+SET turbohybrid.native_build_workers = '0';
+SET turbohybrid.native_build_workers = '1';
+SET turbohybrid.native_build_workers = '2';
+SET turbohybrid.native_build_workers = '4';
+SET turbohybrid.native_build_workers = '8';
+SET turbohybrid.native_build_workers = 'auto';
 RESET turbohybrid.enable_wand;
 RESET turbohybrid.bm25_strategy;
 RESET turbohybrid.bm25_impact_or_mode;
@@ -137,6 +143,12 @@ BEGIN
 	BEGIN
 		EXECUTE 'SET turbohybrid.bm25_hot_postings_cache_mb = 2147483647';
 		RAISE EXCEPTION 'expected bm25_hot_postings_cache_mb cap error';
+	EXCEPTION WHEN invalid_parameter_value THEN
+	END;
+
+	BEGIN
+		EXECUTE 'SET turbohybrid.native_build_workers = ''3''';
+		RAISE EXCEPTION 'expected native_build_workers value error';
 	EXCEPTION WHEN invalid_parameter_value THEN
 	END;
 END
@@ -415,6 +427,15 @@ BEGIN
 			AND proparallel = 'r'
 	) THEN
 		RAISE EXCEPTION 'turbohybrid_last_scan_stats should be parallel restricted';
+	END IF;
+
+	IF NOT EXISTS (
+		SELECT 1
+		FROM pg_proc
+		WHERE oid = 'turbohybrid_last_build_stats()'::regprocedure
+			AND proparallel = 'r'
+	) THEN
+		RAISE EXCEPTION 'turbohybrid_last_build_stats should be parallel restricted';
 	END IF;
 END
 $$;

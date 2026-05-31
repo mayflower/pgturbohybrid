@@ -12,7 +12,7 @@
 --   FINAL_K     recall/precision target          (default 10)
 --   DENSE_K     dense candidate budget           (default 100)
 --   BITS        quantization bits                (default 4)
---   SEGMENTS    comma-separated segment counts   (default 1,2,4,8,10)
+--   SEGMENTS    comma-separated segment counts   (default 1,2,4,8)
 --
 -- This measures the tradeoff of partitioning one native graph into independent
 -- graph segments.  More segments reduce per-segment edge-construction work and
@@ -56,7 +56,7 @@
 \endif
 \if :{?SEGMENTS}
 \else
-  \set SEGMENTS 1,2,4,8,10
+  \set SEGMENTS 1,2,4,8
 \endif
 
 CREATE EXTENSION IF NOT EXISTS pgturbohybrid CASCADE;
@@ -119,6 +119,8 @@ CREATE TEMP TABLE th_segments_results (
     precision_at_k float8,
     p50_ms float8,
     p95_ms float8,
+    avg_segment_count float8,
+    avg_segments_searched float8,
     avg_entry_points float8,
     avg_scored_codes float8,
     avg_visited_nodes float8,
@@ -148,6 +150,8 @@ DECLARE
     latencies float8[] := ARRAY[]::float8[];
     precision_sum float8 := 0.0;
     stats jsonb := '{}'::jsonb;
+    segment_count_sum float8 := 0.0;
+    segments_searched_sum float8 := 0.0;
     entry_points_sum float8 := 0.0;
     scored_sum float8 := 0.0;
     visited_sum float8 := 0.0;
@@ -203,6 +207,8 @@ BEGIN
                 JOIN th_segments_truth truth ON truth.qid = q.qid
                 WHERE got.id = ANY(truth.truth_ids)
             );
+            segment_count_sum := segment_count_sum + coalesce((stats->>'graph_segment_count')::float8, 0);
+            segments_searched_sum := segments_searched_sum + coalesce((stats->>'graph_segments_searched')::float8, 0);
             entry_points_sum := entry_points_sum + coalesce((stats->>'graph_entry_point_count')::float8, 0);
             scored_sum := scored_sum + coalesce((stats->>'graph_scored_codes')::float8, 0);
             visited_sum := visited_sum + coalesce((stats->>'graph_visited_nodes')::float8, 0);
@@ -218,6 +224,8 @@ BEGIN
            precision_sum / (p_timed * p_qset),
            percentile_cont(0.50) WITHIN GROUP (ORDER BY latency_ms),
            percentile_cont(0.95) WITHIN GROUP (ORDER BY latency_ms),
+           segment_count_sum / (p_timed * p_qset),
+           segments_searched_sum / (p_timed * p_qset),
            entry_points_sum / (p_timed * p_qset),
            scored_sum / (p_timed * p_qset),
            visited_sum / (p_timed * p_qset),
@@ -241,6 +249,8 @@ SELECT segment_count,
        round(precision_at_k::numeric, 4) AS precision_at_k,
        round(p50_ms::numeric, 3) AS p50_ms,
        round(p95_ms::numeric, 3) AS p95_ms,
+       round(avg_segment_count::numeric, 2) AS avg_segment_count,
+       round(avg_segments_searched::numeric, 2) AS avg_segments_searched,
        round(avg_entry_points::numeric, 2) AS avg_entry_points,
        round(avg_scored_codes::numeric, 1) AS avg_scored_codes,
        round(avg_visited_nodes::numeric, 1) AS avg_visited_nodes,
