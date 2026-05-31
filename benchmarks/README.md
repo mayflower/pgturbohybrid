@@ -141,6 +141,55 @@ Ready-made harnesses live next to this README:
 - `native_scan_kernel_stats.sql` -- per-bucket kernel attribution from a real
   scan.
 - `rescore_band_latency.sql` -- exact-rescore (`dense_rescore_band`) latency.
+- `concurrency_dense_bench.sql` / `concurrency_dense_bench.sh` -- concurrent-client
+  scaling diagnostics (see below).
+
+## Concurrent-client scaling diagnostics
+
+`concurrency_dense_bench.sql` (driven by `concurrency_dense_bench.sh`) explains
+why dense-default throughput can scale *down* with concurrent clients on
+glove-100-angular (observed ~325 RPS / p95 4.4 ms at 1 client collapsing to
+~127 RPS / p95 179 ms at 8 clients) while pgvector and Qdrant scale up. It does
+not change query behaviour -- it only measures, so the cause is known before any
+algorithm is touched.
+
+It drives the same fixed query set at 1/2/4/8/16 concurrent backends (each a real
+backend opened via `dblink`, so each holds its own per-backend native cache --
+the thing under test) across three native cache caps (`native_cache_max_mb` ∈
+{0 = uncached, 512 = default, high}) and two prewarm modes (A = cold, B = cache
+prebuilt), and attributes the p95 explosion to one of four causes using
+per-backend instrumentation from `turbohybrid_last_scan_stats()`:
+
+| Suspected cause | Signal the harness reads |
+| --- | --- |
+| Cold per-backend cache build | `native_cache_built_this_scan` / `native_cache_build_us` on the cold query; removed by prewarm mode B |
+| Cache duplication / memory bandwidth | `native_cache_bytes` per backend × clients (`total_cache_bytes`); warm, 0 page reads, `graph_total_us` rising with clients; cache ON collapses while OFF scales |
+| Lock waits | `pg_stat_activity` `wait_event_type='Lock'/'LWLock'` sampled during the run; ungranted `pg_locks` on the index |
+| Traversal / scoring CPU | `graph_batch_us` / `graph_traverse_us` per query rising with clients, no waits, ~0 page reads |
+
+The `native_cache_*` keys it relies on are emitted by
+`turbohybrid_last_scan_stats()` (flat keys and under `dense.cache`):
+`native_cache_mode` (`per_backend` / `uncached` / `none`),
+`native_cache_built_this_scan`, `native_cache_build_us`, and
+`native_cache_bytes` with a `code`/`adj`/`exact` breakdown.
+
+```bash
+# Against the loaded glove-100-angular dataset (real collapse):
+benchmarks/concurrency_dense_bench.sh pgturbohybrid_benchmark
+
+# Or build + run a synthetic glove-sized dataset in a throwaway DB:
+CCB_NROWS=1183514 CCB_DIMS=100 \
+  benchmarks/concurrency_dense_bench.sh pgturbohybrid_ccbench
+```
+
+It prints three tables: the **scaling curve** (RPS + p50/p95/p99 vs clients), a
+**cause-attribution** table (cold build µs, wait %, code pages, scoring µs, cache
+bytes per backend × clients), and a heuristic **verdict** per config. It measures
+server-side latency via `dblink` (no client round-trip), so absolute RPS differs
+from the Python `vector-db-benchmark` numbers; the scaling *shape* and the
+per-backend cause signals are the point. Reproducing the per-backend cache
+collapse needs a glove-sized index (~1.18M × 100) -- a small synthetic dataset
+stays cache-resident and scales fine, which the harness correctly shows.
 
 ## Acceptance Checks
 

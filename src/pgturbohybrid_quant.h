@@ -332,8 +332,38 @@ typedef struct PgturbohybridGraphNativeCache
 	BlockNumber tqCorrectionStartBlkno;
 	PgturbohybridGraphScanStorage storage;
 	MemoryContext ctx;
+	/*
+	 * Diagnostics captured when this per-backend cache was built: how long the
+	 * one-time build took, and the resident footprint (code / adjacency / exact
+	 * arenas plus node + metadata) that this backend now holds.  Surfaced via
+	 * turbohybrid_last_scan_stats() so concurrent-client scaling can be reasoned
+	 * about (each backend duplicates residentTotalBytes).
+	 */
+	int64		buildUs;
+	Size		residentCodeBytes;
+	Size		residentAdjBytes;
+	Size		residentExactBytes;
+	Size		residentTotalBytes;
 	struct PgturbohybridGraphNativeCache *next;
 } PgturbohybridGraphNativeCache;
+
+/*
+ * Out-param for PgturbohybridGraphInitScanStorage: how the scan's storage was
+ * satisfied this scan (per-backend cache vs uncached per-scan loading), whether
+ * the per-backend cache had to be built during this very scan (the cold-build
+ * cost), how long that build took, and the resident byte breakdown.  Pass NULL
+ * to ignore (e.g. the insert path).
+ */
+typedef struct PgturbohybridGraphCacheInitInfo
+{
+	PgturbohybridGraphNativeCacheMode mode;
+	bool		builtThisScan;
+	int64		buildUs;
+	int64		totalBytes;
+	int64		codeBytes;
+	int64		adjBytes;
+	int64		exactBytes;
+} PgturbohybridGraphCacheInitInfo;
 
 typedef struct PgturbohybridGraphCorrectionCache
 {
@@ -613,7 +643,8 @@ Vector	   *PgturbohybridGraphReadExactVector(Relation index, PgturbohybridGraphS
 BlockNumber PgturbohybridGraphWriteExactPages(PgturbohybridQuantBuildState *state);
 void		PgturbohybridGraphInvalidateCaches(Relation index);
 void		PgturbohybridGraphInitScanStorage(Relation index, PgturbohybridGraphMetaPageData *meta,
-							   PgturbohybridGraphScanStorage *storage);
+							   PgturbohybridGraphScanStorage *storage,
+							   PgturbohybridGraphCacheInitInfo *info);
 PgturbohybridGraphNativeCache *PgturbohybridGraphInitInsertStorage(Relation index, PgturbohybridGraphMetaPageData *meta,
 										  PgturbohybridGraphScanStorage *storage);
 void		PgturbohybridGraphAppendInsertCacheNode(PgturbohybridGraphNativeCache *cache,

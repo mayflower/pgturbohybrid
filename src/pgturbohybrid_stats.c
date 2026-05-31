@@ -97,6 +97,13 @@ static bool pgturbohybrid_last_graph_large_code_arena = false;
 static bool pgturbohybrid_last_graph_whole_code_prefetch_active = false;
 static int64 pgturbohybrid_last_graph_code_bytes = 0;
 static int64 pgturbohybrid_last_graph_code_arena_estimated_bytes = 0;
+static int pgturbohybrid_last_graph_native_cache_mode = PGTURBOHYBRID_GRAPH_NATIVE_CACHE_NONE;
+static bool pgturbohybrid_last_graph_native_cache_built_this_scan = false;
+static int64 pgturbohybrid_last_graph_native_cache_build_us = 0;
+static int64 pgturbohybrid_last_graph_native_cache_bytes = 0;
+static int64 pgturbohybrid_last_graph_native_cache_code_bytes = 0;
+static int64 pgturbohybrid_last_graph_native_cache_adj_bytes = 0;
+static int64 pgturbohybrid_last_graph_native_cache_exact_bytes = 0;
 static int64 pgturbohybrid_last_graph_dimensions = 0;
 static int64 pgturbohybrid_last_graph_returned_rows = 0;
 static int64 pgturbohybrid_last_graph_oversampling = 0;
@@ -370,6 +377,13 @@ PgturbohybridGraphRecordGraphScanStats(PgturbohybridGraphScanOpaque so)
 		pgturbohybrid_dense_graph_prefetch && so->graphLargeCodeArena;
 	pgturbohybrid_last_graph_code_bytes = so->tq.enabled ? (int64) so->tq.codeBytes : 0;
 	pgturbohybrid_last_graph_code_arena_estimated_bytes = so->graphCodeArenaEstimatedBytes;
+	pgturbohybrid_last_graph_native_cache_mode = so->graphNativeCacheMode;
+	pgturbohybrid_last_graph_native_cache_built_this_scan = so->graphNativeCacheBuiltThisScan;
+	pgturbohybrid_last_graph_native_cache_build_us = so->graphNativeCacheBuildUs;
+	pgturbohybrid_last_graph_native_cache_bytes = so->graphNativeCacheBytes;
+	pgturbohybrid_last_graph_native_cache_code_bytes = so->graphNativeCacheCodeBytes;
+	pgturbohybrid_last_graph_native_cache_adj_bytes = so->graphNativeCacheAdjBytes;
+	pgturbohybrid_last_graph_native_cache_exact_bytes = so->graphNativeCacheExactBytes;
 	/*
 	 * Whether the integer query-split scorer will actually run for this query
 	 * (full gate incl. dim >= 1024 and runtime SIMD availability), as opposed
@@ -477,6 +491,13 @@ PgturbohybridGraphRecordNonGraphScanStats(void)
 	pgturbohybrid_last_graph_whole_code_prefetch_active = false;
 	pgturbohybrid_last_graph_code_bytes = 0;
 	pgturbohybrid_last_graph_code_arena_estimated_bytes = 0;
+	pgturbohybrid_last_graph_native_cache_mode = PGTURBOHYBRID_GRAPH_NATIVE_CACHE_NONE;
+	pgturbohybrid_last_graph_native_cache_built_this_scan = false;
+	pgturbohybrid_last_graph_native_cache_build_us = 0;
+	pgturbohybrid_last_graph_native_cache_bytes = 0;
+	pgturbohybrid_last_graph_native_cache_code_bytes = 0;
+	pgturbohybrid_last_graph_native_cache_adj_bytes = 0;
+	pgturbohybrid_last_graph_native_cache_exact_bytes = 0;
 	pgturbohybrid_last_graph_dimensions = 0;
 	pgturbohybrid_last_graph_returned_rows = 0;
 	pgturbohybrid_last_graph_oversampling = 0;
@@ -489,6 +510,21 @@ PgturbohybridGraphRecordFlatScanStats(void)
 	PgturbohybridGraphRecordNonGraphScanStats();
 	pgturbohybrid_last_scan_orchestration = PGTURBOHYBRID_SCAN_ORCHESTRATION_FLAT;
 	pgturbohybrid_last_graph_storage_kind = PGTURBOHYBRID_GRAPH_STORAGE_QUANT_FLAT;
+}
+
+static const char *
+PgturbohybridGraphNativeCacheModeName(int mode)
+{
+	switch ((PgturbohybridGraphNativeCacheMode) mode)
+	{
+		case PGTURBOHYBRID_GRAPH_NATIVE_CACHE_PER_BACKEND:
+			return "per_backend";
+		case PGTURBOHYBRID_GRAPH_NATIVE_CACHE_UNCACHED:
+			return "uncached";
+		case PGTURBOHYBRID_GRAPH_NATIVE_CACHE_NONE:
+		default:
+			return "none";
+	}
 }
 
 static const char *
@@ -746,6 +782,14 @@ typedef struct TqLastScanCache
 	int64		codeArenaEstimatedBytes;
 	bool		largeCodeArena;
 	bool		wholeCodePrefetchActive;
+	/* Per-backend native scan-cache provenance (see PgturbohybridGraphNativeCacheMode). */
+	int			nativeCacheMode;
+	bool		nativeCacheBuiltThisScan;
+	int64		nativeCacheBuildUs;
+	int64		nativeCacheBytes;
+	int64		nativeCacheCodeBytes;
+	int64		nativeCacheAdjBytes;
+	int64		nativeCacheExactBytes;
 } TqLastScanCache;
 
 typedef struct TqLastScanTraversal
@@ -912,6 +956,13 @@ PgturbohybridCollectLastScanStats(TqLastScanStats *s,
 	d->cache.codeArenaEstimatedBytes = pgturbohybrid_last_graph_code_arena_estimated_bytes;
 	d->cache.largeCodeArena = pgturbohybrid_last_graph_large_code_arena;
 	d->cache.wholeCodePrefetchActive = pgturbohybrid_last_graph_whole_code_prefetch_active;
+	d->cache.nativeCacheMode = pgturbohybrid_last_graph_native_cache_mode;
+	d->cache.nativeCacheBuiltThisScan = pgturbohybrid_last_graph_native_cache_built_this_scan;
+	d->cache.nativeCacheBuildUs = pgturbohybrid_last_graph_native_cache_build_us;
+	d->cache.nativeCacheBytes = pgturbohybrid_last_graph_native_cache_bytes;
+	d->cache.nativeCacheCodeBytes = pgturbohybrid_last_graph_native_cache_code_bytes;
+	d->cache.nativeCacheAdjBytes = pgturbohybrid_last_graph_native_cache_adj_bytes;
+	d->cache.nativeCacheExactBytes = pgturbohybrid_last_graph_native_cache_exact_bytes;
 
 	d->traversal.visitedNodes = pgturbohybrid_last_graph_visited_nodes;
 	d->traversal.scoredCodes = pgturbohybrid_last_graph_scored_codes;
@@ -1085,6 +1136,17 @@ PgturbohybridEmitNestedScanStats(PgturbohybridJsonbState *state,
 	PgturbohybridJsonbAddFloat8(state, "pages_read_per_scored_code",
 								c->scoredCodes > 0 ?
 								(double) c->codePagesRead / (double) c->scoredCodes : 0.0);
+	/* Per-backend native cache: mode, the one-time cold-build cost, and the
+	 * resident footprint duplicated across concurrent clients. */
+	PgturbohybridJsonbAddString(state, "native_cache_mode",
+								PgturbohybridGraphNativeCacheModeName(c->nativeCacheMode));
+	PgturbohybridJsonbAddBool(state, "native_cache_built_this_scan",
+							  c->nativeCacheBuiltThisScan);
+	PgturbohybridJsonbAddInt64(state, "native_cache_build_us", c->nativeCacheBuildUs);
+	PgturbohybridJsonbAddInt64(state, "native_cache_bytes", c->nativeCacheBytes);
+	PgturbohybridJsonbAddInt64(state, "native_cache_code_bytes", c->nativeCacheCodeBytes);
+	PgturbohybridJsonbAddInt64(state, "native_cache_adj_bytes", c->nativeCacheAdjBytes);
+	PgturbohybridJsonbAddInt64(state, "native_cache_exact_bytes", c->nativeCacheExactBytes);
 	PgturbohybridJsonbCloseObject(state);	/* cache */
 
 	/* dense.traversal ------------------------------------------------- */
@@ -1476,6 +1538,29 @@ pgturbohybrid_last_scan_stats(PG_FUNCTION_ARGS)
 							   pgturbohybrid_last_graph_code_bytes);
 	PgturbohybridJsonbAddInt64(&state, "graph_code_arena_estimated_bytes",
 							   pgturbohybrid_last_graph_code_arena_estimated_bytes);
+	/*
+	 * Per-backend native scan-cache provenance.  native_cache_mode says whether
+	 * the scan was served from the process-local per-backend cache, fell back to
+	 * uncached per-scan page loading, or was a non-graph scan; built_this_scan +
+	 * build_us isolate the one-time cold per-backend build (the prewarm A/B
+	 * signal); native_cache_bytes (with the code/adj/exact breakdown) is the
+	 * resident footprint each backend holds and therefore the memory duplicated
+	 * across N concurrent clients.
+	 */
+	PgturbohybridJsonbAddString(&state, "native_cache_mode",
+								PgturbohybridGraphNativeCacheModeName(pgturbohybrid_last_graph_native_cache_mode));
+	PgturbohybridJsonbAddBool(&state, "native_cache_built_this_scan",
+							  pgturbohybrid_last_graph_native_cache_built_this_scan);
+	PgturbohybridJsonbAddInt64(&state, "native_cache_build_us",
+							   pgturbohybrid_last_graph_native_cache_build_us);
+	PgturbohybridJsonbAddInt64(&state, "native_cache_bytes",
+							   pgturbohybrid_last_graph_native_cache_bytes);
+	PgturbohybridJsonbAddInt64(&state, "native_cache_code_bytes",
+							   pgturbohybrid_last_graph_native_cache_code_bytes);
+	PgturbohybridJsonbAddInt64(&state, "native_cache_adj_bytes",
+							   pgturbohybrid_last_graph_native_cache_adj_bytes);
+	PgturbohybridJsonbAddInt64(&state, "native_cache_exact_bytes",
+							   pgturbohybrid_last_graph_native_cache_exact_bytes);
 	PgturbohybridJsonbAddInt64(&state, "graph_dense_requested_k",
 							   pgturbohybrid_last_graph_dense_requested_k);
 	PgturbohybridJsonbAddInt64(&state, "graph_effective_result_target",

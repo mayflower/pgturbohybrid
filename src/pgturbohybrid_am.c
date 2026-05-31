@@ -1675,7 +1675,7 @@ PgturbohybridApplyBm25OnlyExactRescore(IndexScanDesc scan,
 	LockPage(scan->indexRelation, PGTURBOHYBRID_GRAPH_SCAN_LOCK, ShareLock);
 	PG_TRY();
 	{
-		PgturbohybridGraphInitScanStorage(scan->indexRelation, &meta, &storage);
+		PgturbohybridGraphInitScanStorage(scan->indexRelation, &meta, &storage, NULL);
 
 		for (int i = 0; i < count; i++)
 		{

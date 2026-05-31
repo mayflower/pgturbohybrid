@@ -4449,6 +4449,7 @@ PgturbohybridGraphCollectResults(IndexScanDesc scan, PgturbohybridGraphScanOpaqu
 	int			count = 0;
 	PgturbohybridGraphResult *results;
 	PgturbohybridGraphScanStorage storage;
+	PgturbohybridGraphCacheInitInfo cacheInfo;
 	int64		activeTarget;
 	double		estimatedSelectivity;
 	int			rescoreCount;
@@ -4613,7 +4614,20 @@ PgturbohybridGraphCollectResults(IndexScanDesc scan, PgturbohybridGraphScanOpaqu
 	so->graphEffectiveResultTarget = resultTarget;
 	so->graphEffectiveSearchEf = searchEf;
 	results = palloc(sizeof(PgturbohybridGraphResult) * resultTarget);
-	PgturbohybridGraphInitScanStorage(scan->indexRelation, &meta, &storage);
+	PgturbohybridGraphInitScanStorage(scan->indexRelation, &meta, &storage, &cacheInfo);
+	/*
+	 * Per-backend native scan-cache provenance for this scan: which cache mode
+	 * served it, whether the per-backend cache was built during this scan (the
+	 * cold-build cost that the prewarm A/B comparison isolates), and the
+	 * resident footprint each backend duplicates.
+	 */
+	so->graphNativeCacheMode = cacheInfo.mode;
+	so->graphNativeCacheBuiltThisScan = cacheInfo.builtThisScan;
+	so->graphNativeCacheBuildUs = cacheInfo.buildUs;
+	so->graphNativeCacheBytes = cacheInfo.totalBytes;
+	so->graphNativeCacheCodeBytes = cacheInfo.codeBytes;
+	so->graphNativeCacheAdjBytes = cacheInfo.adjBytes;
+	so->graphNativeCacheExactBytes = cacheInfo.exactBytes;
 	/*
 	 * Whole-code prefetch in the batch scorer pays off only once the code arena
 	 * is too big for CPU cache (codes become scattered RAM reads); below that

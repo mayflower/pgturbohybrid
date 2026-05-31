@@ -893,6 +893,27 @@ typedef enum PgturbohybridGraphU8BatchMode
 	PGTURBOHYBRID_U8_BATCH_SINGLE
 }			PgturbohybridGraphU8BatchMode;
 
+/*
+ * How the native dense scan's per-backend code/adjacency cache was satisfied
+ * for this scan, surfaced as native_cache_mode in turbohybrid_last_scan_stats().
+ * The native cache is process-local (one copy per backend), so under N
+ * concurrent clients the per_backend footprint is duplicated N times -- this
+ * mode is the first thing to check when explaining concurrent-client collapse.
+ *   none        non-graph scan (flat storage / no native quantized graph)
+ *   uncached    index exceeds turbohybrid.native_cache_max_mb, so the scan
+ *               storage is rebuilt and code pages reloaded every scan with no
+ *               cross-scan reuse (cold page loading dominates each query)
+ *   per_backend index fits the cap, so a process-local cache is built once and
+ *               reused by every later scan in this backend (warm scans read 0
+ *               code pages but each backend holds its own full copy)
+ */
+typedef enum PgturbohybridGraphNativeCacheMode
+{
+	PGTURBOHYBRID_GRAPH_NATIVE_CACHE_NONE = 0,
+	PGTURBOHYBRID_GRAPH_NATIVE_CACHE_UNCACHED,
+	PGTURBOHYBRID_GRAPH_NATIVE_CACHE_PER_BACKEND
+}			PgturbohybridGraphNativeCacheMode;
+
 typedef struct PgturbohybridGraphScanOpaqueData
 {
 	const		PgturbohybridGraphTypeInfo *typeInfo;
@@ -953,6 +974,20 @@ typedef struct PgturbohybridGraphScanOpaqueData
 	/* Estimated full code working set (tqNodeCount * tqCodeBytes) used to decide
 	 * graphLargeCodeArena.  Per-code width is so->tq.codeBytes. */
 	int64		graphCodeArenaEstimatedBytes;
+	/*
+	 * Per-backend native scan-cache provenance for this scan (diagnostics for
+	 * concurrent-client scaling).  graphNativeCacheMode says which mode served
+	 * the scan; graphNativeCacheBuiltThisScan/BuildUs isolate the one-time cold
+	 * per-backend build cost (the prewarm A/B signal); the *Bytes fields are the
+	 * resident footprint each backend holds (duplicated per concurrent client).
+	 */
+	PgturbohybridGraphNativeCacheMode graphNativeCacheMode;
+	bool		graphNativeCacheBuiltThisScan;
+	int64		graphNativeCacheBuildUs;
+	int64		graphNativeCacheBytes;
+	int64		graphNativeCacheCodeBytes;
+	int64		graphNativeCacheAdjBytes;
+	int64		graphNativeCacheExactBytes;
 	int64		graphCandidateCount;
 	int64		graphRescoreCount;
 	int64		graphRescorePages;
