@@ -76,7 +76,16 @@
 #define PGTURBOHYBRID_COMPILE_AVXVNNI 0
 #endif
 
-#if PGTURBOHYBRID_X86 && (defined(__GNUC__) || defined(__clang__))
+/*
+ * Runtime CPU-dispatch paths call into the AVX2/AVX-512 kernels, which are only
+ * compiled when the matching PGTURBOHYBRID_COMPILE_* macro is set.  So the
+ * runtime gate must require !PGTURBOHYBRID_DISABLE_SIMD too: with SIMD disabled
+ * (SIMD_BUILD=none) the COMPILE_* kernels are absent, and a runtime-gated call
+ * site that survived would reference an undefined function.  Mirrors the
+ * COMPILE-derived PGTURBOHYBRID_RUNTIME_AVXVNNI gate below.
+ */
+#if !defined(PGTURBOHYBRID_DISABLE_SIMD) && \
+	PGTURBOHYBRID_X86 && (defined(__GNUC__) || defined(__clang__))
 #define PGTURBOHYBRID_RUNTIME_AVX2 1
 #define PGTURBOHYBRID_RUNTIME_AVX512VNNI 1
 #else
@@ -1007,6 +1016,10 @@ TqRotateHadamardChunks(double *values, int dim)
 #if PGTURBOHYBRID_RUNTIME_AVX2
 	bool		useAvx2 = simdGate && __builtin_cpu_supports("avx2");
 #endif
+
+	/* simdGate is read only by the AVX2 / NEON branches; on a no-SIMD build
+	 * (neither compiled) it would otherwise be an unused variable. */
+	(void) simdGate;
 
 	while (remaining > 0)
 	{
