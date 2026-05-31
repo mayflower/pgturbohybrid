@@ -1348,9 +1348,9 @@ TqBuildQueryLut(PgturbohybridGraphTqQuery *tq)
 	for (int i = 0; i < dim; i++)
 	{
 		float		qv = tq->queryValues[i];
-		float	   *row = tq->lut + (i * PGTURBOHYBRID_LUT_WIDTH);
+		float	   *row = tq->lut.table + (i * PGTURBOHYBRID_LUT_WIDTH);
 
-		for (int j = 0; j < tq->lutWidth; j++)
+		for (int j = 0; j < tq->lut.width; j++)
 		{
 			float		vv = TqGetCodeCenterBits(j, tq->bits);
 
@@ -1469,11 +1469,11 @@ TqPrepareQueryAsymBit1(PgturbohybridGraphTqQuery *tq)
 	}
 	qScale = (float) qIntMax / qAbsMax;
 
-	tq->queryPlanes = palloc0((Size) totalBlocks * BITS *
+	tq->bit1.planes = palloc0((Size) totalBlocks * BITS *
 							  PGTURBOHYBRID_QUERY_ASYM_BLOCK_BYTES);
-	tq->queryAsymNumFullBlocks = numFullBlocks;
-	tq->queryAsymTailBytes = tailBytes;
-	tq->queryAsymBits = BITS;
+	tq->bit1.numFullBlocks = numFullBlocks;
+	tq->bit1.tailBytes = tailBytes;
+	tq->bit1.bits = BITS;
 
 	for (int i = 0; i < dim; i++)
 	{
@@ -1502,7 +1502,7 @@ TqPrepareQueryAsymBit1(PgturbohybridGraphTqQuery *tq)
 		/* mask to BITS bits — two's-complement representation */
 		qBits = (uint32) qInt & ((BITS >= 32) ? 0xFFFFFFFFu : ((1u << BITS) - 1));
 
-		blockBase = tq->queryPlanes +
+		blockBase = tq->bit1.planes +
 			(Size) blockIdx * BITS * PGTURBOHYBRID_QUERY_ASYM_BLOCK_BYTES;
 
 		for (int b = 0; b < BITS; b++)
@@ -1514,8 +1514,8 @@ TqPrepareQueryAsymBit1(PgturbohybridGraphTqQuery *tq)
 		}
 	}
 
-	tq->queryAsymSumSigned = sumSigned;
-	tq->queryAsymScale = TqCodeCenters1[1] / qScale;	/* c / q_scale */
+	tq->bit1.sumSigned = sumSigned;
+	tq->bit1.scale = TqCodeCenters1[1] / qScale;	/* c / q_scale */
 }
 
 /*
@@ -1523,7 +1523,7 @@ TqPrepareQueryAsymBit1(PgturbohybridGraphTqQuery *tq)
  *
  * Storage:
  *   codebook        signed i8 (PgturbohybridGraphCodebookI8 / PgturbohybridGraphCodebook2I8)
- *   query halves    signed i8 in tq->querySplitLow / querySplitHigh
+ *   query halves    signed i8 in tq->signedSplit.low / signedSplit.high
  *   K               PGTURBOHYBRID_QUERY_SPLIT_HIGH_COEF = 256 on amd64 and aarch64
  *
  * Encoding:
@@ -1536,7 +1536,7 @@ TqPrepareQueryAsymBit1(PgturbohybridGraphTqQuery *tq)
  *   contribution = c * q_signed = c * (K * high + low)             (2)
  *
  * Postprocess:
- *   tq->querySplitPostprocessScale = 1 / (q_scale * CODEBOOK*_SCALE)
+ *   tq->signedSplit.postprocessScale = 1 / (q_scale * CODEBOOK*_SCALE)
  *
  * SIMD implementations:
  *   AVX2 (no VNNI)   — `cvtepi8_epi16 + madd_epi16` → signed*signed dot
@@ -1555,6 +1555,57 @@ TqPrepareQueryAsymBit1(PgturbohybridGraphTqQuery *tq)
  * implementations.  Any drift here changes scoring across CPU dispatches,
  * so the constants are pinned by test/sql/pgturbohybrid_simd_parity.sql.
  */
+
+/*
+ * Shared query-quantization math for the signed split (HIGH_COEF 256) and the
+ * x86 u8 split (HIGH_COEF 128).  Factored out so the two prep functions cannot
+ * drift; they differ only in the constants (absMax, highCoef), storage layout,
+ * representation, bias, and postprocess scale -- all kept at the call sites.
+ */
+
+/* Max |query value|, floored at FLT_EPSILON so qScale stays finite. */
+static inline float
+TqQuerySplitAbsMax(const float *queryValues, int dimensions)
+{
+	float		qAbsMax = 0;
+
+	for (int i = 0; i < dimensions; i++)
+		qAbsMax = Max(qAbsMax, fabsf(queryValues[i]));
+	return qAbsMax < FLT_EPSILON ? FLT_EPSILON : qAbsMax;
+}
+
+/*
+ * Quantize one query value and split it: saturate value*qScale to +/-absMax,
+ * round to qSigned, then write qSigned = highCoef*high + low with low mapped to
+ * the symmetric range [-highCoef/2, highCoef/2).  absMax/highCoef are passed as
+ * literal constants at the (per-query, non-hot) call sites so the modulo and
+ * division fold at -O2; static inline keeps them register-resident.
+ */
+static inline void
+TqQuerySplitValue(float value, float qScale, float absMax, int highCoef,
+				  int *qSignedOut, int8 *lowOut, int8 *highOut)
+{
+	float		scaled = value * qScale;
+	int			qSigned;
+	int			lowMod;
+	int8		low;
+
+	if (scaled < -absMax)
+		scaled = -absMax;
+	else if (scaled > absMax)
+		scaled = absMax;
+
+	qSigned = (int) lrintf(scaled);
+	lowMod = qSigned % highCoef;
+	if (lowMod < 0)
+		lowMod += highCoef;
+	low = (int8) (lowMod >= highCoef / 2 ? lowMod - highCoef : lowMod);
+
+	*qSignedOut = qSigned;
+	*lowOut = low;
+	*highOut = (int8) ((qSigned - (int) low) / highCoef);
+}
+
 #if defined(__aarch64__) || defined(_M_ARM64) || PGTURBOHYBRID_COMPILE_AVX2
 static void
 TqPrepareQuerySplit4(PgturbohybridGraphTqQuery *tq)
@@ -1567,66 +1618,51 @@ TqPrepareQuerySplit4(PgturbohybridGraphTqQuery *tq)
 		tq->scoreMode == PGTURBOHYBRID_SCORE_L1 || tq->dimensions <= 0)
 		return;
 
-	for (int i = 0; i < tq->dimensions; i++)
-		qAbsMax = Max(qAbsMax, fabsf(tq->queryValues[i]));
-
-	if (qAbsMax < FLT_EPSILON)
-		qAbsMax = FLT_EPSILON;
+	qAbsMax = TqQuerySplitAbsMax(tq->queryValues, tq->dimensions);
 
 	tq->querySplitChunks = tq->dimensions / 16;
 	tq->querySplitTailDims = tq->dimensions - (tq->querySplitChunks * 16);
-	tq->querySplitLow = palloc0(Max(tq->querySplitChunks, 1) * 16);
-	tq->querySplitHigh = palloc0(Max(tq->querySplitChunks, 1) * 16);
-	tq->querySplitLowU8 = palloc0(Max(tq->querySplitChunks, 1) * 16);
-	tq->querySplitHighU8 = palloc0(Max(tq->querySplitChunks, 1) * 16);
-	memset(tq->querySplitTailLowU8, 0x80, sizeof(tq->querySplitTailLowU8));
-	memset(tq->querySplitTailHighU8, 0x80, sizeof(tq->querySplitTailHighU8));
+	tq->signedSplit.low = palloc0(Max(tq->querySplitChunks, 1) * 16);
+	tq->signedSplit.high = palloc0(Max(tq->querySplitChunks, 1) * 16);
+	tq->signedSplit.lowU8 = palloc0(Max(tq->querySplitChunks, 1) * 16);
+	tq->signedSplit.highU8 = palloc0(Max(tq->querySplitChunks, 1) * 16);
+	memset(tq->signedSplit.tailLowU8, 0x80, sizeof(tq->signedSplit.tailLowU8));
+	memset(tq->signedSplit.tailHighU8, 0x80, sizeof(tq->signedSplit.tailHighU8));
 	qScale = PGTURBOHYBRID_QUERY_SPLIT_ABS_MAX / qAbsMax;
-	tq->querySplitPostprocessScale = 1.0f /
+	tq->signedSplit.postprocessScale = 1.0f /
 		(qScale * (tq->bits == 2 ? PGTURBOHYBRID_CODEBOOK2_SCALE : PGTURBOHYBRID_CODEBOOK_SCALE));
 	fullDims = tq->querySplitChunks * 16;
 
 	for (int i = 0; i < tq->dimensions; i++)
 	{
 		int			qSigned;
-		int			lowMod;
 		int8		low;
 		int8		high;
 
-		float		scaled = tq->queryValues[i] * qScale;
-
-		if (scaled < -PGTURBOHYBRID_QUERY_SPLIT_ABS_MAX)
-			scaled = -PGTURBOHYBRID_QUERY_SPLIT_ABS_MAX;
-		else if (scaled > PGTURBOHYBRID_QUERY_SPLIT_ABS_MAX)
-			scaled = PGTURBOHYBRID_QUERY_SPLIT_ABS_MAX;
-
-		qSigned = (int) lrintf(scaled);
-		lowMod = qSigned % PGTURBOHYBRID_QUERY_SPLIT_HIGH_COEF;
-		if (lowMod < 0)
-			lowMod += PGTURBOHYBRID_QUERY_SPLIT_HIGH_COEF;
-		low = (int8) (lowMod >= PGTURBOHYBRID_QUERY_SPLIT_HIGH_COEF / 2 ?
-					  lowMod - PGTURBOHYBRID_QUERY_SPLIT_HIGH_COEF : lowMod);
-		high = (int8) ((qSigned - (int) low) / PGTURBOHYBRID_QUERY_SPLIT_HIGH_COEF);
+		TqQuerySplitValue(tq->queryValues[i], qScale,
+						  PGTURBOHYBRID_QUERY_SPLIT_ABS_MAX,
+						  PGTURBOHYBRID_QUERY_SPLIT_HIGH_COEF,
+						  &qSigned, &low, &high);
 
 		if (i < fullDims)
 		{
-			tq->querySplitLow[i] = low;
-			tq->querySplitHigh[i] = high;
-			tq->querySplitLowU8[i] = (uint8) low ^ 0x80;
-			tq->querySplitHighU8[i] = (uint8) high ^ 0x80;
+			tq->signedSplit.low[i] = low;
+			tq->signedSplit.high[i] = high;
+			tq->signedSplit.lowU8[i] = (uint8) low ^ 0x80;
+			tq->signedSplit.highU8[i] = (uint8) high ^ 0x80;
 		}
 		else
 		{
 			int			tail = i - fullDims;
 
-			tq->querySplitTailLow[tail] = low;
-			tq->querySplitTailHigh[tail] = high;
-			tq->querySplitTailLowU8[tail] = (uint8) low ^ 0x80;
-			tq->querySplitTailHighU8[tail] = (uint8) high ^ 0x80;
+			tq->signedSplit.tailLow[tail] = low;
+			tq->signedSplit.tailHigh[tail] = high;
+			tq->signedSplit.tailLowU8[tail] = (uint8) low ^ 0x80;
+			tq->signedSplit.tailHighU8[tail] = (uint8) high ^ 0x80;
 		}
 	}
 
-	tq->querySplitEnabled = true;
+	tq->signedSplit.enabled = true;
 }
 
 #if PGTURBOHYBRID_COMPILE_AVX2
@@ -1650,40 +1686,27 @@ TqPrepareQueryU8Split(PgturbohybridGraphTqQuery *tq)
 		tq->scoreMode == PGTURBOHYBRID_SCORE_L1 || tq->dimensions <= 0)
 		return;
 
-	for (int i = 0; i < tq->dimensions; i++)
-		qAbsMax = Max(qAbsMax, fabsf(tq->queryValues[i]));
-	if (qAbsMax < FLT_EPSILON)
-		qAbsMax = FLT_EPSILON;
+	qAbsMax = TqQuerySplitAbsMax(tq->queryValues, tq->dimensions);
 
 	tq->querySplitChunks = tq->dimensions / 16;
 	tq->querySplitTailDims = tq->dimensions - (tq->querySplitChunks * 16);
-	tq->u8SplitData = palloc0(Max(tq->querySplitChunks, 1) * 32);
-	memset(tq->u8SplitTailLow, 0, sizeof(tq->u8SplitTailLow));
-	memset(tq->u8SplitTailHigh, 0, sizeof(tq->u8SplitTailHigh));
+	tq->u8.data = palloc0(Max(tq->querySplitChunks, 1) * 32);
+	memset(tq->u8.tailLow, 0, sizeof(tq->u8.tailLow));
+	memset(tq->u8.tailHigh, 0, sizeof(tq->u8.tailHigh));
 	qScale = PGTURBOHYBRID_U8_SPLIT_ABS_MAX / qAbsMax;
-	tq->u8SplitPostprocessScale = 1.0f / (qScale * PGTURBOHYBRID_CODEBOOK_SCALE);
+	tq->u8.postprocessScale = 1.0f / (qScale * PGTURBOHYBRID_CODEBOOK_SCALE);
 	fullDims = tq->querySplitChunks * 16;
 
 	for (int i = 0; i < tq->dimensions; i++)
 	{
 		int			qSigned;
-		int			lowMod;
 		int8		low;
 		int8		high;
-		float		scaled = tq->queryValues[i] * qScale;
 
-		if (scaled < -PGTURBOHYBRID_U8_SPLIT_ABS_MAX)
-			scaled = -PGTURBOHYBRID_U8_SPLIT_ABS_MAX;
-		else if (scaled > PGTURBOHYBRID_U8_SPLIT_ABS_MAX)
-			scaled = PGTURBOHYBRID_U8_SPLIT_ABS_MAX;
-
-		qSigned = (int) lrintf(scaled);
-		lowMod = qSigned % PGTURBOHYBRID_U8_SPLIT_HIGH_COEF;
-		if (lowMod < 0)
-			lowMod += PGTURBOHYBRID_U8_SPLIT_HIGH_COEF;
-		low = (int8) (lowMod >= PGTURBOHYBRID_U8_SPLIT_HIGH_COEF / 2 ?
-					  lowMod - PGTURBOHYBRID_U8_SPLIT_HIGH_COEF : lowMod);
-		high = (int8) ((qSigned - (int) low) / PGTURBOHYBRID_U8_SPLIT_HIGH_COEF);
+		TqQuerySplitValue(tq->queryValues[i], qScale,
+						  PGTURBOHYBRID_U8_SPLIT_ABS_MAX,
+						  PGTURBOHYBRID_U8_SPLIT_HIGH_COEF,
+						  &qSigned, &low, &high);
 		sumSigned += qSigned;
 
 		if (i < fullDims)
@@ -1691,19 +1714,19 @@ TqPrepareQueryU8Split(PgturbohybridGraphTqQuery *tq)
 			int			chunk = i / 16;
 			int			lane = i % 16;
 
-			tq->u8SplitData[chunk * 32 + lane] = low;
-			tq->u8SplitData[chunk * 32 + 16 + lane] = high;
+			tq->u8.data[chunk * 32 + lane] = low;
+			tq->u8.data[chunk * 32 + 16 + lane] = high;
 		}
 		else
 		{
 			int			tail = i - fullDims;
 
-			tq->u8SplitTailLow[tail] = low;
-			tq->u8SplitTailHigh[tail] = high;
+			tq->u8.tailLow[tail] = low;
+			tq->u8.tailHigh[tail] = high;
 		}
 	}
 
-	tq->u8SplitBias = (int64) PGTURBOHYBRID_U8_CODEBOOK_OFFSET * sumSigned;
+	tq->u8.bias = (int64) PGTURBOHYBRID_U8_CODEBOOK_OFFSET * sumSigned;
 
 	/*
 	 * Precompute the postprocess reciprocals once per query so the per-node
@@ -1714,7 +1737,14 @@ TqPrepareQueryU8Split(PgturbohybridGraphTqQuery *tq)
 	tq->invQueryNormDimSqrt = tq->queryNorm > 0 ?
 		1.0 / (sqrt(tq->queryNorm) * sqrt((double) tq->dimensions)) : 0.0;
 
-	tq->u8SplitEnabled = true;
+	tq->u8.enabled = true;
+
+	/*
+	 * Resolve the exact u8 single/batch kernels now (per scan, per query) so the
+	 * hot scoring path switches on a precomputed value instead of probing CPU
+	 * features per batch.  Reflects the current SIMD-tier / dense_u8_batch_x4 GUCs.
+	 */
+	PgturbohybridGraphTqResolveU8Kernels(tq);
 }
 #endif
 #endif
@@ -2243,7 +2273,7 @@ PgturbohybridGraphPrepareTqQueryInternal(Relation index, PgturbohybridGraphSuppo
 	query = (Vector *) DatumGetPointer(value);
 	tq->dimensions = query->dim;
 	tq->bits = tqBitsOverride > 0 ? tqBitsOverride : PgturbohybridGraphGetTqBits(index);
-	tq->lutWidth = 1 << tq->bits;
+	tq->lut.width = 1 << tq->bits;
 	tq->codeBytes = TqCodeSizeForBits(query->dim, tq->bits);
 	tq->scoreMode = TqGetScoreMode(support);
 	tq->scoringKernel = TqSelectScoringKernel();
@@ -2308,12 +2338,12 @@ PgturbohybridGraphPrepareTqQueryInternal(Relation index, PgturbohybridGraphSuppo
 	 * Build the LUT-gather scoring table only when the integer query-split
 	 * scorers will not handle this query.  When query split is active every
 	 * scoring path (scan and build) tries QuerySplit before the LUT fallback,
-	 * so tq->lut is never read -- skip allocating and filling it.  tq->lut
+	 * so tq->lut.table is never read -- skip allocating and filling it.  tq->lut.table
 	 * stays NULL (zeroed by the memset above) in that case.
 	 */
 	if (!PgturbohybridGraphTqQuerySplitActive(tq))
 	{
-		tq->lut = palloc(PGTURBOHYBRID_LUT_SIZE(query->dim));
+		tq->lut.table = palloc(PGTURBOHYBRID_LUT_SIZE(query->dim));
 		TqBuildQueryLut(tq);
 	}
 }
@@ -2377,7 +2407,7 @@ TqCodeDistanceScalar(const PgturbohybridGraphTqQuery *tq, const uint8 *valueCode
 		int			vc = TqGetCodeComponentBits(valueCode, i, tq->bits);
 		double		vv = TqGetCodeCenterBits(vc, tq->bits);
 
-		dot += tq->lut[(i * PGTURBOHYBRID_LUT_WIDTH) + vc];
+		dot += tq->lut.table[(i * PGTURBOHYBRID_LUT_WIDTH) + vc];
 		codeNorm += vv * vv;
 	}
 
@@ -2445,7 +2475,7 @@ TqCodeDistanceAvx2(const PgturbohybridGraphTqQuery *tq, const uint8 *valueCode, 
 		}
 
 		acc = _mm256_add_ps(acc,
-							_mm256_i32gather_ps(tq->lut,
+							_mm256_i32gather_ps(tq->lut.table,
 												_mm256_loadu_si256((const __m256i *) idx), 4));
 
 		if (mode == PGTURBOHYBRID_SCORE_COSINE || mode == PGTURBOHYBRID_SCORE_L2)
@@ -2478,7 +2508,7 @@ TqCodeDistanceAvx2(const PgturbohybridGraphTqQuery *tq, const uint8 *valueCode, 
 		{
 			int			code = TqGetCodeComponentBits(valueCode, i, tq->bits);
 
-			dot += tq->lut[(i * PGTURBOHYBRID_LUT_WIDTH) + code];
+			dot += tq->lut.table[(i * PGTURBOHYBRID_LUT_WIDTH) + code];
 		}
 
 		if (tq->queryNorm == 0 || valueScale == 0)
@@ -2492,7 +2522,7 @@ TqCodeDistanceAvx2(const PgturbohybridGraphTqQuery *tq, const uint8 *valueCode, 
 		int			code = TqGetCodeComponentBits(valueCode, i, tq->bits);
 		double		vv = TqGetCodeCenterBits(code, tq->bits);
 
-		dot += tq->lut[(i * PGTURBOHYBRID_LUT_WIDTH) + code];
+		dot += tq->lut.table[(i * PGTURBOHYBRID_LUT_WIDTH) + code];
 		if (mode == PGTURBOHYBRID_SCORE_L2)
 			codeNorm += vv * vv;
 	}
@@ -2543,7 +2573,7 @@ TqCodeDistanceNeon(const PgturbohybridGraphTqQuery *tq, const uint8 *valueCode, 
 		{
 			int			code = TqGetCodeComponentBits(valueCode, i + j, tq->bits);
 
-			scores[j] = tq->lut[((i + j) * PGTURBOHYBRID_LUT_WIDTH) + code];
+			scores[j] = tq->lut.table[((i + j) * PGTURBOHYBRID_LUT_WIDTH) + code];
 		}
 
 		acc = vaddq_f32(acc, vld1q_f32(scores));
@@ -2570,7 +2600,7 @@ TqCodeDistanceNeon(const PgturbohybridGraphTqQuery *tq, const uint8 *valueCode, 
 		{
 			int			code = TqGetCodeComponentBits(valueCode, i, tq->bits);
 
-			dot += tq->lut[(i * PGTURBOHYBRID_LUT_WIDTH) + code];
+			dot += tq->lut.table[(i * PGTURBOHYBRID_LUT_WIDTH) + code];
 		}
 
 		if (tq->queryNorm == 0 || valueScale == 0)
@@ -2584,7 +2614,7 @@ TqCodeDistanceNeon(const PgturbohybridGraphTqQuery *tq, const uint8 *valueCode, 
 		int			code = TqGetCodeComponentBits(valueCode, i, tq->bits);
 		double		vv = TqGetCodeCenterBits(code, tq->bits);
 
-		dot += tq->lut[(i * PGTURBOHYBRID_LUT_WIDTH) + code];
+		dot += tq->lut.table[(i * PGTURBOHYBRID_LUT_WIDTH) + code];
 		if (mode == PGTURBOHYBRID_SCORE_L2)
 			codeNorm += vv * vv;
 	}
@@ -3643,6 +3673,41 @@ PgturbohybridGraphGetTypeInfo(Relation index)
  * Inner-product scoring, no EC correction, 4-bit codes.  Use dim >= 1024 to
  * exercise the query-split path (otherwise signed_split falls back to scalar).
  */
+/*
+ * turbohybrid_query_split_probe(value float8, abs_max float8, high_coef int) -> jsonb
+ *
+ * Developer diagnostic that exposes the shared low/high query-split math
+ * (TqQuerySplitValue) directly so its boundary behaviour can be regression-pinned
+ * without running a full scan.  qScale is fixed at 1, so `value` is the already
+ * scaled value: it drives qSigned (= round, saturated to +/-abs_max) and the
+ * split qSigned = high_coef*high + low, low in [-high_coef/2, high_coef/2).
+ * Pass high_coef = 256 for the signed split, 128 for the x86 u8 split.
+ */
+FUNCTION_PREFIX PG_FUNCTION_INFO_V1(turbohybrid_query_split_probe);
+FUNCTION_PREFIX Datum
+turbohybrid_query_split_probe(PG_FUNCTION_ARGS)
+{
+	float8		value = PG_GETARG_FLOAT8(0);
+	float8		absMax = PG_GETARG_FLOAT8(1);
+	int			highCoef = PG_GETARG_INT32(2);
+	int			qSigned;
+	int8		low;
+	int8		high;
+	StringInfoData json;
+
+	if (highCoef <= 0)
+		ereport(ERROR,
+				(errcode(ERRCODE_DATA_EXCEPTION),
+				 errmsg("turbohybrid_query_split_probe: high_coef must be positive")));
+
+	TqQuerySplitValue((float) value, 1.0f, (float) absMax, highCoef, &qSigned, &low, &high);
+
+	initStringInfo(&json);
+	appendStringInfo(&json, "{\"qsigned\":%d,\"low\":%d,\"high\":%d}",
+					 qSigned, (int) low, (int) high);
+	PG_RETURN_DATUM(DirectFunctionCall1(jsonb_in, CStringGetDatum(json.data)));
+}
+
 FUNCTION_PREFIX PG_FUNCTION_INFO_V1(turbohybrid_scorer_distances);
 FUNCTION_PREFIX Datum
 turbohybrid_scorer_distances(PG_FUNCTION_ARGS)
@@ -3689,7 +3754,7 @@ turbohybrid_scorer_distances(PG_FUNCTION_ARGS)
 	memset(&tq, 0, sizeof(tq));
 	tq.dimensions = dim;
 	tq.bits = bits;
-	tq.lutWidth = 1 << bits;
+	tq.lut.width = 1 << bits;
 	tq.codeBytes = TqCodeSizeForBits(dim, bits);
 	tq.scoreMode = PGTURBOHYBRID_SCORE_IP;
 	tq.scoringKernel = TqSelectScoringKernel();
@@ -3698,7 +3763,7 @@ turbohybrid_scorer_distances(PG_FUNCTION_ARGS)
 	TqRotateVectorFloat(query->x, dim, tq.queryValues);
 	for (int i = 0; i < dim; i++)
 		tq.queryNorm += (double) query->x[i] * (double) query->x[i];
-	tq.lut = palloc(PGTURBOHYBRID_LUT_SIZE(dim));
+	tq.lut.table = palloc(PGTURBOHYBRID_LUT_SIZE(dim));
 	TqBuildQueryLut(&tq);
 	tq.enabled = true;
 #if defined(__aarch64__) || defined(_M_ARM64) || PGTURBOHYBRID_COMPILE_AVX2
@@ -3723,7 +3788,7 @@ turbohybrid_scorer_distances(PG_FUNCTION_ARGS)
 	dU8x4 = dScalar;
 #if PGTURBOHYBRID_COMPILE_AVX2
 	TqPrepareQueryU8Split(&tq);
-	if (tq.u8SplitEnabled)
+	if (tq.u8.enabled)
 	{
 		PgturbohybridGraphTqCodeU8ScalarDistance(&tq, code, scale, &dU8Scalar);
 		if (PgturbohybridGraphTqCodeU8SimdDistance(&tq, code, scale, &dU8Simd))
@@ -3847,7 +3912,7 @@ turbohybrid_scorer_x4_batch_parity(PG_FUNCTION_ARGS)
 	memset(&tq, 0, sizeof(tq));
 	tq.dimensions = dim;
 	tq.bits = bits;
-	tq.lutWidth = 1 << bits;
+	tq.lut.width = 1 << bits;
 	tq.codeBytes = TqCodeSizeForBits(dim, bits);
 	tq.scoreMode = PGTURBOHYBRID_SCORE_IP;
 	tq.scoringKernel = TqSelectScoringKernel();
@@ -3856,7 +3921,7 @@ turbohybrid_scorer_x4_batch_parity(PG_FUNCTION_ARGS)
 	TqRotateVectorFloat(query->x, dim, tq.queryValues);
 	for (int i = 0; i < dim; i++)
 		tq.queryNorm += (double) query->x[i] * (double) query->x[i];
-	tq.lut = palloc(PGTURBOHYBRID_LUT_SIZE(dim));
+	tq.lut.table = palloc(PGTURBOHYBRID_LUT_SIZE(dim));
 	TqBuildQueryLut(&tq);
 	tq.enabled = true;
 #if defined(__aarch64__) || defined(_M_ARM64) || PGTURBOHYBRID_COMPILE_AVX2
@@ -3878,7 +3943,7 @@ turbohybrid_scorer_x4_batch_parity(PG_FUNCTION_ARGS)
 
 #if PGTURBOHYBRID_COMPILE_AVX2
 	TqPrepareQueryU8Split(&tq);
-	if (tq.u8SplitEnabled)
+	if (tq.u8.enabled)
 	{
 		double		b[4];
 
@@ -4004,7 +4069,7 @@ turbohybrid_scorer_bench(PG_FUNCTION_ARGS)
 	memset(&tq, 0, sizeof(tq));
 	tq.dimensions = dim;
 	tq.bits = bits;
-	tq.lutWidth = 1 << bits;
+	tq.lut.width = 1 << bits;
 	tq.codeBytes = TqCodeSizeForBits(dim, bits);
 	tq.scoreMode = PGTURBOHYBRID_SCORE_IP;
 	tq.scoringKernel = TqSelectScoringKernel();
@@ -4013,7 +4078,7 @@ turbohybrid_scorer_bench(PG_FUNCTION_ARGS)
 	TqRotateVectorFloat(query->x, dim, tq.queryValues);
 	for (int i = 0; i < dim; i++)
 		tq.queryNorm += (double) query->x[i] * (double) query->x[i];
-	tq.lut = palloc(PGTURBOHYBRID_LUT_SIZE(dim));
+	tq.lut.table = palloc(PGTURBOHYBRID_LUT_SIZE(dim));
 	TqBuildQueryLut(&tq);
 	tq.enabled = true;
 #if defined(__aarch64__) || defined(_M_ARM64) || PGTURBOHYBRID_COMPILE_AVX2

@@ -4620,8 +4620,10 @@ PgturbohybridGraphCollectResults(IndexScanDesc scan, PgturbohybridGraphScanOpaqu
 	 * the extra prefetches are wasted work.  64MB is comfortably above typical
 	 * L3 and below large indexes (1M x 3072-dim 4-bit ~= 1.5GB).
 	 */
+	so->graphCodeArenaEstimatedBytes =
+		(int64) ((Size) meta.tqNodeCount * (Size) meta.tqCodeBytes);
 	so->graphLargeCodeArena =
-		((Size) meta.tqNodeCount * (Size) meta.tqCodeBytes) > ((Size) 64 * 1024 * 1024);
+		(Size) so->graphCodeArenaEstimatedBytes > ((Size) 64 * 1024 * 1024);
 	PgturbohybridGraphAddElapsedUs(&so->graphPrepareUs, phaseStart);
 
 	if (hasPayloadFilter &&

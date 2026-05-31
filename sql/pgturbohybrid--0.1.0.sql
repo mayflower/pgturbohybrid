@@ -178,6 +178,13 @@ CREATE FUNCTION turbohybrid_scorer_distances(vector, vector, integer) RETURNS pg
 	AS 'MODULE_PATHNAME', 'turbohybrid_scorer_distances'
 	LANGUAGE C STABLE STRICT PARALLEL SAFE;
 
+-- Exposes the shared low/high query-split quantization (qScale fixed at 1, so the
+-- value argument is the already-scaled value) for regression-pinning the split
+-- boundaries.  high_coef = 256 is the signed split, 128 the x86 u8 split.
+CREATE FUNCTION turbohybrid_query_split_probe(float8, float8, integer) RETURNS pg_catalog.jsonb
+	AS 'MODULE_PATHNAME', 'turbohybrid_query_split_probe'
+	LANGUAGE C IMMUTABLE STRICT PARALLEL SAFE;
+
 -- Diagnostic that scores four DISTINCT docs both through the x4 u8 batch kernel
 -- (one pass) and through four single-node u8 kernel calls, returning both result
 -- arrays and a bit-exact match flag.  Proves the 4-candidate batch equals four

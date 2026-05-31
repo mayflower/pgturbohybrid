@@ -393,6 +393,21 @@ typedef enum TqU8Split
 	PGTURBOHYBRID_U8_SPLIT_OFF
 }			TqU8Split;
 
+/*
+ * The exact unsigned-codebook (u8) scoring kernel resolved once per query in
+ * TqPrepareQueryU8Split (via PgturbohybridGraphTqResolveU8Kernels), so the hot
+ * scoring path switches on a precomputed value instead of probing CPU features
+ * per batch.  Stored in PgturbohybridGraphTqQuery.u8.kernelSingle / u8.kernelBatch.
+ */
+typedef enum TqU8Kernel
+{
+	PGTURBOHYBRID_U8_KERNEL_NONE,
+	PGTURBOHYBRID_U8_KERNEL_AVX2_SINGLE,
+	PGTURBOHYBRID_U8_KERNEL_AVX2_X4,
+	PGTURBOHYBRID_U8_KERNEL_AVX512VNNI_SINGLE,
+	PGTURBOHYBRID_U8_KERNEL_AVX512VNNI_X4
+}			TqU8Kernel;
+
 typedef enum TqSimdForce
 {
 	PGTURBOHYBRID_SIMD_FORCE_AUTO,
@@ -607,60 +622,115 @@ typedef struct PgturbohybridGraphQuery
 	Datum		value;
 }			PgturbohybridGraphQuery;
 
+/*
+ * Per-query scoring representations, grouped so it is obvious which fields a
+ * given path owns.  These are (largely) mutually exclusive: a query builds at
+ * most one of the SIMD splits (signedSplit OR u8), and the LUT table is filled
+ * only when no integer split will run.  All pointer members are palloc'd in the
+ * query's MemoryContext by the matching TqPrepareQuery* routine and freed with
+ * that context (ownership noted per group); the fixed [16]-arrays are inline.
+ */
+
+/*
+ * LUT scoring: per-dim 2^bits codebook-distance table.
+ *   populated by: TqBuildQueryLut, only when the integer query split will NOT
+ *                 run for this query (PgturbohybridGraphTqQuerySplitActive false).
+ *   consumed by:  the scalar / avx2_lut_gather scorers (TqCodeDistanceScalar).
+ *   memory:       table is palloc'd; NULL (table stays unset) when a split runs.
+ */
+typedef struct TqLutQuery
+{
+	float	   *table;
+	int			width;			/* 1 << bits */
+}			TqLutQuery;
+
+/*
+ * Signed-codebook query split (AVX2 / AVX-VNNI / AVX-512 VNNI / NEON SDOT).
+ *   populated by: TqPrepareQuerySplit4.
+ *   consumed by:  PgturbohybridGraphQuerySplitRaw{,2}{Avx2,AvxVnni,Avx512Vnni,NeonSdot}.
+ *   memory:       low/high/lowU8/highU8 are palloc'd; the tail[16] arrays inline.
+ * low/high are the signed 7-bit halves; lowU8/highU8 are the +128 (XOR 0x80)
+ * variants the VNNI path feeds to maddubs/vpdpbusd.  Chunk geometry is shared
+ * with the u8 split (querySplitChunks / querySplitTailDims on the parent).
+ */
+typedef struct TqSignedSplitQuery
+{
+	int8	   *low;
+	int8	   *high;
+	uint8	   *lowU8;
+	uint8	   *highU8;
+	int8		tailLow[16];
+	int8		tailHigh[16];
+	uint8		tailLowU8[16];
+	uint8		tailHighU8[16];
+	float		postprocessScale;
+	bool		enabled;
+}			TqSignedSplitQuery;
+
+/*
+ * Unsigned-codebook query split (x86 maddubs / VPDPBUSD).  Separate from the
+ * signed split: query halves are stored signed (no +128 XOR) because the
+ * unsigned u8 codebook is the unsigned operand, and the +128 codebook shift is
+ * unwound by bias.  data holds [low0..15, high0..15] per 16-dim chunk (32
+ * bytes/chunk) so one AVX2 load is a [low|high] pair and one ZMM load is two.
+ *   populated by: TqPrepareQueryU8Split (which also resolves kernelSingle/Batch).
+ *   consumed by:  PgturbohybridGraphQuerySplitU8Raw* via the resolved kernels.
+ *   memory:       data is palloc'd; the tail[16] arrays inline.  Chunk geometry
+ *                 is shared (querySplitChunks / querySplitTailDims on the parent).
+ */
+typedef struct TqU8SplitQuery
+{
+	int8	   *data;
+	int8		tailLow[16];
+	int8		tailHigh[16];
+	int64		bias;			/* OFFSET * Sum(q_signed); subtract from raw dot */
+	float		postprocessScale;
+	bool		enabled;
+	/* Exact u8 kernels resolved once at query prep (TqU8Kernel values); the hot
+	 * scoring path switches on these instead of probing CPU features per batch. */
+	int			kernelSingle;
+	int			kernelBatch;
+}			TqU8SplitQuery;
+
+/*
+ * Asymmetric 1-bit query encoding: bit-plane-decomposed 8-bit signed query
+ * quantization in 128-dim blocks of 8*16 bytes (8 planes of 16 bytes), which
+ * recovers query magnitude the symmetric querySignBits path discards.
+ *   populated by: TqPrepareQueryAsymBit1, only when the asymmetric-query path is
+ *                 enabled and quantization_bits = 1.
+ *   consumed by:  PgturbohybridGraphAsymBit1{Scalar,Avx2,Avx512Vpopcntdq,Neon}*.
+ *   memory:       planes is palloc'd.
+ */
+typedef struct TqBit1Query
+{
+	uint8	   *planes;
+	int64		sumSigned;		/* Σ q_signed over all dims (full + tail) */
+	float		scale;			/* c / q_scale — postprocess multiplier  */
+	int			numFullBlocks;	/* full 128-dim blocks                    */
+	int			tailBytes;		/* 0..15: bytes in trailing partial block */
+	int			bits;			/* BITS captured at precompute (8/12/16) */
+}			TqBit1Query;
+
 typedef struct PgturbohybridGraphTqQuery
 {
 	uint8	   *code;
 #if PGTURBOHYBRID_GRAPH_ENABLE_SYMMETRIC_I8_DOT
 	int8	   *queryI8;
 #endif
-	float	   *lut;
+	TqLutQuery	lut;
 	float	   *queryValues;
 	float	   *rawQueryValues;
 	float	   *ecShift;
 	float	   *ecScale;
 	uint8	   *querySignBits;
-	/*
-	 * Asymmetric 1-bit query encoding.  Bit-plane-decomposed
-	 * 8-bit signed query quantization, laid out in 128-dim blocks of
-	 * `8 * 16` bytes (8 planes of 16 bytes each).  Recovers query
-	 * magnitude information that the symmetric `querySignBits` path
-	 * discards.  Populated by TqPrepareQueryAsymBit1 only when
-	 * the private asymmetric-query path is enabled and quantization_bits = 1.
-	 */
-	uint8	   *queryPlanes;
-	int64		queryAsymSumSigned;		/* Σ q_signed over all dims (full + tail) */
-	float		queryAsymScale;			/* c / q_scale — postprocess multiplier  */
-	int			queryAsymNumFullBlocks;	/* full 128-dim blocks                    */
-	int			queryAsymTailBytes;		/* 0..15: bytes in trailing partial block */
-	int			queryAsymBits;			/* BITS captured at precompute (8/12/16) */
+	TqBit1Query bit1;
 #if defined(__aarch64__) || defined(_M_ARM64) || \
 	defined(__x86_64__) || defined(_M_X64) || defined(__i386) || defined(_M_IX86)
-	int8	   *querySplitLow;
-	int8	   *querySplitHigh;
-	uint8	   *querySplitLowU8;
-	uint8	   *querySplitHighU8;
-	int8		querySplitTailLow[16];
-	int8		querySplitTailHigh[16];
-	uint8		querySplitTailLowU8[16];
-	uint8		querySplitTailHighU8[16];
+	TqSignedSplitQuery signedSplit;
+	TqU8SplitQuery u8;
+	/* Chunk geometry shared by both SIMD splits (16-dim chunks + tail dims). */
 	int			querySplitChunks;
 	int			querySplitTailDims;
-	float		querySplitPostprocessScale;
-	bool		querySplitEnabled;
-	/*
-	 * Unsigned-codebook query-split representation (x86 maddubs / VPDPBUSD).
-	 * Separate from the signed path above: query halves are stored signed
-	 * (no +128 XOR) because the unsigned u8 codebook is the unsigned operand,
-	 * and the +128 codebook shift is unwound by u8SplitBias.  u8SplitData
-	 * holds [low0..15, high0..15] per 16-dim chunk (32 bytes/chunk) so one
-	 * AVX2 load is a [low|high] pair and one ZMM load is two chunks.
-	 */
-	int8	   *u8SplitData;
-	int8		u8SplitTailLow[16];
-	int8		u8SplitTailHigh[16];
-	int64		u8SplitBias;	/* OFFSET * Sum(q_signed); subtract from raw dot */
-	float		u8SplitPostprocessScale;
-	bool		u8SplitEnabled;
 #endif
 #if PGTURBOHYBRID_GRAPH_ENABLE_SYMMETRIC_I8_DOT
 	float		queryScale;
@@ -668,7 +738,6 @@ typedef struct PgturbohybridGraphTqQuery
 #endif
 	int			dimensions;
 	int			bits;
-	int			lutWidth;
 	Size		codeBytes;
 	int			scoreMode;
 	int			scoringKernel;
@@ -811,6 +880,19 @@ typedef union
 	ItemPointerData indextid;
 }			PgturbohybridGraphUnvisited;
 
+/*
+ * Which path the unsigned-codebook batch-of-4 scorer
+ * (PgturbohybridGraphScoreNodeBatchU8Split) took during a scan, surfaced in
+ * turbohybrid_last_scan_stats() as graph_u8_batch_mode.  NONE means the u8 batch
+ * scorer never scored a batch (e.g. scalar/LUT fallback, or a non-u8 build).
+ */
+typedef enum PgturbohybridGraphU8BatchMode
+{
+	PGTURBOHYBRID_U8_BATCH_NONE = 0,
+	PGTURBOHYBRID_U8_BATCH_X4,
+	PGTURBOHYBRID_U8_BATCH_SINGLE
+}			PgturbohybridGraphU8BatchMode;
+
 typedef struct PgturbohybridGraphScanOpaqueData
 {
 	const		PgturbohybridGraphTypeInfo *typeInfo;
@@ -841,6 +923,8 @@ typedef struct PgturbohybridGraphScanOpaqueData
 	int64		graphBatchScoredCodes;
 	int64		graphScalarScoredCodes;
 	int			graphBatchKernel;
+	/* Path taken by the u8 batch-of-4 scorer (x4 kernel vs four single passes). */
+	PgturbohybridGraphU8BatchMode graphU8BatchMode;
 	/* Per-kernel scoring attribution (indexed by PgturbohybridGraphScoreKernelBucket). */
 	int64		graphScoreKernelNodes[PGTURBOHYBRID_SCORE_KERNEL_BUCKET_COUNT];
 	int64		graphScoreKernelCalls[PGTURBOHYBRID_SCORE_KERNEL_BUCKET_COUNT];
@@ -866,6 +950,9 @@ typedef struct PgturbohybridGraphScanOpaqueData
 	int64		graphCodeTuplesCopied;
 	int64		graphCodeArenaAllocatedBytes;
 	int64		graphCodeArenaUsedBytes;
+	/* Estimated full code working set (tqNodeCount * tqCodeBytes) used to decide
+	 * graphLargeCodeArena.  Per-code width is so->tq.codeBytes. */
+	int64		graphCodeArenaEstimatedBytes;
 	int64		graphCandidateCount;
 	int64		graphRescoreCount;
 	int64		graphRescorePages;
@@ -1025,6 +1112,7 @@ double		TqCodeDistance(const PgturbohybridGraphTqQuery *tq, const uint8 *valueCo
 bool		PgturbohybridGraphTqCodeQuerySplitDistance(const PgturbohybridGraphTqQuery *tq, const uint8 *valueCode, float valueScale, double *distance);
 bool		PgturbohybridGraphTqQuerySplitActive(const PgturbohybridGraphTqQuery *tq);
 bool		PgturbohybridGraphTqUseU8Split(const PgturbohybridGraphTqQuery *tq);
+void		PgturbohybridGraphTqResolveU8Kernels(PgturbohybridGraphTqQuery *tq);
 bool		PgturbohybridGraphTqCodeSignedSplitDistance(const PgturbohybridGraphTqQuery *tq, const uint8 *valueCode, float valueScale, double *distance);
 bool		PgturbohybridGraphTqCodeU8SimdDistance(const PgturbohybridGraphTqQuery *tq, const uint8 *valueCode, float valueScale, double *distance);
 bool		PgturbohybridGraphTqCodeU8Simdx4Distance(const PgturbohybridGraphTqQuery *tq, const uint8 *valueCode, float valueScale, double *distance);

@@ -23,48 +23,6 @@
 #define PGTURBOHYBRID_GRAPH_X86 0
 #endif
 
-#if PGTURBOHYBRID_GRAPH_X86 && defined(__linux__)
-/*
- * Detect whether the backend is running under Valgrind.  Valgrind passes the
- * host CPUID through, so the AVX-512 / AVX-VNNI feature probes below would
- * report the feature "available" -- but Valgrind's JIT cannot execute many
- * AVX-512 (EVEX) and AVX-VNNI instructions and raises SIGILL on them, which
- * crashes the backend (the CI valgrind job dies at the SIMD-forcing tests).
- * The AVX-512/AVX-VNNI availability probes treat Valgrind as "not available"
- * so dispatch falls back to AVX2/scalar, which Valgrind fully supports; AVX2
- * stays enabled.  Detected once via /proc/self/maps (Valgrind always maps its
- * vgpreload core); no libvalgrind build dependency.
- */
-static bool pg_attribute_unused()
-PgturbohybridGraphRunningUnderValgrind(void)
-{
-	static int	under = -1;
-	FILE	   *f;
-	char		line[256];
-
-	if (under >= 0)
-		return under != 0;
-
-	under = 0;
-	f = fopen("/proc/self/maps", "r");
-	if (f != NULL)
-	{
-		while (fgets(line, sizeof(line), f) != NULL)
-		{
-			if (strstr(line, "/valgrind/") != NULL ||
-				strstr(line, "vgpreload") != NULL)
-			{
-				under = 1;
-				break;
-			}
-		}
-		fclose(f);
-	}
-	return under != 0;
-}
-#else
-#define PgturbohybridGraphRunningUnderValgrind() (false)
-#endif
 
 #define PGTURBOHYBRID_QUERY_SPLIT_HIGH_COEF 256
 #define PGTURBOHYBRID_GRAPH_CODEBOOK_SCALE (127.0 / 2.733)
@@ -169,6 +127,7 @@ PgturbohybridGraphRunningUnderValgrind(void)
 #include "utils/memutils.h"
 
 #include "pgturbohybrid_quant_score.h"
+#include "pgturbohybrid_quant_score_internal.h"
 
 #if !defined(PGTURBOHYBRID_DISABLE_SIMD) && (defined(__aarch64__) || defined(_M_ARM64))
 #if defined(__clang__)
@@ -187,42 +146,11 @@ PgturbohybridGraphRunningUnderValgrind(void)
 #define PGTURBOHYBRID_GRAPH_ARM_I8MM_TARGET
 #define PGTURBOHYBRID_GRAPH_COMPILE_ARM_I8MM 0
 #endif
-static const int8 PgturbohybridGraphCodebookI8[PGTURBOHYBRID_LUT_WIDTH] = {
-	-127, -96, -75, -58, -44, -31, -18, -6,
-	6, 18, 31, 44, 58, 75, 96, 127
-};
-static const int8 PgturbohybridGraphCodebook2I8[PGTURBOHYBRID_LUT_WIDTH] = {
-	-127, -38, 38, 127, 0, 0, 0, 0,
-	0, 0, 0, 0, 0, 0, 0, 0
-};
 #else
 #define PGTURBOHYBRID_GRAPH_COMPILE_ARM_DOT 0
 #define PGTURBOHYBRID_GRAPH_COMPILE_ARM_I8MM 0
 #endif
 
-#if PGTURBOHYBRID_GRAPH_COMPILE_AVX2 && !PGTURBOHYBRID_GRAPH_COMPILE_ARM_DOT
-static const int8 PgturbohybridGraphCodebookI8[PGTURBOHYBRID_LUT_WIDTH] = {
-	-127, -96, -75, -58, -44, -31, -18, -6,
-	6, 18, 31, 44, 58, 75, 96, 127
-};
-pg_attribute_unused()
-static const int8 PgturbohybridGraphCodebook2I8[PGTURBOHYBRID_LUT_WIDTH] = {
-	-127, -38, 38, 127, 0, 0, 0, 0,
-	0, 0, 0, 0, 0, 0, 0, 0
-};
-static const int8 PgturbohybridGraphCodebook2PairEvenI8[16] = {
-	-127, -38, 38, 127,
-	-127, -38, 38, 127,
-	-127, -38, 38, 127,
-	-127, -38, 38, 127,
-};
-static const int8 PgturbohybridGraphCodebook2PairOddI8[16] = {
-	-127, -127, -127, -127,
-	-38, -38, -38, -38,
-	38, 38, 38, 38,
-	127, 127, 127, 127,
-};
-#endif
 
 #if PGTURBOHYBRID_GRAPH_COMPILE_ARM_DOT || PGTURBOHYBRID_GRAPH_COMPILE_AVX2 || \
 	PGTURBOHYBRID_GRAPH_COMPILE_AVX512VNNI || PGTURBOHYBRID_GRAPH_COMPILE_AVXVNNI || \
@@ -232,28 +160,6 @@ static const int8 PgturbohybridGraphCodebook2PairOddI8[16] = {
 #define PGTURBOHYBRID_GRAPH_COMPILE_QUERY_SPLIT 0
 #endif
 
-/*
- * x86 unsigned-codebook query-split representation.
- *
- * The codebook is the signed 4-bit codebook shifted by +OFFSET (=128) so the
- * un-shifted value equals the signed centre the stored codes were encoded with
- * (PgturbohybridGraphCodebookI8): codebook_u8[k] == PgturbohybridGraphCodebookI8[k] + 128.
- * This keeps scores numerically identical (codebook-wise) to the scalar/LUT
- * reference, while letting _mm256_maddubs_epi16 / _mm512_dpbusd_epi32 consume
- * it directly as their unsigned operand.  Query halves are signed 7-bit
- * (|low|,|high| <= 64) combined as q_signed = 128*high + low, keeping the
- * maddubs pair sum <= 2*255*64 = 32640 < 32767.  The +OFFSET shift contributes
- * a per-query bias OFFSET*Sum(q_signed) that the scorer subtracts once.
- */
-#define PGTURBOHYBRID_U8_SPLIT_HIGH_COEF 128
-#define PGTURBOHYBRID_U8_SPLIT_ABS_MAX 8127.0
-#define PGTURBOHYBRID_U8_CODEBOOK_OFFSET 128
-#if PGTURBOHYBRID_GRAPH_COMPILE_AVX2
-static const uint8 PgturbohybridGraphCodebookU8[PGTURBOHYBRID_LUT_WIDTH] = {
-	1, 32, 53, 70, 84, 97, 110, 122,
-	134, 146, 159, 172, 186, 203, 224, 255
-};
-#endif
 
 
 static inline float
@@ -472,102 +378,6 @@ static inline void PgturbohybridGraphInt8Int8Dot4Neon(const int8 *query,
 										   const uint8 **valueCodes, int dim,
 										   int32 *dots);
 #endif
-#if PGTURBOHYBRID_GRAPH_COMPILE_ARM_DOT
-static bool PgturbohybridGraphArmDotprodAvailable(void);
-#if PGTURBOHYBRID_GRAPH_COMPILE_ARM_I8MM
-static bool PgturbohybridGraphArmI8mmAvailable(void);
-static int32x4_t PGTURBOHYBRID_GRAPH_ARM_I8MM_TARGET
-PgturbohybridGraphDotI8x16ArmI8mm(int32x4_t acc, int8x16_t a, int8x16_t b);
-#endif
-static int64 PGTURBOHYBRID_GRAPH_ARM_DOT_TARGET
-PgturbohybridGraphQuerySplitRawNeonSdot(const PgturbohybridGraphTqQuery *tq, const uint8 *code);
-static int64 PGTURBOHYBRID_GRAPH_ARM_DOT_TARGET
-PgturbohybridGraphQuerySplit2RawNeonSdot(const PgturbohybridGraphTqQuery *tq, const uint8 *code);
-static int64 PGTURBOHYBRID_GRAPH_ARM_DOT_TARGET
-PgturbohybridGraphCodeCodeRawNeonSdot(const uint8 *a, const uint8 *b, int dim,
-						   int *sampleDims);
-static int64 PGTURBOHYBRID_GRAPH_ARM_DOT_TARGET
-PgturbohybridGraphCodeCode2RawNeonSdot(const uint8 *a, const uint8 *b, int dim,
-							int *sampleDims);
-static int64 PGTURBOHYBRID_GRAPH_ARM_DOT_TARGET
-PgturbohybridGraphCodeCodeWeightedRawNeonSdot(const uint8 *a, const uint8 *b,
-								   const int16 *weights, int dim);
-static int64 PGTURBOHYBRID_GRAPH_ARM_DOT_TARGET
-PgturbohybridGraphCodeCode2WeightedRawNeonSdot(const uint8 *a, const uint8 *b,
-									const int16 *weights, int dim);
-#endif
-#if PGTURBOHYBRID_GRAPH_COMPILE_AVX2
-static bool PgturbohybridGraphAvx2Available(void);
-static int64 PGTURBOHYBRID_GRAPH_AVX2_TARGET
-PgturbohybridGraphQuerySplitRawAvx2(const PgturbohybridGraphTqQuery *tq, const uint8 *code);
-static int64 PGTURBOHYBRID_GRAPH_AVX2_TARGET
-PgturbohybridGraphQuerySplit2RawAvx2(const PgturbohybridGraphTqQuery *tq, const uint8 *code);
-static int64 PGTURBOHYBRID_GRAPH_AVX2_TARGET
-PgturbohybridGraphCodeCodeRawAvx2(const uint8 *a, const uint8 *b, int dim,
-					   int *sampleDims);
-static int64 PGTURBOHYBRID_GRAPH_AVX2_TARGET
-PgturbohybridGraphCodeCode2RawAvx2(const uint8 *a, const uint8 *b, int dim,
-						int *sampleDims);
-static int64 PGTURBOHYBRID_GRAPH_AVX2_TARGET
-PgturbohybridGraphCodeCodeWeightedRawAvx2(const uint8 *a, const uint8 *b,
-								const int16 *weights, int dim);
-static int64 PGTURBOHYBRID_GRAPH_AVX2_TARGET
-PgturbohybridGraphCodeCode2WeightedRawAvx2(const uint8 *a, const uint8 *b,
-								 const int16 *weights, int dim);
-#endif
-#if PGTURBOHYBRID_GRAPH_COMPILE_AVX512VNNI
-static bool PgturbohybridGraphAvx512VnniAvailable(void);
-static int64 PGTURBOHYBRID_GRAPH_AVX512VNNI_TARGET
-PgturbohybridGraphQuerySplitRawAvx512Vnni(const PgturbohybridGraphTqQuery *tq, const uint8 *code);
-static int64 PGTURBOHYBRID_GRAPH_AVX512VNNI_TARGET
-PgturbohybridGraphQuerySplit2RawAvx512Vnni(const PgturbohybridGraphTqQuery *tq, const uint8 *code);
-static int64 PGTURBOHYBRID_GRAPH_AVX512VNNI_TARGET
-PgturbohybridGraphCodeCodeRawAvx512Vnni(const uint8 *a, const uint8 *b, int dim,
-							 int *sampleDims);
-static int64 PGTURBOHYBRID_GRAPH_AVX512VNNI_TARGET
-PgturbohybridGraphCodeCode2RawAvx512Vnni(const uint8 *a, const uint8 *b, int dim,
-							  int *sampleDims);
-#endif
-#if PGTURBOHYBRID_GRAPH_COMPILE_AVX512_WEIGHTED
-static bool PgturbohybridGraphAvx512WeightedAvailable(void);
-static int64 PGTURBOHYBRID_GRAPH_AVX512_WEIGHTED_TARGET
-PgturbohybridGraphCodeCodeWeightedRawAvx512(const uint8 *a, const uint8 *b,
-								 const int16 *weights, int dim);
-static int64 PGTURBOHYBRID_GRAPH_AVX512_WEIGHTED_TARGET
-PgturbohybridGraphCodeCode2WeightedRawAvx512(const uint8 *a, const uint8 *b,
-								  const int16 *weights, int dim);
-#endif
-#if PGTURBOHYBRID_GRAPH_COMPILE_AVXVNNI
-static bool PgturbohybridGraphAvxVnniAvailable(void);
-static int64 PGTURBOHYBRID_GRAPH_AVXVNNI_TARGET
-PgturbohybridGraphQuerySplitRawAvxVnni(const PgturbohybridGraphTqQuery *tq, const uint8 *code);
-static int64 PGTURBOHYBRID_GRAPH_AVXVNNI_TARGET
-PgturbohybridGraphQuerySplit2RawAvxVnni(const PgturbohybridGraphTqQuery *tq, const uint8 *code);
-static int64 PGTURBOHYBRID_GRAPH_AVXVNNI_TARGET
-PgturbohybridGraphCodeCodeRawAvxVnni(const uint8 *a, const uint8 *b, int dim,
-						  int *sampleDims);
-static int64 PGTURBOHYBRID_GRAPH_AVXVNNI_TARGET
-PgturbohybridGraphCodeCode2RawAvxVnni(const uint8 *a, const uint8 *b, int dim,
-						   int *sampleDims);
-#endif
-#if PGTURBOHYBRID_GRAPH_COMPILE_AVX2
-/* x86 unsigned-codebook query-split raw scorers (return the integer dot before
- * bias removal and postprocess scaling). */
-static int64 PgturbohybridGraphQuerySplitU8RawScalar(const PgturbohybridGraphTqQuery *tq,
-													 const uint8 *code);
-static int64 PGTURBOHYBRID_GRAPH_AVX2_TARGET
-PgturbohybridGraphQuerySplitU8RawAvx2(const PgturbohybridGraphTqQuery *tq, const uint8 *code);
-static void PGTURBOHYBRID_GRAPH_AVX2_TARGET
-PgturbohybridGraphQuerySplitU8RawAvx2x4(const PgturbohybridGraphTqQuery *tq,
-										const uint8 *codes[4], int64 raw[4]);
-#if PGTURBOHYBRID_GRAPH_COMPILE_AVX512VNNI
-static int64 PGTURBOHYBRID_GRAPH_AVX512VNNI_TARGET
-PgturbohybridGraphQuerySplitU8RawAvx512Vnni(const PgturbohybridGraphTqQuery *tq, const uint8 *code);
-static void PGTURBOHYBRID_GRAPH_AVX512VNNI_TARGET
-PgturbohybridGraphQuerySplitU8RawAvx512Vnnix4(const PgturbohybridGraphTqQuery *tq,
-											  const uint8 *codes[4], int64 raw[4]);
-#endif
-#endif
 
 #if PGTURBOHYBRID_GRAPH_ENABLE_SYMMETRIC_I8_DOT
 static inline int32 PgturbohybridGraphInt8Int8DotScalar(const int8 *query,
@@ -598,7 +408,7 @@ PgturbohybridGraphPackedDistanceQuerySplit4(const PgturbohybridGraphTqQuery *tq,
 	int64		rawDot;
 	TqScoreMode mode = (TqScoreMode) tq->scoreMode;
 
-	if (!tq->querySplitEnabled || tq->dimensions < 1024 ||
+	if (!tq->signedSplit.enabled || tq->dimensions < 1024 ||
 		tq->bits != PGTURBOHYBRID_DEFAULT_BITS || mode == PGTURBOHYBRID_SCORE_L1)
 		return false;
 
@@ -625,7 +435,7 @@ PgturbohybridGraphPackedDistanceQuerySplit4(const PgturbohybridGraphTqQuery *tq,
 		return false;
 
 	dimSqrt = sqrt((double) tq->dimensions);
-	dot = (double) tq->querySplitPostprocessScale *
+	dot = (double) tq->signedSplit.postprocessScale *
 		(double) rawDot;
 	dot += tq->ecCorrection;
 
@@ -689,98 +499,6 @@ PgturbohybridGraphTqUseU8Split(const PgturbohybridGraphTqQuery *tq)
 	}
 }
 
-/*
- * Unsigned-codebook (maddubs / VPDPBUSD) 4-bit query-to-code scorer.  The raw
- * kernel returns Sum(q_signed * codebook_u8[code]); subtracting u8SplitBias
- * (= OFFSET * Sum(q_signed)) recovers Sum(q_signed * codebook_signed[code]),
- * after which the postprocess matches the signed path exactly.
- */
-/* Shared u8 postprocess: bias removal, postprocess scale, IP/cosine/L2. */
-static double
-PgturbohybridGraphU8DistanceFromRaw(const PgturbohybridGraphTqQuery *tq, float valueScale,
-									int64 rawDot)
-{
-	double		dot;
-	TqScoreMode mode = (TqScoreMode) tq->scoreMode;
-
-	rawDot -= tq->u8SplitBias;
-	dot = (double) tq->u8SplitPostprocessScale * (double) rawDot;
-	dot += tq->ecCorrection;
-
-	/* Multiply by precomputed reciprocals (see TqPrepareQueryU8Split) instead
-	 * of recomputing sqrt(dim) / sqrt(queryNorm) per node. */
-	if (mode == PGTURBOHYBRID_SCORE_IP)
-		return -(valueScale * dot * tq->invDimSqrt);
-	if (mode == PGTURBOHYBRID_SCORE_COSINE)
-	{
-		if (tq->queryNorm == 0 || valueScale == 0)
-			return 1;
-		return 1 - (dot * tq->invQueryNormDimSqrt);
-	}
-	{
-		double		distance = tq->queryNorm + ((double) valueScale * valueScale) -
-			(2 * valueScale * dot * tq->invDimSqrt);
-
-		return distance < 0 ? 0 : distance;
-	}
-}
-
-static bool
-PgturbohybridGraphPackedDistanceU8Split(const PgturbohybridGraphTqQuery *tq, const uint8 *valueCode,
-										float valueScale, double *distance)
-{
-	int64		rawDot;
-	TqScoreMode mode = (TqScoreMode) tq->scoreMode;
-
-	if (!tq->u8SplitEnabled || tq->dimensions < 1024 ||
-		tq->bits != PGTURBOHYBRID_DEFAULT_BITS || mode == PGTURBOHYBRID_SCORE_L1)
-		return false;
-
-#if PGTURBOHYBRID_GRAPH_COMPILE_AVX512VNNI
-	if (PgturbohybridGraphAvx512VnniAvailable())
-		rawDot = PgturbohybridGraphQuerySplitU8RawAvx512Vnni(tq, valueCode);
-	else
-#endif
-	if (PgturbohybridGraphAvx2Available())
-		rawDot = PgturbohybridGraphQuerySplitU8RawAvx2(tq, valueCode);
-	else
-		return false;
-
-	*distance = PgturbohybridGraphU8DistanceFromRaw(tq, valueScale, rawDot);
-	return true;
-}
-
-/*
- * 4-candidate u8 split: one x4 raw kernel call (shared query loads) + per-code
- * postprocess.  Same gate and result as four PgturbohybridGraphPackedDistanceU8Split
- * calls; used by the batch-of-4 native scorer.
- */
-static bool
-PgturbohybridGraphPackedDistanceU8Splitx4(const PgturbohybridGraphTqQuery *tq,
-										  const uint8 *codes[4], const float scales[4],
-										  double dist[4])
-{
-	int64		raw[4];
-	TqScoreMode mode = (TqScoreMode) tq->scoreMode;
-
-	if (!tq->u8SplitEnabled || tq->dimensions < 1024 ||
-		tq->bits != PGTURBOHYBRID_DEFAULT_BITS || mode == PGTURBOHYBRID_SCORE_L1)
-		return false;
-
-#if PGTURBOHYBRID_GRAPH_COMPILE_AVX512VNNI
-	if (PgturbohybridGraphAvx512VnniAvailable())
-		PgturbohybridGraphQuerySplitU8RawAvx512Vnnix4(tq, codes, raw);
-	else
-#endif
-	if (PgturbohybridGraphAvx2Available())
-		PgturbohybridGraphQuerySplitU8RawAvx2x4(tq, codes, raw);
-	else
-		return false;
-
-	for (int c = 0; c < 4; c++)
-		dist[c] = PgturbohybridGraphU8DistanceFromRaw(tq, scales[c], raw[c]);
-	return true;
-}
 #endif
 
 static bool
@@ -792,7 +510,7 @@ PgturbohybridGraphPackedDistanceQuerySplit2(const PgturbohybridGraphTqQuery *tq,
 	int64		rawDot;
 	TqScoreMode mode = (TqScoreMode) tq->scoreMode;
 
-	if (!tq->querySplitEnabled || tq->dimensions < 1024 ||
+	if (!tq->signedSplit.enabled || tq->dimensions < 1024 ||
 		tq->bits != 2 || mode == PGTURBOHYBRID_SCORE_L1)
 		return false;
 
@@ -819,7 +537,7 @@ PgturbohybridGraphPackedDistanceQuerySplit2(const PgturbohybridGraphTqQuery *tq,
 		return false;
 
 	dimSqrt = sqrt((double) tq->dimensions);
-	dot = (double) tq->querySplitPostprocessScale *
+	dot = (double) tq->signedSplit.postprocessScale *
 		(double) rawDot;
 	dot += tq->ecCorrection;
 
@@ -1104,7 +822,7 @@ PgturbohybridGraphTqCodeU8ScalarDistance(const PgturbohybridGraphTqQuery *tq,
 {
 	TqScoreMode mode = (TqScoreMode) tq->scoreMode;
 
-	if (!tq->u8SplitEnabled || tq->dimensions < 1024 ||
+	if (!tq->u8.enabled || tq->dimensions < 1024 ||
 		tq->bits != PGTURBOHYBRID_DEFAULT_BITS || mode == PGTURBOHYBRID_SCORE_L1)
 		return false;
 	*distance = PgturbohybridGraphU8DistanceFromRaw(tq, valueScale,
@@ -1146,7 +864,7 @@ PgturbohybridGraphTqCodeQuerySplitDistance(const PgturbohybridGraphTqQuery *tq,
 #if PGTURBOHYBRID_GRAPH_COMPILE_QUERY_SPLIT
 #if PGTURBOHYBRID_GRAPH_COMPILE_AVX2
 	/* Prefer the unsigned-codebook split when it was prepared for this query. */
-	if (tq->u8SplitEnabled &&
+	if (tq->u8.enabled &&
 		PgturbohybridGraphPackedDistanceU8Split(tq, valueCode, valueScale, distance))
 		return true;
 #endif
@@ -1172,10 +890,10 @@ PgturbohybridGraphTqQuerySplitActive(const PgturbohybridGraphTqQuery *tq)
 #if PGTURBOHYBRID_GRAPH_COMPILE_QUERY_SPLIT
 #if PGTURBOHYBRID_GRAPH_COMPILE_AVX2
 	/* Unsigned-codebook split prepared -> it will run; LUT not needed. */
-	if (tq != NULL && tq->u8SplitEnabled)
+	if (tq != NULL && tq->u8.enabled)
 		return true;
 #endif
-	if (tq == NULL || !tq->querySplitEnabled || tq->dimensions < 1024 ||
+	if (tq == NULL || !tq->signedSplit.enabled || tq->dimensions < 1024 ||
 		(tq->bits != PGTURBOHYBRID_DEFAULT_BITS && tq->bits != 2) ||
 		(TqScoreMode) tq->scoreMode == PGTURBOHYBRID_SCORE_L1)
 		return false;
@@ -1560,1959 +1278,6 @@ PgturbohybridGraphInt8Int8Dot4Neon(const int8 *query, const uint8 **valueCodes, 
 
 #endif
 
-#if PGTURBOHYBRID_GRAPH_COMPILE_AVX2
-static bool
-PgturbohybridGraphAvx2Available(void)
-{
-	static int	available = -1;
-
-	if (pgturbohybrid_dense_simd_force != PGTURBOHYBRID_SIMD_FORCE_AUTO &&
-		pgturbohybrid_dense_simd_force != PGTURBOHYBRID_SIMD_FORCE_AVX2)
-		return false;
-
-	if (available >= 0)
-		return available != 0;
-
-#if defined(__AVX2__)
-	available = 1;
-#elif PGTURBOHYBRID_GRAPH_X86 && (defined(__GNUC__) || defined(__clang__))
-	available = __builtin_cpu_supports("avx2") ? 1 : 0;
-#else
-	available = 0;
-#endif
-	return available != 0;
-}
-
-static inline int64 PGTURBOHYBRID_GRAPH_AVX2_TARGET
-PgturbohybridGraphHorizontalSumI32Avx2(__m256i v)
-{
-	int32		s[8];
-
-	_mm256_storeu_si256((__m256i *) s, v);
-	return (int64) s[0] + s[1] + s[2] + s[3] +
-		s[4] + s[5] + s[6] + s[7];
-}
-
-static inline double PGTURBOHYBRID_GRAPH_AVX2_TARGET
-PgturbohybridGraphHorizontalSumF32Avx2(__m256 v)
-{
-	float		s[8];
-
-	_mm256_storeu_ps(s, v);
-	return (double) s[0] + s[1] + s[2] + s[3] +
-		s[4] + s[5] + s[6] + s[7];
-}
-
-static inline __m128i PGTURBOHYBRID_GRAPH_AVX2_TARGET
-PgturbohybridGraphExpandPacked4Avx2(const uint8 *code)
-{
-	const __m128i mask = _mm_set1_epi8(0x0f);
-	const __m128i codebook = _mm_loadu_si128((const __m128i *) PgturbohybridGraphCodebookI8);
-	__m128i	packed = _mm_loadl_epi64((const __m128i *) code);
-	__m128i	lo = _mm_and_si128(packed, mask);
-	__m128i	hi = _mm_and_si128(_mm_srli_epi16(packed, 4), mask);
-	__m128i	idx = _mm_unpacklo_epi8(lo, hi);
-
-	return _mm_shuffle_epi8(codebook, idx);
-}
-
-static inline __m128i PGTURBOHYBRID_GRAPH_AVX2_TARGET
-PgturbohybridGraphExpandPacked2Avx2(const uint8 *code)
-{
-	int32		codeI32;
-	__m128i		data;
-	__m128i		loMask = _mm_set1_epi8(0x0F);
-	__m128i		loNibs;
-	__m128i		hiNibs;
-	__m128i		pairIdx;
-	__m128i		tEven;
-	__m128i		tOdd;
-	__m128i		cEven;
-	__m128i		cOdd;
-
-	memcpy(&codeI32, code, sizeof(codeI32));
-	data = _mm_cvtsi32_si128(codeI32);
-	loNibs = _mm_and_si128(data, loMask);
-	hiNibs = _mm_and_si128(_mm_srli_epi16(data, 4), loMask);
-	pairIdx = _mm_unpacklo_epi8(loNibs, hiNibs);
-
-	tEven = _mm_loadu_si128((const __m128i *) PgturbohybridGraphCodebook2PairEvenI8);
-	tOdd = _mm_loadu_si128((const __m128i *) PgturbohybridGraphCodebook2PairOddI8);
-	cEven = _mm_shuffle_epi8(tEven, pairIdx);
-	cOdd = _mm_shuffle_epi8(tOdd, pairIdx);
-
-	return _mm_unpacklo_epi8(cEven, cOdd);
-}
-
-static inline __m256i PGTURBOHYBRID_GRAPH_AVX2_TARGET
-PgturbohybridGraphDotI8x16Avx2(__m128i a, __m128i b)
-{
-	__m256i	a16 = _mm256_cvtepi8_epi16(a);
-	__m256i	b16 = _mm256_cvtepi8_epi16(b);
-
-	return _mm256_madd_epi16(a16, b16);
-}
-
-static int64 PGTURBOHYBRID_GRAPH_AVX2_TARGET
-PgturbohybridGraphQuerySplitRawAvx2(const PgturbohybridGraphTqQuery *tq, const uint8 *code)
-{
-	__m256i	accLow = _mm256_setzero_si256();
-	__m256i	accHigh = _mm256_setzero_si256();
-
-	for (int chunk = 0; chunk < tq->querySplitChunks; chunk++)
-	{
-		__m128i	c = PgturbohybridGraphExpandPacked4Avx2(code + chunk * 8);
-		__m128i	low = _mm_loadu_si128((const __m128i *) (tq->querySplitLow + chunk * 16));
-		__m128i	high = _mm_loadu_si128((const __m128i *) (tq->querySplitHigh + chunk * 16));
-
-		accLow = _mm256_add_epi32(accLow, PgturbohybridGraphDotI8x16Avx2(low, c));
-		accHigh = _mm256_add_epi32(accHigh, PgturbohybridGraphDotI8x16Avx2(high, c));
-	}
-
-	if (tq->querySplitTailDims != 0)
-	{
-		uint8		scratch[8] = {0};
-		int			tailBytes = (tq->querySplitTailDims + 1) / 2;
-		__m128i	c;
-		__m128i	low;
-		__m128i	high;
-
-		memcpy(scratch, code + tq->querySplitChunks * 8, tailBytes);
-		c = PgturbohybridGraphExpandPacked4Avx2(scratch);
-		low = _mm_loadu_si128((const __m128i *) tq->querySplitTailLow);
-		high = _mm_loadu_si128((const __m128i *) tq->querySplitTailHigh);
-		accLow = _mm256_add_epi32(accLow, PgturbohybridGraphDotI8x16Avx2(low, c));
-		accHigh = _mm256_add_epi32(accHigh, PgturbohybridGraphDotI8x16Avx2(high, c));
-	}
-
-	return PgturbohybridGraphHorizontalSumI32Avx2(accLow) +
-		(int64) PGTURBOHYBRID_QUERY_SPLIT_HIGH_COEF * PgturbohybridGraphHorizontalSumI32Avx2(accHigh);
-}
-
-/*
- * Unsigned-codebook (u8) 4-bit query-split raw scorers.  Return
- *   D = Sum_i q_signed[i] * codebook_u8[code[i]]   (= dotLow + 128 * dotHigh)
- * with q_signed = 128*high + low.  The +128 codebook-shift bias is removed by
- * the caller (PgturbohybridGraphPackedDistanceU8Split) via u8SplitBias.
- *
- * Scalar reference -- the SIMD kernels below must match this exactly.
- */
-static int64
-PgturbohybridGraphQuerySplitU8RawScalar(const PgturbohybridGraphTqQuery *tq, const uint8 *code)
-{
-	int64		dotLow = 0;
-	int64		dotHigh = 0;
-	int			chunks = tq->querySplitChunks;
-	int			fullDims = chunks * 16;
-
-	for (int i = 0; i < fullDims; i++)
-	{
-		int			nib = TqGetCodeComponentBits(code, i, PGTURBOHYBRID_DEFAULT_BITS);
-		int			cu = PgturbohybridGraphCodebookU8[nib];
-		int			chunk = i / 16;
-		int			lane = i % 16;
-
-		dotLow += (int64) tq->u8SplitData[chunk * 32 + lane] * cu;
-		dotHigh += (int64) tq->u8SplitData[chunk * 32 + 16 + lane] * cu;
-	}
-	for (int j = 0; j < tq->querySplitTailDims; j++)
-	{
-		int			nib = TqGetCodeComponentBits(code, fullDims + j, PGTURBOHYBRID_DEFAULT_BITS);
-		int			cu = PgturbohybridGraphCodebookU8[nib];
-
-		dotLow += (int64) tq->u8SplitTailLow[j] * cu;
-		dotHigh += (int64) tq->u8SplitTailHigh[j] * cu;
-	}
-	return dotLow + (int64) PGTURBOHYBRID_U8_SPLIT_HIGH_COEF * dotHigh;
-}
-
-/*
- * AVX2: codebook (u8) broadcast to both 128-bit lanes; the [low|high] query
- * pair fills the 256-bit register so one _mm256_maddubs_epi16 produces c*low in
- * the low lane and c*high in the high lane.
- */
-static int64 PGTURBOHYBRID_GRAPH_AVX2_TARGET
-PgturbohybridGraphQuerySplitU8RawAvx2(const PgturbohybridGraphTqQuery *tq, const uint8 *code)
-{
-	const __m128i mask = _mm_set1_epi8(0x0f);
-	const __m128i cbU8 = _mm_loadu_si128((const __m128i *) PgturbohybridGraphCodebookU8);
-	const __m256i ones = _mm256_set1_epi16(1);
-	const __m128i ones128 = _mm_set1_epi16(1);
-	__m256i		acc = _mm256_setzero_si256();
-	__m128i		accLow128 = _mm_setzero_si128();
-	__m128i		accHigh128 = _mm_setzero_si128();
-	int32		s[8];
-	int32		sl[4];
-	int32		sh[4];
-	int64		dotLow;
-	int64		dotHigh;
-
-	for (int chunk = 0; chunk < tq->querySplitChunks; chunk++)
-	{
-		__m128i		packed = _mm_loadl_epi64((const __m128i *) (code + chunk * 8));
-		__m128i		lo = _mm_and_si128(packed, mask);
-		__m128i		hi = _mm_and_si128(_mm_srli_epi16(packed, 4), mask);
-		__m128i		idx = _mm_unpacklo_epi8(lo, hi);
-		__m128i		cvals = _mm_shuffle_epi8(cbU8, idx);
-		__m256i		c256 = _mm256_broadcastsi128_si256(cvals);
-		__m256i		lh = _mm256_loadu_si256((const __m256i *) (tq->u8SplitData + chunk * 32));
-
-		acc = _mm256_add_epi32(acc, _mm256_madd_epi16(_mm256_maddubs_epi16(c256, lh), ones));
-	}
-
-	if (tq->querySplitTailDims != 0)
-	{
-		uint8		scratch[8] = {0};
-		int			tailBytes = (tq->querySplitTailDims + 1) / 2;
-		__m128i		packed;
-		__m128i		lo;
-		__m128i		hi;
-		__m128i		idx;
-		__m128i		cvals;
-		__m128i		lowv;
-		__m128i		highv;
-
-		memcpy(scratch, code + tq->querySplitChunks * 8, tailBytes);
-		packed = _mm_loadl_epi64((const __m128i *) scratch);
-		lo = _mm_and_si128(packed, mask);
-		hi = _mm_and_si128(_mm_srli_epi16(packed, 4), mask);
-		idx = _mm_unpacklo_epi8(lo, hi);
-		cvals = _mm_shuffle_epi8(cbU8, idx);
-		lowv = _mm_loadu_si128((const __m128i *) tq->u8SplitTailLow);
-		highv = _mm_loadu_si128((const __m128i *) tq->u8SplitTailHigh);
-		accLow128 = _mm_add_epi32(accLow128, _mm_madd_epi16(_mm_maddubs_epi16(cvals, lowv), ones128));
-		accHigh128 = _mm_add_epi32(accHigh128, _mm_madd_epi16(_mm_maddubs_epi16(cvals, highv), ones128));
-	}
-
-	_mm256_storeu_si256((__m256i *) s, acc);
-	_mm_storeu_si128((__m128i *) sl, accLow128);
-	_mm_storeu_si128((__m128i *) sh, accHigh128);
-	dotLow = (int64) s[0] + s[1] + s[2] + s[3] + sl[0] + sl[1] + sl[2] + sl[3];
-	dotHigh = (int64) s[4] + s[5] + s[6] + s[7] + sh[0] + sh[1] + sh[2] + sh[3];
-	return dotLow + (int64) PGTURBOHYBRID_U8_SPLIT_HIGH_COEF * dotHigh;
-}
-
-/*
- * True 4-candidate AVX2 u8 batch: loads each query [low|high] chunk once and
- * decodes/accumulates four codes against it (4 accumulators), instead of
- * walking the whole query four times.  Bit-identical to four single-node
- * PgturbohybridGraphQuerySplitU8RawAvx2() calls.
- */
-static void PGTURBOHYBRID_GRAPH_AVX2_TARGET
-PgturbohybridGraphQuerySplitU8RawAvx2x4(const PgturbohybridGraphTqQuery *tq,
-										const uint8 *codes[4], int64 raw[4])
-{
-	const __m128i mask = _mm_set1_epi8(0x0f);
-	const __m128i cbU8 = _mm_loadu_si128((const __m128i *) PgturbohybridGraphCodebookU8);
-	const __m256i ones = _mm256_set1_epi16(1);
-	const __m128i ones128 = _mm_set1_epi16(1);
-	__m256i		acc[4];
-	__m128i		accLow128[4];
-	__m128i		accHigh128[4];
-
-	for (int c = 0; c < 4; c++)
-	{
-		acc[c] = _mm256_setzero_si256();
-		accLow128[c] = _mm_setzero_si128();
-		accHigh128[c] = _mm_setzero_si128();
-	}
-
-	for (int chunk = 0; chunk < tq->querySplitChunks; chunk++)
-	{
-		__m256i		lh = _mm256_loadu_si256((const __m256i *) (tq->u8SplitData + chunk * 32));
-
-		for (int c = 0; c < 4; c++)
-		{
-			__m128i		packed = _mm_loadl_epi64((const __m128i *) (codes[c] + chunk * 8));
-			__m128i		lo = _mm_and_si128(packed, mask);
-			__m128i		hi = _mm_and_si128(_mm_srli_epi16(packed, 4), mask);
-			__m128i		idx = _mm_unpacklo_epi8(lo, hi);
-			__m128i		cvals = _mm_shuffle_epi8(cbU8, idx);
-			__m256i		c256 = _mm256_broadcastsi128_si256(cvals);
-
-			acc[c] = _mm256_add_epi32(acc[c], _mm256_madd_epi16(_mm256_maddubs_epi16(c256, lh), ones));
-		}
-	}
-
-	if (tq->querySplitTailDims != 0)
-	{
-		int			tailBytes = (tq->querySplitTailDims + 1) / 2;
-		__m128i		lowv = _mm_loadu_si128((const __m128i *) tq->u8SplitTailLow);
-		__m128i		highv = _mm_loadu_si128((const __m128i *) tq->u8SplitTailHigh);
-
-		for (int c = 0; c < 4; c++)
-		{
-			uint8		scratch[8] = {0};
-			__m128i		packed;
-			__m128i		lo;
-			__m128i		hi;
-			__m128i		idx;
-			__m128i		cvals;
-
-			memcpy(scratch, codes[c] + tq->querySplitChunks * 8, tailBytes);
-			packed = _mm_loadl_epi64((const __m128i *) scratch);
-			lo = _mm_and_si128(packed, mask);
-			hi = _mm_and_si128(_mm_srli_epi16(packed, 4), mask);
-			idx = _mm_unpacklo_epi8(lo, hi);
-			cvals = _mm_shuffle_epi8(cbU8, idx);
-			accLow128[c] = _mm_add_epi32(accLow128[c], _mm_madd_epi16(_mm_maddubs_epi16(cvals, lowv), ones128));
-			accHigh128[c] = _mm_add_epi32(accHigh128[c], _mm_madd_epi16(_mm_maddubs_epi16(cvals, highv), ones128));
-		}
-	}
-
-	for (int c = 0; c < 4; c++)
-	{
-		int32		s[8];
-		int32		sl[4];
-		int32		sh[4];
-		int64		dotLow;
-		int64		dotHigh;
-
-		_mm256_storeu_si256((__m256i *) s, acc[c]);
-		_mm_storeu_si128((__m128i *) sl, accLow128[c]);
-		_mm_storeu_si128((__m128i *) sh, accHigh128[c]);
-		dotLow = (int64) s[0] + s[1] + s[2] + s[3] + sl[0] + sl[1] + sl[2] + sl[3];
-		dotHigh = (int64) s[4] + s[5] + s[6] + s[7] + sh[0] + sh[1] + sh[2] + sh[3];
-		raw[c] = dotLow + (int64) PGTURBOHYBRID_U8_SPLIT_HIGH_COEF * dotHigh;
-	}
-}
-
-#if PGTURBOHYBRID_GRAPH_COMPILE_AVX512VNNI
-/*
- * AVX-512 VNNI: two [low|high] chunks (64 bytes) per VPDPBUSD.  ZMM 128-lanes
- * carry [a.low, a.high, b.low, b.high]; the codebook is broadcast per chunk so
- * dpbusd's u8*i8 fused dot lands a.low/a.high in the low 256 and b.low/b.high
- * in the high 256.
- */
-static int64 PGTURBOHYBRID_GRAPH_AVX512VNNI_TARGET
-PgturbohybridGraphQuerySplitU8RawAvx512Vnni(const PgturbohybridGraphTqQuery *tq, const uint8 *code)
-{
-	const __m128i mask = _mm_set1_epi8(0x0f);
-	const __m128i cbU8 = _mm_loadu_si128((const __m128i *) PgturbohybridGraphCodebookU8);
-	const __m512i cb512 = _mm512_broadcast_i32x4(cbU8);
-	const __m128i ones128 = _mm_set1_epi16(1);
-	__m512i		acc = _mm512_setzero_si512();
-	__m128i		sumLow;
-	__m128i		sumHigh;
-	int			chunks = tq->querySplitChunks;
-	int			nPairs = chunks / 2;
-	int32		sl[4];
-	int32		sh[4];
-
-	for (int i = 0; i < nPairs; i++)
-	{
-		__m512i		lh = _mm512_loadu_si512((const __m512i *) (tq->u8SplitData + i * 64));
-		__m128i		packed = _mm_loadu_si128((const __m128i *) (code + i * 16));
-		__m128i		lo = _mm_and_si128(packed, mask);
-		__m128i		hi = _mm_and_si128(_mm_srli_epi16(packed, 4), mask);
-		__m128i		va = _mm_unpacklo_epi8(lo, hi);
-		__m128i		vb = _mm_unpackhi_epi8(lo, hi);
-		__m256i		vaDup = _mm256_broadcastsi128_si256(va);
-		__m256i		vbDup = _mm256_broadcastsi128_si256(vb);
-		__m512i		v512 = _mm512_inserti64x4(_mm512_castsi256_si512(vaDup), vbDup, 1);
-		__m512i		c512 = _mm512_shuffle_epi8(cb512, v512);
-
-		acc = _mm512_dpbusd_epi32(acc, c512, lh);
-	}
-
-	{
-		__m256i		lo256 = _mm512_castsi512_si256(acc);
-		__m256i		hi256 = _mm512_extracti64x4_epi64(acc, 1);
-
-		sumLow = _mm_add_epi32(_mm256_castsi256_si128(lo256),
-							   _mm256_castsi256_si128(hi256));
-		sumHigh = _mm_add_epi32(_mm256_extracti128_si256(lo256, 1),
-								_mm256_extracti128_si256(hi256, 1));
-	}
-
-	if (chunks & 1)
-	{
-		int			chunk = nPairs * 2;
-		__m128i		packed = _mm_loadl_epi64((const __m128i *) (code + chunk * 8));
-		__m128i		lo = _mm_and_si128(packed, mask);
-		__m128i		hi = _mm_and_si128(_mm_srli_epi16(packed, 4), mask);
-		__m128i		idx = _mm_unpacklo_epi8(lo, hi);
-		__m128i		cvals = _mm_shuffle_epi8(cbU8, idx);
-		__m128i		lowv = _mm_loadu_si128((const __m128i *) (tq->u8SplitData + chunk * 32));
-		__m128i		highv = _mm_loadu_si128((const __m128i *) (tq->u8SplitData + chunk * 32 + 16));
-
-		sumLow = _mm_add_epi32(sumLow, _mm_madd_epi16(_mm_maddubs_epi16(cvals, lowv), ones128));
-		sumHigh = _mm_add_epi32(sumHigh, _mm_madd_epi16(_mm_maddubs_epi16(cvals, highv), ones128));
-	}
-
-	if (tq->querySplitTailDims != 0)
-	{
-		uint8		scratch[8] = {0};
-		int			tailBytes = (tq->querySplitTailDims + 1) / 2;
-		__m128i		packed;
-		__m128i		lo;
-		__m128i		hi;
-		__m128i		idx;
-		__m128i		cvals;
-		__m128i		lowv;
-		__m128i		highv;
-
-		memcpy(scratch, code + tq->querySplitChunks * 8, tailBytes);
-		packed = _mm_loadl_epi64((const __m128i *) scratch);
-		lo = _mm_and_si128(packed, mask);
-		hi = _mm_and_si128(_mm_srli_epi16(packed, 4), mask);
-		idx = _mm_unpacklo_epi8(lo, hi);
-		cvals = _mm_shuffle_epi8(cbU8, idx);
-		lowv = _mm_loadu_si128((const __m128i *) tq->u8SplitTailLow);
-		highv = _mm_loadu_si128((const __m128i *) tq->u8SplitTailHigh);
-		sumLow = _mm_add_epi32(sumLow, _mm_madd_epi16(_mm_maddubs_epi16(cvals, lowv), ones128));
-		sumHigh = _mm_add_epi32(sumHigh, _mm_madd_epi16(_mm_maddubs_epi16(cvals, highv), ones128));
-	}
-
-	_mm_storeu_si128((__m128i *) sl, sumLow);
-	_mm_storeu_si128((__m128i *) sh, sumHigh);
-	return ((int64) sl[0] + sl[1] + sl[2] + sl[3]) +
-		(int64) PGTURBOHYBRID_U8_SPLIT_HIGH_COEF * ((int64) sh[0] + sh[1] + sh[2] + sh[3]);
-}
-
-/*
- * True 4-candidate AVX-512 VNNI u8 batch: each 64-byte query pair is loaded once
- * and dpbusd'd against four decoded codes (4 accumulators).  Bit-identical to
- * four single-node PgturbohybridGraphQuerySplitU8RawAvx512Vnni() calls.
- */
-static void PGTURBOHYBRID_GRAPH_AVX512VNNI_TARGET
-PgturbohybridGraphQuerySplitU8RawAvx512Vnnix4(const PgturbohybridGraphTqQuery *tq,
-											  const uint8 *codes[4], int64 raw[4])
-{
-	const __m128i mask = _mm_set1_epi8(0x0f);
-	const __m128i cbU8 = _mm_loadu_si128((const __m128i *) PgturbohybridGraphCodebookU8);
-	const __m512i cb512 = _mm512_broadcast_i32x4(cbU8);
-	const __m128i ones128 = _mm_set1_epi16(1);
-	__m512i		acc[4];
-	__m128i		sumLow[4];
-	__m128i		sumHigh[4];
-	int			chunks = tq->querySplitChunks;
-	int			nPairs = chunks / 2;
-
-	for (int c = 0; c < 4; c++)
-		acc[c] = _mm512_setzero_si512();
-
-	for (int i = 0; i < nPairs; i++)
-	{
-		__m512i		lh = _mm512_loadu_si512((const __m512i *) (tq->u8SplitData + i * 64));
-
-		for (int c = 0; c < 4; c++)
-		{
-			__m128i		packed = _mm_loadu_si128((const __m128i *) (codes[c] + i * 16));
-			__m128i		lo = _mm_and_si128(packed, mask);
-			__m128i		hi = _mm_and_si128(_mm_srli_epi16(packed, 4), mask);
-			__m128i		va = _mm_unpacklo_epi8(lo, hi);
-			__m128i		vb = _mm_unpackhi_epi8(lo, hi);
-			__m256i		vaDup = _mm256_broadcastsi128_si256(va);
-			__m256i		vbDup = _mm256_broadcastsi128_si256(vb);
-			__m512i		v512 = _mm512_inserti64x4(_mm512_castsi256_si512(vaDup), vbDup, 1);
-			__m512i		c512 = _mm512_shuffle_epi8(cb512, v512);
-
-			acc[c] = _mm512_dpbusd_epi32(acc[c], c512, lh);
-		}
-	}
-
-	for (int c = 0; c < 4; c++)
-	{
-		__m256i		lo256 = _mm512_castsi512_si256(acc[c]);
-		__m256i		hi256 = _mm512_extracti64x4_epi64(acc[c], 1);
-
-		sumLow[c] = _mm_add_epi32(_mm256_castsi256_si128(lo256),
-								  _mm256_castsi256_si128(hi256));
-		sumHigh[c] = _mm_add_epi32(_mm256_extracti128_si256(lo256, 1),
-								   _mm256_extracti128_si256(hi256, 1));
-	}
-
-	if (chunks & 1)
-	{
-		int			chunk = nPairs * 2;
-		__m128i		lowv = _mm_loadu_si128((const __m128i *) (tq->u8SplitData + chunk * 32));
-		__m128i		highv = _mm_loadu_si128((const __m128i *) (tq->u8SplitData + chunk * 32 + 16));
-
-		for (int c = 0; c < 4; c++)
-		{
-			__m128i		packed = _mm_loadl_epi64((const __m128i *) (codes[c] + chunk * 8));
-			__m128i		lo = _mm_and_si128(packed, mask);
-			__m128i		hi = _mm_and_si128(_mm_srli_epi16(packed, 4), mask);
-			__m128i		idx = _mm_unpacklo_epi8(lo, hi);
-			__m128i		cvals = _mm_shuffle_epi8(cbU8, idx);
-
-			sumLow[c] = _mm_add_epi32(sumLow[c], _mm_madd_epi16(_mm_maddubs_epi16(cvals, lowv), ones128));
-			sumHigh[c] = _mm_add_epi32(sumHigh[c], _mm_madd_epi16(_mm_maddubs_epi16(cvals, highv), ones128));
-		}
-	}
-
-	if (tq->querySplitTailDims != 0)
-	{
-		int			tailBytes = (tq->querySplitTailDims + 1) / 2;
-		__m128i		lowv = _mm_loadu_si128((const __m128i *) tq->u8SplitTailLow);
-		__m128i		highv = _mm_loadu_si128((const __m128i *) tq->u8SplitTailHigh);
-
-		for (int c = 0; c < 4; c++)
-		{
-			uint8		scratch[8] = {0};
-			__m128i		packed;
-			__m128i		lo;
-			__m128i		hi;
-			__m128i		idx;
-			__m128i		cvals;
-
-			memcpy(scratch, codes[c] + tq->querySplitChunks * 8, tailBytes);
-			packed = _mm_loadl_epi64((const __m128i *) scratch);
-			lo = _mm_and_si128(packed, mask);
-			hi = _mm_and_si128(_mm_srli_epi16(packed, 4), mask);
-			idx = _mm_unpacklo_epi8(lo, hi);
-			cvals = _mm_shuffle_epi8(cbU8, idx);
-			sumLow[c] = _mm_add_epi32(sumLow[c], _mm_madd_epi16(_mm_maddubs_epi16(cvals, lowv), ones128));
-			sumHigh[c] = _mm_add_epi32(sumHigh[c], _mm_madd_epi16(_mm_maddubs_epi16(cvals, highv), ones128));
-		}
-	}
-
-	for (int c = 0; c < 4; c++)
-	{
-		int32		sl[4];
-		int32		sh[4];
-
-		_mm_storeu_si128((__m128i *) sl, sumLow[c]);
-		_mm_storeu_si128((__m128i *) sh, sumHigh[c]);
-		raw[c] = ((int64) sl[0] + sl[1] + sl[2] + sl[3]) +
-			(int64) PGTURBOHYBRID_U8_SPLIT_HIGH_COEF * ((int64) sh[0] + sh[1] + sh[2] + sh[3]);
-	}
-}
-#endif
-
-static int64 PGTURBOHYBRID_GRAPH_AVX2_TARGET
-PgturbohybridGraphQuerySplit2RawAvx2(const PgturbohybridGraphTqQuery *tq, const uint8 *code)
-{
-	__m256i	accLow = _mm256_setzero_si256();
-	__m256i	accHigh = _mm256_setzero_si256();
-
-	for (int chunk = 0; chunk < tq->querySplitChunks; chunk++)
-	{
-		__m128i	c = PgturbohybridGraphExpandPacked2Avx2(code + chunk * 4);
-		__m128i	low = _mm_loadu_si128((const __m128i *) (tq->querySplitLow + chunk * 16));
-		__m128i	high = _mm_loadu_si128((const __m128i *) (tq->querySplitHigh + chunk * 16));
-
-		accLow = _mm256_add_epi32(accLow, PgturbohybridGraphDotI8x16Avx2(low, c));
-		accHigh = _mm256_add_epi32(accHigh, PgturbohybridGraphDotI8x16Avx2(high, c));
-	}
-
-	if (tq->querySplitTailDims != 0)
-	{
-		uint8		scratch[4] = {0};
-		int			tailBytes = (tq->querySplitTailDims + 3) / 4;
-		__m128i	c;
-		__m128i	low;
-		__m128i	high;
-
-		memcpy(scratch, code + tq->querySplitChunks * 4, tailBytes);
-		c = PgturbohybridGraphExpandPacked2Avx2(scratch);
-		low = _mm_loadu_si128((const __m128i *) tq->querySplitTailLow);
-		high = _mm_loadu_si128((const __m128i *) tq->querySplitTailHigh);
-		accLow = _mm256_add_epi32(accLow, PgturbohybridGraphDotI8x16Avx2(low, c));
-		accHigh = _mm256_add_epi32(accHigh, PgturbohybridGraphDotI8x16Avx2(high, c));
-	}
-
-	return PgturbohybridGraphHorizontalSumI32Avx2(accLow) +
-		(int64) PGTURBOHYBRID_QUERY_SPLIT_HIGH_COEF * PgturbohybridGraphHorizontalSumI32Avx2(accHigh);
-}
-
-/*
- * AVX2 SIMD weighted symmetric (code-code) kernels for TQ+.
- *
- * For each chunk of 16 coords (4-bit unpack via shuffle, 2-bit unpack
- * via the pair-table), expand a/b to i8x16, widen to i16x16, then:
- *
- *    prod = c_a · c_b              (i16, fits since |c| ≤ 127)
- *    pw   = madd(prod, weights)    (Σ pairs of i16 → i32, 8 lanes)
- *    acc += widen i32 → i64
- *
- * Returns Σ c_a[d] · c_b[d] · D'²_i16[d] as i64.  Caller divides by
- * `weight_scale · CODEBOOK_SCALE²` to recover the f32 weighted dot.
- *
- * No pruning (unlike the unweighted kernel) — every coord must
- * contribute its weight, otherwise the formula degenerates.  At
- * dim=1536 this does more work than the unweighted kernel (32
- * chunks vs 96 chunks scanned, plus the widen-mul-madd overhead).
- * Keep benchmark claims about this path in benchmark artifacts, not
- * source comments.
- */
-static inline int64 PGTURBOHYBRID_GRAPH_AVX2_TARGET
-PgturbohybridGraphHorizontalSumI64Avx2(__m256i v)
-{
-	int64		s[4];
-
-	_mm256_storeu_si256((__m256i *) s, v);
-	return s[0] + s[1] + s[2] + s[3];
-}
-
-static inline __m256i PGTURBOHYBRID_GRAPH_AVX2_TARGET
-PgturbohybridGraphWeightedDotI8x16Avx2(__m128i ca, __m128i cb,
-							 const int16 *weightsAt)
-{
-	__m256i		caI16 = _mm256_cvtepi8_epi16(ca);
-	__m256i		cbI16 = _mm256_cvtepi8_epi16(cb);
-	__m256i		prod = _mm256_mullo_epi16(caI16, cbI16);
-	__m256i		w = _mm256_loadu_si256((const __m256i *) weightsAt);
-	__m256i		pw = _mm256_madd_epi16(prod, w);
-	__m256i		pwLoI64 = _mm256_cvtepi32_epi64(_mm256_castsi256_si128(pw));
-	__m256i		pwHiI64 = _mm256_cvtepi32_epi64(_mm256_extracti128_si256(pw, 1));
-
-	return _mm256_add_epi64(pwLoI64, pwHiI64);
-}
-
-static int64 PGTURBOHYBRID_GRAPH_AVX2_TARGET
-PgturbohybridGraphCodeCodeWeightedRawAvx2(const uint8 *a, const uint8 *b,
-								const int16 *weights, int dim)
-{
-	__m256i		acc = _mm256_setzero_si256();
-	int			chunks = dim / 16;
-	int			tailDims = dim - chunks * 16;
-
-	for (int chunk = 0; chunk < chunks; chunk++)
-	{
-		__m128i		ca = PgturbohybridGraphExpandPacked4Avx2(a + chunk * 8);
-		__m128i		cb = PgturbohybridGraphExpandPacked4Avx2(b + chunk * 8);
-
-		acc = _mm256_add_epi64(acc,
-								PgturbohybridGraphWeightedDotI8x16Avx2(ca, cb, weights + chunk * 16));
-	}
-
-	if (tailDims != 0)
-	{
-		uint8		scratchA[8] = {0};
-		uint8		scratchB[8] = {0};
-		int16		scratchW[16] = {0};
-		int			tailBytes = (tailDims + 1) / 2;
-		__m128i		ca;
-		__m128i		cb;
-
-		memcpy(scratchA, a + chunks * 8, tailBytes);
-		memcpy(scratchB, b + chunks * 8, tailBytes);
-		memcpy(scratchW, weights + chunks * 16, sizeof(int16) * tailDims);
-		ca = PgturbohybridGraphExpandPacked4Avx2(scratchA);
-		cb = PgturbohybridGraphExpandPacked4Avx2(scratchB);
-		acc = _mm256_add_epi64(acc, PgturbohybridGraphWeightedDotI8x16Avx2(ca, cb, scratchW));
-	}
-
-	return PgturbohybridGraphHorizontalSumI64Avx2(acc);
-}
-
-static int64 PGTURBOHYBRID_GRAPH_AVX2_TARGET
-PgturbohybridGraphCodeCode2WeightedRawAvx2(const uint8 *a, const uint8 *b,
-								 const int16 *weights, int dim)
-{
-	__m256i		acc = _mm256_setzero_si256();
-	int			chunks = dim / 16;
-	int			tailDims = dim - chunks * 16;
-
-	for (int chunk = 0; chunk < chunks; chunk++)
-	{
-		__m128i		ca = PgturbohybridGraphExpandPacked2Avx2(a + chunk * 4);
-		__m128i		cb = PgturbohybridGraphExpandPacked2Avx2(b + chunk * 4);
-
-		acc = _mm256_add_epi64(acc,
-								PgturbohybridGraphWeightedDotI8x16Avx2(ca, cb, weights + chunk * 16));
-	}
-
-	if (tailDims != 0)
-	{
-		uint8		scratchA[4] = {0};
-		uint8		scratchB[4] = {0};
-		int16		scratchW[16] = {0};
-		int			tailBytes = (tailDims + 3) / 4;
-		__m128i		ca;
-		__m128i		cb;
-
-		memcpy(scratchA, a + chunks * 4, tailBytes);
-		memcpy(scratchB, b + chunks * 4, tailBytes);
-		memcpy(scratchW, weights + chunks * 16, sizeof(int16) * tailDims);
-		ca = PgturbohybridGraphExpandPacked2Avx2(scratchA);
-		cb = PgturbohybridGraphExpandPacked2Avx2(scratchB);
-		acc = _mm256_add_epi64(acc, PgturbohybridGraphWeightedDotI8x16Avx2(ca, cb, scratchW));
-	}
-
-	return PgturbohybridGraphHorizontalSumI64Avx2(acc);
-}
-
-#if PGTURBOHYBRID_GRAPH_COMPILE_AVX512_WEIGHTED
-static bool
-PgturbohybridGraphAvx512WeightedAvailable(void)
-{
-	static int	available = -1;
-
-	/* Valgrind cannot execute AVX-512; fall back to AVX2/scalar. */
-	if (PgturbohybridGraphRunningUnderValgrind())
-		return false;
-
-	if (pgturbohybrid_dense_graph_avx512_weighted == PGTURBOHYBRID_GRAPH_AVX512_WEIGHTED_OFF ||
-		pgturbohybrid_dense_simd_force == PGTURBOHYBRID_SIMD_FORCE_SCALAR)
-		return false;
-
-	if (pgturbohybrid_dense_simd_force != PGTURBOHYBRID_SIMD_FORCE_AUTO &&
-		pgturbohybrid_dense_simd_force != PGTURBOHYBRID_SIMD_FORCE_AVX512VNNI)
-		return false;
-
-	if (available >= 0)
-		return available != 0;
-
-#if defined(__AVX512F__) && defined(__AVX512BW__) && defined(__AVX512DQ__) && defined(__AVX512VL__)
-	available = 1;
-#elif PGTURBOHYBRID_GRAPH_X86 && (defined(__GNUC__) || defined(__clang__))
-	available = __builtin_cpu_supports("avx512f") &&
-		__builtin_cpu_supports("avx512bw") &&
-		__builtin_cpu_supports("avx512dq") &&
-		__builtin_cpu_supports("avx512vl") ? 1 : 0;
-#else
-	available = 0;
-#endif
-	return available != 0;
-}
-
-static inline int64 PGTURBOHYBRID_GRAPH_AVX512_WEIGHTED_TARGET
-PgturbohybridGraphHorizontalSumI32x16Avx512(__m512i v)
-{
-	int32		s[16];
-	int64		sum = 0;
-
-	_mm512_storeu_si512((__m512i *) s, v);
-	for (int i = 0; i < 16; i++)
-		sum += s[i];
-
-	return sum;
-}
-
-static inline __m256i PGTURBOHYBRID_GRAPH_AVX512_WEIGHTED_TARGET
-PgturbohybridGraphExpandPacked4x32Avx512(const uint8 *code)
-{
-	__m128i		lo = PgturbohybridGraphExpandPacked4Avx2(code);
-	__m128i		hi = PgturbohybridGraphExpandPacked4Avx2(code + 8);
-
-	return _mm256_inserti128_si256(_mm256_castsi128_si256(lo), hi, 1);
-}
-
-static inline __m256i PGTURBOHYBRID_GRAPH_AVX512_WEIGHTED_TARGET
-PgturbohybridGraphExpandPacked2x32Avx512(const uint8 *code)
-{
-	__m128i		lo = PgturbohybridGraphExpandPacked2Avx2(code);
-	__m128i		hi = PgturbohybridGraphExpandPacked2Avx2(code + 4);
-
-	return _mm256_inserti128_si256(_mm256_castsi128_si256(lo), hi, 1);
-}
-
-static inline int64 PGTURBOHYBRID_GRAPH_AVX512_WEIGHTED_TARGET
-PgturbohybridGraphWeightedDotI8x32Avx512(__m256i ca, __m256i cb,
-							  const int16 *weightsAt)
-{
-	__m512i		caI16 = _mm512_cvtepi8_epi16(ca);
-	__m512i		cbI16 = _mm512_cvtepi8_epi16(cb);
-	__m512i		prod = _mm512_mullo_epi16(caI16, cbI16);
-	__m512i		w = _mm512_loadu_si512((const __m512i *) weightsAt);
-	__m512i		pw = _mm512_madd_epi16(prod, w);
-
-	return PgturbohybridGraphHorizontalSumI32x16Avx512(pw);
-}
-
-static int64 PGTURBOHYBRID_GRAPH_AVX512_WEIGHTED_TARGET
-PgturbohybridGraphCodeCodeWeightedRawAvx512(const uint8 *a, const uint8 *b,
-								 const int16 *weights, int dim)
-{
-	int64		acc = 0;
-	int			chunks = dim / 32;
-	int			tailDims = dim - chunks * 32;
-
-	for (int chunk = 0; chunk < chunks; chunk++)
-	{
-		__m256i		ca = PgturbohybridGraphExpandPacked4x32Avx512(a + chunk * 16);
-		__m256i		cb = PgturbohybridGraphExpandPacked4x32Avx512(b + chunk * 16);
-
-		acc += PgturbohybridGraphWeightedDotI8x32Avx512(ca, cb, weights + chunk * 32);
-	}
-
-	if (tailDims != 0)
-	{
-		uint8		scratchA[16] = {0};
-		uint8		scratchB[16] = {0};
-		int16		scratchW[32] = {0};
-		int			tailBytes = (tailDims + 1) / 2;
-		__m256i		ca;
-		__m256i		cb;
-
-		memcpy(scratchA, a + chunks * 16, tailBytes);
-		memcpy(scratchB, b + chunks * 16, tailBytes);
-		memcpy(scratchW, weights + chunks * 32, sizeof(int16) * tailDims);
-		ca = PgturbohybridGraphExpandPacked4x32Avx512(scratchA);
-		cb = PgturbohybridGraphExpandPacked4x32Avx512(scratchB);
-		acc += PgturbohybridGraphWeightedDotI8x32Avx512(ca, cb, scratchW);
-	}
-
-	return acc;
-}
-
-static int64 PGTURBOHYBRID_GRAPH_AVX512_WEIGHTED_TARGET
-PgturbohybridGraphCodeCode2WeightedRawAvx512(const uint8 *a, const uint8 *b,
-								  const int16 *weights, int dim)
-{
-	int64		acc = 0;
-	int			chunks = dim / 32;
-	int			tailDims = dim - chunks * 32;
-
-	for (int chunk = 0; chunk < chunks; chunk++)
-	{
-		__m256i		ca = PgturbohybridGraphExpandPacked2x32Avx512(a + chunk * 8);
-		__m256i		cb = PgturbohybridGraphExpandPacked2x32Avx512(b + chunk * 8);
-
-		acc += PgturbohybridGraphWeightedDotI8x32Avx512(ca, cb, weights + chunk * 32);
-	}
-
-	if (tailDims != 0)
-	{
-		uint8		scratchA[8] = {0};
-		uint8		scratchB[8] = {0};
-		int16		scratchW[32] = {0};
-		int			tailBytes = (tailDims + 3) / 4;
-		__m256i		ca;
-		__m256i		cb;
-
-		memcpy(scratchA, a + chunks * 8, tailBytes);
-		memcpy(scratchB, b + chunks * 8, tailBytes);
-		memcpy(scratchW, weights + chunks * 32, sizeof(int16) * tailDims);
-		ca = PgturbohybridGraphExpandPacked2x32Avx512(scratchA);
-		cb = PgturbohybridGraphExpandPacked2x32Avx512(scratchB);
-		acc += PgturbohybridGraphWeightedDotI8x32Avx512(ca, cb, scratchW);
-	}
-
-	return acc;
-}
-#endif
-
-static int64 PGTURBOHYBRID_GRAPH_AVX2_TARGET
-PgturbohybridGraphCodeCodeRawAvx2(const uint8 *a, const uint8 *b, int dim,
-					   int *sampleDims)
-{
-	__m256i	acc = _mm256_setzero_si256();
-	int		chunks = dim / 16;
-	int		tailDims = dim - chunks * 16;
-	int		scoredChunks = chunks;
-
-	if (chunks > PGTURBOHYBRID_GRAPH_CODE_CODE_PRUNE_CHUNKS)
-		scoredChunks = PGTURBOHYBRID_GRAPH_CODE_CODE_PRUNE_CHUNKS;
-	*sampleDims = scoredChunks * 16;
-
-	for (int scored = 0; scored < scoredChunks; scored++)
-	{
-		int			chunk = scoredChunks == chunks ? scored :
-			(int) (((int64) scored * chunks) / scoredChunks);
-		__m128i	ca = PgturbohybridGraphExpandPacked4Avx2(a + chunk * 8);
-		__m128i	cb = PgturbohybridGraphExpandPacked4Avx2(b + chunk * 8);
-
-		acc = _mm256_add_epi32(acc, PgturbohybridGraphDotI8x16Avx2(ca, cb));
-	}
-
-	if (scoredChunks == chunks && tailDims != 0)
-	{
-		uint8		scratchA[8] = {0};
-		uint8		scratchB[8] = {0};
-		int			tailBytes = (tailDims + 1) / 2;
-		__m128i	ca;
-		__m128i	cb;
-
-		memcpy(scratchA, a + chunks * 8, tailBytes);
-		memcpy(scratchB, b + chunks * 8, tailBytes);
-		ca = PgturbohybridGraphExpandPacked4Avx2(scratchA);
-		cb = PgturbohybridGraphExpandPacked4Avx2(scratchB);
-		acc = _mm256_add_epi32(acc, PgturbohybridGraphDotI8x16Avx2(ca, cb));
-		*sampleDims += tailDims;
-	}
-
-	return PgturbohybridGraphHorizontalSumI32Avx2(acc);
-}
-
-static int64 PGTURBOHYBRID_GRAPH_AVX2_TARGET
-PgturbohybridGraphCodeCode2RawAvx2(const uint8 *a, const uint8 *b, int dim,
-						int *sampleDims)
-{
-	__m256i	acc = _mm256_setzero_si256();
-	int		chunks = dim / 16;
-	int		tailDims = dim - chunks * 16;
-	int		scoredChunks = chunks;
-
-	if (chunks > PGTURBOHYBRID_GRAPH_CODE_CODE_PRUNE_CHUNKS)
-		scoredChunks = PGTURBOHYBRID_GRAPH_CODE_CODE_PRUNE_CHUNKS;
-	*sampleDims = scoredChunks * 16;
-
-	for (int scored = 0; scored < scoredChunks; scored++)
-	{
-		int			chunk = scoredChunks == chunks ? scored :
-			(int) (((int64) scored * chunks) / scoredChunks);
-		__m128i	ca = PgturbohybridGraphExpandPacked2Avx2(a + chunk * 4);
-		__m128i	cb = PgturbohybridGraphExpandPacked2Avx2(b + chunk * 4);
-
-		acc = _mm256_add_epi32(acc, PgturbohybridGraphDotI8x16Avx2(ca, cb));
-	}
-
-	if (scoredChunks == chunks && tailDims != 0)
-	{
-		uint8		scratchA[4] = {0};
-		uint8		scratchB[4] = {0};
-		int			tailBytes = (tailDims + 3) / 4;
-		__m128i	ca;
-		__m128i	cb;
-
-		memcpy(scratchA, a + chunks * 4, tailBytes);
-		memcpy(scratchB, b + chunks * 4, tailBytes);
-		ca = PgturbohybridGraphExpandPacked2Avx2(scratchA);
-		cb = PgturbohybridGraphExpandPacked2Avx2(scratchB);
-		acc = _mm256_add_epi32(acc, PgturbohybridGraphDotI8x16Avx2(ca, cb));
-		*sampleDims += tailDims;
-	}
-
-	return PgturbohybridGraphHorizontalSumI32Avx2(acc);
-}
-
-#if PGTURBOHYBRID_GRAPH_COMPILE_AVX512VNNI
-static bool
-PgturbohybridGraphAvx512VnniAvailable(void)
-{
-	static int	available = -1;
-
-	/* Valgrind cannot execute AVX-512 VNNI; fall back to AVX2/scalar. */
-	if (PgturbohybridGraphRunningUnderValgrind())
-		return false;
-
-	/*
-	 * The private AVX-512 VNNI policy is consulted on every call.  The
-	 * CPU-feature probe is still memoised.
-	 */
-	if (!pgturbohybrid_dense_graph_avx512vnni)
-		return false;
-	if (pgturbohybrid_dense_simd_force != PGTURBOHYBRID_SIMD_FORCE_AUTO &&
-		pgturbohybrid_dense_simd_force != PGTURBOHYBRID_SIMD_FORCE_AVX512VNNI)
-		return false;
-
-	if (available >= 0)
-		return available != 0;
-
-#if defined(__AVX512VNNI__) && defined(__AVX512VL__) && defined(__AVX512BW__)
-	available = 1;
-#elif PGTURBOHYBRID_GRAPH_X86 && (defined(__GNUC__) || defined(__clang__))
-	available = __builtin_cpu_supports("avx512vnni") &&
-		__builtin_cpu_supports("avx512vl") &&
-		__builtin_cpu_supports("avx512bw") ? 1 : 0;
-#else
-	available = 0;
-#endif
-	return available != 0;
-}
-
-/*
- * AVX-512 VNNI ZMM scoring kernels.
- *
- * Process 64 dims per iteration via _mm512_dpbusd_epi32 on ZMM, with
- * 32-dim YMM and 16-dim XMM tails for residuals. Same XOR-0x80 trick as
- * the AVX-VNNI tier; the -128 * sum(c) correction is hoisted into a third
- * VNNI accumulator that runs in parallel.
- *
- * AVX-512 dispatch should be capped at hosts that don't downclock heavily
- * under wide vectors (Ice Lake server, Sapphire Rapids, Zen 4 server, and
- * newer). Skylake-X / Cascade Lake suffer measurable drops; the 256-bit
- * AVX-VNNI tier is preferred there.
- */
-
-static inline __m512i PGTURBOHYBRID_GRAPH_AVX512VNNI_TARGET
-PgturbohybridGraphExpandPacked4Avx512(const uint8 *code)
-{
-	__m128i		c0 = PgturbohybridGraphExpandPacked4Avx2(code + 0);
-	__m128i		c1 = PgturbohybridGraphExpandPacked4Avx2(code + 8);
-	__m128i		c2 = PgturbohybridGraphExpandPacked4Avx2(code + 16);
-	__m128i		c3 = PgturbohybridGraphExpandPacked4Avx2(code + 24);
-	__m256i		lo = _mm256_inserti128_si256(_mm256_castsi128_si256(c0), c1, 1);
-	__m256i		hi = _mm256_inserti128_si256(_mm256_castsi128_si256(c2), c3, 1);
-
-	return _mm512_inserti64x4(_mm512_castsi256_si512(lo), hi, 1);
-}
-
-static inline __m512i PGTURBOHYBRID_GRAPH_AVX512VNNI_TARGET
-PgturbohybridGraphExpandPacked2Avx512(const uint8 *code)
-{
-	__m128i		c0 = PgturbohybridGraphExpandPacked2Avx2(code + 0);
-	__m128i		c1 = PgturbohybridGraphExpandPacked2Avx2(code + 4);
-	__m128i		c2 = PgturbohybridGraphExpandPacked2Avx2(code + 8);
-	__m128i		c3 = PgturbohybridGraphExpandPacked2Avx2(code + 12);
-	__m256i		lo = _mm256_inserti128_si256(_mm256_castsi128_si256(c0), c1, 1);
-	__m256i		hi = _mm256_inserti128_si256(_mm256_castsi128_si256(c2), c3, 1);
-
-	return _mm512_inserti64x4(_mm512_castsi256_si512(lo), hi, 1);
-}
-
-static inline int64 PGTURBOHYBRID_GRAPH_AVX512VNNI_TARGET
-PgturbohybridGraphHorizontalSumI32x4Avx512Vnni(__m128i v)
-{
-	int32		s[4];
-
-	_mm_storeu_si128((__m128i *) s, v);
-	return (int64) s[0] + s[1] + s[2] + s[3];
-}
-
-static int64 PGTURBOHYBRID_GRAPH_AVX512VNNI_TARGET
-PgturbohybridGraphQuerySplitRawAvx512Vnni(const PgturbohybridGraphTqQuery *tq, const uint8 *code)
-{
-	const __m512i ones512 = _mm512_set1_epi8(1);
-	const __m256i ones256 = _mm256_set1_epi8(1);
-	const __m128i ones128 = _mm_set1_epi8(1);
-	__m512i		accLow512 = _mm512_setzero_si512();
-	__m512i		accHigh512 = _mm512_setzero_si512();
-	__m512i		accCSum512 = _mm512_setzero_si512();
-	__m256i		accLow256 = _mm256_setzero_si256();
-	__m256i		accHigh256 = _mm256_setzero_si256();
-	__m256i		accCSum256 = _mm256_setzero_si256();
-	__m128i		accLow128 = _mm_setzero_si128();
-	__m128i		accHigh128 = _mm_setzero_si128();
-	__m128i		accCSum128 = _mm_setzero_si128();
-	int			chunk = 0;
-	int64		dotLow;
-	int64		dotHigh;
-	int64		cSum;
-
-	/* Quad-stepped main loop: 64 dims per iteration on ZMM. */
-	for (; chunk + 4 <= tq->querySplitChunks; chunk += 4)
-	{
-		__m512i		c = PgturbohybridGraphExpandPacked4Avx512(code + chunk * 8);
-		__m512i		low = _mm512_loadu_si512((const __m512i *) (tq->querySplitLowU8 + chunk * 16));
-		__m512i		high = _mm512_loadu_si512((const __m512i *) (tq->querySplitHighU8 + chunk * 16));
-
-		accLow512 = _mm512_dpbusd_epi32(accLow512, low, c);
-		accHigh512 = _mm512_dpbusd_epi32(accHigh512, high, c);
-		accCSum512 = _mm512_dpbusd_epi32(accCSum512, ones512, c);
-	}
-
-	/* Pair-step trailing 32 dims on YMM. */
-	if (chunk + 2 <= tq->querySplitChunks)
-	{
-		__m128i		c0 = PgturbohybridGraphExpandPacked4Avx2(code + chunk * 8);
-		__m128i		c1 = PgturbohybridGraphExpandPacked4Avx2(code + (chunk + 1) * 8);
-		__m256i		c = _mm256_inserti128_si256(_mm256_castsi128_si256(c0), c1, 1);
-		__m256i		low = _mm256_loadu_si256((const __m256i *) (tq->querySplitLowU8 + chunk * 16));
-		__m256i		high = _mm256_loadu_si256((const __m256i *) (tq->querySplitHighU8 + chunk * 16));
-
-		accLow256 = _mm256_dpbusd_epi32(accLow256, low, c);
-		accHigh256 = _mm256_dpbusd_epi32(accHigh256, high, c);
-		accCSum256 = _mm256_dpbusd_epi32(accCSum256, ones256, c);
-		chunk += 2;
-	}
-
-	/* Trailing 16-dim chunk on XMM. */
-	if (chunk < tq->querySplitChunks)
-	{
-		__m128i		c = PgturbohybridGraphExpandPacked4Avx2(code + chunk * 8);
-		__m128i		low = _mm_loadu_si128((const __m128i *) (tq->querySplitLowU8 + chunk * 16));
-		__m128i		high = _mm_loadu_si128((const __m128i *) (tq->querySplitHighU8 + chunk * 16));
-
-		accLow128 = _mm_dpbusd_epi32(accLow128, low, c);
-		accHigh128 = _mm_dpbusd_epi32(accHigh128, high, c);
-		accCSum128 = _mm_dpbusd_epi32(accCSum128, ones128, c);
-	}
-
-	/* Sub-chunk tail dims. */
-	if (tq->querySplitTailDims != 0)
-	{
-		uint8		scratch[8] = {0};
-		int			tailBytes = (tq->querySplitTailDims + 1) / 2;
-		__m128i		c;
-		__m128i		low;
-		__m128i		high;
-
-		memcpy(scratch, code + tq->querySplitChunks * 8, tailBytes);
-		c = PgturbohybridGraphExpandPacked4Avx2(scratch);
-		low = _mm_loadu_si128((const __m128i *) tq->querySplitTailLowU8);
-		high = _mm_loadu_si128((const __m128i *) tq->querySplitTailHighU8);
-		accLow128 = _mm_dpbusd_epi32(accLow128, low, c);
-		accHigh128 = _mm_dpbusd_epi32(accHigh128, high, c);
-		accCSum128 = _mm_dpbusd_epi32(accCSum128, ones128, c);
-	}
-
-	dotLow = (int64) _mm512_reduce_add_epi32(accLow512) +
-		PgturbohybridGraphHorizontalSumI32Avx2(accLow256) +
-		PgturbohybridGraphHorizontalSumI32x4Avx512Vnni(accLow128);
-	dotHigh = (int64) _mm512_reduce_add_epi32(accHigh512) +
-		PgturbohybridGraphHorizontalSumI32Avx2(accHigh256) +
-		PgturbohybridGraphHorizontalSumI32x4Avx512Vnni(accHigh128);
-	cSum = (int64) _mm512_reduce_add_epi32(accCSum512) +
-		PgturbohybridGraphHorizontalSumI32Avx2(accCSum256) +
-		PgturbohybridGraphHorizontalSumI32x4Avx512Vnni(accCSum128);
-
-	return (dotLow - 128 * cSum) +
-		(int64) PGTURBOHYBRID_QUERY_SPLIT_HIGH_COEF * (dotHigh - 128 * cSum);
-}
-
-static int64 PGTURBOHYBRID_GRAPH_AVX512VNNI_TARGET
-PgturbohybridGraphQuerySplit2RawAvx512Vnni(const PgturbohybridGraphTqQuery *tq, const uint8 *code)
-{
-	const __m512i ones512 = _mm512_set1_epi8(1);
-	const __m256i ones256 = _mm256_set1_epi8(1);
-	const __m128i ones128 = _mm_set1_epi8(1);
-	__m512i		accLow512 = _mm512_setzero_si512();
-	__m512i		accHigh512 = _mm512_setzero_si512();
-	__m512i		accCSum512 = _mm512_setzero_si512();
-	__m256i		accLow256 = _mm256_setzero_si256();
-	__m256i		accHigh256 = _mm256_setzero_si256();
-	__m256i		accCSum256 = _mm256_setzero_si256();
-	__m128i		accLow128 = _mm_setzero_si128();
-	__m128i		accHigh128 = _mm_setzero_si128();
-	__m128i		accCSum128 = _mm_setzero_si128();
-	int			chunk = 0;
-	int64		dotLow;
-	int64		dotHigh;
-	int64		cSum;
-
-	for (; chunk + 4 <= tq->querySplitChunks; chunk += 4)
-	{
-		__m512i		c = PgturbohybridGraphExpandPacked2Avx512(code + chunk * 4);
-		__m512i		low = _mm512_loadu_si512((const __m512i *) (tq->querySplitLowU8 + chunk * 16));
-		__m512i		high = _mm512_loadu_si512((const __m512i *) (tq->querySplitHighU8 + chunk * 16));
-
-		accLow512 = _mm512_dpbusd_epi32(accLow512, low, c);
-		accHigh512 = _mm512_dpbusd_epi32(accHigh512, high, c);
-		accCSum512 = _mm512_dpbusd_epi32(accCSum512, ones512, c);
-	}
-
-	if (chunk + 2 <= tq->querySplitChunks)
-	{
-		__m128i		c0 = PgturbohybridGraphExpandPacked2Avx2(code + chunk * 4);
-		__m128i		c1 = PgturbohybridGraphExpandPacked2Avx2(code + (chunk + 1) * 4);
-		__m256i		c = _mm256_inserti128_si256(_mm256_castsi128_si256(c0), c1, 1);
-		__m256i		low = _mm256_loadu_si256((const __m256i *) (tq->querySplitLowU8 + chunk * 16));
-		__m256i		high = _mm256_loadu_si256((const __m256i *) (tq->querySplitHighU8 + chunk * 16));
-
-		accLow256 = _mm256_dpbusd_epi32(accLow256, low, c);
-		accHigh256 = _mm256_dpbusd_epi32(accHigh256, high, c);
-		accCSum256 = _mm256_dpbusd_epi32(accCSum256, ones256, c);
-		chunk += 2;
-	}
-
-	if (chunk < tq->querySplitChunks)
-	{
-		__m128i		c = PgturbohybridGraphExpandPacked2Avx2(code + chunk * 4);
-		__m128i		low = _mm_loadu_si128((const __m128i *) (tq->querySplitLowU8 + chunk * 16));
-		__m128i		high = _mm_loadu_si128((const __m128i *) (tq->querySplitHighU8 + chunk * 16));
-
-		accLow128 = _mm_dpbusd_epi32(accLow128, low, c);
-		accHigh128 = _mm_dpbusd_epi32(accHigh128, high, c);
-		accCSum128 = _mm_dpbusd_epi32(accCSum128, ones128, c);
-	}
-
-	if (tq->querySplitTailDims != 0)
-	{
-		uint8		scratch[4] = {0};
-		int			tailBytes = (tq->querySplitTailDims + 3) / 4;
-		__m128i		c;
-		__m128i		low;
-		__m128i		high;
-
-		memcpy(scratch, code + tq->querySplitChunks * 4, tailBytes);
-		c = PgturbohybridGraphExpandPacked2Avx2(scratch);
-		low = _mm_loadu_si128((const __m128i *) tq->querySplitTailLowU8);
-		high = _mm_loadu_si128((const __m128i *) tq->querySplitTailHighU8);
-		accLow128 = _mm_dpbusd_epi32(accLow128, low, c);
-		accHigh128 = _mm_dpbusd_epi32(accHigh128, high, c);
-		accCSum128 = _mm_dpbusd_epi32(accCSum128, ones128, c);
-	}
-
-	dotLow = (int64) _mm512_reduce_add_epi32(accLow512) +
-		PgturbohybridGraphHorizontalSumI32Avx2(accLow256) +
-		PgturbohybridGraphHorizontalSumI32x4Avx512Vnni(accLow128);
-	dotHigh = (int64) _mm512_reduce_add_epi32(accHigh512) +
-		PgturbohybridGraphHorizontalSumI32Avx2(accHigh256) +
-		PgturbohybridGraphHorizontalSumI32x4Avx512Vnni(accHigh128);
-	cSum = (int64) _mm512_reduce_add_epi32(accCSum512) +
-		PgturbohybridGraphHorizontalSumI32Avx2(accCSum256) +
-		PgturbohybridGraphHorizontalSumI32x4Avx512Vnni(accCSum128);
-
-	return (dotLow - 128 * cSum) +
-		(int64) PGTURBOHYBRID_QUERY_SPLIT_HIGH_COEF * (dotHigh - 128 * cSum);
-}
-
-static int64 PGTURBOHYBRID_GRAPH_AVX512VNNI_TARGET
-PgturbohybridGraphCodeCodeRawAvx512Vnni(const uint8 *a, const uint8 *b, int dim,
-							 int *sampleDims)
-{
-	const __m512i signFlip512 = _mm512_set1_epi8((char) 0x80);
-	const __m512i ones512 = _mm512_set1_epi8(1);
-	const __m256i signFlip256 = _mm256_set1_epi8((char) 0x80);
-	const __m256i ones256 = _mm256_set1_epi8(1);
-	const __m128i signFlip128 = _mm_set1_epi8((char) 0x80);
-	const __m128i ones128 = _mm_set1_epi8(1);
-	__m512i		acc512 = _mm512_setzero_si512();
-	__m512i		accCSum512 = _mm512_setzero_si512();
-	__m256i		acc256 = _mm256_setzero_si256();
-	__m256i		accCSum256 = _mm256_setzero_si256();
-	__m128i		acc128 = _mm_setzero_si128();
-	__m128i		accCSum128 = _mm_setzero_si128();
-	int			chunks = dim / 16;
-	int			tailDims = dim - chunks * 16;
-	int			scoredChunks = chunks;
-	int			scored = 0;
-	int64		dot;
-	int64		cSum;
-
-	if (chunks > PGTURBOHYBRID_GRAPH_CODE_CODE_PRUNE_CHUNKS)
-		scoredChunks = PGTURBOHYBRID_GRAPH_CODE_CODE_PRUNE_CHUNKS;
-	*sampleDims = scoredChunks * 16;
-
-	if (scoredChunks == chunks)
-	{
-		/*
-		 * Contiguous full traversal — drive ZMM/YMM strides directly across
-		 * the input.
-		 */
-		for (; scored + 4 <= scoredChunks; scored += 4)
-		{
-			__m512i		ca = PgturbohybridGraphExpandPacked4Avx512(a + scored * 8);
-			__m512i		cb = PgturbohybridGraphExpandPacked4Avx512(b + scored * 8);
-
-			acc512 = _mm512_dpbusd_epi32(acc512,
-										 _mm512_xor_si512(ca, signFlip512), cb);
-			accCSum512 = _mm512_dpbusd_epi32(accCSum512, ones512, cb);
-		}
-		if (scored + 2 <= scoredChunks)
-		{
-			__m128i		ca0 = PgturbohybridGraphExpandPacked4Avx2(a + scored * 8);
-			__m128i		cb0 = PgturbohybridGraphExpandPacked4Avx2(b + scored * 8);
-			__m128i		ca1 = PgturbohybridGraphExpandPacked4Avx2(a + (scored + 1) * 8);
-			__m128i		cb1 = PgturbohybridGraphExpandPacked4Avx2(b + (scored + 1) * 8);
-			__m256i		ca = _mm256_inserti128_si256(_mm256_castsi128_si256(ca0), ca1, 1);
-			__m256i		cb = _mm256_inserti128_si256(_mm256_castsi128_si256(cb0), cb1, 1);
-
-			acc256 = _mm256_dpbusd_epi32(acc256,
-										 _mm256_xor_si256(ca, signFlip256), cb);
-			accCSum256 = _mm256_dpbusd_epi32(accCSum256, ones256, cb);
-			scored += 2;
-		}
-	}
-	else
-	{
-		/* Stride-sampled scoring; can still pair adjacent samples. */
-		for (; scored + 2 <= scoredChunks; scored += 2)
-		{
-			int			chunkA = (int) (((int64) scored * chunks) / scoredChunks);
-			int			chunkB = (int) (((int64) (scored + 1) * chunks) / scoredChunks);
-			__m128i		ca0 = PgturbohybridGraphExpandPacked4Avx2(a + chunkA * 8);
-			__m128i		cb0 = PgturbohybridGraphExpandPacked4Avx2(b + chunkA * 8);
-			__m128i		ca1 = PgturbohybridGraphExpandPacked4Avx2(a + chunkB * 8);
-			__m128i		cb1 = PgturbohybridGraphExpandPacked4Avx2(b + chunkB * 8);
-			__m256i		ca = _mm256_inserti128_si256(_mm256_castsi128_si256(ca0), ca1, 1);
-			__m256i		cb = _mm256_inserti128_si256(_mm256_castsi128_si256(cb0), cb1, 1);
-
-			acc256 = _mm256_dpbusd_epi32(acc256,
-										 _mm256_xor_si256(ca, signFlip256), cb);
-			accCSum256 = _mm256_dpbusd_epi32(accCSum256, ones256, cb);
-		}
-	}
-
-	if (scored < scoredChunks)
-	{
-		int			chunk = scoredChunks == chunks ? scored :
-			(int) (((int64) scored * chunks) / scoredChunks);
-		__m128i		ca = PgturbohybridGraphExpandPacked4Avx2(a + chunk * 8);
-		__m128i		cb = PgturbohybridGraphExpandPacked4Avx2(b + chunk * 8);
-
-		acc128 = _mm_dpbusd_epi32(acc128,
-								  _mm_xor_si128(ca, signFlip128), cb);
-		accCSum128 = _mm_dpbusd_epi32(accCSum128, ones128, cb);
-	}
-
-	if (scoredChunks == chunks && tailDims != 0)
-	{
-		uint8		scratchA[8] = {0};
-		uint8		scratchB[8] = {0};
-		int			tailBytes = (tailDims + 1) / 2;
-		__m128i		ca;
-		__m128i		cb;
-
-		memcpy(scratchA, a + chunks * 8, tailBytes);
-		memcpy(scratchB, b + chunks * 8, tailBytes);
-		ca = PgturbohybridGraphExpandPacked4Avx2(scratchA);
-		cb = PgturbohybridGraphExpandPacked4Avx2(scratchB);
-		acc128 = _mm_dpbusd_epi32(acc128,
-								  _mm_xor_si128(ca, signFlip128), cb);
-		accCSum128 = _mm_dpbusd_epi32(accCSum128, ones128, cb);
-		*sampleDims += tailDims;
-	}
-
-	dot = (int64) _mm512_reduce_add_epi32(acc512) +
-		PgturbohybridGraphHorizontalSumI32Avx2(acc256) +
-		PgturbohybridGraphHorizontalSumI32x4Avx512Vnni(acc128);
-	cSum = (int64) _mm512_reduce_add_epi32(accCSum512) +
-		PgturbohybridGraphHorizontalSumI32Avx2(accCSum256) +
-		PgturbohybridGraphHorizontalSumI32x4Avx512Vnni(accCSum128);
-
-	return dot - 128 * cSum;
-}
-
-static int64 PGTURBOHYBRID_GRAPH_AVX512VNNI_TARGET
-PgturbohybridGraphCodeCode2RawAvx512Vnni(const uint8 *a, const uint8 *b, int dim,
-							  int *sampleDims)
-{
-	const __m512i signFlip512 = _mm512_set1_epi8((char) 0x80);
-	const __m512i ones512 = _mm512_set1_epi8(1);
-	const __m256i signFlip256 = _mm256_set1_epi8((char) 0x80);
-	const __m256i ones256 = _mm256_set1_epi8(1);
-	const __m128i signFlip128 = _mm_set1_epi8((char) 0x80);
-	const __m128i ones128 = _mm_set1_epi8(1);
-	__m512i		acc512 = _mm512_setzero_si512();
-	__m512i		accCSum512 = _mm512_setzero_si512();
-	__m256i		acc256 = _mm256_setzero_si256();
-	__m256i		accCSum256 = _mm256_setzero_si256();
-	__m128i		acc128 = _mm_setzero_si128();
-	__m128i		accCSum128 = _mm_setzero_si128();
-	int			chunks = dim / 16;
-	int			tailDims = dim - chunks * 16;
-	int			scoredChunks = chunks;
-	int			scored = 0;
-	int64		dot;
-	int64		cSum;
-
-	if (chunks > PGTURBOHYBRID_GRAPH_CODE_CODE_PRUNE_CHUNKS)
-		scoredChunks = PGTURBOHYBRID_GRAPH_CODE_CODE_PRUNE_CHUNKS;
-	*sampleDims = scoredChunks * 16;
-
-	if (scoredChunks == chunks)
-	{
-		for (; scored + 4 <= scoredChunks; scored += 4)
-		{
-			__m512i		ca = PgturbohybridGraphExpandPacked2Avx512(a + scored * 4);
-			__m512i		cb = PgturbohybridGraphExpandPacked2Avx512(b + scored * 4);
-
-			acc512 = _mm512_dpbusd_epi32(acc512,
-										 _mm512_xor_si512(ca, signFlip512), cb);
-			accCSum512 = _mm512_dpbusd_epi32(accCSum512, ones512, cb);
-		}
-		if (scored + 2 <= scoredChunks)
-		{
-			__m128i		ca0 = PgturbohybridGraphExpandPacked2Avx2(a + scored * 4);
-			__m128i		cb0 = PgturbohybridGraphExpandPacked2Avx2(b + scored * 4);
-			__m128i		ca1 = PgturbohybridGraphExpandPacked2Avx2(a + (scored + 1) * 4);
-			__m128i		cb1 = PgturbohybridGraphExpandPacked2Avx2(b + (scored + 1) * 4);
-			__m256i		ca = _mm256_inserti128_si256(_mm256_castsi128_si256(ca0), ca1, 1);
-			__m256i		cb = _mm256_inserti128_si256(_mm256_castsi128_si256(cb0), cb1, 1);
-
-			acc256 = _mm256_dpbusd_epi32(acc256,
-										 _mm256_xor_si256(ca, signFlip256), cb);
-			accCSum256 = _mm256_dpbusd_epi32(accCSum256, ones256, cb);
-			scored += 2;
-		}
-	}
-	else
-	{
-		for (; scored + 2 <= scoredChunks; scored += 2)
-		{
-			int			chunkA = (int) (((int64) scored * chunks) / scoredChunks);
-			int			chunkB = (int) (((int64) (scored + 1) * chunks) / scoredChunks);
-			__m128i		ca0 = PgturbohybridGraphExpandPacked2Avx2(a + chunkA * 4);
-			__m128i		cb0 = PgturbohybridGraphExpandPacked2Avx2(b + chunkA * 4);
-			__m128i		ca1 = PgturbohybridGraphExpandPacked2Avx2(a + chunkB * 4);
-			__m128i		cb1 = PgturbohybridGraphExpandPacked2Avx2(b + chunkB * 4);
-			__m256i		ca = _mm256_inserti128_si256(_mm256_castsi128_si256(ca0), ca1, 1);
-			__m256i		cb = _mm256_inserti128_si256(_mm256_castsi128_si256(cb0), cb1, 1);
-
-			acc256 = _mm256_dpbusd_epi32(acc256,
-										 _mm256_xor_si256(ca, signFlip256), cb);
-			accCSum256 = _mm256_dpbusd_epi32(accCSum256, ones256, cb);
-		}
-	}
-
-	if (scored < scoredChunks)
-	{
-		int			chunk = scoredChunks == chunks ? scored :
-			(int) (((int64) scored * chunks) / scoredChunks);
-		__m128i		ca = PgturbohybridGraphExpandPacked2Avx2(a + chunk * 4);
-		__m128i		cb = PgturbohybridGraphExpandPacked2Avx2(b + chunk * 4);
-
-		acc128 = _mm_dpbusd_epi32(acc128,
-								  _mm_xor_si128(ca, signFlip128), cb);
-		accCSum128 = _mm_dpbusd_epi32(accCSum128, ones128, cb);
-	}
-
-	if (scoredChunks == chunks && tailDims != 0)
-	{
-		uint8		scratchA[4] = {0};
-		uint8		scratchB[4] = {0};
-		int			tailBytes = (tailDims + 3) / 4;
-		__m128i		ca;
-		__m128i		cb;
-
-		memcpy(scratchA, a + chunks * 4, tailBytes);
-		memcpy(scratchB, b + chunks * 4, tailBytes);
-		ca = PgturbohybridGraphExpandPacked2Avx2(scratchA);
-		cb = PgturbohybridGraphExpandPacked2Avx2(scratchB);
-		acc128 = _mm_dpbusd_epi32(acc128,
-								  _mm_xor_si128(ca, signFlip128), cb);
-		accCSum128 = _mm_dpbusd_epi32(accCSum128, ones128, cb);
-		*sampleDims += tailDims;
-	}
-
-	dot = (int64) _mm512_reduce_add_epi32(acc512) +
-		PgturbohybridGraphHorizontalSumI32Avx2(acc256) +
-		PgturbohybridGraphHorizontalSumI32x4Avx512Vnni(acc128);
-	cSum = (int64) _mm512_reduce_add_epi32(accCSum512) +
-		PgturbohybridGraphHorizontalSumI32Avx2(accCSum256) +
-		PgturbohybridGraphHorizontalSumI32x4Avx512Vnni(accCSum128);
-
-	return dot - 128 * cSum;
-}
-#endif
-
-#if PGTURBOHYBRID_GRAPH_COMPILE_AVXVNNI
-static bool
-PgturbohybridGraphAvxVnniAvailable(void)
-{
-	static int	available = -1;
-
-	/* Valgrind cannot execute AVX-VNNI; fall back to AVX2/scalar. */
-	if (PgturbohybridGraphRunningUnderValgrind())
-		return false;
-
-	/* Private policy switch for AVX VNNI dispatch. */
-	if (!pgturbohybrid_dense_graph_avxvnni)
-		return false;
-	if (pgturbohybrid_dense_simd_force != PGTURBOHYBRID_SIMD_FORCE_AUTO &&
-		pgturbohybrid_dense_simd_force != PGTURBOHYBRID_SIMD_FORCE_AVXVNNI)
-		return false;
-
-	if (available >= 0)
-		return available != 0;
-
-#if defined(__AVXVNNI__)
-	available = 1;
-#elif PGTURBOHYBRID_GRAPH_X86 && \
-	(defined(__GNUC__) && !defined(__clang__) && __GNUC__ >= 11) || \
-	(defined(__clang__) && __clang_major__ >= 18)
-	available = __builtin_cpu_supports("avxvnni") ? 1 : 0;
-#else
-	available = 0;
-#endif
-	return available != 0;
-}
-
-/*
- * AVX-VNNI YMM scoring kernels.
- *
- * Each iteration consumes 32 i8 dims via vpdpbusd on a 256-bit register
- * (one fused uop on Alder Lake / Zen 4 desktop, three or four on plain
- * AVX2 via vpmaddubsw + vpmaddwd + vpaddd). Signed-vs-signed dot product
- * is synthesised from VNNI's u8 * i8 form with the standard XOR-0x80
- * trick:
- *
- *   sum(a_signed * b_signed)
- *     = sum((a_signed XOR 0x80) * b_signed) - 128 * sum(b_signed)
- *
- * The right-hand correction is hoisted out of the inner loop with a third
- * VNNI accumulator running `dpbusd(accCSum, ones_u8, b_signed)`, which
- * produces sum(b_signed) once at the end and replaces the per-chunk
- * cvtepi8_epi16 / madd / hsum chain that the XMM version performed.
- */
-
-static inline int64 PGTURBOHYBRID_GRAPH_AVXVNNI_TARGET
-PgturbohybridGraphHorizontalSumI32x4AvxVnni(__m128i v)
-{
-	int32		s[4];
-
-	_mm_storeu_si128((__m128i *) s, v);
-	return (int64) s[0] + s[1] + s[2] + s[3];
-}
-
-static int64 PGTURBOHYBRID_GRAPH_AVXVNNI_TARGET
-PgturbohybridGraphQuerySplitRawAvxVnni(const PgturbohybridGraphTqQuery *tq, const uint8 *code)
-{
-	const __m256i ones256 = _mm256_set1_epi8(1);
-	const __m128i ones128 = _mm_set1_epi8(1);
-	__m256i		accLow = _mm256_setzero_si256();
-	__m256i		accHigh = _mm256_setzero_si256();
-	__m256i		accCSum = _mm256_setzero_si256();
-	__m128i		accLowLo = _mm_setzero_si128();
-	__m128i		accHighLo = _mm_setzero_si128();
-	__m128i		accCSumLo = _mm_setzero_si128();
-	int			chunk = 0;
-	int64		dotLow;
-	int64		dotHigh;
-	int64		cSum;
-
-	/* Pair-stepped main loop: 32 dims per iteration on YMM. */
-	for (; chunk + 2 <= tq->querySplitChunks; chunk += 2)
-	{
-		__m128i		c0 = PgturbohybridGraphExpandPacked4Avx2(code + chunk * 8);
-		__m128i		c1 = PgturbohybridGraphExpandPacked4Avx2(code + (chunk + 1) * 8);
-		__m256i		c = _mm256_inserti128_si256(_mm256_castsi128_si256(c0), c1, 1);
-		__m256i		low = _mm256_loadu_si256((const __m256i *) (tq->querySplitLowU8 + chunk * 16));
-		__m256i		high = _mm256_loadu_si256((const __m256i *) (tq->querySplitHighU8 + chunk * 16));
-
-		accLow = _mm256_dpbusd_avx_epi32(accLow, low, c);
-		accHigh = _mm256_dpbusd_avx_epi32(accHigh, high, c);
-		accCSum = _mm256_dpbusd_avx_epi32(accCSum, ones256, c);
-	}
-
-	/* Trailing 16-dim chunk (if querySplitChunks is odd). */
-	if (chunk < tq->querySplitChunks)
-	{
-		__m128i		c = PgturbohybridGraphExpandPacked4Avx2(code + chunk * 8);
-		__m128i		low = _mm_loadu_si128((const __m128i *) (tq->querySplitLowU8 + chunk * 16));
-		__m128i		high = _mm_loadu_si128((const __m128i *) (tq->querySplitHighU8 + chunk * 16));
-
-		accLowLo = _mm_dpbusd_avx_epi32(accLowLo, low, c);
-		accHighLo = _mm_dpbusd_avx_epi32(accHighLo, high, c);
-		accCSumLo = _mm_dpbusd_avx_epi32(accCSumLo, ones128, c);
-	}
-
-	/* Final sub-chunk tail dims. */
-	if (tq->querySplitTailDims != 0)
-	{
-		uint8		scratch[8] = {0};
-		int			tailBytes = (tq->querySplitTailDims + 1) / 2;
-		__m128i		c;
-		__m128i		low;
-		__m128i		high;
-
-		memcpy(scratch, code + tq->querySplitChunks * 8, tailBytes);
-		c = PgturbohybridGraphExpandPacked4Avx2(scratch);
-		low = _mm_loadu_si128((const __m128i *) tq->querySplitTailLowU8);
-		high = _mm_loadu_si128((const __m128i *) tq->querySplitTailHighU8);
-		accLowLo = _mm_dpbusd_avx_epi32(accLowLo, low, c);
-		accHighLo = _mm_dpbusd_avx_epi32(accHighLo, high, c);
-		accCSumLo = _mm_dpbusd_avx_epi32(accCSumLo, ones128, c);
-	}
-
-	dotLow = PgturbohybridGraphHorizontalSumI32Avx2(accLow) +
-		PgturbohybridGraphHorizontalSumI32x4AvxVnni(accLowLo);
-	dotHigh = PgturbohybridGraphHorizontalSumI32Avx2(accHigh) +
-		PgturbohybridGraphHorizontalSumI32x4AvxVnni(accHighLo);
-	cSum = PgturbohybridGraphHorizontalSumI32Avx2(accCSum) +
-		PgturbohybridGraphHorizontalSumI32x4AvxVnni(accCSumLo);
-
-	return (dotLow - 128 * cSum) +
-		(int64) PGTURBOHYBRID_QUERY_SPLIT_HIGH_COEF * (dotHigh - 128 * cSum);
-}
-
-static int64 PGTURBOHYBRID_GRAPH_AVXVNNI_TARGET
-PgturbohybridGraphQuerySplit2RawAvxVnni(const PgturbohybridGraphTqQuery *tq, const uint8 *code)
-{
-	const __m256i ones256 = _mm256_set1_epi8(1);
-	const __m128i ones128 = _mm_set1_epi8(1);
-	__m256i		accLow = _mm256_setzero_si256();
-	__m256i		accHigh = _mm256_setzero_si256();
-	__m256i		accCSum = _mm256_setzero_si256();
-	__m128i		accLowLo = _mm_setzero_si128();
-	__m128i		accHighLo = _mm_setzero_si128();
-	__m128i		accCSumLo = _mm_setzero_si128();
-	int			chunk = 0;
-	int64		dotLow;
-	int64		dotHigh;
-	int64		cSum;
-
-	for (; chunk + 2 <= tq->querySplitChunks; chunk += 2)
-	{
-		__m128i		c0 = PgturbohybridGraphExpandPacked2Avx2(code + chunk * 4);
-		__m128i		c1 = PgturbohybridGraphExpandPacked2Avx2(code + (chunk + 1) * 4);
-		__m256i		c = _mm256_inserti128_si256(_mm256_castsi128_si256(c0), c1, 1);
-		__m256i		low = _mm256_loadu_si256((const __m256i *) (tq->querySplitLowU8 + chunk * 16));
-		__m256i		high = _mm256_loadu_si256((const __m256i *) (tq->querySplitHighU8 + chunk * 16));
-
-		accLow = _mm256_dpbusd_avx_epi32(accLow, low, c);
-		accHigh = _mm256_dpbusd_avx_epi32(accHigh, high, c);
-		accCSum = _mm256_dpbusd_avx_epi32(accCSum, ones256, c);
-	}
-
-	if (chunk < tq->querySplitChunks)
-	{
-		__m128i		c = PgturbohybridGraphExpandPacked2Avx2(code + chunk * 4);
-		__m128i		low = _mm_loadu_si128((const __m128i *) (tq->querySplitLowU8 + chunk * 16));
-		__m128i		high = _mm_loadu_si128((const __m128i *) (tq->querySplitHighU8 + chunk * 16));
-
-		accLowLo = _mm_dpbusd_avx_epi32(accLowLo, low, c);
-		accHighLo = _mm_dpbusd_avx_epi32(accHighLo, high, c);
-		accCSumLo = _mm_dpbusd_avx_epi32(accCSumLo, ones128, c);
-	}
-
-	if (tq->querySplitTailDims != 0)
-	{
-		uint8		scratch[4] = {0};
-		int			tailBytes = (tq->querySplitTailDims + 3) / 4;
-		__m128i		c;
-		__m128i		low;
-		__m128i		high;
-
-		memcpy(scratch, code + tq->querySplitChunks * 4, tailBytes);
-		c = PgturbohybridGraphExpandPacked2Avx2(scratch);
-		low = _mm_loadu_si128((const __m128i *) tq->querySplitTailLowU8);
-		high = _mm_loadu_si128((const __m128i *) tq->querySplitTailHighU8);
-		accLowLo = _mm_dpbusd_avx_epi32(accLowLo, low, c);
-		accHighLo = _mm_dpbusd_avx_epi32(accHighLo, high, c);
-		accCSumLo = _mm_dpbusd_avx_epi32(accCSumLo, ones128, c);
-	}
-
-	dotLow = PgturbohybridGraphHorizontalSumI32Avx2(accLow) +
-		PgturbohybridGraphHorizontalSumI32x4AvxVnni(accLowLo);
-	dotHigh = PgturbohybridGraphHorizontalSumI32Avx2(accHigh) +
-		PgturbohybridGraphHorizontalSumI32x4AvxVnni(accHighLo);
-	cSum = PgturbohybridGraphHorizontalSumI32Avx2(accCSum) +
-		PgturbohybridGraphHorizontalSumI32x4AvxVnni(accCSumLo);
-
-	return (dotLow - 128 * cSum) +
-		(int64) PGTURBOHYBRID_QUERY_SPLIT_HIGH_COEF * (dotHigh - 128 * cSum);
-}
-
-static int64 PGTURBOHYBRID_GRAPH_AVXVNNI_TARGET
-PgturbohybridGraphCodeCodeRawAvxVnni(const uint8 *a, const uint8 *b, int dim,
-						  int *sampleDims)
-{
-	const __m256i signFlip256 = _mm256_set1_epi8((char) 0x80);
-	const __m256i ones256 = _mm256_set1_epi8(1);
-	const __m128i signFlip128 = _mm_set1_epi8((char) 0x80);
-	const __m128i ones128 = _mm_set1_epi8(1);
-	__m256i		acc256 = _mm256_setzero_si256();
-	__m256i		accCSum256 = _mm256_setzero_si256();
-	__m128i		accLo = _mm_setzero_si128();
-	__m128i		accCSumLo = _mm_setzero_si128();
-	int			chunks = dim / 16;
-	int			tailDims = dim - chunks * 16;
-	int			scoredChunks = chunks;
-	int			scored = 0;
-	int64		dot;
-	int64		cSum;
-
-	if (chunks > PGTURBOHYBRID_GRAPH_CODE_CODE_PRUNE_CHUNKS)
-		scoredChunks = PGTURBOHYBRID_GRAPH_CODE_CODE_PRUNE_CHUNKS;
-	*sampleDims = scoredChunks * 16;
-
-	for (; scored + 2 <= scoredChunks; scored += 2)
-	{
-		int			chunkA = scoredChunks == chunks ? scored :
-			(int) (((int64) scored * chunks) / scoredChunks);
-		int			chunkB = scoredChunks == chunks ? scored + 1 :
-			(int) (((int64) (scored + 1) * chunks) / scoredChunks);
-		__m128i		ca0 = PgturbohybridGraphExpandPacked4Avx2(a + chunkA * 8);
-		__m128i		cb0 = PgturbohybridGraphExpandPacked4Avx2(b + chunkA * 8);
-		__m128i		ca1 = PgturbohybridGraphExpandPacked4Avx2(a + chunkB * 8);
-		__m128i		cb1 = PgturbohybridGraphExpandPacked4Avx2(b + chunkB * 8);
-		__m256i		ca = _mm256_inserti128_si256(_mm256_castsi128_si256(ca0), ca1, 1);
-		__m256i		cb = _mm256_inserti128_si256(_mm256_castsi128_si256(cb0), cb1, 1);
-
-		acc256 = _mm256_dpbusd_avx_epi32(acc256,
-										 _mm256_xor_si256(ca, signFlip256), cb);
-		accCSum256 = _mm256_dpbusd_avx_epi32(accCSum256, ones256, cb);
-	}
-
-	if (scored < scoredChunks)
-	{
-		int			chunk = scoredChunks == chunks ? scored :
-			(int) (((int64) scored * chunks) / scoredChunks);
-		__m128i		ca = PgturbohybridGraphExpandPacked4Avx2(a + chunk * 8);
-		__m128i		cb = PgturbohybridGraphExpandPacked4Avx2(b + chunk * 8);
-
-		accLo = _mm_dpbusd_avx_epi32(accLo,
-									 _mm_xor_si128(ca, signFlip128), cb);
-		accCSumLo = _mm_dpbusd_avx_epi32(accCSumLo, ones128, cb);
-	}
-
-	if (scoredChunks == chunks && tailDims != 0)
-	{
-		uint8		scratchA[8] = {0};
-		uint8		scratchB[8] = {0};
-		int			tailBytes = (tailDims + 1) / 2;
-		__m128i		ca;
-		__m128i		cb;
-
-		memcpy(scratchA, a + chunks * 8, tailBytes);
-		memcpy(scratchB, b + chunks * 8, tailBytes);
-		ca = PgturbohybridGraphExpandPacked4Avx2(scratchA);
-		cb = PgturbohybridGraphExpandPacked4Avx2(scratchB);
-		accLo = _mm_dpbusd_avx_epi32(accLo,
-									 _mm_xor_si128(ca, signFlip128), cb);
-		accCSumLo = _mm_dpbusd_avx_epi32(accCSumLo, ones128, cb);
-		*sampleDims += tailDims;
-	}
-
-	dot = PgturbohybridGraphHorizontalSumI32Avx2(acc256) +
-		PgturbohybridGraphHorizontalSumI32x4AvxVnni(accLo);
-	cSum = PgturbohybridGraphHorizontalSumI32Avx2(accCSum256) +
-		PgturbohybridGraphHorizontalSumI32x4AvxVnni(accCSumLo);
-
-	return dot - 128 * cSum;
-}
-
-static int64 PGTURBOHYBRID_GRAPH_AVXVNNI_TARGET
-PgturbohybridGraphCodeCode2RawAvxVnni(const uint8 *a, const uint8 *b, int dim,
-						   int *sampleDims)
-{
-	const __m256i signFlip256 = _mm256_set1_epi8((char) 0x80);
-	const __m256i ones256 = _mm256_set1_epi8(1);
-	const __m128i signFlip128 = _mm_set1_epi8((char) 0x80);
-	const __m128i ones128 = _mm_set1_epi8(1);
-	__m256i		acc256 = _mm256_setzero_si256();
-	__m256i		accCSum256 = _mm256_setzero_si256();
-	__m128i		accLo = _mm_setzero_si128();
-	__m128i		accCSumLo = _mm_setzero_si128();
-	int			chunks = dim / 16;
-	int			tailDims = dim - chunks * 16;
-	int			scoredChunks = chunks;
-	int			scored = 0;
-	int64		dot;
-	int64		cSum;
-
-	if (chunks > PGTURBOHYBRID_GRAPH_CODE_CODE_PRUNE_CHUNKS)
-		scoredChunks = PGTURBOHYBRID_GRAPH_CODE_CODE_PRUNE_CHUNKS;
-	*sampleDims = scoredChunks * 16;
-
-	for (; scored + 2 <= scoredChunks; scored += 2)
-	{
-		int			chunkA = scoredChunks == chunks ? scored :
-			(int) (((int64) scored * chunks) / scoredChunks);
-		int			chunkB = scoredChunks == chunks ? scored + 1 :
-			(int) (((int64) (scored + 1) * chunks) / scoredChunks);
-		__m128i		ca0 = PgturbohybridGraphExpandPacked2Avx2(a + chunkA * 4);
-		__m128i		cb0 = PgturbohybridGraphExpandPacked2Avx2(b + chunkA * 4);
-		__m128i		ca1 = PgturbohybridGraphExpandPacked2Avx2(a + chunkB * 4);
-		__m128i		cb1 = PgturbohybridGraphExpandPacked2Avx2(b + chunkB * 4);
-		__m256i		ca = _mm256_inserti128_si256(_mm256_castsi128_si256(ca0), ca1, 1);
-		__m256i		cb = _mm256_inserti128_si256(_mm256_castsi128_si256(cb0), cb1, 1);
-
-		acc256 = _mm256_dpbusd_avx_epi32(acc256,
-										 _mm256_xor_si256(ca, signFlip256), cb);
-		accCSum256 = _mm256_dpbusd_avx_epi32(accCSum256, ones256, cb);
-	}
-
-	if (scored < scoredChunks)
-	{
-		int			chunk = scoredChunks == chunks ? scored :
-			(int) (((int64) scored * chunks) / scoredChunks);
-		__m128i		ca = PgturbohybridGraphExpandPacked2Avx2(a + chunk * 4);
-		__m128i		cb = PgturbohybridGraphExpandPacked2Avx2(b + chunk * 4);
-
-		accLo = _mm_dpbusd_avx_epi32(accLo,
-									 _mm_xor_si128(ca, signFlip128), cb);
-		accCSumLo = _mm_dpbusd_avx_epi32(accCSumLo, ones128, cb);
-	}
-
-	if (scoredChunks == chunks && tailDims != 0)
-	{
-		uint8		scratchA[4] = {0};
-		uint8		scratchB[4] = {0};
-		int			tailBytes = (tailDims + 3) / 4;
-		__m128i		ca;
-		__m128i		cb;
-
-		memcpy(scratchA, a + chunks * 4, tailBytes);
-		memcpy(scratchB, b + chunks * 4, tailBytes);
-		ca = PgturbohybridGraphExpandPacked2Avx2(scratchA);
-		cb = PgturbohybridGraphExpandPacked2Avx2(scratchB);
-		accLo = _mm_dpbusd_avx_epi32(accLo,
-									 _mm_xor_si128(ca, signFlip128), cb);
-		accCSumLo = _mm_dpbusd_avx_epi32(accCSumLo, ones128, cb);
-		*sampleDims += tailDims;
-	}
-
-	dot = PgturbohybridGraphHorizontalSumI32Avx2(acc256) +
-		PgturbohybridGraphHorizontalSumI32x4AvxVnni(accLo);
-	cSum = PgturbohybridGraphHorizontalSumI32Avx2(accCSum256) +
-		PgturbohybridGraphHorizontalSumI32x4AvxVnni(accCSumLo);
-
-	return dot - 128 * cSum;
-}
-#endif
-
-static bool PGTURBOHYBRID_GRAPH_AVX2_TARGET
-PgturbohybridGraphExactVectorDistanceAvx2(PgturbohybridGraphScanOpaque so, Vector *queryVector,
-							   Vector *valueVector, double *result)
-{
-	TqScoreMode mode = (TqScoreMode) so->tq.scoreMode;
-	int			i = 0;
-
-	if (mode == PGTURBOHYBRID_SCORE_L2)
-	{
-		__m256		acc0 = _mm256_setzero_ps();
-		__m256		acc1 = _mm256_setzero_ps();
-		__m256		acc2 = _mm256_setzero_ps();
-		__m256		acc3 = _mm256_setzero_ps();
-
-		for (; i + 32 <= queryVector->dim; i += 32)
-		{
-			__m256	q0 = _mm256_loadu_ps(&queryVector->x[i]);
-			__m256	q1 = _mm256_loadu_ps(&queryVector->x[i + 8]);
-			__m256	q2 = _mm256_loadu_ps(&queryVector->x[i + 16]);
-			__m256	q3 = _mm256_loadu_ps(&queryVector->x[i + 24]);
-			__m256	v0 = _mm256_loadu_ps(&valueVector->x[i]);
-			__m256	v1 = _mm256_loadu_ps(&valueVector->x[i + 8]);
-			__m256	v2 = _mm256_loadu_ps(&valueVector->x[i + 16]);
-			__m256	v3 = _mm256_loadu_ps(&valueVector->x[i + 24]);
-			__m256	d0 = _mm256_sub_ps(q0, v0);
-			__m256	d1 = _mm256_sub_ps(q1, v1);
-			__m256	d2 = _mm256_sub_ps(q2, v2);
-			__m256	d3 = _mm256_sub_ps(q3, v3);
-
-			acc0 = _mm256_add_ps(acc0, _mm256_mul_ps(d0, d0));
-			acc1 = _mm256_add_ps(acc1, _mm256_mul_ps(d1, d1));
-			acc2 = _mm256_add_ps(acc2, _mm256_mul_ps(d2, d2));
-			acc3 = _mm256_add_ps(acc3, _mm256_mul_ps(d3, d3));
-		}
-
-		acc0 = _mm256_add_ps(_mm256_add_ps(acc0, acc1),
-							 _mm256_add_ps(acc2, acc3));
-		*result = PgturbohybridGraphHorizontalSumF32Avx2(acc0);
-		for (; i < queryVector->dim; i++)
-		{
-			double		diff = (double) queryVector->x[i] - valueVector->x[i];
-
-			*result += diff * diff;
-		}
-		return true;
-	}
-
-	if (mode == PGTURBOHYBRID_SCORE_IP || mode == PGTURBOHYBRID_SCORE_COSINE)
-	{
-		__m256		dotAcc = _mm256_setzero_ps();
-		__m256		normAcc = _mm256_setzero_ps();
-		double		dot;
-		double		valueNorm = 0;
-
-		for (; i + 8 <= queryVector->dim; i += 8)
-		{
-			__m256	qv = _mm256_loadu_ps(&queryVector->x[i]);
-			__m256	vv = _mm256_loadu_ps(&valueVector->x[i]);
-
-			dotAcc = _mm256_add_ps(dotAcc, _mm256_mul_ps(qv, vv));
-			if (mode == PGTURBOHYBRID_SCORE_COSINE)
-				normAcc = _mm256_add_ps(normAcc, _mm256_mul_ps(vv, vv));
-		}
-
-		dot = PgturbohybridGraphHorizontalSumF32Avx2(dotAcc);
-		if (mode == PGTURBOHYBRID_SCORE_COSINE)
-			valueNorm = PgturbohybridGraphHorizontalSumF32Avx2(normAcc);
-
-		for (; i < queryVector->dim; i++)
-		{
-			double		qv = queryVector->x[i];
-			double		vv = valueVector->x[i];
-
-			dot += qv * vv;
-			if (mode == PGTURBOHYBRID_SCORE_COSINE)
-				valueNorm += vv * vv;
-		}
-
-		if (mode == PGTURBOHYBRID_SCORE_IP)
-			*result = -dot;
-		else if (so->tq.queryNorm == 0 || valueNorm == 0)
-			*result = 1;
-		else
-			*result = 1 - (dot / sqrt(so->tq.queryNorm * valueNorm));
-
-		return true;
-	}
-
-	return false;
-}
-
-static bool PGTURBOHYBRID_GRAPH_AVX2_TARGET
-PgturbohybridGraphBuildExactDistanceAvx2(PgturbohybridQuantBuildState *state, Vector *av,
-							  Vector *bv, double *result)
-{
-	TqScoreMode mode = (TqScoreMode) state->scoreMode;
-	int			i = 0;
-
-	if (mode == PGTURBOHYBRID_SCORE_L2)
-	{
-		__m256		acc0 = _mm256_setzero_ps();
-		__m256		acc1 = _mm256_setzero_ps();
-		__m256		acc2 = _mm256_setzero_ps();
-		__m256		acc3 = _mm256_setzero_ps();
-
-		for (; i + 32 <= av->dim; i += 32)
-		{
-			__m256	a0 = _mm256_loadu_ps(&av->x[i]);
-			__m256	a1 = _mm256_loadu_ps(&av->x[i + 8]);
-			__m256	a2 = _mm256_loadu_ps(&av->x[i + 16]);
-			__m256	a3 = _mm256_loadu_ps(&av->x[i + 24]);
-			__m256	b0 = _mm256_loadu_ps(&bv->x[i]);
-			__m256	b1 = _mm256_loadu_ps(&bv->x[i + 8]);
-			__m256	b2 = _mm256_loadu_ps(&bv->x[i + 16]);
-			__m256	b3 = _mm256_loadu_ps(&bv->x[i + 24]);
-			__m256	d0 = _mm256_sub_ps(a0, b0);
-			__m256	d1 = _mm256_sub_ps(a1, b1);
-			__m256	d2 = _mm256_sub_ps(a2, b2);
-			__m256	d3 = _mm256_sub_ps(a3, b3);
-
-			acc0 = _mm256_add_ps(acc0, _mm256_mul_ps(d0, d0));
-			acc1 = _mm256_add_ps(acc1, _mm256_mul_ps(d1, d1));
-			acc2 = _mm256_add_ps(acc2, _mm256_mul_ps(d2, d2));
-			acc3 = _mm256_add_ps(acc3, _mm256_mul_ps(d3, d3));
-		}
-
-		acc0 = _mm256_add_ps(_mm256_add_ps(acc0, acc1),
-							 _mm256_add_ps(acc2, acc3));
-		*result = PgturbohybridGraphHorizontalSumF32Avx2(acc0);
-		for (; i < av->dim; i++)
-		{
-			double		diff = (double) av->x[i] - bv->x[i];
-
-			*result += diff * diff;
-		}
-		return true;
-	}
-
-	if (mode == PGTURBOHYBRID_SCORE_IP || mode == PGTURBOHYBRID_SCORE_COSINE)
-	{
-		__m256		dotAcc = _mm256_setzero_ps();
-		__m256		aNormAcc = _mm256_setzero_ps();
-		__m256		bNormAcc = _mm256_setzero_ps();
-		double		dot;
-		double		aNorm = 0;
-		double		bNorm = 0;
-
-		for (; i + 8 <= av->dim; i += 8)
-		{
-			__m256	avv = _mm256_loadu_ps(&av->x[i]);
-			__m256	bvv = _mm256_loadu_ps(&bv->x[i]);
-
-			dotAcc = _mm256_add_ps(dotAcc, _mm256_mul_ps(avv, bvv));
-			if (mode == PGTURBOHYBRID_SCORE_COSINE)
-			{
-				aNormAcc = _mm256_add_ps(aNormAcc, _mm256_mul_ps(avv, avv));
-				bNormAcc = _mm256_add_ps(bNormAcc, _mm256_mul_ps(bvv, bvv));
-			}
-		}
-
-		dot = PgturbohybridGraphHorizontalSumF32Avx2(dotAcc);
-		if (mode == PGTURBOHYBRID_SCORE_COSINE)
-		{
-			aNorm = PgturbohybridGraphHorizontalSumF32Avx2(aNormAcc);
-			bNorm = PgturbohybridGraphHorizontalSumF32Avx2(bNormAcc);
-		}
-
-		for (; i < av->dim; i++)
-		{
-			double		aval = av->x[i];
-			double		bval = bv->x[i];
-
-			dot += aval * bval;
-			if (mode == PGTURBOHYBRID_SCORE_COSINE)
-			{
-				aNorm += aval * aval;
-				bNorm += bval * bval;
-			}
-		}
-
-		if (mode == PGTURBOHYBRID_SCORE_IP)
-			*result = -dot;
-		else if (aNorm == 0 || bNorm == 0)
-			*result = 1;
-		else
-			*result = 1 - (dot / sqrt(aNorm * bNorm));
-
-		return true;
-	}
-
-	return false;
-}
-
-#endif
 
 double
 PgturbohybridGraphExactVectorDistance(PgturbohybridGraphScanOpaque so, Datum query, char *valuePtr)
@@ -3804,7 +1569,7 @@ PgturbohybridGraphBit1PopcntRawCodes(const uint8 *a, const uint8 *b, int dim)
  * Scalar asymmetric 1-bit query-vs-code scorer.
  *
  * Returns the centroid-space dot product computed from a bit-plane
- * decomposed 8-bit signed query (tq->queryPlanes, populated by
+ * decomposed 8-bit signed query (tq->bit1.planes, populated by
  * TqPrepareQueryAsymBit1) against a 1-bit packed code.  Reduction:
  *
  *   v_dot_q   = Σ_b w_b · popcount(code AND plane_b)
@@ -3825,10 +1590,10 @@ PgturbohybridGraphBit1PopcntRawCodes(const uint8 *a, const uint8 *b, int dim)
 static float
 PgturbohybridGraphAsymBit1ScalarRawScore(const PgturbohybridGraphTqQuery *tq, const uint8 *code)
 {
-	const uint8 *planes = tq->queryPlanes;
-	int			numFullBlocks = tq->queryAsymNumFullBlocks;
-	int			tailBytes = tq->queryAsymTailBytes;
-	int			BITS = tq->queryAsymBits;
+	const uint8 *planes = tq->bit1.planes;
+	int			numFullBlocks = tq->bit1.numFullBlocks;
+	int			tailBytes = tq->bit1.tailBytes;
+	int			BITS = tq->bit1.bits;
 	int64		vDotQ = 0;
 
 	for (int block = 0; block < numFullBlocks; block++)
@@ -3877,9 +1642,9 @@ PgturbohybridGraphAsymBit1ScalarRawScore(const PgturbohybridGraphTqQuery *tq, co
 	}
 
 	{
-		int64		signedDot = 2 * vDotQ - tq->queryAsymSumSigned;
+		int64		signedDot = 2 * vDotQ - tq->bit1.sumSigned;
 
-		return tq->queryAsymScale * (float) signedDot;
+		return tq->bit1.scale * (float) signedDot;
 	}
 }
 
@@ -3902,10 +1667,10 @@ PgturbohybridGraphAsymBit1ScalarRawScore(const PgturbohybridGraphTqQuery *tq, co
 static float PGTURBOHYBRID_GRAPH_AVX2_TARGET
 PgturbohybridGraphAsymBit1Avx2RawScore(const PgturbohybridGraphTqQuery *tq, const uint8 *code)
 {
-	const uint8 *planes = tq->queryPlanes;
-	int			numFullBlocks = tq->queryAsymNumFullBlocks;
-	int			tailBytes = tq->queryAsymTailBytes;
-	int			BITS = tq->queryAsymBits;
+	const uint8 *planes = tq->bit1.planes;
+	int			numFullBlocks = tq->bit1.numFullBlocks;
+	int			tailBytes = tq->bit1.tailBytes;
+	int			BITS = tq->bit1.bits;
 	int64		signWeight = (int64) 1 << (BITS - 1);
 	int64		vDotQ = 0;
 	const __m128i nibblePopLut = _mm_setr_epi8(
@@ -3969,9 +1734,9 @@ PgturbohybridGraphAsymBit1Avx2RawScore(const PgturbohybridGraphTqQuery *tq, cons
 	}
 
 	{
-		int64		signedDot = 2 * vDotQ - tq->queryAsymSumSigned;
+		int64		signedDot = 2 * vDotQ - tq->bit1.sumSigned;
 
-		return tq->queryAsymScale * (float) signedDot;
+		return tq->bit1.scale * (float) signedDot;
 	}
 }
 #endif		/* PGTURBOHYBRID_GRAPH_COMPILE_AVX2 */
@@ -3990,10 +1755,10 @@ PgturbohybridGraphAsymBit1Avx2RawScore(const PgturbohybridGraphTqQuery *tq, cons
 static float PGTURBOHYBRID_GRAPH_AVX512VPOPCNTDQ_TARGET
 PgturbohybridGraphAsymBit1Avx512VpopcntdqRawScore(const PgturbohybridGraphTqQuery *tq, const uint8 *code)
 {
-	const uint8 *planes = tq->queryPlanes;
-	int			numFullBlocks = tq->queryAsymNumFullBlocks;
-	int			tailBytes = tq->queryAsymTailBytes;
-	int			BITS = tq->queryAsymBits;
+	const uint8 *planes = tq->bit1.planes;
+	int			numFullBlocks = tq->bit1.numFullBlocks;
+	int			tailBytes = tq->bit1.tailBytes;
+	int			BITS = tq->bit1.bits;
 	int64		signWeight = (int64) 1 << (BITS - 1);
 	int64		vDotQ = 0;
 
@@ -4059,9 +1824,9 @@ PgturbohybridGraphAsymBit1Avx512VpopcntdqRawScore(const PgturbohybridGraphTqQuer
 	}
 
 	{
-		int64		signedDot = 2 * vDotQ - tq->queryAsymSumSigned;
+		int64		signedDot = 2 * vDotQ - tq->bit1.sumSigned;
 
-		return tq->queryAsymScale * (float) signedDot;
+		return tq->bit1.scale * (float) signedDot;
 	}
 }
 
@@ -4112,10 +1877,10 @@ PgturbohybridGraphAvx512VpopcntdqAvailable(void)
 static float
 PgturbohybridGraphAsymBit1NeonRawScore(const PgturbohybridGraphTqQuery *tq, const uint8 *code)
 {
-	const uint8 *planes = tq->queryPlanes;
-	int			numFullBlocks = tq->queryAsymNumFullBlocks;
-	int			tailBytes = tq->queryAsymTailBytes;
-	int			BITS = tq->queryAsymBits;
+	const uint8 *planes = tq->bit1.planes;
+	int			numFullBlocks = tq->bit1.numFullBlocks;
+	int			tailBytes = tq->bit1.tailBytes;
+	int			BITS = tq->bit1.bits;
 	int64		signWeight = (int64) 1 << (BITS - 1);
 	int64		vDotQ = 0;
 
@@ -4164,9 +1929,9 @@ PgturbohybridGraphAsymBit1NeonRawScore(const PgturbohybridGraphTqQuery *tq, cons
 	}
 
 	{
-		int64		signedDot = 2 * vDotQ - tq->queryAsymSumSigned;
+		int64		signedDot = 2 * vDotQ - tq->bit1.sumSigned;
 
-		return tq->queryAsymScale * (float) signedDot;
+		return tq->bit1.scale * (float) signedDot;
 	}
 }
 #endif		/* aarch64 */
@@ -4736,12 +2501,12 @@ PgturbohybridGraphScoreNode(PgturbohybridGraphScanOpaque so, PgturbohybridGraphS
 	 * Asymmetric 1-bit single-node fast path.  Mirrors the
 	 * batch dispatch slot above so tail nodes (< 4 left over) get the
 	 * same scoring math as the batch-of-4 path.  Falls through to
-	 * PgturbohybridGraphPackedDistance when the GUC is off, queryPlanes is NULL,
+	 * PgturbohybridGraphPackedDistance when the GUC is off, bit1.planes is NULL,
 	 * the bit-width isn't 1, the score mode is L1, or the node lacks a
 	 * packed code.
 	 */
 	if (pgturbohybrid_dense_query_1bit_asymmetric && so->tq.bits == 1 &&
-		so->tq.queryPlanes != NULL &&
+		so->tq.bit1.planes != NULL &&
 		(TqScoreMode) so->tq.scoreMode != PGTURBOHYBRID_SCORE_L1)
 	{
 		TqScoreMode mode = (TqScoreMode) so->tq.scoreMode;
@@ -4784,7 +2549,7 @@ PgturbohybridGraphScoreNode(PgturbohybridGraphScanOpaque so, PgturbohybridGraphS
 		double		querySplitDistance;
 
 #if PGTURBOHYBRID_GRAPH_COMPILE_AVX2
-		if (so->tq.u8SplitEnabled &&
+		if (so->tq.u8.enabled &&
 			PgturbohybridGraphPackedDistanceU8Split(&so->tq, node->code,
 													node->scale, &querySplitDistance))
 		{
@@ -4809,554 +2574,6 @@ PgturbohybridGraphScoreNode(PgturbohybridGraphScanOpaque so, PgturbohybridGraphS
 								 node->codeNorm, node->norm);
 }
 
-#if PGTURBOHYBRID_GRAPH_COMPILE_ARM_DOT
-static bool
-PgturbohybridGraphArmDotprodAvailable(void)
-{
-	static int	available = -1;
-
-	if (pgturbohybrid_dense_simd_force != PGTURBOHYBRID_SIMD_FORCE_AUTO &&
-		pgturbohybrid_dense_simd_force != PGTURBOHYBRID_SIMD_FORCE_ARM_SDOT &&
-		pgturbohybrid_dense_simd_force != PGTURBOHYBRID_SIMD_FORCE_NEON)
-		return false;
-
-	if (available >= 0)
-		return available != 0;
-
-#if defined(__APPLE__)
-	{
-		int			value = 0;
-		size_t		len = sizeof(value);
-
-		if (sysctlbyname("hw.optional.arm.FEAT_DotProd", &value, &len,
-						 NULL, 0) == 0)
-		{
-			available = value != 0;
-			return available != 0;
-		}
-	}
-	available = 1;
-#elif defined(__linux__) && defined(HWCAP_ASIMDDP)
-	available = (getauxval(AT_HWCAP) & HWCAP_ASIMDDP) != 0;
-#else
-	available = 0;
-#endif
-	return available != 0;
-}
-
-#if PGTURBOHYBRID_GRAPH_COMPILE_ARM_I8MM
-static bool
-PgturbohybridGraphArmI8mmAvailable(void)
-{
-	static int	available = -1;
-
-	if (!pgturbohybrid_dense_graph_i8mm)
-		return false;
-	if (pgturbohybrid_dense_simd_force != PGTURBOHYBRID_SIMD_FORCE_AUTO &&
-		pgturbohybrid_dense_simd_force != PGTURBOHYBRID_SIMD_FORCE_ARM_I8MM)
-		return false;
-
-	if (available >= 0)
-		return available != 0;
-
-#if defined(__APPLE__)
-	{
-		int			value = 0;
-		size_t		len = sizeof(value);
-
-		if (sysctlbyname("hw.optional.arm.FEAT_I8MM", &value, &len,
-						 NULL, 0) == 0)
-		{
-			available = value != 0;
-			return available != 0;
-		}
-	}
-	available = 0;
-#elif defined(__linux__) && defined(HWCAP2_I8MM)
-	available = (getauxval(AT_HWCAP2) & HWCAP2_I8MM) != 0;
-#else
-	available = 0;
-#endif
-	return available != 0;
-}
-
-static int32x4_t PGTURBOHYBRID_GRAPH_ARM_I8MM_TARGET
-PgturbohybridGraphDotI8x16ArmI8mm(int32x4_t acc, int8x16_t a, int8x16_t b)
-{
-	uint8x16_t	aUnsigned = vreinterpretq_u8_s8(veorq_s8(a, vdupq_n_s8((int8) 0x80)));
-	int16x8_t	pairSums = vpaddlq_s8(b);
-	int32x4_t	groupSums = vpaddlq_s16(pairSums);
-
-	acc = vusdotq_s32(acc, aUnsigned, b);
-	return vsubq_s32(acc, vmulq_n_s32(groupSums, 128));
-}
-#define PGTURBOHYBRID_GRAPH_ARM_DOT(acc, a, b) \
-	(useI8mm ? PgturbohybridGraphDotI8x16ArmI8mm((acc), (a), (b)) : vdotq_s32((acc), (a), (b)))
-#else
-#define PGTURBOHYBRID_GRAPH_ARM_DOT(acc, a, b) vdotq_s32((acc), (a), (b))
-#endif
-
-static int64 PGTURBOHYBRID_GRAPH_ARM_DOT_TARGET
-PgturbohybridGraphQuerySplitRawNeonSdot(const PgturbohybridGraphTqQuery *tq, const uint8 *code)
-{
-	int32x4_t	accLow0 = vdupq_n_s32(0);
-	int32x4_t	accLow1 = vdupq_n_s32(0);
-	int32x4_t	accHigh0 = vdupq_n_s32(0);
-	int32x4_t	accHigh1 = vdupq_n_s32(0);
-	uint8x16_t	mask = vdupq_n_u8(0x0f);
-	int8x16_t	codebook = vld1q_s8((const int8_t *) PgturbohybridGraphCodebookI8);
-	int			pairs = tq->querySplitChunks / 2;
-#if PGTURBOHYBRID_GRAPH_COMPILE_ARM_I8MM
-	bool		useI8mm = PgturbohybridGraphArmI8mmAvailable();
-#endif
-
-	for (int pair = 0; pair < pairs; pair++)
-	{
-		uint8x16_t packed = vld1q_u8(code + pair * 16);
-		uint8x16_t loNibbles = vandq_u8(packed, mask);
-		uint8x16_t hiNibbles = vshrq_n_u8(packed, 4);
-		uint8x16_t idx0 = vzip1q_u8(loNibbles, hiNibbles);
-		uint8x16_t idx1 = vzip2q_u8(loNibbles, hiNibbles);
-		int8x16_t	c0 = vqtbl1q_s8(codebook, idx0);
-		int8x16_t	c1 = vqtbl1q_s8(codebook, idx1);
-		const int8 *low = tq->querySplitLow + pair * 32;
-		const int8 *high = tq->querySplitHigh + pair * 32;
-
-		accLow0 = PGTURBOHYBRID_GRAPH_ARM_DOT(accLow0, vld1q_s8((const int8_t *) low), c0);
-		accLow1 = PGTURBOHYBRID_GRAPH_ARM_DOT(accLow1, vld1q_s8((const int8_t *) (low + 16)), c1);
-		accHigh0 = PGTURBOHYBRID_GRAPH_ARM_DOT(accHigh0, vld1q_s8((const int8_t *) high), c0);
-		accHigh1 = PGTURBOHYBRID_GRAPH_ARM_DOT(accHigh1, vld1q_s8((const int8_t *) (high + 16)), c1);
-	}
-
-	if ((tq->querySplitChunks & 1) != 0)
-	{
-		int			chunk = tq->querySplitChunks - 1;
-		uint8x8_t	packed = vld1_u8(code + chunk * 8);
-		uint8x8_t	loNibbles = vand_u8(packed, vdup_n_u8(0x0f));
-		uint8x8_t	hiNibbles = vshr_n_u8(packed, 4);
-		uint8x16_t	idx = vcombine_u8(vzip1_u8(loNibbles, hiNibbles),
-									   vzip2_u8(loNibbles, hiNibbles));
-		int8x16_t	c = vqtbl1q_s8(codebook, idx);
-		const int8 *low = tq->querySplitLow + chunk * 16;
-		const int8 *high = tq->querySplitHigh + chunk * 16;
-
-		accLow0 = PGTURBOHYBRID_GRAPH_ARM_DOT(accLow0, vld1q_s8((const int8_t *) low), c);
-		accHigh0 = PGTURBOHYBRID_GRAPH_ARM_DOT(accHigh0, vld1q_s8((const int8_t *) high), c);
-	}
-
-	if (tq->querySplitTailDims != 0)
-	{
-		uint8		scratch[8] = {0};
-		int			tailBytes = (tq->querySplitTailDims + 1) / 2;
-		const uint8 *tail = code + tq->querySplitChunks * 8;
-		uint8x8_t	packed;
-		uint8x8_t	loNibbles;
-		uint8x8_t	hiNibbles;
-		uint8x16_t	idx;
-		int8x16_t	c;
-
-		memcpy(scratch, tail, tailBytes);
-		packed = vld1_u8(scratch);
-		loNibbles = vand_u8(packed, vdup_n_u8(0x0f));
-		hiNibbles = vshr_n_u8(packed, 4);
-		idx = vcombine_u8(vzip1_u8(loNibbles, hiNibbles),
-						  vzip2_u8(loNibbles, hiNibbles));
-		c = vqtbl1q_s8(codebook, idx);
-
-		accLow0 = PGTURBOHYBRID_GRAPH_ARM_DOT(accLow0,
-								   vld1q_s8((const int8_t *) tq->querySplitTailLow), c);
-		accHigh0 = PGTURBOHYBRID_GRAPH_ARM_DOT(accHigh0,
-									vld1q_s8((const int8_t *) tq->querySplitTailHigh), c);
-	}
-
-	accLow0 = vaddq_s32(accLow0, accLow1);
-	accHigh0 = vaddq_s32(accHigh0, accHigh1);
-	return (int64) vaddvq_s32(accLow0) +
-		(int64) PGTURBOHYBRID_QUERY_SPLIT_HIGH_COEF * (int64) vaddvq_s32(accHigh0);
-}
-
-static int64 PGTURBOHYBRID_GRAPH_ARM_DOT_TARGET
-PgturbohybridGraphQuerySplit2RawNeonSdot(const PgturbohybridGraphTqQuery *tq, const uint8 *code)
-{
-	int32x4_t	accLow = vdupq_n_s32(0);
-	int32x4_t	accHigh = vdupq_n_s32(0);
-	int8x16_t	codebook = vld1q_s8((const int8_t *) PgturbohybridGraphCodebook2I8);
-	uint8x16_t	mask = vdupq_n_u8(0x03);
-	int8x16_t	shifts = {
-		0, -2, -4, -6, 0, -2, -4, -6,
-		0, -2, -4, -6, 0, -2, -4, -6
-	};
-#if PGTURBOHYBRID_GRAPH_COMPILE_ARM_I8MM
-	bool		useI8mm = PgturbohybridGraphArmI8mmAvailable();
-#endif
-
-	for (int chunk = 0; chunk < tq->querySplitChunks; chunk++)
-	{
-		uint8		repeatedBytes[16];
-		const uint8 *bytes = code + chunk * 4;
-		uint8x16_t	repeated;
-		uint8x16_t	idx;
-		int8x16_t	c;
-		const int8 *low = tq->querySplitLow + chunk * 16;
-		const int8 *high = tq->querySplitHigh + chunk * 16;
-
-		for (int i = 0; i < 16; i++)
-			repeatedBytes[i] = bytes[i / 4];
-
-		repeated = vld1q_u8(repeatedBytes);
-		idx = vandq_u8(vshlq_u8(repeated, shifts), mask);
-		c = vqtbl1q_s8(codebook, idx);
-
-		accLow = PGTURBOHYBRID_GRAPH_ARM_DOT(accLow, vld1q_s8((const int8_t *) low), c);
-		accHigh = PGTURBOHYBRID_GRAPH_ARM_DOT(accHigh, vld1q_s8((const int8_t *) high), c);
-	}
-
-	if (tq->querySplitTailDims != 0)
-	{
-		uint8		repeatedBytes[16] = {0};
-		const uint8 *bytes = code + tq->querySplitChunks * 4;
-		uint8x16_t	repeated;
-		uint8x16_t	idx;
-		int8x16_t	c;
-
-		for (int i = 0; i < tq->querySplitTailDims; i++)
-			repeatedBytes[i] = bytes[i / 4];
-
-		repeated = vld1q_u8(repeatedBytes);
-		idx = vandq_u8(vshlq_u8(repeated, shifts), mask);
-		c = vqtbl1q_s8(codebook, idx);
-
-		accLow = PGTURBOHYBRID_GRAPH_ARM_DOT(accLow,
-								  vld1q_s8((const int8_t *) tq->querySplitTailLow), c);
-		accHigh = PGTURBOHYBRID_GRAPH_ARM_DOT(accHigh,
-								   vld1q_s8((const int8_t *) tq->querySplitTailHigh), c);
-	}
-
-	return (int64) vaddvq_s32(accLow) +
-		(int64) PGTURBOHYBRID_QUERY_SPLIT_HIGH_COEF * (int64) vaddvq_s32(accHigh);
-}
-
-static int64 PGTURBOHYBRID_GRAPH_ARM_DOT_TARGET
-PgturbohybridGraphCodeCodeRawNeonSdot(const uint8 *a, const uint8 *b, int dim,
-						   int *sampleDims)
-{
-	int32x4_t	acc0 = vdupq_n_s32(0);
-	int32x4_t	acc1 = vdupq_n_s32(0);
-	int8x16_t	codebook = vld1q_s8((const int8_t *) PgturbohybridGraphCodebookI8);
-	int			chunks = dim / 16;
-	int			tailDims = dim - chunks * 16;
-	int			scoredChunks = chunks;
-#if PGTURBOHYBRID_GRAPH_COMPILE_ARM_I8MM
-	bool		useI8mm = PgturbohybridGraphArmI8mmAvailable();
-#endif
-
-	if (chunks > PGTURBOHYBRID_GRAPH_CODE_CODE_PRUNE_CHUNKS)
-		scoredChunks = PGTURBOHYBRID_GRAPH_CODE_CODE_PRUNE_CHUNKS;
-	*sampleDims = scoredChunks * 16;
-
-	for (int scored = 0; scored < scoredChunks; scored++)
-	{
-		int			chunk = scoredChunks == chunks ? scored :
-			(int) (((int64) scored * chunks) / scoredChunks);
-		uint8x8_t	pa = vld1_u8(a + chunk * 8);
-		uint8x8_t	pb = vld1_u8(b + chunk * 8);
-		uint8x8_t	loA = vand_u8(pa, vdup_n_u8(0x0f));
-		uint8x8_t	hiA = vshr_n_u8(pa, 4);
-		uint8x8_t	loB = vand_u8(pb, vdup_n_u8(0x0f));
-		uint8x8_t	hiB = vshr_n_u8(pb, 4);
-		uint8x16_t	idxA = vcombine_u8(vzip1_u8(loA, hiA),
-										vzip2_u8(loA, hiA));
-		uint8x16_t	idxB = vcombine_u8(vzip1_u8(loB, hiB),
-										vzip2_u8(loB, hiB));
-		int8x16_t	ca = vqtbl1q_s8(codebook, idxA);
-		int8x16_t	cb = vqtbl1q_s8(codebook, idxB);
-
-		acc0 = PGTURBOHYBRID_GRAPH_ARM_DOT(acc0, ca, cb);
-	}
-
-	if (scoredChunks == chunks && tailDims != 0)
-	{
-		uint8		scratchA[8] = {0};
-		uint8		scratchB[8] = {0};
-		int			tailBytes = (tailDims + 1) / 2;
-		uint8x8_t	pa;
-		uint8x8_t	pb;
-		uint8x8_t	loA;
-		uint8x8_t	hiA;
-		uint8x8_t	loB;
-		uint8x8_t	hiB;
-		uint8x16_t	idxA;
-		uint8x16_t	idxB;
-		int8x16_t	ca;
-		int8x16_t	cb;
-
-		memcpy(scratchA, a + chunks * 8, tailBytes);
-		memcpy(scratchB, b + chunks * 8, tailBytes);
-		pa = vld1_u8(scratchA);
-		pb = vld1_u8(scratchB);
-		loA = vand_u8(pa, vdup_n_u8(0x0f));
-		hiA = vshr_n_u8(pa, 4);
-		loB = vand_u8(pb, vdup_n_u8(0x0f));
-		hiB = vshr_n_u8(pb, 4);
-		idxA = vcombine_u8(vzip1_u8(loA, hiA), vzip2_u8(loA, hiA));
-		idxB = vcombine_u8(vzip1_u8(loB, hiB), vzip2_u8(loB, hiB));
-		ca = vqtbl1q_s8(codebook, idxA);
-		cb = vqtbl1q_s8(codebook, idxB);
-		acc1 = PGTURBOHYBRID_GRAPH_ARM_DOT(acc1, ca, cb);
-		*sampleDims += tailDims;
-	}
-
-	return (int64) vaddvq_s32(acc0) + (int64) vaddvq_s32(acc1);
-}
-
-static int64 PGTURBOHYBRID_GRAPH_ARM_DOT_TARGET
-PgturbohybridGraphCodeCode2RawNeonSdot(const uint8 *a, const uint8 *b, int dim,
-							int *sampleDims)
-{
-	int32x4_t	acc0 = vdupq_n_s32(0);
-	int32x4_t	acc1 = vdupq_n_s32(0);
-	int8x16_t	codebook = vld1q_s8((const int8_t *) PgturbohybridGraphCodebook2I8);
-	uint8x16_t	mask = vdupq_n_u8(0x03);
-	int8x16_t	shifts = {
-		0, -2, -4, -6, 0, -2, -4, -6,
-		0, -2, -4, -6, 0, -2, -4, -6
-	};
-	int			chunks = dim / 16;
-	int			tailDims = dim - chunks * 16;
-	int			scoredChunks = chunks;
-#if PGTURBOHYBRID_GRAPH_COMPILE_ARM_I8MM
-	bool		useI8mm = PgturbohybridGraphArmI8mmAvailable();
-#endif
-
-	if (chunks > PGTURBOHYBRID_GRAPH_CODE_CODE_PRUNE_CHUNKS)
-		scoredChunks = PGTURBOHYBRID_GRAPH_CODE_CODE_PRUNE_CHUNKS;
-	*sampleDims = scoredChunks * 16;
-
-	for (int scored = 0; scored < scoredChunks; scored++)
-	{
-		int			chunk = scoredChunks == chunks ? scored :
-			(int) (((int64) scored * chunks) / scoredChunks);
-		uint8		repeatedA[16];
-		uint8		repeatedB[16];
-		const uint8 *bytesA = a + chunk * 4;
-		const uint8 *bytesB = b + chunk * 4;
-		uint8x16_t	idxA;
-		uint8x16_t	idxB;
-		int8x16_t	ca;
-		int8x16_t	cb;
-
-		for (int i = 0; i < 16; i++)
-		{
-			repeatedA[i] = bytesA[i / 4];
-			repeatedB[i] = bytesB[i / 4];
-		}
-
-		idxA = vandq_u8(vshlq_u8(vld1q_u8(repeatedA), shifts), mask);
-		idxB = vandq_u8(vshlq_u8(vld1q_u8(repeatedB), shifts), mask);
-		ca = vqtbl1q_s8(codebook, idxA);
-		cb = vqtbl1q_s8(codebook, idxB);
-		acc0 = PGTURBOHYBRID_GRAPH_ARM_DOT(acc0, ca, cb);
-	}
-
-	if (scoredChunks == chunks && tailDims != 0)
-	{
-		uint8		repeatedA[16] = {0};
-		uint8		repeatedB[16] = {0};
-		const uint8 *bytesA = a + chunks * 4;
-		const uint8 *bytesB = b + chunks * 4;
-		uint8x16_t	idxA;
-		uint8x16_t	idxB;
-		int8x16_t	ca;
-		int8x16_t	cb;
-
-		for (int i = 0; i < tailDims; i++)
-		{
-			repeatedA[i] = bytesA[i / 4];
-			repeatedB[i] = bytesB[i / 4];
-		}
-
-		idxA = vandq_u8(vshlq_u8(vld1q_u8(repeatedA), shifts), mask);
-		idxB = vandq_u8(vshlq_u8(vld1q_u8(repeatedB), shifts), mask);
-		ca = vqtbl1q_s8(codebook, idxA);
-		cb = vqtbl1q_s8(codebook, idxB);
-		acc1 = PGTURBOHYBRID_GRAPH_ARM_DOT(acc1, ca, cb);
-		*sampleDims += tailDims;
-	}
-
-	return (int64) vaddvq_s32(acc0) + (int64) vaddvq_s32(acc1);
-}
-
-/*
- * NEON weighted symmetric (code-code) kernels for TQ+.
- *
- * Mirrors PgturbohybridGraphCodeCodeWeightedRawAvx2 in math: per chunk of 16
- * coords (4-bit unpack via vqtbl1q_s8 codebook lookup), widen to
- * i16x16, multiply pairwise, multiply by per-coord i16 weight via
- * vmlal_s16 (i16×i16 → i32 multiply-accumulate), widen i32 → i64
- * via vpadalq_s32, accumulate.
- *
- * Returns Σ c_a · c_b · D'²_i16 as i64.  Caller divides by
- * `weight_scale · CODEBOOK_SCALE²` to recover the f32 weighted dot.
- *
- * Uses base NEON only (no SDOT or I8MM); compiles wherever the file
- * already targets aarch64.
- */
-static inline int64x2_t PGTURBOHYBRID_GRAPH_ARM_DOT_TARGET
-PgturbohybridGraphWeightedDotI8x16NeonSdot(int8x16_t ca, int8x16_t cb,
-								const int16 *weightsAt)
-{
-	int16x8_t	caLo = vmovl_s8(vget_low_s8(ca));
-	int16x8_t	caHi = vmovl_s8(vget_high_s8(ca));
-	int16x8_t	cbLo = vmovl_s8(vget_low_s8(cb));
-	int16x8_t	cbHi = vmovl_s8(vget_high_s8(cb));
-	int16x8_t	prodLo = vmulq_s16(caLo, cbLo);
-	int16x8_t	prodHi = vmulq_s16(caHi, cbHi);
-	int16x8_t	wLo = vld1q_s16(weightsAt);
-	int16x8_t	wHi = vld1q_s16(weightsAt + 8);
-	int32x4_t	chunkAcc = vdupq_n_s32(0);
-
-	chunkAcc = vmlal_s16(chunkAcc, vget_low_s16(prodLo), vget_low_s16(wLo));
-	chunkAcc = vmlal_s16(chunkAcc, vget_high_s16(prodLo), vget_high_s16(wLo));
-	chunkAcc = vmlal_s16(chunkAcc, vget_low_s16(prodHi), vget_low_s16(wHi));
-	chunkAcc = vmlal_s16(chunkAcc, vget_high_s16(prodHi), vget_high_s16(wHi));
-
-	return vpadalq_s32(vdupq_n_s64(0), chunkAcc);
-}
-
-static int64 PGTURBOHYBRID_GRAPH_ARM_DOT_TARGET
-PgturbohybridGraphCodeCodeWeightedRawNeonSdot(const uint8 *a, const uint8 *b,
-								   const int16 *weights, int dim)
-{
-	int64x2_t	acc = vdupq_n_s64(0);
-	int8x16_t	codebook = vld1q_s8((const int8_t *) PgturbohybridGraphCodebookI8);
-	int			chunks = dim / 16;
-	int			tailDims = dim - chunks * 16;
-
-	for (int chunk = 0; chunk < chunks; chunk++)
-	{
-		uint8x8_t	pa = vld1_u8(a + chunk * 8);
-		uint8x8_t	pb = vld1_u8(b + chunk * 8);
-		uint8x8_t	loA = vand_u8(pa, vdup_n_u8(0x0f));
-		uint8x8_t	hiA = vshr_n_u8(pa, 4);
-		uint8x8_t	loB = vand_u8(pb, vdup_n_u8(0x0f));
-		uint8x8_t	hiB = vshr_n_u8(pb, 4);
-		uint8x16_t	idxA = vcombine_u8(vzip1_u8(loA, hiA),
-										vzip2_u8(loA, hiA));
-		uint8x16_t	idxB = vcombine_u8(vzip1_u8(loB, hiB),
-										vzip2_u8(loB, hiB));
-		int8x16_t	ca = vqtbl1q_s8(codebook, idxA);
-		int8x16_t	cb = vqtbl1q_s8(codebook, idxB);
-
-		acc = vaddq_s64(acc,
-						 PgturbohybridGraphWeightedDotI8x16NeonSdot(ca, cb, weights + chunk * 16));
-	}
-
-	if (tailDims != 0)
-	{
-		uint8		scratchA[8] = {0};
-		uint8		scratchB[8] = {0};
-		int16		scratchW[16] = {0};
-		int			tailBytes = (tailDims + 1) / 2;
-		uint8x8_t	pa;
-		uint8x8_t	pb;
-		uint8x8_t	loA;
-		uint8x8_t	hiA;
-		uint8x8_t	loB;
-		uint8x8_t	hiB;
-		uint8x16_t	idxA;
-		uint8x16_t	idxB;
-		int8x16_t	ca;
-		int8x16_t	cb;
-
-		memcpy(scratchA, a + chunks * 8, tailBytes);
-		memcpy(scratchB, b + chunks * 8, tailBytes);
-		memcpy(scratchW, weights + chunks * 16, sizeof(int16) * tailDims);
-		pa = vld1_u8(scratchA);
-		pb = vld1_u8(scratchB);
-		loA = vand_u8(pa, vdup_n_u8(0x0f));
-		hiA = vshr_n_u8(pa, 4);
-		loB = vand_u8(pb, vdup_n_u8(0x0f));
-		hiB = vshr_n_u8(pb, 4);
-		idxA = vcombine_u8(vzip1_u8(loA, hiA), vzip2_u8(loA, hiA));
-		idxB = vcombine_u8(vzip1_u8(loB, hiB), vzip2_u8(loB, hiB));
-		ca = vqtbl1q_s8(codebook, idxA);
-		cb = vqtbl1q_s8(codebook, idxB);
-		acc = vaddq_s64(acc, PgturbohybridGraphWeightedDotI8x16NeonSdot(ca, cb, scratchW));
-	}
-
-	return vaddvq_s64(acc);
-}
-
-static int64 PGTURBOHYBRID_GRAPH_ARM_DOT_TARGET
-PgturbohybridGraphCodeCode2WeightedRawNeonSdot(const uint8 *a, const uint8 *b,
-									const int16 *weights, int dim)
-{
-	int64x2_t	acc = vdupq_n_s64(0);
-	int8x16_t	codebook = vld1q_s8((const int8_t *) PgturbohybridGraphCodebook2I8);
-	uint8x16_t	mask = vdupq_n_u8(0x03);
-	int8x16_t	shifts = {
-		0, -2, -4, -6, 0, -2, -4, -6,
-		0, -2, -4, -6, 0, -2, -4, -6
-	};
-	int			chunks = dim / 16;
-	int			tailDims = dim - chunks * 16;
-
-	for (int chunk = 0; chunk < chunks; chunk++)
-	{
-		uint8		repeatedA[16];
-		uint8		repeatedB[16];
-		const uint8 *bytesA = a + chunk * 4;
-		const uint8 *bytesB = b + chunk * 4;
-		uint8x16_t	idxA;
-		uint8x16_t	idxB;
-		int8x16_t	ca;
-		int8x16_t	cb;
-
-		for (int i = 0; i < 16; i++)
-		{
-			repeatedA[i] = bytesA[i / 4];
-			repeatedB[i] = bytesB[i / 4];
-		}
-
-		idxA = vandq_u8(vshlq_u8(vld1q_u8(repeatedA), shifts), mask);
-		idxB = vandq_u8(vshlq_u8(vld1q_u8(repeatedB), shifts), mask);
-		ca = vqtbl1q_s8(codebook, idxA);
-		cb = vqtbl1q_s8(codebook, idxB);
-
-		acc = vaddq_s64(acc,
-						 PgturbohybridGraphWeightedDotI8x16NeonSdot(ca, cb, weights + chunk * 16));
-	}
-
-	if (tailDims != 0)
-	{
-		uint8		repeatedA[16] = {0};
-		uint8		repeatedB[16] = {0};
-		int16		scratchW[16] = {0};
-		const uint8 *bytesA = a + chunks * 4;
-		const uint8 *bytesB = b + chunks * 4;
-		uint8x16_t	idxA;
-		uint8x16_t	idxB;
-		int8x16_t	ca;
-		int8x16_t	cb;
-
-		for (int i = 0; i < tailDims; i++)
-		{
-			repeatedA[i] = bytesA[i / 4];
-			repeatedB[i] = bytesB[i / 4];
-		}
-		memcpy(scratchW, weights + chunks * 16, sizeof(int16) * tailDims);
-
-		idxA = vandq_u8(vshlq_u8(vld1q_u8(repeatedA), shifts), mask);
-		idxB = vandq_u8(vshlq_u8(vld1q_u8(repeatedB), shifts), mask);
-		ca = vqtbl1q_s8(codebook, idxA);
-		cb = vqtbl1q_s8(codebook, idxB);
-		acc = vaddq_s64(acc, PgturbohybridGraphWeightedDotI8x16NeonSdot(ca, cb, scratchW));
-	}
-
-	return vaddvq_s64(acc);
-}
-
-#endif
 
 #if PGTURBOHYBRID_GRAPH_COMPILE_QUERY_SPLIT
 static bool
@@ -5368,7 +2585,7 @@ PgturbohybridGraphScoreNodeBatchQuerySplit4(PgturbohybridGraphScanOpaque so,
 	double		dimSqrt;
 	double		queryNormSqrt = 0;
 
-	if (!so->tq.querySplitEnabled || so->tq.dimensions < 1024 ||
+	if (!so->tq.signedSplit.enabled || so->tq.dimensions < 1024 ||
 		so->tq.bits != PGTURBOHYBRID_DEFAULT_BITS || mode == PGTURBOHYBRID_SCORE_L1)
 		return false;
 
@@ -5407,7 +2624,7 @@ PgturbohybridGraphScoreNodeBatchQuerySplit4(PgturbohybridGraphScanOpaque so,
 #endif
 			return false;
 
-		dot = (double) so->tq.querySplitPostprocessScale *
+		dot = (double) so->tq.signedSplit.postprocessScale *
 			(double) rawDot;
 		dot += so->tq.ecCorrection;
 
@@ -5447,7 +2664,7 @@ PgturbohybridGraphScoreNodeBatchQuerySplit2(PgturbohybridGraphScanOpaque so,
 	double		dimSqrt;
 	double		queryNormSqrt = 0;
 
-	if (!so->tq.querySplitEnabled || so->tq.dimensions < 1024 ||
+	if (!so->tq.signedSplit.enabled || so->tq.dimensions < 1024 ||
 		so->tq.bits != 2 || mode == PGTURBOHYBRID_SCORE_L1)
 		return false;
 
@@ -5486,7 +2703,7 @@ PgturbohybridGraphScoreNodeBatchQuerySplit2(PgturbohybridGraphScanOpaque so,
 #endif
 			return false;
 
-		dot = (double) so->tq.querySplitPostprocessScale *
+		dot = (double) so->tq.signedSplit.postprocessScale *
 			(double) rawDot;
 		dot += so->tq.ecCorrection;
 
@@ -5549,7 +2766,7 @@ PgturbohybridGraphScoreNodeBatchU8Split(PgturbohybridGraphScanOpaque so,
 	const uint8 *codes[4];
 	float		scales[4];
 
-	if (!tq->u8SplitEnabled)
+	if (!tq->u8.enabled)
 		return false;
 
 	/* All four must carry a packed code, else let the caller fall back. */
@@ -5565,19 +2782,24 @@ PgturbohybridGraphScoreNodeBatchU8Split(PgturbohybridGraphScanOpaque so,
 
 	if (pgturbohybrid_dense_u8_batch_x4)
 	{
-		/* Experimental x4 batch: one kernel pass, query loads shared. */
+		/* Default (turbohybrid.dense_u8_batch_x4 = on): the true 4-candidate x4
+		 * kernel in one pass, sharing the query [low|high] loads across the four
+		 * scattered codes. */
 		if (!PgturbohybridGraphPackedDistanceU8Splitx4(tq, codes, scales, distances))
 			return false;
+		so->graphU8BatchMode = PGTURBOHYBRID_U8_BATCH_X4;
 	}
 	else
 	{
-		/* Default: four single-node passes (faster -- see header comment). */
+		/* Fallback / benchmark escape hatch (turbohybrid.dense_u8_batch_x4 = off):
+		 * four single-node passes over the same four codes. */
 		for (int j = 0; j < 4; j++)
 		{
 			if (!PgturbohybridGraphPackedDistanceU8Split(tq, codes[j], scales[j],
 														 &distances[j]))
 				return false;
 		}
+		so->graphU8BatchMode = PGTURBOHYBRID_U8_BATCH_SINGLE;
 	}
 
 	so->graphScoredCodes += 4;
@@ -5620,7 +2842,7 @@ PgturbohybridGraphScoreNodeBatchPacked4(PgturbohybridGraphScanOpaque so, Pgturbo
 
 	for (int i = 0; i + 1 < dim; i += 2)
 	{
-		float	   *loRow = so->tq.lut + (i * PGTURBOHYBRID_LUT_WIDTH);
+		float	   *loRow = so->tq.lut.table + (i * PGTURBOHYBRID_LUT_WIDTH);
 		float	   *hiRow = loRow + PGTURBOHYBRID_LUT_WIDTH;
 		int			byteIndex = i / 2;
 
@@ -5634,7 +2856,7 @@ PgturbohybridGraphScoreNodeBatchPacked4(PgturbohybridGraphScanOpaque so, Pgturbo
 
 	if ((dim & 1) != 0)
 	{
-		float	   *row = so->tq.lut + ((dim - 1) * PGTURBOHYBRID_LUT_WIDTH);
+		float	   *row = so->tq.lut.table + ((dim - 1) * PGTURBOHYBRID_LUT_WIDTH);
 		int			byteIndex = dim / 2;
 
 		for (int j = 0; j < 4; j++)
@@ -5708,7 +2930,7 @@ PgturbohybridGraphScoreNodeBatchPackedLowBits(PgturbohybridGraphScanOpaque so,
 
 		for (; i + 4 <= dim; i += 4)
 		{
-			float	   *row0 = so->tq.lut + (i * PGTURBOHYBRID_LUT_WIDTH);
+			float	   *row0 = so->tq.lut.table + (i * PGTURBOHYBRID_LUT_WIDTH);
 			float	   *row1 = row0 + PGTURBOHYBRID_LUT_WIDTH;
 			float	   *row2 = row1 + PGTURBOHYBRID_LUT_WIDTH;
 			float	   *row3 = row2 + PGTURBOHYBRID_LUT_WIDTH;
@@ -5727,7 +2949,7 @@ PgturbohybridGraphScoreNodeBatchPackedLowBits(PgturbohybridGraphScanOpaque so,
 
 		for (; i < dim; i++)
 		{
-			float	   *row = so->tq.lut + (i * PGTURBOHYBRID_LUT_WIDTH);
+			float	   *row = so->tq.lut.table + (i * PGTURBOHYBRID_LUT_WIDTH);
 			int			byteIndex = i / 4;
 			int			shift = (i & 3) * 2;
 
@@ -5741,7 +2963,7 @@ PgturbohybridGraphScoreNodeBatchPackedLowBits(PgturbohybridGraphScanOpaque so,
 
 		for (; i + 8 <= dim; i += 8)
 		{
-			float	   *row0 = so->tq.lut + (i * PGTURBOHYBRID_LUT_WIDTH);
+			float	   *row0 = so->tq.lut.table + (i * PGTURBOHYBRID_LUT_WIDTH);
 			float	   *row1 = row0 + PGTURBOHYBRID_LUT_WIDTH;
 			float	   *row2 = row1 + PGTURBOHYBRID_LUT_WIDTH;
 			float	   *row3 = row2 + PGTURBOHYBRID_LUT_WIDTH;
@@ -5768,7 +2990,7 @@ PgturbohybridGraphScoreNodeBatchPackedLowBits(PgturbohybridGraphScanOpaque so,
 
 		for (; i < dim; i++)
 		{
-			float	   *row = so->tq.lut + (i * PGTURBOHYBRID_LUT_WIDTH);
+			float	   *row = so->tq.lut.table + (i * PGTURBOHYBRID_LUT_WIDTH);
 			int			byteIndex = i / 8;
 			int			shift = i & 7;
 
@@ -5816,7 +3038,7 @@ PgturbohybridGraphBit1PopcntRaw(PgturbohybridGraphScanOpaque so, const uint8 *co
  * Batch dispatch for the asymmetric 1-bit scoring path.
  *
  * Active when the private asymmetric 1-bit path is enabled and the query
- * precompute populated tq->queryPlanes (1-bit indexes only).  When
+ * precompute populated tq->bit1.planes (1-bit indexes only).  When
  * either condition is missing, returns false so the existing 1-bit
  * popcount or LUT path takes over — preserving baseline behaviour
  * for users who don't opt in.
@@ -5836,7 +3058,7 @@ PgturbohybridGraphScoreNodeBatchAsymBit1(PgturbohybridGraphScanOpaque so,
 	double		queryNormSqrt = 0;
 
 	if (!pgturbohybrid_dense_query_1bit_asymmetric || !so->tq.enabled ||
-		so->tq.bits != 1 || so->tq.queryPlanes == NULL ||
+		so->tq.bits != 1 || so->tq.bit1.planes == NULL ||
 		so->tq.dimensions <= 0 || mode == PGTURBOHYBRID_SCORE_L1)
 		return false;
 
