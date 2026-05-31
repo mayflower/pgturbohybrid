@@ -1,11 +1,13 @@
 #include "postgres.h"
 
 #include <errno.h>
-#include <fcntl.h>
 #include <string.h>
-#include <sys/mman.h>
 #include <sys/stat.h>
+#ifndef WIN32
+#include <fcntl.h>
+#include <sys/mman.h>
 #include <unistd.h>
+#endif
 
 #include "miscadmin.h"
 #include "portability/instr_time.h"
@@ -1201,6 +1203,16 @@ PgturbohybridGraphMapSharedCacheFile(Relation index,
 									 PgturbohybridGraphSharedMap **mapOut,
 									 int64 *attachUs)
 {
+#ifdef WIN32
+	(void) index;
+	(void) meta;
+	(void) path;
+	(void) key;
+	(void) mapOut;
+	if (attachUs != NULL)
+		*attachUs = 0;
+	return false;
+#else
 	int			fd;
 	struct stat st;
 	void	   *base;
@@ -1262,6 +1274,7 @@ PgturbohybridGraphMapSharedCacheFile(Relation index,
 		*attachUs = map->attachUs;
 	*mapOut = map;
 	return true;
+#endif
 }
 
 static PgturbohybridGraphSharedMap *
@@ -1292,6 +1305,20 @@ PgturbohybridGraphWriteSharedCacheFile(Relation index,
 									   int64 *codeLockWaitUs,
 									   int64 *adjLockWaitUs)
 {
+#ifdef WIN32
+	(void) index;
+	(void) meta;
+	(void) path;
+	(void) tmpPath;
+	(void) key;
+	if (buildUs != NULL)
+		*buildUs = 0;
+	if (codeLockWaitUs != NULL)
+		*codeLockWaitUs = 0;
+	if (adjLockWaitUs != NULL)
+		*adjLockWaitUs = 0;
+	return false;
+#else
 	PgturbohybridGraphScanStorage storage;
 	PgturbohybridGraphScanOpaqueData loadStats;
 	PgturbohybridGraphSharedCacheHeader hdr;
@@ -1506,6 +1533,7 @@ PgturbohybridGraphWriteSharedCacheFile(Relation index,
 	if (adjLockWaitUs != NULL)
 		*adjLockWaitUs = loadStats.graphAdjBufferLockWaitUs;
 	return true;
+#endif
 }
 
 static PgturbohybridGraphSharedMap *
@@ -1515,6 +1543,25 @@ PgturbohybridGraphGetSharedMap(Relation index, PgturbohybridGraphMetaPageData *m
 							   bool *builtThisScan,
 							   PgturbohybridGraphNativeCacheReason *reason)
 {
+#ifdef WIN32
+	(void) index;
+	(void) meta;
+	if (attachUs != NULL)
+		*attachUs = 0;
+	if (buildUs != NULL)
+		*buildUs = 0;
+	if (waitUs != NULL)
+		*waitUs = 0;
+	if (codeLockWaitUs != NULL)
+		*codeLockWaitUs = 0;
+	if (adjLockWaitUs != NULL)
+		*adjLockWaitUs = 0;
+	if (builtThisScan != NULL)
+		*builtThisScan = false;
+	if (reason != NULL)
+		*reason = PGTURBOHYBRID_GRAPH_NATIVE_CACHE_REASON_SHARED_ATTACH_FAILED;
+	return NULL;
+#else
 	uint64		key = PgturbohybridGraphSharedCacheKey(index, meta);
 	PgturbohybridGraphSharedMap *map;
 	char		dir[MAXPGPATH];
@@ -1607,6 +1654,7 @@ PgturbohybridGraphGetSharedMap(Relation index, PgturbohybridGraphMetaPageData *m
 	if (reason != NULL)
 		*reason = PGTURBOHYBRID_GRAPH_NATIVE_CACHE_REASON_SHARED_BUILD_TIMEOUT;
 	return NULL;
+#endif
 }
 
 void
