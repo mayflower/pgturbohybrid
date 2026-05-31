@@ -91,3 +91,12 @@ python3 benchmarks/dbpedia_openai3_large.py \
 
 `compare_old_branch.sh` is for development comparisons against an older patched
 pgvector branch. It is not part of public release claims.
+
+## Experiment notes
+
+Negative / decision write-ups from dense-scan experiments live under
+`docs/internal/` (tracked; `benchmarks/**/*.md` is gitignored). See
+[`docs/internal/u8-x4-prefetch-distance-experiment.md`](../../docs/internal/u8-x4-prefetch-distance-experiment.md):
+deeper u8-x4 prefetch measured no p50/p95 improvement on 153 MB / 460 MB
+RAM-resident arenas and was reverted; the patch and `pf_bench` harness are
+preserved there for re-running.
