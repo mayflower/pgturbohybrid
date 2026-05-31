@@ -88,14 +88,13 @@ RESET turbohybrid.dense_graph_avxvnni;
 -- (2) Selection: a real 1536-dim 4-bit dense scan must use the u8 scorer by
 -- default on amd64 (never the LUT gather), and honor the impl GUC.
 DROP TABLE IF EXISTS u8_docs;
-CREATE TABLE u8_docs (id int PRIMARY KEY, embedding vector(1536), body_tsv tsvector);
-INSERT INTO u8_docs(id, embedding, body_tsv)
+CREATE TABLE u8_docs (id int PRIMARY KEY, embedding vector(1536));
+INSERT INTO u8_docs(id, embedding)
 SELECT i,
-       (SELECT array_agg(sin(i * 0.29 + g * 0.011))::real[]::vector FROM generate_series(1, 1536) g),
-       to_tsvector('english', 'document ' || i)
+       (SELECT array_agg(sin(i * 0.29 + g * 0.011))::real[]::vector FROM generate_series(1, 1536) g)
 FROM generate_series(1, 1500) AS i;  -- enough nodes that batch-of-4 scoring fires
 CREATE INDEX u8_idx ON u8_docs
-    USING turbohybrid (embedding vector_cosine_turbohybrid_ops, body_tsv bm25_tsvector_turbohybrid_ops)
+    USING turbohybrid (embedding vector_cosine_turbohybrid_ops)
     WITH (quantization_bits = 4);
 ANALYZE u8_docs;
 

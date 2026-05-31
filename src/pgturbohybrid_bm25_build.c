@@ -1049,16 +1049,16 @@ PgturbohybridBm25BuildCallback(Relation index, ItemPointer tid, Datum *values,
 	PgturbohybridBm25Collector *collector = (PgturbohybridBm25Collector *) opaque;
 	TSVector	vector;
 	bool		mustFree;
+	Datum		lexicalValue;
 	uint32		nodeId;
 	uint32		docLen;
 
-	(void) index;
 	(void) tupleIsAlive;
 
-	if (isnull[1])
+	if (!PgturbohybridIndexGetLexicalDatum(index, values, isnull, &lexicalValue))
 		return;
 
-	vector = PgturbohybridDetoastTSVector(values[1], &mustFree);
+	vector = PgturbohybridDetoastTSVector(lexicalValue, &mustFree);
 	PgturbohybridValidateTSVector(vector);
 	if (!PgturbohybridLookupNodeId(collector, tid, &nodeId))
 	{
@@ -3149,6 +3149,31 @@ PgturbohybridBm25MaybeCompact(Relation index)
 }
 
 void
+PgturbohybridBm25BuildEmpty(Relation index)
+{
+	MemoryContext ctx;
+	MemoryContext oldCtx;
+	PgturbohybridBm25Collector collector;
+
+	if (!PgturbohybridIndexHasLexical(index))
+		return;
+
+	ctx = AllocSetContextCreate(CurrentMemoryContext,
+								"pgturbohybrid BM25 empty build",
+								ALLOCSET_DEFAULT_SIZES);
+	oldCtx = MemoryContextSwitchTo(ctx);
+
+	memset(&collector, 0, sizeof(collector));
+	collector.index = index;
+	collector.softBudget = PgturbohybridBm25MaintenanceWorkMemBytes();
+
+	PgturbohybridBm25WriteStorage(&collector);
+
+	MemoryContextSwitchTo(oldCtx);
+	MemoryContextDelete(ctx);
+}
+
+void
 PgturbohybridBm25BuildCollect(Relation heap, Relation index, IndexInfo *indexInfo)
 {
 	MemoryContext ctx;
@@ -3156,6 +3181,11 @@ PgturbohybridBm25BuildCollect(Relation heap, Relation index, IndexInfo *indexInf
 	PgturbohybridBm25Collector collector;
 	PgturbohybridGraphMetaPageData graphMeta;
 	uint32		uniqueTerms;
+
+	if (!PgturbohybridIndexHasLexical(index) &&
+		(indexInfo == NULL ||
+		 indexInfo->ii_NumIndexKeyAttrs <= PGTURBOHYBRID_LEXICAL_KEY_INDEX))
+		return;
 
 	if (heap == NULL)
 		return;

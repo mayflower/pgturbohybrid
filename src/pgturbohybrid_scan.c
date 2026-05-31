@@ -11,6 +11,7 @@
 #include "miscadmin.h"
 #include "nodes/pg_list.h"
 #include "pgstat.h"
+#include "portability/instr_time.h"
 #include "storage/bufmgr.h"
 #include "storage/lmgr.h"
 #include "utils/float.h"
@@ -23,6 +24,16 @@
 #endif
 
 #include "pgturbohybrid_vector_compat.h"
+
+static inline int64
+PgturbohybridGraphScanElapsedUs(instr_time start)
+{
+	instr_time	elapsed;
+
+	INSTR_TIME_SET_CURRENT(elapsed);
+	INSTR_TIME_SUBTRACT(elapsed, start);
+	return (int64) INSTR_TIME_GET_MICROSEC(elapsed);
+}
 
 /*
  * Get the initial iterative scan batch size
@@ -340,12 +351,19 @@ PgturbohybridGraphGetInitialScanItemsLocked(IndexScanDesc scan, Datum value,
 {
 	List	   *items;
 	bool		scanLockHeld = false;
+	PgturbohybridGraphScanOpaque so =
+		(PgturbohybridGraphScanOpaque) scan->opaque;
+	instr_time	lockStart;
 
 	/*
 	 * Get a shared lock. This allows vacuum to ensure no in-flight scans
 	 * before marking tuples as deleted.
 	 */
+	INSTR_TIME_SET_CURRENT(lockStart);
 	LockPage(scan->indexRelation, PGTURBOHYBRID_GRAPH_SCAN_LOCK, ShareLock);
+	if (so != NULL)
+		so->graphScanLockWaitUs +=
+			PgturbohybridGraphScanElapsedUs(lockStart);
 	scanLockHeld = true;
 
 	PG_TRY();
@@ -373,6 +391,9 @@ PgturbohybridGraphResumeScanItemsLocked(IndexScanDesc scan)
 {
 	List	   *items;
 	bool		scanLockHeld = false;
+	PgturbohybridGraphScanOpaque so =
+		(PgturbohybridGraphScanOpaque) scan->opaque;
+	instr_time	lockStart;
 
 	/*
 	 * Locking ensures when neighbors are read, the elements they reference will
@@ -382,7 +403,11 @@ PgturbohybridGraphResumeScanItemsLocked(IndexScanDesc scan)
 	 * (and replaced), so when reading neighbors, the element version must be
 	 * checked.
 	 */
+	INSTR_TIME_SET_CURRENT(lockStart);
 	LockPage(scan->indexRelation, PGTURBOHYBRID_GRAPH_SCAN_LOCK, ShareLock);
+	if (so != NULL)
+		so->graphScanLockWaitUs +=
+			PgturbohybridGraphScanElapsedUs(lockStart);
 	scanLockHeld = true;
 
 	PG_TRY();

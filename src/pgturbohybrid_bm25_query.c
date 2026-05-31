@@ -2479,6 +2479,131 @@ PgturbohybridBm25ExtractTerms(TSQuery query, PgturbohybridBm25QueryTerm **terms,
 	return count;
 }
 
+static bool
+PgturbohybridBm25TermLooksIdentifier(const PgturbohybridBm25QueryTerm *term)
+{
+	bool		hasAlpha = false;
+	bool		hasDigit = false;
+
+	if (term->termLen >= 16)
+		return true;
+
+	for (uint16 i = 0; i < term->termLen; i++)
+	{
+		unsigned char c = (unsigned char) term->term[i];
+
+		if (c >= '0' && c <= '9')
+			hasDigit = true;
+		else if ((c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z'))
+			hasAlpha = true;
+		else if (c == '_' || c == '-')
+			return true;
+	}
+
+	return term->termLen >= 6 && hasAlpha && hasDigit;
+}
+
+bool
+PgturbohybridBm25AnalyzeQuerySignals(Relation index, TSQuery query,
+									 MemoryContext memoryContext,
+									 PgturbohybridBm25QuerySignals *signals)
+{
+	PgturbohybridBm25MetaTupleData bm25Meta;
+	PgturbohybridGraphMetaPageData graphMeta;
+	PgturbohybridBm25Cache *cache;
+	PgturbohybridBm25DeltaCacheEntry *deltaTerms = NULL;
+	uint32		deltaTermCount = 0;
+	uint32		deltaPostingCount = 0;
+	uint64		deltaCacheBytes = 0;
+	PgturbohybridBm25QueryTerm *terms;
+	MemoryContext oldCtx;
+	int			termCount;
+	int			resolvedTerms = 0;
+	double		idfSum = 0.0;
+	double		maxIdf = 0.0;
+	uint32		minPostings = PG_UINT32_MAX;
+	uint32		corpusDocCount;
+	PgturbohybridBm25QueryEval eval;
+
+	memset(signals, 0, sizeof(*signals));
+	signals->minPostings = 0;
+	signals->queryShape = PGTURBOHYBRID_BM25_QUERY_EMPTY;
+
+	if (query == NULL ||
+		!PgturbohybridBm25ReadMeta(index, &bm25Meta) ||
+		!PgturbohybridGraphReadMeta(index, &graphMeta))
+		return false;
+
+	oldCtx = MemoryContextSwitchTo(memoryContext);
+	termCount = PgturbohybridBm25ExtractTerms(query, &terms, memoryContext);
+	eval = PgturbohybridBm25CompileQueryEval(query, terms, termCount);
+	signals->queryTerms = termCount;
+	if (termCount == 0)
+	{
+		signals->valid = true;
+		MemoryContextSwitchTo(oldCtx);
+		return true;
+	}
+
+	cache = PgturbohybridBm25GetCache(index, &bm25Meta, &graphMeta, NULL);
+	for (int termNo = 0; termNo < termCount; termNo++)
+	{
+		if (PgturbohybridBm25TermLooksIdentifier(&terms[termNo]))
+			signals->hasIdentifierToken = true;
+		if (PgturbohybridBm25CacheFindLexiconEntry(cache, &terms[termNo],
+											  &terms[termNo].lexicon))
+		{
+			terms[termNo].hasLexicon = true;
+			terms[termNo].baseDf = terms[termNo].lexicon.df;
+		}
+	}
+
+	if (pgturbohybrid_bm25_cache_max_mb > 0 && !cache->deltaCacheBuilt)
+	{
+		PgturbohybridBm25BuildDeltaCacheEntries(index, &bm25Meta, cache,
+										   terms, termCount, memoryContext,
+										   &deltaTerms, &deltaTermCount,
+										   &deltaPostingCount,
+										   &deltaCacheBytes, NULL);
+		(void) deltaPostingCount;
+		(void) deltaCacheBytes;
+	}
+	else
+	{
+		PgturbohybridBm25EnsureDeltaCache(index, &bm25Meta, cache, NULL);
+		deltaTerms = cache->deltaTerms;
+		deltaTermCount = cache->deltaTermCount;
+	}
+	PgturbohybridBm25CountDeltaDf(deltaTerms, deltaTermCount, terms, termCount);
+
+	corpusDocCount = Max(bm25Meta.docCount + bm25Meta.deltaDocCount, 1U);
+	signals->docCount = corpusDocCount;
+	for (int termNo = 0; termNo < termCount; termNo++)
+	{
+		uint32		df = terms[termNo].baseDf + terms[termNo].deltaDf;
+		double		idf;
+
+		if (df == 0)
+			continue;
+
+		idf = log(1.0 + (corpusDocCount - (double) df + 0.5) /
+				  ((double) df + 0.5));
+		idfSum += idf;
+		maxIdf = Max(maxIdf, idf);
+		minPostings = Min(minPostings, df);
+		resolvedTerms++;
+	}
+
+	signals->valid = true;
+	signals->resolvedTerms = resolvedTerms;
+	signals->maxIdf = maxIdf;
+	signals->meanIdf = resolvedTerms > 0 ? idfSum / (double) resolvedTerms : 0.0;
+	signals->minPostings = minPostings == PG_UINT32_MAX ? 0 : minPostings;
+	signals->queryShape = eval.shape;
+	MemoryContextSwitchTo(oldCtx);
+	return true;
+}
+
 static int
 PgturbohybridBm25ScoreCompare(const void *a, const void *b)
 {
@@ -3123,6 +3248,10 @@ PgturbohybridBm25ImpactORCanBeExact(Relation index,
 	return true;
 }
 
+static bool PgturbohybridBm25FusedScoreBoundCanPruneUnknownTail(
+	const PgturbohybridBm25FusedScoreBoundContext *bound,
+	double bm25UpperBound);
+
 static bool
 PgturbohybridBm25ScoreImpactOR(Relation index,
 						  const PgturbohybridBm25MetaTupleData *meta,
@@ -3131,7 +3260,8 @@ PgturbohybridBm25ScoreImpactOR(Relation index,
 						  PgturbohybridBm25QueryTerm *terms, int termCount,
 						  const uint32 *docLens, const bool *liveNodes,
 						  PgturbohybridBm25Accumulator *acc, int32 k,
-						  PgturbohybridBm25QueryStats *stats)
+						  PgturbohybridBm25QueryStats *stats,
+						  const PgturbohybridBm25FusedScoreBoundContext *fusedBound)
 {
 	static const uint32 tierCumulativeLimits[] = {
 		256,
@@ -3257,6 +3387,15 @@ PgturbohybridBm25ScoreImpactOR(Relation index,
 			remainingUpperBound < threshold)
 		{
 			stoppedByBound = true;
+			break;
+		}
+		if (!unboundedDelta &&
+			PgturbohybridBm25FusedScoreBoundCanPruneUnknownTail(fusedBound,
+														 remainingUpperBound))
+		{
+			stoppedByBound = true;
+			if (stats != NULL)
+				stats->fusedScoreBoundBlocksPruned += impactTermCount;
 			break;
 		}
 	}
@@ -4192,6 +4331,71 @@ PgturbohybridBm25KthScore(PgturbohybridBm25Accumulator *acc, int32 k)
 	return Max(acc->threshold, threshold);
 }
 
+static double
+PgturbohybridBm25DenseContributionForBound(const PgturbohybridBm25FusedScoreBoundContext *bound,
+									   uint32 nodeId)
+{
+	uint32		left = 0;
+	uint32		right;
+
+	if (bound == NULL || !bound->enabled || bound->dense == NULL)
+		return 0.0;
+
+	right = bound->denseCount;
+	while (left < right)
+	{
+		uint32		mid = left + (right - left) / 2;
+		uint32		midNode = bound->dense[mid].nodeId;
+
+		if (midNode == nodeId)
+			return bound->dense[mid].contribution;
+		if (midNode < nodeId)
+			left = mid + 1;
+		else
+			right = mid;
+	}
+
+	return 0.0;
+}
+
+static bool
+PgturbohybridBm25FusedScoreBoundCanPruneCandidate(const PgturbohybridBm25FusedScoreBoundContext *bound,
+											 uint32 nodeId,
+											 double bm25UpperBound)
+{
+	double		denseContribution;
+	double		maxFusedScore;
+
+	if (bound == NULL || !bound->enabled)
+		return false;
+
+	denseContribution = PgturbohybridBm25DenseContributionForBound(bound, nodeId);
+	maxFusedScore = denseContribution +
+		(1.0 - bound->alpha) *
+		PgturbohybridBm25NormalizeSaturating(bm25UpperBound);
+
+	/*
+	 * Use a strict comparison because final ordering has tie-breakers beyond
+	 * the fused score (both-match status, branch ranks and node id).
+	 */
+	return maxFusedScore < bound->kthScore;
+}
+
+static bool
+PgturbohybridBm25FusedScoreBoundCanPruneUnknownTail(const PgturbohybridBm25FusedScoreBoundContext *bound,
+											   double bm25UpperBound)
+{
+	double		maxFusedScore;
+
+	if (bound == NULL || !bound->enabled)
+		return false;
+
+	maxFusedScore = bound->maxDenseContribution +
+		(1.0 - bound->alpha) *
+		PgturbohybridBm25NormalizeSaturating(bm25UpperBound);
+	return maxFusedScore < bound->kthScore;
+}
+
 static bool
 PgturbohybridBm25ScoreBaseWand(Relation index,
 						  const PgturbohybridBm25MetaTupleData *meta,
@@ -4202,7 +4406,8 @@ PgturbohybridBm25ScoreBaseWand(Relation index,
 						  const uint32 *docLens, const bool *liveNodes,
 						  PgturbohybridBm25Accumulator *acc, int32 k,
 						  MemoryContext memoryContext,
-						  PgturbohybridBm25QueryStats *stats)
+						  PgturbohybridBm25QueryStats *stats,
+						  const PgturbohybridBm25FusedScoreBoundContext *fusedBound)
 {
 	PgturbohybridBm25PostingIterator *iterators;
 	PgturbohybridBm25PostingIterator **active;
@@ -4281,8 +4486,37 @@ PgturbohybridBm25ScoreBaseWand(Relation index,
 		if (PgturbohybridBm25IteratorNodeId(active[0]) == pivotNode)
 		{
 			double		score = 0.0;
+			double		candidateUpperBound = 0.0;
 			uint64		matchedTerms = 0;
 			bool		matched = false;
+
+			for (int i = 0; i < activeCount; i++)
+			{
+				uint32		nodeId = PgturbohybridBm25IteratorNodeId(active[i]);
+
+				if (nodeId > pivotNode)
+					break;
+				candidateUpperBound +=
+					PgturbohybridBm25IteratorUpperBound(meta, active[i], NULL);
+			}
+
+			if (PgturbohybridBm25FusedScoreBoundCanPruneCandidate(fusedBound,
+															 pivotNode,
+															 candidateUpperBound))
+			{
+				if (stats != NULL)
+					stats->fusedScoreBoundCandidatesPruned++;
+				for (int i = 0; i < activeCount; i++)
+				{
+					PgturbohybridBm25PostingIterator *it = active[i];
+
+					if (PgturbohybridBm25IteratorNodeId(it) == pivotNode)
+						(void) PgturbohybridBm25IteratorAdvancePast(it, pivotNode);
+				}
+				PgturbohybridBm25RefreshActiveOrder(active, &activeCount, stats);
+				CHECK_FOR_INTERRUPTS();
+				continue;
+			}
 
 			for (int i = 0; i < activeCount; i++)
 			{
@@ -4486,7 +4720,8 @@ cleanup:
 int
 PgturbohybridBm25TopK(Relation index, TSQuery query, int32 k, bool useWand,
 				 MemoryContext memoryContext, PgturbohybridBm25Result **results,
-				 PgturbohybridBm25QueryStats *stats)
+				 PgturbohybridBm25QueryStats *stats,
+				 const PgturbohybridBm25FusedScoreBoundContext *fusedBound)
 {
 	PgturbohybridBm25MetaTupleData bm25Meta;
 	PgturbohybridGraphMetaPageData graphMeta;
@@ -4622,8 +4857,9 @@ PgturbohybridBm25TopK(Relation index, TSQuery query, int32 k, bool useWand,
 								(uint32) k, accumulatorMode,
 								graphMeta.tqNodeCount, stats);
 
-	if (pgturbohybrid_bm25_strategy == PGTURBOHYBRID_BM25_STRATEGY_AUTO ||
-		pgturbohybrid_bm25_strategy == PGTURBOHYBRID_BM25_STRATEGY_IMPACT)
+	if (!usedBaseWand &&
+		(pgturbohybrid_bm25_strategy == PGTURBOHYBRID_BM25_STRATEGY_AUTO ||
+		 pgturbohybrid_bm25_strategy == PGTURBOHYBRID_BM25_STRATEGY_IMPACT))
 		usedBaseWand = PgturbohybridBm25ScoreImpactSingle(index, &bm25Meta,
 													  &graphMeta, cache,
 													  terms, termCount,
@@ -4637,7 +4873,7 @@ PgturbohybridBm25TopK(Relation index, TSQuery query, int32 k, bool useWand,
 												  &graphMeta, cache,
 												  terms, termCount,
 												  docLens, liveNodes, &acc,
-												  k, stats);
+												  k, stats, fusedBound);
 
 	if (!usedBaseWand &&
 		pgturbohybrid_bm25_strategy == PGTURBOHYBRID_BM25_STRATEGY_AUTO &&
@@ -4661,7 +4897,7 @@ PgturbohybridBm25TopK(Relation index, TSQuery query, int32 k, bool useWand,
 													  &graphMeta, cache,
 													  terms, termCount,
 													  docLens, liveNodes, &acc,
-													  k, stats);
+													  k, stats, fusedBound);
 	}
 
 	if (!usedBaseWand &&
@@ -4696,7 +4932,8 @@ PgturbohybridBm25TopK(Relation index, TSQuery query, int32 k, bool useWand,
 												 &graphMeta, cache, query, terms,
 												 termCount, &eval,
 												 docLens, liveNodes, &acc, k,
-												 memoryContext, stats);
+												 memoryContext, stats,
+												 fusedBound);
 		if (stats != NULL)
 		{
 			stats->usedWand = usedBaseWand;

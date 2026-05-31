@@ -31,12 +31,38 @@ typedef struct PgturbohybridBm25Result
 	int32		rank;
 } PgturbohybridBm25Result;
 
+typedef struct PgturbohybridBm25FusedScoreBoundDenseEntry
+{
+	uint32		nodeId;
+	double		contribution;
+} PgturbohybridBm25FusedScoreBoundDenseEntry;
+
+typedef struct PgturbohybridBm25FusedScoreBoundContext
+{
+	bool		enabled;
+	double		alpha;
+	double		kthScore;
+	double		maxDenseContribution;
+	const PgturbohybridBm25FusedScoreBoundDenseEntry *dense;
+	uint32		denseCount;
+} PgturbohybridBm25FusedScoreBoundContext;
+
+static inline double
+PgturbohybridBm25NormalizeSaturating(double score)
+{
+	if (score <= 0.0)
+		return 0.0;
+	return score / (score + 1.0);
+}
+
 typedef struct PgturbohybridBm25QueryStats
 {
 	uint32		queryTerms;
 	uint64		postingsDecoded;
 	uint64		blocksVisited;
 	uint64		blocksSkipped;
+	uint64		fusedScoreBoundBlocksPruned;
+	uint64		fusedScoreBoundCandidatesPruned;
 	uint32		candidatesScored;
 	uint32		accumulatorEntries;
 	uint64		cacheBytes;
@@ -109,6 +135,19 @@ typedef struct PgturbohybridBm25PlanningStats
 	uint32		deltaTermPages;
 	bool		hasBm25;
 } PgturbohybridBm25PlanningStats;
+
+typedef struct PgturbohybridBm25QuerySignals
+{
+	bool		valid;
+	uint32		queryTerms;
+	uint32		resolvedTerms;
+	uint32		docCount;
+	double		maxIdf;
+	double		meanIdf;
+	uint32		minPostings;
+	bool		hasIdentifierToken;
+	int			queryShape;
+} PgturbohybridBm25QuerySignals;
 
 #define PGTURBOHYBRID_BM25_VERSION 1
 #define PGTURBOHYBRID_BM25_META_TUPLE_TYPE		0x61
@@ -346,6 +385,7 @@ typedef struct PgturbohybridBm25LexiconEntryData
 
 typedef PgturbohybridBm25LexiconEntryData *PgturbohybridBm25LexiconEntry;
 
+void		PgturbohybridBm25BuildEmpty(Relation index);
 void		PgturbohybridBm25BuildCollect(Relation heap, Relation index, IndexInfo *indexInfo);
 void		PgturbohybridBm25AppendDelta(Relation index, uint32 nodeId,
 									ItemPointer heapTid, Datum tsvectorDatum);
@@ -353,10 +393,14 @@ bool		PgturbohybridBm25MaybeCompact(Relation index);
 void		PgturbohybridBm25InvalidateCache(Relation index);
 bool		PgturbohybridBm25GetPlanningStats(Relation index,
 										 PgturbohybridBm25PlanningStats *stats);
+bool		PgturbohybridBm25AnalyzeQuerySignals(Relation index, TSQuery query,
+											MemoryContext memoryContext,
+											PgturbohybridBm25QuerySignals *signals);
 int			PgturbohybridBm25TopK(Relation index, TSQuery query, int32 k,
 							  bool useWand, MemoryContext memoryContext,
 							  PgturbohybridBm25Result **results,
-							  PgturbohybridBm25QueryStats *stats);
+							  PgturbohybridBm25QueryStats *stats,
+							  const PgturbohybridBm25FusedScoreBoundContext *fusedBound);
 
 typedef enum PgturbohybridBm25Kernel
 {

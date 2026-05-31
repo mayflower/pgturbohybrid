@@ -202,14 +202,13 @@ RESET turbohybrid.dense_graph_avxvnni;
 -- Part 2: x4 over DISTINCT scattered codes == four single-node passes, inside a
 -- real index scan; plus the signed-split and scalar/LUT fallbacks.
 -- ----------------------------------------------------------------------------
-CREATE TABLE x4s_docs1536 (id int PRIMARY KEY, embedding vector(1536), body_tsv tsvector);
-INSERT INTO x4s_docs1536(id, embedding, body_tsv)
+CREATE TABLE x4s_docs1536 (id int PRIMARY KEY, embedding vector(1536));
+INSERT INTO x4s_docs1536(id, embedding)
 SELECT i,
-       (SELECT array_agg(sin(i * 0.29 + g * 0.011))::real[]::vector FROM generate_series(1, 1536) g),
-       to_tsvector('english', 'document ' || i)
+       (SELECT array_agg(sin(i * 0.29 + g * 0.011))::real[]::vector FROM generate_series(1, 1536) g)
 FROM generate_series(1, 1500) AS i;  -- enough nodes that batch-of-4 scoring fires
 CREATE INDEX x4s_idx1536 ON x4s_docs1536
-    USING turbohybrid (embedding vector_cosine_turbohybrid_ops, body_tsv bm25_tsvector_turbohybrid_ops)
+    USING turbohybrid (embedding vector_cosine_turbohybrid_ops)
     WITH (quantization_bits = 4);
 ANALYZE x4s_docs1536;
 DO $$
@@ -671,14 +670,13 @@ BEGIN
 END $$;
 -- Same distinct-code x4 parity at a larger 3072-dim index (fewer rows to bound
 -- build time); proves the equality is not specific to 1536.
-CREATE TABLE x4s_docs3072 (id int PRIMARY KEY, embedding vector(3072), body_tsv tsvector);
-INSERT INTO x4s_docs3072(id, embedding, body_tsv)
+CREATE TABLE x4s_docs3072 (id int PRIMARY KEY, embedding vector(3072));
+INSERT INTO x4s_docs3072(id, embedding)
 SELECT i,
-       (SELECT array_agg(sin(i * 0.41 + g * 0.009))::real[]::vector FROM generate_series(1, 3072) g),
-       to_tsvector('english', 'document ' || i)
+       (SELECT array_agg(sin(i * 0.41 + g * 0.009))::real[]::vector FROM generate_series(1, 3072) g)
 FROM generate_series(1, 600) AS i;
 CREATE INDEX x4s_idx3072 ON x4s_docs3072
-    USING turbohybrid (embedding vector_cosine_turbohybrid_ops, body_tsv bm25_tsvector_turbohybrid_ops)
+    USING turbohybrid (embedding vector_cosine_turbohybrid_ops)
     WITH (quantization_bits = 4);
 ANALYZE x4s_docs3072;
 DO $$

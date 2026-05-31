@@ -108,6 +108,8 @@ PgturbohybridQueryFusionName(uint16 fusion)
 			return "rrf";
 		case PGTURBOHYBRID_FUSION_WEIGHTED:
 			return "weighted";
+		case PGTURBOHYBRID_FUSION_FAST_WEIGHTED:
+			return "fast_weighted";
 	}
 
 	return "unknown";
@@ -151,7 +153,8 @@ PgturbohybridQueryValidateInternal(PgturbohybridQueryHeader *query, bool strict)
 				 errmsg("unsupported turbohybrid_query version %u", query->version)));
 
 	if (query->fusion != PGTURBOHYBRID_FUSION_RRF &&
-		query->fusion != PGTURBOHYBRID_FUSION_WEIGHTED)
+		query->fusion != PGTURBOHYBRID_FUSION_WEIGHTED &&
+		query->fusion != PGTURBOHYBRID_FUSION_FAST_WEIGHTED)
 		ereport(ERROR,
 				(errcode(ERRCODE_DATA_EXCEPTION),
 				 errmsg("invalid turbohybrid_query fusion mode %u", query->fusion)));
@@ -274,11 +277,13 @@ PgturbohybridQueryParseFusion(text *fusion)
 		result = PGTURBOHYBRID_FUSION_RRF;
 	else if (pg_strcasecmp(name, "weighted") == 0)
 		result = PGTURBOHYBRID_FUSION_WEIGHTED;
+	else if (pg_strcasecmp(name, "fast_weighted") == 0)
+		result = PGTURBOHYBRID_FUSION_FAST_WEIGHTED;
 	else
 		ereport(ERROR,
 				(errcode(ERRCODE_INVALID_PARAMETER_VALUE),
 				 errmsg("invalid hybrid fusion mode \"%s\"", name),
-				 errdetail("Valid values are \"rrf\" and \"weighted\".")));
+				 errdetail("Valid values are \"rrf\", \"weighted\", and \"fast_weighted\".")));
 
 	pfree(name);
 	return result;

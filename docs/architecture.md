@@ -82,6 +82,24 @@ shorter `turbohybrid` name:
   `vector_ip_turbohybrid_ops`, `vector_cosine_turbohybrid_ops`
 - text/BM25 operator class: `bm25_tsvector_turbohybrid_ops`
 
+The access method supports two index shapes:
+
+```sql
+-- Dense-only: vector queries only.
+CREATE INDEX documents_dense_idx ON documents
+USING turbohybrid (embedding vector_cosine_turbohybrid_ops);
+
+-- Hybrid: vector and/or text queries.
+CREATE INDEX documents_hybrid_idx ON documents
+USING turbohybrid (
+    embedding vector_cosine_turbohybrid_ops,
+    body_tsv bm25_tsvector_turbohybrid_ops
+);
+```
+
+`text_query` requires the hybrid shape with a `tsvector` key. A one-key dense
+index must not build or scan BM25 metadata.
+
 The extension must not create generic names such as `hybrid_query` or opclasses
 whose names could reasonably be mistaken for pgvector-owned objects.
 
@@ -126,6 +144,10 @@ override only for a specific need.
 
 - `turbohybrid.profile`: retrieval profile. Current values are `latency`,
   `balanced`, `quality`, and `debug`; the default profile is `latency`.
+  `latency` keeps the compact 4-bit code-only graph fast path. `balanced` and
+  `quality` use larger default graph/search windows and heuristic dense
+  neighbor selection for new indexes when index reloptions do not override
+  those values.
 - `turbohybrid.default_dense_k`, `turbohybrid.default_bm25_k`,
   `turbohybrid.default_rrf_k`: default dense/BM25 candidate budgets and the RRF
   fusion constant for `turbohybrid_query` callers.
@@ -157,6 +179,11 @@ predictable.
 - `turbohybrid.dense_rescore_band`: exact f32 rescore policy (`auto`, `off`,
   `exact`, `limited`); the latency profile resolves to exact-free for 4-bit
   code-only indexes.
+- `turbohybrid.dense_heap_rescore`: exact-free heap rescore policy (`off`,
+  `topk`, `band`; default `off`). `topk`/`band` fetch candidate heap tuples by
+  TID, read the indexed vector column, and compute exact vector distance with
+  the existing exact SIMD kernels. This improves precision without
+  `exact_storage = on`, but pays heap I/O at query time.
 - `turbohybrid.dense_adaptive_widening` (`off` / `auto` / `on`, default `off`):
   controls one bounded second graph-search pass for ambiguous dense-only scans,
   tuned by `turbohybrid.dense_adaptive_widening_multiplier`,
@@ -197,6 +224,12 @@ setting these does not improve production performance, and they are tagged
   building dense graph edges, while still allowing `exact_storage = off`. Can
   improve graph topology for experiments without storing exact vectors at scan
   time.
+- `turbohybrid.dense_build_neighbor_select`: dense graph neighbor selection for
+  native graph builds. `fast` uses the simple nearest-neighbor selector used by
+  the latency profile's code-only build path. `heuristic` uses the diversified
+  HNSW-style selector even when the build can encode vectors code-only. `auto`
+  keeps `fast` for `latency` and uses `heuristic` for `balanced`, `quality`, and
+  `debug`.
 
 The batch scorer adapts its prefetch to index size automatically (no GUC). Once
 the estimated code working set (`tqNodeCount * codeBytes`) exceeds 64 MB -- large
@@ -226,8 +259,14 @@ quality recommendations.
 
 Profile assignment updates the dynamic defaults for the candidate budgets, BM25
 strategy knobs, hot postings cache, hybrid bound mode, and SIMD setting unless a
-GUC has been explicitly set by the user. The latency profile is the default fast
-path documented in the README and setup guide.
+GUC has been explicitly set by the user. During dense index builds without
+explicit graph reloptions, the profile also selects graph construction/search
+defaults: `latency` uses `ef_construction=128`, `ef_search=64`,
+`oversampling=4`, and fast build edges; `balanced` uses
+`ef_construction=192`, `ef_search=96`, `oversampling=4`, and heuristic build
+edges; `quality` uses `ef_construction=256`, `ef_search=192`,
+`oversampling=8`, and heuristic build edges. The latency profile is the default
+fast path documented in the README and setup guide.
 
 Reloptions are scoped to the `turbohybrid` index access method, but should
 still use stable descriptive names. The current alpha reloptions are:
@@ -237,9 +276,16 @@ still use stable descriptive names. The current alpha reloptions are:
   `128`.
 - `graph_ef_search`: graph candidate list size during scans. Default: `64`.
 - `graph_oversampling`: graph candidate oversampling multiplier. Default: `4`.
+- `native_segments`: number of independent native dense graph segments to build.
+  Default: `1` for single-graph compatibility. `0` means auto and currently
+  resolves from PostgreSQL's parallel maintenance worker setting, capped at 16.
+  More segments can reduce build-edge work, but scans seed all segment entries
+  and merge one candidate set, so measure recall and latency together.
 - `quantization_bits`: quantized dense-vector code width. Default: `4`.
 - `exact_storage`: store exact vectors in the index for final exact rescoring.
-  Default: `off`.
+  Default: `off`. When it is off, users can instead benchmark
+  `turbohybrid.dense_heap_rescore = topk|band` or residual sketches as explicit
+  query-time quality paths.
 - `routing`: dense routing mode. Default: `auto`; current values are `auto`,
   `graph`, and `flat`.
 
@@ -256,7 +302,8 @@ storage format without a release note and `REINDEX` guidance:
 - `residual_rerank`: store small per-vector sketches for final-band dense
   reranking. Default: `off`.
 - `residual_rerank_bytes`: sketch bytes per vector when `residual_rerank` is
-  enabled. Default: `32`; maximum: `64`.
+  enabled. Default: `32`; supported presets are `16`, `32`, and `64` bytes
+  (maximum: `64`).
 
 Prototype names such as `tq_*` should not appear in user-facing reloptions.
 
@@ -385,7 +432,8 @@ The minimum test matrix should validate:
 - no creation of `vector`, `halfvec`, `sparsevec`, or `bit`
 - no replacement of pgvector operators or opclasses
 - all public GUCs use the `turbohybrid.*` prefix
-- index creation and scans using `USING turbohybrid`
+- one-key dense-only and two-key hybrid index creation and scans using
+  `USING turbohybrid`
 - insert, update, delete, vacuum, and restart behavior for the new access method
 - supported pgvector versions across the documented compatibility range
 

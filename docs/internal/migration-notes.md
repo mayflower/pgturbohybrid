@@ -63,6 +63,32 @@ the `pgturbohybrid` namespace:
 
 Test files were also renamed from prototype names to `pgturbohybrid*` names.
 
+## Dense-Only Index Shape
+
+TurboHybrid now supports one-key dense-only indexes:
+
+```sql
+CREATE INDEX documents_dense_idx ON documents
+USING turbohybrid (embedding vector_cosine_turbohybrid_ops);
+```
+
+Existing two-key indexes remain valid:
+
+```sql
+CREATE INDEX documents_hybrid_idx ON documents
+USING turbohybrid (
+    embedding vector_cosine_turbohybrid_ops,
+    body_tsv bm25_tsvector_turbohybrid_ops
+);
+```
+
+Dense-only users can create smaller one-key indexes and avoid BM25 metadata.
+Queries with `text_query` require the two-key hybrid shape. Changing an existing
+index from hybrid to dense-only, or from dense-only to hybrid, requires
+rebuilding the index with the desired key list; use `DROP INDEX` / `CREATE
+INDEX`, or `REINDEX` after the definition has been changed by the migration
+procedure.
+
 ## Removed pgvector-Owned Files
 
 The conversion removed pgvector-owned packaging and source files:

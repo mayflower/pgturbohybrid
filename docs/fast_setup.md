@@ -52,10 +52,28 @@ The default TurboHybrid profile is `latency`:
 SHOW turbohybrid.profile;
 ```
 
-## 4. Create Table
+## 4. Choose Index Shape
 
-Use one pgvector column for dense embeddings and one generated `tsvector`
-column for text search:
+For dense-only vector search, the table and index only need the embedding key:
+
+```sql
+CREATE TABLE dense_documents (
+    id bigserial PRIMARY KEY,
+    embedding vector(3) NOT NULL,
+    body text NOT NULL
+);
+
+CREATE INDEX dense_documents_turbohybrid_idx ON dense_documents
+USING turbohybrid (embedding vector_cosine_turbohybrid_ops);
+
+SELECT id, body
+FROM dense_documents
+ORDER BY embedding <~> turbohybrid_query(vector_query => $1::vector)
+LIMIT 10;
+```
+
+For hybrid vector+text search, add a generated `tsvector` column and include it
+as the second index key:
 
 ```sql
 CREATE TABLE documents (
@@ -67,6 +85,9 @@ CREATE TABLE documents (
     ) STORED
 );
 ```
+
+`text_query` requires the second `tsvector` key. Dense-only indexes support
+vector queries only.
 
 ## 5. Insert Tiny Example Data
 
@@ -81,7 +102,7 @@ VALUES
 ANALYZE documents;
 ```
 
-## 6. Create Default TurboHybrid Index
+## 6. Create Default Hybrid TurboHybrid Index
 
 Create the index without manual tuning options. The default fast path uses the
 `latency` profile, 4-bit quantization, exact storage off, adaptive dense
@@ -96,6 +117,10 @@ USING turbohybrid (
 
 ANALYZE documents;
 ```
+
+Existing two-key indexes remain valid. Dense-only users can create smaller
+one-key indexes. Changing between dense-only and hybrid index shapes requires
+rebuilding the index with the desired key list.
 
 ## 7. Query
 
@@ -165,7 +190,7 @@ final top-k result size.
 | `final_k_source` is `default` | Query has no SQL `LIMIT` | Add `LIMIT 10` or another explicit top-k limit. |
 | `profile` is not `latency` | `SHOW turbohybrid.profile;` | Run `SET turbohybrid.profile = 'latency';` or reset role/database settings. |
 | SIMD is unavailable or disabled | `SELECT turbohybrid_simd_capabilities();` | SIMD means single instruction, multiple data; build with the portable default and avoid `SIMD_BUILD=none`; check `runtime_*`, `enabled_*`, and `simd_force` fields. |
-| Relevance drops on your dataset | Compare against a SQL RRF (reciprocal-rank fusion) baseline or labeled relevance data | Use quality mode, rebuild with `WITH (exact_storage = on)`, or pass larger `dense_k` and `bm25_k`. |
+| Relevance drops on your dataset | Compare against a SQL RRF (reciprocal-rank fusion) baseline or labeled relevance data | Use quality mode, try `SET turbohybrid.dense_heap_rescore = 'topk'`, rebuild with `WITH (exact_storage = on)`, or pass larger `dense_k` and `bm25_k`. |
 
 ## 10. Quality Mode
 
@@ -185,6 +210,15 @@ USING turbohybrid (
 )
 WITH (exact_storage = on);
 ```
+
+For exact-free 4-bit indexes, you can also benchmark heap-backed exact rescore:
+
+```sql
+SET turbohybrid.dense_heap_rescore = 'topk'; -- or 'band'
+```
+
+This fetches candidate heap tuples and computes exact vector distance at query
+time, so it is off by default in the latency profile.
 
 Quality mode does more work per query. Measure latency and relevance on your
 own data before choosing production settings.

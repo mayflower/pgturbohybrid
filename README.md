@@ -113,6 +113,30 @@ PG_CONFIG=pg_config PGVECTOR_REF=v0.8.2 scripts/dev-install.sh
 
 ## Quick Start
 
+### Dense-Only Vector Search
+
+Use a one-column `turbohybrid` index when you only need vector retrieval:
+
+```sql
+CREATE TABLE documents (
+    id bigserial PRIMARY KEY,
+    embedding vector(3) NOT NULL,
+    body text NOT NULL
+);
+
+CREATE INDEX documents_dense_idx ON documents
+USING turbohybrid (embedding vector_cosine_turbohybrid_ops);
+
+SELECT id, body
+FROM documents
+ORDER BY embedding <~> turbohybrid_query(vector_query => $1::vector)
+LIMIT 10;
+```
+
+### Hybrid Vector + Text Search
+
+Add a `tsvector` key when queries use `text_query`:
+
 ```sql
 CREATE TABLE documents (
     id bigserial PRIMARY KEY,
@@ -147,10 +171,19 @@ ORDER BY embedding <~> turbohybrid_query(
 LIMIT 10;
 ```
 
+`text_query` requires a turbohybrid index with a `tsvector` key. A dense-only
+index accepts vector queries and rejects text or vector+text queries with a clear
+error.
+
 Use `<~->` for L2, `<~#>` for negative inner product, and `<~>` for cosine
 hybrid ordering. A longer copy-paste walkthrough lives in
 [examples/fast_start.sql](examples/fast_start.sql) and
 [docs/fast_setup.md](docs/fast_setup.md).
+
+Migration note: existing two-key hybrid indexes remain valid. Dense-only users
+can now create smaller one-key indexes. To change an index from hybrid to
+dense-only, or from dense-only to hybrid, rebuild it with `DROP INDEX` /
+`CREATE INDEX` or `REINDEX` after changing the index definition.
 
 ## Fast Defaults
 
@@ -195,8 +228,11 @@ Use `quality` when relevance matters more than lowest latency:
 SET turbohybrid.profile = 'quality';
 ```
 
-Quality mode uses larger dense and lexical candidate budgets and conservative
-BM25 paths. For quality-sensitive production evaluation, benchmark an
+Quality mode uses larger dense and lexical candidate budgets, conservative BM25
+paths, higher default graph search windows, and heuristic dense-neighbor
+selection for new code-only indexes. It usually costs more build CPU and query
+CPU than `latency`, so compare it at matched recall/precision instead of only
+comparing raw p95. For quality-sensitive production evaluation, benchmark an
 exact-storage index too:
 
 ```sql
@@ -208,10 +244,29 @@ USING turbohybrid (
 WITH (exact_storage = on);
 ```
 
+For exact-free 4-bit indexes that need a precision check without storing a full
+copy of every vector in the index, heap-backed exact rescore is explicit:
+
+```sql
+SET turbohybrid.dense_heap_rescore = 'topk'; -- or 'band'
+```
+
+`topk` fetches heap tuples for the final top-k band and recomputes exact vector
+distance with the same SIMD kernels used by index-exact rescore. `band` rescans
+the full final candidate band. Both add heap I/O and are off in the `latency`
+profile by default. Residual rerank is the lower-I/O middle ground:
+`WITH (residual_rerank = on, residual_rerank_bytes = 16|32|64)`.
+
 Do not treat either profile as universally best. Measure latency and relevance
 on your dataset. Experimental dense diagnostics such as adaptive widening,
 local expansion, exact-build distances, entry sidecars, and residual rerank are
 opt-in knobs for benchmark work, not release defaults.
+
+For a dense-only profile sweep against a glove-like workload, use
+`benchmarks/glove100_recall_latency_grid.sql`. It reports build time, index
+size, precision@K against exact pgvector ordering, p50/p95/p99, and scan stats
+for `default`, `balanced`, `quality`, `exact_storage`, `residual_rerank`, and
+heap-rescore configurations.
 
 ## Diagnostics
 
@@ -326,12 +381,12 @@ query embeddings. See
 
 `pgturbohybrid` defines a `turbohybrid` PostgreSQL index access method over:
 
-- a pgvector `vector` column for dense retrieval
-- a generated `tsvector` column for lexical retrieval
+- one pgvector `vector` column for dense retrieval
+- optionally, one `tsvector` column for lexical/BM25 retrieval
 
-At query time, it gathers dense and BM25-style lexical candidates, fuses them
-with reciprocal-rank fusion, and returns rows through PostgreSQL's normal
-`ORDER BY ... LIMIT` index-scan shape.
+Dense-only indexes run the dense branch. Hybrid indexes can gather dense and
+BM25-style lexical candidates, fuse them with reciprocal-rank fusion, and return
+rows through PostgreSQL's normal `ORDER BY ... LIMIT` index-scan shape.
 
 It depends on pgvector's SQL `vector` type but does not require pgvector to be
 patched. Some graph/index code is derived from pgvector's HNSW implementation;

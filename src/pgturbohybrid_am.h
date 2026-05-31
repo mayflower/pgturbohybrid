@@ -15,6 +15,14 @@
 #define PGTURBOHYBRID_MAX_RRF_K 100000
 #define PGTURBOHYBRID_MAX_UNION_CANDIDATES 1000000
 #define PGTURBOHYBRID_MAX_HOT_POSTINGS_CACHE_MB 1024
+#define PGTURBOHYBRID_DENSE_KEY_INDEX 0
+#define PGTURBOHYBRID_LEXICAL_KEY_INDEX 1
+
+typedef enum PgturbohybridHybridBudgetPolicy
+{
+	PGTURBOHYBRID_HYBRID_BUDGET_FIXED,
+	PGTURBOHYBRID_HYBRID_BUDGET_ADAPTIVE
+}			PgturbohybridHybridBudgetPolicy;
 
 typedef struct PgturbohybridOptions
 {
@@ -27,6 +35,7 @@ typedef struct PgturbohybridOptions
 	int			graphRescoreBand;
 	int			graphExactCache;
 	int			graphReorder;
+	int			nativeSegments;
 	int			tqBits;
 	bool		tqWeighted;
 	bool		tqQuantileFit;
@@ -53,6 +62,10 @@ typedef struct PgturbohybridOptions
 
 typedef struct PgturbohybridScanStatsSnapshot
 {
+	char		indexShape[16];
+	bool		bm25BranchAvailable;
+	bool		denseBranchUsed;
+	bool		bm25BranchUsed;
 	uint32		denseCandidatesEffective;
 	bool		denseKDefaulted;
 	uint32		bm25CandidatesEffective;
@@ -62,6 +75,21 @@ typedef struct PgturbohybridScanStatsSnapshot
 	uint64		bm25HotPostingsCacheHits;
 	uint64		bm25HotPostingsCacheMisses;
 	uint32		bm25Terms;
+	uint64		bm25FusedScoreBoundBlocksPruned;
+	uint64		bm25FusedScoreBoundCandidatesPruned;
+	bool		fastWeightedEnabled;
+	double		fastWeightedAlpha;
+	char		bm25NormMode[16];
+	char		denseNormMode[16];
+	char		hybridBudgetPolicy[16];
+	char		hybridQueryShape[32];
+	uint32		hybridDenseKChosen;
+	uint32		hybridBm25KChosen;
+	char		hybridBudgetReason[96];
+	char		fusionStrategy[24];
+	uint32		fusionCandidatesSeen;
+	uint64		fusionDuplicates;
+	uint64		fusionHeapReplacements;
 	uint64		denseElapsedUs;
 	uint64		bm25ElapsedUs;
 	uint64		fusionElapsedUs;
@@ -102,6 +130,7 @@ extern bool pgturbohybrid_auto_bm25_budget;
 extern int	pgturbohybrid_auto_bm25_budget_min;
 extern int	pgturbohybrid_auto_bm25_budget_max;
 extern bool pgturbohybrid_auto_bm25_budget_dense_confidence;
+extern int	pgturbohybrid_hybrid_budget_policy;
 extern int	pgturbohybrid_profile;
 
 typedef enum PgturbohybridProfile
@@ -162,6 +191,7 @@ const char *PgturbohybridBm25StrategyName(int strategy);
 const char *PgturbohybridBm25ImpactOrModeName(int mode);
 const char *PgturbohybridBm25HybridBoundModeName(int mode);
 const char *PgturbohybridBm25RuntimeStrategyName(int strategy);
+const char *PgturbohybridHybridBudgetPolicyName(int policy);
 const char *PgturbohybridProfileName(int profile);
 void		PgturbohybridApplyProfileDefaults(void);
 
@@ -172,5 +202,8 @@ void		PgturbohybridAmExecutorAbort(void);
 PlannedStmt *PgturbohybridCurrentPlannedStmt(void);
 int			PgturbohybridCurrentLimit(void);
 void		PgturbohybridGetLastScanStatsSnapshot(PgturbohybridScanStatsSnapshot *stats);
+bool		PgturbohybridIndexHasLexical(Relation index);
+bool		PgturbohybridIndexGetLexicalDatum(Relation index, Datum *values,
+										bool *isnull, Datum *lexicalValue);
 
 #endif

@@ -20,7 +20,8 @@
 typedef enum PgturbohybridFusionMode
 {
 	PGTURBOHYBRID_FUSION_RRF = 1,
-	PGTURBOHYBRID_FUSION_WEIGHTED = 2
+	PGTURBOHYBRID_FUSION_WEIGHTED = 2,
+	PGTURBOHYBRID_FUSION_FAST_WEIGHTED = 3
 } PgturbohybridFusionMode;
 
 typedef struct PgturbohybridQueryHeader

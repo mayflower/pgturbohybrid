@@ -70,6 +70,7 @@ typedef Pointer Item;
 #define PGTURBOHYBRID_GRAPH_EXACT_CACHE_AUTO_MAX_BYTES (16 * 1024 * 1024)
 #define PGTURBOHYBRID_GRAPH_MAX_ROUTING_ENTRIES 15
 #define PGTURBOHYBRID_GRAPH_MAX_ENTRY_SIDECAR_REPRESENTATIVES 256
+#define PGTURBOHYBRID_GRAPH_MAX_NATIVE_SEGMENTS 16
 #define PGTURBOHYBRID_DEFAULT_ENTRY_SIDECAR false
 #define PGTURBOHYBRID_DEFAULT_ENTRY_SIDECAR_REPRESENTATIVES 128
 #define PGTURBOHYBRID_DEFAULT_GRAPH_BACKBONE false
@@ -215,12 +216,15 @@ extern bool pgturbohybrid_dense_renorm;
 extern bool pgturbohybrid_dense_query_1bit_asymmetric;
 extern int	pgturbohybrid_dense_query_1bit_asymmetric_bits;
 extern bool pgturbohybrid_dense_build_exact_distances;
+extern int	pgturbohybrid_dense_build_neighbor_select;
 extern bool pgturbohybrid_dense_hadamard_simd;
 extern int	pgturbohybrid_dense_simd_force;
 extern int	pgturbohybrid_dense_query_split_impl;
 extern int	pgturbohybrid_dense_u8_split;
 extern bool pgturbohybrid_dense_u8_batch_x4;
+extern int	pgturbohybrid_native_cache_policy;
 extern int	pgturbohybrid_native_cache_max_mb;
+extern char *pgturbohybrid_native_build_workers;
 extern int	pgturbohybrid_dense_exact_simd_force;
 extern int	pgturbohybrid_dense_graph_batch_scoring;
 extern int	pgturbohybrid_dense_graph_batch_size;
@@ -232,6 +236,7 @@ extern int	pgturbohybrid_dense_max_candidate_multiplier;
 extern double pgturbohybrid_dense_latency_multiplier;
 extern int	pgturbohybrid_dense_max_rescore_multiplier;
 extern int	pgturbohybrid_dense_rescore_band_policy;
+extern int	pgturbohybrid_dense_heap_rescore;
 extern int	pgturbohybrid_dense_adaptive_widening;
 extern double pgturbohybrid_dense_adaptive_widening_multiplier;
 extern double pgturbohybrid_dense_adaptive_widening_max_multiplier;
@@ -257,6 +262,13 @@ typedef enum PgturbohybridGraphRescoreBand
 	PGTURBOHYBRID_GRAPH_RESCORE_BAND_EXACT
 }			PgturbohybridGraphRescoreBand;
 
+typedef enum PgturbohybridDenseBuildNeighborSelect
+{
+	PGTURBOHYBRID_DENSE_BUILD_NEIGHBOR_SELECT_FAST,
+	PGTURBOHYBRID_DENSE_BUILD_NEIGHBOR_SELECT_HEURISTIC,
+	PGTURBOHYBRID_DENSE_BUILD_NEIGHBOR_SELECT_AUTO
+}			PgturbohybridDenseBuildNeighborSelect;
+
 typedef enum PgturbohybridDenseBudgetPolicy
 {
 	PGTURBOHYBRID_DENSE_BUDGET_QUALITY,
@@ -272,6 +284,21 @@ typedef enum TqRescoreBandPolicy
 	PGTURBOHYBRID_RESCORE_BAND_POLICY_AUTO,
 	PGTURBOHYBRID_RESCORE_BAND_POLICY_OFF
 }			TqRescoreBandPolicy;
+
+typedef enum TqDenseHeapRescoreMode
+{
+	PGTURBOHYBRID_DENSE_HEAP_RESCORE_OFF,
+	PGTURBOHYBRID_DENSE_HEAP_RESCORE_TOPK,
+	PGTURBOHYBRID_DENSE_HEAP_RESCORE_BAND
+}			TqDenseHeapRescoreMode;
+
+typedef enum TqExactRescoreSource
+{
+	PGTURBOHYBRID_EXACT_RESCORE_SOURCE_NONE,
+	PGTURBOHYBRID_EXACT_RESCORE_SOURCE_INDEX_EXACT,
+	PGTURBOHYBRID_EXACT_RESCORE_SOURCE_HEAP,
+	PGTURBOHYBRID_EXACT_RESCORE_SOURCE_RESIDUAL
+}			TqExactRescoreSource;
 
 typedef enum TqDenseWideningReason
 {
@@ -310,6 +337,14 @@ typedef enum PgturbohybridGraphExactCache
 	PGTURBOHYBRID_GRAPH_EXACT_CACHE_OFF,
 	PGTURBOHYBRID_GRAPH_EXACT_CACHE_ON
 }			PgturbohybridGraphExactCache;
+
+typedef enum PgturbohybridNativeCachePolicy
+{
+	PGTURBOHYBRID_NATIVE_CACHE_POLICY_AUTO = 0,
+	PGTURBOHYBRID_NATIVE_CACHE_POLICY_PER_BACKEND,
+	PGTURBOHYBRID_NATIVE_CACHE_POLICY_OFF,
+	PGTURBOHYBRID_NATIVE_CACHE_POLICY_SHARED
+}			PgturbohybridNativeCachePolicy;
 
 typedef enum PgturbohybridGraphReorder
 {
@@ -532,6 +567,7 @@ typedef struct TqOptions
 	int			graphRescoreBand;
 	int			graphExactCache;
 	int			graphReorder;
+	int			nativeSegments;
 	int			tqBits;
 	bool		tqWeighted;		/* internal weighted quantized scoring flag */
 	bool		tqQuantileFit;	/* internal quantile-anchored correction fit flag */
@@ -793,6 +829,19 @@ typedef struct PgturbohybridGraphBuildState
 	char	   *graphArea;
 }			PgturbohybridGraphBuildState;
 
+typedef struct PgturbohybridGraphSegmentMetaData
+{
+	uint32		startNodeId;
+	uint32		nodeCount;
+	uint32		entryNodeId;
+	int16		entryLevel;
+	uint16		reserved;
+	BlockNumber codeStartBlkno;
+	BlockNumber adjStartBlkno;
+	BlockNumber exactStartBlkno;
+	BlockNumber correctionStartBlkno;
+}			PgturbohybridGraphSegmentMetaData;
+
 typedef struct PgturbohybridGraphMetaPageData
 {
 	uint32		magicNumber;
@@ -830,6 +879,16 @@ typedef struct PgturbohybridGraphMetaPageData
 	uint16		tqRoutingEntryCount;
 	uint16		tqRoutingEntryBytes;
 	uint32		tqRoutingEntryNodeIds[PGTURBOHYBRID_GRAPH_MAX_ROUTING_ENTRIES];
+	uint16		tqSegmentCount;
+	uint16		tqSegmentBytes;
+	PgturbohybridGraphSegmentMetaData tqSegments[PGTURBOHYBRID_GRAPH_MAX_NATIVE_SEGMENTS];
+	uint64		buildScanUs;
+	uint64		buildCorrectionUs;
+	uint64		buildEncodeUs;
+	uint64		buildEdgeUs;
+	uint64		buildWriteUs;
+	uint32		buildWorkerCount;
+	uint32		buildReserved;
 }			PgturbohybridGraphMetaPageData;
 
 typedef PgturbohybridGraphMetaPageData * PgturbohybridGraphMetaPage;
@@ -911,8 +970,21 @@ typedef enum PgturbohybridGraphNativeCacheMode
 {
 	PGTURBOHYBRID_GRAPH_NATIVE_CACHE_NONE = 0,
 	PGTURBOHYBRID_GRAPH_NATIVE_CACHE_UNCACHED,
-	PGTURBOHYBRID_GRAPH_NATIVE_CACHE_PER_BACKEND
+	PGTURBOHYBRID_GRAPH_NATIVE_CACHE_PER_BACKEND,
+	PGTURBOHYBRID_GRAPH_NATIVE_CACHE_SHARED
 }			PgturbohybridGraphNativeCacheMode;
+
+typedef enum PgturbohybridGraphNativeCacheReason
+{
+	PGTURBOHYBRID_GRAPH_NATIVE_CACHE_REASON_NONE = 0,
+	PGTURBOHYBRID_GRAPH_NATIVE_CACHE_REASON_AUTO_FITS_MAX_MB,
+	PGTURBOHYBRID_GRAPH_NATIVE_CACHE_REASON_PER_BACKEND_FITS_MAX_MB,
+	PGTURBOHYBRID_GRAPH_NATIVE_CACHE_REASON_SHARED_FITS_MAX_MB,
+	PGTURBOHYBRID_GRAPH_NATIVE_CACHE_REASON_POLICY_OFF,
+	PGTURBOHYBRID_GRAPH_NATIVE_CACHE_REASON_EXCEEDS_MAX_MB,
+	PGTURBOHYBRID_GRAPH_NATIVE_CACHE_REASON_SHARED_BUILD_TIMEOUT,
+	PGTURBOHYBRID_GRAPH_NATIVE_CACHE_REASON_SHARED_ATTACH_FAILED
+}			PgturbohybridGraphNativeCacheReason;
 
 typedef struct PgturbohybridGraphScanOpaqueData
 {
@@ -982,12 +1054,22 @@ typedef struct PgturbohybridGraphScanOpaqueData
 	 * resident footprint each backend holds (duplicated per concurrent client).
 	 */
 	PgturbohybridGraphNativeCacheMode graphNativeCacheMode;
+	int			graphNativeCachePolicy;
+	int			graphNativeCacheReason;
+	bool		graphNativeCacheUsed;
+	bool		graphNativeCacheReused;
 	bool		graphNativeCacheBuiltThisScan;
+	int64		graphNativeCacheAttachUs;
 	int64		graphNativeCacheBuildUs;
+	int64		graphNativeCacheWaitUs;
+	int64		graphNativeCacheRefcount;
 	int64		graphNativeCacheBytes;
 	int64		graphNativeCacheCodeBytes;
 	int64		graphNativeCacheAdjBytes;
 	int64		graphNativeCacheExactBytes;
+	int64		graphScanLockWaitUs;
+	int64		graphCodeBufferLockWaitUs;
+	int64		graphAdjBufferLockWaitUs;
 	int64		graphCandidateCount;
 	int64		graphRescoreCount;
 	int64		graphRescorePages;
@@ -1032,6 +1114,10 @@ typedef struct PgturbohybridGraphScanOpaqueData
 	int64		graphResidualRerankCount;
 	int64		graphResidualRerankBytes;
 	int64		graphResidualRerankUs;
+	int64		graphHeapRescoreCount;
+	int64		graphHeapFetchUs;
+	int64		graphHeapRescoreUs;
+	int			graphExactRescoreSource;
 	int			graphDenseBudgetPolicy;
 	int			graphRescoreBandPolicy;
 	int			graphStorageKind;
@@ -1082,6 +1168,10 @@ int			PgturbohybridGraphGetGraphOversampling(Relation index);
 int			PgturbohybridGraphGetGraphRescoreBand(Relation index);
 int			PgturbohybridGraphGetGraphExactCache(Relation index);
 int			PgturbohybridGraphGetGraphReorder(Relation index);
+int			PgturbohybridGraphGetNativeSegments(Relation index);
+const char *PgturbohybridDenseBuildNeighborSelectName(int mode);
+const char *PgturbohybridGraphDenseHeapRescoreName(int mode);
+const char *PgturbohybridGraphExactRescoreSourceName(int source);
 bool		PgturbohybridGraphIspgturbohybridIndex(Relation index);
 bool		PgturbohybridGraphUseTqGraph(Relation index);
 bool		PgturbohybridGraphUseTqNativeGraph(Relation index);
@@ -1180,6 +1270,7 @@ bool		PgturbohybridGraphLoadNeighborTids(PgturbohybridGraphElement element, Item
 void		PgturbohybridGraphInitLockTranche(void);
 const		PgturbohybridGraphTypeInfo *PgturbohybridGraphGetTypeInfo(Relation index);
 PGDLLEXPORT void PgturbohybridParallelBuildMain(dsm_segment *seg, shm_toc *toc);
+PGDLLEXPORT void PgturbohybridNativeParallelBuildMain(dsm_segment *seg, shm_toc *toc);
 
 /* Index access methods */
 IndexBuildResult *pgturbohybrid_graph_build(Relation heap, Relation index, IndexInfo *indexInfo);
