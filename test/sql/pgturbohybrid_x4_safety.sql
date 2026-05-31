@@ -306,6 +306,164 @@ BEGIN
     RESET turbohybrid.dense_query_split_impl;
 END $$;
 
+-- ----------------------------------------------------------------------------
+-- Part 3: turbohybrid_last_scan_stats() accurately reports the U8 batch mode and
+-- whole-code prefetch state for a native 1536-dim 4-bit scan.
+-- ----------------------------------------------------------------------------
+DO $$
+DECLARE
+    qv vector;
+    simd_avail bool;
+    s jsonb;
+    code_bytes bigint;
+    est bigint;
+BEGIN
+    qv := (SELECT array_agg(cos(g * 0.017))::real[]::vector FROM generate_series(1, 1536) g);
+    simd_avail := (turbohybrid_scorer_distances(qv, qv) ->> 'unsigned_split_used')::bool;
+
+    SET turbohybrid.dense_query_split_impl = auto;
+    SET turbohybrid.dense_u8_split = auto;
+
+    -- x4 ON: stats report the x4 batch path and the index's code geometry.
+    SET turbohybrid.dense_u8_batch_x4 = on;
+    PERFORM id FROM x4s_docs1536
+        ORDER BY embedding <~> turbohybrid_query(vector_query => qv) LIMIT 10;
+    s := turbohybrid_last_scan_stats();
+
+    IF NOT (s ->> 'dense_u8_batch_x4_enabled')::bool THEN
+        RAISE EXCEPTION 'x4 on: dense_u8_batch_x4_enabled=% (expected true)',
+            s ->> 'dense_u8_batch_x4_enabled';
+    END IF;
+    IF simd_avail AND (s ->> 'graph_u8_batch_mode') <> 'x4' THEN
+        RAISE EXCEPTION 'x4 on: graph_u8_batch_mode=% (expected x4)', s ->> 'graph_u8_batch_mode';
+    END IF;
+
+    -- This index's code working set (1500 codes x 768 bytes) is far below the
+    -- 64 MB whole-code-prefetch threshold, so both arena fields read false.  A
+    -- multi-GB index (>64 MB of codes) is what flips them to true.
+    code_bytes := (s ->> 'graph_code_bytes')::bigint;
+    est := (s ->> 'graph_code_arena_estimated_bytes')::bigint;
+    IF code_bytes <> 768 THEN          -- 1536 dims * 4 bits / 8
+        RAISE EXCEPTION 'graph_code_bytes=% (expected 768)', code_bytes;
+    END IF;
+    IF est <= 0 OR est >= 64 * 1024 * 1024 THEN
+        RAISE EXCEPTION 'graph_code_arena_estimated_bytes=% (expected >0 and < 64MB)', est;
+    END IF;
+    IF (s ->> 'graph_large_code_arena')::bool THEN
+        RAISE EXCEPTION 'graph_large_code_arena=true (expected false for a sub-64MB arena)';
+    END IF;
+    IF (s ->> 'graph_whole_code_prefetch_active')::bool THEN
+        RAISE EXCEPTION 'graph_whole_code_prefetch_active=true (expected false; arena fits cache)';
+    END IF;
+
+    -- x4 OFF: the batch scorer takes the four-single-node fallback path.
+    SET turbohybrid.dense_u8_batch_x4 = off;
+    PERFORM id FROM x4s_docs1536
+        ORDER BY embedding <~> turbohybrid_query(vector_query => qv) LIMIT 10;
+    s := turbohybrid_last_scan_stats();
+    IF (s ->> 'dense_u8_batch_x4_enabled')::bool THEN
+        RAISE EXCEPTION 'x4 off: dense_u8_batch_x4_enabled=% (expected false)',
+            s ->> 'dense_u8_batch_x4_enabled';
+    END IF;
+    IF simd_avail AND (s ->> 'graph_u8_batch_mode') <> 'single' THEN
+        RAISE EXCEPTION 'x4 off: graph_u8_batch_mode=% (expected single)', s ->> 'graph_u8_batch_mode';
+    END IF;
+    RESET turbohybrid.dense_u8_batch_x4;
+
+    -- simd OFF: the u8 batch scorer never runs -> mode none.
+    SET turbohybrid.simd = off;
+    PERFORM id FROM x4s_docs1536
+        ORDER BY embedding <~> turbohybrid_query(vector_query => qv) LIMIT 10;
+    s := turbohybrid_last_scan_stats();
+    IF simd_avail AND (s ->> 'graph_u8_batch_mode') <> 'none' THEN
+        RAISE EXCEPTION 'simd off: graph_u8_batch_mode=% (expected none)', s ->> 'graph_u8_batch_mode';
+    END IF;
+    RESET turbohybrid.simd;
+
+    RESET turbohybrid.dense_u8_split;
+    RESET turbohybrid.dense_query_split_impl;
+END $$;
+
+-- ----------------------------------------------------------------------------
+-- Part 4: the U8 kernel is resolved once at query prep and reported exactly by
+-- turbohybrid_last_scan_stats() as u8_kernel_single / u8_kernel_batch.  Toggling
+-- the SIMD-tier / x4 / simd GUCs between scans re-selects it (query prep is per
+-- scan).  Assertions are host-agnostic: forcing AVX-512 off always yields the
+-- AVX2 kernels on any AVX2 host; the AVX-512-on result is the host's best.
+-- ----------------------------------------------------------------------------
+DO $$
+DECLARE
+    qv vector;
+    simd_avail bool;
+    s jsonb;
+    single_on text;
+    single_off text;
+    batch_on text;
+BEGIN
+    qv := (SELECT array_agg(cos(g * 0.017))::real[]::vector FROM generate_series(1, 1536) g);
+    simd_avail := (turbohybrid_scorer_distances(qv, qv) ->> 'unsigned_split_used')::bool;
+    SET turbohybrid.dense_u8_split = auto;
+    SET turbohybrid.dense_query_split_impl = auto;
+
+    -- AVX-512 forced OFF -> the AVX2 single/x4 kernels (on any AVX2 host).
+    SET turbohybrid.dense_graph_avx512vnni = off;
+    SET turbohybrid.dense_graph_avxvnni = off;
+    SET turbohybrid.dense_u8_batch_x4 = on;
+    PERFORM id FROM x4s_docs1536 ORDER BY embedding <~> turbohybrid_query(vector_query => qv) LIMIT 10;
+    s := turbohybrid_last_scan_stats();
+    single_off := s ->> 'u8_kernel_single';
+    IF simd_avail AND (single_off <> 'avx2_single' OR (s ->> 'u8_kernel_batch') <> 'avx2_x4') THEN
+        RAISE EXCEPTION 'avx512 off: expected avx2 kernels, got single=% batch=%',
+            single_off, s ->> 'u8_kernel_batch';
+    END IF;
+
+    -- AVX-512 forced ON -> the host's best single kernel (avx512vnni or avx2).
+    SET turbohybrid.dense_graph_avx512vnni = on;
+    SET turbohybrid.dense_graph_avxvnni = on;
+    PERFORM id FROM x4s_docs1536 ORDER BY embedding <~> turbohybrid_query(vector_query => qv) LIMIT 10;
+    s := turbohybrid_last_scan_stats();
+    single_on := s ->> 'u8_kernel_single';
+    batch_on := s ->> 'u8_kernel_batch';
+    IF simd_avail AND single_on NOT IN ('avx512vnni_single', 'avx2_single') THEN
+        RAISE EXCEPTION 'avx512 on: unexpected single kernel %', single_on;
+    END IF;
+    -- Where the host has AVX-512 VNNI, the toggle must actually change the kernel.
+    IF simd_avail AND single_on = 'avx512vnni_single' AND single_off <> 'avx2_single' THEN
+        RAISE EXCEPTION 'avx512 toggle did not change the single kernel (on=%, off=%)',
+            single_on, single_off;
+    END IF;
+
+    -- dense_u8_batch_x4 on/off changes the batch kernel (on -> resolved, off -> none).
+    IF simd_avail AND batch_on = 'none' THEN
+        RAISE EXCEPTION 'dense_u8_batch_x4=on: batch kernel was none';
+    END IF;
+    SET turbohybrid.dense_u8_batch_x4 = off;
+    PERFORM id FROM x4s_docs1536 ORDER BY embedding <~> turbohybrid_query(vector_query => qv) LIMIT 10;
+    s := turbohybrid_last_scan_stats();
+    IF (s ->> 'u8_kernel_batch') <> 'none' THEN
+        RAISE EXCEPTION 'dense_u8_batch_x4=off: u8_kernel_batch=% (expected none)', s ->> 'u8_kernel_batch';
+    END IF;
+    IF simd_avail AND (s ->> 'u8_kernel_single') = 'none' THEN
+        RAISE EXCEPTION 'dense_u8_batch_x4=off must not disable the single kernel';
+    END IF;
+    RESET turbohybrid.dense_u8_batch_x4;
+
+    -- SIMD off disables both U8 kernels.
+    SET turbohybrid.simd = off;
+    PERFORM id FROM x4s_docs1536 ORDER BY embedding <~> turbohybrid_query(vector_query => qv) LIMIT 10;
+    s := turbohybrid_last_scan_stats();
+    IF (s ->> 'u8_kernel_single') <> 'none' OR (s ->> 'u8_kernel_batch') <> 'none' THEN
+        RAISE EXCEPTION 'simd=off: u8 kernels not disabled (single=%, batch=%)',
+            s ->> 'u8_kernel_single', s ->> 'u8_kernel_batch';
+    END IF;
+    RESET turbohybrid.simd;
+
+    RESET turbohybrid.dense_graph_avx512vnni;
+    RESET turbohybrid.dense_graph_avxvnni;
+    RESET turbohybrid.dense_u8_split;
+    RESET turbohybrid.dense_query_split_impl;
+END $$;
+
 -- Same distinct-code x4 parity at a larger 3072-dim index (fewer rows to bound
 -- build time); proves the equality is not specific to 1536.
 CREATE TABLE x4s_docs3072 (id int PRIMARY KEY, embedding vector(3072), body_tsv tsvector);

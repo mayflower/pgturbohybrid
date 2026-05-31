@@ -210,6 +210,67 @@ SELECT 'querysplit parity ok' AS result;
  querysplit parity ok
 (1 row)
 
+-- Targeted boundary check for the shared low/high split math
+-- (TqQuerySplitValue, exposed via turbohybrid_query_split_probe).  Pins the
+-- low/high values around negatives, positives, the +/- HIGH_COEF/2 boundary,
+-- and the saturation limits, for both the signed split (K=256, absMax=32639)
+-- and the x86 u8 split (K=128, absMax=8127).  These are the canonical values of
+-- the unchanged algorithm; the refactor must keep them bit-identical.
+CREATE OR REPLACE FUNCTION qsp_check(p_val float8, p_absmax float8, p_hc int,
+									 p_qs int, p_low int, p_high int) RETURNS void
+LANGUAGE plpgsql AS $$
+DECLARE
+	r jsonb;
+BEGIN
+	r := turbohybrid_query_split_probe(p_val, p_absmax, p_hc);
+	IF (r ->> 'qsigned')::int <> p_qs OR (r ->> 'low')::int <> p_low
+		OR (r ->> 'high')::int <> p_high THEN
+		RAISE EXCEPTION 'split(%, absmax=%, K=%) = {qsigned=%, low=%, high=%}, expected {%, %, %}',
+			p_val, p_absmax, p_hc, r ->> 'qsigned', r ->> 'low', r ->> 'high', p_qs, p_low, p_high;
+	END IF;
+	-- Reconstruction invariant: qsigned = K*high + low.
+	IF (r ->> 'qsigned')::int <> p_hc * (r ->> 'high')::int + (r ->> 'low')::int THEN
+		RAISE EXCEPTION 'split invariant broken at %: qsigned=% != %*high(%)+low(%)',
+			p_val, r ->> 'qsigned', p_hc, r ->> 'high', r ->> 'low';
+	END IF;
+END;
+$$;
+DO $$
+BEGIN
+	-- Signed split: HIGH_COEF = 256, absMax = 32639.
+	PERFORM qsp_check(300, 32639, 256, 300, 44, 1);        -- positive
+	PERFORM qsp_check(130, 32639, 256, 130, -126, 1);      -- positive, low wraps past +K/2
+	PERFORM qsp_check(128, 32639, 256, 128, -128, 1);      -- exactly +K/2 -> low = -K/2
+	PERFORM qsp_check(127, 32639, 256, 127, 127, 0);       -- just below +K/2
+	PERFORM qsp_check(1, 32639, 256, 1, 1, 0);
+	PERFORM qsp_check(0, 32639, 256, 0, 0, 0);
+	PERFORM qsp_check(-1, 32639, 256, -1, -1, 0);
+	PERFORM qsp_check(-127, 32639, 256, -127, -127, 0);
+	PERFORM qsp_check(-128, 32639, 256, -128, -128, 0);    -- -K/2
+	PERFORM qsp_check(-129, 32639, 256, -129, 127, -1);    -- just past -K/2
+	PERFORM qsp_check(-130, 32639, 256, -130, 126, -1);    -- negative
+	PERFORM qsp_check(-300, 32639, 256, -300, -44, -1);    -- negative
+	PERFORM qsp_check(40000, 32639, 256, 32639, 127, 127); -- +saturation
+	PERFORM qsp_check(-40000, 32639, 256, -32639, -127, -127); -- -saturation
+
+	-- x86 u8 split: HIGH_COEF = 128, absMax = 8127.
+	PERFORM qsp_check(200, 8127, 128, 200, -56, 2);        -- positive
+	PERFORM qsp_check(70, 8127, 128, 70, -58, 1);          -- positive, low wraps past +K/2
+	PERFORM qsp_check(64, 8127, 128, 64, -64, 1);          -- +K/2
+	PERFORM qsp_check(63, 8127, 128, 63, 63, 0);           -- just below +K/2
+	PERFORM qsp_check(-64, 8127, 128, -64, -64, 0);        -- -K/2
+	PERFORM qsp_check(-65, 8127, 128, -65, 63, -1);        -- just past -K/2
+	PERFORM qsp_check(-200, 8127, 128, -200, 56, -2);      -- negative
+	PERFORM qsp_check(9000, 8127, 128, 8127, 63, 63);      -- +saturation
+	PERFORM qsp_check(-9000, 8127, 128, -8127, -63, -63);  -- -saturation
+END $$;
+SELECT 'query split boundary values ok' AS result;
+             result             
+--------------------------------
+ query split boundary values ok
+(1 row)
+
+DROP FUNCTION qsp_check(float8, float8, int, int, int, int);
 DROP FUNCTION qs_collect(text, int);
 DROP FUNCTION qs_run_all(int);
 DROP FUNCTION qs_recall(text, int);

@@ -89,6 +89,14 @@ static bool pgturbohybrid_last_graph_exact_storage_known = false;
 static bool pgturbohybrid_last_graph_query_split_active = false;
 static bool pgturbohybrid_last_graph_querysplit_used = false;
 static bool pgturbohybrid_last_graph_u8_split_used = false;
+static bool pgturbohybrid_last_dense_u8_batch_x4_enabled = true;
+static int pgturbohybrid_last_graph_u8_batch_mode = PGTURBOHYBRID_U8_BATCH_NONE;
+static int pgturbohybrid_last_graph_u8_kernel_single = PGTURBOHYBRID_U8_KERNEL_NONE;
+static int pgturbohybrid_last_graph_u8_kernel_batch = PGTURBOHYBRID_U8_KERNEL_NONE;
+static bool pgturbohybrid_last_graph_large_code_arena = false;
+static bool pgturbohybrid_last_graph_whole_code_prefetch_active = false;
+static int64 pgturbohybrid_last_graph_code_bytes = 0;
+static int64 pgturbohybrid_last_graph_code_arena_estimated_bytes = 0;
 static int64 pgturbohybrid_last_graph_dimensions = 0;
 static int64 pgturbohybrid_last_graph_returned_rows = 0;
 static int64 pgturbohybrid_last_graph_oversampling = 0;
@@ -345,16 +353,27 @@ PgturbohybridGraphRecordGraphScanStats(PgturbohybridGraphScanOpaque so)
 	}
 #if defined(__aarch64__) || defined(_M_ARM64) || \
 	defined(__x86_64__) || defined(_M_X64) || defined(__i386) || defined(_M_IX86)
-	pgturbohybrid_last_graph_query_split_active = so->tq.enabled && so->tq.querySplitEnabled;
-	pgturbohybrid_last_graph_u8_split_used = so->tq.enabled && so->tq.u8SplitEnabled;
+	pgturbohybrid_last_graph_query_split_active = so->tq.enabled && so->tq.signedSplit.enabled;
+	pgturbohybrid_last_graph_u8_split_used = so->tq.enabled && so->tq.u8.enabled;
 #else
 	pgturbohybrid_last_graph_query_split_active = false;
 	pgturbohybrid_last_graph_u8_split_used = false;
 #endif
+	/* U8 batch path and whole-code prefetch state for this scan. */
+	pgturbohybrid_last_dense_u8_batch_x4_enabled = pgturbohybrid_dense_u8_batch_x4;
+	pgturbohybrid_last_graph_u8_batch_mode = so->graphU8BatchMode;
+	/* Exact u8 kernels resolved at query prep for this scan. */
+	pgturbohybrid_last_graph_u8_kernel_single = so->tq.enabled ? so->tq.u8.kernelSingle : PGTURBOHYBRID_U8_KERNEL_NONE;
+	pgturbohybrid_last_graph_u8_kernel_batch = so->tq.enabled ? so->tq.u8.kernelBatch : PGTURBOHYBRID_U8_KERNEL_NONE;
+	pgturbohybrid_last_graph_large_code_arena = so->graphLargeCodeArena;
+	pgturbohybrid_last_graph_whole_code_prefetch_active =
+		pgturbohybrid_dense_graph_prefetch && so->graphLargeCodeArena;
+	pgturbohybrid_last_graph_code_bytes = so->tq.enabled ? (int64) so->tq.codeBytes : 0;
+	pgturbohybrid_last_graph_code_arena_estimated_bytes = so->graphCodeArenaEstimatedBytes;
 	/*
 	 * Whether the integer query-split scorer will actually run for this query
 	 * (full gate incl. dim >= 1024 and runtime SIMD availability), as opposed
-	 * to querySplitEnabled which only reflects the per-query prep.  Used to
+	 * to signedSplit.enabled which only reflects the per-query prep.  Used to
 	 * report the exact approximate scorer (query split vs LUT gather).
 	 */
 	pgturbohybrid_last_graph_querysplit_used = PgturbohybridGraphTqQuerySplitActive(&so->tq);
@@ -450,6 +469,14 @@ PgturbohybridGraphRecordNonGraphScanStats(void)
 	pgturbohybrid_last_graph_query_split_active = false;
 	pgturbohybrid_last_graph_querysplit_used = false;
 	pgturbohybrid_last_graph_u8_split_used = false;
+	pgturbohybrid_last_dense_u8_batch_x4_enabled = pgturbohybrid_dense_u8_batch_x4;
+	pgturbohybrid_last_graph_u8_batch_mode = PGTURBOHYBRID_U8_BATCH_NONE;
+	pgturbohybrid_last_graph_u8_kernel_single = PGTURBOHYBRID_U8_KERNEL_NONE;
+	pgturbohybrid_last_graph_u8_kernel_batch = PGTURBOHYBRID_U8_KERNEL_NONE;
+	pgturbohybrid_last_graph_large_code_arena = false;
+	pgturbohybrid_last_graph_whole_code_prefetch_active = false;
+	pgturbohybrid_last_graph_code_bytes = 0;
+	pgturbohybrid_last_graph_code_arena_estimated_bytes = 0;
 	pgturbohybrid_last_graph_dimensions = 0;
 	pgturbohybrid_last_graph_returned_rows = 0;
 	pgturbohybrid_last_graph_oversampling = 0;
@@ -462,6 +489,41 @@ PgturbohybridGraphRecordFlatScanStats(void)
 	PgturbohybridGraphRecordNonGraphScanStats();
 	pgturbohybrid_last_scan_orchestration = PGTURBOHYBRID_SCAN_ORCHESTRATION_FLAT;
 	pgturbohybrid_last_graph_storage_kind = PGTURBOHYBRID_GRAPH_STORAGE_QUANT_FLAT;
+}
+
+static const char *
+PgturbohybridGraphU8BatchModeName(int mode)
+{
+	switch (mode)
+	{
+		case PGTURBOHYBRID_U8_BATCH_X4:
+			return "x4";
+		case PGTURBOHYBRID_U8_BATCH_SINGLE:
+			return "single";
+		case PGTURBOHYBRID_U8_BATCH_NONE:
+		default:
+			return "none";
+	}
+}
+
+/* Name of the exact u8 kernel resolved at query prep (TqU8Kernel). */
+static const char *
+PgturbohybridGraphU8KernelName(int kernel)
+{
+	switch (kernel)
+	{
+		case PGTURBOHYBRID_U8_KERNEL_AVX2_SINGLE:
+			return "avx2_single";
+		case PGTURBOHYBRID_U8_KERNEL_AVX2_X4:
+			return "avx2_x4";
+		case PGTURBOHYBRID_U8_KERNEL_AVX512VNNI_SINGLE:
+			return "avx512vnni_single";
+		case PGTURBOHYBRID_U8_KERNEL_AVX512VNNI_X4:
+			return "avx512vnni_x4";
+		case PGTURBOHYBRID_U8_KERNEL_NONE:
+		default:
+			return "none";
+	}
 }
 
 static const char *
@@ -877,6 +939,28 @@ pgturbohybrid_last_scan_stats(PG_FUNCTION_ARGS)
 								PgturbohybridGraphTqSimdForceName(pgturbohybrid_last_graph_simd_force));
 	PgturbohybridJsonbAddBool(&state, "u8_split_enabled",
 							  pgturbohybrid_last_graph_u8_split_used);
+	/* Whether the x4 u8 batch kernel is enabled, and the path the u8 batch-of-4
+	 * scorer actually took (x4 / single / none). */
+	PgturbohybridJsonbAddBool(&state, "dense_u8_batch_x4_enabled",
+							  pgturbohybrid_last_dense_u8_batch_x4_enabled);
+	PgturbohybridJsonbAddString(&state, "graph_u8_batch_mode",
+								PgturbohybridGraphU8BatchModeName(pgturbohybrid_last_graph_u8_batch_mode));
+	/* Exact u8 kernels resolved once at query prep (no per-batch feature probe). */
+	PgturbohybridJsonbAddString(&state, "u8_kernel_single",
+								PgturbohybridGraphU8KernelName(pgturbohybrid_last_graph_u8_kernel_single));
+	PgturbohybridJsonbAddString(&state, "u8_kernel_batch",
+								PgturbohybridGraphU8KernelName(pgturbohybrid_last_graph_u8_kernel_batch));
+	/* Whole-code prefetch fires only once the code working set exceeds CPU cache
+	 * (graph_large_code_arena); below that the batch scorer prefetches just the
+	 * first cache line. */
+	PgturbohybridJsonbAddBool(&state, "graph_large_code_arena",
+							  pgturbohybrid_last_graph_large_code_arena);
+	PgturbohybridJsonbAddBool(&state, "graph_whole_code_prefetch_active",
+							  pgturbohybrid_last_graph_whole_code_prefetch_active);
+	PgturbohybridJsonbAddInt64(&state, "graph_code_bytes",
+							   pgturbohybrid_last_graph_code_bytes);
+	PgturbohybridJsonbAddInt64(&state, "graph_code_arena_estimated_bytes",
+							   pgturbohybrid_last_graph_code_arena_estimated_bytes);
 	PgturbohybridJsonbAddInt64(&state, "graph_dense_requested_k",
 							   pgturbohybrid_last_graph_dense_requested_k);
 	PgturbohybridJsonbAddInt64(&state, "graph_effective_result_target",

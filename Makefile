@@ -23,6 +23,9 @@ OBJS = \
 	src/pgturbohybrid_quant_psquare.o \
 	src/pgturbohybrid_quant_scan_cache.o \
 	src/pgturbohybrid_quant_score.o \
+	src/pgturbohybrid_quant_score_u8_x86.o \
+	src/pgturbohybrid_quant_score_arm.o \
+	src/pgturbohybrid_quant_score_signed_x86.o \
 	src/pgturbohybrid_quant_storage.o \
 	src/pgturbohybrid_query.o \
 	src/pgturbohybrid_scan.o \
