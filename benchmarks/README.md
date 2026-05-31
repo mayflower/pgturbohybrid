@@ -135,16 +135,78 @@ SELECT turbohybrid_last_scan_stats() -> 'dense' -> 'kernels'; -- u8_batch_mode, 
 
 Ready-made harnesses live next to this README:
 
+- `dense_only_vs_hybrid_shape.sql` -- one-key dense-only index vs the old
+  fake-`tsvector` hybrid shape: build time, index size, vector-query latency,
+  BM25 branch stats, and overlap.
+- `fair_dense_bench.sql` -- fair dense-only vs hybrid-shape dense retrieval
+  with the same vectors and query set, 1-client and 8-client dblink runs,
+  build time, index size, exact precision@K, and scan stats.
+- `concurrency_diagnosis.sql` -- one-backend per-query printout of dense native
+  cache scope/reuse/build, scan-lock wait, buffer-lock wait, page reads, and
+  traversal timing fields.
 - `native_hotpath_bench.sql` -- live native-scan latency, u8 x4 on vs off.
 - `u8_x4_kernel_microbench.sql`, `u8_split_microbench.sql` -- kernel-level
   ns/code microbenchmarks.
 - `native_scan_kernel_stats.sql` -- per-bucket kernel attribution from a real
   scan.
 - `rescore_band_latency.sql` -- exact-rescore (`dense_rescore_band`) latency.
+- `concurrent_dense_bench.py` -- client-side dense concurrency harness with
+  persistent PostgreSQL connections, per-connection warmup, timed steady-state
+  runs, cache-scope/cache-size/EF sweeps, optional exact precision, and CSV/JSON
+  output.
+- `glove100_recall_latency_grid.sql` -- dense-only recall/latency profile grid
+  for glove-like 100-dimensional workloads. It compares `default`, `balanced`,
+  `quality`, `exact_storage`, `residual_rerank`, and heap-rescore top-k/band,
+  recording build time, index size, precision@K against exact pgvector ordering,
+  p50/p95/p99, and dense scan stats such as build neighbor selection, graph EF,
+  oversampling, scored codes, exact rescore count, heap rescore count, and exact
+  rescore source.
+- `native_segments_bench.sql` -- native graph segment-count sweep
+  (`native_segments = 1,2,4,8,10` by default). It records build time, index
+  size, precision@K against exact ordering, p50/p95, and scan stats so the
+  build-speed, recall, and query-cost tradeoff is visible.
 - `concurrency_dense_bench.sql` / `concurrency_dense_bench.sh` -- concurrent-client
   scaling diagnostics (see below).
 
 ## Concurrent-client scaling diagnostics
+
+Use `concurrent_dense_bench.py` when the result needs end-to-end client-side
+RPS/latency and machine-readable artifacts. It opens all client connections
+first, warms every connection, starts the timed phase only after all connections
+are warm, and writes both CSV and JSON under `benchmarks/output/`. The first
+warm query records cold-cache signals such as `native_cache_built_this_scan` and
+`native_cache_build_us`; timed RPS and p50/p95/p99 are measured after that
+warmup, so cache build artifacts are visible but do not pollute steady-state
+concurrency.
+
+```bash
+# Synthetic fallback, glove-like default shape (1,183,514 x 100):
+uv run benchmarks/concurrent_dense_bench.py \
+  --dsn pgturbohybrid_benchmark \
+  --clients 1,8 \
+  --native-cache-scopes off,per_backend,shared \
+  --native-cache-max-mb 0,64,512 \
+  --native-segments 1,2,4,8,10 \
+  --graph-ef-search 64,96,128
+
+# Existing glove table, copied into an isolated benchmark table:
+uv run benchmarks/concurrent_dense_bench.py \
+  --dsn pgturbohybrid_benchmark \
+  --source-table items \
+  --source-vector-column embedding \
+  --rows 1183514 \
+  --dimensions 100 \
+  --compute-ground-truth
+```
+
+For quick smoke tests, lower `--rows`, `--query-count`, `--warm-queries`, and
+`--timed-queries`. If `--compute-ground-truth` or `--ground-truth-table` is
+provided, the output includes `precision_at_k_avg` and `precision_at_k_min`;
+otherwise those columns are empty. The CSV columns include RPS, p50/p95/p99,
+warm and timed native-cache build indicators, `graph_batch_us`,
+`graph_base_us`, `graph_traverse_us`, `graph_code_pages_read`, and
+`graph_adj_pages_read`; the JSON also includes per-client durations and sampled
+first/last scan stats.
 
 `concurrency_dense_bench.sql` (driven by `concurrency_dense_bench.sh`) explains
 why dense-default throughput can scale *down* with concurrent clients on
@@ -154,24 +216,60 @@ not change query behaviour -- it only measures, so the cause is known before any
 algorithm is touched.
 
 It drives the same fixed query set at 1/2/4/8/16 concurrent backends (each a real
-backend opened via `dblink`, so each holds its own per-backend native cache --
-the thing under test) across three native cache caps (`native_cache_max_mb` ∈
-{0 = uncached, 512 = default, high}) and two prewarm modes (A = cold, B = cache
-prebuilt), and attributes the p95 explosion to one of four causes using
+backend opened via `dblink`) across native cache scopes (`per_backend`, `shared`,
+and `off`), cache caps for cached paths, and two prewarm modes (A = cold, B =
+cache prebuilt). It attributes the p95 explosion to one of four causes using
 per-backend instrumentation from `turbohybrid_last_scan_stats()`:
 
 | Suspected cause | Signal the harness reads |
 | --- | --- |
 | Cold per-backend cache build | `native_cache_built_this_scan` / `native_cache_build_us` on the cold query; removed by prewarm mode B |
-| Cache duplication / memory bandwidth | `native_cache_bytes` per backend × clients (`total_cache_bytes`); warm, 0 page reads, `graph_total_us` rising with clients; cache ON collapses while OFF scales |
-| Lock waits | `pg_stat_activity` `wait_event_type='Lock'/'LWLock'` sampled during the run; ungranted `pg_locks` on the index |
+| Cache duplication / memory bandwidth | `native_cache_scope='per_backend'`, `native_cache_used=true`, `native_cache_reused=true`, `native_cache_bytes` per backend × clients (`total_cache_bytes`); warm, 0 page reads, `graph_total_us` rising with clients; `per_backend` collapses while `shared` or `off` scales |
+| Lock waits | `graph_scan_lock_wait_us` for the `PGTURBOHYBRID_GRAPH_SCAN_LOCK`, plus `pg_stat_activity` `wait_event_type='Lock'/'LWLock'` and ungranted `pg_locks` on the index |
+| Shared cache coordination | `native_cache_attach_us`, `native_cache_wait_us`, and `native_cache_build_us`; high wait means clients are waiting for the first shared-cache builder |
+| Buffer/page loading waits | `code_buffer_lock_wait_us`, `adj_buffer_lock_wait_us`, and `graph_*_pages_read`; compare `native_cache_scope=per_backend` and `shared` against `native_cache_scope=off` |
 | Traversal / scoring CPU | `graph_batch_us` / `graph_traverse_us` per query rising with clients, no waits, ~0 page reads |
 
 The `native_cache_*` keys it relies on are emitted by
 `turbohybrid_last_scan_stats()` (flat keys and under `dense.cache`):
-`native_cache_mode` (`per_backend` / `uncached` / `none`),
-`native_cache_built_this_scan`, `native_cache_build_us`, and
-`native_cache_bytes` with a `code`/`adj`/`exact` breakdown.
+`native_cache_policy` / `native_cache_scope` (`auto` / `per_backend` / `shared` / `off`),
+`native_cache_used`, `native_cache_reason`,
+`native_cache_scope` (`per_backend` / `shared` / `per_scan` / `none`),
+`native_cache_reused`, `native_cache_built_this_scan`,
+`native_cache_attach_us`, `native_cache_build_us`, `native_cache_wait_us`,
+`native_cache_refcount`, and `native_cache_bytes` with a `code`/`adj`/`exact`
+breakdown. `native_cache_mode` is retained for compatibility and reports
+`uncached` for the same condition that `native_cache_scope` calls `per_scan`.
+
+For a quick single-backend instrumentation check, run:
+
+```bash
+psql -d pgturbohybrid_benchmark \
+  -v TBL=items -v VCOL=embedding -v POLICY=per_backend -v CACHE_MB=512 \
+  -f benchmarks/concurrency_diagnosis.sql
+psql -d pgturbohybrid_benchmark \
+  -v TBL=items -v VCOL=embedding -v POLICY=shared -v CACHE_MB=512 \
+  -f benchmarks/concurrency_diagnosis.sql
+psql -d pgturbohybrid_benchmark \
+  -v TBL=items -v VCOL=embedding -v POLICY=off -v CACHE_MB=512 \
+  -f benchmarks/concurrency_diagnosis.sql
+```
+
+For an external pgbench or Python concurrency benchmark, use a two-phase run:
+open all client connections first, run enough warmup queries on every
+connection to build that backend's cache, then reset client-side timers and run
+the timed phase over the same fixed query set. Run the timed phase three ways:
+`SET turbohybrid.native_cache_scope=per_backend` for the backend-local cache,
+`SET turbohybrid.native_cache_scope=shared` for the mmap-backed shared cache,
+and `SET turbohybrid.native_cache_scope=off` for per-scan page loading. Capture
+`turbohybrid_last_scan_stats()` on each connection after its final warm query
+and final timed query. If p95/p99 spikes disappear after warmup, cold
+`native_cache_build_us` dominated; if `per_backend` collapses but `shared` or
+`off` does not, suspect per-backend cache duplication or memory bandwidth; if
+`graph_scan_lock_wait_us` grows, the page-level scan lock is visible; if
+`code_buffer_lock_wait_us` / `adj_buffer_lock_wait_us` and page reads grow,
+buffer/page loading is the culprit; otherwise compare `graph_traverse_us` and
+`graph_total_us` for steady-state traversal CPU.
 
 ```bash
 # Against the loaded glove-100-angular dataset (real collapse):
@@ -212,6 +310,14 @@ results and the SQL RRF baseline with `nDCG@10`, `MRR@10`, `p95_ms`, and either
 `Recall@10` or `overlap@10` versus SQL RRF. If the gate fails, evaluate
 `quality` profile, `exact_storage = on`, or larger dense/BM25 budgets before
 publishing the fast default result.
+
+For dense-only comparisons against Qdrant or pgvector, include a matched-quality
+grid rather than only the speed-first 4-bit exact-free default. At minimum,
+report the `glove100_recall_latency_grid.sql` rows for `default`, `balanced`,
+`quality`, `exact_storage`, `residual_rerank`, and heap-rescore top-k/band,
+including build time and index size. Treat `latency` as the compact fast default
+and use the grid to show what it costs to approach or exceed the external
+baseline's recall.
 
 ## Dataset Notes
 

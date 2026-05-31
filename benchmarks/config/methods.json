@@ -133,6 +133,18 @@
       "description": "Dense-only pgturbohybrid variant with experimental 64-byte per-vector residual sketches for final-band reranking while keeping exact_storage off."
     },
     {
+      "name": "pgturbohybrid_dense_heap_rescore_topk",
+      "layer": "systems",
+      "kind": "postgres_index_am",
+      "description": "Dense-only pgturbohybrid variant that keeps exact_storage off but fetches heap tuples for the final top-k band and computes exact vector distances."
+    },
+    {
+      "name": "pgturbohybrid_dense_heap_rescore_band",
+      "layer": "systems",
+      "kind": "postgres_index_am",
+      "description": "Dense-only pgturbohybrid variant that keeps exact_storage off but fetches heap tuples for the full final candidate band and computes exact vector distances."
+    },
+    {
       "name": "postgres_sql_rrf",
       "layer": "reference",
       "kind": "postgres_sql",

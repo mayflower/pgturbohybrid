@@ -1,6 +1,11 @@
 #include "postgres.h"
 
+#include <errno.h>
+#include <fcntl.h>
 #include <string.h>
+#include <sys/mman.h>
+#include <sys/stat.h>
+#include <unistd.h>
 
 #include "miscadmin.h"
 #include "portability/instr_time.h"
@@ -11,6 +16,97 @@
 #include "pgturbohybrid_quant.h"
 
 static PgturbohybridGraphNativeCache *pgturbohybridGraphCacheList = NULL;
+
+#define PGTURBOHYBRID_GRAPH_SHARED_CACHE_MAGIC 0x54485343U
+#define PGTURBOHYBRID_GRAPH_SHARED_CACHE_VERSION 1U
+#define PGTURBOHYBRID_GRAPH_SHARED_CACHE_WAIT_US 5000000L
+#define PGTURBOHYBRID_GRAPH_SHARED_CACHE_POLL_US 10000L
+
+typedef struct PgturbohybridGraphSharedCacheHeader
+{
+	uint32		magic;
+	uint32		version;
+	uint64		key;
+	uint64		fileSize;
+	Oid			relid;
+	Oid			relfilenumber;
+	uint32		dimensions;
+	uint16		m;
+	uint16		graphMaxLevel;
+	uint16		graphFlags;
+	uint16		tqBits;
+	uint32		tqNodeCount;
+	uint32		tqEntryNodeId;
+	uint16		tqCodeBytes;
+	uint16		tqPayloadCount;
+	uint16		tqPayloadBytes;
+	uint16		tqResidualRerankBytes;
+	BlockNumber tqCodeStartBlkno;
+	BlockNumber tqAdjStartBlkno;
+	BlockNumber tqExactStartBlkno;
+	BlockNumber tqCorrectionStartBlkno;
+	uint32		adjRecordCount;
+	uint64		neighborValueCount;
+	uint32		payloadRefCount;
+	uint32		exactBytes;
+	uint64		nodesOffset;
+	uint64		codeArenaOffset;
+	uint64		payloadArenaOffset;
+	uint64		residualArenaOffset;
+	uint64		exactArenaOffset;
+	uint64		neighborCountsOffset;
+	uint64		neighborOffsetsOffset;
+	uint64		neighborDataOffset;
+	uint64		payloadRefsOffset;
+	uint64		residentCodeBytes;
+	uint64		residentAdjBytes;
+	uint64		residentExactBytes;
+	uint64		residentTotalBytes;
+} PgturbohybridGraphSharedCacheHeader;
+
+typedef struct PgturbohybridGraphSharedNode
+{
+	ItemPointerData heaptid;
+	uint16		payloadMask;
+	int			level;
+	BlockNumber exactBlkno;
+	OffsetNumber exactOffno;
+	float		scale;
+	float		norm;
+	float		codeNorm;
+	float		ecCorrection;
+	uint16		flags;
+	bool		loaded;
+} PgturbohybridGraphSharedNode;
+
+typedef struct PgturbohybridGraphSharedMap
+{
+	uint64		key;
+	Oid			relid;
+	Oid			relfilenumber;
+	uint16		graphFlags;
+	void	   *base;
+	Size		size;
+	PgturbohybridGraphScanStorage view;
+	MemoryContext ctx;
+	int64		attachUs;
+	int64		buildUs;
+	int64		waitUs;
+	bool		builtThisBackend;
+	struct PgturbohybridGraphSharedMap *next;
+} PgturbohybridGraphSharedMap;
+
+static PgturbohybridGraphSharedMap *pgturbohybridGraphSharedMapList = NULL;
+
+static inline int64
+PgturbohybridGraphElapsedUsSince(instr_time start)
+{
+	instr_time	elapsed;
+
+	INSTR_TIME_SET_CURRENT(elapsed);
+	INSTR_TIME_SUBTRACT(elapsed, start);
+	return (int64) INSTR_TIME_GET_MICROSEC(elapsed);
+}
 
 /*
  * Per-backend in-memory native scan cache size cap, in bytes, from the
@@ -103,16 +199,154 @@ PgturbohybridGraphArenaBytesHuge(uint32 count, Size itemBytes, Size *totalBytes)
 	return AllocHugeSizeIsValid((Size) count * itemBytes);
 }
 
+static inline void *
+PgturbohybridGraphSharedPtr(void *base, uint64 offset)
+{
+	return offset == 0 ? NULL : (void *) ((char *) base + offset);
+}
+
+static uint64
+PgturbohybridGraphHashU64(uint64 hash, uint64 value)
+{
+	hash ^= value;
+	hash *= UINT64CONST(1099511628211);
+	return hash;
+}
+
+static uint64
+PgturbohybridGraphSharedCacheKey(Relation index, PgturbohybridGraphMetaPageData *meta)
+{
+	uint64		hash = UINT64CONST(1469598103934665603);
+
+	hash = PgturbohybridGraphHashU64(hash, RelationGetRelid(index));
+	hash = PgturbohybridGraphHashU64(hash, PgturbohybridGraphRelFileNumber(index));
+	hash = PgturbohybridGraphHashU64(hash, meta->dimensions);
+	hash = PgturbohybridGraphHashU64(hash, meta->m);
+	hash = PgturbohybridGraphHashU64(hash, meta->graphMaxLevel);
+	hash = PgturbohybridGraphHashU64(hash, meta->graphFlags);
+	hash = PgturbohybridGraphHashU64(hash, meta->tqNodeCount);
+	hash = PgturbohybridGraphHashU64(hash, meta->tqEntryNodeId);
+	hash = PgturbohybridGraphHashU64(hash, meta->tqCodeBytes);
+	hash = PgturbohybridGraphHashU64(hash, meta->tqBits);
+	hash = PgturbohybridGraphHashU64(hash, meta->tqPayloadCount);
+	hash = PgturbohybridGraphHashU64(hash, meta->tqPayloadBytes);
+	hash = PgturbohybridGraphHashU64(hash, meta->tqResidualRerankBytes);
+	hash = PgturbohybridGraphHashU64(hash, meta->tqCodeStartBlkno);
+	hash = PgturbohybridGraphHashU64(hash, meta->tqAdjStartBlkno);
+	hash = PgturbohybridGraphHashU64(hash, meta->tqExactStartBlkno);
+	hash = PgturbohybridGraphHashU64(hash, meta->tqCorrectionStartBlkno);
+	return hash;
+}
+
+static void
+PgturbohybridGraphSharedCacheDir(char *dir, Size dirSize)
+{
+	snprintf(dir, dirSize, "%s/pg_turbohybrid_cache", DataDir);
+}
+
 static bool
-PgturbohybridGraphShouldUseNativeCache(PgturbohybridGraphMetaPageData *meta, bool cacheExactVectors)
+PgturbohybridGraphEnsureSharedCacheDir(char *dir, Size dirSize)
+{
+	PgturbohybridGraphSharedCacheDir(dir, dirSize);
+	if (mkdir(dir, 0700) == 0 || errno == EEXIST)
+		return true;
+	elog(WARNING, "could not create pgturbohybrid shared cache directory \"%s\": %m", dir);
+	return false;
+}
+
+static void
+PgturbohybridGraphSharedCachePath(Relation index, PgturbohybridGraphMetaPageData *meta,
+								  uint64 key, char *path, Size pathSize)
+{
+	char		dir[MAXPGPATH];
+
+	PgturbohybridGraphSharedCacheDir(dir, sizeof(dir));
+	snprintf(path, pathSize, "%s/%u_%u_%u_%016llx.tqcache",
+			 dir,
+			 RelationGetRelid(index),
+			 PgturbohybridGraphRelFileNumber(index),
+			 meta->graphFlags,
+			 (unsigned long long) key);
+}
+
+static void
+PgturbohybridGraphSharedCacheLockPath(Relation index, PgturbohybridGraphMetaPageData *meta,
+									  uint64 key, char *path, Size pathSize)
+{
+	char		cachePath[MAXPGPATH];
+
+	PgturbohybridGraphSharedCachePath(index, meta, key, cachePath, sizeof(cachePath));
+	snprintf(path, pathSize, "%s.building", cachePath);
+}
+
+static bool
+PgturbohybridGraphSharedHeaderMatches(PgturbohybridGraphSharedCacheHeader *hdr,
+									  Relation index,
+									  PgturbohybridGraphMetaPageData *meta,
+									  uint64 key)
+{
+	return hdr->magic == PGTURBOHYBRID_GRAPH_SHARED_CACHE_MAGIC &&
+		hdr->version == PGTURBOHYBRID_GRAPH_SHARED_CACHE_VERSION &&
+		hdr->key == key &&
+		hdr->relid == RelationGetRelid(index) &&
+		hdr->relfilenumber == PgturbohybridGraphRelFileNumber(index) &&
+		hdr->dimensions == meta->dimensions &&
+		hdr->m == meta->m &&
+		hdr->graphMaxLevel == meta->graphMaxLevel &&
+		hdr->graphFlags == meta->graphFlags &&
+		hdr->tqNodeCount == meta->tqNodeCount &&
+		hdr->tqEntryNodeId == meta->tqEntryNodeId &&
+		hdr->tqCodeBytes == meta->tqCodeBytes &&
+		hdr->tqBits == meta->tqBits &&
+		hdr->tqPayloadCount == meta->tqPayloadCount &&
+		hdr->tqPayloadBytes == meta->tqPayloadBytes &&
+		hdr->tqResidualRerankBytes == meta->tqResidualRerankBytes &&
+		hdr->tqCodeStartBlkno == meta->tqCodeStartBlkno &&
+		hdr->tqAdjStartBlkno == meta->tqAdjStartBlkno &&
+		hdr->tqExactStartBlkno == meta->tqExactStartBlkno &&
+		hdr->tqCorrectionStartBlkno == meta->tqCorrectionStartBlkno;
+}
+
+static uint64
+PgturbohybridGraphSharedAlign(uint64 offset)
+{
+	return (uint64) MAXALIGN(offset);
+}
+
+static bool
+PgturbohybridGraphSharedAddBytes(uint64 *offset, uint64 bytes, uint64 *start)
+{
+	*offset = PgturbohybridGraphSharedAlign(*offset);
+	if (start != NULL)
+		*start = *offset;
+	if (bytes > UINT64_MAX - *offset)
+		return false;
+	*offset += bytes;
+	return true;
+}
+
+static bool
+PgturbohybridGraphShouldUseNativeCache(PgturbohybridGraphMetaPageData *meta,
+									   bool cacheExactVectors,
+									   PgturbohybridGraphNativeCacheReason *reason)
 {
 	Size		totalBytes = sizeof(PgturbohybridGraphNativeCache);
 	Size		bytes;
 	Size		baseNeighborsPerNode;
 
+	if (reason != NULL)
+		*reason = PGTURBOHYBRID_GRAPH_NATIVE_CACHE_REASON_NONE;
+
+	if (pgturbohybrid_native_cache_policy == PGTURBOHYBRID_NATIVE_CACHE_POLICY_OFF)
+	{
+		if (reason != NULL)
+			*reason = PGTURBOHYBRID_GRAPH_NATIVE_CACHE_REASON_POLICY_OFF;
+		return false;
+	}
+
 	if (!PgturbohybridGraphArenaBytes(meta->tqNodeCount,
 									  sizeof(PgturbohybridGraphScanNode), &bytes))
-		return false;
+		goto too_large;
 	totalBytes += bytes;
 	if (PgturbohybridGraphArenaBytesHuge(meta->tqNodeCount,
 										 meta->tqCodeBytes, &bytes) &&
@@ -127,7 +361,7 @@ PgturbohybridGraphShouldUseNativeCache(PgturbohybridGraphMetaPageData *meta, boo
 		if (!PgturbohybridGraphArenaBytesHuge(meta->tqNodeCount,
 											  meta->tqResidualRerankBytes, &bytes) ||
 			bytes > PgturbohybridGraphNativeCacheMaxBytes())
-			return false;
+			goto too_large;
 		totalBytes += bytes;
 	}
 	if (cacheExactVectors && meta->dimensions > 0)
@@ -140,19 +374,36 @@ PgturbohybridGraphShouldUseNativeCache(PgturbohybridGraphMetaPageData *meta, boo
 	}
 	if (!PgturbohybridGraphArenaBytes(PgturbohybridGraphAdjRecordCount(meta),
 									  sizeof(uint32 *), &bytes))
-		return false;
+		goto too_large;
 	totalBytes += bytes;
 	if (!PgturbohybridGraphArenaBytes(PgturbohybridGraphAdjRecordCount(meta),
 									  sizeof(uint16), &bytes))
-		return false;
+		goto too_large;
 	totalBytes += bytes;
 	baseNeighborsPerNode = (Size) PgturbohybridGraphLevelM(meta->m, 0) * sizeof(uint32);
 	if (!PgturbohybridGraphArenaBytes(meta->tqNodeCount,
 									  baseNeighborsPerNode, &bytes))
-		return false;
+		goto too_large;
 	totalBytes += bytes;
 
-	return totalBytes <= PgturbohybridGraphNativeCacheMaxBytes();
+	if (totalBytes <= PgturbohybridGraphNativeCacheMaxBytes())
+	{
+		if (reason != NULL)
+		{
+			if (pgturbohybrid_native_cache_policy == PGTURBOHYBRID_NATIVE_CACHE_POLICY_SHARED)
+				*reason = PGTURBOHYBRID_GRAPH_NATIVE_CACHE_REASON_SHARED_FITS_MAX_MB;
+			else if (pgturbohybrid_native_cache_policy == PGTURBOHYBRID_NATIVE_CACHE_POLICY_PER_BACKEND)
+				*reason = PGTURBOHYBRID_GRAPH_NATIVE_CACHE_REASON_PER_BACKEND_FITS_MAX_MB;
+			else
+				*reason = PGTURBOHYBRID_GRAPH_NATIVE_CACHE_REASON_AUTO_FITS_MAX_MB;
+		}
+		return true;
+	}
+
+too_large:
+	if (reason != NULL)
+		*reason = PGTURBOHYBRID_GRAPH_NATIVE_CACHE_REASON_EXCEEDS_MAX_MB;
+	return false;
 }
 
 static void
@@ -288,12 +539,17 @@ PgturbohybridGraphLoadCodePage(Relation index, PgturbohybridGraphScanOpaque so, 
 		PgturbohybridGraphPageOpaque opaque;
 		OffsetNumber maxoff;
 		bool		fallbackTried = false;
+		instr_time	lockStart;
 
 retry:
 
 		CHECK_FOR_INTERRUPTS();
 		buf = ReadBuffer(index, blkno);
+		INSTR_TIME_SET_CURRENT(lockStart);
 		LockBuffer(buf, BUFFER_LOCK_SHARE);
+		if (so != NULL)
+			so->graphCodeBufferLockWaitUs +=
+				PgturbohybridGraphElapsedUsSince(lockStart);
 		page = BufferGetPage(buf);
 		opaque = PgturbohybridGraphPageGetOpaque(page);
 		if ((opaque->pageKind & PGTURBOHYBRID_GRAPH_PAGE_KIND_MASK) != PGTURBOHYBRID_GRAPH_PAGE_KIND_QUANT_CODE)
@@ -411,10 +667,15 @@ PgturbohybridGraphLoadAllAdjPages(Relation index, PgturbohybridGraphScanOpaque s
 		PgturbohybridGraphPageOpaque opaque;
 		OffsetNumber maxoff;
 		BlockNumber nextblkno;
+		instr_time	lockStart;
 
 		CHECK_FOR_INTERRUPTS();
 		buf = ReadBuffer(index, blkno);
+		INSTR_TIME_SET_CURRENT(lockStart);
 		LockBuffer(buf, BUFFER_LOCK_SHARE);
+		if (so != NULL)
+			so->graphAdjBufferLockWaitUs +=
+				PgturbohybridGraphElapsedUsSince(lockStart);
 		page = BufferGetPage(buf);
 		opaque = PgturbohybridGraphPageGetOpaque(page);
 		if ((opaque->pageKind & PGTURBOHYBRID_GRAPH_PAGE_KIND_MASK) != PGTURBOHYBRID_GRAPH_PAGE_KIND_QUANT_ADJ)
@@ -628,6 +889,7 @@ PgturbohybridGraphCacheMatches(PgturbohybridGraphNativeCache *cache, Relation in
 		cache->graphFlags == meta->graphFlags &&
 		cache->tqNodeCount == meta->tqNodeCount &&
 		cache->tqEntryNodeId == meta->tqEntryNodeId &&
+		cache->tqSegmentCount == meta->tqSegmentCount &&
 		cache->tqCodeBytes == meta->tqCodeBytes &&
 		cache->tqBits == meta->tqBits &&
 		cache->tqPayloadCount == meta->tqPayloadCount &&
@@ -749,10 +1011,13 @@ PgturbohybridGraphBuildCache(Relation index, PgturbohybridGraphMetaPageData *met
 	MemoryContext cacheCtx;
 	MemoryContext oldCtx;
 	PgturbohybridGraphNativeCache *cache;
+	PgturbohybridGraphScanOpaqueData loadStats;
 	instr_time	buildStart;
 	instr_time	buildElapsed;
 
 	INSTR_TIME_SET_CURRENT(buildStart);
+	memset(&loadStats, 0, sizeof(loadStats));
+	loadStats.pgturbohybridGraphScan = true;
 
 	cacheCtx = AllocSetContextCreate(CacheMemoryContext,
 									 "pgturbohybrid native graph cache",
@@ -768,6 +1033,7 @@ PgturbohybridGraphBuildCache(Relation index, PgturbohybridGraphMetaPageData *met
 	cache->graphFlags = meta->graphFlags;
 	cache->tqNodeCount = meta->tqNodeCount;
 	cache->tqEntryNodeId = meta->tqEntryNodeId;
+	cache->tqSegmentCount = meta->tqSegmentCount;
 	cache->tqCodeBytes = meta->tqCodeBytes;
 	cache->tqBits = meta->tqBits;
 	cache->tqPayloadCount = meta->tqPayloadCount;
@@ -792,19 +1058,23 @@ PgturbohybridGraphBuildCache(Relation index, PgturbohybridGraphMetaPageData *met
 	{
 		for (uint32 nodeId = 0; nodeId < meta->tqNodeCount;
 			 nodeId += cache->storage.codeTuplesPerPage)
-			(void) PgturbohybridGraphLoadCodePage(index, NULL, meta, &cache->storage, nodeId);
+			(void) PgturbohybridGraphLoadCodePage(index, &loadStats, meta,
+												  &cache->storage, nodeId);
 	}
 
 	PgturbohybridGraphBuildPayloadRefs(meta, &cache->storage);
 
 	if (meta->tqNodeCount > 0)
-		PgturbohybridGraphLoadAllAdjPages(index, NULL, meta, &cache->storage);
+		PgturbohybridGraphLoadAllAdjPages(index, &loadStats, meta,
+										  &cache->storage);
 
 	if (cache->storage.exactArena != NULL)
 		(void) PgturbohybridGraphLoadExactVectors(index, meta, &cache->storage);
 	cache->storage.cached = true;
 
 	PgturbohybridGraphCacheComputeResidentBytes(cache, meta);
+	cache->buildCodeBufferLockWaitUs = loadStats.graphCodeBufferLockWaitUs;
+	cache->buildAdjBufferLockWaitUs = loadStats.graphAdjBufferLockWaitUs;
 
 	cache->next = pgturbohybridGraphCacheList;
 	pgturbohybridGraphCacheList = cache;
@@ -818,6 +1088,523 @@ PgturbohybridGraphBuildCache(Relation index, PgturbohybridGraphMetaPageData *met
 	return cache;
 }
 
+static void
+PgturbohybridGraphSharedInitStorageScratch(PgturbohybridGraphMetaPageData *meta,
+										   PgturbohybridGraphScanStorage *storage)
+{
+	storage->ctx = CurrentMemoryContext;
+	if (meta->tqNodeCount > 0)
+	{
+		storage->visitedGeneration = palloc0(sizeof(uint32) * meta->tqNodeCount);
+		storage->visitGeneration = palloc0(sizeof(uint32));
+	}
+}
+
+static bool
+PgturbohybridGraphSharedBuildView(PgturbohybridGraphSharedMap *map,
+								  PgturbohybridGraphMetaPageData *meta)
+{
+	PgturbohybridGraphSharedCacheHeader *hdr =
+		(PgturbohybridGraphSharedCacheHeader *) map->base;
+	PgturbohybridGraphSharedNode *sharedNodes =
+		(PgturbohybridGraphSharedNode *) PgturbohybridGraphSharedPtr(map->base, hdr->nodesOffset);
+	uint64	   *neighborOffsets =
+		(uint64 *) PgturbohybridGraphSharedPtr(map->base, hdr->neighborOffsetsOffset);
+	uint32	   *neighborData =
+		(uint32 *) PgturbohybridGraphSharedPtr(map->base, hdr->neighborDataOffset);
+	PgturbohybridGraphScanStorage *storage = &map->view;
+	MemoryContext oldCtx;
+
+	oldCtx = MemoryContextSwitchTo(map->ctx);
+	memset(storage, 0, sizeof(*storage));
+	storage->ctx = map->ctx;
+	storage->nodes =
+		palloc0(PgturbohybridCheckedArrayBytes(sizeof(PgturbohybridGraphScanNode),
+											   meta->tqNodeCount,
+											   "pgturbohybrid shared graph node view"));
+	storage->codeArena =
+		(uint8 *) PgturbohybridGraphSharedPtr(map->base, hdr->codeArenaOffset);
+	storage->payloadArena =
+		(uint8 *) PgturbohybridGraphSharedPtr(map->base, hdr->payloadArenaOffset);
+	storage->residualArena =
+		(uint8 *) PgturbohybridGraphSharedPtr(map->base, hdr->residualArenaOffset);
+	storage->exactArena =
+		(char *) PgturbohybridGraphSharedPtr(map->base, hdr->exactArenaOffset);
+	storage->exactBytes = hdr->exactBytes;
+	storage->neighborCounts =
+		(uint16 *) PgturbohybridGraphSharedPtr(map->base, hdr->neighborCountsOffset);
+	storage->neighbors =
+		palloc0(PgturbohybridCheckedArrayBytes(sizeof(uint32 *),
+											   hdr->adjRecordCount,
+											   "pgturbohybrid shared graph neighbor view"));
+	storage->payloadRefs =
+		(PgturbohybridGraphPayloadRef *) PgturbohybridGraphSharedPtr(map->base, hdr->payloadRefsOffset);
+	storage->payloadRefCount = hdr->payloadRefCount;
+	storage->levelCount = PgturbohybridGraphLevelCapacity(meta->m);
+	storage->codeTuplesPerPage =
+		PgturbohybridGraphTuplesPerPage(PgturbohybridGraphCodeTupleSize(meta->dimensions,
+												  meta->tqPayloadCount,
+												  meta->tqBits,
+												  (meta->tqFlags & PGTURBOHYBRID_GRAPH_TQ_WEIGHTED) != 0,
+												  meta->tqResidualRerankBytes));
+	storage->codePageCount = PgturbohybridGraphPageCount(meta->tqNodeCount,
+														 storage->codeTuplesPerPage);
+	storage->adjPageCount = BlockNumberIsValid(meta->tqAdjStartBlkno) ? 1 : 0;
+	storage->cached = true;
+
+	for (uint32 nodeId = 0; nodeId < meta->tqNodeCount; nodeId++)
+	{
+		PgturbohybridGraphScanNode *node = &storage->nodes[nodeId];
+		PgturbohybridGraphSharedNode *sharedNode = &sharedNodes[nodeId];
+
+		node->heaptid = sharedNode->heaptid;
+		node->payloadMask = sharedNode->payloadMask;
+		node->level = sharedNode->level;
+		node->exactBlkno = sharedNode->exactBlkno;
+		node->exactOffno = sharedNode->exactOffno;
+		node->scale = sharedNode->scale;
+		node->norm = sharedNode->norm;
+		node->codeNorm = sharedNode->codeNorm;
+		node->ecCorrection = sharedNode->ecCorrection;
+		node->flags = sharedNode->flags;
+		node->loaded = sharedNode->loaded;
+		if (node->loaded && storage->codeArena != NULL && meta->tqCodeBytes > 0)
+			node->code = storage->codeArena + ((Size) nodeId * meta->tqCodeBytes);
+		if (node->loaded && storage->payloadArena != NULL && meta->tqPayloadBytes > 0)
+			node->payloads = (int32 *) (storage->payloadArena +
+										((Size) nodeId * meta->tqPayloadBytes));
+		if (node->loaded && storage->residualArena != NULL && meta->tqResidualRerankBytes > 0)
+			node->residualSketch = storage->residualArena +
+				((Size) nodeId * meta->tqResidualRerankBytes);
+		if (node->loaded && storage->exactArena != NULL && storage->exactBytes > 0)
+			node->exactVector = storage->exactArena + ((Size) nodeId * storage->exactBytes);
+	}
+
+	for (uint32 slot = 0; slot < hdr->adjRecordCount; slot++)
+	{
+		if (storage->neighborCounts[slot] > 0)
+			storage->neighbors[slot] = neighborData + neighborOffsets[slot];
+	}
+
+	MemoryContextSwitchTo(oldCtx);
+	return true;
+}
+
+static bool
+PgturbohybridGraphMapSharedCacheFile(Relation index,
+									 PgturbohybridGraphMetaPageData *meta,
+									 const char *path, uint64 key,
+									 PgturbohybridGraphSharedMap **mapOut,
+									 int64 *attachUs)
+{
+	int			fd;
+	struct stat st;
+	void	   *base;
+	PgturbohybridGraphSharedCacheHeader *hdr;
+	MemoryContext ctx;
+	MemoryContext oldCtx;
+	PgturbohybridGraphSharedMap *map;
+	instr_time	start;
+
+	if (attachUs != NULL)
+		*attachUs = 0;
+	INSTR_TIME_SET_CURRENT(start);
+	fd = open(path, O_RDONLY);
+	if (fd < 0)
+		return false;
+	if (fstat(fd, &st) != 0 || st.st_size < (off_t) sizeof(PgturbohybridGraphSharedCacheHeader))
+	{
+		close(fd);
+		return false;
+	}
+	base = mmap(NULL, st.st_size, PROT_READ, MAP_SHARED, fd, 0);
+	close(fd);
+	if (base == MAP_FAILED)
+		return false;
+
+	hdr = (PgturbohybridGraphSharedCacheHeader *) base;
+	if (!PgturbohybridGraphSharedHeaderMatches(hdr, index, meta, key) ||
+		hdr->fileSize != (uint64) st.st_size)
+	{
+		munmap(base, st.st_size);
+		return false;
+	}
+
+	ctx = AllocSetContextCreate(CacheMemoryContext,
+								"pgturbohybrid shared graph cache view",
+								ALLOCSET_DEFAULT_SIZES);
+	oldCtx = MemoryContextSwitchTo(ctx);
+	map = palloc0(sizeof(PgturbohybridGraphSharedMap));
+	map->key = key;
+	map->relid = RelationGetRelid(index);
+	map->relfilenumber = PgturbohybridGraphRelFileNumber(index);
+	map->graphFlags = meta->graphFlags;
+	map->base = base;
+	map->size = (Size) st.st_size;
+	map->ctx = ctx;
+	MemoryContextSwitchTo(oldCtx);
+
+	if (!PgturbohybridGraphSharedBuildView(map, meta))
+	{
+		MemoryContextDelete(ctx);
+		munmap(base, st.st_size);
+		return false;
+	}
+
+	map->next = pgturbohybridGraphSharedMapList;
+	pgturbohybridGraphSharedMapList = map;
+	map->attachUs = PgturbohybridGraphElapsedUsSince(start);
+	if (attachUs != NULL)
+		*attachUs = map->attachUs;
+	*mapOut = map;
+	return true;
+}
+
+static PgturbohybridGraphSharedMap *
+PgturbohybridGraphFindSharedMap(Relation index, PgturbohybridGraphMetaPageData *meta,
+								uint64 key)
+{
+	Oid			relid = RelationGetRelid(index);
+	Oid			relfilenumber = PgturbohybridGraphRelFileNumber(index);
+
+	for (PgturbohybridGraphSharedMap *map = pgturbohybridGraphSharedMapList;
+		 map != NULL;
+		 map = map->next)
+	{
+		if (map->key == key &&
+			map->relid == relid &&
+			map->relfilenumber == relfilenumber &&
+			map->graphFlags == meta->graphFlags)
+			return map;
+	}
+	return NULL;
+}
+
+static bool
+PgturbohybridGraphWriteSharedCacheFile(Relation index,
+									   PgturbohybridGraphMetaPageData *meta,
+									   const char *path, const char *tmpPath,
+									   uint64 key, int64 *buildUs,
+									   int64 *codeLockWaitUs,
+									   int64 *adjLockWaitUs)
+{
+	PgturbohybridGraphScanStorage storage;
+	PgturbohybridGraphScanOpaqueData loadStats;
+	PgturbohybridGraphSharedCacheHeader hdr;
+	PgturbohybridGraphSharedNode *sharedNodes;
+	uint16	   *neighborCounts;
+	uint64	   *neighborOffsets;
+	uint32	   *neighborData;
+	uint8	   *codeArena;
+	uint8	   *payloadArena;
+	uint8	   *residualArena;
+	char	   *exactArena;
+	PgturbohybridGraphPayloadRef *payloadRefs;
+	uint64		offset;
+	uint64		neighborValueCount = 0;
+	uint64		codeBytes = 0;
+	uint64		payloadBytes = 0;
+	uint64		residualBytes = 0;
+	uint64		exactBytes = 0;
+	uint64		adjRecordCount = PgturbohybridGraphAdjRecordCount(meta);
+	int			fd;
+	void	   *base;
+	instr_time	start;
+
+	if (buildUs != NULL)
+		*buildUs = 0;
+	if (codeLockWaitUs != NULL)
+		*codeLockWaitUs = 0;
+	if (adjLockWaitUs != NULL)
+		*adjLockWaitUs = 0;
+
+	INSTR_TIME_SET_CURRENT(start);
+	memset(&loadStats, 0, sizeof(loadStats));
+	loadStats.pgturbohybridGraphScan = true;
+	PgturbohybridGraphInitScanStorageUncached(meta, &storage,
+								   PgturbohybridGraphShouldCacheExactVectors(index, meta));
+	if (meta->tqNodeCount > 0)
+	{
+		for (uint32 nodeId = 0; nodeId < meta->tqNodeCount;
+			 nodeId += storage.codeTuplesPerPage)
+			(void) PgturbohybridGraphLoadCodePage(index, &loadStats, meta,
+												  &storage, nodeId);
+	}
+	PgturbohybridGraphBuildPayloadRefs(meta, &storage);
+	if (meta->tqNodeCount > 0)
+		PgturbohybridGraphLoadAllAdjPages(index, &loadStats, meta, &storage);
+	if (storage.exactArena != NULL)
+		(void) PgturbohybridGraphLoadExactVectors(index, meta, &storage);
+
+	for (uint32 slot = 0; slot < adjRecordCount; slot++)
+		neighborValueCount += storage.neighborCounts[slot];
+
+	codeBytes = storage.codeArena != NULL ?
+		(uint64) meta->tqNodeCount * (uint64) meta->tqCodeBytes : 0;
+	payloadBytes = storage.payloadArena != NULL ?
+		(uint64) meta->tqNodeCount * (uint64) meta->tqPayloadBytes : 0;
+	residualBytes = storage.residualArena != NULL ?
+		(uint64) meta->tqNodeCount * (uint64) meta->tqResidualRerankBytes : 0;
+	exactBytes = storage.exactArena != NULL ?
+		(uint64) meta->tqNodeCount * (uint64) storage.exactBytes : 0;
+
+	memset(&hdr, 0, sizeof(hdr));
+	hdr.magic = PGTURBOHYBRID_GRAPH_SHARED_CACHE_MAGIC;
+	hdr.version = PGTURBOHYBRID_GRAPH_SHARED_CACHE_VERSION;
+	hdr.key = key;
+	hdr.relid = RelationGetRelid(index);
+	hdr.relfilenumber = PgturbohybridGraphRelFileNumber(index);
+	hdr.dimensions = meta->dimensions;
+	hdr.m = meta->m;
+	hdr.graphMaxLevel = meta->graphMaxLevel;
+	hdr.graphFlags = meta->graphFlags;
+	hdr.tqBits = meta->tqBits;
+	hdr.tqNodeCount = meta->tqNodeCount;
+	hdr.tqEntryNodeId = meta->tqEntryNodeId;
+	hdr.tqCodeBytes = meta->tqCodeBytes;
+	hdr.tqPayloadCount = meta->tqPayloadCount;
+	hdr.tqPayloadBytes = meta->tqPayloadBytes;
+	hdr.tqResidualRerankBytes = meta->tqResidualRerankBytes;
+	hdr.tqCodeStartBlkno = meta->tqCodeStartBlkno;
+	hdr.tqAdjStartBlkno = meta->tqAdjStartBlkno;
+	hdr.tqExactStartBlkno = meta->tqExactStartBlkno;
+	hdr.tqCorrectionStartBlkno = meta->tqCorrectionStartBlkno;
+	hdr.adjRecordCount = (uint32) adjRecordCount;
+	hdr.neighborValueCount = neighborValueCount;
+	hdr.payloadRefCount = storage.payloadRefCount;
+	hdr.exactBytes = (uint32) storage.exactBytes;
+
+	offset = sizeof(PgturbohybridGraphSharedCacheHeader);
+	if (!PgturbohybridGraphSharedAddBytes(&offset,
+										  (uint64) meta->tqNodeCount * sizeof(PgturbohybridGraphSharedNode),
+										  &hdr.nodesOffset) ||
+		!PgturbohybridGraphSharedAddBytes(&offset, codeBytes, &hdr.codeArenaOffset) ||
+		!PgturbohybridGraphSharedAddBytes(&offset, payloadBytes, &hdr.payloadArenaOffset) ||
+		!PgturbohybridGraphSharedAddBytes(&offset, residualBytes, &hdr.residualArenaOffset) ||
+		!PgturbohybridGraphSharedAddBytes(&offset, exactBytes, &hdr.exactArenaOffset) ||
+		!PgturbohybridGraphSharedAddBytes(&offset,
+										  adjRecordCount * sizeof(uint16),
+										  &hdr.neighborCountsOffset) ||
+		!PgturbohybridGraphSharedAddBytes(&offset,
+										  adjRecordCount * sizeof(uint64),
+										  &hdr.neighborOffsetsOffset) ||
+		!PgturbohybridGraphSharedAddBytes(&offset,
+										  neighborValueCount * sizeof(uint32),
+										  &hdr.neighborDataOffset) ||
+		!PgturbohybridGraphSharedAddBytes(&offset,
+										  (uint64) storage.payloadRefCount *
+										  sizeof(PgturbohybridGraphPayloadRef),
+										  &hdr.payloadRefsOffset))
+		return false;
+	hdr.fileSize = PgturbohybridGraphSharedAlign(offset);
+	hdr.residentCodeBytes = codeBytes;
+	hdr.residentAdjBytes =
+		adjRecordCount * (sizeof(uint16) + sizeof(uint64)) +
+		neighborValueCount * sizeof(uint32);
+	hdr.residentExactBytes = exactBytes;
+	hdr.residentTotalBytes = hdr.fileSize;
+
+	fd = open(tmpPath, O_CREAT | O_TRUNC | O_RDWR, 0600);
+	if (fd < 0)
+		return false;
+	if (ftruncate(fd, (off_t) hdr.fileSize) != 0)
+	{
+		close(fd);
+		unlink(tmpPath);
+		return false;
+	}
+	base = mmap(NULL, (Size) hdr.fileSize, PROT_READ | PROT_WRITE, MAP_SHARED, fd, 0);
+	if (base == MAP_FAILED)
+	{
+		close(fd);
+		unlink(tmpPath);
+		return false;
+	}
+
+	memcpy(base, &hdr, sizeof(hdr));
+	sharedNodes = (PgturbohybridGraphSharedNode *) PgturbohybridGraphSharedPtr(base, hdr.nodesOffset);
+	codeArena = (uint8 *) PgturbohybridGraphSharedPtr(base, hdr.codeArenaOffset);
+	payloadArena = (uint8 *) PgturbohybridGraphSharedPtr(base, hdr.payloadArenaOffset);
+	residualArena = (uint8 *) PgturbohybridGraphSharedPtr(base, hdr.residualArenaOffset);
+	exactArena = (char *) PgturbohybridGraphSharedPtr(base, hdr.exactArenaOffset);
+	neighborCounts = (uint16 *) PgturbohybridGraphSharedPtr(base, hdr.neighborCountsOffset);
+	neighborOffsets = (uint64 *) PgturbohybridGraphSharedPtr(base, hdr.neighborOffsetsOffset);
+	neighborData = (uint32 *) PgturbohybridGraphSharedPtr(base, hdr.neighborDataOffset);
+	payloadRefs = (PgturbohybridGraphPayloadRef *) PgturbohybridGraphSharedPtr(base, hdr.payloadRefsOffset);
+
+	for (uint32 nodeId = 0; nodeId < meta->tqNodeCount; nodeId++)
+	{
+		PgturbohybridGraphScanNode *node = &storage.nodes[nodeId];
+
+		sharedNodes[nodeId].heaptid = node->heaptid;
+		sharedNodes[nodeId].payloadMask = node->payloadMask;
+		sharedNodes[nodeId].level = node->level;
+		sharedNodes[nodeId].exactBlkno = node->exactBlkno;
+		sharedNodes[nodeId].exactOffno = node->exactOffno;
+		sharedNodes[nodeId].scale = node->scale;
+		sharedNodes[nodeId].norm = node->norm;
+		sharedNodes[nodeId].codeNorm = node->codeNorm;
+		sharedNodes[nodeId].ecCorrection = node->ecCorrection;
+		sharedNodes[nodeId].flags = node->flags;
+		sharedNodes[nodeId].loaded = node->loaded;
+	}
+	if (codeBytes > 0)
+		memcpy(codeArena, storage.codeArena, codeBytes);
+	if (payloadBytes > 0)
+		memcpy(payloadArena, storage.payloadArena, payloadBytes);
+	if (residualBytes > 0)
+		memcpy(residualArena, storage.residualArena, residualBytes);
+	if (exactBytes > 0)
+		memcpy(exactArena, storage.exactArena, exactBytes);
+	memcpy(neighborCounts, storage.neighborCounts, adjRecordCount * sizeof(uint16));
+	{
+		uint64		cursor = 0;
+
+		for (uint32 slot = 0; slot < adjRecordCount; slot++)
+		{
+			neighborOffsets[slot] = cursor;
+			if (storage.neighborCounts[slot] > 0 && storage.neighbors[slot] != NULL)
+			{
+				memcpy(&neighborData[cursor], storage.neighbors[slot],
+					   storage.neighborCounts[slot] * sizeof(uint32));
+				cursor += storage.neighborCounts[slot];
+			}
+		}
+	}
+	if (storage.payloadRefCount > 0)
+		memcpy(payloadRefs, storage.payloadRefs,
+			   storage.payloadRefCount * sizeof(PgturbohybridGraphPayloadRef));
+
+	if (msync(base, (Size) hdr.fileSize, MS_SYNC) != 0 ||
+		munmap(base, (Size) hdr.fileSize) != 0)
+	{
+		close(fd);
+		unlink(tmpPath);
+		return false;
+	}
+	if (fsync(fd) != 0)
+	{
+		close(fd);
+		unlink(tmpPath);
+		return false;
+	}
+	close(fd);
+	if (rename(tmpPath, path) != 0)
+	{
+		unlink(tmpPath);
+		return false;
+	}
+
+	if (buildUs != NULL)
+		*buildUs = PgturbohybridGraphElapsedUsSince(start);
+	if (codeLockWaitUs != NULL)
+		*codeLockWaitUs = loadStats.graphCodeBufferLockWaitUs;
+	if (adjLockWaitUs != NULL)
+		*adjLockWaitUs = loadStats.graphAdjBufferLockWaitUs;
+	return true;
+}
+
+static PgturbohybridGraphSharedMap *
+PgturbohybridGraphGetSharedMap(Relation index, PgturbohybridGraphMetaPageData *meta,
+							   int64 *attachUs, int64 *buildUs, int64 *waitUs,
+							   int64 *codeLockWaitUs, int64 *adjLockWaitUs,
+							   bool *builtThisScan,
+							   PgturbohybridGraphNativeCacheReason *reason)
+{
+	uint64		key = PgturbohybridGraphSharedCacheKey(index, meta);
+	PgturbohybridGraphSharedMap *map;
+	char		dir[MAXPGPATH];
+	char		path[MAXPGPATH];
+	char		lockPath[MAXPGPATH];
+	char		tmpPath[MAXPGPATH];
+	int			lockFd;
+	bool		builder = false;
+	instr_time	waitStart;
+
+	if (attachUs != NULL)
+		*attachUs = 0;
+	if (buildUs != NULL)
+		*buildUs = 0;
+	if (waitUs != NULL)
+		*waitUs = 0;
+	if (codeLockWaitUs != NULL)
+		*codeLockWaitUs = 0;
+	if (adjLockWaitUs != NULL)
+		*adjLockWaitUs = 0;
+	if (builtThisScan != NULL)
+		*builtThisScan = false;
+
+	map = PgturbohybridGraphFindSharedMap(index, meta, key);
+	if (map != NULL)
+		return map;
+
+	if (!PgturbohybridGraphEnsureSharedCacheDir(dir, sizeof(dir)))
+	{
+		if (reason != NULL)
+			*reason = PGTURBOHYBRID_GRAPH_NATIVE_CACHE_REASON_SHARED_ATTACH_FAILED;
+		return NULL;
+	}
+	PgturbohybridGraphSharedCachePath(index, meta, key, path, sizeof(path));
+	PgturbohybridGraphSharedCacheLockPath(index, meta, key, lockPath, sizeof(lockPath));
+	snprintf(tmpPath, sizeof(tmpPath), "%s.%d.tmp", path, MyProcPid);
+
+	if (PgturbohybridGraphMapSharedCacheFile(index, meta, path, key, &map, attachUs))
+		return map;
+
+	lockFd = open(lockPath, O_CREAT | O_EXCL | O_RDWR, 0600);
+	if (lockFd >= 0)
+		builder = true;
+
+	if (builder)
+	{
+		bool		ok;
+
+		ok = PgturbohybridGraphWriteSharedCacheFile(index, meta, path, tmpPath, key,
+													buildUs, codeLockWaitUs,
+													adjLockWaitUs);
+		close(lockFd);
+		unlink(lockPath);
+		if (!ok)
+		{
+			if (reason != NULL)
+				*reason = PGTURBOHYBRID_GRAPH_NATIVE_CACHE_REASON_SHARED_ATTACH_FAILED;
+			return NULL;
+		}
+		if (builtThisScan != NULL)
+			*builtThisScan = true;
+		if (PgturbohybridGraphMapSharedCacheFile(index, meta, path, key, &map, attachUs))
+		{
+			map->builtThisBackend = true;
+			map->buildUs = buildUs != NULL ? *buildUs : 0;
+			return map;
+		}
+		if (reason != NULL)
+			*reason = PGTURBOHYBRID_GRAPH_NATIVE_CACHE_REASON_SHARED_ATTACH_FAILED;
+		return NULL;
+	}
+
+	INSTR_TIME_SET_CURRENT(waitStart);
+	for (;;)
+	{
+		CHECK_FOR_INTERRUPTS();
+		if (PgturbohybridGraphMapSharedCacheFile(index, meta, path, key, &map, attachUs))
+		{
+			if (waitUs != NULL)
+				*waitUs = PgturbohybridGraphElapsedUsSince(waitStart);
+			return map;
+		}
+		if (PgturbohybridGraphElapsedUsSince(waitStart) >= PGTURBOHYBRID_GRAPH_SHARED_CACHE_WAIT_US)
+			break;
+		pg_usleep(PGTURBOHYBRID_GRAPH_SHARED_CACHE_POLL_US);
+	}
+
+	if (waitUs != NULL)
+		*waitUs = PgturbohybridGraphElapsedUsSince(waitStart);
+	if (reason != NULL)
+		*reason = PGTURBOHYBRID_GRAPH_NATIVE_CACHE_REASON_SHARED_BUILD_TIMEOUT;
+	return NULL;
+}
+
 void
 PgturbohybridGraphInitScanStorage(Relation index, PgturbohybridGraphMetaPageData *meta,
 					   PgturbohybridGraphScanStorage *storage,
@@ -825,15 +1612,77 @@ PgturbohybridGraphInitScanStorage(Relation index, PgturbohybridGraphMetaPageData
 {
 	PgturbohybridGraphNativeCache *cache;
 	bool		cacheExactVectors = PgturbohybridGraphShouldCacheExactVectors(index, meta);
+	PgturbohybridGraphNativeCacheReason reason;
 
 	if (info != NULL)
+	{
 		memset(info, 0, sizeof(*info));
+		info->policy = pgturbohybrid_native_cache_policy;
+		info->refcount = -1;
+	}
 
-	if (!PgturbohybridGraphShouldUseNativeCache(meta, cacheExactVectors))
+	if (!PgturbohybridGraphShouldUseNativeCache(meta, cacheExactVectors,
+											   &reason))
 	{
 		PgturbohybridGraphInitScanStorageUncached(meta, storage, cacheExactVectors);
 		if (info != NULL)
+		{
 			info->mode = PGTURBOHYBRID_GRAPH_NATIVE_CACHE_UNCACHED;
+			info->reason = reason;
+		}
+		return;
+	}
+
+	if (pgturbohybrid_native_cache_policy == PGTURBOHYBRID_NATIVE_CACHE_POLICY_SHARED)
+	{
+		PgturbohybridGraphSharedMap *sharedMap;
+		int64		attachUs = 0;
+		int64		buildUs = 0;
+		int64		waitUs = 0;
+		int64		codeLockWaitUs = 0;
+		int64		adjLockWaitUs = 0;
+		bool		builtThisScan = false;
+
+		sharedMap = PgturbohybridGraphGetSharedMap(index, meta, &attachUs, &buildUs,
+												   &waitUs, &codeLockWaitUs,
+												   &adjLockWaitUs, &builtThisScan,
+												   &reason);
+		if (sharedMap != NULL)
+		{
+			memcpy(storage, &sharedMap->view, sizeof(PgturbohybridGraphScanStorage));
+			PgturbohybridGraphSharedInitStorageScratch(meta, storage);
+			if (info != NULL)
+			{
+				PgturbohybridGraphSharedCacheHeader *hdr =
+					(PgturbohybridGraphSharedCacheHeader *) sharedMap->base;
+
+				info->mode = PGTURBOHYBRID_GRAPH_NATIVE_CACHE_SHARED;
+				info->reason = reason;
+				info->used = true;
+				info->reused = !builtThisScan;
+				info->builtThisScan = builtThisScan;
+				info->attachUs = attachUs;
+				info->buildUs = buildUs;
+				info->waitUs = waitUs;
+				info->refcount = -1;
+				info->totalBytes = (int64) hdr->residentTotalBytes;
+				info->codeBytes = (int64) hdr->residentCodeBytes;
+				info->adjBytes = (int64) hdr->residentAdjBytes;
+				info->exactBytes = (int64) hdr->residentExactBytes;
+				info->codeBufferLockWaitUs = codeLockWaitUs;
+				info->adjBufferLockWaitUs = adjLockWaitUs;
+			}
+			return;
+		}
+
+		PgturbohybridGraphInitScanStorageUncached(meta, storage, cacheExactVectors);
+		if (info != NULL)
+		{
+			info->mode = PGTURBOHYBRID_GRAPH_NATIVE_CACHE_UNCACHED;
+			info->reason = reason;
+			info->attachUs = attachUs;
+			info->waitUs = waitUs;
+		}
 		return;
 	}
 
@@ -847,6 +1696,8 @@ PgturbohybridGraphInitScanStorage(Relation index, PgturbohybridGraphMetaPageData
 			info->buildUs = cache->buildUs;
 		}
 	}
+	else if (info != NULL)
+		info->reused = true;
 
 	memcpy(storage, &cache->storage, sizeof(PgturbohybridGraphScanStorage));
 	storage->cached = true;
@@ -854,10 +1705,17 @@ PgturbohybridGraphInitScanStorage(Relation index, PgturbohybridGraphMetaPageData
 	if (info != NULL)
 	{
 		info->mode = PGTURBOHYBRID_GRAPH_NATIVE_CACHE_PER_BACKEND;
+		info->reason = reason;
+		info->used = true;
 		info->totalBytes = (int64) cache->residentTotalBytes;
 		info->codeBytes = (int64) cache->residentCodeBytes;
 		info->adjBytes = (int64) cache->residentAdjBytes;
 		info->exactBytes = (int64) cache->residentExactBytes;
+		if (info->builtThisScan)
+		{
+			info->codeBufferLockWaitUs = cache->buildCodeBufferLockWaitUs;
+			info->adjBufferLockWaitUs = cache->buildAdjBufferLockWaitUs;
+		}
 	}
 }
 
@@ -868,7 +1726,13 @@ PgturbohybridGraphInitInsertStorage(Relation index, PgturbohybridGraphMetaPageDa
 	PgturbohybridGraphNativeCache *cache;
 	bool		cacheExactVectors = PgturbohybridGraphShouldCacheExactVectors(index, meta);
 
-	if (!PgturbohybridGraphShouldUseNativeCache(meta, cacheExactVectors))
+	if (pgturbohybrid_native_cache_policy == PGTURBOHYBRID_NATIVE_CACHE_POLICY_SHARED)
+	{
+		PgturbohybridGraphInitScanStorageUncached(meta, storage, cacheExactVectors);
+		return NULL;
+	}
+
+	if (!PgturbohybridGraphShouldUseNativeCache(meta, cacheExactVectors, NULL))
 	{
 		PgturbohybridGraphInitScanStorageUncached(meta, storage, cacheExactVectors);
 		return NULL;

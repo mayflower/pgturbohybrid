@@ -33,9 +33,11 @@ BEGIN
 		'turbohybrid.dense_adaptive_widening_max_multiplier',
 		'turbohybrid.dense_adaptive_widening_multiplier',
 		'turbohybrid.dense_build_exact_distances',
+		'turbohybrid.dense_build_neighbor_select',
 		'turbohybrid.dense_graph_avx512vnni',
-		'turbohybrid.dense_graph_avxvnni',
-		'turbohybrid.dense_local_expansion',
+			'turbohybrid.dense_graph_avxvnni',
+			'turbohybrid.dense_heap_rescore',
+			'turbohybrid.dense_local_expansion',
 		'turbohybrid.dense_local_expansion_max_neighbors',
 		'turbohybrid.dense_local_expansion_topn',
 		'turbohybrid.dense_query_split_impl',
@@ -43,8 +45,13 @@ BEGIN
 		'turbohybrid.dense_u8_batch_x4',
 		'turbohybrid.dense_u8_split',
 		'turbohybrid.enable_wand',
+		'turbohybrid.fast_weighted_score_bound_pruning',
+		'turbohybrid.hybrid_budget_policy',
 		'turbohybrid.max_union_candidates',
+		'turbohybrid.native_build_workers',
 		'turbohybrid.native_cache_max_mb',
+		'turbohybrid.native_cache_policy',
+		'turbohybrid.native_cache_scope',
 		'turbohybrid.profile',
 		'turbohybrid.simd'
 	] THEN
@@ -56,14 +63,16 @@ BEGIN
 			current_setting('turbohybrid.profile');
 	END IF;
 
-	IF current_setting('turbohybrid.dense_adaptive_widening') != 'off' OR
-		current_setting('turbohybrid.dense_local_expansion') != 'off' OR
-		current_setting('turbohybrid.dense_build_exact_distances') != 'off' THEN
-		RAISE EXCEPTION 'unexpected latency dense defaults: adaptive %, local %, exact build %',
-			current_setting('turbohybrid.dense_adaptive_widening'),
-			current_setting('turbohybrid.dense_local_expansion'),
-			current_setting('turbohybrid.dense_build_exact_distances');
-	END IF;
+		IF current_setting('turbohybrid.dense_adaptive_widening') != 'off' OR
+			current_setting('turbohybrid.dense_heap_rescore') != 'off' OR
+			current_setting('turbohybrid.dense_local_expansion') != 'off' OR
+			current_setting('turbohybrid.dense_build_exact_distances') != 'off' THEN
+			RAISE EXCEPTION 'unexpected latency dense defaults: adaptive %, heap %, local %, exact build %',
+				current_setting('turbohybrid.dense_adaptive_widening'),
+				current_setting('turbohybrid.dense_heap_rescore'),
+				current_setting('turbohybrid.dense_local_expansion'),
+				current_setting('turbohybrid.dense_build_exact_distances');
+		END IF;
 
 	IF current_setting('turbohybrid.bm25_strategy') != 'auto' OR
 		current_setting('turbohybrid.bm25_impact_or_mode') != 'approx' OR
@@ -130,6 +139,19 @@ BEGIN
 		RAISE EXCEPTION 'expected bm25_hot_postings_cache_mb cap error';
 	EXCEPTION WHEN invalid_parameter_value THEN
 	END;
+END
+$$;
+DO $$
+BEGIN
+	IF turbohybrid_query_out(turbohybrid_query(
+		vector_query => '[1,0,0]'::vector,
+		text_query => websearch_to_tsquery('english', 'postgres'),
+		fusion => 'fast_weighted',
+		alpha => 0.75,
+		final_k => 5
+	))::text != 'turbohybrid_query(fusion=fast_weighted,vector=true,tsquery=true,dense_weight=1,bm25_weight=1,alpha=0.75,rrf_k=60,dense_k=100,bm25_k=100,final_k=5,require_bm25_match=false)' THEN
+		RAISE EXCEPTION 'unexpected fast_weighted turbohybrid_query output';
+	END IF;
 END
 $$;
 DO $$

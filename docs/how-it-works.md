@@ -8,14 +8,17 @@ keyword search are useful together.
 
 ## One-Minute Explanation
 
-A TurboHybrid query has two inputs:
+A TurboHybrid query can have one or two inputs:
 
 - a vector query, usually an embedding from the same model used for your stored
   document embeddings
 - a text query, usually a PostgreSQL `tsquery` such as
   `websearch_to_tsquery(...)` or `plainto_tsquery(...)`
 
-At scan time, TurboHybrid does three practical things:
+Dense-only indexes have only the vector key and support vector queries. Hybrid
+indexes add a `tsvector` key and support text or vector+text queries.
+
+At hybrid scan time, TurboHybrid does three practical things:
 
 1. It retrieves dense candidates from the pgvector `vector` side.
 2. It retrieves BM25/text candidates from the `tsvector` side. BM25 means Best
@@ -35,6 +38,21 @@ ORDER BY embedding <~> turbohybrid_query(
 )
 LIMIT 10;
 ```
+
+For dense-only retrieval, create a one-key index and pass only `vector_query`:
+
+```sql
+CREATE INDEX documents_dense_idx ON documents
+USING turbohybrid (embedding vector_cosine_turbohybrid_ops);
+
+SELECT id, body
+FROM documents
+ORDER BY embedding <~> turbohybrid_query(vector_query => $1::vector)
+LIMIT 10;
+```
+
+`text_query` requires an index whose second key uses
+`bm25_tsvector_turbohybrid_ops`.
 
 In normal use, the SQL `LIMIT` becomes the final top-k target. You ask
 PostgreSQL for the top 10, and TurboHybrid uses that shape to keep the work
@@ -80,7 +98,14 @@ It adds the TurboHybrid feature surface:
   - `turbohybrid_index_stats(regclass)`
   - `turbohybrid_simd_capabilities()`
 
-A typical index combines one dense column and one generated text-search column:
+A dense-only index uses just the vector column:
+
+```sql
+CREATE INDEX documents_dense_idx ON documents
+USING turbohybrid (embedding vector_cosine_turbohybrid_ops);
+```
+
+A hybrid index combines one dense column and one generated text-search column:
 
 ```sql
 CREATE INDEX documents_turbohybrid_idx ON documents
@@ -136,6 +161,17 @@ USING turbohybrid (
 )
 WITH (exact_storage = on);
 ```
+
+For compact exact-free indexes, another explicit option is heap-backed exact
+rescore:
+
+```sql
+SET turbohybrid.dense_heap_rescore = 'topk'; -- or 'band'
+```
+
+It fetches candidate heap tuples, reads the vector column, and computes exact
+distance at query time. That can recover precision without storing exact vectors
+in the index, but it adds heap I/O and remains off by default.
 
 The tradeoff is straightforward: expect more work per query, and measure both
 latency and relevance before choosing production settings.

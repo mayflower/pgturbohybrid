@@ -143,12 +143,15 @@ bool		pgturbohybrid_dense_renorm = false;
 bool		pgturbohybrid_dense_query_1bit_asymmetric = false;
 int			pgturbohybrid_dense_query_1bit_asymmetric_bits = 8;
 bool		pgturbohybrid_dense_build_exact_distances = false;
+int			pgturbohybrid_dense_build_neighbor_select = PGTURBOHYBRID_DENSE_BUILD_NEIGHBOR_SELECT_AUTO;
 bool		pgturbohybrid_dense_hadamard_simd = true;
 int			pgturbohybrid_dense_simd_force = PGTURBOHYBRID_SIMD_FORCE_AUTO;
 int			pgturbohybrid_dense_query_split_impl = PGTURBOHYBRID_QUERY_SPLIT_IMPL_AUTO;
 int			pgturbohybrid_dense_u8_split = PGTURBOHYBRID_U8_SPLIT_AUTO;
 bool		pgturbohybrid_dense_u8_batch_x4 = true;
+int			pgturbohybrid_native_cache_policy = PGTURBOHYBRID_NATIVE_CACHE_POLICY_AUTO;
 int			pgturbohybrid_native_cache_max_mb = 512;
+char	   *pgturbohybrid_native_build_workers = "auto";
 int			pgturbohybrid_dense_exact_simd_force = PGTURBOHYBRID_EXACT_SIMD_FORCE_AUTO;
 int			pgturbohybrid_dense_graph_batch_scoring = PGTURBOHYBRID_GRAPH_BATCH_AUTO;
 int			pgturbohybrid_dense_graph_batch_size = 4;
@@ -160,6 +163,7 @@ int			pgturbohybrid_dense_max_candidate_multiplier = 4;
 double		pgturbohybrid_dense_latency_multiplier = 1.5;
 int			pgturbohybrid_dense_max_rescore_multiplier = 2;
 int			pgturbohybrid_dense_rescore_band_policy = PGTURBOHYBRID_RESCORE_BAND_POLICY_AUTO;
+int			pgturbohybrid_dense_heap_rescore = PGTURBOHYBRID_DENSE_HEAP_RESCORE_OFF;
 int			pgturbohybrid_dense_adaptive_widening = PGTURBOHYBRID_DENSE_ADAPTIVE_WIDENING_OFF;
 double		pgturbohybrid_dense_adaptive_widening_multiplier = 2.0;
 double		pgturbohybrid_dense_adaptive_widening_max_multiplier = 4.0;
@@ -170,6 +174,55 @@ int			pgturbohybrid_dense_local_expansion_max_neighbors = 256;
 int			pgturbohybrid_graph_lock_tranche_id;
 static relopt_kind pgturbohybrid_graph_relopt_kind;
 static relopt_kind pgturbohybrid_relopt_kind;
+
+const char *
+PgturbohybridDenseBuildNeighborSelectName(int mode)
+{
+	switch ((PgturbohybridDenseBuildNeighborSelect) mode)
+	{
+		case PGTURBOHYBRID_DENSE_BUILD_NEIGHBOR_SELECT_FAST:
+			return "fast";
+		case PGTURBOHYBRID_DENSE_BUILD_NEIGHBOR_SELECT_HEURISTIC:
+			return "heuristic";
+		case PGTURBOHYBRID_DENSE_BUILD_NEIGHBOR_SELECT_AUTO:
+			return "auto";
+		default:
+			return "unknown";
+	}
+}
+
+const char *
+PgturbohybridGraphDenseHeapRescoreName(int mode)
+{
+	switch ((TqDenseHeapRescoreMode) mode)
+	{
+		case PGTURBOHYBRID_DENSE_HEAP_RESCORE_OFF:
+			return "off";
+		case PGTURBOHYBRID_DENSE_HEAP_RESCORE_TOPK:
+			return "topk";
+		case PGTURBOHYBRID_DENSE_HEAP_RESCORE_BAND:
+			return "band";
+		default:
+			return "unknown";
+	}
+}
+
+const char *
+PgturbohybridGraphExactRescoreSourceName(int source)
+{
+	switch ((TqExactRescoreSource) source)
+	{
+		case PGTURBOHYBRID_EXACT_RESCORE_SOURCE_INDEX_EXACT:
+			return "index_exact";
+		case PGTURBOHYBRID_EXACT_RESCORE_SOURCE_HEAP:
+			return "heap";
+		case PGTURBOHYBRID_EXACT_RESCORE_SOURCE_RESIDUAL:
+			return "residual";
+		case PGTURBOHYBRID_EXACT_RESCORE_SOURCE_NONE:
+		default:
+			return "none";
+	}
+}
 
 
 /*
@@ -304,6 +357,7 @@ pgturbohybrid_index_stats(PG_FUNCTION_ARGS)
 	uint16		residualRerankBytes;
 	int			routing;
 	BlockNumber tqBm25MetaStartBlkno;
+	bool		hasLexicalKey;
 	bool		hasBm25Meta = false;
 	PgturbohybridBm25MetaTupleData bm25Meta;
 	TqOptions  *opts;
@@ -330,6 +384,7 @@ pgturbohybrid_index_stats(PG_FUNCTION_ARGS)
 	residualRerankBytes = meta.tqResidualRerankBytes;
 	routing = opts != NULL ? opts->routing : PGTURBOHYBRID_ROUTING_AUTO;
 	tqBm25MetaStartBlkno = meta.tqBm25MetaStartBlkno;
+	hasLexicalKey = PgturbohybridIndexHasLexical(index);
 
 	if (BlockNumberIsValid(tqBm25MetaStartBlkno))
 	{
@@ -394,6 +449,10 @@ pgturbohybrid_index_stats(PG_FUNCTION_ARGS)
 										  PgturbohybridProfileName(pgturbohybrid_profile));
 	PgturbohybridIndexStatsJsonbAddString(&jsonState, "storage_kind",
 										  PgturbohybridGraphStorageKindName(storageKind));
+	PgturbohybridIndexStatsJsonbAddString(&jsonState, "index_shape",
+										  hasLexicalKey ? "hybrid" : "dense_only");
+	PgturbohybridIndexStatsJsonbAddBool(&jsonState, "bm25_branch_available",
+										hasLexicalKey && hasBm25Meta);
 	PgturbohybridIndexStatsJsonbAddUInt32(&jsonState, "blocks", nblocks);
 	PgturbohybridIndexStatsJsonbAddUInt32(&jsonState, "graph_m", graphM);
 	PgturbohybridIndexStatsJsonbAddUInt32(&jsonState, "graph_ef_construction",
@@ -402,6 +461,10 @@ pgturbohybrid_index_stats(PG_FUNCTION_ARGS)
 										  graphEfSearch);
 	PgturbohybridIndexStatsJsonbAddUInt32(&jsonState, "graph_oversampling",
 										  graphOversampling);
+	PgturbohybridIndexStatsJsonbAddUInt32(&jsonState, "native_segments",
+										  meta.tqSegmentCount > 0 ? meta.tqSegmentCount : 1);
+	PgturbohybridIndexStatsJsonbAddUInt32(&jsonState, "native_segment_bytes",
+										  meta.tqSegmentBytes);
 	PgturbohybridIndexStatsJsonbAddString(&jsonState, "routing",
 										  PgturbohybridRoutingName(routing));
 	PgturbohybridIndexStatsJsonbAddUInt32(&jsonState, "quantization_bits", tqBits);
@@ -409,6 +472,11 @@ pgturbohybrid_index_stats(PG_FUNCTION_ARGS)
 										(tqFlags & PGTURBOHYBRID_GRAPH_EXACT_FREE) == 0);
 	PgturbohybridIndexStatsJsonbAddBool(&jsonState, "dense_build_exact_distances",
 										(tqFlags & PGTURBOHYBRID_GRAPH_TQ_EXACT_BUILD) != 0);
+	PgturbohybridIndexStatsJsonbAddString(&jsonState, "build_neighbor_select",
+										  (tqFlags & PGTURBOHYBRID_GRAPH_TQ_FAST_BUILD_EDGES) != 0 ?
+										  "fast" : "heuristic");
+	PgturbohybridIndexStatsJsonbAddBool(&jsonState, "build_fast_edges",
+										(tqFlags & PGTURBOHYBRID_GRAPH_TQ_FAST_BUILD_EDGES) != 0);
 	PgturbohybridIndexStatsJsonbAddBool(&jsonState, "graph_backbone",
 										(tqFlags & PGTURBOHYBRID_GRAPH_TQ_BACKBONE) != 0);
 	PgturbohybridIndexStatsJsonbAddUInt32(&jsonState, "entry_sidecar_count",
@@ -430,6 +498,30 @@ pgturbohybrid_index_stats(PG_FUNCTION_ARGS)
 										  hasBm25Meta ?
 										  (double) (bm25Meta.totalDocLen + bm25Meta.deltaTotalDocLen) /
 										  Max((double) (bm25Meta.docCount + bm25Meta.deltaDocCount), 1.0) : 0.0);
+	PgturbohybridIndexStatsJsonbAddUInt32(&jsonState, "build_worker_count",
+										  meta.buildWorkerCount);
+	PgturbohybridIndexStatsJsonbAddUInt32(&jsonState, "build_scan_us",
+										  (uint32) Min(meta.buildScanUs, (uint64) PG_UINT32_MAX));
+	PgturbohybridIndexStatsJsonbAddUInt32(&jsonState, "build_correction_us",
+										  (uint32) Min(meta.buildCorrectionUs, (uint64) PG_UINT32_MAX));
+	PgturbohybridIndexStatsJsonbAddUInt32(&jsonState, "build_encode_us",
+										  (uint32) Min(meta.buildEncodeUs, (uint64) PG_UINT32_MAX));
+	PgturbohybridIndexStatsJsonbAddUInt32(&jsonState, "build_edge_us",
+										  (uint32) Min(meta.buildEdgeUs, (uint64) PG_UINT32_MAX));
+	PgturbohybridIndexStatsJsonbAddUInt32(&jsonState, "build_write_us",
+										  (uint32) Min(meta.buildWriteUs, (uint64) PG_UINT32_MAX));
+	PgturbohybridIndexStatsJsonbAddUInt32(&jsonState, "scan_us",
+										  (uint32) Min(meta.buildScanUs, (uint64) PG_UINT32_MAX));
+	PgturbohybridIndexStatsJsonbAddUInt32(&jsonState, "correction_us",
+										  (uint32) Min(meta.buildCorrectionUs, (uint64) PG_UINT32_MAX));
+	PgturbohybridIndexStatsJsonbAddUInt32(&jsonState, "encode_us",
+										  (uint32) Min(meta.buildEncodeUs, (uint64) PG_UINT32_MAX));
+	PgturbohybridIndexStatsJsonbAddUInt32(&jsonState, "edge_us",
+										  (uint32) Min(meta.buildEdgeUs, (uint64) PG_UINT32_MAX));
+	PgturbohybridIndexStatsJsonbAddUInt32(&jsonState, "write_us",
+										  (uint32) Min(meta.buildWriteUs, (uint64) PG_UINT32_MAX));
+	PgturbohybridIndexStatsJsonbAddUInt32(&jsonState, "worker_count",
+										  meta.buildWorkerCount);
 	index_close(index, AccessShareLock);
 
 	PG_RETURN_JSONB_P(PgturbohybridJsonbEndObject(&jsonState));

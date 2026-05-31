@@ -30,6 +30,16 @@ BEGIN
 		RAISE EXCEPTION 'unexpected dense_local_expansion default: %',
 			current_setting('turbohybrid.dense_local_expansion');
 	END IF;
+
+	IF current_setting('turbohybrid.dense_build_neighbor_select') <> 'auto' THEN
+		RAISE EXCEPTION 'unexpected dense_build_neighbor_select default: %',
+			current_setting('turbohybrid.dense_build_neighbor_select');
+	END IF;
+
+	IF current_setting('turbohybrid.hybrid_budget_policy') <> 'fixed' THEN
+		RAISE EXCEPTION 'unexpected hybrid_budget_policy default: %',
+			current_setting('turbohybrid.hybrid_budget_policy');
+	END IF;
 END
 $$;
 
@@ -83,12 +93,130 @@ BEGIN
 		(stats->>'graph_oversampling')::int <> 4 OR
 		stats->>'routing' <> 'auto' OR
 		stats->>'storage_kind' <> 'pgturbohybrid_graph_native' OR
+		stats->>'index_shape' <> 'hybrid' OR
+		(stats->>'bm25_branch_available')::boolean IS DISTINCT FROM true OR
+		(stats->>'bm25_document_count')::int <> 4 OR
 		(stats->>'quantization_bits')::int <> 4 OR
+		stats->>'build_neighbor_select' <> 'fast' OR
+		(stats->>'build_fast_edges')::boolean IS DISTINCT FROM true OR
 		(stats->>'entry_sidecar_count')::int <> 0 OR
 		(stats->>'residual_rerank_bytes')::int <> 0 OR
 		(stats->>'dense_build_exact_distances')::boolean IS DISTINCT FROM false OR
+		(stats->>'native_segments')::int <> 1 OR
 		(stats->>'exact_storage')::boolean IS DISTINCT FROM false THEN
 		RAISE EXCEPTION 'unexpected default index stats: %', stats;
+	END IF;
+END
+$$;
+
+CREATE TABLE tqh_segment_docs (
+	id int,
+	embedding vector(3)
+);
+
+INSERT INTO tqh_segment_docs VALUES
+	(1, '[1,0,0]'),
+	(2, '[0.9,0.1,0]'),
+	(3, '[0,1,0]'),
+	(4, '[0,0.9,0.1]'),
+	(5, '[0,0,1]'),
+	(6, '[0.1,0,0.9]');
+
+CREATE INDEX tqh_segment_docs_idx ON tqh_segment_docs
+USING turbohybrid (embedding vector_cosine_turbohybrid_ops)
+WITH (native_segments = 2, quantization_bits = 4, exact_storage = off);
+
+DO $$
+DECLARE
+	stats jsonb;
+	result_count int;
+BEGIN
+	stats := turbohybrid_index_stats('tqh_segment_docs_idx'::regclass);
+	IF (stats->>'native_segments')::int <> 2 OR
+		(stats->>'native_segment_bytes')::int <> 64 OR
+		stats->>'index_shape' <> 'dense_only' THEN
+		RAISE EXCEPTION 'unexpected segmented native index stats: %', stats;
+	END IF;
+
+	SELECT count(*) INTO result_count
+	FROM (
+		SELECT id
+		FROM tqh_segment_docs
+		ORDER BY embedding <~> turbohybrid_query(
+			vector_query => '[1,0,0]'::vector,
+			dense_k => 4,
+			final_k => 4
+		)
+		LIMIT 4
+	) s;
+
+	IF result_count <> 4 THEN
+		RAISE EXCEPTION 'segmented native dense query returned % rows', result_count;
+	END IF;
+END
+$$;
+
+DO $$
+DECLARE
+	latency_stats jsonb;
+	balanced_stats jsonb;
+	quality_stats jsonb;
+	forced_fast_stats jsonb;
+BEGIN
+	EXECUTE 'CREATE TEMP TABLE tqh_profile_docs (id int, embedding vector(3)) ON COMMIT DROP';
+	EXECUTE $SQL$
+		INSERT INTO tqh_profile_docs VALUES
+			(1, '[1,0,0]'::vector),
+			(2, '[0.9,0.1,0]'::vector),
+			(3, '[0,1,0]'::vector),
+			(4, '[0,0,1]'::vector)
+	$SQL$;
+
+	PERFORM set_config('turbohybrid.dense_build_neighbor_select', 'auto', true);
+
+	PERFORM set_config('turbohybrid.profile', 'latency', true);
+	EXECUTE 'CREATE INDEX tqh_profile_latency_idx ON tqh_profile_docs USING turbohybrid (embedding vector_cosine_turbohybrid_ops)';
+	EXECUTE 'SELECT turbohybrid_index_stats(''tqh_profile_latency_idx''::regclass)' INTO latency_stats;
+
+	IF latency_stats->>'build_neighbor_select' <> 'fast' OR
+		(latency_stats->>'build_fast_edges')::boolean IS DISTINCT FROM true OR
+		(latency_stats->>'graph_ef_construction')::int <> 128 OR
+		(latency_stats->>'graph_ef_search')::int <> 64 OR
+		(latency_stats->>'graph_oversampling')::int <> 4 THEN
+		RAISE EXCEPTION 'unexpected latency profile build stats: %', latency_stats;
+	END IF;
+
+	PERFORM set_config('turbohybrid.profile', 'balanced', true);
+	EXECUTE 'CREATE INDEX tqh_profile_balanced_idx ON tqh_profile_docs USING turbohybrid (embedding vector_cosine_turbohybrid_ops)';
+	EXECUTE 'SELECT turbohybrid_index_stats(''tqh_profile_balanced_idx''::regclass)' INTO balanced_stats;
+
+	IF balanced_stats->>'build_neighbor_select' <> 'heuristic' OR
+		(balanced_stats->>'build_fast_edges')::boolean IS DISTINCT FROM false OR
+		(balanced_stats->>'graph_ef_construction')::int <> 192 OR
+		(balanced_stats->>'graph_ef_search')::int <> 96 OR
+		(balanced_stats->>'graph_oversampling')::int <> 4 THEN
+		RAISE EXCEPTION 'unexpected balanced profile build stats: %', balanced_stats;
+	END IF;
+
+	PERFORM set_config('turbohybrid.profile', 'quality', true);
+	EXECUTE 'CREATE INDEX tqh_profile_quality_idx ON tqh_profile_docs USING turbohybrid (embedding vector_cosine_turbohybrid_ops)';
+	EXECUTE 'SELECT turbohybrid_index_stats(''tqh_profile_quality_idx''::regclass)' INTO quality_stats;
+
+	IF quality_stats->>'build_neighbor_select' <> 'heuristic' OR
+		(quality_stats->>'build_fast_edges')::boolean IS DISTINCT FROM false OR
+		(quality_stats->>'graph_ef_construction')::int <> 256 OR
+		(quality_stats->>'graph_ef_search')::int <> 192 OR
+		(quality_stats->>'graph_oversampling')::int <> 8 THEN
+		RAISE EXCEPTION 'unexpected quality profile build stats: %', quality_stats;
+	END IF;
+
+	PERFORM set_config('turbohybrid.dense_build_neighbor_select', 'fast', true);
+	EXECUTE 'CREATE INDEX tqh_profile_forced_fast_idx ON tqh_profile_docs USING turbohybrid (embedding vector_cosine_turbohybrid_ops)';
+	EXECUTE 'SELECT turbohybrid_index_stats(''tqh_profile_forced_fast_idx''::regclass)' INTO forced_fast_stats;
+
+	IF forced_fast_stats->>'build_neighbor_select' <> 'fast' OR
+		(forced_fast_stats->>'build_fast_edges')::boolean IS DISTINCT FROM true THEN
+		RAISE EXCEPTION 'unexpected forced-fast profile build stats: %', forced_fast_stats;
 	END IF;
 END
 $$;
@@ -114,6 +242,10 @@ BEGIN
 	stats := turbohybrid_last_scan_stats();
 
 	IF stats->>'dense_adaptive_widening_mode' <> 'off' OR
+		stats->>'index_shape' <> 'hybrid' OR
+		(stats->>'bm25_branch_available')::boolean IS DISTINCT FROM true OR
+		(stats->>'dense_branch_used')::boolean IS DISTINCT FROM true OR
+		(stats->>'bm25_branch_used')::boolean IS DISTINCT FROM false OR
 		(stats->>'dense_adaptive_triggered')::boolean IS DISTINCT FROM false OR
 		stats->>'dense_local_expansion_mode' <> 'off' OR
 		(stats->>'dense_local_expansion_triggered')::boolean IS DISTINCT FROM false OR
@@ -125,6 +257,676 @@ BEGIN
 	END IF;
 END
 $$;
+
+CREATE TABLE tqh_dense_only_docs (
+	id int PRIMARY KEY,
+	embedding vector(3),
+	category text
+);
+
+INSERT INTO tqh_dense_only_docs VALUES
+	(1, '[1,0,0]', 'keep'),
+	(2, NULL, 'keep'),
+	(3, '[0,1,0]', 'other');
+
+CREATE INDEX tqh_dense_only_docs_idx ON tqh_dense_only_docs
+USING turbohybrid (embedding vector_cosine_turbohybrid_ops);
+
+DO $$
+DECLARE
+	ids int[];
+	stats jsonb;
+BEGIN
+	stats := turbohybrid_index_stats('tqh_dense_only_docs_idx'::regclass);
+	IF stats->>'index_shape' <> 'dense_only' OR
+		(stats->>'bm25_branch_available')::boolean IS DISTINCT FROM false OR
+		(stats->>'hybrid')::boolean IS DISTINCT FROM false OR
+		(stats->>'bm25_document_count')::int <> 0 THEN
+		RAISE EXCEPTION 'unexpected dense-only index stats: %', stats;
+	END IF;
+
+	SELECT array_agg(id) INTO ids
+	FROM (
+		SELECT id
+		FROM tqh_dense_only_docs
+		ORDER BY embedding <~> turbohybrid_query(
+			vector_query => '[1,0,0]'::vector,
+			dense_k => 4,
+			final_k => 4
+		)
+		LIMIT 4
+	) s;
+
+	IF ids <> ARRAY[1,3] THEN
+		RAISE EXCEPTION 'unexpected dense-only build results: %', ids;
+	END IF;
+
+	stats := turbohybrid_last_scan_stats();
+	IF stats->>'index_shape' <> 'dense_only' OR
+		(stats->>'bm25_branch_available')::boolean IS DISTINCT FROM false OR
+		(stats->>'dense_branch_used')::boolean IS DISTINCT FROM true OR
+		(stats->>'bm25_branch_used')::boolean IS DISTINCT FROM false THEN
+		RAISE EXCEPTION 'unexpected dense-only vector scan stats: %', stats;
+	END IF;
+
+	BEGIN
+		PERFORM id
+		FROM tqh_dense_only_docs
+		ORDER BY embedding <~> turbohybrid_query(
+			text_query => websearch_to_tsquery('simple', 'alpha'),
+			bm25_k => 4,
+			final_k => 4
+		)
+		LIMIT 1;
+		RAISE EXCEPTION 'dense-only text query unexpectedly succeeded';
+	EXCEPTION WHEN OTHERS THEN
+		IF SQLERRM <> 'text_query requires a turbohybrid index with a tsvector key' THEN
+			RAISE;
+		END IF;
+	END;
+
+	BEGIN
+		PERFORM id
+		FROM tqh_dense_only_docs
+		ORDER BY embedding <~> turbohybrid_query(
+			vector_query => '[1,0,0]'::vector,
+			text_query => websearch_to_tsquery('simple', 'alpha'),
+			dense_k => 4,
+			bm25_k => 4,
+			final_k => 4
+		)
+		LIMIT 1;
+		RAISE EXCEPTION 'dense-only hybrid query unexpectedly succeeded';
+	EXCEPTION WHEN OTHERS THEN
+		IF SQLERRM <> 'text_query requires a turbohybrid index with a tsvector key' THEN
+			RAISE;
+		END IF;
+	END;
+END
+$$;
+
+INSERT INTO tqh_dense_only_docs VALUES (4, '[0.9,0.1,0]', 'keep');
+INSERT INTO tqh_dense_only_docs VALUES (5, NULL, 'keep');
+UPDATE tqh_dense_only_docs SET embedding = '[0,0,1]' WHERE id = 3;
+
+DO $$
+DECLARE
+	ids int[];
+	stats jsonb;
+BEGIN
+	SELECT array_agg(id) INTO ids
+	FROM (
+		SELECT id
+		FROM tqh_dense_only_docs
+		ORDER BY embedding <~> turbohybrid_query(
+			vector_query => '[0,0,1]'::vector,
+			dense_k => 5,
+			final_k => 5
+		)
+		LIMIT 5
+	) s;
+
+	IF cardinality(ids) <> 3 OR ids[1] <> 3 OR 5 = ANY(ids) THEN
+		RAISE EXCEPTION 'unexpected dense-only update/null-vector results: %', ids;
+	END IF;
+
+	SELECT array_agg(id) INTO ids
+	FROM (
+		SELECT id
+		FROM tqh_dense_only_docs
+		WHERE category = 'keep'
+		ORDER BY embedding <~> turbohybrid_query(
+			vector_query => '[1,0,0]'::vector,
+			dense_k => 5,
+			final_k => 5
+		)
+		LIMIT 2
+	) s;
+
+	IF ids <> ARRAY[1,4] THEN
+		RAISE EXCEPTION 'unexpected dense-only filtered results: %', ids;
+	END IF;
+
+	SELECT array_agg(id) INTO ids
+	FROM (
+		SELECT id
+		FROM tqh_dense_only_docs
+		ORDER BY embedding <~> turbohybrid_query(
+			vector_query => '[1,0,0]'::vector,
+			dense_k => 5,
+			final_k => 5
+		)
+		LIMIT 2
+	) s;
+
+	IF ids <> ARRAY[1,4] THEN
+		RAISE EXCEPTION 'unexpected dense-only LIMIT results: %', ids;
+	END IF;
+END
+$$;
+
+CREATE TABLE tqh_delta_docs (
+	id int PRIMARY KEY,
+	embedding vector(3),
+	body_tsv tsvector
+);
+
+INSERT INTO tqh_delta_docs VALUES
+	(1, '[1,0,0]', to_tsvector('simple', 'basealpha'));
+
+CREATE INDEX tqh_delta_docs_idx ON tqh_delta_docs
+USING turbohybrid (
+	embedding vector_cosine_turbohybrid_ops,
+	body_tsv bm25_tsvector_turbohybrid_ops
+);
+
+INSERT INTO tqh_delta_docs VALUES
+	(2, '[0,1,0]', to_tsvector('simple', 'freshalpha')),
+	(3, '[0,0,1]', NULL);
+
+DO $$
+DECLARE
+	ids int[];
+	stats jsonb;
+BEGIN
+	SELECT array_agg(id) INTO ids
+	FROM (
+		SELECT id
+		FROM tqh_delta_docs
+		ORDER BY embedding <~> turbohybrid_query(
+			text_query => websearch_to_tsquery('simple', 'freshalpha'),
+			dense_k => 0,
+			bm25_k => 4,
+			final_k => 4
+		)
+		LIMIT 4
+	) s;
+
+	IF ids <> ARRAY[2] THEN
+		RAISE EXCEPTION 'unexpected hybrid BM25 delta results: %', ids;
+	END IF;
+
+	stats := turbohybrid_last_scan_stats();
+	IF stats->>'index_shape' <> 'hybrid' OR
+		(stats->>'bm25_branch_available')::boolean IS DISTINCT FROM true OR
+		(stats->>'dense_branch_used')::boolean IS DISTINCT FROM false OR
+		(stats->>'bm25_branch_used')::boolean IS DISTINCT FROM true THEN
+		RAISE EXCEPTION 'unexpected hybrid text-only scan stats: %', stats;
+	END IF;
+
+	SELECT array_agg(id) INTO ids
+	FROM (
+		SELECT id
+		FROM tqh_delta_docs
+		ORDER BY embedding <~> turbohybrid_query(
+			vector_query => '[0,1,0]'::vector,
+			text_query => websearch_to_tsquery('simple', 'freshalpha'),
+			dense_k => 4,
+			bm25_k => 4,
+			final_k => 4
+		)
+		LIMIT 4
+	) s;
+
+	IF ids IS NULL OR ids[1] <> 2 THEN
+		RAISE EXCEPTION 'unexpected hybrid vector+text results: %', ids;
+	END IF;
+
+	stats := turbohybrid_last_scan_stats();
+	IF (stats->>'dense_branch_used')::boolean IS DISTINCT FROM true OR
+		(stats->>'bm25_branch_used')::boolean IS DISTINCT FROM true THEN
+		RAISE EXCEPTION 'unexpected hybrid vector+text scan stats: %', stats;
+	END IF;
+END
+$$;
+
+CREATE TABLE tqh_fast_weighted_docs (
+	id int PRIMARY KEY,
+	embedding vector(3),
+	body_tsv tsvector
+);
+
+INSERT INTO tqh_fast_weighted_docs VALUES
+	(1, '[1,0,0]', to_tsvector('simple', 'alpha alpha dense')),
+	(2, '[0.95,0.05,0]', to_tsvector('simple', 'alpha dense')),
+	(3, '[0.1,0.9,0]', to_tsvector('simple', 'alpha alpha alpha lexical')),
+	(4, '[0,0,1]', to_tsvector('simple', 'beta')),
+	(5, '[0.8,0.2,0]', NULL),
+	(6, '[0.2,0.8,0]', to_tsvector('simple', 'alpha lexical'));
+
+CREATE INDEX tqh_fast_weighted_docs_idx ON tqh_fast_weighted_docs
+USING turbohybrid (
+	embedding vector_cosine_turbohybrid_ops,
+	body_tsv bm25_tsvector_turbohybrid_ops
+)
+WITH (quantization_bits = 4, exact_storage = on);
+
+DO $$
+DECLARE
+	ids_pruning_on int[];
+	ids_pruning_off int[];
+	ids_alpha0 int[];
+	ids_alpha1 int[];
+	stats jsonb;
+BEGIN
+	PERFORM set_config('turbohybrid.bm25_strategy', 'wand', true);
+	PERFORM set_config('turbohybrid.enable_wand', 'on', true);
+	PERFORM set_config('turbohybrid.fast_weighted_score_bound_pruning', 'off', true);
+
+	SELECT array_agg(id) INTO ids_pruning_off
+	FROM (
+		SELECT id
+		FROM tqh_fast_weighted_docs
+		ORDER BY embedding <~> turbohybrid_query(
+			vector_query => '[1,0,0]'::vector,
+			text_query => websearch_to_tsquery('simple', 'alpha'),
+			fusion => 'fast_weighted',
+			alpha => 0.6,
+			dense_k => 6,
+			bm25_k => 6,
+			final_k => 4
+		)
+		LIMIT 4
+	) s;
+
+	PERFORM set_config('turbohybrid.fast_weighted_score_bound_pruning', 'on', true);
+
+	SELECT array_agg(id) INTO ids_pruning_on
+	FROM (
+		SELECT id
+		FROM tqh_fast_weighted_docs
+		ORDER BY embedding <~> turbohybrid_query(
+			vector_query => '[1,0,0]'::vector,
+			text_query => websearch_to_tsquery('simple', 'alpha'),
+			fusion => 'fast_weighted',
+			alpha => 0.6,
+			dense_k => 6,
+			bm25_k => 6,
+			final_k => 4
+		)
+		LIMIT 4
+	) s;
+
+	IF ids_pruning_on IS DISTINCT FROM ids_pruning_off THEN
+		RAISE EXCEPTION 'fast_weighted pruning changed results: on %, off %',
+			ids_pruning_on, ids_pruning_off;
+	END IF;
+
+	stats := turbohybrid_last_scan_stats();
+	IF (stats->>'fast_weighted_enabled')::boolean IS DISTINCT FROM true OR
+		(stats->>'fast_weighted_alpha')::float8 <> 0.6 OR
+		stats->>'bm25_norm_mode' <> 'saturating' OR
+		stats->>'dense_norm_mode' <> 'logistic' THEN
+		RAISE EXCEPTION 'unexpected fast_weighted stats: %', stats;
+	END IF;
+
+	SELECT array_agg(id) INTO ids_alpha0
+	FROM (
+		SELECT id
+		FROM tqh_fast_weighted_docs
+		ORDER BY embedding <~> turbohybrid_query(
+			vector_query => '[1,0,0]'::vector,
+			text_query => websearch_to_tsquery('simple', 'alpha'),
+			fusion => 'fast_weighted',
+			alpha => 0,
+			dense_k => 6,
+			bm25_k => 6,
+			final_k => 3
+		)
+		LIMIT 3
+	) s;
+
+	SELECT array_agg(id) INTO ids_alpha1
+	FROM (
+		SELECT id
+		FROM tqh_fast_weighted_docs
+		ORDER BY embedding <~> turbohybrid_query(
+			vector_query => '[1,0,0]'::vector,
+			text_query => websearch_to_tsquery('simple', 'alpha'),
+			fusion => 'fast_weighted',
+			alpha => 1,
+			dense_k => 6,
+			bm25_k => 6,
+			final_k => 3
+		)
+		LIMIT 3
+	) s;
+
+	IF cardinality(ids_alpha0) <> 3 OR cardinality(ids_alpha1) <> 3 THEN
+		RAISE EXCEPTION 'fast_weighted alpha edge case returned too few rows: alpha0 %, alpha1 %',
+			ids_alpha0, ids_alpha1;
+	END IF;
+
+	PERFORM set_config('turbohybrid.fast_weighted_score_bound_pruning', 'on', true);
+
+	PERFORM id
+	FROM tqh_fast_weighted_docs
+	ORDER BY embedding <~> turbohybrid_query(
+		vector_query => '[1,0,0]'::vector,
+		text_query => websearch_to_tsquery('simple', 'alpha'),
+		fusion => 'rrf',
+		dense_k => 6,
+		bm25_k => 6,
+		final_k => 4
+	)
+	LIMIT 4;
+
+	stats := turbohybrid_last_scan_stats();
+	IF (stats->>'fast_weighted_enabled')::boolean IS DISTINCT FROM false OR
+		(stats->>'bm25_blocks_pruned_by_fused_score_bound')::bigint <> 0 OR
+		(stats->>'bm25_candidates_pruned_by_fused_score_bound')::bigint <> 0 THEN
+		RAISE EXCEPTION 'RRF used fast_weighted score-bound pruning path: %', stats;
+	END IF;
+END
+$$;
+
+DROP TABLE tqh_fast_weighted_docs;
+
+CREATE TABLE tqh_adaptive_budget_docs (
+	id int PRIMARY KEY,
+	embedding vector(3),
+	body_tsv tsvector
+);
+
+INSERT INTO tqh_adaptive_budget_docs VALUES
+	(1, '[1,0,0]', to_tsvector('simple', 'common shared sku123abc')),
+	(2, '[0.98,0.02,0]', to_tsvector('simple', 'common shared')),
+	(3, '[0.9,0.1,0]', to_tsvector('simple', 'common shared')),
+	(4, '[0.8,0.2,0]', to_tsvector('simple', 'common shared')),
+	(5, '[0.2,0.8,0]', to_tsvector('simple', 'common shared lexical')),
+	(6, '[0.1,0.9,0]', to_tsvector('simple', 'common shared lexical')),
+	(7, '[0,1,0]', to_tsvector('simple', 'common shared lexical')),
+	(8, '[0,0,1]', to_tsvector('simple', 'common shared'));
+
+CREATE INDEX tqh_adaptive_budget_docs_idx ON tqh_adaptive_budget_docs
+USING turbohybrid (
+	embedding vector_cosine_turbohybrid_ops,
+	body_tsv bm25_tsvector_turbohybrid_ops
+)
+WITH (quantization_bits = 4, exact_storage = on);
+
+DO $$
+DECLARE
+	fixed_ids int[];
+	adaptive_ids int[];
+	overlap int;
+	fixed_dense_k int;
+	fixed_bm25_k int;
+	adaptive_dense_k int;
+	adaptive_bm25_k int;
+	fixed_latency_metric_available boolean;
+	adaptive_latency_metric_available boolean;
+	stats jsonb;
+BEGIN
+	PERFORM set_config('turbohybrid.hybrid_budget_policy', 'fixed', true);
+
+	SELECT array_agg(id) INTO fixed_ids
+	FROM (
+		SELECT id
+		FROM tqh_adaptive_budget_docs
+		ORDER BY embedding <~> turbohybrid_query(
+			vector_query => '[1,0,0]'::vector,
+			text_query => websearch_to_tsquery('simple', 'sku123abc'),
+			final_k => 3
+		)
+		LIMIT 3
+	) s;
+
+	stats := turbohybrid_last_scan_stats();
+	fixed_dense_k := (stats->>'hybrid_dense_k_chosen')::int;
+	fixed_bm25_k := (stats->>'hybrid_bm25_k_chosen')::int;
+	fixed_latency_metric_available := stats ? 'elapsed_us';
+	IF stats->>'hybrid_budget_policy' <> 'fixed' THEN
+		RAISE EXCEPTION 'expected fixed hybrid budget policy: %', stats;
+	END IF;
+
+	PERFORM set_config('turbohybrid.hybrid_budget_policy', 'adaptive', true);
+
+	SELECT array_agg(id) INTO adaptive_ids
+	FROM (
+		SELECT id
+		FROM tqh_adaptive_budget_docs
+		ORDER BY embedding <~> turbohybrid_query(
+			vector_query => '[1,0,0]'::vector,
+			text_query => websearch_to_tsquery('simple', 'sku123abc'),
+			final_k => 3
+		)
+		LIMIT 3
+	) s;
+
+	stats := turbohybrid_last_scan_stats();
+	adaptive_dense_k := (stats->>'hybrid_dense_k_chosen')::int;
+	adaptive_latency_metric_available := stats ? 'elapsed_us';
+	IF stats->>'hybrid_budget_policy' <> 'adaptive' OR
+		stats->>'hybrid_query_shape' <> 'rare_identifier' OR
+		stats->>'hybrid_budget_reason' !~ '^approx_' OR
+		adaptive_dense_k >= fixed_dense_k THEN
+		RAISE EXCEPTION 'unexpected rare identifier adaptive budget stats: % fixed dense %',
+			stats, fixed_dense_k;
+	END IF;
+
+	SELECT count(*) INTO overlap
+	FROM unnest(fixed_ids) f(id)
+	JOIN unnest(adaptive_ids) a(id) USING (id);
+	IF overlap < 1 THEN
+		RAISE EXCEPTION 'adaptive rare identifier overlap@3 unexpectedly empty: fixed %, adaptive %',
+			fixed_ids, adaptive_ids;
+	END IF;
+
+	RAISE NOTICE 'adaptive_budget_benchmark shape=% overlap@3=% fixed_dense_k=% adaptive_dense_k=% fixed_bm25_k=% adaptive_bm25_k=% latency_metric_available=% ndcg=%',
+		'rare_identifier', overlap, fixed_dense_k, adaptive_dense_k,
+		fixed_bm25_k, (stats->>'hybrid_bm25_k_chosen')::int,
+		fixed_latency_metric_available AND adaptive_latency_metric_available,
+		'not_available';
+
+	SELECT array_agg(id) INTO adaptive_ids
+	FROM (
+		SELECT id
+		FROM tqh_adaptive_budget_docs
+		ORDER BY embedding <~> turbohybrid_query(
+			vector_query => '[1,0,0]'::vector,
+			text_query => websearch_to_tsquery('simple', 'common shared'),
+			final_k => 3
+		)
+		LIMIT 3
+	) s;
+
+	stats := turbohybrid_last_scan_stats();
+	adaptive_bm25_k := (stats->>'hybrid_bm25_k_chosen')::int;
+	IF stats->>'hybrid_query_shape' <> 'broad_natural_language' OR
+		adaptive_bm25_k >= fixed_bm25_k THEN
+		RAISE EXCEPTION 'unexpected broad adaptive budget stats: % fixed bm25 %',
+			stats, fixed_bm25_k;
+	END IF;
+END
+$$;
+
+DROP TABLE tqh_adaptive_budget_docs;
+
+CREATE TABLE tqh_rrf_fusion_docs (
+	id int PRIMARY KEY,
+	embedding vector(3),
+	body_tsv tsvector
+);
+
+INSERT INTO tqh_rrf_fusion_docs
+SELECT g,
+	('[1,' || (g::float8 / 1000.0)::text || ',0]')::vector(3),
+	to_tsvector('simple',
+		CASE WHEN g BETWEEN 41 AND 120
+			THEN 'gamma alpha'
+			ELSE 'gamma'
+		END)
+FROM generate_series(1, 160) AS g;
+
+CREATE INDEX tqh_rrf_fusion_docs_idx ON tqh_rrf_fusion_docs
+USING turbohybrid (
+	embedding vector_cosine_turbohybrid_ops,
+	body_tsv bm25_tsvector_turbohybrid_ops
+)
+WITH (quantization_bits = 4, exact_storage = on);
+
+DO $$
+DECLARE
+	dense_full_ids int[];
+	dense_top_ids int[];
+	bm25_full_ids int[];
+	bm25_top_ids int[];
+	bm25_alpha_ids int[];
+	reference_ids int[];
+	hybrid_ids int[];
+	stats jsonb;
+BEGIN
+	PERFORM set_config('turbohybrid.hybrid_budget_policy', 'fixed', true);
+
+	SELECT array_agg(id) INTO dense_full_ids
+	FROM (
+		SELECT id
+		FROM tqh_rrf_fusion_docs
+		ORDER BY embedding <~> turbohybrid_query(
+			vector_query => '[1,0,0]'::vector,
+			fusion => 'rrf',
+			dense_k => 140,
+			final_k => 140
+		)
+	) s;
+
+	SELECT array_agg(id) INTO dense_top_ids
+	FROM (
+		SELECT id
+		FROM tqh_rrf_fusion_docs
+		ORDER BY embedding <~> turbohybrid_query(
+			vector_query => '[1,0,0]'::vector,
+			fusion => 'rrf',
+			dense_k => 140,
+			final_k => 10
+		)
+	) s;
+
+	stats := turbohybrid_last_scan_stats();
+	IF stats->>'fusion_strategy' <> 'generation_array' OR
+		(stats->>'fusion_candidates_seen')::int < 128 THEN
+		RAISE EXCEPTION 'dense-only RRF did not use generation-array fusion: %', stats;
+	END IF;
+
+	IF dense_top_ids <> dense_full_ids[1:10] THEN
+		RAISE EXCEPTION 'dense-only RRF top-k changed: top %, full %',
+			dense_top_ids, dense_full_ids[1:10];
+	END IF;
+
+	SELECT array_agg(id) INTO bm25_full_ids
+	FROM (
+		SELECT id
+		FROM tqh_rrf_fusion_docs
+		ORDER BY embedding <~> turbohybrid_query(
+			text_query => websearch_to_tsquery('simple', 'gamma'),
+			fusion => 'rrf',
+			bm25_k => 140,
+			final_k => 140
+		)
+	) s;
+
+	SELECT array_agg(id) INTO bm25_top_ids
+	FROM (
+		SELECT id
+		FROM tqh_rrf_fusion_docs
+		ORDER BY embedding <~> turbohybrid_query(
+			text_query => websearch_to_tsquery('simple', 'gamma'),
+			fusion => 'rrf',
+			bm25_k => 140,
+			final_k => 10
+		)
+	) s;
+
+	stats := turbohybrid_last_scan_stats();
+	IF stats->>'fusion_strategy' <> 'generation_array' OR
+		(stats->>'fusion_candidates_seen')::int < 128 THEN
+		RAISE EXCEPTION 'BM25-only RRF did not use generation-array fusion: %', stats;
+	END IF;
+
+	IF bm25_top_ids <> bm25_full_ids[1:10] THEN
+		RAISE EXCEPTION 'BM25-only RRF top-k changed: top %, full %',
+			bm25_top_ids, bm25_full_ids[1:10];
+	END IF;
+
+	SELECT array_agg(id) INTO bm25_alpha_ids
+	FROM (
+		SELECT id
+		FROM tqh_rrf_fusion_docs
+		ORDER BY embedding <~> turbohybrid_query(
+			text_query => websearch_to_tsquery('simple', 'alpha'),
+			fusion => 'rrf',
+			bm25_k => 140,
+			final_k => 140
+		)
+		LIMIT 140
+	) s;
+
+	WITH dense_branch AS (
+		SELECT id, dense_rank
+		FROM unnest(dense_full_ids) WITH ORDINALITY AS d(id, dense_rank)
+	),
+	bm25_branch AS (
+		SELECT id, bm25_rank
+		FROM unnest(bm25_alpha_ids) WITH ORDINALITY AS b(id, bm25_rank)
+	),
+	fused AS (
+		SELECT
+			coalesce(d.id, b.id) AS id,
+			d.dense_rank,
+			b.bm25_rank,
+			((CASE WHEN d.dense_rank IS NULL THEN 0
+				ELSE 1.0 / (60 + d.dense_rank) END) +
+			 (CASE WHEN b.bm25_rank IS NULL THEN 0
+				ELSE 1.0 / (60 + b.bm25_rank) END)) AS score
+		FROM dense_branch d
+		FULL JOIN bm25_branch b USING (id)
+	)
+	SELECT array_agg(id) INTO reference_ids
+	FROM (
+		SELECT id
+		FROM fused
+		ORDER BY score DESC,
+			(dense_rank IS NOT NULL AND bm25_rank IS NOT NULL) DESC,
+			coalesce(dense_rank, 2147483647),
+			coalesce(bm25_rank, 2147483647),
+			id
+		LIMIT 20
+	) r;
+
+	SELECT array_agg(id) INTO hybrid_ids
+	FROM (
+		SELECT id
+		FROM tqh_rrf_fusion_docs
+		ORDER BY embedding <~> turbohybrid_query(
+			vector_query => '[1,0,0]'::vector,
+			text_query => websearch_to_tsquery('simple', 'alpha'),
+			fusion => 'rrf',
+			dense_k => 140,
+			bm25_k => 140,
+			final_k => 20
+		)
+	) h;
+
+	stats := turbohybrid_last_scan_stats();
+	IF stats->>'fusion_strategy' <> 'generation_array' OR
+		(stats->>'fusion_duplicates')::int <= 0 OR
+		(stats->>'fusion_heap_replacements')::int <= 0 THEN
+		RAISE EXCEPTION 'overlap RRF did not report expected generation-array stats: %', stats;
+	END IF;
+
+	IF hybrid_ids <> reference_ids THEN
+		RAISE EXCEPTION 'overlap RRF generation-array order changed: hybrid %, reference %',
+			hybrid_ids, reference_ids;
+	END IF;
+END
+$$;
+
+DROP TABLE tqh_rrf_fusion_docs;
+
+DROP TABLE tqh_segment_docs;
+DROP TABLE tqh_dense_only_docs;
+DROP TABLE tqh_delta_docs;
 
 -- A normal vector-order SQL scan on a (vector + tsvector) turbohybrid index must
 -- run the NATIVE quantized graph path (tqgraphgettuple ->
@@ -833,6 +1635,25 @@ BEGIN
 	IF ids <> ARRAY[2] THEN
 		RAISE EXCEPTION 'unexpected require_bm25_match results: %', ids;
 	END IF;
+
+	SELECT array_agg(id) INTO ids
+	FROM (
+		SELECT id
+		FROM tqh_docs
+		WHERE id IN (1, 2)
+		ORDER BY embedding <~> turbohybrid_query(
+			vector_query => '[1,0,0]'::vector,
+			text_query => websearch_to_tsquery('english', 'hybrid'),
+			dense_k => 4,
+			bm25_k => 4,
+			final_k => 4
+		)
+		LIMIT 2
+	) s;
+
+	IF cardinality(ids) <> 2 OR NOT ARRAY[1,2] @> ids THEN
+		RAISE EXCEPTION 'unexpected hybrid filtered results: %', ids;
+	END IF;
 END
 $$;
 
@@ -1021,8 +1842,20 @@ BEGIN
 	IF keys <> ARRAY[
 		'blocks',
 		'bm25_average_document_length',
+		'bm25_branch_available',
 		'bm25_document_count',
+		'build_correction_us',
+		'build_edge_us',
+		'build_encode_us',
+		'build_fast_edges',
+		'build_neighbor_select',
+		'build_scan_us',
+		'build_worker_count',
+		'build_write_us',
+		'correction_us',
 		'dense_build_exact_distances',
+		'edge_us',
+		'encode_us',
 		'entry_sidecar_bytes',
 		'entry_sidecar_count',
 		'exact_storage',
@@ -1032,6 +1865,9 @@ BEGIN
 		'graph_m',
 		'graph_oversampling',
 		'hybrid',
+		'index_shape',
+		'native_segment_bytes',
+		'native_segments',
 		'profile',
 		'quantization_bits',
 		'residual_rerank_bytes',
@@ -1039,8 +1875,11 @@ BEGIN
 		'routing',
 		'routing_entry_bytes',
 		'routing_entry_count',
+		'scan_us',
 		'storage_kind',
-		'version'
+		'version',
+		'worker_count',
+		'write_us'
 	] THEN
 		RAISE EXCEPTION 'unexpected pgturbohybrid index stats keys: %', keys;
 	END IF;
@@ -1049,12 +1888,17 @@ BEGIN
 	FROM jsonb_object_keys(turbohybrid_last_scan_stats()) AS key;
 
 	IF keys <> ARRAY[
+		'adj_buffer_lock_wait_us',
 		'auto_budget',
 		'bm25',
 		'bm25_accumulator_mode',
+		'bm25_blocks_pruned_by_fused_score_bound',
+		'bm25_branch_available',
+		'bm25_branch_used',
 		'bm25_cache_build_us',
 		'bm25_cache_hit',
 		'bm25_candidates_effective',
+		'bm25_candidates_pruned_by_fused_score_bound',
 		'bm25_elapsed_us',
 		'bm25_hot_postings_cache_hit',
 		'bm25_hot_postings_cache_hits',
@@ -1064,8 +1908,10 @@ BEGIN
 		'bm25_impact_or_mode',
 		'bm25_k_defaulted',
 		'bm25_k_effective',
+		'bm25_norm_mode',
 		'bm25_strategy',
 		'candidate_objects_allocated',
+		'code_buffer_lock_wait_us',
 		'dense',
 		'dense_adaptive_final_result_target',
 		'dense_adaptive_final_search_ef',
@@ -1077,10 +1923,12 @@ BEGIN
 		'dense_adaptive_triggered',
 		'dense_adaptive_widening_mode',
 		'dense_batch_kernel',
+		'dense_branch_used',
 		'dense_candidates_effective',
-		'dense_elapsed_us',
-		'dense_exact_kernel',
-		'dense_k_defaulted',
+			'dense_elapsed_us',
+			'dense_exact_kernel',
+			'dense_heap_rescore',
+			'dense_k_defaulted',
 		'dense_k_effective',
 		'dense_local_expansion_candidates_added',
 		'dense_local_expansion_mode',
@@ -1088,6 +1936,7 @@ BEGIN
 		'dense_local_expansion_seed_count',
 		'dense_local_expansion_triggered',
 		'dense_local_expansion_us',
+		'dense_norm_mode',
 		'dense_residual_rerank_bytes',
 		'dense_residual_rerank_count',
 		'dense_residual_rerank_us',
@@ -1099,17 +1948,24 @@ BEGIN
 		'detected_sql_limit',
 		'dimensions',
 		'elapsed_us',
-		'exact_free',
-		'exact_rescore_count',
-		'exact_rescore_for_bm25_only',
-		'exact_storage',
+			'exact_free',
+			'exact_rescore_count',
+			'exact_rescore_for_bm25_only',
+			'exact_rescore_source',
+			'exact_storage',
 		'fast_vector_checks',
+		'fast_weighted_alpha',
+		'fast_weighted_enabled',
 		'final_k_effective',
 		'final_k_inferred',
 		'final_k_requested',
 		'final_k_source',
 		'fusion',
+		'fusion_candidates_seen',
+		'fusion_duplicates',
 		'fusion_elapsed_us',
+		'fusion_heap_replacements',
+		'fusion_strategy',
 		'graph_adj_pages_read',
 		'graph_avg_batch_size',
 		'graph_base_layer',
@@ -1124,6 +1980,7 @@ BEGIN
 		'graph_code_pages_read',
 		'graph_dense_budget_policy',
 		'graph_dense_requested_k',
+		'graph_ef_search',
 		'graph_effective_rescore_band',
 		'graph_effective_result_target',
 		'graph_effective_search_ef',
@@ -1146,6 +2003,7 @@ BEGIN
 		'graph_rescore_pages',
 		'graph_rescore_us',
 		'graph_scalar_scored_codes',
+		'graph_scan_lock_wait_us',
 		'graph_score_kernels',
 		'graph_scored_codes',
 		'graph_simd_scored_codes',
@@ -1155,17 +2013,34 @@ BEGIN
 		'graph_traverse_us',
 		'graph_u8_batch_mode',
 		'graph_visited_nodes',
-		'graph_whole_code_prefetch_active',
-		'graph_widening_reason',
-		'heap_tuples_returned',
+			'graph_whole_code_prefetch_active',
+			'graph_widening_reason',
+			'heap_fetch_us',
+			'heap_rescore_count',
+			'heap_rescore_us',
+			'heap_tuples_returned',
+		'hybrid_bm25_k_chosen',
+		'hybrid_budget_policy',
+		'hybrid_budget_reason',
+		'hybrid_dense_k_chosen',
+		'hybrid_query_shape',
+		'index_shape',
 		'index_used',
 		'native_cache_adj_bytes',
+		'native_cache_attach_us',
 		'native_cache_build_us',
 		'native_cache_built_this_scan',
 		'native_cache_bytes',
 		'native_cache_code_bytes',
 		'native_cache_exact_bytes',
 		'native_cache_mode',
+		'native_cache_policy',
+		'native_cache_reason',
+		'native_cache_refcount',
+		'native_cache_reused',
+		'native_cache_scope',
+		'native_cache_used',
+		'native_cache_wait_us',
 		'profile',
 		'quantization_bits',
 		'query',
@@ -1225,6 +2100,21 @@ BEGIN
 		RAISE EXCEPTION 'dense_build_exact_distances GUC did not stick';
 	END IF;
 
+	PERFORM set_config('turbohybrid.dense_build_neighbor_select', 'heuristic', true);
+	IF current_setting('turbohybrid.dense_build_neighbor_select') <> 'heuristic' THEN
+		RAISE EXCEPTION 'dense_build_neighbor_select heuristic GUC did not stick';
+	END IF;
+
+	PERFORM set_config('turbohybrid.dense_build_neighbor_select', 'fast', true);
+	IF current_setting('turbohybrid.dense_build_neighbor_select') <> 'fast' THEN
+		RAISE EXCEPTION 'dense_build_neighbor_select fast GUC did not stick';
+	END IF;
+
+	PERFORM set_config('turbohybrid.dense_build_neighbor_select', 'auto', true);
+	IF current_setting('turbohybrid.dense_build_neighbor_select') <> 'auto' THEN
+		RAISE EXCEPTION 'dense_build_neighbor_select auto GUC did not stick';
+	END IF;
+
 	PERFORM set_config('turbohybrid.dense_adaptive_widening', 'auto', true);
 	IF current_setting('turbohybrid.dense_adaptive_widening') <> 'auto' THEN
 		RAISE EXCEPTION 'dense_adaptive_widening auto GUC did not stick';
@@ -1278,6 +2168,105 @@ BEGIN
 	PERFORM set_config('turbohybrid.dense_local_expansion_max_neighbors', '128', true);
 	IF current_setting('turbohybrid.dense_local_expansion_max_neighbors') <> '128' THEN
 		RAISE EXCEPTION 'dense_local_expansion_max_neighbors GUC did not stick';
+	END IF;
+
+	PERFORM set_config('turbohybrid.native_cache_policy', 'auto', true);
+	IF current_setting('turbohybrid.native_cache_policy') <> 'auto' THEN
+		RAISE EXCEPTION 'native_cache_policy auto GUC did not stick';
+	END IF;
+
+	PERFORM set_config('turbohybrid.native_cache_policy', 'per_backend', true);
+	IF current_setting('turbohybrid.native_cache_policy') <> 'per_backend' THEN
+		RAISE EXCEPTION 'native_cache_policy per_backend GUC did not stick';
+	END IF;
+
+	PERFORM set_config('turbohybrid.native_cache_policy', 'off', true);
+	IF current_setting('turbohybrid.native_cache_policy') <> 'off' THEN
+		RAISE EXCEPTION 'native_cache_policy off GUC did not stick';
+	END IF;
+
+	PERFORM set_config('turbohybrid.native_cache_scope', 'shared', true);
+	IF current_setting('turbohybrid.native_cache_scope') <> 'shared' THEN
+		RAISE EXCEPTION 'native_cache_scope shared GUC did not stick';
+	END IF;
+END
+$$;
+
+DO $$
+DECLARE
+	per_backend_ids int[];
+	shared_ids int[];
+	off_ids int[];
+	stats jsonb;
+BEGIN
+	SET LOCAL turbohybrid.native_cache_policy = per_backend;
+	SET LOCAL turbohybrid.native_cache_max_mb = 512;
+
+	SELECT array_agg(id ORDER BY distance, id) INTO per_backend_ids
+	FROM (
+		SELECT id,
+		       embedding <~> turbohybrid_query(
+			       vector_query => '[1,0,0]'::vector,
+			       dense_k => 10,
+			       final_k => 5
+		       ) AS distance
+		FROM tqh_docs
+		ORDER BY distance
+		LIMIT 5
+	) s;
+
+	SET LOCAL turbohybrid.native_cache_policy = off;
+
+	SELECT array_agg(id ORDER BY distance, id) INTO off_ids
+	FROM (
+		SELECT id,
+		       embedding <~> turbohybrid_query(
+			       vector_query => '[1,0,0]'::vector,
+			       dense_k => 10,
+			       final_k => 5
+		       ) AS distance
+		FROM tqh_docs
+		ORDER BY distance
+		LIMIT 5
+	) s;
+
+	IF off_ids <> per_backend_ids THEN
+		RAISE EXCEPTION 'native_cache_policy=off changed dense results: off=% per_backend=%',
+			off_ids, per_backend_ids;
+	END IF;
+
+	stats := turbohybrid_last_scan_stats();
+	IF stats->>'native_cache_policy' <> 'off' OR
+	   (stats->>'native_cache_used')::boolean OR
+	   stats->>'native_cache_reason' <> 'policy_off' THEN
+		RAISE EXCEPTION 'native_cache_policy=off not reflected in stats: %', stats;
+	END IF;
+
+	SET LOCAL turbohybrid.native_cache_scope = shared;
+
+	SELECT array_agg(id ORDER BY distance, id) INTO shared_ids
+	FROM (
+		SELECT id,
+		       embedding <~> turbohybrid_query(
+			       vector_query => '[1,0,0]'::vector,
+			       dense_k => 10,
+			       final_k => 5
+		       ) AS distance
+		FROM tqh_docs
+		ORDER BY distance
+		LIMIT 5
+	) s;
+
+	IF shared_ids <> per_backend_ids THEN
+		RAISE EXCEPTION 'native_cache_scope=shared changed dense results: shared=% per_backend=%',
+			shared_ids, per_backend_ids;
+	END IF;
+
+	stats := turbohybrid_last_scan_stats();
+	IF stats->>'native_cache_scope' <> 'shared' OR
+	   NOT (stats->>'native_cache_used')::boolean OR
+	   stats->>'native_cache_reason' <> 'shared_fits_max_mb' THEN
+		RAISE EXCEPTION 'native_cache_scope=shared not reflected in stats: %', stats;
 	END IF;
 END
 $$;

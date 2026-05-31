@@ -7,6 +7,7 @@
 #include "access/genam.h"
 #include "access/generic_xlog.h"
 #include "access/htup_details.h"
+#include "access/parallel.h"
 #include "catalog/pg_am.h"
 #include "catalog/pg_class.h"
 #include "catalog/pg_index.h"
@@ -15,7 +16,9 @@
 #include "common/hashfn.h"
 #include "fmgr.h"
 #include "pgturbohybrid.h"
+#include "pgturbohybrid_am.h"
 #include "lib/pairingheap.h"
+#include "miscadmin.h"
 #include "nodes/pg_list.h"
 #include "port/atomics.h"
 #include "portability/instr_time.h"
@@ -556,7 +559,21 @@ PgturbohybridGraphGetEfConstruction(Relation index)
 		return opts->efConstruction;
 
 	if (PgturbohybridGraphIspgturbohybridIndex(index))
+	{
+		switch ((PgturbohybridProfile) pgturbohybrid_profile)
+		{
+			case PGTURBOHYBRID_PROFILE_QUALITY:
+				return 256;
+			case PGTURBOHYBRID_PROFILE_BALANCED:
+				return 192;
+			case PGTURBOHYBRID_PROFILE_DEBUG:
+				return 256;
+			case PGTURBOHYBRID_PROFILE_LATENCY:
+			default:
+				break;
+		}
 		return PGTURBOHYBRID_DEFAULT_GRAPH_EF_CONSTRUCTION;
+	}
 
 	return PGTURBOHYBRID_GRAPH_DEFAULT_EF_CONSTRUCTION;
 }
@@ -804,6 +821,18 @@ PgturbohybridGraphGetEfSearch(Relation index)
 		if (opts)
 			return opts->graphEfSearch;
 
+		switch ((PgturbohybridProfile) pgturbohybrid_profile)
+		{
+			case PGTURBOHYBRID_PROFILE_QUALITY:
+				return 192;
+			case PGTURBOHYBRID_PROFILE_BALANCED:
+				return 96;
+			case PGTURBOHYBRID_PROFILE_DEBUG:
+				return 192;
+			case PGTURBOHYBRID_PROFILE_LATENCY:
+			default:
+				break;
+		}
 		return PGTURBOHYBRID_DEFAULT_GRAPH_EF_SEARCH;
 	}
 
@@ -820,6 +849,16 @@ PgturbohybridGraphGetGraphOversampling(Relation index)
 		if (opts)
 			return opts->graphOversampling;
 
+		switch ((PgturbohybridProfile) pgturbohybrid_profile)
+		{
+			case PGTURBOHYBRID_PROFILE_QUALITY:
+				return 8;
+			case PGTURBOHYBRID_PROFILE_BALANCED:
+			case PGTURBOHYBRID_PROFILE_DEBUG:
+			case PGTURBOHYBRID_PROFILE_LATENCY:
+			default:
+				break;
+		}
 		return PGTURBOHYBRID_DEFAULT_GRAPH_OVERSAMPLING;
 	}
 
@@ -851,6 +890,23 @@ PgturbohybridGraphGetGraphReorder(Relation index)
 		return PGTURBOHYBRID_GRAPH_REORDER_OFF;
 
 	return PGTURBOHYBRID_GRAPH_REORDER_AUTO;
+}
+
+int
+PgturbohybridGraphGetNativeSegments(Relation index)
+{
+	TqOptions  *opts;
+	int			segments;
+
+	if (!PgturbohybridGraphIspgturbohybridIndex(index))
+		return 1;
+
+	opts = (TqOptions *) index->rd_options;
+	segments = opts != NULL ? opts->nativeSegments : 1;
+	if (segments == 0)
+		segments = Max(1, max_parallel_maintenance_workers);
+
+	return Max(1, Min(segments, PGTURBOHYBRID_GRAPH_MAX_NATIVE_SEGMENTS));
 }
 
 /*

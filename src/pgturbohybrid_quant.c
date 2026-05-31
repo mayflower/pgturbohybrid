@@ -1,5 +1,6 @@
 #include "postgres.h"
 
+#include <errno.h>
 #include <float.h>
 #include <limits.h>
 #include <math.h>
@@ -7,23 +8,35 @@
 
 #include "access/generic_xlog.h"
 #include "access/genam.h"
+#include "access/parallel.h"
+#include "access/relscan.h"
+#include "access/table.h"
 #include "access/tableam.h"
+#include "access/xact.h"
 #include "access/xloginsert.h"
 #include "catalog/index.h"
 #include "catalog/pg_type_d.h"
 #include "commands/progress.h"
+#include "executor/tuptable.h"
 #include "miscadmin.h"
+#include "nodes/execnodes.h"
+#include "optimizer/optimizer.h"
 #include "pgstat.h"
 #include "port/pg_bitutils.h"
 #include "portability/instr_time.h"
 #include "storage/bufmgr.h"
+#include "storage/condition_variable.h"
 #include "storage/lmgr.h"
+#include "tcop/tcopprot.h"
 #include "utils/array.h"
+#include "utils/backend_status.h"
 #include "utils/datum.h"
 #include "utils/fmgrprotos.h"
 #include "utils/lsyscache.h"
 #include "utils/memutils.h"
 #include "utils/rel.h"
+#include "utils/snapmgr.h"
+#include "utils/wait_event.h"
 
 
 #if PG_VERSION_NUM >= 140000
@@ -46,6 +59,70 @@ static void PgturbohybridGraphEncodeBuildNode(PgturbohybridQuantBuildState *stat
 static void PgturbohybridGraphStreamFitVector(PgturbohybridQuantBuildState *state,
 								Vector *vector);
 static void PgturbohybridGraphFinishStreamingFit(PgturbohybridQuantBuildState *state);
+static bool PgturbohybridGraphUseFastBuildEdges(PgturbohybridQuantBuildState *state);
+static int64 PgturbohybridGraphElapsedUs(instr_time start);
+
+#define PARALLEL_KEY_PGTURBOHYBRID_NATIVE_SHARED	UINT64CONST(0xA000000000000011)
+#define PARALLEL_KEY_PGTURBOHYBRID_NATIVE_QUERY		UINT64CONST(0xA000000000000012)
+
+typedef enum PgturbohybridNativeParallelPhase
+{
+	PGTURBOHYBRID_NATIVE_PARALLEL_FIT = 1,
+	PGTURBOHYBRID_NATIVE_PARALLEL_ENCODE = 2
+} PgturbohybridNativeParallelPhase;
+
+typedef struct PgturbohybridNativeParallelRecord
+{
+	ItemPointerData heaptid;
+	uint64		vectorHash;
+	float		norm;
+	float		scale;
+	float		correction;
+	float		ecCorrection;
+	uint16		payloadMask;
+	uint16		reserved;
+	int32		payloads[PGTURBOHYBRID_GRAPH_MAX_PAYLOADS];
+} PgturbohybridNativeParallelRecord;
+
+typedef struct PgturbohybridNativeParallelShared
+{
+	Oid			heaprelid;
+	Oid			indexrelid;
+	bool		isconcurrent;
+	int			phase;
+	ConditionVariable workersdonecv;
+	slock_t		mutex;
+	int			nparticipantsdone;
+	int			nparticipants;
+	int			participantCapacity;
+	int			nextParticipant;
+	double		reltuples;
+	uint32		dimensions;
+	int			m;
+	int			efConstruction;
+	int			tqBits;
+	int			scoreMode;
+	bool		tqWeighted;
+	bool		tqRenorm;
+	bool		buildCodeOnly;
+	int			payloadCount;
+	Size		payloadBytes;
+	int			residualRerankBytes;
+	uint32		recordCount;
+	uint32		recordCapacity;
+	Size		recordBytes;
+	Size		fitCountOffset;
+	Size		fitMeanOffset;
+	Size		fitM2Offset;
+	Size		encodeUsOffset;
+	Size		ecShiftOffset;
+	Size		ecScaleOffset;
+	Size		recordsOffset;
+	bool		overflowed;
+} PgturbohybridNativeParallelShared;
+
+#define ParallelTableScanFromNativeShared(shared) \
+	(ParallelTableScanDesc) ((char *) (shared) + BUFFERALIGN(sizeof(PgturbohybridNativeParallelShared)))
 
 
 static bool
@@ -740,6 +817,349 @@ PgturbohybridGraphBuildCallback(Relation index, ItemPointer tid, Datum *values,
 	MemoryContextSwitchTo(oldCtx);
 }
 
+static char *
+PgturbohybridNativeParallelBase(PgturbohybridNativeParallelShared *shared)
+{
+	return (char *) shared;
+}
+
+static uint64 *
+PgturbohybridNativeParallelFitCounts(PgturbohybridNativeParallelShared *shared)
+{
+	return (uint64 *) (PgturbohybridNativeParallelBase(shared) + shared->fitCountOffset);
+}
+
+static double *
+PgturbohybridNativeParallelFitMean(PgturbohybridNativeParallelShared *shared)
+{
+	return (double *) (PgturbohybridNativeParallelBase(shared) + shared->fitMeanOffset);
+}
+
+static double *
+PgturbohybridNativeParallelFitM2(PgturbohybridNativeParallelShared *shared)
+{
+	return (double *) (PgturbohybridNativeParallelBase(shared) + shared->fitM2Offset);
+}
+
+static uint64 *
+PgturbohybridNativeParallelEncodeUs(PgturbohybridNativeParallelShared *shared)
+{
+	return (uint64 *) (PgturbohybridNativeParallelBase(shared) + shared->encodeUsOffset);
+}
+
+static float *
+PgturbohybridNativeParallelEcShift(PgturbohybridNativeParallelShared *shared)
+{
+	return shared->ecShiftOffset != 0 ?
+		(float *) (PgturbohybridNativeParallelBase(shared) + shared->ecShiftOffset) : NULL;
+}
+
+static float *
+PgturbohybridNativeParallelEcScale(PgturbohybridNativeParallelShared *shared)
+{
+	return shared->ecScaleOffset != 0 ?
+		(float *) (PgturbohybridNativeParallelBase(shared) + shared->ecScaleOffset) : NULL;
+}
+
+static char *
+PgturbohybridNativeParallelRecords(PgturbohybridNativeParallelShared *shared)
+{
+	return (char *) shared + shared->recordsOffset;
+}
+
+static PgturbohybridNativeParallelRecord *
+PgturbohybridNativeParallelRecordAt(PgturbohybridNativeParallelShared *shared,
+									uint32 row)
+{
+	return (PgturbohybridNativeParallelRecord *)
+		(PgturbohybridNativeParallelRecords(shared) + (Size) row * shared->recordBytes);
+}
+
+static uint8 *
+PgturbohybridNativeParallelRecordCode(PgturbohybridNativeParallelShared *shared,
+									  PgturbohybridNativeParallelRecord *record)
+{
+	return (uint8 *) record + MAXALIGN(sizeof(PgturbohybridNativeParallelRecord));
+}
+
+static uint8 *
+PgturbohybridNativeParallelRecordResidual(PgturbohybridNativeParallelShared *shared,
+										  PgturbohybridNativeParallelRecord *record)
+{
+	return PgturbohybridNativeParallelRecordCode(shared, record) +
+		PgturbohybridGraphCodeBytesForBits(shared->dimensions, shared->tqBits);
+}
+
+static int
+PgturbohybridNativeParallelRecordCompare(const void *a, const void *b)
+{
+	const PgturbohybridNativeParallelRecord *left =
+		(const PgturbohybridNativeParallelRecord *) a;
+	const PgturbohybridNativeParallelRecord *right =
+		(const PgturbohybridNativeParallelRecord *) b;
+	BlockNumber leftBlock = ItemPointerGetBlockNumber(&left->heaptid);
+	BlockNumber rightBlock = ItemPointerGetBlockNumber(&right->heaptid);
+	OffsetNumber leftOff = ItemPointerGetOffsetNumber(&left->heaptid);
+	OffsetNumber rightOff = ItemPointerGetOffsetNumber(&right->heaptid);
+
+	if (leftBlock < rightBlock)
+		return -1;
+	if (leftBlock > rightBlock)
+		return 1;
+	if (leftOff < rightOff)
+		return -1;
+	if (leftOff > rightOff)
+		return 1;
+	return 0;
+}
+
+static int
+PgturbohybridNativeParallelClaimParticipant(PgturbohybridNativeParallelShared *shared)
+{
+	int			slot;
+
+	SpinLockAcquire(&shared->mutex);
+	slot = shared->nextParticipant++;
+	SpinLockRelease(&shared->mutex);
+
+	if (slot >= shared->participantCapacity)
+		elog(ERROR, "pgturbohybrid native parallel build participant overflow");
+
+	return slot;
+}
+
+static void
+PgturbohybridNativeInitWorkerState(PgturbohybridQuantBuildState *state,
+								   Relation heap, Relation index,
+								   IndexInfo *indexInfo,
+								   PgturbohybridNativeParallelShared *shared)
+{
+	memset(state, 0, sizeof(*state));
+	state->heap = heap;
+	state->index = index;
+	state->indexInfo = indexInfo;
+	state->forkNum = MAIN_FORKNUM;
+	state->building = true;
+	state->typeInfo = PgturbohybridGraphGetTypeInfo(index);
+	state->m = shared->m;
+	state->efConstruction = shared->efConstruction;
+	state->tqBits = shared->tqBits;
+	state->tqWeighted = shared->tqWeighted;
+	state->tqRenorm = shared->tqRenorm;
+	state->buildCodeOnly = shared->buildCodeOnly;
+	state->buildFastEdges = true;
+	state->scoreMode = shared->scoreMode;
+	state->payloadCount = shared->payloadCount;
+	state->payloadBytes = shared->payloadBytes;
+	state->residualRerankBytes = shared->residualRerankBytes;
+	state->dimensions = shared->dimensions;
+	state->ctx = AllocSetContextCreate(CurrentMemoryContext,
+									   "pgturbohybrid native parallel worker",
+									   ALLOCSET_DEFAULT_SIZES);
+	PgturbohybridGraphInitSupport(&state->support, index);
+	if (shared->phase == PGTURBOHYBRID_NATIVE_PARALLEL_ENCODE)
+	{
+		state->ecShift = PgturbohybridNativeParallelEcShift(shared);
+		state->ecScale = PgturbohybridNativeParallelEcScale(shared);
+	}
+}
+
+static void
+PgturbohybridNativeParallelBuildCallback(Relation index, ItemPointer tid,
+										 Datum *values, bool *isnull,
+										 bool tupleIsAlive, void *opaque)
+{
+	PgturbohybridQuantBuildState *state = (PgturbohybridQuantBuildState *) opaque;
+	PgturbohybridNativeParallelShared *shared =
+		(PgturbohybridNativeParallelShared *) state->parallelShared;
+	MemoryContext oldCtx;
+	Datum		value;
+	bool		formed;
+
+	(void) index;
+	(void) tupleIsAlive;
+
+	CHECK_FOR_INTERRUPTS();
+	if (isnull[0])
+		return;
+
+	oldCtx = CurrentMemoryContext;
+	if (state->buildTupleCtx == NULL)
+		state->buildTupleCtx = AllocSetContextCreate(state->ctx,
+													 "pgturbohybrid native parallel tuple context",
+													 ALLOCSET_DEFAULT_SIZES);
+	MemoryContextReset(state->buildTupleCtx);
+	MemoryContextSwitchTo(state->buildTupleCtx);
+	formed = PgturbohybridGraphFormIndexValue(&value, values, isnull,
+											   state->typeInfo, &state->support);
+	if (formed)
+	{
+		Vector	   *vector = (Vector *) DatumGetPointer(value);
+
+		if (vector->dim != state->dimensions)
+			ereport(ERROR,
+					(errcode(ERRCODE_DATA_EXCEPTION),
+					 errmsg("different vector dimensions are not supported in the same pgturbohybrid graph")));
+
+		if (shared->phase == PGTURBOHYBRID_NATIVE_PARALLEL_FIT)
+		{
+			MemoryContextSwitchTo(state->ctx);
+			if (state->scoreMode == PGTURBOHYBRID_SCORE_COSINE ||
+				state->scoreMode == PGTURBOHYBRID_SCORE_IP)
+				PgturbohybridGraphStreamFitVector(state, vector);
+			else
+				state->fitCount++;
+		}
+		else
+		{
+			uint32		row;
+			PgturbohybridNativeParallelRecord *record;
+			uint8	   *code;
+			PgturbohybridGraphBuildNode node;
+			instr_time encodeStart;
+			instr_time encodeEnd;
+
+			SpinLockAcquire(&shared->mutex);
+			row = shared->recordCount++;
+			if (row >= shared->recordCapacity)
+			{
+				shared->overflowed = true;
+				SpinLockRelease(&shared->mutex);
+				MemoryContextSwitchTo(oldCtx);
+				return;
+			}
+			SpinLockRelease(&shared->mutex);
+
+			record = PgturbohybridNativeParallelRecordAt(shared, row);
+			memset(record, 0, shared->recordBytes);
+			record->heaptid = *tid;
+			record->vectorHash = PgturbohybridGraphBuildVectorHash(vector);
+			record->norm = PgturbohybridGraphVectorNorm(vector);
+			PgturbohybridGraphCopyPayloadValues(state, record->payloads,
+												&record->payloadMask,
+												values, isnull);
+			if (shared->residualRerankBytes > 0)
+				PgturbohybridGraphBuildResidualSketch(vector->x, vector->dim,
+													  PgturbohybridNativeParallelRecordResidual(shared, record),
+													  shared->residualRerankBytes);
+
+			memset(&node, 0, sizeof(node));
+			code = PgturbohybridNativeParallelRecordCode(shared, record);
+			node.code = code;
+			INSTR_TIME_SET_CURRENT(encodeStart);
+			PgturbohybridGraphEncodeBuildNode(state, &node, vector);
+			INSTR_TIME_SET_CURRENT(encodeEnd);
+			INSTR_TIME_SUBTRACT(encodeEnd, encodeStart);
+			state->parallelEncodeUs += INSTR_TIME_GET_MICROSEC(encodeEnd);
+			record->scale = node.scale;
+			record->correction = node.correction;
+			record->ecCorrection = node.ecCorrection;
+		}
+	}
+	MemoryContextSwitchTo(oldCtx);
+}
+
+static void
+PgturbohybridNativeParallelFinishParticipant(PgturbohybridNativeParallelShared *shared,
+											 PgturbohybridQuantBuildState *state,
+											 int slot, double reltuples)
+{
+	uint64	   *fitCounts = PgturbohybridNativeParallelFitCounts(shared);
+	uint64	   *encodeUs = PgturbohybridNativeParallelEncodeUs(shared);
+
+	if (shared->phase == PGTURBOHYBRID_NATIVE_PARALLEL_FIT)
+	{
+		fitCounts[slot] = state->fitCount;
+		if ((state->scoreMode == PGTURBOHYBRID_SCORE_COSINE ||
+			 state->scoreMode == PGTURBOHYBRID_SCORE_IP) &&
+			state->fitMean != NULL && state->fitM2 != NULL)
+		{
+			double	   *means = PgturbohybridNativeParallelFitMean(shared);
+			double	   *m2s = PgturbohybridNativeParallelFitM2(shared);
+			Size		offset = (Size) slot * shared->dimensions;
+
+			memcpy(means + offset, state->fitMean,
+				   sizeof(double) * shared->dimensions);
+			memcpy(m2s + offset, state->fitM2,
+				   sizeof(double) * shared->dimensions);
+		}
+	}
+	encodeUs[slot] = state->parallelEncodeUs;
+
+	SpinLockAcquire(&shared->mutex);
+	shared->nparticipantsdone++;
+	shared->reltuples += reltuples;
+	SpinLockRelease(&shared->mutex);
+	ConditionVariableSignal(&shared->workersdonecv);
+}
+
+static void
+PgturbohybridNativeParallelScan(Relation heapRel, Relation indexRel,
+								PgturbohybridNativeParallelShared *shared,
+								bool progress)
+{
+	PgturbohybridQuantBuildState state;
+	TableScanDesc scan;
+	double		reltuples;
+	IndexInfo  *indexInfo;
+	int			slot;
+
+	indexInfo = BuildIndexInfo(indexRel);
+	indexInfo->ii_Concurrent = shared->isconcurrent;
+	PgturbohybridNativeInitWorkerState(&state, heapRel, indexRel, indexInfo, shared);
+	state.parallelShared = shared;
+	slot = PgturbohybridNativeParallelClaimParticipant(shared);
+
+	scan = table_beginscan_parallel(heapRel,
+									ParallelTableScanFromNativeShared(shared)
+#if PG_VERSION_NUM >= 190000
+									,SO_NONE
+#endif
+		);
+	reltuples = table_index_build_scan(heapRel, indexRel, indexInfo,
+									   true, progress,
+									   PgturbohybridNativeParallelBuildCallback,
+									   (void *) &state, scan);
+
+	PgturbohybridNativeParallelFinishParticipant(shared, &state, slot, reltuples);
+	MemoryContextDelete(state.ctx);
+}
+
+void
+PgturbohybridNativeParallelBuildMain(dsm_segment *seg, shm_toc *toc)
+{
+	char	   *sharedquery;
+	PgturbohybridNativeParallelShared *shared;
+	Relation	heapRel;
+	Relation	indexRel;
+	LOCKMODE	heapLockmode;
+	LOCKMODE	indexLockmode;
+
+	(void) seg;
+
+	sharedquery = shm_toc_lookup(toc, PARALLEL_KEY_PGTURBOHYBRID_NATIVE_QUERY, true);
+	debug_query_string = sharedquery;
+	pgstat_report_activity(STATE_RUNNING, debug_query_string);
+
+	shared = shm_toc_lookup(toc, PARALLEL_KEY_PGTURBOHYBRID_NATIVE_SHARED, false);
+	if (!shared->isconcurrent)
+	{
+		heapLockmode = ShareLock;
+		indexLockmode = AccessExclusiveLock;
+	}
+	else
+	{
+		heapLockmode = ShareUpdateExclusiveLock;
+		indexLockmode = RowExclusiveLock;
+	}
+
+	heapRel = table_open(shared->heaprelid, heapLockmode);
+	indexRel = index_open(shared->indexrelid, indexLockmode);
+	PgturbohybridNativeParallelScan(heapRel, indexRel, shared, false);
+	index_close(indexRel, indexLockmode);
+	table_close(heapRel, heapLockmode);
+}
+
 /*
  * Extended P-square one-quantile estimator (Jain & Chlamtac
  * 1985, N=5 markers).  Streaming, fixed memory per estimator,
@@ -1283,6 +1703,24 @@ PgturbohybridGraphSelectNeighbors(PgturbohybridQuantBuildState *state, uint32 sr
 	return selectedCount;
 }
 
+static bool
+PgturbohybridGraphUseFastBuildEdges(PgturbohybridQuantBuildState *state)
+{
+	if (!state->buildCodeOnly)
+		return false;
+
+	switch ((PgturbohybridDenseBuildNeighborSelect) pgturbohybrid_dense_build_neighbor_select)
+	{
+		case PGTURBOHYBRID_DENSE_BUILD_NEIGHBOR_SELECT_FAST:
+			return true;
+		case PGTURBOHYBRID_DENSE_BUILD_NEIGHBOR_SELECT_HEURISTIC:
+			return false;
+		case PGTURBOHYBRID_DENSE_BUILD_NEIGHBOR_SELECT_AUTO:
+		default:
+			return pgturbohybrid_profile == PGTURBOHYBRID_PROFILE_LATENCY;
+	}
+}
+
 static double
 PgturbohybridGraphCandidateDistance(PgturbohybridGraphFrontierItem *candidates,
 						 int candidateCount, uint32 nodeId)
@@ -1483,11 +1921,12 @@ PgturbohybridGraphEnsureLevel0Backbone(PgturbohybridQuantBuildState *state)
 }
 
 static uint32
-PgturbohybridGraphAdjacentDuplicateCount(PgturbohybridQuantBuildState *state)
+PgturbohybridGraphAdjacentDuplicateCountRange(PgturbohybridQuantBuildState *state,
+											 uint32 startNodeId, uint32 endNodeId)
 {
 	uint32		duplicates = 0;
 
-	for (uint32 i = 1; i < state->nodeCount; i++)
+	for (uint32 i = startNodeId + 1; i < endNodeId; i++)
 	{
 		CHECK_FOR_INTERRUPTS();
 		if (PgturbohybridGraphBuildVectorsEqual(state, i - 1, i))
@@ -1629,7 +2068,9 @@ PgturbohybridGraphBuildSearchLayer(PgturbohybridQuantBuildState *state, uint32 q
 }
 
 static void
-PgturbohybridGraphBuildEdges(PgturbohybridQuantBuildState *state)
+PgturbohybridGraphBuildEdgesRange(PgturbohybridQuantBuildState *state,
+								  uint32 startNodeId, uint32 endNodeId,
+								  PgturbohybridGraphSegmentMetaData *segment)
 {
 	int			ef = Max(state->efConstruction, PgturbohybridGraphLevelM(state->m, 0));
 	uint32		entryNodeId;
@@ -1639,14 +2080,15 @@ PgturbohybridGraphBuildEdges(PgturbohybridQuantBuildState *state)
 	PgturbohybridGraphBuildOrderItem *order;
 	bool	   *inserted;
 	uint32		adjacentDuplicates;
+	uint32		rangeNodeCount = endNodeId - startNodeId;
 	bool		preserveScanOrder;
 
-	if (state->nodeCount == 0)
+	if (rangeNodeCount == 0)
 		return;
 
 	nearest = palloc(sizeof(PgturbohybridGraphFrontierItem) * ef);
 	selected = palloc(sizeof(uint32) * PgturbohybridGraphLevelM(state->m, 0));
-	order = palloc(sizeof(PgturbohybridGraphBuildOrderItem) * state->nodeCount);
+	order = palloc(sizeof(PgturbohybridGraphBuildOrderItem) * rangeNodeCount);
 	inserted = palloc0(sizeof(bool) * state->nodeCount);
 	state->buildVisitedGeneration = palloc0(sizeof(uint32) * state->nodeCount);
 	state->buildVisitGeneration = 0;
@@ -1654,24 +2096,28 @@ PgturbohybridGraphBuildEdges(PgturbohybridQuantBuildState *state)
 												 "pgturbohybrid graph build query context",
 												 ALLOCSET_DEFAULT_SIZES);
 
-	for (uint32 i = 0; i < state->nodeCount; i++)
+	for (uint32 i = 0; i < rangeNodeCount; i++)
 	{
-		order[i].nodeId = i;
-		order[i].key = PgturbohybridGraphMix64(i);
+		uint32		nodeId = startNodeId + i;
+
+		order[i].nodeId = nodeId;
+		order[i].key = PgturbohybridGraphMix64(nodeId);
 	}
-	adjacentDuplicates = PgturbohybridGraphAdjacentDuplicateCount(state);
-	preserveScanOrder = adjacentDuplicates > state->nodeCount / 2;
-	elog(DEBUG1, "pgturbohybrid native graph duplicate-run build: nodes=%u adjacent_duplicates=%u preserve_scan_order=%s",
-		 state->nodeCount, adjacentDuplicates, preserveScanOrder ? "on" : "off");
+	adjacentDuplicates = PgturbohybridGraphAdjacentDuplicateCountRange(state,
+																	   startNodeId,
+																	   endNodeId);
+	preserveScanOrder = adjacentDuplicates > rangeNodeCount / 2;
+	elog(DEBUG1, "pgturbohybrid native graph segment duplicate-run build: start_node=%u nodes=%u adjacent_duplicates=%u preserve_scan_order=%s",
+		 startNodeId, rangeNodeCount, adjacentDuplicates, preserveScanOrder ? "on" : "off");
 	if (!preserveScanOrder)
-		qsort(order, state->nodeCount, sizeof(PgturbohybridGraphBuildOrderItem),
+		qsort(order, rangeNodeCount, sizeof(PgturbohybridGraphBuildOrderItem),
 			  PgturbohybridGraphBuildOrderCompare);
 
 	entryNodeId = order[0].nodeId;
 	entryLevel = state->nodes[entryNodeId].level;
 	inserted[entryNodeId] = true;
 
-	for (uint32 orderIdx = 1; orderIdx < state->nodeCount; orderIdx++)
+	for (uint32 orderIdx = 1; orderIdx < rangeNodeCount; orderIdx++)
 	{
 		uint32		i = order[orderIdx].nodeId;
 		PgturbohybridGraphFrontierItem levelEntry;
@@ -1679,7 +2125,7 @@ PgturbohybridGraphBuildEdges(PgturbohybridQuantBuildState *state)
 		int			linkingLevel = Min(nodeLevel, entryLevel);
 
 		CHECK_FOR_INTERRUPTS();
-		if (preserveScanOrder && i > 0 && inserted[i - 1])
+		if (preserveScanOrder && i > startNodeId && inserted[i - 1])
 		{
 			PgturbohybridGraphLinkAdjacentBuildNode(state, i, i - 1);
 			if (nodeLevel > entryLevel)
@@ -1748,8 +2194,18 @@ PgturbohybridGraphBuildEdges(PgturbohybridQuantBuildState *state)
 		inserted[i] = true;
 	}
 
-	state->entryNodeId = entryNodeId;
-	state->maxLevel = entryLevel;
+	if (segment != NULL)
+	{
+		segment->startNodeId = startNodeId;
+		segment->nodeCount = rangeNodeCount;
+		segment->entryNodeId = entryNodeId;
+		segment->entryLevel = entryLevel;
+	}
+	if (state->segmentCount <= 1 || entryLevel > state->maxLevel)
+	{
+		state->entryNodeId = entryNodeId;
+		state->maxLevel = entryLevel;
+	}
 	pfree(nearest);
 	pfree(selected);
 	pfree(order);
@@ -1759,6 +2215,40 @@ PgturbohybridGraphBuildEdges(PgturbohybridQuantBuildState *state)
 	MemoryContextDelete(state->buildQueryCtx);
 	state->buildQueryCtx = NULL;
 	state->buildTqValid = false;
+}
+
+static void
+PgturbohybridGraphBuildEdges(PgturbohybridQuantBuildState *state)
+{
+	int			requestedSegments;
+	uint16		segmentCount;
+	uint32		baseSegmentSize;
+	uint32		remainder;
+	uint32		startNodeId = 0;
+
+	if (state->nodeCount == 0)
+		return;
+
+	requestedSegments = PgturbohybridGraphGetNativeSegments(state->index);
+	segmentCount = (uint16) Min((uint32) requestedSegments, state->nodeCount);
+	segmentCount = Max(segmentCount, 1);
+	state->segmentCount = segmentCount;
+	state->entryNodeId = 0;
+	state->maxLevel = -1;
+	memset(state->segments, 0, sizeof(state->segments));
+
+	baseSegmentSize = state->nodeCount / segmentCount;
+	remainder = state->nodeCount % segmentCount;
+	for (uint16 segmentIdx = 0; segmentIdx < segmentCount; segmentIdx++)
+	{
+		uint32		segmentSize = baseSegmentSize + (segmentIdx < remainder ? 1 : 0);
+		uint32		endNodeId = startNodeId + segmentSize;
+
+		CHECK_FOR_INTERRUPTS();
+		PgturbohybridGraphBuildEdgesRange(state, startNodeId, endNodeId,
+										  &state->segments[segmentIdx]);
+		startNodeId = endNodeId;
+	}
 }
 
 static void
@@ -1793,6 +2283,8 @@ PgturbohybridGraphReorderBuildNodesForLocality(PgturbohybridQuantBuildState *sta
 	bool		identity = true;
 
 	if (PgturbohybridGraphGetGraphReorder(state->index) == PGTURBOHYBRID_GRAPH_REORDER_OFF)
+		return;
+	if (state->segmentCount > 1)
 		return;
 	if (state->nodeCount < 2 || state->entryNodeId >= state->nodeCount)
 		return;
@@ -2053,6 +2545,8 @@ PgturbohybridGraphCreateMetaPage(Relation index, ForkNumber forkNum)
 	metap->tqEntrySidecarBytes = 0;
 	metap->tqRoutingEntryCount = 0;
 	metap->tqRoutingEntryBytes = 0;
+	metap->tqSegmentCount = 0;
+	metap->tqSegmentBytes = 0;
 	((PageHeader) page)->pd_lower =
 		((char *) metap + sizeof(PgturbohybridGraphMetaPageData)) - (char *) page;
 
@@ -2112,6 +2606,8 @@ PgturbohybridQuantUpdateMetaPage(Relation index, PgturbohybridQuantBuildState *s
 		metap->tqFlags |= PGTURBOHYBRID_GRAPH_TQ_EXACT_BUILD;
 	if (state->graphBackbone)
 		metap->tqFlags |= PGTURBOHYBRID_GRAPH_TQ_BACKBONE;
+	if (state->buildFastEdges)
+		metap->tqFlags |= PGTURBOHYBRID_GRAPH_TQ_FAST_BUILD_EDGES;
 	metap->tqBits = state->tqBits != 0 ? state->tqBits : PGTURBOHYBRID_DEFAULT_BITS;
 	metap->tqCodeStartBlkno = codeStart;
 	metap->tqAdjStartBlkno = adjStart;
@@ -2130,6 +2626,23 @@ PgturbohybridQuantUpdateMetaPage(Relation index, PgturbohybridQuantBuildState *s
 	if (state->routingEntryCount > 0)
 		memcpy(metap->tqRoutingEntryNodeIds, state->routingEntryNodeIds,
 			   sizeof(uint32) * state->routingEntryCount);
+	metap->tqSegmentCount = state->segmentCount;
+	metap->tqSegmentBytes = state->segmentCount * sizeof(PgturbohybridGraphSegmentMetaData);
+	memset(metap->tqSegments, 0, sizeof(metap->tqSegments));
+	for (uint16 i = 0; i < state->segmentCount; i++)
+	{
+		metap->tqSegments[i] = state->segments[i];
+		metap->tqSegments[i].codeStartBlkno = codeStart;
+		metap->tqSegments[i].adjStartBlkno = adjStart;
+		metap->tqSegments[i].exactStartBlkno = exactStart;
+		metap->tqSegments[i].correctionStartBlkno = correctionStart;
+	}
+	metap->buildScanUs = state->buildScanUs;
+	metap->buildCorrectionUs = state->buildCorrectionUs;
+	metap->buildEncodeUs = state->buildEncodeUs;
+	metap->buildEdgeUs = state->buildEdgeUs;
+	metap->buildWriteUs = state->buildWriteUs;
+	metap->buildWorkerCount = state->buildWorkerCount;
 	PgturbohybridGraphMarkPageGraphOp(page, PGTURBOHYBRID_GRAPH_GRAPH_OP_META_UPDATE);
 
 	if (xlogState != NULL)
@@ -2378,9 +2891,12 @@ PgturbohybridGraphWriteGraphPages(PgturbohybridQuantBuildState *state)
 	BlockNumber adjStart;
 	BlockNumber exactStart;
 	BlockNumber correctionStart;
+	instr_time	writeStart;
 
+	INSTR_TIME_SET_CURRENT(writeStart);
 	PgturbohybridGraphWriteGraphDataPages(state, &codeStart, &adjStart, &exactStart,
 							   &correctionStart);
+	state->buildWriteUs = PgturbohybridGraphElapsedUs(writeStart);
 	PgturbohybridQuantUpdateMetaPage(state->index, state, codeStart, adjStart, exactStart,
 						  correctionStart);
 }
@@ -2420,6 +2936,398 @@ PgturbohybridGraphDebugBuildPhaseDone(PgturbohybridQuantBuildState *state, const
 		 state->nodeCount);
 }
 
+static int
+PgturbohybridNativeBuildWorkerRequest(Relation heap, Relation index)
+{
+	char	   *setting = pgturbohybrid_native_build_workers;
+	char	   *endptr;
+	long		value;
+	int			parallelWorkers;
+
+	if (heap == NULL || setting == NULL)
+		return 0;
+	if (pg_strcasecmp(setting, "auto") == 0)
+	{
+		parallelWorkers = plan_create_index_workers(RelationGetRelid(heap),
+													RelationGetRelid(index));
+		if (parallelWorkers == 0)
+			return 0;
+		parallelWorkers = RelationGetParallelWorkers(heap, -1);
+		if (parallelWorkers != -1)
+			return Min(parallelWorkers, max_parallel_maintenance_workers);
+		return max_parallel_maintenance_workers;
+	}
+
+	errno = 0;
+	value = strtol(setting, &endptr, 10);
+	if (errno != 0 || endptr == setting || *endptr != '\0' || value < 0)
+		ereport(ERROR,
+				(errcode(ERRCODE_INVALID_PARAMETER_VALUE),
+				 errmsg("invalid value for turbohybrid.native_build_workers"),
+				 errdetail("Use \"auto\" or a non-negative integer.")));
+	if (value == 0)
+		return 0;
+
+	parallelWorkers = plan_create_index_workers(RelationGetRelid(heap),
+												RelationGetRelid(index));
+	if (parallelWorkers == 0)
+		return 0;
+	return Min((int) Min(value, (long) INT_MAX), max_parallel_maintenance_workers);
+}
+
+static bool
+PgturbohybridNativeParallelEligible(PgturbohybridQuantBuildState *state,
+									bool needsCorrectionFit)
+{
+	int			dimensions;
+
+	if (state->heap == NULL || !state->buildCodeOnly)
+		return false;
+	if (state->tqQuantileFit && needsCorrectionFit)
+		return false;
+	dimensions = TupleDescAttr(state->index->rd_att, 0)->atttypmod;
+	if (dimensions < 0 || dimensions > state->typeInfo->maxDimensions)
+		return false;
+	state->dimensions = dimensions;
+	return true;
+}
+
+static Size
+PgturbohybridNativeParallelRecordBytes(PgturbohybridQuantBuildState *state)
+{
+	Size		bytes = MAXALIGN(sizeof(PgturbohybridNativeParallelRecord));
+
+	bytes = add_size(bytes,
+					 PgturbohybridGraphCodeBytesForBits(state->dimensions,
+														state->tqBits));
+	bytes = add_size(bytes, MAXALIGN(state->residualRerankBytes));
+	return bytes;
+}
+
+static Size
+PgturbohybridNativeParallelEstimateShared(PgturbohybridQuantBuildState *state,
+										  Snapshot snapshot, int participantCapacity,
+										  int phase, uint32 recordCapacity,
+										  Size recordBytes)
+{
+	Size		bytes;
+	Size		dimSlots = (Size) participantCapacity * state->dimensions;
+
+	bytes = add_size(BUFFERALIGN(sizeof(PgturbohybridNativeParallelShared)),
+					 table_parallelscan_estimate(state->heap, snapshot));
+	bytes = MAXALIGN(bytes);
+	bytes = add_size(bytes, MAXALIGN(sizeof(uint64) * participantCapacity));
+	bytes = add_size(bytes, MAXALIGN(sizeof(uint64) * participantCapacity));
+	if (state->scoreMode == PGTURBOHYBRID_SCORE_COSINE ||
+		state->scoreMode == PGTURBOHYBRID_SCORE_IP)
+	{
+		bytes = add_size(bytes, MAXALIGN(sizeof(double) * dimSlots));
+		bytes = add_size(bytes, MAXALIGN(sizeof(double) * dimSlots));
+	}
+	if (phase == PGTURBOHYBRID_NATIVE_PARALLEL_ENCODE)
+	{
+		if (state->ecShift != NULL && state->ecScale != NULL)
+		{
+			bytes = add_size(bytes, MAXALIGN(sizeof(float) * state->dimensions));
+			bytes = add_size(bytes, MAXALIGN(sizeof(float) * state->dimensions));
+		}
+		bytes = add_size(bytes, mul_size(recordBytes, recordCapacity));
+	}
+	return bytes;
+}
+
+static void
+PgturbohybridNativeParallelInitShared(PgturbohybridQuantBuildState *state,
+									  PgturbohybridNativeParallelShared *shared,
+									  Snapshot snapshot, int phase,
+									  int participantCapacity,
+									  uint32 recordCapacity, Size recordBytes,
+									  Size sharedBytes)
+{
+	Size		cursor;
+
+	memset(shared, 0, sharedBytes);
+	shared->heaprelid = RelationGetRelid(state->heap);
+	shared->indexrelid = RelationGetRelid(state->index);
+	shared->isconcurrent = state->indexInfo->ii_Concurrent;
+	shared->phase = phase;
+	shared->participantCapacity = participantCapacity;
+	shared->dimensions = state->dimensions;
+	shared->m = state->m;
+	shared->efConstruction = state->efConstruction;
+	shared->tqBits = state->tqBits;
+	shared->scoreMode = state->scoreMode;
+	shared->tqWeighted = state->tqWeighted;
+	shared->tqRenorm = state->tqRenorm;
+	shared->buildCodeOnly = state->buildCodeOnly;
+	shared->payloadCount = state->payloadCount;
+	shared->payloadBytes = state->payloadBytes;
+	shared->residualRerankBytes = state->residualRerankBytes;
+	shared->recordCapacity = recordCapacity;
+	shared->recordBytes = recordBytes;
+	ConditionVariableInit(&shared->workersdonecv);
+	SpinLockInit(&shared->mutex);
+	table_parallelscan_initialize(state->heap,
+								  ParallelTableScanFromNativeShared(shared),
+								  snapshot);
+
+	cursor = add_size(BUFFERALIGN(sizeof(PgturbohybridNativeParallelShared)),
+					  table_parallelscan_estimate(state->heap, snapshot));
+	cursor = MAXALIGN(cursor);
+	shared->fitCountOffset = cursor;
+	cursor = add_size(cursor, MAXALIGN(sizeof(uint64) * participantCapacity));
+	shared->encodeUsOffset = cursor;
+	cursor = add_size(cursor, MAXALIGN(sizeof(uint64) * participantCapacity));
+	if (state->scoreMode == PGTURBOHYBRID_SCORE_COSINE ||
+		state->scoreMode == PGTURBOHYBRID_SCORE_IP)
+	{
+		Size		dimSlots = (Size) participantCapacity * state->dimensions;
+
+		shared->fitMeanOffset = cursor;
+		cursor = add_size(cursor, MAXALIGN(sizeof(double) * dimSlots));
+		shared->fitM2Offset = cursor;
+		cursor = add_size(cursor, MAXALIGN(sizeof(double) * dimSlots));
+	}
+	if (phase == PGTURBOHYBRID_NATIVE_PARALLEL_ENCODE)
+	{
+		if (state->ecShift != NULL && state->ecScale != NULL)
+		{
+			shared->ecShiftOffset = cursor;
+			memcpy(PgturbohybridNativeParallelEcShift(shared), state->ecShift,
+				   sizeof(float) * state->dimensions);
+			cursor = add_size(cursor, MAXALIGN(sizeof(float) * state->dimensions));
+			shared->ecScaleOffset = cursor;
+			memcpy(PgturbohybridNativeParallelEcScale(shared), state->ecScale,
+				   sizeof(float) * state->dimensions);
+			cursor = add_size(cursor, MAXALIGN(sizeof(float) * state->dimensions));
+		}
+		shared->recordsOffset = cursor;
+	}
+}
+
+static void
+PgturbohybridNativeParallelWait(PgturbohybridNativeParallelShared *shared)
+{
+	for (;;)
+	{
+		SpinLockAcquire(&shared->mutex);
+		if (shared->nparticipantsdone >= shared->nparticipants)
+		{
+			SpinLockRelease(&shared->mutex);
+			break;
+		}
+		SpinLockRelease(&shared->mutex);
+		ConditionVariableSleep(&shared->workersdonecv,
+							   WAIT_EVENT_PARALLEL_CREATE_INDEX_SCAN);
+	}
+	ConditionVariableCancelSleep();
+}
+
+static void
+PgturbohybridNativeParallelCombineFit(PgturbohybridQuantBuildState *state,
+									  PgturbohybridNativeParallelShared *shared)
+{
+	uint64	   *counts = PgturbohybridNativeParallelFitCounts(shared);
+	double	   *means = PgturbohybridNativeParallelFitMean(shared);
+	double	   *m2s = PgturbohybridNativeParallelFitM2(shared);
+	uint64		totalCount = 0;
+
+	if (state->scoreMode != PGTURBOHYBRID_SCORE_COSINE &&
+		state->scoreMode != PGTURBOHYBRID_SCORE_IP)
+	{
+		for (int slot = 0; slot < shared->participantCapacity; slot++)
+			totalCount += counts[slot];
+		state->fitCount = totalCount;
+		return;
+	}
+
+	state->fitMean = MemoryContextAllocZero(state->ctx,
+											sizeof(double) * state->dimensions);
+	state->fitM2 = MemoryContextAllocZero(state->ctx,
+										  sizeof(double) * state->dimensions);
+	for (int slot = 0; slot < shared->participantCapacity; slot++)
+	{
+		uint64		count = counts[slot];
+		double	   *slotMean;
+		double	   *slotM2;
+		double		total;
+
+		if (count == 0)
+			continue;
+		slotMean = means + (Size) slot * state->dimensions;
+		slotM2 = m2s + (Size) slot * state->dimensions;
+		total = (double) totalCount + (double) count;
+		for (int dim = 0; dim < state->dimensions; dim++)
+		{
+			double		delta = slotMean[dim] - state->fitMean[dim];
+
+			state->fitMean[dim] += delta * ((double) count / total);
+			state->fitM2[dim] += slotM2[dim] +
+				delta * delta * ((double) totalCount * (double) count / total);
+		}
+		totalCount += count;
+	}
+	state->fitCount = totalCount;
+	PgturbohybridGraphFinishStreamingFit(state);
+}
+
+static void
+PgturbohybridNativeParallelMergeRecords(PgturbohybridQuantBuildState *state,
+										PgturbohybridNativeParallelShared *shared)
+{
+	char	   *records = PgturbohybridNativeParallelRecords(shared);
+	Size		codeBytes = PgturbohybridGraphCodeBytesForBits(state->dimensions,
+															  state->tqBits);
+
+	if (shared->overflowed || shared->recordCount > shared->recordCapacity)
+		ereport(ERROR,
+				(errcode(ERRCODE_PROGRAM_LIMIT_EXCEEDED),
+				 errmsg("pgturbohybrid native parallel build record area overflowed")));
+
+	qsort(records, shared->recordCount, shared->recordBytes,
+		  PgturbohybridNativeParallelRecordCompare);
+
+	for (uint32 row = 0; row < shared->recordCount; row++)
+	{
+		PgturbohybridNativeParallelRecord *record =
+			PgturbohybridNativeParallelRecordAt(shared, row);
+		PgturbohybridGraphBuildNode *node;
+		uint32		nodeId = state->nodeCount;
+
+		PgturbohybridGraphEnsureNodeCapacity(state);
+		node = &state->nodes[state->nodeCount++];
+		node->heaptid = record->heaptid;
+		node->vectorHash = record->vectorHash;
+		node->norm = record->norm;
+		node->scale = record->scale;
+		node->correction = record->correction;
+		node->ecCorrection = record->ecCorrection;
+		node->level = PgturbohybridGraphPickLevel(nodeId, state->m);
+		node->flags = 0;
+		node->exactBlkno = InvalidBlockNumber;
+		node->exactOffno = InvalidOffsetNumber;
+		node->code = palloc(codeBytes);
+		memcpy(node->code, PgturbohybridNativeParallelRecordCode(shared, record),
+			   codeBytes);
+		if (state->residualRerankBytes > 0)
+		{
+			node->residualSketch = palloc(state->residualRerankBytes);
+			memcpy(node->residualSketch,
+				   PgturbohybridNativeParallelRecordResidual(shared, record),
+				   state->residualRerankBytes);
+		}
+		if (state->payloadCount > 0)
+		{
+			node->payloads = palloc0(state->payloadBytes);
+			memcpy(node->payloads, record->payloads, state->payloadBytes);
+			node->payloadMask = record->payloadMask;
+		}
+		PgturbohybridGraphAllocateBuildNeighbors(state, node);
+		state->maxLevel = Max(state->maxLevel, node->level);
+	}
+}
+
+static bool
+PgturbohybridNativeRunParallelPhase(PgturbohybridQuantBuildState *state,
+									int phase, int workerRequest,
+									uint32 recordCapacity, Size recordBytes,
+									int64 *elapsedUs,
+									PgturbohybridNativeParallelShared **sharedOut,
+									ParallelContext **pcxtOut,
+									Snapshot *snapshotOut)
+{
+	ParallelContext *pcxt;
+	Snapshot	snapshot;
+	Size		sharedBytes;
+	PgturbohybridNativeParallelShared *shared;
+	int			querylen = 0;
+	instr_time	start;
+
+	Assert(workerRequest > 0);
+	EnterParallelMode();
+	pcxt = CreateParallelContext("pgturbohybrid",
+								 "PgturbohybridNativeParallelBuildMain",
+								 workerRequest);
+	snapshot = state->indexInfo->ii_Concurrent ?
+		RegisterSnapshot(GetTransactionSnapshot()) : SnapshotAny;
+	sharedBytes = PgturbohybridNativeParallelEstimateShared(state, snapshot,
+															workerRequest + 1,
+															phase,
+															recordCapacity,
+															recordBytes);
+	shm_toc_estimate_chunk(&pcxt->estimator, sharedBytes);
+	shm_toc_estimate_keys(&pcxt->estimator, 1);
+	if (debug_query_string)
+	{
+		querylen = strlen(debug_query_string);
+		shm_toc_estimate_chunk(&pcxt->estimator, querylen + 1);
+		shm_toc_estimate_keys(&pcxt->estimator, 1);
+	}
+	InitializeParallelDSM(pcxt);
+	if (pcxt->seg == NULL)
+	{
+		if (IsMVCCSnapshot(snapshot))
+			UnregisterSnapshot(snapshot);
+		DestroyParallelContext(pcxt);
+		ExitParallelMode();
+		return false;
+	}
+
+	shared = (PgturbohybridNativeParallelShared *) shm_toc_allocate(pcxt->toc,
+																	sharedBytes);
+	PgturbohybridNativeParallelInitShared(state, shared, snapshot, phase,
+										  workerRequest + 1, recordCapacity,
+										  recordBytes, sharedBytes);
+	shm_toc_insert(pcxt->toc, PARALLEL_KEY_PGTURBOHYBRID_NATIVE_SHARED, shared);
+	if (debug_query_string)
+	{
+		char	   *sharedquery = (char *) shm_toc_allocate(pcxt->toc,
+															querylen + 1);
+
+		memcpy(sharedquery, debug_query_string, querylen + 1);
+		shm_toc_insert(pcxt->toc, PARALLEL_KEY_PGTURBOHYBRID_NATIVE_QUERY,
+					   sharedquery);
+	}
+
+	LaunchParallelWorkers(pcxt);
+	if (pcxt->nworkers_launched == 0)
+	{
+		WaitForParallelWorkersToFinish(pcxt);
+		if (IsMVCCSnapshot(snapshot))
+			UnregisterSnapshot(snapshot);
+		DestroyParallelContext(pcxt);
+		ExitParallelMode();
+		return false;
+	}
+
+	shared->nparticipants = pcxt->nworkers_launched + 1;
+	elog(DEBUG1, "pgturbohybrid native graph parallel build using %d workers for phase %d",
+		 pcxt->nworkers_launched, phase);
+
+	INSTR_TIME_SET_CURRENT(start);
+	PgturbohybridNativeParallelScan(state->heap, state->index, shared, true);
+	WaitForParallelWorkersToAttach(pcxt);
+	PgturbohybridNativeParallelWait(shared);
+	if (elapsedUs != NULL)
+		*elapsedUs = PgturbohybridGraphElapsedUs(start);
+
+	*sharedOut = shared;
+	*pcxtOut = pcxt;
+	*snapshotOut = snapshot;
+	return true;
+}
+
+static void
+PgturbohybridNativeFinishParallelPhase(ParallelContext *pcxt, Snapshot snapshot)
+{
+	WaitForParallelWorkersToFinish(pcxt);
+	if (IsMVCCSnapshot(snapshot))
+		UnregisterSnapshot(snapshot);
+	DestroyParallelContext(pcxt);
+	ExitParallelMode();
+}
+
+
 IndexBuildResult *
 tqgraphbuild(Relation heap, Relation index, IndexInfo *indexInfo)
 {
@@ -2433,7 +3341,9 @@ tqgraphbuild(Relation heap, Relation index, IndexInfo *indexInfo)
 	int64		edgesUs;
 	int64		writeUs;
 	int64		walUs = 0;
+	int			workerCount = 0;
 	bool		needsCorrectionFit;
+	bool		parallelBuilt = false;
 
 	memset(&state, 0, sizeof(state));
 	INSTR_TIME_SET_CURRENT(totalStart);
@@ -2470,7 +3380,7 @@ tqgraphbuild(Relation heap, Relation index, IndexInfo *indexInfo)
 	PgturbohybridGraphInitSupport(&state.support, index);
 	state.scoreMode = PgturbohybridGraphGetScoreMode(&state.support);
 	state.buildCodeOnly = PgturbohybridGraphCanBuildCodeOnly(&state);
-	state.buildFastEdges = state.buildCodeOnly;
+	state.buildFastEdges = PgturbohybridGraphUseFastBuildEdges(&state);
 	needsCorrectionFit = state.scoreMode == PGTURBOHYBRID_SCORE_COSINE ||
 		state.scoreMode == PGTURBOHYBRID_SCORE_IP;
 	state.ctx = AllocSetContextCreate(CurrentMemoryContext,
@@ -2479,7 +3389,96 @@ tqgraphbuild(Relation heap, Relation index, IndexInfo *indexInfo)
 	state.nodes = MemoryContextAllocZero(state.ctx, sizeof(PgturbohybridGraphBuildNode) * 1024);
 	state.nodeCapacity = 1024;
 
-	if (heap != NULL && state.buildCodeOnly && needsCorrectionFit)
+	if (heap != NULL &&
+		PgturbohybridNativeParallelEligible(&state, needsCorrectionFit))
+	{
+		int			workerRequest = PgturbohybridNativeBuildWorkerRequest(heap, index);
+
+		if (workerRequest > 0)
+		{
+			PgturbohybridNativeParallelShared *fitShared = NULL;
+			PgturbohybridNativeParallelShared *encodeShared = NULL;
+			ParallelContext *fitPcxt = NULL;
+			ParallelContext *encodePcxt = NULL;
+			Snapshot	fitSnapshot = InvalidSnapshot;
+			Snapshot	encodeSnapshot = InvalidSnapshot;
+			int64		fitUs = 0;
+			int64		encodeWallUs = 0;
+
+			PgturbohybridGraphDebugBuildPhaseStart(&state, "parallel_fit_count_scan");
+			INSTR_TIME_SET_CURRENT(phaseStart);
+			if (PgturbohybridNativeRunParallelPhase(&state,
+													PGTURBOHYBRID_NATIVE_PARALLEL_FIT,
+													workerRequest, 0, 0,
+													&fitUs, &fitShared,
+													&fitPcxt, &fitSnapshot))
+			{
+				uint32		recordCapacity;
+				Size		recordBytes;
+
+				PgturbohybridNativeParallelCombineFit(&state, fitShared);
+				state.reltuples = fitShared->reltuples;
+				workerCount = Max(fitShared->nparticipants - 1, 0);
+				correctionUs = fitUs;
+				PgturbohybridNativeFinishParallelPhase(fitPcxt, fitSnapshot);
+				PgturbohybridGraphDebugBuildPhaseDone(&state,
+													  "parallel_fit_count_scan",
+													  phaseStart);
+
+				if (state.fitCount > PG_UINT32_MAX)
+					ereport(ERROR,
+							(errcode(ERRCODE_PROGRAM_LIMIT_EXCEEDED),
+							 errmsg("pgturbohybrid native graph has too many rows for parallel build")));
+				recordCapacity = (uint32) state.fitCount;
+				recordBytes = PgturbohybridNativeParallelRecordBytes(&state);
+				PgturbohybridGraphDebugBuildPhaseStart(&state,
+													  "parallel_scan_encode");
+				INSTR_TIME_SET_CURRENT(phaseStart);
+				if (PgturbohybridNativeRunParallelPhase(&state,
+														PGTURBOHYBRID_NATIVE_PARALLEL_ENCODE,
+														workerRequest,
+														recordCapacity,
+														recordBytes,
+														&encodeWallUs,
+														&encodeShared,
+														&encodePcxt,
+														&encodeSnapshot))
+				{
+					uint64	   *encodeUsBySlot =
+						PgturbohybridNativeParallelEncodeUs(encodeShared);
+
+					scanUs = encodeWallUs;
+					encodeUs = 0;
+					for (int slot = 0; slot < encodeShared->participantCapacity; slot++)
+						encodeUs += (int64) encodeUsBySlot[slot];
+					state.reltuples = encodeShared->reltuples;
+					PgturbohybridNativeParallelMergeRecords(&state, encodeShared);
+					workerCount = Max(encodeShared->nparticipants - 1, 0);
+					PgturbohybridNativeFinishParallelPhase(encodePcxt,
+														   encodeSnapshot);
+					PgturbohybridGraphDebugBuildPhaseDone(&state,
+														  "parallel_scan_encode",
+														  phaseStart);
+					parallelBuilt = true;
+				}
+				else
+				{
+					state.fitCount = 0;
+					state.fitMean = NULL;
+					state.fitM2 = NULL;
+					state.ecShift = NULL;
+					state.ecScale = NULL;
+					state.dPrimeSqI16 = NULL;
+					state.weightScale = 0.0f;
+					state.mmConst = 0.0;
+					correctionUs = 0;
+					workerCount = 0;
+				}
+			}
+		}
+	}
+
+	if (!parallelBuilt && heap != NULL && state.buildCodeOnly && needsCorrectionFit)
 	{
 		PgturbohybridGraphDebugBuildPhaseStart(&state, "fit_correction_scan");
 		INSTR_TIME_SET_CURRENT(phaseStart);
@@ -2492,7 +3491,7 @@ tqgraphbuild(Relation heap, Relation index, IndexInfo *indexInfo)
 		PgturbohybridGraphDebugBuildPhaseDone(&state, "fit_correction_scan", phaseStart);
 	}
 
-	if (heap != NULL)
+	if (!parallelBuilt && heap != NULL)
 	{
 		PgturbohybridGraphDebugBuildPhaseStart(&state, "scan");
 		INSTR_TIME_SET_CURRENT(phaseStart);
@@ -2504,7 +3503,7 @@ tqgraphbuild(Relation heap, Relation index, IndexInfo *indexInfo)
 		PgturbohybridGraphDebugBuildPhaseDone(&state, "scan", phaseStart);
 	}
 
-	if (!state.buildCodeOnly)
+	if (!parallelBuilt && !state.buildCodeOnly)
 	{
 		PgturbohybridGraphDebugBuildPhaseStart(&state, "fit_correction");
 		INSTR_TIME_SET_CURRENT(phaseStart);
@@ -2535,7 +3534,7 @@ tqgraphbuild(Relation heap, Relation index, IndexInfo *indexInfo)
 	PgturbohybridGraphReorderBuildNodesForLocality(&state);
 	PgturbohybridGraphDebugBuildPhaseDone(&state, "reorder_nodes", phaseStart);
 
-	if (state.graphBackbone)
+	if (state.graphBackbone && state.segmentCount <= 1)
 	{
 		PgturbohybridGraphDebugBuildPhaseStart(&state, "connect_backbone");
 		INSTR_TIME_SET_CURRENT(phaseStart);
@@ -2548,6 +3547,12 @@ tqgraphbuild(Relation heap, Relation index, IndexInfo *indexInfo)
 	PgturbohybridGraphBuildRoutingEntries(&state);
 	PgturbohybridGraphBuildEntrySidecar(&state);
 	PgturbohybridGraphDebugBuildPhaseDone(&state, "entry_sidecar", phaseStart);
+
+	state.buildScanUs = scanUs;
+	state.buildCorrectionUs = correctionUs;
+	state.buildEncodeUs = encodeUs;
+	state.buildEdgeUs = edgesUs;
+	state.buildWorkerCount = workerCount;
 
 	PgturbohybridGraphDebugBuildPhaseStart(&state, "write_pages");
 	INSTR_TIME_SET_CURRENT(phaseStart);
@@ -2564,8 +3569,9 @@ tqgraphbuild(Relation heap, Relation index, IndexInfo *indexInfo)
 		PgturbohybridGraphDebugBuildPhaseDone(&state, "wal_newpages", phaseStart);
 	}
 
-	elog(DEBUG1, "pgturbohybrid native graph build timings: relation=%s nodes=%u dimensions=%d scan_ms=%.3f fit_correction_ms=%.3f encode_ms=%.3f build_edges_ms=%.3f write_pages_ms=%.3f wal_ms=%.3f total_ms=%.3f",
+	elog(DEBUG1, "pgturbohybrid native graph build timings: relation=%s nodes=%u dimensions=%d workers=%d scan_ms=%.3f fit_correction_ms=%.3f encode_ms=%.3f build_edges_ms=%.3f write_pages_ms=%.3f wal_ms=%.3f total_ms=%.3f",
 		 RelationGetRelationName(index), state.nodeCount, state.dimensions,
+		 workerCount,
 		 (double) scanUs / 1000.0,
 		 (double) correctionUs / 1000.0,
 		 (double) encodeUs / 1000.0,
@@ -2601,6 +3607,7 @@ tqgraphbuildempty(Relation index)
 	state.index = index;
 	state.forkNum = INIT_FORKNUM;
 	state.building = true;
+	state.typeInfo = PgturbohybridGraphGetTypeInfo(index);
 	state.m = PgturbohybridGraphGetM(index);
 	state.efConstruction = PgturbohybridGraphGetEfConstruction(index);
 	state.tqBits = PgturbohybridGraphGetTqBits(index);
@@ -2625,6 +3632,10 @@ tqgraphbuildempty(Relation index)
 				 errdetail("At 1-bit the decoded vector carries only sign information; the correction can inject per-vector noise instead of correcting bias.")));
 	state.payloadCount = PgturbohybridGraphIndexPayloadCount(index);
 	state.payloadBytes = PgturbohybridGraphPayloadBytes(state.payloadCount);
+	PgturbohybridGraphInitSupport(&state.support, index);
+	state.scoreMode = PgturbohybridGraphGetScoreMode(&state.support);
+	state.buildCodeOnly = PgturbohybridGraphCanBuildCodeOnly(&state);
+	state.buildFastEdges = PgturbohybridGraphUseFastBuildEdges(&state);
 	PgturbohybridGraphWriteIndex(&state);
 	log_newpage_range(index, INIT_FORKNUM, 0, RelationGetNumberOfBlocksInFork(index, INIT_FORKNUM), true);
 }
@@ -2692,6 +3703,10 @@ PgturbohybridGraphResetScan(PgturbohybridGraphScanOpaque so)
 	so->graphResidualRerankCount = 0;
 	so->graphResidualRerankBytes = 0;
 	so->graphResidualRerankUs = 0;
+	so->graphHeapRescoreCount = 0;
+	so->graphHeapFetchUs = 0;
+	so->graphHeapRescoreUs = 0;
+	so->graphExactRescoreSource = PGTURBOHYBRID_EXACT_RESCORE_SOURCE_NONE;
 	so->graphPrepareUs = 0;
 	so->graphTraverseUs = 0;
 	so->graphEntryUs = 0;
@@ -3162,6 +4177,41 @@ PgturbohybridGraphReadMeta(Relation index, PgturbohybridGraphMetaPageData *meta)
 		{
 			meta->tqRoutingEntryCount = 0;
 			meta->tqRoutingEntryBytes = 0;
+			break;
+		}
+	}
+	if (meta->tqSegmentCount == 0 && meta->tqNodeCount > 0)
+	{
+		meta->tqSegmentCount = 1;
+		meta->tqSegmentBytes = sizeof(PgturbohybridGraphSegmentMetaData);
+		memset(meta->tqSegments, 0, sizeof(meta->tqSegments));
+		meta->tqSegments[0].startNodeId = 0;
+		meta->tqSegments[0].nodeCount = meta->tqNodeCount;
+		meta->tqSegments[0].entryNodeId = meta->tqEntryNodeId;
+		meta->tqSegments[0].entryLevel = meta->entryLevel;
+		meta->tqSegments[0].codeStartBlkno = meta->tqCodeStartBlkno;
+		meta->tqSegments[0].adjStartBlkno = meta->tqAdjStartBlkno;
+		meta->tqSegments[0].exactStartBlkno = meta->tqExactStartBlkno;
+		meta->tqSegments[0].correctionStartBlkno = meta->tqCorrectionStartBlkno;
+	}
+	if (meta->tqSegmentCount > PGTURBOHYBRID_GRAPH_MAX_NATIVE_SEGMENTS ||
+		meta->tqSegmentBytes != meta->tqSegmentCount * sizeof(PgturbohybridGraphSegmentMetaData))
+	{
+		meta->tqSegmentCount = 0;
+		meta->tqSegmentBytes = 0;
+	}
+	for (uint16 i = 0; i < meta->tqSegmentCount; i++)
+	{
+		PgturbohybridGraphSegmentMetaData *segment = &meta->tqSegments[i];
+		uint64		endNodeId = (uint64) segment->startNodeId + segment->nodeCount;
+
+		if (segment->nodeCount == 0 || endNodeId > meta->tqNodeCount ||
+			segment->entryNodeId >= meta->tqNodeCount ||
+			segment->entryNodeId < segment->startNodeId ||
+			segment->entryNodeId >= endNodeId)
+		{
+			meta->tqSegmentCount = 0;
+			meta->tqSegmentBytes = 0;
 			break;
 		}
 	}
@@ -3650,6 +4700,19 @@ PgturbohybridGraphTraverse(Relation index, PgturbohybridGraphScanOpaque so, Pgtu
 	entries[entryCount] = entry;
 	entryLevels[entryCount] = storage->nodes[entry.nodeId].level;
 	entryCount++;
+
+	for (uint16 i = 0; i < meta->tqSegmentCount; i++)
+	{
+		PgturbohybridGraphSegmentMetaData *segment = &meta->tqSegments[i];
+		uint32		nodeId = segment->entryNodeId;
+
+		CHECK_FOR_INTERRUPTS();
+		if (nodeId == entry.nodeId || nodeId >= meta->tqNodeCount ||
+			!PgturbohybridGraphLoadCodePage(index, so, meta, storage, nodeId))
+			continue;
+		PgturbohybridGraphOfferLevelEntry(entries, &entryCount, entryLevels,
+										  nodeId, storage->nodes[nodeId].level);
+	}
 
 	/*
 	 * Keep alternative high-level entry points instead of relying on one
@@ -4429,8 +5492,110 @@ PgturbohybridGraphApplyResidualRerank(PgturbohybridGraphScanOpaque so,
 	qsort(results, band, sizeof(PgturbohybridGraphResult), PgturbohybridGraphResultCompare);
 	so->graphResidualRerankCount = band;
 	so->graphResidualRerankBytes = bytes;
+	so->graphExactRescoreSource = PGTURBOHYBRID_EXACT_RESCORE_SOURCE_RESIDUAL;
 	PgturbohybridGraphAddElapsedUs(&so->graphResidualRerankUs, start);
 	return count;
+}
+
+static int
+PgturbohybridGraphHeapRescoreLimit(PgturbohybridGraphScanOpaque so, int count)
+{
+	int64		baseTarget;
+
+	if (count <= 0 ||
+		pgturbohybrid_dense_heap_rescore == PGTURBOHYBRID_DENSE_HEAP_RESCORE_OFF)
+		return 0;
+
+	if (pgturbohybrid_dense_heap_rescore == PGTURBOHYBRID_DENSE_HEAP_RESCORE_BAND)
+		return count;
+
+	baseTarget = so->hasTupleTargetRows ?
+		Max((int64) 1, so->tupleTargetRows) :
+		Max((int64) 1, so->graphDenseRequestedK);
+	if (baseTarget <= 0)
+		baseTarget = PGTURBOHYBRID_DEFAULT_FINAL_K;
+
+	return (int) Min((int64) count, baseTarget);
+}
+
+static int
+PgturbohybridGraphHeapRescore(IndexScanDesc scan, PgturbohybridGraphScanOpaque so,
+				   Datum query, PgturbohybridGraphResult *results, int count)
+{
+	TupleTableSlot *slot;
+	TupleDesc	desc;
+	AttrNumber	denseAttno;
+	int			limit;
+	int			rescored = 0;
+	instr_time	start;
+
+	limit = PgturbohybridGraphHeapRescoreLimit(so, count);
+	if (limit <= 0 || DatumGetPointer(query) == NULL ||
+		scan == NULL || scan->heapRelation == NULL ||
+		scan->indexRelation == NULL || scan->indexRelation->rd_index == NULL)
+		return 0;
+
+	denseAttno =
+		scan->indexRelation->rd_index->indkey.values[PGTURBOHYBRID_DENSE_KEY_INDEX];
+	desc = RelationGetDescr(scan->heapRelation);
+	if (denseAttno <= 0 || denseAttno > desc->natts)
+		return 0;
+
+	INSTR_TIME_SET_CURRENT(start);
+	slot = table_slot_create(scan->heapRelation, NULL);
+	for (int i = 0; i < limit; i++)
+	{
+		Datum		value;
+		bool		isnull;
+		bool		visible;
+		char	   *valuePtr;
+		char	   *vectorPtr;
+		instr_time	fetchStart;
+
+		CHECK_FOR_INTERRUPTS();
+		if (results[i].exactScored)
+			continue;
+
+		INSTR_TIME_SET_CURRENT(fetchStart);
+		visible = table_tuple_fetch_row_version(scan->heapRelation,
+												&results[i].heaptid,
+												scan->xs_snapshot,
+												slot);
+		PgturbohybridGraphAddElapsedUs(&so->graphHeapFetchUs, fetchStart);
+		if (!visible)
+		{
+			ExecClearTuple(slot);
+			continue;
+		}
+
+		value = slot_getattr(slot, denseAttno, &isnull);
+		if (isnull)
+		{
+			ExecClearTuple(slot);
+			continue;
+		}
+
+		valuePtr = DatumGetPointer(value);
+		vectorPtr = (char *) PG_DETOAST_DATUM(value);
+		results[i].distance =
+			PgturbohybridGraphExactVectorDistance(so, query, vectorPtr);
+		results[i].exactScored = true;
+		rescored++;
+		if (vectorPtr != valuePtr)
+			pfree(vectorPtr);
+		ExecClearTuple(slot);
+	}
+	ExecDropSingleTupleTableSlot(slot);
+
+	if (rescored > 0)
+	{
+		so->graphHeapRescoreCount += rescored;
+		so->graphExactRescoreSource = PGTURBOHYBRID_EXACT_RESCORE_SOURCE_HEAP;
+		PgturbohybridGraphAddElapsedUs(&so->graphHeapRescoreUs, start);
+		return limit;
+	}
+	PgturbohybridGraphAddElapsedUs(&so->graphHeapRescoreUs, start);
+	return 0;
 }
 
 
@@ -4622,12 +5787,21 @@ PgturbohybridGraphCollectResults(IndexScanDesc scan, PgturbohybridGraphScanOpaqu
 	 * resident footprint each backend duplicates.
 	 */
 	so->graphNativeCacheMode = cacheInfo.mode;
+	so->graphNativeCachePolicy = cacheInfo.policy;
+	so->graphNativeCacheReason = cacheInfo.reason;
+	so->graphNativeCacheUsed = cacheInfo.used;
+	so->graphNativeCacheReused = cacheInfo.reused;
 	so->graphNativeCacheBuiltThisScan = cacheInfo.builtThisScan;
+	so->graphNativeCacheAttachUs = cacheInfo.attachUs;
 	so->graphNativeCacheBuildUs = cacheInfo.buildUs;
+	so->graphNativeCacheWaitUs = cacheInfo.waitUs;
+	so->graphNativeCacheRefcount = cacheInfo.refcount;
 	so->graphNativeCacheBytes = cacheInfo.totalBytes;
 	so->graphNativeCacheCodeBytes = cacheInfo.codeBytes;
 	so->graphNativeCacheAdjBytes = cacheInfo.adjBytes;
 	so->graphNativeCacheExactBytes = cacheInfo.exactBytes;
+	so->graphCodeBufferLockWaitUs += cacheInfo.codeBufferLockWaitUs;
+	so->graphAdjBufferLockWaitUs += cacheInfo.adjBufferLockWaitUs;
 	/*
 	 * Whole-code prefetch in the batch scorer pays off only once the code arena
 	 * is too big for CPU cache (codes become scattered RAM reads); below that
@@ -4798,9 +5972,20 @@ PgturbohybridGraphCollectResults(IndexScanDesc scan, PgturbohybridGraphScanOpaqu
 	so->graphCandidateCount = count;
 	if (exactFree)
 	{
+		int			heapSortCount;
+
 		count = PgturbohybridGraphApplyResidualRerank(so, &meta, &storage,
 										   results, count);
-		so->graphEffectiveRescoreBand = 0;
+		heapSortCount = PgturbohybridGraphHeapRescore(scan, so, query, results, count);
+		if (heapSortCount > 1)
+		{
+			INSTR_TIME_SET_CURRENT(phaseStart);
+			qsort(results, heapSortCount, sizeof(PgturbohybridGraphResult),
+				  PgturbohybridGraphResultCompare);
+			PgturbohybridGraphAddElapsedUs(&so->graphSortUs, phaseStart);
+		}
+		so->graphEffectiveRescoreBand = heapSortCount > 0 ?
+			heapSortCount : so->graphResidualRerankCount;
 		so->tqGraphResults = results;
 		so->tqGraphResultCount = count;
 		so->tqGraphResultIndex = 0;
@@ -4815,6 +6000,8 @@ PgturbohybridGraphCollectResults(IndexScanDesc scan, PgturbohybridGraphScanOpaqu
 	INSTR_TIME_SET_CURRENT(phaseStart);
 	PgturbohybridGraphExactRescore(scan->indexRelation, so, query, &meta, storage.nodes,
 						results, rescoreCount);
+	if (so->graphRescoreCount > 0)
+		so->graphExactRescoreSource = PGTURBOHYBRID_EXACT_RESCORE_SOURCE_INDEX_EXACT;
 	PgturbohybridGraphAddElapsedUs(&so->graphRescoreUs, phaseStart);
 	INSTR_TIME_SET_CURRENT(phaseStart);
 	qsort(results, finalCount, sizeof(PgturbohybridGraphResult), PgturbohybridGraphResultCompare);
@@ -4846,7 +6033,11 @@ PgturbohybridGraphCollectDenseCandidates(IndexScanDesc scan, int targetK,
 
 	if (so->tqGraphResults == NULL)
 	{
+		instr_time	lockStart;
+
+		INSTR_TIME_SET_CURRENT(lockStart);
 		LockPage(scan->indexRelation, PGTURBOHYBRID_GRAPH_SCAN_LOCK, ShareLock);
+		so->graphScanLockWaitUs += PgturbohybridGraphElapsedUs(lockStart);
 		PG_TRY();
 		{
 			PgturbohybridGraphCollectResults(scan, so, targetK);
@@ -4889,21 +6080,25 @@ PgturbohybridGraphCollectDenseCandidates(IndexScanDesc scan, int targetK,
 		stats->highdimWideningMultiplier = so->graphHighdimWideningMultiplier;
 		stats->wideningReason = so->graphWideningReason;
 		stats->denseBudgetPolicy = so->graphDenseBudgetPolicy;
-		stats->rescoreBandPolicy = so->graphRescoreBandPolicy;
-		stats->denseCandidatesReturned = limit;
-		stats->exactRescoreCount = so->graphRescoreCount;
-		stats->codePagesRead = so->graphCodePagesRead;
-		stats->adjPagesRead = so->graphAdjPagesRead;
-		stats->prepareUs = so->graphPrepareUs;
+			stats->rescoreBandPolicy = so->graphRescoreBandPolicy;
+			stats->denseCandidatesReturned = limit;
+			stats->exactRescoreCount = so->graphRescoreCount;
+			stats->heapRescoreCount = so->graphHeapRescoreCount;
+			stats->codePagesRead = so->graphCodePagesRead;
+			stats->adjPagesRead = so->graphAdjPagesRead;
+			stats->prepareUs = so->graphPrepareUs;
 		stats->traverseUs = so->graphTraverseUs;
 		stats->entryUs = so->graphEntryUs;
-		stats->baseUs = so->graphBaseUs;
-		stats->batchUs = so->graphBatchUs;
-		stats->heapUs = so->graphHeapUs;
-		stats->fillUs = so->graphFillUs;
-		stats->rescoreUs = so->graphRescoreUs;
-		stats->sortUs = so->graphSortUs;
-	}
+			stats->baseUs = so->graphBaseUs;
+			stats->batchUs = so->graphBatchUs;
+			stats->heapUs = so->graphHeapUs;
+			stats->heapFetchUs = so->graphHeapFetchUs;
+			stats->heapRescoreUs = so->graphHeapRescoreUs;
+			stats->fillUs = so->graphFillUs;
+			stats->rescoreUs = so->graphRescoreUs;
+			stats->sortUs = so->graphSortUs;
+			stats->exactRescoreSource = so->graphExactRescoreSource;
+		}
 
 	*outCandidates = candidates;
 	return limit;
@@ -4928,7 +6123,13 @@ tqgraphgettuple(IndexScanDesc scan, ScanDirection dir)
 		if (!IsMVCCSnapshot(scan->xs_snapshot))
 			elog(ERROR, "non-MVCC snapshots are not supported with pgturbohybrid graph");
 
-		LockPage(scan->indexRelation, PGTURBOHYBRID_GRAPH_SCAN_LOCK, ShareLock);
+		{
+			instr_time	lockStart;
+
+			INSTR_TIME_SET_CURRENT(lockStart);
+			LockPage(scan->indexRelation, PGTURBOHYBRID_GRAPH_SCAN_LOCK, ShareLock);
+			so->graphScanLockWaitUs += PgturbohybridGraphElapsedUs(lockStart);
+		}
 		PG_TRY();
 		{
 			PgturbohybridGraphCollectResults(scan, so, 0);

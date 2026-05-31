@@ -4,8 +4,8 @@
 -- on glove-100-angular (observed: 1 client ~325 RPS / p95 4.4 ms; 8 clients
 -- ~127 RPS / p95 179 ms), while pgvector and Qdrant scale up.  This harness
 -- exists to EXPLAIN that collapse before any algorithm is changed: it drives the
--- same fixed query set at 1/2/4/8/16 concurrent backends under three native
--- cache caps and two prewarm modes, and attributes the p95 explosion to one of
+-- same fixed query set at 1/2/4/8/16 concurrent backends under native cache
+-- policies/caps and two prewarm modes, and attributes the p95 explosion to one of
 -- four causes by reading per-backend instrumentation from each client:
 --
 --   1. COLD PER-BACKEND CACHE BUILD
@@ -17,9 +17,9 @@
 --        With a per-backend cache, N clients hold N independent copies of the
 --        whole code+adjacency arena.  Signal: native_cache_bytes per backend x
 --        clients (total_cache_bytes), with warm scans, 0 page reads, and rising
---        graph_total_us as clients grow.  Compare cache ON (per_backend) vs OFF
---        (native_cache_max_mb=0 -> uncached, shared buffers): if OFF scales and
---        ON collapses, duplication/bandwidth is the cause.
+--        graph_total_us as clients grow.  Compare native_cache_scope=per_backend
+--        vs native_cache_scope=shared vs native_cache_scope=off. If SHARED/OFF
+--        scale and PER_BACKEND collapses, duplication/bandwidth is the cause.
 --   3. LOCK WAITS
 --        Signal: pg_stat_activity wait_event_type='Lock'/'LWLock' sampled during
 --        the run, and ungranted pg_locks on the index (the PGTURBOHYBRID_GRAPH_
@@ -169,8 +169,9 @@ FROM (
 -- steady-state cache/timing signals (from the last timed query).
 -- ---------------------------------------------------------------------------
 CREATE OR REPLACE FUNCTION ccbench_client_run(p_tbl text, p_vcol text,
-                                              p_cache_mb int, p_prewarm boolean,
-                                              p_warm int, p_timed int)
+                                              p_policy text, p_cache_mb int,
+                                              p_prewarm boolean, p_warm int,
+                                              p_timed int)
 RETURNS jsonb LANGUAGE plpgsql AS $fn$
 DECLARE
     qtext text;
@@ -186,6 +187,7 @@ BEGIN
     PERFORM set_config('enable_seqscan', 'off', false);
     PERFORM set_config('jit', 'off', false);
     PERFORM set_config('max_parallel_workers_per_gather', '0', false);
+    PERFORM set_config('turbohybrid.native_cache_scope', p_policy, false);
     PERFORM set_config('turbohybrid.native_cache_max_mb', p_cache_mb::text, false);
 
     SELECT count(*) INTO nq FROM ccbench_queries;
@@ -219,7 +221,14 @@ BEGIN
         'wall_ms', extract(epoch FROM clock_timestamp() - wall0) * 1000,
         'durations', to_jsonb(durs),
         'orchestration', st->>'scan_orchestration',
+        'native_cache_policy', st->>'native_cache_policy',
+        'native_cache_scope', st->>'native_cache_scope',
         'native_cache_mode', st->>'native_cache_mode',
+        'native_cache_used', (st->>'native_cache_used')::boolean,
+        'native_cache_reason', st->>'native_cache_reason',
+        'native_cache_attach_us', (st->>'native_cache_attach_us')::bigint,
+        'native_cache_wait_us', (st->>'native_cache_wait_us')::bigint,
+        'native_cache_refcount', (st->>'native_cache_refcount')::bigint,
         'native_cache_bytes', (st->>'native_cache_bytes')::bigint,
         'native_cache_code_bytes', (st->>'native_cache_code_bytes')::bigint,
         'native_cache_adj_bytes', (st->>'native_cache_adj_bytes')::bigint,
@@ -243,7 +252,8 @@ END $fn$;
 -- per-backend cause signals into one jsonb result.
 -- ---------------------------------------------------------------------------
 CREATE OR REPLACE FUNCTION ccbench_run_config(p_tbl text, p_vcol text, p_idx text,
-                                              p_clients int, p_cache_mb int,
+                                              p_clients int, p_policy text,
+                                              p_cache_mb int,
                                               p_prewarm boolean, p_warm int,
                                               p_timed int)
 RETURNS jsonb LANGUAGE plpgsql AS $fn$
@@ -281,8 +291,9 @@ BEGIN
     FOR i IN 0 .. p_clients - 1 LOOP
         cn := 'ccbench_' || i;
         PERFORM dblink_connect(cn, connstr);
-        sql := format('SELECT ccbench_client_run(%L,%L,%s,%L,%s,%s)',
-                      p_tbl, p_vcol, p_cache_mb, p_prewarm, p_warm, p_timed);
+        sql := format('SELECT ccbench_client_run(%L,%L,%L,%s,%L,%s,%s)',
+                      p_tbl, p_vcol, p_policy, p_cache_mb, p_prewarm,
+                      p_warm, p_timed);
         PERFORM dblink_send_query(cn, sql);
     END LOOP;
 
@@ -351,6 +362,7 @@ BEGIN
     RETURN jsonb_build_object(
         'clients', p_clients,
         'cache_mb', p_cache_mb,
+        'native_cache_policy', p_policy,
         'prewarm', p_prewarm,
         'distinct_pids', (SELECT count(DISTINCT (r->>'pid')) FROM unnest(results) r),
         'rps', round(rps::numeric, 1),
@@ -358,6 +370,11 @@ BEGIN
         'p95_ms', round(p95::numeric, 3),
         'p99_ms', round(p99::numeric, 3),
         'native_cache_mode', (SELECT max(r->>'native_cache_mode') FROM unnest(results) r),
+        'native_cache_used', (SELECT bool_or((r->>'native_cache_used')::boolean) FROM unnest(results) r),
+        'native_cache_reason', (SELECT max(r->>'native_cache_reason') FROM unnest(results) r),
+        'max_attach_us', (SELECT max((r->>'native_cache_attach_us')::bigint) FROM unnest(results) r),
+        'max_wait_us', (SELECT max((r->>'native_cache_wait_us')::bigint) FROM unnest(results) r),
+        'native_cache_refcount', (SELECT max((r->>'native_cache_refcount')::bigint) FROM unnest(results) r),
         'cache_bytes_per_backend', (SELECT max((r->>'native_cache_bytes')::bigint) FROM unnest(results) r),
         'total_cache_bytes', (SELECT sum((r->>'native_cache_bytes')::bigint) FROM unnest(results) r),
         'cold_built_any', (SELECT bool_or((r->>'cold_built')::boolean) FROM unnest(results) r),
@@ -381,12 +398,14 @@ BEGIN
 END $fn$;
 
 -- ---------------------------------------------------------------------------
--- Drive the full matrix: clients {1,2,4,8,16} x cache_mb {0, default 512, high}
--- x prewarm {A=off, B=on}.  cache_mb=0 forces uncached per-scan loading; 512 is
--- the shipped default (per-backend cache); HIGH gives headroom for large arenas.
+-- Drive the full matrix: clients {1,2,4,8,16} x policy
+-- {per_backend, shared, off} x cache_mb {default 512, high for cached scopes}
+-- x prewarm {A=off, B=on}. native_cache_scope=off forces uncached per-scan
+-- loading; per_backend uses backend-local cache; shared uses the mmap-backed
+-- immutable cache shared across backends.
 -- ---------------------------------------------------------------------------
 DROP TABLE IF EXISTS ccbench_results;
-CREATE TEMP TABLE ccbench_results (cache_mb int, prewarm boolean, clients int, m jsonb);
+CREATE TEMP TABLE ccbench_results (policy text, cache_mb int, prewarm boolean, clients int, m jsonb);
 
 -- psql does NOT interpolate :vars inside dollar-quoted blocks, so the matrix
 -- parameters travel through a config row the driver reads.
@@ -406,25 +425,33 @@ DO $driver$
 DECLARE
     cfg     ccbench_config%ROWTYPE;
     clients int[] := ARRAY[1, 2, 4, 8, 16];
+    policies text[] := ARRAY['per_backend', 'shared', 'off'];
     caches  int[];
     c  int;
     cm int;
+    policy text;
     pw boolean;
     res jsonb;
 BEGIN
     SELECT * INTO cfg FROM ccbench_config;
-    caches := ARRAY[0, 512, cfg.high_cache_mb];
-    FOREACH cm IN ARRAY caches LOOP
-        FOREACH pw IN ARRAY ARRAY[false, true] LOOP
-            FOREACH c IN ARRAY clients LOOP
-                CONTINUE WHEN c > cfg.max_clients;
-                res := ccbench_run_config(cfg.tbl, cfg.vcol, cfg.idx, c, cm, pw,
-                                          cfg.warm, cfg.timed);
-                INSERT INTO ccbench_results VALUES (cm, pw, c, res);
-                RAISE NOTICE 'cache_mb=% prewarm=% clients=% -> rps=% p95=% p99=% mode=% waiting%%=%',
-                    cm, pw, c,
-                    res->>'rps', res->>'p95_ms', res->>'p99_ms',
-                    res->>'native_cache_mode', res->>'waiting_pct';
+    FOREACH policy IN ARRAY policies LOOP
+        caches := CASE WHEN policy IN ('per_backend', 'shared')
+                       THEN ARRAY[512, cfg.high_cache_mb]
+                       ELSE ARRAY[512]
+                  END;
+        FOREACH cm IN ARRAY caches LOOP
+            FOREACH pw IN ARRAY ARRAY[false, true] LOOP
+                FOREACH c IN ARRAY clients LOOP
+                    CONTINUE WHEN c > cfg.max_clients;
+                    res := ccbench_run_config(cfg.tbl, cfg.vcol, cfg.idx, c, policy,
+                                              cm, pw, cfg.warm, cfg.timed);
+                    INSERT INTO ccbench_results VALUES (policy, cm, pw, c, res);
+                    RAISE NOTICE 'policy=% cache_mb=% prewarm=% clients=% -> rps=% p95=% p99=% mode=% used=% waiting%%=%',
+                        policy, cm, pw, c,
+                        res->>'rps', res->>'p95_ms', res->>'p99_ms',
+                        res->>'native_cache_mode', res->>'native_cache_used',
+                        res->>'waiting_pct';
+                END LOOP;
             END LOOP;
         END LOOP;
     END LOOP;
@@ -435,28 +462,33 @@ END $driver$;
 -- ---------------------------------------------------------------------------
 \echo ''
 \echo '== 1) SCALING CURVE: RPS + latency vs clients (the collapse) =='
-\echo '   cache_mb=0 is uncached (shared buffers); 512 default + HIGH are per-backend.'
+\echo '   policy=off is uncached/shared buffers; policy=per_backend is backend-local; policy=shared is mmap-backed shared cache.'
 \echo '   prewarm f=mode A (cold build counted), t=mode B (cache prebuilt).'
-SELECT cache_mb,
+SELECT policy,
+       cache_mb,
        prewarm,
        clients,
+       (m->>'native_cache_reason')      AS reason,
        (m->>'native_cache_mode')        AS mode,
+       (m->>'native_cache_used')::bool  AS used,
        (m->>'rps')::numeric             AS rps,
        (m->>'p50_ms')::numeric          AS p50_ms,
        (m->>'p95_ms')::numeric          AS p95_ms,
        (m->>'p99_ms')::numeric          AS p99_ms,
        (m->>'distinct_pids')::int       AS pids
 FROM ccbench_results
-ORDER BY cache_mb, prewarm, clients;
+ORDER BY policy, cache_mb, prewarm, clients;
 
 \echo ''
 \echo '== 2) CAUSE ATTRIBUTION per config =='
 \echo '   build_us: one-time cold per-backend build (mode A only).'
 \echo '   waiting%/lock/lwlock: share of sampled active backends stalled on a wait.'
 \echo '   code_pages: per-query code pages read (high => uncached page loading).'
+\echo '   attach_us/wait_us: mmap attach and wait-for-builder costs for shared cache.'
 \echo '   batch_us/total_us: per-query scoring/total CPU (rises => CPU contention).'
 \echo '   cache/backend x clients = total_cache (memory duplicated across clients).'
-SELECT cache_mb,
+SELECT policy,
+       cache_mb,
        prewarm,
        clients,
        (m->>'max_cold_build_us')::bigint                       AS cold_build_us,
@@ -464,23 +496,27 @@ SELECT cache_mb,
        (m->>'lock_obs')::int                                   AS lock,
        (m->>'lwlock_obs')::int                                 AS lwlock,
        (m->>'index_lock_waits')::int                           AS idx_lockw,
+       (m->>'max_attach_us')::bigint                           AS attach_us,
+       (m->>'max_wait_us')::bigint                             AS wait_us,
+       (m->>'native_cache_refcount')::bigint                   AS refcount,
        (m->>'avg_code_pages_read')::numeric                    AS code_pages,
        (m->>'avg_batch_us')::numeric                           AS batch_us,
        (m->>'avg_total_us')::numeric                           AS total_us,
        pg_size_pretty((m->>'cache_bytes_per_backend')::bigint) AS cache_per_backend,
        pg_size_pretty((m->>'total_cache_bytes')::bigint)       AS total_cache
 FROM ccbench_results
-ORDER BY cache_mb, prewarm, clients;
+ORDER BY policy, cache_mb, prewarm, clients;
 
 \echo ''
 \echo '== 3) VERDICT: dominant suspected cause per config (heuristic) =='
 \echo '   Read against the 1-client baseline in the same cache/prewarm group.'
 WITH base AS (
-    SELECT cache_mb, prewarm,
+    SELECT policy, cache_mb, prewarm,
            max((m->>'p95_ms')::numeric) FILTER (WHERE clients = 1) AS p95_1
-    FROM ccbench_results GROUP BY cache_mb, prewarm
+    FROM ccbench_results GROUP BY policy, cache_mb, prewarm
 )
-SELECT r.cache_mb,
+SELECT r.policy,
+       r.cache_mb,
        r.prewarm,
        r.clients,
        round((r.m->>'p95_ms')::numeric / NULLIF(b.p95_1, 0), 1) AS p95_blowup_x,
@@ -493,7 +529,9 @@ SELECT r.cache_mb,
          WHEN NOT r.prewarm AND (r.m->>'max_cold_build_us')::bigint > 0
               AND (r.m->>'p95_ms')::numeric > 2 * COALESCE(b.p95_1, 0)
               THEN 'cold per-backend cache build'
-         WHEN r.cache_mb > 0 AND (r.m->>'avg_code_pages_read')::numeric < 1
+         WHEN r.policy = 'per_backend'
+              AND (r.m->>'native_cache_used')::boolean
+              AND (r.m->>'avg_code_pages_read')::numeric < 1
               AND (r.m->>'p95_ms')::numeric > 2 * COALESCE(b.p95_1, 0)
               THEN 'cache duplication / memory bandwidth'
          WHEN (r.m->>'avg_code_pages_read')::numeric >= 1
@@ -504,12 +542,12 @@ SELECT r.cache_mb,
          ELSE 'scales OK'
        END AS suspected_cause
 FROM ccbench_results r
-JOIN base b ON b.cache_mb = r.cache_mb AND b.prewarm = r.prewarm
-ORDER BY r.cache_mb, r.prewarm, r.clients;
+JOIN base b ON b.policy = r.policy AND b.cache_mb = r.cache_mb AND b.prewarm = r.prewarm
+ORDER BY r.policy, r.cache_mb, r.prewarm, r.clients;
 
 -- Cleanup (helper functions + fixed-query table; synthetic data kept for reuse).
-DROP FUNCTION IF EXISTS ccbench_run_config(text, text, text, int, int, boolean, int, int);
-DROP FUNCTION IF EXISTS ccbench_client_run(text, text, int, boolean, int, int);
+DROP FUNCTION IF EXISTS ccbench_run_config(text, text, text, int, text, int, boolean, int, int);
+DROP FUNCTION IF EXISTS ccbench_client_run(text, text, text, int, boolean, int, int);
 DROP TABLE IF EXISTS ccbench_queries;
 \echo ''
 \echo 'concurrency_dense_bench: done. (synthetic table ccbench_items, if built, is left for reuse;'

@@ -5,8 +5,9 @@
 # glove-100-angular before any algorithm is changed.
 #
 # The SQL file already sweeps the full matrix internally
-# (clients {1,2,4,8,16} x native_cache_max_mb {0, 512, HIGH} x prewarm {A,B}) and
-# prints the diagnosis tables.  This wrapper just:
+# (clients {1,2,4,8,16} x native_cache_scope {per_backend, shared, off} x
+# prewarm {A,B}, with default/HIGH cache caps for cached scopes) and prints the diagnosis
+# tables.  This wrapper just:
 #   - points it at a database (existing `items` index, or a synthetic dataset it
 #     builds on first run),
 #   - forwards the tunables as psql -v vars,

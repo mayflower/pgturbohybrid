@@ -23,27 +23,24 @@ SELECT setseed(0.42);
 -- nearest-neighbour structure that survives 4-bit/2-bit quantization: docs
 -- 1..20 each bump a *distinct* dimension of the query q by a graded magnitude
 -- (so they have distinct codes and distinct distances and are clearly the 20
--- nearest), while docs 21..500 are random and far.  turbohybrid indexes need a
--- vector column plus a tsvector column even for dense-only scans; the dense
--- query below passes no text_query.
+-- nearest), while docs 21..500 are random and far.  This dense-only test uses a
+-- one-key turbohybrid index and passes no text_query.
 DROP TABLE IF EXISTS qs_basis;
 CREATE TABLE qs_basis (q real[]);
 INSERT INTO qs_basis SELECT array_agg(random() * 2 - 1) FROM generate_series(1, 1536);
 
 DROP TABLE IF EXISTS qs_docs;
-CREATE TABLE qs_docs (id int PRIMARY KEY, embedding vector(1536), body_tsv tsvector);
-INSERT INTO qs_docs(id, embedding, body_tsv)
+CREATE TABLE qs_docs (id int PRIMARY KEY, embedding vector(1536));
+INSERT INTO qs_docs(id, embedding)
 SELECT i,
        (SELECT array_agg(CASE WHEN ord = 1 + (i * 70) % 1536
                               THEN b.q[ord] + (5.0 + i * 0.5)
                               ELSE b.q[ord] END ORDER BY ord)
-        FROM generate_series(1, 1536) AS ord)::real[]::vector,
-       to_tsvector('english', 'document number ' || i)
+        FROM generate_series(1, 1536) AS ord)::real[]::vector
 FROM qs_basis b, generate_series(1, 20) AS i;
-INSERT INTO qs_docs(id, embedding, body_tsv)
+INSERT INTO qs_docs(id, embedding)
 SELECT i,
-       (SELECT array_agg(random() * 2 - 1)::real[]::vector FROM generate_series(1, 1536)),
-       to_tsvector('english', 'document number ' || i)
+       (SELECT array_agg(random() * 2 - 1)::real[]::vector FROM generate_series(1, 1536))
 FROM generate_series(21, 500) AS i;
 
 DROP TABLE IF EXISTS qs_query;
@@ -169,7 +166,7 @@ $$;
 
 -- 4-bit index parity.
 DROP INDEX IF EXISTS qs_idx;
-CREATE INDEX qs_idx ON qs_docs USING turbohybrid (embedding vector_cosine_turbohybrid_ops, body_tsv bm25_tsvector_turbohybrid_ops)
+CREATE INDEX qs_idx ON qs_docs USING turbohybrid (embedding vector_cosine_turbohybrid_ops)
     WITH (quantization_bits = 4);
 ANALYZE qs_docs;
 SELECT qs_run_all(4);
@@ -177,7 +174,7 @@ SELECT qs_check(4);
 
 -- 2-bit index parity.
 DROP INDEX qs_idx;
-CREATE INDEX qs_idx ON qs_docs USING turbohybrid (embedding vector_cosine_turbohybrid_ops, body_tsv bm25_tsvector_turbohybrid_ops)
+CREATE INDEX qs_idx ON qs_docs USING turbohybrid (embedding vector_cosine_turbohybrid_ops)
     WITH (quantization_bits = 2);
 ANALYZE qs_docs;
 SELECT qs_run_all(2);

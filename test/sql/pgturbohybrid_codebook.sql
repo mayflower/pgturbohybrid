@@ -86,14 +86,13 @@ RESET turbohybrid.dense_graph_avxvnni;
 
 -- (2) A real 1536-dim 4-bit dense scan must report which scorer it used.
 DROP TABLE IF EXISTS cb_docs;
-CREATE TABLE cb_docs (id int PRIMARY KEY, embedding vector(1536), body_tsv tsvector);
-INSERT INTO cb_docs(id, embedding, body_tsv)
+CREATE TABLE cb_docs (id int PRIMARY KEY, embedding vector(1536));
+INSERT INTO cb_docs(id, embedding)
 SELECT i,
-       (SELECT array_agg(sin(i * 0.31 + g * 0.011))::real[]::vector FROM generate_series(1, 1536) g),
-       to_tsvector('english', 'document ' || i)
+       (SELECT array_agg(sin(i * 0.31 + g * 0.011))::real[]::vector FROM generate_series(1, 1536) g)
 FROM generate_series(1, 200) AS i;
 CREATE INDEX cb_idx ON cb_docs
-    USING turbohybrid (embedding vector_cosine_turbohybrid_ops, body_tsv bm25_tsvector_turbohybrid_ops)
+    USING turbohybrid (embedding vector_cosine_turbohybrid_ops)
     WITH (quantization_bits = 4);
 ANALYZE cb_docs;
 

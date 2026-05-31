@@ -19,6 +19,7 @@
 #define PGTURBOHYBRID_GRAPH_TQ_RESIDUAL_RERANK	0x0010	/* metapage: code tuples carry residual rerank sketch bytes */
 #define PGTURBOHYBRID_GRAPH_TQ_EXACT_BUILD		0x0020	/* metapage: graph edges were built using exact distances */
 #define PGTURBOHYBRID_GRAPH_TQ_BACKBONE			0x0040	/* metapage: level-0 adjacent backbone edges were forced at build */
+#define PGTURBOHYBRID_GRAPH_TQ_FAST_BUILD_EDGES	0x0080	/* metapage: build used simple nearest-neighbor edge selection */
 #define PGTURBOHYBRID_GRAPH_MAX_ENTRY_POINTS		16
 #define PGTURBOHYBRID_GRAPH_ENTRY_SAMPLE_COUNT		608
 #define PGTURBOHYBRID_GRAPH_MAX_NEIGHBORS			(PGTURBOHYBRID_GRAPH_MAX_M * 2)
@@ -175,6 +176,8 @@ typedef struct PgturbohybridQuantBuildState
 	int			scoreMode;
 	int			maxLevel;
 	uint32		entryNodeId;
+	uint16		segmentCount;
+	PgturbohybridGraphSegmentMetaData segments[PGTURBOHYBRID_GRAPH_MAX_NATIVE_SEGMENTS];
 	uint32		routingEntryCount;
 	uint16		routingEntryBytes;
 	uint32		routingEntryNodeIds[PGTURBOHYBRID_GRAPH_MAX_ROUTING_ENTRIES];
@@ -211,6 +214,14 @@ typedef struct PgturbohybridQuantBuildState
 	uint64		buildDistanceCodeCode;
 	uint64		buildDistanceExact;
 	uint64		buildDistanceFallback;
+	uint64		parallelEncodeUs;
+	void	   *parallelShared;
+	uint64		buildScanUs;
+	uint64		buildCorrectionUs;
+	uint64		buildEncodeUs;
+	uint64		buildEdgeUs;
+	uint64		buildWriteUs;
+	uint32		buildWorkerCount;
 } PgturbohybridQuantBuildState;
 
 typedef struct PgturbohybridGraphResult
@@ -245,6 +256,7 @@ typedef struct TqDenseCandidateStats
 	uint64		scoredCodes;
 	uint32		denseCandidatesReturned;
 	uint64		exactRescoreCount;
+	uint64		heapRescoreCount;
 	uint64		codePagesRead;
 	uint64		adjPagesRead;
 	uint64		prepareUs;
@@ -253,9 +265,12 @@ typedef struct TqDenseCandidateStats
 	uint64		baseUs;
 	uint64		batchUs;
 	uint64		heapUs;
+	uint64		heapFetchUs;
+	uint64		heapRescoreUs;
 	uint64		fillUs;
 	uint64		rescoreUs;
 	uint64		sortUs;
+	int			exactRescoreSource;
 } TqDenseCandidateStats;
 
 typedef struct PgturbohybridGraphScanNode
@@ -321,6 +336,7 @@ typedef struct PgturbohybridGraphNativeCache
 	uint16		graphFlags;
 	uint32		tqNodeCount;
 	uint32		tqEntryNodeId;
+	uint16		tqSegmentCount;
 	uint16		tqCodeBytes;
 	uint16		tqBits;
 	uint16		tqPayloadCount;
@@ -344,6 +360,8 @@ typedef struct PgturbohybridGraphNativeCache
 	Size		residentAdjBytes;
 	Size		residentExactBytes;
 	Size		residentTotalBytes;
+	int64		buildCodeBufferLockWaitUs;
+	int64		buildAdjBufferLockWaitUs;
 	struct PgturbohybridGraphNativeCache *next;
 } PgturbohybridGraphNativeCache;
 
@@ -357,12 +375,21 @@ typedef struct PgturbohybridGraphNativeCache
 typedef struct PgturbohybridGraphCacheInitInfo
 {
 	PgturbohybridGraphNativeCacheMode mode;
+	int			policy;
+	int			reason;
+	bool		used;
+	bool		reused;
 	bool		builtThisScan;
+	int64		attachUs;
 	int64		buildUs;
+	int64		waitUs;
+	int64		refcount;
 	int64		totalBytes;
 	int64		codeBytes;
 	int64		adjBytes;
 	int64		exactBytes;
+	int64		codeBufferLockWaitUs;
+	int64		adjBufferLockWaitUs;
 } PgturbohybridGraphCacheInitInfo;
 
 typedef struct PgturbohybridGraphCorrectionCache
