@@ -3,6 +3,7 @@
 #include <string.h>
 
 #include "miscadmin.h"
+#include "portability/instr_time.h"
 #include "storage/bufmgr.h"
 #include "utils/memutils.h"
 #include "utils/rel.h"
@@ -694,12 +695,64 @@ PgturbohybridGraphFindCache(Relation index, PgturbohybridGraphMetaPageData *meta
 	return NULL;
 }
 
+/*
+ * Sum the resident footprint a built per-backend cache holds: the code, exact
+ * and adjacency arenas (the terms that dominate and are duplicated once per
+ * backend), plus the node array and per-scan metadata.  Reported via
+ * turbohybrid_last_scan_stats() (native_cache_bytes and the code/adj/exact
+ * breakdown) so concurrent-client memory duplication is visible.
+ */
+static void
+PgturbohybridGraphCacheComputeResidentBytes(PgturbohybridGraphNativeCache *cache,
+											PgturbohybridGraphMetaPageData *meta)
+{
+	PgturbohybridGraphScanStorage *storage = &cache->storage;
+	int			adjRecordCount = PgturbohybridGraphAdjRecordCount(meta);
+	Size		codeBytes = 0;
+	Size		adjBytes = 0;
+	Size		exactBytes = 0;
+	Size		otherBytes = 0;
+
+	if (storage->codeArena != NULL)
+		codeBytes = (Size) meta->tqNodeCount * (Size) meta->tqCodeBytes;
+	if (storage->exactArena != NULL)
+		exactBytes = (Size) meta->tqNodeCount * storage->exactBytes;
+
+	/* Adjacency: the per-slot metadata arrays plus the actual neighbor lists. */
+	adjBytes += (Size) adjRecordCount *
+		(sizeof(uint32 *) + sizeof(uint16) + sizeof(BlockNumber) + sizeof(OffsetNumber));
+	if (storage->neighborCounts != NULL)
+	{
+		for (int i = 0; i < adjRecordCount; i++)
+			adjBytes += (Size) storage->neighborCounts[i] * sizeof(uint32);
+	}
+
+	/* Node array, residual/payload arenas, visited generation, code-page map. */
+	otherBytes += (Size) meta->tqNodeCount * sizeof(PgturbohybridGraphScanNode);
+	if (storage->residualArena != NULL)
+		otherBytes += (Size) meta->tqNodeCount * (Size) meta->tqResidualRerankBytes;
+	if (storage->payloadArena != NULL)
+		otherBytes += (Size) meta->tqNodeCount * (Size) meta->tqPayloadBytes;
+	if (storage->visitedGeneration != NULL)
+		otherBytes += (Size) meta->tqNodeCount * sizeof(uint32);
+	otherBytes += (Size) storage->codePageCount * (sizeof(bool) + sizeof(BlockNumber));
+
+	cache->residentCodeBytes = codeBytes;
+	cache->residentAdjBytes = adjBytes;
+	cache->residentExactBytes = exactBytes;
+	cache->residentTotalBytes = codeBytes + adjBytes + exactBytes + otherBytes;
+}
+
 static PgturbohybridGraphNativeCache *
 PgturbohybridGraphBuildCache(Relation index, PgturbohybridGraphMetaPageData *meta)
 {
 	MemoryContext cacheCtx;
 	MemoryContext oldCtx;
 	PgturbohybridGraphNativeCache *cache;
+	instr_time	buildStart;
+	instr_time	buildElapsed;
+
+	INSTR_TIME_SET_CURRENT(buildStart);
 
 	cacheCtx = AllocSetContextCreate(CacheMemoryContext,
 									 "pgturbohybrid native graph cache",
@@ -751,32 +804,61 @@ PgturbohybridGraphBuildCache(Relation index, PgturbohybridGraphMetaPageData *met
 		(void) PgturbohybridGraphLoadExactVectors(index, meta, &cache->storage);
 	cache->storage.cached = true;
 
+	PgturbohybridGraphCacheComputeResidentBytes(cache, meta);
+
 	cache->next = pgturbohybridGraphCacheList;
 	pgturbohybridGraphCacheList = cache;
 
 	MemoryContextSwitchTo(oldCtx);
+
+	INSTR_TIME_SET_CURRENT(buildElapsed);
+	INSTR_TIME_SUBTRACT(buildElapsed, buildStart);
+	cache->buildUs = (int64) INSTR_TIME_GET_MICROSEC(buildElapsed);
+
 	return cache;
 }
 
 void
 PgturbohybridGraphInitScanStorage(Relation index, PgturbohybridGraphMetaPageData *meta,
-					   PgturbohybridGraphScanStorage *storage)
+					   PgturbohybridGraphScanStorage *storage,
+					   PgturbohybridGraphCacheInitInfo *info)
 {
 	PgturbohybridGraphNativeCache *cache;
 	bool		cacheExactVectors = PgturbohybridGraphShouldCacheExactVectors(index, meta);
 
+	if (info != NULL)
+		memset(info, 0, sizeof(*info));
+
 	if (!PgturbohybridGraphShouldUseNativeCache(meta, cacheExactVectors))
 	{
 		PgturbohybridGraphInitScanStorageUncached(meta, storage, cacheExactVectors);
+		if (info != NULL)
+			info->mode = PGTURBOHYBRID_GRAPH_NATIVE_CACHE_UNCACHED;
 		return;
 	}
 
 	cache = PgturbohybridGraphFindCache(index, meta);
 	if (cache == NULL)
+	{
 		cache = PgturbohybridGraphBuildCache(index, meta);
+		if (info != NULL)
+		{
+			info->builtThisScan = true;
+			info->buildUs = cache->buildUs;
+		}
+	}
 
 	memcpy(storage, &cache->storage, sizeof(PgturbohybridGraphScanStorage));
 	storage->cached = true;
+
+	if (info != NULL)
+	{
+		info->mode = PGTURBOHYBRID_GRAPH_NATIVE_CACHE_PER_BACKEND;
+		info->totalBytes = (int64) cache->residentTotalBytes;
+		info->codeBytes = (int64) cache->residentCodeBytes;
+		info->adjBytes = (int64) cache->residentAdjBytes;
+		info->exactBytes = (int64) cache->residentExactBytes;
+	}
 }
 
 PgturbohybridGraphNativeCache *
