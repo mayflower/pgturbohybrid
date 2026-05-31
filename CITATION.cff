@@ -1,0 +1,24 @@
+cff-version: 1.2.0
+message: "If you use pgturbohybrid in your work, please cite it using this metadata."
+title: pgturbohybrid
+abstract: >-
+  Standalone PostgreSQL extension for hybrid dense-vector and BM25 lexical
+  retrieval on top of pgvector, with quantized graph search and reciprocal-rank
+  fusion.
+type: software
+authors:
+  - name: Mayflower
+repository-code: "https://github.com/mayflower/pgturbohybrid"
+url: "https://github.com/mayflower/pgturbohybrid#readme"
+license: PostgreSQL
+version: 0.1.0
+keywords:
+  - postgresql
+  - postgres-extension
+  - pgvector
+  - vector-search
+  - hybrid-search
+  - bm25
+  - rag
+  - retrieval
+  - turboquant
