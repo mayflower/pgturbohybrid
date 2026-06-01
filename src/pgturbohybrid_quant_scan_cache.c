@@ -9,12 +9,18 @@
 #include <unistd.h>
 #endif
 
+#include "access/genam.h"
+#include "fmgr.h"
 #include "miscadmin.h"
 #include "portability/instr_time.h"
 #include "storage/bufmgr.h"
+#include "utils/fmgrprotos.h"
+#include "utils/jsonb.h"
 #include "utils/memutils.h"
+#include "utils/numeric.h"
 #include "utils/rel.h"
 
+#include "pgturbohybrid_jsonb_compat.h"
 #include "pgturbohybrid_quant.h"
 
 static PgturbohybridGraphNativeCache *pgturbohybridGraphCacheList = NULL;
@@ -111,18 +117,35 @@ PgturbohybridGraphElapsedUsSince(instr_time start)
 }
 
 /*
- * Per-backend in-memory native scan cache size cap, in bytes, from the
+ * Native scan cache size cap, in bytes, from the
  * turbohybrid.native_cache_max_mb GUC (default 512 MB).  An index whose
- * resident working set fits under the cap is fully loaded into a per-backend
- * codeArena so warm scans read 0 code pages; larger indexes fall back to
- * per-scan page loading.  Raising the cap past ~1 GB requires the huge
- * allocations below (the code arena for 1M x 3072 dims is ~1.5 GB).  Because
- * the cache is per-backend, size the cap to host RAM and connection count.
+ * resident working set fits under the cap can be fully loaded into the
+ * selected native cache scope so warm scans read 0 code pages; larger indexes
+ * fall back to per-scan page loading.  Raising the cap past ~1 GB requires the
+ * huge allocations below (the code arena for 1M x 3072 dims is ~1.5 GB).  When
+ * explicitly using per_backend, size the cap to host RAM and connection count.
  */
 static inline Size
 PgturbohybridGraphNativeCacheMaxBytes(void)
 {
 	return (Size) pgturbohybrid_native_cache_max_mb * 1024 * 1024;
+}
+
+static int
+PgturbohybridGraphEffectiveScanNativeCachePolicy(void)
+{
+	if (pgturbohybrid_native_cache_policy != PGTURBOHYBRID_NATIVE_CACHE_POLICY_AUTO)
+		return pgturbohybrid_native_cache_policy;
+
+#ifdef WIN32
+	/*
+	 * The current shared implementation is mmap-backed and disabled on
+	 * Windows, so auto keeps the previous per-backend behavior there.
+	 */
+	return PGTURBOHYBRID_NATIVE_CACHE_POLICY_PER_BACKEND;
+#else
+	return PGTURBOHYBRID_NATIVE_CACHE_POLICY_SHARED;
+#endif
 }
 
 static int
@@ -328,8 +351,9 @@ PgturbohybridGraphSharedAddBytes(uint64 *offset, uint64 bytes, uint64 *start)
 }
 
 static bool
-PgturbohybridGraphShouldUseNativeCache(PgturbohybridGraphMetaPageData *meta,
+PgturbohybridGraphShouldUseNativeCacheWithPolicy(PgturbohybridGraphMetaPageData *meta,
 									   bool cacheExactVectors,
+									   int policy,
 									   PgturbohybridGraphNativeCacheReason *reason)
 {
 	Size		totalBytes = sizeof(PgturbohybridGraphNativeCache);
@@ -339,7 +363,7 @@ PgturbohybridGraphShouldUseNativeCache(PgturbohybridGraphMetaPageData *meta,
 	if (reason != NULL)
 		*reason = PGTURBOHYBRID_GRAPH_NATIVE_CACHE_REASON_NONE;
 
-	if (pgturbohybrid_native_cache_policy == PGTURBOHYBRID_NATIVE_CACHE_POLICY_OFF)
+	if (policy == PGTURBOHYBRID_NATIVE_CACHE_POLICY_OFF)
 	{
 		if (reason != NULL)
 			*reason = PGTURBOHYBRID_GRAPH_NATIVE_CACHE_REASON_POLICY_OFF;
@@ -392,9 +416,9 @@ PgturbohybridGraphShouldUseNativeCache(PgturbohybridGraphMetaPageData *meta,
 	{
 		if (reason != NULL)
 		{
-			if (pgturbohybrid_native_cache_policy == PGTURBOHYBRID_NATIVE_CACHE_POLICY_SHARED)
+			if (policy == PGTURBOHYBRID_NATIVE_CACHE_POLICY_SHARED)
 				*reason = PGTURBOHYBRID_GRAPH_NATIVE_CACHE_REASON_SHARED_FITS_MAX_MB;
-			else if (pgturbohybrid_native_cache_policy == PGTURBOHYBRID_NATIVE_CACHE_POLICY_PER_BACKEND)
+			else if (policy == PGTURBOHYBRID_NATIVE_CACHE_POLICY_PER_BACKEND)
 				*reason = PGTURBOHYBRID_GRAPH_NATIVE_CACHE_REASON_PER_BACKEND_FITS_MAX_MB;
 			else
 				*reason = PGTURBOHYBRID_GRAPH_NATIVE_CACHE_REASON_AUTO_FITS_MAX_MB;
@@ -406,6 +430,16 @@ too_large:
 	if (reason != NULL)
 		*reason = PGTURBOHYBRID_GRAPH_NATIVE_CACHE_REASON_EXCEEDS_MAX_MB;
 	return false;
+}
+
+static bool
+PgturbohybridGraphShouldUseNativeCache(PgturbohybridGraphMetaPageData *meta,
+									   bool cacheExactVectors,
+									   PgturbohybridGraphNativeCacheReason *reason)
+{
+	return PgturbohybridGraphShouldUseNativeCacheWithPolicy(meta, cacheExactVectors,
+															pgturbohybrid_native_cache_policy,
+															reason);
 }
 
 static void
@@ -1657,6 +1691,171 @@ PgturbohybridGraphGetSharedMap(Relation index, PgturbohybridGraphMetaPageData *m
 #endif
 }
 
+static const char *
+PgturbohybridGraphNativeCacheReasonNameForPrewarm(PgturbohybridGraphNativeCacheReason reason)
+{
+	switch (reason)
+	{
+		case PGTURBOHYBRID_GRAPH_NATIVE_CACHE_REASON_SHARED_FITS_MAX_MB:
+			return "shared_fits_max_mb";
+		case PGTURBOHYBRID_GRAPH_NATIVE_CACHE_REASON_AUTO_FITS_MAX_MB:
+			return "auto_fits_max_mb";
+		case PGTURBOHYBRID_GRAPH_NATIVE_CACHE_REASON_PER_BACKEND_FITS_MAX_MB:
+			return "per_backend_fits_max_mb";
+		case PGTURBOHYBRID_GRAPH_NATIVE_CACHE_REASON_POLICY_OFF:
+			return "policy_off";
+		case PGTURBOHYBRID_GRAPH_NATIVE_CACHE_REASON_EXCEEDS_MAX_MB:
+			return "exceeds_max_mb";
+		case PGTURBOHYBRID_GRAPH_NATIVE_CACHE_REASON_SHARED_BUILD_TIMEOUT:
+			return "shared_build_timeout";
+		case PGTURBOHYBRID_GRAPH_NATIVE_CACHE_REASON_SHARED_ATTACH_FAILED:
+			return "shared_attach_failed";
+		case PGTURBOHYBRID_GRAPH_NATIVE_CACHE_REASON_NONE:
+		default:
+			return "none";
+	}
+}
+
+static void
+PgturbohybridPrewarmJsonbAddKey(PgturbohybridJsonbState *state, const char *key)
+{
+	JsonbValue	value;
+
+	value.type = jbvString;
+	value.val.string.val = (char *) key;
+	value.val.string.len = strlen(key);
+	PgturbohybridJsonbPush(state, WJB_KEY, &value);
+}
+
+static void
+PgturbohybridPrewarmJsonbAddString(PgturbohybridJsonbState *state,
+								   const char *key, const char *val)
+{
+	JsonbValue	value;
+
+	PgturbohybridPrewarmJsonbAddKey(state, key);
+	value.type = jbvString;
+	value.val.string.val = (char *) val;
+	value.val.string.len = strlen(val);
+	PgturbohybridJsonbPush(state, WJB_VALUE, &value);
+}
+
+static void
+PgturbohybridPrewarmJsonbAddBool(PgturbohybridJsonbState *state,
+								 const char *key, bool val)
+{
+	JsonbValue	value;
+
+	PgturbohybridPrewarmJsonbAddKey(state, key);
+	value.type = jbvBool;
+	value.val.boolean = val;
+	PgturbohybridJsonbPush(state, WJB_VALUE, &value);
+}
+
+static void
+PgturbohybridPrewarmJsonbAddInt64(PgturbohybridJsonbState *state,
+								  const char *key, int64 val)
+{
+	JsonbValue	value;
+
+	PgturbohybridPrewarmJsonbAddKey(state, key);
+	value.type = jbvNumeric;
+	value.val.numeric = DatumGetNumeric(DirectFunctionCall1(int8_numeric,
+															Int64GetDatum(val)));
+	PgturbohybridJsonbPush(state, WJB_VALUE, &value);
+}
+
+FUNCTION_PREFIX PG_FUNCTION_INFO_V1(pgturbohybrid_prewarm);
+FUNCTION_PREFIX Datum
+pgturbohybrid_prewarm(PG_FUNCTION_ARGS)
+{
+	Oid			indexOid = PG_GETARG_OID(0);
+	Relation	index;
+	PgturbohybridGraphMetaPageData meta;
+	PgturbohybridGraphSharedMap *sharedMap = NULL;
+	PgturbohybridGraphNativeCacheReason reason =
+		PGTURBOHYBRID_GRAPH_NATIVE_CACHE_REASON_NONE;
+	PgturbohybridGraphSharedCacheHeader *hdr = NULL;
+	bool		cacheExactVectors;
+	bool		cacheable;
+	bool		builtThisScan = false;
+	int64		attachUs = 0;
+	int64		buildUs = 0;
+	int64		waitUs = 0;
+	int64		codeLockWaitUs = 0;
+	int64		adjLockWaitUs = 0;
+	PgturbohybridJsonbState jsonState;
+	Jsonb	   *jsonb;
+
+	index = index_open(indexOid, AccessShareLock);
+	if (!PgturbohybridGraphReadMeta(index, &meta) ||
+		meta.storageKind != PGTURBOHYBRID_GRAPH_STORAGE_QUANT_GRAPH_NATIVE)
+	{
+		index_close(index, AccessShareLock);
+		ereport(ERROR,
+				(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
+				 errmsg("turbohybrid_prewarm requires a native turbohybrid graph index")));
+	}
+
+	cacheExactVectors = PgturbohybridGraphShouldCacheExactVectors(index, &meta);
+	cacheable = PgturbohybridGraphShouldUseNativeCacheWithPolicy(&meta,
+																 cacheExactVectors,
+																 PGTURBOHYBRID_NATIVE_CACHE_POLICY_SHARED,
+																 &reason);
+	if (cacheable)
+	{
+		sharedMap = PgturbohybridGraphGetSharedMap(index, &meta, &attachUs,
+												   &buildUs, &waitUs,
+												   &codeLockWaitUs,
+												   &adjLockWaitUs,
+												   &builtThisScan,
+												   &reason);
+		if (sharedMap != NULL)
+			hdr = (PgturbohybridGraphSharedCacheHeader *) sharedMap->base;
+	}
+
+	PgturbohybridJsonbStateInit(&jsonState);
+	PgturbohybridJsonbBeginObject(&jsonState);
+	PgturbohybridPrewarmJsonbAddString(&jsonState, "index",
+									   RelationGetRelationName(index));
+	PgturbohybridPrewarmJsonbAddInt64(&jsonState, "index_oid",
+									  (int64) indexOid);
+	PgturbohybridPrewarmJsonbAddString(&jsonState, "native_cache_scope",
+									   "shared");
+	PgturbohybridPrewarmJsonbAddString(&jsonState, "native_cache_reason",
+									   PgturbohybridGraphNativeCacheReasonNameForPrewarm(reason));
+	PgturbohybridPrewarmJsonbAddBool(&jsonState, "native_cache_used",
+									 sharedMap != NULL);
+	PgturbohybridPrewarmJsonbAddBool(&jsonState, "native_cache_built",
+									 sharedMap != NULL && builtThisScan);
+	PgturbohybridPrewarmJsonbAddBool(&jsonState, "native_cache_attached",
+									 sharedMap != NULL);
+	PgturbohybridPrewarmJsonbAddBool(&jsonState, "native_cache_reused",
+									 sharedMap != NULL && !builtThisScan);
+	PgturbohybridPrewarmJsonbAddInt64(&jsonState, "native_cache_attach_us",
+									  attachUs);
+	PgturbohybridPrewarmJsonbAddInt64(&jsonState, "native_cache_build_us",
+									  buildUs);
+	PgturbohybridPrewarmJsonbAddInt64(&jsonState, "native_cache_wait_us",
+									  waitUs);
+	PgturbohybridPrewarmJsonbAddInt64(&jsonState, "native_cache_bytes",
+									  hdr != NULL ? (int64) hdr->residentTotalBytes : 0);
+	PgturbohybridPrewarmJsonbAddInt64(&jsonState, "native_cache_code_bytes",
+									  hdr != NULL ? (int64) hdr->residentCodeBytes : 0);
+	PgturbohybridPrewarmJsonbAddInt64(&jsonState, "native_cache_adj_bytes",
+									  hdr != NULL ? (int64) hdr->residentAdjBytes : 0);
+	PgturbohybridPrewarmJsonbAddInt64(&jsonState, "native_cache_exact_bytes",
+									  hdr != NULL ? (int64) hdr->residentExactBytes : 0);
+	PgturbohybridPrewarmJsonbAddInt64(&jsonState, "code_buffer_lock_wait_us",
+									  codeLockWaitUs);
+	PgturbohybridPrewarmJsonbAddInt64(&jsonState, "adj_buffer_lock_wait_us",
+									  adjLockWaitUs);
+	jsonb = PgturbohybridJsonbEndObject(&jsonState);
+
+	index_close(index, AccessShareLock);
+	PG_RETURN_JSONB_P(jsonb);
+}
+
 void
 PgturbohybridGraphInitScanStorage(Relation index, PgturbohybridGraphMetaPageData *meta,
 					   PgturbohybridGraphScanStorage *storage,
@@ -1665,6 +1864,7 @@ PgturbohybridGraphInitScanStorage(Relation index, PgturbohybridGraphMetaPageData
 	PgturbohybridGraphNativeCache *cache;
 	bool		cacheExactVectors = PgturbohybridGraphShouldCacheExactVectors(index, meta);
 	PgturbohybridGraphNativeCacheReason reason;
+	int			effectivePolicy = PgturbohybridGraphEffectiveScanNativeCachePolicy();
 
 	if (info != NULL)
 	{
@@ -1685,7 +1885,7 @@ PgturbohybridGraphInitScanStorage(Relation index, PgturbohybridGraphMetaPageData
 		return;
 	}
 
-	if (pgturbohybrid_native_cache_policy == PGTURBOHYBRID_NATIVE_CACHE_POLICY_SHARED)
+	if (effectivePolicy == PGTURBOHYBRID_NATIVE_CACHE_POLICY_SHARED)
 	{
 		PgturbohybridGraphSharedMap *sharedMap;
 		int64		attachUs = 0;

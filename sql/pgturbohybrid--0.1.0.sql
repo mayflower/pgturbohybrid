@@ -157,6 +157,10 @@ CREATE FUNCTION turbohybrid_index_stats(pg_catalog.regclass) RETURNS pg_catalog.
 	AS 'MODULE_PATHNAME', 'pgturbohybrid_index_stats'
 	LANGUAGE C STABLE STRICT PARALLEL SAFE;
 
+CREATE FUNCTION turbohybrid_prewarm(pg_catalog.regclass) RETURNS pg_catalog.jsonb
+	AS 'MODULE_PATHNAME', 'pgturbohybrid_prewarm'
+	LANGUAGE C STRICT PARALLEL RESTRICTED;
+
 CREATE FUNCTION turbohybrid_last_scan_stats() RETURNS pg_catalog.jsonb
 	AS 'MODULE_PATHNAME', 'pgturbohybrid_last_scan_stats'
 	LANGUAGE C PARALLEL RESTRICTED;
@@ -194,6 +198,13 @@ DECLARE
 	base_us       bigint := COALESCE((s -> 'dense' -> 'timing_us' ->> 'base')::bigint, 0);
 	traverse_us   bigint := COALESCE((s ->> 'graph_traverse_us')::bigint, 0);
 	rescore_us    bigint := COALESCE((s ->> 'graph_rescore_us')::bigint, 0);
+	native_scope  text   := s ->> 'native_cache_scope';
+	native_reason text   := s ->> 'native_cache_reason';
+	native_built  boolean := COALESCE((s ->> 'native_cache_built_this_scan')::boolean, false);
+	native_build_us bigint := COALESCE((s ->> 'native_cache_build_us')::bigint, 0);
+	native_attach_us bigint := COALESCE((s ->> 'native_cache_attach_us')::bigint, 0);
+	native_wait_us bigint := COALESCE((s ->> 'native_cache_wait_us')::bigint, 0);
+	native_bytes bigint := COALESCE((s ->> 'native_cache_bytes')::bigint, 0);
 	ef            bigint := COALESCE((s ->> 'graph_effective_search_ef')::bigint, 0);
 	result_target bigint := COALESCE((s ->> 'graph_effective_result_target')::bigint, 0);
 	large_arena   boolean := COALESCE((s ->> 'graph_large_code_arena')::boolean, false);
@@ -208,6 +219,9 @@ BEGIN
 	-- dominant time component, then the healthy/expected case.
 	IF orchestration IS DISTINCT FROM 'graph_native' OR (scored = 0 AND traverse_us = 0) THEN
 		diagnosis := 'no_native_dense_scan';
+	ELSIF native_built AND native_build_us > GREATEST(traverse_us, batch_us, rescore_us, 1000) THEN
+		-- The first scan in this backend paid the native cache materialization cost.
+		diagnosis := 'native_cache_cold_build';
 	ELSIF scalar_codes > 0 AND scalar_codes * 10 >= scored THEN
 		-- >=10% of scored codes took the scalar/LUT path: the SIMD scorer did not engage.
 		diagnosis := 'scalar_lut_fallback';
@@ -246,6 +260,16 @@ BEGIN
 		'dense_u8_batch_x4_enabled', s -> 'dense_u8_batch_x4_enabled',
 		'graph_large_code_arena', s -> 'graph_large_code_arena',
 		'graph_whole_code_prefetch_active', s -> 'graph_whole_code_prefetch_active',
+		'native_cache_policy', s ->> 'native_cache_policy',
+		'native_cache_scope', native_scope,
+		'native_cache_reason', native_reason,
+		'native_cache_used', s -> 'native_cache_used',
+		'native_cache_reused', s -> 'native_cache_reused',
+		'native_cache_built_this_scan', native_built,
+		'native_cache_build_us', native_build_us,
+		'native_cache_attach_us', native_attach_us,
+		'native_cache_wait_us', native_wait_us,
+		'native_cache_bytes', native_bytes,
 		'graph_scored_codes', scored,
 		'graph_batch_us', batch_us,
 		'graph_heap_us', heap_us,
@@ -322,6 +346,7 @@ COMMENT ON FUNCTION turbohybrid_vector_cosine_distance(vector, vector) IS 'Cosin
 COMMENT ON FUNCTION turbohybrid_vector_norm(vector) IS 'Vector norm support function used by TurboHybrid vector opclasses';
 COMMENT ON FUNCTION turbohybrid_handler(pg_catalog.internal) IS 'Index access method handler for TurboHybrid';
 COMMENT ON FUNCTION turbohybrid_index_stats(pg_catalog.regclass) IS 'Return stable TurboHybrid index metadata as jsonb';
+COMMENT ON FUNCTION turbohybrid_prewarm(pg_catalog.regclass) IS 'Build or attach the shared native graph cache for a TurboHybrid native graph index and return cache diagnostics as jsonb';
 COMMENT ON FUNCTION turbohybrid_last_scan_stats() IS 'Return backend-local summary information for the last TurboHybrid scan as jsonb; parallel restricted because it reads mutable scan state';
 COMMENT ON FUNCTION turbohybrid_last_build_stats() IS 'Return backend-local summary information for the last native TurboHybrid graph build as jsonb; parallel restricted because it reads mutable build state';
 COMMENT ON FUNCTION turbohybrid_last_scan_diagnosis() IS 'Return a compact bottleneck diagnosis of the last TurboHybrid scan as jsonb: key dense hot-path fields, derived ratios, and a single diagnosis label; read-only over turbohybrid_last_scan_stats()';
