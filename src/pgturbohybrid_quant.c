@@ -2991,21 +2991,16 @@ PgturbohybridNativeParallelEdgeWorker(Relation indexRel,
 		BarrierArriveAndWait(&shared->edgeBarrier,
 							  WAIT_EVENT_PARALLEL_CREATE_INDEX_SCAN);
 
-		if (leader)
-			shared->edgeNextOrder = shared->edgeBatchStartOrder;
-		BarrierArriveAndWait(&shared->edgeBarrier,
-							  WAIT_EVENT_PARALLEL_CREATE_INDEX_SCAN);
-
-		for (;;)
+		/*
+		 * Apply backlinks by destination node ownership.  Every participant
+		 * scans the whole batch, but only mutates neighbor lists for destination
+		 * nodes in its shard.  Sharding the source queue would drop backlinks
+		 * for destinations owned by other participants.
+		 */
+		for (uint32 orderIdx = shared->edgeBatchStartOrder;
+			 orderIdx < shared->edgeBatchEndOrder; orderIdx++)
 		{
-			uint32		orderIdx;
-
 			CHECK_FOR_INTERRUPTS();
-			SpinLockAcquire(&shared->mutex);
-			orderIdx = shared->edgeNextOrder++;
-			SpinLockRelease(&shared->mutex);
-			if (orderIdx >= shared->edgeBatchEndOrder)
-				break;
 			PgturbohybridNativeParallelEdgeApplyNodeBacklinks(&state,
 															  order[orderIdx],
 															  inserted, slot,
