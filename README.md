@@ -236,6 +236,44 @@ distances during graph construction, `ef_construction = 192`,
 native segment unless `native_segments` is explicitly set. Exact build
 distances are build-time only; they do not store full vectors in the index.
 
+Use `high_recall` when you want near-exact dense recall from a compact 4-bit,
+**exact-free** index and have latency headroom to spend:
+
+```sql
+SET turbohybrid.profile = 'high_recall';
+```
+
+`high_recall` keeps `quantization_bits = 4` and `exact_storage = off`, reuses
+`matched_recall`'s candidate budgets, and additionally turns on
+`dense_heap_rescore = band` (exact rescore of the full final candidate band by
+re-reading vectors from the heap), turns `dense_adaptive_widening` off, and
+defaults new indexes to `ef_construction = 256`, `ef_search = 192`,
+`graph_oversampling = 12`. Band rescore is what recovers near-exact ordering:
+4-bit code scoring finds the right neighbors but mis-ranks them, and the heap
+rescore fixes the ranking without storing full vectors in the index. On
+DBPedia/OpenAI (1536-d) this reaches ~0.99 recall while staying faster than
+pgvector and Qdrant. Pair it with a heuristic build for best results:
+
+```sql
+SET turbohybrid.profile = 'high_recall';
+SET turbohybrid.dense_build_neighbor_select = 'heuristic';
+SET turbohybrid.dense_build_distance = 'code';
+
+CREATE INDEX documents_turbohybrid_high_recall_idx ON documents
+USING turbohybrid (
+    embedding vector_cosine_turbohybrid_ops,
+    body_tsv bm25_tsvector_turbohybrid_ops
+)
+WITH (
+    quantization_bits = 4,
+    exact_storage = off,
+    graph_ef_construction = 256,
+    graph_ef_search = 192,
+    graph_oversampling = 12,
+    native_segments = 1
+);
+```
+
 Use `quality` when relevance matters more than lowest latency:
 
 ```sql
@@ -269,8 +307,9 @@ SET turbohybrid.dense_heap_rescore = 'topk'; -- or 'band'
 `topk` fetches heap tuples for the final top-k and recomputes exact vector
 distance with the same SIMD kernels used by index-exact rescore. `band` rescans
 the full final candidate band. Both add heap I/O. The `latency` profile keeps
-heap rescore off; `balanced`, `matched_recall`, and `quality` may enable `topk`
-automatically for low-dimensional exact-free indexes, and an explicit
+heap rescore off; the `high_recall` profile defaults it to `band`; `balanced`,
+`matched_recall`, and `quality` may enable `topk` automatically for
+low-dimensional exact-free indexes, and an explicit
 `SET turbohybrid.dense_heap_rescore = 'off'|'topk'|'band'` always wins over the
 profile default; set it to `auto` to return to profile-driven behavior.
 Residual rerank is the lower-I/O middle ground:

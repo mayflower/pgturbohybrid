@@ -113,6 +113,7 @@ static const struct config_enum_entry pgturbohybrid_profile_options[] = {
 	{"balanced", PGTURBOHYBRID_PROFILE_BALANCED, false},
 	{"quality", PGTURBOHYBRID_PROFILE_QUALITY, false},
 	{"matched_recall", PGTURBOHYBRID_PROFILE_MATCHED_RECALL, false},
+	{"high_recall", PGTURBOHYBRID_PROFILE_HIGH_RECALL, false},
 	{"debug", PGTURBOHYBRID_PROFILE_DEBUG, false},
 	{NULL, 0, false}
 };
@@ -253,6 +254,7 @@ typedef struct PgturbohybridProfileDefaults
 	const char *denseAdaptiveWidening;
 	const char *denseAdaptiveWideningMultiplier;
 	const char *denseAdaptiveWideningMaxMultiplier;
+	const char *heapRescore;
 } PgturbohybridProfileDefaults;
 
 static relopt_enum_elt_def pgturbohybrid_routing_relopt_options[] = {
@@ -297,6 +299,8 @@ PgturbohybridProfileName(int profile)
 			return "quality";
 		case PGTURBOHYBRID_PROFILE_MATCHED_RECALL:
 			return "matched_recall";
+		case PGTURBOHYBRID_PROFILE_HIGH_RECALL:
+			return "high_recall";
 		case PGTURBOHYBRID_PROFILE_DEBUG:
 			return "debug";
 		default:
@@ -593,6 +597,7 @@ PgturbohybridProfileDefaultsFor(int profile, PgturbohybridProfileDefaults *defau
 	defaults->denseAdaptiveWidening = "off";
 	defaults->denseAdaptiveWideningMultiplier = "2.0";
 	defaults->denseAdaptiveWideningMaxMultiplier = "4.0";
+	defaults->heapRescore = "off";
 
 	switch ((PgturbohybridProfile) profile)
 	{
@@ -645,6 +650,31 @@ PgturbohybridProfileDefaultsFor(int profile, PgturbohybridProfileDefaults *defau
 			defaults->denseAdaptiveWidening = "auto";
 			defaults->denseAdaptiveWideningMultiplier = "1.5";
 			defaults->denseAdaptiveWideningMaxMultiplier = "1.5";
+			break;
+		case PGTURBOHYBRID_PROFILE_HIGH_RECALL:
+			/*
+			 * Exact-free, high-recall point: matched_recall's candidate
+			 * budgets, but adaptive widening off and heap-band exact rescore
+			 * on. On quantized (exact_storage=off) indexes this recovers
+			 * near-exact recall by re-ranking the final band from the heap,
+			 * spending the latency headroom rather than index size. Pair with
+			 * a heuristic graph build (graph_ef_construction=256,
+			 * graph_ef_search=192, graph_oversampling=12, native_segments=1),
+			 * which this profile also supplies as defaults when the index does
+			 * not set those reloptions explicitly.
+			 */
+			defaults->denseK = 200;
+			defaults->bm25K = 200;
+			defaults->bm25HotPostingsCacheMb = 16;
+			defaults->autoBudgetMinDenseK = 64;
+			defaults->autoBudgetMinBm25K = 64;
+			defaults->autoBudgetQualityCap = 200;
+			defaults->autoBm25Budget = true;
+			defaults->autoBm25BudgetMin = 64;
+			defaults->autoBm25BudgetMax = 200;
+			defaults->autoBm25BudgetDenseConfidence = true;
+			defaults->denseAdaptiveWidening = "off";
+			defaults->heapRescore = "band";
 			break;
 		case PGTURBOHYBRID_PROFILE_DEBUG:
 			defaults->denseK = 400;
@@ -730,6 +760,8 @@ PgturbohybridApplyProfileDefaults(void)
 										 defaults.denseAdaptiveWideningMultiplier);
 	PgturbohybridSetDynamicDefaultString("turbohybrid.dense_adaptive_widening_max_multiplier",
 										 defaults.denseAdaptiveWideningMaxMultiplier);
+	PgturbohybridSetDynamicDefaultString("turbohybrid.dense_heap_rescore",
+										 defaults.heapRescore);
 }
 
 static void
@@ -3852,7 +3884,7 @@ PgturbohybridInit(void)
 							 pgturbohybrid_hybrid_budget_policy_options,
 							 PGC_USERSET, 0, NULL, NULL, NULL);
 	DefineCustomEnumVariable("turbohybrid.profile", "Default retrieval profile for pgturbohybrid",
-							 "Valid values are latency, balanced, matched_recall, quality, and debug.",
+							 "Valid values are latency, balanced, matched_recall, high_recall, quality, and debug.",
 							 &pgturbohybrid_profile,
 							 PGTURBOHYBRID_PROFILE_LATENCY,
 							 pgturbohybrid_profile_options,
