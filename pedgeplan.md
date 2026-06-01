@@ -11,8 +11,8 @@ and HNSW edge-linking phases.
 Use deterministic batch-parallel insertion into one shared graph. The first
 prefix is inserted serially, matching Qdrant's warm-up pattern, then workers
 compute HNSW searches and forward links for bounded batches against the shared
-ready graph. The leader applies backlinks and publishes each batch before the
-next batch starts.
+ready graph. Workers then shard backlink application by target node before the
+leader publishes each batch for the next search wave.
 
 1. Keep scan and encode parallelism on the existing PostgreSQL parallel CREATE
    INDEX worker infrastructure.
@@ -24,9 +24,10 @@ next batch starts.
 5. Insert the first 256 points serially to avoid disconnected early components.
 6. Let workers claim node positions from each bounded batch and run HNSW
    greedy/search-layer plus heuristic neighbor selection against the ready
-   shared graph.
-7. Synchronize at a barrier; the leader applies backlinks, updates the global
-   entry point, and marks the batch ready.
+   shared graph, storing both neighbor ids and distances in DSM.
+7. Synchronize at a barrier; workers shard backlink application by target
+   node modulo participant count, then the leader updates the global entry
+   point and marks the batch ready.
 8. Repeat until all nodes are linked, then copy final adjacency into the
    leader's build state as a single native segment.
 9. Record stats that distinguish scan/encode parallelism from edge parallelism.

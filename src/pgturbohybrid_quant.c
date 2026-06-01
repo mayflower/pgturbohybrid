@@ -162,6 +162,7 @@ typedef struct PgturbohybridNativeParallelShared
 	Size		edgeResidualOffset;
 	Size		edgeNeighborCountOffset;
 	Size		edgeNeighborOffset;
+	Size		edgeNeighborDistanceOffset;
 	Size		edgeSegmentOffset;
 	Size		edgeWorkerUsOffset;
 	Size		edgeOrderOffset;
@@ -973,6 +974,13 @@ PgturbohybridNativeParallelEdgeNeighbors(PgturbohybridNativeParallelShared *shar
 {
 	return (uint32 *) (PgturbohybridNativeParallelBase(shared) +
 					   shared->edgeNeighborOffset);
+}
+
+static double *
+PgturbohybridNativeParallelEdgeNeighborDistances(PgturbohybridNativeParallelShared *shared)
+{
+	return (double *) (PgturbohybridNativeParallelBase(shared) +
+					   shared->edgeNeighborDistanceOffset);
 }
 
 static PgturbohybridGraphSegmentMetaData *
@@ -2018,7 +2026,9 @@ PgturbohybridGraphPruneNeighbors(PgturbohybridQuantBuildState *state, uint32 src
 	{
 		CHECK_FOR_INTERRUPTS();
 		candidates[i].nodeId = node->neighbors[level][i];
-		candidates[i].distance = PgturbohybridGraphBuildDistance(state, src, candidates[i].nodeId);
+		candidates[i].distance = node->neighborDistances != NULL ?
+			node->neighborDistances[level][i] :
+			PgturbohybridGraphBuildDistance(state, src, candidates[i].nodeId);
 	}
 
 	selectedCount = PgturbohybridGraphSelectNeighbors(state, src, candidates, count, level, selected);
@@ -2645,6 +2655,7 @@ PgturbohybridNativeParallelEdgeLoadSharedGraph(PgturbohybridQuantBuildState *sta
 	uint8	   *residuals = PgturbohybridNativeParallelEdgeResiduals(shared);
 	int		   *counts = PgturbohybridNativeParallelEdgeNeighborCounts(shared);
 	uint32	   *neighbors = PgturbohybridNativeParallelEdgeNeighbors(shared);
+	double	   *distances = PgturbohybridNativeParallelEdgeNeighborDistances(shared);
 
 	state->nodeCount = shared->edgeNodeCount;
 	state->nodeCapacity = shared->edgeNodeCount;
@@ -2682,12 +2693,20 @@ PgturbohybridNativeParallelEdgeLoadSharedGraph(PgturbohybridQuantBuildState *sta
 		node->neighborCounts =
 			counts + PgturbohybridNativeParallelEdgeNodeLevelSlot(shared,
 																  nodeId, 0);
-		node->neighborDistances = NULL;
+		node->neighborDistances = MemoryContextAllocZero(state->ctx,
+														 mul_size(sizeof(double *),
+																  (Size) levelCount));
 		for (int level = 0; level <= node->level; level++)
+		{
 			node->neighbors[level] =
 				neighbors + PgturbohybridNativeParallelEdgeNeighborSlot(shared,
 																		nodeId,
 																		level);
+			node->neighborDistances[level] =
+				distances + PgturbohybridNativeParallelEdgeNeighborSlot(shared,
+																		nodeId,
+																		level);
+		}
 		state->maxLevel = Max(state->maxLevel, node->level);
 	}
 }
@@ -2755,7 +2774,12 @@ PgturbohybridNativeParallelEdgeBuildNodeLinks(PgturbohybridQuantBuildState *stat
 														  level, selected);
 
 		for (int j = 0; j < selectedCount; j++)
+		{
 			node->neighbors[level][j] = selected[j];
+			node->neighborDistances[level][j] =
+				PgturbohybridGraphCandidateDistance(nearest, nearestCount,
+													selected[j]);
+		}
 		node->neighborCounts[level] = selectedCount;
 
 		if (nearestCount > 0)
@@ -2768,9 +2792,10 @@ PgturbohybridNativeParallelEdgeBuildNodeLinks(PgturbohybridQuantBuildState *stat
 }
 
 static void
-PgturbohybridNativeParallelEdgeApplyNode(PgturbohybridQuantBuildState *state,
-										 PgturbohybridNativeParallelShared *shared,
-										 uint32 nodeId, bool *inserted)
+PgturbohybridNativeParallelEdgeApplyNodeBacklinks(PgturbohybridQuantBuildState *state,
+												  uint32 nodeId, bool *inserted,
+												  int applyShard,
+												  int applyShardCount)
 {
 	PgturbohybridGraphBuildNode *node = &state->nodes[nodeId];
 
@@ -2781,19 +2806,29 @@ PgturbohybridNativeParallelEdgeApplyNode(PgturbohybridQuantBuildState *state,
 		for (int j = 0; j < count; j++)
 		{
 			uint32		neighbor = node->neighbors[level][j];
-			double		distance;
+			double		distance = node->neighborDistances[level][j];
 			instr_time	addStart;
 
 			CHECK_FOR_INTERRUPTS();
 			if (neighbor >= state->nodeCount || !inserted[neighbor])
 				continue;
-			distance = PgturbohybridGraphBuildDistance(state, neighbor, nodeId);
+			if (applyShardCount > 1 &&
+				(int) (neighbor % (uint32) applyShardCount) != applyShard)
+				continue;
 			INSTR_TIME_SET_CURRENT(addStart);
 			PgturbohybridGraphAddNeighbor(state, neighbor, nodeId, level,
 										  distance);
 			state->buildEdgeAddNeighborUs += PgturbohybridGraphElapsedUs(addStart);
 		}
 	}
+}
+
+static void
+PgturbohybridNativeParallelEdgePublishNode(PgturbohybridQuantBuildState *state,
+										   PgturbohybridNativeParallelShared *shared,
+										   uint32 nodeId, bool *inserted)
+{
+	PgturbohybridGraphBuildNode *node = &state->nodes[nodeId];
 
 	inserted[nodeId] = true;
 	shared->edgeInsertedCount++;
@@ -2840,8 +2875,10 @@ PgturbohybridNativeParallelEdgeBuildWarmup(PgturbohybridQuantBuildState *state,
 													  shared->edgeEntryLevel,
 													  inserted, nearest,
 													  selected);
-		PgturbohybridNativeParallelEdgeApplyNode(state, shared, nodeId,
-												 inserted);
+		PgturbohybridNativeParallelEdgeApplyNodeBacklinks(state, nodeId,
+														  inserted, 0, 1);
+		PgturbohybridNativeParallelEdgePublishNode(state, shared, nodeId,
+												   inserted);
 	}
 	shared->edgeBatchStartOrder = warmup;
 }
@@ -2955,12 +2992,36 @@ PgturbohybridNativeParallelEdgeWorker(Relation indexRel,
 							  WAIT_EVENT_PARALLEL_CREATE_INDEX_SCAN);
 
 		if (leader)
+			shared->edgeNextOrder = shared->edgeBatchStartOrder;
+		BarrierArriveAndWait(&shared->edgeBarrier,
+							  WAIT_EVENT_PARALLEL_CREATE_INDEX_SCAN);
+
+		for (;;)
+		{
+			uint32		orderIdx;
+
+			CHECK_FOR_INTERRUPTS();
+			SpinLockAcquire(&shared->mutex);
+			orderIdx = shared->edgeNextOrder++;
+			SpinLockRelease(&shared->mutex);
+			if (orderIdx >= shared->edgeBatchEndOrder)
+				break;
+			PgturbohybridNativeParallelEdgeApplyNodeBacklinks(&state,
+															  order[orderIdx],
+															  inserted, slot,
+															  shared->nparticipants);
+		}
+
+		BarrierArriveAndWait(&shared->edgeBarrier,
+							  WAIT_EVENT_PARALLEL_CREATE_INDEX_SCAN);
+
+		if (leader)
 		{
 			for (uint32 orderIdx = shared->edgeBatchStartOrder;
 				 orderIdx < shared->edgeBatchEndOrder; orderIdx++)
-				PgturbohybridNativeParallelEdgeApplyNode(&state, shared,
-														 order[orderIdx],
-														 inserted);
+				PgturbohybridNativeParallelEdgePublishNode(&state, shared,
+														   order[orderIdx],
+														   inserted);
 			shared->edgeBatchStartOrder = shared->edgeBatchEndOrder;
 		}
 
@@ -2994,6 +3055,7 @@ PgturbohybridNativeParallelApplyEdges(PgturbohybridQuantBuildState *state,
 {
 	int		   *counts = PgturbohybridNativeParallelEdgeNeighborCounts(shared);
 	uint32	   *neighbors = PgturbohybridNativeParallelEdgeNeighbors(shared);
+	double	   *distances = PgturbohybridNativeParallelEdgeNeighborDistances(shared);
 	PgturbohybridGraphSegmentMetaData *segments =
 		PgturbohybridNativeParallelEdgeSegments(shared);
 
@@ -3018,12 +3080,12 @@ PgturbohybridNativeParallelApplyEdges(PgturbohybridQuantBuildState *state,
 
 			node->neighborCounts[level] = count;
 			if (count > 0)
+			{
 				memcpy(node->neighbors[level], neighbors + neighborSlot,
 					   mul_size(sizeof(uint32), (Size) count));
-			for (int i = 0; i < count; i++)
-				node->neighborDistances[level][i] =
-					PgturbohybridGraphBuildDistance(state, nodeId,
-													node->neighbors[level][i]);
+				memcpy(node->neighborDistances[level], distances + neighborSlot,
+					   mul_size(sizeof(double), (Size) count));
+			}
 		}
 		state->maxLevel = Max(state->maxLevel, node->level);
 	}
@@ -3831,6 +3893,9 @@ PgturbohybridNativeParallelEstimateShared(PgturbohybridQuantBuildState *state,
 		bytes = add_size(bytes, MAXALIGN(mul_size(sizeof(uint32),
 												  mul_size(nodeLevelSlots,
 														   edgeMaxNeighbors))));
+		bytes = add_size(bytes, MAXALIGN(mul_size(sizeof(double),
+												  mul_size(nodeLevelSlots,
+														   edgeMaxNeighbors))));
 		bytes = add_size(bytes,
 						 MAXALIGN(mul_size(sizeof(PgturbohybridGraphSegmentMetaData),
 										   (Size) edgeSegmentCount)));
@@ -3968,6 +4033,9 @@ PgturbohybridNativeParallelInitShared(PgturbohybridQuantBuildState *state,
 		shared->edgeNeighborOffset = cursor;
 		neighborSlots = mul_size(levelSlots, (Size) shared->edgeMaxNeighbors);
 		cursor = add_size(cursor, MAXALIGN(mul_size(sizeof(uint32),
+													neighborSlots)));
+		shared->edgeNeighborDistanceOffset = cursor;
+		cursor = add_size(cursor, MAXALIGN(mul_size(sizeof(double),
 													neighborSlots)));
 		shared->edgeSegmentOffset = cursor;
 		cursor = add_size(cursor,
