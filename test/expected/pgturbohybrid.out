@@ -553,6 +553,9 @@ BEGIN
 		(stats->>'parallel_fit_enabled')::boolean IS DISTINCT FROM true OR
 		(stats->>'parallel_scan_enabled')::boolean IS DISTINCT FROM true OR
 		(stats->>'parallel_encode_enabled')::boolean IS DISTINCT FROM true OR
+		(stats->>'parallel_edge_build_enabled')::boolean IS DISTINCT FROM true OR
+		(stats->>'parallel_edge_workers_launched')::int < 1 OR
+		(stats->>'parallel_edge_segments')::int < 2 OR
 		(stats->>'node_count')::int <> 200 OR
 		jsonb_array_length(stats->'worker_scan_us') < 2 THEN
 		RAISE EXCEPTION 'unexpected parallel dense build stats: %', stats;
@@ -2276,6 +2279,10 @@ BEGIN
 		'native_segment_bytes',
 		'native_segments',
 		'node_count',
+		'parallel_edge_build_enabled',
+		'parallel_edge_repair_us',
+		'parallel_edge_segments',
+		'parallel_edge_workers_launched',
 		'parallel_encode_enabled',
 		'parallel_fit_enabled',
 		'parallel_scan_enabled',
