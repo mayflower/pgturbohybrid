@@ -135,8 +135,11 @@ be done with `REINDEX` or by dropping and recreating the index.
 
 ## Benchmarking
 
-Use `benchmarks/native_segments_bench.sql` to compare `native_segments = 1,2,4,8`.
-It records build time, index size, precision against exact ordering, p50/p95,
-and last-scan stats. The benchmark is expected to show the build/query/recall
-tradeoff; segmented build is approximate retrieval unless the segment count is
-one.
+Use `benchmarks/native_segments_bench.sql` to compare `native_segments = 1,2,4,8`
+with `turbohybrid.native_segment_budget = off|sqrt|linear`. It records build
+time, index size, precision against exact ordering, p50/p95, effective
+pre/post segment-scaled `searchEf`, and last-scan stats. Treat segments as a
+build/concurrency lever: quality-sensitive benchmarks, including
+`profile = matched_recall` and `profile = quality`, should use
+`native_segments = 1` unless a scaled segment budget has been measured on that
+workload.

@@ -143,6 +143,8 @@ bool		pgturbohybrid_dense_renorm = false;
 bool		pgturbohybrid_dense_query_1bit_asymmetric = false;
 int			pgturbohybrid_dense_query_1bit_asymmetric_bits = 8;
 bool		pgturbohybrid_dense_build_exact_distances = false;
+bool		pgturbohybrid_dense_build_exact_distances_user_set = false;
+int			pgturbohybrid_dense_build_distance = PGTURBOHYBRID_DENSE_BUILD_DISTANCE_AUTO;
 int			pgturbohybrid_dense_build_neighbor_select = PGTURBOHYBRID_DENSE_BUILD_NEIGHBOR_SELECT_AUTO;
 bool		pgturbohybrid_dense_hadamard_simd = true;
 int			pgturbohybrid_dense_simd_force = PGTURBOHYBRID_SIMD_FORCE_AUTO;
@@ -152,6 +154,7 @@ bool		pgturbohybrid_dense_u8_batch_x4 = true;
 int			pgturbohybrid_native_cache_policy = PGTURBOHYBRID_NATIVE_CACHE_POLICY_AUTO;
 int			pgturbohybrid_native_cache_max_mb = 512;
 char	   *pgturbohybrid_native_build_workers = "auto";
+int			pgturbohybrid_native_segment_budget = PGTURBOHYBRID_NATIVE_SEGMENT_BUDGET_AUTO;
 int			pgturbohybrid_dense_exact_simd_force = PGTURBOHYBRID_EXACT_SIMD_FORCE_AUTO;
 int			pgturbohybrid_dense_graph_batch_scoring = PGTURBOHYBRID_GRAPH_BATCH_AUTO;
 int			pgturbohybrid_dense_graph_batch_size = 4;
@@ -164,6 +167,7 @@ double		pgturbohybrid_dense_latency_multiplier = 1.5;
 int			pgturbohybrid_dense_max_rescore_multiplier = 2;
 int			pgturbohybrid_dense_rescore_band_policy = PGTURBOHYBRID_RESCORE_BAND_POLICY_AUTO;
 int			pgturbohybrid_dense_heap_rescore = PGTURBOHYBRID_DENSE_HEAP_RESCORE_OFF;
+bool		pgturbohybrid_dense_heap_rescore_user_set = false;
 int			pgturbohybrid_dense_adaptive_widening = PGTURBOHYBRID_DENSE_ADAPTIVE_WIDENING_OFF;
 double		pgturbohybrid_dense_adaptive_widening_multiplier = 2.0;
 double		pgturbohybrid_dense_adaptive_widening_max_multiplier = 4.0;
@@ -192,6 +196,65 @@ PgturbohybridDenseBuildNeighborSelectName(int mode)
 }
 
 const char *
+PgturbohybridDenseBuildDistanceName(int mode)
+{
+	switch ((PgturbohybridDenseBuildDistance) mode)
+	{
+		case PGTURBOHYBRID_DENSE_BUILD_DISTANCE_AUTO:
+			return "auto";
+		case PGTURBOHYBRID_DENSE_BUILD_DISTANCE_CODE:
+			return "code";
+		case PGTURBOHYBRID_DENSE_BUILD_DISTANCE_EXACT:
+			return "exact";
+		default:
+			return "unknown";
+	}
+}
+
+const char *
+PgturbohybridNativeSegmentBudgetName(int mode)
+{
+	switch ((PgturbohybridNativeSegmentBudgetMode) mode)
+	{
+		case PGTURBOHYBRID_NATIVE_SEGMENT_BUDGET_AUTO:
+			return "auto";
+		case PGTURBOHYBRID_NATIVE_SEGMENT_BUDGET_OFF:
+			return "off";
+		case PGTURBOHYBRID_NATIVE_SEGMENT_BUDGET_SQRT:
+			return "sqrt";
+		case PGTURBOHYBRID_NATIVE_SEGMENT_BUDGET_LINEAR:
+			return "linear";
+		default:
+			return "unknown";
+	}
+}
+
+const char *
+PgturbohybridBuildNeighborSelectReasonName(int reason)
+{
+	switch ((PgturbohybridBuildNeighborSelectReason) reason)
+	{
+		case PGTURBOHYBRID_BUILD_NEIGHBOR_SELECT_REASON_EXPLICIT_FAST:
+			return "explicit_fast";
+		case PGTURBOHYBRID_BUILD_NEIGHBOR_SELECT_REASON_EXPLICIT_HEURISTIC:
+			return "explicit_heuristic";
+		case PGTURBOHYBRID_BUILD_NEIGHBOR_SELECT_REASON_AUTO_LOWDIM:
+			return "auto_lowdim";
+		case PGTURBOHYBRID_BUILD_NEIGHBOR_SELECT_REASON_AUTO_BALANCED:
+			return "auto_balanced";
+		case PGTURBOHYBRID_BUILD_NEIGHBOR_SELECT_REASON_AUTO_QUALITY:
+			return "auto_quality";
+		case PGTURBOHYBRID_BUILD_NEIGHBOR_SELECT_REASON_AUTO_MATCHED_RECALL:
+			return "auto_matched_recall";
+		case PGTURBOHYBRID_BUILD_NEIGHBOR_SELECT_REASON_AUTO_LATENCY_HIGHDIM:
+			return "auto_latency_highdim";
+		case PGTURBOHYBRID_BUILD_NEIGHBOR_SELECT_REASON_UNKNOWN:
+		default:
+			return "unknown";
+	}
+}
+
+const char *
 PgturbohybridGraphDenseHeapRescoreName(int mode)
 {
 	switch ((TqDenseHeapRescoreMode) mode)
@@ -202,6 +265,41 @@ PgturbohybridGraphDenseHeapRescoreName(int mode)
 			return "topk";
 		case PGTURBOHYBRID_DENSE_HEAP_RESCORE_BAND:
 			return "band";
+		case PGTURBOHYBRID_DENSE_HEAP_RESCORE_AUTO:
+			return "auto";
+		default:
+			return "unknown";
+	}
+}
+
+const char *
+PgturbohybridGraphDenseHeapRescoreReasonName(int reason)
+{
+	switch ((TqDenseHeapRescoreReason) reason)
+	{
+		case PGTURBOHYBRID_DENSE_HEAP_RESCORE_REASON_EXPLICIT_OFF:
+			return "explicit_off";
+		case PGTURBOHYBRID_DENSE_HEAP_RESCORE_REASON_EXPLICIT_TOPK:
+			return "explicit_topk";
+		case PGTURBOHYBRID_DENSE_HEAP_RESCORE_REASON_EXPLICIT_BAND:
+			return "explicit_band";
+		case PGTURBOHYBRID_DENSE_HEAP_RESCORE_REASON_PROFILE_LATENCY:
+			return "profile_latency";
+		case PGTURBOHYBRID_DENSE_HEAP_RESCORE_REASON_PROFILE_BALANCED_LOWDIM:
+			return "profile_balanced_lowdim";
+		case PGTURBOHYBRID_DENSE_HEAP_RESCORE_REASON_PROFILE_BALANCED_HIGHDIM:
+			return "profile_balanced_highdim";
+		case PGTURBOHYBRID_DENSE_HEAP_RESCORE_REASON_PROFILE_QUALITY_LOWDIM:
+			return "profile_quality_lowdim";
+		case PGTURBOHYBRID_DENSE_HEAP_RESCORE_REASON_PROFILE_QUALITY_HIGHDIM:
+			return "profile_quality_highdim";
+		case PGTURBOHYBRID_DENSE_HEAP_RESCORE_REASON_PROFILE_MATCHED_RECALL_LOWDIM:
+			return "profile_matched_recall_lowdim";
+		case PGTURBOHYBRID_DENSE_HEAP_RESCORE_REASON_PROFILE_MATCHED_RECALL_HIGHDIM:
+			return "profile_matched_recall_highdim";
+		case PGTURBOHYBRID_DENSE_HEAP_RESCORE_REASON_EXACT_STORAGE:
+			return "exact_storage";
+		case PGTURBOHYBRID_DENSE_HEAP_RESCORE_REASON_UNKNOWN:
 		default:
 			return "unknown";
 	}
@@ -472,9 +570,14 @@ pgturbohybrid_index_stats(PG_FUNCTION_ARGS)
 										(tqFlags & PGTURBOHYBRID_GRAPH_EXACT_FREE) == 0);
 	PgturbohybridIndexStatsJsonbAddBool(&jsonState, "dense_build_exact_distances",
 										(tqFlags & PGTURBOHYBRID_GRAPH_TQ_EXACT_BUILD) != 0);
+	PgturbohybridIndexStatsJsonbAddString(&jsonState, "dense_build_distance_mode",
+										  (tqFlags & PGTURBOHYBRID_GRAPH_TQ_EXACT_BUILD) != 0 ?
+										  "exact" : "code");
 	PgturbohybridIndexStatsJsonbAddString(&jsonState, "build_neighbor_select",
 										  (tqFlags & PGTURBOHYBRID_GRAPH_TQ_FAST_BUILD_EDGES) != 0 ?
 										  "fast" : "heuristic");
+	PgturbohybridIndexStatsJsonbAddString(&jsonState, "build_neighbor_select_reason",
+										  PgturbohybridBuildNeighborSelectReasonName(PGTURBOHYBRID_GRAPH_TQ_BUILD_NEIGHBOR_REASON(tqFlags)));
 	PgturbohybridIndexStatsJsonbAddBool(&jsonState, "build_fast_edges",
 										(tqFlags & PGTURBOHYBRID_GRAPH_TQ_FAST_BUILD_EDGES) != 0);
 	PgturbohybridIndexStatsJsonbAddBool(&jsonState, "graph_backbone",

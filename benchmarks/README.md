@@ -156,11 +156,13 @@ Ready-made harnesses live next to this README:
   output.
 - `glove100_recall_latency_grid.sql` -- dense-only recall/latency profile grid
   for glove-like 100-dimensional workloads. It compares `default`, `balanced`,
-  `quality`, `exact_storage`, `residual_rerank`, and heap-rescore top-k/band,
-  recording build time, index size, precision@K against exact pgvector ordering,
-  p50/p95/p99, and dense scan stats such as build neighbor selection, graph EF,
-  oversampling, scored codes, exact rescore count, heap rescore count, and exact
-  rescore source.
+  `matched_recall`, `quality`, `exact_storage`, `residual_rerank`, and
+  heap-rescore top-k/band, recording build time, index size, precision@K against
+  exact pgvector ordering, p50/p95/p99, and dense scan stats such as build
+  neighbor selection, graph EF, oversampling, scored codes, exact rescore count,
+  heap rescore count, and exact rescore source. This benchmark is the authority
+  for deciding whether `matched_recall` is the right one-knob default for a
+  workload.
 - `native_segments_bench.sql` -- native graph segment-count sweep
   (`native_segments = 1,2,4,8` by default). It records build time, index
   size, precision@K against exact ordering, p50/p95, segment count/search
@@ -322,10 +324,11 @@ publishing the fast default result.
 For dense-only comparisons against Qdrant or pgvector, include a matched-quality
 grid rather than only the speed-first 4-bit exact-free default. At minimum,
 report the `glove100_recall_latency_grid.sql` rows for `default`, `balanced`,
-`quality`, `exact_storage`, `residual_rerank`, and heap-rescore top-k/band,
-including build time and index size. Treat `latency` as the compact fast default
-and use the grid to show what it costs to approach or exceed the external
-baseline's recall.
+`matched_recall`, `quality`, `exact_storage`, `residual_rerank`, and
+heap-rescore top-k/band, including build time and index size. Treat `latency` as
+the compact fast default, use `matched_recall` for pgvector/Qdrant-style recall
+comparisons without full-vector storage, and use the grid to show what it costs
+to approach or exceed the external baseline's recall.
 
 ## Dataset Notes
 

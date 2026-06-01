@@ -217,6 +217,8 @@ extern bool pgturbohybrid_dense_renorm;
 extern bool pgturbohybrid_dense_query_1bit_asymmetric;
 extern int	pgturbohybrid_dense_query_1bit_asymmetric_bits;
 extern bool pgturbohybrid_dense_build_exact_distances;
+extern bool pgturbohybrid_dense_build_exact_distances_user_set;
+extern int	pgturbohybrid_dense_build_distance;
 extern int	pgturbohybrid_dense_build_neighbor_select;
 extern bool pgturbohybrid_dense_hadamard_simd;
 extern int	pgturbohybrid_dense_simd_force;
@@ -226,6 +228,7 @@ extern bool pgturbohybrid_dense_u8_batch_x4;
 extern int	pgturbohybrid_native_cache_policy;
 extern int	pgturbohybrid_native_cache_max_mb;
 extern char *pgturbohybrid_native_build_workers;
+extern int	pgturbohybrid_native_segment_budget;
 extern int	pgturbohybrid_dense_exact_simd_force;
 extern int	pgturbohybrid_dense_graph_batch_scoring;
 extern int	pgturbohybrid_dense_graph_batch_size;
@@ -238,6 +241,7 @@ extern double pgturbohybrid_dense_latency_multiplier;
 extern int	pgturbohybrid_dense_max_rescore_multiplier;
 extern int	pgturbohybrid_dense_rescore_band_policy;
 extern int	pgturbohybrid_dense_heap_rescore;
+extern bool pgturbohybrid_dense_heap_rescore_user_set;
 extern int	pgturbohybrid_dense_adaptive_widening;
 extern double pgturbohybrid_dense_adaptive_widening_multiplier;
 extern double pgturbohybrid_dense_adaptive_widening_max_multiplier;
@@ -270,6 +274,33 @@ typedef enum PgturbohybridDenseBuildNeighborSelect
 	PGTURBOHYBRID_DENSE_BUILD_NEIGHBOR_SELECT_AUTO
 }			PgturbohybridDenseBuildNeighborSelect;
 
+typedef enum PgturbohybridDenseBuildDistance
+{
+	PGTURBOHYBRID_DENSE_BUILD_DISTANCE_AUTO,
+	PGTURBOHYBRID_DENSE_BUILD_DISTANCE_CODE,
+	PGTURBOHYBRID_DENSE_BUILD_DISTANCE_EXACT
+}			PgturbohybridDenseBuildDistance;
+
+typedef enum PgturbohybridNativeSegmentBudgetMode
+{
+	PGTURBOHYBRID_NATIVE_SEGMENT_BUDGET_AUTO,
+	PGTURBOHYBRID_NATIVE_SEGMENT_BUDGET_OFF,
+	PGTURBOHYBRID_NATIVE_SEGMENT_BUDGET_SQRT,
+	PGTURBOHYBRID_NATIVE_SEGMENT_BUDGET_LINEAR
+}			PgturbohybridNativeSegmentBudgetMode;
+
+typedef enum PgturbohybridBuildNeighborSelectReason
+{
+	PGTURBOHYBRID_BUILD_NEIGHBOR_SELECT_REASON_UNKNOWN = 0,
+	PGTURBOHYBRID_BUILD_NEIGHBOR_SELECT_REASON_EXPLICIT_FAST,
+	PGTURBOHYBRID_BUILD_NEIGHBOR_SELECT_REASON_EXPLICIT_HEURISTIC,
+	PGTURBOHYBRID_BUILD_NEIGHBOR_SELECT_REASON_AUTO_LOWDIM,
+	PGTURBOHYBRID_BUILD_NEIGHBOR_SELECT_REASON_AUTO_BALANCED,
+	PGTURBOHYBRID_BUILD_NEIGHBOR_SELECT_REASON_AUTO_QUALITY,
+	PGTURBOHYBRID_BUILD_NEIGHBOR_SELECT_REASON_AUTO_MATCHED_RECALL,
+	PGTURBOHYBRID_BUILD_NEIGHBOR_SELECT_REASON_AUTO_LATENCY_HIGHDIM
+}			PgturbohybridBuildNeighborSelectReason;
+
 typedef enum PgturbohybridDenseBudgetPolicy
 {
 	PGTURBOHYBRID_DENSE_BUDGET_QUALITY,
@@ -290,8 +321,25 @@ typedef enum TqDenseHeapRescoreMode
 {
 	PGTURBOHYBRID_DENSE_HEAP_RESCORE_OFF,
 	PGTURBOHYBRID_DENSE_HEAP_RESCORE_TOPK,
-	PGTURBOHYBRID_DENSE_HEAP_RESCORE_BAND
+	PGTURBOHYBRID_DENSE_HEAP_RESCORE_BAND,
+	PGTURBOHYBRID_DENSE_HEAP_RESCORE_AUTO
 }			TqDenseHeapRescoreMode;
+
+typedef enum TqDenseHeapRescoreReason
+{
+	PGTURBOHYBRID_DENSE_HEAP_RESCORE_REASON_UNKNOWN,
+	PGTURBOHYBRID_DENSE_HEAP_RESCORE_REASON_EXPLICIT_OFF,
+	PGTURBOHYBRID_DENSE_HEAP_RESCORE_REASON_EXPLICIT_TOPK,
+	PGTURBOHYBRID_DENSE_HEAP_RESCORE_REASON_EXPLICIT_BAND,
+	PGTURBOHYBRID_DENSE_HEAP_RESCORE_REASON_PROFILE_LATENCY,
+	PGTURBOHYBRID_DENSE_HEAP_RESCORE_REASON_PROFILE_BALANCED_LOWDIM,
+	PGTURBOHYBRID_DENSE_HEAP_RESCORE_REASON_PROFILE_BALANCED_HIGHDIM,
+	PGTURBOHYBRID_DENSE_HEAP_RESCORE_REASON_PROFILE_QUALITY_LOWDIM,
+	PGTURBOHYBRID_DENSE_HEAP_RESCORE_REASON_PROFILE_QUALITY_HIGHDIM,
+	PGTURBOHYBRID_DENSE_HEAP_RESCORE_REASON_PROFILE_MATCHED_RECALL_LOWDIM,
+	PGTURBOHYBRID_DENSE_HEAP_RESCORE_REASON_PROFILE_MATCHED_RECALL_HIGHDIM,
+	PGTURBOHYBRID_DENSE_HEAP_RESCORE_REASON_EXACT_STORAGE
+}			TqDenseHeapRescoreReason;
 
 typedef enum TqExactRescoreSource
 {
@@ -998,12 +1046,15 @@ typedef struct PgturbohybridGraphScanOpaqueData
 	PgturbohybridGraphTqQuery tq;
 	int			m;
 	int			efSearch;
+	int			graphM;
+	int			graphEfConstruction;
 	int			graphOversampling;
 	int			graphRescoreBand;
 	int			graphExactCache;
 	int64		tuples;
 	int64		returnedRows;
 	int64		tupleTargetRows;
+	int64		graphFinalK;
 	double		estimatedFilterSelectivity;
 	int			initialEffectiveEfSearch;
 	bool		hasTupleTargetRows;
@@ -1078,6 +1129,9 @@ typedef struct PgturbohybridGraphScanOpaqueData
 	int64		graphAdjPagesRead;
 	int64		graphSegmentCount;
 	int64		graphSegmentsSearched;
+	int			graphPerSegmentBudgetMode;
+	int64		graphSearchEfBeforeSegmentScaling;
+	int64		graphSearchEfAfterSegmentScaling;
 	int64		graphEntryPointCount;
 	int64		graphEntrySidecarCount;
 	int64		graphEntrySidecarScored;
@@ -1120,11 +1174,18 @@ typedef struct PgturbohybridGraphScanOpaqueData
 	int64		graphHeapRescoreCount;
 	int64		graphHeapFetchUs;
 	int64		graphHeapRescoreUs;
+	int			graphHeapRescoreMode;
+	int			graphHeapRescoreReason;
+	bool		graphHeapRescoreAutoEnabled;
 	int			graphExactRescoreSource;
 	int			graphDenseBudgetPolicy;
 	int			graphRescoreBandPolicy;
 	int			graphStorageKind;
 	bool		graphExactStorage;
+	bool		graphBuildExactDistances;
+	int			graphBuildDistanceMode;
+	bool		graphBuildFastEdges;
+	int			graphBuildNeighborSelectReason;
 	bool		pgturbohybridGraphScan;
 	bool		pgturbohybridFlatScan;
 	void	   *tqGraphResults;
@@ -1173,7 +1234,11 @@ int			PgturbohybridGraphGetGraphExactCache(Relation index);
 int			PgturbohybridGraphGetGraphReorder(Relation index);
 int			PgturbohybridGraphGetNativeSegments(Relation index);
 const char *PgturbohybridDenseBuildNeighborSelectName(int mode);
+const char *PgturbohybridDenseBuildDistanceName(int mode);
+const char *PgturbohybridNativeSegmentBudgetName(int mode);
+const char *PgturbohybridBuildNeighborSelectReasonName(int reason);
 const char *PgturbohybridGraphDenseHeapRescoreName(int mode);
+const char *PgturbohybridGraphDenseHeapRescoreReasonName(int reason);
 const char *PgturbohybridGraphExactRescoreSourceName(int source);
 bool		PgturbohybridGraphIspgturbohybridIndex(Relation index);
 bool		PgturbohybridGraphUseTqGraph(Relation index);
@@ -1212,6 +1277,8 @@ typedef struct PgturbohybridNativeBuildStatsSnapshot
 	bool		exactStorage;
 	bool		buildCodeOnly;
 	bool		buildFastEdges;
+	int			buildDistanceMode;
+	int			buildNeighborSelectReason;
 	uint64		buildDistanceCalls;
 	uint64		buildDistanceQuerySplit;
 	uint64		buildDistancePacked;

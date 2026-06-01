@@ -20,6 +20,10 @@
 #define PGTURBOHYBRID_GRAPH_TQ_EXACT_BUILD		0x0020	/* metapage: graph edges were built using exact distances */
 #define PGTURBOHYBRID_GRAPH_TQ_BACKBONE			0x0040	/* metapage: level-0 adjacent backbone edges were forced at build */
 #define PGTURBOHYBRID_GRAPH_TQ_FAST_BUILD_EDGES	0x0080	/* metapage: build used simple nearest-neighbor edge selection */
+#define PGTURBOHYBRID_GRAPH_TQ_BUILD_NEIGHBOR_REASON_SHIFT 8
+#define PGTURBOHYBRID_GRAPH_TQ_BUILD_NEIGHBOR_REASON_MASK 0x0700
+#define PGTURBOHYBRID_GRAPH_TQ_BUILD_NEIGHBOR_REASON(flags) (((flags) & PGTURBOHYBRID_GRAPH_TQ_BUILD_NEIGHBOR_REASON_MASK) >> PGTURBOHYBRID_GRAPH_TQ_BUILD_NEIGHBOR_REASON_SHIFT)
+#define PGTURBOHYBRID_GRAPH_TQ_BUILD_NEIGHBOR_REASON_BITS(reason) ((((uint16) (reason)) << PGTURBOHYBRID_GRAPH_TQ_BUILD_NEIGHBOR_REASON_SHIFT) & PGTURBOHYBRID_GRAPH_TQ_BUILD_NEIGHBOR_REASON_MASK)
 #define PGTURBOHYBRID_GRAPH_MAX_ENTRY_POINTS		16
 #define PGTURBOHYBRID_GRAPH_ENTRY_SAMPLE_COUNT		608
 #define PGTURBOHYBRID_GRAPH_MAX_NEIGHBORS			(PGTURBOHYBRID_GRAPH_MAX_M * 2)
@@ -169,10 +173,12 @@ typedef struct PgturbohybridQuantBuildState
 	bool		residualRerank;
 	int			residualRerankBytes;
 	bool		buildExactDistances;	/* short-circuit quantized fast paths during build */
+	int			buildDistanceMode; /* effective code/exact build distance mode */
 	bool		buildCodeOnly;	/* avoid retaining raw vectors during exact-free builds */
 	bool		buildFitPass;	/* table scan is only collecting correction statistics */
 	bool		buildEncodeOnAppend;	/* encode node immediately during collection scan */
 	bool		buildFastEdges; /* use bounded simple edge selection for code-only builds */
+	int			buildNeighborSelectReason; /* why the final build edge selector was chosen */
 	int			scoreMode;
 	int			maxLevel;
 	uint32		entryNodeId;
@@ -266,6 +272,8 @@ typedef struct TqDenseCandidateStats
 	uint32		denseCandidatesReturned;
 	uint64		exactRescoreCount;
 	uint64		heapRescoreCount;
+	bool		heapRescoreAutoEnabled;
+	int			heapRescoreReason;
 	uint64		codePagesRead;
 	uint64		adjPagesRead;
 	uint64		prepareUs;

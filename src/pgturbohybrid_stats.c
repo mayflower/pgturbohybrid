@@ -33,6 +33,9 @@ static int64 pgturbohybrid_last_graph_code_pages_read = 0;
 static int64 pgturbohybrid_last_graph_adj_pages_read = 0;
 static int64 pgturbohybrid_last_graph_segment_count = 0;
 static int64 pgturbohybrid_last_graph_segments_searched = 0;
+static int pgturbohybrid_last_graph_per_segment_budget_mode = PGTURBOHYBRID_NATIVE_SEGMENT_BUDGET_OFF;
+static int64 pgturbohybrid_last_graph_search_ef_before_segment_scaling = 0;
+static int64 pgturbohybrid_last_graph_search_ef_after_segment_scaling = 0;
 static int64 pgturbohybrid_last_graph_code_page_attempts = 0;
 static int64 pgturbohybrid_last_graph_code_page_hits = 0;
 static int64 pgturbohybrid_last_graph_code_page_misses = 0;
@@ -50,6 +53,9 @@ static int64 pgturbohybrid_last_graph_residual_rerank_us = 0;
 static int64 pgturbohybrid_last_graph_heap_rescore_count = 0;
 static int64 pgturbohybrid_last_graph_heap_fetch_us = 0;
 static int64 pgturbohybrid_last_graph_heap_rescore_us = 0;
+static int pgturbohybrid_last_graph_heap_rescore_mode = PGTURBOHYBRID_DENSE_HEAP_RESCORE_OFF;
+static bool pgturbohybrid_last_graph_heap_rescore_auto_enabled = false;
+static int pgturbohybrid_last_graph_heap_rescore_reason = PGTURBOHYBRID_DENSE_HEAP_RESCORE_REASON_UNKNOWN;
 static int64 pgturbohybrid_last_graph_prepare_us = 0;
 static int64 pgturbohybrid_last_graph_traverse_us = 0;
 static int64 pgturbohybrid_last_graph_entry_us = 0;
@@ -92,6 +98,10 @@ static int pgturbohybrid_last_scan_orchestration = PGTURBOHYBRID_SCAN_ORCHESTRAT
 static int pgturbohybrid_last_graph_quantization_bits = 0;
 static bool pgturbohybrid_last_graph_exact_storage = false;
 static bool pgturbohybrid_last_graph_exact_storage_known = false;
+static bool pgturbohybrid_last_graph_build_exact_distances = false;
+static int pgturbohybrid_last_graph_build_distance_mode = PGTURBOHYBRID_DENSE_BUILD_DISTANCE_CODE;
+static bool pgturbohybrid_last_graph_build_fast_edges = false;
+static int pgturbohybrid_last_graph_build_neighbor_select_reason = PGTURBOHYBRID_BUILD_NEIGHBOR_SELECT_REASON_UNKNOWN;
 static bool pgturbohybrid_last_graph_query_split_active = false;
 static bool pgturbohybrid_last_graph_querysplit_used = false;
 static bool pgturbohybrid_last_graph_u8_split_used = false;
@@ -122,6 +132,8 @@ static int64 pgturbohybrid_last_graph_code_buffer_lock_wait_us = 0;
 static int64 pgturbohybrid_last_graph_adj_buffer_lock_wait_us = 0;
 static int64 pgturbohybrid_last_graph_dimensions = 0;
 static int64 pgturbohybrid_last_graph_returned_rows = 0;
+static int64 pgturbohybrid_last_graph_m = 0;
+static int64 pgturbohybrid_last_graph_ef_construction = 0;
 static int64 pgturbohybrid_last_graph_ef_search = 0;
 static int64 pgturbohybrid_last_graph_oversampling = 0;
 static int pgturbohybrid_last_graph_exact_cache = PGTURBOHYBRID_GRAPH_EXACT_CACHE_AUTO;
@@ -323,6 +335,12 @@ PgturbohybridGraphRecordGraphScanStats(PgturbohybridGraphScanOpaque so)
 	pgturbohybrid_last_graph_adj_pages_read = so->graphAdjPagesRead;
 	pgturbohybrid_last_graph_segment_count = so->graphSegmentCount;
 	pgturbohybrid_last_graph_segments_searched = so->graphSegmentsSearched;
+	pgturbohybrid_last_graph_per_segment_budget_mode =
+		so->graphPerSegmentBudgetMode;
+	pgturbohybrid_last_graph_search_ef_before_segment_scaling =
+		so->graphSearchEfBeforeSegmentScaling;
+	pgturbohybrid_last_graph_search_ef_after_segment_scaling =
+		so->graphSearchEfAfterSegmentScaling;
 	pgturbohybrid_last_graph_code_page_attempts = so->graphCodePageAttempts;
 	pgturbohybrid_last_graph_code_page_hits = so->graphCodePageHits;
 	pgturbohybrid_last_graph_code_page_misses = so->graphCodePageMisses;
@@ -340,6 +358,10 @@ PgturbohybridGraphRecordGraphScanStats(PgturbohybridGraphScanOpaque so)
 	pgturbohybrid_last_graph_heap_rescore_count = so->graphHeapRescoreCount;
 	pgturbohybrid_last_graph_heap_fetch_us = so->graphHeapFetchUs;
 	pgturbohybrid_last_graph_heap_rescore_us = so->graphHeapRescoreUs;
+	pgturbohybrid_last_graph_heap_rescore_mode = so->graphHeapRescoreMode;
+	pgturbohybrid_last_graph_heap_rescore_auto_enabled =
+		so->graphHeapRescoreAutoEnabled;
+	pgturbohybrid_last_graph_heap_rescore_reason = so->graphHeapRescoreReason;
 	pgturbohybrid_last_graph_prepare_us = so->graphPrepareUs;
 	pgturbohybrid_last_graph_traverse_us = so->graphTraverseUs;
 	pgturbohybrid_last_graph_entry_us = so->graphEntryUs;
@@ -398,11 +420,18 @@ PgturbohybridGraphRecordGraphScanStats(PgturbohybridGraphScanOpaque so)
 	pgturbohybrid_last_graph_quantization_bits = so->tq.enabled ? so->tq.bits : 0;
 	pgturbohybrid_last_graph_dimensions = so->tq.enabled ? so->tq.dimensions : 0;
 	pgturbohybrid_last_graph_returned_rows = so->returnedRows;
+	pgturbohybrid_last_graph_m = so->graphM;
+	pgturbohybrid_last_graph_ef_construction = so->graphEfConstruction;
 	pgturbohybrid_last_graph_ef_search = so->efSearch;
 	pgturbohybrid_last_graph_oversampling = so->graphOversampling;
 	pgturbohybrid_last_graph_exact_cache = so->graphExactCache;
 	pgturbohybrid_last_graph_exact_storage = so->graphExactStorage;
 	pgturbohybrid_last_graph_exact_storage_known = so->tq.enabled;
+	pgturbohybrid_last_graph_build_exact_distances = so->graphBuildExactDistances;
+	pgturbohybrid_last_graph_build_distance_mode = so->graphBuildDistanceMode;
+	pgturbohybrid_last_graph_build_fast_edges = so->graphBuildFastEdges;
+	pgturbohybrid_last_graph_build_neighbor_select_reason =
+		so->graphBuildNeighborSelectReason;
 	if (so->hasTupleTargetRows && so->tupleTargetRows > 0)
 	{
 		int			limit = (int) Min(so->tupleTargetRows, (int64) INT_MAX);
@@ -499,6 +528,10 @@ PgturbohybridGraphRecordNonGraphScanStats(void)
 	pgturbohybrid_last_graph_adj_pages_read = 0;
 	pgturbohybrid_last_graph_segment_count = 0;
 	pgturbohybrid_last_graph_segments_searched = 0;
+	pgturbohybrid_last_graph_per_segment_budget_mode =
+		PGTURBOHYBRID_NATIVE_SEGMENT_BUDGET_OFF;
+	pgturbohybrid_last_graph_search_ef_before_segment_scaling = 0;
+	pgturbohybrid_last_graph_search_ef_after_segment_scaling = 0;
 	pgturbohybrid_last_graph_code_page_attempts = 0;
 	pgturbohybrid_last_graph_code_page_hits = 0;
 	pgturbohybrid_last_graph_code_page_misses = 0;
@@ -516,6 +549,9 @@ PgturbohybridGraphRecordNonGraphScanStats(void)
 		pgturbohybrid_last_graph_heap_rescore_count = 0;
 		pgturbohybrid_last_graph_heap_fetch_us = 0;
 		pgturbohybrid_last_graph_heap_rescore_us = 0;
+		pgturbohybrid_last_graph_heap_rescore_mode = PGTURBOHYBRID_DENSE_HEAP_RESCORE_OFF;
+		pgturbohybrid_last_graph_heap_rescore_auto_enabled = false;
+		pgturbohybrid_last_graph_heap_rescore_reason = PGTURBOHYBRID_DENSE_HEAP_RESCORE_REASON_UNKNOWN;
 		pgturbohybrid_last_graph_prepare_us = 0;
 	pgturbohybrid_last_graph_traverse_us = 0;
 	pgturbohybrid_last_graph_entry_us = 0;
@@ -557,6 +593,11 @@ PgturbohybridGraphRecordNonGraphScanStats(void)
 	pgturbohybrid_last_graph_quantization_bits = 0;
 	pgturbohybrid_last_graph_exact_storage = false;
 	pgturbohybrid_last_graph_exact_storage_known = false;
+	pgturbohybrid_last_graph_build_exact_distances = false;
+	pgturbohybrid_last_graph_build_distance_mode = PGTURBOHYBRID_DENSE_BUILD_DISTANCE_CODE;
+	pgturbohybrid_last_graph_build_fast_edges = false;
+	pgturbohybrid_last_graph_build_neighbor_select_reason =
+		PGTURBOHYBRID_BUILD_NEIGHBOR_SELECT_REASON_UNKNOWN;
 	pgturbohybrid_last_graph_query_split_active = false;
 	pgturbohybrid_last_graph_querysplit_used = false;
 	pgturbohybrid_last_graph_u8_split_used = false;
@@ -587,6 +628,8 @@ PgturbohybridGraphRecordNonGraphScanStats(void)
 	pgturbohybrid_last_graph_adj_buffer_lock_wait_us = 0;
 	pgturbohybrid_last_graph_dimensions = 0;
 	pgturbohybrid_last_graph_returned_rows = 0;
+	pgturbohybrid_last_graph_m = 0;
+	pgturbohybrid_last_graph_ef_construction = 0;
 	pgturbohybrid_last_graph_ef_search = 0;
 	pgturbohybrid_last_graph_oversampling = 0;
 	pgturbohybrid_last_graph_exact_cache = PGTURBOHYBRID_GRAPH_EXACT_CACHE_AUTO;
@@ -1590,6 +1633,12 @@ pgturbohybrid_last_build_stats(PG_FUNCTION_ARGS)
 	PgturbohybridJsonbAddBool(&state, "exact_storage", s->exactStorage);
 	PgturbohybridJsonbAddBool(&state, "build_code_only", s->buildCodeOnly);
 	PgturbohybridJsonbAddBool(&state, "build_fast_edges", s->buildFastEdges);
+	PgturbohybridJsonbAddString(&state, "dense_build_distance_mode",
+								PgturbohybridDenseBuildDistanceName(s->buildDistanceMode));
+	PgturbohybridJsonbAddString(&state, "build_neighbor_select",
+								s->buildFastEdges ? "fast" : "heuristic");
+	PgturbohybridJsonbAddString(&state, "build_neighbor_select_reason",
+								PgturbohybridBuildNeighborSelectReasonName(s->buildNeighborSelectReason));
 	PgturbohybridJsonbAddUint64(&state, "build_distance_calls",
 								s->buildDistanceCalls);
 	PgturbohybridJsonbAddUint64(&state, "build_distance_query_split",
@@ -1728,6 +1777,17 @@ pgturbohybrid_last_scan_stats(PG_FUNCTION_ARGS)
 		PgturbohybridJsonbAddNull(&state, "exact_storage");
 		PgturbohybridJsonbAddNull(&state, "exact_free");
 	}
+	PgturbohybridJsonbAddBool(&state, "dense_build_exact_distances",
+							  pgturbohybrid_last_graph_build_exact_distances);
+	PgturbohybridJsonbAddString(&state, "dense_build_distance_mode",
+								PgturbohybridDenseBuildDistanceName(pgturbohybrid_last_graph_build_distance_mode));
+	PgturbohybridJsonbAddString(&state, "build_neighbor_select",
+								pgturbohybrid_last_graph_build_fast_edges ?
+								"fast" : "heuristic");
+	PgturbohybridJsonbAddString(&state, "build_neighbor_select_reason",
+								PgturbohybridBuildNeighborSelectReasonName(pgturbohybrid_last_graph_build_neighbor_select_reason));
+	PgturbohybridJsonbAddBool(&state, "build_fast_edges",
+							  pgturbohybrid_last_graph_build_fast_edges);
 
 	/*
 	 * Dense scan diagnostics: which scorer ran, the approximate-vs-exact and
@@ -1770,6 +1830,10 @@ pgturbohybrid_last_scan_stats(PG_FUNCTION_ARGS)
 							   pgturbohybrid_last_graph_returned_rows);
 	PgturbohybridJsonbAddInt64(&state, "candidate_objects_allocated",
 							   pgturbohybrid_last_graph_candidate_count);
+	PgturbohybridJsonbAddInt64(&state, "graph_m",
+							   pgturbohybrid_last_graph_m);
+	PgturbohybridJsonbAddInt64(&state, "graph_ef_construction",
+							   pgturbohybrid_last_graph_ef_construction);
 	PgturbohybridJsonbAddInt64(&state, "graph_oversampling",
 							   pgturbohybrid_last_graph_oversampling);
 	PgturbohybridJsonbAddString(&state, "graph_exact_cache",
@@ -1779,7 +1843,11 @@ pgturbohybrid_last_scan_stats(PG_FUNCTION_ARGS)
 	PgturbohybridJsonbAddBool(&state, "residual_rerank_active",
 							  pgturbohybrid_last_graph_residual_rerank_count > 0);
 	PgturbohybridJsonbAddString(&state, "dense_heap_rescore",
-								PgturbohybridGraphDenseHeapRescoreName(pgturbohybrid_dense_heap_rescore));
+								PgturbohybridGraphDenseHeapRescoreName(pgturbohybrid_last_graph_heap_rescore_mode));
+	PgturbohybridJsonbAddBool(&state, "heap_rescore_auto_enabled",
+							  pgturbohybrid_last_graph_heap_rescore_auto_enabled);
+	PgturbohybridJsonbAddString(&state, "heap_rescore_reason",
+								PgturbohybridGraphDenseHeapRescoreReasonName(pgturbohybrid_last_graph_heap_rescore_reason));
 	PgturbohybridJsonbAddBool(&state, "graph_rescore_band_active",
 							  pgturbohybrid_last_graph_effective_rescore_band > 0);
 	/* The index's configured rescore band (auto/none/exact). */
@@ -1814,6 +1882,14 @@ pgturbohybrid_last_scan_stats(PG_FUNCTION_ARGS)
 							   pgturbohybrid_last_graph_segment_count);
 	PgturbohybridJsonbAddInt64(&state, "graph_segments_searched",
 							   pgturbohybrid_last_graph_segments_searched);
+	PgturbohybridJsonbAddInt64(&state, "native_segments",
+							   pgturbohybrid_last_graph_segment_count);
+	PgturbohybridJsonbAddString(&state, "per_segment_budget_mode",
+								PgturbohybridNativeSegmentBudgetName(pgturbohybrid_last_graph_per_segment_budget_mode));
+	PgturbohybridJsonbAddInt64(&state, "effective_search_ef_before_segment_scaling",
+							   pgturbohybrid_last_graph_search_ef_before_segment_scaling);
+	PgturbohybridJsonbAddInt64(&state, "effective_search_ef_after_segment_scaling",
+							   pgturbohybrid_last_graph_search_ef_after_segment_scaling);
 	/*
 	 * Native code-page cache effectiveness (PgturbohybridGraphLoadCodePage).
 	 * A warm scan should be served almost entirely from already-loaded code
@@ -2134,6 +2210,22 @@ pgturbohybrid_last_scan_stats(PG_FUNCTION_ARGS)
 	PgturbohybridJsonbAddFloat8(&state, "dense_adaptive_gap_top10",
 								pgturbohybrid_last_graph_adaptive_gap_top10);
 	PgturbohybridJsonbAddFloat8(&state, "dense_adaptive_gap_boundary",
+								pgturbohybrid_last_graph_adaptive_gap_boundary);
+	PgturbohybridJsonbAddBool(&state, "adaptive_widening_triggered",
+							  pgturbohybrid_last_graph_adaptive_triggered);
+	PgturbohybridJsonbAddString(&state, "adaptive_widening_reason",
+								PgturbohybridGraphDenseAdaptiveWideningReasonName(pgturbohybrid_last_graph_adaptive_trigger_reason));
+	PgturbohybridJsonbAddInt64(&state, "adaptive_initial_result_target",
+							   pgturbohybrid_last_graph_adaptive_initial_result_target);
+	PgturbohybridJsonbAddInt64(&state, "adaptive_final_result_target",
+							   pgturbohybrid_last_graph_adaptive_final_result_target);
+	PgturbohybridJsonbAddInt64(&state, "adaptive_initial_search_ef",
+							   pgturbohybrid_last_graph_adaptive_initial_search_ef);
+	PgturbohybridJsonbAddInt64(&state, "adaptive_final_search_ef",
+							   pgturbohybrid_last_graph_adaptive_final_search_ef);
+	PgturbohybridJsonbAddFloat8(&state, "adaptive_gap_top10",
+								pgturbohybrid_last_graph_adaptive_gap_top10);
+	PgturbohybridJsonbAddFloat8(&state, "adaptive_gap_boundary",
 								pgturbohybrid_last_graph_adaptive_gap_boundary);
 	PgturbohybridJsonbAddString(&state, "dense_local_expansion_mode",
 								PgturbohybridGraphDenseLocalExpansionModeName(pgturbohybrid_last_graph_local_expansion_mode));

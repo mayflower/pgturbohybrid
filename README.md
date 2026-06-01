@@ -220,7 +220,21 @@ LIMIT 10;
 That is the "daily driver" mode: compact settings, fewer knobs, enough speed to
 be interesting, and no need to pack a racing helmet.
 
-## Quality Mode
+## Matched-Recall And Quality Modes
+
+Use `matched_recall` when you want a compact 4-bit, exact-free index but need a
+single named setting for pgvector/Qdrant-like dense recall comparisons:
+
+```sql
+SET turbohybrid.profile = 'matched_recall';
+```
+
+This profile keeps `quantization_bits = 4` and `exact_storage = off`, but new
+low-dimensional indexes use heuristic graph neighbor selection, exact build
+distances during graph construction, `ef_construction = 192`,
+`ef_search = 128`, `graph_oversampling = 8`, final top-k heap rescore, and one
+native segment unless `native_segments` is explicitly set. Exact build
+distances are build-time only; they do not store full vectors in the index.
 
 Use `quality` when relevance matters more than lowest latency:
 
@@ -228,12 +242,12 @@ Use `quality` when relevance matters more than lowest latency:
 SET turbohybrid.profile = 'quality';
 ```
 
-Quality mode uses larger dense and lexical candidate budgets, conservative BM25
-paths, higher default graph search windows, and heuristic dense-neighbor
-selection for new code-only indexes. It usually costs more build CPU and query
-CPU than `latency`, so compare it at matched recall/precision instead of only
-comparing raw p95. For quality-sensitive production evaluation, benchmark an
-exact-storage index too:
+Quality mode is stronger and slower: it uses larger dense and lexical candidate
+budgets, conservative BM25 paths, higher default graph search windows, and
+heuristic dense-neighbor selection for new indexes. It usually costs more build
+CPU and query CPU than `latency` or `matched_recall`, so compare it at matched
+recall/precision instead of only comparing raw p95. For quality-sensitive
+production evaluation, benchmark an exact-storage index too:
 
 ```sql
 CREATE INDEX documents_turbohybrid_quality_idx ON documents
@@ -245,28 +259,42 @@ WITH (exact_storage = on);
 ```
 
 For exact-free 4-bit indexes that need a precision check without storing a full
-copy of every vector in the index, heap-backed exact rescore is explicit:
+copy of every vector in the index, heap-backed exact rescore can rescore only
+the final top-k from the heap:
 
 ```sql
 SET turbohybrid.dense_heap_rescore = 'topk'; -- or 'band'
 ```
 
-`topk` fetches heap tuples for the final top-k band and recomputes exact vector
+`topk` fetches heap tuples for the final top-k and recomputes exact vector
 distance with the same SIMD kernels used by index-exact rescore. `band` rescans
-the full final candidate band. Both add heap I/O and are off in the `latency`
-profile by default. Residual rerank is the lower-I/O middle ground:
+the full final candidate band. Both add heap I/O. The `latency` profile keeps
+heap rescore off; `balanced`, `matched_recall`, and `quality` may enable `topk`
+automatically for low-dimensional exact-free indexes, and an explicit
+`SET turbohybrid.dense_heap_rescore = 'off'|'topk'|'band'` always wins over the
+profile default; set it to `auto` to return to profile-driven behavior.
+Residual rerank is the lower-I/O middle ground:
 `WITH (residual_rerank = on, residual_rerank_bytes = 16|32|64)`.
 
 Do not treat either profile as universally best. Measure latency and relevance
-on your dataset. Experimental dense diagnostics such as adaptive widening,
-local expansion, exact-build distances, entry sidecars, and residual rerank are
-opt-in knobs for benchmark work, not release defaults.
+on your dataset. Adaptive dense widening stays off for the `latency` profile,
+but `balanced`, `matched_recall`, and `quality` can use a conservative `auto`
+mode on low-dimensional exact-free 4-bit indexes when `final_k` is small and the
+score boundary looks ambiguous. Local expansion, entry sidecars, and residual
+rerank remain opt-in knobs for benchmark work, not release defaults.
+`native_segments` is a build/concurrency lever rather than a free quality knob:
+the default is one segment, quality/exact-build auto segmenting resolves to one
+segment, and multi-segment indexes should be benchmarked with
+`turbohybrid.native_segment_budget = sqrt|linear` before using them for
+quality-sensitive comparisons.
 
 For a dense-only profile sweep against a glove-like workload, use
 `benchmarks/glove100_recall_latency_grid.sql`. It reports build time, index
 size, precision@K against exact pgvector ordering, p50/p95/p99, and scan stats
-for `default`, `balanced`, `quality`, `exact_storage`, `residual_rerank`, and
-heap-rescore configurations.
+for `default`, `balanced`, `matched_recall`, `quality`, `exact_storage`,
+`residual_rerank`, and heap-rescore/adaptive-widening configurations. Treat
+that grid as the authority for deciding whether `matched_recall` should become a
+workload default.
 
 ## Diagnostics
 
@@ -338,9 +366,9 @@ measured passes.
 
 That DBPedia result is a tradeoff, not a victory lap: TurboHybrid was much
 faster and smaller on this machine, while the pgvector + FTS SQL RRF baseline
-kept higher nDCG@10 and recall@10. The package default keeps adaptive dense
-widening off; adaptive widening variants remain available in the benchmark
-harness for controlled experiments. Benchmark details, baselines, and
+kept higher nDCG@10 and recall@10. The package default latency profile keeps
+adaptive dense widening off; adaptive widening variants remain available in the
+benchmark harness for controlled experiments. Benchmark details, baselines, and
 reproduction notes are in
 [docs/benchmarks/fiqa-openai.md](docs/benchmarks/fiqa-openai.md),
 [benchmarks/dbpedia_openai3_large.md](benchmarks/dbpedia_openai3_large.md), and

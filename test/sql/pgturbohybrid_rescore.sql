@@ -6,7 +6,8 @@
 --     graph_effective_rescore_band stays 0 even when the band is forced to
 --     'exact', because there are no stored f32 vectors to rescore;
 --   * exact-free indexes can opt into heap-backed exact rescore explicitly with
---     dense_heap_rescore = topk/band;
+--     dense_heap_rescore = topk/band, and balanced/quality profiles can enable
+--     top-k heap rescore automatically for low-dimensional indexes;
 --   * an exact_storage index honors the band (exact rescores, off does not);
 --   * hybrid (vector + bm25) scans do not force exact dense rescore under the
 --     latency profile (exact_rescore_for_bm25_only is off).
@@ -89,6 +90,10 @@ BEGIN
     IF st->>'dense_heap_rescore' <> 'off' OR (st->>'heap_rescore_count')::int <> 0 THEN
         RAISE EXCEPTION 'latency exact-free heap rescored by default: %', st;
     END IF;
+    IF (st->>'heap_rescore_auto_enabled')::bool IS DISTINCT FROM false OR
+       st->>'heap_rescore_reason' <> 'profile_latency' THEN
+        RAISE EXCEPTION 'latency exact-free heap rescore auto stats unexpected: %', st;
+    END IF;
     IF st->>'exact_rescore_source' <> 'none' THEN
         RAISE EXCEPTION 'latency exact-free exact source not none: %', st;
     END IF;
@@ -114,6 +119,10 @@ BEGIN
        topk_heap_count > 10 OR st->>'exact_rescore_source' <> 'heap' THEN
         RAISE EXCEPTION 'exact-free heap topk rescore did not report expected stats: %', st;
     END IF;
+    IF (st->>'heap_rescore_auto_enabled')::bool IS DISTINCT FROM false OR
+       st->>'heap_rescore_reason' <> 'explicit_topk' THEN
+        RAISE EXCEPTION 'explicit heap topk rescore reason unexpected: %', st;
+    END IF;
     IF (st->>'exact_rescore_count')::int <> 0 THEN
         RAISE EXCEPTION 'heap rescore should not report index exact rescore count: %', st;
     END IF;
@@ -122,13 +131,99 @@ BEGIN
     PERFORM id FROM rb_free ORDER BY embedding <~> turbohybrid_query(vector_query => qv) LIMIT 10;
     st := turbohybrid_last_scan_stats();
     IF st->>'dense_heap_rescore' <> 'band' OR
-       (st->>'heap_rescore_count')::int < topk_heap_count OR
+       (st->>'heap_rescore_count')::int <= topk_heap_count OR
        st->>'exact_rescore_source' <> 'heap' THEN
         RAISE EXCEPTION 'exact-free heap band rescore did not report expected stats: %', st;
     END IF;
-    RESET turbohybrid.dense_heap_rescore;
+    IF (st->>'heap_rescore_auto_enabled')::bool IS DISTINCT FROM false OR
+       st->>'heap_rescore_reason' <> 'explicit_band' THEN
+        RAISE EXCEPTION 'explicit heap band rescore reason unexpected: %', st;
+    END IF;
+    SET turbohybrid.dense_heap_rescore = auto;
+
+    -- (2c) Balanced profile automatically heap-rescores only final top-k on
+    -- low-dimensional exact-free indexes.
+    PERFORM set_config('turbohybrid.profile', 'balanced', true);
+    PERFORM id FROM rb_free ORDER BY embedding <~> turbohybrid_query(vector_query => qv) LIMIT 10;
+    st := turbohybrid_last_scan_stats();
+    IF st->>'dense_heap_rescore' <> 'topk' OR
+       (st->>'heap_rescore_auto_enabled')::bool IS DISTINCT FROM true OR
+       st->>'heap_rescore_reason' <> 'profile_balanced_lowdim' OR
+       (st->>'heap_rescore_count')::int <= 0 OR
+       (st->>'heap_rescore_count')::int > 10 OR
+       st->>'exact_rescore_source' <> 'heap' THEN
+        RAISE EXCEPTION 'balanced low-dimensional auto topk heap rescore did not report expected stats: %', st;
+    END IF;
+
+    -- matched_recall is a single-knob quality profile: exact-free low-dimensional
+    -- scans use final top-k heap rescore automatically.
+    PERFORM set_config('turbohybrid.profile', 'matched_recall', true);
+    PERFORM id FROM rb_free ORDER BY embedding <~> turbohybrid_query(vector_query => qv) LIMIT 10;
+    st := turbohybrid_last_scan_stats();
+    IF st->>'profile' <> 'matched_recall' OR
+       st->>'dense_heap_rescore' <> 'topk' OR
+       (st->>'heap_rescore_auto_enabled')::bool IS DISTINCT FROM true OR
+       st->>'heap_rescore_reason' <> 'profile_matched_recall_lowdim' OR
+       (st->>'heap_rescore_count')::int <= 0 OR
+       (st->>'heap_rescore_count')::int > 10 OR
+       st->>'exact_rescore_source' <> 'heap' THEN
+        RAISE EXCEPTION 'matched_recall low-dimensional auto topk heap rescore did not report expected stats: %', st;
+    END IF;
+    PERFORM set_config('turbohybrid.profile', 'balanced', true);
+
+    -- Explicit off must win over the balanced profile default.
+    SET turbohybrid.dense_heap_rescore = off;
+    PERFORM id FROM rb_free ORDER BY embedding <~> turbohybrid_query(vector_query => qv) LIMIT 10;
+    st := turbohybrid_last_scan_stats();
+    IF st->>'dense_heap_rescore' <> 'off' OR
+       (st->>'heap_rescore_auto_enabled')::bool IS DISTINCT FROM false OR
+       st->>'heap_rescore_reason' <> 'explicit_off' OR
+       (st->>'heap_rescore_count')::int <> 0 OR
+       st->>'exact_rescore_source' <> 'none' THEN
+        RAISE EXCEPTION 'explicit heap rescore off did not override balanced profile: %', st;
+    END IF;
+    SET turbohybrid.dense_heap_rescore = auto;
+    PERFORM set_config('turbohybrid.profile', 'latency', true);
+
+    -- (2d) Adaptive widening auto is profile-gated. Balanced low-dimensional
+    -- exact-free scans may widen once when score gaps are flat; latency does
+    -- not widen unless explicitly enabled.
+    PERFORM set_config('turbohybrid.profile', 'balanced', true);
+    SET turbohybrid.dense_adaptive_widening = auto;
+    SET turbohybrid.dense_adaptive_min_gap = 1.0;
+    PERFORM id FROM rb_free ORDER BY embedding <~> turbohybrid_query(vector_query => qv) LIMIT 10;
+    st := turbohybrid_last_scan_stats();
+    IF st->>'dense_adaptive_widening_mode' <> 'auto' OR
+       (st->>'adaptive_widening_triggered')::bool IS DISTINCT FROM true OR
+       st->>'adaptive_widening_reason' NOT IN ('flat_top10', 'flat_boundary', 'underfilled') OR
+       (st->>'adaptive_final_result_target')::int <=
+           (st->>'adaptive_initial_result_target')::int OR
+       (st->>'adaptive_final_result_target')::float8 >
+           ceil((st->>'adaptive_initial_result_target')::float8 * 1.5) THEN
+        RAISE EXCEPTION 'balanced adaptive widening did not report expected stats: %', st;
+    END IF;
+    IF st->>'adaptive_widening_triggered' <> st->>'dense_adaptive_triggered' OR
+       st->>'adaptive_widening_reason' <> st->>'dense_adaptive_trigger_reason' OR
+       st->>'adaptive_gap_top10' <> st->>'dense_adaptive_gap_top10' OR
+       st->>'adaptive_gap_boundary' <> st->>'dense_adaptive_gap_boundary' THEN
+        RAISE EXCEPTION 'adaptive alias stats diverged from dense_adaptive stats: %', st;
+    END IF;
+
+    PERFORM set_config('turbohybrid.profile', 'latency', true);
+    SET turbohybrid.dense_adaptive_widening = auto;
+    PERFORM id FROM rb_free ORDER BY embedding <~> turbohybrid_query(vector_query => qv) LIMIT 10;
+    st := turbohybrid_last_scan_stats();
+    IF st->>'dense_adaptive_widening_mode' <> 'off' OR
+       (st->>'adaptive_widening_triggered')::bool IS DISTINCT FROM false OR
+       (st->>'adaptive_final_result_target')::int <>
+           (st->>'adaptive_initial_result_target')::int THEN
+        RAISE EXCEPTION 'latency adaptive auto widened unexpectedly: %', st;
+    END IF;
+    RESET turbohybrid.dense_adaptive_widening;
+    RESET turbohybrid.dense_adaptive_min_gap;
 
     -- (3) Residual sketches are a separate quality path for exact-free indexes.
+    SET turbohybrid.dense_heap_rescore = off;
     PERFORM set_config('turbohybrid.profile', 'quality', true);
     PERFORM id FROM rb_residual ORDER BY embedding <~> turbohybrid_query(vector_query => qv) LIMIT 10;
     st := turbohybrid_last_scan_stats();
@@ -141,6 +236,7 @@ BEGIN
        (st->>'heap_rescore_count')::int <> 0 THEN
         RAISE EXCEPTION 'residual rerank should not report exact/heap counts: %', st;
     END IF;
+    SET turbohybrid.dense_heap_rescore = auto;
     PERFORM set_config('turbohybrid.profile', 'latency', true);
 
     -- (4) exact_storage index: band = exact rescores (quality behavior intact).
