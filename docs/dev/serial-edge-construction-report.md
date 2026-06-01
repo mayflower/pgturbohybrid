@@ -3,9 +3,10 @@
 > Status: superseded by the parallel edge build implementation. Current code
 > supports code-only native graph edge construction through the
 > `turbohybrid.native_parallel_edge_build` GUC (`auto` by default), using
-> segment-parallel HNSW linking plus a bounded repair step for default
-> single-graph builds. See `pedgeplan.md` for the implementation plan and
-> Qdrant comparison notes.
+> batch-parallel insertion into one shared graph. The rejected
+> segment-and-entry-repair prototype was fast but collapsed measured recall from
+> about 0.9924 to 0.32; see `pedgeplan.md` for the current implementation plan
+> and Qdrant comparison notes.
 
 ## Summary
 

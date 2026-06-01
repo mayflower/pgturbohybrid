@@ -8,8 +8,11 @@ and HNSW edge-linking phases.
 
 ## Implemented Approach
 
-Use deterministic segment-parallel edge construction with a bounded leader-side
-repair step for the default single-graph case.
+Use deterministic batch-parallel insertion into one shared graph. The first
+prefix is inserted serially, matching Qdrant's warm-up pattern, then workers
+compute HNSW searches and forward links for bounded batches against the shared
+ready graph. The leader applies backlinks and publishes each batch before the
+next batch starts.
 
 1. Keep scan and encode parallelism on the existing PostgreSQL parallel CREATE
    INDEX worker infrastructure.
@@ -17,19 +20,25 @@ repair step for the default single-graph case.
    same `ParallelContext`.
 3. Copy immutable build nodes into DSM: heap TID, code bytes, quantization
    metadata, payloads, residual sketch bytes, and level.
-4. Split the node id range into deterministic segments.
-5. Let workers claim segments and run the existing HNSW edge builder for their
-   segment using local neighbor storage.
-6. Copy final per-level neighbor lists back to DSM.
-7. Merge adjacency into the leader's build state.
-8. If the reloption-level native segment count is one, repair the temporary
-   worker segments into a single graph by connecting segment entry points to
-   the global entry point.
+4. Create one deterministic insertion order.
+5. Insert the first 256 points serially to avoid disconnected early components.
+6. Let workers claim node positions from each bounded batch and run HNSW
+   greedy/search-layer plus heuristic neighbor selection against the ready
+   shared graph.
+7. Synchronize at a barrier; the leader applies backlinks, updates the global
+   entry point, and marks the batch ready.
+8. Repeat until all nodes are linked, then copy final adjacency into the
+   leader's build state as a single native segment.
 9. Record stats that distinguish scan/encode parallelism from edge parallelism.
 
 The first supported path is code-only native graph builds. Exact-storage and
 exact-build-distance modes remain serial unless a future implementation carries
 exact vectors into worker DSM or adopts a shared mutable graph.
+
+The earlier segment-parallel implementation was rejected because it built
+isolated worker-local subgraphs and only stitched segment entry nodes. That
+produced a fast build but collapsed measured recall from about 0.9924 to 0.32.
+The current approach keeps a single ready graph throughout edge construction.
 
 ## Qdrant Reference
 
@@ -47,5 +56,6 @@ Qdrant's CPU HNSW builder is lock-based rather than segment-and-repair based:
   practical HNSW indexing parallelism around the 8-16 thread range.
 
 That design gives true shared-graph insertion but adds lock contention and
-thread-count sensitivity. The implemented pgturbohybrid path favors PostgreSQL
-parallel build integration, deterministic output, and no shared neighbor locks.
+thread-count sensitivity. The implemented pgturbohybrid path follows the same
+single-graph/warm-up principle, but uses PostgreSQL DSM barriers and bounded
+batches instead of per-neighbor locks.
