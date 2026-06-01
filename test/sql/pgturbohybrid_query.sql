@@ -34,6 +34,7 @@ BEGIN
 		'turbohybrid.dense_adaptive_widening',
 		'turbohybrid.dense_adaptive_widening_max_multiplier',
 		'turbohybrid.dense_adaptive_widening_multiplier',
+		'turbohybrid.dense_build_distance',
 		'turbohybrid.dense_build_exact_distances',
 		'turbohybrid.dense_build_neighbor_select',
 		'turbohybrid.dense_graph_avx512vnni',
@@ -54,6 +55,7 @@ BEGIN
 		'turbohybrid.native_cache_max_mb',
 		'turbohybrid.native_cache_policy',
 		'turbohybrid.native_cache_scope',
+		'turbohybrid.native_segment_budget',
 		'turbohybrid.profile',
 		'turbohybrid.simd'
 	] THEN
@@ -68,11 +70,15 @@ BEGIN
 		IF current_setting('turbohybrid.dense_adaptive_widening') != 'off' OR
 			current_setting('turbohybrid.dense_heap_rescore') != 'off' OR
 			current_setting('turbohybrid.dense_local_expansion') != 'off' OR
+			current_setting('turbohybrid.native_segment_budget') != 'auto' OR
+			current_setting('turbohybrid.dense_build_distance') != 'auto' OR
 			current_setting('turbohybrid.dense_build_exact_distances') != 'off' THEN
-			RAISE EXCEPTION 'unexpected latency dense defaults: adaptive %, heap %, local %, exact build %',
+			RAISE EXCEPTION 'unexpected latency dense defaults: adaptive %, heap %, local %, segment budget %, build distance %, exact build %',
 				current_setting('turbohybrid.dense_adaptive_widening'),
 				current_setting('turbohybrid.dense_heap_rescore'),
 				current_setting('turbohybrid.dense_local_expansion'),
+				current_setting('turbohybrid.native_segment_budget'),
+				current_setting('turbohybrid.dense_build_distance'),
 				current_setting('turbohybrid.dense_build_exact_distances');
 		END IF;
 
@@ -268,6 +274,28 @@ BEGIN
 		turbohybrid_last_scan_stats()->>'auto_budget' != 'false' THEN
 		RAISE EXCEPTION 'unexpected quality internal defaults: %',
 			turbohybrid_last_scan_stats();
+	END IF;
+END
+$$;
+
+SET turbohybrid.profile = matched_recall;
+
+DO $$
+BEGIN
+	IF turbohybrid_query_out(turbohybrid_query(
+		vector_query => '[1,0,0]'::vector
+	))::text != 'turbohybrid_query(fusion=rrf,vector=true,tsquery=false,dense_weight=1,bm25_weight=1,alpha=null,rrf_k=60,dense_k=200,bm25_k=200,final_k=null,require_bm25_match=false)' THEN
+		RAISE EXCEPTION 'unexpected matched_recall profile defaults';
+	END IF;
+
+	IF current_setting('turbohybrid.bm25_strategy') != 'auto' OR
+		current_setting('turbohybrid.bm25_impact_or_mode') != 'exact_only' OR
+		current_setting('turbohybrid.bm25_hot_postings_cache_mb') != '16' OR
+		current_setting('turbohybrid.bm25_hybrid_bound') != 'safe' OR
+		current_setting('turbohybrid.bm25_accumulator_mode') != 'auto' OR
+		current_setting('turbohybrid.dense_adaptive_widening') != 'auto' OR
+		current_setting('turbohybrid.dense_adaptive_widening_max_multiplier') != '1.5' THEN
+		RAISE EXCEPTION 'unexpected matched_recall defaults';
 	END IF;
 END
 $$;

@@ -112,6 +112,7 @@ static const struct config_enum_entry pgturbohybrid_profile_options[] = {
 	{"latency", PGTURBOHYBRID_PROFILE_LATENCY, false},
 	{"balanced", PGTURBOHYBRID_PROFILE_BALANCED, false},
 	{"quality", PGTURBOHYBRID_PROFILE_QUALITY, false},
+	{"matched_recall", PGTURBOHYBRID_PROFILE_MATCHED_RECALL, false},
 	{"debug", PGTURBOHYBRID_PROFILE_DEBUG, false},
 	{NULL, 0, false}
 };
@@ -181,11 +182,26 @@ static const struct config_enum_entry pgturbohybrid_dense_build_neighbor_select_
 	{NULL, 0, false}
 };
 
+static const struct config_enum_entry pgturbohybrid_dense_build_distance_options[] = {
+	{"auto", PGTURBOHYBRID_DENSE_BUILD_DISTANCE_AUTO, false},
+	{"code", PGTURBOHYBRID_DENSE_BUILD_DISTANCE_CODE, false},
+	{"exact", PGTURBOHYBRID_DENSE_BUILD_DISTANCE_EXACT, false},
+	{NULL, 0, false}
+};
+
 static const struct config_enum_entry pgturbohybrid_native_cache_policy_options[] = {
 	{"auto", PGTURBOHYBRID_NATIVE_CACHE_POLICY_AUTO, false},
 	{"per_backend", PGTURBOHYBRID_NATIVE_CACHE_POLICY_PER_BACKEND, false},
 	{"off", PGTURBOHYBRID_NATIVE_CACHE_POLICY_OFF, false},
 	{"shared", PGTURBOHYBRID_NATIVE_CACHE_POLICY_SHARED, false},
+	{NULL, 0, false}
+};
+
+static const struct config_enum_entry pgturbohybrid_native_segment_budget_options[] = {
+	{"auto", PGTURBOHYBRID_NATIVE_SEGMENT_BUDGET_AUTO, false},
+	{"off", PGTURBOHYBRID_NATIVE_SEGMENT_BUDGET_OFF, false},
+	{"sqrt", PGTURBOHYBRID_NATIVE_SEGMENT_BUDGET_SQRT, false},
+	{"linear", PGTURBOHYBRID_NATIVE_SEGMENT_BUDGET_LINEAR, false},
 	{NULL, 0, false}
 };
 
@@ -201,6 +217,7 @@ static const struct config_enum_entry pgturbohybrid_dense_heap_rescore_options[]
 	{"off", PGTURBOHYBRID_DENSE_HEAP_RESCORE_OFF, false},
 	{"topk", PGTURBOHYBRID_DENSE_HEAP_RESCORE_TOPK, false},
 	{"band", PGTURBOHYBRID_DENSE_HEAP_RESCORE_BAND, false},
+	{"auto", PGTURBOHYBRID_DENSE_HEAP_RESCORE_AUTO, false},
 	{NULL, 0, false}
 };
 
@@ -233,6 +250,9 @@ typedef struct PgturbohybridProfileDefaults
 	int			autoBm25BudgetMin;
 	int			autoBm25BudgetMax;
 	bool		autoBm25BudgetDenseConfidence;
+	const char *denseAdaptiveWidening;
+	const char *denseAdaptiveWideningMultiplier;
+	const char *denseAdaptiveWideningMaxMultiplier;
 } PgturbohybridProfileDefaults;
 
 static relopt_enum_elt_def pgturbohybrid_routing_relopt_options[] = {
@@ -275,6 +295,8 @@ PgturbohybridProfileName(int profile)
 			return "balanced";
 		case PGTURBOHYBRID_PROFILE_QUALITY:
 			return "quality";
+		case PGTURBOHYBRID_PROFILE_MATCHED_RECALL:
+			return "matched_recall";
 		case PGTURBOHYBRID_PROFILE_DEBUG:
 			return "debug";
 		default:
@@ -536,6 +558,25 @@ PgturbohybridCheckBm25AccumulatorMode(int *newval, void **extra, GucSource sourc
 	return true;
 }
 
+static bool
+PgturbohybridCheckDenseBuildExactDistances(bool *newval, void **extra, GucSource source)
+{
+	pgturbohybrid_dense_build_exact_distances_user_set =
+		PgturbohybridGucSourceIsExplicit(source);
+	return true;
+}
+
+static bool
+PgturbohybridCheckDenseHeapRescore(int *newval, void **extra, GucSource source)
+{
+	if (*newval == PGTURBOHYBRID_DENSE_HEAP_RESCORE_AUTO)
+		pgturbohybrid_dense_heap_rescore_user_set = false;
+	else
+		pgturbohybrid_dense_heap_rescore_user_set =
+			PgturbohybridGucSourceIsExplicit(source);
+	return true;
+}
+
 static void
 PgturbohybridProfileDefaultsFor(int profile, PgturbohybridProfileDefaults *defaults)
 {
@@ -549,6 +590,9 @@ PgturbohybridProfileDefaultsFor(int profile, PgturbohybridProfileDefaults *defau
 	defaults->bm25HybridBound = PGTURBOHYBRID_BM25_HYBRID_BOUND_SAFE;
 	defaults->autoBudget = true;
 	defaults->autoBudgetLimitMultiplier = 10;
+	defaults->denseAdaptiveWidening = "off";
+	defaults->denseAdaptiveWideningMultiplier = "2.0";
+	defaults->denseAdaptiveWideningMaxMultiplier = "4.0";
 
 	switch ((PgturbohybridProfile) profile)
 	{
@@ -563,6 +607,9 @@ PgturbohybridProfileDefaultsFor(int profile, PgturbohybridProfileDefaults *defau
 			defaults->autoBm25BudgetMin = 64;
 			defaults->autoBm25BudgetMax = 200;
 			defaults->autoBm25BudgetDenseConfidence = true;
+			defaults->denseAdaptiveWidening = "auto";
+			defaults->denseAdaptiveWideningMultiplier = "1.5";
+			defaults->denseAdaptiveWideningMaxMultiplier = "1.5";
 			break;
 		case PGTURBOHYBRID_PROFILE_QUALITY:
 			defaults->denseK = 400;
@@ -580,6 +627,24 @@ PgturbohybridProfileDefaultsFor(int profile, PgturbohybridProfileDefaults *defau
 			defaults->autoBm25Budget = false;
 			defaults->autoBm25BudgetMin = 100;
 			defaults->autoBm25BudgetMax = 400;
+			defaults->denseAdaptiveWidening = "auto";
+			defaults->denseAdaptiveWideningMultiplier = "2.0";
+			defaults->denseAdaptiveWideningMaxMultiplier = "2.0";
+			break;
+		case PGTURBOHYBRID_PROFILE_MATCHED_RECALL:
+			defaults->denseK = 200;
+			defaults->bm25K = 200;
+			defaults->bm25HotPostingsCacheMb = 16;
+			defaults->autoBudgetMinDenseK = 64;
+			defaults->autoBudgetMinBm25K = 64;
+			defaults->autoBudgetQualityCap = 200;
+			defaults->autoBm25Budget = true;
+			defaults->autoBm25BudgetMin = 64;
+			defaults->autoBm25BudgetMax = 200;
+			defaults->autoBm25BudgetDenseConfidence = true;
+			defaults->denseAdaptiveWidening = "auto";
+			defaults->denseAdaptiveWideningMultiplier = "1.5";
+			defaults->denseAdaptiveWideningMaxMultiplier = "1.5";
 			break;
 		case PGTURBOHYBRID_PROFILE_DEBUG:
 			defaults->denseK = 400;
@@ -595,6 +660,9 @@ PgturbohybridProfileDefaultsFor(int profile, PgturbohybridProfileDefaults *defau
 			defaults->autoBm25Budget = false;
 			defaults->autoBm25BudgetMin = 100;
 			defaults->autoBm25BudgetMax = 400;
+			defaults->denseAdaptiveWidening = "auto";
+			defaults->denseAdaptiveWideningMultiplier = "2.0";
+			defaults->denseAdaptiveWideningMaxMultiplier = "2.0";
 			break;
 		case PGTURBOHYBRID_PROFILE_LATENCY:
 		default:
@@ -656,6 +724,12 @@ PgturbohybridApplyProfileDefaults(void)
 	pgturbohybrid_auto_bm25_budget_max = defaults.autoBm25BudgetMax;
 	pgturbohybrid_auto_bm25_budget_dense_confidence =
 		defaults.autoBm25BudgetDenseConfidence;
+	PgturbohybridSetDynamicDefaultString("turbohybrid.dense_adaptive_widening",
+										 defaults.denseAdaptiveWidening);
+	PgturbohybridSetDynamicDefaultString("turbohybrid.dense_adaptive_widening_multiplier",
+										 defaults.denseAdaptiveWideningMultiplier);
+	PgturbohybridSetDynamicDefaultString("turbohybrid.dense_adaptive_widening_max_multiplier",
+										 defaults.denseAdaptiveWideningMaxMultiplier);
 }
 
 static void
@@ -827,6 +901,8 @@ typedef struct PgturbohybridLastScanStats
 	uint64		graphHeapRescoreCount;
 	uint64		graphHeapFetchUs;
 	uint64		graphHeapRescoreUs;
+	bool		graphHeapRescoreAutoEnabled;
+	int			graphHeapRescoreReason;
 	int			graphExactRescoreSource;
 	uint64		graphPrepareUs;
 	uint64		graphTraverseUs;
@@ -1590,7 +1666,8 @@ static bool
 PgturbohybridProfileAllowsAdaptiveRrfK(void)
 {
 	return pgturbohybrid_profile == PGTURBOHYBRID_PROFILE_LATENCY ||
-		pgturbohybrid_profile == PGTURBOHYBRID_PROFILE_BALANCED;
+		pgturbohybrid_profile == PGTURBOHYBRID_PROFILE_BALANCED ||
+		pgturbohybrid_profile == PGTURBOHYBRID_PROFILE_MATCHED_RECALL;
 }
 
 static void
@@ -2545,6 +2622,7 @@ PgturbohybridCollectScanResults(IndexScanDesc scan, PgturbohybridScanState *stat
 	scanQuery = PgturbohybridEffectiveQuery(originalQuery, autoBudgetLimit, so->tmpCtx);
 	state->query = scanQuery;
 	hasLexicalKey = PgturbohybridIndexHasLexical(scan->indexRelation);
+	so->graphFinalK = PgturbohybridBudgetFinalTarget(scanQuery, autoBudgetLimit);
 
 	if (!hasLexicalKey &&
 		(scanQuery->flags & PGTURBOHYBRID_QUERY_FLAG_HAS_TSQUERY) != 0)
@@ -2838,6 +2916,9 @@ PgturbohybridCollectScanResults(IndexScanDesc scan, PgturbohybridScanState *stat
 	lastStats.graphHeapRescoreCount = denseStats.heapRescoreCount;
 	lastStats.graphHeapFetchUs = denseStats.heapFetchUs;
 	lastStats.graphHeapRescoreUs = denseStats.heapRescoreUs;
+	lastStats.graphHeapRescoreAutoEnabled =
+		denseStats.heapRescoreAutoEnabled;
+	lastStats.graphHeapRescoreReason = denseStats.heapRescoreReason;
 	lastStats.graphExactRescoreSource = denseStats.exactRescoreSource;
 	lastStats.graphPrepareUs = denseStats.prepareUs;
 	lastStats.graphTraverseUs = denseStats.traverseUs;
@@ -3638,7 +3719,9 @@ PgturbohybridInit(void)
 							 &pgturbohybrid_dense_heap_rescore,
 							 PGTURBOHYBRID_DENSE_HEAP_RESCORE_OFF,
 							 pgturbohybrid_dense_heap_rescore_options,
-							 PGC_USERSET, 0, NULL, NULL, NULL);
+							 PGC_USERSET, 0,
+							 PgturbohybridCheckDenseHeapRescore,
+							 NULL, NULL);
 	DefineCustomEnumVariable("turbohybrid.native_cache_policy",
 							 "Native dense graph cache policy",
 							 "Compatibility alias for turbohybrid.native_cache_scope.",
@@ -3666,14 +3749,30 @@ PgturbohybridInit(void)
 							   "auto", PGC_USERSET, 0,
 							   PgturbohybridNativeBuildWorkersCheck,
 							   NULL, NULL);
+	DefineCustomEnumVariable("turbohybrid.native_segment_budget",
+							 "Native dense graph segment search budget scaling",
+							 "auto scales search budget for segmented native graphs (sqrt by default, linear for quality/exact-build indexes); off preserves the raw search budget; sqrt and linear force explicit scaling modes for benchmarks.",
+							 &pgturbohybrid_native_segment_budget,
+							 PGTURBOHYBRID_NATIVE_SEGMENT_BUDGET_AUTO,
+							 pgturbohybrid_native_segment_budget_options,
+							 PGC_USERSET, 0, NULL, NULL, NULL);
+	DefineCustomEnumVariable("turbohybrid.dense_build_distance",
+							 "Dense graph build distance source",
+							 "auto uses exact f32 build distances for low-dimensional balanced/matched_recall/quality builds and compact code distances for latency/high-dimensional builds; code always builds graph edges in the quantized-code domain; exact uses original vectors during build without implying exact_storage.",
+							 &pgturbohybrid_dense_build_distance,
+							 PGTURBOHYBRID_DENSE_BUILD_DISTANCE_AUTO,
+							 pgturbohybrid_dense_build_distance_options,
+							 PGC_USERSET, 0, NULL, NULL, NULL);
 	DefineCustomBoolVariable("turbohybrid.dense_build_exact_distances",
 							 "(developer/benchmark) Use exact f32 vector distances while building dense graph edges",
-							 "This can improve graph topology for experiments without storing exact vectors at scan time.",
+							 "Compatibility override for turbohybrid.dense_build_distance. When explicitly set, on forces exact and off forces code.",
 							 &pgturbohybrid_dense_build_exact_distances,
-							 false, PGC_USERSET, 0, NULL, NULL, NULL);
+							 false, PGC_USERSET, 0,
+							 PgturbohybridCheckDenseBuildExactDistances,
+							 NULL, NULL);
 	DefineCustomEnumVariable("turbohybrid.dense_build_neighbor_select",
 							 "Dense graph neighbor selection during native graph builds",
-							 "fast keeps the latency-profile code-only simple edge selector; heuristic uses the diversified HNSW-style selector; auto uses fast for latency and heuristic for balanced/quality profiles.",
+							 "fast keeps the code-only simple edge selector; heuristic uses the diversified HNSW-style selector; auto uses heuristic for low-dimensional and balanced/matched_recall/quality builds, and fast for high-dimensional latency builds.",
 							 &pgturbohybrid_dense_build_neighbor_select,
 							 PGTURBOHYBRID_DENSE_BUILD_NEIGHBOR_SELECT_AUTO,
 							 pgturbohybrid_dense_build_neighbor_select_options,
@@ -3753,7 +3852,7 @@ PgturbohybridInit(void)
 							 pgturbohybrid_hybrid_budget_policy_options,
 							 PGC_USERSET, 0, NULL, NULL, NULL);
 	DefineCustomEnumVariable("turbohybrid.profile", "Default retrieval profile for pgturbohybrid",
-							 "Valid values are latency, balanced, quality, and debug.",
+							 "Valid values are latency, balanced, matched_recall, quality, and debug.",
 							 &pgturbohybrid_profile,
 							 PGTURBOHYBRID_PROFILE_LATENCY,
 							 pgturbohybrid_profile_options,
@@ -3827,6 +3926,8 @@ PgturbohybridHybridLastScanStats(PG_FUNCTION_ARGS)
 						 "\"heap_rescore_count\":" UINT64_FORMAT ","
 						 "\"heap_fetch_us\":" UINT64_FORMAT ","
 						 "\"heap_rescore_us\":" UINT64_FORMAT ","
+						 "\"heap_rescore_auto_enabled\":%s,"
+						 "\"heap_rescore_reason\":\"%s\","
 						 "\"exact_rescore_source\":\"%s\","
 						 "\"dense_prepare_us\":" UINT64_FORMAT ","
 					 "\"dense_traverse_us\":" UINT64_FORMAT ","
@@ -3974,6 +4075,8 @@ PgturbohybridHybridLastScanStats(PG_FUNCTION_ARGS)
 						 pgturbohybrid_last_scan_state.graphHeapRescoreCount,
 						 pgturbohybrid_last_scan_state.graphHeapFetchUs,
 						 pgturbohybrid_last_scan_state.graphHeapRescoreUs,
+						 pgturbohybrid_last_scan_state.graphHeapRescoreAutoEnabled ? "true" : "false",
+						 PgturbohybridGraphDenseHeapRescoreReasonName(pgturbohybrid_last_scan_state.graphHeapRescoreReason),
 						 PgturbohybridGraphExactRescoreSourceName(pgturbohybrid_last_scan_state.graphExactRescoreSource),
 						 pgturbohybrid_last_scan_state.graphPrepareUs,
 					 pgturbohybrid_last_scan_state.graphTraverseUs,

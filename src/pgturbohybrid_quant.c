@@ -59,11 +59,15 @@ static void PgturbohybridGraphEncodeBuildNode(PgturbohybridQuantBuildState *stat
 static void PgturbohybridGraphStreamFitVector(PgturbohybridQuantBuildState *state,
 								Vector *vector);
 static void PgturbohybridGraphFinishStreamingFit(PgturbohybridQuantBuildState *state);
+static bool PgturbohybridGraphUseExactBuildDistances(PgturbohybridQuantBuildState *state);
 static bool PgturbohybridGraphUseFastBuildEdges(PgturbohybridQuantBuildState *state);
 static int64 PgturbohybridGraphElapsedUs(instr_time start);
 
 #define PARALLEL_KEY_PGTURBOHYBRID_NATIVE_SHARED	UINT64CONST(0xA000000000000011)
 #define PARALLEL_KEY_PGTURBOHYBRID_NATIVE_QUERY		UINT64CONST(0xA000000000000012)
+#define PGTURBOHYBRID_GRAPH_AUTO_HEURISTIC_MAX_DIMENSIONS 256
+#define PGTURBOHYBRID_GRAPH_AUTO_EXACT_BUILD_MAX_DIMENSIONS 256
+#define PGTURBOHYBRID_GRAPH_AUTO_HEAP_RESCORE_MAX_DIMENSIONS 256
 
 typedef enum PgturbohybridNativeParallelPhase
 {
@@ -111,6 +115,8 @@ typedef struct PgturbohybridNativeParallelShared
 	uint32		recordCount;
 	uint32		recordCapacity;
 	Size		recordBytes;
+	Size		sharedBytes;
+	Size		recordsBytes;
 	Size		fitCountOffset;
 	Size		fitMeanOffset;
 	Size		fitM2Offset;
@@ -878,8 +884,12 @@ static PgturbohybridNativeParallelRecord *
 PgturbohybridNativeParallelRecordAt(PgturbohybridNativeParallelShared *shared,
 									uint32 row)
 {
+	Assert(row < shared->recordCapacity);
+	Assert(shared->recordBytes == MAXALIGN(shared->recordBytes));
+
 	return (PgturbohybridNativeParallelRecord *)
-		(PgturbohybridNativeParallelRecords(shared) + (Size) row * shared->recordBytes);
+		(PgturbohybridNativeParallelRecords(shared) +
+		 mul_size((Size) row, shared->recordBytes));
 }
 
 static uint8 *
@@ -1027,14 +1037,14 @@ PgturbohybridNativeParallelBuildCallback(Relation index, ItemPointer tid,
 			instr_time encodeEnd;
 
 			SpinLockAcquire(&shared->mutex);
-			row = shared->recordCount++;
-			if (row >= shared->recordCapacity)
+			if (shared->recordCount >= shared->recordCapacity)
 			{
 				shared->overflowed = true;
 				SpinLockRelease(&shared->mutex);
 				MemoryContextSwitchTo(oldCtx);
 				return;
 			}
+			row = shared->recordCount++;
 			SpinLockRelease(&shared->mutex);
 
 			record = PgturbohybridNativeParallelRecordAt(shared, row);
@@ -1085,12 +1095,13 @@ PgturbohybridNativeParallelFinishParticipant(PgturbohybridNativeParallelShared *
 		{
 			double	   *means = PgturbohybridNativeParallelFitMean(shared);
 			double	   *m2s = PgturbohybridNativeParallelFitM2(shared);
-			Size		offset = (Size) slot * shared->dimensions;
+			Size		offset = mul_size((Size) slot,
+										  (Size) shared->dimensions);
+			Size		fitBytes = mul_size(sizeof(double),
+											(Size) shared->dimensions);
 
-			memcpy(means + offset, state->fitMean,
-				   sizeof(double) * shared->dimensions);
-			memcpy(m2s + offset, state->fitM2,
-				   sizeof(double) * shared->dimensions);
+			memcpy(means + offset, state->fitMean, fitBytes);
+			memcpy(m2s + offset, state->fitM2, fitBytes);
 		}
 	}
 	encodeUs[slot] = state->parallelEncodeUs;
@@ -1729,21 +1740,97 @@ PgturbohybridGraphSelectNeighbors(PgturbohybridQuantBuildState *state, uint32 sr
 }
 
 static bool
+PgturbohybridGraphUseExactBuildDistances(PgturbohybridQuantBuildState *state)
+{
+	int			dimensions;
+	bool		useExact;
+
+	if (pgturbohybrid_dense_build_exact_distances_user_set)
+	{
+		useExact = pgturbohybrid_dense_build_exact_distances;
+		state->buildDistanceMode = useExact ?
+			PGTURBOHYBRID_DENSE_BUILD_DISTANCE_EXACT :
+			PGTURBOHYBRID_DENSE_BUILD_DISTANCE_CODE;
+		return useExact;
+	}
+
+	switch ((PgturbohybridDenseBuildDistance) pgturbohybrid_dense_build_distance)
+	{
+		case PGTURBOHYBRID_DENSE_BUILD_DISTANCE_CODE:
+			state->buildDistanceMode = PGTURBOHYBRID_DENSE_BUILD_DISTANCE_CODE;
+			return false;
+		case PGTURBOHYBRID_DENSE_BUILD_DISTANCE_EXACT:
+			state->buildDistanceMode = PGTURBOHYBRID_DENSE_BUILD_DISTANCE_EXACT;
+			return true;
+		case PGTURBOHYBRID_DENSE_BUILD_DISTANCE_AUTO:
+		default:
+			dimensions = TupleDescAttr(state->index->rd_att, 0)->atttypmod;
+			useExact = dimensions > 0 &&
+				dimensions <= PGTURBOHYBRID_GRAPH_AUTO_EXACT_BUILD_MAX_DIMENSIONS &&
+				(pgturbohybrid_profile == PGTURBOHYBRID_PROFILE_BALANCED ||
+				 pgturbohybrid_profile == PGTURBOHYBRID_PROFILE_QUALITY ||
+				 pgturbohybrid_profile == PGTURBOHYBRID_PROFILE_MATCHED_RECALL);
+			state->buildDistanceMode = useExact ?
+				PGTURBOHYBRID_DENSE_BUILD_DISTANCE_EXACT :
+				PGTURBOHYBRID_DENSE_BUILD_DISTANCE_CODE;
+			return useExact;
+	}
+}
+
+static bool
 PgturbohybridGraphUseFastBuildEdges(PgturbohybridQuantBuildState *state)
 {
-	if (!state->buildCodeOnly)
-		return false;
+	bool		useFast = false;
+	int			reason = PGTURBOHYBRID_BUILD_NEIGHBOR_SELECT_REASON_UNKNOWN;
 
 	switch ((PgturbohybridDenseBuildNeighborSelect) pgturbohybrid_dense_build_neighbor_select)
 	{
 		case PGTURBOHYBRID_DENSE_BUILD_NEIGHBOR_SELECT_FAST:
-			return true;
+			reason = PGTURBOHYBRID_BUILD_NEIGHBOR_SELECT_REASON_EXPLICIT_FAST;
+			useFast = true;
+			break;
 		case PGTURBOHYBRID_DENSE_BUILD_NEIGHBOR_SELECT_HEURISTIC:
-			return false;
+			reason = PGTURBOHYBRID_BUILD_NEIGHBOR_SELECT_REASON_EXPLICIT_HEURISTIC;
+			useFast = false;
+			break;
 		case PGTURBOHYBRID_DENSE_BUILD_NEIGHBOR_SELECT_AUTO:
 		default:
-			return pgturbohybrid_profile == PGTURBOHYBRID_PROFILE_LATENCY;
+			if (pgturbohybrid_profile == PGTURBOHYBRID_PROFILE_BALANCED)
+			{
+				reason = PGTURBOHYBRID_BUILD_NEIGHBOR_SELECT_REASON_AUTO_BALANCED;
+				useFast = false;
+			}
+			else if (pgturbohybrid_profile == PGTURBOHYBRID_PROFILE_QUALITY ||
+					 pgturbohybrid_profile == PGTURBOHYBRID_PROFILE_DEBUG)
+			{
+				reason = PGTURBOHYBRID_BUILD_NEIGHBOR_SELECT_REASON_AUTO_QUALITY;
+				useFast = false;
+			}
+			else if (pgturbohybrid_profile == PGTURBOHYBRID_PROFILE_MATCHED_RECALL)
+			{
+				reason = PGTURBOHYBRID_BUILD_NEIGHBOR_SELECT_REASON_AUTO_MATCHED_RECALL;
+				useFast = false;
+			}
+			else if (state->dimensions > 0 &&
+					 state->dimensions <= PGTURBOHYBRID_GRAPH_AUTO_HEURISTIC_MAX_DIMENSIONS)
+			{
+				reason = PGTURBOHYBRID_BUILD_NEIGHBOR_SELECT_REASON_AUTO_LOWDIM;
+				useFast = false;
+			}
+			else
+			{
+				reason = PGTURBOHYBRID_BUILD_NEIGHBOR_SELECT_REASON_AUTO_LATENCY_HIGHDIM;
+				useFast = true;
+			}
+			break;
 	}
+
+	state->buildNeighborSelectReason = reason;
+
+	if (!state->buildCodeOnly)
+		return false;
+
+	return useFast;
 }
 
 static double
@@ -2669,6 +2756,7 @@ PgturbohybridQuantUpdateMetaPage(Relation index, PgturbohybridQuantBuildState *s
 		metap->tqFlags |= PGTURBOHYBRID_GRAPH_TQ_BACKBONE;
 	if (state->buildFastEdges)
 		metap->tqFlags |= PGTURBOHYBRID_GRAPH_TQ_FAST_BUILD_EDGES;
+	metap->tqFlags |= PGTURBOHYBRID_GRAPH_TQ_BUILD_NEIGHBOR_REASON_BITS(state->buildNeighborSelectReason);
 	metap->tqBits = state->tqBits != 0 ? state->tqBits : PGTURBOHYBRID_DEFAULT_BITS;
 	metap->tqCodeStartBlkno = codeStart;
 	metap->tqAdjStartBlkno = adjStart;
@@ -3059,8 +3147,9 @@ PgturbohybridNativeParallelRecordBytes(PgturbohybridQuantBuildState *state)
 	bytes = add_size(bytes,
 					 PgturbohybridGraphCodeBytesForBits(state->dimensions,
 														state->tqBits));
-	bytes = add_size(bytes, MAXALIGN(state->residualRerankBytes));
-	return bytes;
+	bytes = MAXALIGN(bytes);
+	bytes = add_size(bytes, MAXALIGN((Size) state->residualRerankBytes));
+	return MAXALIGN(bytes);
 }
 
 static Size
@@ -3070,28 +3159,30 @@ PgturbohybridNativeParallelEstimateShared(PgturbohybridQuantBuildState *state,
 										  Size recordBytes)
 {
 	Size		bytes;
-	Size		dimSlots = (Size) participantCapacity * state->dimensions;
+	Size		participants = (Size) participantCapacity;
+	Size		dimensions = (Size) state->dimensions;
+	Size		dimSlots = mul_size(participants, dimensions);
 
 	bytes = add_size(BUFFERALIGN(sizeof(PgturbohybridNativeParallelShared)),
 					 table_parallelscan_estimate(state->heap, snapshot));
 	bytes = MAXALIGN(bytes);
-	bytes = add_size(bytes, MAXALIGN(sizeof(uint64) * participantCapacity));
-	bytes = add_size(bytes, MAXALIGN(sizeof(uint64) * participantCapacity));
-	bytes = add_size(bytes, MAXALIGN(sizeof(uint64) * participantCapacity));
+	bytes = add_size(bytes, MAXALIGN(mul_size(sizeof(uint64), participants)));
+	bytes = add_size(bytes, MAXALIGN(mul_size(sizeof(uint64), participants)));
+	bytes = add_size(bytes, MAXALIGN(mul_size(sizeof(uint64), participants)));
 	if (state->scoreMode == PGTURBOHYBRID_SCORE_COSINE ||
 		state->scoreMode == PGTURBOHYBRID_SCORE_IP)
 	{
-		bytes = add_size(bytes, MAXALIGN(sizeof(double) * dimSlots));
-		bytes = add_size(bytes, MAXALIGN(sizeof(double) * dimSlots));
+		bytes = add_size(bytes, MAXALIGN(mul_size(sizeof(double), dimSlots)));
+		bytes = add_size(bytes, MAXALIGN(mul_size(sizeof(double), dimSlots)));
 	}
 	if (phase == PGTURBOHYBRID_NATIVE_PARALLEL_ENCODE)
 	{
 		if (state->ecShift != NULL && state->ecScale != NULL)
 		{
-			bytes = add_size(bytes, MAXALIGN(sizeof(float) * state->dimensions));
-			bytes = add_size(bytes, MAXALIGN(sizeof(float) * state->dimensions));
+			bytes = add_size(bytes, MAXALIGN(mul_size(sizeof(float), dimensions)));
+			bytes = add_size(bytes, MAXALIGN(mul_size(sizeof(float), dimensions)));
 		}
-		bytes = add_size(bytes, mul_size(recordBytes, recordCapacity));
+		bytes = add_size(bytes, mul_size(recordBytes, (Size) recordCapacity));
 	}
 	return bytes;
 }
@@ -3105,8 +3196,13 @@ PgturbohybridNativeParallelInitShared(PgturbohybridQuantBuildState *state,
 									  Size sharedBytes)
 {
 	Size		cursor;
+	Size		participants = (Size) participantCapacity;
+	Size		dimensions = (Size) state->dimensions;
+	Size		participantUsBytes = MAXALIGN(mul_size(sizeof(uint64),
+													 participants));
 
 	memset(shared, 0, sharedBytes);
+	shared->sharedBytes = sharedBytes;
 	shared->heaprelid = RelationGetRelid(state->heap);
 	shared->indexrelid = RelationGetRelid(state->index);
 	shared->isconcurrent = state->indexInfo->ii_Concurrent;
@@ -3125,6 +3221,8 @@ PgturbohybridNativeParallelInitShared(PgturbohybridQuantBuildState *state,
 	shared->residualRerankBytes = state->residualRerankBytes;
 	shared->recordCapacity = recordCapacity;
 	shared->recordBytes = recordBytes;
+	shared->recordsBytes = phase == PGTURBOHYBRID_NATIVE_PARALLEL_ENCODE ?
+		mul_size(recordBytes, (Size) recordCapacity) : 0;
 	ConditionVariableInit(&shared->workersdonecv);
 	SpinLockInit(&shared->mutex);
 	table_parallelscan_initialize(state->heap,
@@ -3135,36 +3233,51 @@ PgturbohybridNativeParallelInitShared(PgturbohybridQuantBuildState *state,
 					  table_parallelscan_estimate(state->heap, snapshot));
 	cursor = MAXALIGN(cursor);
 	shared->fitCountOffset = cursor;
-	cursor = add_size(cursor, MAXALIGN(sizeof(uint64) * participantCapacity));
+	cursor = add_size(cursor, participantUsBytes);
 	shared->encodeUsOffset = cursor;
-	cursor = add_size(cursor, MAXALIGN(sizeof(uint64) * participantCapacity));
+	cursor = add_size(cursor, participantUsBytes);
 	shared->scanUsOffset = cursor;
-	cursor = add_size(cursor, MAXALIGN(sizeof(uint64) * participantCapacity));
+	cursor = add_size(cursor, participantUsBytes);
 	if (state->scoreMode == PGTURBOHYBRID_SCORE_COSINE ||
 		state->scoreMode == PGTURBOHYBRID_SCORE_IP)
 	{
-		Size		dimSlots = (Size) participantCapacity * state->dimensions;
+		Size		dimSlots = mul_size(participants, dimensions);
 
 		shared->fitMeanOffset = cursor;
-		cursor = add_size(cursor, MAXALIGN(sizeof(double) * dimSlots));
+		cursor = add_size(cursor,
+						  MAXALIGN(mul_size(sizeof(double), dimSlots)));
 		shared->fitM2Offset = cursor;
-		cursor = add_size(cursor, MAXALIGN(sizeof(double) * dimSlots));
+		cursor = add_size(cursor,
+						  MAXALIGN(mul_size(sizeof(double), dimSlots)));
 	}
 	if (phase == PGTURBOHYBRID_NATIVE_PARALLEL_ENCODE)
 	{
 		if (state->ecShift != NULL && state->ecScale != NULL)
 		{
+			Size		correctionBytes = mul_size(sizeof(float), dimensions);
+
 			shared->ecShiftOffset = cursor;
 			memcpy(PgturbohybridNativeParallelEcShift(shared), state->ecShift,
-				   sizeof(float) * state->dimensions);
-			cursor = add_size(cursor, MAXALIGN(sizeof(float) * state->dimensions));
+				   correctionBytes);
+			cursor = add_size(cursor, MAXALIGN(correctionBytes));
 			shared->ecScaleOffset = cursor;
 			memcpy(PgturbohybridNativeParallelEcScale(shared), state->ecScale,
-				   sizeof(float) * state->dimensions);
-			cursor = add_size(cursor, MAXALIGN(sizeof(float) * state->dimensions));
+				   correctionBytes);
+			cursor = add_size(cursor, MAXALIGN(correctionBytes));
 		}
 		shared->recordsOffset = cursor;
+		cursor = add_size(cursor, shared->recordsBytes);
 	}
+	if (cursor > sharedBytes)
+		ereport(ERROR,
+				(errcode(ERRCODE_PROGRAM_LIMIT_EXCEEDED),
+				 errmsg("pgturbohybrid native parallel build shared memory estimate was too small"),
+				 errdetail("required_bytes=%llu allocated_bytes=%llu record_capacity=%u record_bytes=%llu records_bytes=%llu",
+						   (unsigned long long) cursor,
+						   (unsigned long long) sharedBytes,
+						   recordCapacity,
+						   (unsigned long long) recordBytes,
+						   (unsigned long long) shared->recordsBytes)));
 }
 
 static void
@@ -3204,9 +3317,11 @@ PgturbohybridNativeParallelCombineFit(PgturbohybridQuantBuildState *state,
 	}
 
 	state->fitMean = MemoryContextAllocZero(state->ctx,
-											sizeof(double) * state->dimensions);
+											mul_size(sizeof(double),
+													 (Size) state->dimensions));
 	state->fitM2 = MemoryContextAllocZero(state->ctx,
-										  sizeof(double) * state->dimensions);
+										  mul_size(sizeof(double),
+												   (Size) state->dimensions));
 	for (int slot = 0; slot < shared->participantCapacity; slot++)
 	{
 		uint64		count = counts[slot];
@@ -3216,8 +3331,8 @@ PgturbohybridNativeParallelCombineFit(PgturbohybridQuantBuildState *state,
 
 		if (count == 0)
 			continue;
-		slotMean = means + (Size) slot * state->dimensions;
-		slotM2 = m2s + (Size) slot * state->dimensions;
+		slotMean = means + mul_size((Size) slot, (Size) state->dimensions);
+		slotM2 = m2s + mul_size((Size) slot, (Size) state->dimensions);
 		total = (double) totalCount + (double) count;
 		for (int dim = 0; dim < state->dimensions; dim++)
 		{
@@ -3244,7 +3359,13 @@ PgturbohybridNativeParallelMergeRecords(PgturbohybridQuantBuildState *state,
 	if (shared->overflowed || shared->recordCount > shared->recordCapacity)
 		ereport(ERROR,
 				(errcode(ERRCODE_PROGRAM_LIMIT_EXCEEDED),
-				 errmsg("pgturbohybrid native parallel build record area overflowed")));
+				 errmsg("pgturbohybrid native parallel build record area overflowed"),
+				 errdetail("record_count=%u record_capacity=%u record_bytes=%llu records_bytes=%llu shared_bytes=%llu",
+						   shared->recordCount,
+						   shared->recordCapacity,
+						   (unsigned long long) shared->recordBytes,
+						   (unsigned long long) shared->recordsBytes,
+						   (unsigned long long) shared->sharedBytes)));
 
 	qsort(records, shared->recordCount, shared->recordBytes,
 		  PgturbohybridNativeParallelRecordCompare);
@@ -3443,7 +3564,7 @@ tqgraphbuild(Relation heap, Relation index, IndexInfo *indexInfo)
 	state.graphBackbone = PgturbohybridGraphGetBackboneOption(index);
 	state.residualRerank = PgturbohybridGraphGetResidualRerankOption(index);
 	state.residualRerankBytes = PgturbohybridGraphGetResidualRerankBytes(index);
-	state.buildExactDistances = pgturbohybrid_dense_build_exact_distances;
+	state.buildExactDistances = PgturbohybridGraphUseExactBuildDistances(&state);
 	if (state.tqRenorm && state.tqBits >= PGTURBOHYBRID_DEFAULT_BITS)
 		ereport(NOTICE,
 				(errmsg("quantized renormalization has no measurable effect at quantization_bits = %d",
@@ -3458,7 +3579,8 @@ tqgraphbuild(Relation heap, Relation index, IndexInfo *indexInfo)
 	PgturbohybridGraphInitSupport(&state.support, index);
 	state.scoreMode = PgturbohybridGraphGetScoreMode(&state.support);
 	state.buildCodeOnly = PgturbohybridGraphCanBuildCodeOnly(&state);
-	state.buildFastEdges = PgturbohybridGraphUseFastBuildEdges(&state);
+	state.buildFastEdges = false;
+	state.buildNeighborSelectReason = PGTURBOHYBRID_BUILD_NEIGHBOR_SELECT_REASON_UNKNOWN;
 	needsCorrectionFit = state.scoreMode == PGTURBOHYBRID_SCORE_COSINE ||
 		state.scoreMode == PGTURBOHYBRID_SCORE_IP;
 	state.ctx = AllocSetContextCreate(CurrentMemoryContext,
@@ -3609,6 +3731,7 @@ tqgraphbuild(Relation heap, Relation index, IndexInfo *indexInfo)
 		PgturbohybridGraphDebugBuildPhaseDone(&state, "encode", phaseStart);
 	}
 
+	state.buildFastEdges = PgturbohybridGraphUseFastBuildEdges(&state);
 	PgturbohybridGraphDebugBuildPhaseStart(&state, "build_edges");
 	INSTR_TIME_SET_CURRENT(phaseStart);
 	edgeDistanceStart = state.buildDistanceCalls;
@@ -3706,6 +3829,8 @@ tqgraphbuild(Relation heap, Relation index, IndexInfo *indexInfo)
 		buildStats.exactStorage = state.tqExactStorage;
 		buildStats.buildCodeOnly = state.buildCodeOnly;
 		buildStats.buildFastEdges = state.buildFastEdges;
+		buildStats.buildDistanceMode = state.buildDistanceMode;
+		buildStats.buildNeighborSelectReason = state.buildNeighborSelectReason;
 		buildStats.buildDistanceCalls = state.buildDistanceCalls;
 		buildStats.buildDistanceQuerySplit = state.buildDistanceQuerySplit;
 		buildStats.buildDistancePacked = state.buildDistancePacked;
@@ -3785,7 +3910,7 @@ tqgraphbuildempty(Relation index)
 	state.graphBackbone = PgturbohybridGraphGetBackboneOption(index);
 	state.residualRerank = PgturbohybridGraphGetResidualRerankOption(index);
 	state.residualRerankBytes = PgturbohybridGraphGetResidualRerankBytes(index);
-	state.buildExactDistances = pgturbohybrid_dense_build_exact_distances;
+	state.buildExactDistances = PgturbohybridGraphUseExactBuildDistances(&state);
 	if (state.tqRenorm && state.tqBits >= PGTURBOHYBRID_DEFAULT_BITS)
 		ereport(NOTICE,
 				(errmsg("quantized renormalization has no measurable effect at quantization_bits = %d",
@@ -3871,6 +3996,10 @@ PgturbohybridGraphResetScan(PgturbohybridGraphScanOpaque so)
 	so->graphHeapRescoreCount = 0;
 	so->graphHeapFetchUs = 0;
 	so->graphHeapRescoreUs = 0;
+	so->graphHeapRescoreMode = PGTURBOHYBRID_DENSE_HEAP_RESCORE_OFF;
+	so->graphHeapRescoreReason =
+		PGTURBOHYBRID_DENSE_HEAP_RESCORE_REASON_UNKNOWN;
+	so->graphHeapRescoreAutoEnabled = false;
 	so->graphExactRescoreSource = PGTURBOHYBRID_EXACT_RESCORE_SOURCE_NONE;
 	so->graphPrepareUs = 0;
 	so->graphTraverseUs = 0;
@@ -3913,6 +4042,7 @@ PgturbohybridGraphResetScan(PgturbohybridGraphScanOpaque so)
 	so->hasInitialEffectiveEfSearch = false;
 	so->returnedRows = 0;
 	so->tupleTargetRows = -1;
+	so->graphFinalK = 0;
 	so->estimatedFilterSelectivity = -1.0;
 	memset(&so->tq, 0, sizeof(PgturbohybridGraphTqQuery));
 	MemoryContextReset(so->tmpCtx);
@@ -5345,39 +5475,202 @@ PgturbohybridGraphNormalizedGap(double best, double boundary)
 }
 
 static bool
+PgturbohybridGraphAutoAdaptiveWideningEligible(PgturbohybridGraphMetaPageData *meta,
+									bool exactFree, int64 finalTarget)
+{
+	if (meta == NULL || !exactFree)
+		return false;
+	if (meta->dimensions <= 0 || meta->dimensions > 256)
+		return false;
+	if (meta->tqBits > 4)
+		return false;
+	if (finalTarget <= 0 || finalTarget > 20)
+		return false;
+
+	switch ((PgturbohybridProfile) pgturbohybrid_profile)
+	{
+		case PGTURBOHYBRID_PROFILE_BALANCED:
+		case PGTURBOHYBRID_PROFILE_QUALITY:
+		case PGTURBOHYBRID_PROFILE_MATCHED_RECALL:
+		case PGTURBOHYBRID_PROFILE_DEBUG:
+			return true;
+		case PGTURBOHYBRID_PROFILE_LATENCY:
+		default:
+			return false;
+	}
+}
+
+static int
+PgturbohybridGraphEffectiveAdaptiveWideningMode(PgturbohybridGraphMetaPageData *meta,
+									 bool exactFree, int64 finalTarget)
+{
+	switch ((TqDenseAdaptiveWideningMode) pgturbohybrid_dense_adaptive_widening)
+	{
+		case PGTURBOHYBRID_DENSE_ADAPTIVE_WIDENING_ON:
+			return PGTURBOHYBRID_DENSE_ADAPTIVE_WIDENING_ON;
+		case PGTURBOHYBRID_DENSE_ADAPTIVE_WIDENING_AUTO:
+			return PgturbohybridGraphAutoAdaptiveWideningEligible(meta, exactFree,
+																  finalTarget) ?
+				PGTURBOHYBRID_DENSE_ADAPTIVE_WIDENING_AUTO :
+				PGTURBOHYBRID_DENSE_ADAPTIVE_WIDENING_OFF;
+		case PGTURBOHYBRID_DENSE_ADAPTIVE_WIDENING_OFF:
+		default:
+			return PGTURBOHYBRID_DENSE_ADAPTIVE_WIDENING_OFF;
+	}
+}
+
+static double
+PgturbohybridGraphEffectiveAdaptiveWideningMultiplier(void)
+{
+	double		profileCap = pgturbohybrid_dense_adaptive_widening_max_multiplier;
+
+	switch ((PgturbohybridProfile) pgturbohybrid_profile)
+	{
+		case PGTURBOHYBRID_PROFILE_BALANCED:
+		case PGTURBOHYBRID_PROFILE_MATCHED_RECALL:
+			profileCap = Min(profileCap, 1.5);
+			break;
+		case PGTURBOHYBRID_PROFILE_QUALITY:
+		case PGTURBOHYBRID_PROFILE_DEBUG:
+			profileCap = Min(profileCap, 2.0);
+			break;
+		case PGTURBOHYBRID_PROFILE_LATENCY:
+		default:
+			break;
+	}
+
+	return Max(1.0, Min(pgturbohybrid_dense_adaptive_widening_multiplier,
+						profileCap));
+}
+
+static double
+PgturbohybridGraphEffectiveAdaptiveWideningMaxMultiplier(void)
+{
+	switch ((PgturbohybridProfile) pgturbohybrid_profile)
+	{
+		case PGTURBOHYBRID_PROFILE_BALANCED:
+		case PGTURBOHYBRID_PROFILE_MATCHED_RECALL:
+			return Max(1.0, Min(pgturbohybrid_dense_adaptive_widening_max_multiplier,
+								1.5));
+		case PGTURBOHYBRID_PROFILE_QUALITY:
+		case PGTURBOHYBRID_PROFILE_DEBUG:
+			return Max(1.0, Min(pgturbohybrid_dense_adaptive_widening_max_multiplier,
+								2.0));
+		case PGTURBOHYBRID_PROFILE_LATENCY:
+		default:
+			return Max(1.0, pgturbohybrid_dense_adaptive_widening_max_multiplier);
+	}
+}
+
+static int64
+PgturbohybridGraphAdaptiveFinalTarget(PgturbohybridGraphScanOpaque so,
+						   int64 requestedBaseTarget)
+{
+	if (so != NULL && so->graphFinalK > 0)
+		return so->graphFinalK;
+	if (so != NULL && so->hasTupleTargetRows && so->tupleTargetRows > 0)
+		return so->tupleTargetRows;
+	return Min(requestedBaseTarget, (int64) PGTURBOHYBRID_DEFAULT_FINAL_K);
+}
+
+static int
+PgturbohybridGraphEffectiveSegmentBudgetMode(PgturbohybridGraphMetaPageData *meta)
+{
+	uint16		segmentCount = meta->tqSegmentCount > 0 ? meta->tqSegmentCount : 1;
+
+	if (segmentCount <= 1)
+		return PGTURBOHYBRID_NATIVE_SEGMENT_BUDGET_OFF;
+
+	switch ((PgturbohybridNativeSegmentBudgetMode) pgturbohybrid_native_segment_budget)
+	{
+		case PGTURBOHYBRID_NATIVE_SEGMENT_BUDGET_OFF:
+		case PGTURBOHYBRID_NATIVE_SEGMENT_BUDGET_SQRT:
+		case PGTURBOHYBRID_NATIVE_SEGMENT_BUDGET_LINEAR:
+			return pgturbohybrid_native_segment_budget;
+		case PGTURBOHYBRID_NATIVE_SEGMENT_BUDGET_AUTO:
+		default:
+			if (pgturbohybrid_profile == PGTURBOHYBRID_PROFILE_QUALITY ||
+				pgturbohybrid_profile == PGTURBOHYBRID_PROFILE_MATCHED_RECALL ||
+				(meta->tqFlags & PGTURBOHYBRID_GRAPH_TQ_EXACT_BUILD) != 0)
+				return PGTURBOHYBRID_NATIVE_SEGMENT_BUDGET_LINEAR;
+			return PGTURBOHYBRID_NATIVE_SEGMENT_BUDGET_SQRT;
+	}
+}
+
+static int
+PgturbohybridGraphScaleSearchEfForSegments(PgturbohybridGraphScanOpaque so,
+								PgturbohybridGraphMetaPageData *meta,
+								int searchEf)
+{
+	uint16		segmentCount = meta->tqSegmentCount > 0 ? meta->tqSegmentCount : 1;
+	int			mode = PgturbohybridGraphEffectiveSegmentBudgetMode(meta);
+	double		multiplier = 1.0;
+	int64		scaledSearchEf;
+
+	so->graphPerSegmentBudgetMode = mode;
+	so->graphSearchEfBeforeSegmentScaling = searchEf;
+
+	if (segmentCount <= 1 || mode == PGTURBOHYBRID_NATIVE_SEGMENT_BUDGET_OFF)
+	{
+		so->graphSearchEfAfterSegmentScaling = searchEf;
+		return searchEf;
+	}
+
+	if (mode == PGTURBOHYBRID_NATIVE_SEGMENT_BUDGET_LINEAR)
+		multiplier = (double) segmentCount;
+	else if (mode == PGTURBOHYBRID_NATIVE_SEGMENT_BUDGET_SQRT)
+		multiplier = sqrt((double) segmentCount);
+
+	scaledSearchEf = (int64) ceil((double) Max(searchEf, 1) * multiplier);
+	scaledSearchEf = Min(scaledSearchEf, (int64) meta->tqNodeCount);
+	scaledSearchEf = Min(scaledSearchEf, (int64) INT_MAX);
+	so->graphSearchEfAfterSegmentScaling = scaledSearchEf;
+	return (int) Max(scaledSearchEf, (int64) searchEf);
+}
+
+static bool
 PgturbohybridGraphShouldAdaptiveWiden(PgturbohybridGraphScanOpaque so,
 						   PgturbohybridGraphResult *results, int count,
-						   int resultTarget, int64 requestedBaseTarget)
+						   int resultTarget, int64 requestedBaseTarget,
+						   int adaptiveMode)
 {
 	double		threshold;
 	int			top10Index;
+	int			boundaryIndex;
+	int64		finalTarget;
 
-	so->graphAdaptiveWideningMode = pgturbohybrid_dense_adaptive_widening;
+	so->graphAdaptiveWideningMode = adaptiveMode;
 	so->graphAdaptiveInitialResultTarget = resultTarget;
 	so->graphAdaptiveFinalResultTarget = resultTarget;
 	so->graphAdaptiveTriggerReason = PGTURBOHYBRID_DENSE_ADAPTIVE_REASON_NONE;
 	so->graphAdaptiveGapTop10 = 0.0;
 	so->graphAdaptiveGapBoundary = 0.0;
 
-	if (pgturbohybrid_dense_adaptive_widening == PGTURBOHYBRID_DENSE_ADAPTIVE_WIDENING_OFF ||
+	if (adaptiveMode == PGTURBOHYBRID_DENSE_ADAPTIVE_WIDENING_OFF ||
 		resultTarget <= 0 || count <= 0)
 		return false;
 
+	finalTarget = PgturbohybridGraphAdaptiveFinalTarget(so, requestedBaseTarget);
 	top10Index = Min(count, 10) - 1;
 	so->graphAdaptiveGapTop10 =
 		PgturbohybridGraphNormalizedGap(results[0].distance,
 										 results[top10Index].distance);
-	so->graphAdaptiveGapBoundary =
-		PgturbohybridGraphNormalizedGap(results[0].distance,
-										 results[count - 1].distance);
+	boundaryIndex = (int) Min((int64) count - 1,
+							  Max((int64) 0, finalTarget - 1));
+	if (boundaryIndex + 1 < count)
+		so->graphAdaptiveGapBoundary =
+			PgturbohybridGraphNormalizedGap(results[boundaryIndex].distance,
+											 results[boundaryIndex + 1].distance);
+	else
+		so->graphAdaptiveGapBoundary = 0.0;
 
-	if (pgturbohybrid_dense_adaptive_widening == PGTURBOHYBRID_DENSE_ADAPTIVE_WIDENING_ON)
+	if (adaptiveMode == PGTURBOHYBRID_DENSE_ADAPTIVE_WIDENING_ON)
 	{
 		so->graphAdaptiveTriggerReason = PGTURBOHYBRID_DENSE_ADAPTIVE_REASON_FORCED;
 		return true;
 	}
 
-	if (count < Min(resultTarget, (int) Max(requestedBaseTarget, (int64) 1)))
+	if (count < resultTarget)
 	{
 		so->graphAdaptiveTriggerReason = PGTURBOHYBRID_DENSE_ADAPTIVE_REASON_UNDERFILLED;
 		return true;
@@ -5392,7 +5685,8 @@ PgturbohybridGraphShouldAdaptiveWiden(PgturbohybridGraphScanOpaque so,
 		return true;
 	}
 
-	if (count >= resultTarget && so->graphAdaptiveGapBoundary <= threshold * 4.0)
+	if (boundaryIndex + 1 < count &&
+		so->graphAdaptiveGapBoundary <= threshold * 4.0)
 	{
 		so->graphAdaptiveTriggerReason = PGTURBOHYBRID_DENSE_ADAPTIVE_REASON_FLAT_BOUNDARY;
 		return true;
@@ -5668,20 +5962,93 @@ PgturbohybridGraphApplyResidualRerank(PgturbohybridGraphScanOpaque so,
 }
 
 static int
+PgturbohybridGraphEffectiveHeapRescoreMode(PgturbohybridGraphScanOpaque so,
+							   PgturbohybridGraphMetaPageData *meta,
+							   bool exactFree)
+{
+	bool		lowDim = meta != NULL &&
+		meta->dimensions > 0 &&
+		meta->dimensions <= PGTURBOHYBRID_GRAPH_AUTO_HEAP_RESCORE_MAX_DIMENSIONS;
+
+	if (!exactFree)
+	{
+		so->graphHeapRescoreReason =
+			PGTURBOHYBRID_DENSE_HEAP_RESCORE_REASON_EXACT_STORAGE;
+		so->graphHeapRescoreAutoEnabled = false;
+		return PGTURBOHYBRID_DENSE_HEAP_RESCORE_OFF;
+	}
+
+	if (pgturbohybrid_dense_heap_rescore_user_set)
+	{
+		so->graphHeapRescoreAutoEnabled = false;
+		switch ((TqDenseHeapRescoreMode) pgturbohybrid_dense_heap_rescore)
+		{
+			case PGTURBOHYBRID_DENSE_HEAP_RESCORE_TOPK:
+				so->graphHeapRescoreReason =
+					PGTURBOHYBRID_DENSE_HEAP_RESCORE_REASON_EXPLICIT_TOPK;
+				break;
+			case PGTURBOHYBRID_DENSE_HEAP_RESCORE_BAND:
+				so->graphHeapRescoreReason =
+					PGTURBOHYBRID_DENSE_HEAP_RESCORE_REASON_EXPLICIT_BAND;
+				break;
+			case PGTURBOHYBRID_DENSE_HEAP_RESCORE_OFF:
+			default:
+				so->graphHeapRescoreReason =
+					PGTURBOHYBRID_DENSE_HEAP_RESCORE_REASON_EXPLICIT_OFF;
+				break;
+		}
+		return pgturbohybrid_dense_heap_rescore;
+	}
+
+	switch ((PgturbohybridProfile) pgturbohybrid_profile)
+	{
+		case PGTURBOHYBRID_PROFILE_BALANCED:
+			so->graphHeapRescoreReason = lowDim ?
+				PGTURBOHYBRID_DENSE_HEAP_RESCORE_REASON_PROFILE_BALANCED_LOWDIM :
+				PGTURBOHYBRID_DENSE_HEAP_RESCORE_REASON_PROFILE_BALANCED_HIGHDIM;
+			so->graphHeapRescoreAutoEnabled = lowDim;
+			return lowDim ? PGTURBOHYBRID_DENSE_HEAP_RESCORE_TOPK :
+				PGTURBOHYBRID_DENSE_HEAP_RESCORE_OFF;
+		case PGTURBOHYBRID_PROFILE_MATCHED_RECALL:
+			so->graphHeapRescoreReason = lowDim ?
+				PGTURBOHYBRID_DENSE_HEAP_RESCORE_REASON_PROFILE_MATCHED_RECALL_LOWDIM :
+				PGTURBOHYBRID_DENSE_HEAP_RESCORE_REASON_PROFILE_MATCHED_RECALL_HIGHDIM;
+			so->graphHeapRescoreAutoEnabled = lowDim;
+			return lowDim ? PGTURBOHYBRID_DENSE_HEAP_RESCORE_TOPK :
+				PGTURBOHYBRID_DENSE_HEAP_RESCORE_OFF;
+		case PGTURBOHYBRID_PROFILE_QUALITY:
+		case PGTURBOHYBRID_PROFILE_DEBUG:
+			so->graphHeapRescoreReason = lowDim ?
+				PGTURBOHYBRID_DENSE_HEAP_RESCORE_REASON_PROFILE_QUALITY_LOWDIM :
+				PGTURBOHYBRID_DENSE_HEAP_RESCORE_REASON_PROFILE_QUALITY_HIGHDIM;
+			so->graphHeapRescoreAutoEnabled = lowDim;
+			return lowDim ? PGTURBOHYBRID_DENSE_HEAP_RESCORE_TOPK :
+				PGTURBOHYBRID_DENSE_HEAP_RESCORE_OFF;
+		case PGTURBOHYBRID_PROFILE_LATENCY:
+		default:
+			so->graphHeapRescoreReason =
+				PGTURBOHYBRID_DENSE_HEAP_RESCORE_REASON_PROFILE_LATENCY;
+			so->graphHeapRescoreAutoEnabled = false;
+			return PGTURBOHYBRID_DENSE_HEAP_RESCORE_OFF;
+	}
+}
+
+static int
 PgturbohybridGraphHeapRescoreLimit(PgturbohybridGraphScanOpaque so, int count)
 {
 	int64		baseTarget;
 
 	if (count <= 0 ||
-		pgturbohybrid_dense_heap_rescore == PGTURBOHYBRID_DENSE_HEAP_RESCORE_OFF)
+		so->graphHeapRescoreMode == PGTURBOHYBRID_DENSE_HEAP_RESCORE_OFF)
 		return 0;
 
-	if (pgturbohybrid_dense_heap_rescore == PGTURBOHYBRID_DENSE_HEAP_RESCORE_BAND)
+	if (so->graphHeapRescoreMode == PGTURBOHYBRID_DENSE_HEAP_RESCORE_BAND)
 		return count;
 
-	baseTarget = so->hasTupleTargetRows ?
+	baseTarget = so->graphFinalK > 0 ?
+		so->graphFinalK : (so->hasTupleTargetRows ?
 		Max((int64) 1, so->tupleTargetRows) :
-		Max((int64) 1, so->graphDenseRequestedK);
+		(int64) PGTURBOHYBRID_DEFAULT_FINAL_K);
 	if (baseTarget <= 0)
 		baseTarget = PGTURBOHYBRID_DEFAULT_FINAL_K;
 
@@ -5798,6 +6165,7 @@ PgturbohybridGraphCollectResults(IndexScanDesc scan, PgturbohybridGraphScanOpaqu
 	bool		highDimL2Widened = false;
 	bool		latencyBudgetActive = false;
 	int64		requestedBaseTarget;
+	int			adaptiveMode;
 
 	INSTR_TIME_SET_CURRENT(totalStart);
 	INSTR_TIME_SET_CURRENT(phaseStart);
@@ -5814,7 +6182,20 @@ PgturbohybridGraphCollectResults(IndexScanDesc scan, PgturbohybridGraphScanOpaqu
 
 	exactFree = (meta.tqFlags & PGTURBOHYBRID_GRAPH_EXACT_FREE) != 0 ||
 		!BlockNumberIsValid(meta.tqExactStartBlkno);
+	so->graphM = meta.m;
+	so->graphEfConstruction = meta.efConstruction;
 	so->graphExactStorage = !exactFree;
+	so->graphBuildExactDistances =
+		(meta.tqFlags & PGTURBOHYBRID_GRAPH_TQ_EXACT_BUILD) != 0;
+	so->graphBuildDistanceMode = so->graphBuildExactDistances ?
+		PGTURBOHYBRID_DENSE_BUILD_DISTANCE_EXACT :
+		PGTURBOHYBRID_DENSE_BUILD_DISTANCE_CODE;
+	so->graphBuildFastEdges =
+		(meta.tqFlags & PGTURBOHYBRID_GRAPH_TQ_FAST_BUILD_EDGES) != 0;
+	so->graphBuildNeighborSelectReason =
+		PGTURBOHYBRID_GRAPH_TQ_BUILD_NEIGHBOR_REASON(meta.tqFlags);
+	so->graphHeapRescoreMode =
+		PgturbohybridGraphEffectiveHeapRescoreMode(so, &meta, exactFree);
 	PgturbohybridGraphPrepareTqQueryWithBits(scan->indexRelation, &so->support, query,
 							   &so->tq,
 							   meta.tqBits != 0 ? meta.tqBits : PGTURBOHYBRID_DEFAULT_BITS);
@@ -5946,6 +6327,7 @@ PgturbohybridGraphCollectResults(IndexScanDesc scan, PgturbohybridGraphScanOpaqu
 	resultTarget = Max(resultTarget, 1);
 	resultTarget = Min(resultTarget, (int) meta.tqNodeCount);
 	searchEf = Min(Max(effectiveEf, resultTarget), (int) meta.tqNodeCount);
+	searchEf = PgturbohybridGraphScaleSearchEfForSegments(so, &meta, searchEf);
 	so->graphEffectiveResultTarget = resultTarget;
 	so->graphEffectiveSearchEf = searchEf;
 	results = palloc(sizeof(PgturbohybridGraphResult) * resultTarget);
@@ -6042,15 +6424,19 @@ PgturbohybridGraphCollectResults(IndexScanDesc scan, PgturbohybridGraphScanOpaqu
 	so->graphAdaptiveFinalSearchEf = searchEf;
 	so->graphAdaptiveInitialResultTarget = resultTarget;
 	so->graphAdaptiveFinalResultTarget = resultTarget;
+	adaptiveMode =
+		PgturbohybridGraphEffectiveAdaptiveWideningMode(&meta, exactFree,
+														PgturbohybridGraphAdaptiveFinalTarget(so,
+																 requestedBaseTarget));
 	if (PgturbohybridGraphShouldAdaptiveWiden(so, results, count, resultTarget,
-								   requestedBaseTarget))
+								   requestedBaseTarget, adaptiveMode))
 	{
 		int64		adaptiveTarget =
 			(int64) ceil((double) resultTarget *
-						 pgturbohybrid_dense_adaptive_widening_multiplier);
+						 PgturbohybridGraphEffectiveAdaptiveWideningMultiplier());
 		int64		adaptiveMax =
 			(int64) ceil((double) resultTarget *
-						 pgturbohybrid_dense_adaptive_widening_max_multiplier);
+						 PgturbohybridGraphEffectiveAdaptiveWideningMaxMultiplier());
 		int64		scanCap = pgturbohybrid_max_scan_tuples > 0 ?
 			(int64) pgturbohybrid_max_scan_tuples : (int64) meta.tqNodeCount;
 		int			wideTarget;
@@ -6254,6 +6640,9 @@ PgturbohybridGraphCollectDenseCandidates(IndexScanDesc scan, int targetK,
 			stats->denseCandidatesReturned = limit;
 			stats->exactRescoreCount = so->graphRescoreCount;
 			stats->heapRescoreCount = so->graphHeapRescoreCount;
+			stats->heapRescoreAutoEnabled =
+				so->graphHeapRescoreAutoEnabled;
+			stats->heapRescoreReason = so->graphHeapRescoreReason;
 			stats->codePagesRead = so->graphCodePagesRead;
 			stats->adjPagesRead = so->graphAdjPagesRead;
 			stats->prepareUs = so->graphPrepareUs;

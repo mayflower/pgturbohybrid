@@ -2100,7 +2100,7 @@ def main() -> None:
     parser.add_argument("--failure-probe-k", type=int, default=0,
                         help="optional deeper result depth used only for source-row failure attribution")
     parser.add_argument("--profile", default="latency",
-                        choices=("balanced", "latency", "quality", "debug"))
+                        choices=("balanced", "latency", "quality", "matched_recall", "debug"))
     parser.add_argument("--hnsw-ef-search", type=int, default=100)
     parser.add_argument("--max-docs", type=int, default=0,
                         help="deterministic corpus subset size; 0 loads the full 1M corpus")

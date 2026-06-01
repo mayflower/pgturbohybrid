@@ -1013,7 +1013,7 @@ def main() -> None:
     parser.add_argument("--bm25-k", type=int, default=400)
     parser.add_argument("--final-k", type=int, default=10)
     parser.add_argument("--profile", default="balanced",
-                        choices=("balanced", "latency", "quality", "debug"))
+                        choices=("balanced", "latency", "quality", "matched_recall", "debug"))
     parser.add_argument("--budget-matrix", action="store_true",
                         help="run dense/bm25 budget variants 50/50, 100/100, and 400/400")
     parser.add_argument("--max-docs", type=int, default=0,

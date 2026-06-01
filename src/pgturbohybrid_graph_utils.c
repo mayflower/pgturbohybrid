@@ -35,6 +35,8 @@
 #endif
 
 #include "storage/bufmgr.h"
+#include "utils/array.h"
+#include "utils/builtins.h"
 #include "utils/datum.h"
 #include "utils/lsyscache.h"
 #include "utils/memdebug.h"
@@ -530,6 +532,68 @@ PgturbohybridGraphAmOidUsesNativeTqGraph(Oid amoid)
 	return result;
 }
 
+static bool
+PgturbohybridGraphReloptionSpecified(Relation index, const char *name)
+{
+	HeapTuple	reltuple;
+	Datum		reloptions;
+	bool		isnull;
+	ArrayType  *array;
+	Datum	   *elems;
+	bool	   *nulls;
+	int			nelems;
+	int			i;
+	bool		found = false;
+
+	if (index == NULL || !OidIsValid(RelationGetRelid(index)))
+		return false;
+
+	reltuple = SearchSysCache1(RELOID, ObjectIdGetDatum(RelationGetRelid(index)));
+	if (!HeapTupleIsValid(reltuple))
+		return false;
+
+	reloptions = SysCacheGetAttr(RELOID, reltuple, Anum_pg_class_reloptions, &isnull);
+	if (isnull)
+	{
+		ReleaseSysCache(reltuple);
+		return false;
+	}
+
+	array = DatumGetArrayTypeP(reloptions);
+	deconstruct_array(array, TEXTOID, -1, false, TYPALIGN_INT,
+					  &elems, &nulls, &nelems);
+
+	for (i = 0; i < nelems; i++)
+	{
+		char	   *option;
+		char	   *equals;
+		Size		namelen;
+
+		if (nulls[i])
+			continue;
+
+		option = TextDatumGetCString(elems[i]);
+		equals = strchr(option, '=');
+		namelen = equals != NULL ? (Size) (equals - option) : strlen(option);
+
+		if (strlen(name) == namelen && strncmp(option, name, namelen) == 0)
+			found = true;
+
+		pfree(option);
+
+		if (found)
+			break;
+	}
+
+	pfree(elems);
+	pfree(nulls);
+	if ((Pointer) array != DatumGetPointer(reloptions))
+		pfree(array);
+	ReleaseSysCache(reltuple);
+
+	return found;
+}
+
 /*
  * Get the max number of connections in an upper layer for each element in the index
  */
@@ -555,7 +619,7 @@ PgturbohybridGraphGetEfConstruction(Relation index)
 {
 	PgturbohybridGraphOptions *opts = (PgturbohybridGraphOptions *) index->rd_options;
 
-	if (opts)
+	if (opts && PgturbohybridGraphReloptionSpecified(index, "graph_ef_construction"))
 		return opts->efConstruction;
 
 	if (PgturbohybridGraphIspgturbohybridIndex(index))
@@ -564,6 +628,7 @@ PgturbohybridGraphGetEfConstruction(Relation index)
 		{
 			case PGTURBOHYBRID_PROFILE_QUALITY:
 				return 256;
+			case PGTURBOHYBRID_PROFILE_MATCHED_RECALL:
 			case PGTURBOHYBRID_PROFILE_BALANCED:
 				return 192;
 			case PGTURBOHYBRID_PROFILE_DEBUG:
@@ -574,6 +639,9 @@ PgturbohybridGraphGetEfConstruction(Relation index)
 		}
 		return PGTURBOHYBRID_DEFAULT_GRAPH_EF_CONSTRUCTION;
 	}
+
+	if (opts)
+		return opts->efConstruction;
 
 	return PGTURBOHYBRID_GRAPH_DEFAULT_EF_CONSTRUCTION;
 }
@@ -818,13 +886,15 @@ PgturbohybridGraphGetEfSearch(Relation index)
 	{
 		TqOptions  *opts = (TqOptions *) index->rd_options;
 
-		if (opts)
+		if (opts && PgturbohybridGraphReloptionSpecified(index, "graph_ef_search"))
 			return opts->graphEfSearch;
 
 		switch ((PgturbohybridProfile) pgturbohybrid_profile)
 		{
 			case PGTURBOHYBRID_PROFILE_QUALITY:
 				return 192;
+			case PGTURBOHYBRID_PROFILE_MATCHED_RECALL:
+				return 128;
 			case PGTURBOHYBRID_PROFILE_BALANCED:
 				return 96;
 			case PGTURBOHYBRID_PROFILE_DEBUG:
@@ -846,12 +916,13 @@ PgturbohybridGraphGetGraphOversampling(Relation index)
 	{
 		TqOptions  *opts = (TqOptions *) index->rd_options;
 
-		if (opts)
+		if (opts && PgturbohybridGraphReloptionSpecified(index, "graph_oversampling"))
 			return opts->graphOversampling;
 
 		switch ((PgturbohybridProfile) pgturbohybrid_profile)
 		{
 			case PGTURBOHYBRID_PROFILE_QUALITY:
+			case PGTURBOHYBRID_PROFILE_MATCHED_RECALL:
 				return 8;
 			case PGTURBOHYBRID_PROFILE_BALANCED:
 			case PGTURBOHYBRID_PROFILE_DEBUG:
@@ -897,14 +968,25 @@ PgturbohybridGraphGetNativeSegments(Relation index)
 {
 	TqOptions  *opts;
 	int			segments;
+	bool		qualitySensitive;
 
 	if (!PgturbohybridGraphIspgturbohybridIndex(index))
 		return 1;
 
 	opts = (TqOptions *) index->rd_options;
 	segments = opts != NULL ? opts->nativeSegments : 1;
+	qualitySensitive =
+		pgturbohybrid_profile == PGTURBOHYBRID_PROFILE_QUALITY ||
+		pgturbohybrid_profile == PGTURBOHYBRID_PROFILE_MATCHED_RECALL ||
+		pgturbohybrid_dense_build_distance == PGTURBOHYBRID_DENSE_BUILD_DISTANCE_EXACT ||
+		(pgturbohybrid_dense_build_exact_distances_user_set &&
+		 pgturbohybrid_dense_build_exact_distances);
 	if (segments == 0)
+	{
+		if (qualitySensitive)
+			return 1;
 		segments = Max(1, max_parallel_maintenance_workers);
+	}
 
 	return Max(1, Min(segments, PGTURBOHYBRID_GRAPH_MAX_NATIVE_SEGMENTS));
 }

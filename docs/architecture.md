@@ -139,15 +139,17 @@ their `pg_settings` description, so the category is visible from `SHOW` /
 ### Stable public
 
 Stable names and semantics -- this is the supported tuning surface. The
-`latency` / `balanced` / `quality` profiles set sensible defaults for these, so
-override only for a specific need.
+`latency` / `balanced` / `matched_recall` / `quality` profiles set sensible
+defaults for these, so override only for a specific need.
 
 - `turbohybrid.profile`: retrieval profile. Current values are `latency`,
-  `balanced`, `quality`, and `debug`; the default profile is `latency`.
-  `latency` keeps the compact 4-bit code-only graph fast path. `balanced` and
-  `quality` use larger default graph/search windows and heuristic dense
-  neighbor selection for new indexes when index reloptions do not override
-  those values.
+  `balanced`, `matched_recall`, `quality`, and `debug`; the default profile is
+  `latency`. `latency` is the smallest/fastest compact 4-bit profile.
+  `matched_recall` is the compact exact-free profile intended for comparisons
+  against full-vector HNSW defaults in pgvector/Qdrant. `quality` is stronger
+  but slower. `balanced`, `matched_recall`, and `quality` use larger default
+  graph/search windows and heuristic dense neighbor selection for new indexes
+  when index reloptions do not override those values.
 - `turbohybrid.default_dense_k`, `turbohybrid.default_bm25_k`,
   `turbohybrid.default_rrf_k`: default dense/BM25 candidate budgets and the RRF
   fusion constant for `turbohybrid_query` callers.
@@ -185,14 +187,24 @@ predictable.
 - `turbohybrid.dense_rescore_band`: exact f32 rescore policy (`auto`, `off`,
   `exact`, `limited`); the latency profile resolves to exact-free for 4-bit
   code-only indexes.
-- `turbohybrid.dense_heap_rescore`: exact-free heap rescore policy (`off`,
-  `topk`, `band`; default `off`). `topk`/`band` fetch candidate heap tuples by
-  TID, read the indexed vector column, and compute exact vector distance with
-  the existing exact SIMD kernels. This improves precision without
-  `exact_storage = on`, but pays heap I/O at query time.
+- `turbohybrid.dense_heap_rescore`: exact-free heap rescore policy (`auto`,
+  `off`, `topk`, `band`). `topk` fetches only final-k heap tuples; `band`
+  fetches the full candidate band. Both read the indexed vector column and
+  compute exact vector distance with the existing exact SIMD kernels. The
+  default setting is `off`, which resolves to off in the `latency` profile when
+  it has not been explicitly set; use `auto` to force profile-driven behavior.
+  `balanced`, `matched_recall`, and `quality` may resolve to `topk` for
+  low-dimensional exact-free indexes. Explicit `off`, `topk`, and `band` values
+  always override profile defaults.
 - `turbohybrid.dense_adaptive_widening` (`off` / `auto` / `on`, default `off`):
-  controls one bounded second graph-search pass for ambiguous dense-only scans,
-  tuned by `turbohybrid.dense_adaptive_widening_multiplier`,
+  controls one bounded second graph-search pass for ambiguous dense-only scans.
+  The `latency` profile resolves `auto` to off. `balanced`, `matched_recall`,
+  and `quality` may resolve `auto` to one extra pass for low-dimensional
+  (`<= 256`) exact-free 4-bit indexes when `final_k <= 20` and the top-10 gap,
+  final-k boundary gap, or filled candidate band says the query is ambiguous.
+  The default cap is conservative: `balanced` and `matched_recall` widen by at
+  most 1.5x and `quality` widens by at most 2.0x.
+  The knobs are `turbohybrid.dense_adaptive_widening_multiplier`,
   `turbohybrid.dense_adaptive_widening_max_multiplier`, and
   `turbohybrid.dense_adaptive_min_gap`.
 - `turbohybrid.dense_local_expansion` (`off` / `auto` / `on`, default `off`):
@@ -229,13 +241,24 @@ setting these does not improve production performance, and they are tagged
 - `turbohybrid.dense_build_exact_distances`: use exact f32 vector distances while
   building dense graph edges, while still allowing `exact_storage = off`. Can
   improve graph topology for experiments without storing exact vectors at scan
-  time.
+  time. This is a compatibility override for `turbohybrid.dense_build_distance`.
+- `turbohybrid.dense_build_distance`: controls the distance source used while
+  building dense graph topology. `code` builds in the compact quantized-code
+  domain. `exact` keeps original vectors only during graph construction and
+  frees them before writing compact indexes when `exact_storage = off`. `auto`
+  uses exact build distances for low-dimensional (`dimensions <= 256`)
+  `balanced`, `matched_recall`, and `quality` builds, and code-domain build
+  distances for latency or high-dimensional builds. Use
+  `benchmarks/glove100_recall_latency_grid.sql` to measure the build-time,
+  index-size, precision, and p95 cost before promoting a build-distance setting
+  for a workload.
 - `turbohybrid.dense_build_neighbor_select`: dense graph neighbor selection for
   native graph builds. `fast` uses the simple nearest-neighbor selector used by
-  the latency profile's code-only build path. `heuristic` uses the diversified
-  HNSW-style selector even when the build can encode vectors code-only. `auto`
-  keeps `fast` for `latency` and uses `heuristic` for `balanced`, `quality`, and
-  `debug`.
+  the code-only build path. `heuristic` uses the diversified HNSW-style selector
+  even when the build can encode vectors code-only. `auto` uses `heuristic` for
+  low-dimensional indexes (`dimensions <= 256`) and for `balanced`,
+  `matched_recall`, `quality`, and `debug`; it uses `fast` only for
+  high-dimensional latency-profile builds.
 
 The batch scorer adapts its prefetch to index size automatically (no GUC). Once
 the estimated code working set (`tqNodeCount * codeBytes`) exceeds 64 MB -- large
@@ -268,11 +291,15 @@ strategy knobs, hot postings cache, hybrid bound mode, and SIMD setting unless a
 GUC has been explicitly set by the user. During dense index builds without
 explicit graph reloptions, the profile also selects graph construction/search
 defaults: `latency` uses `ef_construction=128`, `ef_search=64`,
-`oversampling=4`, and fast build edges; `balanced` uses
+`oversampling=4`, and heuristic build edges for low-dimensional indexes while
+keeping fast build edges for high-dimensional latency builds; `balanced` uses
 `ef_construction=192`, `ef_search=96`, `oversampling=4`, and heuristic build
-edges; `quality` uses `ef_construction=256`, `ef_search=192`,
-`oversampling=8`, and heuristic build edges. The latency profile is the default
-fast path documented in the README and setup guide.
+edges; `matched_recall` uses `ef_construction=192`, `ef_search=128`,
+`oversampling=8`, heuristic build edges, low-dimensional exact build distances,
+and final top-k heap rescore for exact-free indexes; `quality` uses
+`ef_construction=256`, `ef_search=192`, `oversampling=8`, and heuristic build
+edges. The latency profile is the default fast path documented in the README
+and setup guide.
 
 Reloptions are scoped to the `turbohybrid` index access method, but should
 still use stable descriptive names. The current alpha reloptions are:
@@ -284,14 +311,16 @@ still use stable descriptive names. The current alpha reloptions are:
 - `graph_oversampling`: graph candidate oversampling multiplier. Default: `4`.
 - `native_segments`: number of independent native dense graph segments to build.
   Valid values are `1`, `2`, `4`, `8`, and `auto`. Default: `1` for
-  single-graph compatibility. `auto` currently resolves from PostgreSQL's
-  parallel maintenance worker setting and is capped internally. More segments
-  can reduce build-edge work, but scans seed all segment entries and merge one
-  candidate set, so measure recall and latency together.
+  single-graph compatibility. `auto` resolves from PostgreSQL's parallel
+  maintenance worker setting and is capped internally, except quality-sensitive
+  builds (`profile = matched_recall`, `profile = quality`, or explicit exact
+  build distances) resolve auto to one segment. More segments can reduce
+  build-edge work, but they are a build/concurrency lever: query search must
+  scale the segment budget or recall can drop.
 - `quantization_bits`: quantized dense-vector code width. Default: `4`.
 - `exact_storage`: store exact vectors in the index for final exact rescoring.
-  Default: `off`. When it is off, users can instead benchmark
-  `turbohybrid.dense_heap_rescore = topk|band` or residual sketches as explicit
+  Default: `off`. When it is off, users can instead benchmark profile-driven or
+  explicit `turbohybrid.dense_heap_rescore = topk|band` and residual sketches as
   query-time quality paths.
 - `routing`: dense routing mode. Default: `auto`; current values are `auto`,
   `graph`, and `flat`.

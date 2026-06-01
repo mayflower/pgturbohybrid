@@ -596,7 +596,7 @@ def add_args(parser: argparse.ArgumentParser) -> None:
                         help="use CREATE INDEX instead of CREATE INDEX CONCURRENTLY")
     parser.add_argument("--no-analyze", action="store_true")
     parser.add_argument("--text-search-config", default="english")
-    parser.add_argument("--profile", default="latency", choices=("balanced", "latency", "quality", "debug"))
+    parser.add_argument("--profile", default="latency", choices=("balanced", "latency", "quality", "matched_recall", "debug"))
     parser.add_argument("--dense-k", type=int, default=100)
     parser.add_argument("--bm25-k", type=int, default=100)
     parser.add_argument("--rrf-k", type=int, default=RRF_K)

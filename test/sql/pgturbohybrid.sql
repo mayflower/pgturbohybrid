@@ -97,8 +97,10 @@ BEGIN
 		(stats->>'bm25_branch_available')::boolean IS DISTINCT FROM true OR
 		(stats->>'bm25_document_count')::int <> 4 OR
 		(stats->>'quantization_bits')::int <> 4 OR
-		stats->>'build_neighbor_select' <> 'fast' OR
-		(stats->>'build_fast_edges')::boolean IS DISTINCT FROM true OR
+		stats->>'dense_build_distance_mode' <> 'code' OR
+		stats->>'build_neighbor_select' <> 'heuristic' OR
+		stats->>'build_neighbor_select_reason' <> 'auto_lowdim' OR
+		(stats->>'build_fast_edges')::boolean IS DISTINCT FROM false OR
 		(stats->>'entry_sidecar_count')::int <> 0 OR
 		(stats->>'residual_rerank_bytes')::int <> 0 OR
 		(stats->>'dense_build_exact_distances')::boolean IS DISTINCT FROM false OR
@@ -156,6 +158,10 @@ BEGIN
 
 	stats := turbohybrid_last_scan_stats();
 	IF (stats->>'graph_segment_count')::int <> 2 OR
+		(stats->>'native_segments')::int <> 2 OR
+		stats->>'per_segment_budget_mode' <> 'sqrt' OR
+		(stats->>'effective_search_ef_after_segment_scaling')::int <
+			(stats->>'effective_search_ef_before_segment_scaling')::int OR
 		(stats->>'graph_segments_searched')::int <> 2 THEN
 		RAISE EXCEPTION 'unexpected segmented scan stats: %', stats;
 	END IF;
@@ -231,8 +237,12 @@ DO $$
 DECLARE
 	latency_stats jsonb;
 	balanced_stats jsonb;
+	matched_recall_stats jsonb;
 	quality_stats jsonb;
 	forced_fast_stats jsonb;
+	forced_heuristic_stats jsonb;
+	highdim_stats jsonb;
+	scan_count int;
 BEGIN
 	EXECUTE 'CREATE TEMP TABLE tqh_profile_docs (id int, embedding vector(3)) ON COMMIT DROP';
 	EXECUTE $SQL$
@@ -249,8 +259,11 @@ BEGIN
 	EXECUTE 'CREATE INDEX tqh_profile_latency_idx ON tqh_profile_docs USING turbohybrid (embedding vector_cosine_turbohybrid_ops)';
 	EXECUTE 'SELECT turbohybrid_index_stats(''tqh_profile_latency_idx''::regclass)' INTO latency_stats;
 
-	IF latency_stats->>'build_neighbor_select' <> 'fast' OR
-		(latency_stats->>'build_fast_edges')::boolean IS DISTINCT FROM true OR
+	IF latency_stats->>'build_neighbor_select' <> 'heuristic' OR
+		latency_stats->>'build_neighbor_select_reason' <> 'auto_lowdim' OR
+		(latency_stats->>'build_fast_edges')::boolean IS DISTINCT FROM false OR
+		(latency_stats->>'dense_build_exact_distances')::boolean IS DISTINCT FROM false OR
+		latency_stats->>'dense_build_distance_mode' <> 'code' OR
 		(latency_stats->>'graph_ef_construction')::int <> 128 OR
 		(latency_stats->>'graph_ef_search')::int <> 64 OR
 		(latency_stats->>'graph_oversampling')::int <> 4 THEN
@@ -262,11 +275,71 @@ BEGIN
 	EXECUTE 'SELECT turbohybrid_index_stats(''tqh_profile_balanced_idx''::regclass)' INTO balanced_stats;
 
 	IF balanced_stats->>'build_neighbor_select' <> 'heuristic' OR
+		balanced_stats->>'build_neighbor_select_reason' <> 'auto_balanced' OR
 		(balanced_stats->>'build_fast_edges')::boolean IS DISTINCT FROM false OR
+		(balanced_stats->>'dense_build_exact_distances')::boolean IS DISTINCT FROM true OR
+		balanced_stats->>'dense_build_distance_mode' <> 'exact' OR
 		(balanced_stats->>'graph_ef_construction')::int <> 192 OR
 		(balanced_stats->>'graph_ef_search')::int <> 96 OR
 		(balanced_stats->>'graph_oversampling')::int <> 4 THEN
 		RAISE EXCEPTION 'unexpected balanced profile build stats: %', balanced_stats;
+	END IF;
+
+	PERFORM set_config('turbohybrid.profile', 'matched_recall', true);
+	EXECUTE 'CREATE INDEX tqh_profile_matched_recall_idx ON tqh_profile_docs USING turbohybrid (embedding vector_cosine_turbohybrid_ops)';
+	EXECUTE 'SELECT turbohybrid_index_stats(''tqh_profile_matched_recall_idx''::regclass)' INTO matched_recall_stats;
+
+	IF matched_recall_stats->>'profile' <> 'matched_recall' OR
+		matched_recall_stats->>'build_neighbor_select' <> 'heuristic' OR
+		matched_recall_stats->>'build_neighbor_select_reason' <> 'auto_matched_recall' OR
+		(matched_recall_stats->>'build_fast_edges')::boolean IS DISTINCT FROM false OR
+		(matched_recall_stats->>'dense_build_exact_distances')::boolean IS DISTINCT FROM true OR
+		matched_recall_stats->>'dense_build_distance_mode' <> 'exact' OR
+		(matched_recall_stats->>'graph_ef_construction')::int <> 192 OR
+		(matched_recall_stats->>'graph_ef_search')::int <> 128 OR
+		(matched_recall_stats->>'graph_oversampling')::int <> 8 OR
+		(matched_recall_stats->>'native_segments')::int <> 1 THEN
+		RAISE EXCEPTION 'unexpected matched_recall profile build stats: %', matched_recall_stats;
+	END IF;
+
+	EXECUTE 'DROP INDEX tqh_profile_latency_idx';
+	EXECUTE 'DROP INDEX tqh_profile_balanced_idx';
+	PERFORM set_config('enable_seqscan', 'off', true);
+	EXECUTE $SQL$
+		SELECT count(*) FROM (
+			SELECT id
+			FROM tqh_profile_docs
+			ORDER BY embedding <~> turbohybrid_query(vector_query => '[1,0,0]'::vector, final_k => 2)
+			LIMIT 2
+		) q
+	$SQL$ INTO scan_count;
+	IF scan_count <> 2 THEN
+		RAISE EXCEPTION 'matched_recall scan returned % rows', scan_count;
+	END IF;
+	EXECUTE 'SELECT turbohybrid_last_scan_stats()' INTO matched_recall_stats;
+	IF (matched_recall_stats->>'index_used')::boolean IS DISTINCT FROM true OR
+		matched_recall_stats->>'profile' <> 'matched_recall' OR
+		(matched_recall_stats->>'dense_build_exact_distances')::boolean IS DISTINCT FROM true OR
+		matched_recall_stats->>'dense_build_distance_mode' <> 'exact' OR
+		matched_recall_stats->>'build_neighbor_select' <> 'heuristic' OR
+		matched_recall_stats->>'build_neighbor_select_reason' <> 'auto_matched_recall' OR
+		(matched_recall_stats->>'build_fast_edges')::boolean IS DISTINCT FROM false OR
+		(matched_recall_stats->>'graph_ef_construction')::int <> 192 OR
+		(matched_recall_stats->>'graph_ef_search')::int <> 128 OR
+		(matched_recall_stats->>'graph_oversampling')::int <> 8 THEN
+		RAISE EXCEPTION 'unexpected matched_recall profile scan stats: %', matched_recall_stats;
+	END IF;
+
+	EXECUTE 'CREATE INDEX tqh_profile_matched_recall_auto_segments_idx ON tqh_profile_docs USING turbohybrid (embedding vector_cosine_turbohybrid_ops) WITH (native_segments = auto)';
+	EXECUTE 'SELECT turbohybrid_index_stats(''tqh_profile_matched_recall_auto_segments_idx''::regclass)' INTO matched_recall_stats;
+
+	IF (matched_recall_stats->>'native_segments')::int <> 1 OR
+		(matched_recall_stats->>'graph_ef_construction')::int <> 192 OR
+		(matched_recall_stats->>'graph_ef_search')::int <> 128 OR
+		(matched_recall_stats->>'graph_oversampling')::int <> 8 OR
+		matched_recall_stats->>'dense_build_distance_mode' <> 'exact' OR
+		(matched_recall_stats->>'build_neighbor_select') <> 'heuristic' THEN
+		RAISE EXCEPTION 'matched_recall native_segments=auto should resolve to one segment: %', matched_recall_stats;
 	END IF;
 
 	PERFORM set_config('turbohybrid.profile', 'quality', true);
@@ -274,20 +347,67 @@ BEGIN
 	EXECUTE 'SELECT turbohybrid_index_stats(''tqh_profile_quality_idx''::regclass)' INTO quality_stats;
 
 	IF quality_stats->>'build_neighbor_select' <> 'heuristic' OR
+		quality_stats->>'build_neighbor_select_reason' <> 'auto_quality' OR
 		(quality_stats->>'build_fast_edges')::boolean IS DISTINCT FROM false OR
+		(quality_stats->>'dense_build_exact_distances')::boolean IS DISTINCT FROM true OR
+		quality_stats->>'dense_build_distance_mode' <> 'exact' OR
 		(quality_stats->>'graph_ef_construction')::int <> 256 OR
 		(quality_stats->>'graph_ef_search')::int <> 192 OR
 		(quality_stats->>'graph_oversampling')::int <> 8 THEN
 		RAISE EXCEPTION 'unexpected quality profile build stats: %', quality_stats;
 	END IF;
 
+	EXECUTE 'CREATE INDEX tqh_profile_quality_auto_segments_idx ON tqh_profile_docs USING turbohybrid (embedding vector_cosine_turbohybrid_ops) WITH (native_segments = auto)';
+	EXECUTE 'SELECT turbohybrid_index_stats(''tqh_profile_quality_auto_segments_idx''::regclass)' INTO quality_stats;
+
+	IF (quality_stats->>'native_segments')::int <> 1 THEN
+		RAISE EXCEPTION 'quality native_segments=auto should resolve to one segment: %', quality_stats;
+	END IF;
+
+	PERFORM set_config('turbohybrid.profile', 'latency', true);
+	PERFORM set_config('turbohybrid.dense_build_distance', 'code', true);
 	PERFORM set_config('turbohybrid.dense_build_neighbor_select', 'fast', true);
 	EXECUTE 'CREATE INDEX tqh_profile_forced_fast_idx ON tqh_profile_docs USING turbohybrid (embedding vector_cosine_turbohybrid_ops)';
 	EXECUTE 'SELECT turbohybrid_index_stats(''tqh_profile_forced_fast_idx''::regclass)' INTO forced_fast_stats;
 
 	IF forced_fast_stats->>'build_neighbor_select' <> 'fast' OR
+		forced_fast_stats->>'build_neighbor_select_reason' <> 'explicit_fast' OR
 		(forced_fast_stats->>'build_fast_edges')::boolean IS DISTINCT FROM true THEN
 		RAISE EXCEPTION 'unexpected forced-fast profile build stats: %', forced_fast_stats;
+	END IF;
+
+	PERFORM set_config('turbohybrid.profile', 'latency', true);
+	PERFORM set_config('turbohybrid.dense_build_distance', 'code', true);
+	PERFORM set_config('turbohybrid.dense_build_neighbor_select', 'heuristic', true);
+	EXECUTE 'CREATE INDEX tqh_profile_forced_heuristic_idx ON tqh_profile_docs USING turbohybrid (embedding vector_cosine_turbohybrid_ops)';
+	EXECUTE 'SELECT turbohybrid_index_stats(''tqh_profile_forced_heuristic_idx''::regclass)' INTO forced_heuristic_stats;
+
+	IF forced_heuristic_stats->>'build_neighbor_select' <> 'heuristic' OR
+		forced_heuristic_stats->>'build_neighbor_select_reason' <> 'explicit_heuristic' OR
+		(forced_heuristic_stats->>'build_fast_edges')::boolean IS DISTINCT FROM false THEN
+		RAISE EXCEPTION 'unexpected forced-heuristic profile build stats: %', forced_heuristic_stats;
+	END IF;
+
+	EXECUTE 'CREATE TEMP TABLE tqh_profile_highdim_docs (id int, embedding vector(300)) ON COMMIT DROP';
+	EXECUTE $SQL$
+		INSERT INTO tqh_profile_highdim_docs
+		SELECT g,
+			('[' || (
+				SELECT string_agg(CASE WHEN d = g THEN '1' ELSE '0' END, ',' ORDER BY d)
+				FROM generate_series(1, 300) AS d
+			) || ']')::vector
+		FROM generate_series(1, 4) AS g
+	$SQL$;
+
+	PERFORM set_config('turbohybrid.dense_build_neighbor_select', 'auto', true);
+	PERFORM set_config('turbohybrid.dense_build_distance', 'auto', true);
+	EXECUTE 'CREATE INDEX tqh_profile_highdim_idx ON tqh_profile_highdim_docs USING turbohybrid (embedding vector_cosine_turbohybrid_ops)';
+	EXECUTE 'SELECT turbohybrid_index_stats(''tqh_profile_highdim_idx''::regclass)' INTO highdim_stats;
+
+	IF highdim_stats->>'build_neighbor_select' <> 'fast' OR
+		highdim_stats->>'build_neighbor_select_reason' <> 'auto_latency_highdim' OR
+		(highdim_stats->>'build_fast_edges')::boolean IS DISTINCT FROM true THEN
+		RAISE EXCEPTION 'unexpected high-dimensional latency build stats: %', highdim_stats;
 	END IF;
 END
 $$;
@@ -464,6 +584,7 @@ BEGIN
 		(stats->>'parallel_fit_enabled')::boolean IS DISTINCT FROM true OR
 		(stats->>'parallel_scan_enabled')::boolean IS DISTINCT FROM true OR
 		(stats->>'parallel_encode_enabled')::boolean IS DISTINCT FROM true OR
+		(stats->>'node_count')::int <> 200 OR
 		jsonb_array_length(stats->'worker_scan_us') < 2 THEN
 		RAISE EXCEPTION 'unexpected parallel dense build stats: %', stats;
 	END IF;
@@ -502,6 +623,7 @@ BEGIN
 	IF stats->>'relation_name' <> 'tqh_parallel_hybrid_idx' OR
 		stats->>'index_shape' <> 'hybrid' OR
 		(stats->>'native_build_workers_requested')::int <> 2 OR
+		(stats->>'node_count')::int <> 200 OR
 		(stats->>'native_build_workers_launched')::int < 1 THEN
 		RAISE EXCEPTION 'unexpected parallel hybrid build stats: %', stats;
 	END IF;
@@ -538,6 +660,7 @@ BEGIN
 	stats := turbohybrid_last_build_stats();
 	IF stats->>'relation_name' <> 'tqh_parallel_lowbit_idx' OR
 		(stats->>'quantization_bits')::int <> 2 OR
+		(stats->>'node_count')::int <> 200 OR
 		(stats->>'native_build_workers_launched')::int < 1 THEN
 		RAISE EXCEPTION 'unexpected parallel low-bit build stats: %', stats;
 	END IF;
@@ -595,6 +718,60 @@ BEGIN
 	END IF;
 END
 $$;
+
+CREATE TABLE tqh_parallel_stride_docs (
+	id int PRIMARY KEY,
+	embedding vector(100)
+);
+
+INSERT INTO tqh_parallel_stride_docs (id, embedding)
+SELECT i,
+	(
+		SELECT ('[' || string_agg((((i + d) % 29)::float8 / 29.0)::text, ',' ORDER BY d) || ']')::vector(100)
+		FROM generate_series(1, 100) AS d
+	)
+FROM generate_series(1, 96) AS i;
+
+CREATE INDEX tqh_parallel_stride_idx ON tqh_parallel_stride_docs
+USING turbohybrid (embedding vector_cosine_turbohybrid_ops)
+WITH (quantization_bits = 4, exact_storage = off);
+
+DO $$
+DECLARE
+	row_count int;
+	stats jsonb;
+BEGIN
+	stats := turbohybrid_last_build_stats();
+	IF stats->>'relation_name' <> 'tqh_parallel_stride_idx' OR
+		(stats->>'dimensions')::int <> 100 OR
+		(stats->>'quantization_bits')::int <> 4 OR
+		(stats->>'node_count')::int <> 96 OR
+		(stats->>'native_build_workers_launched')::int < 1 THEN
+		RAISE EXCEPTION 'unexpected parallel 100-dim build stats: %', stats;
+	END IF;
+
+	SELECT count(*) INTO row_count
+	FROM (
+		SELECT id
+		FROM tqh_parallel_stride_docs
+		ORDER BY embedding <~> turbohybrid_query(
+			vector_query => (
+				SELECT ('[' || string_agg('0.1', ',' ORDER BY d) || ']')::vector
+				FROM generate_series(1, 100) AS d
+			),
+			dense_k => 20,
+			final_k => 5
+		)
+		LIMIT 5
+	) s;
+
+	IF row_count <> 5 THEN
+		RAISE EXCEPTION 'unexpected parallel 100-dim query count: %', row_count;
+	END IF;
+END
+$$;
+
+DROP TABLE tqh_parallel_stride_docs CASCADE;
 
 RESET turbohybrid.native_build_workers;
 RESET max_parallel_maintenance_workers;
@@ -1220,7 +1397,7 @@ $$;
 
 DROP INDEX tqh_default_docs_idx;
 
-SET turbohybrid.dense_build_exact_distances = on;
+SET turbohybrid.dense_build_distance = exact;
 
 CREATE INDEX tqh_default_docs_idx ON tqh_default_docs
 USING turbohybrid (
@@ -1228,7 +1405,7 @@ USING turbohybrid (
 	body_tsv bm25_tsvector_turbohybrid_ops
 );
 
-RESET turbohybrid.dense_build_exact_distances;
+RESET turbohybrid.dense_build_distance;
 
 DO $$
 DECLARE
@@ -1237,9 +1414,51 @@ BEGIN
 	stats := turbohybrid_index_stats('tqh_default_docs_idx'::regclass);
 
 	IF (stats->>'dense_build_exact_distances')::boolean IS DISTINCT FROM true OR
+		stats->>'dense_build_distance_mode' <> 'exact' OR
 		(stats->>'exact_storage')::boolean IS DISTINCT FROM false THEN
 		RAISE EXCEPTION 'unexpected exact-build stats: %', stats;
 	END IF;
+END
+$$;
+
+DO $$
+DECLARE
+	exact_build_size bigint;
+	exact_storage_size bigint;
+	stats jsonb;
+BEGIN
+	EXECUTE 'CREATE TEMP TABLE tqh_exact_build_size_docs (id int, embedding vector(64)) ON COMMIT DROP';
+	EXECUTE $SQL$
+		INSERT INTO tqh_exact_build_size_docs
+		SELECT g,
+			('[' || (
+				SELECT string_agg((((g * 31 + d * 17) % 100)::float8 / 100.0)::text, ',' ORDER BY d)
+				FROM generate_series(1, 64) AS d
+			) || ']')::vector
+		FROM generate_series(1, 256) AS g
+	$SQL$;
+
+	PERFORM set_config('turbohybrid.dense_build_distance', 'exact', true);
+	EXECUTE 'CREATE INDEX tqh_exact_build_size_exact_idx ON tqh_exact_build_size_docs USING turbohybrid (embedding vector_cosine_turbohybrid_ops) WITH (quantization_bits = 4, exact_storage = off)';
+	EXECUTE 'SELECT pg_relation_size(''tqh_exact_build_size_exact_idx''::regclass)' INTO exact_build_size;
+	EXECUTE 'SELECT turbohybrid_index_stats(''tqh_exact_build_size_exact_idx''::regclass)' INTO stats;
+
+	IF (stats->>'dense_build_exact_distances')::boolean IS DISTINCT FROM true OR
+		stats->>'dense_build_distance_mode' <> 'exact' OR
+		(stats->>'exact_storage')::boolean IS DISTINCT FROM false THEN
+		RAISE EXCEPTION 'unexpected exact-build compact stats: %', stats;
+	END IF;
+
+	PERFORM set_config('turbohybrid.dense_build_distance', 'code', true);
+	EXECUTE 'CREATE INDEX tqh_exact_build_size_storage_idx ON tqh_exact_build_size_docs USING turbohybrid (embedding vector_cosine_turbohybrid_ops) WITH (quantization_bits = 4, exact_storage = on)';
+	EXECUTE 'SELECT pg_relation_size(''tqh_exact_build_size_storage_idx''::regclass)' INTO exact_storage_size;
+
+	IF exact_build_size >= exact_storage_size THEN
+		RAISE EXCEPTION 'exact-build compact index size % should be smaller than exact_storage size %',
+			exact_build_size, exact_storage_size;
+	END IF;
+
+	PERFORM set_config('turbohybrid.dense_build_distance', 'auto', true);
 END
 $$;
 
@@ -2109,10 +2328,12 @@ BEGIN
 		'build_encode_us',
 		'build_fast_edges',
 		'build_neighbor_select',
+		'build_neighbor_select_reason',
 		'build_scan_us',
 		'build_worker_count',
 		'build_write_us',
 		'correction_us',
+		'dense_build_distance_mode',
 		'dense_build_exact_distances',
 		'edge_us',
 		'encode_us',
@@ -2167,7 +2388,10 @@ BEGIN
 		'build_edges_select_neighbor_us',
 		'build_edges_us',
 		'build_fast_edges',
+		'build_neighbor_select',
+		'build_neighbor_select_reason',
 		'connect_backbone_us',
+		'dense_build_distance_mode',
 		'dimensions',
 		'ef_construction',
 		'encode_us',
@@ -2208,6 +2432,14 @@ BEGIN
 	FROM jsonb_object_keys(turbohybrid_last_scan_stats()) AS key;
 
 	IF keys <> ARRAY[
+		'adaptive_final_result_target',
+		'adaptive_final_search_ef',
+		'adaptive_gap_boundary',
+		'adaptive_gap_top10',
+		'adaptive_initial_result_target',
+		'adaptive_initial_search_ef',
+		'adaptive_widening_reason',
+		'adaptive_widening_triggered',
 		'adj_buffer_lock_wait_us',
 		'auto_budget',
 		'bm25',
@@ -2230,6 +2462,9 @@ BEGIN
 		'bm25_k_effective',
 		'bm25_norm_mode',
 		'bm25_strategy',
+		'build_fast_edges',
+		'build_neighbor_select',
+		'build_neighbor_select_reason',
 		'candidate_objects_allocated',
 		'code_buffer_lock_wait_us',
 		'dense',
@@ -2244,6 +2479,8 @@ BEGIN
 		'dense_adaptive_widening_mode',
 		'dense_batch_kernel',
 		'dense_branch_used',
+		'dense_build_distance_mode',
+		'dense_build_exact_distances',
 		'dense_candidates_effective',
 			'dense_elapsed_us',
 			'dense_exact_kernel',
@@ -2267,6 +2504,8 @@ BEGIN
 		'dense_u8_batch_x4_enabled',
 		'detected_sql_limit',
 		'dimensions',
+		'effective_search_ef_after_segment_scaling',
+		'effective_search_ef_before_segment_scaling',
 		'elapsed_us',
 			'exact_free',
 			'exact_rescore_count',
@@ -2300,6 +2539,7 @@ BEGIN
 		'graph_code_pages_read',
 		'graph_dense_budget_policy',
 		'graph_dense_requested_k',
+		'graph_ef_construction',
 		'graph_ef_search',
 		'graph_effective_rescore_band',
 		'graph_effective_result_target',
@@ -2314,6 +2554,7 @@ BEGIN
 		'graph_heap_us',
 		'graph_highdim_widening_multiplier',
 		'graph_large_code_arena',
+		'graph_m',
 		'graph_oversampling',
 		'graph_prepare_us',
 		'graph_rescore_band',
@@ -2338,7 +2579,9 @@ BEGIN
 			'graph_whole_code_prefetch_active',
 			'graph_widening_reason',
 			'heap_fetch_us',
+			'heap_rescore_auto_enabled',
 			'heap_rescore_count',
+			'heap_rescore_reason',
 			'heap_rescore_us',
 			'heap_tuples_returned',
 		'hybrid_bm25_k_chosen',
@@ -2363,6 +2606,8 @@ BEGIN
 		'native_cache_scope',
 		'native_cache_used',
 		'native_cache_wait_us',
+		'native_segments',
+		'per_segment_budget_mode',
 		'profile',
 		'quantization_bits',
 		'query',
@@ -2420,6 +2665,21 @@ BEGIN
 	PERFORM set_config('turbohybrid.dense_build_exact_distances', 'on', true);
 	IF current_setting('turbohybrid.dense_build_exact_distances') <> 'on' THEN
 		RAISE EXCEPTION 'dense_build_exact_distances GUC did not stick';
+	END IF;
+
+	PERFORM set_config('turbohybrid.dense_build_distance', 'exact', true);
+	IF current_setting('turbohybrid.dense_build_distance') <> 'exact' THEN
+		RAISE EXCEPTION 'dense_build_distance exact GUC did not stick';
+	END IF;
+
+	PERFORM set_config('turbohybrid.dense_build_distance', 'code', true);
+	IF current_setting('turbohybrid.dense_build_distance') <> 'code' THEN
+		RAISE EXCEPTION 'dense_build_distance code GUC did not stick';
+	END IF;
+
+	PERFORM set_config('turbohybrid.dense_build_distance', 'auto', true);
+	IF current_setting('turbohybrid.dense_build_distance') <> 'auto' THEN
+		RAISE EXCEPTION 'dense_build_distance auto GUC did not stick';
 	END IF;
 
 	PERFORM set_config('turbohybrid.dense_build_neighbor_select', 'heuristic', true);
