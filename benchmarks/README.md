@@ -222,6 +222,13 @@ and `off`), cache caps for cached paths, and two prewarm modes (A = cold, B =
 cache prebuilt). It attributes the p95 explosion to one of four causes using
 per-backend instrumentation from `turbohybrid_last_scan_stats()`:
 
+The production default `turbohybrid.native_cache_scope=auto` resolves to the
+shared mmap cache on supported platforms when the native working set fits
+`turbohybrid.native_cache_max_mb`. Use `SELECT turbohybrid_prewarm('idx'::regclass)`
+before a timed run or before admitting traffic to build/attach that shared cache
+outside the first user query; the function returns JSON with `native_cache_built`,
+`native_cache_attach_us`, `native_cache_build_us`, and resident byte counts.
+
 | Suspected cause | Signal the harness reads |
 | --- | --- |
 | Cold per-backend cache build | `native_cache_built_this_scan` / `native_cache_build_us` on the cold query; removed by prewarm mode B |

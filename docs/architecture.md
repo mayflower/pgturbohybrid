@@ -156,10 +156,16 @@ override only for a specific need.
 - `turbohybrid.enable_wand`: WAND pruning for BM25 candidate generation.
 - `turbohybrid.simd`: master switch for SIMD kernels; turn off for the portable
   scalar fallback (troubleshooting, or a non-SIMD baseline).
-- `turbohybrid.native_cache_max_mb`: per-backend in-memory native scan cache cap
-  (default 512 MB); indexes whose working set fits are fully resident, so warm
-  scans read zero code pages. This is a per-backend allocation -- size it to host
-  RAM and connection count.
+- `turbohybrid.native_cache_scope`: native dense graph cache scope. `auto`
+  prefers the mmap-backed shared immutable cache on supported platforms when the
+  working set fits `turbohybrid.native_cache_max_mb`; `per_backend` forces the
+  backend-local arena; `shared` forces the shared mmap cache; `off` uses
+  scan-local page loading through shared buffers.
+- `turbohybrid.native_cache_max_mb`: native scan cache cap (default 512 MB);
+  indexes whose working set fits are fully resident, so warm scans read zero code
+  pages. This is a per-backend allocation only when
+  `native_cache_scope=per_backend`, which should be sized to host RAM and
+  connection count.
 - `turbohybrid.bm25_strategy`, `turbohybrid.bm25_impact_or_mode`,
   `turbohybrid.bm25_hybrid_bound`, `turbohybrid.bm25_accumulator_mode`: BM25
   candidate-generation strategy and bound/accumulator modes. `auto` is robust;

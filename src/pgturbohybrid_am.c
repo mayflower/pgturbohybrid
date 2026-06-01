@@ -3648,14 +3648,14 @@ PgturbohybridInit(void)
 							 PGC_USERSET, 0, NULL, NULL, NULL);
 	DefineCustomEnumVariable("turbohybrid.native_cache_scope",
 							 "Native dense graph cache scope",
-							 "auto keeps the current size-based per-backend behavior; per_backend explicitly uses the backend-local cache; shared uses an mmap-backed immutable cache shared by backends; off uses scan-local page loading through shared buffers.",
+							 "auto uses the mmap-backed shared immutable cache on supported platforms when the native working set fits native_cache_max_mb; per_backend explicitly uses the backend-local cache; shared forces the shared cache; off uses scan-local page loading through shared buffers.",
 							 &pgturbohybrid_native_cache_policy,
 							 PGTURBOHYBRID_NATIVE_CACHE_POLICY_AUTO,
 							 pgturbohybrid_native_cache_policy_options,
 							 PGC_USERSET, 0, NULL, NULL, NULL);
 	DefineCustomIntVariable("turbohybrid.native_cache_max_mb",
-							"Max size (MB) of the per-backend in-memory native scan cache",
-							"An index whose resident code/node/adjacency working set fits under this cap is fully loaded into a per-backend codeArena, so warm scans read 0 code pages. Larger indexes fall back to per-scan page loading. This is a per-backend allocation: size it to host RAM and connection count. Default 512.",
+							"Max size (MB) of the native dense scan cache",
+							"An index whose resident code/node/adjacency working set fits under this cap is fully loaded into the selected native cache scope, so warm scans read 0 code pages. Larger indexes fall back to per-scan page loading. This is per-backend only when native_cache_scope=per_backend. Default 512.",
 							&pgturbohybrid_native_cache_max_mb,
 							512, 0, 1048576,
 							PGC_USERSET, GUC_UNIT_MB, NULL, NULL, NULL);

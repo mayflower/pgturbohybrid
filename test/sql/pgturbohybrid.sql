@@ -1915,6 +1915,7 @@ $$;
 DO $$
 BEGIN
 	PERFORM turbohybrid_index_stats('tqh_docs_idx'::regclass);
+	PERFORM turbohybrid_prewarm('tqh_docs_idx'::regclass);
 	PERFORM turbohybrid_last_scan_stats();
 	PERFORM turbohybrid_simd_capabilities();
 END
@@ -2063,6 +2064,7 @@ BEGIN
 			'turbohybrid_last_build_stats',
 			'turbohybrid_last_scan_diagnosis',
 			'turbohybrid_last_scan_stats',
+			'turbohybrid_prewarm',
 			'turbohybrid_simd_capabilities'
 		);
 
@@ -2071,6 +2073,7 @@ BEGIN
 		'turbohybrid_last_build_stats',
 		'turbohybrid_last_scan_diagnosis',
 		'turbohybrid_last_scan_stats',
+		'turbohybrid_prewarm',
 		'turbohybrid_simd_capabilities'
 	] THEN
 		RAISE EXCEPTION 'unexpected pgturbohybrid diagnostic functions: %', funcs;
@@ -2586,6 +2589,29 @@ BEGIN
 	   NOT (stats->>'native_cache_used')::boolean OR
 	   stats->>'native_cache_reason' <> 'shared_fits_max_mb' THEN
 		RAISE EXCEPTION 'native_cache_scope=shared not reflected in stats: %', stats;
+	END IF;
+END
+$$;
+
+DO $$
+DECLARE
+	stats jsonb;
+BEGIN
+	SET LOCAL turbohybrid.native_cache_max_mb = 512;
+
+	stats := turbohybrid_prewarm('tqh_docs_idx'::regclass);
+	IF stats->>'native_cache_scope' <> 'shared' OR
+	   NOT (stats ? 'native_cache_build_us') OR
+	   NOT (stats ? 'native_cache_attach_us') OR
+	   NOT (stats ? 'native_cache_bytes') THEN
+		RAISE EXCEPTION 'turbohybrid_prewarm omitted expected shared-cache fields: %',
+			stats;
+	END IF;
+
+	IF NOT (stats->>'native_cache_used')::boolean AND
+	   stats->>'native_cache_reason' NOT IN ('shared_attach_failed', 'shared_build_timeout', 'exceeds_max_mb') THEN
+		RAISE EXCEPTION 'turbohybrid_prewarm failed with unexpected reason: %',
+			stats;
 	END IF;
 END
 $$;

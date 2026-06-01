@@ -1380,6 +1380,7 @@ void		tqgraphendscan(IndexScanDesc scan);
 FUNCTION_PREFIX Datum pgturbohybrid_last_scan_stats(PG_FUNCTION_ARGS);
 FUNCTION_PREFIX Datum pgturbohybrid_last_build_stats(PG_FUNCTION_ARGS);
 FUNCTION_PREFIX Datum pgturbohybrid_index_stats(PG_FUNCTION_ARGS);
+FUNCTION_PREFIX Datum pgturbohybrid_prewarm(PG_FUNCTION_ARGS);
 FUNCTION_PREFIX Datum pgturbohybrid_simd_capabilities(PG_FUNCTION_ARGS);
 void		PgturbohybridGraphRecordExactVectorKernel(int kernel);
 void		PgturbohybridGraphRecordWeightedCodeCodeKernel(int kernel);
