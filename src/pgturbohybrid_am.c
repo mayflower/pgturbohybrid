@@ -254,7 +254,6 @@ typedef struct PgturbohybridProfileDefaults
 	const char *denseAdaptiveWidening;
 	const char *denseAdaptiveWideningMultiplier;
 	const char *denseAdaptiveWideningMaxMultiplier;
-	const char *heapRescore;
 } PgturbohybridProfileDefaults;
 
 static relopt_enum_elt_def pgturbohybrid_routing_relopt_options[] = {
@@ -597,7 +596,6 @@ PgturbohybridProfileDefaultsFor(int profile, PgturbohybridProfileDefaults *defau
 	defaults->denseAdaptiveWidening = "off";
 	defaults->denseAdaptiveWideningMultiplier = "2.0";
 	defaults->denseAdaptiveWideningMaxMultiplier = "4.0";
-	defaults->heapRescore = "off";
 
 	switch ((PgturbohybridProfile) profile)
 	{
@@ -654,14 +652,19 @@ PgturbohybridProfileDefaultsFor(int profile, PgturbohybridProfileDefaults *defau
 		case PGTURBOHYBRID_PROFILE_HIGH_RECALL:
 			/*
 			 * Exact-free, high-recall point: matched_recall's candidate
-			 * budgets, but adaptive widening off and heap-band exact rescore
-			 * on. On quantized (exact_storage=off) indexes this recovers
-			 * near-exact recall by re-ranking the final band from the heap,
-			 * spending the latency headroom rather than index size. Pair with
-			 * a heuristic graph build (graph_ef_construction=256,
-			 * graph_ef_search=192, graph_oversampling=12, native_segments=1),
-			 * which this profile also supplies as defaults when the index does
-			 * not set those reloptions explicitly.
+			 * budgets with adaptive widening off. The defining behavior —
+			 * full band heap rescore — is resolved at scan time in
+			 * PgturbohybridGraphEffectiveHeapRescoreMode (profile case
+			 * HIGH_RECALL -> BAND) rather than mutated here as a GUC default,
+			 * because applying dense_heap_rescore via a dynamic default
+			 * regressed heap-band recall. On quantized (exact_storage=off)
+			 * indexes the band rescore re-ranks 4-bit code candidates against
+			 * exact heap vectors, spending latency headroom rather than index
+			 * size. Pair with a heuristic graph build
+			 * (graph_ef_construction=256, graph_ef_search=192,
+			 * graph_oversampling=12, native_segments=1), which this profile
+			 * also supplies as defaults when the index does not set those
+			 * reloptions explicitly.
 			 */
 			defaults->denseK = 200;
 			defaults->bm25K = 200;
@@ -674,7 +677,6 @@ PgturbohybridProfileDefaultsFor(int profile, PgturbohybridProfileDefaults *defau
 			defaults->autoBm25BudgetMax = 200;
 			defaults->autoBm25BudgetDenseConfidence = true;
 			defaults->denseAdaptiveWidening = "off";
-			defaults->heapRescore = "band";
 			break;
 		case PGTURBOHYBRID_PROFILE_DEBUG:
 			defaults->denseK = 400;
@@ -760,8 +762,6 @@ PgturbohybridApplyProfileDefaults(void)
 										 defaults.denseAdaptiveWideningMultiplier);
 	PgturbohybridSetDynamicDefaultString("turbohybrid.dense_adaptive_widening_max_multiplier",
 										 defaults.denseAdaptiveWideningMaxMultiplier);
-	PgturbohybridSetDynamicDefaultString("turbohybrid.dense_heap_rescore",
-										 defaults.heapRescore);
 }
 
 static void

@@ -6016,6 +6016,18 @@ PgturbohybridGraphEffectiveHeapRescoreMode(PgturbohybridGraphScanOpaque so,
 			so->graphHeapRescoreAutoEnabled = lowDim;
 			return lowDim ? PGTURBOHYBRID_DENSE_HEAP_RESCORE_TOPK :
 				PGTURBOHYBRID_DENSE_HEAP_RESCORE_OFF;
+		case PGTURBOHYBRID_PROFILE_HIGH_RECALL:
+			/*
+			 * high_recall is the exact-free, spend-the-latency-headroom
+			 * profile: default to full band heap rescore at every dimension so
+			 * 4-bit code candidates are re-ranked against exact heap vectors.
+			 * An explicit turbohybrid.dense_heap_rescore still overrides this
+			 * (handled above via the user_set branch).
+			 */
+			so->graphHeapRescoreReason =
+				PGTURBOHYBRID_DENSE_HEAP_RESCORE_REASON_PROFILE_HIGH_RECALL;
+			so->graphHeapRescoreAutoEnabled = true;
+			return PGTURBOHYBRID_DENSE_HEAP_RESCORE_BAND;
 		case PGTURBOHYBRID_PROFILE_QUALITY:
 		case PGTURBOHYBRID_PROFILE_DEBUG:
 			so->graphHeapRescoreReason = lowDim ?
