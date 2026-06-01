@@ -549,7 +549,6 @@ END
 $$;
 
 SET max_parallel_maintenance_workers = 2;
-SET turbohybrid.native_build_workers = '2';
 
 CREATE TABLE tqh_parallel_build_docs (
 	id int PRIMARY KEY,

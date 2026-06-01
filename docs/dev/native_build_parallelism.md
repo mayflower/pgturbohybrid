@@ -25,8 +25,10 @@ Native graph builds currently run these phases:
 12. `total_us`: wall-clock build time for the native graph build.
 
 The JSON also records index parameters, build distance-path counters, index
-shape, and `worker_count`. For a strict serial baseline, run with
-`turbohybrid.native_build_workers = '0'`.
+shape, and `worker_count`. Parallel native builds are the default:
+`turbohybrid.native_build_workers` defaults to `2` and is capped by
+PostgreSQL's `max_parallel_maintenance_workers`. For a strict serial baseline,
+run with `turbohybrid.native_build_workers = '0'`.
 
 `turbohybrid.native_build_workers` accepts `auto`, `0`, `1`, `2`, `4`, or `8`.
 Explicit numeric values request that many workers, capped by

@@ -3776,9 +3776,9 @@ PgturbohybridInit(void)
 							PGC_USERSET, GUC_UNIT_MB, NULL, NULL, NULL);
 	DefineCustomStringVariable("turbohybrid.native_build_workers",
 							   "Parallel worker count for native dense graph build scan and encoding",
-							   "auto uses PostgreSQL's parallel CREATE INDEX worker choice; 0 disables native parallel build; 1, 2, 4, or 8 requests that many workers. Edge construction remains serial.",
+							   "Default 2 requests parallel native builds; auto uses PostgreSQL's parallel CREATE INDEX worker choice; 0 disables native parallel build; 1, 2, 4, or 8 requests that many workers. Edge construction remains serial.",
 							   &pgturbohybrid_native_build_workers,
-							   "auto", PGC_USERSET, 0,
+							   "2", PGC_USERSET, 0,
 							   PgturbohybridNativeBuildWorkersCheck,
 							   NULL, NULL);
 	DefineCustomEnumVariable("turbohybrid.native_segment_budget",

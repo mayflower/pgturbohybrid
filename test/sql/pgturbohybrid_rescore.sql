@@ -223,8 +223,8 @@ BEGIN
     RESET turbohybrid.dense_adaptive_min_gap;
 
     -- (3) Residual sketches are a separate quality path for exact-free indexes.
-    SET turbohybrid.dense_heap_rescore = off;
     PERFORM set_config('turbohybrid.profile', 'quality', true);
+    SET turbohybrid.dense_heap_rescore = off;
     PERFORM id FROM rb_residual ORDER BY embedding <~> turbohybrid_query(vector_query => qv) LIMIT 10;
     st := turbohybrid_last_scan_stats();
     IF st->>'exact_rescore_source' <> 'residual' OR
