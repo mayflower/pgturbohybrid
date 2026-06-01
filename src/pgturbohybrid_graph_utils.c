@@ -628,6 +628,8 @@ PgturbohybridGraphGetEfConstruction(Relation index)
 		{
 			case PGTURBOHYBRID_PROFILE_QUALITY:
 				return 256;
+			case PGTURBOHYBRID_PROFILE_HIGH_RECALL:
+				return 256;
 			case PGTURBOHYBRID_PROFILE_MATCHED_RECALL:
 			case PGTURBOHYBRID_PROFILE_BALANCED:
 				return 192;
@@ -893,6 +895,8 @@ PgturbohybridGraphGetEfSearch(Relation index)
 		{
 			case PGTURBOHYBRID_PROFILE_QUALITY:
 				return 192;
+			case PGTURBOHYBRID_PROFILE_HIGH_RECALL:
+				return 192;
 			case PGTURBOHYBRID_PROFILE_MATCHED_RECALL:
 				return 128;
 			case PGTURBOHYBRID_PROFILE_BALANCED:
@@ -921,6 +925,8 @@ PgturbohybridGraphGetGraphOversampling(Relation index)
 
 		switch ((PgturbohybridProfile) pgturbohybrid_profile)
 		{
+			case PGTURBOHYBRID_PROFILE_HIGH_RECALL:
+				return 12;
 			case PGTURBOHYBRID_PROFILE_QUALITY:
 			case PGTURBOHYBRID_PROFILE_MATCHED_RECALL:
 				return 8;

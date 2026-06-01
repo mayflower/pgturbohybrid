@@ -3,6 +3,19 @@
 All notable changes for `pgturbohybrid` are documented here. Release tags may
 use alpha suffixes while the PostgreSQL extension SQL version remains `0.1.0`.
 
+## Unreleased
+
+### Added
+
+- `high_recall` retrieval profile: an exact-free, near-exact-recall operating
+  point. Reuses `matched_recall`'s candidate budgets but defaults
+  `dense_heap_rescore = band`, `dense_adaptive_widening = off`, and the graph
+  topology `ef_construction = 256` / `ef_search = 192` / `oversampling = 12`
+  (used when the index does not set those reloptions). Keeps
+  `exact_storage = off`. On DBPedia/OpenAI (1536-d) it reaches ~0.99 recall
+  while staying faster than pgvector and Qdrant. Explicit GUCs still override
+  the profile defaults.
+
 ## v0.1.0-alpha.2
 
 This alpha changes the default retrieval behavior to the recovered fast setup.
