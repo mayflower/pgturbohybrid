@@ -297,6 +297,8 @@ PgturbohybridGraphDenseHeapRescoreReasonName(int reason)
 			return "profile_matched_recall_lowdim";
 		case PGTURBOHYBRID_DENSE_HEAP_RESCORE_REASON_PROFILE_MATCHED_RECALL_HIGHDIM:
 			return "profile_matched_recall_highdim";
+		case PGTURBOHYBRID_DENSE_HEAP_RESCORE_REASON_PROFILE_HIGH_RECALL:
+			return "profile_high_recall";
 		case PGTURBOHYBRID_DENSE_HEAP_RESCORE_REASON_EXACT_STORAGE:
 			return "exact_storage";
 		case PGTURBOHYBRID_DENSE_HEAP_RESCORE_REASON_UNKNOWN:
