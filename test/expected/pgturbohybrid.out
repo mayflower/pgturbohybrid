@@ -554,6 +554,7 @@ BEGIN
 		(stats->>'parallel_scan_enabled')::boolean IS DISTINCT FROM true OR
 		(stats->>'parallel_encode_enabled')::boolean IS DISTINCT FROM true OR
 		(stats->>'parallel_edge_build_enabled')::boolean IS DISTINCT FROM true OR
+		stats->>'segment_build_mode' <> 'parallel_batch' OR
 		(stats->>'parallel_edge_workers_launched')::int < 1 OR
 		(stats->>'parallel_edge_segments')::int < 2 OR
 		(stats->>'node_count')::int <> 200 OR
