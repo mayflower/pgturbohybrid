@@ -66,6 +66,10 @@ BEGIN
 		RAISE EXCEPTION 'unexpected default turbohybrid profile: %',
 			current_setting('turbohybrid.profile');
 	END IF;
+	IF current_setting('turbohybrid.native_build_workers') != '2' THEN
+		RAISE EXCEPTION 'unexpected default native build workers: %',
+			current_setting('turbohybrid.native_build_workers');
+	END IF;
 
 		IF current_setting('turbohybrid.dense_adaptive_widening') != 'off' OR
 			current_setting('turbohybrid.dense_heap_rescore') != 'off' OR
@@ -114,6 +118,7 @@ SET turbohybrid.native_build_workers = '2';
 SET turbohybrid.native_build_workers = '4';
 SET turbohybrid.native_build_workers = '8';
 SET turbohybrid.native_build_workers = 'auto';
+RESET turbohybrid.native_build_workers;
 RESET turbohybrid.enable_wand;
 RESET turbohybrid.bm25_strategy;
 RESET turbohybrid.bm25_impact_or_mode;
