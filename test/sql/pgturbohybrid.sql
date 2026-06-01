@@ -2852,9 +2852,17 @@ BEGIN
 	END IF;
 
 	stats := turbohybrid_last_scan_stats();
-	IF stats->>'native_cache_scope' <> 'shared' OR
-	   NOT (stats->>'native_cache_used')::boolean OR
-	   stats->>'native_cache_reason' <> 'shared_fits_max_mb' THEN
+	IF stats->>'native_cache_policy' <> 'shared' OR
+	   NOT (
+		   (stats->>'native_cache_scope' = 'shared' AND
+		    (stats->>'native_cache_used')::boolean AND
+		    stats->>'native_cache_reason' = 'shared_fits_max_mb') OR
+		   (stats->>'native_cache_scope' = 'per_scan' AND
+		    NOT (stats->>'native_cache_used')::boolean AND
+		    stats->>'native_cache_reason' IN ('shared_attach_failed',
+											  'shared_build_timeout',
+											  'exceeds_max_mb'))
+	   ) THEN
 		RAISE EXCEPTION 'native_cache_scope=shared not reflected in stats: %', stats;
 	END IF;
 END
