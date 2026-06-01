@@ -1,5 +1,12 @@
 # Problem report: graph edge construction runs serially
 
+> Status: superseded by the parallel edge build implementation. Current code
+> supports code-only native graph edge construction through the
+> `turbohybrid.native_parallel_edge_build` GUC (`auto` by default), using
+> segment-parallel HNSW linking plus a bounded repair step for default
+> single-graph builds. See `pedgeplan.md` for the implementation plan and
+> Qdrant comparison notes.
+
 ## Summary
 
 For the native quantized `turbohybrid` index, the **graph edge-construction phase

@@ -55,6 +55,7 @@ BEGIN
 		'turbohybrid.native_cache_max_mb',
 		'turbohybrid.native_cache_policy',
 		'turbohybrid.native_cache_scope',
+		'turbohybrid.native_parallel_edge_build',
 		'turbohybrid.native_segment_budget',
 		'turbohybrid.profile',
 		'turbohybrid.simd'
@@ -69,6 +70,10 @@ BEGIN
 	IF current_setting('turbohybrid.native_build_workers') != '2' THEN
 		RAISE EXCEPTION 'unexpected default native build workers: %',
 			current_setting('turbohybrid.native_build_workers');
+	END IF;
+	IF current_setting('turbohybrid.native_parallel_edge_build') != 'auto' THEN
+		RAISE EXCEPTION 'unexpected default native parallel edge build: %',
+			current_setting('turbohybrid.native_parallel_edge_build');
 	END IF;
 
 		IF current_setting('turbohybrid.dense_adaptive_widening') != 'off' OR
@@ -119,6 +124,10 @@ SET turbohybrid.native_build_workers = '4';
 SET turbohybrid.native_build_workers = '8';
 SET turbohybrid.native_build_workers = 'auto';
 RESET turbohybrid.native_build_workers;
+SET turbohybrid.native_parallel_edge_build = off;
+SET turbohybrid.native_parallel_edge_build = on;
+SET turbohybrid.native_parallel_edge_build = auto;
+RESET turbohybrid.native_parallel_edge_build;
 RESET turbohybrid.enable_wand;
 RESET turbohybrid.bm25_strategy;
 RESET turbohybrid.bm25_impact_or_mode;

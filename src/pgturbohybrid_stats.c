@@ -1710,6 +1710,14 @@ pgturbohybrid_last_build_stats(PG_FUNCTION_ARGS)
 							  s->parallelScanEnabled);
 	PgturbohybridJsonbAddBool(&state, "parallel_encode_enabled",
 							  s->parallelEncodeEnabled);
+	PgturbohybridJsonbAddBool(&state, "parallel_edge_build_enabled",
+							  s->parallelEdgeBuildEnabled);
+	PgturbohybridJsonbAddInt64(&state, "parallel_edge_segments",
+							   s->parallelEdgeSegments);
+	PgturbohybridJsonbAddInt64(&state, "parallel_edge_workers_launched",
+							   s->parallelEdgeWorkersLaunched);
+	PgturbohybridJsonbAddUint64(&state, "parallel_edge_repair_us",
+								s->parallelEdgeRepairUs);
 	PgturbohybridJsonbAddUint64(&state, "worker_merge_us",
 								s->workerMergeUs);
 	PgturbohybridJsonbAddUint64Array(&state, "worker_scan_us",

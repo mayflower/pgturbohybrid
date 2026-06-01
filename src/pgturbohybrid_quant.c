@@ -50,6 +50,8 @@
 #include "pgturbohybrid_quant_score.h"
 #include "pgturbohybrid_vector_compat.h"
 
+typedef struct PgturbohybridNativeParallelShared PgturbohybridNativeParallelShared;
+
 static int	PgturbohybridGraphResultCompare(const void *a, const void *b);
 static bool PgturbohybridGraphEntryAlreadySelected(PgturbohybridGraphFrontierItem *entries, int entryCount,
 										uint32 nodeId);
@@ -61,6 +63,9 @@ static void PgturbohybridGraphStreamFitVector(PgturbohybridQuantBuildState *stat
 static void PgturbohybridGraphFinishStreamingFit(PgturbohybridQuantBuildState *state);
 static bool PgturbohybridGraphUseExactBuildDistances(PgturbohybridQuantBuildState *state);
 static bool PgturbohybridGraphUseFastBuildEdges(PgturbohybridQuantBuildState *state);
+static void PgturbohybridNativeParallelEdgeWorker(Relation indexRel,
+												  PgturbohybridNativeParallelShared *shared,
+												  bool leader);
 static int64 PgturbohybridGraphElapsedUs(instr_time start);
 
 #define PARALLEL_KEY_PGTURBOHYBRID_NATIVE_SHARED	UINT64CONST(0xA000000000000011)
@@ -72,7 +77,8 @@ static int64 PgturbohybridGraphElapsedUs(instr_time start);
 typedef enum PgturbohybridNativeParallelPhase
 {
 	PGTURBOHYBRID_NATIVE_PARALLEL_FIT = 1,
-	PGTURBOHYBRID_NATIVE_PARALLEL_ENCODE = 2
+	PGTURBOHYBRID_NATIVE_PARALLEL_ENCODE = 2,
+	PGTURBOHYBRID_NATIVE_PARALLEL_EDGES = 3
 } PgturbohybridNativeParallelPhase;
 
 typedef struct PgturbohybridNativeParallelRecord
@@ -87,6 +93,20 @@ typedef struct PgturbohybridNativeParallelRecord
 	uint16		reserved;
 	int32		payloads[PGTURBOHYBRID_GRAPH_MAX_PAYLOADS];
 } PgturbohybridNativeParallelRecord;
+
+typedef struct PgturbohybridNativeParallelEdgeNode
+{
+	ItemPointerData heaptid;
+	uint64		vectorHash;
+	float		norm;
+	float		scale;
+	float		correction;
+	float		ecCorrection;
+	uint16		payloadMask;
+	uint16		flags;
+	int			level;
+	int32		payloads[PGTURBOHYBRID_GRAPH_MAX_PAYLOADS];
+} PgturbohybridNativeParallelEdgeNode;
 
 typedef struct PgturbohybridNativeParallelShared
 {
@@ -109,6 +129,7 @@ typedef struct PgturbohybridNativeParallelShared
 	bool		tqWeighted;
 	bool		tqRenorm;
 	bool		buildCodeOnly;
+	bool		buildFastEdges;
 	int			payloadCount;
 	Size		payloadBytes;
 	int			residualRerankBytes;
@@ -125,6 +146,29 @@ typedef struct PgturbohybridNativeParallelShared
 	Size		ecShiftOffset;
 	Size		ecScaleOffset;
 	Size		recordsOffset;
+	uint32		edgeNodeCount;
+	uint16		edgeSegmentCount;
+	uint16		edgeFinalSegmentCount;
+	uint32		edgeNextSegment;
+	uint32		edgeLevelCapacity;
+	uint32		edgeMaxNeighbors;
+	Size		edgeCodeBytes;
+	Size		edgeNodeOffset;
+	Size		edgeCodeOffset;
+	Size		edgeResidualOffset;
+	Size		edgeNeighborCountOffset;
+	Size		edgeNeighborOffset;
+	Size		edgeSegmentOffset;
+	Size		edgeWorkerUsOffset;
+	uint64		edgeDistanceCalls;
+	uint64		edgeSearchLayerUs;
+	uint64		edgeSelectNeighborUs;
+	uint64		edgeAddNeighborUs;
+	uint64		edgePruneNeighborUs;
+	uint64		edgeEntryUpdateUs;
+	uint64		edgeNearestTotal;
+	uint64		edgeNearestSamples;
+	uint32		edgeMaxFrontierSize;
 	bool		overflowed;
 } PgturbohybridNativeParallelShared;
 
@@ -880,6 +924,71 @@ PgturbohybridNativeParallelRecords(PgturbohybridNativeParallelShared *shared)
 	return (char *) shared + shared->recordsOffset;
 }
 
+static PgturbohybridNativeParallelEdgeNode *
+PgturbohybridNativeParallelEdgeNodes(PgturbohybridNativeParallelShared *shared)
+{
+	return (PgturbohybridNativeParallelEdgeNode *)
+		(PgturbohybridNativeParallelBase(shared) + shared->edgeNodeOffset);
+}
+
+static uint8 *
+PgturbohybridNativeParallelEdgeCodes(PgturbohybridNativeParallelShared *shared)
+{
+	return (uint8 *) (PgturbohybridNativeParallelBase(shared) + shared->edgeCodeOffset);
+}
+
+static uint8 *
+PgturbohybridNativeParallelEdgeResiduals(PgturbohybridNativeParallelShared *shared)
+{
+	return shared->edgeResidualOffset != 0 ?
+		(uint8 *) (PgturbohybridNativeParallelBase(shared) + shared->edgeResidualOffset) : NULL;
+}
+
+static uint16 *
+PgturbohybridNativeParallelEdgeNeighborCounts(PgturbohybridNativeParallelShared *shared)
+{
+	return (uint16 *) (PgturbohybridNativeParallelBase(shared) +
+					   shared->edgeNeighborCountOffset);
+}
+
+static uint32 *
+PgturbohybridNativeParallelEdgeNeighbors(PgturbohybridNativeParallelShared *shared)
+{
+	return (uint32 *) (PgturbohybridNativeParallelBase(shared) +
+					   shared->edgeNeighborOffset);
+}
+
+static PgturbohybridGraphSegmentMetaData *
+PgturbohybridNativeParallelEdgeSegments(PgturbohybridNativeParallelShared *shared)
+{
+	return (PgturbohybridGraphSegmentMetaData *)
+		(PgturbohybridNativeParallelBase(shared) + shared->edgeSegmentOffset);
+}
+
+static uint64 *
+PgturbohybridNativeParallelEdgeWorkerUs(PgturbohybridNativeParallelShared *shared)
+{
+	return (uint64 *) (PgturbohybridNativeParallelBase(shared) +
+					   shared->edgeWorkerUsOffset);
+}
+
+static inline Size
+PgturbohybridNativeParallelEdgeNodeLevelSlot(PgturbohybridNativeParallelShared *shared,
+											 uint32 nodeId, int level)
+{
+	return add_size(mul_size((Size) nodeId, (Size) shared->edgeLevelCapacity),
+					(Size) level);
+}
+
+static inline Size
+PgturbohybridNativeParallelEdgeNeighborSlot(PgturbohybridNativeParallelShared *shared,
+											uint32 nodeId, int level)
+{
+	return mul_size(PgturbohybridNativeParallelEdgeNodeLevelSlot(shared, nodeId,
+																level),
+					(Size) shared->edgeMaxNeighbors);
+}
+
 static PgturbohybridNativeParallelRecord *
 PgturbohybridNativeParallelRecordAt(PgturbohybridNativeParallelShared *shared,
 									uint32 row)
@@ -964,7 +1073,7 @@ PgturbohybridNativeInitWorkerState(PgturbohybridQuantBuildState *state,
 	state->tqWeighted = shared->tqWeighted;
 	state->tqRenorm = shared->tqRenorm;
 	state->buildCodeOnly = shared->buildCodeOnly;
-	state->buildFastEdges = true;
+	state->buildFastEdges = shared->buildFastEdges;
 	state->scoreMode = shared->scoreMode;
 	state->payloadCount = shared->payloadCount;
 	state->payloadBytes = shared->payloadBytes;
@@ -1179,8 +1288,15 @@ PgturbohybridNativeParallelBuildMain(dsm_segment *seg, shm_toc *toc)
 		indexLockmode = RowExclusiveLock;
 	}
 
-	heapRel = table_open(shared->heaprelid, heapLockmode);
 	indexRel = index_open(shared->indexrelid, indexLockmode);
+	if (shared->phase == PGTURBOHYBRID_NATIVE_PARALLEL_EDGES)
+	{
+		PgturbohybridNativeParallelEdgeWorker(indexRel, shared, false);
+		index_close(indexRel, indexLockmode);
+		return;
+	}
+
+	heapRel = table_open(shared->heaprelid, heapLockmode);
 	PgturbohybridNativeParallelScan(heapRel, indexRel, shared, false);
 	index_close(indexRel, indexLockmode);
 	table_close(heapRel, heapLockmode);
@@ -2399,6 +2515,354 @@ PgturbohybridGraphBuildEdges(PgturbohybridQuantBuildState *state)
 	}
 }
 
+static uint16
+PgturbohybridNativeParallelEdgeSegmentCount(PgturbohybridQuantBuildState *state,
+											int workerCount)
+{
+	int			requestedSegments = PgturbohybridGraphGetNativeSegments(state->index);
+	uint32		segmentCount;
+
+	if (state->nodeCount == 0)
+		return 0;
+
+	if (requestedSegments > 1)
+		segmentCount = (uint32) requestedSegments;
+	else
+		segmentCount = (uint32) Max(workerCount + 1, 1);
+
+	segmentCount = Min(segmentCount, state->nodeCount);
+	segmentCount = Min(segmentCount, (uint32) PGTURBOHYBRID_GRAPH_MAX_NATIVE_SEGMENTS);
+	return (uint16) Max(segmentCount, 1);
+}
+
+static bool
+PgturbohybridNativeParallelEdgeEligible(PgturbohybridQuantBuildState *state,
+										bool force)
+{
+	if (pgturbohybrid_native_parallel_edge_build ==
+		PGTURBOHYBRID_NATIVE_PARALLEL_EDGE_BUILD_OFF)
+		return false;
+
+	if (state->nodeCount < 2 || state->dimensions <= 0 || state->m <= 0 ||
+		!state->buildCodeOnly || state->buildExactDistances ||
+		state->tqExactStorage)
+	{
+		if (force)
+			ereport(ERROR,
+					(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
+					 errmsg("turbohybrid.native_parallel_edge_build=on requires a code-only native graph build"),
+					 errdetail("Exact-storage and exact-distance build modes keep edge construction serial.")));
+		return false;
+	}
+
+	return true;
+}
+
+static void
+PgturbohybridNativeParallelEdgeCopyNodes(PgturbohybridQuantBuildState *state,
+										 PgturbohybridNativeParallelShared *shared)
+{
+	PgturbohybridNativeParallelEdgeNode *edgeNodes =
+		PgturbohybridNativeParallelEdgeNodes(shared);
+	uint8	   *codes = PgturbohybridNativeParallelEdgeCodes(shared);
+	uint8	   *residuals = PgturbohybridNativeParallelEdgeResiduals(shared);
+
+	for (uint32 nodeId = 0; nodeId < state->nodeCount; nodeId++)
+	{
+		PgturbohybridGraphBuildNode *node = &state->nodes[nodeId];
+		PgturbohybridNativeParallelEdgeNode *edgeNode = &edgeNodes[nodeId];
+
+		CHECK_FOR_INTERRUPTS();
+		edgeNode->heaptid = node->heaptid;
+		edgeNode->vectorHash = node->vectorHash;
+		edgeNode->norm = node->norm;
+		edgeNode->scale = node->scale;
+		edgeNode->correction = node->correction;
+		edgeNode->ecCorrection = node->ecCorrection;
+		edgeNode->payloadMask = node->payloadMask;
+		edgeNode->flags = node->flags;
+		edgeNode->level = node->level;
+		if (node->payloads != NULL && state->payloadBytes > 0)
+			memcpy(edgeNode->payloads, node->payloads, state->payloadBytes);
+		if (node->code != NULL && shared->edgeCodeBytes > 0)
+			memcpy(codes + mul_size((Size) nodeId, shared->edgeCodeBytes),
+				   node->code, shared->edgeCodeBytes);
+		if (residuals != NULL && node->residualSketch != NULL &&
+			state->residualRerankBytes > 0)
+			memcpy(residuals + mul_size((Size) nodeId,
+										(Size) state->residualRerankBytes),
+				   node->residualSketch, state->residualRerankBytes);
+	}
+}
+
+static void
+PgturbohybridNativeParallelEdgeLoadNodes(PgturbohybridQuantBuildState *state,
+										 PgturbohybridNativeParallelShared *shared,
+										 uint32 startNodeId, uint32 endNodeId)
+{
+	PgturbohybridNativeParallelEdgeNode *edgeNodes =
+		PgturbohybridNativeParallelEdgeNodes(shared);
+	uint8	   *codes = PgturbohybridNativeParallelEdgeCodes(shared);
+	uint8	   *residuals = PgturbohybridNativeParallelEdgeResiduals(shared);
+
+	state->nodeCount = shared->edgeNodeCount;
+	state->nodeCapacity = shared->edgeNodeCount;
+	state->nodes = MemoryContextAllocZero(state->ctx,
+										  mul_size(sizeof(PgturbohybridGraphBuildNode),
+												   (Size) state->nodeCount));
+	state->maxLevel = -1;
+	for (uint32 nodeId = 0; nodeId < state->nodeCount; nodeId++)
+	{
+		PgturbohybridNativeParallelEdgeNode *edgeNode = &edgeNodes[nodeId];
+		PgturbohybridGraphBuildNode *node = &state->nodes[nodeId];
+
+		node->heaptid = edgeNode->heaptid;
+		node->vectorHash = edgeNode->vectorHash;
+		node->norm = edgeNode->norm;
+		node->scale = edgeNode->scale;
+		node->correction = edgeNode->correction;
+		node->ecCorrection = edgeNode->ecCorrection;
+		node->payloadMask = edgeNode->payloadMask;
+		node->flags = edgeNode->flags;
+		node->level = edgeNode->level;
+		node->code = codes + mul_size((Size) nodeId, shared->edgeCodeBytes);
+		if (residuals != NULL && shared->residualRerankBytes > 0)
+			node->residualSketch =
+				residuals + mul_size((Size) nodeId,
+									 (Size) shared->residualRerankBytes);
+		if (shared->payloadBytes > 0)
+			node->payloads = edgeNode->payloads;
+		if (nodeId >= startNodeId && nodeId < endNodeId)
+			PgturbohybridGraphAllocateBuildNeighbors(state, node);
+		state->maxLevel = Max(state->maxLevel, node->level);
+	}
+}
+
+static bool
+PgturbohybridNativeParallelClaimEdgeSegment(PgturbohybridNativeParallelShared *shared,
+											uint16 *segmentIdx,
+											uint32 *startNodeId,
+											uint32 *endNodeId)
+{
+	uint32		idx;
+	uint32		baseSegmentSize;
+	uint32		remainder;
+	uint32		start;
+
+	SpinLockAcquire(&shared->mutex);
+	idx = shared->edgeNextSegment++;
+	SpinLockRelease(&shared->mutex);
+
+	if (idx >= shared->edgeSegmentCount)
+		return false;
+
+	baseSegmentSize = shared->edgeNodeCount / shared->edgeSegmentCount;
+	remainder = shared->edgeNodeCount % shared->edgeSegmentCount;
+	start = idx * baseSegmentSize + Min(idx, remainder);
+	*segmentIdx = (uint16) idx;
+	*startNodeId = start;
+	*endNodeId = start + baseSegmentSize + (idx < remainder ? 1 : 0);
+	return true;
+}
+
+static void
+PgturbohybridNativeParallelWriteEdgeSegment(PgturbohybridQuantBuildState *state,
+											PgturbohybridNativeParallelShared *shared,
+											uint16 segmentIdx,
+											uint32 startNodeId,
+											uint32 endNodeId,
+											PgturbohybridGraphSegmentMetaData *segment)
+{
+	uint16	   *counts = PgturbohybridNativeParallelEdgeNeighborCounts(shared);
+	uint32	   *neighbors = PgturbohybridNativeParallelEdgeNeighbors(shared);
+	PgturbohybridGraphSegmentMetaData *segments =
+		PgturbohybridNativeParallelEdgeSegments(shared);
+
+	segments[segmentIdx] = *segment;
+	for (uint32 nodeId = startNodeId; nodeId < endNodeId; nodeId++)
+	{
+		PgturbohybridGraphBuildNode *node = &state->nodes[nodeId];
+
+		for (int level = 0; level <= node->level; level++)
+		{
+			Size		levelSlot =
+				PgturbohybridNativeParallelEdgeNodeLevelSlot(shared, nodeId, level);
+			Size		neighborSlot =
+				PgturbohybridNativeParallelEdgeNeighborSlot(shared, nodeId, level);
+			int			count = Min(node->neighborCounts[level],
+									(int) shared->edgeMaxNeighbors);
+
+			counts[levelSlot] = (uint16) count;
+			if (count > 0)
+				memcpy(neighbors + neighborSlot, node->neighbors[level],
+					   mul_size(sizeof(uint32), (Size) count));
+		}
+	}
+}
+
+static void
+PgturbohybridNativeParallelEdgeWorker(Relation indexRel,
+									  PgturbohybridNativeParallelShared *shared,
+									  bool leader)
+{
+	PgturbohybridQuantBuildState state;
+	IndexInfo  *indexInfo = BuildIndexInfo(indexRel);
+	int			slot;
+	instr_time	start;
+	uint64		elapsedUs;
+
+	PgturbohybridNativeInitWorkerState(&state, NULL, indexRel, indexInfo, shared);
+	state.parallelShared = shared;
+	state.ecShift = PgturbohybridNativeParallelEcShift(shared);
+	state.ecScale = PgturbohybridNativeParallelEcScale(shared);
+	if (state.ecShift != NULL && state.ecScale != NULL)
+		PgturbohybridGraphFinishCorrectionFit(&state);
+	slot = PgturbohybridNativeParallelClaimParticipant(shared);
+
+	INSTR_TIME_SET_CURRENT(start);
+	for (;;)
+	{
+		uint16		segmentIdx;
+		uint32		startNodeId;
+		uint32		endNodeId;
+		PgturbohybridGraphSegmentMetaData segment;
+
+		CHECK_FOR_INTERRUPTS();
+		if (!PgturbohybridNativeParallelClaimEdgeSegment(shared, &segmentIdx,
+														 &startNodeId,
+														 &endNodeId))
+			break;
+		memset(&segment, 0, sizeof(segment));
+		if (state.nodes != NULL)
+		{
+			pfree(state.nodes);
+			state.nodes = NULL;
+		}
+		PgturbohybridNativeParallelEdgeLoadNodes(&state, shared, startNodeId,
+												 endNodeId);
+		PgturbohybridGraphBuildEdgesRange(&state, startNodeId, endNodeId,
+										  &segment);
+		PgturbohybridNativeParallelWriteEdgeSegment(&state, shared, segmentIdx,
+													startNodeId, endNodeId,
+													&segment);
+	}
+	elapsedUs = (uint64) PgturbohybridGraphElapsedUs(start);
+	PgturbohybridNativeParallelEdgeWorkerUs(shared)[slot] = elapsedUs;
+
+	SpinLockAcquire(&shared->mutex);
+	shared->edgeDistanceCalls += state.buildDistanceCalls;
+	shared->edgeSearchLayerUs += state.buildEdgeSearchLayerUs;
+	shared->edgeSelectNeighborUs += state.buildEdgeSelectNeighborUs;
+	shared->edgeAddNeighborUs += state.buildEdgeAddNeighborUs;
+	shared->edgePruneNeighborUs += state.buildEdgePruneNeighborUs;
+	shared->edgeEntryUpdateUs += state.buildEdgeEntryUpdateUs;
+	shared->edgeNearestTotal += state.buildEdgeNearestTotal;
+	shared->edgeNearestSamples += state.buildEdgeNearestSamples;
+	if (state.buildEdgeMaxFrontierSize > shared->edgeMaxFrontierSize)
+		shared->edgeMaxFrontierSize = state.buildEdgeMaxFrontierSize;
+	shared->nparticipantsdone++;
+	SpinLockRelease(&shared->mutex);
+	ConditionVariableSignal(&shared->workersdonecv);
+	MemoryContextDelete(state.ctx);
+
+	(void) leader;
+}
+
+static void
+PgturbohybridNativeParallelApplyEdges(PgturbohybridQuantBuildState *state,
+									  PgturbohybridNativeParallelShared *shared,
+									  uint64 *repairUs)
+{
+	uint16	   *counts = PgturbohybridNativeParallelEdgeNeighborCounts(shared);
+	uint32	   *neighbors = PgturbohybridNativeParallelEdgeNeighbors(shared);
+	PgturbohybridGraphSegmentMetaData *segments =
+		PgturbohybridNativeParallelEdgeSegments(shared);
+	instr_time	repairStart;
+
+	state->segmentCount = shared->edgeFinalSegmentCount;
+	state->entryNodeId = 0;
+	state->maxLevel = -1;
+	memset(state->segments, 0, sizeof(state->segments));
+	for (uint32 nodeId = 0; nodeId < state->nodeCount; nodeId++)
+	{
+		PgturbohybridGraphBuildNode *node = &state->nodes[nodeId];
+
+		if (node->neighbors == NULL)
+			PgturbohybridGraphAllocateBuildNeighbors(state, node);
+		for (int level = 0; level <= node->level; level++)
+		{
+			Size		levelSlot =
+				PgturbohybridNativeParallelEdgeNodeLevelSlot(shared, nodeId, level);
+			Size		neighborSlot =
+				PgturbohybridNativeParallelEdgeNeighborSlot(shared, nodeId, level);
+			int			count = Min((int) counts[levelSlot],
+									PgturbohybridGraphLevelM(state->m, level));
+
+			node->neighborCounts[level] = count;
+			if (count > 0)
+				memcpy(node->neighbors[level], neighbors + neighborSlot,
+					   mul_size(sizeof(uint32), (Size) count));
+			for (int i = 0; i < count; i++)
+				node->neighborDistances[level][i] =
+					PgturbohybridGraphBuildDistance(state, nodeId,
+													node->neighbors[level][i]);
+		}
+		state->maxLevel = Max(state->maxLevel, node->level);
+	}
+
+	for (uint16 i = 0; i < shared->edgeSegmentCount; i++)
+	{
+		PgturbohybridGraphSegmentMetaData *segment = &segments[i];
+
+		if (i < shared->edgeFinalSegmentCount)
+			state->segments[i] = *segment;
+		if (segment->nodeCount > 0 &&
+			(state->maxLevel < 0 || segment->entryLevel > state->maxLevel ||
+			 state->entryNodeId >= state->nodeCount))
+		{
+			state->entryNodeId = segment->entryNodeId;
+			state->maxLevel = segment->entryLevel;
+		}
+	}
+
+	*repairUs = 0;
+	if (shared->edgeFinalSegmentCount == 1 && shared->edgeSegmentCount > 1)
+	{
+		PgturbohybridGraphSegmentMetaData merged;
+		uint32		globalEntry = state->entryNodeId;
+
+		INSTR_TIME_SET_CURRENT(repairStart);
+		for (uint16 i = 0; i < shared->edgeSegmentCount; i++)
+		{
+			PgturbohybridGraphSegmentMetaData *segment = &segments[i];
+			uint32		entry = segment->entryNodeId;
+
+			if (segment->nodeCount == 0 || entry == globalEntry)
+				continue;
+			for (int level = Min(state->nodes[globalEntry].level,
+								 state->nodes[entry].level);
+				 level >= 0; level--)
+			{
+				double		distance =
+					PgturbohybridGraphBuildDistance(state, globalEntry, entry);
+
+				PgturbohybridGraphAddNeighbor(state, globalEntry, entry, level,
+											  distance);
+				PgturbohybridGraphAddNeighbor(state, entry, globalEntry, level,
+											  distance);
+			}
+		}
+		memset(&merged, 0, sizeof(merged));
+		merged.startNodeId = 0;
+		merged.nodeCount = state->nodeCount;
+		merged.entryNodeId = globalEntry;
+		merged.entryLevel = state->nodes[globalEntry].level;
+		state->segments[0] = merged;
+		state->segmentCount = 1;
+		*repairUs = (uint64) PgturbohybridGraphElapsedUs(repairStart);
+	}
+}
+
 static void
 PgturbohybridGraphFreeExactBuildVectors(PgturbohybridQuantBuildState *state)
 {
@@ -3163,6 +3627,41 @@ PgturbohybridNativeParallelEstimateShared(PgturbohybridQuantBuildState *state,
 	Size		dimensions = (Size) state->dimensions;
 	Size		dimSlots = mul_size(participants, dimensions);
 
+	if (phase == PGTURBOHYBRID_NATIVE_PARALLEL_EDGES)
+	{
+		uint16		edgeSegmentCount = (uint16) recordCapacity;
+		Size		levelCapacity = (Size) PgturbohybridGraphLevelCapacity(state->m);
+		Size		edgeMaxNeighbors = (Size) PgturbohybridGraphLevelM(state->m, 0);
+		Size		nodeCount = (Size) state->nodeCount;
+		Size		nodeLevelSlots = mul_size(nodeCount, levelCapacity);
+		Size		codeBytes =
+			PgturbohybridGraphCodeBytesForBits(state->dimensions, state->tqBits);
+
+		bytes = BUFFERALIGN(sizeof(PgturbohybridNativeParallelShared));
+		bytes = add_size(bytes, MAXALIGN(mul_size(sizeof(uint64), participants)));
+		if (state->ecShift != NULL && state->ecScale != NULL)
+		{
+			bytes = add_size(bytes, MAXALIGN(mul_size(sizeof(float), dimensions)));
+			bytes = add_size(bytes, MAXALIGN(mul_size(sizeof(float), dimensions)));
+		}
+		bytes = add_size(bytes, MAXALIGN(mul_size(sizeof(PgturbohybridNativeParallelEdgeNode),
+												  nodeCount)));
+		bytes = add_size(bytes, MAXALIGN(mul_size(codeBytes, nodeCount)));
+		if (state->residualRerankBytes > 0)
+			bytes = add_size(bytes,
+							 MAXALIGN(mul_size((Size) state->residualRerankBytes,
+											   nodeCount)));
+		bytes = add_size(bytes, MAXALIGN(mul_size(sizeof(uint16),
+												  nodeLevelSlots)));
+		bytes = add_size(bytes, MAXALIGN(mul_size(sizeof(uint32),
+												  mul_size(nodeLevelSlots,
+														   edgeMaxNeighbors))));
+		bytes = add_size(bytes,
+						 MAXALIGN(mul_size(sizeof(PgturbohybridGraphSegmentMetaData),
+										   (Size) edgeSegmentCount)));
+		return bytes;
+	}
+
 	bytes = add_size(BUFFERALIGN(sizeof(PgturbohybridNativeParallelShared)),
 					 table_parallelscan_estimate(state->heap, snapshot));
 	bytes = MAXALIGN(bytes);
@@ -3200,12 +3699,15 @@ PgturbohybridNativeParallelInitShared(PgturbohybridQuantBuildState *state,
 	Size		dimensions = (Size) state->dimensions;
 	Size		participantUsBytes = MAXALIGN(mul_size(sizeof(uint64),
 													 participants));
+	Size		headerBytes = BUFFERALIGN(sizeof(PgturbohybridNativeParallelShared));
 
 	memset(shared, 0, sharedBytes);
 	shared->sharedBytes = sharedBytes;
-	shared->heaprelid = RelationGetRelid(state->heap);
+	shared->heaprelid = state->heap != NULL ? RelationGetRelid(state->heap) :
+		InvalidOid;
 	shared->indexrelid = RelationGetRelid(state->index);
-	shared->isconcurrent = state->indexInfo->ii_Concurrent;
+	shared->isconcurrent = state->indexInfo != NULL &&
+		state->indexInfo->ii_Concurrent;
 	shared->phase = phase;
 	shared->participantCapacity = participantCapacity;
 	shared->dimensions = state->dimensions;
@@ -3216,6 +3718,7 @@ PgturbohybridNativeParallelInitShared(PgturbohybridQuantBuildState *state,
 	shared->tqWeighted = state->tqWeighted;
 	shared->tqRenorm = state->tqRenorm;
 	shared->buildCodeOnly = state->buildCodeOnly;
+	shared->buildFastEdges = state->buildFastEdges;
 	shared->payloadCount = state->payloadCount;
 	shared->payloadBytes = state->payloadBytes;
 	shared->residualRerankBytes = state->residualRerankBytes;
@@ -3225,11 +3728,73 @@ PgturbohybridNativeParallelInitShared(PgturbohybridQuantBuildState *state,
 		mul_size(recordBytes, (Size) recordCapacity) : 0;
 	ConditionVariableInit(&shared->workersdonecv);
 	SpinLockInit(&shared->mutex);
+
+	if (phase == PGTURBOHYBRID_NATIVE_PARALLEL_EDGES)
+	{
+		Size		levelSlots;
+		Size		neighborSlots;
+		Size		correctionBytes = mul_size(sizeof(float), dimensions);
+
+		cursor = headerBytes;
+		shared->edgeNodeCount = state->nodeCount;
+		shared->edgeSegmentCount = (uint16) recordCapacity;
+		shared->edgeFinalSegmentCount =
+			PgturbohybridGraphGetNativeSegments(state->index) > 1 ?
+			shared->edgeSegmentCount : 1;
+		shared->edgeLevelCapacity = PgturbohybridGraphLevelCapacity(state->m);
+		shared->edgeMaxNeighbors = PgturbohybridGraphLevelM(state->m, 0);
+		shared->edgeCodeBytes =
+			PgturbohybridGraphCodeBytesForBits(state->dimensions,
+											   state->tqBits);
+		shared->edgeWorkerUsOffset = cursor;
+		cursor = add_size(cursor, participantUsBytes);
+		if (state->ecShift != NULL && state->ecScale != NULL)
+		{
+			shared->ecShiftOffset = cursor;
+			memcpy(PgturbohybridNativeParallelEcShift(shared), state->ecShift,
+				   correctionBytes);
+			cursor = add_size(cursor, MAXALIGN(correctionBytes));
+			shared->ecScaleOffset = cursor;
+			memcpy(PgturbohybridNativeParallelEcScale(shared), state->ecScale,
+				   correctionBytes);
+			cursor = add_size(cursor, MAXALIGN(correctionBytes));
+		}
+		shared->edgeNodeOffset = cursor;
+		cursor = add_size(cursor,
+						  MAXALIGN(mul_size(sizeof(PgturbohybridNativeParallelEdgeNode),
+											(Size) state->nodeCount)));
+		shared->edgeCodeOffset = cursor;
+		cursor = add_size(cursor,
+						  MAXALIGN(mul_size(shared->edgeCodeBytes,
+											(Size) state->nodeCount)));
+		if (state->residualRerankBytes > 0)
+		{
+			shared->edgeResidualOffset = cursor;
+			cursor = add_size(cursor,
+							  MAXALIGN(mul_size((Size) state->residualRerankBytes,
+												(Size) state->nodeCount)));
+		}
+		levelSlots = mul_size((Size) state->nodeCount,
+							  (Size) shared->edgeLevelCapacity);
+		shared->edgeNeighborCountOffset = cursor;
+		cursor = add_size(cursor, MAXALIGN(mul_size(sizeof(uint16), levelSlots)));
+		shared->edgeNeighborOffset = cursor;
+		neighborSlots = mul_size(levelSlots, (Size) shared->edgeMaxNeighbors);
+		cursor = add_size(cursor, MAXALIGN(mul_size(sizeof(uint32),
+													neighborSlots)));
+		shared->edgeSegmentOffset = cursor;
+		cursor = add_size(cursor,
+						  MAXALIGN(mul_size(sizeof(PgturbohybridGraphSegmentMetaData),
+											(Size) shared->edgeSegmentCount)));
+		PgturbohybridNativeParallelEdgeCopyNodes(state, shared);
+		goto check_estimate;
+	}
+
 	table_parallelscan_initialize(state->heap,
 								  ParallelTableScanFromNativeShared(shared),
 								  snapshot);
 
-	cursor = add_size(BUFFERALIGN(sizeof(PgturbohybridNativeParallelShared)),
+	cursor = add_size(headerBytes,
 					  table_parallelscan_estimate(state->heap, snapshot));
 	cursor = MAXALIGN(cursor);
 	shared->fitCountOffset = cursor;
@@ -3268,6 +3833,7 @@ PgturbohybridNativeParallelInitShared(PgturbohybridQuantBuildState *state,
 		shared->recordsOffset = cursor;
 		cursor = add_size(cursor, shared->recordsBytes);
 	}
+check_estimate:
 	if (cursor > sharedBytes)
 		ereport(ERROR,
 				(errcode(ERRCODE_PROGRAM_LIMIT_EXCEEDED),
@@ -3500,11 +4066,93 @@ PgturbohybridNativeRunParallelPhase(PgturbohybridQuantBuildState *state,
 	return true;
 }
 
+static bool
+PgturbohybridNativeRunParallelEdgePhase(PgturbohybridQuantBuildState *state,
+										int workerRequest,
+										uint16 edgeSegmentCount,
+										int64 *elapsedUs,
+										PgturbohybridNativeParallelShared **sharedOut,
+										ParallelContext **pcxtOut)
+{
+	ParallelContext *pcxt;
+	Size		sharedBytes;
+	PgturbohybridNativeParallelShared *shared;
+	int			querylen = 0;
+	instr_time	start;
+
+	Assert(workerRequest > 0);
+	Assert(edgeSegmentCount > 1);
+	EnterParallelMode();
+	pcxt = CreateParallelContext("pgturbohybrid",
+								 "PgturbohybridNativeParallelBuildMain",
+								 workerRequest);
+	sharedBytes = PgturbohybridNativeParallelEstimateShared(state, InvalidSnapshot,
+															workerRequest + 1,
+															PGTURBOHYBRID_NATIVE_PARALLEL_EDGES,
+															edgeSegmentCount, 0);
+	shm_toc_estimate_chunk(&pcxt->estimator, sharedBytes);
+	shm_toc_estimate_keys(&pcxt->estimator, 1);
+	if (debug_query_string)
+	{
+		querylen = strlen(debug_query_string);
+		shm_toc_estimate_chunk(&pcxt->estimator, querylen + 1);
+		shm_toc_estimate_keys(&pcxt->estimator, 1);
+	}
+	InitializeParallelDSM(pcxt);
+	if (pcxt->seg == NULL)
+	{
+		DestroyParallelContext(pcxt);
+		ExitParallelMode();
+		return false;
+	}
+
+	shared = (PgturbohybridNativeParallelShared *) shm_toc_allocate(pcxt->toc,
+																	sharedBytes);
+	PgturbohybridNativeParallelInitShared(state, shared, InvalidSnapshot,
+										  PGTURBOHYBRID_NATIVE_PARALLEL_EDGES,
+										  workerRequest + 1,
+										  edgeSegmentCount, 0, sharedBytes);
+	shm_toc_insert(pcxt->toc, PARALLEL_KEY_PGTURBOHYBRID_NATIVE_SHARED, shared);
+	if (debug_query_string)
+	{
+		char	   *sharedquery = (char *) shm_toc_allocate(pcxt->toc,
+															querylen + 1);
+
+		memcpy(sharedquery, debug_query_string, querylen + 1);
+		shm_toc_insert(pcxt->toc, PARALLEL_KEY_PGTURBOHYBRID_NATIVE_QUERY,
+					   sharedquery);
+	}
+
+	LaunchParallelWorkers(pcxt);
+	if (pcxt->nworkers_launched == 0)
+	{
+		WaitForParallelWorkersToFinish(pcxt);
+		DestroyParallelContext(pcxt);
+		ExitParallelMode();
+		return false;
+	}
+
+	shared->nparticipants = pcxt->nworkers_launched + 1;
+	elog(DEBUG1, "pgturbohybrid native graph parallel build using %d workers for edge construction across %u segments",
+		 pcxt->nworkers_launched, edgeSegmentCount);
+
+	INSTR_TIME_SET_CURRENT(start);
+	PgturbohybridNativeParallelEdgeWorker(state->index, shared, true);
+	WaitForParallelWorkersToAttach(pcxt);
+	PgturbohybridNativeParallelWait(shared);
+	if (elapsedUs != NULL)
+		*elapsedUs = PgturbohybridGraphElapsedUs(start);
+
+	*sharedOut = shared;
+	*pcxtOut = pcxt;
+	return true;
+}
+
 static void
 PgturbohybridNativeFinishParallelPhase(ParallelContext *pcxt, Snapshot snapshot)
 {
 	WaitForParallelWorkersToFinish(pcxt);
-	if (IsMVCCSnapshot(snapshot))
+	if (snapshot != InvalidSnapshot && IsMVCCSnapshot(snapshot))
 		UnregisterSnapshot(snapshot);
 	DestroyParallelContext(pcxt);
 	ExitParallelMode();
@@ -3537,6 +4185,10 @@ tqgraphbuild(Relation heap, Relation index, IndexInfo *indexInfo)
 	bool		parallelFitEnabled = false;
 	bool		parallelScanEnabled = false;
 	bool		parallelEncodeEnabled = false;
+	bool		parallelEdgeBuildEnabled = false;
+	uint16		parallelEdgeSegments = 0;
+	uint32		parallelEdgeWorkersLaunched = 0;
+	uint64		parallelEdgeRepairUs = 0;
 	uint32		workerScanUsCount = 0;
 	uint64		workerScanUs[PGTURBOHYBRID_NATIVE_BUILD_STATS_MAX_WORKERS];
 	uint64		edgeDistanceStart;
@@ -3735,9 +4387,52 @@ tqgraphbuild(Relation heap, Relation index, IndexInfo *indexInfo)
 	PgturbohybridGraphDebugBuildPhaseStart(&state, "build_edges");
 	INSTR_TIME_SET_CURRENT(phaseStart);
 	edgeDistanceStart = state.buildDistanceCalls;
-	PgturbohybridGraphBuildEdges(&state);
+	if (workerRequest > 0 &&
+		PgturbohybridNativeParallelEdgeEligible(&state,
+												pgturbohybrid_native_parallel_edge_build ==
+												PGTURBOHYBRID_NATIVE_PARALLEL_EDGE_BUILD_ON))
+	{
+		PgturbohybridNativeParallelShared *edgeShared = NULL;
+		ParallelContext *edgePcxt = NULL;
+		int64		edgeWallUs = 0;
+		uint16		edgeSegmentCount =
+			PgturbohybridNativeParallelEdgeSegmentCount(&state, workerRequest);
+
+		if (edgeSegmentCount > 1 &&
+			PgturbohybridNativeRunParallelEdgePhase(&state, workerRequest,
+													edgeSegmentCount,
+													&edgeWallUs,
+													&edgeShared,
+													&edgePcxt))
+		{
+			PgturbohybridNativeParallelApplyEdges(&state, edgeShared,
+												  &parallelEdgeRepairUs);
+			state.buildDistanceCalls += edgeShared->edgeDistanceCalls;
+			state.buildEdgeSearchLayerUs += edgeShared->edgeSearchLayerUs;
+			state.buildEdgeSelectNeighborUs += edgeShared->edgeSelectNeighborUs;
+			state.buildEdgeAddNeighborUs += edgeShared->edgeAddNeighborUs;
+			state.buildEdgePruneNeighborUs += edgeShared->edgePruneNeighborUs;
+			state.buildEdgeEntryUpdateUs += edgeShared->edgeEntryUpdateUs;
+			state.buildEdgeNearestTotal += edgeShared->edgeNearestTotal;
+			state.buildEdgeNearestSamples += edgeShared->edgeNearestSamples;
+			state.buildEdgeMaxFrontierSize =
+				Max(state.buildEdgeMaxFrontierSize,
+					edgeShared->edgeMaxFrontierSize);
+			parallelEdgeBuildEnabled = true;
+			parallelEdgeSegments = edgeShared->edgeSegmentCount;
+			parallelEdgeWorkersLaunched = Max(edgeShared->nparticipants - 1, 0);
+			workerCount = Max(workerCount, (int) parallelEdgeWorkersLaunched);
+			edgesUs = edgeWallUs;
+			PgturbohybridNativeFinishParallelPhase(edgePcxt, InvalidSnapshot);
+		}
+		else
+			PgturbohybridGraphBuildEdges(&state);
+	}
+	else
+		PgturbohybridGraphBuildEdges(&state);
 	state.buildEdgeDistanceCalls = state.buildDistanceCalls - edgeDistanceStart;
-	edgesUs = PgturbohybridGraphElapsedUs(phaseStart);
+	if (!parallelEdgeBuildEnabled)
+		edgesUs = PgturbohybridGraphElapsedUs(phaseStart);
 	PgturbohybridGraphDebugBuildPhaseDone(&state, "build_edges", phaseStart);
 
 	PgturbohybridGraphDebugBuildPhaseStart(&state, "free_exact_build_vectors");
@@ -3865,13 +4560,21 @@ tqgraphbuild(Relation heap, Relation index, IndexInfo *indexInfo)
 			buildStats.nativeSegmentCount * sizeof(PgturbohybridGraphSegmentMetaData);
 		buildStats.parallelSegmentBuildEnabled = false;
 		strlcpy(buildStats.segmentBuildMode,
-				buildStats.nativeSegmentCount > 1 ? "serial" : "single",
+				parallelEdgeBuildEnabled ?
+				(buildStats.nativeSegmentCount > 1 ? "parallel_segmented" :
+				 "parallel_repaired") :
+				(buildStats.nativeSegmentCount > 1 ? "serial" : "single"),
 				sizeof(buildStats.segmentBuildMode));
 		buildStats.nativeBuildWorkersRequested = workerRequest;
 		buildStats.nativeBuildWorkersLaunched = workerCount;
 		buildStats.parallelFitEnabled = parallelFitEnabled;
 		buildStats.parallelScanEnabled = parallelScanEnabled;
 		buildStats.parallelEncodeEnabled = parallelEncodeEnabled;
+		buildStats.parallelSegmentBuildEnabled = parallelEdgeBuildEnabled;
+		buildStats.parallelEdgeBuildEnabled = parallelEdgeBuildEnabled;
+		buildStats.parallelEdgeSegments = parallelEdgeSegments;
+		buildStats.parallelEdgeWorkersLaunched = parallelEdgeWorkersLaunched;
+		buildStats.parallelEdgeRepairUs = parallelEdgeRepairUs;
 		buildStats.workerMergeUs = workerMergeUs;
 		buildStats.workerScanUsCount = workerScanUsCount;
 		memcpy(buildStats.workerScanUs, workerScanUs,

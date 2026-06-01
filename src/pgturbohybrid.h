@@ -228,6 +228,7 @@ extern bool pgturbohybrid_dense_u8_batch_x4;
 extern int	pgturbohybrid_native_cache_policy;
 extern int	pgturbohybrid_native_cache_max_mb;
 extern char *pgturbohybrid_native_build_workers;
+extern int	pgturbohybrid_native_parallel_edge_build;
 extern int	pgturbohybrid_native_segment_budget;
 extern int	pgturbohybrid_dense_exact_simd_force;
 extern int	pgturbohybrid_dense_graph_batch_scoring;
@@ -288,6 +289,13 @@ typedef enum PgturbohybridNativeSegmentBudgetMode
 	PGTURBOHYBRID_NATIVE_SEGMENT_BUDGET_SQRT,
 	PGTURBOHYBRID_NATIVE_SEGMENT_BUDGET_LINEAR
 }			PgturbohybridNativeSegmentBudgetMode;
+
+typedef enum PgturbohybridNativeParallelEdgeBuildMode
+{
+	PGTURBOHYBRID_NATIVE_PARALLEL_EDGE_BUILD_AUTO,
+	PGTURBOHYBRID_NATIVE_PARALLEL_EDGE_BUILD_OFF,
+	PGTURBOHYBRID_NATIVE_PARALLEL_EDGE_BUILD_ON
+}			PgturbohybridNativeParallelEdgeBuildMode;
 
 typedef enum PgturbohybridBuildNeighborSelectReason
 {
@@ -1318,6 +1326,10 @@ typedef struct PgturbohybridNativeBuildStatsSnapshot
 	bool		parallelFitEnabled;
 	bool		parallelScanEnabled;
 	bool		parallelEncodeEnabled;
+	bool		parallelEdgeBuildEnabled;
+	uint32		parallelEdgeSegments;
+	uint32		parallelEdgeWorkersLaunched;
+	uint64		parallelEdgeRepairUs;
 	uint64		workerMergeUs;
 	uint32		workerScanUsCount;
 	uint64		workerScanUs[PGTURBOHYBRID_NATIVE_BUILD_STATS_MAX_WORKERS];

@@ -206,6 +206,13 @@ static const struct config_enum_entry pgturbohybrid_native_segment_budget_option
 	{NULL, 0, false}
 };
 
+static const struct config_enum_entry pgturbohybrid_native_parallel_edge_build_options[] = {
+	{"auto", PGTURBOHYBRID_NATIVE_PARALLEL_EDGE_BUILD_AUTO, false},
+	{"off", PGTURBOHYBRID_NATIVE_PARALLEL_EDGE_BUILD_OFF, false},
+	{"on", PGTURBOHYBRID_NATIVE_PARALLEL_EDGE_BUILD_ON, false},
+	{NULL, 0, false}
+};
+
 static const struct config_enum_entry pgturbohybrid_dense_rescore_band_options[] = {
 	{"auto", PGTURBOHYBRID_RESCORE_BAND_POLICY_AUTO, false},
 	{"off", PGTURBOHYBRID_RESCORE_BAND_POLICY_OFF, false},
@@ -3775,12 +3782,19 @@ PgturbohybridInit(void)
 							512, 0, 1048576,
 							PGC_USERSET, GUC_UNIT_MB, NULL, NULL, NULL);
 	DefineCustomStringVariable("turbohybrid.native_build_workers",
-							   "Parallel worker count for native dense graph build scan and encoding",
-							   "Default 2 requests parallel native builds; auto uses PostgreSQL's parallel CREATE INDEX worker choice; 0 disables native parallel build; 1, 2, 4, or 8 requests that many workers. Edge construction remains serial.",
+							   "Parallel worker count for native dense graph build scan, encoding, and edge construction",
+							   "Default 2 requests parallel native builds; auto uses PostgreSQL's parallel CREATE INDEX worker choice; 0 disables native parallel build; 1, 2, 4, or 8 requests that many workers.",
 							   &pgturbohybrid_native_build_workers,
 							   "2", PGC_USERSET, 0,
 							   PgturbohybridNativeBuildWorkersCheck,
 							   NULL, NULL);
+	DefineCustomEnumVariable("turbohybrid.native_parallel_edge_build",
+							 "Parallelize native dense graph edge construction",
+							 "auto parallelizes code-only native graph edge construction when workers are available; on requires the parallel edge path and errors if unsupported; off preserves serial edge construction.",
+							 &pgturbohybrid_native_parallel_edge_build,
+							 PGTURBOHYBRID_NATIVE_PARALLEL_EDGE_BUILD_AUTO,
+							 pgturbohybrid_native_parallel_edge_build_options,
+							 PGC_USERSET, 0, NULL, NULL, NULL);
 	DefineCustomEnumVariable("turbohybrid.native_segment_budget",
 							 "Native dense graph segment search budget scaling",
 							 "auto scales search budget for segmented native graphs (sqrt by default, linear for quality/exact-build indexes); off preserves the raw search budget; sqrt and linear force explicit scaling modes for benchmarks.",
