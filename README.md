@@ -36,6 +36,39 @@ hypercar, but still has room for groceries.
 - It is a good fit for evaluation, prototypes, and controlled experiments.
 - Treat production use as something to validate carefully, not assume.
 
+## Benchmarks
+
+Dense (vector-only) retrieval on **dbpedia-openai-1M** (1,000,000 × 1536-d,
+cosine), top-10, run with the [vector-db-benchmark][vdbb] harness at
+`parallel=8` on a single node (AWS c6i, Intel Xeon Platinum 8375C). Every engine
+is measured at **steady state**: an untimed warm-up pass precedes the timed run
+so each engine's cache/buffers are hot. (Without this, engines that keep their
+working set in a separate cache populated on first access — including
+pgturbohybrid's native scan cache — are unfairly penalized against engines whose
+index is already warm in shared buffers from the build.)
+
+| engine | recall@10 | queries/s | mean latency |
+|---|---:|---:|---:|
+| **pgturbohybrid `dense`** | 0.836 | **5739** | 1.27 ms |
+| **pgturbohybrid `high_recall`** | **0.983** | **2800** | 2.71 ms |
+| weaviate | 0.977 | 2633 | 2.90 ms |
+| pgvector (HNSW) | 0.979 | 1770 | 4.37 ms |
+| qdrant | 0.986 | 853 | 9.24 ms |
+| milvus | 0.988 | 750 | 10.39 ms |
+
+- `dense` is the speed profile (4-bit, no rescore): the highest throughput here,
+  ~3.2× pgvector, at recall 0.84 — use it when approximate recall is acceptable.
+- `high_recall` is the exact-free high-recall profile (4-bit + heap-band
+  rescore): **0.983 recall at 2800 q/s** — the best recall-per-throughput in this
+  set. It beats pgvector on both recall *and* throughput, and delivers ~3× the
+  throughput of qdrant/milvus at near-equal recall.
+
+Single machine, single dataset — repeat on your own data and hardware. 4-bit
+quantization is strongest on cosine / inner-product embeddings; high-dimensional
+L2 (e.g. GIST-960) is a weaker case where recall holds up but latency does not.
+
+[vdbb]: https://github.com/johannhartmann/vector-db-benchmark
+
 ## What It Does
 
 TurboHybrid, the feature provided by `pgturbohybrid`, aims to make hybrid search
