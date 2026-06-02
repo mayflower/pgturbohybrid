@@ -967,7 +967,7 @@ PgturbohybridGraphBuildPayloadRefs(PgturbohybridGraphMetaPageData *meta, Pgturbo
 	if (refCount == 0)
 		return;
 
-	storage->payloadRefs = palloc(sizeof(PgturbohybridGraphPayloadRef) * refCount);
+	storage->payloadRefs = palloc0(sizeof(PgturbohybridGraphPayloadRef) * refCount);
 	storage->payloadRefCount = refCount;
 
 	for (uint32 nodeId = 0; nodeId < meta->tqNodeCount; nodeId++)
@@ -1677,8 +1677,17 @@ PgturbohybridGraphWriteSharedCacheFile(Relation index,
 		}
 	}
 	if (storage.payloadRefCount > 0)
-		memcpy(payloadRefs, storage.payloadRefs,
-			   storage.payloadRefCount * sizeof(PgturbohybridGraphPayloadRef));
+	{
+		for (uint32 refIndex = 0; refIndex < storage.payloadRefCount; refIndex++)
+		{
+			payloadRefs[refIndex].payloadSlot =
+				storage.payloadRefs[refIndex].payloadSlot;
+			payloadRefs[refIndex].payloadValue =
+				storage.payloadRefs[refIndex].payloadValue;
+			payloadRefs[refIndex].nodeId =
+				storage.payloadRefs[refIndex].nodeId;
+		}
+	}
 
 	if (msync(base, (Size) hdr.fileSize, MS_SYNC) != 0 ||
 		munmap(base, (Size) hdr.fileSize) != 0)
@@ -2358,11 +2367,15 @@ PgturbohybridGraphAppendInsertCacheNode(PgturbohybridGraphNativeCache *cache, Pg
 
 			if (storage->payloadRefs == NULL)
 				storage->payloadRefs =
-					palloc(sizeof(PgturbohybridGraphPayloadRef) * addedRefs);
+					palloc0(sizeof(PgturbohybridGraphPayloadRef) * addedRefs);
 			else
+			{
 				storage->payloadRefs = repalloc(storage->payloadRefs,
 												sizeof(PgturbohybridGraphPayloadRef) *
 												(oldRefCount + addedRefs));
+				memset(&storage->payloadRefs[oldRefCount], 0,
+					   sizeof(PgturbohybridGraphPayloadRef) * addedRefs);
+			}
 			for (int slot = 0; slot < meta->tqPayloadCount; slot++)
 			{
 				if ((payloadMask & (uint16) (1U << slot)) == 0)
