@@ -30,6 +30,59 @@ or install pgvector or `pgturbohybrid`.
 `CURRENT_PGDATABASE` for the current worktree database, and `OLD_PGDATABASE`
 for the optional old patched-branch database.
 
+## Scaling Complexity Smoke Scripts
+
+These SQL scripts create deterministic synthetic data in the target database and
+print timing plus selected `turbohybrid_last_scan_stats()` /
+`turbohybrid_index_stats()` / `turbohybrid_estimate_memory()` fields. They are
+intended to show scaling trends and hot-path diagnostics, not pass/fail timing
+thresholds. Do not commit generated output; redirect it under
+`benchmarks/results/` if you need to keep a local artifact.
+
+Dense filter fallback:
+
+```sh
+psql -d "$PGDATABASE" \
+  -f benchmarks/dev/dense_filter_fallback_bench.sql
+```
+
+Use `NROWS`, `DIMS`, `DENSE_K`, `FINAL_K`, and `FILTER_KEEP_PCT` to scale the
+synthetic corpus. The script compares a graph-owned `INCLUDE` payload filter
+with an unmapped heap filter and prints dense full-band / linear-fallback stats.
+
+Native cache memory and cold/warm scans:
+
+```sh
+psql -d "$PGDATABASE" \
+  -f benchmarks/dev/native_cache_memory_bench.sql
+```
+
+Use `NROWS`, `DIMS`, `DENSE_K`, and `FINAL_K` to scale the index and scan budget.
+The script calls `turbohybrid_estimate_memory()` before any scan, then compares
+first/warm `per_backend` cache behavior against `native_cache_scope=off`.
+
+BM25 cold/warm and large hybrid fusion:
+
+```sh
+psql -d "$PGDATABASE" \
+  -f benchmarks/dev/bm25_cold_warm_bench.sql
+```
+
+Use `NROWS`, `DIMS`, `COMMON_BM25_K`, `RARE_BM25_K`, `HYBRID_K`, and `FINAL_K` to
+scale text and fusion budgets. The script compares common-term cold/warm BM25,
+rare-term BM25, and a hybrid query with large dense/BM25 candidate budgets.
+
+Single-row insert scaling:
+
+```sh
+psql -d "$PGDATABASE" \
+  -f benchmarks/dev/insert_scaling_bench.sql
+```
+
+Use `BASE_ROWS`, `BATCH_ROWS`, `BATCHES`, and `DIMS` to control the starting
+index and inserted batches. Set `DEBUG_INSERT=1` to show DEBUG1 reciprocal
+adjacency instrumentation when the extension build exposes it.
+
 ## Perf Smoke
 
 Use the quick FIQA runner for a small real-data check:

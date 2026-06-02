@@ -3397,20 +3397,89 @@ PgturbohybridGraphCreateMetaPage(Relation index, ForkNumber forkNum)
 	PgturbohybridGraphFinishPage(buf);
 }
 
+static void
+PgturbohybridQuantInitMetaUpdateFromBuild(PgturbohybridQuantBuildState *state,
+							   PgturbohybridQuantMetaUpdate *update,
+							   BlockNumber codeStart, BlockNumber adjStart,
+							   BlockNumber exactStart,
+							   BlockNumber correctionStart)
+{
+	memset(update, 0, sizeof(*update));
+	update->forkNum = state->forkNum;
+	update->building = state->building;
+	update->dimensions = state->dimensions;
+	update->m = state->m;
+	update->efConstruction = state->efConstruction;
+	update->graphMaxLevel = state->maxLevel;
+	update->nodeCount = state->nodeCount;
+	update->entryNodeId = state->entryNodeId;
+	update->entryLevel = state->nodeCount > 0 ?
+		state->nodes[state->entryNodeId].level : -1;
+	update->tqBits = state->tqBits;
+	update->tqPayloadCount = state->payloadCount;
+	update->tqPayloadBytes = state->payloadBytes;
+	update->tqFlags = state->ecShift != NULL && state->ecScale != NULL ?
+		PGTURBOHYBRID_GRAPH_TQ_PLUS : 0;
+	if (state->tqWeighted)
+		update->tqFlags |= PGTURBOHYBRID_GRAPH_TQ_WEIGHTED;
+	if (state->tqRenorm)
+		update->tqFlags |= PGTURBOHYBRID_GRAPH_TQ_RENORM;
+	if (!state->tqExactStorage)
+		update->tqFlags |= PGTURBOHYBRID_GRAPH_EXACT_FREE;
+	if (state->residualRerankBytes > 0)
+		update->tqFlags |= PGTURBOHYBRID_GRAPH_TQ_RESIDUAL_RERANK;
+	if (state->buildExactDistances)
+		update->tqFlags |= PGTURBOHYBRID_GRAPH_TQ_EXACT_BUILD;
+	if (state->graphBackbone)
+		update->tqFlags |= PGTURBOHYBRID_GRAPH_TQ_BACKBONE;
+	if (state->buildFastEdges)
+		update->tqFlags |= PGTURBOHYBRID_GRAPH_TQ_FAST_BUILD_EDGES;
+	update->tqFlags |=
+		PGTURBOHYBRID_GRAPH_TQ_BUILD_NEIGHBOR_REASON_BITS(state->buildNeighborSelectReason);
+	update->tqEntrySidecarCount = state->entrySidecarCount;
+	update->tqEntrySidecarBytes = state->entrySidecarBytes;
+	update->tqResidualRerankBytes = state->residualRerankBytes;
+	if (state->entrySidecarCount > 0)
+		memcpy(update->tqEntrySidecarNodeIds, state->entrySidecarNodeIds,
+			   sizeof(uint32) * state->entrySidecarCount);
+	update->tqRoutingEntryCount = state->routingEntryCount;
+	update->tqRoutingEntryBytes = state->routingEntryBytes;
+	if (state->routingEntryCount > 0)
+		memcpy(update->tqRoutingEntryNodeIds, state->routingEntryNodeIds,
+			   sizeof(uint32) * state->routingEntryCount);
+	update->tqSegmentCount = state->segmentCount;
+	for (uint16 i = 0; i < state->segmentCount; i++)
+	{
+		update->tqSegments[i] = state->segments[i];
+		update->tqSegments[i].codeStartBlkno = codeStart;
+		update->tqSegments[i].adjStartBlkno = adjStart;
+		update->tqSegments[i].exactStartBlkno = exactStart;
+		update->tqSegments[i].correctionStartBlkno = correctionStart;
+	}
+	update->buildScanUs = state->buildScanUs;
+	update->buildCorrectionUs = state->buildCorrectionUs;
+	update->buildEncodeUs = state->buildEncodeUs;
+	update->buildEdgeUs = state->buildEdgeUs;
+	update->buildWriteUs = state->buildWriteUs;
+	update->buildWorkerCount = state->buildWorkerCount;
+}
+
 void
-PgturbohybridQuantUpdateMetaPage(Relation index, PgturbohybridQuantBuildState *state,
-					  BlockNumber codeStart, BlockNumber adjStart,
-					  BlockNumber exactStart, BlockNumber correctionStart)
+PgturbohybridQuantUpdateMetaPageFromUpdate(Relation index,
+							 const PgturbohybridQuantMetaUpdate *update,
+							 BlockNumber codeStart, BlockNumber adjStart,
+							 BlockNumber exactStart,
+							 BlockNumber correctionStart)
 {
 	Buffer		buf;
 	Page		page;
 	PgturbohybridGraphMetaPage metap;
 	GenericXLogState *xlogState = NULL;
 
-	buf = ReadBufferExtended(index, state->forkNum, PGTURBOHYBRID_GRAPH_METAPAGE_BLKNO, RBM_NORMAL, NULL);
+	buf = ReadBufferExtended(index, update->forkNum, PGTURBOHYBRID_GRAPH_METAPAGE_BLKNO, RBM_NORMAL, NULL);
 	LockBuffer(buf, BUFFER_LOCK_EXCLUSIVE);
 
-	if (!state->building && state->forkNum == MAIN_FORKNUM && RelationNeedsWAL(index))
+	if (!update->building && update->forkNum == MAIN_FORKNUM && RelationNeedsWAL(index))
 	{
 		xlogState = GenericXLogStart(index);
 		page = GenericXLogRegisterBuffer(xlogState, buf, 0);
@@ -3420,74 +3489,54 @@ PgturbohybridQuantUpdateMetaPage(Relation index, PgturbohybridQuantBuildState *s
 
 	metap = PgturbohybridGraphPageGetMeta(page);
 
-	metap->dimensions = state->dimensions;
-	metap->m = state->m;
-	metap->efConstruction = state->efConstruction;
+	metap->dimensions = update->dimensions;
+	metap->m = update->m;
+	metap->efConstruction = update->efConstruction;
 	metap->storageKind = PGTURBOHYBRID_GRAPH_STORAGE_QUANT_GRAPH_NATIVE;
 	metap->graphEfSearch = PgturbohybridGraphGetEfSearch(index);
 	metap->graphOversampling = PgturbohybridGraphGetGraphOversampling(index);
 	metap->graphRescoreBand = PgturbohybridGraphGetGraphRescoreBand(index);
-	metap->graphMaxLevel = state->maxLevel;
+	metap->graphMaxLevel = update->graphMaxLevel;
 	metap->graphFlags = metap->graphFlags == 0 ? 1 : metap->graphFlags + 1;
 	metap->entryBlkno = codeStart;
-	metap->entryOffno = state->nodeCount > 0 ? FirstOffsetNumber : InvalidOffsetNumber;
-	metap->entryLevel = state->nodeCount > 0 ? state->nodes[state->entryNodeId].level : -1;
-	metap->tqNodeCount = state->nodeCount;
-	metap->tqEntryNodeId = state->nodeCount > 0 ? state->entryNodeId : UINT_MAX;
-	metap->tqCodeBytes = state->dimensions > 0 ? PgturbohybridGraphCodeBytesForBits(state->dimensions, state->tqBits) : 0;
-	metap->tqPayloadCount = state->payloadCount;
-	metap->tqPayloadBytes = state->payloadBytes;
-	metap->tqFlags = state->ecShift != NULL && state->ecScale != NULL ? PGTURBOHYBRID_GRAPH_TQ_PLUS : 0;
-	if (state->tqWeighted)
-		metap->tqFlags |= PGTURBOHYBRID_GRAPH_TQ_WEIGHTED;
-	if (state->tqRenorm)
-		metap->tqFlags |= PGTURBOHYBRID_GRAPH_TQ_RENORM;
-	if (!state->tqExactStorage)
-		metap->tqFlags |= PGTURBOHYBRID_GRAPH_EXACT_FREE;
-	if (state->residualRerankBytes > 0)
-		metap->tqFlags |= PGTURBOHYBRID_GRAPH_TQ_RESIDUAL_RERANK;
-	if (state->buildExactDistances)
-		metap->tqFlags |= PGTURBOHYBRID_GRAPH_TQ_EXACT_BUILD;
-	if (state->graphBackbone)
-		metap->tqFlags |= PGTURBOHYBRID_GRAPH_TQ_BACKBONE;
-	if (state->buildFastEdges)
-		metap->tqFlags |= PGTURBOHYBRID_GRAPH_TQ_FAST_BUILD_EDGES;
-	metap->tqFlags |= PGTURBOHYBRID_GRAPH_TQ_BUILD_NEIGHBOR_REASON_BITS(state->buildNeighborSelectReason);
-	metap->tqBits = state->tqBits != 0 ? state->tqBits : PGTURBOHYBRID_DEFAULT_BITS;
+	metap->entryOffno = update->nodeCount > 0 ? FirstOffsetNumber : InvalidOffsetNumber;
+	metap->entryLevel = update->nodeCount > 0 ? update->entryLevel : -1;
+	metap->tqNodeCount = update->nodeCount;
+	metap->tqEntryNodeId = update->nodeCount > 0 ? update->entryNodeId : UINT_MAX;
+	metap->tqCodeBytes = update->dimensions > 0 ? PgturbohybridGraphCodeBytesForBits(update->dimensions, update->tqBits) : 0;
+	metap->tqPayloadCount = update->tqPayloadCount;
+	metap->tqPayloadBytes = update->tqPayloadBytes;
+	metap->tqFlags = update->tqFlags;
+	metap->tqBits = update->tqBits != 0 ? update->tqBits : PGTURBOHYBRID_DEFAULT_BITS;
 	metap->tqCodeStartBlkno = codeStart;
 	metap->tqAdjStartBlkno = adjStart;
 	metap->tqExactStartBlkno = exactStart;
 	metap->tqCorrectionStartBlkno = correctionStart;
-	metap->tqEntrySidecarCount = state->entrySidecarCount;
-	metap->tqEntrySidecarBytes = state->entrySidecarBytes;
-	metap->tqResidualRerankBytes = state->residualRerankBytes;
+	metap->tqEntrySidecarCount = update->tqEntrySidecarCount;
+	metap->tqEntrySidecarBytes = update->tqEntrySidecarBytes;
+	metap->tqResidualRerankBytes = update->tqResidualRerankBytes;
 	memset(metap->tqEntrySidecarNodeIds, 0, sizeof(metap->tqEntrySidecarNodeIds));
-	if (state->entrySidecarCount > 0)
-		memcpy(metap->tqEntrySidecarNodeIds, state->entrySidecarNodeIds,
-			   sizeof(uint32) * state->entrySidecarCount);
-	metap->tqRoutingEntryCount = state->routingEntryCount;
-	metap->tqRoutingEntryBytes = state->routingEntryBytes;
+	if (update->tqEntrySidecarCount > 0)
+		memcpy(metap->tqEntrySidecarNodeIds, update->tqEntrySidecarNodeIds,
+			   sizeof(uint32) * update->tqEntrySidecarCount);
+	metap->tqRoutingEntryCount = update->tqRoutingEntryCount;
+	metap->tqRoutingEntryBytes = update->tqRoutingEntryBytes;
 	memset(metap->tqRoutingEntryNodeIds, 0, sizeof(metap->tqRoutingEntryNodeIds));
-	if (state->routingEntryCount > 0)
-		memcpy(metap->tqRoutingEntryNodeIds, state->routingEntryNodeIds,
-			   sizeof(uint32) * state->routingEntryCount);
-	metap->tqSegmentCount = state->segmentCount;
-	metap->tqSegmentBytes = state->segmentCount * sizeof(PgturbohybridGraphSegmentMetaData);
+	if (update->tqRoutingEntryCount > 0)
+		memcpy(metap->tqRoutingEntryNodeIds, update->tqRoutingEntryNodeIds,
+			   sizeof(uint32) * update->tqRoutingEntryCount);
+	metap->tqSegmentCount = update->tqSegmentCount;
+	metap->tqSegmentBytes = update->tqSegmentCount * sizeof(PgturbohybridGraphSegmentMetaData);
 	memset(metap->tqSegments, 0, sizeof(metap->tqSegments));
-	for (uint16 i = 0; i < state->segmentCount; i++)
-	{
-		metap->tqSegments[i] = state->segments[i];
-		metap->tqSegments[i].codeStartBlkno = codeStart;
-		metap->tqSegments[i].adjStartBlkno = adjStart;
-		metap->tqSegments[i].exactStartBlkno = exactStart;
-		metap->tqSegments[i].correctionStartBlkno = correctionStart;
-	}
-	metap->buildScanUs = state->buildScanUs;
-	metap->buildCorrectionUs = state->buildCorrectionUs;
-	metap->buildEncodeUs = state->buildEncodeUs;
-	metap->buildEdgeUs = state->buildEdgeUs;
-	metap->buildWriteUs = state->buildWriteUs;
-	metap->buildWorkerCount = state->buildWorkerCount;
+	if (update->tqSegmentCount > 0)
+		memcpy(metap->tqSegments, update->tqSegments,
+			   sizeof(PgturbohybridGraphSegmentMetaData) * update->tqSegmentCount);
+	metap->buildScanUs = update->buildScanUs;
+	metap->buildCorrectionUs = update->buildCorrectionUs;
+	metap->buildEncodeUs = update->buildEncodeUs;
+	metap->buildEdgeUs = update->buildEdgeUs;
+	metap->buildWriteUs = update->buildWriteUs;
+	metap->buildWorkerCount = update->buildWorkerCount;
 	PgturbohybridGraphMarkPageGraphOp(page, PGTURBOHYBRID_GRAPH_GRAPH_OP_META_UPDATE);
 
 	if (xlogState != NULL)
@@ -3496,7 +3545,20 @@ PgturbohybridQuantUpdateMetaPage(Relation index, PgturbohybridQuantBuildState *s
 		MarkBufferDirty(buf);
 	UnlockReleaseBuffer(buf);
 
-	PgturbohybridGraphLogGraphWalRecord(index, state->forkNum, PGTURBOHYBRID_GRAPH_METAPAGE_BLKNO, PGTURBOHYBRID_GRAPH_GRAPH_OP_META_UPDATE);
+	PgturbohybridGraphLogGraphWalRecord(index, update->forkNum, PGTURBOHYBRID_GRAPH_METAPAGE_BLKNO, PGTURBOHYBRID_GRAPH_GRAPH_OP_META_UPDATE);
+}
+
+void
+PgturbohybridQuantUpdateMetaPage(Relation index, PgturbohybridQuantBuildState *state,
+					  BlockNumber codeStart, BlockNumber adjStart,
+					  BlockNumber exactStart, BlockNumber correctionStart)
+{
+	PgturbohybridQuantMetaUpdate update;
+
+	PgturbohybridQuantInitMetaUpdateFromBuild(state, &update, codeStart, adjStart,
+											  exactStart, correctionStart);
+	PgturbohybridQuantUpdateMetaPageFromUpdate(index, &update, codeStart, adjStart,
+											   exactStart, correctionStart);
 }
 
 static void
@@ -6173,7 +6235,8 @@ PgturbohybridGraphFillCandidateBand(Relation index, PgturbohybridGraphScanOpaque
 						 PgturbohybridGraphMetaPageData *meta,
 						 PgturbohybridGraphScanStorage *storage,
 						 PgturbohybridGraphResult *results, int resultTarget, int count,
-						 int payloadSlot, int32 payloadValue, Datum query)
+						 int payloadSlot, int32 payloadValue, Datum query,
+						 PgturbohybridGraphFillCandidateBandReason reason)
 {
 	bool	   *selected;
 	uint32		batchNodeIds[PGTURBOHYBRID_GRAPH_MAX_NEIGHBORS];
@@ -6182,7 +6245,17 @@ PgturbohybridGraphFillCandidateBand(Relation index, PgturbohybridGraphScanOpaque
 	uint32		payloadFirst = 0;
 	uint32		payloadCount = 0;
 	bool		usePayloadRefs;
+	bool		firstFillCall = so->graphFillCandidateBandCalls == 0;
 
+	so->graphFillCandidateBandCalls++;
+	so->graphFillCandidateBandReason =
+		reason >= PGTURBOHYBRID_GRAPH_FILL_CANDIDATE_BAND_REASON_NONE &&
+		reason <= PGTURBOHYBRID_GRAPH_FILL_CANDIDATE_BAND_REASON_UNKNOWN ?
+		reason : PGTURBOHYBRID_GRAPH_FILL_CANDIDATE_BAND_REASON_UNKNOWN;
+	if (firstFillCall)
+		so->graphFillCandidateBandSelectedBefore = count;
+	so->graphFillCandidateBandSelectedAfter = count;
+	so->graphFillCandidateBandTarget = resultTarget;
 	if (count >= resultTarget || resultTarget <= 0)
 		return count;
 
@@ -6195,6 +6268,9 @@ PgturbohybridGraphFillCandidateBand(Relation index, PgturbohybridGraphScanOpaque
 
 	usePayloadRefs = PgturbohybridGraphPayloadRefRange(storage, payloadSlot, payloadValue,
 											&payloadFirst, &payloadCount);
+	so->graphFillCandidateBandUsedPayloadRefs =
+		so->graphFillCandidateBandUsedPayloadRefs || usePayloadRefs;
+	so->graphFillCandidateBandPayloadRefCount = usePayloadRefs ? payloadCount : 0;
 	if (payloadSlot >= 0 && storage->payloadRefs != NULL && !usePayloadRefs)
 	{
 		pfree(selected);
@@ -6208,6 +6284,7 @@ PgturbohybridGraphFillCandidateBand(Relation index, PgturbohybridGraphScanOpaque
 		PgturbohybridGraphScanNode *node;
 
 		CHECK_FOR_INTERRUPTS();
+		so->graphFillCandidateBandVisited++;
 		if (selected[nodeId])
 			continue;
 		if (!PgturbohybridGraphLoadCodePage(index, so, meta, storage, nodeId))
@@ -6222,6 +6299,7 @@ PgturbohybridGraphFillCandidateBand(Relation index, PgturbohybridGraphScanOpaque
 		batchNodeIds[batchCount++] = nodeId;
 		if (batchCount == PGTURBOHYBRID_GRAPH_MAX_NEIGHBORS)
 		{
+			so->graphFillCandidateBandScored += batchCount;
 			PgturbohybridGraphScoreNodeBatchTimed(so, storage, batchNodeIds, batchCount,
 									   batchDistances, query);
 			for (int i = 0; i < batchCount; i++)
@@ -6243,6 +6321,7 @@ PgturbohybridGraphFillCandidateBand(Relation index, PgturbohybridGraphScanOpaque
 
 	if (batchCount > 0)
 	{
+		so->graphFillCandidateBandScored += batchCount;
 		PgturbohybridGraphScoreNodeBatchTimed(so, storage, batchNodeIds, batchCount,
 								   batchDistances, query);
 		for (int i = 0; i < batchCount; i++)
@@ -6262,6 +6341,7 @@ PgturbohybridGraphFillCandidateBand(Relation index, PgturbohybridGraphScanOpaque
 	}
 
 	pfree(selected);
+	so->graphFillCandidateBandSelectedAfter = count;
 	return count;
 }
 
@@ -7152,6 +7232,7 @@ PgturbohybridGraphCollectResults(IndexScanDesc scan, PgturbohybridGraphScanOpaqu
 	int			payloadSlot = -1;
 	int			candidateOversampling;
 	bool		hasPayloadFilter = false;
+	bool		payloadExactBandMissed = false;
 	bool		exactFree;
 	bool		highDimL2Widened = false;
 	bool		latencyBudgetActive = false;
@@ -7286,6 +7367,24 @@ PgturbohybridGraphCollectResults(IndexScanDesc scan, PgturbohybridGraphScanOpaqu
 		resultTarget = (int) Min((int64) INT_MAX,
 								 Max((int64) resultTarget, conservativeTarget));
 		so->graphWideningReason = PGTURBOHYBRID_DENSE_WIDENING_FILTER;
+		so->graphDenseFilterUnmapped = true;
+		so->graphDenseLinearFallbackRatio =
+			meta.tqNodeCount > 0 ?
+			(double) resultTarget / (double) meta.tqNodeCount : 0.0;
+		so->graphDenseLinearFallbackWarning =
+			so->graphDenseLinearFallbackRatio >=
+			pgturbohybrid_linear_fallback_notice_threshold_ratio;
+		if (pgturbohybrid_warn_linear_fallback &&
+			so->graphDenseLinearFallbackWarning)
+			ereport(DEBUG1,
+					(errmsg("turbohybrid dense graph scan widened for unmapped heap filter"),
+					 errdetail("node_count=%u result_target=%d estimated_selectivity=%.6g max_scan_tuples=%d ratio=%.6g threshold_ratio=%.6g",
+							   meta.tqNodeCount, resultTarget,
+							   estimatedSelectivity,
+							   pgturbohybrid_max_scan_tuples,
+							   so->graphDenseLinearFallbackRatio,
+							   pgturbohybrid_linear_fallback_notice_threshold_ratio),
+					 errhint("Add the filter column as an INCLUDE int4 payload where possible, or lower candidate budgets/max_scan_tuples.")));
 	}
 
 	requestedBaseTarget = Max((int64) 1,
@@ -7343,6 +7442,8 @@ PgturbohybridGraphCollectResults(IndexScanDesc scan, PgturbohybridGraphScanOpaqu
 	so->graphNativeCacheCodeBytes = cacheInfo.codeBytes;
 	so->graphNativeCacheAdjBytes = cacheInfo.adjBytes;
 	so->graphNativeCacheExactBytes = cacheInfo.exactBytes;
+	so->graphNativeCacheWarning = cacheInfo.warning;
+	so->graphNativeCacheWarningReason = cacheInfo.warningReason;
 	so->graphCodeBufferLockWaitUs += cacheInfo.codeBufferLockWaitUs;
 	so->graphAdjBufferLockWaitUs += cacheInfo.adjBufferLockWaitUs;
 	/*
@@ -7357,22 +7458,25 @@ PgturbohybridGraphCollectResults(IndexScanDesc scan, PgturbohybridGraphScanOpaqu
 		(Size) so->graphCodeArenaEstimatedBytes > ((Size) 64 * 1024 * 1024);
 	PgturbohybridGraphAddElapsedUs(&so->graphPrepareUs, phaseStart);
 
-	if (hasPayloadFilter &&
-		PgturbohybridGraphCollectPayloadExactBand(so, &meta, &storage, query,
-									   payloadSlot, payloadValue, results,
-									   resultTarget, &count))
+	if (hasPayloadFilter)
 	{
-		INSTR_TIME_SET_CURRENT(phaseStart);
-		qsort(results, count, sizeof(PgturbohybridGraphResult), PgturbohybridGraphResultCompare);
-		PgturbohybridGraphAddElapsedUs(&so->graphSortUs, phaseStart);
-		so->graphCandidateCount = count;
-		so->graphEffectiveRescoreBand = so->graphRescoreCount;
-		so->tqGraphResults = results;
-		so->tqGraphResultCount = count;
-		so->tqGraphResultIndex = 0;
-		PgturbohybridGraphAddElapsedUs(&so->graphTotalUs, totalStart);
-		PgturbohybridGraphRecordGraphScanStats(so);
-		return;
+		if (PgturbohybridGraphCollectPayloadExactBand(so, &meta, &storage, query,
+										   payloadSlot, payloadValue, results,
+										   resultTarget, &count))
+		{
+			INSTR_TIME_SET_CURRENT(phaseStart);
+			qsort(results, count, sizeof(PgturbohybridGraphResult), PgturbohybridGraphResultCompare);
+			PgturbohybridGraphAddElapsedUs(&so->graphSortUs, phaseStart);
+			so->graphCandidateCount = count;
+			so->graphEffectiveRescoreBand = so->graphRescoreCount;
+			so->tqGraphResults = results;
+			so->tqGraphResultCount = count;
+			so->tqGraphResultIndex = 0;
+			PgturbohybridGraphAddElapsedUs(&so->graphTotalUs, totalStart);
+			PgturbohybridGraphRecordGraphScanStats(so);
+			return;
+		}
+		payloadExactBandMissed = true;
 	}
 
 	INSTR_TIME_SET_CURRENT(phaseStart);
@@ -7386,7 +7490,8 @@ PgturbohybridGraphCollectResults(IndexScanDesc scan, PgturbohybridGraphScanOpaqu
 		INSTR_TIME_SET_CURRENT(phaseStart);
 		count = PgturbohybridGraphFillCandidateBand(scan->indexRelation, so, &meta,
 										 &storage, results, resultTarget, count,
-										 payloadSlot, payloadValue, query);
+										 payloadSlot, payloadValue, query,
+										 PGTURBOHYBRID_GRAPH_FILL_CANDIDATE_BAND_REASON_UNDERFILLED_FULL_TARGET);
 		PgturbohybridGraphAddElapsedUs(&so->graphFillUs, phaseStart);
 	}
 	if (estimatedSelectivity > 0 && estimatedSelectivity < 1 && count < resultTarget)
@@ -7394,7 +7499,10 @@ PgturbohybridGraphCollectResults(IndexScanDesc scan, PgturbohybridGraphScanOpaqu
 		INSTR_TIME_SET_CURRENT(phaseStart);
 		count = PgturbohybridGraphFillCandidateBand(scan->indexRelation, so, &meta,
 										 &storage, results, resultTarget, count,
-										 payloadSlot, payloadValue, query);
+										 payloadSlot, payloadValue, query,
+										 payloadExactBandMissed ?
+										 PGTURBOHYBRID_GRAPH_FILL_CANDIDATE_BAND_REASON_PAYLOAD_EXACT_BAND_MISS :
+										 PGTURBOHYBRID_GRAPH_FILL_CANDIDATE_BAND_REASON_ESTIMATED_SELECTIVITY);
 		PgturbohybridGraphAddElapsedUs(&so->graphFillUs, phaseStart);
 	}
 	INSTR_TIME_SET_CURRENT(phaseStart);
@@ -7462,7 +7570,8 @@ PgturbohybridGraphCollectResults(IndexScanDesc scan, PgturbohybridGraphScanOpaqu
 				INSTR_TIME_SET_CURRENT(phaseStart);
 				count = PgturbohybridGraphFillCandidateBand(scan->indexRelation, so, &meta,
 											 &storage, results, resultTarget, count,
-											 payloadSlot, payloadValue, query);
+											 payloadSlot, payloadValue, query,
+											 PGTURBOHYBRID_GRAPH_FILL_CANDIDATE_BAND_REASON_ADAPTIVE_WIDENING);
 				PgturbohybridGraphAddElapsedUs(&so->graphFillUs, phaseStart);
 			}
 			INSTR_TIME_SET_CURRENT(phaseStart);
@@ -7507,7 +7616,8 @@ PgturbohybridGraphCollectResults(IndexScanDesc scan, PgturbohybridGraphScanOpaqu
 												 &storage, results,
 												 resultTarget, count,
 												 payloadSlot, payloadValue,
-												 query);
+												 query,
+												 PGTURBOHYBRID_GRAPH_FILL_CANDIDATE_BAND_REASON_TIGHT_L2_EXACT_POLICY);
 				PgturbohybridGraphAddElapsedUs(&so->graphFillUs, phaseStart);
 			}
 			INSTR_TIME_SET_CURRENT(phaseStart);
@@ -7645,6 +7755,19 @@ PgturbohybridGraphCollectDenseCandidates(IndexScanDesc scan, int targetK,
 			stats->heapFetchUs = so->graphHeapFetchUs;
 			stats->heapRescoreUs = so->graphHeapRescoreUs;
 			stats->fillUs = so->graphFillUs;
+			stats->fillCandidateBandCalls = so->graphFillCandidateBandCalls;
+			stats->fillCandidateBandReason = so->graphFillCandidateBandReason;
+			stats->fillCandidateBandVisited = so->graphFillCandidateBandVisited;
+			stats->fillCandidateBandScored = so->graphFillCandidateBandScored;
+			stats->fillCandidateBandSelectedBefore =
+				so->graphFillCandidateBandSelectedBefore;
+			stats->fillCandidateBandSelectedAfter =
+				so->graphFillCandidateBandSelectedAfter;
+			stats->fillCandidateBandTarget = so->graphFillCandidateBandTarget;
+			stats->fillCandidateBandUsedPayloadRefs =
+				so->graphFillCandidateBandUsedPayloadRefs;
+			stats->fillCandidateBandPayloadRefCount =
+				so->graphFillCandidateBandPayloadRefCount;
 			stats->rescoreUs = so->graphRescoreUs;
 			stats->sortUs = so->graphSortUs;
 			stats->exactRescoreSource = so->graphExactRescoreSource;

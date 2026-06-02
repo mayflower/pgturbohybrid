@@ -131,6 +131,40 @@ PgturbohybridGraphNativeCacheMaxBytes(void)
 	return (Size) pgturbohybrid_native_cache_max_mb * 1024 * 1024;
 }
 
+static inline Size
+PgturbohybridGraphNativeCacheWarnBytes(void)
+{
+	return (Size) pgturbohybrid_native_cache_warn_mb * 1024 * 1024;
+}
+
+static const char *
+PgturbohybridGraphNativeCachePolicyNameForLog(int policy)
+{
+	switch ((PgturbohybridNativeCachePolicy) policy)
+	{
+		case PGTURBOHYBRID_NATIVE_CACHE_POLICY_OFF:
+			return "off";
+		case PGTURBOHYBRID_NATIVE_CACHE_POLICY_PER_BACKEND:
+			return "per_backend";
+		case PGTURBOHYBRID_NATIVE_CACHE_POLICY_SHARED:
+			return "shared";
+		case PGTURBOHYBRID_NATIVE_CACHE_POLICY_AUTO:
+		default:
+			return "auto";
+	}
+}
+
+static bool
+PgturbohybridGraphNativeCacheWarns(PgturbohybridGraphNativeCache *cache)
+{
+	Size		warnBytes;
+
+	if (cache == NULL || pgturbohybrid_native_cache_warn_mb <= 0)
+		return false;
+	warnBytes = PgturbohybridGraphNativeCacheWarnBytes();
+	return warnBytes > 0 && cache->residentTotalBytes >= warnBytes;
+}
+
 static int
 PgturbohybridGraphEffectiveScanNativeCachePolicy(void)
 {
@@ -440,6 +474,102 @@ PgturbohybridGraphShouldUseNativeCache(PgturbohybridGraphMetaPageData *meta,
 	return PgturbohybridGraphShouldUseNativeCacheWithPolicy(meta, cacheExactVectors,
 															pgturbohybrid_native_cache_policy,
 															reason);
+}
+
+bool
+PgturbohybridGraphEstimateMemory(Relation index,
+								 PgturbohybridGraphMetaPageData *meta,
+								 PgturbohybridGraphMemoryEstimate *estimate)
+{
+	uint64		totalBytes = 0;
+	uint64		adjRecordCount;
+	uint64		neighborCapacityPerNode = 0;
+	int			codeTuplesPerPage;
+	int			levelCapacity;
+	Size		exactBytesPerNode;
+
+	memset(estimate, 0, sizeof(*estimate));
+	if (meta == NULL || !PgturbohybridGraphReadMeta(index, meta))
+		return false;
+
+	estimate->available = true;
+	estimate->adjacencyEstimated = true;
+	estimate->cacheExactVectors = PgturbohybridGraphShouldCacheExactVectors(index, meta);
+	estimate->cachePolicy = pgturbohybrid_native_cache_policy;
+	estimate->effectiveCachePolicy = PgturbohybridGraphEffectiveScanNativeCachePolicy();
+	(void) PgturbohybridGraphShouldUseNativeCache(meta,
+												  estimate->cacheExactVectors,
+												  &estimate->cacheReason);
+	estimate->nodeCount = meta->tqNodeCount;
+	estimate->dimensions = meta->dimensions;
+	estimate->quantizationBits = meta->tqBits != 0 ? meta->tqBits :
+		PGTURBOHYBRID_DEFAULT_BITS;
+
+	estimate->codeBytes =
+		(uint64) meta->tqNodeCount * (uint64) meta->tqCodeBytes;
+	estimate->payloadBytes =
+		(uint64) meta->tqNodeCount * (uint64) meta->tqPayloadBytes;
+	estimate->residualBytes =
+		(uint64) meta->tqNodeCount * (uint64) meta->tqResidualRerankBytes;
+	estimate->nodeBytes =
+		(uint64) meta->tqNodeCount * (uint64) sizeof(PgturbohybridGraphScanNode);
+	if (meta->tqNodeCount > 0)
+		estimate->visitedGenerationBytes =
+			(uint64) meta->tqNodeCount * (uint64) sizeof(uint32);
+
+	exactBytesPerNode = PGTURBOHYBRID_VECTOR_SIZE(meta->dimensions);
+	if (estimate->cacheExactVectors &&
+		BlockNumberIsValid(meta->tqExactStartBlkno) &&
+		meta->tqNodeCount > 0 &&
+		exactBytesPerNode > 0 &&
+		(uint64) meta->tqNodeCount <= UINT64_MAX / (uint64) exactBytesPerNode &&
+		(uint64) meta->tqNodeCount * (uint64) exactBytesPerNode <=
+		PGTURBOHYBRID_GRAPH_EXACT_CACHE_AUTO_MAX_BYTES)
+		estimate->exactBytes =
+			(uint64) meta->tqNodeCount * (uint64) exactBytesPerNode;
+
+	levelCapacity = PgturbohybridGraphLevelCapacity(meta->m);
+	estimate->levelCapacity = (uint16) levelCapacity;
+	adjRecordCount = (uint64) PgturbohybridGraphAdjRecordCount(meta);
+	for (int level = 0; level < levelCapacity; level++)
+		neighborCapacityPerNode +=
+			(uint64) PgturbohybridGraphLevelM(meta->m, level);
+	estimate->adjacencyBytes =
+		adjRecordCount *
+		((uint64) sizeof(uint32 *) + (uint64) sizeof(uint16) +
+		 (uint64) sizeof(BlockNumber) + (uint64) sizeof(OffsetNumber)) +
+		(uint64) meta->tqNodeCount * neighborCapacityPerNode *
+		(uint64) sizeof(uint32);
+
+	codeTuplesPerPage =
+		PgturbohybridGraphTuplesPerPage(PgturbohybridGraphCodeTupleSize(meta->dimensions,
+											 meta->tqPayloadCount,
+											 meta->tqBits,
+											 (meta->tqFlags & PGTURBOHYBRID_GRAPH_TQ_WEIGHTED) != 0,
+											 meta->tqResidualRerankBytes));
+	estimate->codePageCount =
+		(uint32) PgturbohybridGraphPageCount(meta->tqNodeCount,
+											 codeTuplesPerPage);
+	estimate->pageMapBytes =
+		(uint64) estimate->codePageCount *
+		((uint64) sizeof(bool) + (uint64) sizeof(BlockNumber));
+
+	estimate->sharedBackendViewBytes =
+		estimate->nodeBytes +
+		adjRecordCount * (uint64) sizeof(uint32 *) +
+		estimate->visitedGenerationBytes +
+		(meta->tqNodeCount > 0 ? (uint64) sizeof(uint32) : 0);
+
+	totalBytes += estimate->codeBytes;
+	totalBytes += estimate->adjacencyBytes;
+	totalBytes += estimate->exactBytes;
+	totalBytes += estimate->nodeBytes;
+	totalBytes += estimate->visitedGenerationBytes;
+	totalBytes += estimate->payloadBytes;
+	totalBytes += estimate->residualBytes;
+	totalBytes += estimate->pageMapBytes;
+	estimate->estimatedTotalBytes = totalBytes;
+	return true;
 }
 
 static void
@@ -1113,6 +1243,15 @@ PgturbohybridGraphBuildCache(Relation index, PgturbohybridGraphMetaPageData *met
 	cache->storage.cached = true;
 
 	PgturbohybridGraphCacheComputeResidentBytes(cache, meta);
+	if (PgturbohybridGraphNativeCacheWarns(cache))
+		ereport(DEBUG1,
+				(errmsg("pgturbohybrid native graph per-backend cache exceeds warning threshold"),
+				 errdetail("index=%s resident_bytes=%llu warn_mb=%d cache_policy=%s",
+						   RelationGetRelationName(index),
+						   (unsigned long long) cache->residentTotalBytes,
+						   pgturbohybrid_native_cache_warn_mb,
+						   PgturbohybridGraphNativeCachePolicyNameForLog(pgturbohybrid_native_cache_policy)),
+				 errhint("per_backend native cache memory is allocated per active PostgreSQL backend; use turbohybrid_estimate_memory(index), native_cache_scope=shared, or native_cache_scope=off when concurrency would multiply this footprint too far.")));
 	cache->buildCodeBufferLockWaitUs = loadStats.graphCodeBufferLockWaitUs;
 	cache->buildAdjBufferLockWaitUs = loadStats.graphAdjBufferLockWaitUs;
 
@@ -1963,6 +2102,9 @@ PgturbohybridGraphInitScanStorage(Relation index, PgturbohybridGraphMetaPageData
 		info->codeBytes = (int64) cache->residentCodeBytes;
 		info->adjBytes = (int64) cache->residentAdjBytes;
 		info->exactBytes = (int64) cache->residentExactBytes;
+		info->warning = PgturbohybridGraphNativeCacheWarns(cache);
+		info->warningReason = info->warning ?
+			"per_backend_resident_bytes_exceed_warn_mb" : "none";
 		if (info->builtThisScan)
 		{
 			info->codeBufferLockWaitUs = cache->buildCodeBufferLockWaitUs;
@@ -1980,6 +2122,7 @@ PgturbohybridGraphInitInsertStorage(Relation index, PgturbohybridGraphMetaPageDa
 
 	if (pgturbohybrid_native_cache_policy == PGTURBOHYBRID_NATIVE_CACHE_POLICY_SHARED)
 	{
+		/* Inserts need mutable cache state; shared-cache views are scan-only. */
 		PgturbohybridGraphInitScanStorageUncached(meta, storage, cacheExactVectors);
 		return NULL;
 	}
@@ -1995,6 +2138,13 @@ PgturbohybridGraphInitInsertStorage(Relation index, PgturbohybridGraphMetaPageDa
 		cache = PgturbohybridGraphBuildCache(index, meta);
 
 	memcpy(storage, &cache->storage, sizeof(PgturbohybridGraphScanStorage));
+	/*
+	 * The native cache loads adjacency tuple locations with the adjacency
+	 * records.  Single-row reciprocal updates use these block/offset arrays to
+	 * avoid adjacency page-chain scans whenever cached insert storage is valid.
+	 */
+	Assert(cache->storage.adjBlknos != NULL);
+	Assert(cache->storage.adjOffnos != NULL);
 	storage->cached = true;
 	return cache;
 }
