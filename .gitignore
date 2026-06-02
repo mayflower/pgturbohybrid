@@ -48,3 +48,6 @@ Thumbs.db
 *.exp
 *.pyc
 __pycache__/
+
+# local working notes — keep untracked
+expert.md
