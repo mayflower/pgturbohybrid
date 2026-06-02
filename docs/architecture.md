@@ -163,7 +163,7 @@ defaults for these, so override only for a specific need.
   working set fits `turbohybrid.native_cache_max_mb`; `per_backend` forces the
   backend-local arena; `shared` forces the shared mmap cache; `off` uses
   scan-local page loading through shared buffers.
-- `turbohybrid.native_cache_max_mb`: native scan cache cap (default 512 MB);
+- `turbohybrid.native_cache_max_mb`: native scan cache cap (default 2048 MB);
   indexes whose working set fits are fully resident, so warm scans read zero code
   pages. This is a per-backend allocation only when
   `native_cache_scope=per_backend`, which should be sized to host RAM and
