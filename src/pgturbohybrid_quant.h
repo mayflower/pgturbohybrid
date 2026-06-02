@@ -239,6 +239,38 @@ typedef struct PgturbohybridQuantBuildState
 	uint32		buildWorkerCount;
 } PgturbohybridQuantBuildState;
 
+typedef struct PgturbohybridQuantMetaUpdate
+{
+	ForkNumber	forkNum;
+	bool		building;
+	uint32		dimensions;
+	uint16		m;
+	uint16		efConstruction;
+	uint16		graphMaxLevel;
+	uint32		nodeCount;
+	uint32		entryNodeId;
+	int16		entryLevel;
+	uint16		tqBits;
+	uint16		tqPayloadCount;
+	uint16		tqPayloadBytes;
+	uint16		tqFlags;
+	uint16		tqEntrySidecarCount;
+	uint16		tqEntrySidecarBytes;
+	uint16		tqResidualRerankBytes;
+	uint32		tqEntrySidecarNodeIds[PGTURBOHYBRID_GRAPH_MAX_ENTRY_SIDECAR_REPRESENTATIVES];
+	uint16		tqRoutingEntryCount;
+	uint16		tqRoutingEntryBytes;
+	uint32		tqRoutingEntryNodeIds[PGTURBOHYBRID_GRAPH_MAX_ROUTING_ENTRIES];
+	uint16		tqSegmentCount;
+	PgturbohybridGraphSegmentMetaData tqSegments[PGTURBOHYBRID_GRAPH_MAX_NATIVE_SEGMENTS];
+	uint64		buildScanUs;
+	uint64		buildCorrectionUs;
+	uint64		buildEncodeUs;
+	uint64		buildEdgeUs;
+	uint64		buildWriteUs;
+	uint32		buildWorkerCount;
+} PgturbohybridQuantMetaUpdate;
+
 typedef struct PgturbohybridGraphResult
 {
 	ItemPointerData heaptid;
@@ -285,6 +317,15 @@ typedef struct TqDenseCandidateStats
 	uint64		heapFetchUs;
 	uint64		heapRescoreUs;
 	uint64		fillUs;
+	uint64		fillCandidateBandCalls;
+	int			fillCandidateBandReason;
+	uint64		fillCandidateBandVisited;
+	uint64		fillCandidateBandScored;
+	uint64		fillCandidateBandSelectedBefore;
+	uint64		fillCandidateBandSelectedAfter;
+	uint64		fillCandidateBandTarget;
+	bool		fillCandidateBandUsedPayloadRefs;
+	uint64		fillCandidateBandPayloadRefCount;
 	uint64		rescoreUs;
 	uint64		sortUs;
 	int			exactRescoreSource;
@@ -406,9 +447,36 @@ typedef struct PgturbohybridGraphCacheInitInfo
 	int64		codeBytes;
 	int64		adjBytes;
 	int64		exactBytes;
+	bool		warning;
+	const char *warningReason;
 	int64		codeBufferLockWaitUs;
 	int64		adjBufferLockWaitUs;
 } PgturbohybridGraphCacheInitInfo;
+
+typedef struct PgturbohybridGraphMemoryEstimate
+{
+	bool		available;
+	bool		adjacencyEstimated;
+	bool		cacheExactVectors;
+	int			cachePolicy;
+	int			effectiveCachePolicy;
+	PgturbohybridGraphNativeCacheReason cacheReason;
+	uint32		nodeCount;
+	uint32		dimensions;
+	uint16		quantizationBits;
+	uint16		levelCapacity;
+	uint32		codePageCount;
+	uint64		codeBytes;
+	uint64		adjacencyBytes;
+	uint64		exactBytes;
+	uint64		nodeBytes;
+	uint64		visitedGenerationBytes;
+	uint64		payloadBytes;
+	uint64		residualBytes;
+	uint64		pageMapBytes;
+	uint64		sharedBackendViewBytes;
+	uint64		estimatedTotalBytes;
+} PgturbohybridGraphMemoryEstimate;
 
 typedef struct PgturbohybridGraphCorrectionCache
 {
@@ -660,6 +728,12 @@ void		PgturbohybridQuantUpdateMetaPage(Relation index, PgturbohybridQuantBuildSt
 								  BlockNumber codeStart, BlockNumber adjStart,
 								  BlockNumber exactStart,
 								  BlockNumber correctionStart);
+void		PgturbohybridQuantUpdateMetaPageFromUpdate(Relation index,
+									 const PgturbohybridQuantMetaUpdate *update,
+									 BlockNumber codeStart,
+									 BlockNumber adjStart,
+									 BlockNumber exactStart,
+									 BlockNumber correctionStart);
 bool		PgturbohybridGraphLoadCodePage(Relation index, PgturbohybridGraphScanOpaque so,
 								PgturbohybridGraphMetaPageData *meta,
 								PgturbohybridGraphScanStorage *storage,
@@ -692,6 +766,9 @@ void		PgturbohybridGraphInitScanStorage(Relation index, PgturbohybridGraphMetaPa
 							   PgturbohybridGraphCacheInitInfo *info);
 PgturbohybridGraphNativeCache *PgturbohybridGraphInitInsertStorage(Relation index, PgturbohybridGraphMetaPageData *meta,
 										  PgturbohybridGraphScanStorage *storage);
+bool		PgturbohybridGraphEstimateMemory(Relation index,
+								 PgturbohybridGraphMetaPageData *meta,
+								 PgturbohybridGraphMemoryEstimate *estimate);
 void		PgturbohybridGraphAppendInsertCacheNode(PgturbohybridGraphNativeCache *cache,
 										 PgturbohybridGraphMetaPageData *meta,
 										 uint32 nodeId, ItemPointer heapTid,

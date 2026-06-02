@@ -20,6 +20,7 @@ BEGIN
 
 	IF settings <> ARRAY[
 		'turbohybrid.bm25_accumulator_mode',
+		'turbohybrid.bm25_common_term_fallback_min_postings',
 		'turbohybrid.bm25_hot_postings_cache_mb',
 		'turbohybrid.bm25_hot_postings_cache_min_df',
 		'turbohybrid.bm25_hybrid_bound',
@@ -48,15 +49,18 @@ BEGIN
 		'turbohybrid.enable_wand',
 		'turbohybrid.fast_weighted_score_bound_pruning',
 		'turbohybrid.hybrid_budget_policy',
+		'turbohybrid.linear_fallback_notice_threshold_ratio',
 		'turbohybrid.max_union_candidates',
 		'turbohybrid.native_build_workers',
 		'turbohybrid.native_cache_max_mb',
 		'turbohybrid.native_cache_policy',
 		'turbohybrid.native_cache_scope',
+		'turbohybrid.native_cache_warn_mb',
 		'turbohybrid.native_parallel_edge_build',
 		'turbohybrid.native_segment_budget',
 		'turbohybrid.profile',
-		'turbohybrid.simd'
+		'turbohybrid.simd',
+		'turbohybrid.warn_linear_fallback'
 	] THEN
 		RAISE EXCEPTION 'unexpected pgturbohybrid settings: %', settings;
 	END IF;

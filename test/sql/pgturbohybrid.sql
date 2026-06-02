@@ -40,6 +40,16 @@ BEGIN
 		RAISE EXCEPTION 'unexpected hybrid_budget_policy default: %',
 			current_setting('turbohybrid.hybrid_budget_policy');
 	END IF;
+
+	IF current_setting('turbohybrid.warn_linear_fallback') <> 'on' THEN
+		RAISE EXCEPTION 'unexpected warn_linear_fallback default: %',
+			current_setting('turbohybrid.warn_linear_fallback');
+	END IF;
+
+	IF current_setting('turbohybrid.linear_fallback_notice_threshold_ratio') <> '0.25' THEN
+		RAISE EXCEPTION 'unexpected linear_fallback_notice_threshold_ratio default: %',
+			current_setting('turbohybrid.linear_fallback_notice_threshold_ratio');
+	END IF;
 END
 $$;
 
@@ -167,6 +177,223 @@ BEGIN
 	END IF;
 END
 $$;
+
+CREATE INDEX tqh_docs_id_btree_idx ON tqh_docs (id);
+
+DO $$
+DECLARE
+	dense_stats jsonb;
+	hybrid_stats jsonb;
+	btree_stats jsonb;
+BEGIN
+	dense_stats := turbohybrid_estimate_memory('tqh_segment_docs_idx'::regclass);
+	hybrid_stats := turbohybrid_estimate_memory('tqh_default_docs_idx'::regclass);
+	btree_stats := turbohybrid_estimate_memory('tqh_docs_id_btree_idx'::regclass);
+
+	IF dense_stats->>'index' <> 'tqh_segment_docs_idx' OR
+		(dense_stats->>'node_count')::int <> 6 OR
+		(dense_stats->>'dimensions')::int <> 3 OR
+		(dense_stats->>'quantization_bits')::int <> 4 OR
+		(dense_stats->'native'->>'available')::boolean IS DISTINCT FROM true OR
+		(dense_stats->'native'->>'code_bytes')::bigint <= 0 OR
+		(dense_stats->'native'->>'adjacency_bytes')::bigint <= 0 OR
+		(dense_stats->'native'->>'node_bytes')::bigint <= 0 OR
+		(dense_stats->'native'->>'visited_generation_bytes')::bigint <= 0 OR
+		(dense_stats->'native'->>'page_map_bytes')::bigint <= 0 OR
+		(dense_stats->'native'->>'estimated_total_bytes')::bigint <=
+			(dense_stats->'native'->>'code_bytes')::bigint OR
+		(dense_stats->'bm25'->>'available')::boolean IS DISTINCT FROM false THEN
+		RAISE EXCEPTION 'unexpected dense memory estimate: %', dense_stats;
+	END IF;
+
+	IF hybrid_stats->>'index' <> 'tqh_default_docs_idx' OR
+		(hybrid_stats->>'node_count')::int <> 4 OR
+		(hybrid_stats->'native'->>'available')::boolean IS DISTINCT FROM true OR
+		(hybrid_stats->'native'->>'cache_policy') IS NULL OR
+		(hybrid_stats->'bm25'->>'available')::boolean IS DISTINCT FROM true OR
+		(hybrid_stats->'bm25'->>'doc_lens_bytes')::bigint <= 0 OR
+		(hybrid_stats->'bm25'->>'heap_tids_bytes')::bigint <= 0 OR
+		(hybrid_stats->'bm25'->>'live_nodes_bytes')::bigint <= 0 OR
+		(hybrid_stats->'bm25'->>'lexicon_entries')::int <= 0 OR
+		(hybrid_stats->'bm25'->>'estimated_base_cache_bytes')::bigint <=
+			(hybrid_stats->'bm25'->>'doc_lens_bytes')::bigint OR
+		(hybrid_stats->'concurrency'->>'per_backend_total_bytes_per_backend')::bigint <= 0 OR
+		(hybrid_stats->'concurrency'->>'bm25_total_bytes_per_backend')::bigint <= 0 THEN
+		RAISE EXCEPTION 'unexpected hybrid memory estimate: %', hybrid_stats;
+	END IF;
+
+	IF btree_stats->>'index' <> 'tqh_docs_id_btree_idx' OR
+		(btree_stats->>'node_count')::int <> 0 OR
+		(btree_stats->>'dimensions')::int <> 0 OR
+		(btree_stats->'native'->>'available')::boolean IS DISTINCT FROM false OR
+		(btree_stats->'bm25'->>'available')::boolean IS DISTINCT FROM false OR
+		(btree_stats->'concurrency'->>'per_backend_total_bytes_per_backend')::bigint <> 0 THEN
+		RAISE EXCEPTION 'unexpected btree memory estimate: %', btree_stats;
+	END IF;
+END
+$$;
+
+DROP INDEX tqh_docs_id_btree_idx;
+
+CREATE TABLE tqh_fill_band_docs (
+	id int,
+	grp int,
+	embedding vector(3)
+);
+
+INSERT INTO tqh_fill_band_docs
+SELECT g,
+	CASE WHEN g <= 1100 THEN 1 ELSE 2 END,
+	('[' || (g % 7)::text || ',' || (g % 11)::text || ',' ||
+		(g % 13)::text || ']')::vector
+FROM generate_series(1, 1200) AS g;
+
+CREATE INDEX tqh_fill_band_docs_idx ON tqh_fill_band_docs
+USING turbohybrid (embedding vector_cosine_turbohybrid_ops) INCLUDE (grp)
+WITH (quantization_bits = 4, exact_storage = off);
+
+ANALYZE tqh_fill_band_docs;
+
+DO $$
+DECLARE
+	stats jsonb;
+	result_count int;
+BEGIN
+	PERFORM set_config('turbohybrid.warn_linear_fallback', 'off', true);
+	PERFORM set_config('turbohybrid.linear_fallback_notice_threshold_ratio', '0.25', true);
+
+	SELECT count(*) INTO result_count
+	FROM (
+		SELECT id
+		FROM tqh_fill_band_docs
+		WHERE grp = 1
+		ORDER BY embedding <~> turbohybrid_query(
+			vector_query => '[1,0,0]'::vector,
+			dense_k => 20,
+			final_k => 8
+		)
+		LIMIT 8
+	) s;
+
+	stats := turbohybrid_last_scan_stats();
+	IF result_count <> 8 OR
+		(stats->>'graph_fill_candidate_band_calls')::int <= 0 OR
+		stats->>'graph_fill_candidate_band_reason' <> 'payload_exact_band_miss' OR
+		(stats->>'graph_fill_candidate_band_visited')::int <= 0 OR
+		(stats->>'graph_fill_candidate_band_scored')::int <= 0 OR
+		(stats->>'graph_fill_candidate_band_selected_before')::int >=
+			(stats->>'graph_fill_candidate_band_selected_after')::int OR
+		(stats->>'graph_fill_candidate_band_target')::int <= 0 OR
+		(stats->>'graph_fill_candidate_band_used_payload_refs')::boolean IS DISTINCT FROM true OR
+		(stats->>'graph_fill_candidate_band_payload_ref_count')::int <= 1024 OR
+		(stats->'dense'->'traversal'->>'fill_candidate_band_calls')::int <>
+			(stats->>'graph_fill_candidate_band_calls')::int OR
+		stats->'dense'->'traversal'->>'fill_candidate_band_reason' <>
+			stats->>'graph_fill_candidate_band_reason' THEN
+		RAISE EXCEPTION 'unexpected fill candidate band stats: %', stats;
+	END IF;
+END
+$$;
+
+DROP TABLE tqh_fill_band_docs;
+
+CREATE TABLE tqh_unmapped_filter_docs (
+	id int,
+	embedding vector(3)
+);
+
+INSERT INTO tqh_unmapped_filter_docs
+SELECT g,
+	('[' || (g % 7)::text || ',' || (g % 11)::text || ',' ||
+		(g % 13)::text || ']')::vector
+FROM generate_series(1, 1200) AS g;
+
+CREATE INDEX tqh_unmapped_filter_docs_idx ON tqh_unmapped_filter_docs
+USING turbohybrid (embedding vector_cosine_turbohybrid_ops)
+WITH (quantization_bits = 4, exact_storage = off);
+
+ANALYZE tqh_unmapped_filter_docs;
+
+DO $$
+DECLARE
+	simple_plan json;
+	filter_plan json;
+	simple_cost float8;
+	filter_cost float8;
+BEGIN
+	PERFORM set_config('enable_seqscan', 'off', true);
+
+	EXECUTE $explain$
+		EXPLAIN (FORMAT JSON, COSTS TRUE)
+		SELECT id
+		FROM tqh_unmapped_filter_docs
+		ORDER BY embedding <~> turbohybrid_query(
+			vector_query => '[1,0,0]'::vector,
+			dense_k => 20,
+			final_k => 8
+		)
+		LIMIT 8
+	$explain$ INTO simple_plan;
+
+	EXECUTE $explain$
+		EXPLAIN (FORMAT JSON, COSTS TRUE)
+		SELECT id
+		FROM tqh_unmapped_filter_docs
+		WHERE id <= 1100
+		ORDER BY embedding <~> turbohybrid_query(
+			vector_query => '[1,0,0]'::vector,
+			dense_k => 20,
+			final_k => 8
+		)
+		LIMIT 8
+	$explain$ INTO filter_plan;
+
+	simple_cost := (simple_plan->0->'Plan'->>'Total Cost')::float8;
+	filter_cost := (filter_plan->0->'Plan'->>'Total Cost')::float8;
+
+	IF simple_cost <= 0 OR filter_cost <= simple_cost * 2.0 THEN
+		RAISE EXCEPTION 'unmapped heap filter should cost more than simple LIMIT query: simple %, filter %, plans % / %',
+			simple_cost, filter_cost, simple_plan, filter_plan;
+	END IF;
+END
+$$;
+
+DO $$
+DECLARE
+	stats jsonb;
+	result_count int;
+BEGIN
+	PERFORM set_config('turbohybrid.warn_linear_fallback', 'off', true);
+	PERFORM set_config('turbohybrid.linear_fallback_notice_threshold_ratio', '0.25', true);
+
+	SELECT count(*) INTO result_count
+	FROM (
+		SELECT id
+		FROM tqh_unmapped_filter_docs
+		WHERE id <= 1100
+		ORDER BY embedding <~> turbohybrid_query(
+			vector_query => '[1,0,0]'::vector,
+			dense_k => 20,
+			final_k => 8
+		)
+		LIMIT 8
+	) s;
+
+	stats := turbohybrid_last_scan_stats();
+	IF result_count <> 8 OR
+		stats->>'graph_widening_reason' <> 'filter' OR
+		(stats->>'dense_filter_unmapped')::boolean IS DISTINCT FROM true OR
+		(stats->>'dense_linear_fallback_warning')::boolean IS DISTINCT FROM true OR
+		(stats->>'dense_linear_fallback_ratio')::float8 < 0.25 OR
+		(stats->'dense'->>'filter_unmapped')::boolean IS DISTINCT FROM true OR
+		(stats->'dense'->>'linear_fallback_warning')::boolean IS DISTINCT FROM true OR
+		(stats->'dense'->>'linear_fallback_ratio')::float8 < 0.25 THEN
+		RAISE EXCEPTION 'unexpected unmapped filter fallback stats: %', stats;
+	END IF;
+END
+$$;
+
+DROP TABLE tqh_unmapped_filter_docs;
 
 DELETE FROM tqh_segment_docs WHERE id = 6;
 VACUUM tqh_segment_docs;
@@ -547,6 +774,135 @@ BEGIN
 	END;
 END
 $$;
+
+CREATE TABLE tqh_insert_o1_empty_docs (
+	id int PRIMARY KEY,
+	embedding vector(3)
+);
+
+CREATE INDEX tqh_insert_o1_empty_idx ON tqh_insert_o1_empty_docs
+USING turbohybrid (embedding vector_cosine_turbohybrid_ops)
+WITH (quantization_bits = 4, exact_storage = off);
+
+INSERT INTO tqh_insert_o1_empty_docs VALUES
+	(1, '[1,0,0]'),
+	(2, '[0,1,0]');
+
+DO $$
+DECLARE
+	top_id int;
+	stats jsonb;
+BEGIN
+	SELECT id INTO top_id
+	FROM tqh_insert_o1_empty_docs
+	ORDER BY embedding <~> turbohybrid_query(
+		vector_query => '[0,1,0]'::vector,
+		dense_k => 4,
+		final_k => 1
+	)
+	LIMIT 1;
+
+	IF top_id <> 2 THEN
+		RAISE EXCEPTION 'exact-free inserted row was not visible: %', top_id;
+	END IF;
+
+	stats := turbohybrid_index_stats('tqh_insert_o1_empty_idx'::regclass);
+	IF (stats->>'node_count')::int <> 2 OR
+		(stats->>'exact_storage')::boolean IS DISTINCT FROM false THEN
+		RAISE EXCEPTION 'unexpected exact-free insert stats: %', stats;
+	END IF;
+END
+$$;
+
+CREATE TABLE tqh_insert_o1_exact_docs (
+	id int PRIMARY KEY,
+	embedding vector(3)
+);
+
+INSERT INTO tqh_insert_o1_exact_docs VALUES (1, '[1,0,0]');
+
+CREATE INDEX tqh_insert_o1_exact_idx ON tqh_insert_o1_exact_docs
+USING turbohybrid (embedding vector_cosine_turbohybrid_ops)
+WITH (quantization_bits = 4, exact_storage = on);
+
+INSERT INTO tqh_insert_o1_exact_docs VALUES (2, '[0,1,0]');
+
+DO $$
+DECLARE
+	top_id int;
+	stats jsonb;
+BEGIN
+	SELECT id INTO top_id
+	FROM tqh_insert_o1_exact_docs
+	ORDER BY embedding <~> turbohybrid_query(
+		vector_query => '[0,1,0]'::vector,
+		dense_k => 4,
+		final_k => 1
+	)
+	LIMIT 1;
+
+	IF top_id <> 2 THEN
+		RAISE EXCEPTION 'exact-storage inserted row was not visible: %', top_id;
+	END IF;
+
+	stats := turbohybrid_index_stats('tqh_insert_o1_exact_idx'::regclass);
+	IF (stats->>'node_count')::int <> 2 OR
+		(stats->>'exact_storage')::boolean IS DISTINCT FROM true THEN
+		RAISE EXCEPTION 'unexpected exact-storage insert stats: %', stats;
+	END IF;
+END
+$$;
+
+CREATE TABLE tqh_insert_o1_payload_docs (
+	id int PRIMARY KEY,
+	grp int,
+	embedding vector(3)
+);
+
+INSERT INTO tqh_insert_o1_payload_docs VALUES (1, 3, '[1,0,0]');
+
+CREATE INDEX tqh_insert_o1_payload_idx ON tqh_insert_o1_payload_docs
+USING turbohybrid (embedding vector_cosine_turbohybrid_ops) INCLUDE (grp)
+WITH (
+	quantization_bits = 4,
+	exact_storage = off,
+	residual_rerank = on,
+	residual_rerank_bytes = 16
+);
+
+INSERT INTO tqh_insert_o1_payload_docs VALUES (2, 7, '[0,1,0]');
+
+DO $$
+DECLARE
+	top_id int;
+	stats jsonb;
+BEGIN
+	SELECT id INTO top_id
+	FROM tqh_insert_o1_payload_docs
+	WHERE grp = 7
+	ORDER BY embedding <~> turbohybrid_query(
+		vector_query => '[0,1,0]'::vector,
+		dense_k => 4,
+		final_k => 1
+	)
+	LIMIT 1;
+
+	IF top_id <> 2 THEN
+		RAISE EXCEPTION 'payload/residual inserted row was not visible: %', top_id;
+	END IF;
+
+	stats := turbohybrid_index_stats('tqh_insert_o1_payload_idx'::regclass);
+	IF (stats->>'node_count')::int <> 2 OR
+		(stats->>'payload_count')::int <> 1 OR
+		(stats->>'residual_rerank_bytes')::int <> 16 THEN
+		RAISE EXCEPTION 'unexpected payload/residual insert stats: %', stats;
+	END IF;
+END
+$$;
+
+DROP TABLE tqh_insert_o1_payload_docs;
+DROP TABLE tqh_insert_o1_exact_docs;
+DROP TABLE tqh_insert_o1_empty_docs;
 
 SET max_parallel_maintenance_workers = 2;
 
@@ -2283,6 +2639,7 @@ BEGIN
 	WHERE e.extname = 'pgturbohybrid'
 		AND p.proname IN (
 			'turbohybrid_index_stats',
+			'turbohybrid_estimate_memory',
 			'turbohybrid_last_build_stats',
 			'turbohybrid_last_scan_diagnosis',
 			'turbohybrid_last_scan_stats',
@@ -2291,6 +2648,7 @@ BEGIN
 		);
 
 	IF funcs <> ARRAY[
+		'turbohybrid_estimate_memory',
 		'turbohybrid_index_stats',
 		'turbohybrid_last_build_stats',
 		'turbohybrid_last_scan_diagnosis',
@@ -2458,6 +2816,10 @@ BEGIN
 		'bm25_cache_hit',
 		'bm25_candidates_effective',
 		'bm25_candidates_pruned_by_fused_score_bound',
+		'bm25_cold_cache_o_n_work',
+		'bm25_common_term_fallback',
+		'bm25_docstats_bytes',
+		'bm25_docstats_loaded_this_query',
 		'bm25_elapsed_us',
 		'bm25_hot_postings_cache_hit',
 		'bm25_hot_postings_cache_hits',
@@ -2467,8 +2829,12 @@ BEGIN
 		'bm25_impact_or_mode',
 		'bm25_k_defaulted',
 		'bm25_k_effective',
+		'bm25_liveness_bytes',
+		'bm25_liveness_loaded_this_query',
 		'bm25_norm_mode',
+		'bm25_postings_decode_ratio',
 		'bm25_strategy',
+		'bm25_wand_pruned',
 		'build_fast_edges',
 		'build_neighbor_select',
 		'build_neighbor_select_reason',
@@ -2491,9 +2857,12 @@ BEGIN
 		'dense_candidates_effective',
 			'dense_elapsed_us',
 			'dense_exact_kernel',
+			'dense_filter_unmapped',
 			'dense_heap_rescore',
 			'dense_k_defaulted',
 		'dense_k_effective',
+		'dense_linear_fallback_ratio',
+		'dense_linear_fallback_warning',
 		'dense_local_expansion_candidates_added',
 		'dense_local_expansion_mode',
 		'dense_local_expansion_neighbors_scored',
@@ -2530,6 +2899,8 @@ BEGIN
 		'fusion_candidates_seen',
 		'fusion_duplicates',
 		'fusion_elapsed_us',
+		'fusion_generation_array_reset',
+		'fusion_generation_array_reused',
 		'fusion_heap_replacements',
 		'fusion_strategy',
 		'graph_adj_pages_read',
@@ -2558,6 +2929,15 @@ BEGIN
 		'graph_entry_sidecar_us',
 		'graph_exact_cache',
 		'graph_exact_cache_active',
+		'graph_fill_candidate_band_calls',
+		'graph_fill_candidate_band_payload_ref_count',
+		'graph_fill_candidate_band_reason',
+		'graph_fill_candidate_band_scored',
+		'graph_fill_candidate_band_selected_after',
+		'graph_fill_candidate_band_selected_before',
+		'graph_fill_candidate_band_target',
+		'graph_fill_candidate_band_used_payload_refs',
+		'graph_fill_candidate_band_visited',
 		'graph_heap_us',
 		'graph_highdim_widening_multiplier',
 		'graph_large_code_arena',
@@ -2613,6 +2993,8 @@ BEGIN
 		'native_cache_scope',
 		'native_cache_used',
 		'native_cache_wait_us',
+		'native_cache_warning',
+		'native_cache_warning_reason',
 		'native_segments',
 		'per_segment_budget_mode',
 		'profile',
@@ -2636,6 +3018,32 @@ BEGIN
 	IF turbohybrid_last_scan_stats()->>'profile' != 'latency' THEN
 		RAISE EXCEPTION 'unexpected pgturbohybrid last scan profile: %',
 			turbohybrid_last_scan_stats()->>'profile';
+	END IF;
+
+	SELECT array_agg(key ORDER BY key) INTO keys
+	FROM jsonb_object_keys(turbohybrid_last_scan_stats()->'bm25') AS key
+	WHERE key IN (
+		'cold_cache_o_n_work',
+		'common_term_fallback',
+		'docstats_bytes',
+		'docstats_loaded_this_query',
+		'liveness_bytes',
+		'liveness_loaded_this_query',
+		'postings_decode_ratio',
+		'wand_pruned'
+	);
+
+	IF keys <> ARRAY[
+		'cold_cache_o_n_work',
+		'common_term_fallback',
+		'docstats_bytes',
+		'docstats_loaded_this_query',
+		'liveness_bytes',
+		'liveness_loaded_this_query',
+		'postings_decode_ratio',
+		'wand_pruned'
+	] THEN
+		RAISE EXCEPTION 'unexpected nested BM25 diagnostic keys: %', keys;
 	END IF;
 
 	SELECT array_agg(key ORDER BY key) INTO keys
@@ -2734,6 +3142,21 @@ BEGIN
 		RAISE EXCEPTION 'dense_adaptive_min_gap GUC did not stick';
 	END IF;
 
+	PERFORM set_config('turbohybrid.warn_linear_fallback', 'off', true);
+	IF current_setting('turbohybrid.warn_linear_fallback') <> 'off' THEN
+		RAISE EXCEPTION 'warn_linear_fallback off GUC did not stick';
+	END IF;
+
+	PERFORM set_config('turbohybrid.warn_linear_fallback', 'on', true);
+	IF current_setting('turbohybrid.warn_linear_fallback') <> 'on' THEN
+		RAISE EXCEPTION 'warn_linear_fallback on GUC did not stick';
+	END IF;
+
+	PERFORM set_config('turbohybrid.linear_fallback_notice_threshold_ratio', '0.5', true);
+	IF current_setting('turbohybrid.linear_fallback_notice_threshold_ratio') <> '0.5' THEN
+		RAISE EXCEPTION 'linear_fallback_notice_threshold_ratio GUC did not stick';
+	END IF;
+
 	PERFORM set_config('turbohybrid.dense_local_expansion', 'auto', true);
 	IF current_setting('turbohybrid.dense_local_expansion') <> 'auto' THEN
 		RAISE EXCEPTION 'dense_local_expansion auto GUC did not stick';
@@ -2777,6 +3200,16 @@ BEGIN
 	PERFORM set_config('turbohybrid.native_cache_scope', 'shared', true);
 	IF current_setting('turbohybrid.native_cache_scope') <> 'shared' THEN
 		RAISE EXCEPTION 'native_cache_scope shared GUC did not stick';
+	END IF;
+
+	PERFORM set_config('turbohybrid.native_cache_warn_mb', '0', true);
+	IF current_setting('turbohybrid.native_cache_warn_mb') <> '0' THEN
+		RAISE EXCEPTION 'native_cache_warn_mb 0 GUC did not stick';
+	END IF;
+
+	PERFORM set_config('turbohybrid.native_cache_warn_mb', '512', true);
+	IF current_setting('turbohybrid.native_cache_warn_mb') <> '512MB' THEN
+		RAISE EXCEPTION 'native_cache_warn_mb 512 GUC did not stick';
 	END IF;
 END
 $$;
@@ -2827,7 +3260,9 @@ BEGIN
 	stats := turbohybrid_last_scan_stats();
 	IF stats->>'native_cache_policy' <> 'off' OR
 	   (stats->>'native_cache_used')::boolean OR
-	   stats->>'native_cache_reason' <> 'policy_off' THEN
+	   stats->>'native_cache_reason' <> 'policy_off' OR
+	   NOT (stats ? 'native_cache_warning') OR
+	   NOT (stats ? 'native_cache_warning_reason') THEN
 		RAISE EXCEPTION 'native_cache_policy=off not reflected in stats: %', stats;
 	END IF;
 
@@ -2853,6 +3288,8 @@ BEGIN
 
 	stats := turbohybrid_last_scan_stats();
 	IF stats->>'native_cache_policy' <> 'shared' OR
+	   NOT (stats ? 'native_cache_warning') OR
+	   NOT (stats ? 'native_cache_warning_reason') OR
 	   NOT (
 		   (stats->>'native_cache_scope' = 'shared' AND
 		    (stats->>'native_cache_used')::boolean AND

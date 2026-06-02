@@ -34,6 +34,7 @@
 
 #define PGTURBOHYBRID_BM25_MAX_NODE_COUNT_FOR_CACHE 10000000U
 #define PGTURBOHYBRID_BM25_MAX_TERM_COUNT_FOR_CACHE 10000000U
+#define PGTURBOHYBRID_BM25_COMMON_TERM_FALLBACK_RATIO 0.25
 
 int			pgturbohybrid_last_bm25_decode_kernel = PGTURBOHYBRID_BM25_KERNEL_SCALAR;
 int			pgturbohybrid_last_bm25_score_kernel = PGTURBOHYBRID_BM25_KERNEL_SCALAR;
@@ -597,6 +598,9 @@ typedef struct PgturbohybridBm25Cache
 } PgturbohybridBm25Cache;
 
 static PgturbohybridBm25Cache *pgturbohybrid_bm25_cache_list = NULL;
+
+static void PgturbohybridBm25PublishHotPostingsCacheStats(PgturbohybridBm25Cache *cache,
+													PgturbohybridBm25QueryStats *stats);
 
 static int PgturbohybridBm25FindQueryTerm(PgturbohybridBm25QueryTerm *terms,
 									 int termCount, const char *term,
@@ -1189,6 +1193,45 @@ PgturbohybridBm25GetPlanningStats(Relation index, PgturbohybridBm25PlanningStats
 	return true;
 }
 
+bool
+PgturbohybridBm25EstimateMemory(Relation index,
+						  const PgturbohybridGraphMetaPageData *graphMeta,
+						  PgturbohybridBm25MemoryEstimate *estimate)
+{
+	PgturbohybridBm25MetaTupleData meta;
+	uint64		nodeCount;
+
+	memset(estimate, 0, sizeof(*estimate));
+	if (graphMeta == NULL || !PgturbohybridBm25ReadMeta(index, &meta))
+		return false;
+
+	estimate->available = true;
+	estimate->docCount = meta.docCount;
+	estimate->deltaDocCount = meta.deltaDocCount;
+	estimate->termCount = meta.termCount;
+	estimate->termTupleCount = meta.termTupleCount;
+	estimate->postingsPages = meta.postingsPages;
+	estimate->blockMaxPages = meta.blockMaxPages;
+	estimate->deltaPages = meta.deltaPages;
+	estimate->deltaTermPages = meta.deltaTermPages;
+
+	nodeCount = Max((uint64) graphMeta->tqNodeCount, UINT64CONST(1));
+	estimate->docLensBytes = nodeCount * (uint64) sizeof(uint32);
+	estimate->heapTidsBytes = nodeCount * (uint64) sizeof(ItemPointerData);
+	estimate->liveNodesBytes = nodeCount * (uint64) sizeof(bool);
+	estimate->lexiconBytes =
+		(uint64) Max(meta.termCount, 1) *
+		(uint64) sizeof(PgturbohybridBm25CacheLexiconEntry);
+	estimate->estimatedBaseCacheBytes =
+		(uint64) sizeof(PgturbohybridBm25Cache) +
+		estimate->docLensBytes +
+		estimate->heapTidsBytes +
+		estimate->liveNodesBytes +
+		estimate->lexiconBytes;
+
+	return true;
+}
+
 static void
 PgturbohybridBm25LoadDocStats(Relation index, const PgturbohybridBm25MetaTupleData *meta,
 						 uint32 nodeCount, uint32 *docLens)
@@ -1532,6 +1575,45 @@ PgturbohybridBm25BuildCache(Relation index,
 
 	MemoryContextSwitchTo(oldCtx);
 	return cache;
+}
+
+static void
+PgturbohybridBm25FinalizeQueryStats(PgturbohybridBm25QueryStats *stats,
+							   PgturbohybridBm25Cache *cache,
+							   const PgturbohybridBm25MetaTupleData *bm25Meta)
+{
+	double		corpusDocCount;
+	bool		usedDaatFallback;
+	bool		exceedsPostingsThreshold;
+
+	if (stats == NULL)
+		return;
+
+	if (cache != NULL)
+		PgturbohybridBm25PublishHotPostingsCacheStats(cache, stats);
+
+	stats->wandPruned = stats->blocksSkipped +
+		stats->fusedScoreBoundBlocksPruned +
+		stats->fusedScoreBoundCandidatesPruned;
+
+	if (bm25Meta == NULL)
+		return;
+
+	corpusDocCount = Max((double) bm25Meta->docCount +
+						 (double) bm25Meta->deltaDocCount, 1.0);
+	stats->postingsDecodeRatio =
+		(double) stats->postingsDecoded / corpusDocCount;
+	usedDaatFallback =
+		stats->strategy == PGTURBOHYBRID_BM25_RUNTIME_DAAT_SIMD ||
+		stats->strategy == PGTURBOHYBRID_BM25_RUNTIME_DAAT_HASH;
+	exceedsPostingsThreshold =
+		pgturbohybrid_bm25_common_term_fallback_min_postings > 0 &&
+		stats->postingsDecoded >=
+		(uint64) pgturbohybrid_bm25_common_term_fallback_min_postings;
+	stats->commonTermFallback = usedDaatFallback &&
+		(exceedsPostingsThreshold ||
+		 stats->postingsDecodeRatio >=
+		 PGTURBOHYBRID_BM25_COMMON_TERM_FALLBACK_RATIO);
 }
 
 static void
@@ -4741,6 +4823,8 @@ PgturbohybridBm25TopK(Relation index, TSQuery query, int32 k, bool useWand,
 	int			resultCount;
 	bool		usedBaseWand = false;
 	bool		seededImpactWand = false;
+	bool		docStatsLoadedBefore = false;
+	bool		livenessLoadedBefore = false;
 	PgturbohybridBm25Posting *decodedScratch = NULL;
 	uint16		decodedScratchCapacity = 0;
 	int			accumulatorMode;
@@ -4765,6 +4849,14 @@ PgturbohybridBm25TopK(Relation index, TSQuery query, int32 k, bool useWand,
 		!PgturbohybridGraphReadMeta(index, &graphMeta) ||
 		graphMeta.tqNodeCount == 0)
 		return 0;
+	if (stats != NULL)
+	{
+		stats->docstatsBytes =
+			(uint64) graphMeta.tqNodeCount * sizeof(uint32);
+		stats->livenessBytes =
+			(uint64) graphMeta.tqNodeCount *
+			(sizeof(ItemPointerData) + sizeof(bool));
+	}
 
 	oldCtx = MemoryContextSwitchTo(memoryContext);
 	termCount = PgturbohybridBm25ExtractTerms(query, &terms, memoryContext);
@@ -4806,17 +4898,28 @@ PgturbohybridBm25TopK(Relation index, TSQuery query, int32 k, bool useWand,
 		if (stats != NULL)
 		{
 			stats->cacheBytes = MemoryContextMemAllocated(cache->ctx, true);
-			PgturbohybridBm25PublishHotPostingsCacheStats(cache, stats);
+			PgturbohybridBm25FinalizeQueryStats(stats, cache, &bm25Meta);
 		}
 		MemoryContextSwitchTo(oldCtx);
 		return 0;
 	}
 
+	docStatsLoadedBefore = cache->docStatsLoaded;
+	livenessLoadedBefore = cache->livenessLoaded;
 	PgturbohybridBm25EnsureDocStats(index, cache, &bm25Meta, &graphMeta);
 	PgturbohybridBm25EnsureLiveness(index, cache, &graphMeta);
 	docLens = cache->docLens;
 	heapTids = cache->heapTids;
 	liveNodes = cache->liveNodes;
+	if (stats != NULL)
+	{
+		stats->docstatsLoadedThisQuery =
+			!docStatsLoadedBefore && cache->docStatsLoaded;
+		stats->livenessLoadedThisQuery =
+			!livenessLoadedBefore && cache->livenessLoaded;
+		stats->coldCacheONWork = stats->docstatsLoadedThisQuery ||
+			stats->livenessLoadedThisQuery;
+	}
 
 	if (pgturbohybrid_bm25_cache_max_mb > 0 && !cache->deltaCacheBuilt)
 	{
@@ -5098,7 +5201,7 @@ PgturbohybridBm25TopK(Relation index, TSQuery query, int32 k, bool useWand,
 
 	if (resolvedTerms == 0 || acc.touchedCount == 0)
 	{
-		PgturbohybridBm25PublishHotPostingsCacheStats(cache, stats);
+		PgturbohybridBm25FinalizeQueryStats(stats, cache, &bm25Meta);
 		MemoryContextSwitchTo(oldCtx);
 		return 0;
 	}
@@ -5109,7 +5212,7 @@ PgturbohybridBm25TopK(Relation index, TSQuery query, int32 k, bool useWand,
 
 	if (resultCount == 0)
 	{
-		PgturbohybridBm25PublishHotPostingsCacheStats(cache, stats);
+		PgturbohybridBm25FinalizeQueryStats(stats, cache, &bm25Meta);
 		MemoryContextSwitchTo(oldCtx);
 		return 0;
 	}
@@ -5137,7 +5240,7 @@ PgturbohybridBm25TopK(Relation index, TSQuery query, int32 k, bool useWand,
 		if (stats->candidatesScored == 0)
 			stats->candidatesScored = acc.touchedCount;
 		stats->accumulatorEntries = acc.touchedCount;
-		PgturbohybridBm25PublishHotPostingsCacheStats(cache, stats);
+		PgturbohybridBm25FinalizeQueryStats(stats, cache, &bm25Meta);
 		pgturbohybrid_last_bm25_decode_kernel = stats->decodeKernel;
 		pgturbohybrid_last_bm25_score_kernel = stats->scoreKernel;
 		pgturbohybrid_last_bm25_simd_blocks = stats->simdBlocks;

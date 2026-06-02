@@ -227,6 +227,7 @@ extern int	pgturbohybrid_dense_u8_split;
 extern bool pgturbohybrid_dense_u8_batch_x4;
 extern int	pgturbohybrid_native_cache_policy;
 extern int	pgturbohybrid_native_cache_max_mb;
+extern int	pgturbohybrid_native_cache_warn_mb;
 extern char *pgturbohybrid_native_build_workers;
 extern int	pgturbohybrid_native_parallel_edge_build;
 extern int	pgturbohybrid_native_segment_budget;
@@ -247,6 +248,8 @@ extern int	pgturbohybrid_dense_adaptive_widening;
 extern double pgturbohybrid_dense_adaptive_widening_multiplier;
 extern double pgturbohybrid_dense_adaptive_widening_max_multiplier;
 extern double pgturbohybrid_dense_adaptive_min_gap;
+extern bool pgturbohybrid_warn_linear_fallback;
+extern double pgturbohybrid_linear_fallback_notice_threshold_ratio;
 extern int	pgturbohybrid_dense_local_expansion;
 extern int	pgturbohybrid_dense_local_expansion_topn;
 extern int	pgturbohybrid_dense_local_expansion_max_neighbors;
@@ -1044,6 +1047,17 @@ typedef enum PgturbohybridGraphNativeCacheReason
 	PGTURBOHYBRID_GRAPH_NATIVE_CACHE_REASON_SHARED_ATTACH_FAILED
 }			PgturbohybridGraphNativeCacheReason;
 
+typedef enum PgturbohybridGraphFillCandidateBandReason
+{
+	PGTURBOHYBRID_GRAPH_FILL_CANDIDATE_BAND_REASON_NONE = 0,
+	PGTURBOHYBRID_GRAPH_FILL_CANDIDATE_BAND_REASON_UNDERFILLED_FULL_TARGET,
+	PGTURBOHYBRID_GRAPH_FILL_CANDIDATE_BAND_REASON_ESTIMATED_SELECTIVITY,
+	PGTURBOHYBRID_GRAPH_FILL_CANDIDATE_BAND_REASON_ADAPTIVE_WIDENING,
+	PGTURBOHYBRID_GRAPH_FILL_CANDIDATE_BAND_REASON_TIGHT_L2_EXACT_POLICY,
+	PGTURBOHYBRID_GRAPH_FILL_CANDIDATE_BAND_REASON_PAYLOAD_EXACT_BAND_MISS,
+	PGTURBOHYBRID_GRAPH_FILL_CANDIDATE_BAND_REASON_UNKNOWN
+}			PgturbohybridGraphFillCandidateBandReason;
+
 typedef struct PgturbohybridGraphScanOpaqueData
 {
 	const		PgturbohybridGraphTypeInfo *typeInfo;
@@ -1128,6 +1142,8 @@ typedef struct PgturbohybridGraphScanOpaqueData
 	int64		graphNativeCacheCodeBytes;
 	int64		graphNativeCacheAdjBytes;
 	int64		graphNativeCacheExactBytes;
+	bool		graphNativeCacheWarning;
+	const char *graphNativeCacheWarningReason;
 	int64		graphScanLockWaitUs;
 	int64		graphCodeBufferLockWaitUs;
 	int64		graphAdjBufferLockWaitUs;
@@ -1153,6 +1169,20 @@ typedef struct PgturbohybridGraphScanOpaqueData
 	int64		graphBatchUs;
 	int64		graphHeapUs;
 	int64		graphFillUs;
+	/*
+	 * Fill-candidate-band fallback counters.  This fallback can linearly
+	 * inspect every native graph node (or every payload ref) when traversal
+	 * underfills, so keep the O(N) work visible in last-scan stats.
+	 */
+	int64		graphFillCandidateBandCalls;
+	int			graphFillCandidateBandReason;
+	int64		graphFillCandidateBandVisited;
+	int64		graphFillCandidateBandScored;
+	int64		graphFillCandidateBandSelectedBefore;
+	int64		graphFillCandidateBandSelectedAfter;
+	int64		graphFillCandidateBandTarget;
+	bool		graphFillCandidateBandUsedPayloadRefs;
+	int64		graphFillCandidateBandPayloadRefCount;
 	int64		graphRescoreUs;
 	int64		graphSortUs;
 	int64		graphTotalUs;
@@ -1162,6 +1192,9 @@ typedef struct PgturbohybridGraphScanOpaqueData
 	int64		graphEffectiveRescoreBand;
 	double		graphHighdimWideningMultiplier;
 	int			graphWideningReason;
+	bool		graphDenseFilterUnmapped;
+	bool		graphDenseLinearFallbackWarning;
+	double		graphDenseLinearFallbackRatio;
 	int			graphAdaptiveWideningMode;
 	bool		graphAdaptiveTriggered;
 	int			graphAdaptiveTriggerReason;
@@ -1460,6 +1493,7 @@ void		tqgraphendscan(IndexScanDesc scan);
 FUNCTION_PREFIX Datum pgturbohybrid_last_scan_stats(PG_FUNCTION_ARGS);
 FUNCTION_PREFIX Datum pgturbohybrid_last_build_stats(PG_FUNCTION_ARGS);
 FUNCTION_PREFIX Datum pgturbohybrid_index_stats(PG_FUNCTION_ARGS);
+FUNCTION_PREFIX Datum pgturbohybrid_estimate_memory(PG_FUNCTION_ARGS);
 FUNCTION_PREFIX Datum pgturbohybrid_prewarm(PG_FUNCTION_ARGS);
 FUNCTION_PREFIX Datum pgturbohybrid_simd_capabilities(PG_FUNCTION_ARGS);
 void		PgturbohybridGraphRecordExactVectorKernel(int kernel);

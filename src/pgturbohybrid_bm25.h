@@ -7,6 +7,8 @@
 #include "tsearch/ts_type.h"
 #include "utils/rel.h"
 
+#include "pgturbohybrid.h"
+
 typedef struct PgturbohybridBm25BuildDoc
 {
 	uint32		nodeId;
@@ -71,6 +73,14 @@ typedef struct PgturbohybridBm25QueryStats
 	uint64		cacheBuildUs;
 	bool		cacheDocstatsLoaded;
 	bool		cacheLivenessLoaded;
+	bool		docstatsLoadedThisQuery;
+	bool		livenessLoadedThisQuery;
+	uint64		docstatsBytes;
+	uint64		livenessBytes;
+	bool		coldCacheONWork;
+	double		postingsDecodeRatio;
+	bool		commonTermFallback;
+	uint64		wandPruned;
 	uint64		hotPostingsCacheHits;
 	uint64		hotPostingsCacheMisses;
 	uint64		hotPostingsCacheBytes;
@@ -135,6 +145,24 @@ typedef struct PgturbohybridBm25PlanningStats
 	uint32		deltaTermPages;
 	bool		hasBm25;
 } PgturbohybridBm25PlanningStats;
+
+typedef struct PgturbohybridBm25MemoryEstimate
+{
+	bool		available;
+	uint32		docCount;
+	uint32		deltaDocCount;
+	uint32		termCount;
+	uint32		termTupleCount;
+	uint32		postingsPages;
+	uint32		blockMaxPages;
+	uint32		deltaPages;
+	uint32		deltaTermPages;
+	uint64		docLensBytes;
+	uint64		heapTidsBytes;
+	uint64		liveNodesBytes;
+	uint64		lexiconBytes;
+	uint64		estimatedBaseCacheBytes;
+} PgturbohybridBm25MemoryEstimate;
 
 typedef struct PgturbohybridBm25QuerySignals
 {
@@ -393,6 +421,9 @@ bool		PgturbohybridBm25MaybeCompact(Relation index);
 void		PgturbohybridBm25InvalidateCache(Relation index);
 bool		PgturbohybridBm25GetPlanningStats(Relation index,
 										 PgturbohybridBm25PlanningStats *stats);
+bool		PgturbohybridBm25EstimateMemory(Relation index,
+									  const PgturbohybridGraphMetaPageData *graphMeta,
+									  PgturbohybridBm25MemoryEstimate *estimate);
 bool		PgturbohybridBm25AnalyzeQuerySignals(Relation index, TSQuery query,
 											MemoryContext memoryContext,
 											PgturbohybridBm25QuerySignals *signals);

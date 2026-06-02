@@ -157,6 +157,10 @@ CREATE FUNCTION turbohybrid_index_stats(pg_catalog.regclass) RETURNS pg_catalog.
 	AS 'MODULE_PATHNAME', 'pgturbohybrid_index_stats'
 	LANGUAGE C STABLE STRICT PARALLEL SAFE;
 
+CREATE FUNCTION turbohybrid_estimate_memory(pg_catalog.regclass) RETURNS pg_catalog.jsonb
+	AS 'MODULE_PATHNAME', 'pgturbohybrid_estimate_memory'
+	LANGUAGE C STABLE STRICT PARALLEL SAFE;
+
 CREATE FUNCTION turbohybrid_prewarm(pg_catalog.regclass) RETURNS pg_catalog.jsonb
 	AS 'MODULE_PATHNAME', 'pgturbohybrid_prewarm'
 	LANGUAGE C STRICT PARALLEL RESTRICTED;
@@ -346,6 +350,7 @@ COMMENT ON FUNCTION turbohybrid_vector_cosine_distance(vector, vector) IS 'Cosin
 COMMENT ON FUNCTION turbohybrid_vector_norm(vector) IS 'Vector norm support function used by TurboHybrid vector opclasses';
 COMMENT ON FUNCTION turbohybrid_handler(pg_catalog.internal) IS 'Index access method handler for TurboHybrid';
 COMMENT ON FUNCTION turbohybrid_index_stats(pg_catalog.regclass) IS 'Return stable TurboHybrid index metadata as jsonb';
+COMMENT ON FUNCTION turbohybrid_estimate_memory(pg_catalog.regclass) IS 'Estimate native graph cache and BM25 reader-cache memory for a TurboHybrid index without building or loading those caches';
 COMMENT ON FUNCTION turbohybrid_prewarm(pg_catalog.regclass) IS 'Build or attach the shared native graph cache for a TurboHybrid native graph index and return cache diagnostics as jsonb';
 COMMENT ON FUNCTION turbohybrid_last_scan_stats() IS 'Return backend-local summary information for the last TurboHybrid scan as jsonb; parallel restricted because it reads mutable scan state';
 COMMENT ON FUNCTION turbohybrid_last_build_stats() IS 'Return backend-local summary information for the last native TurboHybrid graph build as jsonb; parallel restricted because it reads mutable build state';

@@ -26,6 +26,7 @@
 #include "storage/lmgr.h"
 #include "utils/builtins.h"
 #include "utils/float.h"
+#include "utils/fmgroids.h"
 #include "utils/guc.h"
 #include "utils/lsyscache.h"
 #include "utils/memutils.h"
@@ -82,6 +83,7 @@ bool		pgturbohybrid_enable_exact_rescore_for_bm25_only = false;
 int			pgturbohybrid_bm25_cache_max_mb = 0;
 int			pgturbohybrid_bm25_hot_postings_cache_mb = 0;
 int			pgturbohybrid_bm25_hot_postings_cache_min_df = 1024;
+int			pgturbohybrid_bm25_common_term_fallback_min_postings = 100000;
 bool		pgturbohybrid_bm25_allow_lazy_impact_build = false;
 int			pgturbohybrid_bm25_simd_force = PGTURBOHYBRID_BM25_SIMD_FORCE_AUTO;
 bool		pgturbohybrid_bm25_force_full_sort = false;
@@ -825,6 +827,10 @@ static bytea *pgturbohybridamoptions(Datum reloptions, bool validate);
 static bool pgturbohybridamvalidate(Oid opclassoid);
 static void PgturbohybridEnsureOrderByStorage(IndexScanDesc scan, MemoryContext scanCtx);
 static bool PgturbohybridPathHasFilter(IndexPath *path);
+static bool PgturbohybridPathHasUnmappedFilter(IndexPath *path, Relation index);
+static bool PgturbohybridIndexHasPayloadAttr(Relation index, AttrNumber heapAttno);
+static bool PgturbohybridClauseIsPayloadInt4Equality(Node *node, Index relid,
+											 AttrNumber heapAttno);
 static bool PgturbohybridFindConstQueryWalker(Node *node, void *context);
 static PgturbohybridQueryHeader *PgturbohybridFindConstQuery(List *indexorderbys);
 static int PgturbohybridEstimateTsQueryTerms(TSQuery query);
@@ -875,6 +881,13 @@ typedef struct PgturbohybridFusionArrayEntry
 	uint32		generation;
 	PgturbohybridResult result;
 } PgturbohybridFusionArrayEntry;
+
+typedef struct PgturbohybridFusionGenerationArrayCache
+{
+	PgturbohybridFusionArrayEntry *entries;
+	uint32		capacity;
+	uint32		generation;
+} PgturbohybridFusionGenerationArrayCache;
 
 typedef struct PgturbohybridScanState
 {
@@ -931,6 +944,8 @@ typedef struct PgturbohybridLastScanStats
 	uint32		fusionHeapSize;
 	uint64		fusionDuplicates;
 	uint64		fusionHeapReplacements;
+	bool		fusionGenerationArrayReused;
+	bool		fusionGenerationArrayReset;
 	uint32		bothMatch;
 	uint32		denseOnly;
 	uint32		bm25Only;
@@ -950,6 +965,15 @@ typedef struct PgturbohybridLastScanStats
 	uint64		graphBatchUs;
 	uint64		graphHeapUs;
 	uint64		graphFillUs;
+	uint64		graphFillCandidateBandCalls;
+	int			graphFillCandidateBandReason;
+	uint64		graphFillCandidateBandVisited;
+	uint64		graphFillCandidateBandScored;
+	uint64		graphFillCandidateBandSelectedBefore;
+	uint64		graphFillCandidateBandSelectedAfter;
+	uint64		graphFillCandidateBandTarget;
+	bool		graphFillCandidateBandUsedPayloadRefs;
+	uint64		graphFillCandidateBandPayloadRefCount;
 	uint64		graphRescoreUs;
 	uint64		graphSortUs;
 	uint32		bm25Terms;
@@ -965,6 +989,14 @@ typedef struct PgturbohybridLastScanStats
 	uint64		bm25CacheBuildUs;
 	bool		bm25CacheDocstatsLoaded;
 	bool		bm25CacheLivenessLoaded;
+	bool		bm25DocstatsLoadedThisQuery;
+	bool		bm25LivenessLoadedThisQuery;
+	uint64		bm25DocstatsBytes;
+	uint64		bm25LivenessBytes;
+	bool		bm25ColdCacheONWork;
+	double		bm25PostingsDecodeRatio;
+	bool		bm25CommonTermFallback;
+	uint64		bm25WandPruned;
 	uint64		bm25HotPostingsCacheHits;
 	uint64		bm25HotPostingsCacheMisses;
 	uint64		bm25HotPostingsCacheBytes;
@@ -1029,6 +1061,7 @@ typedef struct PgturbohybridLastScanStats
 } PgturbohybridLastScanStats;
 
 static PgturbohybridLastScanStats pgturbohybrid_last_scan_state;
+static PgturbohybridFusionGenerationArrayCache pgturbohybrid_fusion_generation_array_cache;
 
 void
 PgturbohybridGetLastScanStatsSnapshot(PgturbohybridScanStatsSnapshot *stats)
@@ -1051,6 +1084,22 @@ PgturbohybridGetLastScanStatsSnapshot(PgturbohybridScanStatsSnapshot *stats)
 	stats->bm25KDefaulted = pgturbohybrid_last_scan_state.bm25KDefaulted;
 	stats->bm25CacheHit = pgturbohybrid_last_scan_state.bm25CacheHit;
 	stats->bm25CacheBuildUs = pgturbohybrid_last_scan_state.bm25CacheBuildUs;
+	stats->bm25DocstatsLoadedThisQuery =
+		pgturbohybrid_last_scan_state.bm25DocstatsLoadedThisQuery;
+	stats->bm25LivenessLoadedThisQuery =
+		pgturbohybrid_last_scan_state.bm25LivenessLoadedThisQuery;
+	stats->bm25DocstatsBytes =
+		pgturbohybrid_last_scan_state.bm25DocstatsBytes;
+	stats->bm25LivenessBytes =
+		pgturbohybrid_last_scan_state.bm25LivenessBytes;
+	stats->bm25ColdCacheONWork =
+		pgturbohybrid_last_scan_state.bm25ColdCacheONWork;
+	stats->bm25PostingsDecodeRatio =
+		pgturbohybrid_last_scan_state.bm25PostingsDecodeRatio;
+	stats->bm25CommonTermFallback =
+		pgturbohybrid_last_scan_state.bm25CommonTermFallback;
+	stats->bm25WandPruned =
+		pgturbohybrid_last_scan_state.bm25WandPruned;
 	stats->bm25HotPostingsCacheHits =
 		pgturbohybrid_last_scan_state.bm25HotPostingsCacheHits;
 	stats->bm25HotPostingsCacheMisses =
@@ -1092,6 +1141,10 @@ PgturbohybridGetLastScanStatsSnapshot(PgturbohybridScanStatsSnapshot *stats)
 		pgturbohybrid_last_scan_state.fusionDuplicates;
 	stats->fusionHeapReplacements =
 		pgturbohybrid_last_scan_state.fusionHeapReplacements;
+	stats->fusionGenerationArrayReused =
+		pgturbohybrid_last_scan_state.fusionGenerationArrayReused;
+	stats->fusionGenerationArrayReset =
+		pgturbohybrid_last_scan_state.fusionGenerationArrayReset;
 	stats->denseElapsedUs = pgturbohybrid_last_scan_state.denseElapsedUs;
 	stats->bm25ElapsedUs = pgturbohybrid_last_scan_state.bm25ElapsedUs;
 	stats->fusionElapsedUs = pgturbohybrid_last_scan_state.fusionElapsedUs;
@@ -2511,6 +2564,52 @@ PgturbohybridShouldUseGenerationArray(IndexScanDesc scan,
 	return true;
 }
 
+static PgturbohybridFusionArrayEntry *
+PgturbohybridGetFusionGenerationArray(uint32 nodeCount,
+									  uint32 *generation,
+									  bool *reused,
+									  bool *reset)
+{
+	PgturbohybridFusionGenerationArrayCache *cache =
+		&pgturbohybrid_fusion_generation_array_cache;
+
+	*reused = false;
+	*reset = false;
+
+	if (cache->entries == NULL || cache->capacity < nodeCount)
+	{
+		MemoryContext oldCtx;
+
+		if (cache->entries != NULL)
+			pfree(cache->entries);
+
+		oldCtx = MemoryContextSwitchTo(CacheMemoryContext);
+		cache->entries = MemoryContextAllocZero(CacheMemoryContext,
+												sizeof(PgturbohybridFusionArrayEntry) *
+												nodeCount);
+		MemoryContextSwitchTo(oldCtx);
+		cache->capacity = nodeCount;
+		cache->generation = 1;
+		*generation = cache->generation;
+		*reset = true;
+		return cache->entries;
+	}
+
+	*reused = true;
+	if (cache->generation == PG_UINT32_MAX)
+	{
+		memset(cache->entries, 0,
+			   sizeof(PgturbohybridFusionArrayEntry) * cache->capacity);
+		cache->generation = 1;
+		*reset = true;
+	}
+	else
+		cache->generation++;
+
+	*generation = cache->generation;
+	return cache->entries;
+}
+
 static int
 PgturbohybridFuseGenerationArray(IndexScanDesc scan,
 								 PgturbohybridScanState *state,
@@ -2525,7 +2624,7 @@ PgturbohybridFuseGenerationArray(IndexScanDesc scan,
 								 int *mergedCountOut,
 								 PgturbohybridLastScanStats *stats)
 {
-	const uint32 generation = 1;
+	uint32		generation;
 	uint32		fusionCandidatesSeen = denseCount + bm25Count;
 	PgturbohybridFusionArrayEntry *entries;
 	uint32	   *touched;
@@ -2533,9 +2632,9 @@ PgturbohybridFuseGenerationArray(IndexScanDesc scan,
 	PgturbohybridResult *merged;
 	int			mergedCount = 0;
 
-	entries = MemoryContextAllocZero(memoryContext,
-									 sizeof(PgturbohybridFusionArrayEntry) *
-									 nodeCount);
+	entries = PgturbohybridGetFusionGenerationArray(nodeCount, &generation,
+													&stats->fusionGenerationArrayReused,
+													&stats->fusionGenerationArrayReset);
 	touched = MemoryContextAlloc(memoryContext,
 								 sizeof(uint32) * Max(fusionCandidatesSeen, 1));
 
@@ -2966,6 +3065,19 @@ PgturbohybridCollectScanResults(IndexScanDesc scan, PgturbohybridScanState *stat
 	lastStats.graphBatchUs = denseStats.batchUs;
 	lastStats.graphHeapUs = denseStats.heapUs;
 	lastStats.graphFillUs = denseStats.fillUs;
+	lastStats.graphFillCandidateBandCalls = denseStats.fillCandidateBandCalls;
+	lastStats.graphFillCandidateBandReason = denseStats.fillCandidateBandReason;
+	lastStats.graphFillCandidateBandVisited = denseStats.fillCandidateBandVisited;
+	lastStats.graphFillCandidateBandScored = denseStats.fillCandidateBandScored;
+	lastStats.graphFillCandidateBandSelectedBefore =
+		denseStats.fillCandidateBandSelectedBefore;
+	lastStats.graphFillCandidateBandSelectedAfter =
+		denseStats.fillCandidateBandSelectedAfter;
+	lastStats.graphFillCandidateBandTarget = denseStats.fillCandidateBandTarget;
+	lastStats.graphFillCandidateBandUsedPayloadRefs =
+		denseStats.fillCandidateBandUsedPayloadRefs;
+	lastStats.graphFillCandidateBandPayloadRefCount =
+		denseStats.fillCandidateBandPayloadRefCount;
 	lastStats.graphRescoreUs = denseStats.rescoreUs;
 	lastStats.graphSortUs = denseStats.sortUs;
 	lastStats.bm25Terms = bm25Stats.queryTerms;
@@ -2983,6 +3095,16 @@ PgturbohybridCollectScanResults(IndexScanDesc scan, PgturbohybridScanState *stat
 	lastStats.bm25CacheBuildUs = bm25Stats.cacheBuildUs;
 	lastStats.bm25CacheDocstatsLoaded = bm25Stats.cacheDocstatsLoaded;
 	lastStats.bm25CacheLivenessLoaded = bm25Stats.cacheLivenessLoaded;
+	lastStats.bm25DocstatsLoadedThisQuery =
+		bm25Stats.docstatsLoadedThisQuery;
+	lastStats.bm25LivenessLoadedThisQuery =
+		bm25Stats.livenessLoadedThisQuery;
+	lastStats.bm25DocstatsBytes = bm25Stats.docstatsBytes;
+	lastStats.bm25LivenessBytes = bm25Stats.livenessBytes;
+	lastStats.bm25ColdCacheONWork = bm25Stats.coldCacheONWork;
+	lastStats.bm25PostingsDecodeRatio = bm25Stats.postingsDecodeRatio;
+	lastStats.bm25CommonTermFallback = bm25Stats.commonTermFallback;
+	lastStats.bm25WandPruned = bm25Stats.wandPruned;
 	lastStats.bm25HotPostingsCacheHits = bm25Stats.hotPostingsCacheHits;
 	lastStats.bm25HotPostingsCacheMisses = bm25Stats.hotPostingsCacheMisses;
 	lastStats.bm25HotPostingsCacheBytes = bm25Stats.hotPostingsCacheBytes;
@@ -3300,6 +3422,119 @@ PgturbohybridPathHasFilter(IndexPath *path)
 	return false;
 }
 
+static bool
+PgturbohybridIndexHasPayloadAttr(Relation index, AttrNumber heapAttno)
+{
+	int			totalAttrs = IndexRelationGetNumberOfAttributes(index);
+	int			keyAttrs = IndexRelationGetNumberOfKeyAttributes(index);
+
+	for (int i = keyAttrs; i < totalAttrs; i++)
+	{
+		if (index->rd_index->indkey.values[i] == heapAttno)
+			return true;
+	}
+
+	return false;
+}
+
+static bool
+PgturbohybridClauseIsPayloadInt4Equality(Node *node, Index relid, AttrNumber heapAttno)
+{
+	OpExpr	   *op;
+	Node	   *left;
+	Node	   *right;
+	Var		   *var = NULL;
+	Const	   *constant = NULL;
+	Oid			opfuncid;
+
+	if (node == NULL || !IsA(node, OpExpr))
+		return false;
+
+	op = castNode(OpExpr, node);
+	if (list_length(op->args) != 2)
+		return false;
+
+	opfuncid = op->opfuncid;
+	if (!OidIsValid(opfuncid))
+		opfuncid = get_opcode(op->opno);
+	if (opfuncid != F_INT4EQ)
+		return false;
+
+	left = linitial(op->args);
+	right = lsecond(op->args);
+
+	if (IsA(left, Var) && IsA(right, Const))
+	{
+		var = castNode(Var, left);
+		constant = castNode(Const, right);
+	}
+	else if (IsA(left, Const) && IsA(right, Var))
+	{
+		var = castNode(Var, right);
+		constant = castNode(Const, left);
+	}
+	else
+		return false;
+
+	return var->varno == relid &&
+		var->varattno == heapAttno &&
+		var->vartype == INT4OID &&
+		constant->consttype == INT4OID &&
+		!constant->constisnull;
+}
+
+static bool
+PgturbohybridPathHasUnmappedFilter(IndexPath *path, Relation index)
+{
+	int			denseAttno = path->indexinfo->indexkeys[0];
+	AttrNumber	lexicalAttno = PgturbohybridPathLexicalAttno(path);
+	bool		hasLexicalAttno = AttributeNumberIsValid(lexicalAttno);
+	Index		relid = path->indexinfo->rel->relid;
+	ListCell   *lc;
+
+	foreach(lc, path->indexinfo->indrestrictinfo)
+	{
+		RestrictInfo *rinfo = lfirst_node(RestrictInfo, lc);
+		Bitmapset  *attrs = NULL;
+		int			attrOffset;
+		AttrNumber	heapAttno;
+
+		pull_varattnos((Node *) rinfo->clause, relid, &attrs);
+
+		if (attrs == NULL)
+			continue;
+
+		if (bms_membership(attrs) != BMS_SINGLETON)
+		{
+			bms_free(attrs);
+			return true;
+		}
+
+		attrOffset = bms_singleton_member(attrs);
+		bms_free(attrs);
+		heapAttno = attrOffset + FirstLowInvalidHeapAttributeNumber;
+
+		if (heapAttno == denseAttno ||
+			(hasLexicalAttno && heapAttno == lexicalAttno))
+			continue;
+
+		/*
+		 * Runtime can use graph payload refs only for simple int4 equality
+		 * predicates on INCLUDE payload columns.  Everything else is costed as
+		 * an unmapped heap filter because it may force dense collection toward
+		 * the full scan budget before the executor can recheck the predicate.
+		 */
+		if (PgturbohybridIndexHasPayloadAttr(index, heapAttno) &&
+			PgturbohybridClauseIsPayloadInt4Equality((Node *) rinfo->clause,
+										 relid, heapAttno))
+			continue;
+
+		return true;
+	}
+
+	return false;
+}
+
 static Oid
 PgturbohybridExtensionSchema(Oid extensionOid)
 {
@@ -3419,18 +3654,28 @@ pgturbohybridamcostestimate(PlannerInfo *root, IndexPath *path, double loop_coun
 	double		efSearch;
 	double		graphOversampling;
 	double		m;
+	double		nodeCount;
+	double		filterSelectivity;
+	double		denseCandidateWork = 0.0;
 	double		denseWork = 0.0;
 	double		bm25Postings = 0.0;
 	double		bm25Work = 0.0;
+	double		nativeCacheWork = 0.0;
+	double		bm25ColdCacheWork = 0.0;
+	double		rescoreWork = 0.0;
 	double		fusionWork;
-	double		filterMultiplier = 1.0;
+	double		fusionInput;
 	double		estimatedPages;
 	double		spc_random_page_cost;
 	double		spc_seq_page_cost;
 	double		pageCost;
 	double		cpuCost;
 	double		totalWork;
+	bool		hasHeapFilter = false;
+	bool		hasUnmappedFilter = false;
 	bool		hasLexicalKey;
+	bool		haveGraphMemory = false;
+	PgturbohybridGraphMemoryEstimate graphMemory;
 
 	if (path->indexorderbys == NIL)
 	{
@@ -3448,6 +3693,7 @@ pgturbohybridamcostestimate(PlannerInfo *root, IndexPath *path, double loop_coun
 	MemSet(&costs, 0, sizeof(costs));
 	genericcostestimate(root, path, loop_count, &costs);
 	MemSet(&bm25Stats, 0, sizeof(bm25Stats));
+	MemSet(&graphMemory, 0, sizeof(graphMemory));
 	query = PgturbohybridFindConstQuery(path->indexorderbys);
 
 	index = index_open(path->indexinfo->indexoid, NoLock);
@@ -3481,8 +3727,15 @@ pgturbohybridamcostestimate(PlannerInfo *root, IndexPath *path, double loop_coun
 	}
 	if (bm25K > 0)
 		(void) PgturbohybridBm25GetPlanningStats(index, &bm25Stats);
+	hasHeapFilter = PgturbohybridPathHasFilter(path);
+	if (hasHeapFilter)
+		hasUnmappedFilter = PgturbohybridPathHasUnmappedFilter(path, index);
+	if (denseK > 0)
+		haveGraphMemory = PgturbohybridGraphEstimateMemory(index, &graphMeta,
+														   &graphMemory);
 
 	tuples = Max(path->indexinfo->tuples, 1.0);
+	nodeCount = graphMeta.tqNodeCount > 0 ? graphMeta.tqNodeCount : tuples;
 	m = graphMeta.m > 0 ? graphMeta.m :
 		(opts != NULL ? opts->m : PGTURBOHYBRID_GRAPH_DEFAULT_M);
 	efSearch = graphMeta.graphEfSearch > 0 ? graphMeta.graphEfSearch :
@@ -3492,15 +3745,93 @@ pgturbohybridamcostestimate(PlannerInfo *root, IndexPath *path, double loop_coun
 		(opts != NULL ? opts->graphOversampling : PGTURBOHYBRID_DEFAULT_GRAPH_OVERSAMPLING);
 	index_close(index, NoLock);
 
-	if (PgturbohybridPathHasFilter(path))
-		filterMultiplier = Min(10.0, 1.0 / Max(costs.indexSelectivity, 0.01));
+	filterSelectivity = costs.indexSelectivity;
+	if (path->path.parent != NULL && path->path.parent->tuples > 0 &&
+		path->path.rows >= 0)
+		filterSelectivity = path->path.rows / path->path.parent->tuples;
+	filterSelectivity = Max(Min(filterSelectivity, 1.0), 0.001);
 
 	if (denseK > 0)
 	{
 		double		layer0Work = Max(efSearch, denseK * graphOversampling);
 		double		entryWork = Max(1.0, log(tuples)) * Max(m, 1.0);
+		double		dimensions = graphMeta.dimensions > 0 ?
+			graphMeta.dimensions : 128.0;
+		double		rescoreBand = 0.0;
 
-		denseWork = (entryWork + layer0Work) * filterMultiplier;
+		denseCandidateWork = layer0Work;
+
+		if (hasHeapFilter)
+		{
+			double		selectiveTarget =
+				ceil(Max(finalK, denseK) / filterSelectivity) *
+				Max(graphOversampling, 1.0);
+
+			if (hasUnmappedFilter)
+			{
+				double		scanCap = pgturbohybrid_max_scan_tuples > 0 ?
+					(double) pgturbohybrid_max_scan_tuples : nodeCount;
+
+				/*
+				 * Runtime PgturbohybridGraphCollectResults() widens unmapped
+				 * heap filters to min(N, max_scan_tuples) because the graph
+				 * cannot evaluate the predicate during traversal.
+				 */
+				denseCandidateWork = Max(denseCandidateWork,
+										 Min(nodeCount, scanCap));
+			}
+			else
+			{
+				/*
+				 * Payload-owned int4 equality filters can use graph payload
+				 * refs, but result collection still scales with the filtered
+				 * band size when selectivity is low.
+				 */
+				denseCandidateWork = Max(denseCandidateWork,
+										 Min(nodeCount, selectiveTarget));
+			}
+		}
+
+		denseWork = entryWork + denseCandidateWork;
+
+		/*
+		 * Exact/heap rescore over a large final band is separate work after
+		 * candidate collection.  The exact policies rescore the band; limited
+		 * caps the band by the configured multiplier; large widened bands get
+		 * a small extra term even under auto/off to reflect sorting and tuple
+		 * preparation around the fallback path.
+		 */
+		if (pgturbohybrid_dense_rescore_band_policy ==
+			PGTURBOHYBRID_RESCORE_BAND_POLICY_EXACT ||
+			pgturbohybrid_dense_heap_rescore ==
+			PGTURBOHYBRID_DENSE_HEAP_RESCORE_BAND)
+			rescoreBand = denseCandidateWork;
+		else if (pgturbohybrid_dense_rescore_band_policy ==
+				 PGTURBOHYBRID_RESCORE_BAND_POLICY_LIMITED)
+			rescoreBand = Min(denseCandidateWork,
+							  Max(denseK, finalK) *
+							  Max(pgturbohybrid_dense_max_rescore_multiplier, 1));
+		else if (pgturbohybrid_dense_heap_rescore ==
+				 PGTURBOHYBRID_DENSE_HEAP_RESCORE_TOPK)
+			rescoreBand = Max(finalK, 1.0);
+		else if (denseCandidateWork > layer0Work * 2.0)
+			rescoreBand = (denseCandidateWork - layer0Work) * 0.25;
+
+		rescoreWork = rescoreBand * Max(dimensions / 64.0, 1.0);
+
+		if (haveGraphMemory &&
+			graphMemory.effectiveCachePolicy != PGTURBOHYBRID_NATIVE_CACHE_POLICY_OFF &&
+			graphMemory.estimatedTotalBytes > 0)
+		{
+			/*
+			 * A cold native cache build copies O(N) resident code/node/adjacency
+			 * state before warm scans become cheap.  Keep this as a bounded
+			 * startup surcharge so ordinary warm top-k plans stay attractive.
+			 */
+			nativeCacheWork = Min(nodeCount * 0.05,
+								  (double) graphMemory.estimatedTotalBytes /
+								  (double) BLCKSZ);
+		}
 	}
 
 	if (bm25K > 0)
@@ -3516,21 +3847,47 @@ pgturbohybridamcostestimate(PlannerInfo *root, IndexPath *path, double loop_coun
 		bm25Postings = Min(corpusDocs * Max(termCount, 1.0),
 						   avgDf * Max(termCount, 1.0));
 		if (pgturbohybrid_enable_wand && bm25Stats.blockMaxPages > 0)
-			bm25Postings *= 0.35;
+		{
+			double		dfRatio = bm25Postings / Max(corpusDocs, 1.0);
 
-		bm25Work = (bm25Postings + bm25K * Max(termCount, 1.0)) *
-			filterMultiplier;
+			/*
+			 * Common terms make WAND/impact pruning less selective.  Use the
+			 * normal discount for sparse terms, but retain more postings work
+			 * when average df is a large fraction of the corpus.
+			 */
+			bm25Postings *= dfRatio >= 0.10 ? 0.65 : 0.35;
+		}
+
+		/*
+		 * Cold BM25 queries may populate docLens/heapTids/liveNodes arrays of
+		 * size N before postings scoring.  The planner cannot know cache
+		 * warmth, so this is a small O(N) startup term rather than a full scan
+		 * replacement.
+		 */
+		if (bm25Stats.hasBm25)
+			bm25ColdCacheWork = corpusDocs * 0.04;
+
+		bm25Work = bm25Postings + bm25K * Max(termCount, 1.0);
+		if (hasHeapFilter)
+			bm25Work *= Min(4.0, 1.0 / Max(filterSelectivity, 0.05));
 	}
 
-	fusionWork = Max(finalK, denseK + bm25K);
+	fusionInput = Max(finalK, Max(denseCandidateWork, denseK) + bm25K);
+	if (pgturbohybrid_max_union_candidates > 0)
+		fusionInput = Min(fusionInput, (double) pgturbohybrid_max_union_candidates);
+	fusionWork = fusionInput;
 	if (fusionWork > 1)
 		fusionWork *= log(fusionWork) / log(2.0);
 
-	totalWork = denseWork + bm25Work + fusionWork;
+	totalWork = denseWork + bm25Work + nativeCacheWork + bm25ColdCacheWork +
+		rescoreWork + fusionWork;
 	get_tablespace_page_costs(path->indexinfo->reltablespace,
 							  &spc_random_page_cost, &spc_seq_page_cost);
 	estimatedPages = Min(costs.numIndexPages,
-						 2.0 + denseWork / 256.0 + bm25Work / 512.0);
+						 2.0 + denseWork / 256.0 + bm25Work / 512.0 +
+						 nativeCacheWork / 128.0 +
+						 bm25ColdCacheWork / 256.0 +
+						 rescoreWork / 512.0);
 	pageCost = estimatedPages *
 		(spc_seq_page_cost + (spc_random_page_cost - spc_seq_page_cost) * 0.25);
 	cpuCost = totalWork * cpu_operator_cost + fusionWork * cpu_tuple_cost;
@@ -3781,6 +4138,12 @@ PgturbohybridInit(void)
 							&pgturbohybrid_native_cache_max_mb,
 							2048, 0, 1048576,
 							PGC_USERSET, GUC_UNIT_MB, NULL, NULL, NULL);
+	DefineCustomIntVariable("turbohybrid.native_cache_warn_mb",
+							"Warn when building a large per-backend native dense scan cache",
+							"Emits DEBUG1 when a per-backend native graph cache build exceeds this resident-size threshold. The warning is non-fatal and reminds users that per_backend memory is duplicated by each active PostgreSQL backend. Set to 0 to disable. Default 512.",
+							&pgturbohybrid_native_cache_warn_mb,
+							512, 0, 1048576,
+							PGC_USERSET, GUC_UNIT_MB, NULL, NULL, NULL);
 	DefineCustomStringVariable("turbohybrid.native_build_workers",
 							   "Parallel worker count for native dense graph build scan, encoding, and edge construction",
 							   "Default 2 requests parallel native builds; auto uses PostgreSQL's parallel CREATE INDEX worker choice; 0 disables native parallel build; 1, 2, 4, or 8 requests that many workers.",
@@ -3842,6 +4205,16 @@ PgturbohybridInit(void)
 							 "Normalized score-gap threshold for automatic dense graph widening; 0 uses the built-in threshold",
 							 NULL, &pgturbohybrid_dense_adaptive_min_gap,
 							 0.0, 0.0, 1.0, PGC_USERSET, 0, NULL, NULL, NULL);
+	DefineCustomBoolVariable("turbohybrid.warn_linear_fallback",
+							 "Warn when unmapped heap filters make dense graph scans near-linear",
+							 "When enabled, emits DEBUG1 if an unmapped heap filter widens native dense candidate collection to a large fraction of the index.",
+							 &pgturbohybrid_warn_linear_fallback,
+							 true, PGC_USERSET, 0, NULL, NULL, NULL);
+	DefineCustomRealVariable("turbohybrid.linear_fallback_notice_threshold_ratio",
+							 "Dense graph linear-fallback warning threshold",
+							 "Emit the unmapped-filter dense fallback warning when resultTarget / nodeCount is at least this ratio.",
+							 &pgturbohybrid_linear_fallback_notice_threshold_ratio,
+							 0.25, 0.0, 1.0, PGC_USERSET, 0, NULL, NULL, NULL);
 	DefineCustomEnumVariable("turbohybrid.dense_local_expansion",
 							 "Experimental bounded one-hop dense graph expansion mode",
 							 "Valid values are off, auto, and on. Non-off modes score neighbors of top approximate candidates.",
@@ -3878,6 +4251,11 @@ PgturbohybridInit(void)
 							NULL, &pgturbohybrid_bm25_hot_postings_cache_min_df,
 							1024, 1, INT_MAX, PGC_USERSET, 0,
 							PgturbohybridCheckBm25HotPostingsCacheMinDf, NULL, NULL);
+	DefineCustomIntVariable("turbohybrid.bm25_common_term_fallback_min_postings",
+							"Minimum decoded postings count for flagging common-term BM25 fallback stats",
+							NULL,
+							&pgturbohybrid_bm25_common_term_fallback_min_postings,
+							100000, 0, INT_MAX, PGC_USERSET, 0, NULL, NULL, NULL);
 	DefineCustomEnumVariable("turbohybrid.bm25_hybrid_bound", "Hybrid RRF bound mode for BM25 candidate generation",
 							 "Valid values are off, safe, and approx.",
 							 &pgturbohybrid_bm25_hybrid_bound,
@@ -3954,6 +4332,8 @@ PgturbohybridHybridLastScanStats(PG_FUNCTION_ARGS)
 					 "\"fusion_heap_size\":%u,"
 					 "\"fusion_duplicates\":" UINT64_FORMAT ","
 					 "\"fusion_heap_replacements\":" UINT64_FORMAT ","
+					 "\"fusion_generation_array_reused\":%s,"
+					 "\"fusion_generation_array_reset\":%s,"
 					 "\"fast_weighted_enabled\":%s,"
 					 "\"fast_weighted_alpha\":%.6f,"
 					 "\"bm25_norm_mode\":\"%s\","
@@ -3997,6 +4377,14 @@ PgturbohybridHybridLastScanStats(PG_FUNCTION_ARGS)
 					 "\"bm25_cache_build_us\":" UINT64_FORMAT ","
 					 "\"bm25_cache_docstats_loaded\":%s,"
 					 "\"bm25_cache_liveness_loaded\":%s,"
+					 "\"bm25_docstats_loaded_this_query\":%s,"
+					 "\"bm25_liveness_loaded_this_query\":%s,"
+					 "\"bm25_docstats_bytes\":" UINT64_FORMAT ","
+					 "\"bm25_liveness_bytes\":" UINT64_FORMAT ","
+					 "\"bm25_cold_cache_o_n_work\":%s,"
+					 "\"bm25_postings_decode_ratio\":%.6f,"
+					 "\"bm25_common_term_fallback\":%s,"
+					 "\"bm25_wand_pruned\":" UINT64_FORMAT ","
 					 "\"bm25_hot_postings_cache_hit\":%s,"
 					 "\"bm25_hot_postings_cache_hits\":" UINT64_FORMAT ","
 					 "\"bm25_hot_postings_cache_misses\":" UINT64_FORMAT ","
@@ -4098,6 +4486,8 @@ PgturbohybridHybridLastScanStats(PG_FUNCTION_ARGS)
 					 pgturbohybrid_last_scan_state.fusionHeapSize,
 					 pgturbohybrid_last_scan_state.fusionDuplicates,
 					 pgturbohybrid_last_scan_state.fusionHeapReplacements,
+					 pgturbohybrid_last_scan_state.fusionGenerationArrayReused ? "true" : "false",
+					 pgturbohybrid_last_scan_state.fusionGenerationArrayReset ? "true" : "false",
 					 pgturbohybrid_last_scan_state.fastWeightedEnabled ? "true" : "false",
 					 pgturbohybrid_last_scan_state.fastWeightedAlpha,
 					 pgturbohybrid_last_scan_state.bm25NormMode[0] != '\0' ?
@@ -4146,6 +4536,14 @@ PgturbohybridHybridLastScanStats(PG_FUNCTION_ARGS)
 					 pgturbohybrid_last_scan_state.bm25CacheBuildUs,
 					 pgturbohybrid_last_scan_state.bm25CacheDocstatsLoaded ? "true" : "false",
 					 pgturbohybrid_last_scan_state.bm25CacheLivenessLoaded ? "true" : "false",
+					 pgturbohybrid_last_scan_state.bm25DocstatsLoadedThisQuery ? "true" : "false",
+					 pgturbohybrid_last_scan_state.bm25LivenessLoadedThisQuery ? "true" : "false",
+					 pgturbohybrid_last_scan_state.bm25DocstatsBytes,
+					 pgturbohybrid_last_scan_state.bm25LivenessBytes,
+					 pgturbohybrid_last_scan_state.bm25ColdCacheONWork ? "true" : "false",
+					 pgturbohybrid_last_scan_state.bm25PostingsDecodeRatio,
+					 pgturbohybrid_last_scan_state.bm25CommonTermFallback ? "true" : "false",
+					 pgturbohybrid_last_scan_state.bm25WandPruned,
 					 pgturbohybrid_last_scan_state.bm25HotPostingsCacheHits > 0 ?
 					 "true" : "false",
 					 pgturbohybrid_last_scan_state.bm25HotPostingsCacheHits,

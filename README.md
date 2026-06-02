@@ -342,8 +342,57 @@ After a query, check whether PostgreSQL used the expected TurboHybrid path:
 ```sql
 SELECT turbohybrid_last_scan_stats();
 SELECT turbohybrid_index_stats('documents_turbohybrid_idx'::regclass);
+SELECT turbohybrid_estimate_memory('documents_turbohybrid_idx'::regclass);
 SELECT turbohybrid_simd_capabilities();
 ```
+
+Use `turbohybrid_estimate_memory(index)` before a query or prewarm step when
+sizing native graph cache memory. It reports native code/adjacency/exact-vector
+cache estimates, the current native cache policy, shared-cache per-backend view
+bytes, and BM25 reader-cache arrays without building the native graph cache or
+loading BM25 doc/liveness caches.
+
+Native cache scope matters under concurrency:
+
+- `per_backend` stores the resident native graph cache in each active PostgreSQL
+  backend. A 400 MB native cache is roughly 400 MB at 1 backend, 4 GB at 10
+  backends, and 40 GB at 100 backends before BM25 reader caches and other
+  backend memory.
+- `shared` stores the large immutable native graph arenas once in the mmap-backed
+  shared cache, but each backend still allocates view/scratch metadata and BM25
+  reader caches.
+- `off` avoids resident native graph cache memory, but scans load graph pages
+  through PostgreSQL shared buffers and can do more per-scan I/O/CPU work.
+
+Use the estimator to compute concrete 1/10/100-backend projections for an index:
+
+```sql
+WITH estimate AS (
+  SELECT turbohybrid_estimate_memory('documents_turbohybrid_idx'::regclass) AS m
+),
+backends(n) AS (VALUES (1), (10), (100))
+SELECT
+  n AS active_backends,
+  pg_size_pretty(
+    n * (
+      (m->'concurrency'->>'per_backend_total_bytes_per_backend')::bigint +
+      (m->'concurrency'->>'bm25_total_bytes_per_backend')::bigint
+    )
+  ) AS per_backend_scope_total,
+  pg_size_pretty(
+    (m->'concurrency'->>'shared_cache_total_bytes')::bigint +
+    n * (
+      (m->'concurrency'->>'shared_backend_view_bytes_per_backend')::bigint +
+      (m->'concurrency'->>'bm25_total_bytes_per_backend')::bigint
+    )
+  ) AS shared_scope_total
+FROM estimate, backends
+ORDER BY n;
+```
+
+`turbohybrid.native_cache_warn_mb` emits a non-fatal DEBUG1 message when a
+per-backend native cache build crosses the configured resident-size threshold.
+Set it to `0` to disable the warning.
 
 For a slow query, `turbohybrid_last_scan_diagnosis()` reduces the full stats
 JSON to the key dense hot-path fields, a few derived ratios, and a single

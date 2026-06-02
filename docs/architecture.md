@@ -168,6 +168,40 @@ defaults for these, so override only for a specific need.
   pages. This is a per-backend allocation only when
   `native_cache_scope=per_backend`, which should be sized to host RAM and
   connection count.
+- `turbohybrid.native_cache_warn_mb`: DEBUG1 warning threshold for per-backend
+  native cache builds (default 512 MB). Set it to `0` to disable the warning.
+  The warning is diagnostic only; it does not change cache policy.
+
+For concurrency sizing, prefer `turbohybrid_estimate_memory(index)` before
+running the workload. `per_backend` duplicates native resident cache bytes per
+active PostgreSQL backend. `shared` stores the large immutable native arenas
+once, but still has per-backend view/scratch overhead and BM25 cache arrays.
+`off` avoids resident native cache memory but increases graph page loading per
+scan. To project 1, 10, and 100 active backends from the estimator:
+
+```sql
+WITH estimate AS (
+  SELECT turbohybrid_estimate_memory('documents_turbohybrid_idx'::regclass) AS m
+),
+backends(n) AS (VALUES (1), (10), (100))
+SELECT
+  n AS active_backends,
+  pg_size_pretty(
+    n * (
+      (m->'concurrency'->>'per_backend_total_bytes_per_backend')::bigint +
+      (m->'concurrency'->>'bm25_total_bytes_per_backend')::bigint
+    )
+  ) AS per_backend_scope_total,
+  pg_size_pretty(
+    (m->'concurrency'->>'shared_cache_total_bytes')::bigint +
+    n * (
+      (m->'concurrency'->>'shared_backend_view_bytes_per_backend')::bigint +
+      (m->'concurrency'->>'bm25_total_bytes_per_backend')::bigint
+    )
+  ) AS shared_scope_total
+FROM estimate, backends
+ORDER BY n;
+```
 - `turbohybrid.bm25_strategy`, `turbohybrid.bm25_impact_or_mode`,
   `turbohybrid.bm25_hybrid_bound`, `turbohybrid.bm25_accumulator_mode`: BM25
   candidate-generation strategy and bound/accumulator modes. `auto` is robust;
@@ -207,6 +241,16 @@ predictable.
   The knobs are `turbohybrid.dense_adaptive_widening_multiplier`,
   `turbohybrid.dense_adaptive_widening_max_multiplier`, and
   `turbohybrid.dense_adaptive_min_gap`.
+- Heap filters that are not mapped to native graph `INCLUDE` int4 payload
+  columns cannot be applied inside graph traversal.  PostgreSQL selectivity can
+  therefore widen dense candidate collection toward
+  `turbohybrid.max_scan_tuples`; `turbohybrid_last_scan_stats()` reports this
+  as `dense_filter_unmapped`, `dense_linear_fallback_warning`, and
+  `dense_linear_fallback_ratio`.  `turbohybrid.warn_linear_fallback` (default
+  on) emits a DEBUG1 diagnostic when the ratio crosses
+  `turbohybrid.linear_fallback_notice_threshold_ratio` (default 0.25).  Add the
+  filter column as an `INCLUDE` int4 payload where possible, or lower candidate
+  budgets / `max_scan_tuples`.
 - `turbohybrid.dense_local_expansion` (`off` / `auto` / `on`, default `off`):
   bounded one-hop scoring from the top approximate dense candidates, tuned by
   `turbohybrid.dense_local_expansion_topn` and

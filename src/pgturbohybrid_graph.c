@@ -7,6 +7,7 @@
 
 #include "access/amapi.h"
 #include "access/genam.h"
+#include "access/relation.h"
 #include "access/reloptions.h"
 #include "access/sysattr.h"
 #include "commands/progress.h"
@@ -97,6 +98,23 @@ PgturbohybridIndexStatsJsonbAddUInt32(PgturbohybridJsonbState *state, const char
 }
 
 static void
+PgturbohybridIndexStatsJsonbAddUInt64(PgturbohybridJsonbState *state, const char *key,
+								 uint64 val)
+{
+	char		buf[32];
+	JsonbValue	value;
+
+	snprintf(buf, sizeof(buf), UINT64_FORMAT, val);
+	PgturbohybridIndexStatsJsonbAddKey(state, key);
+	value.type = jbvNumeric;
+	value.val.numeric = DatumGetNumeric(DirectFunctionCall3(numeric_in,
+															CStringGetDatum(buf),
+															ObjectIdGetDatum(InvalidOid),
+															Int32GetDatum(-1)));
+	PgturbohybridJsonbPush(state, WJB_VALUE, &value);
+}
+
+static void
 PgturbohybridIndexStatsJsonbAddFloat8(PgturbohybridJsonbState *state, const char *key,
 								 double val)
 {
@@ -127,6 +145,54 @@ PgturbohybridRoutingName(int routing)
 	}
 }
 
+static const char *
+PgturbohybridMemoryCachePolicyName(int policy)
+{
+	switch ((PgturbohybridNativeCachePolicy) policy)
+	{
+		case PGTURBOHYBRID_NATIVE_CACHE_POLICY_SHARED:
+			return "shared";
+		case PGTURBOHYBRID_NATIVE_CACHE_POLICY_PER_BACKEND:
+			return "per_backend";
+		case PGTURBOHYBRID_NATIVE_CACHE_POLICY_OFF:
+			return "off";
+		case PGTURBOHYBRID_NATIVE_CACHE_POLICY_AUTO:
+		default:
+			return "auto";
+	}
+}
+
+static const char *
+PgturbohybridMemoryCacheReasonName(PgturbohybridGraphNativeCacheReason reason)
+{
+	switch (reason)
+	{
+		case PGTURBOHYBRID_GRAPH_NATIVE_CACHE_REASON_SHARED_FITS_MAX_MB:
+			return "shared_fits_max_mb";
+		case PGTURBOHYBRID_GRAPH_NATIVE_CACHE_REASON_AUTO_FITS_MAX_MB:
+			return "auto_fits_max_mb";
+		case PGTURBOHYBRID_GRAPH_NATIVE_CACHE_REASON_PER_BACKEND_FITS_MAX_MB:
+			return "per_backend_fits_max_mb";
+		case PGTURBOHYBRID_GRAPH_NATIVE_CACHE_REASON_POLICY_OFF:
+			return "policy_off";
+		case PGTURBOHYBRID_GRAPH_NATIVE_CACHE_REASON_EXCEEDS_MAX_MB:
+			return "exceeds_max_mb";
+		case PGTURBOHYBRID_GRAPH_NATIVE_CACHE_REASON_SHARED_BUILD_TIMEOUT:
+			return "shared_build_timeout";
+		case PGTURBOHYBRID_GRAPH_NATIVE_CACHE_REASON_SHARED_ATTACH_FAILED:
+			return "shared_attach_failed";
+		case PGTURBOHYBRID_GRAPH_NATIVE_CACHE_REASON_NONE:
+		default:
+			return "none";
+	}
+}
+
+static double
+PgturbohybridBytesToMb(uint64 bytes)
+{
+	return (double) bytes / (1024.0 * 1024.0);
+}
+
 int			pgturbohybrid_ef_search = PGTURBOHYBRID_GRAPH_DEFAULT_EF_SEARCH;
 int			pgturbohybrid_iterative_scan = PGTURBOHYBRID_GRAPH_ITERATIVE_SCAN_OFF;
 int			pgturbohybrid_max_scan_tuples = 20000;
@@ -153,6 +219,7 @@ int			pgturbohybrid_dense_u8_split = PGTURBOHYBRID_U8_SPLIT_AUTO;
 bool		pgturbohybrid_dense_u8_batch_x4 = true;
 int			pgturbohybrid_native_cache_policy = PGTURBOHYBRID_NATIVE_CACHE_POLICY_AUTO;
 int			pgturbohybrid_native_cache_max_mb = 2048;
+int			pgturbohybrid_native_cache_warn_mb = 512;
 char	   *pgturbohybrid_native_build_workers = "2";
 int			pgturbohybrid_native_parallel_edge_build = PGTURBOHYBRID_NATIVE_PARALLEL_EDGE_BUILD_AUTO;
 int			pgturbohybrid_native_segment_budget = PGTURBOHYBRID_NATIVE_SEGMENT_BUDGET_AUTO;
@@ -173,6 +240,8 @@ int			pgturbohybrid_dense_adaptive_widening = PGTURBOHYBRID_DENSE_ADAPTIVE_WIDEN
 double		pgturbohybrid_dense_adaptive_widening_multiplier = 2.0;
 double		pgturbohybrid_dense_adaptive_widening_max_multiplier = 4.0;
 double		pgturbohybrid_dense_adaptive_min_gap = 0.0;
+bool		pgturbohybrid_warn_linear_fallback = true;
+double		pgturbohybrid_linear_fallback_notice_threshold_ratio = 0.25;
 int			pgturbohybrid_dense_local_expansion = PGTURBOHYBRID_DENSE_LOCAL_EXPANSION_OFF;
 int			pgturbohybrid_dense_local_expansion_topn = 8;
 int			pgturbohybrid_dense_local_expansion_max_neighbors = 256;
@@ -431,6 +500,182 @@ PgturbohybridGraphInit(void)
 					  AccessExclusiveLock);
 
 	PgturbohybridGraphControlInit();
+}
+
+FUNCTION_PREFIX PG_FUNCTION_INFO_V1(pgturbohybrid_estimate_memory);
+FUNCTION_PREFIX Datum
+pgturbohybrid_estimate_memory(PG_FUNCTION_ARGS)
+{
+	Oid			indexOid = PG_GETARG_OID(0);
+	Relation	index;
+	PgturbohybridGraphMetaPageData meta;
+	PgturbohybridGraphMemoryEstimate nativeEstimate;
+	PgturbohybridBm25MemoryEstimate bm25Estimate;
+	bool		hasNative = false;
+	bool		hasBm25 = false;
+	BlockNumber nblocks;
+	uint64		nativeBytesPerBackend = 0;
+	uint64		sharedCacheTotalBytes = 0;
+	PgturbohybridJsonbState jsonState;
+
+	index = relation_open(indexOid, AccessShareLock);
+	nblocks = RelationGetNumberOfBlocks(index);
+	if (nblocks > PGTURBOHYBRID_GRAPH_METAPAGE_BLKNO)
+		hasNative = PgturbohybridGraphEstimateMemory(index, &meta,
+													 &nativeEstimate);
+	else
+	{
+		memset(&meta, 0, sizeof(meta));
+		memset(&nativeEstimate, 0, sizeof(nativeEstimate));
+	}
+	if (hasNative)
+		hasBm25 = PgturbohybridBm25EstimateMemory(index, &meta, &bm25Estimate);
+	else
+		memset(&bm25Estimate, 0, sizeof(bm25Estimate));
+	if (hasNative)
+	{
+		if (nativeEstimate.effectiveCachePolicy == PGTURBOHYBRID_NATIVE_CACHE_POLICY_SHARED)
+		{
+			nativeBytesPerBackend = nativeEstimate.sharedBackendViewBytes;
+			sharedCacheTotalBytes = nativeEstimate.estimatedTotalBytes;
+		}
+		else
+			nativeBytesPerBackend = nativeEstimate.estimatedTotalBytes;
+	}
+
+	PgturbohybridJsonbStateInit(&jsonState);
+	PgturbohybridJsonbBeginObject(&jsonState);
+	PgturbohybridIndexStatsJsonbAddString(&jsonState, "index",
+										  RelationGetRelationName(index));
+	PgturbohybridIndexStatsJsonbAddUInt32(&jsonState, "node_count",
+										  hasNative ? meta.tqNodeCount : 0);
+	PgturbohybridIndexStatsJsonbAddUInt32(&jsonState, "dimensions",
+										  hasNative ? meta.dimensions : 0);
+	PgturbohybridIndexStatsJsonbAddUInt32(&jsonState, "quantization_bits",
+										  hasNative ? nativeEstimate.quantizationBits : 0);
+
+	PgturbohybridIndexStatsJsonbAddKey(&jsonState, "native");
+	PgturbohybridJsonbBeginObject(&jsonState);
+	PgturbohybridIndexStatsJsonbAddBool(&jsonState, "available", hasNative);
+	if (hasNative)
+	{
+		PgturbohybridIndexStatsJsonbAddString(&jsonState, "cache_policy",
+											  PgturbohybridMemoryCachePolicyName(nativeEstimate.effectiveCachePolicy));
+		PgturbohybridIndexStatsJsonbAddString(&jsonState, "configured_cache_policy",
+											  PgturbohybridMemoryCachePolicyName(nativeEstimate.cachePolicy));
+		PgturbohybridIndexStatsJsonbAddString(&jsonState, "cache_reason",
+											  PgturbohybridMemoryCacheReasonName(nativeEstimate.cacheReason));
+		PgturbohybridIndexStatsJsonbAddBool(&jsonState, "cache_exact_vectors",
+											nativeEstimate.cacheExactVectors);
+		PgturbohybridIndexStatsJsonbAddBool(&jsonState, "adjacency_estimated",
+											nativeEstimate.adjacencyEstimated);
+		PgturbohybridIndexStatsJsonbAddUInt32(&jsonState, "level_capacity",
+											  nativeEstimate.levelCapacity);
+		PgturbohybridIndexStatsJsonbAddUInt32(&jsonState, "code_page_count",
+											  nativeEstimate.codePageCount);
+		PgturbohybridIndexStatsJsonbAddUInt64(&jsonState, "code_bytes",
+											  nativeEstimate.codeBytes);
+		PgturbohybridIndexStatsJsonbAddUInt64(&jsonState, "adjacency_bytes",
+											  nativeEstimate.adjacencyBytes);
+		PgturbohybridIndexStatsJsonbAddUInt64(&jsonState, "exact_bytes",
+											  nativeEstimate.exactBytes);
+		PgturbohybridIndexStatsJsonbAddUInt64(&jsonState, "node_bytes",
+											  nativeEstimate.nodeBytes);
+		PgturbohybridIndexStatsJsonbAddUInt64(&jsonState, "visited_generation_bytes",
+											  nativeEstimate.visitedGenerationBytes);
+		PgturbohybridIndexStatsJsonbAddUInt64(&jsonState, "payload_bytes",
+											  nativeEstimate.payloadBytes);
+		PgturbohybridIndexStatsJsonbAddUInt64(&jsonState, "residual_bytes",
+											  nativeEstimate.residualBytes);
+		PgturbohybridIndexStatsJsonbAddUInt64(&jsonState, "page_map_bytes",
+											  nativeEstimate.pageMapBytes);
+		PgturbohybridIndexStatsJsonbAddUInt64(&jsonState, "shared_backend_view_bytes",
+											  nativeEstimate.sharedBackendViewBytes);
+		PgturbohybridIndexStatsJsonbAddUInt64(&jsonState, "estimated_total_bytes",
+											  nativeEstimate.estimatedTotalBytes);
+		PgturbohybridIndexStatsJsonbAddFloat8(&jsonState, "estimated_total_mb",
+											  PgturbohybridBytesToMb(nativeEstimate.estimatedTotalBytes));
+	}
+	PgturbohybridJsonbCloseObject(&jsonState);
+
+	PgturbohybridIndexStatsJsonbAddKey(&jsonState, "bm25");
+	PgturbohybridJsonbBeginObject(&jsonState);
+	PgturbohybridIndexStatsJsonbAddBool(&jsonState, "available", hasBm25);
+	if (hasBm25)
+	{
+		PgturbohybridIndexStatsJsonbAddUInt64(&jsonState, "doc_lens_bytes",
+											  bm25Estimate.docLensBytes);
+		PgturbohybridIndexStatsJsonbAddUInt64(&jsonState, "heap_tids_bytes",
+											  bm25Estimate.heapTidsBytes);
+		PgturbohybridIndexStatsJsonbAddUInt64(&jsonState, "live_nodes_bytes",
+											  bm25Estimate.liveNodesBytes);
+		PgturbohybridIndexStatsJsonbAddUInt32(&jsonState, "lexicon_entries",
+											  bm25Estimate.termCount);
+		PgturbohybridIndexStatsJsonbAddUInt64(&jsonState, "lexicon_bytes",
+											  bm25Estimate.lexiconBytes);
+		PgturbohybridIndexStatsJsonbAddUInt32(&jsonState, "document_count",
+											  bm25Estimate.docCount);
+		PgturbohybridIndexStatsJsonbAddUInt32(&jsonState, "delta_document_count",
+											  bm25Estimate.deltaDocCount);
+		PgturbohybridIndexStatsJsonbAddUInt32(&jsonState, "term_tuple_count",
+											  bm25Estimate.termTupleCount);
+		PgturbohybridIndexStatsJsonbAddUInt32(&jsonState, "postings_pages",
+											  bm25Estimate.postingsPages);
+		PgturbohybridIndexStatsJsonbAddUInt32(&jsonState, "block_max_pages",
+											  bm25Estimate.blockMaxPages);
+		PgturbohybridIndexStatsJsonbAddUInt32(&jsonState, "delta_pages",
+											  bm25Estimate.deltaPages);
+		PgturbohybridIndexStatsJsonbAddUInt32(&jsonState, "delta_term_pages",
+											  bm25Estimate.deltaTermPages);
+		PgturbohybridIndexStatsJsonbAddUInt64(&jsonState, "estimated_base_cache_bytes",
+											  bm25Estimate.estimatedBaseCacheBytes);
+		PgturbohybridIndexStatsJsonbAddFloat8(&jsonState, "estimated_base_cache_mb",
+											  PgturbohybridBytesToMb(bm25Estimate.estimatedBaseCacheBytes));
+	}
+	PgturbohybridJsonbCloseObject(&jsonState);
+
+	PgturbohybridIndexStatsJsonbAddKey(&jsonState, "concurrency");
+	PgturbohybridJsonbBeginObject(&jsonState);
+	if (!hasNative)
+	{
+		PgturbohybridIndexStatsJsonbAddString(&jsonState, "per_backend_warning",
+											  "native graph cache is unavailable for this relation");
+		PgturbohybridIndexStatsJsonbAddString(&jsonState, "shared_cache_note",
+											  "no shared native graph cache applies");
+	}
+	else if (nativeEstimate.effectiveCachePolicy == PGTURBOHYBRID_NATIVE_CACHE_POLICY_SHARED)
+	{
+		PgturbohybridIndexStatsJsonbAddString(&jsonState, "per_backend_warning",
+											  "BM25 reader cache remains per backend; native resident data is shared when the shared cache attaches");
+		PgturbohybridIndexStatsJsonbAddString(&jsonState, "shared_cache_note",
+											  "shared native cache stores resident graph data once; backend view and scratch bytes remain per backend");
+	}
+	else if (nativeEstimate.effectiveCachePolicy == PGTURBOHYBRID_NATIVE_CACHE_POLICY_OFF)
+	{
+		PgturbohybridIndexStatsJsonbAddString(&jsonState, "per_backend_warning",
+											  "native cache policy is off; scans use per-scan storage");
+		PgturbohybridIndexStatsJsonbAddString(&jsonState, "shared_cache_note",
+											  "set turbohybrid.native_cache_policy = shared to use the mmap-backed shared native cache when supported");
+	}
+	else
+	{
+		PgturbohybridIndexStatsJsonbAddString(&jsonState, "per_backend_warning",
+											  "native cache can be duplicated once per backend; multiply by active backend count");
+		PgturbohybridIndexStatsJsonbAddString(&jsonState, "shared_cache_note",
+											  "set turbohybrid.native_cache_policy = shared to store resident native graph data once when supported");
+	}
+	PgturbohybridIndexStatsJsonbAddUInt64(&jsonState, "per_backend_total_bytes_per_backend",
+										  nativeBytesPerBackend);
+	PgturbohybridIndexStatsJsonbAddUInt64(&jsonState, "shared_backend_view_bytes_per_backend",
+										  hasNative ? nativeEstimate.sharedBackendViewBytes : 0);
+	PgturbohybridIndexStatsJsonbAddUInt64(&jsonState, "shared_cache_total_bytes",
+										  sharedCacheTotalBytes);
+	PgturbohybridIndexStatsJsonbAddUInt64(&jsonState, "bm25_total_bytes_per_backend",
+										  hasBm25 ? bm25Estimate.estimatedBaseCacheBytes : 0);
+	PgturbohybridJsonbCloseObject(&jsonState);
+
+	relation_close(index, AccessShareLock);
+	PG_RETURN_JSONB_P(PgturbohybridJsonbEndObject(&jsonState));
 }
 
 FUNCTION_PREFIX PG_FUNCTION_INFO_V1(pgturbohybrid_index_stats);

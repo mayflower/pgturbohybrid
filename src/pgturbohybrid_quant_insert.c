@@ -7,6 +7,7 @@
 #include "access/generic_xlog.h"
 #include "catalog/pg_type_d.h"
 #include "miscadmin.h"
+#include "portability/instr_time.h"
 #include "storage/bufmgr.h"
 #include "utils/datum.h"
 #include "utils/memutils.h"
@@ -23,6 +24,25 @@ typedef struct PgturbohybridGraphInsertAppendCursor
 	BlockNumber tailBlkno;
 	uint16		pageKind;
 } PgturbohybridGraphInsertAppendCursor;
+
+typedef struct PgturbohybridGraphInsertStats
+{
+	uint64		reciprocalNeighborsConsidered;
+	uint64		reciprocalAdjCachedHits;
+	uint64		reciprocalAdjChainScans;
+	uint64		reciprocalAdjPagesScanned;
+	uint64		reciprocalUpdateUs;
+} PgturbohybridGraphInsertStats;
+
+static inline int64
+PgturbohybridGraphInsertElapsedUsSince(instr_time start)
+{
+	instr_time	elapsed;
+
+	INSTR_TIME_SET_CURRENT(elapsed);
+	INSTR_TIME_SUBTRACT(elapsed, start);
+	return (int64) INSTR_TIME_GET_MICROSEC(elapsed);
+}
 
 static PgturbohybridGraphInsertAppendCursor tqGraphCodeAppendCursor = {
 	InvalidOid, InvalidOid, InvalidBlockNumber, InvalidBlockNumber, 0
@@ -132,7 +152,8 @@ PgturbohybridGraphInsertCodeDistanceToNode(Relation index, PgturbohybridGraphSca
 
 static bool
 PgturbohybridGraphLoadAdjTuple(Relation index, PgturbohybridGraphMetaPageData *meta, uint32 nodeId,
-					int level, uint32 *neighbors, int *count)
+					int level, uint32 *neighbors, int *count,
+					PgturbohybridGraphInsertStats *stats)
 {
 	BlockNumber blkno = meta->tqAdjStartBlkno;
 	BlockNumber nblocks;
@@ -145,6 +166,9 @@ PgturbohybridGraphLoadAdjTuple(Relation index, PgturbohybridGraphMetaPageData *m
 	if (!BlockNumberIsValid(blkno))
 		return false;
 
+	if (stats != NULL)
+		stats->reciprocalAdjChainScans++;
+
 	nblocks = RelationGetNumberOfBlocks(index);
 	while (BlockNumberIsValid(blkno) && blkno < nblocks)
 	{
@@ -155,6 +179,8 @@ PgturbohybridGraphLoadAdjTuple(Relation index, PgturbohybridGraphMetaPageData *m
 		BlockNumber nextblkno;
 
 		CHECK_FOR_INTERRUPTS();
+		if (stats != NULL)
+			stats->reciprocalAdjPagesScanned++;
 		buf = ReadBuffer(index, blkno);
 		LockBuffer(buf, BUFFER_LOCK_SHARE);
 		page = BufferGetPage(buf);
@@ -199,7 +225,8 @@ PgturbohybridGraphLoadAdjTuple(Relation index, PgturbohybridGraphMetaPageData *m
 static void
 PgturbohybridGraphUpdateAdjTuple(Relation index, PgturbohybridGraphMetaPageData *meta,
 					  PgturbohybridGraphScanStorage *storage, uint32 nodeId,
-					  int level, uint32 *neighbors, int count)
+					  int level, uint32 *neighbors, int count,
+					  PgturbohybridGraphInsertStats *stats)
 {
 	BlockNumber blkno = meta->tqAdjStartBlkno;
 	BlockNumber nblocks;
@@ -281,13 +308,20 @@ PgturbohybridGraphUpdateAdjTuple(Relation index, PgturbohybridGraphMetaPageData 
 			UnlockReleaseBuffer(buf);
 
 			if (found)
+			{
+				if (stats != NULL)
+					stats->reciprocalAdjCachedHits++;
 				PgturbohybridGraphLogGraphWalRecord(index, MAIN_FORKNUM, blkno,
 									  PGTURBOHYBRID_GRAPH_GRAPH_OP_NEIGHBOR_UPDATE);
+			}
 		}
 	}
 
 	if (found)
 		goto update_cache;
+
+	if (stats != NULL)
+		stats->reciprocalAdjChainScans++;
 
 	nblocks = RelationGetNumberOfBlocks(index);
 	while (BlockNumberIsValid(blkno) && blkno < nblocks)
@@ -300,6 +334,8 @@ PgturbohybridGraphUpdateAdjTuple(Relation index, PgturbohybridGraphMetaPageData 
 		GenericXLogState *xlogState = NULL;
 
 		CHECK_FOR_INTERRUPTS();
+		if (stats != NULL)
+			stats->reciprocalAdjPagesScanned++;
 		buf = ReadBuffer(index, blkno);
 		LockBuffer(buf, BUFFER_LOCK_EXCLUSIVE);
 		if (RelationNeedsWAL(index))
@@ -514,7 +550,8 @@ PgturbohybridGraphUpdateReciprocalNeighbor(Relation index, PgturbohybridGraphMet
 								Vector *newVector, uint8 *newCode,
 								float newScale, float newNorm,
 								float newCodeNorm, float newEcCorrection,
-								uint32 newNodeId, uint32 src, int level)
+								uint32 newNodeId, uint32 src, int level,
+								PgturbohybridGraphInsertStats *stats)
 {
 	int			maxNeighbors = PgturbohybridGraphLevelM(meta->m, level);
 	uint32	   *neighbors;
@@ -528,6 +565,9 @@ PgturbohybridGraphUpdateReciprocalNeighbor(Relation index, PgturbohybridGraphMet
 		(storage->nodes[src].flags & PGTURBOHYBRID_GRAPH_NODE_DEAD) ||
 		storage->nodes[src].level < level)
 		return;
+
+	if (stats != NULL)
+		stats->reciprocalNeighborsConsidered++;
 
 	neighbors = palloc0(sizeof(uint32) * (maxNeighbors + 1));
 	pruned = palloc0(sizeof(uint32) * maxNeighbors);
@@ -546,7 +586,8 @@ PgturbohybridGraphUpdateReciprocalNeighbor(Relation index, PgturbohybridGraphMet
 			memcpy(neighbors, storage->neighbors[slot],
 				   sizeof(uint32) * count);
 	}
-	else if (!PgturbohybridGraphLoadAdjTuple(index, meta, src, level, neighbors, &count))
+	else if (!PgturbohybridGraphLoadAdjTuple(index, meta, src, level, neighbors, &count,
+											 stats))
 	{
 		pfree(neighbors);
 		pfree(pruned);
@@ -626,7 +667,8 @@ PgturbohybridGraphUpdateReciprocalNeighbor(Relation index, PgturbohybridGraphMet
 			pfree(sourceVector);
 	}
 
-	PgturbohybridGraphUpdateAdjTuple(index, meta, storage, src, level, neighbors, count);
+	PgturbohybridGraphUpdateAdjTuple(index, meta, storage, src, level, neighbors, count,
+									 stats);
 	pfree(neighbors);
 	pfree(pruned);
 }
@@ -639,8 +681,17 @@ PgturbohybridGraphUpdateReciprocalNeighbors(Relation index, PgturbohybridGraphMe
 								 float newScale, float newNorm,
 								 float newCodeNorm, float newEcCorrection,
 								 uint32 newNodeId, int nodeLevel,
-								 uint32 **selected, int *selectedCounts)
+								 uint32 **selected, int *selectedCounts,
+								 PgturbohybridGraphInsertStats *stats)
 {
+	instr_time	updateStart;
+
+	INSTR_TIME_SET_CURRENT(updateStart);
+	/*
+	 * Cached insert storage already has direct adjacency block/offset metadata,
+	 * so reciprocal updates are O(selected_neighbors * M).  Without that
+	 * metadata, each update may fall back to scanning the adjacency page chain.
+	 */
 	for (int level = 0; level <= nodeLevel; level++)
 	{
 		for (int i = 0; i < selectedCounts[level]; i++)
@@ -648,8 +699,10 @@ PgturbohybridGraphUpdateReciprocalNeighbors(Relation index, PgturbohybridGraphMe
 											newVector, newCode, newScale,
 											newNorm, newCodeNorm,
 											newEcCorrection, newNodeId,
-											selected[level][i], level);
+											selected[level][i], level, stats);
 	}
+	if (stats != NULL)
+		stats->reciprocalUpdateUs += PgturbohybridGraphInsertElapsedUsSince(updateStart);
 }
 
 
@@ -780,9 +833,9 @@ PgturbohybridGraphInsertValueInPlace(Relation index, IndexInfo *indexInfo,
 	PgturbohybridGraphScanStorage storage;
 	PgturbohybridGraphScanOpaqueData insertSo;
 	PgturbohybridGraphSupport support;
-	PgturbohybridQuantBuildState metaState;
-	PgturbohybridGraphBuildNode *metaNodes;
+	PgturbohybridQuantMetaUpdate metaUpdate;
 	PgturbohybridGraphNativeCache *insertCache = NULL;
+	PgturbohybridGraphInsertStats insertStats;
 	Vector	   *vector = (Vector *) DatumGetPointer(value);
 	uint8	   *code;
 	float		scale;
@@ -816,6 +869,7 @@ PgturbohybridGraphInsertValueInPlace(Relation index, IndexInfo *indexInfo,
 
 	if (!PgturbohybridGraphReadMeta(index, &meta))
 		elog(ERROR, "pgturbohybrid native graph metapage is missing or invalid");
+	memset(&insertStats, 0, sizeof(insertStats));
 
 	if (meta.dimensions != 0 && meta.dimensions != vector->dim)
 		ereport(ERROR,
@@ -927,9 +981,23 @@ PgturbohybridGraphInsertValueInPlace(Relation index, IndexInfo *indexInfo,
 										 &support, vector, code, scale,
 										 insertNorm, insertCodeNorm, insertXm,
 										 newNodeId, nodeLevel,
-										 selected, selectedCounts);
+										 selected, selectedCounts, &insertStats);
 		pfree(candidates);
 	}
+
+	if (insertStats.reciprocalNeighborsConsidered > 0)
+		ereport(DEBUG1,
+				(errmsg("pgturbohybrid native graph insert reciprocal update stats"),
+				 errdetail("insert_reciprocal_neighbors_considered=" UINT64_FORMAT
+						   " insert_reciprocal_adj_cached_hits=" UINT64_FORMAT
+						   " insert_reciprocal_adj_chain_scans=" UINT64_FORMAT
+						   " insert_reciprocal_adj_pages_scanned=" UINT64_FORMAT
+						   " insert_reciprocal_update_us=" UINT64_FORMAT,
+						   insertStats.reciprocalNeighborsConsidered,
+						   insertStats.reciprocalAdjCachedHits,
+						   insertStats.reciprocalAdjChainScans,
+						   insertStats.reciprocalAdjPagesScanned,
+						   insertStats.reciprocalUpdateUs)));
 
 	codeStart = meta.tqCodeStartBlkno;
 	adjStart = meta.tqAdjStartBlkno;
@@ -954,36 +1022,44 @@ PgturbohybridGraphInsertValueInPlace(Relation index, IndexInfo *indexInfo,
 		newNodeId : meta.tqEntryNodeId;
 	entryLevel = entryNodeId == newNodeId ? nodeLevel : meta.entryLevel;
 
-	memset(&metaState, 0, sizeof(metaState));
-	metaState.index = index;
-	metaState.forkNum = MAIN_FORKNUM;
-	metaState.building = false;
-	metaState.dimensions = vector->dim;
-	metaState.m = meta.m;
-	metaState.efConstruction = meta.efConstruction;
-	metaState.tqBits = meta.tqBits;
-	metaState.tqWeighted = (meta.tqFlags & PGTURBOHYBRID_GRAPH_TQ_WEIGHTED) != 0;
-	metaState.tqRenorm = (meta.tqFlags & PGTURBOHYBRID_GRAPH_TQ_RENORM) != 0;
-	metaState.tqExactStorage = insertExactStorage;
-	metaState.graphBackbone = (meta.tqFlags & PGTURBOHYBRID_GRAPH_TQ_BACKBONE) != 0;
-	metaState.residualRerank = meta.tqResidualRerankBytes > 0;
-	metaState.residualRerankBytes = meta.tqResidualRerankBytes;
-	metaState.payloadCount = payloadCount;
-	metaState.payloadBytes = payloadBytes;
-	metaState.entrySidecarCount = meta.tqEntrySidecarCount;
-	metaState.entrySidecarBytes = meta.tqEntrySidecarBytes;
-	memcpy(metaState.entrySidecarNodeIds, meta.tqEntrySidecarNodeIds,
-		   sizeof(metaState.entrySidecarNodeIds));
-	metaState.ecShift = ecShift;
-	metaState.ecScale = ecScale;
-	metaState.nodeCount = meta.tqNodeCount + 1;
-	metaState.maxLevel = Max(meta.graphMaxLevel, nodeLevel);
-	metaState.entryNodeId = entryNodeId;
-	metaNodes = palloc0(sizeof(PgturbohybridGraphBuildNode) * metaState.nodeCount);
-	metaNodes[entryNodeId].level = entryLevel;
-	metaState.nodes = metaNodes;
-	PgturbohybridQuantUpdateMetaPage(index, &metaState, codeStart, adjStart, exactStart,
-						  meta.tqCorrectionStartBlkno);
+	memset(&metaUpdate, 0, sizeof(metaUpdate));
+	metaUpdate.forkNum = MAIN_FORKNUM;
+	metaUpdate.building = false;
+	metaUpdate.dimensions = vector->dim;
+	metaUpdate.m = meta.m;
+	metaUpdate.efConstruction = meta.efConstruction;
+	metaUpdate.graphMaxLevel = Max(meta.graphMaxLevel, nodeLevel);
+	metaUpdate.nodeCount = meta.tqNodeCount + 1;
+	metaUpdate.entryNodeId = entryNodeId;
+	metaUpdate.entryLevel = entryLevel;
+	metaUpdate.tqBits = meta.tqBits;
+	metaUpdate.tqPayloadCount = payloadCount;
+	metaUpdate.tqPayloadBytes = payloadBytes;
+	metaUpdate.tqFlags = meta.tqFlags;
+	metaUpdate.tqEntrySidecarCount = meta.tqEntrySidecarCount;
+	metaUpdate.tqEntrySidecarBytes = meta.tqEntrySidecarBytes;
+	metaUpdate.tqResidualRerankBytes = meta.tqResidualRerankBytes;
+	memcpy(metaUpdate.tqEntrySidecarNodeIds, meta.tqEntrySidecarNodeIds,
+		   sizeof(metaUpdate.tqEntrySidecarNodeIds));
+	metaUpdate.tqRoutingEntryCount = meta.tqRoutingEntryCount;
+	metaUpdate.tqRoutingEntryBytes = meta.tqRoutingEntryBytes;
+	memcpy(metaUpdate.tqRoutingEntryNodeIds, meta.tqRoutingEntryNodeIds,
+		   sizeof(metaUpdate.tqRoutingEntryNodeIds));
+	metaUpdate.tqSegmentCount = meta.tqSegmentCount;
+	memcpy(metaUpdate.tqSegments, meta.tqSegments, sizeof(metaUpdate.tqSegments));
+	metaUpdate.buildScanUs = meta.buildScanUs;
+	metaUpdate.buildCorrectionUs = meta.buildCorrectionUs;
+	metaUpdate.buildEncodeUs = meta.buildEncodeUs;
+	metaUpdate.buildEdgeUs = meta.buildEdgeUs;
+	metaUpdate.buildWriteUs = meta.buildWriteUs;
+	metaUpdate.buildWorkerCount = meta.buildWorkerCount;
+	/*
+	 * Single-row inserts must keep the metapage update O(1) in node count.
+	 * Do not construct fake build nodes here just to carry entry metadata.
+	 */
+	PgturbohybridQuantUpdateMetaPageFromUpdate(index, &metaUpdate, codeStart, adjStart,
+											   exactStart,
+											   meta.tqCorrectionStartBlkno);
 	if (insertCache != NULL)
 		PgturbohybridGraphAppendInsertCacheNode(insertCache, &meta, newNodeId, heap_tid,
 									 nodeLevel, vector, code, residualSketch, scale,
@@ -994,8 +1070,6 @@ PgturbohybridGraphInsertValueInPlace(Relation index, IndexInfo *indexInfo,
 									 codeStart, adjStart, exactStart,
 									 entryNodeId,
 									 (uint16) Max(meta.graphMaxLevel, nodeLevel));
-	pfree(metaNodes);
-
 	for (int level = 0; level < levelCapacity; level++)
 		pfree(selected[level]);
 	pfree(selected);
