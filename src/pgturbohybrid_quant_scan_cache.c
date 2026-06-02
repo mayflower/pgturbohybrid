@@ -1624,6 +1624,7 @@ PgturbohybridGraphWriteSharedCacheFile(Relation index,
 		unlink(tmpPath);
 		return false;
 	}
+	memset(base, 0, (Size) hdr.fileSize);
 
 	memcpy(base, &hdr, sizeof(hdr));
 	sharedNodes = (PgturbohybridGraphSharedNode *) PgturbohybridGraphSharedPtr(base, hdr.nodesOffset);
