@@ -3777,9 +3777,9 @@ PgturbohybridInit(void)
 							 PGC_USERSET, 0, NULL, NULL, NULL);
 	DefineCustomIntVariable("turbohybrid.native_cache_max_mb",
 							"Max size (MB) of the native dense scan cache",
-							"An index whose resident code/node/adjacency working set fits under this cap is fully loaded into the selected native cache scope, so warm scans read 0 code pages. Larger indexes fall back to per-scan page loading. This is per-backend only when native_cache_scope=per_backend. Default 512.",
+							"An index whose resident code/node/adjacency working set fits under this cap is fully loaded into the selected native cache scope, so warm scans read 0 code pages. Larger indexes fall back to per-scan page loading. This is per-backend only when native_cache_scope=per_backend. Default 2048 (covers ~1M-row indexes at common dimensions; under the default native_cache_scope=auto the working set is held once in the mmap-backed shared cache, not per backend).",
 							&pgturbohybrid_native_cache_max_mb,
-							512, 0, 1048576,
+							2048, 0, 1048576,
 							PGC_USERSET, GUC_UNIT_MB, NULL, NULL, NULL);
 	DefineCustomStringVariable("turbohybrid.native_build_workers",
 							   "Parallel worker count for native dense graph build scan, encoding, and edge construction",

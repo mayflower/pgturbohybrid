@@ -118,7 +118,7 @@ PgturbohybridGraphElapsedUsSince(instr_time start)
 
 /*
  * Native scan cache size cap, in bytes, from the
- * turbohybrid.native_cache_max_mb GUC (default 512 MB).  An index whose
+ * turbohybrid.native_cache_max_mb GUC (default 2048 MB).  An index whose
  * resident working set fits under the cap can be fully loaded into the
  * selected native cache scope so warm scans read 0 code pages; larger indexes
  * fall back to per-scan page loading.  Raising the cap past ~1 GB requires the
