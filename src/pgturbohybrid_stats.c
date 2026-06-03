@@ -66,6 +66,7 @@ static int pgturbohybrid_last_graph_residual_rerank_mode =
 	PGTURBOHYBRID_DENSE_RESIDUAL_RERANK_CALIBRATED;
 static double pgturbohybrid_last_graph_residual_rerank_weight_effective = 0.0;
 static int64 pgturbohybrid_last_graph_residual_rerank_band = 0;
+static int pgturbohybrid_last_graph_residual_rerank_band_multiplier = 0;
 static double pgturbohybrid_last_graph_residual_rerank_max_adjustment = 0.0;
 static int64 pgturbohybrid_last_graph_residual_rerank_reordered_count = 0;
 static bool pgturbohybrid_last_graph_residual_rerank_topk_changed = false;
@@ -414,6 +415,8 @@ PgturbohybridGraphRecordGraphScanStats(PgturbohybridGraphScanOpaque so)
 	pgturbohybrid_last_graph_residual_rerank_weight_effective =
 		so->graphResidualRerankWeightEffective;
 	pgturbohybrid_last_graph_residual_rerank_band = so->graphResidualRerankBand;
+	pgturbohybrid_last_graph_residual_rerank_band_multiplier =
+		so->graphResidualRerankBandMultiplier;
 	pgturbohybrid_last_graph_residual_rerank_max_adjustment =
 		so->graphResidualRerankMaxAdjustment;
 	pgturbohybrid_last_graph_residual_rerank_reordered_count =
@@ -671,6 +674,7 @@ PgturbohybridGraphRecordNonGraphScanStats(void)
 			pgturbohybrid_dense_residual_rerank_mode;
 		pgturbohybrid_last_graph_residual_rerank_weight_effective = 0.0;
 		pgturbohybrid_last_graph_residual_rerank_band = 0;
+		pgturbohybrid_last_graph_residual_rerank_band_multiplier = 0;
 		pgturbohybrid_last_graph_residual_rerank_max_adjustment = 0.0;
 		pgturbohybrid_last_graph_residual_rerank_reordered_count = 0;
 		pgturbohybrid_last_graph_residual_rerank_topk_changed = false;
@@ -1220,6 +1224,7 @@ typedef struct TqLastScanTraversal
 	int			residualRerankMode;
 	double		residualRerankWeightEffective;
 	int64		residualRerankBand;
+	int			residualRerankBandMultiplier;
 	double		residualRerankMaxAdjustment;
 	int64		residualRerankReorderedCount;
 	bool		residualRerankTopKChanged;
@@ -1513,6 +1518,8 @@ PgturbohybridCollectLastScanStats(TqLastScanStats *s,
 	d->traversal.residualRerankWeightEffective =
 		pgturbohybrid_last_graph_residual_rerank_weight_effective;
 	d->traversal.residualRerankBand = pgturbohybrid_last_graph_residual_rerank_band;
+	d->traversal.residualRerankBandMultiplier =
+		pgturbohybrid_last_graph_residual_rerank_band_multiplier;
 	d->traversal.residualRerankMaxAdjustment =
 		pgturbohybrid_last_graph_residual_rerank_max_adjustment;
 	d->traversal.residualRerankReorderedCount =
@@ -1867,6 +1874,8 @@ PgturbohybridEmitNestedScanStats(PgturbohybridJsonbState *state,
 	PgturbohybridJsonbAddFloat8(state, "residual_rerank_weight_effective",
 								t->residualRerankWeightEffective);
 	PgturbohybridJsonbAddInt64(state, "residual_rerank_band", t->residualRerankBand);
+	PgturbohybridJsonbAddInt64(state, "residual_rerank_band_multiplier",
+							   t->residualRerankBandMultiplier);
 	PgturbohybridJsonbAddFloat8(state, "residual_rerank_max_adjustment",
 								t->residualRerankMaxAdjustment);
 	PgturbohybridJsonbAddInt64(state, "residual_rerank_reordered_count",
@@ -2568,6 +2577,8 @@ pgturbohybrid_last_scan_stats(PG_FUNCTION_ARGS)
 								pgturbohybrid_last_graph_residual_rerank_weight_effective);
 	PgturbohybridJsonbAddInt64(&state, "residual_rerank_band",
 							   pgturbohybrid_last_graph_residual_rerank_band);
+	PgturbohybridJsonbAddInt64(&state, "residual_rerank_band_multiplier",
+							   pgturbohybrid_last_graph_residual_rerank_band_multiplier);
 	PgturbohybridJsonbAddFloat8(&state, "residual_rerank_max_adjustment",
 								pgturbohybrid_last_graph_residual_rerank_max_adjustment);
 	PgturbohybridJsonbAddInt64(&state, "residual_rerank_reordered_count",

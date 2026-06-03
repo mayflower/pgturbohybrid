@@ -13,6 +13,9 @@
 --     exact vectors from the HEAP table to rescore. Exact, but pays heap I/O.
 -- This grid measures recall@k and latency for both so you can decide whether the
 -- cheaper residual rerank recovers enough recall to recommend over heap rescore.
+-- A final experimental sweep widens the residual rerank band via the benchmark-only
+-- GUC turbohybrid.dense_residual_rerank_band_multiplier (2/4/8/16) to test whether a
+-- wider band lets residual rerank reach neighbours outside its narrow default band.
 --
 -- Run:
 --   createdb resrr ; psql -d resrr -f benchmarks/dev/residual_rerank_grid.sql ; dropdb resrr
@@ -167,5 +170,55 @@ SELECT index_variant AS residual_bytes,
   max(est_memory->'native'->>'residual_bytes') AS est_residual_bytes
 FROM rr_res GROUP BY index_variant
 ORDER BY array_position(ARRAY['off','16','32','64'], index_variant);
+
+-- Experimental band-multiplier sweep (turbohybrid.dense_residual_rerank_band_multiplier).
+-- residual_rerank_grid above showed residual rerank can stall when the missing
+-- neighbours fall OUTSIDE its narrow default band (multiplier=2 -> ~2*final_k).
+-- This sweep widens the band on the residual=32 index, in calibrated mode with heap
+-- rescore off, across multipliers 2/4/8/16 and reports recall, the resulting band
+-- size, residual_us, and reorder count -- so you can see whether a wider band lets
+-- residual rerank reach those neighbours before deciding anything. The GUC is an
+-- experimental, benchmark-only knob (default 2 reproduces current behaviour) and
+-- changes no profile default.
+DROP TABLE IF EXISTS rr_band CASCADE;
+CREATE TABLE rr_band (band_multiplier int, recall_at_k float8, residual_band int,
+  residual_reordered int, residual_topk_changed bool, residual_us bigint, p50_ms float8, p95_ms float8);
+\echo '== running residual band-multiplier sweep (calibrated, residual=32 index) =='
+DO $$
+DECLARE
+  q record; ids int[]; st jsonb; sql text; qexpr text;
+  k int; dk int := 200; iters int; t0 timestamptz; i int; lat float8[]; ov float8; m int;
+BEGIN
+  SELECT p_k, p_iters INTO k, iters FROM rr_params;
+  PERFORM set_config('enable_seqscan','off',false); PERFORM set_config('jit','off',false);
+  PERFORM set_config('turbohybrid.profile','matched_recall',false);
+  SELECT * INTO q FROM rr_q WHERE name='dense';
+  EXECUTE 'DROP INDEX IF EXISTS rr_idx';
+  EXECUTE 'CREATE INDEX rr_idx ON rr_docs USING turbohybrid (embedding vector_cosine_turbohybrid_ops) WITH (quantization_bits = 4, exact_storage = off, native_segments = 1, residual_rerank = on, residual_rerank_bytes = 32)';
+  ANALYZE rr_docs;
+  PERFORM set_config('turbohybrid.dense_heap_rescore','off',false);
+  PERFORM set_config('turbohybrid.dense_residual_rerank_mode','calibrated',false);
+  FOREACH m IN ARRAY ARRAY[2,4,8,16] LOOP
+    PERFORM set_config('turbohybrid.dense_residual_rerank_band_multiplier', m::text, false);
+    qexpr := format('turbohybrid_query(vector_query=>%L::vector, dense_k=>%s, final_k=>%s)', q.qvec::text, dk, k);
+    sql := format('SELECT array_agg(id) FROM (SELECT id FROM rr_docs ORDER BY embedding <~> %s LIMIT %s) s', qexpr, k);
+    EXECUTE sql INTO ids; lat := '{}';
+    FOR i IN 1..iters LOOP t0:=clock_timestamp(); EXECUTE sql INTO ids; lat := lat||(extract(epoch FROM clock_timestamp()-t0)*1000); END LOOP;
+    st := turbohybrid_last_scan_stats();
+    ov := pg_temp.ov(ids,(q.exact_ids)[1:k])::float8/k;
+    INSERT INTO rr_band VALUES (m, ov, (st->>'residual_rerank_band')::int,
+      (st->>'residual_rerank_reordered_count')::int, (st->>'residual_rerank_topk_changed')::bool,
+      (st->>'dense_residual_rerank_us')::bigint,
+      (SELECT percentile_cont(0.5) WITHIN GROUP (ORDER BY x) FROM unnest(lat) x),
+      (SELECT percentile_cont(0.95) WITHIN GROUP (ORDER BY x) FROM unnest(lat) x));
+  END LOOP;
+  PERFORM set_config('turbohybrid.dense_residual_rerank_band_multiplier','2',false);  -- restore default
+END $$;
+
+\echo '== band-multiplier sweep: recall + band size + residual stats (calibrated, residual=32) =='
+SELECT band_multiplier, round(recall_at_k::numeric,3) AS recall, residual_band AS band,
+  residual_reordered AS reordered, residual_topk_changed AS topk_chg, residual_us,
+  round(p50_ms::numeric,3) AS p50_ms, round(p95_ms::numeric,3) AS p95_ms
+FROM rr_band ORDER BY band_multiplier;
 
 \echo '== DONE residual_rerank_grid =='
