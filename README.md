@@ -87,6 +87,33 @@ feel like a normal PostgreSQL index:
 The basic idea: dense search helps with meaning, lexical search helps with exact
 words, product names, IDs, and the weird little terms users actually type.
 RRF is the fusion method that combines the two ranked candidate lists.
+For score-level experiments, `turbohybrid_query(fusion => 'calibrated')` uses
+monotonic dense/BM25 score normalization, chooses a dense alpha from query shape
+when `alpha` is omitted, and can add a small bonus for candidates that appear in
+both branches. This is a separate score-fusion mode; it does not preserve RRF
+semantics and does not enable the `fast_weighted` BM25 score-bound pruning path.
+
+```sql
+SET turbohybrid.calibrated_fusion_both_match_bonus = 0.06;
+SET turbohybrid.calibrated_fusion_identifier_bm25_alpha = 0.35;
+SET turbohybrid.calibrated_fusion_broad_dense_alpha = 0.70;
+SET turbohybrid.calibrated_fusion_default_alpha = 0.50;
+
+SELECT id
+FROM documents
+ORDER BY embedding <~> turbohybrid_query(
+  vector_query => $1,
+  text_query => $2,
+  fusion => 'calibrated'
+)
+LIMIT 10;
+```
+
+Inspect `calibrated_fusion_enabled`,
+`calibrated_fusion_query_shape`, `calibrated_fusion_alpha_effective`,
+`calibrated_fusion_both_match_bonus`,
+`calibrated_fusion_dense_norm_mode`, and
+`calibrated_fusion_bm25_norm_mode` in `turbohybrid_last_scan_stats()`.
 
 ## When It Is Useful
 
@@ -268,6 +295,27 @@ distances during graph construction, `ef_construction = 192`,
 `ef_search = 128`, `graph_oversampling = 8`, final top-k heap rescore, and one
 native segment unless `native_segments` is explicitly set. Exact build
 distances are build-time only; they do not store full vectors in the index.
+Changing build-time reloptions such as neighbor selection, build distance,
+residual sketches, entry sidecar, graph windows, or segment count for an
+existing index requires `REINDEX`. Query-time GUCs such as heap rescore,
+adaptive widening, uncertainty retry, residual mode, and fusion can be compared
+without rebuilding unless they depend on build-time index contents.
+
+`quantization_bits = 8` is available as an opt-in scalar-safe prototype for
+recall experiments:
+
+```sql
+CREATE INDEX documents_turbohybrid_q8_idx ON documents
+USING turbohybrid (embedding vector_cosine_turbohybrid_ops)
+WITH (quantization_bits = 8, exact_storage = off);
+```
+
+The 8-bit path stores one byte per dimension and uses scalar code scoring. It
+does not reuse the optimized 4-bit split/LUT SIMD kernels, is not the default,
+and should be benchmarked against 4-bit, 4-bit plus residual rerank, and
+`exact_storage = on` before adopting it for a workload. `turbohybrid_last_scan_stats()`
+reports `quantization_bits = 8` and `dense_scorer = scalar_8bit` when this path
+is active.
 
 Use `high_recall` when you want near-exact dense recall from a compact 4-bit,
 **exact-free** index and have latency headroom to spend:
@@ -277,15 +325,15 @@ SET turbohybrid.profile = 'high_recall';
 ```
 
 `high_recall` keeps `quantization_bits = 4` and `exact_storage = off`, reuses
-`matched_recall`'s candidate budgets, and additionally turns on
-`dense_heap_rescore = band` (exact rescore of the full final candidate band by
-re-reading vectors from the heap), turns `dense_adaptive_widening` off, and
-defaults new indexes to `ef_construction = 256`, `ef_search = 192`,
-`graph_oversampling = 12`. Band rescore is what recovers near-exact ordering:
-4-bit code scoring finds the right neighbors but mis-ranks them, and the heap
-rescore fixes the ranking without storing full vectors in the index. On
-DBPedia/OpenAI (1536-d) this reaches ~0.99 recall while staying faster than
-pgvector and Qdrant. Pair it with a heuristic build for best results:
+`matched_recall`'s candidate budgets, and additionally resolves
+`dense_heap_rescore` to `band` at scan time (exact rescore of the full final
+candidate band by re-reading vectors from the heap), turns
+`dense_adaptive_widening` off, and defaults new indexes to
+`ef_construction = 256`, `ef_search = 192`, `graph_oversampling = 12`. Band
+rescore can recover ordering quality when 4-bit code scoring finds good
+candidates but mis-ranks them, without storing full vectors in the index. Pair
+it with a heuristic build for best results, then verify the recall/p95 tradeoff
+with the retrieval-quality grid or your external benchmark before adopting it:
 
 ```sql
 SET turbohybrid.profile = 'high_recall';
@@ -315,10 +363,13 @@ SET turbohybrid.profile = 'quality';
 
 Quality mode is stronger and slower: it uses larger dense and lexical candidate
 budgets, conservative BM25 paths, higher default graph search windows, and
-heuristic dense-neighbor selection for new indexes. It usually costs more build
-CPU and query CPU than `latency` or `matched_recall`, so compare it at matched
-recall/precision instead of only comparing raw p95. For quality-sensitive
-production evaluation, benchmark an exact-storage index too:
+heuristic dense-neighbor selection for new indexes. It does not automatically
+enable calibrated fusion, phrase/proximity heap lexical rerank, or the bounded
+uncertainty retry; those remain explicit benchmark knobs until the grid shows a
+quality win at acceptable p95/p99. It usually costs more build CPU and query CPU
+than `latency` or `matched_recall`, so compare it at matched recall/precision
+instead of only comparing raw p95. For quality-sensitive production evaluation,
+benchmark an exact-storage index too:
 
 ```sql
 CREATE INDEX documents_turbohybrid_quality_idx ON documents
@@ -347,26 +398,149 @@ low-dimensional exact-free indexes, and an explicit
 profile default; set it to `auto` to return to profile-driven behavior.
 Residual rerank is the lower-I/O middle ground:
 `WITH (residual_rerank = on, residual_rerank_bytes = 16|32|64)`.
+Residual sketches are build-time index contents, but the scan-time adjustment is
+controlled by GUCs:
 
-Do not treat either profile as universally best. Measure latency and relevance
-on your dataset. Adaptive dense widening stays off for the `latency` profile,
-but `balanced`, `matched_recall`, and `quality` can use a conservative `auto`
-mode on low-dimensional exact-free 4-bit indexes when `final_k` is small and the
-score boundary looks ambiguous. Local expansion, entry sidecars, and residual
-rerank remain opt-in knobs for benchmark work, not release defaults.
+```sql
+SET turbohybrid.dense_residual_rerank_mode = 'calibrated'; -- off | fixed | calibrated
+SET turbohybrid.dense_residual_rerank_weight = -1.0;       -- auto
+SET turbohybrid.dense_residual_rerank_max_adjust_ratio = 0.15;
+```
+
+`fixed` preserves the original hardcoded residual adjustment. `calibrated`
+scales the sketch adjustment by the observed final-band distance spread and
+clamps it, which makes the adjustment comparable across queries. Inspect
+`residual_rerank_mode`, `residual_rerank_weight_effective`,
+`residual_rerank_band`, `residual_rerank_max_adjustment`,
+`residual_rerank_reordered_count`, and `residual_rerank_topk_changed` in
+`turbohybrid_last_scan_stats()`.
+Because residual sketches are stored in the index, enabling or changing
+`residual_rerank_bytes` for an existing index requires `REINDEX`. Switching
+between `off`, `fixed`, and `calibrated` residual adjustment modes is
+query-time only, but the mode has no effect unless the index was built with
+residual sketches.
+
+For phrase/proximity-like text queries, BM25 can optionally rerank a bounded
+candidate prefix by fetching the indexed heap `tsvector` and applying PostgreSQL
+text-search ranking semantics:
+
+```sql
+SET turbohybrid.bm25_heap_tsvector_rerank = 'auto'; -- off | topk | band | auto
+SET turbohybrid.bm25_heap_tsvector_rerank_multiplier = 4;
+SET turbohybrid.bm25_heap_tsvector_rerank_weight = 0.10;
+```
+
+The default is `off`. `topk` fetches only the final-k BM25/hybrid candidates;
+`band` fetches up to `final_k * multiplier`, capped by the BM25 candidate
+count; `auto` enables the same bounded band for phrase tsqueries. The adjustment
+uses `ts_rank_cd` when heap `tsvector` positions are present and `ts_rank`
+otherwise. This does not add positional postings or change the index format,
+and it does not run for dense-only queries. Inspect
+`bm25_heap_tsvector_rerank_mode`, `bm25_heap_tsvector_rerank_count`,
+`bm25_heap_tsvector_rerank_fetch_us`,
+`bm25_heap_tsvector_rerank_score_us`, and
+`bm25_heap_tsvector_rerank_topk_changed` in
+`turbohybrid_last_scan_stats()`.
+
+Do not treat any profile as universally best. Measure latency and relevance on
+your dataset. Adaptive dense widening stays off for the `latency` profile, but
+`balanced`, `matched_recall`, and `quality` can use a conservative `auto` mode
+on low-dimensional exact-free 4-bit indexes when `final_k` is small and the
+score boundary looks ambiguous. The separate bounded uncertainty retry stays
+off in named production profiles until benchmark evidence shows the p95/p99 cost
+is low; test it explicitly:
+
+```sql
+SET turbohybrid.dense_uncertainty_retry = 'auto'; -- off | auto | on
+SET turbohybrid.dense_uncertainty_retry_max_passes = 1;
+SET turbohybrid.dense_uncertainty_retry_multiplier = 1.5;
+```
+
+`off` preserves the single traversal path. `auto` retries only when the first
+candidate band is underfilled or has flat top-k/boundary gaps, or when sidecar,
+payload-filter, residual-rerank, or heap-rescore evidence suggests the band was
+uncertain. `on` forces the retry whenever the wider target is bounded by the
+node count and `turbohybrid.max_scan_tuples`. Inspect
+`dense_uncertainty_retry_triggered`, `dense_uncertainty_retry_reason`,
+`dense_uncertainty_final_target`, and `dense_uncertainty_final_ef` in
+`turbohybrid_last_scan_stats()`.
+
+Local expansion, entry sidecars, uncertainty retry, calibrated hybrid fusion,
+phrase/proximity heap lexical rerank, and residual rerank remain opt-in knobs
+for benchmark work unless a named profile explicitly documents otherwise. Entry
+sidecars keep using
+the fixed metapage node-id array; `entry_sidecar_strategy` controls which
+representatives are chosen at build time:
+
+```sql
+WITH (
+  entry_sidecar = on,
+  entry_sidecar_representatives = 128,
+  entry_sidecar_strategy = 'hash' -- hash | farthest_code | level_covering | hybrid_level_covering
+)
+```
+
+`hash` is the default and preserves existing behavior. `farthest_code` uses a
+deterministic farthest-point selection in code-distance space, `level_covering`
+prefers high-level graph nodes while diversifying by code hash bucket, and
+`hybrid_level_covering` combines both. Because the selected node IDs are stored
+when the index is built, changing the strategy for an existing index requires
+`REINDEX` to change the sidecar contents.
+For payload-filtered dense scans over `INCLUDE` int4 columns, the scan path can
+also seed graph traversal from the existing payload-ref range:
+
+```sql
+SET turbohybrid.payload_entry_seeding = 'auto'; -- off | auto | on
+SET turbohybrid.payload_entry_seed_count = 8;   -- max 64
+```
+
+This is scan-time only: it does not add payload-routing pages or change the
+index format. `auto` is the default and only affects scans with an active int4
+payload equality filter; if the payload value has no ref range, traversal falls
+back to the normal global/sidecar entry points. Inspect
+`payload_entry_seeding_hit`, `payload_entry_seed_count`, and
+`payload_entry_seed_range_count` in `turbohybrid_last_scan_stats()`.
+
+To reduce near-duplicate final results from the same document or chunk group,
+enable scan-time diversity over an existing int4 `INCLUDE` payload slot:
+
+```sql
+SET turbohybrid.final_diversity = 'group_payload'; -- off | group_payload
+SET turbohybrid.final_diversity_payload_slot = 0;  -- INCLUDE payload slot
+SET turbohybrid.final_diversity_lambda = 0.75;     -- relevance/diversity mix
+SET turbohybrid.final_diversity_pool_multiplier = 3;
+```
+
+This is off by default and does not fetch heap rows or change the index format.
+The payload slot is zero-based in `INCLUDE` column order. If the slot is invalid
+or a candidate has no payload value, the scan falls back to normal ranking.
+Inspect `final_diversity_mode`, `final_diversity_pool_size`,
+`final_diversity_selected`, and
+`final_diversity_duplicate_groups_suppressed` in
+`turbohybrid_last_scan_stats()`.
 `native_segments` is a build/concurrency lever rather than a free quality knob:
 the default is one segment, quality/exact-build auto segmenting resolves to one
 segment, and multi-segment indexes should be benchmarked with
 `turbohybrid.native_segment_budget = sqrt|linear` before using them for
 quality-sensitive comparisons.
 
+For a deterministic synthetic dense/hybrid profile sweep, use
+`benchmarks/dev/retrieval_quality_grid.sql`. It reports recall or overlap at K,
+duplicate groups, elapsed milliseconds, index settings, and selected scan stats
+for `latency`, `matched_recall`, `high_recall`, `quality`, residual rerank,
+heap rescore, uncertainty retry, entry sidecar, calibrated fusion, lexical heap
+rerank, and diversity configurations. Use it as the before/after methodology
+for deciding whether a new query-time feature should become a profile default.
 For a dense-only profile sweep against a glove-like workload, use
-`benchmarks/glove100_recall_latency_grid.sql`. It reports build time, index
-size, precision@K against exact pgvector ordering, p50/p95/p99, and scan stats
-for `default`, `balanced`, `matched_recall`, `quality`, `exact_storage`,
-`residual_rerank`, and heap-rescore/adaptive-widening configurations. Treat
-that grid as the authority for deciding whether `matched_recall` should become a
-workload default.
+`benchmarks/glove100_recall_latency_grid.sql`.
+
+For an existing workload with known expected ids, use
+`benchmarks/dev/tune_retrieval_profile.sql` as a practical autotuning harness.
+It consumes an `eval_queries` table, sweeps query-time profiles, candidate
+budgets, fusion, residual rerank mode, and heap rescore mode against an existing
+TurboHybrid index, then prints all trials, a Pareto frontier, and an optional
+recommendation under a p95 latency budget. This is a developer benchmark script;
+it does not add a SQL-visible autotuner or change production defaults.
 
 ## Diagnostics
 
@@ -376,8 +550,18 @@ After a query, check whether PostgreSQL used the expected TurboHybrid path:
 SELECT turbohybrid_last_scan_stats();
 SELECT turbohybrid_index_stats('documents_turbohybrid_idx'::regclass);
 SELECT turbohybrid_estimate_memory('documents_turbohybrid_idx'::regclass);
+SELECT turbohybrid_graph_repair_dry_run('documents_turbohybrid_idx'::regclass);
 SELECT turbohybrid_simd_capabilities();
 ```
+
+`turbohybrid_graph_repair_dry_run(index, sample_nodes, search_ef,
+candidate_limit)` is an opt-in read-only graph neighborhood diagnostic for
+native graph indexes. It samples node IDs deterministically, compares each
+sample's existing level-0 neighborhood with a stronger bounded local candidate
+pool, and reports `avg_overlap`, `weak_nodes`, `missed_neighbor_count`, and
+`suggested_edges`. The function never writes index pages, never emits WAL, and
+uses `AccessShareLock`; it is meant to decide whether a future write-capable
+repair pass is worth building.
 
 Use `turbohybrid_estimate_memory(index)` before a query or prewarm step when
 sizing native graph cache memory. It reports native code/adjacency/exact-vector

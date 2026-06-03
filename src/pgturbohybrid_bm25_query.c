@@ -2313,6 +2313,14 @@ PgturbohybridBm25QueryHasOperator(TSQuery query, int oper)
 	return false;
 }
 
+bool
+PgturbohybridBm25QueryHasPhrase(TSQuery query)
+{
+	if (query == NULL)
+		return false;
+	return PgturbohybridBm25QueryHasOperator(query, OP_PHRASE);
+}
+
 static PgturbohybridBm25QueryEval
 PgturbohybridBm25CompileQueryEval(TSQuery query, PgturbohybridBm25QueryTerm *terms,
 							 int termCount)

@@ -986,7 +986,8 @@ PgturbohybridGraphBuildCodeCodeDistanceScalar(PgturbohybridQuantBuildState *stat
 	TqScoreMode mode = (TqScoreMode) state->scoreMode;
 
 	if ((mode != PGTURBOHYBRID_SCORE_L2 && mode != PGTURBOHYBRID_SCORE_COSINE && mode != PGTURBOHYBRID_SCORE_IP) ||
-		(state->tqBits != PGTURBOHYBRID_DEFAULT_BITS && state->tqBits != 2))
+		(state->tqBits != PGTURBOHYBRID_DEFAULT_BITS && state->tqBits != 2 &&
+		 state->tqBits != 8))
 		return false;
 
 	aNode = &state->nodes[a];
@@ -2126,6 +2127,17 @@ PgturbohybridGraphTryBuildCodeCodeDistance(PgturbohybridQuantBuildState *state, 
 }
 
 bool
+PgturbohybridGraphBuildCodeDistance(PgturbohybridQuantBuildState *state, uint32 a, uint32 b,
+						 double *distance)
+{
+	if (state == NULL || distance == NULL ||
+		a >= state->nodeCount || b >= state->nodeCount)
+		return false;
+
+	return PgturbohybridGraphTryBuildCodeCodeDistance(state, a, b, distance);
+}
+
+bool
 PgturbohybridGraphCodeCodeDistance(PgturbohybridGraphScanOpaque so, PgturbohybridGraphMetaPageData *meta,
 						PgturbohybridGraphScanNode *aNode, PgturbohybridGraphScanNode *bNode,
 						double *distance)
@@ -2415,7 +2427,8 @@ PgturbohybridGraphPrepareBuildQuery(PgturbohybridQuantBuildState *state, uint32 
 	state->buildTqValid = false;
 	if ((mode != PGTURBOHYBRID_SCORE_L2 && mode != PGTURBOHYBRID_SCORE_COSINE && mode != PGTURBOHYBRID_SCORE_IP) ||
 		(state->tqBits != 1 && state->tqBits != 2 &&
-		 state->tqBits != PGTURBOHYBRID_DEFAULT_BITS) ||
+		 state->tqBits != PGTURBOHYBRID_DEFAULT_BITS &&
+		 state->tqBits != 8) ||
 		nodeId >= state->nodeCount ||
 		state->nodes[nodeId].vector == NULL || state->buildQueryCtx == NULL)
 		return;

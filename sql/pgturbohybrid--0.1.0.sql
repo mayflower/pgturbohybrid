@@ -173,6 +173,15 @@ CREATE FUNCTION turbohybrid_last_build_stats() RETURNS pg_catalog.jsonb
 	AS 'MODULE_PATHNAME', 'pgturbohybrid_last_build_stats'
 	LANGUAGE C PARALLEL RESTRICTED;
 
+CREATE FUNCTION turbohybrid_graph_repair_dry_run(
+	index pg_catalog.regclass,
+	sample_nodes pg_catalog.int4 DEFAULT 1000,
+	search_ef pg_catalog.int4 DEFAULT 400,
+	candidate_limit pg_catalog.int4 DEFAULT 200
+) RETURNS pg_catalog.jsonb
+	AS 'MODULE_PATHNAME', 'pgturbohybrid_graph_repair_dry_run'
+	LANGUAGE C STABLE STRICT PARALLEL RESTRICTED;
+
 -- Compact bottleneck diagnosis for the last TurboHybrid scan.  Pulls the key
 -- dense hot-path fields out of turbohybrid_last_scan_stats(), adds a few derived
 -- ratios, and reduces them to a single 'diagnosis' label, so one SELECT explains
@@ -354,6 +363,7 @@ COMMENT ON FUNCTION turbohybrid_estimate_memory(pg_catalog.regclass) IS 'Estimat
 COMMENT ON FUNCTION turbohybrid_prewarm(pg_catalog.regclass) IS 'Build or attach the shared native graph cache for a TurboHybrid native graph index and return cache diagnostics as jsonb';
 COMMENT ON FUNCTION turbohybrid_last_scan_stats() IS 'Return backend-local summary information for the last TurboHybrid scan as jsonb; parallel restricted because it reads mutable scan state';
 COMMENT ON FUNCTION turbohybrid_last_build_stats() IS 'Return backend-local summary information for the last native TurboHybrid graph build as jsonb; parallel restricted because it reads mutable build state';
+COMMENT ON FUNCTION turbohybrid_graph_repair_dry_run(pg_catalog.regclass, pg_catalog.int4, pg_catalog.int4, pg_catalog.int4) IS 'Read-only native graph repair diagnostic; samples graph neighborhoods and reports weak-neighborhood and suggested-edge counts without modifying the index';
 COMMENT ON FUNCTION turbohybrid_last_scan_diagnosis() IS 'Return a compact bottleneck diagnosis of the last TurboHybrid scan as jsonb: key dense hot-path fields, derived ratios, and a single diagnosis label; read-only over turbohybrid_last_scan_stats()';
 COMMENT ON FUNCTION turbohybrid_simd_capabilities() IS 'Return pgturbohybrid build and architecture SIMD capability information as jsonb';
 

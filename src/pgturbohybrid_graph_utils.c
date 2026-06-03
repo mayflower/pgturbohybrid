@@ -143,10 +143,11 @@ static const float TqCodeCenters[PGTURBOHYBRID_LUT_WIDTH] = {
 	1.256f, 1.618f, 2.069f, 2.733f
 };
 
+#define PGTURBOHYBRID_CODEBOOK_ABS_MAX 2.733f
+
 #if defined(__aarch64__) || defined(_M_ARM64) || PGTURBOHYBRID_COMPILE_AVX2
 #define PGTURBOHYBRID_QUERY_SPLIT_HIGH_COEF 256
 #define PGTURBOHYBRID_QUERY_SPLIT_ABS_MAX 32639.0f
-#define PGTURBOHYBRID_CODEBOOK_ABS_MAX 2.733f
 #define PGTURBOHYBRID_CODEBOOK_SCALE (127.0f / PGTURBOHYBRID_CODEBOOK_ABS_MAX)
 /* x86 unsigned-codebook query split: 7-bit signed halves, HIGH_COEF 128,
  * codebook shifted by +128 (bias = 128 * Sum(q_signed)). */
@@ -799,6 +800,19 @@ PgturbohybridGraphGetEntrySidecarRepresentatives(Relation index)
 		PGTURBOHYBRID_DEFAULT_ENTRY_SIDECAR_REPRESENTATIVES;
 }
 
+int
+PgturbohybridGraphGetEntrySidecarStrategy(Relation index)
+{
+	TqOptions  *opts;
+
+	if (!PgturbohybridGraphIspgturbohybridIndex(index))
+		return PGTURBOHYBRID_DEFAULT_ENTRY_SIDECAR_STRATEGY;
+
+	opts = (TqOptions *) index->rd_options;
+	return opts != NULL ? opts->entrySidecarStrategy :
+		PGTURBOHYBRID_DEFAULT_ENTRY_SIDECAR_STRATEGY;
+}
+
 bool
 PgturbohybridGraphGetBackboneOption(Relation index)
 {
@@ -1017,6 +1031,26 @@ TqEncodeComponentBits(float value, int bits)
 
 	if (isnan(value))
 		value = 0;
+
+	if (bits == 8)
+	{
+		float		scaled;
+		int			code;
+
+		if (value < -PGTURBOHYBRID_CODEBOOK_ABS_MAX)
+			value = -PGTURBOHYBRID_CODEBOOK_ABS_MAX;
+		else if (value > PGTURBOHYBRID_CODEBOOK_ABS_MAX)
+			value = PGTURBOHYBRID_CODEBOOK_ABS_MAX;
+
+		scaled = ((value + PGTURBOHYBRID_CODEBOOK_ABS_MAX) *
+				  (255.0f / (2.0f * PGTURBOHYBRID_CODEBOOK_ABS_MAX)));
+		code = (int) lrintf(scaled);
+		if (code < 0)
+			code = 0;
+		else if (code > 255)
+			code = 255;
+		return (uint8) code;
+	}
 
 	if (bits == 1)
 	{
@@ -1311,6 +1345,8 @@ TqEncodeVectorInternal(Vector *vector, uint8 *code, const float *ecShift,
 			code[i / 8] |= component << (i & 7);
 		else if (bits == 2)
 			code[i / 4] |= component << ((i & 3) * 2);
+		else if (bits == 8)
+			code[i] = component;
 		else if ((i & 1) == 0)
 			code[i / 2] |= component;
 		else
@@ -1359,7 +1395,8 @@ TqEncodeVectorInternal(Vector *vector, uint8 *code, const float *ecShift,
 Size
 TqCodeSizeForBits(int dimensions, int bits)
 {
-	if (bits != 1 && bits != 2 && bits != PGTURBOHYBRID_DEFAULT_BITS)
+	if (bits != 1 && bits != 2 && bits != PGTURBOHYBRID_DEFAULT_BITS &&
+		bits != 8)
 		bits = PGTURBOHYBRID_DEFAULT_BITS;
 
 	return PGTURBOHYBRID_CODE_SIZE_BITS(dimensions, bits);
@@ -1372,6 +1409,8 @@ TqGetCodeComponentBits(const uint8 *code, int i, int bits)
 		return (code[i / 8] >> (i & 7)) & 0x01;
 	if (bits == 2)
 		return (code[i / 4] >> ((i & 3) * 2)) & 0x03;
+	if (bits == 8)
+		return code[i];
 
 	return ((i & 1) == 0 ? code[i / 2] : code[i / 2] >> PGTURBOHYBRID_BITS) & 0x0f;
 }
@@ -1383,6 +1422,10 @@ TqGetCodeCenterBits(int code, int bits)
 		return TqCodeCenters1[code & 0x01];
 	if (bits == 2)
 		return TqCodeCenters2[code & 0x03];
+	if (bits == 8)
+		return (((float) (code & 0xff) / 255.0f) *
+				(2.0f * PGTURBOHYBRID_CODEBOOK_ABS_MAX)) -
+			PGTURBOHYBRID_CODEBOOK_ABS_MAX;
 
 	return TqCodeCenters[code & 0x0f];
 }
@@ -1488,11 +1531,12 @@ TqBuildQueryLut(PgturbohybridGraphTqQuery *tq)
 {
 	int			dim = tq->dimensions;
 	TqScoreMode mode = (TqScoreMode) tq->scoreMode;
+	int			stride = tq->bits == 8 ? tq->lut.width : PGTURBOHYBRID_LUT_WIDTH;
 
 	for (int i = 0; i < dim; i++)
 	{
 		float		qv = tq->queryValues[i];
-		float	   *row = tq->lut.table + (i * PGTURBOHYBRID_LUT_WIDTH);
+		float	   *row = tq->lut.table + (i * stride);
 
 		for (int j = 0; j < tq->lut.width; j++)
 		{
@@ -2487,7 +2531,9 @@ PgturbohybridGraphPrepareTqQueryInternal(Relation index, PgturbohybridGraphSuppo
 	 */
 	if (!PgturbohybridGraphTqQuerySplitActive(tq))
 	{
-		tq->lut.table = palloc(PGTURBOHYBRID_LUT_SIZE(query->dim));
+		int			stride = tq->bits == 8 ? tq->lut.width : PGTURBOHYBRID_LUT_WIDTH;
+
+		tq->lut.table = palloc((Size) query->dim * stride * sizeof(float));
 		TqBuildQueryLut(tq);
 	}
 }
@@ -2531,6 +2577,7 @@ TqCodeDistanceScalar(const PgturbohybridGraphTqQuery *tq, const uint8 *valueCode
 	int			dim = tq->dimensions;
 	double		dimSqrt = TqDimSqrt(dim);
 	TqScoreMode mode = (TqScoreMode) tq->scoreMode;
+	int			stride = tq->bits == 8 ? tq->lut.width : PGTURBOHYBRID_LUT_WIDTH;
 
 	if (mode == PGTURBOHYBRID_SCORE_L1)
 	{
@@ -2551,7 +2598,7 @@ TqCodeDistanceScalar(const PgturbohybridGraphTqQuery *tq, const uint8 *valueCode
 		int			vc = TqGetCodeComponentBits(valueCode, i, tq->bits);
 		double		vv = TqGetCodeCenterBits(vc, tq->bits);
 
-		dot += tq->lut.table[(i * PGTURBOHYBRID_LUT_WIDTH) + vc];
+		dot += tq->lut.table[(i * stride) + vc];
 		codeNorm += vv * vv;
 	}
 
@@ -2787,6 +2834,9 @@ TqCodeDistance(const PgturbohybridGraphTqQuery *tq, const uint8 *valueCode, floa
 	if (PgturbohybridGraphTqCodeQuerySplitDistance(tq, valueCode, valueScale,
 												   &querySplitDistance))
 		return querySplitDistance;
+
+	if (tq->bits == 8)
+		return TqCodeDistanceScalar(tq, valueCode, valueScale);
 
 	switch ((TqScoringKernel) tq->scoringKernel)
 	{
@@ -3865,6 +3915,7 @@ turbohybrid_scorer_distances(PG_FUNCTION_ARGS)
 	float		scale;
 	double		dimSqrt;
 	double		dScalar;
+	double		dSelected;
 	double		dSplit;
 	double		dRaw;
 	double		dotRaw = 0;
@@ -3874,6 +3925,7 @@ turbohybrid_scorer_distances(PG_FUNCTION_ARGS)
 	double		dU8x4;
 	bool		u8Used = false;
 	const char *u8Kernel = "none";
+	const char *selectedKernel;
 	int			distinctNibbles = 0;
 	bool		nibbleSeen[16] = {false};
 	StringInfoData json;
@@ -3886,13 +3938,13 @@ turbohybrid_scorer_distances(PG_FUNCTION_ARGS)
 				(errcode(ERRCODE_DATA_EXCEPTION),
 				 errmsg("query and doc vectors must have equal dimension")));
 
-	/* Optional third argument selects the quantization bit width (2 or 4). */
+	/* Optional third argument selects the quantization bit width (2, 4, or 8). */
 	if (PG_NARGS() >= 3 && !PG_ARGISNULL(2))
 		bits = PG_GETARG_INT32(2);
-	if (bits != PGTURBOHYBRID_DEFAULT_BITS && bits != 2)
+	if (bits != PGTURBOHYBRID_DEFAULT_BITS && bits != 2 && bits != 8)
 		ereport(ERROR,
 				(errcode(ERRCODE_DATA_EXCEPTION),
-				 errmsg("turbohybrid_scorer_distances: bits must be 2 or 4")));
+				 errmsg("turbohybrid_scorer_distances: bits must be 2, 4, or 8")));
 
 	/* Prepare a minimal inner-product query (no index, no EC correction). */
 	memset(&tq, 0, sizeof(tq));
@@ -3907,7 +3959,9 @@ turbohybrid_scorer_distances(PG_FUNCTION_ARGS)
 	TqRotateVectorFloat(query->x, dim, tq.queryValues);
 	for (int i = 0; i < dim; i++)
 		tq.queryNorm += (double) query->x[i] * (double) query->x[i];
-	tq.lut.table = palloc(PGTURBOHYBRID_LUT_SIZE(dim));
+	tq.lut.table = palloc((Size) dim *
+						  (bits == 8 ? tq.lut.width : PGTURBOHYBRID_LUT_WIDTH) *
+						  sizeof(float));
 	TqBuildQueryLut(&tq);
 	tq.enabled = true;
 #if defined(__aarch64__) || defined(_M_ARM64) || PGTURBOHYBRID_COMPILE_AVX2
@@ -3920,6 +3974,9 @@ turbohybrid_scorer_distances(PG_FUNCTION_ARGS)
 
 	/* (1) scalar/LUT codebook reference. */
 	dScalar = TqCodeDistanceScalar(&tq, code, scale);
+	dSelected = TqCodeDistance(&tq, code, scale);
+	selectedKernel = bits == 8 ? "scalar_8bit" :
+		PgturbohybridGraphTqScoringKernelName(tq.scoringKernel);
 
 	/* (2) signed integer query-split SIMD kernel (codebook via shuffle). */
 	splitUsed = PgturbohybridGraphTqCodeSignedSplitDistance(&tq, code, scale, &dSplit);
@@ -3968,14 +4025,16 @@ turbohybrid_scorer_distances(PG_FUNCTION_ARGS)
 
 	initStringInfo(&json);
 	appendStringInfo(&json,
-					 "{\"scalar_lut\":%.9g,\"signed_split\":%.9g,"
+					 "{\"scalar_lut\":%.9g,\"selected\":%.9g,"
+					 "\"selected_kernel\":\"%s\",\"signed_split\":%.9g,"
 					 "\"unsigned_split_scalar\":%.9g,\"unsigned_split_simd\":%.9g,"
 					 "\"unsigned_split_x4\":%.9g,"
 					 "\"linear_reference\":%.9g,\"split_kernel\":\"%s\","
 					 "\"unsigned_split_kernel\":\"%s\","
 					 "\"query_split_used\":%s,\"unsigned_split_used\":%s,"
 					 "\"distinct_nibbles\":%d,\"dimensions\":%d,\"bits\":%d}",
-					 dScalar, dSplit, dU8Scalar, dU8Simd, dU8x4, dRaw,
+					 dScalar, dSelected, selectedKernel, dSplit, dU8Scalar,
+					 dU8Simd, dU8x4, dRaw,
 					 PgturbohybridGraphTqScoringKernelName(tq.scoringKernel),
 					 u8Kernel,
 					 splitUsed ? "true" : "false", u8Used ? "true" : "false",

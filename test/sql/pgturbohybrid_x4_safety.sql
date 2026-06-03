@@ -502,6 +502,7 @@ BEGIN
     IF jsonb_typeof(d -> 'kernels') <> 'object' THEN RAISE EXCEPTION 'missing dense.kernels'; END IF;
     IF jsonb_typeof(d -> 'cache') <> 'object' THEN RAISE EXCEPTION 'missing dense.cache'; END IF;
     IF jsonb_typeof(d -> 'traversal') <> 'object' THEN RAISE EXCEPTION 'missing dense.traversal'; END IF;
+    IF jsonb_typeof(d -> 'uncertainty_retry') <> 'object' THEN RAISE EXCEPTION 'missing dense.uncertainty_retry'; END IF;
     IF jsonb_typeof(d -> 'timing_us') <> 'object' THEN RAISE EXCEPTION 'missing dense.timing_us'; END IF;
 
     k := d -> 'kernels';

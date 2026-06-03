@@ -28,6 +28,11 @@ BEGIN
 			current_setting('turbohybrid.dense_local_expansion');
 	END IF;
 
+	IF current_setting('turbohybrid.dense_uncertainty_retry') <> 'off' THEN
+		RAISE EXCEPTION 'unexpected dense_uncertainty_retry default: %',
+			current_setting('turbohybrid.dense_uncertainty_retry');
+	END IF;
+
 	IF current_setting('turbohybrid.dense_build_neighbor_select') <> 'auto' THEN
 		RAISE EXCEPTION 'unexpected dense_build_neighbor_select default: %',
 			current_setting('turbohybrid.dense_build_neighbor_select');
@@ -36,6 +41,11 @@ BEGIN
 	IF current_setting('turbohybrid.hybrid_budget_policy') <> 'fixed' THEN
 		RAISE EXCEPTION 'unexpected hybrid_budget_policy default: %',
 			current_setting('turbohybrid.hybrid_budget_policy');
+	END IF;
+
+	IF current_setting('turbohybrid.bm25_heap_tsvector_rerank') <> 'off' THEN
+		RAISE EXCEPTION 'unexpected bm25_heap_tsvector_rerank default: %',
+			current_setting('turbohybrid.bm25_heap_tsvector_rerank');
 	END IF;
 
 	IF current_setting('turbohybrid.warn_linear_fallback') <> 'on' THEN
@@ -239,6 +249,7 @@ DECLARE
 BEGIN
 	PERFORM set_config('turbohybrid.warn_linear_fallback', 'off', true);
 	PERFORM set_config('turbohybrid.linear_fallback_notice_threshold_ratio', '0.25', true);
+	PERFORM set_config('turbohybrid.payload_entry_seeding', 'off', true);
 
 	SELECT count(*) INTO result_count
 	FROM (
@@ -272,7 +283,245 @@ BEGIN
 	END IF;
 END
 $$;
+DO $$
+DECLARE
+	stats jsonb;
+	result_count int;
+BEGIN
+	PERFORM set_config('turbohybrid.payload_entry_seeding', 'auto', true);
+	PERFORM set_config('turbohybrid.payload_entry_seed_count', '6', true);
+
+	SELECT count(*) INTO result_count
+	FROM (
+		SELECT id
+		FROM tqh_fill_band_docs
+		WHERE grp = 1
+		ORDER BY embedding <~> turbohybrid_query(
+			vector_query => '[2,0,0]'::vector,
+			dense_k => 32,
+			final_k => 4
+		)
+		LIMIT 4
+	) s;
+
+	stats := turbohybrid_last_scan_stats();
+	IF result_count <> 4 OR
+		stats->>'payload_entry_seeding_mode' <> 'auto' OR
+		(stats->>'payload_entry_seeding_hit')::boolean IS DISTINCT FROM true OR
+		(stats->>'payload_entry_seed_count')::int <= 0 OR
+		(stats->>'payload_entry_seed_count')::int > 6 OR
+		(stats->>'payload_entry_seed_payload_slot')::int <> 0 OR
+		(stats->>'payload_entry_seed_range_count')::int <> 1099 OR
+		(stats->'dense'->'traversal'->>'payload_entry_seed_count')::int <>
+			(stats->>'payload_entry_seed_count')::int THEN
+		RAISE EXCEPTION 'unexpected payload entry seed hit stats: %', stats;
+	END IF;
+
+	PERFORM id
+	FROM tqh_fill_band_docs
+	WHERE grp = 99999
+	ORDER BY embedding <~> turbohybrid_query(
+		vector_query => '[2,0,0]'::vector,
+		dense_k => 32,
+		final_k => 4
+	)
+	LIMIT 4;
+
+	stats := turbohybrid_last_scan_stats();
+	IF stats->>'payload_entry_seeding_mode' <> 'auto' OR
+		(stats->>'payload_entry_seeding_hit')::boolean IS DISTINCT FROM false OR
+		(stats->>'payload_entry_seed_count')::int <> 0 OR
+		(stats->>'payload_entry_seed_payload_slot')::int <> 0 OR
+		(stats->>'payload_entry_seed_range_count')::int <> 0 THEN
+		RAISE EXCEPTION 'unexpected payload entry seed miss stats: %', stats;
+	END IF;
+END
+$$;
 DROP TABLE tqh_fill_band_docs;
+CREATE TABLE tqh_final_diversity_docs (
+	id int,
+	group_id int,
+	embedding vector(3)
+);
+INSERT INTO tqh_final_diversity_docs VALUES
+	(1, 1, '[1,0,0]'),
+	(2, 1, '[0.99,0.01,0]'),
+	(3, 1, '[0.98,0.02,0]'),
+	(4, 2, '[0.97,0.03,0]'),
+	(5, 3, '[0.96,0.04,0]'),
+	(6, 4, '[0.95,0.05,0]'),
+	(7, 5, '[0.70,0.30,0]'),
+	(8, 6, '[0.60,0.40,0]');
+CREATE INDEX tqh_final_diversity_docs_idx ON tqh_final_diversity_docs
+USING turbohybrid (embedding vector_cosine_turbohybrid_ops) INCLUDE (group_id)
+WITH (quantization_bits = 4, exact_storage = off, graph_ef_search = 32,
+	  graph_oversampling = 4);
+ANALYZE tqh_final_diversity_docs;
+DO $$
+DECLARE
+	off_ids int[];
+	on_ids int[];
+	off_duplicates int;
+	on_duplicates int;
+	stats jsonb;
+BEGIN
+	PERFORM set_config('enable_seqscan', 'off', true);
+	PERFORM set_config('turbohybrid.final_diversity', 'off', true);
+	PERFORM set_config('turbohybrid.final_diversity_payload_slot', '0', true);
+
+	SELECT array_agg(id ORDER BY ord) INTO off_ids
+	FROM (
+		SELECT id, row_number() OVER () AS ord
+		FROM (
+			SELECT id
+			FROM tqh_final_diversity_docs
+			ORDER BY embedding <~> turbohybrid_query(
+				vector_query => '[1,0,0]'::vector,
+				dense_k => 8,
+				final_k => 4
+			)
+			LIMIT 4
+		) s
+	) ranked;
+
+	stats := turbohybrid_last_scan_stats();
+	IF stats->>'final_diversity_mode' <> 'off' OR
+		(stats->>'final_diversity_selected')::int <> 0 THEN
+		RAISE EXCEPTION 'unexpected final diversity off stats: %', stats;
+	END IF;
+
+	SELECT count(*)::int - count(DISTINCT d.group_id)::int
+	INTO off_duplicates
+	FROM unnest(off_ids) AS r(id)
+	JOIN tqh_final_diversity_docs d USING (id);
+
+	PERFORM set_config('turbohybrid.final_diversity', 'group_payload', true);
+	PERFORM set_config('turbohybrid.final_diversity_payload_slot', '0', true);
+	PERFORM set_config('turbohybrid.final_diversity_lambda', '0', true);
+	PERFORM set_config('turbohybrid.final_diversity_pool_multiplier', '3', true);
+
+	SELECT array_agg(id ORDER BY ord) INTO on_ids
+	FROM (
+		SELECT id, row_number() OVER () AS ord
+		FROM (
+			SELECT id
+			FROM tqh_final_diversity_docs
+			ORDER BY embedding <~> turbohybrid_query(
+				vector_query => '[1,0,0]'::vector,
+				dense_k => 8,
+				final_k => 4
+			)
+			LIMIT 4
+		) s
+	) ranked;
+
+	stats := turbohybrid_last_scan_stats();
+	SELECT count(*)::int - count(DISTINCT d.group_id)::int
+	INTO on_duplicates
+	FROM unnest(on_ids) AS r(id)
+	JOIN tqh_final_diversity_docs d USING (id);
+
+	IF off_duplicates <= 0 OR
+		on_duplicates >= off_duplicates OR
+		stats->>'final_diversity_mode' <> 'group_payload' OR
+		(stats->>'final_diversity_payload_slot')::int <> 0 OR
+		(stats->>'final_diversity_pool_size')::int < 4 OR
+		(stats->>'final_diversity_selected')::int <> 4 OR
+		(stats->>'final_diversity_duplicate_groups_suppressed')::int <= 0 OR
+		(stats->>'final_diversity_us')::int < 0 THEN
+		RAISE EXCEPTION 'unexpected final diversity result: off ids %, on ids %, stats %',
+			off_ids, on_ids, stats;
+	END IF;
+
+	PERFORM set_config('turbohybrid.final_diversity', 'group_payload', true);
+	PERFORM set_config('turbohybrid.final_diversity_payload_slot', '1', true);
+	PERFORM id
+	FROM tqh_final_diversity_docs
+	ORDER BY embedding <~> turbohybrid_query(
+		vector_query => '[1,0,0]'::vector,
+		dense_k => 8,
+		final_k => 4
+	)
+	LIMIT 4;
+
+	stats := turbohybrid_last_scan_stats();
+	IF stats->>'final_diversity_mode' <> 'group_payload' OR
+		(stats->>'final_diversity_payload_slot')::int <> 1 OR
+		(stats->>'final_diversity_selected')::int <> 0 THEN
+		RAISE EXCEPTION 'unexpected final diversity invalid-slot fallback stats: %',
+			stats;
+	END IF;
+END
+$$;
+DROP TABLE tqh_final_diversity_docs;
+CREATE TABLE tqh_graph_repair_docs (
+	id int,
+	embedding vector(3)
+);
+INSERT INTO tqh_graph_repair_docs
+SELECT g,
+	('[' || (g % 17)::text || ',' || (g % 19)::text || ',' ||
+		(g % 23)::text || ']')::vector
+FROM generate_series(1, 96) AS g;
+CREATE INDEX tqh_graph_repair_docs_idx ON tqh_graph_repair_docs
+USING turbohybrid (embedding vector_cosine_turbohybrid_ops)
+WITH (quantization_bits = 4, exact_storage = off, graph_ef_search = 32);
+DO $$
+DECLARE
+	stats jsonb;
+BEGIN
+	stats := turbohybrid_graph_repair_dry_run(
+		'tqh_graph_repair_docs_idx'::regclass, 12, 64, 24);
+	IF (stats->>'dry_run')::boolean IS DISTINCT FROM true OR
+		(stats->>'writes_index_pages')::boolean IS DISTINCT FROM false OR
+		(stats->>'requires_access_exclusive_lock')::boolean IS DISTINCT FROM false OR
+		(stats->>'sampled_nodes')::int <= 0 OR
+		(stats->>'sampled_nodes')::int > 12 OR
+		(stats->>'avg_overlap')::float8 < 0 OR
+		(stats->>'avg_overlap')::float8 > 1 OR
+		(stats->>'weak_nodes')::int < 0 OR
+		(stats->>'suggested_edges')::int < 0 OR
+		(stats->'parameters'->>'sample_nodes')::int <> 12 OR
+		(stats->'parameters'->>'search_ef')::int <> 64 OR
+		(stats->'parameters'->>'candidate_limit')::int <> 24 THEN
+		RAISE EXCEPTION 'unexpected graph repair dry-run stats: %', stats;
+	END IF;
+END
+$$;
+CREATE TABLE tqh_graph_repair_empty_docs (
+	id int,
+	embedding vector(3)
+);
+CREATE INDEX tqh_graph_repair_empty_docs_idx ON tqh_graph_repair_empty_docs
+USING turbohybrid (embedding vector_cosine_turbohybrid_ops)
+WITH (quantization_bits = 4, exact_storage = off);
+DO $$
+DECLARE
+	stats jsonb;
+BEGIN
+	stats := turbohybrid_graph_repair_dry_run(
+		'tqh_graph_repair_empty_docs_idx'::regclass, 10, 40, 20);
+	IF (stats->>'node_count')::int <> 0 OR
+		(stats->>'sampled_nodes')::int <> 0 OR
+		(stats->>'suggested_edges')::int <> 0 THEN
+		RAISE EXCEPTION 'unexpected empty graph repair dry-run stats: %', stats;
+	END IF;
+END
+$$;
+CREATE INDEX tqh_graph_repair_docs_btree_idx ON tqh_graph_repair_docs (id);
+DO $$
+BEGIN
+	BEGIN
+		PERFORM turbohybrid_graph_repair_dry_run(
+			'tqh_graph_repair_docs_btree_idx'::regclass, 10, 40, 20);
+		RAISE EXCEPTION 'expected non-native graph repair dry-run error';
+	EXCEPTION WHEN feature_not_supported THEN
+		NULL;
+	END;
+END
+$$;
+DROP TABLE tqh_graph_repair_empty_docs;
+DROP TABLE tqh_graph_repair_docs;
 CREATE TABLE tqh_unmapped_filter_docs (
 	id int,
 	embedding vector(3)
@@ -1201,7 +1450,8 @@ INSERT INTO tqh_fast_weighted_docs VALUES
 	(3, '[0.1,0.9,0]', to_tsvector('simple', 'alpha alpha alpha lexical')),
 	(4, '[0,0,1]', to_tsvector('simple', 'beta')),
 	(5, '[0.8,0.2,0]', NULL),
-	(6, '[0.2,0.8,0]', to_tsvector('simple', 'alpha lexical'));
+	(6, '[0.2,0.8,0]', to_tsvector('simple', 'alpha lexical')),
+	(7, '[1,0,0]', NULL);
 CREATE INDEX tqh_fast_weighted_docs_idx ON tqh_fast_weighted_docs
 USING turbohybrid (
 	embedding vector_cosine_turbohybrid_ops,
@@ -1323,6 +1573,37 @@ BEGIN
 		(stats->>'bm25_blocks_pruned_by_fused_score_bound')::bigint <> 0 OR
 		(stats->>'bm25_candidates_pruned_by_fused_score_bound')::bigint <> 0 THEN
 		RAISE EXCEPTION 'RRF used fast_weighted score-bound pruning path: %', stats;
+	END IF;
+
+	PERFORM set_config('turbohybrid.calibrated_fusion_both_match_bonus', '0.25', true);
+
+	SELECT array_agg(id) INTO ids_alpha1
+	FROM (
+		SELECT id
+		FROM tqh_fast_weighted_docs
+		ORDER BY embedding <~> turbohybrid_query(
+			vector_query => '[1,0,0]'::vector,
+			text_query => websearch_to_tsquery('simple', 'alpha'),
+			fusion => 'calibrated',
+			alpha => 1,
+			dense_k => 7,
+			bm25_k => 7,
+			final_k => 2
+		)
+		LIMIT 2
+	) s;
+
+	stats := turbohybrid_last_scan_stats();
+	IF ids_alpha1[1] <> 1 OR
+		(stats->>'calibrated_fusion_enabled')::boolean IS DISTINCT FROM true OR
+		(stats->>'calibrated_fusion_alpha_effective')::float8 <> 1 OR
+		(stats->>'calibrated_fusion_both_match_bonus')::float8 <> 0.25 OR
+		stats->>'calibrated_fusion_dense_norm_mode' <> 'logistic' OR
+		stats->>'calibrated_fusion_bm25_norm_mode' <> 'saturating' OR
+		stats->>'bm25_norm_mode' <> 'saturating' OR
+		stats->>'dense_norm_mode' <> 'logistic' THEN
+		RAISE EXCEPTION 'unexpected calibrated fusion results %, stats %',
+			ids_alpha1, stats;
 	END IF;
 END
 $$;
@@ -1719,6 +2000,105 @@ BEGIN
 END
 $$;
 DROP INDEX tqh_default_docs_idx;
+-- 8-bit is an opt-in scalar-safe prototype path.  It must build, scan, insert,
+-- and report scalar_8bit without using the packed 4-bit SIMD scorers.
+DROP TABLE IF EXISTS tqh_quant8_docs;
+NOTICE:  table "tqh_quant8_docs" does not exist, skipping
+CREATE TABLE tqh_quant8_docs (id int PRIMARY KEY, embedding vector(4));
+INSERT INTO tqh_quant8_docs
+SELECT i,
+	   ARRAY[
+		   ((i * 17) % 101)::real / 100.0,
+		   ((i * 31) % 101)::real / 100.0,
+		   ((i * 47) % 101)::real / 100.0,
+		   ((i * 59) % 101)::real / 100.0
+	   ]::real[]::vector
+FROM generate_series(1, 64) AS i;
+CREATE INDEX tqh_quant8_docs_idx ON tqh_quant8_docs
+USING turbohybrid (embedding vector_cosine_turbohybrid_ops)
+WITH (quantization_bits = 8, exact_storage = off, graph_ef_search = 64);
+ANALYZE tqh_quant8_docs;
+DO $$
+DECLARE
+	q vector := ARRAY[0.25, 0.50, 0.75, 1.0]::real[]::vector;
+	stats jsonb;
+	scorer jsonb;
+	exact_ids int[];
+	approx_ids int[];
+	overlap_count int;
+BEGIN
+	scorer := turbohybrid_scorer_distances(q, q, 8);
+	IF abs((scorer->>'selected')::float8 - (scorer->>'scalar_lut')::float8) > 1e-9 OR
+		scorer->>'selected_kernel' <> 'scalar_8bit' THEN
+		RAISE EXCEPTION 'unexpected 8-bit scorer parity stats: %', scorer;
+	END IF;
+
+	stats := turbohybrid_index_stats('tqh_quant8_docs_idx'::regclass);
+	IF (stats->>'quantization_bits')::int <> 8 OR
+		(stats->>'exact_storage')::boolean IS DISTINCT FROM false THEN
+		RAISE EXCEPTION 'unexpected 8-bit index stats: %', stats;
+	END IF;
+
+	SELECT array_agg(id ORDER BY exact_distance, id)
+	INTO exact_ids
+	FROM (
+		SELECT id, embedding <=> q AS exact_distance
+		FROM tqh_quant8_docs
+		ORDER BY embedding <=> q, id
+		LIMIT 5
+	) s;
+
+	SELECT array_agg(id)
+	INTO approx_ids
+	FROM (
+		SELECT id
+		FROM tqh_quant8_docs
+		ORDER BY embedding <~> turbohybrid_query(vector_query => q, dense_k => 64, final_k => 5)
+		LIMIT 5
+	) s;
+
+	stats := turbohybrid_last_scan_stats();
+	IF (stats->>'quantization_bits')::int <> 8 OR
+		stats->>'dense_scorer' <> 'scalar_8bit' OR
+		stats->>'dense_scoring_kernel' <> 'scalar_8bit' THEN
+		RAISE EXCEPTION 'unexpected 8-bit scan stats: %', stats;
+	END IF;
+
+	SELECT count(*) INTO overlap_count
+	FROM unnest(exact_ids) AS e(id)
+	JOIN unnest(approx_ids) AS a(id) USING (id);
+
+	IF overlap_count < 3 THEN
+		RAISE EXCEPTION '8-bit approximate results too far from exact order: exact %, approx %',
+			exact_ids, approx_ids;
+	END IF;
+END
+$$;
+INSERT INTO tqh_quant8_docs VALUES (65, ARRAY[0.25, 0.50, 0.75, 1.0]::real[]::vector);
+VACUUM tqh_quant8_docs;
+DO $$
+DECLARE
+	q vector := ARRAY[0.25, 0.50, 0.75, 1.0]::real[]::vector;
+	rows_seen int;
+	stats jsonb;
+BEGIN
+	SELECT count(*) INTO rows_seen
+	FROM (
+		SELECT id
+		FROM tqh_quant8_docs
+		ORDER BY embedding <~> turbohybrid_query(vector_query => q, dense_k => 64, final_k => 5)
+		LIMIT 5
+	) s;
+
+	stats := turbohybrid_last_scan_stats();
+	IF rows_seen <> 5 OR (stats->>'quantization_bits')::int <> 8 OR
+		stats->>'dense_scorer' <> 'scalar_8bit' THEN
+		RAISE EXCEPTION 'unexpected 8-bit insert/vacuum scan result rows=%, stats=%',
+			rows_seen, stats;
+	END IF;
+END
+$$;
+DROP TABLE tqh_quant8_docs;
 CREATE INDEX tqh_default_docs_idx ON tqh_default_docs
 USING turbohybrid (
 	embedding vector_cosine_turbohybrid_ops,
@@ -1779,11 +2159,83 @@ BEGIN
 		(stats->>'entry_sidecar_count')::int > 8 OR
 		(stats->>'entry_sidecar_bytes')::int <>
 			(stats->>'entry_sidecar_count')::int * 4 OR
+		(stats->>'entry_sidecar_representatives_configured')::int <> 8 OR
+		stats->>'entry_sidecar_strategy' <> 'hash' OR
 		(stats->>'graph_backbone')::boolean IS DISTINCT FROM true OR
 		(stats->>'residual_rerank_bytes')::int <> 16 OR
 		(stats->>'residual_rerank_storage_bytes')::int <> 16 * 4 THEN
 		RAISE EXCEPTION 'unexpected sidecar stats: %', stats;
 	END IF;
+END
+$$;
+DO $$
+BEGIN
+	BEGIN
+		EXECUTE $cmd$
+			CREATE INDEX tqh_default_docs_bad_sidecar_idx ON tqh_default_docs
+			USING turbohybrid (
+				embedding vector_cosine_turbohybrid_ops,
+				body_tsv bm25_tsvector_turbohybrid_ops
+			)
+			WITH (entry_sidecar = on, entry_sidecar_strategy = 'not_a_strategy')
+		$cmd$;
+		RAISE EXCEPTION 'invalid entry_sidecar_strategy was accepted';
+	EXCEPTION WHEN invalid_parameter_value THEN
+		NULL;
+	END;
+END
+$$;
+DO $$
+DECLARE
+	strategy text;
+	stats jsonb;
+	scan_stats jsonb;
+BEGIN
+	FOREACH strategy IN ARRAY ARRAY[
+		'hash',
+		'farthest_code',
+		'level_covering',
+		'hybrid_level_covering'
+	]
+	LOOP
+		DROP INDEX IF EXISTS tqh_default_docs_idx;
+		EXECUTE format($cmd$
+			CREATE INDEX tqh_default_docs_idx ON tqh_default_docs
+			USING turbohybrid (
+				embedding vector_cosine_turbohybrid_ops,
+				body_tsv bm25_tsvector_turbohybrid_ops
+			)
+			WITH (
+				quantization_bits = 4,
+				exact_storage = off,
+				entry_sidecar = on,
+				entry_sidecar_representatives = 8,
+				entry_sidecar_strategy = %L
+			)
+		$cmd$, strategy);
+
+		stats := turbohybrid_index_stats('tqh_default_docs_idx'::regclass);
+		IF stats->>'entry_sidecar_strategy' <> strategy OR
+			(stats->>'entry_sidecar_representatives_configured')::int <> 8 OR
+			(stats->>'entry_sidecar_count')::int <= 0 OR
+			(stats->>'entry_sidecar_count')::int > 8 THEN
+			RAISE EXCEPTION 'unexpected % sidecar index stats: %', strategy, stats;
+		END IF;
+
+		PERFORM id
+		FROM tqh_default_docs
+		ORDER BY embedding <~> turbohybrid_query(vector_query => '[1,0,0]'::vector,
+												 dense_k => 8,
+												 final_k => 2)
+		LIMIT 2;
+
+		scan_stats := turbohybrid_last_scan_stats();
+		IF scan_stats->>'graph_entry_sidecar_strategy' <> strategy OR
+			(scan_stats->>'graph_entry_sidecar_representatives_configured')::int <> 8 OR
+			(scan_stats->>'graph_entry_sidecar_count')::int <= 0 THEN
+			RAISE EXCEPTION 'unexpected % sidecar scan stats: %', strategy, scan_stats;
+		END IF;
+	END LOOP;
 END
 $$;
 DROP TABLE tqh_default_docs;
@@ -2539,6 +2991,8 @@ BEGIN
 		'encode_us',
 		'entry_sidecar_bytes',
 		'entry_sidecar_count',
+		'entry_sidecar_representatives_configured',
+		'entry_sidecar_strategy',
 		'exact_storage',
 		'graph_backbone',
 		'graph_ef_construction',
@@ -2660,6 +3114,14 @@ BEGIN
 		'bm25_docstats_bytes',
 		'bm25_docstats_loaded_this_query',
 		'bm25_elapsed_us',
+		'bm25_heap_tsvector_rerank',
+		'bm25_heap_tsvector_rerank_count',
+		'bm25_heap_tsvector_rerank_fetch_us',
+		'bm25_heap_tsvector_rerank_mode',
+		'bm25_heap_tsvector_rerank_multiplier',
+		'bm25_heap_tsvector_rerank_score_us',
+		'bm25_heap_tsvector_rerank_topk_changed',
+		'bm25_heap_tsvector_rerank_weight',
 		'bm25_hot_postings_cache_hit',
 		'bm25_hot_postings_cache_hits',
 		'bm25_hot_postings_cache_mb',
@@ -2677,6 +3139,12 @@ BEGIN
 		'build_fast_edges',
 		'build_neighbor_select',
 		'build_neighbor_select_reason',
+		'calibrated_fusion_alpha_effective',
+		'calibrated_fusion_bm25_norm_mode',
+		'calibrated_fusion_both_match_bonus',
+		'calibrated_fusion_dense_norm_mode',
+		'calibrated_fusion_enabled',
+		'calibrated_fusion_query_shape',
 		'candidate_objects_allocated',
 		'code_buffer_lock_wait_us',
 		'dense',
@@ -2717,6 +3185,16 @@ BEGIN
 		'dense_scoring_kernel',
 		'dense_simd_force',
 		'dense_u8_batch_x4_enabled',
+		'dense_uncertainty_final_ef',
+		'dense_uncertainty_final_target',
+		'dense_uncertainty_gap_boundary',
+		'dense_uncertainty_gap_top10',
+		'dense_uncertainty_initial_ef',
+		'dense_uncertainty_initial_target',
+		'dense_uncertainty_retry_mode',
+		'dense_uncertainty_retry_passes',
+		'dense_uncertainty_retry_reason',
+		'dense_uncertainty_retry_triggered',
 		'detected_sql_limit',
 		'dimensions',
 		'effective_search_ef_after_segment_scaling',
@@ -2730,6 +3208,15 @@ BEGIN
 		'fast_vector_checks',
 		'fast_weighted_alpha',
 		'fast_weighted_enabled',
+		'final_diversity',
+		'final_diversity_duplicate_groups_suppressed',
+		'final_diversity_lambda',
+		'final_diversity_mode',
+		'final_diversity_payload_slot',
+		'final_diversity_pool_multiplier',
+		'final_diversity_pool_size',
+		'final_diversity_selected',
+		'final_diversity_us',
 		'final_k_effective',
 		'final_k_inferred',
 		'final_k_requested',
@@ -2763,8 +3250,10 @@ BEGIN
 		'graph_effective_search_ef',
 		'graph_entry_point_count',
 		'graph_entry_sidecar_count',
+		'graph_entry_sidecar_representatives_configured',
 		'graph_entry_sidecar_scored',
 		'graph_entry_sidecar_selected',
+		'graph_entry_sidecar_strategy',
 		'graph_entry_sidecar_us',
 		'graph_exact_cache',
 		'graph_exact_cache_active',
@@ -2835,12 +3324,24 @@ BEGIN
 		'native_cache_warning',
 		'native_cache_warning_reason',
 		'native_segments',
+		'payload_entry_seed_count',
+		'payload_entry_seed_payload_slot',
+		'payload_entry_seed_range_count',
+		'payload_entry_seed_us',
+		'payload_entry_seeding_hit',
+		'payload_entry_seeding_mode',
 		'per_segment_budget_mode',
 		'profile',
 		'quantization_bits',
 		'query',
 		'query_split_enabled',
 		'residual_rerank_active',
+		'residual_rerank_band',
+		'residual_rerank_max_adjustment',
+		'residual_rerank_mode',
+		'residual_rerank_reordered_count',
+		'residual_rerank_topk_changed',
+		'residual_rerank_weight_effective',
 		'scan_orchestration',
 		'score_mode',
 		'strict_vector_validations',
@@ -2866,6 +3367,11 @@ BEGIN
 		'common_term_fallback',
 		'docstats_bytes',
 		'docstats_loaded_this_query',
+		'heap_tsvector_rerank_count',
+		'heap_tsvector_rerank_fetch_us',
+		'heap_tsvector_rerank_mode',
+		'heap_tsvector_rerank_score_us',
+		'heap_tsvector_rerank_topk_changed',
 		'liveness_bytes',
 		'liveness_loaded_this_query',
 		'postings_decode_ratio',
@@ -2877,6 +3383,11 @@ BEGIN
 		'common_term_fallback',
 		'docstats_bytes',
 		'docstats_loaded_this_query',
+		'heap_tsvector_rerank_count',
+		'heap_tsvector_rerank_fetch_us',
+		'heap_tsvector_rerank_mode',
+		'heap_tsvector_rerank_score_us',
+		'heap_tsvector_rerank_topk_changed',
 		'liveness_bytes',
 		'liveness_loaded_this_query',
 		'postings_decode_ratio',
@@ -2980,6 +3491,61 @@ BEGIN
 		RAISE EXCEPTION 'dense_adaptive_min_gap GUC did not stick';
 	END IF;
 
+	PERFORM set_config('turbohybrid.dense_uncertainty_retry', 'auto', true);
+	IF current_setting('turbohybrid.dense_uncertainty_retry') <> 'auto' THEN
+		RAISE EXCEPTION 'dense_uncertainty_retry auto GUC did not stick';
+	END IF;
+
+	PERFORM set_config('turbohybrid.dense_uncertainty_retry', 'on', true);
+	IF current_setting('turbohybrid.dense_uncertainty_retry') <> 'on' THEN
+		RAISE EXCEPTION 'dense_uncertainty_retry on GUC did not stick';
+	END IF;
+
+	PERFORM set_config('turbohybrid.dense_uncertainty_retry', 'off', true);
+	IF current_setting('turbohybrid.dense_uncertainty_retry') <> 'off' THEN
+		RAISE EXCEPTION 'dense_uncertainty_retry off GUC did not stick';
+	END IF;
+
+	PERFORM set_config('turbohybrid.dense_uncertainty_retry_max_passes', '2', true);
+	IF current_setting('turbohybrid.dense_uncertainty_retry_max_passes') <> '2' THEN
+		RAISE EXCEPTION 'dense_uncertainty_retry_max_passes GUC did not stick';
+	END IF;
+
+	PERFORM set_config('turbohybrid.dense_uncertainty_retry_multiplier', '1.5', true);
+	IF current_setting('turbohybrid.dense_uncertainty_retry_multiplier') <> '1.5' THEN
+		RAISE EXCEPTION 'dense_uncertainty_retry_multiplier GUC did not stick';
+	END IF;
+
+	PERFORM set_config('turbohybrid.dense_uncertainty_min_gap', '0.03', true);
+	IF current_setting('turbohybrid.dense_uncertainty_min_gap') <> '0.03' THEN
+		RAISE EXCEPTION 'dense_uncertainty_min_gap GUC did not stick';
+	END IF;
+
+	PERFORM set_config('turbohybrid.dense_residual_rerank_mode', 'off', true);
+	IF current_setting('turbohybrid.dense_residual_rerank_mode') <> 'off' THEN
+		RAISE EXCEPTION 'dense_residual_rerank_mode off GUC did not stick';
+	END IF;
+
+	PERFORM set_config('turbohybrid.dense_residual_rerank_mode', 'fixed', true);
+	IF current_setting('turbohybrid.dense_residual_rerank_mode') <> 'fixed' THEN
+		RAISE EXCEPTION 'dense_residual_rerank_mode fixed GUC did not stick';
+	END IF;
+
+	PERFORM set_config('turbohybrid.dense_residual_rerank_mode', 'calibrated', true);
+	IF current_setting('turbohybrid.dense_residual_rerank_mode') <> 'calibrated' THEN
+		RAISE EXCEPTION 'dense_residual_rerank_mode calibrated GUC did not stick';
+	END IF;
+
+	PERFORM set_config('turbohybrid.dense_residual_rerank_weight', '0.5', true);
+	IF current_setting('turbohybrid.dense_residual_rerank_weight') <> '0.5' THEN
+		RAISE EXCEPTION 'dense_residual_rerank_weight GUC did not stick';
+	END IF;
+
+	PERFORM set_config('turbohybrid.dense_residual_rerank_max_adjust_ratio', '0.25', true);
+	IF current_setting('turbohybrid.dense_residual_rerank_max_adjust_ratio') <> '0.25' THEN
+		RAISE EXCEPTION 'dense_residual_rerank_max_adjust_ratio GUC did not stick';
+	END IF;
+
 	PERFORM set_config('turbohybrid.warn_linear_fallback', 'off', true);
 	IF current_setting('turbohybrid.warn_linear_fallback') <> 'off' THEN
 		RAISE EXCEPTION 'warn_linear_fallback off GUC did not stick';
@@ -3020,6 +3586,36 @@ BEGIN
 		RAISE EXCEPTION 'dense_local_expansion_max_neighbors GUC did not stick';
 	END IF;
 
+	PERFORM set_config('turbohybrid.bm25_heap_tsvector_rerank', 'topk', true);
+	IF current_setting('turbohybrid.bm25_heap_tsvector_rerank') <> 'topk' THEN
+		RAISE EXCEPTION 'bm25_heap_tsvector_rerank topk GUC did not stick';
+	END IF;
+
+	PERFORM set_config('turbohybrid.bm25_heap_tsvector_rerank', 'band', true);
+	IF current_setting('turbohybrid.bm25_heap_tsvector_rerank') <> 'band' THEN
+		RAISE EXCEPTION 'bm25_heap_tsvector_rerank band GUC did not stick';
+	END IF;
+
+	PERFORM set_config('turbohybrid.bm25_heap_tsvector_rerank', 'auto', true);
+	IF current_setting('turbohybrid.bm25_heap_tsvector_rerank') <> 'auto' THEN
+		RAISE EXCEPTION 'bm25_heap_tsvector_rerank auto GUC did not stick';
+	END IF;
+
+	PERFORM set_config('turbohybrid.bm25_heap_tsvector_rerank', 'off', true);
+	IF current_setting('turbohybrid.bm25_heap_tsvector_rerank') <> 'off' THEN
+		RAISE EXCEPTION 'bm25_heap_tsvector_rerank off GUC did not stick';
+	END IF;
+
+	PERFORM set_config('turbohybrid.bm25_heap_tsvector_rerank_multiplier', '4', true);
+	IF current_setting('turbohybrid.bm25_heap_tsvector_rerank_multiplier') <> '4' THEN
+		RAISE EXCEPTION 'bm25_heap_tsvector_rerank_multiplier GUC did not stick';
+	END IF;
+
+	PERFORM set_config('turbohybrid.bm25_heap_tsvector_rerank_weight', '0.10', true);
+	IF current_setting('turbohybrid.bm25_heap_tsvector_rerank_weight') <> '0.1' THEN
+		RAISE EXCEPTION 'bm25_heap_tsvector_rerank_weight GUC did not stick';
+	END IF;
+
 	PERFORM set_config('turbohybrid.native_cache_policy', 'auto', true);
 	IF current_setting('turbohybrid.native_cache_policy') <> 'auto' THEN
 		RAISE EXCEPTION 'native_cache_policy auto GUC did not stick';
@@ -3048,6 +3644,62 @@ BEGIN
 	PERFORM set_config('turbohybrid.native_cache_warn_mb', '512', true);
 	IF current_setting('turbohybrid.native_cache_warn_mb') <> '512MB' THEN
 		RAISE EXCEPTION 'native_cache_warn_mb 512 GUC did not stick';
+	END IF;
+END
+$$;
+DO $$
+DECLARE
+	stats jsonb;
+	row_count int;
+BEGIN
+	SELECT count(*) INTO row_count
+	FROM (
+		SELECT id
+		FROM tqh_docs
+		ORDER BY embedding <~> turbohybrid_query(
+			text_query => to_tsquery('english', 'hybrid <-> bm25'),
+			bm25_k => 4,
+			final_k => 2
+		)
+		LIMIT 2
+	) s;
+
+	IF row_count = 0 THEN
+		RAISE EXCEPTION 'expected phrase BM25 query to return rows';
+	END IF;
+
+	stats := turbohybrid_last_scan_stats();
+	IF stats->>'bm25_heap_tsvector_rerank_mode' <> 'off' OR
+		(stats->>'bm25_heap_tsvector_rerank_count')::int <> 0 THEN
+		RAISE EXCEPTION 'default BM25 heap tsvector rerank changed behavior: %',
+			stats;
+	END IF;
+
+	SET LOCAL turbohybrid.bm25_heap_tsvector_rerank = band;
+	SET LOCAL turbohybrid.bm25_heap_tsvector_rerank_multiplier = 4;
+	SET LOCAL turbohybrid.bm25_heap_tsvector_rerank_weight = 0.10;
+
+	SELECT count(*) INTO row_count
+	FROM (
+		SELECT id
+		FROM tqh_docs
+		ORDER BY embedding <~> turbohybrid_query(
+			text_query => to_tsquery('english', 'hybrid <-> bm25'),
+			bm25_k => 4,
+			final_k => 2
+		)
+		LIMIT 2
+	) s;
+
+	stats := turbohybrid_last_scan_stats();
+	IF row_count = 0 OR
+		stats->>'bm25_heap_tsvector_rerank_mode' <> 'band' OR
+		(stats->>'bm25_heap_tsvector_rerank_count')::int <= 0 OR
+		NOT (stats ? 'bm25_heap_tsvector_rerank_fetch_us') OR
+		NOT (stats ? 'bm25_heap_tsvector_rerank_score_us') OR
+		NOT (stats ? 'bm25_heap_tsvector_rerank_topk_changed') THEN
+		RAISE EXCEPTION 'expected BM25 heap tsvector rerank stats: %',
+			stats;
 	END IF;
 END
 $$;

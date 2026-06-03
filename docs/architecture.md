@@ -143,13 +143,15 @@ Stable names and semantics -- this is the supported tuning surface. The
 defaults for these, so override only for a specific need.
 
 - `turbohybrid.profile`: retrieval profile. Current values are `latency`,
-  `balanced`, `matched_recall`, `quality`, and `debug`; the default profile is
-  `latency`. `latency` is the smallest/fastest compact 4-bit profile.
-  `matched_recall` is the compact exact-free profile intended for comparisons
-  against full-vector HNSW defaults in pgvector/Qdrant. `quality` is stronger
-  but slower. `balanced`, `matched_recall`, and `quality` use larger default
-  graph/search windows and heuristic dense neighbor selection for new indexes
-  when index reloptions do not override those values.
+  `balanced`, `matched_recall`, `high_recall`, `quality`, and `debug`; the
+  default profile is `latency`. `latency` is the smallest/fastest compact
+  4-bit profile. `matched_recall` is the compact exact-free profile intended
+  for comparisons against full-vector HNSW defaults in pgvector/Qdrant.
+  `high_recall` spends more scan-time CPU on heap-band rescore while keeping
+  exact vectors out of the index. `quality` is stronger but slower. `balanced`,
+  `matched_recall`, `high_recall`, and `quality` use larger default graph/search
+  windows and heuristic dense neighbor selection for new indexes when index
+  reloptions do not override those values.
 - `turbohybrid.default_dense_k`, `turbohybrid.default_bm25_k`,
   `turbohybrid.default_rrf_k`: default dense/BM25 candidate budgets and the RRF
   fusion constant for `turbohybrid_query` callers.
@@ -231,16 +233,24 @@ predictable.
   low-dimensional exact-free indexes. Explicit `off`, `topk`, and `band` values
   always override profile defaults.
 - `turbohybrid.dense_adaptive_widening` (`off` / `auto` / `on`, default `off`):
-  controls one bounded second graph-search pass for ambiguous dense-only scans.
-  The `latency` profile resolves `auto` to off. `balanced`, `matched_recall`,
-  and `quality` may resolve `auto` to one extra pass for low-dimensional
-  (`<= 256`) exact-free 4-bit indexes when `final_k <= 20` and the top-10 gap,
-  final-k boundary gap, or filled candidate band says the query is ambiguous.
-  The default cap is conservative: `balanced` and `matched_recall` widen by at
-  most 1.5x and `quality` widens by at most 2.0x.
+  controls conservative query-time widening of dense candidate targets for
+  ambiguous dense-only scans. The `latency` profile resolves `auto` to off.
+  `balanced`, `matched_recall`, and `quality` may resolve `auto` to a wider
+  target for low-dimensional (`<= 256`) exact-free 4-bit indexes when
+  `final_k <= 20` and the top-10 gap, final-k boundary gap, or filled candidate
+  band says the query is ambiguous. The default cap is conservative:
+  `balanced` and `matched_recall` widen by at most 1.5x and `quality` widens by
+  at most 2.0x.
   The knobs are `turbohybrid.dense_adaptive_widening_multiplier`,
   `turbohybrid.dense_adaptive_widening_max_multiplier`, and
   `turbohybrid.dense_adaptive_min_gap`.
+- `turbohybrid.dense_uncertainty_retry` (`off` / `auto` / `on`, default `off`):
+  controls a bounded second traversal pass after the first dense result band has
+  been scored and inspected. Named production profiles keep it off until
+  retrieval-quality benchmark rows show a stable recall/precision win with low
+  p95/p99 impact. Use `benchmarks/dev/retrieval_quality_grid.sql` to compare
+  `matched_recall_uncertainty_retry_off`, `_auto`, and `_on` before promoting
+  it. This is query-time only and does not require `REINDEX`.
 - Heap filters that are not mapped to native graph `INCLUDE` int4 payload
   columns cannot be applied inside graph traversal.  PostgreSQL selectivity can
   therefore widen dense candidate collection toward
@@ -330,20 +340,32 @@ Candidate-budget and cache GUCs have conservative public caps in this alpha:
 `bm25_hot_postings_cache_mb` at 1,024 MB. These are resource-safety limits, not
 quality recommendations.
 
-Profile assignment updates the dynamic defaults for the candidate budgets, BM25
-strategy knobs, hot postings cache, hybrid bound mode, and SIMD setting unless a
-GUC has been explicitly set by the user. During dense index builds without
-explicit graph reloptions, the profile also selects graph construction/search
-defaults: `latency` uses `ef_construction=128`, `ef_search=64`,
-`oversampling=4`, and heuristic build edges for low-dimensional indexes while
-keeping fast build edges for high-dimensional latency builds; `balanced` uses
-`ef_construction=192`, `ef_search=96`, `oversampling=4`, and heuristic build
-edges; `matched_recall` uses `ef_construction=192`, `ef_search=128`,
-`oversampling=8`, heuristic build edges, low-dimensional exact build distances,
-and final top-k heap rescore for exact-free indexes; `quality` uses
-`ef_construction=256`, `ef_search=192`, `oversampling=8`, and heuristic build
-edges. The latency profile is the default fast path documented in the README
-and setup guide.
+Profile assignment updates the dynamic defaults for candidate budgets, BM25
+strategy knobs, hot postings cache, hybrid bound mode, SIMD setting, and
+query-time quality knobs unless a GUC has been explicitly set by the user.
+During dense index builds without explicit graph reloptions, the profile also
+selects graph construction/search defaults: `latency` uses
+`ef_construction=128`, `ef_search=64`, `oversampling=4`, and heuristic build
+edges for low-dimensional indexes while keeping fast build edges for
+high-dimensional latency builds; `balanced` uses `ef_construction=192`,
+`ef_search=96`, `oversampling=4`, and heuristic build edges; `matched_recall`
+uses `ef_construction=192`, `ef_search=128`, `oversampling=8`, heuristic build
+edges, low-dimensional exact build distances, and final top-k heap rescore for
+exact-free indexes; `high_recall` uses `ef_construction=256`,
+`ef_search=192`, `oversampling=12`, heuristic build edges, one segment, and
+heap-band rescore at scan time; `quality` uses `ef_construction=256`,
+`ef_search=192`, `oversampling=8`, and heuristic build edges. The latency
+profile is the default fast path documented in the README and setup guide.
+
+Build-time graph choices affect only newly created indexes. Changing
+`graph_ef_construction`, `graph_ef_search`, `graph_oversampling`,
+`dense_build_distance`, `dense_build_neighbor_select`, `native_segments`,
+`entry_sidecar*`, or `residual_rerank*` for an existing index requires
+`REINDEX` to materialize the new topology or stored sketches. Query-time GUCs
+such as `dense_heap_rescore`, `dense_adaptive_widening`,
+`dense_uncertainty_retry`, `dense_residual_rerank_mode`, calibrated fusion, and
+BM25 heap tsvector rerank do not change index storage, though residual mode only
+has an effect when residual sketches were built.
 
 Reloptions are scoped to the `turbohybrid` index access method, but should
 still use stable descriptive names. The current alpha reloptions are:
@@ -379,11 +401,27 @@ storage format without a release note and `REINDEX` guidance:
   Default: `off`.
 - `entry_sidecar_representatives`: maximum representative node IDs when
   `entry_sidecar` is enabled. Default: `128`; maximum: `256`.
+- `entry_sidecar_strategy`: representative selection strategy. Default:
+  `hash`, which preserves the original code-hash bucket behavior. Other
+  supported values are `farthest_code`, `level_covering`, and
+  `hybrid_level_covering`. All strategies write node IDs into the existing
+  metapage sidecar array; no sidecar storage pages are added. Since the chosen
+  representatives are materialized at build time, changing this option requires
+  `REINDEX` to alter an existing index's sidecar contents.
 - `residual_rerank`: store small per-vector sketches for final-band dense
   reranking. Default: `off`.
 - `residual_rerank_bytes`: sketch bytes per vector when `residual_rerank` is
   enabled. Default: `32`; supported presets are `16`, `32`, and `64` bytes
   (maximum: `64`).
+- `turbohybrid.dense_residual_rerank_mode`: scan-time residual-sketch policy.
+  `off` ignores stored sketches, `fixed` preserves the original hardcoded
+  adjustment, and `calibrated` scales and clamps the adjustment by the observed
+  final-band distance spread. This GUC does not change index storage.
+- `turbohybrid.dense_residual_rerank_weight` and
+  `turbohybrid.dense_residual_rerank_max_adjust_ratio`: calibrated residual
+  rerank controls. The default weight `-1` uses the built-in automatic weight;
+  the max-adjust ratio bounds the absolute adjustment as a fraction of the
+  candidate-band spread.
 
 Prototype names such as `tq_*` should not appear in user-facing reloptions.
 

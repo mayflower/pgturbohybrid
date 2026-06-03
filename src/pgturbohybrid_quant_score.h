@@ -4,6 +4,8 @@
 #include "pgturbohybrid_quant.h"
 
 double		PgturbohybridGraphBuildDistance(PgturbohybridQuantBuildState *state, uint32 a, uint32 b);
+bool		PgturbohybridGraphBuildCodeDistance(PgturbohybridQuantBuildState *state, uint32 a, uint32 b,
+									  double *distance);
 bool		PgturbohybridGraphCachedExactNodeDistance(PgturbohybridGraphScanOpaque so, Datum query,
 										   PgturbohybridGraphScanNode *node,
 										   double *distance);

@@ -74,6 +74,9 @@ typedef Pointer Item;
 #define PGTURBOHYBRID_NATIVE_BUILD_STATS_MAX_WORKERS 16
 #define PGTURBOHYBRID_DEFAULT_ENTRY_SIDECAR false
 #define PGTURBOHYBRID_DEFAULT_ENTRY_SIDECAR_REPRESENTATIVES 128
+#define PGTURBOHYBRID_DEFAULT_ENTRY_SIDECAR_STRATEGY 0
+#define PGTURBOHYBRID_DEFAULT_PAYLOAD_ENTRY_SEED_COUNT 8
+#define PGTURBOHYBRID_MAX_PAYLOAD_ENTRY_SEED_COUNT 64
 #define PGTURBOHYBRID_DEFAULT_GRAPH_BACKBONE false
 #define PGTURBOHYBRID_GRAPH_MAX_RESIDUAL_RERANK_BYTES 64
 #define PGTURBOHYBRID_DEFAULT_RESIDUAL_RERANK false
@@ -244,15 +247,28 @@ extern int	pgturbohybrid_dense_max_rescore_multiplier;
 extern int	pgturbohybrid_dense_rescore_band_policy;
 extern int	pgturbohybrid_dense_heap_rescore;
 extern bool pgturbohybrid_dense_heap_rescore_user_set;
+extern int	pgturbohybrid_dense_residual_rerank_mode;
+extern double pgturbohybrid_dense_residual_rerank_weight;
+extern double pgturbohybrid_dense_residual_rerank_max_adjust_ratio;
 extern int	pgturbohybrid_dense_adaptive_widening;
 extern double pgturbohybrid_dense_adaptive_widening_multiplier;
 extern double pgturbohybrid_dense_adaptive_widening_max_multiplier;
 extern double pgturbohybrid_dense_adaptive_min_gap;
+extern int	pgturbohybrid_dense_uncertainty_retry;
+extern int	pgturbohybrid_dense_uncertainty_retry_max_passes;
+extern double pgturbohybrid_dense_uncertainty_retry_multiplier;
+extern double pgturbohybrid_dense_uncertainty_min_gap;
 extern bool pgturbohybrid_warn_linear_fallback;
 extern double pgturbohybrid_linear_fallback_notice_threshold_ratio;
 extern int	pgturbohybrid_dense_local_expansion;
 extern int	pgturbohybrid_dense_local_expansion_topn;
 extern int	pgturbohybrid_dense_local_expansion_max_neighbors;
+extern int	pgturbohybrid_payload_entry_seeding;
+extern int	pgturbohybrid_payload_entry_seed_count;
+extern int	pgturbohybrid_final_diversity;
+extern int	pgturbohybrid_final_diversity_payload_slot;
+extern double pgturbohybrid_final_diversity_lambda;
+extern int	pgturbohybrid_final_diversity_pool_multiplier;
 extern int	pgturbohybrid_graph_lock_tranche_id;
 
 typedef enum PgturbohybridRoutingMode
@@ -284,6 +300,31 @@ typedef enum PgturbohybridDenseBuildDistance
 	PGTURBOHYBRID_DENSE_BUILD_DISTANCE_CODE,
 	PGTURBOHYBRID_DENSE_BUILD_DISTANCE_EXACT
 }			PgturbohybridDenseBuildDistance;
+
+typedef enum PgturbohybridEntrySidecarStrategy
+{
+	PGTURBOHYBRID_ENTRY_SIDECAR_HASH = 0,
+	PGTURBOHYBRID_ENTRY_SIDECAR_FARTHEST_CODE,
+	PGTURBOHYBRID_ENTRY_SIDECAR_LEVEL_COVERING,
+	PGTURBOHYBRID_ENTRY_SIDECAR_HYBRID_LEVEL_COVERING
+}			PgturbohybridEntrySidecarStrategy;
+
+typedef enum PgturbohybridPayloadEntrySeedingMode
+{
+	PGTURBOHYBRID_PAYLOAD_ENTRY_SEEDING_OFF,
+	PGTURBOHYBRID_PAYLOAD_ENTRY_SEEDING_AUTO,
+	PGTURBOHYBRID_PAYLOAD_ENTRY_SEEDING_ON
+}			PgturbohybridPayloadEntrySeedingMode;
+
+#define PGTURBOHYBRID_FINAL_DIVERSITY_DEFAULT_LAMBDA 0.75
+#define PGTURBOHYBRID_FINAL_DIVERSITY_DEFAULT_POOL_MULTIPLIER 3
+#define PGTURBOHYBRID_FINAL_DIVERSITY_MAX_POOL_MULTIPLIER 64
+
+typedef enum PgturbohybridFinalDiversityMode
+{
+	PGTURBOHYBRID_FINAL_DIVERSITY_OFF,
+	PGTURBOHYBRID_FINAL_DIVERSITY_GROUP_PAYLOAD
+}			PgturbohybridFinalDiversityMode;
 
 typedef enum PgturbohybridNativeSegmentBudgetMode
 {
@@ -361,6 +402,13 @@ typedef enum TqExactRescoreSource
 	PGTURBOHYBRID_EXACT_RESCORE_SOURCE_RESIDUAL
 }			TqExactRescoreSource;
 
+typedef enum TqDenseResidualRerankMode
+{
+	PGTURBOHYBRID_DENSE_RESIDUAL_RERANK_OFF,
+	PGTURBOHYBRID_DENSE_RESIDUAL_RERANK_FIXED,
+	PGTURBOHYBRID_DENSE_RESIDUAL_RERANK_CALIBRATED
+}			TqDenseResidualRerankMode;
+
 typedef enum TqDenseWideningReason
 {
 	PGTURBOHYBRID_DENSE_WIDENING_NONE,
@@ -384,6 +432,26 @@ typedef enum TqDenseAdaptiveWideningReason
 	PGTURBOHYBRID_DENSE_ADAPTIVE_REASON_FLAT_TOP10,
 	PGTURBOHYBRID_DENSE_ADAPTIVE_REASON_FLAT_BOUNDARY
 }			TqDenseAdaptiveWideningReason;
+
+typedef enum TqDenseUncertaintyRetryMode
+{
+	PGTURBOHYBRID_DENSE_UNCERTAINTY_RETRY_OFF,
+	PGTURBOHYBRID_DENSE_UNCERTAINTY_RETRY_AUTO,
+	PGTURBOHYBRID_DENSE_UNCERTAINTY_RETRY_ON
+}			TqDenseUncertaintyRetryMode;
+
+typedef enum TqDenseUncertaintyRetryReason
+{
+	PGTURBOHYBRID_DENSE_UNCERTAINTY_REASON_NONE,
+	PGTURBOHYBRID_DENSE_UNCERTAINTY_REASON_FORCED,
+	PGTURBOHYBRID_DENSE_UNCERTAINTY_REASON_UNDERFILLED,
+	PGTURBOHYBRID_DENSE_UNCERTAINTY_REASON_FLAT_TOP10,
+	PGTURBOHYBRID_DENSE_UNCERTAINTY_REASON_FLAT_BOUNDARY,
+	PGTURBOHYBRID_DENSE_UNCERTAINTY_REASON_SIDECAR_UNUSED,
+	PGTURBOHYBRID_DENSE_UNCERTAINTY_REASON_PAYLOAD_UNDERFILLED,
+	PGTURBOHYBRID_DENSE_UNCERTAINTY_REASON_RESIDUAL_REORDERED,
+	PGTURBOHYBRID_DENSE_UNCERTAINTY_REASON_HEAP_REORDERED
+}			TqDenseUncertaintyRetryReason;
 
 typedef enum TqDenseLocalExpansionMode
 {
@@ -636,6 +704,7 @@ typedef struct TqOptions
 	bool		tqExactStorage; /* exact_storage: store full exact vectors for final rescoring, or omit them for exact-free quantized-only storage. */
 	bool		entrySidecar;	/* entry_sidecar: store data-aware representative node IDs in metadata. */
 	int			entrySidecarRepresentatives;
+	int			entrySidecarStrategy;
 	bool		graphBackbone;	/* graph_backbone: force adjacent level-0 graph edges at build time. */
 	bool		residualRerank; /* residual_rerank: store tiny per-vector sketches for final-band reranking. */
 	int			residualRerankBytes;
@@ -1161,7 +1230,15 @@ typedef struct PgturbohybridGraphScanOpaqueData
 	int64		graphEntrySidecarCount;
 	int64		graphEntrySidecarScored;
 	int64		graphEntrySidecarSelected;
+	int64		graphEntrySidecarRepresentativesConfigured;
+	int			graphEntrySidecarStrategy;
 	int64		graphEntrySidecarUs;
+	int			graphPayloadEntrySeedingMode;
+	bool		graphPayloadEntrySeedingHit;
+	int64		graphPayloadEntrySeedCount;
+	int			graphPayloadEntrySeedPayloadSlot;
+	int64		graphPayloadEntrySeedRangeCount;
+	int64		graphPayloadEntrySeedUs;
 	int64		graphPrepareUs;
 	int64		graphTraverseUs;
 	int64		graphEntryUs;
@@ -1204,6 +1281,16 @@ typedef struct PgturbohybridGraphScanOpaqueData
 	int64		graphAdaptiveFinalSearchEf;
 	double		graphAdaptiveGapTop10;
 	double		graphAdaptiveGapBoundary;
+	int			graphUncertaintyRetryMode;
+	bool		graphUncertaintyRetryTriggered;
+	int			graphUncertaintyRetryReason;
+	int64		graphUncertaintyRetryPasses;
+	int64		graphUncertaintyInitialResultTarget;
+	int64		graphUncertaintyFinalResultTarget;
+	int64		graphUncertaintyInitialSearchEf;
+	int64		graphUncertaintyFinalSearchEf;
+	double		graphUncertaintyGapTop10;
+	double		graphUncertaintyGapBoundary;
 	int			graphLocalExpansionMode;
 	bool		graphLocalExpansionTriggered;
 	int64		graphLocalExpansionSeedCount;
@@ -1213,6 +1300,12 @@ typedef struct PgturbohybridGraphScanOpaqueData
 	int64		graphResidualRerankCount;
 	int64		graphResidualRerankBytes;
 	int64		graphResidualRerankUs;
+	int			graphResidualRerankMode;
+	double		graphResidualRerankWeightEffective;
+	int64		graphResidualRerankBand;
+	double		graphResidualRerankMaxAdjustment;
+	int64		graphResidualRerankReorderedCount;
+	bool		graphResidualRerankTopKChanged;
 	int64		graphHeapRescoreCount;
 	int64		graphHeapFetchUs;
 	int64		graphHeapRescoreUs;
@@ -1277,10 +1370,15 @@ int			PgturbohybridGraphGetGraphReorder(Relation index);
 int			PgturbohybridGraphGetNativeSegments(Relation index);
 const char *PgturbohybridDenseBuildNeighborSelectName(int mode);
 const char *PgturbohybridDenseBuildDistanceName(int mode);
+const char *PgturbohybridEntrySidecarStrategyName(int strategy);
+const char *PgturbohybridPayloadEntrySeedingName(int mode);
+const char *PgturbohybridFinalDiversityName(int mode);
 const char *PgturbohybridNativeSegmentBudgetName(int mode);
 const char *PgturbohybridBuildNeighborSelectReasonName(int reason);
 const char *PgturbohybridGraphDenseHeapRescoreName(int mode);
 const char *PgturbohybridGraphDenseHeapRescoreReasonName(int reason);
+const char *PgturbohybridGraphDenseUncertaintyRetryModeName(int mode);
+const char *PgturbohybridGraphDenseUncertaintyRetryReasonName(int reason);
 const char *PgturbohybridGraphExactRescoreSourceName(int source);
 bool		PgturbohybridGraphIspgturbohybridIndex(Relation index);
 bool		PgturbohybridGraphUseTqGraph(Relation index);
@@ -1376,6 +1474,7 @@ const char *PgturbohybridGraphScoreKernelBucketName(int bucket);
 const char *PgturbohybridGraphTqSimdForceName(int force);
 const char *PgturbohybridGraphTqExactSimdForceName(int force);
 const char *PgturbohybridGraphStorageKindName(int storageKind);
+const char *PgturbohybridGraphDenseResidualRerankModeName(int mode);
 int			PgturbohybridGraphGetTqBits(Relation index);
 bool		PgturbohybridGraphGetTqWeightedOption(Relation index);
 bool		PgturbohybridGraphGetTqRenormOption(Relation index);
@@ -1383,6 +1482,7 @@ bool		PgturbohybridGraphGetTqQuantileFitOption(Relation index);
 bool		PgturbohybridGraphGetTqExactStorageOption(Relation index);
 bool		PgturbohybridGraphGetEntrySidecarOption(Relation index);
 int			PgturbohybridGraphGetEntrySidecarRepresentatives(Relation index);
+int			PgturbohybridGraphGetEntrySidecarStrategy(Relation index);
 bool		PgturbohybridGraphGetBackboneOption(Relation index);
 bool		PgturbohybridGraphGetResidualRerankOption(Relation index);
 int			PgturbohybridGraphGetResidualRerankBytes(Relation index);

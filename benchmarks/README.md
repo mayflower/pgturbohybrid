@@ -14,6 +14,31 @@ use `benchmarks/rag_existing.py`. It compares TurboHybrid with your own
 retrieval SQL and is documented in
 [`docs/benchmarks/bring-your-own-rag.md`](../docs/benchmarks/bring-your-own-rag.md).
 
+For deterministic local retrieval-quality checks that do not require external
+data, use `benchmarks/dev/retrieval_quality_grid.sql`. It creates a synthetic
+clustered dense/hybrid corpus, rebuilds TurboHybrid indexes across retrieval
+profiles, and prints recall/overlap plus selected `turbohybrid_last_scan_stats()`
+fields. Treat it as a developer regression harness, not a public benchmark
+claim. The grid also includes payload-filtered cases that compare
+`turbohybrid.payload_entry_seeding` off/auto/on using existing INCLUDE payload
+references, plus `turbohybrid.dense_uncertainty_retry` off/auto/on rows for
+bounded second-pass traversal experiments and
+`turbohybrid.bm25_heap_tsvector_rerank` off/topk/band/auto rows for
+phrase/proximity-like lexical queries. It also includes an opt-in
+`turbohybrid.final_diversity = group_payload` row over an int4 `INCLUDE`
+payload so duplicate group suppression is visible in the same result table, and
+records `turbohybrid_graph_repair_dry_run()` overlap / weak-node /
+suggested-edge diagnostics for each built index.
+
+If you already have an eval query table for a real or synthetic workload, use
+`benchmarks/dev/tune_retrieval_profile.sql` to sweep query-time retrieval
+settings against an existing TurboHybrid index and print a Pareto frontier. The
+script expects an `eval_queries`-compatible table with vector/text queries and
+expected id arrays, records overlap/recall@K plus selected
+`turbohybrid_last_scan_stats()` fields, and can recommend the highest-recall
+setting under a supplied p95 latency budget. It is a developer autotuning
+harness, not a SQL-visible C autotuner.
+
 The DBPedia OpenAI3-large benchmark spec lives in
 [`dbpedia_openai3_large.md`](dbpedia_openai3_large.md). It covers the
 1M-row Qdrant DBPedia corpus, BEIR DBPedia queries/qrels, the native pgvector
@@ -163,6 +188,17 @@ Ready-made harnesses live next to this README:
   heap rescore count, and exact rescore source. This benchmark is the authority
   for deciding whether `matched_recall` is the right one-knob default for a
   workload.
+- `dev/retrieval_quality_grid.sql` -- deterministic synthetic dense/hybrid
+  quality harness. It includes explicit matched-recall rows for 4-bit baseline,
+  4-bit residual rerank, opt-in scalar 8-bit (`quantization_bits = 8`), and
+  `exact_storage = on` so recall changes can be attributed to graph topology,
+  quantization width, residual rerank, or exact final ranking without external
+  datasets.
+- `dev/tune_retrieval_profile.sql` -- practical query-time retrieval tuner for
+  an existing TurboHybrid index. It consumes an `eval_queries` table, sweeps
+  profiles, dense/BM25 budgets, fusion, residual rerank mode, and heap rescore
+  mode when available, then prints all trials, the Pareto frontier, and an
+  optional latency-budget recommendation.
 - `native_segments_bench.sql` -- native graph segment-count sweep
   (`native_segments = 1,2,4,8` by default). It records build time, index
   size, precision@K against exact ordering, p50/p95, segment count/search

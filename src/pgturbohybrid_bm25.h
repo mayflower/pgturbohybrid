@@ -129,6 +129,11 @@ typedef struct PgturbohybridBm25QueryStats
 	uint64		simdBlocks;
 	uint64		scalarTailPostings;
 	uint64		prefetches;
+	int			heapTsvectorRerankMode;
+	uint32		heapTsvectorRerankCount;
+	uint64		heapTsvectorRerankFetchUs;
+	uint64		heapTsvectorRerankScoreUs;
+	bool		heapTsvectorRerankTopKChanged;
 	bool		usedWand;
 } PgturbohybridBm25QueryStats;
 
@@ -425,8 +430,9 @@ bool		PgturbohybridBm25EstimateMemory(Relation index,
 									  const PgturbohybridGraphMetaPageData *graphMeta,
 									  PgturbohybridBm25MemoryEstimate *estimate);
 bool		PgturbohybridBm25AnalyzeQuerySignals(Relation index, TSQuery query,
-											MemoryContext memoryContext,
-											PgturbohybridBm25QuerySignals *signals);
+									  MemoryContext memoryContext,
+									  PgturbohybridBm25QuerySignals *signals);
+bool		PgturbohybridBm25QueryHasPhrase(TSQuery query);
 int			PgturbohybridBm25TopK(Relation index, TSQuery query, int32 k,
 							  bool useWand, MemoryContext memoryContext,
 							  PgturbohybridBm25Result **results,

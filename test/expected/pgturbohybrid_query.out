@@ -21,11 +21,18 @@ BEGIN
 	IF settings <> ARRAY[
 		'turbohybrid.bm25_accumulator_mode',
 		'turbohybrid.bm25_common_term_fallback_min_postings',
+		'turbohybrid.bm25_heap_tsvector_rerank',
+		'turbohybrid.bm25_heap_tsvector_rerank_multiplier',
+		'turbohybrid.bm25_heap_tsvector_rerank_weight',
 		'turbohybrid.bm25_hot_postings_cache_mb',
 		'turbohybrid.bm25_hot_postings_cache_min_df',
 		'turbohybrid.bm25_hybrid_bound',
 		'turbohybrid.bm25_impact_or_mode',
 		'turbohybrid.bm25_strategy',
+		'turbohybrid.calibrated_fusion_both_match_bonus',
+		'turbohybrid.calibrated_fusion_broad_dense_alpha',
+		'turbohybrid.calibrated_fusion_default_alpha',
+		'turbohybrid.calibrated_fusion_identifier_bm25_alpha',
 		'turbohybrid.default_bm25_k',
 		'turbohybrid.default_dense_k',
 		'turbohybrid.default_rrf_k',
@@ -44,10 +51,21 @@ BEGIN
 		'turbohybrid.dense_local_expansion_topn',
 		'turbohybrid.dense_query_split_impl',
 		'turbohybrid.dense_rescore_band',
+		'turbohybrid.dense_residual_rerank_max_adjust_ratio',
+		'turbohybrid.dense_residual_rerank_mode',
+		'turbohybrid.dense_residual_rerank_weight',
 		'turbohybrid.dense_u8_batch_x4',
 		'turbohybrid.dense_u8_split',
+		'turbohybrid.dense_uncertainty_min_gap',
+		'turbohybrid.dense_uncertainty_retry',
+		'turbohybrid.dense_uncertainty_retry_max_passes',
+		'turbohybrid.dense_uncertainty_retry_multiplier',
 		'turbohybrid.enable_wand',
 		'turbohybrid.fast_weighted_score_bound_pruning',
+		'turbohybrid.final_diversity',
+		'turbohybrid.final_diversity_lambda',
+		'turbohybrid.final_diversity_payload_slot',
+		'turbohybrid.final_diversity_pool_multiplier',
 		'turbohybrid.hybrid_budget_policy',
 		'turbohybrid.linear_fallback_notice_threshold_ratio',
 		'turbohybrid.max_union_candidates',
@@ -58,6 +76,8 @@ BEGIN
 		'turbohybrid.native_cache_warn_mb',
 		'turbohybrid.native_parallel_edge_build',
 		'turbohybrid.native_segment_budget',
+		'turbohybrid.payload_entry_seed_count',
+		'turbohybrid.payload_entry_seeding',
 		'turbohybrid.profile',
 		'turbohybrid.simd',
 		'turbohybrid.warn_linear_fallback'
@@ -77,17 +97,49 @@ BEGIN
 		RAISE EXCEPTION 'unexpected default native parallel edge build: %',
 			current_setting('turbohybrid.native_parallel_edge_build');
 	END IF;
+	IF current_setting('turbohybrid.payload_entry_seeding') != 'auto' OR
+		current_setting('turbohybrid.payload_entry_seed_count') != '8' THEN
+		RAISE EXCEPTION 'unexpected default payload entry seeding settings: mode %, count %',
+			current_setting('turbohybrid.payload_entry_seeding'),
+			current_setting('turbohybrid.payload_entry_seed_count');
+	END IF;
+
+	IF current_setting('turbohybrid.final_diversity') != 'off' OR
+		current_setting('turbohybrid.final_diversity_payload_slot') != '-1' OR
+		current_setting('turbohybrid.final_diversity_lambda') != '0.75' OR
+		current_setting('turbohybrid.final_diversity_pool_multiplier') != '3' THEN
+		RAISE EXCEPTION 'unexpected final diversity defaults: mode %, slot %, lambda %, pool multiplier %',
+			current_setting('turbohybrid.final_diversity'),
+			current_setting('turbohybrid.final_diversity_payload_slot'),
+			current_setting('turbohybrid.final_diversity_lambda'),
+			current_setting('turbohybrid.final_diversity_pool_multiplier');
+	END IF;
+
+	IF current_setting('turbohybrid.calibrated_fusion_both_match_bonus') != '0.06' OR
+		current_setting('turbohybrid.calibrated_fusion_identifier_bm25_alpha') != '0.35' OR
+		current_setting('turbohybrid.calibrated_fusion_broad_dense_alpha') != '0.7' OR
+		current_setting('turbohybrid.calibrated_fusion_default_alpha') != '0.5' THEN
+		RAISE EXCEPTION 'unexpected calibrated fusion defaults: bonus %, identifier %, broad %, default %',
+			current_setting('turbohybrid.calibrated_fusion_both_match_bonus'),
+			current_setting('turbohybrid.calibrated_fusion_identifier_bm25_alpha'),
+			current_setting('turbohybrid.calibrated_fusion_broad_dense_alpha'),
+			current_setting('turbohybrid.calibrated_fusion_default_alpha');
+	END IF;
 
 		IF current_setting('turbohybrid.dense_adaptive_widening') != 'off' OR
 			current_setting('turbohybrid.dense_heap_rescore') != 'off' OR
 			current_setting('turbohybrid.dense_local_expansion') != 'off' OR
+			current_setting('turbohybrid.dense_residual_rerank_mode') != 'calibrated' OR
+			current_setting('turbohybrid.dense_uncertainty_retry') != 'off' OR
 			current_setting('turbohybrid.native_segment_budget') != 'auto' OR
 			current_setting('turbohybrid.dense_build_distance') != 'auto' OR
 			current_setting('turbohybrid.dense_build_exact_distances') != 'off' THEN
-			RAISE EXCEPTION 'unexpected latency dense defaults: adaptive %, heap %, local %, segment budget %, build distance %, exact build %',
+			RAISE EXCEPTION 'unexpected latency dense defaults: adaptive %, heap %, local %, residual %, uncertainty retry %, segment budget %, build distance %, exact build %',
 				current_setting('turbohybrid.dense_adaptive_widening'),
 				current_setting('turbohybrid.dense_heap_rescore'),
 				current_setting('turbohybrid.dense_local_expansion'),
+				current_setting('turbohybrid.dense_residual_rerank_mode'),
+				current_setting('turbohybrid.dense_uncertainty_retry'),
 				current_setting('turbohybrid.native_segment_budget'),
 				current_setting('turbohybrid.dense_build_distance'),
 				current_setting('turbohybrid.dense_build_exact_distances');
@@ -129,6 +181,36 @@ SET turbohybrid.native_parallel_edge_build = off;
 SET turbohybrid.native_parallel_edge_build = on;
 SET turbohybrid.native_parallel_edge_build = auto;
 RESET turbohybrid.native_parallel_edge_build;
+SET turbohybrid.payload_entry_seeding = off;
+SET turbohybrid.payload_entry_seeding = on;
+SET turbohybrid.payload_entry_seeding = auto;
+SET turbohybrid.payload_entry_seed_count = 1;
+SET turbohybrid.payload_entry_seed_count = 64;
+RESET turbohybrid.payload_entry_seeding;
+RESET turbohybrid.payload_entry_seed_count;
+SET turbohybrid.final_diversity = off;
+SET turbohybrid.final_diversity = group_payload;
+SET turbohybrid.final_diversity_payload_slot = -1;
+SET turbohybrid.final_diversity_payload_slot = 0;
+SET turbohybrid.final_diversity_lambda = 0;
+SET turbohybrid.final_diversity_lambda = 1;
+SET turbohybrid.final_diversity_pool_multiplier = 1;
+SET turbohybrid.final_diversity_pool_multiplier = 64;
+RESET turbohybrid.final_diversity;
+RESET turbohybrid.final_diversity_payload_slot;
+RESET turbohybrid.final_diversity_lambda;
+RESET turbohybrid.final_diversity_pool_multiplier;
+SET turbohybrid.dense_uncertainty_retry = off;
+SET turbohybrid.dense_uncertainty_retry = auto;
+SET turbohybrid.dense_uncertainty_retry = on;
+SET turbohybrid.dense_uncertainty_retry_max_passes = 1;
+SET turbohybrid.dense_uncertainty_retry_max_passes = 2;
+SET turbohybrid.dense_uncertainty_retry_multiplier = 1.5;
+SET turbohybrid.dense_uncertainty_min_gap = 0.03;
+RESET turbohybrid.dense_uncertainty_retry;
+RESET turbohybrid.dense_uncertainty_retry_max_passes;
+RESET turbohybrid.dense_uncertainty_retry_multiplier;
+RESET turbohybrid.dense_uncertainty_min_gap;
 RESET turbohybrid.enable_wand;
 RESET turbohybrid.bm25_strategy;
 RESET turbohybrid.bm25_impact_or_mode;
@@ -136,6 +218,10 @@ RESET turbohybrid.bm25_hot_postings_cache_mb;
 RESET turbohybrid.bm25_hot_postings_cache_min_df;
 RESET turbohybrid.bm25_hybrid_bound;
 RESET turbohybrid.bm25_accumulator_mode;
+RESET turbohybrid.calibrated_fusion_both_match_bonus;
+RESET turbohybrid.calibrated_fusion_identifier_bm25_alpha;
+RESET turbohybrid.calibrated_fusion_broad_dense_alpha;
+RESET turbohybrid.calibrated_fusion_default_alpha;
 RESET turbohybrid.max_union_candidates;
 RESET turbohybrid.simd;
 DO $$
@@ -175,6 +261,55 @@ BEGIN
 		RAISE EXCEPTION 'expected native_build_workers value error';
 	EXCEPTION WHEN invalid_parameter_value THEN
 	END;
+
+	BEGIN
+		EXECUTE 'SET turbohybrid.payload_entry_seeding = ''hash''';
+		RAISE EXCEPTION 'expected payload_entry_seeding value error';
+	EXCEPTION WHEN invalid_parameter_value THEN
+	END;
+
+	BEGIN
+		EXECUTE 'SET turbohybrid.payload_entry_seed_count = 65';
+		RAISE EXCEPTION 'expected payload_entry_seed_count cap error';
+	EXCEPTION WHEN invalid_parameter_value THEN
+	END;
+
+	BEGIN
+		EXECUTE 'SET turbohybrid.final_diversity = ''payload''';
+		RAISE EXCEPTION 'expected final_diversity value error';
+	EXCEPTION WHEN invalid_parameter_value THEN
+	END;
+
+	BEGIN
+		EXECUTE 'SET turbohybrid.final_diversity_payload_slot = -2';
+		RAISE EXCEPTION 'expected final_diversity_payload_slot floor error';
+	EXCEPTION WHEN invalid_parameter_value THEN
+	END;
+
+	BEGIN
+		EXECUTE 'SET turbohybrid.final_diversity_lambda = 1.1';
+		RAISE EXCEPTION 'expected final_diversity_lambda cap error';
+	EXCEPTION WHEN invalid_parameter_value THEN
+	END;
+
+	BEGIN
+		EXECUTE 'SET turbohybrid.final_diversity_pool_multiplier = 0';
+		RAISE EXCEPTION 'expected final_diversity_pool_multiplier floor error';
+	EXCEPTION WHEN invalid_parameter_value THEN
+	END;
+END
+$$;
+DO $$
+BEGIN
+	IF turbohybrid_query_out(turbohybrid_query(
+		vector_query => '[1,0,0]'::vector,
+		text_query => websearch_to_tsquery('english', 'postgres'),
+		fusion => 'calibrated',
+		alpha => 0.65,
+		final_k => 5
+	))::text != 'turbohybrid_query(fusion=calibrated,vector=true,tsquery=true,dense_weight=1,bm25_weight=1,alpha=0.65,rrf_k=60,dense_k=100,bm25_k=100,final_k=5,require_bm25_match=false)' THEN
+		RAISE EXCEPTION 'unexpected calibrated turbohybrid_query output';
+	END IF;
 END
 $$;
 DO $$
@@ -250,7 +385,8 @@ BEGIN
 		current_setting('turbohybrid.bm25_impact_or_mode') != 'exact_only' OR
 		current_setting('turbohybrid.bm25_hot_postings_cache_mb') != '16' OR
 		current_setting('turbohybrid.bm25_hybrid_bound') != 'safe' OR
-		current_setting('turbohybrid.bm25_accumulator_mode') != 'auto' THEN
+		current_setting('turbohybrid.bm25_accumulator_mode') != 'auto' OR
+		current_setting('turbohybrid.dense_uncertainty_retry') != 'off' THEN
 		RAISE EXCEPTION 'unexpected balanced BM25 defaults';
 	END IF;
 END
@@ -271,7 +407,8 @@ BEGIN
 		current_setting('turbohybrid.bm25_hybrid_bound') != 'safe' OR
 		current_setting('turbohybrid.bm25_accumulator_mode') != 'auto' OR
 		current_setting('turbohybrid.enable_wand') != 'on' OR
-		current_setting('turbohybrid.simd') != 'on' THEN
+		current_setting('turbohybrid.simd') != 'on' OR
+		current_setting('turbohybrid.dense_uncertainty_retry') != 'off' THEN
 		RAISE EXCEPTION 'unexpected quality BM25 defaults';
 	END IF;
 
@@ -297,8 +434,29 @@ BEGIN
 		current_setting('turbohybrid.bm25_hybrid_bound') != 'safe' OR
 		current_setting('turbohybrid.bm25_accumulator_mode') != 'auto' OR
 		current_setting('turbohybrid.dense_adaptive_widening') != 'auto' OR
-		current_setting('turbohybrid.dense_adaptive_widening_max_multiplier') != '1.5' THEN
+		current_setting('turbohybrid.dense_adaptive_widening_max_multiplier') != '1.5' OR
+		current_setting('turbohybrid.dense_uncertainty_retry') != 'off' THEN
 		RAISE EXCEPTION 'unexpected matched_recall defaults';
+	END IF;
+END
+$$;
+SET turbohybrid.profile = high_recall;
+DO $$
+BEGIN
+	IF turbohybrid_query_out(turbohybrid_query(
+		vector_query => '[1,0,0]'::vector
+	))::text != 'turbohybrid_query(fusion=rrf,vector=true,tsquery=false,dense_weight=1,bm25_weight=1,alpha=null,rrf_k=60,dense_k=200,bm25_k=200,final_k=null,require_bm25_match=false)' THEN
+		RAISE EXCEPTION 'unexpected high_recall profile defaults';
+	END IF;
+
+	IF current_setting('turbohybrid.bm25_strategy') != 'auto' OR
+		current_setting('turbohybrid.bm25_impact_or_mode') != 'exact_only' OR
+		current_setting('turbohybrid.bm25_hot_postings_cache_mb') != '16' OR
+		current_setting('turbohybrid.bm25_hybrid_bound') != 'safe' OR
+		current_setting('turbohybrid.bm25_accumulator_mode') != 'auto' OR
+		current_setting('turbohybrid.dense_adaptive_widening') != 'off' OR
+		current_setting('turbohybrid.dense_uncertainty_retry') != 'off' THEN
+		RAISE EXCEPTION 'unexpected high_recall defaults';
 	END IF;
 END
 $$;
@@ -532,10 +690,18 @@ EXCEPTION WHEN invalid_parameter_value THEN
 END
 $$;
 DO $$
+DECLARE
+	detail text;
 BEGIN
-	PERFORM turbohybrid_query(vector_query => '[1]'::vector, fusion => 'bogus');
-	RAISE EXCEPTION 'expected fusion validation error';
-EXCEPTION WHEN invalid_parameter_value THEN
+	BEGIN
+		PERFORM turbohybrid_query(vector_query => '[1]'::vector, fusion => 'bogus');
+		RAISE EXCEPTION 'expected fusion validation error';
+	EXCEPTION WHEN invalid_parameter_value THEN
+		GET STACKED DIAGNOSTICS detail = PG_EXCEPTION_DETAIL;
+		IF detail NOT LIKE '%calibrated%' THEN
+			RAISE EXCEPTION 'fusion validation detail did not list calibrated: %', detail;
+		END IF;
+	END;
 END
 $$;
 DO $$
