@@ -152,6 +152,19 @@ defaults for these, so override only for a specific need.
   `matched_recall`, `high_recall`, and `quality` use larger default graph/search
   windows and heuristic dense neighbor selection for new indexes when index
   reloptions do not override those values.
+
+  Profile choice (guidance — validate on real data, not synthetic benchmarks):
+  `latency` is the fast default and a good fit for easy corpora; `matched_recall`
+  is the compact comparison baseline meant to approximate full-vector HNSW recall
+  (validate its recall on your workload); `high_recall` is for compact 4-bit
+  exact-free high recall when latency headroom exists — on hard/ambiguous queries
+  its recall gain comes from wider `graph_ef_search` / `graph_oversampling` (and
+  heuristic build), not from the opt-in features; `quality` is relevance-oriented
+  but should be benchmarked before being made a default. The residual rerank,
+  dense uncertainty retry, BM25 heap-tsvector rerank, and final-diversity features
+  are opt-in or profile-gated, off in the default profiles, and should be
+  benchmarked separately. No profile default should change from synthetic
+  benchmarks alone.
 - `turbohybrid.default_dense_k`, `turbohybrid.default_bm25_k`,
   `turbohybrid.default_rrf_k`: default dense/BM25 candidate budgets and the RRF
   fusion constant for `turbohybrid_query` callers.

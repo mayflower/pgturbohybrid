@@ -144,7 +144,9 @@ separated by the *hard* out-of-distribution query. There, `latency`/`balanced`/
 ~1.0, at roughly 2.4x the per-query latency. That recall win comes from
 `high_recall`'s wider `graph_ef_search`/`graph_oversampling` (and heuristic build),
 not from `dense_uncertainty_retry`, residual rerank, BM25 heap-tsvector rerank, or
-final diversity — those stay at their defaults in this grid. Read it as: pick
+final diversity — those stay at their defaults in this grid (they are opt-in or
+profile-gated; benchmark each separately on your own data before enabling). Read
+it as: pick
 `latency` for throughput, `high_recall` when hard/ambiguous-query recall matters
 and you can absorb the latency; `matched_recall` targets full-HNSW-matched recall
 and should be compared on real data, not this synthetic.

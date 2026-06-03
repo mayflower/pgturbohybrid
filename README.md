@@ -280,6 +280,38 @@ LIMIT 10;
 That is the "daily driver" mode: compact settings, fewer knobs, enough speed to
 be interesting, and no need to pack a racing helmet.
 
+## Profile choice
+
+Pick a profile by what the query workload needs; all are compact 4-bit,
+exact-free by default. Always validate on your own data — the guidance below is
+qualitative, and any numbers in `benchmarks/` are local synthetic examples, not
+portable performance claims.
+
+- **`latency`** (default): fastest. A good fit for easy corpora and
+  latency-sensitive serving where approximate recall is acceptable.
+- **`matched_recall`**: the compact comparison profile, intended to approximate
+  full-vector HNSW recall (pgvector/Qdrant) without exact storage. Treat it as a
+  comparison baseline and **validate its recall on your real workload** before
+  relying on it.
+- **`high_recall`**: use when hard or ambiguous dense recall matters and you have
+  latency headroom. It recovers recall on hard queries by using wider
+  `graph_ef_search` / `graph_oversampling` (and heuristic build) — i.e. by
+  searching more, at higher per-query latency. The recall gain comes from those
+  wider search windows, not from the opt-in features below. (A local synthetic
+  hard case is documented in `benchmarks/README.md`.)
+- **`quality`**: relevance-oriented (stronger, slower). **Benchmark it before
+  making it a default** — its extra cost is only worth it if your data shows a
+  relevance gain.
+
+The newer retrieval features — residual rerank, dense uncertainty retry, BM25
+heap-tsvector rerank, and final diversity — are **opt-in or profile-gated**, off
+in the default profiles, and should be **benchmarked separately** on your data
+before enabling. They change behavior independently of the profile's graph/search
+windows, so measure them one at a time.
+
+These are guidelines, not defaults to change: no profile's compiled defaults
+should be retuned from synthetic benchmarks alone.
+
 ## Matched-Recall And Quality Modes
 
 Use `matched_recall` when you want a compact 4-bit, exact-free index but need a
