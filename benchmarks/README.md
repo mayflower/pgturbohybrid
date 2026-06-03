@@ -184,6 +184,49 @@ should change from its synthetic output alone — validate on real data first.
 phrase/proximity queries). Same rule: it is a smoke/decision tool, not a source of
 committed results or default changes.
 
+## Deciding whether to widen graph search, use residual rerank, or use heap-band rescore
+
+`benchmarks/dev/dense_candidate_miss_grid.sql` attributes a dense recall miss to
+its *cause*, so you can tell which lever fixes it before reaching for one. For each
+query it computes the exact dense top-k (seqscan `<=>`) and then probes three
+containment questions on the actual index:
+
+- **`candidate_pool_contains_exact_topk`** — are the exact neighbours even in the
+  raw 4-bit graph candidate pool (top `dense_k`, no rescore)? If not, the graph
+  search did not *reach* them.
+- **`residual_band_contains_exact_topk`** — are they inside the narrow residual
+  rerank band (top ~`2*final_k`)? Residual rerank can only reorder within that band.
+- **`heap_band_contains_exact_topk`** — does heap-band rescore (exact, over the
+  whole candidate pool) recover them?
+
+From those it prints one decision label per case:
+
+| label | meaning | lever |
+| --- | --- | --- |
+| `graph_search_sufficient` | base recall already 1.0 | none needed |
+| `candidate_generation_miss` | exact top-k not in the pool at all | widen `graph_ef_search` / `graph_oversampling` |
+| `residual_band_too_narrow` | in the pool but outside the residual band | residual rerank won't help — use heap-band rescore |
+| `quantized_misorder_fixed_by_heap` | in pool and band, base recall < 1 | heap-band (or residual) re-ranks it in |
+| `payload_filter_underfilled` | fewer category matches than `k` in the pool | widen the candidate budget or the filter, not the rescore |
+
+The treatment sweep then *confirms* which lever actually moves recall: it rebuilds
+the index across the four profiles, an `graph_ef_search` ladder (64→384), an
+`graph_oversampling` ladder, and a residual-32 base index, and reports recall@k
+plus `graph_visited_nodes`/`graph_scored_codes` and per-stage µs for each. The key
+reading: if recall stays flat across the whole ef/oversampling ladder but heap-band
+recovers it, the miss is quantization mis-ranking, not graph reach — widening graph
+search wastes latency and you should rescore instead; only a `candidate_generation_miss`
+(exact top-k absent from the pool) is the case widening ef/oversampling is meant to
+fix. Run:
+
+```
+createdb cmiss ; psql -d cmiss -f benchmarks/dev/dense_candidate_miss_grid.sql ; dropdb cmiss
+```
+
+It is deterministic (no `random()`), prints a report, writes no files, and changes
+no defaults. As with the other dev grids, validate on real data before changing any
+index or profile setting.
+
 ## Publishable Run Metadata
 
 Do not commit generated benchmark outputs. Store JSON/Markdown in an external
