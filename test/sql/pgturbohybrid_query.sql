@@ -53,6 +53,7 @@ BEGIN
 		'turbohybrid.dense_local_expansion_topn',
 		'turbohybrid.dense_query_split_impl',
 		'turbohybrid.dense_rescore_band',
+		'turbohybrid.dense_residual_rerank_band_multiplier',
 		'turbohybrid.dense_residual_rerank_max_adjust_ratio',
 		'turbohybrid.dense_residual_rerank_mode',
 		'turbohybrid.dense_residual_rerank_weight',

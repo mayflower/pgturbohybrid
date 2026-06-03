@@ -8007,6 +8007,7 @@ PgturbohybridGraphApplyResidualRerank(PgturbohybridGraphScanOpaque so,
 	so->graphResidualRerankBytes = 0;
 	so->graphResidualRerankWeightEffective = 0.0;
 	so->graphResidualRerankBand = 0;
+	so->graphResidualRerankBandMultiplier = 0;
 	so->graphResidualRerankMaxAdjustment = 0.0;
 	so->graphResidualRerankReorderedCount = 0;
 	so->graphResidualRerankTopKChanged = false;
@@ -8020,7 +8021,10 @@ PgturbohybridGraphApplyResidualRerank(PgturbohybridGraphScanOpaque so,
 	baseTarget = so->hasTupleTargetRows ?
 		Max((int64) 1, so->tupleTargetRows) :
 		Max((int64) 1, so->graphDenseRequestedK);
-	band = (int) Min((int64) count, Max(baseTarget * 2, (int64) 20));
+	band = (int) Min((int64) count,
+					 Max(baseTarget *
+						 (int64) pgturbohybrid_dense_residual_rerank_band_multiplier,
+						 (int64) 20));
 	if (band <= 1)
 		return count;
 	topK = (int) Min((int64) band, baseTarget);
@@ -8104,6 +8108,8 @@ PgturbohybridGraphApplyResidualRerank(PgturbohybridGraphScanOpaque so,
 	so->graphResidualRerankBytes = bytes;
 	so->graphResidualRerankWeightEffective = effectiveWeight;
 	so->graphResidualRerankBand = band;
+	so->graphResidualRerankBandMultiplier =
+		pgturbohybrid_dense_residual_rerank_band_multiplier;
 	so->graphResidualRerankMaxAdjustment = maxAdjustmentApplied;
 	so->graphExactRescoreSource = PGTURBOHYBRID_EXACT_RESCORE_SOURCE_RESIDUAL;
 	PgturbohybridGraphAddElapsedUs(&so->graphResidualRerankUs, start);

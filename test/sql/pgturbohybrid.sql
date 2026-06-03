@@ -3522,6 +3522,7 @@ BEGIN
 		'query_split_enabled',
 		'residual_rerank_active',
 		'residual_rerank_band',
+		'residual_rerank_band_multiplier',
 		'residual_rerank_max_adjustment',
 		'residual_rerank_mode',
 		'residual_rerank_reordered_count',

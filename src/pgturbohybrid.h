@@ -250,6 +250,7 @@ extern bool pgturbohybrid_dense_heap_rescore_user_set;
 extern int	pgturbohybrid_dense_residual_rerank_mode;
 extern double pgturbohybrid_dense_residual_rerank_weight;
 extern double pgturbohybrid_dense_residual_rerank_max_adjust_ratio;
+extern int pgturbohybrid_dense_residual_rerank_band_multiplier;
 extern int	pgturbohybrid_dense_adaptive_widening;
 extern double pgturbohybrid_dense_adaptive_widening_multiplier;
 extern double pgturbohybrid_dense_adaptive_widening_max_multiplier;
@@ -1303,6 +1304,7 @@ typedef struct PgturbohybridGraphScanOpaqueData
 	int			graphResidualRerankMode;
 	double		graphResidualRerankWeightEffective;
 	int64		graphResidualRerankBand;
+	int			graphResidualRerankBandMultiplier;
 	double		graphResidualRerankMaxAdjustment;
 	int64		graphResidualRerankReorderedCount;
 	bool		graphResidualRerankTopKChanged;

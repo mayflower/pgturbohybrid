@@ -248,6 +248,7 @@ int			pgturbohybrid_dense_residual_rerank_mode =
 	PGTURBOHYBRID_DENSE_RESIDUAL_RERANK_CALIBRATED;
 double		pgturbohybrid_dense_residual_rerank_weight = -1.0;
 double		pgturbohybrid_dense_residual_rerank_max_adjust_ratio = 0.15;
+int			pgturbohybrid_dense_residual_rerank_band_multiplier = 2;
 int			pgturbohybrid_dense_adaptive_widening = PGTURBOHYBRID_DENSE_ADAPTIVE_WIDENING_OFF;
 double		pgturbohybrid_dense_adaptive_widening_multiplier = 2.0;
 double		pgturbohybrid_dense_adaptive_widening_max_multiplier = 4.0;

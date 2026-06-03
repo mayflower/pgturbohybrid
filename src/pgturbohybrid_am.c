@@ -4986,6 +4986,11 @@ PgturbohybridInit(void)
 							 NULL,
 							 &pgturbohybrid_dense_residual_rerank_max_adjust_ratio,
 							 0.15, 0.0, 1.0, PGC_USERSET, 0, NULL, NULL, NULL);
+	DefineCustomIntVariable("turbohybrid.dense_residual_rerank_band_multiplier",
+							"Experimental: residual rerank band width as a multiple of the final-k target",
+							"Benchmark-only knob. The residual rerank band is min(count, max(final_k_target * this, 20)). The default 2 preserves current behavior; a wider band lets residual rerank reach neighbours that fall outside the narrow default band.",
+							&pgturbohybrid_dense_residual_rerank_band_multiplier,
+							2, 1, 16, PGC_USERSET, 0, NULL, NULL, NULL);
 	DefineCustomEnumVariable("turbohybrid.native_cache_policy",
 							 "Native dense graph cache policy",
 							 "Compatibility alias for turbohybrid.native_cache_scope.",
