@@ -160,6 +160,30 @@ profile — any change to profile defaults must be justified by real-dataset
 recall/latency runs, not by this harness. Treat its output as a smoke test and a
 parity check, and record any tuning ideas as recommendations, not commits.
 
+## Deciding residual rerank vs heap rescore
+
+`benchmarks/dev/residual_rerank_grid.sql` is the harness to decide whether the
+in-index calibrated residual rerank is worth recommending on exact-free 4-bit
+indexes. It builds `residual_rerank=off / 16 / 32 / 64`-byte indexes and compares
+`dense_residual_rerank_mode = off | fixed | calibrated` against
+`dense_heap_rescore = off | topk | band`, reporting recall@k, p50/p95, the
+residual stats (`residual_rerank_band`, `residual_rerank_reordered_count`,
+`residual_rerank_topk_changed`, `dense_residual_rerank_us`), heap rescore
+count/us, index size, and the `turbohybrid_estimate_memory` estimate. Use it (on
+your data) to decide between the cheaper in-index residual rerank and the exact
+heap-band rescore: residual rerank reorders a narrow top band at microsecond cost
+but recovers recall only when the true neighbours are already in that band, while
+heap-band rescores the full candidate pool from the heap (exact, higher latency)
+and recovers more. As with the other dev grids, no index or profile default
+should change from its synthetic output alone — validate on real data first.
+
+## Phrase/proximity BM25 rerank
+
+`benchmarks/dev/bm25_phrase_rerank_grid.sql` is the companion harness for the
+`bm25_heap_tsvector_rerank` decision (off/topk/band/auto vs rrf/calibrated on
+phrase/proximity queries). Same rule: it is a smoke/decision tool, not a source of
+committed results or default changes.
+
 ## Publishable Run Metadata
 
 Do not commit generated benchmark outputs. Store JSON/Markdown in an external
