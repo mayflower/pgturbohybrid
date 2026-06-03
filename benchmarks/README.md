@@ -98,6 +98,66 @@ python3 benchmarks/tools/check_acceptance.py \
   --suite fiqa_openai_profile_matrix
 ```
 
+## Profile recall/latency grid (AMD64)
+
+`benchmarks/dev/profile_recall_latency_grid.sql` is a deterministic developer
+harness for sanity-checking the named profiles (`latency`, `balanced`,
+`matched_recall`, `high_recall`, `quality`, `debug`) on a host. It generates two
+throwaway corpora — an *easy* doc/chunk corpus (easy dense recall, grouped/
+duplicate, payload-filter, lexical, hybrid) and a *hard* spread corpus with one
+out-of-distribution query — builds one throwaway index per profile, and prints a
+report. It changes no profile defaults and no runtime behavior.
+
+### How to run (AMD64/x86_64)
+
+```sh
+createdb prof_grid
+psql -d prof_grid -f benchmarks/dev/profile_recall_latency_grid.sql            # SIMD_MODE=both (default)
+psql -d prof_grid -v SIMD_MODE=on  -f benchmarks/dev/profile_recall_latency_grid.sql
+psql -d prof_grid -v SIMD_MODE=off -f benchmarks/dev/profile_recall_latency_grid.sql
+dropdb prof_grid
+```
+
+Optional psql variables: `SIMD_MODE` (`on|off|both`, default `both`), `DIMS`
+(default 1536 — keep `>=1024` so the 4-bit u8 AVX2/AVX-512-VNNI path is
+exercised), `NROWS_EASY`, `NROWS_HARD`, `K`, `ITERS`. It is deterministic
+(sin/cos over `generate_series`, no `random()`), so reruns reproduce the same
+recall/grouping; only the latency columns vary with machine load.
+
+The report has three blocks: build reloptions + effective feature modes
+(`retry`/`residual`/`bm25_rerank`/`final_diversity`), recall/overlap/latency, and
+a SIMD on-vs-off parity check.
+
+### Do not commit the output
+
+This script prints a report and leaves no files; do not paste its output, or any
+captured tables/JSON from it, into the repo. Numbers depend on host CPU, memory,
+and load, and are not project benchmark claims. (Markdown under `benchmarks/` is
+gitignored for this reason.) The script and this README are the committed
+artifacts — the results are not.
+
+### Interpreting high_recall vs latency
+
+On the *easy* corpus every profile reaches recall 1.0, so the profiles are only
+separated by the *hard* out-of-distribution query. There, `latency`/`balanced`/
+`matched_recall`/`quality` land around recall 0.6 while `high_recall` recovers to
+~1.0, at roughly 2.4x the per-query latency. That recall win comes from
+`high_recall`'s wider `graph_ef_search`/`graph_oversampling` (and heuristic build),
+not from `dense_uncertainty_retry`, residual rerank, BM25 heap-tsvector rerank, or
+final diversity — those stay at their defaults in this grid. Read it as: pick
+`latency` for throughput, `high_recall` when hard/ambiguous-query recall matters
+and you can absorb the latency; `matched_recall` targets full-HNSW-matched recall
+and should be compared on real data, not this synthetic.
+
+### Why no profile default is changed
+
+The grid only `SET`s `turbohybrid.profile`/`turbohybrid.simd` for the session and
+builds throwaway indexes; it does not (and must not) edit any profile's compiled
+defaults. A synthetic micro-grid is not sufficient evidence to retune a shipped
+profile — any change to profile defaults must be justified by real-dataset
+recall/latency runs, not by this harness. Treat its output as a smoke test and a
+parity check, and record any tuning ideas as recommendations, not commits.
+
 ## Publishable Run Metadata
 
 Do not commit generated benchmark outputs. Store JSON/Markdown in an external
