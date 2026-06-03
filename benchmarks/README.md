@@ -177,6 +177,36 @@ heap-band rescores the full candidate pool from the heap (exact, higher latency)
 and recovers more. As with the other dev grids, no index or profile default
 should change from its synthetic output alone — validate on real data first.
 
+### Residual rerank vs heap-band rescore
+
+Three levers correct an exact-free 4-bit recall miss, and they act at different
+points in the pipeline — pick by *where* the true neighbours are:
+
+- **Residual rerank** (`residual_rerank = on`; `dense_residual_rerank_mode =
+  fixed | calibrated`) is a *cheap top-band refinement*. It reorders the narrow
+  top band (~`2 * final_k`) from a few residual bytes stored in the index, at
+  microsecond cost and no heap I/O. Because it only re-ranks *within* that band,
+  it recovers recall only when the true neighbours are already in it.
+- **Heap-band rescore** (`dense_heap_rescore = band`) is the *stronger
+  recall/ranking recovery*. It fetches exact vectors from the heap and rescores
+  the full candidate band, so it recovers neighbours that are present in the
+  wider heap band but were mis-ranked out of the narrow residual band — at the
+  cost of heap I/O and higher latency.
+- **Wider `graph_ef_search` / `graph_oversampling`** is what you need when the
+  true neighbours are *absent from the candidate pool altogether*: no rescore can
+  recover a neighbour the graph search never visited.
+
+In the synthetic run that motivated this note, residual rerank (16/32/64 bytes,
+both `fixed` and `calibrated`) reordered the band cheaply but left recall
+unchanged, while heap-band rescore recovered the missing neighbours — because the
+exact top-k sat in the wider candidate band, outside the narrow residual band. So
+residual rerank is **not a substitute for heap-band rescore** when the neighbours
+are outside the residual band, and neither is a substitute for widening graph
+search when they are outside the pool. Index size also grows with
+`residual_rerank_bytes`, so the residual sketch is a build-time storage cost
+(`REINDEX` to change it). That ordering is data-dependent — re-run the grid on
+your corpus; the takeaway is the decision rule, not the numbers.
+
 ## Phrase/proximity BM25 rerank
 
 `benchmarks/dev/bm25_phrase_rerank_grid.sql` is the companion harness for the

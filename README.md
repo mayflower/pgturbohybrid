@@ -428,10 +428,16 @@ heap rescore off; the `high_recall` profile defaults it to `band`; `balanced`,
 low-dimensional exact-free indexes, and an explicit
 `SET turbohybrid.dense_heap_rescore = 'off'|'topk'|'band'` always wins over the
 profile default; set it to `auto` to return to profile-driven behavior.
-Residual rerank is the lower-I/O middle ground:
-`WITH (residual_rerank = on, residual_rerank_bytes = 16|32|64)`.
-Residual sketches are build-time index contents, but the scan-time adjustment is
-controlled by GUCs:
+Residual rerank is an opt-in, lower-I/O refinement (off in every profile),
+built into the index with
+`WITH (residual_rerank = on, residual_rerank_bytes = 16|32|64)`. It reorders a
+narrow top band from residual sketches stored in the index, so it is **not a
+replacement for heap-band rescore**: it recovers recall only when the true
+neighbours already sit in that narrow band, whereas heap-band rescore recovers
+neighbours from the wider candidate band. Larger `residual_rerank_bytes` reranks
+more precisely but grows the index — a build-time storage tradeoff. Residual
+sketches are build-time index contents; the scan-time adjustment is controlled by
+GUCs:
 
 ```sql
 SET turbohybrid.dense_residual_rerank_mode = 'calibrated'; -- off | fixed | calibrated
