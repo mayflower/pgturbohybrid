@@ -169,6 +169,7 @@ typedef struct PgturbohybridQuantBuildState
 	bool		tqExactStorage;
 	bool		entrySidecar;
 	int			entrySidecarRepresentatives;
+	int			entrySidecarStrategy;
 	bool		graphBackbone;
 	bool		residualRerank;
 	int			residualRerankBytes;
@@ -330,6 +331,24 @@ typedef struct TqDenseCandidateStats
 	uint64		sortUs;
 	int			exactRescoreSource;
 } TqDenseCandidateStats;
+
+typedef struct PgturbohybridGraphRepairDryRunStats
+{
+	uint32		nodeCount;
+	int			dimensions;
+	int			sampleNodesRequested;
+	int			searchEf;
+	int			candidateLimit;
+	int			sampledNodes;
+	double		avgOverlap;
+	int			weakNodes;
+	uint64		missedNeighbors;
+	uint64		weakEntryCases;
+	uint64		suggestedEdges;
+	uint64		elapsedMs;
+	uint64		codePagesRead;
+	uint64		adjPagesRead;
+} PgturbohybridGraphRepairDryRunStats;
 
 typedef struct PgturbohybridGraphScanNode
 {
@@ -749,6 +768,11 @@ void		PgturbohybridGraphCollectVacuumStats(Relation index, PgturbohybridGraphMet
 bool		PgturbohybridGraphPayloadRefRange(PgturbohybridGraphScanStorage *storage, int payloadSlot,
 								   int32 payloadValue, uint32 *firstIndex,
 								   uint32 *refCount);
+bool		PgturbohybridGraphLoadPayloadValue(Relation index, PgturbohybridGraphScanOpaque so,
+									 PgturbohybridGraphMetaPageData *meta,
+									 PgturbohybridGraphScanStorage *storage,
+									 uint32 nodeId, int payloadSlot,
+									 int32 *payloadValue);
 void		PgturbohybridGraphAppendInsertedExact(Relation index, BlockNumber *exactStart,
 									   uint32 nodeId, Vector *vector,
 									   int dimensions, BlockNumber *exactBlkno,
@@ -803,5 +827,10 @@ const char *PgturbohybridGraphDenseAdaptiveWideningReasonName(int reason);
 const char *PgturbohybridGraphDenseLocalExpansionModeName(int mode);
 const char *PgturbohybridGraphDenseBudgetPolicyNameExternal(int policy);
 const char *PgturbohybridGraphRescoreBandPolicyNameExternal(int policy);
+void		PgturbohybridGraphRepairDryRun(Relation index,
+											int sampleNodes,
+											int searchEf,
+											int candidateLimit,
+											PgturbohybridGraphRepairDryRunStats *stats);
 
 #endif

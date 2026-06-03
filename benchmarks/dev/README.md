@@ -39,6 +39,68 @@ intended to show scaling trends and hot-path diagnostics, not pass/fail timing
 thresholds. Do not commit generated output; redirect it under
 `benchmarks/results/` if you need to keep a local artifact.
 
+Retrieval quality grid:
+
+```sh
+psql -d "$PGDATABASE" \
+  -f benchmarks/dev/retrieval_quality_grid.sql
+```
+
+Use `NROWS`, `DIMS`, `FINAL_K`, `DENSE_K`, `BM25_K`, and `EXACT_BASELINE_K` to
+scale the synthetic corpus and candidate budgets. The script builds clustered
+dense vectors, common and rare text patterns, phrase-like terms, and
+group/category INCLUDE payloads. It rebuilds one hybrid TurboHybrid index per
+quality/profile configuration and prints a compact table with dense recall@K,
+lexical/hybrid overlap@K, duplicate group counts, elapsed milliseconds, and
+selected last-scan stats. Payload-filtered cases include variants with
+`turbohybrid.payload_entry_seeding` off/auto/on so entry-seed hit rates, range
+sizes, and latency can be compared at the same retrieval budget. Phrase-like
+lexical cases include `turbohybrid.bm25_heap_tsvector_rerank` off/topk/band/auto
+variants so heap tsvector rerank count, fetch time, score time, and top-k
+changes are visible at the same BM25 budget. The grid also includes an opt-in
+`turbohybrid.final_diversity = group_payload` row so duplicate group suppression
+can be compared against the normal ranking. Each built index also runs
+`turbohybrid_graph_repair_dry_run()` with a small deterministic sample and
+prints repair overlap, weak-node, suggested-edge, and elapsed-time diagnostics.
+It is the deterministic local harness for retrieval quality changes; use real
+datasets before making public quality claims.
+
+Retrieval profile tuner:
+
+```sh
+psql -d "$PGDATABASE" \
+  -v INDEX_NAME=documents_turbohybrid_idx \
+  -v TABLE_NAME=documents \
+  -v ID_COLUMN=id \
+  -v LIMIT_K=10 \
+  -v MAX_TRIALS=96 \
+  -v EVAL_QUERY_TABLE=eval_queries \
+  -v LATENCY_BUDGET_MS=20 \
+  -f benchmarks/dev/tune_retrieval_profile.sql
+```
+
+`tune_retrieval_profile.sql` evaluates an existing TurboHybrid index against a
+user-provided query table:
+
+```sql
+eval_queries(
+  id int,
+  vector_query vector,
+  tsquery tsquery,
+  expected_ids bigint[] not null
+)
+```
+
+It sweeps practical query-time retrieval settings (`profile`, dense/BM25
+budgets, fusion, residual rerank mode, and heap rescore mode when those GUCs
+exist), records overlap/recall@K plus selected `turbohybrid_last_scan_stats()`
+fields, and prints both the full trial table and the Pareto frontier. It also
+accepts `retrieval_quality_grid.sql`-style query tables with
+`qvec`/`text_query`/`expected_ids` columns, so synthetic quality cases can be
+reused by creating or passing a compatible eval table. Entry-sidecar strategy is
+reported from the current index; build-time sidecar variants should be compared
+by running the tuner once per prebuilt index.
+
 Dense filter fallback:
 
 ```sh

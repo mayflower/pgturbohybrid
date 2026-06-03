@@ -48,6 +48,14 @@ static relopt_enum_elt_def pgturbohybrid_routing_relopt_options[] = {
 	{NULL, 0}
 };
 
+static relopt_enum_elt_def pgturbohybrid_entry_sidecar_strategy_relopt_options[] = {
+	{"hash", PGTURBOHYBRID_ENTRY_SIDECAR_HASH},
+	{"farthest_code", PGTURBOHYBRID_ENTRY_SIDECAR_FARTHEST_CODE},
+	{"level_covering", PGTURBOHYBRID_ENTRY_SIDECAR_LEVEL_COVERING},
+	{"hybrid_level_covering", PGTURBOHYBRID_ENTRY_SIDECAR_HYBRID_LEVEL_COVERING},
+	{NULL, 0}
+};
+
 static void
 PgturbohybridIndexStatsJsonbAddKey(PgturbohybridJsonbState *state, const char *key)
 {
@@ -236,15 +244,26 @@ int			pgturbohybrid_dense_max_rescore_multiplier = 2;
 int			pgturbohybrid_dense_rescore_band_policy = PGTURBOHYBRID_RESCORE_BAND_POLICY_AUTO;
 int			pgturbohybrid_dense_heap_rescore = PGTURBOHYBRID_DENSE_HEAP_RESCORE_OFF;
 bool		pgturbohybrid_dense_heap_rescore_user_set = false;
+int			pgturbohybrid_dense_residual_rerank_mode =
+	PGTURBOHYBRID_DENSE_RESIDUAL_RERANK_CALIBRATED;
+double		pgturbohybrid_dense_residual_rerank_weight = -1.0;
+double		pgturbohybrid_dense_residual_rerank_max_adjust_ratio = 0.15;
 int			pgturbohybrid_dense_adaptive_widening = PGTURBOHYBRID_DENSE_ADAPTIVE_WIDENING_OFF;
 double		pgturbohybrid_dense_adaptive_widening_multiplier = 2.0;
 double		pgturbohybrid_dense_adaptive_widening_max_multiplier = 4.0;
 double		pgturbohybrid_dense_adaptive_min_gap = 0.0;
+int			pgturbohybrid_dense_uncertainty_retry = PGTURBOHYBRID_DENSE_UNCERTAINTY_RETRY_OFF;
+int			pgturbohybrid_dense_uncertainty_retry_max_passes = 1;
+double		pgturbohybrid_dense_uncertainty_retry_multiplier = 1.5;
+double		pgturbohybrid_dense_uncertainty_min_gap = 0.03;
 bool		pgturbohybrid_warn_linear_fallback = true;
 double		pgturbohybrid_linear_fallback_notice_threshold_ratio = 0.25;
 int			pgturbohybrid_dense_local_expansion = PGTURBOHYBRID_DENSE_LOCAL_EXPANSION_OFF;
 int			pgturbohybrid_dense_local_expansion_topn = 8;
 int			pgturbohybrid_dense_local_expansion_max_neighbors = 256;
+int			pgturbohybrid_payload_entry_seeding = PGTURBOHYBRID_PAYLOAD_ENTRY_SEEDING_AUTO;
+int			pgturbohybrid_payload_entry_seed_count =
+	PGTURBOHYBRID_DEFAULT_PAYLOAD_ENTRY_SEED_COUNT;
 int			pgturbohybrid_graph_lock_tranche_id;
 static relopt_kind pgturbohybrid_graph_relopt_kind;
 static relopt_kind pgturbohybrid_relopt_kind;
@@ -278,6 +297,39 @@ PgturbohybridDenseBuildDistanceName(int mode)
 			return "exact";
 		default:
 			return "unknown";
+	}
+}
+
+const char *
+PgturbohybridEntrySidecarStrategyName(int strategy)
+{
+	switch ((PgturbohybridEntrySidecarStrategy) strategy)
+	{
+		case PGTURBOHYBRID_ENTRY_SIDECAR_HASH:
+			return "hash";
+		case PGTURBOHYBRID_ENTRY_SIDECAR_FARTHEST_CODE:
+			return "farthest_code";
+		case PGTURBOHYBRID_ENTRY_SIDECAR_LEVEL_COVERING:
+			return "level_covering";
+		case PGTURBOHYBRID_ENTRY_SIDECAR_HYBRID_LEVEL_COVERING:
+			return "hybrid_level_covering";
+		default:
+			return "unknown";
+	}
+}
+
+const char *
+PgturbohybridPayloadEntrySeedingName(int mode)
+{
+	switch ((PgturbohybridPayloadEntrySeedingMode) mode)
+	{
+		case PGTURBOHYBRID_PAYLOAD_ENTRY_SEEDING_OFF:
+			return "off";
+		case PGTURBOHYBRID_PAYLOAD_ENTRY_SEEDING_ON:
+			return "on";
+		case PGTURBOHYBRID_PAYLOAD_ENTRY_SEEDING_AUTO:
+		default:
+			return "auto";
 	}
 }
 
@@ -319,6 +371,22 @@ PgturbohybridBuildNeighborSelectReasonName(int reason)
 		case PGTURBOHYBRID_BUILD_NEIGHBOR_SELECT_REASON_AUTO_LATENCY_HIGHDIM:
 			return "auto_latency_highdim";
 		case PGTURBOHYBRID_BUILD_NEIGHBOR_SELECT_REASON_UNKNOWN:
+		default:
+			return "unknown";
+	}
+}
+
+const char *
+PgturbohybridGraphDenseResidualRerankModeName(int mode)
+{
+	switch ((TqDenseResidualRerankMode) mode)
+	{
+		case PGTURBOHYBRID_DENSE_RESIDUAL_RERANK_OFF:
+			return "off";
+		case PGTURBOHYBRID_DENSE_RESIDUAL_RERANK_FIXED:
+			return "fixed";
+		case PGTURBOHYBRID_DENSE_RESIDUAL_RERANK_CALIBRATED:
+			return "calibrated";
 		default:
 			return "unknown";
 	}
@@ -374,6 +442,48 @@ PgturbohybridGraphDenseHeapRescoreReasonName(int reason)
 		case PGTURBOHYBRID_DENSE_HEAP_RESCORE_REASON_UNKNOWN:
 		default:
 			return "unknown";
+	}
+}
+
+const char *
+PgturbohybridGraphDenseUncertaintyRetryModeName(int mode)
+{
+	switch ((TqDenseUncertaintyRetryMode) mode)
+	{
+		case PGTURBOHYBRID_DENSE_UNCERTAINTY_RETRY_AUTO:
+			return "auto";
+		case PGTURBOHYBRID_DENSE_UNCERTAINTY_RETRY_ON:
+			return "on";
+		case PGTURBOHYBRID_DENSE_UNCERTAINTY_RETRY_OFF:
+		default:
+			return "off";
+	}
+}
+
+const char *
+PgturbohybridGraphDenseUncertaintyRetryReasonName(int reason)
+{
+	switch ((TqDenseUncertaintyRetryReason) reason)
+	{
+		case PGTURBOHYBRID_DENSE_UNCERTAINTY_REASON_FORCED:
+			return "forced";
+		case PGTURBOHYBRID_DENSE_UNCERTAINTY_REASON_UNDERFILLED:
+			return "underfilled";
+		case PGTURBOHYBRID_DENSE_UNCERTAINTY_REASON_FLAT_TOP10:
+			return "flat_top10";
+		case PGTURBOHYBRID_DENSE_UNCERTAINTY_REASON_FLAT_BOUNDARY:
+			return "flat_boundary";
+		case PGTURBOHYBRID_DENSE_UNCERTAINTY_REASON_SIDECAR_UNUSED:
+			return "entry_sidecar_unused";
+		case PGTURBOHYBRID_DENSE_UNCERTAINTY_REASON_PAYLOAD_UNDERFILLED:
+			return "payload_underfilled";
+		case PGTURBOHYBRID_DENSE_UNCERTAINTY_REASON_RESIDUAL_REORDERED:
+			return "residual_reordered";
+		case PGTURBOHYBRID_DENSE_UNCERTAINTY_REASON_HEAP_REORDERED:
+			return "heap_reordered";
+		case PGTURBOHYBRID_DENSE_UNCERTAINTY_REASON_NONE:
+		default:
+			return "none";
 	}
 }
 
@@ -487,6 +597,12 @@ PgturbohybridGraphInit(void)
 					  PGTURBOHYBRID_DEFAULT_ENTRY_SIDECAR_REPRESENTATIVES, 0,
 					  PGTURBOHYBRID_GRAPH_MAX_ENTRY_SIDECAR_REPRESENTATIVES,
 					  AccessExclusiveLock);
+	add_enum_reloption(pgturbohybrid_relopt_kind, "entry_sidecar_strategy",
+					   "Representative selection strategy for entry_sidecar.",
+					   pgturbohybrid_entry_sidecar_strategy_relopt_options,
+					   PGTURBOHYBRID_DEFAULT_ENTRY_SIDECAR_STRATEGY,
+					   "Valid values are \"hash\", \"farthest_code\", \"level_covering\", and \"hybrid_level_covering\".",
+					   AccessExclusiveLock);
 	add_bool_reloption(pgturbohybrid_relopt_kind, "graph_backbone",
 					   "Force adjacent level-0 graph edges during experimental dense graph builds.",
 					   PGTURBOHYBRID_DEFAULT_GRAPH_BACKBONE, AccessExclusiveLock);
@@ -834,6 +950,12 @@ pgturbohybrid_index_stats(PG_FUNCTION_ARGS)
 										  entrySidecarCount);
 	PgturbohybridIndexStatsJsonbAddUInt32(&jsonState, "entry_sidecar_bytes",
 										  entrySidecarBytes);
+	PgturbohybridIndexStatsJsonbAddUInt32(&jsonState,
+										  "entry_sidecar_representatives_configured",
+										  PgturbohybridGraphGetEntrySidecarRepresentatives(index));
+	PgturbohybridIndexStatsJsonbAddString(&jsonState, "entry_sidecar_strategy",
+										  PgturbohybridEntrySidecarStrategyName(
+											  PgturbohybridGraphGetEntrySidecarStrategy(index)));
 	PgturbohybridIndexStatsJsonbAddUInt32(&jsonState, "routing_entry_count",
 										  routingEntryCount);
 	PgturbohybridIndexStatsJsonbAddUInt32(&jsonState, "routing_entry_bytes",

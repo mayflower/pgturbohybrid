@@ -7,6 +7,8 @@
 #include "access/relscan.h"
 #include "access/reloptions.h"
 #include "access/sysattr.h"
+#include "access/table.h"
+#include "access/tableam.h"
 #include "access/xact.h"
 #include "catalog/namespace.h"
 #include "catalog/pg_extension.h"
@@ -16,7 +18,9 @@
 #include "commands/extension.h"
 #include "commands/vacuum.h"
 #include "executor/executor.h"
+#include "executor/tuptable.h"
 #include "fmgr.h"
+#include "miscadmin.h"
 #include "nodes/bitmapset.h"
 #include "nodes/execnodes.h"
 #include "nodes/nodeFuncs.h"
@@ -26,6 +30,7 @@
 #include "storage/lmgr.h"
 #include "utils/builtins.h"
 #include "utils/float.h"
+#include "utils/fmgrprotos.h"
 #include "utils/fmgroids.h"
 #include "utils/guc.h"
 #include "utils/lsyscache.h"
@@ -60,6 +65,14 @@ typedef enum PgturbohybridBm25HybridBoundMode
 	PGTURBOHYBRID_BM25_HYBRID_BOUND_APPROX
 } PgturbohybridBm25HybridBoundMode;
 
+typedef enum PgturbohybridBm25HeapTSVectorRerankMode
+{
+	PGTURBOHYBRID_BM25_HEAP_TSVECTOR_RERANK_OFF,
+	PGTURBOHYBRID_BM25_HEAP_TSVECTOR_RERANK_TOPK,
+	PGTURBOHYBRID_BM25_HEAP_TSVECTOR_RERANK_BAND,
+	PGTURBOHYBRID_BM25_HEAP_TSVECTOR_RERANK_AUTO
+} PgturbohybridBm25HeapTSVectorRerankMode;
+
 static relopt_kind pgturbohybrid_relopt_kind;
 static List *pgturbohybrid_plannedstmt_stack = NIL;
 static PlannedStmt *pgturbohybrid_current_plannedstmt = NULL;
@@ -92,6 +105,17 @@ int			pgturbohybrid_bm25_dense_accumulator_threshold = 4096;
 double		pgturbohybrid_bm25_dense_accumulator_df_ratio = 0.05;
 int			pgturbohybrid_bm25_strategy = PGTURBOHYBRID_BM25_STRATEGY_AUTO;
 int			pgturbohybrid_bm25_impact_or_mode = PGTURBOHYBRID_BM25_IMPACT_OR_MODE_EXACT_ONLY;
+int			pgturbohybrid_bm25_heap_tsvector_rerank =
+	PGTURBOHYBRID_BM25_HEAP_TSVECTOR_RERANK_OFF;
+int			pgturbohybrid_bm25_heap_tsvector_rerank_multiplier = 4;
+double		pgturbohybrid_bm25_heap_tsvector_rerank_weight = 0.10;
+int			pgturbohybrid_final_diversity =
+	PGTURBOHYBRID_FINAL_DIVERSITY_OFF;
+int			pgturbohybrid_final_diversity_payload_slot = -1;
+double		pgturbohybrid_final_diversity_lambda =
+	PGTURBOHYBRID_FINAL_DIVERSITY_DEFAULT_LAMBDA;
+int			pgturbohybrid_final_diversity_pool_multiplier =
+	PGTURBOHYBRID_FINAL_DIVERSITY_DEFAULT_POOL_MULTIPLIER;
 bool		pgturbohybrid_auto_budget = true;
 int			pgturbohybrid_auto_budget_min_dense_k = 32;
 int			pgturbohybrid_auto_budget_min_bm25_k = 32;
@@ -103,6 +127,10 @@ int			pgturbohybrid_auto_bm25_budget_max = 400;
 bool		pgturbohybrid_auto_bm25_budget_dense_confidence = true;
 int			pgturbohybrid_hybrid_budget_policy = PGTURBOHYBRID_HYBRID_BUDGET_FIXED;
 int			pgturbohybrid_bm25_hybrid_bound = PGTURBOHYBRID_BM25_HYBRID_BOUND_SAFE;
+double		pgturbohybrid_calibrated_fusion_both_match_bonus = 0.06;
+double		pgturbohybrid_calibrated_fusion_identifier_bm25_alpha = 0.35;
+double		pgturbohybrid_calibrated_fusion_broad_dense_alpha = 0.70;
+double		pgturbohybrid_calibrated_fusion_default_alpha = 0.50;
 static bool pgturbohybrid_bm25_strategy_user_set = false;
 static bool pgturbohybrid_bm25_impact_or_mode_user_set = false;
 static bool pgturbohybrid_bm25_hot_postings_cache_mb_user_set = false;
@@ -151,6 +179,14 @@ static const struct config_enum_entry pgturbohybrid_bm25_accumulator_mode_option
 	{NULL, 0, false}
 };
 
+static const struct config_enum_entry pgturbohybrid_bm25_heap_tsvector_rerank_options[] = {
+	{"off", PGTURBOHYBRID_BM25_HEAP_TSVECTOR_RERANK_OFF, false},
+	{"topk", PGTURBOHYBRID_BM25_HEAP_TSVECTOR_RERANK_TOPK, false},
+	{"band", PGTURBOHYBRID_BM25_HEAP_TSVECTOR_RERANK_BAND, false},
+	{"auto", PGTURBOHYBRID_BM25_HEAP_TSVECTOR_RERANK_AUTO, false},
+	{NULL, 0, false}
+};
+
 static const struct config_enum_entry pgturbohybrid_hybrid_budget_policy_options[] = {
 	{"fixed", PGTURBOHYBRID_HYBRID_BUDGET_FIXED, false},
 	{"adaptive", PGTURBOHYBRID_HYBRID_BUDGET_ADAPTIVE, false},
@@ -161,6 +197,13 @@ static const struct config_enum_entry pgturbohybrid_dense_adaptive_widening_opti
 	{"off", PGTURBOHYBRID_DENSE_ADAPTIVE_WIDENING_OFF, false},
 	{"auto", PGTURBOHYBRID_DENSE_ADAPTIVE_WIDENING_AUTO, false},
 	{"on", PGTURBOHYBRID_DENSE_ADAPTIVE_WIDENING_ON, false},
+	{NULL, 0, false}
+};
+
+static const struct config_enum_entry pgturbohybrid_dense_uncertainty_retry_options[] = {
+	{"off", PGTURBOHYBRID_DENSE_UNCERTAINTY_RETRY_OFF, false},
+	{"auto", PGTURBOHYBRID_DENSE_UNCERTAINTY_RETRY_AUTO, false},
+	{"on", PGTURBOHYBRID_DENSE_UNCERTAINTY_RETRY_ON, false},
 	{NULL, 0, false}
 };
 
@@ -231,10 +274,30 @@ static const struct config_enum_entry pgturbohybrid_dense_heap_rescore_options[]
 	{NULL, 0, false}
 };
 
+static const struct config_enum_entry pgturbohybrid_dense_residual_rerank_mode_options[] = {
+	{"off", PGTURBOHYBRID_DENSE_RESIDUAL_RERANK_OFF, false},
+	{"fixed", PGTURBOHYBRID_DENSE_RESIDUAL_RERANK_FIXED, false},
+	{"calibrated", PGTURBOHYBRID_DENSE_RESIDUAL_RERANK_CALIBRATED, false},
+	{NULL, 0, false}
+};
+
 static const struct config_enum_entry pgturbohybrid_dense_local_expansion_options[] = {
 	{"off", PGTURBOHYBRID_DENSE_LOCAL_EXPANSION_OFF, false},
 	{"auto", PGTURBOHYBRID_DENSE_LOCAL_EXPANSION_AUTO, false},
 	{"on", PGTURBOHYBRID_DENSE_LOCAL_EXPANSION_ON, false},
+	{NULL, 0, false}
+};
+
+static const struct config_enum_entry pgturbohybrid_payload_entry_seeding_options[] = {
+	{"off", PGTURBOHYBRID_PAYLOAD_ENTRY_SEEDING_OFF, false},
+	{"auto", PGTURBOHYBRID_PAYLOAD_ENTRY_SEEDING_AUTO, false},
+	{"on", PGTURBOHYBRID_PAYLOAD_ENTRY_SEEDING_ON, false},
+	{NULL, 0, false}
+};
+
+static const struct config_enum_entry pgturbohybrid_final_diversity_options[] = {
+	{"off", PGTURBOHYBRID_FINAL_DIVERSITY_OFF, false},
+	{"group_payload", PGTURBOHYBRID_FINAL_DIVERSITY_GROUP_PAYLOAD, false},
 	{NULL, 0, false}
 };
 
@@ -263,6 +326,7 @@ typedef struct PgturbohybridProfileDefaults
 	const char *denseAdaptiveWidening;
 	const char *denseAdaptiveWideningMultiplier;
 	const char *denseAdaptiveWideningMaxMultiplier;
+	const char *denseUncertaintyRetry;
 } PgturbohybridProfileDefaults;
 
 static relopt_enum_elt_def pgturbohybrid_routing_relopt_options[] = {
@@ -278,6 +342,14 @@ static relopt_enum_elt_def pgturbohybrid_native_segments_relopt_options[] = {
 	{"2", 2},
 	{"4", 4},
 	{"8", 8},
+	{NULL, 0}
+};
+
+static relopt_enum_elt_def pgturbohybrid_entry_sidecar_strategy_relopt_options[] = {
+	{"hash", PGTURBOHYBRID_ENTRY_SIDECAR_HASH},
+	{"farthest_code", PGTURBOHYBRID_ENTRY_SIDECAR_FARTHEST_CODE},
+	{"level_covering", PGTURBOHYBRID_ENTRY_SIDECAR_LEVEL_COVERING},
+	{"hybrid_level_covering", PGTURBOHYBRID_ENTRY_SIDECAR_HYBRID_LEVEL_COVERING},
 	{NULL, 0}
 };
 
@@ -424,6 +496,38 @@ PgturbohybridBm25HybridBoundModeName(int mode)
 			return "safe";
 		case PGTURBOHYBRID_BM25_HYBRID_BOUND_APPROX:
 			return "approx";
+		default:
+			return "unknown";
+	}
+}
+
+const char *
+PgturbohybridBm25HeapTSVectorRerankModeName(int mode)
+{
+	switch ((PgturbohybridBm25HeapTSVectorRerankMode) mode)
+	{
+		case PGTURBOHYBRID_BM25_HEAP_TSVECTOR_RERANK_OFF:
+			return "off";
+		case PGTURBOHYBRID_BM25_HEAP_TSVECTOR_RERANK_TOPK:
+			return "topk";
+		case PGTURBOHYBRID_BM25_HEAP_TSVECTOR_RERANK_BAND:
+			return "band";
+		case PGTURBOHYBRID_BM25_HEAP_TSVECTOR_RERANK_AUTO:
+			return "auto";
+		default:
+			return "unknown";
+	}
+}
+
+const char *
+PgturbohybridFinalDiversityName(int mode)
+{
+	switch ((PgturbohybridFinalDiversityMode) mode)
+	{
+		case PGTURBOHYBRID_FINAL_DIVERSITY_OFF:
+			return "off";
+		case PGTURBOHYBRID_FINAL_DIVERSITY_GROUP_PAYLOAD:
+			return "group_payload";
 		default:
 			return "unknown";
 	}
@@ -605,6 +709,11 @@ PgturbohybridProfileDefaultsFor(int profile, PgturbohybridProfileDefaults *defau
 	defaults->denseAdaptiveWidening = "off";
 	defaults->denseAdaptiveWideningMultiplier = "2.0";
 	defaults->denseAdaptiveWideningMaxMultiplier = "4.0";
+	/*
+	 * Keep bounded retry opt-in until retrieval-quality grids show a stable
+	 * quality win with acceptable p95/p99 cost for the target workload.
+	 */
+	defaults->denseUncertaintyRetry = "off";
 
 	switch ((PgturbohybridProfile) profile)
 	{
@@ -704,6 +813,7 @@ PgturbohybridProfileDefaultsFor(int profile, PgturbohybridProfileDefaults *defau
 			defaults->denseAdaptiveWidening = "auto";
 			defaults->denseAdaptiveWideningMultiplier = "2.0";
 			defaults->denseAdaptiveWideningMaxMultiplier = "2.0";
+			defaults->denseUncertaintyRetry = "auto";
 			break;
 		case PGTURBOHYBRID_PROFILE_LATENCY:
 		default:
@@ -771,6 +881,8 @@ PgturbohybridApplyProfileDefaults(void)
 										 defaults.denseAdaptiveWideningMultiplier);
 	PgturbohybridSetDynamicDefaultString("turbohybrid.dense_adaptive_widening_max_multiplier",
 										 defaults.denseAdaptiveWideningMaxMultiplier);
+	PgturbohybridSetDynamicDefaultString("turbohybrid.dense_uncertainty_retry",
+										 defaults.denseUncertaintyRetry);
 }
 
 static void
@@ -946,6 +1058,12 @@ typedef struct PgturbohybridLastScanStats
 	uint64		fusionHeapReplacements;
 	bool		fusionGenerationArrayReused;
 	bool		fusionGenerationArrayReset;
+	int			finalDiversityMode;
+	int32		finalDiversityPayloadSlot;
+	uint32		finalDiversityPoolSize;
+	uint32		finalDiversitySelected;
+	uint64		finalDiversityDuplicateGroupsSuppressed;
+	uint64		finalDiversityUs;
 	uint32		bothMatch;
 	uint32		denseOnly;
 	uint32		bm25Only;
@@ -983,6 +1101,11 @@ typedef struct PgturbohybridLastScanStats
 	uint64		bm25FusedScoreBoundBlocksPruned;
 	uint64		bm25FusedScoreBoundCandidatesPruned;
 	uint32		bm25CandidatesScored;
+	int			bm25HeapTSVectorRerankMode;
+	uint32		bm25HeapTSVectorRerankCount;
+	uint64		bm25HeapTSVectorRerankFetchUs;
+	uint64		bm25HeapTSVectorRerankScoreUs;
+	bool		bm25HeapTSVectorRerankTopKChanged;
 	uint64		bm25CacheBytes;
 	uint32		bm25CacheLexiconEntries;
 	bool		bm25CacheHit;
@@ -1047,6 +1170,12 @@ typedef struct PgturbohybridLastScanStats
 	uint64		bm25Prefetches;
 	bool		fastWeightedEnabled;
 	double		fastWeightedAlpha;
+	bool		calibratedFusionEnabled;
+	char		calibratedFusionQueryShape[32];
+	double		calibratedFusionAlphaEffective;
+	double		calibratedFusionBothMatchBonus;
+	char		calibratedFusionDenseNormMode[16];
+	char		calibratedFusionBm25NormMode[16];
 	char		bm25NormMode[16];
 	char		denseNormMode[16];
 	char		hybridBudgetPolicy[16];
@@ -1109,10 +1238,37 @@ PgturbohybridGetLastScanStatsSnapshot(PgturbohybridScanStatsSnapshot *stats)
 		pgturbohybrid_last_scan_state.bm25FusedScoreBoundBlocksPruned;
 	stats->bm25FusedScoreBoundCandidatesPruned =
 		pgturbohybrid_last_scan_state.bm25FusedScoreBoundCandidatesPruned;
+	strlcpy(stats->bm25HeapTSVectorRerankMode,
+			PgturbohybridBm25HeapTSVectorRerankModeName(
+				pgturbohybrid_last_scan_state.bm25HeapTSVectorRerankMode),
+			sizeof(stats->bm25HeapTSVectorRerankMode));
+	stats->bm25HeapTSVectorRerankCount =
+		pgturbohybrid_last_scan_state.bm25HeapTSVectorRerankCount;
+	stats->bm25HeapTSVectorRerankFetchUs =
+		pgturbohybrid_last_scan_state.bm25HeapTSVectorRerankFetchUs;
+	stats->bm25HeapTSVectorRerankScoreUs =
+		pgturbohybrid_last_scan_state.bm25HeapTSVectorRerankScoreUs;
+	stats->bm25HeapTSVectorRerankTopKChanged =
+		pgturbohybrid_last_scan_state.bm25HeapTSVectorRerankTopKChanged;
 	stats->fastWeightedEnabled =
 		pgturbohybrid_last_scan_state.fastWeightedEnabled;
 	stats->fastWeightedAlpha =
 		pgturbohybrid_last_scan_state.fastWeightedAlpha;
+	stats->calibratedFusionEnabled =
+		pgturbohybrid_last_scan_state.calibratedFusionEnabled;
+	strlcpy(stats->calibratedFusionQueryShape,
+			pgturbohybrid_last_scan_state.calibratedFusionQueryShape,
+			sizeof(stats->calibratedFusionQueryShape));
+	stats->calibratedFusionAlphaEffective =
+		pgturbohybrid_last_scan_state.calibratedFusionAlphaEffective;
+	stats->calibratedFusionBothMatchBonus =
+		pgturbohybrid_last_scan_state.calibratedFusionBothMatchBonus;
+	strlcpy(stats->calibratedFusionDenseNormMode,
+			pgturbohybrid_last_scan_state.calibratedFusionDenseNormMode,
+			sizeof(stats->calibratedFusionDenseNormMode));
+	strlcpy(stats->calibratedFusionBm25NormMode,
+			pgturbohybrid_last_scan_state.calibratedFusionBm25NormMode,
+			sizeof(stats->calibratedFusionBm25NormMode));
 	strlcpy(stats->bm25NormMode,
 			pgturbohybrid_last_scan_state.bm25NormMode,
 			sizeof(stats->bm25NormMode));
@@ -1145,6 +1301,20 @@ PgturbohybridGetLastScanStatsSnapshot(PgturbohybridScanStatsSnapshot *stats)
 		pgturbohybrid_last_scan_state.fusionGenerationArrayReused;
 	stats->fusionGenerationArrayReset =
 		pgturbohybrid_last_scan_state.fusionGenerationArrayReset;
+	strlcpy(stats->finalDiversityMode,
+			PgturbohybridFinalDiversityName(
+				pgturbohybrid_last_scan_state.finalDiversityMode),
+			sizeof(stats->finalDiversityMode));
+	stats->finalDiversityPayloadSlot =
+		pgturbohybrid_last_scan_state.finalDiversityPayloadSlot;
+	stats->finalDiversityPoolSize =
+		pgturbohybrid_last_scan_state.finalDiversityPoolSize;
+	stats->finalDiversitySelected =
+		pgturbohybrid_last_scan_state.finalDiversitySelected;
+	stats->finalDiversityDuplicateGroupsSuppressed =
+		pgturbohybrid_last_scan_state.finalDiversityDuplicateGroupsSuppressed;
+	stats->finalDiversityUs =
+		pgturbohybrid_last_scan_state.finalDiversityUs;
 	stats->denseElapsedUs = pgturbohybrid_last_scan_state.denseElapsedUs;
 	stats->bm25ElapsedUs = pgturbohybrid_last_scan_state.bm25ElapsedUs;
 	stats->fusionElapsedUs = pgturbohybrid_last_scan_state.fusionElapsedUs;
@@ -1873,6 +2043,61 @@ PgturbohybridChooseAdaptiveHybridBudget(PgturbohybridQueryHeader *query,
 	PgturbohybridApplyHybridBudgetChoice(query, originalQuery, choice);
 }
 
+static int
+PgturbohybridHybridShapeFromSignals(PgturbohybridQueryHeader *query,
+							   const PgturbohybridBm25QuerySignals *signals,
+							   double denseProbeGap, bool denseProbeAvailable)
+{
+	bool		hasVector =
+		(query->flags & PGTURBOHYBRID_QUERY_FLAG_HAS_VECTOR) != 0;
+	bool		hasTsQuery =
+		(query->flags & PGTURBOHYBRID_QUERY_FLAG_HAS_TSQUERY) != 0;
+	bool		rare;
+	bool		broad;
+
+	if (!hasVector || !hasTsQuery)
+		return PGTURBOHYBRID_HYBRID_SHAPE_NOT_HYBRID;
+	if (signals == NULL || !signals->valid)
+		return PGTURBOHYBRID_HYBRID_SHAPE_MIXED;
+
+	rare = signals->hasIdentifierToken ||
+		signals->maxIdf >= 2.8 ||
+		(signals->minPostings > 0 &&
+		 signals->docCount > 0 &&
+		 signals->minPostings <= Max(4U, signals->docCount / 20U));
+	broad = !signals->hasIdentifierToken &&
+		signals->queryTerms >= 2 &&
+		(signals->maxIdf < 1.5 ||
+		 (signals->minPostings > 0 &&
+		  signals->docCount > 0 &&
+		  signals->minPostings >= Max(1U, signals->docCount / 2U)));
+
+	if (denseProbeAvailable && denseProbeGap >= 0.08 && !rare)
+		broad = true;
+
+	if (rare)
+		return PGTURBOHYBRID_HYBRID_SHAPE_RARE_IDENTIFIER;
+	if (broad)
+		return PGTURBOHYBRID_HYBRID_SHAPE_BROAD_NATURAL_LANGUAGE;
+	return PGTURBOHYBRID_HYBRID_SHAPE_MIXED;
+}
+
+static int
+PgturbohybridHybridShapeFromName(const char *name)
+{
+	if (name == NULL || name[0] == '\0')
+		return PGTURBOHYBRID_HYBRID_SHAPE_MIXED;
+	if (strcmp(name, "rare_identifier") == 0)
+		return PGTURBOHYBRID_HYBRID_SHAPE_RARE_IDENTIFIER;
+	if (strcmp(name, "broad_natural_language") == 0)
+		return PGTURBOHYBRID_HYBRID_SHAPE_BROAD_NATURAL_LANGUAGE;
+	if (strcmp(name, "not_hybrid") == 0)
+		return PGTURBOHYBRID_HYBRID_SHAPE_NOT_HYBRID;
+	if (strcmp(name, "fixed") == 0)
+		return PGTURBOHYBRID_HYBRID_SHAPE_FIXED;
+	return PGTURBOHYBRID_HYBRID_SHAPE_MIXED;
+}
+
 static void
 PgturbohybridMaybeApplyDenseBm25Budget(PgturbohybridQueryHeader *query,
 								  const TqDenseCandidate *dense,
@@ -2127,6 +2352,276 @@ PgturbohybridSelectTopN(PgturbohybridResult *items, int itemCount, int target,
 	return heapCount;
 }
 
+typedef struct PgturbohybridFinalDiversityCandidate
+{
+	PgturbohybridResult result;
+	int32		groupValue;
+	bool		selected;
+} PgturbohybridFinalDiversityCandidate;
+
+static int
+PgturbohybridFinalDiversityDuplicateCount(const PgturbohybridFinalDiversityCandidate *candidates,
+										  int count)
+{
+	int			duplicates = 0;
+
+	for (int i = 0; i < count; i++)
+	{
+		bool		seen = false;
+
+		for (int j = 0; j < i; j++)
+		{
+			if (candidates[j].groupValue == candidates[i].groupValue)
+			{
+				seen = true;
+				break;
+			}
+		}
+		if (seen)
+			duplicates++;
+	}
+
+	return duplicates;
+}
+
+static bool
+PgturbohybridFinalDiversityGroupSeen(const int32 *groups, int count,
+									 int32 groupValue)
+{
+	for (int i = 0; i < count; i++)
+	{
+		if (groups[i] == groupValue)
+			return true;
+	}
+	return false;
+}
+
+static bool
+PgturbohybridFinalDiversityNodeSelected(const PgturbohybridFinalDiversityCandidate *selected,
+										int count,
+										uint32 nodeId)
+{
+	for (int i = 0; i < count; i++)
+	{
+		if (selected[i].result.nodeId == nodeId)
+			return true;
+	}
+	return false;
+}
+
+static bool
+PgturbohybridApplyFinalDiversity(IndexScanDesc scan,
+								 PgturbohybridResult *merged,
+								 int mergedCount,
+								 int selectionCount,
+								 int emitCount,
+								 MemoryContext memoryContext,
+								 PgturbohybridResult **finalResults,
+								 uint64 *heapReplacements,
+								 PgturbohybridLastScanStats *stats)
+{
+	PgturbohybridGraphScanOpaque so = (PgturbohybridGraphScanOpaque) scan->opaque;
+	PgturbohybridGraphMetaPageData meta;
+	PgturbohybridGraphScanStorage storage;
+	PgturbohybridResult *poolResults = NULL;
+	PgturbohybridFinalDiversityCandidate *candidates;
+	PgturbohybridFinalDiversityCandidate *selectedCandidates;
+	int32	   *selectedGroups;
+	int			payloadSlot = pgturbohybrid_final_diversity_payload_slot;
+	int			poolMultiplier = Max(pgturbohybrid_final_diversity_pool_multiplier, 1);
+	int			poolCount;
+	int			selectedCount = 0;
+	double		bestScore;
+	double		worstScore;
+	double		scoreRange;
+	double		lambda = pgturbohybrid_final_diversity_lambda;
+	int			beforeDuplicates;
+	int			afterDuplicates;
+	instr_time	start;
+	instr_time	lockStart;
+	bool		applied = false;
+
+	stats->finalDiversityMode = pgturbohybrid_final_diversity;
+	stats->finalDiversityPayloadSlot = payloadSlot;
+
+	if (pgturbohybrid_final_diversity !=
+		PGTURBOHYBRID_FINAL_DIVERSITY_GROUP_PAYLOAD)
+		return false;
+	if (selectionCount <= 0 || emitCount <= 0 || mergedCount <= selectionCount)
+		return false;
+	if (payloadSlot < 0 || so == NULL)
+		return false;
+
+	INSTR_TIME_SET_CURRENT(start);
+
+	if (!PgturbohybridGraphReadMeta(scan->indexRelation, &meta) ||
+		meta.tqNodeCount == 0 ||
+		payloadSlot >= (int) meta.tqPayloadCount)
+	{
+		stats->finalDiversityUs = PgturbohybridElapsedUs(start);
+		return false;
+	}
+
+	poolCount = (int) Min((int64) mergedCount,
+						  (int64) selectionCount * (int64) poolMultiplier);
+	if (poolCount <= selectionCount)
+	{
+		stats->finalDiversityUs = PgturbohybridElapsedUs(start);
+		return false;
+	}
+
+	if (poolCount < mergedCount)
+		poolCount = PgturbohybridSelectTopN(merged, mergedCount, poolCount,
+											&poolResults, memoryContext,
+											heapReplacements);
+	else
+	{
+		if (mergedCount > 1)
+			qsort(merged, mergedCount, sizeof(PgturbohybridResult),
+				  PgturbohybridScoreCompare);
+		poolResults = merged;
+	}
+
+	stats->finalDiversityPoolSize = poolCount;
+
+	candidates = MemoryContextAllocZero(memoryContext,
+										sizeof(*candidates) * Max(poolCount, 1));
+	selectedCandidates = MemoryContextAllocZero(memoryContext,
+											   sizeof(*selectedCandidates) *
+											   Max(selectionCount, 1));
+	selectedGroups = MemoryContextAllocZero(memoryContext,
+											sizeof(int32) * Max(selectionCount, 1));
+
+	INSTR_TIME_SET_CURRENT(lockStart);
+	LockPage(scan->indexRelation, PGTURBOHYBRID_GRAPH_SCAN_LOCK, ShareLock);
+	so->graphScanLockWaitUs += PgturbohybridElapsedUs(lockStart);
+	PG_TRY();
+	{
+		PgturbohybridGraphInitScanStorage(scan->indexRelation, &meta, &storage,
+										  NULL);
+
+		for (int i = 0; i < poolCount; i++)
+		{
+			int32		payloadValue;
+
+			if (!PgturbohybridGraphLoadPayloadValue(scan->indexRelation, so,
+													&meta, &storage,
+													poolResults[i].nodeId,
+													payloadSlot,
+													&payloadValue))
+				goto diversity_done;
+
+			candidates[i].result = poolResults[i];
+			candidates[i].groupValue = payloadValue;
+		}
+
+		bestScore = candidates[0].result.fusedScore;
+		worstScore = candidates[0].result.fusedScore;
+		for (int i = 1; i < poolCount; i++)
+		{
+			bestScore = Max(bestScore, candidates[i].result.fusedScore);
+			worstScore = Min(worstScore, candidates[i].result.fusedScore);
+		}
+		scoreRange = bestScore - worstScore;
+		if (scoreRange <= 0.0 || isnan(scoreRange) || isinf(scoreRange))
+			scoreRange = 1.0;
+
+		beforeDuplicates =
+			PgturbohybridFinalDiversityDuplicateCount(candidates, selectionCount);
+
+		while (selectedCount < selectionCount)
+		{
+			int			bestIndex = -1;
+			double		bestDiversityScore = -HUGE_VAL;
+
+			CHECK_FOR_INTERRUPTS();
+			for (int i = 0; i < poolCount; i++)
+			{
+				double		relevance;
+				double		penalty;
+				double		diversityScore;
+
+				if (candidates[i].selected)
+					continue;
+
+				relevance = (candidates[i].result.fusedScore - worstScore) /
+					scoreRange;
+				penalty = PgturbohybridFinalDiversityGroupSeen(selectedGroups,
+															   selectedCount,
+															   candidates[i].groupValue) ? 1.0 : 0.0;
+				diversityScore = lambda * relevance - (1.0 - lambda) * penalty;
+				if (bestIndex < 0 ||
+					diversityScore > bestDiversityScore ||
+					(diversityScore == bestDiversityScore &&
+					 PgturbohybridScoreCompare(&candidates[i].result,
+											   &candidates[bestIndex].result) < 0))
+				{
+					bestIndex = i;
+					bestDiversityScore = diversityScore;
+				}
+			}
+
+			if (bestIndex < 0)
+				break;
+
+			candidates[bestIndex].selected = true;
+			selectedCandidates[selectedCount] = candidates[bestIndex];
+			selectedGroups[selectedCount] = candidates[bestIndex].groupValue;
+			selectedCount++;
+		}
+
+		if (selectedCount == selectionCount)
+		{
+			PgturbohybridResult *out;
+			int			outCount = Min(emitCount, mergedCount);
+			int			outIndex = 0;
+
+			afterDuplicates =
+				PgturbohybridFinalDiversityDuplicateCount(selectedCandidates,
+														  selectedCount);
+			out = MemoryContextAllocZero(memoryContext,
+										 sizeof(PgturbohybridResult) *
+										 Max(outCount, 1));
+			for (int i = 0; i < selectionCount && outIndex < outCount; i++)
+				out[outIndex++] = selectedCandidates[i].result;
+
+			if (outIndex < outCount)
+			{
+				if (poolResults != merged && mergedCount > 1)
+					qsort(merged, mergedCount, sizeof(PgturbohybridResult),
+						  PgturbohybridScoreCompare);
+				for (int i = 0; i < mergedCount && outIndex < outCount; i++)
+				{
+					if (PgturbohybridFinalDiversityNodeSelected(selectedCandidates,
+																selectedCount,
+																merged[i].nodeId))
+						continue;
+					out[outIndex++] = merged[i];
+				}
+			}
+			*finalResults = out;
+
+			stats->finalDiversitySelected = selectedCount;
+			stats->finalDiversityDuplicateGroupsSuppressed =
+				beforeDuplicates > afterDuplicates ?
+				(uint64) (beforeDuplicates - afterDuplicates) : 0;
+			applied = true;
+		}
+diversity_done:
+		;
+	}
+	PG_CATCH();
+	{
+		UnlockPage(scan->indexRelation, PGTURBOHYBRID_GRAPH_SCAN_LOCK, ShareLock);
+		PG_RE_THROW();
+	}
+	PG_END_TRY();
+	UnlockPage(scan->indexRelation, PGTURBOHYBRID_GRAPH_SCAN_LOCK, ShareLock);
+
+	stats->finalDiversityUs = PgturbohybridElapsedUs(start);
+	return applied;
+}
+
 static void
 PgturbohybridAddDenseCandidate(PgturbohybridResult *item,
 							   const TqDenseCandidate *candidate)
@@ -2220,6 +2715,42 @@ static double
 PgturbohybridFastWeightedDenseContribution(double alpha, double similarity)
 {
 	return alpha * PgturbohybridFastWeightedDenseNormalize(similarity);
+}
+
+static double
+PgturbohybridClampUnit(double value)
+{
+	if (isnan(value) || isinf(value))
+		return 0.5;
+	if (value < 0.0)
+		return 0.0;
+	if (value > 1.0)
+		return 1.0;
+	return value;
+}
+
+static double
+PgturbohybridCalibratedFusionAlpha(PgturbohybridQueryHeader *query,
+								   int queryShape)
+{
+	if ((query->flags & PGTURBOHYBRID_QUERY_FLAG_ALPHA_IS_SET) != 0)
+		return PgturbohybridClampUnit(query->alpha);
+
+	switch ((PgturbohybridHybridAdaptiveShape) queryShape)
+	{
+		case PGTURBOHYBRID_HYBRID_SHAPE_RARE_IDENTIFIER:
+			return PgturbohybridClampUnit(
+				pgturbohybrid_calibrated_fusion_identifier_bm25_alpha);
+		case PGTURBOHYBRID_HYBRID_SHAPE_BROAD_NATURAL_LANGUAGE:
+			return PgturbohybridClampUnit(
+				pgturbohybrid_calibrated_fusion_broad_dense_alpha);
+		case PGTURBOHYBRID_HYBRID_SHAPE_MIXED:
+		case PGTURBOHYBRID_HYBRID_SHAPE_FIXED:
+		case PGTURBOHYBRID_HYBRID_SHAPE_NOT_HYBRID:
+		default:
+			return PgturbohybridClampUnit(
+				pgturbohybrid_calibrated_fusion_default_alpha);
+	}
 }
 
 static int
@@ -2418,8 +2949,208 @@ PgturbohybridApplyBm25OnlyExactRescore(IndexScanDesc scan,
 	UnlockPage(scan->indexRelation, PGTURBOHYBRID_GRAPH_SCAN_LOCK, ShareLock);
 }
 
+static bool
+PgturbohybridTSVectorHasPositions(TSVector vector)
+{
+	WordEntry  *entries;
+
+	if (vector == NULL)
+		return false;
+	entries = ARRPTR(vector);
+	for (int i = 0; i < vector->size; i++)
+	{
+		if (POSDATALEN(vector, &entries[i]) > 0)
+			return true;
+	}
+	return false;
+}
+
+static int
+PgturbohybridBm25ResultCompare(const void *a, const void *b)
+{
+	const PgturbohybridBm25Result *ra = (const PgturbohybridBm25Result *) a;
+	const PgturbohybridBm25Result *rb = (const PgturbohybridBm25Result *) b;
+
+	if (ra->bm25Score > rb->bm25Score)
+		return -1;
+	if (ra->bm25Score < rb->bm25Score)
+		return 1;
+	return (ra->nodeId > rb->nodeId) - (ra->nodeId < rb->nodeId);
+}
+
+static int
+PgturbohybridBm25HeapTSVectorRerankLimit(PgturbohybridQueryHeader *query,
+										 TSQuery tsquery, int count,
+										 int autoBudgetLimit)
+{
+	int			finalTarget;
+	int64		limit;
+
+	if (count <= 0 ||
+		pgturbohybrid_bm25_heap_tsvector_rerank ==
+		PGTURBOHYBRID_BM25_HEAP_TSVECTOR_RERANK_OFF)
+		return 0;
+	if (tsquery == NULL)
+		return 0;
+
+	if (pgturbohybrid_bm25_heap_tsvector_rerank ==
+		PGTURBOHYBRID_BM25_HEAP_TSVECTOR_RERANK_AUTO &&
+		!PgturbohybridBm25QueryHasPhrase(tsquery))
+		return 0;
+
+	finalTarget = PgturbohybridBudgetFinalTarget(query, autoBudgetLimit);
+	if (finalTarget <= 0)
+		finalTarget = PGTURBOHYBRID_DEFAULT_FINAL_K;
+
+	if (pgturbohybrid_bm25_heap_tsvector_rerank ==
+		PGTURBOHYBRID_BM25_HEAP_TSVECTOR_RERANK_TOPK)
+		limit = finalTarget;
+	else
+		limit = (int64) finalTarget *
+			Max(pgturbohybrid_bm25_heap_tsvector_rerank_multiplier, 1);
+
+	return (int) Min((int64) count, limit);
+}
+
 static void
-PgturbohybridScoreResults(PgturbohybridScanState *state, PgturbohybridResult *results, int count)
+PgturbohybridBm25HeapTSVectorRerank(IndexScanDesc scan,
+									PgturbohybridQueryHeader *query,
+									PgturbohybridBm25Result *results,
+									int count, int autoBudgetLimit,
+									PgturbohybridBm25QueryStats *stats)
+{
+	TSQuery		tsquery;
+	Relation	heap;
+	TupleDesc	desc;
+	TupleTableSlot *slot;
+	AttrNumber	lexicalAttno;
+	uint32	   *beforeTopK = NULL;
+	int			beforeTopKCount = 0;
+	int			limit;
+	int			rescored = 0;
+	instr_time	fetchStart;
+	instr_time	scoreStart;
+
+	if (stats != NULL)
+		stats->heapTsvectorRerankMode =
+			pgturbohybrid_bm25_heap_tsvector_rerank;
+
+	if (scan == NULL || scan->heapRelation == NULL ||
+		scan->indexRelation == NULL || scan->indexRelation->rd_index == NULL ||
+		results == NULL || stats == NULL ||
+		!PgturbohybridIndexHasLexical(scan->indexRelation))
+		return;
+
+	tsquery = PgturbohybridQueryGetTsQuery(query);
+	limit = PgturbohybridBm25HeapTSVectorRerankLimit(query, tsquery, count,
+													 autoBudgetLimit);
+	if (limit <= 0)
+		return;
+
+	lexicalAttno =
+		scan->indexRelation->rd_index->indkey.values[PGTURBOHYBRID_LEXICAL_KEY_INDEX];
+	heap = scan->heapRelation;
+	desc = RelationGetDescr(heap);
+	if (lexicalAttno <= 0 || lexicalAttno > desc->natts)
+		return;
+
+	beforeTopKCount = Min(PgturbohybridBudgetFinalTarget(query, autoBudgetLimit),
+						  count);
+	if (beforeTopKCount > 0)
+	{
+		beforeTopK = palloc(sizeof(uint32) * beforeTopKCount);
+		for (int i = 0; i < beforeTopKCount; i++)
+			beforeTopK[i] = results[i].nodeId;
+	}
+
+	slot = table_slot_create(heap, NULL);
+	for (int i = 0; i < limit; i++)
+	{
+		Datum		value;
+		bool		isnull;
+		bool		visible;
+		char	   *valuePtr;
+		TSVector	vector;
+		bool		hasPositions;
+		float4		rank;
+		double		adjustment;
+
+		CHECK_FOR_INTERRUPTS();
+
+		INSTR_TIME_SET_CURRENT(fetchStart);
+		visible = table_tuple_fetch_row_version(heap, &results[i].heaptid,
+												scan->xs_snapshot, slot);
+		stats->heapTsvectorRerankFetchUs += PgturbohybridElapsedUs(fetchStart);
+		if (!visible)
+		{
+			ExecClearTuple(slot);
+			continue;
+		}
+
+		value = slot_getattr(slot, lexicalAttno, &isnull);
+		if (isnull)
+		{
+			ExecClearTuple(slot);
+			continue;
+		}
+
+		valuePtr = DatumGetPointer(value);
+		vector = DatumGetTSVector(value);
+		hasPositions = PgturbohybridTSVectorHasPositions(vector);
+
+		INSTR_TIME_SET_CURRENT(scoreStart);
+		if (hasPositions)
+			rank = DatumGetFloat4(DirectFunctionCall2(ts_rankcd_tt,
+													  TSVectorGetDatum(vector),
+													  TSQueryGetDatum(tsquery)));
+		else
+			rank = DatumGetFloat4(DirectFunctionCall2(ts_rank_tt,
+													  TSVectorGetDatum(vector),
+													  TSQueryGetDatum(tsquery)));
+		stats->heapTsvectorRerankScoreUs += PgturbohybridElapsedUs(scoreStart);
+		if (isfinite(rank) && rank > 0.0f)
+		{
+			adjustment = pgturbohybrid_bm25_heap_tsvector_rerank_weight *
+				((double) rank / ((double) rank + 1.0));
+			results[i].bm25Score += adjustment;
+			rescored++;
+		}
+		if ((char *) vector != valuePtr)
+			pfree(vector);
+		ExecClearTuple(slot);
+	}
+	ExecDropSingleTupleTableSlot(slot);
+
+	if (rescored <= 0)
+	{
+		if (beforeTopK != NULL)
+			pfree(beforeTopK);
+		return;
+	}
+
+	qsort(results, count, sizeof(PgturbohybridBm25Result),
+		  PgturbohybridBm25ResultCompare);
+	for (int i = 0; i < count; i++)
+		results[i].rank = i + 1;
+
+	stats->heapTsvectorRerankCount = rescored;
+	if (beforeTopK != NULL)
+	{
+		for (int i = 0; i < beforeTopKCount; i++)
+		{
+			if (beforeTopK[i] != results[i].nodeId)
+			{
+				stats->heapTsvectorRerankTopKChanged = true;
+				break;
+			}
+		}
+		pfree(beforeTopK);
+	}
+}
+
+static void
+PgturbohybridScoreResults(PgturbohybridScanState *state, PgturbohybridResult *results,
+						  int count, PgturbohybridLastScanStats *stats)
 {
 	PgturbohybridQueryHeader *query = state->query;
 	double		minDense = get_float8_infinity();
@@ -2430,6 +3161,35 @@ PgturbohybridScoreResults(PgturbohybridScanState *state, PgturbohybridResult *re
 		query->alpha : 0.5;
 	uint16		fusion = pgturbohybrid_force_fusion != 0 ?
 		pgturbohybrid_force_fusion : query->fusion;
+
+	if (stats != NULL)
+	{
+		stats->calibratedFusionEnabled =
+			fusion == PGTURBOHYBRID_FUSION_CALIBRATED;
+		stats->calibratedFusionBothMatchBonus =
+			stats->calibratedFusionEnabled ?
+			PgturbohybridClampUnit(
+				pgturbohybrid_calibrated_fusion_both_match_bonus) : 0.0;
+		strlcpy(stats->calibratedFusionDenseNormMode,
+				stats->calibratedFusionEnabled ? "logistic" : "none",
+				sizeof(stats->calibratedFusionDenseNormMode));
+		strlcpy(stats->calibratedFusionBm25NormMode,
+				stats->calibratedFusionEnabled ? "saturating" : "none",
+				sizeof(stats->calibratedFusionBm25NormMode));
+		if (stats->calibratedFusionEnabled)
+		{
+			int			queryShape;
+
+			if (stats->calibratedFusionQueryShape[0] == '\0')
+				strlcpy(stats->calibratedFusionQueryShape, "mixed",
+						sizeof(stats->calibratedFusionQueryShape));
+			queryShape = PgturbohybridHybridShapeFromName(
+				stats->calibratedFusionQueryShape);
+			alpha = PgturbohybridCalibratedFusionAlpha(query, queryShape);
+		}
+		stats->calibratedFusionAlphaEffective =
+			stats->calibratedFusionEnabled ? alpha : 0.0;
+	}
 
 	if (fusion == PGTURBOHYBRID_FUSION_WEIGHTED)
 	{
@@ -2468,6 +3228,20 @@ PgturbohybridScoreResults(PgturbohybridScanState *state, PgturbohybridResult *re
 
 			results[i].fusedScore = alpha * denseNorm + (1.0 - alpha) * bm25Norm;
 		}
+		else if (fusion == PGTURBOHYBRID_FUSION_CALIBRATED)
+		{
+			double		denseNorm = results[i].hasDense ?
+				PgturbohybridFastWeightedDenseNormalize(results[i].denseSimilarity) : 0.0;
+			double		bm25Norm = results[i].hasBm25 ?
+				PgturbohybridBm25NormalizeSaturating(results[i].bm25Score) : 0.0;
+			double		bonus =
+				(results[i].hasDense && results[i].hasBm25) ?
+				PgturbohybridClampUnit(
+					pgturbohybrid_calibrated_fusion_both_match_bonus) : 0.0;
+
+			results[i].fusedScore =
+				alpha * denseNorm + (1.0 - alpha) * bm25Norm + bonus;
+		}
 		else
 		{
 			results[i].fusedScore =
@@ -2485,15 +3259,24 @@ PgturbohybridFinalizeFusedResults(IndexScanDesc scan,
 								  bool allowBm25OnlyExactRescore,
 								  MemoryContext memoryContext,
 								  PgturbohybridResult **finalResults,
-								  uint64 *heapReplacements)
+								  uint64 *heapReplacements,
+								  PgturbohybridLastScanStats *stats)
 {
 	int			finalCount;
 
 	if (allowBm25OnlyExactRescore)
 		PgturbohybridApplyBm25OnlyExactRescore(scan, state, merged, mergedCount);
-	PgturbohybridScoreResults(state, merged, mergedCount);
+	PgturbohybridScoreResults(state, merged, mergedCount, stats);
 
 	finalCount = PgturbohybridFinalTarget(state->query, mergedCount, limit);
+	if (PgturbohybridApplyFinalDiversity(scan, merged, mergedCount,
+										 PgturbohybridBudgetFinalTarget(state->query,
+																	   limit),
+										 finalCount,
+										 memoryContext, finalResults,
+										 heapReplacements, stats))
+		return finalCount;
+
 	if (finalCount < mergedCount)
 		finalCount = PgturbohybridSelectTopN(merged, mergedCount, finalCount,
 											 finalResults, memoryContext,
@@ -2693,7 +3476,8 @@ PgturbohybridFuseGenerationArray(IndexScanDesc scan,
 	return PgturbohybridFinalizeFusedResults(scan, state, merged, mergedCount,
 											 limit, false, memoryContext,
 											 finalResults,
-											 &stats->fusionHeapReplacements);
+											 &stats->fusionHeapReplacements,
+											 stats);
 }
 
 static void
@@ -2743,6 +3527,8 @@ PgturbohybridCollectScanResults(IndexScanDesc scan, PgturbohybridScanState *stat
 	bool		hasLexicalKey;
 	bool		denseBranchUsed = false;
 	bool		bm25BranchUsed = false;
+	uint16		requestedFusion;
+	int			hybridQueryShapeForStats;
 
 	if (state->collectDone)
 		return;
@@ -2751,6 +3537,8 @@ PgturbohybridCollectScanResults(IndexScanDesc scan, PgturbohybridScanState *stat
 	memset(&denseStats, 0, sizeof(denseStats));
 	memset(&bm25Stats, 0, sizeof(bm25Stats));
 	memset(&lastStats, 0, sizeof(lastStats));
+	lastStats.finalDiversityMode = PGTURBOHYBRID_FINAL_DIVERSITY_OFF;
+	lastStats.finalDiversityPayloadSlot = -1;
 	memset(&fusedBound, 0, sizeof(fusedBound));
 	memset(&hybridSignals, 0, sizeof(hybridSignals));
 	memset(&denseProbeStats, 0, sizeof(denseProbeStats));
@@ -2759,6 +3547,8 @@ PgturbohybridCollectScanResults(IndexScanDesc scan, PgturbohybridScanState *stat
 	autoBudgetLimit = PgturbohybridCurrentLimit();
 	scanQuery = PgturbohybridEffectiveQuery(originalQuery, autoBudgetLimit, so->tmpCtx);
 	state->query = scanQuery;
+	requestedFusion = pgturbohybrid_force_fusion != 0 ?
+		pgturbohybrid_force_fusion : scanQuery->fusion;
 	hasLexicalKey = PgturbohybridIndexHasLexical(scan->indexRelation);
 	so->graphFinalK = PgturbohybridBudgetFinalTarget(scanQuery, autoBudgetLimit);
 
@@ -2768,7 +3558,8 @@ PgturbohybridCollectScanResults(IndexScanDesc scan, PgturbohybridScanState *stat
 				(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
 				 errmsg("text_query requires a turbohybrid index with a tsvector key")));
 
-	if (pgturbohybrid_hybrid_budget_policy == PGTURBOHYBRID_HYBRID_BUDGET_ADAPTIVE &&
+	if ((pgturbohybrid_hybrid_budget_policy == PGTURBOHYBRID_HYBRID_BUDGET_ADAPTIVE ||
+		 requestedFusion == PGTURBOHYBRID_FUSION_CALIBRATED) &&
 		hasLexicalKey &&
 		(scanQuery->flags & PGTURBOHYBRID_QUERY_FLAG_HAS_TSQUERY) != 0)
 		(void) PgturbohybridBm25AnalyzeQuerySignals(scan->indexRelation,
@@ -2804,6 +3595,19 @@ PgturbohybridCollectScanResults(IndexScanDesc scan, PgturbohybridScanState *stat
 											denseProbeAvailable,
 											autoBudgetLimit,
 											&hybridBudgetChoice);
+	hybridQueryShapeForStats = hybridBudgetChoice.queryShape;
+	if (!hybridBudgetChoice.adaptive &&
+		requestedFusion == PGTURBOHYBRID_FUSION_CALIBRATED)
+		hybridQueryShapeForStats =
+			PgturbohybridHybridShapeFromSignals(scanQuery, &hybridSignals,
+											denseProbeGap,
+											denseProbeAvailable);
+	strlcpy(lastStats.hybridQueryShape,
+			PgturbohybridHybridQueryShapeName(hybridQueryShapeForStats),
+			sizeof(lastStats.hybridQueryShape));
+	strlcpy(lastStats.calibratedFusionQueryShape,
+			PgturbohybridHybridQueryShapeName(hybridQueryShapeForStats),
+			sizeof(lastStats.calibratedFusionQueryShape));
 	if (denseProbe != NULL && denseProbeCount > 0 &&
 		denseProbeK >= scanQuery->denseK)
 	{
@@ -2858,6 +3662,8 @@ PgturbohybridCollectScanResults(IndexScanDesc scan, PgturbohybridScanState *stat
 										 scanQuery->bm25K, useWand, so->tmpCtx,
 										 &bm25, &bm25Stats,
 										 fusedBound.enabled ? &fusedBound : NULL);
+		PgturbohybridBm25HeapTSVectorRerank(scan, scanQuery, bm25, bm25Count,
+											autoBudgetLimit, &bm25Stats);
 		lastStats.bm25ElapsedUs = PgturbohybridElapsedUs(phaseStart);
 	}
 
@@ -2930,7 +3736,8 @@ PgturbohybridCollectScanResults(IndexScanDesc scan, PgturbohybridScanState *stat
 													   mergedCount,
 													   autoBudgetLimit, true,
 													   so->tmpCtx, &merged,
-													   &lastStats.fusionHeapReplacements);
+													   &lastStats.fusionHeapReplacements,
+													   &lastStats);
 		strlcpy(lastStats.fusionStrategy, "hash",
 				sizeof(lastStats.fusionStrategy));
 		lastStats.fusionHeapSize = finalCount;
@@ -2980,7 +3787,8 @@ PgturbohybridCollectScanResults(IndexScanDesc scan, PgturbohybridScanState *stat
 													   mergedCount,
 													   autoBudgetLimit, true,
 													   so->tmpCtx, &merged,
-													   &lastStats.fusionHeapReplacements);
+													   &lastStats.fusionHeapReplacements,
+													   &lastStats);
 		strlcpy(lastStats.fusionStrategy, "sorted_merge",
 				sizeof(lastStats.fusionStrategy));
 		lastStats.fusionHeapSize = finalCount;
@@ -3089,6 +3897,15 @@ PgturbohybridCollectScanResults(IndexScanDesc scan, PgturbohybridScanState *stat
 	lastStats.bm25FusedScoreBoundCandidatesPruned =
 		bm25Stats.fusedScoreBoundCandidatesPruned;
 	lastStats.bm25CandidatesScored = bm25Stats.candidatesScored;
+	lastStats.bm25HeapTSVectorRerankMode = bm25Stats.heapTsvectorRerankMode;
+	lastStats.bm25HeapTSVectorRerankCount =
+		bm25Stats.heapTsvectorRerankCount;
+	lastStats.bm25HeapTSVectorRerankFetchUs =
+		bm25Stats.heapTsvectorRerankFetchUs;
+	lastStats.bm25HeapTSVectorRerankScoreUs =
+		bm25Stats.heapTsvectorRerankScoreUs;
+	lastStats.bm25HeapTSVectorRerankTopKChanged =
+		bm25Stats.heapTsvectorRerankTopKChanged;
 	lastStats.bm25CacheBytes = bm25Stats.cacheBytes;
 	lastStats.bm25CacheLexiconEntries = bm25Stats.cacheLexiconEntries;
 	lastStats.bm25CacheHit = bm25Stats.cacheHit;
@@ -3163,18 +3980,25 @@ PgturbohybridCollectScanResults(IndexScanDesc scan, PgturbohybridScanState *stat
 	lastStats.fastWeightedAlpha =
 		(scanQuery->flags & PGTURBOHYBRID_QUERY_FLAG_ALPHA_IS_SET) != 0 ?
 		scanQuery->alpha : 0.5;
+	lastStats.calibratedFusionEnabled =
+		requestedFusion == PGTURBOHYBRID_FUSION_CALIBRATED;
 	strlcpy(lastStats.bm25NormMode,
-			lastStats.fastWeightedEnabled ? "saturating" : "none",
+			(lastStats.fastWeightedEnabled || lastStats.calibratedFusionEnabled) ?
+			"saturating" : "none",
 			sizeof(lastStats.bm25NormMode));
 	strlcpy(lastStats.denseNormMode,
-			lastStats.fastWeightedEnabled ? "logistic" : "none",
+			(lastStats.fastWeightedEnabled || lastStats.calibratedFusionEnabled) ?
+			"logistic" : "none",
 			sizeof(lastStats.denseNormMode));
 	strlcpy(lastStats.hybridBudgetPolicy,
 			PgturbohybridHybridBudgetPolicyName(pgturbohybrid_hybrid_budget_policy),
 			sizeof(lastStats.hybridBudgetPolicy));
 	strlcpy(lastStats.hybridQueryShape,
-			PgturbohybridHybridQueryShapeName(hybridBudgetChoice.queryShape),
+			PgturbohybridHybridQueryShapeName(hybridQueryShapeForStats),
 			sizeof(lastStats.hybridQueryShape));
+	strlcpy(lastStats.calibratedFusionQueryShape,
+			PgturbohybridHybridQueryShapeName(hybridQueryShapeForStats),
+			sizeof(lastStats.calibratedFusionQueryShape));
 	lastStats.hybridDenseKChosen = scanQuery->denseK;
 	lastStats.hybridBm25KChosen = scanQuery->bm25K;
 	strlcpy(lastStats.hybridBudgetReason, hybridBudgetChoice.reason,
@@ -3921,6 +4745,7 @@ pgturbohybridamoptions(Datum reloptions, bool validate)
 		PGTURBOHYBRID_RELOPT_PARSE("exact_storage", RELOPT_TYPE_BOOL, tqExactStorage),
 		PGTURBOHYBRID_RELOPT_PARSE("entry_sidecar", RELOPT_TYPE_BOOL, entrySidecar),
 		PGTURBOHYBRID_RELOPT_PARSE("entry_sidecar_representatives", RELOPT_TYPE_INT, entrySidecarRepresentatives),
+		PGTURBOHYBRID_RELOPT_PARSE("entry_sidecar_strategy", RELOPT_TYPE_ENUM, entrySidecarStrategy),
 		PGTURBOHYBRID_RELOPT_PARSE("graph_backbone", RELOPT_TYPE_BOOL, graphBackbone),
 		PGTURBOHYBRID_RELOPT_PARSE("residual_rerank", RELOPT_TYPE_BOOL, residualRerank),
 		PGTURBOHYBRID_RELOPT_PARSE("residual_rerank_bytes", RELOPT_TYPE_INT, residualRerankBytes),
@@ -3954,11 +4779,13 @@ pgturbohybridamoptions(Datum reloptions, bool validate)
 	}
 
 	if (validate && opts != NULL &&
-		opts->tqBits != 1 && opts->tqBits != 2 && opts->tqBits != PGTURBOHYBRID_DEFAULT_BITS)
+		opts->tqBits != 1 && opts->tqBits != 2 &&
+		opts->tqBits != PGTURBOHYBRID_DEFAULT_BITS &&
+		opts->tqBits != 8)
 		ereport(ERROR,
 				(errcode(ERRCODE_INVALID_PARAMETER_VALUE),
 				 errmsg("invalid value %d for option \"quantization_bits\"", opts->tqBits),
-				 errdetail("Valid values are \"1\", \"2\", and \"4\".")));
+				 errdetail("Valid values are \"1\", \"2\", \"4\", and \"8\".")));
 
 	return (bytea *) opts;
 }
@@ -4014,7 +4841,7 @@ PgturbohybridInit(void)
 					   "Valid values are \"1\", \"2\", \"4\", \"8\", and \"auto\".",
 					   AccessExclusiveLock);
 	add_int_reloption(pgturbohybrid_relopt_kind, "quantization_bits", "Quantized vector code bit width",
-					  PGTURBOHYBRID_DEFAULT_INDEX_BITS, 1, PGTURBOHYBRID_DEFAULT_BITS, AccessExclusiveLock);
+					  PGTURBOHYBRID_DEFAULT_INDEX_BITS, 1, 8, AccessExclusiveLock);
 	add_bool_reloption(pgturbohybrid_relopt_kind, "exact_storage",
 					   "Store exact vectors in the dense pgturbohybrid index for final exact rescoring.",
 					   PGTURBOHYBRID_DEFAULT_EXACT_STORAGE, AccessExclusiveLock);
@@ -4026,6 +4853,12 @@ PgturbohybridInit(void)
 					  PGTURBOHYBRID_DEFAULT_ENTRY_SIDECAR_REPRESENTATIVES, 0,
 					  PGTURBOHYBRID_GRAPH_MAX_ENTRY_SIDECAR_REPRESENTATIVES,
 					  AccessExclusiveLock);
+	add_enum_reloption(pgturbohybrid_relopt_kind, "entry_sidecar_strategy",
+					   "Representative selection strategy for entry_sidecar.",
+					   pgturbohybrid_entry_sidecar_strategy_relopt_options,
+					   PGTURBOHYBRID_DEFAULT_ENTRY_SIDECAR_STRATEGY,
+					   "Valid values are \"hash\", \"farthest_code\", \"level_covering\", and \"hybrid_level_covering\".",
+					   AccessExclusiveLock);
 	add_bool_reloption(pgturbohybrid_relopt_kind, "graph_backbone",
 					   "Force adjacent level-0 graph edges during experimental dense graph builds.",
 					   PGTURBOHYBRID_DEFAULT_GRAPH_BACKBONE, AccessExclusiveLock);
@@ -4064,6 +4897,24 @@ PgturbohybridInit(void)
 							 "Only applies to turbohybrid_query(fusion => 'fast_weighted'); RRF and distribution-normalized weighted fusion do not use this pruning path.",
 							 &pgturbohybrid_fast_weighted_score_bound_pruning,
 							 true, PGC_USERSET, 0, NULL, NULL, NULL);
+	DefineCustomRealVariable("turbohybrid.calibrated_fusion_both_match_bonus",
+							 "Score bonus for calibrated fusion candidates that appear in both dense and BM25 branches",
+							 NULL, &pgturbohybrid_calibrated_fusion_both_match_bonus,
+							 0.06, 0.0, 1.0, PGC_USERSET, 0, NULL, NULL, NULL);
+	DefineCustomRealVariable("turbohybrid.calibrated_fusion_identifier_bm25_alpha",
+							 "Dense alpha used by calibrated fusion for rare identifier-like text queries",
+							 "Lower values give BM25 more weight.",
+							 &pgturbohybrid_calibrated_fusion_identifier_bm25_alpha,
+							 0.35, 0.0, 1.0, PGC_USERSET, 0, NULL, NULL, NULL);
+	DefineCustomRealVariable("turbohybrid.calibrated_fusion_broad_dense_alpha",
+							 "Dense alpha used by calibrated fusion for broad natural-language queries",
+							 "Higher values give dense similarity more weight.",
+							 &pgturbohybrid_calibrated_fusion_broad_dense_alpha,
+							 0.70, 0.0, 1.0, PGC_USERSET, 0, NULL, NULL, NULL);
+	DefineCustomRealVariable("turbohybrid.calibrated_fusion_default_alpha",
+							 "Dense alpha used by calibrated fusion for mixed/default query shapes",
+							 NULL, &pgturbohybrid_calibrated_fusion_default_alpha,
+							 0.50, 0.0, 1.0, PGC_USERSET, 0, NULL, NULL, NULL);
 	DefineCustomIntVariable("turbohybrid.max_union_candidates", "Maximum candidates retained while fusing dense and BM25 branches",
 							NULL, &pgturbohybrid_max_union_candidates,
 							100000, 0,
@@ -4118,6 +4969,23 @@ PgturbohybridInit(void)
 							 PGC_USERSET, 0,
 							 PgturbohybridCheckDenseHeapRescore,
 							 NULL, NULL);
+	DefineCustomEnumVariable("turbohybrid.dense_residual_rerank_mode",
+							 "Residual-sketch dense rerank mode for exact-free native graph scans",
+							 "off ignores stored residual sketches; fixed preserves the original fixed 0.03 sketch-similarity adjustment; calibrated scales and clamps the adjustment using the observed final-band distance spread.",
+							 &pgturbohybrid_dense_residual_rerank_mode,
+							 PGTURBOHYBRID_DENSE_RESIDUAL_RERANK_CALIBRATED,
+							 pgturbohybrid_dense_residual_rerank_mode_options,
+							 PGC_USERSET, 0, NULL, NULL, NULL);
+	DefineCustomRealVariable("turbohybrid.dense_residual_rerank_weight",
+							 "Residual-sketch calibrated rerank weight",
+							 "-1 uses the built-in auto weight; non-negative values multiply the final-band distance spread before clamping.",
+							 &pgturbohybrid_dense_residual_rerank_weight,
+							 -1.0, -1.0, 10.0, PGC_USERSET, 0, NULL, NULL, NULL);
+	DefineCustomRealVariable("turbohybrid.dense_residual_rerank_max_adjust_ratio",
+							 "Maximum calibrated residual-rerank adjustment as a fraction of final-band distance spread",
+							 NULL,
+							 &pgturbohybrid_dense_residual_rerank_max_adjust_ratio,
+							 0.15, 0.0, 1.0, PGC_USERSET, 0, NULL, NULL, NULL);
 	DefineCustomEnumVariable("turbohybrid.native_cache_policy",
 							 "Native dense graph cache policy",
 							 "Compatibility alias for turbohybrid.native_cache_scope.",
@@ -4205,6 +5073,26 @@ PgturbohybridInit(void)
 							 "Normalized score-gap threshold for automatic dense graph widening; 0 uses the built-in threshold",
 							 NULL, &pgturbohybrid_dense_adaptive_min_gap,
 							 0.0, 0.0, 1.0, PGC_USERSET, 0, NULL, NULL, NULL);
+	DefineCustomEnumVariable("turbohybrid.dense_uncertainty_retry",
+							 "Bounded dense graph uncertainty retry mode",
+							 "Valid values are off, auto, and on. Non-off modes may run one additional wider graph traversal when the first candidate band looks uncertain.",
+							 &pgturbohybrid_dense_uncertainty_retry,
+							 PGTURBOHYBRID_DENSE_UNCERTAINTY_RETRY_OFF,
+							 pgturbohybrid_dense_uncertainty_retry_options,
+							 PGC_USERSET, 0, NULL, NULL, NULL);
+	DefineCustomIntVariable("turbohybrid.dense_uncertainty_retry_max_passes",
+							"Maximum bounded retry passes for dense graph uncertainty retry",
+							"1 permits one bounded second traversal; 2 is accepted for future multi-pass experiments.",
+							&pgturbohybrid_dense_uncertainty_retry_max_passes,
+							1, 1, 2, PGC_USERSET, 0, NULL, NULL, NULL);
+	DefineCustomRealVariable("turbohybrid.dense_uncertainty_retry_multiplier",
+							 "Multiplier for dense uncertainty retry candidate target and ef_search",
+							 NULL, &pgturbohybrid_dense_uncertainty_retry_multiplier,
+							 1.5, 1.0, 8.0, PGC_USERSET, 0, NULL, NULL, NULL);
+	DefineCustomRealVariable("turbohybrid.dense_uncertainty_min_gap",
+							 "Normalized score-gap threshold for automatic dense uncertainty retry",
+							 NULL, &pgturbohybrid_dense_uncertainty_min_gap,
+							 0.03, 0.0, 1.0, PGC_USERSET, 0, NULL, NULL, NULL);
 	DefineCustomBoolVariable("turbohybrid.warn_linear_fallback",
 							 "Warn when unmapped heap filters make dense graph scans near-linear",
 							 "When enabled, emits DEBUG1 if an unmapped heap filter widens native dense candidate collection to a large fraction of the index.",
@@ -4230,6 +5118,45 @@ PgturbohybridInit(void)
 							"Maximum level-0 neighbors to score during local dense expansion",
 							NULL, &pgturbohybrid_dense_local_expansion_max_neighbors,
 							256, 1, 4096, PGC_USERSET, 0, NULL, NULL, NULL);
+	DefineCustomEnumVariable("turbohybrid.payload_entry_seeding",
+							 "Use INCLUDE int4 payload refs as dense graph entry seeds for payload-filtered scans",
+							 "auto/on sample existing payload refs for the active int4 equality filter and offer those nodes as graph entry points; off preserves global-only entry behavior.",
+							 &pgturbohybrid_payload_entry_seeding,
+							 PGTURBOHYBRID_PAYLOAD_ENTRY_SEEDING_AUTO,
+							 pgturbohybrid_payload_entry_seeding_options,
+							 PGC_USERSET, 0, NULL, NULL, NULL);
+	DefineCustomIntVariable("turbohybrid.payload_entry_seed_count",
+							"Maximum payload-local graph entry seeds sampled for a payload-filtered dense scan",
+							NULL, &pgturbohybrid_payload_entry_seed_count,
+							PGTURBOHYBRID_DEFAULT_PAYLOAD_ENTRY_SEED_COUNT, 1,
+							PGTURBOHYBRID_MAX_PAYLOAD_ENTRY_SEED_COUNT,
+							PGC_USERSET, 0, NULL, NULL, NULL);
+	DefineCustomEnumVariable("turbohybrid.final_diversity",
+							 "Final result diversity mode",
+							 "off preserves relevance order; group_payload greedily diversifies the final top-k using an existing int4 INCLUDE payload slot without fetching heap rows.",
+							 &pgturbohybrid_final_diversity,
+							 PGTURBOHYBRID_FINAL_DIVERSITY_OFF,
+							 pgturbohybrid_final_diversity_options,
+							 PGC_USERSET, 0, NULL, NULL, NULL);
+	DefineCustomIntVariable("turbohybrid.final_diversity_payload_slot",
+							"INCLUDE int4 payload slot used for final group diversity",
+							"-1 disables group-payload diversity until a slot is configured. Slot 0 is the first int4 INCLUDE payload stored by the turbohybrid index.",
+							&pgturbohybrid_final_diversity_payload_slot,
+							-1, -1, PGTURBOHYBRID_GRAPH_MAX_PAYLOADS - 1,
+							PGC_USERSET, 0, NULL, NULL, NULL);
+	DefineCustomRealVariable("turbohybrid.final_diversity_lambda",
+							 "Final diversity relevance weight",
+							 "1.0 preserves pure relevance scoring; lower values penalize duplicate payload groups more strongly.",
+							 &pgturbohybrid_final_diversity_lambda,
+							 PGTURBOHYBRID_FINAL_DIVERSITY_DEFAULT_LAMBDA,
+							 0.0, 1.0, PGC_USERSET, 0, NULL, NULL, NULL);
+	DefineCustomIntVariable("turbohybrid.final_diversity_pool_multiplier",
+							"Final diversity candidate pool multiplier",
+							"The bounded diversity pool is final_k multiplied by this value and capped by the merged candidate count.",
+							&pgturbohybrid_final_diversity_pool_multiplier,
+							PGTURBOHYBRID_FINAL_DIVERSITY_DEFAULT_POOL_MULTIPLIER,
+							1, PGTURBOHYBRID_FINAL_DIVERSITY_MAX_POOL_MULTIPLIER,
+							PGC_USERSET, 0, NULL, NULL, NULL);
 	DefineCustomEnumVariable("turbohybrid.bm25_strategy", "BM25 candidate generation strategy",
 							 "Valid values are auto, impact, impact_or, wand, daat_simd, and daat_hash.",
 							 &pgturbohybrid_bm25_strategy,
@@ -4268,6 +5195,23 @@ PgturbohybridInit(void)
 							 PGTURBOHYBRID_BM25_ACCUMULATOR_AUTO,
 							 pgturbohybrid_bm25_accumulator_mode_options,
 							 PGC_USERSET, 0, PgturbohybridCheckBm25AccumulatorMode, NULL, NULL);
+	DefineCustomEnumVariable("turbohybrid.bm25_heap_tsvector_rerank",
+							 "Heap-backed tsvector rerank policy for BM25 and hybrid scans",
+							 "Valid values are off, topk, band, and auto. The default off preserves indexed BM25 scoring; auto applies a bounded candidate-band rerank to phrase/proximity tsqueries.",
+							 &pgturbohybrid_bm25_heap_tsvector_rerank,
+							 PGTURBOHYBRID_BM25_HEAP_TSVECTOR_RERANK_OFF,
+							 pgturbohybrid_bm25_heap_tsvector_rerank_options,
+							 PGC_USERSET, 0, NULL, NULL, NULL);
+	DefineCustomIntVariable("turbohybrid.bm25_heap_tsvector_rerank_multiplier",
+							"Candidate-band multiplier for BM25 heap tsvector rerank",
+							"Only applies to band and auto modes; the fetch band is final_k multiplied by this value and capped by bm25_k.",
+							&pgturbohybrid_bm25_heap_tsvector_rerank_multiplier,
+							4, 1, 64, PGC_USERSET, 0, NULL, NULL, NULL);
+	DefineCustomRealVariable("turbohybrid.bm25_heap_tsvector_rerank_weight",
+							 "Maximum bounded BM25 score adjustment from heap tsvector ranking",
+							 "The adjustment is weight * rank / (rank + 1), so it is capped by this value.",
+							 &pgturbohybrid_bm25_heap_tsvector_rerank_weight,
+							 0.10, 0.0, 1.0, PGC_USERSET, 0, NULL, NULL, NULL);
 	DefineCustomEnumVariable("turbohybrid.hybrid_budget_policy",
 							 "Hybrid branch budget policy",
 							 "Valid values are fixed and adaptive. Adaptive is approximate and may change dense_k, bm25_k, final_k, and rrf_k for defaulted hybrid queries.",
