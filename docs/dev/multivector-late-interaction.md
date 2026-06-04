@@ -68,5 +68,27 @@ Expected complexity:
 
 - No int8/VNNI exact rerank.
 - No per-subnode exact float32 storage as the default.
-- No hybrid fusion before dense-only multivector correctness is proven.
+- No hybrid fusion before dense-only multivector correctness is proven; the MVP
+  hybrid path is document-level RRF only.
 - No on-disk format expansion without version or compatibility checks.
+
+## Scan Diagnostics
+
+`turbohybrid_last_scan_stats()` should make multivector cost drivers visible:
+
+- `multivector_query_vectors` and `multivector_subvector_searches` describe
+  `Q`, the number of query-token graph traversals.
+- `multivector_raw_subvector_hits` tracks bounded subnode hits across query
+  tokens.
+- `multivector_unique_docs`, `multivector_duplicate_doc_hits`, and
+  `multivector_maxsim_updates` describe the document-level MaxSim accumulator.
+- `multivector_doc_candidates` is the retained document candidate count before
+  final SQL output.
+- `multivector_exact_rerank_docs`, `multivector_exact_rerank_pairs`, and
+  `multivector_exact_kernel` describe bounded heap exact rerank work.
+- `multivector_accumulator_kind` and `multivector_memory_bytes_estimate` expose
+  whether the implementation stayed in touched-document memory, currently a
+  hash accumulator with expected `O(C * Q)` storage.
+
+Single-vector scans report multivector disabled, zero counters, and null
+multivector kernel / accumulator names.

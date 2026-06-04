@@ -42,6 +42,40 @@ SELECT turbohybrid_multivector_maxsim(
   turbohybrid_multivector(ARRAY['[2,0]'::vector, '[3,0]'::vector])
 ) AS negative_maxsim;
 
+CREATE TABLE sv_docs (
+  id int,
+  embedding vector(2)
+);
+
+INSERT INTO sv_docs VALUES
+  (1, '[1,0]'::vector),
+  (2, '[0,1]'::vector);
+
+CREATE INDEX sv_docs_embedding_idx ON sv_docs USING turbohybrid
+  (embedding vector_cosine_turbohybrid_ops);
+
+SET enable_seqscan = off;
+SELECT id FROM sv_docs
+  ORDER BY embedding <~> turbohybrid_query(vector_query => '[1,0]'::vector)
+  LIMIT 1;
+
+DO $$
+DECLARE
+	stats jsonb;
+BEGIN
+	stats := turbohybrid_last_scan_stats();
+	IF stats->>'multivector_enabled' <> 'false' OR
+		(stats->>'multivector_query_vectors')::int <> 0 OR
+		(stats->>'multivector_subvector_searches')::int <> 0 OR
+		stats->>'multivector_exact_kernel' IS NOT NULL OR
+		stats->>'multivector_accumulator_kind' IS NOT NULL THEN
+		RAISE EXCEPTION 'expected single-vector scan to clear multivector stats, got %', stats;
+	END IF;
+END
+$$;
+RESET enable_seqscan;
+DROP TABLE sv_docs;
+
 CREATE TABLE mv_docs (
   id int,
   colbert turbohybrid_multivector,
@@ -92,7 +126,21 @@ BEGIN
 		stats->>'dense_branch_used' <> 'true' OR
 		(stats->>'dense_candidates')::int < 1 OR
 		stats->>'exact_rescore_source' <> 'heap' OR
-		(stats->>'heap_rescore_count')::int < 1 THEN
+		(stats->>'heap_rescore_count')::int < 1 OR
+		stats->>'multivector_enabled' <> 'true' OR
+		(stats->>'multivector_query_vectors')::int <> 1 OR
+		(stats->>'multivector_doc_vectors_limit')::int < 1 OR
+		(stats->>'multivector_subvector_searches')::int <> 1 OR
+		(stats->>'multivector_raw_subvector_hits')::int < 1 OR
+		(stats->>'multivector_unique_docs')::int < 1 OR
+		(stats->>'multivector_maxsim_updates')::int < 1 OR
+		(stats->>'multivector_doc_candidates')::int < 1 OR
+		stats->>'multivector_exact_rerank_enabled' <> 'true' OR
+		(stats->>'multivector_exact_rerank_docs')::int < 1 OR
+		(stats->>'multivector_exact_rerank_pairs')::int < 1 OR
+		stats->>'multivector_exact_kernel' IS NULL OR
+		stats->>'multivector_accumulator_kind' <> 'hash' OR
+		(stats->>'multivector_memory_bytes_estimate')::bigint < 1 THEN
 		RAISE EXCEPTION 'expected indexed multivector dense scan, got %', stats;
 	END IF;
 END
@@ -112,7 +160,11 @@ BEGIN
 	stats := turbohybrid_last_scan_stats();
 	IF stats->>'index_used' <> 'true' OR
 		stats->>'exact_rescore_source' <> 'none' OR
-		(stats->>'heap_rescore_count')::int <> 0 THEN
+		(stats->>'heap_rescore_count')::int <> 0 OR
+		stats->>'multivector_exact_rerank_enabled' <> 'false' OR
+		(stats->>'multivector_exact_rerank_docs')::int <> 0 OR
+		(stats->>'multivector_exact_rerank_pairs')::int <> 0 OR
+		stats->>'multivector_exact_kernel' IS NOT NULL THEN
 		RAISE EXCEPTION 'expected multivector exact rerank off stats, got %', stats;
 	END IF;
 END

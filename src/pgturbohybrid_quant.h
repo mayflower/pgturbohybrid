@@ -337,6 +337,21 @@ typedef struct TqDenseCandidateStats
 	uint64		rescoreUs;
 	uint64		sortUs;
 	int			exactRescoreSource;
+	bool		multivectorEnabled;
+	uint32		multivectorQueryVectors;
+	uint32		multivectorDocVectorsLimit;
+	uint64		multivectorSubvectorSearches;
+	uint64		multivectorRawSubvectorHits;
+	uint64		multivectorUniqueDocs;
+	uint64		multivectorDuplicateDocHits;
+	uint64		multivectorMaxsimUpdates;
+	uint32		multivectorDocCandidates;
+	bool		multivectorExactRerankEnabled;
+	uint32		multivectorExactRerankDocs;
+	uint64		multivectorExactRerankPairs;
+	char		multivectorExactKernel[16];
+	char		multivectorAccumulatorKind[16];
+	uint64		multivectorMemoryBytesEstimate;
 } TqDenseCandidateStats;
 
 typedef struct PgturbohybridGraphRepairDryRunStats

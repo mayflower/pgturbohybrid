@@ -2831,6 +2831,42 @@ pgturbohybrid_last_scan_stats(PG_FUNCTION_ARGS)
 							  scanStats.fusionGenerationArrayReused);
 	PgturbohybridJsonbAddBool(&state, "fusion_generation_array_reset",
 							  scanStats.fusionGenerationArrayReset);
+	PgturbohybridJsonbAddBool(&state, "multivector_enabled",
+							  scanStats.multivectorEnabled);
+	PgturbohybridJsonbAddInt64(&state, "multivector_query_vectors",
+							   scanStats.multivectorQueryVectors);
+	PgturbohybridJsonbAddInt64(&state, "multivector_doc_vectors_limit",
+							   scanStats.multivectorDocVectorsLimit);
+	PgturbohybridJsonbAddUint64(&state, "multivector_subvector_searches",
+								scanStats.multivectorSubvectorSearches);
+	PgturbohybridJsonbAddUint64(&state, "multivector_raw_subvector_hits",
+								scanStats.multivectorRawSubvectorHits);
+	PgturbohybridJsonbAddUint64(&state, "multivector_unique_docs",
+								scanStats.multivectorUniqueDocs);
+	PgturbohybridJsonbAddUint64(&state, "multivector_duplicate_doc_hits",
+								scanStats.multivectorDuplicateDocHits);
+	PgturbohybridJsonbAddUint64(&state, "multivector_maxsim_updates",
+								scanStats.multivectorMaxsimUpdates);
+	PgturbohybridJsonbAddInt64(&state, "multivector_doc_candidates",
+							   scanStats.multivectorDocCandidates);
+	PgturbohybridJsonbAddBool(&state, "multivector_exact_rerank_enabled",
+							  scanStats.multivectorExactRerankEnabled);
+	PgturbohybridJsonbAddInt64(&state, "multivector_exact_rerank_docs",
+							   scanStats.multivectorExactRerankDocs);
+	PgturbohybridJsonbAddUint64(&state, "multivector_exact_rerank_pairs",
+								scanStats.multivectorExactRerankPairs);
+	if (scanStats.multivectorExactKernel[0] != '\0')
+		PgturbohybridJsonbAddString(&state, "multivector_exact_kernel",
+									scanStats.multivectorExactKernel);
+	else
+		PgturbohybridJsonbAddNull(&state, "multivector_exact_kernel");
+	if (scanStats.multivectorAccumulatorKind[0] != '\0')
+		PgturbohybridJsonbAddString(&state, "multivector_accumulator_kind",
+									scanStats.multivectorAccumulatorKind);
+	else
+		PgturbohybridJsonbAddNull(&state, "multivector_accumulator_kind");
+	PgturbohybridJsonbAddUint64(&state, "multivector_memory_bytes_estimate",
+								scanStats.multivectorMemoryBytesEstimate);
 	PgturbohybridJsonbAddString(&state, "final_diversity_mode",
 								scanStats.finalDiversityMode[0] != '\0' ?
 								scanStats.finalDiversityMode : "off");
