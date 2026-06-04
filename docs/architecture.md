@@ -405,6 +405,12 @@ GUCs do not alter index storage. Build/query safety caps are
 `turbohybrid.multivector_max_query_vectors`, and
 `turbohybrid.multivector_max_dim`.
 
+The exact MaxSim kernel is dispatched below the reference scalar implementation:
+scalar remains mandatory, while SIMD-enabled builds may use AVX2 on x86 or NEON
+on ARM when `turbohybrid.simd` is on. The SQL semantics do not depend on SIMD;
+the regression parity test compares scalar and SIMD-enabled MaxSim across
+tail-heavy dimensions.
+
 Reloptions are scoped to the `turbohybrid` index access method, but should
 still use stable descriptive names. The current alpha reloptions are:
 

@@ -181,6 +181,11 @@ portable f32 MaxSim for at most `multivector_exact_rerank_k` retained document
 candidates. Set `turbohybrid.multivector_exact_rerank = 'off'` to inspect the
 raw approximate ordering.
 
+Exact MaxSim always has a scalar fallback. When the extension is built with
+SIMD support and `turbohybrid.simd` is enabled, the exact dot-product kernel may
+dispatch to AVX2 on x86 or NEON on ARM for the bounded rerank work; portable and
+`SIMD_BUILD=none` builds continue to use the scalar path.
+
 Safety caps are controlled by `turbohybrid.multivector_max_doc_vectors`,
 `turbohybrid.multivector_max_query_vectors`, and
 `turbohybrid.multivector_max_dim`.

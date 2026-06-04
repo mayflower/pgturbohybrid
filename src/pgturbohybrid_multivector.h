@@ -75,6 +75,8 @@ const float *PgturbohybridMultiVectorValues(const PgturbohybridMultiVector *mv,
 double		TqDotProductF32Scalar(const float *a, const float *b, int32 dim);
 double		TqMultiVectorMaxSimScalar(const PgturbohybridMultiVector *query,
 									   const PgturbohybridMultiVector *doc);
+double		TqMultiVectorMaxSim(const PgturbohybridMultiVector *query,
+								 const PgturbohybridMultiVector *doc);
 
 FUNCTION_PREFIX Datum pgturbohybrid_multivector_in(PG_FUNCTION_ARGS);
 FUNCTION_PREFIX Datum pgturbohybrid_multivector_out(PG_FUNCTION_ARGS);

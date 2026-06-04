@@ -8560,7 +8560,7 @@ PgturbohybridMultiVectorExactHeapRerank(IndexScanDesc scan,
 		valuePtr = DatumGetPointer(value);
 		doc = PgturbohybridDatumGetMultiVector(value);
 		PgturbohybridCheckSameMultiVectorDims(query, doc);
-		exactMaxsim = TqMultiVectorMaxSimScalar(query, doc);
+		exactMaxsim = TqMultiVectorMaxSim(query, doc);
 		candidates[i].distance = -exactMaxsim;
 		candidates[i].similarity = exactMaxsim / (double) query->count;
 		candidates[i].exactScored = true;
