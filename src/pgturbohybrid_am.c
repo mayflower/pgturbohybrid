@@ -1606,6 +1606,39 @@ PgturbohybridNodeCompare(const void *a, const void *b)
 }
 
 static int
+PgturbohybridItemPointerDataCompare(const ItemPointerData *left,
+									const ItemPointerData *right)
+{
+	BlockNumber leftBlock = ItemPointerGetBlockNumber(left);
+	BlockNumber rightBlock = ItemPointerGetBlockNumber(right);
+	OffsetNumber leftOffset = ItemPointerGetOffsetNumber(left);
+	OffsetNumber rightOffset = ItemPointerGetOffsetNumber(right);
+
+	if (leftBlock < rightBlock)
+		return -1;
+	if (leftBlock > rightBlock)
+		return 1;
+	if (leftOffset < rightOffset)
+		return -1;
+	if (leftOffset > rightOffset)
+		return 1;
+	return 0;
+}
+
+static int
+PgturbohybridHeapTidCompare(const void *a, const void *b)
+{
+	const PgturbohybridResult *ra = (const PgturbohybridResult *) a;
+	const PgturbohybridResult *rb = (const PgturbohybridResult *) b;
+	int			cmp;
+
+	cmp = PgturbohybridItemPointerDataCompare(&ra->heaptid, &rb->heaptid);
+	if (cmp != 0)
+		return cmp;
+	return (ra->nodeId > rb->nodeId) - (ra->nodeId < rb->nodeId);
+}
+
+static int
 PgturbohybridScoreCompare(const void *a, const void *b)
 {
 	const PgturbohybridResult *ra = (const PgturbohybridResult *) a;
@@ -1669,6 +1702,15 @@ PgturbohybridHashNodeId(uint32 nodeId)
 	return nodeId * UINT32_C(2654435761);
 }
 
+static uint32
+PgturbohybridHashHeapTid(const ItemPointerData *heaptid)
+{
+	uint32		block = (uint32) ItemPointerGetBlockNumber(heaptid);
+	uint32		offset = (uint32) ItemPointerGetOffsetNumber(heaptid);
+
+	return (block * UINT32_C(2654435761)) ^ (offset * UINT32_C(2246822519));
+}
+
 static PgturbohybridResult *
 PgturbohybridFindMergeSlot(PgturbohybridMergeSlot *slots, uint32 mask, uint32 nodeId)
 {
@@ -1685,6 +1727,30 @@ PgturbohybridFindMergeSlot(PgturbohybridMergeSlot *slots, uint32 mask, uint32 no
 			return &slot->result;
 		}
 		if (slot->result.nodeId == nodeId)
+			return &slot->result;
+		slotNo = (slotNo + 1) & mask;
+	}
+}
+
+static PgturbohybridResult *
+PgturbohybridFindMergeSlotByHeapTid(PgturbohybridMergeSlot *slots,
+									uint32 mask,
+									const ItemPointerData *heaptid)
+{
+	uint32		slotNo = PgturbohybridHashHeapTid(heaptid) & mask;
+
+	for (;;)
+	{
+		PgturbohybridMergeSlot *slot = &slots[slotNo];
+
+		if (!slot->used)
+		{
+			slot->used = true;
+			slot->result.heaptid = *heaptid;
+			return &slot->result;
+		}
+		if (PgturbohybridItemPointerDataCompare(&slot->result.heaptid,
+												heaptid) == 0)
 			return &slot->result;
 		slotNo = (slotNo + 1) & mask;
 	}
@@ -3561,6 +3627,9 @@ PgturbohybridCollectScanResults(IndexScanDesc scan, PgturbohybridScanState *stat
 	bool		bm25BranchUsed = false;
 	uint16		requestedFusion;
 	int			hybridQueryShapeForStats;
+	bool		hasMultivectorQuery;
+	bool		hasTextQuery;
+	bool		useDocumentFusionKey;
 
 	if (state->collectDone)
 		return;
@@ -3583,15 +3652,19 @@ PgturbohybridCollectScanResults(IndexScanDesc scan, PgturbohybridScanState *stat
 		pgturbohybrid_force_fusion : scanQuery->fusion;
 	hasLexicalKey = PgturbohybridIndexHasLexical(scan->indexRelation);
 	so->graphFinalK = PgturbohybridBudgetFinalTarget(scanQuery, autoBudgetLimit);
+	hasMultivectorQuery =
+		(scanQuery->flags & PGTURBOHYBRID_QUERY_FLAG_HAS_MULTIVECTOR) != 0;
+	hasTextQuery =
+		(scanQuery->flags & PGTURBOHYBRID_QUERY_FLAG_HAS_TSQUERY) != 0;
+	useDocumentFusionKey = hasMultivectorQuery;
 
-	if ((scanQuery->flags & PGTURBOHYBRID_QUERY_FLAG_HAS_MULTIVECTOR) != 0 &&
-		(scanQuery->flags & PGTURBOHYBRID_QUERY_FLAG_HAS_TSQUERY) != 0)
+	if (hasMultivectorQuery && hasTextQuery &&
+		requestedFusion != PGTURBOHYBRID_FUSION_RRF)
 		ereport(ERROR,
 				(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
-				 errmsg("hybrid multivector fusion is not implemented yet")));
+				 errmsg("hybrid multivector fusion currently supports only fusion => 'rrf'")));
 
-	if (!hasLexicalKey &&
-		(scanQuery->flags & PGTURBOHYBRID_QUERY_FLAG_HAS_TSQUERY) != 0)
+	if (!hasLexicalKey && hasTextQuery)
 		ereport(ERROR,
 				(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
 				 errmsg("text_query requires a turbohybrid index with a tsvector key")));
@@ -3726,7 +3799,8 @@ PgturbohybridCollectScanResults(IndexScanDesc scan, PgturbohybridScanState *stat
 		pgturbohybrid_force_fusion : scanQuery->fusion;
 	useHashTopN = pgturbohybrid_fusion_hash_threshold >= 0 &&
 		fusionCandidatesSeen >= (uint32) pgturbohybrid_fusion_hash_threshold;
-	if (PgturbohybridShouldUseGenerationArray(scan, effectiveFusion,
+	if (!useDocumentFusionKey &&
+		PgturbohybridShouldUseGenerationArray(scan, effectiveFusion,
 											  fusionCandidatesSeen, dense,
 											  denseCount, bm25, bm25Count,
 											  &generationArrayNodeCount))
@@ -3752,6 +3826,9 @@ PgturbohybridCollectScanResults(IndexScanDesc scan, PgturbohybridScanState *stat
 		for (int i = 0; i < denseCount; i++)
 		{
 			PgturbohybridResult *item =
+				useDocumentFusionKey ?
+				PgturbohybridFindMergeSlotByHeapTid(slots, slotMask,
+													&dense[i].heaptid) :
 				PgturbohybridFindMergeSlot(slots, slotMask, dense[i].nodeId);
 
 			if (item->hasDense || item->hasBm25)
@@ -3761,6 +3838,9 @@ PgturbohybridCollectScanResults(IndexScanDesc scan, PgturbohybridScanState *stat
 		for (int i = 0; i < bm25Count; i++)
 		{
 			PgturbohybridResult *item =
+				useDocumentFusionKey ?
+				PgturbohybridFindMergeSlotByHeapTid(slots, slotMask,
+													&bm25[i].heaptid) :
 				PgturbohybridFindMergeSlot(slots, slotMask, bm25[i].nodeId);
 
 			if (item->hasDense || item->hasBm25)
@@ -3790,7 +3870,8 @@ PgturbohybridCollectScanResults(IndexScanDesc scan, PgturbohybridScanState *stat
 													   so->tmpCtx, &merged,
 													   &lastStats.fusionHeapReplacements,
 													   &lastStats);
-		strlcpy(lastStats.fusionStrategy, "hash",
+		strlcpy(lastStats.fusionStrategy,
+				useDocumentFusionKey ? "hash_doc" : "hash",
 				sizeof(lastStats.fusionStrategy));
 		lastStats.fusionHeapSize = finalCount;
 	}
@@ -3804,14 +3885,20 @@ PgturbohybridCollectScanResults(IndexScanDesc scan, PgturbohybridScanState *stat
 			PgturbohybridAddBm25Candidate(&items[itemCount++], &bm25[i]);
 
 		if (itemCount > 1)
-			qsort(items, itemCount, sizeof(PgturbohybridResult), PgturbohybridNodeCompare);
+			qsort(items, itemCount, sizeof(PgturbohybridResult),
+				  useDocumentFusionKey ?
+				  PgturbohybridHeapTidCompare : PgturbohybridNodeCompare);
 
 		merged = palloc0(sizeof(PgturbohybridResult) * Max(itemCount, 1));
 		for (int i = 0; i < itemCount;)
 		{
 			PgturbohybridResult item = items[i++];
 
-			while (i < itemCount && items[i].nodeId == item.nodeId)
+			while (i < itemCount &&
+				   (useDocumentFusionKey ?
+					PgturbohybridItemPointerDataCompare(&items[i].heaptid,
+														&item.heaptid) == 0 :
+					items[i].nodeId == item.nodeId))
 			{
 				lastStats.fusionDuplicates++;
 				if (items[i].hasDense)
@@ -3841,7 +3928,8 @@ PgturbohybridCollectScanResults(IndexScanDesc scan, PgturbohybridScanState *stat
 													   so->tmpCtx, &merged,
 													   &lastStats.fusionHeapReplacements,
 													   &lastStats);
-		strlcpy(lastStats.fusionStrategy, "sorted_merge",
+		strlcpy(lastStats.fusionStrategy,
+				useDocumentFusionKey ? "sorted_merge_doc" : "sorted_merge",
 				sizeof(lastStats.fusionStrategy));
 		lastStats.fusionHeapSize = finalCount;
 	}
@@ -4209,10 +4297,12 @@ pgturbohybridamrescan(IndexScanDesc scan, ScanKey keys, int nkeys, ScanKey order
 				(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
 				 errmsg("multivector_query requires a turbohybrid index with a multivector key")));
 
-	if (hasMultiVectorQuery && hasTextQuery)
+	if (hasMultiVectorQuery && hasTextQuery &&
+		(pgturbohybrid_force_fusion != 0 ?
+		 pgturbohybrid_force_fusion : hybridQuery->fusion) != PGTURBOHYBRID_FUSION_RRF)
 		ereport(ERROR,
 				(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
-				 errmsg("hybrid multivector fusion is not implemented yet")));
+				 errmsg("hybrid multivector fusion currently supports only fusion => 'rrf'")));
 
 	if (hasTextQuery && !PgturbohybridIndexHasLexical(scan->indexRelation))
 		ereport(ERROR,
