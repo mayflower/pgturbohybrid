@@ -51,10 +51,16 @@ static int32 tqgraph_active_payload_filter_value = 0;
 
 static void PgturbohybridExecutorHooksInit(void);
 static void PgturbohybridExecutorStartHook(QueryDesc *queryDesc, int eflags);
+#if PG_VERSION_NUM >= 180000
+static void PgturbohybridExecutorRunHook(QueryDesc *queryDesc,
+										 ScanDirection direction,
+										 uint64 count);
+#else
 static void PgturbohybridExecutorRunHook(QueryDesc *queryDesc,
 										 ScanDirection direction,
 										 uint64 count,
 										 bool execute_once);
+#endif
 static void PgturbohybridExecutorEndHook(QueryDesc *queryDesc);
 static void PgturbohybridGraphExecutorStart(QueryDesc *queryDesc, int eflags);
 static void PgturbohybridGraphExecutorEnd(QueryDesc *queryDesc);
@@ -161,14 +167,26 @@ PgturbohybridExecutorStartHook(QueryDesc *queryDesc, int eflags)
 
 static void
 PgturbohybridExecutorRunHook(QueryDesc *queryDesc, ScanDirection direction,
+#if PG_VERSION_NUM >= 180000
+							 uint64 count)
+#else
 							 uint64 count, bool execute_once)
+#endif
 {
 	PG_TRY();
 	{
 		if (prev_ExecutorRun_hook)
+#if PG_VERSION_NUM >= 180000
+			prev_ExecutorRun_hook(queryDesc, direction, count);
+#else
 			prev_ExecutorRun_hook(queryDesc, direction, count, execute_once);
+#endif
 		else
+#if PG_VERSION_NUM >= 180000
+			standard_ExecutorRun(queryDesc, direction, count);
+#else
 			standard_ExecutorRun(queryDesc, direction, count, execute_once);
+#endif
 	}
 	PG_CATCH();
 	{
