@@ -8501,7 +8501,8 @@ PgturbohybridMultiVectorExactHeapRerank(IndexScanDesc scan,
 										PgturbohybridGraphScanOpaque so,
 										const PgturbohybridMultiVector *query,
 										TqDenseCandidate *candidates,
-										int count)
+										int count,
+										uint64 *exactPairs)
 {
 	TupleTableSlot *slot;
 	TupleDesc	desc;
@@ -8560,6 +8561,8 @@ PgturbohybridMultiVectorExactHeapRerank(IndexScanDesc scan,
 		valuePtr = DatumGetPointer(value);
 		doc = PgturbohybridDatumGetMultiVector(value);
 		PgturbohybridCheckSameMultiVectorDims(query, doc);
+		if (exactPairs != NULL)
+			*exactPairs += (uint64) query->count * (uint64) doc->count;
 		exactMaxsim = TqMultiVectorMaxSim(query, doc);
 		candidates[i].distance = -exactMaxsim;
 		candidates[i].similarity = exactMaxsim / (double) query->count;
@@ -8577,7 +8580,7 @@ PgturbohybridMultiVectorExactHeapRerank(IndexScanDesc scan,
 		so->graphHeapRescoreCount += rescored;
 		so->graphExactRescoreSource = PGTURBOHYBRID_EXACT_RESCORE_SOURCE_HEAP;
 		so->graphEffectiveRescoreBand = limit;
-		return limit;
+		return rescored;
 	}
 	return 0;
 }
@@ -8633,7 +8636,9 @@ static void
 PgturbohybridMultiVectorAccumulateDoc(HTAB *docHash,
 									  MemoryContext resultCtx,
 									  const PgturbohybridGraphResult *hit,
-									  int queryOrdinal, int queryCount)
+									  int queryOrdinal, int queryCount,
+									  uint64 *uniqueDocs,
+									  uint64 *maxsimUpdates)
 {
 	PgturbohybridMultiVectorDocKey key;
 	PgturbohybridMultiVectorDocEntry *entry;
@@ -8658,6 +8663,8 @@ PgturbohybridMultiVectorAccumulateDoc(HTAB *docHash,
 											 sizeof(bool) * queryCount);
 		for (int i = 0; i < queryCount; i++)
 			entry->maxsim[i] = -INFINITY;
+		if (uniqueDocs != NULL)
+			(*uniqueDocs)++;
 	}
 
 	if (!entry->seen[queryOrdinal])
@@ -8671,6 +8678,8 @@ PgturbohybridMultiVectorAccumulateDoc(HTAB *docHash,
 			entry->bestSimilarity = similarity;
 			entry->bestNodeId = hit->nodeId;
 		}
+		if (maxsimUpdates != NULL)
+			(*maxsimUpdates)++;
 	}
 	else if (similarity > entry->maxsim[queryOrdinal])
 	{
@@ -8681,6 +8690,8 @@ PgturbohybridMultiVectorAccumulateDoc(HTAB *docHash,
 			entry->bestSimilarity = similarity;
 			entry->bestNodeId = hit->nodeId;
 		}
+		if (maxsimUpdates != NULL)
+			(*maxsimUpdates)++;
 	}
 }
 
@@ -8711,6 +8722,11 @@ PgturbohybridGraphCollectMultiVectorDenseCandidates(IndexScanDesc scan,
 	int			docLimit;
 	int			docCount = 0;
 	int			exactRerankCount = 0;
+	uint64		multivectorRawSubvectorHits = 0;
+	uint64		multivectorUniqueDocs = 0;
+	uint64		multivectorDuplicateDocHits = 0;
+	uint64		multivectorMaxsimUpdates = 0;
+	uint64		multivectorExactPairs = 0;
 	bool		emptyIndex = false;
 
 	if (so == NULL)
@@ -8842,6 +8858,7 @@ PgturbohybridGraphCollectMultiVectorDenseCandidates(IndexScanDesc scan,
 															  -1, 0, false, false,
 															  1.0,
 															  PGTURBOHYBRID_GRAPH_FILL_CANDIDATE_BAND_REASON_NONE);
+				multivectorRawSubvectorHits += (uint64) hitCount;
 				MemoryContextSwitchTo(resultCtx);
 				for (int i = 0; i < hitCount; i++)
 				{
@@ -8852,8 +8869,12 @@ PgturbohybridGraphCollectMultiVectorDenseCandidates(IndexScanDesc scan,
 					key.offset = ItemPointerGetOffsetNumber(&hits[i].heaptid);
 					alreadySeen =
 						hash_search(docHash, &key, HASH_FIND, NULL) != NULL;
+					if (alreadySeen)
+						multivectorDuplicateDocHits++;
 					PgturbohybridMultiVectorAccumulateDoc(docHash, resultCtx,
-														  &hits[i], qi, mv->count);
+														  &hits[i], qi, mv->count,
+														  &multivectorUniqueDocs,
+														  &multivectorMaxsimUpdates);
 					if (!alreadySeen)
 					{
 						uniqueDocs++;
@@ -8915,7 +8936,8 @@ PgturbohybridGraphCollectMultiVectorDenseCandidates(IndexScanDesc scan,
 			  PgturbohybridMultiVectorDenseCandidateCompare);
 	exactRerankCount =
 		PgturbohybridMultiVectorExactHeapRerank(scan, so, mv, candidates,
-												docCount);
+												docCount,
+												&multivectorExactPairs);
 	if (exactRerankCount > 0 && docCount > 1)
 		qsort(candidates, docCount, sizeof(TqDenseCandidate),
 			  PgturbohybridMultiVectorDenseCandidateCompare);
@@ -8943,6 +8965,32 @@ PgturbohybridGraphCollectMultiVectorDenseCandidates(IndexScanDesc scan,
 		stats->heapRescoreUs = so->graphHeapRescoreUs;
 		stats->sortUs = so->graphSortUs;
 		stats->exactRescoreSource = so->graphExactRescoreSource;
+		stats->multivectorEnabled = true;
+		stats->multivectorQueryVectors = (uint32) mv->count;
+		stats->multivectorDocVectorsLimit =
+			(uint32) pgturbohybrid_multivector_max_doc_vectors;
+		stats->multivectorSubvectorSearches = (uint64) mv->count;
+		stats->multivectorRawSubvectorHits = multivectorRawSubvectorHits;
+		stats->multivectorUniqueDocs = multivectorUniqueDocs;
+		stats->multivectorDuplicateDocHits = multivectorDuplicateDocHits;
+		stats->multivectorMaxsimUpdates = multivectorMaxsimUpdates;
+		stats->multivectorDocCandidates = (uint32) docCount;
+		stats->multivectorExactRerankEnabled =
+			pgturbohybrid_multivector_exact_rerank !=
+			PGTURBOHYBRID_MULTIVECTOR_EXACT_RERANK_OFF;
+		stats->multivectorExactRerankDocs = (uint32) exactRerankCount;
+		stats->multivectorExactRerankPairs = multivectorExactPairs;
+		strlcpy(stats->multivectorExactKernel,
+				exactRerankCount > 0 ? TqMultiVectorMaxSimKernelName() : "",
+				sizeof(stats->multivectorExactKernel));
+		strlcpy(stats->multivectorAccumulatorKind, "hash",
+				sizeof(stats->multivectorAccumulatorKind));
+		stats->multivectorMemoryBytesEstimate =
+			(uint64) hash_estimate_size(Max(rawTarget * mv->count, 16),
+										sizeof(PgturbohybridMultiVectorDocEntry)) +
+			multivectorUniqueDocs *
+			((uint64) sizeof(double) + (uint64) sizeof(bool)) *
+			(uint64) mv->count;
 	}
 	so->tqGraphResults = NULL;
 	so->tqGraphResultCount = docCount;

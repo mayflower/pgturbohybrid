@@ -77,6 +77,7 @@ double		TqMultiVectorMaxSimScalar(const PgturbohybridMultiVector *query,
 									   const PgturbohybridMultiVector *doc);
 double		TqMultiVectorMaxSim(const PgturbohybridMultiVector *query,
 								 const PgturbohybridMultiVector *doc);
+const char *TqMultiVectorMaxSimKernelName(void);
 
 FUNCTION_PREFIX Datum pgturbohybrid_multivector_in(PG_FUNCTION_ARGS);
 FUNCTION_PREFIX Datum pgturbohybrid_multivector_out(PG_FUNCTION_ARGS);

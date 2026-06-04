@@ -1077,6 +1077,21 @@ typedef struct PgturbohybridLastScanStats
 	uint64		fusionHeapReplacements;
 	bool		fusionGenerationArrayReused;
 	bool		fusionGenerationArrayReset;
+	bool		multivectorEnabled;
+	uint32		multivectorQueryVectors;
+	uint32		multivectorDocVectorsLimit;
+	uint64		multivectorSubvectorSearches;
+	uint64		multivectorRawSubvectorHits;
+	uint64		multivectorUniqueDocs;
+	uint64		multivectorDuplicateDocHits;
+	uint64		multivectorMaxsimUpdates;
+	uint32		multivectorDocCandidates;
+	bool		multivectorExactRerankEnabled;
+	uint32		multivectorExactRerankDocs;
+	uint64		multivectorExactRerankPairs;
+	char		multivectorExactKernel[16];
+	char		multivectorAccumulatorKind[16];
+	uint64		multivectorMemoryBytesEstimate;
 	int			finalDiversityMode;
 	int32		finalDiversityPayloadSlot;
 	uint32		finalDiversityPoolSize;
@@ -1320,6 +1335,38 @@ PgturbohybridGetLastScanStatsSnapshot(PgturbohybridScanStatsSnapshot *stats)
 		pgturbohybrid_last_scan_state.fusionGenerationArrayReused;
 	stats->fusionGenerationArrayReset =
 		pgturbohybrid_last_scan_state.fusionGenerationArrayReset;
+	stats->multivectorEnabled =
+		pgturbohybrid_last_scan_state.multivectorEnabled;
+	stats->multivectorQueryVectors =
+		pgturbohybrid_last_scan_state.multivectorQueryVectors;
+	stats->multivectorDocVectorsLimit =
+		pgturbohybrid_last_scan_state.multivectorDocVectorsLimit;
+	stats->multivectorSubvectorSearches =
+		pgturbohybrid_last_scan_state.multivectorSubvectorSearches;
+	stats->multivectorRawSubvectorHits =
+		pgturbohybrid_last_scan_state.multivectorRawSubvectorHits;
+	stats->multivectorUniqueDocs =
+		pgturbohybrid_last_scan_state.multivectorUniqueDocs;
+	stats->multivectorDuplicateDocHits =
+		pgturbohybrid_last_scan_state.multivectorDuplicateDocHits;
+	stats->multivectorMaxsimUpdates =
+		pgturbohybrid_last_scan_state.multivectorMaxsimUpdates;
+	stats->multivectorDocCandidates =
+		pgturbohybrid_last_scan_state.multivectorDocCandidates;
+	stats->multivectorExactRerankEnabled =
+		pgturbohybrid_last_scan_state.multivectorExactRerankEnabled;
+	stats->multivectorExactRerankDocs =
+		pgturbohybrid_last_scan_state.multivectorExactRerankDocs;
+	stats->multivectorExactRerankPairs =
+		pgturbohybrid_last_scan_state.multivectorExactRerankPairs;
+	strlcpy(stats->multivectorExactKernel,
+			pgturbohybrid_last_scan_state.multivectorExactKernel,
+			sizeof(stats->multivectorExactKernel));
+	strlcpy(stats->multivectorAccumulatorKind,
+			pgturbohybrid_last_scan_state.multivectorAccumulatorKind,
+			sizeof(stats->multivectorAccumulatorKind));
+	stats->multivectorMemoryBytesEstimate =
+		pgturbohybrid_last_scan_state.multivectorMemoryBytesEstimate;
 	strlcpy(stats->finalDiversityMode,
 			PgturbohybridFinalDiversityName(
 				pgturbohybrid_last_scan_state.finalDiversityMode),
@@ -4028,6 +4075,34 @@ PgturbohybridCollectScanResults(IndexScanDesc scan, PgturbohybridScanState *stat
 		denseStats.fillCandidateBandPayloadRefCount;
 	lastStats.graphRescoreUs = denseStats.rescoreUs;
 	lastStats.graphSortUs = denseStats.sortUs;
+	lastStats.multivectorEnabled = denseStats.multivectorEnabled;
+	lastStats.multivectorQueryVectors = denseStats.multivectorQueryVectors;
+	lastStats.multivectorDocVectorsLimit =
+		denseStats.multivectorDocVectorsLimit;
+	lastStats.multivectorSubvectorSearches =
+		denseStats.multivectorSubvectorSearches;
+	lastStats.multivectorRawSubvectorHits =
+		denseStats.multivectorRawSubvectorHits;
+	lastStats.multivectorUniqueDocs = denseStats.multivectorUniqueDocs;
+	lastStats.multivectorDuplicateDocHits =
+		denseStats.multivectorDuplicateDocHits;
+	lastStats.multivectorMaxsimUpdates =
+		denseStats.multivectorMaxsimUpdates;
+	lastStats.multivectorDocCandidates = denseStats.multivectorDocCandidates;
+	lastStats.multivectorExactRerankEnabled =
+		denseStats.multivectorExactRerankEnabled;
+	lastStats.multivectorExactRerankDocs =
+		denseStats.multivectorExactRerankDocs;
+	lastStats.multivectorExactRerankPairs =
+		denseStats.multivectorExactRerankPairs;
+	strlcpy(lastStats.multivectorExactKernel,
+			denseStats.multivectorExactKernel,
+			sizeof(lastStats.multivectorExactKernel));
+	strlcpy(lastStats.multivectorAccumulatorKind,
+			denseStats.multivectorAccumulatorKind,
+			sizeof(lastStats.multivectorAccumulatorKind));
+	lastStats.multivectorMemoryBytesEstimate =
+		denseStats.multivectorMemoryBytesEstimate;
 	lastStats.bm25Terms = bm25Stats.queryTerms;
 	lastStats.bm25PostingsDecoded = bm25Stats.postingsDecoded;
 	lastStats.bm25BlocksVisited = bm25Stats.blocksVisited;

@@ -373,6 +373,24 @@ TqResolveMultiVectorDotProductKernel(void)
 	return TqDotProductF32Scalar;
 }
 
+const char *
+TqMultiVectorMaxSimKernelName(void)
+{
+	TqDotProductF32Func func = TqResolveMultiVectorDotProductKernel();
+
+	if (func == TqDotProductF32Scalar)
+		return "scalar";
+#if PGTURBOHYBRID_MULTIVECTOR_COMPILE_AVX2
+	if (func == TqDotProductF32Avx2)
+		return "avx2";
+#endif
+#if PGTURBOHYBRID_MULTIVECTOR_COMPILE_NEON
+	if (func == TqDotProductF32Neon)
+		return "neon";
+#endif
+	return "unknown";
+}
+
 static double
 TqMultiVectorMaxSimWithDot(const PgturbohybridMultiVector *query,
 						   const PgturbohybridMultiVector *doc,
