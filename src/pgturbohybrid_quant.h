@@ -4,6 +4,8 @@
 #include "postgres.h"
 
 #include "pgturbohybrid.h"
+#include "pgturbohybrid_multivector.h"
+#include "pgturbohybrid_query.h"
 #include "pgturbohybrid_quant_psquare.h"
 
 #define PGTURBOHYBRID_GRAPH_CODE_TUPLE_TYPE		0x51
@@ -180,6 +182,11 @@ typedef struct PgturbohybridQuantBuildState
 	bool		buildEncodeOnAppend;	/* encode node immediately during collection scan */
 	bool		buildFastEdges; /* use bounded simple edge selection for code-only builds */
 	int			buildNeighborSelectReason; /* why the final build edge selector was chosen */
+	bool		multivectorBuild;	/* heap tuple expands into one graph node per subvector */
+	TqMultiVectorNodeMapEntry *multivectorNodeMap;
+	TqMultiVectorDocMapEntry *multivectorDocMap;
+	uint32		multivectorDocCount;
+	uint32		multivectorDocCapacity;
 	int			scoreMode;
 	int			maxLevel;
 	uint32		entryNodeId;
@@ -821,6 +828,12 @@ int			PgturbohybridGraphCollectDenseCandidates(IndexScanDesc scan, int targetK,
 										  TqDenseCandidate **outCandidates,
 										  MemoryContext resultCtx,
 										  TqDenseCandidateStats *stats);
+int			PgturbohybridGraphCollectMultiVectorDenseCandidates(IndexScanDesc scan,
+																PgturbohybridQueryHeader *query,
+																int targetK,
+																TqDenseCandidate **outCandidates,
+																MemoryContext resultCtx,
+																TqDenseCandidateStats *stats);
 const char *PgturbohybridGraphDenseWideningReasonName(int reason);
 const char *PgturbohybridGraphDenseAdaptiveWideningModeName(int mode);
 const char *PgturbohybridGraphDenseAdaptiveWideningReasonName(int reason);

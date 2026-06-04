@@ -380,6 +380,28 @@ such as `dense_heap_rescore`, `dense_adaptive_widening`,
 BM25 heap tsvector rerank do not change index storage, though residual mode only
 has an effect when residual sketches were built.
 
+Multivector late-interaction indexes use the same native graph storage for
+subvector nodes, but result identity remains the heap TID/document. A build over
+`turbohybrid_multivector` expands each row into one graph node per token vector
+and keeps in-memory build maps from node ID to document ID/token ordinal. The
+current scan path is dense-only: each query token performs a bounded graph
+traversal, candidate hits are grouped by heap TID, and document scores are
+accumulated with approximate MaxSim before final ordering. The `<~>` operator
+therefore still orders by smaller-is-better distance, using `-MaxSim` at the
+document level. Hybrid multivector + BM25 fusion and incremental insert/update
+maintenance are intentionally not part of the current storage contract; use
+bulk build/`REINDEX` for multivector experiments.
+
+The scan-time candidate budgets are controlled by
+`turbohybrid.multivector_subvector_k`,
+`turbohybrid.multivector_unique_docs_per_token`,
+`turbohybrid.multivector_max_raw_hits_per_token`, and
+`turbohybrid.multivector_doc_candidate_k`. These GUCs do not alter index
+storage. Build/query safety caps are
+`turbohybrid.multivector_max_doc_vectors`,
+`turbohybrid.multivector_max_query_vectors`, and
+`turbohybrid.multivector_max_dim`.
+
 Reloptions are scoped to the `turbohybrid` index access method, but should
 still use stable descriptive names. The current alpha reloptions are:
 

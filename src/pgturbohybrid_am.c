@@ -41,6 +41,7 @@
 #include "utils/syscache.h"
 
 #include "pgturbohybrid.h"
+#include "pgturbohybrid_multivector.h"
 #include "pgturbohybrid_query.h"
 #include "pgturbohybrid_quant.h"
 #include "pgturbohybrid_quant_score.h"
@@ -131,6 +132,15 @@ double		pgturbohybrid_calibrated_fusion_both_match_bonus = 0.06;
 double		pgturbohybrid_calibrated_fusion_identifier_bm25_alpha = 0.35;
 double		pgturbohybrid_calibrated_fusion_broad_dense_alpha = 0.70;
 double		pgturbohybrid_calibrated_fusion_default_alpha = 0.50;
+int			pgturbohybrid_multivector_max_doc_vectors =
+	PGTURBOHYBRID_MULTIVECTOR_DEFAULT_MAX_DOC_VECTORS;
+int			pgturbohybrid_multivector_max_query_vectors =
+	PGTURBOHYBRID_MULTIVECTOR_DEFAULT_MAX_QUERY_VECTORS;
+int			pgturbohybrid_multivector_max_dim = PGTURBOHYBRID_MULTIVECTOR_MAX_DIM;
+int			pgturbohybrid_multivector_subvector_k = 100;
+int			pgturbohybrid_multivector_unique_docs_per_token = 100;
+int			pgturbohybrid_multivector_max_raw_hits_per_token = 400;
+int			pgturbohybrid_multivector_doc_candidate_k = 100;
 static bool pgturbohybrid_bm25_strategy_user_set = false;
 static bool pgturbohybrid_bm25_impact_or_mode_user_set = false;
 static bool pgturbohybrid_bm25_hot_postings_cache_mb_user_set = false;
@@ -1456,6 +1466,7 @@ PgturbohybridValidateIndex(Relation index, IndexInfo *indexInfo)
 {
 	TupleDesc	desc = RelationGetDescr(index);
 	Oid			vectorOid;
+	Oid			multivectorOid;
 	Oid			denseType;
 	Oid			lexicalType = InvalidOid;
 	int			keyAttrs;
@@ -1494,15 +1505,17 @@ PgturbohybridValidateIndex(Relation index, IndexInfo *indexInfo)
 
 	denseType = TupleDescAttr(desc, PGTURBOHYBRID_DENSE_KEY_INDEX)->atttypid;
 	vectorOid = PgturbohybridVectorTypeOid();
+	multivectorOid = PgturbohybridMultiVectorTypeOid();
 	hasLexical = keyAttrs > PGTURBOHYBRID_LEXICAL_KEY_INDEX;
 	if (hasLexical)
 		lexicalType =
 			TupleDescAttr(desc, PGTURBOHYBRID_LEXICAL_KEY_INDEX)->atttypid;
 
-	if (!OidIsValid(vectorOid) || denseType != vectorOid)
+	if ((!OidIsValid(vectorOid) || denseType != vectorOid) &&
+		(!OidIsValid(multivectorOid) || denseType != multivectorOid))
 		ereport(ERROR,
 				(errcode(ERRCODE_DATATYPE_MISMATCH),
-				 errmsg("pgturbohybrid first key must be type vector"),
+				 errmsg("pgturbohybrid first key must be type vector or turbohybrid_multivector"),
 				 errdetail("Found %s.", format_type_be(denseType))));
 
 	if (hasLexical && lexicalType != TSVECTOROID)
@@ -1510,6 +1523,16 @@ PgturbohybridValidateIndex(Relation index, IndexInfo *indexInfo)
 				(errcode(ERRCODE_DATATYPE_MISMATCH),
 				 errmsg("pgturbohybrid second key must be type tsvector"),
 				 errdetail("Found %s.", format_type_be(lexicalType))));
+}
+
+static bool
+PgturbohybridIndexIsMultiVector(Relation index)
+{
+	Oid			multivectorOid = PgturbohybridMultiVectorTypeOid();
+	TupleDesc	desc = RelationGetDescr(index);
+
+	return OidIsValid(multivectorOid) &&
+		TupleDescAttr(desc, PGTURBOHYBRID_DENSE_KEY_INDEX)->atttypid == multivectorOid;
 }
 
 static ScanKey
@@ -3552,6 +3575,12 @@ PgturbohybridCollectScanResults(IndexScanDesc scan, PgturbohybridScanState *stat
 	hasLexicalKey = PgturbohybridIndexHasLexical(scan->indexRelation);
 	so->graphFinalK = PgturbohybridBudgetFinalTarget(scanQuery, autoBudgetLimit);
 
+	if ((scanQuery->flags & PGTURBOHYBRID_QUERY_FLAG_HAS_MULTIVECTOR) != 0 &&
+		(scanQuery->flags & PGTURBOHYBRID_QUERY_FLAG_HAS_TSQUERY) != 0)
+		ereport(ERROR,
+				(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
+				 errmsg("hybrid multivector fusion is not implemented yet")));
+
 	if (!hasLexicalKey &&
 		(scanQuery->flags & PGTURBOHYBRID_QUERY_FLAG_HAS_TSQUERY) != 0)
 		ereport(ERROR,
@@ -3628,6 +3657,20 @@ PgturbohybridCollectScanResults(IndexScanDesc scan, PgturbohybridScanState *stat
 												   &denseStats);
 		lastStats.denseElapsedUs = denseProbeElapsedUs +
 			PgturbohybridElapsedUs(phaseStart);
+	}
+	else if ((scanQuery->flags & PGTURBOHYBRID_QUERY_FLAG_HAS_MULTIVECTOR) != 0 &&
+			 scanQuery->denseK > 0)
+	{
+		denseBranchUsed = true;
+		INSTR_TIME_SET_CURRENT(phaseStart);
+		denseCount =
+			PgturbohybridGraphCollectMultiVectorDenseCandidates(scan,
+																scanQuery,
+																scanQuery->denseK,
+																&dense,
+																so->tmpCtx,
+																&denseStats);
+		lastStats.denseElapsedUs = PgturbohybridElapsedUs(phaseStart);
 	}
 	else if (denseProbeReusable)
 		denseBranchUsed = true;
@@ -4051,6 +4094,10 @@ pgturbohybridaminsert(Relation index, Datum *values, bool *isnull, ItemPointer h
 	(void) indexUnchanged;
 #endif
 	PgturbohybridValidateIndex(index, indexInfo);
+	if (PgturbohybridIndexIsMultiVector(index))
+		ereport(ERROR,
+				(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
+				 errmsg("turbohybrid multivector insert is not implemented yet")));
 	if (isnull[0])
 		return false;
 
@@ -4128,6 +4175,7 @@ pgturbohybridamrescan(IndexScanDesc scan, ScanKey keys, int nkeys, ScanKey order
 	PgturbohybridQueryHeader *hybridQuery = NULL;
 	bool		hasTextQuery = false;
 	bool		hasVectorQuery = false;
+	bool		hasMultiVectorQuery = false;
 
 	if (orderbys != NULL && norderbys > 0 &&
 		(orderbys[0].sk_flags & SK_ISNULL) == 0)
@@ -4136,7 +4184,26 @@ pgturbohybridamrescan(IndexScanDesc scan, ScanKey keys, int nkeys, ScanKey order
 		PgturbohybridQueryValidateFast(hybridQuery);
 		hasTextQuery = (hybridQuery->flags & PGTURBOHYBRID_QUERY_FLAG_HAS_TSQUERY) != 0;
 		hasVectorQuery = (hybridQuery->flags & PGTURBOHYBRID_QUERY_FLAG_HAS_VECTOR) != 0;
+		hasMultiVectorQuery =
+			(hybridQuery->flags & PGTURBOHYBRID_QUERY_FLAG_HAS_MULTIVECTOR) != 0;
 	}
+
+	if (PgturbohybridIndexIsMultiVector(scan->indexRelation))
+	{
+		if (hasVectorQuery)
+			ereport(ERROR,
+					(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
+					 errmsg("vector_query requires a turbohybrid index with a vector key")));
+	}
+	else if (hasMultiVectorQuery)
+		ereport(ERROR,
+				(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
+				 errmsg("multivector_query requires a turbohybrid index with a multivector key")));
+
+	if (hasMultiVectorQuery && hasTextQuery)
+		ereport(ERROR,
+				(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
+				 errmsg("hybrid multivector fusion is not implemented yet")));
 
 	if (hasTextQuery && !PgturbohybridIndexHasLexical(scan->indexRelation))
 		ereport(ERROR,
@@ -4147,7 +4214,7 @@ pgturbohybridamrescan(IndexScanDesc scan, ScanKey keys, int nkeys, ScanKey order
 					 hasVectorQuery ? denseOrderbys : NULL,
 					 hasVectorQuery ? norderbys : 0);
 
-	if (hasTextQuery || hasVectorQuery)
+	if (hasTextQuery || hasVectorQuery || hasMultiVectorQuery)
 	{
 		PgturbohybridGraphScanOpaque so = (PgturbohybridGraphScanOpaque) scan->opaque;
 		MemoryContext oldCtx = MemoryContextSwitchTo(so->tmpCtx);
@@ -4809,6 +4876,8 @@ pgturbohybridamvalidate(Oid opclassoid)
 		strcmp(opcname, "vector_ip_turbohybrid_ops") == 0 ||
 		strcmp(opcname, "vector_cosine_turbohybrid_ops") == 0)
 		valid = opclass->opcintype == PgturbohybridVectorTypeOid();
+	else if (strcmp(opcname, "multivector_cosine_turbohybrid_ops") == 0)
+		valid = opclass->opcintype == PgturbohybridMultiVectorTypeOid();
 	else if (strcmp(opcname, "bm25_tsvector_turbohybrid_ops") == 0)
 		valid = opclass->opcintype == TSVECTOROID;
 
@@ -4915,6 +4984,51 @@ PgturbohybridInit(void)
 							 "Dense alpha used by calibrated fusion for mixed/default query shapes",
 							 NULL, &pgturbohybrid_calibrated_fusion_default_alpha,
 							 0.50, 0.0, 1.0, PGC_USERSET, 0, NULL, NULL, NULL);
+	DefineCustomIntVariable("turbohybrid.multivector_max_doc_vectors",
+							"Maximum token vectors accepted for one indexed multivector document",
+							"Future multivector index builds use this as the per-document subnode cap. Single-vector indexes are unaffected.",
+							&pgturbohybrid_multivector_max_doc_vectors,
+							PGTURBOHYBRID_MULTIVECTOR_DEFAULT_MAX_DOC_VECTORS,
+							1, PGTURBOHYBRID_MAX_MULTIVECTOR_DOC_VECTORS,
+							PGC_USERSET, 0, NULL, NULL, NULL);
+	DefineCustomIntVariable("turbohybrid.multivector_max_query_vectors",
+							"Maximum token vectors accepted for one multivector query",
+							"Future multivector scans use this as the per-query MaxSim accumulator cap. Single-vector scans are unaffected.",
+							&pgturbohybrid_multivector_max_query_vectors,
+							PGTURBOHYBRID_MULTIVECTOR_DEFAULT_MAX_QUERY_VECTORS,
+							1, PGTURBOHYBRID_MAX_MULTIVECTOR_QUERY_VECTORS,
+							PGC_USERSET, 0, NULL, NULL, NULL);
+	DefineCustomIntVariable("turbohybrid.multivector_max_dim",
+							"Maximum dimensions accepted for multivector token vectors",
+							"Future multivector build and query paths use this cap before expanding document token vectors into graph subnodes.",
+							&pgturbohybrid_multivector_max_dim,
+							PGTURBOHYBRID_MULTIVECTOR_MAX_DIM,
+							1, PGTURBOHYBRID_MULTIVECTOR_MAX_DIM,
+							PGC_USERSET, 0, NULL, NULL, NULL);
+	DefineCustomIntVariable("turbohybrid.multivector_subvector_k",
+							"Subvector ANN hits collected for each multivector query token",
+							"Multivector MaxSim scans run one bounded graph search per query token and merge hits by heap tuple.",
+							&pgturbohybrid_multivector_subvector_k,
+							100, 1, 100000,
+							PGC_USERSET, 0, NULL, NULL, NULL);
+	DefineCustomIntVariable("turbohybrid.multivector_unique_docs_per_token",
+							"Unique document hits retained per multivector query token",
+							"Stops each query token after this many distinct heap tuples have contributed to the MaxSim accumulator.",
+							&pgturbohybrid_multivector_unique_docs_per_token,
+							100, 1, 100000,
+							PGC_USERSET, 0, NULL, NULL, NULL);
+	DefineCustomIntVariable("turbohybrid.multivector_max_raw_hits_per_token",
+							"Maximum raw subvector hits scanned per multivector query token",
+							"Caps duplicate subvector hits before document-level MaxSim aggregation.",
+							&pgturbohybrid_multivector_max_raw_hits_per_token,
+							400, 1, 100000,
+							PGC_USERSET, 0, NULL, NULL, NULL);
+	DefineCustomIntVariable("turbohybrid.multivector_doc_candidate_k",
+							"Document candidates retained after approximate multivector MaxSim aggregation",
+							"Final multivector dense results are truncated by this document-level candidate budget and the query dense_k.",
+							&pgturbohybrid_multivector_doc_candidate_k,
+							100, 1, 100000,
+							PGC_USERSET, 0, NULL, NULL, NULL);
 	DefineCustomIntVariable("turbohybrid.max_union_candidates", "Maximum candidates retained while fusing dense and BM25 branches",
 							NULL, &pgturbohybrid_max_union_candidates,
 							100000, 0,

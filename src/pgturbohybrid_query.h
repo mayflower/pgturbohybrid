@@ -4,9 +4,10 @@
 #include "postgres.h"
 
 #include "tsearch/ts_type.h"
+#include "pgturbohybrid_multivector.h"
 #include "pgturbohybrid_vector_compat.h"
 
-#define PGTURBOHYBRID_QUERY_VERSION 1
+#define PGTURBOHYBRID_QUERY_VERSION 2
 
 #define PGTURBOHYBRID_QUERY_FLAG_HAS_VECTOR			0x0001
 #define PGTURBOHYBRID_QUERY_FLAG_HAS_TSQUERY			0x0002
@@ -16,6 +17,15 @@
 #define PGTURBOHYBRID_QUERY_FLAG_DENSE_K_DEFAULTED		0x0020
 #define PGTURBOHYBRID_QUERY_FLAG_BM25_K_DEFAULTED		0x0040
 #define PGTURBOHYBRID_QUERY_FLAG_RRF_K_DEFAULTED		0x0080
+#define PGTURBOHYBRID_QUERY_FLAG_HAS_DENSE			0x0100
+#define PGTURBOHYBRID_QUERY_FLAG_HAS_MULTIVECTOR		0x0200
+
+typedef enum PgturbohybridDenseQueryKind
+{
+	PGTURBOHYBRID_DENSE_QUERY_NONE = 0,
+	PGTURBOHYBRID_DENSE_QUERY_VECTOR = 1,
+	PGTURBOHYBRID_DENSE_QUERY_MULTIVECTOR = 2
+} PgturbohybridDenseQueryKind;
 
 typedef enum PgturbohybridFusionMode
 {
@@ -39,8 +49,13 @@ typedef struct PgturbohybridQueryHeader
 	int32		denseK;
 	int32		bm25K;
 	int32		finalK;
+	uint16		denseKind;
+	uint16		reserved2;
 	int32		vectorBytes;
+	int32		multivectorBytes;
 	int32		tsqueryBytes;
+	int32		multivectorDim;
+	int32		multivectorCount;
 	/* payload starts at MAXALIGN(sizeof(PgturbohybridQueryHeader)) */
 } PgturbohybridQueryHeader;
 
@@ -49,6 +64,7 @@ typedef struct PgturbohybridQueryHeader
 #define PG_RETURN_PGTURBOHYBRID_QUERY_P(x) PG_RETURN_POINTER(x)
 
 Vector	   *PgturbohybridQueryGetVector(PgturbohybridQueryHeader *query);
+PgturbohybridMultiVector *PgturbohybridQueryGetMultiVector(PgturbohybridQueryHeader *query);
 TSQuery		PgturbohybridQueryGetTsQuery(PgturbohybridQueryHeader *query);
 void		PgturbohybridQueryValidate(PgturbohybridQueryHeader *query);
 void		PgturbohybridQueryValidateFast(PgturbohybridQueryHeader *query);
