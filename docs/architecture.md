@@ -384,13 +384,14 @@ Multivector late-interaction indexes use the same native graph storage for
 subvector nodes, but result identity remains the heap TID/document. A build over
 `turbohybrid_multivector` expands each row into one graph node per token vector
 and keeps in-memory build maps from node ID to document ID/token ordinal. The
-current scan path is dense-only: each query token performs a bounded graph
-traversal, candidate hits are grouped by heap TID, and document scores are
-accumulated with approximate MaxSim before final ordering. The `<~>` operator
-therefore still orders by smaller-is-better distance, using `-MaxSim` at the
-document level. Hybrid multivector + BM25 fusion and incremental insert/update
-maintenance are intentionally not part of the current storage contract; use
-bulk build/`REINDEX` for multivector experiments.
+scan path runs one bounded graph traversal per query token, groups candidate
+hits by heap TID, and accumulates document scores with approximate MaxSim before
+final ordering. The `<~>` operator therefore still orders by smaller-is-better
+distance, using `-MaxSim` at the document level. Hybrid multivector + BM25 is
+supported for document-level RRF fusion; score-level fusion modes remain
+unsupported unless explicitly documented. Incremental insert/update maintenance
+is intentionally not part of the current storage contract; use bulk
+build/`REINDEX` for multivector experiments.
 
 The scan-time candidate budgets are controlled by
 `turbohybrid.multivector_subvector_k`,
@@ -403,7 +404,8 @@ heap multivector values and does not store full f32 vectors in the index. These
 GUCs do not alter index storage. Build/query safety caps are
 `turbohybrid.multivector_max_doc_vectors`,
 `turbohybrid.multivector_max_query_vectors`, and
-`turbohybrid.multivector_max_dim`.
+`turbohybrid.multivector_max_dim`. The scan-time accumulator memory estimate is
+bounded by `turbohybrid.multivector_max_accumulator_mb`.
 
 The exact MaxSim kernel is dispatched below the reference scalar implementation:
 scalar remains mandatory, while SIMD-enabled builds may use AVX2 on x86 or NEON

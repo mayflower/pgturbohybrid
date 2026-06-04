@@ -130,6 +130,22 @@ reused by creating or passing a compatible eval table. Entry-sidecar strategy is
 reported from the current index; build-time sidecar variants should be compared
 by running the tuner once per prebuilt index.
 
+Multivector late-interaction slopes:
+
+```sh
+psql -d "$PGDATABASE" \
+  -f benchmarks/dev/multivector_late_interaction.sql
+```
+
+Use `DOCS`, `DIMS`, `FINAL_K`, and `ITERS` to scale the deterministic synthetic
+corpus. The harness varies document token vectors `L`, query token vectors `Q`,
+exact rerank documents `R`, and per-token subvector hits `Ks`, then reports build
+time, index size, graph subnode count, local p50/p95, exact-reference recall@K,
+raw subvector hits, unique documents, exact rerank pairs, and multivector
+accumulator memory estimates. See
+[`multivector_late_interaction.md`](multivector_late_interaction.md) for the
+expected slopes and the single-vector comparison guidance.
+
 Dense filter fallback:
 
 ```sh

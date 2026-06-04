@@ -156,7 +156,7 @@ This path is intentionally narrow today:
 - dense-only multivector scans are supported;
 - `vector_query` and `multivector_query` cannot be mixed in one
   `turbohybrid_query`;
-- hybrid multivector + text fusion is not implemented yet;
+- hybrid multivector + text search is supported for document-level RRF fusion;
 - incremental insert/update into a multivector turbohybrid index is not
   implemented yet, so build indexes from existing data and `REINDEX` after bulk
   replacement.
@@ -172,6 +172,7 @@ SET turbohybrid.multivector_max_raw_hits_per_token = 400;
 SET turbohybrid.multivector_doc_candidate_k = 100;
 SET turbohybrid.multivector_exact_rerank = 'topk'; -- or 'off'
 SET turbohybrid.multivector_exact_rerank_k = 100;
+SET turbohybrid.multivector_max_accumulator_mb = 64;
 ```
 
 By default, multivector scans exact-rerank a bounded top document prefix from
@@ -189,6 +190,10 @@ dispatch to AVX2 on x86 or NEON on ARM for the bounded rerank work; portable and
 Safety caps are controlled by `turbohybrid.multivector_max_doc_vectors`,
 `turbohybrid.multivector_max_query_vectors`, and
 `turbohybrid.multivector_max_dim`.
+
+See [`docs/multivector-late-interaction.md`](docs/multivector-late-interaction.md)
+for dense-only and hybrid examples, tuning guidance, diagnostics, and current
+limitations.
 
 ## When It Is Useful
 

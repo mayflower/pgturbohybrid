@@ -54,6 +54,12 @@ LIMIT 10;
 `text_query` requires an index whose second key uses
 `bm25_tsvector_turbohybrid_ops`.
 
+For ColBERT-style late interaction, `turbohybrid_multivector` stores multiple
+token vectors in one row. The graph indexes token subvectors, but the SQL result
+is still the document heap tuple and the exposed distance is `-MaxSim`. See
+[`multivector-late-interaction.md`](multivector-late-interaction.md) for the
+current multivector examples and limitations.
+
 In normal use, the SQL `LIMIT` becomes the final top-k target. You ask
 PostgreSQL for the top 10, and TurboHybrid uses that shape to keep the work
 bounded.
