@@ -1,0 +1,63 @@
+{
+  "nodes": {
+    "nixpkgs": {
+      "locked": {
+        "lastModified": 1780243769,
+        "narHash": "sha256-x5UQuRsH3MqI0U9afaXSNqzTPSeZlRLvFAav2Ux1pNw=",
+        "owner": "NixOS",
+        "repo": "nixpkgs",
+        "rev": "331800de5053fcebacf6813adb5db9c9dca22a0c",
+        "type": "github"
+      },
+      "original": {
+        "owner": "NixOS",
+        "ref": "nixos-unstable",
+        "repo": "nixpkgs",
+        "type": "github"
+      }
+    },
+    "pgvector-master": {
+      "flake": false,
+      "locked": {
+        "lastModified": 1780167490,
+        "narHash": "sha256-nnbwqDwJWWJ0gop9w/E9IFXh6UlOWWiOQzihGhape4Q=",
+        "owner": "pgvector",
+        "repo": "pgvector",
+        "rev": "12368bd79c469d82cb1914714b1b8eebab64a831",
+        "type": "github"
+      },
+      "original": {
+        "owner": "pgvector",
+        "ref": "master",
+        "repo": "pgvector",
+        "type": "github"
+      }
+    },
+    "pgvector-v082": {
+      "flake": false,
+      "locked": {
+        "lastModified": 1772045217,
+        "narHash": "sha256-TLPlH+amFdeI2pEsUZuvoQ1JA0sCMiIAWdkgqGBo4mI=",
+        "owner": "pgvector",
+        "repo": "pgvector",
+        "rev": "cab9da72c04353f143bb06b42ab70a403daac64a",
+        "type": "github"
+      },
+      "original": {
+        "owner": "pgvector",
+        "ref": "v0.8.2",
+        "repo": "pgvector",
+        "type": "github"
+      }
+    },
+    "root": {
+      "inputs": {
+        "nixpkgs": "nixpkgs",
+        "pgvector-master": "pgvector-master",
+        "pgvector-v082": "pgvector-v082"
+      }
+    }
+  },
+  "root": "root",
+  "version": 7
+}

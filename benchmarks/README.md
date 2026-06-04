@@ -9,6 +9,43 @@ Public benchmark explanations live under `docs/benchmarks/`. This directory is
 for reproducible tooling, acceptance thresholds, and developer benchmark
 helpers. Developer-only workflows are documented in `benchmarks/dev/README.md`.
 
+## Nix integration
+
+The Nix flake separates deterministic development checks from benchmark
+experiments:
+
+- `nix flake check` stays small and build-oriented. It builds the extension, the
+  wrapped PostgreSQL package, the pgvector-master variant, and a scalar
+  `SIMD_BUILD=none` variant.
+- `nix develop` provides the local PostgreSQL cluster, SQL regression commands,
+  and deterministic synthetic benchmark helpers.
+- `nix develop .#bench` adds `uv` and common Python data packages for real-data
+  benchmark scripts.
+
+Useful commands:
+
+```sh
+nix develop
+th-test
+th-bench-retrieval-quality
+th-bench-profile-grid
+th-bench-tune-profile
+
+nix develop .#bench
+th-bench-concurrent-dense --help
+FIQA_DATASET=/path/to/fiqa th-bench-fiqa-quick
+```
+
+The Nix `th-bench-fiqa-quick` wrapper defaults to the separate
+`pgturbohybrid_fiqa_quick` database. Use `FIQA_PGDATABASE=...` to choose another
+benchmark database, or set `PGDATABASE=...` explicitly when you want the wrapped
+script to use that database.
+
+Benchmarks that need external datasets or produce host-specific artifacts are
+not part of `flake check`. Keep generated JSON, CSV, logs, and Markdown reports
+under ignored result directories such as `benchmarks/results/` or outside the
+repository.
+
 If you already have a PostgreSQL RAG database and want a quick local comparison,
 use `benchmarks/rag_existing.py`. It compares TurboHybrid with your own
 retrieval SQL and is documented in

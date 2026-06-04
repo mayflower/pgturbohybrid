@@ -141,6 +141,91 @@ wash.
 
 ## Install
 
+### Nix development shell
+
+For a reproducible local development environment with PostgreSQL, pgvector, and
+`pgturbohybrid` packaged together:
+
+```sh
+nix develop
+th-pg-init
+th-smoke
+th-psql
+```
+
+The default shell uses PostgreSQL 17 and pgvector v0.8.2. It keeps the local
+database cluster under `.nix-dev/pg17-pgvector-v0.8.2/`, so it does not install
+extensions into Homebrew, apt, or another system PostgreSQL prefix. If your Nix
+install does not enable flakes globally, run commands with:
+
+```sh
+nix --extra-experimental-features 'nix-command flakes' develop
+```
+
+Useful commands inside the shell:
+
+```sh
+th-pg-start             # start the local PostgreSQL cluster
+th-pg-stop              # stop it
+th-pg-reset             # recreate it from scratch
+th-installcheck         # run SQL regression tests
+th-prove-installcheck   # run TAP tests when local TAP dependencies are available
+th-test                 # run smoke + SQL regression tests
+```
+
+To test against the pinned pgvector `master` input instead of v0.8.2:
+
+```sh
+nix develop .#pgvector-master
+th-pg-reset
+th-smoke
+```
+
+After changing extension C or SQL files, re-enter the shell or run the relevant
+`nix develop ... -c ...` command again so PostgreSQL sees the rebuilt extension
+package. The Nix workflow intentionally uses an isolated wrapped PostgreSQL
+rather than `make install` into a mutable system prefix.
+
+For deterministic local quality checks, use the benchmark commands from the
+default shell. They create synthetic data in the local Nix-managed database and
+print result tables; do not commit captured output.
+
+```sh
+th-bench-retrieval-quality
+th-bench-profile-grid
+th-bench-tune-profile
+```
+
+For Python and real-data benchmark work, use the benchmark shell. It includes
+`uv` and common Python data packages while keeping the default development shell
+small.
+
+```sh
+nix develop .#bench
+th-bench-concurrent-dense --help
+FIQA_DATASET=/path/to/fiqa th-bench-fiqa-quick
+```
+
+`th-bench-fiqa-quick` defaults to the separate
+`pgturbohybrid_fiqa_quick` database so it does not recreate the normal
+`pgturbohybrid_dev` database. Set `FIQA_PGDATABASE=...` for a different
+benchmark database, or set `PGDATABASE=...` explicitly when you want full
+control.
+
+The flake keeps `nix flake check` intentionally cheap: it builds the extension,
+the wrapped PostgreSQL package, the pgvector-master variant, and a scalar
+`SIMD_BUILD=none` variant. Long-running benchmarks, external datasets, and
+host-specific result files stay outside `flake check`.
+
+The flake inputs pin both nixpkgs and pgvector. Update them explicitly when
+testing newer dependencies:
+
+```sh
+nix flake lock --update-input pgvector-master
+```
+
+### Manual install
+
 Install pgvector first:
 
 ```sh

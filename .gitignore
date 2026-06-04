@@ -7,6 +7,9 @@ Thumbs.db
 .#*
 
 # Local dependency checkouts and release archives
+/.nix-dev/
+/result
+/result-*
 /.deps/
 /pgvector/
 /pgvector-*/
