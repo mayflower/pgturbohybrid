@@ -139,7 +139,7 @@ BEGIN
 		(stats->>'multivector_exact_rerank_docs')::int < 1 OR
 		(stats->>'multivector_exact_rerank_pairs')::int < 1 OR
 		stats->>'multivector_exact_kernel' IS NULL OR
-		stats->>'multivector_accumulator_kind' <> 'hash' OR
+		stats->>'multivector_accumulator_kind' <> 'docid_hash' OR
 		(stats->>'multivector_memory_bytes_estimate')::bigint < 1 OR
 		(stats->>'multivector_memory_bytes_estimate')::bigint > 1048576 THEN
 		RAISE EXCEPTION 'expected indexed multivector dense scan, got %', stats;
@@ -191,9 +191,40 @@ CREATE INDEX mv_docs_hybrid_idx ON mv_docs USING turbohybrid
    body_tsv bm25_tsvector_turbohybrid_ops);
 
 INSERT INTO mv_docs VALUES
-  (4, turbohybrid_multivector(ARRAY['[0.5,0.5]'::vector, '[0.6,0.4]'::vector]), to_tsvector('epsilon'));
+  (4, turbohybrid_multivector(ARRAY['[-1,-1]'::vector, '[-0.8,-1.2]'::vector]), to_tsvector('epsilon'));
 
 SET enable_seqscan = off;
+DO $$
+DECLARE
+	stats jsonb;
+BEGIN
+	stats := turbohybrid_index_stats('mv_docs_hybrid_idx'::regclass);
+	IF (stats->>'node_count')::int <> 8 THEN
+		RAISE EXCEPTION 'expected multivector insert to append two graph nodes, got %',
+			stats->>'node_count';
+	END IF;
+END
+$$;
+
+SELECT id FROM mv_docs
+  ORDER BY colbert <~> turbohybrid_query(
+    multivector_query => turbohybrid_multivector(ARRAY['[-1,-1]'::vector]),
+    dense_k => 8,
+    final_k => 1
+  )
+  LIMIT 1;
+
+SELECT id FROM mv_docs
+  ORDER BY colbert <~> turbohybrid_query(
+    multivector_query => turbohybrid_multivector(ARRAY['[-1,-1]'::vector]),
+    text_query => to_tsquery('epsilon'),
+    dense_k => 8,
+    bm25_k => 3,
+    final_k => 1,
+    fusion => 'rrf'
+  )
+  LIMIT 1;
+
 SELECT id FROM mv_docs
   ORDER BY colbert <~> turbohybrid_query(
     multivector_query => turbohybrid_multivector(ARRAY['[1,0]'::vector]),

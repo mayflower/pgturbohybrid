@@ -216,8 +216,9 @@ Useful fields include:
   MaxSim semantics over the stored token vectors.
 - `turbohybrid_query` cannot contain both `vector_query` and
   `multivector_query`.
-- Incremental insert/update into a multivector TurboHybrid index is not
-  supported yet. Load or replace data first, then build or `REINDEX`.
+- Incremental insert/update into a multivector TurboHybrid index expands the new
+  tuple into one graph subnode per document vector. Hybrid indexes append one
+  BM25 delta for the inserted document when the lexical key is non-null.
 - Hybrid multivector search currently supports document-level RRF. Treat other
   fusion modes as unsupported unless tests and docs for that mode say otherwise.
 - SIMD MaxSim kernels are optional; scalar is always available and defines the

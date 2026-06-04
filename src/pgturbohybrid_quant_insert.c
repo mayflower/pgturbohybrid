@@ -14,6 +14,8 @@
 #include "utils/rel.h"
 
 #include "pgturbohybrid_quant.h"
+#include "pgturbohybrid_am.h"
+#include "pgturbohybrid_multivector.h"
 #include "pgturbohybrid_quant_score.h"
 
 typedef struct PgturbohybridGraphInsertAppendCursor
@@ -75,6 +77,24 @@ PgturbohybridGraphInsertFrontierCompare(const void *a, const void *b)
 	if (ia->distance > ib->distance)
 		return 1;
 	return (ia->nodeId > ib->nodeId) - (ia->nodeId < ib->nodeId);
+}
+
+static Vector *
+PgturbohybridGraphInsertMultiVectorSubvector(const PgturbohybridMultiVector *mv,
+											 int32 ordinal)
+{
+	Vector	   *vector;
+	Size		vectorSize;
+	const float *values;
+
+	values = PgturbohybridMultiVectorValues(mv, ordinal);
+	vectorSize = PGTURBOHYBRID_VECTOR_SIZE(mv->dim);
+	vector = (Vector *) palloc(vectorSize);
+	SET_VARSIZE(vector, vectorSize);
+	vector->dim = (int16) mv->dim;
+	vector->unused = 0;
+	memcpy(vector->x, values, sizeof(float) * (Size) mv->dim);
+	return vector;
 }
 
 static double
@@ -1087,4 +1107,44 @@ PgturbohybridGraphInsertValueInPlace(Relation index, IndexInfo *indexInfo,
 	pfree(code);
 
 	return newNodeId;
+}
+
+uint32
+PgturbohybridGraphInsertMultiVectorInPlace(Relation index, IndexInfo *indexInfo,
+										   ItemPointer heap_tid, Datum value,
+										   Datum *values, bool *isnull,
+										   uint32 *insertedNodes)
+{
+	PgturbohybridMultiVector *mv;
+	char	   *rawValue;
+	uint32		firstNodeId = InvalidOid;
+	uint32		count = 0;
+
+	rawValue = (char *) DatumGetPointer(value);
+	mv = PgturbohybridDatumGetMultiVector(value);
+	PgturbohybridMultiVectorCheckDim((uint32) mv->dim,
+									 (uint32) pgturbohybrid_multivector_max_dim);
+	PgturbohybridMultiVectorCheckTokenCount((uint32) mv->count,
+											(uint32) pgturbohybrid_multivector_max_doc_vectors);
+
+	for (int32 i = 0; i < mv->count; i++)
+	{
+		Vector	   *vector;
+		uint32		nodeId;
+
+		vector = PgturbohybridGraphInsertMultiVectorSubvector(mv, i);
+		nodeId = PgturbohybridGraphInsertValueInPlace(index, indexInfo, heap_tid,
+													  PointerGetDatum(vector),
+													  values, isnull);
+		if (i == 0)
+			firstNodeId = nodeId;
+		count++;
+		pfree(vector);
+	}
+
+	if ((char *) mv != rawValue)
+		pfree(mv);
+	if (insertedNodes != NULL)
+		*insertedNodes = count;
+	return firstNodeId;
 }
