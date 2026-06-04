@@ -9215,6 +9215,7 @@ PgturbohybridMultiVectorResolveDocId(HTAB *docIdHash,
 	PgturbohybridMultiVectorDocIdEntry *entry;
 	bool		found;
 
+	memset(&key, 0, sizeof(key));
 	key.block = ItemPointerGetBlockNumber(heaptid);
 	key.offset = ItemPointerGetOffsetNumber(heaptid);
 	entry = (PgturbohybridMultiVectorDocIdEntry *) hash_search(docIdHash, &key,
@@ -9242,6 +9243,7 @@ PgturbohybridMultiVectorAccumulateDoc(HTAB *docHash,
 	bool		found;
 	double		similarity = -hit->distance;
 
+	memset(&key, 0, sizeof(key));
 	key.docId = docId;
 	entry = (PgturbohybridMultiVectorDocEntry *) hash_search(docHash, &key,
 															 HASH_ENTER,
