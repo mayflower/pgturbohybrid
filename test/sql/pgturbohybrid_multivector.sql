@@ -21,7 +21,64 @@ SELECT turbohybrid_multivector_count(
   turbohybrid_multivector(ARRAY['[1,0]'::vector, '[0,1]'::vector])
 ) AS count;
 
+SELECT turbohybrid_multivector_subvector(
+  turbohybrid_multivector(ARRAY['[1,0]'::vector, '[0,1]'::vector]),
+  1
+)::text AS subvector_1;
+
+SELECT turbohybrid_multivector_subvector(
+  turbohybrid_multivector(ARRAY['[1,0]'::vector, '[0,1]'::vector]),
+  2
+)::text AS subvector_2;
+
+SELECT turbohybrid_multivector(
+  turbohybrid_multivector_to_vector_array(
+    turbohybrid_multivector(ARRAY['[1,0]'::vector, '[0,1]'::vector])
+  )
+)::text AS mv_array_roundtrip;
+
+DO $$
+DECLARE
+	ordinal int;
+BEGIN
+	FOREACH ordinal IN ARRAY ARRAY[0, 3]
+	LOOP
+		BEGIN
+			PERFORM turbohybrid_multivector_subvector(
+				turbohybrid_multivector(ARRAY['[1,0]'::vector, '[0,1]'::vector]),
+				ordinal
+			);
+			RAISE EXCEPTION 'expected multivector subvector ordinal to fail: %',
+				ordinal;
+		EXCEPTION WHEN array_subscript_error THEN
+			NULL;
+		END;
+	END LOOP;
+END
+$$;
+
 SELECT turbohybrid_multivector(ARRAY['[1,0]'::vector, '[0,1]'::vector])::text AS mv_out;
+
+SELECT turbohybrid_multivector(ARRAY['[1,0]'::vector, '[0,1]'::vector])::text::turbohybrid_multivector::text
+  AS mv_roundtrip;
+
+SELECT t.typsend::regproc::text AS mv_send,
+       t.typreceive::regproc::text AS mv_recv
+FROM pg_type t
+WHERE t.typname = 'turbohybrid_multivector';
+
+SELECT pg_catalog.length(
+  turbohybrid_multivector_send(
+    turbohybrid_multivector(ARRAY['[1,0]'::vector, '[0,1]'::vector])
+  )
+) AS mv_binary_len;
+
+SELECT turbohybrid_multivector_dims(
+  'turbohybrid_multivector(dim=2,count=1,values=[[1,0]])'::turbohybrid_multivector
+) AS literal_dims;
+
+SELECT ' turbohybrid_multivector ( dim = 2 , count = 1 , values = [ [ 1 , 0 ] ] ) '::turbohybrid_multivector::text
+  AS mv_whitespace;
 
 SELECT turbohybrid_multivector_maxsim(
   turbohybrid_multivector(ARRAY['[1,0]'::vector, '[0,1]'::vector]),
@@ -36,6 +93,30 @@ SELECT turbohybrid_multivector_maxsim_distance(
 SELECT turbohybrid_multivector(ARRAY['[1,0]'::vector, '[1,1]'::vector]) <~>
   turbohybrid_query(multivector_query => turbohybrid_multivector(ARRAY['[1,0]'::vector, '[0,1]'::vector]))
   AS operator_distance;
+
+DO $$
+DECLARE
+	message text;
+	detail text;
+BEGIN
+	BEGIN
+		PERFORM turbohybrid_multivector(ARRAY['[1,0]'::vector]) <~>
+			turbohybrid_query(
+				multivector_query => turbohybrid_multivector(ARRAY['[1,0]'::vector]),
+				text_query => to_tsquery('alpha')
+			);
+		RAISE EXCEPTION 'expected scalar multivector text fallback error';
+	EXCEPTION WHEN feature_not_supported THEN
+		GET STACKED DIAGNOSTICS message = MESSAGE_TEXT,
+								detail = PG_EXCEPTION_DETAIL;
+		IF message <> 'hybrid text queries require a turbohybrid index scan' OR
+			detail <> 'Scalar multivector MaxSim can only evaluate the multivector payload.' THEN
+			RAISE EXCEPTION 'unexpected scalar multivector fallback diagnostics: %, %',
+				message, detail;
+		END IF;
+	END;
+END
+$$;
 
 SELECT turbohybrid_multivector_maxsim(
   turbohybrid_multivector(ARRAY['[-1,0]'::vector]),
@@ -75,6 +156,122 @@ END
 $$;
 RESET enable_seqscan;
 DROP TABLE sv_docs;
+
+CREATE TABLE mv_token_limit_docs (
+  id int,
+  colbert turbohybrid_multivector
+);
+
+INSERT INTO mv_token_limit_docs VALUES
+  (1, turbohybrid_multivector(ARRAY['[1,0]'::vector, '[0,1]'::vector]));
+
+CREATE INDEX mv_token_limit_docs_idx ON mv_token_limit_docs USING turbohybrid
+  (colbert multivector_cosine_turbohybrid_ops);
+
+SET enable_seqscan = off;
+SET turbohybrid.multivector_unique_docs_per_token = 1;
+SET turbohybrid.multivector_max_raw_hits_per_token = 10;
+SELECT COUNT(*) AS result_count,
+       COUNT(DISTINCT id) AS distinct_docs
+FROM (
+  SELECT id FROM mv_token_limit_docs
+    ORDER BY colbert <~> turbohybrid_query(
+      multivector_query => turbohybrid_multivector(ARRAY['[1,0]'::vector, '[0,1]'::vector]),
+      dense_k => 4,
+      final_k => 4
+    )
+    LIMIT 4
+) s;
+
+DO $$
+DECLARE
+	stats jsonb;
+BEGIN
+	stats := turbohybrid_last_scan_stats();
+	IF (stats->>'multivector_subvector_searches')::int <> 2 OR
+		(stats->>'multivector_unique_docs')::int <> 2 OR
+		(stats->>'multivector_doc_candidates')::int <> 1 THEN
+		RAISE EXCEPTION 'expected per-token unique doc accounting, got %', stats;
+	END IF;
+END
+$$;
+RESET turbohybrid.multivector_max_raw_hits_per_token;
+RESET turbohybrid.multivector_unique_docs_per_token;
+RESET enable_seqscan;
+DROP TABLE mv_token_limit_docs;
+
+CREATE TABLE mv_adaptive_docs (
+  id int,
+  colbert turbohybrid_multivector
+);
+
+INSERT INTO mv_adaptive_docs VALUES
+  (1, turbohybrid_multivector(ARRAY['[1,0]'::vector])),
+  (2, turbohybrid_multivector(ARRAY['[0.95,0.05]'::vector]));
+
+CREATE INDEX mv_adaptive_docs_idx ON mv_adaptive_docs USING turbohybrid
+  (colbert multivector_cosine_turbohybrid_ops);
+
+SET enable_seqscan = off;
+SET turbohybrid.multivector_subvector_k = 1;
+SET turbohybrid.multivector_unique_docs_per_token = 2;
+SET turbohybrid.multivector_max_raw_hits_per_token = 2;
+SET turbohybrid.multivector_adaptive_widening = on;
+SELECT COUNT(*) AS adaptive_result_count
+FROM (
+  SELECT id FROM mv_adaptive_docs
+    ORDER BY colbert <~> turbohybrid_query(
+      multivector_query => turbohybrid_multivector(ARRAY['[1,0]'::vector]),
+      dense_k => 2,
+      final_k => 2
+    )
+    LIMIT 2
+) s;
+
+DO $$
+DECLARE
+	stats jsonb;
+BEGIN
+	stats := turbohybrid_last_scan_stats();
+	IF stats->>'multivector_adaptive_widening_triggered' <> 'true' OR
+		(stats->>'multivector_adaptive_initial_raw_target')::int <> 1 OR
+		(stats->>'multivector_adaptive_final_raw_target')::int <> 2 OR
+		(stats->>'multivector_raw_subvector_hits')::int > 2 THEN
+		RAISE EXCEPTION 'expected adaptive multivector widening to reach cap, got %', stats;
+	END IF;
+END
+$$;
+
+SET turbohybrid.multivector_adaptive_widening = off;
+SELECT COUNT(*) AS fixed_result_count
+FROM (
+  SELECT id FROM mv_adaptive_docs
+    ORDER BY colbert <~> turbohybrid_query(
+      multivector_query => turbohybrid_multivector(ARRAY['[1,0]'::vector]),
+      dense_k => 2,
+      final_k => 2
+    )
+    LIMIT 2
+) s;
+
+DO $$
+DECLARE
+	stats jsonb;
+BEGIN
+	stats := turbohybrid_last_scan_stats();
+	IF stats->>'multivector_adaptive_widening_triggered' <> 'false' OR
+		(stats->>'multivector_adaptive_initial_raw_target')::int <> 2 OR
+		(stats->>'multivector_adaptive_final_raw_target')::int <> 2 THEN
+		RAISE EXCEPTION 'expected fixed multivector raw target when adaptive widening is off, got %', stats;
+	END IF;
+END
+$$;
+RESET turbohybrid.multivector_adaptive_widening;
+RESET turbohybrid.multivector_max_raw_hits_per_token;
+RESET turbohybrid.multivector_unique_docs_per_token;
+RESET turbohybrid.multivector_subvector_k;
+RESET enable_seqscan;
+DROP TABLE mv_adaptive_docs;
 
 CREATE TABLE mv_docs (
   id int,
@@ -139,13 +336,89 @@ BEGIN
 		(stats->>'multivector_exact_rerank_docs')::int < 1 OR
 		(stats->>'multivector_exact_rerank_pairs')::int < 1 OR
 		stats->>'multivector_exact_kernel' IS NULL OR
-		stats->>'multivector_accumulator_kind' <> 'docid_hash' OR
+		stats->>'multivector_accumulator_kind' <> 'docid_hash_slab' OR
+		stats->>'multivector_docmap_source' <> 'sidecar' OR
+		(stats->>'multivector_docmap_bytes')::bigint < 1 OR
 		(stats->>'multivector_memory_bytes_estimate')::bigint < 1 OR
 		(stats->>'multivector_memory_bytes_estimate')::bigint > 1048576 THEN
 		RAISE EXCEPTION 'expected indexed multivector dense scan, got %', stats;
 	END IF;
 END
 $$;
+
+DO $$
+DECLARE
+	memory_stats jsonb;
+BEGIN
+	memory_stats := turbohybrid_estimate_memory('mv_docs_colbert_idx'::regclass);
+	IF (memory_stats->'native'->>'multivector_docmap_bytes')::bigint < 1 THEN
+		RAISE EXCEPTION 'expected multivector docmap bytes in memory estimate, got %',
+			memory_stats;
+	END IF;
+END
+$$;
+
+SET turbohybrid.multivector_docmap = off;
+SELECT id FROM mv_docs
+  ORDER BY colbert <~> turbohybrid_query(
+    multivector_query => turbohybrid_multivector(ARRAY['[1,0]'::vector])
+  )
+  LIMIT 1;
+
+DO $$
+DECLARE
+	stats jsonb;
+BEGIN
+	stats := turbohybrid_last_scan_stats();
+	IF stats->>'multivector_docmap_source' <> 'heap_tid_hash' OR
+		(stats->>'multivector_docmap_bytes')::bigint <> 0 THEN
+		RAISE EXCEPTION 'expected forced heap-TID docmap fallback, got %', stats;
+	END IF;
+END
+$$;
+
+SET turbohybrid.multivector_docmap = require;
+SELECT id FROM mv_docs
+  ORDER BY colbert <~> turbohybrid_query(
+    multivector_query => turbohybrid_multivector(ARRAY['[1,0]'::vector])
+  )
+  LIMIT 1;
+
+DO $$
+DECLARE
+	stats jsonb;
+BEGIN
+	stats := turbohybrid_last_scan_stats();
+	IF stats->>'multivector_docmap_source' <> 'sidecar' OR
+		(stats->>'multivector_docmap_bytes')::bigint < 1 THEN
+		RAISE EXCEPTION 'expected required multivector docmap sidecar, got %',
+			stats;
+	END IF;
+END
+$$;
+RESET turbohybrid.multivector_docmap;
+
+SET turbohybrid.default_dense_k = 7;
+SELECT id FROM mv_docs
+  ORDER BY colbert <~> turbohybrid_query(
+    multivector_query => turbohybrid_multivector(ARRAY['[1,0]'::vector]),
+    dense_k => NULL
+  )
+  LIMIT 1;
+
+DO $$
+DECLARE
+	stats jsonb;
+BEGIN
+	stats := turbohybrid_last_scan_stats();
+	IF stats->>'multivector_enabled' <> 'true' OR
+		(stats->>'dense_candidates_effective')::int <> 7 THEN
+		RAISE EXCEPTION 'expected multivector default dense_k to use dense budget, got %',
+			stats;
+	END IF;
+END
+$$;
+RESET turbohybrid.default_dense_k;
 
 SET turbohybrid.multivector_exact_rerank = off;
 SELECT id FROM mv_docs
@@ -183,7 +456,229 @@ FROM (
     )
     LIMIT 3
 ) s;
+
+SET turbohybrid.multivector_doc_candidate_k = 2;
+SELECT COUNT(*) AS result_count,
+       COUNT(DISTINCT id) AS distinct_docs
+FROM (
+  SELECT id FROM mv_docs
+    ORDER BY colbert <~> turbohybrid_query(
+      multivector_query => turbohybrid_multivector(ARRAY['[1,0]'::vector, '[0,1]'::vector]),
+      dense_k => 6,
+      final_k => 3
+    )
+    LIMIT 3
+) s;
+
+DO $$
+DECLARE
+	stats jsonb;
+BEGIN
+	stats := turbohybrid_last_scan_stats();
+	IF (stats->>'multivector_doc_candidates')::int <> 2 THEN
+		RAISE EXCEPTION 'expected bounded multivector candidate heap to retain 2 docs, got %',
+			stats;
+	END IF;
+END
+$$;
+RESET turbohybrid.multivector_doc_candidate_k;
 RESET enable_seqscan;
+
+CREATE TABLE mv_alias_cosine_docs (
+  id int,
+  colbert turbohybrid_multivector
+);
+
+CREATE TABLE mv_alias_ip_docs (
+  id int,
+  colbert turbohybrid_multivector
+);
+
+INSERT INTO mv_alias_cosine_docs VALUES
+  (1, turbohybrid_multivector(ARRAY['[1,0]'::vector, '[0.8,0.2]'::vector])),
+  (2, turbohybrid_multivector(ARRAY['[0,1]'::vector, '[0.2,0.8]'::vector])),
+  (3, turbohybrid_multivector(ARRAY['[0.95,0.05]'::vector, '[0,1]'::vector]));
+
+INSERT INTO mv_alias_ip_docs SELECT * FROM mv_alias_cosine_docs;
+
+CREATE INDEX mv_alias_cosine_idx ON mv_alias_cosine_docs USING turbohybrid
+  (colbert multivector_cosine_turbohybrid_ops);
+
+CREATE INDEX mv_alias_ip_idx ON mv_alias_ip_docs USING turbohybrid
+  (colbert multivector_maxsim_ip_turbohybrid_ops);
+
+SET enable_seqscan = off;
+WITH cosine_results AS (
+  SELECT pg_catalog.array_agg(id) AS ids
+  FROM (
+    SELECT id FROM mv_alias_cosine_docs
+      ORDER BY colbert <~> turbohybrid_query(
+        multivector_query => turbohybrid_multivector(ARRAY['[1,0]'::vector, '[0,1]'::vector]),
+        dense_k => 6,
+        final_k => 3
+      )
+      LIMIT 3
+  ) s
+),
+ip_results AS (
+  SELECT pg_catalog.array_agg(id) AS ids
+  FROM (
+    SELECT id FROM mv_alias_ip_docs
+      ORDER BY colbert <~> turbohybrid_query(
+        multivector_query => turbohybrid_multivector(ARRAY['[1,0]'::vector, '[0,1]'::vector]),
+        dense_k => 6,
+        final_k => 3
+      )
+      LIMIT 3
+  ) s
+)
+SELECT cosine_results.ids = ip_results.ids AS maxsim_ip_alias_same_order
+FROM cosine_results, ip_results;
+RESET enable_seqscan;
+DROP TABLE mv_alias_cosine_docs;
+DROP TABLE mv_alias_ip_docs;
+
+CREATE TABLE mv_recall_docs (
+  id int,
+  colbert turbohybrid_multivector
+);
+
+INSERT INTO mv_recall_docs VALUES
+  (1, turbohybrid_multivector(ARRAY['[1,0]'::vector, '[0,1]'::vector])),
+  (2, turbohybrid_multivector(ARRAY['[0.9,0.1]'::vector, '[0.1,0.9]'::vector])),
+  (3, turbohybrid_multivector(ARRAY['[0.8,0.2]'::vector, '[0.3,0.7]'::vector])),
+  (4, turbohybrid_multivector(ARRAY['[0.6,0.4]'::vector, '[0.2,0.6]'::vector])),
+  (5, turbohybrid_multivector(ARRAY['[-1,0]'::vector, '[0,-1]'::vector])),
+  (6, turbohybrid_multivector(ARRAY['[0.4,0.6]'::vector, '[0.5,0.5]'::vector]));
+
+CREATE INDEX mv_recall_docs_idx ON mv_recall_docs USING turbohybrid
+  (colbert multivector_maxsim_ip_turbohybrid_ops);
+
+SET enable_seqscan = off;
+SET turbohybrid.multivector_doc_candidate_k = 8;
+SET turbohybrid.multivector_unique_docs_per_token = 8;
+SET turbohybrid.multivector_max_raw_hits_per_token = 64;
+
+WITH q AS (
+  SELECT turbohybrid_multivector(ARRAY['[1,0]'::vector, '[0,1]'::vector]) AS mv
+),
+brute AS (
+  SELECT pg_catalog.array_agg(id ORDER BY dist, id) AS ids
+  FROM (
+    SELECT id, turbohybrid_multivector_maxsim_distance(q.mv, colbert) AS dist
+    FROM mv_recall_docs, q
+    ORDER BY dist, id
+    LIMIT 5
+  ) s
+),
+indexed AS (
+  SELECT pg_catalog.array_agg(id ORDER BY ord) AS ids
+  FROM (
+    SELECT id, row_number() OVER () AS ord
+    FROM mv_recall_docs, q
+    ORDER BY colbert <~> turbohybrid_query(
+      multivector_query => q.mv,
+      dense_k => 12,
+      final_k => 5
+    )
+    LIMIT 5
+  ) s
+)
+SELECT brute.ids = indexed.ids AS multivector_index_matches_bruteforce
+FROM brute, indexed;
+
+RESET turbohybrid.multivector_max_raw_hits_per_token;
+RESET turbohybrid.multivector_unique_docs_per_token;
+RESET turbohybrid.multivector_doc_candidate_k;
+RESET enable_seqscan;
+DROP TABLE mv_recall_docs;
+
+CREATE TABLE mv_insert_batch_dense_docs (
+  id int,
+  colbert turbohybrid_multivector
+);
+
+INSERT INTO mv_insert_batch_dense_docs VALUES
+  (1, turbohybrid_multivector(ARRAY['[0,1]'::vector]));
+
+CREATE INDEX mv_insert_batch_dense_idx ON mv_insert_batch_dense_docs USING turbohybrid
+  (colbert multivector_cosine_turbohybrid_ops);
+
+INSERT INTO mv_insert_batch_dense_docs VALUES
+  (2, turbohybrid_multivector(ARRAY[
+    '[1,0]'::vector,
+    '[0.8,0.2]'::vector,
+    '[0.6,0.4]'::vector
+  ]));
+
+DO $$
+DECLARE
+	stats jsonb;
+BEGIN
+	stats := turbohybrid_index_stats('mv_insert_batch_dense_idx'::regclass);
+	IF (stats->>'node_count')::int <> 4 THEN
+		RAISE EXCEPTION 'expected 3-token multivector insert to append three dense nodes, got %',
+			stats->>'node_count';
+	END IF;
+END
+$$;
+
+SET enable_seqscan = off;
+SELECT id FROM mv_insert_batch_dense_docs
+  ORDER BY colbert <~> turbohybrid_query(
+    multivector_query => turbohybrid_multivector(ARRAY['[1,0]'::vector]),
+    dense_k => 4,
+    final_k => 1
+  )
+  LIMIT 1;
+RESET enable_seqscan;
+DROP TABLE mv_insert_batch_dense_docs;
+
+CREATE TABLE mv_insert_batch_hybrid_docs (
+  id int,
+  colbert turbohybrid_multivector,
+  body_tsv tsvector
+);
+
+INSERT INTO mv_insert_batch_hybrid_docs VALUES
+  (1, turbohybrid_multivector(ARRAY['[0,1]'::vector]), to_tsvector('alpha'));
+
+CREATE INDEX mv_insert_batch_hybrid_idx ON mv_insert_batch_hybrid_docs USING turbohybrid
+  (colbert multivector_cosine_turbohybrid_ops,
+   body_tsv bm25_tsvector_turbohybrid_ops);
+
+INSERT INTO mv_insert_batch_hybrid_docs VALUES
+  (2, turbohybrid_multivector(ARRAY[
+    '[1,0]'::vector,
+    '[0.8,0.2]'::vector,
+    '[0.6,0.4]'::vector
+  ]), to_tsvector('batchterm'));
+
+DO $$
+DECLARE
+	stats jsonb;
+BEGIN
+	stats := turbohybrid_index_stats('mv_insert_batch_hybrid_idx'::regclass);
+	IF (stats->>'node_count')::int <> 4 THEN
+		RAISE EXCEPTION 'expected 3-token hybrid multivector insert to append three dense nodes, got %',
+			stats->>'node_count';
+	END IF;
+END
+$$;
+
+SET enable_seqscan = off;
+SELECT id FROM mv_insert_batch_hybrid_docs
+	ORDER BY colbert <~> turbohybrid_query(
+		multivector_query => turbohybrid_multivector(ARRAY['[1,0]'::vector]),
+		text_query => to_tsquery('batchterm'),
+		dense_k => 4,
+		bm25_k => 4,
+		final_k => 4,
+		fusion => 'rrf'
+	)
+	LIMIT 4;
+RESET enable_seqscan;
+DROP TABLE mv_insert_batch_hybrid_docs;
 
 DROP INDEX mv_docs_colbert_idx;
 CREATE INDEX mv_docs_hybrid_idx ON mv_docs USING turbohybrid
@@ -213,6 +708,22 @@ SELECT id FROM mv_docs
     final_k => 1
   )
   LIMIT 1;
+
+DO $$
+DECLARE
+	stats jsonb;
+	memory_stats jsonb;
+BEGIN
+	stats := turbohybrid_last_scan_stats();
+	memory_stats := turbohybrid_estimate_memory('mv_docs_hybrid_idx'::regclass);
+	IF stats->>'multivector_docmap_source' <> 'sidecar' OR
+		(stats->>'multivector_docmap_bytes')::bigint < 1 OR
+		(memory_stats->'native'->>'multivector_docmap_bytes')::bigint < 1 THEN
+		RAISE EXCEPTION 'expected inserted multivector docmap sidecar, scan %, memory %',
+			stats, memory_stats;
+	END IF;
+END
+$$;
 
 SELECT id FROM mv_docs
   ORDER BY colbert <~> turbohybrid_query(
@@ -251,20 +762,46 @@ BEGIN
 END
 $$;
 
-SELECT COUNT(*) AS hybrid_result_count,
-       COUNT(DISTINCT id) AS hybrid_distinct_docs
-FROM (
-  SELECT id FROM mv_docs
-    ORDER BY colbert <~> turbohybrid_query(
-      multivector_query => turbohybrid_multivector(ARRAY['[1,0]'::vector, '[0,1]'::vector]),
-      text_query => to_tsquery('alpha | gamma'),
-      dense_k => 6,
-      bm25_k => 3,
-      final_k => 3,
-      fusion => 'rrf'
-    )
-    LIMIT 3
-) s;
+SELECT id FROM mv_docs
+  ORDER BY colbert <~> turbohybrid_query(
+    multivector_query => turbohybrid_multivector(ARRAY['[1,0]'::vector, '[0,1]'::vector]),
+    text_query => to_tsquery('alpha | gamma'),
+    dense_k => 6,
+    bm25_k => 3,
+    final_k => 3,
+    fusion => 'rrf'
+  )
+  LIMIT 3;
+
+SELECT id FROM mv_docs
+  ORDER BY colbert <~> turbohybrid_query(
+    multivector_query => turbohybrid_multivector(ARRAY['[1,0]'::vector]),
+    dense_k => 6,
+    final_k => 1,
+    fusion => 'weighted'
+  )
+  LIMIT 1;
+
+SELECT id FROM mv_docs
+  ORDER BY colbert <~> turbohybrid_query(
+    multivector_query => turbohybrid_multivector(ARRAY['[1,0]'::vector]),
+    text_query => to_tsquery('gamma'),
+    fusion => 'weighted'
+  )
+  LIMIT 1;
+
+DO $$
+DECLARE
+	stats jsonb;
+BEGIN
+	stats := turbohybrid_last_scan_stats();
+	IF stats->>'fusion_strategy' NOT IN ('sorted_merge_doc', 'hash_doc') OR
+		(stats->>'both_match')::int < 1 THEN
+		RAISE EXCEPTION 'expected weighted multivector hybrid fusion, got %',
+			stats;
+	END IF;
+END
+$$;
 
 SELECT id FROM mv_docs
   ORDER BY colbert <~> turbohybrid_query(
@@ -273,6 +810,102 @@ SELECT id FROM mv_docs
     fusion => 'fast_weighted'
   )
   LIMIT 1;
+
+SELECT id FROM mv_docs
+  ORDER BY colbert <~> turbohybrid_query(
+    multivector_query => turbohybrid_multivector(ARRAY['[1,0]'::vector]),
+    text_query => to_tsquery('gamma'),
+    fusion => 'calibrated'
+  )
+  LIMIT 1;
+
+CREATE TABLE mv_weighted_docs (
+  id int,
+  colbert turbohybrid_multivector,
+  body_tsv tsvector
+);
+
+INSERT INTO mv_weighted_docs VALUES
+  (1, turbohybrid_multivector(ARRAY['[1,0]'::vector]), to_tsvector('alpha')),
+  (2, turbohybrid_multivector(ARRAY['[1,0]'::vector]), to_tsvector('beta')),
+  (3, turbohybrid_multivector(ARRAY['[-1,0]'::vector]), to_tsvector('alpha'));
+
+CREATE INDEX mv_weighted_docs_idx ON mv_weighted_docs USING turbohybrid
+  (colbert multivector_cosine_turbohybrid_ops,
+   body_tsv bm25_tsvector_turbohybrid_ops);
+
+DO $$
+DECLARE
+	top_id int;
+BEGIN
+	SELECT id INTO top_id FROM mv_weighted_docs
+		ORDER BY colbert <~> turbohybrid_query(
+			multivector_query => turbohybrid_multivector(ARRAY['[1,0]'::vector]),
+			text_query => to_tsquery('alpha'),
+			dense_k => 2,
+			bm25_k => 2,
+			final_k => 3,
+			fusion => 'weighted',
+			alpha => 0.5
+		)
+		LIMIT 1;
+	IF top_id <> 1 THEN
+		RAISE EXCEPTION 'expected weighted fusion to rank both-evidence doc first, got %',
+			top_id;
+	END IF;
+END
+$$;
+
+DO $$
+DECLARE
+	result_count int;
+	result_id int;
+	seen_ids int[] := ARRAY[]::int[];
+BEGIN
+	result_count := 0;
+	FOR result_id IN
+		SELECT id FROM mv_weighted_docs
+			ORDER BY colbert <~> turbohybrid_query(
+				multivector_query => turbohybrid_multivector(ARRAY['[1,0]'::vector]),
+				text_query => to_tsquery('alpha'),
+				dense_k => 2,
+				bm25_k => 2,
+				final_k => 3,
+				fusion => 'weighted',
+				alpha => 0.5
+			)
+			LIMIT 3
+	LOOP
+		result_count := result_count + 1;
+		IF result_id = ANY(seen_ids) THEN
+			RAISE EXCEPTION 'expected weighted fusion to deduplicate docs, saw duplicate doc %',
+				result_id;
+		END IF;
+		seen_ids := seen_ids || result_id;
+	END LOOP;
+	IF result_count < 1 THEN
+		RAISE EXCEPTION 'expected weighted fusion to return at least one doc';
+	END IF;
+END
+$$;
+
+SELECT bool_and(id IN (1, 3)) AS weighted_require_bm25_match
+FROM (
+  SELECT id FROM mv_weighted_docs
+    ORDER BY colbert <~> turbohybrid_query(
+      multivector_query => turbohybrid_multivector(ARRAY['[1,0]'::vector]),
+      text_query => to_tsquery('alpha'),
+      dense_k => 2,
+      bm25_k => 2,
+      final_k => 3,
+      fusion => 'weighted',
+      alpha => 0.5,
+      require_bm25_match => true
+    )
+    LIMIT 3
+) s;
+
+DROP TABLE mv_weighted_docs;
 
 SET turbohybrid.multivector_max_query_vectors = 1;
 SELECT id FROM mv_docs
@@ -314,7 +947,225 @@ BEGIN
 END
 $$;
 RESET turbohybrid.multivector_max_raw_hits_per_token;
+
+DELETE FROM mv_docs WHERE id = 4;
+VACUUM mv_docs;
+SELECT COALESCE(bool_or(id = 4), false) AS deleted_doc_returned
+FROM (
+  SELECT id FROM mv_docs
+    ORDER BY colbert <~> turbohybrid_query(
+      multivector_query => turbohybrid_multivector(ARRAY['[-1,-1]'::vector]),
+      dense_k => 8,
+      final_k => 3
+    )
+    LIMIT 3
+) s;
+
+DO $$
+DECLARE
+	stats jsonb;
+BEGIN
+	stats := turbohybrid_last_scan_stats();
+	IF stats->>'multivector_docmap_source' <> 'sidecar' THEN
+		RAISE EXCEPTION 'expected post-delete scan to keep using sidecar, got %',
+			stats;
+	END IF;
+END
+$$;
+
+CREATE TABLE mv_lifecycle_docs (
+  id int PRIMARY KEY,
+  colbert turbohybrid_multivector,
+  body_tsv tsvector
+);
+
+INSERT INTO mv_lifecycle_docs VALUES
+  (1, turbohybrid_multivector(ARRAY['[1,0]'::vector]), to_tsvector('delete_me')),
+  (2, turbohybrid_multivector(ARRAY['[-1,0]'::vector]), to_tsvector('old_update')),
+  (3, turbohybrid_multivector(ARRAY['[-1,0]'::vector]), to_tsvector('hybrid_old'));
+
+CREATE INDEX mv_lifecycle_idx ON mv_lifecycle_docs USING turbohybrid
+  (colbert multivector_cosine_turbohybrid_ops,
+   body_tsv bm25_tsvector_turbohybrid_ops);
+
+SET enable_seqscan = off;
+DELETE FROM mv_lifecycle_docs WHERE id = 1;
+SELECT COALESCE(bool_or(id = 1), false) AS lifecycle_deleted_before_vacuum
+FROM (
+  SELECT id FROM mv_lifecycle_docs
+    ORDER BY colbert <~> turbohybrid_query(
+      multivector_query => turbohybrid_multivector(ARRAY['[1,0]'::vector]),
+      dense_k => 6,
+      final_k => 3
+    )
+    LIMIT 3
+) s;
+
+VACUUM mv_lifecycle_docs;
+SELECT COALESCE(bool_or(id = 1), false) AS lifecycle_deleted_after_vacuum
+FROM (
+  SELECT id FROM mv_lifecycle_docs
+    ORDER BY colbert <~> turbohybrid_query(
+      multivector_query => turbohybrid_multivector(ARRAY['[1,0]'::vector]),
+      dense_k => 6,
+      final_k => 3
+    )
+    LIMIT 3
+) s;
+
+UPDATE mv_lifecycle_docs
+SET colbert = turbohybrid_multivector(ARRAY['[1,0]'::vector]),
+    body_tsv = to_tsvector('updated_dense')
+WHERE id = 2;
+
+SELECT id AS lifecycle_updated_dense_top FROM mv_lifecycle_docs
+  ORDER BY colbert <~> turbohybrid_query(
+    multivector_query => turbohybrid_multivector(ARRAY['[1,0]'::vector]),
+    dense_k => 6,
+    final_k => 1
+  )
+  LIMIT 1;
+
+SELECT id AS lifecycle_old_update_top FROM mv_lifecycle_docs
+  ORDER BY colbert <~> turbohybrid_query(
+    multivector_query => turbohybrid_multivector(ARRAY['[-1,0]'::vector]),
+    dense_k => 6,
+    final_k => 1
+  )
+  LIMIT 1;
+
+UPDATE mv_lifecycle_docs
+SET colbert = turbohybrid_multivector(ARRAY['[0,1]'::vector]),
+    body_tsv = to_tsvector('hybrid_new')
+WHERE id = 3;
+
+SELECT id AS lifecycle_hybrid_update_top FROM mv_lifecycle_docs
+  ORDER BY colbert <~> turbohybrid_query(
+    multivector_query => turbohybrid_multivector(ARRAY['[0,1]'::vector]),
+    text_query => to_tsquery('hybrid_new'),
+    dense_k => 6,
+    bm25_k => 6,
+    final_k => 1,
+    fusion => 'rrf'
+  )
+  LIMIT 1;
+
+CREATE TEMP TABLE mv_lifecycle_before_insert AS
+SELECT (turbohybrid_index_stats('mv_lifecycle_idx'::regclass)->>'node_count')::int AS node_count;
+
+INSERT INTO mv_lifecycle_docs VALUES
+  (4, turbohybrid_multivector(ARRAY[
+    '[-0.2,-0.8]'::vector,
+    '[-0.4,-0.6]'::vector,
+    '[-0.6,-0.4]'::vector
+  ]), to_tsvector('insert_after_vacuum'));
+
+DO $$
+DECLARE
+	before_count int;
+	after_count int;
+BEGIN
+	SELECT node_count INTO before_count FROM mv_lifecycle_before_insert;
+	after_count := (turbohybrid_index_stats('mv_lifecycle_idx'::regclass)->>'node_count')::int;
+	IF after_count <= before_count THEN
+		RAISE EXCEPTION 'expected post-vacuum multivector insert to increase node_count, before %, after %',
+			before_count, after_count;
+	END IF;
+END
+$$;
+
+SELECT id AS lifecycle_insert_after_vacuum_top FROM mv_lifecycle_docs
+  ORDER BY colbert <~> turbohybrid_query(
+    multivector_query => turbohybrid_multivector(ARRAY['[-0.2,-0.8]'::vector]),
+    dense_k => 8,
+    final_k => 1
+  )
+  LIMIT 1;
+
+DROP TABLE mv_lifecycle_docs;
+DROP TABLE mv_lifecycle_before_insert;
+
+SELECT id AS rrf_text_only_top FROM mv_docs
+  ORDER BY colbert <~> turbohybrid_query(
+    text_query => to_tsquery('gamma'),
+    bm25_k => 3,
+    final_k => 1,
+    fusion => 'rrf'
+  )
+  LIMIT 1;
+
+SELECT bool_and(id IN (2, 3)) AS rrf_require_bm25_match
+FROM (
+  SELECT id FROM mv_docs
+    ORDER BY colbert <~> turbohybrid_query(
+      multivector_query => turbohybrid_multivector(ARRAY['[1,0]'::vector]),
+      text_query => to_tsquery('gamma'),
+      dense_k => 6,
+      bm25_k => 3,
+      final_k => 3,
+      fusion => 'rrf',
+      require_bm25_match => true
+    )
+    LIMIT 3
+) s;
+
+EXPLAIN (COSTS OFF)
+SELECT id FROM mv_docs
+  ORDER BY colbert <~> turbohybrid_query(
+    multivector_query => turbohybrid_multivector(ARRAY['[1,0]'::vector]),
+    dense_k => 6,
+    final_k => 1
+  )
+  LIMIT 1;
 RESET enable_seqscan;
+
+CREATE TABLE mv_usability_dense_only_docs (
+  id int,
+  colbert turbohybrid_multivector
+);
+
+INSERT INTO mv_usability_dense_only_docs VALUES
+  (1, turbohybrid_multivector(ARRAY['[1,0]'::vector]));
+
+CREATE INDEX mv_usability_dense_only_idx ON mv_usability_dense_only_docs USING turbohybrid
+  (colbert multivector_cosine_turbohybrid_ops);
+
+SET enable_seqscan = off;
+SELECT id FROM mv_usability_dense_only_docs
+  ORDER BY colbert <~> turbohybrid_query(
+    text_query => to_tsquery('alpha'),
+    bm25_k => 1,
+    final_k => 1,
+    fusion => 'rrf'
+  )
+  LIMIT 1;
+RESET enable_seqscan;
+DROP TABLE mv_usability_dense_only_docs;
+
+CREATE TABLE mv_usability_vector_docs (
+  id int,
+  embedding vector(2)
+);
+
+INSERT INTO mv_usability_vector_docs VALUES
+  (1, '[1,0]'::vector);
+
+CREATE INDEX mv_usability_vector_idx ON mv_usability_vector_docs USING turbohybrid
+  (embedding vector_cosine_turbohybrid_ops);
+
+SET enable_seqscan = off;
+SELECT id FROM mv_usability_vector_docs
+  ORDER BY embedding <~> turbohybrid_query(
+    multivector_query => turbohybrid_multivector(ARRAY['[1,0]'::vector]),
+    dense_k => 1,
+    final_k => 1
+  )
+  LIMIT 1;
+RESET enable_seqscan;
+DROP TABLE mv_usability_vector_docs;
+
+CREATE INDEX mv_docs_expr_idx ON mv_docs USING turbohybrid
+  ((coalesce(colbert, colbert)) multivector_cosine_turbohybrid_ops);
 
 SET turbohybrid.multivector_max_doc_vectors = 1;
 CREATE INDEX mv_docs_colbert_limited_idx ON mv_docs USING turbohybrid
@@ -326,6 +1177,16 @@ CREATE INDEX mv_docs_bad_order_idx ON mv_docs USING turbohybrid
 
 SELECT turbohybrid_multivector(ARRAY['[1,0]'::vector]) <~>
   turbohybrid_query(vector_query => '[1,0]'::vector);
+
+SET enable_seqscan = off;
+SELECT id FROM mv_docs
+  ORDER BY colbert <~> turbohybrid_query(
+    vector_query => '[1,0]'::vector,
+    dense_k => 1,
+    final_k => 1
+  )
+  LIMIT 1;
+RESET enable_seqscan;
 
 DROP TABLE mv_docs;
 
@@ -342,4 +1203,25 @@ SELECT turbohybrid_multivector_maxsim(
   turbohybrid_multivector(ARRAY['[1,0,0]'::vector])
 );
 
-SELECT 'turbohybrid_multivector(dim=2,count=1,values=[[1,0]])'::turbohybrid_multivector;
+DO $$
+DECLARE
+	literal text;
+BEGIN
+	FOREACH literal IN ARRAY ARRAY[
+		'turbohybrid_multivector(dim=2,count=2,values=[[1,0]])',
+		'turbohybrid_multivector(dim=2,count=1,values=[[1]])',
+		'turbohybrid_multivector(dim=2,count=1,values=[1,0])',
+		'turbohybrid_multivector(dim=2,count=1,values=[[NaN,0]])',
+		'turbohybrid_multivector(dim=2,count=1,values=[[Inf,0]])',
+		'turbohybrid_multivector(dim=2,count=1,values=[[1,0]]) trailing'
+	]
+	LOOP
+		BEGIN
+			EXECUTE format('SELECT %L::turbohybrid_multivector', literal);
+			RAISE EXCEPTION 'expected malformed multivector literal to fail: %', literal;
+		EXCEPTION WHEN invalid_text_representation OR data_exception THEN
+			NULL;
+		END;
+	END LOOP;
+END
+$$;

@@ -2250,6 +2250,7 @@ BEGIN
 	IF opclasses <> ARRAY[
 		'bm25_tsvector_turbohybrid_ops',
 		'multivector_cosine_turbohybrid_ops',
+		'multivector_maxsim_ip_turbohybrid_ops',
 		'vector_cosine_turbohybrid_ops',
 		'vector_ip_turbohybrid_ops',
 		'vector_l2_turbohybrid_ops'
@@ -3308,8 +3309,13 @@ BEGIN
 		'index_shape',
 		'index_used',
 		'multivector_accumulator_kind',
+		'multivector_adaptive_final_raw_target',
+		'multivector_adaptive_initial_raw_target',
+		'multivector_adaptive_widening_triggered',
 		'multivector_doc_candidates',
 		'multivector_doc_vectors_limit',
+		'multivector_docmap_bytes',
+		'multivector_docmap_source',
 		'multivector_duplicate_doc_hits',
 		'multivector_enabled',
 		'multivector_exact_kernel',
@@ -3501,6 +3507,36 @@ BEGIN
 	PERFORM set_config('turbohybrid.dense_adaptive_widening_max_multiplier', '3.0', true);
 	IF current_setting('turbohybrid.dense_adaptive_widening_max_multiplier') <> '3' THEN
 		RAISE EXCEPTION 'dense_adaptive_widening_max_multiplier GUC did not stick';
+	END IF;
+
+	PERFORM set_config('turbohybrid.multivector_adaptive_widening', 'auto', true);
+	IF current_setting('turbohybrid.multivector_adaptive_widening') <> 'auto' THEN
+		RAISE EXCEPTION 'multivector_adaptive_widening auto GUC did not stick';
+	END IF;
+
+	PERFORM set_config('turbohybrid.multivector_adaptive_widening', 'on', true);
+	IF current_setting('turbohybrid.multivector_adaptive_widening') <> 'on' THEN
+		RAISE EXCEPTION 'multivector_adaptive_widening on GUC did not stick';
+	END IF;
+
+	PERFORM set_config('turbohybrid.multivector_adaptive_widening', 'off', true);
+	IF current_setting('turbohybrid.multivector_adaptive_widening') <> 'off' THEN
+		RAISE EXCEPTION 'multivector_adaptive_widening off GUC did not stick';
+	END IF;
+
+	PERFORM set_config('turbohybrid.multivector_docmap', 'auto', true);
+	IF current_setting('turbohybrid.multivector_docmap') <> 'auto' THEN
+		RAISE EXCEPTION 'multivector_docmap auto GUC did not stick';
+	END IF;
+
+	PERFORM set_config('turbohybrid.multivector_docmap', 'require', true);
+	IF current_setting('turbohybrid.multivector_docmap') <> 'require' THEN
+		RAISE EXCEPTION 'multivector_docmap require GUC did not stick';
+	END IF;
+
+	PERFORM set_config('turbohybrid.multivector_docmap', 'off', true);
+	IF current_setting('turbohybrid.multivector_docmap') <> 'off' THEN
+		RAISE EXCEPTION 'multivector_docmap off GUC did not stick';
 	END IF;
 
 	PERFORM set_config('turbohybrid.dense_adaptive_min_gap', '0.05', true);

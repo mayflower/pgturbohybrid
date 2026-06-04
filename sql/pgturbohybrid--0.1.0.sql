@@ -70,9 +70,19 @@ CREATE FUNCTION turbohybrid_multivector_out(turbohybrid_multivector) RETURNS pg_
 	AS 'MODULE_PATHNAME', 'pgturbohybrid_multivector_out'
 	LANGUAGE C IMMUTABLE STRICT PARALLEL SAFE;
 
+CREATE FUNCTION turbohybrid_multivector_recv(pg_catalog.internal) RETURNS turbohybrid_multivector
+	AS 'MODULE_PATHNAME', 'pgturbohybrid_multivector_recv'
+	LANGUAGE C IMMUTABLE STRICT PARALLEL SAFE;
+
+CREATE FUNCTION turbohybrid_multivector_send(turbohybrid_multivector) RETURNS pg_catalog.bytea
+	AS 'MODULE_PATHNAME', 'pgturbohybrid_multivector_send'
+	LANGUAGE C IMMUTABLE STRICT PARALLEL SAFE;
+
 CREATE TYPE turbohybrid_multivector (
 	INPUT = turbohybrid_multivector_in,
 	OUTPUT = turbohybrid_multivector_out,
+	RECEIVE = turbohybrid_multivector_recv,
+	SEND = turbohybrid_multivector_send,
 	INTERNALLENGTH = variable,
 	STORAGE = extended,
 	ALIGNMENT = double
@@ -90,11 +100,38 @@ CREATE FUNCTION turbohybrid_multivector_count(turbohybrid_multivector) RETURNS p
 	AS 'MODULE_PATHNAME', 'pgturbohybrid_multivector_count'
 	LANGUAGE C IMMUTABLE STRICT PARALLEL SAFE;
 
+CREATE FUNCTION turbohybrid_multivector_subvector(
+	mv turbohybrid_multivector,
+	ordinal pg_catalog.int4
+) RETURNS vector
+	AS 'MODULE_PATHNAME', 'pgturbohybrid_multivector_subvector'
+	LANGUAGE C IMMUTABLE STRICT PARALLEL SAFE;
+
+CREATE FUNCTION turbohybrid_multivector_to_vector_array(
+	mv turbohybrid_multivector
+) RETURNS vector[]
+	AS 'MODULE_PATHNAME', 'pgturbohybrid_multivector_to_vector_array'
+	LANGUAGE C IMMUTABLE STRICT PARALLEL SAFE;
+
 CREATE FUNCTION turbohybrid_multivector_maxsim(
 	query turbohybrid_multivector,
 	doc turbohybrid_multivector
 ) RETURNS pg_catalog.float8
 	AS 'MODULE_PATHNAME', 'pgturbohybrid_multivector_maxsim'
+	LANGUAGE C IMMUTABLE STRICT PARALLEL SAFE;
+
+CREATE FUNCTION turbohybrid_multivector_maxsim_scalar(
+	query turbohybrid_multivector,
+	doc turbohybrid_multivector
+) RETURNS pg_catalog.float8
+	AS 'MODULE_PATHNAME', 'pgturbohybrid_multivector_maxsim_scalar'
+	LANGUAGE C IMMUTABLE STRICT PARALLEL SAFE;
+
+CREATE FUNCTION turbohybrid_multivector_maxsim_blocked_scalar(
+	query turbohybrid_multivector,
+	doc turbohybrid_multivector
+) RETURNS pg_catalog.float8
+	AS 'MODULE_PATHNAME', 'pgturbohybrid_multivector_maxsim_blocked_scalar'
 	LANGUAGE C IMMUTABLE STRICT PARALLEL SAFE;
 
 CREATE FUNCTION turbohybrid_multivector_maxsim_distance(
@@ -203,6 +240,13 @@ CREATE OPERATOR CLASS vector_cosine_turbohybrid_ops
 	FUNCTION 4 turbohybrid_vector_norm(vector);
 
 CREATE OPERATOR CLASS multivector_cosine_turbohybrid_ops
+	FOR TYPE turbohybrid_multivector USING turbohybrid AS
+	OPERATOR 1 <~> (turbohybrid_multivector, turbohybrid_query) FOR ORDER BY pg_catalog.float_ops,
+	FUNCTION 1 turbohybrid_vector_negative_inner_product(vector, vector),
+	FUNCTION 2 turbohybrid_vector_norm(vector),
+	FUNCTION 4 turbohybrid_vector_norm(vector);
+
+CREATE OPERATOR CLASS multivector_maxsim_ip_turbohybrid_ops
 	FOR TYPE turbohybrid_multivector USING turbohybrid AS
 	OPERATOR 1 <~> (turbohybrid_multivector, turbohybrid_query) FOR ORDER BY pg_catalog.float_ops,
 	FUNCTION 1 turbohybrid_vector_negative_inner_product(vector, vector),
@@ -413,6 +457,8 @@ COMMENT ON FUNCTION turbohybrid_l2_distance(vector, turbohybrid_query) IS 'L2 Tu
 COMMENT ON FUNCTION turbohybrid_negative_inner_product(vector, turbohybrid_query) IS 'Negative inner product TurboHybrid distance between a vector and a query';
 COMMENT ON FUNCTION turbohybrid_cosine_distance(vector, turbohybrid_query) IS 'Cosine TurboHybrid distance between a vector and a query';
 COMMENT ON FUNCTION turbohybrid_multivector_distance(turbohybrid_multivector, turbohybrid_query) IS 'Exact MaxSim distance between a multivector and a TurboHybrid query';
+COMMENT ON FUNCTION turbohybrid_multivector_subvector(turbohybrid_multivector, pg_catalog.int4) IS 'Return one 1-based subvector from a turbohybrid_multivector as vector';
+COMMENT ON FUNCTION turbohybrid_multivector_to_vector_array(turbohybrid_multivector) IS 'Return all subvectors from a turbohybrid_multivector as vector[]';
 COMMENT ON FUNCTION turbohybrid_vector_l2_squared_distance(vector, vector) IS 'Squared L2 support function used by TurboHybrid vector opclasses';
 COMMENT ON FUNCTION turbohybrid_vector_l2_distance(vector, vector) IS 'L2 support function used by TurboHybrid vector opclasses';
 COMMENT ON FUNCTION turbohybrid_vector_negative_inner_product(vector, vector) IS 'Negative inner product support function used by TurboHybrid vector opclasses';
@@ -435,11 +481,13 @@ COMMENT ON OPERATOR <~> (vector, turbohybrid_query) IS 'Cosine distance operator
 COMMENT ON OPERATOR CLASS vector_l2_turbohybrid_ops USING turbohybrid IS 'TurboHybrid L2 vector operator class';
 COMMENT ON OPERATOR CLASS vector_ip_turbohybrid_ops USING turbohybrid IS 'TurboHybrid inner product vector operator class';
 COMMENT ON OPERATOR CLASS vector_cosine_turbohybrid_ops USING turbohybrid IS 'TurboHybrid cosine vector operator class';
-COMMENT ON OPERATOR CLASS multivector_cosine_turbohybrid_ops USING turbohybrid IS 'TurboHybrid multivector cosine operator class';
+COMMENT ON OPERATOR CLASS multivector_cosine_turbohybrid_ops USING turbohybrid IS 'Compatibility multivector operator class for normalized token vectors; uses dot-product MaxSim internally';
+COMMENT ON OPERATOR CLASS multivector_maxsim_ip_turbohybrid_ops USING turbohybrid IS 'TurboHybrid multivector operator class exposing raw dot-product MaxSim semantics';
 COMMENT ON OPERATOR CLASS bm25_tsvector_turbohybrid_ops USING turbohybrid IS 'TurboHybrid BM25 tsvector operator class';
 
 COMMENT ON OPERATOR FAMILY vector_l2_turbohybrid_ops USING turbohybrid IS 'TurboHybrid L2 vector operator family';
 COMMENT ON OPERATOR FAMILY vector_ip_turbohybrid_ops USING turbohybrid IS 'TurboHybrid inner product vector operator family';
 COMMENT ON OPERATOR FAMILY vector_cosine_turbohybrid_ops USING turbohybrid IS 'TurboHybrid cosine vector operator family';
-COMMENT ON OPERATOR FAMILY multivector_cosine_turbohybrid_ops USING turbohybrid IS 'TurboHybrid multivector cosine operator family';
+COMMENT ON OPERATOR FAMILY multivector_cosine_turbohybrid_ops USING turbohybrid IS 'Compatibility multivector operator family for normalized token vectors; uses dot-product MaxSim internally';
+COMMENT ON OPERATOR FAMILY multivector_maxsim_ip_turbohybrid_ops USING turbohybrid IS 'TurboHybrid multivector raw dot-product MaxSim operator family';
 COMMENT ON OPERATOR FAMILY bm25_tsvector_turbohybrid_ops USING turbohybrid IS 'TurboHybrid BM25 tsvector operator family';

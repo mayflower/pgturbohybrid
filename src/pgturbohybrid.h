@@ -119,6 +119,7 @@ typedef Pointer Item;
 #define PGTURBOHYBRID_GRAPH_PAGE_KIND_BM25_DELTA	12
 #define PGTURBOHYBRID_GRAPH_PAGE_KIND_BM25_IMPACT	13
 #define PGTURBOHYBRID_GRAPH_PAGE_KIND_BM25_DELTA_TERM 14
+#define PGTURBOHYBRID_GRAPH_PAGE_KIND_MULTIVECTOR_DOCMAP 15
 #define PGTURBOHYBRID_GRAPH_PAGE_KIND_MASK				0x00ff
 #define PGTURBOHYBRID_GRAPH_PAGE_GRAPH_OP_SHIFT		8
 
@@ -1002,6 +1003,12 @@ typedef struct PgturbohybridGraphMetaPageData
 	BlockNumber tqExactStartBlkno;
 	BlockNumber tqCorrectionStartBlkno;
 	BlockNumber tqBm25MetaStartBlkno;
+	BlockNumber tqMultivectorDocMapStartBlkno;
+	uint32		tqMultivectorDocMapPageCount;
+	uint32		tqMultivectorDocCount;
+	uint32		tqMultivectorDocMapBytes;
+	uint16		tqMultivectorDocMapVersion;
+	uint16		tqMultivectorDocMapFlags;
 	uint16		tqEntrySidecarCount;
 	uint16		tqEntrySidecarBytes;
 	uint16		tqResidualRerankBytes;

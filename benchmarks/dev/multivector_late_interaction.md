@@ -22,7 +22,7 @@ psql -d "$PGDATABASE" \
   -f benchmarks/dev/multivector_late_interaction.sql
 ```
 
-The default is intentionally small (`DOCS=256`, `DIMS=16`) so it can run on a
+The default is intentionally small (`DOCS=256`, `DIMS=32`) so it can run on a
 laptop. Increase `DOCS` and `DIMS` when you want stronger slope evidence.
 
 ## Variables
@@ -35,6 +35,17 @@ laptop. Increase `DOCS` and `DIMS` when you want stronger slope evidence.
 - `Ks`: subvector hits per query token.
 - `C`: unique document candidates touched by subvector hits.
 - `R`: exact heap rerank documents.
+
+## Grid Axes
+
+The tracked harness keeps `D` configurable through `DOCS` and sweeps these
+deterministic cells:
+
+- `L = 8, 32, 128`
+- `Q = 4, 16, 64`
+- `d = 32, 96, 128`
+- `R = off, 25, 100`
+- `Ks = 16, 64, 256`
 
 ## Expected Complexity
 
@@ -49,8 +60,10 @@ laptop. Increase `DOCS` and `DIMS` when you want stronger slope evidence.
 
 The SQL report prints build time, index size, graph node count, p50/p95 local
 latency, exact-reference recall@K on the synthetic corpus, raw subvector hits,
-unique documents, exact rerank pairs, and the accumulator memory estimate from
-`turbohybrid_last_scan_stats()`.
+unique documents, document candidate count, exact rerank pairs, accumulator
+memory estimate, and `fusion_strategy` from `turbohybrid_last_scan_stats()`.
+Exact rerank pair counts are bounded by available candidate documents, so very
+small `DOCS` smoke runs may cap `R=25` and `R=100` at the same observed work.
 
 ## Comparing Against Single-Vector
 

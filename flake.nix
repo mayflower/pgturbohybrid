@@ -36,6 +36,10 @@
           pkgs = import nixpkgs { inherit system; };
           lib = pkgs.lib;
           postgresql = pkgs.postgresql_17;
+          tapPerl = pkgs.perl.withPackages (ps: [
+            ps.IPCRun
+            ps.IOTty
+          ]);
 
           cleanSource = lib.cleanSourceWith {
             src = ./.;
@@ -289,9 +293,10 @@
                 exec make PG_CONFIG="$PG_CONFIG" installcheck
               '';
 
-              proveInstallcheck = mkScript "th-prove-installcheck" ''
+              proveInstallcheck = mkScriptWithInputs [ tapPerl ] "th-prove-installcheck" ''
                 ${pgInit}/bin/th-pg-init >/dev/null
-                exec make PG_CONFIG="$PG_CONFIG" prove_installcheck
+                export PERL5LIB="${postgresql.src}/test/perl:${postgresql.src}/src/test/perl:''${PERL5LIB:-}"
+                exec make PG_CONFIG="$PG_CONFIG" bindir="${postgresWithExtensions}/bin" prove_installcheck
               '';
 
               test = mkScript "th-test" ''

@@ -15,8 +15,10 @@
 -- ID sets are compared sorted (order-independent): the documented behavior is
 -- that SIMD vs scalar may reorder tied/near-equal candidates, but must never
 -- change WHICH ids are returned.
+SET client_min_messages = warning;
 CREATE EXTENSION IF NOT EXISTS vector;
 CREATE EXTENSION IF NOT EXISTS pgturbohybrid;
+RESET client_min_messages;
 
 SET enable_seqscan = off;
 SET jit = off;
@@ -120,6 +122,8 @@ DECLARE
     query_mv turbohybrid_multivector;
     doc_mv turbohybrid_multivector;
     scalar_score float8;
+    blocked_score float8;
+    fallback_score float8;
     simd_score float8;
     tolerance float8;
 BEGIN
@@ -130,7 +134,21 @@ BEGIN
         doc_mv := simd_parity_multivector(doc_count, dims, -0.75);
 
         PERFORM set_config('turbohybrid.simd', 'off', false);
-        scalar_score := turbohybrid_multivector_maxsim(query_mv, doc_mv);
+        scalar_score := turbohybrid_multivector_maxsim_scalar(query_mv, doc_mv);
+        blocked_score := turbohybrid_multivector_maxsim_blocked_scalar(query_mv, doc_mv);
+        fallback_score := turbohybrid_multivector_maxsim(query_mv, doc_mv);
+
+        tolerance := 1e-12 * greatest(1.0, abs(scalar_score));
+        IF abs(scalar_score - blocked_score) > tolerance THEN
+            RAISE EXCEPTION
+                'multivector blocked scalar parity failed for dim %, q %, d %: scalar %, blocked %, tolerance %',
+                dims, query_count, doc_count, scalar_score, blocked_score, tolerance;
+        END IF;
+        IF abs(scalar_score - fallback_score) > tolerance THEN
+            RAISE EXCEPTION
+                'multivector scalar fallback parity failed for dim %, q %, d %: scalar %, fallback %, tolerance %',
+                dims, query_count, doc_count, scalar_score, fallback_score, tolerance;
+        END IF;
 
         PERFORM set_config('turbohybrid.simd', 'on', false);
         simd_score := turbohybrid_multivector_maxsim(query_mv, doc_mv);

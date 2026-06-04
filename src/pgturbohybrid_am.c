@@ -140,6 +140,10 @@ int			pgturbohybrid_multivector_max_dim = PGTURBOHYBRID_MULTIVECTOR_MAX_DIM;
 int			pgturbohybrid_multivector_subvector_k = 100;
 int			pgturbohybrid_multivector_unique_docs_per_token = 100;
 int			pgturbohybrid_multivector_max_raw_hits_per_token = 400;
+int			pgturbohybrid_multivector_adaptive_widening =
+	PGTURBOHYBRID_MULTIVECTOR_ADAPTIVE_WIDENING_AUTO;
+int			pgturbohybrid_multivector_docmap =
+	PGTURBOHYBRID_MULTIVECTOR_DOCMAP_AUTO;
 int			pgturbohybrid_multivector_doc_candidate_k = 100;
 int			pgturbohybrid_multivector_exact_rerank =
 	PGTURBOHYBRID_MULTIVECTOR_EXACT_RERANK_TOPK;
@@ -211,6 +215,20 @@ static const struct config_enum_entry pgturbohybrid_dense_adaptive_widening_opti
 	{"off", PGTURBOHYBRID_DENSE_ADAPTIVE_WIDENING_OFF, false},
 	{"auto", PGTURBOHYBRID_DENSE_ADAPTIVE_WIDENING_AUTO, false},
 	{"on", PGTURBOHYBRID_DENSE_ADAPTIVE_WIDENING_ON, false},
+	{NULL, 0, false}
+};
+
+static const struct config_enum_entry pgturbohybrid_multivector_adaptive_widening_options[] = {
+	{"off", PGTURBOHYBRID_MULTIVECTOR_ADAPTIVE_WIDENING_OFF, false},
+	{"auto", PGTURBOHYBRID_MULTIVECTOR_ADAPTIVE_WIDENING_AUTO, false},
+	{"on", PGTURBOHYBRID_MULTIVECTOR_ADAPTIVE_WIDENING_ON, false},
+	{NULL, 0, false}
+};
+
+static const struct config_enum_entry pgturbohybrid_multivector_docmap_options[] = {
+	{"off", PGTURBOHYBRID_MULTIVECTOR_DOCMAP_OFF, false},
+	{"auto", PGTURBOHYBRID_MULTIVECTOR_DOCMAP_AUTO, false},
+	{"require", PGTURBOHYBRID_MULTIVECTOR_DOCMAP_REQUIRE, false},
 	{NULL, 0, false}
 };
 
@@ -1083,6 +1101,11 @@ typedef struct PgturbohybridLastScanStats
 	uint32		multivectorDocVectorsLimit;
 	uint64		multivectorSubvectorSearches;
 	uint64		multivectorRawSubvectorHits;
+	bool		multivectorAdaptiveWideningTriggered;
+	uint32		multivectorAdaptiveInitialRawTarget;
+	uint32		multivectorAdaptiveFinalRawTarget;
+	char		multivectorDocMapSource[16];
+	uint64		multivectorDocMapBytes;
 	uint64		multivectorUniqueDocs;
 	uint64		multivectorDuplicateDocHits;
 	uint64		multivectorMaxsimUpdates;
@@ -1346,6 +1369,17 @@ PgturbohybridGetLastScanStatsSnapshot(PgturbohybridScanStatsSnapshot *stats)
 		pgturbohybrid_last_scan_state.multivectorSubvectorSearches;
 	stats->multivectorRawSubvectorHits =
 		pgturbohybrid_last_scan_state.multivectorRawSubvectorHits;
+	stats->multivectorAdaptiveWideningTriggered =
+		pgturbohybrid_last_scan_state.multivectorAdaptiveWideningTriggered;
+	stats->multivectorAdaptiveInitialRawTarget =
+		pgturbohybrid_last_scan_state.multivectorAdaptiveInitialRawTarget;
+	stats->multivectorAdaptiveFinalRawTarget =
+		pgturbohybrid_last_scan_state.multivectorAdaptiveFinalRawTarget;
+	strlcpy(stats->multivectorDocMapSource,
+			pgturbohybrid_last_scan_state.multivectorDocMapSource,
+			sizeof(stats->multivectorDocMapSource));
+	stats->multivectorDocMapBytes =
+		pgturbohybrid_last_scan_state.multivectorDocMapBytes;
 	stats->multivectorUniqueDocs =
 		pgturbohybrid_last_scan_state.multivectorUniqueDocs;
 	stats->multivectorDuplicateDocHits =
@@ -1960,6 +1994,33 @@ PgturbohybridApplyAutoBudget(int requested, int limit, int minBudget,
 }
 
 static void
+PgturbohybridQueryValidateMultiVectorFusionSupport(Relation index,
+												  PgturbohybridQueryHeader *query)
+{
+	uint16		requestedFusion;
+
+	(void) index;
+	if (query == NULL ||
+		!PgturbohybridQueryHasMultiVector(query) ||
+		!PgturbohybridQueryHasText(query))
+	{
+		/*
+		 * Dense-only multivector scans do not execute score fusion, so the
+		 * fusion setting is currently ignored for that path.
+		 */
+		return;
+	}
+
+	requestedFusion = pgturbohybrid_force_fusion != 0 ?
+		pgturbohybrid_force_fusion : query->fusion;
+	if (requestedFusion != PGTURBOHYBRID_FUSION_RRF &&
+		requestedFusion != PGTURBOHYBRID_FUSION_WEIGHTED)
+		ereport(ERROR,
+				(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
+				 errmsg("hybrid multivector fusion currently supports only fusion => 'rrf' or fusion => 'weighted'")));
+}
+
+static void
 PgturbohybridCanonicalizeLatencyQuery(PgturbohybridQueryHeader *query, int limit)
 {
 	if (pgturbohybrid_profile != PGTURBOHYBRID_PROFILE_LATENCY)
@@ -1985,18 +2046,20 @@ PgturbohybridEffectiveQuery(PgturbohybridQueryHeader *query, int limit,
 {
 	PgturbohybridQueryHeader *effective;
 	Size		querySize = VARSIZE_ANY(query);
-	bool		hasVector =
-		(query->flags & PGTURBOHYBRID_QUERY_FLAG_HAS_VECTOR) != 0;
+	bool		hasDense = PgturbohybridQueryHasDense(query);
 	bool		hasTsQuery =
 		(query->flags & PGTURBOHYBRID_QUERY_FLAG_HAS_TSQUERY) != 0;
 
 	effective = MemoryContextAlloc(memoryContext, querySize);
 	memcpy(effective, query, querySize);
 
+	/*
+	 * Default dense budget applies to both vector_query and multivector_query.
+	 */
 	effective->denseK = PgturbohybridApplyAutoBudget(query->denseK, limit,
 												pgturbohybrid_auto_budget_min_dense_k,
 												(query->flags & PGTURBOHYBRID_QUERY_FLAG_DENSE_K_DEFAULTED) != 0,
-												hasVector);
+												hasDense);
 	effective->bm25K = PgturbohybridApplyAutoBudget(query->bm25K, limit,
 											   pgturbohybrid_auto_budget_min_bm25_k,
 											   (query->flags & PGTURBOHYBRID_QUERY_FLAG_BM25_K_DEFAULTED) != 0,
@@ -2108,8 +2171,7 @@ PgturbohybridChooseAdaptiveHybridBudget(PgturbohybridQueryHeader *query,
 								   int limit,
 								   PgturbohybridHybridBudgetChoice *choice)
 {
-	bool		hasVector =
-		(query->flags & PGTURBOHYBRID_QUERY_FLAG_HAS_VECTOR) != 0;
+	bool		hasDense = PgturbohybridQueryHasDense(query);
 	bool		hasTsQuery =
 		(query->flags & PGTURBOHYBRID_QUERY_FLAG_HAS_TSQUERY) != 0;
 	int			finalTarget;
@@ -2125,7 +2187,7 @@ PgturbohybridChooseAdaptiveHybridBudget(PgturbohybridQueryHeader *query,
 	choice->adaptive = true;
 	strlcpy(choice->reason, "adaptive_approximate_policy", sizeof(choice->reason));
 
-	if (!hasVector || !hasTsQuery)
+	if (!hasDense || !hasTsQuery)
 	{
 		choice->queryShape = PGTURBOHYBRID_HYBRID_SHAPE_NOT_HYBRID;
 		strlcpy(choice->reason, "not_hybrid", sizeof(choice->reason));
@@ -2194,14 +2256,13 @@ PgturbohybridHybridShapeFromSignals(PgturbohybridQueryHeader *query,
 							   const PgturbohybridBm25QuerySignals *signals,
 							   double denseProbeGap, bool denseProbeAvailable)
 {
-	bool		hasVector =
-		(query->flags & PGTURBOHYBRID_QUERY_FLAG_HAS_VECTOR) != 0;
+	bool		hasDense = PgturbohybridQueryHasDense(query);
 	bool		hasTsQuery =
 		(query->flags & PGTURBOHYBRID_QUERY_FLAG_HAS_TSQUERY) != 0;
 	bool		rare;
 	bool		broad;
 
-	if (!hasVector || !hasTsQuery)
+	if (!hasDense || !hasTsQuery)
 		return PGTURBOHYBRID_HYBRID_SHAPE_NOT_HYBRID;
 	if (signals == NULL || !signals->valid)
 		return PGTURBOHYBRID_HYBRID_SHAPE_MIXED;
@@ -2251,8 +2312,7 @@ PgturbohybridMaybeApplyDenseBm25Budget(PgturbohybridQueryHeader *query,
 								  char *reason, Size reasonSize,
 								  double *denseConfidence)
 {
-	bool		hasVector =
-		(query->flags & PGTURBOHYBRID_QUERY_FLAG_HAS_VECTOR) != 0;
+	bool		hasDense = PgturbohybridQueryHasDense(query);
 	bool		hasTsQuery =
 		(query->flags & PGTURBOHYBRID_QUERY_FLAG_HAS_TSQUERY) != 0;
 	bool		bm25Defaulted =
@@ -2283,7 +2343,7 @@ PgturbohybridMaybeApplyDenseBm25Budget(PgturbohybridQueryHeader *query,
 			strlcpy(reason, "explicit_bm25_k", reasonSize);
 		return;
 	}
-	if (!hasVector || !hasTsQuery)
+	if (!hasDense || !hasTsQuery)
 	{
 		if (reason != NULL && reasonSize > 0)
 			strlcpy(reason, "not_hybrid", reasonSize);
@@ -2341,8 +2401,7 @@ PgturbohybridMaybeApplyBm25HybridBound(PgturbohybridQueryHeader *query, int dens
 								  uint32 *skippedEstimated,
 								  double *threshold, bool *safe)
 {
-	bool		hasVector =
-		(query->flags & PGTURBOHYBRID_QUERY_FLAG_HAS_VECTOR) != 0;
+	bool		hasDense = PgturbohybridQueryHasDense(query);
 	bool		hasTsQuery =
 		(query->flags & PGTURBOHYBRID_QUERY_FLAG_HAS_TSQUERY) != 0;
 	bool		bm25Defaulted =
@@ -2363,7 +2422,7 @@ PgturbohybridMaybeApplyBm25HybridBound(PgturbohybridQueryHeader *query, int dens
 			PGTURBOHYBRID_BM25_HYBRID_BOUND_APPROX;
 
 	if (pgturbohybrid_bm25_hybrid_bound == PGTURBOHYBRID_BM25_HYBRID_BOUND_OFF ||
-		!hasVector || !hasTsQuery ||
+		!hasDense || !hasTsQuery ||
 		query->fusion != PGTURBOHYBRID_FUSION_RRF ||
 		query->denseWeight <= 0.0 || query->bm25Weight <= 0.0 ||
 		query->bm25K <= 0 || denseCount <= 0)
@@ -3095,6 +3154,125 @@ PgturbohybridApplyBm25OnlyExactRescore(IndexScanDesc scan,
 	UnlockPage(scan->indexRelation, PGTURBOHYBRID_GRAPH_SCAN_LOCK, ShareLock);
 }
 
+/*
+ * Future score-level multivector fusion needs exact dense scores for documents
+ * that entered only through BM25.  Keep this helper separate from the vector
+ * path because multivector dense scores must be exact heap MaxSim over the
+ * original float32 token vectors, not a quantized graph-node score.
+ *
+	 * Weighted multivector hybrid fusion uses this for BM25-only documents.
+	 * RRF normally does not need a BM25-only dense contribution.
+	 */
+static void
+PgturbohybridApplyBm25OnlyMultiVectorExactRescore(IndexScanDesc scan,
+												  PgturbohybridScanState *state,
+												  PgturbohybridResult *results,
+												  int count)
+{
+	Relation	heap;
+	TupleDesc	desc;
+	TupleTableSlot *slot;
+	AttrNumber	denseAttno;
+	PgturbohybridMultiVector *queryMv;
+	double	   *denseDistances;
+	int			denseDistanceCount = 0;
+	bool		haveBm25Only = false;
+
+	if (!pgturbohybrid_enable_exact_rescore_for_bm25_only)
+		return;
+	if (scan == NULL || scan->heapRelation == NULL ||
+		scan->indexRelation == NULL || scan->indexRelation->rd_index == NULL ||
+		state == NULL || state->query == NULL || results == NULL ||
+		!PgturbohybridQueryHasMultiVector(state->query) ||
+		!PgturbohybridQueryHasText(state->query) ||
+		!PgturbohybridIndexIsMultiVector(scan->indexRelation))
+		return;
+
+	for (int i = 0; i < count; i++)
+	{
+		if (results[i].hasBm25 && !results[i].hasDense)
+		{
+			haveBm25Only = true;
+			break;
+		}
+	}
+	if (!haveBm25Only)
+		return;
+
+	queryMv = PgturbohybridQueryGetMultiVector(state->query);
+	if (queryMv == NULL || queryMv->count <= 0)
+		return;
+
+	denseAttno =
+		scan->indexRelation->rd_index->indkey.values[PGTURBOHYBRID_DENSE_KEY_INDEX];
+	heap = scan->heapRelation;
+	desc = RelationGetDescr(heap);
+	if (denseAttno <= 0 || denseAttno > desc->natts)
+		return;
+
+	denseDistances = palloc(sizeof(double) * Max(count, 1));
+	for (int i = 0; i < count; i++)
+	{
+		if (results[i].hasDense)
+			denseDistances[denseDistanceCount++] = results[i].denseDistance;
+	}
+
+	slot = table_slot_create(heap, NULL);
+	for (int i = 0; i < count; i++)
+	{
+		Datum		value;
+		bool		isnull;
+		bool		visible;
+		char	   *valuePtr;
+		PgturbohybridMultiVector *docMv;
+		double		maxsim;
+		double		distance;
+		int32		denseRank = 1;
+
+		CHECK_FOR_INTERRUPTS();
+		if (!(results[i].hasBm25 && !results[i].hasDense))
+			continue;
+
+		visible = table_tuple_fetch_row_version(heap, &results[i].heaptid,
+												scan->xs_snapshot, slot);
+		if (!visible)
+		{
+			ExecClearTuple(slot);
+			continue;
+		}
+
+		value = slot_getattr(slot, denseAttno, &isnull);
+		if (isnull)
+		{
+			ExecClearTuple(slot);
+			continue;
+		}
+
+		valuePtr = DatumGetPointer(value);
+		docMv = PgturbohybridDatumGetMultiVector(value);
+		maxsim = TqMultiVectorMaxSim(queryMv, docMv);
+		distance = -maxsim;
+
+		for (int j = 0; j < denseDistanceCount; j++)
+		{
+			if (denseDistances[j] < distance)
+				denseRank++;
+		}
+
+		results[i].denseDistance = distance;
+		results[i].denseSimilarity = maxsim / (double) queryMv->count;
+		results[i].denseRank = denseRank;
+		results[i].hasDense = true;
+		results[i].exactScored = true;
+
+		if ((char *) docMv != valuePtr)
+			pfree(docMv);
+		ExecClearTuple(slot);
+	}
+	ExecDropSingleTupleTableSlot(slot);
+	pfree(denseDistances);
+}
+
 static bool
 PgturbohybridTSVectorHasPositions(TSVector vector)
 {
@@ -3406,12 +3584,26 @@ PgturbohybridFinalizeFusedResults(IndexScanDesc scan,
 								  MemoryContext memoryContext,
 								  PgturbohybridResult **finalResults,
 								  uint64 *heapReplacements,
-								  PgturbohybridLastScanStats *stats)
+	PgturbohybridLastScanStats *stats)
 {
 	int			finalCount;
 
 	if (allowBm25OnlyExactRescore)
-		PgturbohybridApplyBm25OnlyExactRescore(scan, state, merged, mergedCount);
+	{
+		uint16		fusion = pgturbohybrid_force_fusion != 0 ?
+			pgturbohybrid_force_fusion : state->query->fusion;
+
+		if (fusion != PGTURBOHYBRID_FUSION_RRF &&
+			PgturbohybridQueryHasMultiVector(state->query) &&
+			PgturbohybridQueryHasText(state->query) &&
+			PgturbohybridIndexIsMultiVector(scan->indexRelation))
+			PgturbohybridApplyBm25OnlyMultiVectorExactRescore(scan, state,
+															  merged,
+															  mergedCount);
+		else
+			PgturbohybridApplyBm25OnlyExactRescore(scan, state, merged,
+												   mergedCount);
+	}
 	PgturbohybridScoreResults(state, merged, mergedCount, stats);
 
 	finalCount = PgturbohybridFinalTarget(state->query, mergedCount, limit);
@@ -3706,11 +3898,8 @@ PgturbohybridCollectScanResults(IndexScanDesc scan, PgturbohybridScanState *stat
 		(scanQuery->flags & PGTURBOHYBRID_QUERY_FLAG_HAS_TSQUERY) != 0;
 	useDocumentFusionKey = hasMultivectorQuery;
 
-	if (hasMultivectorQuery && hasTextQuery &&
-		requestedFusion != PGTURBOHYBRID_FUSION_RRF)
-		ereport(ERROR,
-				(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
-				 errmsg("hybrid multivector fusion currently supports only fusion => 'rrf'")));
+	PgturbohybridQueryValidateMultiVectorFusionSupport(scan->indexRelation,
+													   scanQuery);
 
 	if (!hasLexicalKey && hasTextQuery)
 		ereport(ERROR,
@@ -3727,6 +3916,7 @@ PgturbohybridCollectScanResults(IndexScanDesc scan, PgturbohybridScanState *stat
 
 	if (pgturbohybrid_hybrid_budget_policy == PGTURBOHYBRID_HYBRID_BUDGET_ADAPTIVE &&
 		hasLexicalKey &&
+		/* Adaptive hybrid dense probing remains vector-only for now. */
 		(scanQuery->flags & PGTURBOHYBRID_QUERY_FLAG_HAS_VECTOR) != 0 &&
 		(scanQuery->flags & PGTURBOHYBRID_QUERY_FLAG_HAS_TSQUERY) != 0 &&
 		(originalQuery->flags & PGTURBOHYBRID_QUERY_FLAG_DENSE_K_DEFAULTED) != 0 &&
@@ -4084,6 +4274,30 @@ PgturbohybridCollectScanResults(IndexScanDesc scan, PgturbohybridScanState *stat
 		denseStats.multivectorSubvectorSearches;
 	lastStats.multivectorRawSubvectorHits =
 		denseStats.multivectorRawSubvectorHits;
+	lastStats.multivectorAdaptiveWideningTriggered =
+		denseStats.multivectorAdaptiveWideningTriggered;
+	lastStats.multivectorAdaptiveInitialRawTarget =
+		denseStats.multivectorAdaptiveInitialRawTarget;
+	lastStats.multivectorAdaptiveFinalRawTarget =
+		denseStats.multivectorAdaptiveFinalRawTarget;
+	switch ((PgturbohybridMultiVectorDocMapSource) denseStats.multivectorDocMapSource)
+	{
+		case PGTURBOHYBRID_MULTIVECTOR_DOCMAP_SOURCE_SIDECAR:
+			strlcpy(lastStats.multivectorDocMapSource, "sidecar",
+					sizeof(lastStats.multivectorDocMapSource));
+			break;
+		case PGTURBOHYBRID_MULTIVECTOR_DOCMAP_SOURCE_HEAP_TID_HASH:
+			strlcpy(lastStats.multivectorDocMapSource, "heap_tid_hash",
+					sizeof(lastStats.multivectorDocMapSource));
+			break;
+		case PGTURBOHYBRID_MULTIVECTOR_DOCMAP_SOURCE_NONE:
+		default:
+			strlcpy(lastStats.multivectorDocMapSource, "none",
+					sizeof(lastStats.multivectorDocMapSource));
+			break;
+	}
+	lastStats.multivectorDocMapBytes =
+		denseStats.multivectorDocMapBytes;
 	lastStats.multivectorUniqueDocs = denseStats.multivectorUniqueDocs;
 	lastStats.multivectorDuplicateDocHits =
 		denseStats.multivectorDuplicateDocHits;
@@ -4277,12 +4491,12 @@ pgturbohybridaminsert(Relation index, Datum *values, bool *isnull, ItemPointer h
 		LockPage(index, PGTURBOHYBRID_GRAPH_UPDATE_LOCK, ExclusiveLock);
 		PG_TRY();
 		{
-			nodeId = PgturbohybridGraphInsertMultiVectorInPlace(index, indexInfo,
-																heap_tid,
-																values[0],
-																values,
-																isnull,
-																&insertedNodes);
+				nodeId = PgturbohybridGraphInsertMultiVectorBatchInPlace(index, indexInfo,
+																		 heap_tid,
+																		 values[0],
+																		 values,
+																		 isnull,
+																		 &insertedNodes);
 			if (insertedNodes > 0 &&
 				PgturbohybridIndexGetLexicalDatum(index, values, isnull, &lexicalValue))
 				PgturbohybridBm25AppendDelta(index, nodeId, heap_tid, lexicalValue);
@@ -4398,12 +4612,8 @@ pgturbohybridamrescan(IndexScanDesc scan, ScanKey keys, int nkeys, ScanKey order
 				(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
 				 errmsg("multivector_query requires a turbohybrid index with a multivector key")));
 
-	if (hasMultiVectorQuery && hasTextQuery &&
-		(pgturbohybrid_force_fusion != 0 ?
-		 pgturbohybrid_force_fusion : hybridQuery->fusion) != PGTURBOHYBRID_FUSION_RRF)
-		ereport(ERROR,
-				(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
-				 errmsg("hybrid multivector fusion currently supports only fusion => 'rrf'")));
+	PgturbohybridQueryValidateMultiVectorFusionSupport(scan->indexRelation,
+													   hybridQuery);
 
 	if (hasTextQuery && !PgturbohybridIndexHasLexical(scan->indexRelation))
 		ereport(ERROR,
@@ -5076,7 +5286,8 @@ pgturbohybridamvalidate(Oid opclassoid)
 		strcmp(opcname, "vector_ip_turbohybrid_ops") == 0 ||
 		strcmp(opcname, "vector_cosine_turbohybrid_ops") == 0)
 		valid = opclass->opcintype == PgturbohybridVectorTypeOid();
-	else if (strcmp(opcname, "multivector_cosine_turbohybrid_ops") == 0)
+	else if (strcmp(opcname, "multivector_cosine_turbohybrid_ops") == 0 ||
+			 strcmp(opcname, "multivector_maxsim_ip_turbohybrid_ops") == 0)
 		valid = opclass->opcintype == PgturbohybridMultiVectorTypeOid();
 	else if (strcmp(opcname, "bm25_tsvector_turbohybrid_ops") == 0)
 		valid = opclass->opcintype == TSVECTOROID;
@@ -5223,6 +5434,20 @@ PgturbohybridInit(void)
 							&pgturbohybrid_multivector_max_raw_hits_per_token,
 							400, 1, 100000,
 							PGC_USERSET, 0, NULL, NULL, NULL);
+	DefineCustomEnumVariable("turbohybrid.multivector_adaptive_widening",
+							 "Adaptive raw-hit widening mode for multivector query tokens",
+							 "When enabled, multivector scans start from multivector_subvector_k and widen per token up to multivector_max_raw_hits_per_token if too few unique documents are seen.",
+							 &pgturbohybrid_multivector_adaptive_widening,
+							 PGTURBOHYBRID_MULTIVECTOR_ADAPTIVE_WIDENING_AUTO,
+							 pgturbohybrid_multivector_adaptive_widening_options,
+							 PGC_USERSET, 0, NULL, NULL, NULL);
+	DefineCustomEnumVariable("turbohybrid.multivector_docmap",
+							 "Persistent docmap sidecar mode for multivector scans",
+							 "auto uses the sidecar when available and falls back to heap-TID hashing for old indexes; require errors if the sidecar is missing.",
+							 &pgturbohybrid_multivector_docmap,
+							 PGTURBOHYBRID_MULTIVECTOR_DOCMAP_AUTO,
+							 pgturbohybrid_multivector_docmap_options,
+							 PGC_USERSET, 0, NULL, NULL, NULL);
 	DefineCustomIntVariable("turbohybrid.multivector_doc_candidate_k",
 							"Document candidates retained after approximate multivector MaxSim aggregation",
 							"Final multivector dense results are truncated by this document-level candidate budget and the query dense_k.",

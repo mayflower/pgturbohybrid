@@ -1278,26 +1278,6 @@ PgturbohybridGraphAppendBuildNode(PgturbohybridQuantBuildState *state, ItemPoint
 	return nodeId;
 }
 
-static Vector *
-PgturbohybridGraphMultiVectorSubvector(const PgturbohybridMultiVector *mv,
-									   int32 ordinal,
-									   MemoryContext context)
-{
-	Vector	   *vector;
-	Size		vectorSize;
-	const float *values;
-
-	values = PgturbohybridMultiVectorValues(mv, ordinal);
-	vectorSize = PGTURBOHYBRID_VECTOR_SIZE(mv->dim);
-	vector = MemoryContextAlloc(context, vectorSize);
-	SET_VARSIZE(vector, vectorSize);
-	vector->dim = (int16) mv->dim;
-	vector->unused = 0;
-	memcpy(vector->x, values, sizeof(float) * (Size) mv->dim);
-
-	return vector;
-}
-
 static bool
 PgturbohybridGraphIndexIsMultiVector(Relation index)
 {
@@ -1312,11 +1292,13 @@ static void
 PgturbohybridGraphStreamFitMultiVector(PgturbohybridQuantBuildState *state,
 									   const PgturbohybridMultiVector *mv)
 {
+	Vector	   *vector;
+
+	vector = MemoryContextAlloc(state->buildTupleCtx,
+								PgturbohybridMultiVectorSubvectorSize(mv));
 	for (int32 i = 0; i < mv->count; i++)
 	{
-		Vector	   *vector = PgturbohybridGraphMultiVectorSubvector(mv, i,
-																	 state->buildTupleCtx);
-
+		PgturbohybridMultiVectorCopySubvectorToVector(mv, i, vector);
 		if (state->scoreMode == PGTURBOHYBRID_SCORE_COSINE ||
 			state->scoreMode == PGTURBOHYBRID_SCORE_IP)
 			PgturbohybridGraphStreamFitVector(state, vector);
@@ -1333,6 +1315,7 @@ PgturbohybridGraphAppendBuildMultiVector(PgturbohybridQuantBuildState *state,
 {
 	TqDocId		docId;
 	TqMultiVectorDocMapEntry *docEntry;
+	Vector	   *vector;
 
 	PgturbohybridMultiVectorCheckDim((uint32) mv->dim,
 									 (uint32) pgturbohybrid_multivector_max_dim);
@@ -1345,12 +1328,13 @@ PgturbohybridGraphAppendBuildMultiVector(PgturbohybridQuantBuildState *state,
 	docEntry->firstNodeId = state->nodeCount;
 	docEntry->tokenCount = (uint16) mv->count;
 
+	vector = MemoryContextAlloc(state->buildTupleCtx,
+								PgturbohybridMultiVectorSubvectorSize(mv));
 	for (int32 i = 0; i < mv->count; i++)
 	{
-		Vector	   *vector = PgturbohybridGraphMultiVectorSubvector(mv, i,
-																	 state->buildTupleCtx);
 		uint32		nodeId;
 
+		PgturbohybridMultiVectorCopySubvectorToVector(mv, i, vector);
 		nodeId = PgturbohybridGraphAppendBuildNode(state, tid,
 												   PointerGetDatum(vector),
 												   values, isnull);
@@ -4183,6 +4167,12 @@ PgturbohybridGraphCreateMetaPage(Relation index, ForkNumber forkNum)
 	metap->tqExactStartBlkno = InvalidBlockNumber;
 	metap->tqCorrectionStartBlkno = InvalidBlockNumber;
 	metap->tqBm25MetaStartBlkno = InvalidBlockNumber;
+	metap->tqMultivectorDocMapStartBlkno = InvalidBlockNumber;
+	metap->tqMultivectorDocMapPageCount = 0;
+	metap->tqMultivectorDocCount = 0;
+	metap->tqMultivectorDocMapBytes = 0;
+	metap->tqMultivectorDocMapVersion = 0;
+	metap->tqMultivectorDocMapFlags = 0;
 	metap->tqEntrySidecarCount = 0;
 	metap->tqEntrySidecarBytes = 0;
 	metap->tqRoutingEntryCount = 0;
@@ -4200,7 +4190,10 @@ PgturbohybridQuantInitMetaUpdateFromBuild(PgturbohybridQuantBuildState *state,
 							   PgturbohybridQuantMetaUpdate *update,
 							   BlockNumber codeStart, BlockNumber adjStart,
 							   BlockNumber exactStart,
-							   BlockNumber correctionStart)
+							   BlockNumber correctionStart,
+							   BlockNumber docMapStart,
+							   uint32 docMapPageCount,
+							   uint32 docMapBytes)
 {
 	memset(update, 0, sizeof(*update));
 	update->forkNum = state->forkNum;
@@ -4237,6 +4230,15 @@ PgturbohybridQuantInitMetaUpdateFromBuild(PgturbohybridQuantBuildState *state,
 	update->tqEntrySidecarCount = state->entrySidecarCount;
 	update->tqEntrySidecarBytes = state->entrySidecarBytes;
 	update->tqResidualRerankBytes = state->residualRerankBytes;
+	update->tqMultivectorDocMapStartBlkno = docMapStart;
+	update->tqMultivectorDocMapPageCount = docMapPageCount;
+	update->tqMultivectorDocCount =
+		BlockNumberIsValid(docMapStart) ? state->multivectorDocCount : 0;
+	update->tqMultivectorDocMapBytes = docMapBytes;
+	update->tqMultivectorDocMapVersion =
+		BlockNumberIsValid(docMapStart) ?
+		PGTURBOHYBRID_GRAPH_MULTIVECTOR_DOCMAP_VERSION : 0;
+	update->tqMultivectorDocMapFlags = 0;
 	if (state->entrySidecarCount > 0)
 		memcpy(update->tqEntrySidecarNodeIds, state->entrySidecarNodeIds,
 			   sizeof(uint32) * state->entrySidecarCount);
@@ -4310,6 +4312,17 @@ PgturbohybridQuantUpdateMetaPageFromUpdate(Relation index,
 	metap->tqAdjStartBlkno = adjStart;
 	metap->tqExactStartBlkno = exactStart;
 	metap->tqCorrectionStartBlkno = correctionStart;
+	metap->tqMultivectorDocMapStartBlkno =
+		update->tqMultivectorDocMapStartBlkno;
+	metap->tqMultivectorDocMapPageCount =
+		update->tqMultivectorDocMapPageCount;
+	metap->tqMultivectorDocCount = update->tqMultivectorDocCount;
+	metap->tqMultivectorDocMapBytes =
+		update->tqMultivectorDocMapBytes;
+	metap->tqMultivectorDocMapVersion =
+		update->tqMultivectorDocMapVersion;
+	metap->tqMultivectorDocMapFlags =
+		update->tqMultivectorDocMapFlags;
 	metap->tqEntrySidecarCount = update->tqEntrySidecarCount;
 	metap->tqEntrySidecarBytes = update->tqEntrySidecarBytes;
 	metap->tqResidualRerankBytes = update->tqResidualRerankBytes;
@@ -4349,14 +4362,65 @@ PgturbohybridQuantUpdateMetaPageFromUpdate(Relation index,
 void
 PgturbohybridQuantUpdateMetaPage(Relation index, PgturbohybridQuantBuildState *state,
 					  BlockNumber codeStart, BlockNumber adjStart,
-					  BlockNumber exactStart, BlockNumber correctionStart)
+					  BlockNumber exactStart, BlockNumber correctionStart,
+					  BlockNumber docMapStart, uint32 docMapPageCount,
+					  uint32 docMapBytes)
 {
 	PgturbohybridQuantMetaUpdate update;
 
 	PgturbohybridQuantInitMetaUpdateFromBuild(state, &update, codeStart, adjStart,
-											  exactStart, correctionStart);
+											  exactStart, correctionStart,
+											  docMapStart, docMapPageCount,
+											  docMapBytes);
 	PgturbohybridQuantUpdateMetaPageFromUpdate(index, &update, codeStart, adjStart,
 											   exactStart, correctionStart);
+}
+
+void
+PgturbohybridGraphUpdateMultiVectorDocMapMeta(Relation index,
+									 BlockNumber startBlkno,
+									 uint32 pageCount,
+									 uint32 docCount,
+									 uint32 docMapBytes)
+{
+	Buffer		buf;
+	Page		page;
+	PgturbohybridGraphMetaPage metap;
+	GenericXLogState *xlogState = NULL;
+
+	buf = ReadBuffer(index, PGTURBOHYBRID_GRAPH_METAPAGE_BLKNO);
+	LockBuffer(buf, BUFFER_LOCK_EXCLUSIVE);
+
+	if (RelationNeedsWAL(index))
+	{
+		xlogState = GenericXLogStart(index);
+		page = GenericXLogRegisterBuffer(xlogState, buf, 0);
+	}
+	else
+		page = BufferGetPage(buf);
+
+	metap = PgturbohybridGraphPageGetMeta(page);
+	metap->graphFlags = metap->graphFlags == 0 ? 1 : metap->graphFlags + 1;
+	metap->tqMultivectorDocMapStartBlkno = startBlkno;
+	metap->tqMultivectorDocMapPageCount = pageCount;
+	metap->tqMultivectorDocCount = docCount;
+	metap->tqMultivectorDocMapBytes = docMapBytes;
+	metap->tqMultivectorDocMapVersion =
+		BlockNumberIsValid(startBlkno) ?
+		PGTURBOHYBRID_GRAPH_MULTIVECTOR_DOCMAP_VERSION : 0;
+	metap->tqMultivectorDocMapFlags = 0;
+	PgturbohybridGraphMarkPageGraphOp(page,
+									  PGTURBOHYBRID_GRAPH_GRAPH_OP_META_UPDATE);
+
+	if (xlogState != NULL)
+		GenericXLogFinish(xlogState);
+	else
+		MarkBufferDirty(buf);
+
+	UnlockReleaseBuffer(buf);
+	PgturbohybridGraphLogGraphWalRecord(index, MAIN_FORKNUM,
+										PGTURBOHYBRID_GRAPH_METAPAGE_BLKNO,
+										PGTURBOHYBRID_GRAPH_GRAPH_OP_META_UPDATE);
 }
 
 static void
@@ -4558,10 +4622,156 @@ PgturbohybridGraphWriteCorrectionPages(PgturbohybridQuantBuildState *state)
 	return start;
 }
 
+static uint16
+PgturbohybridGraphMultiVectorDocMapNodeTupleMaxCount(void)
+{
+	Size		header = MAXALIGN(offsetof(PgturbohybridGraphMultiVectorDocMapNodeTupleData,
+										   entries));
+	Size		usable = PGTURBOHYBRID_GRAPH_MAX_SIZE;
+	Size		maxCount;
+
+	if (header >= usable)
+		return 1;
+	maxCount = (usable - header) / sizeof(TqMultiVectorNodeMapEntry);
+	return (uint16) Max(1, Min((Size) UINT16_MAX, maxCount));
+}
+
+static uint16
+PgturbohybridGraphMultiVectorDocMapDocTupleMaxCount(void)
+{
+	Size		header = MAXALIGN(offsetof(PgturbohybridGraphMultiVectorDocMapDocTupleData,
+										   entries));
+	Size		usable = PGTURBOHYBRID_GRAPH_MAX_SIZE;
+	Size		maxCount;
+
+	if (header >= usable)
+		return 1;
+	maxCount = (usable - header) / sizeof(TqMultiVectorDocMapEntry);
+	return (uint16) Max(1, Min((Size) UINT16_MAX, maxCount));
+}
+
+static void
+PgturbohybridGraphWriteMultiVectorDocMapItem(PgturbohybridQuantBuildState *state,
+											 Buffer *buf, Page *page,
+											 BlockNumber *start,
+											 uint32 *pageCount,
+											 Item tuple, Size tupleSize)
+{
+	if (!BufferIsValid(*buf) || PageGetFreeSpace(*page) < tupleSize)
+	{
+		PgturbohybridGraphAppendPage(state->index, state->forkNum, buf, page,
+									 PGTURBOHYBRID_GRAPH_PAGE_KIND_MULTIVECTOR_DOCMAP);
+		if (!BlockNumberIsValid(*start))
+			*start = BufferGetBlockNumber(*buf);
+		(*pageCount)++;
+	}
+
+	if (PageAddItem(*page, tuple, tupleSize, InvalidOffsetNumber,
+					false, false) == InvalidOffsetNumber)
+		elog(ERROR, "failed to add pgturbohybrid multivector docmap item to \"%s\"",
+			 RelationGetRelationName(state->index));
+	PgturbohybridGraphMarkPageGraphOp(*page,
+									  PGTURBOHYBRID_GRAPH_GRAPH_OP_ELEMENT_INSERT);
+}
+
+static BlockNumber
+PgturbohybridGraphWriteMultiVectorDocMapPages(PgturbohybridQuantBuildState *state,
+											  uint32 *pageCount,
+											  uint32 *docMapBytes)
+{
+	Buffer		buf = InvalidBuffer;
+	Page		page = NULL;
+	BlockNumber start = InvalidBlockNumber;
+	uint16		maxNodeCount;
+	uint16		maxDocCount;
+
+	*pageCount = 0;
+	*docMapBytes = 0;
+	if (!state->multivectorBuild ||
+		state->multivectorNodeMap == NULL ||
+		state->multivectorDocMap == NULL ||
+		state->nodeCount == 0 ||
+		state->multivectorDocCount == 0)
+		return InvalidBlockNumber;
+
+	maxNodeCount = PgturbohybridGraphMultiVectorDocMapNodeTupleMaxCount();
+	maxDocCount = PgturbohybridGraphMultiVectorDocMapDocTupleMaxCount();
+
+	for (uint32 firstNodeId = 0; firstNodeId < state->nodeCount;)
+	{
+		uint16		count =
+			(uint16) Min((uint32) maxNodeCount,
+						 state->nodeCount - firstNodeId);
+		Size		tupleSize =
+			PgturbohybridGraphMultiVectorDocMapNodeTupleSize(count);
+		PgturbohybridGraphMultiVectorDocMapNodeTuple tuple =
+			palloc0(tupleSize);
+
+		CHECK_FOR_INTERRUPTS();
+		tuple->type =
+			PGTURBOHYBRID_GRAPH_MULTIVECTOR_DOCMAP_NODE_TUPLE_TYPE;
+		tuple->version = PGTURBOHYBRID_GRAPH_MULTIVECTOR_DOCMAP_VERSION;
+		tuple->count = count;
+		tuple->magic = PGTURBOHYBRID_GRAPH_MULTIVECTOR_DOCMAP_MAGIC;
+		tuple->firstNodeId = firstNodeId;
+		memcpy(tuple->entries, &state->multivectorNodeMap[firstNodeId],
+			   sizeof(TqMultiVectorNodeMapEntry) * count);
+		PgturbohybridGraphWriteMultiVectorDocMapItem(state, &buf, &page,
+													 &start, pageCount,
+													 (Item) tuple, tupleSize);
+		if (tupleSize > UINT32_MAX - *docMapBytes)
+			ereport(ERROR,
+					(errcode(ERRCODE_PROGRAM_LIMIT_EXCEEDED),
+					 errmsg("pgturbohybrid multivector docmap sidecar is too large")));
+		*docMapBytes += (uint32) tupleSize;
+		pfree(tuple);
+		firstNodeId += count;
+	}
+
+	for (uint32 firstDocId = 0; firstDocId < state->multivectorDocCount;)
+	{
+		uint16		count =
+			(uint16) Min((uint32) maxDocCount,
+						 state->multivectorDocCount - firstDocId);
+		Size		tupleSize =
+			PgturbohybridGraphMultiVectorDocMapDocTupleSize(count);
+		PgturbohybridGraphMultiVectorDocMapDocTuple tuple =
+			palloc0(tupleSize);
+
+		CHECK_FOR_INTERRUPTS();
+		tuple->type =
+			PGTURBOHYBRID_GRAPH_MULTIVECTOR_DOCMAP_DOC_TUPLE_TYPE;
+		tuple->version = PGTURBOHYBRID_GRAPH_MULTIVECTOR_DOCMAP_VERSION;
+		tuple->count = count;
+		tuple->magic = PGTURBOHYBRID_GRAPH_MULTIVECTOR_DOCMAP_MAGIC;
+		tuple->firstDocId = firstDocId;
+		memcpy(tuple->entries, &state->multivectorDocMap[firstDocId],
+			   sizeof(TqMultiVectorDocMapEntry) * count);
+		PgturbohybridGraphWriteMultiVectorDocMapItem(state, &buf, &page,
+													 &start, pageCount,
+													 (Item) tuple, tupleSize);
+		if (tupleSize > UINT32_MAX - *docMapBytes)
+			ereport(ERROR,
+					(errcode(ERRCODE_PROGRAM_LIMIT_EXCEEDED),
+					 errmsg("pgturbohybrid multivector docmap sidecar is too large")));
+		*docMapBytes += (uint32) tupleSize;
+		pfree(tuple);
+		firstDocId += count;
+	}
+
+	if (BufferIsValid(buf))
+		PgturbohybridGraphFinishPage(buf);
+
+	return start;
+}
+
 static void
 PgturbohybridGraphWriteGraphDataPages(PgturbohybridQuantBuildState *state, BlockNumber *codeStart,
 						   BlockNumber *adjStart, BlockNumber *exactStart,
-						   BlockNumber *correctionStart)
+						   BlockNumber *correctionStart,
+						   BlockNumber *docMapStart,
+						   uint32 *docMapPageCount,
+						   uint32 *docMapBytes)
 {
 	if (state->nodeCount == 0)
 	{
@@ -4569,6 +4779,9 @@ PgturbohybridGraphWriteGraphDataPages(PgturbohybridQuantBuildState *state, Block
 		*adjStart = InvalidBlockNumber;
 		*exactStart = InvalidBlockNumber;
 		*correctionStart = InvalidBlockNumber;
+		*docMapStart = InvalidBlockNumber;
+		*docMapPageCount = 0;
+		*docMapBytes = 0;
 		return;
 	}
 
@@ -4585,6 +4798,10 @@ PgturbohybridGraphWriteGraphDataPages(PgturbohybridQuantBuildState *state, Block
 		}
 	}
 	*correctionStart = PgturbohybridGraphWriteCorrectionPages(state);
+	*docMapStart =
+		PgturbohybridGraphWriteMultiVectorDocMapPages(state,
+													  docMapPageCount,
+													  docMapBytes);
 	*codeStart = PgturbohybridGraphWriteCodePages(state);
 	*adjStart = PgturbohybridGraphWriteAdjPages(state);
 }
@@ -4596,14 +4813,19 @@ PgturbohybridGraphWriteGraphPages(PgturbohybridQuantBuildState *state)
 	BlockNumber adjStart;
 	BlockNumber exactStart;
 	BlockNumber correctionStart;
+	BlockNumber docMapStart;
+	uint32		docMapPageCount;
+	uint32		docMapBytes;
 	instr_time	writeStart;
 
 	INSTR_TIME_SET_CURRENT(writeStart);
 	PgturbohybridGraphWriteGraphDataPages(state, &codeStart, &adjStart, &exactStart,
-							   &correctionStart);
+							   &correctionStart, &docMapStart,
+							   &docMapPageCount, &docMapBytes);
 	state->buildWriteUs = PgturbohybridGraphElapsedUs(writeStart);
 	PgturbohybridQuantUpdateMetaPage(state->index, state, codeStart, adjStart, exactStart,
-						  correctionStart);
+						  correctionStart, docMapStart, docMapPageCount,
+						  docMapBytes);
 }
 
 static void
@@ -6330,6 +6552,25 @@ PgturbohybridGraphReadMeta(Relation index, PgturbohybridGraphMetaPageData *meta)
 		meta->tqBits = PGTURBOHYBRID_DEFAULT_BITS;
 	if (meta->tqBm25MetaStartBlkno <= PGTURBOHYBRID_GRAPH_METAPAGE_BLKNO)
 		meta->tqBm25MetaStartBlkno = InvalidBlockNumber;
+	if (meta->tqMultivectorDocMapStartBlkno <=
+		PGTURBOHYBRID_GRAPH_METAPAGE_BLKNO ||
+		meta->tqMultivectorDocMapPageCount == 0 ||
+		meta->tqMultivectorDocCount == 0)
+	{
+		meta->tqMultivectorDocMapStartBlkno = InvalidBlockNumber;
+		meta->tqMultivectorDocMapPageCount = 0;
+		meta->tqMultivectorDocCount = 0;
+		meta->tqMultivectorDocMapBytes = 0;
+		meta->tqMultivectorDocMapVersion = 0;
+		meta->tqMultivectorDocMapFlags = 0;
+	}
+	else if (meta->tqMultivectorDocMapVersion !=
+			 PGTURBOHYBRID_GRAPH_MULTIVECTOR_DOCMAP_VERSION)
+	{
+		/* Preserve the start block so require/auto loaders can report REINDEX guidance. */
+		meta->tqMultivectorDocMapPageCount = 0;
+		meta->tqMultivectorDocMapBytes = 0;
+	}
 	if (meta->tqEntrySidecarCount > PGTURBOHYBRID_GRAPH_MAX_ENTRY_SIDECAR_REPRESENTATIVES)
 		meta->tqEntrySidecarCount = 0;
 	if (meta->tqEntrySidecarBytes != meta->tqEntrySidecarCount * sizeof(uint32))
@@ -8616,6 +8857,31 @@ typedef struct PgturbohybridMultiVectorDocIdEntry
 	ItemPointerData heaptid;
 } PgturbohybridMultiVectorDocIdEntry;
 
+typedef struct PgturbohybridMultiVectorTokenSeenEntry
+{
+	TqDocId		docId;
+} PgturbohybridMultiVectorTokenSeenEntry;
+
+typedef struct PgturbohybridMultiVectorAccumulatorArenaChunk
+{
+	struct PgturbohybridMultiVectorAccumulatorArenaChunk *next;
+	uint32		capacity;
+	uint32		used;
+	double	   *maxsim;
+	bool	   *seen;
+} PgturbohybridMultiVectorAccumulatorArenaChunk;
+
+typedef struct PgturbohybridMultiVectorAccumulatorArena
+{
+	MemoryContext ctx;
+	int			queryCount;
+	uint32		chunkDocCapacity;
+	uint64		allocatedDocs;
+	Size		allocatedBytes;
+	PgturbohybridMultiVectorAccumulatorArenaChunk *chunks;
+	PgturbohybridMultiVectorAccumulatorArenaChunk *current;
+} PgturbohybridMultiVectorAccumulatorArena;
+
 static Size
 PgturbohybridMultiVectorAccumulatorArrayBytes(int queryCount)
 {
@@ -8623,6 +8889,53 @@ PgturbohybridMultiVectorAccumulatorArrayBytes(int queryCount)
 													 (Size) queryCount),
 					PgturbohybridGraphArrayAllocSize(sizeof(bool),
 													 (Size) queryCount));
+}
+
+static uint32
+PgturbohybridMultiVectorAccumulatorArenaChunkCapacity(uint64 docCapacity)
+{
+	uint64		capacity = Max(docCapacity, (uint64) 16);
+
+	capacity = Min(capacity, (uint64) 1024);
+	return (uint32) capacity;
+}
+
+static Size
+PgturbohybridMultiVectorAccumulatorArenaEstimatedBytes(uint64 docCapacity,
+													   int queryCount)
+{
+	uint32		chunkDocCapacity;
+	uint64		chunkCount;
+	uint64		slabDocs;
+	Size		arrayBytes;
+	Size		chunkBytes;
+
+	if (docCapacity == 0)
+		return 0;
+	chunkDocCapacity =
+		PgturbohybridMultiVectorAccumulatorArenaChunkCapacity(docCapacity);
+	chunkCount =
+		(docCapacity + (uint64) chunkDocCapacity - 1) /
+		(uint64) chunkDocCapacity;
+	if (chunkCount > (uint64) (SIZE_MAX / sizeof(PgturbohybridMultiVectorAccumulatorArenaChunk)))
+		ereport(ERROR,
+				(errcode(ERRCODE_PROGRAM_LIMIT_EXCEEDED),
+				 errmsg("multivector accumulator memory estimate overflow")));
+	chunkBytes =
+		(Size) chunkCount *
+		sizeof(PgturbohybridMultiVectorAccumulatorArenaChunk);
+	if (chunkCount > PG_UINT64_MAX / (uint64) chunkDocCapacity)
+		ereport(ERROR,
+				(errcode(ERRCODE_PROGRAM_LIMIT_EXCEEDED),
+				 errmsg("multivector accumulator memory estimate overflow")));
+	slabDocs = chunkCount * (uint64) chunkDocCapacity;
+	arrayBytes = PgturbohybridMultiVectorAccumulatorArrayBytes(queryCount);
+	if (slabDocs > (uint64) (SIZE_MAX / arrayBytes))
+		ereport(ERROR,
+				(errcode(ERRCODE_PROGRAM_LIMIT_EXCEEDED),
+				 errmsg("multivector accumulator memory estimate overflow")));
+
+	return add_size(chunkBytes, (Size) slabDocs * arrayBytes);
 }
 
 static uint64
@@ -8645,7 +8958,6 @@ static Size
 PgturbohybridMultiVectorAccumulatorBytesEstimate(uint64 docCapacity,
 												 int queryCount)
 {
-	Size		arrayBytes;
 	Size		arrayTotal;
 
 	if (docCapacity > (uint64) LONG_MAX)
@@ -8653,12 +8965,9 @@ PgturbohybridMultiVectorAccumulatorBytesEstimate(uint64 docCapacity,
 				(errcode(ERRCODE_PROGRAM_LIMIT_EXCEEDED),
 				 errmsg("multivector accumulator candidate count is too large")));
 
-	arrayBytes = PgturbohybridMultiVectorAccumulatorArrayBytes(queryCount);
-	if (docCapacity > (uint64) (SIZE_MAX / arrayBytes))
-		ereport(ERROR,
-				(errcode(ERRCODE_PROGRAM_LIMIT_EXCEEDED),
-				 errmsg("multivector accumulator memory estimate overflow")));
-	arrayTotal = (Size) docCapacity * arrayBytes;
+	arrayTotal =
+		PgturbohybridMultiVectorAccumulatorArenaEstimatedBytes(docCapacity,
+															  queryCount);
 
 	return add_size(hash_estimate_size((long) docCapacity,
 									   sizeof(PgturbohybridMultiVectorDocEntry)),
@@ -8685,6 +8994,70 @@ PgturbohybridMultiVectorCheckAccumulatorMemory(uint64 docCapacity,
 						estimated,
 						pgturbohybrid_multivector_max_accumulator_mb),
 				 errhint("Reduce dense_k, turbohybrid.multivector_subvector_k, turbohybrid.multivector_unique_docs_per_token, or turbohybrid.multivector_max_query_vectors.")));
+}
+
+static void
+PgturbohybridMultiVectorAccumulatorArenaInit(PgturbohybridMultiVectorAccumulatorArena *arena,
+											 MemoryContext ctx,
+											 int queryCount,
+											 uint64 docCapacity)
+{
+	memset(arena, 0, sizeof(*arena));
+	arena->ctx = ctx;
+	arena->queryCount = queryCount;
+	arena->chunkDocCapacity =
+		PgturbohybridMultiVectorAccumulatorArenaChunkCapacity(docCapacity);
+}
+
+static PgturbohybridMultiVectorAccumulatorArenaChunk *
+PgturbohybridMultiVectorAccumulatorArenaAllocChunk(PgturbohybridMultiVectorAccumulatorArena *arena)
+{
+	PgturbohybridMultiVectorAccumulatorArenaChunk *chunk;
+	Size		slotCount;
+	Size		maxsimBytes;
+	Size		seenBytes;
+
+	if ((Size) arena->chunkDocCapacity > MaxAllocSize / (Size) arena->queryCount)
+		ereport(ERROR,
+				(errcode(ERRCODE_PROGRAM_LIMIT_EXCEEDED),
+				 errmsg("multivector accumulator slab is too large")));
+	slotCount = (Size) arena->chunkDocCapacity * (Size) arena->queryCount;
+	maxsimBytes = PgturbohybridGraphArrayAllocSize(sizeof(double), slotCount);
+	seenBytes = PgturbohybridGraphArrayAllocSize(sizeof(bool), slotCount);
+
+	chunk = MemoryContextAllocZero(arena->ctx, sizeof(*chunk));
+	chunk->capacity = arena->chunkDocCapacity;
+	chunk->maxsim = MemoryContextAlloc(arena->ctx, maxsimBytes);
+	chunk->seen = MemoryContextAllocZero(arena->ctx, seenBytes);
+	chunk->next = arena->chunks;
+	arena->chunks = chunk;
+	arena->current = chunk;
+	arena->allocatedBytes =
+		add_size(arena->allocatedBytes,
+				 add_size(sizeof(*chunk), add_size(maxsimBytes, seenBytes)));
+
+	return chunk;
+}
+
+static void
+PgturbohybridMultiVectorAccumulatorArenaAllocDoc(PgturbohybridMultiVectorAccumulatorArena *arena,
+												 PgturbohybridMultiVectorDocEntry *entry)
+{
+	PgturbohybridMultiVectorAccumulatorArenaChunk *chunk;
+	Size		offset;
+
+	chunk = arena->current;
+	if (chunk == NULL || chunk->used >= chunk->capacity)
+		chunk = PgturbohybridMultiVectorAccumulatorArenaAllocChunk(arena);
+
+	offset = (Size) chunk->used * (Size) arena->queryCount;
+	entry->maxsim = chunk->maxsim + offset;
+	entry->seen = chunk->seen + offset;
+	memset(entry->seen, 0, sizeof(bool) * (Size) arena->queryCount);
+	for (int i = 0; i < arena->queryCount; i++)
+		entry->maxsim[i] = -INFINITY;
+	chunk->used++;
+	arena->allocatedDocs++;
 }
 
 static int
@@ -8716,6 +9089,123 @@ PgturbohybridMultiVectorDenseCandidateCompare(const void *a, const void *b)
 	return (ca->nodeId > cb->nodeId) - (ca->nodeId < cb->nodeId);
 }
 
+static bool
+PgturbohybridMultiVectorCandidateWorse(const TqDenseCandidate *a,
+									   const TqDenseCandidate *b)
+{
+	return PgturbohybridMultiVectorDenseCandidateCompare(a, b) > 0;
+}
+
+static void
+PgturbohybridMultiVectorCandidateHeapSwap(TqDenseCandidate *a,
+										  TqDenseCandidate *b)
+{
+	TqDenseCandidate tmp = *a;
+
+	*a = *b;
+	*b = tmp;
+}
+
+static void
+PgturbohybridMultiVectorCandidateHeapSiftUp(TqDenseCandidate *heap, int index)
+{
+	while (index > 0)
+	{
+		int			parent = (index - 1) / 2;
+
+		if (!PgturbohybridMultiVectorCandidateWorse(&heap[index],
+													&heap[parent]))
+			break;
+		PgturbohybridMultiVectorCandidateHeapSwap(&heap[index], &heap[parent]);
+		index = parent;
+	}
+}
+
+static void
+PgturbohybridMultiVectorCandidateHeapSiftDown(TqDenseCandidate *heap,
+											  int count, int index)
+{
+	for (;;)
+	{
+		int			left = index * 2 + 1;
+		int			right = left + 1;
+		int			worst = index;
+
+		if (left < count &&
+			PgturbohybridMultiVectorCandidateWorse(&heap[left], &heap[worst]))
+			worst = left;
+		if (right < count &&
+			PgturbohybridMultiVectorCandidateWorse(&heap[right], &heap[worst]))
+			worst = right;
+		if (worst == index)
+			break;
+		PgturbohybridMultiVectorCandidateHeapSwap(&heap[index], &heap[worst]);
+		index = worst;
+	}
+}
+
+static void
+PgturbohybridMultiVectorCandidateHeapOffer(TqDenseCandidate *heap,
+										   int *count,
+										   int limit,
+										   const TqDenseCandidate *candidate)
+{
+	if (*count < limit)
+	{
+		heap[*count] = *candidate;
+		PgturbohybridMultiVectorCandidateHeapSiftUp(heap, *count);
+		(*count)++;
+	}
+	else if (PgturbohybridMultiVectorDenseCandidateCompare(candidate,
+														  &heap[0]) < 0)
+	{
+		heap[0] = *candidate;
+		PgturbohybridMultiVectorCandidateHeapSiftDown(heap, *count, 0);
+	}
+}
+
+static void
+PgturbohybridMultiVectorCandidateHeapSort(TqDenseCandidate *heap, int count)
+{
+	if (count > 1)
+		qsort(heap, count, sizeof(TqDenseCandidate),
+			  PgturbohybridMultiVectorDenseCandidateCompare);
+}
+
+static HTAB *
+PgturbohybridMultiVectorTokenSeenCreate(MemoryContext ctx, long capacity)
+{
+	HASHCTL		hashCtl;
+
+	memset(&hashCtl, 0, sizeof(hashCtl));
+	hashCtl.keysize = sizeof(TqDocId);
+	hashCtl.entrysize = sizeof(PgturbohybridMultiVectorTokenSeenEntry);
+	hashCtl.hcxt = ctx;
+
+	return hash_create("pgturbohybrid multivector token seen docs",
+					   Max(capacity, 16L),
+					   &hashCtl,
+					   HASH_ELEM | HASH_BLOBS | HASH_CONTEXT);
+}
+
+static void
+PgturbohybridMultiVectorTokenSeenReset(HTAB **seen,
+									   MemoryContext tokenCtx,
+									   long capacity)
+{
+	MemoryContextReset(tokenCtx);
+	*seen = PgturbohybridMultiVectorTokenSeenCreate(tokenCtx, capacity);
+}
+
+static bool
+PgturbohybridMultiVectorTokenSeenAdd(HTAB *seen, TqDocId docId)
+{
+	bool		found;
+
+	hash_search(seen, &docId, HASH_ENTER, &found);
+	return !found;
+}
+
 static TqDocId
 PgturbohybridMultiVectorResolveDocId(HTAB *docIdHash,
 									 const ItemPointerData *heaptid,
@@ -8741,11 +9231,10 @@ PgturbohybridMultiVectorResolveDocId(HTAB *docIdHash,
 
 static void
 PgturbohybridMultiVectorAccumulateDoc(HTAB *docHash,
-									  MemoryContext resultCtx,
+									  PgturbohybridMultiVectorAccumulatorArena *arena,
 									  const PgturbohybridGraphResult *hit,
 									  TqDocId docId,
 									  int queryOrdinal, int queryCount,
-									  uint64 *uniqueDocs,
 									  uint64 *maxsimUpdates)
 {
 	PgturbohybridMultiVectorDocKey key;
@@ -8765,18 +9254,7 @@ PgturbohybridMultiVectorAccumulateDoc(HTAB *docHash,
 		entry->bestSimilarity = -INFINITY;
 		entry->score = 0.0;
 		entry->matchedTokens = 0;
-		entry->maxsim =
-			MemoryContextAlloc(resultCtx,
-							   PgturbohybridGraphArrayAllocSize(sizeof(double),
-																(Size) queryCount));
-		entry->seen =
-			MemoryContextAllocZero(resultCtx,
-								   PgturbohybridGraphArrayAllocSize(sizeof(bool),
-																	(Size) queryCount));
-		for (int i = 0; i < queryCount; i++)
-			entry->maxsim[i] = -INFINITY;
-		if (uniqueDocs != NULL)
-			(*uniqueDocs)++;
+		PgturbohybridMultiVectorAccumulatorArenaAllocDoc(arena, entry);
 	}
 
 	if (!entry->seen[queryOrdinal])
@@ -8821,18 +9299,23 @@ PgturbohybridGraphCollectMultiVectorDenseCandidates(IndexScanDesc scan,
 	PgturbohybridGraphCacheInitInfo cacheInfo;
 	PgturbohybridMultiVector *mv;
 	HTAB	   *docHash;
-	HTAB	   *docIdHash;
+	HTAB	   *docIdHash = NULL;
 	HASHCTL		hashCtl;
 	HASHCTL		docIdHashCtl;
 	HASH_SEQ_STATUS seq;
 	PgturbohybridMultiVectorDocEntry *entry;
 	TqDenseCandidate *candidates;
+	PgturbohybridMultiVectorAccumulatorArena accumulatorArena;
+	Vector	   *token;
 	MemoryContext oldCtx;
 	MemoryContext tokenCtx;
 	instr_time	lockStart;
 	instr_time	phaseStart;
 	int			rawTarget;
 	int			searchEf;
+	int			initialRawTarget;
+	int			maxRawTarget;
+	int			maxSearchEf = 0;
 	int			docLimit;
 	int			docCount = 0;
 	int			exactRerankCount = 0;
@@ -8844,6 +9327,15 @@ PgturbohybridGraphCollectMultiVectorDenseCandidates(IndexScanDesc scan,
 	uint64		multivectorMaxsimUpdates = 0;
 	uint64		multivectorExactPairs = 0;
 	uint64		nextDocOrdinal = 0;
+	bool		adaptiveWidening =
+		pgturbohybrid_multivector_adaptive_widening !=
+		PGTURBOHYBRID_MULTIVECTOR_ADAPTIVE_WIDENING_OFF;
+	bool		adaptiveWideningTriggered = false;
+	uint32		adaptiveFinalRawTarget = 0;
+	bool		useDocMapSidecar = false;
+	int			docMapSource =
+		PGTURBOHYBRID_MULTIVECTOR_DOCMAP_SOURCE_NONE;
+	uint64		docMapBytes = 0;
 	bool		emptyIndex = false;
 
 	if (so == NULL)
@@ -8899,23 +9391,45 @@ PgturbohybridGraphCollectMultiVectorDenseCandidates(IndexScanDesc scan,
 			so->graphBuildNeighborSelectReason =
 				PGTURBOHYBRID_GRAPH_TQ_BUILD_NEIGHBOR_REASON(meta.tqFlags);
 
-			rawTarget = Max(pgturbohybrid_multivector_subvector_k,
-							pgturbohybrid_multivector_unique_docs_per_token);
-			rawTarget = Max(rawTarget, targetK > 0 ? targetK : 1);
-			rawTarget = Min(rawTarget,
-							pgturbohybrid_multivector_max_raw_hits_per_token);
-			rawTarget = Min(rawTarget, (int) meta.tqNodeCount);
-			rawTarget = Max(rawTarget, 1);
+			if (adaptiveWidening)
+			{
+				initialRawTarget = pgturbohybrid_multivector_subvector_k;
+				maxRawTarget =
+					Max(initialRawTarget,
+						pgturbohybrid_multivector_unique_docs_per_token);
+				maxRawTarget = Max(maxRawTarget, targetK > 0 ? targetK : 1);
+			}
+			else
+			{
+				initialRawTarget =
+					Max(pgturbohybrid_multivector_subvector_k,
+						pgturbohybrid_multivector_unique_docs_per_token);
+				initialRawTarget =
+					Max(initialRawTarget, targetK > 0 ? targetK : 1);
+				maxRawTarget = initialRawTarget;
+			}
+			initialRawTarget =
+				Min(initialRawTarget,
+					pgturbohybrid_multivector_max_raw_hits_per_token);
+			initialRawTarget = Min(initialRawTarget, (int) meta.tqNodeCount);
+			initialRawTarget = Max(initialRawTarget, 1);
+			maxRawTarget =
+				Min(maxRawTarget,
+					pgturbohybrid_multivector_max_raw_hits_per_token);
+			maxRawTarget = Min(maxRawTarget, (int) meta.tqNodeCount);
+			maxRawTarget = Max(maxRawTarget, initialRawTarget);
+			rawTarget = initialRawTarget;
 			searchEf = Min(Max(so->efSearch, rawTarget), (int) meta.tqNodeCount);
 			searchEf = PgturbohybridGraphScaleSearchEfForSegments(so, &meta,
 																  searchEf);
+			maxSearchEf = searchEf;
 			so->graphDenseRequestedK = targetK;
 			so->graphEffectiveResultTarget = rawTarget;
 			so->graphEffectiveSearchEf = searchEf;
 			so->graphEffectiveRescoreBand = 0;
 
 			multivectorDocCapacity =
-				PgturbohybridMultiVectorDocCapacity(rawTarget, mv->count);
+				PgturbohybridMultiVectorDocCapacity(maxRawTarget, mv->count);
 			multivectorMemoryEstimate =
 				PgturbohybridMultiVectorAccumulatorBytesEstimate(multivectorDocCapacity,
 																 mv->count);
@@ -8929,14 +9443,9 @@ PgturbohybridGraphCollectMultiVectorDenseCandidates(IndexScanDesc scan,
 								  Max((long) multivectorDocCapacity, 16L),
 								  &hashCtl,
 								  HASH_ELEM | HASH_BLOBS | HASH_CONTEXT);
-			memset(&docIdHashCtl, 0, sizeof(docIdHashCtl));
-			docIdHashCtl.keysize = sizeof(PgturbohybridMultiVectorTidKey);
-			docIdHashCtl.entrysize = sizeof(PgturbohybridMultiVectorDocIdEntry);
-			docIdHashCtl.hcxt = resultCtx;
-			docIdHash = hash_create("pgturbohybrid multivector scan doc ids",
-									Max((long) multivectorDocCapacity, 16L),
-									&docIdHashCtl,
-									HASH_ELEM | HASH_BLOBS | HASH_CONTEXT);
+			PgturbohybridMultiVectorAccumulatorArenaInit(&accumulatorArena,
+														 resultCtx, mv->count,
+														 multivectorDocCapacity);
 
 			INSTR_TIME_SET_CURRENT(phaseStart);
 			PgturbohybridGraphInitScanStorage(scan->indexRelation, &meta,
@@ -8960,67 +9469,172 @@ PgturbohybridGraphCollectMultiVectorDenseCandidates(IndexScanDesc scan,
 			so->graphCodeBufferLockWaitUs += cacheInfo.codeBufferLockWaitUs;
 			so->graphAdjBufferLockWaitUs += cacheInfo.adjBufferLockWaitUs;
 			PgturbohybridGraphAddElapsedUs(&so->graphPrepareUs, phaseStart);
+			if (pgturbohybrid_multivector_docmap !=
+				PGTURBOHYBRID_MULTIVECTOR_DOCMAP_OFF)
+				useDocMapSidecar =
+					PgturbohybridGraphLoadMultiVectorDocMap(scan->indexRelation,
+															&meta,
+															&storage,
+															pgturbohybrid_multivector_docmap ==
+															PGTURBOHYBRID_MULTIVECTOR_DOCMAP_REQUIRE);
+			if (useDocMapSidecar)
+			{
+				docMapSource =
+					PGTURBOHYBRID_MULTIVECTOR_DOCMAP_SOURCE_SIDECAR;
+				docMapBytes = storage.multivectorDocMapBytes;
+			}
+			else
+			{
+				docMapSource =
+					PGTURBOHYBRID_MULTIVECTOR_DOCMAP_SOURCE_HEAP_TID_HASH;
+				memset(&docIdHashCtl, 0, sizeof(docIdHashCtl));
+				docIdHashCtl.keysize = sizeof(PgturbohybridMultiVectorTidKey);
+				docIdHashCtl.entrysize =
+					sizeof(PgturbohybridMultiVectorDocIdEntry);
+				docIdHashCtl.hcxt = resultCtx;
+				docIdHash =
+					hash_create("pgturbohybrid multivector scan doc ids",
+								Max((long) multivectorDocCapacity, 16L),
+								&docIdHashCtl,
+								HASH_ELEM | HASH_BLOBS | HASH_CONTEXT);
+			}
 
 			tokenCtx = AllocSetContextCreate(resultCtx,
 											 "pgturbohybrid multivector token scan",
 											 ALLOCSET_DEFAULT_SIZES);
+			token = MemoryContextAlloc(resultCtx,
+									   PgturbohybridMultiVectorSubvectorSize(mv));
 			for (int qi = 0; qi < mv->count; qi++)
 			{
-				Vector	   *token;
 				PgturbohybridGraphResult *hits;
+				HTAB	   *countSeen;
+				HTAB	   *tokenSeen;
 				int			hitCount;
-				int			uniqueDocs = 0;
+				int			tokenRawTarget = initialRawTarget;
+				int			tokenUniqueDocs = 0;
 
 				CHECK_FOR_INTERRUPTS();
-				MemoryContextReset(tokenCtx);
-				MemoryContextSwitchTo(tokenCtx);
-				token = PgturbohybridGraphMultiVectorSubvector(mv, qi, tokenCtx);
-				PgturbohybridGraphPrepareTqQueryWithBits(scan->indexRelation,
-														 &so->support,
-														 PointerGetDatum(token),
-														 &so->tq,
-														 meta.tqBits != 0 ?
-														 meta.tqBits :
-														 PGTURBOHYBRID_DEFAULT_BITS);
-				hits = palloc(sizeof(PgturbohybridGraphResult) * rawTarget);
-				hitCount = PgturbohybridGraphRunTraversalPass(scan, so, &meta,
-															  &storage, hits,
-															  rawTarget,
-															  searchEf,
-															  PointerGetDatum(token),
-															  -1, 0, false, false,
-															  1.0,
-															  PGTURBOHYBRID_GRAPH_FILL_CANDIDATE_BAND_REASON_NONE);
-				multivectorRawSubvectorHits += (uint64) hitCount;
-				MemoryContextSwitchTo(resultCtx);
+				for (;;)
+				{
+					int			currentSearchEf;
+
+					tokenUniqueDocs = 0;
+					PgturbohybridMultiVectorTokenSeenReset(&countSeen,
+														   tokenCtx,
+														   tokenRawTarget);
+					MemoryContextSwitchTo(tokenCtx);
+					PgturbohybridMultiVectorCopySubvectorToVector(mv, qi,
+																  token);
+					PgturbohybridGraphPrepareTqQueryWithBits(scan->indexRelation,
+															 &so->support,
+															 PointerGetDatum(token),
+															 &so->tq,
+															 meta.tqBits != 0 ?
+															 meta.tqBits :
+															 PGTURBOHYBRID_DEFAULT_BITS);
+					currentSearchEf =
+						Min(Max(so->efSearch, tokenRawTarget),
+							(int) meta.tqNodeCount);
+					currentSearchEf =
+						PgturbohybridGraphScaleSearchEfForSegments(so, &meta,
+																  currentSearchEf);
+					maxSearchEf = Max(maxSearchEf, currentSearchEf);
+					hits = palloc(sizeof(PgturbohybridGraphResult) *
+								  tokenRawTarget);
+					hitCount = PgturbohybridGraphRunTraversalPass(scan, so,
+																  &meta,
+																  &storage,
+																  hits,
+																  tokenRawTarget,
+																  currentSearchEf,
+																  PointerGetDatum(token),
+																  -1, 0, false,
+																  false, 1.0,
+																  PGTURBOHYBRID_GRAPH_FILL_CANDIDATE_BAND_REASON_NONE);
+					MemoryContextSwitchTo(resultCtx);
+					for (int i = 0; i < hitCount; i++)
+					{
+						TqDocId		docId;
+
+						if (useDocMapSidecar)
+						{
+							if (hits[i].nodeId >= meta.tqNodeCount)
+								elog(ERROR, "pgturbohybrid multivector hit node id is out of range");
+							docId =
+								storage.multivectorNodeMap[hits[i].nodeId].docId;
+						}
+						else
+							docId =
+								PgturbohybridMultiVectorResolveDocId(docIdHash,
+																	 &hits[i].heaptid,
+																	 &nextDocOrdinal);
+						if (PgturbohybridMultiVectorTokenSeenAdd(countSeen,
+																 docId))
+							tokenUniqueDocs++;
+					}
+					if (!adaptiveWidening ||
+						tokenUniqueDocs >=
+						pgturbohybrid_multivector_unique_docs_per_token ||
+						tokenRawTarget >= maxRawTarget)
+						break;
+
+					adaptiveWideningTriggered = true;
+					tokenRawTarget =
+						Min(maxRawTarget,
+							Max(tokenRawTarget + 1, tokenRawTarget * 2));
+				}
+				adaptiveFinalRawTarget =
+					Max(adaptiveFinalRawTarget, (uint32) tokenRawTarget);
+				tokenSeen =
+					PgturbohybridMultiVectorTokenSeenCreate(tokenCtx,
+															tokenRawTarget);
+				tokenUniqueDocs = 0;
 				for (int i = 0; i < hitCount; i++)
 				{
-					PgturbohybridMultiVectorDocKey key;
 					TqDocId		docId;
-					bool		alreadySeen;
+					bool		tokenUniqueDoc;
+					PgturbohybridGraphResult docHit = hits[i];
 
-					docId = PgturbohybridMultiVectorResolveDocId(docIdHash,
+					multivectorRawSubvectorHits++;
+					if (useDocMapSidecar)
+					{
+						TqMultiVectorDocMapEntry *docEntry;
+
+						if (hits[i].nodeId >= meta.tqNodeCount)
+							elog(ERROR, "pgturbohybrid multivector hit node id is out of range");
+						docId =
+							storage.multivectorNodeMap[hits[i].nodeId].docId;
+						if (docId >= storage.multivectorDocCount)
+							elog(ERROR, "pgturbohybrid multivector doc id is out of range");
+						docEntry = &storage.multivectorDocMap[docId];
+						docHit.heaptid = docEntry->heapTid;
+					}
+					else
+						docId =
+							PgturbohybridMultiVectorResolveDocId(docIdHash,
 																 &hits[i].heaptid,
 																 &nextDocOrdinal);
-					key.docId = docId;
-					alreadySeen =
-						hash_search(docHash, &key, HASH_FIND, NULL) != NULL;
-					if (alreadySeen)
+					tokenUniqueDoc =
+						PgturbohybridMultiVectorTokenSeenAdd(tokenSeen, docId);
+					if (!tokenUniqueDoc)
 						multivectorDuplicateDocHits++;
-					PgturbohybridMultiVectorAccumulateDoc(docHash, resultCtx,
-														  &hits[i], docId,
+					PgturbohybridMultiVectorAccumulateDoc(docHash,
+														  &accumulatorArena,
+														  &docHit, docId,
 														  qi, mv->count,
-														  &multivectorUniqueDocs,
 														  &multivectorMaxsimUpdates);
-					if (!alreadySeen)
+					if (tokenUniqueDoc)
 					{
-						uniqueDocs++;
-						if (uniqueDocs >=
+						tokenUniqueDocs++;
+						multivectorUniqueDocs++;
+						if (tokenUniqueDocs >=
 							pgturbohybrid_multivector_unique_docs_per_token)
 							break;
 					}
 				}
 			}
+			so->graphEffectiveResultTarget = (int) adaptiveFinalRawTarget;
+			so->graphEffectiveSearchEf = maxSearchEf;
 			MemoryContextDelete(tokenCtx);
 		}
 	}
@@ -9057,27 +9671,16 @@ PgturbohybridGraphCollectMultiVectorDenseCandidates(IndexScanDesc scan,
 		candidate.rank = 0;
 		candidate.exactScored = false;
 
-		if (docCount < docLimit)
-			candidates[docCount++] = candidate;
-		else
-		{
-			qsort(candidates, docCount, sizeof(TqDenseCandidate),
-				  PgturbohybridMultiVectorDenseCandidateCompare);
-			if (PgturbohybridMultiVectorDenseCandidateCompare(&candidate,
-															 &candidates[docCount - 1]) < 0)
-				candidates[docCount - 1] = candidate;
-		}
+		PgturbohybridMultiVectorCandidateHeapOffer(candidates, &docCount,
+												  docLimit, &candidate);
 	}
-	if (docCount > 1)
-		qsort(candidates, docCount, sizeof(TqDenseCandidate),
-			  PgturbohybridMultiVectorDenseCandidateCompare);
+	PgturbohybridMultiVectorCandidateHeapSort(candidates, docCount);
 	exactRerankCount =
 		PgturbohybridMultiVectorExactHeapRerank(scan, so, mv, candidates,
 												docCount,
 												&multivectorExactPairs);
 	if (exactRerankCount > 0 && docCount > 1)
-		qsort(candidates, docCount, sizeof(TqDenseCandidate),
-			  PgturbohybridMultiVectorDenseCandidateCompare);
+		PgturbohybridMultiVectorCandidateHeapSort(candidates, docCount);
 	for (int i = 0; i < docCount; i++)
 		candidates[i].rank = i + 1;
 
@@ -9108,6 +9711,13 @@ PgturbohybridGraphCollectMultiVectorDenseCandidates(IndexScanDesc scan,
 			(uint32) pgturbohybrid_multivector_max_doc_vectors;
 		stats->multivectorSubvectorSearches = (uint64) mv->count;
 		stats->multivectorRawSubvectorHits = multivectorRawSubvectorHits;
+		stats->multivectorAdaptiveWideningTriggered =
+			adaptiveWideningTriggered;
+		stats->multivectorAdaptiveInitialRawTarget =
+			(uint32) initialRawTarget;
+		stats->multivectorAdaptiveFinalRawTarget = adaptiveFinalRawTarget;
+		stats->multivectorDocMapSource = docMapSource;
+		stats->multivectorDocMapBytes = docMapBytes;
 		stats->multivectorUniqueDocs = multivectorUniqueDocs;
 		stats->multivectorDuplicateDocHits = multivectorDuplicateDocHits;
 		stats->multivectorMaxsimUpdates = multivectorMaxsimUpdates;
@@ -9120,7 +9730,7 @@ PgturbohybridGraphCollectMultiVectorDenseCandidates(IndexScanDesc scan,
 		strlcpy(stats->multivectorExactKernel,
 				exactRerankCount > 0 ? TqMultiVectorMaxSimKernelName() : "",
 				sizeof(stats->multivectorExactKernel));
-		strlcpy(stats->multivectorAccumulatorKind, "docid_hash",
+		strlcpy(stats->multivectorAccumulatorKind, "docid_hash_slab",
 				sizeof(stats->multivectorAccumulatorKind));
 		stats->multivectorMemoryBytesEstimate =
 			(uint64) multivectorMemoryEstimate;

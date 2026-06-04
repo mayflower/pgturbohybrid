@@ -27,6 +27,13 @@ typedef enum PgturbohybridHybridBudgetPolicy
 	PGTURBOHYBRID_HYBRID_BUDGET_ADAPTIVE
 }			PgturbohybridHybridBudgetPolicy;
 
+typedef enum PgturbohybridMultiVectorDocMapSource
+{
+	PGTURBOHYBRID_MULTIVECTOR_DOCMAP_SOURCE_NONE,
+	PGTURBOHYBRID_MULTIVECTOR_DOCMAP_SOURCE_HEAP_TID_HASH,
+	PGTURBOHYBRID_MULTIVECTOR_DOCMAP_SOURCE_SIDECAR
+}			PgturbohybridMultiVectorDocMapSource;
+
 typedef struct PgturbohybridOptions
 {
 	int32		vl_len_;
@@ -120,7 +127,14 @@ typedef struct PgturbohybridScanStatsSnapshot
 	uint32		multivectorDocVectorsLimit;
 	uint64		multivectorSubvectorSearches;
 	uint64		multivectorRawSubvectorHits;
+	bool		multivectorAdaptiveWideningTriggered;
+	uint32		multivectorAdaptiveInitialRawTarget;
+	uint32		multivectorAdaptiveFinalRawTarget;
+	char		multivectorDocMapSource[16];
+	uint64		multivectorDocMapBytes;
+	/* Token-local unique document hits summed across query tokens. */
 	uint64		multivectorUniqueDocs;
+	/* Raw hits whose document was already seen for the same query token. */
 	uint64		multivectorDuplicateDocHits;
 	uint64		multivectorMaxsimUpdates;
 	uint32		multivectorDocCandidates;
@@ -192,6 +206,8 @@ extern int	pgturbohybrid_multivector_max_dim;
 extern int	pgturbohybrid_multivector_subvector_k;
 extern int	pgturbohybrid_multivector_unique_docs_per_token;
 extern int	pgturbohybrid_multivector_max_raw_hits_per_token;
+extern int	pgturbohybrid_multivector_adaptive_widening;
+extern int	pgturbohybrid_multivector_docmap;
 extern int	pgturbohybrid_multivector_doc_candidate_k;
 extern int	pgturbohybrid_multivector_exact_rerank;
 extern int	pgturbohybrid_multivector_exact_rerank_k;
@@ -202,6 +218,20 @@ typedef enum PgturbohybridMultiVectorExactRerankMode
 	PGTURBOHYBRID_MULTIVECTOR_EXACT_RERANK_OFF,
 	PGTURBOHYBRID_MULTIVECTOR_EXACT_RERANK_TOPK
 }			PgturbohybridMultiVectorExactRerankMode;
+
+typedef enum PgturbohybridMultiVectorAdaptiveWideningMode
+{
+	PGTURBOHYBRID_MULTIVECTOR_ADAPTIVE_WIDENING_OFF,
+	PGTURBOHYBRID_MULTIVECTOR_ADAPTIVE_WIDENING_AUTO,
+	PGTURBOHYBRID_MULTIVECTOR_ADAPTIVE_WIDENING_ON
+}			PgturbohybridMultiVectorAdaptiveWideningMode;
+
+typedef enum PgturbohybridMultiVectorDocMapMode
+{
+	PGTURBOHYBRID_MULTIVECTOR_DOCMAP_OFF,
+	PGTURBOHYBRID_MULTIVECTOR_DOCMAP_AUTO,
+	PGTURBOHYBRID_MULTIVECTOR_DOCMAP_REQUIRE
+}			PgturbohybridMultiVectorDocMapMode;
 
 typedef enum PgturbohybridProfile
 {

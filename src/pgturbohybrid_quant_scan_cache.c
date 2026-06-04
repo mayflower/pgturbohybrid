@@ -432,6 +432,21 @@ PgturbohybridGraphShouldUseNativeCacheWithPolicy(PgturbohybridGraphMetaPageData 
 			bytes <= PGTURBOHYBRID_GRAPH_EXACT_CACHE_AUTO_MAX_BYTES)
 			totalBytes += bytes;
 	}
+	if (BlockNumberIsValid(meta->tqMultivectorDocMapStartBlkno) &&
+		meta->tqMultivectorDocMapVersion ==
+		PGTURBOHYBRID_GRAPH_MULTIVECTOR_DOCMAP_VERSION)
+	{
+		if (!PgturbohybridGraphArenaBytes(meta->tqNodeCount,
+										  sizeof(TqMultiVectorNodeMapEntry),
+										  &bytes))
+			goto too_large;
+		totalBytes += bytes;
+		if (!PgturbohybridGraphArenaBytes(meta->tqMultivectorDocCount,
+										  sizeof(TqMultiVectorDocMapEntry),
+										  &bytes))
+			goto too_large;
+		totalBytes += bytes;
+	}
 	if (!PgturbohybridGraphArenaBytes(PgturbohybridGraphAdjRecordCount(meta),
 									  sizeof(uint32 *), &bytes))
 		goto too_large;
@@ -511,6 +526,14 @@ PgturbohybridGraphEstimateMemory(Relation index,
 		(uint64) meta->tqNodeCount * (uint64) meta->tqPayloadBytes;
 	estimate->residualBytes =
 		(uint64) meta->tqNodeCount * (uint64) meta->tqResidualRerankBytes;
+	if (BlockNumberIsValid(meta->tqMultivectorDocMapStartBlkno) &&
+		meta->tqMultivectorDocMapVersion ==
+		PGTURBOHYBRID_GRAPH_MULTIVECTOR_DOCMAP_VERSION)
+		estimate->multivectorDocMapBytes =
+			(uint64) meta->tqNodeCount *
+			(uint64) sizeof(TqMultiVectorNodeMapEntry) +
+			(uint64) meta->tqMultivectorDocCount *
+			(uint64) sizeof(TqMultiVectorDocMapEntry);
 	estimate->nodeBytes =
 		(uint64) meta->tqNodeCount * (uint64) sizeof(PgturbohybridGraphScanNode);
 	if (meta->tqNodeCount > 0)
@@ -567,6 +590,7 @@ PgturbohybridGraphEstimateMemory(Relation index,
 	totalBytes += estimate->visitedGenerationBytes;
 	totalBytes += estimate->payloadBytes;
 	totalBytes += estimate->residualBytes;
+	totalBytes += estimate->multivectorDocMapBytes;
 	totalBytes += estimate->pageMapBytes;
 	estimate->estimatedTotalBytes = totalBytes;
 	return true;
@@ -653,6 +677,216 @@ PgturbohybridGraphInitScanStorageUncached(PgturbohybridGraphMetaPageData *meta, 
 		storage->adjBlknos[i] = InvalidBlockNumber;
 		storage->adjOffnos[i] = InvalidOffsetNumber;
 	}
+}
+
+static void
+PgturbohybridGraphMultiVectorDocMapError(Relation index, const char *detail)
+{
+	ereport(ERROR,
+			(errcode(ERRCODE_DATA_CORRUPTED),
+			 errmsg("pgturbohybrid multivector docmap sidecar is invalid for index \"%s\"",
+					RelationGetRelationName(index)),
+			 errdetail_internal("%s", detail),
+			 errhint("REINDEX the index to rebuild the multivector docmap sidecar.")));
+}
+
+bool
+PgturbohybridGraphLoadMultiVectorDocMap(Relation index,
+									 PgturbohybridGraphMetaPageData *meta,
+									 PgturbohybridGraphScanStorage *storage,
+									 bool require)
+{
+	MemoryContext oldCtx;
+	bool	   *nodeSeen;
+	bool	   *docSeen;
+	uint32		nodesSeen = 0;
+	uint32		docsSeen = 0;
+	BlockNumber blkno;
+
+	if (!BlockNumberIsValid(meta->tqMultivectorDocMapStartBlkno))
+	{
+		if (require)
+			ereport(ERROR,
+					(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
+					 errmsg("multivector docmap sidecar is not available for index \"%s\"",
+							RelationGetRelationName(index)),
+					 errhint("REINDEX the index to build the multivector docmap sidecar, or set turbohybrid.multivector_docmap = 'auto' or 'off'.")));
+		return false;
+	}
+	if (meta->tqMultivectorDocMapVersion !=
+		PGTURBOHYBRID_GRAPH_MULTIVECTOR_DOCMAP_VERSION)
+		PgturbohybridGraphMultiVectorDocMapError(index,
+												 "unsupported docmap sidecar version");
+	if (meta->tqMultivectorDocMapPageCount == 0 ||
+		meta->tqMultivectorDocCount == 0)
+		PgturbohybridGraphMultiVectorDocMapError(index,
+												 "docmap metapage counts are empty");
+
+	if (storage->multivectorDocMapLoaded)
+		return true;
+
+	oldCtx = MemoryContextSwitchTo(storage->ctx);
+	storage->multivectorNodeMap =
+		palloc0(PgturbohybridCheckedArrayBytes(sizeof(TqMultiVectorNodeMapEntry),
+											   meta->tqNodeCount,
+											   "pgturbohybrid multivector node docmap"));
+	storage->multivectorDocMap =
+		palloc0(PgturbohybridCheckedArrayBytes(sizeof(TqMultiVectorDocMapEntry),
+											   meta->tqMultivectorDocCount,
+											   "pgturbohybrid multivector docmap"));
+	nodeSeen =
+		palloc0(PgturbohybridCheckedArrayBytes(sizeof(bool),
+											   meta->tqNodeCount,
+											   "pgturbohybrid multivector node docmap seen"));
+	docSeen =
+		palloc0(PgturbohybridCheckedArrayBytes(sizeof(bool),
+											   meta->tqMultivectorDocCount,
+											   "pgturbohybrid multivector docmap seen"));
+	MemoryContextSwitchTo(oldCtx);
+
+	blkno = meta->tqMultivectorDocMapStartBlkno;
+	for (uint32 pageNo = 0; pageNo < meta->tqMultivectorDocMapPageCount; pageNo++)
+	{
+		Buffer		buf;
+		Page		page;
+		PgturbohybridGraphPageOpaque opaque;
+		OffsetNumber maxoff;
+		BlockNumber nextblkno;
+
+		CHECK_FOR_INTERRUPTS();
+		if (!BlockNumberIsValid(blkno))
+			PgturbohybridGraphMultiVectorDocMapError(index,
+													 "docmap page chain ended early");
+		buf = ReadBuffer(index, blkno);
+		LockBuffer(buf, BUFFER_LOCK_SHARE);
+		page = BufferGetPage(buf);
+		opaque = PgturbohybridGraphPageGetOpaque(page);
+		if ((opaque->pageKind & PGTURBOHYBRID_GRAPH_PAGE_KIND_MASK) !=
+			PGTURBOHYBRID_GRAPH_PAGE_KIND_MULTIVECTOR_DOCMAP)
+		{
+			UnlockReleaseBuffer(buf);
+			PgturbohybridGraphMultiVectorDocMapError(index,
+													 "docmap page kind mismatch");
+		}
+
+		maxoff = PageGetMaxOffsetNumber(page);
+		for (OffsetNumber offno = FirstOffsetNumber; offno <= maxoff;
+			 offno = OffsetNumberNext(offno))
+		{
+			ItemId		iid = PageGetItemId(page, offno);
+			Item		item = PageGetItem(page, iid);
+			Size		itemSize = ItemIdGetLength(iid);
+			uint8		type = *((uint8 *) item);
+
+			if (type ==
+				PGTURBOHYBRID_GRAPH_MULTIVECTOR_DOCMAP_NODE_TUPLE_TYPE)
+			{
+				PgturbohybridGraphMultiVectorDocMapNodeTuple tuple =
+					(PgturbohybridGraphMultiVectorDocMapNodeTuple) item;
+				Size		tupleSize;
+
+				if (itemSize < offsetof(PgturbohybridGraphMultiVectorDocMapNodeTupleData,
+										entries) ||
+					tuple->magic != PGTURBOHYBRID_GRAPH_MULTIVECTOR_DOCMAP_MAGIC ||
+					tuple->version != PGTURBOHYBRID_GRAPH_MULTIVECTOR_DOCMAP_VERSION ||
+					tuple->count == 0)
+					PgturbohybridGraphMultiVectorDocMapError(index,
+															 "malformed node docmap tuple");
+				tupleSize =
+					PgturbohybridGraphMultiVectorDocMapNodeTupleSize(tuple->count);
+				if (itemSize < tupleSize ||
+					(uint64) tuple->firstNodeId + tuple->count >
+					meta->tqNodeCount)
+					PgturbohybridGraphMultiVectorDocMapError(index,
+															 "node docmap tuple range is invalid");
+				for (uint16 i = 0; i < tuple->count; i++)
+				{
+					uint32		nodeId = tuple->firstNodeId + i;
+					TqMultiVectorNodeMapEntry *entry =
+						&tuple->entries[i];
+
+					if (nodeSeen[nodeId] ||
+						entry->docId >= meta->tqMultivectorDocCount)
+						PgturbohybridGraphMultiVectorDocMapError(index,
+																 "node docmap entry is invalid");
+					nodeSeen[nodeId] = true;
+					storage->multivectorNodeMap[nodeId] = *entry;
+					nodesSeen++;
+				}
+			}
+			else if (type ==
+					 PGTURBOHYBRID_GRAPH_MULTIVECTOR_DOCMAP_DOC_TUPLE_TYPE)
+			{
+				PgturbohybridGraphMultiVectorDocMapDocTuple tuple =
+					(PgturbohybridGraphMultiVectorDocMapDocTuple) item;
+				Size		tupleSize;
+
+				if (itemSize < offsetof(PgturbohybridGraphMultiVectorDocMapDocTupleData,
+										entries) ||
+					tuple->magic != PGTURBOHYBRID_GRAPH_MULTIVECTOR_DOCMAP_MAGIC ||
+					tuple->version != PGTURBOHYBRID_GRAPH_MULTIVECTOR_DOCMAP_VERSION ||
+					tuple->count == 0)
+					PgturbohybridGraphMultiVectorDocMapError(index,
+															 "malformed document docmap tuple");
+				tupleSize =
+					PgturbohybridGraphMultiVectorDocMapDocTupleSize(tuple->count);
+				if (itemSize < tupleSize ||
+					(uint64) tuple->firstDocId + tuple->count >
+					meta->tqMultivectorDocCount)
+					PgturbohybridGraphMultiVectorDocMapError(index,
+															 "document docmap tuple range is invalid");
+				for (uint16 i = 0; i < tuple->count; i++)
+				{
+					uint32		docId = tuple->firstDocId + i;
+					TqMultiVectorDocMapEntry *entry =
+						&tuple->entries[i];
+
+					if (docSeen[docId] ||
+						entry->tokenCount == 0 ||
+						entry->firstNodeId >= meta->tqNodeCount ||
+						(uint64) entry->firstNodeId + entry->tokenCount >
+						meta->tqNodeCount)
+						PgturbohybridGraphMultiVectorDocMapError(index,
+																 "document docmap entry is invalid");
+					docSeen[docId] = true;
+					storage->multivectorDocMap[docId] = *entry;
+					docsSeen++;
+				}
+			}
+			else
+				PgturbohybridGraphMultiVectorDocMapError(index,
+														 "unknown docmap tuple type");
+		}
+
+		nextblkno = opaque->nextblkno;
+		UnlockReleaseBuffer(buf);
+		blkno = nextblkno;
+	}
+
+	if (nodesSeen != meta->tqNodeCount ||
+		docsSeen != meta->tqMultivectorDocCount)
+		PgturbohybridGraphMultiVectorDocMapError(index,
+												 "docmap sidecar does not cover every node and document");
+	for (uint32 nodeId = 0; nodeId < meta->tqNodeCount; nodeId++)
+	{
+		TqMultiVectorNodeMapEntry *nodeEntry =
+			&storage->multivectorNodeMap[nodeId];
+		TqMultiVectorDocMapEntry *docEntry =
+			&storage->multivectorDocMap[nodeEntry->docId];
+
+		if (nodeEntry->tokenOrdinal >= docEntry->tokenCount ||
+			nodeId < docEntry->firstNodeId ||
+			nodeId >= docEntry->firstNodeId + docEntry->tokenCount)
+			PgturbohybridGraphMultiVectorDocMapError(index,
+													 "node docmap entry does not match its document range");
+	}
+
+	storage->multivectorDocCount = meta->tqMultivectorDocCount;
+	storage->multivectorDocMapBytes = meta->tqMultivectorDocMapBytes;
+	storage->multivectorDocMapLoaded = true;
+	pfree(nodeSeen);
+	pfree(docSeen);
+	return true;
 }
 
 bool
@@ -1065,6 +1299,11 @@ PgturbohybridGraphCacheMatches(PgturbohybridGraphNativeCache *cache, Relation in
 		cache->tqAdjStartBlkno == meta->tqAdjStartBlkno &&
 		cache->tqExactStartBlkno == meta->tqExactStartBlkno &&
 		cache->tqCorrectionStartBlkno == meta->tqCorrectionStartBlkno &&
+		cache->tqMultivectorDocMapStartBlkno == meta->tqMultivectorDocMapStartBlkno &&
+		cache->tqMultivectorDocMapPageCount == meta->tqMultivectorDocMapPageCount &&
+		cache->tqMultivectorDocCount == meta->tqMultivectorDocCount &&
+		cache->tqMultivectorDocMapBytes == meta->tqMultivectorDocMapBytes &&
+		cache->tqMultivectorDocMapVersion == meta->tqMultivectorDocMapVersion &&
 		memcmp(cache->tqSegments, meta->tqSegments,
 			   sizeof(PgturbohybridGraphSegmentMetaData) * meta->tqSegmentCount) == 0;
 }
@@ -1165,6 +1404,11 @@ PgturbohybridGraphCacheComputeResidentBytes(PgturbohybridGraphNativeCache *cache
 		otherBytes += (Size) meta->tqNodeCount * (Size) meta->tqPayloadBytes;
 	if (storage->visitedGeneration != NULL)
 		otherBytes += (Size) meta->tqNodeCount * sizeof(uint32);
+	if (storage->multivectorDocMapLoaded)
+		otherBytes +=
+			(Size) meta->tqNodeCount * sizeof(TqMultiVectorNodeMapEntry) +
+			(Size) meta->tqMultivectorDocCount *
+			sizeof(TqMultiVectorDocMapEntry);
 	otherBytes += (Size) storage->codePageCount * (sizeof(bool) + sizeof(BlockNumber));
 
 	cache->residentCodeBytes = codeBytes;
@@ -1211,6 +1455,15 @@ PgturbohybridGraphBuildCache(Relation index, PgturbohybridGraphMetaPageData *met
 	cache->tqAdjStartBlkno = meta->tqAdjStartBlkno;
 	cache->tqExactStartBlkno = meta->tqExactStartBlkno;
 	cache->tqCorrectionStartBlkno = meta->tqCorrectionStartBlkno;
+	cache->tqMultivectorDocMapStartBlkno =
+		meta->tqMultivectorDocMapStartBlkno;
+	cache->tqMultivectorDocMapPageCount =
+		meta->tqMultivectorDocMapPageCount;
+	cache->tqMultivectorDocCount = meta->tqMultivectorDocCount;
+	cache->tqMultivectorDocMapBytes =
+		meta->tqMultivectorDocMapBytes;
+	cache->tqMultivectorDocMapVersion =
+		meta->tqMultivectorDocMapVersion;
 	memcpy(cache->tqSegments, meta->tqSegments,
 		   sizeof(PgturbohybridGraphSegmentMetaData) * meta->tqSegmentCount);
 	cache->ctx = cacheCtx;
@@ -1240,6 +1493,12 @@ PgturbohybridGraphBuildCache(Relation index, PgturbohybridGraphMetaPageData *met
 
 	if (cache->storage.exactArena != NULL)
 		(void) PgturbohybridGraphLoadExactVectors(index, meta, &cache->storage);
+	if (BlockNumberIsValid(meta->tqMultivectorDocMapStartBlkno) &&
+		meta->tqMultivectorDocMapVersion ==
+		PGTURBOHYBRID_GRAPH_MULTIVECTOR_DOCMAP_VERSION)
+		(void) PgturbohybridGraphLoadMultiVectorDocMap(index, meta,
+													   &cache->storage,
+													   false);
 	cache->storage.cached = true;
 
 	PgturbohybridGraphCacheComputeResidentBytes(cache, meta);
@@ -2133,6 +2392,18 @@ PgturbohybridGraphInitInsertStorage(Relation index, PgturbohybridGraphMetaPageDa
 	if (pgturbohybrid_native_cache_policy == PGTURBOHYBRID_NATIVE_CACHE_POLICY_SHARED)
 	{
 		/* Inserts need mutable cache state; shared-cache views are scan-only. */
+		PgturbohybridGraphInitScanStorageUncached(meta, storage, cacheExactVectors);
+		return NULL;
+	}
+
+	if (BlockNumberIsValid(meta->tqMultivectorDocMapStartBlkno))
+	{
+		/*
+		 * Multivector row inserts append graph nodes one subvector at a time,
+		 * then append the docmap entry once the row is complete.  Avoid
+		 * validating a transiently incomplete sidecar while building insert
+		 * storage for the later subvectors.
+		 */
 		PgturbohybridGraphInitScanStorageUncached(meta, storage, cacheExactVectors);
 		return NULL;
 	}

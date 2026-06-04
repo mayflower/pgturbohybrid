@@ -138,11 +138,12 @@ psql -d "$PGDATABASE" \
 ```
 
 Use `DOCS`, `DIMS`, `FINAL_K`, and `ITERS` to scale the deterministic synthetic
-corpus. The harness varies document token vectors `L`, query token vectors `Q`,
-exact rerank documents `R`, and per-token subvector hits `Ks`, then reports build
-time, index size, graph subnode count, local p50/p95, exact-reference recall@K,
-raw subvector hits, unique documents, exact rerank pairs, and multivector
-accumulator memory estimates. See
+corpus. The harness varies document token vectors `L = 8/32/128`, query token
+vectors `Q = 4/16/64`, vector dimensions `d = 32/96/128`, exact rerank documents
+`R = off/25/100`, and per-token subvector hits `Ks = 16/64/256`, then reports
+build time, index size, graph subnode count, local p50/p95, exact-reference
+recall@K, raw subvector hits, unique documents, document candidates, exact
+rerank pairs, multivector accumulator memory estimates, and fusion strategy. See
 [`multivector_late_interaction.md`](multivector_late_interaction.md) for the
 expected slopes and the single-vector comparison guidance.
 
