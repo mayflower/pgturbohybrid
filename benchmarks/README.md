@@ -76,6 +76,14 @@ expected id arrays, records overlap/recall@K plus selected
 setting under a supplied p95 latency budget. It is a developer autotuning
 harness, not a SQL-visible C autotuner.
 
+For multivector/ColBERT work, use
+`benchmarks/dev/multivector_late_interaction.sql`. It builds a deterministic
+synthetic `turbohybrid_multivector` corpus and varies `L`, `Q`, exact rerank
+`R`, and subvector hit budget `Ks` to make build, approximate candidate
+collection, exact rerank, and accumulator-memory slopes visible. The companion
+developer note is
+[`benchmarks/dev/multivector_late_interaction.md`](dev/multivector_late_interaction.md).
+
 The DBPedia OpenAI3-large benchmark spec lives in
 [`dbpedia_openai3_large.md`](dbpedia_openai3_large.md). It covers the
 1M-row Qdrant DBPedia corpus, BEIR DBPedia queries/qrels, the native pgvector
@@ -395,6 +403,11 @@ Ready-made harnesses live next to this README:
   profiles, dense/BM25 budgets, fusion, residual rerank mode, and heap rescore
   mode when available, then prints all trials, the Pareto frontier, and an
   optional latency-budget recommendation.
+- `dev/multivector_late_interaction.sql` -- deterministic multivector /
+  ColBERT slope harness. It varies document token vectors `L`, query vectors
+  `Q`, exact rerank docs `R`, and subvector hits `Ks`, then reports build time,
+  index size, recall sanity, raw hits, unique docs, exact pairs, and accumulator
+  memory estimates.
 - `native_segments_bench.sql` -- native graph segment-count sweep
   (`native_segments = 1,2,4,8` by default). It records build time, index
   size, precision@K against exact ordering, p50/p95, segment count/search
