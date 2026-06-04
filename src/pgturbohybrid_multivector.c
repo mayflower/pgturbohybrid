@@ -42,6 +42,20 @@
 #define PGTURBOHYBRID_MULTIVECTOR_AVX2_TARGET
 #endif
 
+#if !defined(PGTURBOHYBRID_DISABLE_SIMD) && \
+	(defined(__AVX512F__) || (defined(__x86_64__) && (defined(__GNUC__) || defined(__clang__))))
+#define PGTURBOHYBRID_MULTIVECTOR_COMPILE_AVX512F 1
+#else
+#define PGTURBOHYBRID_MULTIVECTOR_COMPILE_AVX512F 0
+#endif
+
+#if PGTURBOHYBRID_MULTIVECTOR_COMPILE_AVX512F && !defined(__AVX512F__) && \
+	(defined(__GNUC__) || defined(__clang__))
+#define PGTURBOHYBRID_MULTIVECTOR_AVX512F_TARGET __attribute__((target("avx512f")))
+#else
+#define PGTURBOHYBRID_MULTIVECTOR_AVX512F_TARGET
+#endif
+
 #if !defined(PGTURBOHYBRID_DISABLE_SIMD) && (defined(__aarch64__) || defined(_M_ARM64))
 #define PGTURBOHYBRID_MULTIVECTOR_COMPILE_NEON 1
 #include <arm_neon.h>
@@ -365,32 +379,171 @@ TqMultiVectorAvx2Available(void)
 static double PGTURBOHYBRID_MULTIVECTOR_AVX2_TARGET
 TqDotProductF32Avx2(const float *a, const float *b, int32 dim)
 {
-	__m256d	acc0 = _mm256_setzero_pd();
-	__m256d	acc1 = _mm256_setzero_pd();
-	double		tmp[4];
-	double		result;
+	__m256		acc0 = _mm256_setzero_ps();
+	__m256		acc1 = _mm256_setzero_ps();
+	__m256		acc2 = _mm256_setzero_ps();
+	__m256		acc3 = _mm256_setzero_ps();
+	float		tmp[8];
+	float		result;
 	int32		i = 0;
+
+	for (; i + 32 <= dim; i += 32)
+	{
+		acc0 = _mm256_add_ps(acc0,
+							 _mm256_mul_ps(_mm256_loadu_ps(a + i),
+										   _mm256_loadu_ps(b + i)));
+		acc1 = _mm256_add_ps(acc1,
+							 _mm256_mul_ps(_mm256_loadu_ps(a + i + 8),
+										   _mm256_loadu_ps(b + i + 8)));
+		acc2 = _mm256_add_ps(acc2,
+							 _mm256_mul_ps(_mm256_loadu_ps(a + i + 16),
+										   _mm256_loadu_ps(b + i + 16)));
+		acc3 = _mm256_add_ps(acc3,
+							 _mm256_mul_ps(_mm256_loadu_ps(a + i + 24),
+										   _mm256_loadu_ps(b + i + 24)));
+	}
+
+	acc0 = _mm256_add_ps(_mm256_add_ps(acc0, acc1),
+						 _mm256_add_ps(acc2, acc3));
+	_mm256_storeu_ps(tmp, acc0);
+	result = 0.0f;
+	for (int lane = 0; lane < 8; lane++)
+		result += tmp[lane];
+
+	for (; i < dim; i++)
+		result += a[i] * b[i];
+
+	return (double) result;
+}
+
+static void PGTURBOHYBRID_MULTIVECTOR_AVX2_TARGET
+TqDotProductF32BlockAvx2(const float *queryValues, const float *docValues,
+						 int32 dim, int32 blockCount, double *dots)
+{
+	__m256		acc[PGTURBOHYBRID_MULTIVECTOR_BLOCKED_SCALAR_Q];
+	float		tmp[8];
+	int32		i = 0;
+
+	for (int32 qi = 0; qi < blockCount; qi++)
+		acc[qi] = _mm256_setzero_ps();
 
 	for (; i + 8 <= dim; i += 8)
 	{
-		__m256		va = _mm256_loadu_ps(a + i);
-		__m256		vb = _mm256_loadu_ps(b + i);
-		__m256		prod = _mm256_mul_ps(va, vb);
-		__m128		lo = _mm256_castps256_ps128(prod);
-		__m128		hi = _mm256_extractf128_ps(prod, 1);
+		__m256		dv = _mm256_loadu_ps(docValues + i);
 
-		acc0 = _mm256_add_pd(acc0, _mm256_cvtps_pd(lo));
-		acc1 = _mm256_add_pd(acc1, _mm256_cvtps_pd(hi));
+		for (int32 qi = 0; qi < blockCount; qi++)
+		{
+			const float *qv = queryValues + ((Size) qi * (Size) dim);
+
+			acc[qi] = _mm256_add_ps(acc[qi],
+									_mm256_mul_ps(_mm256_loadu_ps(qv + i), dv));
+		}
 	}
 
-	acc0 = _mm256_add_pd(acc0, acc1);
-	_mm256_storeu_pd(tmp, acc0);
-	result = tmp[0] + tmp[1] + tmp[2] + tmp[3];
+	for (int32 qi = 0; qi < blockCount; qi++)
+	{
+		const float *qv = queryValues + ((Size) qi * (Size) dim);
+		float		result = 0.0f;
+
+		_mm256_storeu_ps(tmp, acc[qi]);
+		for (int lane = 0; lane < 8; lane++)
+			result += tmp[lane];
+		for (int32 tail = i; tail < dim; tail++)
+			result += qv[tail] * docValues[tail];
+		dots[qi] = (double) result;
+	}
+}
+#endif
+
+#if PGTURBOHYBRID_MULTIVECTOR_COMPILE_AVX512F
+static bool
+TqMultiVectorAvx512fAvailable(void)
+{
+#if defined(__AVX512F__)
+	return true;
+#elif defined(__GNUC__) || defined(__clang__)
+	return __builtin_cpu_supports("avx512f");
+#else
+	return false;
+#endif
+}
+
+static double PGTURBOHYBRID_MULTIVECTOR_AVX512F_TARGET
+TqDotProductF32Avx512f(const float *a, const float *b, int32 dim)
+{
+	__m512		acc0 = _mm512_setzero_ps();
+	__m512		acc1 = _mm512_setzero_ps();
+	__m512		acc2 = _mm512_setzero_ps();
+	__m512		acc3 = _mm512_setzero_ps();
+	float		tmp[16];
+	float		result;
+	int32		i = 0;
+
+	for (; i + 64 <= dim; i += 64)
+	{
+		acc0 = _mm512_add_ps(acc0,
+							 _mm512_mul_ps(_mm512_loadu_ps(a + i),
+										   _mm512_loadu_ps(b + i)));
+		acc1 = _mm512_add_ps(acc1,
+							 _mm512_mul_ps(_mm512_loadu_ps(a + i + 16),
+										   _mm512_loadu_ps(b + i + 16)));
+		acc2 = _mm512_add_ps(acc2,
+							 _mm512_mul_ps(_mm512_loadu_ps(a + i + 32),
+										   _mm512_loadu_ps(b + i + 32)));
+		acc3 = _mm512_add_ps(acc3,
+							 _mm512_mul_ps(_mm512_loadu_ps(a + i + 48),
+										   _mm512_loadu_ps(b + i + 48)));
+	}
+
+	acc0 = _mm512_add_ps(_mm512_add_ps(acc0, acc1),
+						 _mm512_add_ps(acc2, acc3));
+	_mm512_storeu_ps(tmp, acc0);
+	result = 0.0f;
+	for (int lane = 0; lane < 16; lane++)
+		result += tmp[lane];
 
 	for (; i < dim; i++)
-		result += (double) a[i] * (double) b[i];
+		result += a[i] * b[i];
 
-	return result;
+	return (double) result;
+}
+
+static void PGTURBOHYBRID_MULTIVECTOR_AVX512F_TARGET
+TqDotProductF32BlockAvx512f(const float *queryValues, const float *docValues,
+							int32 dim, int32 blockCount, double *dots)
+{
+	__m512		acc[PGTURBOHYBRID_MULTIVECTOR_BLOCKED_SCALAR_Q];
+	float		tmp[16];
+	int32		i = 0;
+
+	for (int32 qi = 0; qi < blockCount; qi++)
+		acc[qi] = _mm512_setzero_ps();
+
+	for (; i + 16 <= dim; i += 16)
+	{
+		__m512		dv = _mm512_loadu_ps(docValues + i);
+
+		for (int32 qi = 0; qi < blockCount; qi++)
+		{
+			const float *qv = queryValues + ((Size) qi * (Size) dim);
+
+			acc[qi] = _mm512_add_ps(acc[qi],
+									_mm512_mul_ps(_mm512_loadu_ps(qv + i), dv));
+		}
+	}
+
+	for (int32 qi = 0; qi < blockCount; qi++)
+	{
+		const float *qv = queryValues + ((Size) qi * (Size) dim);
+		float		result = 0.0f;
+
+		_mm512_storeu_ps(tmp, acc[qi]);
+		for (int lane = 0; lane < 16; lane++)
+			result += tmp[lane];
+		for (int32 tail = i; tail < dim; tail++)
+			result += qv[tail] * docValues[tail];
+		dots[qi] = (double) result;
+	}
 }
 #endif
 
@@ -398,28 +551,65 @@ TqDotProductF32Avx2(const float *a, const float *b, int32 dim)
 static double
 TqDotProductF32Neon(const float *a, const float *b, int32 dim)
 {
-	float64x2_t acc0 = vdupq_n_f64(0);
-	float64x2_t acc1 = vdupq_n_f64(0);
-	double		result;
+	float32x4_t acc0 = vdupq_n_f32(0);
+	float32x4_t acc1 = vdupq_n_f32(0);
+	float32x4_t acc2 = vdupq_n_f32(0);
+	float32x4_t acc3 = vdupq_n_f32(0);
+	float		result;
 	int32		i = 0;
+
+	for (; i + 16 <= dim; i += 16)
+	{
+		acc0 = vaddq_f32(acc0, vmulq_f32(vld1q_f32(a + i),
+										  vld1q_f32(b + i)));
+		acc1 = vaddq_f32(acc1, vmulq_f32(vld1q_f32(a + i + 4),
+										  vld1q_f32(b + i + 4)));
+		acc2 = vaddq_f32(acc2, vmulq_f32(vld1q_f32(a + i + 8),
+										  vld1q_f32(b + i + 8)));
+		acc3 = vaddq_f32(acc3, vmulq_f32(vld1q_f32(a + i + 12),
+										  vld1q_f32(b + i + 12)));
+	}
+
+	acc0 = vaddq_f32(vaddq_f32(acc0, acc1), vaddq_f32(acc2, acc3));
+	result = vaddvq_f32(acc0);
+
+	for (; i < dim; i++)
+		result += a[i] * b[i];
+
+	return (double) result;
+}
+
+static void
+TqDotProductF32BlockNeon(const float *queryValues, const float *docValues,
+						 int32 dim, int32 blockCount, double *dots)
+{
+	float32x4_t acc[PGTURBOHYBRID_MULTIVECTOR_BLOCKED_SCALAR_Q];
+	int32		i = 0;
+
+	for (int32 qi = 0; qi < blockCount; qi++)
+		acc[qi] = vdupq_n_f32(0);
 
 	for (; i + 4 <= dim; i += 4)
 	{
-		float32x4_t va = vld1q_f32(a + i);
-		float32x4_t vb = vld1q_f32(b + i);
-		float32x4_t prod = vmulq_f32(va, vb);
+		float32x4_t dv = vld1q_f32(docValues + i);
 
-		acc0 = vaddq_f64(acc0, vcvt_f64_f32(vget_low_f32(prod)));
-		acc1 = vaddq_f64(acc1, vcvt_f64_f32(vget_high_f32(prod)));
+		for (int32 qi = 0; qi < blockCount; qi++)
+		{
+			const float *qv = queryValues + ((Size) qi * (Size) dim);
+
+			acc[qi] = vaddq_f32(acc[qi], vmulq_f32(vld1q_f32(qv + i), dv));
+		}
 	}
 
-	acc0 = vaddq_f64(acc0, acc1);
-	result = vgetq_lane_f64(acc0, 0) + vgetq_lane_f64(acc0, 1);
+	for (int32 qi = 0; qi < blockCount; qi++)
+	{
+		const float *qv = queryValues + ((Size) qi * (Size) dim);
+		float		result = vaddvq_f32(acc[qi]);
 
-	for (; i < dim; i++)
-		result += (double) a[i] * (double) b[i];
-
-	return result;
+		for (int32 tail = i; tail < dim; tail++)
+			result += qv[tail] * docValues[tail];
+		dots[qi] = (double) result;
+	}
 }
 #endif
 
@@ -513,7 +703,45 @@ static double PGTURBOHYBRID_MULTIVECTOR_AVX2_TARGET
 TqMultiVectorMaxSimBlockedAvx2(const PgturbohybridMultiVector *query,
 							   const PgturbohybridMultiVector *doc)
 {
-	return TqMultiVectorMaxSimBlockedWithDot(query, doc, TqDotProductF32Avx2);
+	double		score = 0.0;
+
+	PgturbohybridCheckSameMultiVectorDims(query, doc);
+
+	for (int32 qb = 0; qb < query->count;
+		 qb += PGTURBOHYBRID_MULTIVECTOR_BLOCKED_SCALAR_Q)
+	{
+		int32		blockCount =
+			Min(query->count - qb, PGTURBOHYBRID_MULTIVECTOR_BLOCKED_SCALAR_Q);
+		const float *queryValues =
+			query->values + ((Size) qb * (Size) query->dim);
+		double		best[PGTURBOHYBRID_MULTIVECTOR_BLOCKED_SCALAR_Q];
+		double		dots[PGTURBOHYBRID_MULTIVECTOR_BLOCKED_SCALAR_Q];
+
+		for (int32 qi = 0; qi < blockCount; qi++)
+			best[qi] = -INFINITY;
+
+		for (int32 di = 0; di < doc->count; di++)
+		{
+			const float *dv = doc->values + ((Size) di * (Size) doc->dim);
+
+			if (blockCount == 1)
+				dots[0] = TqDotProductF32Avx2(queryValues, dv, query->dim);
+			else
+				TqDotProductF32BlockAvx2(queryValues, dv, query->dim,
+										 blockCount, dots);
+
+			for (int32 qi = 0; qi < blockCount; qi++)
+			{
+				if (dots[qi] > best[qi])
+					best[qi] = dots[qi];
+			}
+		}
+
+		for (int32 qi = 0; qi < blockCount; qi++)
+			score += best[qi];
+	}
+
+	return score;
 }
 #endif
 
@@ -522,7 +750,92 @@ static double
 TqMultiVectorMaxSimBlockedNeon(const PgturbohybridMultiVector *query,
 							   const PgturbohybridMultiVector *doc)
 {
-	return TqMultiVectorMaxSimBlockedWithDot(query, doc, TqDotProductF32Neon);
+	double		score = 0.0;
+
+	PgturbohybridCheckSameMultiVectorDims(query, doc);
+
+	for (int32 qb = 0; qb < query->count;
+		 qb += PGTURBOHYBRID_MULTIVECTOR_BLOCKED_SCALAR_Q)
+	{
+		int32		blockCount =
+			Min(query->count - qb, PGTURBOHYBRID_MULTIVECTOR_BLOCKED_SCALAR_Q);
+		const float *queryValues =
+			query->values + ((Size) qb * (Size) query->dim);
+		double		best[PGTURBOHYBRID_MULTIVECTOR_BLOCKED_SCALAR_Q];
+		double		dots[PGTURBOHYBRID_MULTIVECTOR_BLOCKED_SCALAR_Q];
+
+		for (int32 qi = 0; qi < blockCount; qi++)
+			best[qi] = -INFINITY;
+
+		for (int32 di = 0; di < doc->count; di++)
+		{
+			const float *dv = doc->values + ((Size) di * (Size) doc->dim);
+
+			if (blockCount == 1)
+				dots[0] = TqDotProductF32Neon(queryValues, dv, query->dim);
+			else
+				TqDotProductF32BlockNeon(queryValues, dv, query->dim,
+										 blockCount, dots);
+
+			for (int32 qi = 0; qi < blockCount; qi++)
+			{
+				if (dots[qi] > best[qi])
+					best[qi] = dots[qi];
+			}
+		}
+
+		for (int32 qi = 0; qi < blockCount; qi++)
+			score += best[qi];
+	}
+
+	return score;
+}
+#endif
+
+#if PGTURBOHYBRID_MULTIVECTOR_COMPILE_AVX512F
+static double PGTURBOHYBRID_MULTIVECTOR_AVX512F_TARGET
+TqMultiVectorMaxSimBlockedAvx512f(const PgturbohybridMultiVector *query,
+								  const PgturbohybridMultiVector *doc)
+{
+	double		score = 0.0;
+
+	PgturbohybridCheckSameMultiVectorDims(query, doc);
+
+	for (int32 qb = 0; qb < query->count;
+		 qb += PGTURBOHYBRID_MULTIVECTOR_BLOCKED_SCALAR_Q)
+	{
+		int32		blockCount =
+			Min(query->count - qb, PGTURBOHYBRID_MULTIVECTOR_BLOCKED_SCALAR_Q);
+		const float *queryValues =
+			query->values + ((Size) qb * (Size) query->dim);
+		double		best[PGTURBOHYBRID_MULTIVECTOR_BLOCKED_SCALAR_Q];
+		double		dots[PGTURBOHYBRID_MULTIVECTOR_BLOCKED_SCALAR_Q];
+
+		for (int32 qi = 0; qi < blockCount; qi++)
+			best[qi] = -INFINITY;
+
+		for (int32 di = 0; di < doc->count; di++)
+		{
+			const float *dv = doc->values + ((Size) di * (Size) doc->dim);
+
+			if (blockCount == 1)
+				dots[0] = TqDotProductF32Avx512f(queryValues, dv, query->dim);
+			else
+				TqDotProductF32BlockAvx512f(queryValues, dv, query->dim,
+											blockCount, dots);
+
+			for (int32 qi = 0; qi < blockCount; qi++)
+			{
+				if (dots[qi] > best[qi])
+					best[qi] = dots[qi];
+			}
+		}
+
+		for (int32 qi = 0; qi < blockCount; qi++)
+			score += best[qi];
+	}
+
+	return score;
 }
 #endif
 
@@ -532,6 +845,10 @@ TqResolveMultiVectorMaxSimKernel(void)
 	if (pgturbohybrid_dense_exact_simd_force == PGTURBOHYBRID_EXACT_SIMD_FORCE_SCALAR)
 		return TqMultiVectorMaxSimBlockedScalar;
 
+#if PGTURBOHYBRID_MULTIVECTOR_COMPILE_AVX512F
+	if (TqMultiVectorAvx512fAvailable())
+		return TqMultiVectorMaxSimBlockedAvx512f;
+#endif
 #if PGTURBOHYBRID_MULTIVECTOR_COMPILE_AVX2
 	if (TqMultiVectorAvx2Available())
 		return TqMultiVectorMaxSimBlockedAvx2;
@@ -549,6 +866,10 @@ TqMultiVectorMaxSimKernelName(void)
 
 	if (func == TqMultiVectorMaxSimBlockedScalar)
 		return "blocked_scalar";
+#if PGTURBOHYBRID_MULTIVECTOR_COMPILE_AVX512F
+	if (func == TqMultiVectorMaxSimBlockedAvx512f)
+		return "blocked_avx512";
+#endif
 #if PGTURBOHYBRID_MULTIVECTOR_COMPILE_AVX2
 	if (func == TqMultiVectorMaxSimBlockedAvx2)
 		return "blocked_avx2";
