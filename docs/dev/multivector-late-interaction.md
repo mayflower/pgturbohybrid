@@ -68,8 +68,8 @@ Expected complexity:
 
 - No int8/VNNI exact rerank.
 - No per-subnode exact float32 storage as the default.
-- No hybrid fusion before dense-only multivector correctness is proven; the MVP
-  hybrid path is document-level RRF only.
+- Hybrid multivector fusion is document-level RRF only; score-level fusion modes
+  are deferred until their document-level semantics are specified and tested.
 - No on-disk format expansion without version or compatibility checks.
 
 ## Scan Diagnostics
@@ -88,7 +88,7 @@ Expected complexity:
   `multivector_exact_kernel` describe bounded heap exact rerank work.
 - `multivector_accumulator_kind` and `multivector_memory_bytes_estimate` expose
   whether the implementation stayed in touched-document memory, currently a
-  hash accumulator with expected `O(C * Q)` storage.
+  scan-local doc-ID hash accumulator with expected `O(C * Q)` storage.
 
 Single-vector scans report multivector disabled, zero counters, and null
 multivector kernel / accumulator names.
@@ -110,7 +110,8 @@ The multivector scan path is bounded before allocating per-query state:
 - `turbohybrid.multivector_max_accumulator_mb` rejects queries whose
   touched-document hash accumulator would exceed the configured memory budget.
 
-The accumulator is a touched-document hash table with per-document `Q` arrays,
-so it avoids global `D * Q` or `N * Q` clearing. Incremental multivector
-insert/update remains unsupported and errors explicitly; bulk build plus
-`REINDEX` is the supported path for now.
+The accumulator is a touched-document hash table keyed by scan-local `TqDocId`
+with per-document `Q` arrays, so it avoids global `D * Q` or `N * Q` clearing.
+Bulk build and incremental insert/update both expand each multivector row into
+one graph subnode per document vector. Hybrid indexes append one BM25 delta per
+inserted document when the lexical key is non-null.

@@ -383,15 +383,16 @@ has an effect when residual sketches were built.
 Multivector late-interaction indexes use the same native graph storage for
 subvector nodes, but result identity remains the heap TID/document. A build over
 `turbohybrid_multivector` expands each row into one graph node per token vector
-and keeps in-memory build maps from node ID to document ID/token ordinal. The
-scan path runs one bounded graph traversal per query token, groups candidate
-hits by heap TID, and accumulates document scores with approximate MaxSim before
-final ordering. The `<~>` operator therefore still orders by smaller-is-better
-distance, using `-MaxSim` at the document level. Hybrid multivector + BM25 is
-supported for document-level RRF fusion; score-level fusion modes remain
-unsupported unless explicitly documented. Incremental insert/update maintenance
-is intentionally not part of the current storage contract; use bulk
-build/`REINDEX` for multivector experiments.
+and keeps in-memory build maps from node ID to document ID/token ordinal.
+Incremental insert/update uses the same expansion semantics for the new tuple
+and appends one BM25 delta per inserted document when a lexical key is present.
+The scan path runs one bounded graph traversal per query token, assigns
+scan-local `TqDocId` values to touched documents, and accumulates document
+scores with approximate MaxSim before final ordering. The `<~>` operator
+therefore still orders by smaller-is-better distance, using `-MaxSim` at the
+document level. Hybrid multivector + BM25 is supported for document-level RRF
+fusion; score-level fusion modes remain unsupported unless explicitly
+documented.
 
 The scan-time candidate budgets are controlled by
 `turbohybrid.multivector_subvector_k`,

@@ -157,9 +157,11 @@ This path is intentionally narrow today:
 - `vector_query` and `multivector_query` cannot be mixed in one
   `turbohybrid_query`;
 - hybrid multivector + text search is supported for document-level RRF fusion;
-- incremental insert/update into a multivector turbohybrid index is not
-  implemented yet, so build indexes from existing data and `REINDEX` after bulk
-  replacement.
+- incremental insert/update expands each new multivector row into one graph
+  subnode per document vector and appends one BM25 delta when a lexical key is
+  present;
+- text input for `turbohybrid_multivector` remains intentionally unsupported;
+  construct values from `vector[]`.
 
 Candidate collection is approximate: each query token searches the TurboQuant
 graph, then results are accumulated with document-level MaxSim. Tune the bounded

@@ -758,6 +758,11 @@ void		PgturbohybridGraphExactRescore(Relation index, PgturbohybridGraphScanOpaqu
 uint32		PgturbohybridGraphInsertValueInPlace(Relation index, IndexInfo *indexInfo,
 									  ItemPointer heap_tid, Datum value,
 									  Datum *values, bool *isnull);
+uint32		PgturbohybridGraphInsertMultiVectorInPlace(Relation index,
+											 IndexInfo *indexInfo,
+											 ItemPointer heap_tid, Datum value,
+											 Datum *values, bool *isnull,
+											 uint32 *insertedNodes);
 int			PgturbohybridGraphPickLevel(uint32 nodeId, int m);
 int			PgturbohybridGraphTraverse(Relation index, PgturbohybridGraphScanOpaque so,
 						 PgturbohybridGraphMetaPageData *meta,

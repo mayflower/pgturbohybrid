@@ -4257,7 +4257,7 @@ pgturbohybridaminsert(Relation index, Datum *values, bool *isnull, ItemPointer h
 {
 	Datum		value;
 	Datum		lexicalValue;
-	const PgturbohybridGraphTypeInfo *typeInfo = PgturbohybridGraphGetTypeInfo(index);
+	const PgturbohybridGraphTypeInfo *typeInfo;
 	PgturbohybridGraphSupport support;
 	uint32		nodeId;
 
@@ -4267,13 +4267,38 @@ pgturbohybridaminsert(Relation index, Datum *values, bool *isnull, ItemPointer h
 	(void) indexUnchanged;
 #endif
 	PgturbohybridValidateIndex(index, indexInfo);
-	if (PgturbohybridIndexIsMultiVector(index))
-		ereport(ERROR,
-				(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
-				 errmsg("turbohybrid multivector insert is not implemented yet")));
 	if (isnull[0])
 		return false;
 
+	if (PgturbohybridIndexIsMultiVector(index))
+	{
+		uint32		insertedNodes = 0;
+
+		LockPage(index, PGTURBOHYBRID_GRAPH_UPDATE_LOCK, ExclusiveLock);
+		PG_TRY();
+		{
+			nodeId = PgturbohybridGraphInsertMultiVectorInPlace(index, indexInfo,
+																heap_tid,
+																values[0],
+																values,
+																isnull,
+																&insertedNodes);
+			if (insertedNodes > 0 &&
+				PgturbohybridIndexGetLexicalDatum(index, values, isnull, &lexicalValue))
+				PgturbohybridBm25AppendDelta(index, nodeId, heap_tid, lexicalValue);
+		}
+		PG_CATCH();
+		{
+			UnlockPage(index, PGTURBOHYBRID_GRAPH_UPDATE_LOCK, ExclusiveLock);
+			PG_RE_THROW();
+		}
+		PG_END_TRY();
+		UnlockPage(index, PGTURBOHYBRID_GRAPH_UPDATE_LOCK, ExclusiveLock);
+
+		return true;
+	}
+
+	typeInfo = PgturbohybridGraphGetTypeInfo(index);
 	PgturbohybridGraphInitSupport(&support, index);
 	if (!PgturbohybridGraphFormIndexValue(&value, values, isnull, typeInfo, &support))
 		return false;
