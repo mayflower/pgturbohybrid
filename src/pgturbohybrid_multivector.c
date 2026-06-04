@@ -18,8 +18,31 @@
 #include "varatt.h"
 #endif
 
+#include "pgturbohybrid.h"
 #include "pgturbohybrid_multivector.h"
 #include "pgturbohybrid_query.h"
+
+#if !defined(PGTURBOHYBRID_DISABLE_SIMD) && \
+	(defined(__AVX2__) || (defined(__x86_64__) && (defined(__GNUC__) || defined(__clang__))))
+#define PGTURBOHYBRID_MULTIVECTOR_COMPILE_AVX2 1
+#include <immintrin.h>
+#else
+#define PGTURBOHYBRID_MULTIVECTOR_COMPILE_AVX2 0
+#endif
+
+#if PGTURBOHYBRID_MULTIVECTOR_COMPILE_AVX2 && !defined(__AVX2__) && \
+	(defined(__GNUC__) || defined(__clang__))
+#define PGTURBOHYBRID_MULTIVECTOR_AVX2_TARGET __attribute__((target("avx2")))
+#else
+#define PGTURBOHYBRID_MULTIVECTOR_AVX2_TARGET
+#endif
+
+#if !defined(PGTURBOHYBRID_DISABLE_SIMD) && (defined(__aarch64__) || defined(_M_ARM64))
+#define PGTURBOHYBRID_MULTIVECTOR_COMPILE_NEON 1
+#include <arm_neon.h>
+#else
+#define PGTURBOHYBRID_MULTIVECTOR_COMPILE_NEON 0
+#endif
 
 FUNCTION_PREFIX PG_FUNCTION_INFO_V1(pgturbohybrid_multivector_in);
 FUNCTION_PREFIX PG_FUNCTION_INFO_V1(pgturbohybrid_multivector_out);
@@ -34,6 +57,8 @@ static Oid	pgturbohybrid_multivector_type_oid = InvalidOid;
 
 static Oid PgturbohybridExtensionSchema(Oid extensionOid);
 static void PgturbohybridCheckMultiVectorHeader(int32 count, int32 dim);
+
+typedef double (*TqDotProductF32Func) (const float *a, const float *b, int32 dim);
 
 static Oid
 PgturbohybridExtensionSchema(Oid extensionOid)
@@ -258,9 +283,100 @@ TqDotProductF32Scalar(const float *a, const float *b, int32 dim)
 	return result;
 }
 
-double
-TqMultiVectorMaxSimScalar(const PgturbohybridMultiVector *query,
-						  const PgturbohybridMultiVector *doc)
+#if PGTURBOHYBRID_MULTIVECTOR_COMPILE_AVX2
+static bool
+TqMultiVectorAvx2Available(void)
+{
+#if defined(__AVX2__)
+	return true;
+#elif defined(__GNUC__) || defined(__clang__)
+	return __builtin_cpu_supports("avx2");
+#else
+	return false;
+#endif
+}
+
+static double PGTURBOHYBRID_MULTIVECTOR_AVX2_TARGET
+TqDotProductF32Avx2(const float *a, const float *b, int32 dim)
+{
+	__m256d	acc0 = _mm256_setzero_pd();
+	__m256d	acc1 = _mm256_setzero_pd();
+	double		tmp[4];
+	double		result;
+	int32		i = 0;
+
+	for (; i + 8 <= dim; i += 8)
+	{
+		__m256		va = _mm256_loadu_ps(a + i);
+		__m256		vb = _mm256_loadu_ps(b + i);
+		__m256		prod = _mm256_mul_ps(va, vb);
+		__m128		lo = _mm256_castps256_ps128(prod);
+		__m128		hi = _mm256_extractf128_ps(prod, 1);
+
+		acc0 = _mm256_add_pd(acc0, _mm256_cvtps_pd(lo));
+		acc1 = _mm256_add_pd(acc1, _mm256_cvtps_pd(hi));
+	}
+
+	acc0 = _mm256_add_pd(acc0, acc1);
+	_mm256_storeu_pd(tmp, acc0);
+	result = tmp[0] + tmp[1] + tmp[2] + tmp[3];
+
+	for (; i < dim; i++)
+		result += (double) a[i] * (double) b[i];
+
+	return result;
+}
+#endif
+
+#if PGTURBOHYBRID_MULTIVECTOR_COMPILE_NEON
+static double
+TqDotProductF32Neon(const float *a, const float *b, int32 dim)
+{
+	float64x2_t acc0 = vdupq_n_f64(0);
+	float64x2_t acc1 = vdupq_n_f64(0);
+	double		result;
+	int32		i = 0;
+
+	for (; i + 4 <= dim; i += 4)
+	{
+		float32x4_t va = vld1q_f32(a + i);
+		float32x4_t vb = vld1q_f32(b + i);
+		float32x4_t prod = vmulq_f32(va, vb);
+
+		acc0 = vaddq_f64(acc0, vcvt_f64_f32(vget_low_f32(prod)));
+		acc1 = vaddq_f64(acc1, vcvt_f64_f32(vget_high_f32(prod)));
+	}
+
+	acc0 = vaddq_f64(acc0, acc1);
+	result = vgetq_lane_f64(acc0, 0) + vgetq_lane_f64(acc0, 1);
+
+	for (; i < dim; i++)
+		result += (double) a[i] * (double) b[i];
+
+	return result;
+}
+#endif
+
+static TqDotProductF32Func
+TqResolveMultiVectorDotProductKernel(void)
+{
+	if (pgturbohybrid_dense_exact_simd_force == PGTURBOHYBRID_EXACT_SIMD_FORCE_SCALAR)
+		return TqDotProductF32Scalar;
+
+#if PGTURBOHYBRID_MULTIVECTOR_COMPILE_AVX2
+	if (TqMultiVectorAvx2Available())
+		return TqDotProductF32Avx2;
+#endif
+#if PGTURBOHYBRID_MULTIVECTOR_COMPILE_NEON
+	return TqDotProductF32Neon;
+#endif
+	return TqDotProductF32Scalar;
+}
+
+static double
+TqMultiVectorMaxSimWithDot(const PgturbohybridMultiVector *query,
+						   const PgturbohybridMultiVector *doc,
+						   TqDotProductF32Func dotProduct)
 {
 	double		score = 0.0;
 
@@ -268,13 +384,13 @@ TqMultiVectorMaxSimScalar(const PgturbohybridMultiVector *query,
 
 	for (int32 qi = 0; qi < query->count; qi++)
 	{
-		const float *qv = PgturbohybridMultiVectorValues(query, qi);
+		const float *qv = query->values + ((Size) qi * (Size) query->dim);
 		double		best = -INFINITY;
 
 		for (int32 di = 0; di < doc->count; di++)
 		{
-			const float *dv = PgturbohybridMultiVectorValues(doc, di);
-			double		dot = TqDotProductF32Scalar(qv, dv, query->dim);
+			const float *dv = doc->values + ((Size) di * (Size) doc->dim);
+			double		dot = dotProduct(qv, dv, query->dim);
 
 			if (dot > best)
 				best = dot;
@@ -284,6 +400,21 @@ TqMultiVectorMaxSimScalar(const PgturbohybridMultiVector *query,
 	}
 
 	return score;
+}
+
+double
+TqMultiVectorMaxSimScalar(const PgturbohybridMultiVector *query,
+						  const PgturbohybridMultiVector *doc)
+{
+	return TqMultiVectorMaxSimWithDot(query, doc, TqDotProductF32Scalar);
+}
+
+double
+TqMultiVectorMaxSim(const PgturbohybridMultiVector *query,
+					const PgturbohybridMultiVector *doc)
+{
+	return TqMultiVectorMaxSimWithDot(query, doc,
+									  TqResolveMultiVectorDotProductKernel());
 }
 
 Datum
@@ -428,7 +559,7 @@ pgturbohybrid_multivector_maxsim(PG_FUNCTION_ARGS)
 	PgturbohybridMultiVector *query = PG_GETARG_PGTURBOHYBRID_MULTIVECTOR_P(0);
 	PgturbohybridMultiVector *doc = PG_GETARG_PGTURBOHYBRID_MULTIVECTOR_P(1);
 
-	PG_RETURN_FLOAT8(TqMultiVectorMaxSimScalar(query, doc));
+	PG_RETURN_FLOAT8(TqMultiVectorMaxSim(query, doc));
 }
 
 Datum
@@ -437,7 +568,7 @@ pgturbohybrid_multivector_maxsim_distance(PG_FUNCTION_ARGS)
 	PgturbohybridMultiVector *query = PG_GETARG_PGTURBOHYBRID_MULTIVECTOR_P(0);
 	PgturbohybridMultiVector *doc = PG_GETARG_PGTURBOHYBRID_MULTIVECTOR_P(1);
 
-	PG_RETURN_FLOAT8(-TqMultiVectorMaxSimScalar(query, doc));
+	PG_RETURN_FLOAT8(-TqMultiVectorMaxSim(query, doc));
 }
 
 Datum
@@ -453,5 +584,5 @@ pgturbohybrid_multivector_query_distance(PG_FUNCTION_ARGS)
 				(errcode(ERRCODE_INVALID_PARAMETER_VALUE),
 				 errmsg("turbohybrid_query requires multivector_query for multivector distance")));
 
-	PG_RETURN_FLOAT8(-TqMultiVectorMaxSimScalar(queryMv, doc));
+	PG_RETURN_FLOAT8(-TqMultiVectorMaxSim(queryMv, doc));
 }
