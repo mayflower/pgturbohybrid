@@ -30,6 +30,35 @@ or install pgvector or `pgturbohybrid`.
 `CURRENT_PGDATABASE` for the current worktree database, and `OLD_PGDATABASE`
 for the optional old patched-branch database.
 
+With Nix, use the wrapped PostgreSQL cluster and command helpers instead of a
+mutable system PostgreSQL install:
+
+```sh
+nix develop
+th-pg-init
+th-bench-retrieval-quality
+th-bench-profile-grid
+th-bench-tune-profile
+```
+
+For Python or external-dataset benchmarks, use the benchmark shell:
+
+```sh
+nix develop .#bench
+th-bench-concurrent-dense --help
+FIQA_DATASET=/path/to/beir/fiqa th-bench-fiqa-quick
+```
+
+`th-bench-fiqa-quick` intentionally avoids the default Nix development database:
+when `PGDATABASE` is not set by the caller, it runs against
+`pgturbohybrid_fiqa_quick`. Set `FIQA_PGDATABASE=...` to pick another benchmark
+database while keeping the normal dev database safe, or set `PGDATABASE=...`
+explicitly to pass that database through to `run_fiqa_quick.sh`.
+
+The Nix benchmark commands print reports from the same SQL/Python scripts
+documented below. They are not part of `nix flake check`, and their output
+should remain uncommitted.
+
 ## Scaling Complexity Smoke Scripts
 
 These SQL scripts create deterministic synthetic data in the target database and
