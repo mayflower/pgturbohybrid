@@ -70,7 +70,9 @@ BEGIN
 		'turbohybrid.hybrid_budget_policy',
 		'turbohybrid.linear_fallback_notice_threshold_ratio',
 		'turbohybrid.max_union_candidates',
+		'turbohybrid.multivector_adaptive_widening',
 		'turbohybrid.multivector_doc_candidate_k',
+		'turbohybrid.multivector_docmap',
 		'turbohybrid.multivector_exact_rerank',
 		'turbohybrid.multivector_exact_rerank_k',
 		'turbohybrid.multivector_max_accumulator_mb',
@@ -113,16 +115,20 @@ BEGIN
 		current_setting('turbohybrid.multivector_subvector_k') != '100' OR
 		current_setting('turbohybrid.multivector_unique_docs_per_token') != '100' OR
 		current_setting('turbohybrid.multivector_max_raw_hits_per_token') != '400' OR
+		current_setting('turbohybrid.multivector_adaptive_widening') != 'auto' OR
+		current_setting('turbohybrid.multivector_docmap') != 'auto' OR
 		current_setting('turbohybrid.multivector_doc_candidate_k') != '100' OR
 		current_setting('turbohybrid.multivector_exact_rerank') != 'topk' OR
 		current_setting('turbohybrid.multivector_exact_rerank_k') != '100' OR
 		current_setting('turbohybrid.multivector_max_accumulator_mb') != '64' THEN
-		RAISE EXCEPTION 'unexpected multivector defaults: doc %, query %, subvector %, unique %, raw %, docs %, rerank %, rerank_k %, accumulator_mb %',
+		RAISE EXCEPTION 'unexpected multivector defaults: doc %, query %, subvector %, unique %, raw %, adaptive %, docmap %, docs %, rerank %, rerank_k %, accumulator_mb %',
 			current_setting('turbohybrid.multivector_max_doc_vectors'),
 			current_setting('turbohybrid.multivector_max_query_vectors'),
 			current_setting('turbohybrid.multivector_subvector_k'),
 			current_setting('turbohybrid.multivector_unique_docs_per_token'),
 			current_setting('turbohybrid.multivector_max_raw_hits_per_token'),
+			current_setting('turbohybrid.multivector_adaptive_widening'),
+			current_setting('turbohybrid.multivector_docmap'),
 			current_setting('turbohybrid.multivector_doc_candidate_k'),
 			current_setting('turbohybrid.multivector_exact_rerank'),
 			current_setting('turbohybrid.multivector_exact_rerank_k'),

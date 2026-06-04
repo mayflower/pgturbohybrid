@@ -36,7 +36,6 @@ static uint16 PgturbohybridQueryParseFusion(text *fusion);
 static void PgturbohybridQueryCheckPositiveInt(const char *name, int32 value);
 static void PgturbohybridQueryCheckNonNegativeInt(const char *name, int32 value);
 static void PgturbohybridQueryRejectTextFallback(void);
-static bool PgturbohybridQueryTextIndexOrderByContext(FunctionCallInfo fcinfo);
 static void PgturbohybridQueryValidateInternal(PgturbohybridQueryHeader *query,
 											   bool strict);
 static PgturbohybridQueryHeader *PgturbohybridQueryConstructorCached(FunctionCallInfo fcinfo);
@@ -90,7 +89,7 @@ PgturbohybridQueryGetVector(PgturbohybridQueryHeader *query)
 {
 	PgturbohybridQueryValidateFast(query);
 
-	if ((query->flags & PGTURBOHYBRID_QUERY_FLAG_HAS_VECTOR) == 0)
+	if (!PgturbohybridQueryHasVector(query))
 		return NULL;
 
 	return (Vector *) ((char *) query + PgturbohybridQueryVectorOffset());
@@ -101,7 +100,7 @@ PgturbohybridQueryGetMultiVector(PgturbohybridQueryHeader *query)
 {
 	PgturbohybridQueryValidateFast(query);
 
-	if ((query->flags & PGTURBOHYBRID_QUERY_FLAG_HAS_MULTIVECTOR) == 0)
+	if (!PgturbohybridQueryHasMultiVector(query))
 		return NULL;
 
 	return (PgturbohybridMultiVector *) ((char *) query +
@@ -113,7 +112,7 @@ PgturbohybridQueryGetTsQuery(PgturbohybridQueryHeader *query)
 {
 	PgturbohybridQueryValidateFast(query);
 
-	if ((query->flags & PGTURBOHYBRID_QUERY_FLAG_HAS_TSQUERY) == 0)
+	if (!PgturbohybridQueryHasText(query))
 		return NULL;
 
 	return (TSQuery) ((char *) query + PgturbohybridQueryTsQueryOffset(query));
@@ -331,13 +330,13 @@ pgturbohybrid_query_out(PG_FUNCTION_ARGS)
 	appendStringInfo(&buf,
 					 "turbohybrid_query(fusion=%s,vector=%s",
 					 PgturbohybridQueryFusionName(query->fusion),
-					 (query->flags & PGTURBOHYBRID_QUERY_FLAG_HAS_VECTOR) ? "true" : "false");
-	if (query->flags & PGTURBOHYBRID_QUERY_FLAG_HAS_MULTIVECTOR)
+					 PgturbohybridQueryHasVector(query) ? "true" : "false");
+	if (PgturbohybridQueryHasMultiVector(query))
 		appendStringInfoString(&buf, ",multivector=true");
 
 	appendStringInfo(&buf,
 					 ",tsquery=%s,dense_weight=%g,bm25_weight=%g,alpha=",
-					 (query->flags & PGTURBOHYBRID_QUERY_FLAG_HAS_TSQUERY) ? "true" : "false",
+					 PgturbohybridQueryHasText(query) ? "true" : "false",
 					 query->denseWeight,
 					 query->bm25Weight);
 	if (query->flags & PGTURBOHYBRID_QUERY_FLAG_ALPHA_IS_SET)
@@ -481,23 +480,22 @@ PgturbohybridQueryDistanceCallMatches(Node *candidate, PgturbohybridQueryPlanChe
 }
 
 static bool
-PgturbohybridQueryExprListContains(List *exprs, PgturbohybridQueryPlanCheck *check)
+PgturbohybridQueryPlanHasIndexOrderBy(Plan *plan)
 {
-	ListCell   *lc;
+	if (plan == NULL)
+		return false;
 
-	foreach(lc, exprs)
-	{
-		Node	   *candidate = (Node *) lfirst(lc);
+	if (IsA(plan, IndexScan) &&
+		((IndexScan *) plan)->indexorderbyorig != NIL)
+		return true;
 
-		if (PgturbohybridQueryDistanceCallMatches(candidate, check))
-			return true;
-	}
-
-	return false;
+	return PgturbohybridQueryPlanHasIndexOrderBy(plan->lefttree) ||
+		PgturbohybridQueryPlanHasIndexOrderBy(plan->righttree);
 }
 
 static void
-PgturbohybridQueryInspectPlan(Plan *plan, PgturbohybridQueryPlanCheck *check)
+PgturbohybridQueryInspectPlan(Plan *plan, PgturbohybridQueryPlanCheck *check,
+							  bool topLevel)
 {
 	ListCell   *lc;
 
@@ -512,23 +510,21 @@ PgturbohybridQueryInspectPlan(Plan *plan, PgturbohybridQueryPlanCheck *check)
 			!PgturbohybridQueryDistanceCallMatches((Node *) tle->expr, check))
 			continue;
 
-		if (!tle->resjunk)
+		if (!tle->resjunk && topLevel)
 		{
 			check->hasUserVisibleExpr = true;
 			continue;
 		}
 
-		if (IsA(plan, IndexScan) &&
-			PgturbohybridQueryExprListContains(((IndexScan *) plan)->indexorderbyorig,
-										check))
+		if (PgturbohybridQueryPlanHasIndexOrderBy(plan))
 			check->hasIndexOrderByResjunkExpr = true;
 	}
 
-	PgturbohybridQueryInspectPlan(plan->lefttree, check);
-	PgturbohybridQueryInspectPlan(plan->righttree, check);
+	PgturbohybridQueryInspectPlan(plan->lefttree, check, false);
+	PgturbohybridQueryInspectPlan(plan->righttree, check, false);
 }
 
-static bool
+bool
 PgturbohybridQueryTextIndexOrderByContext(FunctionCallInfo fcinfo)
 {
 	PlannedStmt *plannedstmt;
@@ -554,7 +550,10 @@ PgturbohybridQueryTextIndexOrderByContext(FunctionCallInfo fcinfo)
 	check.hasUserVisibleExpr = false;
 	check.hasIndexOrderByResjunkExpr = false;
 
-	PgturbohybridQueryInspectPlan(plannedstmt->planTree, &check);
+	PgturbohybridQueryInspectPlan(plannedstmt->planTree, &check, true);
+	if (!check.hasIndexOrderByResjunkExpr)
+		check.hasIndexOrderByResjunkExpr =
+			PgturbohybridQueryPlanHasIndexOrderBy(plannedstmt->planTree);
 
 	if (cache == NULL)
 	{

@@ -40,6 +40,7 @@ typedef struct PgturbohybridGraphExecWrapperState
 }			PgturbohybridGraphExecWrapperState;
 
 static ExecutorStart_hook_type prev_ExecutorStart_hook = NULL;
+static ExecutorRun_hook_type prev_ExecutorRun_hook = NULL;
 static ExecutorEnd_hook_type prev_ExecutorEnd_hook = NULL;
 static List *tqgraph_exec_wrapper_states = NIL;
 static int64 tqgraph_active_limit_tuple_target = -1;
@@ -50,6 +51,10 @@ static int32 tqgraph_active_payload_filter_value = 0;
 
 static void PgturbohybridExecutorHooksInit(void);
 static void PgturbohybridExecutorStartHook(QueryDesc *queryDesc, int eflags);
+static void PgturbohybridExecutorRunHook(QueryDesc *queryDesc,
+										 ScanDirection direction,
+										 uint64 count,
+										 bool execute_once);
 static void PgturbohybridExecutorEndHook(QueryDesc *queryDesc);
 static void PgturbohybridGraphExecutorStart(QueryDesc *queryDesc, int eflags);
 static void PgturbohybridGraphExecutorEnd(QueryDesc *queryDesc);
@@ -118,6 +123,9 @@ PgturbohybridExecutorHooksInit(void)
 	prev_ExecutorStart_hook = ExecutorStart_hook;
 	ExecutorStart_hook = PgturbohybridExecutorStartHook;
 
+	prev_ExecutorRun_hook = ExecutorRun_hook;
+	ExecutorRun_hook = PgturbohybridExecutorRunHook;
+
 	prev_ExecutorEnd_hook = ExecutorEnd_hook;
 	ExecutorEnd_hook = PgturbohybridExecutorEndHook;
 }
@@ -127,15 +135,16 @@ PgturbohybridExecutorStartHook(QueryDesc *queryDesc, int eflags)
 {
 	bool		am_started = false;
 
-	if (prev_ExecutorStart_hook)
-		prev_ExecutorStart_hook(queryDesc, eflags);
-	else
-		standard_ExecutorStart(queryDesc, eflags);
-
 	PG_TRY();
 	{
 		PgturbohybridAmExecutorStart(queryDesc, eflags);
 		am_started = true;
+
+		if (prev_ExecutorStart_hook)
+			prev_ExecutorStart_hook(queryDesc, eflags);
+		else
+			standard_ExecutorStart(queryDesc, eflags);
+
 		PgturbohybridGraphExecutorStart(queryDesc, eflags);
 	}
 	PG_CATCH();
@@ -145,6 +154,26 @@ PgturbohybridExecutorStartHook(QueryDesc *queryDesc, int eflags)
 			PgturbohybridAmExecutorEnd(queryDesc);
 		else
 			PgturbohybridAmExecutorAbort();
+		PG_RE_THROW();
+	}
+	PG_END_TRY();
+}
+
+static void
+PgturbohybridExecutorRunHook(QueryDesc *queryDesc, ScanDirection direction,
+							 uint64 count, bool execute_once)
+{
+	PG_TRY();
+	{
+		if (prev_ExecutorRun_hook)
+			prev_ExecutorRun_hook(queryDesc, direction, count, execute_once);
+		else
+			standard_ExecutorRun(queryDesc, direction, count, execute_once);
+	}
+	PG_CATCH();
+	{
+		tqgraph_exec_wrapper_states = NIL;
+		PgturbohybridAmExecutorAbort();
 		PG_RE_THROW();
 	}
 	PG_END_TRY();

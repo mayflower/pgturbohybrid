@@ -13,6 +13,25 @@
 - Do not commit generated benchmark output, regression output, local logs, or
   host-specific artifacts.
 
+## Nix Development Environment
+
+- Use this repository's Nix flake for builds, regression tests, TAP tests, and
+  benchmark smoke checks. Do not default to the host Homebrew PostgreSQL or
+  `pg_config` toolchain.
+- Enter the dev environment with:
+  `nix --extra-experimental-features 'nix-command flakes' develop`
+- If running commands non-interactively, wrap them with:
+  `nix --extra-experimental-features 'nix-command flakes' develop --command ...`
+- Prefer the flake helper commands inside the dev shell:
+  - `th-pg-init` to initialize/start the local PostgreSQL cluster.
+  - `th-installcheck` for SQL regression tests.
+  - `th-prove-installcheck` for TAP tests.
+  - `th-smoke` for the minimal extension smoke test.
+- Verify the environment before validation with `echo "$IN_NIX_SHELL"` and
+  `pg_config --version`; the flake currently provides PostgreSQL 17. If TAP
+  modules appear unavailable, first re-check that the command is running inside
+  `nix develop` before treating it as a project or system issue.
+
 ## Multivector / Late Interaction
 
 - A multivector graph node is a subvector/token node, not a SQL result.

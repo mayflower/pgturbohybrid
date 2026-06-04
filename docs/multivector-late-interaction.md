@@ -63,9 +63,15 @@ INSERT INTO passages VALUES
 
 CREATE INDEX passages_colbert_idx
 ON passages USING turbohybrid (
-  colbert multivector_cosine_turbohybrid_ops
+  colbert multivector_maxsim_ip_turbohybrid_ops
 );
 ```
+
+For new indexes, prefer `multivector_maxsim_ip_turbohybrid_ops`. It names the
+actual raw dot-product MaxSim semantics. The older
+`multivector_cosine_turbohybrid_ops` remains available for compatibility and
+assumes stored and query token vectors are already normalized before indexing
+or querying.
 
 Query with a multivector payload:
 
@@ -101,7 +107,7 @@ CREATE TABLE hybrid_passages (
 
 CREATE INDEX hybrid_passages_idx
 ON hybrid_passages USING turbohybrid (
-  colbert multivector_cosine_turbohybrid_ops,
+  colbert multivector_maxsim_ip_turbohybrid_ops,
   body_tsv bm25_tsvector_turbohybrid_ops
 );
 ```
@@ -124,7 +130,10 @@ LIMIT 10;
 
 Fusion is document-level: dense MaxSim candidates are keyed by document/heap
 tuple, BM25 candidates are keyed by heap tuple, and RRF combines document ranks.
-Score-level fusion modes for multivector are not the supported path today.
+Weighted score-level fusion is also document-keyed and combines normalized
+MaxSim (`maxsim / query_vector_count`) with the existing normalized BM25 score.
+`fast_weighted` and `calibrated` are not supported for multivector hybrid scans
+yet.
 
 ## Tuning Knobs
 
@@ -134,8 +143,22 @@ Approximate candidate collection:
 SET turbohybrid.multivector_subvector_k = 100;
 SET turbohybrid.multivector_unique_docs_per_token = 100;
 SET turbohybrid.multivector_max_raw_hits_per_token = 400;
+SET turbohybrid.multivector_adaptive_widening = 'auto'; -- off | auto | on
 SET turbohybrid.multivector_doc_candidate_k = 100;
+SET turbohybrid.multivector_docmap = 'auto'; -- off | auto | require
 ```
+
+Adaptive widening starts each query token at
+`turbohybrid.multivector_subvector_k`. If that traversal finds fewer
+token-local unique documents than
+`turbohybrid.multivector_unique_docs_per_token`, it widens and retries that
+token up to the hard `turbohybrid.multivector_max_raw_hits_per_token` cap.
+
+`turbohybrid.multivector_docmap` controls the persistent node-to-document
+sidecar used by multivector indexes. `auto` prefers the sidecar and falls back
+to the heap-TID hash path for old indexes that do not have it. `off` forces the
+heap-TID hash path. `require` fails with REINDEX guidance if a sidecar is
+missing or malformed.
 
 Exact heap rerank:
 
@@ -197,10 +220,15 @@ Useful fields include:
 - `multivector_query_vectors`
 - `multivector_subvector_searches`
 - `multivector_raw_subvector_hits`
+- `multivector_adaptive_widening_triggered`
+- `multivector_adaptive_initial_raw_target`
+- `multivector_adaptive_final_raw_target`
 - `multivector_unique_docs`
 - `multivector_duplicate_doc_hits`
 - `multivector_maxsim_updates`
 - `multivector_doc_candidates`
+- `multivector_docmap_source`
+- `multivector_docmap_bytes`
 - `multivector_exact_rerank_enabled`
 - `multivector_exact_rerank_docs`
 - `multivector_exact_rerank_pairs`
@@ -208,12 +236,20 @@ Useful fields include:
 - `multivector_accumulator_kind`
 - `multivector_memory_bytes_estimate`
 
+For resident-cache sizing, `turbohybrid_estimate_memory(index)` reports
+`native.multivector_docmap_bytes` and includes those bytes in
+`native.estimated_total_bytes` when the index has a valid sidecar.
+
 ## Limitations
 
 - This is an alpha feature and the storage format is not a compatibility
   promise.
-- Only the cosine multivector operator class is exposed today, using dot-product
-  MaxSim semantics over the stored token vectors.
+- Indexes built before the multivector docmap sidecar continue to work in
+  `auto` mode through the heap-TID hash fallback. Use `REINDEX` to build the
+  sidecar, or set `turbohybrid.multivector_docmap = 'require'` to enforce it.
+- Prefer `multivector_maxsim_ip_turbohybrid_ops` for new indexes. The legacy
+  `multivector_cosine_turbohybrid_ops` name is compatibility-only and assumes
+  normalized token vectors while still using dot-product MaxSim internally.
 - `turbohybrid_query` cannot contain both `vector_query` and
   `multivector_query`.
 - Incremental insert/update into a multivector TurboHybrid index expands the new

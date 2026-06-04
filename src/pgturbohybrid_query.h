@@ -63,11 +63,47 @@ typedef struct PgturbohybridQueryHeader
 #define PG_GETARG_PGTURBOHYBRID_QUERY_P(x) DatumGetPgturbohybridQuery(PG_GETARG_DATUM(x))
 #define PG_RETURN_PGTURBOHYBRID_QUERY_P(x) PG_RETURN_POINTER(x)
 
+static inline PgturbohybridDenseQueryKind
+PgturbohybridQueryDenseKind(const PgturbohybridQueryHeader *query)
+{
+	return (PgturbohybridDenseQueryKind) query->denseKind;
+}
+
+static inline bool
+PgturbohybridQueryHasVector(const PgturbohybridQueryHeader *query)
+{
+	return (query->flags & PGTURBOHYBRID_QUERY_FLAG_HAS_DENSE) != 0 &&
+		(query->flags & PGTURBOHYBRID_QUERY_FLAG_HAS_VECTOR) != 0 &&
+		PgturbohybridQueryDenseKind(query) == PGTURBOHYBRID_DENSE_QUERY_VECTOR;
+}
+
+static inline bool
+PgturbohybridQueryHasMultiVector(const PgturbohybridQueryHeader *query)
+{
+	return (query->flags & PGTURBOHYBRID_QUERY_FLAG_HAS_DENSE) != 0 &&
+		(query->flags & PGTURBOHYBRID_QUERY_FLAG_HAS_MULTIVECTOR) != 0 &&
+		PgturbohybridQueryDenseKind(query) == PGTURBOHYBRID_DENSE_QUERY_MULTIVECTOR;
+}
+
+static inline bool
+PgturbohybridQueryHasDense(const PgturbohybridQueryHeader *query)
+{
+	return PgturbohybridQueryHasVector(query) ||
+		PgturbohybridQueryHasMultiVector(query);
+}
+
+static inline bool
+PgturbohybridQueryHasText(const PgturbohybridQueryHeader *query)
+{
+	return (query->flags & PGTURBOHYBRID_QUERY_FLAG_HAS_TSQUERY) != 0;
+}
+
 Vector	   *PgturbohybridQueryGetVector(PgturbohybridQueryHeader *query);
 PgturbohybridMultiVector *PgturbohybridQueryGetMultiVector(PgturbohybridQueryHeader *query);
 TSQuery		PgturbohybridQueryGetTsQuery(PgturbohybridQueryHeader *query);
 void		PgturbohybridQueryValidate(PgturbohybridQueryHeader *query);
 void		PgturbohybridQueryValidateFast(PgturbohybridQueryHeader *query);
 const char *PgturbohybridQueryFusionName(uint16 fusion);
+bool		PgturbohybridQueryTextIndexOrderByContext(FunctionCallInfo fcinfo);
 
 #endif

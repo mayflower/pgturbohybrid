@@ -9,14 +9,15 @@
 --
 -- Optional psql variables:
 --   DOCS       document count D                       (default 256)
---   DIMS       vector dimensions d                    (default 16)
+--   DIMS       vector dimensions d                    (default 32)
 --   FINAL_K    final result cutoff                    (default 10)
 --   ITERS      timed iterations per cell              (default 3)
 --
--- The four grids make O-complexity visible:
+-- The slope grids make O-complexity visible:
 --   * D constant, doc token vectors L = 8, 32, 128
 --   * L constant, query token vectors Q = 4, 16, 64
---   * exact rerank R = off, 50, 200
+--   * d constant unless the dimensions grid varies d = 32, 96, 128
+--   * exact rerank R = off, 25, 100
 --   * subvector_k Ks = 16, 64, 256
 --
 -- Expected slopes:
@@ -34,7 +35,7 @@
 \endif
 \if :{?DIMS}
 \else
-  \set DIMS 16
+  \set DIMS 32
 \endif
 \if :{?FINAL_K}
 \else
@@ -68,6 +69,7 @@ CREATE TEMP TABLE mli_report (
     experiment text NOT NULL,
     variant text NOT NULL,
     doc_count int NOT NULL,
+    dimensions int NOT NULL,
     doc_vectors int NOT NULL,
     query_vectors int NOT NULL,
     subvector_k int NOT NULL,
@@ -84,6 +86,7 @@ CREATE TEMP TABLE mli_report (
     doc_candidates int,
     exact_rerank_pairs bigint,
     accumulator_memory_bytes bigint,
+    fusion_strategy text,
     notes text
 );
 
@@ -129,6 +132,7 @@ CREATE OR REPLACE FUNCTION pg_temp.mli_run_case(
     p_query_vectors int,
     p_subvector_k int,
     p_exact_rerank_k int,
+    p_dims int DEFAULT NULL,
     p_notes text DEFAULT NULL
 )
 RETURNS void
@@ -153,7 +157,7 @@ DECLARE
     unique_docs_per_token int;
     raw_hits_per_token int;
 BEGIN
-    SELECT m.dims, m.final_k, m.iters
+    SELECT COALESCE(p_dims, m.dims), m.final_k, m.iters
     INTO dims, final_k, iters
     FROM mli_params m;
 
@@ -224,14 +228,16 @@ BEGIN
     stats := turbohybrid_last_scan_stats();
 
     INSERT INTO mli_report(
-        experiment, variant, doc_count, doc_vectors, query_vectors, subvector_k,
+        experiment, variant, doc_count, dimensions, doc_vectors, query_vectors, subvector_k,
         exact_rerank, exact_rerank_k, build_ms, index_bytes, node_count,
         p50_ms, p95_ms, recall_at_k, raw_subvector_hits, unique_docs,
-        doc_candidates, exact_rerank_pairs, accumulator_memory_bytes, notes)
+        doc_candidates, exact_rerank_pairs, accumulator_memory_bytes,
+        fusion_strategy, notes)
     VALUES (
         p_experiment,
         p_variant,
         p_docs,
+        dims,
         p_doc_vectors,
         p_query_vectors,
         p_subvector_k,
@@ -248,6 +254,7 @@ BEGIN
         NULLIF(stats->>'multivector_doc_candidates', '')::int,
         NULLIF(stats->>'multivector_exact_rerank_pairs', '')::bigint,
         NULLIF(stats->>'multivector_memory_bytes_estimate', '')::bigint,
+        COALESCE(stats->>'fusion_strategy', 'dense_only'),
         p_notes);
 END;
 $$;
@@ -259,6 +266,7 @@ DECLARE
     final_k int;
     l int;
     q int;
+    d int;
     r int;
     ks int;
 BEGIN
@@ -268,7 +276,8 @@ BEGIN
         PERFORM pg_temp.mli_run_case(
             'vary_doc_vectors_l',
             'L=' || l,
-            docs, l, 4, 64, 50,
+            docs, l, 4, 64, 25,
+            NULL,
             'D constant; expected build nodes and exact pairs scale with L');
     END LOOP;
 
@@ -276,15 +285,26 @@ BEGIN
         PERFORM pg_temp.mli_run_case(
             'vary_query_vectors_q',
             'Q=' || q,
-            docs, 32, q, 64, 50,
+            docs, 32, q, 64, 25,
+            NULL,
             'L constant; expected raw hits/searches and exact pairs scale with Q');
     END LOOP;
 
-    FOREACH r IN ARRAY ARRAY[0, 50, 200] LOOP
+    FOREACH d IN ARRAY ARRAY[32, 96, 128] LOOP
+        PERFORM pg_temp.mli_run_case(
+            'vary_dimensions_d',
+            'd=' || d,
+            docs, 32, 16, 64, 25,
+            d,
+            'D/L/Q fixed; exact MaxSim work should scale with vector dimension d');
+    END LOOP;
+
+    FOREACH r IN ARRAY ARRAY[0, 25, 100] LOOP
         PERFORM pg_temp.mli_run_case(
             'vary_exact_rerank_r',
             CASE WHEN r = 0 THEN 'R=off' ELSE 'R=' || r END,
             docs, 32, 16, 64, r,
+            NULL,
             'Approx candidate collection fixed; exact pairs should track rerank docs * Q * L');
     END LOOP;
 
@@ -292,7 +312,8 @@ BEGIN
         PERFORM pg_temp.mli_run_case(
             'vary_subvector_k_ks',
             'Ks=' || ks,
-            docs, 32, 16, ks, 50,
+            docs, 32, 16, ks, 25,
+            NULL,
             'Expected raw hits and unique docs grow with per-token subvector budget');
     END LOOP;
 END $$;
@@ -301,6 +322,7 @@ END $$;
 SELECT experiment,
        variant,
        doc_count AS docs,
+       dimensions AS d,
        doc_vectors AS l,
        query_vectors AS q,
        subvector_k AS ks,
@@ -316,16 +338,19 @@ SELECT experiment,
        unique_docs,
        doc_candidates,
        exact_rerank_pairs AS exact_pairs,
-       accumulator_memory_bytes AS accum_bytes
+       accumulator_memory_bytes AS accum_bytes,
+       fusion_strategy
 FROM mli_report
 ORDER BY
     CASE experiment
         WHEN 'vary_doc_vectors_l' THEN 1
         WHEN 'vary_query_vectors_q' THEN 2
-        WHEN 'vary_exact_rerank_r' THEN 3
-        WHEN 'vary_subvector_k_ks' THEN 4
+        WHEN 'vary_dimensions_d' THEN 3
+        WHEN 'vary_exact_rerank_r' THEN 4
+        WHEN 'vary_subvector_k_ks' THEN 5
         ELSE 99
     END,
+    dimensions,
     doc_vectors,
     query_vectors,
     exact_rerank_k,
@@ -337,6 +362,8 @@ SELECT experiment,
        node_count AS graph_nodes,
        doc_count * doc_vectors AS expected_subnodes,
        (node_count = doc_count * doc_vectors) AS graph_nodes_match,
+       dimensions AS d,
+       fusion_strategy,
        exact_rerank_pairs AS observed_exact_pairs,
        CASE
            WHEN exact_rerank = 'off' THEN 0
@@ -348,10 +375,12 @@ ORDER BY
     CASE experiment
         WHEN 'vary_doc_vectors_l' THEN 1
         WHEN 'vary_query_vectors_q' THEN 2
-        WHEN 'vary_exact_rerank_r' THEN 3
-        WHEN 'vary_subvector_k_ks' THEN 4
+        WHEN 'vary_dimensions_d' THEN 3
+        WHEN 'vary_exact_rerank_r' THEN 4
+        WHEN 'vary_subvector_k_ks' THEN 5
         ELSE 99
     END,
+    dimensions,
     doc_vectors,
     query_vectors,
     exact_rerank_k,

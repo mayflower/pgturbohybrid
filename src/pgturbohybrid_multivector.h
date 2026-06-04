@@ -72,19 +72,31 @@ Size		PgturbohybridMultiVectorFloatCount(int32 count, int32 dim);
 Size		PgturbohybridMultiVectorSize(int32 count, int32 dim);
 const float *PgturbohybridMultiVectorValues(const PgturbohybridMultiVector *mv,
 											int32 ordinal);
+Size		PgturbohybridMultiVectorSubvectorSize(const PgturbohybridMultiVector *mv);
+void		PgturbohybridMultiVectorCopySubvectorToVector(const PgturbohybridMultiVector *mv,
+														   int32 ordinal,
+														   Vector *dst);
 double		TqDotProductF32Scalar(const float *a, const float *b, int32 dim);
 double		TqMultiVectorMaxSimScalar(const PgturbohybridMultiVector *query,
 									   const PgturbohybridMultiVector *doc);
+double		TqMultiVectorMaxSimBlockedScalar(const PgturbohybridMultiVector *query,
+											  const PgturbohybridMultiVector *doc);
 double		TqMultiVectorMaxSim(const PgturbohybridMultiVector *query,
 								 const PgturbohybridMultiVector *doc);
 const char *TqMultiVectorMaxSimKernelName(void);
 
 FUNCTION_PREFIX Datum pgturbohybrid_multivector_in(PG_FUNCTION_ARGS);
 FUNCTION_PREFIX Datum pgturbohybrid_multivector_out(PG_FUNCTION_ARGS);
+FUNCTION_PREFIX Datum pgturbohybrid_multivector_recv(PG_FUNCTION_ARGS);
+FUNCTION_PREFIX Datum pgturbohybrid_multivector_send(PG_FUNCTION_ARGS);
 FUNCTION_PREFIX Datum pgturbohybrid_multivector_constructor(PG_FUNCTION_ARGS);
 FUNCTION_PREFIX Datum pgturbohybrid_multivector_dims(PG_FUNCTION_ARGS);
 FUNCTION_PREFIX Datum pgturbohybrid_multivector_count(PG_FUNCTION_ARGS);
+FUNCTION_PREFIX Datum pgturbohybrid_multivector_subvector(PG_FUNCTION_ARGS);
+FUNCTION_PREFIX Datum pgturbohybrid_multivector_to_vector_array(PG_FUNCTION_ARGS);
 FUNCTION_PREFIX Datum pgturbohybrid_multivector_maxsim(PG_FUNCTION_ARGS);
+FUNCTION_PREFIX Datum pgturbohybrid_multivector_maxsim_scalar(PG_FUNCTION_ARGS);
+FUNCTION_PREFIX Datum pgturbohybrid_multivector_maxsim_blocked_scalar(PG_FUNCTION_ARGS);
 FUNCTION_PREFIX Datum pgturbohybrid_multivector_maxsim_distance(PG_FUNCTION_ARGS);
 FUNCTION_PREFIX Datum pgturbohybrid_multivector_query_distance(PG_FUNCTION_ARGS);
 

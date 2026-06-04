@@ -12,7 +12,11 @@
 #define PGTURBOHYBRID_GRAPH_ADJ_TUPLE_TYPE			0x52
 #define PGTURBOHYBRID_GRAPH_EXACT_TUPLE_TYPE		0x53
 #define PGTURBOHYBRID_GRAPH_CORRECTION_TUPLE_TYPE	0x54
+#define PGTURBOHYBRID_GRAPH_MULTIVECTOR_DOCMAP_NODE_TUPLE_TYPE 0x55
+#define PGTURBOHYBRID_GRAPH_MULTIVECTOR_DOCMAP_DOC_TUPLE_TYPE 0x56
 #define PGTURBOHYBRID_GRAPH_EXACT_SLAB_MAGIC		0x54514553U
+#define PGTURBOHYBRID_GRAPH_MULTIVECTOR_DOCMAP_MAGIC 0x54514d56U
+#define PGTURBOHYBRID_GRAPH_MULTIVECTOR_DOCMAP_VERSION 1
 #define PGTURBOHYBRID_GRAPH_NODE_DEAD				0x0001
 #define PGTURBOHYBRID_GRAPH_TQ_PLUS				0x0001	/* metapage: ecShift/ecScale correction tuples present */
 #define PGTURBOHYBRID_GRAPH_TQ_WEIGHTED			0x0002	/* metapage: code tuples carry per-vector ec_correction */
@@ -125,6 +129,30 @@ typedef struct PgturbohybridGraphCorrectionTupleData
 } PgturbohybridGraphCorrectionTupleData;
 
 typedef PgturbohybridGraphCorrectionTupleData *PgturbohybridGraphCorrectionTuple;
+
+typedef struct PgturbohybridGraphMultiVectorDocMapNodeTupleData
+{
+	uint8		type;
+	uint8		version;
+	uint16		count;
+	uint32		magic;
+	uint32		firstNodeId;
+	TqMultiVectorNodeMapEntry entries[FLEXIBLE_ARRAY_MEMBER];
+} PgturbohybridGraphMultiVectorDocMapNodeTupleData;
+
+typedef PgturbohybridGraphMultiVectorDocMapNodeTupleData *PgturbohybridGraphMultiVectorDocMapNodeTuple;
+
+typedef struct PgturbohybridGraphMultiVectorDocMapDocTupleData
+{
+	uint8		type;
+	uint8		version;
+	uint16		count;
+	uint32		magic;
+	uint32		firstDocId;
+	TqMultiVectorDocMapEntry entries[FLEXIBLE_ARRAY_MEMBER];
+} PgturbohybridGraphMultiVectorDocMapDocTupleData;
+
+typedef PgturbohybridGraphMultiVectorDocMapDocTupleData *PgturbohybridGraphMultiVectorDocMapDocTuple;
 
 typedef struct PgturbohybridGraphBuildNode
 {
@@ -265,6 +293,12 @@ typedef struct PgturbohybridQuantMetaUpdate
 	uint16		tqEntrySidecarCount;
 	uint16		tqEntrySidecarBytes;
 	uint16		tqResidualRerankBytes;
+	BlockNumber tqMultivectorDocMapStartBlkno;
+	uint32		tqMultivectorDocMapPageCount;
+	uint32		tqMultivectorDocCount;
+	uint32		tqMultivectorDocMapBytes;
+	uint16		tqMultivectorDocMapVersion;
+	uint16		tqMultivectorDocMapFlags;
 	uint32		tqEntrySidecarNodeIds[PGTURBOHYBRID_GRAPH_MAX_ENTRY_SIDECAR_REPRESENTATIVES];
 	uint16		tqRoutingEntryCount;
 	uint16		tqRoutingEntryBytes;
@@ -342,7 +376,14 @@ typedef struct TqDenseCandidateStats
 	uint32		multivectorDocVectorsLimit;
 	uint64		multivectorSubvectorSearches;
 	uint64		multivectorRawSubvectorHits;
+	bool		multivectorAdaptiveWideningTriggered;
+	uint32		multivectorAdaptiveInitialRawTarget;
+	uint32		multivectorAdaptiveFinalRawTarget;
+	int			multivectorDocMapSource;
+	uint64		multivectorDocMapBytes;
+	/* Token-local unique document hits summed across query tokens. */
 	uint64		multivectorUniqueDocs;
+	/* Raw hits whose document was already seen for the same query token. */
 	uint64		multivectorDuplicateDocHits;
 	uint64		multivectorMaxsimUpdates;
 	uint32		multivectorDocCandidates;
@@ -416,7 +457,12 @@ typedef struct PgturbohybridGraphScanStorage
 	BlockNumber *adjBlknos;
 	OffsetNumber *adjOffnos;
 	PgturbohybridGraphPayloadRef *payloadRefs;
+	TqMultiVectorNodeMapEntry *multivectorNodeMap;
+	TqMultiVectorDocMapEntry *multivectorDocMap;
 	uint32		payloadRefCount;
+	uint32		multivectorDocCount;
+	uint32		multivectorDocMapBytes;
+	bool		multivectorDocMapLoaded;
 	MemoryContext ctx;
 	int			codeTuplesPerPage;
 	int			codePageCount;
@@ -445,6 +491,11 @@ typedef struct PgturbohybridGraphNativeCache
 	BlockNumber tqAdjStartBlkno;
 	BlockNumber tqExactStartBlkno;
 	BlockNumber tqCorrectionStartBlkno;
+	BlockNumber tqMultivectorDocMapStartBlkno;
+	uint32		tqMultivectorDocMapPageCount;
+	uint32		tqMultivectorDocCount;
+	uint32		tqMultivectorDocMapBytes;
+	uint16		tqMultivectorDocMapVersion;
 	PgturbohybridGraphSegmentMetaData tqSegments[PGTURBOHYBRID_GRAPH_MAX_NATIVE_SEGMENTS];
 	PgturbohybridGraphScanStorage storage;
 	MemoryContext ctx;
@@ -488,6 +539,7 @@ typedef struct PgturbohybridGraphCacheInitInfo
 	int64		codeBytes;
 	int64		adjBytes;
 	int64		exactBytes;
+	int64		docMapBytes;
 	bool		warning;
 	const char *warningReason;
 	int64		codeBufferLockWaitUs;
@@ -514,6 +566,7 @@ typedef struct PgturbohybridGraphMemoryEstimate
 	uint64		visitedGenerationBytes;
 	uint64		payloadBytes;
 	uint64		residualBytes;
+	uint64		multivectorDocMapBytes;
 	uint64		pageMapBytes;
 	uint64		sharedBackendViewBytes;
 	uint64		estimatedTotalBytes;
@@ -717,6 +770,26 @@ PgturbohybridGraphTuplesPerPage(Size tupleSize)
 	return Max(1, (int) (usable / (tupleSize + sizeof(ItemIdData))));
 }
 
+static inline Size
+PgturbohybridGraphMultiVectorDocMapNodeTupleSize(uint16 count)
+{
+	return MAXALIGN(offsetof(PgturbohybridGraphMultiVectorDocMapNodeTupleData,
+							 entries) +
+					PgturbohybridCheckedArrayBytes(sizeof(TqMultiVectorNodeMapEntry),
+												   count,
+												   "pgturbohybrid multivector docmap node tuple"));
+}
+
+static inline Size
+PgturbohybridGraphMultiVectorDocMapDocTupleSize(uint16 count)
+{
+	return MAXALIGN(offsetof(PgturbohybridGraphMultiVectorDocMapDocTupleData,
+							 entries) +
+					PgturbohybridCheckedArrayBytes(sizeof(TqMultiVectorDocMapEntry),
+												   count,
+												   "pgturbohybrid multivector docmap doc tuple"));
+}
+
 static inline int
 PgturbohybridGraphPageCount(uint32 nodeCount, int tuplesPerPage)
 {
@@ -756,12 +829,17 @@ void		PgturbohybridGraphExactRescore(Relation index, PgturbohybridGraphScanOpaqu
 								 PgturbohybridGraphScanNode *nodes,
 								 PgturbohybridGraphResult *results, int count);
 uint32		PgturbohybridGraphInsertValueInPlace(Relation index, IndexInfo *indexInfo,
-									  ItemPointer heap_tid, Datum value,
-									  Datum *values, bool *isnull);
+										  ItemPointer heap_tid, Datum value,
+										  Datum *values, bool *isnull);
+uint32		PgturbohybridGraphInsertMultiVectorBatchInPlace(Relation index,
+												 IndexInfo *indexInfo,
+												 ItemPointer heap_tid, Datum value,
+												 Datum *values, bool *isnull,
+												 uint32 *insertedNodes);
 uint32		PgturbohybridGraphInsertMultiVectorInPlace(Relation index,
-											 IndexInfo *indexInfo,
-											 ItemPointer heap_tid, Datum value,
-											 Datum *values, bool *isnull,
+												 IndexInfo *indexInfo,
+												 ItemPointer heap_tid, Datum value,
+												 Datum *values, bool *isnull,
 											 uint32 *insertedNodes);
 int			PgturbohybridGraphPickLevel(uint32 nodeId, int m);
 int			PgturbohybridGraphTraverse(Relation index, PgturbohybridGraphScanOpaque so,
@@ -773,13 +851,21 @@ int			PgturbohybridGraphTraverse(Relation index, PgturbohybridGraphScanOpaque so
 void		PgturbohybridQuantUpdateMetaPage(Relation index, PgturbohybridQuantBuildState *state,
 								  BlockNumber codeStart, BlockNumber adjStart,
 								  BlockNumber exactStart,
-								  BlockNumber correctionStart);
+								  BlockNumber correctionStart,
+								  BlockNumber docMapStart,
+								  uint32 docMapPageCount,
+								  uint32 docMapBytes);
 void		PgturbohybridQuantUpdateMetaPageFromUpdate(Relation index,
 									 const PgturbohybridQuantMetaUpdate *update,
 									 BlockNumber codeStart,
 									 BlockNumber adjStart,
 									 BlockNumber exactStart,
 									 BlockNumber correctionStart);
+void		PgturbohybridGraphUpdateMultiVectorDocMapMeta(Relation index,
+									 BlockNumber startBlkno,
+									 uint32 pageCount,
+									 uint32 docCount,
+									 uint32 docMapBytes);
 bool		PgturbohybridGraphLoadCodePage(Relation index, PgturbohybridGraphScanOpaque so,
 								PgturbohybridGraphMetaPageData *meta,
 								PgturbohybridGraphScanStorage *storage,
@@ -815,6 +901,10 @@ void		PgturbohybridGraphInvalidateCaches(Relation index);
 void		PgturbohybridGraphInitScanStorage(Relation index, PgturbohybridGraphMetaPageData *meta,
 							   PgturbohybridGraphScanStorage *storage,
 							   PgturbohybridGraphCacheInitInfo *info);
+bool		PgturbohybridGraphLoadMultiVectorDocMap(Relation index,
+									 PgturbohybridGraphMetaPageData *meta,
+									 PgturbohybridGraphScanStorage *storage,
+									 bool require);
 PgturbohybridGraphNativeCache *PgturbohybridGraphInitInsertStorage(Relation index, PgturbohybridGraphMetaPageData *meta,
 										  PgturbohybridGraphScanStorage *storage);
 bool		PgturbohybridGraphEstimateMemory(Relation index,

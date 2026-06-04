@@ -2841,6 +2841,20 @@ pgturbohybrid_last_scan_stats(PG_FUNCTION_ARGS)
 								scanStats.multivectorSubvectorSearches);
 	PgturbohybridJsonbAddUint64(&state, "multivector_raw_subvector_hits",
 								scanStats.multivectorRawSubvectorHits);
+	PgturbohybridJsonbAddBool(&state, "multivector_adaptive_widening_triggered",
+							  scanStats.multivectorAdaptiveWideningTriggered);
+	PgturbohybridJsonbAddInt64(&state, "multivector_adaptive_initial_raw_target",
+							   scanStats.multivectorAdaptiveInitialRawTarget);
+	PgturbohybridJsonbAddInt64(&state, "multivector_adaptive_final_raw_target",
+							   scanStats.multivectorAdaptiveFinalRawTarget);
+	if (scanStats.multivectorDocMapSource[0] != '\0')
+		PgturbohybridJsonbAddString(&state, "multivector_docmap_source",
+									scanStats.multivectorDocMapSource);
+	else
+		PgturbohybridJsonbAddString(&state, "multivector_docmap_source",
+									"none");
+	PgturbohybridJsonbAddUint64(&state, "multivector_docmap_bytes",
+								scanStats.multivectorDocMapBytes);
 	PgturbohybridJsonbAddUint64(&state, "multivector_unique_docs",
 								scanStats.multivectorUniqueDocs);
 	PgturbohybridJsonbAddUint64(&state, "multivector_duplicate_doc_hits",

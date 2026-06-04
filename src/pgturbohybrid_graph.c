@@ -704,6 +704,8 @@ pgturbohybrid_estimate_memory(PG_FUNCTION_ARGS)
 											  nativeEstimate.payloadBytes);
 		PgturbohybridIndexStatsJsonbAddUInt64(&jsonState, "residual_bytes",
 											  nativeEstimate.residualBytes);
+		PgturbohybridIndexStatsJsonbAddUInt64(&jsonState, "multivector_docmap_bytes",
+											  nativeEstimate.multivectorDocMapBytes);
 		PgturbohybridIndexStatsJsonbAddUInt64(&jsonState, "page_map_bytes",
 											  nativeEstimate.pageMapBytes);
 		PgturbohybridIndexStatsJsonbAddUInt64(&jsonState, "shared_backend_view_bytes",
