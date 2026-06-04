@@ -17,6 +17,7 @@
 #define PGTURBOHYBRID_MAX_HOT_POSTINGS_CACHE_MB 1024
 #define PGTURBOHYBRID_MAX_MULTIVECTOR_DOC_VECTORS 4096
 #define PGTURBOHYBRID_MAX_MULTIVECTOR_QUERY_VECTORS 4096
+#define PGTURBOHYBRID_MAX_MULTIVECTOR_ACCUMULATOR_MB 1024
 #define PGTURBOHYBRID_DENSE_KEY_INDEX 0
 #define PGTURBOHYBRID_LEXICAL_KEY_INDEX 1
 
@@ -194,6 +195,7 @@ extern int	pgturbohybrid_multivector_max_raw_hits_per_token;
 extern int	pgturbohybrid_multivector_doc_candidate_k;
 extern int	pgturbohybrid_multivector_exact_rerank;
 extern int	pgturbohybrid_multivector_exact_rerank_k;
+extern int	pgturbohybrid_multivector_max_accumulator_mb;
 
 typedef enum PgturbohybridMultiVectorExactRerankMode
 {

@@ -75,6 +75,7 @@ BEGIN
 		'turbohybrid.multivector_doc_candidate_k',
 		'turbohybrid.multivector_exact_rerank',
 		'turbohybrid.multivector_exact_rerank_k',
+		'turbohybrid.multivector_max_accumulator_mb',
 		'turbohybrid.multivector_max_dim',
 		'turbohybrid.multivector_max_doc_vectors',
 		'turbohybrid.multivector_max_query_vectors',
@@ -116,8 +117,9 @@ BEGIN
 		current_setting('turbohybrid.multivector_max_raw_hits_per_token') != '400' OR
 		current_setting('turbohybrid.multivector_doc_candidate_k') != '100' OR
 		current_setting('turbohybrid.multivector_exact_rerank') != 'topk' OR
-		current_setting('turbohybrid.multivector_exact_rerank_k') != '100' THEN
-		RAISE EXCEPTION 'unexpected multivector defaults: doc %, query %, subvector %, unique %, raw %, docs %, rerank %, rerank_k %',
+		current_setting('turbohybrid.multivector_exact_rerank_k') != '100' OR
+		current_setting('turbohybrid.multivector_max_accumulator_mb') != '64' THEN
+		RAISE EXCEPTION 'unexpected multivector defaults: doc %, query %, subvector %, unique %, raw %, docs %, rerank %, rerank_k %, accumulator_mb %',
 			current_setting('turbohybrid.multivector_max_doc_vectors'),
 			current_setting('turbohybrid.multivector_max_query_vectors'),
 			current_setting('turbohybrid.multivector_subvector_k'),
@@ -125,7 +127,8 @@ BEGIN
 			current_setting('turbohybrid.multivector_max_raw_hits_per_token'),
 			current_setting('turbohybrid.multivector_doc_candidate_k'),
 			current_setting('turbohybrid.multivector_exact_rerank'),
-			current_setting('turbohybrid.multivector_exact_rerank_k');
+			current_setting('turbohybrid.multivector_exact_rerank_k'),
+			current_setting('turbohybrid.multivector_max_accumulator_mb');
 	END IF;
 	IF current_setting('turbohybrid.payload_entry_seeding') != 'auto' OR
 		current_setting('turbohybrid.payload_entry_seed_count') != '8' THEN
@@ -327,6 +330,12 @@ BEGIN
 	BEGIN
 		EXECUTE 'SET turbohybrid.multivector_exact_rerank_k = 2147483647';
 		RAISE EXCEPTION 'expected multivector_exact_rerank_k cap error';
+	EXCEPTION WHEN invalid_parameter_value THEN
+	END;
+
+	BEGIN
+		EXECUTE 'SET turbohybrid.multivector_max_accumulator_mb = 2147483647';
+		RAISE EXCEPTION 'expected multivector_max_accumulator_mb cap error';
 	EXCEPTION WHEN invalid_parameter_value THEN
 	END;
 

@@ -83,6 +83,12 @@ BEGIN
 		RAISE EXCEPTION 'expected multivector_exact_rerank_k cap error';
 	EXCEPTION WHEN invalid_parameter_value THEN
 	END;
+
+	BEGIN
+		EXECUTE 'SET turbohybrid.multivector_max_accumulator_mb = 2147483647';
+		RAISE EXCEPTION 'expected multivector_max_accumulator_mb cap error';
+	EXCEPTION WHEN invalid_parameter_value THEN
+	END;
 END
 $$;
 DO $$

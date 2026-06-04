@@ -144,6 +144,7 @@ int			pgturbohybrid_multivector_doc_candidate_k = 100;
 int			pgturbohybrid_multivector_exact_rerank =
 	PGTURBOHYBRID_MULTIVECTOR_EXACT_RERANK_TOPK;
 int			pgturbohybrid_multivector_exact_rerank_k = 100;
+int			pgturbohybrid_multivector_max_accumulator_mb = 64;
 static bool pgturbohybrid_bm25_strategy_user_set = false;
 static bool pgturbohybrid_bm25_impact_or_mode_user_set = false;
 static bool pgturbohybrid_bm25_hot_postings_cache_mb_user_set = false;
@@ -5215,6 +5216,12 @@ PgturbohybridInit(void)
 							"Bounds heap tuple fetches and exact query-token by document-token MaxSim work.",
 							&pgturbohybrid_multivector_exact_rerank_k,
 							100, 1, 100000,
+							PGC_USERSET, 0, NULL, NULL, NULL);
+	DefineCustomIntVariable("turbohybrid.multivector_max_accumulator_mb",
+							"Maximum memory allowed for one multivector document accumulator",
+							"Prevents pathological multivector queries from allocating state proportional to too many touched documents times query vectors.",
+							&pgturbohybrid_multivector_max_accumulator_mb,
+							64, 1, PGTURBOHYBRID_MAX_MULTIVECTOR_ACCUMULATOR_MB,
 							PGC_USERSET, 0, NULL, NULL, NULL);
 	DefineCustomIntVariable("turbohybrid.max_union_candidates", "Maximum candidates retained while fusing dense and BM25 branches",
 							NULL, &pgturbohybrid_max_union_candidates,
