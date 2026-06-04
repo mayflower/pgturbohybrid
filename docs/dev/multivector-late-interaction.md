@@ -92,3 +92,25 @@ Expected complexity:
 
 Single-vector scans report multivector disabled, zero counters, and null
 multivector kernel / accumulator names.
+
+## Guardrails
+
+The multivector scan path is bounded before allocating per-query state:
+
+- `turbohybrid.multivector_max_doc_vectors` caps document-token expansion at
+  build time.
+- `turbohybrid.multivector_max_query_vectors` and
+  `turbohybrid.multivector_max_dim` reject pathological query payloads.
+- `turbohybrid.multivector_max_raw_hits_per_token`,
+  `turbohybrid.multivector_unique_docs_per_token`, and
+  `turbohybrid.multivector_doc_candidate_k` bound approximate candidate
+  collection and retained document candidates.
+- `turbohybrid.multivector_exact_rerank_k` bounds heap fetches and exact
+  `R * Q * L * d` work.
+- `turbohybrid.multivector_max_accumulator_mb` rejects queries whose
+  touched-document hash accumulator would exceed the configured memory budget.
+
+The accumulator is a touched-document hash table with per-document `Q` arrays,
+so it avoids global `D * Q` or `N * Q` clearing. Incremental multivector
+insert/update remains unsupported and errors explicitly; bulk build plus
+`REINDEX` is the supported path for now.

@@ -140,7 +140,8 @@ BEGIN
 		(stats->>'multivector_exact_rerank_pairs')::int < 1 OR
 		stats->>'multivector_exact_kernel' IS NULL OR
 		stats->>'multivector_accumulator_kind' <> 'hash' OR
-		(stats->>'multivector_memory_bytes_estimate')::bigint < 1 THEN
+		(stats->>'multivector_memory_bytes_estimate')::bigint < 1 OR
+		(stats->>'multivector_memory_bytes_estimate')::bigint > 1048576 THEN
 		RAISE EXCEPTION 'expected indexed multivector dense scan, got %', stats;
 	END IF;
 END
@@ -188,6 +189,9 @@ DROP INDEX mv_docs_colbert_idx;
 CREATE INDEX mv_docs_hybrid_idx ON mv_docs USING turbohybrid
   (colbert multivector_cosine_turbohybrid_ops,
    body_tsv bm25_tsvector_turbohybrid_ops);
+
+INSERT INTO mv_docs VALUES
+  (4, turbohybrid_multivector(ARRAY['[0.5,0.5]'::vector, '[0.6,0.4]'::vector]), to_tsvector('epsilon'));
 
 SET enable_seqscan = off;
 SELECT id FROM mv_docs
@@ -238,6 +242,47 @@ SELECT id FROM mv_docs
     fusion => 'fast_weighted'
   )
   LIMIT 1;
+
+SET turbohybrid.multivector_max_query_vectors = 1;
+SELECT id FROM mv_docs
+  ORDER BY colbert <~> turbohybrid_query(
+    multivector_query => turbohybrid_multivector(ARRAY['[1,0]'::vector, '[0,1]'::vector]),
+    dense_k => 6,
+    final_k => 1
+  )
+  LIMIT 1;
+RESET turbohybrid.multivector_max_query_vectors;
+
+SET turbohybrid.multivector_max_dim = 1;
+SELECT id FROM mv_docs
+  ORDER BY colbert <~> turbohybrid_query(
+    multivector_query => turbohybrid_multivector(ARRAY['[1,0]'::vector]),
+    dense_k => 6,
+    final_k => 1
+  )
+  LIMIT 1;
+RESET turbohybrid.multivector_max_dim;
+
+SET turbohybrid.multivector_max_raw_hits_per_token = 1;
+SELECT id FROM mv_docs
+  ORDER BY colbert <~> turbohybrid_query(
+    multivector_query => turbohybrid_multivector(ARRAY['[1,0]'::vector]),
+    dense_k => 6,
+    final_k => 1
+  )
+  LIMIT 1;
+
+DO $$
+DECLARE
+	stats jsonb;
+BEGIN
+	stats := turbohybrid_last_scan_stats();
+	IF (stats->>'multivector_raw_subvector_hits')::int > 1 THEN
+		RAISE EXCEPTION 'expected raw-hit cap to be respected, got %', stats;
+	END IF;
+END
+$$;
+RESET turbohybrid.multivector_max_raw_hits_per_token;
 RESET enable_seqscan;
 
 SET turbohybrid.multivector_max_doc_vectors = 1;

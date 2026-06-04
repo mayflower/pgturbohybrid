@@ -8603,6 +8603,75 @@ typedef struct PgturbohybridMultiVectorDocEntry
 	int			matchedTokens;
 } PgturbohybridMultiVectorDocEntry;
 
+static Size
+PgturbohybridMultiVectorAccumulatorArrayBytes(int queryCount)
+{
+	return add_size(PgturbohybridGraphArrayAllocSize(sizeof(double),
+													 (Size) queryCount),
+					PgturbohybridGraphArrayAllocSize(sizeof(bool),
+													 (Size) queryCount));
+}
+
+static uint64
+PgturbohybridMultiVectorDocCapacity(int rawTarget, int queryCount)
+{
+	uint64		perToken;
+
+	perToken = (uint64) Min(rawTarget,
+							pgturbohybrid_multivector_unique_docs_per_token);
+	if (queryCount > 0 &&
+		perToken > PG_UINT64_MAX / (uint64) queryCount)
+		ereport(ERROR,
+				(errcode(ERRCODE_PROGRAM_LIMIT_EXCEEDED),
+				 errmsg("multivector accumulator candidate count is too large")));
+
+	return Max(perToken * (uint64) queryCount, (uint64) 1);
+}
+
+static Size
+PgturbohybridMultiVectorAccumulatorBytesEstimate(uint64 docCapacity,
+												 int queryCount)
+{
+	Size		arrayBytes;
+	Size		arrayTotal;
+
+	if (docCapacity > (uint64) LONG_MAX)
+		ereport(ERROR,
+				(errcode(ERRCODE_PROGRAM_LIMIT_EXCEEDED),
+				 errmsg("multivector accumulator candidate count is too large")));
+
+	arrayBytes = PgturbohybridMultiVectorAccumulatorArrayBytes(queryCount);
+	if (docCapacity > (uint64) (SIZE_MAX / arrayBytes))
+		ereport(ERROR,
+				(errcode(ERRCODE_PROGRAM_LIMIT_EXCEEDED),
+				 errmsg("multivector accumulator memory estimate overflow")));
+	arrayTotal = (Size) docCapacity * arrayBytes;
+
+	return add_size(hash_estimate_size((long) docCapacity,
+									   sizeof(PgturbohybridMultiVectorDocEntry)),
+					arrayTotal);
+}
+
+static void
+PgturbohybridMultiVectorCheckAccumulatorMemory(uint64 docCapacity,
+											   int queryCount)
+{
+	Size		estimated;
+	uint64		limitBytes;
+
+	estimated = PgturbohybridMultiVectorAccumulatorBytesEstimate(docCapacity,
+																 queryCount);
+	limitBytes = (uint64) pgturbohybrid_multivector_max_accumulator_mb *
+		(uint64) 1024 * (uint64) 1024;
+	if ((uint64) estimated > limitBytes)
+		ereport(ERROR,
+				(errcode(ERRCODE_PROGRAM_LIMIT_EXCEEDED),
+				 errmsg("multivector accumulator memory estimate %zu bytes exceeds configured limit %d MB",
+						estimated,
+						pgturbohybrid_multivector_max_accumulator_mb),
+				 errhint("Reduce dense_k, turbohybrid.multivector_subvector_k, turbohybrid.multivector_unique_docs_per_token, or turbohybrid.multivector_max_query_vectors.")));
+}
+
 static int
 PgturbohybridMultiVectorDenseCandidateCompare(const void *a, const void *b)
 {
@@ -8657,10 +8726,14 @@ PgturbohybridMultiVectorAccumulateDoc(HTAB *docHash,
 		entry->bestSimilarity = -INFINITY;
 		entry->score = 0.0;
 		entry->matchedTokens = 0;
-		entry->maxsim = MemoryContextAlloc(resultCtx,
-										   sizeof(double) * queryCount);
-		entry->seen = MemoryContextAllocZero(resultCtx,
-											 sizeof(bool) * queryCount);
+		entry->maxsim =
+			MemoryContextAlloc(resultCtx,
+							   PgturbohybridGraphArrayAllocSize(sizeof(double),
+																(Size) queryCount));
+		entry->seen =
+			MemoryContextAllocZero(resultCtx,
+								   PgturbohybridGraphArrayAllocSize(sizeof(bool),
+																	(Size) queryCount));
 		for (int i = 0; i < queryCount; i++)
 			entry->maxsim[i] = -INFINITY;
 		if (uniqueDocs != NULL)
@@ -8722,6 +8795,8 @@ PgturbohybridGraphCollectMultiVectorDenseCandidates(IndexScanDesc scan,
 	int			docLimit;
 	int			docCount = 0;
 	int			exactRerankCount = 0;
+	uint64		multivectorDocCapacity = 0;
+	Size		multivectorMemoryEstimate = 0;
 	uint64		multivectorRawSubvectorHits = 0;
 	uint64		multivectorUniqueDocs = 0;
 	uint64		multivectorDuplicateDocHits = 0;
@@ -8784,10 +8859,11 @@ PgturbohybridGraphCollectMultiVectorDenseCandidates(IndexScanDesc scan,
 
 			rawTarget = Max(pgturbohybrid_multivector_subvector_k,
 							pgturbohybrid_multivector_unique_docs_per_token);
+			rawTarget = Max(rawTarget, targetK > 0 ? targetK : 1);
 			rawTarget = Min(rawTarget,
 							pgturbohybrid_multivector_max_raw_hits_per_token);
-			rawTarget = Max(rawTarget, targetK > 0 ? targetK : 1);
 			rawTarget = Min(rawTarget, (int) meta.tqNodeCount);
+			rawTarget = Max(rawTarget, 1);
 			searchEf = Min(Max(so->efSearch, rawTarget), (int) meta.tqNodeCount);
 			searchEf = PgturbohybridGraphScaleSearchEfForSegments(so, &meta,
 																  searchEf);
@@ -8796,12 +8872,19 @@ PgturbohybridGraphCollectMultiVectorDenseCandidates(IndexScanDesc scan,
 			so->graphEffectiveSearchEf = searchEf;
 			so->graphEffectiveRescoreBand = 0;
 
+			multivectorDocCapacity =
+				PgturbohybridMultiVectorDocCapacity(rawTarget, mv->count);
+			multivectorMemoryEstimate =
+				PgturbohybridMultiVectorAccumulatorBytesEstimate(multivectorDocCapacity,
+																 mv->count);
+			PgturbohybridMultiVectorCheckAccumulatorMemory(multivectorDocCapacity,
+														   mv->count);
 			memset(&hashCtl, 0, sizeof(hashCtl));
 			hashCtl.keysize = sizeof(PgturbohybridMultiVectorDocKey);
 			hashCtl.entrysize = sizeof(PgturbohybridMultiVectorDocEntry);
 			hashCtl.hcxt = resultCtx;
 			docHash = hash_create("pgturbohybrid multivector doc accumulator",
-								  Max(rawTarget * mv->count, 16),
+								  Max((long) multivectorDocCapacity, 16L),
 								  &hashCtl,
 								  HASH_ELEM | HASH_BLOBS | HASH_CONTEXT);
 
@@ -8986,11 +9069,7 @@ PgturbohybridGraphCollectMultiVectorDenseCandidates(IndexScanDesc scan,
 		strlcpy(stats->multivectorAccumulatorKind, "hash",
 				sizeof(stats->multivectorAccumulatorKind));
 		stats->multivectorMemoryBytesEstimate =
-			(uint64) hash_estimate_size(Max(rawTarget * mv->count, 16),
-										sizeof(PgturbohybridMultiVectorDocEntry)) +
-			multivectorUniqueDocs *
-			((uint64) sizeof(double) + (uint64) sizeof(bool)) *
-			(uint64) mv->count;
+			(uint64) multivectorMemoryEstimate;
 	}
 	so->tqGraphResults = NULL;
 	so->tqGraphResultCount = docCount;
