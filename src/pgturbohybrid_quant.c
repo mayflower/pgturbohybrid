@@ -33,6 +33,7 @@
 #include "utils/backend_status.h"
 #include "utils/datum.h"
 #include "utils/fmgrprotos.h"
+#include "utils/hsearch.h"
 #include "utils/lsyscache.h"
 #include "utils/memutils.h"
 #include "utils/rel.h"
@@ -47,6 +48,7 @@
 
 #include "pgturbohybrid_quant.h"
 #include "pgturbohybrid_am.h"
+#include "pgturbohybrid_multivector.h"
 #include "pgturbohybrid_quant_psquare.h"
 #include "pgturbohybrid_quant_score.h"
 #include "pgturbohybrid_vector_compat.h"
@@ -61,6 +63,7 @@ static bool PgturbohybridGraphEntryAlreadySelected(PgturbohybridGraphFrontierIte
 static void PgturbohybridGraphEncodeBuildNode(PgturbohybridQuantBuildState *state,
 								 PgturbohybridGraphBuildNode *node,
 								 Vector *vector);
+static bool PgturbohybridGraphIndexIsMultiVector(Relation index);
 static void PgturbohybridGraphStreamFitVector(PgturbohybridQuantBuildState *state,
 								Vector *vector);
 static void PgturbohybridGraphFinishStreamingFit(PgturbohybridQuantBuildState *state);
@@ -1083,6 +1086,67 @@ PgturbohybridGraphEnsureNodeCapacity(PgturbohybridQuantBuildState *state)
 
 		state->nodes = repalloc(state->nodes, newBytes);
 		memset((char *) state->nodes + oldBytes, 0, newBytes - oldBytes);
+		if (state->multivectorBuild && state->multivectorNodeMap != NULL)
+		{
+			oldBytes = PgturbohybridGraphArrayAllocSize(sizeof(TqMultiVectorNodeMapEntry),
+														oldCapacity);
+			newBytes = PgturbohybridGraphArrayAllocSize(sizeof(TqMultiVectorNodeMapEntry),
+														state->nodeCapacity);
+			state->multivectorNodeMap = repalloc(state->multivectorNodeMap,
+												 newBytes);
+			memset((char *) state->multivectorNodeMap + oldBytes, 0,
+				   newBytes - oldBytes);
+		}
+	}
+}
+
+static void
+PgturbohybridGraphEnsureMultiVectorNodeMapCapacity(PgturbohybridQuantBuildState *state)
+{
+	Size		mapBytes;
+
+	if (!state->multivectorBuild)
+		return;
+
+	mapBytes = PgturbohybridGraphArrayAllocSize(sizeof(TqMultiVectorNodeMapEntry),
+												state->nodeCapacity);
+	if (state->multivectorNodeMap == NULL)
+		state->multivectorNodeMap = MemoryContextAllocZero(state->ctx, mapBytes);
+}
+
+static void
+PgturbohybridGraphEnsureMultiVectorDocCapacity(PgturbohybridQuantBuildState *state)
+{
+	uint32		oldCapacity = state->multivectorDocCapacity;
+
+	if (!state->multivectorBuild ||
+		state->multivectorDocCount < state->multivectorDocCapacity)
+		return;
+
+	if (state->multivectorDocCapacity == 0)
+		state->multivectorDocCapacity = 128;
+	else
+	{
+		if (state->multivectorDocCapacity > PG_UINT32_MAX / 2)
+			ereport(ERROR,
+					(errcode(ERRCODE_PROGRAM_LIMIT_EXCEEDED),
+					 errmsg("pgturbohybrid multivector document map is too large")));
+		state->multivectorDocCapacity += state->multivectorDocCapacity;
+	}
+
+	{
+		Size		oldBytes = PgturbohybridGraphArrayAllocSize(sizeof(TqMultiVectorDocMapEntry),
+																oldCapacity);
+		Size		newBytes = PgturbohybridGraphArrayAllocSize(sizeof(TqMultiVectorDocMapEntry),
+																state->multivectorDocCapacity);
+
+		if (state->multivectorDocMap == NULL)
+			state->multivectorDocMap = MemoryContextAllocZero(state->ctx, newBytes);
+		else
+		{
+			state->multivectorDocMap = repalloc(state->multivectorDocMap, newBytes);
+			memset((char *) state->multivectorDocMap + oldBytes, 0, newBytes - oldBytes);
+		}
 	}
 }
 
@@ -1133,7 +1197,7 @@ PgturbohybridGraphAllocateBuildNeighbors(PgturbohybridQuantBuildState *state,
 	}
 }
 
-static void
+static uint32
 PgturbohybridGraphAppendBuildNode(PgturbohybridQuantBuildState *state, ItemPointer tid, Datum value,
 					   Datum *values, bool *isnull)
 {
@@ -1154,6 +1218,7 @@ PgturbohybridGraphAppendBuildNode(PgturbohybridQuantBuildState *state, ItemPoint
 				 errmsg("different vector dimensions are not supported in the same pgturbohybrid graph")));
 
 	PgturbohybridGraphEnsureNodeCapacity(state);
+	PgturbohybridGraphEnsureMultiVectorNodeMapCapacity(state);
 	vectorSize = PGTURBOHYBRID_VECTOR_SIZE(vector->dim);
 	vectorHash = PgturbohybridGraphBuildVectorHash(vector);
 	if (state->nodeCount > 0)
@@ -1209,6 +1274,90 @@ PgturbohybridGraphAppendBuildNode(PgturbohybridQuantBuildState *state, ItemPoint
 
 	if (state->buildEncodeOnAppend)
 		PgturbohybridGraphEncodeBuildNode(state, node, vector);
+
+	return nodeId;
+}
+
+static Vector *
+PgturbohybridGraphMultiVectorSubvector(const PgturbohybridMultiVector *mv,
+									   int32 ordinal,
+									   MemoryContext context)
+{
+	Vector	   *vector;
+	Size		vectorSize;
+	const float *values;
+
+	values = PgturbohybridMultiVectorValues(mv, ordinal);
+	vectorSize = PGTURBOHYBRID_VECTOR_SIZE(mv->dim);
+	vector = MemoryContextAlloc(context, vectorSize);
+	SET_VARSIZE(vector, vectorSize);
+	vector->dim = (int16) mv->dim;
+	vector->unused = 0;
+	memcpy(vector->x, values, sizeof(float) * (Size) mv->dim);
+
+	return vector;
+}
+
+static bool
+PgturbohybridGraphIndexIsMultiVector(Relation index)
+{
+	Oid			multivectorOid = PgturbohybridMultiVectorTypeOid();
+	TupleDesc	desc = RelationGetDescr(index);
+
+	return OidIsValid(multivectorOid) &&
+		TupleDescAttr(desc, PGTURBOHYBRID_DENSE_KEY_INDEX)->atttypid == multivectorOid;
+}
+
+static void
+PgturbohybridGraphStreamFitMultiVector(PgturbohybridQuantBuildState *state,
+									   const PgturbohybridMultiVector *mv)
+{
+	for (int32 i = 0; i < mv->count; i++)
+	{
+		Vector	   *vector = PgturbohybridGraphMultiVectorSubvector(mv, i,
+																	 state->buildTupleCtx);
+
+		if (state->scoreMode == PGTURBOHYBRID_SCORE_COSINE ||
+			state->scoreMode == PGTURBOHYBRID_SCORE_IP)
+			PgturbohybridGraphStreamFitVector(state, vector);
+		else
+			state->fitCount++;
+	}
+}
+
+static void
+PgturbohybridGraphAppendBuildMultiVector(PgturbohybridQuantBuildState *state,
+										 ItemPointer tid,
+										 const PgturbohybridMultiVector *mv,
+										 Datum *values, bool *isnull)
+{
+	TqDocId		docId;
+	TqMultiVectorDocMapEntry *docEntry;
+
+	PgturbohybridMultiVectorCheckDim((uint32) mv->dim,
+									 (uint32) pgturbohybrid_multivector_max_dim);
+	PgturbohybridMultiVectorCheckTokenCount((uint32) mv->count,
+											(uint32) pgturbohybrid_multivector_max_doc_vectors);
+	docId = PgturbohybridMultiVectorMakeDocId(state->multivectorDocCount);
+	PgturbohybridGraphEnsureMultiVectorDocCapacity(state);
+	docEntry = &state->multivectorDocMap[state->multivectorDocCount++];
+	docEntry->heapTid = *tid;
+	docEntry->firstNodeId = state->nodeCount;
+	docEntry->tokenCount = (uint16) mv->count;
+
+	for (int32 i = 0; i < mv->count; i++)
+	{
+		Vector	   *vector = PgturbohybridGraphMultiVectorSubvector(mv, i,
+																	 state->buildTupleCtx);
+		uint32		nodeId;
+
+		nodeId = PgturbohybridGraphAppendBuildNode(state, tid,
+												   PointerGetDatum(vector),
+												   values, isnull);
+		state->multivectorNodeMap[nodeId].docId = docId;
+		state->multivectorNodeMap[nodeId].tokenOrdinal =
+			PgturbohybridMultiVectorMakeSubvectorOrdinal((uint32) i);
+	}
 }
 
 static void
@@ -1235,6 +1384,31 @@ PgturbohybridGraphBuildCallback(Relation index, ItemPointer tid, Datum *values,
 													 ALLOCSET_DEFAULT_SIZES);
 	MemoryContextReset(state->buildTupleCtx);
 	MemoryContextSwitchTo(state->buildTupleCtx);
+	if (state->multivectorBuild)
+	{
+		PgturbohybridMultiVector *mv =
+			(PgturbohybridMultiVector *) PG_DETOAST_DATUM(values[0]);
+
+		PgturbohybridCheckMultiVector(mv);
+		PgturbohybridMultiVectorCheckDim((uint32) mv->dim,
+										 (uint32) pgturbohybrid_multivector_max_dim);
+		PgturbohybridMultiVectorCheckTokenCount((uint32) mv->count,
+												(uint32) pgturbohybrid_multivector_max_doc_vectors);
+		if (state->buildFitPass)
+		{
+			PgturbohybridGraphStreamFitMultiVector(state, mv);
+			pgstat_progress_update_param(PROGRESS_CREATEIDX_TUPLES_DONE, state->fitCount);
+		}
+		else
+		{
+			MemoryContextSwitchTo(state->ctx);
+			PgturbohybridGraphAppendBuildMultiVector(state, tid, mv, values, isnull);
+			pgstat_progress_update_param(PROGRESS_CREATEIDX_TUPLES_DONE, state->nodeCount);
+		}
+		MemoryContextSwitchTo(oldCtx);
+		return;
+	}
+
 	formed = PgturbohybridGraphFormIndexValue(&value, values, isnull,
 											   state->typeInfo, &state->support);
 	if (formed)
@@ -5180,6 +5354,7 @@ tqgraphbuild(Relation heap, Relation index, IndexInfo *indexInfo)
 	state.graphBackbone = PgturbohybridGraphGetBackboneOption(index);
 	state.residualRerank = PgturbohybridGraphGetResidualRerankOption(index);
 	state.residualRerankBytes = PgturbohybridGraphGetResidualRerankBytes(index);
+	state.multivectorBuild = PgturbohybridGraphIndexIsMultiVector(index);
 	state.buildExactDistances = PgturbohybridGraphUseExactBuildDistances(&state);
 	if (state.tqRenorm && state.tqBits >= PGTURBOHYBRID_DEFAULT_BITS)
 		ereport(NOTICE,
@@ -5207,6 +5382,8 @@ tqgraphbuild(Relation heap, Relation index, IndexInfo *indexInfo)
 
 	if (heap != NULL)
 		workerRequest = PgturbohybridNativeBuildWorkerRequest(heap, index);
+	if (state.multivectorBuild)
+		workerRequest = 0;
 
 	if (heap != NULL && workerRequest > 0 &&
 		PgturbohybridNativeParallelEligible(&state, needsCorrectionFit))
@@ -5577,6 +5754,7 @@ tqgraphbuildempty(Relation index)
 	state.graphBackbone = PgturbohybridGraphGetBackboneOption(index);
 	state.residualRerank = PgturbohybridGraphGetResidualRerankOption(index);
 	state.residualRerankBytes = PgturbohybridGraphGetResidualRerankBytes(index);
+	state.multivectorBuild = PgturbohybridGraphIndexIsMultiVector(index);
 	state.buildExactDistances = PgturbohybridGraphUseExactBuildDistances(&state);
 	if (state.tqRenorm && state.tqBits >= PGTURBOHYBRID_DEFAULT_BITS)
 		ereport(NOTICE,
@@ -8300,6 +8478,367 @@ PgturbohybridGraphHeapRescore(IndexScanDesc scan, PgturbohybridGraphScanOpaque s
 	}
 	PgturbohybridGraphAddElapsedUs(&so->graphHeapRescoreUs, start);
 	return 0;
+}
+
+typedef struct PgturbohybridMultiVectorDocKey
+{
+	BlockNumber block;
+	OffsetNumber offset;
+} PgturbohybridMultiVectorDocKey;
+
+typedef struct PgturbohybridMultiVectorDocEntry
+{
+	PgturbohybridMultiVectorDocKey key;
+	ItemPointerData heaptid;
+	uint32		bestNodeId;
+	double		bestSimilarity;
+	double		score;
+	double	   *maxsim;
+	bool	   *seen;
+	int			matchedTokens;
+} PgturbohybridMultiVectorDocEntry;
+
+static int
+PgturbohybridMultiVectorDenseCandidateCompare(const void *a, const void *b)
+{
+	const TqDenseCandidate *ca = (const TqDenseCandidate *) a;
+	const TqDenseCandidate *cb = (const TqDenseCandidate *) b;
+	BlockNumber ablock;
+	BlockNumber bblock;
+	OffsetNumber aoff;
+	OffsetNumber boff;
+
+	if (ca->distance < cb->distance)
+		return -1;
+	if (ca->distance > cb->distance)
+		return 1;
+	ablock = ItemPointerGetBlockNumber(&ca->heaptid);
+	bblock = ItemPointerGetBlockNumber(&cb->heaptid);
+	if (ablock < bblock)
+		return -1;
+	if (ablock > bblock)
+		return 1;
+	aoff = ItemPointerGetOffsetNumber(&ca->heaptid);
+	boff = ItemPointerGetOffsetNumber(&cb->heaptid);
+	if (aoff < boff)
+		return -1;
+	if (aoff > boff)
+		return 1;
+	return (ca->nodeId > cb->nodeId) - (ca->nodeId < cb->nodeId);
+}
+
+static void
+PgturbohybridMultiVectorAccumulateDoc(HTAB *docHash,
+									  MemoryContext resultCtx,
+									  const PgturbohybridGraphResult *hit,
+									  int queryOrdinal, int queryCount)
+{
+	PgturbohybridMultiVectorDocKey key;
+	PgturbohybridMultiVectorDocEntry *entry;
+	bool		found;
+	double		similarity = -hit->distance;
+
+	key.block = ItemPointerGetBlockNumber(&hit->heaptid);
+	key.offset = ItemPointerGetOffsetNumber(&hit->heaptid);
+	entry = (PgturbohybridMultiVectorDocEntry *) hash_search(docHash, &key,
+															 HASH_ENTER,
+															 &found);
+	if (!found)
+	{
+		entry->heaptid = hit->heaptid;
+		entry->bestNodeId = hit->nodeId;
+		entry->bestSimilarity = -INFINITY;
+		entry->score = 0.0;
+		entry->matchedTokens = 0;
+		entry->maxsim = MemoryContextAlloc(resultCtx,
+										   sizeof(double) * queryCount);
+		entry->seen = MemoryContextAllocZero(resultCtx,
+											 sizeof(bool) * queryCount);
+		for (int i = 0; i < queryCount; i++)
+			entry->maxsim[i] = -INFINITY;
+	}
+
+	if (!entry->seen[queryOrdinal])
+	{
+		entry->seen[queryOrdinal] = true;
+		entry->matchedTokens++;
+		entry->maxsim[queryOrdinal] = similarity;
+		entry->score += similarity;
+		if (similarity > entry->bestSimilarity)
+		{
+			entry->bestSimilarity = similarity;
+			entry->bestNodeId = hit->nodeId;
+		}
+	}
+	else if (similarity > entry->maxsim[queryOrdinal])
+	{
+		entry->score += similarity - entry->maxsim[queryOrdinal];
+		entry->maxsim[queryOrdinal] = similarity;
+		if (similarity > entry->bestSimilarity)
+		{
+			entry->bestSimilarity = similarity;
+			entry->bestNodeId = hit->nodeId;
+		}
+	}
+}
+
+int
+PgturbohybridGraphCollectMultiVectorDenseCandidates(IndexScanDesc scan,
+													PgturbohybridQueryHeader *query,
+													int targetK,
+													TqDenseCandidate **outCandidates,
+													MemoryContext resultCtx,
+													TqDenseCandidateStats *stats)
+{
+	PgturbohybridGraphScanOpaque so = (PgturbohybridGraphScanOpaque) scan->opaque;
+	PgturbohybridGraphMetaPageData meta;
+	PgturbohybridGraphScanStorage storage;
+	PgturbohybridGraphCacheInitInfo cacheInfo;
+	PgturbohybridMultiVector *mv;
+	HTAB	   *docHash;
+	HASHCTL		hashCtl;
+	HASH_SEQ_STATUS seq;
+	PgturbohybridMultiVectorDocEntry *entry;
+	TqDenseCandidate *candidates;
+	MemoryContext oldCtx;
+	MemoryContext tokenCtx;
+	instr_time	lockStart;
+	instr_time	phaseStart;
+	int			rawTarget;
+	int			searchEf;
+	int			docLimit;
+	int			docCount = 0;
+	bool		emptyIndex = false;
+
+	if (so == NULL)
+		ereport(ERROR,
+				(errcode(ERRCODE_DATA_EXCEPTION),
+				 errmsg("pgturbohybrid multivector candidate collection requires an active scan")));
+	mv = PgturbohybridQueryGetMultiVector(query);
+	if (mv == NULL)
+		ereport(ERROR,
+				(errcode(ERRCODE_DATA_EXCEPTION),
+				 errmsg("multivector_query is required for multivector dense scan")));
+	PgturbohybridMultiVectorCheckDim((uint32) mv->dim,
+									 (uint32) pgturbohybrid_multivector_max_dim);
+	PgturbohybridMultiVectorCheckTokenCount((uint32) mv->count,
+											(uint32) pgturbohybrid_multivector_max_query_vectors);
+
+	oldCtx = MemoryContextSwitchTo(resultCtx);
+	*outCandidates = NULL;
+	if (stats != NULL)
+		memset(stats, 0, sizeof(*stats));
+
+	INSTR_TIME_SET_CURRENT(lockStart);
+	LockPage(scan->indexRelation, PGTURBOHYBRID_GRAPH_SCAN_LOCK, ShareLock);
+	so->graphScanLockWaitUs += PgturbohybridGraphElapsedUs(lockStart);
+	PG_TRY();
+	{
+		if (!PgturbohybridGraphReadMeta(scan->indexRelation, &meta) ||
+			meta.tqNodeCount == 0 ||
+			!BlockNumberIsValid(meta.tqCodeStartBlkno) ||
+			!BlockNumberIsValid(meta.tqAdjStartBlkno))
+		{
+			emptyIndex = true;
+		}
+		else if (meta.dimensions != mv->dim)
+			ereport(ERROR,
+					(errcode(ERRCODE_DATA_EXCEPTION),
+					 errmsg("multivector query dimensions %d do not match index dimensions %d",
+							mv->dim, meta.dimensions)));
+		if (!emptyIndex)
+		{
+			so->graphM = meta.m;
+			so->graphEfConstruction = meta.efConstruction;
+			so->graphExactStorage =
+				((meta.tqFlags & PGTURBOHYBRID_GRAPH_EXACT_FREE) == 0 &&
+				 BlockNumberIsValid(meta.tqExactStartBlkno));
+			so->graphBuildExactDistances =
+				(meta.tqFlags & PGTURBOHYBRID_GRAPH_TQ_EXACT_BUILD) != 0;
+			so->graphBuildDistanceMode = so->graphBuildExactDistances ?
+				PGTURBOHYBRID_DENSE_BUILD_DISTANCE_EXACT :
+				PGTURBOHYBRID_DENSE_BUILD_DISTANCE_CODE;
+			so->graphBuildFastEdges =
+				(meta.tqFlags & PGTURBOHYBRID_GRAPH_TQ_FAST_BUILD_EDGES) != 0;
+			so->graphBuildNeighborSelectReason =
+				PGTURBOHYBRID_GRAPH_TQ_BUILD_NEIGHBOR_REASON(meta.tqFlags);
+
+			rawTarget = Max(pgturbohybrid_multivector_subvector_k,
+							pgturbohybrid_multivector_unique_docs_per_token);
+			rawTarget = Min(rawTarget,
+							pgturbohybrid_multivector_max_raw_hits_per_token);
+			rawTarget = Max(rawTarget, targetK > 0 ? targetK : 1);
+			rawTarget = Min(rawTarget, (int) meta.tqNodeCount);
+			searchEf = Min(Max(so->efSearch, rawTarget), (int) meta.tqNodeCount);
+			searchEf = PgturbohybridGraphScaleSearchEfForSegments(so, &meta,
+																  searchEf);
+			so->graphDenseRequestedK = targetK;
+			so->graphEffectiveResultTarget = rawTarget;
+			so->graphEffectiveSearchEf = searchEf;
+			so->graphEffectiveRescoreBand = 0;
+
+			memset(&hashCtl, 0, sizeof(hashCtl));
+			hashCtl.keysize = sizeof(PgturbohybridMultiVectorDocKey);
+			hashCtl.entrysize = sizeof(PgturbohybridMultiVectorDocEntry);
+			hashCtl.hcxt = resultCtx;
+			docHash = hash_create("pgturbohybrid multivector doc accumulator",
+								  Max(rawTarget * mv->count, 16),
+								  &hashCtl,
+								  HASH_ELEM | HASH_BLOBS | HASH_CONTEXT);
+
+			INSTR_TIME_SET_CURRENT(phaseStart);
+			PgturbohybridGraphInitScanStorage(scan->indexRelation, &meta,
+											  &storage, &cacheInfo);
+			so->graphNativeCacheMode = cacheInfo.mode;
+			so->graphNativeCachePolicy = cacheInfo.policy;
+			so->graphNativeCacheReason = cacheInfo.reason;
+			so->graphNativeCacheUsed = cacheInfo.used;
+			so->graphNativeCacheReused = cacheInfo.reused;
+			so->graphNativeCacheBuiltThisScan = cacheInfo.builtThisScan;
+			so->graphNativeCacheAttachUs = cacheInfo.attachUs;
+			so->graphNativeCacheBuildUs = cacheInfo.buildUs;
+			so->graphNativeCacheWaitUs = cacheInfo.waitUs;
+			so->graphNativeCacheRefcount = cacheInfo.refcount;
+			so->graphNativeCacheBytes = cacheInfo.totalBytes;
+			so->graphNativeCacheCodeBytes = cacheInfo.codeBytes;
+			so->graphNativeCacheAdjBytes = cacheInfo.adjBytes;
+			so->graphNativeCacheExactBytes = cacheInfo.exactBytes;
+			so->graphNativeCacheWarning = cacheInfo.warning;
+			so->graphNativeCacheWarningReason = cacheInfo.warningReason;
+			so->graphCodeBufferLockWaitUs += cacheInfo.codeBufferLockWaitUs;
+			so->graphAdjBufferLockWaitUs += cacheInfo.adjBufferLockWaitUs;
+			PgturbohybridGraphAddElapsedUs(&so->graphPrepareUs, phaseStart);
+
+			tokenCtx = AllocSetContextCreate(resultCtx,
+											 "pgturbohybrid multivector token scan",
+											 ALLOCSET_DEFAULT_SIZES);
+			for (int qi = 0; qi < mv->count; qi++)
+			{
+				Vector	   *token;
+				PgturbohybridGraphResult *hits;
+				int			hitCount;
+				int			uniqueDocs = 0;
+
+				CHECK_FOR_INTERRUPTS();
+				MemoryContextReset(tokenCtx);
+				MemoryContextSwitchTo(tokenCtx);
+				token = PgturbohybridGraphMultiVectorSubvector(mv, qi, tokenCtx);
+				PgturbohybridGraphPrepareTqQueryWithBits(scan->indexRelation,
+														 &so->support,
+														 PointerGetDatum(token),
+														 &so->tq,
+														 meta.tqBits != 0 ?
+														 meta.tqBits :
+														 PGTURBOHYBRID_DEFAULT_BITS);
+				hits = palloc(sizeof(PgturbohybridGraphResult) * rawTarget);
+				hitCount = PgturbohybridGraphRunTraversalPass(scan, so, &meta,
+															  &storage, hits,
+															  rawTarget,
+															  searchEf,
+															  PointerGetDatum(token),
+															  -1, 0, false, false,
+															  1.0,
+															  PGTURBOHYBRID_GRAPH_FILL_CANDIDATE_BAND_REASON_NONE);
+				MemoryContextSwitchTo(resultCtx);
+				for (int i = 0; i < hitCount; i++)
+				{
+					PgturbohybridMultiVectorDocKey key;
+					bool		alreadySeen;
+
+					key.block = ItemPointerGetBlockNumber(&hits[i].heaptid);
+					key.offset = ItemPointerGetOffsetNumber(&hits[i].heaptid);
+					alreadySeen =
+						hash_search(docHash, &key, HASH_FIND, NULL) != NULL;
+					PgturbohybridMultiVectorAccumulateDoc(docHash, resultCtx,
+														  &hits[i], qi, mv->count);
+					if (!alreadySeen)
+					{
+						uniqueDocs++;
+						if (uniqueDocs >=
+							pgturbohybrid_multivector_unique_docs_per_token)
+							break;
+					}
+				}
+			}
+			MemoryContextDelete(tokenCtx);
+		}
+	}
+	PG_CATCH();
+	{
+		UnlockPage(scan->indexRelation, PGTURBOHYBRID_GRAPH_SCAN_LOCK, ShareLock);
+		PG_RE_THROW();
+	}
+	PG_END_TRY();
+	UnlockPage(scan->indexRelation, PGTURBOHYBRID_GRAPH_SCAN_LOCK, ShareLock);
+
+	if (emptyIndex)
+	{
+		*outCandidates = palloc0(sizeof(TqDenseCandidate));
+		MemoryContextSwitchTo(oldCtx);
+		return 0;
+	}
+
+	docLimit = targetK > 0 ? targetK : pgturbohybrid_multivector_doc_candidate_k;
+	docLimit = Min(docLimit, pgturbohybrid_multivector_doc_candidate_k);
+	docLimit = Max(docLimit, 1);
+	candidates = palloc0(sizeof(TqDenseCandidate) * docLimit);
+	hash_seq_init(&seq, docHash);
+	while ((entry = (PgturbohybridMultiVectorDocEntry *) hash_seq_search(&seq)) != NULL)
+	{
+		TqDenseCandidate candidate;
+
+		CHECK_FOR_INTERRUPTS();
+		memset(&candidate, 0, sizeof(candidate));
+		candidate.nodeId = entry->bestNodeId;
+		candidate.heaptid = entry->heaptid;
+		candidate.distance = -entry->score;
+		candidate.similarity = entry->score / (double) mv->count;
+		candidate.rank = 0;
+		candidate.exactScored = false;
+
+		if (docCount < docLimit)
+			candidates[docCount++] = candidate;
+		else
+		{
+			qsort(candidates, docCount, sizeof(TqDenseCandidate),
+				  PgturbohybridMultiVectorDenseCandidateCompare);
+			if (PgturbohybridMultiVectorDenseCandidateCompare(&candidate,
+															 &candidates[docCount - 1]) < 0)
+				candidates[docCount - 1] = candidate;
+		}
+	}
+	if (docCount > 1)
+		qsort(candidates, docCount, sizeof(TqDenseCandidate),
+			  PgturbohybridMultiVectorDenseCandidateCompare);
+	for (int i = 0; i < docCount; i++)
+		candidates[i].rank = i + 1;
+
+	if (stats != NULL)
+	{
+		stats->visitedGraphNodes = so->graphVisitedNodes;
+		stats->scoredCodes = so->graphScoredCodes;
+		stats->denseCandidatesRequested = targetK > 0 ? targetK : docLimit;
+		stats->effectiveResultTarget = (uint32) Max(so->graphEffectiveResultTarget, 0);
+		stats->effectiveSearchEf = (uint32) Max(so->graphEffectiveSearchEf, 0);
+		stats->denseCandidatesReturned = docCount;
+		stats->codePagesRead = so->graphCodePagesRead;
+		stats->adjPagesRead = so->graphAdjPagesRead;
+		stats->prepareUs = so->graphPrepareUs;
+		stats->traverseUs = so->graphTraverseUs;
+		stats->entryUs = so->graphEntryUs;
+		stats->baseUs = so->graphBaseUs;
+		stats->batchUs = so->graphBatchUs;
+		stats->sortUs = so->graphSortUs;
+		stats->exactRescoreSource = PGTURBOHYBRID_EXACT_RESCORE_SOURCE_NONE;
+	}
+	so->tqGraphResults = NULL;
+	so->tqGraphResultCount = docCount;
+	so->tqGraphResultIndex = 0;
+	so->graphCandidateCount = docCount;
+	PgturbohybridGraphRecordGraphScanStats(so);
+	*outCandidates = candidates;
+	MemoryContextSwitchTo(oldCtx);
+	return docCount;
 }
 
 

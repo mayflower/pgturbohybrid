@@ -115,6 +115,67 @@ Inspect `calibrated_fusion_enabled`,
 `calibrated_fusion_dense_norm_mode`, and
 `calibrated_fusion_bm25_norm_mode` in `turbohybrid_last_scan_stats()`.
 
+## Multivector Late Interaction
+
+`pgturbohybrid` includes an experimental `turbohybrid_multivector` type for
+late-interaction retrieval models such as ColBERT-style MaxSim. A multivector
+stores several same-dimensional token vectors for one document row. The native
+graph build expands those token vectors into graph subnodes, while query output
+is aggregated back to heap rows so the same document is not returned multiple
+times.
+
+```sql
+CREATE TABLE passages (
+  id bigint PRIMARY KEY,
+  colbert turbohybrid_multivector
+);
+
+INSERT INTO passages VALUES
+  (1, turbohybrid_multivector(ARRAY[
+    '[1,0,0]'::vector,
+    '[0,1,0]'::vector
+  ]));
+
+CREATE INDEX passages_colbert_idx
+ON passages USING turbohybrid (
+  colbert multivector_cosine_turbohybrid_ops
+);
+
+SELECT id
+FROM passages
+ORDER BY colbert <~> turbohybrid_query(
+  multivector_query => turbohybrid_multivector(ARRAY[
+    '[1,0,0]'::vector
+  ])
+)
+LIMIT 10;
+```
+
+This path is intentionally narrow today:
+
+- dense-only multivector scans are supported;
+- `vector_query` and `multivector_query` cannot be mixed in one
+  `turbohybrid_query`;
+- hybrid multivector + text fusion is not implemented yet;
+- incremental insert/update into a multivector turbohybrid index is not
+  implemented yet, so build indexes from existing data and `REINDEX` after bulk
+  replacement.
+
+Candidate collection is approximate: each query token searches the TurboQuant
+graph, then results are accumulated with document-level MaxSim. Tune the bounded
+candidate budgets with:
+
+```sql
+SET turbohybrid.multivector_subvector_k = 100;
+SET turbohybrid.multivector_unique_docs_per_token = 100;
+SET turbohybrid.multivector_max_raw_hits_per_token = 400;
+SET turbohybrid.multivector_doc_candidate_k = 100;
+```
+
+Safety caps are controlled by `turbohybrid.multivector_max_doc_vectors`,
+`turbohybrid.multivector_max_query_vectors`, and
+`turbohybrid.multivector_max_dim`.
+
 ## When It Is Useful
 
 Try `pgturbohybrid` when you are evaluating:

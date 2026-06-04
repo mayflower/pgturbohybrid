@@ -28,6 +28,7 @@ FUNCTION_PREFIX PG_FUNCTION_INFO_V1(pgturbohybrid_negative_inner_product);
 FUNCTION_PREFIX PG_FUNCTION_INFO_V1(pgturbohybrid_cosine_distance);
 
 static Size PgturbohybridQueryVectorOffset(void);
+static Size PgturbohybridQueryMultiVectorOffset(PgturbohybridQueryHeader *query);
 static Size PgturbohybridQueryTsQueryOffset(PgturbohybridQueryHeader *query);
 static Size PgturbohybridQueryAlignedSize(Size value);
 static Size PgturbohybridQuerySizeAdd(Size a, Size b);
@@ -50,6 +51,13 @@ PgturbohybridQueryVectorOffset(void)
 
 static Size
 PgturbohybridQueryTsQueryOffset(PgturbohybridQueryHeader *query)
+{
+	return PgturbohybridQuerySizeAdd(PgturbohybridQueryMultiVectorOffset(query),
+									 PgturbohybridQueryAlignedSize(query->multivectorBytes));
+}
+
+static Size
+PgturbohybridQueryMultiVectorOffset(PgturbohybridQueryHeader *query)
 {
 	return PgturbohybridQuerySizeAdd(PgturbohybridQueryVectorOffset(),
 									 PgturbohybridQueryAlignedSize(query->vectorBytes));
@@ -86,6 +94,18 @@ PgturbohybridQueryGetVector(PgturbohybridQueryHeader *query)
 		return NULL;
 
 	return (Vector *) ((char *) query + PgturbohybridQueryVectorOffset());
+}
+
+PgturbohybridMultiVector *
+PgturbohybridQueryGetMultiVector(PgturbohybridQueryHeader *query)
+{
+	PgturbohybridQueryValidateFast(query);
+
+	if ((query->flags & PGTURBOHYBRID_QUERY_FLAG_HAS_MULTIVECTOR) == 0)
+		return NULL;
+
+	return (PgturbohybridMultiVector *) ((char *) query +
+										 PgturbohybridQueryMultiVectorOffset(query));
 }
 
 TSQuery
@@ -134,6 +154,7 @@ PgturbohybridQueryValidateInternal(PgturbohybridQueryHeader *query, bool strict)
 {
 	Size		actual;
 	Size		vectorOffset;
+	Size		multivectorOffset;
 	Size		tsqueryOffset;
 	Size		expected;
 
@@ -162,10 +183,36 @@ PgturbohybridQueryValidateInternal(PgturbohybridQueryHeader *query, bool strict)
 				(errcode(ERRCODE_DATA_EXCEPTION),
 				 errmsg("invalid turbohybrid_query fusion mode %u", query->fusion)));
 
-	if (query->vectorBytes < 0 || query->tsqueryBytes < 0)
+	if (query->denseKind != PGTURBOHYBRID_DENSE_QUERY_NONE &&
+		query->denseKind != PGTURBOHYBRID_DENSE_QUERY_VECTOR &&
+		query->denseKind != PGTURBOHYBRID_DENSE_QUERY_MULTIVECTOR)
+		ereport(ERROR,
+				(errcode(ERRCODE_DATA_EXCEPTION),
+				 errmsg("invalid turbohybrid_query dense kind %u", query->denseKind)));
+
+	if (query->vectorBytes < 0 || query->multivectorBytes < 0 ||
+		query->tsqueryBytes < 0)
 		ereport(ERROR,
 				(errcode(ERRCODE_DATA_EXCEPTION),
 				 errmsg("invalid turbohybrid_query payload size")));
+
+	if (((query->flags & PGTURBOHYBRID_QUERY_FLAG_HAS_VECTOR) != 0) &&
+		((query->flags & PGTURBOHYBRID_QUERY_FLAG_HAS_MULTIVECTOR) != 0))
+		ereport(ERROR,
+				(errcode(ERRCODE_DATA_EXCEPTION),
+				 errmsg("turbohybrid_query cannot contain both vector and multivector payloads")));
+
+	if ((query->flags & PGTURBOHYBRID_QUERY_FLAG_HAS_DENSE) == 0 &&
+		query->denseKind != PGTURBOHYBRID_DENSE_QUERY_NONE)
+		ereport(ERROR,
+				(errcode(ERRCODE_DATA_EXCEPTION),
+				 errmsg("turbohybrid_query dense payload is inconsistent")));
+
+	if ((query->flags & PGTURBOHYBRID_QUERY_FLAG_HAS_DENSE) != 0 &&
+		query->denseKind == PGTURBOHYBRID_DENSE_QUERY_NONE)
+		ereport(ERROR,
+				(errcode(ERRCODE_DATA_EXCEPTION),
+				 errmsg("turbohybrid_query dense payload is inconsistent")));
 
 	if ((query->flags & PGTURBOHYBRID_QUERY_FLAG_HAS_VECTOR) == 0 &&
 		query->vectorBytes != 0)
@@ -177,6 +224,12 @@ PgturbohybridQueryValidateInternal(PgturbohybridQueryHeader *query, bool strict)
 	{
 		Vector	   *vector = (Vector *) ((char *) query + PgturbohybridQueryVectorOffset());
 		Size		vectorBytes;
+
+		if (query->denseKind != PGTURBOHYBRID_DENSE_QUERY_VECTOR ||
+			(query->flags & PGTURBOHYBRID_QUERY_FLAG_HAS_DENSE) == 0)
+			ereport(ERROR,
+					(errcode(ERRCODE_DATA_EXCEPTION),
+					 errmsg("turbohybrid_query vector payload is inconsistent")));
 
 		if (PgturbohybridQuerySizeAdd(vectorOffset, query->vectorBytes) > actual)
 			ereport(ERROR,
@@ -191,8 +244,46 @@ PgturbohybridQueryValidateInternal(PgturbohybridQueryHeader *query, bool strict)
 		if (query->vectorBytes != vectorBytes)
 			ereport(ERROR,
 					(errcode(ERRCODE_DATA_EXCEPTION),
-					 errmsg("turbohybrid_query vector payload is inconsistent")));
+				 errmsg("turbohybrid_query vector payload is inconsistent")));
 	}
+
+	if ((query->flags & PGTURBOHYBRID_QUERY_FLAG_HAS_MULTIVECTOR) == 0 &&
+		query->multivectorBytes != 0)
+		ereport(ERROR,
+				(errcode(ERRCODE_DATA_EXCEPTION),
+				 errmsg("turbohybrid_query multivector payload is inconsistent")));
+
+	multivectorOffset = PgturbohybridQueryMultiVectorOffset(query);
+	if ((query->flags & PGTURBOHYBRID_QUERY_FLAG_HAS_MULTIVECTOR) != 0)
+	{
+		PgturbohybridMultiVector *mv =
+			(PgturbohybridMultiVector *) ((char *) query + multivectorOffset);
+		Size		multivectorBytes;
+
+		if (query->denseKind != PGTURBOHYBRID_DENSE_QUERY_MULTIVECTOR ||
+			(query->flags & PGTURBOHYBRID_QUERY_FLAG_HAS_DENSE) == 0)
+			ereport(ERROR,
+					(errcode(ERRCODE_DATA_EXCEPTION),
+					 errmsg("turbohybrid_query multivector payload is inconsistent")));
+
+		if (PgturbohybridQuerySizeAdd(multivectorOffset, query->multivectorBytes) > actual)
+			ereport(ERROR,
+					(errcode(ERRCODE_DATA_EXCEPTION),
+					 errmsg("truncated turbohybrid_query payload")));
+
+		PgturbohybridCheckMultiVector(mv);
+		multivectorBytes = PgturbohybridMultiVectorSize(mv->count, mv->dim);
+		if (query->multivectorBytes != multivectorBytes ||
+			query->multivectorDim != mv->dim ||
+			query->multivectorCount != mv->count)
+			ereport(ERROR,
+					(errcode(ERRCODE_DATA_EXCEPTION),
+					 errmsg("turbohybrid_query multivector payload is inconsistent")));
+	}
+	else if (query->multivectorDim != 0 || query->multivectorCount != 0)
+		ereport(ERROR,
+				(errcode(ERRCODE_DATA_EXCEPTION),
+				 errmsg("turbohybrid_query multivector payload is inconsistent")));
 
 	if ((query->flags & PGTURBOHYBRID_QUERY_FLAG_HAS_TSQUERY) == 0 &&
 		query->tsqueryBytes != 0)
@@ -238,9 +329,14 @@ pgturbohybrid_query_out(PG_FUNCTION_ARGS)
 
 	initStringInfo(&buf);
 	appendStringInfo(&buf,
-					 "turbohybrid_query(fusion=%s,vector=%s,tsquery=%s,dense_weight=%g,bm25_weight=%g,alpha=",
+					 "turbohybrid_query(fusion=%s,vector=%s",
 					 PgturbohybridQueryFusionName(query->fusion),
-					 (query->flags & PGTURBOHYBRID_QUERY_FLAG_HAS_VECTOR) ? "true" : "false",
+					 (query->flags & PGTURBOHYBRID_QUERY_FLAG_HAS_VECTOR) ? "true" : "false");
+	if (query->flags & PGTURBOHYBRID_QUERY_FLAG_HAS_MULTIVECTOR)
+		appendStringInfoString(&buf, ",multivector=true");
+
+	appendStringInfo(&buf,
+					 ",tsquery=%s,dense_weight=%g,bm25_weight=%g,alpha=",
 					 (query->flags & PGTURBOHYBRID_QUERY_FLAG_HAS_TSQUERY) ? "true" : "false",
 					 query->denseWeight,
 					 query->bm25Weight);
@@ -570,12 +666,18 @@ pgturbohybrid_query_constructor(PG_FUNCTION_ARGS)
 {
 	PgturbohybridQueryHeader *cached;
 	struct varlena *vectorDatum = NULL;
+	struct varlena *multivectorDatum = NULL;
 	struct varlena *tsqueryDatum = NULL;
 	int32		vectorBytes = 0;
+	int32		multivectorBytes = 0;
 	int32		tsqueryBytes = 0;
+	int32		multivectorDim = 0;
+	int32		multivectorCount = 0;
 	Size		vectorSize = 0;
+	Size		multivectorSize = 0;
 	Size		tsquerySize = 0;
 	uint16		flags = 0;
+	uint16		denseKind = PGTURBOHYBRID_DENSE_QUERY_NONE;
 	uint16		fusion;
 	float8		denseWeight;
 	float8		bm25Weight;
@@ -601,7 +703,8 @@ pgturbohybrid_query_constructor(PG_FUNCTION_ARGS)
 					(errcode(ERRCODE_PROGRAM_LIMIT_EXCEEDED),
 					 errmsg("turbohybrid_query vector payload is too large")));
 		vectorBytes = (int32) vectorSize;
-		flags |= PGTURBOHYBRID_QUERY_FLAG_HAS_VECTOR;
+		flags |= PGTURBOHYBRID_QUERY_FLAG_HAS_VECTOR | PGTURBOHYBRID_QUERY_FLAG_HAS_DENSE;
+		denseKind = PGTURBOHYBRID_DENSE_QUERY_VECTOR;
 	}
 
 	if (!PG_ARGISNULL(1))
@@ -616,10 +719,34 @@ pgturbohybrid_query_constructor(PG_FUNCTION_ARGS)
 		flags |= PGTURBOHYBRID_QUERY_FLAG_HAS_TSQUERY;
 	}
 
-	if ((flags & (PGTURBOHYBRID_QUERY_FLAG_HAS_VECTOR | PGTURBOHYBRID_QUERY_FLAG_HAS_TSQUERY)) == 0)
+	if (!PG_ARGISNULL(11))
+	{
+		PgturbohybridMultiVector *mv;
+
+		if ((flags & PGTURBOHYBRID_QUERY_FLAG_HAS_VECTOR) != 0)
+			ereport(ERROR,
+					(errcode(ERRCODE_INVALID_PARAMETER_VALUE),
+					 errmsg("turbohybrid_query cannot contain both vector_query and multivector_query")));
+
+		multivectorDatum = PG_DETOAST_DATUM_COPY(PG_GETARG_DATUM(11));
+		mv = (PgturbohybridMultiVector *) multivectorDatum;
+		PgturbohybridCheckMultiVector(mv);
+		multivectorSize = VARSIZE_ANY(multivectorDatum);
+		if (multivectorSize > PG_INT32_MAX)
+			ereport(ERROR,
+					(errcode(ERRCODE_PROGRAM_LIMIT_EXCEEDED),
+					 errmsg("turbohybrid_query multivector payload is too large")));
+		multivectorBytes = (int32) multivectorSize;
+		multivectorDim = mv->dim;
+		multivectorCount = mv->count;
+		flags |= PGTURBOHYBRID_QUERY_FLAG_HAS_MULTIVECTOR | PGTURBOHYBRID_QUERY_FLAG_HAS_DENSE;
+		denseKind = PGTURBOHYBRID_DENSE_QUERY_MULTIVECTOR;
+	}
+
+	if ((flags & (PGTURBOHYBRID_QUERY_FLAG_HAS_DENSE | PGTURBOHYBRID_QUERY_FLAG_HAS_TSQUERY)) == 0)
 		ereport(ERROR,
 				(errcode(ERRCODE_INVALID_PARAMETER_VALUE),
-				 errmsg("turbohybrid_query requires a vector_query or text_query")));
+				 errmsg("turbohybrid_query requires a vector_query, multivector_query, or text_query")));
 
 	fusion = PgturbohybridQueryParseFusion(PG_ARGISNULL(2) ? NULL : PG_GETARG_TEXT_PP(2));
 
@@ -698,6 +825,8 @@ pgturbohybrid_query_constructor(PG_FUNCTION_ARGS)
 	totalSize = PgturbohybridQuerySizeAdd(PgturbohybridQueryVectorOffset(),
 										  PgturbohybridQueryAlignedSize(vectorBytes));
 	totalSize = PgturbohybridQuerySizeAdd(totalSize,
+										  PgturbohybridQueryAlignedSize(multivectorBytes));
+	totalSize = PgturbohybridQuerySizeAdd(totalSize,
 										  PgturbohybridQueryAlignedSize(tsqueryBytes));
 	result = palloc0(totalSize);
 	SET_VARSIZE(result, totalSize);
@@ -711,13 +840,23 @@ pgturbohybrid_query_constructor(PG_FUNCTION_ARGS)
 	result->denseK = denseK;
 	result->bm25K = bm25K;
 	result->finalK = finalK;
+	result->denseKind = denseKind;
 	result->vectorBytes = vectorBytes;
+	result->multivectorBytes = multivectorBytes;
 	result->tsqueryBytes = tsqueryBytes;
+	result->multivectorDim = multivectorDim;
+	result->multivectorCount = multivectorCount;
 
 	if (vectorDatum != NULL)
 	{
 		memcpy((char *) result + PgturbohybridQueryVectorOffset(), vectorDatum, vectorBytes);
 		pfree(vectorDatum);
+	}
+	if (multivectorDatum != NULL)
+	{
+		memcpy((char *) result + PgturbohybridQueryMultiVectorOffset(result),
+			   multivectorDatum, multivectorBytes);
+		pfree(multivectorDatum);
 	}
 	if (tsqueryDatum != NULL)
 	{

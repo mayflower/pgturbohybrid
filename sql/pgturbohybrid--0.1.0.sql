@@ -60,6 +60,50 @@ CREATE TYPE turbohybrid_query (
 	ALIGNMENT = double
 );
 
+CREATE TYPE turbohybrid_multivector;
+
+CREATE FUNCTION turbohybrid_multivector_in(pg_catalog.cstring) RETURNS turbohybrid_multivector
+	AS 'MODULE_PATHNAME', 'pgturbohybrid_multivector_in'
+	LANGUAGE C IMMUTABLE STRICT PARALLEL SAFE;
+
+CREATE FUNCTION turbohybrid_multivector_out(turbohybrid_multivector) RETURNS pg_catalog.cstring
+	AS 'MODULE_PATHNAME', 'pgturbohybrid_multivector_out'
+	LANGUAGE C IMMUTABLE STRICT PARALLEL SAFE;
+
+CREATE TYPE turbohybrid_multivector (
+	INPUT = turbohybrid_multivector_in,
+	OUTPUT = turbohybrid_multivector_out,
+	INTERNALLENGTH = variable,
+	STORAGE = extended,
+	ALIGNMENT = double
+);
+
+CREATE FUNCTION turbohybrid_multivector(vector[]) RETURNS turbohybrid_multivector
+	AS 'MODULE_PATHNAME', 'pgturbohybrid_multivector_constructor'
+	LANGUAGE C IMMUTABLE STRICT PARALLEL SAFE;
+
+CREATE FUNCTION turbohybrid_multivector_dims(turbohybrid_multivector) RETURNS pg_catalog.int4
+	AS 'MODULE_PATHNAME', 'pgturbohybrid_multivector_dims'
+	LANGUAGE C IMMUTABLE STRICT PARALLEL SAFE;
+
+CREATE FUNCTION turbohybrid_multivector_count(turbohybrid_multivector) RETURNS pg_catalog.int4
+	AS 'MODULE_PATHNAME', 'pgturbohybrid_multivector_count'
+	LANGUAGE C IMMUTABLE STRICT PARALLEL SAFE;
+
+CREATE FUNCTION turbohybrid_multivector_maxsim(
+	query turbohybrid_multivector,
+	doc turbohybrid_multivector
+) RETURNS pg_catalog.float8
+	AS 'MODULE_PATHNAME', 'pgturbohybrid_multivector_maxsim'
+	LANGUAGE C IMMUTABLE STRICT PARALLEL SAFE;
+
+CREATE FUNCTION turbohybrid_multivector_maxsim_distance(
+	query turbohybrid_multivector,
+	doc turbohybrid_multivector
+) RETURNS pg_catalog.float8
+	AS 'MODULE_PATHNAME', 'pgturbohybrid_multivector_maxsim_distance'
+	LANGUAGE C IMMUTABLE STRICT PARALLEL SAFE;
+
 CREATE FUNCTION turbohybrid_query(
 	vector_query vector DEFAULT NULL,
 	text_query pg_catalog.tsquery DEFAULT NULL,
@@ -71,7 +115,8 @@ CREATE FUNCTION turbohybrid_query(
 	dense_k pg_catalog.int4 DEFAULT NULL,
 	bm25_k pg_catalog.int4 DEFAULT NULL,
 	final_k pg_catalog.int4 DEFAULT NULL,
-	require_bm25_match pg_catalog.bool DEFAULT false
+	require_bm25_match pg_catalog.bool DEFAULT false,
+	multivector_query turbohybrid_multivector DEFAULT NULL
 ) RETURNS turbohybrid_query
 	AS 'MODULE_PATHNAME', 'pgturbohybrid_query_constructor'
 	LANGUAGE C STABLE PARALLEL SAFE;
@@ -90,6 +135,10 @@ CREATE FUNCTION turbohybrid_negative_inner_product(vector, turbohybrid_query) RE
 
 CREATE FUNCTION turbohybrid_cosine_distance(vector, turbohybrid_query) RETURNS pg_catalog.float8
 	AS 'MODULE_PATHNAME', 'pgturbohybrid_cosine_distance'
+	LANGUAGE C STABLE STRICT PARALLEL RESTRICTED;
+
+CREATE FUNCTION turbohybrid_multivector_distance(turbohybrid_multivector, turbohybrid_query) RETURNS pg_catalog.float8
+	AS 'MODULE_PATHNAME', 'pgturbohybrid_multivector_query_distance'
 	LANGUAGE C STABLE STRICT PARALLEL RESTRICTED;
 
 CREATE FUNCTION turbohybrid_vector_l2_squared_distance(vector, vector) RETURNS pg_catalog.float8
@@ -124,6 +173,10 @@ CREATE OPERATOR <~> (
 	LEFTARG = vector, RIGHTARG = turbohybrid_query, PROCEDURE = turbohybrid_cosine_distance
 );
 
+CREATE OPERATOR <~> (
+	LEFTARG = turbohybrid_multivector, RIGHTARG = turbohybrid_query, PROCEDURE = turbohybrid_multivector_distance
+);
+
 CREATE FUNCTION turbohybrid_handler(pg_catalog.internal) RETURNS pg_catalog.index_am_handler
 	AS 'MODULE_PATHNAME', 'pgturbohybrid_handler'
 	LANGUAGE C;
@@ -145,6 +198,13 @@ CREATE OPERATOR CLASS vector_ip_turbohybrid_ops
 CREATE OPERATOR CLASS vector_cosine_turbohybrid_ops
 	FOR TYPE vector USING turbohybrid AS
 	OPERATOR 1 <~> (vector, turbohybrid_query) FOR ORDER BY pg_catalog.float_ops,
+	FUNCTION 1 turbohybrid_vector_negative_inner_product(vector, vector),
+	FUNCTION 2 turbohybrid_vector_norm(vector),
+	FUNCTION 4 turbohybrid_vector_norm(vector);
+
+CREATE OPERATOR CLASS multivector_cosine_turbohybrid_ops
+	FOR TYPE turbohybrid_multivector USING turbohybrid AS
+	OPERATOR 1 <~> (turbohybrid_multivector, turbohybrid_query) FOR ORDER BY pg_catalog.float_ops,
 	FUNCTION 1 turbohybrid_vector_negative_inner_product(vector, vector),
 	FUNCTION 2 turbohybrid_vector_norm(vector),
 	FUNCTION 4 turbohybrid_vector_norm(vector);
@@ -347,11 +407,12 @@ COMMENT ON TYPE turbohybrid_query IS 'TurboHybrid query payload for dense vector
 
 COMMENT ON FUNCTION turbohybrid_query_in(pg_catalog.cstring) IS 'Input function for turbohybrid_query';
 COMMENT ON FUNCTION turbohybrid_query_out(turbohybrid_query) IS 'Output function for turbohybrid_query';
-COMMENT ON FUNCTION turbohybrid_query(vector, pg_catalog.tsquery, pg_catalog.text, pg_catalog.float8, pg_catalog.float8, pg_catalog.float8, pg_catalog.int4, pg_catalog.int4, pg_catalog.int4, pg_catalog.int4, pg_catalog.bool) IS 'Constructs a TurboHybrid query payload';
+COMMENT ON FUNCTION turbohybrid_query(vector, pg_catalog.tsquery, pg_catalog.text, pg_catalog.float8, pg_catalog.float8, pg_catalog.float8, pg_catalog.int4, pg_catalog.int4, pg_catalog.int4, pg_catalog.int4, pg_catalog.bool, turbohybrid_multivector) IS 'Constructs a TurboHybrid query payload';
 COMMENT ON FUNCTION turbohybrid_distance(vector, turbohybrid_query) IS 'Default TurboHybrid distance between a vector and a query';
 COMMENT ON FUNCTION turbohybrid_l2_distance(vector, turbohybrid_query) IS 'L2 TurboHybrid distance between a vector and a query';
 COMMENT ON FUNCTION turbohybrid_negative_inner_product(vector, turbohybrid_query) IS 'Negative inner product TurboHybrid distance between a vector and a query';
 COMMENT ON FUNCTION turbohybrid_cosine_distance(vector, turbohybrid_query) IS 'Cosine TurboHybrid distance between a vector and a query';
+COMMENT ON FUNCTION turbohybrid_multivector_distance(turbohybrid_multivector, turbohybrid_query) IS 'Exact MaxSim distance between a multivector and a TurboHybrid query';
 COMMENT ON FUNCTION turbohybrid_vector_l2_squared_distance(vector, vector) IS 'Squared L2 support function used by TurboHybrid vector opclasses';
 COMMENT ON FUNCTION turbohybrid_vector_l2_distance(vector, vector) IS 'L2 support function used by TurboHybrid vector opclasses';
 COMMENT ON FUNCTION turbohybrid_vector_negative_inner_product(vector, vector) IS 'Negative inner product support function used by TurboHybrid vector opclasses';
@@ -374,9 +435,11 @@ COMMENT ON OPERATOR <~> (vector, turbohybrid_query) IS 'Cosine distance operator
 COMMENT ON OPERATOR CLASS vector_l2_turbohybrid_ops USING turbohybrid IS 'TurboHybrid L2 vector operator class';
 COMMENT ON OPERATOR CLASS vector_ip_turbohybrid_ops USING turbohybrid IS 'TurboHybrid inner product vector operator class';
 COMMENT ON OPERATOR CLASS vector_cosine_turbohybrid_ops USING turbohybrid IS 'TurboHybrid cosine vector operator class';
+COMMENT ON OPERATOR CLASS multivector_cosine_turbohybrid_ops USING turbohybrid IS 'TurboHybrid multivector cosine operator class';
 COMMENT ON OPERATOR CLASS bm25_tsvector_turbohybrid_ops USING turbohybrid IS 'TurboHybrid BM25 tsvector operator class';
 
 COMMENT ON OPERATOR FAMILY vector_l2_turbohybrid_ops USING turbohybrid IS 'TurboHybrid L2 vector operator family';
 COMMENT ON OPERATOR FAMILY vector_ip_turbohybrid_ops USING turbohybrid IS 'TurboHybrid inner product vector operator family';
 COMMENT ON OPERATOR FAMILY vector_cosine_turbohybrid_ops USING turbohybrid IS 'TurboHybrid cosine vector operator family';
+COMMENT ON OPERATOR FAMILY multivector_cosine_turbohybrid_ops USING turbohybrid IS 'TurboHybrid multivector cosine operator family';
 COMMENT ON OPERATOR FAMILY bm25_tsvector_turbohybrid_ops USING turbohybrid IS 'TurboHybrid BM25 tsvector operator family';

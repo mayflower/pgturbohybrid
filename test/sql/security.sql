@@ -37,6 +37,48 @@ BEGIN
 		RAISE EXCEPTION 'expected bm25_hot_postings_cache_mb cap error';
 	EXCEPTION WHEN invalid_parameter_value THEN
 	END;
+
+	BEGIN
+		EXECUTE 'SET turbohybrid.multivector_max_doc_vectors = 2147483647';
+		RAISE EXCEPTION 'expected multivector_max_doc_vectors cap error';
+	EXCEPTION WHEN invalid_parameter_value THEN
+	END;
+
+	BEGIN
+		EXECUTE 'SET turbohybrid.multivector_max_query_vectors = 2147483647';
+		RAISE EXCEPTION 'expected multivector_max_query_vectors cap error';
+	EXCEPTION WHEN invalid_parameter_value THEN
+	END;
+
+	BEGIN
+		EXECUTE 'SET turbohybrid.multivector_max_dim = 2147483647';
+		RAISE EXCEPTION 'expected multivector_max_dim cap error';
+	EXCEPTION WHEN invalid_parameter_value THEN
+	END;
+
+	BEGIN
+		EXECUTE 'SET turbohybrid.multivector_subvector_k = 2147483647';
+		RAISE EXCEPTION 'expected multivector_subvector_k cap error';
+	EXCEPTION WHEN invalid_parameter_value THEN
+	END;
+
+	BEGIN
+		EXECUTE 'SET turbohybrid.multivector_unique_docs_per_token = 2147483647';
+		RAISE EXCEPTION 'expected multivector_unique_docs_per_token cap error';
+	EXCEPTION WHEN invalid_parameter_value THEN
+	END;
+
+	BEGIN
+		EXECUTE 'SET turbohybrid.multivector_max_raw_hits_per_token = 2147483647';
+		RAISE EXCEPTION 'expected multivector_max_raw_hits_per_token cap error';
+	EXCEPTION WHEN invalid_parameter_value THEN
+	END;
+
+	BEGIN
+		EXECUTE 'SET turbohybrid.multivector_doc_candidate_k = 2147483647';
+		RAISE EXCEPTION 'expected multivector_doc_candidate_k cap error';
+	EXCEPTION WHEN invalid_parameter_value THEN
+	END;
 END
 $$;
 

@@ -15,6 +15,8 @@
 #define PGTURBOHYBRID_MAX_RRF_K 100000
 #define PGTURBOHYBRID_MAX_UNION_CANDIDATES 1000000
 #define PGTURBOHYBRID_MAX_HOT_POSTINGS_CACHE_MB 1024
+#define PGTURBOHYBRID_MAX_MULTIVECTOR_DOC_VECTORS 4096
+#define PGTURBOHYBRID_MAX_MULTIVECTOR_QUERY_VECTORS 4096
 #define PGTURBOHYBRID_DENSE_KEY_INDEX 0
 #define PGTURBOHYBRID_LEXICAL_KEY_INDEX 1
 
@@ -168,6 +170,13 @@ extern double pgturbohybrid_calibrated_fusion_both_match_bonus;
 extern double pgturbohybrid_calibrated_fusion_identifier_bm25_alpha;
 extern double pgturbohybrid_calibrated_fusion_broad_dense_alpha;
 extern double pgturbohybrid_calibrated_fusion_default_alpha;
+extern int	pgturbohybrid_multivector_max_doc_vectors;
+extern int	pgturbohybrid_multivector_max_query_vectors;
+extern int	pgturbohybrid_multivector_max_dim;
+extern int	pgturbohybrid_multivector_subvector_k;
+extern int	pgturbohybrid_multivector_unique_docs_per_token;
+extern int	pgturbohybrid_multivector_max_raw_hits_per_token;
+extern int	pgturbohybrid_multivector_doc_candidate_k;
 
 typedef enum PgturbohybridProfile
 {

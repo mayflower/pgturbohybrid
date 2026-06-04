@@ -16,6 +16,7 @@ OBJS = \
 	src/pgturbohybrid_graph.o \
 	src/pgturbohybrid_graph_utils.o \
 	src/pgturbohybrid_insert.o \
+	src/pgturbohybrid_multivector.o \
 	src/pgturbohybrid_quant.o \
 	src/pgturbohybrid_quant_cache.o \
 	src/pgturbohybrid_quant_exact.o \
@@ -37,7 +38,7 @@ HEADERS =
 
 $(OBJS): src/*.h
 
-REGRESS = extension pgturbohybrid pgturbohybrid_query pgturbohybrid_querysplit pgturbohybrid_codebook pgturbohybrid_u8split pgturbohybrid_nibble_guard pgturbohybrid_x4_safety pgturbohybrid_simd_parity pgturbohybrid_rescore security
+REGRESS = extension pgturbohybrid pgturbohybrid_query pgturbohybrid_querysplit pgturbohybrid_multivector pgturbohybrid_codebook pgturbohybrid_u8split pgturbohybrid_nibble_guard pgturbohybrid_x4_safety pgturbohybrid_simd_parity pgturbohybrid_rescore security
 REGRESS_OPTS = --inputdir=test
 
 SIMD_BUILD ?= portable

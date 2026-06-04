@@ -70,6 +70,13 @@ BEGIN
 		'turbohybrid.hybrid_budget_policy',
 		'turbohybrid.linear_fallback_notice_threshold_ratio',
 		'turbohybrid.max_union_candidates',
+		'turbohybrid.multivector_doc_candidate_k',
+		'turbohybrid.multivector_max_dim',
+		'turbohybrid.multivector_max_doc_vectors',
+		'turbohybrid.multivector_max_query_vectors',
+		'turbohybrid.multivector_max_raw_hits_per_token',
+		'turbohybrid.multivector_subvector_k',
+		'turbohybrid.multivector_unique_docs_per_token',
 		'turbohybrid.native_build_workers',
 		'turbohybrid.native_cache_max_mb',
 		'turbohybrid.native_cache_policy',
@@ -97,6 +104,20 @@ BEGIN
 	IF current_setting('turbohybrid.native_parallel_edge_build') != 'auto' THEN
 		RAISE EXCEPTION 'unexpected default native parallel edge build: %',
 			current_setting('turbohybrid.native_parallel_edge_build');
+	END IF;
+	IF current_setting('turbohybrid.multivector_max_doc_vectors') != '256' OR
+		current_setting('turbohybrid.multivector_max_query_vectors') != '64' OR
+		current_setting('turbohybrid.multivector_subvector_k') != '100' OR
+		current_setting('turbohybrid.multivector_unique_docs_per_token') != '100' OR
+		current_setting('turbohybrid.multivector_max_raw_hits_per_token') != '400' OR
+		current_setting('turbohybrid.multivector_doc_candidate_k') != '100' THEN
+		RAISE EXCEPTION 'unexpected multivector defaults: doc %, query %, subvector %, unique %, raw %, docs %',
+			current_setting('turbohybrid.multivector_max_doc_vectors'),
+			current_setting('turbohybrid.multivector_max_query_vectors'),
+			current_setting('turbohybrid.multivector_subvector_k'),
+			current_setting('turbohybrid.multivector_unique_docs_per_token'),
+			current_setting('turbohybrid.multivector_max_raw_hits_per_token'),
+			current_setting('turbohybrid.multivector_doc_candidate_k');
 	END IF;
 	IF current_setting('turbohybrid.payload_entry_seeding') != 'auto' OR
 		current_setting('turbohybrid.payload_entry_seed_count') != '8' THEN
@@ -208,6 +229,14 @@ SET turbohybrid.dense_uncertainty_retry_max_passes = 1;
 SET turbohybrid.dense_uncertainty_retry_max_passes = 2;
 SET turbohybrid.dense_uncertainty_retry_multiplier = 1.5;
 SET turbohybrid.dense_uncertainty_min_gap = 0.03;
+SET turbohybrid.multivector_subvector_k = 1;
+SET turbohybrid.multivector_unique_docs_per_token = 1;
+SET turbohybrid.multivector_max_raw_hits_per_token = 1;
+SET turbohybrid.multivector_doc_candidate_k = 1;
+RESET turbohybrid.multivector_subvector_k;
+RESET turbohybrid.multivector_unique_docs_per_token;
+RESET turbohybrid.multivector_max_raw_hits_per_token;
+RESET turbohybrid.multivector_doc_candidate_k;
 RESET turbohybrid.dense_uncertainty_retry;
 RESET turbohybrid.dense_uncertainty_retry_max_passes;
 RESET turbohybrid.dense_uncertainty_retry_multiplier;
@@ -254,6 +283,30 @@ BEGIN
 	BEGIN
 		EXECUTE 'SET turbohybrid.bm25_hot_postings_cache_mb = 2147483647';
 		RAISE EXCEPTION 'expected bm25_hot_postings_cache_mb cap error';
+	EXCEPTION WHEN invalid_parameter_value THEN
+	END;
+
+	BEGIN
+		EXECUTE 'SET turbohybrid.multivector_subvector_k = 2147483647';
+		RAISE EXCEPTION 'expected multivector_subvector_k cap error';
+	EXCEPTION WHEN invalid_parameter_value THEN
+	END;
+
+	BEGIN
+		EXECUTE 'SET turbohybrid.multivector_unique_docs_per_token = 2147483647';
+		RAISE EXCEPTION 'expected multivector_unique_docs_per_token cap error';
+	EXCEPTION WHEN invalid_parameter_value THEN
+	END;
+
+	BEGIN
+		EXECUTE 'SET turbohybrid.multivector_max_raw_hits_per_token = 2147483647';
+		RAISE EXCEPTION 'expected multivector_max_raw_hits_per_token cap error';
+	EXCEPTION WHEN invalid_parameter_value THEN
+	END;
+
+	BEGIN
+		EXECUTE 'SET turbohybrid.multivector_doc_candidate_k = 2147483647';
+		RAISE EXCEPTION 'expected multivector_doc_candidate_k cap error';
 	EXCEPTION WHEN invalid_parameter_value THEN
 	END;
 
@@ -371,6 +424,35 @@ BEGIN
 	))::text != 'turbohybrid_query(fusion=rrf,vector=true,tsquery=true,dense_weight=1,bm25_weight=1,alpha=null,rrf_k=60,dense_k=100,bm25_k=100,final_k=null,require_bm25_match=false)' THEN
 		RAISE EXCEPTION 'unexpected default hybrid query output';
 	END IF;
+END
+$$;
+DO $$
+BEGIN
+	IF turbohybrid_query_out(turbohybrid_query(
+		multivector_query => turbohybrid_multivector(ARRAY['[1,0,0]'::vector, '[0,1,0]'::vector])
+	))::text != 'turbohybrid_query(fusion=rrf,vector=false,multivector=true,tsquery=false,dense_weight=1,bm25_weight=1,alpha=null,rrf_k=60,dense_k=100,bm25_k=100,final_k=null,require_bm25_match=false)' THEN
+		RAISE EXCEPTION 'unexpected multivector query output';
+	END IF;
+END
+$$;
+DO $$
+BEGIN
+	IF turbohybrid_query_out(turbohybrid_query(
+		text_query => websearch_to_tsquery('english', 'postgres'),
+		multivector_query => turbohybrid_multivector(ARRAY['[1,0,0]'::vector, '[0,1,0]'::vector])
+	))::text != 'turbohybrid_query(fusion=rrf,vector=false,multivector=true,tsquery=true,dense_weight=1,bm25_weight=1,alpha=null,rrf_k=60,dense_k=100,bm25_k=100,final_k=null,require_bm25_match=false)' THEN
+		RAISE EXCEPTION 'unexpected hybrid multivector query output';
+	END IF;
+END
+$$;
+DO $$
+BEGIN
+	PERFORM turbohybrid_query(
+		vector_query => '[1,0,0]'::vector,
+		multivector_query => turbohybrid_multivector(ARRAY['[1,0,0]'::vector])
+	);
+	RAISE EXCEPTION 'expected mixed dense payload rejection';
+EXCEPTION WHEN invalid_parameter_value THEN
 END
 $$;
 SET turbohybrid.profile = balanced;
