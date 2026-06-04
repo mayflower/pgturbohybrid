@@ -132,6 +132,62 @@ FROM (
 ) s;
 RESET enable_seqscan;
 
+DROP INDEX mv_docs_colbert_idx;
+CREATE INDEX mv_docs_hybrid_idx ON mv_docs USING turbohybrid
+  (colbert multivector_cosine_turbohybrid_ops,
+   body_tsv bm25_tsvector_turbohybrid_ops);
+
+SET enable_seqscan = off;
+SELECT id FROM mv_docs
+  ORDER BY colbert <~> turbohybrid_query(
+    multivector_query => turbohybrid_multivector(ARRAY['[1,0]'::vector]),
+    text_query => to_tsquery('gamma'),
+    dense_k => 6,
+    bm25_k => 3,
+    final_k => 3,
+    fusion => 'rrf'
+  )
+  LIMIT 1;
+
+DO $$
+DECLARE
+	stats jsonb;
+BEGIN
+	stats := turbohybrid_last_scan_stats();
+	IF stats->>'index_used' <> 'true' OR
+		stats->>'dense_branch_used' <> 'true' OR
+		stats->>'bm25_branch_used' <> 'true' OR
+		(stats->>'both_match')::int < 1 OR
+		stats->>'fusion_strategy' NOT IN ('sorted_merge_doc', 'hash_doc') THEN
+		RAISE EXCEPTION 'expected indexed multivector hybrid scan, got %', stats;
+	END IF;
+END
+$$;
+
+SELECT COUNT(*) AS hybrid_result_count,
+       COUNT(DISTINCT id) AS hybrid_distinct_docs
+FROM (
+  SELECT id FROM mv_docs
+    ORDER BY colbert <~> turbohybrid_query(
+      multivector_query => turbohybrid_multivector(ARRAY['[1,0]'::vector, '[0,1]'::vector]),
+      text_query => to_tsquery('alpha | gamma'),
+      dense_k => 6,
+      bm25_k => 3,
+      final_k => 3,
+      fusion => 'rrf'
+    )
+    LIMIT 3
+) s;
+
+SELECT id FROM mv_docs
+  ORDER BY colbert <~> turbohybrid_query(
+    multivector_query => turbohybrid_multivector(ARRAY['[1,0]'::vector]),
+    text_query => to_tsquery('gamma'),
+    fusion => 'fast_weighted'
+  )
+  LIMIT 1;
+RESET enable_seqscan;
+
 SET turbohybrid.multivector_max_doc_vectors = 1;
 CREATE INDEX mv_docs_colbert_limited_idx ON mv_docs USING turbohybrid
   (colbert multivector_cosine_turbohybrid_ops);
