@@ -90,11 +90,34 @@ BEGIN
 	stats := turbohybrid_last_scan_stats();
 	IF stats->>'index_used' <> 'true' OR
 		stats->>'dense_branch_used' <> 'true' OR
-		(stats->>'dense_candidates')::int < 1 THEN
+		(stats->>'dense_candidates')::int < 1 OR
+		stats->>'exact_rescore_source' <> 'heap' OR
+		(stats->>'heap_rescore_count')::int < 1 THEN
 		RAISE EXCEPTION 'expected indexed multivector dense scan, got %', stats;
 	END IF;
 END
 $$;
+
+SET turbohybrid.multivector_exact_rerank = off;
+SELECT id FROM mv_docs
+  ORDER BY colbert <~> turbohybrid_query(
+    multivector_query => turbohybrid_multivector(ARRAY['[1,0]'::vector])
+  )
+  LIMIT 1;
+
+DO $$
+DECLARE
+	stats jsonb;
+BEGIN
+	stats := turbohybrid_last_scan_stats();
+	IF stats->>'index_used' <> 'true' OR
+		stats->>'exact_rescore_source' <> 'none' OR
+		(stats->>'heap_rescore_count')::int <> 0 THEN
+		RAISE EXCEPTION 'expected multivector exact rerank off stats, got %', stats;
+	END IF;
+END
+$$;
+RESET turbohybrid.multivector_exact_rerank;
 
 SELECT COUNT(*) AS result_count,
        COUNT(DISTINCT id) AS distinct_docs

@@ -396,8 +396,11 @@ The scan-time candidate budgets are controlled by
 `turbohybrid.multivector_subvector_k`,
 `turbohybrid.multivector_unique_docs_per_token`,
 `turbohybrid.multivector_max_raw_hits_per_token`, and
-`turbohybrid.multivector_doc_candidate_k`. These GUCs do not alter index
-storage. Build/query safety caps are
+`turbohybrid.multivector_doc_candidate_k`. Exact final ordering for retained
+document candidates is controlled by `turbohybrid.multivector_exact_rerank`
+(`topk` by default) and `turbohybrid.multivector_exact_rerank_k`; this fetches
+heap multivector values and does not store full f32 vectors in the index. These
+GUCs do not alter index storage. Build/query safety caps are
 `turbohybrid.multivector_max_doc_vectors`,
 `turbohybrid.multivector_max_query_vectors`, and
 `turbohybrid.multivector_max_dim`.

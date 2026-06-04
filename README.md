@@ -170,7 +170,16 @@ SET turbohybrid.multivector_subvector_k = 100;
 SET turbohybrid.multivector_unique_docs_per_token = 100;
 SET turbohybrid.multivector_max_raw_hits_per_token = 400;
 SET turbohybrid.multivector_doc_candidate_k = 100;
+SET turbohybrid.multivector_exact_rerank = 'topk'; -- or 'off'
+SET turbohybrid.multivector_exact_rerank_k = 100;
 ```
+
+By default, multivector scans exact-rerank a bounded top document prefix from
+the heap. The index still stores compact TurboQuant subvector nodes; exact
+rerank fetches the original `turbohybrid_multivector` heap value and computes
+portable f32 MaxSim for at most `multivector_exact_rerank_k` retained document
+candidates. Set `turbohybrid.multivector_exact_rerank = 'off'` to inspect the
+raw approximate ordering.
 
 Safety caps are controlled by `turbohybrid.multivector_max_doc_vectors`,
 `turbohybrid.multivector_max_query_vectors`, and
