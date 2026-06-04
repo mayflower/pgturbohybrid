@@ -141,6 +141,9 @@ int			pgturbohybrid_multivector_subvector_k = 100;
 int			pgturbohybrid_multivector_unique_docs_per_token = 100;
 int			pgturbohybrid_multivector_max_raw_hits_per_token = 400;
 int			pgturbohybrid_multivector_doc_candidate_k = 100;
+int			pgturbohybrid_multivector_exact_rerank =
+	PGTURBOHYBRID_MULTIVECTOR_EXACT_RERANK_TOPK;
+int			pgturbohybrid_multivector_exact_rerank_k = 100;
 static bool pgturbohybrid_bm25_strategy_user_set = false;
 static bool pgturbohybrid_bm25_impact_or_mode_user_set = false;
 static bool pgturbohybrid_bm25_hot_postings_cache_mb_user_set = false;
@@ -281,6 +284,12 @@ static const struct config_enum_entry pgturbohybrid_dense_heap_rescore_options[]
 	{"topk", PGTURBOHYBRID_DENSE_HEAP_RESCORE_TOPK, false},
 	{"band", PGTURBOHYBRID_DENSE_HEAP_RESCORE_BAND, false},
 	{"auto", PGTURBOHYBRID_DENSE_HEAP_RESCORE_AUTO, false},
+	{NULL, 0, false}
+};
+
+static const struct config_enum_entry pgturbohybrid_multivector_exact_rerank_options[] = {
+	{"off", PGTURBOHYBRID_MULTIVECTOR_EXACT_RERANK_OFF, false},
+	{"topk", PGTURBOHYBRID_MULTIVECTOR_EXACT_RERANK_TOPK, false},
 	{NULL, 0, false}
 };
 
@@ -5027,6 +5036,19 @@ PgturbohybridInit(void)
 							"Document candidates retained after approximate multivector MaxSim aggregation",
 							"Final multivector dense results are truncated by this document-level candidate budget and the query dense_k.",
 							&pgturbohybrid_multivector_doc_candidate_k,
+							100, 1, 100000,
+							PGC_USERSET, 0, NULL, NULL, NULL);
+	DefineCustomEnumVariable("turbohybrid.multivector_exact_rerank",
+							 "Exact heap rerank mode for multivector MaxSim scans",
+							 "topk fetches a bounded document-candidate prefix from the heap and recomputes exact f32 MaxSim; off keeps approximate TurboQuant ordering.",
+							 &pgturbohybrid_multivector_exact_rerank,
+							 PGTURBOHYBRID_MULTIVECTOR_EXACT_RERANK_TOPK,
+							 pgturbohybrid_multivector_exact_rerank_options,
+							 PGC_USERSET, 0, NULL, NULL, NULL);
+	DefineCustomIntVariable("turbohybrid.multivector_exact_rerank_k",
+							"Maximum document candidates exact-reranked for multivector MaxSim scans",
+							"Bounds heap tuple fetches and exact query-token by document-token MaxSim work.",
+							&pgturbohybrid_multivector_exact_rerank_k,
 							100, 1, 100000,
 							PGC_USERSET, 0, NULL, NULL, NULL);
 	DefineCustomIntVariable("turbohybrid.max_union_candidates", "Maximum candidates retained while fusing dense and BM25 branches",

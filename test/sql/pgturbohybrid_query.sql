@@ -73,6 +73,8 @@ BEGIN
 		'turbohybrid.linear_fallback_notice_threshold_ratio',
 		'turbohybrid.max_union_candidates',
 		'turbohybrid.multivector_doc_candidate_k',
+		'turbohybrid.multivector_exact_rerank',
+		'turbohybrid.multivector_exact_rerank_k',
 		'turbohybrid.multivector_max_dim',
 		'turbohybrid.multivector_max_doc_vectors',
 		'turbohybrid.multivector_max_query_vectors',
@@ -112,14 +114,18 @@ BEGIN
 		current_setting('turbohybrid.multivector_subvector_k') != '100' OR
 		current_setting('turbohybrid.multivector_unique_docs_per_token') != '100' OR
 		current_setting('turbohybrid.multivector_max_raw_hits_per_token') != '400' OR
-		current_setting('turbohybrid.multivector_doc_candidate_k') != '100' THEN
-		RAISE EXCEPTION 'unexpected multivector defaults: doc %, query %, subvector %, unique %, raw %, docs %',
+		current_setting('turbohybrid.multivector_doc_candidate_k') != '100' OR
+		current_setting('turbohybrid.multivector_exact_rerank') != 'topk' OR
+		current_setting('turbohybrid.multivector_exact_rerank_k') != '100' THEN
+		RAISE EXCEPTION 'unexpected multivector defaults: doc %, query %, subvector %, unique %, raw %, docs %, rerank %, rerank_k %',
 			current_setting('turbohybrid.multivector_max_doc_vectors'),
 			current_setting('turbohybrid.multivector_max_query_vectors'),
 			current_setting('turbohybrid.multivector_subvector_k'),
 			current_setting('turbohybrid.multivector_unique_docs_per_token'),
 			current_setting('turbohybrid.multivector_max_raw_hits_per_token'),
-			current_setting('turbohybrid.multivector_doc_candidate_k');
+			current_setting('turbohybrid.multivector_doc_candidate_k'),
+			current_setting('turbohybrid.multivector_exact_rerank'),
+			current_setting('turbohybrid.multivector_exact_rerank_k');
 	END IF;
 	IF current_setting('turbohybrid.payload_entry_seeding') != 'auto' OR
 		current_setting('turbohybrid.payload_entry_seed_count') != '8' THEN
@@ -236,10 +242,14 @@ SET turbohybrid.multivector_subvector_k = 1;
 SET turbohybrid.multivector_unique_docs_per_token = 1;
 SET turbohybrid.multivector_max_raw_hits_per_token = 1;
 SET turbohybrid.multivector_doc_candidate_k = 1;
+SET turbohybrid.multivector_exact_rerank = off;
+SET turbohybrid.multivector_exact_rerank_k = 1;
 RESET turbohybrid.multivector_subvector_k;
 RESET turbohybrid.multivector_unique_docs_per_token;
 RESET turbohybrid.multivector_max_raw_hits_per_token;
 RESET turbohybrid.multivector_doc_candidate_k;
+RESET turbohybrid.multivector_exact_rerank;
+RESET turbohybrid.multivector_exact_rerank_k;
 RESET turbohybrid.dense_uncertainty_retry;
 RESET turbohybrid.dense_uncertainty_retry_max_passes;
 RESET turbohybrid.dense_uncertainty_retry_multiplier;
@@ -311,6 +321,12 @@ BEGIN
 	BEGIN
 		EXECUTE 'SET turbohybrid.multivector_doc_candidate_k = 2147483647';
 		RAISE EXCEPTION 'expected multivector_doc_candidate_k cap error';
+	EXCEPTION WHEN invalid_parameter_value THEN
+	END;
+
+	BEGIN
+		EXECUTE 'SET turbohybrid.multivector_exact_rerank_k = 2147483647';
+		RAISE EXCEPTION 'expected multivector_exact_rerank_k cap error';
 	EXCEPTION WHEN invalid_parameter_value THEN
 	END;
 

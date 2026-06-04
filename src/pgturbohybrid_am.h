@@ -177,6 +177,14 @@ extern int	pgturbohybrid_multivector_subvector_k;
 extern int	pgturbohybrid_multivector_unique_docs_per_token;
 extern int	pgturbohybrid_multivector_max_raw_hits_per_token;
 extern int	pgturbohybrid_multivector_doc_candidate_k;
+extern int	pgturbohybrid_multivector_exact_rerank;
+extern int	pgturbohybrid_multivector_exact_rerank_k;
+
+typedef enum PgturbohybridMultiVectorExactRerankMode
+{
+	PGTURBOHYBRID_MULTIVECTOR_EXACT_RERANK_OFF,
+	PGTURBOHYBRID_MULTIVECTOR_EXACT_RERANK_TOPK
+}			PgturbohybridMultiVectorExactRerankMode;
 
 typedef enum PgturbohybridProfile
 {

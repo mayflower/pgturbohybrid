@@ -77,6 +77,12 @@ BEGIN
 		RAISE EXCEPTION 'expected multivector_doc_candidate_k cap error';
 	EXCEPTION WHEN invalid_parameter_value THEN
 	END;
+
+	BEGIN
+		EXECUTE 'SET turbohybrid.multivector_exact_rerank_k = 2147483647';
+		RAISE EXCEPTION 'expected multivector_exact_rerank_k cap error';
+	EXCEPTION WHEN invalid_parameter_value THEN
+	END;
 END
 $$;
 DO $$

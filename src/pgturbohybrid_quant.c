@@ -8480,6 +8480,108 @@ PgturbohybridGraphHeapRescore(IndexScanDesc scan, PgturbohybridGraphScanOpaque s
 	return 0;
 }
 
+static int
+PgturbohybridMultiVectorExactRerankLimit(int count)
+{
+	int64		limit;
+
+	if (count <= 0 ||
+		pgturbohybrid_multivector_exact_rerank ==
+		PGTURBOHYBRID_MULTIVECTOR_EXACT_RERANK_OFF)
+		return 0;
+
+	limit = Min((int64) count,
+				(int64) pgturbohybrid_multivector_doc_candidate_k);
+	limit = Min(limit, (int64) pgturbohybrid_multivector_exact_rerank_k);
+	return (int) Max((int64) 0, limit);
+}
+
+static int
+PgturbohybridMultiVectorExactHeapRerank(IndexScanDesc scan,
+										PgturbohybridGraphScanOpaque so,
+										const PgturbohybridMultiVector *query,
+										TqDenseCandidate *candidates,
+										int count)
+{
+	TupleTableSlot *slot;
+	TupleDesc	desc;
+	AttrNumber	denseAttno;
+	int			limit;
+	int			rescored = 0;
+	instr_time	start;
+
+	limit = PgturbohybridMultiVectorExactRerankLimit(count);
+	if (limit <= 0 || query == NULL || candidates == NULL ||
+		scan == NULL || scan->heapRelation == NULL ||
+		scan->indexRelation == NULL || scan->indexRelation->rd_index == NULL)
+		return 0;
+
+	denseAttno =
+		scan->indexRelation->rd_index->indkey.values[PGTURBOHYBRID_DENSE_KEY_INDEX];
+	desc = RelationGetDescr(scan->heapRelation);
+	if (denseAttno <= 0 || denseAttno > desc->natts)
+		return 0;
+
+	INSTR_TIME_SET_CURRENT(start);
+	slot = table_slot_create(scan->heapRelation, NULL);
+	for (int i = 0; i < limit; i++)
+	{
+		Datum		value;
+		bool		isnull;
+		bool		visible;
+		char	   *valuePtr;
+		PgturbohybridMultiVector *doc;
+		double		exactMaxsim;
+		instr_time	fetchStart;
+
+		CHECK_FOR_INTERRUPTS();
+		if (candidates[i].exactScored)
+			continue;
+
+		INSTR_TIME_SET_CURRENT(fetchStart);
+		visible = table_tuple_fetch_row_version(scan->heapRelation,
+												&candidates[i].heaptid,
+												scan->xs_snapshot,
+												slot);
+		PgturbohybridGraphAddElapsedUs(&so->graphHeapFetchUs, fetchStart);
+		if (!visible)
+		{
+			ExecClearTuple(slot);
+			continue;
+		}
+
+		value = slot_getattr(slot, denseAttno, &isnull);
+		if (isnull)
+		{
+			ExecClearTuple(slot);
+			continue;
+		}
+
+		valuePtr = DatumGetPointer(value);
+		doc = PgturbohybridDatumGetMultiVector(value);
+		PgturbohybridCheckSameMultiVectorDims(query, doc);
+		exactMaxsim = TqMultiVectorMaxSimScalar(query, doc);
+		candidates[i].distance = -exactMaxsim;
+		candidates[i].similarity = exactMaxsim / (double) query->count;
+		candidates[i].exactScored = true;
+		rescored++;
+		if ((char *) doc != valuePtr)
+			pfree(doc);
+		ExecClearTuple(slot);
+	}
+	ExecDropSingleTupleTableSlot(slot);
+
+	PgturbohybridGraphAddElapsedUs(&so->graphHeapRescoreUs, start);
+	if (rescored > 0)
+	{
+		so->graphHeapRescoreCount += rescored;
+		so->graphExactRescoreSource = PGTURBOHYBRID_EXACT_RESCORE_SOURCE_HEAP;
+		so->graphEffectiveRescoreBand = limit;
+		return limit;
+	}
+	return 0;
+}
+
 typedef struct PgturbohybridMultiVectorDocKey
 {
 	BlockNumber block;
@@ -8608,6 +8710,7 @@ PgturbohybridGraphCollectMultiVectorDenseCandidates(IndexScanDesc scan,
 	int			searchEf;
 	int			docLimit;
 	int			docCount = 0;
+	int			exactRerankCount = 0;
 	bool		emptyIndex = false;
 
 	if (so == NULL)
@@ -8810,6 +8913,12 @@ PgturbohybridGraphCollectMultiVectorDenseCandidates(IndexScanDesc scan,
 	if (docCount > 1)
 		qsort(candidates, docCount, sizeof(TqDenseCandidate),
 			  PgturbohybridMultiVectorDenseCandidateCompare);
+	exactRerankCount =
+		PgturbohybridMultiVectorExactHeapRerank(scan, so, mv, candidates,
+												docCount);
+	if (exactRerankCount > 0 && docCount > 1)
+		qsort(candidates, docCount, sizeof(TqDenseCandidate),
+			  PgturbohybridMultiVectorDenseCandidateCompare);
 	for (int i = 0; i < docCount; i++)
 		candidates[i].rank = i + 1;
 
@@ -8820,7 +8929,9 @@ PgturbohybridGraphCollectMultiVectorDenseCandidates(IndexScanDesc scan,
 		stats->denseCandidatesRequested = targetK > 0 ? targetK : docLimit;
 		stats->effectiveResultTarget = (uint32) Max(so->graphEffectiveResultTarget, 0);
 		stats->effectiveSearchEf = (uint32) Max(so->graphEffectiveSearchEf, 0);
+		stats->effectiveRescoreBand = (uint32) Max(so->graphEffectiveRescoreBand, 0);
 		stats->denseCandidatesReturned = docCount;
+		stats->heapRescoreCount = so->graphHeapRescoreCount;
 		stats->codePagesRead = so->graphCodePagesRead;
 		stats->adjPagesRead = so->graphAdjPagesRead;
 		stats->prepareUs = so->graphPrepareUs;
@@ -8828,8 +8939,10 @@ PgturbohybridGraphCollectMultiVectorDenseCandidates(IndexScanDesc scan,
 		stats->entryUs = so->graphEntryUs;
 		stats->baseUs = so->graphBaseUs;
 		stats->batchUs = so->graphBatchUs;
+		stats->heapFetchUs = so->graphHeapFetchUs;
+		stats->heapRescoreUs = so->graphHeapRescoreUs;
 		stats->sortUs = so->graphSortUs;
-		stats->exactRescoreSource = PGTURBOHYBRID_EXACT_RESCORE_SOURCE_NONE;
+		stats->exactRescoreSource = so->graphExactRescoreSource;
 	}
 	so->tqGraphResults = NULL;
 	so->tqGraphResultCount = docCount;
