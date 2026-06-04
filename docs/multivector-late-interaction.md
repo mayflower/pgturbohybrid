@@ -258,4 +258,5 @@ For resident-cache sizing, `turbohybrid_estimate_memory(index)` reports
 - Hybrid multivector search currently supports document-level RRF. Treat other
   fusion modes as unsupported unless tests and docs for that mode say otherwise.
 - SIMD MaxSim kernels are optional; scalar is always available and defines the
-  semantics.
+  semantics. SIMD-enabled builds may dispatch to AVX-512F, AVX2, or NEON exact
+  rerank kernels.
