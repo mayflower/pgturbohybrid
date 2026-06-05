@@ -197,6 +197,12 @@ See [`docs/multivector-late-interaction.md`](docs/multivector-late-interaction.m
 for dense-only and hybrid examples, tuning guidance, diagnostics, and current
 limitations.
 
+For local ColBERT embedding inside PostgreSQL, see
+[`docs/colbert-llama-extension.md`](docs/colbert-llama-extension.md). It
+describes the companion `pg_colbert_llama` extension, which keeps llama.cpp
+model loading separate from the `pgturbohybrid` index AM and returns
+`turbohybrid_multivector` values through the public SQL API.
+
 ## When It Is Useful
 
 Try `pgturbohybrid` when you are evaluating:

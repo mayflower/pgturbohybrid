@@ -31,6 +31,11 @@
   `pg_config --version`; the flake currently provides PostgreSQL 17. If TAP
   modules appear unavailable, first re-check that the command is running inside
   `nix develop` before treating it as a project or system issue.
+- For live `pg_colbert_llama` development and validation, use the small 15m
+  ColBERT pair: `VAGOsolutions/SauerkrautLM-Multi-ColBERT-15m` for PyLate
+  parity and `johannhartmann/SauerkrautLM-Multi-ColBERT-15m-GGUF` for the
+  PostgreSQL/llama.cpp GGUF path. Keep GGUFs under
+  `.nix-dev/models/colbert-15m/`, which is ignored and must not be committed.
 
 ## Multivector / Late Interaction
 

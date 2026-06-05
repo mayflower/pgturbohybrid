@@ -132,6 +132,54 @@
               }
             ) { };
 
+          mkPgColbertLlama =
+            {
+              pgvector,
+              pgturbohybrid,
+              engine ? "stub",
+            }:
+            postgresql.pkgs.callPackage (
+              {
+                lib,
+                postgresql,
+                postgresqlBuildExtension,
+              }:
+              postgresqlBuildExtension {
+                pname = "pg_colbert_llama";
+                version = "0.1.0";
+                src = cleanSource;
+                sourceRoot = "source/extensions/pg_colbert_llama";
+                enableUpdateScript = false;
+
+                buildInputs =
+                  [
+                    pgvector
+                    pgturbohybrid
+                  ]
+                  ++ lib.optionals (engine == "llama") [
+                    pkgs.llama-cpp
+                  ];
+                makeFlags =
+                  [
+                    "VECTOR_INCLUDE=${pgvector}/include/server/extension/vector"
+                    "PG_COLBERT_LLAMA_ENGINE=${engine}"
+                  ]
+                  ++ lib.optionals (engine == "llama") [
+                    "LLAMA_CPP_INCLUDE=${pkgs.llama-cpp}/include"
+                    "LLAMA_CPP_LIB=${pkgs.llama-cpp}/lib"
+                    "LLAMA_CPP_BACKEND_DIR=${pkgs.llama-cpp}/bin"
+                    "LLAMA_CPP_LDFLAGS=-Wl,-rpath,${pkgs.llama-cpp}/lib"
+                  ];
+
+                meta = {
+                  description = "ColBERT embedding companion extension for pgturbohybrid";
+                  homepage = "https://github.com/mayflower/pgturbohybrid";
+                  license = lib.licenses.postgresql;
+                  platforms = postgresql.meta.platforms;
+                };
+              }
+            ) { };
+
           mkDevSet =
             {
               suffix,
@@ -139,10 +187,26 @@
             }:
             let
               pgturbohybrid = mkPgturbohybrid { inherit pgvector; };
+              pgColbertLlamaStub = mkPgColbertLlama {
+                inherit pgvector pgturbohybrid;
+                engine = "stub";
+              };
+              pgColbertLlamaLlama = mkPgColbertLlama {
+                inherit pgvector pgturbohybrid;
+                engine = "llama";
+              };
               postgresWithExtensions = postgresql.withPackages (
                 _: [
                   pgvector
                   pgturbohybrid
+                  pgColbertLlamaStub
+                ]
+              );
+              postgresWithLlamaExtensions = postgresql.withPackages (
+                _: [
+                  pgvector
+                  pgturbohybrid
+                  pgColbertLlamaLlama
                 ]
               );
 
@@ -194,6 +258,7 @@
                     export TH_LOG_FILE="''${TH_LOG_FILE:-$TH_LOG_DIR/postgres.log}"
                     export PG_CONFIG="${postgresql.pg_config}/bin/pg_config"
                     export VECTOR_INCLUDE="${pgvector}/include/server/extension/vector"
+                    export TH_EMPTY_POSTGRES_LISTEN_ADDRESS=""
 
                     mkdir -p "$TH_STATE_DIR" "$PGHOST" "$TH_LOG_DIR"
 
@@ -207,20 +272,30 @@
                   {
                     echo "unix_socket_directories = '$PGHOST'"
                     echo "port = $TH_PGPORT"
-                    echo "listen_addresses = 'localhost'"
+                    if [ "''${TH_POSTGRES_SOCKET_ONLY:-0}" = "1" ]; then
+                      echo "listen_addresses = '$TH_EMPTY_POSTGRES_LISTEN_ADDRESS'"
+                    else
+                      echo "listen_addresses = 'localhost'"
+                    fi
                     echo "log_min_messages = warning"
                     echo "client_min_messages = warning"
                   } >> "$PGDATA/postgresql.conf"
                 fi
 
                 if ! pg_ctl -D "$PGDATA" status >/dev/null 2>&1; then
-                  pg_ctl -D "$PGDATA" -l "$TH_LOG_FILE" -o "-k '$PGHOST' -p '$TH_PGPORT'" start
+                  if ! pg_ctl -D "$PGDATA" -l "$TH_LOG_FILE" -o "-k '$PGHOST' -p '$TH_PGPORT'" start; then
+                    if [ -f "$TH_LOG_FILE" ]; then
+                      cat "$TH_LOG_FILE" >&2
+                    fi
+                    exit 1
+                  fi
                 fi
 
                 createdb --host="$PGHOST" --port="$TH_PGPORT" --username="$PGUSER" "$PGDATABASE" >/dev/null 2>&1 || true
                 psql --host="$PGHOST" --port="$TH_PGPORT" --username="$PGUSER" --dbname="$PGDATABASE" -v ON_ERROR_STOP=1 <<'SQL'
                 CREATE EXTENSION IF NOT EXISTS vector;
                 CREATE EXTENSION IF NOT EXISTS pgturbohybrid;
+                CREATE EXTENSION IF NOT EXISTS pg_colbert_llama;
                 SQL
 
                 printf 'ready: %s on socket %s port %s database %s\n' "$TH_ENV_NAME" "$PGHOST" "$TH_PGPORT" "$PGDATABASE"
@@ -356,6 +431,80 @@
                 exec uv run "$TH_ROOT/benchmarks/concurrent_dense_bench.py" "$@"
               '';
 
+              colbertBuildStub = mkScript "th-colbert-build-stub" ''
+                exec make -C "$TH_ROOT/extensions/pg_colbert_llama" \
+                  PG_CONFIG="$PG_CONFIG" \
+                  VECTOR_INCLUDE="$VECTOR_INCLUDE" \
+                  PG_COLBERT_LLAMA_ENGINE=stub \
+                  "$@"
+              '';
+
+              colbertTestStub = mkScript "th-colbert-test-stub" ''
+                ${pgInit}/bin/th-pg-init >/dev/null
+                make -C "$TH_ROOT/extensions/pg_colbert_llama" \
+                  PG_CONFIG="$PG_CONFIG" \
+                  VECTOR_INCLUDE="$VECTOR_INCLUDE" \
+                  PG_COLBERT_LLAMA_ENGINE=stub
+                exec make -C "$TH_ROOT/extensions/pg_colbert_llama" \
+                  PG_CONFIG="$PG_CONFIG" \
+                  VECTOR_INCLUDE="$VECTOR_INCLUDE" \
+                  PG_COLBERT_LLAMA_ENGINE=stub \
+                  installcheck
+              '';
+
+              colbertBuildLlama = mkScript "th-colbert-build-llama" ''
+                exec nix --extra-experimental-features 'nix-command flakes' \
+                  build "$TH_ROOT#pg_colbert_llama-llama" \
+                  --print-build-logs \
+                  "$@"
+              '';
+
+              colbertLiveTest = mkScriptWithInputs [ tapPerl ] "th-colbert-live-test"
+                ''
+                  if [ -z "''${PG_COLBERT_LLAMA_TEST_MODEL:-}" ]; then
+                    echo "PG_COLBERT_LLAMA_TEST_MODEL is not set; skipping live pg_colbert_llama TAP tests"
+                    exit 0
+                  fi
+
+                  postgres_with_colbert="''${TH_COLBERT_LLAMA_POSTGRES:-}"
+                  if [ -z "$postgres_with_colbert" ]; then
+                    postgres_with_colbert="$(nix --extra-experimental-features 'nix-command flakes' \
+                      build "$TH_ROOT#postgres-with-colbert-llama" \
+                      --no-link \
+                      --print-out-paths)"
+                  fi
+                  export PATH="$postgres_with_colbert/bin:$PATH"
+
+                  export TH_ENV_NAME="''${TH_ENV_NAME:-${commonEnv.TH_ENV_NAME}-colbert-llama}"
+                  export TH_STATE_DIR="''${TH_STATE_DIR:-$TH_ROOT/.nix-dev/$TH_ENV_NAME}"
+                  export PGDATA="''${PGDATA:-$TH_STATE_DIR/pgdata}"
+                  export PGHOST="''${PGHOST:-$TH_STATE_DIR/run}"
+                  export TH_LOG_DIR="''${TH_LOG_DIR:-$TH_STATE_DIR/log}"
+                  export TH_LOG_FILE="''${TH_LOG_FILE:-$TH_LOG_DIR/postgres.log}"
+                  mkdir -p "$TH_STATE_DIR" "$PGHOST" "$TH_LOG_DIR"
+
+                  if [ ! -s "$PGDATA/PG_VERSION" ]; then
+                    initdb -D "$PGDATA" --username="$PGUSER" --auth=trust --no-locale --encoding=UTF8
+                    {
+                      echo "unix_socket_directories = '$PGHOST'"
+                      echo "port = $TH_PGPORT"
+                      echo "listen_addresses = 'localhost'"
+                      echo "log_min_messages = warning"
+                      echo "client_min_messages = warning"
+                    } >> "$PGDATA/postgresql.conf"
+                  fi
+
+                  if ! pg_ctl -D "$PGDATA" status >/dev/null 2>&1; then
+                    pg_ctl -D "$PGDATA" -l "$TH_LOG_FILE" -o "-k '$PGHOST' -p '$TH_PGPORT'" start
+                  fi
+
+                  export PERL5LIB="${postgresql.src}/test/perl:${postgresql.src}/src/test/perl:''${PERL5LIB:-}"
+                  exec make -C "$TH_ROOT/extensions/pg_colbert_llama" \
+                    PG_CONFIG="$PG_CONFIG" \
+                    bindir="$postgres_with_colbert/bin" \
+                    prove_installcheck
+                '';
+
               scripts = [
                 pgInit
                 pgStart
@@ -375,13 +524,48 @@
                 benchNativeCache
                 benchFiqaQuick
                 benchConcurrentDense
+                colbertBuildStub
+                colbertTestStub
+                colbertBuildLlama
+                colbertLiveTest
               ];
+
+              colbertStubInstallcheck =
+                pkgs.runCommand "pg_colbert_llama-stub-installcheck"
+                  {
+                    nativeBuildInputs = [
+                      colbertTestStub
+                      pgStop
+                      pkgs.clang
+                      pkgs.coreutils
+                    ];
+                  }
+                  ''
+                    cp -R --no-preserve=mode,ownership ${cleanSource} source
+                    chmod -R u+w source
+
+                    export TH_ROOT="$PWD/source"
+                    export TH_ENV_NAME="flake-colbert-stub-${suffix}"
+                    export TH_STATE_DIR="$TMPDIR/$TH_ENV_NAME"
+                    export TH_PGPORT=55433
+                    export PGPORT="$TH_PGPORT"
+                    export PGDATABASE=pgturbohybrid_colbert_check
+                    export TH_POSTGRES_SOCKET_ONLY=1
+
+                    trap 'th-pg-stop >/dev/null 2>&1 || true' EXIT
+                    th-colbert-test-stub
+                    touch "$out"
+                  '';
             in
             {
               inherit
                 pgvector
                 pgturbohybrid
+                pgColbertLlamaStub
+                pgColbertLlamaLlama
+                colbertStubInstallcheck
                 postgresWithExtensions
+                postgresWithLlamaExtensions
                 scripts
                 commonEnv
                 ;
@@ -406,6 +590,7 @@
               packages =
                 [
                   devSet.postgresWithExtensions
+                  postgresql.pg_config
                   pkgs.clang-tools
                   pkgs.git
                   pkgs.gnumake
@@ -439,7 +624,7 @@
                 export PGDATA="$TH_STATE_DIR/pgdata"
                 export TH_LOG_DIR="$TH_STATE_DIR/log"
                 export TH_LOG_FILE="$TH_LOG_DIR/postgres.log"
-                export PATH="${devSet.postgresWithExtensions}/bin:$PATH"
+                export PATH="${postgresql.pg_config}/bin:${devSet.postgresWithExtensions}/bin:$PATH"
 
                 cat <<EOF
                 pgturbohybrid Nix shell
@@ -457,6 +642,10 @@
                   th-test                run smoke + SQL regression tests
                   th-installcheck        run SQL regression tests
                   th-prove-installcheck  run TAP tests
+                  th-colbert-build-stub  build pg_colbert_llama with the stub engine
+                  th-colbert-test-stub   run pg_colbert_llama stub regression tests
+                  th-colbert-build-llama build pg_colbert_llama against llama.cpp
+                  th-colbert-live-test   run gated live ColBERT TAP tests
 
                 Deterministic benchmark helpers:
                   th-bench-retrieval-quality
@@ -481,11 +670,15 @@
           packages = {
             default = stable.postgresWithExtensions;
             postgres-with-extensions = stable.postgresWithExtensions;
+            postgres-with-colbert-llama = stable.postgresWithLlamaExtensions;
             pgturbohybrid = stable.pgturbohybrid;
             pgturbohybrid-nosimd = pgturbohybridNoSimd;
+            pg_colbert_llama = stable.pgColbertLlamaStub;
+            pg_colbert_llama-llama = stable.pgColbertLlamaLlama;
             pgvector = stable.pgvector;
             postgres-with-extensions-pgvector-master = master.postgresWithExtensions;
             pgturbohybrid-pgvector-master = master.pgturbohybrid;
+            pg_colbert_llama-pgvector-master = master.pgColbertLlamaStub;
             pgvector-master = master.pgvector;
           };
 
@@ -500,8 +693,11 @@
 
           checks = {
             pgturbohybrid = stable.pgturbohybrid;
+            pg_colbert_llama = stable.pgColbertLlamaStub;
+            pg_colbert_llama-stub-installcheck = stable.colbertStubInstallcheck;
             postgres-with-extensions = stable.postgresWithExtensions;
             pgturbohybrid-pgvector-master = master.pgturbohybrid;
+            pg_colbert_llama-pgvector-master = master.pgColbertLlamaStub;
             pgturbohybrid-nosimd = pgturbohybridNoSimd;
           };
 
@@ -528,6 +724,14 @@
                 mkApp "Run the retrieval profile autotuning SQL harness" (stableScript "th-bench-tune-profile");
               bench-concurrent-dense =
                 mkApp "Run the concurrent dense Python benchmark via uv" (stableScript "th-bench-concurrent-dense");
+              colbert-build-stub =
+                mkApp "Build pg_colbert_llama with the stub engine" (stableScript "th-colbert-build-stub");
+              colbert-test-stub =
+                mkApp "Run pg_colbert_llama stub regression tests" (stableScript "th-colbert-test-stub");
+              colbert-build-llama =
+                mkApp "Build pg_colbert_llama against llama.cpp" (stableScript "th-colbert-build-llama");
+              colbert-live-test =
+                mkApp "Run gated live pg_colbert_llama TAP tests" (stableScript "th-colbert-live-test");
             };
         };
     in

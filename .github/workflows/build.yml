@@ -118,6 +118,60 @@ jobs:
           path: perf-smoke-results.json
           if-no-files-found: error
 
+  pg-colbert-llama-stub:
+    name: pg_colbert_llama stub pg17 pgvector-v0.8.2
+    runs-on: ubuntu-24.04
+    env:
+      PG_CONFIG: /usr/lib/postgresql/17/bin/pg_config
+      PG_COLBERT_LLAMA_ENGINE: stub
+    steps:
+      - uses: actions/checkout@v6
+
+      - uses: ankane/setup-postgres@v1
+        with:
+          postgres-version: 17
+          dev-files: true
+
+      - name: Build and install upstream pgvector
+        run: |
+          PGVECTOR_DIR="${RUNNER_TEMP:-$PWD/.deps}/pgvector-v0.8.2"
+          rm -rf "$PGVECTOR_DIR"
+          git clone --depth 1 --branch v0.8.2 https://github.com/pgvector/pgvector.git "$PGVECTOR_DIR"
+          make -C "$PGVECTOR_DIR"
+          sudo --preserve-env=PG_CONFIG make -C "$PGVECTOR_DIR" install
+          echo "VECTOR_INCLUDE=$PGVECTOR_DIR/src" >> "$GITHUB_ENV"
+
+      - name: Build and install pgturbohybrid
+        run: |
+          make clean
+          make
+          sudo --preserve-env=PG_CONFIG make install
+        env:
+          PG_CFLAGS: -DUSE_ASSERT_CHECKING -Wall -Wextra -Werror -Wno-unused-parameter -Wno-sign-compare
+
+      - name: Build and install pg_colbert_llama stub
+        run: |
+          make -C extensions/pg_colbert_llama clean
+          make -C extensions/pg_colbert_llama
+          sudo env \
+            PG_CONFIG="$PG_CONFIG" \
+            VECTOR_INCLUDE="$VECTOR_INCLUDE" \
+            PG_COLBERT_LLAMA_ENGINE="$PG_COLBERT_LLAMA_ENGINE" \
+            make -C extensions/pg_colbert_llama install
+
+      - name: Run pg_colbert_llama stub regression tests
+        run: make -C extensions/pg_colbert_llama installcheck
+
+      - uses: actions/upload-artifact@v4
+        if: failure()
+        with:
+          name: pg-colbert-llama-stub-regression
+          path: |
+            extensions/pg_colbert_llama/regression.diffs
+            extensions/pg_colbert_llama/regression.out
+            extensions/pg_colbert_llama/log/
+          if-no-files-found: ignore
+
   macos:
     name: ${{ matrix.os }} pg${{ matrix.postgres }} pgvector-${{ matrix.pgvector_ref }}
     runs-on: ${{ matrix.os }}

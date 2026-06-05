@@ -39,10 +39,16 @@ typedef struct PgturbohybridGraphExecWrapperState
 	LimitState  *limitstate;
 }			PgturbohybridGraphExecWrapperState;
 
+typedef struct PgturbohybridGraphExecWrapperFrame
+{
+	List	   *owned_wrapper_states;
+}			PgturbohybridGraphExecWrapperFrame;
+
 static ExecutorStart_hook_type prev_ExecutorStart_hook = NULL;
 static ExecutorRun_hook_type prev_ExecutorRun_hook = NULL;
 static ExecutorEnd_hook_type prev_ExecutorEnd_hook = NULL;
 static List *tqgraph_exec_wrapper_states = NIL;
+static List *tqgraph_exec_wrapper_frames = NIL;
 static int64 tqgraph_active_limit_tuple_target = -1;
 static double tqgraph_active_estimated_filter_selectivity = -1.0;
 static bool tqgraph_active_payload_filter_valid = false;
@@ -64,6 +70,7 @@ static void PgturbohybridExecutorRunHook(QueryDesc *queryDesc,
 static void PgturbohybridExecutorEndHook(QueryDesc *queryDesc);
 static void PgturbohybridGraphExecutorStart(QueryDesc *queryDesc, int eflags);
 static void PgturbohybridGraphExecutorEnd(QueryDesc *queryDesc);
+static void PgturbohybridGraphExecutorRestorePrevious(void);
 static TupleTableSlot *PgturbohybridGraphExecIndexScanWithController(PlanState *planstate);
 static void PgturbohybridGraphWrapControlledIndexScans(PlanState *planstate, LimitState *limitstate);
 static PgturbohybridGraphExecWrapperState *PgturbohybridGraphFindWrapperState(PlanState *planstate);
@@ -155,7 +162,6 @@ PgturbohybridExecutorStartHook(QueryDesc *queryDesc, int eflags)
 	}
 	PG_CATCH();
 	{
-		tqgraph_exec_wrapper_states = NIL;
 		if (am_started)
 			PgturbohybridAmExecutorEnd(queryDesc);
 		else
@@ -190,7 +196,7 @@ PgturbohybridExecutorRunHook(QueryDesc *queryDesc, ScanDirection direction,
 	}
 	PG_CATCH();
 	{
-		tqgraph_exec_wrapper_states = NIL;
+		PgturbohybridGraphExecutorRestorePrevious();
 		PgturbohybridAmExecutorAbort();
 		PG_RE_THROW();
 	}
@@ -202,8 +208,23 @@ PgturbohybridGraphExecutorStart(QueryDesc *queryDesc, int eflags)
 {
 	(void) eflags;
 
-	tqgraph_exec_wrapper_states = NIL;
-	PgturbohybridGraphWrapControlledIndexScans(queryDesc->planstate, NULL);
+	{
+		PgturbohybridGraphExecWrapperFrame *frame =
+			palloc(sizeof(PgturbohybridGraphExecWrapperFrame));
+
+		frame->owned_wrapper_states = NIL;
+		tqgraph_exec_wrapper_frames = lappend(tqgraph_exec_wrapper_frames, frame);
+	}
+	PG_TRY();
+	{
+		PgturbohybridGraphWrapControlledIndexScans(queryDesc->planstate, NULL);
+	}
+	PG_CATCH();
+	{
+		PgturbohybridGraphExecutorRestorePrevious();
+		PG_RE_THROW();
+	}
+	PG_END_TRY();
 }
 
 static void
@@ -223,7 +244,27 @@ PgturbohybridGraphExecutorEnd(QueryDesc *queryDesc)
 {
 	(void) queryDesc;
 
-	tqgraph_exec_wrapper_states = NIL;
+	PgturbohybridGraphExecutorRestorePrevious();
+}
+
+static void
+PgturbohybridGraphExecutorRestorePrevious(void)
+{
+	PgturbohybridGraphExecWrapperFrame *frame;
+	ListCell   *lc;
+
+	if (tqgraph_exec_wrapper_frames == NIL)
+	{
+		tqgraph_exec_wrapper_states = NIL;
+		return;
+	}
+
+	frame = llast(tqgraph_exec_wrapper_frames);
+	foreach(lc, frame->owned_wrapper_states)
+		tqgraph_exec_wrapper_states =
+			list_delete_ptr(tqgraph_exec_wrapper_states, lfirst(lc));
+	tqgraph_exec_wrapper_frames =
+		list_delete_last(tqgraph_exec_wrapper_frames);
 }
 
 static TupleTableSlot *
@@ -309,6 +350,14 @@ PgturbohybridGraphWrapControlledIndexScans(PlanState *planstate, LimitState *lim
 		wrapper_state->original_exec_proc_node = planstate->ExecProcNodeReal;
 		wrapper_state->limitstate = limitstate;
 		tqgraph_exec_wrapper_states = lappend(tqgraph_exec_wrapper_states, wrapper_state);
+		if (tqgraph_exec_wrapper_frames != NIL)
+		{
+			PgturbohybridGraphExecWrapperFrame *frame =
+				llast(tqgraph_exec_wrapper_frames);
+
+			frame->owned_wrapper_states =
+				lappend(frame->owned_wrapper_states, wrapper_state);
+		}
 		ExecSetExecProcNode(planstate, PgturbohybridGraphExecIndexScanWithController);
 	}
 

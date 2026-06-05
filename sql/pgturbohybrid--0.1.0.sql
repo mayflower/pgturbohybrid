@@ -92,6 +92,13 @@ CREATE FUNCTION turbohybrid_multivector(vector[]) RETURNS turbohybrid_multivecto
 	AS 'MODULE_PATHNAME', 'pgturbohybrid_multivector_constructor'
 	LANGUAGE C IMMUTABLE STRICT PARALLEL SAFE;
 
+CREATE FUNCTION turbohybrid_multivector_from_float4(
+	raw_values pg_catalog.float4[],
+	dim pg_catalog.int4
+) RETURNS turbohybrid_multivector
+	AS 'MODULE_PATHNAME', 'pgturbohybrid_multivector_from_float4'
+	LANGUAGE C IMMUTABLE STRICT PARALLEL SAFE;
+
 CREATE FUNCTION turbohybrid_multivector_dims(turbohybrid_multivector) RETURNS pg_catalog.int4
 	AS 'MODULE_PATHNAME', 'pgturbohybrid_multivector_dims'
 	LANGUAGE C IMMUTABLE STRICT PARALLEL SAFE;
