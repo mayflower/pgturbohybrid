@@ -50,6 +50,24 @@ typedef struct PgColbertLegacyBertMetadata
 	double		layerNormEps;
 } PgColbertLegacyBertMetadata;
 
+typedef enum PgColbertProjectionModuleKind
+{
+	PG_COLBERT_PROJECTION_DENSE = 1,
+	PG_COLBERT_PROJECTION_NORMALIZE = 2,
+	PG_COLBERT_PROJECTION_TRUNCATE = 3
+} PgColbertProjectionModuleKind;
+
+typedef struct PgColbertProjectionModule
+{
+	PgColbertProjectionModuleKind kind;
+	int32		inputDim;
+	int32		outputDim;
+	bool		transposed;
+	float	   *weight;
+	float	   *bias;
+	int32		p;
+} PgColbertProjectionModule;
+
 typedef struct PgColbertCachedModel
 {
 	char	   *alias;
@@ -65,13 +83,34 @@ typedef struct PgColbertCachedModel
 	int32		nLayer;
 	int32		nHead;
 	bool		hasProjection;
-	bool		projectionTransposed;
-	int32		projectionIn;
-	int32		projectionOut;
-	float	   *projection;
+	PgColbertProjectionModule projectionModules[PG_COLBERT_LLAMA_MAX_PROJECTION_MODULES];
+	int32		projectionModuleCount;
+	int32		maxProjectionDim;
 	uint64		lastUsed;
 	struct PgColbertCachedModel *next;
 } PgColbertCachedModel;
+
+typedef struct PgColbertTensorInfo
+{
+	bool		found;
+	uint32_t	type;
+	uint32_t	nDims;
+	uint64_t	dims[4];
+	uint64_t	offset;
+} PgColbertTensorInfo;
+
+typedef struct PgColbertEncodePlan
+{
+	llama_token *tokens;
+	int32	   *positionIds;
+	int32	   *tokenTypeIds;
+	int32	   *attentionMask;
+	bool	   *retainMask;
+	bool	   *outputMask;
+	const char **retainReasons;
+	int32		nTokens;
+	int32		outputCount;
+} PgColbertEncodePlan;
 
 static bool pg_colbert_llama_backend_initialized = false;
 static bool pg_colbert_llama_backend_gpu_loaded = false;
@@ -100,21 +139,33 @@ static int	PgColbertBuildLegacyBertOverrides(const PgColbertModelSpec *spec,
 											   const char *path,
 											   struct llama_model_kv_override *overrides,
 											   int maxOverrides);
-static bool PgColbertLoadProjection(const char *path,
+static bool PgColbertLoadProjection(const PgColbertModelSpec *spec,
+									const char *path,
 									PgColbertCachedModel *entry,
 									MemoryContext ctx,
 									char **errorMessage);
-static bool PgColbertLoadProjectionSidecar(const char *path,
+static bool PgColbertLoadProjectionSidecar(const PgColbertModelSpec *spec,
+										   const char *path,
 										   PgColbertCachedModel *entry,
 										   MemoryContext ctx,
 										   char **errorMessage);
-static bool PgColbertUnsupportedGgufMetadata(const char *path,
-											 const char **reason);
+static bool PgColbertValidateProjectionProfile(const PgColbertModelSpec *spec,
+											  MemoryContext ctx,
+											  char **errorMessage);
+static bool PgColbertCheckTokenizerCapability(const PgColbertModelSpec *spec,
+											  const char *path,
+											  const char **reason);
+static bool PgColbertCheckCanonicalBertMetadata(const char *path,
+												MemoryContext ctx,
+												char **errorMessage);
 static bool PgColbertIsPunctuationToken(const struct llama_vocab *vocab,
 										llama_token token);
+static bool PgColbertProfileHasSkiplistToken(const PgColbertModelSpec *spec,
+											 llama_token token);
 static bool PgColbertShouldRetainToken(const struct llama_vocab *vocab,
 									   const PgColbertModelSpec *spec,
-									   llama_token token);
+									   llama_token token,
+									   const char **reason);
 static bool PgColbertEncodeBody(const PgColbertModelSpec *spec,
 								const char *input,
 								MemoryContext ctx,
@@ -240,7 +291,11 @@ PgColbertFreeCachedModel(PgColbertCachedModel *entry)
 		llama_model_free(entry->model);
 	free(entry->alias);
 	free(entry->path);
-	free(entry->projection);
+	for (int32 i = 0; i < entry->projectionModuleCount; i++)
+	{
+		free(entry->projectionModules[i].weight);
+		free(entry->projectionModules[i].bias);
+	}
 	free(entry);
 }
 
@@ -585,13 +640,12 @@ PgColbertBuildLegacyBertOverrides(const PgColbertModelSpec *spec,
 	if (!metadata.hasContextLength && metadata.hasMaxPositionEmbeddings)
 		PgColbertAddIntOverride(overrides, &count, maxOverrides,
 								"bert.context_length",
-								metadata.maxPositionEmbeddings < spec->nCtx ?
-								metadata.maxPositionEmbeddings : spec->nCtx);
+								metadata.maxPositionEmbeddings);
 	if (!metadata.hasEmbeddingLength && metadata.hasHiddenSize)
 		PgColbertAddIntOverride(overrides, &count, maxOverrides,
 								"bert.embedding_length",
 								metadata.hiddenSize);
-	if (!metadata.hasFeedForwardLength && metadata.hasIntermediateSize)
+	if (metadata.hasIntermediateSize)
 		PgColbertAddIntOverride(overrides, &count, maxOverrides,
 								"bert.feed_forward_length",
 								metadata.intermediateSize);
@@ -599,7 +653,7 @@ PgColbertBuildLegacyBertOverrides(const PgColbertModelSpec *spec,
 		PgColbertAddIntOverride(overrides, &count, maxOverrides,
 								"bert.block_count",
 								metadata.numHiddenLayers);
-	if (!metadata.hasAttentionHeadCount && metadata.hasNumAttentionHeads)
+	if (metadata.hasNumAttentionHeads)
 		PgColbertAddIntOverride(overrides, &count, maxOverrides,
 								"bert.attention.head_count",
 								metadata.numAttentionHeads);
@@ -613,6 +667,62 @@ PgColbertBuildLegacyBertOverrides(const PgColbertModelSpec *spec,
 								metadata.typeVocabSize);
 
 	return count;
+}
+
+static void
+PgColbertAppendMissingKey(char *buffer, size_t bufferSize, const char *key)
+{
+	if (buffer[0] != '\0')
+		strlcat(buffer, ", ", bufferSize);
+	strlcat(buffer, key, bufferSize);
+}
+
+static bool
+PgColbertCheckCanonicalBertMetadata(const char *path, MemoryContext ctx,
+									char **errorMessage)
+{
+	PgColbertLegacyBertMetadata metadata;
+	bool		legacyBert;
+	char		missing[512];
+
+	if (!PgColbertReadLegacyBertMetadata(path, &metadata))
+		return true;
+
+	legacyBert = metadata.hasHiddenSize || metadata.hasIntermediateSize ||
+		metadata.hasNumHiddenLayers || metadata.hasNumAttentionHeads ||
+		metadata.hasMaxPositionEmbeddings || metadata.hasLayerNormEps ||
+		metadata.hasTypeVocabSize;
+	if (!legacyBert)
+		return true;
+
+	missing[0] = '\0';
+	if (!metadata.hasContextLength)
+		PgColbertAppendMissingKey(missing, sizeof(missing),
+								  "bert.context_length");
+	if (!metadata.hasEmbeddingLength)
+		PgColbertAppendMissingKey(missing, sizeof(missing),
+								  "bert.embedding_length");
+	if (!metadata.hasFeedForwardLength)
+		PgColbertAppendMissingKey(missing, sizeof(missing),
+								  "bert.feed_forward_length");
+	if (!metadata.hasBlockCount)
+		PgColbertAppendMissingKey(missing, sizeof(missing),
+								  "bert.block_count");
+	if (!metadata.hasAttentionHeadCount)
+		PgColbertAppendMissingKey(missing, sizeof(missing),
+								  "bert.attention.head_count");
+	if (!metadata.hasAttentionLayerNormEps)
+		PgColbertAppendMissingKey(missing, sizeof(missing),
+								  "bert.attention.layer_norm_epsilon");
+	if (!metadata.hasTokenizerTokenTypeCount)
+		PgColbertAppendMissingKey(missing, sizeof(missing),
+								  "tokenizer.ggml.token_type_count");
+	if (missing[0] == '\0')
+		return true;
+
+	return PgColbertSetError(ctx, errorMessage,
+							 "unsupported GGUF model \"%s\": missing llama.cpp BERT metadata keys: %s; re-export with canonical llama.cpp BERT hparams",
+							 path, missing);
 }
 
 #ifdef PG_COLBERT_LLAMA_BACKEND_DIR
@@ -701,81 +811,140 @@ PgColbertHalfToFloat(uint16_t value)
 }
 
 static bool
-PgColbertReadProjectionData(FILE *file, uint32_t projType, uint64_t dim0,
-							uint64_t dim1, PgColbertCachedModel *entry,
-							MemoryContext ctx, char **errorMessage)
+PgColbertReadFloatTensor(FILE *file, uint64_t dataStart,
+						 const PgColbertTensorInfo *tensor,
+						 float **values, MemoryContext ctx,
+						 char **errorMessage)
 {
-	bool		transposed = false;
-	uint64_t	projElements;
+	uint64_t	elements = 1;
 	int			typeSize;
-	float	   *projection;
+	uint64_t	target;
+	float	   *out;
 
-	if (dim0 == (uint64_t) entry->nEmbdModel)
-	{
-		entry->projectionIn = (int32) dim0;
-		entry->projectionOut = (int32) dim1;
-		transposed = false;
-	}
-	else if (dim1 == (uint64_t) entry->nEmbdModel)
-	{
-		entry->projectionIn = (int32) dim1;
-		entry->projectionOut = (int32) dim0;
-		transposed = true;
-	}
-	else
-		return PgColbertSetError(ctx, errorMessage,
-								 "GGUF ColBERT projection shape is %llu x %llu, but model embedding output is %d",
-								 (unsigned long long) dim0,
-								 (unsigned long long) dim1,
-								 entry->nEmbdModel);
-
-	typeSize = PgColbertGgmlTypeSize(projType);
+	typeSize = PgColbertGgmlTypeSize(tensor->type);
 	if (typeSize == 0)
 		return PgColbertSetError(ctx, errorMessage,
-								 "GGUF ColBERT projection uses unsupported tensor type %u",
-								 projType);
+								 "GGUF ColBERT projection tensor uses unsupported type %u",
+								 tensor->type);
+	for (uint32_t i = 0; i < tensor->nDims; i++)
+		elements *= tensor->dims[i];
 
-	projElements = dim0 * dim1;
-	projection = (float *) malloc(sizeof(float) * (size_t) projElements);
-	if (projection == NULL)
+	out = (float *) malloc(sizeof(float) * (size_t) elements);
+	if (out == NULL)
 		return PgColbertSetError(ctx, errorMessage,
-								 "out of memory while loading ColBERT projection");
+								 "out of memory while loading ColBERT projection tensor");
 
-	if (projType == 0)
+	target = dataStart + tensor->offset;
+	if (fseek(file, 0, SEEK_SET) != 0 || !PgColbertSkipBytes(file, target))
 	{
-		if (!PgColbertReadExact(file, projection,
-								sizeof(float) * (size_t) projElements))
+		free(out);
+		return PgColbertSetError(ctx, errorMessage,
+								 "could not seek to ColBERT projection tensor data");
+	}
+
+	if (tensor->type == 0)
+	{
+		if (!PgColbertReadExact(file, out, sizeof(float) * (size_t) elements))
 		{
-			free(projection);
+			free(out);
 			return PgColbertSetError(ctx, errorMessage,
-									 "could not read ColBERT projection data");
+									 "could not read ColBERT projection tensor data");
 		}
 	}
 	else
 	{
-		for (uint64_t i = 0; i < projElements; i++)
+		for (uint64_t i = 0; i < elements; i++)
 		{
 			uint16_t	value;
 
 			if (!PgColbertReadExact(file, &value, sizeof(value)))
 			{
-				free(projection);
+				free(out);
 				return PgColbertSetError(ctx, errorMessage,
-										 "could not read ColBERT projection data");
+										 "could not read ColBERT projection tensor data");
 			}
-			projection[i] = PgColbertHalfToFloat(value);
+			out[i] = PgColbertHalfToFloat(value);
 		}
 	}
 
-	entry->projection = projection;
-	entry->hasProjection = true;
-	entry->projectionTransposed = transposed;
-	entry->nEmbdOut = entry->projectionOut;
+	*values = out;
 	return true;
 }
 
 static bool
-PgColbertLoadProjectionSidecar(const char *path, PgColbertCachedModel *entry,
+PgColbertConfigureDenseProjection(PgColbertProjectionModule *module,
+								  const PgColbertTensorInfo *weight,
+								  int32 currentDim,
+								  MemoryContext ctx,
+								  char **errorMessage)
+{
+	uint64_t	dim0;
+	uint64_t	dim1;
+
+	if (weight->nDims != 2)
+		return PgColbertSetError(ctx, errorMessage,
+								 "GGUF ColBERT dense projection tensor must be 2-dimensional");
+	dim0 = weight->dims[0];
+	dim1 = weight->dims[1];
+
+	if (dim0 == (uint64_t) currentDim)
+	{
+		module->inputDim = currentDim;
+		module->outputDim = (int32) dim1;
+		module->transposed = false;
+	}
+	else if (dim1 == (uint64_t) currentDim)
+	{
+		module->inputDim = currentDim;
+		module->outputDim = (int32) dim0;
+		module->transposed = true;
+	}
+	else
+		return PgColbertSetError(ctx, errorMessage,
+								 "GGUF ColBERT dense projection shape is %llu x %llu, but current projection dimension is %d",
+								 (unsigned long long) dim0,
+								 (unsigned long long) dim1,
+								 currentDim);
+
+	return true;
+}
+
+static bool
+PgColbertValidateBiasTensor(const PgColbertTensorInfo *bias, int32 outputDim,
+							MemoryContext ctx, char **errorMessage)
+{
+	if (bias->nDims != 1)
+		return PgColbertSetError(ctx, errorMessage,
+								 "GGUF ColBERT dense bias tensor must be 1-dimensional");
+	if (bias->dims[0] != (uint64_t) outputDim)
+		return PgColbertSetError(ctx, errorMessage,
+								 "GGUF ColBERT dense bias has dimension %llu, expected %d",
+								 (unsigned long long) bias->dims[0],
+								 outputDim);
+	return true;
+}
+
+static void
+PgColbertProjectionDefaultWeightName(char *name, size_t size, int denseOrdinal)
+{
+	if (denseOrdinal == 0)
+		snprintf(name, size, "%s", "colbert.proj.weight");
+	else
+		snprintf(name, size, "%s.%d", "colbert.proj.weight", denseOrdinal);
+}
+
+static void
+PgColbertProjectionDefaultBiasName(char *name, size_t size, int denseOrdinal)
+{
+	if (denseOrdinal == 0)
+		snprintf(name, size, "%s", "colbert.proj.bias");
+	else
+		snprintf(name, size, "%s.%d", "colbert.proj.bias", denseOrdinal);
+}
+
+static bool
+PgColbertLoadProjectionSidecar(const PgColbertModelSpec *spec,
+							   const char *path, PgColbertCachedModel *entry,
 							   MemoryContext ctx, char **errorMessage)
 {
 	FILE	   *file;
@@ -786,6 +955,8 @@ PgColbertLoadProjectionSidecar(const char *path, PgColbertCachedModel *entry,
 	uint64_t	dim0;
 	uint64_t	dim1;
 	bool		ok;
+	PgColbertTensorInfo weight;
+	PgColbertProjectionModule module;
 
 	sidecarPath = (char *) malloc(pathLen + strlen(".colbert_proj") + 1);
 	if (sidecarPath == NULL)
@@ -815,15 +986,123 @@ PgColbertLoadProjectionSidecar(const char *path, PgColbertCachedModel *entry,
 		return ok;
 	}
 
-	ok = PgColbertReadProjectionData(file, projType, dim0, dim1, entry, ctx,
-									 errorMessage);
+	memset(&weight, 0, sizeof(weight));
+	weight.found = true;
+	weight.type = projType;
+	weight.nDims = 2;
+	weight.dims[0] = dim0;
+	weight.dims[1] = dim1;
+	weight.offset = 0;
+	memset(&module, 0, sizeof(module));
+	module.kind = PG_COLBERT_PROJECTION_DENSE;
+	if (PgColbertGgmlTypeSize(projType) == 0)
+		ok = PgColbertSetError(ctx, errorMessage,
+							   "ColBERT projection sidecar uses unsupported tensor type %u",
+							   projType);
+	else if (spec->profile.loaded &&
+			 spec->profile.projectionModuleCount > 0 &&
+			 spec->profile.projectionModules[0].hasBias)
+		ok = PgColbertSetError(ctx, errorMessage,
+							   "ColBERT projection sidecar cannot satisfy dense bias tensor \"%s\"; store the bias in GGUF metadata",
+							   spec->profile.projectionModules[0].biasTensor[0] != '\0' ?
+							   spec->profile.projectionModules[0].biasTensor :
+							   "colbert.proj.bias");
+	else
+		ok = PgColbertConfigureDenseProjection(&module, &weight,
+											   entry->nEmbdOut, ctx,
+											   errorMessage);
+	if (ok)
+	{
+		uint64_t	elements = dim0 * dim1;
+
+		module.weight = (float *) malloc(sizeof(float) * (size_t) elements);
+		if (module.weight == NULL)
+			ok = PgColbertSetError(ctx, errorMessage,
+								   "out of memory while loading ColBERT projection sidecar");
+		else if (projType == 0)
+		{
+			if (!PgColbertReadExact(file, module.weight,
+									sizeof(float) * (size_t) elements))
+				ok = PgColbertSetError(ctx, errorMessage,
+									   "could not read ColBERT projection sidecar data");
+		}
+		else
+		{
+			for (uint64_t i = 0; ok && i < elements; i++)
+			{
+				uint16_t	value;
+
+				if (!PgColbertReadExact(file, &value, sizeof(value)))
+					ok = PgColbertSetError(ctx, errorMessage,
+										   "could not read ColBERT projection sidecar data");
+				else
+					module.weight[i] = PgColbertHalfToFloat(value);
+			}
+		}
+	}
+	if (ok)
+	{
+		entry->projectionModules[entry->projectionModuleCount++] = module;
+		entry->hasProjection = true;
+		entry->nEmbdOut = module.outputDim;
+		entry->maxProjectionDim = Max(entry->maxProjectionDim, module.outputDim);
+		if (spec->profile.loaded && spec->profile.projectionModuleCount > 1)
+		{
+			for (int32 i = 1; i < spec->profile.projectionModuleCount; i++)
+			{
+				const PgColbertProjectionModuleProfile *profileModule =
+					&spec->profile.projectionModules[i];
+				PgColbertProjectionModule extra;
+				bool		isNormalize =
+					strcmp(profileModule->type, "normalize") == 0;
+				bool		isTruncate =
+					strcmp(profileModule->type, "truncate") == 0;
+
+				memset(&extra, 0, sizeof(extra));
+				if (isNormalize)
+				{
+					extra.kind = PG_COLBERT_PROJECTION_NORMALIZE;
+					extra.inputDim = entry->nEmbdOut;
+					extra.outputDim = entry->nEmbdOut;
+					extra.p = profileModule->p > 0 ? profileModule->p : 2;
+				}
+				else if (isTruncate)
+				{
+					extra.kind = PG_COLBERT_PROJECTION_TRUNCATE;
+					extra.inputDim = entry->nEmbdOut;
+					extra.outputDim = profileModule->outputDim;
+					if (extra.outputDim <= 0 || extra.outputDim > extra.inputDim)
+					{
+						ok = PgColbertSetError(ctx, errorMessage,
+											   "ColBERT truncate projection output_dim %d is invalid for input_dim %d",
+											   extra.outputDim, extra.inputDim);
+						break;
+					}
+				}
+				else
+				{
+					ok = PgColbertSetError(ctx, errorMessage,
+										   "ColBERT projection sidecar can only satisfy the first dense module; module %d requires GGUF tensors",
+										   i);
+					break;
+				}
+				entry->projectionModules[entry->projectionModuleCount++] = extra;
+				entry->nEmbdOut = extra.outputDim;
+				entry->maxProjectionDim = Max(entry->maxProjectionDim,
+											  extra.outputDim);
+			}
+		}
+	}
+	if (!ok)
+		free(module.weight);
 	fclose(file);
 	free(sidecarPath);
 	return ok;
 }
 
 static bool
-PgColbertLoadProjection(const char *path, PgColbertCachedModel *entry,
+PgColbertLoadProjection(const PgColbertModelSpec *spec, const char *path,
+						PgColbertCachedModel *entry,
 						MemoryContext ctx, char **errorMessage)
 {
 	FILE	   *file;
@@ -832,13 +1111,15 @@ PgColbertLoadProjection(const char *path, PgColbertCachedModel *entry,
 	uint64_t	tensorCount;
 	uint64_t	kvCount;
 	uint64_t	alignment = 32;
-	bool		found = false;
-	uint64_t	dim0 = 0;
-	uint64_t	dim1 = 0;
-	uint32_t	projType = 0;
-	uint64_t	projOffset = 0;
 	uint64_t	dataStart;
 	bool		ok = false;
+	PgColbertTensorInfo weightInfos[PG_COLBERT_LLAMA_MAX_PROJECTION_MODULES];
+	PgColbertTensorInfo biasInfos[PG_COLBERT_LLAMA_MAX_PROJECTION_MODULES];
+	char		weightNames[PG_COLBERT_LLAMA_MAX_PROJECTION_MODULES][PG_COLBERT_LLAMA_MAX_PROFILE_STRING];
+	char		biasNames[PG_COLBERT_LLAMA_MAX_PROJECTION_MODULES][PG_COLBERT_LLAMA_MAX_PROFILE_STRING];
+	int32		moduleCount = 0;
+	int32		denseOrdinal = 0;
+	bool		requiresProjection = false;
 
 	file = fopen(path, "rb");
 	if (file == NULL)
@@ -852,6 +1133,45 @@ PgColbertLoadProjection(const char *path, PgColbertCachedModel *entry,
 		!PgColbertReadExact(file, &tensorCount, sizeof(tensorCount)) ||
 		!PgColbertReadExact(file, &kvCount, sizeof(kvCount)))
 		goto malformed;
+
+	memset(weightInfos, 0, sizeof(weightInfos));
+	memset(biasInfos, 0, sizeof(biasInfos));
+	memset(weightNames, 0, sizeof(weightNames));
+	memset(biasNames, 0, sizeof(biasNames));
+
+	if (spec->profile.loaded && spec->profile.projectionModuleCount > 0)
+		moduleCount = spec->profile.projectionModuleCount;
+	else
+		moduleCount = 1;
+
+	for (int32 i = 0; i < moduleCount; i++)
+	{
+		const PgColbertProjectionModuleProfile *profileModule =
+			(spec->profile.loaded && spec->profile.projectionModuleCount > 0) ?
+			&spec->profile.projectionModules[i] : NULL;
+		const char *type = profileModule != NULL ? profileModule->type : "dense";
+		bool		isDense =
+			strcmp(type, "dense") == 0 || strcmp(type, "linear") == 0;
+
+		if (!isDense)
+			continue;
+		if (profileModule != NULL && profileModule->weightTensor[0] != '\0')
+			snprintf(weightNames[i], sizeof(weightNames[i]), "%s",
+					 profileModule->weightTensor);
+		else
+			PgColbertProjectionDefaultWeightName(weightNames[i],
+												sizeof(weightNames[i]),
+												denseOrdinal);
+		if (profileModule != NULL && profileModule->biasTensor[0] != '\0')
+			snprintf(biasNames[i], sizeof(biasNames[i]), "%s",
+					 profileModule->biasTensor);
+		else if (profileModule != NULL && profileModule->hasBias)
+			PgColbertProjectionDefaultBiasName(biasNames[i],
+											  sizeof(biasNames[i]),
+											  denseOrdinal);
+		requiresProjection = true;
+		denseOrdinal++;
+	}
 
 	for (uint64_t i = 0; i < kvCount; i++)
 	{
@@ -906,40 +1226,141 @@ PgColbertLoadProjection(const char *path, PgColbertCachedModel *entry,
 			!PgColbertReadExact(file, &offset, sizeof(offset)))
 			goto malformed;
 
-		if (strcmp(name, "colbert.proj.weight") == 0)
+		for (int32 j = 0; j < moduleCount; j++)
 		{
-			if (nDims != 2)
-				return PgColbertSetError(ctx, errorMessage,
-										 "GGUF ColBERT projection tensor must be 2-dimensional");
-			found = true;
-			dim0 = dims[0];
-			dim1 = dims[1];
-			projType = type;
-			projOffset = offset;
+			if (weightNames[j][0] != '\0' && strcmp(name, weightNames[j]) == 0)
+			{
+				weightInfos[j].found = true;
+				weightInfos[j].type = type;
+				weightInfos[j].nDims = nDims;
+				memcpy(weightInfos[j].dims, dims, sizeof(dims));
+				weightInfos[j].offset = offset;
+			}
+			if (biasNames[j][0] != '\0' && strcmp(name, biasNames[j]) == 0)
+			{
+				biasInfos[j].found = true;
+				biasInfos[j].type = type;
+				biasInfos[j].nDims = nDims;
+				memcpy(biasInfos[j].dims, dims, sizeof(dims));
+				biasInfos[j].offset = offset;
+			}
 		}
 	}
 
-	if (!found)
+	if (ftell(file) < 0)
+		goto malformed;
+	dataStart = PgColbertAlign((uint64_t) ftell(file), alignment);
+
+	if (requiresProjection)
 	{
-		fclose(file);
-		return PgColbertLoadProjectionSidecar(path, entry, ctx, errorMessage);
+		bool		missingWeight = false;
+
+		for (int32 i = 0; i < moduleCount; i++)
+		{
+			if (weightNames[i][0] != '\0' && !weightInfos[i].found)
+				missingWeight = true;
+			if (biasNames[i][0] != '\0' && !biasInfos[i].found)
+				return PgColbertSetError(ctx, errorMessage,
+										 "GGUF ColBERT projection bias tensor \"%s\" was not found",
+										 biasNames[i]);
+		}
+		if (missingWeight)
+		{
+			fclose(file);
+			return PgColbertLoadProjectionSidecar(spec, path, entry, ctx,
+												 errorMessage);
+		}
+	}
+	else if (!spec->profile.loaded || spec->profile.projectionModuleCount == 0)
+		goto no_projection;
+
+	entry->maxProjectionDim = entry->nEmbdOut;
+	for (int32 i = 0; i < moduleCount; i++)
+	{
+		const PgColbertProjectionModuleProfile *profileModule =
+			(spec->profile.loaded && spec->profile.projectionModuleCount > 0) ?
+			&spec->profile.projectionModules[i] : NULL;
+		const char *type = profileModule != NULL ? profileModule->type : "dense";
+		bool		isDense =
+			strcmp(type, "dense") == 0 || strcmp(type, "linear") == 0;
+		bool		isNormalize = strcmp(type, "normalize") == 0;
+		bool		isTruncate = strcmp(type, "truncate") == 0;
+		PgColbertProjectionModule module;
+
+		memset(&module, 0, sizeof(module));
+		if (isDense)
+		{
+			module.kind = PG_COLBERT_PROJECTION_DENSE;
+			if (!PgColbertConfigureDenseProjection(&module, &weightInfos[i],
+												   entry->nEmbdOut, ctx,
+												   errorMessage))
+				goto cleanup;
+			if (!PgColbertReadFloatTensor(file, dataStart, &weightInfos[i],
+										  &module.weight, ctx, errorMessage))
+			{
+				free(module.weight);
+				free(module.bias);
+				goto cleanup;
+			}
+			if (biasNames[i][0] != '\0')
+			{
+				if (!PgColbertValidateBiasTensor(&biasInfos[i],
+												module.outputDim, ctx,
+												errorMessage) ||
+					!PgColbertReadFloatTensor(file, dataStart, &biasInfos[i],
+											  &module.bias, ctx,
+											  errorMessage))
+				{
+					free(module.weight);
+					free(module.bias);
+					goto cleanup;
+				}
+			}
+		}
+		else if (isNormalize)
+		{
+			module.kind = PG_COLBERT_PROJECTION_NORMALIZE;
+			module.inputDim = entry->nEmbdOut;
+			module.outputDim = entry->nEmbdOut;
+			module.p = profileModule != NULL && profileModule->p > 0 ?
+				profileModule->p : 2;
+		}
+		else if (isTruncate)
+		{
+			module.kind = PG_COLBERT_PROJECTION_TRUNCATE;
+			module.inputDim = entry->nEmbdOut;
+			module.outputDim = profileModule != NULL ?
+				profileModule->outputDim : 0;
+			if (module.outputDim <= 0 || module.outputDim > module.inputDim)
+			{
+				PgColbertSetError(ctx, errorMessage,
+								  "ColBERT truncate projection output_dim %d is invalid for input_dim %d",
+								  module.outputDim, module.inputDim);
+				goto cleanup;
+			}
+		}
+		else
+		{
+			PgColbertSetError(ctx, errorMessage,
+							  "ColBERT projection profile uses unsupported module type \"%s\"",
+							  type);
+			goto cleanup;
+		}
+
+		entry->projectionModules[entry->projectionModuleCount++] = module;
+		entry->hasProjection = true;
+		entry->nEmbdOut = module.outputDim;
+		entry->maxProjectionDim = Max(entry->maxProjectionDim,
+									  module.outputDim);
 	}
 
-	{
-		long		pos = ftell(file);
-		uint64_t	target;
+	if (entry->projectionModuleCount == 0)
+		goto no_projection;
+	ok = true;
+	goto cleanup;
 
-		if (pos < 0)
-			goto malformed;
-		dataStart = PgColbertAlign((uint64_t) pos, alignment);
-		target = dataStart + projOffset;
-		if (fseek(file, 0, SEEK_SET) != 0 ||
-			!PgColbertSkipBytes(file, target))
-			goto malformed;
-	}
-
-	ok = PgColbertReadProjectionData(file, projType, dim0, dim1, entry, ctx,
-									 errorMessage);
+no_projection:
+	ok = true;
 	goto cleanup;
 
 malformed:
@@ -953,7 +1374,52 @@ cleanup:
 }
 
 static bool
-PgColbertUnsupportedGgufMetadata(const char *path, const char **reason)
+PgColbertValidateProjectionProfile(const PgColbertModelSpec *spec,
+								   MemoryContext ctx,
+								   char **errorMessage)
+{
+	if (!spec->profile.loaded || spec->profile.projectionModuleCount == 0)
+		return true;
+
+	for (int32 i = 0; i < spec->profile.projectionModuleCount; i++)
+	{
+		const PgColbertProjectionModuleProfile *module =
+			&spec->profile.projectionModules[i];
+		bool		isLinear =
+			strcmp(module->type, "linear") == 0 ||
+			strcmp(module->type, "dense") == 0;
+		bool		isNormalize = strcmp(module->type, "normalize") == 0;
+		bool		isTruncate = strcmp(module->type, "truncate") == 0;
+
+		if (isLinear)
+		{
+			if (module->activation[0] != '\0' &&
+				strcmp(module->activation, "identity") != 0)
+				return PgColbertSetError(ctx, errorMessage,
+										 "ColBERT projection profile uses unsupported activation \"%s\"",
+										 module->activation);
+			continue;
+		}
+		if (isNormalize)
+			continue;
+		if (isTruncate)
+		{
+			if (module->outputDim > 0 && module->outputDim != spec->expectedDim)
+				return PgColbertSetError(ctx, errorMessage,
+										 "ColBERT truncate module output_dim %d does not match expected dimension %d",
+										 module->outputDim, spec->expectedDim);
+			continue;
+		}
+		return PgColbertSetError(ctx, errorMessage,
+								 "ColBERT projection profile uses unsupported module type \"%s\"",
+								 module->type);
+	}
+	return true;
+}
+
+static bool
+PgColbertCheckTokenizerCapability(const PgColbertModelSpec *spec,
+								  const char *path, const char **reason)
 {
 	PgColbertLegacyBertMetadata metadata;
 
@@ -964,14 +1430,128 @@ PgColbertUnsupportedGgufMetadata(const char *path, const char **reason)
 	if (metadata.hasHuggingFaceTokenizer &&
 		(!metadata.hasTokenizerModel || !metadata.hasTokenizerList))
 	{
-		if (metadata.hasPgColbertSchema)
-			*reason = "the GGUF uses the pg_colbert schema with embedded Hugging Face tokenizer JSON, but this llama.cpp engine currently requires canonical tokenizer.ggml metadata and tensors";
+		if (spec->profile.loaded &&
+			strcmp(spec->profile.tokenizerSource, "hf_json") == 0)
+			*reason = "unsupported_tokenizer: prepare this GGUF with tokenizer.ggml metadata using colbert-gguf-converter --target-runtime llama_cpp";
+		else if (metadata.hasPgColbertSchema)
+			*reason = "unsupported_tokenizer: the GGUF uses the pg_colbert schema with embedded Hugging Face tokenizer JSON, but this llama.cpp engine currently requires canonical tokenizer.ggml metadata and tensors";
 		else
-			*reason = "the GGUF embeds Hugging Face tokenizer JSON but does not provide canonical tokenizer.ggml metadata required by this llama.cpp engine";
+			*reason = "unsupported_tokenizer: the GGUF embeds Hugging Face tokenizer JSON but does not provide canonical tokenizer.ggml metadata required by this llama.cpp engine";
 		return true;
 	}
 
 	return false;
+}
+
+static bool
+PgColbertNormalizeVector(float *values, int32 dim)
+{
+	double		norm = 0.0;
+
+	for (int32 i = 0; i < dim; i++)
+		norm += (double) values[i] * (double) values[i];
+	if (norm <= 0.0 || !std::isfinite(norm))
+		return false;
+	norm = sqrt(norm);
+	for (int32 i = 0; i < dim; i++)
+		values[i] = (float) ((double) values[i] / norm);
+	return true;
+}
+
+static bool
+PgColbertApplyProjectionChain(const PgColbertCachedModel *entry,
+							  const float *embedding,
+							  float *workspaceA,
+							  float *workspaceB,
+							  const float **vector,
+							  int32 *dim,
+							  MemoryContext ctx,
+							  char **errorMessage)
+{
+	const float *current = embedding;
+	float	   *currentOwned = NULL;
+	int32		currentDim = entry->nEmbdModel;
+	bool		useA = true;
+
+	for (int32 i = 0; i < entry->projectionModuleCount; i++)
+	{
+		const PgColbertProjectionModule *module = &entry->projectionModules[i];
+		float	   *out = useA ? workspaceA : workspaceB;
+
+		if (module->inputDim != currentDim)
+			return PgColbertSetError(ctx, errorMessage,
+									 "ColBERT projection module %d expected input_dim %d but received %d",
+									 i, module->inputDim, currentDim);
+
+		if (module->kind == PG_COLBERT_PROJECTION_DENSE)
+		{
+			for (int32 j = 0; j < module->outputDim; j++)
+			{
+				double		value = module->bias != NULL ?
+					(double) module->bias[j] : 0.0;
+
+				for (int32 k = 0; k < module->inputDim; k++)
+				{
+					size_t		idx;
+
+					if (module->transposed)
+						idx = (size_t) k * (size_t) module->outputDim +
+							(size_t) j;
+					else
+						idx = (size_t) j * (size_t) module->inputDim +
+							(size_t) k;
+					value += (double) current[k] *
+						(double) module->weight[idx];
+				}
+				out[j] = (float) value;
+			}
+			current = out;
+			currentOwned = out;
+			currentDim = module->outputDim;
+			useA = !useA;
+			continue;
+		}
+
+		if (module->kind == PG_COLBERT_PROJECTION_NORMALIZE)
+		{
+			if (currentOwned == NULL)
+			{
+				memcpy(out, current, sizeof(float) * (size_t) currentDim);
+				current = out;
+				currentOwned = out;
+				useA = !useA;
+			}
+			if (!PgColbertNormalizeVector(currentOwned, currentDim))
+				return PgColbertSetError(ctx, errorMessage,
+										 "ColBERT projection normalization saw a zero or non-finite vector");
+			continue;
+		}
+
+		if (module->kind == PG_COLBERT_PROJECTION_TRUNCATE)
+		{
+			if (module->outputDim > currentDim)
+				return PgColbertSetError(ctx, errorMessage,
+										 "ColBERT truncate projection output_dim %d exceeds input_dim %d",
+										 module->outputDim, currentDim);
+			if (currentOwned == NULL)
+			{
+				memcpy(out, current, sizeof(float) * (size_t) module->outputDim);
+				current = out;
+				currentOwned = out;
+				useA = !useA;
+			}
+			currentDim = module->outputDim;
+			continue;
+		}
+
+		return PgColbertSetError(ctx, errorMessage,
+								 "ColBERT projection module %d has unknown kind %d",
+								 i, (int) module->kind);
+	}
+
+	*vector = current;
+	*dim = currentDim;
+	return true;
 }
 
 static bool
@@ -1033,10 +1613,14 @@ PgColbertLoadModel(const PgColbertModelSpec *spec, const char *path,
 		}
 	}
 
-	if (PgColbertUnsupportedGgufMetadata(path, &unsupportedReason))
+	if (PgColbertCheckTokenizerCapability(spec, path, &unsupportedReason))
 		return PgColbertSetError(ctx, errorMessage,
 								 "unsupported GGUF model \"%s\": %s",
 								 path, unsupportedReason);
+	if (!PgColbertCheckCanonicalBertMetadata(path, ctx, errorMessage))
+		return false;
+	if (!PgColbertValidateProjectionProfile(spec, ctx, errorMessage))
+		return false;
 
 	loaded = (PgColbertCachedModel *) calloc(1, sizeof(PgColbertCachedModel));
 	if (loaded == NULL)
@@ -1077,7 +1661,7 @@ PgColbertLoadModel(const PgColbertModelSpec *spec, const char *path,
 	loaded->nBatch = spec->nBatch;
 	loaded->nGpuLayers = spec->nGpuLayers;
 
-	if (!PgColbertLoadProjection(path, loaded, ctx, errorMessage))
+	if (!PgColbertLoadProjection(spec, path, loaded, ctx, errorMessage))
 	{
 		PgColbertFreeCachedModel(loaded);
 		return false;
@@ -1134,18 +1718,34 @@ PgColbertIsPunctuationToken(const struct llama_vocab *vocab, llama_token token)
 
 	return piece[0] != '\0' &&
 		piece[1] == '\0' &&
-		strchr("!\"#$%&'()*+,-./:;<=>?@[\\]^_`{|}~", piece[0]) != NULL;
+			strchr("!\"#$%&'()*+,-./:;<=>?@[\\]^_`{|}~", piece[0]) != NULL;
+}
+
+static bool
+PgColbertProfileHasSkiplistToken(const PgColbertModelSpec *spec,
+								 llama_token token)
+{
+	for (int32 i = 0; i < spec->profile.skiplistTokenCount; i++)
+	{
+		if (spec->profile.skiplistTokenIds[i] == (int32) token)
+			return true;
+	}
+	return false;
 }
 
 static bool
 PgColbertShouldRetainToken(const struct llama_vocab *vocab,
 						   const PgColbertModelSpec *spec,
-						   llama_token token)
+						   llama_token token,
+						   const char **reason)
 {
 	llama_token special;
 
 	if (token == LLAMA_TOKEN_NULL)
+	{
+		*reason = "dropped_null";
 		return false;
+	}
 
 	/*
 	 * PyLate keeps [CLS], the ColBERT prefix token, [SEP], and query
@@ -1153,14 +1753,167 @@ PgColbertShouldRetainToken(const struct llama_vocab *vocab,
 	 * non-padding tokens; punctuation skiplist handling is a scorer concern.
 	 */
 	if (spec->role == PG_COLBERT_ROLE_QUERY)
+	{
+		*reason = "retained_query";
 		return true;
+	}
 
 	special = llama_vocab_pad(vocab);
 	if (special != LLAMA_TOKEN_NULL && token == special)
+	{
+		*reason = "dropped_pad";
 		return false;
+	}
+	if (spec->profile.specialTokens.padTokenId >= 0 &&
+		token == (llama_token) spec->profile.specialTokens.padTokenId)
+	{
+		*reason = "dropped_pad";
+		return false;
+	}
+	if (PgColbertProfileHasSkiplistToken(spec, token))
+	{
+		*reason = "dropped_skiplist_token";
+		return false;
+	}
 	if (PgColbertIsPunctuationToken(vocab, token))
+	{
+		*reason = "dropped_punctuation";
 		return false;
+	}
+	*reason = "retained_document";
 	return true;
+}
+
+static void
+PgColbertFreeEncodePlan(PgColbertEncodePlan *plan)
+{
+	free(plan->tokens);
+	free(plan->positionIds);
+	free(plan->tokenTypeIds);
+	free(plan->attentionMask);
+	free(plan->retainMask);
+	free(plan->outputMask);
+	free(plan->retainReasons);
+	memset(plan, 0, sizeof(*plan));
+}
+
+static bool
+PgColbertBuildEncodePlan(const struct llama_vocab *vocab,
+						 const PgColbertModelSpec *spec,
+						 const char *fullText,
+						 int32 textLen,
+						 PgColbertEncodePlan *plan,
+						 MemoryContext ctx,
+						 char **errorMessage)
+{
+	int32		requiredTokens;
+	int32		tokenCapacity;
+	int32		maxPlanTokens;
+	int32		queryPadTo;
+	int32		outputCount = 0;
+
+	memset(plan, 0, sizeof(*plan));
+	requiredTokens = llama_tokenize(vocab, fullText, textLen, NULL, 0, true,
+									true);
+	if (requiredTokens == INT32_MIN)
+		return PgColbertSetError(ctx, errorMessage,
+								 "llama tokenization failed");
+	if (requiredTokens < 0)
+		requiredTokens = -requiredTokens;
+	if (requiredTokens <= 0)
+		return PgColbertSetError(ctx, errorMessage,
+								 "llama tokenization returned no tokens");
+
+	maxPlanTokens = spec->role == PG_COLBERT_ROLE_QUERY ?
+		spec->profile.queryMaxLength : spec->profile.documentMaxLength;
+	if (maxPlanTokens <= 0)
+		maxPlanTokens = spec->role == PG_COLBERT_ROLE_QUERY ?
+			spec->queryLength : spec->maxVectors;
+	queryPadTo = spec->role == PG_COLBERT_ROLE_QUERY ?
+		spec->profile.queryPadTo : -1;
+	if (queryPadTo <= 0)
+		queryPadTo = spec->queryLength;
+
+	tokenCapacity = requiredTokens;
+	if (spec->role == PG_COLBERT_ROLE_QUERY && queryPadTo > tokenCapacity)
+		tokenCapacity = queryPadTo;
+
+	plan->tokens = (llama_token *) malloc(sizeof(llama_token) *
+										  (size_t) tokenCapacity);
+	if (plan->tokens == NULL)
+		goto oom;
+	plan->nTokens = llama_tokenize(vocab, fullText, textLen, plan->tokens,
+								   tokenCapacity, true, true);
+	if (plan->nTokens < 0)
+	{
+		PgColbertFreeEncodePlan(plan);
+		return PgColbertSetError(ctx, errorMessage,
+								 "llama tokenization failed");
+	}
+	if (plan->nTokens <= 0)
+	{
+		PgColbertFreeEncodePlan(plan);
+		return PgColbertSetError(ctx, errorMessage,
+								 "llama tokenization returned no tokens");
+	}
+	if (maxPlanTokens > 0 && plan->nTokens > maxPlanTokens)
+		plan->nTokens = maxPlanTokens;
+	if (spec->role == PG_COLBERT_ROLE_QUERY && plan->nTokens < queryPadTo)
+	{
+		llama_token mask = spec->profile.queryPadTokenId >= 0 ?
+			(llama_token) spec->profile.queryPadTokenId : llama_vocab_mask(vocab);
+
+		if (mask == LLAMA_TOKEN_NULL)
+		{
+			PgColbertFreeEncodePlan(plan);
+			return PgColbertSetError(ctx, errorMessage,
+									 "llama vocabulary does not define a mask token required for query expansion");
+		}
+		while (plan->nTokens < queryPadTo)
+			plan->tokens[plan->nTokens++] = mask;
+	}
+
+	plan->positionIds = (int32 *) malloc(sizeof(int32) * (size_t) plan->nTokens);
+	plan->tokenTypeIds = (int32 *) malloc(sizeof(int32) * (size_t) plan->nTokens);
+	plan->attentionMask = (int32 *) malloc(sizeof(int32) * (size_t) plan->nTokens);
+	plan->retainMask = (bool *) malloc(sizeof(bool) * (size_t) plan->nTokens);
+	plan->outputMask = (bool *) malloc(sizeof(bool) * (size_t) plan->nTokens);
+	plan->retainReasons =
+		(const char **) malloc(sizeof(const char *) * (size_t) plan->nTokens);
+	if (plan->positionIds == NULL || plan->tokenTypeIds == NULL ||
+		plan->attentionMask == NULL || plan->retainMask == NULL ||
+		plan->outputMask == NULL || plan->retainReasons == NULL)
+		goto oom;
+
+	for (int32 i = 0; i < plan->nTokens; i++)
+	{
+		const char *reason = NULL;
+		bool		retain =
+			PgColbertShouldRetainToken(vocab, spec, plan->tokens[i], &reason);
+
+		plan->positionIds[i] = i;
+		plan->tokenTypeIds[i] = spec->role == PG_COLBERT_ROLE_QUERY ?
+			spec->profile.queryTokenTypeId : spec->profile.documentTokenTypeId;
+		plan->attentionMask[i] = 1;
+		plan->retainMask[i] = retain;
+		plan->outputMask[i] = retain && outputCount < spec->maxVectors;
+		plan->retainReasons[i] = reason != NULL ? reason : "";
+		if (plan->outputMask[i])
+			outputCount++;
+	}
+	plan->outputCount = outputCount;
+	if (plan->outputCount <= 0)
+	{
+		PgColbertFreeEncodePlan(plan);
+		return PgColbertSetError(ctx, errorMessage,
+								 "llama tokenization retained no non-special token vectors");
+	}
+	return true;
+
+oom:
+	PgColbertFreeEncodePlan(plan);
+	return PgColbertSetError(ctx, errorMessage,
+							 "out of memory while building ColBERT encode plan");
 }
 
 static bool
@@ -1171,23 +1924,23 @@ PgColbertEncodeBody(const PgColbertModelSpec *spec, const char *input,
 	MemoryContext oldCtx;
 	char	   *path = NULL;
 	char	   *fullText = NULL;
-	llama_token *tokens = NULL;
-	float	   *projected = NULL;
+	PgColbertEncodePlan plan;
+	float	   *projectionWorkspaceA = NULL;
+	float	   *projectionWorkspaceB = NULL;
 	struct llama_batch batch;
 	const struct llama_vocab *vocab;
 	PgColbertCachedModel *entry = NULL;
 	bool		loadedFromCache = false;
 	bool		cacheOwned = false;
 	int32		textLen;
-	int32		requiredTokens;
-	int32		tokenCapacity;
-	int32		nTokens;
 	int32		retained;
 	bool		ok = false;
 	bool		batchInitialized = false;
 	int32		rc;
+	const char *attentionMaskStatus = "ok";
 
 	memset(&batch, 0, sizeof(batch));
+	memset(&plan, 0, sizeof(plan));
 	memset(output, 0, sizeof(*output));
 
 	if (!PgColbertResolvePath(spec, ctx, &path, errorMessage))
@@ -1214,85 +1967,36 @@ PgColbertEncodeBody(const PgColbertModelSpec *spec, const char *input,
 	memcpy(fullText + strlen(spec->prefix), input, strlen(input) + 1);
 
 	vocab = llama_model_get_vocab(entry->model);
-	requiredTokens = llama_tokenize(vocab, fullText, textLen, NULL, 0, true,
-									true);
-	if (requiredTokens == INT32_MIN)
-		goto tokenize_error;
-	if (requiredTokens < 0)
-		requiredTokens = -requiredTokens;
-	if (requiredTokens <= 0)
-	{
-		PgColbertSetError(ctx, errorMessage,
-						  "llama tokenization returned no tokens");
+	if (!PgColbertBuildEncodePlan(vocab, spec, fullText, textLen, &plan,
+								  ctx, errorMessage))
 		goto cleanup;
-	}
+	if (spec->role == PG_COLBERT_ROLE_QUERY &&
+		spec->profile.loaded &&
+		spec->profile.strictPylateProfile &&
+		!spec->profile.queryAttendToExpansionTokens)
+		attentionMaskStatus = "approximated";
 
-	tokenCapacity = requiredTokens;
-	if (spec->role == PG_COLBERT_ROLE_QUERY && spec->queryLength > tokenCapacity)
-		tokenCapacity = spec->queryLength;
-
-	tokens = (llama_token *) malloc(sizeof(llama_token) * (size_t) tokenCapacity);
-	if (tokens == NULL)
-		goto oom;
-	nTokens = llama_tokenize(vocab, fullText, textLen, tokens, tokenCapacity,
-							 true, true);
-	if (nTokens < 0)
-		goto tokenize_error;
-	if (nTokens <= 0)
-	{
-		PgColbertSetError(ctx, errorMessage,
-						  "llama tokenization returned no tokens");
-		goto cleanup;
-	}
-	if (spec->role == PG_COLBERT_ROLE_QUERY && nTokens < spec->queryLength &&
-		spec->queryLength <= spec->maxVectors)
-	{
-		llama_token mask = llama_vocab_mask(vocab);
-
-		if (mask == LLAMA_TOKEN_NULL)
-		{
-			PgColbertSetError(ctx, errorMessage,
-							  "llama vocabulary does not define a mask token required for query expansion");
-			goto cleanup;
-		}
-		while (nTokens < spec->queryLength)
-			tokens[nTokens++] = mask;
-	}
-
-	if (nTokens > spec->nCtx || nTokens > spec->nBatch)
+	if (plan.nTokens > spec->nCtx || plan.nTokens > spec->nBatch)
 	{
 		PgColbertSetError(ctx, errorMessage,
 						  "tokenized input has %d tokens, exceeding n_ctx=%d or n_batch=%d",
-						  nTokens, spec->nCtx, spec->nBatch);
+						  plan.nTokens, spec->nCtx, spec->nBatch);
 		goto cleanup;
 	}
 
-	retained = 0;
-	for (int32 i = 0; i < nTokens; i++)
-	{
-		if (PgColbertShouldRetainToken(vocab, spec, tokens[i]))
-			retained++;
-	}
-	if (retained > spec->maxVectors)
-		retained = spec->maxVectors;
-	if (retained <= 0)
-	{
-		PgColbertSetError(ctx, errorMessage,
-						  "llama tokenization retained no non-special token vectors");
-		goto cleanup;
-	}
+	retained = plan.outputCount;
 
-	batch = llama_batch_init(nTokens, 0, 1);
+	batch = llama_batch_init(plan.nTokens, 0, 1);
 	batchInitialized = true;
 	if (batch.token == NULL || batch.pos == NULL || batch.n_seq_id == NULL ||
 		batch.seq_id == NULL || batch.logits == NULL)
 		goto oom;
 
-	batch.n_tokens = nTokens;
-	for (int32 i = 0; i < nTokens; i++)
+	batch.n_tokens = plan.nTokens;
+	for (int32 i = 0; i < plan.nTokens; i++)
 	{
-		batch.token[i] = tokens[i];
-		batch.pos[i] = i;
+		batch.token[i] = plan.tokens[i];
+		batch.pos[i] = plan.positionIds[i];
 		batch.n_seq_id[i] = 1;
 		batch.seq_id[i][0] = 0;
 		batch.logits[i] = 1;
@@ -1314,30 +2018,59 @@ PgColbertEncodeBody(const PgColbertModelSpec *spec, const char *input,
 	oldCtx = MemoryContextSwitchTo(ctx);
 	output->engine = PgColbertEngineName();
 	output->path = pstrdup(entry->path);
+	output->input = pstrdup(input);
+	output->prefix = pstrdup(spec->prefix);
+	output->profileSource = pstrdup(spec->profile.sourceName);
+	output->attentionMaskStatus = pstrdup(attentionMaskStatus);
+	output->knownLimitations = pstrdup(spec->profile.knownLimitations);
 	output->dim = entry->nEmbdOut;
 	output->count = retained;
+	output->planTokenCount = plan.nTokens;
 	output->normalized = true;
 	output->loadedFromCache = loadedFromCache;
+	output->tokenDebug =
+		(PgColbertTokenDebug *) palloc0(sizeof(PgColbertTokenDebug) * (Size) plan.nTokens);
 	output->tokenIds = (int32 *) palloc0(sizeof(int32) * (Size) retained);
 	output->values = (float4 *) palloc0(sizeof(float4) * (Size) retained *
 										(Size) entry->nEmbdOut);
+	for (int32 i = 0; i < plan.nTokens; i++)
+	{
+		const char *piece = llama_vocab_get_text(vocab, plan.tokens[i]);
+
+		output->tokenDebug[i].index = i;
+		output->tokenDebug[i].id = (int32) plan.tokens[i];
+		output->tokenDebug[i].piece = piece != NULL ? pstrdup(piece) : NULL;
+		output->tokenDebug[i].positionId = plan.positionIds[i];
+		output->tokenDebug[i].tokenTypeId = plan.tokenTypeIds[i];
+		output->tokenDebug[i].attentionMask = plan.attentionMask[i];
+		output->tokenDebug[i].outputEnabled = plan.outputMask[i];
+		output->tokenDebug[i].retained = plan.retainMask[i];
+		output->tokenDebug[i].retainReason =
+			pstrdup(plan.retainReasons[i]);
+	}
 	MemoryContextSwitchTo(oldCtx);
 
 	if (entry->hasProjection)
 	{
-		projected = (float *) malloc(sizeof(float) * (size_t) entry->projectionOut);
-		if (projected == NULL)
+		int32		workspaceDim = Max(entry->maxProjectionDim, entry->nEmbdModel);
+
+		projectionWorkspaceA =
+			(float *) malloc(sizeof(float) * (size_t) workspaceDim);
+		projectionWorkspaceB =
+			(float *) malloc(sizeof(float) * (size_t) workspaceDim);
+		if (projectionWorkspaceA == NULL || projectionWorkspaceB == NULL)
 			goto oom;
 	}
 
 	retained = 0;
-	for (int32 i = 0; i < nTokens && retained < output->count; i++)
+	for (int32 i = 0; i < plan.nTokens && retained < output->count; i++)
 	{
 		const float *embedding;
 		const float *vector;
+		int32		vectorDim;
 		double		norm = 0.0;
 
-		if (!PgColbertShouldRetainToken(vocab, spec, tokens[i]))
+		if (!plan.outputMask[i])
 			continue;
 
 		embedding = llama_get_embeddings_ith(entry->ctx, i);
@@ -1349,28 +2082,22 @@ PgColbertEncodeBody(const PgColbertModelSpec *spec, const char *input,
 		}
 
 		vector = embedding;
+		vectorDim = entry->nEmbdModel;
 		if (entry->hasProjection)
 		{
-			for (int32 j = 0; j < entry->projectionOut; j++)
+			if (!PgColbertApplyProjectionChain(entry, embedding,
+											   projectionWorkspaceA,
+											   projectionWorkspaceB,
+											   &vector, &vectorDim,
+											   ctx, errorMessage))
+				goto cleanup;
+			if (vectorDim != output->dim)
 			{
-				double		value = 0.0;
-
-				for (int32 k = 0; k < entry->projectionIn; k++)
-				{
-					size_t		idx;
-
-					if (entry->projectionTransposed)
-						idx = (size_t) k * (size_t) entry->projectionOut +
-							(size_t) j;
-					else
-						idx = (size_t) j * (size_t) entry->projectionIn +
-							(size_t) k;
-					value += (double) embedding[k] *
-						(double) entry->projection[idx];
-				}
-				projected[j] = (float) value;
+				PgColbertSetError(ctx, errorMessage,
+								  "ColBERT projection output dimension is %d, expected %d",
+								  vectorDim, output->dim);
+				goto cleanup;
 			}
-			vector = projected;
 		}
 
 		for (int32 j = 0; j < output->dim; j++)
@@ -1383,7 +2110,7 @@ PgColbertEncodeBody(const PgColbertModelSpec *spec, const char *input,
 		}
 
 		norm = sqrt(norm);
-		output->tokenIds[retained] = tokens[i];
+		output->tokenIds[retained] = plan.tokens[i];
 		for (int32 j = 0; j < output->dim; j++)
 			output->values[(Size) retained * (Size) output->dim + (Size) j] =
 				(float4) (vector[j] / norm);
@@ -1398,16 +2125,12 @@ oom:
 					  "out of memory while running llama embedding");
 	goto cleanup;
 
-tokenize_error:
-	PgColbertSetError(ctx, errorMessage,
-					  "llama tokenization failed");
-	goto cleanup;
-
 cleanup:
 	if (batchInitialized)
 		llama_batch_free(batch);
-	free(projected);
-	free(tokens);
+	free(projectionWorkspaceA);
+	free(projectionWorkspaceB);
+	PgColbertFreeEncodePlan(&plan);
 	free(fullText);
 	if (!cacheOwned)
 		PgColbertFreeCachedModel(entry);
@@ -1441,6 +2164,11 @@ PgColbertModelInfoBody(const PgColbertModelSpec *spec, MemoryContext ctx,
 	info->nEmbdOut = entry->nEmbdOut;
 	info->nLayer = entry->nLayer;
 	info->nHead = entry->nHead;
+	info->tokenizerStatus = pstrdup(spec->profile.tokenizerStatus);
+	info->projectionKind = pstrdup(spec->profile.projectionKind);
+	info->projectionStatus = pstrdup(entry->nEmbdOut == spec->expectedDim ?
+									 "ok" : "missing_or_unexpected_dim");
+	info->projectionModuleCount = entry->projectionModuleCount;
 	MemoryContextSwitchTo(oldCtx);
 
 	if (!cacheOwned)

@@ -1,0 +1,21 @@
+{
+  "token_plan_source": "hf_tokenizer_profile_rules",
+  "model_name_or_path": "VAGOsolutions/SauerkrautLM-Multi-ColBERT-15m",
+  "role": "doc",
+  "plans": [
+    {
+      "input_text": "Mars is the Red Planet.",
+      "role": "doc",
+      "token_ids_after_padding_truncation": [
+        101, 30523, 7733, 2003, 1996, 2417, 4774, 1012, 102
+      ],
+      "token_pieces": [
+        "[CLS]", "[D] ", "mars", "is", "the", "red", "planet", ".", "[SEP]"
+      ],
+      "attention_mask": [1, 1, 1, 1, 1, 1, 1, 1, 1],
+      "token_type_ids": [0, 0, 0, 0, 0, 0, 0, 0, 0],
+      "retain_mask": [1, 1, 1, 1, 1, 1, 1, 0, 1],
+      "final_vector_count": 8
+    }
+  ]
+}

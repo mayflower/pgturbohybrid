@@ -1,0 +1,72 @@
+{
+  "schema": "pg_colbert_profile_v1",
+  "source_model_id": "VAGOsolutions/SauerkrautLM-Multi-ColBERT-15m",
+  "source_revision": "main",
+  "backbone_family": "bert",
+  "colbert_family": "pylate",
+  "similarity": "MaxSim",
+  "output_dim": 4,
+  "normalize": true,
+  "tokenizer": {
+    "source": "hf_json",
+    "tokenizer_model": "bert",
+    "special_tokens": {
+      "cls_token_id": 101,
+      "sep_token_id": 102,
+      "pad_token_id": 103,
+      "mask_token_id": 103,
+      "q_token_id": 30522,
+      "d_token_id": 30523
+    },
+    "prefix_token_ids": {
+      "query": [30522],
+      "document": [30523]
+    }
+  },
+  "query": {
+    "prefix": "[Q] ",
+    "max_length": 32,
+    "pad_to": 32,
+    "pad_token_id": 103,
+    "pad_token": "[MASK]",
+    "attend_to_expansion_tokens": false,
+    "attention_mask_policy": "pylate_query_expansion_requested",
+    "retain_policy": "all",
+    "output_policy": "all",
+    "token_type_id": 0
+  },
+  "document": {
+    "prefix": "[D] ",
+    "max_length": 300,
+    "pad_to": null,
+    "attention_mask_policy": "llama_default_noncausal",
+    "retain_policy": "mask_and_skiplist",
+    "skiplist_words": ["."],
+    "skiplist_token_ids": [1012],
+    "token_type_id": 0
+  },
+  "projection": {
+    "kind": "dense",
+    "input_dim": 4,
+    "output_dim": 4,
+    "modules": [
+      {
+        "type": "linear",
+        "in_features": 4,
+        "out_features": 4,
+        "bias": false
+      },
+      {
+        "type": "normalize",
+        "p": 2
+      }
+    ],
+    "normalize_after": true
+  },
+  "compatibility": {
+    "llama_cpp_loadable": true,
+    "requires_profile": true,
+    "strict_pylate_profile": true,
+    "known_limitations": []
+  }
+}

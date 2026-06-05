@@ -1,0 +1,36 @@
+{
+  "token_plan_source": "hf_tokenizer_profile_rules",
+  "model_name_or_path": "VAGOsolutions/SauerkrautLM-Multi-ColBERT-15m",
+  "role": "query",
+  "plans": [
+    {
+      "input_text": "Mars is the Red Planet.",
+      "role": "query",
+      "token_ids_after_padding_truncation": [
+        101, 30522, 7733, 2003, 1996, 2417, 4774, 1012, 102,
+        103, 103, 103, 103, 103, 103, 103, 103, 103, 103, 103,
+        103, 103, 103, 103, 103, 103, 103, 103, 103, 103, 103, 103
+      ],
+      "token_pieces": [
+        "[CLS]", "[Q] ", "mars", "is", "the", "red", "planet", ".", "[SEP]",
+        "[MASK]", "[MASK]", "[MASK]", "[MASK]", "[MASK]", "[MASK]", "[MASK]",
+        "[MASK]", "[MASK]", "[MASK]", "[MASK]", "[MASK]", "[MASK]", "[MASK]",
+        "[MASK]", "[MASK]", "[MASK]", "[MASK]", "[MASK]", "[MASK]", "[MASK]",
+        "[MASK]", "[MASK]"
+      ],
+      "attention_mask": [
+        1, 1, 1, 1, 1, 1, 1, 1, 1, 0, 0, 0, 0, 0, 0, 0,
+        0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0
+      ],
+      "token_type_ids": [
+        0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+        0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0
+      ],
+      "retain_mask": [
+        1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1,
+        1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1
+      ],
+      "final_vector_count": 32
+    }
+  ]
+}

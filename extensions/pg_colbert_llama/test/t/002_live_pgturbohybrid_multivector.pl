@@ -2,6 +2,8 @@ use strict;
 use warnings FATAL => 'all';
 use Test::More;
 use File::Basename qw(basename dirname);
+use File::Copy qw(copy);
+use JSON::PP qw(decode_json);
 
 BEGIN
 {
@@ -19,6 +21,18 @@ my $model_dir = dirname($model_path);
 my $alias = basename($model_path);
 $alias =~ s/\.gguf\z//;
 my $expected_dim = $ENV{PG_COLBERT_LLAMA_EXPECTED_DIM} // 128;
+my $profile_path = $ENV{PG_COLBERT_LLAMA_TEST_PROFILE};
+my $token_plan_golden = $ENV{PG_COLBERT_LLAMA_TOKEN_PLAN_GOLDEN};
+
+if (defined $profile_path && $profile_path ne '')
+{
+	my $sidecar_path = "$model_dir/$alias.gguf.colbert_profile.json";
+	if ($profile_path ne $sidecar_path)
+	{
+		copy($profile_path, $sidecar_path)
+		  or die "copy profile sidecar failed: $!";
+	}
+}
 
 sub sql_literal
 {
@@ -59,10 +73,68 @@ is($node->safe_psql('pg_colbert_llama_live', sprintf(q(
 ), sql_literal("$alias:query"), $expected_dim)), 't',
 	'live model info reports llama projection output and normalization');
 
+if (defined $profile_path && $profile_path ne '')
+{
+	is($node->safe_psql('pg_colbert_llama_live', sprintf(q(
+		WITH info AS (
+			SELECT colbert_model_info(%s) AS payload
+		)
+		SELECT payload->>'profile_loaded' = 'true'
+		       AND payload->>'profile_source' IN ('sidecar', 'gguf')
+		       AND payload->>'profile_schema' = 'pg_colbert_profile_v1'
+		FROM info;
+	), sql_literal("$alias:query"))), 't',
+		'live model info reports profile loaded from sidecar or GGUF');
+}
+
 is($node->safe_psql('pg_colbert_llama_live', sprintf(q(
 	SELECT turbohybrid_multivector_count(colbert_mv(%s, 'test')) > 0;
 ), sql_literal("$alias:query"))), 't',
 	'live query encoding returns at least one token vector');
+
+is($node->safe_psql('pg_colbert_llama_live', sprintf(q(
+	WITH debug AS (
+		SELECT colbert_debug(%s, 'red planet') AS payload
+	)
+	SELECT payload ? 'token_plan'
+	       AND jsonb_typeof(payload->'token_plan'->'tokens') = 'array'
+	       AND jsonb_array_length(payload->'token_plan'->'tokens') >=
+	           (payload->>'vector_count')::int
+	FROM debug;
+), sql_literal("$alias:query"))), 't',
+	'live colbert_debug exposes a token plan with at least vector-count tokens');
+
+if (defined $token_plan_golden && $token_plan_golden ne '')
+{
+	open my $golden_file, '<', $token_plan_golden
+	  or die "open token plan golden failed: $!";
+	local $/;
+	my $golden_json = <$golden_file>;
+	close $golden_file or die "close token plan golden failed: $!";
+	my $golden = decode_json($golden_json);
+	my $plan = $golden->{plans}->[0];
+	my $role = $plan->{role} // ($golden->{role} // 'query');
+	my $text = $plan->{input_text} // 'red planet';
+	my $debug_json = $node->safe_psql(
+		'pg_colbert_llama_live',
+		sprintf(q(SELECT colbert_debug(%s, %s)::text;),
+			sql_literal("$alias:$role"),
+			sql_literal($text)),
+	);
+	my $debug = decode_json($debug_json);
+	my @tokens = @{ $debug->{token_plan}->{tokens} };
+	my @actual_ids = map { $_->{id} + 0 } @tokens;
+	my @actual_retain = map { $_->{retained} ? 1 : 0 } @tokens;
+	my @expected_ids = map { $_ + 0 } @{ $plan->{token_ids_after_padding_truncation} };
+	my @expected_retain = map { $_ + 0 } @{ $plan->{retain_mask} };
+
+	is_deeply(\@actual_ids, \@expected_ids,
+		'live colbert_debug token ids match token-plan golden');
+	is_deeply(\@actual_retain, \@expected_retain,
+		'live colbert_debug retain mask matches token-plan golden');
+	is($debug->{vector_count} + 0, $plan->{final_vector_count} + 0,
+		'live colbert_debug vector count matches token-plan golden');
+}
 
 is($node->safe_psql('pg_colbert_llama_live', sprintf(q(
 	WITH encoded AS (
