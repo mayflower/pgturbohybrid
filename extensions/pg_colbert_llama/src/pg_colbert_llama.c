@@ -55,8 +55,9 @@ static int	pg_colbert_llama_n_gpu_layers = 0;
 static int	pg_colbert_llama_cache_size = 2;
 static char *pg_colbert_llama_query_prefix = NULL;
 static char *pg_colbert_llama_document_prefix = NULL;
-static int	pg_colbert_llama_max_query_vectors = 64;
+static int	pg_colbert_llama_max_query_vectors = 32;
 static int	pg_colbert_llama_max_doc_vectors = 256;
+static int	pg_colbert_llama_query_length = 32;
 static bool pg_colbert_llama_require_normalized = true;
 static int	pg_colbert_llama_expected_dim = 128;
 static char *pg_colbert_llama_allowed_models = NULL;
@@ -143,13 +144,19 @@ _PG_init(void)
 							"Maximum retained query token vectors.",
 							NULL,
 							&pg_colbert_llama_max_query_vectors,
-							64, 1, 4096,
+							32, 1, 4096,
 							PGC_USERSET, 0, NULL, NULL, NULL);
 	DefineCustomIntVariable("pg_colbert_llama.max_doc_vectors",
 							"Maximum retained document token vectors.",
 							NULL,
 							&pg_colbert_llama_max_doc_vectors,
 							256, 1, 4096,
+							PGC_USERSET, 0, NULL, NULL, NULL);
+	DefineCustomIntVariable("pg_colbert_llama.query_length",
+							"PyLate-style query expansion length.",
+							"Short query inputs are padded with mask tokens up to this length before embedding.",
+							&pg_colbert_llama_query_length,
+							32, 1, 4096,
 							PGC_USERSET, 0, NULL, NULL, NULL);
 	DefineCustomBoolVariable("pg_colbert_llama.require_normalized",
 							 "Require each ColBERT token vector to be L2-normalized.",
@@ -359,6 +366,7 @@ PgColbertParseModel(text *modelText, PgColbertModelSpec *spec)
 	spec->nBatch = pg_colbert_llama_n_batch;
 	spec->nGpuLayers = pg_colbert_llama_n_gpu_layers;
 	spec->cacheSize = pg_colbert_llama_cache_size;
+	spec->queryLength = pg_colbert_llama_query_length;
 	PgColbertCheckAllowedModel(spec->alias);
 }
 
@@ -698,8 +706,9 @@ pg_colbert_llama_colbert_model_info(PG_FUNCTION_ARGS)
 	appendStringInfoString(&buf, ",\"path\":");
 	PgColbertAppendJsonString(&buf, info.path);
 	appendStringInfo(&buf,
-					 ",\"max_vectors\":%d,\"expected_dim\":%d,\"n_embd_out\":%d",
-					 spec.maxVectors, spec.expectedDim, info.nEmbdOut);
+					 ",\"max_vectors\":%d,\"query_length\":%d,\"expected_dim\":%d,\"n_embd_out\":%d",
+					 spec.maxVectors, spec.queryLength, spec.expectedDim,
+					 info.nEmbdOut);
 	appendStringInfoString(&buf, ",\"projection_status\":");
 	PgColbertAppendJsonString(&buf, projectionStatus);
 	appendStringInfo(&buf,

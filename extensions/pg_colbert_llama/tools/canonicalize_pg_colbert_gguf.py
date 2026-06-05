@@ -213,6 +213,14 @@ def get_float(kvs_by_key: dict[str, Kv], key: str) -> float:
         raise ValueError(f"missing required GGUF key {key}") from exc
 
 
+def llama_wpm_token(token: str, token_type: int) -> str:
+    if token_type != 1:
+        return token
+    if token.startswith("##"):
+        return token[2:]
+    return "\u2581" + token
+
+
 def tokenizer_from_hf_json(kvs_by_key: dict[str, Kv]) -> tuple[list[str], list[int]]:
     try:
         tokenizer_json = json.loads(kvs_by_key["tokenizer.huggingface.json"].value)
@@ -248,7 +256,10 @@ def tokenizer_from_hf_json(kvs_by_key: dict[str, Kv]) -> tuple[list[str], list[i
     missing = [str(i) for i, token in enumerate(tokens) if token is None]
     if missing:
         raise ValueError("tokenizer vocab ids are not contiguous: " + ", ".join(missing[:10]))
-    return [str(token) for token in tokens], token_types
+    return [
+        llama_wpm_token(str(token), token_type)
+        for token, token_type in zip(tokens, token_types)
+    ], token_types
 
 
 def tensor_rename(name: str) -> str | None:

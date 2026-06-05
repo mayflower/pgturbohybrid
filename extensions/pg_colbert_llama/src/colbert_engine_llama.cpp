@@ -110,8 +110,9 @@ static bool PgColbertLoadProjectionSidecar(const char *path,
 										   char **errorMessage);
 static bool PgColbertUnsupportedGgufMetadata(const char *path,
 											 const char **reason);
-static bool PgColbertIsSpecialToken(const struct llama_vocab *vocab,
-									llama_token token);
+static bool PgColbertShouldRetainToken(const struct llama_vocab *vocab,
+									   const PgColbertModelSpec *spec,
+									   llama_token token);
 static bool PgColbertEncodeBody(const PgColbertModelSpec *spec,
 								const char *input,
 								MemoryContext ctx,
@@ -1115,27 +1116,27 @@ PgColbertLoadModel(const PgColbertModelSpec *spec, const char *path,
 }
 
 static bool
-PgColbertIsSpecialToken(const struct llama_vocab *vocab, llama_token token)
+PgColbertShouldRetainToken(const struct llama_vocab *vocab,
+						   const PgColbertModelSpec *spec,
+						   llama_token token)
 {
 	llama_token special;
 
 	if (token == LLAMA_TOKEN_NULL)
+		return false;
+
+	/*
+	 * PyLate keeps [CLS], the ColBERT prefix token, [SEP], and query
+	 * expansion [MASK] vectors for query scoring.  Documents keep attended
+	 * non-padding tokens; punctuation skiplist handling is a scorer concern.
+	 */
+	if (spec->role == PG_COLBERT_ROLE_QUERY)
 		return true;
 
-	special = llama_vocab_bos(vocab);
-	if (special != LLAMA_TOKEN_NULL && token == special)
-		return true;
-	special = llama_vocab_eos(vocab);
-	if (special != LLAMA_TOKEN_NULL && token == special)
-		return true;
-	special = llama_vocab_sep(vocab);
-	if (special != LLAMA_TOKEN_NULL && token == special)
-		return true;
 	special = llama_vocab_pad(vocab);
 	if (special != LLAMA_TOKEN_NULL && token == special)
-		return true;
-
-	return false;
+		return false;
+	return true;
 }
 
 static bool
@@ -1155,6 +1156,7 @@ PgColbertEncodeBody(const PgColbertModelSpec *spec, const char *input,
 	bool		cacheOwned = false;
 	int32		textLen;
 	int32		requiredTokens;
+	int32		tokenCapacity;
 	int32		nTokens;
 	int32		retained;
 	bool		ok = false;
@@ -1201,10 +1203,14 @@ PgColbertEncodeBody(const PgColbertModelSpec *spec, const char *input,
 		goto cleanup;
 	}
 
-	tokens = (llama_token *) malloc(sizeof(llama_token) * (size_t) requiredTokens);
+	tokenCapacity = requiredTokens;
+	if (spec->role == PG_COLBERT_ROLE_QUERY && spec->queryLength > tokenCapacity)
+		tokenCapacity = spec->queryLength;
+
+	tokens = (llama_token *) malloc(sizeof(llama_token) * (size_t) tokenCapacity);
 	if (tokens == NULL)
 		goto oom;
-	nTokens = llama_tokenize(vocab, fullText, textLen, tokens, requiredTokens,
+	nTokens = llama_tokenize(vocab, fullText, textLen, tokens, tokenCapacity,
 							 true, true);
 	if (nTokens < 0)
 		goto tokenize_error;
@@ -1214,6 +1220,21 @@ PgColbertEncodeBody(const PgColbertModelSpec *spec, const char *input,
 						  "llama tokenization returned no tokens");
 		goto cleanup;
 	}
+	if (spec->role == PG_COLBERT_ROLE_QUERY && nTokens < spec->queryLength &&
+		spec->queryLength <= spec->maxVectors)
+	{
+		llama_token mask = llama_vocab_mask(vocab);
+
+		if (mask == LLAMA_TOKEN_NULL)
+		{
+			PgColbertSetError(ctx, errorMessage,
+							  "llama vocabulary does not define a mask token required for query expansion");
+			goto cleanup;
+		}
+		while (nTokens < spec->queryLength)
+			tokens[nTokens++] = mask;
+	}
+
 	if (nTokens > spec->nCtx || nTokens > spec->nBatch)
 	{
 		PgColbertSetError(ctx, errorMessage,
@@ -1225,7 +1246,7 @@ PgColbertEncodeBody(const PgColbertModelSpec *spec, const char *input,
 	retained = 0;
 	for (int32 i = 0; i < nTokens; i++)
 	{
-		if (!PgColbertIsSpecialToken(vocab, tokens[i]))
+		if (PgColbertShouldRetainToken(vocab, spec, tokens[i]))
 			retained++;
 	}
 	if (retained > spec->maxVectors)
@@ -1292,7 +1313,7 @@ PgColbertEncodeBody(const PgColbertModelSpec *spec, const char *input,
 		const float *vector;
 		double		norm = 0.0;
 
-		if (PgColbertIsSpecialToken(vocab, tokens[i]))
+		if (!PgColbertShouldRetainToken(vocab, spec, tokens[i]))
 			continue;
 
 		embedding = llama_get_embeddings_ith(entry->ctx, i);

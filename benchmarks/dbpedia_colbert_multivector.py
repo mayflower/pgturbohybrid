@@ -266,17 +266,45 @@ def choose_query_ids(qrels: dict[str, dict[str, int]], queries: dict[str, str], 
     return qids
 
 
-def corpus_rows(dataset: Path, max_docs: int) -> Iterable[tuple[str, str, str]]:
+def iter_corpus_rows(dataset: Path) -> Iterable[tuple[str, str, str]]:
     pq = require_pyarrow()
-    emitted = 0
     for path in find_corpus_parquet(dataset):
         parquet = pq.ParquetFile(path)
         for batch in parquet.iter_batches(batch_size=1024, columns=["_id", "title", "text"]):
             for row in batch.to_pylist():
-                if max_docs > 0 and emitted >= max_docs:
-                    return
-                emitted += 1
                 yield str(row["_id"]), row.get("title") or "", row.get("text") or ""
+
+
+def corpus_rows(
+    dataset: Path,
+    max_docs: int,
+    priority_doc_ids: set[str] | None = None,
+) -> Iterable[tuple[str, str, str]]:
+    if not priority_doc_ids or max_docs == 0:
+        emitted = 0
+        for row in iter_corpus_rows(dataset):
+            if max_docs > 0 and emitted >= max_docs:
+                return
+            emitted += 1
+            yield row
+        return
+
+    emitted: set[str] = set()
+    for doc_id, title, text in iter_corpus_rows(dataset):
+        if doc_id not in priority_doc_ids or doc_id in emitted:
+            continue
+        emitted.add(doc_id)
+        yield doc_id, title, text
+        if len(emitted) >= max_docs:
+            return
+
+    for doc_id, title, text in iter_corpus_rows(dataset):
+        if doc_id in emitted:
+            continue
+        emitted.add(doc_id)
+        yield doc_id, title, text
+        if len(emitted) >= max_docs:
+            return
 
 
 def query_rows(qids: list[str], queries: dict[str, str]) -> Iterable[tuple[str, str]]:
@@ -288,6 +316,29 @@ def qrel_rows(qids: list[str], qrels: dict[str, dict[str, int]]) -> Iterable[tup
     for qid in qids:
         for doc_id, score in sorted(qrels.get(qid, {}).items()):
             yield qid, doc_id, score
+
+
+def qrel_doc_ids(qids: list[str], qrels: dict[str, dict[str, int]]) -> set[str]:
+    return {doc_id for qid in qids for doc_id in qrels.get(qid, {})}
+
+
+def filter_qrels_to_loaded_docs(
+    qids: list[str],
+    qrels: dict[str, dict[str, int]],
+    loaded_doc_ids: set[str],
+) -> tuple[list[str], dict[str, dict[str, int]]]:
+    filtered: dict[str, dict[str, int]] = {}
+    filtered_qids: list[str] = []
+    for qid in qids:
+        qid_qrels = {
+            doc_id: score
+            for doc_id, score in qrels.get(qid, {}).items()
+            if doc_id in loaded_doc_ids
+        }
+        if qid_qrels:
+            filtered[qid] = qid_qrels
+            filtered_qids.append(qid)
+    return filtered_qids, filtered
 
 
 def connect(args: argparse.Namespace) -> psycopg.Connection[Any]:
@@ -422,35 +473,59 @@ def load_data(
             SELECT
               coalesce((SELECT count(*) FROM dbpedia_colbert_docs), 0),
               coalesce((SELECT count(*) FROM dbpedia_colbert_queries), 0),
-              coalesce((SELECT count(*) FROM dbpedia_colbert_qrels), 0)
+              coalesce((SELECT count(*) FROM dbpedia_colbert_qrels), 0),
+              coalesce((
+                SELECT count(*)
+                FROM dbpedia_colbert_qrels q
+                JOIN dbpedia_colbert_docs d ON d.doc_id = q.doc_id
+              ), 0)
             """,
         )
-        if row and int(row[0]) > 0 and int(row[1]) > 0 and int(row[2]) > 0:
-            return {"reused": True, "documents": int(row[0]), "queries": int(row[1]), "qrels": int(row[2])}
+        if row and int(row[0]) > 0 and int(row[1]) > 0 and int(row[2]) > 0 and int(row[2]) == int(row[3]):
+            return {
+                "reused": True,
+                "documents": int(row[0]),
+                "queries": int(row[1]),
+                "qrels": int(row[2]),
+                "qrels_in_loaded_docs": int(row[3]),
+            }
 
     started = time.perf_counter()
     exec_sql(conn, "DROP INDEX IF EXISTS dbpedia_colbert_docs_colbert_idx")
     exec_sql(conn, "TRUNCATE dbpedia_colbert_qrels, dbpedia_colbert_queries, dbpedia_colbert_docs")
+    requested_qrel_doc_ids = qrel_doc_ids(qids, qrels)
     doc_count = copy_rows(
         conn,
         "COPY dbpedia_colbert_docs (doc_id, title, body) FROM STDIN",
-        corpus_rows(args.dataset, args.max_docs),
+        corpus_rows(args.dataset, args.max_docs, requested_qrel_doc_ids if args.prioritize_qrels else None),
     )
+    loaded_doc_ids = set(selected_doc_ids(conn, 0))
+    loaded_qids, loaded_qrels = filter_qrels_to_loaded_docs(qids, qrels, loaded_doc_ids)
+    if not loaded_qids:
+        raise RuntimeError(
+            "none of the selected qrels are present in the loaded corpus; "
+            "increase --max-docs or verify the corpus/qrels id space"
+        )
     query_count = copy_rows(
         conn,
         "COPY dbpedia_colbert_queries (query_id, query_text) FROM STDIN",
-        query_rows(qids, queries),
+        query_rows(loaded_qids, queries),
     )
     qrel_count = copy_rows(
         conn,
         "COPY dbpedia_colbert_qrels (query_id, doc_id, relevance) FROM STDIN",
-        qrel_rows(qids, qrels),
+        qrel_rows(loaded_qids, loaded_qrels),
     )
     return {
         "reused": False,
         "documents": doc_count,
         "queries": query_count,
         "qrels": qrel_count,
+        "input_qrels": sum(len(qrels.get(qid, {})) for qid in qids),
+        "requested_qrel_doc_ids": len(requested_qrel_doc_ids),
+        "qrels_in_loaded_docs": qrel_count,
+        "queries_with_loaded_qrels": len(loaded_qids),
+        "prioritized_qrels": bool(args.prioritize_qrels),
         "elapsed_ms": round((time.perf_counter() - started) * 1000.0, 3),
     }
 
@@ -466,6 +541,23 @@ def selected_doc_ids(conn: psycopg.Connection[Any], limit: int) -> list[str]:
 def selected_query_ids(conn: psycopg.Connection[Any]) -> list[str]:
     rows = fetch_all(conn, "SELECT query_id FROM dbpedia_colbert_queries ORDER BY query_id")
     return [str(row[0]) for row in rows]
+
+
+def loaded_qrels(conn: psycopg.Connection[Any]) -> dict[str, dict[str, int]]:
+    rows = fetch_all(
+        conn,
+        """
+        SELECT query_id, doc_id, relevance
+        FROM dbpedia_colbert_qrels
+        ORDER BY query_id, doc_id
+        """,
+    )
+    qrels: dict[str, dict[str, int]] = {}
+    for query_id, doc_id, relevance in rows:
+        qrels.setdefault(str(query_id), {})[str(doc_id)] = int(relevance)
+    if not qrels:
+        raise RuntimeError("no qrels are available for the loaded benchmark corpus")
+    return qrels
 
 
 def measure_generation_sample(
@@ -897,10 +989,16 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--model-path", type=Path, default=None, help="GGUF ColBERT model path")
     parser.add_argument("--model-alias", default=None, help="pg_colbert_llama model alias, defaults to model stem")
     parser.add_argument("--expected-dim", type=int, default=128)
-    parser.add_argument("--max-doc-vectors", type=int, default=512)
+    parser.add_argument("--max-doc-vectors", type=int, default=256)
     parser.add_argument("--max-query-vectors", type=int, default=64)
     parser.add_argument("--max-docs", type=int, default=1000, help="documents to load; 0 means all available")
     parser.add_argument("--max-queries", type=int, default=32, help="queries to load from qrels; 0 means all")
+    parser.add_argument(
+        "--no-prioritize-qrels",
+        dest="prioritize_qrels",
+        action="store_false",
+        help="load the first corpus rows instead of filling the sample with judged relevant documents first",
+    )
     parser.add_argument("--generation-sample-docs", type=int, default=100)
     parser.add_argument("--insert-batch-size", type=int, default=1)
     parser.add_argument("--progress-every", type=int, default=100)
@@ -935,6 +1033,7 @@ def main() -> None:
         load_phase = load_data(conn, args, qids, queries, qrels)
         doc_ids = selected_doc_ids(conn, args.max_docs)
         query_ids = selected_query_ids(conn)
+        qrels = loaded_qrels(conn)
         generation_phase = measure_generation_sample(conn, args, doc_ids, query_ids)
         insert_phase = persist_multivectors(conn, args, doc_ids, query_ids)
         index_phase = build_index(conn, args)
@@ -976,6 +1075,7 @@ def main() -> None:
                 "qrels": load_phase["qrels"],
                 "max_docs": args.max_docs,
                 "max_queries": args.max_queries,
+                "prioritize_qrels": args.prioritize_qrels,
             },
             "model": {
                 "gguf": "johannhartmann/SauerkrautLM-Multi-ColBERT-15m-GGUF",
