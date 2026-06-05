@@ -110,6 +110,8 @@ static bool PgColbertLoadProjectionSidecar(const char *path,
 										   char **errorMessage);
 static bool PgColbertUnsupportedGgufMetadata(const char *path,
 											 const char **reason);
+static bool PgColbertIsPunctuationToken(const struct llama_vocab *vocab,
+										llama_token token);
 static bool PgColbertShouldRetainToken(const struct llama_vocab *vocab,
 									   const PgColbertModelSpec *spec,
 									   llama_token token);
@@ -1116,6 +1118,26 @@ PgColbertLoadModel(const PgColbertModelSpec *spec, const char *path,
 }
 
 static bool
+PgColbertIsPunctuationToken(const struct llama_vocab *vocab, llama_token token)
+{
+	const char *text = llama_vocab_get_text(vocab, token);
+	const char *piece = text;
+
+	if (piece == NULL || piece[0] == '\0')
+		return false;
+
+	/* llama.cpp's BERT WPM tokenizer prefixes word-start tokens with U+2581. */
+	if ((unsigned char) piece[0] == 0xe2 &&
+		(unsigned char) piece[1] == 0x96 &&
+		(unsigned char) piece[2] == 0x81)
+		piece += 3;
+
+	return piece[0] != '\0' &&
+		piece[1] == '\0' &&
+		strchr("!\"#$%&'()*+,-./:;<=>?@[\\]^_`{|}~", piece[0]) != NULL;
+}
+
+static bool
 PgColbertShouldRetainToken(const struct llama_vocab *vocab,
 						   const PgColbertModelSpec *spec,
 						   llama_token token)
@@ -1135,6 +1157,8 @@ PgColbertShouldRetainToken(const struct llama_vocab *vocab,
 
 	special = llama_vocab_pad(vocab);
 	if (special != LLAMA_TOKEN_NULL && token == special)
+		return false;
+	if (PgColbertIsPunctuationToken(vocab, token))
 		return false;
 	return true;
 }

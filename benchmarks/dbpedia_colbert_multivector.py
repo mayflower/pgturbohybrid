@@ -32,6 +32,7 @@ import psycopg
 DEFAULT_METHODS = "pgturbohybrid_colbert_multivector_query_only"
 QUERY_ONLY_METHOD = "pgturbohybrid_colbert_multivector_query_only"
 RRF_METHOD = "pgturbohybrid_colbert_multivector_rrf"
+EXACT_SCAN_METHOD = "pgturbohybrid_colbert_multivector_exact_scan"
 DEFAULT_MODEL_PATH = ".nix-dev/models/colbert-15m/sauerkraut-modern.gguf"
 
 
@@ -398,6 +399,13 @@ def set_colbert_gucs(conn: psycopg.Connection[Any], args: argparse.Namespace) ->
         "pg_colbert_llama.expected_dim": str(args.expected_dim),
         "pg_colbert_llama.max_doc_vectors": str(args.max_doc_vectors),
         "pg_colbert_llama.max_query_vectors": str(args.max_query_vectors),
+        "pg_colbert_llama.query_length": str(args.query_length),
+        "turbohybrid.multivector_subvector_k": str(args.multivector_subvector_k),
+        "turbohybrid.multivector_unique_docs_per_token": str(args.multivector_unique_docs_per_token),
+        "turbohybrid.multivector_max_raw_hits_per_token": str(args.multivector_max_raw_hits_per_token),
+        "turbohybrid.multivector_adaptive_widening": args.multivector_adaptive_widening,
+        "turbohybrid.multivector_doc_candidate_k": str(args.multivector_doc_candidate_k),
+        "turbohybrid.multivector_exact_rerank_k": str(args.multivector_exact_rerank_k),
     }
     for key, value in settings.items():
         exec_sql(conn, "SELECT set_config(%s, %s, false)", (key, value))
@@ -413,6 +421,7 @@ def set_retrieval_gucs(conn: psycopg.Connection[Any], args: argparse.Namespace, 
         "pg_colbert_llama.expected_dim": str(args.expected_dim),
         "pg_colbert_llama.max_doc_vectors": str(args.max_doc_vectors),
         "pg_colbert_llama.max_query_vectors": str(args.max_query_vectors),
+        "pg_colbert_llama.query_length": str(args.query_length),
     }
     for key, value in settings.items():
         exec_sql(conn, "SELECT set_config(%s, %s, false)", (key, value))
@@ -457,6 +466,49 @@ def setup_schema(conn: psycopg.Connection[Any]) -> None:
         )
         """,
     )
+
+
+def validate_embedding_health(conn: psycopg.Connection[Any], args: argparse.Namespace) -> dict[str, Any]:
+    set_colbert_gucs(conn, args)
+    query = jsonb_value(fetch_one(conn, "SELECT colbert(%s, 'red planet')", (f"{args.model_alias}:query",))[0])
+    doc = jsonb_value(fetch_one(conn, "SELECT colbert(%s, 'red planet')", (f"{args.model_alias}:doc",))[0])
+    punct_doc = jsonb_value(
+        fetch_one(conn, "SELECT colbert(%s, 'Mars is often called the red planet.')", (f"{args.model_alias}:doc",))[0]
+    )
+
+    query_tokens = [int(token) for token in query.get("token_ids", [])]
+    doc_tokens = [int(token) for token in doc.get("token_ids", [])]
+    punct_doc_tokens = [int(token) for token in punct_doc.get("token_ids", [])]
+    expected_query_prefix = [101, 30522, 2417, 4774, 102]
+    expected_doc_tokens = [101, 30523, 2417, 4774, 102]
+    failures: list[str] = []
+
+    if int(query.get("dim", 0)) != args.expected_dim or int(doc.get("dim", 0)) != args.expected_dim:
+        failures.append("probe embeddings have the wrong dimension")
+    if query_tokens[: len(expected_query_prefix)] != expected_query_prefix:
+        failures.append(f"query tokenization probe mismatch: got {query_tokens[:len(expected_query_prefix)]}")
+    if args.query_length <= args.max_query_vectors and len(query_tokens) != args.query_length:
+        failures.append(f"query expansion length mismatch: got {len(query_tokens)}, expected {args.query_length}")
+    if 100 in query_tokens[: len(expected_query_prefix)]:
+        failures.append("query tokenization produced [UNK] for normal probe words")
+    if doc_tokens != expected_doc_tokens:
+        failures.append(f"document tokenization probe mismatch: got {doc_tokens}")
+    if 1012 in punct_doc_tokens:
+        failures.append("document tokenization retained '.' punctuation skiplist token")
+
+    result = {
+        "validated": not failures,
+        "query_probe_token_ids": query_tokens,
+        "document_probe_token_ids": doc_tokens,
+        "punctuation_probe_token_ids": punct_doc_tokens,
+        "expected_query_prefix": expected_query_prefix,
+        "expected_document_tokens": expected_doc_tokens,
+        "query_length": args.query_length,
+        "failures": failures,
+    }
+    if failures and not args.allow_unvalidated_embeddings:
+        raise RuntimeError("invalid ColBERT embedding preflight: " + "; ".join(failures))
+    return result
 
 
 def load_data(
@@ -765,6 +817,22 @@ def run_retrieval_query(
             """,
             (query.multivector_text, args.dense_k, final_k, final_k),
         )
+    elif method == EXACT_SCAN_METHOD:
+        rows = fetch_all(
+            conn,
+            """
+            SELECT doc_id
+            FROM dbpedia_colbert_docs
+            WHERE colbert IS NOT NULL
+            ORDER BY turbohybrid_multivector_maxsim_distance(
+                       %s::turbohybrid_multivector,
+                       colbert
+                     ),
+                     doc_id
+            LIMIT %s
+            """,
+            (query.multivector_text, final_k),
+        )
     elif method == RRF_METHOD:
         rows = fetch_all(
             conn,
@@ -790,6 +858,10 @@ def run_retrieval_query(
     return [str(row[0]) for row in rows]
 
 
+def uses_turbohybrid_index(method: str) -> bool:
+    return method in {QUERY_ONLY_METHOD, RRF_METHOD}
+
+
 def last_scan_stats(conn: psycopg.Connection[Any]) -> dict[str, Any]:
     row = fetch_one(conn, "SELECT turbohybrid_last_scan_stats()")
     return jsonb_value(row[0] if row else None)
@@ -809,7 +881,7 @@ def run_serial_retrieval(
         started = time.perf_counter()
         run[query.query_id] = run_retrieval_query(conn, method, query, args, final_k)
         latencies.append((time.perf_counter() - started) * 1000.0)
-        scan_stats.append(last_scan_stats(conn))
+        scan_stats.append(last_scan_stats(conn) if uses_turbohybrid_index(method) else {})
     return run, latencies, scan_stats
 
 
@@ -841,10 +913,10 @@ def run_worker(
                 started = time.perf_counter()
                 run_retrieval_query(conn, method, query, args, args.final_k)
                 result.timed_durations_ms.append((time.perf_counter() - started) * 1000.0)
-                if i == 0:
+                if i == 0 and uses_turbohybrid_index(method):
                     result.first_timed_stats = last_scan_stats(conn)
             result.timed_wall_ms = (time.perf_counter() - timed_started) * 1000.0
-            if args.timed_queries > 0:
+            if args.timed_queries > 0 and uses_turbohybrid_index(method):
                 result.last_timed_stats = last_scan_stats(conn)
         finally:
             conn.close()
@@ -893,6 +965,7 @@ def run_parallel_retrieval(args: argparse.Namespace, method: str, queries: list[
         "clients": args.clients,
         "warm_queries_per_client": args.warm_queries,
         "timed_queries_per_client": args.timed_queries,
+        "total_timed_queries": total_queries,
         "warm_latency": summarize_ms(warm),
         "timed_latency": summarize_ms(timed),
         "timed_wall_ms": round(wall_ms, 3),
@@ -962,7 +1035,7 @@ def validate_args(args: argparse.Namespace) -> argparse.Namespace:
     if args.model_alias is None:
         args.model_alias = args.model_path.stem
     methods = [method.strip() for method in args.methods.split(",") if method.strip()]
-    unknown = sorted(set(methods) - {QUERY_ONLY_METHOD, RRF_METHOD})
+    unknown = sorted(set(methods) - {QUERY_ONLY_METHOD, RRF_METHOD, EXACT_SCAN_METHOD})
     if unknown:
         raise SystemExit(f"unknown method(s): {', '.join(unknown)}")
     args.methods = methods
@@ -990,7 +1063,8 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--model-alias", default=None, help="pg_colbert_llama model alias, defaults to model stem")
     parser.add_argument("--expected-dim", type=int, default=128)
     parser.add_argument("--max-doc-vectors", type=int, default=256)
-    parser.add_argument("--max-query-vectors", type=int, default=64)
+    parser.add_argument("--max-query-vectors", type=int, default=32)
+    parser.add_argument("--query-length", type=int, default=32)
     parser.add_argument("--max-docs", type=int, default=1000, help="documents to load; 0 means all available")
     parser.add_argument("--max-queries", type=int, default=32, help="queries to load from qrels; 0 means all")
     parser.add_argument(
@@ -1006,6 +1080,12 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--dense-k", type=int, default=100)
     parser.add_argument("--bm25-k", type=int, default=100)
     parser.add_argument("--rrf-k", type=int, default=60)
+    parser.add_argument("--multivector-subvector-k", type=int, default=100)
+    parser.add_argument("--multivector-unique-docs-per-token", type=int, default=100)
+    parser.add_argument("--multivector-max-raw-hits-per-token", type=int, default=400)
+    parser.add_argument("--multivector-adaptive-widening", choices=("off", "auto", "on"), default="auto")
+    parser.add_argument("--multivector-doc-candidate-k", type=int, default=100)
+    parser.add_argument("--multivector-exact-rerank-k", type=int, default=100)
     parser.add_argument("--final-k", type=int, default=10)
     parser.add_argument("--quality-k", type=int, default=10)
     parser.add_argument("--clients", type=int, default=8)
@@ -1015,6 +1095,11 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--reuse-embeddings", action="store_true")
     parser.add_argument("--reuse-index", action="store_true")
     parser.add_argument("--force-reload", action="store_true")
+    parser.add_argument(
+        "--allow-unvalidated-embeddings",
+        action="store_true",
+        help="continue even if the Sauerkraut 15m tokenization preflight fails",
+    )
     parser.add_argument("--output", type=Path, default=None)
     return validate_args(parser.parse_args())
 
@@ -1030,6 +1115,7 @@ def main() -> None:
     conn = connect(args)
     try:
         setup_schema(conn)
+        embedding_health = validate_embedding_health(conn, args)
         load_phase = load_data(conn, args, qids, queries, qrels)
         doc_ids = selected_doc_ids(conn, args.max_docs)
         query_ids = selected_query_ids(conn)
@@ -1046,7 +1132,11 @@ def main() -> None:
             parallel = run_parallel_retrieval(args, method, encoded_queries)
             result_methods.append({
                 "method": method,
-                "retrieval_mode": "multivector_query_only" if method == QUERY_ONLY_METHOD else "multivector_plus_bm25_rrf",
+                "retrieval_mode": {
+                    QUERY_ONLY_METHOD: "multivector_query_only",
+                    RRF_METHOD: "multivector_plus_bm25_rrf",
+                    EXACT_SCAN_METHOD: "multivector_exact_scan",
+                }[method],
                 "metrics": method_metrics(run, qrels, args.final_k, args.quality_k),
                 "serial_latency": summarize_ms(serial_latencies),
                 "parallel_8x": parallel,
@@ -1085,11 +1175,19 @@ def main() -> None:
                 "expected_dim": args.expected_dim,
                 "max_doc_vectors": args.max_doc_vectors,
                 "max_query_vectors": args.max_query_vectors,
+                "query_length": args.query_length,
+                "embedding_health": embedding_health,
             },
             "settings": {
                 "dense_k": args.dense_k,
                 "bm25_k": args.bm25_k,
                 "rrf_k": args.rrf_k,
+                "multivector_subvector_k": args.multivector_subvector_k,
+                "multivector_unique_docs_per_token": args.multivector_unique_docs_per_token,
+                "multivector_max_raw_hits_per_token": args.multivector_max_raw_hits_per_token,
+                "multivector_adaptive_widening": args.multivector_adaptive_widening,
+                "multivector_doc_candidate_k": args.multivector_doc_candidate_k,
+                "multivector_exact_rerank_k": args.multivector_exact_rerank_k,
                 "final_k": args.final_k,
                 "quality_k": args.quality_k,
                 "clients": args.clients,
