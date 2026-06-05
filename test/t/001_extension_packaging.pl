@@ -1,15 +1,7 @@
 use strict;
 use warnings FATAL => 'all';
 use Test::More;
-
-BEGIN
-{
-	eval {
-		require PostgreSQL::Test::Cluster;
-		PostgreSQL::Test::Cluster->import();
-		1;
-	} or plan skip_all => 'PostgreSQL TAP test modules are not available';
-}
+use PostgreSQL::Test::Cluster;
 
 my $node = PostgreSQL::Test::Cluster->new('node');
 $node->init;

@@ -370,8 +370,13 @@
 
               proveInstallcheck = mkScriptWithInputs [ tapPerl ] "th-prove-installcheck" ''
                 ${pgInit}/bin/th-pg-init >/dev/null
-                export PERL5LIB="${postgresql.src}/test/perl:${postgresql.src}/src/test/perl:''${PERL5LIB:-}"
-                exec make PG_CONFIG="$PG_CONFIG" bindir="${postgresWithExtensions}/bin" prove_installcheck
+                export PERL5LIB="${postgresql.src}/src/test/perl:${postgresql.src}/test/perl:''${PERL5LIB:-}"
+                export PG_PROVE_FLAGS="-I ${postgresql.src}/src/test/perl ''${PG_PROVE_FLAGS:-}"
+                exec make \
+                  PG_CONFIG="$PG_CONFIG" \
+                  bindir="${postgresWithExtensions}/bin" \
+                  PG_PROVE_FLAGS="-I ${postgresql.src}/src/test/perl ''${PG_PROVE_FLAGS:-}" \
+                  prove_installcheck
               '';
 
               test = mkScript "th-test" ''
@@ -465,10 +470,12 @@
                 python3 -m unittest discover \
                   "$TH_ROOT/extensions/pg_colbert_llama/test" \
                   -p 'test_*.py'
-                export PERL5LIB="${postgresql.src}/test/perl:${postgresql.src}/src/test/perl:''${PERL5LIB:-}"
+                export PERL5LIB="${postgresql.src}/src/test/perl:${postgresql.src}/test/perl:''${PERL5LIB:-}"
+                export PG_PROVE_FLAGS="-I ${postgresql.src}/src/test/perl ''${PG_PROVE_FLAGS:-}"
                 exec make -C "$TH_ROOT/extensions/pg_colbert_llama" \
                   PG_CONFIG="$PG_CONFIG" \
                   bindir="${postgresWithExtensions}/bin" \
+                  PG_PROVE_FLAGS="-I ${postgresql.src}/src/test/perl ''${PG_PROVE_FLAGS:-}" \
                   prove_stub_installcheck
               '';
 
@@ -518,10 +525,12 @@
                     pg_ctl -D "$PGDATA" -l "$TH_LOG_FILE" -o "-k '$PGHOST' -p '$TH_PGPORT'" start
                   fi
 
-                  export PERL5LIB="${postgresql.src}/test/perl:${postgresql.src}/src/test/perl:''${PERL5LIB:-}"
+                  export PERL5LIB="${postgresql.src}/src/test/perl:${postgresql.src}/test/perl:''${PERL5LIB:-}"
+                  export PG_PROVE_FLAGS="-I ${postgresql.src}/src/test/perl ''${PG_PROVE_FLAGS:-}"
                   exec make -C "$TH_ROOT/extensions/pg_colbert_llama" \
                     PG_CONFIG="$PG_CONFIG" \
                     bindir="$postgres_with_colbert/bin" \
+                    PG_PROVE_FLAGS="-I ${postgresql.src}/src/test/perl ''${PG_PROVE_FLAGS:-}" \
                     prove_live_installcheck
                 '';
 

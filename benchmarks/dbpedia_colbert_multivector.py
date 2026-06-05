@@ -410,6 +410,7 @@ def set_colbert_gucs(conn: psycopg.Connection[Any], args: argparse.Namespace) ->
         "pg_colbert_llama.threads": str(args.generation_threads),
         "pg_colbert_llama.n_batch": str(args.generation_n_batch),
         "pg_colbert_llama.batch_sequences": str(args.generation_batch_sequences),
+        "pg_colbert_llama.n_gpu_layers": str(args.generation_n_gpu_layers),
         "pg_colbert_llama.expected_dim": str(args.expected_dim),
         "pg_colbert_llama.max_doc_vectors": str(args.max_doc_vectors),
         "pg_colbert_llama.max_query_vectors": str(args.max_query_vectors),
@@ -865,6 +866,7 @@ def persist_document_multivectors(
     return doc_latencies, doc_counts, {
         "workers": worker_count,
         "threads_per_worker": args.generation_threads,
+        "n_gpu_layers": args.generation_n_gpu_layers,
         "warmup_excluded": bool(args.generation_warmup),
         "batches": sum(result.batches for result in results),
         "elapsed_ms": elapsed_ms,
@@ -1253,6 +1255,8 @@ def validate_args(args: argparse.Namespace) -> argparse.Namespace:
         raise SystemExit("--generation-clients must be at least 1")
     if args.generation_threads < 1:
         raise SystemExit("--generation-threads must be at least 1")
+    if args.generation_n_gpu_layers < 0:
+        raise SystemExit("--generation-n-gpu-layers must be at least 0")
     if args.generation_batch_sequences < 1:
         raise SystemExit("--generation-batch-sequences must be at least 1")
     if args.generation_n_batch is None:
@@ -1308,6 +1312,12 @@ def parse_args() -> argparse.Namespace:
         type=int,
         default=1,
         help="llama.cpp worker threads per generation backend",
+    )
+    parser.add_argument(
+        "--generation-n-gpu-layers",
+        type=int,
+        default=0,
+        help="llama.cpp model layers to offload to GPU per generation backend",
     )
     parser.add_argument(
         "--generation-batch-sequences",
@@ -1443,6 +1453,7 @@ def main() -> None:
                 "clients": args.clients,
                 "generation_clients": args.generation_clients,
                 "generation_threads": args.generation_threads,
+                "generation_n_gpu_layers": args.generation_n_gpu_layers,
                 "generation_batch_sequences": args.generation_batch_sequences,
                 "generation_n_batch": args.generation_n_batch,
                 "generation_warmup": args.generation_warmup,

@@ -3,15 +3,7 @@ use warnings FATAL => 'all';
 use Test::More;
 use File::Copy qw(copy);
 use File::Temp qw(tempdir);
-
-BEGIN
-{
-	eval {
-		require PostgreSQL::Test::Cluster;
-		PostgreSQL::Test::Cluster->import();
-		1;
-	} or plan skip_all => 'PostgreSQL TAP test modules are not available';
-}
+use PostgreSQL::Test::Cluster;
 
 my $srcdir = $ENV{TESTDIR} // '.';
 my $fixture = "$srcdir/test/fixtures/profile_sauerkraut_15m_minimal.json";

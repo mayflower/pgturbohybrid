@@ -58,15 +58,16 @@ ifeq ($(PROVE),)
 	PROVE = prove
 endif
 
+PG_TEST_PORT ?= $(if $(PGPORT),$(PGPORT),6$(DEF_PGPORT))
 PROVE_FLAGS += -I ./test/perl
 
 prove_stub_installcheck:
-	cd $(srcdir) && TESTDIR='$(CURDIR)' PATH="$(bindir):$$PATH" PGPORT='6$(DEF_PGPORT)' PG_REGRESS='$(top_builddir)/src/test/regress/pg_regress' $(PROVE) $(PG_PROVE_FLAGS) $(PROVE_FLAGS) test/t/001_profile_stub.pl
+	cd $(srcdir) && TESTDIR='$(CURDIR)' PATH="$(bindir):$$PATH" PGPORT='$(PG_TEST_PORT)' PG_REGRESS='$(top_builddir)/src/test/regress/pg_regress' $(PROVE) $(PG_PROVE_FLAGS) $(PROVE_FLAGS) test/t/001_profile_stub.pl
 
 prove_live_installcheck:
 	if [ -n "$$PG_COLBERT_LLAMA_TEST_MODEL" ]; then \
 		rm -rf $(srcdir)/tmp_check/t_002_live_pgturbohybrid_multivector_pg_colbert_llama_live_data; \
-		cd $(srcdir) && TESTDIR='$(CURDIR)' PATH="$(bindir):$$PATH" PGPORT='6$(DEF_PGPORT)' PG_REGRESS='$(top_builddir)/src/test/regress/pg_regress' $(PROVE) $(PG_PROVE_FLAGS) $(PROVE_FLAGS) test/t/002_live_pgturbohybrid_multivector.pl; \
+		cd $(srcdir) && TESTDIR='$(CURDIR)' PATH="$(bindir):$$PATH" PGPORT='$(PG_TEST_PORT)' PG_REGRESS='$(top_builddir)/src/test/regress/pg_regress' $(PROVE) $(PG_PROVE_FLAGS) $(PROVE_FLAGS) test/t/002_live_pgturbohybrid_multivector.pl; \
 	else \
 		echo "PG_COLBERT_LLAMA_TEST_MODEL is not set; skipping live pg_colbert_llama TAP tests"; \
 	fi
