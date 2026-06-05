@@ -441,24 +441,35 @@
               '';
 
               colbertBuildStub = mkScript "th-colbert-build-stub" ''
-                exec make -C "$TH_ROOT/extensions/pg_colbert_llama" \
+                make -C "$TH_ROOT/extensions/pg_colbert_llama" \
                   PG_CONFIG="$PG_CONFIG" \
                   VECTOR_INCLUDE="$VECTOR_INCLUDE" \
                   PG_COLBERT_LLAMA_ENGINE=stub \
                   "$@"
               '';
 
-              colbertTestStub = mkScript "th-colbert-test-stub" ''
+              colbertTestStub = mkScriptWithInputs [
+                tapPerl
+                pkgs.python3
+              ] "th-colbert-test-stub" ''
                 ${pgInit}/bin/th-pg-init >/dev/null
                 make -C "$TH_ROOT/extensions/pg_colbert_llama" \
                   PG_CONFIG="$PG_CONFIG" \
                   VECTOR_INCLUDE="$VECTOR_INCLUDE" \
                   PG_COLBERT_LLAMA_ENGINE=stub
-                exec make -C "$TH_ROOT/extensions/pg_colbert_llama" \
+                make -C "$TH_ROOT/extensions/pg_colbert_llama" \
                   PG_CONFIG="$PG_CONFIG" \
                   VECTOR_INCLUDE="$VECTOR_INCLUDE" \
                   PG_COLBERT_LLAMA_ENGINE=stub \
                   installcheck
+                python3 -m unittest discover \
+                  "$TH_ROOT/extensions/pg_colbert_llama/test" \
+                  -p 'test_*.py'
+                export PERL5LIB="${postgresql.src}/test/perl:${postgresql.src}/src/test/perl:''${PERL5LIB:-}"
+                exec make -C "$TH_ROOT/extensions/pg_colbert_llama" \
+                  PG_CONFIG="$PG_CONFIG" \
+                  bindir="${postgresWithExtensions}/bin" \
+                  prove_stub_installcheck
               '';
 
               colbertBuildLlama = mkScript "th-colbert-build-llama" ''
@@ -484,12 +495,12 @@
                   fi
                   export PATH="$postgres_with_colbert/bin:$PATH"
 
-                  export TH_ENV_NAME="''${TH_ENV_NAME:-${commonEnv.TH_ENV_NAME}-colbert-llama}"
-                  export TH_STATE_DIR="''${TH_STATE_DIR:-$TH_ROOT/.nix-dev/$TH_ENV_NAME}"
-                  export PGDATA="''${PGDATA:-$TH_STATE_DIR/pgdata}"
-                  export PGHOST="''${PGHOST:-$TH_STATE_DIR/run}"
-                  export TH_LOG_DIR="''${TH_LOG_DIR:-$TH_STATE_DIR/log}"
-                  export TH_LOG_FILE="''${TH_LOG_FILE:-$TH_LOG_DIR/postgres.log}"
+                  export TH_ENV_NAME="''${TH_COLBERT_LLAMA_ENV_NAME:-${commonEnv.TH_ENV_NAME}-colbert-llama}"
+                  export TH_STATE_DIR="$TH_ROOT/.nix-dev/$TH_ENV_NAME"
+                  export PGDATA="$TH_STATE_DIR/pgdata"
+                  export PGHOST="$TH_STATE_DIR/run"
+                  export TH_LOG_DIR="$TH_STATE_DIR/log"
+                  export TH_LOG_FILE="$TH_LOG_DIR/postgres.log"
                   mkdir -p "$TH_STATE_DIR" "$PGHOST" "$TH_LOG_DIR"
 
                   if [ ! -s "$PGDATA/PG_VERSION" ]; then
@@ -511,7 +522,7 @@
                   exec make -C "$TH_ROOT/extensions/pg_colbert_llama" \
                     PG_CONFIG="$PG_CONFIG" \
                     bindir="$postgres_with_colbert/bin" \
-                    prove_installcheck
+                    prove_live_installcheck
                 '';
 
               scripts = [

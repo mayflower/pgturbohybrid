@@ -35,6 +35,18 @@ class RankingSmoke:
     pylate_scores: list[float]
 
 
+@dataclass(frozen=True)
+class TokenPlanComparison:
+    input_text: str
+    token_plan_parity_passed: bool
+    retain_parity_passed: bool
+    vector_count_passed: bool
+    first_token_mismatch: dict[str, Any] | None
+    first_retain_mismatch: dict[str, Any] | None
+    pg_final_token_ids: list[int]
+    golden_final_token_ids: list[int]
+
+
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         description="Compare pg_colbert_llama JSON output against PyLate.",
@@ -56,6 +68,11 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument("--texts-file", required=True, help="UTF-8 file with one text per line")
     parser.add_argument("--role", choices=("query", "doc"), required=True)
+    parser.add_argument(
+        "--golden-token-plan",
+        default=None,
+        help="Optional converter token-plan golden JSON to compare before vectors",
+    )
     parser.add_argument("--model-dir", default=None, help="SET pg_colbert_llama.model_dir before encoding")
     parser.add_argument("--expected-dim", type=int, default=None)
     parser.add_argument("--count-tolerance", type=int, default=2)
@@ -107,6 +124,11 @@ def pg_vectors(cur: Any, pg_model: str, text: str) -> list[list[float]]:
     return [[float(value) for value in row] for row in payload["vectors"]]
 
 
+def pg_debug(cur: Any, pg_model: str, text: str) -> dict[str, Any]:
+    cur.execute("SELECT colbert_debug(%s, %s)::text", (pg_model, text))
+    return json.loads(cur.fetchone()[0])
+
+
 def pylate_vectors(model: Any, text: str, role: str) -> list[list[float]]:
     encoded: Any = model.encode([text], is_query=role == "query")
     first = encoded[0] if isinstance(encoded, (list, tuple)) else encoded
@@ -122,6 +144,129 @@ def load_pylate_model(model_name: str) -> Any:
         raise SystemExit("PyLate is not installed; install pylate before running parity checks") from exc
 
     return models.ColBERT(model_name)
+
+
+def normalize_piece(piece: Any) -> str | None:
+    if piece is None:
+        return None
+    return str(piece)
+
+
+def first_sequence_mismatch(
+    left: list[Any],
+    right: list[Any],
+    left_name: str,
+    right_name: str,
+) -> dict[str, Any] | None:
+    for index, (left_value, right_value) in enumerate(zip(left, right)):
+        if left_value != right_value:
+            return {
+                "index": index,
+                left_name: left_value,
+                right_name: right_value,
+            }
+    if len(left) != len(right):
+        return {
+            "index": min(len(left), len(right)),
+            f"{left_name}_length": len(left),
+            f"{right_name}_length": len(right),
+        }
+    return None
+
+
+def load_golden_token_plans(path: str, role: str) -> list[dict[str, Any]]:
+    with open(path, encoding="utf-8") as file:
+        payload = json.load(file)
+    plans = payload.get("plans")
+    if not isinstance(plans, list):
+        raise SystemExit("--golden-token-plan must contain a plans array")
+    filtered = [plan for plan in plans if plan.get("role", role) == role]
+    if not filtered:
+        raise SystemExit(f"--golden-token-plan contains no plans for role {role!r}")
+    return filtered
+
+
+def select_golden_plan(
+    plans: list[dict[str, Any]],
+    text: str,
+    index: int,
+) -> dict[str, Any]:
+    for plan in plans:
+        if plan.get("input_text") == text:
+            return plan
+    if index < len(plans):
+        return plans[index]
+    raise SystemExit(
+        f"--golden-token-plan has no plan for input {text!r} at position {index}"
+    )
+
+
+def retained_token_ids(token_ids: list[int], retain_mask: list[int]) -> list[int]:
+    return [token_id for token_id, retained in zip(token_ids, retain_mask) if retained]
+
+
+def compare_token_plan(
+    debug_payload: dict[str, Any],
+    golden_plan: dict[str, Any],
+    input_text: str,
+) -> TokenPlanComparison:
+    tokens = debug_payload.get("token_plan", {}).get("tokens", [])
+    if not isinstance(tokens, list):
+        raise SystemExit("colbert_debug payload did not contain token_plan.tokens")
+
+    pg_token_ids = [int(token["id"]) for token in tokens]
+    pg_pieces = [normalize_piece(token.get("piece")) for token in tokens]
+    pg_retain_mask = [1 if bool(token.get("retained")) else 0 for token in tokens]
+    pg_final = retained_token_ids(pg_token_ids, pg_retain_mask)
+
+    golden_token_ids = golden_plan.get("token_ids_after_padding_truncation")
+    if not isinstance(golden_token_ids, list):
+        raise SystemExit("golden token plan lacks token_ids_after_padding_truncation")
+    golden_token_ids = [int(token_id) for token_id in golden_token_ids]
+
+    golden_pieces = golden_plan.get("token_pieces")
+    if isinstance(golden_pieces, list) and any(piece is not None for piece in pg_pieces):
+        token_mismatch = first_sequence_mismatch(
+            list(zip(golden_token_ids, [normalize_piece(piece) for piece in golden_pieces])),
+            list(zip(pg_token_ids, pg_pieces)),
+            "golden",
+            "pg",
+        )
+    else:
+        token_mismatch = first_sequence_mismatch(
+            golden_token_ids,
+            pg_token_ids,
+            "golden",
+            "pg",
+        )
+
+    golden_retain_mask = golden_plan.get("retain_mask")
+    if not isinstance(golden_retain_mask, list):
+        raise SystemExit("golden token plan lacks retain_mask")
+    golden_retain_mask = [int(value) for value in golden_retain_mask]
+    retain_mismatch = first_sequence_mismatch(
+        golden_retain_mask,
+        pg_retain_mask,
+        "golden",
+        "pg",
+    )
+    golden_final = retained_token_ids(golden_token_ids, golden_retain_mask)
+
+    expected_count = golden_plan.get("final_vector_count")
+    if expected_count is None:
+        expected_count = len(golden_final)
+    vector_count = int(debug_payload.get("vector_count", -1))
+
+    return TokenPlanComparison(
+        input_text=input_text,
+        token_plan_parity_passed=token_mismatch is None,
+        retain_parity_passed=retain_mismatch is None and pg_final == golden_final,
+        vector_count_passed=vector_count == int(expected_count),
+        first_token_mismatch=token_mismatch,
+        first_retain_mismatch=retain_mismatch,
+        pg_final_token_ids=pg_final,
+        golden_final_token_ids=golden_final,
+    )
 
 
 def l2_norm(row: list[float]) -> float:
@@ -239,8 +384,14 @@ def run_ranking_smoke(
 def main() -> int:
     args = parse_args()
     texts = read_texts(args.texts_file)
+    golden_plans = (
+        load_golden_token_plans(args.golden_token_plan, args.role)
+        if args.golden_token_plan
+        else None
+    )
     model = load_pylate_model(args.model_name_or_path)
     results: list[Comparison] = []
+    token_plan_results: list[TokenPlanComparison] = []
     ranking: RankingSmoke | None = None
 
     try:
@@ -254,7 +405,15 @@ def main() -> int:
                 cur.execute("SELECT set_config(%s, %s, false)", ("pg_colbert_llama.model_dir", args.model_dir))
             if args.expected_dim:
                 cur.execute("SELECT set_config(%s, %s, false)", ("pg_colbert_llama.expected_dim", str(args.expected_dim)))
-            for text in texts:
+            for index, text in enumerate(texts):
+                if golden_plans is not None:
+                    token_plan_results.append(
+                        compare_token_plan(
+                            pg_debug(cur, args.pg_model_alias, text),
+                            select_golden_plan(golden_plans, text, index),
+                            text,
+                        )
+                    )
                 results.append(
                     compare(
                         pg_vectors(cur, args.pg_model_alias, text),
@@ -285,9 +444,19 @@ def main() -> int:
                     args.ranking_expected_index,
                 )
 
+    token_plan_parity_passed = all(
+        result.token_plan_parity_passed for result in token_plan_results
+    ) if token_plan_results else True
+    retain_parity_passed = all(
+        result.retain_parity_passed for result in token_plan_results
+    ) if token_plan_results else True
+    vector_count_passed = all(
+        result.vector_count_passed for result in token_plan_results
+    ) if token_plan_results else True
     vector_parity_passed = all(
         result.pg_dim == result.pylate_dim
         and abs(result.pg_count - result.pylate_count) <= args.count_tolerance
+        and vector_count_passed
         and result.max_abs_diff <= args.max_abs_diff
         and result.max_norm_deviation <= args.max_norm_deviation
         and result.max_cosine_delta <= args.max_cosine_delta
@@ -297,12 +466,37 @@ def main() -> int:
         ranking.pg_top_index == ranking.expected_index
         and ranking.pylate_top_index == ranking.expected_index
     )
-    passed = vector_parity_passed and ranking_passed
+    first_token_mismatch = next(
+        (
+            result.first_token_mismatch
+            for result in token_plan_results
+            if result.first_token_mismatch is not None
+        ),
+        None,
+    )
+    first_retain_mismatch = next(
+        (
+            result.first_retain_mismatch
+            for result in token_plan_results
+            if result.first_retain_mismatch is not None
+        ),
+        None,
+    )
+    passed = (
+        token_plan_parity_passed
+        and retain_parity_passed
+        and vector_parity_passed
+        and ranking_passed
+    )
 
     payload: dict[str, Any] = {
         "passed": passed,
+        "token_plan_parity_passed": token_plan_parity_passed,
+        "retain_parity_passed": retain_parity_passed,
         "vector_parity_passed": vector_parity_passed,
         "ranking_passed": ranking_passed,
+        "first_token_mismatch": first_token_mismatch,
+        "first_retain_mismatch": first_retain_mismatch,
         "texts": len(results),
         "max_abs_diff": max(result.max_abs_diff for result in results),
         "mean_abs_diff": sum(result.mean_abs_diff for result in results) / len(results),
@@ -310,6 +504,10 @@ def main() -> int:
         "max_cosine_delta": max(result.max_cosine_delta for result in results),
         "comparisons": [result.__dict__ for result in results],
     }
+    if token_plan_results:
+        payload["token_plan_comparisons"] = [
+            result.__dict__ for result in token_plan_results
+        ]
     if ranking is not None:
         payload["ranking"] = ranking.__dict__
     if args.json:

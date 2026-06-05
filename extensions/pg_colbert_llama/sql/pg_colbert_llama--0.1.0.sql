@@ -50,6 +50,11 @@ RETURNS pg_catalog.jsonb
 AS 'MODULE_PATHNAME', 'pg_colbert_llama_colbert_model_info'
 LANGUAGE C STABLE STRICT PARALLEL RESTRICTED;
 
+CREATE FUNCTION colbert_debug(model pg_catalog.text, input pg_catalog.text)
+RETURNS pg_catalog.jsonb
+AS 'MODULE_PATHNAME', 'pg_colbert_llama_colbert_debug'
+LANGUAGE C STABLE STRICT PARALLEL RESTRICTED;
+
 CREATE FUNCTION colbert_mv(model pg_catalog.text, input pg_catalog.text)
 RETURNS turbohybrid_multivector
 AS 'MODULE_PATHNAME', 'pg_colbert_llama_colbert_mv'
