@@ -10,6 +10,15 @@
       "metrics": ["nDCG@10", "Recall@10", "Recall@100", "MRR@10", "MAP@10", "overlap@10", "p50", "p95", "p99"]
     },
     {
+      "name": "dbpedia-colbert-multivector",
+      "layer": "ir_quality_and_systems",
+      "family": "Qdrant/DBPedia Entity + BEIR DBpedia",
+      "scale": "smoke-to-large",
+      "purpose": "ColBERT late-interaction benchmark covering PostgreSQL multivector generation, generated multivector insertion/storage, 8x parallel retrieval speed, and BEIR DBpedia recall quality.",
+      "inputs": ["Qdrant DBPedia parquet shards", "BEIR DBpedia queries", "BEIR DBpedia qrels", "johannhartmann/SauerkrautLM-Multi-ColBERT-15m-GGUF"],
+      "metrics": ["nDCG@10", "Recall@10", "Recall@100 when final_k permits it", "MRR@10", "MAP@10", "p50", "p95", "p99", "8x throughput"]
+    },
+    {
       "name": "beir-fiqa",
       "layer": "ir_quality",
       "family": "BEIR/MTEB",

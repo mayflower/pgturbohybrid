@@ -175,6 +175,18 @@
       "description": "pgturbohybrid quality profile with 400 dense and 400 BM25 candidates, exact-safe BM25 paths, SIMD enabled, and documented exact_storage choice."
     },
     {
+      "name": "pgturbohybrid_colbert_multivector_query_only",
+      "layer": "systems",
+      "kind": "postgres_index_am",
+      "description": "ColBERT late-interaction retrieval using pg_colbert_llama-generated turbohybrid_multivector query embeddings and pgturbohybrid multivector MaxSim ranking only."
+    },
+    {
+      "name": "pgturbohybrid_colbert_multivector_rrf",
+      "layer": "systems",
+      "kind": "postgres_index_am",
+      "description": "ColBERT late-interaction retrieval fused with PostgreSQL full-text BM25 through turbohybrid_query reciprocal rank fusion."
+    },
+    {
       "name": "pyserini_lucene_bm25",
       "layer": "reference",
       "kind": "external_ir",

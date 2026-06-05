@@ -33,6 +33,7 @@ th-bench-tune-profile
 
 nix develop .#bench
 th-bench-concurrent-dense --help
+th-bench-dbpedia-colbert --help
 FIQA_DATASET=/path/to/fiqa th-bench-fiqa-quick
 ```
 
@@ -40,6 +41,28 @@ The Nix `th-bench-fiqa-quick` wrapper defaults to the separate
 `pgturbohybrid_fiqa_quick` database. Use `FIQA_PGDATABASE=...` to choose another
 benchmark database, or set `PGDATABASE=...` explicitly when you want the wrapped
 script to use that database.
+
+The Nix `th-bench-dbpedia-colbert` wrapper defaults to the separate
+`pgturbohybrid_dbpedia_colbert` database. It uses the smaller
+`johannhartmann/SauerkrautLM-Multi-ColBERT-15m-GGUF` validation model by
+default when `--model-path` or `PG_COLBERT_LLAMA_TEST_MODEL` points at the GGUF
+file. The default run is smoke-sized (`--max-docs 1000 --max-queries 32`) and
+measures PostgreSQL multivector generation, persisted generated multivector
+insertion/storage, pgturbohybrid index build, serial retrieval, 8x parallel
+retrieval, and BEIR DBpedia qrels metrics for
+`pgturbohybrid_colbert_multivector_query_only`:
+
+```sh
+nix develop .#bench
+DBPEDIA_DATASET=/path/to/qdrant-dbpedia \
+BEIR_DBPEDIA_DATASET=/path/to/beir-dbpedia \
+PG_COLBERT_LLAMA_TEST_MODEL=/path/to/sauerkraut-modern.gguf \
+  th-bench-dbpedia-colbert
+```
+
+Use `--methods pgturbohybrid_colbert_multivector_query_only,pgturbohybrid_colbert_multivector_rrf`
+to include BM25 RRF fusion, and use `--max-docs 0 --max-queries 0 --final-k 100
+--quality-k 100` for an opt-in full-scale recall@100 run.
 
 Benchmarks that need external datasets or produce host-specific artifacts are
 not part of `flake check`. Keep generated JSON, CSV, logs, and Markdown reports
