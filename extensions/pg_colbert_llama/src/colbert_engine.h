@@ -27,6 +27,7 @@ typedef struct PgColbertModelSpec
 	int			nBatch;
 	int			nGpuLayers;
 	int			cacheSize;
+	int			queryLength;
 } PgColbertModelSpec;
 
 typedef struct PgColbertEngineOutput

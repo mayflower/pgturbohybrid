@@ -251,9 +251,9 @@ def main() -> int:
     with psycopg.connect(args.pg_dsn) as conn:
         with conn.cursor() as cur:
             if args.model_dir:
-                cur.execute("SET pg_colbert_llama.model_dir = %s", (args.model_dir,))
+                cur.execute("SELECT set_config(%s, %s, false)", ("pg_colbert_llama.model_dir", args.model_dir))
             if args.expected_dim:
-                cur.execute("SET pg_colbert_llama.expected_dim = %s", (args.expected_dim,))
+                cur.execute("SELECT set_config(%s, %s, false)", ("pg_colbert_llama.expected_dim", str(args.expected_dim)))
             for text in texts:
                 results.append(
                     compare(
