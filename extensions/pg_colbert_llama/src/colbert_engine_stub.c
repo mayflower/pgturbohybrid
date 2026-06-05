@@ -47,26 +47,36 @@ PgColbertEngineEncode(const PgColbertModelSpec *spec,
 	output->planTokenCount = count;
 	output->normalized = true;
 	output->loadedFromCache = false;
-	output->tokenDebug = (PgColbertTokenDebug *) palloc0(sizeof(PgColbertTokenDebug) * (Size) count);
 	output->tokenIds = (int32 *) palloc0(sizeof(int32) * (Size) count);
 	output->values = (float4 *) palloc0(sizeof(float4) * (Size) count * (Size) dim);
+	output->timing.inputs = 1;
+	output->timing.tokens = count;
+	output->timing.outputVectors = count;
+
+	if (spec->debugTokens)
+		output->tokenDebug =
+			(PgColbertTokenDebug *) palloc0(sizeof(PgColbertTokenDebug) *
+											(Size) count);
 
 	for (int32 i = 0; i < count; i++)
 	{
 		output->tokenIds[i] = i + 1;
-		output->tokenDebug[i].index = i;
-		output->tokenDebug[i].id = i + 1;
-		output->tokenDebug[i].piece = pstrdup(i == 0 ? "[CLS]" : "stub");
-		output->tokenDebug[i].positionId = i;
-		output->tokenDebug[i].tokenTypeId =
-			spec->role == PG_COLBERT_ROLE_QUERY ?
-			spec->profile.queryTokenTypeId : spec->profile.documentTokenTypeId;
-		output->tokenDebug[i].attentionMask = 1;
-		output->tokenDebug[i].outputEnabled = true;
-		output->tokenDebug[i].retained = true;
-		output->tokenDebug[i].retainReason =
-			pstrdup(spec->role == PG_COLBERT_ROLE_QUERY ?
-				   "retained_query" : "retained_document");
+		if (output->tokenDebug != NULL)
+		{
+			output->tokenDebug[i].index = i;
+			output->tokenDebug[i].id = i + 1;
+			output->tokenDebug[i].piece = pstrdup(i == 0 ? "[CLS]" : "stub");
+			output->tokenDebug[i].positionId = i;
+			output->tokenDebug[i].tokenTypeId =
+				spec->role == PG_COLBERT_ROLE_QUERY ?
+				spec->profile.queryTokenTypeId : spec->profile.documentTokenTypeId;
+			output->tokenDebug[i].attentionMask = 1;
+			output->tokenDebug[i].outputEnabled = true;
+			output->tokenDebug[i].retained = true;
+			output->tokenDebug[i].retainReason =
+				pstrdup(spec->role == PG_COLBERT_ROLE_QUERY ?
+					   "retained_query" : "retained_document");
+		}
 		output->values[(Size) i * (Size) dim + (i % dim)] = 1.0f;
 	}
 

@@ -106,6 +106,8 @@ typedef struct PgColbertModelSpec
 	int			cacheSize;
 	int			queryLength;
 	bool		strictProfile;
+	bool		debugTokens;
+	bool		logTiming;
 	PgColbertRuntimeProfile profile;
 } PgColbertModelSpec;
 
@@ -122,6 +124,19 @@ typedef struct PgColbertTokenDebug
 	const char *retainReason;
 } PgColbertTokenDebug;
 
+typedef struct PgColbertEngineTiming
+{
+	int64		tokenizationUs;
+	int64		llamaUs;
+	int64		outputUs;
+	int64		debugUs;
+	int64		projectionUs;
+	int64		totalUs;
+	int64		inputs;
+	int64		tokens;
+	int64		outputVectors;
+} PgColbertEngineTiming;
+
 typedef struct PgColbertEngineOutput
 {
 	const char *engine;
@@ -136,6 +151,7 @@ typedef struct PgColbertEngineOutput
 	int32		planTokenCount;
 	bool		normalized;
 	bool		loadedFromCache;
+	PgColbertEngineTiming timing;
 	PgColbertTokenDebug *tokenDebug;
 	int32	   *tokenIds;
 	float4	   *values;

@@ -66,6 +66,7 @@ static int	pg_colbert_llama_max_doc_vectors = 256;
 static int	pg_colbert_llama_query_length = 32;
 static bool pg_colbert_llama_strict_profile = false;
 static bool pg_colbert_llama_require_normalized = true;
+static bool pg_colbert_llama_log_timing = false;
 static int	pg_colbert_llama_expected_dim = 128;
 static char *pg_colbert_llama_allowed_models = NULL;
 static Oid	pg_colbert_llama_vector_type_oid = InvalidOid;
@@ -86,11 +87,13 @@ static void PgColbertValidateOutput(const PgColbertModelSpec *spec,
 static void PgColbertEncodeOrError(text *modelText, text *inputText,
 								   MemoryContext ctx,
 								   PgColbertModelSpec *spec,
-								   PgColbertEngineOutput *output);
+								   PgColbertEngineOutput *output,
+								   bool debugTokens);
 static int32 PgColbertEncodeBatchOrError(text *modelText, ArrayType *inputsArray,
 										 MemoryContext ctx,
 										 PgColbertModelSpec *spec,
-										 PgColbertEngineOutput **outputs);
+										 PgColbertEngineOutput **outputs,
+										 bool debugTokens);
 static PgColbertVector *PgColbertMakeVector(const float4 *values, int32 dim);
 static ArrayType *PgColbertBuildVectorArray(const PgColbertEngineOutput *output);
 static ArrayType *PgColbertBuildFloat4Array(const PgColbertEngineOutput *output);
@@ -197,6 +200,12 @@ _PG_init(void)
 							 NULL,
 							 &pg_colbert_llama_require_normalized,
 							 true,
+							 PGC_USERSET, 0, NULL, NULL, NULL);
+	DefineCustomBoolVariable("pg_colbert_llama.log_timing",
+							 "Log ColBERT llama embedding phase timings.",
+							 NULL,
+							 &pg_colbert_llama_log_timing,
+							 false,
 							 PGC_USERSET, 0, NULL, NULL, NULL);
 	DefineCustomIntVariable("pg_colbert_llama.expected_dim",
 							"Expected ColBERT embedding dimension.",
@@ -1341,6 +1350,7 @@ PgColbertParseModel(text *modelText, PgColbertModelSpec *spec)
 	spec->cacheSize = pg_colbert_llama_cache_size;
 	spec->queryLength = pg_colbert_llama_query_length;
 	spec->strictProfile = pg_colbert_llama_strict_profile;
+	spec->logTiming = pg_colbert_llama_log_timing;
 	PgColbertCheckAllowedModel(spec->alias);
 	PgColbertLoadRuntimeProfile(spec);
 }
@@ -1395,12 +1405,14 @@ static void
 PgColbertEncodeOrError(text *modelText, text *inputText,
 					   MemoryContext ctx,
 					   PgColbertModelSpec *spec,
-					   PgColbertEngineOutput *output)
+					   PgColbertEngineOutput *output,
+					   bool debugTokens)
 {
 	char	   *input = text_to_cstring(inputText);
 	char	   *errorMessage = NULL;
 
 	PgColbertParseModel(modelText, spec);
+	spec->debugTokens = debugTokens;
 	if (!PgColbertEngineEncode(spec, input, ctx, output, &errorMessage))
 		ereport(ERROR,
 				(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
@@ -1412,7 +1424,8 @@ static int32
 PgColbertEncodeBatchOrError(text *modelText, ArrayType *inputsArray,
 							MemoryContext ctx,
 							PgColbertModelSpec *spec,
-							PgColbertEngineOutput **outputs)
+							PgColbertEngineOutput **outputs,
+							bool debugTokens)
 {
 	Datum	   *inputDatums;
 	bool	   *inputNulls;
@@ -1429,6 +1442,7 @@ PgColbertEncodeBatchOrError(text *modelText, ArrayType *inputsArray,
 					  &inputDatums, &inputNulls, &inputCount);
 
 	PgColbertParseModel(modelText, spec);
+	spec->debugTokens = debugTokens;
 	*outputs =
 		(PgColbertEngineOutput *) palloc0(sizeof(PgColbertEngineOutput) *
 										  (Size) inputCount);
@@ -1776,8 +1790,21 @@ PgColbertAppendDebugJson(StringInfo buf,
 	appendStringInfoString(buf, ",\"known_limitations\":");
 	PgColbertAppendJsonString(buf, output->knownLimitations != NULL ?
 							  output->knownLimitations : spec->profile.knownLimitations);
+	appendStringInfo(buf,
+					 ",\"timing_us\":{\"total\":%lld,\"tokenization\":%lld,\"llama\":%lld,\"output\":%lld,\"debug\":%lld,\"projection\":%lld,\"inputs\":%lld,\"tokens\":%lld,\"output_vectors\":%lld}",
+					 (long long) output->timing.totalUs,
+					 (long long) output->timing.tokenizationUs,
+					 (long long) output->timing.llamaUs,
+					 (long long) output->timing.outputUs,
+					 (long long) output->timing.debugUs,
+					 (long long) output->timing.projectionUs,
+					 (long long) output->timing.inputs,
+					 (long long) output->timing.tokens,
+					 (long long) output->timing.outputVectors);
 	appendStringInfoString(buf, ",\"token_plan\":{\"tokens\":[");
-	for (int32 i = 0; i < output->planTokenCount; i++)
+	for (int32 i = 0;
+		 output->tokenDebug != NULL && i < output->planTokenCount;
+		 i++)
 	{
 		const PgColbertTokenDebug *token = &output->tokenDebug[i];
 
@@ -1862,7 +1889,7 @@ pg_colbert_llama_colbert(PG_FUNCTION_ARGS)
 	StringInfoData buf;
 
 	PgColbertEncodeOrError(PG_GETARG_TEXT_PP(0), PG_GETARG_TEXT_PP(1),
-						   CurrentMemoryContext, &spec, &output);
+						   CurrentMemoryContext, &spec, &output, false);
 	initStringInfo(&buf);
 	PgColbertAppendOutputJson(&buf, &spec, &output, true);
 	PG_RETURN_DATUM(PgColbertJsonbFromCString(buf.data));
@@ -1876,7 +1903,7 @@ pg_colbert_llama_colbert_vectors(PG_FUNCTION_ARGS)
 	ArrayType  *array;
 
 	PgColbertEncodeOrError(PG_GETARG_TEXT_PP(0), PG_GETARG_TEXT_PP(1),
-						   CurrentMemoryContext, &spec, &output);
+						   CurrentMemoryContext, &spec, &output, false);
 
 	array = PgColbertBuildVectorArray(&output);
 	PG_RETURN_ARRAYTYPE_P(array);
@@ -1890,7 +1917,7 @@ pg_colbert_llama_colbert_float4(PG_FUNCTION_ARGS)
 	ArrayType  *array;
 
 	PgColbertEncodeOrError(PG_GETARG_TEXT_PP(0), PG_GETARG_TEXT_PP(1),
-						   CurrentMemoryContext, &spec, &output);
+						   CurrentMemoryContext, &spec, &output, false);
 
 	array = PgColbertBuildFloat4Array(&output);
 	PG_RETURN_ARRAYTYPE_P(array);
@@ -1903,7 +1930,7 @@ pg_colbert_llama_colbert_dim(PG_FUNCTION_ARGS)
 	PgColbertEngineOutput output;
 
 	PgColbertEncodeOrError(PG_GETARG_TEXT_PP(0), PG_GETARG_TEXT_PP(1),
-						   CurrentMemoryContext, &spec, &output);
+						   CurrentMemoryContext, &spec, &output, false);
 	PG_RETURN_INT32(output.dim);
 }
 
@@ -1914,7 +1941,7 @@ pg_colbert_llama_colbert_mv(PG_FUNCTION_ARGS)
 	PgColbertEngineOutput output;
 
 	PgColbertEncodeOrError(PG_GETARG_TEXT_PP(0), PG_GETARG_TEXT_PP(1),
-						   CurrentMemoryContext, &spec, &output);
+						   CurrentMemoryContext, &spec, &output, false);
 	PG_RETURN_DATUM(PgColbertBuildMultiVector(&output));
 }
 
@@ -1933,7 +1960,8 @@ pg_colbert_llama_colbert_mv_batch(PG_FUNCTION_ARGS)
 									PG_GETARG_ARRAYTYPE_P(1),
 									CurrentMemoryContext,
 									&spec,
-									&outputs);
+									&outputs,
+									false);
 	resultType = get_fn_expr_rettype(fcinfo->flinfo);
 	multivectorOid = OidIsValid(resultType) ? get_element_type(resultType) :
 		InvalidOid;
@@ -1954,7 +1982,7 @@ pg_colbert_llama_colbert_debug(PG_FUNCTION_ARGS)
 	StringInfoData buf;
 
 	PgColbertEncodeOrError(PG_GETARG_TEXT_PP(0), PG_GETARG_TEXT_PP(1),
-						   CurrentMemoryContext, &spec, &output);
+						   CurrentMemoryContext, &spec, &output, true);
 	initStringInfo(&buf);
 	PgColbertAppendDebugJson(&buf, &spec, &output);
 	PG_RETURN_DATUM(PgColbertJsonbFromCString(buf.data));

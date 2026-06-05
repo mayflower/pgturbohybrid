@@ -3,19 +3,19 @@ use warnings FATAL => 'all';
 use Test::More;
 use File::Basename qw(basename dirname);
 use File::Copy qw(copy);
+use Cwd qw(abs_path);
 use JSON::PP qw(decode_json);
-
-BEGIN
-{
-	eval {
-		require PostgreSQL::Test::Cluster;
-		PostgreSQL::Test::Cluster->import();
-		1;
-	} or plan skip_all => 'PostgreSQL TAP test modules are not available';
-}
+use PostgreSQL::Test::Cluster;
 
 my $model_path = $ENV{PG_COLBERT_LLAMA_TEST_MODEL}
   or plan skip_all => 'PG_COLBERT_LLAMA_TEST_MODEL is not set';
+my $resolved_model_path = abs_path($model_path);
+if (!defined $resolved_model_path && $model_path !~ m{\A/} && defined $ENV{TH_ROOT})
+{
+	$resolved_model_path = abs_path("$ENV{TH_ROOT}/$model_path");
+}
+$model_path = $resolved_model_path
+  or die "could not resolve PG_COLBERT_LLAMA_TEST_MODEL: $ENV{PG_COLBERT_LLAMA_TEST_MODEL}";
 
 my $model_dir = dirname($model_path);
 my $alias = basename($model_path);

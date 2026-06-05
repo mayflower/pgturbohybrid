@@ -2,6 +2,7 @@ extern "C" {
 #include "postgres.h"
 
 #include "lib/stringinfo.h"
+#include "portability/instr_time.h"
 #include "utils/memutils.h"
 
 #include "colbert_engine.h"
@@ -1469,6 +1470,45 @@ PgColbertNormalizeVector(float *values, int32 dim)
 	return true;
 }
 
+static int64
+PgColbertElapsedUs(instr_time start)
+{
+	instr_time	end;
+
+	INSTR_TIME_SET_CURRENT(end);
+	INSTR_TIME_SUBTRACT(end, start);
+	return (int64) INSTR_TIME_GET_MICROSEC(end);
+}
+
+static void
+PgColbertSetTotalTiming(PgColbertEngineTiming *timing,
+						instr_time totalStart)
+{
+	timing->totalUs = PgColbertElapsedUs(totalStart);
+}
+
+static void
+PgColbertLogTiming(const PgColbertModelSpec *spec,
+				   const PgColbertEngineTiming *timing,
+				   const char *mode)
+{
+	if (!spec->logTiming)
+		return;
+
+	ereport(LOG,
+			(errmsg("pg_colbert_llama %s timing: inputs=%lld tokens=%lld output_vectors=%lld total_us=%lld tokenization_us=%lld llama_us=%lld output_us=%lld debug_us=%lld projection_us=%lld",
+					mode,
+					(long long) timing->inputs,
+					(long long) timing->tokens,
+					(long long) timing->outputVectors,
+					(long long) timing->totalUs,
+					(long long) timing->tokenizationUs,
+					(long long) timing->llamaUs,
+					(long long) timing->outputUs,
+					(long long) timing->debugUs,
+					(long long) timing->projectionUs)));
+}
+
 static bool
 PgColbertApplyProjectionChain(const PgColbertCachedModel *entry,
 							  const float *embedding,
@@ -1957,10 +1997,15 @@ PgColbertEncodeBody(const PgColbertModelSpec *spec, const char *input,
 	bool		batchInitialized = false;
 	int32		rc;
 	const char *attentionMaskStatus = "ok";
+	instr_time	totalStart;
+	instr_time	phaseStart;
+	PgColbertEngineTiming timing;
 
 	memset(&batch, 0, sizeof(batch));
 	memset(&plan, 0, sizeof(plan));
 	memset(output, 0, sizeof(*output));
+	memset(&timing, 0, sizeof(timing));
+	INSTR_TIME_SET_CURRENT(totalStart);
 
 	if (!PgColbertResolvePath(spec, ctx, &path, errorMessage))
 		return false;
@@ -1980,6 +2025,7 @@ PgColbertEncodeBody(const PgColbertModelSpec *spec, const char *input,
 	}
 
 	textLen = strlen(spec->prefix) + strlen(input);
+	INSTR_TIME_SET_CURRENT(phaseStart);
 	fullText = (char *) malloc((size_t) textLen + 1);
 	if (fullText == NULL)
 		goto oom;
@@ -1990,6 +2036,7 @@ PgColbertEncodeBody(const PgColbertModelSpec *spec, const char *input,
 	if (!PgColbertBuildEncodePlan(vocab, spec, fullText, textLen, &plan,
 								  ctx, errorMessage))
 		goto cleanup;
+	timing.tokenizationUs += PgColbertElapsedUs(phaseStart);
 	if (spec->role == PG_COLBERT_ROLE_QUERY &&
 		spec->profile.loaded &&
 		spec->profile.strictPylateProfile &&
@@ -2024,11 +2071,17 @@ PgColbertEncodeBody(const PgColbertModelSpec *spec, const char *input,
 
 	if (llama_model_has_encoder(entry->model) &&
 		!llama_model_has_decoder(entry->model))
+	{
+		INSTR_TIME_SET_CURRENT(phaseStart);
 		rc = llama_encode(entry->ctx, batch);
+		timing.llamaUs += PgColbertElapsedUs(phaseStart);
+	}
 	else
 	{
 		llama_memory_clear(llama_get_memory(entry->ctx), true);
+		INSTR_TIME_SET_CURRENT(phaseStart);
 		rc = llama_decode(entry->ctx, batch);
+		timing.llamaUs += PgColbertElapsedUs(phaseStart);
 	}
 	if (rc != 0)
 	{
@@ -2037,6 +2090,7 @@ PgColbertEncodeBody(const PgColbertModelSpec *spec, const char *input,
 		goto cleanup;
 	}
 
+	INSTR_TIME_SET_CURRENT(phaseStart);
 	oldCtx = MemoryContextSwitchTo(ctx);
 	output->engine = PgColbertEngineName();
 	output->path = pstrdup(entry->path);
@@ -2050,27 +2104,37 @@ PgColbertEncodeBody(const PgColbertModelSpec *spec, const char *input,
 	output->planTokenCount = plan.nTokens;
 	output->normalized = true;
 	output->loadedFromCache = loadedFromCache;
-	output->tokenDebug =
-		(PgColbertTokenDebug *) palloc0(sizeof(PgColbertTokenDebug) * (Size) plan.nTokens);
 	output->tokenIds = (int32 *) palloc0(sizeof(int32) * (Size) retained);
 	output->values = (float4 *) palloc0(sizeof(float4) * (Size) retained *
 										(Size) entry->nEmbdOut);
-	for (int32 i = 0; i < plan.nTokens; i++)
-	{
-		const char *piece = llama_vocab_get_text(vocab, plan.tokens[i]);
-
-		output->tokenDebug[i].index = i;
-		output->tokenDebug[i].id = (int32) plan.tokens[i];
-		output->tokenDebug[i].piece = piece != NULL ? pstrdup(piece) : NULL;
-		output->tokenDebug[i].positionId = plan.positionIds[i];
-		output->tokenDebug[i].tokenTypeId = plan.tokenTypeIds[i];
-		output->tokenDebug[i].attentionMask = plan.attentionMask[i];
-		output->tokenDebug[i].outputEnabled = plan.outputMask[i];
-		output->tokenDebug[i].retained = plan.retainMask[i];
-		output->tokenDebug[i].retainReason =
-			pstrdup(plan.retainReasons[i]);
-	}
 	MemoryContextSwitchTo(oldCtx);
+	timing.outputUs += PgColbertElapsedUs(phaseStart);
+
+	if (spec->debugTokens)
+	{
+		INSTR_TIME_SET_CURRENT(phaseStart);
+		oldCtx = MemoryContextSwitchTo(ctx);
+		output->tokenDebug =
+			(PgColbertTokenDebug *) palloc0(sizeof(PgColbertTokenDebug) *
+											(Size) plan.nTokens);
+		for (int32 i = 0; i < plan.nTokens; i++)
+		{
+			const char *piece = llama_vocab_get_text(vocab, plan.tokens[i]);
+
+			output->tokenDebug[i].index = i;
+			output->tokenDebug[i].id = (int32) plan.tokens[i];
+			output->tokenDebug[i].piece = piece != NULL ? pstrdup(piece) : NULL;
+			output->tokenDebug[i].positionId = plan.positionIds[i];
+			output->tokenDebug[i].tokenTypeId = plan.tokenTypeIds[i];
+			output->tokenDebug[i].attentionMask = plan.attentionMask[i];
+			output->tokenDebug[i].outputEnabled = plan.outputMask[i];
+			output->tokenDebug[i].retained = plan.retainMask[i];
+			output->tokenDebug[i].retainReason =
+				pstrdup(plan.retainReasons[i]);
+		}
+		MemoryContextSwitchTo(oldCtx);
+		timing.debugUs += PgColbertElapsedUs(phaseStart);
+	}
 
 	if (entry->hasProjection)
 	{
@@ -2093,6 +2157,7 @@ PgColbertEncodeBody(const PgColbertModelSpec *spec, const char *input,
 	}
 
 	retained = 0;
+	INSTR_TIME_SET_CURRENT(phaseStart);
 	for (int32 i = 0; i < plan.nTokens && retained < output->count; i++)
 	{
 		const float *vector;
@@ -2137,6 +2202,13 @@ PgColbertEncodeBody(const PgColbertModelSpec *spec, const char *input,
 				(float4) (vector[j] / norm);
 		retained++;
 	}
+	timing.projectionUs += PgColbertElapsedUs(phaseStart);
+	timing.inputs = 1;
+	timing.tokens = plan.nTokens;
+	timing.outputVectors = output->count;
+	PgColbertSetTotalTiming(&timing, totalStart);
+	output->timing = timing;
+	PgColbertLogTiming(spec, &timing, "single");
 
 	ok = true;
 	goto cleanup;
@@ -2185,8 +2257,14 @@ PgColbertEncodeBatchBody(const PgColbertModelSpec *spec,
 	int32		maxBatchTokens = 0;
 	size_t		prefixLen = strlen(spec->prefix);
 	const char *attentionMaskStatus = "ok";
+	instr_time	totalStart;
+	instr_time	phaseStart;
+	PgColbertEngineTiming timing;
 
 	memset(&batch, 0, sizeof(batch));
+	memset(&timing, 0, sizeof(timing));
+	timing.inputs = inputCount;
+	INSTR_TIME_SET_CURRENT(totalStart);
 
 	if (inputCount <= 0)
 		return true;
@@ -2214,6 +2292,7 @@ PgColbertEncodeBatchBody(const PgColbertModelSpec *spec,
 		goto oom;
 
 	vocab = llama_model_get_vocab(entry->model);
+	INSTR_TIME_SET_CURRENT(phaseStart);
 	for (int32 i = 0; i < inputCount; i++)
 	{
 		int32		textLen = prefixLen + strlen(inputs[i]);
@@ -2228,6 +2307,8 @@ PgColbertEncodeBatchBody(const PgColbertModelSpec *spec,
 		if (!PgColbertBuildEncodePlan(vocab, spec, fullTexts[i], textLen,
 									  &plans[i], ctx, errorMessage))
 			goto cleanup;
+		timing.tokens += plans[i].nTokens;
+		timing.outputVectors += plans[i].outputCount;
 		if (plans[i].nTokens > spec->nCtx || plans[i].nTokens > spec->nBatch)
 		{
 			PgColbertSetError(ctx, errorMessage,
@@ -2237,6 +2318,7 @@ PgColbertEncodeBatchBody(const PgColbertModelSpec *spec,
 			goto cleanup;
 		}
 	}
+	timing.tokenizationUs += PgColbertElapsedUs(phaseStart);
 
 	for (int32 start = 0; start < inputCount;)
 	{
@@ -2334,11 +2416,17 @@ PgColbertEncodeBatchBody(const PgColbertModelSpec *spec,
 
 		if (llama_model_has_encoder(entry->model) &&
 			!llama_model_has_decoder(entry->model))
+		{
+			INSTR_TIME_SET_CURRENT(phaseStart);
 			rc = llama_encode(entry->ctx, batch);
+			timing.llamaUs += PgColbertElapsedUs(phaseStart);
+		}
 		else
 		{
 			llama_memory_clear(llama_get_memory(entry->ctx), true);
+			INSTR_TIME_SET_CURRENT(phaseStart);
 			rc = llama_decode(entry->ctx, batch);
+			timing.llamaUs += PgColbertElapsedUs(phaseStart);
 		}
 		if (rc != 0)
 		{
@@ -2361,6 +2449,7 @@ PgColbertEncodeBatchBody(const PgColbertModelSpec *spec,
 			PgColbertEngineOutput *output = &outputs[inputIndex];
 			int32		retained = 0;
 
+			INSTR_TIME_SET_CURRENT(phaseStart);
 			oldCtx = MemoryContextSwitchTo(ctx);
 			output->engine = PgColbertEngineName();
 			output->path = pstrdup(entry->path);
@@ -2374,39 +2463,51 @@ PgColbertEncodeBatchBody(const PgColbertModelSpec *spec,
 			output->planTokenCount = plan->nTokens;
 			output->normalized = true;
 			output->loadedFromCache = loadedFromCache;
-			output->tokenDebug =
-				(PgColbertTokenDebug *) palloc0(sizeof(PgColbertTokenDebug) *
-												(Size) plan->nTokens);
 			output->tokenIds =
 				(int32 *) palloc0(sizeof(int32) * (Size) plan->outputCount);
 			output->values =
 				(float4 *) palloc0(sizeof(float4) * (Size) plan->outputCount *
 								   (Size) entry->nEmbdOut);
-			for (int32 tokenIndex = 0; tokenIndex < plan->nTokens; tokenIndex++)
-			{
-				const char *piece = llama_vocab_get_text(vocab,
-														 plan->tokens[tokenIndex]);
-
-				output->tokenDebug[tokenIndex].index = tokenIndex;
-				output->tokenDebug[tokenIndex].id =
-					(int32) plan->tokens[tokenIndex];
-				output->tokenDebug[tokenIndex].piece =
-					piece != NULL ? pstrdup(piece) : NULL;
-				output->tokenDebug[tokenIndex].positionId =
-					plan->positionIds[tokenIndex];
-				output->tokenDebug[tokenIndex].tokenTypeId =
-					plan->tokenTypeIds[tokenIndex];
-				output->tokenDebug[tokenIndex].attentionMask =
-					plan->attentionMask[tokenIndex];
-				output->tokenDebug[tokenIndex].outputEnabled =
-					plan->outputMask[tokenIndex];
-				output->tokenDebug[tokenIndex].retained =
-					plan->retainMask[tokenIndex];
-				output->tokenDebug[tokenIndex].retainReason =
-					pstrdup(plan->retainReasons[tokenIndex]);
-			}
 			MemoryContextSwitchTo(oldCtx);
+			timing.outputUs += PgColbertElapsedUs(phaseStart);
 
+			if (spec->debugTokens)
+			{
+				INSTR_TIME_SET_CURRENT(phaseStart);
+				oldCtx = MemoryContextSwitchTo(ctx);
+				output->tokenDebug =
+					(PgColbertTokenDebug *) palloc0(sizeof(PgColbertTokenDebug) *
+													(Size) plan->nTokens);
+				for (int32 tokenIndex = 0;
+					 tokenIndex < plan->nTokens;
+					 tokenIndex++)
+				{
+					const char *piece = llama_vocab_get_text(vocab,
+															 plan->tokens[tokenIndex]);
+
+					output->tokenDebug[tokenIndex].index = tokenIndex;
+					output->tokenDebug[tokenIndex].id =
+						(int32) plan->tokens[tokenIndex];
+					output->tokenDebug[tokenIndex].piece =
+						piece != NULL ? pstrdup(piece) : NULL;
+					output->tokenDebug[tokenIndex].positionId =
+						plan->positionIds[tokenIndex];
+					output->tokenDebug[tokenIndex].tokenTypeId =
+						plan->tokenTypeIds[tokenIndex];
+					output->tokenDebug[tokenIndex].attentionMask =
+						plan->attentionMask[tokenIndex];
+					output->tokenDebug[tokenIndex].outputEnabled =
+						plan->outputMask[tokenIndex];
+					output->tokenDebug[tokenIndex].retained =
+						plan->retainMask[tokenIndex];
+					output->tokenDebug[tokenIndex].retainReason =
+						pstrdup(plan->retainReasons[tokenIndex]);
+				}
+				MemoryContextSwitchTo(oldCtx);
+				timing.debugUs += PgColbertElapsedUs(phaseStart);
+			}
+
+			INSTR_TIME_SET_CURRENT(phaseStart);
 			for (int32 tokenIndex = 0; tokenIndex < plan->nTokens; tokenIndex++)
 			{
 				const float *vector;
@@ -2457,6 +2558,7 @@ PgColbertEncodeBatchBody(const PgColbertModelSpec *spec,
 								   (Size) j] = (float4) (vector[j] / norm);
 				retained++;
 			}
+			timing.projectionUs += PgColbertElapsedUs(phaseStart);
 		}
 
 		if (outputOrdinal != totalOutputs || readToken != totalTokens)
@@ -2469,6 +2571,10 @@ PgColbertEncodeBatchBody(const PgColbertModelSpec *spec,
 		start = end;
 	}
 
+	PgColbertSetTotalTiming(&timing, totalStart);
+	for (int32 i = 0; i < inputCount; i++)
+		outputs[i].timing = timing;
+	PgColbertLogTiming(spec, &timing, "batch");
 	ok = true;
 	goto cleanup;
 
