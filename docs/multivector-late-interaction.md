@@ -27,6 +27,21 @@ SELECT turbohybrid_multivector_dims(colbert),
 FROM passages;
 ```
 
+Embedding extensions that already have flat row-major float data can avoid
+building intermediate pgvector values:
+
+```sql
+SELECT turbohybrid_multivector_from_float4(
+  ARRAY[1,0,0,1]::real[],
+  2
+);
+```
+
+`turbohybrid_multivector_from_float4(raw_values, dim)` requires `dim > 0`, a
+non-empty `real[]`, an array length divisible by `dim`, no null elements, and
+finite values. It stores values exactly in the same multivector layout used by
+the `vector[]` constructor.
+
 Exact reference scoring is available without an index:
 
 ```sql

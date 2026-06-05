@@ -68,6 +68,7 @@ FUNCTION_PREFIX PG_FUNCTION_INFO_V1(pgturbohybrid_multivector_out);
 FUNCTION_PREFIX PG_FUNCTION_INFO_V1(pgturbohybrid_multivector_recv);
 FUNCTION_PREFIX PG_FUNCTION_INFO_V1(pgturbohybrid_multivector_send);
 FUNCTION_PREFIX PG_FUNCTION_INFO_V1(pgturbohybrid_multivector_constructor);
+FUNCTION_PREFIX PG_FUNCTION_INFO_V1(pgturbohybrid_multivector_from_float4);
 FUNCTION_PREFIX PG_FUNCTION_INFO_V1(pgturbohybrid_multivector_dims);
 FUNCTION_PREFIX PG_FUNCTION_INFO_V1(pgturbohybrid_multivector_count);
 FUNCTION_PREFIX PG_FUNCTION_INFO_V1(pgturbohybrid_multivector_subvector);
@@ -1207,6 +1208,81 @@ pgturbohybrid_multivector_constructor(PG_FUNCTION_ARGS)
 		dest += dim;
 	}
 
+	PG_RETURN_PGTURBOHYBRID_MULTIVECTOR_P(result);
+}
+
+Datum
+pgturbohybrid_multivector_from_float4(PG_FUNCTION_ARGS)
+{
+	ArrayType  *array;
+	Datum	   *elements;
+	bool	   *nulls;
+	int			nelems;
+	int32		dim = PG_GETARG_INT32(1);
+	int32		count;
+	Size		resultSize;
+	PgturbohybridMultiVector *result;
+
+	if (PG_ARGISNULL(0))
+		ereport(ERROR,
+				(errcode(ERRCODE_NULL_VALUE_NOT_ALLOWED),
+				 errmsg("multivector values array cannot be null")));
+
+	if (dim <= 0)
+		ereport(ERROR,
+				(errcode(ERRCODE_INVALID_PARAMETER_VALUE),
+				 errmsg("multivector dimensions must be greater than zero")));
+
+	array = PG_GETARG_ARRAYTYPE_P(0);
+	if (ARR_NDIM(array) == 0)
+		ereport(ERROR,
+				(errcode(ERRCODE_DATA_EXCEPTION),
+				 errmsg("multivector values array cannot be empty")));
+
+	if (ARR_ELEMTYPE(array) != FLOAT4OID)
+		ereport(ERROR,
+				(errcode(ERRCODE_DATATYPE_MISMATCH),
+				 errmsg("expected real[] input")));
+
+	deconstruct_array(array, FLOAT4OID, sizeof(float4), true, TYPALIGN_INT,
+					  &elements, &nulls, &nelems);
+
+	if (nelems <= 0)
+		ereport(ERROR,
+				(errcode(ERRCODE_DATA_EXCEPTION),
+				 errmsg("multivector values array cannot be empty")));
+
+	if (nelems % dim != 0)
+		ereport(ERROR,
+				(errcode(ERRCODE_DATA_EXCEPTION),
+				 errmsg("multivector values array length must be divisible by dimensions")));
+
+	count = nelems / dim;
+	resultSize = PgturbohybridMultiVectorSize(count, dim);
+	result = (PgturbohybridMultiVector *) palloc0(resultSize);
+	SET_VARSIZE(result, resultSize);
+	result->dim = dim;
+	result->count = count;
+	result->flags = 0;
+
+	for (int i = 0; i < nelems; i++)
+	{
+		float4		value;
+
+		if (nulls[i])
+			ereport(ERROR,
+					(errcode(ERRCODE_NULL_VALUE_NOT_ALLOWED),
+					 errmsg("multivector values array cannot contain null elements")));
+
+		value = DatumGetFloat4(elements[i]);
+		if (!isfinite(value))
+			ereport(ERROR,
+					(errcode(ERRCODE_DATA_EXCEPTION),
+					 errmsg("multivector cannot contain NaN or infinite values")));
+		result->values[i] = value;
+	}
+
+	PgturbohybridCheckMultiVector(result);
 	PG_RETURN_PGTURBOHYBRID_MULTIVECTOR_P(result);
 }
 

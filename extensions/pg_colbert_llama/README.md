@@ -1,0 +1,82 @@
+# pg_colbert_llama
+
+`pg_colbert_llama` is a companion extension that turns text into
+`pgturbohybrid` ColBERT multivectors.
+
+The default build uses a deterministic stub engine for CI:
+
+```sh
+nix --extra-experimental-features 'nix-command flakes' develop --command th-colbert-build-stub
+nix --extra-experimental-features 'nix-command flakes' develop --command th-colbert-test-stub
+```
+
+Use it with:
+
+```sql
+CREATE EXTENSION vector;
+CREATE EXTENSION pgturbohybrid;
+CREATE EXTENSION pg_colbert_llama;
+
+SET pg_colbert_llama.expected_dim = 4; -- stub mode only
+
+SELECT colbert('sauerkraut-modern:query', 'test');
+SELECT colbert_vectors('sauerkraut-modern:doc', 'test');
+SELECT colbert_mv('sauerkraut-modern:query', 'test');
+```
+
+Optional llama build path:
+
+```sh
+nix --extra-experimental-features 'nix-command flakes' develop --command th-colbert-build-llama
+```
+
+The llama engine path is kept opt-in so normal CI never requires model downloads
+or GGUF files. Live tests are gated:
+
+```sh
+hf download johannhartmann/SauerkrautLM-Multi-ColBERT-15m-GGUF \
+  VAGOsolutions_SauerkrautLM_Multi_ColBERT_15m.f16.gguf \
+  --local-dir .nix-dev/models/colbert-15m
+
+python3 extensions/pg_colbert_llama/tools/canonicalize_pg_colbert_gguf.py \
+  .nix-dev/models/colbert-15m/VAGOsolutions_SauerkrautLM_Multi_ColBERT_15m.f16.gguf \
+  .nix-dev/models/colbert-15m/sauerkraut-modern.gguf
+
+nix --extra-experimental-features 'nix-command flakes' develop --impure --command \
+  env PG_COLBERT_LLAMA_TEST_MODEL="$PWD/.nix-dev/models/colbert-15m/sauerkraut-modern.gguf" \
+  th-colbert-live-test
+```
+
+The 15m model is small enough to be the default local validation pair:
+`VAGOsolutions/SauerkrautLM-Multi-ColBERT-15m` for PyLate parity and
+`johannhartmann/SauerkrautLM-Multi-ColBERT-15m-GGUF` for the PostgreSQL
+llama.cpp GGUF path. The canonicalizer rewrites the GGUF repository's
+`pg_colbert_v1` format into llama.cpp BERT tensor names and writes the ColBERT
+projection to `sauerkraut-modern.gguf.colbert_proj`. By default it writes
+CPU-compatible `f32` tensors; pass `--preserve-tensor-types` only when the
+target backend supports the source tensor types.
+
+Compare live PostgreSQL output against PyLate manually:
+
+```sh
+python extensions/pg_colbert_llama/tools/compare_pylate.py \
+  --pg-dsn "$DATABASE_URL" \
+  --pg-model-alias sauerkraut-modern:query \
+  --model-name-or-path VAGOsolutions/SauerkrautLM-Multi-ColBERT-15m \
+  --texts-file texts.txt \
+  --role query \
+  --model-dir /var/lib/postgresql/colbert-models \
+  --ranking-query "red planet" \
+  --ranking-docs-file ranking-docs.txt \
+  --ranking-expected-index 0
+```
+
+Put the obviously relevant passage first in `ranking-docs.txt`. The ranking
+smoke encodes the query with `alias:query`, encodes candidate passages with
+`alias:doc`, computes ColBERT MaxSim for PostgreSQL and PyLate output, and
+fails unless both rank the expected passage first.
+
+Model names are aliases such as `sauerkraut-modern:query` and
+`sauerkraut-modern:doc`. SQL callers cannot pass arbitrary filesystem paths;
+models must be installed by an administrator under
+`pg_colbert_llama.model_dir`.

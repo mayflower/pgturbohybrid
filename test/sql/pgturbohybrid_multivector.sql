@@ -37,6 +37,50 @@ SELECT turbohybrid_multivector(
   )
 )::text AS mv_array_roundtrip;
 
+SELECT turbohybrid_multivector_from_float4(ARRAY[1,0,0,1]::real[], 2)::text
+  AS mv_float4;
+
+SELECT turbohybrid_multivector(
+  turbohybrid_multivector_to_vector_array(
+    turbohybrid_multivector_from_float4(ARRAY[1,0,0,1]::real[], 2)
+  )
+)::text AS mv_float4_roundtrip;
+
+DO $mv_float4$
+DECLARE
+	spec record;
+BEGIN
+	FOR spec IN
+		SELECT 'dim_zero' AS name,
+			   'SELECT turbohybrid_multivector_from_float4(ARRAY[1,0]::real[], 0)' AS sql
+		UNION ALL
+		SELECT 'length_not_divisible',
+			   'SELECT turbohybrid_multivector_from_float4(ARRAY[1,0,1]::real[], 2)'
+		UNION ALL
+		SELECT 'empty_array',
+			   'SELECT turbohybrid_multivector_from_float4(ARRAY[]::real[], 2)'
+		UNION ALL
+		SELECT 'null_element',
+			   'SELECT turbohybrid_multivector_from_float4(ARRAY[1,NULL]::real[], 2)'
+		UNION ALL
+		SELECT 'nan_element',
+			   $$SELECT turbohybrid_multivector_from_float4(ARRAY['NaN'::real,0]::real[], 2)$$
+		UNION ALL
+		SELECT 'infinite_element',
+			   $$SELECT turbohybrid_multivector_from_float4(ARRAY['Infinity'::real,0]::real[], 2)$$
+	LOOP
+		BEGIN
+			EXECUTE spec.sql;
+			RAISE EXCEPTION 'expected turbohybrid_multivector_from_float4 case to fail: %',
+				spec.name;
+		EXCEPTION
+			WHEN invalid_parameter_value OR data_exception OR null_value_not_allowed THEN
+				NULL;
+		END;
+	END LOOP;
+END
+$mv_float4$;
+
 DO $$
 DECLARE
 	ordinal int;

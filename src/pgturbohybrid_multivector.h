@@ -90,6 +90,7 @@ FUNCTION_PREFIX Datum pgturbohybrid_multivector_out(PG_FUNCTION_ARGS);
 FUNCTION_PREFIX Datum pgturbohybrid_multivector_recv(PG_FUNCTION_ARGS);
 FUNCTION_PREFIX Datum pgturbohybrid_multivector_send(PG_FUNCTION_ARGS);
 FUNCTION_PREFIX Datum pgturbohybrid_multivector_constructor(PG_FUNCTION_ARGS);
+FUNCTION_PREFIX Datum pgturbohybrid_multivector_from_float4(PG_FUNCTION_ARGS);
 FUNCTION_PREFIX Datum pgturbohybrid_multivector_dims(PG_FUNCTION_ARGS);
 FUNCTION_PREFIX Datum pgturbohybrid_multivector_count(PG_FUNCTION_ARGS);
 FUNCTION_PREFIX Datum pgturbohybrid_multivector_subvector(PG_FUNCTION_ARGS);
