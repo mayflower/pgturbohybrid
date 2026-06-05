@@ -718,7 +718,16 @@ pgturbohybrid_query_constructor(PG_FUNCTION_ARGS)
 		flags |= PGTURBOHYBRID_QUERY_FLAG_HAS_TSQUERY;
 	}
 
-	if (!PG_ARGISNULL(11))
+	/*
+	 * multivector_query is the optional 12th argument (index 11).  Guard the
+	 * read with PG_NARGS() so an extension still installed at the older 11-arg
+	 * signature (no multivector_query) does not make us read past the argument
+	 * array -- otherwise the out-of-bounds PG_ARGISNULL(11) reads garbage and
+	 * spuriously raises the "both vector and multivector" error for a plain
+	 * vector_query.  Keeps a new library backward compatible with a not-yet
+	 * re-created extension.
+	 */
+	if (PG_NARGS() > 11 && !PG_ARGISNULL(11))
 	{
 		PgturbohybridMultiVector *mv;
 
