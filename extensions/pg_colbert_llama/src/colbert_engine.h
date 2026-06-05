@@ -101,6 +101,7 @@ typedef struct PgColbertModelSpec
 	int			threads;
 	int			nCtx;
 	int			nBatch;
+	int			batchSequences;
 	int			nGpuLayers;
 	int			cacheSize;
 	int			queryLength;
@@ -161,6 +162,12 @@ extern bool PgColbertEngineEncode(const PgColbertModelSpec *spec,
 								  MemoryContext ctx,
 								  PgColbertEngineOutput *output,
 								  char **errorMessage);
+extern bool PgColbertEngineEncodeBatch(const PgColbertModelSpec *spec,
+									   const char *const *inputs,
+									   int32 inputCount,
+									   MemoryContext ctx,
+									   PgColbertEngineOutput *outputs,
+									   char **errorMessage);
 extern bool PgColbertEngineGetModelInfo(const PgColbertModelSpec *spec,
 										MemoryContext ctx,
 										PgColbertEngineModelInfo *info,

@@ -37,6 +37,7 @@ PG_FUNCTION_INFO_V1(pg_colbert_llama_colbert_vectors);
 PG_FUNCTION_INFO_V1(pg_colbert_llama_colbert_float4);
 PG_FUNCTION_INFO_V1(pg_colbert_llama_colbert_dim);
 PG_FUNCTION_INFO_V1(pg_colbert_llama_colbert_mv);
+PG_FUNCTION_INFO_V1(pg_colbert_llama_colbert_mv_batch);
 PG_FUNCTION_INFO_V1(pg_colbert_llama_colbert_debug);
 PG_FUNCTION_INFO_V1(pg_colbert_llama_colbert_model_info);
 
@@ -55,6 +56,7 @@ static char *pg_colbert_llama_model_dir = NULL;
 static int	pg_colbert_llama_threads = 4;
 static int	pg_colbert_llama_n_ctx = 512;
 static int	pg_colbert_llama_n_batch = 512;
+static int	pg_colbert_llama_batch_sequences = 8;
 static int	pg_colbert_llama_n_gpu_layers = 0;
 static int	pg_colbert_llama_cache_size = 2;
 static char *pg_colbert_llama_query_prefix = NULL;
@@ -85,10 +87,17 @@ static void PgColbertEncodeOrError(text *modelText, text *inputText,
 								   MemoryContext ctx,
 								   PgColbertModelSpec *spec,
 								   PgColbertEngineOutput *output);
+static int32 PgColbertEncodeBatchOrError(text *modelText, ArrayType *inputsArray,
+										 MemoryContext ctx,
+										 PgColbertModelSpec *spec,
+										 PgColbertEngineOutput **outputs);
 static PgColbertVector *PgColbertMakeVector(const float4 *values, int32 dim);
 static ArrayType *PgColbertBuildVectorArray(const PgColbertEngineOutput *output);
 static ArrayType *PgColbertBuildFloat4Array(const PgColbertEngineOutput *output);
 static Datum PgColbertBuildMultiVector(const PgColbertEngineOutput *output);
+static ArrayType *PgColbertBuildMultiVectorArray(PgColbertEngineOutput *outputs,
+												 int32 outputCount,
+												 Oid multivectorOid);
 static void PgColbertAppendJsonString(StringInfo buf, const char *value);
 static void PgColbertAppendOutputJson(StringInfo buf,
 									  const PgColbertModelSpec *spec,
@@ -128,6 +137,12 @@ _PG_init(void)
 							NULL,
 							&pg_colbert_llama_n_batch,
 							512, 1, INT_MAX,
+							PGC_USERSET, 0, NULL, NULL, NULL);
+	DefineCustomIntVariable("pg_colbert_llama.batch_sequences",
+							"Maximum independent input sequences per llama.cpp embedding batch.",
+							NULL,
+							&pg_colbert_llama_batch_sequences,
+							8, 1, 1024,
 							PGC_USERSET, 0, NULL, NULL, NULL);
 	DefineCustomIntVariable("pg_colbert_llama.n_gpu_layers",
 							"Number of model layers to offload to GPU.",
@@ -1321,6 +1336,7 @@ PgColbertParseModel(text *modelText, PgColbertModelSpec *spec)
 	spec->threads = pg_colbert_llama_threads;
 	spec->nCtx = pg_colbert_llama_n_ctx;
 	spec->nBatch = pg_colbert_llama_n_batch;
+	spec->batchSequences = pg_colbert_llama_batch_sequences;
 	spec->nGpuLayers = pg_colbert_llama_n_gpu_layers;
 	spec->cacheSize = pg_colbert_llama_cache_size;
 	spec->queryLength = pg_colbert_llama_query_length;
@@ -1390,6 +1406,54 @@ PgColbertEncodeOrError(text *modelText, text *inputText,
 				(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
 				 errmsg("%s", errorMessage != NULL ? errorMessage : "ColBERT engine failed")));
 	PgColbertValidateOutput(spec, output);
+}
+
+static int32
+PgColbertEncodeBatchOrError(text *modelText, ArrayType *inputsArray,
+							MemoryContext ctx,
+							PgColbertModelSpec *spec,
+							PgColbertEngineOutput **outputs)
+{
+	Datum	   *inputDatums;
+	bool	   *inputNulls;
+	int			inputCount;
+	const char **inputs;
+	char	   *errorMessage = NULL;
+
+	if (ARR_ELEMTYPE(inputsArray) != TEXTOID)
+		ereport(ERROR,
+				(errcode(ERRCODE_DATATYPE_MISMATCH),
+				 errmsg("colbert_mv_batch inputs must be text[]")));
+
+	deconstruct_array(inputsArray, TEXTOID, -1, false, TYPALIGN_INT,
+					  &inputDatums, &inputNulls, &inputCount);
+
+	PgColbertParseModel(modelText, spec);
+	*outputs =
+		(PgColbertEngineOutput *) palloc0(sizeof(PgColbertEngineOutput) *
+										  (Size) inputCount);
+	if (inputCount == 0)
+		return 0;
+
+	inputs = (const char **) palloc0(sizeof(char *) * (Size) inputCount);
+	for (int i = 0; i < inputCount; i++)
+	{
+		if (inputNulls[i])
+			ereport(ERROR,
+					(errcode(ERRCODE_NULL_VALUE_NOT_ALLOWED),
+					 errmsg("colbert_mv_batch inputs cannot contain null elements")));
+		inputs[i] = TextDatumGetCString(inputDatums[i]);
+	}
+
+	if (!PgColbertEngineEncodeBatch(spec, inputs, inputCount, ctx, *outputs,
+									&errorMessage))
+		ereport(ERROR,
+				(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
+				 errmsg("%s", errorMessage != NULL ? errorMessage : "ColBERT engine failed")));
+	for (int i = 0; i < inputCount; i++)
+		PgColbertValidateOutput(spec, &(*outputs)[i]);
+
+	return (int32) inputCount;
 }
 
 static PgColbertVector *
@@ -1477,6 +1541,28 @@ PgColbertBuildMultiVector(const PgColbertEngineOutput *output)
 
 	array = PgColbertBuildVectorArray(output);
 	return OidFunctionCall1(constructorOid, PointerGetDatum(array));
+}
+
+static ArrayType *
+PgColbertBuildMultiVectorArray(PgColbertEngineOutput *outputs,
+							   int32 outputCount,
+							   Oid multivectorOid)
+{
+	Datum	   *datums;
+	int16		typlen;
+	bool		typbyval;
+	char		typalign;
+
+	if (outputCount == 0)
+		return construct_empty_array(multivectorOid);
+
+	get_typlenbyvalalign(multivectorOid, &typlen, &typbyval, &typalign);
+	datums = (Datum *) palloc0(sizeof(Datum) * (Size) outputCount);
+	for (int32 i = 0; i < outputCount; i++)
+		datums[i] = PgColbertBuildMultiVector(&outputs[i]);
+
+	return construct_array(datums, outputCount, multivectorOid, typlen,
+						   typbyval, typalign);
 }
 
 static void
@@ -1750,9 +1836,9 @@ PgColbertAppendModelInfoJson(StringInfo buf,
 	appendStringInfo(buf, ",\"projection_module_count\":%d",
 					 info->projectionModuleCount);
 	appendStringInfo(buf,
-					 ",\"n_ctx\":%d,\"n_batch\":%d,\"threads\":%d,\"n_gpu_layers\":%d,\"cache_size\":%d,\"require_normalized\":%s",
-					 spec->nCtx, spec->nBatch, spec->threads, spec->nGpuLayers,
-					 spec->cacheSize,
+					 ",\"n_ctx\":%d,\"n_batch\":%d,\"batch_sequences\":%d,\"threads\":%d,\"n_gpu_layers\":%d,\"cache_size\":%d,\"require_normalized\":%s",
+					 spec->nCtx, spec->nBatch, spec->batchSequences,
+					 spec->threads, spec->nGpuLayers, spec->cacheSize,
 					 pg_colbert_llama_require_normalized ? "true" : "false");
 	appendStringInfo(buf,
 					 ",\"n_ctx_train\":%d,\"n_layer\":%d,\"n_head\":%d,\"loaded_from_cache\":%s",
@@ -1830,6 +1916,34 @@ pg_colbert_llama_colbert_mv(PG_FUNCTION_ARGS)
 	PgColbertEncodeOrError(PG_GETARG_TEXT_PP(0), PG_GETARG_TEXT_PP(1),
 						   CurrentMemoryContext, &spec, &output);
 	PG_RETURN_DATUM(PgColbertBuildMultiVector(&output));
+}
+
+Datum
+pg_colbert_llama_colbert_mv_batch(PG_FUNCTION_ARGS)
+{
+	PgColbertModelSpec spec;
+	PgColbertEngineOutput *outputs;
+	ArrayType  *array;
+	Oid			resultType;
+	Oid			multivectorOid;
+	int32		outputCount;
+
+	outputCount =
+		PgColbertEncodeBatchOrError(PG_GETARG_TEXT_PP(0),
+									PG_GETARG_ARRAYTYPE_P(1),
+									CurrentMemoryContext,
+									&spec,
+									&outputs);
+	resultType = get_fn_expr_rettype(fcinfo->flinfo);
+	multivectorOid = OidIsValid(resultType) ? get_element_type(resultType) :
+		InvalidOid;
+	if (!OidIsValid(multivectorOid))
+		ereport(ERROR,
+				(errcode(ERRCODE_UNDEFINED_OBJECT),
+				 errmsg("could not resolve colbert_mv_batch result element type")));
+
+	array = PgColbertBuildMultiVectorArray(outputs, outputCount, multivectorOid);
+	PG_RETURN_ARRAYTYPE_P(array);
 }
 
 Datum

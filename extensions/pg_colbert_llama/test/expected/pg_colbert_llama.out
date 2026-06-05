@@ -38,6 +38,12 @@ SELECT turbohybrid_multivector_dims(colbert_mv('sauerkraut-modern:query', 'test'
 query_dims|query_count|doc_count
 4|2|3
 (1 row)
+SELECT array_length(colbert_mv_batch('sauerkraut-modern:doc', ARRAY['alpha', 'beta']), 1) AS batch_count,
+       turbohybrid_multivector_dims((colbert_mv_batch('sauerkraut-modern:doc', ARRAY['alpha', 'beta']))[1]) AS batch_dims,
+       turbohybrid_multivector_count((colbert_mv_batch('sauerkraut-modern:doc', ARRAY['alpha', 'beta']))[2]) AS second_doc_count;
+batch_count|batch_dims|second_doc_count
+2|4|3
+(1 row)
 SELECT turbohybrid_multivector_maxsim(
   colbert_mv('sauerkraut-modern:query', 'test'),
   colbert_mv('sauerkraut-modern:doc', 'test')

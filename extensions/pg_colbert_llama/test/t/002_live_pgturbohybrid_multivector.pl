@@ -92,6 +92,41 @@ is($node->safe_psql('pg_colbert_llama_live', sprintf(q(
 ), sql_literal("$alias:query"))), 't',
 	'live query encoding returns at least one token vector');
 
+my $batch_parity = $node->safe_psql('pg_colbert_llama_live', sprintf(q(
+	WITH scalar AS (
+		SELECT colbert_mv(%s, 'Mars is the red planet.') AS doc1,
+		       colbert_mv(%s, 'Earth has blue oceans.') AS doc2
+	),
+	batched AS (
+		SELECT colbert_mv_batch(
+			%s,
+			ARRAY['Mars is the red planet.', 'Earth has blue oceans.']
+		) AS docs
+	)
+	SELECT turbohybrid_multivector_dims(doc1) = %d
+	       AND turbohybrid_multivector_count(doc1) =
+	           turbohybrid_multivector_count(docs[1])
+	       AND turbohybrid_multivector_count(doc2) =
+	           turbohybrid_multivector_count(docs[2])
+	       AND abs(turbohybrid_multivector_maxsim(doc1, docs[1]) -
+	               turbohybrid_multivector_count(doc1)) < 1e-3
+	       AND abs(turbohybrid_multivector_maxsim(doc2, docs[2]) -
+	               turbohybrid_multivector_count(doc2)) < 1e-3
+	       AS ok,
+	       turbohybrid_multivector_count(doc1) AS doc1_count,
+	       turbohybrid_multivector_count(docs[1]) AS batch1_count,
+	       turbohybrid_multivector_maxsim(doc1, docs[1]) AS doc1_batch1_maxsim,
+	       turbohybrid_multivector_count(doc2) AS doc2_count,
+	       turbohybrid_multivector_count(docs[2]) AS batch2_count,
+	       turbohybrid_multivector_maxsim(doc2, docs[2]) AS doc2_batch2_maxsim
+	FROM scalar, batched;
+), sql_literal("$alias:doc"), sql_literal("$alias:doc"),
+	sql_literal("$alias:doc"), $expected_dim));
+my ($batch_ok) = split /\|/, $batch_parity;
+is($batch_ok, 't',
+	'live batched document encoding matches scalar multivectors')
+	or diag("batch parity details: $batch_parity");
+
 is($node->safe_psql('pg_colbert_llama_live', sprintf(q(
 	WITH debug AS (
 		SELECT colbert_debug(%s, 'red planet') AS payload
