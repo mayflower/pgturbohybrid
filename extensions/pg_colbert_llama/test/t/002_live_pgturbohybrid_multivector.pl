@@ -2,6 +2,7 @@ use strict;
 use warnings FATAL => 'all';
 use Test::More;
 use File::Basename qw(basename dirname);
+use JSON::PP qw(decode_json);
 
 BEGIN
 {
@@ -25,6 +26,77 @@ sub sql_literal
 	my ($value) = @_;
 	$value =~ s/'/''/g;
 	return "'$value'";
+}
+
+sub read_file
+{
+	my ($path) = @_;
+	open my $fh, '<', $path or die "could not open $path: $!";
+	local $/;
+	return <$fh>;
+}
+
+sub compare_colbert_payload
+{
+	my ($expected, $actual, $tolerance) = @_;
+
+	for my $key (qw(alias role engine dim count normalized))
+	{
+		my $expected_value = $expected->{$key};
+		my $actual_value = $actual->{$key};
+		return "payload $key mismatch: expected $expected_value, got $actual_value"
+		  if !defined $actual_value || "$expected_value" ne "$actual_value";
+	}
+
+	my $expected_tokens = $expected->{token_ids};
+	my $actual_tokens = $actual->{token_ids};
+	return "token_ids is not an array"
+	  unless ref $expected_tokens eq 'ARRAY' && ref $actual_tokens eq 'ARRAY';
+	return "token_ids length mismatch: expected "
+	  . scalar(@$expected_tokens) . ", got " . scalar(@$actual_tokens)
+	  unless scalar(@$expected_tokens) == scalar(@$actual_tokens);
+	for my $i (0 .. $#$expected_tokens)
+	{
+		return "token_ids[$i] mismatch: expected $expected_tokens->[$i], got $actual_tokens->[$i]"
+		  unless $expected_tokens->[$i] == $actual_tokens->[$i];
+	}
+
+	my $expected_vectors = $expected->{vectors};
+	my $actual_vectors = $actual->{vectors};
+	return "vectors is not an array"
+	  unless ref $expected_vectors eq 'ARRAY' && ref $actual_vectors eq 'ARRAY';
+	return "vector count mismatch: expected "
+	  . scalar(@$expected_vectors) . ", got " . scalar(@$actual_vectors)
+	  unless scalar(@$expected_vectors) == scalar(@$actual_vectors);
+
+	my $max_abs_error = 0;
+	my $max_position = '';
+	for my $i (0 .. $#$expected_vectors)
+	{
+		return "vectors[$i] is not an array"
+		  unless ref $expected_vectors->[$i] eq 'ARRAY'
+		  && ref $actual_vectors->[$i] eq 'ARRAY';
+		return "vectors[$i] dimension mismatch: expected "
+		  . scalar(@{$expected_vectors->[$i]}) . ", got "
+		  . scalar(@{$actual_vectors->[$i]})
+		  unless scalar(@{$expected_vectors->[$i]}) ==
+		  scalar(@{$actual_vectors->[$i]});
+
+		for my $j (0 .. $#{$expected_vectors->[$i]})
+		{
+			my $error =
+			  abs($expected_vectors->[$i][$j] - $actual_vectors->[$i][$j]);
+			if ($error > $max_abs_error)
+			{
+				$max_abs_error = $error;
+				$max_position = "vectors[$i][$j]";
+			}
+		}
+	}
+
+	return "max vector error $max_abs_error at $max_position exceeds $tolerance"
+	  if $max_abs_error > $tolerance;
+	return;
 }
 
 my $node = PostgreSQL::Test::Cluster->new('pg_colbert_llama_live');
@@ -87,6 +159,32 @@ is($node->safe_psql('pg_colbert_llama_live', sprintf(q(
 	FROM vectors;
 ), sql_literal("$alias:query"))), 't',
 	'live query vectors are finite and L2-normalized');
+
+my $golden_path =
+  dirname(__FILE__) . '/../golden/sauerkraut_15m_rag_chunk_doc.json';
+my $golden = decode_json(read_file($golden_path));
+
+SKIP:
+{
+	skip 'golden RAG chunk fixture is for sauerkraut-modern 128-dim GGUF', 1
+	  unless $alias eq $golden->{alias}
+	  && $expected_dim == $golden->{payload}->{dim};
+
+	my $actual = decode_json($node->safe_psql(
+		'pg_colbert_llama_live',
+		sprintf(q(
+			SELECT colbert(%s, %s)::text;
+		),
+			sql_literal("$alias:doc"),
+			sql_literal($golden->{input_text}))
+	));
+
+	my $mismatch =
+	  compare_colbert_payload($golden->{payload}, $actual, 2e-5);
+	ok(!defined $mismatch,
+		'live real-model RAG chunk doc multivector matches golden');
+	diag($mismatch) if defined $mismatch;
+}
 
 is($node->safe_psql('pg_colbert_llama_live', sprintf(q(
 	WITH q AS (
