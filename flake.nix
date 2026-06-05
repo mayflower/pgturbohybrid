@@ -431,6 +431,15 @@
                 exec uv run "$TH_ROOT/benchmarks/concurrent_dense_bench.py" "$@"
               '';
 
+              benchDbpediaColbert = mkScriptWithInputs [ pkgs.uv ] "th-bench-dbpedia-colbert" ''
+                if [ "''${TH_PGDATABASE_WAS_EXPLICIT:-0}" != "1" ]; then
+                  export PGDATABASE="''${DBPEDIA_COLBERT_PGDATABASE:-pgturbohybrid_dbpedia_colbert}"
+                fi
+                ${pgInit}/bin/th-pg-init >/dev/null
+                export PGHOST PGPORT PGUSER PGDATABASE
+                exec uv run "$TH_ROOT/benchmarks/dbpedia_colbert_multivector.py" "$@"
+              '';
+
               colbertBuildStub = mkScript "th-colbert-build-stub" ''
                 exec make -C "$TH_ROOT/extensions/pg_colbert_llama" \
                   PG_CONFIG="$PG_CONFIG" \
@@ -524,6 +533,7 @@
                 benchNativeCache
                 benchFiqaQuick
                 benchConcurrentDense
+                benchDbpediaColbert
                 colbertBuildStub
                 colbertTestStub
                 colbertBuildLlama
@@ -655,6 +665,7 @@
                   th-bench-bm25-phrase-rerank
                   th-bench-dense-candidate-miss
                   th-bench-native-cache-memory
+                  th-bench-dbpedia-colbert
                 EOF
               '';
             };
@@ -724,6 +735,8 @@
                 mkApp "Run the retrieval profile autotuning SQL harness" (stableScript "th-bench-tune-profile");
               bench-concurrent-dense =
                 mkApp "Run the concurrent dense Python benchmark via uv" (stableScript "th-bench-concurrent-dense");
+              bench-dbpedia-colbert =
+                mkApp "Run the DBpedia ColBERT multivector benchmark via uv" (stableScript "th-bench-dbpedia-colbert");
               colbert-build-stub =
                 mkApp "Build pg_colbert_llama with the stub engine" (stableScript "th-colbert-build-stub");
               colbert-test-stub =
