@@ -75,6 +75,23 @@ PgColbertEngineEncode(const PgColbertModelSpec *spec,
 }
 
 bool
+PgColbertEngineEncodeBatch(const PgColbertModelSpec *spec,
+						   const char *const *inputs,
+						   int32 inputCount,
+						   MemoryContext ctx,
+						   PgColbertEngineOutput *outputs,
+						   char **errorMessage)
+{
+	for (int32 i = 0; i < inputCount; i++)
+	{
+		if (!PgColbertEngineEncode(spec, inputs[i], ctx, &outputs[i],
+								   errorMessage))
+			return false;
+	}
+	return true;
+}
+
+bool
 PgColbertEngineGetModelInfo(const PgColbertModelSpec *spec,
 							MemoryContext ctx,
 							PgColbertEngineModelInfo *info,

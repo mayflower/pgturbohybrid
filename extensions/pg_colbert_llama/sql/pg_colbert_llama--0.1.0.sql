@@ -59,3 +59,8 @@ CREATE FUNCTION colbert_mv(model pg_catalog.text, input pg_catalog.text)
 RETURNS turbohybrid_multivector
 AS 'MODULE_PATHNAME', 'pg_colbert_llama_colbert_mv'
 LANGUAGE C STABLE STRICT PARALLEL RESTRICTED;
+
+CREATE FUNCTION colbert_mv_batch(model pg_catalog.text, inputs pg_catalog.text[])
+RETURNS turbohybrid_multivector[]
+AS 'MODULE_PATHNAME', 'pg_colbert_llama_colbert_mv_batch'
+LANGUAGE C STABLE STRICT PARALLEL RESTRICTED;
