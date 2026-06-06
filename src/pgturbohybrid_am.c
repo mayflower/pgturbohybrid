@@ -145,6 +145,11 @@ int			pgturbohybrid_multivector_adaptive_widening =
 int			pgturbohybrid_multivector_docmap =
 	PGTURBOHYBRID_MULTIVECTOR_DOCMAP_AUTO;
 int			pgturbohybrid_multivector_doc_candidate_k = 100;
+int			pgturbohybrid_multivector_doc_graph_search_ef = 0;
+int			pgturbohybrid_multivector_doc_graph_oversampling = 1;
+int			pgturbohybrid_multivector_doc_graph_rescore_k = 0;
+int			pgturbohybrid_multivector_doc_storage =
+	PGTURBOHYBRID_MULTIVECTOR_DOC_STORAGE_F32;
 int			pgturbohybrid_multivector_exact_rerank =
 	PGTURBOHYBRID_MULTIVECTOR_EXACT_RERANK_TOPK;
 int			pgturbohybrid_multivector_exact_rerank_k = 100;
@@ -248,6 +253,13 @@ static const struct config_enum_entry pgturbohybrid_multivector_docmap_options[]
 	{NULL, 0, false}
 };
 
+static const struct config_enum_entry pgturbohybrid_multivector_doc_storage_options[] = {
+	{"f32", PGTURBOHYBRID_MULTIVECTOR_DOC_STORAGE_F32, false},
+	{"f16", PGTURBOHYBRID_MULTIVECTOR_DOC_STORAGE_F16, false},
+	{"sq8", PGTURBOHYBRID_MULTIVECTOR_DOC_STORAGE_SQ8, false},
+	{NULL, 0, false}
+};
+
 static const struct config_enum_entry pgturbohybrid_dense_uncertainty_retry_options[] = {
 	{"off", PGTURBOHYBRID_DENSE_UNCERTAINTY_RETRY_OFF, false},
 	{"auto", PGTURBOHYBRID_DENSE_UNCERTAINTY_RETRY_AUTO, false},
@@ -340,6 +352,8 @@ static const struct config_enum_entry pgturbohybrid_multivector_candidate_source
 	{"exact_token_scan", PGTURBOHYBRID_MULTIVECTOR_CANDIDATE_SOURCE_EXACT_TOKEN_SCAN, false},
 	{"exact_doc_scan", PGTURBOHYBRID_MULTIVECTOR_CANDIDATE_SOURCE_EXACT_DOC_SCAN, false},
 	{"doc_graph_prototype", PGTURBOHYBRID_MULTIVECTOR_CANDIDATE_SOURCE_DOC_GRAPH_PROTOTYPE, false},
+	{"document_nodes", PGTURBOHYBRID_MULTIVECTOR_CANDIDATE_SOURCE_DOCUMENT_NODES, false},
+	{"proxy_vector", PGTURBOHYBRID_MULTIVECTOR_CANDIDATE_SOURCE_PROXY_VECTOR, false},
 	{NULL, 0, false}
 };
 
@@ -1176,7 +1190,12 @@ typedef struct PgturbohybridLastScanStats
 	uint64		multivectorDocGraphDocsScored;
 	uint64		multivectorDocGraphEdgesVisited;
 	uint32		multivectorDocGraphCandidates;
+	uint32		multivectorDocGraphSearchEf;
+	uint32		multivectorDocGraphOversampling;
+	uint32		multivectorDocGraphRescoreK;
 	uint64		multivectorDocGraphQuantizedScores;
+	char		multivectorDocGraphStorageKind[16];
+	char		multivectorDocGraphRescoreSource[16];
 	uint32		multivectorDocGraphExactRerankDocs;
 	uint64		multivectorDocGraphHeapFetches;
 	char		multivectorDocGraphWarning[96];
@@ -1506,8 +1525,20 @@ PgturbohybridGetLastScanStatsSnapshot(PgturbohybridScanStatsSnapshot *stats)
 		pgturbohybrid_last_scan_state.multivectorDocGraphEdgesVisited;
 	stats->multivectorDocGraphCandidates =
 		pgturbohybrid_last_scan_state.multivectorDocGraphCandidates;
+	stats->multivectorDocGraphSearchEf =
+		pgturbohybrid_last_scan_state.multivectorDocGraphSearchEf;
+	stats->multivectorDocGraphOversampling =
+		pgturbohybrid_last_scan_state.multivectorDocGraphOversampling;
+	stats->multivectorDocGraphRescoreK =
+		pgturbohybrid_last_scan_state.multivectorDocGraphRescoreK;
 	stats->multivectorDocGraphQuantizedScores =
 		pgturbohybrid_last_scan_state.multivectorDocGraphQuantizedScores;
+	strlcpy(stats->multivectorDocGraphStorageKind,
+			pgturbohybrid_last_scan_state.multivectorDocGraphStorageKind,
+			sizeof(stats->multivectorDocGraphStorageKind));
+	strlcpy(stats->multivectorDocGraphRescoreSource,
+			pgturbohybrid_last_scan_state.multivectorDocGraphRescoreSource,
+			sizeof(stats->multivectorDocGraphRescoreSource));
 	stats->multivectorDocGraphExactRerankDocs =
 		pgturbohybrid_last_scan_state.multivectorDocGraphExactRerankDocs;
 	stats->multivectorDocGraphHeapFetches =
@@ -2213,10 +2244,13 @@ PgturbohybridQueryValidateMultiVectorFusionSupport(Relation index,
 	requestedFusion = pgturbohybrid_force_fusion != 0 ?
 		pgturbohybrid_force_fusion : query->fusion;
 	if (requestedFusion != PGTURBOHYBRID_FUSION_RRF &&
-		requestedFusion != PGTURBOHYBRID_FUSION_WEIGHTED)
+		requestedFusion != PGTURBOHYBRID_FUSION_WEIGHTED &&
+		requestedFusion != PGTURBOHYBRID_FUSION_FAST_WEIGHTED &&
+		requestedFusion != PGTURBOHYBRID_FUSION_CALIBRATED)
 		ereport(ERROR,
 				(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
-				 errmsg("hybrid multivector fusion currently supports only fusion => 'rrf' or fusion => 'weighted'")));
+				 errmsg("hybrid multivector fusion requires rank or normalized score fusion"),
+				 errdetail("Supported multivector hybrid fusion modes are 'rrf', query-local normalized 'weighted', logistic/saturating 'fast_weighted', and 'calibrated'. Raw BM25 plus raw MaxSim alpha fusion is not supported.")));
 }
 
 static void
@@ -2592,6 +2626,102 @@ PgturbohybridMaybeApplyDenseBm25Budget(PgturbohybridQueryHeader *query,
 		if (reason != NULL && reasonSize > 0)
 			strlcpy(reason, "dense_confident_common_terms", reasonSize);
 	}
+}
+
+static void
+PgturbohybridMaybeApplyMultiVectorAdmissionBudget(PgturbohybridQueryHeader *query,
+										const PgturbohybridQueryHeader *originalQuery,
+										const TqDenseCandidateStats *denseStats,
+										int denseCount, int limit,
+										int effectiveBm25Ceiling,
+										PgturbohybridHybridBudgetChoice *choice)
+{
+	int			finalTarget;
+	int			minBudget;
+	int			reducedTarget;
+	bool		bm25Defaulted;
+	bool		admissionTruncated;
+	bool		documentLevelSource;
+	bool		exactDenseEvidence;
+
+	if (query == NULL || originalQuery == NULL || denseStats == NULL ||
+		choice == NULL)
+		return;
+	if (pgturbohybrid_hybrid_budget_policy !=
+		PGTURBOHYBRID_HYBRID_BUDGET_ADAPTIVE)
+		return;
+	if (!PgturbohybridQueryHasMultiVector(query) ||
+		!PgturbohybridQueryHasText(query))
+		return;
+
+	bm25Defaulted =
+		(originalQuery->flags & PGTURBOHYBRID_QUERY_FLAG_BM25_K_DEFAULTED) != 0;
+	if (!bm25Defaulted)
+		return;
+	if (query->bm25K <= 0)
+		return;
+
+	finalTarget = PgturbohybridBudgetFinalTarget(query, limit);
+	if (finalTarget <= 0)
+		finalTarget = PGTURBOHYBRID_DEFAULT_FINAL_K;
+	minBudget = PgturbohybridAdaptiveMinBudget(finalTarget);
+	admissionTruncated =
+		denseStats->multivectorAdmissionTruncatedByDocCandidateK ||
+		denseStats->multivectorAdmissionTruncatedByAccumulatorMemory;
+	documentLevelSource =
+		strcmp(denseStats->multivectorCandidateSource, "document_nodes") == 0 ||
+		strcmp(denseStats->multivectorCandidateSource, "proxy_vector") == 0 ||
+		strcmp(denseStats->multivectorCandidateSource, "exact_doc_scan") == 0 ||
+		strcmp(denseStats->multivectorCandidateSource, "doc_graph_prototype") == 0;
+	exactDenseEvidence =
+		denseStats->multivectorAdmissionExactRerankDocs >= (uint32) finalTarget ||
+		denseStats->multivectorExactRerankDocs >= (uint32) finalTarget ||
+		denseStats->multivectorDocGraphExactRerankDocs >= (uint32) finalTarget;
+
+	choice->adaptive = true;
+	choice->finalK = finalTarget;
+
+	if (denseCount < finalTarget)
+	{
+		if (query->bm25K < effectiveBm25Ceiling)
+			query->bm25K = effectiveBm25Ceiling;
+		choice->bm25K = query->bm25K;
+		strlcpy(choice->reason, "admission_underfilled_keep_bm25",
+				sizeof(choice->reason));
+		return;
+	}
+
+	if (admissionTruncated)
+	{
+		if (query->bm25K < effectiveBm25Ceiling)
+			query->bm25K = effectiveBm25Ceiling;
+		choice->bm25K = query->bm25K;
+		strlcpy(choice->reason, "admission_truncated_keep_bm25",
+				sizeof(choice->reason));
+		return;
+	}
+
+	if (!documentLevelSource && !exactDenseEvidence)
+	{
+		choice->bm25K = query->bm25K;
+		strlcpy(choice->reason, "admission_token_dense_keep_bm25",
+				sizeof(choice->reason));
+		return;
+	}
+
+	reducedTarget = Max(minBudget, finalTarget * 4);
+	reducedTarget = Min(reducedTarget, effectiveBm25Ceiling);
+	reducedTarget = Max(reducedTarget, 1);
+	if (reducedTarget < query->bm25K)
+		query->bm25K = reducedTarget;
+
+	choice->bm25K = query->bm25K;
+	choice->denseK = query->denseK;
+	strlcpy(choice->reason,
+			documentLevelSource ?
+			"admission_document_dense_reduce_bm25" :
+			"admission_exact_dense_reduce_bm25",
+			sizeof(choice->reason));
 }
 
 static void
@@ -4279,6 +4409,7 @@ PgturbohybridCollectScanResults(IndexScanDesc scan, PgturbohybridScanState *stat
 	double		bm25DenseConfidence = 0.0;
 	PgturbohybridBm25QuerySignals hybridSignals;
 	PgturbohybridHybridBudgetChoice hybridBudgetChoice;
+	int			hybridEffectiveBm25Ceiling;
 	TqDenseCandidate *denseProbe = NULL;
 	int			denseProbeCount = 0;
 	TqDenseCandidateStats denseProbeStats;
@@ -4323,6 +4454,7 @@ PgturbohybridCollectScanResults(IndexScanDesc scan, PgturbohybridScanState *stat
 		pgturbohybrid_force_fusion : scanQuery->fusion;
 	hasLexicalKey = PgturbohybridIndexHasLexical(scan->indexRelation);
 	so->graphFinalK = PgturbohybridBudgetFinalTarget(scanQuery, autoBudgetLimit);
+	hybridEffectiveBm25Ceiling = scanQuery->bm25K;
 	hasMultivectorQuery =
 		(scanQuery->flags & PGTURBOHYBRID_QUERY_FLAG_HAS_MULTIVECTOR) != 0;
 	hasTextQuery =
@@ -4430,6 +4562,11 @@ PgturbohybridCollectScanResults(IndexScanDesc scan, PgturbohybridScanState *stat
 									  autoBudgetLimit, bm25BudgetReason,
 									  sizeof(bm25BudgetReason),
 									  &bm25DenseConfidence);
+	PgturbohybridMaybeApplyMultiVectorAdmissionBudget(scanQuery, originalQuery,
+													  &denseStats, denseCount,
+													  autoBudgetLimit,
+													  hybridEffectiveBm25Ceiling,
+													  &hybridBudgetChoice);
 	bm25BudgetEffectiveK = scanQuery->bm25K;
 	PgturbohybridMaybeApplyBm25HybridBound(scanQuery, denseCount,
 									  autoBudgetLimit,
@@ -4746,8 +4883,20 @@ PgturbohybridCollectScanResults(IndexScanDesc scan, PgturbohybridScanState *stat
 		denseStats.multivectorDocGraphEdgesVisited;
 	lastStats.multivectorDocGraphCandidates =
 		denseStats.multivectorDocGraphCandidates;
+	lastStats.multivectorDocGraphSearchEf =
+		denseStats.multivectorDocGraphSearchEf;
+	lastStats.multivectorDocGraphOversampling =
+		denseStats.multivectorDocGraphOversampling;
+	lastStats.multivectorDocGraphRescoreK =
+		denseStats.multivectorDocGraphRescoreK;
 	lastStats.multivectorDocGraphQuantizedScores =
 		denseStats.multivectorDocGraphQuantizedScores;
+	strlcpy(lastStats.multivectorDocGraphStorageKind,
+			denseStats.multivectorDocGraphStorageKind,
+			sizeof(lastStats.multivectorDocGraphStorageKind));
+	strlcpy(lastStats.multivectorDocGraphRescoreSource,
+			denseStats.multivectorDocGraphRescoreSource,
+			sizeof(lastStats.multivectorDocGraphRescoreSource));
 	lastStats.multivectorDocGraphExactRerankDocs =
 		denseStats.multivectorDocGraphExactRerankDocs;
 	lastStats.multivectorDocGraphHeapFetches =
@@ -5998,6 +6147,31 @@ PgturbohybridInit(void)
 							&pgturbohybrid_multivector_doc_candidate_k,
 							100, 1, 100000,
 							PGC_USERSET, 0, NULL, NULL, NULL);
+	DefineCustomIntVariable("turbohybrid.multivector_doc_graph_search_ef",
+							"Document-node graph traversal breadth for multivector MaxSim scans",
+							"Zero uses the index graph_ef_search setting; positive values override traversal ef for document-node multivector graphs.",
+							&pgturbohybrid_multivector_doc_graph_search_ef,
+							0, 0, 100000,
+							PGC_USERSET, 0, NULL, NULL, NULL);
+	DefineCustomIntVariable("turbohybrid.multivector_doc_graph_oversampling",
+							"Document-node graph candidate oversampling multiplier for multivector MaxSim scans",
+							"Document-node graph traversal retains this multiple of the exact-rescore budget before final reranking.",
+							&pgturbohybrid_multivector_doc_graph_oversampling,
+							1, 1, 100,
+							PGC_USERSET, 0, NULL, NULL, NULL);
+	DefineCustomIntVariable("turbohybrid.multivector_doc_graph_rescore_k",
+							"Document-node graph exact rescore prefix for multivector MaxSim scans",
+							"Zero uses multivector_doc_candidate_k; positive values set the document-node exact-rescore budget independently from final_k.",
+							&pgturbohybrid_multivector_doc_graph_rescore_k,
+							0, 0, 100000,
+							PGC_USERSET, 0, NULL, NULL, NULL);
+	DefineCustomEnumVariable("turbohybrid.multivector_doc_storage",
+							 "Document-node multivector sidecar scoring storage",
+							 "f32 uses the exact float32 sidecar for traversal; f16 and sq8 build compact in-memory scoring sidecars and keep exact heap rerank for final ordering.",
+							 &pgturbohybrid_multivector_doc_storage,
+							 PGTURBOHYBRID_MULTIVECTOR_DOC_STORAGE_F32,
+							 pgturbohybrid_multivector_doc_storage_options,
+							 PGC_USERSET, 0, NULL, NULL, NULL);
 	DefineCustomEnumVariable("turbohybrid.multivector_exact_rerank",
 							 "Exact heap rerank mode for multivector MaxSim scans",
 							 "topk fetches a bounded document-candidate prefix from the heap and recomputes exact f32 MaxSim; off keeps approximate TurboQuant ordering.",
@@ -6038,7 +6212,7 @@ PgturbohybridInit(void)
 							   PGC_USERSET, 0, NULL, NULL, NULL);
 	DefineCustomEnumVariable("turbohybrid.multivector_candidate_source",
 							 "Developer candidate source for multivector MaxSim scans",
-							 "graph uses the normal per-token graph search; exact_token_scan scores all stored token nodes per query token; exact_doc_scan and doc_graph_prototype score heap documents with full MaxSim for validation.",
+							 "graph uses the index graph mode; document_nodes requires a document-node index; exact_token_scan scores all stored token nodes per query token; exact_doc_scan and doc_graph_prototype score heap documents with full MaxSim for validation; proxy_vector uses document-node representative vectors for graph admission and exact MaxSim rerank.",
 							 &pgturbohybrid_multivector_candidate_source,
 							 PGTURBOHYBRID_MULTIVECTOR_CANDIDATE_SOURCE_GRAPH,
 							 pgturbohybrid_multivector_candidate_source_options,

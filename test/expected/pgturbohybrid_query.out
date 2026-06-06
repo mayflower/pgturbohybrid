@@ -79,6 +79,10 @@ BEGIN
 		'turbohybrid.multivector_debug_skip_query_tokens',
 		'turbohybrid.multivector_debug_trace_limit',
 		'turbohybrid.multivector_doc_candidate_k',
+		'turbohybrid.multivector_doc_graph_oversampling',
+		'turbohybrid.multivector_doc_graph_rescore_k',
+		'turbohybrid.multivector_doc_graph_search_ef',
+		'turbohybrid.multivector_doc_storage',
 		'turbohybrid.multivector_docmap',
 		'turbohybrid.multivector_exact_rerank',
 		'turbohybrid.multivector_exact_rerank_k',
@@ -137,13 +141,17 @@ BEGIN
 		current_setting('turbohybrid.multivector_per_token_doc_reservoir_k') != '1' OR
 		current_setting('turbohybrid.multivector_docmap') != 'auto' OR
 		current_setting('turbohybrid.multivector_doc_candidate_k') != '100' OR
+		current_setting('turbohybrid.multivector_doc_graph_search_ef') != '0' OR
+		current_setting('turbohybrid.multivector_doc_graph_oversampling') != '1' OR
+		current_setting('turbohybrid.multivector_doc_graph_rescore_k') != '0' OR
+		current_setting('turbohybrid.multivector_doc_storage') != 'f32' OR
 		current_setting('turbohybrid.multivector_exact_rerank') != 'topk' OR
 		current_setting('turbohybrid.multivector_exact_rerank_k') != '100' OR
 		current_setting('turbohybrid.multivector_max_accumulator_mb') != '64' OR
 		current_setting('turbohybrid.multivector_debug_admission') != 'off' OR
 		current_setting('turbohybrid.multivector_debug_skip_query_tokens') != '' OR
 		current_setting('turbohybrid.multivector_debug_trace_limit') != '1000' THEN
-			RAISE EXCEPTION 'unexpected multivector defaults: doc %, query %, subvector %, unique %, raw %, adaptive %, source %, bm25_injection %, reservoirs %, coverage_reservoir_k %, fallback %, fallback_fraction %, fallback_max_docs %, per_token_reservoir_k %, docmap %, docs %, rerank %, rerank_k %, accumulator_mb %, debug %, skip_tokens %, trace_limit %',
+			RAISE EXCEPTION 'unexpected multivector defaults: doc %, query %, subvector %, unique %, raw %, adaptive %, source %, bm25_injection %, reservoirs %, coverage_reservoir_k %, fallback %, fallback_fraction %, fallback_max_docs %, per_token_reservoir_k %, docmap %, docs %, doc_graph_search_ef %, doc_graph_oversampling %, doc_graph_rescore_k %, doc_storage %, rerank %, rerank_k %, accumulator_mb %, debug %, skip_tokens %, trace_limit %',
 				current_setting('turbohybrid.multivector_max_doc_vectors'),
 			current_setting('turbohybrid.multivector_max_query_vectors'),
 			current_setting('turbohybrid.multivector_subvector_k'),
@@ -160,6 +168,10 @@ BEGIN
 			current_setting('turbohybrid.multivector_per_token_doc_reservoir_k'),
 			current_setting('turbohybrid.multivector_docmap'),
 			current_setting('turbohybrid.multivector_doc_candidate_k'),
+			current_setting('turbohybrid.multivector_doc_graph_search_ef'),
+			current_setting('turbohybrid.multivector_doc_graph_oversampling'),
+			current_setting('turbohybrid.multivector_doc_graph_rescore_k'),
+			current_setting('turbohybrid.multivector_doc_storage'),
 			current_setting('turbohybrid.multivector_exact_rerank'),
 			current_setting('turbohybrid.multivector_exact_rerank_k'),
 			current_setting('turbohybrid.multivector_max_accumulator_mb'),
@@ -359,6 +371,24 @@ BEGIN
 	BEGIN
 		EXECUTE 'SET turbohybrid.multivector_doc_candidate_k = 2147483647';
 		RAISE EXCEPTION 'expected multivector_doc_candidate_k cap error';
+	EXCEPTION WHEN invalid_parameter_value THEN
+	END;
+
+	BEGIN
+		EXECUTE 'SET turbohybrid.multivector_doc_graph_search_ef = 2147483647';
+		RAISE EXCEPTION 'expected multivector_doc_graph_search_ef cap error';
+	EXCEPTION WHEN invalid_parameter_value THEN
+	END;
+
+	BEGIN
+		EXECUTE 'SET turbohybrid.multivector_doc_graph_oversampling = 2147483647';
+		RAISE EXCEPTION 'expected multivector_doc_graph_oversampling cap error';
+	EXCEPTION WHEN invalid_parameter_value THEN
+	END;
+
+	BEGIN
+		EXECUTE 'SET turbohybrid.multivector_doc_graph_rescore_k = 2147483647';
+		RAISE EXCEPTION 'expected multivector_doc_graph_rescore_k cap error';
 	EXCEPTION WHEN invalid_parameter_value THEN
 	END;
 

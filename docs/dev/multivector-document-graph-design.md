@@ -404,16 +404,33 @@ Current index option:
 
 - `multivector_graph = token_nodes | document_nodes`
 
-Planned compact document-graph options:
+Current compact document-graph storage GUC:
 
-- `multivector_doc_graph_storage = f32 | f16 | sq8 | bq | pq`
-- `multivector_doc_graph_build_score = symmetric_maxsim | directional_insert`
-- `multivector_doc_graph_oversampling = <float>`
+- `turbohybrid.multivector_doc_storage = f32 | f16 | sq8`
+
+Planned compact document-graph extensions:
+
+- binary/product quantized document storage;
+- configurable document graph build score variants beyond the current
+  symmetric MaxSim objective.
 
 Current developer GUC:
 
 - `turbohybrid.multivector_candidate_source =
-  graph | exact_token_scan | exact_doc_scan | doc_graph_prototype`
+  graph | document_nodes | exact_token_scan | exact_doc_scan | doc_graph_prototype |
+  proxy_vector`
+
+`document_nodes` is an explicit source alias for the document-node graph path
+and requires `multivector_graph = document_nodes`. `proxy_vector` is a
+document-node prototype: it uses the existing single-vector TurboQuant graph
+over document representative vectors for admission, then reranks admitted
+documents with exact MaxSim.
+
+Adaptive hybrid scheduling is multivector-aware. When
+`turbohybrid.hybrid_budget_policy = adaptive` and BM25 budgets were defaulted,
+the scheduler uses multivector admission stats after the dense branch runs:
+document-level sources with non-truncated exact-reranked dense admission can
+reduce the BM25 branch, while underfilled or truncated admission keeps BM25 wide.
 
 Planned compact document-graph GUCs:
 

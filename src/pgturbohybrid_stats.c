@@ -2975,8 +2975,30 @@ pgturbohybrid_last_scan_stats(PG_FUNCTION_ARGS)
 								scanStats.multivectorDocGraphEdgesVisited);
 	PgturbohybridJsonbAddInt64(&state, "multivector_doc_graph_candidates",
 							   scanStats.multivectorDocGraphCandidates);
+	PgturbohybridJsonbAddInt64(&state, "multivector_doc_graph_search_ef",
+							   scanStats.multivectorDocGraphSearchEf);
+	PgturbohybridJsonbAddInt64(&state, "multivector_doc_graph_oversampling",
+							   scanStats.multivectorDocGraphOversampling);
+	PgturbohybridJsonbAddInt64(&state, "multivector_doc_graph_rescore_k",
+							   scanStats.multivectorDocGraphRescoreK);
 	PgturbohybridJsonbAddUint64(&state, "multivector_doc_graph_quantized_scores",
 								scanStats.multivectorDocGraphQuantizedScores);
+	if (scanStats.multivectorDocGraphStorageKind[0] != '\0')
+		PgturbohybridJsonbAddString(&state,
+									"multivector_doc_graph_storage_kind",
+									scanStats.multivectorDocGraphStorageKind);
+	else
+		PgturbohybridJsonbAddString(&state,
+									"multivector_doc_graph_storage_kind",
+									"f32");
+	if (scanStats.multivectorDocGraphRescoreSource[0] != '\0')
+		PgturbohybridJsonbAddString(&state,
+									"multivector_doc_graph_rescore_source",
+									scanStats.multivectorDocGraphRescoreSource);
+	else
+		PgturbohybridJsonbAddString(&state,
+									"multivector_doc_graph_rescore_source",
+									"none");
 	PgturbohybridJsonbAddInt64(&state, "multivector_doc_graph_exact_rerank_docs",
 							   scanStats.multivectorDocGraphExactRerankDocs);
 	PgturbohybridJsonbAddUint64(&state, "multivector_doc_graph_heap_fetches",

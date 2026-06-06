@@ -168,6 +168,19 @@ uses the same heap-backed exact document MaxSim path and reports:
 - `multivector_doc_graph_edges_visited` (`0` for the heap-backed prototype)
 - `multivector_doc_graph_candidates`
 - `multivector_doc_graph_heap_fetches`
+
+`turbohybrid.multivector_candidate_source = 'proxy_vector'` requires an index
+built with `multivector_graph = document_nodes`. It uses the existing
+single-vector TurboQuant graph over document representative vectors for
+admission and then exact-reranks admitted heap documents with full MaxSim. Its
+stats report `multivector_candidate_source = proxy_vector` and
+`multivector_doc_graph_warning =
+document_node_proxy_vector_graph_traversal`.
+
+`turbohybrid.multivector_candidate_source = 'document_nodes'` is an explicit
+alias for the normal document-node graph path. It requires an index built with
+`multivector_graph = document_nodes` and reports
+`multivector_candidate_source = document_nodes`.
 - `multivector_doc_graph_warning`
 
 The warning is

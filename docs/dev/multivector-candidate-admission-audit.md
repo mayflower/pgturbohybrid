@@ -158,7 +158,7 @@ reconstructed into document candidates after per-query-token graph searches.
 | `turbohybrid.multivector_unique_docs_per_token` | `100` | `1..100000` | Stops each query token after this many unique documents. |
 | `turbohybrid.multivector_max_raw_hits_per_token` | `400` | `1..100000` | Hard cap for adaptive raw token hits. |
 | `turbohybrid.multivector_adaptive_widening` | `auto` | `off`, `auto`, `on` | Allows repeated per-token searches with larger raw targets when unique docs underfill. |
-| `turbohybrid.multivector_candidate_source` | `graph` | `graph`, `exact_token_scan`, `exact_doc_scan`, `doc_graph_prototype` | Developer candidate-source switch. `graph` is the production token ANN path; `exact_token_scan` scores all token nodes per query token before normal document aggregation; `exact_doc_scan` heap-scans exact document MaxSim; `doc_graph_prototype` is the heap-backed Prompt 10 document-graph validation hook. |
+| `turbohybrid.multivector_candidate_source` | `graph` | `graph`, `document_nodes`, `exact_token_scan`, `exact_doc_scan`, `doc_graph_prototype`, `proxy_vector` | Developer candidate-source switch. `graph` uses the index graph mode; `document_nodes` requires a document-node index; `exact_token_scan` scores all token nodes per query token before normal document aggregation; `exact_doc_scan` heap-scans exact document MaxSim; `doc_graph_prototype` is the heap-backed Prompt 10 document-graph validation hook; `proxy_vector` uses a document-node representative-vector graph for admission and exact MaxSim rerank. |
 | `turbohybrid.multivector_plain_fallback` | `auto` | `auto`, `off`, `force` | Exact heap MaxSim fallback for small or near-exhaustive multivector scans. |
 | `turbohybrid.multivector_plain_fallback_max_docs` | `1000` | `0..10000000` | Auto fallback threshold for estimated live documents. |
 | `turbohybrid.multivector_plain_fallback_candidate_fraction` | `0.5` | `0.0..1.0` | Auto fallback threshold when candidate/rerank budgets exceed this fraction of estimated documents. |
@@ -179,7 +179,7 @@ reconstructed into document candidates after per-query-token graph searches.
 
 | Option | Default | Values | Admission effect |
 | --- | --- | --- | --- |
-| `multivector_graph` | `token_nodes` | `token_nodes`, `document_nodes` | `token_nodes` is the compatible token/subvector-node graph. `document_nodes` is explicit opt-in and stores one graph node per heap document plus a versioned float32 multivector sidecar; build edge selection uses symmetrized document MaxSim, non-exhaustive scans traverse document graph adjacency with full sidecar MaxSim scoring, and near-exhaustive scans use the exact sidecar scan. Compact quantized document scoring is still future work. |
+| `multivector_graph` | `token_nodes` | `token_nodes`, `document_nodes` | `token_nodes` is the compatible token/subvector-node graph. `document_nodes` is explicit opt-in and stores one graph node per heap document plus a versioned float32 multivector sidecar; build edge selection uses symmetrized document MaxSim, non-exhaustive scans traverse document graph adjacency with f32/f16/sq8 sidecar scoring, and near-exhaustive scans use the exact sidecar scan. |
 
 ## Current Scan Stats
 
@@ -195,7 +195,7 @@ reconstructed into document candidates after per-query-token graph searches.
 | `multivector_adaptive_widening_triggered` | token loop | Whether any query token widened beyond the initial target. |
 | `multivector_adaptive_initial_raw_target` | target setup | Initial raw token target after clamping. |
 | `multivector_adaptive_final_raw_target` | token loop | Maximum final raw target used by any token. |
-| `multivector_candidate_source` | candidate source path | `graph`, `exact_token_scan`, `exact_doc_scan`, `doc_graph_prototype`, or `plain_fallback` for this scan. |
+| `multivector_candidate_source` | candidate source path | `graph`, `document_nodes`, `exact_token_scan`, `exact_doc_scan`, `doc_graph_prototype`, `proxy_vector`, or `plain_fallback` for this scan. |
 | `multivector_exact_token_scan_enabled` | candidate source GUC | Whether the exact-token oracle path was active. |
 | `multivector_exact_token_scan_nodes_scored` | exact-token oracle | Count of live token nodes scored across all query tokens. |
 | `multivector_plain_fallback_used` | fallback decision | Whether exact heap MaxSim fallback bypassed token candidate generation. |
@@ -204,13 +204,13 @@ reconstructed into document candidates after per-query-token graph searches.
 | `multivector_plain_fallback_pairs` | fallback heap scan | Query-token by document-token comparisons used by exact MaxSim fallback. |
 | `multivector_doc_graph_prototype_enabled` | doc graph prototype | Whether the Prompt 10 document-level prototype source was active. |
 | `multivector_doc_graph_nodes` | document graph | Document graph nodes available for `document_nodes`; `0` for token-node scans. |
-| `multivector_doc_graph_docs_scored` | document graph | Documents scored by approximate/full document MaxSim; currently exact heap MaxSim in prototype mode and exact float32 sidecar MaxSim for `document_nodes`. |
+| `multivector_doc_graph_docs_scored` | document graph | Documents scored by approximate/full document MaxSim; exact heap MaxSim in prototype mode, exact float32 sidecar MaxSim for `f32`, or compact sidecar MaxSim for `f16`/`sq8`. |
 | `multivector_doc_graph_edges_visited` | document graph | Graph edges traversed; `0` for the heap-backed prototype, real edge visits for document-node traversal, or the scored-document count for near-exhaustive sidecar scans. |
 | `multivector_doc_graph_candidates` | document graph | Candidate documents retained by the prototype or `document_nodes` source. |
-| `multivector_doc_graph_quantized_scores` | document graph | Approximate compact-code document scores. Current `document_nodes` sidecar scans report `0` because they score float32 sidecar vectors. |
+| `multivector_doc_graph_quantized_scores` | document graph | Approximate compact-code document scores. `f16` and `sq8` document-node scans increment this; `f32` scans report `0`. |
 | `multivector_doc_graph_heap_fetches` | document graph | Heap document fetches used by prototype/fallback paths or exact rerank. |
 | `multivector_doc_graph_exact_rerank_docs` | document graph | Document graph candidates reranked against heap float32 multivectors. |
-| `multivector_doc_graph_warning` | document graph | `prototype_heap_scan_no_index_resident_doc_graph` for the Prompt 10 prototype, `document_node_f32_sidecar_graph_traversal` for non-exhaustive `document_nodes` scans, or `document_node_f32_sidecar_exact_scan` when the document-node budget covers the sidecar. |
+| `multivector_doc_graph_warning` | document graph | `prototype_heap_scan_no_index_resident_doc_graph` for the heap-backed prototype, `document_node_f32_sidecar_graph_traversal`, `document_node_f16_sidecar_graph_traversal`, `document_node_sq8_sidecar_graph_traversal`, `document_node_proxy_vector_graph_traversal`, or `document_node_f32_sidecar_exact_scan` when the document-node budget covers the sidecar. |
 | `multivector_reservoirs_enabled` | candidate reduction | Whether the bounded multi-reservoir candidate selector replaced score-only truncation. |
 | `multivector_reservoir_score_docs` | candidate reduction | Documents retained from the approximate MaxSim-sum reservoir. |
 | `multivector_reservoir_coverage_docs` | candidate reduction | Documents retained from the query-token coverage reservoir. |

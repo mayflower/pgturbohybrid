@@ -411,7 +411,12 @@ typedef struct TqDenseCandidateStats
 	uint64		multivectorDocGraphDocsScored;
 	uint64		multivectorDocGraphEdgesVisited;
 	uint32		multivectorDocGraphCandidates;
+	uint32		multivectorDocGraphSearchEf;
+	uint32		multivectorDocGraphOversampling;
+	uint32		multivectorDocGraphRescoreK;
 	uint64		multivectorDocGraphQuantizedScores;
+	char		multivectorDocGraphStorageKind[16];
+	char		multivectorDocGraphRescoreSource[16];
 	uint32		multivectorDocGraphExactRerankDocs;
 	uint64		multivectorDocGraphHeapFetches;
 	char		multivectorDocGraphWarning[96];
