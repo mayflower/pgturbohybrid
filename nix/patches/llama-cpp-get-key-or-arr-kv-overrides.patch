@@ -1,0 +1,55 @@
+--- a/src/llama-model-loader.cpp
++++ b/src/llama-model-loader.cpp
+@@ -437,0 +438,4 @@
++        auto it = kv_overrides.find(key);
++        const struct llama_model_kv_override * override =
++            it != kv_overrides.end() ? &it->second : nullptr;
++
+@@ -440,0 +445,8 @@
++            T value;
++
++            if (GGUFMeta::GKV<T>::template try_override<T>(value, override)) {
++                for (uint32_t i = 0; i < n; i++) {
++                    result[i] = value;
++                }
++                return true;
++            }
+@@ -482,0 +495,3 @@
++        auto it = kv_overrides.find(key);
++        const struct llama_model_kv_override * override =
++            it != kv_overrides.end() ? &it->second : nullptr;
+@@ -486,0 +502,6 @@
++            uint32_t value;
++
++            if (GGUFMeta::GKV<uint32_t>::try_override<uint32_t>(value, override)) {
++                result = value;
++                return true;
++            }
+@@ -700,0 +722,8 @@
++    for (const auto & it : weights_map) {
++        if (it.first == "colbert.proj.weight" ||
++            it.first == "colbert.proj.bias" ||
++            it.first.rfind("colbert.proj.weight.", 0) == 0 ||
++            it.first.rfind("colbert.proj.bias.", 0) == 0) {
++            n_tensors--;
++        }
++    }
+@@ -848,0 +878,18 @@
++        std::string alias = name;
++
++        auto replace_once = [&](const char * from, const char * to) {
++            const size_t pos = alias.find(from);
++            if (pos != std::string::npos) {
++                alias.replace(pos, strlen(from), to);
++            }
++        };
++
++        replace_once(".attn_output.", ".attn_out.");
++        replace_once(".attn_output_norm.", ".attn_norm.");
++        replace_once(".layer_output_norm.", ".ffn_norm.");
++
++        if (alias != name) {
++            weight = get_weight(alias.c_str());
++        }
++    }
++    if (!weight) {
