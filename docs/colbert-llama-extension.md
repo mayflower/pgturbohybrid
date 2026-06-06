@@ -220,12 +220,9 @@ th-colbert-build-stub
 th-colbert-test-stub
 th-colbert-build-llama
 hf download johannhartmann/SauerkrautLM-Multi-ColBERT-15m-GGUF \
-  VAGOsolutions_SauerkrautLM_Multi_ColBERT_15m.f16.gguf \
+  sauerkraut-modern.gguf \
+  sauerkraut-modern.gguf.colbert_proj \
   --local-dir .nix-dev/models/colbert-15m
-
-python3 extensions/pg_colbert_llama/tools/canonicalize_pg_colbert_gguf.py \
-  .nix-dev/models/colbert-15m/VAGOsolutions_SauerkrautLM_Multi_ColBERT_15m.f16.gguf \
-  .nix-dev/models/colbert-15m/sauerkraut-modern.gguf
 
 PG_COLBERT_LLAMA_TEST_MODEL="$PWD/.nix-dev/models/colbert-15m/sauerkraut-modern.gguf" \
   th-colbert-live-test

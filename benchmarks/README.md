@@ -43,7 +43,9 @@ benchmark database, or set `PGDATABASE=...` explicitly when you want the wrapped
 script to use that database.
 
 The Nix `th-bench-dbpedia-colbert` wrapper defaults to the separate
-`pgturbohybrid_dbpedia_colbert` database. It uses the smaller
+`pgturbohybrid_dbpedia_colbert` database and starts a separate llama-backed
+PostgreSQL cluster under `.nix-dev/pg17-pgvector-v0.8.2-colbert-llama/` on
+port `55433` by default. It uses the smaller
 `johannhartmann/SauerkrautLM-Multi-ColBERT-15m-GGUF` validation model by
 default when `--model-path` or `PG_COLBERT_LLAMA_TEST_MODEL` points at the GGUF
 file. The default run is smoke-sized (`--max-docs 1000 --max-queries 32`) and
@@ -63,6 +65,78 @@ PG_COLBERT_LLAMA_TEST_MODEL=/path/to/sauerkraut-modern.gguf \
 Use `--methods pgturbohybrid_colbert_multivector_query_only,pgturbohybrid_colbert_multivector_rrf`
 to include BM25 RRF fusion, and use `--max-docs 0 --max-queries 0 --final-k 100
 --quality-k 100` for an opt-in full-scale recall@100 run.
+
+### Precomputed DBpedia ColBERT multivector dataset
+
+After a DBpedia ColBERT run has generated and persisted document/query
+multivectors in `dbpedia_colbert_docs` and `dbpedia_colbert_queries`, export the
+loaded benchmark database as a Hugging Face-ready dataset:
+
+```sh
+nix develop .#bench
+DBPEDIA_COLBERT_PGDATABASE=pgturbohybrid_dbpedia_colbert \
+  th-dbpedia-colbert-hf-dataset export \
+    --output-dir .nix-dev/hf-datasets/dbpedia-colbert-multivector-1m \
+    --force
+```
+
+To create the PostgreSQL database, generate the 1M document/query multivectors,
+and export the Hugging Face-ready dataset in one pass:
+
+```sh
+nix develop .#bench
+th-dbpedia-colbert-generate-export \
+  --database pgturbohybrid_dbpedia_colbert \
+  --max-docs 1000000 \
+  --max-queries 0 \
+  --generation-clients 8 \
+  --generation-threads 1 \
+  --insert-batch-size 16 \
+  --output-dir .nix-dev/hf-datasets/dbpedia-colbert-multivector-1m \
+  --force-export
+```
+
+By default, this uses the repo-local benchmark inputs already used by the
+ColBERT benchmark runs:
+
+- corpus: `.deps/datasets/qdrant-dbpedia-openai3-large-1m`
+- queries: `.deps/datasets/beir-dbpedia-entity/queries`
+- qrels: `.deps/datasets/beir-dbpedia-entity-qrels/test-positive.tsv`
+- model: `.nix-dev/models/colbert-15m/sauerkraut-modern.gguf`
+
+Use `--resume` to continue from an existing partially encoded database, or
+`--recreate-database` to drop and recreate the target database before starting.
+Add `--repo-id <owner>/dbpedia-colbert-multivector-1m --upload` to publish the
+exported dataset after generation.
+
+To publish it, pass the target dataset repo id and `--upload`:
+
+```sh
+HF_TOKEN=... \
+DBPEDIA_COLBERT_PGDATABASE=pgturbohybrid_dbpedia_colbert \
+  th-dbpedia-colbert-hf-dataset export \
+    --output-dir .nix-dev/hf-datasets/dbpedia-colbert-multivector-1m \
+    --repo-id <owner>/dbpedia-colbert-multivector-1m \
+    --upload \
+    --force
+```
+
+The dataset contains Parquet shards under `docs/`, `queries/`, and `qrels/`.
+Document and query rows store PostgreSQL `turbohybrid_multivector` text literals
+so later runs can load them into PostgreSQL without llama.cpp embedding
+generation:
+
+```sh
+DBPEDIA_COLBERT_PRECOMPUTED_DATASET=<owner>/dbpedia-colbert-multivector-1m \
+  th-bench-dbpedia-colbert \
+    --precomputed-dataset <owner>/dbpedia-colbert-multivector-1m \
+    --reuse-data \
+    --reuse-embeddings
+```
+
+For local smoke testing, use `--source .nix-dev/hf-datasets/dbpedia-colbert-multivector-1m`
+with `th-dbpedia-colbert-hf-dataset import`, or pass the same local path to
+`--precomputed-dataset`.
 
 Benchmarks that need external datasets or produce host-specific artifacts are
 not part of `flake check`. Keep generated JSON, CSV, logs, and Markdown reports

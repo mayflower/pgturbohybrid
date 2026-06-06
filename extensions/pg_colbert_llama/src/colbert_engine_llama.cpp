@@ -708,25 +708,25 @@ PgColbertCheckCanonicalBertMetadata(const char *path, MemoryContext ctx,
 		return true;
 
 	missing[0] = '\0';
-	if (!metadata.hasContextLength)
+	if (!metadata.hasContextLength && !metadata.hasMaxPositionEmbeddings)
 		PgColbertAppendMissingKey(missing, sizeof(missing),
 								  "bert.context_length");
-	if (!metadata.hasEmbeddingLength)
+	if (!metadata.hasEmbeddingLength && !metadata.hasHiddenSize)
 		PgColbertAppendMissingKey(missing, sizeof(missing),
 								  "bert.embedding_length");
-	if (!metadata.hasFeedForwardLength)
+	if (!metadata.hasFeedForwardLength && !metadata.hasIntermediateSize)
 		PgColbertAppendMissingKey(missing, sizeof(missing),
 								  "bert.feed_forward_length");
-	if (!metadata.hasBlockCount)
+	if (!metadata.hasBlockCount && !metadata.hasNumHiddenLayers)
 		PgColbertAppendMissingKey(missing, sizeof(missing),
 								  "bert.block_count");
-	if (!metadata.hasAttentionHeadCount)
+	if (!metadata.hasAttentionHeadCount && !metadata.hasNumAttentionHeads)
 		PgColbertAppendMissingKey(missing, sizeof(missing),
 								  "bert.attention.head_count");
-	if (!metadata.hasAttentionLayerNormEps)
+	if (!metadata.hasAttentionLayerNormEps && !metadata.hasLayerNormEps)
 		PgColbertAppendMissingKey(missing, sizeof(missing),
 								  "bert.attention.layer_norm_epsilon");
-	if (!metadata.hasTokenizerTokenTypeCount)
+	if (!metadata.hasTokenizerTokenTypeCount && !metadata.hasTypeVocabSize)
 		PgColbertAppendMissingKey(missing, sizeof(missing),
 								  "tokenizer.ggml.token_type_count");
 	if (missing[0] == '\0')

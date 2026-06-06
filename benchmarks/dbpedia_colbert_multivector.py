@@ -4,6 +4,7 @@
 # /// script
 # requires-python = ">=3.11"
 # dependencies = [
+#   "numpy>=1.26",
 #   "psycopg[binary]>=3.2",
 #   "pyarrow>=16",
 # ]
@@ -40,7 +41,6 @@ DEFAULT_MODEL_PATH = ".nix-dev/models/colbert-15m/sauerkraut-modern.gguf"
 class QueryItem:
     query_id: str
     query_text: str
-    multivector_text: str
 
 
 @dataclass
@@ -437,15 +437,22 @@ def set_retrieval_gucs(conn: psycopg.Connection[Any], args: argparse.Namespace, 
         "pg_colbert_llama.max_doc_vectors": str(args.max_doc_vectors),
         "pg_colbert_llama.max_query_vectors": str(args.max_query_vectors),
         "pg_colbert_llama.query_length": str(args.query_length),
+        "turbohybrid.multivector_subvector_k": str(args.multivector_subvector_k),
+        "turbohybrid.multivector_unique_docs_per_token": str(args.multivector_unique_docs_per_token),
+        "turbohybrid.multivector_max_raw_hits_per_token": str(args.multivector_max_raw_hits_per_token),
+        "turbohybrid.multivector_adaptive_widening": args.multivector_adaptive_widening,
+        "turbohybrid.multivector_doc_candidate_k": str(args.multivector_doc_candidate_k),
+        "turbohybrid.multivector_exact_rerank_k": str(args.multivector_exact_rerank_k),
     }
     for key, value in settings.items():
         exec_sql(conn, "SELECT set_config(%s, %s, false)", (key, value))
 
 
-def setup_schema(conn: psycopg.Connection[Any]) -> None:
+def setup_schema(conn: psycopg.Connection[Any], include_colbert_llama: bool = True) -> None:
     exec_sql(conn, "CREATE EXTENSION IF NOT EXISTS vector")
     exec_sql(conn, "CREATE EXTENSION IF NOT EXISTS pgturbohybrid")
-    exec_sql(conn, "CREATE EXTENSION IF NOT EXISTS pg_colbert_llama")
+    if include_colbert_llama:
+        exec_sql(conn, "CREATE EXTENSION IF NOT EXISTS pg_colbert_llama")
     exec_sql(
         conn,
         """
@@ -952,6 +959,55 @@ def persist_multivectors(
     }
 
 
+def load_precomputed_multivectors(conn: psycopg.Connection[Any], args: argparse.Namespace) -> dict[str, Any]:
+    from dbpedia_colbert_hf_dataset import import_precomputed_dataset_to_postgres
+
+    if args.reuse_data and not args.force_reload:
+        row = fetch_one(
+            conn,
+            """
+            SELECT
+              coalesce((SELECT count(*) FROM dbpedia_colbert_docs), 0),
+              coalesce((SELECT count(*) FILTER (WHERE colbert IS NOT NULL) FROM dbpedia_colbert_docs), 0),
+              coalesce((SELECT count(*) FROM dbpedia_colbert_queries), 0),
+              coalesce((SELECT count(*) FILTER (WHERE colbert IS NOT NULL) FROM dbpedia_colbert_queries), 0),
+              coalesce((SELECT count(*) FROM dbpedia_colbert_qrels), 0),
+              coalesce((
+                SELECT count(*)
+                FROM dbpedia_colbert_qrels q
+                JOIN dbpedia_colbert_docs d ON d.doc_id = q.doc_id
+                JOIN dbpedia_colbert_queries bq ON bq.query_id = q.query_id
+              ), 0)
+            """,
+        )
+        if (
+            row
+            and int(row[0]) > 0
+            and int(row[0]) == int(row[1])
+            and int(row[2]) > 0
+            and int(row[2]) == int(row[3])
+            and int(row[4]) > 0
+            and int(row[4]) == int(row[5])
+        ):
+            return {
+                "reused": True,
+                "source": args.precomputed_dataset,
+                "documents": int(row[0]),
+                "queries": int(row[2]),
+                "qrels": int(row[4]),
+                "qrels_in_loaded_docs": int(row[5]),
+            }
+
+    return import_precomputed_dataset_to_postgres(
+        conn=conn,
+        source=args.precomputed_dataset,
+        batch_size=args.precomputed_batch_size,
+        max_docs=args.max_docs,
+        max_queries=args.max_queries,
+        force_reload=True,
+    )
+
+
 def build_index(conn: psycopg.Connection[Any], args: argparse.Namespace) -> dict[str, Any]:
     if args.reuse_index:
         row = fetch_one(conn, "SELECT to_regclass('dbpedia_colbert_docs_colbert_idx') IS NOT NULL")
@@ -992,13 +1048,13 @@ def load_encoded_queries(conn: psycopg.Connection[Any]) -> list[QueryItem]:
     rows = fetch_all(
         conn,
         """
-        SELECT query_id, query_text, colbert::text
+        SELECT query_id, query_text
         FROM dbpedia_colbert_queries
         WHERE colbert IS NOT NULL
         ORDER BY query_id
         """,
     )
-    queries = [QueryItem(str(row[0]), str(row[1]), str(row[2])) for row in rows]
+    queries = [QueryItem(str(row[0]), str(row[1])) for row in rows]
     if not queries:
         raise RuntimeError("no encoded query multivectors are available")
     return queries
@@ -1015,53 +1071,62 @@ def run_retrieval_query(
         rows = fetch_all(
             conn,
             """
-            SELECT doc_id
-            FROM dbpedia_colbert_docs
-            WHERE colbert IS NOT NULL
-            ORDER BY colbert <~> turbohybrid_query(
-              multivector_query => %s::turbohybrid_multivector,
-              dense_k => %s,
-              final_k => %s
+            SELECT d.doc_id
+            FROM dbpedia_colbert_docs d
+            WHERE d.colbert IS NOT NULL
+            ORDER BY d.colbert <~> (
+              SELECT turbohybrid_query(
+                multivector_query => q.colbert,
+                dense_k => %s,
+                final_k => %s
+              )
+              FROM dbpedia_colbert_queries q
+              WHERE q.query_id = %s
             )
             LIMIT %s
             """,
-            (query.multivector_text, args.dense_k, final_k, final_k),
+            (args.dense_k, final_k, query.query_id, final_k),
         )
     elif method == EXACT_SCAN_METHOD:
         rows = fetch_all(
             conn,
             """
-            SELECT doc_id
-            FROM dbpedia_colbert_docs
-            WHERE colbert IS NOT NULL
+            SELECT d.doc_id
+            FROM dbpedia_colbert_docs d
+            JOIN dbpedia_colbert_queries q ON q.query_id = %s
+            WHERE d.colbert IS NOT NULL
             ORDER BY turbohybrid_multivector_maxsim_distance(
-                       %s::turbohybrid_multivector,
-                       colbert
+                       q.colbert,
+                       d.colbert
                      ),
-                     doc_id
+                     d.doc_id
             LIMIT %s
             """,
-            (query.multivector_text, final_k),
+            (query.query_id, final_k),
         )
     elif method == RRF_METHOD:
         rows = fetch_all(
             conn,
             """
-            SELECT doc_id
-            FROM dbpedia_colbert_docs
-            WHERE colbert IS NOT NULL
-            ORDER BY colbert <~> turbohybrid_query(
-              multivector_query => %s::turbohybrid_multivector,
-              text_query => websearch_to_tsquery('simple', %s),
-              fusion => 'rrf',
-              dense_k => %s,
-              bm25_k => %s,
-              rrf_k => %s,
-              final_k => %s
+            SELECT d.doc_id
+            FROM dbpedia_colbert_docs d
+            WHERE d.colbert IS NOT NULL
+            ORDER BY d.colbert <~> (
+              SELECT turbohybrid_query(
+                multivector_query => q.colbert,
+                text_query => websearch_to_tsquery('simple', q.query_text),
+                fusion => 'rrf',
+                dense_k => %s,
+                bm25_k => %s,
+                rrf_k => %s,
+                final_k => %s
+              )
+              FROM dbpedia_colbert_queries q
+              WHERE q.query_id = %s
             )
             LIMIT %s
             """,
-            (query.multivector_text, query.query_text, args.dense_k, args.bm25_k, args.rrf_k, final_k, final_k),
+            (args.dense_k, args.bm25_k, args.rrf_k, final_k, query.query_id, final_k),
         )
     else:
         raise ValueError(f"unknown method: {method}")
@@ -1217,27 +1282,31 @@ def validate_args(args: argparse.Namespace) -> argparse.Namespace:
     env_dataset = os.environ.get("DBPEDIA_DATASET")
     env_beir = os.environ.get("BEIR_DBPEDIA_DATASET")
     env_model = os.environ.get("PG_COLBERT_LLAMA_TEST_MODEL")
+    env_precomputed = os.environ.get("DBPEDIA_COLBERT_PRECOMPUTED_DATASET")
     if args.dataset is None and env_dataset:
         args.dataset = Path(env_dataset)
     if args.beir_dataset is None and env_beir:
         args.beir_dataset = Path(env_beir)
+    if args.precomputed_dataset is None and env_precomputed:
+        args.precomputed_dataset = env_precomputed
     if args.model_path is None:
         args.model_path = Path(env_model or DEFAULT_MODEL_PATH)
 
-    if not args.reuse_data and args.dataset is None:
+    if args.precomputed_dataset is None and not args.reuse_data and args.dataset is None:
         raise SystemExit("pass --dataset or set DBPEDIA_DATASET")
     if args.dataset is not None:
         args.dataset = args.dataset.resolve()
         if not args.dataset.exists():
             raise SystemExit(f"dataset path does not exist: {args.dataset}")
-    if args.beir_dataset is None:
+    if args.precomputed_dataset is None and args.beir_dataset is None:
         raise SystemExit("pass --beir-dataset or set BEIR_DBPEDIA_DATASET")
-    args.beir_dataset = args.beir_dataset.resolve()
-    if not args.beir_dataset.exists():
+    if args.beir_dataset is not None:
+        args.beir_dataset = args.beir_dataset.resolve()
+    if args.beir_dataset is not None and not args.beir_dataset.exists():
         raise SystemExit(f"BEIR dataset path does not exist: {args.beir_dataset}")
 
     args.model_path = args.model_path.resolve()
-    if not args.model_path.is_file():
+    if args.precomputed_dataset is None and not args.model_path.is_file():
         raise SystemExit(
             f"model file does not exist: {args.model_path}\n"
             "Use johannhartmann/SauerkrautLM-Multi-ColBERT-15m-GGUF and pass --model-path."
@@ -1253,6 +1322,8 @@ def validate_args(args: argparse.Namespace) -> argparse.Namespace:
         args.generation_clients = args.clients
     if args.generation_clients < 1:
         raise SystemExit("--generation-clients must be at least 1")
+    if args.precomputed_batch_size < 1:
+        raise SystemExit("--precomputed-batch-size must be at least 1")
     if args.generation_threads < 1:
         raise SystemExit("--generation-threads must be at least 1")
     if args.generation_n_gpu_layers < 0:
@@ -1283,6 +1354,17 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--dataset", type=Path, default=None, help="Qdrant DBpedia parquet dataset root")
     parser.add_argument("--beir-dataset", type=Path, default=None, help="BEIR DBpedia dataset root containing queries")
     parser.add_argument("--qrels", default=None, help="BEIR DBpedia qrels TSV path")
+    parser.add_argument(
+        "--precomputed-dataset",
+        default=None,
+        help="local directory or Hugging Face dataset repo id with precomputed DBpedia ColBERT multivectors",
+    )
+    parser.add_argument(
+        "--precomputed-batch-size",
+        type=int,
+        default=4096,
+        help="Parquet/COPY batch size when loading --precomputed-dataset",
+    )
     parser.add_argument("--model-path", type=Path, default=None, help="GGUF ColBERT model path")
     parser.add_argument("--model-alias", default=None, help="pg_colbert_llama model alias, defaults to model stem")
     parser.add_argument("--expected-dim", type=int, default=128)
@@ -1366,22 +1448,50 @@ def parse_args() -> argparse.Namespace:
 
 def main() -> None:
     args = parse_args()
-    queries = load_queries(args.beir_dataset)
-    qrels_path = resolve_qrels_path(args.qrels, args.beir_dataset)
-    all_qrels = read_qrels(qrels_path)
-    qids = choose_query_ids(all_qrels, queries, args.max_queries)
-    qrels = {qid: all_qrels[qid] for qid in qids}
+    if args.precomputed_dataset is None:
+        queries = load_queries(args.beir_dataset)
+        qrels_path = resolve_qrels_path(args.qrels, args.beir_dataset)
+        all_qrels = read_qrels(qrels_path)
+        qids = choose_query_ids(all_qrels, queries, args.max_queries)
+        qrels = {qid: all_qrels[qid] for qid in qids}
+    else:
+        qrels_path = None
+        qids = []
+        queries = {}
+        qrels = {}
 
     conn = connect(args)
     try:
-        setup_schema(conn)
-        embedding_health = validate_embedding_health(conn, args)
-        load_phase = load_data(conn, args, qids, queries, qrels)
+        setup_schema(conn, include_colbert_llama=args.precomputed_dataset is None)
+        if args.precomputed_dataset is None:
+            embedding_health = validate_embedding_health(conn, args)
+            load_phase = load_data(conn, args, qids, queries, qrels)
+        else:
+            embedding_health = {
+                "validated": True,
+                "skipped": True,
+                "reason": "precomputed multivectors loaded from dataset",
+            }
+            load_phase = load_precomputed_multivectors(conn, args)
         doc_ids = selected_doc_ids(conn, args.max_docs)
         query_ids = selected_query_ids(conn)
         qrels = loaded_qrels(conn)
-        generation_phase = measure_generation_sample(conn, args, doc_ids, query_ids)
-        insert_phase = persist_multivectors(conn, args, doc_ids, query_ids)
+        if args.precomputed_dataset is None:
+            generation_phase = measure_generation_sample(conn, args, doc_ids, query_ids)
+            insert_phase = persist_multivectors(conn, args, doc_ids, query_ids)
+        else:
+            generation_phase = {
+                "skipped": True,
+                "reason": "precomputed multivectors loaded from dataset",
+            }
+            insert_phase = {
+                "reused": True,
+                "precomputed": True,
+                "documents": len(doc_ids),
+                "queries": len(query_ids),
+                "source": args.precomputed_dataset,
+                "note": "runtime generation skipped; rows were loaded from precomputed multivector dataset",
+            }
         index_phase = build_index(conn, args)
         set_retrieval_gucs(conn, args, "dbpedia_colbert_serial")
         encoded_queries = load_encoded_queries(conn)
@@ -1418,8 +1528,9 @@ def main() -> None:
             "dataset": {
                 "name": "dbpedia-colbert-multivector",
                 "corpus_path": portable_path(args.dataset) if args.dataset else None,
-                "beir_dataset_path": portable_path(args.beir_dataset),
-                "qrels_path": portable_path(qrels_path),
+                "beir_dataset_path": portable_path(args.beir_dataset) if args.beir_dataset else None,
+                "qrels_path": portable_path(qrels_path) if qrels_path else None,
+                "precomputed_dataset": args.precomputed_dataset,
                 "documents": load_phase["documents"],
                 "queries": load_phase["queries"],
                 "qrels": load_phase["qrels"],
