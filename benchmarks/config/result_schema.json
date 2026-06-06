@@ -143,6 +143,62 @@
         "type": "number"
       }
     },
+    "admission_debug": {
+      "type": "object",
+      "properties": {
+        "enabled": { "type": "boolean" },
+        "candidate_source": { "type": "string" },
+        "retrieval_method": { "type": "string" },
+        "aggregate": {
+          "type": "object",
+          "properties": {
+            "queries": { "type": "integer" },
+            "admission_k": { "type": "integer" },
+            "budget_sweep": {
+              "type": "array",
+              "items": { "type": "integer" }
+            },
+            "exact_top1_admission": { "type": "number" },
+            "exact_top1_admission_rate": { "type": "number" },
+            "exact_top10_admission_recall": { "type": "number" },
+            "admission_by_budget": {
+              "type": "object",
+              "additionalProperties": {
+                "type": "object",
+                "properties": {
+                  "exact_top1_admission": { "type": "number" },
+                  "exact_top10_admission_recall": { "type": "number" },
+                  "latency": { "type": "object", "additionalProperties": true },
+                  "docs_scored": { "type": "object", "additionalProperties": true },
+                  "graph_edges_visited": { "type": "object", "additionalProperties": true },
+                  "exact_rerank_docs": { "type": "object", "additionalProperties": true }
+                },
+                "additionalProperties": true
+              }
+            }
+          },
+          "additionalProperties": true
+        },
+        "per_query": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "properties": {
+              "exact_top1_admission": { "type": "boolean" },
+              "exact_top10_admission_recall": { "type": "number" },
+              "latency": { "type": "object", "additionalProperties": true },
+              "docs_scored": { "type": "integer" },
+              "graph_edges_visited": { "type": "integer" },
+              "exact_rerank_docs": { "type": "integer" },
+              "doc_graph_storage_kind": { "type": ["string", "null"] },
+              "doc_graph_rescore_source": { "type": ["string", "null"] }
+            },
+            "additionalProperties": true
+          }
+        }
+      },
+      "additionalProperties": true
+    },
     "per_query_recovery_overlap": {
       "type": "object",
       "additionalProperties": true

@@ -949,6 +949,28 @@ $$;
 DO $$
 BEGIN
 	BEGIN
+		SET LOCAL turbohybrid.multivector_candidate_source = document_nodes;
+		PERFORM id
+		FROM mv_bm25_injection_docs
+		ORDER BY colbert <~> turbohybrid_query(
+		  multivector_query => turbohybrid_multivector(ARRAY['[1,0]'::vector]),
+		  dense_k => 1,
+		  final_k => 1
+		)
+		LIMIT 1;
+		RAISE EXCEPTION 'expected document_nodes source on token-node index to fail';
+	EXCEPTION
+		WHEN feature_not_supported THEN
+			IF SQLERRM NOT LIKE '%requires multivector_graph = document_nodes%' THEN
+				RAISE EXCEPTION 'unexpected document_nodes token-node error: %', SQLERRM;
+			END IF;
+	END;
+END
+$$;
+
+DO $$
+BEGIN
+	BEGIN
 		PERFORM id
 		FROM mv_docs
 		ORDER BY colbert <~> turbohybrid_query(
@@ -1110,6 +1132,21 @@ SELECT id FROM mv_docs
   )
   LIMIT 1;
 
+DO $$
+DECLARE
+	stats jsonb;
+BEGIN
+	stats := turbohybrid_last_scan_stats();
+	IF stats->>'fusion_strategy' NOT IN ('sorted_merge_doc', 'hash_doc') OR
+		(stats->>'fast_weighted_enabled')::boolean IS DISTINCT FROM true OR
+		stats->>'dense_norm_mode' <> 'logistic' OR
+		stats->>'bm25_norm_mode' <> 'saturating' THEN
+		RAISE EXCEPTION 'expected normalized fast_weighted multivector hybrid fusion, got %',
+			stats;
+	END IF;
+END
+$$;
+
 SELECT id FROM mv_docs
   ORDER BY colbert <~> turbohybrid_query(
     multivector_query => turbohybrid_multivector(ARRAY['[1,0]'::vector]),
@@ -1117,6 +1154,94 @@ SELECT id FROM mv_docs
     fusion => 'calibrated'
   )
   LIMIT 1;
+
+DO $$
+DECLARE
+	stats jsonb;
+BEGIN
+	stats := turbohybrid_last_scan_stats();
+	IF stats->>'fusion_strategy' NOT IN ('sorted_merge_doc', 'hash_doc') OR
+		(stats->>'calibrated_fusion_enabled')::boolean IS DISTINCT FROM true OR
+		stats->>'calibrated_fusion_dense_norm_mode' <> 'logistic' OR
+		stats->>'calibrated_fusion_bm25_norm_mode' <> 'saturating' THEN
+		RAISE EXCEPTION 'expected calibrated multivector hybrid fusion, got %',
+			stats;
+	END IF;
+END
+$$;
+
+CREATE TABLE mv_docnode_hybrid_scheduler_docs (
+  id text PRIMARY KEY,
+  colbert turbohybrid_multivector,
+  body_tsv tsvector
+);
+
+INSERT INTO mv_docnode_hybrid_scheduler_docs VALUES
+  ('dense_a', turbohybrid_multivector(ARRAY[
+    '[1,0]'::vector,
+    '[0,1]'::vector
+  ]), to_tsvector('simple', 'common alpha')),
+  ('dense_b', turbohybrid_multivector(ARRAY[
+    '[0.9,0.1]'::vector,
+    '[0.1,0.9]'::vector
+  ]), to_tsvector('simple', 'common beta')),
+  ('lexical_only', turbohybrid_multivector(ARRAY[
+    '[-1,0]'::vector,
+    '[0,-1]'::vector
+  ]), to_tsvector('simple', 'common needle')),
+  ('mixed', turbohybrid_multivector(ARRAY[
+    '[0.8,0.2]'::vector,
+    '[0.2,0.8]'::vector
+  ]), to_tsvector('simple', 'common needle'));
+
+CREATE INDEX mv_docnode_hybrid_scheduler_idx
+  ON mv_docnode_hybrid_scheduler_docs USING turbohybrid
+  (colbert multivector_cosine_turbohybrid_ops,
+   body_tsv bm25_tsvector_turbohybrid_ops)
+  WITH (multivector_graph = document_nodes,
+        graph_m = 4,
+        graph_ef_construction = 8,
+        graph_ef_search = 4);
+ANALYZE mv_docnode_hybrid_scheduler_docs;
+
+DO $$
+DECLARE
+	stats jsonb;
+	top_id text;
+BEGIN
+	PERFORM set_config('turbohybrid.hybrid_budget_policy', 'adaptive', true);
+	PERFORM set_config('turbohybrid.multivector_candidate_source', 'document_nodes', true);
+	PERFORM set_config('turbohybrid.default_dense_k', '64', true);
+	PERFORM set_config('turbohybrid.default_bm25_k', '64', true);
+
+	SELECT id INTO top_id
+	FROM mv_docnode_hybrid_scheduler_docs
+	ORDER BY colbert <~> turbohybrid_query(
+	  multivector_query => turbohybrid_multivector(ARRAY[
+	    '[1,0]'::vector,
+	    '[0,1]'::vector
+	  ]),
+	  text_query => to_tsquery('simple', 'common | needle'),
+	  fusion => 'rrf'
+	)
+	LIMIT 1;
+
+	stats := turbohybrid_last_scan_stats();
+	IF top_id IS NULL OR
+		stats->>'hybrid_budget_policy' <> 'adaptive' OR
+		stats->>'multivector_candidate_source' <> 'document_nodes' OR
+		stats->>'multivector_graph_mode' <> 'document_nodes' OR
+		stats->>'hybrid_budget_reason' <>
+			'admission_document_dense_reduce_bm25' OR
+		(stats->>'hybrid_bm25_k_chosen')::int >= 64 OR
+		stats->>'fusion_strategy' NOT IN ('sorted_merge_doc', 'hash_doc') THEN
+		RAISE EXCEPTION 'expected branch-aware document-node hybrid scheduler stats, top %, stats %',
+			top_id, stats;
+	END IF;
+END
+$$;
+
+DROP TABLE mv_docnode_hybrid_scheduler_docs;
 
 CREATE TABLE mv_weighted_docs (
   id int,
@@ -1532,6 +1657,7 @@ BEGIN
 END
 $$;
 
+SET turbohybrid.multivector_doc_graph_rescore_k = 1;
 SELECT id AS document_node_graph_traversal_probe
 FROM mv_document_node_docs
 ORDER BY colbert <~> turbohybrid_query(
@@ -1556,6 +1682,7 @@ BEGIN
 	END IF;
 END
 $$;
+RESET turbohybrid.multivector_doc_graph_rescore_k;
 RESET enable_seqscan;
 
 INSERT INTO mv_document_node_docs VALUES

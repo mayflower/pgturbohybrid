@@ -189,6 +189,163 @@ PgturbohybridGraphInsertCodeDistanceToNode(Relation index, PgturbohybridGraphSca
 	return PgturbohybridGraphInsertQueryDistanceToNode(index, so, meta, storage, nodeId);
 }
 
+static PgturbohybridMultiVector *
+PgturbohybridGraphDocumentInsertVectorForNode(Relation index,
+								   PgturbohybridGraphMetaPageData *meta,
+								   PgturbohybridGraphScanStorage *storage,
+								   uint32 nodeId, uint32 newNodeId,
+								   const PgturbohybridMultiVector *newDocument)
+{
+	TqDocId		docId;
+
+	if (nodeId == newNodeId)
+		return (PgturbohybridMultiVector *) newDocument;
+	if (nodeId >= meta->tqNodeCount ||
+		!PgturbohybridGraphLoadCodePage(index, NULL, meta, storage, nodeId) ||
+		(storage->nodes[nodeId].flags & PGTURBOHYBRID_GRAPH_NODE_DEAD))
+		return NULL;
+	if (storage->multivectorNodeMap == NULL ||
+		storage->multivectorDocVectors == NULL)
+		ereport(ERROR,
+				(errcode(ERRCODE_INDEX_CORRUPTED),
+				 errmsg("document-node multivector sidecar is missing"),
+				 errhint("REINDEX the index to rebuild the document-node multivector sidecar.")));
+
+	docId = storage->multivectorNodeMap[nodeId].docId;
+	if (docId >= meta->tqMultivectorDocCount)
+		ereport(ERROR,
+				(errcode(ERRCODE_INDEX_CORRUPTED),
+				 errmsg("document-node multivector sidecar has invalid document id"),
+				 errhint("REINDEX the index to rebuild the document-node multivector sidecar.")));
+	if (storage->multivectorDocVectors[docId] == NULL)
+		ereport(ERROR,
+				(errcode(ERRCODE_INDEX_CORRUPTED),
+				 errmsg("document-node multivector sidecar is missing a document vector"),
+				 errhint("REINDEX the index to rebuild the document-node multivector sidecar.")));
+
+	return storage->multivectorDocVectors[docId];
+}
+
+static double
+PgturbohybridGraphDocumentInsertDistance(const PgturbohybridMultiVector *a,
+							  const PgturbohybridMultiVector *b)
+{
+	double		ab;
+	double		ba;
+
+	if (a == NULL || b == NULL || a->count <= 0 || b->count <= 0)
+		return DBL_MAX;
+	PgturbohybridCheckSameMultiVectorDims(a, b);
+	ab = TqMultiVectorMaxSim(a, b) / (double) a->count;
+	ba = TqMultiVectorMaxSim(b, a) / (double) b->count;
+	return -(0.5 * (ab + ba));
+}
+
+static double
+PgturbohybridGraphDocumentInsertNodeDistance(Relation index,
+								  PgturbohybridGraphMetaPageData *meta,
+								  PgturbohybridGraphScanStorage *storage,
+								  uint32 aNodeId, uint32 bNodeId,
+								  uint32 newNodeId,
+								  const PgturbohybridMultiVector *newDocument)
+{
+	PgturbohybridMultiVector *a;
+	PgturbohybridMultiVector *b;
+
+	a = PgturbohybridGraphDocumentInsertVectorForNode(index, meta, storage,
+										   aNodeId, newNodeId, newDocument);
+	b = PgturbohybridGraphDocumentInsertVectorForNode(index, meta, storage,
+										   bNodeId, newNodeId, newDocument);
+	return PgturbohybridGraphDocumentInsertDistance(a, b);
+}
+
+static void
+PgturbohybridGraphDocumentInsertOfferCandidate(PgturbohybridGraphResult *candidates,
+									int *candidateCount, int candidateLimit,
+									uint32 nodeId, ItemPointer heapTid,
+									double distance)
+{
+	int			worst = -1;
+
+	if (candidateLimit <= 0 || distance == DBL_MAX)
+		return;
+	for (int i = 0; i < *candidateCount; i++)
+	{
+		if (candidates[i].nodeId == nodeId)
+			return;
+	}
+	if (*candidateCount < candidateLimit)
+	{
+		PgturbohybridGraphResult *candidate = &candidates[*candidateCount];
+
+		ItemPointerCopy(heapTid, &candidate->heaptid);
+		candidate->nodeId = nodeId;
+		candidate->distance = distance;
+		candidate->exactScored = true;
+		(*candidateCount)++;
+		return;
+	}
+
+	for (int i = 0; i < *candidateCount; i++)
+	{
+		if (worst < 0 ||
+			candidates[i].distance > candidates[worst].distance ||
+			(candidates[i].distance == candidates[worst].distance &&
+			 candidates[i].nodeId > candidates[worst].nodeId))
+			worst = i;
+	}
+	if (worst >= 0 &&
+		(distance < candidates[worst].distance ||
+		 (distance == candidates[worst].distance &&
+		  nodeId < candidates[worst].nodeId)))
+	{
+		ItemPointerCopy(heapTid, &candidates[worst].heaptid);
+		candidates[worst].nodeId = nodeId;
+		candidates[worst].distance = distance;
+		candidates[worst].exactScored = true;
+	}
+}
+
+static int
+PgturbohybridGraphCollectDocumentInsertCandidates(Relation index,
+									   PgturbohybridGraphMetaPageData *meta,
+									   PgturbohybridGraphScanStorage *storage,
+									   const PgturbohybridMultiVector *newDocument,
+									   uint32 newNodeId,
+									   PgturbohybridGraphResult *candidates,
+									   int candidateLimit)
+{
+	int			candidateCount = 0;
+
+	if (!PgturbohybridGraphLoadMultiVectorDocMap(index, meta, storage, true))
+		return 0;
+
+	for (TqDocId docId = 0; docId < meta->tqMultivectorDocCount; docId++)
+	{
+		TqMultiVectorDocMapEntry *docEntry = &storage->multivectorDocMap[docId];
+		uint32		nodeId = docEntry->firstNodeId;
+		double		distance;
+
+		if (nodeId >= meta->tqNodeCount ||
+			!PgturbohybridGraphLoadCodePage(index, NULL, meta, storage, nodeId) ||
+			(storage->nodes[nodeId].flags & PGTURBOHYBRID_GRAPH_NODE_DEAD))
+			continue;
+
+		distance = PgturbohybridGraphDocumentInsertNodeDistance(index, meta,
+														 storage, newNodeId,
+														 nodeId, newNodeId,
+														 newDocument);
+		PgturbohybridGraphDocumentInsertOfferCandidate(candidates, &candidateCount,
+											 candidateLimit, nodeId,
+											 &docEntry->heapTid, distance);
+	}
+
+	if (candidateCount > 1)
+		qsort(candidates, candidateCount, sizeof(PgturbohybridGraphResult),
+			  PgturbohybridGraphInsertResultCompare);
+	return candidateCount;
+}
+
 static bool
 PgturbohybridGraphLoadAdjTuple(Relation index, PgturbohybridGraphMetaPageData *meta, uint32 nodeId,
 					int level, uint32 *neighbors, int *count,
@@ -582,6 +739,91 @@ PgturbohybridGraphSelectInsertNeighbors(Relation index, PgturbohybridGraphMetaPa
 	}
 }
 
+static bool
+PgturbohybridGraphDocumentInsertCandidateDiverse(Relation index,
+									  PgturbohybridGraphMetaPageData *meta,
+									  PgturbohybridGraphScanStorage *storage,
+									  const PgturbohybridMultiVector *newDocument,
+									  uint32 newNodeId, uint32 candidate,
+									  double candidateDistance,
+									  uint32 *selected, int selectedCount)
+{
+	if (selectedCount == 0)
+		return true;
+
+	for (int i = 0; i < selectedCount; i++)
+	{
+		double		selectedDistance;
+
+		selectedDistance =
+			PgturbohybridGraphDocumentInsertNodeDistance(index, meta, storage,
+											  candidate, selected[i],
+											  newNodeId, newDocument);
+		if (selectedDistance < candidateDistance)
+			return false;
+	}
+
+	return true;
+}
+
+static void
+PgturbohybridGraphSelectInsertDocumentNeighbors(Relation index,
+									 PgturbohybridGraphMetaPageData *meta,
+									 PgturbohybridGraphScanStorage *storage,
+									 const PgturbohybridMultiVector *newDocument,
+									 uint32 newNodeId,
+									 PgturbohybridGraphResult *candidates,
+									 int candidateCount, int nodeLevel,
+									 uint32 **selected,
+									 int *selectedCounts)
+{
+	qsort(candidates, candidateCount, sizeof(PgturbohybridGraphResult),
+		  PgturbohybridGraphInsertResultCompare);
+
+	for (int level = 0; level <= nodeLevel; level++)
+	{
+		int			maxNeighbors = PgturbohybridGraphLevelM(meta->m, level);
+
+		for (int i = 0; i < candidateCount &&
+			 selectedCounts[level] < maxNeighbors; i++)
+		{
+			uint32		nodeId = candidates[i].nodeId;
+
+			if (nodeId >= meta->tqNodeCount ||
+				!PgturbohybridGraphLoadCodePage(index, NULL, meta, storage, nodeId) ||
+				storage->nodes[nodeId].level < level ||
+				(storage->nodes[nodeId].flags & PGTURBOHYBRID_GRAPH_NODE_DEAD))
+				continue;
+
+			if (!PgturbohybridGraphDocumentInsertCandidateDiverse(index, meta,
+														   storage, newDocument,
+														   newNodeId, nodeId,
+														   candidates[i].distance,
+														   selected[level],
+														   selectedCounts[level]))
+				continue;
+
+			selected[level][selectedCounts[level]++] = nodeId;
+		}
+
+		for (int i = 0; i < candidateCount &&
+			 selectedCounts[level] < maxNeighbors; i++)
+		{
+			uint32		nodeId = candidates[i].nodeId;
+
+			if (nodeId >= meta->tqNodeCount ||
+				!PgturbohybridGraphLoadCodePage(index, NULL, meta, storage, nodeId) ||
+				storage->nodes[nodeId].level < level ||
+				(storage->nodes[nodeId].flags & PGTURBOHYBRID_GRAPH_NODE_DEAD) ||
+				PgturbohybridGraphSelectedContains(selected[level],
+										selectedCounts[level], nodeId))
+				continue;
+
+			selected[level][selectedCounts[level]++] = nodeId;
+		}
+	}
+}
+
 static void
 PgturbohybridGraphUpdateReciprocalNeighbor(Relation index, PgturbohybridGraphMetaPageData *meta,
 								PgturbohybridGraphScanStorage *storage,
@@ -739,6 +981,127 @@ PgturbohybridGraphUpdateReciprocalNeighbors(Relation index, PgturbohybridGraphMe
 											newNorm, newCodeNorm,
 											newEcCorrection, newNodeId,
 											selected[level][i], level, stats);
+	}
+	if (stats != NULL)
+		stats->reciprocalUpdateUs += PgturbohybridGraphInsertElapsedUsSince(updateStart);
+}
+
+static void
+PgturbohybridGraphUpdateReciprocalDocumentNeighbor(Relation index,
+										PgturbohybridGraphMetaPageData *meta,
+										PgturbohybridGraphScanStorage *storage,
+										const PgturbohybridMultiVector *newDocument,
+										uint32 newNodeId, uint32 src,
+										int level,
+										PgturbohybridGraphInsertStats *stats)
+{
+	int			maxNeighbors = PgturbohybridGraphLevelM(meta->m, level);
+	uint32	   *neighbors;
+	uint32	   *pruned;
+	int			count;
+	bool		found = false;
+
+	if (src >= meta->tqNodeCount ||
+		!PgturbohybridGraphLoadCodePage(index, NULL, meta, storage, src) ||
+		(storage->nodes[src].flags & PGTURBOHYBRID_GRAPH_NODE_DEAD) ||
+		storage->nodes[src].level < level)
+		return;
+
+	if (stats != NULL)
+		stats->reciprocalNeighborsConsidered++;
+
+	neighbors = palloc0(sizeof(uint32) * (maxNeighbors + 1));
+	pruned = palloc0(sizeof(uint32) * maxNeighbors);
+	if (storage->cached)
+	{
+		int			slot = PgturbohybridGraphAdjSlot(meta, src, level);
+
+		if (slot < 0 || slot >= PgturbohybridGraphAdjRecordCount(meta))
+		{
+			pfree(neighbors);
+			pfree(pruned);
+			return;
+		}
+		count = Min(storage->neighborCounts[slot], maxNeighbors);
+		if (count > 0 && storage->neighbors[slot] != NULL)
+			memcpy(neighbors, storage->neighbors[slot],
+				   sizeof(uint32) * count);
+	}
+	else if (!PgturbohybridGraphLoadAdjTuple(index, meta, src, level, neighbors,
+											 &count, stats))
+	{
+		pfree(neighbors);
+		pfree(pruned);
+		return;
+	}
+
+	for (int i = 0; i < count; i++)
+	{
+		if (neighbors[i] == newNodeId)
+		{
+			found = true;
+			break;
+		}
+	}
+
+	if (!found)
+		neighbors[count++] = newNodeId;
+
+	if (count > maxNeighbors)
+	{
+		PgturbohybridGraphFrontierItem *ranked =
+			palloc(sizeof(PgturbohybridGraphFrontierItem) * count);
+		int			prunedCount = 0;
+
+		for (int i = 0; i < count; i++)
+		{
+			ranked[i].nodeId = neighbors[i];
+			ranked[i].distance =
+				PgturbohybridGraphDocumentInsertNodeDistance(index, meta, storage,
+												  src, neighbors[i],
+												  newNodeId, newDocument);
+		}
+
+		qsort(ranked, count, sizeof(PgturbohybridGraphFrontierItem),
+			  PgturbohybridGraphInsertFrontierCompare);
+		for (int i = 0; i < count && prunedCount < maxNeighbors; i++)
+		{
+			if (ranked[i].distance < DBL_MAX)
+				pruned[prunedCount++] = ranked[i].nodeId;
+		}
+
+		memcpy(neighbors, pruned, sizeof(uint32) * prunedCount);
+		count = prunedCount;
+		pfree(ranked);
+	}
+
+	PgturbohybridGraphUpdateAdjTuple(index, meta, storage, src, level, neighbors,
+									 count, stats);
+	pfree(neighbors);
+	pfree(pruned);
+}
+
+static void
+PgturbohybridGraphUpdateReciprocalDocumentNeighbors(Relation index,
+										 PgturbohybridGraphMetaPageData *meta,
+										 PgturbohybridGraphScanStorage *storage,
+										 const PgturbohybridMultiVector *newDocument,
+										 uint32 newNodeId, int nodeLevel,
+										 uint32 **selected,
+										 int *selectedCounts,
+										 PgturbohybridGraphInsertStats *stats)
+{
+	instr_time	updateStart;
+
+	INSTR_TIME_SET_CURRENT(updateStart);
+	for (int level = 0; level <= nodeLevel; level++)
+	{
+		for (int i = 0; i < selectedCounts[level]; i++)
+			PgturbohybridGraphUpdateReciprocalDocumentNeighbor(index, meta,
+													storage, newDocument,
+													newNodeId,
+													selected[level][i],
+													level, stats);
 	}
 	if (stats != NULL)
 		stats->reciprocalUpdateUs += PgturbohybridGraphInsertElapsedUsSince(updateStart);
@@ -1041,10 +1404,11 @@ PgturbohybridGraphAppendInsertedAdj(Relation index, BlockNumber *adjStart, int m
 	pfree(tuple);
 }
 
-uint32
-PgturbohybridGraphInsertValueInPlace(Relation index, IndexInfo *indexInfo,
-						  ItemPointer heap_tid, Datum value,
-						  Datum *values, bool *isnull)
+static uint32
+PgturbohybridGraphInsertValueInPlaceInternal(Relation index, IndexInfo *indexInfo,
+								  ItemPointer heap_tid, Datum value,
+								  Datum *values, bool *isnull,
+								  const PgturbohybridMultiVector *documentInsert)
 {
 	PgturbohybridGraphMetaPageData meta;
 	PgturbohybridGraphScanStorage storage;
@@ -1083,10 +1447,15 @@ PgturbohybridGraphInsertValueInPlace(Relation index, IndexInfo *indexInfo,
 	float		insertNorm;
 	float		insertCodeNorm;
 	uint8	   *residualSketch = NULL;
+	bool		documentInsertNodes = false;
 
 	if (!PgturbohybridGraphReadMeta(index, &meta))
 		elog(ERROR, "pgturbohybrid native graph metapage is missing or invalid");
 	memset(&insertStats, 0, sizeof(insertStats));
+	documentInsertNodes =
+		documentInsert != NULL &&
+		meta.tqMultivectorGraphMode ==
+		PGTURBOHYBRID_MULTIVECTOR_GRAPH_DOCUMENT_NODES;
 
 	if (meta.dimensions != 0 && meta.dimensions != vector->dim)
 		ereport(ERROR,
@@ -1185,20 +1554,42 @@ PgturbohybridGraphInsertValueInPlace(Relation index, IndexInfo *indexInfo,
 						   (int) meta.tqNodeCount);
 		searchEf = resultTarget;
 		candidates = palloc0(sizeof(PgturbohybridGraphResult) * resultTarget);
-		candidateCount = PgturbohybridGraphTraverse(index, &insertSo, &meta, &storage,
-										  candidates, resultTarget, searchEf,
-										  query, -1, 0);
-		if (insertExactStorage)
-			PgturbohybridGraphExactRescore(index, &insertSo, query, &meta, storage.nodes,
-								candidates, candidateCount);
-		PgturbohybridGraphSelectInsertNeighbors(index, &meta, &storage, &support,
-									 candidates, candidateCount, nodeLevel,
-									 selected, selectedCounts);
-		PgturbohybridGraphUpdateReciprocalNeighbors(index, &meta, &storage, &insertSo,
-										 &support, vector, code, scale,
-										 insertNorm, insertCodeNorm, insertXm,
-										 newNodeId, nodeLevel,
-										 selected, selectedCounts, &insertStats);
+		if (documentInsertNodes)
+		{
+			candidateCount =
+				PgturbohybridGraphCollectDocumentInsertCandidates(index, &meta,
+												   &storage, documentInsert,
+												   newNodeId, candidates,
+												   resultTarget);
+			PgturbohybridGraphSelectInsertDocumentNeighbors(index, &meta,
+												 &storage, documentInsert,
+												 newNodeId, candidates,
+												 candidateCount, nodeLevel,
+												 selected, selectedCounts);
+			PgturbohybridGraphUpdateReciprocalDocumentNeighbors(index, &meta,
+													 &storage, documentInsert,
+													 newNodeId, nodeLevel,
+													 selected, selectedCounts,
+													 &insertStats);
+		}
+		else
+		{
+			candidateCount = PgturbohybridGraphTraverse(index, &insertSo, &meta, &storage,
+											  candidates, resultTarget, searchEf,
+											  query, -1, 0);
+			if (insertExactStorage)
+				PgturbohybridGraphExactRescore(index, &insertSo, query, &meta, storage.nodes,
+									candidates, candidateCount);
+			PgturbohybridGraphSelectInsertNeighbors(index, &meta, &storage, &support,
+										 candidates, candidateCount, nodeLevel,
+										 selected, selectedCounts);
+			PgturbohybridGraphUpdateReciprocalNeighbors(index, &meta, &storage,
+											 &insertSo, &support, vector, code,
+											 scale, insertNorm, insertCodeNorm,
+											 insertXm, newNodeId, nodeLevel,
+											 selected, selectedCounts,
+											 &insertStats);
+		}
 		pfree(candidates);
 	}
 
@@ -1320,6 +1711,16 @@ PgturbohybridGraphInsertValueInPlace(Relation index, IndexInfo *indexInfo,
 }
 
 uint32
+PgturbohybridGraphInsertValueInPlace(Relation index, IndexInfo *indexInfo,
+						  ItemPointer heap_tid, Datum value,
+						  Datum *values, bool *isnull)
+{
+	return PgturbohybridGraphInsertValueInPlaceInternal(index, indexInfo,
+													   heap_tid, value,
+													   values, isnull, NULL);
+}
+
+uint32
 PgturbohybridGraphInsertMultiVectorBatchInPlace(Relation index,
 												IndexInfo *indexInfo,
 												ItemPointer heap_tid,
@@ -1354,10 +1755,11 @@ PgturbohybridGraphInsertMultiVectorBatchInPlace(Relation index,
 	if (documentNodes)
 	{
 		vector = PgturbohybridGraphMultiVectorInsertRepresentative(mv);
-		firstNodeId = PgturbohybridGraphInsertValueInPlace(index, indexInfo,
-														   heap_tid,
-														   PointerGetDatum(vector),
-														   values, isnull);
+		firstNodeId = PgturbohybridGraphInsertValueInPlaceInternal(index, indexInfo,
+																   heap_tid,
+																   PointerGetDatum(vector),
+																   values, isnull,
+																   mv);
 		count = 1;
 	}
 	else

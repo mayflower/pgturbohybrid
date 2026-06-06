@@ -427,6 +427,10 @@ def set_colbert_gucs(conn: psycopg.Connection[Any], args: argparse.Namespace) ->
         "turbohybrid.multivector_adaptive_widening": args.multivector_adaptive_widening,
         "turbohybrid.multivector_doc_candidate_k": str(args.multivector_doc_candidate_k),
         "turbohybrid.multivector_exact_rerank_k": str(args.multivector_exact_rerank_k),
+        "turbohybrid.multivector_doc_graph_search_ef": str(args.multivector_doc_graph_search_ef),
+        "turbohybrid.multivector_doc_graph_oversampling": str(args.multivector_doc_graph_oversampling),
+        "turbohybrid.multivector_doc_graph_rescore_k": str(args.multivector_doc_graph_rescore_k),
+        "turbohybrid.multivector_doc_storage": args.multivector_doc_storage,
         "turbohybrid.multivector_candidate_source": args.multivector_candidate_source,
         "turbohybrid.multivector_plain_fallback": args.multivector_plain_fallback,
         "turbohybrid.multivector_plain_fallback_max_docs": str(args.multivector_plain_fallback_max_docs),
@@ -458,6 +462,10 @@ def set_retrieval_gucs(conn: psycopg.Connection[Any], args: argparse.Namespace, 
         "turbohybrid.multivector_adaptive_widening": args.multivector_adaptive_widening,
         "turbohybrid.multivector_doc_candidate_k": str(args.multivector_doc_candidate_k),
         "turbohybrid.multivector_exact_rerank_k": str(args.multivector_exact_rerank_k),
+        "turbohybrid.multivector_doc_graph_search_ef": str(args.multivector_doc_graph_search_ef),
+        "turbohybrid.multivector_doc_graph_oversampling": str(args.multivector_doc_graph_oversampling),
+        "turbohybrid.multivector_doc_graph_rescore_k": str(args.multivector_doc_graph_rescore_k),
+        "turbohybrid.multivector_doc_storage": args.multivector_doc_storage,
         "turbohybrid.multivector_candidate_source": args.multivector_candidate_source,
         "turbohybrid.multivector_plain_fallback": args.multivector_plain_fallback,
         "turbohybrid.multivector_plain_fallback_max_docs": str(args.multivector_plain_fallback_max_docs),
@@ -1049,13 +1057,15 @@ def build_index(conn: psycopg.Connection[Any], args: argparse.Namespace) -> dict
     started = time.perf_counter()
     exec_sql(
         conn,
-        """
+        f"""
         CREATE INDEX dbpedia_colbert_docs_colbert_idx
         ON dbpedia_colbert_docs USING turbohybrid (
           colbert multivector_maxsim_ip_turbohybrid_ops,
           body_tsv bm25_tsvector_turbohybrid_ops
         )
-        WITH (quantization_bits = 4, exact_storage = off)
+        WITH (quantization_bits = 4,
+              exact_storage = off,
+              multivector_graph = {args.multivector_graph})
         """,
     )
     elapsed_ms = (time.perf_counter() - started) * 1000.0
@@ -1226,8 +1236,33 @@ def scan_stat_bool(stats: dict[str, Any], key: str) -> bool:
     return stats.get(key) is True or stats.get(key) == "true"
 
 
+def scan_stat_str(stats: dict[str, Any], key: str) -> str | None:
+    value = stats.get(key)
+    return value if isinstance(value, str) else None
+
+
 def memory_estimate_from_stats(stats: dict[str, Any]) -> int:
     return scan_stat_int(stats, "multivector_memory_bytes_estimate")
+
+
+def scan_docs_scored(stats: dict[str, Any]) -> int:
+    return max(
+        scan_stat_int(stats, "multivector_doc_graph_docs_scored"),
+        scan_stat_int(stats, "multivector_plain_fallback_docs_scored"),
+        scan_stat_int(stats, "multivector_doc_candidates"),
+        scan_stat_int(stats, "multivector_unique_docs"),
+    )
+
+
+def scan_graph_edges_visited(stats: dict[str, Any]) -> int:
+    return scan_stat_int(stats, "multivector_doc_graph_edges_visited")
+
+
+def scan_exact_rerank_docs(stats: dict[str, Any]) -> int:
+    return max(
+        scan_stat_int(stats, "multivector_exact_rerank_docs"),
+        scan_stat_int(stats, "multivector_doc_graph_exact_rerank_docs"),
+    )
 
 
 def run_admission_budget(
@@ -1266,7 +1301,13 @@ def run_admission_budget(
     infer_admission_from_results = (
         not trace_by_heap
         and fallback_used
-        and candidate_source in {"exact_doc_scan", "doc_graph_prototype", "plain_fallback"}
+        and candidate_source in {
+            "exact_doc_scan",
+            "doc_graph_prototype",
+            "plain_fallback",
+            "document_nodes",
+            "proxy_vector",
+        }
     )
 
     admitted_ranks: list[int] = []
@@ -1309,6 +1350,11 @@ def run_admission_budget(
 
     top10 = exact_top[: min(10, len(exact_top))]
     top10_admitted = sum(1 for item in exact_top_with_admission[: len(top10)] if item["admitted_before_rerank"])
+    top1_admission = bool(exact_top_with_admission and exact_top_with_admission[0]["admitted_before_rerank"])
+    latency_ms_rounded = round(latency_ms, 3)
+    docs_scored = scan_docs_scored(stats)
+    graph_edges_visited = scan_graph_edges_visited(stats)
+    exact_rerank_docs = scan_exact_rerank_docs(stats)
     return {
         "budget": budget,
         "candidate_source": candidate_source,
@@ -1335,9 +1381,11 @@ def run_admission_budget(
         "bm25_injection_candidates": scan_stat_int(stats, "multivector_bm25_injection_candidates"),
         "bm25_injection_retained": scan_stat_int(stats, "multivector_bm25_injection_retained"),
         "bm25_injection_exact_reranked": scan_stat_int(stats, "multivector_bm25_injection_exact_reranked"),
-        "latency_ms": round(latency_ms, 3),
+        "latency_ms": latency_ms_rounded,
+        "latency": {"ms": latency_ms_rounded},
         "result_doc_ids": docs,
-        "exact_top1_admitted_before_rerank": bool(exact_top_with_admission and exact_top_with_admission[0]["admitted_before_rerank"]),
+        "exact_top1_admission": top1_admission,
+        "exact_top1_admitted_before_rerank": top1_admission,
         "exact_top10_admission_recall": round(top10_admitted / len(top10), 6) if top10 else 0.0,
         "exact_top1_candidate_rank_before_rerank": (
             exact_top_with_admission[0]["candidate_rank_before_rerank"] if exact_top_with_admission else None
@@ -1349,7 +1397,14 @@ def run_admission_budget(
         "unique_docs": scan_stat_int(stats, "multivector_unique_docs"),
         "maxsim_updates": scan_stat_int(stats, "multivector_maxsim_updates"),
         "doc_candidates": scan_stat_int(stats, "multivector_doc_candidates"),
-        "exact_rerank_docs": scan_stat_int(stats, "multivector_exact_rerank_docs"),
+        "docs_scored": docs_scored,
+        "graph_edges_visited": graph_edges_visited,
+        "exact_rerank_docs": exact_rerank_docs,
+        "doc_graph_search_ef": scan_stat_int(stats, "multivector_doc_graph_search_ef"),
+        "doc_graph_oversampling": scan_stat_int(stats, "multivector_doc_graph_oversampling"),
+        "doc_graph_rescore_k": scan_stat_int(stats, "multivector_doc_graph_rescore_k"),
+        "doc_graph_storage_kind": scan_stat_str(stats, "multivector_doc_graph_storage_kind"),
+        "doc_graph_rescore_source": scan_stat_str(stats, "multivector_doc_graph_rescore_source"),
         "memory_bytes_estimate": memory_estimate_from_stats(stats),
         "trace_available": scan_stat_bool(stats, "multivector_admission_trace_available"),
         "trace_entries": len(trace_entries),
@@ -1381,6 +1436,11 @@ def run_admission_debug(
 
     per_query: list[dict[str, Any]] = []
     latency_by_budget: dict[int, list[float]] = {budget: [] for budget in budgets}
+    top1_by_budget: dict[int, list[bool]] = {budget: [] for budget in budgets}
+    top10_recall_by_budget: dict[int, list[float]] = {budget: [] for budget in budgets}
+    docs_scored_by_budget: dict[int, list[int]] = {budget: [] for budget in budgets}
+    graph_edges_by_budget: dict[int, list[int]] = {budget: [] for budget in budgets}
+    exact_rerank_docs_by_budget: dict[int, list[int]] = {budget: [] for budget in budgets}
     top1_first_budget_values: list[int] = []
     top1_admitted_queries = 0
     top10_recall_values: list[float] = []
@@ -1395,6 +1455,11 @@ def run_admission_debug(
             result = run_admission_budget(conn, query, args, budget, exact_top)
             budget_results.append(result)
             latency_by_budget[budget].append(float(result["latency_ms"]))
+            top1_by_budget[budget].append(bool(result["exact_top1_admission"]))
+            top10_recall_by_budget[budget].append(float(result["exact_top10_admission_recall"]))
+            docs_scored_by_budget[budget].append(int(result["docs_scored"]))
+            graph_edges_by_budget[budget].append(int(result["graph_edges_visited"]))
+            exact_rerank_docs_by_budget[budget].append(int(result["exact_rerank_docs"]))
             if result["exact_top1_admitted_before_rerank"] and first_budget is None:
                 first_budget = budget
                 top1_candidate_rank = result["exact_top1_candidate_rank_before_rerank"]
@@ -1421,9 +1486,27 @@ def run_admission_debug(
         "queries": len(per_query),
         "admission_k": args.admission_k,
         "budget_sweep": budgets,
+        "exact_top1_admission": round(top1_admitted_queries / len(per_query), 6) if per_query else 0.0,
         "exact_top1_admission_rate": round(top1_admitted_queries / len(per_query), 6) if per_query else 0.0,
         "exact_top10_admission_recall": round(statistics.mean(top10_recall_values), 6) if top10_recall_values else 0.0,
         "exact_top1_first_budget_admitted": summarize_ints(top1_first_budget_values),
+        "admission_by_budget": {
+            str(budget): {
+                "exact_top1_admission": round(
+                    sum(1 for value in top1_by_budget[budget] if value) / len(top1_by_budget[budget]),
+                    6,
+                ) if top1_by_budget[budget] else 0.0,
+                "exact_top10_admission_recall": round(
+                    statistics.mean(top10_recall_by_budget[budget]),
+                    6,
+                ) if top10_recall_by_budget[budget] else 0.0,
+                "latency": summarize_ms(latency_by_budget[budget]),
+                "docs_scored": summarize_ints(docs_scored_by_budget[budget]),
+                "graph_edges_visited": summarize_ints(graph_edges_by_budget[budget]),
+                "exact_rerank_docs": summarize_ints(exact_rerank_docs_by_budget[budget]),
+            }
+            for budget in budgets
+        },
         "latency_by_budget": {
             str(budget): summarize_ms(values)
             for budget, values in latency_by_budget.items()
@@ -1821,7 +1904,7 @@ def run_synthetic_gate_mode(
         if isinstance(entry, dict) and (key := trace_key(entry)) is not None
     }
     inferred_exact_doc_admission = (
-        mode["candidate_source"] in {"exact_doc_scan", "doc_graph_prototype"}
+        mode["candidate_source"] in {"exact_doc_scan", "doc_graph_prototype", "document_nodes", "proxy_vector"}
         or mode["plain_fallback"] == "force"
         or mode.get("graph_mode") == "document_nodes"
     )
@@ -1910,8 +1993,8 @@ def markdown_recall_gate_summary(report: dict[str, Any]) -> str:
     lines.extend([
         "",
         "Gate condition: `exact_scan`, `plain_fallback`, `exact_doc_scan`, "
-        "`doc_graph_prototype`, and `document_nodes` must return and admit the "
-        "synthetic exact top-1 document at the configured small candidate "
+        "`doc_graph_prototype`, `document_nodes`, and `proxy_vector` must return "
+        "and admit the synthetic exact top-1 document at the configured small candidate "
         "budget. DBpedia admission reporting remains optional and is run with "
         "`--admission-debug` when local data is available.",
         "",
@@ -1930,7 +2013,11 @@ def markdown_benchmark_summary(report: dict[str, Any]) -> str:
         f"- Qrels: `{dataset.get('qrels', 0)}`",
         f"- Final K: `{settings.get('final_k', 0)}`",
         f"- Clients: `{settings.get('clients', 0)}`",
+        f"- Multivector graph: `{settings.get('multivector_graph', '')}`",
         f"- Candidate source: `{settings.get('multivector_candidate_source', '')}`",
+        f"- Doc graph search EF: `{settings.get('multivector_doc_graph_search_ef', 0)}`",
+        f"- Doc graph oversampling: `{settings.get('multivector_doc_graph_oversampling', 1)}`",
+        f"- Doc graph rescore K: `{settings.get('multivector_doc_graph_rescore_k', 0)}`",
         f"- Plain fallback: `{settings.get('multivector_plain_fallback', '')}`",
         f"- Reservoirs: `{settings.get('multivector_candidate_reservoirs', '')}`",
         "",
@@ -1968,19 +2055,36 @@ def markdown_benchmark_summary(report: dict[str, Any]) -> str:
             f"- Exact top-10 admission recall: `{float(aggregate.get('exact_top10_admission_recall', 0.0)):.6f}`",
             f"- First admitted budget p50: `{first_budget.get('p50', 0)}`",
             "",
-            "| budget | latency p50 ms | latency p95 ms | runs |",
-            "|---:|---:|---:|---:|",
+            "| budget | top1 admission | top10 admission recall | latency p50 ms | latency p95 ms | docs scored p50 | graph edges p50 | exact rerank docs p50 | runs |",
+            "|---:|---:|---:|---:|---:|---:|---:|---:|---:|",
         ])
-        latency_by_budget = aggregate.get("latency_by_budget", {})
-        if isinstance(latency_by_budget, dict):
-            for budget, latency in sorted(latency_by_budget.items(), key=lambda item: int(item[0])):
-                if not isinstance(latency, dict):
+        admission_by_budget = aggregate.get("admission_by_budget", {})
+        if isinstance(admission_by_budget, dict):
+            for budget, budget_stats in sorted(admission_by_budget.items(), key=lambda item: int(item[0])):
+                if not isinstance(budget_stats, dict):
                     continue
+                latency = budget_stats.get("latency", {})
+                docs_scored = budget_stats.get("docs_scored", {})
+                graph_edges = budget_stats.get("graph_edges_visited", {})
+                exact_rerank_docs = budget_stats.get("exact_rerank_docs", {})
+                if not isinstance(latency, dict):
+                    latency = {}
+                if not isinstance(docs_scored, dict):
+                    docs_scored = {}
+                if not isinstance(graph_edges, dict):
+                    graph_edges = {}
+                if not isinstance(exact_rerank_docs, dict):
+                    exact_rerank_docs = {}
                 lines.append(
-                    "| {budget} | {p50:.3f} | {p95:.3f} | {runs} |".format(
+                    "| {budget} | {top1:.6f} | {top10:.6f} | {p50:.3f} | {p95:.3f} | {docs_p50:.3f} | {edges_p50:.3f} | {rerank_p50:.3f} | {runs} |".format(
                         budget=budget,
+                        top1=float(budget_stats.get("exact_top1_admission", 0.0)),
+                        top10=float(budget_stats.get("exact_top10_admission_recall", 0.0)),
                         p50=float(latency.get("p50_ms", 0.0)),
                         p95=float(latency.get("p95_ms", 0.0)),
+                        docs_p50=float(docs_scored.get("p50", 0.0)),
+                        edges_p50=float(graph_edges.get("p50", 0.0)),
+                        rerank_p50=float(exact_rerank_docs.get("p50", 0.0)),
                         runs=int(latency.get("runs", 0)),
                     )
                 )
@@ -2009,13 +2113,14 @@ def run_multivector_recall_gate(conn: psycopg.Connection[Any], args: argparse.Na
         {"name": "plain_fallback", "graph_mode": "token_nodes", "candidate_source": "graph", "plain_fallback": "force", "reservoirs": "off"},
         {"name": "exact_doc_scan", "graph_mode": "token_nodes", "candidate_source": "exact_doc_scan", "plain_fallback": "off", "reservoirs": "off"},
         {"name": "doc_graph_prototype", "graph_mode": "token_nodes", "candidate_source": "doc_graph_prototype", "plain_fallback": "off", "reservoirs": "off"},
-        {"name": "document_nodes", "graph_mode": "document_nodes", "candidate_source": "graph", "plain_fallback": "off", "reservoirs": "off"},
+        {"name": "document_nodes", "graph_mode": "document_nodes", "candidate_source": "document_nodes", "plain_fallback": "off", "reservoirs": "off"},
+        {"name": "proxy_vector", "graph_mode": "document_nodes", "candidate_source": "proxy_vector", "plain_fallback": "off", "reservoirs": "off"},
     ]
     results = [run_synthetic_exact_scan(conn, args.final_k)]
     for mode in modes:
         results.append(run_synthetic_gate_mode(conn, mode, exact_top, args.recall_gate_budget, args.final_k))
 
-    required_modes = {"exact_scan", "plain_fallback", "exact_doc_scan", "doc_graph_prototype", "document_nodes"}
+    required_modes = {"exact_scan", "plain_fallback", "exact_doc_scan", "doc_graph_prototype", "document_nodes", "proxy_vector"}
     passed = all(
         item["mode"] not in required_modes
         or (item.get("top1") == "good" and item.get("exact_top1_admitted_before_rerank") is True)
@@ -2121,6 +2226,12 @@ def validate_args(args: argparse.Namespace) -> argparse.Namespace:
         raise SystemExit("--multivector-plain-fallback-max-docs must be non-negative")
     if not 0.0 <= args.multivector_plain_fallback_candidate_fraction <= 1.0:
         raise SystemExit("--multivector-plain-fallback-candidate-fraction must be between 0 and 1")
+    if args.multivector_doc_graph_search_ef < 0:
+        raise SystemExit("--multivector-doc-graph-search-ef must be non-negative")
+    if args.multivector_doc_graph_oversampling < 1:
+        raise SystemExit("--multivector-doc-graph-oversampling must be at least 1")
+    if args.multivector_doc_graph_rescore_k < 0:
+        raise SystemExit("--multivector-doc-graph-rescore-k must be non-negative")
     if args.multivector_per_token_doc_reservoir_k < 0:
         raise SystemExit("--multivector-per-token-doc-reservoir-k must be non-negative")
     if args.multivector_coverage_reservoir_k < 0:
@@ -2221,10 +2332,40 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--multivector-doc-candidate-k", type=int, default=100)
     parser.add_argument("--multivector-exact-rerank-k", type=int, default=100)
     parser.add_argument(
+        "--multivector-graph",
+        choices=("token_nodes", "document_nodes"),
+        default="token_nodes",
+        help="turbohybrid multivector graph layout used for the DBpedia ColBERT index",
+    )
+    parser.add_argument(
+        "--multivector-doc-graph-search-ef",
+        type=int,
+        default=0,
+        help="document-node graph traversal search_ef override; 0 uses the index graph_ef_search",
+    )
+    parser.add_argument(
+        "--multivector-doc-graph-oversampling",
+        type=int,
+        default=1,
+        help="candidate oversampling multiplier for document-node graph traversal",
+    )
+    parser.add_argument(
+        "--multivector-doc-graph-rescore-k",
+        type=int,
+        default=0,
+        help="document-node candidate rescore budget; 0 follows multivector_doc_candidate_k",
+    )
+    parser.add_argument(
+        "--multivector-doc-storage",
+        choices=("f32", "f16", "sq8"),
+        default="f32",
+        help="document-node MaxSim sidecar scoring storage for graph traversal",
+    )
+    parser.add_argument(
         "--multivector-candidate-source",
-        choices=("graph", "exact_token_scan", "exact_doc_scan", "doc_graph_prototype"),
+        choices=("graph", "document_nodes", "exact_token_scan", "exact_doc_scan", "doc_graph_prototype", "proxy_vector"),
         default="graph",
-        help="multivector candidate source for query-only/RRF retrieval; exact_* and doc_graph_prototype are debug validation modes",
+        help="multivector candidate source for query-only/RRF retrieval; document_nodes/proxy_vector require multivector_graph=document_nodes",
     )
     parser.add_argument(
         "--multivector-plain-fallback",
@@ -2476,6 +2617,11 @@ def main() -> None:
                 "multivector_adaptive_widening": args.multivector_adaptive_widening,
                 "multivector_doc_candidate_k": args.multivector_doc_candidate_k,
                 "multivector_exact_rerank_k": args.multivector_exact_rerank_k,
+                "multivector_graph": args.multivector_graph,
+                "multivector_doc_graph_search_ef": args.multivector_doc_graph_search_ef,
+                "multivector_doc_graph_oversampling": args.multivector_doc_graph_oversampling,
+                "multivector_doc_graph_rescore_k": args.multivector_doc_graph_rescore_k,
+                "multivector_doc_storage": args.multivector_doc_storage,
                 "multivector_candidate_source": args.multivector_candidate_source,
                 "multivector_plain_fallback": args.multivector_plain_fallback,
                 "multivector_plain_fallback_max_docs": args.multivector_plain_fallback_max_docs,

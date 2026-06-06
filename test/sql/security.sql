@@ -82,6 +82,24 @@ BEGIN
 	END;
 
 	BEGIN
+		EXECUTE 'SET turbohybrid.multivector_doc_graph_search_ef = 2147483647';
+		RAISE EXCEPTION 'expected multivector_doc_graph_search_ef cap error';
+	EXCEPTION WHEN invalid_parameter_value THEN
+	END;
+
+	BEGIN
+		EXECUTE 'SET turbohybrid.multivector_doc_graph_oversampling = 2147483647';
+		RAISE EXCEPTION 'expected multivector_doc_graph_oversampling cap error';
+	EXCEPTION WHEN invalid_parameter_value THEN
+	END;
+
+	BEGIN
+		EXECUTE 'SET turbohybrid.multivector_doc_graph_rescore_k = 2147483647';
+		RAISE EXCEPTION 'expected multivector_doc_graph_rescore_k cap error';
+	EXCEPTION WHEN invalid_parameter_value THEN
+	END;
+
+	BEGIN
 		EXECUTE 'SET turbohybrid.multivector_exact_rerank_k = 2147483647';
 		RAISE EXCEPTION 'expected multivector_exact_rerank_k cap error';
 	EXCEPTION WHEN invalid_parameter_value THEN

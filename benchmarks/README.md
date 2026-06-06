@@ -74,7 +74,10 @@ normal retrieval methods. The report exact-scans each encoded query for
 `admission_debug` JSON section with per-query and aggregate fields for exact
 top-1 admission, exact top-10 admission recall, raw subvector hits, unique docs,
 MaxSim updates, retained candidates, exact rerank docs, memory estimate, and
-latency. Normal runs without `--admission-debug` keep the existing JSON shape.
+latency. The aggregate `admission_by_budget` records use the DBpedia gate field
+names `exact_top1_admission`, `exact_top10_admission_recall`, `latency`,
+`docs_scored`, `graph_edges_visited`, and `exact_rerank_docs`. Normal runs
+without `--admission-debug` keep the existing JSON shape.
 
 Use `--multivector-candidate-source graph` for the normal token-node ANN path
 and `--multivector-candidate-source exact_token_scan` for the developer oracle
@@ -105,12 +108,44 @@ index option `multivector_graph = token_nodes | document_nodes` and the
 `document_nodes` indexes store one graph node per heap document plus a versioned
 index-resident float32 multivector sidecar. Build-time edge selection uses
 symmetrized document MaxSim. Non-exhaustive scans traverse document graph
-adjacency and score visited candidates with exact float32 sidecar MaxSim before
-heap rerank; near-exhaustive scans use the exact sidecar scan. The warning is
-`document_node_f32_sidecar_graph_traversal` or
-`document_node_f32_sidecar_exact_scan`; compact quantized document scoring is
-still future work. Keep `doc_graph_prototype` in benchmark grids when you need
-the heap-backed validation mode for comparison.
+adjacency and score visited candidates with the selected document sidecar scoring
+storage before heap rerank; near-exhaustive scans use the exact float32 sidecar
+scan as the correctness reference. Set
+`turbohybrid.multivector_doc_storage = f32 | f16 | sq8` or pass
+`--multivector-doc-storage f32|f16|sq8` in the DBpedia benchmark. The warning is
+`document_node_f32_sidecar_graph_traversal`,
+`document_node_f16_sidecar_graph_traversal`,
+`document_node_sq8_sidecar_graph_traversal`, or
+`document_node_f32_sidecar_exact_scan`. Scan stats report
+`multivector_doc_graph_storage_kind`,
+`multivector_doc_graph_quantized_scores`, and
+`multivector_doc_graph_rescore_source`; exact rerank currently uses heap values.
+Keep `doc_graph_prototype` in benchmark grids when you need the heap-backed
+validation mode for comparison.
+
+`--multivector-candidate-source document_nodes` is an explicit alias for the
+normal document-node graph path and requires `--multivector-graph document_nodes`.
+
+`--multivector-candidate-source proxy_vector` is a document-node prototype that
+uses the existing single-vector TurboQuant graph over document representative
+vectors for admission, then exact-reranks admitted documents with full MaxSim.
+Use it with `--multivector-graph document_nodes`.
+
+For DBpedia document-node admission checks, build the benchmark index with
+`--multivector-graph document_nodes` and sweep document-level budgets with
+`--admission-debug`. The benchmark exposes the document-node knobs as
+`--multivector-doc-graph-search-ef`, `--multivector-doc-graph-oversampling`,
+`--multivector-doc-graph-rescore-k`, and `--multivector-doc-storage`; leaving
+`rescore-k` at `0` makes each admission budget drive the rescore budget through
+`turbohybrid.multivector_doc_candidate_k`.
+Multivector hybrid scans support RRF and normalized score fusion through
+`weighted`, `fast_weighted`, and `calibrated`; raw BM25 plus raw MaxSim alpha
+fusion is intentionally not exposed. With
+`turbohybrid.hybrid_budget_policy = adaptive`, document-level multivector dense
+branches use their admission stats before BM25 collection to shrink only
+defaulted BM25 budgets when dense admission is not truncated. If admission is
+underfilled or truncated by `doc_candidate_k`/accumulator limits, the scheduler
+keeps the BM25 branch wide and reports the reason in `hybrid_budget_reason`.
 
 Use `--multivector-recall-gate` for the deterministic Prompt 12 gate that does
 not require DBpedia, BEIR qrels, or a GGUF model. It builds a tiny synthetic
@@ -118,8 +153,8 @@ many-moderate corpus where exact MaxSim top-1 is `good`, while low-budget
 token-node candidate generation admits only single-token spike documents. The
 gate compares `exact_scan`, token graph, exact token scan, balanced reservoirs,
 forced plain fallback, `exact_doc_scan`, `doc_graph_prototype`, and
-`document_nodes`, then fails unless the document-level exact paths return and
-admit the exact top-1:
+`document_nodes`/`proxy_vector`, then fails unless the document-level exact
+paths return and admit the exact top-1:
 
 ```sh
 nix develop .#bench

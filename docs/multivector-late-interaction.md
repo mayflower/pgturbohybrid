@@ -147,8 +147,21 @@ Fusion is document-level: dense MaxSim candidates are keyed by document/heap
 tuple, BM25 candidates are keyed by heap tuple, and RRF combines document ranks.
 Weighted score-level fusion is also document-keyed and combines normalized
 MaxSim (`maxsim / query_vector_count`) with the existing normalized BM25 score.
-`fast_weighted` and `calibrated` are not supported for multivector hybrid scans
-yet.
+`fast_weighted` and `calibrated` are supported only as normalized score-fusion
+modes: dense MaxSim uses logistic normalization and BM25 uses saturating
+normalization. Raw BM25 plus raw MaxSim alpha fusion is intentionally rejected.
+
+With `turbohybrid.hybrid_budget_policy = 'adaptive'`, multivector hybrid scans
+use dense admission stats after the multivector branch has run to refine the
+defaulted BM25 branch budget before fetching BM25 candidates. Document-level
+sources such as `document_nodes`, `proxy_vector`, `exact_doc_scan`, and
+`doc_graph_prototype` can reduce a defaulted BM25 budget when dense admission is
+not truncated and enough documents were exact-reranked. Token-node admission
+truncation or dense underfill keeps the BM25 branch wide. The decision is
+reported in `hybrid_budget_reason`, for example
+`admission_document_dense_reduce_bm25`,
+`admission_exact_dense_reduce_bm25`, or
+`admission_truncated_keep_bm25`.
 
 ## Tuning Knobs
 
@@ -160,7 +173,7 @@ SET turbohybrid.multivector_unique_docs_per_token = 100;
 SET turbohybrid.multivector_max_raw_hits_per_token = 400;
 SET turbohybrid.multivector_adaptive_widening = 'auto'; -- off | auto | on
 SET turbohybrid.multivector_doc_candidate_k = 100;
-SET turbohybrid.multivector_candidate_source = 'graph'; -- graph | exact_token_scan | exact_doc_scan | doc_graph_prototype
+SET turbohybrid.multivector_candidate_source = 'graph'; -- graph | document_nodes | exact_token_scan | exact_doc_scan | doc_graph_prototype | proxy_vector
 SET turbohybrid.multivector_plain_fallback = 'auto'; -- auto | off | force
 SET turbohybrid.multivector_plain_fallback_max_docs = 1000;
 SET turbohybrid.multivector_plain_fallback_candidate_fraction = 0.5;
@@ -186,11 +199,15 @@ missing or malformed.
 `turbohybrid.multivector_candidate_source` defaults to `graph`. For
 `multivector_graph = token_nodes`, that is the production token-node graph
 path. For `multivector_graph = document_nodes`, it uses the explicit
-document-node index path described below. `exact_token_scan`, `exact_doc_scan`,
-and `doc_graph_prototype` are developer validation modes for separating token
-graph recall, token-top-K admission loss, exact document MaxSim, and
-document-level graph behavior. They are useful for benchmark diagnosis, not
-normal serving defaults.
+document-node index path described below. `document_nodes` is an explicit
+candidate-source alias that requires a document-node index. `proxy_vector` also
+requires `multivector_graph = document_nodes`; it uses the document
+representative single-vector graph for admission and exact-reranks admitted
+documents with full MaxSim. `exact_token_scan`, `exact_doc_scan`, and
+`doc_graph_prototype`
+are developer validation modes for separating token graph recall, token-top-K
+admission loss, exact document MaxSim, and document-level graph behavior. They
+are useful for benchmark diagnosis, not normal serving defaults.
 
 `turbohybrid.multivector_plain_fallback = auto` switches to exact heap MaxSim
 when the estimated corpus is small enough or the requested candidate/rerank

@@ -147,7 +147,12 @@ typedef struct PgturbohybridScanStatsSnapshot
 	uint64		multivectorDocGraphDocsScored;
 	uint64		multivectorDocGraphEdgesVisited;
 	uint32		multivectorDocGraphCandidates;
+	uint32		multivectorDocGraphSearchEf;
+	uint32		multivectorDocGraphOversampling;
+	uint32		multivectorDocGraphRescoreK;
 	uint64		multivectorDocGraphQuantizedScores;
+	char		multivectorDocGraphStorageKind[16];
+	char		multivectorDocGraphRescoreSource[16];
 	uint32		multivectorDocGraphExactRerankDocs;
 	uint64		multivectorDocGraphHeapFetches;
 	char		multivectorDocGraphWarning[96];
@@ -253,6 +258,10 @@ extern int	pgturbohybrid_multivector_max_raw_hits_per_token;
 extern int	pgturbohybrid_multivector_adaptive_widening;
 extern int	pgturbohybrid_multivector_docmap;
 extern int	pgturbohybrid_multivector_doc_candidate_k;
+extern int	pgturbohybrid_multivector_doc_graph_search_ef;
+extern int	pgturbohybrid_multivector_doc_graph_oversampling;
+extern int	pgturbohybrid_multivector_doc_graph_rescore_k;
+extern int	pgturbohybrid_multivector_doc_storage;
 extern int	pgturbohybrid_multivector_exact_rerank;
 extern int	pgturbohybrid_multivector_exact_rerank_k;
 extern int	pgturbohybrid_multivector_max_accumulator_mb;
@@ -288,6 +297,13 @@ typedef enum PgturbohybridMultiVectorDocMapMode
 	PGTURBOHYBRID_MULTIVECTOR_DOCMAP_REQUIRE
 }			PgturbohybridMultiVectorDocMapMode;
 
+typedef enum PgturbohybridMultiVectorDocStorageMode
+{
+	PGTURBOHYBRID_MULTIVECTOR_DOC_STORAGE_F32,
+	PGTURBOHYBRID_MULTIVECTOR_DOC_STORAGE_F16,
+	PGTURBOHYBRID_MULTIVECTOR_DOC_STORAGE_SQ8
+}			PgturbohybridMultiVectorDocStorageMode;
+
 typedef enum PgturbohybridMultiVectorDebugAdmissionMode
 {
 	PGTURBOHYBRID_MULTIVECTOR_DEBUG_ADMISSION_OFF,
@@ -300,7 +316,9 @@ typedef enum PgturbohybridMultiVectorCandidateSource
 	PGTURBOHYBRID_MULTIVECTOR_CANDIDATE_SOURCE_GRAPH,
 	PGTURBOHYBRID_MULTIVECTOR_CANDIDATE_SOURCE_EXACT_TOKEN_SCAN,
 	PGTURBOHYBRID_MULTIVECTOR_CANDIDATE_SOURCE_EXACT_DOC_SCAN,
-	PGTURBOHYBRID_MULTIVECTOR_CANDIDATE_SOURCE_DOC_GRAPH_PROTOTYPE
+	PGTURBOHYBRID_MULTIVECTOR_CANDIDATE_SOURCE_DOC_GRAPH_PROTOTYPE,
+	PGTURBOHYBRID_MULTIVECTOR_CANDIDATE_SOURCE_DOCUMENT_NODES,
+	PGTURBOHYBRID_MULTIVECTOR_CANDIDATE_SOURCE_PROXY_VECTOR
 }			PgturbohybridMultiVectorCandidateSource;
 
 typedef enum PgturbohybridMultiVectorPlainFallbackMode
