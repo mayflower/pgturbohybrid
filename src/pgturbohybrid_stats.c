@@ -306,6 +306,95 @@ PgturbohybridJsonbAddFloat8(PgturbohybridJsonbState *state, const char *key, dou
 	PgturbohybridJsonbPush(state, WJB_VALUE, &value);
 }
 
+static void
+PgturbohybridJsonbAddMultiVectorAdmissionTrace(PgturbohybridJsonbState *state,
+											   const PgturbohybridScanStatsSnapshot *scanStats)
+{
+	uint32		count;
+
+	if (scanStats == NULL || !scanStats->multivectorAdmissionTraceAvailable)
+		return;
+
+	count = Min(scanStats->multivectorAdmissionTraceCount,
+				(uint32) PGTURBOHYBRID_MULTIVECTOR_DEBUG_TRACE_LIMIT_MAX);
+	PgturbohybridJsonbAddKey(state, "multivector_admission_trace");
+	PgturbohybridJsonbPush(state, WJB_BEGIN_ARRAY, NULL);
+	for (uint32 i = 0; i < count; i++)
+	{
+		const PgturbohybridMultiVectorAdmissionTraceEntry *entry =
+			&scanStats->multivectorAdmissionTrace[i];
+		char		tidbuf[64];
+
+		snprintf(tidbuf, sizeof(tidbuf), "(%u,%u)",
+				 entry->block, entry->offset);
+		PgturbohybridJsonbPush(state, WJB_BEGIN_OBJECT, NULL);
+		PgturbohybridJsonbAddInt64(state, "doc_id", entry->docId);
+		PgturbohybridJsonbAddString(state, "heap_tid", tidbuf);
+		PgturbohybridJsonbAddInt64(state, "heap_block", entry->block);
+		PgturbohybridJsonbAddInt64(state, "heap_offset", entry->offset);
+		PgturbohybridJsonbAddInt64(state, "best_node_id", entry->bestNodeId);
+		PgturbohybridJsonbAddFloat8(state, "approximate_score_before_rerank",
+									entry->approximateScoreBeforeRerank);
+		PgturbohybridJsonbAddInt64(state, "query_token_coverage_count",
+								   entry->queryTokenCoverageCount);
+		PgturbohybridJsonbAddInt64(state, "raw_hit_count",
+								   entry->rawHitCount);
+		PgturbohybridJsonbAddInt64(state, "duplicate_hit_count",
+								   entry->duplicateHitCount);
+		PgturbohybridJsonbAddInt64(state, "candidate_rank_before_truncation",
+								   entry->candidateRankBeforeTruncation);
+		PgturbohybridJsonbAddBool(state, "retained_for_exact_rerank",
+								  entry->retainedForExactRerank);
+		if (entry->exactRerankScoreAvailable)
+			PgturbohybridJsonbAddFloat8(state, "exact_rerank_score",
+										entry->exactRerankScore);
+		else
+			PgturbohybridJsonbAddNull(state, "exact_rerank_score");
+		PgturbohybridJsonbCloseObject(state);
+	}
+	PgturbohybridJsonbPush(state, WJB_END_ARRAY, NULL);
+}
+
+static void
+PgturbohybridJsonbAddMultiVectorTokenStats(PgturbohybridJsonbState *state,
+										   const PgturbohybridScanStatsSnapshot *scanStats)
+{
+	uint32		count;
+
+	if (scanStats == NULL || !scanStats->multivectorTokenStatsAvailable)
+		return;
+
+	count = Min(scanStats->multivectorTokenStatsCount,
+				(uint32) PGTURBOHYBRID_MULTIVECTOR_TOKEN_STATS_LIMIT_MAX);
+	PgturbohybridJsonbAddKey(state, "multivector_query_token_stats");
+	PgturbohybridJsonbPush(state, WJB_BEGIN_ARRAY, NULL);
+	for (uint32 i = 0; i < count; i++)
+	{
+		const PgturbohybridMultiVectorTokenStatsEntry *entry =
+			&scanStats->multivectorTokenStats[i];
+
+		PgturbohybridJsonbPush(state, WJB_BEGIN_OBJECT, NULL);
+		PgturbohybridJsonbAddInt64(state, "query_token_ordinal",
+								   entry->queryTokenOrdinal);
+		PgturbohybridJsonbAddInt64(state, "raw_hits", entry->rawHits);
+		PgturbohybridJsonbAddInt64(state, "unique_docs", entry->uniqueDocs);
+		PgturbohybridJsonbAddInt64(state, "duplicate_doc_hits",
+								   entry->duplicateDocHits);
+		if (entry->topHitSimilarityAvailable)
+			PgturbohybridJsonbAddFloat8(state, "top_hit_similarity",
+										entry->topHitSimilarity);
+		else
+			PgturbohybridJsonbAddNull(state, "top_hit_similarity");
+		PgturbohybridJsonbAddFloat8(state, "contribution_to_top_candidates",
+									entry->contributionToTopCandidates);
+		PgturbohybridJsonbAddInt64(state, "candidate_docs_retained_from_token",
+								   entry->candidateDocsRetainedFromToken);
+		PgturbohybridJsonbAddBool(state, "skipped", entry->skipped);
+		PgturbohybridJsonbCloseObject(state);
+	}
+	PgturbohybridJsonbPush(state, WJB_END_ARRAY, NULL);
+}
+
 void
 PgturbohybridGraphRecordNativeBuildStats(const PgturbohybridNativeBuildStatsSnapshot *stats)
 {
@@ -2847,6 +2936,81 @@ pgturbohybrid_last_scan_stats(PG_FUNCTION_ARGS)
 							   scanStats.multivectorAdaptiveInitialRawTarget);
 	PgturbohybridJsonbAddInt64(&state, "multivector_adaptive_final_raw_target",
 							   scanStats.multivectorAdaptiveFinalRawTarget);
+	if (scanStats.multivectorCandidateSource[0] != '\0')
+		PgturbohybridJsonbAddString(&state, "multivector_candidate_source",
+									scanStats.multivectorCandidateSource);
+	else
+		PgturbohybridJsonbAddString(&state, "multivector_candidate_source",
+									"graph");
+	if (scanStats.multivectorGraphMode[0] != '\0')
+		PgturbohybridJsonbAddString(&state, "multivector_graph_mode",
+									scanStats.multivectorGraphMode);
+	else
+		PgturbohybridJsonbAddString(&state, "multivector_graph_mode",
+									PgturbohybridMultiVectorGraphModeName(
+										PGTURBOHYBRID_DEFAULT_MULTIVECTOR_GRAPH_MODE));
+	PgturbohybridJsonbAddBool(&state, "multivector_exact_token_scan_enabled",
+							  scanStats.multivectorExactTokenScanEnabled);
+	PgturbohybridJsonbAddUint64(&state, "multivector_exact_token_scan_nodes_scored",
+								scanStats.multivectorExactTokenScanNodesScored);
+	PgturbohybridJsonbAddBool(&state, "multivector_plain_fallback_used",
+							  scanStats.multivectorPlainFallbackUsed);
+	if (scanStats.multivectorPlainFallbackReason[0] != '\0')
+		PgturbohybridJsonbAddString(&state, "multivector_plain_fallback_reason",
+									scanStats.multivectorPlainFallbackReason);
+	else
+		PgturbohybridJsonbAddString(&state, "multivector_plain_fallback_reason",
+									"not_applicable");
+	PgturbohybridJsonbAddUint64(&state, "multivector_plain_fallback_docs_scored",
+								scanStats.multivectorPlainFallbackDocsScored);
+	PgturbohybridJsonbAddUint64(&state, "multivector_plain_fallback_pairs",
+								scanStats.multivectorPlainFallbackPairs);
+	PgturbohybridJsonbAddBool(&state, "multivector_doc_graph_prototype_enabled",
+							  scanStats.multivectorDocGraphPrototypeEnabled);
+	PgturbohybridJsonbAddUint64(&state, "multivector_doc_graph_nodes",
+								scanStats.multivectorDocGraphNodes);
+	PgturbohybridJsonbAddUint64(&state, "multivector_doc_graph_docs_scored",
+								scanStats.multivectorDocGraphDocsScored);
+	PgturbohybridJsonbAddUint64(&state, "multivector_doc_graph_edges_visited",
+								scanStats.multivectorDocGraphEdgesVisited);
+	PgturbohybridJsonbAddInt64(&state, "multivector_doc_graph_candidates",
+							   scanStats.multivectorDocGraphCandidates);
+	PgturbohybridJsonbAddUint64(&state, "multivector_doc_graph_quantized_scores",
+								scanStats.multivectorDocGraphQuantizedScores);
+	PgturbohybridJsonbAddInt64(&state, "multivector_doc_graph_exact_rerank_docs",
+							   scanStats.multivectorDocGraphExactRerankDocs);
+	PgturbohybridJsonbAddUint64(&state, "multivector_doc_graph_heap_fetches",
+								scanStats.multivectorDocGraphHeapFetches);
+	if (scanStats.multivectorDocGraphWarning[0] != '\0')
+		PgturbohybridJsonbAddString(&state, "multivector_doc_graph_warning",
+									scanStats.multivectorDocGraphWarning);
+	else
+		PgturbohybridJsonbAddString(&state, "multivector_doc_graph_warning",
+									"not_applicable");
+	PgturbohybridJsonbAddBool(&state, "multivector_reservoirs_enabled",
+							  scanStats.multivectorReservoirsEnabled);
+	PgturbohybridJsonbAddInt64(&state, "multivector_reservoir_score_docs",
+							   scanStats.multivectorReservoirScoreDocs);
+	PgturbohybridJsonbAddInt64(&state, "multivector_reservoir_coverage_docs",
+							   scanStats.multivectorReservoirCoverageDocs);
+	PgturbohybridJsonbAddInt64(&state, "multivector_reservoir_mean_docs",
+							   scanStats.multivectorReservoirMeanDocs);
+	PgturbohybridJsonbAddInt64(&state, "multivector_reservoir_per_token_docs",
+							   scanStats.multivectorReservoirPerTokenDocs);
+	PgturbohybridJsonbAddInt64(&state, "multivector_reservoir_bm25_docs",
+							   scanStats.multivectorReservoirBm25Docs);
+	PgturbohybridJsonbAddInt64(&state, "multivector_reservoir_union_docs",
+							   scanStats.multivectorReservoirUnionDocs);
+	PgturbohybridJsonbAddInt64(&state, "multivector_reservoir_duplicates",
+							   scanStats.multivectorReservoirDuplicates);
+	PgturbohybridJsonbAddBool(&state, "multivector_bm25_injection_enabled",
+							  scanStats.multivectorBm25InjectionEnabled);
+	PgturbohybridJsonbAddInt64(&state, "multivector_bm25_injection_candidates",
+							   scanStats.multivectorBm25InjectionCandidates);
+	PgturbohybridJsonbAddInt64(&state, "multivector_bm25_injection_retained",
+							   scanStats.multivectorBm25InjectionRetained);
+	PgturbohybridJsonbAddInt64(&state, "multivector_bm25_injection_exact_reranked",
+							   scanStats.multivectorBm25InjectionExactReranked);
 	if (scanStats.multivectorDocMapSource[0] != '\0')
 		PgturbohybridJsonbAddString(&state, "multivector_docmap_source",
 									scanStats.multivectorDocMapSource);
@@ -2881,6 +3045,24 @@ pgturbohybrid_last_scan_stats(PG_FUNCTION_ARGS)
 		PgturbohybridJsonbAddNull(&state, "multivector_accumulator_kind");
 	PgturbohybridJsonbAddUint64(&state, "multivector_memory_bytes_estimate",
 								scanStats.multivectorMemoryBytesEstimate);
+	PgturbohybridJsonbAddBool(&state, "multivector_admission_debug_enabled",
+							  scanStats.multivectorAdmissionDebugEnabled);
+	PgturbohybridJsonbAddInt64(&state, "multivector_admission_candidates_before_rerank",
+							   scanStats.multivectorAdmissionCandidatesBeforeRerank);
+	PgturbohybridJsonbAddInt64(&state, "multivector_admission_candidates_after_truncation",
+							   scanStats.multivectorAdmissionCandidatesAfterTruncation);
+	PgturbohybridJsonbAddInt64(&state, "multivector_admission_exact_rerank_docs",
+							   scanStats.multivectorAdmissionExactRerankDocs);
+	PgturbohybridJsonbAddBool(&state, "multivector_admission_truncated_by_doc_candidate_k",
+							  scanStats.multivectorAdmissionTruncatedByDocCandidateK);
+	PgturbohybridJsonbAddBool(&state, "multivector_admission_truncated_by_accumulator_memory",
+							  scanStats.multivectorAdmissionTruncatedByAccumulatorMemory);
+	PgturbohybridJsonbAddBool(&state, "multivector_admission_trace_available",
+							  scanStats.multivectorAdmissionTraceAvailable);
+	PgturbohybridJsonbAddMultiVectorAdmissionTrace(&state, &scanStats);
+	PgturbohybridJsonbAddBool(&state, "multivector_query_token_stats_available",
+							  scanStats.multivectorTokenStatsAvailable);
+	PgturbohybridJsonbAddMultiVectorTokenStats(&state, &scanStats);
 	PgturbohybridJsonbAddString(&state, "final_diversity_mode",
 								scanStats.finalDiversityMode[0] != '\0' ?
 								scanStats.finalDiversityMode : "off");

@@ -105,6 +105,11 @@ typedef Pointer Item;
 #define PGTURBOHYBRID_GRAPH_STORAGE_QUANT_FLAT	2
 #define PGTURBOHYBRID_GRAPH_STORAGE_QUANT_IVF		3
 #define PGTURBOHYBRID_GRAPH_STORAGE_QUANT_GRAPH_NATIVE	4
+
+#define PGTURBOHYBRID_MULTIVECTOR_GRAPH_TOKEN_NODES		0
+#define PGTURBOHYBRID_MULTIVECTOR_GRAPH_DOCUMENT_NODES	1
+#define PGTURBOHYBRID_DEFAULT_MULTIVECTOR_GRAPH_MODE \
+	PGTURBOHYBRID_MULTIVECTOR_GRAPH_TOKEN_NODES
 #define PGTURBOHYBRID_GRAPH_PAGE_KIND_GRAPH			1
 #define PGTURBOHYBRID_GRAPH_PAGE_KIND_META				2
 #define PGTURBOHYBRID_GRAPH_PAGE_KIND_QUANT_CODE			3
@@ -710,6 +715,7 @@ typedef struct TqOptions
 	bool		graphBackbone;	/* graph_backbone: force adjacent level-0 graph edges at build time. */
 	bool		residualRerank; /* residual_rerank: store tiny per-vector sketches for final-band reranking. */
 	int			residualRerankBytes;
+	int			multivectorGraphMode;	/* multivector_graph: token_nodes or document_nodes */
 }			TqOptions;
 
 typedef struct PgturbohybridGraphGraph
@@ -1012,7 +1018,7 @@ typedef struct PgturbohybridGraphMetaPageData
 	uint16		tqEntrySidecarCount;
 	uint16		tqEntrySidecarBytes;
 	uint16		tqResidualRerankBytes;
-	uint16		tqReserved;
+	uint16		tqMultivectorGraphMode;
 	uint32		tqEntrySidecarNodeIds[PGTURBOHYBRID_GRAPH_MAX_ENTRY_SIDECAR_REPRESENTATIVES];
 	uint16		tqRoutingEntryCount;
 	uint16		tqRoutingEntryBytes;
@@ -1483,6 +1489,7 @@ const char *PgturbohybridGraphScoreKernelBucketName(int bucket);
 const char *PgturbohybridGraphTqSimdForceName(int force);
 const char *PgturbohybridGraphTqExactSimdForceName(int force);
 const char *PgturbohybridGraphStorageKindName(int storageKind);
+const char *PgturbohybridMultiVectorGraphModeName(int mode);
 const char *PgturbohybridGraphDenseResidualRerankModeName(int mode);
 int			PgturbohybridGraphGetTqBits(Relation index);
 bool		PgturbohybridGraphGetTqWeightedOption(Relation index);
@@ -1495,6 +1502,7 @@ int			PgturbohybridGraphGetEntrySidecarStrategy(Relation index);
 bool		PgturbohybridGraphGetBackboneOption(Relation index);
 bool		PgturbohybridGraphGetResidualRerankOption(Relation index);
 int			PgturbohybridGraphGetResidualRerankBytes(Relation index);
+int			PgturbohybridGraphGetMultiVectorGraphModeOption(Relation index);
 void		PgturbohybridGraphPrepareTqQuery(Relation index, PgturbohybridGraphSupport * support, Datum value, PgturbohybridGraphTqQuery * tq);
 void		PgturbohybridGraphPrepareTqQueryWithBits(Relation index, PgturbohybridGraphSupport * support, Datum value, PgturbohybridGraphTqQuery * tq, int tqBits);
 void		PgturbohybridGraphPrepareTqBuildQuery(Relation index, PgturbohybridGraphSupport * support, Datum value, PgturbohybridGraphTqQuery * tq);

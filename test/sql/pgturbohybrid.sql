@@ -1802,11 +1802,11 @@ BEGIN
 			fixed_ids, adaptive_ids;
 	END IF;
 
-	RAISE NOTICE 'adaptive_budget_benchmark shape=% overlap@3=% fixed_dense_k=% adaptive_dense_k=% fixed_bm25_k=% adaptive_bm25_k=% latency_metric_available=% ndcg=%',
+	PERFORM format('adaptive_budget_benchmark shape=%s overlap@3=%s fixed_dense_k=%s adaptive_dense_k=%s fixed_bm25_k=%s adaptive_bm25_k=%s latency_metric_available=%s ndcg=%s',
 		'rare_identifier', overlap, fixed_dense_k, adaptive_dense_k,
 		fixed_bm25_k, (stats->>'hybrid_bm25_k_chosen')::int,
 		fixed_latency_metric_available AND adaptive_latency_metric_available,
-		'not_available';
+		'not_available');
 
 	SELECT array_agg(id) INTO adaptive_ids
 	FROM (
@@ -2123,7 +2123,9 @@ DROP INDEX tqh_default_docs_idx;
 
 -- 8-bit is an opt-in scalar-safe prototype path.  It must build, scan, insert,
 -- and report scalar_8bit without using the packed 4-bit SIMD scorers.
+SET client_min_messages = warning;
 DROP TABLE IF EXISTS tqh_quant8_docs;
+RESET client_min_messages;
 CREATE TABLE tqh_quant8_docs (id int PRIMARY KEY, embedding vector(4));
 INSERT INTO tqh_quant8_docs
 SELECT i,
@@ -3188,8 +3190,10 @@ BEGIN
 		'graph_oversampling',
 		'hybrid',
 		'index_shape',
+		'multivector_graph_mode',
 		'native_segment_bytes',
 		'native_segments',
+		'node_count',
 		'profile',
 		'quantization_bits',
 		'residual_rerank_bytes',
@@ -3497,7 +3501,28 @@ BEGIN
 		'multivector_adaptive_final_raw_target',
 		'multivector_adaptive_initial_raw_target',
 		'multivector_adaptive_widening_triggered',
+		'multivector_admission_candidates_after_truncation',
+		'multivector_admission_candidates_before_rerank',
+		'multivector_admission_debug_enabled',
+		'multivector_admission_exact_rerank_docs',
+			'multivector_admission_trace_available',
+			'multivector_admission_truncated_by_accumulator_memory',
+			'multivector_admission_truncated_by_doc_candidate_k',
+			'multivector_bm25_injection_candidates',
+			'multivector_bm25_injection_enabled',
+			'multivector_bm25_injection_exact_reranked',
+			'multivector_bm25_injection_retained',
+			'multivector_candidate_source',
 		'multivector_doc_candidates',
+		'multivector_doc_graph_candidates',
+		'multivector_doc_graph_docs_scored',
+		'multivector_doc_graph_edges_visited',
+		'multivector_doc_graph_exact_rerank_docs',
+		'multivector_doc_graph_heap_fetches',
+		'multivector_doc_graph_nodes',
+		'multivector_doc_graph_prototype_enabled',
+		'multivector_doc_graph_quantized_scores',
+		'multivector_doc_graph_warning',
 		'multivector_doc_vectors_limit',
 		'multivector_docmap_bytes',
 		'multivector_docmap_source',
@@ -3507,10 +3532,26 @@ BEGIN
 		'multivector_exact_rerank_docs',
 		'multivector_exact_rerank_enabled',
 		'multivector_exact_rerank_pairs',
+		'multivector_exact_token_scan_enabled',
+		'multivector_exact_token_scan_nodes_scored',
+		'multivector_graph_mode',
 		'multivector_maxsim_updates',
 		'multivector_memory_bytes_estimate',
+		'multivector_plain_fallback_docs_scored',
+		'multivector_plain_fallback_pairs',
+		'multivector_plain_fallback_reason',
+		'multivector_plain_fallback_used',
+		'multivector_query_token_stats_available',
 		'multivector_query_vectors',
 		'multivector_raw_subvector_hits',
+		'multivector_reservoir_bm25_docs',
+		'multivector_reservoir_coverage_docs',
+		'multivector_reservoir_duplicates',
+		'multivector_reservoir_mean_docs',
+		'multivector_reservoir_per_token_docs',
+		'multivector_reservoir_score_docs',
+		'multivector_reservoir_union_docs',
+		'multivector_reservoirs_enabled',
 		'multivector_subvector_searches',
 		'multivector_unique_docs',
 		'native_cache_adj_bytes',
@@ -3708,6 +3749,21 @@ BEGIN
 	PERFORM set_config('turbohybrid.multivector_adaptive_widening', 'off', true);
 	IF current_setting('turbohybrid.multivector_adaptive_widening') <> 'off' THEN
 		RAISE EXCEPTION 'multivector_adaptive_widening off GUC did not stick';
+	END IF;
+
+	PERFORM set_config('turbohybrid.multivector_candidate_reservoirs', 'conservative', true);
+	IF current_setting('turbohybrid.multivector_candidate_reservoirs') <> 'conservative' THEN
+		RAISE EXCEPTION 'multivector_candidate_reservoirs conservative GUC did not stick';
+	END IF;
+
+	PERFORM set_config('turbohybrid.multivector_candidate_reservoirs', 'balanced', true);
+	IF current_setting('turbohybrid.multivector_candidate_reservoirs') <> 'balanced' THEN
+		RAISE EXCEPTION 'multivector_candidate_reservoirs balanced GUC did not stick';
+	END IF;
+
+	PERFORM set_config('turbohybrid.multivector_candidate_reservoirs', 'off', true);
+	IF current_setting('turbohybrid.multivector_candidate_reservoirs') <> 'off' THEN
+		RAISE EXCEPTION 'multivector_candidate_reservoirs off GUC did not stick';
 	END IF;
 
 	PERFORM set_config('turbohybrid.multivector_docmap', 'auto', true);

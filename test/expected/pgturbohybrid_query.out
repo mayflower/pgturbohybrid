@@ -71,6 +71,13 @@ BEGIN
 		'turbohybrid.linear_fallback_notice_threshold_ratio',
 		'turbohybrid.max_union_candidates',
 		'turbohybrid.multivector_adaptive_widening',
+			'turbohybrid.multivector_bm25_candidate_injection',
+			'turbohybrid.multivector_candidate_reservoirs',
+			'turbohybrid.multivector_candidate_source',
+		'turbohybrid.multivector_coverage_reservoir_k',
+		'turbohybrid.multivector_debug_admission',
+		'turbohybrid.multivector_debug_skip_query_tokens',
+		'turbohybrid.multivector_debug_trace_limit',
 		'turbohybrid.multivector_doc_candidate_k',
 		'turbohybrid.multivector_docmap',
 		'turbohybrid.multivector_exact_rerank',
@@ -80,6 +87,10 @@ BEGIN
 		'turbohybrid.multivector_max_doc_vectors',
 		'turbohybrid.multivector_max_query_vectors',
 		'turbohybrid.multivector_max_raw_hits_per_token',
+			'turbohybrid.multivector_per_token_doc_reservoir_k',
+			'turbohybrid.multivector_plain_fallback',
+			'turbohybrid.multivector_plain_fallback_candidate_fraction',
+			'turbohybrid.multivector_plain_fallback_max_docs',
 		'turbohybrid.multivector_subvector_k',
 		'turbohybrid.multivector_unique_docs_per_token',
 		'turbohybrid.native_build_workers',
@@ -116,23 +127,45 @@ BEGIN
 		current_setting('turbohybrid.multivector_unique_docs_per_token') != '100' OR
 		current_setting('turbohybrid.multivector_max_raw_hits_per_token') != '400' OR
 		current_setting('turbohybrid.multivector_adaptive_widening') != 'auto' OR
+		current_setting('turbohybrid.multivector_candidate_source') != 'graph' OR
+		current_setting('turbohybrid.multivector_bm25_candidate_injection') != 'off' OR
+		current_setting('turbohybrid.multivector_candidate_reservoirs') != 'conservative' OR
+		current_setting('turbohybrid.multivector_coverage_reservoir_k') != '10' OR
+		current_setting('turbohybrid.multivector_plain_fallback') != 'auto' OR
+		current_setting('turbohybrid.multivector_plain_fallback_candidate_fraction') != '0.5' OR
+		current_setting('turbohybrid.multivector_plain_fallback_max_docs') != '1000' OR
+		current_setting('turbohybrid.multivector_per_token_doc_reservoir_k') != '1' OR
 		current_setting('turbohybrid.multivector_docmap') != 'auto' OR
 		current_setting('turbohybrid.multivector_doc_candidate_k') != '100' OR
 		current_setting('turbohybrid.multivector_exact_rerank') != 'topk' OR
 		current_setting('turbohybrid.multivector_exact_rerank_k') != '100' OR
-		current_setting('turbohybrid.multivector_max_accumulator_mb') != '64' THEN
-		RAISE EXCEPTION 'unexpected multivector defaults: doc %, query %, subvector %, unique %, raw %, adaptive %, docmap %, docs %, rerank %, rerank_k %, accumulator_mb %',
-			current_setting('turbohybrid.multivector_max_doc_vectors'),
+		current_setting('turbohybrid.multivector_max_accumulator_mb') != '64' OR
+		current_setting('turbohybrid.multivector_debug_admission') != 'off' OR
+		current_setting('turbohybrid.multivector_debug_skip_query_tokens') != '' OR
+		current_setting('turbohybrid.multivector_debug_trace_limit') != '1000' THEN
+			RAISE EXCEPTION 'unexpected multivector defaults: doc %, query %, subvector %, unique %, raw %, adaptive %, source %, bm25_injection %, reservoirs %, coverage_reservoir_k %, fallback %, fallback_fraction %, fallback_max_docs %, per_token_reservoir_k %, docmap %, docs %, rerank %, rerank_k %, accumulator_mb %, debug %, skip_tokens %, trace_limit %',
+				current_setting('turbohybrid.multivector_max_doc_vectors'),
 			current_setting('turbohybrid.multivector_max_query_vectors'),
 			current_setting('turbohybrid.multivector_subvector_k'),
 			current_setting('turbohybrid.multivector_unique_docs_per_token'),
 			current_setting('turbohybrid.multivector_max_raw_hits_per_token'),
 			current_setting('turbohybrid.multivector_adaptive_widening'),
+			current_setting('turbohybrid.multivector_candidate_source'),
+			current_setting('turbohybrid.multivector_bm25_candidate_injection'),
+			current_setting('turbohybrid.multivector_candidate_reservoirs'),
+			current_setting('turbohybrid.multivector_coverage_reservoir_k'),
+			current_setting('turbohybrid.multivector_plain_fallback'),
+			current_setting('turbohybrid.multivector_plain_fallback_candidate_fraction'),
+			current_setting('turbohybrid.multivector_plain_fallback_max_docs'),
+			current_setting('turbohybrid.multivector_per_token_doc_reservoir_k'),
 			current_setting('turbohybrid.multivector_docmap'),
 			current_setting('turbohybrid.multivector_doc_candidate_k'),
 			current_setting('turbohybrid.multivector_exact_rerank'),
 			current_setting('turbohybrid.multivector_exact_rerank_k'),
-			current_setting('turbohybrid.multivector_max_accumulator_mb');
+			current_setting('turbohybrid.multivector_max_accumulator_mb'),
+			current_setting('turbohybrid.multivector_debug_admission'),
+			current_setting('turbohybrid.multivector_debug_skip_query_tokens'),
+			current_setting('turbohybrid.multivector_debug_trace_limit');
 	END IF;
 	IF current_setting('turbohybrid.payload_entry_seeding') != 'auto' OR
 		current_setting('turbohybrid.payload_entry_seed_count') != '8' THEN
@@ -338,6 +371,12 @@ BEGIN
 	BEGIN
 		EXECUTE 'SET turbohybrid.multivector_max_accumulator_mb = 2147483647';
 		RAISE EXCEPTION 'expected multivector_max_accumulator_mb cap error';
+	EXCEPTION WHEN invalid_parameter_value THEN
+	END;
+
+	BEGIN
+		EXECUTE 'SET turbohybrid.multivector_debug_trace_limit = 2147483647';
+		RAISE EXCEPTION 'expected multivector_debug_trace_limit cap error';
 	EXCEPTION WHEN invalid_parameter_value THEN
 	END;
 

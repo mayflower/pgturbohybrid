@@ -12,6 +12,8 @@
 #define PGTURBOHYBRID_MULTIVECTOR_MAX_COUNT 4096
 #define PGTURBOHYBRID_MULTIVECTOR_DEFAULT_MAX_DOC_VECTORS 256
 #define PGTURBOHYBRID_MULTIVECTOR_DEFAULT_MAX_QUERY_VECTORS 64
+#define PGTURBOHYBRID_MULTIVECTOR_DEBUG_TRACE_LIMIT_MAX 1000
+#define PGTURBOHYBRID_MULTIVECTOR_TOKEN_STATS_LIMIT_MAX 4096
 #define PGTURBOHYBRID_MULTIVECTOR_SIZE(_count, _dim) \
 	(offsetof(PgturbohybridMultiVector, values) + \
 	 sizeof(float) * (Size) (_count) * (Size) (_dim))
@@ -42,6 +44,35 @@ typedef struct TqMultiVectorDocMapEntry
 	uint32		firstNodeId;
 	uint16		tokenCount;
 } TqMultiVectorDocMapEntry;
+
+typedef struct PgturbohybridMultiVectorAdmissionTraceEntry
+{
+	TqDocId		docId;
+	BlockNumber block;
+	OffsetNumber offset;
+	uint32		bestNodeId;
+	double		approximateScoreBeforeRerank;
+	uint32		queryTokenCoverageCount;
+	uint32		rawHitCount;
+	uint32		duplicateHitCount;
+	uint32		candidateRankBeforeTruncation;
+	bool		retainedForExactRerank;
+	bool		exactRerankScoreAvailable;
+	double		exactRerankScore;
+}			PgturbohybridMultiVectorAdmissionTraceEntry;
+
+typedef struct PgturbohybridMultiVectorTokenStatsEntry
+{
+	uint32		queryTokenOrdinal;
+	uint32		rawHits;
+	uint32		uniqueDocs;
+	uint32		duplicateDocHits;
+	bool		topHitSimilarityAvailable;
+	double		topHitSimilarity;
+	double		contributionToTopCandidates;
+	uint32		candidateDocsRetainedFromToken;
+	bool		skipped;
+}			PgturbohybridMultiVectorTokenStatsEntry;
 
 typedef struct PgturbohybridMultiVector
 {

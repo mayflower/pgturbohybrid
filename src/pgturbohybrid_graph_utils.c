@@ -851,6 +851,32 @@ PgturbohybridGraphGetResidualRerankBytes(Relation index)
 	return opts->residualRerankBytes;
 }
 
+const char *
+PgturbohybridMultiVectorGraphModeName(int mode)
+{
+	switch (mode)
+	{
+		case PGTURBOHYBRID_MULTIVECTOR_GRAPH_DOCUMENT_NODES:
+			return "document_nodes";
+		case PGTURBOHYBRID_MULTIVECTOR_GRAPH_TOKEN_NODES:
+		default:
+			return "token_nodes";
+	}
+}
+
+int
+PgturbohybridGraphGetMultiVectorGraphModeOption(Relation index)
+{
+	TqOptions  *opts;
+
+	if (!PgturbohybridGraphIspgturbohybridIndex(index))
+		return PGTURBOHYBRID_DEFAULT_MULTIVECTOR_GRAPH_MODE;
+
+	opts = (TqOptions *) index->rd_options;
+	return opts != NULL ? opts->multivectorGraphMode :
+		PGTURBOHYBRID_DEFAULT_MULTIVECTOR_GRAPH_MODE;
+}
+
 static bool
 PgturbohybridGraphTqSupportsPackedCodes(Relation index)
 {

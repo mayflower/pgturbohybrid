@@ -2399,6 +2399,33 @@ PgturbohybridGraphBuildDistance(PgturbohybridQuantBuildState *state, uint32 a, u
 	if (a >= state->nodeCount || b >= state->nodeCount)
 		return DBL_MAX;
 
+	if (state->multivectorBuild &&
+		state->multivectorGraphMode ==
+		PGTURBOHYBRID_MULTIVECTOR_GRAPH_DOCUMENT_NODES &&
+		state->multivectorNodeMap != NULL &&
+		state->multivectorDocVectors != NULL)
+	{
+		TqDocId		aDocId = state->multivectorNodeMap[a].docId;
+		TqDocId		bDocId = state->multivectorNodeMap[b].docId;
+		PgturbohybridMultiVector *aDoc;
+		PgturbohybridMultiVector *bDoc;
+		double		ab;
+		double		ba;
+
+		if (aDocId >= state->multivectorDocCount ||
+			bDocId >= state->multivectorDocCount)
+			return DBL_MAX;
+		aDoc = state->multivectorDocVectors[aDocId];
+		bDoc = state->multivectorDocVectors[bDocId];
+		if (aDoc == NULL || bDoc == NULL || aDoc->dim != bDoc->dim ||
+			aDoc->count <= 0 || bDoc->count <= 0)
+			return DBL_MAX;
+
+		ab = TqMultiVectorMaxSim(aDoc, bDoc) / (double) aDoc->count;
+		ba = TqMultiVectorMaxSim(bDoc, aDoc) / (double) bDoc->count;
+		return -(0.5 * (ab + ba));
+	}
+
 	/*
 	 * When requested, short-circuit the quantized fast paths and route every
 	 * build-time pruning call through exact f32 distance.  This locks in a
