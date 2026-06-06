@@ -56,6 +56,12 @@ static relopt_enum_elt_def pgturbohybrid_entry_sidecar_strategy_relopt_options[]
 	{NULL, 0}
 };
 
+static relopt_enum_elt_def pgturbohybrid_multivector_graph_relopt_options[] = {
+	{"token_nodes", PGTURBOHYBRID_MULTIVECTOR_GRAPH_TOKEN_NODES},
+	{"document_nodes", PGTURBOHYBRID_MULTIVECTOR_GRAPH_DOCUMENT_NODES},
+	{NULL, 0}
+};
+
 static void
 PgturbohybridIndexStatsJsonbAddKey(PgturbohybridJsonbState *state, const char *key)
 {
@@ -615,6 +621,12 @@ PgturbohybridGraphInit(void)
 					  PGTURBOHYBRID_DEFAULT_RESIDUAL_RERANK_BYTES, 0,
 					  PGTURBOHYBRID_GRAPH_MAX_RESIDUAL_RERANK_BYTES,
 					  AccessExclusiveLock);
+	add_enum_reloption(pgturbohybrid_relopt_kind, "multivector_graph",
+					   "Multivector graph node storage mode.",
+					   pgturbohybrid_multivector_graph_relopt_options,
+					   PGTURBOHYBRID_DEFAULT_MULTIVECTOR_GRAPH_MODE,
+					   "Valid values are \"token_nodes\" and \"document_nodes\". \"document_nodes\" stores one graph node per heap document with a versioned document multivector sidecar for MaxSim-aligned candidate generation.",
+					   AccessExclusiveLock);
 
 	PgturbohybridGraphControlInit();
 }
@@ -916,9 +928,14 @@ pgturbohybrid_index_stats(PG_FUNCTION_ARGS)
 										  PgturbohybridGraphStorageKindName(storageKind));
 	PgturbohybridIndexStatsJsonbAddString(&jsonState, "index_shape",
 										  hasLexicalKey ? "hybrid" : "dense_only");
+	PgturbohybridIndexStatsJsonbAddString(&jsonState, "multivector_graph_mode",
+										  PgturbohybridMultiVectorGraphModeName(
+											  meta.tqMultivectorGraphMode));
 	PgturbohybridIndexStatsJsonbAddBool(&jsonState, "bm25_branch_available",
 										hasLexicalKey && hasBm25Meta);
 	PgturbohybridIndexStatsJsonbAddUInt32(&jsonState, "blocks", nblocks);
+	PgturbohybridIndexStatsJsonbAddUInt32(&jsonState, "node_count",
+										  meta.tqNodeCount);
 	PgturbohybridIndexStatsJsonbAddUInt32(&jsonState, "graph_m", graphM);
 	PgturbohybridIndexStatsJsonbAddUInt32(&jsonState, "graph_ef_construction",
 										  graphEfConstruction);

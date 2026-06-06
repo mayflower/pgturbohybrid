@@ -66,6 +66,113 @@ Use `--methods pgturbohybrid_colbert_multivector_query_only,pgturbohybrid_colber
 to include BM25 RRF fusion, and use `--max-docs 0 --max-queries 0 --final-k 100
 --quality-k 100` for an opt-in full-scale recall@100 run.
 
+Add `--admission-debug` to run an exact-vs-candidate admission report after the
+normal retrieval methods. The report exact-scans each encoded query for
+`--admission-k` documents, sweeps query-only multivector retrieval across
+`--admission-budget-sweep` document candidate budgets, enables bounded
+`turbohybrid.multivector_debug_admission = trace`, and writes a top-level
+`admission_debug` JSON section with per-query and aggregate fields for exact
+top-1 admission, exact top-10 admission recall, raw subvector hits, unique docs,
+MaxSim updates, retained candidates, exact rerank docs, memory estimate, and
+latency. Normal runs without `--admission-debug` keep the existing JSON shape.
+
+Use `--multivector-candidate-source graph` for the normal token-node ANN path
+and `--multivector-candidate-source exact_token_scan` for the developer oracle
+that scores every stored token node per query token before the same document
+aggregation and exact rerank. Include
+`--methods pgturbohybrid_colbert_multivector_query_only,pgturbohybrid_colbert_multivector_exact_scan`
+to compare token-candidate retrieval against exact document MaxSim scan; rerun
+with `--multivector-candidate-source exact_token_scan --admission-debug` to
+separate graph/token ANN miss from structural token-top-K admission loss. The
+admission budget records include `candidate_source` and
+`exact_token_scan_nodes_scored` when the oracle is active.
+
+Prompt 10 adds two document-level validation modes:
+`--multivector-candidate-source exact_doc_scan` and
+`--multivector-candidate-source doc_graph_prototype`. `exact_doc_scan` is the
+exact document MaxSim oracle. `doc_graph_prototype` is intentionally
+heap-backed until index-resident document graph storage exists; its admission
+records include `doc_graph_prototype_enabled`, `doc_graph_docs_scored`,
+`doc_graph_edges_visited`, `doc_graph_candidates`,
+`doc_graph_heap_fetches`, and `doc_graph_warning`. Because the heap-backed
+fallback does not emit per-document trace entries, admission records can set
+`admission_inferred_from_result_docs` when exact document/prototype scans infer
+admission from the exact-ranked result list.
+
+Prompt 11 has started the production document-node path by adding the persisted
+index option `multivector_graph = token_nodes | document_nodes` and the
+`turbohybrid_index_stats()` field `multivector_graph_mode`. Explicit
+`document_nodes` indexes store one graph node per heap document plus a versioned
+index-resident float32 multivector sidecar. Build-time edge selection uses
+symmetrized document MaxSim. Non-exhaustive scans traverse document graph
+adjacency and score visited candidates with exact float32 sidecar MaxSim before
+heap rerank; near-exhaustive scans use the exact sidecar scan. The warning is
+`document_node_f32_sidecar_graph_traversal` or
+`document_node_f32_sidecar_exact_scan`; compact quantized document scoring is
+still future work. Keep `doc_graph_prototype` in benchmark grids when you need
+the heap-backed validation mode for comparison.
+
+Use `--multivector-recall-gate` for the deterministic Prompt 12 gate that does
+not require DBpedia, BEIR qrels, or a GGUF model. It builds a tiny synthetic
+many-moderate corpus where exact MaxSim top-1 is `good`, while low-budget
+token-node candidate generation admits only single-token spike documents. The
+gate compares `exact_scan`, token graph, exact token scan, balanced reservoirs,
+forced plain fallback, `exact_doc_scan`, `doc_graph_prototype`, and
+`document_nodes`, then fails unless the document-level exact paths return and
+admit the exact top-1:
+
+```sh
+nix develop .#bench
+python benchmarks/dbpedia_colbert_multivector.py \
+  --multivector-recall-gate \
+  --database pgturbohybrid_dev \
+  --output .nix-dev/tmp/multivector-recall-gate.json \
+  --markdown-output .nix-dev/tmp/multivector-recall-gate.md
+```
+
+The JSON includes the same admission-style counters used by DBpedia diagnostics
+plus a `markdown_summary` field. The optional Markdown output is intended for
+local reports or CI artifacts. DBpedia admission and recall quality remain
+separate opt-in checks through the normal benchmark path and `--admission-debug`.
+Pass `--markdown-output <path>` on normal DBpedia benchmark runs to write a
+PR-ready summary with recall, latency, throughput, and admission-debug
+aggregates.
+
+Add `--token-ablation-query-id <qid>` to run one extra query-only retrieval with
+`turbohybrid.multivector_debug_admission = summary` and emit the
+`multivector_query_token_stats` array from `turbohybrid_last_scan_stats()`.
+Pass `--token-ablation-skip-tokens 0,3` to run a second variant with
+`turbohybrid.multivector_debug_skip_query_tokens` set for candidate generation
+only; exact MaxSim rerank still uses the full query multivector. The top-level
+`token_ablation` JSON section records latency, top docs, qrel hits, scan stats,
+and per-token raw hits, unique docs, duplicates, and retained-candidate
+contribution.
+
+Use `--multivector-plain-fallback off|auto|force` to compare the lossy
+token-node path with exact heap MaxSim fallback. `auto` is the PostgreSQL
+default and uses `--multivector-plain-fallback-max-docs` plus
+`--multivector-plain-fallback-candidate-fraction` to switch when the corpus or
+candidate budget is small enough that exact scoring is safer. Admission records
+include `plain_fallback_used`, `plain_fallback_reason`,
+`plain_fallback_docs_scored`, and `plain_fallback_pairs`.
+
+Use `--multivector-candidate-reservoirs off|conservative|balanced` to compare
+score-only document truncation with bounded multi-reservoir retention before
+exact MaxSim rerank. Tune
+`--multivector-per-token-doc-reservoir-k` and
+`--multivector-coverage-reservoir-k` to control the per-query-token, coverage,
+and mean seen-similarity reservoirs. Admission records include reservoir union,
+duplicate, score, coverage, mean, per-token, and BM25 reservoir counts.
+
+Use `--multivector-bm25-candidate-injection off|hybrid_only|dense_with_text`
+to compare the token-node path with BM25-backed candidate admission before exact
+MaxSim rerank. `hybrid_only` injects lexical candidates for hybrid
+multivector/text queries, while `dense_with_text` also permits text-backed
+dense-only MaxSim runs where BM25 is used as an admission safety net rather
+than the final scorer. Admission records include
+`bm25_injection_enabled`, `bm25_injection_candidates`,
+`bm25_injection_retained`, and `bm25_injection_exact_reranked`.
+
 ### Precomputed DBpedia ColBERT multivector dataset
 
 After a DBpedia ColBERT run has generated and persisted document/query

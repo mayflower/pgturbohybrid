@@ -14,9 +14,11 @@
 #define PGTURBOHYBRID_GRAPH_CORRECTION_TUPLE_TYPE	0x54
 #define PGTURBOHYBRID_GRAPH_MULTIVECTOR_DOCMAP_NODE_TUPLE_TYPE 0x55
 #define PGTURBOHYBRID_GRAPH_MULTIVECTOR_DOCMAP_DOC_TUPLE_TYPE 0x56
+#define PGTURBOHYBRID_GRAPH_MULTIVECTOR_DOCMAP_VECTOR_TUPLE_TYPE 0x57
 #define PGTURBOHYBRID_GRAPH_EXACT_SLAB_MAGIC		0x54514553U
 #define PGTURBOHYBRID_GRAPH_MULTIVECTOR_DOCMAP_MAGIC 0x54514d56U
 #define PGTURBOHYBRID_GRAPH_MULTIVECTOR_DOCMAP_VERSION 1
+#define PGTURBOHYBRID_GRAPH_MULTIVECTOR_DOCMAP_FLAG_DOC_VECTORS 0x0001
 #define PGTURBOHYBRID_GRAPH_NODE_DEAD				0x0001
 #define PGTURBOHYBRID_GRAPH_TQ_PLUS				0x0001	/* metapage: ecShift/ecScale correction tuples present */
 #define PGTURBOHYBRID_GRAPH_TQ_WEIGHTED			0x0002	/* metapage: code tuples carry per-vector ec_correction */
@@ -154,6 +156,19 @@ typedef struct PgturbohybridGraphMultiVectorDocMapDocTupleData
 
 typedef PgturbohybridGraphMultiVectorDocMapDocTupleData *PgturbohybridGraphMultiVectorDocMapDocTuple;
 
+typedef struct PgturbohybridGraphMultiVectorDocMapVectorTupleData
+{
+	uint8		type;
+	uint8		version;
+	uint16		count;
+	uint32		magic;
+	uint32		docId;
+	uint32		startFloat;
+	float		values[FLEXIBLE_ARRAY_MEMBER];
+} PgturbohybridGraphMultiVectorDocMapVectorTupleData;
+
+typedef PgturbohybridGraphMultiVectorDocMapVectorTupleData *PgturbohybridGraphMultiVectorDocMapVectorTuple;
+
 typedef struct PgturbohybridGraphBuildNode
 {
 	ItemPointerData heaptid;
@@ -211,8 +226,10 @@ typedef struct PgturbohybridQuantBuildState
 	bool		buildFastEdges; /* use bounded simple edge selection for code-only builds */
 	int			buildNeighborSelectReason; /* why the final build edge selector was chosen */
 	bool		multivectorBuild;	/* heap tuple expands into one graph node per subvector */
+	int			multivectorGraphMode;
 	TqMultiVectorNodeMapEntry *multivectorNodeMap;
 	TqMultiVectorDocMapEntry *multivectorDocMap;
+	PgturbohybridMultiVector **multivectorDocVectors;
 	uint32		multivectorDocCount;
 	uint32		multivectorDocCapacity;
 	int			scoreMode;
@@ -299,6 +316,7 @@ typedef struct PgturbohybridQuantMetaUpdate
 	uint32		tqMultivectorDocMapBytes;
 	uint16		tqMultivectorDocMapVersion;
 	uint16		tqMultivectorDocMapFlags;
+	uint16		tqMultivectorGraphMode;
 	uint32		tqEntrySidecarNodeIds[PGTURBOHYBRID_GRAPH_MAX_ENTRY_SIDECAR_REPRESENTATIVES];
 	uint16		tqRoutingEntryCount;
 	uint16		tqRoutingEntryBytes;
@@ -380,6 +398,35 @@ typedef struct TqDenseCandidateStats
 	uint32		multivectorAdaptiveInitialRawTarget;
 	uint32		multivectorAdaptiveFinalRawTarget;
 	int			multivectorDocMapSource;
+	char		multivectorCandidateSource[24];
+	char		multivectorGraphMode[24];
+	bool		multivectorExactTokenScanEnabled;
+	uint64		multivectorExactTokenScanNodesScored;
+	bool		multivectorPlainFallbackUsed;
+	char		multivectorPlainFallbackReason[48];
+	uint64		multivectorPlainFallbackDocsScored;
+	uint64		multivectorPlainFallbackPairs;
+	bool		multivectorDocGraphPrototypeEnabled;
+	uint64		multivectorDocGraphNodes;
+	uint64		multivectorDocGraphDocsScored;
+	uint64		multivectorDocGraphEdgesVisited;
+	uint32		multivectorDocGraphCandidates;
+	uint64		multivectorDocGraphQuantizedScores;
+	uint32		multivectorDocGraphExactRerankDocs;
+	uint64		multivectorDocGraphHeapFetches;
+	char		multivectorDocGraphWarning[96];
+	bool		multivectorReservoirsEnabled;
+	uint32		multivectorReservoirScoreDocs;
+	uint32		multivectorReservoirCoverageDocs;
+	uint32		multivectorReservoirMeanDocs;
+	uint32		multivectorReservoirPerTokenDocs;
+	uint32		multivectorReservoirBm25Docs;
+	uint32		multivectorReservoirUnionDocs;
+	uint32		multivectorReservoirDuplicates;
+	bool		multivectorBm25InjectionEnabled;
+	uint32		multivectorBm25InjectionCandidates;
+	uint32		multivectorBm25InjectionRetained;
+	uint32		multivectorBm25InjectionExactReranked;
 	uint64		multivectorDocMapBytes;
 	/* Token-local unique document hits summed across query tokens. */
 	uint64		multivectorUniqueDocs;
@@ -393,6 +440,18 @@ typedef struct TqDenseCandidateStats
 	char		multivectorExactKernel[16];
 	char		multivectorAccumulatorKind[16];
 	uint64		multivectorMemoryBytesEstimate;
+	bool		multivectorAdmissionDebugEnabled;
+	uint32		multivectorAdmissionCandidatesBeforeRerank;
+	uint32		multivectorAdmissionCandidatesAfterTruncation;
+	uint32		multivectorAdmissionExactRerankDocs;
+	bool		multivectorAdmissionTruncatedByDocCandidateK;
+	bool		multivectorAdmissionTruncatedByAccumulatorMemory;
+	bool		multivectorAdmissionTraceAvailable;
+	uint32		multivectorAdmissionTraceCount;
+	PgturbohybridMultiVectorAdmissionTraceEntry multivectorAdmissionTrace[PGTURBOHYBRID_MULTIVECTOR_DEBUG_TRACE_LIMIT_MAX];
+	bool		multivectorTokenStatsAvailable;
+	uint32		multivectorTokenStatsCount;
+	PgturbohybridMultiVectorTokenStatsEntry multivectorTokenStats[PGTURBOHYBRID_MULTIVECTOR_TOKEN_STATS_LIMIT_MAX];
 } TqDenseCandidateStats;
 
 typedef struct PgturbohybridGraphRepairDryRunStats
@@ -459,9 +518,11 @@ typedef struct PgturbohybridGraphScanStorage
 	PgturbohybridGraphPayloadRef *payloadRefs;
 	TqMultiVectorNodeMapEntry *multivectorNodeMap;
 	TqMultiVectorDocMapEntry *multivectorDocMap;
+	PgturbohybridMultiVector **multivectorDocVectors;
 	uint32		payloadRefCount;
 	uint32		multivectorDocCount;
 	uint32		multivectorDocMapBytes;
+	bool		multivectorDocVectorsLoaded;
 	bool		multivectorDocMapLoaded;
 	MemoryContext ctx;
 	int			codeTuplesPerPage;
@@ -496,6 +557,7 @@ typedef struct PgturbohybridGraphNativeCache
 	uint32		tqMultivectorDocCount;
 	uint32		tqMultivectorDocMapBytes;
 	uint16		tqMultivectorDocMapVersion;
+	uint16		tqMultivectorGraphMode;
 	PgturbohybridGraphSegmentMetaData tqSegments[PGTURBOHYBRID_GRAPH_MAX_NATIVE_SEGMENTS];
 	PgturbohybridGraphScanStorage storage;
 	MemoryContext ctx;
@@ -790,6 +852,16 @@ PgturbohybridGraphMultiVectorDocMapDocTupleSize(uint16 count)
 												   "pgturbohybrid multivector docmap doc tuple"));
 }
 
+static inline Size
+PgturbohybridGraphMultiVectorDocMapVectorTupleSize(uint16 count)
+{
+	return MAXALIGN(offsetof(PgturbohybridGraphMultiVectorDocMapVectorTupleData,
+							 values) +
+					PgturbohybridCheckedArrayBytes(sizeof(float),
+												   count,
+												   "pgturbohybrid multivector docmap vector tuple"));
+}
+
 static inline int
 PgturbohybridGraphPageCount(uint32 nodeCount, int tuplesPerPage)
 {
@@ -865,7 +937,8 @@ void		PgturbohybridGraphUpdateMultiVectorDocMapMeta(Relation index,
 									 BlockNumber startBlkno,
 									 uint32 pageCount,
 									 uint32 docCount,
-									 uint32 docMapBytes);
+									 uint32 docMapBytes,
+									 uint16 docMapFlags);
 bool		PgturbohybridGraphLoadCodePage(Relation index, PgturbohybridGraphScanOpaque so,
 								PgturbohybridGraphMetaPageData *meta,
 								PgturbohybridGraphScanStorage *storage,

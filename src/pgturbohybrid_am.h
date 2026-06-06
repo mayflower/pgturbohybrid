@@ -9,6 +9,8 @@
 #include "nodes/pathnodes.h"
 #include "utils/rel.h"
 
+#include "pgturbohybrid_multivector.h"
+
 #define PGTURBOHYBRID_DEFAULT_FINAL_K 10
 #define PGTURBOHYBRID_MAX_DEFAULT_DENSE_K 10000
 #define PGTURBOHYBRID_MAX_DEFAULT_BM25_K 10000
@@ -57,6 +59,7 @@ typedef struct PgturbohybridOptions
 	bool		graphBackbone;
 	bool		residualRerank;
 	int			residualRerankBytes;
+	int			multivectorGraphMode;
 	float8		bm25K1;
 	float8		bm25B;
 	bool		bm25BlockMax;
@@ -131,6 +134,35 @@ typedef struct PgturbohybridScanStatsSnapshot
 	uint32		multivectorAdaptiveInitialRawTarget;
 	uint32		multivectorAdaptiveFinalRawTarget;
 	char		multivectorDocMapSource[16];
+	char		multivectorCandidateSource[24];
+	char		multivectorGraphMode[24];
+	bool		multivectorExactTokenScanEnabled;
+	uint64		multivectorExactTokenScanNodesScored;
+	bool		multivectorPlainFallbackUsed;
+	char		multivectorPlainFallbackReason[48];
+	uint64		multivectorPlainFallbackDocsScored;
+	uint64		multivectorPlainFallbackPairs;
+	bool		multivectorDocGraphPrototypeEnabled;
+	uint64		multivectorDocGraphNodes;
+	uint64		multivectorDocGraphDocsScored;
+	uint64		multivectorDocGraphEdgesVisited;
+	uint32		multivectorDocGraphCandidates;
+	uint64		multivectorDocGraphQuantizedScores;
+	uint32		multivectorDocGraphExactRerankDocs;
+	uint64		multivectorDocGraphHeapFetches;
+	char		multivectorDocGraphWarning[96];
+	bool		multivectorReservoirsEnabled;
+	uint32		multivectorReservoirScoreDocs;
+	uint32		multivectorReservoirCoverageDocs;
+	uint32		multivectorReservoirMeanDocs;
+	uint32		multivectorReservoirPerTokenDocs;
+	uint32		multivectorReservoirBm25Docs;
+	uint32		multivectorReservoirUnionDocs;
+	uint32		multivectorReservoirDuplicates;
+	bool		multivectorBm25InjectionEnabled;
+	uint32		multivectorBm25InjectionCandidates;
+	uint32		multivectorBm25InjectionRetained;
+	uint32		multivectorBm25InjectionExactReranked;
 	uint64		multivectorDocMapBytes;
 	/* Token-local unique document hits summed across query tokens. */
 	uint64		multivectorUniqueDocs;
@@ -144,6 +176,18 @@ typedef struct PgturbohybridScanStatsSnapshot
 	char		multivectorExactKernel[16];
 	char		multivectorAccumulatorKind[16];
 	uint64		multivectorMemoryBytesEstimate;
+	bool		multivectorAdmissionDebugEnabled;
+	uint32		multivectorAdmissionCandidatesBeforeRerank;
+	uint32		multivectorAdmissionCandidatesAfterTruncation;
+	uint32		multivectorAdmissionExactRerankDocs;
+	bool		multivectorAdmissionTruncatedByDocCandidateK;
+	bool		multivectorAdmissionTruncatedByAccumulatorMemory;
+	bool		multivectorAdmissionTraceAvailable;
+	uint32		multivectorAdmissionTraceCount;
+	PgturbohybridMultiVectorAdmissionTraceEntry multivectorAdmissionTrace[PGTURBOHYBRID_MULTIVECTOR_DEBUG_TRACE_LIMIT_MAX];
+	bool		multivectorTokenStatsAvailable;
+	uint32		multivectorTokenStatsCount;
+	PgturbohybridMultiVectorTokenStatsEntry multivectorTokenStats[PGTURBOHYBRID_MULTIVECTOR_TOKEN_STATS_LIMIT_MAX];
 	char		finalDiversityMode[24];
 	int32		finalDiversityPayloadSlot;
 	uint32		finalDiversityPoolSize;
@@ -212,6 +256,17 @@ extern int	pgturbohybrid_multivector_doc_candidate_k;
 extern int	pgturbohybrid_multivector_exact_rerank;
 extern int	pgturbohybrid_multivector_exact_rerank_k;
 extern int	pgturbohybrid_multivector_max_accumulator_mb;
+extern int	pgturbohybrid_multivector_debug_admission;
+extern int	pgturbohybrid_multivector_debug_trace_limit;
+extern char *pgturbohybrid_multivector_debug_skip_query_tokens;
+extern int	pgturbohybrid_multivector_candidate_source;
+extern int	pgturbohybrid_multivector_plain_fallback;
+extern int	pgturbohybrid_multivector_plain_fallback_max_docs;
+extern double pgturbohybrid_multivector_plain_fallback_candidate_fraction;
+extern int	pgturbohybrid_multivector_candidate_reservoirs;
+extern int	pgturbohybrid_multivector_per_token_doc_reservoir_k;
+extern int	pgturbohybrid_multivector_coverage_reservoir_k;
+extern int	pgturbohybrid_multivector_bm25_candidate_injection;
 
 typedef enum PgturbohybridMultiVectorExactRerankMode
 {
@@ -232,6 +287,42 @@ typedef enum PgturbohybridMultiVectorDocMapMode
 	PGTURBOHYBRID_MULTIVECTOR_DOCMAP_AUTO,
 	PGTURBOHYBRID_MULTIVECTOR_DOCMAP_REQUIRE
 }			PgturbohybridMultiVectorDocMapMode;
+
+typedef enum PgturbohybridMultiVectorDebugAdmissionMode
+{
+	PGTURBOHYBRID_MULTIVECTOR_DEBUG_ADMISSION_OFF,
+	PGTURBOHYBRID_MULTIVECTOR_DEBUG_ADMISSION_SUMMARY,
+	PGTURBOHYBRID_MULTIVECTOR_DEBUG_ADMISSION_TRACE
+}			PgturbohybridMultiVectorDebugAdmissionMode;
+
+typedef enum PgturbohybridMultiVectorCandidateSource
+{
+	PGTURBOHYBRID_MULTIVECTOR_CANDIDATE_SOURCE_GRAPH,
+	PGTURBOHYBRID_MULTIVECTOR_CANDIDATE_SOURCE_EXACT_TOKEN_SCAN,
+	PGTURBOHYBRID_MULTIVECTOR_CANDIDATE_SOURCE_EXACT_DOC_SCAN,
+	PGTURBOHYBRID_MULTIVECTOR_CANDIDATE_SOURCE_DOC_GRAPH_PROTOTYPE
+}			PgturbohybridMultiVectorCandidateSource;
+
+typedef enum PgturbohybridMultiVectorPlainFallbackMode
+{
+	PGTURBOHYBRID_MULTIVECTOR_PLAIN_FALLBACK_AUTO,
+	PGTURBOHYBRID_MULTIVECTOR_PLAIN_FALLBACK_OFF,
+	PGTURBOHYBRID_MULTIVECTOR_PLAIN_FALLBACK_FORCE
+}			PgturbohybridMultiVectorPlainFallbackMode;
+
+typedef enum PgturbohybridMultiVectorCandidateReservoirMode
+{
+	PGTURBOHYBRID_MULTIVECTOR_CANDIDATE_RESERVOIRS_OFF,
+	PGTURBOHYBRID_MULTIVECTOR_CANDIDATE_RESERVOIRS_CONSERVATIVE,
+	PGTURBOHYBRID_MULTIVECTOR_CANDIDATE_RESERVOIRS_BALANCED
+}			PgturbohybridMultiVectorCandidateReservoirMode;
+
+typedef enum PgturbohybridMultiVectorBm25CandidateInjectionMode
+{
+	PGTURBOHYBRID_MULTIVECTOR_BM25_CANDIDATE_INJECTION_OFF,
+	PGTURBOHYBRID_MULTIVECTOR_BM25_CANDIDATE_INJECTION_HYBRID_ONLY,
+	PGTURBOHYBRID_MULTIVECTOR_BM25_CANDIDATE_INJECTION_DENSE_WITH_TEXT
+}			PgturbohybridMultiVectorBm25CandidateInjectionMode;
 
 typedef enum PgturbohybridProfile
 {

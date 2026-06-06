@@ -699,9 +699,13 @@ PgturbohybridGraphLoadMultiVectorDocMap(Relation index,
 	MemoryContext oldCtx;
 	bool	   *nodeSeen;
 	bool	   *docSeen;
+	uint32	   *vectorFloatCounts = NULL;
 	uint32		nodesSeen = 0;
 	uint32		docsSeen = 0;
 	BlockNumber blkno;
+	bool		documentNodes =
+		meta->tqMultivectorGraphMode ==
+		PGTURBOHYBRID_MULTIVECTOR_GRAPH_DOCUMENT_NODES;
 
 	if (!BlockNumberIsValid(meta->tqMultivectorDocMapStartBlkno))
 	{
@@ -723,7 +727,7 @@ PgturbohybridGraphLoadMultiVectorDocMap(Relation index,
 												 "docmap metapage counts are empty");
 
 	if (storage->multivectorDocMapLoaded)
-		return true;
+		return !documentNodes || storage->multivectorDocVectorsLoaded;
 
 	oldCtx = MemoryContextSwitchTo(storage->ctx);
 	storage->multivectorNodeMap =
@@ -734,6 +738,17 @@ PgturbohybridGraphLoadMultiVectorDocMap(Relation index,
 		palloc0(PgturbohybridCheckedArrayBytes(sizeof(TqMultiVectorDocMapEntry),
 											   meta->tqMultivectorDocCount,
 											   "pgturbohybrid multivector docmap"));
+	if (documentNodes)
+	{
+		storage->multivectorDocVectors =
+			palloc0(PgturbohybridCheckedArrayBytes(sizeof(PgturbohybridMultiVector *),
+												   meta->tqMultivectorDocCount,
+												   "pgturbohybrid multivector document vectors"));
+		vectorFloatCounts =
+			palloc0(PgturbohybridCheckedArrayBytes(sizeof(uint32),
+												   meta->tqMultivectorDocCount,
+												   "pgturbohybrid multivector document vector coverage"));
+	}
 	nodeSeen =
 		palloc0(PgturbohybridCheckedArrayBytes(sizeof(bool),
 											   meta->tqNodeCount,
@@ -844,14 +859,68 @@ PgturbohybridGraphLoadMultiVectorDocMap(Relation index,
 					if (docSeen[docId] ||
 						entry->tokenCount == 0 ||
 						entry->firstNodeId >= meta->tqNodeCount ||
-						(uint64) entry->firstNodeId + entry->tokenCount >
-						meta->tqNodeCount)
+						(!documentNodes &&
+						 (uint64) entry->firstNodeId + entry->tokenCount >
+						 meta->tqNodeCount))
 						PgturbohybridGraphMultiVectorDocMapError(index,
 																 "document docmap entry is invalid");
 					docSeen[docId] = true;
 					storage->multivectorDocMap[docId] = *entry;
 					docsSeen++;
 				}
+			}
+			else if (type ==
+					 PGTURBOHYBRID_GRAPH_MULTIVECTOR_DOCMAP_VECTOR_TUPLE_TYPE)
+			{
+				PgturbohybridGraphMultiVectorDocMapVectorTuple tuple =
+					(PgturbohybridGraphMultiVectorDocMapVectorTuple) item;
+				TqMultiVectorDocMapEntry *entry;
+				PgturbohybridMultiVector *mv;
+				Size		totalFloats;
+				Size		tupleSize;
+
+				if (!documentNodes)
+					PgturbohybridGraphMultiVectorDocMapError(index,
+															 "document vector tuple found in token-node docmap");
+				if (itemSize < offsetof(PgturbohybridGraphMultiVectorDocMapVectorTupleData,
+										values) ||
+					tuple->magic != PGTURBOHYBRID_GRAPH_MULTIVECTOR_DOCMAP_MAGIC ||
+					tuple->version != PGTURBOHYBRID_GRAPH_MULTIVECTOR_DOCMAP_VERSION ||
+					tuple->count == 0 ||
+					tuple->docId >= meta->tqMultivectorDocCount)
+					PgturbohybridGraphMultiVectorDocMapError(index,
+															 "malformed document vector tuple");
+				tupleSize =
+					PgturbohybridGraphMultiVectorDocMapVectorTupleSize(tuple->count);
+				if (itemSize < tupleSize || !docSeen[tuple->docId])
+					PgturbohybridGraphMultiVectorDocMapError(index,
+															 "document vector tuple range is invalid");
+				entry = &storage->multivectorDocMap[tuple->docId];
+				totalFloats =
+					PgturbohybridMultiVectorFloatCount(entry->tokenCount,
+													   meta->dimensions);
+				if ((uint64) tuple->startFloat + tuple->count > totalFloats)
+					PgturbohybridGraphMultiVectorDocMapError(index,
+															 "document vector tuple range is invalid");
+				mv = storage->multivectorDocVectors[tuple->docId];
+				if (mv == NULL)
+				{
+					Size		mvSize =
+						PgturbohybridMultiVectorSize(entry->tokenCount,
+													 meta->dimensions);
+
+					mv = MemoryContextAllocZero(storage->ctx, mvSize);
+					SET_VARSIZE(mv, mvSize);
+					mv->dim = meta->dimensions;
+					mv->count = entry->tokenCount;
+					storage->multivectorDocVectors[tuple->docId] = mv;
+				}
+				if (tuple->startFloat != vectorFloatCounts[tuple->docId])
+					PgturbohybridGraphMultiVectorDocMapError(index,
+															 "document vector tuple chunks are not contiguous");
+				memcpy(mv->values + tuple->startFloat, tuple->values,
+					   sizeof(float) * tuple->count);
+				vectorFloatCounts[tuple->docId] += tuple->count;
 			}
 			else
 				PgturbohybridGraphMultiVectorDocMapError(index,
@@ -875,10 +944,33 @@ PgturbohybridGraphLoadMultiVectorDocMap(Relation index,
 			&storage->multivectorDocMap[nodeEntry->docId];
 
 		if (nodeEntry->tokenOrdinal >= docEntry->tokenCount ||
-			nodeId < docEntry->firstNodeId ||
-			nodeId >= docEntry->firstNodeId + docEntry->tokenCount)
+			(!documentNodes &&
+			 (nodeId < docEntry->firstNodeId ||
+			  nodeId >= docEntry->firstNodeId + docEntry->tokenCount)) ||
+			(documentNodes && nodeId != docEntry->firstNodeId))
 			PgturbohybridGraphMultiVectorDocMapError(index,
 													 "node docmap entry does not match its document range");
+	}
+	if (documentNodes)
+	{
+		if ((meta->tqMultivectorDocMapFlags &
+			 PGTURBOHYBRID_GRAPH_MULTIVECTOR_DOCMAP_FLAG_DOC_VECTORS) == 0)
+			PgturbohybridGraphMultiVectorDocMapError(index,
+													 "document-node docmap is missing document vector storage flag");
+		for (uint32 docId = 0; docId < meta->tqMultivectorDocCount; docId++)
+		{
+			TqMultiVectorDocMapEntry *entry =
+				&storage->multivectorDocMap[docId];
+			Size		totalFloats =
+				PgturbohybridMultiVectorFloatCount(entry->tokenCount,
+												   meta->dimensions);
+
+			if (storage->multivectorDocVectors[docId] == NULL ||
+				vectorFloatCounts[docId] != totalFloats)
+				PgturbohybridGraphMultiVectorDocMapError(index,
+														 "document-node docmap does not cover every document vector");
+		}
+		storage->multivectorDocVectorsLoaded = true;
 	}
 
 	storage->multivectorDocCount = meta->tqMultivectorDocCount;
@@ -886,6 +978,8 @@ PgturbohybridGraphLoadMultiVectorDocMap(Relation index,
 	storage->multivectorDocMapLoaded = true;
 	pfree(nodeSeen);
 	pfree(docSeen);
+	if (vectorFloatCounts != NULL)
+		pfree(vectorFloatCounts);
 	return true;
 }
 
@@ -1304,6 +1398,7 @@ PgturbohybridGraphCacheMatches(PgturbohybridGraphNativeCache *cache, Relation in
 		cache->tqMultivectorDocCount == meta->tqMultivectorDocCount &&
 		cache->tqMultivectorDocMapBytes == meta->tqMultivectorDocMapBytes &&
 		cache->tqMultivectorDocMapVersion == meta->tqMultivectorDocMapVersion &&
+		cache->tqMultivectorGraphMode == meta->tqMultivectorGraphMode &&
 		memcmp(cache->tqSegments, meta->tqSegments,
 			   sizeof(PgturbohybridGraphSegmentMetaData) * meta->tqSegmentCount) == 0;
 }
@@ -1464,6 +1559,7 @@ PgturbohybridGraphBuildCache(Relation index, PgturbohybridGraphMetaPageData *met
 		meta->tqMultivectorDocMapBytes;
 	cache->tqMultivectorDocMapVersion =
 		meta->tqMultivectorDocMapVersion;
+	cache->tqMultivectorGraphMode = meta->tqMultivectorGraphMode;
 	memcpy(cache->tqSegments, meta->tqSegments,
 		   sizeof(PgturbohybridGraphSegmentMetaData) * meta->tqSegmentCount);
 	cache->ctx = cacheCtx;

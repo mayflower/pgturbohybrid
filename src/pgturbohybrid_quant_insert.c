@@ -46,6 +46,40 @@ PgturbohybridGraphInsertElapsedUsSince(instr_time start)
 	return (int64) INSTR_TIME_GET_MICROSEC(elapsed);
 }
 
+static uint16
+PgturbohybridGraphInsertMultiVectorDocMapVectorTupleMaxCount(void)
+{
+	Size		header = MAXALIGN(offsetof(PgturbohybridGraphMultiVectorDocMapVectorTupleData,
+										   values));
+	Size		usable = PGTURBOHYBRID_GRAPH_MAX_SIZE;
+	Size		maxCount;
+
+	if (header >= usable)
+		return 1;
+	maxCount = (usable - header) / sizeof(float);
+	return (uint16) Max(1, Min((Size) UINT16_MAX, maxCount));
+}
+
+static Vector *
+PgturbohybridGraphMultiVectorInsertRepresentative(const PgturbohybridMultiVector *mv)
+{
+	Vector	   *vector;
+
+	vector = palloc0(PGTURBOHYBRID_VECTOR_SIZE(mv->dim));
+	SET_VARSIZE(vector, PGTURBOHYBRID_VECTOR_SIZE(mv->dim));
+	vector->dim = mv->dim;
+	for (int32 token = 0; token < mv->count; token++)
+	{
+		const float *values = PgturbohybridMultiVectorValues(mv, token);
+
+		for (int32 dim = 0; dim < mv->dim; dim++)
+			vector->x[dim] += values[dim];
+	}
+	for (int32 dim = 0; dim < mv->dim; dim++)
+		vector->x[dim] /= (float) mv->count;
+	return vector;
+}
+
 static PgturbohybridGraphInsertAppendCursor tqGraphCodeAppendCursor = {
 	InvalidOid, InvalidOid, InvalidBlockNumber, InvalidBlockNumber, 0
 };
@@ -781,17 +815,22 @@ PgturbohybridGraphAppendInsertedMultiVectorDocMap(Relation index,
 												  ItemPointer heapTid,
 												  uint32 firstNodeId,
 												  uint16 tokenCount,
+												  const PgturbohybridMultiVector *mv,
+												  bool documentNodes,
 												  PgturbohybridGraphMetaPageData *meta)
 {
 	BlockNumber docMapStart = meta->tqMultivectorDocMapStartBlkno;
 	BlockNumber insertBlkno;
 	TqDocId		docId;
+	uint16		nodeMapCount;
 	Size		nodeTupleSize;
 	Size		docTupleSize;
+	uint32		vectorBytes = 0;
 	PgturbohybridGraphMultiVectorDocMapNodeTuple nodeTuple;
 	PgturbohybridGraphMultiVectorDocMapDocTuple docTuple;
 	uint32		pageCount;
 	uint32		docMapBytes;
+	uint16		docMapFlags = meta->tqMultivectorDocMapFlags;
 
 	if (!BlockNumberIsValid(docMapStart))
 		return;
@@ -803,10 +842,13 @@ PgturbohybridGraphAppendInsertedMultiVectorDocMap(Relation index,
 				 errhint("REINDEX the index to rebuild the multivector docmap sidecar.")));
 	if (tokenCount == 0 || firstNodeId != meta->tqNodeCount)
 		elog(ERROR, "invalid multivector docmap insert range");
+	if (documentNodes && mv == NULL)
+		elog(ERROR, "document-node multivector insert requires document vector sidecar data");
 
 	docId = PgturbohybridMultiVectorMakeDocId(meta->tqMultivectorDocCount);
+	nodeMapCount = documentNodes ? 1 : tokenCount;
 	nodeTupleSize =
-		PgturbohybridGraphMultiVectorDocMapNodeTupleSize(tokenCount);
+		PgturbohybridGraphMultiVectorDocMapNodeTupleSize(nodeMapCount);
 	docTupleSize = PgturbohybridGraphMultiVectorDocMapDocTupleSize(1);
 	if ((uint64) meta->tqMultivectorDocMapBytes + nodeTupleSize +
 		docTupleSize > UINT32_MAX)
@@ -818,14 +860,14 @@ PgturbohybridGraphAppendInsertedMultiVectorDocMap(Relation index,
 	nodeTuple->type =
 		PGTURBOHYBRID_GRAPH_MULTIVECTOR_DOCMAP_NODE_TUPLE_TYPE;
 	nodeTuple->version = PGTURBOHYBRID_GRAPH_MULTIVECTOR_DOCMAP_VERSION;
-	nodeTuple->count = tokenCount;
+	nodeTuple->count = nodeMapCount;
 	nodeTuple->magic = PGTURBOHYBRID_GRAPH_MULTIVECTOR_DOCMAP_MAGIC;
 	nodeTuple->firstNodeId = firstNodeId;
-	for (uint16 i = 0; i < tokenCount; i++)
+	for (uint16 i = 0; i < nodeMapCount; i++)
 	{
 		nodeTuple->entries[i].docId = docId;
 		nodeTuple->entries[i].tokenOrdinal =
-			PgturbohybridMultiVectorMakeSubvectorOrdinal(i);
+			PgturbohybridMultiVectorMakeSubvectorOrdinal(documentNodes ? 0 : i);
 	}
 
 	(void) PgturbohybridGraphAppendTupleWithCursor(index, &docMapStart,
@@ -854,16 +896,62 @@ PgturbohybridGraphAppendInsertedMultiVectorDocMap(Relation index,
 										&tqGraphDocMapAppendCursor);
 	pfree(docTuple);
 
+	if (documentNodes)
+	{
+		uint16		maxVectorCount =
+			PgturbohybridGraphInsertMultiVectorDocMapVectorTupleMaxCount();
+		Size		totalFloats =
+			PgturbohybridMultiVectorFloatCount(mv->count, mv->dim);
+
+		docMapFlags |= PGTURBOHYBRID_GRAPH_MULTIVECTOR_DOCMAP_FLAG_DOC_VECTORS;
+		for (uint32 startFloat = 0; startFloat < totalFloats;)
+		{
+			uint16		count =
+				(uint16) Min((Size) maxVectorCount,
+							 totalFloats - (Size) startFloat);
+			Size		tupleSize =
+				PgturbohybridGraphMultiVectorDocMapVectorTupleSize(count);
+			PgturbohybridGraphMultiVectorDocMapVectorTuple tuple =
+				palloc0(tupleSize);
+
+			if ((uint64) meta->tqMultivectorDocMapBytes + nodeTupleSize +
+				docTupleSize + vectorBytes + tupleSize > UINT32_MAX)
+				ereport(ERROR,
+						(errcode(ERRCODE_PROGRAM_LIMIT_EXCEEDED),
+						 errmsg("pgturbohybrid multivector docmap sidecar is too large")));
+			tuple->type =
+				PGTURBOHYBRID_GRAPH_MULTIVECTOR_DOCMAP_VECTOR_TUPLE_TYPE;
+			tuple->version = PGTURBOHYBRID_GRAPH_MULTIVECTOR_DOCMAP_VERSION;
+			tuple->count = count;
+			tuple->magic = PGTURBOHYBRID_GRAPH_MULTIVECTOR_DOCMAP_MAGIC;
+			tuple->docId = docId;
+			tuple->startFloat = startFloat;
+			memcpy(tuple->values, mv->values + startFloat,
+				   sizeof(float) * count);
+			(void) PgturbohybridGraphAppendTupleWithCursor(index,
+											&docMapStart,
+											PGTURBOHYBRID_GRAPH_PAGE_KIND_MULTIVECTOR_DOCMAP,
+											(Item) tuple, tupleSize,
+											PGTURBOHYBRID_GRAPH_GRAPH_OP_ELEMENT_INSERT,
+											&insertBlkno,
+											&tqGraphDocMapAppendCursor);
+			vectorBytes += (uint32) tupleSize;
+			pfree(tuple);
+			startFloat += count;
+		}
+	}
+
 	pageCount =
 		PgturbohybridGraphCountPageChainForKind(index, docMapStart,
 												PGTURBOHYBRID_GRAPH_PAGE_KIND_MULTIVECTOR_DOCMAP);
 	docMapBytes =
 		meta->tqMultivectorDocMapBytes + (uint32) nodeTupleSize +
-		(uint32) docTupleSize;
+		(uint32) docTupleSize + vectorBytes;
 	PgturbohybridGraphUpdateMultiVectorDocMapMeta(index, docMapStart,
 												  pageCount,
 												  meta->tqMultivectorDocCount + 1,
-												  docMapBytes);
+												  docMapBytes,
+												  docMapFlags);
 	PgturbohybridGraphInvalidateCaches(index);
 }
 
@@ -1179,6 +1267,8 @@ PgturbohybridGraphInsertValueInPlace(Relation index, IndexInfo *indexInfo,
 		meta.tqMultivectorDocMapVersion;
 	metaUpdate.tqMultivectorDocMapFlags =
 		meta.tqMultivectorDocMapFlags;
+	metaUpdate.tqMultivectorGraphMode =
+		meta.tqMultivectorGraphMode;
 	memcpy(metaUpdate.tqEntrySidecarNodeIds, meta.tqEntrySidecarNodeIds,
 		   sizeof(metaUpdate.tqEntrySidecarNodeIds));
 	metaUpdate.tqRoutingEntryCount = meta.tqRoutingEntryCount;
@@ -1244,6 +1334,7 @@ PgturbohybridGraphInsertMultiVectorBatchInPlace(Relation index,
 	uint32		firstNodeId = InvalidOid;
 	uint32		count = 0;
 	bool		appendDocMap = false;
+	bool		documentNodes = false;
 
 	rawValue = (char *) DatumGetPointer(value);
 	mv = PgturbohybridDatumGetMultiVector(value);
@@ -1253,27 +1344,46 @@ PgturbohybridGraphInsertMultiVectorBatchInPlace(Relation index,
 											(uint32) pgturbohybrid_multivector_max_doc_vectors);
 	if (PgturbohybridGraphReadMeta(index, &meta) &&
 		BlockNumberIsValid(meta.tqMultivectorDocMapStartBlkno))
-		appendDocMap = true;
-
-	vector = (Vector *) palloc(PgturbohybridMultiVectorSubvectorSize(mv));
-	for (int32 i = 0; i < mv->count; i++)
 	{
-		uint32		nodeId;
+		appendDocMap = true;
+		documentNodes =
+			meta.tqMultivectorGraphMode ==
+			PGTURBOHYBRID_MULTIVECTOR_GRAPH_DOCUMENT_NODES;
+	}
 
-		PgturbohybridMultiVectorCopySubvectorToVector(mv, i, vector);
-		nodeId = PgturbohybridGraphInsertValueInPlace(index, indexInfo, heap_tid,
-													  PointerGetDatum(vector),
-													  values, isnull);
-		if (i == 0)
-			firstNodeId = nodeId;
-		else if (appendDocMap && nodeId != firstNodeId + (uint32) i)
-			elog(ERROR, "multivector graph insert produced nonconsecutive node ids");
-		count++;
+	if (documentNodes)
+	{
+		vector = PgturbohybridGraphMultiVectorInsertRepresentative(mv);
+		firstNodeId = PgturbohybridGraphInsertValueInPlace(index, indexInfo,
+														   heap_tid,
+														   PointerGetDatum(vector),
+														   values, isnull);
+		count = 1;
+	}
+	else
+	{
+		vector = (Vector *) palloc(PgturbohybridMultiVectorSubvectorSize(mv));
+		for (int32 i = 0; i < mv->count; i++)
+		{
+			uint32		nodeId;
+
+			PgturbohybridMultiVectorCopySubvectorToVector(mv, i, vector);
+			nodeId = PgturbohybridGraphInsertValueInPlace(index, indexInfo, heap_tid,
+														  PointerGetDatum(vector),
+														  values, isnull);
+			if (i == 0)
+				firstNodeId = nodeId;
+			else if (appendDocMap && nodeId != firstNodeId + (uint32) i)
+				elog(ERROR, "multivector graph insert produced nonconsecutive node ids");
+			count++;
+		}
 	}
 	if (appendDocMap)
 		PgturbohybridGraphAppendInsertedMultiVectorDocMap(index, heap_tid,
 														  firstNodeId,
-														  (uint16) count,
+														  (uint16) mv->count,
+														  documentNodes ? mv : NULL,
+														  documentNodes,
 														  &meta);
 
 	pfree(vector);

@@ -10,6 +10,7 @@ END
 $$;
 CREATE EXTENSION vector;
 CREATE EXTENSION pgturbohybrid;
+SET turbohybrid.multivector_plain_fallback = off;
 DO $$
 BEGIN
 	BEGIN
@@ -87,6 +88,18 @@ BEGIN
 	BEGIN
 		EXECUTE 'SET turbohybrid.multivector_max_accumulator_mb = 2147483647';
 		RAISE EXCEPTION 'expected multivector_max_accumulator_mb cap error';
+	EXCEPTION WHEN invalid_parameter_value THEN
+	END;
+
+	BEGIN
+		EXECUTE 'SET turbohybrid.multivector_debug_trace_limit = 2147483647';
+		RAISE EXCEPTION 'expected multivector_debug_trace_limit cap error';
+	EXCEPTION WHEN invalid_parameter_value THEN
+	END;
+
+	BEGIN
+		EXECUTE 'SET turbohybrid.multivector_plain_fallback_max_docs = 2147483647';
+		RAISE EXCEPTION 'expected multivector_plain_fallback_max_docs cap error';
 	EXCEPTION WHEN invalid_parameter_value THEN
 	END;
 END

@@ -1,1090 +1,676 @@
-Below is a **Codex prompt set** split across the two repos:
+## Prompt 0 — Baseline audit: locate the lossy admission path
 
 ```text
-mayflower/colbert-gguf-converter
-mayflower/pgturbohybrid
-```
-
-The key design is: **the converter should become the source of truth for ColBERT profile metadata**, and `pg_colbert_llama` should consume that profile instead of relying on global GUC guesses.
-
-The converter already produces a custom `pg_colbert_v1` GGUF format and says it preserves ColBERT projection layers, tokenizer configuration, and query/document metadata.  The current spec already contains many profile ingredients, including `colbert.query_prefix`, `colbert.document_prefix`, query/document lengths, skiplist words, token IDs, and prefix token IDs.  The runtime side already exposes the right SQL functions, including `colbert`, `colbert_vectors`, `colbert_float4`, `colbert_dim`, `colbert_model_info`, and `colbert_mv`.
-
-The missing bridge is a formal **profile contract** that the converter writes and the Postgres extension consumes.
-
----
-
-# Prompt set overview
-
-Use these in order:
-
-```text
-A. Converter profile generation
-B. Runtime profile consumption
-C. Parity tooling
-D. Cross-repo integration
-E. Documentation and claim control
-```
-
-I would do them as separate PRs so each PR is reviewable.
-
----
-
-# A. `mayflower/colbert-gguf-converter` prompts
-
-## Prompt A1 — Add ColBERT profile v1 spec
-
-```text
-Repository: mayflower/colbert-gguf-converter
-Branch from: master
+You are working in the pgturbohybrid repository.
 
 Goal:
-Introduce a formal ColBERT runtime profile schema that can be embedded in GGUF metadata and also written as a sidecar JSON file. This profile will be consumed by pg_colbert_llama in mayflower/pgturbohybrid.
+Audit the current multivector candidate-generation path and produce a precise code map before making changes.
 
 Context:
-The current docs/COLBERT_GGUF_SPEC.md defines pg_colbert_v1 metadata, including projection, query/document prefixes, query/document lengths, skiplist words, token IDs, and tokenizer JSON. Extend that into a single explicit profile contract.
+The current multivector path appears to:
+1. Run approximate ANN searches per query subvector/token.
+2. Aggregate raw subvector hits into document candidates.
+3. Apply document candidate caps.
+4. Exact-rerank only the surviving candidates with full MaxSim.
+
+This is lossy for ColBERT-style late interaction because a document can be globally strong by sum-of-token MaxSim while never ranking highly enough for any individual query token.
 
 Tasks:
-1. Add docs/COLBERT_PROFILE_SPEC.md.
-2. Define schema name:
-   pg_colbert_profile_v1
-3. Define these top-level fields:
-   - schema
-   - source_model_id
-   - source_revision
-   - converter_version
-   - backbone_family
-   - colbert_family
-   - similarity
-   - output_dim
-   - normalize
-   - tokenizer
-   - query
-   - document
-   - projection
-   - compatibility
-4. Define tokenizer object:
-   - source: "llama" | "hf_json" | "canonical_ggml"
-   - tokenizer_model
-   - tokenizer_json_sha256
-   - special_tokens:
-       cls_token_id
-       sep_token_id
-       pad_token_id
-       mask_token_id
-       q_token_id
-       d_token_id
-   - prefix_token_ids:
-       query
-       document
-5. Define query object:
-   - prefix
-   - max_length
-   - pad_to
-   - pad_token_id
-   - pad_token
-   - attend_to_expansion_tokens
-   - retain_policy
-   - output_policy
-   - token_type_id
-6. Define document object:
-   - prefix
-   - max_length
-   - pad_to
-   - retain_policy
-   - skiplist_words
-   - skiplist_token_ids
-   - token_type_id
-7. Define projection object:
-   - kind: "identity" | "dense" | "module_chain"
-   - input_dim
-   - output_dim
-   - modules
-   - normalize_after
-8. Define compatibility object:
-   - llama_cpp_loadable: bool
-   - requires_profile: bool
-   - strict_pylate_profile: bool
-   - known_limitations: string[]
-9. Update docs/COLBERT_GGUF_SPEC.md to reference the new profile spec.
-10. Add the GGUF metadata key:
-    pg_colbert.profile_json = JSON string containing the profile.
-11. Add sidecar filename convention:
-    <model>.gguf.colbert_profile.json
-12. Include a complete example profile for:
-    VAGOsolutions/SauerkrautLM-Multi-ColBERT-15m
-13. Do not change converter code yet.
+1. Locate the code that:
+   - iterates query subvectors,
+   - calls the graph/ANN search per subvector,
+   - resolves nodeId -> document/heap tuple,
+   - updates the MaxSim accumulator,
+   - applies raw-hit, unique-doc, doc-candidate, and exact-rerank caps,
+   - computes exact heap MaxSim rerank.
+2. Produce a new Markdown document:
+   docs/dev/multivector-candidate-admission-audit.md
+3. In that doc, include:
+   - file/function map,
+   - current control flow,
+   - all relevant GUCs and their defaults,
+   - all current scan stats,
+   - where a true exact top-K document can be dropped,
+   - where we can add instrumentation with minimal risk.
+4. Do not modify runtime behavior.
+5. Run formatting/tests that are standard for this repo, or explain why they cannot be run.
 
-Tests:
-- Documentation-only change.
-- Run pytest if cheap, but no code behavior should change.
+Acceptance criteria:
+- The doc identifies the exact functions and structs involved.
+- The doc explicitly distinguishes:
+  - ANN/token miss,
+  - document aggregation miss,
+  - doc-candidate truncation miss,
+  - exact-rerank miss.
+- No production behavior changes.
 ```
 
 ---
 
-## Prompt A2 — Add profile dataclasses and JSON writer
+## Prompt 1 — Add admission-recall diagnostics to scan stats
 
 ```text
-Repository: mayflower/colbert-gguf-converter
-Branch from: A1 branch
+You are working in the pgturbohybrid repository.
 
 Goal:
-Add Python data structures and writers for pg_colbert_profile_v1.
-
-Tasks:
-1. Create tools/colbert_profile.py.
-2. Add dataclasses:
-   - ColbertProfile
-   - TokenizerProfile
-   - SpecialTokensProfile
-   - QueryProfile
-   - DocumentProfile
-   - ProjectionProfile
-   - ProjectionModule
-   - CompatibilityProfile
-3. Add:
-   - to_dict()
-   - to_json()
-   - validate_profile(profile)
-   - write_profile_sidecar(profile, gguf_path)
-4. Validation must check:
-   - schema == "pg_colbert_profile_v1"
-   - output_dim > 0
-   - query.max_length > 0
-   - document.max_length > 0
-   - projection.output_dim == output_dim unless projection.kind == "identity"
-   - special token IDs are integers or null
-   - skiplist_token_ids contains only non-negative integers
-5. Add unit tests in tests/test_colbert_profile.py:
-   - minimal valid profile serializes
-   - invalid output_dim fails
-   - projection dim mismatch fails
-   - skiplist token IDs validate
-6. No GGUF writing yet.
-```
-
----
-
-## Prompt A3 — Extract profile from Hugging Face / PyLate metadata
-
-```text
-Repository: mayflower/colbert-gguf-converter
-Branch from: A2 branch
-
-Goal:
-Build a ColBERT profile from the source Hugging Face / SentenceTransformers / PyLate repository.
-
-Files to inspect:
-- tools/convert_colbert_hf_to_gguf.py
-- tools/inspect_colbert_hf.py
-- tools/create_pylate_golden.py
-- config_sentence_transformers.json
-- modules.json
-- 1_Dense/config.json
-- tokenizer.json
-- tokenizer_config.json
-- special_tokens_map.json
-
-Tasks:
-1. In tools/convert_colbert_hf_to_gguf.py, factor metadata extraction into reusable functions:
-   - load_sentence_transformers_config()
-   - load_tokenizer_profile()
-   - load_query_document_profile()
-   - load_projection_profile()
-   - build_colbert_profile()
-2. Extract from config_sentence_transformers.json where available:
-   - query_prefix
-   - document_prefix
-   - query_length
-   - document_length
-   - similarity_fn_name
-   - attend_to_expansion_tokens
-   - skiplist_words
-3. Extract tokenizer special IDs using AutoTokenizer:
-   - cls_token_id
-   - sep_token_id
-   - pad_token_id
-   - mask_token_id
-   - q_token_id
-   - d_token_id
-4. Compute:
-   - query_prefix_token_ids
-   - document_prefix_token_ids
-   - skiplist_token_ids
-5. For skiplist_token_ids:
-   - tokenize each skiplist word with add_special_tokens=False
-   - include single-token IDs directly
-   - for multi-token skiplist entries, include a structured warning in compatibility.known_limitations
-6. Extract projection info:
-   - Dense module config
-   - in_features
-   - out_features
-   - bias
-   - activation_function
-7. Add CLI option:
-   --write-profile-sidecar
-   default: true
-8. Add CLI option:
-   --no-profile-sidecar
-9. In dry-run mode, print the profile summary.
-10. Add tests using existing mock fixtures:
-    - profile query/document prefixes are read
-    - query/document lengths are read
-    - projection dims are read
-    - skiplist token IDs are produced
-    - profile validation passes
-```
-
----
-
-## Prompt A4 — Embed `pg_colbert.profile_json` into GGUF
-
-```text
-Repository: mayflower/colbert-gguf-converter
-Branch from: A3 branch
-
-Goal:
-Embed the ColBERT profile JSON into GGUF metadata and write a sidecar JSON file.
-
-Tasks:
-1. Update tools/convert_colbert_hf_to_gguf.py so every non-dry-run conversion:
-   - builds a ColBERT profile
-   - validates it
-   - writes GGUF metadata key:
-     pg_colbert.profile_json
-   - writes sidecar:
-     <outfile>.colbert_profile.json
-     unless --no-profile-sidecar is set
-2. Update docs/COLBERT_GGUF_SPEC.md:
-   - document pg_colbert.profile_json
-   - document sidecar JSON
-3. Update tools/inspect_colbert_gguf.py:
-   - detect pg_colbert.profile_json
-   - parse it
-   - validate it
-   - print concise profile summary:
-       schema
-       output_dim
-       query prefix/length/pad_to
-       document prefix/length
-       skiplist token count
-       projection kind/modules
-       compatibility flags
-4. Add tests:
-   - converted mock GGUF includes pg_colbert.profile_json
-   - sidecar is written
-   - inspector validates profile
-```
-
----
-
-## Prompt A5 — Add llama.cpp canonical export mode
-
-```text
-Repository: mayflower/colbert-gguf-converter
-Branch from: A4 branch
-
-Goal:
-Support two GGUF output targets:
-1. pg_colbert_v1 custom GGUF
-2. llama.cpp-loadable GGUF + ColBERT profile
-
-The pgturbohybrid pg_colbert_llama extension should prefer llama.cpp-loadable GGUFs with profile metadata.
-
-Tasks:
-1. Add CLI option:
-   --target-runtime pg_colbert|llama_cpp|both
-   default: pg_colbert for backwards compatibility.
-2. For target-runtime=llama_cpp:
-   - write llama.cpp canonical tensor names for BERT/ModernBERT where supported
-   - write tokenizer.ggml.* metadata where possible
-   - embed pg_colbert.profile_json
-   - store colbert.proj.weight and optional colbert.proj.bias in GGUF if llama.cpp can ignore unknown tensors safely, or write them to sidecar if necessary
-3. Preserve existing pg_colbert_v1 behavior for target-runtime=pg_colbert.
-4. If target-runtime=both:
-   - write <outfile>.pg_colbert.gguf
-   - write <outfile>.llama.gguf
-   - write matching profile sidecars
-5. Refactor existing tensor mapping so BERT/ModernBERT canonicalization is not hardcoded only in pgturbohybrid's canonicalize_pg_colbert_gguf.py.
-6. Add tests:
-   - llama_cpp target contains tokenizer.ggml.model
-   - llama_cpp target contains tokenizer.ggml.tokens or fails with clear explanation
-   - llama_cpp target embeds pg_colbert.profile_json
-   - pg_colbert target remains unchanged
-7. Update README usage examples.
-
-Important:
-Do not promise universal llama.cpp support in docs. Say "llama.cpp-loadable for supported BERT/ModernBERT ColBERT backbones."
-```
-
----
-
-## Prompt A6 — Generate token-plan goldens
-
-```text
-Repository: mayflower/colbert-gguf-converter
-Branch from: A5 branch
-
-Goal:
-Add a PyLate/HF-based token-plan golden generator. This will let pg_colbert_llama compare tokenization, query expansion, retention, and skiplist behavior before comparing vectors.
-
-Tasks:
-1. Create tools/create_colbert_profile_golden.py.
-2. Inputs:
-   --model-name-or-path
-   --texts-file
-   --role query|doc
-   --outfile
-3. For each text, output JSON containing:
-   - input text
-   - role
-   - token_ids before padding
-   - token_ids after padding/truncation
-   - token pieces
-   - attention_mask
-   - token_type_ids if available
-   - retain_mask
-   - retain_reasons
-   - skiplist_token_ids
-   - final_vector_count
-4. Use PyLate where available.
-5. If PyLate does not expose token plan internals, use Hugging Face tokenizer plus profile rules and clearly mark:
-   token_plan_source = "hf_tokenizer_profile_rules"
-6. Add tests with a tiny fixture:
-   - query "red planet" includes mask padding to query length
-   - document "red planet." marks punctuation as skipped when skiplist contains "."
-7. Document the tool in README.
-```
-
----
-
-## Prompt A7 — Add strict parity report generation
-
-```text
-Repository: mayflower/colbert-gguf-converter
-Branch from: A6 branch
-
-Goal:
-Make the converter optionally produce a parity report that downstream users can trust.
-
-Tasks:
-1. Extend tools/create_pylate_golden.py or create tools/verify_pylate_parity.py.
-2. Inputs:
-   --model-name-or-path
-   --gguf
-   --profile
-   --texts-file
-   --role query|doc
-   --outfile
-3. For now, since this repo may not run llama.cpp inference directly, produce:
-   - token-plan parity report
-   - projection/profile consistency report
-   - PyLate vector goldens
-4. Output JSON:
-   - profile_valid
-   - token_plan_valid
-   - vector_golden_available
-   - known_limitations
-   - texts[]
-5. Add README section:
-   - "This verifies converter/profile correctness, not Postgres runtime correctness."
-6. Tests:
-   - report file is created
-   - invalid profile fails
-   - missing PyLate is a clean skip or clear error
-```
-
----
-
-## Prompt A8 — Publishing updates
-
-```text
-Repository: mayflower/colbert-gguf-converter
-Branch from: A7 branch
-
-Goal:
-When publishing GGUF to Hugging Face, publish profile and parity artifacts too.
-
-Tasks:
-1. Update tools/publish_colbert_gguf.py.
-2. Include upload of:
-   - .gguf
-   - .gguf.colbert_profile.json
-   - optional token-plan golden JSON
-   - optional parity report JSON
-3. Update generated model card:
-   - state profile schema
-   - state target runtime
-   - state whether strict PyLate token-plan parity passed
-   - state whether vector parity was checked
-   - include exact CLI command
-4. Do not claim strict vector parity unless the parity report says it passed.
-5. Add tests for model card text generation.
-```
-
----
-
-# B. `mayflower/pgturbohybrid` prompts
-
-## Prompt B1 — Add runtime compatibility document
-
-```text
-Repository: mayflower/pgturbohybrid
-Branch from: main
-
-Goal:
-Document the current compatibility level and the new profile-driven direction for pg_colbert_llama.
+Add debug-only multivector admission diagnostics so we can prove whether exact top-K documents are missing before exact rerank.
 
 Context:
-Current pg_colbert_llama works for GGUF load, projection detection, shape, normalization, and pgturbohybrid ranking smoke. It is not yet strict PyLate vector parity.
+Exact rerank cannot recover documents that never enter the candidate set. We need scan-level and optional per-document diagnostics that answer:
+- Was the exact top-1/top-10 admitted before rerank?
+- At what candidate budget was it first admitted?
+- Was it dropped by token raw-hit caps, unique-doc caps, doc-candidate caps, or accumulator memory?
 
 Tasks:
-1. Add extensions/pg_colbert_llama/docs/profile-runtime.md.
-2. Explain compatibility levels:
-   - load
-   - shape
-   - ranking_smoke
-   - token_plan_parity
-   - vector_parity
-3. State that current broad claim must remain:
-   "supports canonicalized BERT/ModernBERT-style ColBERT GGUFs matching our Sauerkraut/PyLate conventions, with correct tokenization shape and usable ranking smoke behavior."
-4. Explain why profile support is needed:
-   - query expansion attention mask
-   - punctuation/document skiplist
-   - tokenizer metadata
-   - projection module chain
-   - model-specific query/document lengths
-5. Link to converter profile spec once available.
-6. No code changes.
+1. Add a new GUC:
+   turbohybrid.multivector_debug_admission = off | summary | trace
+   Default: off.
+2. In summary mode, extend turbohybrid_last_scan_stats() with fields:
+   - multivector_admission_debug_enabled
+   - multivector_admission_candidates_before_rerank
+   - multivector_admission_candidates_after_truncation
+   - multivector_admission_exact_rerank_docs
+   - multivector_admission_truncated_by_doc_candidate_k
+   - multivector_admission_truncated_by_accumulator_memory
+   - multivector_admission_trace_available
+3. In trace mode, collect a bounded per-scan debug trace in memory, exposed as either:
+   - a JSON field in turbohybrid_last_scan_stats(), or
+   - a new function turbohybrid_last_multivector_admission_trace().
+4. Trace entries should be document-keyed, not subvector-keyed, and include at least:
+   - docId or heap TID
+   - approximate accumulated score before exact rerank
+   - query-token coverage count
+   - raw hit count
+   - duplicate hit count
+   - candidate rank before truncation
+   - retained_for_exact_rerank boolean
+   - exact_rerank_score when available
+5. Keep memory bounded. Add a hard trace limit GUC if necessary:
+   turbohybrid.multivector_debug_trace_limit, default 1000.
+6. Update docs/dev/multivector-late-interaction.md or a new debug doc.
+7. Add regression tests proving:
+   - default stats do not include large trace payloads,
+   - summary mode reports counters,
+   - trace mode returns bounded entries,
+   - trace is document-keyed.
+
+Acceptance criteria:
+- Default behavior and performance are unchanged when debug mode is off.
+- Debug trace cannot allocate unbounded memory.
+- Existing tests pass.
 ```
 
 ---
 
-## Prompt B2 — Add profile parser to `pg_colbert_llama`
+## Prompt 2 — Add a deterministic synthetic regression for “many moderate matches”
 
 ```text
-Repository: mayflower/pgturbohybrid
-Branch from: B1 branch
+You are working in the pgturbohybrid repository.
 
 Goal:
-Teach pg_colbert_llama to load pg_colbert_profile_v1 from either GGUF metadata or sidecar JSON.
+Create a small deterministic SQL regression test that reproduces the structural failure mode:
+a document is exact-MaxSim top-1 because it matches many query tokens moderately, but it is not the top subvector hit for any single query token.
 
-Files:
-- extensions/pg_colbert_llama/src/colbert_engine.h
-- extensions/pg_colbert_llama/src/colbert_engine_llama.cpp
-- extensions/pg_colbert_llama/src/pg_colbert_llama.c
+Context:
+This is the core ColBERT-style failure:
+- per-token top-k candidate generation can miss a document,
+- exact rerank only sees candidates admitted earlier,
+- raising k fixes it only near-exhaustively.
 
 Tasks:
-1. Add profile structs in C/C++:
-   - PgColbertRuntimeProfile
-   - PgColbertTokenizerProfile
-   - PgColbertQueryProfile
-   - PgColbertDocumentProfile
-   - PgColbertProjectionProfile
-   - PgColbertCompatibilityProfile
-2. Add profile load order:
-   - GGUF metadata key pg_colbert.profile_json
-   - sidecar <model>.gguf.colbert_profile.json
-   - fallback to legacy GUC-derived profile
-3. Add profile validation:
-   - schema must be pg_colbert_profile_v1
-   - output_dim must match expected_dim unless expected_dim is explicitly overridden
-   - query/document max lengths must be positive
-   - projection output dim must match output_dim
-4. Avoid adding a heavy JSON dependency if possible:
-   - simple parser for known fields is acceptable
-   - or use PostgreSQL JSON routines on C side if cleaner
-5. colbert_model_info() must report:
-   - profile_loaded
-   - profile_source: gguf | sidecar | guc_fallback
-   - profile_schema
-   - compatibility_level
-   - query_length source
-   - document_length source
-   - skiplist_token_count
-6. Add tests in stub mode:
-   - profile sidecar is loaded from model_dir for stub fake model
-   - colbert_model_info reports profile_loaded=true
-   - invalid schema errors cleanly
-   - missing profile falls back to GUCs and reports guc_fallback
+1. Add a SQL test under test/sql/ and expected output under test/expected/.
+2. Use hand-constructed turbohybrid_multivector values with small dimensions.
+3. Create:
+   - one query multivector Q with multiple query tokens,
+   - one “globally good” document D_good that has moderate best matches for many query tokens,
+   - several “spiky” documents D_spike_* that each match one query token strongly but have poor total MaxSim.
+4. Verify exact scan ranking:
+   ORDER BY turbohybrid_multivector_maxsim_distance(query, doc)
+   puts D_good at top-1.
+5. Build a turbohybrid multivector index.
+6. Run index search under intentionally low candidate budgets.
+7. Assert or at least expose that D_good is missing before the fix.
+8. Mark the failing assertion in a way compatible with this repo’s test style:
+   - either expected output documents the current failure,
+   - or add it as a developer-only benchmark/test script if normal regression cannot include failing behavior.
+9. Add comments explaining why this test models the DBpedia failure.
+
+Acceptance criteria:
+- The test is deterministic and does not require external models or datasets.
+- Exact MaxSim top-1 is D_good.
+- The index path with low budgets demonstrates admission loss or records debug stats showing why it would be lost.
 ```
 
 ---
 
-## Prompt B3 — Add `colbert_debug()` with token-plan output
+## Prompt 3 — Extend DBpedia benchmark with admission-recall reporting
 
 ```text
-Repository: mayflower/pgturbohybrid
-Branch from: B2 branch
+You are working in the pgturbohybrid repository.
 
 Goal:
-Add a debug function that exposes the ColBERT token plan, not just final vectors.
+Extend benchmarks/dbpedia_colbert_multivector.py so it reports candidate-admission recall, not only final retrieval metrics.
 
-Current colbert() returns token_ids and vectors. We need more detail to diagnose PyLate parity failures.
+Context:
+The current benchmark already has:
+- pgturbohybrid_colbert_multivector_query_only,
+- pgturbohybrid_colbert_multivector_rrf,
+- pgturbohybrid_colbert_multivector_exact_scan.
+
+We need to compare exact top-K against the candidate set before exact rerank.
 
 Tasks:
-1. Add SQL function:
-   colbert_debug(model text, input text)
-   RETURNS jsonb
-2. Keep colbert() unchanged for compatibility.
-3. colbert_debug() must include:
-   - engine
-   - alias
-   - role
-   - profile_source
-   - dim
-   - vector_count
-   - normalized
-   - input
-   - prefix
-   - token_plan:
-       tokens[]
-4. Each token object should include:
-   - index
-   - id
-   - piece if available through llama_token_to_piece
-   - position_id
-   - token_type_id if known
-   - attention_mask value if known
-   - output_enabled
-   - retained
-   - retain_reason
-5. For now, if token_type_id or attention_mask is unavailable, output null and add known_limitations.
-6. Add regression tests in stub mode for JSON shape.
-7. Add live test guarded by PG_COLBERT_LLAMA_TEST_MODEL:
-   - colbert_debug(alias:query, 'red planet') includes token_plan.tokens
-   - token count is >= vector count
+1. Add benchmark options:
+   --admission-debug
+   --admission-k, default 10
+   --admission-budget-sweep, comma-separated candidate budgets such as 100,200,400,800,1600,3200,6400,10000
+2. For each query:
+   - run exact scan top admission_k,
+   - run index search under each candidate budget,
+   - collect turbohybrid_last_scan_stats(),
+   - collect debug admission trace if available.
+3. Report:
+   - exact_top1_admitted_before_rerank
+   - exact_top10_admission_recall
+   - exact_top1_first_budget_admitted
+   - exact_top1_candidate_rank_before_rerank if available
+   - exact_top1_exact_rerank_rank if available
+   - raw_subvector_hits
+   - unique_docs
+   - maxsim_updates
+   - doc_candidates
+   - exact_rerank_docs
+   - memory estimate
+   - latency
+4. Output JSON should include a per-query section and an aggregate section.
+5. Keep normal benchmark behavior unchanged unless --admission-debug is passed.
+6. Update benchmark docs/comments.
+
+Acceptance criteria:
+- Running without --admission-debug produces the same shape as before.
+- Running with --admission-debug clearly distinguishes:
+  - not admitted,
+  - admitted before rerank but ranked low,
+  - admitted and exact reranked correctly.
 ```
 
 ---
 
-## Prompt B4 — Implement profile-driven retention and skiplist
+## Prompt 4 — Add an exact per-token oracle mode
 
 ```text
-Repository: mayflower/pgturbohybrid
-Branch from: B3 branch
+You are working in the pgturbohybrid repository.
 
 Goal:
-Replace the current hardcoded retention policy.
+Add a developer/debug mode that replaces approximate per-token ANN with exact per-token top-k over all subvector nodes. This isolates graph ANN miss from structural token-top-k admission loss.
 
-Current behavior:
-- query retains every token
-- document drops only PAD
-This causes document punctuation mismatches against PyLate.
+Context:
+We need three comparable modes:
+A. current graph ANN token hits -> document aggregation -> exact rerank
+B. exact per-token top-k over all token nodes -> document aggregation -> exact rerank
+C. exact document MaxSim scan
+
+If B is still bad at ordinary budgets, the token-candidate strategy is structurally too lossy.
+If B is good and A is bad, graph/quantized token ANN recall is the main problem.
 
 Tasks:
-1. Replace PgColbertShouldRetainToken() with a profile-driven function.
-2. The function must support:
-   - retain all query tokens when query.retain_policy says so
-   - document PAD drop
-   - document punctuation skiplist drop
-   - explicit skiplist_token_ids from profile
-   - optional skiplist_words fallback using token pieces
-3. Use llama_vocab_pad(), llama_vocab_cls(), llama_vocab_sep(), llama_vocab_mask() where available.
-4. Use llama_token_to_piece() to expose token piece strings for fallback punctuation detection.
-5. Add Unicode-basic punctuation fallback:
-   - ASCII punctuation at minimum
-   - document clearly that full Unicode category support is limited unless profile provides token IDs
-6. colbert_debug() must show retain_reason:
-   - retained_query
-   - retained_document
-   - dropped_pad
-   - dropped_skiplist_token
-   - dropped_punctuation
-7. Add tests:
-   - with fake profile skiplist_token_ids containing token X, doc drops token X
-   - query still retains mask tokens
-   - document "red planet." drops punctuation when profile says "."
-8. Add live parity helper test:
-   - if PG_COLBERT_LLAMA_TEST_MODEL and a profile sidecar exist, document count for "red planet." should match profile golden when provided.
-```
+1. Add a developer GUC:
+   turbohybrid.multivector_candidate_source = graph | exact_token_scan
+   Default: graph.
+2. Implement exact_token_scan only for multivector scans.
+3. exact_token_scan should:
+   - iterate all graph subnodes or available exact/quantized subvector storage,
+   - score each node against the current query token,
+   - produce the top raw hits per query token using the same raw-hit and unique-doc caps as graph mode,
+   - feed the existing document accumulator unchanged.
+4. Add scan stats:
+   - multivector_candidate_source
+   - multivector_exact_token_scan_nodes_scored
+   - multivector_exact_token_scan_enabled
+5. Add tests on a tiny multivector table proving exact_token_scan returns the same or better candidate admission than graph mode under the same candidate caps.
+6. Update docs/dev/multivector-candidate-admission-audit.md.
 
-The current implementation only drops PAD for documents, so this prompt directly targets the documented mismatch.
+Important constraints:
+- This is a debug/developer path, not a production optimization.
+- Keep it guarded by the GUC.
+- Do not alter default behavior.
+
+Acceptance criteria:
+- The benchmark can run A/B/C comparisons.
+- The implementation reuses the existing accumulator and exact rerank code.
+```
 
 ---
 
-## Prompt B5 — Build explicit query/document encode plans
+## Prompt 5 — Implement exact/plain MaxSim fallback for near-exhaustive cases
 
 ```text
-Repository: mayflower/pgturbohybrid
-Branch from: B4 branch
+You are working in the pgturbohybrid repository.
 
 Goal:
-Separate tokenization, query expansion, attention policy, output mask, and retention into an explicit encode plan.
+Add a safe exact/plain fallback for multivector search when the approximate candidate generator would be near-exhaustive or when the corpus/filter cardinality is small.
 
-Current behavior directly tokenizes prefix+input, then pads queries with mask tokens up to query_length. That gets shape right but does not expose enough to match PyLate attention behavior. :contentReference[oaicite:4]{index=4}
+Context:
+Qdrant avoids forcing small or exact cases through lossy HNSW; pgturbohybrid should do the same for multivector MaxSim. If DBpedia-10k needs 6400+ or 10000 document candidates, an exact MaxSim scan is probably a better plan than lossy candidate generation plus rerank.
 
 Tasks:
-1. Add internal struct:
-   PgColbertEncodePlan
-   containing:
-   - token_ids
-   - token_pieces
-   - position_ids
-   - token_type_ids
-   - attention_mask
-   - output_mask
-   - retain_mask
-   - retain_reasons
-   - n_tokens
-2. Add:
-   PgColbertBuildEncodePlan(profile, role, input)
-3. Rules:
-   - use profile query/document prefix
-   - use profile max_length
-   - use profile query pad_to
-   - use profile pad_token_id / mask_token_id
-   - support truncation before padding
-   - retain [MASK] tokens for query when profile says so
-4. llama_batch construction must consume the encode plan instead of raw tokens.
-5. colbert_debug() must output the encode plan.
-6. Do not attempt custom llama.cpp attention masking yet.
-7. Add model_info known limitation:
-   attention_mask_policy="llama_default_noncausal" unless exact policy is implemented.
-8. Tests:
-   - query "red planet" with pad_to=32 yields 32 tokens
-   - doc "red planet" is not mask padded
-   - debug token count equals encode plan count
+1. Add GUCs:
+   turbohybrid.multivector_plain_fallback = auto | off | force
+   turbohybrid.multivector_plain_fallback_max_docs = integer, default choose conservative value
+   turbohybrid.multivector_plain_fallback_candidate_fraction = float, default e.g. 0.5
+2. In auto mode, choose exact/plain fallback when:
+   - estimated live document count is <= max_docs, or
+   - requested/effective doc_candidate_k exceeds candidate_fraction * estimated_docs, or
+   - exact rerank k exceeds candidate_fraction * estimated_docs.
+3. Implement fallback as exact document-level MaxSim over heap multivectors, respecting MVCC visibility and SQL LIMIT/final_k semantics.
+4. Add scan stats:
+   - multivector_plain_fallback_used
+   - multivector_plain_fallback_reason
+   - multivector_plain_fallback_docs_scored
+   - multivector_plain_fallback_pairs
+5. Ensure hybrid behavior is explicit:
+   - dense-only multivector may use plain fallback,
+   - hybrid RRF should either use dense plain fallback as dense branch or stay on existing path with clear stats,
+   - unsupported score-level fusion must remain rejected as before.
+6. Add regression tests for:
+   - force mode,
+   - off mode,
+   - auto mode on small table,
+   - MVCC visibility after delete/update where applicable.
+7. Update user docs.
+
+Acceptance criteria:
+- Exact/plain fallback returns the same top-K as turbohybrid_multivector_maxsim_distance exact scan.
+- The fallback is never silently used for unsupported fusion semantics.
+- Existing index path remains default for larger non-near-exhaustive cases.
 ```
 
 ---
 
-## Prompt B6 — Add strict attention-mask capability flag
+## Prompt 6 — Improve current token path with multi-reservoir retention
 
 ```text
-Repository: mayflower/pgturbohybrid
-Branch from: B5 branch
+You are working in the pgturbohybrid repository.
 
 Goal:
-Make attention-mask parity explicit instead of silently pretending to match PyLate.
+Make the current token/subvector candidate path less lossy before exact rerank by retaining document candidates through multiple reservoirs, not only a single approximate accumulated-score top-K.
+
+Context:
+A document can be globally strong by matching many query tokens moderately. A single partial-score top-K can drop such documents too early. We need candidate retention that preserves:
+- high partial MaxSim score,
+- broad query-token coverage,
+- strong per-token evidence,
+- BM25/RRF evidence when available.
 
 Tasks:
-1. Add profile field handling:
-   query.attention_mask_policy
-   document.attention_mask_policy
-2. Supported values initially:
-   - llama_default_noncausal
-   - pylate_query_expansion_requested
-3. If profile requests exact PyLate query expansion attention and pg_colbert_llama cannot express it in llama.cpp:
-   - default behavior: warn in colbert_model_info known_limitations
-   - if GUC pg_colbert_llama.strict_profile = on, raise ERROR
-4. Add GUC:
-   pg_colbert_llama.strict_profile bool default off
-5. colbert_model_info must report:
-   - strict_profile
-   - attention_mask_status: ok | approximated | unsupported
-6. colbert_debug must show attention_mask if known, and attention_mask_status.
-7. Tests:
-   - strict_profile=off allows approximated mask
-   - strict_profile=on rejects profile requesting unsupported exact mask
-8. Add TODO comment pointing to future llama.cpp encoder attention-mask support.
+1. Add an internal multivector candidate selection stage that builds the final exact-rerank candidate set as a union of reservoirs:
+   - top_by_approx_maxsim_sum
+   - top_by_query_token_coverage
+   - top_by_mean_seen_similarity
+   - per_query_token_top_docs
+   - optional bm25_injected_docs when hybrid/text branch exists
+2. Add GUCs:
+   turbohybrid.multivector_candidate_reservoirs = off | conservative | balanced
+   Default: conservative once tests pass, otherwise off during initial implementation.
+   turbohybrid.multivector_per_token_doc_reservoir_k = integer
+   turbohybrid.multivector_coverage_reservoir_k = integer
+3. Use the existing document accumulator. Do not duplicate exact MaxSim logic.
+4. Ensure final exact-rerank candidate count remains bounded by:
+   - multivector_doc_candidate_k,
+   - multivector_exact_rerank_k,
+   - max accumulator memory.
+5. Add stats:
+   - multivector_reservoirs_enabled
+   - multivector_reservoir_score_docs
+   - multivector_reservoir_coverage_docs
+   - multivector_reservoir_per_token_docs
+   - multivector_reservoir_bm25_docs
+   - multivector_reservoir_union_docs
+   - multivector_reservoir_duplicates
+6. Add deterministic tests using the synthetic “many moderate matches” setup.
+7. Update docs with explanation that this is a mitigation, not the final Qdrant-style architecture.
+
+Acceptance criteria:
+- The synthetic many-moderate-matches case improves admission without requiring near-exhaustive candidate_k.
+- Candidate counts and memory remain bounded.
+- Results are still document-keyed, never subvector-keyed.
 ```
 
 ---
 
-## Prompt B7 — Support projection module chains
+## Prompt 7 — Add query-token contribution diagnostics and token masking experiment
 
 ```text
-Repository: mayflower/pgturbohybrid
-Branch from: B6 branch
+You are working in the pgturbohybrid repository.
 
 Goal:
-Replace one hardcoded colbert.proj.weight path with a profile-driven projection chain.
+Add diagnostics to identify noisy query tokens that flood candidate generation and suppress useful documents.
 
-Current engine loads colbert.proj.weight or .colbert_proj sidecar and supports manual F32/F16 dense projection. Keep that as module_chain length 1, but generalize it.
+Context:
+Late-interaction candidate generation can be harmed by query tokens that produce many high-scoring but irrelevant token hits. We need per-query-token stats and an optional debug mode to skip low-value tokens.
 
 Tasks:
-1. Parse projection.modules from profile.
-2. Support module:
-   - type: dense
-   - weight tensor name
-   - optional bias tensor name
-   - input_dim
-   - output_dim
-   - activation: identity initially
-3. Support module:
-   - type: normalize
-   - p: 2
-4. Support module:
-   - type: truncate
-   - output_dim
-5. Dense module:
-   - load weight from GGUF or projection sidecar
-   - support F32/F16 initially
-   - support optional bias F32/F16
-6. If activation is not identity:
-   - if strict_profile=on, error
-   - otherwise error with precise message; do not silently ignore activation
-7. colbert_model_info reports:
-   - projection_kind
-   - projection_modules
-   - projection_status
-8. Tests:
-   - one dense no bias still works
-   - dense with bias fixture works
-   - unsupported activation errors cleanly
-   - truncate module changes output_dim
+1. Add per-query-token summary stats in debug mode:
+   - query_token_ordinal
+   - raw_hits
+   - unique_docs
+   - duplicate_doc_hits
+   - top_hit_similarity
+   - contribution_to_top_candidates
+   - candidate_docs_retained_from_token
+2. Expose the summary through turbohybrid_last_scan_stats() or a dedicated debug function.
+3. Add a debug GUC:
+   turbohybrid.multivector_debug_skip_query_tokens = comma-separated ordinals
+   Default empty.
+4. When set, skip those query token ordinals during candidate generation only.
+5. Exact rerank must still use the full query multivector unless another explicit debug GUC says otherwise.
+6. Extend DBpedia benchmark to run optional token-ablation experiments for a single query.
+
+Acceptance criteria:
+- Default behavior unchanged.
+- Token skip is clearly marked debug-only.
+- Stats are sufficient to identify tokens that contribute many raw hits but few final candidates.
 ```
 
 ---
 
-## Prompt B8 — Stop rejecting HF tokenizer JSON too early
+## Prompt 8 — Add dense-only BM25 candidate injection for MaxSim rerank
 
 ```text
-Repository: mayflower/pgturbohybrid
-Branch from: B7 branch
+You are working in the pgturbohybrid repository.
 
 Goal:
-Make tokenizer support profile-aware.
+Use the existing BM25 branch as an admission-recall safety net for multivector MaxSim rerank when text is available.
 
-Current code rejects GGUFs with embedded HF tokenizer JSON unless canonical tokenizer.ggml metadata is present. Keep a clear failure mode, but move the decision to profile/model load capability rather than a blanket rejection.
+Context:
+Learned sparse systems such as SPLATE use sparse retrieval as candidate generation and then rerank with ColBERT/MaxSim. pgturbohybrid already has BM25/RRF infrastructure. For multivector queries with text available, BM25 candidates can help admit documents that token ANN misses.
 
 Tasks:
-1. Replace PgColbertUnsupportedGgufMetadata() with:
-   PgColbertCheckTokenizerCapability(profile, model, path)
-2. If llama.cpp can load and tokenize the model, do not reject just because HF tokenizer JSON exists.
-3. If llama.cpp cannot tokenize and profile tokenizer.source == hf_json:
-   - error with remediation:
-     "prepare this GGUF with tokenizer.ggml metadata using colbert-gguf-converter --target-runtime llama_cpp"
-4. colbert_model_info reports:
-   - tokenizer_source
-   - tokenizer_status
-   - tokenizer_known_limitations
-5. Tests:
-   - GGUF metadata fixture with HF tokenizer JSON + canonical tokenizer metadata is accepted
-   - HF tokenizer JSON only reports unsupported_tokenizer unless stub profile says otherwise
-6. Keep existing safe behavior for truly unsupported tokenizers.
-```
+1. Add an option:
+   turbohybrid.multivector_bm25_candidate_injection = off | hybrid_only | dense_with_text
+   Default off initially.
+2. For dense multivector queries where the table/index has a BM25 key and the query has text_query:
+   - collect BM25 candidates,
+   - inject them into the exact MaxSim rerank candidate set,
+   - final ranking for dense-only mode must remain dense MaxSim, not RRF, unless fusion='rrf' was requested.
+3. Add stats:
+   - multivector_bm25_injection_enabled
+   - multivector_bm25_injection_candidates
+   - multivector_bm25_injection_retained
+   - multivector_bm25_injection_exact_reranked
+4. Preserve existing multivector fusion validation:
+   - RRF remains document-level,
+   - unsupported score-level fusion stays rejected.
+5. Add tests:
+   - dense-only multivector plus text_query with injection ranks by exact MaxSim after admission,
+   - RRF behavior unchanged,
+   - no lexical key -> clear error or no injection depending on existing semantics.
+6. Update docs.
 
-The current rejection is visible in the llama engine: if `tokenizer.huggingface.json` exists without canonical `tokenizer.ggml.*` metadata, the engine rejects the model.
+Acceptance criteria:
+- Injection improves admission opportunities but does not alter final dense-only scoring semantics.
+- No result is deduplicated by subvector nodeId.
+```
 
 ---
 
-## Prompt B9 — Upgrade PyLate comparison tool to token-plan parity
+## Prompt 9 — Design Qdrant-style document-level MaxSim graph
 
 ```text
-Repository: mayflower/pgturbohybrid
-Branch from: B8 branch
+You are working in the pgturbohybrid repository.
 
 Goal:
-Make compare_pylate.py diagnose where parity fails.
+Write a design document for a Qdrant-style document-level multivector graph, where candidate generation operates on document/point nodes and every candidate point is scored by approximate full MaxSim.
 
-Current tool compares vector rows and ranking. It needs token-plan and retention comparison first.
+Context:
+The current pgturbohybrid multivector graph indexes one node per document token. Qdrant’s multivector path scores point IDs using full MaxSim over the point’s stored multivector. The practical fix direction is:
+- graph node == document/point,
+- graph traversal scorer == approximate full MaxSim(query_mv, doc_mv),
+- graph build/link scorer == document-level multivector similarity,
+- quantization/oversampling/exact rerank are approximation layers, not a token-admission filter.
 
 Tasks:
-1. Update extensions/pg_colbert_llama/tools/compare_pylate.py.
-2. Add optional input:
-   --golden-token-plan path.json
-3. Add ability to call:
-   SELECT colbert_debug(%s, %s)::text
-4. Compare:
-   - token_ids_after_padding
-   - token pieces when available
-   - retain_mask
-   - final retained token_ids
-   - vector count
-5. Output JSON fields:
-   - token_plan_parity_passed
-   - retain_parity_passed
-   - vector_parity_passed
-   - ranking_passed
-   - first_token_mismatch
-   - first_retain_mismatch
-6. Change vector comparison:
-   - align vectors by retained token id/order when token plan is available
-   - otherwise retain existing row-wise comparison
-7. Add tests using stub debug JSON.
-8. Keep ranking smoke behavior.
-```
+1. Create docs/dev/multivector-document-graph-design.md.
+2. Include:
+   - problem statement,
+   - current token-node architecture,
+   - proposed document-node architecture,
+   - storage layout options,
+   - build algorithm,
+   - search algorithm,
+   - exact rerank integration,
+   - MVCC/dead tuple handling,
+   - incremental insert/update handling,
+   - compatibility strategy,
+   - GUC/index option names,
+   - migration/reindex guidance,
+   - testing plan.
+3. Address scoring:
+   - query-vs-document MaxSim is directional and natural,
+   - document-vs-document graph build needs either symmetric scoring or a documented directional choice,
+   - propose a symmetrized score such as 0.5 * (MaxSim(A,B)/count(A) + MaxSim(B,A)/count(B)) for graph edge construction if needed.
+4. Address storage:
+   - do not heap-fetch during graph traversal,
+   - store compact per-doc multivector codes or references in index-resident/cache-resident storage,
+   - reuse or extend the existing multivector docmap sidecar where appropriate.
+5. Include a staged implementation plan:
+   - Phase 1: in-memory/dev prototype,
+   - Phase 2: index-resident compact storage,
+   - Phase 3: quantized scorer + oversampling,
+   - Phase 4: exact heap rerank and production safeguards.
+6. Do not implement code in this prompt.
 
-The current comparison tool already computes vector parity and ranking smoke, so this is an incremental upgrade rather than a replacement.
+Acceptance criteria:
+- The design is detailed enough for implementation prompts.
+- It explicitly explains why this aligns candidate generation with MaxSim.
+- It lists all on-disk compatibility risks.
+```
 
 ---
 
-## Prompt B10 — Add profile-aware live TAP tests
+## Prompt 10 — Prototype document-level MaxSim search behind a dev-only GUC
 
 ```text
-Repository: mayflower/pgturbohybrid
-Branch from: B9 branch
+You are working in the pgturbohybrid repository.
 
 Goal:
-Add live tests that prove profile consumption and pgturbohybrid search integration without requiring CI model downloads.
+Prototype document-level MaxSim candidate generation behind a dev-only GUC, without changing on-disk format.
+
+Prerequisite:
+Read docs/dev/multivector-document-graph-design.md first. If it does not exist, stop and write it before coding.
+
+Context:
+This prototype should prove whether document-level candidate generation solves the DBpedia admission problem. It does not need to be the final storage format.
 
 Tasks:
-1. Extend extensions/pg_colbert_llama/test/t/002_live_pgturbohybrid_multivector.pl.
-2. Keep existing PG_COLBERT_LLAMA_TEST_MODEL gating.
-3. Add optional env:
-   PG_COLBERT_LLAMA_TEST_PROFILE
-   PG_COLBERT_LLAMA_TOKEN_PLAN_GOLDEN
-4. If profile env is present:
-   - copy or symlink it into model_dir as <alias>.gguf.colbert_profile.json
-   - assert colbert_model_info profile_loaded=true
-   - assert profile_source=sidecar or gguf
-5. If token-plan golden env is present:
-   - call colbert_debug()
-   - compare token ids after padding
-   - compare retain mask
-   - compare count
-6. Keep existing tests:
-   - model loads
-   - projection_status ok
-   - vectors finite and normalized
-   - query/doc prefix embeddings differ
-   - pgturbohybrid dense indexed search works
-   - pgturbohybrid hybrid indexed search works
-7. Do not make these live tests run by default in normal CI.
-```
+1. Add a dev-only candidate source:
+   turbohybrid.multivector_candidate_source = graph | exact_token_scan | exact_doc_scan | doc_graph_prototype
+2. For doc_graph_prototype:
+   - build or derive an in-memory document list for the scan from existing index/docmap/heap-accessible data,
+   - perform a simple HNSW-like or beam-search-like traversal over document IDs if feasible,
+   - score candidate documents with approximate full MaxSim using index-resident quantized token data where available,
+   - otherwise use heap multivectors only in prototype mode with clear stats and warnings.
+3. Exact rerank still uses existing heap float32 MaxSim.
+4. Add stats:
+   - multivector_doc_graph_prototype_enabled
+   - multivector_doc_graph_docs_scored
+   - multivector_doc_graph_edges_visited if graph-like
+   - multivector_doc_graph_candidates
+   - multivector_doc_graph_heap_fetches
+   - multivector_doc_graph_warning
+5. Keep this explicitly non-default.
+6. Extend DBpedia benchmark to include this candidate source.
+7. Compare:
+   - graph token path,
+   - exact token scan,
+   - exact doc scan,
+   - doc graph prototype.
+8. Add docs warning that this is a validation prototype.
 
-The existing live TAP test already verifies model load, projection status, finite normalized vectors, and indexed pgturbohybrid dense/hybrid search.
-
----
-
-# C. Cross-repo prompts
-
-## Prompt C1 — Converter/runtime contract test fixture
-
-```text
-Repositories:
-- mayflower/colbert-gguf-converter
-- mayflower/pgturbohybrid
-
-Goal:
-Create a shared fixture contract so converter output can be consumed by pg_colbert_llama.
-
-In colbert-gguf-converter:
-1. Add tests/fixtures/profile_sauerkraut_15m_minimal.json.
-2. Add tests/fixtures/token_plan_red_planet_query.json.
-3. Add tests/fixtures/token_plan_red_planet_doc.json.
-4. Add a small README describing fixture meaning.
-
-In pgturbohybrid:
-1. Copy or vendor those fixtures under:
-   extensions/pg_colbert_llama/test/fixtures/
-2. Add a test that loads profile fixture in stub mode.
-3. Add a test that colbert_debug() shape can be compared against token plan fixture.
-
-Important:
-The fixture should not contain large model weights.
+Acceptance criteria:
+- No on-disk format change.
+- Default behavior unchanged.
+- Prototype can be benchmarked against exact scan and token candidate generation.
+- It reports whether exact top-1/top-10 are admitted at much lower candidate counts.
 ```
 
 ---
 
-## Prompt C2 — End-to-end local smoke script
+## Prompt 11 — Implement production document-level graph storage plan
 
 ```text
-Repositories:
-- mayflower/colbert-gguf-converter
-- mayflower/pgturbohybrid
+You are working in the pgturbohybrid repository.
 
 Goal:
-Add a documented local smoke procedure that converts a model, writes a profile, installs it into PostgreSQL model_dir, and runs pg_colbert_llama live tests.
+Implement the first production slice of document-level multivector graph storage, using a versioned on-disk format and clear REINDEX requirements.
 
-In colbert-gguf-converter:
-1. Add examples/convert_for_pg_colbert_llama.sh.
-2. It should run:
-   python tools/convert_colbert_hf_to_gguf.py \
-     --model-id VAGOsolutions/SauerkrautLM-Multi-ColBERT-15m \
-     --target-runtime llama_cpp \
-     --outfile ./build/sauerkraut-modern.gguf \
-     --outtype f16 \
-     --write-profile-sidecar
-3. It should print:
-   - output GGUF path
-   - profile sidecar path
-   - recommended PG_COLBERT_LLAMA_TEST_MODEL
-   - recommended PG_COLBERT_LLAMA_TEST_PROFILE
-
-In pgturbohybrid:
-1. Add extensions/pg_colbert_llama/README section:
-   "Using a profile generated by colbert-gguf-converter"
-2. Include exact env vars:
-   PG_COLBERT_LLAMA_TEST_MODEL
-   PG_COLBERT_LLAMA_TEST_PROFILE
-3. Do not download models in default CI.
-```
-
----
-
-## Prompt C3 — Compatibility matrix
-
-```text
-Repositories:
-- mayflower/colbert-gguf-converter
-- mayflower/pgturbohybrid
-
-Goal:
-Create a compatibility matrix for supported ColBERT model families.
-
-In colbert-gguf-converter:
-1. Add docs/COMPATIBILITY.md with rows:
-   - BERT WordPiece PyLate ColBERT
-   - ModernBERT PyLate ColBERT
-   - SentenceTransformers Dense ColBERT
-   - HF tokenizer JSON only
-   - llama.cpp canonical tokenizer metadata
-2. Columns:
-   - converter support
-   - llama.cpp load support
-   - pg_colbert_llama load support
-   - token-plan parity support
-   - vector parity support
-   - known limitations
-
-In pgturbohybrid:
-1. Add a link from extensions/pg_colbert_llama/README.md.
-2. Add a short local compatibility table specific to runtime.
-3. Make sure claims are conservative:
-   - "shape/ranking smoke" when strict parity is not proved
-   - "strict PyLate parity" only when token-plan and vector parity tests pass
-```
-
----
-
-# D. Follow-up prompts for strict parity
-
-## Prompt D1 — Fix document punctuation parity first
-
-```text
-Repository: mayflower/pgturbohybrid
-Depends on:
-- profile loader
-- colbert_debug
-- converter skiplist_token_ids
-
-Goal:
-Eliminate document count mismatch caused by punctuation retention.
+Prerequisite:
+Only start this after the doc_graph_prototype benchmark shows materially better admission recall than the token-node path.
 
 Tasks:
-1. Use profile.document.skiplist_token_ids for document filtering.
-2. Use profile.document.skiplist_words only as fallback.
-3. Add test:
-   document text "red planet."
-   profile skiplist contains "."
-   final retained tokens exclude "."
-4. Add PyLate comparison:
-   compare_pylate.py reports retain_parity_passed=true for this case.
-5. Do not chase vector cosine delta until token count and retain mask match exactly.
+1. Add an index option:
+   multivector_graph = token_nodes | document_nodes
+   Default: token_nodes for compatibility.
+2. For document_nodes:
+   - assign one graph node per heap document,
+   - store docId -> heap TID,
+   - store compact per-document multivector code blocks,
+   - store token count and dimensions,
+   - preserve MVCC visibility semantics.
+3. Add versioned sidecar/page structures with magic/version fields.
+4. Add metapage fields for document-node multivector storage.
+5. Implement build-time document graph construction:
+   - graph edge scorer uses document-level multivector similarity,
+   - use approximate/quantized MaxSim where possible,
+   - document-vs-document scoring must match the design doc.
+6. Implement search:
+   - graph traversal visits document nodes,
+   - scores candidates using approximate full MaxSim,
+   - oversamples,
+   - exact-reranks heap multivectors.
+7. Add scan/index stats:
+   - multivector_graph_mode
+   - multivector_doc_graph_nodes
+   - multivector_doc_graph_candidates
+   - multivector_doc_graph_quantized_scores
+   - multivector_doc_graph_exact_rerank_docs
+8. Add tests:
+   - build,
+   - scan,
+   - insert,
+   - update/delete/vacuum,
+   - old index compatibility,
+   - REINDEX guidance for unsupported/missing sidecar,
+   - deterministic recall test from synthetic many-moderate-matches case.
+9. Update docs.
+
+Acceptance criteria:
+- Existing token-node indexes still work.
+- New document-node indexes require explicit opt-in.
+- No silent fallback on corrupt sidecar metadata.
+- Candidate generation is document-keyed and MaxSim-aligned.
 ```
 
 ---
 
-## Prompt D2 — Investigate query cosine delta
+## Prompt 12 — Add acceptance benchmark gate for multivector recall
 
 ```text
-Repository: mayflower/pgturbohybrid
-Depends on:
-- token-plan parity
+You are working in the pgturbohybrid repository.
 
 Goal:
-Determine whether query vector delta comes from token plan, attention mask, projection, normalization, or llama.cpp numerics.
+Add a developer benchmark gate that prevents future regressions in multivector candidate admission.
 
 Tasks:
-1. Add debug mode:
-   pg_colbert_llama.debug_dump_stage = off|token|hidden|projected|normalized
-   or expose stage data only in test builds if too large.
-2. For a single query "red planet", compare against PyLate:
-   - token ids
-   - attention mask
-   - hidden state before projection if PyLate can expose it
-   - projection output before normalization
-   - final normalized vectors
-3. Add compare_pylate.py options:
-   --compare-stage hidden|projected|normalized
-4. Print first layer/stage where cosine delta exceeds threshold.
-5. If the first mismatch is before projection and token plan matches:
-   document as likely llama.cpp encoder-mask/numeric difference.
-6. If mismatch starts at projection:
-   fix projection orientation/bias/activation.
-7. If mismatch starts after normalization:
-   fix normalization precision/order.
+1. Add a benchmark/report mode that runs:
+   - exact scan baseline,
+   - current token graph,
+   - exact token scan debug mode,
+   - multi-reservoir token mode if implemented,
+   - plain fallback,
+   - doc graph prototype or document_nodes mode if implemented.
+2. On the deterministic synthetic test:
+   - exact top-1 must be admitted by the chosen fixed path at small candidate budgets.
+3. On DBpedia when data is available:
+   - report exact_top1_admission_rate,
+   - exact_top10_admission_recall,
+   - latency p50/p95,
+   - candidate count,
+   - exact rerank docs,
+   - memory estimate.
+4. Add a Markdown output summary suitable for pasting into PR descriptions.
+5. Do not make DBpedia external data required for normal CI.
+6. Add documentation explaining how to run the gate locally.
+
+Acceptance criteria:
+- CI remains self-contained.
+- Developers can reproduce admission-recall claims with one command when DBpedia data is available.
+- The report makes it obvious whether a change improves admission, reranking, or only final metric luck.
 ```
 
 ---
 
-## Prompt D3 — Upstream or local llama.cpp attention-mask support
+## Prompt 13 — Cleanup and docs after mitigation/fix
 
 ```text
-Repository: mayflower/pgturbohybrid
-Potential external dependency: llama.cpp
+You are working in the pgturbohybrid repository.
 
 Goal:
-Prepare the work needed for exact PyLate query expansion attention mask support.
+Clean up the multivector candidate-generation code and documentation after the debug/fix work.
 
 Tasks:
-1. Add docs/llama-encoder-attention-mask-gap.md.
-2. Document current llama.cpp batch fields used by pg_colbert_llama.
-3. Document PyLate/HF attention mask required for query expansion.
-4. Add a minimal C++ reproduction outside PostgreSQL:
-   extensions/pg_colbert_llama/tools/llama_colbert_attention_mask_probe.cpp
-5. The probe should:
-   - load the same GGUF
-   - run current default llama encode
-   - optionally run a patched/custom attention mask path if available
-   - dump final token embeddings
-6. If llama.cpp exposes a public API for encoder attention mask by the current version, use it.
-7. If not, prepare an upstream issue/PR summary.
-8. In pg_colbert_llama, keep strict_profile=on rejecting exact mask profiles until support exists.
+1. Review all multivector paths for document-keying invariants:
+   - SQL results must be heap/document keyed,
+   - subvector node IDs are only evidence,
+   - final exact MaxSim ranks documents.
+2. Remove or clearly mark temporary debug-only code.
+3. Ensure all new GUCs are documented with defaults and safety limits.
+4. Update:
+   - docs/multivector-late-interaction.md
+   - docs/dev/multivector-late-interaction.md
+   - docs/dev/multivector-candidate-admission-audit.md
+   - benchmark docs
+5. Add a “Known tradeoffs” section:
+   - token-node candidate generation can miss many-moderate-match docs,
+   - exact/plain fallback is safer for small or near-exhaustive cases,
+   - document-level graph aligns candidate generation with MaxSim,
+   - exact rerank remains the semantic final scorer.
+6. Run the full relevant test set.
+
+Acceptance criteria:
+- Docs match actual GUC names and stats fields.
+- No stale references to old debug field names.
+- Tests pass.
 ```
 
 ---
 
-# E. Final documentation prompt
+## Recommended order to run them
 
-## Prompt E1 — Update claims and release notes
-
-```text
-Repositories:
-- mayflower/colbert-gguf-converter
-- mayflower/pgturbohybrid
-
-Goal:
-Update docs so users know exactly what is supported.
-
-In colbert-gguf-converter:
-1. README should describe:
-   - pg_colbert_v1 GGUF
-   - llama_cpp target runtime
-   - profile sidecar
-   - parity report artifacts
-2. docs/COLBERT_PROFILE_SPEC.md must be linked.
-3. Publishing docs must explain profile upload.
-
-In pgturbohybrid:
-1. extensions/pg_colbert_llama/README.md should state:
-   - profile-aware models are preferred
-   - shape/ranking smoke is not strict vector parity
-   - strict parity requires token-plan and vector parity reports
-2. colbert_model_info docs should explain:
-   - profile_source
-   - compatibility_level
-   - attention_mask_status
-   - tokenizer_status
-   - projection_status
-3. Add examples:
-   - profile-based model install
-   - dense pgturbohybrid multivector search
-   - hybrid pgturbohybrid multivector + BM25 search
-4. Add release note:
-   "Do not claim universal ColBERT support. Claim profile-backed BERT/ModernBERT ColBERT support at the compatibility level reported by colbert_model_info()."
-```
-
----
-
-# Suggested PR order
-
-I would merge in this order:
+Run these first because they are low-risk and will tell you exactly where the quality is lost:
 
 ```text
-1. converter: profile spec + dataclasses
-2. converter: profile extraction + sidecar + GGUF metadata
-3. pgturbohybrid: profile parser + colbert_model_info reporting
-4. pgturbohybrid: colbert_debug token plan
-5. pgturbohybrid: profile-driven retention / skiplist
-6. converter: token-plan golden generator
-7. pgturbohybrid: compare_pylate token-plan parity
-8. pgturbohybrid: projection module chain
-9. converter: llama_cpp target runtime export
-10. cross-repo live profile integration
-11. attention-mask investigation / upstream llama.cpp work
+0 -> 1 -> 2 -> 3 -> 4
 ```
 
-The first concrete parity win should be **document skiplist parity**, because the current code only drops PAD for documents. After that, token-plan parity will tell you whether the remaining query cosine delta is an attention-mask gap, projection issue, or llama.cpp numerical/model-path issue.
+Then land the safest production improvements:
+
+```text
+5 -> 6 -> 7 -> 8
+```
+
+Then move to the architectural fix:
+
+```text
+9 -> 10 -> 11
+```
+
+Finally add benchmark gates and cleanup:
+
+```text
+12 -> 13
+```
+
+The most valuable first PR is probably **Prompts 1–4 together or separately**: admission diagnostics, deterministic regression, DBpedia admission reporting, and exact-token oracle mode. Those will turn the DBpedia result from “candidate generation seems lossy” into a precise failure classification: ANN miss, structural token-top-k miss, truncation miss, or exact-rerank issue.
+
+[1]: https://github.com/qdrant/qdrant/blob/master/lib/segment/src/vector_storage/query_scorer/mod.rs "qdrant/lib/segment/src/vector_storage/query_scorer/mod.rs at master · qdrant/qdrant · GitHub"

@@ -160,6 +160,14 @@ SET turbohybrid.multivector_unique_docs_per_token = 100;
 SET turbohybrid.multivector_max_raw_hits_per_token = 400;
 SET turbohybrid.multivector_adaptive_widening = 'auto'; -- off | auto | on
 SET turbohybrid.multivector_doc_candidate_k = 100;
+SET turbohybrid.multivector_candidate_source = 'graph'; -- graph | exact_token_scan | exact_doc_scan | doc_graph_prototype
+SET turbohybrid.multivector_plain_fallback = 'auto'; -- auto | off | force
+SET turbohybrid.multivector_plain_fallback_max_docs = 1000;
+SET turbohybrid.multivector_plain_fallback_candidate_fraction = 0.5;
+SET turbohybrid.multivector_candidate_reservoirs = 'conservative'; -- off | conservative | balanced
+SET turbohybrid.multivector_per_token_doc_reservoir_k = 1;
+SET turbohybrid.multivector_coverage_reservoir_k = 10;
+SET turbohybrid.multivector_bm25_candidate_injection = 'off'; -- off | hybrid_only | dense_with_text
 SET turbohybrid.multivector_docmap = 'auto'; -- off | auto | require
 ```
 
@@ -174,6 +182,53 @@ sidecar used by multivector indexes. `auto` prefers the sidecar and falls back
 to the heap-TID hash path for old indexes that do not have it. `off` forces the
 heap-TID hash path. `require` fails with REINDEX guidance if a sidecar is
 missing or malformed.
+
+`turbohybrid.multivector_candidate_source` defaults to `graph`. For
+`multivector_graph = token_nodes`, that is the production token-node graph
+path. For `multivector_graph = document_nodes`, it uses the explicit
+document-node index path described below. `exact_token_scan`, `exact_doc_scan`,
+and `doc_graph_prototype` are developer validation modes for separating token
+graph recall, token-top-K admission loss, exact document MaxSim, and
+document-level graph behavior. They are useful for benchmark diagnosis, not
+normal serving defaults.
+
+`turbohybrid.multivector_plain_fallback = auto` switches to exact heap MaxSim
+when the estimated corpus is small enough or the requested candidate/rerank
+budget is near-exhaustive. `force` is the exact document oracle inside the
+access method; `off` keeps the token-node candidate path active for diagnostics.
+
+Multivector indexes also accept:
+
+```sql
+WITH (multivector_graph = token_nodes)
+```
+
+`token_nodes` is the default compatibility storage mode. It preserves existing
+behavior and reports `multivector_graph_mode = token_nodes` in
+`turbohybrid_index_stats()`. Explicit `document_nodes` indexes store one graph
+node per heap document and a versioned float32 multivector sidecar. Build-time
+edge selection uses symmetrized document MaxSim. Non-exhaustive scans traverse
+document graph adjacency, score visited candidates by exact float32 sidecar
+MaxSim, and exact-rerank heap multivectors. Near-exhaustive scans use the exact
+sidecar scan. `multivector_doc_graph_warning` reports
+`document_node_f32_sidecar_graph_traversal` or
+`document_node_f32_sidecar_exact_scan`; compact quantized document scoring is
+still future work. Missing or malformed document-node sidecar metadata fails
+with REINDEX guidance instead of silently falling back to token-node storage.
+
+`turbohybrid.multivector_candidate_reservoirs` can replace score-only document
+truncation with a bounded union of score, coverage, mean seen-similarity, and
+per-query-token document reservoirs before exact rerank. This mitigates
+token-node admission loss when useful pre-rerank evidence reached the
+accumulator, but it is not a substitute for exact/plain fallback or a future
+document-level MaxSim graph.
+
+`turbohybrid.multivector_bm25_candidate_injection` can use lexical BM25 hits as
+an admission safety net for multivector MaxSim when the index has a BM25 key and
+the query supplies `text_query`. `hybrid_only` applies this to hybrid
+multivector/text queries. `dense_with_text` also allows text-backed dense-only
+MaxSim runs where BM25 admits candidates, but exact MaxSim remains the dense
+score. RRF, when requested, still fuses document-level ranks.
 
 Exact heap rerank:
 
@@ -244,6 +299,27 @@ Useful fields include:
 - `multivector_doc_candidates`
 - `multivector_docmap_source`
 - `multivector_docmap_bytes`
+- `multivector_reservoirs_enabled`
+- `multivector_reservoir_score_docs`
+- `multivector_reservoir_coverage_docs`
+- `multivector_reservoir_mean_docs`
+- `multivector_reservoir_per_token_docs`
+- `multivector_reservoir_bm25_docs`
+- `multivector_reservoir_union_docs`
+- `multivector_reservoir_duplicates`
+- `multivector_bm25_injection_enabled`
+- `multivector_bm25_injection_candidates`
+- `multivector_bm25_injection_retained`
+- `multivector_bm25_injection_exact_reranked`
+- `multivector_doc_graph_prototype_enabled`
+- `multivector_doc_graph_nodes`
+- `multivector_doc_graph_docs_scored`
+- `multivector_doc_graph_edges_visited`
+- `multivector_doc_graph_candidates`
+- `multivector_doc_graph_quantized_scores`
+- `multivector_doc_graph_heap_fetches`
+- `multivector_doc_graph_exact_rerank_docs`
+- `multivector_doc_graph_warning`
 - `multivector_exact_rerank_enabled`
 - `multivector_exact_rerank_docs`
 - `multivector_exact_rerank_pairs`
@@ -254,6 +330,28 @@ Useful fields include:
 For resident-cache sizing, `turbohybrid_estimate_memory(index)` reports
 `native.multivector_docmap_bytes` and includes those bytes in
 `native.estimated_total_bytes` when the index has a valid sidecar.
+
+## Known Tradeoffs
+
+- Token-node candidate generation can miss many-moderate-match documents. A
+  document may be the exact MaxSim top result because many query tokens match
+  moderately, while no single document token is admitted early enough by
+  per-token top-K search.
+- Exact/plain fallback is safer for small or near-exhaustive cases. It scores
+  MVCC-visible documents with full float32 MaxSim and avoids lossy token-node
+  admission.
+- Multi-reservoir retention and BM25 candidate injection are mitigations. They
+  can preserve better document candidates after evidence reaches the
+  accumulator, but they cannot recover a document that no candidate source
+  admitted.
+- A document-level graph is the MaxSim-aligned candidate-generation direction.
+  `document_nodes` is explicit opt-in today and avoids token admission loss by
+  scoring document candidates with full sidecar MaxSim. Its current warning
+  marks that this first slice is an exact float32 sidecar scan, not yet the
+  final compact quantized HNSW traversal.
+- Exact rerank remains the semantic final scorer. Approximate candidates and
+  admission sources should only decide which documents are eligible for exact
+  MaxSim scoring.
 
 ## Limitations
 
