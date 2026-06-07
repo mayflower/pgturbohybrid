@@ -3188,10 +3188,14 @@ BEGIN
 		'graph_ef_search',
 		'graph_m',
 		'graph_oversampling',
-		'hybrid',
-		'index_shape',
-		'multivector_graph_mode',
-		'native_segment_bytes',
+			'hybrid',
+			'index_shape',
+			'multivector_context_mode',
+			'multivector_field_mode',
+			'multivector_graph_mode',
+			'multivector_model_known',
+			'multivector_model_name',
+			'native_segment_bytes',
 		'native_segments',
 		'node_count',
 		'profile',
@@ -3216,6 +3220,10 @@ BEGIN
 	IF keys <> ARRAY[
 		'available',
 		'build_code_only',
+		'build_distance_cache_collisions',
+		'build_distance_cache_hits',
+		'build_distance_cache_misses',
+		'build_distance_cache_stores',
 		'build_distance_calls',
 		'build_distance_code_code',
 		'build_distance_exact',
@@ -3287,6 +3295,7 @@ BEGIN
 		'adaptive_gap_top10',
 		'adaptive_initial_result_target',
 		'adaptive_initial_search_ef',
+		'adaptive_rerank_topk_changed_vs_full',
 		'adaptive_widening_reason',
 		'adaptive_widening_triggered',
 		'adj_buffer_lock_wait_us',
@@ -3327,6 +3336,17 @@ BEGIN
 		'bm25_postings_decode_ratio',
 		'bm25_strategy',
 		'bm25_wand_pruned',
+		'branch_candidate_counts',
+		'branch_candidate_limits',
+		'branch_count',
+		'branch_fusion_mode',
+		'branch_kinds',
+		'branch_latency_us',
+		'branch_ranks',
+		'branch_rescore_limits',
+		'branch_scores',
+		'branch_source_flags',
+		'branch_truncated_flags',
 		'build_fast_edges',
 		'build_neighbor_select',
 		'build_neighbor_select_reason',
@@ -3337,7 +3357,17 @@ BEGIN
 		'calibrated_fusion_enabled',
 		'calibrated_fusion_query_shape',
 		'candidate_objects_allocated',
+		'centroid_candidates',
+		'centroid_docs_touched',
+		'centroid_lists_visited',
+		'centroid_pruned_docs',
 		'code_buffer_lock_wait_us',
+		'dbsf_branch_max',
+		'dbsf_branch_mean',
+		'dbsf_branch_min',
+		'dbsf_branch_stddev',
+		'dbsf_degenerate_branches',
+		'dbsf_enabled',
 		'dense',
 		'dense_adaptive_final_result_target',
 		'dense_adaptive_final_search_ef',
@@ -3392,6 +3422,10 @@ BEGIN
 		'effective_search_ef_before_segment_scaling',
 		'elapsed_us',
 			'exact_free',
+			'exact_rerank_candidates',
+			'exact_rerank_pairs_saved',
+			'exact_rerank_tokens_evaluated',
+			'exact_rerank_tokens_skipped',
 			'exact_rescore_count',
 			'exact_rescore_for_bm25_only',
 			'exact_rescore_source',
@@ -3497,6 +3531,9 @@ BEGIN
 		'hybrid_query_shape',
 		'index_shape',
 		'index_used',
+		'learned_sparse_branch_latency_us',
+		'learned_sparse_candidates',
+		'learned_sparse_retained_for_maxsim',
 		'multivector_accumulator_kind',
 		'multivector_adaptive_final_raw_target',
 		'multivector_adaptive_initial_raw_target',
@@ -3512,6 +3549,7 @@ BEGIN
 			'multivector_bm25_injection_enabled',
 			'multivector_bm25_injection_exact_reranked',
 			'multivector_bm25_injection_retained',
+			'multivector_branch_plan',
 			'multivector_candidate_source',
 		'multivector_doc_candidates',
 		'multivector_doc_graph_candidates',
@@ -3519,6 +3557,9 @@ BEGIN
 		'multivector_doc_graph_edges_visited',
 		'multivector_doc_graph_exact_rerank_docs',
 		'multivector_doc_graph_heap_fetches',
+		'multivector_doc_graph_insert_full_maxsim_edges',
+		'multivector_doc_graph_insert_pairs_scored',
+		'multivector_doc_graph_insert_representative_fallbacks',
 		'multivector_doc_graph_nodes',
 		'multivector_doc_graph_oversampling',
 		'multivector_doc_graph_prototype_enabled',
@@ -3528,6 +3569,12 @@ BEGIN
 		'multivector_doc_graph_search_ef',
 		'multivector_doc_graph_storage_kind',
 		'multivector_doc_graph_warning',
+		'multivector_doc_sidecar_bytes_touched',
+		'multivector_doc_sidecar_cache_hits',
+		'multivector_doc_sidecar_cache_misses',
+		'multivector_doc_sidecar_cache_mode',
+		'multivector_doc_sidecar_pages_read',
+		'multivector_doc_sidecar_vectors_loaded',
 		'multivector_doc_vectors_limit',
 		'multivector_docmap_bytes',
 		'multivector_docmap_source',
@@ -3558,6 +3605,9 @@ BEGIN
 		'multivector_reservoir_union_docs',
 		'multivector_reservoirs_enabled',
 		'multivector_subvector_searches',
+		'multivector_token_pooling_ratio',
+		'multivector_tokens_original',
+		'multivector_tokens_pooled',
 		'multivector_unique_docs',
 		'native_cache_adj_bytes',
 		'native_cache_attach_us',
@@ -3585,7 +3635,17 @@ BEGIN
 		'payload_entry_seeding_mode',
 		'per_segment_budget_mode',
 		'profile',
+		'proxy_candidates',
+		'proxy_encoder_kind',
+		'proxy_exact_rerank_docs',
+		'proxy_top1_admission',
 		'quantization_bits',
+		'quantized_inverted_candidates',
+		'quantized_inverted_codebook_size',
+		'quantized_inverted_docs_scored',
+		'quantized_inverted_exact_rerank_docs',
+		'quantized_inverted_lists_visited',
+		'quantized_inverted_postings_touched',
 		'query',
 		'query_split_enabled',
 		'residual_rerank_active',
@@ -3754,6 +3814,41 @@ BEGIN
 	PERFORM set_config('turbohybrid.multivector_adaptive_widening', 'off', true);
 	IF current_setting('turbohybrid.multivector_adaptive_widening') <> 'off' THEN
 		RAISE EXCEPTION 'multivector_adaptive_widening off GUC did not stick';
+	END IF;
+
+	PERFORM set_config('turbohybrid.multivector_branch_plan', 'auto', true);
+	IF current_setting('turbohybrid.multivector_branch_plan') <> 'auto' THEN
+		RAISE EXCEPTION 'multivector_branch_plan auto GUC did not stick';
+	END IF;
+
+	PERFORM set_config('turbohybrid.multivector_branch_plan', 'dense_only', true);
+	IF current_setting('turbohybrid.multivector_branch_plan') <> 'dense_only' THEN
+		RAISE EXCEPTION 'multivector_branch_plan dense_only GUC did not stick';
+	END IF;
+
+	PERFORM set_config('turbohybrid.multivector_branch_plan', 'qdrant_like', true);
+	IF current_setting('turbohybrid.multivector_branch_plan') <> 'qdrant_like' THEN
+		RAISE EXCEPTION 'multivector_branch_plan qdrant_like GUC did not stick';
+	END IF;
+
+	PERFORM set_config('turbohybrid.dbsf_sigma', '2.5', true);
+	IF current_setting('turbohybrid.dbsf_sigma')::float8 <> 2.5 THEN
+		RAISE EXCEPTION 'dbsf_sigma GUC did not stick';
+	END IF;
+
+	PERFORM set_config('turbohybrid.dbsf_min_branch_candidates', '3', true);
+	IF current_setting('turbohybrid.dbsf_min_branch_candidates')::int <> 3 THEN
+		RAISE EXCEPTION 'dbsf_min_branch_candidates GUC did not stick';
+	END IF;
+
+	PERFORM set_config('turbohybrid.dbsf_robust', 'mad', true);
+	IF current_setting('turbohybrid.dbsf_robust') <> 'mad' THEN
+		RAISE EXCEPTION 'dbsf_robust mad GUC did not stick';
+	END IF;
+
+	PERFORM set_config('turbohybrid.dbsf_robust', 'off', true);
+	IF current_setting('turbohybrid.dbsf_robust') <> 'off' THEN
+		RAISE EXCEPTION 'dbsf_robust off GUC did not stick';
 	END IF;
 
 	PERFORM set_config('turbohybrid.multivector_candidate_reservoirs', 'conservative', true);

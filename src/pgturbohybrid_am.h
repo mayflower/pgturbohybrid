@@ -60,6 +60,14 @@ typedef struct PgturbohybridOptions
 	bool		residualRerank;
 	int			residualRerankBytes;
 	int			multivectorGraphMode;
+	int			multivectorTokenPooling;
+	float8		multivectorTokenPoolingTargetRatio;
+	int			multivectorTokenPoolingMinTokens;
+	int			multivectorCentroids;
+	int			multivectorCentroidCount;
+	int			multivectorProxyEncoder;
+	int			multivectorContextMode;
+	int			multivectorFieldMode;
 	float8		bm25K1;
 	float8		bm25B;
 	bool		bm25BlockMax;
@@ -74,12 +82,60 @@ typedef struct PgturbohybridOptions
 	int			hybridDefaultRrfK;
 }			PgturbohybridOptions;
 
+#define PGTURBOHYBRID_BRANCH_PLAN_MAX_BRANCHES 8
+
+typedef enum PgturbohybridBranchPlanMode
+{
+	PGTURBOHYBRID_BRANCH_PLAN_AUTO,
+	PGTURBOHYBRID_BRANCH_PLAN_DENSE_ONLY,
+	PGTURBOHYBRID_BRANCH_PLAN_QDRANT_LIKE
+}			PgturbohybridBranchPlanMode;
+
+typedef enum PgturbohybridBranchKind
+{
+	PGTURBOHYBRID_BRANCH_KIND_BM25,
+	PGTURBOHYBRID_BRANCH_KIND_DENSE_SINGLE,
+	PGTURBOHYBRID_BRANCH_KIND_PROXY_VECTOR,
+	PGTURBOHYBRID_BRANCH_KIND_DOCUMENT_NODES,
+	PGTURBOHYBRID_BRANCH_KIND_TOKEN_NODES,
+	PGTURBOHYBRID_BRANCH_KIND_EXACT_DOC_SCAN,
+	PGTURBOHYBRID_BRANCH_KIND_CENTROID_LITE,
+	PGTURBOHYBRID_BRANCH_KIND_QUANTIZED_INVERTED_EXPERIMENTAL
+}			PgturbohybridBranchKind;
+
+#define PGTURBOHYBRID_BRANCH_SOURCE_DENSE		(1U << 0)
+#define PGTURBOHYBRID_BRANCH_SOURCE_BM25		(1U << 1)
+#define PGTURBOHYBRID_BRANCH_SOURCE_MULTIVECTOR	(1U << 2)
+#define PGTURBOHYBRID_BRANCH_SOURCE_EXACT		(1U << 3)
+
+typedef struct PgturbohybridBranchPlanItem
+{
+	int			kind;
+	uint32		candidateLimit;
+	uint32		rescoreLimit;
+	uint32		branchRank;
+	double		branchScore;
+	uint32		sourceFlags;
+	uint32		candidateCount;
+	bool		truncated;
+	uint64		latencyUs;
+}			PgturbohybridBranchPlanItem;
+
+typedef struct PgturbohybridBranchPlan
+{
+	int			mode;
+	uint32		count;
+	char		fusionMode[32];
+	PgturbohybridBranchPlanItem items[PGTURBOHYBRID_BRANCH_PLAN_MAX_BRANCHES];
+}			PgturbohybridBranchPlan;
+
 typedef struct PgturbohybridScanStatsSnapshot
 {
 	char		indexShape[16];
 	bool		bm25BranchAvailable;
 	bool		denseBranchUsed;
 	bool		bm25BranchUsed;
+	PgturbohybridBranchPlan branchPlan;
 	uint32		denseCandidatesEffective;
 	bool		denseKDefaulted;
 	uint32		bm25CandidatesEffective;
@@ -114,6 +170,12 @@ typedef struct PgturbohybridScanStatsSnapshot
 	char		calibratedFusionBm25NormMode[16];
 	char		bm25NormMode[16];
 	char		denseNormMode[16];
+	bool		dbsfEnabled;
+	double		dbsfBranchMean[2];
+	double		dbsfBranchStddev[2];
+	double		dbsfBranchMin[2];
+	double		dbsfBranchMax[2];
+	uint32		dbsfDegenerateBranches;
 	char		hybridBudgetPolicy[16];
 	char		hybridQueryShape[32];
 	uint32		hybridDenseKChosen;
@@ -134,7 +196,8 @@ typedef struct PgturbohybridScanStatsSnapshot
 	uint32		multivectorAdaptiveInitialRawTarget;
 	uint32		multivectorAdaptiveFinalRawTarget;
 	char		multivectorDocMapSource[16];
-	char		multivectorCandidateSource[24];
+	char		multivectorCandidateSource[48];
+	char		multivectorProxyEncoderKind[32];
 	char		multivectorGraphMode[24];
 	bool		multivectorExactTokenScanEnabled;
 	uint64		multivectorExactTokenScanNodesScored;
@@ -156,6 +219,27 @@ typedef struct PgturbohybridScanStatsSnapshot
 	uint32		multivectorDocGraphExactRerankDocs;
 	uint64		multivectorDocGraphHeapFetches;
 	char		multivectorDocGraphWarning[96];
+	uint32		proxyCandidates;
+	bool		proxyTop1Admission;
+	uint32		proxyExactRerankDocs;
+	uint64		centroidListsVisited;
+	uint64		centroidDocsTouched;
+	uint64		centroidPrunedDocs;
+	uint32		centroidCandidates;
+	uint64		quantizedInvertedListsVisited;
+	uint64		quantizedInvertedPostingsTouched;
+	uint64		quantizedInvertedDocsScored;
+	uint32		quantizedInvertedCandidates;
+	uint32		quantizedInvertedExactRerankDocs;
+	uint32		quantizedInvertedCodebookSize;
+	char		multivectorDocSidecarCacheMode[16];
+	uint64		multivectorDocSidecarPagesRead;
+	uint64		multivectorDocSidecarCacheHits;
+	uint64		multivectorDocSidecarCacheMisses;
+	uint64		multivectorDocSidecarBytesTouched;
+	uint64		multivectorDocSidecarVectorsLoaded;
+	uint64		multivectorTokensOriginal;
+	uint64		multivectorTokensPooled;
 	bool		multivectorReservoirsEnabled;
 	uint32		multivectorReservoirScoreDocs;
 	uint32		multivectorReservoirCoverageDocs;
@@ -168,6 +252,9 @@ typedef struct PgturbohybridScanStatsSnapshot
 	uint32		multivectorBm25InjectionCandidates;
 	uint32		multivectorBm25InjectionRetained;
 	uint32		multivectorBm25InjectionExactReranked;
+	uint32		learnedSparseCandidates;
+	uint32		learnedSparseRetainedForMaxsim;
+	uint64		learnedSparseBranchLatencyUs;
 	uint64		multivectorDocMapBytes;
 	/* Token-local unique document hits summed across query tokens. */
 	uint64		multivectorUniqueDocs;
@@ -178,8 +265,13 @@ typedef struct PgturbohybridScanStatsSnapshot
 	bool		multivectorExactRerankEnabled;
 	uint32		multivectorExactRerankDocs;
 	uint64		multivectorExactRerankPairs;
+	uint32		exactRerankCandidates;
+	uint64		exactRerankTokensEvaluated;
+	uint64		exactRerankTokensSkipped;
+	uint64		exactRerankPairsSaved;
+	bool		adaptiveRerankTopKChangedVsFull;
 	char		multivectorExactKernel[16];
-	char		multivectorAccumulatorKind[16];
+	char		multivectorAccumulatorKind[48];
 	uint64		multivectorMemoryBytesEstimate;
 	bool		multivectorAdmissionDebugEnabled;
 	uint32		multivectorAdmissionCandidatesBeforeRerank;
@@ -249,9 +341,13 @@ extern double pgturbohybrid_calibrated_fusion_both_match_bonus;
 extern double pgturbohybrid_calibrated_fusion_identifier_bm25_alpha;
 extern double pgturbohybrid_calibrated_fusion_broad_dense_alpha;
 extern double pgturbohybrid_calibrated_fusion_default_alpha;
+extern double pgturbohybrid_dbsf_sigma;
+extern int	pgturbohybrid_dbsf_min_branch_candidates;
+extern int	pgturbohybrid_dbsf_robust;
 extern int	pgturbohybrid_multivector_max_doc_vectors;
 extern int	pgturbohybrid_multivector_max_query_vectors;
 extern int	pgturbohybrid_multivector_max_dim;
+extern char *pgturbohybrid_multivector_model_name;
 extern int	pgturbohybrid_multivector_subvector_k;
 extern int	pgturbohybrid_multivector_unique_docs_per_token;
 extern int	pgturbohybrid_multivector_max_raw_hits_per_token;
@@ -262,8 +358,10 @@ extern int	pgturbohybrid_multivector_doc_graph_search_ef;
 extern int	pgturbohybrid_multivector_doc_graph_oversampling;
 extern int	pgturbohybrid_multivector_doc_graph_rescore_k;
 extern int	pgturbohybrid_multivector_doc_storage;
+extern int	pgturbohybrid_multivector_doc_storage_cache;
 extern int	pgturbohybrid_multivector_exact_rerank;
 extern int	pgturbohybrid_multivector_exact_rerank_k;
+extern int	pgturbohybrid_multivector_proxy_encoder;
 extern int	pgturbohybrid_multivector_max_accumulator_mb;
 extern int	pgturbohybrid_multivector_debug_admission;
 extern int	pgturbohybrid_multivector_debug_trace_limit;
@@ -276,11 +374,14 @@ extern int	pgturbohybrid_multivector_candidate_reservoirs;
 extern int	pgturbohybrid_multivector_per_token_doc_reservoir_k;
 extern int	pgturbohybrid_multivector_coverage_reservoir_k;
 extern int	pgturbohybrid_multivector_bm25_candidate_injection;
+extern int	pgturbohybrid_multivector_sparse_candidate_source;
+extern int	pgturbohybrid_multivector_branch_plan;
 
 typedef enum PgturbohybridMultiVectorExactRerankMode
 {
 	PGTURBOHYBRID_MULTIVECTOR_EXACT_RERANK_OFF,
-	PGTURBOHYBRID_MULTIVECTOR_EXACT_RERANK_TOPK
+	PGTURBOHYBRID_MULTIVECTOR_EXACT_RERANK_TOPK,
+	PGTURBOHYBRID_MULTIVECTOR_EXACT_RERANK_ADAPTIVE
 }			PgturbohybridMultiVectorExactRerankMode;
 
 typedef enum PgturbohybridMultiVectorAdaptiveWideningMode
@@ -304,6 +405,13 @@ typedef enum PgturbohybridMultiVectorDocStorageMode
 	PGTURBOHYBRID_MULTIVECTOR_DOC_STORAGE_SQ8
 }			PgturbohybridMultiVectorDocStorageMode;
 
+typedef enum PgturbohybridMultiVectorDocStorageCacheMode
+{
+	PGTURBOHYBRID_MULTIVECTOR_DOC_STORAGE_CACHE_RESIDENT,
+	PGTURBOHYBRID_MULTIVECTOR_DOC_STORAGE_CACHE_PAGED,
+	PGTURBOHYBRID_MULTIVECTOR_DOC_STORAGE_CACHE_AUTO
+}			PgturbohybridMultiVectorDocStorageCacheMode;
+
 typedef enum PgturbohybridMultiVectorDebugAdmissionMode
 {
 	PGTURBOHYBRID_MULTIVECTOR_DEBUG_ADMISSION_OFF,
@@ -318,7 +426,9 @@ typedef enum PgturbohybridMultiVectorCandidateSource
 	PGTURBOHYBRID_MULTIVECTOR_CANDIDATE_SOURCE_EXACT_DOC_SCAN,
 	PGTURBOHYBRID_MULTIVECTOR_CANDIDATE_SOURCE_DOC_GRAPH_PROTOTYPE,
 	PGTURBOHYBRID_MULTIVECTOR_CANDIDATE_SOURCE_DOCUMENT_NODES,
-	PGTURBOHYBRID_MULTIVECTOR_CANDIDATE_SOURCE_PROXY_VECTOR
+	PGTURBOHYBRID_MULTIVECTOR_CANDIDATE_SOURCE_PROXY_VECTOR,
+	PGTURBOHYBRID_MULTIVECTOR_CANDIDATE_SOURCE_CENTROID_LITE,
+	PGTURBOHYBRID_MULTIVECTOR_CANDIDATE_SOURCE_QUANTIZED_INVERTED_EXPERIMENTAL
 }			PgturbohybridMultiVectorCandidateSource;
 
 typedef enum PgturbohybridMultiVectorPlainFallbackMode
@@ -341,6 +451,13 @@ typedef enum PgturbohybridMultiVectorBm25CandidateInjectionMode
 	PGTURBOHYBRID_MULTIVECTOR_BM25_CANDIDATE_INJECTION_HYBRID_ONLY,
 	PGTURBOHYBRID_MULTIVECTOR_BM25_CANDIDATE_INJECTION_DENSE_WITH_TEXT
 }			PgturbohybridMultiVectorBm25CandidateInjectionMode;
+
+typedef enum PgturbohybridMultiVectorSparseCandidateSource
+{
+	PGTURBOHYBRID_MULTIVECTOR_SPARSE_CANDIDATE_SOURCE_OFF,
+	PGTURBOHYBRID_MULTIVECTOR_SPARSE_CANDIDATE_SOURCE_BM25,
+	PGTURBOHYBRID_MULTIVECTOR_SPARSE_CANDIDATE_SOURCE_LEARNED_SPARSE
+}			PgturbohybridMultiVectorSparseCandidateSource;
 
 typedef enum PgturbohybridProfile
 {

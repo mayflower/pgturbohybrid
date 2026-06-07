@@ -14,6 +14,8 @@
 #include "commands/vacuum.h"
 #include "fmgr.h"
 #include "pgturbohybrid.h"
+#include "pgturbohybrid_am.h"
+#include "pgturbohybrid_multivector.h"
 #include "lib/stringinfo.h"
 #include "miscadmin.h"
 #include "nodes/bitmapset.h"
@@ -818,6 +820,7 @@ pgturbohybrid_index_stats(PG_FUNCTION_ARGS)
 	Buffer		buf;
 	Page		page;
 	PgturbohybridGraphMetaPageData meta;
+	const PgturbohybridMultiVectorModelInfo *modelInfo;
 	PgturbohybridGraphPageOpaque opaque;
 	BlockNumber nblocks;
 	uint16		storageKind;
@@ -837,11 +840,11 @@ pgturbohybrid_index_stats(PG_FUNCTION_ARGS)
 	bool		hasLexicalKey;
 	bool		hasBm25Meta = false;
 	PgturbohybridBm25MetaTupleData bm25Meta;
-	TqOptions  *opts;
+	PgturbohybridOptions *opts;
 	PgturbohybridJsonbState jsonState;
 
 	index = index_open(indexOid, AccessShareLock);
-	opts = (TqOptions *) index->rd_options;
+	opts = (PgturbohybridOptions *) index->rd_options;
 
 	nblocks = RelationGetNumberOfBlocks(index);
 	if (!PgturbohybridGraphReadMeta(index, &meta))
@@ -862,6 +865,8 @@ pgturbohybrid_index_stats(PG_FUNCTION_ARGS)
 	routing = opts != NULL ? opts->routing : PGTURBOHYBRID_ROUTING_AUTO;
 	tqBm25MetaStartBlkno = meta.tqBm25MetaStartBlkno;
 	hasLexicalKey = PgturbohybridIndexHasLexical(index);
+	modelInfo =
+		PgturbohybridMultiVectorLookupModel(pgturbohybrid_multivector_model_name);
 
 	if (BlockNumberIsValid(tqBm25MetaStartBlkno))
 	{
@@ -931,6 +936,48 @@ pgturbohybrid_index_stats(PG_FUNCTION_ARGS)
 	PgturbohybridIndexStatsJsonbAddString(&jsonState, "multivector_graph_mode",
 										  PgturbohybridMultiVectorGraphModeName(
 											  meta.tqMultivectorGraphMode));
+	PgturbohybridIndexStatsJsonbAddString(&jsonState, "multivector_context_mode",
+										  opts != NULL &&
+										  opts->multivectorContextMode ==
+										  PGTURBOHYBRID_MULTIVECTOR_CONTEXT_MODE_CONTEXT_LEVEL ?
+										  "context_level" : "flat");
+	PgturbohybridIndexStatsJsonbAddString(&jsonState, "multivector_field_mode",
+										  opts != NULL &&
+										  opts->multivectorFieldMode ==
+										  PGTURBOHYBRID_MULTIVECTOR_FIELD_MODE_WEIGHTED ?
+										  "weighted" : "off");
+	PgturbohybridIndexStatsJsonbAddString(&jsonState, "multivector_model_name",
+										  pgturbohybrid_multivector_model_name != NULL ?
+										  pgturbohybrid_multivector_model_name : "");
+	PgturbohybridIndexStatsJsonbAddBool(&jsonState, "multivector_model_known",
+										modelInfo != NULL);
+	if (modelInfo != NULL)
+	{
+		PgturbohybridIndexStatsJsonbAddUInt32(&jsonState, "multivector_model_dim",
+											  (uint32) modelInfo->dim);
+		PgturbohybridIndexStatsJsonbAddUInt32(&jsonState,
+											  "multivector_model_default_query_max_tokens",
+											  (uint32) modelInfo->defaultQueryMaxTokens);
+		if (modelInfo->defaultDocMaxTokens > 0)
+			PgturbohybridIndexStatsJsonbAddUInt32(&jsonState,
+												  "multivector_model_default_doc_max_tokens",
+												  (uint32) modelInfo->defaultDocMaxTokens);
+		PgturbohybridIndexStatsJsonbAddString(&jsonState,
+											  "multivector_model_distance_mode",
+											  modelInfo->distanceMode);
+		PgturbohybridIndexStatsJsonbAddBool(&jsonState,
+											"multivector_model_normalized_tokens",
+											modelInfo->normalizedTokens);
+		PgturbohybridIndexStatsJsonbAddString(&jsonState,
+											  "multivector_model_recommended_storage_kind",
+											  modelInfo->recommendedStorageKind);
+		PgturbohybridIndexStatsJsonbAddString(&jsonState,
+											  "multivector_model_token_mask_policy",
+											  modelInfo->tokenMaskPolicy);
+		PgturbohybridIndexStatsJsonbAddString(&jsonState,
+											  "multivector_model_field_context_policy",
+											  modelInfo->fieldContextPolicy);
+	}
 	PgturbohybridIndexStatsJsonbAddBool(&jsonState, "bm25_branch_available",
 										hasLexicalKey && hasBm25Meta);
 	PgturbohybridIndexStatsJsonbAddUInt32(&jsonState, "blocks", nblocks);

@@ -93,6 +93,9 @@ static bool pgturbohybrid_simd = true;
 int			pgturbohybrid_force_fusion = 0;
 int			pgturbohybrid_fusion_hash_threshold = 128;
 static bool pgturbohybrid_fast_weighted_score_bound_pruning = true;
+double		pgturbohybrid_dbsf_sigma = 3.0;
+int			pgturbohybrid_dbsf_min_branch_candidates = 10;
+int			pgturbohybrid_dbsf_robust = 0;
 bool		pgturbohybrid_enable_exact_rescore_for_bm25_only = false;
 int			pgturbohybrid_bm25_cache_max_mb = 0;
 int			pgturbohybrid_bm25_hot_postings_cache_mb = 0;
@@ -137,6 +140,7 @@ int			pgturbohybrid_multivector_max_doc_vectors =
 int			pgturbohybrid_multivector_max_query_vectors =
 	PGTURBOHYBRID_MULTIVECTOR_DEFAULT_MAX_QUERY_VECTORS;
 int			pgturbohybrid_multivector_max_dim = PGTURBOHYBRID_MULTIVECTOR_MAX_DIM;
+char	   *pgturbohybrid_multivector_model_name = "";
 int			pgturbohybrid_multivector_subvector_k = 100;
 int			pgturbohybrid_multivector_unique_docs_per_token = 100;
 int			pgturbohybrid_multivector_max_raw_hits_per_token = 400;
@@ -150,9 +154,13 @@ int			pgturbohybrid_multivector_doc_graph_oversampling = 1;
 int			pgturbohybrid_multivector_doc_graph_rescore_k = 0;
 int			pgturbohybrid_multivector_doc_storage =
 	PGTURBOHYBRID_MULTIVECTOR_DOC_STORAGE_F32;
+int			pgturbohybrid_multivector_doc_storage_cache =
+	PGTURBOHYBRID_MULTIVECTOR_DOC_STORAGE_CACHE_AUTO;
 int			pgturbohybrid_multivector_exact_rerank =
-	PGTURBOHYBRID_MULTIVECTOR_EXACT_RERANK_TOPK;
+	PGTURBOHYBRID_MULTIVECTOR_EXACT_RERANK_ADAPTIVE;
 int			pgturbohybrid_multivector_exact_rerank_k = 100;
+int			pgturbohybrid_multivector_proxy_encoder =
+	PGTURBOHYBRID_MULTIVECTOR_PROXY_ENCODER_MEAN_POOL;
 int			pgturbohybrid_multivector_max_accumulator_mb = 64;
 int			pgturbohybrid_multivector_debug_admission =
 	PGTURBOHYBRID_MULTIVECTOR_DEBUG_ADMISSION_OFF;
@@ -170,6 +178,10 @@ int			pgturbohybrid_multivector_per_token_doc_reservoir_k = 1;
 int			pgturbohybrid_multivector_coverage_reservoir_k = 10;
 int			pgturbohybrid_multivector_bm25_candidate_injection =
 	PGTURBOHYBRID_MULTIVECTOR_BM25_CANDIDATE_INJECTION_OFF;
+int			pgturbohybrid_multivector_sparse_candidate_source =
+	PGTURBOHYBRID_MULTIVECTOR_SPARSE_CANDIDATE_SOURCE_OFF;
+int			pgturbohybrid_multivector_branch_plan =
+	PGTURBOHYBRID_BRANCH_PLAN_AUTO;
 static bool pgturbohybrid_bm25_strategy_user_set = false;
 static bool pgturbohybrid_bm25_impact_or_mode_user_set = false;
 static bool pgturbohybrid_bm25_hot_postings_cache_mb_user_set = false;
@@ -218,6 +230,18 @@ static const struct config_enum_entry pgturbohybrid_bm25_accumulator_mode_option
 	{NULL, 0, false}
 };
 
+typedef enum PgturbohybridDbsfRobustMode
+{
+	PGTURBOHYBRID_DBSF_ROBUST_OFF,
+	PGTURBOHYBRID_DBSF_ROBUST_MAD
+}			PgturbohybridDbsfRobustMode;
+
+static const struct config_enum_entry pgturbohybrid_dbsf_robust_options[] = {
+	{"off", PGTURBOHYBRID_DBSF_ROBUST_OFF, false},
+	{"mad", PGTURBOHYBRID_DBSF_ROBUST_MAD, false},
+	{NULL, 0, false}
+};
+
 static const struct config_enum_entry pgturbohybrid_bm25_heap_tsvector_rerank_options[] = {
 	{"off", PGTURBOHYBRID_BM25_HEAP_TSVECTOR_RERANK_OFF, false},
 	{"topk", PGTURBOHYBRID_BM25_HEAP_TSVECTOR_RERANK_TOPK, false},
@@ -257,6 +281,13 @@ static const struct config_enum_entry pgturbohybrid_multivector_doc_storage_opti
 	{"f32", PGTURBOHYBRID_MULTIVECTOR_DOC_STORAGE_F32, false},
 	{"f16", PGTURBOHYBRID_MULTIVECTOR_DOC_STORAGE_F16, false},
 	{"sq8", PGTURBOHYBRID_MULTIVECTOR_DOC_STORAGE_SQ8, false},
+	{NULL, 0, false}
+};
+
+static const struct config_enum_entry pgturbohybrid_multivector_doc_storage_cache_options[] = {
+	{"resident", PGTURBOHYBRID_MULTIVECTOR_DOC_STORAGE_CACHE_RESIDENT, false},
+	{"paged", PGTURBOHYBRID_MULTIVECTOR_DOC_STORAGE_CACHE_PAGED, false},
+	{"auto", PGTURBOHYBRID_MULTIVECTOR_DOC_STORAGE_CACHE_AUTO, false},
 	{NULL, 0, false}
 };
 
@@ -337,6 +368,15 @@ static const struct config_enum_entry pgturbohybrid_dense_heap_rescore_options[]
 static const struct config_enum_entry pgturbohybrid_multivector_exact_rerank_options[] = {
 	{"off", PGTURBOHYBRID_MULTIVECTOR_EXACT_RERANK_OFF, false},
 	{"topk", PGTURBOHYBRID_MULTIVECTOR_EXACT_RERANK_TOPK, false},
+	{"adaptive", PGTURBOHYBRID_MULTIVECTOR_EXACT_RERANK_ADAPTIVE, false},
+	{NULL, 0, false}
+};
+
+static const struct config_enum_entry pgturbohybrid_multivector_proxy_encoder_options[] = {
+	{"mean_pool", PGTURBOHYBRID_MULTIVECTOR_PROXY_ENCODER_MEAN_POOL, false},
+	{"max_pool", PGTURBOHYBRID_MULTIVECTOR_PROXY_ENCODER_MAX_POOL, false},
+	{"random_projection_fde", PGTURBOHYBRID_MULTIVECTOR_PROXY_ENCODER_RANDOM_PROJECTION_FDE, false},
+	{"learned_projection_placeholder", PGTURBOHYBRID_MULTIVECTOR_PROXY_ENCODER_LEARNED_PROJECTION_PLACEHOLDER, false},
 	{NULL, 0, false}
 };
 
@@ -354,6 +394,8 @@ static const struct config_enum_entry pgturbohybrid_multivector_candidate_source
 	{"doc_graph_prototype", PGTURBOHYBRID_MULTIVECTOR_CANDIDATE_SOURCE_DOC_GRAPH_PROTOTYPE, false},
 	{"document_nodes", PGTURBOHYBRID_MULTIVECTOR_CANDIDATE_SOURCE_DOCUMENT_NODES, false},
 	{"proxy_vector", PGTURBOHYBRID_MULTIVECTOR_CANDIDATE_SOURCE_PROXY_VECTOR, false},
+	{"centroid_lite", PGTURBOHYBRID_MULTIVECTOR_CANDIDATE_SOURCE_CENTROID_LITE, false},
+	{"quantized_inverted_experimental", PGTURBOHYBRID_MULTIVECTOR_CANDIDATE_SOURCE_QUANTIZED_INVERTED_EXPERIMENTAL, false},
 	{NULL, 0, false}
 };
 
@@ -375,6 +417,20 @@ static const struct config_enum_entry pgturbohybrid_multivector_bm25_candidate_i
 	{"off", PGTURBOHYBRID_MULTIVECTOR_BM25_CANDIDATE_INJECTION_OFF, false},
 	{"hybrid_only", PGTURBOHYBRID_MULTIVECTOR_BM25_CANDIDATE_INJECTION_HYBRID_ONLY, false},
 	{"dense_with_text", PGTURBOHYBRID_MULTIVECTOR_BM25_CANDIDATE_INJECTION_DENSE_WITH_TEXT, false},
+	{NULL, 0, false}
+};
+
+static const struct config_enum_entry pgturbohybrid_multivector_sparse_candidate_source_options[] = {
+	{"off", PGTURBOHYBRID_MULTIVECTOR_SPARSE_CANDIDATE_SOURCE_OFF, false},
+	{"bm25", PGTURBOHYBRID_MULTIVECTOR_SPARSE_CANDIDATE_SOURCE_BM25, false},
+	{"learned_sparse", PGTURBOHYBRID_MULTIVECTOR_SPARSE_CANDIDATE_SOURCE_LEARNED_SPARSE, false},
+	{NULL, 0, false}
+};
+
+static const struct config_enum_entry pgturbohybrid_multivector_branch_plan_options[] = {
+	{"auto", PGTURBOHYBRID_BRANCH_PLAN_AUTO, false},
+	{"dense_only", PGTURBOHYBRID_BRANCH_PLAN_DENSE_ONLY, false},
+	{"qdrant_like", PGTURBOHYBRID_BRANCH_PLAN_QDRANT_LIKE, false},
 	{NULL, 0, false}
 };
 
@@ -460,6 +516,39 @@ static relopt_enum_elt_def pgturbohybrid_entry_sidecar_strategy_relopt_options[]
 static relopt_enum_elt_def pgturbohybrid_multivector_graph_relopt_options[] = {
 	{"token_nodes", PGTURBOHYBRID_MULTIVECTOR_GRAPH_TOKEN_NODES},
 	{"document_nodes", PGTURBOHYBRID_MULTIVECTOR_GRAPH_DOCUMENT_NODES},
+	{NULL, 0}
+};
+
+static relopt_enum_elt_def pgturbohybrid_multivector_token_pooling_relopt_options[] = {
+	{"off", PGTURBOHYBRID_MULTIVECTOR_TOKEN_POOLING_OFF},
+	{"kmeans", PGTURBOHYBRID_MULTIVECTOR_TOKEN_POOLING_KMEANS},
+	{"greedy_cosine", PGTURBOHYBRID_MULTIVECTOR_TOKEN_POOLING_GREEDY_COSINE},
+	{NULL, 0}
+};
+
+static relopt_enum_elt_def pgturbohybrid_multivector_centroids_relopt_options[] = {
+	{"off", PGTURBOHYBRID_MULTIVECTOR_CENTROIDS_OFF},
+	{"kmeans", PGTURBOHYBRID_MULTIVECTOR_CENTROIDS_KMEANS},
+	{NULL, 0}
+};
+
+static relopt_enum_elt_def pgturbohybrid_multivector_proxy_encoder_relopt_options[] = {
+	{"mean_pool", PGTURBOHYBRID_MULTIVECTOR_PROXY_ENCODER_MEAN_POOL},
+	{"max_pool", PGTURBOHYBRID_MULTIVECTOR_PROXY_ENCODER_MAX_POOL},
+	{"random_projection_fde", PGTURBOHYBRID_MULTIVECTOR_PROXY_ENCODER_RANDOM_PROJECTION_FDE},
+	{"learned_projection_placeholder", PGTURBOHYBRID_MULTIVECTOR_PROXY_ENCODER_LEARNED_PROJECTION_PLACEHOLDER},
+	{NULL, 0}
+};
+
+static relopt_enum_elt_def pgturbohybrid_multivector_context_mode_relopt_options[] = {
+	{"flat", PGTURBOHYBRID_MULTIVECTOR_CONTEXT_MODE_FLAT},
+	{"context_level", PGTURBOHYBRID_MULTIVECTOR_CONTEXT_MODE_CONTEXT_LEVEL},
+	{NULL, 0}
+};
+
+static relopt_enum_elt_def pgturbohybrid_multivector_field_mode_relopt_options[] = {
+	{"off", PGTURBOHYBRID_MULTIVECTOR_FIELD_MODE_OFF},
+	{"weighted", PGTURBOHYBRID_MULTIVECTOR_FIELD_MODE_WEIGHTED},
 	{NULL, 0}
 };
 
@@ -1127,6 +1216,7 @@ typedef struct PgturbohybridLastScanStats
 	bool		bm25BranchAvailable;
 	bool		denseBranchUsed;
 	bool		bm25BranchUsed;
+	PgturbohybridBranchPlan branchPlan;
 	char		profile[16];
 	char		fusion[16];
 	uint32		denseCandidatesRequested;
@@ -1177,7 +1267,8 @@ typedef struct PgturbohybridLastScanStats
 	uint32		multivectorAdaptiveInitialRawTarget;
 	uint32		multivectorAdaptiveFinalRawTarget;
 	char		multivectorDocMapSource[16];
-	char		multivectorCandidateSource[24];
+	char		multivectorCandidateSource[48];
+	char		multivectorProxyEncoderKind[32];
 	char		multivectorGraphMode[24];
 	bool		multivectorExactTokenScanEnabled;
 	uint64		multivectorExactTokenScanNodesScored;
@@ -1199,6 +1290,27 @@ typedef struct PgturbohybridLastScanStats
 	uint32		multivectorDocGraphExactRerankDocs;
 	uint64		multivectorDocGraphHeapFetches;
 	char		multivectorDocGraphWarning[96];
+	uint32		proxyCandidates;
+	bool		proxyTop1Admission;
+	uint32		proxyExactRerankDocs;
+	uint64		centroidListsVisited;
+	uint64		centroidDocsTouched;
+	uint64		centroidPrunedDocs;
+	uint32		centroidCandidates;
+	uint64		quantizedInvertedListsVisited;
+	uint64		quantizedInvertedPostingsTouched;
+	uint64		quantizedInvertedDocsScored;
+	uint32		quantizedInvertedCandidates;
+	uint32		quantizedInvertedExactRerankDocs;
+	uint32		quantizedInvertedCodebookSize;
+	char		multivectorDocSidecarCacheMode[16];
+	uint64		multivectorDocSidecarPagesRead;
+	uint64		multivectorDocSidecarCacheHits;
+	uint64		multivectorDocSidecarCacheMisses;
+	uint64		multivectorDocSidecarBytesTouched;
+	uint64		multivectorDocSidecarVectorsLoaded;
+	uint64		multivectorTokensOriginal;
+	uint64		multivectorTokensPooled;
 	bool		multivectorReservoirsEnabled;
 	uint32		multivectorReservoirScoreDocs;
 	uint32		multivectorReservoirCoverageDocs;
@@ -1211,6 +1323,9 @@ typedef struct PgturbohybridLastScanStats
 	uint32		multivectorBm25InjectionCandidates;
 	uint32		multivectorBm25InjectionRetained;
 	uint32		multivectorBm25InjectionExactReranked;
+	uint32		learnedSparseCandidates;
+	uint32		learnedSparseRetainedForMaxsim;
+	uint64		learnedSparseBranchLatencyUs;
 	uint64		multivectorDocMapBytes;
 	uint64		multivectorUniqueDocs;
 	uint64		multivectorDuplicateDocHits;
@@ -1219,8 +1334,13 @@ typedef struct PgturbohybridLastScanStats
 	bool		multivectorExactRerankEnabled;
 	uint32		multivectorExactRerankDocs;
 	uint64		multivectorExactRerankPairs;
+	uint32		exactRerankCandidates;
+	uint64		exactRerankTokensEvaluated;
+	uint64		exactRerankTokensSkipped;
+	uint64		exactRerankPairsSaved;
+	bool		adaptiveRerankTopKChangedVsFull;
 	char		multivectorExactKernel[16];
-	char		multivectorAccumulatorKind[16];
+	char		multivectorAccumulatorKind[48];
 	uint64		multivectorMemoryBytesEstimate;
 	bool		multivectorAdmissionDebugEnabled;
 	uint32		multivectorAdmissionCandidatesBeforeRerank;
@@ -1352,6 +1472,12 @@ typedef struct PgturbohybridLastScanStats
 	double		calibratedFusionBothMatchBonus;
 	char		calibratedFusionDenseNormMode[16];
 	char		calibratedFusionBm25NormMode[16];
+	bool		dbsfEnabled;
+	double		dbsfBranchMean[2];
+	double		dbsfBranchStddev[2];
+	double		dbsfBranchMin[2];
+	double		dbsfBranchMax[2];
+	uint32		dbsfDegenerateBranches;
 	char		bm25NormMode[16];
 	char		denseNormMode[16];
 	char		hybridBudgetPolicy[16];
@@ -1381,6 +1507,7 @@ PgturbohybridGetLastScanStatsSnapshot(PgturbohybridScanStatsSnapshot *stats)
 		pgturbohybrid_last_scan_state.denseBranchUsed;
 	stats->bm25BranchUsed =
 		pgturbohybrid_last_scan_state.bm25BranchUsed;
+	stats->branchPlan = pgturbohybrid_last_scan_state.branchPlan;
 	stats->denseCandidatesEffective =
 		pgturbohybrid_last_scan_state.denseCandidatesEffective;
 	stats->denseKDefaulted = pgturbohybrid_last_scan_state.denseKDefaulted;
@@ -1445,6 +1572,21 @@ PgturbohybridGetLastScanStatsSnapshot(PgturbohybridScanStatsSnapshot *stats)
 	strlcpy(stats->calibratedFusionBm25NormMode,
 			pgturbohybrid_last_scan_state.calibratedFusionBm25NormMode,
 			sizeof(stats->calibratedFusionBm25NormMode));
+	stats->dbsfEnabled = pgturbohybrid_last_scan_state.dbsfEnabled;
+	memcpy(stats->dbsfBranchMean,
+		   pgturbohybrid_last_scan_state.dbsfBranchMean,
+		   sizeof(stats->dbsfBranchMean));
+	memcpy(stats->dbsfBranchStddev,
+		   pgturbohybrid_last_scan_state.dbsfBranchStddev,
+		   sizeof(stats->dbsfBranchStddev));
+	memcpy(stats->dbsfBranchMin,
+		   pgturbohybrid_last_scan_state.dbsfBranchMin,
+		   sizeof(stats->dbsfBranchMin));
+	memcpy(stats->dbsfBranchMax,
+		   pgturbohybrid_last_scan_state.dbsfBranchMax,
+		   sizeof(stats->dbsfBranchMax));
+	stats->dbsfDegenerateBranches =
+		pgturbohybrid_last_scan_state.dbsfDegenerateBranches;
 	strlcpy(stats->bm25NormMode,
 			pgturbohybrid_last_scan_state.bm25NormMode,
 			sizeof(stats->bm25NormMode));
@@ -1499,6 +1641,9 @@ PgturbohybridGetLastScanStatsSnapshot(PgturbohybridScanStatsSnapshot *stats)
 	strlcpy(stats->multivectorCandidateSource,
 			pgturbohybrid_last_scan_state.multivectorCandidateSource,
 			sizeof(stats->multivectorCandidateSource));
+	strlcpy(stats->multivectorProxyEncoderKind,
+			pgturbohybrid_last_scan_state.multivectorProxyEncoderKind,
+			sizeof(stats->multivectorProxyEncoderKind));
 	strlcpy(stats->multivectorGraphMode,
 			pgturbohybrid_last_scan_state.multivectorGraphMode,
 			sizeof(stats->multivectorGraphMode));
@@ -1546,6 +1691,49 @@ PgturbohybridGetLastScanStatsSnapshot(PgturbohybridScanStatsSnapshot *stats)
 	strlcpy(stats->multivectorDocGraphWarning,
 			pgturbohybrid_last_scan_state.multivectorDocGraphWarning,
 			sizeof(stats->multivectorDocGraphWarning));
+	stats->proxyCandidates =
+		pgturbohybrid_last_scan_state.proxyCandidates;
+	stats->proxyTop1Admission =
+		pgturbohybrid_last_scan_state.proxyTop1Admission;
+	stats->proxyExactRerankDocs =
+		pgturbohybrid_last_scan_state.proxyExactRerankDocs;
+	stats->centroidListsVisited =
+		pgturbohybrid_last_scan_state.centroidListsVisited;
+	stats->centroidDocsTouched =
+		pgturbohybrid_last_scan_state.centroidDocsTouched;
+	stats->centroidPrunedDocs =
+		pgturbohybrid_last_scan_state.centroidPrunedDocs;
+	stats->centroidCandidates =
+		pgturbohybrid_last_scan_state.centroidCandidates;
+	stats->quantizedInvertedListsVisited =
+		pgturbohybrid_last_scan_state.quantizedInvertedListsVisited;
+	stats->quantizedInvertedPostingsTouched =
+		pgturbohybrid_last_scan_state.quantizedInvertedPostingsTouched;
+	stats->quantizedInvertedDocsScored =
+		pgturbohybrid_last_scan_state.quantizedInvertedDocsScored;
+	stats->quantizedInvertedCandidates =
+		pgturbohybrid_last_scan_state.quantizedInvertedCandidates;
+	stats->quantizedInvertedExactRerankDocs =
+		pgturbohybrid_last_scan_state.quantizedInvertedExactRerankDocs;
+	stats->quantizedInvertedCodebookSize =
+		pgturbohybrid_last_scan_state.quantizedInvertedCodebookSize;
+	strlcpy(stats->multivectorDocSidecarCacheMode,
+			pgturbohybrid_last_scan_state.multivectorDocSidecarCacheMode,
+			sizeof(stats->multivectorDocSidecarCacheMode));
+	stats->multivectorDocSidecarPagesRead =
+		pgturbohybrid_last_scan_state.multivectorDocSidecarPagesRead;
+	stats->multivectorDocSidecarCacheHits =
+		pgturbohybrid_last_scan_state.multivectorDocSidecarCacheHits;
+	stats->multivectorDocSidecarCacheMisses =
+		pgturbohybrid_last_scan_state.multivectorDocSidecarCacheMisses;
+	stats->multivectorDocSidecarBytesTouched =
+		pgturbohybrid_last_scan_state.multivectorDocSidecarBytesTouched;
+	stats->multivectorDocSidecarVectorsLoaded =
+		pgturbohybrid_last_scan_state.multivectorDocSidecarVectorsLoaded;
+	stats->multivectorTokensOriginal =
+		pgturbohybrid_last_scan_state.multivectorTokensOriginal;
+	stats->multivectorTokensPooled =
+		pgturbohybrid_last_scan_state.multivectorTokensPooled;
 	stats->multivectorReservoirsEnabled =
 		pgturbohybrid_last_scan_state.multivectorReservoirsEnabled;
 	stats->multivectorReservoirScoreDocs =
@@ -1570,6 +1758,12 @@ PgturbohybridGetLastScanStatsSnapshot(PgturbohybridScanStatsSnapshot *stats)
 		pgturbohybrid_last_scan_state.multivectorBm25InjectionRetained;
 	stats->multivectorBm25InjectionExactReranked =
 		pgturbohybrid_last_scan_state.multivectorBm25InjectionExactReranked;
+	stats->learnedSparseCandidates =
+		pgturbohybrid_last_scan_state.learnedSparseCandidates;
+	stats->learnedSparseRetainedForMaxsim =
+		pgturbohybrid_last_scan_state.learnedSparseRetainedForMaxsim;
+	stats->learnedSparseBranchLatencyUs =
+		pgturbohybrid_last_scan_state.learnedSparseBranchLatencyUs;
 	stats->multivectorDocMapBytes =
 		pgturbohybrid_last_scan_state.multivectorDocMapBytes;
 	stats->multivectorUniqueDocs =
@@ -1586,6 +1780,16 @@ PgturbohybridGetLastScanStatsSnapshot(PgturbohybridScanStatsSnapshot *stats)
 		pgturbohybrid_last_scan_state.multivectorExactRerankDocs;
 	stats->multivectorExactRerankPairs =
 		pgturbohybrid_last_scan_state.multivectorExactRerankPairs;
+	stats->exactRerankCandidates =
+		pgturbohybrid_last_scan_state.exactRerankCandidates;
+	stats->exactRerankTokensEvaluated =
+		pgturbohybrid_last_scan_state.exactRerankTokensEvaluated;
+	stats->exactRerankTokensSkipped =
+		pgturbohybrid_last_scan_state.exactRerankTokensSkipped;
+	stats->exactRerankPairsSaved =
+		pgturbohybrid_last_scan_state.exactRerankPairsSaved;
+	stats->adaptiveRerankTopKChangedVsFull =
+		pgturbohybrid_last_scan_state.adaptiveRerankTopKChangedVsFull;
 	strlcpy(stats->multivectorExactKernel,
 			pgturbohybrid_last_scan_state.multivectorExactKernel,
 			sizeof(stats->multivectorExactKernel));
@@ -2246,11 +2450,12 @@ PgturbohybridQueryValidateMultiVectorFusionSupport(Relation index,
 	if (requestedFusion != PGTURBOHYBRID_FUSION_RRF &&
 		requestedFusion != PGTURBOHYBRID_FUSION_WEIGHTED &&
 		requestedFusion != PGTURBOHYBRID_FUSION_FAST_WEIGHTED &&
-		requestedFusion != PGTURBOHYBRID_FUSION_CALIBRATED)
+		requestedFusion != PGTURBOHYBRID_FUSION_CALIBRATED &&
+		requestedFusion != PGTURBOHYBRID_FUSION_DBSF)
 		ereport(ERROR,
 				(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
 				 errmsg("hybrid multivector fusion requires rank or normalized score fusion"),
-				 errdetail("Supported multivector hybrid fusion modes are 'rrf', query-local normalized 'weighted', logistic/saturating 'fast_weighted', and 'calibrated'. Raw BM25 plus raw MaxSim alpha fusion is not supported.")));
+				 errdetail("Supported multivector hybrid fusion modes are 'rrf', query-local normalized 'weighted', logistic/saturating 'fast_weighted', 'calibrated', and distribution-normalized 'dbsf'. Raw BM25 plus raw MaxSim alpha fusion is not supported.")));
 }
 
 static void
@@ -2807,6 +3012,227 @@ PgturbohybridMaybeApplyBm25HybridBound(PgturbohybridQueryHeader *query, int dens
 }
 
 static void
+PgturbohybridBranchPlanInit(PgturbohybridBranchPlan *plan, uint16 fusion)
+{
+	if (plan == NULL)
+		return;
+	memset(plan, 0, sizeof(*plan));
+	plan->mode = pgturbohybrid_multivector_branch_plan;
+	if (pgturbohybrid_multivector_branch_plan ==
+		PGTURBOHYBRID_BRANCH_PLAN_QDRANT_LIKE)
+	{
+		if (fusion == PGTURBOHYBRID_FUSION_RRF)
+			strlcpy(plan->fusionMode, "qdrant_like_rrf",
+					sizeof(plan->fusionMode));
+		else if (fusion == PGTURBOHYBRID_FUSION_DBSF)
+			strlcpy(plan->fusionMode, "qdrant_like_dbsf",
+					sizeof(plan->fusionMode));
+		else if (fusion == PGTURBOHYBRID_FUSION_FAST_WEIGHTED ||
+				 fusion == PGTURBOHYBRID_FUSION_CALIBRATED)
+			strlcpy(plan->fusionMode, "qdrant_like_normalized",
+					sizeof(plan->fusionMode));
+		else
+			strlcpy(plan->fusionMode, "qdrant_like_dense_only",
+					sizeof(plan->fusionMode));
+	}
+	else if (pgturbohybrid_multivector_branch_plan ==
+			 PGTURBOHYBRID_BRANCH_PLAN_DENSE_ONLY)
+		strlcpy(plan->fusionMode, "dense_only", sizeof(plan->fusionMode));
+	else
+		strlcpy(plan->fusionMode, PgturbohybridQueryFusionName(fusion),
+				sizeof(plan->fusionMode));
+}
+
+static void
+PgturbohybridBranchPlanAdd(PgturbohybridBranchPlan *plan,
+						   PgturbohybridBranchKind kind,
+						   uint32 candidateLimit,
+						   uint32 rescoreLimit,
+						   uint32 branchRank,
+						   double branchScore,
+						   uint32 sourceFlags,
+						   uint32 candidateCount,
+						   bool truncated,
+						   uint64 latencyUs)
+{
+	PgturbohybridBranchPlanItem *item;
+
+	if (plan == NULL ||
+		plan->count >= PGTURBOHYBRID_BRANCH_PLAN_MAX_BRANCHES)
+		return;
+	item = &plan->items[plan->count++];
+	item->kind = kind;
+	item->candidateLimit = candidateLimit;
+	item->rescoreLimit = rescoreLimit;
+	item->branchRank = branchRank;
+	item->branchScore = branchScore;
+	item->sourceFlags = sourceFlags;
+	item->candidateCount = candidateCount;
+	item->truncated = truncated;
+	item->latencyUs = latencyUs;
+}
+
+static PgturbohybridBranchKind
+PgturbohybridMultiVectorBranchKind(const TqDenseCandidateStats *denseStats)
+{
+	const char *source;
+
+	if (denseStats == NULL)
+		return PGTURBOHYBRID_BRANCH_KIND_TOKEN_NODES;
+	source = denseStats->multivectorCandidateSource;
+	if (strcmp(source, "proxy_vector") == 0)
+		return PGTURBOHYBRID_BRANCH_KIND_PROXY_VECTOR;
+	if (strcmp(source, "centroid_lite") == 0)
+		return PGTURBOHYBRID_BRANCH_KIND_CENTROID_LITE;
+	if (strcmp(source, "quantized_inverted_experimental") == 0)
+		return PGTURBOHYBRID_BRANCH_KIND_QUANTIZED_INVERTED_EXPERIMENTAL;
+	if (strcmp(source, "document_nodes") == 0 ||
+		strcmp(source, "doc_graph_prototype") == 0)
+		return PGTURBOHYBRID_BRANCH_KIND_DOCUMENT_NODES;
+	if (strcmp(source, "exact_doc_scan") == 0)
+		return PGTURBOHYBRID_BRANCH_KIND_EXACT_DOC_SCAN;
+	return PGTURBOHYBRID_BRANCH_KIND_TOKEN_NODES;
+}
+
+static void
+PgturbohybridBuildBranchPlan(PgturbohybridBranchPlan *plan,
+							 const PgturbohybridQueryHeader *query,
+							 uint16 effectiveFusion,
+							 const TqDenseCandidate *dense,
+							 int denseCount,
+							 const PgturbohybridBm25Result *bm25,
+							 int bm25Count,
+							 const TqDenseCandidateStats *denseStats,
+							 uint64 denseElapsedUs,
+							 uint64 bm25ElapsedUs)
+{
+	bool		hasVector;
+	bool		hasMultivector;
+	bool		denseTruncated;
+	bool		bm25Injected;
+	bool		emitBm25Branch;
+	uint32		denseLimit;
+	uint32		denseRescoreLimit;
+	uint32		denseSourceFlags;
+	double		denseScore = 0.0;
+	double		bm25Score = 0.0;
+	PgturbohybridBranchKind denseKind;
+
+	PgturbohybridBranchPlanInit(plan, effectiveFusion);
+	if (plan == NULL || query == NULL)
+		return;
+
+	hasVector =
+		(query->flags & PGTURBOHYBRID_QUERY_FLAG_HAS_VECTOR) != 0;
+	hasMultivector =
+		(query->flags & PGTURBOHYBRID_QUERY_FLAG_HAS_MULTIVECTOR) != 0;
+	bm25Injected = denseStats != NULL &&
+		denseStats->multivectorBm25InjectionEnabled;
+	emitBm25Branch =
+		pgturbohybrid_multivector_branch_plan !=
+		PGTURBOHYBRID_BRANCH_PLAN_DENSE_ONLY;
+
+	if (dense != NULL && denseCount > 0)
+		denseScore = dense[0].similarity != 0.0 ?
+			dense[0].similarity : -dense[0].distance;
+	if (bm25 != NULL && bm25Count > 0)
+		bm25Score = bm25[0].bm25Score;
+
+	if ((hasVector || hasMultivector) && query->denseK > 0)
+	{
+		denseLimit = (uint32) Max(query->denseK, 0);
+		denseRescoreLimit = denseLimit;
+		denseTruncated = denseCount >= query->denseK && query->denseK > 0;
+		denseKind = hasMultivector ?
+			PgturbohybridMultiVectorBranchKind(denseStats) :
+			PGTURBOHYBRID_BRANCH_KIND_DENSE_SINGLE;
+
+		if (denseStats != NULL && hasMultivector)
+		{
+			if (denseStats->effectiveResultTarget > 0)
+				denseLimit = denseStats->effectiveResultTarget;
+			if (denseStats->multivectorDocGraphExactRerankDocs > 0)
+				denseRescoreLimit =
+					denseStats->multivectorDocGraphExactRerankDocs;
+			else if (denseStats->multivectorExactRerankDocs > 0)
+				denseRescoreLimit = denseStats->multivectorExactRerankDocs;
+			denseTruncated =
+				denseStats->multivectorAdmissionTruncatedByDocCandidateK ||
+				denseStats->multivectorAdmissionTruncatedByAccumulatorMemory;
+		}
+
+		denseSourceFlags = PGTURBOHYBRID_BRANCH_SOURCE_DENSE |
+			(hasMultivector ?
+			 PGTURBOHYBRID_BRANCH_SOURCE_MULTIVECTOR : 0) |
+			(bm25Injected ? PGTURBOHYBRID_BRANCH_SOURCE_BM25 : 0);
+
+		PgturbohybridBranchPlanAdd(plan, denseKind, denseLimit,
+								   denseRescoreLimit, 1, denseScore,
+								   denseSourceFlags,
+								   (uint32) Max(denseCount, 0),
+								   denseTruncated, denseElapsedUs);
+
+		if (hasMultivector &&
+			pgturbohybrid_multivector_branch_plan ==
+			PGTURBOHYBRID_BRANCH_PLAN_QDRANT_LIKE &&
+			denseKind == PGTURBOHYBRID_BRANCH_KIND_PROXY_VECTOR &&
+			denseStats != NULL)
+		{
+			PgturbohybridBranchPlanAdd(plan,
+									   PGTURBOHYBRID_BRANCH_KIND_DOCUMENT_NODES,
+									   denseStats->multivectorDocGraphCandidates,
+									   denseRescoreLimit, 2, denseScore,
+									   PGTURBOHYBRID_BRANCH_SOURCE_DENSE |
+									   PGTURBOHYBRID_BRANCH_SOURCE_MULTIVECTOR,
+									   denseStats->multivectorDocGraphCandidates,
+									   denseTruncated, 0);
+			PgturbohybridBranchPlanAdd(plan,
+									   PGTURBOHYBRID_BRANCH_KIND_EXACT_DOC_SCAN,
+									   denseRescoreLimit, denseRescoreLimit,
+									   3, denseScore,
+									   PGTURBOHYBRID_BRANCH_SOURCE_DENSE |
+									   PGTURBOHYBRID_BRANCH_SOURCE_MULTIVECTOR |
+									   PGTURBOHYBRID_BRANCH_SOURCE_EXACT,
+									   denseStats->multivectorDocGraphExactRerankDocs,
+									   false, denseStats->heapRescoreUs);
+		}
+	}
+
+	if (emitBm25Branch &&
+		(query->flags & PGTURBOHYBRID_QUERY_FLAG_HAS_TSQUERY) != 0 &&
+		query->bm25K > 0 && bm25Count > 0)
+	{
+		PgturbohybridBranchPlanAdd(plan, PGTURBOHYBRID_BRANCH_KIND_BM25,
+								   (uint32) query->bm25K, 0,
+								   plan->count + 1, bm25Score,
+								   PGTURBOHYBRID_BRANCH_SOURCE_BM25,
+								   (uint32) bm25Count,
+								   bm25Count >= query->bm25K,
+								   bm25ElapsedUs);
+		if (hasMultivector &&
+			pgturbohybrid_multivector_branch_plan ==
+			PGTURBOHYBRID_BRANCH_PLAN_QDRANT_LIKE)
+		{
+			uint32		exactCount = bm25Injected ?
+				denseStats->multivectorBm25InjectionExactReranked :
+				(uint32) bm25Count;
+
+			PgturbohybridBranchPlanAdd(plan,
+									   PGTURBOHYBRID_BRANCH_KIND_EXACT_DOC_SCAN,
+									   (uint32) bm25Count,
+									   exactCount,
+									   plan->count + 1,
+									   denseScore,
+									   PGTURBOHYBRID_BRANCH_SOURCE_BM25 |
+									   PGTURBOHYBRID_BRANCH_SOURCE_MULTIVECTOR |
+									   PGTURBOHYBRID_BRANCH_SOURCE_EXACT,
+									   exactCount,
+									   false, 0);
+		}
+	}
+}
+
+static void
 PgturbohybridTopNHeapSiftUp(PgturbohybridResult *heap, int index)
 {
 	while (index > 0)
@@ -3263,6 +3689,161 @@ PgturbohybridClampUnit(double value)
 	return value;
 }
 
+typedef struct PgturbohybridDbsfBranchStats
+{
+	uint32		count;
+	double		mean;
+	double		stddev;
+	double		min;
+	double		max;
+	bool		degenerate;
+} PgturbohybridDbsfBranchStats;
+
+static int
+PgturbohybridDoubleAscendingCompare(const void *a, const void *b)
+{
+	double		da = *((const double *) a);
+	double		db = *((const double *) b);
+
+	if (da < db)
+		return -1;
+	if (da > db)
+		return 1;
+	return 0;
+}
+
+static double
+PgturbohybridMedianSorted(const double *values, int count)
+{
+	int			mid;
+
+	if (count <= 0)
+		return 0.0;
+	mid = count / 2;
+	if ((count % 2) != 0)
+		return values[mid];
+	return (values[mid - 1] + values[mid]) * 0.5;
+}
+
+static void
+PgturbohybridDbsfCollectBranch(const PgturbohybridResult *results, int count,
+							   bool dense,
+							   PgturbohybridDbsfBranchStats *branch)
+{
+	double	   *values;
+	double		sum = 0.0;
+	double		sumSq = 0.0;
+	int			valueCount = 0;
+	int			minBranchCandidates;
+
+	memset(branch, 0, sizeof(*branch));
+	branch->min = 0.0;
+	branch->max = 0.0;
+	if (results == NULL || count <= 0)
+	{
+		branch->degenerate = true;
+		return;
+	}
+
+	values = palloc(sizeof(double) * count);
+	for (int i = 0; i < count; i++)
+	{
+		double		score;
+
+		if (dense)
+		{
+			if (!results[i].hasDense)
+				continue;
+			score = results[i].denseSimilarity;
+		}
+		else
+		{
+			if (!results[i].hasBm25)
+				continue;
+			score = results[i].bm25Score;
+		}
+		if (isnan(score) || isinf(score))
+			continue;
+		values[valueCount++] = score;
+		sum += score;
+		if (valueCount == 1)
+		{
+			branch->min = score;
+			branch->max = score;
+		}
+		else
+		{
+			branch->min = Min(branch->min, score);
+			branch->max = Max(branch->max, score);
+		}
+	}
+
+	branch->count = (uint32) valueCount;
+	if (valueCount <= 0)
+	{
+		pfree(values);
+		branch->degenerate = true;
+		return;
+	}
+
+	branch->mean = sum / (double) valueCount;
+	if (valueCount > 1)
+	{
+		for (int i = 0; i < valueCount; i++)
+		{
+			double		delta = values[i] - branch->mean;
+
+			sumSq += delta * delta;
+		}
+		branch->stddev = sqrt(sumSq / (double) (valueCount - 1));
+	}
+
+	if (pgturbohybrid_dbsf_robust == PGTURBOHYBRID_DBSF_ROBUST_MAD)
+	{
+		double		median;
+
+		qsort(values, valueCount, sizeof(double),
+			  PgturbohybridDoubleAscendingCompare);
+		median = PgturbohybridMedianSorted(values, valueCount);
+		for (int i = 0; i < valueCount; i++)
+			values[i] = fabs(values[i] - median);
+		qsort(values, valueCount, sizeof(double),
+			  PgturbohybridDoubleAscendingCompare);
+		branch->mean = median;
+		branch->stddev = 1.4826 *
+			PgturbohybridMedianSorted(values, valueCount);
+	}
+
+	pfree(values);
+
+	minBranchCandidates = Max(pgturbohybrid_dbsf_min_branch_candidates, 1);
+	branch->degenerate =
+		valueCount < minBranchCandidates ||
+		branch->stddev <= 0.0 ||
+		isnan(branch->stddev) ||
+		isinf(branch->stddev);
+}
+
+static double
+PgturbohybridDbsfNormalize(double value,
+						   const PgturbohybridDbsfBranchStats *branch)
+{
+	double		sigma;
+	double		lo;
+	double		hi;
+
+	if (branch == NULL || branch->degenerate)
+		return 0.5;
+	sigma = pgturbohybrid_dbsf_sigma;
+	if (isnan(sigma) || isinf(sigma) || sigma <= 0.0)
+		sigma = 3.0;
+	lo = branch->mean - sigma * branch->stddev;
+	hi = branch->mean + sigma * branch->stddev;
+	if (hi <= lo)
+		return 0.5;
+	return PgturbohybridClampUnit((value - lo) / (hi - lo));
+}
+
 static double
 PgturbohybridCalibratedFusionAlpha(PgturbohybridQueryHeader *query,
 								   int queryShape)
@@ -3503,6 +4084,9 @@ PgturbohybridApplyBm25OnlyMultiVectorExactRescore(IndexScanDesc scan,
 	TupleTableSlot *slot;
 	AttrNumber	denseAttno;
 	PgturbohybridMultiVector *queryMv;
+	const float4 *queryWeights;
+	const bool *queryMask;
+	double		queryWeightSum;
 	double	   *denseDistances;
 	int			denseDistanceCount = 0;
 	bool		haveBm25Only = false;
@@ -3531,6 +4115,9 @@ PgturbohybridApplyBm25OnlyMultiVectorExactRescore(IndexScanDesc scan,
 	queryMv = PgturbohybridQueryGetMultiVector(state->query);
 	if (queryMv == NULL || queryMv->count <= 0)
 		return;
+	queryWeights = PgturbohybridQueryGetTokenWeights(state->query);
+	queryMask = PgturbohybridQueryGetTokenMask(state->query);
+	queryWeightSum = PgturbohybridQueryMultiVectorWeightSum(state->query);
 
 	denseAttno =
 		scan->indexRelation->rd_index->indkey.values[PGTURBOHYBRID_DENSE_KEY_INDEX];
@@ -3579,7 +4166,8 @@ PgturbohybridApplyBm25OnlyMultiVectorExactRescore(IndexScanDesc scan,
 
 		valuePtr = DatumGetPointer(value);
 		docMv = PgturbohybridDatumGetMultiVector(value);
-		maxsim = TqMultiVectorMaxSim(queryMv, docMv);
+		maxsim = TqMultiVectorMaxSimWeighted(queryMv, docMv,
+											 queryWeights, queryMask);
 		distance = -maxsim;
 
 		for (int j = 0; j < denseDistanceCount; j++)
@@ -3589,7 +4177,8 @@ PgturbohybridApplyBm25OnlyMultiVectorExactRescore(IndexScanDesc scan,
 		}
 
 		results[i].denseDistance = distance;
-		results[i].denseSimilarity = maxsim / (double) queryMv->count;
+		results[i].denseSimilarity =
+			queryWeightSum > 0.0 ? maxsim / queryWeightSum : 0.0;
 		results[i].denseRank = denseRank;
 		results[i].hasDense = true;
 		results[i].exactScored = true;
@@ -3689,6 +4278,12 @@ PgturbohybridInjectionPoolContainsHeapTid(
 static bool
 PgturbohybridShouldInjectMultiVectorBm25Candidates(PgturbohybridQueryHeader *query)
 {
+	if (pgturbohybrid_multivector_sparse_candidate_source ==
+		PGTURBOHYBRID_MULTIVECTOR_SPARSE_CANDIDATE_SOURCE_BM25 ||
+		pgturbohybrid_multivector_sparse_candidate_source ==
+		PGTURBOHYBRID_MULTIVECTOR_SPARSE_CANDIDATE_SOURCE_LEARNED_SPARSE)
+		return true;
+
 	switch ((PgturbohybridMultiVectorBm25CandidateInjectionMode)
 			pgturbohybrid_multivector_bm25_candidate_injection)
 	{
@@ -3700,6 +4295,13 @@ PgturbohybridShouldInjectMultiVectorBm25Candidates(PgturbohybridQueryHeader *que
 		default:
 			return false;
 	}
+}
+
+static bool
+PgturbohybridUsingLearnedSparseCandidateInjection(void)
+{
+	return pgturbohybrid_multivector_sparse_candidate_source ==
+		PGTURBOHYBRID_MULTIVECTOR_SPARSE_CANDIDATE_SOURCE_LEARNED_SPARSE;
 }
 
 static void
@@ -3718,6 +4320,9 @@ PgturbohybridInjectMultiVectorBm25Candidates(IndexScanDesc scan,
 	TupleTableSlot *slot;
 	AttrNumber	denseAttno;
 	PgturbohybridMultiVector *queryMv;
+	const float4 *queryWeights;
+	const bool *queryMask;
+	double		queryWeightSum;
 	PgturbohybridMultiVectorBm25InjectionCandidate *pool;
 	TqDenseCandidate *newDense;
 	int			poolCount;
@@ -3725,7 +4330,10 @@ PgturbohybridInjectMultiVectorBm25Candidates(IndexScanDesc scan,
 	int			newDenseCount;
 	uint32		exactReranked = 0;
 	uint32		retained = 0;
+	uint32		learnedSparseRetained = 0;
 	uint64		exactPairs = 0;
+	bool		learnedSparse =
+		PgturbohybridUsingLearnedSparseCandidateInjection();
 
 	if (denseStats == NULL)
 		return;
@@ -3733,6 +4341,9 @@ PgturbohybridInjectMultiVectorBm25Candidates(IndexScanDesc scan,
 	denseStats->multivectorBm25InjectionCandidates = 0;
 	denseStats->multivectorBm25InjectionRetained = 0;
 	denseStats->multivectorBm25InjectionExactReranked = 0;
+	denseStats->learnedSparseCandidates = 0;
+	denseStats->learnedSparseRetainedForMaxsim = 0;
+	denseStats->learnedSparseBranchLatencyUs = 0;
 
 	if (scan == NULL || scan->heapRelation == NULL ||
 		scan->indexRelation == NULL || scan->indexRelation->rd_index == NULL ||
@@ -3747,6 +4358,9 @@ PgturbohybridInjectMultiVectorBm25Candidates(IndexScanDesc scan,
 	queryMv = PgturbohybridQueryGetMultiVector(query);
 	if (queryMv == NULL || queryMv->count <= 0)
 		return;
+	queryWeights = PgturbohybridQueryGetTokenWeights(query);
+	queryMask = PgturbohybridQueryGetTokenMask(query);
+	queryWeightSum = PgturbohybridQueryMultiVectorWeightSum(query);
 
 	denseAttno =
 		scan->indexRelation->rd_index->indkey.values[PGTURBOHYBRID_DENSE_KEY_INDEX];
@@ -3757,6 +4371,8 @@ PgturbohybridInjectMultiVectorBm25Candidates(IndexScanDesc scan,
 
 	denseStats->multivectorBm25InjectionEnabled = true;
 	denseStats->multivectorBm25InjectionCandidates = (uint32) bm25Count;
+	if (learnedSparse)
+		denseStats->learnedSparseCandidates = (uint32) bm25Count;
 
 	candidateLimit = Max(*denseCount,
 						 PgturbohybridBudgetFinalTarget(query,
@@ -3818,12 +4434,13 @@ PgturbohybridInjectMultiVectorBm25Candidates(IndexScanDesc scan,
 
 		valuePtr = DatumGetPointer(value);
 		docMv = PgturbohybridDatumGetMultiVector(value);
-		maxsim = TqMultiVectorMaxSim(queryMv, docMv);
+		maxsim = TqMultiVectorMaxSimWeighted(queryMv, docMv,
+											 queryWeights, queryMask);
 		pool[poolCount].candidate.nodeId = bm25[i].nodeId;
 		pool[poolCount].candidate.heaptid = bm25[i].heaptid;
 		pool[poolCount].candidate.distance = -maxsim;
 		pool[poolCount].candidate.similarity =
-			maxsim / (double) queryMv->count;
+			queryWeightSum > 0.0 ? maxsim / queryWeightSum : 0.0;
 		pool[poolCount].candidate.rank = 0;
 		pool[poolCount].candidate.exactScored = true;
 		pool[poolCount].injected = true;
@@ -3852,6 +4469,16 @@ PgturbohybridInjectMultiVectorBm25Candidates(IndexScanDesc scan,
 		if (pool[i].injected)
 			retained++;
 	}
+	if (learnedSparse)
+	{
+		for (int i = 0; i < bm25Count; i++)
+		{
+			if (PgturbohybridDenseCandidatesContainHeapTid(newDense,
+														  newDenseCount,
+														  &bm25[i].heaptid))
+				learnedSparseRetained++;
+		}
+	}
 
 	*dense = newDense;
 	*denseCount = newDenseCount;
@@ -3859,8 +4486,13 @@ PgturbohybridInjectMultiVectorBm25Candidates(IndexScanDesc scan,
 	denseStats->multivectorDocCandidates = (uint32) newDenseCount;
 	denseStats->multivectorExactRerankDocs += exactReranked;
 	denseStats->multivectorExactRerankPairs += exactPairs;
+	denseStats->exactRerankCandidates += exactReranked;
+	denseStats->exactRerankTokensEvaluated +=
+		(uint64) exactReranked * (uint64) queryMv->count;
 	denseStats->multivectorBm25InjectionRetained = retained;
 	denseStats->multivectorBm25InjectionExactReranked = exactReranked;
+	if (learnedSparse)
+		denseStats->learnedSparseRetainedForMaxsim = learnedSparseRetained;
 }
 
 static int
@@ -4046,11 +4678,22 @@ PgturbohybridScoreResults(PgturbohybridScanState *state, PgturbohybridResult *re
 		query->alpha : 0.5;
 	uint16		fusion = pgturbohybrid_force_fusion != 0 ?
 		pgturbohybrid_force_fusion : query->fusion;
+	PgturbohybridDbsfBranchStats dbsfDense;
+	PgturbohybridDbsfBranchStats dbsfBm25;
+
+	memset(&dbsfDense, 0, sizeof(dbsfDense));
+	memset(&dbsfBm25, 0, sizeof(dbsfBm25));
 
 	if (stats != NULL)
 	{
 		stats->calibratedFusionEnabled =
 			fusion == PGTURBOHYBRID_FUSION_CALIBRATED;
+		stats->dbsfEnabled = fusion == PGTURBOHYBRID_FUSION_DBSF;
+		stats->dbsfDegenerateBranches = 0;
+		memset(stats->dbsfBranchMean, 0, sizeof(stats->dbsfBranchMean));
+		memset(stats->dbsfBranchStddev, 0, sizeof(stats->dbsfBranchStddev));
+		memset(stats->dbsfBranchMin, 0, sizeof(stats->dbsfBranchMin));
+		memset(stats->dbsfBranchMax, 0, sizeof(stats->dbsfBranchMax));
 		stats->calibratedFusionBothMatchBonus =
 			stats->calibratedFusionEnabled ?
 			PgturbohybridClampUnit(
@@ -4092,6 +4735,25 @@ PgturbohybridScoreResults(PgturbohybridScanState *state, PgturbohybridResult *re
 			}
 		}
 	}
+	else if (fusion == PGTURBOHYBRID_FUSION_DBSF)
+	{
+		PgturbohybridDbsfCollectBranch(results, count, true, &dbsfDense);
+		PgturbohybridDbsfCollectBranch(results, count, false, &dbsfBm25);
+		if (stats != NULL)
+		{
+			stats->dbsfBranchMean[0] = dbsfDense.mean;
+			stats->dbsfBranchMean[1] = dbsfBm25.mean;
+			stats->dbsfBranchStddev[0] = dbsfDense.stddev;
+			stats->dbsfBranchStddev[1] = dbsfBm25.stddev;
+			stats->dbsfBranchMin[0] = dbsfDense.min;
+			stats->dbsfBranchMin[1] = dbsfBm25.min;
+			stats->dbsfBranchMax[0] = dbsfDense.max;
+			stats->dbsfBranchMax[1] = dbsfBm25.max;
+			stats->dbsfDegenerateBranches =
+				(dbsfDense.degenerate ? 1 : 0) +
+				(dbsfBm25.degenerate ? 1 : 0);
+		}
+	}
 
 	for (int i = 0; i < count; i++)
 	{
@@ -4126,6 +4788,19 @@ PgturbohybridScoreResults(PgturbohybridScanState *state, PgturbohybridResult *re
 
 			results[i].fusedScore =
 				alpha * denseNorm + (1.0 - alpha) * bm25Norm + bonus;
+		}
+		else if (fusion == PGTURBOHYBRID_FUSION_DBSF)
+		{
+			double		denseNorm = results[i].hasDense ?
+				PgturbohybridDbsfNormalize(results[i].denseSimilarity,
+										   &dbsfDense) : 0.0;
+			double		bm25Norm = results[i].hasBm25 ?
+				PgturbohybridDbsfNormalize(results[i].bm25Score,
+										   &dbsfBm25) : 0.0;
+
+			results[i].fusedScore =
+				query->denseWeight * denseNorm +
+				query->bm25Weight * bm25Norm;
 		}
 		else
 		{
@@ -4603,6 +5278,8 @@ PgturbohybridCollectScanResults(IndexScanDesc scan, PgturbohybridScanState *stat
 												 &denseCount,
 												 autoBudgetLimit,
 												 so->tmpCtx, &denseStats);
+	if (PgturbohybridUsingLearnedSparseCandidateInjection())
+		denseStats.learnedSparseBranchLatencyUs = lastStats.bm25ElapsedUs;
 
 	INSTR_TIME_SET_CURRENT(phaseStart);
 	fusionCandidatesSeen = denseCount + bm25Count;
@@ -4857,6 +5534,9 @@ PgturbohybridCollectScanResults(IndexScanDesc scan, PgturbohybridScanState *stat
 	strlcpy(lastStats.multivectorCandidateSource,
 			denseStats.multivectorCandidateSource,
 			sizeof(lastStats.multivectorCandidateSource));
+	strlcpy(lastStats.multivectorProxyEncoderKind,
+			denseStats.multivectorProxyEncoderKind,
+			sizeof(lastStats.multivectorProxyEncoderKind));
 	strlcpy(lastStats.multivectorGraphMode,
 			denseStats.multivectorGraphMode,
 			sizeof(lastStats.multivectorGraphMode));
@@ -4904,6 +5584,42 @@ PgturbohybridCollectScanResults(IndexScanDesc scan, PgturbohybridScanState *stat
 	strlcpy(lastStats.multivectorDocGraphWarning,
 			denseStats.multivectorDocGraphWarning,
 			sizeof(lastStats.multivectorDocGraphWarning));
+	lastStats.proxyCandidates = denseStats.proxyCandidates;
+	lastStats.proxyTop1Admission = denseStats.proxyTop1Admission;
+	lastStats.proxyExactRerankDocs = denseStats.proxyExactRerankDocs;
+	lastStats.centroidListsVisited = denseStats.centroidListsVisited;
+	lastStats.centroidDocsTouched = denseStats.centroidDocsTouched;
+	lastStats.centroidPrunedDocs = denseStats.centroidPrunedDocs;
+	lastStats.centroidCandidates = denseStats.centroidCandidates;
+	lastStats.quantizedInvertedListsVisited =
+		denseStats.quantizedInvertedListsVisited;
+	lastStats.quantizedInvertedPostingsTouched =
+		denseStats.quantizedInvertedPostingsTouched;
+	lastStats.quantizedInvertedDocsScored =
+		denseStats.quantizedInvertedDocsScored;
+	lastStats.quantizedInvertedCandidates =
+		denseStats.quantizedInvertedCandidates;
+	lastStats.quantizedInvertedExactRerankDocs =
+		denseStats.quantizedInvertedExactRerankDocs;
+	lastStats.quantizedInvertedCodebookSize =
+		denseStats.quantizedInvertedCodebookSize;
+	strlcpy(lastStats.multivectorDocSidecarCacheMode,
+			denseStats.multivectorDocSidecarCacheMode,
+			sizeof(lastStats.multivectorDocSidecarCacheMode));
+	lastStats.multivectorDocSidecarPagesRead =
+		denseStats.multivectorDocSidecarPagesRead;
+	lastStats.multivectorDocSidecarCacheHits =
+		denseStats.multivectorDocSidecarCacheHits;
+	lastStats.multivectorDocSidecarCacheMisses =
+		denseStats.multivectorDocSidecarCacheMisses;
+	lastStats.multivectorDocSidecarBytesTouched =
+		denseStats.multivectorDocSidecarBytesTouched;
+	lastStats.multivectorDocSidecarVectorsLoaded =
+		denseStats.multivectorDocSidecarVectorsLoaded;
+	lastStats.multivectorTokensOriginal =
+		denseStats.multivectorTokensOriginal;
+	lastStats.multivectorTokensPooled =
+		denseStats.multivectorTokensPooled;
 	lastStats.multivectorReservoirsEnabled =
 		denseStats.multivectorReservoirsEnabled;
 	lastStats.multivectorReservoirScoreDocs =
@@ -4928,6 +5644,11 @@ PgturbohybridCollectScanResults(IndexScanDesc scan, PgturbohybridScanState *stat
 		denseStats.multivectorBm25InjectionRetained;
 	lastStats.multivectorBm25InjectionExactReranked =
 		denseStats.multivectorBm25InjectionExactReranked;
+	lastStats.learnedSparseCandidates = denseStats.learnedSparseCandidates;
+	lastStats.learnedSparseRetainedForMaxsim =
+		denseStats.learnedSparseRetainedForMaxsim;
+	lastStats.learnedSparseBranchLatencyUs =
+		denseStats.learnedSparseBranchLatencyUs;
 	switch ((PgturbohybridMultiVectorDocMapSource) denseStats.multivectorDocMapSource)
 	{
 		case PGTURBOHYBRID_MULTIVECTOR_DOCMAP_SOURCE_SIDECAR:
@@ -4958,6 +5679,14 @@ PgturbohybridCollectScanResults(IndexScanDesc scan, PgturbohybridScanState *stat
 		denseStats.multivectorExactRerankDocs;
 	lastStats.multivectorExactRerankPairs =
 		denseStats.multivectorExactRerankPairs;
+	lastStats.exactRerankCandidates = denseStats.exactRerankCandidates;
+	lastStats.exactRerankTokensEvaluated =
+		denseStats.exactRerankTokensEvaluated;
+	lastStats.exactRerankTokensSkipped =
+		denseStats.exactRerankTokensSkipped;
+	lastStats.exactRerankPairsSaved = denseStats.exactRerankPairsSaved;
+	lastStats.adaptiveRerankTopKChangedVsFull =
+		denseStats.adaptiveRerankTopKChangedVsFull;
 	strlcpy(lastStats.multivectorExactKernel,
 			denseStats.multivectorExactKernel,
 			sizeof(lastStats.multivectorExactKernel));
@@ -5092,19 +5821,23 @@ PgturbohybridCollectScanResults(IndexScanDesc scan, PgturbohybridScanState *stat
 	lastStats.bm25ScalarTailPostings = bm25Stats.scalarTailPostings;
 	lastStats.bm25Prefetches = bm25Stats.prefetches;
 	lastStats.fastWeightedEnabled =
-		scanQuery->fusion == PGTURBOHYBRID_FUSION_FAST_WEIGHTED;
+		effectiveFusion == PGTURBOHYBRID_FUSION_FAST_WEIGHTED;
 	lastStats.fastWeightedAlpha =
 		(scanQuery->flags & PGTURBOHYBRID_QUERY_FLAG_ALPHA_IS_SET) != 0 ?
 		scanQuery->alpha : 0.5;
 	lastStats.calibratedFusionEnabled =
-		requestedFusion == PGTURBOHYBRID_FUSION_CALIBRATED;
+		effectiveFusion == PGTURBOHYBRID_FUSION_CALIBRATED;
+	lastStats.dbsfEnabled =
+		effectiveFusion == PGTURBOHYBRID_FUSION_DBSF;
 	strlcpy(lastStats.bm25NormMode,
-			(lastStats.fastWeightedEnabled || lastStats.calibratedFusionEnabled) ?
-			"saturating" : "none",
+			lastStats.dbsfEnabled ? "dbsf" :
+			((lastStats.fastWeightedEnabled || lastStats.calibratedFusionEnabled) ?
+			 "saturating" : "none"),
 			sizeof(lastStats.bm25NormMode));
 	strlcpy(lastStats.denseNormMode,
-			(lastStats.fastWeightedEnabled || lastStats.calibratedFusionEnabled) ?
-			"logistic" : "none",
+			lastStats.dbsfEnabled ? "dbsf" :
+			((lastStats.fastWeightedEnabled || lastStats.calibratedFusionEnabled) ?
+			 "logistic" : "none"),
 			sizeof(lastStats.denseNormMode));
 	strlcpy(lastStats.hybridBudgetPolicy,
 			PgturbohybridHybridBudgetPolicyName(pgturbohybrid_hybrid_budget_policy),
@@ -5119,6 +5852,11 @@ PgturbohybridCollectScanResults(IndexScanDesc scan, PgturbohybridScanState *stat
 	lastStats.hybridBm25KChosen = scanQuery->bm25K;
 	strlcpy(lastStats.hybridBudgetReason, hybridBudgetChoice.reason,
 			sizeof(lastStats.hybridBudgetReason));
+	PgturbohybridBuildBranchPlan(&lastStats.branchPlan, scanQuery,
+								 effectiveFusion, dense, denseCount,
+								 bm25, bm25Count, &denseStats,
+								 lastStats.denseElapsedUs,
+								 lastStats.bm25ElapsedUs);
 	lastStats.elapsedUs = PgturbohybridElapsedUs(totalStart);
 	pgturbohybrid_last_scan_state = lastStats;
 	state->query = originalQuery;
@@ -5913,6 +6651,14 @@ pgturbohybridamoptions(Datum reloptions, bool validate)
 		PGTURBOHYBRID_RELOPT_PARSE("residual_rerank", RELOPT_TYPE_BOOL, residualRerank),
 		PGTURBOHYBRID_RELOPT_PARSE("residual_rerank_bytes", RELOPT_TYPE_INT, residualRerankBytes),
 		PGTURBOHYBRID_RELOPT_PARSE("multivector_graph", RELOPT_TYPE_ENUM, multivectorGraphMode),
+		PGTURBOHYBRID_RELOPT_PARSE("multivector_token_pooling", RELOPT_TYPE_ENUM, multivectorTokenPooling),
+		PGTURBOHYBRID_RELOPT_PARSE("multivector_token_pooling_target_ratio", RELOPT_TYPE_REAL, multivectorTokenPoolingTargetRatio),
+		PGTURBOHYBRID_RELOPT_PARSE("multivector_token_pooling_min_tokens", RELOPT_TYPE_INT, multivectorTokenPoolingMinTokens),
+		PGTURBOHYBRID_RELOPT_PARSE("multivector_centroids", RELOPT_TYPE_ENUM, multivectorCentroids),
+		PGTURBOHYBRID_RELOPT_PARSE("multivector_centroid_count", RELOPT_TYPE_INT, multivectorCentroidCount),
+		PGTURBOHYBRID_RELOPT_PARSE("multivector_proxy_encoder", RELOPT_TYPE_ENUM, multivectorProxyEncoder),
+		PGTURBOHYBRID_RELOPT_PARSE("multivector_context_mode", RELOPT_TYPE_ENUM, multivectorContextMode),
+		PGTURBOHYBRID_RELOPT_PARSE("multivector_field_mode", RELOPT_TYPE_ENUM, multivectorFieldMode),
 	};
 	PgturbohybridOptions *opts = (PgturbohybridOptions *) build_reloptions(reloptions, validate,
 																 pgturbohybrid_relopt_kind,
@@ -6043,6 +6789,50 @@ PgturbohybridInit(void)
 					   PGTURBOHYBRID_DEFAULT_MULTIVECTOR_GRAPH_MODE,
 					   "Valid values are \"token_nodes\" and \"document_nodes\". \"document_nodes\" stores one graph node per heap document with a versioned document multivector sidecar for MaxSim-aligned candidate generation.",
 					   AccessExclusiveLock);
+	add_enum_reloption(pgturbohybrid_relopt_kind, "multivector_token_pooling",
+					   "Index-time document-token pooling mode for multivector document_nodes indexes.",
+					   pgturbohybrid_multivector_token_pooling_relopt_options,
+					   PGTURBOHYBRID_MULTIVECTOR_TOKEN_POOLING_OFF,
+					   "Valid values are \"off\", \"kmeans\", and \"greedy_cosine\".",
+					   AccessExclusiveLock);
+	add_real_reloption(pgturbohybrid_relopt_kind, "multivector_token_pooling_target_ratio",
+					   "Target pooled/original document-token ratio when multivector_token_pooling is enabled.",
+					   PGTURBOHYBRID_MULTIVECTOR_TOKEN_POOLING_DEFAULT_TARGET_RATIO,
+					   0.01, 1.0, AccessExclusiveLock);
+	add_int_reloption(pgturbohybrid_relopt_kind, "multivector_token_pooling_min_tokens",
+					  "Minimum document-token count before index-time multivector token pooling is applied.",
+					  PGTURBOHYBRID_MULTIVECTOR_TOKEN_POOLING_DEFAULT_MIN_TOKENS,
+					  1, PGTURBOHYBRID_MULTIVECTOR_MAX_COUNT, AccessExclusiveLock);
+	add_enum_reloption(pgturbohybrid_relopt_kind, "multivector_centroids",
+					   "Experimental PLAID-lite document centroid mode for multivector candidate generation.",
+					   pgturbohybrid_multivector_centroids_relopt_options,
+					   PGTURBOHYBRID_MULTIVECTOR_CENTROIDS_OFF,
+					   "Valid values are \"off\" and \"kmeans\".",
+					   AccessExclusiveLock);
+	add_int_reloption(pgturbohybrid_relopt_kind, "multivector_centroid_count",
+					  "Per-document centroid count for multivector_centroids; 0 selects an automatic count.",
+					  PGTURBOHYBRID_MULTIVECTOR_CENTROID_COUNT_AUTO,
+					  PGTURBOHYBRID_MULTIVECTOR_CENTROID_COUNT_AUTO,
+					  PGTURBOHYBRID_MULTIVECTOR_CENTROID_COUNT_MAX,
+					  AccessExclusiveLock);
+	add_enum_reloption(pgturbohybrid_relopt_kind, "multivector_proxy_encoder",
+					   "Fixed-dimensional proxy encoder for document-node proxy_vector admission.",
+					   pgturbohybrid_multivector_proxy_encoder_relopt_options,
+					   PGTURBOHYBRID_MULTIVECTOR_PROXY_ENCODER_MEAN_POOL,
+					   "Valid values are \"mean_pool\", \"max_pool\", \"random_projection_fde\", and \"learned_projection_placeholder\".",
+					   AccessExclusiveLock);
+	add_enum_reloption(pgturbohybrid_relopt_kind, "multivector_context_mode",
+					   "Long-context multivector scoring mode.",
+					   pgturbohybrid_multivector_context_mode_relopt_options,
+					   PGTURBOHYBRID_MULTIVECTOR_CONTEXT_MODE_FLAT,
+					   "Valid values are \"flat\" and \"context_level\".",
+					   AccessExclusiveLock);
+	add_enum_reloption(pgturbohybrid_relopt_kind, "multivector_field_mode",
+					   "Field-aware multivector scoring mode.",
+					   pgturbohybrid_multivector_field_mode_relopt_options,
+					   PGTURBOHYBRID_MULTIVECTOR_FIELD_MODE_OFF,
+					   "Valid values are \"off\" and \"weighted\".",
+					   AccessExclusiveLock);
 
 	DefineCustomIntVariable("turbohybrid.default_dense_k", "Default dense candidate budget for turbohybrid_query callers",
 							NULL, &pgturbohybrid_default_dense_k,
@@ -6088,6 +6878,23 @@ PgturbohybridInit(void)
 							 "Dense alpha used by calibrated fusion for mixed/default query shapes",
 							 NULL, &pgturbohybrid_calibrated_fusion_default_alpha,
 							 0.50, 0.0, 1.0, PGC_USERSET, 0, NULL, NULL, NULL);
+	DefineCustomRealVariable("turbohybrid.dbsf_sigma",
+							 "Sigma window used by DBSF distribution-based score normalization",
+							 "DBSF maps each branch score through clipped mean +/- sigma * stddev endpoints before weighted summation.",
+							 &pgturbohybrid_dbsf_sigma,
+							 3.0, 0.001, 100.0, PGC_USERSET, 0, NULL, NULL, NULL);
+	DefineCustomIntVariable("turbohybrid.dbsf_min_branch_candidates",
+							"Minimum usable branch candidates before DBSF treats a branch as degenerate",
+							"Degenerate DBSF branches normalize present scores to 0.5 and are exposed in scan stats.",
+							&pgturbohybrid_dbsf_min_branch_candidates,
+							10, 1, 1000000, PGC_USERSET, 0, NULL, NULL, NULL);
+	DefineCustomEnumVariable("turbohybrid.dbsf_robust",
+							 "Robust DBSF normalization mode",
+							 "Use 'mad' to center DBSF on the branch median and scale by median absolute deviation.",
+							 &pgturbohybrid_dbsf_robust,
+							 PGTURBOHYBRID_DBSF_ROBUST_OFF,
+							 pgturbohybrid_dbsf_robust_options,
+							 PGC_USERSET, 0, NULL, NULL, NULL);
 	DefineCustomIntVariable("turbohybrid.multivector_max_doc_vectors",
 							"Maximum token vectors accepted for one indexed multivector document",
 							"Multivector index builds use this as the per-document token cap. Single-vector indexes are unaffected.",
@@ -6109,6 +6916,12 @@ PgturbohybridInit(void)
 							PGTURBOHYBRID_MULTIVECTOR_MAX_DIM,
 							1, PGTURBOHYBRID_MULTIVECTOR_MAX_DIM,
 							PGC_USERSET, 0, NULL, NULL, NULL);
+	DefineCustomStringVariable("turbohybrid.multivector_model_name",
+							   "Late-interaction model metadata profile for multivector validation",
+							   "When set to a registered model name, multivector dimensions are checked against the model profile and suspicious token counts produce warnings.",
+							   &pgturbohybrid_multivector_model_name,
+							   "",
+							   PGC_USERSET, 0, NULL, NULL, NULL);
 	DefineCustomIntVariable("turbohybrid.multivector_subvector_k",
 							"Subvector ANN hits collected for each multivector query token",
 							"Multivector MaxSim scans run one bounded graph search per query token and merge hits by heap tuple.",
@@ -6149,7 +6962,7 @@ PgturbohybridInit(void)
 							PGC_USERSET, 0, NULL, NULL, NULL);
 	DefineCustomIntVariable("turbohybrid.multivector_doc_graph_search_ef",
 							"Document-node graph traversal breadth for multivector MaxSim scans",
-							"Zero uses the index graph_ef_search setting; positive values override traversal ef for document-node multivector graphs.",
+							"Zero uses the index graph_ef_search setting as the traversal cap; positive values override traversal ef for document-node multivector graphs.",
 							&pgturbohybrid_multivector_doc_graph_search_ef,
 							0, 0, 100000,
 							PGC_USERSET, 0, NULL, NULL, NULL);
@@ -6172,11 +6985,18 @@ PgturbohybridInit(void)
 							 PGTURBOHYBRID_MULTIVECTOR_DOC_STORAGE_F32,
 							 pgturbohybrid_multivector_doc_storage_options,
 							 PGC_USERSET, 0, NULL, NULL, NULL);
+	DefineCustomEnumVariable("turbohybrid.multivector_doc_storage_cache",
+							 "Document-node multivector sidecar cache mode",
+							 "auto keeps the document sidecar resident for low-latency scans when it fits native_cache_max_mb and otherwise page-loads the sidecar through shared buffers; resident prefers the already loaded sidecar; paged reports per-scan sidecar page reads and bytes touched.",
+							 &pgturbohybrid_multivector_doc_storage_cache,
+							 PGTURBOHYBRID_MULTIVECTOR_DOC_STORAGE_CACHE_AUTO,
+							 pgturbohybrid_multivector_doc_storage_cache_options,
+							 PGC_USERSET, 0, NULL, NULL, NULL);
 	DefineCustomEnumVariable("turbohybrid.multivector_exact_rerank",
 							 "Exact heap rerank mode for multivector MaxSim scans",
-							 "topk fetches a bounded document-candidate prefix from the heap and recomputes exact f32 MaxSim; off keeps approximate TurboQuant ordering.",
+							 "topk fetches a bounded document-candidate prefix from the heap and recomputes exact f32 MaxSim; adaptive uses conservative token-norm upper bounds to skip candidates that cannot enter top-K; off keeps approximate TurboQuant ordering.",
 							 &pgturbohybrid_multivector_exact_rerank,
-							 PGTURBOHYBRID_MULTIVECTOR_EXACT_RERANK_TOPK,
+							 PGTURBOHYBRID_MULTIVECTOR_EXACT_RERANK_ADAPTIVE,
 							 pgturbohybrid_multivector_exact_rerank_options,
 							 PGC_USERSET, 0, NULL, NULL, NULL);
 	DefineCustomIntVariable("turbohybrid.multivector_exact_rerank_k",
@@ -6185,6 +7005,13 @@ PgturbohybridInit(void)
 							&pgturbohybrid_multivector_exact_rerank_k,
 							100, 1, 100000,
 							PGC_USERSET, 0, NULL, NULL, NULL);
+	DefineCustomEnumVariable("turbohybrid.multivector_proxy_encoder",
+							 "Default fixed-dimensional proxy encoder for new document-node indexes",
+							 "Existing indexes use their persisted multivector_proxy_encoder reloption; this GUC is a session fallback when no index reloption is available.",
+							 &pgturbohybrid_multivector_proxy_encoder,
+							 PGTURBOHYBRID_MULTIVECTOR_PROXY_ENCODER_MEAN_POOL,
+							 pgturbohybrid_multivector_proxy_encoder_options,
+							 PGC_USERSET, 0, NULL, NULL, NULL);
 	DefineCustomIntVariable("turbohybrid.multivector_max_accumulator_mb",
 							"Maximum memory allowed for one multivector document accumulator",
 							"Prevents pathological multivector queries from allocating state proportional to too many touched documents times query vectors.",
@@ -6212,10 +7039,17 @@ PgturbohybridInit(void)
 							   PGC_USERSET, 0, NULL, NULL, NULL);
 	DefineCustomEnumVariable("turbohybrid.multivector_candidate_source",
 							 "Developer candidate source for multivector MaxSim scans",
-							 "graph uses the index graph mode; document_nodes requires a document-node index; exact_token_scan scores all stored token nodes per query token; exact_doc_scan and doc_graph_prototype score heap documents with full MaxSim for validation; proxy_vector uses document-node representative vectors for graph admission and exact MaxSim rerank.",
+							 "graph uses the index graph mode; document_nodes requires a document-node index; exact_token_scan scores all stored token nodes per query token; exact_doc_scan and doc_graph_prototype score heap documents with full MaxSim for validation; proxy_vector uses the persisted document-node proxy encoder graph for admission and exact MaxSim rerank; centroid_lite uses opt-in document-local centroids before exact MaxSim rerank; quantized_inverted_experimental is a research-only ColBERTSaR-style branch with unstable storage.",
 							 &pgturbohybrid_multivector_candidate_source,
 							 PGTURBOHYBRID_MULTIVECTOR_CANDIDATE_SOURCE_GRAPH,
 							 pgturbohybrid_multivector_candidate_source_options,
+							 PGC_USERSET, 0, NULL, NULL, NULL);
+	DefineCustomEnumVariable("turbohybrid.multivector_branch_plan",
+							 "Multivector branch planner mode",
+							 "auto preserves existing branch execution, dense_only exposes a dense-only branch plan, and qdrant_like emits nested prefetch-style branch diagnostics for multivector/hybrid scans.",
+							 &pgturbohybrid_multivector_branch_plan,
+							 PGTURBOHYBRID_BRANCH_PLAN_AUTO,
+							 pgturbohybrid_multivector_branch_plan_options,
 							 PGC_USERSET, 0, NULL, NULL, NULL);
 	DefineCustomEnumVariable("turbohybrid.multivector_plain_fallback",
 							 "Exact/plain heap fallback mode for multivector MaxSim scans",
@@ -6261,6 +7095,13 @@ PgturbohybridInit(void)
 							 &pgturbohybrid_multivector_bm25_candidate_injection,
 							 PGTURBOHYBRID_MULTIVECTOR_BM25_CANDIDATE_INJECTION_OFF,
 							 pgturbohybrid_multivector_bm25_candidate_injection_options,
+							 PGC_USERSET, 0, NULL, NULL, NULL);
+	DefineCustomEnumVariable("turbohybrid.multivector_sparse_candidate_source",
+							 "Sparse branch source for multivector candidate injection",
+							 "off disables the explicit sparse branch; bm25 uses lexical postings; learned_sparse reuses the sparse postings path for exported learned sparse vectors and exact-MaxSim reranks admitted documents.",
+							 &pgturbohybrid_multivector_sparse_candidate_source,
+							 PGTURBOHYBRID_MULTIVECTOR_SPARSE_CANDIDATE_SOURCE_OFF,
+							 pgturbohybrid_multivector_sparse_candidate_source_options,
 							 PGC_USERSET, 0, NULL, NULL, NULL);
 	DefineCustomIntVariable("turbohybrid.max_union_candidates", "Maximum candidates retained while fusing dense and BM25 branches",
 							NULL, &pgturbohybrid_max_union_candidates,

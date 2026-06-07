@@ -1,6 +1,8 @@
 EXTENSION = pgturbohybrid
 EXTVERSION = 0.1.0
 
+.DEFAULT_GOAL := all
+
 MODULE_big = pgturbohybrid
 DATA = sql/pgturbohybrid--0.1.0.sql
 

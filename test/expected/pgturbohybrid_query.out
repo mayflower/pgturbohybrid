@@ -33,6 +33,9 @@ BEGIN
 		'turbohybrid.calibrated_fusion_broad_dense_alpha',
 		'turbohybrid.calibrated_fusion_default_alpha',
 		'turbohybrid.calibrated_fusion_identifier_bm25_alpha',
+		'turbohybrid.dbsf_min_branch_candidates',
+		'turbohybrid.dbsf_robust',
+		'turbohybrid.dbsf_sigma',
 		'turbohybrid.default_bm25_k',
 		'turbohybrid.default_dense_k',
 		'turbohybrid.default_rrf_k',
@@ -72,6 +75,7 @@ BEGIN
 		'turbohybrid.max_union_candidates',
 		'turbohybrid.multivector_adaptive_widening',
 			'turbohybrid.multivector_bm25_candidate_injection',
+			'turbohybrid.multivector_branch_plan',
 			'turbohybrid.multivector_candidate_reservoirs',
 			'turbohybrid.multivector_candidate_source',
 		'turbohybrid.multivector_coverage_reservoir_k',
@@ -83,6 +87,7 @@ BEGIN
 		'turbohybrid.multivector_doc_graph_rescore_k',
 		'turbohybrid.multivector_doc_graph_search_ef',
 		'turbohybrid.multivector_doc_storage',
+		'turbohybrid.multivector_doc_storage_cache',
 		'turbohybrid.multivector_docmap',
 		'turbohybrid.multivector_exact_rerank',
 		'turbohybrid.multivector_exact_rerank_k',
@@ -91,10 +96,13 @@ BEGIN
 		'turbohybrid.multivector_max_doc_vectors',
 		'turbohybrid.multivector_max_query_vectors',
 		'turbohybrid.multivector_max_raw_hits_per_token',
+		'turbohybrid.multivector_model_name',
 			'turbohybrid.multivector_per_token_doc_reservoir_k',
 			'turbohybrid.multivector_plain_fallback',
-			'turbohybrid.multivector_plain_fallback_candidate_fraction',
-			'turbohybrid.multivector_plain_fallback_max_docs',
+		'turbohybrid.multivector_plain_fallback_candidate_fraction',
+		'turbohybrid.multivector_plain_fallback_max_docs',
+		'turbohybrid.multivector_proxy_encoder',
+		'turbohybrid.multivector_sparse_candidate_source',
 		'turbohybrid.multivector_subvector_k',
 		'turbohybrid.multivector_unique_docs_per_token',
 		'turbohybrid.native_build_workers',
@@ -131,8 +139,10 @@ BEGIN
 		current_setting('turbohybrid.multivector_unique_docs_per_token') != '100' OR
 		current_setting('turbohybrid.multivector_max_raw_hits_per_token') != '400' OR
 		current_setting('turbohybrid.multivector_adaptive_widening') != 'auto' OR
+		current_setting('turbohybrid.multivector_branch_plan') != 'auto' OR
 		current_setting('turbohybrid.multivector_candidate_source') != 'graph' OR
 		current_setting('turbohybrid.multivector_bm25_candidate_injection') != 'off' OR
+		current_setting('turbohybrid.multivector_sparse_candidate_source') != 'off' OR
 		current_setting('turbohybrid.multivector_candidate_reservoirs') != 'conservative' OR
 		current_setting('turbohybrid.multivector_coverage_reservoir_k') != '10' OR
 		current_setting('turbohybrid.multivector_plain_fallback') != 'auto' OR
@@ -145,21 +155,26 @@ BEGIN
 		current_setting('turbohybrid.multivector_doc_graph_oversampling') != '1' OR
 		current_setting('turbohybrid.multivector_doc_graph_rescore_k') != '0' OR
 		current_setting('turbohybrid.multivector_doc_storage') != 'f32' OR
-		current_setting('turbohybrid.multivector_exact_rerank') != 'topk' OR
+		current_setting('turbohybrid.multivector_doc_storage_cache') != 'auto' OR
+		current_setting('turbohybrid.multivector_exact_rerank') != 'adaptive' OR
 		current_setting('turbohybrid.multivector_exact_rerank_k') != '100' OR
+		current_setting('turbohybrid.multivector_model_name') != '' OR
+		current_setting('turbohybrid.multivector_proxy_encoder') != 'mean_pool' OR
 		current_setting('turbohybrid.multivector_max_accumulator_mb') != '64' OR
 		current_setting('turbohybrid.multivector_debug_admission') != 'off' OR
 		current_setting('turbohybrid.multivector_debug_skip_query_tokens') != '' OR
 		current_setting('turbohybrid.multivector_debug_trace_limit') != '1000' THEN
-			RAISE EXCEPTION 'unexpected multivector defaults: doc %, query %, subvector %, unique %, raw %, adaptive %, source %, bm25_injection %, reservoirs %, coverage_reservoir_k %, fallback %, fallback_fraction %, fallback_max_docs %, per_token_reservoir_k %, docmap %, docs %, doc_graph_search_ef %, doc_graph_oversampling %, doc_graph_rescore_k %, doc_storage %, rerank %, rerank_k %, accumulator_mb %, debug %, skip_tokens %, trace_limit %',
+			RAISE EXCEPTION 'unexpected multivector defaults: doc %, query %, subvector %, unique %, raw %, adaptive %, branch_plan %, source %, bm25_injection %, sparse_source %, reservoirs %, coverage_reservoir_k %, fallback %, fallback_fraction %, fallback_max_docs %, per_token_reservoir_k %, docmap %, docs %, doc_graph_search_ef %, doc_graph_oversampling %, doc_graph_rescore_k %, doc_storage %, doc_storage_cache %, rerank %, rerank_k %, model %, proxy_encoder %, accumulator_mb %, debug %, skip_tokens %, trace_limit %',
 				current_setting('turbohybrid.multivector_max_doc_vectors'),
 			current_setting('turbohybrid.multivector_max_query_vectors'),
 			current_setting('turbohybrid.multivector_subvector_k'),
 			current_setting('turbohybrid.multivector_unique_docs_per_token'),
 			current_setting('turbohybrid.multivector_max_raw_hits_per_token'),
 			current_setting('turbohybrid.multivector_adaptive_widening'),
+			current_setting('turbohybrid.multivector_branch_plan'),
 			current_setting('turbohybrid.multivector_candidate_source'),
 			current_setting('turbohybrid.multivector_bm25_candidate_injection'),
+			current_setting('turbohybrid.multivector_sparse_candidate_source'),
 			current_setting('turbohybrid.multivector_candidate_reservoirs'),
 			current_setting('turbohybrid.multivector_coverage_reservoir_k'),
 			current_setting('turbohybrid.multivector_plain_fallback'),
@@ -172,8 +187,11 @@ BEGIN
 			current_setting('turbohybrid.multivector_doc_graph_oversampling'),
 			current_setting('turbohybrid.multivector_doc_graph_rescore_k'),
 			current_setting('turbohybrid.multivector_doc_storage'),
+			current_setting('turbohybrid.multivector_doc_storage_cache'),
 			current_setting('turbohybrid.multivector_exact_rerank'),
 			current_setting('turbohybrid.multivector_exact_rerank_k'),
+			current_setting('turbohybrid.multivector_model_name'),
+			current_setting('turbohybrid.multivector_proxy_encoder'),
 			current_setting('turbohybrid.multivector_max_accumulator_mb'),
 			current_setting('turbohybrid.multivector_debug_admission'),
 			current_setting('turbohybrid.multivector_debug_skip_query_tokens'),
@@ -241,6 +259,15 @@ BEGIN
 			current_setting('turbohybrid.bm25_hybrid_bound'),
 			current_setting('turbohybrid.bm25_accumulator_mode');
 	END IF;
+
+	IF current_setting('turbohybrid.dbsf_sigma')::float8 != 3.0 OR
+		current_setting('turbohybrid.dbsf_min_branch_candidates')::int != 10 OR
+		current_setting('turbohybrid.dbsf_robust') != 'off' THEN
+		RAISE EXCEPTION 'unexpected DBSF defaults: sigma %, min_branch_candidates %, robust %',
+			current_setting('turbohybrid.dbsf_sigma'),
+			current_setting('turbohybrid.dbsf_min_branch_candidates'),
+			current_setting('turbohybrid.dbsf_robust');
+	END IF;
 END
 $$;
 SET turbohybrid.enable_wand = off;
@@ -295,12 +322,16 @@ SET turbohybrid.multivector_max_raw_hits_per_token = 1;
 SET turbohybrid.multivector_doc_candidate_k = 1;
 SET turbohybrid.multivector_exact_rerank = off;
 SET turbohybrid.multivector_exact_rerank_k = 1;
+SET turbohybrid.multivector_sparse_candidate_source = bm25;
+SET turbohybrid.multivector_sparse_candidate_source = learned_sparse;
+SET turbohybrid.multivector_sparse_candidate_source = off;
 RESET turbohybrid.multivector_subvector_k;
 RESET turbohybrid.multivector_unique_docs_per_token;
 RESET turbohybrid.multivector_max_raw_hits_per_token;
 RESET turbohybrid.multivector_doc_candidate_k;
 RESET turbohybrid.multivector_exact_rerank;
 RESET turbohybrid.multivector_exact_rerank_k;
+RESET turbohybrid.multivector_sparse_candidate_source;
 RESET turbohybrid.dense_uncertainty_retry;
 RESET turbohybrid.dense_uncertainty_retry_max_passes;
 RESET turbohybrid.dense_uncertainty_retry_multiplier;
@@ -906,6 +937,46 @@ BEGIN
 	PERFORM 'anything'::turbohybrid_query;
 	RAISE EXCEPTION 'expected turbohybrid_query input rejection';
 EXCEPTION WHEN feature_not_supported THEN
+END
+$$;
+DO $$
+BEGIN
+	IF turbohybrid_sparse_vector_from_arrays(
+		ARRAY[10, 20, 30],
+		ARRAY[0.5, 1.25, 2.0]::real[]
+	)::text <> 'turbohybrid_sparse_vector(count=3)' THEN
+		RAISE EXCEPTION 'unexpected sparse vector text output';
+	END IF;
+END
+$$;
+DO $$
+BEGIN
+	BEGIN
+		PERFORM turbohybrid_sparse_vector_from_arrays(
+			ARRAY[1, 2],
+			ARRAY[1.0]::real[]
+		);
+		RAISE EXCEPTION 'expected sparse vector length validation error';
+	EXCEPTION WHEN invalid_parameter_value THEN
+	END;
+
+	BEGIN
+		PERFORM turbohybrid_sparse_vector_from_arrays(
+			ARRAY[1, NULL],
+			ARRAY[1.0, 2.0]::real[]
+		);
+		RAISE EXCEPTION 'expected sparse vector null validation error';
+	EXCEPTION WHEN null_value_not_allowed THEN
+	END;
+
+	BEGIN
+		PERFORM turbohybrid_sparse_vector_from_arrays(
+			ARRAY[-1],
+			ARRAY[1.0]::real[]
+		);
+		RAISE EXCEPTION 'expected sparse vector term id validation error';
+	EXCEPTION WHEN invalid_parameter_value THEN
+	END;
 END
 $$;
 DROP TABLE hq_items;

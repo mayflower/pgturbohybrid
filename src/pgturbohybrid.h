@@ -716,6 +716,14 @@ typedef struct TqOptions
 	bool		residualRerank; /* residual_rerank: store tiny per-vector sketches for final-band reranking. */
 	int			residualRerankBytes;
 	int			multivectorGraphMode;	/* multivector_graph: token_nodes or document_nodes */
+	int			multivectorTokenPooling;	/* multivector_token_pooling: off, kmeans, or greedy_cosine */
+	double		multivectorTokenPoolingTargetRatio;
+	int			multivectorTokenPoolingMinTokens;
+	int			multivectorCentroids;	/* multivector_centroids: off or kmeans */
+	int			multivectorCentroidCount;	/* multivector_centroid_count: 0 means auto */
+	int			multivectorProxyEncoder; /* multivector_proxy_encoder */
+	int			multivectorContextMode;	/* multivector_context_mode */
+	int			multivectorFieldMode;	/* multivector_field_mode */
 }			TqOptions;
 
 typedef struct PgturbohybridGraphGraph
@@ -1441,6 +1449,10 @@ typedef struct PgturbohybridNativeBuildStatsSnapshot
 	uint64		buildDistanceCodeCode;
 	uint64		buildDistanceExact;
 	uint64		buildDistanceFallback;
+	uint64		buildDistanceCacheHits;
+	uint64		buildDistanceCacheMisses;
+	uint64		buildDistanceCacheStores;
+	uint64		buildDistanceCacheCollisions;
 	uint64		buildEdgeDistanceCalls;
 	uint64		buildEdgeSearchLayerUs;
 	uint64		buildEdgeSelectNeighborUs;
@@ -1503,6 +1515,12 @@ bool		PgturbohybridGraphGetBackboneOption(Relation index);
 bool		PgturbohybridGraphGetResidualRerankOption(Relation index);
 int			PgturbohybridGraphGetResidualRerankBytes(Relation index);
 int			PgturbohybridGraphGetMultiVectorGraphModeOption(Relation index);
+int			PgturbohybridGraphGetMultiVectorTokenPoolingOption(Relation index);
+double		PgturbohybridGraphGetMultiVectorTokenPoolingTargetRatio(Relation index);
+int			PgturbohybridGraphGetMultiVectorTokenPoolingMinTokens(Relation index);
+int			PgturbohybridGraphGetMultiVectorCentroidsOption(Relation index);
+int			PgturbohybridGraphGetMultiVectorCentroidCountOption(Relation index);
+int			PgturbohybridGraphGetMultiVectorProxyEncoderOption(Relation index);
 void		PgturbohybridGraphPrepareTqQuery(Relation index, PgturbohybridGraphSupport * support, Datum value, PgturbohybridGraphTqQuery * tq);
 void		PgturbohybridGraphPrepareTqQueryWithBits(Relation index, PgturbohybridGraphSupport * support, Datum value, PgturbohybridGraphTqQuery * tq, int tqBits);
 void		PgturbohybridGraphPrepareTqBuildQuery(Relation index, PgturbohybridGraphSupport * support, Datum value, PgturbohybridGraphTqQuery * tq);
@@ -1615,6 +1633,15 @@ FUNCTION_PREFIX Datum pgturbohybrid_prewarm(PG_FUNCTION_ARGS);
 FUNCTION_PREFIX Datum pgturbohybrid_simd_capabilities(PG_FUNCTION_ARGS);
 void		PgturbohybridGraphRecordExactVectorKernel(int kernel);
 void		PgturbohybridGraphRecordWeightedCodeCodeKernel(int kernel);
+
+typedef struct PgturbohybridGraphDocInsertStats
+{
+	uint64		fullMaxsimEdges;
+	uint64		representativeFallbacks;
+	uint64		pairsScored;
+} PgturbohybridGraphDocInsertStats;
+
+void		PgturbohybridGraphRecordDocInsertStats(const PgturbohybridGraphDocInsertStats *stats);
 
 static inline PgturbohybridGraphNeighborArray *
 PgturbohybridGraphGetNeighbors(char *base, PgturbohybridGraphElement element, int lc)

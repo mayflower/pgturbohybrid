@@ -62,6 +62,17 @@ PG_COLBERT_LLAMA_TEST_MODEL=/path/to/sauerkraut-modern.gguf \
   th-bench-dbpedia-colbert
 ```
 
+The benchmark records `--colbert-model-name` in the JSON `model` section and
+sets `turbohybrid.multivector_model_name` for PostgreSQL-side validation and
+index-stat provenance. `--expected-dim` defaults to `auto`, resolving through
+the same known late-interaction profiles used by the extension registry:
+ColBERTv2 is 128d, AnswerAI ColBERT small is 96d, Jina-ColBERT-v2 supports
+128/96/64d variants, GTE/Reason ModernColBERT profiles are 128d, the
+Sauerkraut validation pair is 128d, and ColPali-like visual profiles default to
+128d with processor-specific patch counts. For an unregistered export, pass
+`--expected-dim <n>` explicitly and use the report metadata to preserve
+reproducibility.
+
 Use `--methods pgturbohybrid_colbert_multivector_query_only,pgturbohybrid_colbert_multivector_rrf`
 to include BM25 RRF fusion, and use `--max-docs 0 --max-queries 0 --final-k 100
 --quality-k 100` for an opt-in full-scale recall@100 run.
@@ -75,8 +86,9 @@ normal retrieval methods. The report exact-scans each encoded query for
 top-1 admission, exact top-10 admission recall, raw subvector hits, unique docs,
 MaxSim updates, retained candidates, exact rerank docs, memory estimate, and
 latency. The aggregate `admission_by_budget` records use the DBpedia gate field
-names `exact_top1_admission`, `exact_top10_admission_recall`, `latency`,
-`docs_scored`, `graph_edges_visited`, and `exact_rerank_docs`. Normal runs
+names `exact_top1_admitted`, `exact_top10_admission_recall`, `exact_top1_rank`,
+`latency`, `docs_scored`, `graph_edges_visited`, and `exact_rerank_docs`.
+`exact_top1_admission` remains as a backward-compatible alias. Normal runs
 without `--admission-debug` keep the existing JSON shape.
 
 Use `--multivector-candidate-source graph` for the normal token-node ANN path
@@ -97,50 +109,516 @@ exact document MaxSim oracle. `doc_graph_prototype` is intentionally
 heap-backed until index-resident document graph storage exists; its admission
 records include `doc_graph_prototype_enabled`, `doc_graph_docs_scored`,
 `doc_graph_edges_visited`, `doc_graph_candidates`,
-`doc_graph_heap_fetches`, and `doc_graph_warning`. Because the heap-backed
-fallback does not emit per-document trace entries, admission records can set
-`admission_inferred_from_result_docs` when exact document/prototype scans infer
-admission from the exact-ranked result list.
+`doc_graph_heap_fetches`, and `doc_graph_warning`. Some document-level paths do
+not emit per-document trace entries. Admission records set
+`admission_inferred_from_result_docs` when `exact_doc_scan`,
+`doc_graph_prototype`, forced/plain fallback, production `document_nodes`,
+`proxy_vector`, or `quantized_inverted_experimental` infer admission from exact
+top documents that appear in the final exact-reranked result list. This proves
+the document was admitted and retained for exact rerank, but it does not expose
+the pre-rerank candidate rank; that field remains `null` unless a trace entry
+provides it.
+
+In `turbohybrid.multivector_plain_fallback = auto`, document-node indexes also
+consider the expanded graph candidate limit
+`rescore_k * multivector_doc_graph_oversampling` when deciding whether a scan
+has become near-exhaustive. If that expanded limit crosses
+`turbohybrid.multivector_plain_fallback_candidate_fraction`, the benchmark
+reports `plain_fallback_reason = document_node_candidate_fraction` and uses the
+single-pass heap exact scan instead of scoring every sidecar document and then
+heap-reranking a large prefix. Explicit `proxy_vector`, `centroid_lite`, and
+`quantized_inverted_experimental` sources keep their own candidate paths so the
+grid can still measure those branches directly.
 
 Prompt 11 has started the production document-node path by adding the persisted
 index option `multivector_graph = token_nodes | document_nodes` and the
 `turbohybrid_index_stats()` field `multivector_graph_mode`. Explicit
 `document_nodes` indexes store one graph node per heap document plus a versioned
 index-resident float32 multivector sidecar. Build-time edge selection uses
-symmetrized document MaxSim. Non-exhaustive scans traverse document graph
+symmetrized document MaxSim. Incremental document-node inserts use the same
+document-level scorer for candidate collection, neighbor selection, and
+reciprocal pruning; the representative vector stored in the dense graph is not
+used as a silent graph-link fallback. Non-exhaustive scans traverse document graph
 adjacency and score visited candidates with the selected document sidecar scoring
 storage before heap rerank; near-exhaustive scans use the exact float32 sidecar
 scan as the correctness reference. Set
 `turbohybrid.multivector_doc_storage = f32 | f16 | sq8` or pass
-`--multivector-doc-storage f32|f16|sq8` in the DBpedia benchmark. The warning is
+`--multivector-doc-storage f32|f16|sq8` in the DBpedia benchmark. Control
+whether the document sidecar is reused as resident cache or loaded through
+shared-buffer page reads with
+`turbohybrid.multivector_doc_storage_cache = auto | resident | paged` or
+`--multivector-doc-storage-cache auto|resident|paged`. `auto` keeps low-latency
+profile scans resident when the sidecar fits `turbohybrid.native_cache_max_mb`
+and otherwise uses paged access; explicit `paged` is useful for cold-sidecar
+measurements because graph adjacency can remain native-cached while document
+sidecar page reads are counted per scan. The warning is
 `document_node_f32_sidecar_graph_traversal`,
 `document_node_f16_sidecar_graph_traversal`,
 `document_node_sq8_sidecar_graph_traversal`, or
 `document_node_f32_sidecar_exact_scan`. Scan stats report
 `multivector_doc_graph_storage_kind`,
 `multivector_doc_graph_quantized_scores`, and
-`multivector_doc_graph_rescore_source`; exact rerank currently uses heap values.
+`multivector_doc_graph_rescore_source`; sidecar cache stats report
+`multivector_doc_sidecar_cache_mode`,
+`multivector_doc_sidecar_pages_read`,
+`multivector_doc_sidecar_cache_hits`,
+`multivector_doc_sidecar_cache_misses`, and
+`multivector_doc_sidecar_bytes_touched`; paged-access benchmarks also summarize
+`multivector_doc_sidecar_vectors_loaded` to show how many document multivectors
+were reconstructed on demand. Exact rerank currently uses heap values.
+Incremental insert diagnostics are available through
+`turbohybrid_last_scan_stats()`:
+`multivector_doc_graph_insert_full_maxsim_edges`,
+`multivector_doc_graph_insert_representative_fallbacks`, and
+`multivector_doc_graph_insert_pairs_scored`.
 Keep `doc_graph_prototype` in benchmark grids when you need the heap-backed
 validation mode for comparison.
+
+Document-node indexes can reduce stored document-token count with opt-in
+index-time pooling:
+
+```sh
+python benchmarks/dbpedia_colbert_multivector.py \
+  --multivector-graph document_nodes \
+  --multivector-token-pooling greedy_cosine \
+  --multivector-token-pooling-target-ratio 0.5 \
+  --multivector-token-pooling-min-tokens 16 \
+  --multivector-doc-storage f16
+```
+
+Pooling applies only to document tokens before they are stored in the
+document-node sidecar; query tokens remain unpooled. Last-scan stats expose
+`multivector_tokens_original`, `multivector_tokens_pooled`, and
+`multivector_token_pooling_ratio` so storage/latency/quality runs can verify
+the effective reduction. The admission grid rebuilds document-node indexes for
+`--document-node-pooling-grid`, whose default is
+`off:1.0,greedy_cosine:0.75,greedy_cosine:0.5,greedy_cosine:0.33`, and combines
+those ratios with `--document-node-storage-grid f32,f16,sq8`.
 
 `--multivector-candidate-source document_nodes` is an explicit alias for the
 normal document-node graph path and requires `--multivector-graph document_nodes`.
 
 `--multivector-candidate-source proxy_vector` is a document-node prototype that
-uses the existing single-vector TurboQuant graph over document representative
-vectors for admission, then exact-reranks admitted documents with full MaxSim.
-Use it with `--multivector-graph document_nodes`.
+uses the persisted fixed-dimensional proxy encoder as the single-vector
+TurboQuant graph key for admission, then exact-reranks admitted documents with
+full MaxSim. Use it with `--multivector-graph document_nodes`.
+`--multivector-proxy-encoder mean_pool|max_pool|random_projection_fde`
+selects the proxy encoder for the index build; `mean_pool` preserves the old
+representative-vector behavior. The admission grid can compare encoders with
+`--document-node-proxy-encoder-grid mean_pool,max_pool,random_projection_fde`.
+Proxy scans report `proxy_encoder_kind`, `proxy_candidates`,
+`proxy_top1_admission`, and `proxy_exact_rerank_docs`.
 
-For DBpedia document-node admission checks, build the benchmark index with
-`--multivector-graph document_nodes` and sweep document-level budgets with
-`--admission-debug`. The benchmark exposes the document-node knobs as
-`--multivector-doc-graph-search-ef`, `--multivector-doc-graph-oversampling`,
-`--multivector-doc-graph-rescore-k`, and `--multivector-doc-storage`; leaving
-`rescore-k` at `0` makes each admission budget drive the rescore budget through
-`turbohybrid.multivector_doc_candidate_k`.
+`--multivector-candidate-source centroid_lite` is the experimental PLAID-lite
+admission path. Build the index with `--multivector-centroids kmeans`; it can
+run on `token_nodes` as a compatibility prefilter and on `document_nodes` as a
+document-local centroid prefilter backed by persisted centroid sidecar tuples.
+Leave `--multivector-centroid-count auto` or set an integer per-document
+centroid count. The benchmark reports
+`centroid_lists_visited`, `centroid_docs_touched`, `centroid_pruned_docs`, and
+`centroid_candidates`. Final ranking still uses exact MaxSim rerank over the
+original multivectors. This branch persists per-document centroid vectors,
+residual summaries, and codeword posting tuples in the multivector docmap
+sidecar; scans load those posting lists and avoid per-query posting-list
+rebuilds.
+Plain fallback is bypassed when this explicit source is selected, so missing
+`--multivector-centroids kmeans` fails instead of producing
+substitute fallback numbers.
+
+`--multivector-candidate-source quantized_inverted_experimental` names the
+research-only ColBERTSaR-style branch. It currently requires
+`--multivector-graph document_nodes` and uses persisted experimental codeword
+posting tuples before exact MaxSim rerank. Plain fallback is bypassed when this
+source is selected so the reported numbers cannot come from a substitute
+candidate path. It remains outside normal CI and default single-run retrieval
+because the codebook/posting sidecar has no production compatibility promise;
+the opt-in document-node admission grid includes it so research comparisons
+produce explicit experimental stats without falling through to another candidate
+source.
+
+For SPLADE/SPLATE-style exported sparse vectors, use the explicit sparse
+candidate-source switch:
+
+```sh
+python benchmarks/dbpedia_colbert_multivector.py \
+  --multivector-sparse-candidate-source learned_sparse \
+  --learned-sparse-doc-jsonl .nix-dev/tmp/dbpedia-splate-docs.jsonl \
+  --learned-sparse-query-jsonl .nix-dev/tmp/dbpedia-splate-queries.jsonl \
+  --multivector-bm25-candidate-injection off \
+  --methods pgturbohybrid_colbert_multivector_query_only
+```
+
+The PostgreSQL ingestion helper is
+`turbohybrid_sparse_vector_from_arrays(term_ids int[], weights real[])`.
+Convert exported document features into the indexed sparse key with
+`turbohybrid_sparse_vector_to_tsvector(...)`, and convert exported query
+features with `turbohybrid_sparse_vector_to_tsquery(...)`. The current
+implementation reuses the existing sparse/BM25 postings branch for candidate
+admission; it does not train sparse weights inside PostgreSQL and it does not
+change the final dense ranking contract. Admitted documents are still reranked
+with exact MaxSim. Reports include
+`learned_sparse_candidates`, `learned_sparse_retained_for_maxsim`, and
+`learned_sparse_branch_latency_us`.
+
+The benchmark JSONL hooks expect one object per row:
+
+```json
+{"doc_id":"<dbpedia-doc-id>","term_ids":[42,777],"weights":[2.0,1.0]}
+{"query_id":"<dbpedia-query-id>","term_ids":[42,991],"weights":[1.0,0.5]}
+```
+
+The document and query JSONL files must be supplied together. When loaded, the
+benchmark stores the vectors in `learned_sparse`, indexes
+`learned_sparse_tsv`, and the `learned_sparse_exact_maxsim` hybrid mode uses
+the query sparse vector instead of deriving a `tsquery` from text.
+
+For DBpedia document-node admission checks, use `--admission-debug` for one
+specific configuration or `--document-node-admission-grid` for the full
+DBpedia-scale gate. The grid rebuilds the benchmark index once for token-node
+baselines and once for document-node modes, then reports token graph,
+`exact_token_scan`, forced plain fallback, `exact_doc_scan`, document-node
+`f32|f16|sq8`, `proxy_vector`, token-node `centroid_lite`, document-node
+`centroid_lite`, and `quantized_inverted_experimental` admission. It sweeps
+`--document-node-storage-grid`, `--document-node-pooling-grid`,
+`--document-node-cache-grid`, `--document-node-proxy-encoder-grid`,
+`--document-node-ef-grid`, and
+`--document-node-oversampling-grid`; the existing
+`--admission-budget-sweep` controls the candidate budgets. Leaving
+`--multivector-doc-graph-rescore-k` at `0` makes each admission budget drive
+the rescore budget through `turbohybrid.multivector_doc_candidate_k`.
+
+Query-only and admission-only runs build a single-column multivector
+TurboHybrid index. The benchmark adds the lexical `body_tsv` or
+`learned_sparse_tsv` index column only when the selected methods, sparse
+candidate source, BM25 injection, learned-sparse input, or
+`--hybrid-evaluation-harness` need it. This keeps Prompt 2 admission sweeps from
+paying Prompt 15 hybrid index-build cost unless the run is explicitly measuring
+hybrid behavior.
+
+When the document-node grid includes the default physical layout
+(`--multivector-proxy-encoder` plus `off:1.0` pooling), the harness runs
+`proxy_vector`, document-index `exact_doc_scan`, and
+`quantized_inverted_experimental` while that index is still resident. The JSON
+field `default_document_modes_reused_grid_index` records whether this avoided a
+separate default document-node rebuild.
+
+Document-node index construction uses the same symmetric document MaxSim
+objective for bulk and incremental graph edges. The build scorer computes both
+directions in one pairwise token pass, so DBpedia build timings should be
+compared against this fused-scorer path rather than older runs that computed
+`MaxSim(A,B)` and `MaxSim(B,A)` separately.
+
+Fast 10k document-node admission smoke:
+
+```sh
+nix develop .#bench
+python benchmarks/dbpedia_colbert_multivector.py \
+  --database pgturbohybrid_dbpedia_colbert_10k \
+  --precomputed-dataset johannhartmann/pgturbohybrid_dbpedia_colbert \
+  --max-docs 10000 \
+  --max-queries 100 \
+  --reuse-data \
+  --document-node-admission-grid \
+  --document-node-storage-grid f32,f16,sq8 \
+  --document-node-pooling-grid off:1.0,greedy_cosine:0.75,greedy_cosine:0.5,greedy_cosine:0.33 \
+  --document-node-cache-grid auto,paged \
+  --document-node-ef-grid 50,100,200 \
+  --document-node-oversampling-grid 1,2,4 \
+  --index-graph-m 4 \
+  --index-graph-ef-construction 8 \
+  --index-graph-ef-search 8 \
+  --admission-budget-sweep 50,100,200,400,800 \
+  --output .nix-dev/tmp/dbpedia-colbert-admission-10k.json \
+  --markdown-output .nix-dev/tmp/dbpedia-colbert-admission-10k.md
+```
+
+The 10k command uses small index-build graph knobs so it is a fast harness
+smoke. Leave `--index-graph-m`, `--index-graph-ef-construction`, and
+`--index-graph-ef-search` at `0` or omit them for the extension defaults when
+collecting quality-profile evidence.
+
+Latest qrel-backed 10k smoke evidence for one document-node configuration
+(`f32`, `auto`, no pooling, `graph_m = 4`, `graph_ef_construction = 8`,
+`graph_ef_search = 8`, budgets `50,800,1600`, three queries) retained `126`
+qrels from the precomputed dataset. It produced `recall@10 = 0.166667`,
+`ndcg@10 = 0.207257`, exact top-1 admission `0.333333`, and exact top-10
+admission recall `0.400000` at budget `1600`. Treat this as a qrel-loader and
+single-profile admission smoke; the Prompt 2 acceptance gate is satisfied by
+10k evidence only once the grid comparison covers token baselines, exact scans,
+storage modes, and proxy branches.
+
+A narrow 10k qrel-backed admission-grid smoke with the same three queries,
+`f32` storage only, no pooling, EF `50`, oversampling `1`, and budgets `50,800`
+confirmed that the comparison report is populated. At budget `800`, token nodes
+scored `recall@10 = 0.666667`, `ndcg@10 = 0.600137`, exact top-1 admission
+`0.666667`, and top-10 admission `0.466667`; the tested document-node profile
+scored `recall@10 = 0.300000`, `ndcg@10 = 0.375685`, exact top-1 admission
+`0.333333`, and top-10 admission `0.300000`; exact document scan and plain
+fallback both reached `recall@10 = 0.800000` and full admission. This is a
+comparison-smoke result, not Prompt 2 acceptance evidence, because `f16`, `sq8`,
+wider EF/oversampling settings, and the normal 10k query set were intentionally
+omitted.
+
+A wider 10k qrel-backed Prompt 2 run used `10` selected DBpedia queries, `382`
+loaded qrels, no pooling, `auto` cache, storage `f32,f16,sq8`, EF
+`50,100,200,400,800`, oversampling `1,2,4,8`, and budgets `50,800,1600`.
+The report emitted `69` comparison rows. At budget `1600`, exact document scan
+and forced plain fallback reached `recall@10 = 0.667143`, `ndcg@10 = 0.591325`,
+and full top-1/top-10 admission. Document-node rows with oversampling `8`
+matched that exact-scan quality and full admission for all three storage modes,
+but did so by scoring the full `10000` documents on this slice. Lower
+oversampling exposed the quality/cost tradeoff: oversampling `4` reached
+top-10 admission `0.490000` and `recall@10 = 0.498571`; oversampling `1`
+reached top-10 admission `0.420000` and `recall@10 = 0.448571`. The fastest
+tested document-node exact-quality rows were `f32` around `424..446 ms` p50 and
+`sq8` around `430..440 ms` p50; `f16` was slower on this host. `proxy_vector`
+was faster at `138.726 ms` p50 but only reached `recall@10 = 0.398571` and
+top-10 admission `0.360000`. The experimental quantized-inverted branch reached
+`recall@10 = 0.657143` and top-10 admission `0.720000`, but took
+`35266.755 ms` p50. This satisfies the 10k storage/EF/oversampling comparison
+shape; the 100k and 1M commands below remain opt-in scale proof.
+
+A 100k reuse-index probe before the document-node entry-seeding fix exposed the
+scale failure mode rather than a usable quality result: document-node recall@10
+was `0.000000` at budgets `100`, `1600`, and `10000`, while one budget-10000
+query touched about `3.57 GB` of document sidecar data and exact-reranked
+`10000` full multivector documents. That combination can overload a developer
+machine when followed by the 8-client throughput phase. The candidate path now
+scores a bounded deterministic spread of document nodes as MaxSim entry seeds,
+matching the single-vector graph's multi-entry strategy instead of relying only
+on the global, segment, and routing entries. The index/default `graph_ef_search`
+and explicit `turbohybrid.multivector_doc_graph_search_ef` settings remain
+traversal caps: a large admission/rerank budget no longer inflates the graph
+walk beyond the configured EF. Treat any future 100k/1M run as a fresh
+validation of that candidate-admission fix; do not use the zero-recall probe as
+performance evidence.
+
+The normal benchmark path now runs a serial probe before the 8-client throughput
+phase. If the serial run already exceeds configured scan-work limits
+(`--parallel-safety-max-docs-scored`,
+`--parallel-safety-max-exact-rerank-docs`,
+`--parallel-safety-max-exact-pairs`,
+`--parallel-safety-max-sidecar-bytes`, or
+`--parallel-safety-max-serial-p95-ms`), the JSON and Markdown reports mark the
+parallel phase as skipped and include the observed counters. Use
+`--skip-parallel-retrieval` for the first 100k/1M admission probe when you only
+want serial responsiveness and scan-work counters. Use
+`--force-parallel-retrieval` only after the serial admission report shows that
+the candidate path is no longer expanding into near-exact MaxSim over thousands
+of full document multivectors.
+
+100k admission run:
+
+```sh
+nix develop .#bench
+python benchmarks/dbpedia_colbert_multivector.py \
+  --database pgturbohybrid_dbpedia_colbert_100k \
+  --precomputed-dataset johannhartmann/pgturbohybrid_dbpedia_colbert \
+  --max-docs 100000 \
+  --max-queries 0 \
+  --reuse-data \
+  --document-node-admission-grid \
+  --document-node-storage-grid f32,f16,sq8 \
+  --document-node-pooling-grid off:1.0,greedy_cosine:0.75,greedy_cosine:0.5,greedy_cosine:0.33 \
+  --document-node-cache-grid auto,paged \
+  --document-node-ef-grid 50,100,200,400,800 \
+  --document-node-oversampling-grid 1,2,4,8 \
+  --index-graph-m 0 \
+  --index-graph-ef-construction 0 \
+  --index-graph-ef-search 0 \
+  --index-native-segments 8 \
+  --multivector-exact-rerank adaptive \
+  --skip-parallel-retrieval \
+  --admission-budget-sweep 100,200,400,800,1600,3200,6400,10000 \
+  --output .nix-dev/tmp/dbpedia-colbert-admission-100k.json \
+  --markdown-output .nix-dev/tmp/dbpedia-colbert-admission-100k.md
+```
+
+1M admission run:
+
+```sh
+nix develop .#bench
+python benchmarks/dbpedia_colbert_multivector.py \
+  --database pgturbohybrid_dbpedia_colbert_1m \
+  --precomputed-dataset johannhartmann/pgturbohybrid_dbpedia_colbert \
+  --max-docs 1000000 \
+  --max-queries 0 \
+  --reuse-data \
+  --document-node-admission-grid \
+  --document-node-storage-grid f32,f16,sq8 \
+  --document-node-pooling-grid off:1.0,greedy_cosine:0.75,greedy_cosine:0.5,greedy_cosine:0.33 \
+  --document-node-cache-grid auto,paged \
+  --document-node-ef-grid 50,100,200,400,800 \
+  --document-node-oversampling-grid 1,2,4,8 \
+  --index-graph-m 0 \
+  --index-graph-ef-construction 0 \
+  --index-graph-ef-search 0 \
+  --index-native-segments 8 \
+  --skip-parallel-retrieval \
+  --admission-budget-sweep 100,200,400,800,1600,3200,6400,10000 \
+  --output .nix-dev/tmp/dbpedia-colbert-admission-1m.json \
+  --markdown-output .nix-dev/tmp/dbpedia-colbert-admission-1m.md
+```
+
+For document-node indexes this is segmented exact-MaxSim build work, not
+PostgreSQL parallel worker build work. The extension keeps document-node graph
+construction serial per segment because parallel code-only workers do not carry
+the document multivector sidecar required for MaxSim-aligned edge geometry.
+
+The grid is not part of normal CI and requires DBpedia text or the precomputed
+ColBERT multivector dataset. JSON output includes per-query admission records
+with `exact_top1_admitted`, `exact_top10_admission_recall`, `exact_top1_rank`,
+latency p50/p95, scored-doc/edge/rerank counters, storage kind, sidecar
+page/cache counters, `admission_inferred_from_result_docs`, per-exact-top
+`admission_evidence`, and `turbohybrid_last_scan_stats()` snapshots. Markdown
+output includes a
+comparison table with admission, BEIR metrics when qrels are loaded, latency,
+documents scored, graph edges visited, exact rerank docs, adaptive rerank pair
+savings, native cache exact-byte counters, and document-sidecar page/cache
+counters. Compare
+`auto`/`resident` rows against `paged` rows to separate warm resident sidecar
+latency from cold/random sidecar access cost.
+
+Precomputed bounded slices use qrel prioritization by default, matching the raw
+DBpedia loader: the selected query IDs are read first, their judged document IDs
+fill the `--max-docs` budget first, and the remaining document budget is filled
+from the corpus shards. Use `--no-prioritize-qrels` only when intentionally
+measuring first-row corpus slices. If a precomputed slice still has no loaded
+qrels, the benchmark leaves BEIR metric objects empty; treat that as a broken or
+non-quality slice, not retrieval-quality evidence.
+
+For the end-to-end hybrid comparison from Prompt 15, add
+`--hybrid-evaluation-harness`. The harness rebuilds a document-node index and
+runs these modes over the same loaded DBpedia queries:
+
+- `exact_scan`
+- `document_nodes`
+- `document_nodes_bm25_admission`
+- `document_nodes_bm25_rrf`
+- `document_nodes_bm25_dbsf`
+- `proxy_vector_document_nodes`
+- `learned_sparse_exact_maxsim`
+
+For Prompt 14 research comparisons, add
+`--hybrid-evaluation-modes exact_scan,document_nodes,learned_sparse_exact_maxsim,quantized_inverted_experimental`
+to compare the persisted quantized-inverted branch against the learned-sparse
+and exact/document-node baselines in the same harness. This mode is supported
+only when named explicitly; it is not part of the default recommendation set.
+
+The BM25 admission-only and learned-sparse modes pass `text_query` with
+`bm25_weight => 0`, so sparse candidates are used for admission but final
+ranking remains exact MaxSim. The RRF and DBSF modes run the sparse branch as a
+hybrid branch and report branch candidates, branch latency, exact MaxSim work,
+sidecar bytes, BEIR metrics, candidate admission failures, and a recommended
+default profile. JSON and Markdown output also include profile-specific
+recommendations for `latency`, `balanced`, `quality`, and `high_recall`, each
+with the selected mode and the concrete GUCs needed to reproduce that profile.
+
+A 10k qrel-backed Prompt 15 run on the same `10` queries and `382` qrels
+compared `exact_scan`, `document_nodes`, BM25 admission, BM25 RRF, BM25 DBSF,
+and `proxy_vector_document_nodes`. `exact_scan` remained the quality, balanced,
+and high-recall recommendation with `recall@10 = 0.667143`, `ndcg@10 =
+0.591325`, full admission, and `358.157 ms` p50. Raw `document_nodes` was much
+faster at `75.096 ms` p50 but only reached `recall@10 = 0.300000`, top-10
+admission `0.250000`, and had candidate failures for all `10` queries. BM25
+admission improved recall to `0.420000` and top-10 admission to `0.500000`
+around `73..74 ms` p50, but still had failures on `8..9` queries. RRF had the
+best BM25-fused NDCG at `0.372541`; DBSF was lower at `0.343564`.
+`proxy_vector_document_nodes` was the latency recommendation at `61.388 ms`
+p50, but had `recall@10 = 0.227143` and top-10 admission `0.140000`. No
+learned-sparse JSONL inputs were present for this local run, so that mode
+remains a conditional harness path until exported sparse vectors are supplied.
+
+The learned-sparse branch was validated separately on a 1k qrel-backed slice
+using deterministic text-hash sparse JSONL fixtures under `.nix-dev/tmp`
+(`1867` document rows read, `1000` loaded documents updated, and `10` query
+rows updated). This is a code-path validation for the Prompt 15 harness, not a
+SPLADE/SPLATE quality claim. On `1000` docs, `10` queries, and `382` loaded
+qrels, `learned_sparse_exact_maxsim` produced nonzero sparse candidates
+(`p50 = 68`, mean `55.4`), reached `recall@10 = 0.681429`,
+`ndcg@10 = 0.591116`, top-10 admission `0.910000`, and `18.756 ms` p50. Exact
+scan reached `recall@10 = 0.677143`, `ndcg@10 = 0.593917`, and full admission
+at `46.206 ms` p50. Raw document nodes reached `recall@10 = 0.597143` and
+top-10 admission `0.690000`. Treat this as proof that externally supplied
+learned-sparse vectors are ingested, indexed, reported, and used for admission;
+real learned-sparse model exports are still required before recommending this
+mode for quality.
+
+For long-context ColBERT/ModernColBERT fixtures, keep each RAG chunk as one
+database row and build document-node indexes with explicit context mode:
+
+```sql
+CREATE INDEX passages_colbert_context_idx
+ON passages USING turbohybrid
+  (colbert multivector_maxsim_ip_turbohybrid_ops)
+WITH (
+  multivector_graph = document_nodes,
+  multivector_context_mode = context_level,
+  multivector_field_mode = weighted
+);
+```
+
+The benchmark input should construct document embeddings with
+`turbohybrid_multivector_from_contexts(raw_values, dim, context_offsets)` or
+`turbohybrid_multivector_from_contexts_and_fields(raw_values, dim,
+context_offsets, field_ids)`. Offsets are zero-based context-window token
+starts. `context_level` changes document-node sidecar scoring and exact heap
+rerank to best-context MaxSim; `flat` keeps global cross-context MaxSim.
+`multivector_field_mode = weighted` is currently provenance/validation for
+field-aware datasets. Query-specific title/body/section weights are evaluated
+with `turbohybrid_multivector_field_weighted_maxsim()` until query payloads
+carry field weights. Do not combine context-aware document embeddings with
+`--multivector-token-pooling` yet; context-aware indexes require pooling `off`
+until pooling can preserve or rebuild context-window metadata.
+
+Fast 10k hybrid harness:
+
+```sh
+nix develop .#bench
+python benchmarks/dbpedia_colbert_multivector.py \
+  --database pgturbohybrid_dbpedia_colbert_10k \
+  --precomputed-dataset johannhartmann/pgturbohybrid_dbpedia_colbert \
+  --max-docs 10000 \
+  --max-queries 100 \
+  --reuse-data \
+  --hybrid-evaluation-harness \
+  --multivector-doc-storage f32 \
+  --multivector-doc-storage-cache auto \
+  --multivector-doc-graph-search-ef 200 \
+  --multivector-doc-graph-oversampling 4 \
+  --multivector-exact-rerank adaptive \
+  --output .nix-dev/tmp/dbpedia-colbert-hybrid-10k.json \
+  --markdown-output .nix-dev/tmp/dbpedia-colbert-hybrid-10k.md
+```
+
+For 100k and 1M runs, keep the same command shape, increase `--max-docs`, and
+use larger `--max-queries` only when the qrels and runtime budget justify it.
+The harness is opt-in and is not part of normal CI.
+
+Latest qrel-backed 10k hybrid smoke evidence, using three queries and `126`
+loaded qrels, compared `exact_scan`, dense `document_nodes`,
+BM25 admission-only, BM25 RRF, BM25 DBSF, and `proxy_vector_document_nodes`.
+`exact_scan` was the quality ceiling (`recall@10 = 0.800000`,
+`ndcg@10 = 0.736563`, p50 `350.746 ms`). Dense document nodes were faster but
+missed most judged documents (`recall@10 = 0.166667`,
+`ndcg@10 = 0.207257`, top-10 admission `0.133333`, p50 `74.467 ms`). BM25
+admission/RRF/DBSF improved recall to `0.400000` with p50 around `69..75 ms`,
+but all still had candidate-admission failures for all three queries.
+`proxy_vector_document_nodes` was fastest (`58.943 ms` p50) but had
+`recall@10 = 0.066667` and zero top-10 admission. The corrected
+recommendation metadata emits `turbohybrid.multivector_candidate_source =
+exact_doc_scan` when `exact_scan` wins a quality or balanced profile.
+
 Multivector hybrid scans support RRF and normalized score fusion through
-`weighted`, `fast_weighted`, and `calibrated`; raw BM25 plus raw MaxSim alpha
-fusion is intentionally not exposed. With
+`weighted`, `fast_weighted`, `calibrated`, and explicit `dbsf`; raw BM25 plus
+raw MaxSim alpha fusion is intentionally not exposed. DBSF normalizes each
+returned branch score distribution before weighted summation and reports
+`dbsf_enabled`, `dbsf_branch_mean`, `dbsf_branch_stddev`,
+`dbsf_branch_min`, `dbsf_branch_max`, and `dbsf_degenerate_branches` in
+`turbohybrid_last_scan_stats()`. Prefer RRF when candidate sets are tiny,
+branch scores are identical, or distributions are too noisy for a stable
+mean/stddev; use DBSF only when benchmark qrels show score-distribution fusion
+beats rank fusion for the workload. With
 `turbohybrid.hybrid_budget_policy = adaptive`, document-level multivector dense
 branches use their admission stats before BM25 collection to shrink only
 defaulted BM25 budgets when dense admission is not truncated. If admission is

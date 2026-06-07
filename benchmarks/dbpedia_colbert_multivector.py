@@ -35,6 +35,62 @@ QUERY_ONLY_METHOD = "pgturbohybrid_colbert_multivector_query_only"
 RRF_METHOD = "pgturbohybrid_colbert_multivector_rrf"
 EXACT_SCAN_METHOD = "pgturbohybrid_colbert_multivector_exact_scan"
 DEFAULT_MODEL_PATH = ".nix-dev/models/colbert-15m/sauerkraut-modern.gguf"
+DEFAULT_COLBERT_MODEL_NAME = "VAGOsolutions/SauerkrautLM-Multi-ColBERT-15m"
+COLBERT_MODEL_DIMENSIONS = {
+    "colbert-ir/colbertv2.0": 128,
+    "answerdotai/answerai-colbert-small-v1": 96,
+    "jinaai/jina-colbert-v2": 128,
+    "jinaai/jina-colbert-v2-96": 96,
+    "jinaai/jina-colbert-v2-64": 64,
+    "lightonai/gte-moderncolbert-v1": 128,
+    "chadboyda/reason-moderncolbert": 128,
+    "vagosolutions/sauerkrautlm-multi-colbert-15m": 128,
+    "johannhartmann/sauerkrautlm-multi-colbert-15m-gguf": 128,
+    "vidore/colpali-v1.2": 128,
+    "colpali-like-visual": 128,
+}
+DOCUMENT_NODE_STORAGE_CHOICES = ("f32", "f16", "sq8")
+DOCUMENT_NODE_STORAGE_CACHE_CHOICES = ("auto", "resident", "paged")
+DOCUMENT_NODE_TOKEN_POOLING_CHOICES = ("off", "kmeans", "greedy_cosine")
+DOCUMENT_NODE_CENTROIDS_CHOICES = ("off", "kmeans")
+MULTIVECTOR_PROXY_ENCODER_CHOICES = (
+    "mean_pool",
+    "max_pool",
+    "random_projection_fde",
+    "learned_projection_placeholder",
+)
+MULTIVECTOR_SPARSE_CANDIDATE_SOURCE_CHOICES = ("off", "bm25", "learned_sparse")
+DOCUMENT_NODE_BASELINE_MODES = (
+    "token_nodes",
+    "exact_token_scan",
+    "plain_fallback",
+    "exact_doc_scan",
+    "document_nodes",
+    "proxy_vector",
+    "centroid_lite",
+    "quantized_inverted_experimental",
+)
+HYBRID_EVALUATION_MODES = (
+    "exact_scan",
+    "document_nodes",
+    "document_nodes_bm25_admission",
+    "document_nodes_bm25_rrf",
+    "document_nodes_bm25_dbsf",
+    "proxy_vector_document_nodes",
+    "learned_sparse_exact_maxsim",
+)
+OPTIONAL_HYBRID_EVALUATION_MODES = (
+    "quantized_inverted_experimental",
+)
+SUPPORTED_HYBRID_EVALUATION_MODES = (
+    *HYBRID_EVALUATION_MODES,
+    *OPTIONAL_HYBRID_EVALUATION_MODES,
+)
+DEFAULT_PARALLEL_SAFETY_MAX_SERIAL_P95_MS = 5000.0
+DEFAULT_PARALLEL_SAFETY_MAX_DOCS_SCORED = 5000
+DEFAULT_PARALLEL_SAFETY_MAX_EXACT_RERANK_DOCS = 1000
+DEFAULT_PARALLEL_SAFETY_MAX_EXACT_PAIRS = 5_000_000
+DEFAULT_PARALLEL_SAFETY_MAX_SIDECAR_BYTES = 512 * 1024 * 1024
 
 
 @dataclass(frozen=True)
@@ -408,6 +464,119 @@ def copy_rows(conn: psycopg.Connection[Any], sql: str, rows: Iterable[tuple[Any,
     return count
 
 
+def parse_sparse_jsonl(path: Path, preferred_id_key: str) -> list[tuple[str, list[int], list[float]]]:
+    rows: list[tuple[str, list[int], list[float]]] = []
+    id_keys = (preferred_id_key, "id")
+    term_keys = ("term_ids", "terms", "indices")
+    weight_keys = ("weights", "scores", "values")
+    with path.open("r", encoding="utf-8") as handle:
+        for line_no, raw_line in enumerate(handle, start=1):
+            line = raw_line.strip()
+            if not line:
+                continue
+            try:
+                item = json.loads(line)
+            except json.JSONDecodeError as exc:
+                raise SystemExit(f"{path}:{line_no}: invalid JSONL row") from exc
+            if not isinstance(item, dict):
+                raise SystemExit(f"{path}:{line_no}: expected a JSON object")
+
+            sparse_id = next((item[key] for key in id_keys if key in item), None)
+            terms = next((item[key] for key in term_keys if key in item), None)
+            weights = next((item[key] for key in weight_keys if key in item), None)
+            if sparse_id is None or terms is None or weights is None:
+                raise SystemExit(
+                    f"{path}:{line_no}: expected {preferred_id_key!r}, term_ids, and weights fields"
+                )
+            if not isinstance(terms, list) or not isinstance(weights, list) or len(terms) != len(weights):
+                raise SystemExit(f"{path}:{line_no}: term_ids and weights must be equal-length arrays")
+
+            term_ids: list[int] = []
+            sparse_weights: list[float] = []
+            for term, weight in zip(terms, weights):
+                term_id = int(term)
+                sparse_weight = float(weight)
+                if term_id < 0 or not math.isfinite(sparse_weight):
+                    raise SystemExit(f"{path}:{line_no}: sparse terms must be non-negative and weights finite")
+                term_ids.append(term_id)
+                sparse_weights.append(sparse_weight)
+            rows.append((str(sparse_id), term_ids, sparse_weights))
+    return rows
+
+
+def require_complete_learned_sparse_args(args: argparse.Namespace) -> None:
+    if (args.learned_sparse_doc_jsonl is None) != (args.learned_sparse_query_jsonl is None):
+        raise SystemExit(
+            "--learned-sparse-doc-jsonl and --learned-sparse-query-jsonl must be supplied together"
+        )
+
+
+def has_learned_sparse_docs(conn: psycopg.Connection[Any]) -> bool:
+    row = fetch_one(
+        conn,
+        "SELECT EXISTS (SELECT 1 FROM dbpedia_colbert_docs WHERE learned_sparse IS NOT NULL)",
+    )
+    return bool(row and row[0])
+
+
+def learned_sparse_text_query_sql() -> str:
+    return """
+    CASE
+      WHEN q.learned_sparse IS NOT NULL THEN turbohybrid_sparse_vector_to_tsquery(q.learned_sparse)
+      ELSE websearch_to_tsquery('simple', q.query_text)
+    END
+    """
+
+
+def load_learned_sparse_vectors(conn: psycopg.Connection[Any], args: argparse.Namespace) -> dict[str, Any]:
+    require_complete_learned_sparse_args(args)
+    if args.learned_sparse_doc_jsonl is None:
+        return {"skipped": True, "reason": "no learned sparse JSONL files supplied"}
+
+    started = time.perf_counter()
+    doc_rows = parse_sparse_jsonl(args.learned_sparse_doc_jsonl, "doc_id")
+    query_rows_sparse = parse_sparse_jsonl(args.learned_sparse_query_jsonl, "query_id")
+    doc_updates = 0
+    query_updates = 0
+    with conn.cursor() as cur:
+        for doc_id, term_ids, weights in doc_rows:
+            cur.execute(
+                """
+                UPDATE dbpedia_colbert_docs
+                SET learned_sparse = turbohybrid_sparse_vector_from_arrays(%s::int[], %s::real[])
+                WHERE doc_id = %s
+                """,
+                (term_ids, weights, doc_id),
+            )
+            doc_updates += cur.rowcount
+        for query_id, term_ids, weights in query_rows_sparse:
+            cur.execute(
+                """
+                UPDATE dbpedia_colbert_queries
+                SET learned_sparse = turbohybrid_sparse_vector_from_arrays(%s::int[], %s::real[])
+                WHERE query_id = %s
+                """,
+                (term_ids, weights, query_id),
+            )
+            query_updates += cur.rowcount
+
+    if doc_rows and doc_updates == 0:
+        raise RuntimeError(f"no learned sparse document rows matched loaded docs from {args.learned_sparse_doc_jsonl}")
+    if query_rows_sparse and query_updates == 0:
+        raise RuntimeError(f"no learned sparse query rows matched loaded queries from {args.learned_sparse_query_jsonl}")
+
+    return {
+        "skipped": False,
+        "doc_jsonl": portable_path(args.learned_sparse_doc_jsonl),
+        "query_jsonl": portable_path(args.learned_sparse_query_jsonl),
+        "doc_rows_read": len(doc_rows),
+        "doc_rows_updated": doc_updates,
+        "query_rows_read": len(query_rows_sparse),
+        "query_rows_updated": query_updates,
+        "elapsed_ms": round((time.perf_counter() - started) * 1000.0, 3),
+    }
+
+
 def set_colbert_gucs(conn: psycopg.Connection[Any], args: argparse.Namespace) -> None:
     settings = {
         "jit": "off",
@@ -421,16 +590,20 @@ def set_colbert_gucs(conn: psycopg.Connection[Any], args: argparse.Namespace) ->
         "pg_colbert_llama.max_doc_vectors": str(args.max_doc_vectors),
         "pg_colbert_llama.max_query_vectors": str(args.max_query_vectors),
         "pg_colbert_llama.query_length": str(args.query_length),
+        "turbohybrid.multivector_model_name": args.colbert_model_name,
         "turbohybrid.multivector_subvector_k": str(args.multivector_subvector_k),
         "turbohybrid.multivector_unique_docs_per_token": str(args.multivector_unique_docs_per_token),
         "turbohybrid.multivector_max_raw_hits_per_token": str(args.multivector_max_raw_hits_per_token),
         "turbohybrid.multivector_adaptive_widening": args.multivector_adaptive_widening,
         "turbohybrid.multivector_doc_candidate_k": str(args.multivector_doc_candidate_k),
+        "turbohybrid.multivector_exact_rerank": args.multivector_exact_rerank,
         "turbohybrid.multivector_exact_rerank_k": str(args.multivector_exact_rerank_k),
         "turbohybrid.multivector_doc_graph_search_ef": str(args.multivector_doc_graph_search_ef),
         "turbohybrid.multivector_doc_graph_oversampling": str(args.multivector_doc_graph_oversampling),
         "turbohybrid.multivector_doc_graph_rescore_k": str(args.multivector_doc_graph_rescore_k),
         "turbohybrid.multivector_doc_storage": args.multivector_doc_storage,
+        "turbohybrid.multivector_doc_storage_cache": args.multivector_doc_storage_cache,
+        "turbohybrid.multivector_proxy_encoder": args.multivector_proxy_encoder,
         "turbohybrid.multivector_candidate_source": args.multivector_candidate_source,
         "turbohybrid.multivector_plain_fallback": args.multivector_plain_fallback,
         "turbohybrid.multivector_plain_fallback_max_docs": str(args.multivector_plain_fallback_max_docs),
@@ -439,6 +612,7 @@ def set_colbert_gucs(conn: psycopg.Connection[Any], args: argparse.Namespace) ->
         "turbohybrid.multivector_per_token_doc_reservoir_k": str(args.multivector_per_token_doc_reservoir_k),
         "turbohybrid.multivector_coverage_reservoir_k": str(args.multivector_coverage_reservoir_k),
         "turbohybrid.multivector_bm25_candidate_injection": args.multivector_bm25_candidate_injection,
+        "turbohybrid.multivector_sparse_candidate_source": args.multivector_sparse_candidate_source,
         "turbohybrid.multivector_debug_skip_query_tokens": "",
     }
     for key, value in settings.items():
@@ -456,16 +630,20 @@ def set_retrieval_gucs(conn: psycopg.Connection[Any], args: argparse.Namespace, 
         "pg_colbert_llama.max_doc_vectors": str(args.max_doc_vectors),
         "pg_colbert_llama.max_query_vectors": str(args.max_query_vectors),
         "pg_colbert_llama.query_length": str(args.query_length),
+        "turbohybrid.multivector_model_name": args.colbert_model_name,
         "turbohybrid.multivector_subvector_k": str(args.multivector_subvector_k),
         "turbohybrid.multivector_unique_docs_per_token": str(args.multivector_unique_docs_per_token),
         "turbohybrid.multivector_max_raw_hits_per_token": str(args.multivector_max_raw_hits_per_token),
         "turbohybrid.multivector_adaptive_widening": args.multivector_adaptive_widening,
         "turbohybrid.multivector_doc_candidate_k": str(args.multivector_doc_candidate_k),
+        "turbohybrid.multivector_exact_rerank": args.multivector_exact_rerank,
         "turbohybrid.multivector_exact_rerank_k": str(args.multivector_exact_rerank_k),
         "turbohybrid.multivector_doc_graph_search_ef": str(args.multivector_doc_graph_search_ef),
         "turbohybrid.multivector_doc_graph_oversampling": str(args.multivector_doc_graph_oversampling),
         "turbohybrid.multivector_doc_graph_rescore_k": str(args.multivector_doc_graph_rescore_k),
         "turbohybrid.multivector_doc_storage": args.multivector_doc_storage,
+        "turbohybrid.multivector_doc_storage_cache": args.multivector_doc_storage_cache,
+        "turbohybrid.multivector_proxy_encoder": args.multivector_proxy_encoder,
         "turbohybrid.multivector_candidate_source": args.multivector_candidate_source,
         "turbohybrid.multivector_plain_fallback": args.multivector_plain_fallback,
         "turbohybrid.multivector_plain_fallback_max_docs": str(args.multivector_plain_fallback_max_docs),
@@ -474,6 +652,7 @@ def set_retrieval_gucs(conn: psycopg.Connection[Any], args: argparse.Namespace, 
         "turbohybrid.multivector_per_token_doc_reservoir_k": str(args.multivector_per_token_doc_reservoir_k),
         "turbohybrid.multivector_coverage_reservoir_k": str(args.multivector_coverage_reservoir_k),
         "turbohybrid.multivector_bm25_candidate_injection": args.multivector_bm25_candidate_injection,
+        "turbohybrid.multivector_sparse_candidate_source": args.multivector_sparse_candidate_source,
         "turbohybrid.multivector_debug_skip_query_tokens": "",
     }
     for key, value in settings.items():
@@ -496,8 +675,28 @@ def setup_schema(conn: psycopg.Connection[Any], include_colbert_llama: bool = Tr
             body_tsv tsvector GENERATED ALWAYS AS (
                 to_tsvector('simple', coalesce(title, '') || ' ' || coalesce(body, ''))
             ) STORED,
+            learned_sparse turbohybrid_sparse_vector,
+            learned_sparse_tsv tsvector GENERATED ALWAYS AS (
+                CASE
+                  WHEN learned_sparse IS NULL THEN NULL
+                  ELSE turbohybrid_sparse_vector_to_tsvector(learned_sparse)
+                END
+            ) STORED,
             colbert turbohybrid_multivector
         )
+        """,
+    )
+    exec_sql(conn, "ALTER TABLE dbpedia_colbert_docs ADD COLUMN IF NOT EXISTS learned_sparse turbohybrid_sparse_vector")
+    exec_sql(
+        conn,
+        """
+        ALTER TABLE dbpedia_colbert_docs
+        ADD COLUMN IF NOT EXISTS learned_sparse_tsv tsvector GENERATED ALWAYS AS (
+            CASE
+              WHEN learned_sparse IS NULL THEN NULL
+              ELSE turbohybrid_sparse_vector_to_tsvector(learned_sparse)
+            END
+        ) STORED
         """,
     )
     exec_sql(
@@ -506,10 +705,12 @@ def setup_schema(conn: psycopg.Connection[Any], include_colbert_llama: bool = Tr
         CREATE TABLE IF NOT EXISTS dbpedia_colbert_queries (
             query_id text PRIMARY KEY,
             query_text text NOT NULL,
+            learned_sparse turbohybrid_sparse_vector,
             colbert turbohybrid_multivector
         )
         """,
     )
+    exec_sql(conn, "ALTER TABLE dbpedia_colbert_queries ADD COLUMN IF NOT EXISTS learned_sparse turbohybrid_sparse_vector")
     exec_sql(
         conn,
         """
@@ -564,6 +765,26 @@ def validate_embedding_health(conn: psycopg.Connection[Any], args: argparse.Name
     if failures and not args.allow_unvalidated_embeddings:
         raise RuntimeError("invalid ColBERT embedding preflight: " + "; ".join(failures))
     return result
+
+
+def resolve_expected_dim(value: str, model_name: str) -> tuple[int, str]:
+    requested = value.strip().lower()
+    if requested == "auto":
+        dim = COLBERT_MODEL_DIMENSIONS.get(model_name.lower())
+        if dim is None:
+            raise SystemExit(
+                f"--expected-dim auto does not know model {model_name!r}; "
+                "pass --expected-dim explicitly or add the model to the registry."
+            )
+        return dim, "model_registry"
+
+    try:
+        dim = int(value)
+    except ValueError as exc:
+        raise SystemExit("--expected-dim must be a positive integer or 'auto'") from exc
+    if dim <= 0:
+        raise SystemExit("--expected-dim must be positive")
+    return dim, "explicit"
 
 
 def load_data(
@@ -662,8 +883,6 @@ def loaded_qrels(conn: psycopg.Connection[Any]) -> dict[str, dict[str, int]]:
     qrels: dict[str, dict[str, int]] = {}
     for query_id, doc_id, relevance in rows:
         qrels.setdefault(str(query_id), {})[str(doc_id)] = int(relevance)
-    if not qrels:
-        raise RuntimeError("no qrels are available for the loaded benchmark corpus")
     return qrels
 
 
@@ -1038,6 +1257,7 @@ def load_precomputed_multivectors(conn: psycopg.Connection[Any], args: argparse.
         max_docs=args.max_docs,
         max_queries=args.max_queries,
         force_reload=True,
+        prioritize_qrels=args.prioritize_qrels,
     )
 
 
@@ -1046,36 +1266,104 @@ def build_index(conn: psycopg.Connection[Any], args: argparse.Namespace) -> dict
         row = fetch_one(conn, "SELECT to_regclass('dbpedia_colbert_docs_colbert_idx') IS NOT NULL")
         if row and bool(row[0]):
             stats = fetch_one(conn, "SELECT turbohybrid_index_stats('dbpedia_colbert_docs_colbert_idx'::regclass)")
+            build_stats = fetch_one(conn, "SELECT turbohybrid_last_build_stats()")
             size = fetch_one(conn, "SELECT pg_relation_size('dbpedia_colbert_docs_colbert_idx'::regclass)")
             return {
                 "reused": True,
+                "index_graph_m": int(getattr(args, "index_graph_m", 0)),
+                "index_graph_ef_construction": int(getattr(args, "index_graph_ef_construction", 0)),
+                "index_graph_ef_search": int(getattr(args, "index_graph_ef_search", 0)),
+                "index_native_segments": int(getattr(args, "index_native_segments", 0)),
                 "index_bytes": int(size[0]) if size else 0,
                 "index_stats": jsonb_value(stats[0]) if stats else {},
+                "build_stats": jsonb_value(build_stats[0]) if build_stats else {},
             }
 
     exec_sql(conn, "DROP INDEX IF EXISTS dbpedia_colbert_docs_colbert_idx")
     started = time.perf_counter()
-    exec_sql(
-        conn,
-        f"""
-        CREATE INDEX dbpedia_colbert_docs_colbert_idx
-        ON dbpedia_colbert_docs USING turbohybrid (
-          colbert multivector_maxsim_ip_turbohybrid_ops,
-          body_tsv bm25_tsvector_turbohybrid_ops
-        )
-        WITH (quantization_bits = 4,
-              exact_storage = off,
-              multivector_graph = {args.multivector_graph})
-        """,
+    pooling_mode = getattr(args, "multivector_token_pooling", "off")
+    pooling_ratio = float(getattr(args, "multivector_token_pooling_target_ratio", 0.5))
+    pooling_min_tokens = int(getattr(args, "multivector_token_pooling_min_tokens", 16))
+    centroids = getattr(args, "multivector_centroids", "off")
+    centroid_count = getattr(args, "multivector_centroid_count", "auto")
+    if isinstance(centroid_count, str) and centroid_count.lower() == "auto":
+        centroid_count_sql = 0
+    else:
+        centroid_count_sql = int(centroid_count)
+    proxy_encoder = getattr(args, "multivector_proxy_encoder", "mean_pool")
+    needs_lexical_index = (
+        RRF_METHOD in set(getattr(args, "methods", []))
+        or bool(getattr(args, "hybrid_evaluation_harness", False))
+        or getattr(args, "multivector_bm25_candidate_injection", "off") != "off"
+        or getattr(args, "multivector_sparse_candidate_source", "off") != "off"
+        or getattr(args, "learned_sparse_doc_jsonl", None) is not None
     )
+    lexical_column = None
+    if needs_lexical_index:
+        lexical_column = "learned_sparse_tsv" if has_learned_sparse_docs(conn) else "body_tsv"
+    reloptions = [
+        "quantization_bits = 4",
+        "exact_storage = off",
+        f"multivector_graph = {args.multivector_graph}",
+        f"multivector_token_pooling = {pooling_mode}",
+        f"multivector_token_pooling_target_ratio = {pooling_ratio}",
+        f"multivector_token_pooling_min_tokens = {pooling_min_tokens}",
+        f"multivector_centroids = {centroids}",
+        f"multivector_centroid_count = {centroid_count_sql}",
+        f"multivector_proxy_encoder = {proxy_encoder}",
+    ]
+    index_graph_m = int(getattr(args, "index_graph_m", 0))
+    index_graph_ef_construction = int(getattr(args, "index_graph_ef_construction", 0))
+    index_graph_ef_search = int(getattr(args, "index_graph_ef_search", 0))
+    index_native_segments = int(getattr(args, "index_native_segments", 0))
+    if index_graph_m > 0:
+        reloptions.append(f"graph_m = {index_graph_m}")
+    if index_graph_ef_construction > 0:
+        reloptions.append(f"graph_ef_construction = {index_graph_ef_construction}")
+    if index_graph_ef_search > 0:
+        reloptions.append(f"graph_ef_search = {index_graph_ef_search}")
+    if index_native_segments > 0:
+        reloptions.append(f"native_segments = {index_native_segments}")
+    reloptions_sql = ",\n              ".join(reloptions)
+    if lexical_column is None:
+        exec_sql(
+            conn,
+            f"""
+            CREATE INDEX dbpedia_colbert_docs_colbert_idx
+            ON dbpedia_colbert_docs USING turbohybrid (
+              colbert multivector_maxsim_ip_turbohybrid_ops
+            )
+            WITH ({reloptions_sql})
+            """,
+        )
+    else:
+        exec_sql(
+            conn,
+            f"""
+            CREATE INDEX dbpedia_colbert_docs_colbert_idx
+            ON dbpedia_colbert_docs USING turbohybrid (
+              colbert multivector_maxsim_ip_turbohybrid_ops,
+              {lexical_column} bm25_tsvector_turbohybrid_ops
+            )
+            WITH ({reloptions_sql})
+            """,
+        )
     elapsed_ms = (time.perf_counter() - started) * 1000.0
+    build_stats = fetch_one(conn, "SELECT turbohybrid_last_build_stats()")
     stats = fetch_one(conn, "SELECT turbohybrid_index_stats('dbpedia_colbert_docs_colbert_idx'::regclass)")
     size = fetch_one(conn, "SELECT pg_relation_size('dbpedia_colbert_docs_colbert_idx'::regclass)")
     return {
         "reused": False,
         "elapsed_ms": round(elapsed_ms, 3),
+        "lexical_indexed": lexical_column is not None,
+        "lexical_column": lexical_column,
+        "index_graph_m": index_graph_m,
+        "index_graph_ef_construction": index_graph_ef_construction,
+        "index_graph_ef_search": index_graph_ef_search,
+        "index_native_segments": index_native_segments,
         "index_bytes": int(size[0]) if size else 0,
         "index_stats": jsonb_value(stats[0]) if stats else {},
+        "build_stats": jsonb_value(build_stats[0]) if build_stats else {},
     }
 
 
@@ -1224,6 +1512,34 @@ def trace_key(entry: dict[str, Any]) -> tuple[int, int] | None:
         return None
 
 
+def can_infer_admission_from_result_docs(
+    candidate_source: Any,
+    *,
+    fallback_used: bool = False,
+    plain_fallback: Any = None,
+    graph_mode: Any = None,
+) -> bool:
+    """Return whether final result membership proves exact-rerank admission.
+
+    Some document-level paths exact-rerank candidate documents but do not emit a
+    bounded per-document admission trace. In those cases, a returned exact-top
+    document proves it was admitted and retained for exact rerank, but not its
+    pre-rerank candidate rank.
+    """
+    if fallback_used or plain_fallback == "force":
+        return True
+    if graph_mode == "document_nodes":
+        return True
+    return candidate_source in {
+        "exact_doc_scan",
+        "doc_graph_prototype",
+        "plain_fallback",
+        "document_nodes",
+        "proxy_vector",
+        "quantized_inverted_experimental",
+    }
+
+
 def scan_stat_int(stats: dict[str, Any], key: str) -> int:
     value = stats.get(key, 0)
     try:
@@ -1265,6 +1581,174 @@ def scan_exact_rerank_docs(stats: dict[str, Any]) -> int:
     )
 
 
+def exact_rerank_work_from_stats(stats: dict[str, Any]) -> dict[str, Any]:
+    return {
+        "exact_rerank_candidates": scan_stat_int(stats, "exact_rerank_candidates"),
+        "exact_rerank_tokens_evaluated": scan_stat_int(stats, "exact_rerank_tokens_evaluated"),
+        "exact_rerank_tokens_skipped": scan_stat_int(stats, "exact_rerank_tokens_skipped"),
+        "exact_rerank_pairs_saved": scan_stat_int(stats, "exact_rerank_pairs_saved"),
+        "adaptive_rerank_topk_changed_vs_full": bool(
+            stats.get("adaptive_rerank_topk_changed_vs_full", False)
+        ),
+    }
+
+
+def proxy_work_from_stats(stats: dict[str, Any]) -> dict[str, Any]:
+    return {
+        "proxy_encoder_kind": scan_stat_str(stats, "proxy_encoder_kind"),
+        "proxy_candidates": scan_stat_int(stats, "proxy_candidates"),
+        "proxy_top1_admission": scan_stat_bool(stats, "proxy_top1_admission"),
+        "proxy_exact_rerank_docs": scan_stat_int(stats, "proxy_exact_rerank_docs"),
+    }
+
+
+def centroid_work_from_stats(stats: dict[str, Any]) -> dict[str, Any]:
+    return {
+        "centroid_lists_visited": scan_stat_int(stats, "centroid_lists_visited"),
+        "centroid_docs_touched": scan_stat_int(stats, "centroid_docs_touched"),
+        "centroid_pruned_docs": scan_stat_int(stats, "centroid_pruned_docs"),
+        "centroid_candidates": scan_stat_int(stats, "centroid_candidates"),
+    }
+
+
+def quantized_inverted_work_from_stats(stats: dict[str, Any]) -> dict[str, Any]:
+    return {
+        "quantized_inverted_lists_visited": scan_stat_int(
+            stats, "quantized_inverted_lists_visited"
+        ),
+        "quantized_inverted_postings_touched": scan_stat_int(
+            stats, "quantized_inverted_postings_touched"
+        ),
+        "quantized_inverted_docs_scored": scan_stat_int(
+            stats, "quantized_inverted_docs_scored"
+        ),
+        "quantized_inverted_candidates": scan_stat_int(
+            stats, "quantized_inverted_candidates"
+        ),
+        "quantized_inverted_exact_rerank_docs": scan_stat_int(
+            stats, "quantized_inverted_exact_rerank_docs"
+        ),
+        "quantized_inverted_codebook_size": scan_stat_int(
+            stats, "quantized_inverted_codebook_size"
+        ),
+    }
+
+
+def learned_sparse_work_from_stats(stats: dict[str, Any]) -> dict[str, Any]:
+    return {
+        "learned_sparse_candidates": scan_stat_int(stats, "learned_sparse_candidates"),
+        "learned_sparse_retained_for_maxsim": scan_stat_int(
+            stats, "learned_sparse_retained_for_maxsim"
+        ),
+        "learned_sparse_branch_latency_us": scan_stat_int(
+            stats, "learned_sparse_branch_latency_us"
+        ),
+    }
+
+
+def scan_stat_int_list(stats: dict[str, Any], key: str) -> list[int]:
+    value = stats.get(key)
+    if not isinstance(value, list):
+        return []
+    result: list[int] = []
+    for item in value:
+        try:
+            result.append(int(item))
+        except (TypeError, ValueError):
+            continue
+    return result
+
+
+def clone_args(args: argparse.Namespace, **overrides: Any) -> argparse.Namespace:
+    values = vars(args).copy()
+    values.update(overrides)
+    return argparse.Namespace(**values)
+
+
+def sidecar_stats_from_scan(stats: dict[str, Any]) -> dict[str, Any]:
+    dedicated_keys = (
+        "multivector_doc_sidecar_cache_mode",
+        "multivector_doc_sidecar_pages_read",
+        "multivector_doc_sidecar_cache_hits",
+        "multivector_doc_sidecar_cache_misses",
+        "multivector_doc_sidecar_bytes_touched",
+        "multivector_doc_sidecar_vectors_loaded",
+    )
+    return {
+        "sidecar_stats_available": any(key in stats for key in dedicated_keys),
+        "sidecar_cache_mode": str(stats.get("multivector_doc_sidecar_cache_mode", "none")),
+        "sidecar_pages_read": scan_stat_int(stats, "multivector_doc_sidecar_pages_read"),
+        "sidecar_bytes_touched": scan_stat_int(stats, "multivector_doc_sidecar_bytes_touched"),
+        "sidecar_cache_hits": scan_stat_int(stats, "multivector_doc_sidecar_cache_hits"),
+        "sidecar_cache_misses": scan_stat_int(stats, "multivector_doc_sidecar_cache_misses"),
+        "sidecar_vectors_loaded": scan_stat_int(stats, "multivector_doc_sidecar_vectors_loaded"),
+        "native_cache_used": scan_stat_bool(stats, "native_cache_used"),
+        "native_cache_reused": scan_stat_bool(stats, "native_cache_reused"),
+        "native_cache_built_this_scan": scan_stat_bool(stats, "native_cache_built_this_scan"),
+        "native_cache_bytes": scan_stat_int(stats, "native_cache_bytes"),
+        "native_cache_exact_bytes": scan_stat_int(stats, "native_cache_exact_bytes"),
+        "native_cache_code_bytes": scan_stat_int(stats, "native_cache_code_bytes"),
+        "native_cache_adj_bytes": scan_stat_int(stats, "native_cache_adj_bytes"),
+        "native_cache_mode": scan_stat_str(stats, "native_cache_mode"),
+        "native_cache_scope": scan_stat_str(stats, "native_cache_scope"),
+        "memory_bytes_estimate": memory_estimate_from_stats(stats),
+    }
+
+
+def parse_int_grid(value: str, option_name: str) -> list[int]:
+    try:
+        items = [int(item.strip()) for item in value.split(",") if item.strip()]
+    except ValueError as exc:
+        raise SystemExit(f"{option_name} must contain comma-separated integers") from exc
+    items = sorted({item for item in items if item > 0})
+    if not items:
+        raise SystemExit(f"{option_name} must contain at least one positive integer")
+    return items
+
+
+def parse_choice_grid(value: str, choices: tuple[str, ...], option_name: str) -> list[str]:
+    items = [item.strip() for item in value.split(",") if item.strip()]
+    if not items:
+        raise SystemExit(f"{option_name} must contain at least one value")
+    unknown = sorted(set(items) - set(choices))
+    if unknown:
+        raise SystemExit(f"{option_name} contains unsupported value(s): {', '.join(unknown)}")
+    return list(dict.fromkeys(items))
+
+
+def parse_document_node_pooling_grid(value: str) -> list[dict[str, Any]]:
+    items: list[dict[str, Any]] = []
+    seen: set[tuple[str, float]] = set()
+    for raw in value.split(","):
+        entry = raw.strip()
+        if not entry:
+            continue
+        if ":" in entry:
+            mode, ratio_text = entry.split(":", 1)
+        else:
+            mode, ratio_text = ("off" if entry == "1.0" else "greedy_cosine", entry)
+        mode = mode.strip()
+        ratio_text = ratio_text.strip()
+        if mode not in DOCUMENT_NODE_TOKEN_POOLING_CHOICES:
+            raise SystemExit(f"--document-node-pooling-grid contains unsupported mode: {mode}")
+        try:
+            ratio = float(ratio_text)
+        except ValueError as exc:
+            raise SystemExit("--document-node-pooling-grid ratios must be numeric") from exc
+        if ratio <= 0.0 or ratio > 1.0:
+            raise SystemExit("--document-node-pooling-grid ratios must be in (0, 1]")
+        if mode == "off" and ratio != 1.0:
+            raise SystemExit("--document-node-pooling-grid uses off only with ratio 1.0")
+        key = (mode, ratio)
+        if key in seen:
+            continue
+        seen.add(key)
+        items.append({"mode": mode, "ratio": ratio})
+    if not items:
+        raise SystemExit("--document-node-pooling-grid must contain at least one entry")
+    return items
+
+
 def run_admission_budget(
     conn: psycopg.Connection[Any],
     query: QueryItem,
@@ -1300,14 +1784,7 @@ def run_admission_budget(
     fallback_used = bool(stats.get("multivector_plain_fallback_used"))
     infer_admission_from_results = (
         not trace_by_heap
-        and fallback_used
-        and candidate_source in {
-            "exact_doc_scan",
-            "doc_graph_prototype",
-            "plain_fallback",
-            "document_nodes",
-            "proxy_vector",
-        }
+        and can_infer_admission_from_result_docs(candidate_source, fallback_used=fallback_used)
     )
 
     admitted_ranks: list[int] = []
@@ -1318,17 +1795,17 @@ def run_admission_budget(
         result_rank = docs.index(exact["doc_id"]) + 1 if exact["doc_id"] in docs else None
         inferred_admitted = infer_admission_from_results and result_rank is not None
         admitted = entry is not None or inferred_admitted
+        admission_evidence = "trace" if entry is not None else "result_doc" if inferred_admitted else "missing"
         if admitted:
             admitted_ranks.append(int(exact["rank"]))
         exact_top_with_admission.append({
             "rank": exact["rank"],
             "doc_id": exact["doc_id"],
             "admitted_before_rerank": admitted,
+            "admission_evidence": admission_evidence,
             "candidate_rank_before_rerank": (
                 int(entry["candidate_rank_before_truncation"])
                 if isinstance(entry, dict) and entry.get("candidate_rank_before_truncation") is not None
-                else int(exact["rank"])
-                if inferred_admitted
                 else None
             ),
             "retained_for_exact_rerank": (
@@ -1381,14 +1858,19 @@ def run_admission_budget(
         "bm25_injection_candidates": scan_stat_int(stats, "multivector_bm25_injection_candidates"),
         "bm25_injection_retained": scan_stat_int(stats, "multivector_bm25_injection_retained"),
         "bm25_injection_exact_reranked": scan_stat_int(stats, "multivector_bm25_injection_exact_reranked"),
+        **learned_sparse_work_from_stats(stats),
         "latency_ms": latency_ms_rounded,
         "latency": {"ms": latency_ms_rounded},
         "result_doc_ids": docs,
         "exact_top1_admission": top1_admission,
+        "exact_top1_admitted": top1_admission,
         "exact_top1_admitted_before_rerank": top1_admission,
         "exact_top10_admission_recall": round(top10_admitted / len(top10), 6) if top10 else 0.0,
         "exact_top1_candidate_rank_before_rerank": (
             exact_top_with_admission[0]["candidate_rank_before_rerank"] if exact_top_with_admission else None
+        ),
+        "exact_top1_rank": (
+            exact_top_with_admission[0]["exact_rerank_rank"] if exact_top_with_admission else None
         ),
         "exact_top1_exact_rerank_rank": (
             exact_top_with_admission[0]["exact_rerank_rank"] if exact_top_with_admission else None
@@ -1400,6 +1882,11 @@ def run_admission_budget(
         "docs_scored": docs_scored,
         "graph_edges_visited": graph_edges_visited,
         "exact_rerank_docs": exact_rerank_docs,
+        **exact_rerank_work_from_stats(stats),
+        **proxy_work_from_stats(stats),
+        **centroid_work_from_stats(stats),
+        **quantized_inverted_work_from_stats(stats),
+        "sidecar_stats": sidecar_stats_from_scan(stats),
         "doc_graph_search_ef": scan_stat_int(stats, "multivector_doc_graph_search_ef"),
         "doc_graph_oversampling": scan_stat_int(stats, "multivector_doc_graph_oversampling"),
         "doc_graph_rescore_k": scan_stat_int(stats, "multivector_doc_graph_rescore_k"),
@@ -1441,9 +1928,32 @@ def run_admission_debug(
     docs_scored_by_budget: dict[int, list[int]] = {budget: [] for budget in budgets}
     graph_edges_by_budget: dict[int, list[int]] = {budget: [] for budget in budgets}
     exact_rerank_docs_by_budget: dict[int, list[int]] = {budget: [] for budget in budgets}
+    exact_rerank_tokens_evaluated_by_budget: dict[int, list[int]] = {budget: [] for budget in budgets}
+    exact_rerank_tokens_skipped_by_budget: dict[int, list[int]] = {budget: [] for budget in budgets}
+    exact_rerank_pairs_saved_by_budget: dict[int, list[int]] = {budget: [] for budget in budgets}
+    proxy_candidates_by_budget: dict[int, list[int]] = {budget: [] for budget in budgets}
+    proxy_exact_rerank_docs_by_budget: dict[int, list[int]] = {budget: [] for budget in budgets}
+    centroid_lists_visited_by_budget: dict[int, list[int]] = {budget: [] for budget in budgets}
+    centroid_docs_touched_by_budget: dict[int, list[int]] = {budget: [] for budget in budgets}
+    centroid_pruned_docs_by_budget: dict[int, list[int]] = {budget: [] for budget in budgets}
+    centroid_candidates_by_budget: dict[int, list[int]] = {budget: [] for budget in budgets}
+    learned_sparse_candidates_by_budget: dict[int, list[int]] = {budget: [] for budget in budgets}
+    learned_sparse_retained_by_budget: dict[int, list[int]] = {budget: [] for budget in budgets}
+    learned_sparse_latency_us_by_budget: dict[int, list[int]] = {budget: [] for budget in budgets}
+    quantized_inverted_candidates_by_budget: dict[int, list[int]] = {budget: [] for budget in budgets}
+    quantized_inverted_postings_by_budget: dict[int, list[int]] = {budget: [] for budget in budgets}
+    quantized_inverted_docs_by_budget: dict[int, list[int]] = {budget: [] for budget in budgets}
+    exact_top1_rank_by_budget: dict[int, list[int]] = {budget: [] for budget in budgets}
+    native_cache_bytes_by_budget: dict[int, list[int]] = {budget: [] for budget in budgets}
+    native_cache_exact_bytes_by_budget: dict[int, list[int]] = {budget: [] for budget in budgets}
+    sidecar_pages_read_by_budget: dict[int, list[int]] = {budget: [] for budget in budgets}
+    sidecar_bytes_touched_by_budget: dict[int, list[int]] = {budget: [] for budget in budgets}
+    sidecar_cache_hits_by_budget: dict[int, list[int]] = {budget: [] for budget in budgets}
+    sidecar_vectors_loaded_by_budget: dict[int, list[int]] = {budget: [] for budget in budgets}
     top1_first_budget_values: list[int] = []
     top1_admitted_queries = 0
     top10_recall_values: list[float] = []
+    run_at_largest_budget: dict[str, list[str]] = {}
 
     for query in queries:
         exact_top = exact_admission_top(conn, query, args.admission_k)
@@ -1460,10 +1970,65 @@ def run_admission_debug(
             docs_scored_by_budget[budget].append(int(result["docs_scored"]))
             graph_edges_by_budget[budget].append(int(result["graph_edges_visited"]))
             exact_rerank_docs_by_budget[budget].append(int(result["exact_rerank_docs"]))
+            exact_rerank_tokens_evaluated_by_budget[budget].append(
+                int(result.get("exact_rerank_tokens_evaluated", 0))
+            )
+            exact_rerank_tokens_skipped_by_budget[budget].append(
+                int(result.get("exact_rerank_tokens_skipped", 0))
+            )
+            exact_rerank_pairs_saved_by_budget[budget].append(
+                int(result.get("exact_rerank_pairs_saved", 0))
+            )
+            proxy_candidates_by_budget[budget].append(int(result.get("proxy_candidates", 0)))
+            proxy_exact_rerank_docs_by_budget[budget].append(
+                int(result.get("proxy_exact_rerank_docs", 0))
+            )
+            centroid_lists_visited_by_budget[budget].append(
+                int(result.get("centroid_lists_visited", 0))
+            )
+            centroid_docs_touched_by_budget[budget].append(
+                int(result.get("centroid_docs_touched", 0))
+            )
+            centroid_pruned_docs_by_budget[budget].append(
+                int(result.get("centroid_pruned_docs", 0))
+            )
+            centroid_candidates_by_budget[budget].append(
+                int(result.get("centroid_candidates", 0))
+            )
+            learned_sparse_candidates_by_budget[budget].append(
+                int(result.get("learned_sparse_candidates", 0))
+            )
+            learned_sparse_retained_by_budget[budget].append(
+                int(result.get("learned_sparse_retained_for_maxsim", 0))
+            )
+            learned_sparse_latency_us_by_budget[budget].append(
+                int(result.get("learned_sparse_branch_latency_us", 0))
+            )
+            quantized_inverted_candidates_by_budget[budget].append(
+                int(result.get("quantized_inverted_candidates", 0))
+            )
+            quantized_inverted_postings_by_budget[budget].append(
+                int(result.get("quantized_inverted_postings_touched", 0))
+            )
+            quantized_inverted_docs_by_budget[budget].append(
+                int(result.get("quantized_inverted_docs_scored", 0))
+            )
+            if result["exact_top1_exact_rerank_rank"] is not None:
+                exact_top1_rank_by_budget[budget].append(int(result["exact_top1_exact_rerank_rank"]))
+            sidecar_stats = result.get("sidecar_stats", {})
+            if isinstance(sidecar_stats, dict):
+                native_cache_bytes_by_budget[budget].append(int(sidecar_stats.get("native_cache_bytes", 0)))
+                native_cache_exact_bytes_by_budget[budget].append(int(sidecar_stats.get("native_cache_exact_bytes", 0)))
+                sidecar_pages_read_by_budget[budget].append(int(sidecar_stats.get("sidecar_pages_read", 0)))
+                sidecar_bytes_touched_by_budget[budget].append(int(sidecar_stats.get("sidecar_bytes_touched", 0)))
+                sidecar_cache_hits_by_budget[budget].append(int(sidecar_stats.get("sidecar_cache_hits", 0)))
+                sidecar_vectors_loaded_by_budget[budget].append(int(sidecar_stats.get("sidecar_vectors_loaded", 0)))
             if result["exact_top1_admitted_before_rerank"] and first_budget is None:
                 first_budget = budget
                 top1_candidate_rank = result["exact_top1_candidate_rank_before_rerank"]
                 top1_exact_rank = result["exact_top1_exact_rerank_rank"]
+            if budget == budgets[-1]:
+                run_at_largest_budget[query.query_id] = list(result["result_doc_ids"])
         if first_budget is not None:
             top1_first_budget_values.append(first_budget)
             top1_admitted_queries += 1
@@ -1474,9 +2039,12 @@ def run_admission_debug(
             "query_id": query.query_id,
             "query_text": query.query_text,
             "exact_top": exact_top,
+            "exact_top1_admitted": first_budget is not None,
             "exact_top1_admitted_before_rerank": first_budget is not None,
             "exact_top10_admission_recall": budget_results[-1]["exact_top10_admission_recall"] if budget_results else 0.0,
             "exact_top1_first_budget_admitted": first_budget,
+            "first_budget_admitting_exact_top1": first_budget,
+            "exact_top1_rank": top1_exact_rank,
             "exact_top1_candidate_rank_before_rerank": top1_candidate_rank,
             "exact_top1_exact_rerank_rank": top1_exact_rank,
             "budgets": budget_results,
@@ -1487,12 +2055,18 @@ def run_admission_debug(
         "admission_k": args.admission_k,
         "budget_sweep": budgets,
         "exact_top1_admission": round(top1_admitted_queries / len(per_query), 6) if per_query else 0.0,
+        "exact_top1_admitted": round(top1_admitted_queries / len(per_query), 6) if per_query else 0.0,
         "exact_top1_admission_rate": round(top1_admitted_queries / len(per_query), 6) if per_query else 0.0,
         "exact_top10_admission_recall": round(statistics.mean(top10_recall_values), 6) if top10_recall_values else 0.0,
         "exact_top1_first_budget_admitted": summarize_ints(top1_first_budget_values),
+        "first_budget_admitting_exact_top1": summarize_ints(top1_first_budget_values),
         "admission_by_budget": {
             str(budget): {
                 "exact_top1_admission": round(
+                    sum(1 for value in top1_by_budget[budget] if value) / len(top1_by_budget[budget]),
+                    6,
+                ) if top1_by_budget[budget] else 0.0,
+                "exact_top1_admitted": round(
                     sum(1 for value in top1_by_budget[budget] if value) / len(top1_by_budget[budget]),
                     6,
                 ) if top1_by_budget[budget] else 0.0,
@@ -1504,6 +2078,56 @@ def run_admission_debug(
                 "docs_scored": summarize_ints(docs_scored_by_budget[budget]),
                 "graph_edges_visited": summarize_ints(graph_edges_by_budget[budget]),
                 "exact_rerank_docs": summarize_ints(exact_rerank_docs_by_budget[budget]),
+                "exact_rerank_tokens_evaluated": summarize_ints(
+                    exact_rerank_tokens_evaluated_by_budget[budget]
+                ),
+                "exact_rerank_tokens_skipped": summarize_ints(
+                    exact_rerank_tokens_skipped_by_budget[budget]
+                ),
+                "exact_rerank_pairs_saved": summarize_ints(
+                    exact_rerank_pairs_saved_by_budget[budget]
+                ),
+                "proxy_candidates": summarize_ints(proxy_candidates_by_budget[budget]),
+                "proxy_exact_rerank_docs": summarize_ints(
+                    proxy_exact_rerank_docs_by_budget[budget]
+                ),
+                "centroid_lists_visited": summarize_ints(
+                    centroid_lists_visited_by_budget[budget]
+                ),
+                "centroid_docs_touched": summarize_ints(
+                    centroid_docs_touched_by_budget[budget]
+                ),
+                "centroid_pruned_docs": summarize_ints(
+                    centroid_pruned_docs_by_budget[budget]
+                ),
+                "centroid_candidates": summarize_ints(
+                    centroid_candidates_by_budget[budget]
+                ),
+                "learned_sparse_candidates": summarize_ints(
+                    learned_sparse_candidates_by_budget[budget]
+                ),
+                "learned_sparse_retained_for_maxsim": summarize_ints(
+                    learned_sparse_retained_by_budget[budget]
+                ),
+                "learned_sparse_branch_latency_us": summarize_ints(
+                    learned_sparse_latency_us_by_budget[budget]
+                ),
+                "quantized_inverted_candidates": summarize_ints(
+                    quantized_inverted_candidates_by_budget[budget]
+                ),
+                "quantized_inverted_postings_touched": summarize_ints(
+                    quantized_inverted_postings_by_budget[budget]
+                ),
+                "quantized_inverted_docs_scored": summarize_ints(
+                    quantized_inverted_docs_by_budget[budget]
+                ),
+                "exact_top1_rank": summarize_ints(exact_top1_rank_by_budget[budget]),
+                "native_cache_bytes": summarize_ints(native_cache_bytes_by_budget[budget]),
+                "native_cache_exact_bytes": summarize_ints(native_cache_exact_bytes_by_budget[budget]),
+                "sidecar_pages_read": summarize_ints(sidecar_pages_read_by_budget[budget]),
+                "sidecar_bytes_touched": summarize_ints(sidecar_bytes_touched_by_budget[budget]),
+                "sidecar_cache_hits": summarize_ints(sidecar_cache_hits_by_budget[budget]),
+                "sidecar_vectors_loaded": summarize_ints(sidecar_vectors_loaded_by_budget[budget]),
             }
             for budget in budgets
         },
@@ -1511,18 +2135,829 @@ def run_admission_debug(
             str(budget): summarize_ms(values)
             for budget, values in latency_by_budget.items()
         },
+        "run_at_largest_budget": run_at_largest_budget,
     }
 
     set_retrieval_gucs(conn, args, "dbpedia_colbert_serial")
     return {
         "enabled": True,
         "candidate_source": args.multivector_candidate_source,
+        "graph_mode": args.multivector_graph,
+        "storage_kind": args.multivector_doc_storage,
+        "token_pooling": args.multivector_token_pooling,
+        "token_pooling_target_ratio": args.multivector_token_pooling_target_ratio,
+        "token_pooling_min_tokens": args.multivector_token_pooling_min_tokens,
+        "centroids": args.multivector_centroids,
+        "centroid_count": args.multivector_centroid_count,
+        "doc_graph_search_ef": args.multivector_doc_graph_search_ef,
+        "doc_graph_oversampling": args.multivector_doc_graph_oversampling,
+        "doc_graph_rescore_k": args.multivector_doc_graph_rescore_k,
         "plain_fallback": args.multivector_plain_fallback,
         "candidate_reservoirs": args.multivector_candidate_reservoirs,
         "bm25_candidate_injection": args.multivector_bm25_candidate_injection,
+        "sparse_candidate_source": args.multivector_sparse_candidate_source,
         "retrieval_method": QUERY_ONLY_METHOD,
         "aggregate": aggregate,
         "per_query": per_query,
+    }
+
+
+def grid_mode_args(args: argparse.Namespace, mode: str, graph_mode: str) -> argparse.Namespace:
+    if mode == "token_nodes":
+        return clone_args(
+            args,
+            multivector_graph=graph_mode,
+            multivector_candidate_source="graph",
+            multivector_plain_fallback="off",
+            multivector_candidate_reservoirs="off",
+            multivector_doc_storage="f32",
+            multivector_doc_storage_cache="auto",
+            multivector_token_pooling="off",
+            multivector_token_pooling_target_ratio=1.0,
+            multivector_centroids="off",
+            multivector_centroid_count="auto",
+            multivector_doc_graph_search_ef=0,
+            multivector_doc_graph_oversampling=1,
+            multivector_doc_graph_rescore_k=0,
+        )
+    if mode == "exact_token_scan":
+        return clone_args(
+            args,
+            multivector_graph=graph_mode,
+            multivector_candidate_source="exact_token_scan",
+            multivector_plain_fallback="off",
+            multivector_candidate_reservoirs="off",
+            multivector_doc_storage="f32",
+            multivector_doc_storage_cache="auto",
+            multivector_token_pooling="off",
+            multivector_token_pooling_target_ratio=1.0,
+            multivector_centroids="off",
+            multivector_centroid_count="auto",
+            multivector_doc_graph_search_ef=0,
+            multivector_doc_graph_oversampling=1,
+            multivector_doc_graph_rescore_k=0,
+        )
+    if mode == "plain_fallback":
+        return clone_args(
+            args,
+            multivector_graph=graph_mode,
+            multivector_candidate_source="graph",
+            multivector_plain_fallback="force",
+            multivector_candidate_reservoirs="off",
+            multivector_doc_storage="f32",
+            multivector_doc_storage_cache="auto",
+            multivector_token_pooling="off",
+            multivector_token_pooling_target_ratio=1.0,
+            multivector_centroids="off",
+            multivector_centroid_count="auto",
+            multivector_doc_graph_search_ef=0,
+            multivector_doc_graph_oversampling=1,
+            multivector_doc_graph_rescore_k=0,
+        )
+    if mode == "exact_doc_scan":
+        return clone_args(
+            args,
+            multivector_graph=graph_mode,
+            multivector_candidate_source="exact_doc_scan",
+            multivector_plain_fallback="off",
+            multivector_candidate_reservoirs="off",
+            multivector_doc_storage="f32",
+            multivector_doc_storage_cache="paged",
+            multivector_token_pooling="off",
+            multivector_token_pooling_target_ratio=1.0,
+            multivector_centroids="off",
+            multivector_centroid_count="auto",
+            multivector_doc_graph_search_ef=0,
+            multivector_doc_graph_oversampling=1,
+            multivector_doc_graph_rescore_k=0,
+        )
+    if mode == "proxy_vector":
+        return clone_args(
+            args,
+            multivector_graph=graph_mode,
+            multivector_candidate_source="proxy_vector",
+            multivector_plain_fallback="off",
+            multivector_candidate_reservoirs="off",
+            multivector_doc_storage="f32",
+            multivector_doc_storage_cache="auto",
+            multivector_token_pooling="off",
+            multivector_token_pooling_target_ratio=1.0,
+            multivector_centroids="off",
+            multivector_centroid_count="auto",
+            multivector_doc_graph_search_ef=0,
+            multivector_doc_graph_oversampling=1,
+            multivector_doc_graph_rescore_k=0,
+        )
+    if mode == "centroid_lite":
+        return clone_args(
+            args,
+            multivector_graph=graph_mode,
+            multivector_candidate_source="centroid_lite",
+            multivector_plain_fallback="off",
+            multivector_candidate_reservoirs="off",
+            multivector_doc_storage="f32",
+            multivector_doc_storage_cache="auto",
+            multivector_token_pooling="off",
+            multivector_token_pooling_target_ratio=1.0,
+            multivector_centroids="kmeans",
+            multivector_centroid_count=args.multivector_centroid_count,
+            multivector_doc_graph_search_ef=0,
+            multivector_doc_graph_oversampling=1,
+            multivector_doc_graph_rescore_k=0,
+        )
+    if mode == "quantized_inverted_experimental":
+        return clone_args(
+            args,
+            multivector_graph=graph_mode,
+            multivector_candidate_source="quantized_inverted_experimental",
+            multivector_plain_fallback="off",
+            multivector_candidate_reservoirs="off",
+            multivector_doc_storage="f32",
+            multivector_doc_storage_cache="auto",
+            multivector_token_pooling="off",
+            multivector_token_pooling_target_ratio=1.0,
+            multivector_centroids="off",
+            multivector_centroid_count="auto",
+            multivector_doc_graph_search_ef=0,
+            multivector_doc_graph_oversampling=1,
+            multivector_doc_graph_rescore_k=0,
+        )
+    raise ValueError(f"unsupported grid mode: {mode}")
+
+
+def grid_admission_summary(
+    *,
+    mode: str,
+    args: argparse.Namespace,
+    index_phase: dict[str, Any],
+    admission: dict[str, Any],
+    qrels: dict[str, dict[str, int]],
+) -> dict[str, Any]:
+    aggregate = admission.get("aggregate", {})
+    run = aggregate.get("run_at_largest_budget", {})
+    if not isinstance(run, dict):
+        run = {}
+    metrics = method_metrics(run, qrels, args.final_k, args.quality_k) if qrels else {}
+    budget_sweep = aggregate.get("budget_sweep", [])
+    largest_budget = int(budget_sweep[-1]) if isinstance(budget_sweep, list) and budget_sweep else None
+    return {
+        "mode": mode,
+        "candidate_source": args.multivector_candidate_source,
+        "graph_mode": args.multivector_graph,
+        "storage_kind": args.multivector_doc_storage,
+        "storage_cache_mode": args.multivector_doc_storage_cache,
+        "token_pooling": args.multivector_token_pooling,
+        "token_pooling_target_ratio": args.multivector_token_pooling_target_ratio,
+        "token_pooling_min_tokens": args.multivector_token_pooling_min_tokens,
+        "doc_graph_search_ef": args.multivector_doc_graph_search_ef,
+        "doc_graph_oversampling": args.multivector_doc_graph_oversampling,
+        "doc_graph_rescore_k": args.multivector_doc_graph_rescore_k,
+        "index_graph_m": index_phase.get("index_graph_m", 0),
+        "index_graph_ef_construction": index_phase.get("index_graph_ef_construction", 0),
+        "index_graph_ef_search": index_phase.get("index_graph_ef_search", 0),
+        "plain_fallback": args.multivector_plain_fallback,
+        "largest_budget": largest_budget,
+        "exact_top1_admission_rate": aggregate.get("exact_top1_admission_rate", 0.0),
+        "exact_top1_admitted": aggregate.get("exact_top1_admitted", aggregate.get("exact_top1_admission", 0.0)),
+        "exact_top10_admission_recall": aggregate.get("exact_top10_admission_recall", 0.0),
+        "metrics": metrics,
+        "admission_by_budget": aggregate.get("admission_by_budget", {}),
+        "latency_by_budget": aggregate.get("latency_by_budget", {}),
+        "index_stats": index_phase.get("index_stats", {}),
+        "index_bytes": index_phase.get("index_bytes", 0),
+    }
+
+
+def run_document_node_admission_grid(
+    conn: psycopg.Connection[Any],
+    args: argparse.Namespace,
+    queries: list[QueryItem],
+    qrels: dict[str, dict[str, int]],
+) -> dict[str, Any]:
+    storage_grid = args.document_node_storage_grid_values
+    cache_grid = args.document_node_cache_grid_values
+    pooling_grid = args.document_node_pooling_grid_values
+    proxy_encoder_grid = args.document_node_proxy_encoder_grid_values
+    ef_grid = args.document_node_ef_grid_values
+    oversampling_grid = args.document_node_oversampling_grid_values
+    budget_grid = parse_int_grid(args.admission_budget_sweep, "--admission-budget-sweep")
+    results: list[dict[str, Any]] = []
+    full_admission: list[dict[str, Any]] = []
+    default_document_modes_done = False
+    default_document_modes_reused_grid_index = False
+
+    def run_default_document_modes(index_phase: dict[str, Any], *, reused_grid_index: bool) -> None:
+        nonlocal default_document_modes_done, default_document_modes_reused_grid_index
+        for mode in ("proxy_vector", "exact_doc_scan", "quantized_inverted_experimental"):
+            mode_args = grid_mode_args(args, mode, "document_nodes")
+            admission = run_admission_debug(conn, mode_args, queries)
+            mode_name = f"{mode}_document_index" if mode == "exact_doc_scan" else mode
+            full_admission.append({"mode": mode_name, "admission_debug": admission})
+            results.append(grid_admission_summary(
+                mode=mode_name,
+                args=mode_args,
+                index_phase=index_phase,
+                admission=admission,
+                qrels=qrels,
+            ))
+        default_document_modes_done = True
+        default_document_modes_reused_grid_index = reused_grid_index
+
+    token_args = clone_args(args, multivector_graph="token_nodes", reuse_index=False)
+    token_index_phase = build_index(conn, token_args)
+    for mode in ("token_nodes", "exact_token_scan", "plain_fallback", "exact_doc_scan"):
+        mode_args = grid_mode_args(args, mode, "token_nodes")
+        admission = run_admission_debug(conn, mode_args, queries)
+        full_admission.append({"mode": mode, "admission_debug": admission})
+        results.append(grid_admission_summary(
+            mode=mode,
+            args=mode_args,
+            index_phase=token_index_phase,
+            admission=admission,
+            qrels=qrels,
+        ))
+
+    token_centroid_args = clone_args(
+        args,
+        multivector_graph="token_nodes",
+        reuse_index=False,
+        multivector_centroids="kmeans",
+        multivector_centroid_count=args.multivector_centroid_count,
+    )
+    token_centroid_index_phase = build_index(conn, token_centroid_args)
+    mode_args = grid_mode_args(token_centroid_args, "centroid_lite", "token_nodes")
+    admission = run_admission_debug(conn, mode_args, queries)
+    full_admission.append({"mode": "centroid_lite_token_index", "admission_debug": admission})
+    results.append(grid_admission_summary(
+        mode="centroid_lite_token_index",
+        args=mode_args,
+        index_phase=token_centroid_index_phase,
+        admission=admission,
+        qrels=qrels,
+    ))
+
+    for proxy_encoder in proxy_encoder_grid:
+        for pooling in pooling_grid:
+            pooling_mode = str(pooling["mode"])
+            pooling_ratio = float(pooling["ratio"])
+            document_args = clone_args(
+                args,
+                multivector_graph="document_nodes",
+                reuse_index=False,
+                multivector_token_pooling=pooling_mode,
+                multivector_token_pooling_target_ratio=pooling_ratio,
+                multivector_proxy_encoder=proxy_encoder,
+            )
+            document_index_phase = build_index(conn, document_args)
+            for storage in storage_grid:
+                for cache_mode in cache_grid:
+                    for ef in ef_grid:
+                        for oversampling in oversampling_grid:
+                            mode_args = clone_args(
+                                args,
+                                multivector_graph="document_nodes",
+                                multivector_candidate_source="document_nodes",
+                                multivector_plain_fallback="off",
+                                multivector_candidate_reservoirs="off",
+                                multivector_doc_storage=storage,
+                                multivector_doc_storage_cache=cache_mode,
+                                multivector_token_pooling=pooling_mode,
+                                multivector_token_pooling_target_ratio=pooling_ratio,
+                                multivector_proxy_encoder=proxy_encoder,
+                                multivector_doc_graph_search_ef=ef,
+                                multivector_doc_graph_oversampling=oversampling,
+                                multivector_doc_graph_rescore_k=0,
+                            )
+                            admission = run_admission_debug(conn, mode_args, queries)
+                            ratio_label = str(pooling_ratio).replace(".", "_")
+                            mode_name = (
+                                f"document_nodes_{storage}_{cache_mode}_{proxy_encoder}_"
+                                f"{pooling_mode}_r{ratio_label}_ef{ef}_os{oversampling}"
+                            )
+                            full_admission.append({"mode": mode_name, "admission_debug": admission})
+                            results.append(grid_admission_summary(
+                                mode=mode_name,
+                                args=mode_args,
+                                index_phase=document_index_phase,
+                                admission=admission,
+                                qrels=qrels,
+                            ))
+            if (
+                not default_document_modes_done
+                and proxy_encoder == args.multivector_proxy_encoder
+                and pooling_mode == "off"
+                and pooling_ratio == 1.0
+            ):
+                run_default_document_modes(document_index_phase, reused_grid_index=True)
+
+    if not default_document_modes_done:
+        default_document_args = clone_args(
+            args,
+            multivector_graph="document_nodes",
+            reuse_index=False,
+            multivector_token_pooling="off",
+            multivector_token_pooling_target_ratio=1.0,
+            multivector_proxy_encoder=args.multivector_proxy_encoder,
+        )
+        default_document_index_phase = build_index(conn, default_document_args)
+        run_default_document_modes(default_document_index_phase, reused_grid_index=False)
+
+    document_centroid_args = clone_args(
+        args,
+        multivector_graph="document_nodes",
+        reuse_index=False,
+        multivector_centroids="kmeans",
+        multivector_centroid_count=args.multivector_centroid_count,
+    )
+    document_centroid_index_phase = build_index(conn, document_centroid_args)
+    mode_args = grid_mode_args(document_centroid_args, "centroid_lite", "document_nodes")
+    admission = run_admission_debug(conn, mode_args, queries)
+    full_admission.append({"mode": "centroid_lite_document_index", "admission_debug": admission})
+    results.append(grid_admission_summary(
+        mode="centroid_lite_document_index",
+        args=mode_args,
+        index_phase=document_centroid_index_phase,
+        admission=admission,
+        qrels=qrels,
+    ))
+
+    return {
+        "enabled": True,
+        "rebuilds_index": True,
+        "budget_sweep": budget_grid,
+        "storage_grid": storage_grid,
+        "cache_grid": cache_grid,
+        "pooling_grid": pooling_grid,
+        "proxy_encoder_grid": proxy_encoder_grid,
+        "ef_grid": ef_grid,
+        "oversampling_grid": oversampling_grid,
+        "index_graph_m": args.index_graph_m,
+        "index_graph_ef_construction": args.index_graph_ef_construction,
+        "index_graph_ef_search": args.index_graph_ef_search,
+        "index_native_segments": args.index_native_segments,
+        "default_document_modes_reused_grid_index": default_document_modes_reused_grid_index,
+        "modes": list(DOCUMENT_NODE_BASELINE_MODES),
+        "queries": len(queries),
+        "results": results,
+        "admission_debug_runs": full_admission,
+    }
+
+
+def hybrid_evaluation_mode_args(args: argparse.Namespace, mode: str) -> argparse.Namespace:
+    common = {
+        "multivector_graph": "document_nodes",
+        "multivector_plain_fallback": "off",
+        "multivector_candidate_reservoirs": "off",
+        "multivector_doc_storage_cache": args.multivector_doc_storage_cache,
+        "multivector_doc_graph_search_ef": args.multivector_doc_graph_search_ef,
+        "multivector_doc_graph_oversampling": args.multivector_doc_graph_oversampling,
+        "multivector_doc_graph_rescore_k": args.multivector_doc_graph_rescore_k,
+        "multivector_exact_rerank": args.multivector_exact_rerank,
+        "multivector_exact_rerank_k": args.multivector_exact_rerank_k,
+    }
+    if mode == "exact_scan":
+        return clone_args(args, **common, multivector_candidate_source="exact_doc_scan")
+    if mode == "document_nodes":
+        return clone_args(
+            args,
+            **common,
+            multivector_candidate_source="document_nodes",
+            multivector_bm25_candidate_injection="off",
+            multivector_sparse_candidate_source="off",
+        )
+    if mode == "document_nodes_bm25_admission":
+        return clone_args(
+            args,
+            **common,
+            multivector_candidate_source="document_nodes",
+            multivector_bm25_candidate_injection="dense_with_text",
+            multivector_sparse_candidate_source="bm25",
+        )
+    if mode in {"document_nodes_bm25_rrf", "document_nodes_bm25_dbsf"}:
+        return clone_args(
+            args,
+            **common,
+            multivector_candidate_source="document_nodes",
+            multivector_bm25_candidate_injection="hybrid_only",
+            multivector_sparse_candidate_source="bm25",
+        )
+    if mode == "proxy_vector_document_nodes":
+        return clone_args(
+            args,
+            **common,
+            multivector_candidate_source="proxy_vector",
+            multivector_bm25_candidate_injection="off",
+            multivector_sparse_candidate_source="off",
+        )
+    if mode == "learned_sparse_exact_maxsim":
+        return clone_args(
+            args,
+            **common,
+            multivector_candidate_source="document_nodes",
+            multivector_bm25_candidate_injection="off",
+            multivector_sparse_candidate_source="learned_sparse",
+        )
+    if mode == "quantized_inverted_experimental":
+        return clone_args(
+            args,
+            **common,
+            multivector_candidate_source="quantized_inverted_experimental",
+            multivector_bm25_candidate_injection="off",
+            multivector_sparse_candidate_source="off",
+        )
+    raise ValueError(f"unsupported hybrid evaluation mode: {mode}")
+
+
+def set_hybrid_mode_gucs(
+    conn: psycopg.Connection[Any],
+    mode: str,
+    mode_args: argparse.Namespace,
+) -> None:
+    set_retrieval_gucs(conn, mode_args, f"dbpedia_colbert_hybrid_{mode}")
+    branch_plan = "qdrant_like" if mode in {
+        "document_nodes_bm25_rrf",
+        "document_nodes_bm25_dbsf",
+        "proxy_vector_document_nodes",
+    } else "dense_only"
+    exec_sql(conn, "SELECT set_config('turbohybrid.multivector_branch_plan', %s, false)", (branch_plan,))
+    exec_sql(conn, "SELECT set_config('turbohybrid.multivector_debug_admission', 'trace', false)")
+    exec_sql(
+        conn,
+        "SELECT set_config('turbohybrid.multivector_debug_trace_limit', %s, false)",
+        (str(min(mode_args.admission_trace_limit, 1000)),),
+    )
+    if mode == "document_nodes_bm25_dbsf":
+        exec_sql(
+            conn,
+            "SELECT set_config('turbohybrid.dbsf_min_branch_candidates', %s, false)",
+            (str(max(1, getattr(mode_args, "hybrid_evaluation_dbsf_min_branch_candidates", 1))),),
+        )
+
+
+def run_hybrid_mode_query(
+    conn: psycopg.Connection[Any],
+    mode: str,
+    query: QueryItem,
+    args: argparse.Namespace,
+    final_k: int,
+) -> list[str]:
+    if mode == "exact_scan":
+        return run_retrieval_query(conn, EXACT_SCAN_METHOD, query, args, final_k)
+
+    if mode in {"document_nodes", "proxy_vector_document_nodes", "quantized_inverted_experimental"}:
+        return run_retrieval_query(conn, QUERY_ONLY_METHOD, query, args, final_k)
+
+    if mode in {"document_nodes_bm25_admission", "learned_sparse_exact_maxsim"}:
+        text_query_expr = (
+            learned_sparse_text_query_sql()
+            if mode == "learned_sparse_exact_maxsim"
+            else "websearch_to_tsquery('simple', q.query_text)"
+        )
+        rows = fetch_all(
+            conn,
+            f"""
+            SELECT d.doc_id
+            FROM dbpedia_colbert_docs d
+            WHERE d.colbert IS NOT NULL
+            ORDER BY d.colbert <~> (
+              SELECT turbohybrid_query(
+                multivector_query => q.colbert,
+                text_query => {text_query_expr},
+                dense_k => %s,
+                bm25_k => %s,
+                final_k => %s,
+                bm25_weight => 0
+              )
+              FROM dbpedia_colbert_queries q
+              WHERE q.query_id = %s
+            )
+            LIMIT %s
+            """,
+            (args.dense_k, args.bm25_k, final_k, query.query_id, final_k),
+        )
+        return [str(row[0]) for row in rows]
+
+    fusion = "rrf" if mode == "document_nodes_bm25_rrf" else "dbsf"
+    rows = fetch_all(
+        conn,
+        """
+        SELECT d.doc_id
+        FROM dbpedia_colbert_docs d
+        WHERE d.colbert IS NOT NULL
+        ORDER BY d.colbert <~> (
+          SELECT turbohybrid_query(
+            multivector_query => q.colbert,
+            text_query => websearch_to_tsquery('simple', q.query_text),
+            fusion => %s,
+            dense_k => %s,
+            bm25_k => %s,
+            rrf_k => %s,
+            final_k => %s
+          )
+          FROM dbpedia_colbert_queries q
+          WHERE q.query_id = %s
+        )
+        LIMIT %s
+        """,
+        (fusion, args.dense_k, args.bm25_k, args.rrf_k, final_k, query.query_id, final_k),
+    )
+    return [str(row[0]) for row in rows]
+
+
+def admission_from_trace_or_results(
+    exact_top: list[dict[str, Any]],
+    result_docs: list[str],
+    stats: dict[str, Any],
+    *,
+    candidate_source: Any = None,
+    graph_mode: Any = None,
+    plain_fallback: Any = None,
+    exact_scan: bool = False,
+) -> dict[str, Any]:
+    if exact_scan:
+        return {
+            "exact_top1_admission": True,
+            "exact_top10_admission_recall": 1.0 if exact_top else 0.0,
+            "candidate_failures": [],
+        }
+
+    trace = stats.get("multivector_admission_trace")
+    trace_entries = trace if isinstance(trace, list) else []
+    trace_by_heap = {
+        key: entry
+        for entry in trace_entries
+        if isinstance(entry, dict) and (key := trace_key(entry)) is not None
+    }
+    infer_from_results = (
+        not trace_by_heap
+        and can_infer_admission_from_result_docs(
+            candidate_source or stats.get("multivector_candidate_source"),
+            fallback_used=bool(stats.get("multivector_plain_fallback_used")),
+            plain_fallback=plain_fallback,
+            graph_mode=graph_mode or stats.get("multivector_graph_mode"),
+        )
+    )
+    candidate_failures: list[str] = []
+    admitted = 0
+    top = exact_top[: min(10, len(exact_top))]
+    for item in top:
+        key = (int(item["heap_block"]), int(item["heap_offset"]))
+        is_admitted = key in trace_by_heap or (infer_from_results and item["doc_id"] in result_docs)
+        if is_admitted:
+            admitted += 1
+        else:
+            candidate_failures.append(item["doc_id"])
+    return {
+        "exact_top1_admission": bool(top and not candidate_failures[:1]),
+        "exact_top10_admission_recall": round(admitted / len(top), 6) if top else 0.0,
+        "admission_inferred_from_result_docs": infer_from_results,
+        "candidate_failures": candidate_failures,
+    }
+
+
+def hybrid_scan_record(stats: dict[str, Any]) -> dict[str, Any]:
+    branch_latency = scan_stat_int_list(stats, "branch_latency_us")
+    branch_candidates = scan_stat_int_list(stats, "branch_candidate_counts")
+    return {
+        "branch_kinds": stats.get("branch_kinds", []),
+        "branch_candidate_counts": branch_candidates,
+        "branch_latency_us": branch_latency,
+        "branch_latency_us_total": sum(branch_latency),
+        "branch_candidates_total": sum(branch_candidates),
+        "branch_fusion_mode": scan_stat_str(stats, "branch_fusion_mode"),
+        "fusion_strategy": scan_stat_str(stats, "fusion_strategy"),
+        "docs_scored": scan_docs_scored(stats),
+        "exact_maxsim_pairs": scan_stat_int(stats, "multivector_exact_rerank_pairs"),
+        "exact_rerank_docs": scan_exact_rerank_docs(stats),
+        "sidecar_bytes": sidecar_stats_from_scan(stats).get("sidecar_bytes_touched", 0),
+        "native_exact_bytes": sidecar_stats_from_scan(stats).get("native_cache_exact_bytes", 0),
+        **exact_rerank_work_from_stats(stats),
+        **proxy_work_from_stats(stats),
+        **centroid_work_from_stats(stats),
+        **quantized_inverted_work_from_stats(stats),
+        **learned_sparse_work_from_stats(stats),
+    }
+
+
+def summarize_hybrid_scan_records(records: list[dict[str, Any]]) -> dict[str, Any]:
+    return {
+        "branch_latency_us_total": summarize_ints([int(item.get("branch_latency_us_total", 0)) for item in records]),
+        "branch_candidates_total": summarize_ints([int(item.get("branch_candidates_total", 0)) for item in records]),
+        "docs_scored": summarize_ints([int(item.get("docs_scored", 0)) for item in records]),
+        "exact_maxsim_pairs": summarize_ints([int(item.get("exact_maxsim_pairs", 0)) for item in records]),
+        "exact_rerank_docs": summarize_ints([int(item.get("exact_rerank_docs", 0)) for item in records]),
+        "exact_rerank_pairs_saved": summarize_ints([int(item.get("exact_rerank_pairs_saved", 0)) for item in records]),
+        "sidecar_bytes": summarize_ints([int(item.get("sidecar_bytes", 0)) for item in records]),
+        "native_exact_bytes": summarize_ints([int(item.get("native_exact_bytes", 0)) for item in records]),
+        "learned_sparse_candidates": summarize_ints([int(item.get("learned_sparse_candidates", 0)) for item in records]),
+        "proxy_candidates": summarize_ints([int(item.get("proxy_candidates", 0)) for item in records]),
+        "centroid_candidates": summarize_ints([int(item.get("centroid_candidates", 0)) for item in records]),
+        "centroid_docs_touched": summarize_ints([int(item.get("centroid_docs_touched", 0)) for item in records]),
+        "quantized_inverted_candidates": summarize_ints([int(item.get("quantized_inverted_candidates", 0)) for item in records]),
+        "quantized_inverted_postings_touched": summarize_ints([int(item.get("quantized_inverted_postings_touched", 0)) for item in records]),
+        "quantized_inverted_docs_scored": summarize_ints([int(item.get("quantized_inverted_docs_scored", 0)) for item in records]),
+    }
+
+
+def hybrid_mode_recommendation(mode: str | None, reason: str) -> dict[str, Any]:
+    candidate_source = "document_nodes"
+    branch_plan = "dense_only"
+    sparse_source = "off"
+    bm25_injection = "off"
+    fusion = None
+    if mode == "exact_scan":
+        candidate_source = "exact_doc_scan"
+    elif mode == "proxy_vector_document_nodes":
+        candidate_source = "proxy_vector"
+        branch_plan = "qdrant_like"
+    elif mode == "document_nodes_bm25_admission":
+        sparse_source = "bm25"
+        bm25_injection = "dense_with_text"
+    elif mode == "document_nodes_bm25_rrf":
+        sparse_source = "bm25"
+        branch_plan = "qdrant_like"
+        fusion = "rrf"
+    elif mode == "document_nodes_bm25_dbsf":
+        sparse_source = "bm25"
+        branch_plan = "qdrant_like"
+        fusion = "dbsf"
+    elif mode == "learned_sparse_exact_maxsim":
+        sparse_source = "learned_sparse"
+    elif mode == "quantized_inverted_experimental":
+        candidate_source = "quantized_inverted_experimental"
+
+    gucs: dict[str, str] = {
+        "turbohybrid.multivector_candidate_source": candidate_source,
+        "turbohybrid.multivector_branch_plan": branch_plan,
+        "turbohybrid.multivector_sparse_candidate_source": sparse_source,
+        "turbohybrid.multivector_bm25_candidate_injection": bm25_injection,
+    }
+    if fusion is not None:
+        gucs["fusion"] = fusion
+    return {
+        "mode": mode,
+        "reason": reason,
+        "index_options": {
+            "multivector_graph": "document_nodes",
+        },
+        "gucs": gucs,
+    }
+
+
+def hybrid_profile_recommendations(
+    mode_results: list[dict[str, Any]],
+    best_quality: dict[str, Any] | None,
+    best_latency_under_floor: dict[str, Any] | None,
+) -> dict[str, Any]:
+    latency = min(
+        mode_results,
+        key=lambda item: float(item.get("latency", {}).get("p50_ms", float("inf"))),
+        default=None,
+    )
+    high_recall = max(
+        mode_results,
+        key=lambda item: (
+            float(item.get("exact_top10_admission_recall", 0.0)),
+            float(item.get("exact_top1_admission_rate", 0.0)),
+            float(item.get("metrics", {}).get("ndcg@10", 0.0)),
+            -float(item.get("latency", {}).get("p50_ms", float("inf"))),
+        ),
+        default=None,
+    )
+    return {
+        "latency": hybrid_mode_recommendation(
+            latency.get("mode") if latency else None,
+            "lowest p50 latency across evaluated modes",
+        ),
+        "balanced": hybrid_mode_recommendation(
+            best_latency_under_floor.get("mode") if best_latency_under_floor else None,
+            "lowest p50 latency among modes within the configured relative NDCG floor",
+        ),
+        "quality": hybrid_mode_recommendation(
+            best_quality.get("mode") if best_quality else None,
+            "highest NDCG@10 with recall and admission recall as tie breakers",
+        ),
+        "high_recall": hybrid_mode_recommendation(
+            high_recall.get("mode") if high_recall else None,
+            "highest exact top-10 admission recall with top-1 admission and NDCG tie breakers",
+        ),
+    }
+
+
+def run_hybrid_evaluation_harness(
+    conn: psycopg.Connection[Any],
+    args: argparse.Namespace,
+    queries: list[QueryItem],
+    qrels: dict[str, dict[str, int]],
+) -> dict[str, Any]:
+    modes = [
+        mode.strip()
+        for mode in args.hybrid_evaluation_modes.split(",")
+        if mode.strip()
+    ]
+    unknown = sorted(set(modes) - set(SUPPORTED_HYBRID_EVALUATION_MODES))
+    if unknown:
+        raise ValueError(f"unknown hybrid evaluation mode(s): {', '.join(unknown)}")
+
+    document_index_args = clone_args(args, multivector_graph="document_nodes", reuse_index=False)
+    index_phase = build_index(conn, document_index_args)
+    exact_top_by_query = {
+        query.query_id: exact_admission_top(conn, query, args.admission_k)
+        for query in queries
+    }
+
+    mode_results: list[dict[str, Any]] = []
+    for mode in modes:
+        mode_args = hybrid_evaluation_mode_args(args, mode)
+        set_hybrid_mode_gucs(conn, mode, mode_args)
+        run: dict[str, list[str]] = {}
+        latencies: list[float] = []
+        scan_records: list[dict[str, Any]] = []
+        top1_admissions: list[bool] = []
+        top10_admissions: list[float] = []
+        inferred_admissions = 0
+        candidate_failures: dict[str, list[str]] = {}
+
+        for query in queries:
+            started = time.perf_counter()
+            docs = run_hybrid_mode_query(conn, mode, query, mode_args, args.final_k)
+            latency_ms = (time.perf_counter() - started) * 1000.0
+            stats = last_scan_stats(conn) if mode != "exact_scan" else {}
+            admission = admission_from_trace_or_results(
+                exact_top_by_query.get(query.query_id, []),
+                docs,
+                stats,
+                candidate_source=mode_args.multivector_candidate_source,
+                graph_mode=mode_args.multivector_graph,
+                plain_fallback=mode_args.multivector_plain_fallback,
+                exact_scan=(mode == "exact_scan"),
+            )
+            run[query.query_id] = docs
+            latencies.append(latency_ms)
+            scan_records.append(hybrid_scan_record(stats) if stats else {})
+            top1_admissions.append(bool(admission["exact_top1_admission"]))
+            top10_admissions.append(float(admission["exact_top10_admission_recall"]))
+            if admission.get("admission_inferred_from_result_docs"):
+                inferred_admissions += 1
+            failures = admission.get("candidate_failures", [])
+            if isinstance(failures, list) and failures:
+                candidate_failures[query.query_id] = [str(item) for item in failures]
+
+        metrics = method_metrics(run, qrels, args.final_k, args.quality_k) if qrels else {}
+        mode_results.append({
+            "mode": mode,
+            "metrics": metrics,
+            "latency": summarize_ms(latencies),
+            "exact_top1_admission_rate": round(sum(1 for item in top1_admissions if item) / len(top1_admissions), 6)
+            if top1_admissions else 0.0,
+            "exact_top10_admission_recall": round(statistics.mean(top10_admissions), 6)
+            if top10_admissions else 0.0,
+            "scan_work": summarize_hybrid_scan_records(scan_records),
+            "admission_inferred_from_result_docs_queries": inferred_admissions,
+            "candidate_admission_failures": candidate_failures,
+            "failure_query_count": len(candidate_failures),
+            "top10_by_query": {qid: docs[:10] for qid, docs in run.items()},
+            "first_scan": scan_records[0] if scan_records else {},
+            "index_stats": index_phase.get("index_stats", {}),
+        })
+
+    best_quality = max(
+        mode_results,
+        key=lambda item: (
+            float(item.get("metrics", {}).get("ndcg@10", 0.0)),
+            float(item.get("metrics", {}).get("recall@10", 0.0)),
+            float(item.get("exact_top10_admission_recall", 0.0)),
+        ),
+        default=None,
+    )
+    best_ndcg = float(best_quality.get("metrics", {}).get("ndcg@10", 0.0)) if best_quality else 0.0
+    floor = best_ndcg * float(args.hybrid_evaluation_quality_floor)
+    eligible = [
+        item for item in mode_results
+        if float(item.get("metrics", {}).get("ndcg@10", 0.0)) >= floor
+    ] or mode_results
+    best_latency = min(
+        eligible,
+        key=lambda item: float(item.get("latency", {}).get("p50_ms", float("inf"))),
+        default=None,
+    )
+    profile_recommendations = hybrid_profile_recommendations(
+        mode_results,
+        best_quality,
+        best_latency,
+    )
+    return {
+        "enabled": True,
+        "rebuilds_index": True,
+        "modes": modes,
+        "queries": len(queries),
+        "quality_floor_relative_to_best_ndcg": args.hybrid_evaluation_quality_floor,
+        "index_phase": index_phase,
+        "results": mode_results,
+        "best_quality_mode": best_quality.get("mode") if best_quality else None,
+        "best_latency_under_quality_floor_mode": best_latency.get("mode") if best_latency else None,
+        "recommended_default_profile": profile_recommendations["balanced"],
+        "profile_recommendations": profile_recommendations,
     }
 
 
@@ -1703,6 +3138,144 @@ def run_parallel_retrieval(args: argparse.Namespace, method: str, queries: list[
         "first_timed_scan_stats": results[0].first_timed_stats if results else None,
         "last_timed_scan_stats": results[0].last_timed_stats if results else None,
     }
+
+
+def scan_stat_samples(scan_stats: list[dict[str, Any]], key: str) -> list[int]:
+    return [scan_stat_int(stats, key) for stats in scan_stats if key in stats]
+
+
+def max_scan_work_value(scan_stats: list[dict[str, Any]], keys: tuple[str, ...]) -> int:
+    values: list[int] = []
+    for stats in scan_stats:
+        values.append(max(scan_stat_int(stats, key) for key in keys))
+    return max(values, default=0)
+
+
+def parallel_safety_preflight(
+    args: argparse.Namespace,
+    method: str,
+    serial_latencies: list[float],
+    serial_stats: list[dict[str, Any]],
+) -> dict[str, Any]:
+    """Return a skip decision when the serial probe is already pathological."""
+    decision: dict[str, Any] = {
+        "enabled": args.parallel_safety_preflight != "off",
+        "forced": bool(args.force_parallel_retrieval),
+        "method": method,
+        "skipped": False,
+        "reasons": [],
+        "thresholds": {
+            "max_serial_p95_ms": args.parallel_safety_max_serial_p95_ms,
+            "max_docs_scored": args.parallel_safety_max_docs_scored,
+            "max_exact_rerank_docs": args.parallel_safety_max_exact_rerank_docs,
+            "max_exact_pairs": args.parallel_safety_max_exact_pairs,
+            "max_sidecar_bytes": args.parallel_safety_max_sidecar_bytes,
+        },
+        "observed": {
+            "serial_latency": summarize_ms(serial_latencies),
+            "docs_scored_max": max(scan_docs_scored(stats) for stats in serial_stats) if serial_stats else 0,
+            "exact_rerank_docs_max": max(scan_exact_rerank_docs(stats) for stats in serial_stats) if serial_stats else 0,
+            "exact_pairs_max": max_scan_work_value(serial_stats, ("multivector_exact_rerank_pairs",)),
+            "sidecar_bytes_max": max_scan_work_value(serial_stats, ("multivector_doc_sidecar_bytes_touched",)),
+        },
+    }
+    if args.parallel_safety_preflight == "off" or args.force_parallel_retrieval:
+        return decision
+
+    reasons: list[str] = []
+    observed = decision["observed"]
+    latency = observed.get("serial_latency", {})
+    p95_ms = float(latency.get("p95_ms", 0.0)) if isinstance(latency, dict) else 0.0
+    if p95_ms > args.parallel_safety_max_serial_p95_ms:
+        reasons.append(
+            "serial p95 {observed:.3f} ms exceeds {limit:.3f} ms".format(
+                observed=p95_ms,
+                limit=args.parallel_safety_max_serial_p95_ms,
+            )
+        )
+    if int(observed["docs_scored_max"]) > args.parallel_safety_max_docs_scored:
+        reasons.append(
+            "docs scored {observed} exceeds {limit}".format(
+                observed=observed["docs_scored_max"],
+                limit=args.parallel_safety_max_docs_scored,
+            )
+        )
+    if int(observed["exact_rerank_docs_max"]) > args.parallel_safety_max_exact_rerank_docs:
+        reasons.append(
+            "exact rerank docs {observed} exceeds {limit}".format(
+                observed=observed["exact_rerank_docs_max"],
+                limit=args.parallel_safety_max_exact_rerank_docs,
+            )
+        )
+    if int(observed["exact_pairs_max"]) > args.parallel_safety_max_exact_pairs:
+        reasons.append(
+            "exact MaxSim pairs {observed} exceeds {limit}".format(
+                observed=observed["exact_pairs_max"],
+                limit=args.parallel_safety_max_exact_pairs,
+            )
+        )
+    if int(observed["sidecar_bytes_max"]) > args.parallel_safety_max_sidecar_bytes:
+        reasons.append(
+            "sidecar bytes {observed} exceeds {limit}".format(
+                observed=observed["sidecar_bytes_max"],
+                limit=args.parallel_safety_max_sidecar_bytes,
+            )
+        )
+
+    if reasons:
+        decision["skipped"] = True
+        decision["reasons"] = reasons
+    return decision
+
+
+def run_parallel_retrieval_report(
+    args: argparse.Namespace,
+    method: str,
+    queries: list[QueryItem],
+    serial_latencies: list[float],
+    serial_stats: list[dict[str, Any]],
+) -> dict[str, Any]:
+    preflight = parallel_safety_preflight(args, method, serial_latencies, serial_stats)
+    if args.skip_parallel_retrieval:
+        return {
+            "clients": args.clients,
+            "warm_queries_per_client": args.warm_queries,
+            "timed_queries_per_client": args.timed_queries,
+            "total_timed_queries": 0,
+            "failed": False,
+            "skipped": True,
+            "skip_reason": "disabled by --skip-parallel-retrieval",
+            "safety_preflight": preflight,
+        }
+    if preflight["skipped"]:
+        return {
+            "clients": args.clients,
+            "warm_queries_per_client": args.warm_queries,
+            "timed_queries_per_client": args.timed_queries,
+            "total_timed_queries": 0,
+            "failed": False,
+            "skipped": True,
+            "skip_reason": "; ".join(preflight["reasons"]),
+            "safety_preflight": preflight,
+        }
+    try:
+        parallel = run_parallel_retrieval(args, method, queries)
+    except Exception as exc:  # pragma: no cover - host benchmark failure path
+        return {
+            "clients": args.clients,
+            "warm_queries_per_client": args.warm_queries,
+            "timed_queries_per_client": args.timed_queries,
+            "total_timed_queries": 0,
+            "failed": True,
+            "skipped": False,
+            "error": str(exc),
+            "safety_preflight": preflight,
+        }
+
+    parallel["failed"] = False
+    parallel["skipped"] = False
+    parallel["safety_preflight"] = preflight
+    return parallel
 
 
 def method_metrics(
@@ -1904,9 +3477,12 @@ def run_synthetic_gate_mode(
         if isinstance(entry, dict) and (key := trace_key(entry)) is not None
     }
     inferred_exact_doc_admission = (
-        mode["candidate_source"] in {"exact_doc_scan", "doc_graph_prototype", "document_nodes", "proxy_vector"}
-        or mode["plain_fallback"] == "force"
-        or mode.get("graph_mode") == "document_nodes"
+        not trace_by_heap
+        and can_infer_admission_from_result_docs(
+            mode["candidate_source"],
+            plain_fallback=mode["plain_fallback"],
+            graph_mode=mode.get("graph_mode"),
+        )
     )
     exact_with_admission: list[dict[str, Any]] = []
     for exact in exact_top:
@@ -1914,16 +3490,22 @@ def run_synthetic_gate_mode(
         entry = trace_by_heap.get(key)
         result_rank = docs.index(exact["doc_id"]) + 1 if exact["doc_id"] in docs else None
         admitted = entry is not None or (inferred_exact_doc_admission and result_rank is not None)
+        admission_evidence = (
+            "trace"
+            if entry is not None
+            else "result_doc"
+            if inferred_exact_doc_admission and result_rank is not None
+            else "missing"
+        )
         exact_with_admission.append({
             "rank": exact["rank"],
             "doc_id": exact["doc_id"],
             "admitted_before_rerank": admitted,
+            "admission_evidence": admission_evidence,
             "exact_rerank_rank": result_rank,
             "candidate_rank_before_rerank": (
                 int(entry["candidate_rank_before_truncation"])
                 if isinstance(entry, dict) and entry.get("candidate_rank_before_truncation") is not None
-                else int(exact["rank"])
-                if admitted and inferred_exact_doc_admission
                 else None
             ),
         })
@@ -1951,10 +3533,13 @@ def run_synthetic_gate_mode(
             scan_stat_int(stats, "multivector_exact_rerank_docs"),
             scan_stat_int(stats, "multivector_doc_graph_exact_rerank_docs"),
         ),
+        **exact_rerank_work_from_stats(stats),
+        **proxy_work_from_stats(stats),
         "memory_bytes_estimate": memory_estimate_from_stats(stats),
         "raw_subvector_hits": scan_stat_int(stats, "multivector_raw_subvector_hits"),
         "unique_docs": scan_stat_int(stats, "multivector_unique_docs"),
         "trace_entries": len(trace_entries),
+        "admission_inferred_from_result_docs": inferred_exact_doc_admission,
         "exact_top": exact_with_admission,
         "scan_stats": stats,
     }
@@ -2015,6 +3600,12 @@ def markdown_benchmark_summary(report: dict[str, Any]) -> str:
         f"- Clients: `{settings.get('clients', 0)}`",
         f"- Multivector graph: `{settings.get('multivector_graph', '')}`",
         f"- Candidate source: `{settings.get('multivector_candidate_source', '')}`",
+        f"- Sparse candidate source: `{settings.get('multivector_sparse_candidate_source', '')}`",
+        f"- Token pooling: `{settings.get('multivector_token_pooling', '')}`",
+        f"- Token pooling target ratio: `{settings.get('multivector_token_pooling_target_ratio', '')}`",
+        f"- Centroids: `{settings.get('multivector_centroids', '')}`",
+        f"- Centroid count: `{settings.get('multivector_centroid_count', '')}`",
+        f"- Proxy encoder: `{settings.get('multivector_proxy_encoder', '')}`",
         f"- Doc graph search EF: `{settings.get('multivector_doc_graph_search_ef', 0)}`",
         f"- Doc graph oversampling: `{settings.get('multivector_doc_graph_oversampling', 1)}`",
         f"- Doc graph rescore K: `{settings.get('multivector_doc_graph_rescore_k', 0)}`",
@@ -2038,6 +3629,42 @@ def markdown_benchmark_summary(report: dict[str, Any]) -> str:
                 qps=float(parallel.get("throughput_qps", 0.0)),
             )
         )
+    skipped_parallel = [
+        item
+        for item in report.get("results", [])
+        if isinstance(item, dict)
+        and isinstance(item.get("parallel_8x"), dict)
+        and item["parallel_8x"].get("skipped") is True
+    ]
+    failed_parallel = [
+        item
+        for item in report.get("results", [])
+        if isinstance(item, dict)
+        and isinstance(item.get("parallel_8x"), dict)
+        and item["parallel_8x"].get("failed") is True
+    ]
+    if skipped_parallel or failed_parallel:
+        lines.extend([
+            "",
+            "### Parallel Retrieval Notes",
+            "",
+        ])
+        for item in skipped_parallel:
+            parallel = item["parallel_8x"]
+            lines.append(
+                "- `{method}` skipped 8x retrieval: {reason}".format(
+                    method=item.get("method", ""),
+                    reason=parallel.get("skip_reason", ""),
+                )
+            )
+        for item in failed_parallel:
+            parallel = item["parallel_8x"]
+            lines.append(
+                "- `{method}` failed 8x retrieval: {error}".format(
+                    method=item.get("method", ""),
+                    error=parallel.get("error", ""),
+                )
+            )
 
     admission = report.get("admission_debug")
     if isinstance(admission, dict):
@@ -2048,6 +3675,7 @@ def markdown_benchmark_summary(report: dict[str, Any]) -> str:
             "### Admission Debug",
             "",
             f"- Candidate source: `{admission.get('candidate_source', '')}`",
+            f"- Sparse candidate source: `{admission.get('sparse_candidate_source', '')}`",
             f"- Plain fallback: `{admission.get('plain_fallback', '')}`",
             f"- Reservoirs: `{admission.get('candidate_reservoirs', '')}`",
             f"- Admission K: `{aggregate.get('admission_k', 0)}`",
@@ -2055,8 +3683,8 @@ def markdown_benchmark_summary(report: dict[str, Any]) -> str:
             f"- Exact top-10 admission recall: `{float(aggregate.get('exact_top10_admission_recall', 0.0)):.6f}`",
             f"- First admitted budget p50: `{first_budget.get('p50', 0)}`",
             "",
-            "| budget | top1 admission | top10 admission recall | latency p50 ms | latency p95 ms | docs scored p50 | graph edges p50 | exact rerank docs p50 | runs |",
-            "|---:|---:|---:|---:|---:|---:|---:|---:|---:|",
+            "| budget | top1 admission | top10 admission recall | latency p50 ms | latency p95 ms | docs scored p50 | graph edges p50 | exact rerank docs p50 | pairs saved p50 | runs |",
+            "|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|",
         ])
         admission_by_budget = aggregate.get("admission_by_budget", {})
         if isinstance(admission_by_budget, dict):
@@ -2067,6 +3695,7 @@ def markdown_benchmark_summary(report: dict[str, Any]) -> str:
                 docs_scored = budget_stats.get("docs_scored", {})
                 graph_edges = budget_stats.get("graph_edges_visited", {})
                 exact_rerank_docs = budget_stats.get("exact_rerank_docs", {})
+                exact_rerank_pairs_saved = budget_stats.get("exact_rerank_pairs_saved", {})
                 if not isinstance(latency, dict):
                     latency = {}
                 if not isinstance(docs_scored, dict):
@@ -2075,8 +3704,10 @@ def markdown_benchmark_summary(report: dict[str, Any]) -> str:
                     graph_edges = {}
                 if not isinstance(exact_rerank_docs, dict):
                     exact_rerank_docs = {}
+                if not isinstance(exact_rerank_pairs_saved, dict):
+                    exact_rerank_pairs_saved = {}
                 lines.append(
-                    "| {budget} | {top1:.6f} | {top10:.6f} | {p50:.3f} | {p95:.3f} | {docs_p50:.3f} | {edges_p50:.3f} | {rerank_p50:.3f} | {runs} |".format(
+                    "| {budget} | {top1:.6f} | {top10:.6f} | {p50:.3f} | {p95:.3f} | {docs_p50:.3f} | {edges_p50:.3f} | {rerank_p50:.3f} | {pairs_saved_p50:.3f} | {runs} |".format(
                         budget=budget,
                         top1=float(budget_stats.get("exact_top1_admission", 0.0)),
                         top10=float(budget_stats.get("exact_top10_admission_recall", 0.0)),
@@ -2085,6 +3716,7 @@ def markdown_benchmark_summary(report: dict[str, Any]) -> str:
                         docs_p50=float(docs_scored.get("p50", 0.0)),
                         edges_p50=float(graph_edges.get("p50", 0.0)),
                         rerank_p50=float(exact_rerank_docs.get("p50", 0.0)),
+                        pairs_saved_p50=float(exact_rerank_pairs_saved.get("p50", 0.0)),
                         runs=int(latency.get("runs", 0)),
                     )
                 )
@@ -2094,6 +3726,181 @@ def markdown_benchmark_summary(report: dict[str, Any]) -> str:
             "before exact rerank. Improvements here mean better admission; unchanged "
             "admission with different final metrics should be treated as reranking or "
             "metric variance until proven otherwise.",
+        ])
+
+    admission_grid = report.get("document_node_admission_grid")
+    if isinstance(admission_grid, dict):
+        pooling_grid_text = ",".join(
+            "{mode}:{ratio}".format(mode=item.get("mode"), ratio=item.get("ratio"))
+            for item in admission_grid.get("pooling_grid", [])
+            if isinstance(item, dict)
+        )
+        lines.extend([
+            "",
+            "### Document-Node Admission Grid",
+            "",
+            f"- Rebuilds index: `{admission_grid.get('rebuilds_index', False)}`",
+            f"- Budget sweep: `{','.join(str(item) for item in admission_grid.get('budget_sweep', []))}`",
+            f"- Storage grid: `{','.join(str(item) for item in admission_grid.get('storage_grid', []))}`",
+            f"- Pooling grid: `{pooling_grid_text}`",
+            f"- EF grid: `{','.join(str(item) for item in admission_grid.get('ef_grid', []))}`",
+            f"- Oversampling grid: `{','.join(str(item) for item in admission_grid.get('oversampling_grid', []))}`",
+            f"- Index graph build: `m={admission_grid.get('index_graph_m', 0)}, ef_construction={admission_grid.get('index_graph_ef_construction', 0)}, ef_search={admission_grid.get('index_graph_ef_search', 0)}, native_segments={admission_grid.get('index_native_segments', 0)}`",
+            "",
+            "| mode | graph | storage | pooling | ratio | ef | oversampling | budget | top1 admission | top10 admission recall | recall@10 | ndcg@10 | mrr@10 | p50 ms | p95 ms | docs scored p50 | edges p50 | exact rerank p50 | native exact bytes p50 |",
+            "|---|---|---|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|",
+        ])
+        grid_results = admission_grid.get("results", [])
+        if isinstance(grid_results, list):
+            for item in grid_results:
+                if not isinstance(item, dict):
+                    continue
+                budget = item.get("largest_budget")
+                admission_by_budget = item.get("admission_by_budget", {})
+                budget_stats = {}
+                if isinstance(admission_by_budget, dict) and budget is not None:
+                    budget_stats = admission_by_budget.get(str(budget), {})
+                    if not isinstance(budget_stats, dict):
+                        budget_stats = {}
+                latency = budget_stats.get("latency", {}) if isinstance(budget_stats, dict) else {}
+                docs_scored = budget_stats.get("docs_scored", {}) if isinstance(budget_stats, dict) else {}
+                graph_edges = budget_stats.get("graph_edges_visited", {}) if isinstance(budget_stats, dict) else {}
+                exact_rerank_docs = budget_stats.get("exact_rerank_docs", {}) if isinstance(budget_stats, dict) else {}
+                native_cache_exact = budget_stats.get("native_cache_exact_bytes", {}) if isinstance(budget_stats, dict) else {}
+                metrics = item.get("metrics", {})
+                if not isinstance(latency, dict):
+                    latency = {}
+                if not isinstance(docs_scored, dict):
+                    docs_scored = {}
+                if not isinstance(graph_edges, dict):
+                    graph_edges = {}
+                if not isinstance(exact_rerank_docs, dict):
+                    exact_rerank_docs = {}
+                if not isinstance(native_cache_exact, dict):
+                    native_cache_exact = {}
+                if not isinstance(metrics, dict):
+                    metrics = {}
+                lines.append(
+                    "| {mode} | {graph} | {storage} | {pooling} | {ratio:.2f} | {ef} | {oversampling} | {budget} | {top1:.6f} | {top10:.6f} | {recall:.6f} | {ndcg:.6f} | {mrr:.6f} | {p50:.3f} | {p95:.3f} | {docs:.3f} | {edges:.3f} | {rerank:.3f} | {native_exact:.3f} |".format(
+                        mode=item.get("mode", ""),
+                        graph=item.get("graph_mode", ""),
+                        storage=item.get("storage_kind", ""),
+                        pooling=item.get("token_pooling", ""),
+                        ratio=float(item.get("token_pooling_target_ratio", 1.0) or 1.0),
+                        ef=int(item.get("doc_graph_search_ef", 0) or 0),
+                        oversampling=int(item.get("doc_graph_oversampling", 0) or 0),
+                        budget=budget or "",
+                        top1=float(item.get("exact_top1_admission_rate", 0.0)),
+                        top10=float(item.get("exact_top10_admission_recall", 0.0)),
+                        recall=float(metrics.get("recall@10", 0.0)),
+                        ndcg=float(metrics.get("ndcg@10", 0.0)),
+                        mrr=float(metrics.get("mrr@10", 0.0)),
+                        p50=float(latency.get("p50_ms", 0.0)),
+                        p95=float(latency.get("p95_ms", 0.0)),
+                        docs=float(docs_scored.get("p50", 0.0)),
+                        edges=float(graph_edges.get("p50", 0.0)),
+                        rerank=float(exact_rerank_docs.get("p50", 0.0)),
+                        native_exact=float(native_cache_exact.get("p50", 0.0)),
+                    )
+                )
+        lines.extend([
+            "",
+            "The grid rebuilds token-node and document-node index layouts so the "
+            "report can compare token baselines with document-node admission. "
+            "Document-sidecar page/cache counters are emitted when the engine "
+            "exposes them; until then the table includes native cache exact-byte "
+            "counters as the available storage footprint signal.",
+        ])
+
+    hybrid_eval = report.get("hybrid_evaluation")
+    if isinstance(hybrid_eval, dict):
+        recommended = hybrid_eval.get("recommended_default_profile", {})
+        if not isinstance(recommended, dict):
+            recommended = {}
+        profile_recommendations = hybrid_eval.get("profile_recommendations", {})
+        if not isinstance(profile_recommendations, dict):
+            profile_recommendations = {}
+        lines.extend([
+            "",
+            "### Hybrid Evaluation Harness",
+            "",
+            f"- Rebuilds index: `{hybrid_eval.get('rebuilds_index', False)}`",
+            f"- Modes: `{','.join(str(item) for item in hybrid_eval.get('modes', []))}`",
+            f"- Best quality mode: `{hybrid_eval.get('best_quality_mode', '')}`",
+            f"- Best latency under quality floor: `{hybrid_eval.get('best_latency_under_quality_floor_mode', '')}`",
+            f"- Recommended default mode: `{recommended.get('mode', '')}`",
+            "",
+            "| mode | recall@10 | ndcg@10 | mrr@10 | top1 admission | top10 admission | p50 ms | p95 ms | branch us p50 | candidates p50 | exact pairs p50 | sidecar bytes p50 | failure queries |",
+            "|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|",
+        ])
+        results = hybrid_eval.get("results", [])
+        if isinstance(results, list):
+            for item in results:
+                if not isinstance(item, dict):
+                    continue
+                metrics = item.get("metrics", {})
+                latency = item.get("latency", {})
+                work = item.get("scan_work", {})
+                if not isinstance(metrics, dict):
+                    metrics = {}
+                if not isinstance(latency, dict):
+                    latency = {}
+                if not isinstance(work, dict):
+                    work = {}
+                branch_latency = work.get("branch_latency_us_total", {})
+                branch_candidates = work.get("branch_candidates_total", {})
+                exact_pairs = work.get("exact_maxsim_pairs", {})
+                sidecar_bytes = work.get("sidecar_bytes", {})
+                if not isinstance(branch_latency, dict):
+                    branch_latency = {}
+                if not isinstance(branch_candidates, dict):
+                    branch_candidates = {}
+                if not isinstance(exact_pairs, dict):
+                    exact_pairs = {}
+                if not isinstance(sidecar_bytes, dict):
+                    sidecar_bytes = {}
+                lines.append(
+                    "| {mode} | {recall:.6f} | {ndcg:.6f} | {mrr:.6f} | {top1:.6f} | {top10:.6f} | {p50:.3f} | {p95:.3f} | {branch_p50:.3f} | {candidates_p50:.3f} | {pairs_p50:.3f} | {sidecar_p50:.3f} | {failures} |".format(
+                        mode=item.get("mode", ""),
+                        recall=float(metrics.get("recall@10", 0.0)),
+                        ndcg=float(metrics.get("ndcg@10", 0.0)),
+                        mrr=float(metrics.get("mrr@10", 0.0)),
+                        top1=float(item.get("exact_top1_admission_rate", 0.0)),
+                        top10=float(item.get("exact_top10_admission_recall", 0.0)),
+                        p50=float(latency.get("p50_ms", 0.0)),
+                        p95=float(latency.get("p95_ms", 0.0)),
+                        branch_p50=float(branch_latency.get("p50", 0.0)),
+                        candidates_p50=float(branch_candidates.get("p50", 0.0)),
+                        pairs_p50=float(exact_pairs.get("p50", 0.0)),
+                        sidecar_p50=float(sidecar_bytes.get("p50", 0.0)),
+                        failures=int(item.get("failure_query_count", 0)),
+                    )
+                )
+        if profile_recommendations:
+            lines.extend([
+                "",
+                "| profile | mode | reason |",
+                "|---|---|---|",
+            ])
+            for profile in ("latency", "balanced", "quality", "high_recall"):
+                item = profile_recommendations.get(profile, {})
+                if not isinstance(item, dict):
+                    item = {}
+                lines.append(
+                    "| {profile} | {mode} | {reason} |".format(
+                        profile=profile,
+                        mode=item.get("mode", ""),
+                        reason=item.get("reason", ""),
+                    )
+                )
+        lines.extend([
+            "",
+            "The harness compares exact scan, document-node retrieval, BM25 "
+            "admission-only, BM25 RRF, BM25 DBSF, proxy-vector document-node "
+            "prefetch, and learned-sparse admission. Candidate admission failures "
+            "list exact top-K documents not seen before final rerank, so a zero or "
+            "low admission row is a candidate-generation failure, not a final-ranker "
+            "success.",
         ])
 
     lines.append("")
@@ -2128,6 +3935,7 @@ def run_multivector_recall_gate(conn: psycopg.Connection[Any], args: argparse.Na
     )
     report = {
         "suite": "multivector_recall_gate",
+        "layer": "ir_quality_and_systems",
         "generated_at": datetime.now(timezone.utc).isoformat(),
         "dataset": "synthetic_many_moderate",
         "dbpedia_status": "not_required",
@@ -2155,6 +3963,7 @@ def validate_args(args: argparse.Namespace) -> argparse.Namespace:
         args.precomputed_dataset = env_precomputed
     if args.model_path is None:
         args.model_path = Path(env_model or DEFAULT_MODEL_PATH)
+    require_complete_learned_sparse_args(args)
     if args.token_ablation_skip_tokens and not args.token_ablation_query_id:
         raise SystemExit("--token-ablation-skip-tokens requires --token-ablation-query-id")
     if args.token_ablation_final_k is not None and args.token_ablation_final_k <= 0:
@@ -2174,6 +3983,14 @@ def validate_args(args: argparse.Namespace) -> argparse.Namespace:
         args.beir_dataset = args.beir_dataset.resolve()
     if args.beir_dataset is not None and not args.beir_dataset.exists():
         raise SystemExit(f"BEIR dataset path does not exist: {args.beir_dataset}")
+    if args.learned_sparse_doc_jsonl is not None:
+        args.learned_sparse_doc_jsonl = args.learned_sparse_doc_jsonl.resolve()
+        if not args.learned_sparse_doc_jsonl.is_file():
+            raise SystemExit(f"learned sparse document JSONL does not exist: {args.learned_sparse_doc_jsonl}")
+    if args.learned_sparse_query_jsonl is not None:
+        args.learned_sparse_query_jsonl = args.learned_sparse_query_jsonl.resolve()
+        if not args.learned_sparse_query_jsonl.is_file():
+            raise SystemExit(f"learned sparse query JSONL does not exist: {args.learned_sparse_query_jsonl}")
 
     args.model_path = args.model_path.resolve()
     if args.precomputed_dataset is None and not args.model_path.is_file() and not args.multivector_recall_gate:
@@ -2183,6 +4000,11 @@ def validate_args(args: argparse.Namespace) -> argparse.Namespace:
         )
     if args.model_alias is None:
         args.model_alias = args.model_path.stem
+    args.expected_dim_requested = str(args.expected_dim)
+    args.expected_dim, args.expected_dim_source = resolve_expected_dim(
+        args.expected_dim_requested,
+        args.colbert_model_name,
+    )
     methods = [method.strip() for method in args.methods.split(",") if method.strip()]
     unknown = sorted(set(methods) - {QUERY_ONLY_METHOD, RRF_METHOD, EXACT_SCAN_METHOD})
     if unknown:
@@ -2218,6 +4040,24 @@ def validate_args(args: argparse.Namespace) -> argparse.Namespace:
             "quality metrics will be capped by final_k",
             file=sys.stderr,
         )
+    if args.clients < 1:
+        raise SystemExit("--clients must be at least 1")
+    if args.warm_queries < 0:
+        raise SystemExit("--warm-queries must be non-negative")
+    if args.timed_queries < 0:
+        raise SystemExit("--timed-queries must be non-negative")
+    if args.parallel_safety_max_serial_p95_ms < 0:
+        raise SystemExit("--parallel-safety-max-serial-p95-ms must be non-negative")
+    if args.parallel_safety_max_docs_scored < 0:
+        raise SystemExit("--parallel-safety-max-docs-scored must be non-negative")
+    if args.parallel_safety_max_exact_rerank_docs < 0:
+        raise SystemExit("--parallel-safety-max-exact-rerank-docs must be non-negative")
+    if args.parallel_safety_max_exact_pairs < 0:
+        raise SystemExit("--parallel-safety-max-exact-pairs must be non-negative")
+    if args.parallel_safety_max_sidecar_bytes < 0:
+        raise SystemExit("--parallel-safety-max-sidecar-bytes must be non-negative")
+    if args.force_parallel_retrieval and args.skip_parallel_retrieval:
+        raise SystemExit("--force-parallel-retrieval and --skip-parallel-retrieval are mutually exclusive")
     if args.admission_k < 1:
         raise SystemExit("--admission-k must be at least 1")
     if args.admission_trace_limit < 0:
@@ -2232,6 +4072,18 @@ def validate_args(args: argparse.Namespace) -> argparse.Namespace:
         raise SystemExit("--multivector-doc-graph-oversampling must be at least 1")
     if args.multivector_doc_graph_rescore_k < 0:
         raise SystemExit("--multivector-doc-graph-rescore-k must be non-negative")
+    if args.index_graph_m < 0:
+        raise SystemExit("--index-graph-m must be non-negative")
+    if args.index_graph_ef_construction < 0:
+        raise SystemExit("--index-graph-ef-construction must be non-negative")
+    if args.index_graph_ef_search < 0:
+        raise SystemExit("--index-graph-ef-search must be non-negative")
+    if args.index_native_segments < 0:
+        raise SystemExit("--index-native-segments must be non-negative")
+    if not 0.0 < args.multivector_token_pooling_target_ratio <= 1.0:
+        raise SystemExit("--multivector-token-pooling-target-ratio must be in (0, 1]")
+    if args.multivector_token_pooling_min_tokens < 1:
+        raise SystemExit("--multivector-token-pooling-min-tokens must be positive")
     if args.multivector_per_token_doc_reservoir_k < 0:
         raise SystemExit("--multivector-per-token-doc-reservoir-k must be non-negative")
     if args.multivector_coverage_reservoir_k < 0:
@@ -2244,8 +4096,52 @@ def validate_args(args: argparse.Namespace) -> argparse.Namespace:
         ]
     except ValueError as exc:
         raise SystemExit("--admission-budget-sweep must contain comma-separated integers") from exc
-    if args.admission_debug and (not admission_budgets or any(budget < 1 for budget in admission_budgets)):
+    if (args.admission_debug or args.document_node_admission_grid or args.hybrid_evaluation_harness) and (
+        not admission_budgets or any(budget < 1 for budget in admission_budgets)
+    ):
         raise SystemExit("--admission-budget-sweep must contain positive integer budgets")
+    if not 0.0 < args.hybrid_evaluation_quality_floor <= 1.0:
+        raise SystemExit("--hybrid-evaluation-quality-floor must be in (0, 1]")
+    if args.hybrid_evaluation_dbsf_min_branch_candidates < 1:
+        raise SystemExit("--hybrid-evaluation-dbsf-min-branch-candidates must be positive")
+    hybrid_modes = [
+        mode.strip()
+        for mode in args.hybrid_evaluation_modes.split(",")
+        if mode.strip()
+    ]
+    unknown_hybrid_modes = sorted(set(hybrid_modes) - set(SUPPORTED_HYBRID_EVALUATION_MODES))
+    if unknown_hybrid_modes:
+        raise SystemExit(
+            "--hybrid-evaluation-modes contains unsupported value(s): "
+            + ", ".join(unknown_hybrid_modes)
+        )
+    args.hybrid_evaluation_mode_values = hybrid_modes
+    args.document_node_storage_grid_values = parse_choice_grid(
+        args.document_node_storage_grid,
+        DOCUMENT_NODE_STORAGE_CHOICES,
+        "--document-node-storage-grid",
+    )
+    args.document_node_cache_grid_values = parse_choice_grid(
+        args.document_node_cache_grid,
+        DOCUMENT_NODE_STORAGE_CACHE_CHOICES,
+        "--document-node-cache-grid",
+    )
+    args.document_node_ef_grid_values = parse_int_grid(
+        args.document_node_ef_grid,
+        "--document-node-ef-grid",
+    )
+    args.document_node_oversampling_grid_values = parse_int_grid(
+        args.document_node_oversampling_grid,
+        "--document-node-oversampling-grid",
+    )
+    args.document_node_pooling_grid_values = parse_document_node_pooling_grid(
+        args.document_node_pooling_grid,
+    )
+    args.document_node_proxy_encoder_grid_values = parse_choice_grid(
+        args.document_node_proxy_encoder_grid,
+        tuple(choice for choice in MULTIVECTOR_PROXY_ENCODER_CHOICES if choice != "learned_projection_placeholder"),
+        "--document-node-proxy-encoder-grid",
+    )
     if args.recall_gate_budget < 1:
         raise SystemExit("--recall-gate-budget must be positive")
     return args
@@ -2270,7 +4166,12 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument("--model-path", type=Path, default=None, help="GGUF ColBERT model path")
     parser.add_argument("--model-alias", default=None, help="pg_colbert_llama model alias, defaults to model stem")
-    parser.add_argument("--expected-dim", type=int, default=128)
+    parser.add_argument(
+        "--colbert-model-name",
+        default=DEFAULT_COLBERT_MODEL_NAME,
+        help="late-interaction model profile name for dimension auto-detection and benchmark provenance",
+    )
+    parser.add_argument("--expected-dim", default="auto", help="expected embedding dimension or 'auto'")
     parser.add_argument("--max-doc-vectors", type=int, default=256)
     parser.add_argument("--max-query-vectors", type=int, default=32)
     parser.add_argument("--query-length", type=int, default=32)
@@ -2330,6 +4231,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--multivector-max-raw-hits-per-token", type=int, default=400)
     parser.add_argument("--multivector-adaptive-widening", choices=("off", "auto", "on"), default="auto")
     parser.add_argument("--multivector-doc-candidate-k", type=int, default=100)
+    parser.add_argument("--multivector-exact-rerank", choices=("off", "topk", "adaptive"), default="adaptive")
     parser.add_argument("--multivector-exact-rerank-k", type=int, default=100)
     parser.add_argument(
         "--multivector-graph",
@@ -2356,16 +4258,81 @@ def parse_args() -> argparse.Namespace:
         help="document-node candidate rescore budget; 0 follows multivector_doc_candidate_k",
     )
     parser.add_argument(
+        "--index-graph-m",
+        type=int,
+        default=0,
+        help="turbohybrid index graph_m reloption; 0 uses the extension default",
+    )
+    parser.add_argument(
+        "--index-graph-ef-construction",
+        type=int,
+        default=0,
+        help="turbohybrid index graph_ef_construction reloption; 0 uses the extension default",
+    )
+    parser.add_argument(
+        "--index-graph-ef-search",
+        type=int,
+        default=0,
+        help="turbohybrid index graph_ef_search reloption; 0 uses the extension default",
+    )
+    parser.add_argument(
+        "--index-native-segments",
+        type=int,
+        default=0,
+        help="turbohybrid index native_segments reloption; 0 uses the extension default",
+    )
+    parser.add_argument(
         "--multivector-doc-storage",
         choices=("f32", "f16", "sq8"),
         default="f32",
         help="document-node MaxSim sidecar scoring storage for graph traversal",
     )
     parser.add_argument(
+        "--multivector-doc-storage-cache",
+        choices=("auto", "resident", "paged"),
+        default="auto",
+        help="document-node sidecar cache mode; paged keeps graph adjacency resident and reports sidecar page reads per scan",
+    )
+    parser.add_argument(
+        "--multivector-token-pooling",
+        choices=DOCUMENT_NODE_TOKEN_POOLING_CHOICES,
+        default="off",
+        help="document-node index-time token pooling mode",
+    )
+    parser.add_argument(
+        "--multivector-token-pooling-target-ratio",
+        type=float,
+        default=0.5,
+        help="target pooled/original document-token ratio when token pooling is enabled",
+    )
+    parser.add_argument(
+        "--multivector-token-pooling-min-tokens",
+        type=int,
+        default=16,
+        help="minimum document token count before index-time token pooling is applied",
+    )
+    parser.add_argument(
+        "--multivector-proxy-encoder",
+        choices=MULTIVECTOR_PROXY_ENCODER_CHOICES,
+        default="mean_pool",
+        help="document-node proxy_vector fixed-dimensional encoder used at index build and query time",
+    )
+    parser.add_argument(
+        "--multivector-centroids",
+        choices=DOCUMENT_NODE_CENTROIDS_CHOICES,
+        default="off",
+        help="experimental PLAID-lite centroid mode persisted as an index reloption",
+    )
+    parser.add_argument(
+        "--multivector-centroid-count",
+        default="auto",
+        help="per-document centroid count for centroid_lite; 'auto' maps to the extension default",
+    )
+    parser.add_argument(
         "--multivector-candidate-source",
-        choices=("graph", "document_nodes", "exact_token_scan", "exact_doc_scan", "doc_graph_prototype", "proxy_vector"),
+        choices=("graph", "document_nodes", "exact_token_scan", "exact_doc_scan", "doc_graph_prototype", "proxy_vector", "centroid_lite", "quantized_inverted_experimental"),
         default="graph",
-        help="multivector candidate source for query-only/RRF retrieval; document_nodes/proxy_vector require multivector_graph=document_nodes",
+        help="multivector candidate source for query-only/RRF retrieval; document_nodes/proxy_vector require multivector_graph=document_nodes; centroid_lite also supports token_nodes compatibility indexes built with multivector_centroids=kmeans; quantized_inverted_experimental is a guarded research-only document-node branch using persisted experimental codeword postings before exact MaxSim rerank",
     )
     parser.add_argument(
         "--multivector-plain-fallback",
@@ -2390,6 +4357,28 @@ def parse_args() -> argparse.Namespace:
         help="inject BM25 candidates into the multivector exact MaxSim rerank candidate set",
     )
     parser.add_argument(
+        "--multivector-sparse-candidate-source",
+        choices=MULTIVECTOR_SPARSE_CANDIDATE_SOURCE_CHOICES,
+        default="off",
+        help=(
+            "explicit sparse candidate source for multivector admission; "
+            "learned_sparse reuses exported sparse postings and exact-MaxSim "
+            "reranks admitted documents"
+        ),
+    )
+    parser.add_argument(
+        "--learned-sparse-doc-jsonl",
+        type=Path,
+        default=None,
+        help="optional JSONL with doc_id, term_ids, and weights for learned-sparse document admission",
+    )
+    parser.add_argument(
+        "--learned-sparse-query-jsonl",
+        type=Path,
+        default=None,
+        help="optional JSONL with query_id, term_ids, and weights for learned-sparse query admission",
+    )
+    parser.add_argument(
         "--admission-debug",
         action="store_true",
         help="run exact-vs-candidate admission recall diagnostics after normal retrieval",
@@ -2410,6 +4399,66 @@ def parse_args() -> argparse.Namespace:
         type=int,
         default=1000,
         help="bounded trace entries requested from turbohybrid_last_scan_stats()",
+    )
+    parser.add_argument(
+        "--document-node-admission-grid",
+        action="store_true",
+        help="run DBpedia admission comparisons for token-node baselines and document-node storage/EF/oversampling grid",
+    )
+    parser.add_argument(
+        "--document-node-storage-grid",
+        default="f32,f16,sq8",
+        help="comma-separated document-node storage kinds to sweep when --document-node-admission-grid is enabled",
+    )
+    parser.add_argument(
+        "--document-node-cache-grid",
+        default="auto,paged",
+        help="comma-separated document-node sidecar cache modes to sweep when --document-node-admission-grid is enabled",
+    )
+    parser.add_argument(
+        "--document-node-ef-grid",
+        default="50,100,200,400,800",
+        help="comma-separated document-node graph search EF values to sweep",
+    )
+    parser.add_argument(
+        "--document-node-oversampling-grid",
+        default="1,2,4,8",
+        help="comma-separated document-node graph oversampling multipliers to sweep",
+    )
+    parser.add_argument(
+        "--document-node-pooling-grid",
+        default="off:1.0,greedy_cosine:0.75,greedy_cosine:0.5,greedy_cosine:0.33",
+        help="comma-separated pooling mode:ratio entries to rebuild document-node indexes for",
+    )
+    parser.add_argument(
+        "--document-node-proxy-encoder-grid",
+        default="mean_pool,max_pool,random_projection_fde",
+        help="comma-separated proxy encoders to rebuild document-node indexes for",
+    )
+    parser.add_argument(
+        "--hybrid-evaluation-harness",
+        action="store_true",
+        help="run Prompt 15 end-to-end hybrid comparison modes over a document-node index",
+    )
+    parser.add_argument(
+        "--hybrid-evaluation-modes",
+        default=",".join(HYBRID_EVALUATION_MODES),
+        help=(
+            "comma-separated Prompt 15 hybrid modes to run; "
+            "quantized_inverted_experimental is also supported when named explicitly"
+        ),
+    )
+    parser.add_argument(
+        "--hybrid-evaluation-quality-floor",
+        type=float,
+        default=0.95,
+        help="relative NDCG@10 floor used to pick the fastest recommended hybrid profile",
+    )
+    parser.add_argument(
+        "--hybrid-evaluation-dbsf-min-branch-candidates",
+        type=int,
+        default=1,
+        help="DBSF minimum branch candidates for the Prompt 15 harness",
     )
     parser.add_argument(
         "--multivector-recall-gate",
@@ -2455,6 +4504,52 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--clients", type=int, default=8)
     parser.add_argument("--warm-queries", type=int, default=2)
     parser.add_argument("--timed-queries", type=int, default=10)
+    parser.add_argument(
+        "--parallel-safety-preflight",
+        choices=("serial_probe", "off"),
+        default="serial_probe",
+        help="skip the 8x phase when the serial probe already shows pathological multivector scan work",
+    )
+    parser.add_argument(
+        "--parallel-safety-max-serial-p95-ms",
+        type=float,
+        default=DEFAULT_PARALLEL_SAFETY_MAX_SERIAL_P95_MS,
+        help="maximum serial p95 latency allowed before the 8x phase is skipped",
+    )
+    parser.add_argument(
+        "--parallel-safety-max-docs-scored",
+        type=int,
+        default=DEFAULT_PARALLEL_SAFETY_MAX_DOCS_SCORED,
+        help="maximum per-query document candidates/docs scored allowed before the 8x phase is skipped",
+    )
+    parser.add_argument(
+        "--parallel-safety-max-exact-rerank-docs",
+        type=int,
+        default=DEFAULT_PARALLEL_SAFETY_MAX_EXACT_RERANK_DOCS,
+        help="maximum exact MaxSim-reranked documents allowed before the 8x phase is skipped",
+    )
+    parser.add_argument(
+        "--parallel-safety-max-exact-pairs",
+        type=int,
+        default=DEFAULT_PARALLEL_SAFETY_MAX_EXACT_PAIRS,
+        help="maximum exact MaxSim token-pair evaluations allowed before the 8x phase is skipped",
+    )
+    parser.add_argument(
+        "--parallel-safety-max-sidecar-bytes",
+        type=int,
+        default=DEFAULT_PARALLEL_SAFETY_MAX_SIDECAR_BYTES,
+        help="maximum per-query document-sidecar bytes touched allowed before the 8x phase is skipped",
+    )
+    parser.add_argument(
+        "--force-parallel-retrieval",
+        action="store_true",
+        help="run the 8x retrieval phase even when the serial safety preflight exceeds configured thresholds",
+    )
+    parser.add_argument(
+        "--skip-parallel-retrieval",
+        action="store_true",
+        help="record serial retrieval metrics only and skip the 8x throughput phase",
+    )
     parser.add_argument("--reuse-data", action="store_true")
     parser.add_argument("--reuse-embeddings", action="store_true")
     parser.add_argument("--reuse-index", action="store_true")
@@ -2543,6 +4638,7 @@ def main() -> None:
                 "source": args.precomputed_dataset,
                 "note": "runtime generation skipped; rows were loaded from precomputed multivector dataset",
             }
+        learned_sparse_phase = load_learned_sparse_vectors(conn, args)
         index_phase = build_index(conn, args)
         set_retrieval_gucs(conn, args, "dbpedia_colbert_serial")
         encoded_queries = load_encoded_queries(conn)
@@ -2550,7 +4646,13 @@ def main() -> None:
         result_methods: list[dict[str, Any]] = []
         for method in args.methods:
             run, serial_latencies, serial_stats = run_serial_retrieval(conn, method, encoded_queries, args, args.final_k)
-            parallel = run_parallel_retrieval(args, method, encoded_queries)
+            parallel = run_parallel_retrieval_report(
+                args,
+                method,
+                encoded_queries,
+                serial_latencies,
+                serial_stats,
+            )
             result_methods.append({
                 "method": method,
                 "retrieval_mode": {
@@ -2558,7 +4660,7 @@ def main() -> None:
                     RRF_METHOD: "multivector_plus_bm25_rrf",
                     EXACT_SCAN_METHOD: "multivector_exact_scan",
                 }[method],
-                "metrics": method_metrics(run, qrels, args.final_k, args.quality_k),
+                "metrics": method_metrics(run, qrels, args.final_k, args.quality_k) if qrels else {},
                 "serial_latency": summarize_ms(serial_latencies),
                 "parallel_8x": parallel,
                 "top10_by_query": {qid: docs[:10] for qid, docs in run.items()},
@@ -2569,6 +4671,16 @@ def main() -> None:
         admission_debug = (
             run_admission_debug(conn, args, encoded_queries)
             if args.admission_debug
+            else None
+        )
+        document_node_admission_grid = (
+            run_document_node_admission_grid(conn, args, encoded_queries, qrels)
+            if args.document_node_admission_grid
+            else None
+        )
+        hybrid_evaluation = (
+            run_hybrid_evaluation_harness(conn, args, encoded_queries, qrels)
+            if args.hybrid_evaluation_harness
             else None
         )
         token_ablation = run_token_ablation(conn, args, encoded_queries, qrels)
@@ -2599,9 +4711,12 @@ def main() -> None:
             "model": {
                 "gguf": "johannhartmann/SauerkrautLM-Multi-ColBERT-15m-GGUF",
                 "source_model": "VAGOsolutions/SauerkrautLM-Multi-ColBERT-15m",
+                "colbert_model_name": args.colbert_model_name,
                 "model_path": portable_path(args.model_path),
                 "model_alias": args.model_alias,
                 "expected_dim": args.expected_dim,
+                "expected_dim_requested": args.expected_dim_requested,
+                "expected_dim_source": args.expected_dim_source,
                 "max_doc_vectors": args.max_doc_vectors,
                 "max_query_vectors": args.max_query_vectors,
                 "query_length": args.query_length,
@@ -2616,12 +4731,24 @@ def main() -> None:
                 "multivector_max_raw_hits_per_token": args.multivector_max_raw_hits_per_token,
                 "multivector_adaptive_widening": args.multivector_adaptive_widening,
                 "multivector_doc_candidate_k": args.multivector_doc_candidate_k,
+                "multivector_exact_rerank": args.multivector_exact_rerank,
                 "multivector_exact_rerank_k": args.multivector_exact_rerank_k,
                 "multivector_graph": args.multivector_graph,
                 "multivector_doc_graph_search_ef": args.multivector_doc_graph_search_ef,
                 "multivector_doc_graph_oversampling": args.multivector_doc_graph_oversampling,
                 "multivector_doc_graph_rescore_k": args.multivector_doc_graph_rescore_k,
+                "index_graph_m": args.index_graph_m,
+                "index_graph_ef_construction": args.index_graph_ef_construction,
+                "index_graph_ef_search": args.index_graph_ef_search,
+                "index_native_segments": args.index_native_segments,
                 "multivector_doc_storage": args.multivector_doc_storage,
+                "multivector_doc_storage_cache": args.multivector_doc_storage_cache,
+                "multivector_token_pooling": args.multivector_token_pooling,
+                "multivector_token_pooling_target_ratio": args.multivector_token_pooling_target_ratio,
+                "multivector_token_pooling_min_tokens": args.multivector_token_pooling_min_tokens,
+                "multivector_centroids": args.multivector_centroids,
+                "multivector_centroid_count": args.multivector_centroid_count,
+                "multivector_proxy_encoder": args.multivector_proxy_encoder,
                 "multivector_candidate_source": args.multivector_candidate_source,
                 "multivector_plain_fallback": args.multivector_plain_fallback,
                 "multivector_plain_fallback_max_docs": args.multivector_plain_fallback_max_docs,
@@ -2630,6 +4757,20 @@ def main() -> None:
                 "multivector_per_token_doc_reservoir_k": args.multivector_per_token_doc_reservoir_k,
                 "multivector_coverage_reservoir_k": args.multivector_coverage_reservoir_k,
                 "multivector_bm25_candidate_injection": args.multivector_bm25_candidate_injection,
+                "multivector_sparse_candidate_source": args.multivector_sparse_candidate_source,
+                "learned_sparse_doc_jsonl": portable_path(args.learned_sparse_doc_jsonl) if args.learned_sparse_doc_jsonl else None,
+                "learned_sparse_query_jsonl": portable_path(args.learned_sparse_query_jsonl) if args.learned_sparse_query_jsonl else None,
+                "document_node_admission_grid": args.document_node_admission_grid,
+                "document_node_storage_grid": args.document_node_storage_grid_values,
+                "document_node_cache_grid": args.document_node_cache_grid_values,
+                "document_node_pooling_grid": args.document_node_pooling_grid_values,
+                "document_node_proxy_encoder_grid": args.document_node_proxy_encoder_grid_values,
+                "document_node_ef_grid": args.document_node_ef_grid_values,
+                "document_node_oversampling_grid": args.document_node_oversampling_grid_values,
+                "hybrid_evaluation_harness": args.hybrid_evaluation_harness,
+                "hybrid_evaluation_modes": args.hybrid_evaluation_mode_values,
+                "hybrid_evaluation_quality_floor": args.hybrid_evaluation_quality_floor,
+                "hybrid_evaluation_dbsf_min_branch_candidates": args.hybrid_evaluation_dbsf_min_branch_candidates,
                 "token_ablation_query_id": args.token_ablation_query_id,
                 "token_ablation_skip_tokens": args.token_ablation_skip_tokens,
                 "token_ablation_final_k": args.token_ablation_final_k,
@@ -2637,6 +4778,14 @@ def main() -> None:
                 "final_k": args.final_k,
                 "quality_k": args.quality_k,
                 "clients": args.clients,
+                "parallel_safety_preflight": args.parallel_safety_preflight,
+                "parallel_safety_max_serial_p95_ms": args.parallel_safety_max_serial_p95_ms,
+                "parallel_safety_max_docs_scored": args.parallel_safety_max_docs_scored,
+                "parallel_safety_max_exact_rerank_docs": args.parallel_safety_max_exact_rerank_docs,
+                "parallel_safety_max_exact_pairs": args.parallel_safety_max_exact_pairs,
+                "parallel_safety_max_sidecar_bytes": args.parallel_safety_max_sidecar_bytes,
+                "force_parallel_retrieval": args.force_parallel_retrieval,
+                "skip_parallel_retrieval": args.skip_parallel_retrieval,
                 "generation_clients": args.generation_clients,
                 "generation_threads": args.generation_threads,
                 "generation_n_gpu_layers": args.generation_n_gpu_layers,
@@ -2650,12 +4799,17 @@ def main() -> None:
                 "load_text": load_phase,
                 "generation_in_postgres": generation_phase,
                 "insert_generated_multivectors": insert_phase,
+                "load_learned_sparse_vectors": learned_sparse_phase,
                 "build_index": index_phase,
             },
             "results": result_methods,
         }
         if admission_debug is not None:
             output["admission_debug"] = admission_debug
+        if document_node_admission_grid is not None:
+            output["document_node_admission_grid"] = document_node_admission_grid
+        if hybrid_evaluation is not None:
+            output["hybrid_evaluation"] = hybrid_evaluation
         if token_ablation is not None:
             output["token_ablation"] = token_ablation
         output["markdown_summary"] = markdown_benchmark_summary(output)

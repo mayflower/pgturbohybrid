@@ -42,11 +42,59 @@ non-empty `real[]`, an array length divisible by `dim`, no null elements, and
 finite values. It stores values exactly in the same multivector layout used by
 the `vector[]` constructor.
 
+Long documents can stay in one SQL row while carrying context/window metadata:
+
+```sql
+SELECT turbohybrid_multivector_from_contexts(
+  ARRAY[1,0, 0,1, 0.2,0.2, 0.1,0.1]::real[],
+  2,
+  ARRAY[0,2]::int[]
+);
+```
+
+`context_offsets` are zero-based document-token start offsets. They must start
+with `0`, be strictly increasing, and point inside the stored token sequence.
+The last context runs to the end of the multivector. For section-aware scoring,
+store one non-negative field id per context:
+
+```sql
+SELECT turbohybrid_multivector_from_contexts_and_fields(
+  ARRAY[1,0, 0,1, 0.2,0.2, 0.1,0.1]::real[],
+  2,
+  ARRAY[0,2]::int[],
+  ARRAY[1,2]::int[] -- title/body, for example
+);
+```
+
+Metadata accessors are available for validation and debugging:
+`turbohybrid_multivector_context_count(mv)`,
+`turbohybrid_multivector_context_offsets(mv)`, and
+`turbohybrid_multivector_field_ids(mv)`.
+
 Exact reference scoring is available without an index:
 
 ```sql
 SELECT turbohybrid_multivector_maxsim($query_mv, $doc_mv) AS score,
        turbohybrid_multivector_maxsim_distance($query_mv, $doc_mv) AS distance;
+```
+
+Flat MaxSim is the default and treats all document tokens as one global token
+set. Context-level MaxSim scores each stored context independently and returns
+the best context score:
+
+```sql
+SELECT turbohybrid_multivector_context_maxsim($query_mv, $doc_mv);
+```
+
+Field-weighted MaxSim is explicit because weights are query/workload policy:
+
+```sql
+SELECT turbohybrid_multivector_field_weighted_maxsim(
+  $query_mv,
+  $doc_mv,
+  ARRAY[1,2]::int[],
+  ARRAY[2.0,1.0]::real[]
+);
 ```
 
 MaxSim score is larger-is-better. SQL index ordering remains distance-oriented,
@@ -103,6 +151,32 @@ ORDER BY colbert <~> turbohybrid_query(
 )
 LIMIT 10;
 ```
+
+Model/query-token importance can be supplied without changing the stored
+document multivectors:
+
+```sql
+ORDER BY colbert <~> turbohybrid_query(
+  multivector_query => $1,
+  query_token_weights => ARRAY[1.0, 0.4, 2.0]::real[],
+  query_token_mask => ARRAY[false, true, false]
+)
+```
+
+`query_token_weights` and `query_token_mask` must match the query multivector
+token count. A `true` mask entry removes that query token from token-node
+candidate generation and exact scoring. The weighted score is:
+
+```text
+score(Q, D) = sum_i weight_i * max_j dot(q_i, d_j)
+```
+
+If weights are omitted, every unmasked query token has weight `1.0`. The
+adaptive exact reranker orders tokens by weighted query-token norm, and
+document-node sidecar scoring uses the same weighted MaxSim as heap rerank.
+Model-specific special-token masking, punctuation masking, and IDF weighting
+should be applied by the query/model metadata layer that builds these arrays;
+the scorer accepts the arrays and does not hardcode one ColBERT variant.
 
 The graph returns subvector hits internally, but the access method aggregates
 them by heap tuple/document. A document with many matching token vectors should
@@ -173,7 +247,8 @@ SET turbohybrid.multivector_unique_docs_per_token = 100;
 SET turbohybrid.multivector_max_raw_hits_per_token = 400;
 SET turbohybrid.multivector_adaptive_widening = 'auto'; -- off | auto | on
 SET turbohybrid.multivector_doc_candidate_k = 100;
-SET turbohybrid.multivector_candidate_source = 'graph'; -- graph | document_nodes | exact_token_scan | exact_doc_scan | doc_graph_prototype | proxy_vector
+SET turbohybrid.multivector_candidate_source = 'graph'; -- graph | document_nodes | exact_token_scan | exact_doc_scan | doc_graph_prototype | proxy_vector | centroid_lite | quantized_inverted_experimental
+SET turbohybrid.multivector_proxy_encoder = 'mean_pool'; -- mean_pool | max_pool | random_projection_fde | learned_projection_placeholder
 SET turbohybrid.multivector_plain_fallback = 'auto'; -- auto | off | force
 SET turbohybrid.multivector_plain_fallback_max_docs = 1000;
 SET turbohybrid.multivector_plain_fallback_candidate_fraction = 0.5;
@@ -181,6 +256,7 @@ SET turbohybrid.multivector_candidate_reservoirs = 'conservative'; -- off | cons
 SET turbohybrid.multivector_per_token_doc_reservoir_k = 1;
 SET turbohybrid.multivector_coverage_reservoir_k = 10;
 SET turbohybrid.multivector_bm25_candidate_injection = 'off'; -- off | hybrid_only | dense_with_text
+SET turbohybrid.multivector_sparse_candidate_source = 'off'; -- off | bm25 | learned_sparse
 SET turbohybrid.multivector_docmap = 'auto'; -- off | auto | require
 ```
 
@@ -201,9 +277,35 @@ missing or malformed.
 path. For `multivector_graph = document_nodes`, it uses the explicit
 document-node index path described below. `document_nodes` is an explicit
 candidate-source alias that requires a document-node index. `proxy_vector` also
-requires `multivector_graph = document_nodes`; it uses the document
-representative single-vector graph for admission and exact-reranks admitted
-documents with full MaxSim. `exact_token_scan`, `exact_doc_scan`, and
+requires `multivector_graph = document_nodes`; it uses the index-persisted
+fixed-dimensional proxy encoder as the single-vector graph key for admission
+and exact-reranks admitted documents with full MaxSim. `mean_pool` preserves the
+old representative-vector behavior. `max_pool` and `random_projection_fde` are
+additional pluggable encoders for DBpedia admission comparison, while
+`learned_projection_placeholder` fails explicitly until learned projection
+weights are configured. Scan stats expose `proxy_encoder_kind`,
+`proxy_candidates`, `proxy_top1_admission`, and `proxy_exact_rerank_docs`.
+`centroid_lite` is an experimental PLAID-inspired candidate source for indexes
+built with `multivector_centroids = kmeans`. On document-node indexes, build
+and incremental insert persist deterministic document-local k-means centroid
+vectors, a mean residual summary, and codeword posting tuples in the
+multivector docmap sidecar. Scans load those persisted posting lists, keep the
+original multivector sidecar for exact heap MaxSim rerank, and report
+`centroid_lists_visited`, `centroid_docs_touched`, `centroid_pruned_docs`, and
+`centroid_candidates`. On token-node indexes it is a compatibility mode that
+uses exact token-scan admission before exact heap MaxSim rerank and reports
+`multivector_doc_graph_warning =
+token_node_centroid_lite_exact_token_prefilter`. It is opt-in benchmark
+plumbing, not the primary document-node path. Plain fallback is bypassed when
+`centroid_lite` is selected, so missing centroid configuration fails explicitly.
+`quantized_inverted_experimental` is a guarded research-only ColBERTSaR-style
+candidate source for document-node indexes. The current prototype uses
+persisted experimental deterministic codeword postings from the multivector
+docmap sidecar, then exact-reranks admitted heap documents with MaxSim.
+Token-node indexes fail explicitly, plain fallback is bypassed when the source
+is selected, and there is no production on-disk compatibility promise; see
+`docs/dev/multivector-colbertsar-research.md`.
+`exact_token_scan`, `exact_doc_scan`, and
 `doc_graph_prototype`
 are developer validation modes for separating token graph recall, token-top-K
 admission loss, exact document MaxSim, and document-level graph behavior. They
@@ -217,21 +319,104 @@ access method; `off` keeps the token-node candidate path active for diagnostics.
 Multivector indexes also accept:
 
 ```sql
-WITH (multivector_graph = token_nodes)
+WITH (
+  multivector_graph = token_nodes,
+  multivector_centroids = off,
+  multivector_centroid_count = 0,
+  multivector_proxy_encoder = mean_pool,
+  multivector_context_mode = flat,
+  multivector_field_mode = off
+)
 ```
 
 `token_nodes` is the default compatibility storage mode. It preserves existing
 behavior and reports `multivector_graph_mode = token_nodes` in
-`turbohybrid_index_stats()`. Explicit `document_nodes` indexes store one graph
-node per heap document and a versioned float32 multivector sidecar. Build-time
-edge selection uses symmetrized document MaxSim. Non-exhaustive scans traverse
-document graph adjacency, score visited candidates by exact float32 sidecar
-MaxSim, and exact-rerank heap multivectors. Near-exhaustive scans use the exact
-sidecar scan. `multivector_doc_graph_warning` reports
-`document_node_f32_sidecar_graph_traversal` or
-`document_node_f32_sidecar_exact_scan`; compact quantized document scoring is
-still future work. Missing or malformed document-node sidecar metadata fails
-with REINDEX guidance instead of silently falling back to token-node storage.
+`turbohybrid_index_stats()`. `multivector_context_mode = flat` keeps current
+cross-context/global MaxSim semantics. `multivector_context_mode =
+context_level` is explicit opt-in for context-window scoring in document-node
+sidecar and exact heap rerank paths; long documents still return one SQL row.
+`multivector_field_mode = weighted` records that field metadata is expected and
+is visible in index stats, but query-specific field weights still come from the
+explicit `turbohybrid_multivector_field_weighted_maxsim()` scorer until the
+query payload carries field weights.
+
+Explicit `document_nodes` indexes store one graph node per heap document and a
+versioned float32 multivector sidecar. Build-time edge selection uses
+symmetrized document MaxSim. Non-exhaustive scans traverse document graph
+adjacency, score visited candidates with the selected
+`turbohybrid.multivector_doc_storage = f32 | f16 | sq8` sidecar, and
+exact-rerank heap multivectors. Near-exhaustive scans use the exact float32
+sidecar scan. `turbohybrid_index_stats()` reports
+`multivector_context_mode` and `multivector_field_mode` for benchmark
+provenance. `multivector_doc_graph_warning` reports
+`document_node_f32_sidecar_graph_traversal`,
+`document_node_f16_sidecar_graph_traversal`,
+`document_node_sq8_sidecar_graph_traversal`, or
+`document_node_f32_sidecar_exact_scan`.
+
+Large document-node corpora can choose the sidecar cache policy explicitly:
+
+```sql
+SET turbohybrid.multivector_doc_storage_cache = 'auto';     -- auto | resident | paged
+```
+
+`auto` keeps the document sidecar resident for latency-profile scans when it
+fits `turbohybrid.native_cache_max_mb`, otherwise it uses paged sidecar access.
+`resident` prefers a loaded native sidecar, while `paged` keeps graph adjacency
+resident and loads/touches sidecar pages for the scan. Last-scan stats expose
+`multivector_doc_sidecar_cache_mode`,
+`multivector_doc_sidecar_pages_read`,
+`multivector_doc_sidecar_cache_hits`,
+`multivector_doc_sidecar_cache_misses`, and
+`multivector_doc_sidecar_bytes_touched`. Paged document-node scans also expose
+`multivector_doc_sidecar_vectors_loaded`, which counts document multivectors
+reconstructed from sidecar chunks during the scan.
+
+Document-node indexes can optionally pool document tokens at index build and
+incremental insert time:
+
+```sql
+CREATE INDEX passages_colbert_doc_pool_idx
+ON passages USING turbohybrid
+  (colbert multivector_maxsim_ip_turbohybrid_ops)
+WITH (
+  multivector_graph = document_nodes,
+  multivector_token_pooling = greedy_cosine, -- off | kmeans | greedy_cosine
+  multivector_token_pooling_target_ratio = 0.5,
+  multivector_token_pooling_min_tokens = 16
+);
+```
+
+Pooling is opt-in and applies only to stored document tokens. Query
+multivectors are not pooled. The document sidecar stores the original and pooled
+token counts so scans can report `multivector_tokens_original`,
+`multivector_tokens_pooled`, and `multivector_token_pooling_ratio`. Graph
+traversal scores the pooled sidecar; exact heap rerank can still score the
+original heap `turbohybrid_multivector` when the heap value is available.
+Context-aware multivectors currently require
+`multivector_token_pooling = off`, because pooling rewrites the document-token
+sequence and context-aware pooling must preserve or recompute window metadata.
+
+Document-node indexes also accept experimental PLAID-lite centroid options:
+
+```sql
+CREATE INDEX passages_colbert_centroid_idx
+ON passages USING turbohybrid
+  (colbert multivector_maxsim_ip_turbohybrid_ops)
+WITH (
+  multivector_graph = document_nodes,
+  multivector_centroids = kmeans,        -- off | kmeans
+  multivector_centroid_count = 0         -- 0 means auto
+);
+```
+
+Use them with `SET turbohybrid.multivector_candidate_source = 'centroid_lite'`.
+The current implementation is deliberately conservative: centroid interaction
+is only an admission approximation and final ranking still uses exact heap
+MaxSim over the original document multivectors.
+
+Missing or malformed document-node sidecar metadata fails with REINDEX guidance
+instead of silently falling back to token-node storage.
 
 `turbohybrid.multivector_candidate_reservoirs` can replace score-only document
 truncation with a bounded union of score, coverage, mean seen-similarity, and
@@ -247,10 +432,24 @@ multivector/text queries. `dense_with_text` also allows text-backed dense-only
 MaxSim runs where BM25 admits candidates, but exact MaxSim remains the dense
 score. RRF, when requested, still fuses document-level ranks.
 
+`turbohybrid.multivector_sparse_candidate_source` is the explicit sparse
+candidate branch selector. `off` keeps the legacy behavior, `bm25` uses lexical
+postings, and `learned_sparse` is the SPLATE/SLIM-style admission path for
+externally exported learned sparse vectors. PostgreSQL does not train the sparse
+model; callers ingest term IDs and weights with
+`turbohybrid_sparse_vector_from_arrays(term_ids int[], weights real[])`, convert
+document-side features with `turbohybrid_sparse_vector_to_tsvector(...)`, and
+convert query features with `turbohybrid_sparse_vector_to_tsquery(...)`. The
+branch reuses the sparse/BM25 candidate machinery. In dense-only-with-text
+queries, learned-sparse candidates are admission-only and final ranking remains
+exact MaxSim. In hybrid queries, the branch is document-keyed and can contribute
+to rank/score fusion modes that are explicitly enabled for multivector hybrid
+search.
+
 Exact heap rerank:
 
 ```sql
-SET turbohybrid.multivector_exact_rerank = 'topk'; -- off | topk
+SET turbohybrid.multivector_exact_rerank = 'topk'; -- off | topk | adaptive
 SET turbohybrid.multivector_exact_rerank_k = 100;
 ```
 
@@ -263,9 +462,52 @@ SET turbohybrid.multivector_max_dim = 4096;
 SET turbohybrid.multivector_max_accumulator_mb = 64;
 ```
 
+Model metadata:
+
+```sql
+SELECT turbohybrid_multivector_model_info('colbert-ir/colbertv2.0');
+SET turbohybrid.multivector_model_name = 'jinaai/jina-colbert-v2-96';
+```
+
+`turbohybrid_multivector_model_info(model_name text)` returns a JSON profile
+with `dim`, default query/document token caps, distance mode, token
+normalization, recommended document-node sidecar storage, token mask policy, and
+field/context policy. When `turbohybrid.multivector_model_name` is set to a
+registered profile, build, insert, and query validation reject dimension
+mismatches with model-aware hints. Token counts above the model profile defaults
+emit warnings while still respecting the explicit GUC caps.
+`turbohybrid_index_stats()` exposes the configured model name, known/unknown
+status, dimension, recommended storage, mask policy, and context policy for
+benchmark provenance.
+
+Built-in profiles intentionally avoid assuming every ColBERT-like model is
+128-dimensional:
+
+| Model profile | Dim | Default query/doc tokens | Notes |
+| --- | ---: | --- | --- |
+| `colbert-ir/colbertv2.0` | 128 | 32 / 180 | Classic ColBERTv2 text profile. |
+| `answerdotai/answerai-colbert-small-v1` | 96 | 32 / 512 | Small multilingual ColBERT profile. |
+| `jinaai/jina-colbert-v2` | 128 | 32 / 8192 | Long-context default Matryoshka variant. |
+| `jinaai/jina-colbert-v2-96` | 96 | 32 / 8192 | Jina 96-dimensional variant. |
+| `jinaai/jina-colbert-v2-64` | 64 | 32 / 8192 | Jina 64-dimensional variant. |
+| `lightonai/GTE-ModernColBERT-v1` | 128 | 48 / 300 | PyLate ModernColBERT profile; document length can be raised for long-context runs. |
+| `chadboyda/Reason-ModernColBERT` | 128 | 48 / 300 | Reasoning-tuned ModernColBERT profile. |
+| `VAGOsolutions/SauerkrautLM-Multi-ColBERT-15m` | 128 | 32 / 256 | PyLate validation model. |
+| `johannhartmann/SauerkrautLM-Multi-ColBERT-15m-GGUF` | 128 | 32 / 256 | GGUF validation model for `pg_colbert_llama`. |
+| `vidore/colpali-v1.2` / `colpali-like-visual` | 128 | 64 / model-specific | ColPali-style visual-document multivectors; document patch counts depend on processor settings. |
+
 The exact rerank path fetches the original `turbohybrid_multivector` heap value
 for a bounded document prefix and computes f32 MaxSim. It does not store a full
 float copy of each subvector in the index by default.
+
+`adaptive` preserves the exact returned top-K result while reducing MaxSim work
+when a safe threshold exists. It processes query tokens in deterministic
+importance order and bounds the remaining contribution with weighted
+query-token norms and the candidate document's maximum token norm. Masked and
+zero-weight query tokens do not contribute to the bound. Candidates are stopped
+only when their upper bound cannot enter top-K. If no smaller final top-K
+threshold exists, or if bounds are unsafe, the scan uses the full exact scorer.
+Approximate relaxations require a separate explicit GUC.
 
 ## Performance Model
 
@@ -328,6 +570,9 @@ Useful fields include:
 - `multivector_bm25_injection_candidates`
 - `multivector_bm25_injection_retained`
 - `multivector_bm25_injection_exact_reranked`
+- `learned_sparse_candidates`
+- `learned_sparse_retained_for_maxsim`
+- `learned_sparse_branch_latency_us`
 - `multivector_doc_graph_prototype_enabled`
 - `multivector_doc_graph_nodes`
 - `multivector_doc_graph_docs_scored`
@@ -337,9 +582,17 @@ Useful fields include:
 - `multivector_doc_graph_heap_fetches`
 - `multivector_doc_graph_exact_rerank_docs`
 - `multivector_doc_graph_warning`
+- `multivector_tokens_original`
+- `multivector_tokens_pooled`
+- `multivector_token_pooling_ratio`
 - `multivector_exact_rerank_enabled`
 - `multivector_exact_rerank_docs`
 - `multivector_exact_rerank_pairs`
+- `exact_rerank_candidates`
+- `exact_rerank_tokens_evaluated`
+- `exact_rerank_tokens_skipped`
+- `exact_rerank_pairs_saved`
+- `adaptive_rerank_topk_changed_vs_full`
 - `multivector_exact_kernel`
 - `multivector_accumulator_kind`
 - `multivector_memory_bytes_estimate`

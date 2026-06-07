@@ -94,9 +94,14 @@ pg_colbert_llama.expected_dim = 128
 pg_colbert_llama.allowed_models = ''
 ```
 
-For ModernColBERT GGUFs, `expected_dim` should remain `128`. The GGUF must
-include the ColBERT projection, not only the ModernBERT hidden states. Use the
-small 15m validation pair by default:
+For ModernColBERT GGUFs, set `pg_colbert_llama.expected_dim` from the
+registered pgturbohybrid model profile or pass an explicit dimension for an
+unregistered export. `turbohybrid_multivector_model_info(model_name)` exposes
+the extension-side profiles used by DBpedia benchmark `--expected-dim auto`;
+current GTE/Reason ModernColBERT and Sauerkraut validation profiles are 128d,
+while other ColBERT-style models such as AnswerAI small and Jina 96/64 variants
+are not. The GGUF must include the ColBERT projection, not only the ModernBERT
+hidden states. Use the small 15m validation pair by default:
 `VAGOsolutions/SauerkrautLM-Multi-ColBERT-15m` for PyLate parity and
 `johannhartmann/SauerkrautLM-Multi-ColBERT-15m-GGUF` for the PostgreSQL
 llama.cpp path. Run

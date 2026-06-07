@@ -622,7 +622,54 @@ SELECT turbohybrid_last_scan_stats()->>'multivector_graph_mode'
 document_node_many_moderate_mode|document_node_many_moderate_warning|document_node_many_moderate_nodes
 document_nodes|document_node_f32_sidecar_exact_scan|5
 (1 row)
-SET turbohybrid.multivector_doc_graph_search_ef = 2;
+SET turbohybrid.native_cache_scope = off;
+SET turbohybrid.multivector_doc_storage_cache = 'paged';
+DO $$
+DECLARE
+	q turbohybrid_multivector := turbohybrid_multivector(ARRAY[
+		'[1,0,0,0]'::vector,
+		'[0,1,0,0]'::vector,
+		'[0,0,1,0]'::vector,
+		'[0,0,0,1]'::vector
+	]);
+	doc_node_top1 text;
+	stats jsonb;
+BEGIN
+	SELECT id INTO doc_node_top1
+	FROM mv_many_moderate_docs
+	ORDER BY colbert <~> turbohybrid_query(
+	  multivector_query => q,
+	  dense_k => 1,
+	  final_k => 1
+	)
+	LIMIT 1;
+	stats := turbohybrid_last_scan_stats();
+
+	IF doc_node_top1 <> 'good' OR
+		stats->>'multivector_doc_sidecar_cache_mode' <> 'paged' OR
+		COALESCE((stats->>'multivector_doc_sidecar_pages_read')::int, 0) <= 0 OR
+		COALESCE((stats->>'multivector_doc_sidecar_cache_misses')::int, 0) <= 0 OR
+		COALESCE((stats->>'multivector_doc_sidecar_vectors_loaded')::int, 0) <= 0 OR
+		COALESCE((stats->>'multivector_doc_sidecar_bytes_touched')::int, 0) <= 0 THEN
+		RAISE EXCEPTION 'expected paged document-node sidecar stats with correct top doc, top %, stats %',
+			doc_node_top1, stats;
+	END IF;
+END
+$$;
+SELECT turbohybrid_last_scan_stats()->>'multivector_doc_sidecar_cache_mode'
+  AS document_node_sidecar_cache_mode,
+       (turbohybrid_last_scan_stats()->>'multivector_doc_sidecar_pages_read')::int
+  AS document_node_sidecar_pages_read,
+       (turbohybrid_last_scan_stats()->>'multivector_doc_sidecar_vectors_loaded')::int
+  AS document_node_sidecar_vectors_loaded,
+       (turbohybrid_last_scan_stats()->>'multivector_doc_sidecar_bytes_touched')::int
+  AS document_node_sidecar_bytes_touched;
+document_node_sidecar_cache_mode|document_node_sidecar_pages_read|document_node_sidecar_vectors_loaded|document_node_sidecar_bytes_touched
+paged|6|5|712
+(1 row)
+RESET turbohybrid.native_cache_scope;
+RESET turbohybrid.multivector_doc_storage_cache;
+SET turbohybrid.multivector_doc_graph_search_ef = 4;
 SET turbohybrid.multivector_doc_graph_oversampling = 2;
 SET turbohybrid.multivector_doc_graph_rescore_k = 2;
 SET turbohybrid.multivector_doc_storage = 'f16';
@@ -681,6 +728,89 @@ SELECT (turbohybrid_last_scan_stats()->>'multivector_doc_graph_search_ef')::int
 document_node_knob_search_ef|document_node_knob_oversampling|document_node_knob_rescore_k|document_node_knob_candidates|document_node_knob_exact_rerank_docs|document_node_knob_storage_kind|document_node_knob_rescore_source
 4|2|2|4|2|f16|heap
 (1 row)
+SET turbohybrid.multivector_doc_candidate_k = 10;
+SET turbohybrid.multivector_exact_rerank_k = 10;
+SET turbohybrid.multivector_doc_graph_search_ef = 2;
+SET turbohybrid.multivector_doc_graph_rescore_k = 10;
+DO $$
+DECLARE
+	q turbohybrid_multivector := turbohybrid_multivector(ARRAY[
+		'[1,0,0,0]'::vector,
+		'[0,1,0,0]'::vector,
+		'[0,0,1,0]'::vector,
+		'[0,0,0,1]'::vector
+	]);
+	stats jsonb;
+BEGIN
+	PERFORM id
+	FROM mv_many_moderate_docs
+	ORDER BY colbert <~> turbohybrid_query(
+	  multivector_query => q,
+	  dense_k => 1,
+	  final_k => 1
+	)
+	LIMIT 1;
+	stats := turbohybrid_last_scan_stats();
+
+	IF (stats->>'multivector_doc_graph_search_ef')::int <> 2 OR
+		(stats->>'multivector_doc_graph_candidates')::int > 2 OR
+		(stats->>'multivector_doc_graph_exact_rerank_docs')::int > 2 THEN
+		RAISE EXCEPTION 'expected explicit document-node EF to cap graph traversal independently of candidate budget, stats %',
+			stats;
+	END IF;
+END
+$$;
+SELECT (turbohybrid_last_scan_stats()->>'multivector_doc_graph_search_ef')::int
+  AS document_node_explicit_ef,
+       (turbohybrid_last_scan_stats()->>'multivector_doc_graph_candidates')::int <= 2
+  AS document_node_explicit_ef_caps_candidates,
+       (turbohybrid_last_scan_stats()->>'multivector_doc_graph_exact_rerank_docs')::int <= 2
+  AS document_node_explicit_ef_caps_rerank;
+document_node_explicit_ef|document_node_explicit_ef_caps_candidates|document_node_explicit_ef_caps_rerank
+2|t|t
+(1 row)
+SET turbohybrid.multivector_doc_graph_search_ef = 0;
+DO $$
+DECLARE
+	q turbohybrid_multivector := turbohybrid_multivector(ARRAY[
+		'[1,0,0,0]'::vector,
+		'[0,1,0,0]'::vector,
+		'[0,0,1,0]'::vector,
+		'[0,0,0,1]'::vector
+	]);
+	stats jsonb;
+BEGIN
+	PERFORM id
+	FROM mv_many_moderate_docs
+	ORDER BY colbert <~> turbohybrid_query(
+	  multivector_query => q,
+	  dense_k => 1,
+	  final_k => 1
+	)
+	LIMIT 1;
+	stats := turbohybrid_last_scan_stats();
+
+		IF (stats->>'multivector_doc_graph_search_ef')::int <> 5 OR
+			(stats->>'multivector_doc_graph_candidates')::int > 5 OR
+			(stats->>'multivector_doc_graph_exact_rerank_docs')::int > 5 THEN
+			RAISE EXCEPTION 'expected default document-node EF to use graph_ef_search independently of candidate budget, stats %',
+				stats;
+		END IF;
+END
+$$;
+SELECT (turbohybrid_last_scan_stats()->>'multivector_doc_graph_search_ef')::int
+  AS document_node_default_ef,
+       (turbohybrid_last_scan_stats()->>'multivector_doc_graph_candidates')::int <= 5
+  AS document_node_default_ef_caps_candidates,
+       (turbohybrid_last_scan_stats()->>'multivector_doc_graph_exact_rerank_docs')::int <= 5
+  AS document_node_default_ef_caps_rerank;
+document_node_default_ef|document_node_default_ef_caps_candidates|document_node_default_ef_caps_rerank
+5|t|t
+(1 row)
+SET turbohybrid.multivector_doc_candidate_k = 1;
+SET turbohybrid.multivector_exact_rerank_k = 1;
+SET turbohybrid.multivector_doc_graph_search_ef = 4;
+SET turbohybrid.multivector_doc_graph_rescore_k = 2;
 SET turbohybrid.multivector_doc_storage = 'sq8';
 DO $$
 DECLARE
@@ -792,8 +922,12 @@ BEGIN
 			'document_node_proxy_vector_graph_traversal' OR
 		stats->>'multivector_accumulator_kind' <>
 			'doc_proxy_graph' OR
+		stats->>'proxy_encoder_kind' <> 'mean_pool' OR
 		(stats->>'multivector_doc_graph_candidates')::int <> 4 OR
 		(stats->>'multivector_doc_graph_exact_rerank_docs')::int <> 4 OR
+		(stats->>'proxy_candidates')::int <> 4 OR
+		(stats->>'proxy_exact_rerank_docs')::int <> 4 OR
+		NOT (stats ? 'proxy_top1_admission') OR
 		(stats->>'multivector_doc_graph_quantized_scores')::int <> 0 OR
 		stats->>'multivector_doc_graph_rescore_source' <> 'heap' THEN
 		RAISE EXCEPTION 'expected proxy-vector document-node graph admission with exact MaxSim rerank, top %, stats %',
@@ -805,12 +939,234 @@ SELECT turbohybrid_last_scan_stats()->>'multivector_candidate_source'
   AS document_node_proxy_source,
        turbohybrid_last_scan_stats()->>'multivector_doc_graph_warning'
   AS document_node_proxy_warning,
+       turbohybrid_last_scan_stats()->>'proxy_encoder_kind'
+  AS document_node_proxy_encoder,
+       (turbohybrid_last_scan_stats()->>'proxy_candidates')::int
+  AS document_node_proxy_candidates,
        (turbohybrid_last_scan_stats()->>'multivector_doc_graph_exact_rerank_docs')::int
   AS document_node_proxy_exact_rerank_docs;
-document_node_proxy_source|document_node_proxy_warning|document_node_proxy_exact_rerank_docs
-proxy_vector|document_node_proxy_vector_graph_traversal|4
+document_node_proxy_source|document_node_proxy_warning|document_node_proxy_encoder|document_node_proxy_candidates|document_node_proxy_exact_rerank_docs
+proxy_vector|document_node_proxy_vector_graph_traversal|mean_pool|4|4
 (1 row)
+CREATE TABLE mv_proxy_encoder_docs (
+	id text PRIMARY KEY,
+	colbert turbohybrid_multivector
+);
+INSERT INTO mv_proxy_encoder_docs VALUES
+('alpha', turbohybrid_multivector(ARRAY[
+	'[1,0,0,0]'::vector,
+	'[0,1,0,0]'::vector
+])),
+('beta', turbohybrid_multivector(ARRAY[
+	'[0,0,1,0]'::vector,
+	'[0,0,0,1]'::vector
+]));
+CREATE INDEX mv_proxy_encoder_docs_max_idx ON mv_proxy_encoder_docs USING turbohybrid
+  (colbert multivector_cosine_turbohybrid_ops)
+  WITH (multivector_graph = document_nodes, multivector_proxy_encoder = max_pool);
+DO $$
+DECLARE
+	q turbohybrid_multivector := turbohybrid_multivector(ARRAY[
+		'[1,0,0,0]'::vector,
+		'[0,1,0,0]'::vector
+	]);
+	stats jsonb;
+BEGIN
+	PERFORM id
+	FROM mv_proxy_encoder_docs
+	ORDER BY colbert <~> turbohybrid_query(
+	  multivector_query => q,
+	  dense_k => 2,
+	  final_k => 1
+	)
+	LIMIT 1;
+	stats := turbohybrid_last_scan_stats();
+
+	IF stats->>'proxy_encoder_kind' <> 'max_pool' OR
+		(stats->>'proxy_candidates')::int <= 0 OR
+		(stats->>'proxy_exact_rerank_docs')::int <= 0 THEN
+		RAISE EXCEPTION 'expected max_pool proxy stats, got %', stats;
+	END IF;
+END
+$$;
+SELECT turbohybrid_last_scan_stats()->>'proxy_encoder_kind'
+  AS document_node_proxy_max_encoder;
+document_node_proxy_max_encoder
+max_pool
+(1 row)
+DROP INDEX mv_proxy_encoder_docs_max_idx;
+CREATE INDEX mv_proxy_encoder_docs_fde_idx ON mv_proxy_encoder_docs USING turbohybrid
+  (colbert multivector_cosine_turbohybrid_ops)
+  WITH (multivector_graph = document_nodes, multivector_proxy_encoder = random_projection_fde);
+DO $$
+DECLARE
+	q turbohybrid_multivector := turbohybrid_multivector(ARRAY[
+		'[1,0,0,0]'::vector,
+		'[0,1,0,0]'::vector
+	]);
+	stats jsonb;
+BEGIN
+	PERFORM id
+	FROM mv_proxy_encoder_docs
+	ORDER BY colbert <~> turbohybrid_query(
+	  multivector_query => q,
+	  dense_k => 2,
+	  final_k => 1
+	)
+	LIMIT 1;
+	stats := turbohybrid_last_scan_stats();
+
+	IF stats->>'proxy_encoder_kind' <> 'random_projection_fde' OR
+		(stats->>'proxy_candidates')::int <= 0 OR
+		(stats->>'proxy_exact_rerank_docs')::int <= 0 THEN
+		RAISE EXCEPTION 'expected random_projection_fde proxy stats, got %', stats;
+	END IF;
+END
+$$;
+SELECT turbohybrid_last_scan_stats()->>'proxy_encoder_kind'
+  AS document_node_proxy_fde_encoder;
+document_node_proxy_fde_encoder
+random_projection_fde
+(1 row)
+DROP INDEX mv_proxy_encoder_docs_fde_idx;
+DO $$
+BEGIN
+	EXECUTE 'CREATE INDEX mv_proxy_encoder_docs_learned_idx ON mv_proxy_encoder_docs USING turbohybrid ' ||
+		'(colbert multivector_cosine_turbohybrid_ops) WITH (multivector_graph = document_nodes, ' ||
+		'multivector_proxy_encoder = learned_projection_placeholder)';
+	RAISE EXCEPTION 'learned projection placeholder index build unexpectedly succeeded';
+EXCEPTION WHEN feature_not_supported THEN
+	IF SQLERRM NOT LIKE '%learned multivector proxy projection is not configured%' THEN
+		RAISE;
+	END IF;
+END
+$$;
+DROP TABLE mv_proxy_encoder_docs;
+SET turbohybrid.multivector_branch_plan = qdrant_like;
+DO $$
+DECLARE
+	q turbohybrid_multivector := turbohybrid_multivector(ARRAY[
+		'[1,0,0,0]'::vector,
+		'[0,1,0,0]'::vector,
+		'[0,0,1,0]'::vector,
+		'[0,0,0,1]'::vector
+	]);
+	stats jsonb;
+BEGIN
+	PERFORM set_config('turbohybrid.multivector_doc_graph_rescore_k', '2', true);
+	PERFORM id
+	FROM mv_many_moderate_docs
+	ORDER BY colbert <~> turbohybrid_query(
+	  multivector_query => q,
+	  fusion => 'rrf',
+	  dense_k => 1,
+	  final_k => 1
+	)
+	LIMIT 1;
+	stats := turbohybrid_last_scan_stats();
+
+	IF stats->>'multivector_branch_plan' <> 'qdrant_like' OR
+		stats->>'branch_fusion_mode' <> 'qdrant_like_rrf' OR
+		(stats->>'branch_count')::int <> 3 OR
+		stats->'branch_kinds' <> '["proxy_vector", "document_nodes", "exact_doc_scan"]'::jsonb OR
+		stats->'branch_ranks' <> '[1, 2, 3]'::jsonb OR
+		(stats->'branch_candidate_counts'->>0)::int <> 4 OR
+		(stats->'branch_candidate_counts'->>1)::int <> 4 OR
+		(stats->'branch_candidate_counts'->>2)::int <> 2 OR
+		(stats->>'multivector_doc_graph_exact_rerank_docs')::int <> 2 OR
+		(stats->>'proxy_exact_rerank_docs')::int <> 2 THEN
+		RAISE EXCEPTION 'unexpected qdrant-like proxy branch plan stats: %', stats;
+	END IF;
+END
+$$;
+SELECT turbohybrid_last_scan_stats()->>'multivector_branch_plan'
+  AS qdrant_like_proxy_plan,
+       turbohybrid_last_scan_stats()->'branch_kinds'
+  AS qdrant_like_proxy_branch_kinds,
+       turbohybrid_last_scan_stats()->'branch_candidate_counts'
+  AS qdrant_like_proxy_candidate_counts,
+       (turbohybrid_last_scan_stats()->>'proxy_exact_rerank_docs')::int
+  AS qdrant_like_proxy_exact_rerank_docs;
+qdrant_like_proxy_plan|qdrant_like_proxy_branch_kinds|qdrant_like_proxy_candidate_counts|qdrant_like_proxy_exact_rerank_docs
+qdrant_like|["proxy_vector", "document_nodes", "exact_doc_scan"]|[4, 4, 2]|2
+(1 row)
+SELECT turbohybrid_sparse_vector_terms(
+         turbohybrid_sparse_vector_from_arrays(ARRAY[7, 9], ARRAY[2.0, 1.0]::real[])
+       ) AS learned_sparse_terms,
+       turbohybrid_sparse_vector_query_terms(
+         turbohybrid_sparse_vector_from_arrays(ARRAY[7, 9], ARRAY[2.0, 1.0]::real[])
+       ) AS learned_sparse_query_terms,
+       turbohybrid_sparse_vector_to_tsvector(
+         turbohybrid_sparse_vector_from_arrays(ARRAY[7, 9], ARRAY[2.0, 1.0]::real[])
+       ) AS learned_sparse_tsvector,
+       turbohybrid_sparse_vector_to_tsquery(
+         turbohybrid_sparse_vector_from_arrays(ARRAY[7, 9], ARRAY[2.0, 1.0]::real[])
+       ) AS learned_sparse_tsquery;
+learned_sparse_terms|learned_sparse_query_terms|learned_sparse_tsvector|learned_sparse_tsquery
+ths7 ths7 ths9|ths7 | ths9|'ths7':1,2 'ths9':3|'ths7' | 'ths9'
+(1 row)
+CREATE TABLE mv_learned_sparse_docs (
+	id text PRIMARY KEY,
+	colbert turbohybrid_multivector,
+	learned_sparse turbohybrid_sparse_vector,
+	learned_sparse_tsv tsvector GENERATED ALWAYS AS
+	  (turbohybrid_sparse_vector_to_tsvector(learned_sparse)) STORED
+);
+INSERT INTO mv_learned_sparse_docs (id, colbert, learned_sparse) VALUES
+('alpha', turbohybrid_multivector(ARRAY['[1,0,0,0]'::vector]),
+          turbohybrid_sparse_vector_from_arrays(ARRAY[7], ARRAY[1.0]::real[])),
+('beta', turbohybrid_multivector(ARRAY['[0.8,0.6,0,0]'::vector]),
+         turbohybrid_sparse_vector_from_arrays(ARRAY[42], ARRAY[1.0]::real[]));
+CREATE INDEX mv_learned_sparse_docs_idx
+  ON mv_learned_sparse_docs USING turbohybrid
+  (colbert multivector_cosine_turbohybrid_ops,
+   learned_sparse_tsv bm25_tsvector_turbohybrid_ops)
+  WITH (multivector_graph = document_nodes,
+        graph_ef_search = 1);
+SET turbohybrid.multivector_sparse_candidate_source = learned_sparse;
+SET turbohybrid.multivector_bm25_candidate_injection = off;
+DO $$
+DECLARE
+	q turbohybrid_multivector := turbohybrid_multivector(ARRAY['[1,0,0,0]'::vector]);
+	sq turbohybrid_sparse_vector :=
+		turbohybrid_sparse_vector_from_arrays(ARRAY[42], ARRAY[1.0]::real[]);
+	stats jsonb;
+	top1 text;
+BEGIN
+	SELECT id INTO top1
+	FROM mv_learned_sparse_docs
+	ORDER BY colbert <~> turbohybrid_query(
+	  multivector_query => q,
+	  text_query => turbohybrid_sparse_vector_to_tsquery(sq),
+	  dense_k => 1,
+	  bm25_k => 2,
+	  bm25_weight => 0,
+	  final_k => 2
+	)
+	LIMIT 1;
+	stats := turbohybrid_last_scan_stats();
+
+	IF top1 <> 'alpha' OR
+		(stats->>'learned_sparse_candidates')::int <= 0 OR
+		(stats->>'learned_sparse_retained_for_maxsim')::int < 0 OR
+		(stats->>'learned_sparse_branch_latency_us')::bigint < 0 THEN
+		RAISE EXCEPTION 'unexpected learned sparse exact-MaxSim admission result %, stats %',
+			top1, stats;
+	END IF;
+END
+$$;
+SELECT turbohybrid_last_scan_stats()->>'learned_sparse_candidates'
+  AS learned_sparse_candidates,
+       turbohybrid_last_scan_stats()->>'learned_sparse_retained_for_maxsim'
+  AS learned_sparse_retained_for_maxsim;
+learned_sparse_candidates|learned_sparse_retained_for_maxsim
+1|0
+(1 row)
+RESET turbohybrid.multivector_sparse_candidate_source;
+RESET turbohybrid.multivector_bm25_candidate_injection;
+DROP TABLE mv_learned_sparse_docs;
 RESET turbohybrid.multivector_candidate_source;
+RESET turbohybrid.multivector_branch_plan;
 RESET turbohybrid.multivector_doc_graph_search_ef;
 RESET turbohybrid.multivector_doc_graph_oversampling;
 RESET turbohybrid.multivector_doc_graph_rescore_k;
@@ -899,7 +1255,12 @@ BEGIN
 			'document_node_f32_sidecar_graph_traversal' OR
 		(bulk_stats->>'multivector_doc_graph_candidates')::int <> 1 OR
 		(inc_stats->>'multivector_doc_graph_candidates')::int <> 1 OR
-		(inc_stats->>'multivector_doc_graph_nodes')::int <> 5 THEN
+		(bulk_stats->>'graph_entry_point_count')::int <= 1 OR
+		(inc_stats->>'graph_entry_point_count')::int <= 1 OR
+		(inc_stats->>'multivector_doc_graph_nodes')::int <> 5 OR
+		(inc_stats->>'multivector_doc_graph_insert_full_maxsim_edges')::int <= 0 OR
+		(inc_stats->>'multivector_doc_graph_insert_representative_fallbacks')::int <> 0 OR
+		(inc_stats->>'multivector_doc_graph_insert_pairs_scored')::int <= 0 THEN
 		RAISE EXCEPTION 'expected bulk and incremental document-node graph recall parity, bulk top %, inc top %, bulk stats %, inc stats %',
 			bulk_top1, inc_top1, bulk_stats, inc_stats;
 	END IF;
@@ -910,9 +1271,17 @@ SELECT turbohybrid_last_scan_stats()->>'multivector_doc_graph_warning'
        (turbohybrid_last_scan_stats()->>'multivector_doc_graph_nodes')::int
   AS document_node_insert_many_moderate_nodes,
        (turbohybrid_last_scan_stats()->>'multivector_doc_graph_candidates')::int
-  AS document_node_insert_many_moderate_candidates;
-document_node_insert_many_moderate_warning|document_node_insert_many_moderate_nodes|document_node_insert_many_moderate_candidates
-document_node_f32_sidecar_graph_traversal|5|1
+  AS document_node_insert_many_moderate_candidates,
+       (turbohybrid_last_scan_stats()->>'graph_entry_point_count')::int > 1
+  AS document_node_insert_sampled_entries,
+       (turbohybrid_last_scan_stats()->>'multivector_doc_graph_insert_full_maxsim_edges')::int > 0
+  AS document_node_insert_full_maxsim_edges,
+       (turbohybrid_last_scan_stats()->>'multivector_doc_graph_insert_representative_fallbacks')::int
+  AS document_node_insert_representative_fallbacks,
+       (turbohybrid_last_scan_stats()->>'multivector_doc_graph_insert_pairs_scored')::int > 0
+  AS document_node_insert_pairs_scored;
+document_node_insert_many_moderate_warning|document_node_insert_many_moderate_nodes|document_node_insert_many_moderate_candidates|document_node_insert_sampled_entries|document_node_insert_full_maxsim_edges|document_node_insert_representative_fallbacks|document_node_insert_pairs_scored
+document_node_f32_sidecar_graph_traversal|5|1|t|t|0|t
 (1 row)
 DROP TABLE mv_doc_node_insert_many_moderate_inc;
 DROP TABLE mv_doc_node_insert_many_moderate_bulk;

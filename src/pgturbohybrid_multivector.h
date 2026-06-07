@@ -5,6 +5,7 @@
 
 #include "fmgr.h"
 #include "storage/itemptr.h"
+#include "utils/memutils.h"
 
 #include "pgturbohybrid_vector_compat.h"
 
@@ -14,6 +15,27 @@
 #define PGTURBOHYBRID_MULTIVECTOR_DEFAULT_MAX_QUERY_VECTORS 64
 #define PGTURBOHYBRID_MULTIVECTOR_DEBUG_TRACE_LIMIT_MAX 1000
 #define PGTURBOHYBRID_MULTIVECTOR_TOKEN_STATS_LIMIT_MAX 4096
+#define PGTURBOHYBRID_MULTIVECTOR_TOKEN_POOLING_OFF 0
+#define PGTURBOHYBRID_MULTIVECTOR_TOKEN_POOLING_KMEANS 1
+#define PGTURBOHYBRID_MULTIVECTOR_TOKEN_POOLING_GREEDY_COSINE 2
+#define PGTURBOHYBRID_MULTIVECTOR_TOKEN_POOLING_DEFAULT_TARGET_RATIO 0.5
+#define PGTURBOHYBRID_MULTIVECTOR_TOKEN_POOLING_DEFAULT_MIN_TOKENS 16
+#define PGTURBOHYBRID_MULTIVECTOR_CENTROIDS_OFF 0
+#define PGTURBOHYBRID_MULTIVECTOR_CENTROIDS_KMEANS 1
+#define PGTURBOHYBRID_MULTIVECTOR_CENTROID_COUNT_AUTO 0
+#define PGTURBOHYBRID_MULTIVECTOR_CENTROID_COUNT_MAX 1024
+#define PGTURBOHYBRID_MULTIVECTOR_PROXY_ENCODER_MEAN_POOL 0
+#define PGTURBOHYBRID_MULTIVECTOR_PROXY_ENCODER_MAX_POOL 1
+#define PGTURBOHYBRID_MULTIVECTOR_PROXY_ENCODER_RANDOM_PROJECTION_FDE 2
+#define PGTURBOHYBRID_MULTIVECTOR_PROXY_ENCODER_LEARNED_PROJECTION_PLACEHOLDER 3
+#define PGTURBOHYBRID_MULTIVECTOR_FLAG_CONTEXTS 0x00000001U
+#define PGTURBOHYBRID_MULTIVECTOR_FLAG_FIELDS 0x00000002U
+#define PGTURBOHYBRID_MULTIVECTOR_KNOWN_FLAGS \
+	(PGTURBOHYBRID_MULTIVECTOR_FLAG_CONTEXTS | PGTURBOHYBRID_MULTIVECTOR_FLAG_FIELDS)
+#define PGTURBOHYBRID_MULTIVECTOR_CONTEXT_MODE_FLAT 0
+#define PGTURBOHYBRID_MULTIVECTOR_CONTEXT_MODE_CONTEXT_LEVEL 1
+#define PGTURBOHYBRID_MULTIVECTOR_FIELD_MODE_OFF 0
+#define PGTURBOHYBRID_MULTIVECTOR_FIELD_MODE_WEIGHTED 1
 #define PGTURBOHYBRID_MULTIVECTOR_SIZE(_count, _dim) \
 	(offsetof(PgturbohybridMultiVector, values) + \
 	 sizeof(float) * (Size) (_count) * (Size) (_dim))
@@ -43,6 +65,8 @@ typedef struct TqMultiVectorDocMapEntry
 	ItemPointerData heapTid;
 	uint32		firstNodeId;
 	uint16		tokenCount;
+	uint16		originalTokenCount;
+	uint16		pooledTokenCount;
 } TqMultiVectorDocMapEntry;
 
 typedef struct PgturbohybridMultiVectorAdmissionTraceEntry
@@ -89,11 +113,27 @@ typedef struct PgturbohybridMultiVector
 	DatumGetPgturbohybridMultiVector(PG_GETARG_DATUM(x))
 #define PG_RETURN_PGTURBOHYBRID_MULTIVECTOR_P(x) PG_RETURN_POINTER(x)
 
+typedef struct PgturbohybridMultiVectorModelInfo
+{
+	const char *modelName;
+	int32		dim;
+	int32		defaultQueryMaxTokens;
+	int32		defaultDocMaxTokens;
+	const char *distanceMode;
+	bool		normalizedTokens;
+	const char *recommendedStorageKind;
+	const char *tokenMaskPolicy;
+	const char *fieldContextPolicy;
+	const char *status;
+	const char *notes;
+} PgturbohybridMultiVectorModelInfo;
+
 PgturbohybridMultiVector *PgturbohybridDatumGetMultiVector(Datum value);
 Oid			PgturbohybridMultiVectorTypeOid(void);
 void		PgturbohybridCheckMultiVector(const PgturbohybridMultiVector *mv);
 void		PgturbohybridCheckSameMultiVectorDims(const PgturbohybridMultiVector *a,
 												   const PgturbohybridMultiVector *b);
+const PgturbohybridMultiVectorModelInfo *PgturbohybridMultiVectorLookupModel(const char *modelName);
 TqDocId		PgturbohybridMultiVectorMakeDocId(uint64 docOrdinal);
 TqSubvectorOrdinal PgturbohybridMultiVectorMakeSubvectorOrdinal(uint32 tokenOrdinal);
 void		PgturbohybridMultiVectorCheckTokenCount(uint32 tokenCount,
@@ -101,12 +141,32 @@ void		PgturbohybridMultiVectorCheckTokenCount(uint32 tokenCount,
 void		PgturbohybridMultiVectorCheckDim(uint32 dim, uint32 maxDim);
 Size		PgturbohybridMultiVectorFloatCount(int32 count, int32 dim);
 Size		PgturbohybridMultiVectorSize(int32 count, int32 dim);
+Size		PgturbohybridMultiVectorExtendedSize(int32 count, int32 dim,
+												  int32 contextCount,
+												  bool hasFields);
 const float *PgturbohybridMultiVectorValues(const PgturbohybridMultiVector *mv,
 											int32 ordinal);
+bool		PgturbohybridMultiVectorHasContexts(const PgturbohybridMultiVector *mv);
+int32		PgturbohybridMultiVectorContextCount(const PgturbohybridMultiVector *mv);
+const int32 *PgturbohybridMultiVectorContextOffsets(const PgturbohybridMultiVector *mv);
+const int32 *PgturbohybridMultiVectorContextFields(const PgturbohybridMultiVector *mv);
 Size		PgturbohybridMultiVectorSubvectorSize(const PgturbohybridMultiVector *mv);
 void		PgturbohybridMultiVectorCopySubvectorToVector(const PgturbohybridMultiVector *mv,
 														   int32 ordinal,
 														   Vector *dst);
+PgturbohybridMultiVector *PgturbohybridMultiVectorPoolDocumentTokens(const PgturbohybridMultiVector *mv,
+																	 int mode,
+																	 double targetRatio,
+																	 int minTokens,
+																	 MemoryContext ctx);
+int			PgturbohybridMultiVectorCentroidCountForDoc(const PgturbohybridMultiVector *doc,
+														 int requested);
+float		PgturbohybridMultiVectorCentroidResidualMean(const PgturbohybridMultiVector *doc,
+														 const PgturbohybridMultiVector *centroids);
+const char *PgturbohybridMultiVectorProxyEncoderName(int encoder);
+Vector	   *PgturbohybridMultiVectorBuildProxyVector(const PgturbohybridMultiVector *mv,
+													 int encoder,
+													 MemoryContext ctx);
 double		TqDotProductF32Scalar(const float *a, const float *b, int32 dim);
 double		TqMultiVectorMaxSimScalar(const PgturbohybridMultiVector *query,
 									   const PgturbohybridMultiVector *doc);
@@ -114,6 +174,25 @@ double		TqMultiVectorMaxSimBlockedScalar(const PgturbohybridMultiVector *query,
 											  const PgturbohybridMultiVector *doc);
 double		TqMultiVectorMaxSim(const PgturbohybridMultiVector *query,
 								 const PgturbohybridMultiVector *doc);
+double		TqMultiVectorSymmetricMaxSimAverage(const PgturbohybridMultiVector *a,
+												const PgturbohybridMultiVector *b);
+double		TqMultiVectorSymmetricMaxSimAverageUnchecked(const PgturbohybridMultiVector *a,
+														 const PgturbohybridMultiVector *b);
+double		TqMultiVectorMaxSimWeighted(const PgturbohybridMultiVector *query,
+										 const PgturbohybridMultiVector *doc,
+										 const float4 *queryWeights,
+										 const bool *queryMask);
+double		TqMultiVectorMaxSimContextLevel(const PgturbohybridMultiVector *query,
+											 const PgturbohybridMultiVector *doc);
+double		TqMultiVectorMaxSimContextLevelWeighted(const PgturbohybridMultiVector *query,
+													 const PgturbohybridMultiVector *doc,
+													 const float4 *queryWeights,
+													 const bool *queryMask);
+double		TqMultiVectorMaxSimFieldWeighted(const PgturbohybridMultiVector *query,
+											  const PgturbohybridMultiVector *doc,
+											  const int32 *fieldIds,
+											  const float4 *weights,
+											  int fieldCount);
 const char *TqMultiVectorMaxSimKernelName(void);
 
 FUNCTION_PREFIX Datum pgturbohybrid_multivector_in(PG_FUNCTION_ARGS);
@@ -122,11 +201,18 @@ FUNCTION_PREFIX Datum pgturbohybrid_multivector_recv(PG_FUNCTION_ARGS);
 FUNCTION_PREFIX Datum pgturbohybrid_multivector_send(PG_FUNCTION_ARGS);
 FUNCTION_PREFIX Datum pgturbohybrid_multivector_constructor(PG_FUNCTION_ARGS);
 FUNCTION_PREFIX Datum pgturbohybrid_multivector_from_float4(PG_FUNCTION_ARGS);
+FUNCTION_PREFIX Datum pgturbohybrid_multivector_from_contexts(PG_FUNCTION_ARGS);
+FUNCTION_PREFIX Datum pgturbohybrid_multivector_from_contexts_and_fields(PG_FUNCTION_ARGS);
 FUNCTION_PREFIX Datum pgturbohybrid_multivector_dims(PG_FUNCTION_ARGS);
 FUNCTION_PREFIX Datum pgturbohybrid_multivector_count(PG_FUNCTION_ARGS);
+FUNCTION_PREFIX Datum pgturbohybrid_multivector_context_count(PG_FUNCTION_ARGS);
+FUNCTION_PREFIX Datum pgturbohybrid_multivector_context_offsets(PG_FUNCTION_ARGS);
+FUNCTION_PREFIX Datum pgturbohybrid_multivector_field_ids(PG_FUNCTION_ARGS);
 FUNCTION_PREFIX Datum pgturbohybrid_multivector_subvector(PG_FUNCTION_ARGS);
 FUNCTION_PREFIX Datum pgturbohybrid_multivector_to_vector_array(PG_FUNCTION_ARGS);
 FUNCTION_PREFIX Datum pgturbohybrid_multivector_maxsim(PG_FUNCTION_ARGS);
+FUNCTION_PREFIX Datum pgturbohybrid_multivector_context_maxsim(PG_FUNCTION_ARGS);
+FUNCTION_PREFIX Datum pgturbohybrid_multivector_field_weighted_maxsim(PG_FUNCTION_ARGS);
 FUNCTION_PREFIX Datum pgturbohybrid_multivector_maxsim_scalar(PG_FUNCTION_ARGS);
 FUNCTION_PREFIX Datum pgturbohybrid_multivector_maxsim_blocked_scalar(PG_FUNCTION_ARGS);
 FUNCTION_PREFIX Datum pgturbohybrid_multivector_maxsim_distance(PG_FUNCTION_ARGS);

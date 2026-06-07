@@ -1,8 +1,10 @@
 # Multivector Doc Map Sidecar Design
 
-This document designs the persistent multivector document map sidecar for the
-native TurboHybrid graph storage. It is intentionally documentation-only until
-the implementation prompt changes the on-disk format.
+This document records the persistent multivector document map sidecar for the
+native TurboHybrid graph storage. The implementation now uses the graph
+docmap tuple family in `src/pgturbohybrid_quant.h`; older design snippets below
+are retained only as background where they describe the same compatibility
+rules.
 
 ## Problem
 
@@ -36,9 +38,14 @@ The sidecar needs its own explicit identity separate from
 `PGTURBOHYBRID_GRAPH_VERSION`:
 
 ```c
-#define PGTURBOHYBRID_MULTIVECTOR_DOCMAP_MAGIC 0x54514d56
-#define PGTURBOHYBRID_MULTIVECTOR_DOCMAP_VERSION 1
+#define PGTURBOHYBRID_GRAPH_MULTIVECTOR_DOCMAP_MAGIC 0x54514d56
+#define PGTURBOHYBRID_GRAPH_MULTIVECTOR_DOCMAP_VERSION 3
 ```
+
+Version 3 covers document-node vectors, context metadata, centroid sidecar
+tuples, centroid posting tuples, and the experimental quantized inverted
+posting tuples. Future persisted sidecar changes must bump this version or add
+an equivalent magic/compatibility check with REINDEX guidance.
 
 The graph metapage should gain discoverability fields:
 

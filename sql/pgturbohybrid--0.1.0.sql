@@ -60,6 +60,57 @@ CREATE TYPE turbohybrid_query (
 	ALIGNMENT = double
 );
 
+CREATE TYPE turbohybrid_sparse_vector;
+
+CREATE FUNCTION turbohybrid_sparse_vector_in(pg_catalog.cstring) RETURNS turbohybrid_sparse_vector
+	AS 'MODULE_PATHNAME', 'pgturbohybrid_sparse_vector_in'
+	LANGUAGE C IMMUTABLE STRICT PARALLEL SAFE;
+
+CREATE FUNCTION turbohybrid_sparse_vector_out(turbohybrid_sparse_vector) RETURNS pg_catalog.cstring
+	AS 'MODULE_PATHNAME', 'pgturbohybrid_sparse_vector_out'
+	LANGUAGE C IMMUTABLE STRICT PARALLEL SAFE;
+
+CREATE TYPE turbohybrid_sparse_vector (
+	INPUT = turbohybrid_sparse_vector_in,
+	OUTPUT = turbohybrid_sparse_vector_out,
+	INTERNALLENGTH = variable,
+	STORAGE = extended,
+	ALIGNMENT = double
+);
+
+CREATE FUNCTION turbohybrid_sparse_vector_from_arrays(
+	term_ids pg_catalog.int4[],
+	weights pg_catalog.float4[]
+) RETURNS turbohybrid_sparse_vector
+	AS 'MODULE_PATHNAME', 'pgturbohybrid_sparse_vector_from_arrays'
+	LANGUAGE C IMMUTABLE STRICT PARALLEL SAFE;
+
+CREATE FUNCTION turbohybrid_sparse_vector_terms(
+	sparse turbohybrid_sparse_vector
+) RETURNS pg_catalog.text
+	AS 'MODULE_PATHNAME', 'pgturbohybrid_sparse_vector_terms'
+	LANGUAGE C IMMUTABLE STRICT PARALLEL SAFE;
+
+CREATE FUNCTION turbohybrid_sparse_vector_query_terms(
+	sparse turbohybrid_sparse_vector
+) RETURNS pg_catalog.text
+	AS 'MODULE_PATHNAME', 'pgturbohybrid_sparse_vector_query_terms'
+	LANGUAGE C IMMUTABLE STRICT PARALLEL SAFE;
+
+CREATE FUNCTION turbohybrid_sparse_vector_to_tsvector(
+	sparse turbohybrid_sparse_vector
+) RETURNS pg_catalog.tsvector
+	LANGUAGE SQL IMMUTABLE STRICT PARALLEL SAFE
+	RETURN pg_catalog.to_tsvector('pg_catalog.simple'::pg_catalog.regconfig,
+								  turbohybrid_sparse_vector_terms(sparse));
+
+CREATE FUNCTION turbohybrid_sparse_vector_to_tsquery(
+	sparse turbohybrid_sparse_vector
+) RETURNS pg_catalog.tsquery
+	LANGUAGE SQL IMMUTABLE STRICT PARALLEL SAFE
+	RETURN pg_catalog.to_tsquery('pg_catalog.simple'::pg_catalog.regconfig,
+								 turbohybrid_sparse_vector_query_terms(sparse));
+
 CREATE TYPE turbohybrid_multivector;
 
 CREATE FUNCTION turbohybrid_multivector_in(pg_catalog.cstring) RETURNS turbohybrid_multivector
@@ -99,12 +150,45 @@ CREATE FUNCTION turbohybrid_multivector_from_float4(
 	AS 'MODULE_PATHNAME', 'pgturbohybrid_multivector_from_float4'
 	LANGUAGE C IMMUTABLE STRICT PARALLEL SAFE;
 
+CREATE FUNCTION turbohybrid_multivector_from_contexts(
+	raw_values pg_catalog.float4[],
+	dim pg_catalog.int4,
+	context_offsets pg_catalog.int4[]
+) RETURNS turbohybrid_multivector
+	AS 'MODULE_PATHNAME', 'pgturbohybrid_multivector_from_contexts'
+	LANGUAGE C IMMUTABLE STRICT PARALLEL SAFE;
+
+CREATE FUNCTION turbohybrid_multivector_from_contexts_and_fields(
+	raw_values pg_catalog.float4[],
+	dim pg_catalog.int4,
+	context_offsets pg_catalog.int4[],
+	field_ids pg_catalog.int4[]
+) RETURNS turbohybrid_multivector
+	AS 'MODULE_PATHNAME', 'pgturbohybrid_multivector_from_contexts_and_fields'
+	LANGUAGE C IMMUTABLE STRICT PARALLEL SAFE;
+
 CREATE FUNCTION turbohybrid_multivector_dims(turbohybrid_multivector) RETURNS pg_catalog.int4
 	AS 'MODULE_PATHNAME', 'pgturbohybrid_multivector_dims'
 	LANGUAGE C IMMUTABLE STRICT PARALLEL SAFE;
 
 CREATE FUNCTION turbohybrid_multivector_count(turbohybrid_multivector) RETURNS pg_catalog.int4
 	AS 'MODULE_PATHNAME', 'pgturbohybrid_multivector_count'
+	LANGUAGE C IMMUTABLE STRICT PARALLEL SAFE;
+
+CREATE FUNCTION turbohybrid_multivector_model_info(model_name pg_catalog.text) RETURNS pg_catalog.jsonb
+	AS 'MODULE_PATHNAME', 'pgturbohybrid_multivector_model_info'
+	LANGUAGE C IMMUTABLE STRICT PARALLEL SAFE;
+
+CREATE FUNCTION turbohybrid_multivector_context_count(turbohybrid_multivector) RETURNS pg_catalog.int4
+	AS 'MODULE_PATHNAME', 'pgturbohybrid_multivector_context_count'
+	LANGUAGE C IMMUTABLE STRICT PARALLEL SAFE;
+
+CREATE FUNCTION turbohybrid_multivector_context_offsets(turbohybrid_multivector) RETURNS pg_catalog.int4[]
+	AS 'MODULE_PATHNAME', 'pgturbohybrid_multivector_context_offsets'
+	LANGUAGE C IMMUTABLE STRICT PARALLEL SAFE;
+
+CREATE FUNCTION turbohybrid_multivector_field_ids(turbohybrid_multivector) RETURNS pg_catalog.int4[]
+	AS 'MODULE_PATHNAME', 'pgturbohybrid_multivector_field_ids'
 	LANGUAGE C IMMUTABLE STRICT PARALLEL SAFE;
 
 CREATE FUNCTION turbohybrid_multivector_subvector(
@@ -125,6 +209,22 @@ CREATE FUNCTION turbohybrid_multivector_maxsim(
 	doc turbohybrid_multivector
 ) RETURNS pg_catalog.float8
 	AS 'MODULE_PATHNAME', 'pgturbohybrid_multivector_maxsim'
+	LANGUAGE C IMMUTABLE STRICT PARALLEL SAFE;
+
+CREATE FUNCTION turbohybrid_multivector_context_maxsim(
+	query turbohybrid_multivector,
+	doc turbohybrid_multivector
+) RETURNS pg_catalog.float8
+	AS 'MODULE_PATHNAME', 'pgturbohybrid_multivector_context_maxsim'
+	LANGUAGE C IMMUTABLE STRICT PARALLEL SAFE;
+
+CREATE FUNCTION turbohybrid_multivector_field_weighted_maxsim(
+	query turbohybrid_multivector,
+	doc turbohybrid_multivector,
+	field_ids pg_catalog.int4[],
+	weights pg_catalog.float4[]
+) RETURNS pg_catalog.float8
+	AS 'MODULE_PATHNAME', 'pgturbohybrid_multivector_field_weighted_maxsim'
 	LANGUAGE C IMMUTABLE STRICT PARALLEL SAFE;
 
 CREATE FUNCTION turbohybrid_multivector_maxsim_scalar(
@@ -160,7 +260,9 @@ CREATE FUNCTION turbohybrid_query(
 	bm25_k pg_catalog.int4 DEFAULT NULL,
 	final_k pg_catalog.int4 DEFAULT NULL,
 	require_bm25_match pg_catalog.bool DEFAULT false,
-	multivector_query turbohybrid_multivector DEFAULT NULL
+	multivector_query turbohybrid_multivector DEFAULT NULL,
+	query_token_weights pg_catalog.float4[] DEFAULT NULL,
+	query_token_mask pg_catalog.bool[] DEFAULT NULL
 ) RETURNS turbohybrid_query
 	AS 'MODULE_PATHNAME', 'pgturbohybrid_query_constructor'
 	LANGUAGE C STABLE PARALLEL SAFE;
@@ -458,12 +560,20 @@ COMMENT ON TYPE turbohybrid_query IS 'TurboHybrid query payload for dense vector
 
 COMMENT ON FUNCTION turbohybrid_query_in(pg_catalog.cstring) IS 'Input function for turbohybrid_query';
 COMMENT ON FUNCTION turbohybrid_query_out(turbohybrid_query) IS 'Output function for turbohybrid_query';
-COMMENT ON FUNCTION turbohybrid_query(vector, pg_catalog.tsquery, pg_catalog.text, pg_catalog.float8, pg_catalog.float8, pg_catalog.float8, pg_catalog.int4, pg_catalog.int4, pg_catalog.int4, pg_catalog.int4, pg_catalog.bool, turbohybrid_multivector) IS 'Constructs a TurboHybrid query payload';
+COMMENT ON FUNCTION turbohybrid_query(vector, pg_catalog.tsquery, pg_catalog.text, pg_catalog.float8, pg_catalog.float8, pg_catalog.float8, pg_catalog.int4, pg_catalog.int4, pg_catalog.int4, pg_catalog.int4, pg_catalog.bool, turbohybrid_multivector, pg_catalog.float4[], pg_catalog.bool[]) IS 'Constructs a TurboHybrid query payload';
 COMMENT ON FUNCTION turbohybrid_distance(vector, turbohybrid_query) IS 'Default TurboHybrid distance between a vector and a query';
 COMMENT ON FUNCTION turbohybrid_l2_distance(vector, turbohybrid_query) IS 'L2 TurboHybrid distance between a vector and a query';
 COMMENT ON FUNCTION turbohybrid_negative_inner_product(vector, turbohybrid_query) IS 'Negative inner product TurboHybrid distance between a vector and a query';
 COMMENT ON FUNCTION turbohybrid_cosine_distance(vector, turbohybrid_query) IS 'Cosine TurboHybrid distance between a vector and a query';
 COMMENT ON FUNCTION turbohybrid_multivector_distance(turbohybrid_multivector, turbohybrid_query) IS 'Exact MaxSim distance between a multivector and a TurboHybrid query';
+COMMENT ON FUNCTION turbohybrid_multivector_from_contexts(pg_catalog.float4[], pg_catalog.int4, pg_catalog.int4[]) IS 'Construct a context-aware turbohybrid_multivector from flat float values and zero-based context start token offsets';
+COMMENT ON FUNCTION turbohybrid_multivector_from_contexts_and_fields(pg_catalog.float4[], pg_catalog.int4, pg_catalog.int4[], pg_catalog.int4[]) IS 'Construct a context-aware turbohybrid_multivector with one non-negative field id per context';
+COMMENT ON FUNCTION turbohybrid_multivector_model_info(pg_catalog.text) IS 'Return registered late-interaction model metadata for multivector validation and benchmark provenance';
+COMMENT ON FUNCTION turbohybrid_multivector_context_count(turbohybrid_multivector) IS 'Return the number of context windows stored in a turbohybrid_multivector';
+COMMENT ON FUNCTION turbohybrid_multivector_context_offsets(turbohybrid_multivector) IS 'Return zero-based context start token offsets from a turbohybrid_multivector';
+COMMENT ON FUNCTION turbohybrid_multivector_field_ids(turbohybrid_multivector) IS 'Return one field id per context window from a turbohybrid_multivector, defaulting to 0 for flat values';
+COMMENT ON FUNCTION turbohybrid_multivector_context_maxsim(turbohybrid_multivector, turbohybrid_multivector) IS 'Exact context-level MaxSim: score each document context independently and return the best context score';
+COMMENT ON FUNCTION turbohybrid_multivector_field_weighted_maxsim(turbohybrid_multivector, turbohybrid_multivector, pg_catalog.int4[], pg_catalog.float4[]) IS 'Exact field-weighted MaxSim over context field ids, using one weight per requested field';
 COMMENT ON FUNCTION turbohybrid_multivector_subvector(turbohybrid_multivector, pg_catalog.int4) IS 'Return one 1-based subvector from a turbohybrid_multivector as vector';
 COMMENT ON FUNCTION turbohybrid_multivector_to_vector_array(turbohybrid_multivector) IS 'Return all subvectors from a turbohybrid_multivector as vector[]';
 COMMENT ON FUNCTION turbohybrid_vector_l2_squared_distance(vector, vector) IS 'Squared L2 support function used by TurboHybrid vector opclasses';

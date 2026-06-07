@@ -136,6 +136,182 @@ SELECT pg_catalog.length(
 mv_binary_len
 32
 (1 row)
+DO $long_context$
+DECLARE
+	q turbohybrid_multivector :=
+		turbohybrid_multivector_from_float4(ARRAY[1,0,0,1]::real[], 2);
+	flat_doc turbohybrid_multivector :=
+		turbohybrid_multivector_from_float4(ARRAY[1,0,0,1,0.2,0.2,0.2,0.2]::real[], 2);
+	one_context_doc turbohybrid_multivector :=
+		turbohybrid_multivector_from_contexts(ARRAY[1,0,0,1,0.2,0.2,0.2,0.2]::real[], 2, ARRAY[0]::int[]);
+	two_context_doc turbohybrid_multivector :=
+		turbohybrid_multivector_from_contexts(ARRAY[0.2,0,0,0.2,1,0,0,1]::real[], 2, ARRAY[0,2]::int[]);
+	field_doc_a turbohybrid_multivector :=
+		turbohybrid_multivector_from_contexts_and_fields(ARRAY[1,0,0.8,0]::real[], 2, ARRAY[0,1]::int[], ARRAY[1,2]::int[]);
+	field_doc_b turbohybrid_multivector :=
+		turbohybrid_multivector_from_contexts_and_fields(ARRAY[0.8,0,1,0]::real[], 2, ARRAY[0,1]::int[], ARRAY[1,2]::int[]);
+	roundtrip turbohybrid_multivector;
+BEGIN
+	IF turbohybrid_multivector_context_count(two_context_doc) <> 2 OR
+	   turbohybrid_multivector_context_offsets(two_context_doc) <> ARRAY[0,2]::int[] THEN
+		RAISE EXCEPTION 'context metadata was not stored correctly';
+	END IF;
+	IF turbohybrid_multivector_field_ids(field_doc_a) <> ARRAY[1,2]::int[] THEN
+		RAISE EXCEPTION 'field metadata was not stored correctly';
+	END IF;
+	IF turbohybrid_multivector_context_maxsim(q, one_context_doc) <>
+	   turbohybrid_multivector_maxsim(q, flat_doc) THEN
+		RAISE EXCEPTION 'single context MaxSim must match flat global MaxSim';
+	END IF;
+	IF turbohybrid_multivector_context_maxsim(q, two_context_doc) <> 2.0 THEN
+		RAISE EXCEPTION 'context-level MaxSim did not choose the best window';
+	END IF;
+	IF turbohybrid_multivector_field_weighted_maxsim(
+		   turbohybrid_multivector_from_float4(ARRAY[1,0]::real[], 2),
+		   field_doc_a, ARRAY[1,2]::int[], ARRAY[2,1]::real[]
+	   ) <= turbohybrid_multivector_field_weighted_maxsim(
+		   turbohybrid_multivector_from_float4(ARRAY[1,0]::real[], 2),
+		   field_doc_b, ARRAY[1,2]::int[], ARRAY[2,1]::real[]
+	   ) THEN
+		RAISE EXCEPTION 'field weights did not affect rank deterministically';
+	END IF;
+	roundtrip := two_context_doc::text::turbohybrid_multivector;
+	IF turbohybrid_multivector_context_offsets(roundtrip) <> ARRAY[0,2]::int[] THEN
+		RAISE EXCEPTION 'context metadata text roundtrip failed';
+	END IF;
+END
+$long_context$;
+DO $long_context_errors$
+DECLARE
+	spec record;
+BEGIN
+	FOR spec IN
+		SELECT 'missing_zero' AS name,
+			   'SELECT turbohybrid_multivector_from_contexts(ARRAY[1,0,0,1]::real[], 2, ARRAY[1]::int[])' AS sql
+		UNION ALL
+		SELECT 'duplicate_offset',
+			   'SELECT turbohybrid_multivector_from_contexts(ARRAY[1,0,0,1]::real[], 2, ARRAY[0,0]::int[])'
+		UNION ALL
+		SELECT 'field_count_mismatch',
+			   'SELECT turbohybrid_multivector_from_contexts_and_fields(ARRAY[1,0,0,1]::real[], 2, ARRAY[0,1]::int[], ARRAY[1]::int[])'
+	LOOP
+		BEGIN
+			EXECUTE spec.sql;
+			RAISE EXCEPTION 'expected context constructor case to fail: %',
+				spec.name;
+		EXCEPTION
+			WHEN invalid_parameter_value OR data_exception OR array_subscript_error THEN
+				NULL;
+		END;
+	END LOOP;
+END
+$long_context_errors$;
+CREATE TEMP TABLE th_mv_context_docs (
+	id int,
+	embedding turbohybrid_multivector
+);
+INSERT INTO th_mv_context_docs VALUES
+	(1, turbohybrid_multivector_from_contexts_and_fields(ARRAY[1,0,0,1]::real[], 2, ARRAY[0,1]::int[], ARRAY[1,2]::int[])),
+	(2, turbohybrid_multivector_from_contexts_and_fields(ARRAY[0.8,0,0,0.8]::real[], 2, ARRAY[0,1]::int[], ARRAY[1,2]::int[]));
+CREATE INDEX th_mv_context_docs_idx ON th_mv_context_docs
+	USING turbohybrid (embedding multivector_maxsim_ip_turbohybrid_ops)
+	WITH (multivector_graph = 'document_nodes',
+		  multivector_context_mode = 'context_level',
+		  multivector_field_mode = 'weighted');
+DO $long_context_index$
+DECLARE
+	stats jsonb := turbohybrid_index_stats('th_mv_context_docs_idx'::regclass);
+	top_id int;
+BEGIN
+	IF stats->>'multivector_context_mode' <> 'context_level' OR
+	   stats->>'multivector_field_mode' <> 'weighted' THEN
+		RAISE EXCEPTION 'context/field reloptions missing from stats: %', stats;
+	END IF;
+	SET LOCAL turbohybrid.multivector_candidate_source = 'exact_doc_scan';
+	SELECT id INTO top_id
+	FROM th_mv_context_docs
+	ORDER BY embedding <~> turbohybrid_query(
+		multivector_query => turbohybrid_multivector_from_float4(ARRAY[0,1]::real[], 2),
+		final_k => 1
+	)
+	LIMIT 1;
+	IF top_id <> 1 THEN
+		RAISE EXCEPTION 'context-level indexed rerank returned %, expected 1', top_id;
+	END IF;
+END
+$long_context_index$;
+DO $long_context_pooling$
+BEGIN
+	BEGIN
+		EXECUTE $sql$
+			CREATE INDEX th_mv_context_docs_pool_idx ON th_mv_context_docs
+				USING turbohybrid (embedding multivector_maxsim_ip_turbohybrid_ops)
+				WITH (multivector_graph = 'document_nodes',
+					  multivector_context_mode = 'context_level',
+					  multivector_token_pooling = 'greedy_cosine',
+					  multivector_token_pooling_target_ratio = 0.5,
+					  multivector_token_pooling_min_tokens = 1)
+		$sql$;
+		RAISE EXCEPTION 'expected context-aware token pooling to fail';
+	EXCEPTION
+		WHEN feature_not_supported THEN
+			NULL;
+	END;
+END
+$long_context_pooling$;
+CREATE TEMP TABLE th_mv_context_mvcc_docs (
+	id int,
+	embedding turbohybrid_multivector
+);
+INSERT INTO th_mv_context_mvcc_docs VALUES
+	(1, turbohybrid_multivector_from_contexts(ARRAY[1,0,0.1,0]::real[], 2, ARRAY[0,1]::int[])),
+	(2, turbohybrid_multivector_from_contexts(ARRAY[0.1,0,0,1]::real[], 2, ARRAY[0,1]::int[])),
+	(3, turbohybrid_multivector_from_contexts(ARRAY[0.2,0,0,0.8]::real[], 2, ARRAY[0,1]::int[]));
+CREATE INDEX th_mv_context_mvcc_docs_idx ON th_mv_context_mvcc_docs
+	USING turbohybrid (embedding multivector_maxsim_ip_turbohybrid_ops)
+	WITH (multivector_graph = 'document_nodes',
+		  multivector_context_mode = 'context_level');
+SET enable_seqscan = off;
+SET turbohybrid.multivector_candidate_source = 'exact_doc_scan';
+DO $long_context_mvcc_before$
+DECLARE
+	top_id int;
+BEGIN
+	SELECT id INTO top_id
+	FROM th_mv_context_mvcc_docs
+	ORDER BY embedding <~> turbohybrid_query(
+		multivector_query => turbohybrid_multivector_from_float4(ARRAY[0,1]::real[], 2),
+		final_k => 1
+	)
+	LIMIT 1;
+	IF top_id <> 2 THEN
+		RAISE EXCEPTION 'context-level MVCC precheck returned %, expected 2', top_id;
+	END IF;
+END
+$long_context_mvcc_before$;
+UPDATE th_mv_context_mvcc_docs
+SET embedding = turbohybrid_multivector_from_contexts(ARRAY[1,0,0.1,0]::real[], 2, ARRAY[0,1]::int[])
+WHERE id = 2;
+DELETE FROM th_mv_context_mvcc_docs WHERE id = 1;
+VACUUM th_mv_context_mvcc_docs;
+DO $long_context_mvcc_after$
+DECLARE
+	top_id int;
+BEGIN
+	SELECT id INTO top_id
+	FROM th_mv_context_mvcc_docs
+	ORDER BY embedding <~> turbohybrid_query(
+		multivector_query => turbohybrid_multivector_from_float4(ARRAY[0,1]::real[], 2),
+		final_k => 1
+	)
+	LIMIT 1;
+	IF top_id <> 3 THEN
+		RAISE EXCEPTION 'context-level MVCC postcheck returned %, expected 3', top_id;
+	END IF;
+END
+$long_context_mvcc_after$;
+RESET turbohybrid.multivector_candidate_source;
+RESET enable_seqscan;
 SELECT turbohybrid_multivector_dims(
   'turbohybrid_multivector(dim=2,count=1,values=[[1,0]])'::turbohybrid_multivector
 ) AS literal_dims;
@@ -859,6 +1035,7 @@ BEGIN
 	END IF;
 
 	SET LOCAL turbohybrid.multivector_bm25_candidate_injection = dense_with_text;
+	SET LOCAL turbohybrid.multivector_branch_plan = dense_only;
 	SELECT id INTO top_id
 	FROM mv_bm25_injection_docs
 	ORDER BY colbert <~> turbohybrid_query(
@@ -875,7 +1052,12 @@ BEGIN
 		stats->>'multivector_bm25_injection_enabled' <> 'true' OR
 		(stats->>'multivector_bm25_injection_candidates')::int < 1 OR
 		(stats->>'multivector_bm25_injection_retained')::int < 1 OR
-		(stats->>'multivector_bm25_injection_exact_reranked')::int < 1 THEN
+		(stats->>'multivector_bm25_injection_exact_reranked')::int < 1 OR
+		stats->>'multivector_branch_plan' <> 'dense_only' OR
+		stats->>'branch_fusion_mode' <> 'dense_only' OR
+		(stats->>'branch_count')::int <> 1 OR
+		stats->'branch_kinds' <> '["token_nodes"]'::jsonb OR
+		(stats->'branch_source_flags'->>0)::int <> 7 THEN
 		RAISE EXCEPTION 'expected dense_with_text BM25 injection to admit exact-MaxSim winner, top %, stats %',
 			top_id, stats;
 	END IF;
@@ -885,6 +1067,7 @@ BEGIN
 	END IF;
 
 	SET LOCAL turbohybrid.multivector_bm25_candidate_injection = hybrid_only;
+	SET LOCAL turbohybrid.multivector_branch_plan = qdrant_like;
 	SELECT id INTO top_id
 	FROM mv_bm25_injection_docs
 	ORDER BY colbert <~> turbohybrid_query(
@@ -898,9 +1081,118 @@ BEGIN
 	LIMIT 1;
 	stats := turbohybrid_last_scan_stats();
 	IF stats->>'multivector_bm25_injection_enabled' <> 'true' OR
-		stats->>'fusion_strategy' NOT IN ('sorted_merge_doc', 'hash_doc') THEN
+		stats->>'fusion_strategy' NOT IN ('sorted_merge_doc', 'hash_doc') OR
+		stats->>'multivector_branch_plan' <> 'qdrant_like' OR
+		stats->>'branch_fusion_mode' <> 'qdrant_like_rrf' OR
+		(stats->>'branch_count')::int <> 3 OR
+		stats->'branch_kinds' <> '["token_nodes", "bm25", "exact_doc_scan"]'::jsonb OR
+		stats->'branch_ranks' <> '[1, 2, 3]'::jsonb OR
+		(stats->'branch_candidate_counts'->>2)::int < 1 THEN
 		RAISE EXCEPTION 'expected hybrid_only injection to preserve document-keyed RRF, top %, stats %',
 			top_id, stats;
+	END IF;
+
+	SET LOCAL turbohybrid.multivector_bm25_candidate_injection = off;
+	SET LOCAL turbohybrid.multivector_sparse_candidate_source = learned_sparse;
+	SET LOCAL turbohybrid.multivector_branch_plan = dense_only;
+	SELECT id INTO top_id
+	FROM mv_bm25_injection_docs
+	ORDER BY colbert <~> turbohybrid_query(
+	  multivector_query => q,
+	  text_query => to_tsquery('simple', 'needle'),
+	  dense_k => 1,
+	  bm25_k => 2,
+	  final_k => 1,
+	  bm25_weight => 0
+	)
+	LIMIT 1;
+	stats := turbohybrid_last_scan_stats();
+	IF top_id <> 'good' OR
+		stats->>'multivector_bm25_injection_enabled' <> 'true' OR
+		(stats->>'learned_sparse_candidates')::int < 1 OR
+		(stats->>'learned_sparse_retained_for_maxsim')::int < 1 OR
+		(stats->>'learned_sparse_branch_latency_us')::int < 0 OR
+		(stats->>'multivector_bm25_injection_exact_reranked')::int < 1 THEN
+		RAISE EXCEPTION 'expected learned_sparse injection to admit exact-MaxSim winner, top %, stats %',
+			top_id, stats;
+	END IF;
+	SET LOCAL turbohybrid.multivector_sparse_candidate_source = off;
+END
+$$;
+DO $$
+DECLARE
+	q turbohybrid_multivector := turbohybrid_multivector(ARRAY[
+		'[1,0]'::vector,
+		'[0,1]'::vector
+	]);
+	topk_ids text[];
+	adaptive_ids text[];
+	stats jsonb;
+BEGIN
+	SET LOCAL turbohybrid.multivector_candidate_source = exact_token_scan;
+	SET LOCAL turbohybrid.multivector_candidate_reservoirs = off;
+	SET LOCAL turbohybrid.multivector_subvector_k = 4;
+	SET LOCAL turbohybrid.multivector_unique_docs_per_token = 4;
+	SET LOCAL turbohybrid.multivector_max_raw_hits_per_token = 8;
+	SET LOCAL turbohybrid.multivector_doc_candidate_k = 4;
+	SET LOCAL turbohybrid.multivector_exact_rerank_k = 4;
+
+	SET LOCAL turbohybrid.multivector_exact_rerank = topk;
+	SELECT array_agg(id) INTO topk_ids
+	FROM (
+		SELECT id
+		FROM mv_bm25_injection_docs
+		ORDER BY colbert <~> turbohybrid_query(
+		  multivector_query => q,
+		  dense_k => 4,
+		  final_k => 1
+		)
+		LIMIT 3
+	) ranked;
+
+	SET LOCAL turbohybrid.multivector_exact_rerank = adaptive;
+	SELECT array_agg(id) INTO adaptive_ids
+	FROM (
+		SELECT id
+		FROM mv_bm25_injection_docs
+		ORDER BY colbert <~> turbohybrid_query(
+		  multivector_query => q,
+		  dense_k => 4,
+		  final_k => 1
+		)
+		LIMIT 3
+	) ranked;
+	stats := turbohybrid_last_scan_stats();
+	IF adaptive_ids IS DISTINCT FROM topk_ids OR
+		stats->>'adaptive_rerank_topk_changed_vs_full' <> 'false' OR
+		(stats->>'exact_rerank_candidates')::int < 1 OR
+		(stats->>'exact_rerank_tokens_evaluated')::int < 1 OR
+		(stats->>'exact_rerank_tokens_skipped')::int < 1 OR
+		(stats->>'exact_rerank_pairs_saved')::int < 1 THEN
+		RAISE EXCEPTION 'expected adaptive rerank to preserve topk result with saved work, topk %, adaptive %, stats %',
+			topk_ids, adaptive_ids, stats;
+	END IF;
+
+	SET LOCAL turbohybrid.multivector_exact_rerank = adaptive;
+	SET LOCAL turbohybrid.multivector_exact_rerank_k = 1;
+	SELECT array_agg(id) INTO adaptive_ids
+	FROM (
+		SELECT id
+		FROM mv_bm25_injection_docs
+		ORDER BY colbert <~> turbohybrid_query(
+		  multivector_query => q,
+		  dense_k => 1,
+		  final_k => 1
+		)
+		LIMIT 1
+	) ranked;
+	stats := turbohybrid_last_scan_stats();
+	IF (stats->>'exact_rerank_candidates')::int <> 1 OR
+		(stats->>'exact_rerank_tokens_evaluated')::int <> 2 OR
+		(stats->>'exact_rerank_tokens_skipped')::int <> 0 OR
+		(stats->>'exact_rerank_pairs_saved')::int <> 0 THEN
+		RAISE EXCEPTION 'expected adaptive rerank to fall back to full scoring when topK equals rerank limit, stats %',
+			stats;
 	END IF;
 END
 $$;
@@ -997,6 +1289,8 @@ END
 $$;
 DROP TABLE mv_bm25_injection_docs;
 RESET turbohybrid.multivector_bm25_candidate_injection;
+RESET turbohybrid.multivector_sparse_candidate_source;
+RESET turbohybrid.multivector_exact_rerank;
 RESET turbohybrid.multivector_exact_rerank_k;
 RESET turbohybrid.multivector_candidate_source;
 RESET turbohybrid.multivector_candidate_reservoirs;
@@ -1062,6 +1356,7 @@ SELECT id FROM mv_docs
 id
 4
 (1 row)
+SET turbohybrid.multivector_branch_plan = qdrant_like;
 SELECT id FROM mv_docs
   ORDER BY colbert <~> turbohybrid_query(
     multivector_query => turbohybrid_multivector(ARRAY['[1,0]'::vector]),
@@ -1155,12 +1450,16 @@ BEGIN
 	IF stats->>'fusion_strategy' NOT IN ('sorted_merge_doc', 'hash_doc') OR
 		(stats->>'fast_weighted_enabled')::boolean IS DISTINCT FROM true OR
 		stats->>'dense_norm_mode' <> 'logistic' OR
-		stats->>'bm25_norm_mode' <> 'saturating' THEN
+		stats->>'bm25_norm_mode' <> 'saturating' OR
+		stats->>'multivector_branch_plan' <> 'qdrant_like' OR
+		stats->>'branch_fusion_mode' <> 'qdrant_like_normalized' OR
+		stats->'branch_kinds' <> '["token_nodes", "bm25", "exact_doc_scan"]'::jsonb THEN
 		RAISE EXCEPTION 'expected normalized fast_weighted multivector hybrid fusion, got %',
 			stats;
 	END IF;
 END
 $$;
+RESET turbohybrid.multivector_branch_plan;
 SELECT id FROM mv_docs
   ORDER BY colbert <~> turbohybrid_query(
     multivector_query => turbohybrid_multivector(ARRAY['[1,0]'::vector]),
@@ -1185,6 +1484,134 @@ BEGIN
 	END IF;
 END
 $$;
+SET turbohybrid.multivector_branch_plan = qdrant_like;
+SET turbohybrid.dbsf_min_branch_candidates = 1;
+SELECT id FROM mv_docs
+  ORDER BY colbert <~> turbohybrid_query(
+    multivector_query => turbohybrid_multivector(ARRAY['[1,0]'::vector]),
+    text_query => to_tsquery('alpha | gamma'),
+    dense_k => 6,
+    bm25_k => 3,
+    final_k => 3,
+    fusion => 'dbsf'
+  )
+  LIMIT 1;
+id
+3
+(1 row)
+DO $$
+DECLARE
+	stats jsonb;
+BEGIN
+	stats := turbohybrid_last_scan_stats();
+	IF stats->>'fusion_strategy' NOT IN ('sorted_merge_doc', 'hash_doc') OR
+		(stats->>'dbsf_enabled')::boolean IS DISTINCT FROM true OR
+		stats->>'dense_norm_mode' <> 'dbsf' OR
+		stats->>'bm25_norm_mode' <> 'dbsf' OR
+		stats->>'multivector_branch_plan' <> 'qdrant_like' OR
+		stats->>'branch_fusion_mode' <> 'qdrant_like_dbsf' OR
+		stats->'branch_kinds' <> '["token_nodes", "bm25", "exact_doc_scan"]'::jsonb OR
+		jsonb_array_length(stats->'dbsf_branch_mean') <> 2 OR
+		jsonb_array_length(stats->'dbsf_branch_stddev') <> 2 OR
+		(stats->'dbsf_branch_stddev'->>0)::float8 <= 0 OR
+		(stats->'dbsf_branch_stddev'->>1)::float8 <= 0 OR
+		(stats->>'dbsf_degenerate_branches')::int <> 0 THEN
+		RAISE EXCEPTION 'expected document-keyed DBSF multivector hybrid fusion, got %',
+			stats;
+	END IF;
+END
+$$;
+CREATE TABLE mv_dbsf_scale_docs (
+  id int,
+  colbert turbohybrid_multivector,
+  body_tsv tsvector
+);
+INSERT INTO mv_dbsf_scale_docs VALUES
+  (1, turbohybrid_multivector(ARRAY['[0.99,0.01]'::vector]), to_tsvector('simple', repeat('needle ', 200))),
+  (2, turbohybrid_multivector(ARRAY['[0.90,0.10]'::vector]), to_tsvector('simple', repeat('needle ', 80))),
+  (3, turbohybrid_multivector(ARRAY['[0.80,0.20]'::vector]), to_tsvector('simple', repeat('needle ', 20))),
+  (4, turbohybrid_multivector(ARRAY['[0.70,0.30]'::vector]), to_tsvector('simple', 'needle')),
+  (5, turbohybrid_multivector(ARRAY['[0.60,0.40]'::vector]), to_tsvector('simple', 'background one')),
+  (6, turbohybrid_multivector(ARRAY['[0.50,0.50]'::vector]), to_tsvector('simple', 'background two')),
+  (7, turbohybrid_multivector(ARRAY['[0.40,0.60]'::vector]), to_tsvector('simple', 'background three')),
+  (8, turbohybrid_multivector(ARRAY['[0.30,0.70]'::vector]), to_tsvector('simple', 'background four')),
+  (9, turbohybrid_multivector(ARRAY['[0.20,0.80]'::vector]), to_tsvector('simple', 'background five')),
+  (10, turbohybrid_multivector(ARRAY['[0.10,0.90]'::vector]), to_tsvector('simple', 'background six')),
+  (11, turbohybrid_multivector(ARRAY['[0.05,0.95]'::vector]), to_tsvector('simple', 'background seven')),
+  (12, turbohybrid_multivector(ARRAY['[-1,0]'::vector]), to_tsvector('simple', 'background eight'));
+CREATE INDEX mv_dbsf_scale_idx ON mv_dbsf_scale_docs USING turbohybrid
+  (colbert multivector_cosine_turbohybrid_ops,
+   body_tsv bm25_tsvector_turbohybrid_ops);
+ANALYZE mv_dbsf_scale_docs;
+DO $$
+DECLARE
+	stats jsonb;
+	top_id int;
+BEGIN
+	SELECT id INTO top_id
+	FROM mv_dbsf_scale_docs
+	ORDER BY colbert <~> turbohybrid_query(
+	  multivector_query => turbohybrid_multivector(ARRAY['[1,0]'::vector]),
+	  text_query => to_tsquery('simple', 'needle'),
+	  dense_k => 8,
+	  bm25_k => 4,
+	  final_k => 4,
+	  fusion => 'dbsf'
+	)
+	LIMIT 1;
+	stats := turbohybrid_last_scan_stats();
+	IF top_id IS NULL OR
+		(stats->>'dbsf_enabled')::boolean IS DISTINCT FROM true OR
+		(stats->'dbsf_branch_max'->>0)::float8 <= (stats->'dbsf_branch_min'->>0)::float8 OR
+		(stats->'dbsf_branch_max'->>1)::float8 <= (stats->'dbsf_branch_min'->>1)::float8 OR
+		(stats->'dbsf_branch_stddev'->>0)::float8 <= 0 OR
+		(stats->'dbsf_branch_stddev'->>1)::float8 <= 0 OR
+		(stats->>'dbsf_degenerate_branches')::int <> 0 THEN
+		RAISE EXCEPTION 'expected DBSF to normalize mismatched BM25/MaxSim branch scales, top %, stats %',
+			top_id, stats;
+	END IF;
+END
+$$;
+DROP TABLE mv_dbsf_scale_docs;
+CREATE TABLE mv_dbsf_degenerate_docs (
+  id int,
+  colbert turbohybrid_multivector,
+  body_tsv tsvector
+);
+INSERT INTO mv_dbsf_degenerate_docs VALUES
+  (1, turbohybrid_multivector(ARRAY['[1,0]'::vector]), to_tsvector('simple', 'same')),
+  (2, turbohybrid_multivector(ARRAY['[1,0]'::vector]), to_tsvector('simple', 'same')),
+  (3, turbohybrid_multivector(ARRAY['[1,0]'::vector]), to_tsvector('simple', 'same'));
+CREATE INDEX mv_dbsf_degenerate_idx ON mv_dbsf_degenerate_docs USING turbohybrid
+  (colbert multivector_cosine_turbohybrid_ops,
+   body_tsv bm25_tsvector_turbohybrid_ops);
+ANALYZE mv_dbsf_degenerate_docs;
+DO $$
+DECLARE
+	stats jsonb;
+BEGIN
+	PERFORM id
+	FROM mv_dbsf_degenerate_docs
+	ORDER BY colbert <~> turbohybrid_query(
+	  multivector_query => turbohybrid_multivector(ARRAY['[1,0]'::vector]),
+	  text_query => to_tsquery('simple', 'same'),
+	  dense_k => 3,
+	  bm25_k => 3,
+	  final_k => 3,
+	  fusion => 'dbsf'
+	)
+	LIMIT 3;
+	stats := turbohybrid_last_scan_stats();
+	IF (stats->>'dbsf_enabled')::boolean IS DISTINCT FROM true OR
+		(stats->>'dbsf_degenerate_branches')::int < 1 THEN
+		RAISE EXCEPTION 'expected DBSF degenerate branch diagnostics for identical scores, got %',
+			stats;
+	END IF;
+END
+$$;
+DROP TABLE mv_dbsf_degenerate_docs;
+RESET turbohybrid.dbsf_min_branch_candidates;
+RESET turbohybrid.multivector_branch_plan;
 CREATE TABLE mv_docnode_hybrid_scheduler_docs (
   id text PRIMARY KEY,
   colbert turbohybrid_multivector,
@@ -1357,6 +1784,103 @@ SELECT id FROM mv_docs
   LIMIT 1;
 ERROR:  multivector dimensions 2 exceed configured limit 1
 RESET turbohybrid.multivector_max_dim;
+SELECT turbohybrid_multivector_model_info('colbert-ir/colbertv2.0')->>'dim'
+  AS colbertv2_dim;
+colbertv2_dim
+128
+(1 row)
+SELECT turbohybrid_multivector_model_info('answerdotai/answerai-colbert-small-v1')->>'dim'
+  AS answerai_small_dim;
+answerai_small_dim
+96
+(1 row)
+SELECT turbohybrid_multivector_model_info('jinaai/jina-colbert-v2-64')->>'dim'
+  AS jina_colbert_v2_64_dim;
+jina_colbert_v2_64_dim
+64
+(1 row)
+SELECT turbohybrid_multivector_model_info('johannhartmann/SauerkrautLM-Multi-ColBERT-15m-GGUF')->>'status'
+  AS sauerkraut_gguf_status;
+sauerkraut_gguf_status
+validation
+(1 row)
+SELECT turbohybrid_multivector_model_info('colbert-ir/colbertv2.0')->>'token_mask_policy'
+  AS colbertv2_mask_policy;
+colbertv2_mask_policy
+special_and_punctuation
+(1 row)
+SELECT turbohybrid_multivector_model_info('vidore/colpali-v1.2')->>'field_context_policy'
+  AS colpali_field_context_policy;
+colpali_field_context_policy
+visual_patch_multivector
+(1 row)
+SELECT turbohybrid_multivector_model_info('not/a-real-model')->>'known'
+  AS unknown_model_known;
+unknown_model_known
+false
+(1 row)
+SET turbohybrid.multivector_model_name = 'answerdotai/answerai-colbert-small-v1';
+SELECT id FROM mv_docs
+  ORDER BY colbert <~> turbohybrid_query(
+    multivector_query => turbohybrid_multivector(ARRAY['[1,0]'::vector]),
+    dense_k => 6,
+    final_k => 1
+  )
+  LIMIT 1;
+ERROR:  multivector dimensions 2 do not match configured model "answerdotai/answerai-colbert-small-v1" dimensions 96
+RESET turbohybrid.multivector_model_name;
+SET turbohybrid.multivector_model_name = 'jinaai/jina-colbert-v2-64';
+SELECT turbohybrid_index_stats('mv_docs_hybrid_idx'::regclass)->>'multivector_model_name'
+  AS stats_model_name,
+       turbohybrid_index_stats('mv_docs_hybrid_idx'::regclass)->>'multivector_model_dim'
+  AS stats_model_dim,
+       turbohybrid_index_stats('mv_docs_hybrid_idx'::regclass)->>'multivector_model_recommended_storage_kind'
+  AS stats_model_storage,
+       turbohybrid_index_stats('mv_docs_hybrid_idx'::regclass)->>'multivector_model_token_mask_policy'
+  AS stats_model_mask_policy,
+       turbohybrid_index_stats('mv_docs_hybrid_idx'::regclass)->>'multivector_model_field_context_policy'
+  AS stats_model_field_context_policy;
+stats_model_name|stats_model_dim|stats_model_storage|stats_model_mask_policy|stats_model_field_context_policy
+jinaai/jina-colbert-v2-64|64|f16|model_skiplist|long_context_text
+(1 row)
+RESET turbohybrid.multivector_model_name;
+CREATE TEMP TABLE mv_model_warning_docs (
+	id int,
+	colbert turbohybrid_multivector
+);
+INSERT INTO mv_model_warning_docs
+SELECT 1,
+       turbohybrid_multivector_from_float4(
+         ARRAY(
+           SELECT CASE WHEN gs = 1 THEN 1 ELSE 0 END::real
+           FROM generate_series(1, 128) gs
+         ),
+         128
+       );
+CREATE INDEX mv_model_warning_docs_idx ON mv_model_warning_docs
+USING turbohybrid (colbert multivector_maxsim_ip_turbohybrid_ops);
+SET enable_seqscan = off;
+SET turbohybrid.multivector_model_name = 'colbert-ir/colbertv2.0';
+SELECT id FROM mv_model_warning_docs
+  ORDER BY colbert <~> turbohybrid_query(
+    multivector_query => turbohybrid_multivector_from_float4(
+      ARRAY(
+        SELECT CASE WHEN (gs - 1) % 128 = 0 THEN 1 ELSE 0 END::real
+        FROM generate_series(1, 128 * 33) gs
+      ),
+      128
+    ),
+    dense_k => 1,
+    final_k => 1
+  )
+  LIMIT 1;
+WARNING:  multivector query token count 33 exceeds colbert-ir/colbertv2.0 profile default 32
+id
+1
+(1 row)
+RESET turbohybrid.multivector_model_name;
+SET enable_seqscan = off;
+DROP TABLE mv_model_warning_docs;
 SET turbohybrid.multivector_max_raw_hits_per_token = 1;
 SELECT id FROM mv_docs
   ORDER BY colbert <~> turbohybrid_query(
@@ -1559,7 +2083,7 @@ SELECT id FROM mv_docs
 QUERY PLAN
 Limit
   ->  Index Scan using mv_docs_hybrid_idx on mv_docs
-        Order By: (colbert <~> turbohybrid_query(NULL::vector, NULL::tsquery, 'rrf'::text, '1'::double precision, '1'::double precision, NULL::double precision, NULL::integer, 6, NULL::integer, 1, false, 'turbohybrid_multivector(dim=2,count=1,values=[[1,0]])'::turbohybrid_multivector))
+        Order By: (colbert <~> turbohybrid_query(NULL::vector, NULL::tsquery, 'rrf'::text, '1'::double precision, '1'::double precision, NULL::double precision, NULL::integer, 6, NULL::integer, 1, false, 'turbohybrid_multivector(dim=2,count=1,values=[[1,0]])'::turbohybrid_multivector, NULL::real[], NULL::boolean[]))
 (3 rows)
 RESET enable_seqscan;
 CREATE TABLE mv_usability_dense_only_docs (
@@ -1661,16 +2185,17 @@ DECLARE
 	stats jsonb;
 BEGIN
 	stats := turbohybrid_last_scan_stats();
-	IF stats->>'multivector_graph_mode' <> 'document_nodes' OR
-		stats->>'multivector_docmap_source' <> 'sidecar' OR
-		(stats->>'multivector_doc_graph_nodes')::int <> 3 OR
-		(stats->>'multivector_doc_graph_candidates')::int <> 3 OR
-		(stats->>'multivector_doc_graph_quantized_scores')::int <> 0 OR
-		(stats->>'multivector_doc_graph_exact_rerank_docs')::int < 1 OR
-		stats->>'multivector_doc_graph_warning' <> 'document_node_f32_sidecar_exact_scan' THEN
-		RAISE EXCEPTION 'expected document-node graph scan stats, got %',
-			stats;
-	END IF;
+		IF stats->>'multivector_graph_mode' <> 'document_nodes' OR
+			stats->>'multivector_docmap_source' <> 'sidecar' OR
+			(stats->>'multivector_doc_graph_nodes')::int <> 3 OR
+			(stats->>'multivector_doc_graph_search_ef')::int <> 2 OR
+			(stats->>'multivector_doc_graph_candidates')::int <> 2 OR
+			(stats->>'multivector_doc_graph_quantized_scores')::int <> 0 OR
+			(stats->>'multivector_doc_graph_exact_rerank_docs')::int <> 2 OR
+			stats->>'multivector_doc_graph_warning' <> 'document_node_f32_sidecar_graph_traversal' THEN
+			RAISE EXCEPTION 'expected document-node graph scan stats, got %',
+				stats;
+		END IF;
 END
 $$;
 SET turbohybrid.multivector_doc_graph_rescore_k = 1;
@@ -1701,6 +2226,41 @@ BEGIN
 END
 $$;
 RESET turbohybrid.multivector_doc_graph_rescore_k;
+SET turbohybrid.multivector_plain_fallback = auto;
+SET turbohybrid.multivector_plain_fallback_max_docs = 0;
+SET turbohybrid.multivector_plain_fallback_candidate_fraction = 0.5;
+SET turbohybrid.multivector_doc_graph_rescore_k = 2;
+SET turbohybrid.multivector_doc_graph_oversampling = 2;
+SELECT id AS document_node_auto_full_candidate_fallback
+FROM mv_document_node_docs
+ORDER BY colbert <~> turbohybrid_query(
+  multivector_query => turbohybrid_multivector(ARRAY['[1,0]'::vector]),
+  dense_k => 1,
+  final_k => 1
+)
+LIMIT 1;
+document_node_auto_full_candidate_fallback
+1
+(1 row)
+DO $$
+DECLARE
+	stats jsonb;
+BEGIN
+	stats := turbohybrid_last_scan_stats();
+	IF stats->>'multivector_plain_fallback_used' <> 'true' OR
+		stats->>'multivector_plain_fallback_reason' <> 'document_node_candidate_fraction' OR
+		(stats->>'multivector_plain_fallback_docs_scored')::int <> 3 OR
+		(stats->>'multivector_doc_graph_edges_visited')::int <> 0 THEN
+		RAISE EXCEPTION 'expected document-node expanded candidate fallback stats, got %',
+			stats;
+	END IF;
+END
+$$;
+RESET turbohybrid.multivector_doc_graph_oversampling;
+RESET turbohybrid.multivector_doc_graph_rescore_k;
+RESET turbohybrid.multivector_plain_fallback_candidate_fraction;
+RESET turbohybrid.multivector_plain_fallback_max_docs;
+SET turbohybrid.multivector_plain_fallback = off;
 RESET enable_seqscan;
 INSERT INTO mv_document_node_docs VALUES
   (4, turbohybrid_multivector(ARRAY['[-1,0]'::vector, '[-0.8,-0.2]'::vector]));
@@ -1733,9 +2293,166 @@ LIMIT 1;
 document_node_post_vacuum_top1
 3
 (1 row)
+DO $$
+DECLARE
+	stats jsonb;
+BEGIN
+	stats := turbohybrid_last_scan_stats();
+	IF stats->>'multivector_graph_mode' <> 'document_nodes' OR
+		stats->>'multivector_docmap_source' <> 'sidecar' OR
+		(stats->>'multivector_doc_graph_candidates')::int < 1 OR
+		(stats->>'multivector_doc_graph_exact_rerank_docs')::int < 1 THEN
+		RAISE EXCEPTION 'expected document-node post-vacuum visibility to use sidecar graph path, got %',
+			stats;
+	END IF;
+END
+$$;
 RESET enable_seqscan;
 RESET turbohybrid.multivector_plain_fallback;
 DROP TABLE mv_document_node_docs;
+CREATE TABLE mv_document_node_pool_docs (
+  id int PRIMARY KEY,
+  colbert turbohybrid_multivector
+);
+INSERT INTO mv_document_node_pool_docs VALUES
+  (1, turbohybrid_multivector(ARRAY[
+    '[1,0,0,0]'::vector,
+    '[0.98,0.02,0,0]'::vector,
+    '[0,1,0,0]'::vector,
+    '[0.02,0.98,0,0]'::vector,
+    '[0,0,1,0]'::vector,
+    '[0,0,0.98,0.02]'::vector,
+    '[0,0,0,1]'::vector,
+    '[0,0,0.02,0.98]'::vector
+  ])),
+  (2, turbohybrid_multivector(ARRAY[
+    '[0,0,1,0]'::vector,
+    '[0,0,0.98,0.02]'::vector,
+    '[0,0,0,1]'::vector,
+    '[0,0,0.02,0.98]'::vector,
+    '[-1,0,0,0]'::vector,
+    '[-0.98,-0.02,0,0]'::vector,
+    '[0,-1,0,0]'::vector,
+    '[-0.02,-0.98,0,0]'::vector
+  ]));
+CREATE INDEX mv_document_node_pool_docs_idx ON mv_document_node_pool_docs USING turbohybrid
+  (colbert multivector_cosine_turbohybrid_ops)
+  WITH (multivector_graph = document_nodes,
+        multivector_token_pooling = greedy_cosine,
+        multivector_token_pooling_target_ratio = 0.5,
+        multivector_token_pooling_min_tokens = 4,
+        graph_ef_search = 2);
+SET enable_seqscan = off;
+SET turbohybrid.multivector_plain_fallback = off;
+SELECT id AS document_node_pooling_top1
+FROM mv_document_node_pool_docs
+ORDER BY colbert <~> turbohybrid_query(
+  multivector_query => turbohybrid_multivector(ARRAY[
+    '[1,0,0,0]'::vector,
+    '[0,1,0,0]'::vector,
+    '[0,0,1,0]'::vector,
+    '[0,0,0,1]'::vector
+  ]),
+  dense_k => 2,
+  final_k => 1
+)
+LIMIT 1;
+document_node_pooling_top1
+1
+(1 row)
+DO $$
+DECLARE
+	stats jsonb;
+	original_tokens int;
+	pooled_tokens int;
+	pooling_ratio numeric;
+BEGIN
+	stats := turbohybrid_last_scan_stats();
+	original_tokens := (stats->>'multivector_tokens_original')::int;
+	pooled_tokens := (stats->>'multivector_tokens_pooled')::int;
+	pooling_ratio := (stats->>'multivector_token_pooling_ratio')::numeric;
+
+	IF stats->>'multivector_graph_mode' <> 'document_nodes' OR
+		original_tokens <> 16 OR
+		pooled_tokens <> 8 OR
+		pooling_ratio < 0.49 OR
+		pooling_ratio > 0.51 OR
+		(stats->>'multivector_doc_graph_exact_rerank_docs')::int < 1 THEN
+		RAISE EXCEPTION 'expected pooled document-node scan stats, got %',
+			stats;
+	END IF;
+END
+$$;
+RESET enable_seqscan;
+RESET turbohybrid.multivector_plain_fallback;
+DROP INDEX mv_document_node_pool_docs_idx;
+CREATE INDEX mv_document_node_pool_docs_kmeans_idx ON mv_document_node_pool_docs USING turbohybrid
+  (colbert multivector_cosine_turbohybrid_ops)
+  WITH (multivector_graph = document_nodes,
+        multivector_token_pooling = kmeans,
+        multivector_token_pooling_target_ratio = 0.5,
+        multivector_token_pooling_min_tokens = 4,
+        graph_ef_search = 2);
+SET enable_seqscan = off;
+SET turbohybrid.multivector_plain_fallback = off;
+SELECT id AS document_node_kmeans_pooling_top1
+FROM mv_document_node_pool_docs
+ORDER BY colbert <~> turbohybrid_query(
+  multivector_query => turbohybrid_multivector(ARRAY[
+    '[1,0,0,0]'::vector,
+    '[0,1,0,0]'::vector,
+    '[0,0,1,0]'::vector,
+    '[0,0,0,1]'::vector
+  ]),
+  dense_k => 2,
+  final_k => 1
+)
+LIMIT 1;
+document_node_kmeans_pooling_top1
+1
+(1 row)
+DO $$
+DECLARE
+	stats jsonb;
+	original_tokens int;
+	pooled_tokens int;
+	pooling_ratio numeric;
+BEGIN
+	stats := turbohybrid_last_scan_stats();
+	original_tokens := (stats->>'multivector_tokens_original')::int;
+	pooled_tokens := (stats->>'multivector_tokens_pooled')::int;
+	pooling_ratio := (stats->>'multivector_token_pooling_ratio')::numeric;
+
+	IF stats->>'multivector_graph_mode' <> 'document_nodes' OR
+		original_tokens <> 16 OR
+		pooled_tokens <> 8 OR
+		pooling_ratio < 0.49 OR
+		pooling_ratio > 0.51 OR
+		(stats->>'multivector_doc_graph_exact_rerank_docs')::int < 1 THEN
+		RAISE EXCEPTION 'expected kmeans pooled document-node scan stats, got %',
+			stats;
+	END IF;
+END
+$$;
+RESET enable_seqscan;
+RESET turbohybrid.multivector_plain_fallback;
+DO $$
+BEGIN
+	BEGIN
+		EXECUTE '
+			CREATE INDEX mv_document_node_pool_bad_ratio_idx
+			ON mv_document_node_pool_docs USING turbohybrid
+			(colbert multivector_cosine_turbohybrid_ops)
+			WITH (multivector_graph = document_nodes,
+			      multivector_token_pooling = greedy_cosine,
+			      multivector_token_pooling_target_ratio = 0)';
+		RAISE EXCEPTION 'expected invalid multivector_token_pooling_target_ratio to fail';
+	EXCEPTION WHEN invalid_parameter_value THEN
+		NULL;
+	END;
+END
+$$;
+DROP TABLE mv_document_node_pool_docs;
 SELECT turbohybrid_multivector(ARRAY['[1,0]'::vector]) <~>
   turbohybrid_query(vector_query => '[1,0]'::vector);
 ERROR:  turbohybrid_query requires multivector_query for multivector distance
@@ -1750,6 +2467,390 @@ SELECT id FROM mv_docs
 ERROR:  vector_query requires a turbohybrid index with a vector key
 RESET enable_seqscan;
 DROP TABLE mv_docs;
+DO $$
+DECLARE
+	doc turbohybrid_multivector :=
+		turbohybrid_multivector(ARRAY['[1,0]'::vector, '[0,1]'::vector]);
+	query_two turbohybrid_multivector :=
+		turbohybrid_multivector(ARRAY['[1,0]'::vector, '[0,1]'::vector]);
+	query_one turbohybrid_multivector :=
+		turbohybrid_multivector(ARRAY['[1,0]'::vector]);
+	unweighted float8;
+	weighted_ones float8;
+	masked float8;
+	one_token float8;
+	unweighted_top int;
+	weighted_top int;
+BEGIN
+	unweighted := turbohybrid_multivector_distance(
+		doc,
+		turbohybrid_query(multivector_query => query_two));
+	weighted_ones := turbohybrid_multivector_distance(
+		doc,
+		turbohybrid_query(
+			multivector_query => query_two,
+			query_token_weights => ARRAY[1,1]::real[]));
+	masked := turbohybrid_multivector_distance(
+		doc,
+		turbohybrid_query(
+			multivector_query => query_two,
+			query_token_mask => ARRAY[false,true]));
+	one_token := turbohybrid_multivector_distance(
+		doc,
+		turbohybrid_query(multivector_query => query_one));
+
+	IF abs(unweighted - weighted_ones) > 0.000001 THEN
+		RAISE EXCEPTION 'all-one query token weights changed score: % vs %',
+			unweighted, weighted_ones;
+	END IF;
+	IF abs(masked - one_token) > 0.000001 THEN
+		RAISE EXCEPTION 'masked query token affected score: % vs %',
+			masked, one_token;
+	END IF;
+
+	WITH docs(id, mv) AS (
+		VALUES
+			(1, turbohybrid_multivector(ARRAY['[1,0]'::vector, '[0.5,0.5]'::vector])),
+			(2, turbohybrid_multivector(ARRAY['[0.4,0]'::vector, '[0,1]'::vector]))
+	)
+	SELECT id INTO unweighted_top
+	FROM docs
+	ORDER BY mv <~> turbohybrid_query(multivector_query => query_two)
+	LIMIT 1;
+
+	WITH docs(id, mv) AS (
+		VALUES
+			(1, turbohybrid_multivector(ARRAY['[1,0]'::vector, '[0.5,0.5]'::vector])),
+			(2, turbohybrid_multivector(ARRAY['[0.4,0]'::vector, '[0,1]'::vector]))
+	)
+	SELECT id INTO weighted_top
+	FROM docs
+	ORDER BY mv <~> turbohybrid_query(
+		multivector_query => query_two,
+		query_token_weights => ARRAY[1,3]::real[])
+	LIMIT 1;
+
+	IF unweighted_top <> 1 OR weighted_top <> 2 THEN
+		RAISE EXCEPTION 'expected query token weights to change ranking, got unweighted %, weighted %',
+			unweighted_top, weighted_top;
+	END IF;
+END
+$$;
+CREATE TABLE mv_query_token_mask_docs (
+	id int,
+	colbert turbohybrid_multivector
+);
+INSERT INTO mv_query_token_mask_docs VALUES
+	(1, turbohybrid_multivector(ARRAY['[1,0]'::vector])),
+	(2, turbohybrid_multivector(ARRAY['[0,1]'::vector]));
+CREATE INDEX mv_query_token_mask_docs_idx ON mv_query_token_mask_docs
+USING turbohybrid (colbert multivector_cosine_turbohybrid_ops)
+WITH (multivector_graph = token_nodes, graph_ef_search = 2);
+SET enable_seqscan = off;
+DO $$
+DECLARE
+	top_id int;
+BEGIN
+	SELECT id INTO top_id
+	FROM mv_query_token_mask_docs
+	ORDER BY colbert <~> turbohybrid_query(
+		multivector_query => turbohybrid_multivector(ARRAY[
+			'[1,0]'::vector,
+			'[0,1]'::vector
+		]),
+		query_token_mask => ARRAY[false,true],
+		dense_k => 1,
+		final_k => 1
+	)
+	LIMIT 1;
+
+	IF top_id <> 1 THEN
+		RAISE EXCEPTION 'masked token-node query returned %, expected 1',
+			top_id;
+	END IF;
+END
+$$;
+RESET enable_seqscan;
+DROP TABLE mv_query_token_mask_docs;
+CREATE TABLE mv_query_token_weight_docnodes (
+	id int,
+	colbert turbohybrid_multivector
+);
+INSERT INTO mv_query_token_weight_docnodes VALUES
+	(1, turbohybrid_multivector(ARRAY['[1,0]'::vector, '[0.5,0.5]'::vector])),
+	(2, turbohybrid_multivector(ARRAY['[0.4,0]'::vector, '[0,1]'::vector]));
+CREATE INDEX mv_query_token_weight_docnodes_idx ON mv_query_token_weight_docnodes
+USING turbohybrid (colbert multivector_maxsim_ip_turbohybrid_ops)
+WITH (multivector_graph = document_nodes, graph_ef_search = 4);
+SET enable_seqscan = off;
+SET turbohybrid.multivector_candidate_source = 'document_nodes';
+SET turbohybrid.multivector_exact_rerank = off;
+DO $$
+DECLARE
+	query_two turbohybrid_multivector :=
+		turbohybrid_multivector(ARRAY['[1,0]'::vector, '[0,1]'::vector]);
+	unweighted_top int;
+	weighted_top int;
+	masked_top int;
+BEGIN
+	SELECT id INTO unweighted_top
+	FROM mv_query_token_weight_docnodes
+	ORDER BY colbert <~> turbohybrid_query(
+		multivector_query => query_two,
+		final_k => 1
+	)
+	LIMIT 1;
+
+	SELECT id INTO weighted_top
+	FROM mv_query_token_weight_docnodes
+	ORDER BY colbert <~> turbohybrid_query(
+		multivector_query => query_two,
+		query_token_weights => ARRAY[1,3]::real[],
+		final_k => 1
+	)
+	LIMIT 1;
+
+	SELECT id INTO masked_top
+	FROM mv_query_token_weight_docnodes
+	ORDER BY colbert <~> turbohybrid_query(
+		multivector_query => query_two,
+		query_token_mask => ARRAY[false,true],
+		final_k => 1
+	)
+	LIMIT 1;
+
+	IF unweighted_top <> 1 OR weighted_top <> 2 OR masked_top <> 1 THEN
+		RAISE EXCEPTION 'expected document-node query token sidecar ranking 1/2/1, got %/%/%',
+			unweighted_top, weighted_top, masked_top;
+	END IF;
+END
+$$;
+RESET turbohybrid.multivector_exact_rerank;
+RESET turbohybrid.multivector_candidate_source;
+RESET enable_seqscan;
+DROP TABLE mv_query_token_weight_docnodes;
+CREATE TABLE mv_centroid_lite_docs (
+	id int,
+	colbert turbohybrid_multivector
+);
+INSERT INTO mv_centroid_lite_docs VALUES
+	(1, turbohybrid_multivector(ARRAY['[1,0]'::vector, '[0.8,0.2]'::vector, '[0,1]'::vector, '[0.2,0.8]'::vector])),
+	(2, turbohybrid_multivector(ARRAY['[0,1]'::vector, '[0.1,0.9]'::vector, '[-1,0]'::vector, '[-0.8,0.2]'::vector])),
+	(3, turbohybrid_multivector(ARRAY['[-1,0]'::vector, '[-0.9,0.1]'::vector, '[0,-1]'::vector, '[0.1,-0.9]'::vector]));
+CREATE INDEX mv_centroid_lite_docs_idx ON mv_centroid_lite_docs
+USING turbohybrid (colbert multivector_cosine_turbohybrid_ops)
+WITH (multivector_graph = document_nodes,
+      multivector_centroids = kmeans,
+      multivector_centroid_count = 2,
+      graph_ef_search = 2);
+SET enable_seqscan = off;
+DO $$
+DECLARE
+	top_id int;
+	stats jsonb;
+BEGIN
+	PERFORM set_config('turbohybrid.multivector_candidate_source', 'centroid_lite', true);
+	PERFORM set_config('turbohybrid.multivector_plain_fallback', 'off', true);
+	PERFORM set_config('turbohybrid.multivector_doc_candidate_k', '3', true);
+	SELECT id INTO top_id
+	FROM mv_centroid_lite_docs
+	ORDER BY colbert <~> turbohybrid_query(
+		multivector_query => turbohybrid_multivector(ARRAY[
+			'[1,0]'::vector,
+			'[0,1]'::vector
+		]),
+		dense_k => 3,
+		final_k => 1
+	)
+	LIMIT 1;
+	stats := turbohybrid_last_scan_stats();
+
+	IF top_id <> 1 OR
+		stats->>'multivector_candidate_source' <> 'centroid_lite' OR
+		stats->>'multivector_doc_graph_warning' <> 'document_node_centroid_lite_prefilter' OR
+		(stats->>'centroid_docs_touched')::int <= 0 OR
+		(stats->>'centroid_lists_visited')::int <= 0 OR
+		NOT (stats ? 'centroid_pruned_docs') OR
+		(stats->>'centroid_candidates')::int <= 0 THEN
+		RAISE EXCEPTION 'centroid_lite scan failed, top %, stats %',
+			top_id, stats;
+	END IF;
+END
+$$;
+RESET enable_seqscan;
+INSERT INTO mv_centroid_lite_docs VALUES
+	(4, turbohybrid_multivector(ARRAY['[0.6,0.8]'::vector, '[0.6,0.8]'::vector, '[0.5,0.86]'::vector, '[0.55,0.83]'::vector]));
+SET enable_seqscan = off;
+DO $$
+DECLARE
+	top_id int;
+	stats jsonb;
+BEGIN
+	PERFORM set_config('turbohybrid.multivector_candidate_source', 'centroid_lite', true);
+	PERFORM set_config('turbohybrid.multivector_plain_fallback', 'off', true);
+	PERFORM set_config('turbohybrid.multivector_doc_candidate_k', '4', true);
+	SELECT id INTO top_id
+	FROM mv_centroid_lite_docs
+	ORDER BY colbert <~> turbohybrid_query(
+		multivector_query => turbohybrid_multivector(ARRAY[
+			'[0.6,0.8]'::vector,
+			'[0.6,0.8]'::vector
+		]),
+		dense_k => 4,
+		final_k => 1
+	)
+	LIMIT 1;
+	stats := turbohybrid_last_scan_stats();
+
+	IF top_id <> 4 OR
+		stats->>'multivector_candidate_source' <> 'centroid_lite' OR
+		stats->>'multivector_doc_graph_warning' <> 'document_node_centroid_lite_prefilter' OR
+		(stats->>'centroid_docs_touched')::int <= 0 THEN
+		RAISE EXCEPTION 'centroid_lite insert sidecar scan failed, top %, stats %',
+			top_id, stats;
+	END IF;
+END
+$$;
+RESET enable_seqscan;
+DO $$
+BEGIN
+	CREATE TEMP TABLE mv_centroid_lite_bad_docs (
+		id int,
+		colbert turbohybrid_multivector
+	);
+	INSERT INTO mv_centroid_lite_bad_docs VALUES
+		(1, turbohybrid_multivector(ARRAY['[1,0]'::vector, '[0,1]'::vector])),
+		(2, turbohybrid_multivector(ARRAY['[-1,0]'::vector, '[0,-1]'::vector]));
+	CREATE INDEX mv_centroid_lite_bad_docs_idx ON mv_centroid_lite_bad_docs
+	USING turbohybrid (colbert multivector_cosine_turbohybrid_ops)
+	WITH (multivector_graph = document_nodes);
+
+	PERFORM set_config('enable_seqscan', 'off', true);
+	PERFORM set_config('turbohybrid.multivector_candidate_source', 'centroid_lite', true);
+	PERFORM set_config('turbohybrid.multivector_plain_fallback', 'force', true);
+	PERFORM id
+	FROM mv_centroid_lite_bad_docs
+	ORDER BY colbert <~> turbohybrid_query(
+		multivector_query => turbohybrid_multivector(ARRAY['[1,0]'::vector]),
+		dense_k => 2,
+		final_k => 1
+	)
+	LIMIT 1;
+	RAISE EXCEPTION 'centroid_lite without centroid option unexpectedly executed';
+EXCEPTION
+	WHEN feature_not_supported THEN
+		IF SQLERRM NOT LIKE 'centroid_lite multivector candidate source requires multivector_centroids = kmeans%' THEN
+			RAISE EXCEPTION 'unexpected centroid_lite missing-centroid error: %', SQLERRM;
+		END IF;
+END
+$$;
+DO $$
+DECLARE
+	top_id int;
+	stats jsonb;
+BEGIN
+	CREATE TEMP TABLE mv_centroid_lite_token_docs (
+		id int,
+		colbert turbohybrid_multivector
+	);
+	INSERT INTO mv_centroid_lite_token_docs VALUES
+		(1, turbohybrid_multivector(ARRAY['[1,0]'::vector, '[0,1]'::vector])),
+		(2, turbohybrid_multivector(ARRAY['[-1,0]'::vector, '[0,-1]'::vector]));
+	CREATE INDEX mv_centroid_lite_token_docs_idx ON mv_centroid_lite_token_docs
+	USING turbohybrid (colbert multivector_cosine_turbohybrid_ops)
+	WITH (multivector_graph = token_nodes,
+	      multivector_centroids = kmeans);
+
+	PERFORM set_config('enable_seqscan', 'off', true);
+	PERFORM set_config('turbohybrid.multivector_candidate_source', 'centroid_lite', true);
+	PERFORM set_config('turbohybrid.multivector_plain_fallback', 'off', true);
+	SELECT id INTO top_id
+	FROM mv_centroid_lite_token_docs
+	ORDER BY colbert <~> turbohybrid_query(
+		multivector_query => turbohybrid_multivector(ARRAY['[1,0]'::vector]),
+		dense_k => 2,
+		final_k => 1
+	)
+	LIMIT 1;
+	stats := turbohybrid_last_scan_stats();
+
+	IF top_id <> 1 OR
+		stats->>'multivector_candidate_source' <> 'centroid_lite' OR
+		stats->>'multivector_doc_graph_warning' <> 'token_node_centroid_lite_exact_token_prefilter' OR
+		(stats->>'centroid_lists_visited')::int <= 0 OR
+		(stats->>'centroid_candidates')::int <= 0 THEN
+		RAISE EXCEPTION 'token-node centroid_lite scan failed, top %, stats %',
+			top_id, stats;
+	END IF;
+END
+$$;
+DO $$
+DECLARE
+	top_id int;
+	stats jsonb;
+BEGIN
+	PERFORM set_config('enable_seqscan', 'off', true);
+	PERFORM set_config('turbohybrid.multivector_candidate_source', 'quantized_inverted_experimental', true);
+	PERFORM set_config('turbohybrid.multivector_plain_fallback', 'force', true);
+	PERFORM set_config('turbohybrid.multivector_doc_candidate_k', '3', true);
+	SELECT id INTO top_id
+	FROM mv_centroid_lite_docs
+	ORDER BY colbert <~> turbohybrid_query(
+		multivector_query => turbohybrid_multivector(ARRAY['[1,0]'::vector]),
+		dense_k => 3,
+		final_k => 1
+	)
+	LIMIT 1;
+	stats := turbohybrid_last_scan_stats();
+
+	IF top_id <> 1 OR
+		stats->>'multivector_candidate_source' <> 'quantized_inverted_experimental' OR
+		stats->>'multivector_accumulator_kind' <> 'quantized_inverted_experimental' OR
+		stats->>'multivector_doc_graph_warning' <> 'quantized_inverted_experimental_persisted_postings' OR
+		(stats->>'quantized_inverted_lists_visited')::int <> 1 OR
+		(stats->>'quantized_inverted_postings_touched')::int <= 0 OR
+		(stats->>'quantized_inverted_docs_scored')::int <= 0 OR
+		(stats->>'quantized_inverted_candidates')::int <= 0 OR
+		(stats->>'quantized_inverted_exact_rerank_docs')::int <= 0 OR
+		(stats->>'quantized_inverted_codebook_size')::int <> 4 THEN
+		RAISE EXCEPTION 'quantized_inverted_experimental scan failed, top %, stats %',
+			top_id, stats;
+	END IF;
+END
+$$;
+DO $$
+BEGIN
+	CREATE TEMP TABLE mv_quantized_inverted_token_docs (
+		id int,
+		colbert turbohybrid_multivector
+	);
+	INSERT INTO mv_quantized_inverted_token_docs VALUES
+		(1, turbohybrid_multivector(ARRAY['[1,0]'::vector])),
+		(2, turbohybrid_multivector(ARRAY['[-1,0]'::vector]));
+	CREATE INDEX mv_quantized_inverted_token_docs_idx ON mv_quantized_inverted_token_docs
+	USING turbohybrid (colbert multivector_cosine_turbohybrid_ops)
+	WITH (multivector_graph = token_nodes);
+
+	PERFORM set_config('enable_seqscan', 'off', true);
+	PERFORM set_config('turbohybrid.multivector_candidate_source', 'quantized_inverted_experimental', true);
+	PERFORM set_config('turbohybrid.multivector_plain_fallback', 'force', true);
+	PERFORM id
+	FROM mv_quantized_inverted_token_docs
+	ORDER BY colbert <~> turbohybrid_query(
+		multivector_query => turbohybrid_multivector(ARRAY['[1,0]'::vector]),
+		dense_k => 2,
+		final_k => 1
+	)
+	LIMIT 1;
+	RAISE EXCEPTION 'quantized_inverted_experimental token-node scan unexpectedly executed';
+EXCEPTION
+	WHEN feature_not_supported THEN
+		IF SQLERRM NOT LIKE 'quantized_inverted_experimental multivector candidate source requires multivector_graph = document_nodes%' THEN
+			RAISE EXCEPTION 'unexpected quantized_inverted_experimental error: %', SQLERRM;
+		END IF;
+END
+$$;
+DROP TABLE mv_centroid_lite_docs;
 \set VERBOSITY terse
 SELECT turbohybrid_multivector(ARRAY[]::vector[]);
 ERROR:  vector array cannot be empty
