@@ -1,318 +1,812 @@
-I rechecked the updated repository by source review, not by running the benchmark locally. The reported gate result is consistent with the current implementation.
+## Current `pgturbohybrid` state to build from
 
-## Recheck verdict
+`pgturbohybrid` is no longer only a token-node ColBERT approximation. The current docs show two paths: the legacy `token_nodes` path, where query tokens retrieve token/subvector graph hits and then aggregate to documents, and the new explicit `document_nodes` path, where one graph node represents one heap document/tuple version and search scoring is intended to be full document-level MaxSim.
 
-The update moved `pgturbohybrid` in the right direction. The decisive signal in your report is not just that `document_nodes` returns `good`; it is that **`exact_token_scan` still returns `spike_1` and does not admit `good`**. That means the old token-node strategy is structurally lossy even when ANN error is removed. The repo’s audit now explicitly describes this distinction: `exact_token_scan` scores every token node but still feeds the same token-hit → document-accumulator → doc-candidate pipeline, so if that oracle still misses, the problem is token-top-k admission rather than graph ANN recall.
+The current benchmark docs also show that Prompt 11 has already started a production document-node path: `multivector_graph = token_nodes | document_nodes`, one graph node per heap document, a versioned index-resident multivector sidecar, symmetrized document MaxSim for build-time edge selection, document-sidecar scoring before heap rerank, and storage modes `f32 | f16 | sq8`. It also now has `proxy_vector`, document-graph knobs, RRF, normalized score fusion, and adaptive hybrid budgeting.
 
-The new document-level paths solve the synthetic top-1 failure in the intended way: they score candidate documents with full document-level MaxSim before final heap rerank. The implementation now has `multivector_graph = token_nodes | document_nodes`; `document_nodes` is opt-in, stores one graph node per heap document, persists a float32 multivector sidecar, builds edges with symmetrized document MaxSim, and scans either by document-graph traversal with sidecar MaxSim or by exact sidecar scan when the search becomes exhaustive.
+So the next best ideas are **not** “make token-node candidate generation wider.” The strongest direction is to make `document_nodes` fast, robust, hybrid-aware, and model-aware, while keeping `token_nodes` only as compatibility/debug mode.
 
-I would **not** read the `top10 admission recall = 0.200` for `plain_fallback`, `exact_doc_scan`, `doc_graph_prototype`, and `document_nodes` as a failure of those paths in this gate. The benchmark README says this deterministic recall gate is primarily a synthetic many-moderate top-1 admission gate; it fails unless the document-level exact paths return and admit the exact top-1. DBpedia admission and broad recall remain separate opt-in checks through normal benchmark runs plus `--admission-debug`.
+---
 
-## What looks good now
+## What modern systems and papers are doing
 
-The implementation now has the right diagnostic surface. `TqDenseCandidateStats` includes candidate source, graph mode, exact-token scan counts, plain-fallback fields, document-graph stats, reservoir stats, BM25-injection stats, admission trace fields, and token stats. This should make DBpedia failures much easier to classify.
+### Qdrant: point-level MaxSim + prefetch pipelines
 
-The document-node build path stores the original multivector for each document in build state and creates one graph node using a representative vector. More importantly, build-time graph distance for `document_nodes` switches to symmetrized full MaxSim over the stored document multivectors: `0.5 * (MaxSim(a,b)/count(a) + MaxSim(b,a)/count(b))`, returned as a distance by negation. That is the right graph-topology direction.
+Qdrant’s multivectors store a variable number of same-shaped dense vectors per point, and its MaxSim comparator returns a **single combined score per point**, not per subvector. Qdrant explicitly defines `max_sim` as the sum of maximum similarities between vectors in the matrices, which matches the semantic direction `pgturbohybrid` is moving toward with `document_nodes`. ([Qdrant][1])
 
-The document-node scan path now loads the document-vector sidecar, scores visited graph nodes with full `TqMultiVectorMaxSim(query, doc)`, and then exact-reranks heap multivectors. This is much closer to Qdrant’s point-level multivector model, where MaxSim returns a combined score per point rather than per subvector.   Qdrant’s public docs describe `max_sim` as a sum of maximum similarities between the matrices and emphasize that MaxSim returns a single combined score per point, not per subvector. ([Qdrant][1])
+Qdrant’s docs also recommend using ColBERT as a reranker over a small candidate set for large-scale retrieval, because ColBERT improves semantic granularity but costs more memory and speed than single-vector retrieval. They suggest dense retrieval for roughly 100–500 initial candidates followed by ColBERT reranking. ([Qdrant][2])
 
-The fallback work also looks useful. `multivector_plain_fallback` now supports `off | auto | force` and can switch to exact heap MaxSim when estimated cardinality is small or candidate/rerank budgets are near-exhaustive. That is the correct safety net for the “10k corpus requires 6400+ candidates” case.
+The most copyable Qdrant API idea is its **prefetch/multi-stage query model**. It can run cheap first-stage retrieval, then rescore with a larger or multivector representation, and it supports nested prefetches such as byte-vector prefetch → full dense vector prefetch → ColBERT multivector final query. ([Qdrant][3])
 
-## Gaps I would fix next
+For hybrid, Qdrant exposes both RRF and DBSF. RRF fuses by ranks; DBSF keeps raw scores but normalizes each retriever’s returned-score distribution before summing, and Qdrant warns that no fusion method dominates universally, so an eval set should choose. ([Qdrant][3])
 
-The biggest code-level concern is **incremental insert for `document_nodes`**. Build-time document-node graph edges use symmetrized full MaxSim, but the insert path creates an averaged representative vector and calls the normal single-vector graph insert path. The sidecar is appended afterward. That means freshly inserted document-node graph connectivity may be based on average-vector geometry, not document-level MaxSim geometry.
+**Copy:** nested branch/prefetch planning, explicit branch budgets, point-level MaxSim scoring, oversampling before exact rerank, DBSF-like score fusion.
 
-That should be a P0 follow-up: implement a document-node-specific insert path that links the new document using the same full/symmetrized MaxSim objective as build. The new document’s full multivector can be kept in memory during insertion; existing neighbor candidates can be scored from the loaded document sidecar. Without this, bulk-built `document_nodes` indexes and incrementally updated `document_nodes` indexes may drift in quality.
+---
 
-The second concern is cost. The current document-node scan is correct but uses a float32 multivector sidecar and full MaxSim for graph traversal. The stats even report `multivectorDocGraphQuantizedScores = 0` and `doc_graph_f32`, and the design doc marks compact quantized document scoring as future work.   This is acceptable as a correctness-first production slice, but it will become the next bottleneck on DBpedia-scale or larger corpora.
+### Vespa: tensor-native ColBERT, long context, int8 compression, phased ranking
 
-The third concern is budget semantics. In `document_nodes`, `candidateLimit` is roughly bounded by `min(doc_candidate_k, docLimit * 2, doc_count)`, and `searchEf` is at least that candidate limit.  For real recall runs, you probably want separate knobs:
+Vespa’s long-context ColBERT implementation stores token vectors as tensors such as `tensor<int8>(context{}, token{}, v[16])`, with `context` representing sliding context windows and `token` representing token position. It uses compressed token vectors and can store them as paged attributes, allowing OS paging for large token tensors. ([Vespa Blog][4])
 
-```text
-turbohybrid.multivector_doc_graph_search_ef
-turbohybrid.multivector_doc_graph_oversampling
-turbohybrid.multivector_doc_graph_exact_rescore_k
-```
+Vespa expresses MaxSim directly in rank profiles using tensor operations. It supports context-level and cross-context MaxSim over long documents, and explicitly discusses using ColBERT as a second-phase ranking expression after a first-stage retrieval operator. ([Vespa Blog][4])
 
-Do not overload `doc_candidate_k` as both admission cap and graph traversal quality knob. Qdrant-style systems separate candidate-generation breadth, oversampling, and exact rescore.
+Vespa also notes that structured fields can either be concatenated or stored as several ColBERT tensors, letting ranking expressions weight multiple MaxSim calculations per field. ([Vespa Blog][4])
 
-The fourth concern is stats/estimation polish. Plain fallback estimates document count from relation estimates or metadata; in token-node indexes, `tqNodeCount` is token count, not document count, so fallback decisions should prefer `tqMultivectorDocCount` when a docmap exists.  Also, plain fallback currently labels graph mode with the default graph mode rather than necessarily the actual index graph mode, because it does not carry `meta` into that stats assignment. That is not a ranking bug, but it can confuse benchmark reports.
+**Copy:** context-window-aware multivectors, field-specific MaxSim, paged sidecar storage, phased ranking, int8 token compression, and “ColBERT as second phase over constrained candidates” as an explicit planner mode.
 
-## Other optimizations worth integrating
+---
 
-### 1. Compact document-node MaxSim scoring
+### Milvus: hybrid branch model + sparse WAND/MaxScore + normalized weighted fusion
 
-This is the highest-impact next step. Keep the current `document_nodes` architecture, but replace traversal-time float32 sidecar scoring with compact sidecar scoring:
+Milvus’ “multi-vector hybrid search” is not ColBERT MaxSim; it is multiple vector fields searched simultaneously, such as dense text, sparse BM25/SPLADE-like text, and image dense vectors. It then reranks/fuses the result sets. ([Milvus][5])
 
-```text
-multivector_doc_storage = f32 | f16 | sq8 | pq | binary
-multivector_doc_graph_oversampling = 2..20
-multivector_doc_graph_rescore = sidecar_f32 | heap_exact
-```
+Milvus’ sparse index supports BM25 with `DAAT_MAXSCORE`, and its docs list `DAAT_MAXSCORE`, `DAAT_WAND`, and `TAAT_NAIVE` as inverted-index algorithm choices. ([Milvus][5])
 
-The search path becomes:
+Milvus’ `WeightedRanker` normalizes route scores into `[0,1]`, using an arctan transform because IP, L2, and other metrics live on different scales; its `RRFRanker` fuses by rank, typically with smoothing constant 60. ([Milvus][6])
 
-```text
-document HNSW traversal
-  -> approximate full MaxSim from compact document sidecar
-  -> oversample candidate docs
-  -> exact MaxSim rerank from f32 sidecar or heap
-```
+**Copy:** make hybrid retrieval branch-native, preserve per-branch score/rank provenance, add a calibrated route-normalization mode, and expose sparse branch algorithm choices similar to WAND/MaxScore.
 
-This directly mirrors the Qdrant lesson: quantization should approximate point-level MaxSim scoring, not change the retrieval identity from documents to token postings. Qdrant’s multivector API exposes MaxSim as a point-level comparator, and its hybrid query docs also model multi-stage retrieval as prefetch candidates followed by a main query/rerank over those candidates. ([Qdrant][1])
+---
 
-The simplest implementation order would be `f16` first, then per-dimension scalar int8, then maybe product quantization or binary quantization. ColBERTv2 is a useful reference here because it reduced late-interaction storage with residual compression while preserving retrieval quality. ([arXiv][2])
+### PLAID / ColBERTv2: centroid interaction and progressive pruning
 
-### 2. PLAID-lite as a legacy token-node rescue path
+PLAID accelerates ColBERTv2 by treating each passage as a lightweight bag of centroids, using centroid interaction and centroid pruning before exact scoring. The paper reports up to 7× GPU and 45× CPU speedups versus vanilla ColBERTv2 without quality loss. ([arXiv][7])
 
-PLAID is still relevant even though `document_nodes` is now the better architecture. PLAID accelerates late interaction by treating each passage as a lightweight bag of centroids, using centroid interaction and centroid pruning to eliminate low-scoring passages before exact late-interaction scoring. The paper reports large CPU/GPU speedups without quality loss relative to vanilla ColBERTv2. ([arXiv][3])
+A 2024 PLAID reproducibility study found that PLAID’s Pareto frontier depends on carefully balancing parameters, and that lexical reranking can be very competitive at low-latency points, but cannot reach peak exhaustive ColBERT effectiveness because lexical candidate recall is limited. ([arXiv][8])
 
-For `pgturbohybrid`, PLAID-lite would be useful in two places:
+**Copy:** a PLAID-lite centroid sidecar for `token_nodes` compatibility and as an optional `document_nodes` candidate prefilter, but only after the current document-node path has DBpedia-scale admission data.
 
-```text
-Old token_nodes indexes:
-  centroid postings -> document candidates -> exact MaxSim rerank
+---
 
-Hybrid retrieval:
-  BM25 candidates ∪ PLAID-lite candidates ∪ document_nodes candidates
-  -> exact MaxSim rerank or RRF
-```
+### SPLATE / SLIM / learned sparse: inverted-index candidate generation for late interaction
 
-I would not prioritize this above document-node compact scoring, but it is the best way to make the old token-node layout less pathological without requiring immediate reindexing into `document_nodes`.
+SPLATE maps frozen ColBERTv2 token embeddings into sparse vocabulary space so traditional sparse retrieval can generate candidates, then reranks with ColBERT MaxSim. The paper says it matches PLAID ColBERTv2 effectiveness by reranking 50 documents retrieved under 10 ms. ([arXiv][9])
 
-### 3. MUVERA-style fixed-dimensional proxy branch
+SLIM similarly maps contextual token vectors to sparse lexical space and uses inverted-index retrieval plus refinement, explicitly targeting compatibility with off-the-shelf lexical search libraries such as Lucene. ([arXiv][10])
 
-MUVERA reduces multi-vector retrieval to single-vector MIPS by generating fixed-dimensional encodings whose inner product approximates multi-vector similarity. The paper reports similar recall with fewer candidates and lower latency than prior multi-vector search heuristics. ([arXiv][4])
+**Copy:** learned-sparse candidate injection using existing BM25/WAND infrastructure, with exact MaxSim final ranking. This is especially attractive for hybrid retrieval because it upgrades BM25 injection into semantic sparse injection.
 
-This fits `pgturbohybrid` especially well because you already have a mature single-vector graph path. Add a document-level proxy vector sidecar or second dense key:
+---
 
-```text
-doc multivector -> proxy vector
-query multivector -> proxy vector
-existing TurboQuant dense graph retrieves proxy candidates
-exact MaxSim reranks candidates
-```
+### MUVERA / LEMUR: reduce multivector search to single-vector ANN
 
-For hybrid retrieval, this becomes another prefetch branch:
+MUVERA generates fixed-dimensional encodings of query and document multivectors whose inner product approximates multivector similarity, allowing off-the-shelf MIPS/ANN. The paper reports 2–5× fewer retrieved candidates and 90% lower latency with improved average recall in its evaluations. ([arXiv][11])
 
-```text
-BM25 branch
-proxy-vector branch
-document-node MaxSim branch
-optional exact MaxSim rerank over union
-```
+LEMUR, published in 2026, also reduces multivector similarity to single-vector search through a learned latent-space reduction and reports order-of-magnitude speedups on ColBERTv2 and modern multivector models. ([arXiv][12])
 
-This is lower risk than implementing a completely new centroid engine, because it reuses existing dense graph infrastructure.
+**Copy:** upgrade the current `proxy_vector` prototype into a real learned/provable proxy branch: first heuristic representative vectors, then MUVERA-style fixed-dimensional encodings, then learned LEMUR-like projection if benchmarked.
 
-### 4. Learned sparse candidate generation: SPLATE/SPLADE
+---
 
-SPLATE is particularly relevant because it maps frozen ColBERTv2 token embeddings into a sparse vocabulary space, uses traditional sparse retrieval for candidate generation, and then reranks with ColBERTv2. The paper claims it matches PLAID effectiveness by reranking only 50 documents retrieved under 10 ms, making it attractive for CPU environments. ([arXiv][5])
+### WARP / Col-Bandit: exact MaxSim rerank cost reduction
 
-SPLADE/SPLADEv2 is the broader learned-sparse family: sparse lexical/expansion vectors are compatible with inverted indexes and can compete strongly with dense and sparse methods. ([arXiv][6])
+WARP targets multi-vector scoring speed with dynamic similarity imputation, implicit decompression, and two-stage reduction; it reports 41× speedup over an XTR reference implementation and 3× speedup over official PLAID while preserving quality. ([arXiv][13])
 
-For `pgturbohybrid`, the integration path is:
+Col-Bandit, a 2026 paper, reduces query-time MaxSim FLOPs by adaptively revealing only the document/query-token interactions needed to identify top-K, without index modifications or retraining. It reports up to 5× MaxSim FLOP reductions. ([arXiv][14])
 
-```text
-Add a learned_sparse_tsvector or weighted sparse key
-Use BM25/impact/WAND-like infrastructure for sparse neural candidates
-Inject sparse candidates into exact MaxSim rerank
-Optionally fuse sparse branch and document-node branch with RRF
-```
+**Copy:** after admission recall is fixed, reduce exact rerank cost with adaptive per-query-token MaxSim pruning and two-stage MaxSim reductions.
 
-This is the strongest hybrid-retrieval extension because it turns “BM25 injection” into “semantic sparse injection.” BM25 remains useful, but learned sparse retrieval can recover semantic lexical variants that raw BM25 misses.
+---
 
-### 5. WARP-style and Col-Bandit-style MaxSim rerank pruning
+### Token pooling / ColBERTSaR: reduce storage and gather cost
 
-Once candidate admission is fixed, the next cost center is exact MaxSim over many candidates. WARP targets multi-vector retrieval efficiency with dynamic similarity imputation, implicit decompression, and two-stage reduction; it reports major latency reductions relative to XTR/PLAID-style baselines. ([arXiv][7])
+Token pooling clusters document token vectors during indexing to reduce the number of vectors stored. The 2024 paper reports a 50% footprint reduction with virtually no retrieval degradation, and further 66–75% reductions with degradation under 5% on most datasets. ([arXiv][15])
 
-Col-Bandit is newer and directly attacks query-time MaxSim cost: it treats reranking as a top-K identification problem and adaptively reveals only the document/query-token MaxSim entries needed to decide the top results, reporting up to 5× MaxSim FLOP reductions. ([arXiv][8])
+A very recent 2026 paper, ColBERTSaR, proposes turning a ColBERT index into a true inverted index via embedding quantization and reports 50–70% smaller indexes than one-bit PLAID while retaining effectiveness. This is new enough that I would treat it as an experimental branch, not an immediate production dependency. ([arXiv][16])
 
-These are not candidate-generation fixes; they are **rerank cost reducers**. They become very attractive once hybrid retrieval starts producing larger candidate unions:
+**Copy:** token pooling should be near-term because it is model-agnostic and simple. ColBERTSaR-style quantized inverted indexes are worth a research prototype later.
 
-```text
-BM25 candidates
-+ learned sparse candidates
-+ document_nodes candidates
-+ proxy vector candidates
-= larger union
--> pruned/adaptive exact MaxSim
-```
+---
 
-That lets you improve admission recall without linearly increasing exact-rerank cost.
+### ModernColBERT / Jina-ColBERT-v2 / PyLate model compatibility
 
-### 6. DESSERT-style vector-set retrieval
+Jina-ColBERT-v2 is a multilingual late-interaction retriever with architectural/training improvements for broader multilingual retrieval. ([arXiv][17])
 
-DESSERT is a general vector-set search algorithm with theoretical guarantees, and its ColBERT integration reports 2–5× speedups with minimal recall loss. ([arXiv][9])
+PyLate adds late-interaction support on top of Sentence Transformers and has enabled GTE-ModernColBERT and Reason-ModernColBERT. ([arXiv][18])
 
-I would treat DESSERT as a research branch rather than the next production path. It is attractive if `document_nodes` graph traversal with compact MaxSim still costs too much, but it is a bigger indexing departure than MUVERA-style proxy vectors or compact document-node scoring.
+Qdrant’s FastEmbed docs list supported late-interaction models such as `colbert-ir/colbertv2.0` and `answerdotai/answerai-colbert-small-v1`, with dimensions 128 and 96 respectively. ([Qdrant][2])
 
-## Hybrid retrieval integration
+**Copy:** model-metadata-driven multivector ingestion: dimensions, token limits, token masks, query/doc role, pooling policy, storage kind, normalization, and per-token weights must not be hardcoded to one ColBERT variant.
 
-The current state is much better for hybrid retrieval than the old token-node design because `document_nodes` makes the dense branch document-keyed from the start. The design doc already states that the dense document-node candidate list should behave as the dense branch in hybrid search, while BM25 remains document-keyed and RRF operates over document ranks.
+---
 
-I would define three hybrid modes clearly:
+# What `pgturbohybrid` should copy next
+
+## Highest priority
+
+1. **Document-node insert correctness.** Current build uses symmetrized MaxSim, but incremental insert must be audited so it does not link document nodes using only representative-vector geometry. This matters because document-node graph quality will drift after inserts if insert geometry differs from build geometry.
+
+2. **DBpedia-scale document-node admission/latency benchmark.** The synthetic gate proves top-1 admission on a constructed case, but the benchmark docs explicitly say DBpedia admission and recall quality are separate opt-in checks.
+
+3. **Qdrant-style branch/prefetch planner.** `pgturbohybrid` already has branches; make them explicit, nested, budgeted, and visible in stats.
+
+4. **Vespa-style long-context and field-aware MaxSim.** This is the clearest route for ModernColBERT and enterprise documents: title/body/section fields, context windows, and paged storage.
+
+5. **Rerank cost pruning.** As hybrid admission improves, candidate unions grow; copy WARP/Col-Bandit ideas to keep exact MaxSim affordable.
+
+## Medium priority
+
+6. **MUVERA/LEMUR proxy branch.** `proxy_vector` exists; make it a real branch with FDE/learned projections and admission benchmarks.
+
+7. **Token pooling.** It reduces storage and MaxSim cost without changing query-time logic.
+
+8. **Learned sparse branch.** Upgrade BM25 injection into SPLATE/SLIM-style semantic sparse injection.
+
+## Research priority
+
+9. **PLAID-lite centroids.** Useful for legacy `token_nodes` and possibly as a fast document-node sidecar prefilter.
+
+10. **ColBERTSaR-style quantized inverted index.** Promising but too new to make core yet.
+
+---
+
+# Codex prompts
+
+Run these one at a time. They assume the current repository state with `document_nodes`, `f32|f16|sq8` sidecar storage, `proxy_vector`, normalized hybrid fusion, and admission-debug infrastructure.
+
+---
+
+## Prompt 1 — Audit and fix document-node incremental insert geometry
 
 ```text
-1. dense_only_with_injection
-   BM25 / sparse / proxy branches are candidate admission only.
-   Final rank = exact MaxSim.
+You are working in mayflower/pgturbohybrid.
 
-2. rrf
-   Dense document-node branch produces ranks.
-   BM25 / learned sparse branch produces ranks.
-   Final rank = RRF over document IDs.
+Goal:
+Ensure incremental insert/update for multivector_graph=document_nodes uses the same document-level MaxSim graph geometry as bulk build.
 
-3. normalized_score_fusion
-   Dense score = MaxSim / query_token_count.
-   Sparse score = normalized BM25 or learned sparse score.
-   Final rank = calibrated weighted sum or DBSF-like query-local normalization.
-```
+Context:
+Bulk build for document_nodes uses one graph node per heap document and symmetrized document MaxSim for graph edge selection. Incremental insert must not link a new document node using only an averaged representative vector if that changes the graph topology semantics.
 
-RRF should remain the safe default. Qdrant’s hybrid docs make the same point: RRF fuses by rank, while score fusion requires normalization because dense and sparse scores live on different scales. Qdrant’s DBSF normalizes each retriever’s returned-score distribution before summing, and its docs warn that raw alpha-weighted dense/sparse score combinations are unreliable without normalization. ([Qdrant][10])
-
-For `pgturbohybrid`, the most practical hybrid pipeline is:
-
-```text
-Prefetch/admission:
-  A. document_nodes MaxSim graph candidates
-  B. BM25 or learned sparse candidates
-  C. optional MUVERA/proxy-vector candidates
-
-Candidate union:
-  document-keyed dedupe
-  preserve branch ranks and branch scores
-  keep admission provenance stats
-
-Scoring:
-  dense-only mode -> exact MaxSim over union
-  RRF mode -> RRF over branch ranks
-  score-fusion mode -> normalize scores, then combine
-
-Final:
-  optional exact MaxSim rerank or MaxSim-aware diversity
-```
-
-The existing benchmark already has flags for BM25 candidate injection, candidate reservoirs, exact doc scan, doc graph prototype, document nodes, token ablation, and admission debug. The README documents `--multivector-bm25-candidate-injection off|hybrid_only|dense_with_text`, where `dense_with_text` uses BM25 as admission safety rather than final scorer. That is exactly the right hybrid semantics.
-
-## Recommended next engineering prompts
-
-### P0: fix document-node incremental insert geometry
-
-```text
-Implement document-node-specific incremental insert for multivector_graph=document_nodes.
-
-Do not link new document nodes using only the averaged representative vector.
-Use the same symmetrized full MaxSim objective used by bulk build:
-  0.5 * (MaxSim(new, existing)/count(new) + MaxSim(existing, new)/count(existing))
-
-During insert:
-- keep the new document multivector in memory,
-- load existing document vectors from the sidecar/cache,
-- score candidate neighbors with full document MaxSim,
-- use the same score for neighbor selection and reciprocal pruning,
-- append sidecar records safely,
-- add tests comparing bulk build vs insert-after-build topology/recall on the many-moderate corpus.
-```
-
-### P1: add document-node oversampling and DBpedia admission gate
-
-```text
-Add:
-  turbohybrid.multivector_doc_graph_search_ef
-  turbohybrid.multivector_doc_graph_oversampling
-  turbohybrid.multivector_doc_graph_rescore_k
-
-Make document_nodes candidateLimit independent from final_k * 2.
-Benchmark DBpedia admission with:
-  exact_top1_admission
-  exact_top10_admission_recall
-  latency
-  docs_scored
-  graph_edges_visited
-  exact_rerank_docs
+Tasks:
+1. Audit PgturbohybridGraphInsertMultiVectorBatchInPlace and related insert helpers.
+2. If document_nodes insert still uses a representative vector for graph neighbor search/link selection, implement a document-node-specific insert path.
+3. During insert:
+   - keep the inserted PgturbohybridMultiVector in memory;
+   - load existing document multivectors from the document-node sidecar/cache;
+   - score candidate neighbors with the same symmetrized MaxSim used by bulk build:
+     0.5 * (MaxSim(new, existing)/count(new) + MaxSim(existing, new)/count(existing));
+   - use that score for entry search, neighbor selection, and reciprocal pruning;
+   - append the document-node sidecar after graph insertion with WAL-safe metadata updates.
+4. Add stats:
+   - multivector_doc_graph_insert_full_maxsim_edges
+   - multivector_doc_graph_insert_representative_fallbacks
+   - multivector_doc_graph_insert_pairs_scored
+5. Add tests:
+   - build document_nodes index, insert a new many-moderate document, verify it is retrievable;
+   - compare bulk-build vs insert-after-build recall on the synthetic many-moderate corpus;
+   - update/delete/vacuum visibility still passes.
+6. Update docs/dev/multivector-document-graph-design.md and benchmarks/README.md.
 
 Acceptance:
-  document_nodes should admit exact top-1/top-10 at far lower budgets than token_graph and exact_token_scan.
+- document_nodes insert never silently uses representative-vector geometry for graph links unless a clearly named debug fallback is enabled.
+- bulk and incremental paths use the same documented document-level scorer.
 ```
 
-### P1: compact document-node sidecar scoring
+---
+
+## Prompt 2 — Add DBpedia document-node admission benchmark gate
 
 ```text
-Add compact document-node sidecar storage:
-  multivector_doc_storage = f32 | f16 | sq8
+You are working in mayflower/pgturbohybrid.
 
-Search:
-  graph traversal scores compact sidecar MaxSim,
-  oversamples candidates,
-  exact-reranks from f32 sidecar or heap.
+Goal:
+Turn the current synthetic recall gate into a DBpedia-scale admission gate for document_nodes.
 
-Stats:
-  multivector_doc_graph_quantized_scores
-  multivector_doc_graph_storage_kind
-  multivector_doc_graph_oversampling
-  multivector_doc_graph_rescore_source
+Context:
+The synthetic gate proves exact top-1 admission on a constructed case. We now need DBpedia evidence for:
+- token_nodes,
+- exact_token_scan,
+- document_nodes f32/f16/sq8,
+- proxy_vector,
+- plain fallback,
+- exact_doc_scan.
 
-Keep f32 as correctness reference.
+Tasks:
+1. Extend benchmarks/dbpedia_colbert_multivector.py with:
+   --document-node-admission-grid
+   --document-node-storage-grid f32,f16,sq8
+   --document-node-ef-grid 50,100,200,400,800
+   --document-node-oversampling-grid 1,2,4,8
+2. For each query and mode, collect:
+   - exact_top1_admitted
+   - exact_top10_admission_recall
+   - exact_top1_rank
+   - final NDCG/Recall/MRR where qrels exist
+   - latency p50/p95
+   - docs_scored
+   - edges_visited
+   - exact_rerank_docs
+   - sidecar bytes read/cache hit stats
+   - storage kind
+3. Emit JSON and Markdown summaries.
+4. Add a benchmark README section with a required 10k DBpedia command and
+   optional 100k/1M scale-up commands.
+5. Do not require external DBpedia data in normal CI.
+
+Acceptance:
+- The report can show whether document_nodes beats token_nodes and exact_token_scan on admission at lower budgets.
+- f16/sq8 quality loss is visible against f32.
+- 10k DBpedia evidence is sufficient for this prompt's acceptance gate; 100k
+  and 1M runs are optional scale checks, not required completion evidence.
 ```
 
-### P2: hybrid branch scheduler
+---
+
+## Prompt 3 — Implement Qdrant-style nested prefetch branch planner
 
 ```text
-Implement a branch-aware hybrid admission scheduler for multivector queries.
+You are working in mayflower/pgturbohybrid.
 
-Branches:
-  dense_document_nodes
-  bm25
-  learned_sparse_future
-  proxy_vector_future
+Goal:
+Implement a branch-aware, nested prefetch planner for multivector/hybrid retrieval.
 
-Modes:
-  dense_only_with_injection -> final exact MaxSim
-  rrf -> branch-rank fusion
-  dbsf_or_normalized_score -> explicit normalized score fusion only
+Inspiration:
+Qdrant supports prefetch pipelines where cheap candidates feed a more expensive scorer, and hybrid branches can be fused with RRF or DBSF.
 
-Use admission-debug stats to adapt branch budgets.
-Do not allow raw BM25 + raw MaxSim alpha fusion without normalization.
+Current state:
+pgturbohybrid already has dense multivector, BM25, proxy_vector, document_nodes, RRF, normalized score fusion, and adaptive hybrid budgeting.
+
+Tasks:
+1. Add an internal branch plan struct:
+   - branch kind: bm25, dense_single, proxy_vector, document_nodes, token_nodes, exact_doc_scan
+   - candidate_limit
+   - rescore_limit
+   - branch_rank
+   - branch_score
+   - branch_source flags
+2. Add a GUC:
+   turbohybrid.multivector_branch_plan = auto | dense_only | qdrant_like
+3. In qdrant_like mode support nested plans:
+   - proxy_vector -> document_nodes MaxSim -> exact heap MaxSim
+   - BM25/sparse -> exact MaxSim
+   - dense_single/proxy + BM25 -> RRF/DBSF/normalized fusion
+4. Preserve existing SQL API initially; this is internal planning.
+5. Add scan stats:
+   - branch_count
+   - branch_kinds
+   - branch_candidate_counts
+   - branch_truncated_flags
+   - branch_latency_us
+   - branch_fusion_mode
+6. Add tests:
+   - branch dedupe is heap/document keyed;
+   - dense-only with BM25 injection still ranks by exact MaxSim;
+   - RRF path preserves branch ranks;
+   - normalized fusion never combines raw BM25 and raw MaxSim without normalization.
+
+Acceptance:
+- Branch plans are deterministic and visible in turbohybrid_last_scan_stats().
+- Existing behavior remains default unless qdrant_like is selected.
 ```
 
-### P2: MUVERA-style proxy branch prototype
+---
+
+## Prompt 4 — Add DBSF-style distribution-based score fusion
 
 ```text
-Prototype a fixed-dimensional proxy vector for each document multivector.
+You are working in mayflower/pgturbohybrid.
 
-Use existing single-vector TurboQuant graph as candidate generator:
-  proxy candidates -> exact MaxSim rerank
+Goal:
+Add Qdrant-style DBSF fusion for multivector hybrid retrieval.
 
-Expose as:
-  turbohybrid.multivector_candidate_source = proxy_vector | document_nodes | graph
+Context:
+Qdrant DBSF normalizes each retriever’s returned score distribution before combining. pgturbohybrid already supports normalized score fusion modes, but we need an explicit DBSF mode with branch-local diagnostics.
 
-Hybrid:
-  allow proxy branch as another prefetch/admission source.
+Tasks:
+1. Add fusion mode:
+   fusion => 'dbsf'
+2. For each branch:
+   - collect raw scores from the branch candidate set;
+   - compute mean and sample standard deviation;
+   - normalize using clipped 3-sigma endpoints or a documented robust alternative;
+   - handle degenerate stddev=0 safely.
+3. Combine normalized branch scores by sum or configurable weights.
+4. Add GUCs:
+   turbohybrid.dbsf_sigma = 3.0
+   turbohybrid.dbsf_min_branch_candidates = 10
+   turbohybrid.dbsf_robust = off | mad
+5. Add stats:
+   - dbsf_enabled
+   - dbsf_branch_mean/stddev
+   - dbsf_branch_min/max
+   - dbsf_degenerate_branches
+6. Tests:
+   - score scale mismatch: BM25 large values + MaxSim small values;
+   - degenerate branch with identical scores;
+   - RRF and calibrated modes unchanged.
+
+Acceptance:
+- DBSF is never used silently.
+- Fusion remains document-keyed.
+- Docs explain when RRF is safer than DBSF.
 ```
 
-## Bottom line
+---
 
-The current update fixes the core conceptual bug for new `document_nodes` indexes: candidate generation can now operate at document level and use full MaxSim for visited candidates. The synthetic gate result is exactly what I would expect if that fix is working.
-
-The next work should not be more token-node reservoir tuning. Keep the token path for compatibility and diagnostics, but focus on:
+## Prompt 5 — Add Vespa-style long-context multivector support
 
 ```text
-1. document-node insert correctness,
-2. document-node oversampling/search-ef tuning,
-3. compact document MaxSim scoring,
-4. hybrid branch scheduling with RRF or normalized score fusion,
-5. rerank pruning so larger hybrid candidate unions stay cheap.
+You are working in mayflower/pgturbohybrid.
+
+Goal:
+Support long-context ColBERT/ModernColBERT documents without forcing users to split each context window into a separate SQL row.
+
+Inspiration:
+Vespa stores ColBERT as tensors with context and token dimensions and supports context-level and cross-context MaxSim.
+
+Tasks:
+1. Extend turbohybrid_multivector metadata or add a new internal layout that can represent:
+   - context/window ordinal
+   - token ordinal within context
+   - field id or section id
+2. Add builder function:
+   turbohybrid_multivector_from_contexts(raw_values real[], dim int, context_offsets int[])
+3. Add scoring modes:
+   - cross_context_maxsim: current global MaxSim across all doc tokens
+   - context_level_maxsim: score each context independently, then max or top-N aggregate
+   - field_weighted_maxsim: weighted sum of MaxSim across named fields/sections
+4. Add index options:
+   multivector_context_mode = flat | context_level
+   multivector_field_mode = off | weighted
+5. Add docs and examples for title/body/section fields.
+6. Add tests:
+   - cross-context equals current MaxSim when all tokens are flat;
+   - context-level max chooses the best window;
+   - field weights affect rank deterministically;
+   - MVCC and exact rerank still use heap/document identity.
+
+Acceptance:
+- Long documents can remain one SQL result row.
+- Context/field modes are explicit and benchmarkable.
 ```
 
-That is the path most consistent with Qdrant’s point-level MaxSim design, ColBERT/PLAID-style late-interaction efficiency work, and practical hybrid retrieval.
+---
+
+## Prompt 6 — Add paged/cold document multivector sidecar mode
+
+```text
+You are working in mayflower/pgturbohybrid.
+
+Goal:
+Add a Vespa-inspired cold/paged sidecar mode for large document-node multivector storage.
+
+Context:
+document_nodes currently uses index-resident sidecar storage. For large corpora, f32/f16/sq8 sidecar memory can dominate. Vespa uses paged attributes to let the OS page large tensors.
+
+Tasks:
+1. Design and implement:
+   multivector_doc_storage_cache = resident | paged | auto
+2. In paged mode:
+   - keep document-node graph adjacency and compact metadata resident;
+   - memory-map or page-load document sidecar chunks on demand;
+   - track page/cache misses separately from graph code pages.
+3. Add stats:
+   - multivector_doc_sidecar_cache_mode
+   - multivector_doc_sidecar_pages_read
+   - multivector_doc_sidecar_cache_hits
+   - multivector_doc_sidecar_bytes_touched
+4. Add fallback:
+   - for low latency profile, prefer resident if under memory cap;
+   - for large corpora, auto chooses paged.
+5. Add benchmark support for cache-cold and cache-warm document_nodes scans.
+
+Acceptance:
+- Large document_nodes indexes can run without loading all multivectors into backend memory.
+- Stats make random access cost visible.
+```
+
+---
+
+## Prompt 7 — Implement token pooling for multivector storage reduction
+
+```text
+You are working in mayflower/pgturbohybrid.
+
+Goal:
+Implement model-agnostic token pooling to reduce document multivector size before indexing.
+
+Inspiration:
+Recent token pooling work reports ~50% ColBERT index footprint reduction with minimal retrieval degradation.
+
+Tasks:
+1. Add optional index-time document token pooling:
+   multivector_token_pooling = off | kmeans | greedy_cosine
+   multivector_token_pooling_target_ratio = 0.5
+   multivector_token_pooling_min_tokens = 16
+2. Pool only document tokens, not query tokens.
+3. Store original token count and pooled token count in doc sidecar metadata.
+4. Exact rerank options:
+   - rerank over pooled sidecar;
+   - optionally heap exact over original multivector if heap value is available.
+5. Add stats:
+   - multivector_tokens_original
+   - multivector_tokens_pooled
+   - multivector_token_pooling_ratio
+6. Add benchmark grid:
+   ratios 1.0, 0.75, 0.5, 0.33
+   storage f32/f16/sq8
+7. Tests:
+   - deterministic pooling on small fixtures;
+   - pooled exact rerank remains stable;
+   - invalid ratios rejected.
+
+Acceptance:
+- Pooling is opt-in.
+- Benchmark shows storage/latency/recall tradeoff.
+```
+
+---
+
+## Prompt 8 — Upgrade proxy_vector toward MUVERA-style fixed-dimensional encodings
+
+```text
+You are working in mayflower/pgturbohybrid.
+
+Goal:
+Turn the current proxy_vector prototype into a serious fixed-dimensional multivector proxy branch.
+
+Inspiration:
+MUVERA reduces multivector retrieval to single-vector MIPS using fixed-dimensional encodings. LEMUR similarly reduces multivector search to a learned latent single-vector search.
+
+Current state:
+proxy_vector currently uses the existing single-vector TurboQuant graph over document representative vectors for admission, then exact MaxSim rerank.
+
+Tasks:
+1. Add a proxy encoder abstraction:
+   - mean_pool
+   - max_pool
+   - random_projection_fde
+   - learned_projection_placeholder
+2. Store proxy vector per document node as a normal dense graph key or sidecar.
+3. Add query proxy generation for the same encoder.
+4. Branch plan:
+   proxy_vector -> exact MaxSim rerank
+   proxy_vector -> document_nodes MaxSim -> exact heap MaxSim
+5. Add stats:
+   - proxy_encoder_kind
+   - proxy_candidates
+   - proxy_top1_admission
+   - proxy_exact_rerank_docs
+6. Add benchmark:
+   - compare proxy encoders against document_nodes and exact_doc_scan;
+   - report candidates required to admit exact top-1/top-10.
+
+Acceptance:
+- Existing representative proxy remains available.
+- New proxy encoders are pluggable and benchmarked.
+```
+
+---
+
+## Prompt 9 — Add learned sparse multivector candidate injection
+
+```text
+You are working in mayflower/pgturbohybrid.
+
+Goal:
+Add a learned-sparse branch for ColBERT/ModernColBERT candidate generation, inspired by SPLATE/SLIM.
+
+Context:
+pgturbohybrid already has BM25, sparse/lexical infrastructure, BM25 candidate injection, and hybrid fusion. Learned sparse candidate generation can improve admission recall while keeping final exact MaxSim.
+
+Tasks:
+1. Define a sparse sidecar/input format:
+   - document id
+   - sparse term ids
+   - weights
+   - optional field id
+2. Add SQL ingestion helper:
+   turbohybrid_sparse_vector_from_arrays(term_ids int[], weights real[])
+3. Add branch:
+   multivector_sparse_candidate_source = off | bm25 | learned_sparse
+4. Use existing sparse/BM25/WAND/impact infrastructure where possible.
+5. For dense-only-with-text:
+   - learned_sparse candidates are admission-only;
+   - final rank remains exact MaxSim.
+6. For hybrid:
+   - learned_sparse can participate in RRF/DBSF/calibrated fusion.
+7. Add stats:
+   - learned_sparse_candidates
+   - learned_sparse_retained_for_maxsim
+   - learned_sparse_branch_latency_us
+8. Add benchmark hooks for SPLADE/SPLATE-style exported sparse vectors.
+
+Acceptance:
+- No model training is required inside PostgreSQL.
+- Candidate injection is document-keyed and exact-MaxSim-reranked.
+```
+
+---
+
+## Prompt 10 — Implement adaptive MaxSim rerank pruning
+
+```text
+You are working in mayflower/pgturbohybrid.
+
+Goal:
+Reduce exact MaxSim rerank cost after candidate admission is fixed.
+
+Inspiration:
+WARP and Col-Bandit reduce MaxSim computation by avoiding unnecessary full interaction matrix computation.
+
+Tasks:
+1. Add exact rerank mode:
+   turbohybrid.multivector_exact_rerank = off | topk | adaptive
+2. Adaptive mode:
+   - compute cheap upper/lower bounds per candidate;
+   - process query tokens in an importance order;
+   - maintain top-K threshold;
+   - stop scoring a candidate once it cannot enter top-K;
+   - always allow exact/full mode for parity.
+3. Start with safe deterministic bounds:
+   - max possible remaining contribution from query-token norms;
+   - precomputed per-document token norm maxima;
+   - query-token IDF/importance order if available.
+4. Add stats:
+   - exact_rerank_candidates
+   - exact_rerank_tokens_evaluated
+   - exact_rerank_tokens_skipped
+   - exact_rerank_pairs_saved
+   - adaptive_rerank_topk_changed_vs_full
+5. Add tests:
+   - adaptive result equals full exact on deterministic fixtures;
+   - fallback to full exact when bounds are unsafe;
+   - benchmark DBpedia pair savings.
+
+Acceptance:
+- Adaptive mode must be exact by default.
+- Any approximate relaxation needs a separate explicit GUC.
+```
+
+---
+
+## Prompt 11 — Add query-token importance and masking
+
+```text
+You are working in mayflower/pgturbohybrid.
+
+Goal:
+Support model/query-token importance for ModernColBERT and faster MaxSim.
+
+Inspiration:
+Token-importance work improves late-interaction scoring by weighting query-token contributions. Vespa/Qdrant-style ColBERT deployments also benefit from token masking for punctuation/special/noisy tokens.
+
+Tasks:
+1. Extend turbohybrid_query multivector payload to optionally carry:
+   - query_token_weights real[]
+   - query_token_mask bool[]
+2. Extend MaxSim:
+   score(Q,D) = sum_i weight_i * max_j sim(q_i, d_j)
+3. Exact rerank and document-node sidecar scoring must both support weights/masks.
+4. Candidate generation:
+   - skip masked tokens in token_nodes;
+   - use weights to order adaptive exact rerank;
+   - document_nodes scoring uses weighted MaxSim.
+5. Add model metadata defaults:
+   - special token masking
+   - punctuation token masking
+   - IDF weighting hook
+6. Add tests:
+   - weights reproduce unweighted when all weights = 1;
+   - masked tokens do not affect exact score;
+   - weighted and unweighted rankings differ deterministically on fixture.
+
+Acceptance:
+- ModernColBERT-specific token weighting is supported without hardcoding a model.
+```
+
+---
+
+## Prompt 12 — Add ModernColBERT / ColPali model metadata registry
+
+```text
+You are working in mayflower/pgturbohybrid.
+
+Goal:
+Make pgturbohybrid robust to modern late-interaction models with different dimensions, query/doc token behavior, and pooling/masking rules.
+
+Context:
+Current and emerging models include ColBERTv2, Jina-ColBERT-v2, AnswerAI ColBERT, GTE-ModernColBERT, Reason-ModernColBERT, and ColPali-style visual-document multivectors.
+
+Tasks:
+1. Add a model metadata table or extension config:
+   - model_name
+   - dim
+   - default_query_max_tokens
+   - default_doc_max_tokens
+   - distance mode
+   - normalized tokens yes/no
+   - recommended storage kind f32/f16/sq8
+   - token mask policy
+   - optional field/context policy
+2. Add SQL helper:
+   turbohybrid_multivector_model_info(model_name text)
+3. Add validation:
+   - reject wrong dimensions with model-aware hints;
+   - warn on suspicious token counts;
+   - expose model metadata in index stats.
+4. Add benchmark support:
+   --colbert-model-name
+   --expected-dim auto
+5. Add docs:
+   - ColBERTv2
+   - AnswerAI ColBERT small
+   - Jina-ColBERT-v2
+   - GTE/Reason ModernColBERT placeholders
+   - ColPali-like visual multivectors
+
+Acceptance:
+- No hardcoded assumption that ColBERT vectors are always 128 dimensions.
+- Model metadata improves error messages and benchmark reproducibility.
+```
+
+---
+
+## Prompt 13 — PLAID-lite centroid sidecar for compatibility mode
+
+```text
+You are working in mayflower/pgturbohybrid.
+
+Goal:
+Add a PLAID-lite centroid sidecar as an optional candidate generator, mainly for token_nodes compatibility and for fast prefiltering.
+
+Inspiration:
+PLAID uses centroid interaction and centroid pruning before exact ColBERT scoring.
+
+Tasks:
+1. Add index option:
+   multivector_centroids = off | kmeans
+   multivector_centroid_count = auto | integer
+2. Build:
+   - cluster document token vectors into centroids;
+   - store per-document centroid ids and residual summary;
+   - preserve original document multivectors for exact rerank.
+3. Search:
+   - map query tokens to nearest centroids;
+   - collect documents from centroid postings;
+   - compute centroid-interaction approximate MaxSim;
+   - exact-rerank top documents.
+4. Stats:
+   - centroid_lists_visited
+   - centroid_docs_touched
+   - centroid_pruned_docs
+   - centroid_candidates
+5. Benchmarks:
+   - token_nodes vs centroid_lite vs document_nodes;
+   - DBpedia admission and latency.
+
+Acceptance:
+- This must not replace document_nodes as the primary path.
+- It must be opt-in and documented as compatibility/experimental.
+```
+
+---
+
+## Prompt 14 — ColBERTSaR-style quantized inverted-index research branch
+
+```text
+You are working in mayflower/pgturbohybrid.
+
+Goal:
+Create a research-only branch for quantized inverted-index ColBERT candidate generation.
+
+Inspiration:
+Recent ColBERTSaR work suggests embedding quantization can turn ColBERT indexing into a true inverted index and shrink indexes relative to one-bit PLAID.
+
+Tasks:
+1. Create docs/dev/multivector-colbertsar-research.md.
+2. Prototype only under:
+   turbohybrid.multivector_candidate_source = quantized_inverted_experimental
+3. Quantize token embeddings into learned/codebook terms.
+4. Build postings:
+   codeword -> docId, tokenOrdinal, quantized residual/score payload
+5. Query:
+   quantize query tokens;
+   retrieve postings;
+   approximate score;
+   exact MaxSim rerank.
+6. Add warnings:
+   - experimental;
+   - not default;
+   - storage format unstable.
+7. Benchmark against learned_sparse, PLAID-lite, token_nodes, and document_nodes.
+
+Acceptance:
+- No production on-disk compatibility promise.
+- Useful enough to compare storage size and admission recall.
+```
+
+---
+
+## Prompt 15 — End-to-end hybrid evaluation harness
+
+```text
+You are working in mayflower/pgturbohybrid.
+
+Goal:
+Add an end-to-end hybrid evaluation harness for document_nodes + BM25 + learned_sparse/proxy branches.
+
+Tasks:
+1. Extend benchmarks/dbpedia_colbert_multivector.py to run these modes:
+   - exact_scan
+   - document_nodes
+   - document_nodes + BM25 admission-only
+   - document_nodes + BM25 RRF
+   - document_nodes + BM25 DBSF
+   - proxy_vector -> document_nodes -> exact MaxSim
+   - learned_sparse -> exact MaxSim, if available
+2. For each mode report:
+   - BEIR metrics
+   - admission recall
+   - latency p50/p95
+   - branch latency
+   - branch candidates
+   - exact MaxSim pairs
+   - memory/sidecar bytes
+3. Add Markdown comparison output:
+   - best quality
+   - best latency under quality floor
+   - candidate admission failures
+   - recommended default GUC profile
+4. Add no external-data CI dependency.
+
+Acceptance:
+- The harness can justify default recommendations for latency, balanced, quality, and high_recall profiles.
+- 10k DBpedia evidence is sufficient for this prompt's acceptance gate; 100k
+  and 1M runs are optional scale checks, not required completion evidence.
+```
+
+---
+
+## Suggested execution order
+
+Start with correctness and evidence:
+
+```text
+1 -> 2 -> 3 -> 4
+```
+
+Then make document-node scalable:
+
+```text
+6 -> 7 -> 10
+```
+
+Then improve hybrid recall:
+
+```text
+8 -> 9 -> 15
+```
+
+Then broaden model coverage:
+
+```text
+5 -> 11 -> 12
+```
+
+Then explore research branches:
+
+```text
+13 -> 14
+```
+
+The single most valuable next PR is probably **Prompt 2 plus Prompt 15**: a DBpedia document-node admission and hybrid benchmark. Without that, it is hard to know whether `f16`, `sq8`, `proxy_vector`, RRF, DBSF, and BM25 injection are actually improving the real failure case rather than only passing the synthetic top-1 gate.
 
 [1]: https://qdrant.tech/documentation/concepts/vectors/ "Vectors - Qdrant"
-[2]: https://arxiv.org/abs/2112.01488?utm_source=chatgpt.com "ColBERTv2: Effective and Efficient Retrieval via Lightweight Late Interaction"
-[3]: https://arxiv.org/abs/2205.09707?utm_source=chatgpt.com "PLAID: An Efficient Engine for Late Interaction Retrieval"
-[4]: https://arxiv.org/abs/2405.19504?utm_source=chatgpt.com "MUVERA: Multi-Vector Retrieval via Fixed Dimensional Encodings"
-[5]: https://arxiv.org/abs/2404.13950?utm_source=chatgpt.com "SPLATE: Sparse Late Interaction Retrieval"
-[6]: https://arxiv.org/abs/2109.10086?utm_source=chatgpt.com "SPLADE v2: Sparse Lexical and Expansion Model for Information Retrieval"
-[7]: https://arxiv.org/abs/2501.17788?utm_source=chatgpt.com "WARP: An Efficient Engine for Multi-Vector Retrieval"
-[8]: https://arxiv.org/abs/2602.02827?utm_source=chatgpt.com "Col-Bandit: Zero-Shot Query-Time Pruning for Late-Interaction Retrieval"
-[9]: https://arxiv.org/abs/2210.15748?utm_source=chatgpt.com "DESSERT: An Efficient Algorithm for Vector Set Search with Vector Set Queries"
-[10]: https://qdrant.tech/documentation/concepts/hybrid-queries/ "Hybrid Queries - Qdrant"
+[2]: https://qdrant.tech/documentation/fastembed/fastembed-colbert/ "Working with ColBERT - Qdrant"
+[3]: https://qdrant.tech/documentation/concepts/hybrid-queries/ "Hybrid Queries - Qdrant"
+[4]: https://blog.vespa.ai/announcing-long-context-colbert-in-vespa/ "Announcing Vespa Long-Context ColBERT | Vespa Blog"
+[5]: https://milvus.io/docs/multi-vector-search.md "Multi-Vector Hybrid Search | Milvus Documentation"
+[6]: https://milvus.io/docs/reranking.md "Reranking | Milvus Documentation"
+[7]: https://arxiv.org/abs/2205.09707?utm_source=chatgpt.com "PLAID: An Efficient Engine for Late Interaction Retrieval"
+[8]: https://arxiv.org/abs/2404.14989?utm_source=chatgpt.com "A Reproducibility Study of PLAID"
+[9]: https://arxiv.org/abs/2404.13950?utm_source=chatgpt.com "SPLATE: Sparse Late Interaction Retrieval"
+[10]: https://arxiv.org/abs/2302.06587?utm_source=chatgpt.com "SLIM: Sparsified Late Interaction for Multi-Vector Retrieval with Inverted Indexes"
+[11]: https://arxiv.org/abs/2405.19504?utm_source=chatgpt.com "MUVERA: Multi-Vector Retrieval via Fixed Dimensional Encodings"
+[12]: https://arxiv.org/abs/2601.21853?utm_source=chatgpt.com "LEMUR: Learned Multi-Vector Retrieval"
+[13]: https://arxiv.org/abs/2501.17788?utm_source=chatgpt.com "WARP: An Efficient Engine for Multi-Vector Retrieval"
+[14]: https://arxiv.org/abs/2602.02827?utm_source=chatgpt.com "Col-Bandit: Zero-Shot Query-Time Pruning for Late-Interaction Retrieval"
+[15]: https://arxiv.org/abs/2409.14683?utm_source=chatgpt.com "Reducing the Footprint of Multi-Vector Retrieval with Minimal Performance Impact via Token Pooling"
+[16]: https://arxiv.org/abs/2606.05568?utm_source=chatgpt.com "ColBERTSaR: Sparsified ColBERT Index via Product Quantization"
+[17]: https://arxiv.org/abs/2408.16672?utm_source=chatgpt.com "Jina-ColBERT-v2: A General-Purpose Multilingual Late Interaction Retriever"
+[18]: https://arxiv.org/abs/2508.03555?utm_source=chatgpt.com "PyLate: Flexible Training and Retrieval for Late Interaction Models"

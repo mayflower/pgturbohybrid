@@ -19,6 +19,8 @@
 #define PGTURBOHYBRID_QUERY_FLAG_RRF_K_DEFAULTED		0x0080
 #define PGTURBOHYBRID_QUERY_FLAG_HAS_DENSE			0x0100
 #define PGTURBOHYBRID_QUERY_FLAG_HAS_MULTIVECTOR		0x0200
+#define PGTURBOHYBRID_QUERY_FLAG_HAS_TOKEN_WEIGHTS		0x0400
+#define PGTURBOHYBRID_QUERY_FLAG_HAS_TOKEN_MASK		0x0800
 
 typedef enum PgturbohybridDenseQueryKind
 {
@@ -32,7 +34,8 @@ typedef enum PgturbohybridFusionMode
 	PGTURBOHYBRID_FUSION_RRF = 1,
 	PGTURBOHYBRID_FUSION_WEIGHTED = 2,
 	PGTURBOHYBRID_FUSION_FAST_WEIGHTED = 3,
-	PGTURBOHYBRID_FUSION_CALIBRATED = 4
+	PGTURBOHYBRID_FUSION_CALIBRATED = 4,
+	PGTURBOHYBRID_FUSION_DBSF = 5
 } PgturbohybridFusionMode;
 
 typedef struct PgturbohybridQueryHeader
@@ -100,6 +103,11 @@ PgturbohybridQueryHasText(const PgturbohybridQueryHeader *query)
 
 Vector	   *PgturbohybridQueryGetVector(PgturbohybridQueryHeader *query);
 PgturbohybridMultiVector *PgturbohybridQueryGetMultiVector(PgturbohybridQueryHeader *query);
+const float4 *PgturbohybridQueryGetTokenWeights(PgturbohybridQueryHeader *query);
+const bool *PgturbohybridQueryGetTokenMask(PgturbohybridQueryHeader *query);
+bool		PgturbohybridQueryHasTokenWeights(const PgturbohybridQueryHeader *query);
+bool		PgturbohybridQueryHasTokenMask(const PgturbohybridQueryHeader *query);
+double		PgturbohybridQueryMultiVectorWeightSum(PgturbohybridQueryHeader *query);
 TSQuery		PgturbohybridQueryGetTsQuery(PgturbohybridQueryHeader *query);
 void		PgturbohybridQueryValidate(PgturbohybridQueryHeader *query);
 void		PgturbohybridQueryValidateFast(PgturbohybridQueryHeader *query);

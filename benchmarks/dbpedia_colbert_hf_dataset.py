@@ -589,12 +589,50 @@ def parquet_files(dataset_dir: Path, rel_dir: str) -> list[Path]:
     return files
 
 
-def iter_parquet_rows(files: list[Path], batch_size: int) -> Iterable[dict[str, Any]]:
+def iter_parquet_rows(
+    files: list[Path],
+    batch_size: int,
+    columns: list[str] | None = None,
+) -> Iterable[dict[str, Any]]:
     for path in files:
         parquet = pq.ParquetFile(path)
-        for batch in parquet.iter_batches(batch_size=batch_size):
+        for batch in parquet.iter_batches(batch_size=batch_size, columns=columns):
             for row in batch.to_pylist():
                 yield row
+
+
+def iter_matching_document_rows(
+    files: list[Path],
+    batch_size: int,
+    doc_ids: set[str],
+) -> Iterable[dict[str, Any]]:
+    if not doc_ids:
+        return
+    remaining = set(doc_ids)
+    for path in files:
+        parquet = pq.ParquetFile(path)
+        matching_row_groups: list[int] = []
+        for row_group in range(parquet.num_row_groups):
+            doc_id_table = parquet.read_row_group(row_group, columns=["doc_id"])
+            row_group_doc_ids = {
+                str(row["doc_id"])
+                for batch in doc_id_table.to_batches(max_chunksize=batch_size)
+                for row in batch.to_pylist()
+            }
+            if row_group_doc_ids & remaining:
+                matching_row_groups.append(row_group)
+
+        for row_group in matching_row_groups:
+            table = parquet.read_row_group(row_group)
+            for batch in table.to_batches(max_chunksize=batch_size):
+                for row in batch.to_pylist():
+                    doc_id = str(row["doc_id"])
+                    if doc_id not in remaining:
+                        continue
+                    yield row
+                    remaining.discard(doc_id)
+        if not remaining:
+            return
 
 
 def row_multivector_text(row: dict[str, Any]) -> str:
@@ -625,19 +663,38 @@ def import_documents(
     files: list[Path],
     batch_size: int,
     max_docs: int,
+    priority_doc_ids: set[str] | None = None,
 ) -> int:
+    priority = set(priority_doc_ids or set())
+
+    def emit_row(row: dict[str, Any]) -> tuple[str, str, str, str]:
+        return (
+            str(row["doc_id"]),
+            row.get("title") or "",
+            row.get("body") or "",
+            row_multivector_text(row),
+        )
+
     def rows() -> Iterable[tuple[str, str, str, str]]:
         emitted = 0
+        emitted_doc_ids: set[str] = set()
+        if priority:
+            for row in iter_matching_document_rows(files, batch_size, priority):
+                doc_id = str(row["doc_id"])
+                if max_docs > 0 and emitted >= max_docs:
+                    return
+                emitted += 1
+                emitted_doc_ids.add(doc_id)
+                yield emit_row(row)
+
         for row in iter_parquet_rows(files, batch_size):
+            doc_id = str(row["doc_id"])
+            if doc_id in emitted_doc_ids:
+                continue
             if max_docs > 0 and emitted >= max_docs:
                 return
             emitted += 1
-            yield (
-                str(row["doc_id"]),
-                row.get("title") or "",
-                row.get("body") or "",
-                row_multivector_text(row),
-            )
+            yield emit_row(row)
 
     return copy_rows(
         conn,
@@ -690,6 +747,29 @@ def import_qrels(
     )
 
 
+def selected_query_ids_from_parquet(files: list[Path], batch_size: int, max_queries: int) -> list[str]:
+    selected: list[str] = []
+    for row in iter_parquet_rows(files, batch_size, columns=["query_id"]):
+        if max_queries > 0 and len(selected) >= max_queries:
+            break
+        selected.append(str(row["query_id"]))
+    return selected
+
+
+def qrel_doc_ids_for_queries(
+    files: list[Path],
+    batch_size: int,
+    query_ids: set[str],
+) -> set[str]:
+    doc_ids: set[str] = set()
+    if not query_ids:
+        return doc_ids
+    for row in iter_parquet_rows(files, batch_size):
+        if str(row["query_id"]) in query_ids:
+            doc_ids.add(str(row["doc_id"]))
+    return doc_ids
+
+
 def import_precomputed_dataset_to_postgres(
     *,
     conn: psycopg.Connection[Any],
@@ -699,17 +779,28 @@ def import_precomputed_dataset_to_postgres(
     max_docs: int = 0,
     max_queries: int = 0,
     force_reload: bool = True,
+    prioritize_qrels: bool = True,
 ) -> dict[str, Any]:
     started = time.perf_counter()
     dataset_dir = resolve_source(source, cache_dir)
+    doc_files = parquet_files(dataset_dir, "docs")
+    query_files = parquet_files(dataset_dir, "queries")
+    qrel_files = parquet_files(dataset_dir, "qrels")
     setup_schema(conn)
     if force_reload:
         exec_sql(conn, "DROP INDEX IF EXISTS dbpedia_colbert_docs_colbert_idx")
         exec_sql(conn, "TRUNCATE dbpedia_colbert_qrels, dbpedia_colbert_queries, dbpedia_colbert_docs")
 
-    doc_count = import_documents(conn, parquet_files(dataset_dir, "docs"), batch_size, max_docs)
-    query_count = import_queries(conn, parquet_files(dataset_dir, "queries"), batch_size, max_queries)
-    qrel_count = import_qrels(conn, parquet_files(dataset_dir, "qrels"), batch_size)
+    selected_query_ids = selected_query_ids_from_parquet(query_files, batch_size, max_queries)
+    priority_doc_ids = (
+        qrel_doc_ids_for_queries(qrel_files, batch_size, set(selected_query_ids))
+        if prioritize_qrels
+        else set()
+    )
+
+    doc_count = import_documents(conn, doc_files, batch_size, max_docs, priority_doc_ids)
+    query_count = import_queries(conn, query_files, batch_size, max_queries)
+    qrel_count = import_qrels(conn, qrel_files, batch_size)
     exec_sql(
         conn,
         """
@@ -723,6 +814,11 @@ def import_precomputed_dataset_to_postgres(
         """,
     )
     filtered_qrels = fetch_one(conn, "SELECT count(*) FROM dbpedia_colbert_qrels")
+    qrels_in_loaded_docs = int(filtered_qrels[0]) if filtered_qrels else 0
+    queries_with_loaded_qrels = fetch_one(
+        conn,
+        "SELECT count(DISTINCT query_id) FROM dbpedia_colbert_qrels",
+    )
     dims = fetch_one(
         conn,
         """
@@ -739,9 +835,13 @@ def import_precomputed_dataset_to_postgres(
         "source": str(dataset_dir),
         "documents": doc_count,
         "queries": query_count,
-        "qrels": int(filtered_qrels[0]) if filtered_qrels else 0,
+        "qrels": qrels_in_loaded_docs,
         "input_qrels": qrel_count,
-        "filtered_qrels": max(qrel_count - (int(filtered_qrels[0]) if filtered_qrels else 0), 0),
+        "filtered_qrels": max(qrel_count - qrels_in_loaded_docs, 0),
+        "requested_qrel_doc_ids": len(priority_doc_ids),
+        "qrels_in_loaded_docs": qrels_in_loaded_docs,
+        "queries_with_loaded_qrels": int(queries_with_loaded_qrels[0]) if queries_with_loaded_qrels else 0,
+        "prioritized_qrels": bool(prioritize_qrels),
         "document_dim_min": int(dims[0]) if dims and dims[0] is not None else 0,
         "document_dim_max": int(dims[1]) if dims and dims[1] is not None else 0,
         "document_vectors_min": int(dims[2]) if dims and dims[2] is not None else 0,
@@ -761,6 +861,7 @@ def import_dataset(args: argparse.Namespace) -> dict[str, Any]:
             max_docs=args.max_docs,
             max_queries=args.max_queries,
             force_reload=not args.reuse_existing,
+            prioritize_qrels=args.prioritize_qrels,
         )
     finally:
         conn.close()
@@ -800,6 +901,12 @@ def parse_args() -> argparse.Namespace:
     import_cmd.add_argument("--max-docs", type=int, default=0, help="limit imported documents; 0 imports all")
     import_cmd.add_argument("--max-queries", type=int, default=0, help="limit imported queries; 0 imports all")
     import_cmd.add_argument("--reuse-existing", action="store_true", help="do not truncate existing benchmark tables")
+    import_cmd.add_argument(
+        "--no-prioritize-qrels",
+        dest="prioritize_qrels",
+        action="store_false",
+        help="load the first document rows instead of filling bounded imports with judged documents first",
+    )
 
     args = parser.parse_args()
     if args.batch_size < 1:

@@ -877,6 +877,84 @@ PgturbohybridGraphGetMultiVectorGraphModeOption(Relation index)
 		PGTURBOHYBRID_DEFAULT_MULTIVECTOR_GRAPH_MODE;
 }
 
+int
+PgturbohybridGraphGetMultiVectorTokenPoolingOption(Relation index)
+{
+	TqOptions  *opts;
+
+	if (!PgturbohybridGraphIspgturbohybridIndex(index))
+		return PGTURBOHYBRID_MULTIVECTOR_TOKEN_POOLING_OFF;
+
+	opts = (TqOptions *) index->rd_options;
+	return opts != NULL ? opts->multivectorTokenPooling :
+		PGTURBOHYBRID_MULTIVECTOR_TOKEN_POOLING_OFF;
+}
+
+double
+PgturbohybridGraphGetMultiVectorTokenPoolingTargetRatio(Relation index)
+{
+	TqOptions  *opts;
+
+	if (!PgturbohybridGraphIspgturbohybridIndex(index))
+		return PGTURBOHYBRID_MULTIVECTOR_TOKEN_POOLING_DEFAULT_TARGET_RATIO;
+
+	opts = (TqOptions *) index->rd_options;
+	return opts != NULL ? opts->multivectorTokenPoolingTargetRatio :
+		PGTURBOHYBRID_MULTIVECTOR_TOKEN_POOLING_DEFAULT_TARGET_RATIO;
+}
+
+int
+PgturbohybridGraphGetMultiVectorTokenPoolingMinTokens(Relation index)
+{
+	TqOptions  *opts;
+
+	if (!PgturbohybridGraphIspgturbohybridIndex(index))
+		return PGTURBOHYBRID_MULTIVECTOR_TOKEN_POOLING_DEFAULT_MIN_TOKENS;
+
+	opts = (TqOptions *) index->rd_options;
+	return opts != NULL ? opts->multivectorTokenPoolingMinTokens :
+		PGTURBOHYBRID_MULTIVECTOR_TOKEN_POOLING_DEFAULT_MIN_TOKENS;
+}
+
+int
+PgturbohybridGraphGetMultiVectorCentroidsOption(Relation index)
+{
+	TqOptions  *opts;
+
+	if (!PgturbohybridGraphIspgturbohybridIndex(index))
+		return PGTURBOHYBRID_MULTIVECTOR_CENTROIDS_OFF;
+
+	opts = (TqOptions *) index->rd_options;
+	return opts != NULL ? opts->multivectorCentroids :
+		PGTURBOHYBRID_MULTIVECTOR_CENTROIDS_OFF;
+}
+
+int
+PgturbohybridGraphGetMultiVectorCentroidCountOption(Relation index)
+{
+	TqOptions  *opts;
+
+	if (!PgturbohybridGraphIspgturbohybridIndex(index))
+		return PGTURBOHYBRID_MULTIVECTOR_CENTROID_COUNT_AUTO;
+
+	opts = (TqOptions *) index->rd_options;
+	return opts != NULL ? opts->multivectorCentroidCount :
+		PGTURBOHYBRID_MULTIVECTOR_CENTROID_COUNT_AUTO;
+}
+
+int
+PgturbohybridGraphGetMultiVectorProxyEncoderOption(Relation index)
+{
+	TqOptions  *opts;
+
+	if (!PgturbohybridGraphIspgturbohybridIndex(index))
+		return pgturbohybrid_multivector_proxy_encoder;
+
+	opts = (TqOptions *) index->rd_options;
+	return opts != NULL ? opts->multivectorProxyEncoder :
+		pgturbohybrid_multivector_proxy_encoder;
+}
+
 static bool
 PgturbohybridGraphTqSupportsPackedCodes(Relation index)
 {

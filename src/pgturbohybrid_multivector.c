@@ -2,6 +2,7 @@
 
 #include <ctype.h>
 #include <errno.h>
+#include <float.h>
 #include <limits.h>
 #include <math.h>
 #include <stdlib.h>
@@ -13,10 +14,13 @@
 #include "fmgr.h"
 #include "lib/stringinfo.h"
 #include "libpq/pqformat.h"
+#include "utils/fmgrprotos.h"
 #include "utils/array.h"
 #include "utils/builtins.h"
+#include "utils/jsonb.h"
 #include "utils/lsyscache.h"
 #include "utils/memutils.h"
+#include "utils/numeric.h"
 #include "utils/syscache.h"
 
 #if PG_VERSION_NUM >= 160000
@@ -24,6 +28,7 @@
 #endif
 
 #include "pgturbohybrid.h"
+#include "pgturbohybrid_jsonb_compat.h"
 #include "pgturbohybrid_multivector.h"
 #include "pgturbohybrid_query.h"
 
@@ -69,19 +74,31 @@ FUNCTION_PREFIX PG_FUNCTION_INFO_V1(pgturbohybrid_multivector_recv);
 FUNCTION_PREFIX PG_FUNCTION_INFO_V1(pgturbohybrid_multivector_send);
 FUNCTION_PREFIX PG_FUNCTION_INFO_V1(pgturbohybrid_multivector_constructor);
 FUNCTION_PREFIX PG_FUNCTION_INFO_V1(pgturbohybrid_multivector_from_float4);
+FUNCTION_PREFIX PG_FUNCTION_INFO_V1(pgturbohybrid_multivector_from_contexts);
+FUNCTION_PREFIX PG_FUNCTION_INFO_V1(pgturbohybrid_multivector_from_contexts_and_fields);
 FUNCTION_PREFIX PG_FUNCTION_INFO_V1(pgturbohybrid_multivector_dims);
 FUNCTION_PREFIX PG_FUNCTION_INFO_V1(pgturbohybrid_multivector_count);
+FUNCTION_PREFIX PG_FUNCTION_INFO_V1(pgturbohybrid_multivector_context_count);
+FUNCTION_PREFIX PG_FUNCTION_INFO_V1(pgturbohybrid_multivector_context_offsets);
+FUNCTION_PREFIX PG_FUNCTION_INFO_V1(pgturbohybrid_multivector_field_ids);
 FUNCTION_PREFIX PG_FUNCTION_INFO_V1(pgturbohybrid_multivector_subvector);
 FUNCTION_PREFIX PG_FUNCTION_INFO_V1(pgturbohybrid_multivector_to_vector_array);
 FUNCTION_PREFIX PG_FUNCTION_INFO_V1(pgturbohybrid_multivector_maxsim);
+FUNCTION_PREFIX PG_FUNCTION_INFO_V1(pgturbohybrid_multivector_context_maxsim);
+FUNCTION_PREFIX PG_FUNCTION_INFO_V1(pgturbohybrid_multivector_field_weighted_maxsim);
 FUNCTION_PREFIX PG_FUNCTION_INFO_V1(pgturbohybrid_multivector_maxsim_scalar);
 FUNCTION_PREFIX PG_FUNCTION_INFO_V1(pgturbohybrid_multivector_maxsim_blocked_scalar);
 FUNCTION_PREFIX PG_FUNCTION_INFO_V1(pgturbohybrid_multivector_maxsim_distance);
 FUNCTION_PREFIX PG_FUNCTION_INFO_V1(pgturbohybrid_multivector_query_distance);
+FUNCTION_PREFIX PG_FUNCTION_INFO_V1(pgturbohybrid_multivector_model_info);
 
 static Oid	pgturbohybrid_multivector_type_oid = InvalidOid;
+extern char *pgturbohybrid_multivector_model_name;
+extern int	pgturbohybrid_multivector_max_doc_vectors;
+extern int	pgturbohybrid_multivector_max_query_vectors;
 
 #define PGTURBOHYBRID_MULTIVECTOR_BINARY_VERSION 1
+#define PGTURBOHYBRID_MULTIVECTOR_BINARY_VERSION_CONTEXTS 2
 #define PGTURBOHYBRID_MULTIVECTOR_BLOCKED_SCALAR_Q 8
 
 static Oid PgturbohybridExtensionSchema(Oid extensionOid);
@@ -92,12 +109,238 @@ static int32 TqMvParseInt32(const char **cursor, const char *fieldName);
 static float4 TqMvParseFloat4(const char **cursor);
 static void TqMvExpectChar(const char **cursor, char expected);
 static void PgturbohybridMultiVectorRejectTextFallback(void);
+static int32 *PgturbohybridMultiVectorReadInt4Array(ArrayType *array,
+													const char *name,
+													int *nelems);
+static float4 *PgturbohybridMultiVectorReadFloat4Array(ArrayType *array,
+													   const char *name,
+													   int *nelems);
+static PgturbohybridMultiVector *PgturbohybridMultiVectorBuildFromFlatArray(ArrayType *array,
+																			 int32 dim,
+																			 int32 contextCount,
+																			 const int32 *contextOffsets,
+																			 const int32 *fieldIds);
+static void PgturbohybridMultiVectorValidateContexts(const PgturbohybridMultiVector *mv,
+													 int32 contextCount,
+													 const int32 *contextOffsets,
+													 const int32 *fieldIds);
+static const PgturbohybridMultiVectorModelInfo *PgturbohybridMultiVectorConfiguredModel(void);
+static void PgturbohybridMultiVectorWarnSuspiciousTokenCount(uint32 tokenCount,
+															 uint32 maxTokenCount);
 static Vector *PgturbohybridMultiVectorSubvectorCopy(const PgturbohybridMultiVector *mv,
 													 int32 ordinal);
+static double PgturbohybridMultiVectorTokenCosine(const PgturbohybridMultiVector *mv,
+												  int32 a, int32 b);
+static void PgturbohybridMultiVectorNormalizeToken(float *values, int32 dim);
+static uint32 PgturbohybridMultiVectorProxyHash(uint32 a, uint32 b, uint32 salt);
 
 typedef double (*TqDotProductF32Func) (const float *a, const float *b, int32 dim);
+typedef void (*TqDotProductF32BlockFunc) (const float *queryValues,
+										  const float *docValues,
+										  int32 dim,
+										  int32 blockCount,
+										  double *dots);
 typedef double (*TqMultiVectorMaxSimFunc) (const PgturbohybridMultiVector *query,
 										   const PgturbohybridMultiVector *doc);
+
+static double TqMultiVectorSymmetricMaxSimAverageWithDotUnchecked(const PgturbohybridMultiVector *a,
+																  const PgturbohybridMultiVector *b,
+																  TqDotProductF32Func dotProduct,
+																  TqDotProductF32BlockFunc blockDotProduct);
+
+static const PgturbohybridMultiVectorModelInfo pgturbohybrid_multivector_model_registry[] = {
+	{
+		"colbert-ir/colbertv2.0", 128, 32, 180, "dot_product", true, "f16",
+		"special_and_punctuation", "flat_text", "stable",
+		"Classic ColBERTv2 late-interaction text model."
+	},
+	{
+		"answerdotai/answerai-colbert-small-v1", 96, 32, 512, "dot_product",
+		true, "f16", "special_and_punctuation", "flat_text", "stable",
+		"Small multilingual ColBERT model supported by FastEmbed."
+	},
+	{
+		"jinaai/jina-colbert-v2", 128, 32, 8192, "dot_product", true, "f16",
+		"model_skiplist", "long_context_text", "stable",
+		"Jina-ColBERT-v2 default 128-dimensional Matryoshka variant."
+	},
+	{
+		"jinaai/jina-colbert-v2-96", 96, 32, 8192, "dot_product", true, "f16",
+		"model_skiplist", "long_context_text", "stable",
+		"Jina-ColBERT-v2 96-dimensional Matryoshka variant."
+	},
+	{
+		"jinaai/jina-colbert-v2-64", 64, 32, 8192, "dot_product", true, "f16",
+		"model_skiplist", "long_context_text", "stable",
+		"Jina-ColBERT-v2 64-dimensional Matryoshka variant."
+	},
+	{
+		"lightonai/GTE-ModernColBERT-v1", 128, 48, 300, "maxsim", true, "f16",
+		"pylate_skiplist", "long_context_text", "profile",
+		"PyLate ModernColBERT profile; document length can be raised for long-context runs."
+	},
+	{
+		"chadboyda/Reason-ModernColBERT", 128, 48, 300, "maxsim", true, "f16",
+		"pylate_skiplist", "reasoning_text", "profile",
+		"Reasoning-tuned ModernColBERT profile; verify tokenizer policy with the exported model."
+	},
+	{
+		"VAGOsolutions/SauerkrautLM-Multi-ColBERT-15m", 128, 32, 256,
+		"maxsim", true, "f16", "special_and_punctuation", "flat_text",
+		"validation", "Small validation model used by the pgturbohybrid benchmark suite."
+	},
+	{
+		"johannhartmann/SauerkrautLM-Multi-ColBERT-15m-GGUF", 128, 32, 256,
+		"maxsim", true, "f16", "special_and_punctuation", "flat_text",
+		"validation", "GGUF companion for live pg_colbert_llama validation."
+	},
+	{
+		"vidore/colpali-v1.2", 128, 64, 0, "maxsim", true, "f16",
+		"processor_policy", "visual_patch_multivector", "placeholder",
+		"ColPali-style visual multivectors use image patch counts that vary by processor settings."
+	},
+	{
+		"colpali-like-visual", 128, 64, 0, "maxsim", true, "f16",
+		"processor_policy", "visual_patch_multivector", "placeholder",
+		"Generic visual-document late-interaction profile for ColPali-compatible exports."
+	}
+};
+
+static void
+PgturbohybridMultiVectorModelJsonbAddKey(PgturbohybridJsonbState *state,
+										 const char *key)
+{
+	JsonbValue	value;
+
+	value.type = jbvString;
+	value.val.string.val = (char *) key;
+	value.val.string.len = strlen(key);
+	PgturbohybridJsonbPush(state, WJB_KEY, &value);
+}
+
+static void
+PgturbohybridMultiVectorModelJsonbAddString(PgturbohybridJsonbState *state,
+											const char *key, const char *val)
+{
+	JsonbValue	value;
+
+	PgturbohybridMultiVectorModelJsonbAddKey(state, key);
+	value.type = jbvString;
+	value.val.string.val = (char *) val;
+	value.val.string.len = strlen(val);
+	PgturbohybridJsonbPush(state, WJB_VALUE, &value);
+}
+
+static void
+PgturbohybridMultiVectorModelJsonbAddBool(PgturbohybridJsonbState *state,
+										  const char *key, bool val)
+{
+	JsonbValue	value;
+
+	PgturbohybridMultiVectorModelJsonbAddKey(state, key);
+	value.type = jbvBool;
+	value.val.boolean = val;
+	PgturbohybridJsonbPush(state, WJB_VALUE, &value);
+}
+
+static void
+PgturbohybridMultiVectorModelJsonbAddInt32(PgturbohybridJsonbState *state,
+										   const char *key, int32 val)
+{
+	JsonbValue	value;
+
+	PgturbohybridMultiVectorModelJsonbAddKey(state, key);
+	if (val <= 0)
+	{
+		value.type = jbvNull;
+		PgturbohybridJsonbPush(state, WJB_VALUE, &value);
+		return;
+	}
+	value.type = jbvNumeric;
+	value.val.numeric = DatumGetNumeric(DirectFunctionCall1(int8_numeric,
+															Int64GetDatum((int64) val)));
+	PgturbohybridJsonbPush(state, WJB_VALUE, &value);
+}
+
+static Jsonb *
+PgturbohybridMultiVectorModelInfoJsonb(const PgturbohybridMultiVectorModelInfo *info,
+									   const char *requestedName)
+{
+	PgturbohybridJsonbState state;
+
+	PgturbohybridJsonbStateInit(&state);
+	PgturbohybridJsonbBeginObject(&state);
+	PgturbohybridMultiVectorModelJsonbAddString(&state, "model_name",
+												info != NULL ? info->modelName : requestedName);
+	PgturbohybridMultiVectorModelJsonbAddBool(&state, "known", info != NULL);
+	if (info == NULL)
+	{
+		PgturbohybridMultiVectorModelJsonbAddString(&state, "status", "unknown");
+		PgturbohybridMultiVectorModelJsonbAddInt32(&state, "dim", 0);
+		PgturbohybridMultiVectorModelJsonbAddInt32(&state, "default_query_max_tokens", 0);
+		PgturbohybridMultiVectorModelJsonbAddInt32(&state, "default_doc_max_tokens", 0);
+		PgturbohybridMultiVectorModelJsonbAddString(&state, "distance_mode", "unknown");
+		PgturbohybridMultiVectorModelJsonbAddBool(&state, "normalized_tokens", false);
+		PgturbohybridMultiVectorModelJsonbAddString(&state, "recommended_storage_kind", "unknown");
+		PgturbohybridMultiVectorModelJsonbAddString(&state, "token_mask_policy", "unknown");
+		PgturbohybridMultiVectorModelJsonbAddString(&state, "field_context_policy", "unknown");
+		PgturbohybridMultiVectorModelJsonbAddString(&state, "notes",
+													"Pass an explicit expected dimension for unregistered models.");
+		return PgturbohybridJsonbEndObject(&state);
+	}
+
+	PgturbohybridMultiVectorModelJsonbAddString(&state, "status", info->status);
+	PgturbohybridMultiVectorModelJsonbAddInt32(&state, "dim", info->dim);
+	PgturbohybridMultiVectorModelJsonbAddInt32(&state, "default_query_max_tokens",
+											   info->defaultQueryMaxTokens);
+	PgturbohybridMultiVectorModelJsonbAddInt32(&state, "default_doc_max_tokens",
+											   info->defaultDocMaxTokens);
+	PgturbohybridMultiVectorModelJsonbAddString(&state, "distance_mode",
+												info->distanceMode);
+	PgturbohybridMultiVectorModelJsonbAddBool(&state, "normalized_tokens",
+											  info->normalizedTokens);
+	PgturbohybridMultiVectorModelJsonbAddString(&state, "recommended_storage_kind",
+												info->recommendedStorageKind);
+	PgturbohybridMultiVectorModelJsonbAddString(&state, "token_mask_policy",
+												info->tokenMaskPolicy);
+	PgturbohybridMultiVectorModelJsonbAddString(&state, "field_context_policy",
+												info->fieldContextPolicy);
+	PgturbohybridMultiVectorModelJsonbAddString(&state, "notes", info->notes);
+	return PgturbohybridJsonbEndObject(&state);
+}
+
+const PgturbohybridMultiVectorModelInfo *
+PgturbohybridMultiVectorLookupModel(const char *modelName)
+{
+	if (modelName == NULL || modelName[0] == '\0')
+		return NULL;
+
+	for (int i = 0; i < lengthof(pgturbohybrid_multivector_model_registry); i++)
+	{
+		const PgturbohybridMultiVectorModelInfo *info =
+			&pgturbohybrid_multivector_model_registry[i];
+
+		if (pg_strcasecmp(modelName, info->modelName) == 0)
+			return info;
+	}
+	return NULL;
+}
+
+static const PgturbohybridMultiVectorModelInfo *
+PgturbohybridMultiVectorConfiguredModel(void)
+{
+	return PgturbohybridMultiVectorLookupModel(pgturbohybrid_multivector_model_name);
+}
+
+FUNCTION_PREFIX Datum
+pgturbohybrid_multivector_model_info(PG_FUNCTION_ARGS)
+{
+	char	   *modelName = text_to_cstring(PG_GETARG_TEXT_PP(0));
+	const PgturbohybridMultiVectorModelInfo *info =
+		PgturbohybridMultiVectorLookupModel(modelName);
+
+	PG_RETURN_JSONB_P(PgturbohybridMultiVectorModelInfoJsonb(info, modelName));
+}
 
 static Oid
 PgturbohybridExtensionSchema(Oid extensionOid)
@@ -186,12 +429,101 @@ PgturbohybridMultiVectorSize(int32 count, int32 dim)
 	return offsetof(PgturbohybridMultiVector, values) + floatCount * sizeof(float);
 }
 
+Size
+PgturbohybridMultiVectorExtendedSize(int32 count, int32 dim,
+									 int32 contextCount, bool hasFields)
+{
+	Size		size = PgturbohybridMultiVectorSize(count, dim);
+
+	if (contextCount <= 0 || contextCount > count)
+		ereport(ERROR,
+				(errcode(ERRCODE_INVALID_PARAMETER_VALUE),
+				 errmsg("invalid multivector context count %d", contextCount)));
+	if ((Size) contextCount > (MaxAllocSize - size - sizeof(int32)) / sizeof(int32))
+		ereport(ERROR,
+				(errcode(ERRCODE_PROGRAM_LIMIT_EXCEEDED),
+				 errmsg("multivector context metadata is too large")));
+
+	size += sizeof(int32);
+	size += sizeof(int32) * (Size) contextCount;
+	if (hasFields)
+	{
+		if ((Size) contextCount > (MaxAllocSize - size) / sizeof(int32))
+			ereport(ERROR,
+					(errcode(ERRCODE_PROGRAM_LIMIT_EXCEEDED),
+					 errmsg("multivector field metadata is too large")));
+		size += sizeof(int32) * (Size) contextCount;
+	}
+	return size;
+}
+
+static int32 *
+PgturbohybridMultiVectorContextCountPtr(const PgturbohybridMultiVector *mv)
+{
+	return (int32 *) ((char *) mv + PgturbohybridMultiVectorSize(mv->count,
+																 mv->dim));
+}
+
+static int32 *
+PgturbohybridMultiVectorMutableContextOffsets(PgturbohybridMultiVector *mv)
+{
+	return PgturbohybridMultiVectorContextCountPtr(mv) + 1;
+}
+
+static int32 *
+PgturbohybridMultiVectorMutableContextFields(PgturbohybridMultiVector *mv)
+{
+	int32	   *contextCount = PgturbohybridMultiVectorContextCountPtr(mv);
+
+	return PgturbohybridMultiVectorMutableContextOffsets(mv) + *contextCount;
+}
+
+bool
+PgturbohybridMultiVectorHasContexts(const PgturbohybridMultiVector *mv)
+{
+	PgturbohybridCheckMultiVector(mv);
+	return (mv->flags & PGTURBOHYBRID_MULTIVECTOR_FLAG_CONTEXTS) != 0;
+}
+
+int32
+PgturbohybridMultiVectorContextCount(const PgturbohybridMultiVector *mv)
+{
+	PgturbohybridCheckMultiVector(mv);
+	if ((mv->flags & PGTURBOHYBRID_MULTIVECTOR_FLAG_CONTEXTS) == 0)
+		return 1;
+	return *PgturbohybridMultiVectorContextCountPtr(mv);
+}
+
+const int32 *
+PgturbohybridMultiVectorContextOffsets(const PgturbohybridMultiVector *mv)
+{
+	PgturbohybridCheckMultiVector(mv);
+	if ((mv->flags & PGTURBOHYBRID_MULTIVECTOR_FLAG_CONTEXTS) == 0)
+		return NULL;
+	return PgturbohybridMultiVectorContextCountPtr(mv) + 1;
+}
+
+const int32 *
+PgturbohybridMultiVectorContextFields(const PgturbohybridMultiVector *mv)
+{
+	int32		contextCount;
+
+	PgturbohybridCheckMultiVector(mv);
+	if ((mv->flags & PGTURBOHYBRID_MULTIVECTOR_FLAG_FIELDS) == 0)
+		return NULL;
+	contextCount = *PgturbohybridMultiVectorContextCountPtr(mv);
+	return PgturbohybridMultiVectorContextCountPtr(mv) + 1 + contextCount;
+}
+
 void
 PgturbohybridCheckMultiVector(const PgturbohybridMultiVector *mv)
 {
 	Size		actual;
 	Size		expected;
 	Size		floatCount;
+	int32		contextCount = 0;
+	const int32 *contextOffsets = NULL;
+	const int32 *fieldIds = NULL;
 
 	if (mv == NULL)
 		ereport(ERROR,
@@ -205,7 +537,37 @@ PgturbohybridCheckMultiVector(const PgturbohybridMultiVector *mv)
 				 errmsg("malformed multivector value"),
 				 errdetail("Multivector varlena size is too small.")));
 
+	if ((mv->flags & ~PGTURBOHYBRID_MULTIVECTOR_KNOWN_FLAGS) != 0)
+		ereport(ERROR,
+				(errcode(ERRCODE_DATA_EXCEPTION),
+				 errmsg("malformed multivector value"),
+				 errdetail("Multivector flags contain unsupported bits 0x%x.",
+						   mv->flags & ~PGTURBOHYBRID_MULTIVECTOR_KNOWN_FLAGS)));
+	if ((mv->flags & PGTURBOHYBRID_MULTIVECTOR_FLAG_FIELDS) != 0 &&
+		(mv->flags & PGTURBOHYBRID_MULTIVECTOR_FLAG_CONTEXTS) == 0)
+		ereport(ERROR,
+				(errcode(ERRCODE_DATA_EXCEPTION),
+				 errmsg("malformed multivector value"),
+				 errdetail("Field metadata requires context metadata.")));
+
 	expected = PgturbohybridMultiVectorSize(mv->count, mv->dim);
+	if ((mv->flags & PGTURBOHYBRID_MULTIVECTOR_FLAG_CONTEXTS) != 0)
+	{
+		if (actual < expected + sizeof(int32))
+			ereport(ERROR,
+					(errcode(ERRCODE_DATA_EXCEPTION),
+					 errmsg("malformed multivector value"),
+					 errdetail("Context metadata is truncated.")));
+		contextCount = *PgturbohybridMultiVectorContextCountPtr(mv);
+		expected =
+			PgturbohybridMultiVectorExtendedSize(mv->count, mv->dim,
+												 contextCount,
+												 (mv->flags &
+												  PGTURBOHYBRID_MULTIVECTOR_FLAG_FIELDS) != 0);
+		contextOffsets = PgturbohybridMultiVectorContextCountPtr(mv) + 1;
+		if ((mv->flags & PGTURBOHYBRID_MULTIVECTOR_FLAG_FIELDS) != 0)
+			fieldIds = contextOffsets + contextCount;
+	}
 	if (actual != expected)
 		ereport(ERROR,
 				(errcode(ERRCODE_DATA_EXCEPTION),
@@ -221,6 +583,10 @@ PgturbohybridCheckMultiVector(const PgturbohybridMultiVector *mv)
 					(errcode(ERRCODE_DATA_EXCEPTION),
 					 errmsg("multivector cannot contain NaN or infinite values")));
 	}
+
+	if (contextCount > 0)
+		PgturbohybridMultiVectorValidateContexts(mv, contextCount,
+												 contextOffsets, fieldIds);
 }
 
 PgturbohybridMultiVector *
@@ -281,21 +647,71 @@ PgturbohybridMultiVectorCheckTokenCount(uint32 tokenCount, uint32 maxTokenCount)
 				(errcode(ERRCODE_PROGRAM_LIMIT_EXCEEDED),
 				 errmsg("multivector token count %u exceeds configured limit %u",
 						tokenCount, maxTokenCount)));
+
+	PgturbohybridMultiVectorWarnSuspiciousTokenCount(tokenCount, maxTokenCount);
 }
 
 void
 PgturbohybridMultiVectorCheckDim(uint32 dim, uint32 maxDim)
 {
+	const PgturbohybridMultiVectorModelInfo *modelInfo;
+
 	if (dim == 0)
 		ereport(ERROR,
 				(errcode(ERRCODE_INVALID_PARAMETER_VALUE),
 				 errmsg("multivector dimensions must be greater than zero")));
+
+	modelInfo = PgturbohybridMultiVectorConfiguredModel();
+	if (modelInfo != NULL && modelInfo->dim > 0 && dim != (uint32) modelInfo->dim)
+		ereport(ERROR,
+				(errcode(ERRCODE_INVALID_PARAMETER_VALUE),
+				 errmsg("multivector dimensions %u do not match configured model \"%s\" dimensions %d",
+						dim, modelInfo->modelName, modelInfo->dim),
+				 errhint("Check turbohybrid.multivector_model_name, pg_colbert_llama.expected_dim, the embedding export, or rebuild the index with matching multivectors.")));
 
 	if (maxDim == 0 || dim > maxDim)
 		ereport(ERROR,
 				(errcode(ERRCODE_PROGRAM_LIMIT_EXCEEDED),
 				 errmsg("multivector dimensions %u exceed configured limit %u",
 						dim, maxDim)));
+}
+
+static void
+PgturbohybridMultiVectorWarnSuspiciousTokenCount(uint32 tokenCount, uint32 maxTokenCount)
+{
+	static bool warnedQuery = false;
+	static bool warnedDoc = false;
+	const PgturbohybridMultiVectorModelInfo *modelInfo =
+		PgturbohybridMultiVectorConfiguredModel();
+	int32		modelLimit = 0;
+	const char *role = NULL;
+	bool	   *warned = NULL;
+
+	if (modelInfo == NULL)
+		return;
+
+	if (maxTokenCount == (uint32) pgturbohybrid_multivector_max_query_vectors)
+	{
+		modelLimit = modelInfo->defaultQueryMaxTokens;
+		role = "query";
+		warned = &warnedQuery;
+	}
+	else if (maxTokenCount == (uint32) pgturbohybrid_multivector_max_doc_vectors)
+	{
+		modelLimit = modelInfo->defaultDocMaxTokens;
+		role = "document";
+		warned = &warnedDoc;
+	}
+
+	if (role == NULL || warned == NULL || *warned || modelLimit <= 0 ||
+		tokenCount <= (uint32) modelLimit)
+		return;
+
+	*warned = true;
+	ereport(WARNING,
+			(errmsg("multivector %s token count %u exceeds %s profile default %d",
+					role, tokenCount, modelInfo->modelName, modelLimit),
+			 errhint("This is allowed by the current GUC limit, but benchmark reports should record the model profile and token limit override.")));
 }
 
 const float *
@@ -329,6 +745,581 @@ PgturbohybridMultiVectorCopySubvectorToVector(const PgturbohybridMultiVector *mv
 	dst->unused = 0;
 	memcpy(dst->x, PgturbohybridMultiVectorValues(mv, ordinal),
 		   sizeof(float) * (Size) mv->dim);
+}
+
+static void
+PgturbohybridMultiVectorValidateContexts(const PgturbohybridMultiVector *mv,
+										 int32 contextCount,
+										 const int32 *contextOffsets,
+										 const int32 *fieldIds)
+{
+	if (contextOffsets == NULL)
+		ereport(ERROR,
+				(errcode(ERRCODE_NULL_VALUE_NOT_ALLOWED),
+				 errmsg("multivector context offsets cannot be null")));
+	if (contextCount <= 0 || contextCount > mv->count)
+		ereport(ERROR,
+				(errcode(ERRCODE_INVALID_PARAMETER_VALUE),
+				 errmsg("invalid multivector context count %d", contextCount)));
+	if (contextOffsets[0] != 0)
+		ereport(ERROR,
+				(errcode(ERRCODE_INVALID_PARAMETER_VALUE),
+				 errmsg("multivector context offsets must start at zero")));
+	for (int32 i = 0; i < contextCount; i++)
+	{
+		if (contextOffsets[i] < 0 || contextOffsets[i] >= mv->count)
+			ereport(ERROR,
+					(errcode(ERRCODE_INVALID_PARAMETER_VALUE),
+					 errmsg("multivector context offset %d is out of range",
+							contextOffsets[i])));
+		if (i > 0 && contextOffsets[i] <= contextOffsets[i - 1])
+			ereport(ERROR,
+					(errcode(ERRCODE_INVALID_PARAMETER_VALUE),
+					 errmsg("multivector context offsets must be strictly increasing")));
+		if (fieldIds != NULL && fieldIds[i] < 0)
+			ereport(ERROR,
+					(errcode(ERRCODE_INVALID_PARAMETER_VALUE),
+					 errmsg("multivector field ids must be non-negative")));
+	}
+}
+
+static int32 *
+PgturbohybridMultiVectorReadInt4Array(ArrayType *array, const char *name,
+									  int *nelems)
+{
+	Datum	   *elements;
+	bool	   *nulls;
+	int32	   *values;
+
+	if (array == NULL || ARR_NDIM(array) == 0)
+		ereport(ERROR,
+				(errcode(ERRCODE_DATA_EXCEPTION),
+				 errmsg("%s array cannot be empty", name)));
+	if (ARR_ELEMTYPE(array) != INT4OID)
+		ereport(ERROR,
+				(errcode(ERRCODE_DATATYPE_MISMATCH),
+				 errmsg("expected integer[] input for %s", name)));
+
+	deconstruct_array(array, INT4OID, sizeof(int32), true, TYPALIGN_INT,
+					  &elements, &nulls, nelems);
+	if (*nelems <= 0)
+		ereport(ERROR,
+				(errcode(ERRCODE_DATA_EXCEPTION),
+				 errmsg("%s array cannot be empty", name)));
+
+	values = palloc(sizeof(int32) * (Size) *nelems);
+	for (int i = 0; i < *nelems; i++)
+	{
+		if (nulls[i])
+			ereport(ERROR,
+					(errcode(ERRCODE_NULL_VALUE_NOT_ALLOWED),
+					 errmsg("%s array cannot contain null elements", name)));
+		values[i] = DatumGetInt32(elements[i]);
+	}
+	return values;
+}
+
+static float4 *
+PgturbohybridMultiVectorReadFloat4Array(ArrayType *array, const char *name,
+										int *nelems)
+{
+	Datum	   *elements;
+	bool	   *nulls;
+	float4	   *values;
+
+	if (array == NULL || ARR_NDIM(array) == 0)
+		ereport(ERROR,
+				(errcode(ERRCODE_DATA_EXCEPTION),
+				 errmsg("%s array cannot be empty", name)));
+	if (ARR_ELEMTYPE(array) != FLOAT4OID)
+		ereport(ERROR,
+				(errcode(ERRCODE_DATATYPE_MISMATCH),
+				 errmsg("expected real[] input for %s", name)));
+
+	deconstruct_array(array, FLOAT4OID, sizeof(float4), true, TYPALIGN_INT,
+					  &elements, &nulls, nelems);
+	if (*nelems <= 0)
+		ereport(ERROR,
+				(errcode(ERRCODE_DATA_EXCEPTION),
+				 errmsg("%s array cannot be empty", name)));
+
+	values = palloc(sizeof(float4) * (Size) *nelems);
+	for (int i = 0; i < *nelems; i++)
+	{
+		if (nulls[i])
+			ereport(ERROR,
+					(errcode(ERRCODE_DATA_EXCEPTION),
+					 errmsg("%s array must contain finite non-null values", name)));
+		values[i] = DatumGetFloat4(elements[i]);
+		if (!isfinite(values[i]))
+			ereport(ERROR,
+					(errcode(ERRCODE_DATA_EXCEPTION),
+					 errmsg("%s array must contain finite non-null values", name)));
+	}
+	return values;
+}
+
+static PgturbohybridMultiVector *
+PgturbohybridMultiVectorBuildFromFlatArray(ArrayType *array, int32 dim,
+										   int32 contextCount,
+										   const int32 *contextOffsets,
+										   const int32 *fieldIds)
+{
+	Datum	   *elements;
+	bool	   *nulls;
+	int			nelems;
+	int32		count;
+	Size		resultSize;
+	PgturbohybridMultiVector *result;
+	bool		hasContexts = contextCount > 0;
+	bool		hasFields = fieldIds != NULL;
+
+	if (array == NULL)
+		ereport(ERROR,
+				(errcode(ERRCODE_NULL_VALUE_NOT_ALLOWED),
+				 errmsg("multivector values array cannot be null")));
+	if (dim <= 0)
+		ereport(ERROR,
+				(errcode(ERRCODE_INVALID_PARAMETER_VALUE),
+				 errmsg("multivector dimensions must be greater than zero")));
+	if (ARR_NDIM(array) == 0)
+		ereport(ERROR,
+				(errcode(ERRCODE_DATA_EXCEPTION),
+				 errmsg("multivector values array cannot be empty")));
+	if (ARR_ELEMTYPE(array) != FLOAT4OID)
+		ereport(ERROR,
+				(errcode(ERRCODE_DATATYPE_MISMATCH),
+				 errmsg("expected real[] input")));
+
+	deconstruct_array(array, FLOAT4OID, sizeof(float4), true, TYPALIGN_INT,
+					  &elements, &nulls, &nelems);
+	if (nelems <= 0)
+		ereport(ERROR,
+				(errcode(ERRCODE_DATA_EXCEPTION),
+				 errmsg("multivector values array cannot be empty")));
+	if (nelems % dim != 0)
+		ereport(ERROR,
+				(errcode(ERRCODE_DATA_EXCEPTION),
+				 errmsg("multivector values array length must be divisible by dimensions")));
+
+	count = nelems / dim;
+	if (hasContexts)
+	{
+		PgturbohybridMultiVector stackMv;
+
+		memset(&stackMv, 0, sizeof(stackMv));
+		stackMv.dim = dim;
+		stackMv.count = count;
+		PgturbohybridMultiVectorValidateContexts(&stackMv, contextCount,
+												 contextOffsets, fieldIds);
+		resultSize =
+			PgturbohybridMultiVectorExtendedSize(count, dim, contextCount,
+												 hasFields);
+	}
+	else
+		resultSize = PgturbohybridMultiVectorSize(count, dim);
+
+	result = (PgturbohybridMultiVector *) palloc0(resultSize);
+	SET_VARSIZE(result, resultSize);
+	result->dim = dim;
+	result->count = count;
+	result->flags = 0;
+	if (hasContexts)
+		result->flags |= PGTURBOHYBRID_MULTIVECTOR_FLAG_CONTEXTS;
+	if (hasFields)
+		result->flags |= PGTURBOHYBRID_MULTIVECTOR_FLAG_FIELDS;
+
+	for (int i = 0; i < nelems; i++)
+	{
+		float4		value;
+
+		if (nulls[i])
+			ereport(ERROR,
+					(errcode(ERRCODE_NULL_VALUE_NOT_ALLOWED),
+					 errmsg("multivector values array cannot contain null elements")));
+
+		value = DatumGetFloat4(elements[i]);
+		if (!isfinite(value))
+			ereport(ERROR,
+					(errcode(ERRCODE_DATA_EXCEPTION),
+					 errmsg("multivector cannot contain NaN or infinite values")));
+		result->values[i] = value;
+	}
+
+	if (hasContexts)
+	{
+		int32	   *storedContextCount =
+			PgturbohybridMultiVectorContextCountPtr(result);
+		int32	   *storedOffsets =
+			PgturbohybridMultiVectorMutableContextOffsets(result);
+
+		*storedContextCount = contextCount;
+		memcpy(storedOffsets, contextOffsets,
+			   sizeof(int32) * (Size) contextCount);
+		if (hasFields)
+			memcpy(PgturbohybridMultiVectorMutableContextFields(result),
+				   fieldIds, sizeof(int32) * (Size) contextCount);
+	}
+
+	PgturbohybridCheckMultiVector(result);
+	return result;
+}
+
+static double
+PgturbohybridMultiVectorTokenCosine(const PgturbohybridMultiVector *mv, int32 a,
+									int32 b)
+{
+	const float *av = PgturbohybridMultiVectorValues(mv, a);
+	const float *bv = PgturbohybridMultiVectorValues(mv, b);
+	double		dot = 0.0;
+	double		anorm = 0.0;
+	double		bnorm = 0.0;
+
+	for (int32 dim = 0; dim < mv->dim; dim++)
+	{
+		double		ax = av[dim];
+		double		bx = bv[dim];
+
+		dot += ax * bx;
+		anorm += ax * ax;
+		bnorm += bx * bx;
+	}
+	if (anorm <= 0.0 || bnorm <= 0.0)
+		return 0.0;
+	return dot / sqrt(anorm * bnorm);
+}
+
+static void
+PgturbohybridMultiVectorNormalizeToken(float *values, int32 dim)
+{
+	double		norm = 0.0;
+
+	for (int32 i = 0; i < dim; i++)
+		norm += (double) values[i] * (double) values[i];
+	if (norm <= 0.0)
+		return;
+	norm = sqrt(norm);
+	for (int32 i = 0; i < dim; i++)
+		values[i] = (float) ((double) values[i] / norm);
+}
+
+PgturbohybridMultiVector *
+PgturbohybridMultiVectorPoolDocumentTokens(const PgturbohybridMultiVector *mv,
+										   int mode, double targetRatio,
+										   int minTokens, MemoryContext ctx)
+{
+	MemoryContext oldCtx;
+	PgturbohybridMultiVector *pooled;
+	int32		targetCount;
+	int		   *selected;
+	bool	   *isSelected;
+	int		   *clusterCounts;
+	float	   *centroids;
+	float	   *sums;
+	Size		centroidBytes;
+	Size		resultSize;
+
+	PgturbohybridCheckMultiVector(mv);
+	if (mode == PGTURBOHYBRID_MULTIVECTOR_TOKEN_POOLING_OFF ||
+		mv->count <= 1 ||
+		minTokens <= 0 ||
+		mv->count < minTokens ||
+		targetRatio >= 1.0)
+		return (PgturbohybridMultiVector *) mv;
+	if (targetRatio <= 0.0)
+		ereport(ERROR,
+				(errcode(ERRCODE_INVALID_PARAMETER_VALUE),
+				 errmsg("multivector token pooling target ratio must be greater than zero")));
+
+	targetCount = (int32) ceil((double) mv->count * targetRatio);
+	targetCount = Max(1, Min(targetCount, mv->count));
+	if (targetCount >= mv->count)
+		return (PgturbohybridMultiVector *) mv;
+	if ((mv->flags & PGTURBOHYBRID_MULTIVECTOR_FLAG_CONTEXTS) != 0)
+		ereport(ERROR,
+				(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
+				 errmsg("multivector token pooling does not support context-aware multivectors"),
+				 errhint("Use multivector_token_pooling = off for context-aware multivectors.")));
+
+	oldCtx = MemoryContextSwitchTo(ctx);
+	resultSize = PgturbohybridMultiVectorSize(targetCount, mv->dim);
+	pooled = palloc0(resultSize);
+	SET_VARSIZE(pooled, resultSize);
+	pooled->dim = mv->dim;
+	pooled->count = targetCount;
+	pooled->flags = mv->flags;
+
+	selected = palloc0(sizeof(int) * targetCount);
+	isSelected = palloc0(sizeof(bool) * mv->count);
+	clusterCounts = palloc0(sizeof(int) * targetCount);
+	centroidBytes = sizeof(float) * (Size) targetCount * (Size) mv->dim;
+	centroids = palloc0(centroidBytes);
+	sums = palloc0(centroidBytes);
+
+	selected[0] = 0;
+	isSelected[0] = true;
+	for (int32 cluster = 1; cluster < targetCount; cluster++)
+	{
+		double		bestWorstSimilarity = DBL_MAX;
+		int			bestToken = -1;
+
+		for (int32 token = 0; token < mv->count; token++)
+		{
+			double		bestSimilarity = -DBL_MAX;
+
+			if (isSelected[token])
+				continue;
+			for (int32 existing = 0; existing < cluster; existing++)
+				bestSimilarity =
+					Max(bestSimilarity,
+						PgturbohybridMultiVectorTokenCosine(mv, token,
+															selected[existing]));
+			if (bestToken < 0 || bestSimilarity < bestWorstSimilarity)
+			{
+				bestWorstSimilarity = bestSimilarity;
+				bestToken = token;
+			}
+		}
+		if (bestToken < 0)
+			bestToken = cluster;
+		selected[cluster] = bestToken;
+		isSelected[bestToken] = true;
+	}
+
+	for (int32 cluster = 0; cluster < targetCount; cluster++)
+		memcpy(centroids + (Size) cluster * mv->dim,
+			   PgturbohybridMultiVectorValues(mv, selected[cluster]),
+			   sizeof(float) * mv->dim);
+
+	for (int iteration = 0;
+		 iteration < (mode == PGTURBOHYBRID_MULTIVECTOR_TOKEN_POOLING_KMEANS ? 4 : 1);
+		 iteration++)
+	{
+		memset(sums, 0, centroidBytes);
+		memset(clusterCounts, 0, sizeof(int) * targetCount);
+		for (int32 token = 0; token < mv->count; token++)
+		{
+			const float *values = PgturbohybridMultiVectorValues(mv, token);
+			double		bestSimilarity = -DBL_MAX;
+			int			bestCluster = 0;
+
+			for (int32 cluster = 0; cluster < targetCount; cluster++)
+			{
+				float	   *centroid = centroids + (Size) cluster * mv->dim;
+				double		dot = 0.0;
+
+				for (int32 dim = 0; dim < mv->dim; dim++)
+					dot += (double) values[dim] * (double) centroid[dim];
+				if (cluster == 0 || dot > bestSimilarity)
+				{
+					bestSimilarity = dot;
+					bestCluster = cluster;
+				}
+			}
+			clusterCounts[bestCluster]++;
+			for (int32 dim = 0; dim < mv->dim; dim++)
+				sums[(Size) bestCluster * mv->dim + dim] += values[dim];
+		}
+
+		for (int32 cluster = 0; cluster < targetCount; cluster++)
+		{
+			float	   *centroid = centroids + (Size) cluster * mv->dim;
+
+			if (clusterCounts[cluster] == 0)
+			{
+				memcpy(centroid,
+					   PgturbohybridMultiVectorValues(mv, selected[cluster]),
+					   sizeof(float) * mv->dim);
+				continue;
+			}
+			for (int32 dim = 0; dim < mv->dim; dim++)
+				centroid[dim] =
+					sums[(Size) cluster * mv->dim + dim] /
+					(float) clusterCounts[cluster];
+			PgturbohybridMultiVectorNormalizeToken(centroid, mv->dim);
+		}
+	}
+
+	memcpy(pooled->values, centroids, centroidBytes);
+	pfree(sums);
+	pfree(centroids);
+	pfree(clusterCounts);
+	pfree(isSelected);
+	pfree(selected);
+	MemoryContextSwitchTo(oldCtx);
+
+	return pooled;
+}
+
+int
+PgturbohybridMultiVectorCentroidCountForDoc(const PgturbohybridMultiVector *doc,
+											int requested)
+{
+	int			autoCount;
+
+	if (doc == NULL || doc->count <= 0)
+		return 0;
+	if (requested > 0)
+		return Min(requested, doc->count);
+	if (doc->count <= 4)
+		return doc->count;
+
+	autoCount = (int) ceil(sqrt((double) doc->count));
+	autoCount = Max(4, autoCount);
+	autoCount = Min(autoCount, 64);
+	return Min(autoCount, doc->count);
+}
+
+float
+PgturbohybridMultiVectorCentroidResidualMean(const PgturbohybridMultiVector *doc,
+											 const PgturbohybridMultiVector *centroids)
+{
+	double		sum = 0.0;
+
+	PgturbohybridCheckSameMultiVectorDims(doc, centroids);
+	if (doc->count <= 0 || centroids->count <= 0)
+		return 0.0f;
+
+	for (int32 token = 0; token < doc->count; token++)
+	{
+		const float *values = PgturbohybridMultiVectorValues(doc, token);
+		const float *bestCentroid = NULL;
+		double		bestSimilarity = -DBL_MAX;
+
+		for (int32 centroid = 0; centroid < centroids->count; centroid++)
+		{
+			const float *centroidValues =
+				PgturbohybridMultiVectorValues(centroids, centroid);
+			double		dot = 0.0;
+
+			for (int32 dim = 0; dim < doc->dim; dim++)
+				dot += (double) values[dim] * (double) centroidValues[dim];
+			if (centroid == 0 || dot > bestSimilarity)
+			{
+				bestSimilarity = dot;
+				bestCentroid = centroidValues;
+			}
+		}
+
+		if (bestCentroid != NULL)
+		{
+			double		residual = 0.0;
+
+			for (int32 dim = 0; dim < doc->dim; dim++)
+			{
+				double		delta =
+					(double) values[dim] - (double) bestCentroid[dim];
+
+				residual += delta * delta;
+			}
+			sum += residual;
+		}
+	}
+
+	return (float) (sum / (double) doc->count);
+}
+
+static uint32
+PgturbohybridMultiVectorProxyHash(uint32 a, uint32 b, uint32 salt)
+{
+	uint32		x = (uint32) 0x9e3779b9U;
+
+	x ^= a + (uint32) 0x85ebca6bU + (x << 6) + (x >> 2);
+	x ^= b + (uint32) 0xc2b2ae35U + (x << 6) + (x >> 2);
+	x ^= salt + (uint32) 0x27d4eb2dU + (x << 6) + (x >> 2);
+	x ^= x >> 16;
+	x *= (uint32) 0x7feb352dU;
+	x ^= x >> 15;
+	x *= (uint32) 0x846ca68bU;
+	x ^= x >> 16;
+	return x;
+}
+
+const char *
+PgturbohybridMultiVectorProxyEncoderName(int encoder)
+{
+	switch (encoder)
+	{
+		case PGTURBOHYBRID_MULTIVECTOR_PROXY_ENCODER_MAX_POOL:
+			return "max_pool";
+		case PGTURBOHYBRID_MULTIVECTOR_PROXY_ENCODER_RANDOM_PROJECTION_FDE:
+			return "random_projection_fde";
+		case PGTURBOHYBRID_MULTIVECTOR_PROXY_ENCODER_LEARNED_PROJECTION_PLACEHOLDER:
+			return "learned_projection_placeholder";
+		case PGTURBOHYBRID_MULTIVECTOR_PROXY_ENCODER_MEAN_POOL:
+		default:
+			return "mean_pool";
+	}
+}
+
+Vector *
+PgturbohybridMultiVectorBuildProxyVector(const PgturbohybridMultiVector *mv,
+										 int encoder,
+										 MemoryContext ctx)
+{
+	Vector	   *vector;
+
+	PgturbohybridCheckMultiVector(mv);
+	if (encoder ==
+		PGTURBOHYBRID_MULTIVECTOR_PROXY_ENCODER_LEARNED_PROJECTION_PLACEHOLDER)
+		ereport(ERROR,
+				(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
+				 errmsg("learned multivector proxy projection is not configured"),
+				 errhint("Use multivector_proxy_encoder = mean_pool, max_pool, or random_projection_fde until learned projection weights are supported.")));
+
+	vector = MemoryContextAllocZero(ctx, PGTURBOHYBRID_VECTOR_SIZE(mv->dim));
+	SET_VARSIZE(vector, PGTURBOHYBRID_VECTOR_SIZE(mv->dim));
+	vector->dim = mv->dim;
+
+	if (encoder == PGTURBOHYBRID_MULTIVECTOR_PROXY_ENCODER_MAX_POOL)
+	{
+		for (int32 dim = 0; dim < mv->dim; dim++)
+			vector->x[dim] = -FLT_MAX;
+		for (int32 token = 0; token < mv->count; token++)
+		{
+			const float *values = PgturbohybridMultiVectorValues(mv, token);
+
+			for (int32 dim = 0; dim < mv->dim; dim++)
+				vector->x[dim] = Max(vector->x[dim], values[dim]);
+		}
+	}
+	else if (encoder ==
+			 PGTURBOHYBRID_MULTIVECTOR_PROXY_ENCODER_RANDOM_PROJECTION_FDE)
+	{
+		double		scale = 1.0 / sqrt((double) mv->count);
+
+		for (int32 token = 0; token < mv->count; token++)
+		{
+			const float *values = PgturbohybridMultiVectorValues(mv, token);
+
+			for (int32 dim = 0; dim < mv->dim; dim++)
+			{
+				uint32		hash =
+					PgturbohybridMultiVectorProxyHash((uint32) token,
+													  (uint32) dim, 0);
+				int32		bucket = (int32) (hash % (uint32) mv->dim);
+				float		sign =
+					(hash & (uint32) 0x80000000U) ? -1.0f : 1.0f;
+
+				vector->x[bucket] += (float) ((double) sign *
+											  (double) values[dim] * scale);
+			}
+		}
+	}
+	else
+	{
+		for (int32 token = 0; token < mv->count; token++)
+		{
+			const float *values = PgturbohybridMultiVectorValues(mv, token);
+
+			for (int32 dim = 0; dim < mv->dim; dim++)
+				vector->x[dim] += values[dim];
+		}
+		for (int32 dim = 0; dim < mv->dim; dim++)
+			vector->x[dim] /= (float) mv->count;
+	}
+
+	return vector;
 }
 
 static Vector *
@@ -684,6 +1675,18 @@ TqMultiVectorMaxSimBlockedWithDot(const PgturbohybridMultiVector *query,
 	return score;
 }
 
+static void
+TqDotProductF32BlockScalar(const float *queryValues, const float *docValues,
+						   int32 dim, int32 blockCount, double *dots)
+{
+	for (int32 qi = 0; qi < blockCount; qi++)
+	{
+		const float *qv = queryValues + ((Size) qi * (Size) dim);
+
+		dots[qi] = TqDotProductF32Scalar(qv, docValues, dim);
+	}
+}
+
 double
 TqMultiVectorMaxSimScalar(const PgturbohybridMultiVector *query,
 						  const PgturbohybridMultiVector *doc)
@@ -889,6 +1892,318 @@ TqMultiVectorMaxSim(const PgturbohybridMultiVector *query,
 	return TqResolveMultiVectorMaxSimKernel()(query, doc);
 }
 
+static double
+TqMultiVectorSymmetricMaxSimAverageWithDot(const PgturbohybridMultiVector *a,
+										   const PgturbohybridMultiVector *b,
+										   TqDotProductF32Func dotProduct,
+										   TqDotProductF32BlockFunc blockDotProduct)
+{
+	PgturbohybridCheckSameMultiVectorDims(a, b);
+
+	return TqMultiVectorSymmetricMaxSimAverageWithDotUnchecked(a, b,
+															  dotProduct,
+															  blockDotProduct);
+}
+
+static double
+TqMultiVectorSymmetricMaxSimAverageWithDotUnchecked(const PgturbohybridMultiVector *a,
+													const PgturbohybridMultiVector *b,
+													TqDotProductF32Func dotProduct,
+													TqDotProductF32BlockFunc blockDotProduct)
+{
+	double		bestA[PGTURBOHYBRID_MULTIVECTOR_MAX_COUNT];
+	double		bestB[PGTURBOHYBRID_MULTIVECTOR_MAX_COUNT];
+	double		dots[PGTURBOHYBRID_MULTIVECTOR_BLOCKED_SCALAR_Q];
+	double		sumA = 0.0;
+	double		sumB = 0.0;
+
+	for (int32 ai = 0; ai < a->count; ai++)
+		bestA[ai] = -INFINITY;
+	for (int32 bi = 0; bi < b->count; bi++)
+		bestB[bi] = -INFINITY;
+
+	for (int32 ab = 0; ab < a->count;
+		 ab += PGTURBOHYBRID_MULTIVECTOR_BLOCKED_SCALAR_Q)
+	{
+		int32		blockCount =
+			Min(a->count - ab, PGTURBOHYBRID_MULTIVECTOR_BLOCKED_SCALAR_Q);
+		const float *aValues = a->values + ((Size) ab * (Size) a->dim);
+
+		for (int32 bi = 0; bi < b->count; bi++)
+		{
+			const float *bv = b->values + ((Size) bi * (Size) b->dim);
+
+			if (blockCount == 1)
+				dots[0] = dotProduct(aValues, bv, a->dim);
+			else
+				blockDotProduct(aValues, bv, a->dim, blockCount, dots);
+
+			for (int32 ai = 0; ai < blockCount; ai++)
+			{
+				double		dot = dots[ai];
+
+				if (dot > bestA[ab + ai])
+					bestA[ab + ai] = dot;
+				if (dot > bestB[bi])
+					bestB[bi] = dot;
+			}
+		}
+	}
+
+	for (int32 ai = 0; ai < a->count; ai++)
+		sumA += bestA[ai];
+	for (int32 bi = 0; bi < b->count; bi++)
+		sumB += bestB[bi];
+
+	return 0.5 * ((sumA / (double) a->count) + (sumB / (double) b->count));
+}
+
+double
+TqMultiVectorSymmetricMaxSimAverage(const PgturbohybridMultiVector *a,
+									const PgturbohybridMultiVector *b)
+{
+	if (pgturbohybrid_dense_exact_simd_force == PGTURBOHYBRID_EXACT_SIMD_FORCE_SCALAR)
+		return TqMultiVectorSymmetricMaxSimAverageWithDot(a, b,
+														  TqDotProductF32Scalar,
+														  TqDotProductF32BlockScalar);
+
+#if PGTURBOHYBRID_MULTIVECTOR_COMPILE_AVX512F
+	if (TqMultiVectorAvx512fAvailable())
+		return TqMultiVectorSymmetricMaxSimAverageWithDot(a, b,
+														  TqDotProductF32Avx512f,
+														  TqDotProductF32BlockAvx512f);
+#endif
+#if PGTURBOHYBRID_MULTIVECTOR_COMPILE_AVX2
+	if (TqMultiVectorAvx2Available())
+		return TqMultiVectorSymmetricMaxSimAverageWithDot(a, b,
+														  TqDotProductF32Avx2,
+														  TqDotProductF32BlockAvx2);
+#endif
+#if PGTURBOHYBRID_MULTIVECTOR_COMPILE_NEON
+	return TqMultiVectorSymmetricMaxSimAverageWithDot(a, b,
+													  TqDotProductF32Neon,
+													  TqDotProductF32BlockNeon);
+#endif
+	return TqMultiVectorSymmetricMaxSimAverageWithDot(a, b,
+													  TqDotProductF32Scalar,
+													  TqDotProductF32BlockScalar);
+}
+
+double
+TqMultiVectorSymmetricMaxSimAverageUnchecked(const PgturbohybridMultiVector *a,
+											 const PgturbohybridMultiVector *b)
+{
+	if (pgturbohybrid_dense_exact_simd_force == PGTURBOHYBRID_EXACT_SIMD_FORCE_SCALAR)
+		return TqMultiVectorSymmetricMaxSimAverageWithDotUnchecked(a, b,
+																   TqDotProductF32Scalar,
+																   TqDotProductF32BlockScalar);
+
+#if PGTURBOHYBRID_MULTIVECTOR_COMPILE_AVX512F
+	if (TqMultiVectorAvx512fAvailable())
+		return TqMultiVectorSymmetricMaxSimAverageWithDotUnchecked(a, b,
+																   TqDotProductF32Avx512f,
+																   TqDotProductF32BlockAvx512f);
+#endif
+#if PGTURBOHYBRID_MULTIVECTOR_COMPILE_AVX2
+	if (TqMultiVectorAvx2Available())
+		return TqMultiVectorSymmetricMaxSimAverageWithDotUnchecked(a, b,
+																   TqDotProductF32Avx2,
+																   TqDotProductF32BlockAvx2);
+#endif
+#if PGTURBOHYBRID_MULTIVECTOR_COMPILE_NEON
+	return TqMultiVectorSymmetricMaxSimAverageWithDotUnchecked(a, b,
+															   TqDotProductF32Neon,
+															   TqDotProductF32BlockNeon);
+#endif
+	return TqMultiVectorSymmetricMaxSimAverageWithDotUnchecked(a, b,
+															   TqDotProductF32Scalar,
+															   TqDotProductF32BlockScalar);
+}
+
+static double
+TqMultiVectorMaxSimTokenRangeWeighted(const PgturbohybridMultiVector *query,
+									  const PgturbohybridMultiVector *doc,
+									  int32 startToken, int32 endToken,
+									  const float4 *queryWeights,
+									  const bool *queryMask)
+{
+	double		score = 0.0;
+
+	PgturbohybridCheckSameMultiVectorDims(query, doc);
+	if (startToken < 0 || endToken > doc->count || startToken >= endToken)
+		ereport(ERROR,
+				(errcode(ERRCODE_DATA_EXCEPTION),
+				 errmsg("invalid multivector context token range")));
+
+	for (int32 qi = 0; qi < query->count; qi++)
+	{
+		const float *qv = query->values + ((Size) qi * (Size) query->dim);
+		double		weight = queryWeights != NULL ? (double) queryWeights[qi] : 1.0;
+		double		best = -INFINITY;
+
+		if (queryMask != NULL && queryMask[qi])
+			continue;
+		if (!isfinite(weight) || weight < 0.0)
+			ereport(ERROR,
+					(errcode(ERRCODE_DATA_EXCEPTION),
+					 errmsg("query token weights must be finite non-negative values")));
+		if (weight == 0.0)
+			continue;
+
+		for (int32 di = startToken; di < endToken; di++)
+		{
+			const float *dv = doc->values + ((Size) di * (Size) doc->dim);
+			double		dot = TqDotProductF32Scalar(qv, dv, query->dim);
+
+			if (dot > best)
+				best = dot;
+		}
+		score += weight * best;
+	}
+	return score;
+}
+
+static double
+TqMultiVectorMaxSimTokenRange(const PgturbohybridMultiVector *query,
+							  const PgturbohybridMultiVector *doc,
+							  int32 startToken, int32 endToken)
+{
+	return TqMultiVectorMaxSimTokenRangeWeighted(query, doc, startToken,
+												 endToken, NULL, NULL);
+}
+
+double
+TqMultiVectorMaxSimWeighted(const PgturbohybridMultiVector *query,
+							const PgturbohybridMultiVector *doc,
+							const float4 *queryWeights,
+							const bool *queryMask)
+{
+	if (queryWeights == NULL && queryMask == NULL)
+		return TqMultiVectorMaxSim(query, doc);
+	return TqMultiVectorMaxSimTokenRangeWeighted(query, doc, 0, doc->count,
+												 queryWeights, queryMask);
+}
+
+double
+TqMultiVectorMaxSimContextLevel(const PgturbohybridMultiVector *query,
+								const PgturbohybridMultiVector *doc)
+{
+	const int32 *offsets;
+	int32		contextCount;
+	double		best = -INFINITY;
+
+	PgturbohybridCheckSameMultiVectorDims(query, doc);
+	if (!PgturbohybridMultiVectorHasContexts(doc))
+		return TqMultiVectorMaxSim(query, doc);
+
+	offsets = PgturbohybridMultiVectorContextOffsets(doc);
+	contextCount = PgturbohybridMultiVectorContextCount(doc);
+	for (int32 ci = 0; ci < contextCount; ci++)
+	{
+		int32		start = offsets[ci];
+		int32		end = (ci + 1 < contextCount) ? offsets[ci + 1] : doc->count;
+		double		score =
+			TqMultiVectorMaxSimTokenRange(query, doc, start, end);
+
+		if (score > best)
+			best = score;
+	}
+	return best;
+}
+
+double
+TqMultiVectorMaxSimContextLevelWeighted(const PgturbohybridMultiVector *query,
+										const PgturbohybridMultiVector *doc,
+										const float4 *queryWeights,
+										const bool *queryMask)
+{
+	const int32 *offsets;
+	int32		contextCount;
+	double		best = -INFINITY;
+
+	if (queryWeights == NULL && queryMask == NULL)
+		return TqMultiVectorMaxSimContextLevel(query, doc);
+
+	PgturbohybridCheckSameMultiVectorDims(query, doc);
+	if (!PgturbohybridMultiVectorHasContexts(doc))
+		return TqMultiVectorMaxSimWeighted(query, doc, queryWeights, queryMask);
+
+	offsets = PgturbohybridMultiVectorContextOffsets(doc);
+	contextCount = PgturbohybridMultiVectorContextCount(doc);
+	for (int32 ci = 0; ci < contextCount; ci++)
+	{
+		int32		start = offsets[ci];
+		int32		end = (ci + 1 < contextCount) ? offsets[ci + 1] : doc->count;
+		double		score =
+			TqMultiVectorMaxSimTokenRangeWeighted(query, doc, start, end,
+												  queryWeights, queryMask);
+
+		if (score > best)
+			best = score;
+	}
+	return best;
+}
+
+double
+TqMultiVectorMaxSimFieldWeighted(const PgturbohybridMultiVector *query,
+								 const PgturbohybridMultiVector *doc,
+								 const int32 *fieldIds,
+								 const float4 *weights,
+								 int fieldCount)
+{
+	const int32 *offsets;
+	const int32 *docFields;
+	int32		contextCount;
+	double		total = 0.0;
+
+	PgturbohybridCheckSameMultiVectorDims(query, doc);
+	if (fieldIds == NULL || weights == NULL || fieldCount <= 0)
+		ereport(ERROR,
+				(errcode(ERRCODE_INVALID_PARAMETER_VALUE),
+				 errmsg("field weighted MaxSim requires at least one field weight")));
+
+	if (!PgturbohybridMultiVectorHasContexts(doc))
+	{
+		for (int i = 0; i < fieldCount; i++)
+		{
+			if (fieldIds[i] == 0)
+				return (double) weights[i] * TqMultiVectorMaxSim(query, doc);
+		}
+		return 0.0;
+	}
+
+	offsets = PgturbohybridMultiVectorContextOffsets(doc);
+	docFields = PgturbohybridMultiVectorContextFields(doc);
+	contextCount = PgturbohybridMultiVectorContextCount(doc);
+	for (int wi = 0; wi < fieldCount; wi++)
+	{
+		double		fieldBest = -INFINITY;
+
+		if (!isfinite(weights[wi]))
+			ereport(ERROR,
+					(errcode(ERRCODE_DATA_EXCEPTION),
+					 errmsg("field weights must be finite")));
+		for (int32 ci = 0; ci < contextCount; ci++)
+		{
+			int32		docField = docFields != NULL ? docFields[ci] : 0;
+			int32		start;
+			int32		end;
+			double		score;
+
+			if (docField != fieldIds[wi])
+				continue;
+			start = offsets[ci];
+			end = (ci + 1 < contextCount) ? offsets[ci + 1] : doc->count;
+			score = TqMultiVectorMaxSimTokenRange(query, doc, start, end);
+			if (score > fieldBest)
+				fieldBest = score;
+		}
+		if (fieldBest > -INFINITY)
+			total += (double) weights[wi] * fieldBest;
+	}
+	return total;
+}
+
 static void
 TqMvSkipSpaces(const char **cursor)
 {
@@ -1036,6 +2351,81 @@ pgturbohybrid_multivector_in(PG_FUNCTION_ARGS)
 			TqMvExpectChar(&cursor, ',');
 	}
 	TqMvExpectChar(&cursor, ']');
+	TqMvSkipSpaces(&cursor);
+	if (*cursor == ',')
+	{
+		int32	   *contextOffsets = NULL;
+		int32	   *fieldIds = NULL;
+		int32		contextCount = 0;
+		bool		hasFields = false;
+
+		cursor++;
+		if (!TqMvConsumeLiteral(&cursor, "contexts"))
+			TqMvInputError("Expected contexts field.");
+		TqMvExpectChar(&cursor, '=');
+		TqMvExpectChar(&cursor, '[');
+		for (;;)
+		{
+			int32		offset = TqMvParseInt32(&cursor, "contexts");
+
+			contextOffsets = contextOffsets == NULL ?
+				palloc(sizeof(int32) * (Size) (contextCount + 1)) :
+				repalloc(contextOffsets,
+						 sizeof(int32) * (Size) (contextCount + 1));
+			contextOffsets[contextCount++] = offset;
+			TqMvSkipSpaces(&cursor);
+			if (*cursor != ',')
+				break;
+			cursor++;
+		}
+		TqMvExpectChar(&cursor, ']');
+		TqMvSkipSpaces(&cursor);
+		if (*cursor == ',')
+		{
+			int32		fieldCount = 0;
+
+			cursor++;
+			if (!TqMvConsumeLiteral(&cursor, "fields"))
+				TqMvInputError("Expected fields field.");
+			TqMvExpectChar(&cursor, '=');
+			TqMvExpectChar(&cursor, '[');
+			for (;;)
+			{
+				int32		fieldId = TqMvParseInt32(&cursor, "fields");
+
+				fieldIds = fieldIds == NULL ?
+					palloc(sizeof(int32) * (Size) (fieldCount + 1)) :
+					repalloc(fieldIds,
+							 sizeof(int32) * (Size) (fieldCount + 1));
+				fieldIds[fieldCount++] = fieldId;
+				TqMvSkipSpaces(&cursor);
+				if (*cursor != ',')
+					break;
+				cursor++;
+			}
+			TqMvExpectChar(&cursor, ']');
+			if (fieldCount != contextCount)
+				TqMvInputError("fields count must match contexts count.");
+			hasFields = true;
+		}
+
+		PgturbohybridMultiVectorValidateContexts(result, contextCount,
+												 contextOffsets, fieldIds);
+		resultSize =
+			PgturbohybridMultiVectorExtendedSize(count, dim, contextCount,
+												 hasFields);
+		result = repalloc(result, resultSize);
+		SET_VARSIZE(result, resultSize);
+		result->flags = PGTURBOHYBRID_MULTIVECTOR_FLAG_CONTEXTS;
+		if (hasFields)
+			result->flags |= PGTURBOHYBRID_MULTIVECTOR_FLAG_FIELDS;
+		*PgturbohybridMultiVectorContextCountPtr(result) = contextCount;
+		memcpy(PgturbohybridMultiVectorMutableContextOffsets(result),
+			   contextOffsets, sizeof(int32) * (Size) contextCount);
+		if (hasFields)
+			memcpy(PgturbohybridMultiVectorMutableContextFields(result),
+				   fieldIds, sizeof(int32) * (Size) contextCount);
+	}
 	TqMvExpectChar(&cursor, ')');
 	TqMvSkipSpaces(&cursor);
 	if (*cursor != '\0')
@@ -1050,6 +2440,9 @@ pgturbohybrid_multivector_out(PG_FUNCTION_ARGS)
 {
 	PgturbohybridMultiVector *mv = PG_GETARG_PGTURBOHYBRID_MULTIVECTOR_P(0);
 	StringInfoData buf;
+	const int32 *contextOffsets = PgturbohybridMultiVectorContextOffsets(mv);
+	const int32 *fieldIds = PgturbohybridMultiVectorContextFields(mv);
+	int32		contextCount = PgturbohybridMultiVectorContextCount(mv);
 
 	initStringInfo(&buf);
 	appendStringInfo(&buf, "turbohybrid_multivector(dim=%d,count=%d,values=[", mv->dim, mv->count);
@@ -1070,7 +2463,30 @@ pgturbohybrid_multivector_out(PG_FUNCTION_ARGS)
 		appendStringInfoChar(&buf, ']');
 	}
 
-	appendStringInfoString(&buf, "])");
+	appendStringInfoChar(&buf, ']');
+	if (contextOffsets != NULL)
+	{
+		appendStringInfoString(&buf, ",contexts=[");
+		for (int32 i = 0; i < contextCount; i++)
+		{
+			if (i > 0)
+				appendStringInfoChar(&buf, ',');
+			appendStringInfo(&buf, "%d", contextOffsets[i]);
+		}
+		appendStringInfoChar(&buf, ']');
+		if (fieldIds != NULL)
+		{
+			appendStringInfoString(&buf, ",fields=[");
+			for (int32 i = 0; i < contextCount; i++)
+			{
+				if (i > 0)
+					appendStringInfoChar(&buf, ',');
+				appendStringInfo(&buf, "%d", fieldIds[i]);
+			}
+			appendStringInfoChar(&buf, ']');
+		}
+	}
+	appendStringInfoChar(&buf, ')');
 	PG_RETURN_CSTRING(buf.data);
 }
 
@@ -1087,7 +2503,8 @@ pgturbohybrid_multivector_recv(PG_FUNCTION_ARGS)
 	PgturbohybridMultiVector *result;
 
 	formatVersion = (int32) pq_getmsgint(buf, 4);
-	if (formatVersion != PGTURBOHYBRID_MULTIVECTOR_BINARY_VERSION)
+	if (formatVersion != PGTURBOHYBRID_MULTIVECTOR_BINARY_VERSION &&
+		formatVersion != PGTURBOHYBRID_MULTIVECTOR_BINARY_VERSION_CONTEXTS)
 		ereport(ERROR,
 				(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
 				 errmsg("unsupported turbohybrid_multivector binary format version %d",
@@ -1097,13 +2514,44 @@ pgturbohybrid_multivector_recv(PG_FUNCTION_ARGS)
 	count = (int32) pq_getmsgint(buf, 4);
 	flags = (uint32) pq_getmsgint(buf, 4);
 	floatCount = PgturbohybridMultiVectorFloatCount(count, dim);
-	resultSize = PgturbohybridMultiVectorSize(count, dim);
+	if ((flags & PGTURBOHYBRID_MULTIVECTOR_FLAG_CONTEXTS) != 0)
+	{
+		int32		contextCount = (int32) pq_getmsgint(buf, 4);
+		bool		hasFields =
+			(flags & PGTURBOHYBRID_MULTIVECTOR_FLAG_FIELDS) != 0;
 
-	result = (PgturbohybridMultiVector *) palloc0(resultSize);
-	SET_VARSIZE(result, resultSize);
-	result->dim = dim;
-	result->count = count;
-	result->flags = flags;
+		if (formatVersion < PGTURBOHYBRID_MULTIVECTOR_BINARY_VERSION_CONTEXTS)
+			ereport(ERROR,
+					(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
+					 errmsg("context-aware multivector requires binary format version 2")));
+		resultSize =
+			PgturbohybridMultiVectorExtendedSize(count, dim, contextCount,
+												 hasFields);
+		result = (PgturbohybridMultiVector *) palloc0(resultSize);
+		SET_VARSIZE(result, resultSize);
+		result->dim = dim;
+		result->count = count;
+		result->flags = flags;
+		*PgturbohybridMultiVectorContextCountPtr(result) = contextCount;
+		for (int32 i = 0; i < contextCount; i++)
+			PgturbohybridMultiVectorMutableContextOffsets(result)[i] =
+				(int32) pq_getmsgint(buf, 4);
+		if (hasFields)
+		{
+			for (int32 i = 0; i < contextCount; i++)
+				PgturbohybridMultiVectorMutableContextFields(result)[i] =
+					(int32) pq_getmsgint(buf, 4);
+		}
+	}
+	else
+	{
+		resultSize = PgturbohybridMultiVectorSize(count, dim);
+		result = (PgturbohybridMultiVector *) palloc0(resultSize);
+		SET_VARSIZE(result, resultSize);
+		result->dim = dim;
+		result->count = count;
+		result->flags = flags;
+	}
 
 	for (Size i = 0; i < floatCount; i++)
 		result->values[i] = pq_getmsgfloat4(buf);
@@ -1119,12 +2567,32 @@ pgturbohybrid_multivector_send(PG_FUNCTION_ARGS)
 	PgturbohybridMultiVector *mv = PG_GETARG_PGTURBOHYBRID_MULTIVECTOR_P(0);
 	Size		floatCount = PgturbohybridMultiVectorFloatCount(mv->count, mv->dim);
 	StringInfoData buf;
+	bool		hasContexts =
+		(mv->flags & PGTURBOHYBRID_MULTIVECTOR_FLAG_CONTEXTS) != 0;
 
 	pq_begintypsend(&buf);
-	pq_sendint32(&buf, PGTURBOHYBRID_MULTIVECTOR_BINARY_VERSION);
+	pq_sendint32(&buf, hasContexts ?
+				 PGTURBOHYBRID_MULTIVECTOR_BINARY_VERSION_CONTEXTS :
+				 PGTURBOHYBRID_MULTIVECTOR_BINARY_VERSION);
 	pq_sendint32(&buf, (uint32) mv->dim);
 	pq_sendint32(&buf, (uint32) mv->count);
 	pq_sendint32(&buf, mv->flags);
+	if (hasContexts)
+	{
+		int32		contextCount = PgturbohybridMultiVectorContextCount(mv);
+		const int32 *contextOffsets =
+			PgturbohybridMultiVectorContextOffsets(mv);
+		const int32 *fieldIds = PgturbohybridMultiVectorContextFields(mv);
+
+		pq_sendint32(&buf, contextCount);
+		for (int32 i = 0; i < contextCount; i++)
+			pq_sendint32(&buf, contextOffsets[i]);
+		if (fieldIds != NULL)
+		{
+			for (int32 i = 0; i < contextCount; i++)
+				pq_sendint32(&buf, fieldIds[i]);
+		}
+	}
 	for (Size i = 0; i < floatCount; i++)
 		pq_sendfloat4(&buf, mv->values[i]);
 
@@ -1215,12 +2683,7 @@ Datum
 pgturbohybrid_multivector_from_float4(PG_FUNCTION_ARGS)
 {
 	ArrayType  *array;
-	Datum	   *elements;
-	bool	   *nulls;
-	int			nelems;
 	int32		dim = PG_GETARG_INT32(1);
-	int32		count;
-	Size		resultSize;
 	PgturbohybridMultiVector *result;
 
 	if (PG_ARGISNULL(0))
@@ -1228,61 +2691,77 @@ pgturbohybrid_multivector_from_float4(PG_FUNCTION_ARGS)
 				(errcode(ERRCODE_NULL_VALUE_NOT_ALLOWED),
 				 errmsg("multivector values array cannot be null")));
 
-	if (dim <= 0)
-		ereport(ERROR,
-				(errcode(ERRCODE_INVALID_PARAMETER_VALUE),
-				 errmsg("multivector dimensions must be greater than zero")));
-
 	array = PG_GETARG_ARRAYTYPE_P(0);
-	if (ARR_NDIM(array) == 0)
+	result = PgturbohybridMultiVectorBuildFromFlatArray(array, dim, 0, NULL,
+														NULL);
+	PG_RETURN_PGTURBOHYBRID_MULTIVECTOR_P(result);
+}
+
+Datum
+pgturbohybrid_multivector_from_contexts(PG_FUNCTION_ARGS)
+{
+	ArrayType  *valuesArray;
+	ArrayType  *contextsArray;
+	int32		dim = PG_GETARG_INT32(1);
+	int		   contextCount;
+	int32	   *contextOffsets;
+	PgturbohybridMultiVector *result;
+
+	if (PG_ARGISNULL(0) || PG_ARGISNULL(2))
 		ereport(ERROR,
-				(errcode(ERRCODE_DATA_EXCEPTION),
-				 errmsg("multivector values array cannot be empty")));
+				(errcode(ERRCODE_NULL_VALUE_NOT_ALLOWED),
+				 errmsg("multivector values and context offsets cannot be null")));
 
-	if (ARR_ELEMTYPE(array) != FLOAT4OID)
+	valuesArray = PG_GETARG_ARRAYTYPE_P(0);
+	contextsArray = PG_GETARG_ARRAYTYPE_P(2);
+	contextOffsets =
+		PgturbohybridMultiVectorReadInt4Array(contextsArray,
+											  "context offsets",
+											  &contextCount);
+	result = PgturbohybridMultiVectorBuildFromFlatArray(valuesArray, dim,
+														contextCount,
+														contextOffsets,
+														NULL);
+	PG_RETURN_PGTURBOHYBRID_MULTIVECTOR_P(result);
+}
+
+Datum
+pgturbohybrid_multivector_from_contexts_and_fields(PG_FUNCTION_ARGS)
+{
+	ArrayType  *valuesArray;
+	ArrayType  *contextsArray;
+	ArrayType  *fieldsArray;
+	int32		dim = PG_GETARG_INT32(1);
+	int			contextCount;
+	int			fieldCount;
+	int32	   *contextOffsets;
+	int32	   *fieldIds;
+	PgturbohybridMultiVector *result;
+
+	if (PG_ARGISNULL(0) || PG_ARGISNULL(2) || PG_ARGISNULL(3))
 		ereport(ERROR,
-				(errcode(ERRCODE_DATATYPE_MISMATCH),
-				 errmsg("expected real[] input")));
+				(errcode(ERRCODE_NULL_VALUE_NOT_ALLOWED),
+				 errmsg("multivector values, context offsets, and field ids cannot be null")));
 
-	deconstruct_array(array, FLOAT4OID, sizeof(float4), true, TYPALIGN_INT,
-					  &elements, &nulls, &nelems);
-
-	if (nelems <= 0)
+	valuesArray = PG_GETARG_ARRAYTYPE_P(0);
+	contextsArray = PG_GETARG_ARRAYTYPE_P(2);
+	fieldsArray = PG_GETARG_ARRAYTYPE_P(3);
+	contextOffsets =
+		PgturbohybridMultiVectorReadInt4Array(contextsArray,
+											  "context offsets",
+											  &contextCount);
+	fieldIds =
+		PgturbohybridMultiVectorReadInt4Array(fieldsArray, "field ids",
+											  &fieldCount);
+	if (fieldCount != contextCount)
 		ereport(ERROR,
-				(errcode(ERRCODE_DATA_EXCEPTION),
-				 errmsg("multivector values array cannot be empty")));
+				(errcode(ERRCODE_ARRAY_SUBSCRIPT_ERROR),
+				 errmsg("field id count must match context offset count")));
 
-	if (nelems % dim != 0)
-		ereport(ERROR,
-				(errcode(ERRCODE_DATA_EXCEPTION),
-				 errmsg("multivector values array length must be divisible by dimensions")));
-
-	count = nelems / dim;
-	resultSize = PgturbohybridMultiVectorSize(count, dim);
-	result = (PgturbohybridMultiVector *) palloc0(resultSize);
-	SET_VARSIZE(result, resultSize);
-	result->dim = dim;
-	result->count = count;
-	result->flags = 0;
-
-	for (int i = 0; i < nelems; i++)
-	{
-		float4		value;
-
-		if (nulls[i])
-			ereport(ERROR,
-					(errcode(ERRCODE_NULL_VALUE_NOT_ALLOWED),
-					 errmsg("multivector values array cannot contain null elements")));
-
-		value = DatumGetFloat4(elements[i]);
-		if (!isfinite(value))
-			ereport(ERROR,
-					(errcode(ERRCODE_DATA_EXCEPTION),
-					 errmsg("multivector cannot contain NaN or infinite values")));
-		result->values[i] = value;
-	}
-
-	PgturbohybridCheckMultiVector(result);
+	result = PgturbohybridMultiVectorBuildFromFlatArray(valuesArray, dim,
+														contextCount,
+														contextOffsets,
+														fieldIds);
 	PG_RETURN_PGTURBOHYBRID_MULTIVECTOR_P(result);
 }
 
@@ -1300,6 +2779,53 @@ pgturbohybrid_multivector_count(PG_FUNCTION_ARGS)
 	PgturbohybridMultiVector *mv = PG_GETARG_PGTURBOHYBRID_MULTIVECTOR_P(0);
 
 	PG_RETURN_INT32(mv->count);
+}
+
+Datum
+pgturbohybrid_multivector_context_count(PG_FUNCTION_ARGS)
+{
+	PgturbohybridMultiVector *mv = PG_GETARG_PGTURBOHYBRID_MULTIVECTOR_P(0);
+
+	PG_RETURN_INT32(PgturbohybridMultiVectorContextCount(mv));
+}
+
+Datum
+pgturbohybrid_multivector_context_offsets(PG_FUNCTION_ARGS)
+{
+	PgturbohybridMultiVector *mv = PG_GETARG_PGTURBOHYBRID_MULTIVECTOR_P(0);
+	const int32 *offsets = PgturbohybridMultiVectorContextOffsets(mv);
+	int32		contextCount = PgturbohybridMultiVectorContextCount(mv);
+	Datum	   *elements;
+	ArrayType  *array;
+
+	elements = palloc(sizeof(Datum) * (Size) contextCount);
+	if (offsets == NULL)
+		elements[0] = Int32GetDatum(0);
+	else
+	{
+		for (int32 i = 0; i < contextCount; i++)
+			elements[i] = Int32GetDatum(offsets[i]);
+	}
+	array = construct_array(elements, contextCount, INT4OID, sizeof(int32),
+							true, TYPALIGN_INT);
+	PG_RETURN_ARRAYTYPE_P(array);
+}
+
+Datum
+pgturbohybrid_multivector_field_ids(PG_FUNCTION_ARGS)
+{
+	PgturbohybridMultiVector *mv = PG_GETARG_PGTURBOHYBRID_MULTIVECTOR_P(0);
+	const int32 *fields = PgturbohybridMultiVectorContextFields(mv);
+	int32		contextCount = PgturbohybridMultiVectorContextCount(mv);
+	Datum	   *elements;
+	ArrayType  *array;
+
+	elements = palloc(sizeof(Datum) * (Size) contextCount);
+	for (int32 i = 0; i < contextCount; i++)
+		elements[i] = Int32GetDatum(fields != NULL ? fields[i] : 0);
+	array = construct_array(elements, contextCount, INT4OID, sizeof(int32),
+							true, TYPALIGN_INT);
+	PG_RETURN_ARRAYTYPE_P(array);
 }
 
 Datum
@@ -1347,6 +2873,49 @@ pgturbohybrid_multivector_maxsim(PG_FUNCTION_ARGS)
 	PgturbohybridMultiVector *doc = PG_GETARG_PGTURBOHYBRID_MULTIVECTOR_P(1);
 
 	PG_RETURN_FLOAT8(TqMultiVectorMaxSim(query, doc));
+}
+
+Datum
+pgturbohybrid_multivector_context_maxsim(PG_FUNCTION_ARGS)
+{
+	PgturbohybridMultiVector *query = PG_GETARG_PGTURBOHYBRID_MULTIVECTOR_P(0);
+	PgturbohybridMultiVector *doc = PG_GETARG_PGTURBOHYBRID_MULTIVECTOR_P(1);
+
+	PG_RETURN_FLOAT8(TqMultiVectorMaxSimContextLevel(query, doc));
+}
+
+Datum
+pgturbohybrid_multivector_field_weighted_maxsim(PG_FUNCTION_ARGS)
+{
+	PgturbohybridMultiVector *query = PG_GETARG_PGTURBOHYBRID_MULTIVECTOR_P(0);
+	PgturbohybridMultiVector *doc = PG_GETARG_PGTURBOHYBRID_MULTIVECTOR_P(1);
+	ArrayType  *fieldArray;
+	ArrayType  *weightArray;
+	int			fieldCount;
+	int			weightCount;
+	int32	   *fieldIds;
+	float4	   *weights;
+
+	if (PG_ARGISNULL(2) || PG_ARGISNULL(3))
+		ereport(ERROR,
+				(errcode(ERRCODE_NULL_VALUE_NOT_ALLOWED),
+				 errmsg("field ids and weights cannot be null")));
+
+	fieldArray = PG_GETARG_ARRAYTYPE_P(2);
+	weightArray = PG_GETARG_ARRAYTYPE_P(3);
+	fieldIds =
+		PgturbohybridMultiVectorReadInt4Array(fieldArray, "field ids",
+											  &fieldCount);
+	weights =
+		PgturbohybridMultiVectorReadFloat4Array(weightArray, "field weights",
+												&weightCount);
+	if (fieldCount != weightCount)
+		ereport(ERROR,
+				(errcode(ERRCODE_ARRAY_SUBSCRIPT_ERROR),
+				 errmsg("field id count must match field weight count")));
+
+	PG_RETURN_FLOAT8(TqMultiVectorMaxSimFieldWeighted(query, doc, fieldIds,
+													  weights, fieldCount));
 }
 
 Datum
@@ -1401,5 +2970,7 @@ pgturbohybrid_multivector_query_distance(PG_FUNCTION_ARGS)
 				(errcode(ERRCODE_INVALID_PARAMETER_VALUE),
 				 errmsg("turbohybrid_query requires multivector_query for multivector distance")));
 
-	PG_RETURN_FLOAT8(-TqMultiVectorMaxSim(queryMv, doc));
+	PG_RETURN_FLOAT8(-TqMultiVectorMaxSimWeighted(queryMv, doc,
+												  PgturbohybridQueryGetTokenWeights(query),
+												  PgturbohybridQueryGetTokenMask(query)));
 }

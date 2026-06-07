@@ -2,12 +2,14 @@
 
 #include <math.h>
 
+#include "catalog/pg_type.h"
 #include "fmgr.h"
 #include "lib/stringinfo.h"
 #include "nodes/execnodes.h"
 #include "nodes/nodes.h"
 #include "nodes/plannodes.h"
 #include "nodes/primnodes.h"
+#include "utils/array.h"
 #include "utils/builtins.h"
 #include "utils/float.h"
 #include "utils/memutils.h"
@@ -21,17 +23,50 @@
 
 FUNCTION_PREFIX PG_FUNCTION_INFO_V1(pgturbohybrid_query_in);
 FUNCTION_PREFIX PG_FUNCTION_INFO_V1(pgturbohybrid_query_out);
+FUNCTION_PREFIX PG_FUNCTION_INFO_V1(pgturbohybrid_sparse_vector_in);
+FUNCTION_PREFIX PG_FUNCTION_INFO_V1(pgturbohybrid_sparse_vector_out);
+FUNCTION_PREFIX PG_FUNCTION_INFO_V1(pgturbohybrid_sparse_vector_from_arrays);
+FUNCTION_PREFIX PG_FUNCTION_INFO_V1(pgturbohybrid_sparse_vector_terms);
+FUNCTION_PREFIX PG_FUNCTION_INFO_V1(pgturbohybrid_sparse_vector_query_terms);
 FUNCTION_PREFIX PG_FUNCTION_INFO_V1(pgturbohybrid_query_constructor);
 FUNCTION_PREFIX PG_FUNCTION_INFO_V1(pgturbohybrid_distance);
 FUNCTION_PREFIX PG_FUNCTION_INFO_V1(pgturbohybrid_l2_distance);
 FUNCTION_PREFIX PG_FUNCTION_INFO_V1(pgturbohybrid_negative_inner_product);
 FUNCTION_PREFIX PG_FUNCTION_INFO_V1(pgturbohybrid_cosine_distance);
 
+#define PGTURBOHYBRID_SPARSE_VECTOR_VERSION 1
+#define PGTURBOHYBRID_SPARSE_VECTOR_FIELD_NONE (-1)
+
+typedef struct PgturbohybridSparseVectorEntry
+{
+	int32		termId;
+	float4		weight;
+	int16		fieldId;
+	uint16		reserved;
+} PgturbohybridSparseVectorEntry;
+
+typedef struct PgturbohybridSparseVector
+{
+	int32		vl_len_;
+	uint16		version;
+	uint16		flags;
+	uint32		count;
+	/* entries follow */
+} PgturbohybridSparseVector;
+
+static PgturbohybridSparseVectorEntry *PgturbohybridSparseVectorEntries(PgturbohybridSparseVector *sparse);
+static void PgturbohybridSparseVectorValidate(PgturbohybridSparseVector *sparse);
+static void PgturbohybridSparseVectorAppendTerm(StringInfo buf,
+												int32 termId, int16 fieldId);
 static Size PgturbohybridQueryVectorOffset(void);
 static Size PgturbohybridQueryMultiVectorOffset(PgturbohybridQueryHeader *query);
 static Size PgturbohybridQueryTsQueryOffset(PgturbohybridQueryHeader *query);
+static Size PgturbohybridQueryTokenWeightsOffset(PgturbohybridQueryHeader *query);
+static Size PgturbohybridQueryTokenMaskOffset(PgturbohybridQueryHeader *query);
 static Size PgturbohybridQueryAlignedSize(Size value);
 static Size PgturbohybridQuerySizeAdd(Size a, Size b);
+static Size PgturbohybridQueryTokenWeightsBytes(PgturbohybridQueryHeader *query);
+static Size PgturbohybridQueryTokenMaskBytes(PgturbohybridQueryHeader *query);
 static uint16 PgturbohybridQueryParseFusion(text *fusion);
 static void PgturbohybridQueryCheckPositiveInt(const char *name, int32 value);
 static void PgturbohybridQueryCheckNonNegativeInt(const char *name, int32 value);
@@ -41,6 +76,36 @@ static void PgturbohybridQueryValidateInternal(PgturbohybridQueryHeader *query,
 static PgturbohybridQueryHeader *PgturbohybridQueryConstructorCached(FunctionCallInfo fcinfo);
 static void PgturbohybridQueryConstructorStoreCache(FunctionCallInfo fcinfo,
 												   PgturbohybridQueryHeader *query);
+
+static PgturbohybridSparseVectorEntry *
+PgturbohybridSparseVectorEntries(PgturbohybridSparseVector *sparse)
+{
+	return (PgturbohybridSparseVectorEntry *)
+		((char *) sparse + MAXALIGN(sizeof(PgturbohybridSparseVector)));
+}
+
+static void
+PgturbohybridSparseVectorValidate(PgturbohybridSparseVector *sparse)
+{
+	if (sparse == NULL ||
+		VARSIZE_ANY(sparse) < MAXALIGN(sizeof(PgturbohybridSparseVector)) ||
+		sparse->version != PGTURBOHYBRID_SPARSE_VECTOR_VERSION ||
+		VARSIZE_ANY(sparse) !=
+		MAXALIGN(sizeof(PgturbohybridSparseVector)) +
+		(Size) sparse->count * sizeof(PgturbohybridSparseVectorEntry))
+		ereport(ERROR,
+				(errcode(ERRCODE_DATA_EXCEPTION),
+				 errmsg("malformed turbohybrid_sparse_vector payload")));
+}
+
+static void
+PgturbohybridSparseVectorAppendTerm(StringInfo buf, int32 termId, int16 fieldId)
+{
+	if (fieldId == PGTURBOHYBRID_SPARSE_VECTOR_FIELD_NONE)
+		appendStringInfo(buf, "ths%d", termId);
+	else
+		appendStringInfo(buf, "thsf%d_%d", fieldId, termId);
+}
 
 static Size
 PgturbohybridQueryVectorOffset(void)
@@ -53,6 +118,36 @@ PgturbohybridQueryTsQueryOffset(PgturbohybridQueryHeader *query)
 {
 	return PgturbohybridQuerySizeAdd(PgturbohybridQueryMultiVectorOffset(query),
 									 PgturbohybridQueryAlignedSize(query->multivectorBytes));
+}
+
+static Size
+PgturbohybridQueryTokenWeightsBytes(PgturbohybridQueryHeader *query)
+{
+	if ((query->flags & PGTURBOHYBRID_QUERY_FLAG_HAS_TOKEN_WEIGHTS) == 0)
+		return 0;
+	return (Size) query->multivectorCount * sizeof(float4);
+}
+
+static Size
+PgturbohybridQueryTokenMaskBytes(PgturbohybridQueryHeader *query)
+{
+	if ((query->flags & PGTURBOHYBRID_QUERY_FLAG_HAS_TOKEN_MASK) == 0)
+		return 0;
+	return (Size) query->multivectorCount * sizeof(bool);
+}
+
+static Size
+PgturbohybridQueryTokenWeightsOffset(PgturbohybridQueryHeader *query)
+{
+	return PgturbohybridQuerySizeAdd(PgturbohybridQueryTsQueryOffset(query),
+									 PgturbohybridQueryAlignedSize(query->tsqueryBytes));
+}
+
+static Size
+PgturbohybridQueryTokenMaskOffset(PgturbohybridQueryHeader *query)
+{
+	return PgturbohybridQuerySizeAdd(PgturbohybridQueryTokenWeightsOffset(query),
+									 PgturbohybridQueryAlignedSize(PgturbohybridQueryTokenWeightsBytes(query)));
 }
 
 static Size
@@ -107,6 +202,66 @@ PgturbohybridQueryGetMultiVector(PgturbohybridQueryHeader *query)
 										 PgturbohybridQueryMultiVectorOffset(query));
 }
 
+bool
+PgturbohybridQueryHasTokenWeights(const PgturbohybridQueryHeader *query)
+{
+	return query != NULL &&
+		(query->flags & PGTURBOHYBRID_QUERY_FLAG_HAS_TOKEN_WEIGHTS) != 0;
+}
+
+bool
+PgturbohybridQueryHasTokenMask(const PgturbohybridQueryHeader *query)
+{
+	return query != NULL &&
+		(query->flags & PGTURBOHYBRID_QUERY_FLAG_HAS_TOKEN_MASK) != 0;
+}
+
+const float4 *
+PgturbohybridQueryGetTokenWeights(PgturbohybridQueryHeader *query)
+{
+	PgturbohybridQueryValidateFast(query);
+
+	if (!PgturbohybridQueryHasTokenWeights(query))
+		return NULL;
+
+	return (const float4 *) ((char *) query +
+							 PgturbohybridQueryTokenWeightsOffset(query));
+}
+
+const bool *
+PgturbohybridQueryGetTokenMask(PgturbohybridQueryHeader *query)
+{
+	PgturbohybridQueryValidateFast(query);
+
+	if (!PgturbohybridQueryHasTokenMask(query))
+		return NULL;
+
+	return (const bool *) ((char *) query +
+						   PgturbohybridQueryTokenMaskOffset(query));
+}
+
+double
+PgturbohybridQueryMultiVectorWeightSum(PgturbohybridQueryHeader *query)
+{
+	const float4 *weights;
+	const bool *mask;
+	double		total = 0.0;
+
+	PgturbohybridQueryValidateFast(query);
+	if (!PgturbohybridQueryHasMultiVector(query) || query->multivectorCount <= 0)
+		return 0.0;
+
+	weights = PgturbohybridQueryGetTokenWeights(query);
+	mask = PgturbohybridQueryGetTokenMask(query);
+	for (int32 i = 0; i < query->multivectorCount; i++)
+	{
+		if (mask != NULL && mask[i])
+			continue;
+		total += weights != NULL ? (double) weights[i] : 1.0;
+	}
+	return total;
+}
+
 TSQuery
 PgturbohybridQueryGetTsQuery(PgturbohybridQueryHeader *query)
 {
@@ -131,6 +286,8 @@ PgturbohybridQueryFusionName(uint16 fusion)
 			return "fast_weighted";
 		case PGTURBOHYBRID_FUSION_CALIBRATED:
 			return "calibrated";
+		case PGTURBOHYBRID_FUSION_DBSF:
+			return "dbsf";
 	}
 
 	return "unknown";
@@ -155,6 +312,8 @@ PgturbohybridQueryValidateInternal(PgturbohybridQueryHeader *query, bool strict)
 	Size		vectorOffset;
 	Size		multivectorOffset;
 	Size		tsqueryOffset;
+	Size		tokenWeightsOffset;
+	Size		tokenMaskOffset;
 	Size		expected;
 
 	if (query == NULL)
@@ -177,7 +336,8 @@ PgturbohybridQueryValidateInternal(PgturbohybridQueryHeader *query, bool strict)
 	if (query->fusion != PGTURBOHYBRID_FUSION_RRF &&
 		query->fusion != PGTURBOHYBRID_FUSION_WEIGHTED &&
 		query->fusion != PGTURBOHYBRID_FUSION_FAST_WEIGHTED &&
-		query->fusion != PGTURBOHYBRID_FUSION_CALIBRATED)
+		query->fusion != PGTURBOHYBRID_FUSION_CALIBRATED &&
+		query->fusion != PGTURBOHYBRID_FUSION_DBSF)
 		ereport(ERROR,
 				(errcode(ERRCODE_DATA_EXCEPTION),
 				 errmsg("invalid turbohybrid_query fusion mode %u", query->fusion)));
@@ -271,7 +431,7 @@ PgturbohybridQueryValidateInternal(PgturbohybridQueryHeader *query, bool strict)
 					 errmsg("truncated turbohybrid_query payload")));
 
 		PgturbohybridCheckMultiVector(mv);
-		multivectorBytes = PgturbohybridMultiVectorSize(mv->count, mv->dim);
+		multivectorBytes = VARSIZE_ANY(mv);
 		if (query->multivectorBytes != multivectorBytes ||
 			query->multivectorDim != mv->dim ||
 			query->multivectorCount != mv->count)
@@ -284,6 +444,13 @@ PgturbohybridQueryValidateInternal(PgturbohybridQueryHeader *query, bool strict)
 				(errcode(ERRCODE_DATA_EXCEPTION),
 				 errmsg("turbohybrid_query multivector payload is inconsistent")));
 
+	if (((query->flags & PGTURBOHYBRID_QUERY_FLAG_HAS_TOKEN_WEIGHTS) != 0 ||
+		 (query->flags & PGTURBOHYBRID_QUERY_FLAG_HAS_TOKEN_MASK) != 0) &&
+		!PgturbohybridQueryHasMultiVector(query))
+		ereport(ERROR,
+				(errcode(ERRCODE_DATA_EXCEPTION),
+				 errmsg("turbohybrid_query token metadata requires multivector_query")));
+
 	if ((query->flags & PGTURBOHYBRID_QUERY_FLAG_HAS_TSQUERY) == 0 &&
 		query->tsqueryBytes != 0)
 		ereport(ERROR,
@@ -295,8 +462,32 @@ PgturbohybridQueryValidateInternal(PgturbohybridQueryHeader *query, bool strict)
 		ereport(ERROR,
 				(errcode(ERRCODE_DATA_EXCEPTION),
 				 errmsg("truncated turbohybrid_query payload")));
-	expected = PgturbohybridQuerySizeAdd(tsqueryOffset,
-										 PgturbohybridQueryAlignedSize(query->tsqueryBytes));
+	tokenWeightsOffset = PgturbohybridQueryTokenWeightsOffset(query);
+	if (PgturbohybridQuerySizeAdd(tokenWeightsOffset,
+								  PgturbohybridQueryTokenWeightsBytes(query)) > actual)
+		ereport(ERROR,
+				(errcode(ERRCODE_DATA_EXCEPTION),
+				 errmsg("truncated turbohybrid_query token weights payload")));
+	if ((query->flags & PGTURBOHYBRID_QUERY_FLAG_HAS_TOKEN_WEIGHTS) != 0)
+	{
+		const float4 *weights = (const float4 *) ((char *) query + tokenWeightsOffset);
+
+		for (int32 i = 0; i < query->multivectorCount; i++)
+		{
+			if (!isfinite((double) weights[i]) || weights[i] < 0.0f)
+				ereport(ERROR,
+						(errcode(ERRCODE_DATA_EXCEPTION),
+						 errmsg("turbohybrid_query token weights must be finite non-negative values")));
+		}
+	}
+	tokenMaskOffset = PgturbohybridQueryTokenMaskOffset(query);
+	if (PgturbohybridQuerySizeAdd(tokenMaskOffset,
+								  PgturbohybridQueryTokenMaskBytes(query)) > actual)
+		ereport(ERROR,
+				(errcode(ERRCODE_DATA_EXCEPTION),
+				 errmsg("truncated turbohybrid_query token mask payload")));
+	expected = PgturbohybridQuerySizeAdd(tokenMaskOffset,
+										 PgturbohybridQueryAlignedSize(PgturbohybridQueryTokenMaskBytes(query)));
 	if (actual != expected)
 		ereport(ERROR,
 				(errcode(ERRCODE_DATA_EXCEPTION),
@@ -333,6 +524,10 @@ pgturbohybrid_query_out(PG_FUNCTION_ARGS)
 					 PgturbohybridQueryHasVector(query) ? "true" : "false");
 	if (PgturbohybridQueryHasMultiVector(query))
 		appendStringInfoString(&buf, ",multivector=true");
+	if (PgturbohybridQueryHasTokenWeights(query))
+		appendStringInfoString(&buf, ",query_token_weights=true");
+	if (PgturbohybridQueryHasTokenMask(query))
+		appendStringInfoString(&buf, ",query_token_mask=true");
 
 	appendStringInfo(&buf,
 					 ",tsquery=%s,dense_weight=%g,bm25_weight=%g,alpha=",
@@ -361,6 +556,178 @@ pgturbohybrid_query_out(PG_FUNCTION_ARGS)
 	PG_RETURN_CSTRING(buf.data);
 }
 
+Datum
+pgturbohybrid_sparse_vector_in(PG_FUNCTION_ARGS)
+{
+	char	   *input = PG_GETARG_CSTRING(0);
+
+	(void) input;
+
+	ereport(ERROR,
+			(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
+			 errmsg("text input is not supported for turbohybrid_sparse_vector"),
+			 errhint("Use turbohybrid_sparse_vector_from_arrays(term_ids, weights).")));
+
+	PG_RETURN_NULL();
+}
+
+Datum
+pgturbohybrid_sparse_vector_out(PG_FUNCTION_ARGS)
+{
+	PgturbohybridSparseVector *sparse =
+		(PgturbohybridSparseVector *) PG_DETOAST_DATUM(PG_GETARG_DATUM(0));
+	StringInfoData buf;
+
+	PgturbohybridSparseVectorValidate(sparse);
+
+	initStringInfo(&buf);
+	appendStringInfo(&buf, "turbohybrid_sparse_vector(count=%u)",
+					 sparse->count);
+	PG_RETURN_CSTRING(buf.data);
+}
+
+Datum
+pgturbohybrid_sparse_vector_from_arrays(PG_FUNCTION_ARGS)
+{
+	ArrayType  *termArray = PG_GETARG_ARRAYTYPE_P(0);
+	ArrayType  *weightArray = PG_GETARG_ARRAYTYPE_P(1);
+	Datum	   *termDatums;
+	Datum	   *weightDatums;
+	bool	   *termNulls;
+	bool	   *weightNulls;
+	int			termCount;
+	int			weightCount;
+	Size		headerSize = MAXALIGN(sizeof(PgturbohybridSparseVector));
+	Size		payloadSize;
+	Size		totalSize;
+	PgturbohybridSparseVector *result;
+	PgturbohybridSparseVectorEntry *entries;
+
+	if (ARR_NDIM(termArray) > 1 || ARR_NDIM(weightArray) > 1)
+		ereport(ERROR,
+				(errcode(ERRCODE_INVALID_PARAMETER_VALUE),
+				 errmsg("sparse vector arrays must be one-dimensional")));
+
+	deconstruct_array(termArray, INT4OID, sizeof(int32), true, TYPALIGN_INT,
+					  &termDatums, &termNulls, &termCount);
+	deconstruct_array(weightArray, FLOAT4OID, sizeof(float4), true, TYPALIGN_INT,
+					  &weightDatums, &weightNulls, &weightCount);
+
+	if (termCount != weightCount)
+		ereport(ERROR,
+				(errcode(ERRCODE_INVALID_PARAMETER_VALUE),
+				 errmsg("term_ids and weights must have the same length")));
+
+	if ((Size) termCount >
+		(MaxAllocSize - headerSize) / sizeof(PgturbohybridSparseVectorEntry))
+		ereport(ERROR,
+				(errcode(ERRCODE_PROGRAM_LIMIT_EXCEEDED),
+				 errmsg("turbohybrid_sparse_vector payload is too large")));
+
+	payloadSize = (Size) termCount * sizeof(PgturbohybridSparseVectorEntry);
+	totalSize = headerSize + payloadSize;
+	result = palloc0(totalSize);
+	SET_VARSIZE(result, totalSize);
+	result->version = PGTURBOHYBRID_SPARSE_VECTOR_VERSION;
+	result->count = (uint32) termCount;
+	entries = (PgturbohybridSparseVectorEntry *) ((char *) result + headerSize);
+
+	for (int i = 0; i < termCount; i++)
+	{
+		int32		termId;
+		float4		weight;
+
+		if (termNulls[i] || weightNulls[i])
+			ereport(ERROR,
+					(errcode(ERRCODE_NULL_VALUE_NOT_ALLOWED),
+					 errmsg("sparse vector arrays cannot contain nulls")));
+
+		termId = DatumGetInt32(termDatums[i]);
+		weight = DatumGetFloat4(weightDatums[i]);
+		if (termId < 0)
+			ereport(ERROR,
+					(errcode(ERRCODE_INVALID_PARAMETER_VALUE),
+					 errmsg("sparse vector term ids must be non-negative")));
+		if (!isfinite((double) weight))
+			ereport(ERROR,
+					(errcode(ERRCODE_INVALID_PARAMETER_VALUE),
+					 errmsg("sparse vector weights must be finite")));
+
+		entries[i].termId = termId;
+		entries[i].weight = weight;
+		entries[i].fieldId = PGTURBOHYBRID_SPARSE_VECTOR_FIELD_NONE;
+	}
+
+	PG_RETURN_POINTER(result);
+}
+
+Datum
+pgturbohybrid_sparse_vector_terms(PG_FUNCTION_ARGS)
+{
+	PgturbohybridSparseVector *sparse =
+		(PgturbohybridSparseVector *) PG_DETOAST_DATUM(PG_GETARG_DATUM(0));
+	PgturbohybridSparseVectorEntry *entries;
+	StringInfoData buf;
+	bool		first = true;
+
+	PgturbohybridSparseVectorValidate(sparse);
+	entries = PgturbohybridSparseVectorEntries(sparse);
+
+	initStringInfo(&buf);
+	for (uint32 i = 0; i < sparse->count; i++)
+	{
+		int			repeats;
+
+		if (entries[i].weight <= 0.0f)
+			continue;
+		repeats = (int) ceilf(entries[i].weight);
+		repeats = Max(repeats, 1);
+		repeats = Min(repeats, 255);
+		for (int j = 0; j < repeats; j++)
+		{
+			if (!first)
+				appendStringInfoChar(&buf, ' ');
+			PgturbohybridSparseVectorAppendTerm(&buf, entries[i].termId,
+												entries[i].fieldId);
+			first = false;
+		}
+	}
+
+	PG_RETURN_TEXT_P(cstring_to_text(buf.data));
+}
+
+Datum
+pgturbohybrid_sparse_vector_query_terms(PG_FUNCTION_ARGS)
+{
+	PgturbohybridSparseVector *sparse =
+		(PgturbohybridSparseVector *) PG_DETOAST_DATUM(PG_GETARG_DATUM(0));
+	PgturbohybridSparseVectorEntry *entries;
+	StringInfoData buf;
+	bool		first = true;
+
+	PgturbohybridSparseVectorValidate(sparse);
+	entries = PgturbohybridSparseVectorEntries(sparse);
+
+	initStringInfo(&buf);
+	for (uint32 i = 0; i < sparse->count; i++)
+	{
+		if (entries[i].weight <= 0.0f)
+			continue;
+		if (!first)
+			appendStringInfoString(&buf, " | ");
+		PgturbohybridSparseVectorAppendTerm(&buf, entries[i].termId,
+											entries[i].fieldId);
+		first = false;
+	}
+
+	if (first)
+		ereport(ERROR,
+				(errcode(ERRCODE_INVALID_PARAMETER_VALUE),
+				 errmsg("sparse vector query must contain at least one positive-weight term")));
+
+	PG_RETURN_TEXT_P(cstring_to_text(buf.data));
+}
+
 static uint16
 PgturbohybridQueryParseFusion(text *fusion)
 {
@@ -379,11 +746,13 @@ PgturbohybridQueryParseFusion(text *fusion)
 		result = PGTURBOHYBRID_FUSION_FAST_WEIGHTED;
 	else if (pg_strcasecmp(name, "calibrated") == 0)
 		result = PGTURBOHYBRID_FUSION_CALIBRATED;
+	else if (pg_strcasecmp(name, "dbsf") == 0)
+		result = PGTURBOHYBRID_FUSION_DBSF;
 	else
 		ereport(ERROR,
 				(errcode(ERRCODE_INVALID_PARAMETER_VALUE),
 				 errmsg("invalid hybrid fusion mode \"%s\"", name),
-				 errdetail("Valid values are \"rrf\", \"weighted\", \"fast_weighted\", and \"calibrated\".")));
+				 errdetail("Valid values are \"rrf\", \"weighted\", \"fast_weighted\", \"calibrated\", and \"dbsf\".")));
 
 	pfree(name);
 	return result;
@@ -667,6 +1036,8 @@ pgturbohybrid_query_constructor(PG_FUNCTION_ARGS)
 	struct varlena *vectorDatum = NULL;
 	struct varlena *multivectorDatum = NULL;
 	struct varlena *tsqueryDatum = NULL;
+	float4	   *tokenWeights = NULL;
+	bool	   *tokenMask = NULL;
 	int32		vectorBytes = 0;
 	int32		multivectorBytes = 0;
 	int32		tsqueryBytes = 0;
@@ -675,6 +1046,8 @@ pgturbohybrid_query_constructor(PG_FUNCTION_ARGS)
 	Size		vectorSize = 0;
 	Size		multivectorSize = 0;
 	Size		tsquerySize = 0;
+	Size		tokenWeightsBytes = 0;
+	Size		tokenMaskBytes = 0;
 	uint16		flags = 0;
 	uint16		denseKind = PGTURBOHYBRID_DENSE_QUERY_NONE;
 	uint16		fusion;
@@ -749,6 +1122,83 @@ pgturbohybrid_query_constructor(PG_FUNCTION_ARGS)
 		multivectorCount = mv->count;
 		flags |= PGTURBOHYBRID_QUERY_FLAG_HAS_MULTIVECTOR | PGTURBOHYBRID_QUERY_FLAG_HAS_DENSE;
 		denseKind = PGTURBOHYBRID_DENSE_QUERY_MULTIVECTOR;
+	}
+
+	if (PG_NARGS() > 12 && !PG_ARGISNULL(12))
+	{
+		ArrayType  *weightArray = PG_GETARG_ARRAYTYPE_P(12);
+		Datum	   *datums;
+		bool	   *nulls;
+		int			count;
+
+		if (multivectorCount <= 0)
+			ereport(ERROR,
+					(errcode(ERRCODE_INVALID_PARAMETER_VALUE),
+					 errmsg("query_token_weights requires multivector_query")));
+		if (ARR_NDIM(weightArray) > 1)
+			ereport(ERROR,
+					(errcode(ERRCODE_INVALID_PARAMETER_VALUE),
+					 errmsg("query_token_weights must be a one-dimensional real array")));
+		deconstruct_array(weightArray, FLOAT4OID, sizeof(float4), true,
+						  TYPALIGN_INT, &datums, &nulls, &count);
+		if (count != multivectorCount)
+			ereport(ERROR,
+					(errcode(ERRCODE_INVALID_PARAMETER_VALUE),
+					 errmsg("query_token_weights length %d does not match multivector query token count %d",
+							count, multivectorCount)));
+		tokenWeightsBytes = (Size) count * sizeof(float4);
+		tokenWeights = palloc(tokenWeightsBytes);
+		for (int i = 0; i < count; i++)
+		{
+			float4		weight;
+
+			if (nulls[i])
+				ereport(ERROR,
+						(errcode(ERRCODE_NULL_VALUE_NOT_ALLOWED),
+						 errmsg("query_token_weights cannot contain nulls")));
+			weight = DatumGetFloat4(datums[i]);
+			if (!isfinite((double) weight) || weight < 0.0f)
+				ereport(ERROR,
+						(errcode(ERRCODE_INVALID_PARAMETER_VALUE),
+						 errmsg("query_token_weights must contain finite non-negative values")));
+			tokenWeights[i] = weight;
+		}
+		flags |= PGTURBOHYBRID_QUERY_FLAG_HAS_TOKEN_WEIGHTS;
+	}
+
+	if (PG_NARGS() > 13 && !PG_ARGISNULL(13))
+	{
+		ArrayType  *maskArray = PG_GETARG_ARRAYTYPE_P(13);
+		Datum	   *datums;
+		bool	   *nulls;
+		int			count;
+
+		if (multivectorCount <= 0)
+			ereport(ERROR,
+					(errcode(ERRCODE_INVALID_PARAMETER_VALUE),
+					 errmsg("query_token_mask requires multivector_query")));
+		if (ARR_NDIM(maskArray) > 1)
+			ereport(ERROR,
+					(errcode(ERRCODE_INVALID_PARAMETER_VALUE),
+					 errmsg("query_token_mask must be a one-dimensional boolean array")));
+		deconstruct_array(maskArray, BOOLOID, sizeof(bool), true,
+						  TYPALIGN_CHAR, &datums, &nulls, &count);
+		if (count != multivectorCount)
+			ereport(ERROR,
+					(errcode(ERRCODE_INVALID_PARAMETER_VALUE),
+					 errmsg("query_token_mask length %d does not match multivector query token count %d",
+							count, multivectorCount)));
+		tokenMaskBytes = (Size) count * sizeof(bool);
+		tokenMask = palloc(tokenMaskBytes);
+		for (int i = 0; i < count; i++)
+		{
+			if (nulls[i])
+				ereport(ERROR,
+						(errcode(ERRCODE_NULL_VALUE_NOT_ALLOWED),
+						 errmsg("query_token_mask cannot contain nulls")));
+			tokenMask[i] = DatumGetBool(datums[i]);
+		}
+		flags |= PGTURBOHYBRID_QUERY_FLAG_HAS_TOKEN_MASK;
 	}
 
 	if ((flags & (PGTURBOHYBRID_QUERY_FLAG_HAS_DENSE | PGTURBOHYBRID_QUERY_FLAG_HAS_TSQUERY)) == 0)
@@ -836,6 +1286,10 @@ pgturbohybrid_query_constructor(PG_FUNCTION_ARGS)
 										  PgturbohybridQueryAlignedSize(multivectorBytes));
 	totalSize = PgturbohybridQuerySizeAdd(totalSize,
 										  PgturbohybridQueryAlignedSize(tsqueryBytes));
+	totalSize = PgturbohybridQuerySizeAdd(totalSize,
+										  PgturbohybridQueryAlignedSize(tokenWeightsBytes));
+	totalSize = PgturbohybridQuerySizeAdd(totalSize,
+										  PgturbohybridQueryAlignedSize(tokenMaskBytes));
 	result = palloc0(totalSize);
 	SET_VARSIZE(result, totalSize);
 	result->version = PGTURBOHYBRID_QUERY_VERSION;
@@ -870,6 +1324,18 @@ pgturbohybrid_query_constructor(PG_FUNCTION_ARGS)
 	{
 		memcpy((char *) result + PgturbohybridQueryTsQueryOffset(result), tsqueryDatum, tsqueryBytes);
 		pfree(tsqueryDatum);
+	}
+	if (tokenWeights != NULL)
+	{
+		memcpy((char *) result + PgturbohybridQueryTokenWeightsOffset(result),
+			   tokenWeights, tokenWeightsBytes);
+		pfree(tokenWeights);
+	}
+	if (tokenMask != NULL)
+	{
+		memcpy((char *) result + PgturbohybridQueryTokenMaskOffset(result),
+			   tokenMask, tokenMaskBytes);
+		pfree(tokenMask);
 	}
 
 	PgturbohybridQueryValidate(result);

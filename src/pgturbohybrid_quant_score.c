@@ -2390,6 +2390,51 @@ PgturbohybridGraphBuildExactVectorDistance(PgturbohybridQuantBuildState *state, 
 							PointerGetDatum(bv));
 }
 
+#define PGTURBOHYBRID_GRAPH_BUILD_DISTANCE_CACHE_MAX_ENTRIES (UINT32_C(1) << 24)
+
+static uint64
+PgturbohybridGraphBuildDistanceCacheHash(uint64 key)
+{
+	key ^= key >> 33;
+	key *= UINT64CONST(0xff51afd7ed558ccd);
+	key ^= key >> 33;
+	key *= UINT64CONST(0xc4ceb9fe1a85ec53);
+	key ^= key >> 33;
+	return key;
+}
+
+static uint32
+PgturbohybridGraphBuildDistanceCacheCapacity(uint32 nodeCount)
+{
+	uint64		wanted = Max((uint64) nodeCount * UINT64CONST(64),
+							 UINT64CONST(1024));
+	uint32		capacity = 1;
+
+	wanted = Min(wanted,
+				 (uint64) PGTURBOHYBRID_GRAPH_BUILD_DISTANCE_CACHE_MAX_ENTRIES);
+	while ((uint64) capacity < wanted &&
+		   capacity < PGTURBOHYBRID_GRAPH_BUILD_DISTANCE_CACHE_MAX_ENTRIES)
+		capacity <<= 1;
+
+	return Max(capacity, (uint32) 1024);
+}
+
+static void
+PgturbohybridGraphInitBuildDistanceCache(PgturbohybridQuantBuildState *state)
+{
+	uint32		capacity;
+
+	if (state->buildDistanceCache != NULL || state->nodeCount == 0)
+		return;
+
+	capacity = PgturbohybridGraphBuildDistanceCacheCapacity(state->nodeCount);
+	state->buildDistanceCache =
+		MemoryContextAllocZero(state->ctx,
+							   mul_size(sizeof(PgturbohybridGraphBuildDistanceCacheEntry),
+										(Size) capacity));
+	state->buildDistanceCacheMask = capacity - 1;
+}
+
 double
 PgturbohybridGraphBuildDistance(PgturbohybridQuantBuildState *state, uint32 a, uint32 b)
 {
@@ -2409,8 +2454,7 @@ PgturbohybridGraphBuildDistance(PgturbohybridQuantBuildState *state, uint32 a, u
 		TqDocId		bDocId = state->multivectorNodeMap[b].docId;
 		PgturbohybridMultiVector *aDoc;
 		PgturbohybridMultiVector *bDoc;
-		double		ab;
-		double		ba;
+		uint64		cacheKey;
 
 		if (aDocId >= state->multivectorDocCount ||
 			bDocId >= state->multivectorDocCount)
@@ -2421,9 +2465,37 @@ PgturbohybridGraphBuildDistance(PgturbohybridQuantBuildState *state, uint32 a, u
 			aDoc->count <= 0 || bDoc->count <= 0)
 			return DBL_MAX;
 
-		ab = TqMultiVectorMaxSim(aDoc, bDoc) / (double) aDoc->count;
-		ba = TqMultiVectorMaxSim(bDoc, aDoc) / (double) bDoc->count;
-		return -(0.5 * (ab + ba));
+		if (aDocId <= bDocId)
+			cacheKey = ((uint64) aDocId << 32) | (uint64) bDocId;
+		else
+			cacheKey = ((uint64) bDocId << 32) | (uint64) aDocId;
+
+		if (state->buildDistanceCache == NULL)
+			PgturbohybridGraphInitBuildDistanceCache(state);
+		if (state->buildDistanceCache != NULL)
+		{
+			PgturbohybridGraphBuildDistanceCacheEntry *entry;
+			uint64		hash =
+				PgturbohybridGraphBuildDistanceCacheHash(cacheKey);
+
+			entry = &state->buildDistanceCache[hash & state->buildDistanceCacheMask];
+			if (entry->valid && entry->key == cacheKey)
+			{
+				state->buildDistanceCacheHits++;
+				return entry->distance;
+			}
+			if (entry->valid)
+				state->buildDistanceCacheCollisions++;
+			state->buildDistanceCacheMisses++;
+			distance = -TqMultiVectorSymmetricMaxSimAverageUnchecked(aDoc, bDoc);
+			entry->valid = true;
+			entry->key = cacheKey;
+			entry->distance = distance;
+			state->buildDistanceCacheStores++;
+			return distance;
+		}
+
+		return -TqMultiVectorSymmetricMaxSimAverageUnchecked(aDoc, bDoc);
 	}
 
 	/*

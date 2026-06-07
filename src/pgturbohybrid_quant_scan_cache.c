@@ -21,6 +21,7 @@
 #include "utils/rel.h"
 
 #include "pgturbohybrid_jsonb_compat.h"
+#include "pgturbohybrid_am.h"
 #include "pgturbohybrid_quant.h"
 
 static PgturbohybridGraphNativeCache *pgturbohybridGraphCacheList = NULL;
@@ -129,6 +130,29 @@ static inline Size
 PgturbohybridGraphNativeCacheMaxBytes(void)
 {
 	return (Size) pgturbohybrid_native_cache_max_mb * 1024 * 1024;
+}
+
+static bool
+PgturbohybridGraphShouldCacheMultiVectorDocSidecar(PgturbohybridGraphMetaPageData *meta)
+{
+	Size		cacheMaxBytes = PgturbohybridGraphNativeCacheMaxBytes();
+
+	if (meta->tqMultivectorGraphMode !=
+		PGTURBOHYBRID_MULTIVECTOR_GRAPH_DOCUMENT_NODES)
+		return true;
+	switch ((PgturbohybridMultiVectorDocStorageCacheMode)
+			pgturbohybrid_multivector_doc_storage_cache)
+	{
+		case PGTURBOHYBRID_MULTIVECTOR_DOC_STORAGE_CACHE_RESIDENT:
+			return true;
+		case PGTURBOHYBRID_MULTIVECTOR_DOC_STORAGE_CACHE_PAGED:
+			return false;
+		case PGTURBOHYBRID_MULTIVECTOR_DOC_STORAGE_CACHE_AUTO:
+		default:
+			return pgturbohybrid_profile == PGTURBOHYBRID_PROFILE_LATENCY &&
+				cacheMaxBytes > 0 &&
+				(Size) meta->tqMultivectorDocMapBytes <= cacheMaxBytes;
+	}
 }
 
 static inline Size
@@ -696,16 +720,118 @@ PgturbohybridGraphLoadMultiVectorDocMap(Relation index,
 									 PgturbohybridGraphScanStorage *storage,
 									 bool require)
 {
+	return PgturbohybridGraphLoadMultiVectorDocMapWithStats(index, meta,
+															storage, require,
+															NULL);
+}
+
+static void
+PgturbohybridGraphRememberMultiVectorDocVectorChunk(Relation index,
+													PgturbohybridGraphScanStorage *storage,
+													uint32 docId,
+													BlockNumber blkno,
+													OffsetNumber offno,
+													uint32 startFloat,
+													uint16 count)
+{
+	uint32		chunkIndex;
+
+	if (storage->multivectorDocVectorChunkCount >=
+		storage->multivectorDocVectorChunkCapacity)
+	{
+		uint32		oldCapacity = storage->multivectorDocVectorChunkCapacity;
+		uint32		newCapacity = oldCapacity == 0 ? 1024 : oldCapacity;
+		Size		oldBytes;
+		Size		newBytes;
+
+		while (newCapacity <= storage->multivectorDocVectorChunkCount)
+		{
+			if (newCapacity > PG_UINT32_MAX / 2)
+				PgturbohybridGraphMultiVectorDocMapError(index,
+														 "document vector sidecar has too many chunks");
+			newCapacity += newCapacity;
+		}
+		oldBytes =
+			PgturbohybridCheckedArrayBytes(sizeof(PgturbohybridGraphMultiVectorDocVectorChunkRef),
+										   oldCapacity,
+										   "pgturbohybrid multivector document vector chunk refs");
+		newBytes =
+			PgturbohybridCheckedArrayBytes(sizeof(PgturbohybridGraphMultiVectorDocVectorChunkRef),
+										   newCapacity,
+										   "pgturbohybrid multivector document vector chunk refs");
+		if (storage->multivectorDocVectorChunks == NULL)
+			storage->multivectorDocVectorChunks =
+				MemoryContextAllocZero(storage->ctx, newBytes);
+		else
+		{
+			storage->multivectorDocVectorChunks =
+				repalloc(storage->multivectorDocVectorChunks, newBytes);
+			memset((char *) storage->multivectorDocVectorChunks + oldBytes, 0,
+				   newBytes - oldBytes);
+		}
+		storage->multivectorDocVectorChunkCapacity = newCapacity;
+	}
+
+	chunkIndex = storage->multivectorDocVectorChunkCount++;
+	if (storage->multivectorDocVectorFirstChunk[docId] == PG_UINT32_MAX)
+		storage->multivectorDocVectorFirstChunk[docId] = chunkIndex;
+	else if (storage->multivectorDocVectorFirstChunk[docId] +
+			 storage->multivectorDocVectorChunkCounts[docId] != chunkIndex)
+		PgturbohybridGraphMultiVectorDocMapError(index,
+												 "document vector sidecar chunks are not grouped by document");
+	storage->multivectorDocVectorChunkCounts[docId]++;
+	storage->multivectorDocVectorChunks[chunkIndex].blkno = blkno;
+	storage->multivectorDocVectorChunks[chunkIndex].offno = offno;
+	storage->multivectorDocVectorChunks[chunkIndex].startFloat = startFloat;
+	storage->multivectorDocVectorChunks[chunkIndex].count = count;
+}
+
+bool
+PgturbohybridGraphLoadMultiVectorDocMapWithStats(Relation index,
+									 PgturbohybridGraphMetaPageData *meta,
+									 PgturbohybridGraphScanStorage *storage,
+									 bool require,
+									 PgturbohybridMultiVectorDocSidecarAccessStats *stats)
+{
 	MemoryContext oldCtx;
 	bool	   *nodeSeen;
 	bool	   *docSeen;
 	uint32	   *vectorFloatCounts = NULL;
+	uint32	   *centroidFloatCounts = NULL;
+	uint32	   *centroidPostingListCounts = NULL;
+	uint32	   *centroidPostingScratchCodewords = NULL;
+	PgturbohybridGraphMultiVectorCentroidPostingEntry *centroidPostingScratch = NULL;
+	uint32		centroidPostingScratchCount = 0;
+	uint32		centroidPostingScratchCapacity = 0;
+	uint32	   *quantizedPostingListCounts = NULL;
+	uint32	   *quantizedPostingScratchCodewords = NULL;
+	PgturbohybridGraphMultiVectorQuantizedPostingEntry *quantizedPostingScratch = NULL;
+	uint32		quantizedPostingScratchCount = 0;
+	uint32		quantizedPostingScratchCapacity = 0;
 	uint32		nodesSeen = 0;
 	uint32		docsSeen = 0;
 	BlockNumber blkno;
 	bool		documentNodes =
 		meta->tqMultivectorGraphMode ==
 		PGTURBOHYBRID_MULTIVECTOR_GRAPH_DOCUMENT_NODES;
+	bool		hasCentroids =
+		documentNodes &&
+		(meta->tqMultivectorDocMapFlags &
+		 PGTURBOHYBRID_GRAPH_MULTIVECTOR_DOCMAP_FLAG_CENTROIDS) != 0;
+	bool		hasCentroidPostings =
+		hasCentroids &&
+		(meta->tqMultivectorDocMapFlags &
+		 PGTURBOHYBRID_GRAPH_MULTIVECTOR_DOCMAP_FLAG_CENTROID_POSTINGS) != 0;
+	bool		hasQuantizedPostings =
+		documentNodes &&
+		(meta->tqMultivectorDocMapFlags &
+		 PGTURBOHYBRID_GRAPH_MULTIVECTOR_DOCMAP_FLAG_QUANTIZED_POSTINGS) != 0;
+	uint32		centroidPostingCodebookSize =
+		documentNodes ? (uint32) meta->dimensions * 2U : 0;
+	uint32		quantizedPostingCodebookSize =
+		documentNodes ? (uint32) meta->dimensions * 2U : 0;
+	bool		pagedDocVectors =
+		documentNodes && storage->multivectorDocVectorsPaged;
 
 	if (!BlockNumberIsValid(meta->tqMultivectorDocMapStartBlkno))
 	{
@@ -727,7 +853,17 @@ PgturbohybridGraphLoadMultiVectorDocMap(Relation index,
 												 "docmap metapage counts are empty");
 
 	if (storage->multivectorDocMapLoaded)
-		return !documentNodes || storage->multivectorDocVectorsLoaded;
+	{
+		if (stats != NULL)
+			stats->cacheHits++;
+		return !documentNodes ||
+			(storage->multivectorDocVectorsLoaded &&
+			 (!hasCentroids || storage->multivectorDocCentroidsLoaded) &&
+			 (!hasCentroidPostings ||
+			  storage->multivectorCentroidPostingsLoaded) &&
+			 (!hasQuantizedPostings ||
+			  storage->multivectorQuantizedInvertedPostingsLoaded));
+	}
 
 	oldCtx = MemoryContextSwitchTo(storage->ctx);
 	storage->multivectorNodeMap =
@@ -748,6 +884,50 @@ PgturbohybridGraphLoadMultiVectorDocMap(Relation index,
 			palloc0(PgturbohybridCheckedArrayBytes(sizeof(uint32),
 												   meta->tqMultivectorDocCount,
 												   "pgturbohybrid multivector document vector coverage"));
+		if (pagedDocVectors)
+		{
+			Size		chunkMetaBytes;
+
+			storage->multivectorDocVectorFirstChunk =
+				palloc(PgturbohybridCheckedArrayBytes(sizeof(uint32),
+													  meta->tqMultivectorDocCount,
+													  "pgturbohybrid multivector document vector first chunks"));
+			storage->multivectorDocVectorChunkCounts =
+				palloc0(PgturbohybridCheckedArrayBytes(sizeof(uint32),
+													   meta->tqMultivectorDocCount,
+													   "pgturbohybrid multivector document vector chunk counts"));
+			chunkMetaBytes =
+				PgturbohybridCheckedArrayBytes(sizeof(uint32),
+											   meta->tqMultivectorDocCount,
+											   "pgturbohybrid multivector document vector first chunks");
+			memset(storage->multivectorDocVectorFirstChunk, 0xff,
+				   chunkMetaBytes);
+		}
+		if (hasCentroids)
+		{
+			storage->multivectorDocCentroids =
+				palloc0(PgturbohybridCheckedArrayBytes(sizeof(PgturbohybridMultiVector *),
+													   meta->tqMultivectorDocCount,
+													   "pgturbohybrid multivector document centroids"));
+			storage->multivectorDocCentroidResiduals =
+				palloc0(PgturbohybridCheckedArrayBytes(sizeof(float),
+													   meta->tqMultivectorDocCount,
+													   "pgturbohybrid multivector document centroid residuals"));
+			centroidFloatCounts =
+			 palloc0(PgturbohybridCheckedArrayBytes(sizeof(uint32),
+												   meta->tqMultivectorDocCount,
+												   "pgturbohybrid multivector document centroid coverage"));
+			if (hasCentroidPostings)
+				centroidPostingListCounts =
+					palloc0(PgturbohybridCheckedArrayBytes(sizeof(uint32),
+														   centroidPostingCodebookSize,
+														   "pgturbohybrid multivector centroid posting counts"));
+		}
+		if (hasQuantizedPostings)
+			quantizedPostingListCounts =
+				palloc0(PgturbohybridCheckedArrayBytes(sizeof(uint32),
+													   quantizedPostingCodebookSize,
+													   "pgturbohybrid multivector quantized posting counts"));
 	}
 	nodeSeen =
 		palloc0(PgturbohybridCheckedArrayBytes(sizeof(bool),
@@ -776,6 +956,11 @@ PgturbohybridGraphLoadMultiVectorDocMap(Relation index,
 		LockBuffer(buf, BUFFER_LOCK_SHARE);
 		page = BufferGetPage(buf);
 		opaque = PgturbohybridGraphPageGetOpaque(page);
+		if (stats != NULL)
+		{
+			stats->pagesRead++;
+			stats->cacheMisses++;
+		}
 		if ((opaque->pageKind & PGTURBOHYBRID_GRAPH_PAGE_KIND_MASK) !=
 			PGTURBOHYBRID_GRAPH_PAGE_KIND_MULTIVECTOR_DOCMAP)
 		{
@@ -793,6 +978,8 @@ PgturbohybridGraphLoadMultiVectorDocMap(Relation index,
 			Size		itemSize = ItemIdGetLength(iid);
 			uint8		type = *((uint8 *) item);
 
+			if (stats != NULL)
+				stats->bytesTouched += itemSize;
 			if (type ==
 				PGTURBOHYBRID_GRAPH_MULTIVECTOR_DOCMAP_NODE_TUPLE_TYPE)
 			{
@@ -902,25 +1089,393 @@ PgturbohybridGraphLoadMultiVectorDocMap(Relation index,
 				if ((uint64) tuple->startFloat + tuple->count > totalFloats)
 					PgturbohybridGraphMultiVectorDocMapError(index,
 															 "document vector tuple range is invalid");
-				mv = storage->multivectorDocVectors[tuple->docId];
-				if (mv == NULL)
+				if (pagedDocVectors)
 				{
-					Size		mvSize =
-						PgturbohybridMultiVectorSize(entry->tokenCount,
-													 meta->dimensions);
+					PgturbohybridGraphRememberMultiVectorDocVectorChunk(index,
+																		storage,
+																		tuple->docId,
+																		blkno,
+																		offno,
+																		tuple->startFloat,
+																		tuple->count);
+				}
+				else
+				{
+					mv = storage->multivectorDocVectors[tuple->docId];
+					if (mv == NULL)
+					{
+						Size		mvSize =
+							PgturbohybridMultiVectorSize(entry->tokenCount,
+														 meta->dimensions);
 
-					mv = MemoryContextAllocZero(storage->ctx, mvSize);
-					SET_VARSIZE(mv, mvSize);
-					mv->dim = meta->dimensions;
-					mv->count = entry->tokenCount;
-					storage->multivectorDocVectors[tuple->docId] = mv;
+						mv = MemoryContextAllocZero(storage->ctx, mvSize);
+						SET_VARSIZE(mv, mvSize);
+						mv->dim = meta->dimensions;
+						mv->count = entry->tokenCount;
+						storage->multivectorDocVectors[tuple->docId] = mv;
+					}
+					memcpy(mv->values + tuple->startFloat, tuple->values,
+						   sizeof(float) * tuple->count);
 				}
 				if (tuple->startFloat != vectorFloatCounts[tuple->docId])
 					PgturbohybridGraphMultiVectorDocMapError(index,
 															 "document vector tuple chunks are not contiguous");
-				memcpy(mv->values + tuple->startFloat, tuple->values,
-					   sizeof(float) * tuple->count);
 				vectorFloatCounts[tuple->docId] += tuple->count;
+			}
+			else if (type ==
+					 PGTURBOHYBRID_GRAPH_MULTIVECTOR_DOCMAP_CENTROID_TUPLE_TYPE)
+			{
+				PgturbohybridGraphMultiVectorDocMapCentroidTuple tuple =
+					(PgturbohybridGraphMultiVectorDocMapCentroidTuple) item;
+				PgturbohybridMultiVector *centroids;
+				Size		totalFloats;
+				Size		tupleSize;
+
+				if (!documentNodes)
+					PgturbohybridGraphMultiVectorDocMapError(index,
+															 "document centroid tuple found in token-node docmap");
+				if (!hasCentroids)
+					PgturbohybridGraphMultiVectorDocMapError(index,
+															 "document centroid tuple found without centroid storage flag");
+				if (itemSize < offsetof(PgturbohybridGraphMultiVectorDocMapCentroidTupleData,
+										values) ||
+					tuple->magic != PGTURBOHYBRID_GRAPH_MULTIVECTOR_DOCMAP_MAGIC ||
+					tuple->version != PGTURBOHYBRID_GRAPH_MULTIVECTOR_DOCMAP_VERSION ||
+					tuple->count == 0 ||
+					tuple->docId >= meta->tqMultivectorDocCount ||
+					tuple->centroidCount == 0)
+					PgturbohybridGraphMultiVectorDocMapError(index,
+															 "malformed document centroid tuple");
+				tupleSize =
+					PgturbohybridGraphMultiVectorDocMapCentroidTupleSize(tuple->count);
+				if (itemSize < tupleSize || !docSeen[tuple->docId])
+					PgturbohybridGraphMultiVectorDocMapError(index,
+															 "document centroid tuple range is invalid");
+				totalFloats =
+					PgturbohybridMultiVectorFloatCount(tuple->centroidCount,
+													   meta->dimensions);
+				if ((uint64) tuple->startFloat + tuple->count > totalFloats)
+					PgturbohybridGraphMultiVectorDocMapError(index,
+															 "document centroid tuple range is invalid");
+				centroids = storage->multivectorDocCentroids[tuple->docId];
+				if (centroids == NULL)
+				{
+					Size		mvSize =
+						PgturbohybridMultiVectorSize(tuple->centroidCount,
+													 meta->dimensions);
+
+					centroids = MemoryContextAllocZero(storage->ctx, mvSize);
+					SET_VARSIZE(centroids, mvSize);
+					centroids->dim = meta->dimensions;
+					centroids->count = tuple->centroidCount;
+					storage->multivectorDocCentroids[tuple->docId] = centroids;
+					storage->multivectorDocCentroidResiduals[tuple->docId] =
+						tuple->residualMean;
+				}
+				else if (centroids->count != tuple->centroidCount)
+					PgturbohybridGraphMultiVectorDocMapError(index,
+															 "document centroid tuple count changed across chunks");
+				if (tuple->startFloat != centroidFloatCounts[tuple->docId])
+					PgturbohybridGraphMultiVectorDocMapError(index,
+															 "document centroid tuple chunks are not contiguous");
+				memcpy(centroids->values + tuple->startFloat, tuple->values,
+					   sizeof(float) * tuple->count);
+				centroidFloatCounts[tuple->docId] += tuple->count;
+			}
+			else if (type ==
+					 PGTURBOHYBRID_GRAPH_MULTIVECTOR_DOCMAP_CENTROID_POSTING_TUPLE_TYPE)
+			{
+				PgturbohybridGraphMultiVectorDocMapCentroidPostingTuple tuple =
+					(PgturbohybridGraphMultiVectorDocMapCentroidPostingTuple) item;
+				Size		tupleSize;
+
+				if (!documentNodes)
+					PgturbohybridGraphMultiVectorDocMapError(index,
+															 "centroid posting tuple found in token-node docmap");
+				if (!hasCentroidPostings)
+					PgturbohybridGraphMultiVectorDocMapError(index,
+															 "centroid posting tuple found without posting storage flag");
+				if (itemSize < offsetof(PgturbohybridGraphMultiVectorDocMapCentroidPostingTupleData,
+										entries) ||
+					tuple->magic != PGTURBOHYBRID_GRAPH_MULTIVECTOR_DOCMAP_MAGIC ||
+					tuple->version != PGTURBOHYBRID_GRAPH_MULTIVECTOR_DOCMAP_VERSION ||
+					tuple->count == 0 ||
+					tuple->codeword >= centroidPostingCodebookSize)
+					PgturbohybridGraphMultiVectorDocMapError(index,
+															 "malformed centroid posting tuple");
+				tupleSize =
+					PgturbohybridGraphMultiVectorDocMapCentroidPostingTupleSize(tuple->count);
+				if (itemSize < tupleSize)
+					PgturbohybridGraphMultiVectorDocMapError(index,
+															 "centroid posting tuple range is invalid");
+				if ((uint64) centroidPostingScratchCount + tuple->count >
+					(uint64) PG_UINT32_MAX)
+					PgturbohybridGraphMultiVectorDocMapError(index,
+															 "centroid posting sidecar is too large");
+				if (centroidPostingScratchCount + tuple->count >
+					centroidPostingScratchCapacity)
+				{
+					uint32		oldCapacity = centroidPostingScratchCapacity;
+					uint32		newCapacity =
+						centroidPostingScratchCapacity == 0 ?
+						1024 : centroidPostingScratchCapacity;
+					Size		oldPostingBytes;
+					Size		newPostingBytes;
+					Size		oldCodewordBytes;
+					Size		newCodewordBytes;
+
+					while (newCapacity <
+						   centroidPostingScratchCount + tuple->count)
+					{
+						if (newCapacity > PG_UINT32_MAX / 2)
+							PgturbohybridGraphMultiVectorDocMapError(index,
+																	 "centroid posting sidecar is too large");
+						newCapacity += newCapacity;
+					}
+					oldPostingBytes =
+						PgturbohybridCheckedArrayBytes(sizeof(PgturbohybridGraphMultiVectorCentroidPostingEntry),
+													   oldCapacity,
+													   "pgturbohybrid multivector centroid posting scratch");
+					newPostingBytes =
+						PgturbohybridCheckedArrayBytes(sizeof(PgturbohybridGraphMultiVectorCentroidPostingEntry),
+													   newCapacity,
+													   "pgturbohybrid multivector centroid posting scratch");
+					oldCodewordBytes =
+						PgturbohybridCheckedArrayBytes(sizeof(uint32),
+													   oldCapacity,
+													   "pgturbohybrid multivector centroid posting codewords");
+					newCodewordBytes =
+						PgturbohybridCheckedArrayBytes(sizeof(uint32),
+													   newCapacity,
+													   "pgturbohybrid multivector centroid posting codewords");
+					if (centroidPostingScratch == NULL)
+					{
+						centroidPostingScratch =
+							MemoryContextAllocZero(storage->ctx,
+												   newPostingBytes);
+						centroidPostingScratchCodewords =
+							MemoryContextAllocZero(storage->ctx,
+												   newCodewordBytes);
+					}
+					else
+					{
+						centroidPostingScratch =
+							repalloc(centroidPostingScratch,
+									 newPostingBytes);
+						memset((char *) centroidPostingScratch + oldPostingBytes,
+							   0, newPostingBytes - oldPostingBytes);
+						centroidPostingScratchCodewords =
+							repalloc(centroidPostingScratchCodewords,
+									 newCodewordBytes);
+						memset((char *) centroidPostingScratchCodewords +
+							   oldCodewordBytes, 0,
+							   newCodewordBytes - oldCodewordBytes);
+					}
+					centroidPostingScratchCapacity = newCapacity;
+				}
+				for (uint16 i = 0; i < tuple->count; i++)
+				{
+					PgturbohybridGraphMultiVectorCentroidPostingEntry *entry =
+						&tuple->entries[i];
+
+					if (entry->docId >= meta->tqMultivectorDocCount ||
+						entry->unused != 0)
+						PgturbohybridGraphMultiVectorDocMapError(index,
+																 "centroid posting entry is invalid");
+					centroidPostingScratch[centroidPostingScratchCount] =
+						*entry;
+					centroidPostingScratchCodewords[centroidPostingScratchCount] =
+						tuple->codeword;
+					centroidPostingListCounts[tuple->codeword]++;
+					centroidPostingScratchCount++;
+				}
+			}
+			else if (type ==
+					 PGTURBOHYBRID_GRAPH_MULTIVECTOR_DOCMAP_QUANTIZED_POSTING_TUPLE_TYPE)
+			{
+				PgturbohybridGraphMultiVectorDocMapQuantizedPostingTuple tuple =
+					(PgturbohybridGraphMultiVectorDocMapQuantizedPostingTuple) item;
+				Size		tupleSize;
+
+				if (!documentNodes)
+					PgturbohybridGraphMultiVectorDocMapError(index,
+															 "quantized posting tuple found in token-node docmap");
+				if (!hasQuantizedPostings)
+					PgturbohybridGraphMultiVectorDocMapError(index,
+															 "quantized posting tuple found without posting storage flag");
+				if (itemSize < offsetof(PgturbohybridGraphMultiVectorDocMapQuantizedPostingTupleData,
+										entries) ||
+					tuple->magic != PGTURBOHYBRID_GRAPH_MULTIVECTOR_DOCMAP_MAGIC ||
+					tuple->version != PGTURBOHYBRID_GRAPH_MULTIVECTOR_DOCMAP_VERSION ||
+					tuple->count == 0 ||
+					tuple->codeword >= quantizedPostingCodebookSize)
+					PgturbohybridGraphMultiVectorDocMapError(index,
+															 "malformed quantized posting tuple");
+				tupleSize =
+					PgturbohybridGraphMultiVectorDocMapQuantizedPostingTupleSize(tuple->count);
+				if (itemSize < tupleSize)
+					PgturbohybridGraphMultiVectorDocMapError(index,
+															 "quantized posting tuple range is invalid");
+				if ((uint64) quantizedPostingScratchCount + tuple->count >
+					(uint64) PG_UINT32_MAX)
+					PgturbohybridGraphMultiVectorDocMapError(index,
+															 "quantized posting sidecar is too large");
+				if (quantizedPostingScratchCount + tuple->count >
+					quantizedPostingScratchCapacity)
+				{
+					uint32		oldCapacity = quantizedPostingScratchCapacity;
+					uint32		newCapacity =
+						quantizedPostingScratchCapacity == 0 ?
+						1024 : quantizedPostingScratchCapacity;
+					Size		oldPostingBytes;
+					Size		newPostingBytes;
+					Size		oldCodewordBytes;
+					Size		newCodewordBytes;
+
+					while (newCapacity <
+						   quantizedPostingScratchCount + tuple->count)
+					{
+						if (newCapacity > PG_UINT32_MAX / 2)
+							PgturbohybridGraphMultiVectorDocMapError(index,
+																	 "quantized posting sidecar is too large");
+						newCapacity += newCapacity;
+					}
+					oldPostingBytes =
+						PgturbohybridCheckedArrayBytes(sizeof(PgturbohybridGraphMultiVectorQuantizedPostingEntry),
+													   oldCapacity,
+													   "pgturbohybrid multivector quantized posting scratch");
+					newPostingBytes =
+						PgturbohybridCheckedArrayBytes(sizeof(PgturbohybridGraphMultiVectorQuantizedPostingEntry),
+													   newCapacity,
+													   "pgturbohybrid multivector quantized posting scratch");
+					oldCodewordBytes =
+						PgturbohybridCheckedArrayBytes(sizeof(uint32),
+													   oldCapacity,
+													   "pgturbohybrid multivector quantized posting codewords");
+					newCodewordBytes =
+						PgturbohybridCheckedArrayBytes(sizeof(uint32),
+													   newCapacity,
+													   "pgturbohybrid multivector quantized posting codewords");
+					if (quantizedPostingScratch == NULL)
+					{
+						quantizedPostingScratch =
+							MemoryContextAllocZero(storage->ctx,
+												   newPostingBytes);
+						quantizedPostingScratchCodewords =
+							MemoryContextAllocZero(storage->ctx,
+												   newCodewordBytes);
+					}
+					else
+					{
+						quantizedPostingScratch =
+							repalloc(quantizedPostingScratch,
+									 newPostingBytes);
+						memset((char *) quantizedPostingScratch + oldPostingBytes,
+							   0, newPostingBytes - oldPostingBytes);
+						quantizedPostingScratchCodewords =
+							repalloc(quantizedPostingScratchCodewords,
+									 newCodewordBytes);
+						memset((char *) quantizedPostingScratchCodewords +
+							   oldCodewordBytes, 0,
+							   newCodewordBytes - oldCodewordBytes);
+					}
+					quantizedPostingScratchCapacity = newCapacity;
+				}
+				for (uint16 i = 0; i < tuple->count; i++)
+				{
+					PgturbohybridGraphMultiVectorQuantizedPostingEntry *entry =
+						&tuple->entries[i];
+
+					if (entry->docId >= meta->tqMultivectorDocCount)
+						PgturbohybridGraphMultiVectorDocMapError(index,
+																 "quantized posting entry is invalid");
+					quantizedPostingScratch[quantizedPostingScratchCount] =
+						*entry;
+					quantizedPostingScratchCodewords[quantizedPostingScratchCount] =
+						tuple->codeword;
+					quantizedPostingListCounts[tuple->codeword]++;
+					quantizedPostingScratchCount++;
+				}
+			}
+			else if (type ==
+					 PGTURBOHYBRID_GRAPH_MULTIVECTOR_DOCMAP_CONTEXT_TUPLE_TYPE)
+			{
+				PgturbohybridGraphMultiVectorDocMapContextTuple tuple =
+					(PgturbohybridGraphMultiVectorDocMapContextTuple) item;
+				TqMultiVectorDocMapEntry *entry;
+				PgturbohybridMultiVector *mv;
+				PgturbohybridMultiVector *extended;
+				Size		flatSize;
+				Size		extendedSize;
+				Size		tupleSize;
+				bool		hasFields;
+
+				if (!documentNodes)
+					PgturbohybridGraphMultiVectorDocMapError(index,
+															 "document context tuple found in token-node docmap");
+				if (itemSize < offsetof(PgturbohybridGraphMultiVectorDocMapContextTupleData,
+										values) ||
+					tuple->magic != PGTURBOHYBRID_GRAPH_MULTIVECTOR_DOCMAP_MAGIC ||
+					tuple->version != PGTURBOHYBRID_GRAPH_MULTIVECTOR_DOCMAP_VERSION ||
+					tuple->contextCount == 0 ||
+					tuple->docId >= meta->tqMultivectorDocCount ||
+					(tuple->flags & PGTURBOHYBRID_MULTIVECTOR_FLAG_CONTEXTS) == 0 ||
+					(tuple->flags & ~PGTURBOHYBRID_MULTIVECTOR_KNOWN_FLAGS) != 0)
+					PgturbohybridGraphMultiVectorDocMapError(index,
+															 "malformed document context tuple");
+				hasFields =
+					(tuple->flags & PGTURBOHYBRID_MULTIVECTOR_FLAG_FIELDS) != 0;
+				tupleSize =
+					PgturbohybridGraphMultiVectorDocMapContextTupleSize(tuple->contextCount,
+																		hasFields);
+				if (itemSize < tupleSize || !docSeen[tuple->docId])
+					PgturbohybridGraphMultiVectorDocMapError(index,
+															 "document context tuple range is invalid");
+				entry = &storage->multivectorDocMap[tuple->docId];
+				if (pagedDocVectors)
+					PgturbohybridGraphMultiVectorDocMapError(index,
+															 "paged document-node sidecar does not support context metadata yet");
+				if (tuple->contextCount > entry->tokenCount)
+					PgturbohybridGraphMultiVectorDocMapError(index,
+															 "document context tuple range is invalid");
+				mv = storage->multivectorDocVectors[tuple->docId];
+				flatSize =
+					PgturbohybridMultiVectorSize(entry->tokenCount,
+												 meta->dimensions);
+				if (mv == NULL)
+				{
+					mv = MemoryContextAllocZero(storage->ctx, flatSize);
+					SET_VARSIZE(mv, flatSize);
+					mv->dim = meta->dimensions;
+					mv->count = entry->tokenCount;
+				}
+				else if (PgturbohybridMultiVectorHasContexts(mv))
+					PgturbohybridGraphMultiVectorDocMapError(index,
+															 "duplicate document context tuple");
+
+				extendedSize =
+					PgturbohybridMultiVectorExtendedSize(entry->tokenCount,
+														 meta->dimensions,
+														 tuple->contextCount,
+														 hasFields);
+				extended = MemoryContextAllocZero(storage->ctx, extendedSize);
+				memcpy(extended, mv, flatSize);
+				SET_VARSIZE(extended, extendedSize);
+				extended->flags = tuple->flags;
+				*((int32 *) ((char *) extended + flatSize)) =
+					(int32) tuple->contextCount;
+				memcpy((int32 *) ((char *) extended + flatSize) + 1,
+					   tuple->values,
+					   sizeof(int32) * (Size) tuple->contextCount);
+				if (hasFields)
+					memcpy((int32 *) ((char *) extended + flatSize) + 1 +
+						   tuple->contextCount,
+						   tuple->values + tuple->contextCount,
+						   sizeof(int32) * (Size) tuple->contextCount);
+				PgturbohybridCheckMultiVector(extended);
+				storage->multivectorDocVectors[tuple->docId] = extended;
+				if (mv != extended)
+					pfree(mv);
 			}
 			else
 				PgturbohybridGraphMultiVectorDocMapError(index,
@@ -967,10 +1522,217 @@ PgturbohybridGraphLoadMultiVectorDocMap(Relation index,
 
 			if (storage->multivectorDocVectors[docId] == NULL ||
 				vectorFloatCounts[docId] != totalFloats)
+			{
+				if (pagedDocVectors &&
+					storage->multivectorDocVectorFirstChunk[docId] != PG_UINT32_MAX &&
+					storage->multivectorDocVectorChunkCounts[docId] > 0 &&
+					vectorFloatCounts[docId] == totalFloats)
+					continue;
 				PgturbohybridGraphMultiVectorDocMapError(index,
 														 "document-node docmap does not cover every document vector");
+			}
 		}
 		storage->multivectorDocVectorsLoaded = true;
+		if (hasQuantizedPostings)
+		{
+			uint32	   *listOffsets;
+			uint32	   *listWrite;
+			uint32	   *docPostingCounts;
+			uint32		expectedPostings = 0;
+
+			for (uint32 docId = 0; docId < meta->tqMultivectorDocCount; docId++)
+			{
+				TqMultiVectorDocMapEntry *entry =
+					&storage->multivectorDocMap[docId];
+
+				if ((uint64) expectedPostings + (uint64) entry->tokenCount >
+					(uint64) PG_UINT32_MAX)
+					PgturbohybridGraphMultiVectorDocMapError(index,
+															 "quantized posting sidecar is too large");
+				expectedPostings += (uint32) entry->tokenCount;
+			}
+			if (quantizedPostingScratchCount != expectedPostings)
+				PgturbohybridGraphMultiVectorDocMapError(index,
+														 "quantized posting sidecar does not cover every document token");
+
+			oldCtx = MemoryContextSwitchTo(storage->ctx);
+			listOffsets =
+				palloc0(PgturbohybridCheckedArrayBytes(sizeof(uint32),
+													   (Size) quantizedPostingCodebookSize + 1,
+													   "pgturbohybrid multivector quantized posting offsets"));
+			listWrite =
+				palloc0(PgturbohybridCheckedArrayBytes(sizeof(uint32),
+													   quantizedPostingCodebookSize,
+													   "pgturbohybrid multivector quantized posting write cursors"));
+			docPostingCounts =
+				palloc0(PgturbohybridCheckedArrayBytes(sizeof(uint32),
+													   meta->tqMultivectorDocCount,
+													   "pgturbohybrid multivector quantized posting coverage"));
+			storage->multivectorQuantizedInvertedPostings =
+				palloc0(PgturbohybridCheckedArrayBytes(sizeof(PgturbohybridGraphMultiVectorQuantizedPostingEntry),
+													   Max(quantizedPostingScratchCount, 1U),
+													   "pgturbohybrid multivector quantized postings"));
+			MemoryContextSwitchTo(oldCtx);
+
+			listOffsets[0] = 0;
+			for (uint32 codeword = 0; codeword < quantizedPostingCodebookSize;
+				 codeword++)
+			{
+				listOffsets[codeword + 1] =
+					listOffsets[codeword] + quantizedPostingListCounts[codeword];
+				listWrite[codeword] = listOffsets[codeword];
+			}
+			for (uint32 postingIndex = 0;
+				 postingIndex < quantizedPostingScratchCount;
+				 postingIndex++)
+			{
+				PgturbohybridGraphMultiVectorQuantizedPostingEntry *entry =
+					&quantizedPostingScratch[postingIndex];
+				uint32		codeword =
+					quantizedPostingScratchCodewords[postingIndex];
+				TqMultiVectorDocMapEntry *docEntry;
+				uint32		offset;
+
+				if (codeword >= quantizedPostingCodebookSize)
+					PgturbohybridGraphMultiVectorDocMapError(index,
+															 "quantized posting entry has invalid codeword");
+				docEntry = &storage->multivectorDocMap[entry->docId];
+				if (entry->tokenOrdinal >= (uint32) docEntry->tokenCount)
+					PgturbohybridGraphMultiVectorDocMapError(index,
+															 "quantized posting entry is invalid");
+				docPostingCounts[entry->docId]++;
+				offset = listWrite[codeword]++;
+				storage->multivectorQuantizedInvertedPostings[offset] =
+					*entry;
+			}
+			for (uint32 docId = 0; docId < meta->tqMultivectorDocCount; docId++)
+			{
+				TqMultiVectorDocMapEntry *entry =
+					&storage->multivectorDocMap[docId];
+
+				if (docPostingCounts[docId] != (uint32) entry->tokenCount)
+					PgturbohybridGraphMultiVectorDocMapError(index,
+															 "quantized posting sidecar does not cover every document token");
+			}
+			storage->multivectorQuantizedInvertedListOffsets = listOffsets;
+			storage->multivectorQuantizedInvertedCodebookSize =
+				quantizedPostingCodebookSize;
+			storage->multivectorQuantizedInvertedPostingCount =
+				quantizedPostingScratchCount;
+			storage->multivectorQuantizedInvertedPostingsLoaded = true;
+			pfree(listWrite);
+			pfree(docPostingCounts);
+		}
+		if (hasCentroids)
+		{
+			for (uint32 docId = 0; docId < meta->tqMultivectorDocCount; docId++)
+			{
+				PgturbohybridMultiVector *centroids =
+					storage->multivectorDocCentroids[docId];
+				Size		totalFloats;
+
+				if (centroids == NULL)
+					PgturbohybridGraphMultiVectorDocMapError(index,
+															 "document-node docmap does not cover every document centroid");
+				totalFloats =
+					PgturbohybridMultiVectorFloatCount(centroids->count,
+													   meta->dimensions);
+				if (centroidFloatCounts[docId] != totalFloats)
+					PgturbohybridGraphMultiVectorDocMapError(index,
+															 "document-node docmap does not cover every document centroid");
+			}
+			storage->multivectorDocCentroidsLoaded = true;
+			if (hasCentroidPostings)
+			{
+				uint32	   *listOffsets;
+				uint32	   *listWrite;
+				uint32	   *docPostingCounts;
+				uint32		expectedPostings = 0;
+
+				for (uint32 docId = 0; docId < meta->tqMultivectorDocCount; docId++)
+				{
+					PgturbohybridMultiVector *centroids =
+						storage->multivectorDocCentroids[docId];
+
+					if ((uint64) expectedPostings + (uint64) centroids->count >
+						(uint64) PG_UINT32_MAX)
+						PgturbohybridGraphMultiVectorDocMapError(index,
+																 "centroid posting sidecar is too large");
+					expectedPostings += (uint32) centroids->count;
+				}
+				if (centroidPostingScratchCount != expectedPostings)
+					PgturbohybridGraphMultiVectorDocMapError(index,
+															 "centroid posting sidecar does not cover every document centroid");
+
+				oldCtx = MemoryContextSwitchTo(storage->ctx);
+				listOffsets =
+					palloc0(PgturbohybridCheckedArrayBytes(sizeof(uint32),
+														   (Size) centroidPostingCodebookSize + 1,
+														   "pgturbohybrid multivector centroid posting offsets"));
+				listWrite =
+					palloc0(PgturbohybridCheckedArrayBytes(sizeof(uint32),
+														   centroidPostingCodebookSize,
+														   "pgturbohybrid multivector centroid posting write cursors"));
+				docPostingCounts =
+					palloc0(PgturbohybridCheckedArrayBytes(sizeof(uint32),
+														   meta->tqMultivectorDocCount,
+														   "pgturbohybrid multivector centroid posting coverage"));
+				storage->multivectorCentroidPostings =
+					palloc0(PgturbohybridCheckedArrayBytes(sizeof(PgturbohybridGraphMultiVectorCentroidPostingEntry),
+														   Max(centroidPostingScratchCount, 1U),
+														   "pgturbohybrid multivector centroid postings"));
+				MemoryContextSwitchTo(oldCtx);
+
+				listOffsets[0] = 0;
+				for (uint32 codeword = 0; codeword < centroidPostingCodebookSize;
+					 codeword++)
+				{
+					listOffsets[codeword + 1] =
+						listOffsets[codeword] + centroidPostingListCounts[codeword];
+					listWrite[codeword] = listOffsets[codeword];
+				}
+				for (uint32 postingIndex = 0;
+					 postingIndex < centroidPostingScratchCount;
+					 postingIndex++)
+				{
+					PgturbohybridGraphMultiVectorCentroidPostingEntry *entry =
+						&centroidPostingScratch[postingIndex];
+					uint32		codeword =
+						centroidPostingScratchCodewords[postingIndex];
+					PgturbohybridMultiVector *centroids;
+					uint32		offset;
+
+					if (codeword >= centroidPostingCodebookSize)
+						PgturbohybridGraphMultiVectorDocMapError(index,
+																 "centroid posting entry has invalid codeword");
+					centroids = storage->multivectorDocCentroids[entry->docId];
+					if (centroids == NULL ||
+						entry->centroidOrdinal >= (uint32) centroids->count)
+						PgturbohybridGraphMultiVectorDocMapError(index,
+																 "centroid posting entry is invalid");
+					docPostingCounts[entry->docId]++;
+					offset = listWrite[codeword]++;
+					storage->multivectorCentroidPostings[offset] = *entry;
+				}
+				for (uint32 docId = 0; docId < meta->tqMultivectorDocCount; docId++)
+				{
+					PgturbohybridMultiVector *centroids =
+						storage->multivectorDocCentroids[docId];
+
+					if (docPostingCounts[docId] != (uint32) centroids->count)
+						PgturbohybridGraphMultiVectorDocMapError(index,
+																 "centroid posting sidecar does not cover every document centroid");
+				}
+				storage->multivectorCentroidPostingListOffsets = listOffsets;
+				storage->multivectorCentroidPostingCodebookSize =
+					centroidPostingCodebookSize;
+				storage->multivectorCentroidPostingCount =
+					centroidPostingScratchCount;
+				storage->multivectorCentroidPostingsLoaded = true;
+				pfree(listWrite);
+				pfree(docPostingCounts);
+			}
+		}
 	}
 
 	storage->multivectorDocCount = meta->tqMultivectorDocCount;
@@ -980,6 +1742,20 @@ PgturbohybridGraphLoadMultiVectorDocMap(Relation index,
 	pfree(docSeen);
 	if (vectorFloatCounts != NULL)
 		pfree(vectorFloatCounts);
+	if (centroidFloatCounts != NULL)
+		pfree(centroidFloatCounts);
+	if (centroidPostingListCounts != NULL)
+		pfree(centroidPostingListCounts);
+	if (centroidPostingScratch != NULL)
+		pfree(centroidPostingScratch);
+	if (centroidPostingScratchCodewords != NULL)
+		pfree(centroidPostingScratchCodewords);
+	if (quantizedPostingListCounts != NULL)
+		pfree(quantizedPostingListCounts);
+	if (quantizedPostingScratch != NULL)
+		pfree(quantizedPostingScratch);
+	if (quantizedPostingScratchCodewords != NULL)
+		pfree(quantizedPostingScratchCodewords);
 	return true;
 }
 
@@ -1371,9 +2147,144 @@ PgturbohybridGraphPayloadRefRange(PgturbohybridGraphScanStorage *storage, int pa
 	return true;
 }
 
+PgturbohybridMultiVector *
+PgturbohybridGraphLoadMultiVectorDocVector(Relation index,
+									  PgturbohybridGraphMetaPageData *meta,
+									  PgturbohybridGraphScanStorage *storage,
+									  TqDocId docId,
+									  MemoryContext ctx,
+									  PgturbohybridMultiVectorDocSidecarAccessStats *stats)
+{
+	TqMultiVectorDocMapEntry *entry;
+	PgturbohybridMultiVector *mv;
+	Size		totalFloats;
+	Size		mvSize;
+	uint32		firstChunk;
+	uint32		chunkCount;
+	uint32		copiedFloats = 0;
+	MemoryContext oldCtx;
+
+	if (storage == NULL || meta == NULL || docId >= meta->tqMultivectorDocCount)
+		ereport(ERROR,
+				(errcode(ERRCODE_INDEX_CORRUPTED),
+				 errmsg("document-node multivector sidecar has invalid document id"),
+				 errhint("REINDEX the index to rebuild the document-node multivector sidecar.")));
+
+	if (!storage->multivectorDocVectorsPaged)
+	{
+		if (storage->multivectorDocVectors == NULL ||
+			storage->multivectorDocVectors[docId] == NULL)
+			ereport(ERROR,
+					(errcode(ERRCODE_INDEX_CORRUPTED),
+					 errmsg("document-node multivector sidecar is missing a document vector"),
+					 errhint("REINDEX the index to rebuild the document-node multivector sidecar.")));
+		return storage->multivectorDocVectors[docId];
+	}
+
+	if (storage->multivectorDocVectorFirstChunk == NULL ||
+		storage->multivectorDocVectorChunkCounts == NULL ||
+		storage->multivectorDocVectorChunks == NULL)
+		ereport(ERROR,
+				(errcode(ERRCODE_INDEX_CORRUPTED),
+				 errmsg("paged document-node multivector sidecar metadata is missing"),
+				 errhint("REINDEX the index to rebuild the document-node multivector sidecar.")));
+
+	entry = &storage->multivectorDocMap[docId];
+	totalFloats =
+		PgturbohybridMultiVectorFloatCount(entry->tokenCount,
+										   meta->dimensions);
+	mvSize = PgturbohybridMultiVectorSize(entry->tokenCount, meta->dimensions);
+	oldCtx = MemoryContextSwitchTo(ctx);
+	mv = MemoryContextAllocZero(ctx, mvSize);
+	MemoryContextSwitchTo(oldCtx);
+	SET_VARSIZE(mv, mvSize);
+	mv->dim = meta->dimensions;
+	mv->count = entry->tokenCount;
+
+	firstChunk = storage->multivectorDocVectorFirstChunk[docId];
+	chunkCount = storage->multivectorDocVectorChunkCounts[docId];
+	if (firstChunk == PG_UINT32_MAX || chunkCount == 0 ||
+		(uint64) firstChunk + (uint64) chunkCount >
+		(uint64) storage->multivectorDocVectorChunkCount)
+		PgturbohybridGraphMultiVectorDocMapError(index,
+												 "paged document vector sidecar chunk range is invalid");
+
+	for (uint32 chunkOffset = 0; chunkOffset < chunkCount; chunkOffset++)
+	{
+		PgturbohybridGraphMultiVectorDocVectorChunkRef *ref =
+			&storage->multivectorDocVectorChunks[firstChunk + chunkOffset];
+		Buffer		buf;
+		Page		page;
+		PgturbohybridGraphPageOpaque opaque;
+		ItemId		iid;
+		Item		item;
+		Size		itemSize;
+		PgturbohybridGraphMultiVectorDocMapVectorTuple tuple;
+		Size		tupleSize;
+
+		CHECK_FOR_INTERRUPTS();
+		buf = ReadBuffer(index, ref->blkno);
+		LockBuffer(buf, BUFFER_LOCK_SHARE);
+		page = BufferGetPage(buf);
+		opaque = PgturbohybridGraphPageGetOpaque(page);
+		if ((opaque->pageKind & PGTURBOHYBRID_GRAPH_PAGE_KIND_MASK) !=
+			PGTURBOHYBRID_GRAPH_PAGE_KIND_MULTIVECTOR_DOCMAP ||
+			ref->offno < FirstOffsetNumber ||
+			ref->offno > PageGetMaxOffsetNumber(page))
+		{
+			UnlockReleaseBuffer(buf);
+			PgturbohybridGraphMultiVectorDocMapError(index,
+													 "paged document vector sidecar chunk reference is invalid");
+		}
+		iid = PageGetItemId(page, ref->offno);
+		item = PageGetItem(page, iid);
+		itemSize = ItemIdGetLength(iid);
+		if (itemSize < offsetof(PgturbohybridGraphMultiVectorDocMapVectorTupleData,
+								values))
+		{
+			UnlockReleaseBuffer(buf);
+			PgturbohybridGraphMultiVectorDocMapError(index,
+													 "paged document vector sidecar chunk is malformed");
+		}
+		tuple = (PgturbohybridGraphMultiVectorDocMapVectorTuple) item;
+		tupleSize =
+			PgturbohybridGraphMultiVectorDocMapVectorTupleSize(tuple->count);
+		if (itemSize < tupleSize ||
+			tuple->type != PGTURBOHYBRID_GRAPH_MULTIVECTOR_DOCMAP_VECTOR_TUPLE_TYPE ||
+			tuple->magic != PGTURBOHYBRID_GRAPH_MULTIVECTOR_DOCMAP_MAGIC ||
+			tuple->version != PGTURBOHYBRID_GRAPH_MULTIVECTOR_DOCMAP_VERSION ||
+			tuple->docId != docId ||
+			tuple->startFloat != ref->startFloat ||
+			tuple->count != ref->count ||
+			tuple->startFloat != copiedFloats ||
+			(uint64) tuple->startFloat + tuple->count > totalFloats)
+		{
+			UnlockReleaseBuffer(buf);
+			PgturbohybridGraphMultiVectorDocMapError(index,
+													 "paged document vector sidecar chunk is invalid");
+		}
+		memcpy(mv->values + tuple->startFloat, tuple->values,
+			   sizeof(float) * tuple->count);
+		copiedFloats += tuple->count;
+		if (stats != NULL)
+		{
+			stats->pagesRead++;
+			stats->cacheMisses++;
+			stats->bytesTouched += itemSize;
+		}
+		UnlockReleaseBuffer(buf);
+	}
+	if (copiedFloats != totalFloats)
+		PgturbohybridGraphMultiVectorDocMapError(index,
+												 "paged document vector sidecar chunks are incomplete");
+	if (stats != NULL)
+		stats->vectorsLoaded++;
+	return mv;
+}
+
 static bool
 PgturbohybridGraphCacheMatches(PgturbohybridGraphNativeCache *cache, Relation index,
-					PgturbohybridGraphMetaPageData *meta)
+							   PgturbohybridGraphMetaPageData *meta)
 {
 	return cache->relid == RelationGetRelid(index) &&
 		cache->relfilenumber == PgturbohybridGraphRelFileNumber(index) &&
@@ -1398,7 +2309,10 @@ PgturbohybridGraphCacheMatches(PgturbohybridGraphNativeCache *cache, Relation in
 		cache->tqMultivectorDocCount == meta->tqMultivectorDocCount &&
 		cache->tqMultivectorDocMapBytes == meta->tqMultivectorDocMapBytes &&
 		cache->tqMultivectorDocMapVersion == meta->tqMultivectorDocMapVersion &&
+		cache->tqMultivectorDocMapFlags == meta->tqMultivectorDocMapFlags &&
 		cache->tqMultivectorGraphMode == meta->tqMultivectorGraphMode &&
+		cache->multivectorDocSidecarResident ==
+		PgturbohybridGraphShouldCacheMultiVectorDocSidecar(meta) &&
 		memcmp(cache->tqSegments, meta->tqSegments,
 			   sizeof(PgturbohybridGraphSegmentMetaData) * meta->tqSegmentCount) == 0;
 }
@@ -1504,6 +2418,59 @@ PgturbohybridGraphCacheComputeResidentBytes(PgturbohybridGraphNativeCache *cache
 			(Size) meta->tqNodeCount * sizeof(TqMultiVectorNodeMapEntry) +
 			(Size) meta->tqMultivectorDocCount *
 			sizeof(TqMultiVectorDocMapEntry);
+	if (storage->multivectorDocVectorsLoaded &&
+		storage->multivectorDocVectors != NULL)
+	{
+		otherBytes += (Size) meta->tqMultivectorDocCount *
+			sizeof(PgturbohybridMultiVector *);
+		if (storage->multivectorDocVectorsPaged)
+		{
+			otherBytes += (Size) meta->tqMultivectorDocCount *
+				(sizeof(uint32) + sizeof(uint32));
+			otherBytes += (Size) storage->multivectorDocVectorChunkCapacity *
+				sizeof(PgturbohybridGraphMultiVectorDocVectorChunkRef);
+		}
+		for (uint32 docId = 0; docId < meta->tqMultivectorDocCount; docId++)
+		{
+			PgturbohybridMultiVector *mv =
+				storage->multivectorDocVectors[docId];
+
+			if (mv != NULL)
+				otherBytes += (Size) VARSIZE_ANY(mv);
+		}
+	}
+	if (storage->multivectorDocCentroidsLoaded &&
+		storage->multivectorDocCentroids != NULL)
+	{
+		otherBytes += (Size) meta->tqMultivectorDocCount *
+			(sizeof(PgturbohybridMultiVector *) + sizeof(float));
+		for (uint32 docId = 0; docId < meta->tqMultivectorDocCount; docId++)
+		{
+			PgturbohybridMultiVector *mv =
+				storage->multivectorDocCentroids[docId];
+
+			if (mv != NULL)
+				otherBytes += (Size) VARSIZE_ANY(mv);
+		}
+	}
+	if (storage->multivectorCentroidPostingsLoaded &&
+		storage->multivectorCentroidPostings != NULL &&
+		storage->multivectorCentroidPostingListOffsets != NULL)
+	{
+		otherBytes += ((Size) storage->multivectorCentroidPostingCodebookSize + 1) *
+			sizeof(uint32);
+		otherBytes += (Size) storage->multivectorCentroidPostingCount *
+			sizeof(PgturbohybridGraphMultiVectorCentroidPostingEntry);
+	}
+	if (storage->multivectorQuantizedInvertedPostingsLoaded &&
+		storage->multivectorQuantizedInvertedPostings != NULL &&
+		storage->multivectorQuantizedInvertedListOffsets != NULL)
+	{
+		otherBytes += ((Size) storage->multivectorQuantizedInvertedCodebookSize + 1) *
+			sizeof(uint32);
+		otherBytes += (Size) storage->multivectorQuantizedInvertedPostingCount *
+			sizeof(PgturbohybridGraphMultiVectorQuantizedPostingEntry);
+	}
 	otherBytes += (Size) storage->codePageCount * (sizeof(bool) + sizeof(BlockNumber));
 
 	cache->residentCodeBytes = codeBytes;
@@ -1559,7 +2526,11 @@ PgturbohybridGraphBuildCache(Relation index, PgturbohybridGraphMetaPageData *met
 		meta->tqMultivectorDocMapBytes;
 	cache->tqMultivectorDocMapVersion =
 		meta->tqMultivectorDocMapVersion;
+	cache->tqMultivectorDocMapFlags =
+		meta->tqMultivectorDocMapFlags;
 	cache->tqMultivectorGraphMode = meta->tqMultivectorGraphMode;
+	cache->multivectorDocSidecarResident =
+		PgturbohybridGraphShouldCacheMultiVectorDocSidecar(meta);
 	memcpy(cache->tqSegments, meta->tqSegments,
 		   sizeof(PgturbohybridGraphSegmentMetaData) * meta->tqSegmentCount);
 	cache->ctx = cacheCtx;
@@ -1591,7 +2562,8 @@ PgturbohybridGraphBuildCache(Relation index, PgturbohybridGraphMetaPageData *met
 		(void) PgturbohybridGraphLoadExactVectors(index, meta, &cache->storage);
 	if (BlockNumberIsValid(meta->tqMultivectorDocMapStartBlkno) &&
 		meta->tqMultivectorDocMapVersion ==
-		PGTURBOHYBRID_GRAPH_MULTIVECTOR_DOCMAP_VERSION)
+		PGTURBOHYBRID_GRAPH_MULTIVECTOR_DOCMAP_VERSION &&
+		cache->multivectorDocSidecarResident)
 		(void) PgturbohybridGraphLoadMultiVectorDocMap(index, meta,
 													   &cache->storage,
 													   false);

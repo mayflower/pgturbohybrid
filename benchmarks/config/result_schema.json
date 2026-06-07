@@ -61,6 +61,24 @@
     "method": {
       "type": "string"
     },
+    "settings": {
+      "type": "object",
+      "properties": {
+        "multivector_proxy_encoder": { "type": "string" },
+        "multivector_centroids": { "type": "string" },
+        "multivector_centroid_count": { "type": ["string", "integer"] },
+        "multivector_sparse_candidate_source": { "type": "string" },
+        "learned_sparse_doc_jsonl": { "type": ["string", "null"] },
+        "learned_sparse_query_jsonl": { "type": ["string", "null"] },
+        "skip_parallel_retrieval": { "type": "boolean" },
+        "force_parallel_retrieval": { "type": "boolean" },
+        "document_node_proxy_encoder_grid": {
+          "type": "array",
+          "items": { "type": "string" }
+        }
+      },
+      "additionalProperties": true
+    },
     "results": {
       "type": "array",
       "items": {
@@ -129,6 +147,39 @@
             "type": "object",
             "additionalProperties": true
           },
+          "parallel_8x": {
+            "type": "object",
+            "properties": {
+              "clients": { "type": "integer" },
+              "warm_queries_per_client": { "type": "integer" },
+              "timed_queries_per_client": { "type": "integer" },
+              "total_timed_queries": { "type": "integer" },
+              "failed": { "type": "boolean" },
+              "skipped": { "type": "boolean" },
+              "skip_reason": { "type": "string" },
+              "error": { "type": "string" },
+              "throughput_qps": { "type": "number" },
+              "warm_latency": { "type": "object", "additionalProperties": true },
+              "timed_latency": { "type": "object", "additionalProperties": true },
+              "safety_preflight": {
+                "type": "object",
+                "properties": {
+                  "enabled": { "type": "boolean" },
+                  "forced": { "type": "boolean" },
+                  "method": { "type": "string" },
+                  "skipped": { "type": "boolean" },
+                  "reasons": {
+                    "type": "array",
+                    "items": { "type": "string" }
+                  },
+                  "thresholds": { "type": "object", "additionalProperties": true },
+                  "observed": { "type": "object", "additionalProperties": true }
+                },
+                "additionalProperties": true
+              }
+            },
+            "additionalProperties": true
+          },
           "index_stats": {
             "type": ["object", "null"],
             "additionalProperties": true
@@ -148,6 +199,7 @@
       "properties": {
         "enabled": { "type": "boolean" },
         "candidate_source": { "type": "string" },
+        "sparse_candidate_source": { "type": "string" },
         "retrieval_method": { "type": "string" },
         "aggregate": {
           "type": "object",
@@ -159,19 +211,38 @@
               "items": { "type": "integer" }
             },
             "exact_top1_admission": { "type": "number" },
+            "exact_top1_admitted": { "type": "number" },
             "exact_top1_admission_rate": { "type": "number" },
             "exact_top10_admission_recall": { "type": "number" },
+            "exact_top1_first_budget_admitted": { "type": "object", "additionalProperties": true },
+            "first_budget_admitting_exact_top1": { "type": "object", "additionalProperties": true },
             "admission_by_budget": {
               "type": "object",
               "additionalProperties": {
                 "type": "object",
                 "properties": {
                   "exact_top1_admission": { "type": "number" },
+                  "exact_top1_admitted": { "type": "number" },
                   "exact_top10_admission_recall": { "type": "number" },
                   "latency": { "type": "object", "additionalProperties": true },
                   "docs_scored": { "type": "object", "additionalProperties": true },
                   "graph_edges_visited": { "type": "object", "additionalProperties": true },
-                  "exact_rerank_docs": { "type": "object", "additionalProperties": true }
+                  "exact_rerank_docs": { "type": "object", "additionalProperties": true },
+                  "exact_rerank_tokens_evaluated": { "type": "object", "additionalProperties": true },
+                  "exact_rerank_tokens_skipped": { "type": "object", "additionalProperties": true },
+                  "exact_rerank_pairs_saved": { "type": "object", "additionalProperties": true },
+                  "proxy_candidates": { "type": "object", "additionalProperties": true },
+                  "proxy_exact_rerank_docs": { "type": "object", "additionalProperties": true },
+                  "centroid_lists_visited": { "type": "object", "additionalProperties": true },
+                  "centroid_docs_touched": { "type": "object", "additionalProperties": true },
+                  "centroid_pruned_docs": { "type": "object", "additionalProperties": true },
+                  "centroid_candidates": { "type": "object", "additionalProperties": true },
+                  "quantized_inverted_candidates": { "type": "object", "additionalProperties": true },
+                  "quantized_inverted_postings_touched": { "type": "object", "additionalProperties": true },
+                  "quantized_inverted_docs_scored": { "type": "object", "additionalProperties": true },
+                  "learned_sparse_candidates": { "type": "object", "additionalProperties": true },
+                  "learned_sparse_retained_for_maxsim": { "type": "object", "additionalProperties": true },
+                  "learned_sparse_branch_latency_us": { "type": "object", "additionalProperties": true }
                 },
                 "additionalProperties": true
               }
@@ -185,13 +256,80 @@
             "type": "object",
             "properties": {
               "exact_top1_admission": { "type": "boolean" },
+              "exact_top1_admitted": { "type": "boolean" },
               "exact_top10_admission_recall": { "type": "number" },
+              "exact_top1_rank": { "type": ["integer", "null"] },
+              "admission_inferred_from_result_docs": { "type": "boolean" },
               "latency": { "type": "object", "additionalProperties": true },
               "docs_scored": { "type": "integer" },
               "graph_edges_visited": { "type": "integer" },
               "exact_rerank_docs": { "type": "integer" },
+              "exact_rerank_candidates": { "type": "integer" },
+              "exact_rerank_tokens_evaluated": { "type": "integer" },
+              "exact_rerank_tokens_skipped": { "type": "integer" },
+              "exact_rerank_pairs_saved": { "type": "integer" },
+              "adaptive_rerank_topk_changed_vs_full": { "type": "boolean" },
+              "proxy_encoder_kind": { "type": ["string", "null"] },
+              "proxy_candidates": { "type": "integer" },
+              "proxy_top1_admission": { "type": "boolean" },
+              "proxy_exact_rerank_docs": { "type": "integer" },
+              "centroid_lists_visited": { "type": "integer" },
+              "centroid_docs_touched": { "type": "integer" },
+              "centroid_pruned_docs": { "type": "integer" },
+              "centroid_candidates": { "type": "integer" },
+              "quantized_inverted_lists_visited": { "type": "integer" },
+              "quantized_inverted_postings_touched": { "type": "integer" },
+              "quantized_inverted_docs_scored": { "type": "integer" },
+              "quantized_inverted_candidates": { "type": "integer" },
+              "quantized_inverted_exact_rerank_docs": { "type": "integer" },
+              "quantized_inverted_codebook_size": { "type": "integer" },
+              "learned_sparse_candidates": { "type": "integer" },
+              "learned_sparse_retained_for_maxsim": { "type": "integer" },
+              "learned_sparse_branch_latency_us": { "type": "integer" },
               "doc_graph_storage_kind": { "type": ["string", "null"] },
               "doc_graph_rescore_source": { "type": ["string", "null"] }
+            },
+            "additionalProperties": true
+          }
+        }
+      },
+      "additionalProperties": true
+    },
+    "hybrid_evaluation": {
+      "type": "object",
+      "properties": {
+        "enabled": { "type": "boolean" },
+        "rebuilds_index": { "type": "boolean" },
+        "modes": {
+          "type": "array",
+          "items": { "type": "string" }
+        },
+        "queries": { "type": "integer" },
+        "best_quality_mode": { "type": ["string", "null"] },
+        "best_latency_under_quality_floor_mode": { "type": ["string", "null"] },
+        "recommended_default_profile": {
+          "type": "object",
+          "additionalProperties": true
+        },
+        "profile_recommendations": {
+          "type": "object",
+          "additionalProperties": true
+        },
+        "results": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "properties": {
+              "mode": { "type": "string" },
+              "metrics": { "type": "object", "additionalProperties": { "type": "number" } },
+              "latency": { "type": "object", "additionalProperties": true },
+              "exact_top1_admission_rate": { "type": "number" },
+              "exact_top10_admission_recall": { "type": "number" },
+              "scan_work": { "type": "object", "additionalProperties": true },
+              "admission_inferred_from_result_docs_queries": { "type": "integer" },
+              "candidate_admission_failures": { "type": "object", "additionalProperties": true },
+              "failure_query_count": { "type": "integer" },
+              "top10_by_query": { "type": "object", "additionalProperties": true }
             },
             "additionalProperties": true
           }
