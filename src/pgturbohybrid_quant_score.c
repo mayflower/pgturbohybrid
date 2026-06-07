@@ -2435,6 +2435,46 @@ PgturbohybridGraphInitBuildDistanceCache(PgturbohybridQuantBuildState *state)
 	state->buildDistanceCacheMask = capacity - 1;
 }
 
+static uint64
+PgturbohybridGraphBuildDistanceElapsedUs(instr_time start)
+{
+	instr_time	duration;
+
+	INSTR_TIME_SET_CURRENT(duration);
+	INSTR_TIME_SUBTRACT(duration, start);
+	return (uint64) INSTR_TIME_GET_MICROSEC(duration);
+}
+
+static bool
+PgturbohybridGraphUseExactDocumentBuildDistance(PgturbohybridQuantBuildState *state)
+{
+	return state != NULL &&
+		state->multivectorBuild &&
+		state->multivectorGraphMode ==
+		PGTURBOHYBRID_MULTIVECTOR_GRAPH_DOCUMENT_NODES &&
+		state->multivectorDocBuildScorer ==
+		PGTURBOHYBRID_MULTIVECTOR_DOC_BUILD_SCORER_EXACT_SYMMETRIC &&
+		state->multivectorNodeMap != NULL &&
+		state->multivectorDocVectors != NULL;
+}
+
+static double
+PgturbohybridGraphExactDocumentBuildDistance(PgturbohybridQuantBuildState *state,
+											 const PgturbohybridMultiVector *aDoc,
+											 const PgturbohybridMultiVector *bDoc)
+{
+	instr_time	start;
+	double		distance;
+
+	INSTR_TIME_SET_CURRENT(start);
+	distance = -TqMultiVectorSymmetricMaxSimAverageUnchecked(aDoc, bDoc);
+	state->multivectorDocExactBuildDistanceCalls++;
+	state->multivectorDocExactBuildDistanceUs +=
+		PgturbohybridGraphBuildDistanceElapsedUs(start);
+
+	return distance;
+}
+
 double
 PgturbohybridGraphBuildDistance(PgturbohybridQuantBuildState *state, uint32 a, uint32 b)
 {
@@ -2444,11 +2484,7 @@ PgturbohybridGraphBuildDistance(PgturbohybridQuantBuildState *state, uint32 a, u
 	if (a >= state->nodeCount || b >= state->nodeCount)
 		return DBL_MAX;
 
-	if (state->multivectorBuild &&
-		state->multivectorGraphMode ==
-		PGTURBOHYBRID_MULTIVECTOR_GRAPH_DOCUMENT_NODES &&
-		state->multivectorNodeMap != NULL &&
-		state->multivectorDocVectors != NULL)
+	if (PgturbohybridGraphUseExactDocumentBuildDistance(state))
 	{
 		TqDocId		aDocId = state->multivectorNodeMap[a].docId;
 		TqDocId		bDocId = state->multivectorNodeMap[b].docId;
@@ -2487,7 +2523,8 @@ PgturbohybridGraphBuildDistance(PgturbohybridQuantBuildState *state, uint32 a, u
 			if (entry->valid)
 				state->buildDistanceCacheCollisions++;
 			state->buildDistanceCacheMisses++;
-			distance = -TqMultiVectorSymmetricMaxSimAverageUnchecked(aDoc, bDoc);
+			distance =
+				PgturbohybridGraphExactDocumentBuildDistance(state, aDoc, bDoc);
 			entry->valid = true;
 			entry->key = cacheKey;
 			entry->distance = distance;
@@ -2495,7 +2532,7 @@ PgturbohybridGraphBuildDistance(PgturbohybridQuantBuildState *state, uint32 a, u
 			return distance;
 		}
 
-		return -TqMultiVectorSymmetricMaxSimAverageUnchecked(aDoc, bDoc);
+		return PgturbohybridGraphExactDocumentBuildDistance(state, aDoc, bDoc);
 	}
 
 	/*

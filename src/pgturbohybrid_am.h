@@ -60,6 +60,7 @@ typedef struct PgturbohybridOptions
 	bool		residualRerank;
 	int			residualRerankBytes;
 	int			multivectorGraphMode;
+	int			multivectorDocBuildScorer;
 	int			multivectorTokenPooling;
 	float8		multivectorTokenPoolingTargetRatio;
 	int			multivectorTokenPoolingMinTokens;
@@ -197,8 +198,10 @@ typedef struct PgturbohybridScanStatsSnapshot
 	uint32		multivectorAdaptiveFinalRawTarget;
 	char		multivectorDocMapSource[16];
 	char		multivectorCandidateSource[48];
+	char		multivectorCandidatePath[48];
 	char		multivectorProxyEncoderKind[32];
 	char		multivectorGraphMode[24];
+	uint64		multivectorProxyGraphSearches;
 	bool		multivectorExactTokenScanEnabled;
 	uint64		multivectorExactTokenScanNodesScored;
 	bool		multivectorPlainFallbackUsed;
@@ -265,6 +268,10 @@ typedef struct PgturbohybridScanStatsSnapshot
 	bool		multivectorExactRerankEnabled;
 	uint32		multivectorExactRerankDocs;
 	uint64		multivectorExactRerankPairs;
+	char		multivectorExactRerankSource[16];
+	uint64		multivectorExactRerankHeapFetches;
+	uint64		multivectorExactRerankSidecarReads;
+	uint64		multivectorExactRerankSidecarBytes;
 	uint32		exactRerankCandidates;
 	uint64		exactRerankTokensEvaluated;
 	uint64		exactRerankTokensSkipped;
@@ -362,6 +369,8 @@ extern int	pgturbohybrid_multivector_doc_storage_cache;
 extern int	pgturbohybrid_multivector_exact_rerank;
 extern int	pgturbohybrid_multivector_exact_rerank_k;
 extern int	pgturbohybrid_multivector_proxy_encoder;
+extern bool pgturbohybrid_multivector_allow_exact_symmetric_build;
+extern int	pgturbohybrid_multivector_exact_symmetric_build_max_docs;
 extern int	pgturbohybrid_multivector_max_accumulator_mb;
 extern int	pgturbohybrid_multivector_debug_admission;
 extern int	pgturbohybrid_multivector_debug_trace_limit;

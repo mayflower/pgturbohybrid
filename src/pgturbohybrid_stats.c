@@ -2525,6 +2525,10 @@ pgturbohybrid_last_build_stats(PG_FUNCTION_ARGS)
 								s->buildDistanceExact);
 	PgturbohybridJsonbAddUint64(&state, "build_distance_fallback",
 								s->buildDistanceFallback);
+	PgturbohybridJsonbAddUint64(&state, "multivector_doc_exact_build_distance_calls",
+								s->multivectorDocExactBuildDistanceCalls);
+	PgturbohybridJsonbAddUint64(&state, "multivector_doc_exact_build_distance_us",
+								s->multivectorDocExactBuildDistanceUs);
 	PgturbohybridJsonbAddUint64(&state, "build_distance_cache_hits",
 								s->buildDistanceCacheHits);
 	PgturbohybridJsonbAddUint64(&state, "build_distance_cache_misses",
@@ -2592,6 +2596,9 @@ pgturbohybrid_last_build_stats(PG_FUNCTION_ARGS)
 							  s->parallelEncodeEnabled);
 	PgturbohybridJsonbAddBool(&state, "parallel_edge_build_enabled",
 							  s->parallelEdgeBuildEnabled);
+	PgturbohybridJsonbAddString(&state, "parallel_edge_build_disabled_reason",
+								PgturbohybridParallelEdgeBuildDisabledReasonName(
+									s->parallelEdgeBuildDisabledReason));
 	PgturbohybridJsonbAddInt64(&state, "parallel_edge_segments",
 							   s->parallelEdgeSegments);
 	PgturbohybridJsonbAddInt64(&state, "parallel_edge_workers_launched",
@@ -3223,15 +3230,23 @@ pgturbohybrid_last_scan_stats(PG_FUNCTION_ARGS)
 							   scanStats.multivectorAdaptiveInitialRawTarget);
 	PgturbohybridJsonbAddInt64(&state, "multivector_adaptive_final_raw_target",
 							   scanStats.multivectorAdaptiveFinalRawTarget);
-	if (scanStats.multivectorCandidateSource[0] != '\0')
-		PgturbohybridJsonbAddString(&state, "multivector_candidate_source",
-									scanStats.multivectorCandidateSource);
-	else
-		PgturbohybridJsonbAddString(&state, "multivector_candidate_source",
-									"graph");
-	PgturbohybridJsonbAddString(&state, "proxy_encoder_kind",
-								scanStats.multivectorProxyEncoderKind[0] != '\0' ?
-								scanStats.multivectorProxyEncoderKind : "none");
+		if (scanStats.multivectorCandidateSource[0] != '\0')
+			PgturbohybridJsonbAddString(&state, "multivector_candidate_source",
+										scanStats.multivectorCandidateSource);
+		else
+			PgturbohybridJsonbAddString(&state, "multivector_candidate_source",
+										"graph");
+		if (scanStats.multivectorCandidatePath[0] != '\0')
+			PgturbohybridJsonbAddString(&state, "multivector_candidate_path",
+										scanStats.multivectorCandidatePath);
+		else
+			PgturbohybridJsonbAddString(&state, "multivector_candidate_path",
+										"graph");
+		PgturbohybridJsonbAddUint64(&state, "multivector_proxy_graph_searches",
+									scanStats.multivectorProxyGraphSearches);
+		PgturbohybridJsonbAddString(&state, "proxy_encoder_kind",
+									scanStats.multivectorProxyEncoderKind[0] != '\0' ?
+									scanStats.multivectorProxyEncoderKind : "none");
 	PgturbohybridJsonbAddInt64(&state, "proxy_candidates",
 							   scanStats.proxyCandidates);
 	PgturbohybridJsonbAddBool(&state, "proxy_top1_admission",
@@ -3407,6 +3422,23 @@ pgturbohybrid_last_scan_stats(PG_FUNCTION_ARGS)
 							   scanStats.multivectorExactRerankDocs);
 	PgturbohybridJsonbAddUint64(&state, "multivector_exact_rerank_pairs",
 								scanStats.multivectorExactRerankPairs);
+	if (scanStats.multivectorExactRerankSource[0] != '\0')
+		PgturbohybridJsonbAddString(&state,
+									"multivector_exact_rerank_source",
+									scanStats.multivectorExactRerankSource);
+	else
+		PgturbohybridJsonbAddString(&state,
+									"multivector_exact_rerank_source",
+									"off");
+	PgturbohybridJsonbAddUint64(&state,
+								"multivector_exact_rerank_heap_fetches",
+								scanStats.multivectorExactRerankHeapFetches);
+	PgturbohybridJsonbAddUint64(&state,
+								"multivector_exact_rerank_sidecar_reads",
+								scanStats.multivectorExactRerankSidecarReads);
+	PgturbohybridJsonbAddUint64(&state,
+								"multivector_exact_rerank_sidecar_bytes",
+								scanStats.multivectorExactRerankSidecarBytes);
 	PgturbohybridJsonbAddInt64(&state, "exact_rerank_candidates",
 							   scanStats.exactRerankCandidates);
 	PgturbohybridJsonbAddUint64(&state, "exact_rerank_tokens_evaluated",

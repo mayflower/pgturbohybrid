@@ -416,6 +416,7 @@ DECLARE
 BEGIN
 	stats := turbohybrid_last_scan_stats();
 	IF (stats->>'multivector_subvector_searches')::int <> 2 OR
+		(stats->>'multivector_proxy_graph_searches')::int <> 0 OR
 		(stats->>'multivector_unique_docs')::int <> 2 OR
 		(stats->>'multivector_doc_candidates')::int <> 1 OR
 		stats->>'multivector_admission_debug_enabled' <> 'false' OR
@@ -2137,14 +2138,201 @@ INSERT INTO mv_document_node_docs VALUES
   (2, turbohybrid_multivector(ARRAY['[0,1]'::vector, '[0.2,0.8]'::vector])),
   (3, turbohybrid_multivector(ARRAY['[0.95,0.05]'::vector, '[0,1]'::vector]));
 
+CREATE INDEX mv_document_node_docs_token_nodes_idx ON mv_document_node_docs USING turbohybrid
+  (colbert multivector_cosine_turbohybrid_ops)
+  WITH (multivector_graph = token_nodes);
+
+SELECT turbohybrid_index_stats('mv_document_node_docs_token_nodes_idx'::regclass)->>'multivector_graph_mode'
+  AS token_node_graph_mode,
+       (turbohybrid_index_stats('mv_document_node_docs_token_nodes_idx'::regclass)->>'node_count')::int
+  AS token_node_count;
+
+SET turbohybrid.dense_build_neighbor_select = auto;
+
 CREATE INDEX mv_document_node_docs_idx ON mv_document_node_docs USING turbohybrid
   (colbert multivector_cosine_turbohybrid_ops)
   WITH (multivector_graph = document_nodes, graph_ef_search = 2);
 
+SELECT (turbohybrid_last_build_stats()->>'multivector_doc_exact_build_distance_calls')::bigint
+  AS document_node_exact_build_calls;
+
 SELECT turbohybrid_index_stats('mv_document_node_docs_idx'::regclass)->>'multivector_graph_mode'
   AS document_node_graph_mode,
+       turbohybrid_index_stats('mv_document_node_docs_idx'::regclass)->>'multivector_doc_build_scorer'
+  AS document_node_build_scorer,
+       turbohybrid_index_stats('mv_document_node_docs_idx'::regclass)->>'multivector_proxy_encoder'
+  AS document_node_proxy_encoder,
+       (turbohybrid_index_stats('mv_document_node_docs_idx'::regclass)->>'dimensions')::int
+  AS document_node_proxy_dimensions,
        (turbohybrid_index_stats('mv_document_node_docs_idx'::regclass)->>'node_count')::int
-  AS document_node_count;
+  AS document_node_count,
+       (turbohybrid_index_stats('mv_document_node_docs_idx'::regclass)->>'build_fast_edges')::boolean
+  AS document_node_build_fast_edges,
+       turbohybrid_index_stats('mv_document_node_docs_idx'::regclass)->>'build_neighbor_select_reason'
+  AS document_node_build_neighbor_select_reason;
+
+SET turbohybrid.dense_build_neighbor_select = heuristic;
+
+CREATE INDEX mv_document_node_docs_explicit_heuristic_idx ON mv_document_node_docs USING turbohybrid
+  (colbert multivector_cosine_turbohybrid_ops)
+  WITH (multivector_graph = document_nodes, graph_ef_search = 2);
+
+SELECT turbohybrid_index_stats('mv_document_node_docs_explicit_heuristic_idx'::regclass)->>'build_neighbor_select'
+  AS document_node_explicit_neighbor_select,
+       (turbohybrid_index_stats('mv_document_node_docs_explicit_heuristic_idx'::regclass)->>'build_fast_edges')::boolean
+  AS document_node_explicit_build_fast_edges,
+       turbohybrid_index_stats('mv_document_node_docs_explicit_heuristic_idx'::regclass)->>'build_neighbor_select_reason'
+  AS document_node_explicit_build_neighbor_select_reason;
+
+SET turbohybrid.dense_build_neighbor_select = auto;
+
+CREATE INDEX mv_document_node_docs_exact_symmetric_idx ON mv_document_node_docs USING turbohybrid
+  (colbert multivector_cosine_turbohybrid_ops)
+  WITH (multivector_graph = document_nodes,
+        multivector_doc_build_scorer = exact_symmetric,
+        graph_ef_search = 2);
+
+SELECT (turbohybrid_last_build_stats()->>'multivector_doc_exact_build_distance_calls')::bigint > 0
+  AS exact_document_node_exact_build_calls_positive,
+       (turbohybrid_last_build_stats()->>'multivector_doc_exact_build_distance_us')::bigint >= 0
+  AS exact_document_node_exact_build_us_recorded;
+
+SELECT turbohybrid_index_stats('mv_document_node_docs_exact_symmetric_idx'::regclass)->>'multivector_doc_build_scorer'
+  AS explicit_document_node_build_scorer,
+       turbohybrid_index_stats('mv_document_node_docs_exact_symmetric_idx'::regclass)->>'build_neighbor_select'
+  AS exact_document_node_neighbor_select,
+       (turbohybrid_index_stats('mv_document_node_docs_exact_symmetric_idx'::regclass)->>'build_fast_edges')::boolean
+  AS exact_document_node_build_fast_edges,
+       turbohybrid_index_stats('mv_document_node_docs_exact_symmetric_idx'::regclass)->>'build_neighbor_select_reason'
+  AS exact_document_node_build_neighbor_select_reason;
+
+SET turbohybrid.multivector_exact_symmetric_build_max_docs = 2;
+
+DO $$
+DECLARE
+	err_message text;
+	err_hint text;
+BEGIN
+	BEGIN
+		EXECUTE '
+			CREATE INDEX mv_document_node_docs_exact_symmetric_guard_idx
+			ON mv_document_node_docs USING turbohybrid
+			(colbert multivector_cosine_turbohybrid_ops)
+			WITH (multivector_graph = document_nodes,
+			      multivector_doc_build_scorer = exact_symmetric,
+			      graph_ef_search = 2)';
+		RAISE EXCEPTION 'expected exact_symmetric scale guard to fail';
+	EXCEPTION WHEN feature_not_supported THEN
+		GET STACKED DIAGNOSTICS
+			err_message = MESSAGE_TEXT,
+			err_hint = PG_EXCEPTION_HINT;
+		IF err_message <> 'exact symmetric multivector document graph build is not allowed at this scale' THEN
+			RAISE EXCEPTION 'unexpected exact_symmetric scale guard message: %', err_message;
+		END IF;
+		IF err_hint <> 'Use multivector_doc_build_scorer = proxy for production builds, or set turbohybrid.multivector_allow_exact_symmetric_build = on for diagnostic experiments.' THEN
+			RAISE EXCEPTION 'unexpected exact_symmetric scale guard hint: %', err_hint;
+		END IF;
+	END;
+END
+$$;
+
+CREATE INDEX mv_document_node_docs_proxy_low_threshold_idx ON mv_document_node_docs USING turbohybrid
+  (colbert multivector_cosine_turbohybrid_ops)
+  WITH (multivector_graph = document_nodes,
+        multivector_doc_build_scorer = proxy,
+        graph_ef_search = 2);
+
+RESET turbohybrid.multivector_exact_symmetric_build_max_docs;
+
+SET max_parallel_maintenance_workers = 2;
+SET turbohybrid.native_build_workers = '2';
+SET turbohybrid.native_parallel_edge_build = auto;
+
+CREATE TABLE mv_document_node_parallel_docs (
+  id int PRIMARY KEY,
+  colbert turbohybrid_multivector
+);
+
+INSERT INTO mv_document_node_parallel_docs
+SELECT i,
+       turbohybrid_multivector(ARRAY[
+         ('[' || ((i % 7)::float8 / 7.0)::text || ',' ||
+                 ((i % 11)::float8 / 11.0)::text || ',' ||
+                 ((i % 13)::float8 / 13.0)::text || ']')::vector(3),
+         ('[' || (((i + 3) % 7)::float8 / 7.0)::text || ',' ||
+                 (((i + 5) % 11)::float8 / 11.0)::text || ',' ||
+                 (((i + 7) % 13)::float8 / 13.0)::text || ']')::vector(3)
+       ])
+FROM generate_series(1, 200) AS i;
+
+CREATE INDEX mv_document_node_parallel_proxy_idx ON mv_document_node_parallel_docs USING turbohybrid
+  (colbert multivector_cosine_turbohybrid_ops)
+  WITH (multivector_graph = document_nodes, exact_storage = off, graph_ef_search = 2);
+
+DO $$
+DECLARE
+	stats jsonb;
+BEGIN
+	stats := turbohybrid_last_build_stats();
+	IF stats->>'relation_name' <> 'mv_document_node_parallel_proxy_idx' OR
+		(stats->>'node_count')::int <> 200 OR
+		turbohybrid_index_stats('mv_document_node_parallel_proxy_idx'::regclass)->>'multivector_doc_build_scorer' <> 'proxy' OR
+		(stats->>'native_build_workers_requested')::int <> 2 OR
+		(stats->>'parallel_scan_enabled')::boolean IS DISTINCT FROM false OR
+		(stats->>'parallel_encode_enabled')::boolean IS DISTINCT FROM false THEN
+		RAISE EXCEPTION 'unexpected document-node proxy worker stats: %', stats;
+	END IF;
+
+	IF (stats->>'parallel_edge_build_enabled')::boolean THEN
+		IF stats->>'parallel_edge_build_disabled_reason' <> 'none' OR
+			(stats->>'parallel_edge_workers_launched')::int < 1 THEN
+			RAISE EXCEPTION 'unexpected enabled document-node proxy edge stats: %', stats;
+		END IF;
+	ELSE
+		IF stats->>'parallel_edge_build_disabled_reason' = 'none' THEN
+			RAISE EXCEPTION 'missing document-node proxy edge disable reason: %', stats;
+		END IF;
+	END IF;
+END
+$$;
+
+CREATE INDEX mv_document_node_parallel_exact_idx ON mv_document_node_docs USING turbohybrid
+  (colbert multivector_cosine_turbohybrid_ops)
+  WITH (multivector_graph = document_nodes,
+        multivector_doc_build_scorer = exact_symmetric,
+        exact_storage = off,
+        graph_ef_search = 2);
+
+SELECT turbohybrid_last_build_stats()->>'parallel_edge_build_disabled_reason'
+  AS exact_document_node_parallel_disabled_reason;
+
+CREATE INDEX mv_document_node_parallel_token_idx ON mv_document_node_docs USING turbohybrid
+  (colbert multivector_cosine_turbohybrid_ops)
+  WITH (multivector_graph = token_nodes, exact_storage = off);
+
+SELECT turbohybrid_last_build_stats()->>'parallel_edge_build_disabled_reason'
+  AS token_node_parallel_disabled_reason;
+
+RESET turbohybrid.native_parallel_edge_build;
+RESET turbohybrid.native_build_workers;
+RESET max_parallel_maintenance_workers;
+DROP TABLE mv_document_node_parallel_docs;
+
+DO $$
+BEGIN
+	BEGIN
+		EXECUTE '
+			CREATE INDEX mv_document_node_docs_bad_build_scorer_idx
+			ON mv_document_node_docs USING turbohybrid
+			(colbert multivector_cosine_turbohybrid_ops)
+			WITH (multivector_graph = document_nodes,
+			      multivector_doc_build_scorer = nope)';
+		RAISE EXCEPTION 'expected invalid multivector_doc_build_scorer to fail';
+	EXCEPTION WHEN invalid_parameter_value THEN
+		NULL;
+	END;
+END
+$$;
 
 SET enable_seqscan = off;
 SET turbohybrid.multivector_plain_fallback = off;
@@ -2162,17 +2350,72 @@ DECLARE
 	stats jsonb;
 BEGIN
 	stats := turbohybrid_last_scan_stats();
-		IF stats->>'multivector_graph_mode' <> 'document_nodes' OR
-			stats->>'multivector_docmap_source' <> 'sidecar' OR
-			(stats->>'multivector_doc_graph_nodes')::int <> 3 OR
-			(stats->>'multivector_doc_graph_search_ef')::int <> 2 OR
-			(stats->>'multivector_doc_graph_candidates')::int <> 2 OR
-			(stats->>'multivector_doc_graph_quantized_scores')::int <> 0 OR
-			(stats->>'multivector_doc_graph_exact_rerank_docs')::int <> 2 OR
-			stats->>'multivector_doc_graph_warning' <> 'document_node_f32_sidecar_graph_traversal' THEN
-			RAISE EXCEPTION 'expected document-node graph scan stats, got %',
-				stats;
-		END IF;
+	IF stats->>'multivector_graph_mode' <> 'document_nodes' OR
+		stats->>'multivector_candidate_source' <> 'graph' OR
+		stats->>'multivector_candidate_path' <> 'proxy_graph' OR
+		stats->>'multivector_docmap_source' <> 'sidecar' OR
+		(stats->>'multivector_proxy_graph_searches')::int <> 1 OR
+		(stats->>'multivector_subvector_searches')::int <> 0 OR
+		(stats->>'multivector_doc_graph_nodes')::int <> 3 OR
+		(stats->>'multivector_doc_graph_search_ef')::int <> 2 OR
+		(stats->>'multivector_doc_graph_candidates')::int <> 3 OR
+		(stats->>'multivector_doc_graph_quantized_scores')::int <> 0 OR
+		(stats->>'multivector_doc_graph_exact_rerank_docs')::int <> 3 OR
+		stats->>'multivector_doc_graph_rescore_source' <> 'sidecar' OR
+		stats->>'multivector_exact_rerank_source' <> 'sidecar' OR
+		(stats->>'multivector_doc_graph_heap_fetches')::int <> 0 OR
+		(stats->>'multivector_exact_rerank_heap_fetches')::int <> 0 OR
+		stats->>'multivector_doc_graph_warning' <>
+			'document_node_proxy_vector_graph_traversal' THEN
+		RAISE EXCEPTION 'expected document-node proxy graph scan stats, got %',
+			stats;
+	END IF;
+END
+$$;
+
+DO $$
+DECLARE
+	q turbohybrid_multivector := turbohybrid_multivector(ARRAY[
+		'[1,0]'::vector,
+		'[0,1]'::vector
+	]);
+	index_ids int[];
+	brute_ids int[];
+	result_count int;
+	distinct_count int;
+BEGIN
+	PERFORM set_config('turbohybrid.multivector_doc_graph_search_ef', '3', true);
+	SELECT array_agg(id ORDER BY id), count(*), count(DISTINCT id)
+	INTO index_ids, result_count, distinct_count
+	FROM (
+		SELECT id
+		FROM mv_document_node_docs
+		ORDER BY colbert <~> turbohybrid_query(
+			multivector_query => q,
+			dense_k => 3,
+			final_k => 3
+		)
+		LIMIT 3
+	) s;
+
+	SELECT array_agg(id ORDER BY id)
+	INTO brute_ids
+	FROM (
+		SELECT id
+		FROM mv_document_node_docs
+		ORDER BY turbohybrid_multivector_maxsim_distance(q, colbert), id
+		LIMIT 3
+	) s;
+
+	IF result_count <> distinct_count THEN
+		RAISE EXCEPTION 'document-node proxy graph returned duplicate docs: %',
+			index_ids;
+	END IF;
+	IF index_ids <> brute_ids THEN
+		RAISE EXCEPTION 'document-node proxy graph rerank disagrees with brute force, index %, brute %',
+			index_ids, brute_ids;
+	END IF;
+	PERFORM set_config('turbohybrid.multivector_doc_graph_search_ef', '0', true);
 END
 $$;
 
@@ -2192,10 +2435,20 @@ DECLARE
 BEGIN
 	stats := turbohybrid_last_scan_stats();
 	IF stats->>'multivector_graph_mode' <> 'document_nodes' OR
-		stats->>'multivector_doc_graph_warning' <> 'document_node_f32_sidecar_graph_traversal' OR
+		stats->>'multivector_candidate_path' <> 'proxy_graph' OR
+		stats->>'multivector_doc_graph_warning' <>
+			'document_node_proxy_vector_graph_traversal' OR
+		(stats->>'multivector_proxy_graph_searches')::int <> 1 OR
+		(stats->>'multivector_subvector_searches')::int <> 0 OR
 		(stats->>'multivector_doc_graph_nodes')::int <> 3 OR
 		(stats->>'multivector_doc_graph_candidates')::int < 1 OR
-		(stats->>'multivector_doc_graph_exact_rerank_docs')::int < 1 THEN
+		(stats->>'multivector_doc_graph_exact_rerank_docs')::int < 1 OR
+		stats->>'multivector_doc_graph_rescore_source' <> 'sidecar' OR
+		stats->>'multivector_exact_rerank_source' <> 'sidecar' OR
+		(stats->>'multivector_doc_graph_heap_fetches')::int <> 0 OR
+		(stats->>'multivector_exact_rerank_heap_fetches')::int <> 0 OR
+		(stats->>'multivector_exact_rerank_sidecar_reads')::int < 1 OR
+		(stats->>'multivector_exact_rerank_sidecar_bytes')::int < 1 THEN
 		RAISE EXCEPTION 'expected non-exhaustive document-node graph traversal stats, got %',
 			stats;
 	END IF;

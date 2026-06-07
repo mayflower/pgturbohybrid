@@ -76,9 +76,10 @@ BEGIN
 		'turbohybrid.linear_fallback_notice_threshold_ratio',
 		'turbohybrid.max_union_candidates',
 		'turbohybrid.multivector_adaptive_widening',
-			'turbohybrid.multivector_bm25_candidate_injection',
-			'turbohybrid.multivector_branch_plan',
-			'turbohybrid.multivector_candidate_reservoirs',
+		'turbohybrid.multivector_allow_exact_symmetric_build',
+		'turbohybrid.multivector_bm25_candidate_injection',
+		'turbohybrid.multivector_branch_plan',
+		'turbohybrid.multivector_candidate_reservoirs',
 			'turbohybrid.multivector_candidate_source',
 		'turbohybrid.multivector_coverage_reservoir_k',
 		'turbohybrid.multivector_debug_admission',
@@ -93,6 +94,7 @@ BEGIN
 		'turbohybrid.multivector_docmap',
 		'turbohybrid.multivector_exact_rerank',
 		'turbohybrid.multivector_exact_rerank_k',
+		'turbohybrid.multivector_exact_symmetric_build_max_docs',
 		'turbohybrid.multivector_max_accumulator_mb',
 		'turbohybrid.multivector_max_dim',
 		'turbohybrid.multivector_max_doc_vectors',
@@ -160,13 +162,15 @@ BEGIN
 		current_setting('turbohybrid.multivector_doc_storage_cache') != 'auto' OR
 		current_setting('turbohybrid.multivector_exact_rerank') != 'adaptive' OR
 		current_setting('turbohybrid.multivector_exact_rerank_k') != '100' OR
+		current_setting('turbohybrid.multivector_allow_exact_symmetric_build') != 'off' OR
+		current_setting('turbohybrid.multivector_exact_symmetric_build_max_docs') != '1000' OR
 		current_setting('turbohybrid.multivector_model_name') != '' OR
-		current_setting('turbohybrid.multivector_proxy_encoder') != 'mean_pool' OR
+		current_setting('turbohybrid.multivector_proxy_encoder') != 'normalized_mean' OR
 		current_setting('turbohybrid.multivector_max_accumulator_mb') != '64' OR
 		current_setting('turbohybrid.multivector_debug_admission') != 'off' OR
 		current_setting('turbohybrid.multivector_debug_skip_query_tokens') != '' OR
 		current_setting('turbohybrid.multivector_debug_trace_limit') != '1000' THEN
-			RAISE EXCEPTION 'unexpected multivector defaults: doc %, query %, subvector %, unique %, raw %, adaptive %, branch_plan %, source %, bm25_injection %, sparse_source %, reservoirs %, coverage_reservoir_k %, fallback %, fallback_fraction %, fallback_max_docs %, per_token_reservoir_k %, docmap %, docs %, doc_graph_search_ef %, doc_graph_oversampling %, doc_graph_rescore_k %, doc_storage %, doc_storage_cache %, rerank %, rerank_k %, model %, proxy_encoder %, accumulator_mb %, debug %, skip_tokens %, trace_limit %',
+			RAISE EXCEPTION 'unexpected multivector defaults: doc %, query %, subvector %, unique %, raw %, adaptive %, branch_plan %, source %, bm25_injection %, sparse_source %, reservoirs %, coverage_reservoir_k %, fallback %, fallback_fraction %, fallback_max_docs %, per_token_reservoir_k %, docmap %, docs %, doc_graph_search_ef %, doc_graph_oversampling %, doc_graph_rescore_k %, doc_storage %, doc_storage_cache %, rerank %, rerank_k %, allow_exact_symmetric_build %, exact_symmetric_build_max_docs %, model %, proxy_encoder %, accumulator_mb %, debug %, skip_tokens %, trace_limit %',
 				current_setting('turbohybrid.multivector_max_doc_vectors'),
 			current_setting('turbohybrid.multivector_max_query_vectors'),
 			current_setting('turbohybrid.multivector_subvector_k'),
@@ -192,6 +196,8 @@ BEGIN
 			current_setting('turbohybrid.multivector_doc_storage_cache'),
 			current_setting('turbohybrid.multivector_exact_rerank'),
 			current_setting('turbohybrid.multivector_exact_rerank_k'),
+			current_setting('turbohybrid.multivector_allow_exact_symmetric_build'),
+			current_setting('turbohybrid.multivector_exact_symmetric_build_max_docs'),
 			current_setting('turbohybrid.multivector_model_name'),
 			current_setting('turbohybrid.multivector_proxy_encoder'),
 			current_setting('turbohybrid.multivector_max_accumulator_mb'),
@@ -293,6 +299,12 @@ SET turbohybrid.native_parallel_edge_build = off;
 SET turbohybrid.native_parallel_edge_build = on;
 SET turbohybrid.native_parallel_edge_build = auto;
 RESET turbohybrid.native_parallel_edge_build;
+SET turbohybrid.multivector_allow_exact_symmetric_build = on;
+SET turbohybrid.multivector_allow_exact_symmetric_build = off;
+RESET turbohybrid.multivector_allow_exact_symmetric_build;
+SET turbohybrid.multivector_exact_symmetric_build_max_docs = 0;
+SET turbohybrid.multivector_exact_symmetric_build_max_docs = 1000;
+RESET turbohybrid.multivector_exact_symmetric_build_max_docs;
 SET turbohybrid.payload_entry_seeding = off;
 SET turbohybrid.payload_entry_seeding = on;
 SET turbohybrid.payload_entry_seeding = auto;

@@ -110,6 +110,19 @@ typedef Pointer Item;
 #define PGTURBOHYBRID_MULTIVECTOR_GRAPH_DOCUMENT_NODES	1
 #define PGTURBOHYBRID_DEFAULT_MULTIVECTOR_GRAPH_MODE \
 	PGTURBOHYBRID_MULTIVECTOR_GRAPH_TOKEN_NODES
+typedef enum PgturbohybridMultiVectorDocBuildScorer
+{
+	PGTURBOHYBRID_MULTIVECTOR_DOC_BUILD_SCORER_PROXY = 0,
+	PGTURBOHYBRID_MULTIVECTOR_DOC_BUILD_SCORER_EXACT_SYMMETRIC = 1
+}			PgturbohybridMultiVectorDocBuildScorer;
+#define PGTURBOHYBRID_DEFAULT_MULTIVECTOR_DOC_BUILD_SCORER \
+	PGTURBOHYBRID_MULTIVECTOR_DOC_BUILD_SCORER_PROXY
+typedef enum PgturbohybridMultiVectorRerankSource
+{
+	PGTURBOHYBRID_MULTIVECTOR_RERANK_SOURCE_OFF = 0,
+	PGTURBOHYBRID_MULTIVECTOR_RERANK_SOURCE_SIDECAR = 1,
+	PGTURBOHYBRID_MULTIVECTOR_RERANK_SOURCE_HEAP = 2
+}			PgturbohybridMultiVectorRerankSource;
 #define PGTURBOHYBRID_GRAPH_PAGE_KIND_GRAPH			1
 #define PGTURBOHYBRID_GRAPH_PAGE_KIND_META				2
 #define PGTURBOHYBRID_GRAPH_PAGE_KIND_QUANT_CODE			3
@@ -348,6 +361,21 @@ typedef enum PgturbohybridNativeParallelEdgeBuildMode
 	PGTURBOHYBRID_NATIVE_PARALLEL_EDGE_BUILD_ON
 }			PgturbohybridNativeParallelEdgeBuildMode;
 
+typedef enum PgturbohybridParallelEdgeBuildDisabledReason
+{
+	PGTURBOHYBRID_PARALLEL_EDGE_BUILD_DISABLED_REASON_NONE = 0,
+	PGTURBOHYBRID_PARALLEL_EDGE_BUILD_DISABLED_REASON_NO_WORKERS_REQUESTED,
+	PGTURBOHYBRID_PARALLEL_EDGE_BUILD_DISABLED_REASON_TOKEN_NODES_UNSAFE,
+	PGTURBOHYBRID_PARALLEL_EDGE_BUILD_DISABLED_REASON_EXACT_DOCUMENT_MAXSIM_BUILD,
+	PGTURBOHYBRID_PARALLEL_EDGE_BUILD_DISABLED_REASON_REQUIRES_FULL_MULTIVECTOR_SIDECAR,
+	PGTURBOHYBRID_PARALLEL_EDGE_BUILD_DISABLED_REASON_NOT_CODE_ONLY,
+	PGTURBOHYBRID_PARALLEL_EDGE_BUILD_DISABLED_REASON_PARALLEL_EDGE_GUC_OFF,
+	PGTURBOHYBRID_PARALLEL_EDGE_BUILD_DISABLED_REASON_SEGMENTED_GRAPH,
+	PGTURBOHYBRID_PARALLEL_EDGE_BUILD_DISABLED_REASON_INVALID_GRAPH_STATE,
+	PGTURBOHYBRID_PARALLEL_EDGE_BUILD_DISABLED_REASON_TOO_FEW_SEGMENTS,
+	PGTURBOHYBRID_PARALLEL_EDGE_BUILD_DISABLED_REASON_WORKER_LAUNCH_FAILED
+}			PgturbohybridParallelEdgeBuildDisabledReason;
+
 typedef enum PgturbohybridBuildNeighborSelectReason
 {
 	PGTURBOHYBRID_BUILD_NEIGHBOR_SELECT_REASON_UNKNOWN = 0,
@@ -357,7 +385,8 @@ typedef enum PgturbohybridBuildNeighborSelectReason
 	PGTURBOHYBRID_BUILD_NEIGHBOR_SELECT_REASON_AUTO_BALANCED,
 	PGTURBOHYBRID_BUILD_NEIGHBOR_SELECT_REASON_AUTO_QUALITY,
 	PGTURBOHYBRID_BUILD_NEIGHBOR_SELECT_REASON_AUTO_MATCHED_RECALL,
-	PGTURBOHYBRID_BUILD_NEIGHBOR_SELECT_REASON_AUTO_LATENCY_HIGHDIM
+	PGTURBOHYBRID_BUILD_NEIGHBOR_SELECT_REASON_AUTO_LATENCY_HIGHDIM,
+	PGTURBOHYBRID_BUILD_NEIGHBOR_SELECT_REASON_AUTO_MULTIVECTOR_DOCUMENT_PROXY
 }			PgturbohybridBuildNeighborSelectReason;
 
 typedef enum PgturbohybridDenseBudgetPolicy
@@ -716,6 +745,7 @@ typedef struct TqOptions
 	bool		residualRerank; /* residual_rerank: store tiny per-vector sketches for final-band reranking. */
 	int			residualRerankBytes;
 	int			multivectorGraphMode;	/* multivector_graph: token_nodes or document_nodes */
+	int			multivectorDocBuildScorer;	/* multivector_doc_build_scorer */
 	int			multivectorTokenPooling;	/* multivector_token_pooling: off, kmeans, or greedy_cosine */
 	double		multivectorTokenPoolingTargetRatio;
 	int			multivectorTokenPoolingMinTokens;
@@ -1449,6 +1479,8 @@ typedef struct PgturbohybridNativeBuildStatsSnapshot
 	uint64		buildDistanceCodeCode;
 	uint64		buildDistanceExact;
 	uint64		buildDistanceFallback;
+	uint64		multivectorDocExactBuildDistanceCalls;
+	uint64		multivectorDocExactBuildDistanceUs;
 	uint64		buildDistanceCacheHits;
 	uint64		buildDistanceCacheMisses;
 	uint64		buildDistanceCacheStores;
@@ -1485,6 +1517,7 @@ typedef struct PgturbohybridNativeBuildStatsSnapshot
 	bool		parallelScanEnabled;
 	bool		parallelEncodeEnabled;
 	bool		parallelEdgeBuildEnabled;
+	int			parallelEdgeBuildDisabledReason;
 	uint32		parallelEdgeSegments;
 	uint32		parallelEdgeWorkersLaunched;
 	uint64		parallelEdgeRepairUs;
@@ -1502,6 +1535,9 @@ const char *PgturbohybridGraphTqSimdForceName(int force);
 const char *PgturbohybridGraphTqExactSimdForceName(int force);
 const char *PgturbohybridGraphStorageKindName(int storageKind);
 const char *PgturbohybridMultiVectorGraphModeName(int mode);
+const char *PgturbohybridMultiVectorDocBuildScorerName(int scorer);
+const char *PgturbohybridMultiVectorRerankSourceName(int source);
+const char *PgturbohybridParallelEdgeBuildDisabledReasonName(int reason);
 const char *PgturbohybridGraphDenseResidualRerankModeName(int mode);
 int			PgturbohybridGraphGetTqBits(Relation index);
 bool		PgturbohybridGraphGetTqWeightedOption(Relation index);
@@ -1515,6 +1551,7 @@ bool		PgturbohybridGraphGetBackboneOption(Relation index);
 bool		PgturbohybridGraphGetResidualRerankOption(Relation index);
 int			PgturbohybridGraphGetResidualRerankBytes(Relation index);
 int			PgturbohybridGraphGetMultiVectorGraphModeOption(Relation index);
+int			PgturbohybridGraphGetMultiVectorDocBuildScorerOption(Relation index);
 int			PgturbohybridGraphGetMultiVectorTokenPoolingOption(Relation index);
 double		PgturbohybridGraphGetMultiVectorTokenPoolingTargetRatio(Relation index);
 int			PgturbohybridGraphGetMultiVectorTokenPoolingMinTokens(Relation index);

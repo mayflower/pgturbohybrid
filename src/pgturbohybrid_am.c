@@ -160,7 +160,9 @@ int			pgturbohybrid_multivector_exact_rerank =
 	PGTURBOHYBRID_MULTIVECTOR_EXACT_RERANK_ADAPTIVE;
 int			pgturbohybrid_multivector_exact_rerank_k = 100;
 int			pgturbohybrid_multivector_proxy_encoder =
-	PGTURBOHYBRID_MULTIVECTOR_PROXY_ENCODER_MEAN_POOL;
+	PGTURBOHYBRID_DEFAULT_MULTIVECTOR_PROXY_ENCODER;
+bool		pgturbohybrid_multivector_allow_exact_symmetric_build = false;
+int			pgturbohybrid_multivector_exact_symmetric_build_max_docs = 1000;
 int			pgturbohybrid_multivector_max_accumulator_mb = 64;
 int			pgturbohybrid_multivector_debug_admission =
 	PGTURBOHYBRID_MULTIVECTOR_DEBUG_ADMISSION_OFF;
@@ -373,7 +375,11 @@ static const struct config_enum_entry pgturbohybrid_multivector_exact_rerank_opt
 };
 
 static const struct config_enum_entry pgturbohybrid_multivector_proxy_encoder_options[] = {
-	{"mean_pool", PGTURBOHYBRID_MULTIVECTOR_PROXY_ENCODER_MEAN_POOL, false},
+	{"mean", PGTURBOHYBRID_MULTIVECTOR_PROXY_ENCODER_MEAN, false},
+	{"normalized_mean", PGTURBOHYBRID_MULTIVECTOR_PROXY_ENCODER_NORMALIZED_MEAN, false},
+	{"first_token", PGTURBOHYBRID_MULTIVECTOR_PROXY_ENCODER_FIRST_TOKEN, false},
+	{"max_abs_mean", PGTURBOHYBRID_MULTIVECTOR_PROXY_ENCODER_MAX_ABS_MEAN, false},
+	{"mean_pool", PGTURBOHYBRID_MULTIVECTOR_PROXY_ENCODER_MEAN, false},
 	{"max_pool", PGTURBOHYBRID_MULTIVECTOR_PROXY_ENCODER_MAX_POOL, false},
 	{"random_projection_fde", PGTURBOHYBRID_MULTIVECTOR_PROXY_ENCODER_RANDOM_PROJECTION_FDE, false},
 	{"learned_projection_placeholder", PGTURBOHYBRID_MULTIVECTOR_PROXY_ENCODER_LEARNED_PROJECTION_PLACEHOLDER, false},
@@ -519,6 +525,12 @@ static relopt_enum_elt_def pgturbohybrid_multivector_graph_relopt_options[] = {
 	{NULL, 0}
 };
 
+static relopt_enum_elt_def pgturbohybrid_multivector_doc_build_scorer_relopt_options[] = {
+	{"proxy", PGTURBOHYBRID_MULTIVECTOR_DOC_BUILD_SCORER_PROXY},
+	{"exact_symmetric", PGTURBOHYBRID_MULTIVECTOR_DOC_BUILD_SCORER_EXACT_SYMMETRIC},
+	{NULL, 0}
+};
+
 static relopt_enum_elt_def pgturbohybrid_multivector_token_pooling_relopt_options[] = {
 	{"off", PGTURBOHYBRID_MULTIVECTOR_TOKEN_POOLING_OFF},
 	{"kmeans", PGTURBOHYBRID_MULTIVECTOR_TOKEN_POOLING_KMEANS},
@@ -533,7 +545,11 @@ static relopt_enum_elt_def pgturbohybrid_multivector_centroids_relopt_options[] 
 };
 
 static relopt_enum_elt_def pgturbohybrid_multivector_proxy_encoder_relopt_options[] = {
-	{"mean_pool", PGTURBOHYBRID_MULTIVECTOR_PROXY_ENCODER_MEAN_POOL},
+	{"mean", PGTURBOHYBRID_MULTIVECTOR_PROXY_ENCODER_MEAN},
+	{"normalized_mean", PGTURBOHYBRID_MULTIVECTOR_PROXY_ENCODER_NORMALIZED_MEAN},
+	{"first_token", PGTURBOHYBRID_MULTIVECTOR_PROXY_ENCODER_FIRST_TOKEN},
+	{"max_abs_mean", PGTURBOHYBRID_MULTIVECTOR_PROXY_ENCODER_MAX_ABS_MEAN},
+	{"mean_pool", PGTURBOHYBRID_MULTIVECTOR_PROXY_ENCODER_MEAN},
 	{"max_pool", PGTURBOHYBRID_MULTIVECTOR_PROXY_ENCODER_MAX_POOL},
 	{"random_projection_fde", PGTURBOHYBRID_MULTIVECTOR_PROXY_ENCODER_RANDOM_PROJECTION_FDE},
 	{"learned_projection_placeholder", PGTURBOHYBRID_MULTIVECTOR_PROXY_ENCODER_LEARNED_PROJECTION_PLACEHOLDER},
@@ -1268,8 +1284,10 @@ typedef struct PgturbohybridLastScanStats
 	uint32		multivectorAdaptiveFinalRawTarget;
 	char		multivectorDocMapSource[16];
 	char		multivectorCandidateSource[48];
+	char		multivectorCandidatePath[48];
 	char		multivectorProxyEncoderKind[32];
 	char		multivectorGraphMode[24];
+	uint64		multivectorProxyGraphSearches;
 	bool		multivectorExactTokenScanEnabled;
 	uint64		multivectorExactTokenScanNodesScored;
 	bool		multivectorPlainFallbackUsed;
@@ -1334,6 +1352,10 @@ typedef struct PgturbohybridLastScanStats
 	bool		multivectorExactRerankEnabled;
 	uint32		multivectorExactRerankDocs;
 	uint64		multivectorExactRerankPairs;
+	char		multivectorExactRerankSource[16];
+	uint64		multivectorExactRerankHeapFetches;
+	uint64		multivectorExactRerankSidecarReads;
+	uint64		multivectorExactRerankSidecarBytes;
 	uint32		exactRerankCandidates;
 	uint64		exactRerankTokensEvaluated;
 	uint64		exactRerankTokensSkipped;
@@ -1641,12 +1663,17 @@ PgturbohybridGetLastScanStatsSnapshot(PgturbohybridScanStatsSnapshot *stats)
 	strlcpy(stats->multivectorCandidateSource,
 			pgturbohybrid_last_scan_state.multivectorCandidateSource,
 			sizeof(stats->multivectorCandidateSource));
+	strlcpy(stats->multivectorCandidatePath,
+			pgturbohybrid_last_scan_state.multivectorCandidatePath,
+			sizeof(stats->multivectorCandidatePath));
 	strlcpy(stats->multivectorProxyEncoderKind,
 			pgturbohybrid_last_scan_state.multivectorProxyEncoderKind,
 			sizeof(stats->multivectorProxyEncoderKind));
 	strlcpy(stats->multivectorGraphMode,
 			pgturbohybrid_last_scan_state.multivectorGraphMode,
 			sizeof(stats->multivectorGraphMode));
+	stats->multivectorProxyGraphSearches =
+		pgturbohybrid_last_scan_state.multivectorProxyGraphSearches;
 	stats->multivectorExactTokenScanEnabled =
 		pgturbohybrid_last_scan_state.multivectorExactTokenScanEnabled;
 	stats->multivectorExactTokenScanNodesScored =
@@ -1780,6 +1807,15 @@ PgturbohybridGetLastScanStatsSnapshot(PgturbohybridScanStatsSnapshot *stats)
 		pgturbohybrid_last_scan_state.multivectorExactRerankDocs;
 	stats->multivectorExactRerankPairs =
 		pgturbohybrid_last_scan_state.multivectorExactRerankPairs;
+	strlcpy(stats->multivectorExactRerankSource,
+			pgturbohybrid_last_scan_state.multivectorExactRerankSource,
+			sizeof(stats->multivectorExactRerankSource));
+	stats->multivectorExactRerankHeapFetches =
+		pgturbohybrid_last_scan_state.multivectorExactRerankHeapFetches;
+	stats->multivectorExactRerankSidecarReads =
+		pgturbohybrid_last_scan_state.multivectorExactRerankSidecarReads;
+	stats->multivectorExactRerankSidecarBytes =
+		pgturbohybrid_last_scan_state.multivectorExactRerankSidecarBytes;
 	stats->exactRerankCandidates =
 		pgturbohybrid_last_scan_state.exactRerankCandidates;
 	stats->exactRerankTokensEvaluated =
@@ -5534,12 +5570,17 @@ PgturbohybridCollectScanResults(IndexScanDesc scan, PgturbohybridScanState *stat
 	strlcpy(lastStats.multivectorCandidateSource,
 			denseStats.multivectorCandidateSource,
 			sizeof(lastStats.multivectorCandidateSource));
+	strlcpy(lastStats.multivectorCandidatePath,
+			denseStats.multivectorCandidatePath,
+			sizeof(lastStats.multivectorCandidatePath));
 	strlcpy(lastStats.multivectorProxyEncoderKind,
 			denseStats.multivectorProxyEncoderKind,
 			sizeof(lastStats.multivectorProxyEncoderKind));
 	strlcpy(lastStats.multivectorGraphMode,
 			denseStats.multivectorGraphMode,
 			sizeof(lastStats.multivectorGraphMode));
+	lastStats.multivectorProxyGraphSearches =
+		denseStats.multivectorProxyGraphSearches;
 	lastStats.multivectorExactTokenScanEnabled =
 		denseStats.multivectorExactTokenScanEnabled;
 	lastStats.multivectorExactTokenScanNodesScored =
@@ -5679,6 +5720,16 @@ PgturbohybridCollectScanResults(IndexScanDesc scan, PgturbohybridScanState *stat
 		denseStats.multivectorExactRerankDocs;
 	lastStats.multivectorExactRerankPairs =
 		denseStats.multivectorExactRerankPairs;
+	strlcpy(lastStats.multivectorExactRerankSource,
+			PgturbohybridMultiVectorRerankSourceName(
+				denseStats.multivectorExactRerankSource),
+			sizeof(lastStats.multivectorExactRerankSource));
+	lastStats.multivectorExactRerankHeapFetches =
+		denseStats.multivectorExactRerankHeapFetches;
+	lastStats.multivectorExactRerankSidecarReads =
+		denseStats.multivectorExactRerankSidecarReads;
+	lastStats.multivectorExactRerankSidecarBytes =
+		denseStats.multivectorExactRerankSidecarBytes;
 	lastStats.exactRerankCandidates = denseStats.exactRerankCandidates;
 	lastStats.exactRerankTokensEvaluated =
 		denseStats.exactRerankTokensEvaluated;
@@ -6651,6 +6702,7 @@ pgturbohybridamoptions(Datum reloptions, bool validate)
 		PGTURBOHYBRID_RELOPT_PARSE("residual_rerank", RELOPT_TYPE_BOOL, residualRerank),
 		PGTURBOHYBRID_RELOPT_PARSE("residual_rerank_bytes", RELOPT_TYPE_INT, residualRerankBytes),
 		PGTURBOHYBRID_RELOPT_PARSE("multivector_graph", RELOPT_TYPE_ENUM, multivectorGraphMode),
+		PGTURBOHYBRID_RELOPT_PARSE("multivector_doc_build_scorer", RELOPT_TYPE_ENUM, multivectorDocBuildScorer),
 		PGTURBOHYBRID_RELOPT_PARSE("multivector_token_pooling", RELOPT_TYPE_ENUM, multivectorTokenPooling),
 		PGTURBOHYBRID_RELOPT_PARSE("multivector_token_pooling_target_ratio", RELOPT_TYPE_REAL, multivectorTokenPoolingTargetRatio),
 		PGTURBOHYBRID_RELOPT_PARSE("multivector_token_pooling_min_tokens", RELOPT_TYPE_INT, multivectorTokenPoolingMinTokens),
@@ -6789,6 +6841,12 @@ PgturbohybridInit(void)
 					   PGTURBOHYBRID_DEFAULT_MULTIVECTOR_GRAPH_MODE,
 					   "Valid values are \"token_nodes\" and \"document_nodes\". \"document_nodes\" stores one graph node per heap document with a versioned document multivector sidecar for MaxSim-aligned candidate generation.",
 					   AccessExclusiveLock);
+	add_enum_reloption(pgturbohybrid_relopt_kind, "multivector_doc_build_scorer",
+					   "Document-node multivector graph build distance scorer.",
+					   pgturbohybrid_multivector_doc_build_scorer_relopt_options,
+					   PGTURBOHYBRID_DEFAULT_MULTIVECTOR_DOC_BUILD_SCORER,
+					   "Valid values are \"proxy\" and \"exact_symmetric\". Only meaningful with multivector_graph = document_nodes.",
+					   AccessExclusiveLock);
 	add_enum_reloption(pgturbohybrid_relopt_kind, "multivector_token_pooling",
 					   "Index-time document-token pooling mode for multivector document_nodes indexes.",
 					   pgturbohybrid_multivector_token_pooling_relopt_options,
@@ -6818,8 +6876,8 @@ PgturbohybridInit(void)
 	add_enum_reloption(pgturbohybrid_relopt_kind, "multivector_proxy_encoder",
 					   "Fixed-dimensional proxy encoder for document-node proxy_vector admission.",
 					   pgturbohybrid_multivector_proxy_encoder_relopt_options,
-					   PGTURBOHYBRID_MULTIVECTOR_PROXY_ENCODER_MEAN_POOL,
-					   "Valid values are \"mean_pool\", \"max_pool\", \"random_projection_fde\", and \"learned_projection_placeholder\".",
+					   PGTURBOHYBRID_DEFAULT_MULTIVECTOR_PROXY_ENCODER,
+					   "Valid values are \"normalized_mean\", \"mean\", \"first_token\", \"max_abs_mean\", \"max_pool\", \"random_projection_fde\", and \"learned_projection_placeholder\".",
 					   AccessExclusiveLock);
 	add_enum_reloption(pgturbohybrid_relopt_kind, "multivector_context_mode",
 					   "Long-context multivector scoring mode.",
@@ -7009,9 +7067,20 @@ PgturbohybridInit(void)
 							 "Default fixed-dimensional proxy encoder for new document-node indexes",
 							 "Existing indexes use their persisted multivector_proxy_encoder reloption; this GUC is a session fallback when no index reloption is available.",
 							 &pgturbohybrid_multivector_proxy_encoder,
-							 PGTURBOHYBRID_MULTIVECTOR_PROXY_ENCODER_MEAN_POOL,
+							 PGTURBOHYBRID_DEFAULT_MULTIVECTOR_PROXY_ENCODER,
 							 pgturbohybrid_multivector_proxy_encoder_options,
 							 PGC_USERSET, 0, NULL, NULL, NULL);
+	DefineCustomBoolVariable("turbohybrid.multivector_allow_exact_symmetric_build",
+							 "Allow exact symmetric document MaxSim graph topology builds above the diagnostic size guard",
+							 "Off blocks multivector document-node exact_symmetric graph builds above turbohybrid.multivector_exact_symmetric_build_max_docs. This protects production builds and benchmarks from accidentally selecting O(doc_tokens^2 * dim) document-document MaxSim topology.",
+							 &pgturbohybrid_multivector_allow_exact_symmetric_build,
+							 false, PGC_USERSET, 0, NULL, NULL, NULL);
+	DefineCustomIntVariable("turbohybrid.multivector_exact_symmetric_build_max_docs",
+							"Maximum document count allowed for exact symmetric multivector document graph builds without explicit override",
+							"CREATE INDEX errors above this observed document count when multivector_doc_build_scorer = exact_symmetric and turbohybrid.multivector_allow_exact_symmetric_build is off.",
+							&pgturbohybrid_multivector_exact_symmetric_build_max_docs,
+							1000, 0, INT_MAX,
+							PGC_USERSET, 0, NULL, NULL, NULL);
 	DefineCustomIntVariable("turbohybrid.multivector_max_accumulator_mb",
 							"Maximum memory allowed for one multivector document accumulator",
 							"Prevents pathological multivector queries from allocating state proportional to too many touched documents times query vectors.",
@@ -7242,7 +7311,7 @@ PgturbohybridInit(void)
 							 NULL, NULL);
 	DefineCustomEnumVariable("turbohybrid.dense_build_neighbor_select",
 							 "Dense graph neighbor selection during native graph builds",
-							 "fast keeps the code-only simple edge selector; heuristic uses the diversified HNSW-style selector; auto uses heuristic for low-dimensional and balanced/matched_recall/quality builds, and fast for high-dimensional latency builds.",
+							 "fast keeps the code-only simple edge selector; heuristic uses the diversified HNSW-style selector; auto uses fast for multivector document-node proxy builds, heuristic for low-dimensional and balanced/matched_recall/quality dense builds, and fast for high-dimensional latency builds.",
 							 &pgturbohybrid_dense_build_neighbor_select,
 							 PGTURBOHYBRID_DENSE_BUILD_NEIGHBOR_SELECT_AUTO,
 							 pgturbohybrid_dense_build_neighbor_select_options,
