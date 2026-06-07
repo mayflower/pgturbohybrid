@@ -2282,6 +2282,63 @@ PgturbohybridGraphLoadMultiVectorDocVector(Relation index,
 	return mv;
 }
 
+PgturbohybridMultiVector *
+PgturbohybridGraphReadMultiVectorDocFromSidecar(Relation index, TqDocId docId,
+											MemoryContext ctx)
+{
+	PgturbohybridGraphMetaPageData meta;
+	PgturbohybridGraphScanStorage storage;
+	PgturbohybridMultiVectorDocSidecarAccessStats stats;
+	PgturbohybridMultiVector *doc;
+	PgturbohybridMultiVector *copy;
+	Size		docSize;
+	MemoryContext allocCtx;
+	MemoryContext loadCtx;
+	MemoryContext oldCtx;
+
+	if (index == NULL)
+		return NULL;
+	if (!PgturbohybridGraphReadMeta(index, &meta) ||
+		meta.tqMultivectorDocCount == 0 ||
+			docId >= meta.tqMultivectorDocCount)
+		return NULL;
+
+	allocCtx = ctx != NULL ? ctx : CurrentMemoryContext;
+	loadCtx = AllocSetContextCreate(allocCtx,
+									"pgturbohybrid sidecar doc read",
+									ALLOCSET_DEFAULT_SIZES);
+	memset(&storage, 0, sizeof(storage));
+	memset(&stats, 0, sizeof(stats));
+	PgturbohybridGraphInitScanStorage(index, &meta, &storage, NULL);
+	storage.ctx = loadCtx;
+	if (!PgturbohybridGraphLoadMultiVectorDocMapWithStats(index, &meta,
+														  &storage,
+														  false,
+														  &stats) ||
+		!storage.multivectorDocMapLoaded ||
+		!storage.multivectorDocVectorsLoaded)
+	{
+		MemoryContextDelete(loadCtx);
+		return NULL;
+	}
+
+	doc = PgturbohybridGraphLoadMultiVectorDocVector(index, &meta, &storage,
+													 docId, loadCtx, &stats);
+	if (doc == NULL)
+	{
+		MemoryContextDelete(loadCtx);
+		return NULL;
+	}
+
+	docSize = VARSIZE_ANY(doc);
+	oldCtx = MemoryContextSwitchTo(allocCtx);
+	copy = palloc(docSize);
+	memcpy(copy, doc, docSize);
+	MemoryContextSwitchTo(oldCtx);
+	MemoryContextDelete(loadCtx);
+	return copy;
+}
+
 static bool
 PgturbohybridGraphCacheMatches(PgturbohybridGraphNativeCache *cache, Relation index,
 							   PgturbohybridGraphMetaPageData *meta)

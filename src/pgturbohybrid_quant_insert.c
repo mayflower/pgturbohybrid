@@ -1240,6 +1240,7 @@ PgturbohybridGraphAppendInsertedMultiVectorDocMap(Relation index,
 												  uint32 firstNodeId,
 												  uint16 tokenCount,
 												  uint16 originalTokenCount,
+												  uint16 pooledTokenCount,
 												  const PgturbohybridMultiVector *mv,
 												  bool documentNodes,
 												  PgturbohybridGraphMetaPageData *meta)
@@ -1330,7 +1331,7 @@ PgturbohybridGraphAppendInsertedMultiVectorDocMap(Relation index,
 	docTuple->entries[0].firstNodeId = firstNodeId;
 	docTuple->entries[0].tokenCount = tokenCount;
 	docTuple->entries[0].originalTokenCount = originalTokenCount;
-	docTuple->entries[0].pooledTokenCount = tokenCount;
+	docTuple->entries[0].pooledTokenCount = pooledTokenCount;
 	(void) PgturbohybridGraphAppendTupleWithCursor(index, &docMapStart,
 										PGTURBOHYBRID_GRAPH_PAGE_KIND_MULTIVECTOR_DOCMAP,
 										(Item) docTuple, docTupleSize,
@@ -2066,11 +2067,12 @@ PgturbohybridGraphInsertMultiVectorBatchInPlace(Relation index,
 	if (appendDocMap)
 		PgturbohybridGraphAppendInsertedMultiVectorDocMap(index, heap_tid,
 														  firstNodeId,
+														  (uint16) mv->count,
+														  (uint16) mv->count,
 														  (uint16) (documentNodes ?
 																	 indexedMv->count :
 																	 mv->count),
-														  (uint16) mv->count,
-														  documentNodes ? indexedMv : NULL,
+														  documentNodes ? mv : NULL,
 														  documentNodes,
 														  &meta);
 

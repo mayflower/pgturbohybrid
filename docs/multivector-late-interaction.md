@@ -341,9 +341,13 @@ explicit `turbohybrid_multivector_field_weighted_maxsim()` scorer until the
 query payload carries field weights.
 
 Explicit `document_nodes` indexes store one graph node per heap document and a
-versioned float32 multivector sidecar. Build-time edge selection uses
-symmetrized document MaxSim. Non-exhaustive scans traverse document graph
-adjacency, score visited candidates with the selected
+versioned float32 multivector sidecar. Production builds use a fixed-dimensional
+proxy vector for graph topology and reserve exact MaxSim for bounded final
+rerank. The diagnostic `multivector_doc_build_scorer = exact_symmetric` mode
+uses symmetrized document MaxSim during graph construction and is guarded by
+`turbohybrid.multivector_exact_symmetric_build_max_docs` unless
+`turbohybrid.multivector_allow_exact_symmetric_build = on`. Non-exhaustive
+scans traverse document graph adjacency, score visited candidates with the selected
 `turbohybrid.multivector_doc_storage = f32 | f16 | sq8` sidecar, and
 exact-rerank heap multivectors. Near-exhaustive scans use the exact float32
 sidecar scan. `turbohybrid_index_stats()` reports

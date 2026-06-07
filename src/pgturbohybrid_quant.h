@@ -37,7 +37,7 @@
 #define PGTURBOHYBRID_GRAPH_TQ_BACKBONE			0x0040	/* metapage: level-0 adjacent backbone edges were forced at build */
 #define PGTURBOHYBRID_GRAPH_TQ_FAST_BUILD_EDGES	0x0080	/* metapage: build used simple nearest-neighbor edge selection */
 #define PGTURBOHYBRID_GRAPH_TQ_BUILD_NEIGHBOR_REASON_SHIFT 8
-#define PGTURBOHYBRID_GRAPH_TQ_BUILD_NEIGHBOR_REASON_MASK 0x0700
+#define PGTURBOHYBRID_GRAPH_TQ_BUILD_NEIGHBOR_REASON_MASK 0x0f00
 #define PGTURBOHYBRID_GRAPH_TQ_BUILD_NEIGHBOR_REASON(flags) (((flags) & PGTURBOHYBRID_GRAPH_TQ_BUILD_NEIGHBOR_REASON_MASK) >> PGTURBOHYBRID_GRAPH_TQ_BUILD_NEIGHBOR_REASON_SHIFT)
 #define PGTURBOHYBRID_GRAPH_TQ_BUILD_NEIGHBOR_REASON_BITS(reason) ((((uint16) (reason)) << PGTURBOHYBRID_GRAPH_TQ_BUILD_NEIGHBOR_REASON_SHIFT) & PGTURBOHYBRID_GRAPH_TQ_BUILD_NEIGHBOR_REASON_MASK)
 #define PGTURBOHYBRID_GRAPH_MAX_ENTRY_POINTS		16
@@ -310,8 +310,10 @@ typedef struct PgturbohybridQuantBuildState
 	bool		buildEncodeOnAppend;	/* encode node immediately during collection scan */
 	bool		buildFastEdges; /* use bounded simple edge selection for code-only builds */
 	int			buildNeighborSelectReason; /* why the final build edge selector was chosen */
+	int			parallelEdgeBuildDisabledReason;
 	bool		multivectorBuild;	/* heap tuple expands into one graph node per subvector */
 	int			multivectorGraphMode;
+	int			multivectorDocBuildScorer;
 	int			multivectorTokenPooling;
 	double		multivectorTokenPoolingTargetRatio;
 	int			multivectorTokenPoolingMinTokens;
@@ -377,6 +379,8 @@ typedef struct PgturbohybridQuantBuildState
 	uint64		buildDistanceCodeCode;
 	uint64		buildDistanceExact;
 	uint64		buildDistanceFallback;
+	uint64		multivectorDocExactBuildDistanceCalls;
+	uint64		multivectorDocExactBuildDistanceUs;
 	uint64		buildEdgeDistanceCalls;
 	uint64		buildEdgeSearchLayerUs;
 	uint64		buildEdgeSelectNeighborUs;
@@ -446,10 +450,12 @@ typedef struct PgturbohybridGraphResult
 typedef struct TqDenseCandidate
 {
 	uint32		nodeId;
+	TqDocId		docId;
 	ItemPointerData heaptid;
 	double		distance;
 	double		similarity;
 	int32		rank;
+	bool		hasDocId;
 	bool		exactScored;
 } TqDenseCandidate;
 
@@ -503,8 +509,10 @@ typedef struct TqDenseCandidateStats
 	uint32		multivectorAdaptiveFinalRawTarget;
 	int			multivectorDocMapSource;
 	char		multivectorCandidateSource[48];
+	char		multivectorCandidatePath[48];
 	char		multivectorProxyEncoderKind[32];
 	char		multivectorGraphMode[24];
+	uint64		multivectorProxyGraphSearches;
 	bool		multivectorExactTokenScanEnabled;
 	uint64		multivectorExactTokenScanNodesScored;
 	bool		multivectorPlainFallbackUsed;
@@ -571,6 +579,10 @@ typedef struct TqDenseCandidateStats
 	bool		multivectorExactRerankEnabled;
 	uint32		multivectorExactRerankDocs;
 	uint64		multivectorExactRerankPairs;
+	int			multivectorExactRerankSource;
+	uint64		multivectorExactRerankHeapFetches;
+	uint64		multivectorExactRerankSidecarReads;
+	uint64		multivectorExactRerankSidecarBytes;
 	uint32		exactRerankCandidates;
 	uint64		exactRerankTokensEvaluated;
 	uint64		exactRerankTokensSkipped;
@@ -1220,6 +1232,9 @@ PgturbohybridMultiVector *PgturbohybridGraphLoadMultiVectorDocVector(Relation in
 									  TqDocId docId,
 									  MemoryContext ctx,
 									  PgturbohybridMultiVectorDocSidecarAccessStats *stats);
+PgturbohybridMultiVector *PgturbohybridGraphReadMultiVectorDocFromSidecar(Relation index,
+										 TqDocId docId,
+										 MemoryContext ctx);
 PgturbohybridGraphNativeCache *PgturbohybridGraphInitInsertStorage(Relation index, PgturbohybridGraphMetaPageData *meta,
 										  PgturbohybridGraphScanStorage *storage);
 bool		PgturbohybridGraphEstimateMemory(Relation index,

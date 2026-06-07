@@ -606,7 +606,11 @@ BEGIN
 		(stats->>'multivector_doc_graph_exact_rerank_docs')::int <> 1 OR
 		(stats->>'multivector_doc_graph_quantized_scores')::int <> 0 OR
 		stats->>'multivector_doc_graph_storage_kind' <> 'f32' OR
-		stats->>'multivector_doc_graph_rescore_source' <> 'heap' OR
+		stats->>'multivector_doc_graph_rescore_source' <> 'sidecar' OR
+		stats->>'multivector_exact_rerank_source' <> 'sidecar' OR
+		(stats->>'multivector_doc_graph_heap_fetches')::int <> 0 OR
+		(stats->>'multivector_exact_rerank_heap_fetches')::int <> 0 OR
+		(stats->>'multivector_exact_rerank_sidecar_reads')::int <> 1 OR
 		stats->>'multivector_doc_graph_warning' <> 'document_node_f32_sidecar_exact_scan' THEN
 		RAISE EXCEPTION 'expected document-node graph to admit many-moderate good doc, top %, stats %',
 			doc_node_top1, stats;
@@ -658,14 +662,14 @@ END
 $$;
 SELECT turbohybrid_last_scan_stats()->>'multivector_doc_sidecar_cache_mode'
   AS document_node_sidecar_cache_mode,
-       (turbohybrid_last_scan_stats()->>'multivector_doc_sidecar_pages_read')::int
+       (turbohybrid_last_scan_stats()->>'multivector_doc_sidecar_pages_read')::int > 0
   AS document_node_sidecar_pages_read,
-       (turbohybrid_last_scan_stats()->>'multivector_doc_sidecar_vectors_loaded')::int
+       (turbohybrid_last_scan_stats()->>'multivector_doc_sidecar_vectors_loaded')::int > 0
   AS document_node_sidecar_vectors_loaded,
-       (turbohybrid_last_scan_stats()->>'multivector_doc_sidecar_bytes_touched')::int
+       (turbohybrid_last_scan_stats()->>'multivector_doc_sidecar_bytes_touched')::int > 0
   AS document_node_sidecar_bytes_touched;
 document_node_sidecar_cache_mode|document_node_sidecar_pages_read|document_node_sidecar_vectors_loaded|document_node_sidecar_bytes_touched
-paged|6|5|712
+paged|t|t|t
 (1 row)
 RESET turbohybrid.native_cache_scope;
 RESET turbohybrid.multivector_doc_storage_cache;
@@ -695,17 +699,24 @@ BEGIN
 	stats := turbohybrid_last_scan_stats();
 
 	IF doc_node_top1 <> 'good' OR
+		stats->>'multivector_candidate_path' <> 'proxy_graph' OR
 		stats->>'multivector_doc_graph_warning' <>
-			'document_node_f16_sidecar_graph_traversal' OR
+			'document_node_proxy_vector_graph_traversal' OR
+		(stats->>'multivector_proxy_graph_searches')::int <> 1 OR
+		(stats->>'multivector_subvector_searches')::int <> 0 OR
 		(stats->>'multivector_doc_graph_search_ef')::int <> 4 OR
 		(stats->>'multivector_doc_graph_oversampling')::int <> 2 OR
-		(stats->>'multivector_doc_graph_rescore_k')::int <> 2 OR
+		(stats->>'multivector_doc_graph_rescore_k')::int <> 1 OR
 		(stats->>'multivector_doc_graph_candidates')::int <> 4 OR
-		(stats->>'multivector_doc_graph_exact_rerank_docs')::int <> 2 OR
-		(stats->>'multivector_doc_graph_quantized_scores')::int <= 0 OR
+		(stats->>'multivector_doc_graph_exact_rerank_docs')::int <> 1 OR
+		(stats->>'multivector_doc_graph_quantized_scores')::int <> 0 OR
 		stats->>'multivector_doc_graph_storage_kind' <> 'f16' OR
-		stats->>'multivector_doc_graph_rescore_source' <> 'heap' OR
-		stats->>'multivector_accumulator_kind' <> 'doc_graph_f16' THEN
+		stats->>'multivector_doc_graph_rescore_source' <> 'sidecar' OR
+		stats->>'multivector_exact_rerank_source' <> 'sidecar' OR
+		(stats->>'multivector_doc_graph_heap_fetches')::int <> 0 OR
+		(stats->>'multivector_exact_rerank_heap_fetches')::int <> 0 OR
+		(stats->>'multivector_exact_rerank_sidecar_reads')::int <> 1 OR
+		stats->>'multivector_accumulator_kind' <> 'doc_proxy_graph' THEN
 		RAISE EXCEPTION 'expected document-node graph f16 knobs to widen candidates independently of final_k, top %, stats %',
 			doc_node_top1, stats;
 	END IF;
@@ -726,7 +737,7 @@ SELECT (turbohybrid_last_scan_stats()->>'multivector_doc_graph_search_ef')::int
        turbohybrid_last_scan_stats()->>'multivector_doc_graph_rescore_source'
   AS document_node_knob_rescore_source;
 document_node_knob_search_ef|document_node_knob_oversampling|document_node_knob_rescore_k|document_node_knob_candidates|document_node_knob_exact_rerank_docs|document_node_knob_storage_kind|document_node_knob_rescore_source
-4|2|2|4|2|f16|heap
+4|2|1|4|1|f16|sidecar
 (1 row)
 SET turbohybrid.multivector_doc_candidate_k = 10;
 SET turbohybrid.multivector_exact_rerank_k = 10;
@@ -753,20 +764,23 @@ BEGIN
 	stats := turbohybrid_last_scan_stats();
 
 	IF (stats->>'multivector_doc_graph_search_ef')::int <> 2 OR
-		(stats->>'multivector_doc_graph_candidates')::int > 2 OR
-		(stats->>'multivector_doc_graph_exact_rerank_docs')::int > 2 THEN
-		RAISE EXCEPTION 'expected explicit document-node EF to cap graph traversal independently of candidate budget, stats %',
+		stats->>'multivector_candidate_path' <> 'proxy_graph' OR
+		(stats->>'multivector_proxy_graph_searches')::int <> 1 OR
+		(stats->>'multivector_subvector_searches')::int <> 0 OR
+		(stats->>'multivector_doc_graph_candidates')::int <> 5 OR
+		(stats->>'multivector_doc_graph_exact_rerank_docs')::int <> 5 THEN
+		RAISE EXCEPTION 'expected explicit document-node EF with proxy candidate-band fill, stats %',
 			stats;
 	END IF;
 END
 $$;
 SELECT (turbohybrid_last_scan_stats()->>'multivector_doc_graph_search_ef')::int
   AS document_node_explicit_ef,
-       (turbohybrid_last_scan_stats()->>'multivector_doc_graph_candidates')::int <= 2
-  AS document_node_explicit_ef_caps_candidates,
-       (turbohybrid_last_scan_stats()->>'multivector_doc_graph_exact_rerank_docs')::int <= 2
-  AS document_node_explicit_ef_caps_rerank;
-document_node_explicit_ef|document_node_explicit_ef_caps_candidates|document_node_explicit_ef_caps_rerank
+       (turbohybrid_last_scan_stats()->>'multivector_doc_graph_candidates')::int = 5
+  AS document_node_explicit_ef_fills_candidate_band,
+       (turbohybrid_last_scan_stats()->>'multivector_doc_graph_exact_rerank_docs')::int = 5
+  AS document_node_explicit_ef_reranks_candidate_band;
+document_node_explicit_ef|document_node_explicit_ef_fills_candidate_band|document_node_explicit_ef_reranks_candidate_band
 2|t|t
 (1 row)
 SET turbohybrid.multivector_doc_graph_search_ef = 0;
@@ -834,12 +848,19 @@ BEGIN
 	stats := turbohybrid_last_scan_stats();
 
 	IF doc_node_top1 <> 'good' OR
+		stats->>'multivector_candidate_path' <> 'proxy_graph' OR
 		stats->>'multivector_doc_graph_warning' <>
-			'document_node_sq8_sidecar_graph_traversal' OR
-		(stats->>'multivector_doc_graph_quantized_scores')::int <= 0 OR
+			'document_node_proxy_vector_graph_traversal' OR
+		(stats->>'multivector_proxy_graph_searches')::int <> 1 OR
+		(stats->>'multivector_subvector_searches')::int <> 0 OR
+		(stats->>'multivector_doc_graph_quantized_scores')::int <> 0 OR
 		stats->>'multivector_doc_graph_storage_kind' <> 'sq8' OR
-		stats->>'multivector_doc_graph_rescore_source' <> 'heap' OR
-		stats->>'multivector_accumulator_kind' <> 'doc_graph_sq8' THEN
+		stats->>'multivector_doc_graph_rescore_source' <> 'sidecar' OR
+		stats->>'multivector_exact_rerank_source' <> 'sidecar' OR
+		(stats->>'multivector_doc_graph_heap_fetches')::int <> 0 OR
+		(stats->>'multivector_exact_rerank_heap_fetches')::int <> 0 OR
+		(stats->>'multivector_exact_rerank_sidecar_reads')::int < 1 OR
+		stats->>'multivector_accumulator_kind' <> 'doc_proxy_graph' THEN
 		RAISE EXCEPTION 'expected document-node graph sq8 compact scoring to admit many-moderate good doc, top %, stats %',
 			doc_node_top1, stats;
 	END IF;
@@ -852,7 +873,7 @@ SELECT turbohybrid_last_scan_stats()->>'multivector_doc_graph_storage_kind'
        (turbohybrid_last_scan_stats()->>'multivector_doc_graph_quantized_scores')::int > 0
   AS document_node_sq8_quantized_scores;
 document_node_sq8_storage_kind|document_node_sq8_rescore_source|document_node_sq8_quantized_scores
-sq8|heap|t
+sq8|sidecar|f
 (1 row)
 SET turbohybrid.multivector_doc_storage = 'f32';
 SET turbohybrid.multivector_candidate_source = document_nodes;
@@ -922,14 +943,18 @@ BEGIN
 			'document_node_proxy_vector_graph_traversal' OR
 		stats->>'multivector_accumulator_kind' <>
 			'doc_proxy_graph' OR
-		stats->>'proxy_encoder_kind' <> 'mean_pool' OR
+		stats->>'proxy_encoder_kind' <> 'normalized_mean' OR
 		(stats->>'multivector_doc_graph_candidates')::int <> 4 OR
-		(stats->>'multivector_doc_graph_exact_rerank_docs')::int <> 4 OR
+		(stats->>'multivector_doc_graph_exact_rerank_docs')::int <> 1 OR
 		(stats->>'proxy_candidates')::int <> 4 OR
-		(stats->>'proxy_exact_rerank_docs')::int <> 4 OR
+		(stats->>'proxy_exact_rerank_docs')::int <> 1 OR
 		NOT (stats ? 'proxy_top1_admission') OR
 		(stats->>'multivector_doc_graph_quantized_scores')::int <> 0 OR
-		stats->>'multivector_doc_graph_rescore_source' <> 'heap' THEN
+		stats->>'multivector_doc_graph_rescore_source' <> 'sidecar' OR
+		stats->>'multivector_exact_rerank_source' <> 'sidecar' OR
+		(stats->>'multivector_doc_graph_heap_fetches')::int <> 0 OR
+		(stats->>'multivector_exact_rerank_heap_fetches')::int <> 0 OR
+		(stats->>'multivector_exact_rerank_sidecar_reads')::int <> 1 THEN
 		RAISE EXCEPTION 'expected proxy-vector document-node graph admission with exact MaxSim rerank, top %, stats %',
 			doc_node_top1, stats;
 	END IF;
@@ -946,7 +971,7 @@ SELECT turbohybrid_last_scan_stats()->>'multivector_candidate_source'
        (turbohybrid_last_scan_stats()->>'multivector_doc_graph_exact_rerank_docs')::int
   AS document_node_proxy_exact_rerank_docs;
 document_node_proxy_source|document_node_proxy_warning|document_node_proxy_encoder|document_node_proxy_candidates|document_node_proxy_exact_rerank_docs
-proxy_vector|document_node_proxy_vector_graph_traversal|mean_pool|4|4
+proxy_vector|document_node_proxy_vector_graph_traversal|normalized_mean|4|1
 (1 row)
 CREATE TABLE mv_proxy_encoder_docs (
 	id text PRIMARY KEY,
@@ -1250,9 +1275,9 @@ BEGIN
 
 	IF bulk_top1 <> 'good' OR inc_top1 <> 'good' OR
 		bulk_stats->>'multivector_doc_graph_warning' <>
-			'document_node_f32_sidecar_graph_traversal' OR
+			'document_node_proxy_vector_graph_traversal' OR
 		inc_stats->>'multivector_doc_graph_warning' <>
-			'document_node_f32_sidecar_graph_traversal' OR
+			'document_node_proxy_vector_graph_traversal' OR
 		(bulk_stats->>'multivector_doc_graph_candidates')::int <> 1 OR
 		(inc_stats->>'multivector_doc_graph_candidates')::int <> 1 OR
 		(bulk_stats->>'graph_entry_point_count')::int <= 1 OR
@@ -1281,7 +1306,7 @@ SELECT turbohybrid_last_scan_stats()->>'multivector_doc_graph_warning'
        (turbohybrid_last_scan_stats()->>'multivector_doc_graph_insert_pairs_scored')::int > 0
   AS document_node_insert_pairs_scored;
 document_node_insert_many_moderate_warning|document_node_insert_many_moderate_nodes|document_node_insert_many_moderate_candidates|document_node_insert_sampled_entries|document_node_insert_full_maxsim_edges|document_node_insert_representative_fallbacks|document_node_insert_pairs_scored
-document_node_f32_sidecar_graph_traversal|5|1|t|t|0|t
+document_node_proxy_vector_graph_traversal|5|1|t|t|0|t
 (1 row)
 DROP TABLE mv_doc_node_insert_many_moderate_inc;
 DROP TABLE mv_doc_node_insert_many_moderate_bulk;

@@ -64,6 +64,12 @@ static relopt_enum_elt_def pgturbohybrid_multivector_graph_relopt_options[] = {
 	{NULL, 0}
 };
 
+static relopt_enum_elt_def pgturbohybrid_multivector_doc_build_scorer_relopt_options[] = {
+	{"proxy", PGTURBOHYBRID_MULTIVECTOR_DOC_BUILD_SCORER_PROXY},
+	{"exact_symmetric", PGTURBOHYBRID_MULTIVECTOR_DOC_BUILD_SCORER_EXACT_SYMMETRIC},
+	{NULL, 0}
+};
+
 static void
 PgturbohybridIndexStatsJsonbAddKey(PgturbohybridJsonbState *state, const char *key)
 {
@@ -379,7 +385,41 @@ PgturbohybridBuildNeighborSelectReasonName(int reason)
 			return "auto_matched_recall";
 		case PGTURBOHYBRID_BUILD_NEIGHBOR_SELECT_REASON_AUTO_LATENCY_HIGHDIM:
 			return "auto_latency_highdim";
+		case PGTURBOHYBRID_BUILD_NEIGHBOR_SELECT_REASON_AUTO_MULTIVECTOR_DOCUMENT_PROXY:
+			return "auto_multivector_document_proxy";
 		case PGTURBOHYBRID_BUILD_NEIGHBOR_SELECT_REASON_UNKNOWN:
+		default:
+			return "unknown";
+	}
+}
+
+const char *
+PgturbohybridParallelEdgeBuildDisabledReasonName(int reason)
+{
+	switch ((PgturbohybridParallelEdgeBuildDisabledReason) reason)
+	{
+		case PGTURBOHYBRID_PARALLEL_EDGE_BUILD_DISABLED_REASON_NONE:
+			return "none";
+		case PGTURBOHYBRID_PARALLEL_EDGE_BUILD_DISABLED_REASON_NO_WORKERS_REQUESTED:
+			return "no_workers_requested";
+		case PGTURBOHYBRID_PARALLEL_EDGE_BUILD_DISABLED_REASON_TOKEN_NODES_UNSAFE:
+			return "token_nodes_unsafe";
+		case PGTURBOHYBRID_PARALLEL_EDGE_BUILD_DISABLED_REASON_EXACT_DOCUMENT_MAXSIM_BUILD:
+			return "exact_document_maxsim_build";
+		case PGTURBOHYBRID_PARALLEL_EDGE_BUILD_DISABLED_REASON_REQUIRES_FULL_MULTIVECTOR_SIDECAR:
+			return "requires_full_multivector_sidecar";
+		case PGTURBOHYBRID_PARALLEL_EDGE_BUILD_DISABLED_REASON_NOT_CODE_ONLY:
+			return "not_code_only";
+		case PGTURBOHYBRID_PARALLEL_EDGE_BUILD_DISABLED_REASON_PARALLEL_EDGE_GUC_OFF:
+			return "parallel_edge_guc_off";
+		case PGTURBOHYBRID_PARALLEL_EDGE_BUILD_DISABLED_REASON_SEGMENTED_GRAPH:
+			return "segmented_graph";
+		case PGTURBOHYBRID_PARALLEL_EDGE_BUILD_DISABLED_REASON_INVALID_GRAPH_STATE:
+			return "invalid_graph_state";
+		case PGTURBOHYBRID_PARALLEL_EDGE_BUILD_DISABLED_REASON_TOO_FEW_SEGMENTS:
+			return "too_few_segments";
+		case PGTURBOHYBRID_PARALLEL_EDGE_BUILD_DISABLED_REASON_WORKER_LAUNCH_FAILED:
+			return "worker_launch_failed";
 		default:
 			return "unknown";
 	}
@@ -628,6 +668,12 @@ PgturbohybridGraphInit(void)
 					   pgturbohybrid_multivector_graph_relopt_options,
 					   PGTURBOHYBRID_DEFAULT_MULTIVECTOR_GRAPH_MODE,
 					   "Valid values are \"token_nodes\" and \"document_nodes\". \"document_nodes\" stores one graph node per heap document with a versioned document multivector sidecar for MaxSim-aligned candidate generation.",
+					   AccessExclusiveLock);
+	add_enum_reloption(pgturbohybrid_relopt_kind, "multivector_doc_build_scorer",
+					   "Document-node multivector graph build distance scorer.",
+					   pgturbohybrid_multivector_doc_build_scorer_relopt_options,
+					   PGTURBOHYBRID_DEFAULT_MULTIVECTOR_DOC_BUILD_SCORER,
+					   "Valid values are \"proxy\" and \"exact_symmetric\". Only meaningful with multivector_graph = document_nodes.",
 					   AccessExclusiveLock);
 
 	PgturbohybridGraphControlInit();
@@ -936,6 +982,16 @@ pgturbohybrid_index_stats(PG_FUNCTION_ARGS)
 	PgturbohybridIndexStatsJsonbAddString(&jsonState, "multivector_graph_mode",
 										  PgturbohybridMultiVectorGraphModeName(
 											  meta.tqMultivectorGraphMode));
+	PgturbohybridIndexStatsJsonbAddString(&jsonState, "multivector_doc_build_scorer",
+										  PgturbohybridMultiVectorDocBuildScorerName(
+											  opts != NULL ?
+											  opts->multivectorDocBuildScorer :
+											  PGTURBOHYBRID_DEFAULT_MULTIVECTOR_DOC_BUILD_SCORER));
+	PgturbohybridIndexStatsJsonbAddString(&jsonState, "multivector_proxy_encoder",
+										  PgturbohybridMultiVectorProxyEncoderName(
+											  opts != NULL ?
+											  opts->multivectorProxyEncoder :
+											  PGTURBOHYBRID_DEFAULT_MULTIVECTOR_PROXY_ENCODER));
 	PgturbohybridIndexStatsJsonbAddString(&jsonState, "multivector_context_mode",
 										  opts != NULL &&
 										  opts->multivectorContextMode ==
@@ -983,6 +1039,8 @@ pgturbohybrid_index_stats(PG_FUNCTION_ARGS)
 	PgturbohybridIndexStatsJsonbAddUInt32(&jsonState, "blocks", nblocks);
 	PgturbohybridIndexStatsJsonbAddUInt32(&jsonState, "node_count",
 										  meta.tqNodeCount);
+	PgturbohybridIndexStatsJsonbAddUInt32(&jsonState, "dimensions",
+										  meta.dimensions);
 	PgturbohybridIndexStatsJsonbAddUInt32(&jsonState, "graph_m", graphM);
 	PgturbohybridIndexStatsJsonbAddUInt32(&jsonState, "graph_ef_construction",
 										  graphEfConstruction);

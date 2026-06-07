@@ -133,6 +133,10 @@ static double PgturbohybridMultiVectorTokenCosine(const PgturbohybridMultiVector
 												  int32 a, int32 b);
 static void PgturbohybridMultiVectorNormalizeToken(float *values, int32 dim);
 static uint32 PgturbohybridMultiVectorProxyHash(uint32 a, uint32 b, uint32 salt);
+static void PgturbohybridMultiVectorProxyMean(const PgturbohybridMultiVector *mv,
+											  Vector *vector);
+static void PgturbohybridMultiVectorProxyNormalizedMean(const PgturbohybridMultiVector *mv,
+														Vector *vector);
 
 typedef double (*TqDotProductF32Func) (const float *a, const float *b, int32 dim);
 typedef void (*TqDotProductF32BlockFunc) (const float *queryValues,
@@ -1238,17 +1242,71 @@ PgturbohybridMultiVectorProxyHash(uint32 a, uint32 b, uint32 salt)
 const char *
 PgturbohybridMultiVectorProxyEncoderName(int encoder)
 {
-	switch (encoder)
+	switch ((PgturbohybridMultiVectorProxyEncoder) encoder)
 	{
+		case PGTURBOHYBRID_MULTIVECTOR_PROXY_ENCODER_NORMALIZED_MEAN:
+			return "normalized_mean";
+		case PGTURBOHYBRID_MULTIVECTOR_PROXY_ENCODER_FIRST_TOKEN:
+			return "first_token";
+		case PGTURBOHYBRID_MULTIVECTOR_PROXY_ENCODER_MAX_ABS_MEAN:
+			return "max_abs_mean";
 		case PGTURBOHYBRID_MULTIVECTOR_PROXY_ENCODER_MAX_POOL:
 			return "max_pool";
 		case PGTURBOHYBRID_MULTIVECTOR_PROXY_ENCODER_RANDOM_PROJECTION_FDE:
 			return "random_projection_fde";
 		case PGTURBOHYBRID_MULTIVECTOR_PROXY_ENCODER_LEARNED_PROJECTION_PLACEHOLDER:
 			return "learned_projection_placeholder";
-		case PGTURBOHYBRID_MULTIVECTOR_PROXY_ENCODER_MEAN_POOL:
+		case PGTURBOHYBRID_MULTIVECTOR_PROXY_ENCODER_MEAN:
 		default:
-			return "mean_pool";
+			return "mean";
+	}
+}
+
+static void
+PgturbohybridMultiVectorProxyMean(const PgturbohybridMultiVector *mv,
+								  Vector *vector)
+{
+	for (int32 token = 0; token < mv->count; token++)
+	{
+		const float *values = PgturbohybridMultiVectorValues(mv, token);
+
+		for (int32 dim = 0; dim < mv->dim; dim++)
+			vector->x[dim] += values[dim];
+	}
+	for (int32 dim = 0; dim < mv->dim; dim++)
+		vector->x[dim] /= (float) mv->count;
+}
+
+static void
+PgturbohybridMultiVectorProxyNormalizedMean(const PgturbohybridMultiVector *mv,
+											Vector *vector)
+{
+	PgturbohybridMultiVectorProxyMean(mv, vector);
+	PgturbohybridMultiVectorNormalizeToken(vector->x, vector->dim);
+}
+
+static void
+PgturbohybridMultiVectorProxyFirstToken(const PgturbohybridMultiVector *mv,
+										Vector *vector)
+{
+	const float *values = PgturbohybridMultiVectorValues(mv, 0);
+
+	memcpy(vector->x, values, sizeof(float) * (Size) mv->dim);
+}
+
+static void
+PgturbohybridMultiVectorProxyMaxAbsMean(const PgturbohybridMultiVector *mv,
+										Vector *vector)
+{
+	for (int32 token = 0; token < mv->count; token++)
+	{
+		const float *values = PgturbohybridMultiVectorValues(mv, token);
+
+		for (int32 dim = 0; dim < mv->dim; dim++)
+		{
+			if (token == 0 || fabsf(values[dim]) > fabsf(vector->x[dim]))
+				vector->x[dim] = values[dim];
+		}
 	}
 }
 
@@ -1265,61 +1323,72 @@ PgturbohybridMultiVectorBuildProxyVector(const PgturbohybridMultiVector *mv,
 		ereport(ERROR,
 				(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
 				 errmsg("learned multivector proxy projection is not configured"),
-				 errhint("Use multivector_proxy_encoder = mean_pool, max_pool, or random_projection_fde until learned projection weights are supported.")));
+				 errhint("Use multivector_proxy_encoder = normalized_mean, mean, first_token, max_abs_mean, max_pool, or random_projection_fde until learned projection weights are supported.")));
 
 	vector = MemoryContextAllocZero(ctx, PGTURBOHYBRID_VECTOR_SIZE(mv->dim));
 	SET_VARSIZE(vector, PGTURBOHYBRID_VECTOR_SIZE(mv->dim));
 	vector->dim = mv->dim;
 
-	if (encoder == PGTURBOHYBRID_MULTIVECTOR_PROXY_ENCODER_MAX_POOL)
+	switch ((PgturbohybridMultiVectorProxyEncoder) encoder)
 	{
-		for (int32 dim = 0; dim < mv->dim; dim++)
-			vector->x[dim] = -FLT_MAX;
-		for (int32 token = 0; token < mv->count; token++)
-		{
-			const float *values = PgturbohybridMultiVectorValues(mv, token);
-
+		case PGTURBOHYBRID_MULTIVECTOR_PROXY_ENCODER_NORMALIZED_MEAN:
+			PgturbohybridMultiVectorProxyNormalizedMean(mv, vector);
+			break;
+		case PGTURBOHYBRID_MULTIVECTOR_PROXY_ENCODER_FIRST_TOKEN:
+			PgturbohybridMultiVectorProxyFirstToken(mv, vector);
+			break;
+		case PGTURBOHYBRID_MULTIVECTOR_PROXY_ENCODER_MAX_ABS_MEAN:
+			PgturbohybridMultiVectorProxyMaxAbsMean(mv, vector);
+			break;
+		case PGTURBOHYBRID_MULTIVECTOR_PROXY_ENCODER_MAX_POOL:
 			for (int32 dim = 0; dim < mv->dim; dim++)
-				vector->x[dim] = Max(vector->x[dim], values[dim]);
-		}
-	}
-	else if (encoder ==
-			 PGTURBOHYBRID_MULTIVECTOR_PROXY_ENCODER_RANDOM_PROJECTION_FDE)
-	{
-		double		scale = 1.0 / sqrt((double) mv->count);
-
-		for (int32 token = 0; token < mv->count; token++)
-		{
-			const float *values = PgturbohybridMultiVectorValues(mv, token);
-
-			for (int32 dim = 0; dim < mv->dim; dim++)
+				vector->x[dim] = -FLT_MAX;
+			for (int32 token = 0; token < mv->count; token++)
 			{
-				uint32		hash =
-					PgturbohybridMultiVectorProxyHash((uint32) token,
-													  (uint32) dim, 0);
-				int32		bucket = (int32) (hash % (uint32) mv->dim);
-				float		sign =
-					(hash & (uint32) 0x80000000U) ? -1.0f : 1.0f;
+				const float *values = PgturbohybridMultiVectorValues(mv, token);
 
-				vector->x[bucket] += (float) ((double) sign *
-											  (double) values[dim] * scale);
+				for (int32 dim = 0; dim < mv->dim; dim++)
+					vector->x[dim] = Max(vector->x[dim], values[dim]);
 			}
-		}
-	}
-	else
-	{
-		for (int32 token = 0; token < mv->count; token++)
-		{
-			const float *values = PgturbohybridMultiVectorValues(mv, token);
+			break;
+		case PGTURBOHYBRID_MULTIVECTOR_PROXY_ENCODER_RANDOM_PROJECTION_FDE:
+			{
+				double		scale = 1.0 / sqrt((double) mv->count);
 
-			for (int32 dim = 0; dim < mv->dim; dim++)
-				vector->x[dim] += values[dim];
-		}
-		for (int32 dim = 0; dim < mv->dim; dim++)
-			vector->x[dim] /= (float) mv->count;
+				for (int32 token = 0; token < mv->count; token++)
+				{
+					const float *values = PgturbohybridMultiVectorValues(mv, token);
+
+					for (int32 dim = 0; dim < mv->dim; dim++)
+					{
+						uint32		hash =
+							PgturbohybridMultiVectorProxyHash((uint32) token,
+															  (uint32) dim, 0);
+						int32		bucket = (int32) (hash % (uint32) mv->dim);
+						float		sign =
+							(hash & (uint32) 0x80000000U) ? -1.0f : 1.0f;
+
+						vector->x[bucket] += (float) ((double) sign *
+													  (double) values[dim] * scale);
+					}
+				}
+			}
+			break;
+		case PGTURBOHYBRID_MULTIVECTOR_PROXY_ENCODER_MEAN:
+		default:
+			PgturbohybridMultiVectorProxyMean(mv, vector);
+			break;
 	}
 
 	return vector;
+}
+
+Vector *
+PgturbohybridMultiVectorBuildQueryProxyVector(const PgturbohybridMultiVector *query,
+											  int encoder,
+											  MemoryContext ctx)
+{
+	return PgturbohybridMultiVectorBuildProxyVector(query, encoder, ctx);
 }
 
 static Vector *

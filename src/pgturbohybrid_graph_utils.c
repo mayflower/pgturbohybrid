@@ -864,6 +864,34 @@ PgturbohybridMultiVectorGraphModeName(int mode)
 	}
 }
 
+const char *
+PgturbohybridMultiVectorDocBuildScorerName(int scorer)
+{
+	switch ((PgturbohybridMultiVectorDocBuildScorer) scorer)
+	{
+		case PGTURBOHYBRID_MULTIVECTOR_DOC_BUILD_SCORER_EXACT_SYMMETRIC:
+			return "exact_symmetric";
+		case PGTURBOHYBRID_MULTIVECTOR_DOC_BUILD_SCORER_PROXY:
+		default:
+			return "proxy";
+	}
+}
+
+const char *
+PgturbohybridMultiVectorRerankSourceName(int source)
+{
+	switch ((PgturbohybridMultiVectorRerankSource) source)
+	{
+		case PGTURBOHYBRID_MULTIVECTOR_RERANK_SOURCE_SIDECAR:
+			return "sidecar";
+		case PGTURBOHYBRID_MULTIVECTOR_RERANK_SOURCE_HEAP:
+			return "heap";
+		case PGTURBOHYBRID_MULTIVECTOR_RERANK_SOURCE_OFF:
+		default:
+			return "off";
+	}
+}
+
 int
 PgturbohybridGraphGetMultiVectorGraphModeOption(Relation index)
 {
@@ -875,6 +903,19 @@ PgturbohybridGraphGetMultiVectorGraphModeOption(Relation index)
 	opts = (TqOptions *) index->rd_options;
 	return opts != NULL ? opts->multivectorGraphMode :
 		PGTURBOHYBRID_DEFAULT_MULTIVECTOR_GRAPH_MODE;
+}
+
+int
+PgturbohybridGraphGetMultiVectorDocBuildScorerOption(Relation index)
+{
+	TqOptions  *opts;
+
+	if (!PgturbohybridGraphIspgturbohybridIndex(index))
+		return PGTURBOHYBRID_DEFAULT_MULTIVECTOR_DOC_BUILD_SCORER;
+
+	opts = (TqOptions *) index->rd_options;
+	return opts != NULL ? opts->multivectorDocBuildScorer :
+		PGTURBOHYBRID_DEFAULT_MULTIVECTOR_DOC_BUILD_SCORER;
 }
 
 int
