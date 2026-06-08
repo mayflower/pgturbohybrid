@@ -179,26 +179,31 @@ PgturbohybridGraphAppendTuple(Relation index, ForkNumber forkNum, BlockNumber *s
 	}
 	else
 	{
+		buf = ReadBufferExtended(index, forkNum, blkno, RBM_NORMAL, NULL);
+		LockBuffer(buf, BUFFER_LOCK_EXCLUSIVE);
+		page = BufferGetPage(buf);
+
 		for (;;)
 		{
 			BlockNumber nextblkno;
+			uint16		kind;
 
-			buf = ReadBufferExtended(index, forkNum, blkno, RBM_NORMAL, NULL);
-			LockBuffer(buf, BUFFER_LOCK_SHARE);
-			page = BufferGetPage(buf);
+			kind = PgturbohybridGraphPageGetOpaque(page)->pageKind &
+				PGTURBOHYBRID_GRAPH_PAGE_KIND_MASK;
+			if (kind != pageKind)
+				elog(ERROR, "unexpected pgturbohybrid graph page kind while appending");
+
 			nextblkno = PgturbohybridGraphPageGetOpaque(page)->nextblkno;
-			UnlockReleaseBuffer(buf);
-
 			if (!BlockNumberIsValid(nextblkno))
 				break;
+
+			UnlockReleaseBuffer(buf);
 			blkno = nextblkno;
+			buf = ReadBufferExtended(index, forkNum, blkno, RBM_NORMAL, NULL);
+			LockBuffer(buf, BUFFER_LOCK_EXCLUSIVE);
+			page = BufferGetPage(buf);
 		}
-
-		buf = ReadBufferExtended(index, forkNum, blkno, RBM_NORMAL, NULL);
 	}
-
-	if (!createdStart)
-		LockBuffer(buf, BUFFER_LOCK_EXCLUSIVE);
 	if (RelationNeedsWAL(index) && forkNum == MAIN_FORKNUM)
 	{
 		xlogState = GenericXLogStart(index);

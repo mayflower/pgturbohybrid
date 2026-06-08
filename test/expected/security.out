@@ -344,3 +344,66 @@ BEGIN
 	END IF;
 END
 $$;
+CREATE TABLE sec_delta_compact (
+	id int PRIMARY KEY,
+	embedding vector(3),
+	body_tsv tsvector
+);
+INSERT INTO sec_delta_compact
+SELECT g,
+	format('[%s,%s,%s]', (g % 3)::float8, ((g + 1) % 3)::float8, ((g + 2) % 3)::float8)::vector,
+	to_tsvector('simple', 'delta term' || g::text || ' extra' || (g % 5)::text)
+FROM generate_series(1, 16) g;
+CREATE INDEX sec_delta_compact_idx ON sec_delta_compact
+USING turbohybrid (
+	embedding vector_cosine_turbohybrid_ops,
+	body_tsv bm25_tsvector_turbohybrid_ops
+)
+WITH (quantization_bits = 4, exact_storage = off);
+DO $$
+DECLARE
+	i int;
+BEGIN
+	FOR i IN 1..16 LOOP
+		UPDATE sec_delta_compact
+		SET embedding = format('[%s,%s,%s]',
+							   ((i + 1) % 3)::float8,
+							   ((i + 2) % 3)::float8,
+							   ((i + 3) % 3)::float8)::vector,
+			body_tsv = to_tsvector('simple', 'delta refresh' || i::text || ' token' || (i % 7)::text)
+		WHERE id = i;
+	END LOOP;
+END
+$$;
+VACUUM sec_delta_compact;
+DO $$
+DECLARE
+	i int;
+	top_id int;
+BEGIN
+	FOR i IN 1..16 LOOP
+		UPDATE sec_delta_compact
+		SET embedding = format('[%s,%s,%s]',
+							   ((i + 2) % 3)::float8,
+							   ((i + 3) % 3)::float8,
+							   ((i + 4) % 3)::float8)::vector,
+			body_tsv = to_tsvector('simple', 'delta second' || i::text || ' token' || (i % 11)::text)
+		WHERE id = i;
+	END LOOP;
+
+	SELECT id INTO top_id
+	FROM sec_delta_compact
+	ORDER BY embedding <~> turbohybrid_query(
+		vector_query => '[0,1,2]'::vector,
+		text_query => to_tsquery('simple', 'delta'),
+		dense_k => 8,
+		bm25_k => 8,
+		final_k => 1
+	)
+	LIMIT 1;
+
+	IF top_id IS NULL THEN
+		RAISE EXCEPTION 'hybrid query failed after BM25 delta compaction cycle';
+	END IF;
+END
+$$;

@@ -1405,6 +1405,8 @@ PgturbohybridBm25InvalidateCache(Relation index)
 	PgturbohybridBm25Cache **link = &pgturbohybrid_bm25_cache_list;
 	Oid			relid = RelationGetRelid(index);
 
+	PgturbohybridBm25ResetDeltaAppendCursor(index);
+
 	while (*link != NULL)
 	{
 		PgturbohybridBm25Cache *cache = *link;

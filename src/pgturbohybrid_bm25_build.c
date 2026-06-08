@@ -102,6 +102,21 @@ static BlockNumber pgturbohybrid_bm25_delta_cursor_tail = InvalidBlockNumber;
 static uint64 pgturbohybrid_bm25_delta_cursor_generation = 0;
 static uint32 pgturbohybrid_bm25_delta_cursor_pages = 0;
 
+void
+PgturbohybridBm25ResetDeltaAppendCursor(Relation index)
+{
+	if (index != NULL &&
+		pgturbohybrid_bm25_delta_cursor_index != RelationGetRelid(index))
+		return;
+
+	pgturbohybrid_bm25_delta_cursor_index = InvalidOid;
+	pgturbohybrid_bm25_delta_cursor_relfilenumber = InvalidOid;
+	pgturbohybrid_bm25_delta_cursor_start = InvalidBlockNumber;
+	pgturbohybrid_bm25_delta_cursor_tail = InvalidBlockNumber;
+	pgturbohybrid_bm25_delta_cursor_generation = 0;
+	pgturbohybrid_bm25_delta_cursor_pages = 0;
+}
+
 static void
 PgturbohybridBufFileReadExact(BufFile *file, void *ptr, size_t size)
 {
@@ -1403,13 +1418,14 @@ PgturbohybridBm25EnsureWalTail(Relation index, ForkNumber forkNum, Buffer *buf,
 		return;
 	}
 
+	*buf = ReadBufferExtended(index, forkNum, blkno, RBM_NORMAL, NULL);
+	LockBuffer(*buf, BUFFER_LOCK_EXCLUSIVE);
+	*page = BufferGetPage(*buf);
+
 	for (;;)
 	{
 		BlockNumber nextblkno;
 
-		*buf = ReadBufferExtended(index, forkNum, blkno, RBM_NORMAL, NULL);
-		LockBuffer(*buf, BUFFER_LOCK_SHARE);
-		*page = BufferGetPage(*buf);
 		if (!PgturbohybridBm25PageIsKind(*page, pageKind))
 		{
 			UnlockReleaseBuffer(*buf);
@@ -1417,23 +1433,16 @@ PgturbohybridBm25EnsureWalTail(Relation index, ForkNumber forkNum, Buffer *buf,
 			*page = NULL;
 			elog(ERROR, "unexpected pgturbohybrid BM25 page kind while appending");
 		}
-		nextblkno = PgturbohybridGraphPageGetOpaque(*page)->nextblkno;
-		UnlockReleaseBuffer(*buf);
 
+		nextblkno = PgturbohybridGraphPageGetOpaque(*page)->nextblkno;
 		if (!BlockNumberIsValid(nextblkno))
 			break;
-		blkno = nextblkno;
-	}
 
-	*buf = ReadBufferExtended(index, forkNum, blkno, RBM_NORMAL, NULL);
-	LockBuffer(*buf, BUFFER_LOCK_EXCLUSIVE);
-	*page = BufferGetPage(*buf);
-	if (!PgturbohybridBm25PageIsKind(*page, pageKind))
-	{
 		UnlockReleaseBuffer(*buf);
-		*buf = InvalidBuffer;
-		*page = NULL;
-		elog(ERROR, "unexpected pgturbohybrid BM25 page kind while appending");
+		blkno = nextblkno;
+		*buf = ReadBufferExtended(index, forkNum, blkno, RBM_NORMAL, NULL);
+		LockBuffer(*buf, BUFFER_LOCK_EXCLUSIVE);
+		*page = BufferGetPage(*buf);
 	}
 }
 
@@ -3078,6 +3087,7 @@ PgturbohybridBm25MaybeCompact(Relation index)
 	PgturbohybridOptions *opts = (PgturbohybridOptions *) index->rd_options;
 	int			threshold = opts != NULL ? opts->bm25DeltaCompactionThreshold : 25;
 	uint32		uniqueTerms;
+	bool		compacted = false;
 
 	if (!PgturbohybridBm25ReadMeta(index, &oldMeta, NULL) ||
 		oldMeta.deltaDocCount == 0 ||
@@ -3088,64 +3098,82 @@ PgturbohybridBm25MaybeCompact(Relation index)
 		(uint64) Max(oldMeta.docCount, 1) * (uint64) threshold)
 		return false;
 
-	ctx = AllocSetContextCreate(CurrentMemoryContext,
-								"pgturbohybrid BM25 delta compaction",
-								ALLOCSET_DEFAULT_SIZES);
-	oldCtx = MemoryContextSwitchTo(ctx);
-
-	nodeStates = PgturbohybridReadNodeStates(index, &graphMeta, &nodeCount);
-	if (nodeCount == 0)
-		ereport(ERROR,
-				(errcode(ERRCODE_DATA_CORRUPTED),
-				 errmsg("pgturbohybrid native graph metadata is missing during BM25 compaction")));
-
-	docLens = palloc0(PgturbohybridCheckedArrayBytes(sizeof(uint32),
-													 nodeCount,
-													 "pgturbohybrid BM25 compacted doc lengths"));
-	docSeen = palloc0(PgturbohybridCheckedArrayBytes(sizeof(bool),
-													 nodeCount,
-													 "pgturbohybrid BM25 compacted doc visibility"));
-	PgturbohybridBm25ReadDocLens(index, &oldMeta, nodeCount, docLens);
-
-	memset(&collector, 0, sizeof(collector));
-	collector.index = index;
-	collector.softBudget = PgturbohybridBm25MaintenanceWorkMemBytes();
-	collector.allowSpill = true;
-	collector.walLoggedWrites = RelationNeedsWAL(index);
-	collector.tidNodeCount = nodeCount;
-
-	for (uint32 nodeId = 0; nodeId < nodeCount; nodeId++)
+	/*
+	 * Delta compaction rewrites BM25 base pages and clears the delta chain.
+	 * Serialize it with inserts via the same update lock aminsert uses.
+	 */
+	LockPage(index, PGTURBOHYBRID_GRAPH_UPDATE_LOCK, ExclusiveLock);
+	PG_TRY();
 	{
-		if (nodeStates[nodeId].live && docLens[nodeId] > 0)
+		ctx = AllocSetContextCreate(CurrentMemoryContext,
+									"pgturbohybrid BM25 delta compaction",
+									ALLOCSET_DEFAULT_SIZES);
+		oldCtx = MemoryContextSwitchTo(ctx);
+
+		nodeStates = PgturbohybridReadNodeStates(index, &graphMeta, &nodeCount);
+		if (nodeCount == 0)
+			ereport(ERROR,
+					(errcode(ERRCODE_DATA_CORRUPTED),
+					 errmsg("pgturbohybrid native graph metadata is missing during BM25 compaction")));
+
+		docLens = palloc0(PgturbohybridCheckedArrayBytes(sizeof(uint32),
+														 nodeCount,
+														 "pgturbohybrid BM25 compacted doc lengths"));
+		docSeen = palloc0(PgturbohybridCheckedArrayBytes(sizeof(bool),
+														 nodeCount,
+														 "pgturbohybrid BM25 compacted doc visibility"));
+		PgturbohybridBm25ReadDocLens(index, &oldMeta, nodeCount, docLens);
+
+		memset(&collector, 0, sizeof(collector));
+		collector.index = index;
+		collector.softBudget = PgturbohybridBm25MaintenanceWorkMemBytes();
+		collector.allowSpill = true;
+		collector.walLoggedWrites = RelationNeedsWAL(index);
+		collector.tidNodeCount = nodeCount;
+
+		for (uint32 nodeId = 0; nodeId < nodeCount; nodeId++)
 		{
-			PgturbohybridAppendBuildDoc(&collector, nodeId,
-								   &nodeStates[nodeId].tid, docLens[nodeId]);
-			docSeen[nodeId] = true;
+			if (nodeStates[nodeId].live && docLens[nodeId] > 0)
+			{
+				PgturbohybridAppendBuildDoc(&collector, nodeId,
+									   &nodeStates[nodeId].tid, docLens[nodeId]);
+				docSeen[nodeId] = true;
+			}
 		}
+
+		PgturbohybridBm25CollectBasePostings(index, &oldMeta, &collector,
+										nodeStates, docLens, nodeCount);
+		PgturbohybridBm25CollectDelta(index, &oldMeta, &collector,
+								 nodeStates, docSeen, nodeCount);
+
+		if (collector.spillRunCount > 0)
+		{
+			PgturbohybridSpillTermRun(&collector);
+			uniqueTerms = 0;
+		}
+		else
+			uniqueTerms = PgturbohybridReduceUniqueTerms(&collector);
+		collector.uniqueTerms = uniqueTerms;
+		PgturbohybridBm25WriteBasePages(&collector);
+		PgturbohybridBm25UpdateCompactedMeta(index, &collector, &oldMeta);
+		PgturbohybridBm25ResetDeltaAppendCursor(index);
+		PgturbohybridBm25InvalidateCache(index);
+		PgturbohybridGraphInvalidateCaches(index);
+		PgturbohybridCloseSpillRuns(&collector);
+
+		MemoryContextSwitchTo(oldCtx);
+		MemoryContextDelete(ctx);
+		compacted = true;
 	}
-
-	PgturbohybridBm25CollectBasePostings(index, &oldMeta, &collector,
-									nodeStates, docLens, nodeCount);
-	PgturbohybridBm25CollectDelta(index, &oldMeta, &collector,
-							 nodeStates, docSeen, nodeCount);
-
-	if (collector.spillRunCount > 0)
+	PG_CATCH();
 	{
-		PgturbohybridSpillTermRun(&collector);
-		uniqueTerms = 0;
+		UnlockPage(index, PGTURBOHYBRID_GRAPH_UPDATE_LOCK, ExclusiveLock);
+		PG_RE_THROW();
 	}
-	else
-		uniqueTerms = PgturbohybridReduceUniqueTerms(&collector);
-	collector.uniqueTerms = uniqueTerms;
-	PgturbohybridBm25WriteBasePages(&collector);
-	PgturbohybridBm25UpdateCompactedMeta(index, &collector, &oldMeta);
-	PgturbohybridBm25InvalidateCache(index);
-	PgturbohybridGraphInvalidateCaches(index);
-	PgturbohybridCloseSpillRuns(&collector);
+	PG_END_TRY();
+	UnlockPage(index, PGTURBOHYBRID_GRAPH_UPDATE_LOCK, ExclusiveLock);
 
-	MemoryContextSwitchTo(oldCtx);
-	MemoryContextDelete(ctx);
-	return true;
+	return compacted;
 }
 
 void
@@ -3338,7 +3366,11 @@ PgturbohybridBm25CountChainPagesAndTail(Relation index, BlockNumber startBlkno,
 		if (!PgturbohybridBm25PageIsKind(page, pageKind))
 		{
 			UnlockReleaseBuffer(buf);
-			break;
+			ereport(ERROR,
+					(errcode(ERRCODE_DATA_CORRUPTED),
+					 errmsg("pgturbohybrid BM25 page chain has unexpected page kind"),
+					 errdetail("Block %u in chain starting at block %u is not page kind %u.",
+							   blkno, startBlkno, pageKind)));
 		}
 
 		nextblkno = opaque->nextblkno;

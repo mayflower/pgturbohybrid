@@ -423,6 +423,7 @@ void		PgturbohybridBm25BuildCollect(Relation heap, Relation index, IndexInfo *in
 void		PgturbohybridBm25AppendDelta(Relation index, uint32 nodeId,
 									ItemPointer heapTid, Datum tsvectorDatum);
 bool		PgturbohybridBm25MaybeCompact(Relation index);
+void		PgturbohybridBm25ResetDeltaAppendCursor(Relation index);
 void		PgturbohybridBm25InvalidateCache(Relation index);
 bool		PgturbohybridBm25GetPlanningStats(Relation index,
 										 PgturbohybridBm25PlanningStats *stats);
