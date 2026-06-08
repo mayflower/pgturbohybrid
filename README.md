@@ -36,6 +36,32 @@ hypercar, but still has room for groceries.
 - It is a good fit for evaluation, prototypes, and controlled experiments.
 - Treat production use as something to validate carefully, not assume.
 
+## ValorBrain maintenance fork
+
+This repository is also the **production fork** for
+[ValorBrain](https://github.com/valor-digital/valorbrain) — PostgreSQL 17/18
+hybrid retrieval on tenant-scoped `documents_fts` + `content_vectors`, not a
+generic upstream drop-in only.
+
+| Topic | Detail |
+|-------|--------|
+| **Tracking branch** | `main` (ValorBrain fixes merged here; upstream: `agentxagi/pgturbohybrid`) |
+| **Prod indexes** | `idx_documents_fts_hybrid` (BM25 + vector RRF), `idx_content_vectors_turbo` (4-bit dense) |
+| **Do not recreate** | IVFFlat on `content_vectors` — removed in ValorBrain prod |
+| **Internal tags** | `0.1.0-valorbrain.N` (changelog separate from upstream alpha) |
+
+Operational docs:
+
+- [ValorBrain fork notes](docs/dev/valorbrain-fork.md) — deploy, REINDEX, integration
+- [ValorBrain roadmap 2026](docs/dev/valorbrain-roadmap-2026.md) — fork-specific evolution plan
+
+After extension upgrades or BM25 corruption incidents:
+
+```sql
+REINDEX INDEX CONCURRENTLY idx_documents_fts_hybrid;
+REINDEX INDEX CONCURRENTLY idx_content_vectors_turbo;
+```
+
 ## Benchmarks
 
 Dense (vector-only) retrieval on **dbpedia-openai-1M** (1,000,000 × 1536-d,
