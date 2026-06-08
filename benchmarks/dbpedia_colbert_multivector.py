@@ -19,6 +19,7 @@ import os
 import platform
 import shlex
 import statistics
+import subprocess
 import sys
 import threading
 import time
@@ -54,12 +55,16 @@ DOCUMENT_NODE_STORAGE_CACHE_CHOICES = ("auto", "resident", "paged")
 DOCUMENT_NODE_TOKEN_POOLING_CHOICES = ("off", "kmeans", "greedy_cosine")
 DOCUMENT_NODE_CENTROIDS_CHOICES = ("off", "kmeans")
 MULTIVECTOR_PROXY_ENCODER_CHOICES = (
+    "normalized_mean",
+    "first_token",
+    "centroid_mean",
     "mean_pool",
     "max_pool",
     "random_projection_fde",
     "learned_projection_placeholder",
 )
 MULTIVECTOR_SPARSE_CANDIDATE_SOURCE_CHOICES = ("off", "bm25", "learned_sparse")
+MULTIVECTOR_DOC_BUILD_SCORER_CHOICES = ("proxy", "exact_symmetric")
 DOCUMENT_NODE_BASELINE_MODES = (
     "token_nodes",
     "exact_token_scan",
@@ -174,6 +179,21 @@ def command_metadata() -> dict[str, Any]:
             "PG_COLBERT_LLAMA_TEST_MODEL": os.environ.get("PG_COLBERT_LLAMA_TEST_MODEL", ""),
         },
     }
+
+
+def git_sha() -> str | None:
+    try:
+        result = subprocess.run(
+            ["git", "rev-parse", "HEAD"],
+            cwd=Path(__file__).resolve().parents[1],
+            check=True,
+            capture_output=True,
+            text=True,
+        )
+    except (OSError, subprocess.CalledProcessError):
+        return None
+    sha = result.stdout.strip()
+    return sha or None
 
 
 def percentile(values: list[float], pct: float) -> float:
@@ -432,6 +452,156 @@ def fetch_all(conn: psycopg.Connection[Any], sql: str, params: tuple[Any, ...] |
     with conn.cursor() as cur:
         cur.execute(sql, params)
         return list(cur.fetchall())
+
+
+def loaded_document_count(conn: psycopg.Connection[Any]) -> int:
+    row = fetch_one(conn, "SELECT count(*) FROM dbpedia_colbert_docs WHERE colbert IS NOT NULL")
+    return int(row[0]) if row else 0
+
+
+def multivector_dataset_stats(conn: psycopg.Connection[Any]) -> dict[str, Any]:
+    row = fetch_one(
+        conn,
+        """
+        WITH doc_stats AS (
+          SELECT
+            turbohybrid_multivector_count(colbert)::double precision AS token_count,
+            turbohybrid_multivector_dims(colbert)::int AS dim
+          FROM dbpedia_colbert_docs
+          WHERE colbert IS NOT NULL
+        )
+        SELECT
+          count(*)::bigint,
+          avg(token_count)::double precision,
+          percentile_cont(0.5) WITHIN GROUP (ORDER BY token_count)::double precision,
+          percentile_cont(0.9) WITHIN GROUP (ORDER BY token_count)::double precision,
+          min(token_count)::double precision,
+          max(token_count)::double precision,
+          min(dim)::int,
+          max(dim)::int
+        FROM doc_stats
+        """,
+    )
+    if not row or int(row[0] or 0) == 0:
+        return {
+            "docs": 0,
+            "avg_tokens": 0.0,
+            "p50_tokens": 0.0,
+            "p90_tokens": 0.0,
+            "min_tokens": 0,
+            "max_tokens": 0,
+            "dim": 0,
+            "dim_min": 0,
+            "dim_max": 0,
+        }
+
+    dim_min = int(row[6] or 0)
+    dim_max = int(row[7] or 0)
+    return {
+        "docs": int(row[0]),
+        "avg_tokens": round(float(row[1] or 0.0), 3),
+        "p50_tokens": round(float(row[2] or 0.0), 3),
+        "p90_tokens": round(float(row[3] or 0.0), 3),
+        "min_tokens": int(float(row[4] or 0.0)),
+        "max_tokens": int(float(row[5] or 0.0)),
+        "dim": dim_min if dim_min == dim_max else None,
+        "dim_min": dim_min,
+        "dim_max": dim_max,
+    }
+
+
+def validate_document_node_proxy_build(
+    *,
+    args: argparse.Namespace,
+    index_stats: dict[str, Any],
+    build_stats: dict[str, Any],
+    row_count: int,
+) -> dict[str, Any]:
+    graph_mode = index_stats.get("multivector_graph_mode")
+    requested_scorer = getattr(args, "multivector_doc_build_scorer", "proxy")
+    observed_scorer = index_stats.get("multivector_doc_build_scorer")
+    exact_calls = int(build_stats.get("multivector_doc_exact_build_distance_calls", 0) or 0)
+    node_count = int(index_stats.get("node_count", 0) or 0)
+    build_fast_edges = bool(index_stats.get("build_fast_edges", False))
+
+    checks = {
+        "graph_mode": graph_mode,
+        "requested_doc_build_scorer": requested_scorer,
+        "observed_doc_build_scorer": observed_scorer,
+        "doc_exact_build_distance_calls": exact_calls,
+        "node_count": node_count,
+        "row_count": row_count,
+        "build_fast_edges": build_fast_edges,
+    }
+    if graph_mode != "document_nodes":
+        return {**checks, "enforced": False, "reason": "not_document_nodes"}
+    if requested_scorer == "exact_symmetric":
+        return {**checks, "enforced": False, "reason": "exact_symmetric_explicitly_allowed"}
+
+    if observed_scorer != "proxy":
+        raise SystemExit(
+            "refusing benchmark: document_nodes index used "
+            f"multivector_doc_build_scorer={observed_scorer!r}, expected 'proxy'"
+        )
+    if exact_calls != 0:
+        raise SystemExit(
+            "refusing benchmark: document_nodes proxy build made "
+            f"{exact_calls} exact document-document MaxSim build-distance calls"
+        )
+    if not build_fast_edges:
+        raise SystemExit(
+            "refusing benchmark: document_nodes proxy index did not use "
+            "fast edge construction"
+        )
+    if node_count != row_count:
+        raise SystemExit(
+            "refusing benchmark: document_nodes proxy index node_count "
+            f"{node_count} does not match loaded document count {row_count}"
+        )
+    return {**checks, "enforced": True, "reason": "ok"}
+
+
+def build_index_reloptions(args: argparse.Namespace) -> tuple[list[str], dict[str, Any]]:
+    pooling_mode = getattr(args, "multivector_token_pooling", "off")
+    pooling_ratio = float(getattr(args, "multivector_token_pooling_target_ratio", 0.5))
+    pooling_min_tokens = int(getattr(args, "multivector_token_pooling_min_tokens", 16))
+    centroids = getattr(args, "multivector_centroids", "off")
+    centroid_count = getattr(args, "multivector_centroid_count", "auto")
+    if isinstance(centroid_count, str) and centroid_count.lower() == "auto":
+        centroid_count_sql = 0
+    else:
+        centroid_count_sql = int(centroid_count)
+    proxy_encoder = getattr(args, "multivector_proxy_encoder", "normalized_mean")
+    reloptions = [
+        "quantization_bits = 4",
+        "exact_storage = off",
+        f"multivector_graph = {args.multivector_graph}",
+        f"multivector_doc_build_scorer = {args.multivector_doc_build_scorer}",
+        f"multivector_token_pooling = {pooling_mode}",
+        f"multivector_token_pooling_target_ratio = {pooling_ratio}",
+        f"multivector_token_pooling_min_tokens = {pooling_min_tokens}",
+        f"multivector_centroids = {centroids}",
+        f"multivector_centroid_count = {centroid_count_sql}",
+        f"multivector_proxy_encoder = {proxy_encoder}",
+    ]
+    index_graph_m = int(getattr(args, "index_graph_m", 0))
+    index_graph_ef_construction = int(getattr(args, "index_graph_ef_construction", 0))
+    index_graph_ef_search = int(getattr(args, "index_graph_ef_search", 0))
+    index_native_segments = int(getattr(args, "index_native_segments", 0))
+    if index_graph_m > 0:
+        reloptions.append(f"graph_m = {index_graph_m}")
+    if index_graph_ef_construction > 0:
+        reloptions.append(f"graph_ef_construction = {index_graph_ef_construction}")
+    if index_graph_ef_search > 0:
+        reloptions.append(f"graph_ef_search = {index_graph_ef_search}")
+    if index_native_segments > 0:
+        reloptions.append(f"native_segments = {index_native_segments}")
+    return reloptions, {
+        "index_graph_m": index_graph_m,
+        "index_graph_ef_construction": index_graph_ef_construction,
+        "index_graph_ef_search": index_graph_ef_search,
+        "index_native_segments": index_native_segments,
+    }
 
 
 def load_pgturbohybrid_library(conn: psycopg.Connection[Any]) -> None:
@@ -1262,35 +1432,33 @@ def load_precomputed_multivectors(conn: psycopg.Connection[Any], args: argparse.
 
 
 def build_index(conn: psycopg.Connection[Any], args: argparse.Namespace) -> dict[str, Any]:
+    reloptions, index_option_values = build_index_reloptions(args)
     if args.reuse_index:
         row = fetch_one(conn, "SELECT to_regclass('dbpedia_colbert_docs_colbert_idx') IS NOT NULL")
         if row and bool(row[0]):
             stats = fetch_one(conn, "SELECT turbohybrid_index_stats('dbpedia_colbert_docs_colbert_idx'::regclass)")
             build_stats = fetch_one(conn, "SELECT turbohybrid_last_build_stats()")
             size = fetch_one(conn, "SELECT pg_relation_size('dbpedia_colbert_docs_colbert_idx'::regclass)")
+            index_stats = jsonb_value(stats[0]) if stats else {}
+            build_stats_value = jsonb_value(build_stats[0]) if build_stats else {}
+            row_count = loaded_document_count(conn)
             return {
                 "reused": True,
-                "index_graph_m": int(getattr(args, "index_graph_m", 0)),
-                "index_graph_ef_construction": int(getattr(args, "index_graph_ef_construction", 0)),
-                "index_graph_ef_search": int(getattr(args, "index_graph_ef_search", 0)),
-                "index_native_segments": int(getattr(args, "index_native_segments", 0)),
+                "reloptions": reloptions,
+                **index_option_values,
                 "index_bytes": int(size[0]) if size else 0,
-                "index_stats": jsonb_value(stats[0]) if stats else {},
-                "build_stats": jsonb_value(build_stats[0]) if build_stats else {},
+                "index_stats": index_stats,
+                "build_stats": build_stats_value,
+                "safety_checks": validate_document_node_proxy_build(
+                    args=args,
+                    index_stats=index_stats,
+                    build_stats={},
+                    row_count=row_count,
+                ),
             }
 
     exec_sql(conn, "DROP INDEX IF EXISTS dbpedia_colbert_docs_colbert_idx")
     started = time.perf_counter()
-    pooling_mode = getattr(args, "multivector_token_pooling", "off")
-    pooling_ratio = float(getattr(args, "multivector_token_pooling_target_ratio", 0.5))
-    pooling_min_tokens = int(getattr(args, "multivector_token_pooling_min_tokens", 16))
-    centroids = getattr(args, "multivector_centroids", "off")
-    centroid_count = getattr(args, "multivector_centroid_count", "auto")
-    if isinstance(centroid_count, str) and centroid_count.lower() == "auto":
-        centroid_count_sql = 0
-    else:
-        centroid_count_sql = int(centroid_count)
-    proxy_encoder = getattr(args, "multivector_proxy_encoder", "mean_pool")
     needs_lexical_index = (
         RRF_METHOD in set(getattr(args, "methods", []))
         or bool(getattr(args, "hybrid_evaluation_harness", False))
@@ -1301,29 +1469,6 @@ def build_index(conn: psycopg.Connection[Any], args: argparse.Namespace) -> dict
     lexical_column = None
     if needs_lexical_index:
         lexical_column = "learned_sparse_tsv" if has_learned_sparse_docs(conn) else "body_tsv"
-    reloptions = [
-        "quantization_bits = 4",
-        "exact_storage = off",
-        f"multivector_graph = {args.multivector_graph}",
-        f"multivector_token_pooling = {pooling_mode}",
-        f"multivector_token_pooling_target_ratio = {pooling_ratio}",
-        f"multivector_token_pooling_min_tokens = {pooling_min_tokens}",
-        f"multivector_centroids = {centroids}",
-        f"multivector_centroid_count = {centroid_count_sql}",
-        f"multivector_proxy_encoder = {proxy_encoder}",
-    ]
-    index_graph_m = int(getattr(args, "index_graph_m", 0))
-    index_graph_ef_construction = int(getattr(args, "index_graph_ef_construction", 0))
-    index_graph_ef_search = int(getattr(args, "index_graph_ef_search", 0))
-    index_native_segments = int(getattr(args, "index_native_segments", 0))
-    if index_graph_m > 0:
-        reloptions.append(f"graph_m = {index_graph_m}")
-    if index_graph_ef_construction > 0:
-        reloptions.append(f"graph_ef_construction = {index_graph_ef_construction}")
-    if index_graph_ef_search > 0:
-        reloptions.append(f"graph_ef_search = {index_graph_ef_search}")
-    if index_native_segments > 0:
-        reloptions.append(f"native_segments = {index_native_segments}")
     reloptions_sql = ",\n              ".join(reloptions)
     if lexical_column is None:
         exec_sql(
@@ -1352,18 +1497,25 @@ def build_index(conn: psycopg.Connection[Any], args: argparse.Namespace) -> dict
     build_stats = fetch_one(conn, "SELECT turbohybrid_last_build_stats()")
     stats = fetch_one(conn, "SELECT turbohybrid_index_stats('dbpedia_colbert_docs_colbert_idx'::regclass)")
     size = fetch_one(conn, "SELECT pg_relation_size('dbpedia_colbert_docs_colbert_idx'::regclass)")
+    index_stats = jsonb_value(stats[0]) if stats else {}
+    build_stats_value = jsonb_value(build_stats[0]) if build_stats else {}
+    row_count = loaded_document_count(conn)
     return {
         "reused": False,
         "elapsed_ms": round(elapsed_ms, 3),
         "lexical_indexed": lexical_column is not None,
         "lexical_column": lexical_column,
-        "index_graph_m": index_graph_m,
-        "index_graph_ef_construction": index_graph_ef_construction,
-        "index_graph_ef_search": index_graph_ef_search,
-        "index_native_segments": index_native_segments,
+        "reloptions": reloptions,
+        **index_option_values,
         "index_bytes": int(size[0]) if size else 0,
-        "index_stats": jsonb_value(stats[0]) if stats else {},
-        "build_stats": jsonb_value(build_stats[0]) if build_stats else {},
+        "index_stats": index_stats,
+        "build_stats": build_stats_value,
+        "safety_checks": validate_document_node_proxy_build(
+            args=args,
+            index_stats=index_stats,
+            build_stats=build_stats_value,
+            row_count=row_count,
+        ),
     }
 
 
@@ -2397,6 +2549,7 @@ def run_document_node_admission_grid(
     ))
 
     for proxy_encoder in proxy_encoder_grid:
+        proxy_centroids = "kmeans" if proxy_encoder == "centroid_mean" else args.multivector_centroids
         for pooling in pooling_grid:
             pooling_mode = str(pooling["mode"])
             pooling_ratio = float(pooling["ratio"])
@@ -2407,6 +2560,8 @@ def run_document_node_admission_grid(
                 multivector_token_pooling=pooling_mode,
                 multivector_token_pooling_target_ratio=pooling_ratio,
                 multivector_proxy_encoder=proxy_encoder,
+                multivector_centroids=proxy_centroids,
+                multivector_centroid_count=args.multivector_centroid_count,
             )
             document_index_phase = build_index(conn, document_args)
             for storage in storage_grid:
@@ -2424,6 +2579,8 @@ def run_document_node_admission_grid(
                                 multivector_token_pooling=pooling_mode,
                                 multivector_token_pooling_target_ratio=pooling_ratio,
                                 multivector_proxy_encoder=proxy_encoder,
+                                multivector_centroids=proxy_centroids,
+                                multivector_centroid_count=args.multivector_centroid_count,
                                 multivector_doc_graph_search_ef=ef,
                                 multivector_doc_graph_oversampling=oversampling,
                                 multivector_doc_graph_rescore_k=0,
@@ -3358,6 +3515,8 @@ def create_synthetic_gate_index(conn: psycopg.Connection[Any], graph_mode: str) 
         CREATE INDEX mv_recall_gate_docs_idx ON mv_recall_gate_docs USING turbohybrid
           (colbert multivector_cosine_turbohybrid_ops)
           WITH (multivector_graph = {graph_mode},
+                multivector_doc_build_scorer = proxy,
+                exact_storage = off,
                 graph_m = 4,
                 graph_ef_construction = 8,
                 graph_ef_search = 8)
@@ -4080,6 +4239,18 @@ def validate_args(args: argparse.Namespace) -> argparse.Namespace:
         raise SystemExit("--index-graph-ef-search must be non-negative")
     if args.index_native_segments < 0:
         raise SystemExit("--index-native-segments must be non-negative")
+    if args.multivector_doc_build_scorer == "exact_symmetric":
+        if not args.allow_exact_symmetric_build:
+            raise SystemExit(
+                "--multivector-doc-build-scorer exact_symmetric requires "
+                "--allow-exact-symmetric-build"
+            )
+        print(
+            "WARNING: exact_symmetric document-node graph builds compute exact "
+            "document-document MaxSim inside topology construction; cost is "
+            "O(distance_calls * La * Lb * d). Use proxy for DBpedia benchmark runs.",
+            file=sys.stderr,
+        )
     if not 0.0 < args.multivector_token_pooling_target_ratio <= 1.0:
         raise SystemExit("--multivector-token-pooling-target-ratio must be in (0, 1]")
     if args.multivector_token_pooling_min_tokens < 1:
@@ -4236,8 +4407,22 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--multivector-graph",
         choices=("token_nodes", "document_nodes"),
-        default="token_nodes",
+        default="document_nodes",
         help="turbohybrid multivector graph layout used for the DBpedia ColBERT index",
+    )
+    parser.add_argument(
+        "--multivector-doc-build-scorer",
+        choices=MULTIVECTOR_DOC_BUILD_SCORER_CHOICES,
+        default="proxy",
+        help=(
+            "document_nodes graph-build distance scorer; proxy is the production-safe "
+            "default, exact_symmetric is a diagnostic-only O(distance_calls * La * Lb * d) path"
+        ),
+    )
+    parser.add_argument(
+        "--allow-exact-symmetric-build",
+        action="store_true",
+        help="allow diagnostic exact_symmetric document-document MaxSim graph topology builds",
     )
     parser.add_argument(
         "--multivector-doc-graph-search-ef",
@@ -4314,7 +4499,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--multivector-proxy-encoder",
         choices=MULTIVECTOR_PROXY_ENCODER_CHOICES,
-        default="mean_pool",
+        default="normalized_mean",
         help="document-node proxy_vector fixed-dimensional encoder used at index build and query time",
     )
     parser.add_argument(
@@ -4432,7 +4617,7 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument(
         "--document-node-proxy-encoder-grid",
-        default="mean_pool,max_pool,random_projection_fde",
+        default="normalized_mean,centroid_mean,max_pool,random_projection_fde",
         help="comma-separated proxy encoders to rebuild document-node indexes for",
     )
     parser.add_argument(
@@ -4638,6 +4823,7 @@ def main() -> None:
                 "source": args.precomputed_dataset,
                 "note": "runtime generation skipped; rows were loaded from precomputed multivector dataset",
             }
+        dataset_stats = multivector_dataset_stats(conn)
         learned_sparse_phase = load_learned_sparse_vectors(conn, args)
         index_phase = build_index(conn, args)
         set_retrieval_gucs(conn, args, "dbpedia_colbert_serial")
@@ -4695,12 +4881,16 @@ def main() -> None:
                 "python": platform.python_version(),
             },
             "command": command_metadata(),
+            "pgturbohybrid": {
+                "git_sha": git_sha(),
+            },
             "dataset": {
                 "name": "dbpedia-colbert-multivector",
                 "corpus_path": portable_path(args.dataset) if args.dataset else None,
                 "beir_dataset_path": portable_path(args.beir_dataset) if args.beir_dataset else None,
                 "qrels_path": portable_path(qrels_path) if qrels_path else None,
                 "precomputed_dataset": args.precomputed_dataset,
+                "stats": dataset_stats,
                 "documents": load_phase["documents"],
                 "queries": load_phase["queries"],
                 "qrels": load_phase["qrels"],
@@ -4734,6 +4924,9 @@ def main() -> None:
                 "multivector_exact_rerank": args.multivector_exact_rerank,
                 "multivector_exact_rerank_k": args.multivector_exact_rerank_k,
                 "multivector_graph": args.multivector_graph,
+                "multivector_doc_build_scorer": args.multivector_doc_build_scorer,
+                "allow_exact_symmetric_build": args.allow_exact_symmetric_build,
+                "index_reloptions": index_phase.get("reloptions", []),
                 "multivector_doc_graph_search_ef": args.multivector_doc_graph_search_ef,
                 "multivector_doc_graph_oversampling": args.multivector_doc_graph_oversampling,
                 "multivector_doc_graph_rescore_k": args.multivector_doc_graph_rescore_k,

@@ -34,10 +34,14 @@ Thumbs.db
 /benchmarks/**/*.md
 !/benchmarks/README.md
 !/benchmarks/dev/README.md
+!/benchmarks/qdrant/README.md
 !/benchmarks/dbpedia_openai3_large.md
 /benchmarks/**/*.tq
 /benchmarks/**/*.tv
 /benchmarks/**/*.tvim
+/benchmarks/qdrant/results/
+/benchmarks/qdrant/data/
+/benchmarks/qdrant/qdrant-storage/
 /perf-smoke-results.json
 
 # Build artifacts
