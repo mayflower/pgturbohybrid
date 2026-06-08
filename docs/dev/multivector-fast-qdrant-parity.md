@@ -85,6 +85,9 @@ results without making graph construction pay exact MaxSim cost.
 Each document node stores a cheap fixed-dimensional proxy vector as its graph
 key. The proxy is produced by the configured proxy encoder, for example:
 
+- `normalized_mean`;
+- `first_token`;
+- `centroid_mean`;
 - `mean_pool`;
 - `max_pool`;
 - `random_projection_fde`;
@@ -107,7 +110,7 @@ vector:
 The default document-node build scorer is therefore conceptually:
 
 ```text
-multivector_doc_build_scorer = proxy_code
+multivector_doc_build_scorer = proxy
 ```
 
 An opt-in diagnostic scorer may exist:
@@ -155,7 +158,7 @@ document multivector source is:
 The scan stats must expose this as:
 
 ```text
-exact_rerank_source = sidecar | heap | off
+multivector_exact_rerank_source = sidecar | heap | off
 ```
 
 This keeps Qdrant-style candidate generation and ColBERT-style final scoring
@@ -192,7 +195,7 @@ Add or preserve stats that make the scorer split auditable.
 Build stats from `turbohybrid_last_build_stats()`:
 
 - `multivector_doc_build_scorer`
-  - expected default: `proxy_code`;
+  - expected default: `proxy`;
   - diagnostic value: `exact_symmetric`.
 - `multivector_doc_exact_build_distance_calls`
   - expected default: `0`.
@@ -206,7 +209,7 @@ Build stats from `turbohybrid_last_build_stats()`:
 
 Scan stats from `turbohybrid_last_scan_stats()`:
 
-- `exact_rerank_source = sidecar | heap | off`
+- `multivector_exact_rerank_source = sidecar | heap | off`
 - existing document-node counters:
   - `multivector_graph_mode`;
   - `multivector_doc_graph_nodes`;
@@ -250,7 +253,7 @@ For `pgturbohybrid`, every benchmark artifact must include:
 - `parallel_edge_build_enabled`;
 - `native_build_workers_requested`;
 - `native_build_workers_launched`;
-- `exact_rerank_source`;
+- `multivector_exact_rerank_source`;
 - `build_edges_us`;
 - `build_edges_distance_calls`;
 - recall@10 after exact rerank;
@@ -268,8 +271,7 @@ the current failure and small enough to run repeatedly during development.
 A passing 10k document-node build must satisfy all of the following:
 
 - The index builds to completion without manual interruption.
-- `multivector_doc_build_scorer = proxy_code` or the final chosen cheap default
-  name.
+- `multivector_doc_build_scorer = proxy`.
 - `multivector_doc_exact_build_distance_calls = 0`.
 - `multivector_doc_exact_build_distance_us = 0`.
 - `native_build_workers_requested > 0` when PostgreSQL and reloptions permit
@@ -280,8 +282,8 @@ A passing 10k document-node build must satisfy all of the following:
   code-only edge construction is otherwise eligible.
 - Build stats show `build_edges_us` is no longer dominated by exact
   document-document MaxSim.
-- Query artifacts report `exact_rerank_source = sidecar` for the preferred path
-  or `heap` only for an explicitly labeled fallback run.
+- Query artifacts report `multivector_exact_rerank_source = sidecar` for the
+  preferred path or `heap` only for an explicitly labeled fallback run.
 - Recall@10 is measured after exact MaxSim rerank over the candidate band.
 - p50 and p95 query latency are reported for the exact-reranked path.
 - Index size is reported and compared against Qdrant on the same 10k subset.
@@ -312,7 +314,8 @@ The fast path needs additional tests after implementation:
   tiny table and is rejected or warned above the guard threshold;
 - proxy document-node search still exact-reranks enough candidates to recover
   the `many_moderate` style document when budgets allow;
-- `exact_rerank_source` reports `sidecar`, `heap`, or `off` correctly;
+- `multivector_exact_rerank_source` reports `sidecar`, `heap`, or `off`
+  correctly;
 - malformed document-node sidecar metadata fails with REINDEX guidance and
   does not fall back to token-node behavior.
 

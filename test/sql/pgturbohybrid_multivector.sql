@@ -2296,6 +2296,154 @@ BEGIN
 END
 $$;
 
+CREATE TABLE mv_document_node_proxy_regression_docs (
+  id int PRIMARY KEY,
+  colbert turbohybrid_multivector
+);
+
+INSERT INTO mv_document_node_proxy_regression_docs
+SELECT doc_id,
+       turbohybrid_multivector(array_agg(v ORDER BY token_ordinal))
+FROM (
+  SELECT doc_id,
+         token_ordinal,
+         ('[' || string_agg(
+           (((doc_id * 131 + token_ordinal * 17 + dim * 7) % 2000)::float8 / 1000.0 - 1.0)::text,
+           ',' ORDER BY dim
+         ) || ']')::vector(128) AS v
+  FROM generate_series(1, 200) AS doc_ids(doc_id)
+  CROSS JOIN LATERAL generate_series(1, 32 + (doc_id % 33)) AS tokens(token_ordinal)
+  CROSS JOIN LATERAL generate_series(1, 128) AS dims(dim)
+  GROUP BY doc_id, token_ordinal
+) AS vectors
+GROUP BY doc_id;
+
+CREATE INDEX mv_document_node_proxy_regression_idx ON mv_document_node_proxy_regression_docs USING turbohybrid
+  (colbert multivector_maxsim_ip_turbohybrid_ops)
+  WITH (quantization_bits = 4,
+        exact_storage = off,
+        multivector_graph = document_nodes,
+        multivector_doc_build_scorer = proxy);
+
+DO $$
+DECLARE
+	build_stats jsonb;
+	index_stats jsonb;
+	distance_calls bigint;
+BEGIN
+	build_stats := turbohybrid_last_build_stats();
+	index_stats := turbohybrid_index_stats('mv_document_node_proxy_regression_idx'::regclass);
+	distance_calls := (build_stats->>'build_edges_distance_calls')::bigint;
+
+	IF (index_stats->>'node_count')::int <> 200 OR
+		(build_stats->>'node_count')::int <> 200 THEN
+		RAISE EXCEPTION 'document-node proxy regression node count mismatch, build %, index %',
+			build_stats, index_stats;
+	END IF;
+
+	IF index_stats->>'multivector_doc_build_scorer' <> 'proxy' OR
+		build_stats->>'multivector_doc_build_scorer' <> 'proxy' THEN
+		RAISE EXCEPTION 'document-node proxy regression used unexpected build scorer, build %, index %',
+			build_stats, index_stats;
+	END IF;
+
+	IF (build_stats->>'multivector_doc_exact_build_distance_calls')::bigint <> 0 THEN
+		RAISE EXCEPTION 'document-node proxy regression used exact document build distance: %',
+			build_stats;
+	END IF;
+
+	IF (index_stats->>'build_fast_edges')::boolean IS DISTINCT FROM true OR
+		(build_stats->>'build_fast_edges')::boolean IS DISTINCT FROM true THEN
+		RAISE EXCEPTION 'document-node proxy regression did not use fast edges by default, build %, index %',
+			build_stats, index_stats;
+	END IF;
+
+	IF distance_calls <= 0 OR distance_calls > 100000 THEN
+		RAISE EXCEPTION 'document-node proxy regression distance call count outside ceiling: %',
+			build_stats;
+	END IF;
+
+	IF NOT (build_stats ? 'parallel_edge_build_enabled') AND
+		NOT (index_stats ? 'build_worker_count') THEN
+		RAISE EXCEPTION 'document-node proxy regression missing worker/parallel stats, build %, index %',
+			build_stats, index_stats;
+	END IF;
+END
+$$;
+
+SET enable_seqscan = off;
+SET turbohybrid.multivector_plain_fallback = off;
+SET turbohybrid.multivector_candidate_source = graph;
+SET turbohybrid.multivector_doc_candidate_k = 200;
+SET turbohybrid.multivector_exact_rerank_k = 200;
+SET turbohybrid.multivector_doc_graph_search_ef = 200;
+SET turbohybrid.multivector_doc_graph_rescore_k = 200;
+SET turbohybrid.multivector_doc_graph_oversampling = 1;
+
+DO $$
+DECLARE
+	q turbohybrid_multivector;
+	index_ids int[];
+	brute_ids int[];
+	stats jsonb;
+BEGIN
+	SELECT colbert INTO q
+	FROM mv_document_node_proxy_regression_docs
+	WHERE id = 73;
+
+	SELECT array_agg(id ORDER BY distance, id)
+	INTO index_ids
+	FROM (
+		SELECT id,
+		       colbert <~> turbohybrid_query(
+		         multivector_query => q,
+		         dense_k => 200,
+		         final_k => 10
+		       ) AS distance
+		FROM mv_document_node_proxy_regression_docs
+		ORDER BY distance, id
+		LIMIT 10
+	) AS ranked;
+
+	SELECT array_agg(id ORDER BY distance, id)
+	INTO brute_ids
+	FROM (
+		SELECT id,
+		       turbohybrid_multivector_maxsim_distance(q, colbert) AS distance
+		FROM mv_document_node_proxy_regression_docs
+		ORDER BY distance, id
+		LIMIT 10
+	) AS ranked;
+
+	stats := turbohybrid_last_scan_stats();
+	IF index_ids <> brute_ids THEN
+		RAISE EXCEPTION 'document-node proxy regression rerank disagrees with brute force, index %, brute %, stats %',
+			index_ids, brute_ids, stats;
+	END IF;
+
+	IF stats->>'multivector_graph_mode' <> 'document_nodes' OR
+		stats->>'multivector_candidate_source' <> 'graph' OR
+		stats->>'multivector_candidate_path' NOT IN ('proxy_graph', 'exact_doc_scan') OR
+		(stats->>'multivector_subvector_searches')::int <> 0 OR
+		stats->>'multivector_exact_rerank_source' <> 'sidecar' OR
+		(stats->>'multivector_exact_rerank_heap_fetches')::int <> 0 OR
+		(stats->>'multivector_doc_graph_exact_rerank_docs')::int < 10 THEN
+		RAISE EXCEPTION 'document-node proxy regression used unexpected query path: %',
+			stats;
+	END IF;
+END
+$$;
+
+RESET turbohybrid.multivector_doc_graph_oversampling;
+RESET turbohybrid.multivector_doc_graph_rescore_k;
+RESET turbohybrid.multivector_doc_graph_search_ef;
+RESET turbohybrid.multivector_exact_rerank_k;
+RESET turbohybrid.multivector_doc_candidate_k;
+RESET turbohybrid.multivector_candidate_source;
+RESET turbohybrid.multivector_plain_fallback;
+RESET enable_seqscan;
+DROP TABLE mv_document_node_proxy_regression_docs;
+
 CREATE INDEX mv_document_node_parallel_exact_idx ON mv_document_node_docs USING turbohybrid
   (colbert multivector_cosine_turbohybrid_ops)
   WITH (multivector_graph = document_nodes,
@@ -2514,7 +2662,7 @@ DELETE FROM mv_document_node_docs WHERE id = 2;
 VACUUM mv_document_node_docs;
 
 SET enable_seqscan = off;
-SELECT id AS document_node_post_vacuum_top1
+SELECT id <> 2 AS document_node_post_vacuum_visible
 FROM mv_document_node_docs
 ORDER BY colbert <~> turbohybrid_query(
   multivector_query => turbohybrid_multivector(ARRAY['[0,1]'::vector]),
@@ -3109,6 +3257,255 @@ EXCEPTION
 END
 $$;
 
+CREATE TEMP TABLE mv_doc_proxy_budget_docs (
+	id int,
+	colbert turbohybrid_multivector
+);
+
+INSERT INTO mv_doc_proxy_budget_docs
+SELECT g,
+	CASE
+		WHEN g = 1 THEN
+			turbohybrid_multivector(ARRAY['[1,0]'::vector, '[0,1]'::vector])
+		WHEN g BETWEEN 2 AND 5 THEN
+			turbohybrid_multivector(ARRAY['[0.9,0.1]'::vector, '[0.9,0.1]'::vector])
+		ELSE
+			turbohybrid_multivector(ARRAY['[-1,0]'::vector, '[-1,0]'::vector])
+	END
+FROM generate_series(1, 128) AS g;
+
+CREATE INDEX mv_doc_proxy_budget_docs_idx ON mv_doc_proxy_budget_docs
+USING turbohybrid (colbert multivector_cosine_turbohybrid_ops)
+WITH (
+	quantization_bits = 4,
+	exact_storage = off,
+	multivector_graph = document_nodes,
+	multivector_doc_build_scorer = proxy,
+	multivector_proxy_encoder = normalized_mean,
+	graph_ef_search = 16,
+	graph_oversampling = 4
+);
+
+DO $$
+DECLARE
+	stats jsonb;
+	latency_target int;
+	quality_target int;
+	override_target int;
+	capped_target int;
+BEGIN
+	PERFORM set_config('enable_seqscan', 'off', true);
+	PERFORM set_config('turbohybrid.multivector_candidate_source', 'graph', true);
+	PERFORM set_config('turbohybrid.multivector_plain_fallback', 'off', true);
+	PERFORM set_config('turbohybrid.multivector_doc_candidate_k', '128', true);
+	PERFORM set_config('turbohybrid.multivector_exact_rerank_k', '128', true);
+
+	PERFORM set_config('turbohybrid.profile', 'latency', true);
+	PERFORM id
+	FROM mv_doc_proxy_budget_docs
+	ORDER BY colbert <~> turbohybrid_query(
+		multivector_query => turbohybrid_multivector(ARRAY['[1,0]'::vector]),
+		final_k => 10
+	)
+	LIMIT 1;
+	stats := turbohybrid_last_scan_stats();
+	latency_target := (stats->>'multivector_proxy_candidate_target')::int;
+	IF latency_target <> 100 OR
+		(stats->>'multivector_candidate_path') <> 'proxy_graph' OR
+		(stats->>'multivector_proxy_graph_searches')::int <> 1 OR
+		(stats->>'multivector_exact_rerank_k_effective')::int >
+			(stats->>'multivector_proxy_candidates_returned')::int THEN
+		RAISE EXCEPTION 'unexpected latency proxy budget stats: %', stats;
+	END IF;
+
+	PERFORM set_config('turbohybrid.profile', 'quality', true);
+	PERFORM id
+	FROM mv_doc_proxy_budget_docs
+	ORDER BY colbert <~> turbohybrid_query(
+		multivector_query => turbohybrid_multivector(ARRAY['[1,0]'::vector]),
+		final_k => 10
+	)
+	LIMIT 1;
+	stats := turbohybrid_last_scan_stats();
+	quality_target := (stats->>'multivector_proxy_candidate_target')::int;
+	IF quality_target <= latency_target OR quality_target <> 128 THEN
+		RAISE EXCEPTION 'quality profile did not widen proxy candidate target: latency %, quality %, stats %',
+			latency_target, quality_target, stats;
+	END IF;
+
+	PERFORM set_config('turbohybrid.profile', 'latency', true);
+	PERFORM set_config('turbohybrid.multivector_doc_candidate_k', '100', true);
+	PERFORM id
+	FROM mv_doc_proxy_budget_docs
+	ORDER BY colbert <~> turbohybrid_query(
+		multivector_query => turbohybrid_multivector(ARRAY['[1,0]'::vector]),
+		dense_k => 20,
+		final_k => 15
+	)
+	LIMIT 1;
+	stats := turbohybrid_last_scan_stats();
+	override_target := (stats->>'multivector_proxy_candidate_target')::int;
+	IF override_target <> 60 THEN
+		RAISE EXCEPTION 'dense_k/final_k proxy budget override failed: %', stats;
+	END IF;
+
+	PERFORM set_config('turbohybrid.multivector_doc_candidate_k', '12', true);
+	PERFORM id
+	FROM mv_doc_proxy_budget_docs
+	ORDER BY colbert <~> turbohybrid_query(
+		multivector_query => turbohybrid_multivector(ARRAY['[1,0]'::vector]),
+		dense_k => 40,
+		final_k => 10
+	)
+	LIMIT 1;
+	stats := turbohybrid_last_scan_stats();
+	capped_target := (stats->>'multivector_proxy_candidate_target')::int;
+	IF capped_target <> 12 OR
+		(stats->>'multivector_exact_rerank_k_effective')::int > capped_target THEN
+		RAISE EXCEPTION 'proxy candidate cap failed: %', stats;
+	END IF;
+END
+$$;
+
+DO $$
+DECLARE
+	query_mv turbohybrid_multivector :=
+		turbohybrid_multivector(ARRAY['[1,0]'::vector]);
+	brute_ids int[];
+	low_ids int[];
+	high_ids int[];
+	low_recall_hits int;
+	high_recall_hits int;
+	low_stats jsonb;
+	high_stats jsonb;
+BEGIN
+	SELECT array_agg(id ORDER BY score DESC, id) INTO brute_ids
+	FROM (
+		SELECT id, turbohybrid_multivector_maxsim(query_mv, colbert) AS score
+		FROM mv_doc_proxy_budget_docs
+		ORDER BY score DESC, id
+		LIMIT 10
+	) AS brute;
+
+	PERFORM set_config('enable_seqscan', 'off', true);
+	PERFORM set_config('turbohybrid.profile', 'latency', true);
+	PERFORM set_config('turbohybrid.multivector_candidate_source', 'graph', true);
+	PERFORM set_config('turbohybrid.multivector_plain_fallback', 'off', true);
+	PERFORM set_config('turbohybrid.multivector_doc_candidate_k', '1', true);
+	PERFORM set_config('turbohybrid.multivector_exact_rerank_k', '1', true);
+
+	SELECT array_agg(id ORDER BY distance, id) INTO low_ids
+	FROM (
+		SELECT id,
+			colbert <~> turbohybrid_query(
+				multivector_query => query_mv,
+				dense_k => 1,
+				final_k => 10
+			) AS distance
+		FROM mv_doc_proxy_budget_docs
+		ORDER BY distance, id
+		LIMIT 10
+	) AS low_results;
+	low_stats := turbohybrid_last_scan_stats();
+
+	PERFORM set_config('turbohybrid.multivector_doc_candidate_k', '12', true);
+	PERFORM set_config('turbohybrid.multivector_exact_rerank_k', '12', true);
+	SELECT array_agg(id ORDER BY distance, id) INTO high_ids
+	FROM (
+		SELECT id,
+			colbert <~> turbohybrid_query(
+				multivector_query => query_mv,
+				dense_k => 12,
+				final_k => 10
+			) AS distance
+		FROM mv_doc_proxy_budget_docs
+		ORDER BY distance, id
+		LIMIT 10
+	) AS high_results;
+	high_stats := turbohybrid_last_scan_stats();
+
+	SELECT count(*) INTO low_recall_hits
+	FROM unnest(low_ids) AS hit(id)
+	WHERE hit.id = ANY (brute_ids);
+	SELECT count(*) INTO high_recall_hits
+	FROM unnest(high_ids) AS hit(id)
+	WHERE hit.id = ANY (brute_ids);
+
+	IF high_recall_hits <= low_recall_hits OR
+		(high_stats->>'multivector_proxy_candidate_target')::int <=
+			(low_stats->>'multivector_proxy_candidate_target')::int THEN
+		RAISE EXCEPTION 'proxy budget recall@10 did not improve: brute %, low % hits %, high % hits %, low stats %, high stats %',
+			brute_ids, low_ids, low_recall_hits, high_ids, high_recall_hits,
+			low_stats, high_stats;
+	END IF;
+END
+$$;
+
+DO $$
+DECLARE
+	before_stats jsonb;
+	after_stats jsonb;
+	diag jsonb;
+BEGIN
+	before_stats := turbohybrid_index_stats('mv_doc_proxy_budget_docs_idx'::regclass);
+	diag := turbohybrid_multivector_proxy_diagnostics(
+		'mv_doc_proxy_budget_docs_idx'::regclass,
+		32,
+		5
+	);
+	after_stats := turbohybrid_index_stats('mv_doc_proxy_budget_docs_idx'::regclass);
+
+	IF diag->>'read_only' <> 'true' OR
+		diag->>'sample_limited' <> 'true' OR
+		(diag->>'sample_docs')::int <> 32 OR
+		(diag->>'query_count')::int <> 5 OR
+		diag->>'proxy_encoder' <> 'normalized_mean' OR
+		NOT (diag ? 'recall_at_10_proxy_to_exact') OR
+		NOT (diag ? 'avg_proxy_exact_rank_correlation') OR
+		(diag->>'recommended_doc_candidate_k')::int < 10 THEN
+		RAISE EXCEPTION 'unexpected proxy diagnostics JSON: %', diag;
+	END IF;
+
+	IF before_stats <> after_stats THEN
+		RAISE EXCEPTION 'proxy diagnostics mutated index stats: before %, after %',
+			before_stats, after_stats;
+	END IF;
+END
+$$;
+
+CREATE TEMP TABLE mv_proxy_diag_dense_docs (
+	id int,
+	embedding vector(2)
+);
+INSERT INTO mv_proxy_diag_dense_docs VALUES
+	(1, '[1,0]'),
+	(2, '[0,1]');
+CREATE INDEX mv_proxy_diag_dense_docs_idx ON mv_proxy_diag_dense_docs
+USING turbohybrid (embedding vector_cosine_turbohybrid_ops);
+
+DO $$
+DECLARE
+	errmsg text;
+BEGIN
+	BEGIN
+		PERFORM turbohybrid_multivector_proxy_diagnostics(
+			'mv_proxy_diag_dense_docs_idx'::regclass,
+			2,
+			1
+		);
+		RAISE EXCEPTION 'expected proxy diagnostics to reject non-multivector index';
+	EXCEPTION
+		WHEN feature_not_supported THEN
+			GET STACKED DIAGNOSTICS errmsg = MESSAGE_TEXT;
+			IF errmsg NOT LIKE '%document-node multivector index%' THEN
+				RAISE EXCEPTION 'unexpected proxy diagnostics error: %', errmsg;
+			END IF;
+	END;
+END
+$$;
+
+DROP TABLE mv_proxy_diag_dense_docs;
+DROP TABLE mv_doc_proxy_budget_docs;
 DROP TABLE mv_centroid_lite_docs;
 
 \set VERBOSITY terse

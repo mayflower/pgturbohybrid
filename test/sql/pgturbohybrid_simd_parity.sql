@@ -128,44 +128,112 @@ DECLARE
     tolerance float8;
 BEGIN
     FOREACH dims IN ARRAY ARRAY[1, 2, 3, 8, 15, 16, 31, 32, 96, 128] LOOP
-        query_count := 1 + (dims % 3);
-        doc_count := 2 + (dims % 4);
-        query_mv := simd_parity_multivector(query_count, dims, 0.125);
-        doc_mv := simd_parity_multivector(doc_count, dims, -0.75);
+        FOREACH query_count IN ARRAY ARRAY[1, 2, 8, 32] LOOP
+            FOREACH doc_count IN ARRAY ARRAY[1, 4, 64, 128] LOOP
+                query_mv := simd_parity_multivector(query_count, dims, 0.125);
+                doc_mv := simd_parity_multivector(doc_count, dims, -0.75);
 
-        PERFORM set_config('turbohybrid.simd', 'off', false);
-        scalar_score := turbohybrid_multivector_maxsim_scalar(query_mv, doc_mv);
-        blocked_score := turbohybrid_multivector_maxsim_blocked_scalar(query_mv, doc_mv);
-        fallback_score := turbohybrid_multivector_maxsim(query_mv, doc_mv);
+                PERFORM set_config('turbohybrid.simd', 'off', false);
+                scalar_score := turbohybrid_multivector_maxsim_scalar(query_mv, doc_mv);
+                blocked_score := turbohybrid_multivector_maxsim_blocked_scalar(query_mv, doc_mv);
+                fallback_score := turbohybrid_multivector_maxsim(query_mv, doc_mv);
 
-        tolerance := 1e-12 * greatest(1.0, abs(scalar_score));
-        IF abs(scalar_score - blocked_score) > tolerance THEN
-            RAISE EXCEPTION
-                'multivector blocked scalar parity failed for dim %, q %, d %: scalar %, blocked %, tolerance %',
-                dims, query_count, doc_count, scalar_score, blocked_score, tolerance;
-        END IF;
-        IF abs(scalar_score - fallback_score) > tolerance THEN
-            RAISE EXCEPTION
-                'multivector scalar fallback parity failed for dim %, q %, d %: scalar %, fallback %, tolerance %',
-                dims, query_count, doc_count, scalar_score, fallback_score, tolerance;
-        END IF;
+                tolerance := 1e-12 * greatest(1.0, abs(scalar_score));
+                IF abs(scalar_score - blocked_score) > tolerance THEN
+                    RAISE EXCEPTION
+                        'multivector blocked scalar parity failed for dim %, q %, d %: scalar %, blocked %, tolerance %',
+                        dims, query_count, doc_count, scalar_score, blocked_score, tolerance;
+                END IF;
+                IF abs(scalar_score - fallback_score) > tolerance THEN
+                    RAISE EXCEPTION
+                        'multivector scalar fallback parity failed for dim %, q %, d %: scalar %, fallback %, tolerance %',
+                        dims, query_count, doc_count, scalar_score, fallback_score, tolerance;
+                END IF;
 
-        PERFORM set_config('turbohybrid.simd', 'on', false);
-        simd_score := turbohybrid_multivector_maxsim(query_mv, doc_mv);
+                PERFORM set_config('turbohybrid.simd', 'on', false);
+                simd_score := turbohybrid_multivector_maxsim(query_mv, doc_mv);
 
-        tolerance := 1e-5 * greatest(1.0, abs(scalar_score));
-        IF abs(scalar_score - simd_score) > tolerance THEN
-            RAISE EXCEPTION
-                'multivector SIMD parity failed for dim %, q %, d %: scalar %, simd %, tolerance %',
-                dims, query_count, doc_count, scalar_score, simd_score, tolerance;
-        END IF;
+                tolerance := 1e-5 * greatest(1.0, abs(scalar_score));
+                IF abs(scalar_score - simd_score) > tolerance THEN
+                    RAISE EXCEPTION
+                        'multivector SIMD parity failed for dim %, q %, d %: scalar %, simd %, tolerance %',
+                        dims, query_count, doc_count, scalar_score, simd_score, tolerance;
+                END IF;
+            END LOOP;
+        END LOOP;
     END LOOP;
 
     RESET turbohybrid.simd;
 END $$;
 
+CREATE TABLE simd_parity_mv_docs (
+    id int PRIMARY KEY,
+    colbert turbohybrid_multivector
+);
+
+INSERT INTO simd_parity_mv_docs
+SELECT g, simd_parity_multivector(4, 128, g * 0.25)
+FROM generate_series(1, 16) g;
+
+CREATE INDEX simd_parity_mv_idx ON simd_parity_mv_docs
+    USING turbohybrid (colbert multivector_cosine_turbohybrid_ops)
+    WITH (quantization_bits = 4, exact_storage = off);
+
+DO $$
+DECLARE
+    q turbohybrid_multivector := simd_parity_multivector(4, 128, -0.125);
+    st jsonb;
+    kernel text;
+BEGIN
+    PERFORM set_config('turbohybrid.multivector_plain_fallback', 'off', false);
+    PERFORM set_config('turbohybrid.multivector_exact_rerank', 'topk', false);
+    PERFORM set_config('turbohybrid.multivector_exact_rerank_k', '16', false);
+
+    PERFORM set_config('turbohybrid.simd', 'off', false);
+    PERFORM id
+    FROM simd_parity_mv_docs
+    ORDER BY colbert <~> turbohybrid_query(
+        multivector_query => q,
+        dense_k => 16,
+        final_k => 5
+    )
+    LIMIT 5;
+
+    st := turbohybrid_last_scan_stats();
+    kernel := st->>'multivector_exact_kernel';
+    IF kernel <> 'scalar' OR
+        (st->>'multivector_exact_rerank_docs')::int <= 0 THEN
+        RAISE EXCEPTION 'expected forced scalar multivector exact kernel, got %',
+            st;
+    END IF;
+
+    PERFORM set_config('turbohybrid.simd', 'on', false);
+    PERFORM id
+    FROM simd_parity_mv_docs
+    ORDER BY colbert <~> turbohybrid_query(
+        multivector_query => q,
+        dense_k => 16,
+        final_k => 5
+    )
+    LIMIT 5;
+
+    st := turbohybrid_last_scan_stats();
+    kernel := st->>'multivector_exact_kernel';
+    IF kernel NOT IN ('blocked_scalar', 'blocked_avx2', 'blocked_neon', 'blocked_avx512') OR
+        (st->>'multivector_exact_rerank_docs')::int <= 0 THEN
+        RAISE EXCEPTION 'expected blocked multivector exact kernel, got %',
+            st;
+    END IF;
+
+    RESET turbohybrid.simd;
+    RESET turbohybrid.multivector_plain_fallback;
+    RESET turbohybrid.multivector_exact_rerank;
+    RESET turbohybrid.multivector_exact_rerank_k;
+END $$;
+
 SELECT 'simd_parity_ok' AS result;
 
+DROP TABLE simd_parity_mv_docs;
 DROP FUNCTION simd_parity_multivector(int, int, float8);
 DROP FUNCTION simd_parity_ids();
 DROP TABLE simd_parity_docs;

@@ -202,10 +202,12 @@ normal document-node graph path and requires `--multivector-graph document_nodes
 uses the persisted fixed-dimensional proxy encoder as the single-vector
 TurboQuant graph key for admission, then exact-reranks admitted documents with
 full MaxSim. Use it with `--multivector-graph document_nodes`.
-`--multivector-proxy-encoder mean_pool|max_pool|random_projection_fde`
-selects the proxy encoder for the index build; `mean_pool` preserves the old
-representative-vector behavior. The admission grid can compare encoders with
-`--document-node-proxy-encoder-grid mean_pool,max_pool,random_projection_fde`.
+`--multivector-proxy-encoder normalized_mean|first_token|centroid_mean|mean_pool|max_pool|random_projection_fde`
+selects the proxy encoder for the index build; `normalized_mean` is the default
+document proxy, `centroid_mean` requires `--multivector-centroids kmeans`, and
+`mean_pool` remains a compatibility encoder. The admission grid can compare
+encoders with
+`--document-node-proxy-encoder-grid normalized_mean,centroid_mean,max_pool,random_projection_fde`.
 Proxy scans report `proxy_encoder_kind`, `proxy_candidates`,
 `proxy_top1_admission`, and `proxy_exact_rerank_docs`.
 
@@ -553,6 +555,8 @@ ON passages USING turbohybrid
   (colbert multivector_maxsim_ip_turbohybrid_ops)
 WITH (
   multivector_graph = document_nodes,
+  multivector_doc_build_scorer = proxy,
+  exact_storage = off,
   multivector_context_mode = context_level,
   multivector_field_mode = weighted
 );
