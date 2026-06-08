@@ -1,6 +1,8 @@
 #include "postgres.h"
 
+#include <float.h>
 #include <limits.h>
+#include <math.h>
 #include <string.h>
 
 #include "access/genam.h"
@@ -8,6 +10,7 @@
 #include "fmgr.h"
 #include "pgturbohybrid.h"
 #include "lib/stringinfo.h"
+#include "pgturbohybrid_multivector.h"
 #include "pgturbohybrid_quant.h"
 #include "pgturbohybrid_am.h"
 #include "pgturbohybrid_bm25.h"
@@ -199,6 +202,49 @@ static int pgturbohybrid_last_graph_simd_force = PGTURBOHYBRID_SIMD_FORCE_AUTO;
 static PgturbohybridNativeBuildStatsSnapshot pgturbohybrid_last_native_build_stats;
 static bool pgturbohybrid_last_native_build_stats_valid = false;
 static PgturbohybridGraphDocInsertStats pgturbohybrid_last_doc_insert_stats;
+
+typedef struct PgturbohybridMultiVectorProxyDiagnosticScore
+{
+	uint32		sampleIndex;
+	double		score;
+} PgturbohybridMultiVectorProxyDiagnosticScore;
+
+typedef struct PgturbohybridMultiVectorProxyDiagnosticResult
+{
+	uint32		corpusDocs;
+	uint32		sampleDocsRequested;
+	uint32		queryCountRequested;
+	uint32		sampleDocs;
+	uint32		queryCount;
+	uint32		dimensions;
+	double		avgDocTokens;
+	int			proxyEncoder;
+	double		recallAt10ProxyToExact;
+	double		avgProxyExactRankCorrelation;
+	uint32		recommendedDocCandidateK;
+	uint64		exactPairsScored;
+	uint64		proxyPairsScored;
+} PgturbohybridMultiVectorProxyDiagnosticResult;
+
+static int
+PgturbohybridMultiVectorProxyDiagnosticScoreCompare(const void *a,
+													const void *b)
+{
+	const PgturbohybridMultiVectorProxyDiagnosticScore *sa =
+		(const PgturbohybridMultiVectorProxyDiagnosticScore *) a;
+	const PgturbohybridMultiVectorProxyDiagnosticScore *sb =
+		(const PgturbohybridMultiVectorProxyDiagnosticScore *) b;
+
+	if (sa->score > sb->score)
+		return -1;
+	if (sa->score < sb->score)
+		return 1;
+	if (sa->sampleIndex < sb->sampleIndex)
+		return -1;
+	if (sa->sampleIndex > sb->sampleIndex)
+		return 1;
+	return 0;
+}
 
 static void
 PgturbohybridJsonbAddKey(PgturbohybridJsonbState *state, const char *key)
@@ -2681,6 +2727,301 @@ pgturbohybrid_graph_repair_dry_run(PG_FUNCTION_ARGS)
 	PG_RETURN_JSONB_P(PgturbohybridJsonbEndObject(&state));
 }
 
+FUNCTION_PREFIX PG_FUNCTION_INFO_V1(pgturbohybrid_multivector_proxy_diagnostics);
+FUNCTION_PREFIX Datum
+pgturbohybrid_multivector_proxy_diagnostics(PG_FUNCTION_ARGS)
+{
+	Oid			indexOid = PG_GETARG_OID(0);
+	int32		sampleDocsArg = PG_GETARG_INT32(1);
+	int32		queryCountArg = PG_GETARG_INT32(2);
+	Relation	index = NULL;
+	PgturbohybridGraphMetaPageData meta;
+	PgturbohybridGraphScanStorage storage;
+	PgturbohybridMultiVectorDocSidecarAccessStats sidecarStats;
+	PgturbohybridOptions *opts;
+	MemoryContext workCtx = NULL;
+	MemoryContext oldCtx = NULL;
+	PgturbohybridMultiVectorProxyDiagnosticResult result;
+	PgturbohybridJsonbState state;
+
+	memset(&result, 0, sizeof(result));
+	memset(&storage, 0, sizeof(storage));
+	memset(&sidecarStats, 0, sizeof(sidecarStats));
+
+	if (sampleDocsArg < 2 || sampleDocsArg > 10000)
+		ereport(ERROR,
+				(errcode(ERRCODE_INVALID_PARAMETER_VALUE),
+				 errmsg("sample_docs must be between 2 and 10000"),
+				 errhint("Use a bounded sample; this diagnostic is intentionally not a full-corpus benchmark.")));
+	if (queryCountArg < 1 || queryCountArg > 1000)
+		ereport(ERROR,
+				(errcode(ERRCODE_INVALID_PARAMETER_VALUE),
+				 errmsg("query_count must be between 1 and 1000"),
+				 errhint("Use a bounded query sample; this diagnostic is intentionally not a full-corpus benchmark.")));
+
+	index = index_open(indexOid, AccessShareLock);
+	workCtx = AllocSetContextCreate(CurrentMemoryContext,
+									"pgturbohybrid multivector proxy diagnostics",
+									ALLOCSET_DEFAULT_SIZES);
+
+	PG_TRY();
+	{
+		uint32		sampleDocs;
+		uint32		queryCount;
+		uint32	   *docIds;
+		PgturbohybridMultiVector **docs;
+		Vector	  **proxies;
+		PgturbohybridMultiVectorProxyDiagnosticScore *exactScores;
+		PgturbohybridMultiVectorProxyDiagnosticScore *proxyScores;
+		int		   *exactRanks;
+		int		   *proxyRanks;
+		double		tokenSum = 0.0;
+		double		recallSum = 0.0;
+		double		correlationSum = 0.0;
+		uint32		correlationCount = 0;
+		uint32		recommendedK = 0;
+
+		if (RelationGetForm(index)->relkind != RELKIND_INDEX &&
+			RelationGetForm(index)->relkind != RELKIND_PARTITIONED_INDEX)
+			ereport(ERROR,
+					(errcode(ERRCODE_WRONG_OBJECT_TYPE),
+					 errmsg("\"%s\" is not an index",
+							RelationGetRelationName(index))));
+		if (!PgturbohybridGraphReadMeta(index, &meta))
+			ereport(ERROR,
+					(errcode(ERRCODE_WRONG_OBJECT_TYPE),
+					 errmsg("\"%s\" is not a valid pgturbohybrid index",
+							RelationGetRelationName(index))));
+		if (meta.tqMultivectorGraphMode !=
+			PGTURBOHYBRID_MULTIVECTOR_GRAPH_DOCUMENT_NODES ||
+			meta.tqMultivectorDocCount == 0 ||
+			!BlockNumberIsValid(meta.tqMultivectorDocMapStartBlkno))
+			ereport(ERROR,
+					(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
+					 errmsg("\"%s\" is not a document-node multivector index",
+							RelationGetRelationName(index)),
+					 errhint("Create the index with multivector_graph = document_nodes so document proxies and sidecar multivectors are available.")));
+
+		opts = (PgturbohybridOptions *) index->rd_options;
+		result.corpusDocs = meta.tqMultivectorDocCount;
+		result.sampleDocsRequested = (uint32) sampleDocsArg;
+		result.queryCountRequested = (uint32) queryCountArg;
+		result.dimensions = meta.dimensions;
+		result.proxyEncoder =
+			opts != NULL ? opts->multivectorProxyEncoder :
+			PGTURBOHYBRID_DEFAULT_MULTIVECTOR_PROXY_ENCODER;
+		sampleDocs =
+			Min((uint32) sampleDocsArg, meta.tqMultivectorDocCount);
+		if (sampleDocs < 2)
+			ereport(ERROR,
+					(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
+					 errmsg("document-node multivector diagnostics require at least two documents")));
+		queryCount = Min((uint32) queryCountArg, sampleDocs);
+
+		oldCtx = MemoryContextSwitchTo(workCtx);
+		docIds = palloc0(sizeof(uint32) * (Size) sampleDocs);
+		docs = palloc0(sizeof(PgturbohybridMultiVector *) * (Size) sampleDocs);
+		proxies = palloc0(sizeof(Vector *) * (Size) sampleDocs);
+		exactScores =
+			palloc0(sizeof(PgturbohybridMultiVectorProxyDiagnosticScore) *
+					(Size) sampleDocs);
+		proxyScores =
+			palloc0(sizeof(PgturbohybridMultiVectorProxyDiagnosticScore) *
+					(Size) sampleDocs);
+		exactRanks = palloc0(sizeof(int) * (Size) sampleDocs);
+		proxyRanks = palloc0(sizeof(int) * (Size) sampleDocs);
+		PgturbohybridGraphInitScanStorage(index, &meta, &storage, NULL);
+		storage.ctx = workCtx;
+		if (!PgturbohybridGraphLoadMultiVectorDocMapWithStats(index, &meta,
+															  &storage,
+															  false,
+															  &sidecarStats) ||
+			!storage.multivectorDocMapLoaded ||
+			!storage.multivectorDocVectorsLoaded)
+			ereport(ERROR,
+					(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
+					 errmsg("document-node multivector sidecar is not available"),
+					 errhint("REINDEX with multivector_graph = document_nodes to rebuild the document sidecar.")));
+
+		for (uint32 i = 0; i < sampleDocs; i++)
+		{
+			uint64		docId =
+				((uint64) i * (uint64) meta.tqMultivectorDocCount) /
+				(uint64) sampleDocs;
+
+			if (docId >= meta.tqMultivectorDocCount)
+				docId = meta.tqMultivectorDocCount - 1;
+			if (i > 0 && docId <= docIds[i - 1] &&
+				docIds[i - 1] + 1 < meta.tqMultivectorDocCount)
+				docId = docIds[i - 1] + 1;
+			docIds[i] = (uint32) docId;
+			docs[i] =
+				PgturbohybridGraphLoadMultiVectorDocVector(index, &meta,
+														   &storage,
+														   docIds[i],
+														   workCtx,
+														   &sidecarStats);
+			proxies[i] =
+				PgturbohybridMultiVectorBuildProxyVector(docs[i],
+														 result.proxyEncoder,
+														 workCtx);
+			tokenSum += (double) docs[i]->count;
+		}
+
+		for (uint32 qi = 0; qi < queryCount; qi++)
+		{
+			uint32		querySampleIndex =
+				(uint32) (((uint64) qi * (uint64) sampleDocs) /
+						  (uint64) queryCount);
+			uint32		topK = Min((uint32) 10, sampleDocs - 1);
+			uint32		hits = 0;
+			uint32		queryRequiredK = topK;
+			uint32		rank;
+			uint32		rankableCount = sampleDocs - 1;
+			double		rankDiffSquaredSum = 0.0;
+
+			if (querySampleIndex >= sampleDocs)
+				querySampleIndex = sampleDocs - 1;
+			memset(exactRanks, 0, sizeof(int) * (Size) sampleDocs);
+			memset(proxyRanks, 0, sizeof(int) * (Size) sampleDocs);
+
+			for (uint32 di = 0; di < sampleDocs; di++)
+			{
+				exactScores[di].sampleIndex = di;
+				proxyScores[di].sampleIndex = di;
+				if (di == querySampleIndex)
+				{
+					exactScores[di].score = -DBL_MAX;
+					proxyScores[di].score = -DBL_MAX;
+					continue;
+				}
+				result.exactPairsScored +=
+					(uint64) docs[querySampleIndex]->count *
+					(uint64) docs[di]->count;
+				result.proxyPairsScored++;
+				exactScores[di].score =
+					TqMultiVectorMaxSim(docs[querySampleIndex], docs[di]);
+				proxyScores[di].score =
+					TqDotProductF32Scalar(proxies[querySampleIndex]->x,
+										  proxies[di]->x,
+										  proxies[querySampleIndex]->dim);
+			}
+
+			qsort(exactScores, sampleDocs, sizeof(*exactScores),
+				  PgturbohybridMultiVectorProxyDiagnosticScoreCompare);
+			qsort(proxyScores, sampleDocs, sizeof(*proxyScores),
+				  PgturbohybridMultiVectorProxyDiagnosticScoreCompare);
+
+			rank = 1;
+			for (uint32 i = 0; i < sampleDocs; i++)
+			{
+				if (exactScores[i].sampleIndex == querySampleIndex)
+					continue;
+				exactRanks[exactScores[i].sampleIndex] = (int) rank++;
+			}
+			rank = 1;
+			for (uint32 i = 0; i < sampleDocs; i++)
+			{
+				if (proxyScores[i].sampleIndex == querySampleIndex)
+					continue;
+				proxyRanks[proxyScores[i].sampleIndex] = (int) rank++;
+			}
+
+			for (uint32 i = 0; i < topK; i++)
+			{
+				uint32		sampleIndex = exactScores[i].sampleIndex;
+				int			proxyRank = proxyRanks[sampleIndex];
+
+				if (proxyRank > 0 && proxyRank <= (int) topK)
+					hits++;
+				if (proxyRank > (int) queryRequiredK)
+					queryRequiredK = (uint32) proxyRank;
+			}
+			if (queryRequiredK > recommendedK)
+				recommendedK = queryRequiredK;
+			recallSum += (double) hits / (double) topK;
+
+			if (rankableCount > 1)
+			{
+				for (uint32 di = 0; di < sampleDocs; di++)
+				{
+					double		diff;
+
+					if (di == querySampleIndex)
+						continue;
+					diff = (double) exactRanks[di] - (double) proxyRanks[di];
+					rankDiffSquaredSum += diff * diff;
+				}
+				correlationSum +=
+					1.0 -
+					(6.0 * rankDiffSquaredSum) /
+					((double) rankableCount *
+					 ((double) rankableCount * (double) rankableCount - 1.0));
+				correlationCount++;
+			}
+		}
+		MemoryContextSwitchTo(oldCtx);
+
+		result.sampleDocs = sampleDocs;
+		result.queryCount = queryCount;
+		result.avgDocTokens = tokenSum / (double) sampleDocs;
+		result.recallAt10ProxyToExact = recallSum / (double) queryCount;
+		result.avgProxyExactRankCorrelation =
+			correlationCount > 0 ? correlationSum / (double) correlationCount :
+			0.0;
+		result.recommendedDocCandidateK =
+			Max(recommendedK, Min((uint32) 10, sampleDocs - 1));
+	}
+	PG_CATCH();
+	{
+		if (oldCtx != NULL)
+			MemoryContextSwitchTo(oldCtx);
+		if (index != NULL)
+			index_close(index, AccessShareLock);
+		if (workCtx != NULL)
+			MemoryContextDelete(workCtx);
+		PG_RE_THROW();
+	}
+	PG_END_TRY();
+
+	index_close(index, AccessShareLock);
+	if (workCtx != NULL)
+		MemoryContextDelete(workCtx);
+
+	PgturbohybridJsonbStateInit(&state);
+	PgturbohybridJsonbBeginObject(&state);
+	PgturbohybridJsonbAddInt64(&state, "version", 1);
+	PgturbohybridJsonbAddBool(&state, "read_only", true);
+	PgturbohybridJsonbAddBool(&state, "sample_limited", true);
+	PgturbohybridJsonbAddBool(&state, "excludes_self_match", true);
+	PgturbohybridJsonbAddInt64(&state, "corpus_docs", result.corpusDocs);
+	PgturbohybridJsonbAddInt64(&state, "sample_docs_requested",
+							   result.sampleDocsRequested);
+	PgturbohybridJsonbAddInt64(&state, "query_count_requested",
+							   result.queryCountRequested);
+	PgturbohybridJsonbAddInt64(&state, "sample_docs", result.sampleDocs);
+	PgturbohybridJsonbAddInt64(&state, "query_count", result.queryCount);
+	PgturbohybridJsonbAddInt64(&state, "dimensions", result.dimensions);
+	PgturbohybridJsonbAddFloat8(&state, "avg_doc_tokens",
+								result.avgDocTokens);
+	PgturbohybridJsonbAddString(&state, "proxy_encoder",
+								PgturbohybridMultiVectorProxyEncoderName(
+									result.proxyEncoder));
+	PgturbohybridJsonbAddFloat8(&state, "recall_at_10_proxy_to_exact",
+								result.recallAt10ProxyToExact);
+	PgturbohybridJsonbAddFloat8(&state,
+								"avg_proxy_exact_rank_correlation",
+								result.avgProxyExactRankCorrelation);
+	PgturbohybridJsonbAddInt64(&state, "recommended_doc_candidate_k",
+							   result.recommendedDocCandidateK);
+	PgturbohybridJsonbAddUint64(&state, "exact_pairs_scored",
+								result.exactPairsScored);
+	PgturbohybridJsonbAddUint64(&state, "proxy_pairs_scored",
+								result.proxyPairsScored);
+
+	PG_RETURN_JSONB_P(PgturbohybridJsonbEndObject(&state));
+}
+
 FUNCTION_PREFIX PG_FUNCTION_INFO_V1(pgturbohybrid_last_scan_stats);
 FUNCTION_PREFIX Datum
 pgturbohybrid_last_scan_stats(PG_FUNCTION_ARGS)
@@ -3244,6 +3585,12 @@ pgturbohybrid_last_scan_stats(PG_FUNCTION_ARGS)
 										"graph");
 		PgturbohybridJsonbAddUint64(&state, "multivector_proxy_graph_searches",
 									scanStats.multivectorProxyGraphSearches);
+		PgturbohybridJsonbAddInt64(&state, "multivector_proxy_candidate_target",
+								   scanStats.multivectorProxyCandidateTarget);
+		PgturbohybridJsonbAddInt64(&state, "multivector_proxy_candidates_returned",
+								   scanStats.multivectorProxyCandidatesReturned);
+		PgturbohybridJsonbAddInt64(&state, "multivector_exact_rerank_k_effective",
+								   scanStats.multivectorExactRerankKEffective);
 		PgturbohybridJsonbAddString(&state, "proxy_encoder_kind",
 									scanStats.multivectorProxyEncoderKind[0] != '\0' ?
 									scanStats.multivectorProxyEncoderKind : "none");
@@ -3261,6 +3608,12 @@ pgturbohybrid_last_scan_stats(PG_FUNCTION_ARGS)
 								scanStats.centroidPrunedDocs);
 	PgturbohybridJsonbAddInt64(&state, "centroid_candidates",
 							   scanStats.centroidCandidates);
+	PgturbohybridJsonbAddInt64(&state, "multivector_centroid_count",
+							   scanStats.multivectorCentroidCount);
+	PgturbohybridJsonbAddInt64(&state, "multivector_centroid_prerank_docs",
+							   scanStats.multivectorCentroidPrerankDocs);
+	PgturbohybridJsonbAddInt64(&state, "multivector_full_maxsim_rerank_docs",
+							   scanStats.multivectorFullMaxsimRerankDocs);
 	PgturbohybridJsonbAddUint64(&state, "quantized_inverted_lists_visited",
 								scanStats.quantizedInvertedListsVisited);
 	PgturbohybridJsonbAddUint64(&state, "quantized_inverted_postings_touched",

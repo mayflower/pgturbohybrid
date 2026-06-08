@@ -248,7 +248,7 @@ SET turbohybrid.multivector_max_raw_hits_per_token = 400;
 SET turbohybrid.multivector_adaptive_widening = 'auto'; -- off | auto | on
 SET turbohybrid.multivector_doc_candidate_k = 100;
 SET turbohybrid.multivector_candidate_source = 'graph'; -- graph | document_nodes | exact_token_scan | exact_doc_scan | doc_graph_prototype | proxy_vector | centroid_lite | quantized_inverted_experimental
-SET turbohybrid.multivector_proxy_encoder = 'mean_pool'; -- mean_pool | max_pool | random_projection_fde | learned_projection_placeholder
+SET turbohybrid.multivector_proxy_encoder = 'normalized_mean'; -- normalized_mean | first_token | centroid_mean | max_pool | random_projection_fde | learned_projection_placeholder
 SET turbohybrid.multivector_plain_fallback = 'auto'; -- auto | off | force
 SET turbohybrid.multivector_plain_fallback_max_docs = 1000;
 SET turbohybrid.multivector_plain_fallback_candidate_fraction = 0.5;
@@ -279,12 +279,20 @@ document-node index path described below. `document_nodes` is an explicit
 candidate-source alias that requires a document-node index. `proxy_vector` also
 requires `multivector_graph = document_nodes`; it uses the index-persisted
 fixed-dimensional proxy encoder as the single-vector graph key for admission
-and exact-reranks admitted documents with full MaxSim. `mean_pool` preserves the
-old representative-vector behavior. `max_pool` and `random_projection_fde` are
-additional pluggable encoders for DBpedia admission comparison, while
-`learned_projection_placeholder` fails explicitly until learned projection
-weights are configured. Scan stats expose `proxy_encoder_kind`,
-`proxy_candidates`, `proxy_top1_admission`, and `proxy_exact_rerank_docs`.
+and exact-reranks admitted documents with full MaxSim. `normalized_mean` is the
+default document proxy. `first_token`, `max_pool`, and
+`random_projection_fde` are additional pluggable encoders for DBpedia admission
+comparison, while `learned_projection_placeholder` fails explicitly until
+learned projection weights are configured. `centroid_mean` is an optional
+quality mode that keeps one graph node per document, requires
+`multivector_centroids = kmeans`, stores compact centroids in the sidecar, uses
+the normalized mean of those centroids as the graph proxy vector, and runs a
+bounded centroid MaxSim pre-rerank before the unchanged full-token exact MaxSim
+rerank. `multivector_centroid_count = 0` means auto. Scan stats expose
+`proxy_encoder_kind`, `proxy_candidates`, `proxy_top1_admission`,
+`proxy_exact_rerank_docs`, `multivector_centroid_count`,
+`multivector_centroid_prerank_docs`, and
+`multivector_full_maxsim_rerank_docs`.
 `centroid_lite` is an experimental PLAID-inspired candidate source for indexes
 built with `multivector_centroids = kmeans`. On document-node indexes, build
 and incremental insert persist deterministic document-local k-means centroid
@@ -323,7 +331,7 @@ WITH (
   multivector_graph = token_nodes,
   multivector_centroids = off,
   multivector_centroid_count = 0,
-  multivector_proxy_encoder = mean_pool,
+  multivector_proxy_encoder = normalized_mean,
   multivector_context_mode = flat,
   multivector_field_mode = off
 )

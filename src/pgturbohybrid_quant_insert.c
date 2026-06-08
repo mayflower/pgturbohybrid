@@ -2004,6 +2004,7 @@ PgturbohybridGraphInsertMultiVectorBatchInPlace(Relation index,
 {
 	PgturbohybridMultiVector *mv;
 	PgturbohybridMultiVector *indexedMv = NULL;
+	const PgturbohybridMultiVector *proxySource = NULL;
 	PgturbohybridGraphMetaPageData meta;
 	char	   *rawValue;
 	Vector	   *vector;
@@ -2011,6 +2012,12 @@ PgturbohybridGraphInsertMultiVectorBatchInPlace(Relation index,
 	uint32		count = 0;
 	bool		appendDocMap = false;
 	bool		documentNodes = false;
+	int			proxyEncoder =
+		PgturbohybridGraphGetMultiVectorProxyEncoderOption(index);
+	int			centroidMode =
+		PgturbohybridGraphGetMultiVectorCentroidsOption(index);
+	int			centroidCount =
+		PgturbohybridGraphGetMultiVectorCentroidCountOption(index);
 
 	rawValue = (char *) DatumGetPointer(value);
 	mv = PgturbohybridDatumGetMultiVector(value);
@@ -2029,16 +2036,29 @@ PgturbohybridGraphInsertMultiVectorBatchInPlace(Relation index,
 
 	if (documentNodes)
 	{
+		if (proxyEncoder ==
+			PGTURBOHYBRID_MULTIVECTOR_PROXY_ENCODER_CENTROID_MEAN &&
+			centroidMode != PGTURBOHYBRID_MULTIVECTOR_CENTROIDS_KMEANS)
+			ereport(ERROR,
+					(errcode(ERRCODE_INVALID_PARAMETER_VALUE),
+					 errmsg("centroid_mean multivector proxy encoder requires multivector_centroids = kmeans"),
+					 errhint("REINDEX with multivector_centroids = kmeans, or use multivector_proxy_encoder = normalized_mean.")));
 		indexedMv =
 			PgturbohybridMultiVectorPoolDocumentTokens(mv,
 													   PgturbohybridGraphGetMultiVectorTokenPoolingOption(index),
 													   PgturbohybridGraphGetMultiVectorTokenPoolingTargetRatio(index),
 													   PgturbohybridGraphGetMultiVectorTokenPoolingMinTokens(index),
 													   CurrentMemoryContext);
+		proxySource =
+			proxyEncoder ==
+			PGTURBOHYBRID_MULTIVECTOR_PROXY_ENCODER_CENTROID_MEAN ?
+			mv : indexedMv;
 		vector =
-			PgturbohybridMultiVectorBuildProxyVector(indexedMv,
-													 PgturbohybridGraphGetMultiVectorProxyEncoderOption(index),
-													 CurrentMemoryContext);
+			PgturbohybridMultiVectorBuildProxyVectorWithCentroids(proxySource,
+																  NULL,
+																  proxyEncoder,
+																  centroidCount,
+																  CurrentMemoryContext);
 		firstNodeId = PgturbohybridGraphInsertValueInPlaceInternal(index, indexInfo,
 																   heap_tid,
 																   PointerGetDatum(vector),

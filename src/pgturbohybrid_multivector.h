@@ -32,7 +32,8 @@ typedef enum PgturbohybridMultiVectorProxyEncoder
 	PGTURBOHYBRID_MULTIVECTOR_PROXY_ENCODER_LEARNED_PROJECTION_PLACEHOLDER = 3,
 	PGTURBOHYBRID_MULTIVECTOR_PROXY_ENCODER_NORMALIZED_MEAN = 4,
 	PGTURBOHYBRID_MULTIVECTOR_PROXY_ENCODER_FIRST_TOKEN = 5,
-	PGTURBOHYBRID_MULTIVECTOR_PROXY_ENCODER_MAX_ABS_MEAN = 6
+	PGTURBOHYBRID_MULTIVECTOR_PROXY_ENCODER_MAX_ABS_MEAN = 6,
+	PGTURBOHYBRID_MULTIVECTOR_PROXY_ENCODER_CENTROID_MEAN = 7
 } PgturbohybridMultiVectorProxyEncoder;
 
 #define PGTURBOHYBRID_MULTIVECTOR_PROXY_ENCODER_MEAN_POOL \
@@ -178,6 +179,11 @@ const char *PgturbohybridMultiVectorProxyEncoderName(int encoder);
 Vector	   *PgturbohybridMultiVectorBuildProxyVector(const PgturbohybridMultiVector *mv,
 													 int encoder,
 													 MemoryContext ctx);
+Vector	   *PgturbohybridMultiVectorBuildProxyVectorWithCentroids(const PgturbohybridMultiVector *mv,
+																  const PgturbohybridMultiVector *centroids,
+																  int encoder,
+																  int centroidCount,
+																  MemoryContext ctx);
 Vector	   *PgturbohybridMultiVectorBuildQueryProxyVector(const PgturbohybridMultiVector *query,
 														  int encoder,
 														  MemoryContext ctx);
@@ -186,6 +192,8 @@ double		TqMultiVectorMaxSimScalar(const PgturbohybridMultiVector *query,
 									   const PgturbohybridMultiVector *doc);
 double		TqMultiVectorMaxSimBlockedScalar(const PgturbohybridMultiVector *query,
 											  const PgturbohybridMultiVector *doc);
+double		TqMultiVectorMaxSimBlocked(const PgturbohybridMultiVector *query,
+										const PgturbohybridMultiVector *doc);
 double		TqMultiVectorMaxSim(const PgturbohybridMultiVector *query,
 								 const PgturbohybridMultiVector *doc);
 double		TqMultiVectorSymmetricMaxSimAverage(const PgturbohybridMultiVector *a,

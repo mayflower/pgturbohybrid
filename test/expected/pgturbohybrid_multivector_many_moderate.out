@@ -676,6 +676,8 @@ RESET turbohybrid.multivector_doc_storage_cache;
 SET turbohybrid.multivector_doc_graph_search_ef = 4;
 SET turbohybrid.multivector_doc_graph_oversampling = 2;
 SET turbohybrid.multivector_doc_graph_rescore_k = 2;
+SET turbohybrid.multivector_doc_candidate_k = 4;
+SET turbohybrid.multivector_exact_rerank_k = 1;
 SET turbohybrid.multivector_doc_storage = 'f16';
 DO $$
 DECLARE
@@ -707,6 +709,9 @@ BEGIN
 		(stats->>'multivector_doc_graph_search_ef')::int <> 4 OR
 		(stats->>'multivector_doc_graph_oversampling')::int <> 2 OR
 		(stats->>'multivector_doc_graph_rescore_k')::int <> 1 OR
+		(stats->>'multivector_proxy_candidate_target')::int <> 4 OR
+		(stats->>'multivector_proxy_candidates_returned')::int <> 4 OR
+		(stats->>'multivector_exact_rerank_k_effective')::int <> 1 OR
 		(stats->>'multivector_doc_graph_candidates')::int <> 4 OR
 		(stats->>'multivector_doc_graph_exact_rerank_docs')::int <> 1 OR
 		(stats->>'multivector_doc_graph_quantized_scores')::int <> 0 OR
@@ -717,7 +722,7 @@ BEGIN
 		(stats->>'multivector_exact_rerank_heap_fetches')::int <> 0 OR
 		(stats->>'multivector_exact_rerank_sidecar_reads')::int <> 1 OR
 		stats->>'multivector_accumulator_kind' <> 'doc_proxy_graph' THEN
-		RAISE EXCEPTION 'expected document-node graph f16 knobs to widen candidates independently of final_k, top %, stats %',
+		RAISE EXCEPTION 'expected document-node graph f16 proxy candidate budget to widen candidates while reranking one doc, top %, stats %',
 			doc_node_top1, stats;
 	END IF;
 END
@@ -728,6 +733,8 @@ SELECT (turbohybrid_last_scan_stats()->>'multivector_doc_graph_search_ef')::int
   AS document_node_knob_oversampling,
        (turbohybrid_last_scan_stats()->>'multivector_doc_graph_rescore_k')::int
   AS document_node_knob_rescore_k,
+       (turbohybrid_last_scan_stats()->>'multivector_proxy_candidate_target')::int
+  AS document_node_knob_proxy_candidate_target,
        (turbohybrid_last_scan_stats()->>'multivector_doc_graph_candidates')::int
   AS document_node_knob_candidates,
        (turbohybrid_last_scan_stats()->>'multivector_doc_graph_exact_rerank_docs')::int
@@ -736,12 +743,12 @@ SELECT (turbohybrid_last_scan_stats()->>'multivector_doc_graph_search_ef')::int
   AS document_node_knob_storage_kind,
        turbohybrid_last_scan_stats()->>'multivector_doc_graph_rescore_source'
   AS document_node_knob_rescore_source;
-document_node_knob_search_ef|document_node_knob_oversampling|document_node_knob_rescore_k|document_node_knob_candidates|document_node_knob_exact_rerank_docs|document_node_knob_storage_kind|document_node_knob_rescore_source
-4|2|1|4|1|f16|sidecar
+document_node_knob_search_ef|document_node_knob_oversampling|document_node_knob_rescore_k|document_node_knob_proxy_candidate_target|document_node_knob_candidates|document_node_knob_exact_rerank_docs|document_node_knob_storage_kind|document_node_knob_rescore_source
+4|2|1|4|4|1|f16|sidecar
 (1 row)
 SET turbohybrid.multivector_doc_candidate_k = 10;
 SET turbohybrid.multivector_exact_rerank_k = 10;
-SET turbohybrid.multivector_doc_graph_search_ef = 2;
+SET turbohybrid.multivector_doc_graph_search_ef = 4;
 SET turbohybrid.multivector_doc_graph_rescore_k = 10;
 DO $$
 DECLARE
@@ -763,25 +770,28 @@ BEGIN
 	LIMIT 1;
 	stats := turbohybrid_last_scan_stats();
 
-	IF (stats->>'multivector_doc_graph_search_ef')::int <> 2 OR
+	IF (stats->>'multivector_doc_graph_search_ef')::int <> 4 OR
 		stats->>'multivector_candidate_path' <> 'proxy_graph' OR
 		(stats->>'multivector_proxy_graph_searches')::int <> 1 OR
 		(stats->>'multivector_subvector_searches')::int <> 0 OR
-		(stats->>'multivector_doc_graph_candidates')::int <> 5 OR
-		(stats->>'multivector_doc_graph_exact_rerank_docs')::int <> 5 THEN
-		RAISE EXCEPTION 'expected explicit document-node EF with proxy candidate-band fill, stats %',
+		(stats->>'multivector_proxy_candidate_target')::int <> 4 OR
+		(stats->>'multivector_doc_graph_candidates')::int <> 4 OR
+		(stats->>'multivector_doc_graph_exact_rerank_docs')::int <> 4 THEN
+		RAISE EXCEPTION 'expected explicit document-node EF with proxy candidate-band target, stats %',
 			stats;
 	END IF;
 END
 $$;
 SELECT (turbohybrid_last_scan_stats()->>'multivector_doc_graph_search_ef')::int
   AS document_node_explicit_ef,
-       (turbohybrid_last_scan_stats()->>'multivector_doc_graph_candidates')::int = 5
-  AS document_node_explicit_ef_fills_candidate_band,
-       (turbohybrid_last_scan_stats()->>'multivector_doc_graph_exact_rerank_docs')::int = 5
-  AS document_node_explicit_ef_reranks_candidate_band;
-document_node_explicit_ef|document_node_explicit_ef_fills_candidate_band|document_node_explicit_ef_reranks_candidate_band
-2|t|t
+       (turbohybrid_last_scan_stats()->>'multivector_proxy_candidate_target')::int = 4
+  AS document_node_explicit_ef_proxy_candidate_target,
+       (turbohybrid_last_scan_stats()->>'multivector_doc_graph_candidates')::int = 4
+  AS document_node_explicit_ef_returns_candidate_target,
+       (turbohybrid_last_scan_stats()->>'multivector_doc_graph_exact_rerank_docs')::int = 4
+  AS document_node_explicit_ef_reranks_candidate_target;
+document_node_explicit_ef|document_node_explicit_ef_proxy_candidate_target|document_node_explicit_ef_returns_candidate_target|document_node_explicit_ef_reranks_candidate_target
+4|t|t|t
 (1 row)
 SET turbohybrid.multivector_doc_graph_search_ef = 0;
 DO $$
@@ -916,6 +926,8 @@ document_node_source|document_node_graph_mode
 document_nodes|document_nodes
 (1 row)
 SET turbohybrid.multivector_candidate_source = proxy_vector;
+SET turbohybrid.multivector_doc_candidate_k = 4;
+SET turbohybrid.multivector_exact_rerank_k = 1;
 DO $$
 DECLARE
 	q turbohybrid_multivector := turbohybrid_multivector(ARRAY[
@@ -1054,6 +1066,98 @@ document_node_proxy_fde_encoder
 random_projection_fde
 (1 row)
 DROP INDEX mv_proxy_encoder_docs_fde_idx;
+CREATE INDEX mv_proxy_encoder_docs_centroid_idx ON mv_proxy_encoder_docs USING turbohybrid
+  (colbert multivector_cosine_turbohybrid_ops)
+  WITH (
+    multivector_graph = document_nodes,
+    multivector_doc_build_scorer = proxy,
+    multivector_proxy_encoder = centroid_mean,
+    multivector_centroids = kmeans,
+    multivector_centroid_count = 1
+  );
+DO $$
+DECLARE
+	q turbohybrid_multivector := turbohybrid_multivector(ARRAY[
+		'[1,0,0,0]'::vector,
+		'[0,1,0,0]'::vector
+	]);
+	stats jsonb;
+	index_stats jsonb;
+	top_id text;
+	brute_id text;
+BEGIN
+	PERFORM set_config('turbohybrid.multivector_candidate_source', 'graph', true);
+	index_stats := turbohybrid_index_stats('mv_proxy_encoder_docs_centroid_idx'::regclass);
+	IF index_stats->>'multivector_proxy_encoder' <> 'centroid_mean' OR
+		index_stats->>'multivector_centroids' <> 'kmeans' OR
+		(index_stats->>'multivector_centroid_count')::int <> 1 OR
+		(index_stats->>'multivector_doc_exact_build_distance_calls')::bigint <> 0 OR
+		(index_stats->>'node_count')::int <> 2 THEN
+		RAISE EXCEPTION 'unexpected centroid_mean index stats, got %', index_stats;
+	END IF;
+
+	SELECT id INTO top_id
+	FROM mv_proxy_encoder_docs
+	ORDER BY colbert <~> turbohybrid_query(
+	  multivector_query => q,
+	  dense_k => 2,
+	  final_k => 1
+	)
+	LIMIT 1;
+	stats := turbohybrid_last_scan_stats();
+
+	PERFORM set_config('turbohybrid.multivector_candidate_source', 'exact_doc_scan', true);
+	SELECT id INTO brute_id
+	FROM mv_proxy_encoder_docs
+	ORDER BY colbert <~> turbohybrid_query(
+	  multivector_query => q,
+	  dense_k => 2,
+	  final_k => 1
+	)
+	LIMIT 1;
+	PERFORM set_config('turbohybrid.multivector_candidate_source', 'graph', true);
+
+	IF top_id <> brute_id OR
+		stats->>'proxy_encoder_kind' <> 'centroid_mean' OR
+		(stats->>'multivector_centroid_count')::int <> 1 OR
+		(stats->>'multivector_centroid_prerank_docs')::int <= 0 OR
+		(stats->>'multivector_full_maxsim_rerank_docs')::int <= 0 THEN
+		RAISE EXCEPTION 'expected centroid_mean proxy stats and exact top match, got top %, brute %, stats %',
+			top_id, brute_id, stats;
+	END IF;
+
+	PERFORM id
+	FROM mv_proxy_encoder_docs
+	ORDER BY colbert <~> turbohybrid_query(
+	  multivector_query => q,
+	  dense_k => 2,
+	  final_k => 1
+	)
+	LIMIT 1;
+END
+$$;
+SELECT turbohybrid_last_scan_stats()->>'proxy_encoder_kind'
+  AS document_node_proxy_centroid_encoder,
+       (turbohybrid_last_scan_stats()->>'multivector_centroid_prerank_docs')::int > 0
+  AS document_node_proxy_centroid_prerank,
+       (turbohybrid_last_scan_stats()->>'multivector_full_maxsim_rerank_docs')::int > 0
+  AS document_node_proxy_centroid_full_rerank;
+document_node_proxy_centroid_encoder|document_node_proxy_centroid_prerank|document_node_proxy_centroid_full_rerank
+centroid_mean|t|t
+(1 row)
+DROP INDEX mv_proxy_encoder_docs_centroid_idx;
+DO $$
+BEGIN
+	EXECUTE 'CREATE INDEX mv_proxy_encoder_docs_centroid_missing_idx ON mv_proxy_encoder_docs USING turbohybrid ' ||
+		'(colbert multivector_cosine_turbohybrid_ops) WITH (multivector_graph = document_nodes, ' ||
+		'multivector_proxy_encoder = centroid_mean)';
+	RAISE EXCEPTION 'centroid_mean without centroid sidecar unexpectedly succeeded';
+EXCEPTION WHEN invalid_parameter_value THEN
+	IF SQLERRM NOT LIKE '%centroid_mean multivector proxy encoder requires multivector_centroids = kmeans%' THEN
+		RAISE;
+	END IF;
+END
+$$;
 DO $$
 BEGIN
 	EXECUTE 'CREATE INDEX mv_proxy_encoder_docs_learned_idx ON mv_proxy_encoder_docs USING turbohybrid ' ||
@@ -1079,6 +1183,8 @@ DECLARE
 	stats jsonb;
 BEGIN
 	PERFORM set_config('turbohybrid.multivector_doc_graph_rescore_k', '2', true);
+	PERFORM set_config('turbohybrid.multivector_doc_candidate_k', '4', true);
+	PERFORM set_config('turbohybrid.multivector_exact_rerank_k', '2', true);
 	PERFORM id
 	FROM mv_many_moderate_docs
 	ORDER BY colbert <~> turbohybrid_query(
