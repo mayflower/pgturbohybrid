@@ -222,6 +222,9 @@ typedef struct PgturbohybridScanStatsSnapshot
 	uint32		multivectorDocGraphExactRerankDocs;
 	uint64		multivectorDocGraphHeapFetches;
 	char		multivectorDocGraphWarning[96];
+	uint32		multivectorProxyCandidateTarget;
+	uint32		multivectorProxyCandidatesReturned;
+	uint32		multivectorExactRerankKEffective;
 	uint32		proxyCandidates;
 	bool		proxyTop1Admission;
 	uint32		proxyExactRerankDocs;
@@ -229,6 +232,9 @@ typedef struct PgturbohybridScanStatsSnapshot
 	uint64		centroidDocsTouched;
 	uint64		centroidPrunedDocs;
 	uint32		centroidCandidates;
+	uint32		multivectorCentroidCount;
+	uint32		multivectorCentroidPrerankDocs;
+	uint32		multivectorFullMaxsimRerankDocs;
 	uint64		quantizedInvertedListsVisited;
 	uint64		quantizedInvertedPostingsTouched;
 	uint64		quantizedInvertedDocsScored;

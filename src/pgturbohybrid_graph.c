@@ -992,6 +992,15 @@ pgturbohybrid_index_stats(PG_FUNCTION_ARGS)
 											  opts != NULL ?
 											  opts->multivectorProxyEncoder :
 											  PGTURBOHYBRID_DEFAULT_MULTIVECTOR_PROXY_ENCODER));
+	PgturbohybridIndexStatsJsonbAddString(&jsonState, "multivector_centroids",
+										  opts != NULL &&
+										  opts->multivectorCentroids ==
+										  PGTURBOHYBRID_MULTIVECTOR_CENTROIDS_KMEANS ?
+										  "kmeans" : "off");
+	PgturbohybridIndexStatsJsonbAddUInt32(&jsonState, "multivector_centroid_count",
+										  (uint32) (opts != NULL ?
+													opts->multivectorCentroidCount :
+													PGTURBOHYBRID_MULTIVECTOR_CENTROID_COUNT_AUTO));
 	PgturbohybridIndexStatsJsonbAddString(&jsonState, "multivector_context_mode",
 										  opts != NULL &&
 										  opts->multivectorContextMode ==

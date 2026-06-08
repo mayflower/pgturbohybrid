@@ -1250,6 +1250,8 @@ PgturbohybridMultiVectorProxyEncoderName(int encoder)
 			return "first_token";
 		case PGTURBOHYBRID_MULTIVECTOR_PROXY_ENCODER_MAX_ABS_MEAN:
 			return "max_abs_mean";
+		case PGTURBOHYBRID_MULTIVECTOR_PROXY_ENCODER_CENTROID_MEAN:
+			return "centroid_mean";
 		case PGTURBOHYBRID_MULTIVECTOR_PROXY_ENCODER_MAX_POOL:
 			return "max_pool";
 		case PGTURBOHYBRID_MULTIVECTOR_PROXY_ENCODER_RANDOM_PROJECTION_FDE:
@@ -1311,11 +1313,14 @@ PgturbohybridMultiVectorProxyMaxAbsMean(const PgturbohybridMultiVector *mv,
 }
 
 Vector *
-PgturbohybridMultiVectorBuildProxyVector(const PgturbohybridMultiVector *mv,
-										 int encoder,
-										 MemoryContext ctx)
+PgturbohybridMultiVectorBuildProxyVectorWithCentroids(const PgturbohybridMultiVector *mv,
+													  const PgturbohybridMultiVector *centroids,
+													  int encoder,
+													  int centroidCount,
+													  MemoryContext ctx)
 {
 	Vector	   *vector;
+	PgturbohybridMultiVector *localCentroids = NULL;
 
 	PgturbohybridCheckMultiVector(mv);
 	if (encoder ==
@@ -1323,7 +1328,7 @@ PgturbohybridMultiVectorBuildProxyVector(const PgturbohybridMultiVector *mv,
 		ereport(ERROR,
 				(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
 				 errmsg("learned multivector proxy projection is not configured"),
-				 errhint("Use multivector_proxy_encoder = normalized_mean, mean, first_token, max_abs_mean, max_pool, or random_projection_fde until learned projection weights are supported.")));
+				 errhint("Use multivector_proxy_encoder = normalized_mean, mean, first_token, max_abs_mean, centroid_mean, max_pool, or random_projection_fde until learned projection weights are supported.")));
 
 	vector = MemoryContextAllocZero(ctx, PGTURBOHYBRID_VECTOR_SIZE(mv->dim));
 	SET_VARSIZE(vector, PGTURBOHYBRID_VECTOR_SIZE(mv->dim));
@@ -1339,6 +1344,29 @@ PgturbohybridMultiVectorBuildProxyVector(const PgturbohybridMultiVector *mv,
 			break;
 		case PGTURBOHYBRID_MULTIVECTOR_PROXY_ENCODER_MAX_ABS_MEAN:
 			PgturbohybridMultiVectorProxyMaxAbsMean(mv, vector);
+			break;
+		case PGTURBOHYBRID_MULTIVECTOR_PROXY_ENCODER_CENTROID_MEAN:
+			if (centroids == NULL)
+			{
+				int			effectiveCount;
+				double		targetRatio;
+
+				effectiveCount =
+					PgturbohybridMultiVectorCentroidCountForDoc(mv,
+																centroidCount);
+				if (effectiveCount <= 0)
+					elog(ERROR, "invalid multivector centroid count");
+				targetRatio = (double) effectiveCount / (double) mv->count;
+				localCentroids =
+					PgturbohybridMultiVectorPoolDocumentTokens(mv,
+															   PGTURBOHYBRID_MULTIVECTOR_TOKEN_POOLING_KMEANS,
+															   targetRatio,
+															   1,
+															   ctx);
+				centroids = localCentroids;
+			}
+			PgturbohybridCheckSameMultiVectorDims(mv, centroids);
+			PgturbohybridMultiVectorProxyNormalizedMean(centroids, vector);
 			break;
 		case PGTURBOHYBRID_MULTIVECTOR_PROXY_ENCODER_MAX_POOL:
 			for (int32 dim = 0; dim < mv->dim; dim++)
@@ -1381,6 +1409,17 @@ PgturbohybridMultiVectorBuildProxyVector(const PgturbohybridMultiVector *mv,
 	}
 
 	return vector;
+}
+
+Vector *
+PgturbohybridMultiVectorBuildProxyVector(const PgturbohybridMultiVector *mv,
+										 int encoder,
+										 MemoryContext ctx)
+{
+	return PgturbohybridMultiVectorBuildProxyVectorWithCentroids(mv, NULL,
+																 encoder,
+																 PGTURBOHYBRID_MULTIVECTOR_CENTROID_COUNT_AUTO,
+																 ctx);
 }
 
 Vector *
@@ -1913,11 +1952,8 @@ TqMultiVectorMaxSimBlockedAvx512f(const PgturbohybridMultiVector *query,
 #endif
 
 static TqMultiVectorMaxSimFunc
-TqResolveMultiVectorMaxSimKernel(void)
+TqResolveMultiVectorMaxSimBlockedKernel(void)
 {
-	if (pgturbohybrid_dense_exact_simd_force == PGTURBOHYBRID_EXACT_SIMD_FORCE_SCALAR)
-		return TqMultiVectorMaxSimBlockedScalar;
-
 #if PGTURBOHYBRID_MULTIVECTOR_COMPILE_AVX512F
 	if (TqMultiVectorAvx512fAvailable())
 		return TqMultiVectorMaxSimBlockedAvx512f;
@@ -1932,11 +1968,29 @@ TqResolveMultiVectorMaxSimKernel(void)
 	return TqMultiVectorMaxSimBlockedScalar;
 }
 
+double
+TqMultiVectorMaxSimBlocked(const PgturbohybridMultiVector *query,
+						   const PgturbohybridMultiVector *doc)
+{
+	return TqResolveMultiVectorMaxSimBlockedKernel()(query, doc);
+}
+
+static TqMultiVectorMaxSimFunc
+TqResolveMultiVectorMaxSimKernel(void)
+{
+	if (pgturbohybrid_dense_exact_simd_force == PGTURBOHYBRID_EXACT_SIMD_FORCE_SCALAR)
+		return TqMultiVectorMaxSimScalar;
+
+	return TqResolveMultiVectorMaxSimBlockedKernel();
+}
+
 const char *
 TqMultiVectorMaxSimKernelName(void)
 {
 	TqMultiVectorMaxSimFunc func = TqResolveMultiVectorMaxSimKernel();
 
+	if (func == TqMultiVectorMaxSimScalar)
+		return "scalar";
 	if (func == TqMultiVectorMaxSimBlockedScalar)
 		return "blocked_scalar";
 #if PGTURBOHYBRID_MULTIVECTOR_COMPILE_AVX512F

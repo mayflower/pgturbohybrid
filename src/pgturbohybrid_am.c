@@ -379,6 +379,7 @@ static const struct config_enum_entry pgturbohybrid_multivector_proxy_encoder_op
 	{"normalized_mean", PGTURBOHYBRID_MULTIVECTOR_PROXY_ENCODER_NORMALIZED_MEAN, false},
 	{"first_token", PGTURBOHYBRID_MULTIVECTOR_PROXY_ENCODER_FIRST_TOKEN, false},
 	{"max_abs_mean", PGTURBOHYBRID_MULTIVECTOR_PROXY_ENCODER_MAX_ABS_MEAN, false},
+	{"centroid_mean", PGTURBOHYBRID_MULTIVECTOR_PROXY_ENCODER_CENTROID_MEAN, false},
 	{"mean_pool", PGTURBOHYBRID_MULTIVECTOR_PROXY_ENCODER_MEAN, false},
 	{"max_pool", PGTURBOHYBRID_MULTIVECTOR_PROXY_ENCODER_MAX_POOL, false},
 	{"random_projection_fde", PGTURBOHYBRID_MULTIVECTOR_PROXY_ENCODER_RANDOM_PROJECTION_FDE, false},
@@ -493,6 +494,8 @@ typedef struct PgturbohybridProfileDefaults
 	const char *denseAdaptiveWideningMultiplier;
 	const char *denseAdaptiveWideningMaxMultiplier;
 	const char *denseUncertaintyRetry;
+	int			multivectorDocCandidateK;
+	int			multivectorExactRerankK;
 } PgturbohybridProfileDefaults;
 
 static relopt_enum_elt_def pgturbohybrid_routing_relopt_options[] = {
@@ -549,6 +552,7 @@ static relopt_enum_elt_def pgturbohybrid_multivector_proxy_encoder_relopt_option
 	{"normalized_mean", PGTURBOHYBRID_MULTIVECTOR_PROXY_ENCODER_NORMALIZED_MEAN},
 	{"first_token", PGTURBOHYBRID_MULTIVECTOR_PROXY_ENCODER_FIRST_TOKEN},
 	{"max_abs_mean", PGTURBOHYBRID_MULTIVECTOR_PROXY_ENCODER_MAX_ABS_MEAN},
+	{"centroid_mean", PGTURBOHYBRID_MULTIVECTOR_PROXY_ENCODER_CENTROID_MEAN},
 	{"mean_pool", PGTURBOHYBRID_MULTIVECTOR_PROXY_ENCODER_MEAN},
 	{"max_pool", PGTURBOHYBRID_MULTIVECTOR_PROXY_ENCODER_MAX_POOL},
 	{"random_projection_fde", PGTURBOHYBRID_MULTIVECTOR_PROXY_ENCODER_RANDOM_PROJECTION_FDE},
@@ -924,6 +928,8 @@ PgturbohybridProfileDefaultsFor(int profile, PgturbohybridProfileDefaults *defau
 	defaults->denseAdaptiveWidening = "off";
 	defaults->denseAdaptiveWideningMultiplier = "2.0";
 	defaults->denseAdaptiveWideningMaxMultiplier = "4.0";
+	defaults->multivectorDocCandidateK = 100;
+	defaults->multivectorExactRerankK = 100;
 	/*
 	 * Keep bounded retry opt-in until retrieval-quality grids show a stable
 	 * quality win with acceptable p95/p99 cost for the target workload.
@@ -935,6 +941,8 @@ PgturbohybridProfileDefaultsFor(int profile, PgturbohybridProfileDefaults *defau
 		case PGTURBOHYBRID_PROFILE_BALANCED:
 			defaults->denseK = 200;
 			defaults->bm25K = 200;
+			defaults->multivectorDocCandidateK = 200;
+			defaults->multivectorExactRerankK = 200;
 			defaults->bm25HotPostingsCacheMb = 16;
 			defaults->autoBudgetMinDenseK = 64;
 			defaults->autoBudgetMinBm25K = 64;
@@ -950,6 +958,8 @@ PgturbohybridProfileDefaultsFor(int profile, PgturbohybridProfileDefaults *defau
 		case PGTURBOHYBRID_PROFILE_QUALITY:
 			defaults->denseK = 400;
 			defaults->bm25K = 400;
+			defaults->multivectorDocCandidateK = 400;
+			defaults->multivectorExactRerankK = 400;
 			defaults->enableSimd = true;
 			defaults->bm25Strategy = PGTURBOHYBRID_BM25_STRATEGY_AUTO;
 			defaults->bm25ImpactOrMode = PGTURBOHYBRID_BM25_IMPACT_OR_MODE_EXACT_ONLY;
@@ -970,6 +980,8 @@ PgturbohybridProfileDefaultsFor(int profile, PgturbohybridProfileDefaults *defau
 		case PGTURBOHYBRID_PROFILE_MATCHED_RECALL:
 			defaults->denseK = 200;
 			defaults->bm25K = 200;
+			defaults->multivectorDocCandidateK = 200;
+			defaults->multivectorExactRerankK = 200;
 			defaults->bm25HotPostingsCacheMb = 16;
 			defaults->autoBudgetMinDenseK = 64;
 			defaults->autoBudgetMinBm25K = 64;
@@ -1001,6 +1013,8 @@ PgturbohybridProfileDefaultsFor(int profile, PgturbohybridProfileDefaults *defau
 			 */
 			defaults->denseK = 200;
 			defaults->bm25K = 200;
+			defaults->multivectorDocCandidateK = 400;
+			defaults->multivectorExactRerankK = 400;
 			defaults->bm25HotPostingsCacheMb = 16;
 			defaults->autoBudgetMinDenseK = 64;
 			defaults->autoBudgetMinBm25K = 64;
@@ -1014,6 +1028,8 @@ PgturbohybridProfileDefaultsFor(int profile, PgturbohybridProfileDefaults *defau
 		case PGTURBOHYBRID_PROFILE_DEBUG:
 			defaults->denseK = 400;
 			defaults->bm25K = 400;
+			defaults->multivectorDocCandidateK = 400;
+			defaults->multivectorExactRerankK = 400;
 			defaults->enableSimd = false;
 			defaults->bm25HotPostingsCacheMb = 0;
 			defaults->bm25HybridBound = PGTURBOHYBRID_BM25_HYBRID_BOUND_OFF;
@@ -1098,6 +1114,10 @@ PgturbohybridApplyProfileDefaults(void)
 										 defaults.denseAdaptiveWideningMaxMultiplier);
 	PgturbohybridSetDynamicDefaultString("turbohybrid.dense_uncertainty_retry",
 										 defaults.denseUncertaintyRetry);
+	PgturbohybridSetDynamicDefaultInt("turbohybrid.multivector_doc_candidate_k",
+									  defaults.multivectorDocCandidateK);
+	PgturbohybridSetDynamicDefaultInt("turbohybrid.multivector_exact_rerank_k",
+									  defaults.multivectorExactRerankK);
 }
 
 static void
@@ -1308,6 +1328,9 @@ typedef struct PgturbohybridLastScanStats
 	uint32		multivectorDocGraphExactRerankDocs;
 	uint64		multivectorDocGraphHeapFetches;
 	char		multivectorDocGraphWarning[96];
+	uint32		multivectorProxyCandidateTarget;
+	uint32		multivectorProxyCandidatesReturned;
+	uint32		multivectorExactRerankKEffective;
 	uint32		proxyCandidates;
 	bool		proxyTop1Admission;
 	uint32		proxyExactRerankDocs;
@@ -1315,6 +1338,9 @@ typedef struct PgturbohybridLastScanStats
 	uint64		centroidDocsTouched;
 	uint64		centroidPrunedDocs;
 	uint32		centroidCandidates;
+	uint32		multivectorCentroidCount;
+	uint32		multivectorCentroidPrerankDocs;
+	uint32		multivectorFullMaxsimRerankDocs;
 	uint64		quantizedInvertedListsVisited;
 	uint64		quantizedInvertedPostingsTouched;
 	uint64		quantizedInvertedDocsScored;
@@ -1718,6 +1744,12 @@ PgturbohybridGetLastScanStatsSnapshot(PgturbohybridScanStatsSnapshot *stats)
 	strlcpy(stats->multivectorDocGraphWarning,
 			pgturbohybrid_last_scan_state.multivectorDocGraphWarning,
 			sizeof(stats->multivectorDocGraphWarning));
+	stats->multivectorProxyCandidateTarget =
+		pgturbohybrid_last_scan_state.multivectorProxyCandidateTarget;
+	stats->multivectorProxyCandidatesReturned =
+		pgturbohybrid_last_scan_state.multivectorProxyCandidatesReturned;
+	stats->multivectorExactRerankKEffective =
+		pgturbohybrid_last_scan_state.multivectorExactRerankKEffective;
 	stats->proxyCandidates =
 		pgturbohybrid_last_scan_state.proxyCandidates;
 	stats->proxyTop1Admission =
@@ -1732,6 +1764,12 @@ PgturbohybridGetLastScanStatsSnapshot(PgturbohybridScanStatsSnapshot *stats)
 		pgturbohybrid_last_scan_state.centroidPrunedDocs;
 	stats->centroidCandidates =
 		pgturbohybrid_last_scan_state.centroidCandidates;
+	stats->multivectorCentroidCount =
+		pgturbohybrid_last_scan_state.multivectorCentroidCount;
+	stats->multivectorCentroidPrerankDocs =
+		pgturbohybrid_last_scan_state.multivectorCentroidPrerankDocs;
+	stats->multivectorFullMaxsimRerankDocs =
+		pgturbohybrid_last_scan_state.multivectorFullMaxsimRerankDocs;
 	stats->quantizedInvertedListsVisited =
 		pgturbohybrid_last_scan_state.quantizedInvertedListsVisited;
 	stats->quantizedInvertedPostingsTouched =
@@ -5625,6 +5663,12 @@ PgturbohybridCollectScanResults(IndexScanDesc scan, PgturbohybridScanState *stat
 	strlcpy(lastStats.multivectorDocGraphWarning,
 			denseStats.multivectorDocGraphWarning,
 			sizeof(lastStats.multivectorDocGraphWarning));
+	lastStats.multivectorProxyCandidateTarget =
+		denseStats.multivectorProxyCandidateTarget;
+	lastStats.multivectorProxyCandidatesReturned =
+		denseStats.multivectorProxyCandidatesReturned;
+	lastStats.multivectorExactRerankKEffective =
+		denseStats.multivectorExactRerankKEffective;
 	lastStats.proxyCandidates = denseStats.proxyCandidates;
 	lastStats.proxyTop1Admission = denseStats.proxyTop1Admission;
 	lastStats.proxyExactRerankDocs = denseStats.proxyExactRerankDocs;
@@ -5632,6 +5676,12 @@ PgturbohybridCollectScanResults(IndexScanDesc scan, PgturbohybridScanState *stat
 	lastStats.centroidDocsTouched = denseStats.centroidDocsTouched;
 	lastStats.centroidPrunedDocs = denseStats.centroidPrunedDocs;
 	lastStats.centroidCandidates = denseStats.centroidCandidates;
+	lastStats.multivectorCentroidCount =
+		denseStats.multivectorCentroidCount;
+	lastStats.multivectorCentroidPrerankDocs =
+		denseStats.multivectorCentroidPrerankDocs;
+	lastStats.multivectorFullMaxsimRerankDocs =
+		denseStats.multivectorFullMaxsimRerankDocs;
 	lastStats.quantizedInvertedListsVisited =
 		denseStats.quantizedInvertedListsVisited;
 	lastStats.quantizedInvertedPostingsTouched =
@@ -6877,7 +6927,7 @@ PgturbohybridInit(void)
 					   "Fixed-dimensional proxy encoder for document-node proxy_vector admission.",
 					   pgturbohybrid_multivector_proxy_encoder_relopt_options,
 					   PGTURBOHYBRID_DEFAULT_MULTIVECTOR_PROXY_ENCODER,
-					   "Valid values are \"normalized_mean\", \"mean\", \"first_token\", \"max_abs_mean\", \"max_pool\", \"random_projection_fde\", and \"learned_projection_placeholder\".",
+					   "Valid values are \"normalized_mean\", \"mean\", \"first_token\", \"max_abs_mean\", \"centroid_mean\", \"max_pool\", \"random_projection_fde\", and \"learned_projection_placeholder\".",
 					   AccessExclusiveLock);
 	add_enum_reloption(pgturbohybrid_relopt_kind, "multivector_context_mode",
 					   "Long-context multivector scoring mode.",
