@@ -1392,9 +1392,19 @@ PgturbohybridBm25EnsureWalTail(Relation index, ForkNumber forkNum, Buffer *buf,
 
 	if (BufferIsValid(*buf))
 	{
+		/*
+		 * Refresh the page pointer after any prior GenericXLog update on this
+		 * buffer (e.g. postings/impact chunk linking during compaction).
+		 */
+		*page = BufferGetPage(*buf);
 		if (!PgturbohybridBm25PageIsKind(*page, pageKind))
-			elog(ERROR, "unexpected pgturbohybrid BM25 page kind while appending");
-		return;
+		{
+			UnlockReleaseBuffer(*buf);
+			*buf = InvalidBuffer;
+			*page = NULL;
+		}
+		else
+			return;
 	}
 
 	if (!BlockNumberIsValid(blkno))
@@ -1693,7 +1703,7 @@ PgturbohybridWritePostingsChunk(PgturbohybridBm25Collector *collector, uint32 te
 }
 
 static void
-PgturbohybridLinkPostingsChunk(Relation index, Buffer currentBuf, Page currentPage,
+PgturbohybridLinkPostingsChunk(Relation index, Buffer currentBuf, Page *currentPage,
 						  BlockNumber prevBlkno, OffsetNumber prevOffno,
 						  BlockNumber nextBlkno, OffsetNumber nextOffno)
 {
@@ -1709,7 +1719,7 @@ PgturbohybridLinkPostingsChunk(Relation index, Buffer currentBuf, Page currentPa
 	if (current)
 	{
 		buf = currentBuf;
-		page = currentPage;
+		page = *currentPage;
 	}
 	else
 	{
@@ -1749,12 +1759,14 @@ PgturbohybridLinkPostingsChunk(Relation index, Buffer currentBuf, Page currentPa
 	else if (modified)
 		MarkBufferDirty(buf);
 
-	if (!current)
+	if (current)
+		*currentPage = BufferGetPage(buf);
+	else
 		UnlockReleaseBuffer(buf);
 }
 
 static void
-PgturbohybridLinkImpactChunk(Relation index, Buffer currentBuf, Page currentPage,
+PgturbohybridLinkImpactChunk(Relation index, Buffer currentBuf, Page *currentPage,
 						BlockNumber prevBlkno, OffsetNumber prevOffno,
 						BlockNumber nextBlkno, OffsetNumber nextOffno)
 {
@@ -1770,7 +1782,7 @@ PgturbohybridLinkImpactChunk(Relation index, Buffer currentBuf, Page currentPage
 	if (current)
 	{
 		buf = currentBuf;
-		page = currentPage;
+		page = *currentPage;
 	}
 	else
 	{
@@ -1810,7 +1822,9 @@ PgturbohybridLinkImpactChunk(Relation index, Buffer currentBuf, Page currentPage
 	else if (modified)
 		MarkBufferDirty(buf);
 
-	if (!current)
+	if (current)
+		*currentPage = BufferGetPage(buf);
+	else
 		UnlockReleaseBuffer(buf);
 }
 
@@ -1847,7 +1861,7 @@ PgturbohybridWritePostings(PgturbohybridBm25Collector *collector, uint32 termId,
 			firstBlkno = chunkBlkno;
 		}
 		if (BlockNumberIsValid(prevBlkno))
-			PgturbohybridLinkPostingsChunk(collector->index, *buf, *page,
+			PgturbohybridLinkPostingsChunk(collector->index, *buf, page,
 									  prevBlkno, prevOffno,
 									  chunkBlkno, chunkOffno);
 
@@ -2067,7 +2081,7 @@ PgturbohybridWriteImpactHead(PgturbohybridBm25Collector *collector, uint32 termI
 			firstBlkno = insertBlkno;
 		}
 		if (BlockNumberIsValid(prevBlkno))
-			PgturbohybridLinkImpactChunk(collector->index, *buf, *page,
+			PgturbohybridLinkImpactChunk(collector->index, *buf, page,
 									prevBlkno, prevOffno,
 									insertBlkno, offno);
 
@@ -2474,7 +2488,7 @@ PgturbohybridWriteLexiconAndPostingsFromRuns(PgturbohybridBm25Collector *collect
 				}
 				if (BlockNumberIsValid(prevPostingsBlkno))
 					PgturbohybridLinkPostingsChunk(collector->index, postingsBuf,
-											  postingsPage, prevPostingsBlkno,
+											  &postingsPage, prevPostingsBlkno,
 											  prevPostingsOffno, chunkBlkno,
 											  chunkOffno);
 				prevPostingsBlkno = chunkBlkno;
@@ -2511,7 +2525,7 @@ PgturbohybridWriteLexiconAndPostingsFromRuns(PgturbohybridBm25Collector *collect
 			}
 			if (BlockNumberIsValid(prevPostingsBlkno))
 				PgturbohybridLinkPostingsChunk(collector->index, postingsBuf,
-										  postingsPage, prevPostingsBlkno,
+										  &postingsPage, prevPostingsBlkno,
 										  prevPostingsOffno, chunkBlkno,
 										  chunkOffno);
 			postingsBytes += chunkBytes;
@@ -2727,8 +2741,10 @@ PgturbohybridBm25WriteBasePages(PgturbohybridBm25Collector *collector)
 	collector->bm25LexiconStartBlkno = InvalidBlockNumber;
 	collector->bm25PostingsStartBlkno = InvalidBlockNumber;
 	collector->bm25BlockMaxStartBlkno = InvalidBlockNumber;
+	collector->bm25ImpactStartBlkno = InvalidBlockNumber;
 	collector->bm25PostingsPages = 0;
 	collector->bm25BlockMaxPages = 0;
+	collector->bm25ImpactPages = 0;
 
 	PgturbohybridWriteDocStats(collector);
 	PgturbohybridWriteLexiconAndPostings(collector);
