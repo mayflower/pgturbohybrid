@@ -4238,6 +4238,31 @@ $$;
 
 DO $$
 DECLARE
+	prune jsonb;
+BEGIN
+	PERFORM set_config('turbohybrid.native_cache_disk_max_mb', '8192', true);
+	IF current_setting('turbohybrid.native_cache_disk_max_mb') <> '8192MB' THEN
+		RAISE EXCEPTION 'native_cache_disk_max_mb GUC did not stick';
+	END IF;
+
+	prune := turbohybrid_prune_shared_cache();
+	IF NOT (prune ? 'pruned_files') OR
+	   NOT (prune ? 'freed_bytes') OR
+	   NOT (prune ? 'remaining_bytes') OR
+	   NOT (prune ? 'remaining_files') OR
+	   NOT (prune ? 'disk_cap_mb') THEN
+		RAISE EXCEPTION 'turbohybrid_prune_shared_cache omitted expected fields: %', prune;
+	END IF;
+
+	prune := turbohybrid_prune_shared_cache('tqh_docs_idx'::regclass);
+	IF NOT (prune ? 'pruned_files') THEN
+		RAISE EXCEPTION 'turbohybrid_prune_shared_cache(index) failed: %', prune;
+	END IF;
+END
+$$;
+
+DO $$
+DECLARE
 	stats jsonb;
 	top_id int;
 BEGIN

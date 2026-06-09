@@ -378,6 +378,10 @@ CREATE FUNCTION turbohybrid_prewarm(pg_catalog.regclass) RETURNS pg_catalog.json
 	AS 'MODULE_PATHNAME', 'pgturbohybrid_prewarm'
 	LANGUAGE C STRICT PARALLEL RESTRICTED;
 
+CREATE FUNCTION turbohybrid_prune_shared_cache(index pg_catalog.regclass DEFAULT NULL) RETURNS pg_catalog.jsonb
+	AS 'MODULE_PATHNAME', 'pgturbohybrid_prune_shared_cache'
+	LANGUAGE C PARALLEL UNSAFE;
+
 CREATE FUNCTION turbohybrid_multivector_proxy_diagnostics(
 	index pg_catalog.regclass,
 	sample_docs pg_catalog.int4 DEFAULT 100,
@@ -593,6 +597,7 @@ COMMENT ON FUNCTION turbohybrid_handler(pg_catalog.internal) IS 'Index access me
 COMMENT ON FUNCTION turbohybrid_index_stats(pg_catalog.regclass) IS 'Return stable TurboHybrid index metadata as jsonb';
 COMMENT ON FUNCTION turbohybrid_estimate_memory(pg_catalog.regclass) IS 'Estimate native graph cache and BM25 reader-cache memory for a TurboHybrid index without building or loading those caches';
 COMMENT ON FUNCTION turbohybrid_prewarm(pg_catalog.regclass) IS 'Build or attach the shared native graph cache for a TurboHybrid native graph index and return cache diagnostics as jsonb';
+COMMENT ON FUNCTION turbohybrid_prune_shared_cache(pg_catalog.regclass) IS 'Prune stale mmap-backed .tqcache files under pg_turbohybrid_cache: per-index orphans after REINDEX, duplicate generations, and LRU eviction when turbohybrid.native_cache_disk_max_mb is exceeded';
 COMMENT ON FUNCTION turbohybrid_multivector_proxy_diagnostics(pg_catalog.regclass, pg_catalog.int4, pg_catalog.int4) IS 'Read-only bounded diagnostic comparing document proxy nearest-neighbor order with exact multivector MaxSim order for sampled document-node multivector indexes';
 COMMENT ON FUNCTION turbohybrid_last_scan_stats() IS 'Return backend-local summary information for the last TurboHybrid scan as jsonb; parallel restricted because it reads mutable scan state';
 COMMENT ON FUNCTION turbohybrid_last_build_stats() IS 'Return backend-local summary information for the last native TurboHybrid graph build as jsonb; parallel restricted because it reads mutable build state';

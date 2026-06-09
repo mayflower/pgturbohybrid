@@ -60,6 +60,10 @@ jobs:
       - name: Run SQL regression tests
         run: make installcheck
 
+      - name: Hybrid insert/query concurrency smoke
+        if: matrix.postgres == 18 && matrix.pgvector_ref == 'v0.8.2'
+        run: bash scripts/ci-hybrid-concurrency.sh
+
       - name: Run TAP tests
         run: make prove_installcheck
 

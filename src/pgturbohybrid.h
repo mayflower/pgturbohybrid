@@ -250,6 +250,7 @@ extern bool pgturbohybrid_dense_u8_batch_x4;
 extern int	pgturbohybrid_native_cache_policy;
 extern int	pgturbohybrid_native_cache_max_mb;
 extern int	pgturbohybrid_native_cache_warn_mb;
+extern int	pgturbohybrid_native_cache_disk_max_mb;
 extern char *pgturbohybrid_native_build_workers;
 extern int	pgturbohybrid_native_parallel_edge_build;
 extern int	pgturbohybrid_native_segment_budget;
@@ -754,6 +755,7 @@ typedef struct TqOptions
 	int			multivectorProxyEncoder; /* multivector_proxy_encoder */
 	int			multivectorContextMode;	/* multivector_context_mode */
 	int			multivectorFieldMode;	/* multivector_field_mode */
+	int			pageCompactionThreshold; /* page_compaction_threshold */
 }			TqOptions;
 
 typedef struct PgturbohybridGraphGraph
@@ -1667,6 +1669,10 @@ FUNCTION_PREFIX Datum pgturbohybrid_last_build_stats(PG_FUNCTION_ARGS);
 FUNCTION_PREFIX Datum pgturbohybrid_index_stats(PG_FUNCTION_ARGS);
 FUNCTION_PREFIX Datum pgturbohybrid_estimate_memory(PG_FUNCTION_ARGS);
 FUNCTION_PREFIX Datum pgturbohybrid_prewarm(PG_FUNCTION_ARGS);
+FUNCTION_PREFIX Datum pgturbohybrid_prune_shared_cache(PG_FUNCTION_ARGS);
+extern uint32 PgturbohybridGraphPruneSharedCacheAll(uint64 *freedBytesOut,
+													uint64 *remainingBytesOut,
+													int *remainingFilesOut);
 FUNCTION_PREFIX Datum pgturbohybrid_multivector_proxy_diagnostics(PG_FUNCTION_ARGS);
 FUNCTION_PREFIX Datum pgturbohybrid_simd_capabilities(PG_FUNCTION_ARGS);
 void		PgturbohybridGraphRecordExactVectorKernel(int kernel);

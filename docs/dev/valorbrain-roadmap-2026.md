@@ -16,16 +16,16 @@ Status: ✅ done · 🔄 in progress · ▫ planned · ⏸ defer
 |---|------|-----|--------|
 | ✅ 1 | BM25 delta compaction + page pointer WAL fixes | Prod corruption under concurrent embed/FTS | M |
 | ✅ 2 | Merge fixes to `main`, tag `0.1.0-valorbrain.1` | Single deploy branch | B |
-| 🔄 3 | Concurrency regression in CI | Reproduce insert + FTS + hybrid query parallel | M |
-| ▫ 4 | `REINDEX CONCURRENTLY` runbook automation | Post-upgrade hygiene | B |
+| ✅ 3 | Concurrency regression in CI | `scripts/ci-hybrid-concurrency.sh` (PG18 matrix) | M |
+| ✅ 4 | `REINDEX CONCURRENTLY` runbook automation | `scripts/valorbrain/post-deploy.sh` + runbook PG | B |
 
 ## Next (Q3 2026) — ValorBrain retrieval quality
 
 | # | Item | Why | Effort |
 |---|------|-----|--------|
-| ▫ 5 | **Scalar fallback guard** | `EXPLAIN` must show `Index Scan` on `turbohybrid`; alert when seq scan | M |
-| ▫ 6 | **Bilingual BM25 probe** | `websearch_to_tsquery` config matched to query language (PT/EN) | M |
-| ▫ 7 | **BM25 delta chunking** | Large tuples on write path → vacuum bloat, latency spikes | M |
+| ✅ 5 | **Scalar fallback guard** | `scripts/valorbrain/scalar-fallback-guard.sh` + CI test `pgturbohybrid_plan_guard` | M |
+| ✅ 6 | **Bilingual BM25 probe** | `resolveHybridTsConfig()` in ValorBrain `hybrid-search.ts` | M |
+| ✅ 7 | **BM25 delta chunking** | Multi-tuple delta append when document exceeds page size | M |
 | ▫ 8 | **Hybrid candidate budget tuning** | Per-tenant reloptions from `valorbrain_hybrid_embedding_coverage` | B-M |
 | ▫ 9 | **Autovacuum tuning validation** | `documents_fts` churn under BullMQ embed load (migration 0041) | B |
 

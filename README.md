@@ -962,6 +962,46 @@ It depends on pgvector's SQL `vector` type but does not require pgvector to be
 patched. Some graph/index code is derived from pgvector's HNSW implementation;
 see [NOTICE](NOTICE) and [docs/architecture.md](docs/architecture.md).
 
+## Page Compaction
+
+TurboHybrid stores graph data (code vectors, adjacency lists, exact vectors,
+BM25 postings) in append-only page chains. Deleted nodes are marked dead but
+their pages are not reused by subsequent inserts. Over time this causes index
+bloat proportional to the update churn.
+
+The extension compacts dead pages automatically during `VACUUM` / autovacuum.
+Compaction triggers when either condition is met:
+
+- Dead-node ratio reaches the configured threshold (default 25%)
+- Page bloat exceeds 3× the expected minimum
+
+The compaction algorithm walks each page chain, skips dead nodes, remaps node
+IDs, rewrites live data into fresh pages, and atomically swaps the metapage
+pointers. Old chains remain intact until the swap completes, so a crash at any
+point leaves the index in a consistent state (same crash-safety model as
+`REINDEX`).
+
+### Per-index threshold
+
+Set the compaction threshold at index creation time:
+
+```sql
+CREATE INDEX ON documents USING turbohybrid (embedding vector_l2_ops, text)
+  WITH (page_compaction_threshold = 10);
+```
+
+- `0` disables automatic compaction for that index.
+- Range: 0–100. Default: 25.
+
+### Manual compaction
+
+`REINDEX` always produces a fully compact index via `ambuild` (the initial-build
+code path). For a one-shot compact without changing autovacuum behavior:
+
+```sql
+REINDEX INDEX CONCURRENTLY idx_documents_fts_hybrid;
+```
+
 ## Documentation
 
 - [How TurboHybrid works](docs/how-it-works.md)

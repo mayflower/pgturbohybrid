@@ -242,6 +242,7 @@ bool		pgturbohybrid_dense_u8_batch_x4 = true;
 int			pgturbohybrid_native_cache_policy = PGTURBOHYBRID_NATIVE_CACHE_POLICY_AUTO;
 int			pgturbohybrid_native_cache_max_mb = 2048;
 int			pgturbohybrid_native_cache_warn_mb = 512;
+int			pgturbohybrid_native_cache_disk_max_mb = 8192;
 char	   *pgturbohybrid_native_build_workers = "2";
 int			pgturbohybrid_native_parallel_edge_build = PGTURBOHYBRID_NATIVE_PARALLEL_EDGE_BUILD_AUTO;
 int			pgturbohybrid_native_segment_budget = PGTURBOHYBRID_NATIVE_SEGMENT_BUDGET_AUTO;

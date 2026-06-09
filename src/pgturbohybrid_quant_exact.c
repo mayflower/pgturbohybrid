@@ -40,7 +40,7 @@ PgturbohybridGraphExactSlabCapacity(Page page)
 	return header->capacity;
 }
 
-static bool
+bool
 PgturbohybridGraphExactPageIsSlab(Page page)
 {
 	PgturbohybridGraphExactSlabPageHeader header = PgturbohybridGraphExactSlabHeader(page);
@@ -54,7 +54,7 @@ PgturbohybridGraphExactByteOffsetIsValid(OffsetNumber offno)
 	return offno != InvalidOffsetNumber;
 }
 
-static void
+void
 PgturbohybridGraphInitExactSlabPage(Page page)
 {
 	Size		tupleSize = PageGetFreeSpace(page);

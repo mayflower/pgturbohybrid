@@ -6086,6 +6086,7 @@ pgturbohybridamvacuumcleanup(IndexVacuumInfo *info, IndexBulkDeleteResult *stats
 	{
 		result = tqgraphvacuumcleanup(info, stats);
 		(void) PgturbohybridBm25MaybeCompact(info->index);
+		PgturbohybridGraphMaybeCompactPageChains(info->index);
 		PgturbohybridBm25InvalidateCache(info->index);
 	}
 	else
@@ -6942,6 +6943,10 @@ PgturbohybridInit(void)
 					   "Valid values are \"off\" and \"weighted\".",
 					   AccessExclusiveLock);
 
+	add_int_reloption(pgturbohybrid_relopt_kind, "page_compaction_threshold",
+				  "Percentage of dead graph nodes that triggers automatic page chain compaction during VACUUM (0 = disabled)",
+				  25, 0, 100, AccessExclusiveLock);
+
 	DefineCustomIntVariable("turbohybrid.default_dense_k", "Default dense candidate budget for turbohybrid_query callers",
 							NULL, &pgturbohybrid_default_dense_k,
 							PGTURBOHYBRID_DEFAULT_DENSE_K, 0,
@@ -7324,6 +7329,12 @@ PgturbohybridInit(void)
 							&pgturbohybrid_native_cache_warn_mb,
 							512, 0, 1048576,
 							PGC_USERSET, GUC_UNIT_MB, NULL, NULL, NULL);
+	DefineCustomIntVariable("turbohybrid.native_cache_disk_max_mb",
+							"Max total on-disk shared native cache under pg_turbohybrid_cache",
+							"Caps the aggregate size of mmap-backed .tqcache files in the PostgreSQL data directory. When exceeded, the oldest unattached cache files are deleted automatically after each new cache build and via turbohybrid_prune_shared_cache(). Stale files from REINDEX are also removed per index. Set to 0 to disable the cap (not recommended on space-constrained hosts). Default 8192.",
+							&pgturbohybrid_native_cache_disk_max_mb,
+							8192, 0, 1048576,
+							PGC_SIGHUP, GUC_UNIT_MB, NULL, NULL, NULL);
 	DefineCustomStringVariable("turbohybrid.native_build_workers",
 							   "Parallel worker count for native dense graph build scan, encoding, and edge construction",
 							   "Default 2 requests parallel native builds; auto uses PostgreSQL's parallel CREATE INDEX worker choice; 0 disables native parallel build; 1, 2, 4, or 8 requests that many workers.",

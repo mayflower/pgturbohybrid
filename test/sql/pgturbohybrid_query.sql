@@ -110,6 +110,7 @@ BEGIN
 		'turbohybrid.multivector_subvector_k',
 		'turbohybrid.multivector_unique_docs_per_token',
 		'turbohybrid.native_build_workers',
+		'turbohybrid.native_cache_disk_max_mb',
 		'turbohybrid.native_cache_max_mb',
 		'turbohybrid.native_cache_policy',
 		'turbohybrid.native_cache_scope',

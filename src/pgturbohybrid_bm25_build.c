@@ -543,6 +543,102 @@ PgturbohybridBm25DeltaTermTupleBytes(PgturbohybridBm25DeltaTermTuple tuple)
 		sizeof(PgturbohybridBm25DeltaTermPosting) * tuple->postingCount;
 }
 
+static uint32
+PgturbohybridBm25DeltaChunkTermCount(PgturbohybridBm25Collector *collector,
+									 uint32 startTerm,
+									 Size maxItemSize)
+{
+	uint32		count = 0;
+	uint32		termBytes = 0;
+
+	while (startTerm + count < collector->termCount)
+	{
+		PgturbohybridBm25TermTuple *term =
+			&collector->terms[startTerm + count];
+		Size		nextSize =
+			PgturbohybridBm25DeltaTupleSize((uint16) (count + 1),
+										   termBytes + term->termLen);
+
+		if (count > 0 && nextSize > maxItemSize)
+			break;
+
+		if (count == 0 && nextSize > maxItemSize)
+		{
+			if (PgturbohybridBm25DeltaTermTupleSize(1, term->termLen) > maxItemSize)
+				ereport(ERROR,
+						(errcode(ERRCODE_PROGRAM_LIMIT_EXCEEDED),
+						 errmsg("pgturbohybrid BM25 delta term exceeds page size"),
+						 errdetail("A single delta term for node %u is %u bytes long; the maximum index tuple size is %zu bytes.",
+								   term->nodeId,
+								   term->termLen, maxItemSize),
+						 errhint("Shorten individual lexemes or tsvector values for a single row.")));
+			return 1;
+		}
+
+		termBytes += term->termLen;
+		count++;
+	}
+
+	if (count == 0)
+		ereport(ERROR,
+				(errcode(ERRCODE_PROGRAM_LIMIT_EXCEEDED),
+				 errmsg("pgturbohybrid BM25 delta chunk could not be formed")));
+
+	return count;
+}
+
+static PgturbohybridBm25DeltaTuple
+PgturbohybridBm25BuildDeltaChunk(PgturbohybridBm25Collector *collector,
+								 uint32 nodeId,
+								 ItemPointer heapTid,
+								 uint32 docLen,
+								 uint32 startTerm,
+								 uint32 chunkTermCount,
+								 Size *outSize)
+{
+	PgturbohybridBm25DeltaTuple delta;
+	char	   *deltaBytes;
+	uint32		termBytesUsed = 0;
+	Size		deltaSize;
+
+	for (uint32 i = 0; i < chunkTermCount; i++)
+		termBytesUsed += collector->terms[startTerm + i].termLen;
+
+	deltaSize = PgturbohybridBm25DeltaTupleSize((uint16) chunkTermCount,
+												termBytesUsed);
+	delta = palloc0(deltaSize);
+	delta->type = PGTURBOHYBRID_BM25_DELTA_TUPLE_TYPE;
+	delta->termCount = (uint16) chunkTermCount;
+	delta->nodeId = nodeId;
+	delta->heaptid = *heapTid;
+	delta->docLen = docLen;
+	delta->termBytesLen = termBytesUsed;
+	deltaBytes = ((char *) delta) +
+		offsetof(PgturbohybridBm25DeltaTupleData, terms) +
+		sizeof(PgturbohybridBm25DeltaTerm) * chunkTermCount;
+
+	for (uint32 i = 0; i < chunkTermCount; i++)
+	{
+		PgturbohybridBm25TermTuple *src = &collector->terms[startTerm + i];
+		PgturbohybridBm25DeltaTerm *dst = &delta->terms[i];
+		uint32		dstOffset = 0;
+
+		for (uint32 j = 0; j < i; j++)
+			dstOffset += collector->terms[startTerm + j].termLen;
+
+		dst->termHash = src->termHash;
+		dst->termOffset = dstOffset;
+		dst->tf = src->tf;
+		dst->termLen = src->termLen;
+		memcpy(deltaBytes + dstOffset,
+			   collector->termBytes + src->termOffset,
+			   src->termLen);
+	}
+
+	*outSize = deltaSize;
+	return delta;
+}
+
 static bool
 PgturbohybridBm25ImpactHeadEnabled(PgturbohybridBm25Collector *collector,
 							  uint32 *minDf, uint32 *headK)
@@ -3567,10 +3663,9 @@ PgturbohybridBm25AppendDelta(Relation index, uint32 nodeId,
 	PgturbohybridBm25Collector collector;
 	TSVector	vector;
 	bool		mustFree;
-	PgturbohybridBm25DeltaTuple delta;
-	char	   *deltaBytes;
-	Size		deltaSize;
 	Size		maxItemSize;
+	uint32		docLen;
+	uint32		startTerm;
 	BlockNumber deltaStart;
 	BlockNumber deltaTail;
 	BlockNumber deltaTermDirectoryBlkno;
@@ -3606,41 +3701,15 @@ PgturbohybridBm25AppendDelta(Relation index, uint32 nodeId,
 						   PG_UINT16_MAX, collector.termCount),
 				 errhint("Rebuild the index after loading very large text documents, or reduce the tsvector vocabulary for a single row.")));
 
-	deltaSize = PgturbohybridBm25DeltaTupleSize((uint16) collector.termCount,
-										   collector.termBytesUsed);
 	maxItemSize = BLCKSZ - SizeOfPageHeaderData -
 		MAXALIGN(sizeof(PgturbohybridGraphPageOpaqueData));
-	if (deltaSize > maxItemSize)
-		ereport(ERROR,
-				(errcode(ERRCODE_PROGRAM_LIMIT_EXCEEDED),
-				 errmsg("pgturbohybrid BM25 delta tuple exceeds page size"),
-				 errdetail("Delta tuple for node %u has %u terms, %u bytes of term text, and %zu bytes total; the maximum index tuple size is %zu bytes.",
-						   nodeId, collector.termCount,
-						   collector.termBytesUsed, deltaSize, maxItemSize),
-				 errhint("Rebuild the index after loading very large text documents, or reduce the tsvector vocabulary for a single row.")));
+	docLen = PgturbohybridDocLen(vector);
 
 	if (!PgturbohybridBm25ReadMetaForUpdate(index, &metaBuf, &metaPage,
 									   &metaTuple, &xlogState))
 		ereport(ERROR,
 				(errcode(ERRCODE_DATA_CORRUPTED),
 				 errmsg("pgturbohybrid BM25 metadata is missing")));
-	delta = palloc0(deltaSize);
-	delta->type = PGTURBOHYBRID_BM25_DELTA_TUPLE_TYPE;
-	delta->termCount = collector.termCount;
-	delta->nodeId = nodeId;
-	delta->heaptid = *heapTid;
-	delta->docLen = PgturbohybridDocLen(vector);
-	delta->termBytesLen = collector.termBytesUsed;
-	deltaBytes = PgturbohybridBm25DeltaTermBytes(delta);
-	if (collector.termBytesUsed > 0)
-		memcpy(deltaBytes, collector.termBytes, collector.termBytesUsed);
-	for (uint32 i = 0; i < collector.termCount; i++)
-	{
-		delta->terms[i].termHash = collector.terms[i].termHash;
-		delta->terms[i].termOffset = collector.terms[i].termOffset;
-		delta->terms[i].tf = collector.terms[i].tf;
-		delta->terms[i].termLen = collector.terms[i].termLen;
-	}
 
 	deltaStart = metaTuple->deltaStartBlkno;
 	deltaTermDirectoryBlkno = metaTuple->deltaTermDirectoryBlkno;
@@ -3666,27 +3735,42 @@ PgturbohybridBm25AppendDelta(Relation index, uint32 nodeId,
 		GenericXLogAbort(xlogState);
 	UnlockReleaseBuffer(metaBuf);
 
-	appendStart = BlockNumberIsValid(deltaTail) ? deltaTail : deltaStart;
-	(void) PgturbohybridGraphAppendTuple(index, MAIN_FORKNUM, &appendStart,
-							  PGTURBOHYBRID_GRAPH_PAGE_KIND_BM25_DELTA,
-							  (Item) delta, deltaSize,
-							  PGTURBOHYBRID_GRAPH_GRAPH_OP_ELEMENT_INSERT,
-							  &deltaBlkno);
-	if (!BlockNumberIsValid(deltaStart))
+	for (startTerm = 0; startTerm < collector.termCount;)
 	{
-		deltaStart = appendStart;
-		deltaPages = 1;
-	}
-	else if (!BlockNumberIsValid(deltaTail))
-		deltaPages = PgturbohybridBm25CountChainPagesAndTail(index, deltaStart,
-														 PGTURBOHYBRID_GRAPH_PAGE_KIND_BM25_DELTA,
-														 &deltaTail);
-	else if (deltaBlkno != deltaTail)
-		deltaPages++;
-	deltaTail = deltaBlkno;
+		PgturbohybridBm25DeltaTuple delta;
+		Size		deltaSize;
+		uint32		chunkTermCount =
+			PgturbohybridBm25DeltaChunkTermCount(&collector, startTerm,
+												 maxItemSize);
 
-	PgturbohybridBm25AppendDeltaTermSegments(index, delta, &deltaDirectory,
-										maxItemSize);
+		delta = PgturbohybridBm25BuildDeltaChunk(&collector, nodeId, heapTid,
+												 docLen, startTerm,
+												 chunkTermCount, &deltaSize);
+		appendStart = BlockNumberIsValid(deltaTail) ? deltaTail : deltaStart;
+		(void) PgturbohybridGraphAppendTuple(index, MAIN_FORKNUM, &appendStart,
+								  PGTURBOHYBRID_GRAPH_PAGE_KIND_BM25_DELTA,
+								  (Item) delta, deltaSize,
+								  PGTURBOHYBRID_GRAPH_GRAPH_OP_ELEMENT_INSERT,
+								  &deltaBlkno);
+		if (!BlockNumberIsValid(deltaStart))
+		{
+			deltaStart = appendStart;
+			deltaPages = 1;
+		}
+		else if (!BlockNumberIsValid(deltaTail))
+			deltaPages = PgturbohybridBm25CountChainPagesAndTail(index, deltaStart,
+																 PGTURBOHYBRID_GRAPH_PAGE_KIND_BM25_DELTA,
+																 &deltaTail);
+		else if (deltaBlkno != deltaTail)
+			deltaPages++;
+		deltaTail = deltaBlkno;
+
+		PgturbohybridBm25AppendDeltaTermSegments(index, delta, &deltaDirectory,
+											maxItemSize);
+		pfree(delta);
+		startTerm += chunkTermCount;
+	}
+
 	deltaTermDirectoryBlkno =
 		PgturbohybridBm25WriteDeltaTermDirectory(index, &deltaDirectory);
 	deltaTermPages = PgturbohybridBm25DeltaDirectoryTermPages(&deltaDirectory);
@@ -3701,8 +3785,8 @@ PgturbohybridBm25AppendDelta(Relation index, uint32 nodeId,
 	metaTuple->deltaTermDirectoryBlkno = deltaTermDirectoryBlkno;
 	metaTuple->deltaGeneration++;
 	metaTuple->deltaDocCount++;
-	metaTuple->deltaTotalDocLen += delta->docLen;
-	metaTuple->deltaTermCount += delta->termCount;
+	metaTuple->deltaTotalDocLen += docLen;
+	metaTuple->deltaTermCount += collector.termCount;
 	metaTuple->deltaPages = deltaPages;
 	metaTuple->deltaTermPages = deltaTermPages;
 	pgturbohybrid_bm25_delta_cursor_index = RelationGetRelid(index);

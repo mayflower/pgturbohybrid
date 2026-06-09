@@ -1213,6 +1213,8 @@ void		PgturbohybridGraphAppendInsertedExact(Relation index, BlockNumber *exactSt
 									   int dimensions, BlockNumber *exactBlkno,
 									   OffsetNumber *exactOffno);
 bool		PgturbohybridGraphExactByteOffsetIsValid(OffsetNumber offno);
+bool		PgturbohybridGraphExactPageIsSlab(Page page);
+void		PgturbohybridGraphInitExactSlabPage(Page page);
 bool		PgturbohybridGraphReadExactVectorInto(Relation index, PgturbohybridGraphScanNode *node,
 									   int dimensions, char *dest,
 									   PgturbohybridGraphScanOpaque so);
@@ -1291,5 +1293,6 @@ void		PgturbohybridGraphRepairDryRun(Relation index,
 											int searchEf,
 											int candidateLimit,
 											PgturbohybridGraphRepairDryRunStats *stats);
+void		PgturbohybridGraphMaybeCompactPageChains(Relation index);
 
 #endif

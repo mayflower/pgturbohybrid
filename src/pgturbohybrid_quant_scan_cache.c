@@ -4,7 +4,9 @@
 #include <string.h>
 #include <sys/stat.h>
 #ifndef WIN32
+#include <dirent.h>
 #include <fcntl.h>
+#include <stdlib.h>
 #include <sys/mman.h>
 #include <unistd.h>
 #endif
@@ -361,6 +363,438 @@ PgturbohybridGraphSharedCacheLockPath(Relation index, PgturbohybridGraphMetaPage
 	PgturbohybridGraphSharedCachePath(index, meta, key, cachePath, sizeof(cachePath));
 	snprintf(path, pathSize, "%s.building", cachePath);
 }
+
+#ifndef WIN32
+typedef struct PgturbohybridSharedCacheDiskEntry
+{
+	char		path[MAXPGPATH];
+	Oid			relid;
+	off_t		size;
+	time_t		mtime;
+} PgturbohybridSharedCacheDiskEntry;
+
+static void
+PgturbohybridGraphSharedCachePathFromParts(Oid relid, Oid relfilenumber,
+										   uint16 graphFlags, uint64 key,
+										   char *path, Size pathSize)
+{
+	char		dir[MAXPGPATH];
+
+	PgturbohybridGraphSharedCacheDir(dir, sizeof(dir));
+	snprintf(path, pathSize, "%s/%u_%u_%u_%016llx.tqcache",
+			 dir,
+			 relid,
+			 relfilenumber,
+			 (unsigned int) graphFlags,
+			 (unsigned long long) key);
+}
+
+static bool
+PgturbohybridGraphSharedCachePathInUse(const char *path)
+{
+	PgturbohybridGraphSharedMap *map;
+	char		activePath[MAXPGPATH];
+
+	for (map = pgturbohybridGraphSharedMapList; map != NULL; map = map->next)
+	{
+		PgturbohybridGraphSharedCachePathFromParts(map->relid,
+												   map->relfilenumber,
+												   map->graphFlags,
+												   map->key,
+												   activePath,
+												   sizeof(activePath));
+		if (strcmp(path, activePath) == 0)
+			return true;
+	}
+	return false;
+}
+
+static bool
+PgturbohybridGraphSharedCacheParseFilename(const char *name,
+										   Oid *relid,
+										   Oid *relfilenumber,
+										   unsigned int *graphFlags,
+										   unsigned long long *key)
+{
+	unsigned int relidU;
+	unsigned int relfilenumberU;
+	unsigned int graphFlagsU;
+	unsigned long long keyU;
+
+	if (relid == NULL || relfilenumber == NULL || graphFlags == NULL || key == NULL)
+		return false;
+	if (sscanf(name, "%u_%u_%u_%llx.tqcache",
+			   &relidU, &relfilenumberU, &graphFlagsU, &keyU) != 4)
+		return false;
+	*relid = (Oid) relidU;
+	*relfilenumber = (Oid) relfilenumberU;
+	*graphFlags = graphFlagsU;
+	*key = keyU;
+	return true;
+}
+
+static bool
+PgturbohybridGraphSharedCacheUnlinkIfSafe(const char *path, uint64 *freedBytes)
+{
+	struct stat st;
+
+	if (path == NULL || path[0] == '\0')
+		return false;
+	if (PgturbohybridGraphSharedCachePathInUse(path))
+		return false;
+	if (stat(path, &st) != 0)
+	{
+		(void) unlink(path);
+		return false;
+	}
+	if (unlink(path) != 0)
+		return false;
+	if (freedBytes != NULL)
+		*freedBytes += (uint64) st.st_size;
+	return true;
+}
+
+static uint32
+PgturbohybridGraphPruneStaleSharedCacheForRelid(Oid relid, const char *keepPath,
+												uint64 *freedBytes)
+{
+	DIR		   *dirp;
+	struct dirent *dent;
+	char		cacheDir[MAXPGPATH];
+	char		path[MAXPGPATH];
+	uint32		pruned = 0;
+
+	if (!PgturbohybridGraphEnsureSharedCacheDir(cacheDir, sizeof(cacheDir)))
+		return 0;
+
+	dirp = opendir(cacheDir);
+	if (dirp == NULL)
+		return 0;
+
+	while ((dent = readdir(dirp)) != NULL)
+	{
+		Oid			fileRelid;
+		Oid			fileRelfilenumber;
+		unsigned int graphFlags;
+		unsigned long long key;
+
+		if (dent->d_name[0] == '.')
+			continue;
+		if (!PgturbohybridGraphSharedCacheParseFilename(dent->d_name,
+														&fileRelid,
+														&fileRelfilenumber,
+														&graphFlags,
+														&key))
+			continue;
+		if (fileRelid != relid)
+			continue;
+
+		snprintf(path, sizeof(path), "%s/%s", cacheDir, dent->d_name);
+		if (keepPath != NULL && strcmp(path, keepPath) == 0)
+			continue;
+		if (PgturbohybridGraphSharedCacheUnlinkIfSafe(path, freedBytes))
+			pruned++;
+	}
+	closedir(dirp);
+	return pruned;
+}
+
+static uint32
+PgturbohybridGraphPruneSharedCacheArtifacts(uint64 *freedBytes)
+{
+	DIR		   *dirp;
+	struct dirent *dent;
+	char		cacheDir[MAXPGPATH];
+	char		path[MAXPGPATH];
+	uint32		pruned = 0;
+	const time_t staleCutoff = time(NULL) - 3600;
+
+	if (!PgturbohybridGraphEnsureSharedCacheDir(cacheDir, sizeof(cacheDir)))
+		return 0;
+
+	dirp = opendir(cacheDir);
+	if (dirp == NULL)
+		return 0;
+
+	while ((dent = readdir(dirp)) != NULL)
+	{
+		const char *name = dent->d_name;
+		struct stat st;
+		bool		isArtifact = false;
+
+		if (name[0] == '.')
+			continue;
+		if (strstr(name, ".building") != NULL || strstr(name, ".tmp") != NULL)
+			isArtifact = true;
+		if (!isArtifact)
+			continue;
+
+		snprintf(path, sizeof(path), "%s/%s", cacheDir, name);
+		if (stat(path, &st) != 0)
+			continue;
+		if (st.st_mtime > staleCutoff)
+			continue;
+		if (unlink(path) == 0)
+		{
+			pruned++;
+			if (freedBytes != NULL)
+				*freedBytes += (uint64) st.st_size;
+		}
+	}
+	closedir(dirp);
+	return pruned;
+}
+
+static int
+PgturbohybridSharedCacheDiskEntryCmp(const void *a, const void *b)
+{
+	const PgturbohybridSharedCacheDiskEntry *ea = a;
+	const PgturbohybridSharedCacheDiskEntry *eb = b;
+
+	if (ea->relid < eb->relid)
+		return -1;
+	if (ea->relid > eb->relid)
+		return 1;
+	if (ea->mtime < eb->mtime)
+		return -1;
+	if (ea->mtime > eb->mtime)
+		return 1;
+	return 0;
+}
+
+static int
+PgturbohybridSharedCacheDiskEntryMtimeCmp(const void *a, const void *b)
+{
+	const PgturbohybridSharedCacheDiskEntry *ea = a;
+	const PgturbohybridSharedCacheDiskEntry *eb = b;
+
+	if (ea->mtime < eb->mtime)
+		return -1;
+	if (ea->mtime > eb->mtime)
+		return 1;
+	return 0;
+}
+
+static bool
+PgturbohybridGraphCollectSharedCacheDiskEntries(PgturbohybridSharedCacheDiskEntry **entriesOut,
+												int *countOut,
+												uint64 *totalBytesOut)
+{
+	DIR		   *dirp;
+	struct dirent *dent;
+	char		cacheDir[MAXPGPATH];
+	PgturbohybridSharedCacheDiskEntry *entries;
+	int			capacity = 32;
+	int			count = 0;
+	uint64		totalBytes = 0;
+
+	*entriesOut = NULL;
+	*countOut = 0;
+	if (totalBytesOut != NULL)
+		*totalBytesOut = 0;
+
+	if (!PgturbohybridGraphEnsureSharedCacheDir(cacheDir, sizeof(cacheDir)))
+		return false;
+
+	dirp = opendir(cacheDir);
+	if (dirp == NULL)
+		return false;
+
+	entries = palloc(sizeof(PgturbohybridSharedCacheDiskEntry) * capacity);
+	while ((dent = readdir(dirp)) != NULL)
+	{
+		struct stat st;
+		char		path[MAXPGPATH];
+		Oid			relid;
+		Oid			relfilenumber;
+		unsigned int graphFlags;
+		unsigned long long key;
+
+		if (dent->d_name[0] == '.')
+			continue;
+		if (!PgturbohybridGraphSharedCacheParseFilename(dent->d_name,
+														&relid,
+														&relfilenumber,
+														&graphFlags,
+														&key))
+			continue;
+
+		snprintf(path, sizeof(path), "%s/%s", cacheDir, dent->d_name);
+		if (stat(path, &st) != 0 || !S_ISREG(st.st_mode))
+			continue;
+
+		if (count >= capacity)
+		{
+			capacity *= 2;
+			entries = repalloc(entries,
+							   sizeof(PgturbohybridSharedCacheDiskEntry) * capacity);
+		}
+
+		strlcpy(entries[count].path, path, sizeof(entries[count].path));
+		entries[count].relid = relid;
+		entries[count].size = st.st_size;
+		entries[count].mtime = st.st_mtime;
+		totalBytes += (uint64) st.st_size;
+		count++;
+	}
+	closedir(dirp);
+
+	*entriesOut = entries;
+	*countOut = count;
+	if (totalBytesOut != NULL)
+		*totalBytesOut = totalBytes;
+	return true;
+}
+
+static uint32
+PgturbohybridGraphPruneDuplicateSharedCachePerRelid(uint64 *freedBytes)
+{
+	PgturbohybridSharedCacheDiskEntry *entries;
+	int			count;
+	uint64		totalBytes PG_USED_FOR_ASSERTS_ONLY;
+	uint32		pruned = 0;
+	int			i;
+
+	if (!PgturbohybridGraphCollectSharedCacheDiskEntries(&entries, &count, &totalBytes))
+		return 0;
+	if (count <= 1)
+	{
+		pfree(entries);
+		return 0;
+	}
+
+	qsort(entries, count, sizeof(PgturbohybridSharedCacheDiskEntry),
+		  PgturbohybridSharedCacheDiskEntryCmp);
+
+	for (i = 0; i < count; )
+	{
+		int			j = i + 1;
+
+		while (j < count && entries[j].relid == entries[i].relid)
+			j++;
+
+		if (j - i > 1)
+		{
+			int			keep = i;
+
+			for (int k = i + 1; k < j; k++)
+			{
+				if (entries[k].mtime > entries[keep].mtime)
+					keep = k;
+			}
+			for (int k = i; k < j; k++)
+			{
+				if (k == keep)
+					continue;
+				if (PgturbohybridGraphSharedCacheUnlinkIfSafe(entries[k].path, freedBytes))
+					pruned++;
+			}
+		}
+		i = j;
+	}
+
+	pfree(entries);
+	return pruned;
+}
+
+static uint32
+PgturbohybridGraphEnforceSharedCacheDiskCap(uint64 *freedBytes)
+{
+	PgturbohybridSharedCacheDiskEntry *entries;
+	int			count;
+	uint64		totalBytes = 0;
+	uint64		capBytes;
+	uint32		pruned = 0;
+
+	if (pgturbohybrid_native_cache_disk_max_mb <= 0)
+		return 0;
+
+	capBytes = (uint64) pgturbohybrid_native_cache_disk_max_mb * 1024ULL * 1024ULL;
+	if (!PgturbohybridGraphCollectSharedCacheDiskEntries(&entries, &count, &totalBytes))
+		return 0;
+	if (totalBytes <= capBytes || count == 0)
+	{
+		pfree(entries);
+		return 0;
+	}
+
+	qsort(entries, count, sizeof(PgturbohybridSharedCacheDiskEntry),
+		  PgturbohybridSharedCacheDiskEntryMtimeCmp);
+
+	for (int i = 0; i < count && totalBytes > capBytes; i++)
+	{
+		if (PgturbohybridGraphSharedCacheUnlinkIfSafe(entries[i].path, freedBytes))
+		{
+			totalBytes -= (uint64) entries[i].size;
+			pruned++;
+		}
+	}
+
+	pfree(entries);
+	return pruned;
+}
+
+static void
+PgturbohybridGraphSharedCacheMaintain(Relation index, const char *keepPath)
+{
+	(void) PgturbohybridGraphPruneSharedCacheArtifacts(NULL);
+	if (index != NULL)
+		(void) PgturbohybridGraphPruneStaleSharedCacheForRelid(RelationGetRelid(index),
+															   keepPath,
+															   NULL);
+	(void) PgturbohybridGraphPruneDuplicateSharedCachePerRelid(NULL);
+	(void) PgturbohybridGraphEnforceSharedCacheDiskCap(NULL);
+}
+
+uint32
+PgturbohybridGraphPruneSharedCacheAll(uint64 *freedBytesOut,
+									  uint64 *remainingBytesOut,
+									  int *remainingFilesOut)
+{
+	uint32		pruned = 0;
+	uint64		freedBytes = 0;
+	PgturbohybridSharedCacheDiskEntry *entries = NULL;
+	int			count = 0;
+	uint64		remainingBytes = 0;
+
+	if (freedBytesOut != NULL)
+		*freedBytesOut = 0;
+	if (remainingBytesOut != NULL)
+		*remainingBytesOut = 0;
+	if (remainingFilesOut != NULL)
+		*remainingFilesOut = 0;
+
+	pruned += PgturbohybridGraphPruneSharedCacheArtifacts(&freedBytes);
+	pruned += PgturbohybridGraphPruneDuplicateSharedCachePerRelid(&freedBytes);
+	pruned += PgturbohybridGraphEnforceSharedCacheDiskCap(&freedBytes);
+
+	(void) PgturbohybridGraphCollectSharedCacheDiskEntries(&entries, &count, &remainingBytes);
+	if (entries != NULL)
+		pfree(entries);
+
+	if (freedBytesOut != NULL)
+		*freedBytesOut = freedBytes;
+	if (remainingBytesOut != NULL)
+		*remainingBytesOut = remainingBytes;
+	if (remainingFilesOut != NULL)
+		*remainingFilesOut = count;
+	return pruned;
+}
+#else
+uint32
+PgturbohybridGraphPruneSharedCacheAll(uint64 *freedBytesOut,
+									  uint64 *remainingBytesOut,
+									  int *remainingFilesOut)
+{
+	if (freedBytesOut != NULL)
+		*freedBytesOut = 0;
+	if (remainingBytesOut != NULL)
+		*remainingBytesOut = 0;
+	if (remainingFilesOut != NULL)
+		*remainingFilesOut = 0;
+	return 0;
+}
+#endif							/* !WIN32 */
 
 static bool
 PgturbohybridGraphSharedHeaderMatches(PgturbohybridGraphSharedCacheHeader *hdr,
@@ -2800,6 +3234,7 @@ PgturbohybridGraphMapSharedCacheFile(Relation index,
 		hdr->fileSize != (uint64) st.st_size)
 	{
 		munmap(base, st.st_size);
+		(void) unlink(path);
 		return false;
 	}
 
@@ -3092,6 +3527,8 @@ PgturbohybridGraphWriteSharedCacheFile(Relation index,
 		unlink(tmpPath);
 		return false;
 	}
+
+	PgturbohybridGraphSharedCacheMaintain(index, path);
 
 	if (buildUs != NULL)
 		*buildUs = PgturbohybridGraphElapsedUsSince(start);
@@ -3386,6 +3823,61 @@ pgturbohybrid_prewarm(PG_FUNCTION_ARGS)
 	jsonb = PgturbohybridJsonbEndObject(&jsonState);
 
 	index_close(index, AccessShareLock);
+	PG_RETURN_JSONB_P(jsonb);
+}
+
+FUNCTION_PREFIX PG_FUNCTION_INFO_V1(pgturbohybrid_prune_shared_cache);
+FUNCTION_PREFIX Datum
+pgturbohybrid_prune_shared_cache(PG_FUNCTION_ARGS)
+{
+	uint64		freedBytes = 0;
+	uint64		remainingBytes = 0;
+	int			remainingFiles = 0;
+	uint32		pruned = 0;
+	PgturbohybridJsonbState jsonState;
+	Jsonb	   *jsonb;
+
+	if (PG_NARGS() > 0 && !PG_ARGISNULL(0))
+	{
+#ifndef WIN32
+		Oid			indexOid = PG_GETARG_OID(0);
+		Relation	index;
+		uint64		relFreed = 0;
+
+		index = index_open(indexOid, AccessShareLock);
+		pruned = PgturbohybridGraphPruneStaleSharedCacheForRelid(RelationGetRelid(index),
+																 NULL,
+																 &relFreed);
+		freedBytes = relFreed;
+		index_close(index, AccessShareLock);
+		pruned += PgturbohybridGraphEnforceSharedCacheDiskCap(&freedBytes);
+		{
+			PgturbohybridSharedCacheDiskEntry *entries = NULL;
+
+			(void) PgturbohybridGraphCollectSharedCacheDiskEntries(&entries,
+																   &remainingFiles,
+																   &remainingBytes);
+			if (entries != NULL)
+				pfree(entries);
+		}
+#else
+		(void) PG_GETARG_OID(0);
+#endif
+	}
+	else
+		pruned = PgturbohybridGraphPruneSharedCacheAll(&freedBytes,
+													  &remainingBytes,
+													  &remainingFiles);
+
+	PgturbohybridJsonbStateInit(&jsonState);
+	PgturbohybridJsonbBeginObject(&jsonState);
+	PgturbohybridPrewarmJsonbAddInt64(&jsonState, "pruned_files", (int64) pruned);
+	PgturbohybridPrewarmJsonbAddInt64(&jsonState, "freed_bytes", (int64) freedBytes);
+	PgturbohybridPrewarmJsonbAddInt64(&jsonState, "remaining_bytes", (int64) remainingBytes);
+	PgturbohybridPrewarmJsonbAddInt64(&jsonState, "remaining_files", (int64) remainingFiles);
+	PgturbohybridPrewarmJsonbAddInt64(&jsonState, "disk_cap_mb",
+									  (int64) pgturbohybrid_native_cache_disk_max_mb);
+	jsonb = PgturbohybridJsonbEndObject(&jsonState);
 	PG_RETURN_JSONB_P(jsonb);
 }
 
