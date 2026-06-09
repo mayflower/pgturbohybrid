@@ -3626,6 +3626,12 @@ pgturbohybrid_last_scan_stats(PG_FUNCTION_ARGS)
 							   scanStats.quantizedInvertedExactRerankDocs);
 	PgturbohybridJsonbAddInt64(&state, "quantized_inverted_codebook_size",
 							   scanStats.quantizedInvertedCodebookSize);
+	PgturbohybridJsonbAddUint64(&state, "quantized_inverted_list_offset_bytes",
+								scanStats.quantizedInvertedListOffsetBytes);
+	PgturbohybridJsonbAddUint64(&state, "quantized_inverted_posting_bytes",
+								scanStats.quantizedInvertedPostingBytes);
+	PgturbohybridJsonbAddUint64(&state, "quantized_inverted_sidecar_bytes",
+								scanStats.quantizedInvertedSidecarBytes);
 	if (scanStats.multivectorGraphMode[0] != '\0')
 		PgturbohybridJsonbAddString(&state, "multivector_graph_mode",
 									scanStats.multivectorGraphMode);

@@ -158,6 +158,63 @@ BEGIN
 
     RESET turbohybrid.simd;
 END $$;
+DO $$
+DECLARE
+    q smallint[] := ARRAY[
+        1, -2, 3, 4, -5, 6, 7, -8, 9, 10,
+        -11, 12, 13, -14, 15, 16, 17, -18, 19, 20
+    ]::smallint[];
+    d smallint[] := ARRAY[
+        -3, 4, 5, -6, 7, 8, -9, 10, 11, -12,
+        13, 14, -15, 16, 17, -18, 19, 20, -21, 22
+    ]::smallint[];
+    guarded bool := false;
+    scalar jsonb;
+    auto jsonb;
+    forced_scalar jsonb;
+    scalar_score float8;
+    auto_score float8;
+    kernel text;
+BEGIN
+    BEGIN
+        PERFORM turbohybrid_experimental_compact_code_score(q, d, false, 'auto');
+    EXCEPTION WHEN feature_not_supported THEN
+        guarded := true;
+    END;
+    IF NOT guarded THEN
+        RAISE EXCEPTION 'compact-code scorer did not require experimental guard';
+    END IF;
+
+    scalar := turbohybrid_experimental_compact_code_score(q, d, true, 'scalar');
+    auto := turbohybrid_experimental_compact_code_score(q, d, true, 'auto');
+    scalar_score := (scalar->>'score')::float8;
+    auto_score := (auto->>'score')::float8;
+    kernel := auto->>'approximate_scoring_kernel';
+
+    IF scalar->>'approximate_scoring_kernel' <> 'compact_scalar' THEN
+        RAISE EXCEPTION 'expected compact_scalar, got %', scalar;
+    END IF;
+    IF scalar_score <> -594 OR auto_score <> scalar_score THEN
+        RAISE EXCEPTION 'compact-code scalar/SIMD parity failed: scalar %, auto %, raw % / %',
+            scalar_score, auto_score, scalar, auto;
+    END IF;
+    IF kernel NOT IN ('compact_scalar', 'compact_avx2', 'compact_avx512', 'compact_neon') THEN
+        RAISE EXCEPTION 'unexpected compact-code kernel % in %', kernel, auto;
+    END IF;
+    IF NOT (auto ? 'approximate_scoring_us')
+       OR auto->>'final_sql_ordering' <> 'exact_heap_maxsim' THEN
+        RAISE EXCEPTION 'missing compact-code scoring diagnostics: %', auto;
+    END IF;
+
+    PERFORM set_config('turbohybrid.simd', 'off', false);
+    forced_scalar := turbohybrid_experimental_compact_code_score(q, d, true, 'auto');
+    IF forced_scalar->>'approximate_scoring_kernel' <> 'compact_scalar'
+       OR (forced_scalar->>'score')::float8 <> scalar_score THEN
+        RAISE EXCEPTION 'turbohybrid.simd=off did not force compact scalar: %',
+            forced_scalar;
+    END IF;
+    RESET turbohybrid.simd;
+END $$;
 CREATE TABLE simd_parity_mv_docs (
     id int PRIMARY KEY,
     colbert turbohybrid_multivector
