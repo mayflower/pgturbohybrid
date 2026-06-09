@@ -1,0 +1,53 @@
+# Token optimization — exclude heavy docs from auto-load
+# These files are still available when explicitly requested, just not auto-loaded.
+# Run `npx claude-token-optimizer measure` to verify savings.
+
+# Dev notes (50k+ tokens, available on demand)
+docs/dev/multivector-document-graph-design.md
+docs/dev/multivector-candidate-admission-audit.md
+docs/dev/multivector-late-interaction.md
+docs/dev/multivector-fast-qdrant-parity.md
+docs/dev/multivector-docmap-sidecar.md
+docs/dev/multivector-fix-plan.md
+docs/dev/multivector-colbertsar-research.md
+docs/dev/scaling-complexity-notes.md
+docs/dev/native_parallel_edge_insertion.md
+docs/dev/native_build_parallelism.md
+docs/dev/native_segmented_build.md
+docs/dev/native_shared_cache.md
+docs/dev/serial-edge-construction-report.md
+docs/dev/amd64-validation-report.md
+docs/dev/amd64-current-state-check.md
+
+# Internal notes (20k+ tokens)
+docs/internal/dbpedia-dense-quality-decision.md
+docs/internal/u8-x4-prefetch-distance-experiment.md
+docs/internal/hybrid-rrf-early-stop-feasibility.md
+docs/internal/migration-notes.md
+docs/internal/pgvector-dependency-audit.md
+docs/internal/readiness-checklist.md
+
+# Benchmarks (4k+ tokens)
+docs/benchmarks/fiqa-openai.md
+docs/benchmarks/bring-your-own-rag.md
+
+# Release notes (2.5k tokens)
+docs/release-notes/github-v0.1.0-alpha.2.md
+docs/release-notes/v0.1.0-alpha.2.md
+
+# Legacy planning docs
+prompts.md
+problem.md
+pedgeplan.md
+
+# Large docs that aren't needed every session
+docs/multivector-late-interaction.md
+docs/architecture.md
+docs/colbert-llama-extension.md
+
+# Release/process docs (available on demand)
+RELEASE_CHECKLIST.md
+RELEASE_HYGIENE.md
+RELEASE.md
+SECURITY_CODE_AUDIT.md
+SECURITY_CODE_AUDIT_SIGNOFF.md

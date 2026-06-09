@@ -1132,6 +1132,10 @@ bool		PgturbohybridGraphResolveChainBlockNumber(Relation index, BlockNumber star
 										   int pageNo, int pageCount, uint16 pageKind,
 										   BlockNumber *blknos, BlockNumber *blkno);
 bool		PgturbohybridGraphReadMeta(Relation index, PgturbohybridGraphMetaPageData *meta);
+
+	/* BM25 self-healing (pgturbohybrid_bm25_build.c) */
+	extern bool	PgturbohybridBm25TryRepairMetaBlock(Relation index);
+	extern void	PgturbohybridBm25ValidateMetaPointer(Relation index);
 void		PgturbohybridGraphFinishPage(Buffer buf);
 void		PgturbohybridGraphAppendPage(Relation index, ForkNumber forkNum, Buffer *buf,
 							Page *page, uint16 pageKind);

@@ -1126,11 +1126,16 @@ PgturbohybridBm25ReadMeta(Relation index, PgturbohybridBm25MetaTupleData *meta)
 	blkno = graphMeta.tqBm25MetaStartBlkno;
 	nblocks = RelationGetNumberOfBlocks(index);
 	if (blkno >= nblocks)
+	{
+		/* Self-healing: attempt to find BM25 META page by scanning */
+		if (PgturbohybridBm25TryRepairMetaBlock(index))
+			return PgturbohybridBm25ReadMeta(index, meta);
 		ereport(ERROR,
 				(errcode(ERRCODE_DATA_CORRUPTED),
 				 errmsg("pgturbohybrid BM25 metadata pointer is invalid"),
 				 errdetail("Metapage points to block %u, but the index has only %u blocks.",
 						   blkno, nblocks)));
+	}
 
 	buf = ReadBuffer(index, blkno);
 	LockBuffer(buf, BUFFER_LOCK_SHARE);
@@ -1138,6 +1143,9 @@ PgturbohybridBm25ReadMeta(Relation index, PgturbohybridBm25MetaTupleData *meta)
 	if (!PgturbohybridBm25PageIsKind(page, PGTURBOHYBRID_GRAPH_PAGE_KIND_BM25_META))
 	{
 		UnlockReleaseBuffer(buf);
+		/* Self-healing: attempt to find BM25 META page by scanning */
+		if (PgturbohybridBm25TryRepairMetaBlock(index))
+			return PgturbohybridBm25ReadMeta(index, meta);
 		ereport(ERROR,
 				(errcode(ERRCODE_DATA_CORRUPTED),
 				 errmsg("pgturbohybrid BM25 metadata pointer is invalid"),

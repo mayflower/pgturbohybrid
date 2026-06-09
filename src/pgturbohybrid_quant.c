@@ -4721,6 +4721,16 @@ PgturbohybridQuantUpdateMetaPageFromUpdate(Relation index,
 	metap->buildEdgeUs = update->buildEdgeUs;
 	metap->buildWriteUs = update->buildWriteUs;
 	metap->buildWorkerCount = update->buildWorkerCount;
+
+	/*
+	 * tqBm25MetaStartBlkno is NOT part of PgturbohybridQuantMetaUpdate.
+	 * It must be preserved across graph page compaction.  This function
+	 * uses individual field assignments (not memset/memcpy), so the
+	 * existing value is retained.  Do NOT add a memset on metap above.
+	 */
+	Assert(metap->tqBm25MetaStartBlkno == InvalidBlockNumber ||
+		   metap->tqBm25MetaStartBlkno > PGTURBOHYBRID_GRAPH_METAPAGE_BLKNO);
+
 	PgturbohybridGraphMarkPageGraphOp(page, PGTURBOHYBRID_GRAPH_GRAPH_OP_META_UPDATE);
 
 	if (xlogState != NULL)

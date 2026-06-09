@@ -1,0 +1,12 @@
+{
+  "active": false,
+  "started_at": "2026-06-09T13:36:04.452Z",
+  "original_prompt": "Não o do OMC, o nativo do claude code, agora tem modo /effort ultrawork",
+  "session_id": "9c864cfa-1568-4b95-8de5-95587b628344",
+  "project_path": "/opt/pgturbohybrid",
+  "reinforcement_count": 0,
+  "awaiting_confirmation": true,
+  "awaiting_confirmation_set_at": "2026-06-09T13:36:04.452Z",
+  "last_checked_at": "2026-06-09T13:38:45.732Z",
+  "deactivated_reason": "task_completion"
+}

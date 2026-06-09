@@ -6087,6 +6087,7 @@ pgturbohybridamvacuumcleanup(IndexVacuumInfo *info, IndexBulkDeleteResult *stats
 		result = tqgraphvacuumcleanup(info, stats);
 		(void) PgturbohybridBm25MaybeCompact(info->index);
 		PgturbohybridGraphMaybeCompactPageChains(info->index);
+		PgturbohybridBm25ValidateMetaPointer(info->index);
 		PgturbohybridBm25InvalidateCache(info->index);
 	}
 	else

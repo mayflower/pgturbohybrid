@@ -1,0 +1,7 @@
+{
+  "tool_name": "Bash",
+  "tool_input_preview": "{\"command\":\"PGHOST=127.0.0.1 PGPORT=5433 PGDATABASE=valorbrain PGUSER=postgres rtk psql -c \\\"\\nUPDATE documents_fts fts\\nSET embedding = cv.embedding\\nFROM content_vectors cv, documents d\\nWHERE d.has...",
+  "error": "Exit code 1\nERROR:  pgturbohybrid BM25 metadata pointer is invalid\nDETAIL:  Metapage points to block 2312, which is not a BM25 metadata page.",
+  "timestamp": "2026-06-09T16:59:45.366Z",
+  "retry_count": 2
+}
