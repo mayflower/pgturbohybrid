@@ -238,6 +238,84 @@ the opt-in document-node admission grid includes it so research comparisons
 produce explicit experimental stats without falling through to another candidate
 source.
 
+### x00k document-node serving selection
+
+Use `--document-node-serving-grid` when the goal is to choose a practical
+document-node serving profile for 10k to x00k ColBERT corpora. This preset is a
+compact production-oriented grid, not the exhaustive admission research grid. It
+compares named profiles for `proxy_vector`, the explicit `document_nodes`
+source, `normalized_mean`, `centroid_mean`, `centroid_lite`, token pooling, and
+`sq8` sidecar storage. It leaves `quantized_inverted_experimental` out by
+default; add `--document-node-serving-grid-include-experimental` only for
+research runs.
+
+Quick 10k smoke:
+
+```sh
+nix develop .#bench
+python benchmarks/dbpedia_colbert_multivector.py \
+  --database pgturbohybrid_dbpedia_colbert_10k \
+  --precomputed-dataset johannhartmann/pgturbohybrid_dbpedia_colbert \
+  --max-docs 10000 \
+  --max-queries 100 \
+  --reuse-data \
+  --document-node-serving-grid \
+  --admission-budget-sweep 50,100,200,400,800 \
+  --output .nix-dev/tmp/dbpedia-colbert-serving-grid-10k.json \
+  --markdown-output .nix-dev/tmp/dbpedia-colbert-serving-grid-10k.md
+```
+
+For a faster smoke-only command on a constrained workstation, reduce
+`--max-queries` to `50`. Avoid adding toy graph knobs to serving-selection runs
+unless the command is explicitly labeled as a harness smoke; graph defaults are
+the quality-profile evidence users need for profile selection.
+
+x00k evaluation template:
+
+```sh
+nix develop .#bench
+python benchmarks/dbpedia_colbert_multivector.py \
+  --database pgturbohybrid_dbpedia_colbert_x00k \
+  --precomputed-dataset johannhartmann/pgturbohybrid_dbpedia_colbert \
+  --max-docs 300000 \
+  --max-queries 1000 \
+  --reuse-data \
+  --document-node-serving-grid \
+  --admission-budget-sweep 50,100,200,400,800 \
+  --serving-min-top10-admission 0.80 \
+  --serving-min-ndcg-ratio-vs-exact 0.95 \
+  --output .nix-dev/tmp/dbpedia-colbert-serving-grid-x00k.json \
+  --markdown-output .nix-dev/tmp/dbpedia-colbert-serving-grid-x00k.md
+```
+
+Set `--max-docs` to `100000`, `300000`, or the corpus size you want to serve.
+Use `--max-queries 500` for a shorter selection run and `1000` or more when
+the qrel coverage is large enough to justify the extra time. Generated JSON,
+Markdown, local logs, downloaded datasets, and other benchmark artifacts belong
+under `.nix-dev/tmp/` or another ignored work directory and must not be
+committed.
+
+Interpret the serving-grid report as follows:
+
+- Choose `best_latency_safe` when it passes the admission and quality
+  thresholds. This is the first profile to try for production serving.
+- Choose `best_quality` when relevance dominates latency or storage cost.
+- Treat `centroid_lite` as PLAID-inspired admission followed by exact final
+  MaxSim, not as an approximate final ranking mode.
+- Treat `quantized_inverted_experimental` as opt-in research, not production.
+- If `exact_doc_scan` wins relevance but is too slow, inspect admission loss by
+  candidate source before tuning rerank kernels.
+- If `proxy_vector` wins latency but fails admission, try `centroid_mean`,
+  `centroid_lite`, BM25 or learned-sparse rescue, or larger admission budgets.
+- If exact rerank dominates latency, test `greedy_cosine` token pooling and
+  `f16` or `sq8` document sidecar storage.
+
+The report writes `document_node_serving_grid` plus
+`document_node_serving_recommendation`. The recommendation includes
+`best_latency_safe`, `best_quality`, `best_balanced`, the Pareto frontier, and
+rejected profiles with reasons. Final SQL result ordering remains exact MaxSim
+unless the candidate source is explicitly experimental.
+
 For SPLADE/SPLATE-style exported sparse vectors, use the explicit sparse
 candidate-source switch:
 

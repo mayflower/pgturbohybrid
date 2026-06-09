@@ -14,6 +14,7 @@
 #include "fmgr.h"
 #include "lib/stringinfo.h"
 #include "libpq/pqformat.h"
+#include "portability/instr_time.h"
 #include "utils/fmgrprotos.h"
 #include "utils/array.h"
 #include "utils/builtins.h"
@@ -61,6 +62,21 @@
 #define PGTURBOHYBRID_MULTIVECTOR_AVX512F_TARGET
 #endif
 
+#if !defined(PGTURBOHYBRID_DISABLE_SIMD) && \
+	(defined(__AVX512BW__) || (defined(__x86_64__) && (defined(__GNUC__) || defined(__clang__))))
+#define PGTURBOHYBRID_MULTIVECTOR_COMPILE_AVX512BW 1
+#else
+#define PGTURBOHYBRID_MULTIVECTOR_COMPILE_AVX512BW 0
+#endif
+
+#if PGTURBOHYBRID_MULTIVECTOR_COMPILE_AVX512BW && \
+	(!defined(__AVX512BW__) || !defined(__AVX512F__)) && \
+	(defined(__GNUC__) || defined(__clang__))
+#define PGTURBOHYBRID_MULTIVECTOR_AVX512BW_TARGET __attribute__((target("avx512bw,avx512f")))
+#else
+#define PGTURBOHYBRID_MULTIVECTOR_AVX512BW_TARGET
+#endif
+
 #if !defined(PGTURBOHYBRID_DISABLE_SIMD) && (defined(__aarch64__) || defined(_M_ARM64))
 #define PGTURBOHYBRID_MULTIVECTOR_COMPILE_NEON 1
 #include <arm_neon.h>
@@ -91,6 +107,7 @@ FUNCTION_PREFIX PG_FUNCTION_INFO_V1(pgturbohybrid_multivector_maxsim_blocked_sca
 FUNCTION_PREFIX PG_FUNCTION_INFO_V1(pgturbohybrid_multivector_maxsim_distance);
 FUNCTION_PREFIX PG_FUNCTION_INFO_V1(pgturbohybrid_multivector_query_distance);
 FUNCTION_PREFIX PG_FUNCTION_INFO_V1(pgturbohybrid_multivector_model_info);
+FUNCTION_PREFIX PG_FUNCTION_INFO_V1(pgturbohybrid_experimental_compact_code_score);
 
 static Oid	pgturbohybrid_multivector_type_oid = InvalidOid;
 extern char *pgturbohybrid_multivector_model_name;
@@ -110,6 +127,9 @@ static float4 TqMvParseFloat4(const char **cursor);
 static void TqMvExpectChar(const char **cursor, char expected);
 static void PgturbohybridMultiVectorRejectTextFallback(void);
 static int32 *PgturbohybridMultiVectorReadInt4Array(ArrayType *array,
+													const char *name,
+													int *nelems);
+static int16 *PgturbohybridMultiVectorReadInt2Array(ArrayType *array,
 													const char *name,
 													int *nelems);
 static float4 *PgturbohybridMultiVectorReadFloat4Array(ArrayType *array,
@@ -146,6 +166,9 @@ typedef void (*TqDotProductF32BlockFunc) (const float *queryValues,
 										  double *dots);
 typedef double (*TqMultiVectorMaxSimFunc) (const PgturbohybridMultiVector *query,
 										   const PgturbohybridMultiVector *doc);
+typedef int64 (*TqCompactCodeScoreFunc) (const int16 *queryCodes,
+										 const int16 *docCodes,
+										 int32 count);
 
 static double TqMultiVectorSymmetricMaxSimAverageWithDotUnchecked(const PgturbohybridMultiVector *a,
 																  const PgturbohybridMultiVector *b,
@@ -263,6 +286,32 @@ PgturbohybridMultiVectorModelJsonbAddInt32(PgturbohybridJsonbState *state,
 	value.type = jbvNumeric;
 	value.val.numeric = DatumGetNumeric(DirectFunctionCall1(int8_numeric,
 															Int64GetDatum((int64) val)));
+	PgturbohybridJsonbPush(state, WJB_VALUE, &value);
+}
+
+static void
+PgturbohybridMultiVectorModelJsonbAddInt64(PgturbohybridJsonbState *state,
+										   const char *key, int64 val)
+{
+	JsonbValue	value;
+
+	PgturbohybridMultiVectorModelJsonbAddKey(state, key);
+	value.type = jbvNumeric;
+	value.val.numeric = DatumGetNumeric(DirectFunctionCall1(int8_numeric,
+															Int64GetDatum(val)));
+	PgturbohybridJsonbPush(state, WJB_VALUE, &value);
+}
+
+static void
+PgturbohybridMultiVectorModelJsonbAddFloat8(PgturbohybridJsonbState *state,
+											const char *key, double val)
+{
+	JsonbValue	value;
+
+	PgturbohybridMultiVectorModelJsonbAddKey(state, key);
+	value.type = jbvNumeric;
+	value.val.numeric = DatumGetNumeric(DirectFunctionCall1(float8_numeric,
+															Float8GetDatum(val)));
 	PgturbohybridJsonbPush(state, WJB_VALUE, &value);
 }
 
@@ -819,6 +868,42 @@ PgturbohybridMultiVectorReadInt4Array(ArrayType *array, const char *name,
 					(errcode(ERRCODE_NULL_VALUE_NOT_ALLOWED),
 					 errmsg("%s array cannot contain null elements", name)));
 		values[i] = DatumGetInt32(elements[i]);
+	}
+	return values;
+}
+
+static int16 *
+PgturbohybridMultiVectorReadInt2Array(ArrayType *array, const char *name,
+									  int *nelems)
+{
+	Datum	   *elements;
+	bool	   *nulls;
+	int16	   *values;
+
+	if (array == NULL || ARR_NDIM(array) == 0)
+		ereport(ERROR,
+				(errcode(ERRCODE_DATA_EXCEPTION),
+				 errmsg("%s array cannot be empty", name)));
+	if (ARR_ELEMTYPE(array) != INT2OID)
+		ereport(ERROR,
+				(errcode(ERRCODE_DATATYPE_MISMATCH),
+				 errmsg("expected smallint[] input for %s", name)));
+
+	deconstruct_array(array, INT2OID, sizeof(int16), true, TYPALIGN_SHORT,
+					  &elements, &nulls, nelems);
+	if (*nelems <= 0)
+		ereport(ERROR,
+				(errcode(ERRCODE_DATA_EXCEPTION),
+				 errmsg("%s array cannot be empty", name)));
+
+	values = palloc(sizeof(int16) * (Size) *nelems);
+	for (int i = 0; i < *nelems; i++)
+	{
+		if (nulls[i])
+			ereport(ERROR,
+					(errcode(ERRCODE_NULL_VALUE_NOT_ALLOWED),
+					 errmsg("%s array cannot contain null elements", name)));
+		values[i] = DatumGetInt16(elements[i]);
 	}
 	return values;
 }
@@ -2008,6 +2093,210 @@ TqMultiVectorMaxSimKernelName(void)
 	return "unknown";
 }
 
+static int64
+TqCompactCodeScoreScalar(const int16 *queryCodes, const int16 *docCodes,
+						 int32 count)
+{
+	int64		score = 0;
+
+	for (int32 i = 0; i < count; i++)
+		score += (int64) queryCodes[i] * (int64) docCodes[i];
+	return score;
+}
+
+#if PGTURBOHYBRID_MULTIVECTOR_COMPILE_AVX2
+static int64 PGTURBOHYBRID_MULTIVECTOR_AVX2_TARGET
+TqCompactCodeScoreAvx2(const int16 *queryCodes, const int16 *docCodes,
+					   int32 count)
+{
+	int32		i = 0;
+	int32		tmp[8];
+	int64		score = 0;
+
+	for (; i + 16 <= count; i += 16)
+	{
+		__m256i		q = _mm256_loadu_si256((const __m256i *) (queryCodes + i));
+		__m256i		d = _mm256_loadu_si256((const __m256i *) (docCodes + i));
+		__m256i		prod = _mm256_madd_epi16(q, d);
+
+		_mm256_storeu_si256((__m256i *) tmp, prod);
+		for (int lane = 0; lane < 8; lane++)
+			score += (int64) tmp[lane];
+	}
+
+	for (; i < count; i++)
+		score += (int64) queryCodes[i] * (int64) docCodes[i];
+	return score;
+}
+#endif
+
+#if PGTURBOHYBRID_MULTIVECTOR_COMPILE_AVX512BW
+static bool
+TqMultiVectorAvx512bwAvailable(void)
+{
+#if defined(__AVX512BW__) && defined(__AVX512F__)
+	return true;
+#elif defined(__GNUC__) || defined(__clang__)
+	return __builtin_cpu_supports("avx512f") &&
+		__builtin_cpu_supports("avx512bw");
+#else
+	return false;
+#endif
+}
+
+static int64 PGTURBOHYBRID_MULTIVECTOR_AVX512BW_TARGET
+TqCompactCodeScoreAvx512(const int16 *queryCodes, const int16 *docCodes,
+						 int32 count)
+{
+	int32		i = 0;
+	int32		tmp[16];
+	int64		score = 0;
+
+	for (; i + 32 <= count; i += 32)
+	{
+		__m512i		q = _mm512_loadu_si512((const void *) (queryCodes + i));
+		__m512i		d = _mm512_loadu_si512((const void *) (docCodes + i));
+		__m512i		prod = _mm512_madd_epi16(q, d);
+
+		_mm512_storeu_si512((void *) tmp, prod);
+		for (int lane = 0; lane < 16; lane++)
+			score += (int64) tmp[lane];
+	}
+
+	for (; i < count; i++)
+		score += (int64) queryCodes[i] * (int64) docCodes[i];
+	return score;
+}
+#endif
+
+#if PGTURBOHYBRID_MULTIVECTOR_COMPILE_NEON
+static int64
+TqCompactCodeScoreNeon(const int16 *queryCodes, const int16 *docCodes,
+					   int32 count)
+{
+	int32		tmp[4];
+	int64		score = 0;
+	int32		i = 0;
+
+	for (; i + 8 <= count; i += 8)
+	{
+		int16x8_t	q = vld1q_s16(queryCodes + i);
+		int16x8_t	d = vld1q_s16(docCodes + i);
+		int32x4_t	prod0 = vmull_s16(vget_low_s16(q), vget_low_s16(d));
+		int32x4_t	prod1 = vmull_s16(vget_high_s16(q), vget_high_s16(d));
+
+		vst1q_s32(tmp, prod0);
+		for (int lane = 0; lane < 4; lane++)
+			score += (int64) tmp[lane];
+		vst1q_s32(tmp, prod1);
+		for (int lane = 0; lane < 4; lane++)
+			score += (int64) tmp[lane];
+	}
+
+	for (; i < count; i++)
+		score += (int64) queryCodes[i] * (int64) docCodes[i];
+	return score;
+}
+#endif
+
+static TqCompactCodeScoreFunc
+TqResolveCompactCodeScoreKernel(const char *forceKernel)
+{
+	if (forceKernel == NULL || pg_strcasecmp(forceKernel, "auto") == 0)
+	{
+		if (pgturbohybrid_dense_exact_simd_force ==
+			PGTURBOHYBRID_EXACT_SIMD_FORCE_SCALAR)
+			return TqCompactCodeScoreScalar;
+#if PGTURBOHYBRID_MULTIVECTOR_COMPILE_AVX512BW
+		if (TqMultiVectorAvx512bwAvailable())
+			return TqCompactCodeScoreAvx512;
+#endif
+#if PGTURBOHYBRID_MULTIVECTOR_COMPILE_AVX2
+		if (TqMultiVectorAvx2Available())
+			return TqCompactCodeScoreAvx2;
+#endif
+#if PGTURBOHYBRID_MULTIVECTOR_COMPILE_NEON
+		return TqCompactCodeScoreNeon;
+#endif
+		return TqCompactCodeScoreScalar;
+	}
+
+	if (pg_strcasecmp(forceKernel, "scalar") == 0 ||
+		pg_strcasecmp(forceKernel, "compact_scalar") == 0)
+		return TqCompactCodeScoreScalar;
+#if PGTURBOHYBRID_MULTIVECTOR_COMPILE_AVX512BW
+	if (pg_strcasecmp(forceKernel, "avx512") == 0 ||
+		pg_strcasecmp(forceKernel, "compact_avx512") == 0)
+	{
+		if (TqMultiVectorAvx512bwAvailable())
+			return TqCompactCodeScoreAvx512;
+		ereport(ERROR,
+				(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
+				 errmsg("compact code scoring kernel \"compact_avx512\" is not available")));
+	}
+#else
+	if (pg_strcasecmp(forceKernel, "avx512") == 0 ||
+		pg_strcasecmp(forceKernel, "compact_avx512") == 0)
+		ereport(ERROR,
+				(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
+				 errmsg("compact code scoring kernel \"compact_avx512\" is not available")));
+#endif
+#if PGTURBOHYBRID_MULTIVECTOR_COMPILE_AVX2
+	if (pg_strcasecmp(forceKernel, "avx2") == 0 ||
+		pg_strcasecmp(forceKernel, "compact_avx2") == 0)
+	{
+		if (TqMultiVectorAvx2Available())
+			return TqCompactCodeScoreAvx2;
+		ereport(ERROR,
+				(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
+				 errmsg("compact code scoring kernel \"compact_avx2\" is not available")));
+	}
+#else
+	if (pg_strcasecmp(forceKernel, "avx2") == 0 ||
+		pg_strcasecmp(forceKernel, "compact_avx2") == 0)
+		ereport(ERROR,
+				(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
+				 errmsg("compact code scoring kernel \"compact_avx2\" is not available")));
+#endif
+#if PGTURBOHYBRID_MULTIVECTOR_COMPILE_NEON
+	if (pg_strcasecmp(forceKernel, "neon") == 0 ||
+		pg_strcasecmp(forceKernel, "compact_neon") == 0)
+		return TqCompactCodeScoreNeon;
+#else
+	if (pg_strcasecmp(forceKernel, "neon") == 0 ||
+		pg_strcasecmp(forceKernel, "compact_neon") == 0)
+		ereport(ERROR,
+				(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
+				 errmsg("compact code scoring kernel \"compact_neon\" is not available")));
+#endif
+
+	ereport(ERROR,
+			(errcode(ERRCODE_INVALID_PARAMETER_VALUE),
+			 errmsg("unknown compact code scoring kernel \"%s\"", forceKernel),
+			 errhint("Use auto, scalar, avx2, avx512, or neon.")));
+	return TqCompactCodeScoreScalar;
+}
+
+static const char *
+TqCompactCodeScoreKernelName(TqCompactCodeScoreFunc func)
+{
+	if (func == TqCompactCodeScoreScalar)
+		return "compact_scalar";
+#if PGTURBOHYBRID_MULTIVECTOR_COMPILE_AVX512BW
+	if (func == TqCompactCodeScoreAvx512)
+		return "compact_avx512";
+#endif
+#if PGTURBOHYBRID_MULTIVECTOR_COMPILE_AVX2
+	if (func == TqCompactCodeScoreAvx2)
+		return "compact_avx2";
+#endif
+#if PGTURBOHYBRID_MULTIVECTOR_COMPILE_NEON
+	if (func == TqCompactCodeScoreNeon)
+		return "compact_neon";
+#endif
+	return "unknown";
+}
+
 double
 TqMultiVectorMaxSim(const PgturbohybridMultiVector *query,
 					const PgturbohybridMultiVector *doc)
@@ -3057,6 +3346,80 @@ pgturbohybrid_multivector_maxsim_blocked_scalar(PG_FUNCTION_ARGS)
 	PgturbohybridMultiVector *doc = PG_GETARG_PGTURBOHYBRID_MULTIVECTOR_P(1);
 
 	PG_RETURN_FLOAT8(TqMultiVectorMaxSimBlockedScalar(query, doc));
+}
+
+Datum
+pgturbohybrid_experimental_compact_code_score(PG_FUNCTION_ARGS)
+{
+	ArrayType  *queryArray;
+	ArrayType  *docArray;
+	bool		experimental;
+	char	   *forceKernel = "auto";
+	int			queryCount;
+	int			docCount;
+	int16	   *queryCodes;
+	int16	   *docCodes;
+	TqCompactCodeScoreFunc scorer;
+	const char *kernelName;
+	instr_time	start;
+	instr_time	elapsed;
+	int64		score;
+	int64		scoreUs;
+	PgturbohybridJsonbState state;
+
+	if (PG_ARGISNULL(0) || PG_ARGISNULL(1))
+		ereport(ERROR,
+				(errcode(ERRCODE_NULL_VALUE_NOT_ALLOWED),
+				 errmsg("compact code arrays cannot be null")));
+	experimental = !PG_ARGISNULL(2) && PG_GETARG_BOOL(2);
+	if (!experimental)
+		ereport(ERROR,
+				(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
+				 errmsg("experimental compact-code scoring is disabled"),
+				 errhint("Pass experimental => true to call this diagnostic prototype. It is not used for final SQL ordering.")));
+	if (!PG_ARGISNULL(3))
+		forceKernel = text_to_cstring(PG_GETARG_TEXT_PP(3));
+
+	queryArray = PG_GETARG_ARRAYTYPE_P(0);
+	docArray = PG_GETARG_ARRAYTYPE_P(1);
+	queryCodes =
+		PgturbohybridMultiVectorReadInt2Array(queryArray, "query compact codes",
+											  &queryCount);
+	docCodes =
+		PgturbohybridMultiVectorReadInt2Array(docArray, "document compact codes",
+											  &docCount);
+	if (queryCount != docCount)
+		ereport(ERROR,
+				(errcode(ERRCODE_ARRAY_SUBSCRIPT_ERROR),
+				 errmsg("query and document compact code arrays must have the same length")));
+
+	scorer = TqResolveCompactCodeScoreKernel(forceKernel);
+	kernelName = TqCompactCodeScoreKernelName(scorer);
+	INSTR_TIME_SET_CURRENT(start);
+	score = scorer(queryCodes, docCodes, (int32) queryCount);
+	INSTR_TIME_SET_CURRENT(elapsed);
+	INSTR_TIME_SUBTRACT(elapsed, start);
+	scoreUs = (int64) INSTR_TIME_GET_MICROSEC(elapsed);
+
+	PgturbohybridJsonbStateInit(&state);
+	PgturbohybridJsonbBeginObject(&state);
+	PgturbohybridMultiVectorModelJsonbAddBool(&state, "experimental", true);
+	PgturbohybridMultiVectorModelJsonbAddString(&state,
+												"approximate_scoring_kernel",
+												kernelName);
+	PgturbohybridMultiVectorModelJsonbAddString(&state, "requested_kernel",
+												forceKernel);
+	PgturbohybridMultiVectorModelJsonbAddInt64(&state, "code_count",
+											   queryCount);
+	PgturbohybridMultiVectorModelJsonbAddFloat8(&state, "score",
+												(double) score);
+	PgturbohybridMultiVectorModelJsonbAddInt64(&state,
+											   "approximate_scoring_us",
+											   scoreUs);
+	PgturbohybridMultiVectorModelJsonbAddString(&state,
+												"final_sql_ordering",
+												"exact_heap_maxsim");
+	PG_RETURN_JSONB_P(PgturbohybridJsonbEndObject(&state));
 }
 
 Datum

@@ -1347,6 +1347,9 @@ typedef struct PgturbohybridLastScanStats
 	uint32		quantizedInvertedCandidates;
 	uint32		quantizedInvertedExactRerankDocs;
 	uint32		quantizedInvertedCodebookSize;
+	uint64		quantizedInvertedListOffsetBytes;
+	uint64		quantizedInvertedPostingBytes;
+	uint64		quantizedInvertedSidecarBytes;
 	char		multivectorDocSidecarCacheMode[16];
 	uint64		multivectorDocSidecarPagesRead;
 	uint64		multivectorDocSidecarCacheHits;
@@ -1782,6 +1785,12 @@ PgturbohybridGetLastScanStatsSnapshot(PgturbohybridScanStatsSnapshot *stats)
 		pgturbohybrid_last_scan_state.quantizedInvertedExactRerankDocs;
 	stats->quantizedInvertedCodebookSize =
 		pgturbohybrid_last_scan_state.quantizedInvertedCodebookSize;
+	stats->quantizedInvertedListOffsetBytes =
+		pgturbohybrid_last_scan_state.quantizedInvertedListOffsetBytes;
+	stats->quantizedInvertedPostingBytes =
+		pgturbohybrid_last_scan_state.quantizedInvertedPostingBytes;
+	stats->quantizedInvertedSidecarBytes =
+		pgturbohybrid_last_scan_state.quantizedInvertedSidecarBytes;
 	strlcpy(stats->multivectorDocSidecarCacheMode,
 			pgturbohybrid_last_scan_state.multivectorDocSidecarCacheMode,
 			sizeof(stats->multivectorDocSidecarCacheMode));
@@ -5694,6 +5703,12 @@ PgturbohybridCollectScanResults(IndexScanDesc scan, PgturbohybridScanState *stat
 		denseStats.quantizedInvertedExactRerankDocs;
 	lastStats.quantizedInvertedCodebookSize =
 		denseStats.quantizedInvertedCodebookSize;
+	lastStats.quantizedInvertedListOffsetBytes =
+		denseStats.quantizedInvertedListOffsetBytes;
+	lastStats.quantizedInvertedPostingBytes =
+		denseStats.quantizedInvertedPostingBytes;
+	lastStats.quantizedInvertedSidecarBytes =
+		denseStats.quantizedInvertedSidecarBytes;
 	strlcpy(lastStats.multivectorDocSidecarCacheMode,
 			denseStats.multivectorDocSidecarCacheMode,
 			sizeof(lastStats.multivectorDocSidecarCacheMode));

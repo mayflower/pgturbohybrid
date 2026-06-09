@@ -3017,6 +3017,40 @@ RESET turbohybrid.multivector_exact_rerank;
 RESET turbohybrid.multivector_candidate_source;
 RESET enable_seqscan;
 DROP TABLE mv_query_token_weight_docnodes;
+DO $$
+BEGIN
+	CREATE TEMP TABLE mv_proxy_token_source_docs (
+		id int,
+		colbert turbohybrid_multivector
+	);
+	INSERT INTO mv_proxy_token_source_docs VALUES
+		(1, turbohybrid_multivector(ARRAY['[1,0]'::vector])),
+		(2, turbohybrid_multivector(ARRAY['[-1,0]'::vector]));
+	CREATE INDEX mv_proxy_token_source_docs_idx ON mv_proxy_token_source_docs
+	USING turbohybrid (colbert multivector_cosine_turbohybrid_ops)
+	WITH (multivector_graph = token_nodes);
+
+	PERFORM set_config('enable_seqscan', 'off', true);
+	PERFORM set_config('turbohybrid.multivector_candidate_source',
+					   'proxy_vector', true);
+	PERFORM set_config('turbohybrid.multivector_plain_fallback',
+					   'force', true);
+	PERFORM id
+	FROM mv_proxy_token_source_docs
+	ORDER BY colbert <~> turbohybrid_query(
+		multivector_query => turbohybrid_multivector(ARRAY['[1,0]'::vector]),
+		dense_k => 2,
+		final_k => 1
+	)
+	LIMIT 1;
+	RAISE EXCEPTION 'proxy_vector token-node scan unexpectedly executed';
+EXCEPTION
+	WHEN feature_not_supported THEN
+		IF SQLERRM NOT LIKE 'proxy_vector multivector candidate source requires multivector_graph = document_nodes%' THEN
+			RAISE EXCEPTION 'unexpected proxy_vector token-node error: %', SQLERRM;
+		END IF;
+END
+$$;
 CREATE TABLE mv_centroid_lite_docs (
 	id int,
 	colbert turbohybrid_multivector
@@ -3040,6 +3074,8 @@ BEGIN
 	PERFORM set_config('turbohybrid.multivector_candidate_source', 'centroid_lite', true);
 	PERFORM set_config('turbohybrid.multivector_plain_fallback', 'off', true);
 	PERFORM set_config('turbohybrid.multivector_doc_candidate_k', '3', true);
+	PERFORM set_config('turbohybrid.multivector_exact_rerank', 'topk', true);
+	PERFORM set_config('turbohybrid.multivector_exact_rerank_k', '3', true);
 	SELECT id INTO top_id
 	FROM mv_centroid_lite_docs
 	ORDER BY colbert <~> turbohybrid_query(
@@ -3056,10 +3092,19 @@ BEGIN
 	IF top_id <> 1 OR
 		stats->>'multivector_candidate_source' <> 'centroid_lite' OR
 		stats->>'multivector_doc_graph_warning' <> 'document_node_centroid_lite_prefilter' OR
+		stats->>'multivector_candidate_path' <> 'centroid_lite' OR
+		stats->>'multivector_plain_fallback_used' <> 'false' OR
 		(stats->>'centroid_docs_touched')::int <= 0 OR
 		(stats->>'centroid_lists_visited')::int <= 0 OR
 		NOT (stats ? 'centroid_pruned_docs') OR
-		(stats->>'centroid_candidates')::int <= 0 THEN
+		(stats->>'centroid_candidates')::int <= 0 OR
+		(stats->>'multivector_doc_graph_exact_rerank_docs')::int <= 0 OR
+		(stats->>'multivector_exact_rerank_docs')::int <= 0 OR
+		(stats->>'multivector_exact_rerank_pairs')::int <= 0 OR
+		stats->>'multivector_exact_rerank_source' <> 'heap' OR
+		(stats->>'multivector_exact_rerank_heap_fetches')::int <= 0 OR
+		(stats->>'multivector_exact_rerank_sidecar_reads')::int <> 0 OR
+		stats->>'multivector_exact_kernel' IS NULL THEN
 		RAISE EXCEPTION 'centroid_lite scan failed, top %, stats %',
 			top_id, stats;
 	END IF;
@@ -3077,6 +3122,8 @@ BEGIN
 	PERFORM set_config('turbohybrid.multivector_candidate_source', 'centroid_lite', true);
 	PERFORM set_config('turbohybrid.multivector_plain_fallback', 'off', true);
 	PERFORM set_config('turbohybrid.multivector_doc_candidate_k', '4', true);
+	PERFORM set_config('turbohybrid.multivector_exact_rerank', 'topk', true);
+	PERFORM set_config('turbohybrid.multivector_exact_rerank_k', '4', true);
 	SELECT id INTO top_id
 	FROM mv_centroid_lite_docs
 	ORDER BY colbert <~> turbohybrid_query(
@@ -3093,7 +3140,8 @@ BEGIN
 	IF top_id <> 4 OR
 		stats->>'multivector_candidate_source' <> 'centroid_lite' OR
 		stats->>'multivector_doc_graph_warning' <> 'document_node_centroid_lite_prefilter' OR
-		(stats->>'centroid_docs_touched')::int <= 0 THEN
+		(stats->>'centroid_docs_touched')::int <= 0 OR
+		stats->>'multivector_exact_rerank_source' <> 'heap' THEN
 		RAISE EXCEPTION 'centroid_lite insert sidecar scan failed, top %, stats %',
 			top_id, stats;
 	END IF;
@@ -3165,8 +3213,10 @@ BEGIN
 	IF top_id <> 1 OR
 		stats->>'multivector_candidate_source' <> 'centroid_lite' OR
 		stats->>'multivector_doc_graph_warning' <> 'token_node_centroid_lite_exact_token_prefilter' OR
+		stats->>'multivector_plain_fallback_used' <> 'false' OR
 		(stats->>'centroid_lists_visited')::int <= 0 OR
-		(stats->>'centroid_candidates')::int <= 0 THEN
+		(stats->>'centroid_candidates')::int <= 0 OR
+		stats->>'multivector_exact_rerank_source' <> 'heap' THEN
 		RAISE EXCEPTION 'token-node centroid_lite scan failed, top %, stats %',
 			top_id, stats;
 	END IF;
@@ -3200,9 +3250,143 @@ BEGIN
 		(stats->>'quantized_inverted_docs_scored')::int <= 0 OR
 		(stats->>'quantized_inverted_candidates')::int <= 0 OR
 		(stats->>'quantized_inverted_exact_rerank_docs')::int <= 0 OR
-		(stats->>'quantized_inverted_codebook_size')::int <> 4 THEN
+		(stats->>'quantized_inverted_codebook_size')::int <> 4 OR
+		NOT (stats ? 'quantized_inverted_list_offset_bytes') OR
+		NOT (stats ? 'quantized_inverted_posting_bytes') OR
+		NOT (stats ? 'quantized_inverted_sidecar_bytes') OR
+		(stats->>'quantized_inverted_list_offset_bytes')::bigint <= 0 OR
+		(stats->>'quantized_inverted_posting_bytes')::bigint <= 0 OR
+		(stats->>'quantized_inverted_sidecar_bytes')::bigint <= 0 OR
+		stats->>'multivector_plain_fallback_used' <> 'false' OR
+		stats->>'multivector_exact_rerank_source' <> 'heap' OR
+		(stats->>'multivector_exact_rerank_docs')::int <= 0 OR
+		(stats->>'multivector_exact_rerank_pairs')::int <= 0 THEN
 		RAISE EXCEPTION 'quantized_inverted_experimental scan failed, top %, stats %',
 			top_id, stats;
+	END IF;
+END
+$$;
+DO $$
+DECLARE
+	query_mv turbohybrid_multivector :=
+		turbohybrid_multivector(ARRAY[
+			'[1,0]'::vector,
+			'[0,1]'::vector
+		]);
+	exact_ids int[];
+	proxy_ids int[];
+	centroid_ids int[];
+	quantized_ids int[];
+	stats jsonb;
+BEGIN
+	PERFORM set_config('enable_seqscan', 'off', true);
+	PERFORM set_config('turbohybrid.multivector_plain_fallback', 'off', true);
+	PERFORM set_config('turbohybrid.multivector_doc_candidate_k', '4', true);
+	PERFORM set_config('turbohybrid.multivector_exact_rerank_k', '4', true);
+	PERFORM set_config('turbohybrid.multivector_doc_graph_search_ef', '4', true);
+
+	PERFORM set_config('turbohybrid.multivector_candidate_source', 'exact_doc_scan', true);
+	SELECT array_agg(id ORDER BY distance, id) INTO exact_ids
+	FROM (
+		SELECT id,
+		       colbert <~> turbohybrid_query(
+			       multivector_query => query_mv,
+			       dense_k => 4,
+			       final_k => 3
+		       ) AS distance
+		FROM mv_centroid_lite_docs
+		ORDER BY distance, id
+		LIMIT 3
+	) AS exact_results;
+
+	PERFORM set_config('turbohybrid.multivector_candidate_source', 'proxy_vector', true);
+	SELECT array_agg(id ORDER BY distance, id) INTO proxy_ids
+	FROM (
+		SELECT id,
+		       colbert <~> turbohybrid_query(
+			       multivector_query => query_mv,
+			       dense_k => 4,
+			       final_k => 3
+		       ) AS distance
+		FROM mv_centroid_lite_docs
+		ORDER BY distance, id
+		LIMIT 3
+	) AS proxy_results;
+	stats := turbohybrid_last_scan_stats();
+
+	IF proxy_ids <> exact_ids OR
+		stats->>'multivector_enabled' <> 'true' OR
+		stats->>'multivector_candidate_source' <> 'proxy_vector' OR
+		stats->>'proxy_encoder_kind' <> 'normalized_mean' OR
+		(stats->>'multivector_doc_graph_exact_rerank_docs')::int <> 4 OR
+		(stats->>'multivector_exact_rerank_docs')::int <> 4 OR
+		stats->>'multivector_exact_kernel' IS NULL THEN
+		RAISE EXCEPTION 'proxy_vector full-budget rerank did not match exact_doc_scan: exact %, proxy %, stats %',
+			exact_ids, proxy_ids, stats;
+	END IF;
+
+	PERFORM set_config('turbohybrid.multivector_candidate_source', 'centroid_lite', true);
+	SELECT array_agg(id ORDER BY distance, id) INTO centroid_ids
+	FROM (
+		SELECT id,
+		       colbert <~> turbohybrid_query(
+			       multivector_query => query_mv,
+			       dense_k => 4,
+			       final_k => 3
+		       ) AS distance
+		FROM mv_centroid_lite_docs
+		ORDER BY distance, id
+		LIMIT 3
+	) AS centroid_results;
+	stats := turbohybrid_last_scan_stats();
+
+	IF centroid_ids <> exact_ids OR
+		stats->>'multivector_enabled' <> 'true' OR
+		stats->>'multivector_candidate_source' <> 'centroid_lite' OR
+		stats->>'multivector_doc_graph_warning' <> 'document_node_centroid_lite_prefilter' OR
+		stats->>'multivector_plain_fallback_used' <> 'false' OR
+		(stats->>'centroid_lists_visited')::int <= 0 OR
+		(stats->>'centroid_docs_touched')::int <= 0 OR
+		(stats->>'centroid_candidates')::int <= 0 OR
+		stats->>'multivector_exact_rerank_source' <> 'heap' OR
+		(stats->>'multivector_doc_graph_exact_rerank_docs')::int < 3 OR
+		(stats->>'multivector_exact_rerank_docs')::int < 3 OR
+		(stats->>'multivector_exact_rerank_pairs')::int <= 0 THEN
+		RAISE EXCEPTION 'centroid_lite full-budget rerank did not match exact_doc_scan: exact %, centroid %, stats %',
+			exact_ids, centroid_ids, stats;
+	END IF;
+
+	PERFORM set_config('turbohybrid.multivector_candidate_source', 'quantized_inverted_experimental', true);
+	SELECT array_agg(id ORDER BY distance, id) INTO quantized_ids
+	FROM (
+		SELECT id,
+		       colbert <~> turbohybrid_query(
+			       multivector_query => query_mv,
+			       dense_k => 4,
+			       final_k => 3
+		       ) AS distance
+		FROM mv_centroid_lite_docs
+		ORDER BY distance, id
+		LIMIT 3
+	) AS quantized_results;
+	stats := turbohybrid_last_scan_stats();
+
+	IF quantized_ids <> exact_ids OR
+		stats->>'multivector_enabled' <> 'true' OR
+		stats->>'multivector_candidate_source' <> 'quantized_inverted_experimental' OR
+		stats->>'multivector_doc_graph_warning' <> 'quantized_inverted_experimental_persisted_postings' OR
+		stats->>'multivector_plain_fallback_used' <> 'false' OR
+		(stats->>'quantized_inverted_postings_touched')::int <= 0 OR
+		(stats->>'quantized_inverted_docs_scored')::int < 3 OR
+		(stats->>'quantized_inverted_candidates')::int < 3 OR
+		(stats->>'quantized_inverted_exact_rerank_docs')::int < 3 OR
+		NOT (stats ? 'quantized_inverted_sidecar_bytes') OR
+		(stats->>'quantized_inverted_sidecar_bytes')::bigint <= 0 OR
+		stats->>'multivector_exact_rerank_source' <> 'heap' OR
+		(stats->>'multivector_exact_rerank_docs')::int < 3 OR
+		(stats->>'multivector_exact_rerank_pairs')::int <= 0 THEN
+		RAISE EXCEPTION 'quantized_inverted_experimental full-budget rerank did not match exact_doc_scan: exact %, quantized %, stats %',
+			exact_ids, quantized_ids, stats;
 	END IF;
 END
 $$;

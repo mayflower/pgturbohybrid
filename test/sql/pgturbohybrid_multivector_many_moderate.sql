@@ -1013,6 +1013,17 @@ CREATE INDEX mv_proxy_encoder_docs_max_idx ON mv_proxy_encoder_docs USING turboh
 
 DO $$
 DECLARE
+	index_stats jsonb;
+BEGIN
+	index_stats := turbohybrid_index_stats('mv_proxy_encoder_docs_max_idx'::regclass);
+	IF index_stats->>'multivector_proxy_encoder' <> 'max_pool' THEN
+		RAISE EXCEPTION 'expected max_pool index stats, got %', index_stats;
+	END IF;
+END
+$$;
+
+DO $$
+DECLARE
 	q turbohybrid_multivector := turbohybrid_multivector(ARRAY[
 		'[1,0,0,0]'::vector,
 		'[0,1,0,0]'::vector
@@ -1045,6 +1056,17 @@ DROP INDEX mv_proxy_encoder_docs_max_idx;
 CREATE INDEX mv_proxy_encoder_docs_fde_idx ON mv_proxy_encoder_docs USING turbohybrid
   (colbert multivector_cosine_turbohybrid_ops)
   WITH (multivector_graph = document_nodes, multivector_proxy_encoder = random_projection_fde);
+
+DO $$
+DECLARE
+	index_stats jsonb;
+BEGIN
+	index_stats := turbohybrid_index_stats('mv_proxy_encoder_docs_fde_idx'::regclass);
+	IF index_stats->>'multivector_proxy_encoder' <> 'random_projection_fde' THEN
+		RAISE EXCEPTION 'expected random_projection_fde index stats, got %', index_stats;
+	END IF;
+END
+$$;
 
 DO $$
 DECLARE

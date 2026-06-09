@@ -241,6 +241,15 @@ CREATE FUNCTION turbohybrid_multivector_maxsim_blocked_scalar(
 	AS 'MODULE_PATHNAME', 'pgturbohybrid_multivector_maxsim_blocked_scalar'
 	LANGUAGE C IMMUTABLE STRICT PARALLEL SAFE;
 
+CREATE FUNCTION turbohybrid_experimental_compact_code_score(
+	query_codes pg_catalog.int2[],
+	doc_codes pg_catalog.int2[],
+	experimental pg_catalog.bool DEFAULT false,
+	force_kernel pg_catalog.text DEFAULT 'auto'
+) RETURNS pg_catalog.jsonb
+	AS 'MODULE_PATHNAME', 'pgturbohybrid_experimental_compact_code_score'
+	LANGUAGE C VOLATILE PARALLEL SAFE;
+
 CREATE FUNCTION turbohybrid_multivector_maxsim_distance(
 	query turbohybrid_multivector,
 	doc turbohybrid_multivector

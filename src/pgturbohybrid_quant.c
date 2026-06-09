@@ -10146,6 +10146,7 @@ PgturbohybridMultiVectorExactHeapRerank(IndexScanDesc scan,
 		return 0;
 
 	sidecarUsable =
+		sidecarStats != NULL &&
 		PgturbohybridMultiVectorExactRerankCanUseSidecar(sidecarMeta,
 														 sidecarStorage);
 	adaptiveMode =
@@ -13047,6 +13048,9 @@ PgturbohybridMultiVectorDocumentNodeScan(IndexScanDesc scan,
 	bool		proxyTopTidValid = false;
 	bool		proxyTop1Admission = false;
 	uint32		proxyDocumentRescoreDocs = 0;
+	PgturbohybridGraphMetaPageData *exactRerankSidecarMeta = NULL;
+	PgturbohybridGraphScanStorage *exactRerankSidecarStorage = NULL;
+	PgturbohybridMultiVectorDocSidecarAccessStats *exactRerankSidecarStats = NULL;
 
 	if (outCandidates == NULL)
 		return 0;
@@ -13754,9 +13758,17 @@ PgturbohybridMultiVectorDocumentNodeScan(IndexScanDesc scan,
 		0 : Min(docCount, rescoreLimit);
 	exactRerankLimitOverride = proxyGraph ?
 		exactRerankKEffective : rescoreLimit;
+	if (!centroidLite && !quantizedInvertedExperimental)
+	{
+		exactRerankSidecarMeta = meta;
+		exactRerankSidecarStorage = &storage;
+		exactRerankSidecarStats = &sidecarStats;
+	}
 	exactRerankCount =
-		PgturbohybridMultiVectorExactHeapRerank(scan, so, meta, &storage,
-												&sidecarStats,
+		PgturbohybridMultiVectorExactHeapRerank(scan, so,
+												exactRerankSidecarMeta,
+												exactRerankSidecarStorage,
+												exactRerankSidecarStats,
 												query,
 												queryWeights,
 												queryMask,
@@ -13897,6 +13909,17 @@ PgturbohybridMultiVectorDocumentNodeScan(IndexScanDesc scan,
 		stats->quantizedInvertedCodebookSize =
 			quantizedInvertedExperimental ?
 			storage.multivectorQuantizedInvertedCodebookSize : 0;
+		stats->quantizedInvertedListOffsetBytes =
+			quantizedInvertedExperimental ?
+			((uint64) storage.multivectorQuantizedInvertedCodebookSize + 1) *
+			(uint64) sizeof(uint32) : 0;
+		stats->quantizedInvertedPostingBytes =
+			quantizedInvertedExperimental ?
+			(uint64) storage.multivectorQuantizedInvertedPostingCount *
+			(uint64) sizeof(PgturbohybridGraphMultiVectorQuantizedPostingEntry) : 0;
+		stats->quantizedInvertedSidecarBytes =
+			stats->quantizedInvertedListOffsetBytes +
+			stats->quantizedInvertedPostingBytes;
 			strlcpy(stats->multivectorDocSidecarCacheMode,
 					sidecarStats.cacheMode,
 					sizeof(stats->multivectorDocSidecarCacheMode));
@@ -14199,7 +14222,7 @@ PgturbohybridGraphCollectMultiVectorDenseCandidates(IndexScanDesc scan,
 					(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
 					 errmsg("centroid_lite multivector candidate source requires multivector_centroids = kmeans"),
 					 errhint("REINDEX with multivector_centroids = kmeans, or use another turbohybrid.multivector_candidate_source.")));
-		if (proxyVector && !emptyIndex && !plainFallback &&
+		if (proxyVector && !emptyIndex &&
 			meta.tqMultivectorGraphMode !=
 			PGTURBOHYBRID_MULTIVECTOR_GRAPH_DOCUMENT_NODES)
 			ereport(ERROR,
@@ -14643,9 +14666,11 @@ PgturbohybridGraphCollectMultiVectorDenseCandidates(IndexScanDesc scan,
 	exactRerankLimit = PgturbohybridMultiVectorExactRerankLimit(docCount);
 	exactRerankCount =
 		PgturbohybridMultiVectorExactHeapRerank(scan, so,
+												!centroidLite &&
 												useDocMapSidecar &&
 												storage.multivectorDocVectorsLoaded ?
 												&meta : NULL,
+												!centroidLite &&
 												useDocMapSidecar &&
 												storage.multivectorDocVectorsLoaded ?
 												&storage : NULL,

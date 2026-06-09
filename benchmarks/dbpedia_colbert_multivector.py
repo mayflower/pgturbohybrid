@@ -28,7 +28,10 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Iterable
 
-import psycopg
+try:
+    import psycopg
+except ImportError:  # pragma: no cover - exercised by --help without bench deps
+    psycopg = None  # type: ignore[assignment]
 
 
 DEFAULT_METHODS = "pgturbohybrid_colbert_multivector_query_only"
@@ -96,6 +99,63 @@ DEFAULT_PARALLEL_SAFETY_MAX_DOCS_SCORED = 5000
 DEFAULT_PARALLEL_SAFETY_MAX_EXACT_RERANK_DOCS = 1000
 DEFAULT_PARALLEL_SAFETY_MAX_EXACT_PAIRS = 5_000_000
 DEFAULT_PARALLEL_SAFETY_MAX_SIDECAR_BYTES = 512 * 1024 * 1024
+DEFAULT_ADMISSION_BUDGET_SWEEP = "100,200,400,800,1600,3200,6400,10000"
+DOCUMENT_NODE_SERVING_GRID_BUDGETS = (50, 100, 200, 400, 800)
+DOCUMENT_NODE_SERVING_GRID_BUDGET_SWEEP = ",".join(
+    str(budget) for budget in DOCUMENT_NODE_SERVING_GRID_BUDGETS
+)
+DOCUMENT_NODE_SERVING_GRID_EF = (50, 100, 200)
+DOCUMENT_NODE_SERVING_GRID_OVERSAMPLING = (1, 2)
+SERVING_STATS_FIELD_GROUPS: dict[str, tuple[str, ...]] = {
+    "core": (
+        "multivector_candidate_source",
+        "multivector_doc_graph_warning",
+        "multivector_doc_graph_nodes",
+        "multivector_doc_graph_docs_scored",
+        "multivector_doc_graph_edges_visited",
+        "multivector_doc_graph_candidates",
+        "multivector_doc_graph_exact_rerank_docs",
+        "multivector_exact_rerank_docs",
+        "multivector_exact_rerank_pairs",
+        "multivector_exact_kernel",
+    ),
+    "proxy": (
+        "proxy_encoder_kind",
+        "proxy_candidates",
+        "proxy_top1_admission",
+        "proxy_exact_rerank_docs",
+        "multivector_centroid_count",
+        "multivector_centroid_prerank_docs",
+        "multivector_full_maxsim_rerank_docs",
+    ),
+    "centroid_lite": (
+        "centroid_lists_visited",
+        "centroid_docs_touched",
+        "centroid_pruned_docs",
+        "centroid_candidates",
+    ),
+    "storage_cache": (
+        "multivector_doc_sidecar_cache_mode",
+        "multivector_doc_sidecar_pages_read",
+        "multivector_doc_sidecar_cache_hits",
+        "multivector_doc_sidecar_cache_misses",
+        "multivector_doc_sidecar_bytes_touched",
+        "multivector_doc_sidecar_vectors_loaded",
+    ),
+    "pooling": (
+        "multivector_tokens_original",
+        "multivector_tokens_pooled",
+        "multivector_token_pooling_ratio",
+    ),
+    "sparse_bm25_rescue": (
+        "multivector_bm25_injection_enabled",
+        "multivector_bm25_injection_candidates",
+        "multivector_bm25_injection_retained",
+        "learned_sparse_candidates",
+        "learned_sparse_retained_for_maxsim",
+        "learned_sparse_branch_latency_us",
+    ),
+}
 
 
 @dataclass(frozen=True)
@@ -124,6 +184,20 @@ class PersistWorkerResult:
     doc_vector_counts: list[int] = field(default_factory=list)
     batches: int = 0
     error: str | None = None
+
+
+@dataclass(frozen=True)
+class DocumentNodeServingProfile:
+    name: str
+    candidate_source: str
+    proxy_encoder: str = "normalized_mean"
+    centroids: str = "off"
+    centroid_count: str = "auto"
+    storage_kind: str = "f16"
+    cache_mode: str = "auto"
+    token_pooling: str = "off"
+    token_pooling_target_ratio: float = 1.0
+    plain_fallback: str = "off"
 
 
 def require_pyarrow() -> Any:
@@ -430,6 +504,11 @@ def filter_qrels_to_loaded_docs(
 
 
 def connect(args: argparse.Namespace) -> psycopg.Connection[Any]:
+    if psycopg is None:
+        raise SystemExit(
+            "psycopg is required to run the DBpedia ColBERT benchmark. "
+            "Use the Nix benchmark helper or install psycopg[binary]."
+        )
     return psycopg.connect(
         dbname=args.database,
         autocommit=True,
@@ -1783,6 +1862,15 @@ def quantized_inverted_work_from_stats(stats: dict[str, Any]) -> dict[str, Any]:
         "quantized_inverted_codebook_size": scan_stat_int(
             stats, "quantized_inverted_codebook_size"
         ),
+        "quantized_inverted_list_offset_bytes": scan_stat_int(
+            stats, "quantized_inverted_list_offset_bytes"
+        ),
+        "quantized_inverted_posting_bytes": scan_stat_int(
+            stats, "quantized_inverted_posting_bytes"
+        ),
+        "quantized_inverted_sidecar_bytes": scan_stat_int(
+            stats, "quantized_inverted_sidecar_bytes"
+        ),
     }
 
 
@@ -1796,6 +1884,63 @@ def learned_sparse_work_from_stats(stats: dict[str, Any]) -> dict[str, Any]:
             stats, "learned_sparse_branch_latency_us"
         ),
     }
+
+
+def is_experimental_quantized_stat_key(key: str) -> bool:
+    lowered = key.lower()
+    return (
+        lowered.startswith("quantized_")
+        or lowered.startswith("quantized_inverted_")
+        or "codeword" in lowered
+        or "posting" in lowered
+    )
+
+
+def extract_document_node_serving_stats(stats: dict[str, Any]) -> dict[str, Any]:
+    if not isinstance(stats, dict):
+        return {}
+    fields = {
+        key
+        for group_fields in SERVING_STATS_FIELD_GROUPS.values()
+        for key in group_fields
+    }
+    extracted = {key: stats[key] for key in fields if key in stats}
+    for key, value in stats.items():
+        if is_experimental_quantized_stat_key(str(key)):
+            extracted[str(key)] = value
+    return dict(sorted(extracted.items()))
+
+
+def document_node_serving_stats_available(extracted: dict[str, Any]) -> dict[str, bool]:
+    if not isinstance(extracted, dict):
+        extracted = {}
+    available = {
+        group: any(key in extracted for key in fields)
+        for group, fields in SERVING_STATS_FIELD_GROUPS.items()
+    }
+    available["experimental_quantized"] = any(
+        is_experimental_quantized_stat_key(str(key))
+        for key in extracted
+    )
+    return available
+
+
+def merge_document_node_serving_stats_available(
+    samples_by_budget: dict[str, dict[str, Any]]
+) -> dict[str, bool]:
+    merged = {
+        group: False
+        for group in (*SERVING_STATS_FIELD_GROUPS.keys(), "experimental_quantized")
+    }
+    for sample in samples_by_budget.values():
+        if not isinstance(sample, dict):
+            continue
+        available = sample.get("stats_available", {})
+        if not isinstance(available, dict):
+            continue
+        for group, value in available.items():
+            merged[str(group)] = bool(merged.get(str(group), False) or value)
+    return dict(sorted(merged.items()))
 
 
 def scan_stat_int_list(stats: dict[str, Any], key: str) -> list[int]:
@@ -2477,6 +2622,1154 @@ def grid_admission_summary(
         "latency_by_budget": aggregate.get("latency_by_budget", {}),
         "index_stats": index_phase.get("index_stats", {}),
         "index_bytes": index_phase.get("index_bytes", 0),
+    }
+
+
+def document_node_serving_profiles(
+    *,
+    include_experimental: bool,
+    centroid_count: str,
+) -> list[DocumentNodeServingProfile]:
+    profiles = [
+        DocumentNodeServingProfile(
+            name="proxy_normalized_mean_f16",
+            candidate_source="proxy_vector",
+            proxy_encoder="normalized_mean",
+            storage_kind="f16",
+        ),
+        DocumentNodeServingProfile(
+            name="docnodes_normalized_mean_f16",
+            candidate_source="document_nodes",
+            proxy_encoder="normalized_mean",
+            storage_kind="f16",
+        ),
+        DocumentNodeServingProfile(
+            name="centroid_mean_f16",
+            candidate_source="proxy_vector",
+            proxy_encoder="centroid_mean",
+            centroids="kmeans",
+            centroid_count=centroid_count,
+            storage_kind="f16",
+        ),
+        DocumentNodeServingProfile(
+            name="centroid_lite_f16",
+            candidate_source="centroid_lite",
+            centroids="kmeans",
+            centroid_count=centroid_count,
+            storage_kind="f16",
+        ),
+        DocumentNodeServingProfile(
+            name="centroid_lite_f16_pool_050",
+            candidate_source="centroid_lite",
+            centroids="kmeans",
+            centroid_count=centroid_count,
+            storage_kind="f16",
+            token_pooling="greedy_cosine",
+            token_pooling_target_ratio=0.5,
+        ),
+        DocumentNodeServingProfile(
+            name="proxy_normalized_mean_sq8",
+            candidate_source="proxy_vector",
+            proxy_encoder="normalized_mean",
+            storage_kind="sq8",
+        ),
+    ]
+    if include_experimental:
+        profiles.append(
+            DocumentNodeServingProfile(
+                name="quantized_inverted_experimental_f32",
+                candidate_source="quantized_inverted_experimental",
+                storage_kind="f32",
+                plain_fallback="off",
+            )
+        )
+    return profiles
+
+
+def _self_check_document_node_serving_profiles() -> None:
+    base = document_node_serving_profiles(
+        include_experimental=False,
+        centroid_count="auto",
+    )
+    assert [profile.name for profile in base] == [
+        "proxy_normalized_mean_f16",
+        "docnodes_normalized_mean_f16",
+        "centroid_mean_f16",
+        "centroid_lite_f16",
+        "centroid_lite_f16_pool_050",
+        "proxy_normalized_mean_sq8",
+    ]
+    assert all(profile.candidate_source != "quantized_inverted_experimental" for profile in base)
+    profiles_by_name = {profile.name: profile for profile in base}
+    assert profiles_by_name["centroid_mean_f16"].proxy_encoder == "centroid_mean"
+    assert profiles_by_name["centroid_mean_f16"].centroids == "kmeans"
+    assert profiles_by_name["centroid_lite_f16_pool_050"].token_pooling == "greedy_cosine"
+    assert profiles_by_name["centroid_lite_f16_pool_050"].token_pooling_target_ratio == 0.5
+    experimental = document_node_serving_profiles(
+        include_experimental=True,
+        centroid_count="auto",
+    )
+    assert experimental[-1].name == "quantized_inverted_experimental_f32"
+    assert experimental[-1].candidate_source == "quantized_inverted_experimental"
+    assert experimental[-1].storage_kind == "f32"
+    assert experimental[-1].plain_fallback == "off"
+
+
+def document_node_serving_profile_args(
+    args: argparse.Namespace,
+    profile: DocumentNodeServingProfile,
+    *,
+    ef: int,
+    oversampling: int,
+) -> argparse.Namespace:
+    return clone_args(
+        args,
+        multivector_graph="document_nodes",
+        multivector_doc_build_scorer="proxy",
+        multivector_candidate_source=profile.candidate_source,
+        multivector_proxy_encoder=profile.proxy_encoder,
+        multivector_centroids=profile.centroids,
+        multivector_centroid_count=profile.centroid_count,
+        multivector_doc_storage=profile.storage_kind,
+        multivector_doc_storage_cache=profile.cache_mode,
+        multivector_token_pooling=profile.token_pooling,
+        multivector_token_pooling_target_ratio=profile.token_pooling_target_ratio,
+        multivector_plain_fallback=profile.plain_fallback,
+        multivector_candidate_reservoirs="off",
+        multivector_doc_graph_search_ef=ef,
+        multivector_doc_graph_oversampling=oversampling,
+        multivector_doc_graph_rescore_k=0,
+        admission_budget_sweep=args.admission_budget_sweep,
+        reuse_index=False,
+    )
+
+
+def serving_grid_scan_stats_by_budget(admission: dict[str, Any]) -> dict[str, dict[str, Any]]:
+    per_query = admission.get("per_query", [])
+    if not isinstance(per_query, list) or not per_query:
+        return {}
+    samples: dict[str, dict[str, Any]] = {}
+    for query_result in per_query:
+        if not isinstance(query_result, dict):
+            continue
+        budgets = query_result.get("budgets", [])
+        if not isinstance(budgets, list):
+            continue
+        for item in budgets:
+            if not isinstance(item, dict):
+                continue
+            budget = item.get("budget")
+            if budget is None:
+                continue
+            budget_key = str(budget)
+            if budget_key in samples:
+                continue
+            stats = item.get("scan_stats", {})
+            if not isinstance(stats, dict):
+                continue
+            extracted = extract_document_node_serving_stats(stats)
+            samples[budget_key] = {
+                "scan_stats_sample": extracted,
+                "stats_available": document_node_serving_stats_available(extracted),
+            }
+    return {
+        key: samples[key]
+        for key in sorted(
+            samples,
+            key=lambda value: (
+                0,
+                int(value),
+            )
+            if value.isdigit()
+            else (1, value),
+        )
+    }
+
+
+def serving_grid_scan_stats_sample(admission: dict[str, Any], largest_budget: int | None) -> dict[str, Any]:
+    if largest_budget is None:
+        return {}
+    by_budget = serving_grid_scan_stats_by_budget(admission)
+    selected = by_budget.get(str(largest_budget), {})
+    if not isinstance(selected, dict):
+        return {}
+    sample = selected.get("scan_stats_sample", {})
+    return sample if isinstance(sample, dict) else {}
+
+
+def document_node_serving_summary_row(
+    *,
+    profile: DocumentNodeServingProfile,
+    args: argparse.Namespace,
+    ef: int,
+    oversampling: int,
+    index_phase: dict[str, Any],
+    admission: dict[str, Any],
+    qrels: dict[str, dict[str, int]],
+) -> dict[str, Any]:
+    aggregate = admission.get("aggregate", {})
+    if not isinstance(aggregate, dict):
+        aggregate = {}
+    budget_sweep = aggregate.get("budget_sweep", [])
+    largest_budget = int(budget_sweep[-1]) if isinstance(budget_sweep, list) and budget_sweep else None
+    latency_by_budget = aggregate.get("latency_by_budget", {})
+    largest_latency = (
+        latency_by_budget.get(str(largest_budget), {})
+        if isinstance(latency_by_budget, dict) and largest_budget is not None
+        else {}
+    )
+    if not isinstance(largest_latency, dict):
+        largest_latency = {}
+    admission_by_budget = aggregate.get("admission_by_budget", {})
+    largest_work = (
+        admission_by_budget.get(str(largest_budget), {})
+        if isinstance(admission_by_budget, dict) and largest_budget is not None
+        else {}
+    )
+    if not isinstance(largest_work, dict):
+        largest_work = {}
+    run = aggregate.get("run_at_largest_budget", {})
+    if not isinstance(run, dict):
+        run = {}
+    metrics = method_metrics(run, qrels, args.final_k, args.quality_k) if qrels else {}
+    stats_by_budget = serving_grid_scan_stats_by_budget(admission)
+    stats_sample = serving_grid_scan_stats_sample(admission, largest_budget)
+    return {
+        "profile": profile.name,
+        "candidate_source": profile.candidate_source,
+        "graph_mode": "document_nodes",
+        "proxy_encoder": profile.proxy_encoder,
+        "centroids": profile.centroids,
+        "centroid_count": profile.centroid_count,
+        "storage_kind": profile.storage_kind,
+        "cache_mode": profile.cache_mode,
+        "storage_cache_mode": profile.cache_mode,
+        "token_pooling": profile.token_pooling,
+        "token_pooling_target_ratio": profile.token_pooling_target_ratio,
+        "token_pooling_min_tokens": args.multivector_token_pooling_min_tokens,
+        "ef": ef,
+        "oversampling": oversampling,
+        "largest_budget": largest_budget,
+        "p50_ms": largest_latency.get("p50_ms"),
+        "p95_ms": largest_latency.get("p95_ms"),
+        "p50_latency_ms_at_largest_budget": largest_latency.get("p50_ms"),
+        "p95_latency_ms_at_largest_budget": largest_latency.get("p95_ms"),
+        "exact_top1_admission_rate": aggregate.get("exact_top1_admission_rate", 0.0),
+        "exact_top10_admission_recall": aggregate.get("exact_top10_admission_recall", 0.0),
+        "recall@10": metrics.get("recall@10") if metrics else None,
+        "ndcg@10": metrics.get("ndcg@10") if metrics else None,
+        "mrr@10": metrics.get("mrr@10") if metrics else None,
+        "metrics": metrics,
+        "index_bytes": index_phase.get("index_bytes", 0),
+        "index_stats": index_phase.get("index_stats", {}),
+        "largest_budget_work": largest_work,
+        "serving_stats_by_budget": stats_by_budget,
+        "stats_available": merge_document_node_serving_stats_available(stats_by_budget),
+        "serving_stats_sample": stats_sample,
+        "last_scan_stats_sample": stats_sample,
+    }
+
+
+def serving_row_id(row: dict[str, Any]) -> str:
+    return "{profile}_ef{ef}_os{oversampling}".format(
+        profile=row.get("profile", ""),
+        ef=int(row.get("ef", 0) or 0),
+        oversampling=int(row.get("oversampling", 0) or 0),
+    )
+
+
+def serving_row_p95(row: dict[str, Any]) -> float | None:
+    value = row.get("p95_latency_ms_at_largest_budget")
+    if value is None:
+        value = row.get("p95_ms")
+    if value is None:
+        return None
+    try:
+        p95 = float(value)
+    except (TypeError, ValueError):
+        return None
+    return p95 if math.isfinite(p95) else None
+
+
+def serving_row_metric(row: dict[str, Any], key: str) -> float | None:
+    value = row.get(key)
+    if value is None:
+        metrics = row.get("metrics", {})
+        if isinstance(metrics, dict):
+            value = metrics.get(key)
+    if value is None:
+        return None
+    try:
+        metric = float(value)
+    except (TypeError, ValueError):
+        return None
+    return metric if math.isfinite(metric) else None
+
+
+def serving_storage_penalty(row: dict[str, Any]) -> int:
+    return {
+        "sq8": 0,
+        "f16": 1,
+        "f32": 2,
+    }.get(str(row.get("storage_kind", "")), 3)
+
+
+def serving_row_experimental(row: dict[str, Any]) -> bool:
+    profile = str(row.get("profile", ""))
+    return (
+        str(row.get("candidate_source", "")) == "quantized_inverted_experimental"
+        or profile == "quantized_inverted_experimental"
+        or profile.startswith("quantized_inverted_experimental_")
+    )
+
+
+def serving_row_has_usable_metrics(row: dict[str, Any]) -> bool:
+    return (
+        serving_row_p95(row) is not None
+        or serving_row_metric(row, "exact_top10_admission_recall") is not None
+        or serving_row_metric(row, "ndcg@10") is not None
+    )
+
+
+def serving_recommendation_row(row: dict[str, Any]) -> dict[str, Any]:
+    return {
+        "id": serving_row_id(row),
+        "profile": row.get("profile"),
+        "candidate_source": row.get("candidate_source"),
+        "experimental": serving_row_experimental(row),
+        "proxy_encoder": row.get("proxy_encoder"),
+        "centroids": row.get("centroids"),
+        "storage_kind": row.get("storage_kind"),
+        "cache_mode": row.get("cache_mode"),
+        "token_pooling": row.get("token_pooling"),
+        "token_pooling_target_ratio": row.get("token_pooling_target_ratio"),
+        "ef": row.get("ef"),
+        "oversampling": row.get("oversampling"),
+        "largest_budget": row.get("largest_budget"),
+        "p50_ms": row.get("p50_ms"),
+        "p95_ms": row.get("p95_ms"),
+        "p50_latency_ms_at_largest_budget": row.get("p50_latency_ms_at_largest_budget"),
+        "p95_latency_ms_at_largest_budget": row.get("p95_latency_ms_at_largest_budget"),
+        "exact_top10_admission_recall": row.get("exact_top10_admission_recall"),
+        "exact_top1_admission_rate": row.get("exact_top1_admission_rate"),
+        "recall@10": row.get("recall@10"),
+        "ndcg@10": row.get("ndcg@10"),
+        "mrr@10": row.get("mrr@10"),
+        "index_bytes": row.get("index_bytes"),
+        "stats_available": row.get("stats_available", {}),
+        "last_scan_stats_sample": row.get("last_scan_stats_sample", {}),
+    }
+
+
+def serving_profile_explanation(row: dict[str, Any]) -> str:
+    if not isinstance(row, dict) or not row:
+        return "No profile was selected."
+    sample = row.get("last_scan_stats_sample", {})
+    if not isinstance(sample, dict):
+        sample = {}
+    parts = [
+        f"source={row.get('candidate_source', '')}",
+        f"p95={float(serving_row_p95(row) or 0.0):.3f}ms",
+        f"top10_admission={float(row.get('exact_top10_admission_recall') or 0.0):.6f}",
+    ]
+    if row.get("ndcg@10") is not None:
+        parts.append(f"ndcg@10={float(row.get('ndcg@10') or 0.0):.6f}")
+    for key, label in (
+        ("multivector_doc_graph_warning", "warning"),
+        ("proxy_encoder_kind", "proxy"),
+        ("proxy_candidates", "proxy_candidates"),
+        ("centroid_candidates", "centroid_candidates"),
+        ("centroid_docs_touched", "centroid_docs_touched"),
+        ("multivector_doc_graph_exact_rerank_docs", "doc_graph_rerank_docs"),
+        ("multivector_exact_rerank_docs", "exact_rerank_docs"),
+        ("multivector_exact_rerank_pairs", "exact_pairs"),
+        ("multivector_exact_kernel", "kernel"),
+        ("multivector_doc_sidecar_cache_mode", "sidecar_cache"),
+        ("multivector_doc_sidecar_bytes_touched", "sidecar_bytes"),
+        ("multivector_tokens_original", "tokens_original"),
+        ("multivector_tokens_pooled", "tokens_pooled"),
+        ("quantized_inverted_postings_touched", "quantized_postings"),
+    ):
+        if key in sample:
+            parts.append(f"{label}={sample[key]}")
+    return "; ".join(parts)
+
+
+def serving_quality_available(rows: list[dict[str, Any]]) -> bool:
+    return any(serving_row_metric(row, "ndcg@10") is not None for row in rows)
+
+
+def serving_exact_baseline_from_results(results: list[dict[str, Any]]) -> dict[str, Any]:
+    for item in results:
+        if not isinstance(item, dict):
+            continue
+        if item.get("method") == EXACT_SCAN_METHOD or item.get("retrieval_mode") == "multivector_exact_scan":
+            metrics = item.get("metrics", {})
+            serial_latency = item.get("serial_latency", {})
+            return {
+                "available": True,
+                "method": item.get("method"),
+                "metrics": metrics if isinstance(metrics, dict) else {},
+                "serial_latency": serial_latency if isinstance(serial_latency, dict) else {},
+            }
+    return {
+        "available": False,
+        "reason": "exact scan method was not included in this benchmark run",
+    }
+
+
+def serving_threshold_failures(
+    row: dict[str, Any],
+    *,
+    min_top10_admission: float,
+    min_ndcg_ratio_vs_exact: float,
+    max_p95_ms: float,
+    exact_baseline_ndcg: float | None,
+) -> tuple[list[str], list[str]]:
+    failures: list[str] = []
+    unavailable: list[str] = []
+    p95 = serving_row_p95(row)
+    if p95 is None:
+        failures.append("missing_p95_latency")
+    elif max_p95_ms > 0.0 and p95 > max_p95_ms:
+        failures.append("p95_latency_above_cap")
+
+    admission = serving_row_metric(row, "exact_top10_admission_recall")
+    if admission is None:
+        failures.append("missing_exact_top10_admission_recall")
+    elif admission < min_top10_admission:
+        failures.append("top10_admission_below_threshold")
+
+    ndcg = serving_row_metric(row, "ndcg@10")
+    if exact_baseline_ndcg is None:
+        unavailable.append("ndcg_ratio_vs_exact")
+    elif ndcg is None:
+        failures.append("missing_ndcg@10")
+    elif ndcg < exact_baseline_ndcg * min_ndcg_ratio_vs_exact:
+        failures.append("ndcg_ratio_below_threshold")
+
+    return failures, unavailable
+
+
+def pareto_frontier_latency_quality(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    use_ndcg = serving_quality_available(rows)
+    frontier: list[dict[str, Any]] = []
+    for row in rows:
+        p95 = serving_row_p95(row)
+        if p95 is None:
+            continue
+        admission = serving_row_metric(row, "exact_top10_admission_recall") or 0.0
+        ndcg = serving_row_metric(row, "ndcg@10") or 0.0
+        dominated = False
+        for other in rows:
+            if other is row:
+                continue
+            other_p95 = serving_row_p95(other)
+            other_comparable_p95 = other_p95 if other_p95 is not None else float("inf")
+            other_admission = serving_row_metric(other, "exact_top10_admission_recall") or 0.0
+            other_ndcg = serving_row_metric(other, "ndcg@10") or 0.0
+            better_or_equal = (
+                other_comparable_p95 <= p95
+                and other_admission >= admission
+                and (not use_ndcg or other_ndcg >= ndcg)
+            )
+            strictly_better = (
+                other_comparable_p95 < p95
+                or other_admission > admission
+                or (use_ndcg and other_ndcg > ndcg)
+            )
+            if better_or_equal and strictly_better:
+                dominated = True
+                break
+        if not dominated:
+            frontier.append(serving_recommendation_row(row))
+    return sorted(
+        frontier,
+        key=lambda item: (
+            serving_row_p95(item) if serving_row_p95(item) is not None else float("inf"),
+            str(item.get("id", "")),
+        ),
+    )
+
+
+def compute_document_node_serving_recommendation(
+    serving_grid: dict[str, Any],
+    *,
+    exact_baseline: dict[str, Any],
+    min_top10_admission: float,
+    min_ndcg_ratio_vs_exact: float,
+    max_p95_ms: float,
+) -> dict[str, Any]:
+    raw_rows = serving_grid.get("results", serving_grid.get("summary_rows", []))
+    rows = [
+        item
+        for item in raw_rows
+        if isinstance(item, dict)
+    ]
+    exact_metrics = exact_baseline.get("metrics", {}) if isinstance(exact_baseline, dict) else {}
+    exact_baseline_ndcg = (
+        serving_row_metric({"ndcg@10": exact_metrics.get("ndcg@10")}, "ndcg@10")
+        if isinstance(exact_metrics, dict)
+        else None
+    )
+    threshold_rows: list[dict[str, Any]] = []
+    rejected_profiles: list[dict[str, Any]] = []
+    for row in rows:
+        failures, unavailable = serving_threshold_failures(
+            row,
+            min_top10_admission=min_top10_admission,
+            min_ndcg_ratio_vs_exact=min_ndcg_ratio_vs_exact,
+            max_p95_ms=max_p95_ms,
+            exact_baseline_ndcg=exact_baseline_ndcg,
+        )
+        summary = serving_recommendation_row(row)
+        summary["threshold_pass"] = not failures
+        summary["failure_reasons"] = failures
+        summary["unavailable_criteria"] = unavailable
+        threshold_rows.append(summary)
+        if failures:
+            rejected_profiles.append(summary)
+
+    eligible = [
+        item for item in threshold_rows
+        if (
+            item["threshold_pass"]
+            and not serving_row_experimental(item)
+            and serving_row_p95(item) is not None
+        )
+    ]
+    best_latency_safe = min(
+        eligible,
+        key=lambda item: (
+            serving_row_p95(item) if serving_row_p95(item) is not None else float("inf"),
+            str(item.get("id", "")),
+        ),
+        default=None,
+    )
+    if best_latency_safe is not None:
+        best_latency_safe = {
+            **best_latency_safe,
+            "criteria_unavailable": sorted({
+                criterion
+                for item in threshold_rows
+                for criterion in item.get("unavailable_criteria", [])
+            }),
+        }
+
+    use_ndcg = serving_quality_available(rows)
+    best_quality_row = max(
+        rows,
+        key=lambda item: (
+            (serving_row_metric(item, "ndcg@10") or 0.0)
+            if use_ndcg
+            else (serving_row_metric(item, "exact_top10_admission_recall") or 0.0),
+            serving_row_metric(item, "exact_top10_admission_recall") or 0.0,
+            0 if not serving_row_experimental(item) else -1,
+            -(serving_row_p95(item) if serving_row_p95(item) is not None else float("inf")),
+            str(item.get("profile", "")),
+        ),
+        default=None,
+    )
+    best_quality = serving_recommendation_row(best_quality_row) if best_quality_row else None
+    if best_quality is not None:
+        best_quality["selection_basis"] = "ndcg@10" if use_ndcg else "exact_top10_admission_recall"
+
+    ordered_by_latency = sorted(
+        rows,
+        key=lambda item: (
+            serving_row_p95(item) if serving_row_p95(item) is not None else float("inf"),
+            str(item.get("profile", "")),
+            int(item.get("ef", 0) or 0),
+            int(item.get("oversampling", 0) or 0),
+        ),
+    )
+    latency_rank = {
+        serving_row_id(item): rank
+        for rank, item in enumerate(ordered_by_latency, start=1)
+    }
+    best_admission = max(
+        (serving_row_metric(item, "exact_top10_admission_recall") or 0.0 for item in rows),
+        default=0.0,
+    )
+    best_ndcg = max(
+        (serving_row_metric(item, "ndcg@10") or 0.0 for item in rows),
+        default=0.0,
+    )
+    non_experimental_has_usable_metrics = any(
+        not serving_row_experimental(item) and serving_row_has_usable_metrics(item)
+        for item in rows
+    )
+    balanced_candidates: list[dict[str, Any]] = []
+    for row in rows:
+        admission = serving_row_metric(row, "exact_top10_admission_recall") or 0.0
+        ndcg = serving_row_metric(row, "ndcg@10") or 0.0
+        admission_loss_penalty = round(max(0.0, best_admission - admission) * 100.0, 3)
+        quality_loss_penalty = round(max(0.0, best_ndcg - ndcg) * 100.0, 3) if use_ndcg else 0.0
+        storage_penalty = serving_storage_penalty(row)
+        experimental_penalty = (
+            1_000_000
+            if serving_row_experimental(row) and non_experimental_has_usable_metrics
+            else 0
+        )
+        score = (
+            latency_rank.get(serving_row_id(row), len(rows) + 1)
+            + admission_loss_penalty
+            + quality_loss_penalty
+            + storage_penalty
+            + experimental_penalty
+        )
+        balanced_candidates.append({
+            **serving_recommendation_row(row),
+            "score": round(score, 3),
+            "score_components": {
+                "latency_rank": latency_rank.get(serving_row_id(row), len(rows) + 1),
+                "admission_loss_penalty": admission_loss_penalty,
+                "quality_loss_penalty": quality_loss_penalty,
+                "storage_penalty": storage_penalty,
+                "experimental_penalty": experimental_penalty,
+            },
+        })
+    best_balanced = min(
+        balanced_candidates,
+        key=lambda item: (
+            float(item["score"]),
+            serving_row_p95(item) if serving_row_p95(item) is not None else float("inf"),
+            str(item.get("id", "")),
+        ),
+        default=None,
+    )
+
+    return {
+        "thresholds": {
+            "serving_min_top10_admission": min_top10_admission,
+            "serving_min_ndcg_ratio_vs_exact": min_ndcg_ratio_vs_exact,
+            "serving_max_p95_ms": max_p95_ms,
+        },
+        "exact_baseline": exact_baseline,
+        "best_latency_safe": best_latency_safe,
+        "best_quality": best_quality,
+        "best_balanced": best_balanced,
+        "balanced_formula": (
+            "score = latency_rank + max(0,best_admission-admission)*100 "
+            "+ max(0,best_ndcg-ndcg)*100 when qrels exist + storage_penalty; "
+            "storage_penalty is sq8=0, f16=1, f32=2, other=3; "
+            "experimental_penalty is 1000000 when any non-experimental profile has usable metrics"
+        ),
+        "pareto_frontier_latency_quality": pareto_frontier_latency_quality(rows),
+        "pareto_frontier": pareto_frontier_latency_quality(rows),
+        "profile_thresholds": sorted(
+            threshold_rows,
+            key=lambda item: (
+                serving_row_p95(item) if serving_row_p95(item) is not None else float("inf"),
+                str(item.get("id", "")),
+            ),
+        ),
+        "rejected_profiles": sorted(
+            rejected_profiles,
+            key=lambda item: (
+                serving_row_p95(item) if serving_row_p95(item) is not None else float("inf"),
+                str(item.get("id", "")),
+            ),
+        ),
+    }
+
+
+def _synthetic_serving_row(
+    profile: str,
+    *,
+    p95: float | None,
+    admission: float,
+    ndcg: float | None,
+    storage: str = "f16",
+    candidate_source: str = "proxy_vector",
+    proxy_encoder: str = "normalized_mean",
+    centroids: str = "off",
+    ef: int = 100,
+    oversampling: int = 1,
+    stats_sample: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    if stats_sample is None:
+        stats_sample = {}
+    return {
+        "profile": profile,
+        "candidate_source": candidate_source,
+        "proxy_encoder": proxy_encoder,
+        "centroids": centroids,
+        "storage_kind": storage,
+        "cache_mode": "auto",
+        "token_pooling": "off",
+        "token_pooling_target_ratio": 1.0,
+        "ef": ef,
+        "oversampling": oversampling,
+        "largest_budget": 800,
+        "p50_latency_ms_at_largest_budget": None if p95 is None else round(p95 * 0.7, 3),
+        "p95_latency_ms_at_largest_budget": p95,
+        "exact_top1_admission_rate": admission,
+        "exact_top10_admission_recall": admission,
+        "recall@10": ndcg,
+        "ndcg@10": ndcg,
+        "mrr@10": ndcg,
+        "index_bytes": 1000,
+        "stats_available": document_node_serving_stats_available(stats_sample),
+        "last_scan_stats_sample": stats_sample,
+    }
+
+
+def _self_check_document_node_serving_recommendation() -> None:
+    rows = [
+        _synthetic_serving_row("latency_winner_fails_admission", p95=8.0, admission=0.55, ndcg=0.70, storage="sq8"),
+        _synthetic_serving_row("latency_safe_winner", p95=12.0, admission=0.86, ndcg=0.86, storage="f16"),
+        _synthetic_serving_row(
+            "balanced_winner",
+            p95=20.0,
+            admission=0.94,
+            ndcg=0.88,
+            storage="sq8",
+            stats_sample={
+                "multivector_candidate_source": "proxy_vector",
+                "proxy_encoder_kind": "normalized_mean",
+                "multivector_doc_graph_exact_rerank_docs": 400,
+                "multivector_exact_rerank_pairs": 8192,
+                "multivector_exact_kernel": "blocked_avx2",
+                "multivector_doc_sidecar_cache_mode": "resident",
+            },
+        ),
+        _synthetic_serving_row("quality_winner_slow", p95=80.0, admission=0.91, ndcg=0.90, storage="f32"),
+        _synthetic_serving_row("missing_latency", p95=None, admission=0.88, ndcg=0.86, storage="f16"),
+    ]
+    grid = {"results": rows}
+    exact = {"available": True, "metrics": {"ndcg@10": 0.90}}
+    rec = compute_document_node_serving_recommendation(
+        grid,
+        exact_baseline=exact,
+        min_top10_admission=0.80,
+        min_ndcg_ratio_vs_exact=0.95,
+        max_p95_ms=0.0,
+    )
+    assert rec["best_latency_safe"]["profile"] == "latency_safe_winner"
+    assert rec["best_quality"]["profile"] == "quality_winner_slow"
+    assert rec["best_balanced"]["profile"] == "balanced_winner"
+    assert rec["best_balanced"]["profile"] != rec["best_latency_safe"]["profile"]
+    assert rec["best_balanced"]["profile"] != rec["best_quality"]["profile"]
+    rejected = {item["profile"]: item["failure_reasons"] for item in rec["rejected_profiles"]}
+    assert "top10_admission_below_threshold" in rejected["latency_winner_fails_admission"]
+    assert "missing_p95_latency" in rejected["missing_latency"]
+    rec_again = compute_document_node_serving_recommendation(
+        grid,
+        exact_baseline=exact,
+        min_top10_admission=0.80,
+        min_ndcg_ratio_vs_exact=0.95,
+        max_p95_ms=0.0,
+    )
+    assert rec == rec_again
+
+    no_qrels_rows = [
+        _synthetic_serving_row("fast_no_qrels", p95=10.0, admission=0.82, ndcg=None, storage="sq8"),
+        _synthetic_serving_row("quality_no_qrels", p95=50.0, admission=0.95, ndcg=None, storage="f16"),
+    ]
+    no_qrels = compute_document_node_serving_recommendation(
+        {"summary_rows": no_qrels_rows},
+        exact_baseline={"available": False},
+        min_top10_admission=0.80,
+        min_ndcg_ratio_vs_exact=0.95,
+        max_p95_ms=0.0,
+    )
+    assert no_qrels["best_latency_safe"]["profile"] == "fast_no_qrels"
+    assert "ndcg_ratio_vs_exact" in no_qrels["best_latency_safe"]["criteria_unavailable"]
+    assert no_qrels["best_quality"]["profile"] == "quality_no_qrels"
+    assert no_qrels["best_quality"]["selection_basis"] == "exact_top10_admission_recall"
+
+    exact_baseline_missing_rows = [
+        _synthetic_serving_row("baseline_missing_fast", p95=7.0, admission=0.82, ndcg=0.50, storage="sq8"),
+        _synthetic_serving_row("baseline_missing_quality", p95=40.0, admission=0.95, ndcg=0.90, storage="f16"),
+    ]
+    exact_baseline_missing = compute_document_node_serving_recommendation(
+        {"results": exact_baseline_missing_rows},
+        exact_baseline={"available": False, "reason": "synthetic exact baseline missing"},
+        min_top10_admission=0.80,
+        min_ndcg_ratio_vs_exact=0.95,
+        max_p95_ms=0.0,
+    )
+    assert exact_baseline_missing["best_latency_safe"]["profile"] == "baseline_missing_fast"
+    assert (
+        "ndcg_ratio_vs_exact"
+        in exact_baseline_missing["best_latency_safe"]["criteria_unavailable"]
+    )
+    assert exact_baseline_missing["best_quality"]["profile"] == "baseline_missing_quality"
+    assert exact_baseline_missing["best_quality"]["selection_basis"] == "ndcg@10"
+
+    none_pass = compute_document_node_serving_recommendation(
+        {
+            "results": [
+                _synthetic_serving_row("too_low_admission", p95=9.0, admission=0.40, ndcg=0.60, storage="sq8"),
+                _synthetic_serving_row("too_slow", p95=200.0, admission=0.90, ndcg=0.88, storage="f16"),
+            ]
+        },
+        exact_baseline=exact,
+        min_top10_admission=0.80,
+        min_ndcg_ratio_vs_exact=0.95,
+        max_p95_ms=100.0,
+    )
+    assert none_pass["best_latency_safe"] is None
+    none_pass_rejected = {item["profile"]: item["failure_reasons"] for item in none_pass["rejected_profiles"]}
+    assert "top10_admission_below_threshold" in none_pass_rejected["too_low_admission"]
+    assert "p95_latency_above_cap" in none_pass_rejected["too_slow"]
+
+    experimental_rows = [
+        _synthetic_serving_row(
+            "quantized_inverted_experimental_f32",
+            p95=5.0,
+            admission=0.99,
+            ndcg=0.90,
+            storage="f32",
+            candidate_source="quantized_inverted_experimental",
+        ),
+        _synthetic_serving_row("valid_non_experimental", p95=30.0, admission=0.85, ndcg=0.87, storage="f16"),
+    ]
+    experimental_rec = compute_document_node_serving_recommendation(
+        {"results": experimental_rows},
+        exact_baseline=exact,
+        min_top10_admission=0.80,
+        min_ndcg_ratio_vs_exact=0.95,
+        max_p95_ms=0.0,
+    )
+    assert experimental_rec["best_latency_safe"]["profile"] == "valid_non_experimental"
+    assert experimental_rec["best_balanced"]["profile"] == "valid_non_experimental"
+    experimental_only = compute_document_node_serving_recommendation(
+        {"results": [experimental_rows[0]]},
+        exact_baseline=exact,
+        min_top10_admission=0.80,
+        min_ndcg_ratio_vs_exact=0.95,
+        max_p95_ms=0.0,
+    )
+    assert experimental_only["best_latency_safe"] is None
+    assert experimental_only["best_balanced"]["profile"] == "quantized_inverted_experimental_f32"
+
+    tie_rows = [
+        _synthetic_serving_row("tie_a", p95=10.0, admission=0.90, ndcg=0.90, storage="f16"),
+        _synthetic_serving_row("tie_b", p95=10.0, admission=0.90, ndcg=0.90, storage="f16"),
+    ]
+    tie = compute_document_node_serving_recommendation(
+        {"results": tie_rows},
+        exact_baseline=exact,
+        min_top10_admission=0.80,
+        min_ndcg_ratio_vs_exact=0.95,
+        max_p95_ms=0.0,
+    )
+    assert tie["best_latency_safe"]["profile"] == "tie_a"
+    assert tie["best_balanced"]["profile"] == "tie_a"
+    tie_again = compute_document_node_serving_recommendation(
+        {"results": tie_rows},
+        exact_baseline=exact,
+        min_top10_admission=0.80,
+        min_ndcg_ratio_vs_exact=0.95,
+        max_p95_ms=0.0,
+    )
+    assert tie == tie_again
+
+
+def _self_check_document_node_serving_recommendation_schema_fixture() -> None:
+    fixture_rows = [
+        _synthetic_serving_row(
+            "proxy_normalized_mean_f16",
+            p95=8.0,
+            admission=0.70,
+            ndcg=0.91,
+            storage="f16",
+        ),
+        _synthetic_serving_row(
+            "centroid_mean_f16",
+            p95=20.0,
+            admission=0.86,
+            ndcg=0.91,
+            storage="f16",
+            proxy_encoder="centroid_mean",
+            centroids="kmeans",
+        ),
+        _synthetic_serving_row(
+            "centroid_lite_f16",
+            p95=55.0,
+            admission=0.93,
+            ndcg=0.94,
+            storage="f16",
+            candidate_source="centroid_lite",
+            centroids="kmeans",
+        ),
+        _synthetic_serving_row(
+            "quantized_inverted_experimental_f32",
+            p95=6.0,
+            admission=0.98,
+            ndcg=0.93,
+            storage="f32",
+            candidate_source="quantized_inverted_experimental",
+        ),
+    ]
+    report = {
+        "document_node_serving_grid": {
+            "enabled": True,
+            "results": fixture_rows,
+        }
+    }
+    report["document_node_serving_recommendation"] = compute_document_node_serving_recommendation(
+        report["document_node_serving_grid"],
+        exact_baseline={"available": True, "metrics": {"ndcg@10": 0.95}},
+        min_top10_admission=0.80,
+        min_ndcg_ratio_vs_exact=0.95,
+        max_p95_ms=0.0,
+    )
+    rec = report["document_node_serving_recommendation"]
+    assert rec
+    assert rec["best_latency_safe"]["profile"] == "centroid_mean_f16"
+    assert rec["best_quality"]["profile"] == "centroid_lite_f16"
+    balanced_profile = rec["best_balanced"]["profile"]
+    assert balanced_profile == "centroid_lite_f16"
+    repeat = compute_document_node_serving_recommendation(
+        report["document_node_serving_grid"],
+        exact_baseline={"available": True, "metrics": {"ndcg@10": 0.95}},
+        min_top10_admission=0.80,
+        min_ndcg_ratio_vs_exact=0.95,
+        max_p95_ms=0.0,
+    )
+    assert repeat["best_balanced"]["profile"] == balanced_profile
+    thresholds = {item["profile"]: item for item in rec["profile_thresholds"]}
+    assert thresholds["quantized_inverted_experimental_f32"]["experimental"] is True
+    assert rec["best_latency_safe"]["profile"] != "quantized_inverted_experimental_f32"
+    rejected = {item["profile"]: item["failure_reasons"] for item in rec["rejected_profiles"]}
+    assert rejected["proxy_normalized_mean_f16"] == ["top10_admission_below_threshold"]
+    markdown = markdown_benchmark_summary(report)
+    assert "### Document-node serving recommendation" in markdown
+    assert "centroid_mean_f16" in markdown
+    assert "quantized_inverted_experimental_f32" in markdown
+
+
+def _self_check_document_node_serving_stats_extraction() -> None:
+    partial_stats = {
+        "multivector_candidate_source": "proxy_vector",
+        "multivector_doc_graph_warning": "document_node_proxy_vector_graph_traversal",
+        "multivector_doc_graph_nodes": 1000,
+        "multivector_doc_graph_exact_rerank_docs": 400,
+        "multivector_exact_rerank_docs": 400,
+        "multivector_exact_rerank_pairs": 123456,
+        "multivector_exact_kernel": "blocked_neon",
+        "proxy_encoder_kind": "normalized_mean",
+        "proxy_candidates": 800,
+        "proxy_top1_admission": True,
+        "multivector_doc_sidecar_cache_mode": "resident",
+        "multivector_doc_sidecar_cache_hits": 20,
+        "multivector_tokens_original": 6400,
+        "multivector_tokens_pooled": 3200,
+        "multivector_bm25_injection_enabled": False,
+        "learned_sparse_candidates": 0,
+        "quantized_inverted_postings_touched": 0,
+        "quantized_inverted_posting_bytes": 2048,
+        "quantized_inverted_sidecar_bytes": 2304,
+        "quantized_codeword_debug_counter": 7,
+        "unrelated_large_field": "ignored",
+    }
+    extracted = extract_document_node_serving_stats(partial_stats)
+    assert extracted["multivector_candidate_source"] == "proxy_vector"
+    assert extracted["proxy_candidates"] == 800
+    assert extracted["multivector_doc_sidecar_cache_hits"] == 20
+    assert extracted["quantized_inverted_posting_bytes"] == 2048
+    assert extracted["quantized_inverted_sidecar_bytes"] == 2304
+    assert extracted["quantized_codeword_debug_counter"] == 7
+    assert "unrelated_large_field" not in extracted
+    available = document_node_serving_stats_available(extracted)
+    assert available["core"] is True
+    assert available["proxy"] is True
+    assert available["storage_cache"] is True
+    assert available["pooling"] is True
+    assert available["sparse_bm25_rescue"] is True
+    assert available["experimental_quantized"] is True
+    assert document_node_serving_stats_available({})["core"] is False
+
+    admission = {
+        "per_query": [
+            {
+                "query_id": "q1",
+                "budgets": [
+                    {"budget": 50, "scan_stats": {"multivector_candidate_source": "proxy_vector"}},
+                    {"budget": 800, "scan_stats": partial_stats},
+                ],
+            }
+        ]
+    }
+    by_budget = serving_grid_scan_stats_by_budget(admission)
+    assert by_budget["50"]["scan_stats_sample"]["multivector_candidate_source"] == "proxy_vector"
+    assert by_budget["800"]["scan_stats_sample"]["multivector_exact_kernel"] == "blocked_neon"
+    assert serving_grid_scan_stats_sample(admission, 800)["proxy_encoder_kind"] == "normalized_mean"
+    assert serving_grid_scan_stats_sample({"per_query": []}, 800) == {}
+
+    row = _synthetic_serving_row(
+        "stats_roundtrip",
+        p95=12.0,
+        admission=0.91,
+        ndcg=0.87,
+        stats_sample=by_budget["800"]["scan_stats_sample"],
+    )
+    round_trip = json.loads(json.dumps(row))
+    assert round_trip["last_scan_stats_sample"]["multivector_exact_kernel"] == "blocked_neon"
+    rec = compute_document_node_serving_recommendation(
+        {"summary_rows": [row]},
+        exact_baseline={"available": True, "metrics": {"ndcg@10": 0.90}},
+        min_top10_admission=0.80,
+        min_ndcg_ratio_vs_exact=0.95,
+        max_p95_ms=0.0,
+    )
+    markdown = markdown_benchmark_summary({
+        "document_node_serving_recommendation": rec,
+    })
+    assert "Why latency-safe won" in markdown
+    assert "blocked_neon" in markdown
+    assert "document_node_proxy_vector_graph_traversal" in markdown
+
+
+def _self_check_document_node_serving_grid_serialization() -> None:
+    profile = DocumentNodeServingProfile(
+        name="proxy_normalized_mean_f16",
+        candidate_source="proxy_vector",
+        proxy_encoder="normalized_mean",
+        storage_kind="f16",
+    )
+    args = argparse.Namespace(
+        final_k=10,
+        quality_k=10,
+        multivector_token_pooling_min_tokens=16,
+        admission_budget_sweep="50,100,200,400,800",
+    )
+    admission = {
+        "aggregate": {
+            "budget_sweep": [50, 100, 200, 400, 800],
+            "latency_by_budget": {
+                "800": {"p50_ms": 12.5, "p95_ms": 21.0},
+            },
+            "admission_by_budget": {
+                "800": {"exact_rerank_docs": {"p50": 400}},
+            },
+            "exact_top1_admission_rate": 0.75,
+            "exact_top10_admission_recall": 0.92,
+            "run_at_largest_budget": {},
+        },
+        "per_query": [
+            {
+                "query_id": "q1",
+                "budgets": [
+                    {
+                        "budget": 800,
+                        "scan_stats": {
+                            "multivector_candidate_source": "proxy_vector",
+                            "proxy_encoder_kind": "normalized_mean",
+                            "multivector_exact_kernel": "blocked_scalar",
+                        },
+                    },
+                ],
+            }
+        ],
+    }
+    row = document_node_serving_summary_row(
+        profile=profile,
+        args=args,
+        ef=100,
+        oversampling=2,
+        index_phase={
+            "index_bytes": 4096,
+            "index_stats": {"multivector_proxy_encoder": "normalized_mean"},
+        },
+        admission=admission,
+        qrels={},
+    )
+    assert row["graph_mode"] == "document_nodes"
+    assert row["storage_cache_mode"] == "auto"
+    assert row["p50_ms"] == 12.5
+    assert row["p95_ms"] == 21.0
+    assert row["last_scan_stats_sample"]["proxy_encoder_kind"] == "normalized_mean"
+
+    grid = {
+        "document_node_serving_grid": {
+            "enabled": True,
+            "profiles": [profile.__dict__],
+            "budget_sweep": [50, 100, 200, 400, 800],
+            "results": [row],
+        }
+    }
+    serialized = json.loads(json.dumps(grid))
+    assert serialized["document_node_serving_grid"]["results"][0]["profile"] == "proxy_normalized_mean_f16"
+    markdown = markdown_benchmark_summary(serialized)
+    assert "### Document-node serving grid" in markdown
+    assert "proxy_normalized_mean_f16" in markdown
+    assert "21.000" in markdown
+
+    base_args = argparse.Namespace(admission_budget_sweep="25,50")
+    profile_args = document_node_serving_profile_args(
+        base_args,
+        profile,
+        ef=50,
+        oversampling=1,
+    )
+    assert profile_args.admission_budget_sweep == "25,50"
+
+
+def run_document_node_serving_grid(
+    conn: psycopg.Connection[Any],
+    args: argparse.Namespace,
+    queries: list[QueryItem],
+    qrels: dict[str, dict[str, int]],
+) -> dict[str, Any]:
+    profiles = document_node_serving_profiles(
+        include_experimental=args.document_node_serving_grid_include_experimental,
+        centroid_count=args.multivector_centroid_count,
+    )
+    summary_rows: list[dict[str, Any]] = []
+    full_admission: list[dict[str, Any]] = []
+
+    for profile in profiles:
+        index_args = document_node_serving_profile_args(
+            args,
+            profile,
+            ef=0,
+            oversampling=1,
+        )
+        index_phase = build_index(conn, index_args)
+        for ef in DOCUMENT_NODE_SERVING_GRID_EF:
+            for oversampling in DOCUMENT_NODE_SERVING_GRID_OVERSAMPLING:
+                mode_args = document_node_serving_profile_args(
+                    args,
+                    profile,
+                    ef=ef,
+                    oversampling=oversampling,
+                )
+                admission = run_admission_debug(conn, mode_args, queries)
+                full_admission.append({
+                    "profile": profile.name,
+                    "ef": ef,
+                    "oversampling": oversampling,
+                    "admission_debug": admission,
+                })
+                summary_rows.append(
+                    document_node_serving_summary_row(
+                        profile=profile,
+                        args=mode_args,
+                        ef=ef,
+                        oversampling=oversampling,
+                        index_phase=index_phase,
+                        admission=admission,
+                        qrels=qrels,
+                    )
+                )
+
+    return {
+        "enabled": True,
+        "production_oriented": True,
+        "include_experimental": args.document_node_serving_grid_include_experimental,
+        "budget_sweep": parse_int_grid(args.admission_budget_sweep, "--admission-budget-sweep"),
+        "ef_grid": list(DOCUMENT_NODE_SERVING_GRID_EF),
+        "oversampling_grid": list(DOCUMENT_NODE_SERVING_GRID_OVERSAMPLING),
+        "cache_grid": ["auto"],
+        "profiles": [profile.__dict__ for profile in profiles],
+        "queries": len(queries),
+        "results": summary_rows,
+        "summary_rows": summary_rows,
+        "admission_debug_runs": full_admission,
     }
 
 
@@ -3971,6 +5264,126 @@ def markdown_benchmark_summary(report: dict[str, Any]) -> str:
             "counters as the available storage footprint signal.",
         ])
 
+    serving_grid = report.get("document_node_serving_grid")
+    if isinstance(serving_grid, dict):
+        rows = serving_grid.get("results", serving_grid.get("summary_rows", []))
+        if isinstance(rows, list):
+            sorted_rows = sorted(
+                [item for item in rows if isinstance(item, dict)],
+                key=lambda item: (
+                    serving_row_p95(item) if serving_row_p95(item) is not None else float("inf"),
+                    str(item.get("profile", "")),
+                    int(item.get("ef", 0) or 0),
+                    int(item.get("oversampling", 0) or 0),
+                ),
+            )
+        else:
+            sorted_rows = []
+        lines.extend([
+            "",
+            "### Document-node serving grid",
+            "",
+            "| profile | source | graph | proxy | centroids | storage | cache | pooling | ef | oversampling | budget | top1 admission | top10 admission | recall@10 | ndcg@10 | mrr@10 | p50 ms | p95 ms | index bytes |",
+            "|---|---|---|---|---|---|---|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|",
+        ])
+        for item in sorted_rows:
+            lines.append(
+                "| {profile} | {source} | {graph} | {proxy} | {centroids} | {storage} | {cache} | {pooling}:{ratio:.2f} | {ef} | {oversampling} | {budget} | {top1:.6f} | {top10:.6f} | {recall:.6f} | {ndcg:.6f} | {mrr:.6f} | {p50:.3f} | {p95:.3f} | {index_bytes} |".format(
+                    profile=item.get("profile", ""),
+                    source=item.get("candidate_source", ""),
+                    graph=item.get("graph_mode", ""),
+                    proxy=item.get("proxy_encoder", ""),
+                    centroids=item.get("centroids", ""),
+                    storage=item.get("storage_kind", ""),
+                    cache=item.get("storage_cache_mode", item.get("cache_mode", "")),
+                    pooling=item.get("token_pooling", ""),
+                    ratio=float(item.get("token_pooling_target_ratio", 1.0) or 1.0),
+                    ef=int(item.get("ef", 0) or 0),
+                    oversampling=int(item.get("oversampling", 0) or 0),
+                    budget=int(item.get("largest_budget", 0) or 0),
+                    top1=float(item.get("exact_top1_admission_rate", 0.0) or 0.0),
+                    top10=float(item.get("exact_top10_admission_recall", 0.0) or 0.0),
+                    recall=float(item.get("recall@10", 0.0) or 0.0),
+                    ndcg=float(item.get("ndcg@10", 0.0) or 0.0),
+                    mrr=float(item.get("mrr@10", 0.0) or 0.0),
+                    p50=float(item.get("p50_ms", item.get("p50_latency_ms_at_largest_budget", 0.0)) or 0.0),
+                    p95=float(item.get("p95_ms", item.get("p95_latency_ms_at_largest_budget", 0.0)) or 0.0),
+                    index_bytes=int(item.get("index_bytes", 0) or 0),
+                )
+            )
+
+    serving_rec = report.get("document_node_serving_recommendation")
+    if isinstance(serving_rec, dict):
+        thresholds = serving_rec.get("thresholds", {})
+        best_latency_safe = serving_rec.get("best_latency_safe") or {}
+        best_quality = serving_rec.get("best_quality") or {}
+        best_balanced = serving_rec.get("best_balanced") or {}
+        if not isinstance(thresholds, dict):
+            thresholds = {}
+        if not isinstance(best_latency_safe, dict):
+            best_latency_safe = {}
+        if not isinstance(best_quality, dict):
+            best_quality = {}
+        if not isinstance(best_balanced, dict):
+            best_balanced = {}
+        lines.extend([
+            "",
+            "### Document-node serving recommendation",
+            "",
+            f"- Minimum top-10 admission: `{float(thresholds.get('serving_min_top10_admission', 0.0)):.3f}`",
+            f"- Minimum NDCG ratio vs exact: `{float(thresholds.get('serving_min_ndcg_ratio_vs_exact', 0.0)):.3f}`",
+            f"- Maximum p95 ms: `{float(thresholds.get('serving_max_p95_ms', 0.0)):.3f}` (`0` means no hard cap)",
+            f"- Best latency-safe: `{best_latency_safe.get('id', '')}`",
+            f"- Best quality: `{best_quality.get('id', '')}`",
+            f"- Best balanced: `{best_balanced.get('id', '')}`",
+            f"- Why latency-safe won: {serving_profile_explanation(best_latency_safe)}",
+            f"- Why quality won: {serving_profile_explanation(best_quality)}",
+            f"- Why balanced won: {serving_profile_explanation(best_balanced)}",
+            "",
+            "| pass | profile | source | proxy | storage | pooling | ef | oversampling | budget | top10 admission | ndcg@10 | p95 ms | reasons |",
+            "|---|---|---|---|---|---|---:|---:|---:|---:|---:|---:|---|",
+        ])
+        rows = serving_rec.get("profile_thresholds", [])
+        if isinstance(rows, list):
+            for item in rows:
+                if not isinstance(item, dict):
+                    continue
+                failures = item.get("failure_reasons", [])
+                unavailable = item.get("unavailable_criteria", [])
+                reasons = []
+                if isinstance(failures, list):
+                    reasons.extend(str(reason) for reason in failures)
+                if isinstance(unavailable, list):
+                    reasons.extend(f"unavailable:{criterion}" for criterion in unavailable)
+                lines.append(
+                    "| {passed} | {profile} | {source} | {proxy} | {storage} | {pooling}:{ratio:.2f} | {ef} | {oversampling} | {budget} | {admission:.6f} | {ndcg:.6f} | {p95:.3f} | {reasons} |".format(
+                        passed="pass" if item.get("threshold_pass") else "fail",
+                        profile=item.get("profile", ""),
+                        source=item.get("candidate_source", ""),
+                        proxy=item.get("proxy_encoder", ""),
+                        storage=item.get("storage_kind", ""),
+                        pooling=item.get("token_pooling", ""),
+                        ratio=float(item.get("token_pooling_target_ratio", 1.0) or 1.0),
+                        ef=int(item.get("ef", 0) or 0),
+                        oversampling=int(item.get("oversampling", 0) or 0),
+                        budget=int(item.get("largest_budget", 0) or 0),
+                        admission=float(item.get("exact_top10_admission_recall", 0.0) or 0.0),
+                        ndcg=float(item.get("ndcg@10", 0.0) or 0.0),
+                        p95=float(serving_row_p95(item) or 0.0),
+                        reasons=", ".join(reasons) if reasons else "",
+                    )
+                )
+        lines.extend([
+            "",
+            "The balanced score is stable and simple: latency rank plus admission "
+            "loss, optional NDCG loss when qrels exist, and a small storage "
+            "penalty (`sq8=0`, `f16=1`, `f32=2`). Experimental profiles remain "
+            "opt-in and should not be baked into serving defaults; they receive "
+            "a large balanced-score penalty whenever a non-experimental profile "
+            "has usable metrics. Final ranking remains exact heap MaxSim unless "
+            "the candidate source is explicitly experimental.",
+        ])
+
     hybrid_eval = report.get("hybrid_evaluation")
     if isinstance(hybrid_eval, dict):
         recommended = hybrid_eval.get("recommended_default_profile", {})
@@ -4064,6 +5477,14 @@ def markdown_benchmark_summary(report: dict[str, Any]) -> str:
 
     lines.append("")
     return "\n".join(lines)
+
+
+def run_self_checks() -> None:
+    _self_check_document_node_serving_profiles()
+    _self_check_document_node_serving_recommendation()
+    _self_check_document_node_serving_recommendation_schema_fixture()
+    _self_check_document_node_serving_stats_extraction()
+    _self_check_document_node_serving_grid_serialization()
 
 
 def run_multivector_recall_gate(conn: psycopg.Connection[Any], args: argparse.Namespace) -> dict[str, Any]:
@@ -4259,6 +5680,12 @@ def validate_args(args: argparse.Namespace) -> argparse.Namespace:
         raise SystemExit("--multivector-per-token-doc-reservoir-k must be non-negative")
     if args.multivector_coverage_reservoir_k < 0:
         raise SystemExit("--multivector-coverage-reservoir-k must be non-negative")
+    if args.admission_budget_sweep is None:
+        args.admission_budget_sweep = (
+            DOCUMENT_NODE_SERVING_GRID_BUDGET_SWEEP
+            if args.document_node_serving_grid
+            else DEFAULT_ADMISSION_BUDGET_SWEEP
+        )
     try:
         admission_budgets = [
             int(item.strip())
@@ -4267,7 +5694,12 @@ def validate_args(args: argparse.Namespace) -> argparse.Namespace:
         ]
     except ValueError as exc:
         raise SystemExit("--admission-budget-sweep must contain comma-separated integers") from exc
-    if (args.admission_debug or args.document_node_admission_grid or args.hybrid_evaluation_harness) and (
+    if (
+        args.admission_debug
+        or args.document_node_admission_grid
+        or args.document_node_serving_grid
+        or args.hybrid_evaluation_harness
+    ) and (
         not admission_budgets or any(budget < 1 for budget in admission_budgets)
     ):
         raise SystemExit("--admission-budget-sweep must contain positive integer budgets")
@@ -4275,6 +5707,12 @@ def validate_args(args: argparse.Namespace) -> argparse.Namespace:
         raise SystemExit("--hybrid-evaluation-quality-floor must be in (0, 1]")
     if args.hybrid_evaluation_dbsf_min_branch_candidates < 1:
         raise SystemExit("--hybrid-evaluation-dbsf-min-branch-candidates must be positive")
+    if not 0.0 <= args.serving_min_top10_admission <= 1.0:
+        raise SystemExit("--serving-min-top10-admission must be in [0, 1]")
+    if args.serving_min_ndcg_ratio_vs_exact < 0.0:
+        raise SystemExit("--serving-min-ndcg-ratio-vs-exact must be non-negative")
+    if args.serving_max_p95_ms < 0.0:
+        raise SystemExit("--serving-max-p95-ms must be non-negative")
     hybrid_modes = [
         mode.strip()
         for mode in args.hybrid_evaluation_modes.split(",")
@@ -4320,6 +5758,11 @@ def validate_args(args: argparse.Namespace) -> argparse.Namespace:
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument(
+        "--self-check",
+        action="store_true",
+        help="run pure Python benchmark report construction self-checks and exit",
+    )
     parser.add_argument("--database", default=os.environ.get("PGDATABASE", "pgturbohybrid_dbpedia_colbert"))
     parser.add_argument("--dataset", type=Path, default=None, help="Qdrant DBpedia parquet dataset root")
     parser.add_argument("--beir-dataset", type=Path, default=None, help="BEIR DBpedia dataset root containing queries")
@@ -4576,8 +6019,12 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument(
         "--admission-budget-sweep",
-        default="100,200,400,800,1600,3200,6400,10000",
-        help="comma-separated multivector document candidate budgets to sweep",
+        default=None,
+        help=(
+            "comma-separated multivector document candidate budgets to sweep; "
+            f"--document-node-serving-grid defaults to {DOCUMENT_NODE_SERVING_GRID_BUDGET_SWEEP}, "
+            f"other modes default to {DEFAULT_ADMISSION_BUDGET_SWEEP}"
+        ),
     )
     parser.add_argument(
         "--admission-trace-limit",
@@ -4589,6 +6036,44 @@ def parse_args() -> argparse.Namespace:
         "--document-node-admission-grid",
         action="store_true",
         help="run DBpedia admission comparisons for token-node baselines and document-node storage/EF/oversampling grid",
+    )
+    parser.add_argument(
+        "--document-node-serving-grid",
+        action="store_true",
+        help=(
+            "run a compact production-oriented document-node serving grid over "
+            "named f16/sq8 proxy and centroid profiles"
+        ),
+    )
+    parser.add_argument(
+        "--document-node-serving-grid-include-experimental",
+        action="store_true",
+        help=(
+            "include the guarded quantized_inverted_experimental_f32 profile in "
+            "--document-node-serving-grid"
+        ),
+    )
+    parser.add_argument(
+        "--serving-min-top10-admission",
+        type=float,
+        default=0.80,
+        help="minimum exact top-10 admission recall for --document-node-serving-grid best_latency_safe",
+    )
+    parser.add_argument(
+        "--serving-min-ndcg-ratio-vs-exact",
+        type=float,
+        default=0.95,
+        help=(
+            "minimum ndcg@10 ratio versus the exact-scan baseline for "
+            "--document-node-serving-grid best_latency_safe; ignored with an "
+            "unavailable-criteria note when qrels or exact baseline metrics are missing"
+        ),
+    )
+    parser.add_argument(
+        "--serving-max-p95-ms",
+        type=float,
+        default=0.0,
+        help="hard p95 latency cap for --document-node-serving-grid; 0 disables the cap",
     )
     parser.add_argument(
         "--document-node-storage-grid",
@@ -4751,11 +6236,18 @@ def parse_args() -> argparse.Namespace:
         default=None,
         help="optional Markdown summary path for benchmark results or --multivector-recall-gate",
     )
-    return validate_args(parser.parse_args())
+    args = parser.parse_args()
+    if args.self_check:
+        return args
+    return validate_args(args)
 
 
 def main() -> None:
     args = parse_args()
+    if args.self_check:
+        run_self_checks()
+        print("self-check ok")
+        return
     if args.multivector_recall_gate:
         conn = connect(args)
         try:
@@ -4864,6 +6356,22 @@ def main() -> None:
             if args.document_node_admission_grid
             else None
         )
+        document_node_serving_grid = (
+            run_document_node_serving_grid(conn, args, encoded_queries, qrels)
+            if args.document_node_serving_grid
+            else None
+        )
+        document_node_serving_recommendation = (
+            compute_document_node_serving_recommendation(
+                document_node_serving_grid,
+                exact_baseline=serving_exact_baseline_from_results(result_methods),
+                min_top10_admission=args.serving_min_top10_admission,
+                min_ndcg_ratio_vs_exact=args.serving_min_ndcg_ratio_vs_exact,
+                max_p95_ms=args.serving_max_p95_ms,
+            )
+            if document_node_serving_grid is not None
+            else None
+        )
         hybrid_evaluation = (
             run_hybrid_evaluation_harness(conn, args, encoded_queries, qrels)
             if args.hybrid_evaluation_harness
@@ -4954,6 +6462,11 @@ def main() -> None:
                 "learned_sparse_doc_jsonl": portable_path(args.learned_sparse_doc_jsonl) if args.learned_sparse_doc_jsonl else None,
                 "learned_sparse_query_jsonl": portable_path(args.learned_sparse_query_jsonl) if args.learned_sparse_query_jsonl else None,
                 "document_node_admission_grid": args.document_node_admission_grid,
+                "document_node_serving_grid": args.document_node_serving_grid,
+                "document_node_serving_grid_include_experimental": args.document_node_serving_grid_include_experimental,
+                "serving_min_top10_admission": args.serving_min_top10_admission,
+                "serving_min_ndcg_ratio_vs_exact": args.serving_min_ndcg_ratio_vs_exact,
+                "serving_max_p95_ms": args.serving_max_p95_ms,
                 "document_node_storage_grid": args.document_node_storage_grid_values,
                 "document_node_cache_grid": args.document_node_cache_grid_values,
                 "document_node_pooling_grid": args.document_node_pooling_grid_values,
@@ -5001,6 +6514,10 @@ def main() -> None:
             output["admission_debug"] = admission_debug
         if document_node_admission_grid is not None:
             output["document_node_admission_grid"] = document_node_admission_grid
+        if document_node_serving_grid is not None:
+            output["document_node_serving_grid"] = document_node_serving_grid
+        if document_node_serving_recommendation is not None:
+            output["document_node_serving_recommendation"] = document_node_serving_recommendation
         if hybrid_evaluation is not None:
             output["hybrid_evaluation"] = hybrid_evaluation
         if token_ablation is not None:

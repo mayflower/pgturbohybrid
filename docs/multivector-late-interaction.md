@@ -427,6 +427,34 @@ The current implementation is deliberately conservative: centroid interaction
 is only an admission approximation and final ranking still uses exact heap
 MaxSim over the original document multivectors.
 
+### x00k Serving Selection Benchmark
+
+Use the DBpedia ColBERT serving grid when selecting a document-node profile for
+10k to x00k corpora:
+
+```sh
+python benchmarks/dbpedia_colbert_multivector.py \
+  --precomputed-dataset johannhartmann/pgturbohybrid_dbpedia_colbert \
+  --max-docs 10000 \
+  --max-queries 100 \
+  --reuse-data \
+  --document-node-serving-grid \
+  --admission-budget-sweep 50,100,200,400,800 \
+  --output .nix-dev/tmp/dbpedia-colbert-serving-grid-10k.json \
+  --markdown-output .nix-dev/tmp/dbpedia-colbert-serving-grid-10k.md
+```
+
+For x00k evaluation, raise `--max-docs` to `100000`, `300000`, or the corpus
+size and use `--max-queries 500` or `1000`. Leave graph knobs at the extension
+defaults unless the run is explicitly a smoke test. The report ranks the named
+document-node profiles with `best_latency_safe`, `best_quality`, and
+`best_balanced`; choose `best_latency_safe` when it passes admission and qrel
+quality thresholds, and choose `best_quality` when relevance dominates. Treat
+`centroid_lite` as PLAID-inspired admission with exact final MaxSim, and treat
+`quantized_inverted_experimental` as opt-in research. Generated JSON,
+Markdown, local logs, and datasets should stay under `.nix-dev/tmp/` or another
+ignored path and must not be committed.
+
 Missing or malformed document-node sidecar metadata fails with REINDEX guidance
 instead of silently falling back to token-node storage.
 
