@@ -455,6 +455,14 @@ quality thresholds, and choose `best_quality` when relevance dominates. Treat
 Markdown, local logs, and datasets should stay under `.nix-dev/tmp/` or another
 ignored path and must not be committed.
 
+The serving-grid report includes explicit cost accounting. At the top level,
+`total_elapsed_ms`, `index_build_elapsed_ms_total`,
+`exact_baseline_elapsed_ms_total`, `retrieval_elapsed_ms_total`,
+`exact_baseline_query_count`, and `retrieval_query_count` show whether the run
+spent time building indexes, recomputing exact admission baselines, or executing
+indexed retrieval. The same split is emitted per profile and per
+profile/EF/oversampling row.
+
 Missing or malformed document-node sidecar metadata fails with REINDEX guidance
 instead of silently falling back to token-node storage.
 

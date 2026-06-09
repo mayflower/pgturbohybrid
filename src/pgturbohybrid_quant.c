@@ -6956,6 +6956,16 @@ PgturbohybridGraphAddElapsedUs(int64 *target, instr_time start)
 }
 
 static void
+PgturbohybridGraphAddElapsedUint64(uint64 *target, instr_time start)
+{
+	instr_time	duration;
+
+	INSTR_TIME_SET_CURRENT(duration);
+	INSTR_TIME_SUBTRACT(duration, start);
+	*target += (uint64) INSTR_TIME_GET_MICROSEC(duration);
+}
+
+static void
 PgturbohybridGraphScoreNodeBatchTimed(PgturbohybridGraphScanOpaque so, PgturbohybridGraphScanStorage *storage,
 						   uint32 *nodeIds, int count, double *distances,
 						   Datum query)
@@ -9756,6 +9766,11 @@ typedef struct PgturbohybridMultiVectorExactRerankWorkStats
 	uint64		heapFetches;
 	uint64		sidecarReads;
 	uint64		sidecarBytes;
+	uint64		sidecarLoadUs;
+	uint64		heapVisibilityUs;
+	uint64		exactHeapFetchUs;
+	uint64		exactMaxsimUs;
+	uint64		totalUs;
 	bool		adaptiveTopKChangedVsFull;
 }			PgturbohybridMultiVectorExactRerankWorkStats;
 
@@ -10187,7 +10202,10 @@ PgturbohybridMultiVectorExactHeapRerank(IndexScanDesc scan,
 		bool		adaptivePruned = false;
 		bool		adaptiveScored = false;
 		bool		docFromSidecar = false;
+		bool		heapPathTimed = false;
 		instr_time	fetchStart;
+		instr_time	heapPathStart;
+		instr_time	maxsimStart;
 
 		CHECK_FOR_INTERRUPTS();
 		if (candidates[i].exactScored)
@@ -10197,6 +10215,8 @@ PgturbohybridMultiVectorExactHeapRerank(IndexScanDesc scan,
 			candidates[i].hasDocId &&
 			candidates[i].docId < sidecarMeta->tqMultivectorDocCount)
 		{
+			if (rerankStats != NULL)
+				INSTR_TIME_SET_CURRENT(fetchStart);
 			doc = PgturbohybridGraphLoadMultiVectorDocVector(scan->indexRelation,
 															 sidecarMeta,
 															 sidecarStorage,
@@ -10205,6 +10225,9 @@ PgturbohybridMultiVectorExactHeapRerank(IndexScanDesc scan,
 															 sidecarStorage->ctx :
 															 CurrentMemoryContext,
 															 sidecarStats);
+			if (rerankStats != NULL)
+				PgturbohybridGraphAddElapsedUint64(&rerankStats->sidecarLoadUs,
+												   fetchStart);
 			if (doc != NULL)
 			{
 				docFromSidecar = true;
@@ -10220,6 +10243,11 @@ PgturbohybridMultiVectorExactHeapRerank(IndexScanDesc scan,
 		{
 			if (scan->heapRelation == NULL)
 				continue;
+			if (rerankStats != NULL)
+			{
+				INSTR_TIME_SET_CURRENT(heapPathStart);
+				heapPathTimed = true;
+			}
 			if (denseAttno == InvalidAttrNumber)
 			{
 				denseAttno =
@@ -10238,9 +10266,15 @@ PgturbohybridMultiVectorExactHeapRerank(IndexScanDesc scan,
 													slot);
 			PgturbohybridGraphAddElapsedUs(&so->graphHeapFetchUs, fetchStart);
 			if (rerankStats != NULL)
+				PgturbohybridGraphAddElapsedUint64(&rerankStats->heapVisibilityUs,
+												   fetchStart);
+			if (rerankStats != NULL)
 				rerankStats->heapFetches++;
 			if (!visible)
 			{
+				if (rerankStats != NULL && heapPathTimed)
+					PgturbohybridGraphAddElapsedUint64(&rerankStats->exactHeapFetchUs,
+													   heapPathStart);
 				ExecClearTuple(slot);
 				continue;
 			}
@@ -10248,14 +10282,22 @@ PgturbohybridMultiVectorExactHeapRerank(IndexScanDesc scan,
 			value = slot_getattr(slot, denseAttno, &isnull);
 			if (isnull)
 			{
+				if (rerankStats != NULL && heapPathTimed)
+					PgturbohybridGraphAddElapsedUint64(&rerankStats->exactHeapFetchUs,
+													   heapPathStart);
 				ExecClearTuple(slot);
 				continue;
 			}
 
 			valuePtr = DatumGetPointer(value);
 			doc = PgturbohybridDatumGetMultiVector(value);
+			if (rerankStats != NULL && heapPathTimed)
+				PgturbohybridGraphAddElapsedUint64(&rerankStats->exactHeapFetchUs,
+												   heapPathStart);
 		}
 		PgturbohybridCheckSameMultiVectorDims(query, doc);
+		if (rerankStats != NULL)
+			INSTR_TIME_SET_CURRENT(maxsimStart);
 		if (adaptiveReady)
 			adaptiveScored =
 				PgturbohybridMultiVectorMaxSimAdaptiveBounded(query, doc,
@@ -10285,6 +10327,9 @@ PgturbohybridMultiVectorExactHeapRerank(IndexScanDesc scan,
 													queryWeights,
 													queryMask);
 		}
+		if (rerankStats != NULL)
+			PgturbohybridGraphAddElapsedUint64(&rerankStats->exactMaxsimUs,
+											   maxsimStart);
 		if (exactPairs != NULL)
 			*exactPairs += docPairsEvaluated;
 		candidates[i].distance = -exactMaxsim;
@@ -10328,6 +10373,8 @@ PgturbohybridMultiVectorExactHeapRerank(IndexScanDesc scan,
 		pfree(adaptiveTopScores);
 
 	PgturbohybridGraphAddElapsedUs(&so->graphHeapRescoreUs, start);
+	if (rerankStats != NULL)
+		PgturbohybridGraphAddElapsedUint64(&rerankStats->totalUs, start);
 	if (rescored > 0)
 	{
 		if (rerankStats != NULL)
@@ -13051,6 +13098,19 @@ PgturbohybridMultiVectorDocumentNodeScan(IndexScanDesc scan,
 	PgturbohybridGraphMetaPageData *exactRerankSidecarMeta = NULL;
 	PgturbohybridGraphScanStorage *exactRerankSidecarStorage = NULL;
 	PgturbohybridMultiVectorDocSidecarAccessStats *exactRerankSidecarStats = NULL;
+	bool		collectPhaseStats = stats != NULL;
+	uint64		candidateSourceUs = 0;
+	uint64		docGraphTraversalUs = 0;
+	uint64		proxyCandidateUs = 0;
+	uint64		proxyGraphTraversalUs = 0;
+	uint64		proxyScoringUs = 0;
+	uint64		centroidLitePostingUs = 0;
+	uint64		quantizedInvertedPostingUs = 0;
+	uint64		sidecarLoadUs = 0;
+	uint64		finalSortUs = 0;
+	instr_time	candidateSourceStart;
+	instr_time	subphaseStart;
+	instr_time	sortStart;
 
 	if (outCandidates == NULL)
 		return 0;
@@ -13200,11 +13260,15 @@ PgturbohybridMultiVectorDocumentNodeScan(IndexScanDesc scan,
 		storage.ctx = resultCtx;
 		storage.multivectorDocVectorsPaged = true;
 	}
+	if (collectPhaseStats)
+		INSTR_TIME_SET_CURRENT(subphaseStart);
 	(void) PgturbohybridGraphLoadMultiVectorDocMapWithStats(scan->indexRelation,
 															meta,
 															&storage,
 															true,
 															&sidecarStats);
+	if (collectPhaseStats)
+		PgturbohybridGraphAddElapsedUint64(&sidecarLoadUs, subphaseStart);
 	if (!storage.multivectorDocVectorsLoaded)
 		ereport(ERROR,
 				(errcode(ERRCODE_INDEX_CORRUPTED),
@@ -13272,6 +13336,8 @@ PgturbohybridMultiVectorDocumentNodeScan(IndexScanDesc scan,
 		PgturbohybridGraphAddElapsedUs(&so->graphPrepareUs, phaseStart);
 	}
 
+	if (collectPhaseStats)
+		INSTR_TIME_SET_CURRENT(candidateSourceStart);
 	if (exhaustiveScan && !centroidLite && !quantizedInvertedExperimental)
 	{
 		INSTR_TIME_SET_CURRENT(phaseStart);
@@ -13317,6 +13383,8 @@ PgturbohybridMultiVectorDocumentNodeScan(IndexScanDesc scan,
 			docsScored++;
 		}
 		PgturbohybridGraphAddElapsedUs(&so->graphTraverseUs, phaseStart);
+		if (collectPhaseStats)
+			PgturbohybridGraphAddElapsedUint64(&docGraphTraversalUs, phaseStart);
 		docGraphWarning = "document_node_f32_sidecar_exact_scan";
 	}
 	else
@@ -13326,6 +13394,8 @@ PgturbohybridMultiVectorDocumentNodeScan(IndexScanDesc scan,
 		{
 			PgturbohybridGraphResult *hits;
 			int			hitCount;
+			int64		batchUsBefore = so->graphBatchUs;
+			int64		baseUsBefore = so->graphBaseUs;
 
 			hits = palloc0(sizeof(PgturbohybridGraphResult) * candidateLimit);
 			hitCount = PgturbohybridGraphRunTraversalPass(scan, so, meta,
@@ -13337,6 +13407,11 @@ PgturbohybridMultiVectorDocumentNodeScan(IndexScanDesc scan,
 														  -1, 0, false,
 														  false, 1.0,
 														  PGTURBOHYBRID_GRAPH_FILL_CANDIDATE_BAND_REASON_NONE);
+			if (collectPhaseStats)
+				proxyScoringUs +=
+					(uint64) Max((int64) 0,
+								 (so->graphBatchUs - batchUsBefore) +
+								 (so->graphBaseUs - baseUsBefore));
 			for (int i = 0; i < hitCount; i++)
 			{
 				TqDocId		docId;
@@ -13381,6 +13456,8 @@ PgturbohybridMultiVectorDocumentNodeScan(IndexScanDesc scan,
 			uint32		codebookSize;
 			uint32		matchedDocCount = 0;
 
+			if (collectPhaseStats)
+				INSTR_TIME_SET_CURRENT(subphaseStart);
 			codebookSize = storage.multivectorQuantizedInvertedCodebookSize;
 			postings = storage.multivectorQuantizedInvertedPostings;
 			listOffsets = storage.multivectorQuantizedInvertedListOffsets;
@@ -13515,6 +13592,9 @@ PgturbohybridMultiVectorDocumentNodeScan(IndexScanDesc scan,
 														  &candidate);
 			}
 			quantizedInvertedDocsScored = matchedDocCount;
+			if (collectPhaseStats)
+				PgturbohybridGraphAddElapsedUint64(&quantizedInvertedPostingUs,
+												   subphaseStart);
 		}
 		else if (centroidLite)
 		{
@@ -13530,6 +13610,8 @@ PgturbohybridMultiVectorDocumentNodeScan(IndexScanDesc scan,
 			uint32		matchedDocCount = 0;
 			uint64		centroidPostingsTouched = 0;
 
+			if (collectPhaseStats)
+				INSTR_TIME_SET_CURRENT(subphaseStart);
 			codebookSize = storage.multivectorCentroidPostingCodebookSize;
 			postings = storage.multivectorCentroidPostings;
 			listOffsets = storage.multivectorCentroidPostingListOffsets;
@@ -13672,6 +13754,9 @@ PgturbohybridMultiVectorDocumentNodeScan(IndexScanDesc scan,
 			centroidDocsTouched = matchedDocCount;
 			edgesVisited = centroidPostingsTouched;
 			maxsimPairs = centroidPostingsTouched;
+			if (collectPhaseStats)
+				PgturbohybridGraphAddElapsedUint64(&centroidLitePostingUs,
+												   subphaseStart);
 		}
 		else
 			docCount =
@@ -13690,9 +13775,13 @@ PgturbohybridMultiVectorDocumentNodeScan(IndexScanDesc scan,
 															  &maxsimPairs,
 															  &sidecarStats);
 		PgturbohybridGraphAddElapsedUs(&so->graphTraverseUs, phaseStart);
+		if (collectPhaseStats)
+			PgturbohybridGraphAddElapsedUint64(&docGraphTraversalUs, phaseStart);
+		if (proxyGraph)
+			proxyGraphTraversalUs = docGraphTraversalUs;
 		quantizedScores = compactTraversal ? docsScored : 0;
-			if (proxyGraph)
-				docGraphWarning = "document_node_proxy_vector_graph_traversal";
+		if (proxyGraph)
+			docGraphWarning = "document_node_proxy_vector_graph_traversal";
 		else if (quantizedInvertedExperimental)
 		{
 			docsScored = quantizedInvertedDocsScored;
@@ -13713,8 +13802,17 @@ PgturbohybridMultiVectorDocumentNodeScan(IndexScanDesc scan,
 		else
 			docGraphWarning = "document_node_f32_sidecar_graph_traversal";
 	}
+	if (collectPhaseStats)
+		PgturbohybridGraphAddElapsedUint64(&candidateSourceUs,
+										   candidateSourceStart);
+	if (proxyGraph)
+		proxyCandidateUs = candidateSourceUs;
 
+	if (collectPhaseStats)
+		INSTR_TIME_SET_CURRENT(sortStart);
 	PgturbohybridMultiVectorCandidateHeapSort(candidates, docCount);
+	if (collectPhaseStats)
+		PgturbohybridGraphAddElapsedUint64(&finalSortUs, sortStart);
 	if (proxyGraph && docCount > 0)
 	{
 		proxyTopTid = candidates[0].heaptid;
@@ -13739,6 +13837,8 @@ PgturbohybridMultiVectorDocumentNodeScan(IndexScanDesc scan,
 	}
 	else if (centroidMeanProxy && proxyGraph && docCount > 0)
 	{
+		if (collectPhaseStats)
+			INSTR_TIME_SET_CURRENT(subphaseStart);
 		centroidPrerankDocs =
 			(uint32) PgturbohybridMultiVectorProxyCentroidPrerank(scan->indexRelation,
 																  &storage,
@@ -13750,6 +13850,9 @@ PgturbohybridMultiVectorDocumentNodeScan(IndexScanDesc scan,
 																  docCount,
 																  &maxsimPairs,
 																  &centroidCountEffective);
+		if (collectPhaseStats)
+			PgturbohybridGraphAddElapsedUint64(&proxyScoringUs,
+											   subphaseStart);
 		centroidDocsTouched += centroidPrerankDocs;
 	}
 	exactRerankKEffective =
@@ -13779,7 +13882,13 @@ PgturbohybridMultiVectorDocumentNodeScan(IndexScanDesc scan,
 												&exactPairs,
 												&exactStats);
 	if (exactRerankCount > 0 && docCount > 1)
+	{
+		if (collectPhaseStats)
+			INSTR_TIME_SET_CURRENT(sortStart);
 		PgturbohybridMultiVectorCandidateHeapSort(candidates, docCount);
+		if (collectPhaseStats)
+			PgturbohybridGraphAddElapsedUint64(&finalSortUs, sortStart);
+	}
 	if (proxyGraph && proxyTopTidValid && docCount > 0)
 		proxyTop1Admission =
 			ItemPointerEquals(&proxyTopTid, &candidates[0].heaptid);
@@ -13920,17 +14029,20 @@ PgturbohybridMultiVectorDocumentNodeScan(IndexScanDesc scan,
 		stats->quantizedInvertedSidecarBytes =
 			stats->quantizedInvertedListOffsetBytes +
 			stats->quantizedInvertedPostingBytes;
-			strlcpy(stats->multivectorDocSidecarCacheMode,
-					sidecarStats.cacheMode,
-					sizeof(stats->multivectorDocSidecarCacheMode));
-			stats->multivectorDocSidecarPagesRead = sidecarStats.pagesRead;
-			stats->multivectorDocSidecarCacheHits = sidecarStats.cacheHits;
-			stats->multivectorDocSidecarCacheMisses = sidecarStats.cacheMisses;
-			stats->multivectorDocSidecarBytesTouched = sidecarStats.bytesTouched;
-			stats->multivectorDocSidecarVectorsLoaded =
-				sidecarStats.vectorsLoaded;
-			stats->multivectorTokensOriginal = originalTokens;
-			stats->multivectorTokensPooled = pooledTokens;
+		strlcpy(stats->multivectorDocSidecarCacheMode,
+				sidecarStats.cacheMode,
+				sizeof(stats->multivectorDocSidecarCacheMode));
+		stats->multivectorDocSidecarPagesRead = sidecarStats.pagesRead;
+		stats->multivectorDocSidecarCacheHits = sidecarStats.cacheHits;
+		stats->multivectorDocSidecarCacheMisses = sidecarStats.cacheMisses;
+		stats->multivectorDocSidecarBytesTouched = sidecarStats.bytesTouched;
+		stats->multivectorDocSidecarVectorsLoaded =
+			sidecarStats.vectorsLoaded;
+		stats->multivectorSidecarPageReadUs = sidecarStats.pageReadUs;
+		stats->multivectorSidecarVectorReconstructUs =
+			sidecarStats.vectorReconstructUs;
+		stats->multivectorTokensOriginal = originalTokens;
+		stats->multivectorTokensPooled = pooledTokens;
 		stats->multivectorReservoirsEnabled = false;
 		stats->multivectorDocMapBytes = storage.multivectorDocMapBytes;
 		stats->multivectorUniqueDocs = docsScored;
@@ -13946,6 +14058,20 @@ PgturbohybridMultiVectorDocumentNodeScan(IndexScanDesc scan,
 		stats->multivectorExactRerankHeapFetches = exactStats.heapFetches;
 		stats->multivectorExactRerankSidecarReads = exactStats.sidecarReads;
 		stats->multivectorExactRerankSidecarBytes = exactStats.sidecarBytes;
+		stats->multivectorCandidateSourceUs = candidateSourceUs;
+		stats->multivectorDocGraphTraversalUs = docGraphTraversalUs;
+		stats->multivectorProxyCandidateUs = proxyCandidateUs;
+		stats->multivectorProxyGraphTraversalUs = proxyGraphTraversalUs;
+		stats->multivectorProxyScoringUs = proxyScoringUs;
+		stats->multivectorCentroidLitePostingUs = centroidLitePostingUs;
+		stats->multivectorQuantizedInvertedPostingUs =
+			quantizedInvertedPostingUs;
+		stats->multivectorSidecarLoadUs =
+			sidecarLoadUs + exactStats.sidecarLoadUs;
+		stats->multivectorHeapVisibilityUs = exactStats.heapVisibilityUs;
+		stats->multivectorExactHeapFetchUs = exactStats.exactHeapFetchUs;
+		stats->multivectorExactRerankUs = exactStats.exactMaxsimUs;
+		stats->multivectorFinalSortUs = finalSortUs;
 		stats->exactRerankCandidates = exactStats.candidates;
 		stats->exactRerankTokensEvaluated = exactStats.tokensEvaluated;
 		stats->exactRerankTokensSkipped = exactStats.tokensSkipped;
