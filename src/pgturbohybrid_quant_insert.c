@@ -664,9 +664,11 @@ PgturbohybridGraphUpdateAdjTuple(Relation index, PgturbohybridGraphMetaPageData 
 					}
 				}
 
-				found = true;
-				xlogState = NULL;
-				break;
+				/*
+				 * Buffer was already released above; jump directly
+				 * to cache update, skipping the double-release path.
+				 */
+				goto update_cache;
 			}
 
 			tuple->count = count;
