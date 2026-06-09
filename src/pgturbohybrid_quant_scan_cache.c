@@ -12,12 +12,14 @@
 #endif
 
 #include "access/genam.h"
+#include "catalog/pg_class.h"
 #include "fmgr.h"
 #include "miscadmin.h"
 #include "portability/instr_time.h"
 #include "storage/bufmgr.h"
 #include "utils/fmgrprotos.h"
 #include "utils/jsonb.h"
+#include "utils/syscache.h"
 #include "utils/memutils.h"
 #include "utils/numeric.h"
 #include "utils/rel.h"
@@ -647,6 +649,44 @@ PgturbohybridGraphCollectSharedCacheDiskEntries(PgturbohybridSharedCacheDiskEntr
 }
 
 static uint32
+PgturbohybridGraphPruneOrphanRelidCache(uint64 *freedBytes)
+{
+	PgturbohybridSharedCacheDiskEntry *entries;
+	int			count;
+	uint32		pruned = 0;
+
+	if (!PgturbohybridGraphCollectSharedCacheDiskEntries(&entries, &count, NULL))
+		return 0;
+
+	for (int i = 0; i < count; i++)
+	{
+		Oid			relid;
+		char	   *underscore;
+		HeapTuple	tp;
+
+		/* Extract leading OID from filename (format: OID_OID_...) */
+		relid = (Oid) strtoul(entries[i].path, &underscore, 10);
+		if (relid == InvalidOid)
+			continue;
+
+		/* Check if this OID still exists in pg_class */
+		tp = SearchSysCache1(RELOID, ObjectIdGetDatum(relid));
+		if (HeapTupleIsValid(tp))
+		{
+			ReleaseSysCache(tp);
+			continue;				/* still live */
+		}
+
+		/* OID no longer in pg_class — orphan cache file */
+		if (PgturbohybridGraphSharedCacheUnlinkIfSafe(entries[i].path, freedBytes))
+			pruned++;
+	}
+
+	pfree(entries);
+	return pruned;
+}
+
+static uint32
 PgturbohybridGraphPruneDuplicateSharedCachePerRelid(uint64 *freedBytes)
 {
 	PgturbohybridSharedCacheDiskEntry *entries;
@@ -765,6 +805,7 @@ PgturbohybridGraphPruneSharedCacheAll(uint64 *freedBytesOut,
 		*remainingFilesOut = 0;
 
 	pruned += PgturbohybridGraphPruneSharedCacheArtifacts(&freedBytes);
+	pruned += PgturbohybridGraphPruneOrphanRelidCache(&freedBytes);
 	pruned += PgturbohybridGraphPruneDuplicateSharedCachePerRelid(&freedBytes);
 	pruned += PgturbohybridGraphEnforceSharedCacheDiskCap(&freedBytes);
 
