@@ -1356,6 +1356,8 @@ typedef struct PgturbohybridLastScanStats
 	uint64		multivectorDocSidecarCacheMisses;
 	uint64		multivectorDocSidecarBytesTouched;
 	uint64		multivectorDocSidecarVectorsLoaded;
+	uint64		multivectorSidecarPageReadUs;
+	uint64		multivectorSidecarVectorReconstructUs;
 	uint64		multivectorTokensOriginal;
 	uint64		multivectorTokensPooled;
 	bool		multivectorReservoirsEnabled;
@@ -1385,6 +1387,18 @@ typedef struct PgturbohybridLastScanStats
 	uint64		multivectorExactRerankHeapFetches;
 	uint64		multivectorExactRerankSidecarReads;
 	uint64		multivectorExactRerankSidecarBytes;
+	uint64		multivectorCandidateSourceUs;
+	uint64		multivectorDocGraphTraversalUs;
+	uint64		multivectorProxyCandidateUs;
+	uint64		multivectorProxyGraphTraversalUs;
+	uint64		multivectorProxyScoringUs;
+	uint64		multivectorCentroidLitePostingUs;
+	uint64		multivectorQuantizedInvertedPostingUs;
+	uint64		multivectorSidecarLoadUs;
+	uint64		multivectorHeapVisibilityUs;
+	uint64		multivectorExactHeapFetchUs;
+	uint64		multivectorExactRerankUs;
+	uint64		multivectorFinalSortUs;
 	uint32		exactRerankCandidates;
 	uint64		exactRerankTokensEvaluated;
 	uint64		exactRerankTokensSkipped;
@@ -1804,6 +1818,10 @@ PgturbohybridGetLastScanStatsSnapshot(PgturbohybridScanStatsSnapshot *stats)
 		pgturbohybrid_last_scan_state.multivectorDocSidecarBytesTouched;
 	stats->multivectorDocSidecarVectorsLoaded =
 		pgturbohybrid_last_scan_state.multivectorDocSidecarVectorsLoaded;
+	stats->multivectorSidecarPageReadUs =
+		pgturbohybrid_last_scan_state.multivectorSidecarPageReadUs;
+	stats->multivectorSidecarVectorReconstructUs =
+		pgturbohybrid_last_scan_state.multivectorSidecarVectorReconstructUs;
 	stats->multivectorTokensOriginal =
 		pgturbohybrid_last_scan_state.multivectorTokensOriginal;
 	stats->multivectorTokensPooled =
@@ -1863,6 +1881,30 @@ PgturbohybridGetLastScanStatsSnapshot(PgturbohybridScanStatsSnapshot *stats)
 		pgturbohybrid_last_scan_state.multivectorExactRerankSidecarReads;
 	stats->multivectorExactRerankSidecarBytes =
 		pgturbohybrid_last_scan_state.multivectorExactRerankSidecarBytes;
+	stats->multivectorCandidateSourceUs =
+		pgturbohybrid_last_scan_state.multivectorCandidateSourceUs;
+	stats->multivectorDocGraphTraversalUs =
+		pgturbohybrid_last_scan_state.multivectorDocGraphTraversalUs;
+	stats->multivectorProxyCandidateUs =
+		pgturbohybrid_last_scan_state.multivectorProxyCandidateUs;
+	stats->multivectorProxyGraphTraversalUs =
+		pgturbohybrid_last_scan_state.multivectorProxyGraphTraversalUs;
+	stats->multivectorProxyScoringUs =
+		pgturbohybrid_last_scan_state.multivectorProxyScoringUs;
+	stats->multivectorCentroidLitePostingUs =
+		pgturbohybrid_last_scan_state.multivectorCentroidLitePostingUs;
+	stats->multivectorQuantizedInvertedPostingUs =
+		pgturbohybrid_last_scan_state.multivectorQuantizedInvertedPostingUs;
+	stats->multivectorSidecarLoadUs =
+		pgturbohybrid_last_scan_state.multivectorSidecarLoadUs;
+	stats->multivectorHeapVisibilityUs =
+		pgturbohybrid_last_scan_state.multivectorHeapVisibilityUs;
+	stats->multivectorExactHeapFetchUs =
+		pgturbohybrid_last_scan_state.multivectorExactHeapFetchUs;
+	stats->multivectorExactRerankUs =
+		pgturbohybrid_last_scan_state.multivectorExactRerankUs;
+	stats->multivectorFinalSortUs =
+		pgturbohybrid_last_scan_state.multivectorFinalSortUs;
 	stats->exactRerankCandidates =
 		pgturbohybrid_last_scan_state.exactRerankCandidates;
 	stats->exactRerankTokensEvaluated =
@@ -5722,6 +5764,10 @@ PgturbohybridCollectScanResults(IndexScanDesc scan, PgturbohybridScanState *stat
 		denseStats.multivectorDocSidecarBytesTouched;
 	lastStats.multivectorDocSidecarVectorsLoaded =
 		denseStats.multivectorDocSidecarVectorsLoaded;
+	lastStats.multivectorSidecarPageReadUs =
+		denseStats.multivectorSidecarPageReadUs;
+	lastStats.multivectorSidecarVectorReconstructUs =
+		denseStats.multivectorSidecarVectorReconstructUs;
 	lastStats.multivectorTokensOriginal =
 		denseStats.multivectorTokensOriginal;
 	lastStats.multivectorTokensPooled =
@@ -5795,6 +5841,30 @@ PgturbohybridCollectScanResults(IndexScanDesc scan, PgturbohybridScanState *stat
 		denseStats.multivectorExactRerankSidecarReads;
 	lastStats.multivectorExactRerankSidecarBytes =
 		denseStats.multivectorExactRerankSidecarBytes;
+	lastStats.multivectorCandidateSourceUs =
+		denseStats.multivectorCandidateSourceUs;
+	lastStats.multivectorDocGraphTraversalUs =
+		denseStats.multivectorDocGraphTraversalUs;
+	lastStats.multivectorProxyCandidateUs =
+		denseStats.multivectorProxyCandidateUs;
+	lastStats.multivectorProxyGraphTraversalUs =
+		denseStats.multivectorProxyGraphTraversalUs;
+	lastStats.multivectorProxyScoringUs =
+		denseStats.multivectorProxyScoringUs;
+	lastStats.multivectorCentroidLitePostingUs =
+		denseStats.multivectorCentroidLitePostingUs;
+	lastStats.multivectorQuantizedInvertedPostingUs =
+		denseStats.multivectorQuantizedInvertedPostingUs;
+	lastStats.multivectorSidecarLoadUs =
+		denseStats.multivectorSidecarLoadUs;
+	lastStats.multivectorHeapVisibilityUs =
+		denseStats.multivectorHeapVisibilityUs;
+	lastStats.multivectorExactHeapFetchUs =
+		denseStats.multivectorExactHeapFetchUs;
+	lastStats.multivectorExactRerankUs =
+		denseStats.multivectorExactRerankUs;
+	lastStats.multivectorFinalSortUs =
+		denseStats.multivectorFinalSortUs;
 	lastStats.exactRerankCandidates = denseStats.exactRerankCandidates;
 	lastStats.exactRerankTokensEvaluated =
 		denseStats.exactRerankTokensEvaluated;

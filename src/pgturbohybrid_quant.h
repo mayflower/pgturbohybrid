@@ -561,6 +561,8 @@ typedef struct TqDenseCandidateStats
 	uint64		multivectorDocSidecarCacheMisses;
 	uint64		multivectorDocSidecarBytesTouched;
 	uint64		multivectorDocSidecarVectorsLoaded;
+	uint64		multivectorSidecarPageReadUs;
+	uint64		multivectorSidecarVectorReconstructUs;
 	uint64		multivectorTokensOriginal;
 	uint64		multivectorTokensPooled;
 	bool		multivectorReservoirsEnabled;
@@ -592,6 +594,18 @@ typedef struct TqDenseCandidateStats
 	uint64		multivectorExactRerankHeapFetches;
 	uint64		multivectorExactRerankSidecarReads;
 	uint64		multivectorExactRerankSidecarBytes;
+	uint64		multivectorCandidateSourceUs;
+	uint64		multivectorDocGraphTraversalUs;
+	uint64		multivectorProxyCandidateUs;
+	uint64		multivectorProxyGraphTraversalUs;
+	uint64		multivectorProxyScoringUs;
+	uint64		multivectorCentroidLitePostingUs;
+	uint64		multivectorQuantizedInvertedPostingUs;
+	uint64		multivectorSidecarLoadUs;
+	uint64		multivectorHeapVisibilityUs;
+	uint64		multivectorExactHeapFetchUs;
+	uint64		multivectorExactRerankUs;
+	uint64		multivectorFinalSortUs;
 	uint32		exactRerankCandidates;
 	uint64		exactRerankTokensEvaluated;
 	uint64		exactRerankTokensSkipped;
@@ -719,6 +733,8 @@ typedef struct PgturbohybridMultiVectorDocSidecarAccessStats
 	uint64		cacheMisses;
 	uint64		bytesTouched;
 	uint64		vectorsLoaded;
+	uint64		pageReadUs;
+	uint64		vectorReconstructUs;
 } PgturbohybridMultiVectorDocSidecarAccessStats;
 
 typedef struct PgturbohybridGraphNativeCache

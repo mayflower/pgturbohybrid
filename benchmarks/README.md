@@ -260,15 +260,16 @@ python benchmarks/dbpedia_colbert_multivector.py \
   --max-queries 100 \
   --reuse-data \
   --document-node-serving-grid \
-  --admission-budget-sweep 50,100,200,400,800 \
+  --document-node-serving-grid-smoke \
   --output .nix-dev/tmp/dbpedia-colbert-serving-grid-10k.json \
   --markdown-output .nix-dev/tmp/dbpedia-colbert-serving-grid-10k.md
 ```
 
-For a faster smoke-only command on a constrained workstation, reduce
-`--max-queries` to `50`. Avoid adding toy graph knobs to serving-selection runs
-unless the command is explicitly labeled as a harness smoke; graph defaults are
-the quality-profile evidence users need for profile selection.
+Smoke mode runs only `proxy_normalized_mean_f16`, `centroid_mean_f16`, and
+`centroid_lite_f16` over EF `50,100`, oversampling `1`, and budgets `200,800`
+unless `--admission-budget-sweep` is explicit. If more than 25 queries are
+loaded, the smoke run uses the first 25 and records `query_subset_used = true`.
+Treat this as a harness/runtime check, not serving evidence.
 
 x00k evaluation template:
 
@@ -281,7 +282,6 @@ python benchmarks/dbpedia_colbert_multivector.py \
   --max-queries 1000 \
   --reuse-data \
   --document-node-serving-grid \
-  --admission-budget-sweep 50,100,200,400,800 \
   --serving-min-top10-admission 0.80 \
   --serving-min-ndcg-ratio-vs-exact 0.95 \
   --output .nix-dev/tmp/dbpedia-colbert-serving-grid-x00k.json \
@@ -315,6 +315,15 @@ The report writes `document_node_serving_grid` plus
 `best_latency_safe`, `best_quality`, `best_balanced`, the Pareto frontier, and
 rejected profiles with reasons. Final SQL result ordering remains exact MaxSim
 unless the candidate source is explicitly experimental.
+
+The serving-grid JSON and Markdown also include cost accounting. Use
+`total_elapsed_ms`, `index_build_elapsed_ms_total`,
+`exact_baseline_elapsed_ms_total`, `retrieval_elapsed_ms_total`,
+`profiles_run`, `index_builds`, `exact_baseline_query_count`, and
+`retrieval_query_count` to see whether a run is dominated by repeated exact
+admission baselines, index rebuilds, or indexed retrieval. Each profile summary
+and each profile/EF/oversampling row repeats the same timing split so slow
+profiles can be diagnosed without opening the full per-query trace.
 
 For SPLADE/SPLATE-style exported sparse vectors, use the explicit sparse
 candidate-source switch:

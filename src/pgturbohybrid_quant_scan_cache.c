@@ -947,11 +947,14 @@ PgturbohybridGraphLoadMultiVectorDocMapWithStats(Relation index,
 		PgturbohybridGraphPageOpaque opaque;
 		OffsetNumber maxoff;
 		BlockNumber nextblkno;
+		instr_time	pageReadStart;
 
 		CHECK_FOR_INTERRUPTS();
 		if (!BlockNumberIsValid(blkno))
 			PgturbohybridGraphMultiVectorDocMapError(index,
 													 "docmap page chain ended early");
+		if (stats != NULL)
+			INSTR_TIME_SET_CURRENT(pageReadStart);
 		buf = ReadBuffer(index, blkno);
 		LockBuffer(buf, BUFFER_LOCK_SHARE);
 		page = BufferGetPage(buf);
@@ -960,6 +963,8 @@ PgturbohybridGraphLoadMultiVectorDocMapWithStats(Relation index,
 		{
 			stats->pagesRead++;
 			stats->cacheMisses++;
+			stats->pageReadUs +=
+				(uint64) PgturbohybridGraphElapsedUsSince(pageReadStart);
 		}
 		if ((opaque->pageKind & PGTURBOHYBRID_GRAPH_PAGE_KIND_MASK) !=
 			PGTURBOHYBRID_GRAPH_PAGE_KIND_MULTIVECTOR_DOCMAP)
@@ -1065,7 +1070,10 @@ PgturbohybridGraphLoadMultiVectorDocMapWithStats(Relation index,
 				PgturbohybridMultiVector *mv;
 				Size		totalFloats;
 				Size		tupleSize;
+				instr_time	vectorReconstructStart;
 
+				if (stats != NULL)
+					INSTR_TIME_SET_CURRENT(vectorReconstructStart);
 				if (!documentNodes)
 					PgturbohybridGraphMultiVectorDocMapError(index,
 															 "document vector tuple found in token-node docmap");
@@ -1121,6 +1129,9 @@ PgturbohybridGraphLoadMultiVectorDocMapWithStats(Relation index,
 					PgturbohybridGraphMultiVectorDocMapError(index,
 															 "document vector tuple chunks are not contiguous");
 				vectorFloatCounts[tuple->docId] += tuple->count;
+				if (stats != NULL)
+					stats->vectorReconstructUs +=
+						(uint64) PgturbohybridGraphElapsedUsSince(vectorReconstructStart);
 			}
 			else if (type ==
 					 PGTURBOHYBRID_GRAPH_MULTIVECTOR_DOCMAP_CENTROID_TUPLE_TYPE)
@@ -2163,6 +2174,7 @@ PgturbohybridGraphLoadMultiVectorDocVector(Relation index,
 	uint32		chunkCount;
 	uint32		copiedFloats = 0;
 	MemoryContext oldCtx;
+	instr_time	vectorReconstructStart;
 
 	if (storage == NULL || meta == NULL || docId >= meta->tqMultivectorDocCount)
 		ereport(ERROR,
@@ -2194,12 +2206,17 @@ PgturbohybridGraphLoadMultiVectorDocVector(Relation index,
 		PgturbohybridMultiVectorFloatCount(entry->tokenCount,
 										   meta->dimensions);
 	mvSize = PgturbohybridMultiVectorSize(entry->tokenCount, meta->dimensions);
+	if (stats != NULL)
+		INSTR_TIME_SET_CURRENT(vectorReconstructStart);
 	oldCtx = MemoryContextSwitchTo(ctx);
 	mv = MemoryContextAllocZero(ctx, mvSize);
 	MemoryContextSwitchTo(oldCtx);
 	SET_VARSIZE(mv, mvSize);
 	mv->dim = meta->dimensions;
 	mv->count = entry->tokenCount;
+	if (stats != NULL)
+		stats->vectorReconstructUs +=
+			(uint64) PgturbohybridGraphElapsedUsSince(vectorReconstructStart);
 
 	firstChunk = storage->multivectorDocVectorFirstChunk[docId];
 	chunkCount = storage->multivectorDocVectorChunkCounts[docId];
@@ -2221,12 +2238,18 @@ PgturbohybridGraphLoadMultiVectorDocVector(Relation index,
 		Size		itemSize;
 		PgturbohybridGraphMultiVectorDocMapVectorTuple tuple;
 		Size		tupleSize;
+		instr_time	pageReadStart;
 
 		CHECK_FOR_INTERRUPTS();
+		if (stats != NULL)
+			INSTR_TIME_SET_CURRENT(pageReadStart);
 		buf = ReadBuffer(index, ref->blkno);
 		LockBuffer(buf, BUFFER_LOCK_SHARE);
 		page = BufferGetPage(buf);
 		opaque = PgturbohybridGraphPageGetOpaque(page);
+		if (stats != NULL)
+			stats->pageReadUs +=
+				(uint64) PgturbohybridGraphElapsedUsSince(pageReadStart);
 		if ((opaque->pageKind & PGTURBOHYBRID_GRAPH_PAGE_KIND_MASK) !=
 			PGTURBOHYBRID_GRAPH_PAGE_KIND_MULTIVECTOR_DOCMAP ||
 			ref->offno < FirstOffsetNumber ||
@@ -2263,9 +2286,14 @@ PgturbohybridGraphLoadMultiVectorDocVector(Relation index,
 			PgturbohybridGraphMultiVectorDocMapError(index,
 													 "paged document vector sidecar chunk is invalid");
 		}
+		if (stats != NULL)
+			INSTR_TIME_SET_CURRENT(vectorReconstructStart);
 		memcpy(mv->values + tuple->startFloat, tuple->values,
 			   sizeof(float) * tuple->count);
 		copiedFloats += tuple->count;
+		if (stats != NULL)
+			stats->vectorReconstructUs +=
+				(uint64) PgturbohybridGraphElapsedUsSince(vectorReconstructStart);
 		if (stats != NULL)
 		{
 			stats->pagesRead++;

@@ -1516,6 +1516,8 @@ typedef struct TqLastScanCache
 	uint64		multivectorDocSidecarCacheMisses;
 	uint64		multivectorDocSidecarBytesTouched;
 	uint64		multivectorDocSidecarVectorsLoaded;
+	uint64		multivectorSidecarPageReadUs;
+	uint64		multivectorSidecarVectorReconstructUs;
 	uint64		multivectorTokensOriginal;
 	uint64		multivectorTokensPooled;
 } TqLastScanCache;
@@ -1819,6 +1821,10 @@ PgturbohybridCollectLastScanStats(TqLastScanStats *s,
 		scanStats->multivectorDocSidecarBytesTouched;
 	d->cache.multivectorDocSidecarVectorsLoaded =
 		scanStats->multivectorDocSidecarVectorsLoaded;
+	d->cache.multivectorSidecarPageReadUs =
+		scanStats->multivectorSidecarPageReadUs;
+	d->cache.multivectorSidecarVectorReconstructUs =
+		scanStats->multivectorSidecarVectorReconstructUs;
 	d->cache.multivectorTokensOriginal =
 		scanStats->multivectorTokensOriginal;
 	d->cache.multivectorTokensPooled =
@@ -2202,6 +2208,11 @@ PgturbohybridEmitNestedScanStats(PgturbohybridJsonbState *state,
 								c->multivectorDocSidecarBytesTouched);
 	PgturbohybridJsonbAddUint64(state, "multivector_doc_sidecar_vectors_loaded",
 								c->multivectorDocSidecarVectorsLoaded);
+	PgturbohybridJsonbAddUint64(state, "multivector_sidecar_page_read_time_us",
+								c->multivectorSidecarPageReadUs);
+	PgturbohybridJsonbAddUint64(state,
+								"multivector_sidecar_vector_reconstruct_time_us",
+								c->multivectorSidecarVectorReconstructUs);
 	PgturbohybridJsonbAddUint64(state, "multivector_tokens_original",
 								c->multivectorTokensOriginal);
 	PgturbohybridJsonbAddUint64(state, "multivector_tokens_pooled",
@@ -3798,6 +3809,75 @@ pgturbohybrid_last_scan_stats(PG_FUNCTION_ARGS)
 	PgturbohybridJsonbAddUint64(&state,
 								"multivector_exact_rerank_sidecar_bytes",
 								scanStats.multivectorExactRerankSidecarBytes);
+	PgturbohybridJsonbAddUint64(&state,
+								"multivector_candidate_source_us",
+								scanStats.multivectorCandidateSourceUs);
+	PgturbohybridJsonbAddUint64(&state,
+								"multivector_candidate_source_time_us",
+								scanStats.multivectorCandidateSourceUs);
+	PgturbohybridJsonbAddUint64(&state,
+								"multivector_doc_graph_traversal_us",
+								scanStats.multivectorDocGraphTraversalUs);
+	PgturbohybridJsonbAddUint64(&state,
+								"multivector_document_graph_traversal_time_us",
+								scanStats.multivectorDocGraphTraversalUs);
+	PgturbohybridJsonbAddUint64(&state,
+								"multivector_proxy_candidate_time_us",
+								scanStats.multivectorProxyCandidateUs);
+	PgturbohybridJsonbAddUint64(&state,
+								"multivector_proxy_graph_traversal_time_us",
+								scanStats.multivectorProxyGraphTraversalUs);
+	PgturbohybridJsonbAddUint64(&state,
+								"multivector_proxy_scoring_us",
+								scanStats.multivectorProxyScoringUs);
+	PgturbohybridJsonbAddUint64(&state,
+								"multivector_proxy_scoring_time_us",
+								scanStats.multivectorProxyScoringUs);
+	PgturbohybridJsonbAddUint64(&state,
+								"multivector_centroid_lite_posting_us",
+								scanStats.multivectorCentroidLitePostingUs);
+	PgturbohybridJsonbAddUint64(&state,
+								"multivector_centroid_lite_time_us",
+								scanStats.multivectorCentroidLitePostingUs);
+	PgturbohybridJsonbAddUint64(&state,
+								"multivector_quantized_inverted_posting_us",
+								scanStats.multivectorQuantizedInvertedPostingUs);
+	PgturbohybridJsonbAddUint64(&state,
+								"multivector_quantized_inverted_time_us",
+								scanStats.multivectorQuantizedInvertedPostingUs);
+	PgturbohybridJsonbAddUint64(&state,
+								"multivector_sidecar_load_us",
+								scanStats.multivectorSidecarLoadUs);
+	PgturbohybridJsonbAddUint64(&state,
+								"multivector_sidecar_load_time_us",
+								scanStats.multivectorSidecarLoadUs);
+	PgturbohybridJsonbAddUint64(&state,
+								"multivector_sidecar_page_read_time_us",
+								scanStats.multivectorSidecarPageReadUs);
+	PgturbohybridJsonbAddUint64(&state,
+								"multivector_sidecar_vector_reconstruct_time_us",
+								scanStats.multivectorSidecarVectorReconstructUs);
+	PgturbohybridJsonbAddUint64(&state,
+								"multivector_heap_visibility_us",
+								scanStats.multivectorHeapVisibilityUs);
+	PgturbohybridJsonbAddUint64(&state,
+								"multivector_exact_heap_fetch_us",
+								scanStats.multivectorExactHeapFetchUs);
+	PgturbohybridJsonbAddUint64(&state,
+								"multivector_exact_heap_fetch_time_us",
+								scanStats.multivectorExactHeapFetchUs);
+	PgturbohybridJsonbAddUint64(&state,
+								"multivector_exact_rerank_us",
+								scanStats.multivectorExactRerankUs);
+	PgturbohybridJsonbAddUint64(&state,
+								"multivector_exact_maxsim_rerank_time_us",
+								scanStats.multivectorExactRerankUs);
+	PgturbohybridJsonbAddUint64(&state,
+								"multivector_final_sort_us",
+								scanStats.multivectorFinalSortUs);
+	PgturbohybridJsonbAddUint64(&state,
+								"multivector_final_sort_time_us",
+								scanStats.multivectorFinalSortUs);
 	PgturbohybridJsonbAddInt64(&state, "exact_rerank_candidates",
 							   scanStats.exactRerankCandidates);
 	PgturbohybridJsonbAddUint64(&state, "exact_rerank_tokens_evaluated",
