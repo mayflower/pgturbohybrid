@@ -618,7 +618,56 @@ PgturbohybridGraphUpdateAdjTuple(Relation index, PgturbohybridGraphMetaPageData 
 			tupleCapacity = (tupleSize - offsetof(PgturbohybridGraphAdjTupleData, neighbors)) /
 				sizeof(uint32);
 			if (count > tupleCapacity)
-				elog(ERROR, "pgturbohybrid graph adjacency tuple lacks update capacity");
+			{
+				/*
+				 * Adjacency tuple was allocated with insufficient
+				 * capacity during build.  Mark the old tuple unused
+				 * and append a replacement at the tail of the adj
+				 * page chain.
+				 */
+				ItemIdSetUnused(iid);
+				PgturbohybridGraphMarkPageGraphOp(page,
+								PGTURBOHYBRID_GRAPH_GRAPH_OP_NEIGHBOR_UPDATE);
+				if (xlogState != NULL)
+					GenericXLogFinish(xlogState);
+				else
+					MarkBufferDirty(buf);
+				UnlockReleaseBuffer(buf);
+
+				{
+					Size		newSize = PgturbohybridGraphAdjTupleSize(count);
+					PgturbohybridGraphAdjTuple newTup = palloc0(newSize);
+					BlockNumber	newBlkno;
+					OffsetNumber	newOff;
+
+					newTup->type = PGTURBOHYBRID_GRAPH_ADJ_TUPLE_TYPE;
+					newTup->nodeId = nodeId;
+					newTup->level = level;
+					newTup->count = count;
+					memcpy(newTup->neighbors, neighbors,
+						   sizeof(uint32) * count);
+
+					newOff = PgturbohybridGraphAppendTuple(
+						index, MAIN_FORKNUM,
+						&meta->tqAdjStartBlkno,
+						PGTURBOHYBRID_GRAPH_PAGE_KIND_QUANT_ADJ,
+						(Item) newTup, newSize,
+						PGTURBOHYBRID_GRAPH_GRAPH_OP_NEIGHBOR_INSERT,
+						&newBlkno);
+					pfree(newTup);
+
+					if (storage != NULL && storage->cached &&
+						cacheSlot >= 0)
+					{
+						storage->adjBlknos[cacheSlot] = newBlkno;
+						storage->adjOffnos[cacheSlot] = newOff;
+					}
+				}
+
+				found = true;
+				xlogState = NULL;
+				break;
+			}
 
 			tuple->count = count;
 			memcpy(tuple->neighbors, neighbors, sizeof(uint32) * count);
