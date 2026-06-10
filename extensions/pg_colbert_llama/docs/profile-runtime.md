@@ -1,7 +1,7 @@
 # pg_colbert_llama Profile Runtime
 
 `pg_colbert_llama` consumes `pg_colbert_profile_v1` metadata produced by
-`mayflower/colbert-gguf-converter`. The preferred runtime input is a
+[`agentxagi/colbert-gguf-converter`](https://github.com/agentxagi/colbert-gguf-converter). The preferred runtime input is a
 llama.cpp-loadable GGUF with an embedded `pg_colbert.profile_json` profile or a
 matching sidecar named `<model>.gguf.colbert_profile.json`.
 

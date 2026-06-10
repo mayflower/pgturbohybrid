@@ -40,9 +40,10 @@ technical collaboration possible.
 
 ## Reporting
 
-Report code-of-conduct concerns privately to the maintainers at
-security@mayflower.de. If the repository is published under an organization with
-a dedicated community contact, use that contact as the preferred reporting path.
+Report code-of-conduct concerns privately via
+[GitHub issues](https://github.com/agentxagi/pgturbohybrid/issues) (mark as
+sensitive/private if available) or the repository security advisory workflow
+when the concern overlaps with safety or harassment involving security access.
 
 Security vulnerabilities should follow [SECURITY.md](SECURITY.md), not public
 issue threads.

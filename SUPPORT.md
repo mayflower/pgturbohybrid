@@ -24,9 +24,9 @@ Before opening an issue, please check the README, [docs/fast_setup.md](docs/fast
 
 ## Security Issues
 
-Do not report security issues in public issues. Use the repository's GitHub
-security advisory workflow, or email security@mayflower.de if the advisory
-workflow is unavailable. See [SECURITY.md](SECURITY.md).
+Do not report security issues in public issues. Use the
+[GitHub security advisory workflow](https://github.com/agentxagi/pgturbohybrid/security/advisories/new).
+See [SECURITY.md](SECURITY.md).
 
 ## Bug Reports
 

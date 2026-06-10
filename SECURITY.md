@@ -6,10 +6,9 @@ accepted operational risk.
 
 ## Reporting Vulnerabilities
 
-Report security issues privately to the maintainers before opening a public
-issue. If this code is published under the Mayflower organization, use the
-repository's GitHub security advisory workflow or email
-security@mayflower.de.
+Report security issues privately before opening a public issue. Use the
+[GitHub security advisory workflow](https://github.com/agentxagi/pgturbohybrid/security/advisories/new)
+for `agentxagi/pgturbohybrid`.
 
 ## Extension SQL
 
