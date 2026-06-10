@@ -74,7 +74,7 @@ embedding model, and relevance labels. Please reproduce it on your own data
 before drawing conclusions.
 
 Full benchmark context and reproduction notes are in the
-[FIQA/OpenAI benchmark details](https://github.com/mayflower/pgturbohybrid/blob/v0.1.0-alpha.2/docs/benchmarks/fiqa-openai.md).
+[FIQA/OpenAI benchmark details](https://github.com/agentxagi/pgturbohybrid/blob/v0.1.0-alpha.2/docs/benchmarks/fiqa-openai.md).
 
 ## 5. Quality mode
 
@@ -108,7 +108,7 @@ git clone --depth 1 --branch v0.8.2 https://github.com/pgvector/pgvector.git ../
 make -C ../pgvector
 make -C ../pgvector install
 
-git clone https://github.com/mayflower/pgturbohybrid.git
+git clone https://github.com/agentxagi/pgturbohybrid.git
 cd pgturbohybrid
 make
 make install
@@ -138,7 +138,7 @@ LIMIT 10;
 ```
 
 For a copy-paste local walkthrough, see the
-[fast setup guide](https://github.com/mayflower/pgturbohybrid/blob/v0.1.0-alpha.2/docs/fast_setup.md).
+[fast setup guide](https://github.com/agentxagi/pgturbohybrid/blob/v0.1.0-alpha.2/docs/fast_setup.md).
 
 ## 8. Known limitations
 
@@ -169,7 +169,7 @@ useful on real roads.
 
 Useful links:
 
-- [README](https://github.com/mayflower/pgturbohybrid/blob/v0.1.0-alpha.2/README.md)
-- [Fast setup guide](https://github.com/mayflower/pgturbohybrid/blob/v0.1.0-alpha.2/docs/fast_setup.md)
-- [FIQA/OpenAI benchmark details](https://github.com/mayflower/pgturbohybrid/blob/v0.1.0-alpha.2/docs/benchmarks/fiqa-openai.md)
-- [Changelog](https://github.com/mayflower/pgturbohybrid/blob/v0.1.0-alpha.2/CHANGELOG.md)
+- [README](https://github.com/agentxagi/pgturbohybrid/blob/v0.1.0-alpha.2/README.md)
+- [Fast setup guide](https://github.com/agentxagi/pgturbohybrid/blob/v0.1.0-alpha.2/docs/fast_setup.md)
+- [FIQA/OpenAI benchmark details](https://github.com/agentxagi/pgturbohybrid/blob/v0.1.0-alpha.2/docs/benchmarks/fiqa-openai.md)
+- [Changelog](https://github.com/agentxagi/pgturbohybrid/blob/v0.1.0-alpha.2/CHANGELOG.md)

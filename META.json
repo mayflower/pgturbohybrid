@@ -3,7 +3,7 @@
   "abstract": "Hot-hatch hybrid vector + BM25 search for PostgreSQL on top of pgvector",
   "description": "Standalone PostgreSQL extension for experimental dense vector and BM25 hybrid retrieval on top of pgvector.",
   "version": "0.1.0",
-  "maintainer": "Mayflower",
+  "maintainer": "agentxagi",
   "license": "postgresql",
   "release_status": "unstable",
   "provides": {
@@ -23,13 +23,13 @@
     }
   },
   "resources": {
-    "homepage": "https://github.com/mayflower/pgturbohybrid#readme",
+    "homepage": "https://github.com/agentxagi/pgturbohybrid#readme",
     "bugtracker": {
-      "web": "https://github.com/mayflower/pgturbohybrid/issues"
+      "web": "https://github.com/agentxagi/pgturbohybrid/issues"
     },
     "repository": {
-      "url": "https://github.com/mayflower/pgturbohybrid.git",
-      "web": "https://github.com/mayflower/pgturbohybrid",
+      "url": "https://github.com/agentxagi/pgturbohybrid.git",
+      "web": "https://github.com/agentxagi/pgturbohybrid",
       "type": "git"
     }
   },

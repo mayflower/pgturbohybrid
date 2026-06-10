@@ -139,7 +139,7 @@
 
                 meta = {
                   description = "Hybrid vector and BM25 search for PostgreSQL on top of pgvector";
-                  homepage = "https://github.com/mayflower/pgturbohybrid";
+                  homepage = "https://github.com/agentxagi/pgturbohybrid";
                   license = lib.licenses.postgresql;
                   platforms = postgresql.meta.platforms;
                 };
@@ -187,7 +187,7 @@
 
                 meta = {
                   description = "ColBERT embedding companion extension for pgturbohybrid";
-                  homepage = "https://github.com/mayflower/pgturbohybrid";
+                  homepage = "https://github.com/agentxagi/pgturbohybrid";
                   license = lib.licenses.postgresql;
                   platforms = postgresql.meta.platforms;
                 };

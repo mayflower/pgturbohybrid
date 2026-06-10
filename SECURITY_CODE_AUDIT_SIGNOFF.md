@@ -38,7 +38,7 @@ release-hardening pass.
 - Local TAP: `prove_installcheck` reported `NOTESTS` because PostgreSQL TAP
   Perl modules were unavailable in the local PGXS installation.
 - GitHub build workflow: passed on the pushed branch.
-- GitHub build run: https://github.com/mayflower/pgturbohybrid/actions/runs/26472545673
+- GitHub build run: https://github.com/agentxagi/pgturbohybrid/actions
 - CI coverage included Linux PostgreSQL 14-19, pgvector v0.8.2 and master,
   Linux i386, macOS, Windows, perf smoke, and valgrind.
 

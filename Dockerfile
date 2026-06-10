@@ -31,7 +31,7 @@ RUN make -C /tmp/pgturbohybrid clean \
 
 FROM postgres:${PG_MAJOR}
 ARG PG_MAJOR
-LABEL org.opencontainers.image.source="https://github.com/mayflower/pgturbohybrid" \
+LABEL org.opencontainers.image.source="https://github.com/agentxagi/pgturbohybrid" \
       org.opencontainers.image.description="PostgreSQL with pgvector and pgturbohybrid preinstalled" \
       org.opencontainers.image.licenses="PostgreSQL"
 

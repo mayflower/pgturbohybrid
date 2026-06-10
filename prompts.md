@@ -149,7 +149,7 @@ Run these one at a time. They assume the current repository state with `document
 ## Prompt 1 — Audit and fix document-node incremental insert geometry
 
 ```text
-You are working in mayflower/pgturbohybrid.
+You are working in agentxagi/pgturbohybrid.
 
 Goal:
 Ensure incremental insert/update for multivector_graph=document_nodes uses the same document-level MaxSim graph geometry as bulk build.
@@ -187,7 +187,7 @@ Acceptance:
 ## Prompt 2 — Add DBpedia document-node admission benchmark gate
 
 ```text
-You are working in mayflower/pgturbohybrid.
+You are working in agentxagi/pgturbohybrid.
 
 Goal:
 Turn the current synthetic recall gate into a DBpedia-scale admission gate for document_nodes.
@@ -235,7 +235,7 @@ Acceptance:
 ## Prompt 3 — Implement Qdrant-style nested prefetch branch planner
 
 ```text
-You are working in mayflower/pgturbohybrid.
+You are working in agentxagi/pgturbohybrid.
 
 Goal:
 Implement a branch-aware, nested prefetch planner for multivector/hybrid retrieval.
@@ -284,7 +284,7 @@ Acceptance:
 ## Prompt 4 — Add DBSF-style distribution-based score fusion
 
 ```text
-You are working in mayflower/pgturbohybrid.
+You are working in agentxagi/pgturbohybrid.
 
 Goal:
 Add Qdrant-style DBSF fusion for multivector hybrid retrieval.
@@ -326,7 +326,7 @@ Acceptance:
 ## Prompt 5 — Add Vespa-style long-context multivector support
 
 ```text
-You are working in mayflower/pgturbohybrid.
+You are working in agentxagi/pgturbohybrid.
 
 Goal:
 Support long-context ColBERT/ModernColBERT documents without forcing users to split each context window into a separate SQL row.
@@ -365,7 +365,7 @@ Acceptance:
 ## Prompt 6 — Add paged/cold document multivector sidecar mode
 
 ```text
-You are working in mayflower/pgturbohybrid.
+You are working in agentxagi/pgturbohybrid.
 
 Goal:
 Add a Vespa-inspired cold/paged sidecar mode for large document-node multivector storage.
@@ -400,7 +400,7 @@ Acceptance:
 ## Prompt 7 — Implement token pooling for multivector storage reduction
 
 ```text
-You are working in mayflower/pgturbohybrid.
+You are working in agentxagi/pgturbohybrid.
 
 Goal:
 Implement model-agnostic token pooling to reduce document multivector size before indexing.
@@ -440,7 +440,7 @@ Acceptance:
 ## Prompt 8 — Upgrade proxy_vector toward MUVERA-style fixed-dimensional encodings
 
 ```text
-You are working in mayflower/pgturbohybrid.
+You are working in agentxagi/pgturbohybrid.
 
 Goal:
 Turn the current proxy_vector prototype into a serious fixed-dimensional multivector proxy branch.
@@ -481,7 +481,7 @@ Acceptance:
 ## Prompt 9 — Add learned sparse multivector candidate injection
 
 ```text
-You are working in mayflower/pgturbohybrid.
+You are working in agentxagi/pgturbohybrid.
 
 Goal:
 Add a learned-sparse branch for ColBERT/ModernColBERT candidate generation, inspired by SPLATE/SLIM.
@@ -521,7 +521,7 @@ Acceptance:
 ## Prompt 10 — Implement adaptive MaxSim rerank pruning
 
 ```text
-You are working in mayflower/pgturbohybrid.
+You are working in agentxagi/pgturbohybrid.
 
 Goal:
 Reduce exact MaxSim rerank cost after candidate admission is fixed.
@@ -563,7 +563,7 @@ Acceptance:
 ## Prompt 11 — Add query-token importance and masking
 
 ```text
-You are working in mayflower/pgturbohybrid.
+You are working in agentxagi/pgturbohybrid.
 
 Goal:
 Support model/query-token importance for ModernColBERT and faster MaxSim.
@@ -600,7 +600,7 @@ Acceptance:
 ## Prompt 12 — Add ModernColBERT / ColPali model metadata registry
 
 ```text
-You are working in mayflower/pgturbohybrid.
+You are working in agentxagi/pgturbohybrid.
 
 Goal:
 Make pgturbohybrid robust to modern late-interaction models with different dimensions, query/doc token behavior, and pooling/masking rules.
@@ -645,7 +645,7 @@ Acceptance:
 ## Prompt 13 — PLAID-lite centroid sidecar for compatibility mode
 
 ```text
-You are working in mayflower/pgturbohybrid.
+You are working in agentxagi/pgturbohybrid.
 
 Goal:
 Add a PLAID-lite centroid sidecar as an optional candidate generator, mainly for token_nodes compatibility and for fast prefiltering.
@@ -685,7 +685,7 @@ Acceptance:
 ## Prompt 14 — ColBERTSaR-style quantized inverted-index research branch
 
 ```text
-You are working in mayflower/pgturbohybrid.
+You are working in agentxagi/pgturbohybrid.
 
 Goal:
 Create a research-only branch for quantized inverted-index ColBERT candidate generation.
@@ -721,7 +721,7 @@ Acceptance:
 ## Prompt 15 — End-to-end hybrid evaluation harness
 
 ```text
-You are working in mayflower/pgturbohybrid.
+You are working in agentxagi/pgturbohybrid.
 
 Goal:
 Add an end-to-end hybrid evaluation harness for document_nodes + BM25 + learned_sparse/proxy branches.

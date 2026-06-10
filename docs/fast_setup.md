@@ -25,7 +25,7 @@ Build and install this extension with PGXS, PostgreSQL's extension build
 system:
 
 ```sh
-git clone https://github.com/mayflower/pgturbohybrid.git
+git clone https://github.com/agentxagi/pgturbohybrid.git
 cd pgturbohybrid
 make
 make install

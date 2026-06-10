@@ -13,7 +13,7 @@ known alpha limitation note.
 - Latest release archive implementation commit:
   `343cf98c959d365b8967cb94da6e0f2666d689a7`
 - CI build workflow:
-  https://github.com/mayflower/pgturbohybrid/actions/runs/26472545673
+  https://github.com/agentxagi/pgturbohybrid/actions
 - Local release gate:
   `PG_CONFIG=/opt/homebrew/opt/postgresql@16/bin/pg_config scripts/release-check.sh`
 - Source archive SHA256 from the clean local release gate:

@@ -8,8 +8,8 @@ abstract: >-
 type: software
 authors:
   - name: Mayflower
-repository-code: "https://github.com/mayflower/pgturbohybrid"
-url: "https://github.com/mayflower/pgturbohybrid#readme"
+repository-code: "https://github.com/agentxagi/pgturbohybrid"
+url: "https://github.com/agentxagi/pgturbohybrid#readme"
 license: PostgreSQL
 version: 0.1.0
 keywords:
