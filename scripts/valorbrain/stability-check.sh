@@ -46,6 +46,71 @@ else
   pass "extensions vector + pgturbohybrid"
 fi
 
+# 2b) pg_ripple KG shadow path
+ripple_ext="$("${PSQL[@]}" -tAc "
+  SELECT count(*) FROM pg_extension WHERE extname = 'pg_ripple';
+" | tr -d '[:space:]')"
+if [[ "$ripple_ext" != "1" ]]; then
+  warn "pg_ripple extension not installed (KG shadow/inference disabled)"
+else
+  pass "extension pg_ripple present"
+  preload_ok="$("${PSQL[@]}" -tAc "
+    SELECT current_setting('shared_preload_libraries') LIKE '%pg_ripple%';
+  " | tr -d '[:space:]')"
+  if [[ "$preload_ok" != "t" ]]; then
+    warn "pg_ripple not in shared_preload_libraries (HTAP/CWB disabled)"
+  else
+    pass "pg_ripple preloaded (HTAP/CWB enabled)"
+  fi
+  ripple_n="$("${PSQL[@]}" -tAc "SELECT pg_ripple.triple_count();" 2>/dev/null | tr -d '[:space:]' || echo 0)"
+  if [[ "${ripple_n:-0}" -lt 1 ]]; then
+    warn "pg_ripple graph empty — run /opt/valorbrain/scripts/kg/load-ripple.sh"
+  else
+    pass "pg_ripple triple_count global ${ripple_n}"
+  fi
+  main_tenant="${VALORBRAIN_DEFAULT_TENANT_ID:-3ceeb048-754c-4910-a798-112ae867e9a4}"
+  graph_iri="https://valorbrain.valor.digital/kg/tenant/${main_tenant}"
+  tenant_ripple_n="$("${PSQL[@]}" -tAc "
+    SELECT COALESCE((s::jsonb->>'c')::int, 0)
+    FROM (SELECT pg_ripple.sparql(
+      'SELECT (COUNT(?o) AS ?c) WHERE { GRAPH <${graph_iri}> { ?s ?p ?o } }'
+    )::text AS s) q;
+  " 2>/dev/null | tr -d '[:space:]' || echo 0)"
+  sql_triple_n="$("${PSQL[@]}" -tAc "
+    SELECT count(*)::int FROM entity_triples
+    WHERE tenant_id = '${main_tenant}' AND valid_to IS NULL;
+  " 2>/dev/null | tr -d '[:space:]' || echo 0)"
+  if [[ "${tenant_ripple_n:-0}" -lt 1 && "${sql_triple_n:-0}" -gt 0 ]]; then
+    warn "tenant ripple graph empty (sql=${sql_triple_n}) — run backfill-ripple-sync"
+  else
+    pass "tenant ripple graph triples ${tenant_ripple_n} (sql current ${sql_triple_n})"
+  fi
+  if command -v bun >/dev/null 2>&1 && [[ -f /opt/valorbrain/scripts/kg/kg-sync-drift.ts ]]; then
+    if POSTGRES_USER="$PGUSER" POSTGRES_PASSWORD="${PGPASSWORD:-}" \
+      bun run /opt/valorbrain/scripts/kg/kg-sync-drift.ts >/dev/null 2>&1; then
+      pass "kg SQL/ripple drift sample OK"
+    else
+      warn "kg SQL/ripple drift — run scripts/kg/backfill-ripple-sync.ts"
+    fi
+  fi
+  mirror_enforce="$("${PSQL[@]}" -tAc "
+    SELECT current_setting('valorbrain.kg_sql_mirror_enforce', true);
+  " 2>/dev/null | tr -d '[:space:]' || echo off)"
+  if [[ "$mirror_enforce" == "on" ]]; then
+    pass "ADR-002 entity_triples mirror enforce on"
+  else
+    warn "ADR-002 mirror enforce off — set valorbrain.kg_sql_mirror_enforce=on"
+  fi
+  if command -v bun >/dev/null 2>&1 && [[ -f /opt/valorbrain/scripts/kg/test-kg-visibility-ff15.ts ]]; then
+    if POSTGRES_SUPERUSER_PASSWORD="${POSTGRES_SUPERUSER_PASSWORD:-${PGPASSWORD:-}}" \
+      bun run /opt/valorbrain/scripts/kg/test-kg-visibility-ff15.ts >/dev/null 2>&1; then
+      pass "FF.15 KG visibility probe OK"
+    else
+      warn "FF.15 KG visibility probe failed"
+    fi
+  fi
+fi
+
 # 3) Critical indexes exist
 for idx in idx_documents_fts_hybrid idx_content_vectors_turbo; do
   exists="$("${PSQL[@]}" -tAc "SELECT to_regclass('public.${idx}') IS NOT NULL;" | tr -d '[:space:]')"
@@ -59,8 +124,8 @@ done
 # 4) Embed / hybrid coverage
 read -r embed_ratio hybrid_ratio <<<"$("${PSQL[@]}" -tAc "
   SELECT
-    round((COUNT(*) FILTER (WHERE last_embedded_at IS NOT NULL)::numeric
-      / GREATEST(COUNT(*),1)), 4),
+    round((COUNT(*) FILTER (WHERE last_embedded_at IS NOT NULL AND embed_state != 'skipped')::numeric
+      / GREATEST(COUNT(*) FILTER (WHERE embed_state != 'skipped'), 1)), 4),
     round((SELECT COUNT(*) FILTER (WHERE embedding IS NOT NULL)::numeric
       / GREATEST(COUNT(*),1) FROM documents_fts), 4)
   FROM documents WHERE active = 1;

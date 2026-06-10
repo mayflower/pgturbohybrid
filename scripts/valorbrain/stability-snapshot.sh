@@ -29,6 +29,11 @@ cache_mb="null"
 guard_ok=false
 engine_ok="null"
 log_errors=0
+ripple_ext=0
+ripple_global=0
+kg_sql_triples=0
+kg_ripple_triples=0
+kg_drift_ok="null"
 
 if "${PSQL[@]}" -q -c "SELECT 1" >/dev/null 2>&1; then
   pg_ok=true
@@ -44,8 +49,8 @@ if "${PSQL[@]}" -q -c "SELECT 1" >/dev/null 2>&1; then
   " | tr -d '[:space:]')"
   read -r embed_ratio hybrid_ratio <<<"$("${PSQL[@]}" -tAc "
     SELECT
-      round((COUNT(*) FILTER (WHERE last_embedded_at IS NOT NULL)::numeric
-        / GREATEST(COUNT(*),1)), 4),
+      round((COUNT(*) FILTER (WHERE last_embedded_at IS NOT NULL AND embed_state != 'skipped')::numeric
+        / GREATEST(COUNT(*) FILTER (WHERE embed_state != 'skipped'), 1)), 4),
       round((SELECT COUNT(*) FILTER (WHERE embedding IS NOT NULL)::numeric
         / GREATEST(COUNT(*),1) FROM documents_fts), 4)
     FROM documents WHERE active = 1;
@@ -54,6 +59,33 @@ if "${PSQL[@]}" -q -c "SELECT 1" >/dev/null 2>&1; then
     SELECT coalesce(round(100.0 * n_dead_tup / GREATEST(n_live_tup + n_dead_tup, 1), 2), 0)
     FROM pg_stat_user_tables WHERE relname = 'documents_fts';
   " | tr -d '[:space:]')"
+  ripple_ext="$("${PSQL[@]}" -tAc "
+    SELECT count(*) FROM pg_extension WHERE extname = 'pg_ripple';
+  " 2>/dev/null | tr -d '[:space:]' || echo 0)"
+  if [[ "${ripple_ext:-0}" == "1" ]]; then
+    ripple_global="$("${PSQL[@]}" -tAc "SELECT pg_ripple.triple_count();" 2>/dev/null | tr -d '[:space:]' || echo 0)"
+    main_tenant="${VALORBRAIN_DEFAULT_TENANT_ID:-3ceeb048-754c-4910-a798-112ae867e9a4}"
+    graph_iri="https://valorbrain.valor.digital/kg/tenant/${main_tenant}"
+    kg_ripple_triples="$("${PSQL[@]}" -tAc "
+      SELECT COALESCE((s::jsonb->>'c')::int, 0)
+      FROM (SELECT pg_ripple.sparql(
+        'SELECT (COUNT(?o) AS ?c) WHERE { GRAPH <${graph_iri}> { ?s ?p ?o } }'
+      )::text AS s) q;
+    " 2>/dev/null | tr -d '[:space:]' || echo 0)"
+    kg_sql_triples="$("${PSQL[@]}" -tAc "
+      SELECT count(*)::int FROM entity_triples
+      WHERE tenant_id = '${main_tenant}' AND valid_to IS NULL;
+    " 2>/dev/null | tr -d '[:space:]' || echo 0)"
+    if command -v bun >/dev/null 2>&1 && [[ -f /opt/valorbrain/scripts/kg/kg-sync-drift.ts ]]; then
+      if POSTGRES_USER="$PGUSER" POSTGRES_PASSWORD="${PGPASSWORD:-}" \
+        bun run /opt/valorbrain/scripts/kg/kg-sync-drift.ts >/dev/null 2>&1; then
+        kg_drift_ok=true
+      else
+        kg_drift_ok=false
+        warnings+=("kg_sql_ripple_drift")
+      fi
+    fi
+  fi
 else
   failures=$((failures + 1))
 fi
@@ -117,6 +149,11 @@ json="$(jq -n \
   --argjson guard_ok "$guard_ok" \
   --argjson engine_ok "$( [[ "$engine_ok" == "null" ]] && echo null || ( [[ "$engine_ok" == true ]] && echo true || echo false ) )" \
   --argjson log_errors "$log_errors" \
+  --argjson ripple_ext "$ripple_ext" \
+  --argjson ripple_global "$ripple_global" \
+  --argjson kg_sql_triples "$kg_sql_triples" \
+  --argjson kg_ripple_triples "$kg_ripple_triples" \
+  --argjson kg_drift_ok "$( [[ "$kg_drift_ok" == "null" ]] && echo null || ( [[ "$kg_drift_ok" == true ]] && echo true || echo false ) )" \
   --argjson failures "$failures" \
   --argjson warnings "$warn_json" \
   '{
@@ -129,13 +166,18 @@ json="$(jq -n \
       idx_content_vectors_turbo: $dense_idx,
       scalar_guard: $guard_ok,
       engine_health: $engine_ok,
-      pg_log_errors_15m: $log_errors
+      pg_log_errors_15m: $log_errors,
+      pg_ripple: ($ripple_ext == 1),
+      kg_drift: $kg_drift_ok
     },
     metrics: {
       embed_coverage: $embed_ratio,
       hybrid_embedding_coverage: $hybrid_ratio,
       documents_fts_dead_pct: $dead_pct,
-      cache_mb: $cache_mb
+      cache_mb: $cache_mb,
+      ripple_triples_global: $ripple_global,
+      kg_sql_triples: $kg_sql_triples,
+      kg_ripple_triples: $kg_ripple_triples
     },
     failures: $failures,
     warnings: $warnings,
