@@ -227,6 +227,15 @@ if command -v journalctl >/dev/null 2>&1; then
   else
     pass "no pgturbohybrid errors in PG logs (15m)"
   fi
+
+  # 10b) UAT #8 — zero segfault / pg_ripple crash signals (7d)
+  segfault_count="$(journalctl -u postgresql --since "7 days ago" --no-pager 2>/dev/null \
+    | grep -ciE 'segfault|signal 11|pg_ripple.*(crash|fatal|panic)' || true)"
+  if [[ "${segfault_count:-0}" -gt 0 ]]; then
+    fail "postgresql logs: ${segfault_count} segfault/pg_ripple signals (7d)"
+  else
+    pass "no segfault/pg_ripple signals in PG logs (7d)"
+  fi
 fi
 
 note "stability-check done: ${failures} failure(s), ${warnings} warning(s)"
