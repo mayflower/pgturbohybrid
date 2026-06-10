@@ -1,5 +1,31 @@
 # Project Guidelines
 
+## Execution Culture
+
+We ship. Prefer **smallest change that moves production metrics** over perfect abstractions.
+
+- **Clone, fork, patch extensions** — `pgturbohybrid`, `pg_ripple`, `pg-trickle`, `pg_deltax` are in our control. Point fixes in C/SQL are normal; upstream PRs are optional follow-up.
+- **SOTA by default** — benchmark against best open baselines (LoCoMo, hybrid retrieval, KG explainability). If we are not leading, document why and close the gap.
+- **Always commit** — atomic commits with a clear message; never leave working tree dirty across sessions. Push when the change is verified.
+- **One source of truth** — long plan: ValorBrain `docs/dev/enterprise-knowledge-stack-plan.md`; active queue: `docs/sprints/EXECUTION-BACKLOG.md`; ops: `docs/OPERATIONS-CHECKLIST.md` (ValorBrain repo).
+- **ICE before starting** — Impact × Confidence ÷ Effort. P0 = production latency/reliability; P1 = KG/ripple; P2 = platform (deltax/trickle). Cut anything that does not move R@5, p95, or data safety.
+- **Sprint batches** — work in numbered batches (VB-25xx, VB-26xx). Finish the batch or leave explicit `🔄` notes in the backlog; do not scatter new markdown.
+
+### Stack (ValorBrain production)
+
+```
+Agents → ValorBrain engine (Bun, :7438)
+           ├── Retrieval: pgturbohybrid + pgvector + BM25/RRF
+           ├── KG: entity_triples → pg_ripple (shadow → hybrid read → SoT)
+           ├── Embeddings: vLLM jina-embeddings-v5 (:7997)
+           └── LLM: OpenRouter (hooks/HyDE); legacy Ollama optional
+PostgreSQL :5433 — extensions: vector, pgturbohybrid, pg_ripple, pg_trgm
+```
+
+This repo (`pgturbohybrid`) is the **hybrid retrieval access method**. ValorBrain consumes it via SQL (`turbohybrid` engine). Changes here require `th-installcheck` before ValorBrain adopts.
+
+---
+
 ## PostgreSQL Extension Style
 
 - Keep C code in the existing PostgreSQL extension style: explicit memory
@@ -53,3 +79,16 @@
 - TurboQuant may be used for approximate subvector candidate generation, but
   final MaxSim rerank should use exact float32 values unless a prompt explicitly
   changes that contract.
+
+## Pre-Flight (every change)
+
+See ValorBrain `docs/OPERATIONS-CHECKLIST.md` for the unified list. Minimum here:
+
+1. `nix develop --command th-installcheck` after C/SQL changes.
+2. No tracked generated artifacts.
+3. Commit with regression evidence in the message (pass/fail counts).
+4. If the change affects on-disk index format, bump extension version and document REINDEX.
+
+## Release
+
+Extension releases follow `RELEASE_CHECKLIST.md` in this repo. Coordinate with ValorBrain ops runbook when deploying to `:5433`.
