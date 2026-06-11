@@ -7180,10 +7180,36 @@ def compute_document_node_candidate_source_deltas(
             delta_row.update(serving_candidate_delta_value(row, baseline, metric_key))
         top10_delta = delta_row.get("exact_top10_admission_recall_delta")
         p95_delta = delta_row.get("p95_ms_delta")
+        build_delta: float | None = None
+        try:
+            build_delta = (
+                float(row.get("index_build_elapsed_ms"))
+                - float(baseline.get("index_build_elapsed_ms"))
+            )
+        except (TypeError, ValueError):
+            build_delta = None
+        delta_row["index_build_elapsed_ms"] = row.get("index_build_elapsed_ms")
+        delta_row["baseline_index_build_elapsed_ms"] = baseline.get(
+            "index_build_elapsed_ms"
+        )
+        delta_row["index_build_elapsed_ms_delta"] = (
+            round(build_delta, 6) if build_delta is not None else None
+        )
         delta_row["admission_improved"] = (
             top10_delta is not None and float(top10_delta) > 0.0
         )
         delta_row["latency_improved"] = p95_delta is not None and float(p95_delta) < 0.0
+        if comparison == "entry_sidecar":
+            if build_delta is not None and build_delta > max(
+                1000.0,
+                float(baseline.get("index_build_elapsed_ms") or 0.0) * 0.25,
+            ):
+                evidence_warnings.append("entry_sidecar_build_cost_high")
+            if top10_delta is not None and float(top10_delta) <= 0.0:
+                evidence_warnings.append("entry_sidecar_no_admission_gain")
+            if p95_delta is not None and float(p95_delta) > 0.0:
+                evidence_warnings.append("entry_sidecar_latency_regression")
+            delta_row["evidence_warnings"] = sorted(dict.fromkeys(evidence_warnings))
         if comparison == "centroid_lite_posting_cap":
             for warning_name in row.get("centroid_lite_warnings", []) or []:
                 evidence_warnings.append(str(warning_name))
@@ -10029,6 +10055,7 @@ def _self_check_document_node_candidate_source_deltas() -> None:
         ndcg: float,
         source: str = "proxy_vector",
         proxy: str = "normalized_mean",
+        build_ms: float = 100.0,
     ) -> dict[str, Any]:
         return {
             "stage": "single",
@@ -10047,6 +10074,7 @@ def _self_check_document_node_candidate_source_deltas() -> None:
             "ndcg@10": ndcg,
             "p50_ms": p95 / 2.0,
             "p95_ms": p95,
+            "index_build_elapsed_ms": build_ms,
         }
 
     rows = [
@@ -10077,6 +10105,7 @@ def _self_check_document_node_candidate_source_deltas() -> None:
             top10=0.42,
             p95=22.0,
             ndcg=0.40,
+            build_ms=1600.0,
         ) | {
             "entry_sidecar": True,
             "last_scan_stats_sample": {
@@ -10197,6 +10226,24 @@ def _self_check_document_node_candidate_source_deltas() -> None:
         == 8
     )
     assert close(by_profile["proxy_normalized_mean_f16_entry_sidecar"]["p95_ms_delta"], 2.0)
+    assert (
+        by_profile["proxy_normalized_mean_f16_entry_sidecar"][
+            "index_build_elapsed_ms_delta"
+        ]
+        == 1500.0
+    )
+    assert (
+        "entry_sidecar_build_cost_high"
+        in by_profile["proxy_normalized_mean_f16_entry_sidecar"]["evidence_warnings"]
+    )
+    assert (
+        "entry_sidecar_no_admission_gain"
+        in by_profile["proxy_normalized_mean_f16_entry_sidecar"]["evidence_warnings"]
+    )
+    assert (
+        "entry_sidecar_latency_regression"
+        in by_profile["proxy_normalized_mean_f16_entry_sidecar"]["evidence_warnings"]
+    )
     assert by_profile["proxy_max_pool_f16_bm25_rescue"]["baseline_profile"] == "proxy_max_pool_f16"
     assert by_profile["proxy_max_pool_f16_bm25_rescue"]["comparison"] == "bm25_rescue"
     assert by_profile["centroid_mean_f16"]["comparison"] == "proxy_encoder_variant"
