@@ -186,7 +186,7 @@ PgturbohybridGraphCompactPhase2RewriteCode(Relation index,
 		OffsetNumber maxoff;
 
 		CHECK_FOR_INTERRUPTS();
-		vacuum_delay_point(false);
+		PGTURBOHYBRID_VACUUM_DELAY_POINT();
 
 		oldBuf = ReadBufferExtended(index, MAIN_FORKNUM, blkno, RBM_NORMAL, strategy);
 		LockBuffer(oldBuf, BUFFER_LOCK_SHARE);
@@ -289,7 +289,7 @@ PgturbohybridGraphCompactPhase3RewriteAdj(Relation index,
 		OffsetNumber maxoff;
 
 		CHECK_FOR_INTERRUPTS();
-		vacuum_delay_point(false);
+		PGTURBOHYBRID_VACUUM_DELAY_POINT();
 
 		oldBuf = ReadBufferExtended(index, MAIN_FORKNUM, blkno, RBM_NORMAL, strategy);
 		LockBuffer(oldBuf, BUFFER_LOCK_SHARE);
@@ -425,7 +425,7 @@ PgturbohybridGraphCompactPhase4RewriteExact(Relation index,
 			continue;
 
 		CHECK_FOR_INTERRUPTS();
-		vacuum_delay_point(false);
+		PGTURBOHYBRID_VACUUM_DELAY_POINT();
 
 		blkno = oldExactBlknoMap[oldNid];
 		offno = oldExactOffnoMap[oldNid];

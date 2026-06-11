@@ -14,9 +14,7 @@
 #include "varatt.h"
 #endif
 
-#if PG_VERSION_NUM >= 180000
-#define vacuum_delay_point() vacuum_delay_point(false)
-#endif
+
 
 /*
  * Check if deleted list contains an index TID
@@ -59,7 +57,7 @@ RemoveHeapTids(PgturbohybridGraphVacuumState * vacuumstate)
 		OffsetNumber maxoffno;
 		bool		updated = false;
 
-		vacuum_delay_point();
+		PGTURBOHYBRID_VACUUM_DELAY_POINT();
 
 		buf = ReadBufferExtended(index, MAIN_FORKNUM, blkno, RBM_NORMAL, bas);
 		LockBuffer(buf, BUFFER_LOCK_EXCLUSIVE);
@@ -367,7 +365,7 @@ RepairGraph(PgturbohybridGraphVacuumState * vacuumstate)
 		ListCell   *lc2;
 		MemoryContext oldCtx;
 
-		vacuum_delay_point();
+		PGTURBOHYBRID_VACUUM_DELAY_POINT();
 
 		oldCtx = MemoryContextSwitchTo(vacuumstate->tmpCtx);
 
@@ -479,7 +477,7 @@ MarkDeleted(PgturbohybridGraphVacuumState * vacuumstate)
 		OffsetNumber offno;
 		OffsetNumber maxoffno;
 
-		vacuum_delay_point();
+		PGTURBOHYBRID_VACUUM_DELAY_POINT();
 
 		buf = ReadBufferExtended(index, MAIN_FORKNUM, blkno, RBM_NORMAL, bas);
 

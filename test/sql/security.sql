@@ -1,3 +1,4 @@
+SET client_min_messages = warning;
 DO $$
 BEGIN
 	IF EXISTS (SELECT 1 FROM pg_extension WHERE extname = 'pgturbohybrid') THEN

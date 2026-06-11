@@ -69,6 +69,7 @@ typedef struct PgturbohybridOptions
 	int			multivectorProxyEncoder;
 	int			multivectorContextMode;
 	int			multivectorFieldMode;
+	int			pageCompactionThreshold;
 	float8		bm25K1;
 	float8		bm25B;
 	bool		bm25BlockMax;

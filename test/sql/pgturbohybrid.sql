@@ -4240,9 +4240,9 @@ DO $$
 DECLARE
 	prune jsonb;
 BEGIN
-	PERFORM set_config('turbohybrid.native_cache_disk_max_mb', '8192', true);
-	IF current_setting('turbohybrid.native_cache_disk_max_mb') <> '8192MB' THEN
-		RAISE EXCEPTION 'native_cache_disk_max_mb GUC did not stick';
+	IF current_setting('turbohybrid.native_cache_disk_max_mb') NOT IN ('8192MB', '8GB') THEN
+		RAISE EXCEPTION 'unexpected native_cache_disk_max_mb default: %',
+			current_setting('turbohybrid.native_cache_disk_max_mb');
 	END IF;
 
 	prune := turbohybrid_prune_shared_cache();

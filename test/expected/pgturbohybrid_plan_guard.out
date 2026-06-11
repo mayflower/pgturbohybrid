@@ -1,8 +1,8 @@
 \set ON_ERROR_STOP on
+SET client_min_messages = warning;
 CREATE EXTENSION IF NOT EXISTS vector;
 CREATE EXTENSION IF NOT EXISTS pgturbohybrid;
 DROP TABLE IF EXISTS tqh_plan_guard_docs;
-NOTICE:  table "tqh_plan_guard_docs" does not exist, skipping
 CREATE TABLE tqh_plan_guard_docs (
 	id int PRIMARY KEY,
 	embedding vector(3) NOT NULL,
@@ -177,7 +177,6 @@ BEGIN
     RAISE NOTICE 'plan guard ok: %', guard_result;
 END;
 $$;
-NOTICE:  plan guard ok: {"valid": true, "query_label": "regression hybrid plan guard", "expected_index": "tqh_plan_guard_idx"}
 SELECT 'plan_guard_pass' AS status;
      status      
 -----------------

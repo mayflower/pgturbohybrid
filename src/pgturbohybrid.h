@@ -19,6 +19,14 @@
 #include "utils/memutils.h"
 #include "utils/sampling.h"
 #include "pgturbohybrid_vector_compat.h"
+#include "commands/vacuum.h"
+
+/* PG17: vacuum_delay_point(void). PG18+: vacuum_delay_point(bool can_sleep). */
+#if PG_VERSION_NUM >= 180000
+#define PGTURBOHYBRID_VACUUM_DELAY_POINT() vacuum_delay_point(false)
+#else
+#define PGTURBOHYBRID_VACUUM_DELAY_POINT() vacuum_delay_point()
+#endif
 
 #if PG_VERSION_NUM >= 190000
 typedef Pointer Item;
