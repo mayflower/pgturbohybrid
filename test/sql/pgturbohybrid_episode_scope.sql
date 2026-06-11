@@ -1,0 +1,31 @@
+-- VB-3202 spike: episode-scoped hybrid pattern (doc_id IN filter + turbohybrid_query).
+-- Proves scoped ORDER BY turbohybrid_query works when candidate set is pre-filtered.
+
+CREATE EXTENSION IF NOT EXISTS vector;
+CREATE EXTENSION IF NOT EXISTS pgturbohybrid;
+
+CREATE TEMP TABLE episode_scope_docs (
+  id int PRIMARY KEY,
+  episode_id int NOT NULL,
+  embedding vector(3),
+  body_tsv tsvector
+);
+
+INSERT INTO episode_scope_docs (id, episode_id, embedding, body_tsv) VALUES
+  (1, 10, '[1,0,0]', to_tsvector('english', 'episode ten alpha')),
+  (2, 10, '[0.95,0.05,0]', to_tsvector('english', 'episode ten beta')),
+  (3, 20, '[0,1,0]', to_tsvector('english', 'episode twenty gamma'));
+
+CREATE INDEX episode_scope_hybrid_idx ON episode_scope_docs
+  USING turbohybrid (embedding vector_cosine_turbohybrid_ops, body_tsv bm25_tsvector_turbohybrid_ops);
+
+-- Episode 10 only: should return ids 1/2, not 3.
+SELECT id
+FROM episode_scope_docs
+WHERE episode_id = 10
+  AND embedding IS NOT NULL
+ORDER BY embedding <~> turbohybrid_query(
+  vector_query => '[1,0,0]'::vector,
+  text_query => websearch_to_tsquery('english', 'episode ten alpha')
+)
+LIMIT 5;
