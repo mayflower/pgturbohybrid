@@ -306,7 +306,7 @@ WITH (
   multivector_graph = token_nodes,      -- default
   multivector_centroids = off,          -- off | kmeans
   multivector_centroid_count = 0,       -- 0 means auto
-  multivector_proxy_encoder = normalized_mean -- normalized_mean | first_token | centroid_mean | max_pool | random_projection_fde | learned_projection_placeholder | learned_projection_v1
+  multivector_proxy_encoder = normalized_mean -- normalized_mean | mean | mean_pool | first_token | max_abs_mean | centroid_mean | max_pool | random_projection_fde | learned_projection_placeholder | learned_projection_v1
 )
 ```
 
