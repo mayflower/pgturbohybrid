@@ -2862,6 +2862,21 @@ def quantized_inverted_work_from_stats(stats: dict[str, Any]) -> dict[str, Any]:
         "quantized_inverted_sidecar_bytes": scan_stat_int(
             stats, "quantized_inverted_sidecar_bytes"
         ),
+        "quantized_inverted_compact_kernel": scan_stat_str(
+            stats, "quantized_inverted_compact_kernel"
+        ),
+        "quantized_inverted_compact_score_us": scan_stat_int(
+            stats, "quantized_inverted_compact_score_us"
+        ),
+        "quantized_inverted_compact_docs_scored": scan_stat_int(
+            stats, "quantized_inverted_compact_docs_scored"
+        ),
+        "quantized_inverted_compact_payload_bytes": scan_stat_int(
+            stats, "quantized_inverted_compact_payload_bytes"
+        ),
+        "quantized_inverted_compact_topk_changed_vs_scalar": scan_stat_bool(
+            stats, "quantized_inverted_compact_topk_changed_vs_scalar"
+        ),
     }
 
 
@@ -9493,6 +9508,11 @@ def _self_check_document_node_serving_stats_extraction() -> None:
         "quantized_inverted_postings_touched": 0,
         "quantized_inverted_posting_bytes": 2048,
         "quantized_inverted_sidecar_bytes": 2304,
+        "quantized_inverted_compact_kernel": "neon",
+        "quantized_inverted_compact_score_us": 321,
+        "quantized_inverted_compact_docs_scored": 12,
+        "quantized_inverted_compact_payload_bytes": 64,
+        "quantized_inverted_compact_topk_changed_vs_scalar": False,
         "quantized_codeword_debug_counter": 7,
         "unrelated_large_field": "ignored",
     }
@@ -9534,6 +9554,11 @@ def _self_check_document_node_serving_stats_extraction() -> None:
     assert extracted["centroid_bitset_memory_bytes"] == 128
     assert extracted["quantized_inverted_posting_bytes"] == 2048
     assert extracted["quantized_inverted_sidecar_bytes"] == 2304
+    assert extracted["quantized_inverted_compact_kernel"] == "neon"
+    assert extracted["quantized_inverted_compact_score_us"] == 321
+    assert extracted["quantized_inverted_compact_docs_scored"] == 12
+    assert extracted["quantized_inverted_compact_payload_bytes"] == 64
+    assert extracted["quantized_inverted_compact_topk_changed_vs_scalar"] is False
     assert extracted["quantized_codeword_debug_counter"] == 7
     assert "unrelated_large_field" not in extracted
     available = document_node_serving_stats_available(extracted)

@@ -114,6 +114,7 @@ BEGIN
 		'turbohybrid.multivector_quantized_inverted_codebook',
 		'turbohybrid.multivector_quantized_inverted_codebook_path',
 		'turbohybrid.multivector_quantized_inverted_codebook_top_m',
+		'turbohybrid.multivector_quantized_inverted_compact_scoring',
 		'turbohybrid.multivector_sparse_candidate_source',
 		'turbohybrid.multivector_subvector_k',
 		'turbohybrid.multivector_unique_docs_per_token',
@@ -183,11 +184,12 @@ BEGIN
 		current_setting('turbohybrid.multivector_quantized_inverted_codebook') != 'deterministic' OR
 		current_setting('turbohybrid.multivector_quantized_inverted_codebook_path') != '' OR
 		current_setting('turbohybrid.multivector_quantized_inverted_codebook_top_m') != '1' OR
+		current_setting('turbohybrid.multivector_quantized_inverted_compact_scoring') != 'off' OR
 		current_setting('turbohybrid.multivector_max_accumulator_mb') != '64' OR
 		current_setting('turbohybrid.multivector_debug_admission') != 'off' OR
 		current_setting('turbohybrid.multivector_debug_skip_query_tokens') != '' OR
 		current_setting('turbohybrid.multivector_debug_trace_limit') != '1000' THEN
-			RAISE EXCEPTION 'unexpected multivector defaults: doc %, query %, subvector %, unique %, raw %, adaptive %, branch_plan %, source %, centroid_lite_bitset_prefilter %, centroid_lite_pruning %, bm25_injection %, sparse_source %, reservoirs %, coverage_reservoir_k %, fallback %, fallback_fraction %, fallback_max_docs %, per_token_reservoir_k %, docmap %, docs %, doc_graph_entry_sample_count %, doc_graph_search_ef %, doc_graph_oversampling %, doc_graph_rescore_k %, doc_storage %, doc_storage_cache %, rerank %, rerank_k %, allow_exact_symmetric_build %, exact_symmetric_build_max_docs %, learned_projection_checksum %, learned_projection_model %, learned_projection_path %, model %, proxy_encoder %, quantized_codebook %, quantized_codebook_path %, quantized_codebook_top_m %, accumulator_mb %, debug %, skip_tokens %, trace_limit %',
+			RAISE EXCEPTION 'unexpected multivector defaults: doc %, query %, subvector %, unique %, raw %, adaptive %, branch_plan %, source %, centroid_lite_bitset_prefilter %, centroid_lite_pruning %, bm25_injection %, sparse_source %, reservoirs %, coverage_reservoir_k %, fallback %, fallback_fraction %, fallback_max_docs %, per_token_reservoir_k %, docmap %, docs %, doc_graph_entry_sample_count %, doc_graph_search_ef %, doc_graph_oversampling %, doc_graph_rescore_k %, doc_storage %, doc_storage_cache %, rerank %, rerank_k %, allow_exact_symmetric_build %, exact_symmetric_build_max_docs %, learned_projection_checksum %, learned_projection_model %, learned_projection_path %, model %, proxy_encoder %, quantized_codebook %, quantized_codebook_path %, quantized_codebook_top_m %, quantized_compact_scoring %, accumulator_mb %, debug %, skip_tokens %, trace_limit %',
 				current_setting('turbohybrid.multivector_max_doc_vectors'),
 			current_setting('turbohybrid.multivector_max_query_vectors'),
 			current_setting('turbohybrid.multivector_subvector_k'),
@@ -226,6 +228,7 @@ BEGIN
 			current_setting('turbohybrid.multivector_quantized_inverted_codebook'),
 			current_setting('turbohybrid.multivector_quantized_inverted_codebook_path'),
 			current_setting('turbohybrid.multivector_quantized_inverted_codebook_top_m'),
+			current_setting('turbohybrid.multivector_quantized_inverted_compact_scoring'),
 			current_setting('turbohybrid.multivector_max_accumulator_mb'),
 			current_setting('turbohybrid.multivector_debug_admission'),
 			current_setting('turbohybrid.multivector_debug_skip_query_tokens'),

@@ -3878,6 +3878,18 @@ pgturbohybrid_last_scan_stats(PG_FUNCTION_ARGS)
 								scanStats.quantizedInvertedPostingBytes);
 	PgturbohybridJsonbAddUint64(&state, "quantized_inverted_sidecar_bytes",
 								scanStats.quantizedInvertedSidecarBytes);
+	PgturbohybridJsonbAddString(&state, "quantized_inverted_compact_kernel",
+								scanStats.quantizedInvertedCompactKernel[0] != '\0' ?
+								scanStats.quantizedInvertedCompactKernel :
+								"off");
+	PgturbohybridJsonbAddUint64(&state, "quantized_inverted_compact_score_us",
+								scanStats.quantizedInvertedCompactScoreUs);
+	PgturbohybridJsonbAddUint64(&state, "quantized_inverted_compact_docs_scored",
+								scanStats.quantizedInvertedCompactDocsScored);
+	PgturbohybridJsonbAddUint64(&state, "quantized_inverted_compact_payload_bytes",
+								scanStats.quantizedInvertedCompactPayloadBytes);
+	PgturbohybridJsonbAddBool(&state, "quantized_inverted_compact_topk_changed_vs_scalar",
+							  scanStats.quantizedInvertedCompactTopKChangedVsScalar);
 	if (scanStats.multivectorGraphMode[0] != '\0')
 		PgturbohybridJsonbAddString(&state, "multivector_graph_mode",
 									scanStats.multivectorGraphMode);

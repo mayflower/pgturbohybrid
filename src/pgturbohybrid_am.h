@@ -307,6 +307,11 @@ typedef struct PgturbohybridScanStatsSnapshot
 	uint64		quantizedInvertedListOffsetBytes;
 	uint64		quantizedInvertedPostingBytes;
 	uint64		quantizedInvertedSidecarBytes;
+	char		quantizedInvertedCompactKernel[24];
+	uint64		quantizedInvertedCompactScoreUs;
+	uint64		quantizedInvertedCompactDocsScored;
+	uint64		quantizedInvertedCompactPayloadBytes;
+	bool		quantizedInvertedCompactTopKChangedVsScalar;
 	char		multivectorDocSidecarCacheMode[16];
 	uint64		multivectorDocSidecarPagesRead;
 	uint64		multivectorDocSidecarCacheHits;
@@ -491,6 +496,7 @@ extern int	pgturbohybrid_multivector_centroid_lite_pruning;
 extern int	pgturbohybrid_multivector_quantized_inverted_codebook;
 extern char *pgturbohybrid_multivector_quantized_inverted_codebook_path;
 extern int	pgturbohybrid_multivector_quantized_inverted_codebook_top_m;
+extern int	pgturbohybrid_multivector_quantized_inverted_compact_scoring;
 
 typedef enum PgturbohybridMultiVectorExactRerankMode
 {
@@ -563,6 +569,12 @@ typedef enum PgturbohybridMultiVectorQuantizedInvertedCodebookSource
 	PGTURBOHYBRID_MULTIVECTOR_QUANTIZED_INVERTED_CODEBOOK_DETERMINISTIC,
 	PGTURBOHYBRID_MULTIVECTOR_QUANTIZED_INVERTED_CODEBOOK_EXTERNAL
 }			PgturbohybridMultiVectorQuantizedInvertedCodebookSource;
+
+typedef enum PgturbohybridMultiVectorQuantizedInvertedCompactScoringMode
+{
+	PGTURBOHYBRID_MULTIVECTOR_QUANTIZED_INVERTED_COMPACT_SCORING_OFF,
+	PGTURBOHYBRID_MULTIVECTOR_QUANTIZED_INVERTED_COMPACT_SCORING_EXPERIMENTAL
+}			PgturbohybridMultiVectorQuantizedInvertedCompactScoringMode;
 
 typedef enum PgturbohybridMultiVectorPlainFallbackMode
 {

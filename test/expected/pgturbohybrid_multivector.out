@@ -3463,9 +3463,18 @@ BEGIN
 		NOT (stats ? 'quantized_inverted_list_offset_bytes') OR
 		NOT (stats ? 'quantized_inverted_posting_bytes') OR
 		NOT (stats ? 'quantized_inverted_sidecar_bytes') OR
+		NOT (stats ? 'quantized_inverted_compact_kernel') OR
+		NOT (stats ? 'quantized_inverted_compact_score_us') OR
+		NOT (stats ? 'quantized_inverted_compact_docs_scored') OR
+		NOT (stats ? 'quantized_inverted_compact_payload_bytes') OR
+		NOT (stats ? 'quantized_inverted_compact_topk_changed_vs_scalar') OR
 		(stats->>'quantized_inverted_list_offset_bytes')::bigint <= 0 OR
 		(stats->>'quantized_inverted_posting_bytes')::bigint <= 0 OR
 		(stats->>'quantized_inverted_sidecar_bytes')::bigint <= 0 OR
+		stats->>'quantized_inverted_compact_kernel' <> 'off' OR
+		(stats->>'quantized_inverted_compact_docs_scored')::int <> 0 OR
+		(stats->>'quantized_inverted_compact_payload_bytes')::bigint <> 0 OR
+		stats->>'quantized_inverted_compact_topk_changed_vs_scalar' <> 'false' OR
 		stats->>'multivector_plain_fallback_used' <> 'false' OR
 		stats->>'multivector_exact_rerank_source' <> 'heap' OR
 		(stats->>'multivector_exact_rerank_docs')::int <= 0 OR
@@ -3630,6 +3639,7 @@ DECLARE
 	centroid_bitset_ids int[];
 	centroid_pruned_ids int[];
 	quantized_ids int[];
+	quantized_compact_ids int[];
 	stats jsonb;
 	timing_key text;
 BEGIN
@@ -3842,6 +3852,37 @@ BEGIN
 		RAISE EXCEPTION 'quantized_inverted_experimental full-budget rerank did not match exact_doc_scan: exact %, quantized %, stats %',
 			exact_ids, quantized_ids, stats;
 	END IF;
+
+	PERFORM set_config('turbohybrid.multivector_quantized_inverted_compact_scoring', 'experimental', true);
+	SELECT array_agg(id ORDER BY distance, id) INTO quantized_compact_ids
+	FROM (
+		SELECT id,
+		       colbert <~> turbohybrid_query(
+			       multivector_query => query_mv,
+			       dense_k => 4,
+			       final_k => 3
+		       ) AS distance
+		FROM mv_centroid_lite_docs
+		ORDER BY distance, id
+		LIMIT 3
+	) AS quantized_compact_results;
+	stats := turbohybrid_last_scan_stats();
+
+	IF quantized_compact_ids <> exact_ids OR
+		stats->>'multivector_candidate_source' <> 'quantized_inverted_experimental' OR
+		stats->>'multivector_doc_graph_warning' <> 'quantized_inverted_experimental_persisted_postings' OR
+		stats->>'quantized_inverted_compact_kernel' NOT IN ('scalar', 'avx2', 'avx512', 'neon') OR
+		(stats->>'quantized_inverted_compact_docs_scored')::int < 3 OR
+		(stats->>'quantized_inverted_compact_payload_bytes')::bigint <= 0 OR
+		(stats->>'quantized_inverted_compact_score_us')::bigint < 0 OR
+		stats->>'quantized_inverted_compact_topk_changed_vs_scalar' <> 'false' OR
+		stats->>'multivector_exact_rerank_source' <> 'heap' OR
+		(stats->>'multivector_exact_rerank_docs')::int < 3 OR
+		(stats->>'multivector_exact_rerank_pairs')::int <= 0 THEN
+		RAISE EXCEPTION 'quantized_inverted_experimental compact scoring changed final exact result or missing stats: exact %, compact %, stats %',
+			exact_ids, quantized_compact_ids, stats;
+	END IF;
+	PERFORM set_config('turbohybrid.multivector_quantized_inverted_compact_scoring', 'off', true);
 END
 $$;
 DO $$
