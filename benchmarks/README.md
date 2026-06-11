@@ -216,11 +216,13 @@ normal document-node graph path and requires `--multivector-graph document_nodes
 uses the persisted fixed-dimensional proxy encoder as the single-vector
 TurboQuant graph key for admission, then exact-reranks admitted documents with
 full MaxSim. Use it with `--multivector-graph document_nodes`.
-`--multivector-proxy-encoder normalized_mean|first_token|centroid_mean|mean_pool|max_pool|random_projection_fde`
+`--multivector-proxy-encoder normalized_mean|first_token|centroid_mean|mean_pool|max_pool|random_projection_fde|learned_projection_placeholder|learned_projection_v1`
 selects the proxy encoder for the index build; `normalized_mean` is the default
-document proxy, `centroid_mean` requires `--multivector-centroids kmeans`, and
-`mean_pool` remains a compatibility encoder. The admission grid can compare
-encoders with
+document proxy, `centroid_mean` requires `--multivector-centroids kmeans`,
+`mean_pool` remains a compatibility encoder, `learned_projection_placeholder`
+fails explicitly, and `learned_projection_v1` requires
+`--multivector-learned-projection-path`. The admission grid can compare
+practical built-in encoders with
 `--document-node-proxy-encoder-grid normalized_mean,centroid_mean,max_pool,random_projection_fde`.
 Proxy scans report `proxy_encoder_kind`, `proxy_candidates`,
 `proxy_top1_admission`, and `proxy_exact_rerank_docs`.
@@ -872,9 +874,13 @@ need EF values outside the compact default `50,100,200`. Use
 `proxy_normalized_mean_f16` before paying for every physical profile index
 build. For additional proxy encoder evidence, combine it with
 `--document-node-serving-grid-include-proxy-encoders` and request
-`proxy_max_pool_f16` or `proxy_random_projection_fde_f16` by name. Treat any
-future 100k/1M run as a fresh validation of that candidate-admission fix; do
-not use the zero-recall probe as performance evidence.
+`proxy_max_pool_f16` or `proxy_random_projection_fde_f16` by name. Treat
+learned projection as separate opt-in evidence: add
+`--document-node-serving-grid-include-learned-projection`, configure
+`--multivector-learned-projection-path`, and request
+`proxy_learned_projection_v1_f16`. Treat any future 100k/1M run as a fresh
+validation of that candidate-admission fix; do not use the zero-recall probe as
+performance evidence.
 
 The normal benchmark path now runs a serial probe before the 8-client throughput
 phase. If the serial run already exceeds configured scan-work limits
