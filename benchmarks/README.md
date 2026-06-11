@@ -638,6 +638,7 @@ python benchmarks/dbpedia_colbert_multivector.py \
   --max-queries 25 \
   --reuse-data \
   --document-node-serving-build-only \
+  --document-node-serving-grid-include-proxy-encoders \
   --document-node-serving-grid-profiles centroid_mean_f16,proxy_max_pool_f16,proxy_normalized_mean_f16 \
   --output .nix-dev/tmp/dbpedia-colbert-serving-build-10k.json \
   --markdown-output .nix-dev/tmp/dbpedia-colbert-serving-build-10k.md
