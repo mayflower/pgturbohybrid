@@ -1448,6 +1448,9 @@ PgturbohybridGraphStoreBuildMultiVectorCentroids(PgturbohybridQuantBuildState *s
 	Size		centroidSize;
 	int			centroidCount;
 	double		targetRatio;
+	instr_time	start;
+	instr_time	clusterStart;
+	instr_time	residualStart;
 
 	if (state->multivectorCentroids !=
 		PGTURBOHYBRID_MULTIVECTOR_CENTROIDS_KMEANS)
@@ -1463,19 +1466,29 @@ PgturbohybridGraphStoreBuildMultiVectorCentroids(PgturbohybridQuantBuildState *s
 													state->multivectorCentroidCount);
 	if (centroidCount <= 0)
 		elog(ERROR, "invalid multivector centroid count");
+	INSTR_TIME_SET_CURRENT(start);
 	targetRatio = (double) centroidCount / (double) doc->count;
+	INSTR_TIME_SET_CURRENT(clusterStart);
 	centroids =
 		PgturbohybridMultiVectorPoolDocumentTokens(doc,
 												   PGTURBOHYBRID_MULTIVECTOR_TOKEN_POOLING_KMEANS,
 												   targetRatio,
 												   1,
 												   state->buildTupleCtx);
+	state->multivectorCentroidClusterUs +=
+		PgturbohybridGraphElapsedUs(clusterStart);
 	centroidSize = VARSIZE_ANY(centroids);
 	stored = MemoryContextAlloc(state->ctx, centroidSize);
 	memcpy(stored, centroids, centroidSize);
 	state->multivectorDocCentroids[docOrdinal] = stored;
+	INSTR_TIME_SET_CURRENT(residualStart);
 	state->multivectorDocCentroidResiduals[docOrdinal] =
 		PgturbohybridMultiVectorCentroidResidualMean(doc, stored);
+	state->multivectorCentroidResidualUs +=
+		PgturbohybridGraphElapsedUs(residualStart);
+	state->multivectorCentroidBuildUs += PgturbohybridGraphElapsedUs(start);
+	state->multivectorCentroidBuildDocs++;
+	state->multivectorCentroidBuildVectors += (uint64) stored->count;
 }
 
 static void
@@ -1493,6 +1506,7 @@ PgturbohybridGraphAppendBuildMultiVectorDocument(PgturbohybridQuantBuildState *s
 	Size		mvSize;
 	uint32		nodeId;
 	uint32		docOrdinal;
+	instr_time	proxyStart;
 
 	PgturbohybridMultiVectorCheckDim((uint32) mv->dim,
 									 (uint32) pgturbohybrid_multivector_max_dim);
@@ -1522,12 +1536,14 @@ PgturbohybridGraphAppendBuildMultiVectorDocument(PgturbohybridQuantBuildState *s
 	centroids = state->multivectorDocCentroids[docOrdinal];
 	state->multivectorDocCount++;
 
+	INSTR_TIME_SET_CURRENT(proxyStart);
 	vector =
 		PgturbohybridMultiVectorBuildProxyVectorWithCentroids(indexedMv,
 															  centroids,
 															  state->multivectorProxyEncoder,
 															  state->multivectorCentroidCount,
 															  state->buildTupleCtx);
+	state->multivectorProxyBuildUs += PgturbohybridGraphElapsedUs(proxyStart);
 	nodeId = PgturbohybridGraphAppendBuildNode(state, tid,
 											   PointerGetDatum(vector),
 											   values, isnull);
@@ -5127,6 +5143,7 @@ PgturbohybridGraphWriteMultiVectorCentroidPostingTuples(PgturbohybridQuantBuildS
 	PgturbohybridGraphMultiVectorCentroidPostingEntry *postings;
 	uint32		totalPostings = 0;
 	uint16		maxPostingCount;
+	instr_time	startTime;
 
 	if (state->multivectorCentroids !=
 		PGTURBOHYBRID_MULTIVECTOR_CENTROIDS_KMEANS ||
@@ -5134,6 +5151,7 @@ PgturbohybridGraphWriteMultiVectorCentroidPostingTuples(PgturbohybridQuantBuildS
 		state->dimensions <= 0)
 		return;
 
+	INSTR_TIME_SET_CURRENT(startTime);
 	codebookSize = (uint32) state->dimensions * 2U;
 	listCounts = palloc0(sizeof(uint32) * (Size) codebookSize);
 	listOffsets = palloc0(sizeof(uint32) * ((Size) codebookSize + 1));
@@ -5243,6 +5261,9 @@ PgturbohybridGraphWriteMultiVectorCentroidPostingTuples(PgturbohybridQuantBuildS
 	pfree(listWrite);
 	pfree(listOffsets);
 	pfree(listCounts);
+	state->multivectorCentroidPostingWriteUs +=
+		PgturbohybridGraphElapsedUs(startTime);
+	state->multivectorCentroidPostingCount += (uint64) totalPostings;
 }
 
 static void
@@ -5388,6 +5409,7 @@ PgturbohybridGraphWriteMultiVectorDocMapPages(PgturbohybridQuantBuildState *stat
 	BlockNumber start = InvalidBlockNumber;
 	uint16		maxNodeCount;
 	uint16		maxDocCount;
+	instr_time	sidecarStart;
 
 	*pageCount = 0;
 	*docMapBytes = 0;
@@ -5398,6 +5420,7 @@ PgturbohybridGraphWriteMultiVectorDocMapPages(PgturbohybridQuantBuildState *stat
 		state->multivectorDocCount == 0)
 		return InvalidBlockNumber;
 
+	INSTR_TIME_SET_CURRENT(sidecarStart);
 	maxNodeCount = PgturbohybridGraphMultiVectorDocMapNodeTupleMaxCount();
 	maxDocCount = PgturbohybridGraphMultiVectorDocMapDocTupleMaxCount();
 
@@ -5561,6 +5584,7 @@ PgturbohybridGraphWriteMultiVectorDocMapPages(PgturbohybridQuantBuildState *stat
 					state->multivectorDocCentroids != NULL ?
 					state->multivectorDocCentroids[docId] : NULL;
 				Size		centroidFloats;
+				instr_time	centroidWriteStart;
 
 				if (centroids == NULL)
 					ereport(ERROR,
@@ -5570,6 +5594,7 @@ PgturbohybridGraphWriteMultiVectorDocMapPages(PgturbohybridQuantBuildState *stat
 				centroidFloats =
 					PgturbohybridMultiVectorFloatCount(centroids->count,
 													   centroids->dim);
+				INSTR_TIME_SET_CURRENT(centroidWriteStart);
 				for (uint32 startFloat = 0; startFloat < centroidFloats;)
 				{
 					uint16		count =
@@ -5608,6 +5633,8 @@ PgturbohybridGraphWriteMultiVectorDocMapPages(PgturbohybridQuantBuildState *stat
 					pfree(tuple);
 					startFloat += count;
 				}
+				state->multivectorCentroidSidecarWriteUs +=
+					PgturbohybridGraphElapsedUs(centroidWriteStart);
 			}
 		}
 		if (state->multivectorCentroids ==
@@ -5629,6 +5656,8 @@ PgturbohybridGraphWriteMultiVectorDocMapPages(PgturbohybridQuantBuildState *stat
 	if (BufferIsValid(buf))
 		PgturbohybridGraphFinishPage(buf);
 
+	state->multivectorDocSidecarWriteUs +=
+		PgturbohybridGraphElapsedUs(sidecarStart);
 	return start;
 }
 
@@ -6816,6 +6845,25 @@ tqgraphbuild(Relation heap, Relation index, IndexInfo *indexInfo)
 			state.multivectorDocExactBuildDistanceCalls;
 		buildStats.multivectorDocExactBuildDistanceUs =
 			state.multivectorDocExactBuildDistanceUs;
+		buildStats.multivectorCentroidBuildUs =
+			state.multivectorCentroidBuildUs;
+		buildStats.multivectorCentroidClusterUs =
+			state.multivectorCentroidClusterUs;
+		buildStats.multivectorCentroidResidualUs =
+			state.multivectorCentroidResidualUs;
+		buildStats.multivectorCentroidBuildDocs =
+			state.multivectorCentroidBuildDocs;
+		buildStats.multivectorCentroidBuildVectors =
+			state.multivectorCentroidBuildVectors;
+		buildStats.multivectorProxyBuildUs = state.multivectorProxyBuildUs;
+		buildStats.multivectorDocSidecarWriteUs =
+			state.multivectorDocSidecarWriteUs;
+		buildStats.multivectorCentroidSidecarWriteUs =
+			state.multivectorCentroidSidecarWriteUs;
+		buildStats.multivectorCentroidPostingWriteUs =
+			state.multivectorCentroidPostingWriteUs;
+		buildStats.multivectorCentroidPostingCount =
+			state.multivectorCentroidPostingCount;
 		buildStats.buildDistanceCacheHits = state.buildDistanceCacheHits;
 		buildStats.buildDistanceCacheMisses = state.buildDistanceCacheMisses;
 		buildStats.buildDistanceCacheStores = state.buildDistanceCacheStores;
@@ -7011,6 +7059,9 @@ PgturbohybridGraphResetScan(PgturbohybridGraphScanOpaque so)
 	so->graphCodePagesRead = 0;
 	so->graphAdjPagesRead = 0;
 	so->graphEntryPointCount = 0;
+	so->graphEntrySampleConfigured = 0;
+	so->graphEntrySampleEffective = 0;
+	so->graphEntrySampleScored = 0;
 	so->graphEntrySidecarCount = 0;
 	so->graphEntrySidecarScored = 0;
 	so->graphEntrySidecarSelected = 0;
@@ -8148,9 +8199,9 @@ PgturbohybridGraphTraverse(Relation index, PgturbohybridGraphScanOpaque so, Pgtu
 	PgturbohybridGraphFrontierItem entry;
 	PgturbohybridGraphFrontierItem entries[PGTURBOHYBRID_GRAPH_MAX_ENTRY_POINTS];
 	int			entryLevels[PGTURBOHYBRID_GRAPH_MAX_ENTRY_POINTS];
-	PgturbohybridGraphFrontierItem sampled[PGTURBOHYBRID_GRAPH_ENTRY_SAMPLE_COUNT];
-	uint32		sampledNodeIds[PGTURBOHYBRID_GRAPH_ENTRY_SAMPLE_COUNT];
-	double		sampledDistances[PGTURBOHYBRID_GRAPH_ENTRY_SAMPLE_COUNT];
+	PgturbohybridGraphFrontierItem *sampled = NULL;
+	uint32	   *sampledNodeIds = NULL;
+	double	   *sampledDistances = NULL;
 	int			entryCount = 0;
 	int			sampledCount = 0;
 	int64		segmentsSearched = 0;
@@ -8247,6 +8298,8 @@ PgturbohybridGraphTraverse(Relation index, PgturbohybridGraphScanOpaque so, Pgtu
 	{
 		int			sampleTarget = searchEf;
 		int			sampleCount;
+		int			configuredSamples =
+			Max(pgturbohybrid_multivector_doc_graph_entry_sample_count, 0);
 
 		if (so->tq.bits == PGTURBOHYBRID_DEFAULT_BITS &&
 			(TqScoreMode) so->tq.scoreMode == PGTURBOHYBRID_SCORE_L2 &&
@@ -8254,10 +8307,18 @@ PgturbohybridGraphTraverse(Relation index, PgturbohybridGraphScanOpaque so, Pgtu
 			sampleTarget = Max(PGTURBOHYBRID_GRAPH_MAX_ENTRY_POINTS,
 							   searchEf / PGTURBOHYBRID_GRAPH_HIGHDIM_ENTRY_SAMPLE_DIVISOR);
 
-		sampleCount = Min((int) meta->tqNodeCount,
-						  Min(PGTURBOHYBRID_GRAPH_ENTRY_SAMPLE_COUNT,
-							  Max(sampleTarget,
-								  PGTURBOHYBRID_GRAPH_MAX_ENTRY_POINTS)));
+		if (configuredSamples > 0)
+			sampleCount = Min((int) meta->tqNodeCount, configuredSamples);
+		else
+			sampleCount = Min((int) meta->tqNodeCount,
+							  Min(PGTURBOHYBRID_GRAPH_ENTRY_SAMPLE_COUNT,
+								  Max(sampleTarget,
+									  PGTURBOHYBRID_GRAPH_MAX_ENTRY_POINTS)));
+		so->graphEntrySampleConfigured = configuredSamples;
+		so->graphEntrySampleEffective = sampleCount;
+		sampled = palloc(sizeof(PgturbohybridGraphFrontierItem) * sampleCount);
+		sampledNodeIds = palloc(sizeof(uint32) * sampleCount);
+		sampledDistances = palloc(sizeof(double) * sampleCount);
 
 		for (int i = 0; i < sampleCount; i++)
 		{
@@ -8301,6 +8362,10 @@ PgturbohybridGraphTraverse(Relation index, PgturbohybridGraphScanOpaque so, Pgtu
 			  PgturbohybridGraphFrontierCompare);
 		for (int i = 0; i < sampledCount; i++)
 			PgturbohybridGraphOfferDistanceEntry(entries, &entryCount, sampled[i]);
+		so->graphEntrySampleScored = sampledCount;
+		pfree(sampledDistances);
+		pfree(sampledNodeIds);
+		pfree(sampled);
 	}
 
 	PgturbohybridGraphAddPayloadEntrySeeds(index, so, meta, storage, entries,
@@ -11651,6 +11716,191 @@ PgturbohybridMultiVectorBuildReservoirCandidates(HTAB *docHash,
 }
 
 static bool
+PgturbohybridMultiVectorProxyReservoirCandidateSelected(const TqDenseCandidate *selected,
+														int selectedCount,
+														const TqDenseCandidate *candidate)
+{
+	for (int i = 0; i < selectedCount; i++)
+	{
+		if (selected[i].hasDocId && candidate->hasDocId &&
+			selected[i].docId == candidate->docId)
+			return true;
+		if (ItemPointerIsValid(&selected[i].heaptid) &&
+			ItemPointerIsValid(&candidate->heaptid) &&
+			ItemPointerGetBlockNumber(&selected[i].heaptid) ==
+			ItemPointerGetBlockNumber(&candidate->heaptid) &&
+			ItemPointerGetOffsetNumber(&selected[i].heaptid) ==
+			ItemPointerGetOffsetNumber(&candidate->heaptid))
+			return true;
+	}
+	return false;
+}
+
+static bool
+PgturbohybridMultiVectorProxyReservoirAddCandidate(const TqDenseCandidate *candidates,
+												  int candidateIndex,
+												  int candidateCount,
+												  TqDenseCandidate *selected,
+												  int *selectedCount,
+												  int selectedLimit,
+												  uint32 *added,
+												  uint32 *duplicates)
+{
+	const TqDenseCandidate *candidate;
+
+	if (candidateIndex < 0 || candidateIndex >= candidateCount ||
+		*selectedCount >= selectedLimit)
+		return false;
+	candidate = &candidates[candidateIndex];
+	if (!candidate->hasDocId && !ItemPointerIsValid(&candidate->heaptid))
+		return false;
+	if (PgturbohybridMultiVectorProxyReservoirCandidateSelected(selected,
+															   *selectedCount,
+															   candidate))
+	{
+		if (duplicates != NULL)
+			(*duplicates)++;
+		return false;
+	}
+
+	selected[*selectedCount] = *candidate;
+	(*selectedCount)++;
+	if (added != NULL)
+		(*added)++;
+	return true;
+}
+
+static int
+PgturbohybridMultiVectorApplyProxyReservoirCandidates(TqDenseCandidate *candidates,
+													 int candidateCount,
+													 int rerankLimit,
+													 MemoryContext ctx,
+													 uint32 *scoreDocs,
+													 uint32 *coverageDocs,
+													 uint32 *meanDocs,
+													 uint32 *perTokenDocs,
+													 uint32 *unionDocs,
+													 uint32 *duplicates)
+{
+	TqDenseCandidate *selected;
+	bool	   *selectedByIndex;
+	int			selectedCount = 0;
+	int			scoreLimit;
+	int			spreadLimit;
+	int			mode = pgturbohybrid_multivector_candidate_reservoirs;
+
+	if (scoreDocs != NULL)
+		*scoreDocs = 0;
+	if (coverageDocs != NULL)
+		*coverageDocs = 0;
+	if (meanDocs != NULL)
+		*meanDocs = 0;
+	if (perTokenDocs != NULL)
+		*perTokenDocs = 0;
+	if (unionDocs != NULL)
+		*unionDocs = 0;
+	if (duplicates != NULL)
+		*duplicates = 0;
+	if (candidates == NULL || candidateCount <= 0 || rerankLimit <= 0)
+		return 0;
+
+	rerankLimit = Min(rerankLimit, candidateCount);
+	selected = MemoryContextAlloc(ctx, sizeof(*selected) * (Size) rerankLimit);
+	selectedByIndex = MemoryContextAllocZero(ctx,
+											sizeof(*selectedByIndex) *
+											(Size) candidateCount);
+
+	/*
+	 * Document-node proxy candidates have one proxy score per document, not
+	 * token-local coverage evidence.  Conservative mode keeps most of the
+	 * proxy-ranked prefix and uses a small deterministic rank spread. Balanced
+	 * mode keeps the best proxy-ranked half and fills the remaining
+	 * exact-rerank band with the same spread.  This is an opt-in admission
+	 * experiment; exact MaxSim remains the final rerank score.
+	 */
+	if (mode == PGTURBOHYBRID_MULTIVECTOR_CANDIDATE_RESERVOIRS_BALANCED)
+		scoreLimit = Max(1, rerankLimit / 2);
+	else
+		scoreLimit = Max(1, (rerankLimit * 3) / 4);
+	spreadLimit = rerankLimit - scoreLimit;
+
+	for (int i = 0; i < candidateCount && selectedCount < scoreLimit; i++)
+	{
+		if (PgturbohybridMultiVectorProxyReservoirAddCandidate(candidates,
+															  i,
+															  candidateCount,
+															  selected,
+															  &selectedCount,
+															  rerankLimit,
+															  scoreDocs,
+															  duplicates))
+			selectedByIndex[i] = true;
+	}
+
+	for (int i = 0; i < spreadLimit && selectedCount < rerankLimit; i++)
+	{
+		int			index;
+
+		if (spreadLimit <= 1)
+			index = candidateCount - 1;
+		else
+			index = (int) (((int64) i * (int64) (candidateCount - 1)) /
+						   (int64) (spreadLimit - 1));
+		if (index < scoreLimit && candidateCount > scoreLimit)
+			index = scoreLimit +
+				(int) (((int64) i * (int64) (candidateCount - scoreLimit - 1)) /
+					   (int64) Max(spreadLimit - 1, 1));
+		if (PgturbohybridMultiVectorProxyReservoirAddCandidate(candidates,
+															  index,
+															  candidateCount,
+															  selected,
+															  &selectedCount,
+															  rerankLimit,
+															  coverageDocs,
+															  duplicates))
+			selectedByIndex[index] = true;
+	}
+
+	for (int i = 0; i < candidateCount && selectedCount < rerankLimit; i++)
+	{
+		if (selectedByIndex[i])
+			continue;
+		if (PgturbohybridMultiVectorProxyReservoirAddCandidate(candidates,
+															  i,
+															  candidateCount,
+															  selected,
+															  &selectedCount,
+															  rerankLimit,
+															  scoreDocs,
+															  duplicates))
+			selectedByIndex[i] = true;
+	}
+
+	if (selectedCount > 0)
+	{
+		TqDenseCandidate *reordered;
+		int			writeIndex = 0;
+
+		reordered = MemoryContextAlloc(ctx,
+									   sizeof(*reordered) *
+									   (Size) candidateCount);
+		for (int i = 0; i < selectedCount; i++)
+			reordered[writeIndex++] = selected[i];
+		for (int i = 0; i < candidateCount; i++)
+		{
+			if (selectedByIndex[i])
+				continue;
+			reordered[writeIndex++] = candidates[i];
+		}
+		memcpy(candidates, reordered, sizeof(*candidates) * (Size) candidateCount);
+	}
+
+	if (unionDocs != NULL)
+		*unionDocs = (uint32) selectedCount;
+	return selectedCount;
+}
+
+static bool
 PgturbohybridMultiVectorSameHeapTid(const ItemPointerData *a,
 									const ItemPointerData *b)
 {
@@ -12645,9 +12895,10 @@ PgturbohybridMultiVectorDocumentGraphTraverse(Relation index,
 											  PgturbohybridMultiVectorDocSidecarAccessStats *sidecarStats)
 {
 	PgturbohybridGraphFrontierItem entries[PGTURBOHYBRID_GRAPH_MAX_ENTRY_POINTS];
-	PgturbohybridGraphFrontierItem sampled[PGTURBOHYBRID_GRAPH_ENTRY_SAMPLE_COUNT];
+	PgturbohybridGraphFrontierItem *sampled = NULL;
 	int			entryCount = 0;
 	int			sampledCount = 0;
+	int			sampleCount = 0;
 	bool	   *visited;
 	PgturbohybridGraphFrontierItem *frontier;
 	PgturbohybridGraphFrontierItem *nearest;
@@ -12754,19 +13005,28 @@ PgturbohybridMultiVectorDocumentGraphTraverse(Relation index,
 	}
 	if (meta->tqNodeCount > 1)
 	{
-		int			sampleCount =
-			Min((int) meta->tqNodeCount,
-				Min(PGTURBOHYBRID_GRAPH_ENTRY_SAMPLE_COUNT,
-					Max(searchEf, PGTURBOHYBRID_GRAPH_MAX_ENTRY_POINTS)));
+		int			configuredSamples =
+			Max(pgturbohybrid_multivector_doc_graph_entry_sample_count, 0);
+
+		if (configuredSamples > 0)
+			sampleCount = Min((int) meta->tqNodeCount, configuredSamples);
+		else
+			sampleCount =
+				Min((int) meta->tqNodeCount,
+					Min(PGTURBOHYBRID_GRAPH_ENTRY_SAMPLE_COUNT,
+						Max(searchEf, PGTURBOHYBRID_GRAPH_MAX_ENTRY_POINTS)));
+		so->graphEntrySampleConfigured = configuredSamples;
+		so->graphEntrySampleEffective = sampleCount;
 
 		/*
 		 * Document-node graphs need the same multi-entry robustness as the
 		 * single-vector graph path.  A single global entry, plus a few segment
 		 * entries, can start large ColBERT indexes in the wrong region and then
-		 * spend a large MaxSim budget on irrelevant documents.  Score a bounded,
-		 * deterministic spread of document nodes with the real document MaxSim
-		 * distance and keep the best entry seeds before base-layer traversal.
+		 * spend a large rerank budget on irrelevant documents.  Score a bounded,
+		 * deterministic spread of document proxy nodes and keep the best entry
+		 * seeds before base-layer traversal.
 		 */
+		sampled = palloc(sizeof(PgturbohybridGraphFrontierItem) * sampleCount);
 		for (int i = 0; i < sampleCount; i++)
 		{
 			uint32		nodeId = sampleCount == 1 ? 0 :
@@ -12814,10 +13074,13 @@ PgturbohybridMultiVectorDocumentGraphTraverse(Relation index,
 														 PGTURBOHYBRID_GRAPH_MAX_ENTRY_POINTS,
 														 sampled[i].nodeId,
 														 sampled[i].distance);
+		so->graphEntrySampleScored = sampledCount;
 	}
 
 	if (entryCount == 0)
 	{
+		if (sampled != NULL)
+			pfree(sampled);
 		pfree(nearest);
 		pfree(frontier);
 		pfree(visited);
@@ -12931,6 +13194,8 @@ PgturbohybridMultiVectorDocumentGraphTraverse(Relation index,
 												   resultTarget, &candidate);
 	}
 
+	if (sampled != NULL)
+		pfree(sampled);
 	pfree(nearest);
 	pfree(frontier);
 	pfree(visited);
@@ -13054,6 +13319,7 @@ PgturbohybridMultiVectorDocumentNodeScan(IndexScanDesc scan,
 		proxyEncoder ==
 		PGTURBOHYBRID_MULTIVECTOR_PROXY_ENCODER_CENTROID_MEAN;
 	bool		proxyDocumentCompactRescore = false;
+	bool		proxyLazySidecarVectors = false;
 	bool		centroidLite =
 		pgturbohybrid_multivector_candidate_source ==
 		PGTURBOHYBRID_MULTIVECTOR_CANDIDATE_SOURCE_CENTROID_LITE;
@@ -13063,6 +13329,10 @@ PgturbohybridMultiVectorDocumentNodeScan(IndexScanDesc scan,
 	bool		documentNodesSource =
 		pgturbohybrid_multivector_candidate_source ==
 		PGTURBOHYBRID_MULTIVECTOR_CANDIDATE_SOURCE_DOCUMENT_NODES;
+	bool		proxyReservoirsEnabled =
+		explicitProxyVector &&
+		pgturbohybrid_multivector_candidate_reservoirs !=
+		PGTURBOHYBRID_MULTIVECTOR_CANDIDATE_RESERVOIRS_OFF;
 	uint64		docsScored = 0;
 	uint64		edgesVisited = 0;
 	uint64		maxsimPairs = 0;
@@ -13075,6 +13345,11 @@ PgturbohybridMultiVectorDocumentNodeScan(IndexScanDesc scan,
 	uint64		centroidListsVisited = 0;
 	uint64		centroidDocsTouched = 0;
 	uint64		centroidPrunedDocs = 0;
+	uint64		centroidPostingsSkipped = 0;
+	uint32		centroidPostingLimitPerToken =
+		(uint32) Max(pgturbohybrid_multivector_centroid_lite_max_postings_per_token,
+					 0);
+	const char *centroidPostingCapStrategy = "none";
 	uint32		centroidCandidates = 0;
 	uint32		centroidCountEffective = 0;
 	uint32		centroidPrerankDocs = 0;
@@ -13082,10 +13357,39 @@ PgturbohybridMultiVectorDocumentNodeScan(IndexScanDesc scan,
 	uint64		quantizedInvertedPostingsTouched = 0;
 	uint64		quantizedInvertedDocsScored = 0;
 	uint32		quantizedInvertedCandidates = 0;
+	uint32		multivectorReservoirScoreDocs = 0;
+	uint32		multivectorReservoirCoverageDocs = 0;
+	uint32		multivectorReservoirMeanDocs = 0;
+	uint32		multivectorReservoirPerTokenDocs = 0;
+	uint32		multivectorReservoirUnionDocs = 0;
+	uint32		multivectorReservoirDuplicates = 0;
+	int			proxyGraphHitCount = 0;
+	int			proxyCandidateLimitEffective = 0;
+	const char *proxyCandidateLimitSource = "none";
+	uint64		sidecarInitialBytesTouched = 0;
+	uint64		sidecarInitialPagesRead = 0;
+	uint64		sidecarInitialVectorsLoaded = 0;
+	uint64		sidecarCacheBuildBytes = 0;
+	uint64		sidecarCacheBuildPagesRead = 0;
+	uint64		sidecarCacheBuildUs = 0;
+	uint64		sidecarQueryBytesTouched = 0;
+	uint64		sidecarQueryPagesRead = 0;
+	uint64		sidecarQueryVectorsLoaded = 0;
+	uint64		sidecarQueryLoadUs = 0;
+	uint64		proxyFullSidecarVectorsLoaded = 0;
+	uint64		proxyFullSidecarBytesTouched = 0;
+	uint64		proxyFullSidecarPagesRead = 0;
+	uint64		proxyFullSidecarLoadUs = 0;
+	uint64		proxyFullSidecarReconstructUs = 0;
+	bool		sidecarCacheBuildThisQuery = false;
+	bool		proxyVectorUsesFullSidecarForGraph = false;
+	bool		proxyVectorNearExhaustiveSidecarTouch = false;
+	const char *proxyVectorSidecarTouchReason = "none";
 	int			docStorageCacheMode;
 	const char *docGraphWarning;
 	const char *docStorageKindName;
 	const char *docStorageCacheModeName;
+	const char *docStorageCacheRequestedName;
 	const char *docAccumulatorKind;
 	instr_time	phaseStart;
 	PgturbohybridMultiVectorDocCompactStorage *compact = NULL;
@@ -13173,13 +13477,41 @@ PgturbohybridMultiVectorDocumentNodeScan(IndexScanDesc scan,
 		pgturbohybrid_multivector_doc_graph_search_ef : so->efSearch;
 	searchEf = Min(Max(searchEfBase, 1), (int) meta->tqMultivectorDocCount);
 	exhaustiveScan = searchEf >= (int) meta->tqMultivectorDocCount;
+	if (proxyGraph)
+	{
+		proxyCandidateLimitEffective = candidateLimit;
+		proxyCandidateLimitSource = "candidate_target";
+		if (proxyCandidateLimitEffective > searchEf)
+		{
+			proxyCandidateLimitEffective = searchEf;
+			proxyCandidateLimitSource = "search_ef";
+		}
+		if (proxyCandidateLimitEffective > (int) meta->tqMultivectorDocCount)
+		{
+			proxyCandidateLimitEffective = (int) meta->tqMultivectorDocCount;
+			proxyCandidateLimitSource = "doc_count";
+		}
+		if (proxyCandidateLimitEffective < 0)
+			proxyCandidateLimitEffective = 0;
+	}
 	docStorageKind = pgturbohybrid_multivector_doc_storage;
 	if (docStorageKind != PGTURBOHYBRID_MULTIVECTOR_DOC_STORAGE_F32 &&
 		docStorageKind != PGTURBOHYBRID_MULTIVECTOR_DOC_STORAGE_F16 &&
 		docStorageKind != PGTURBOHYBRID_MULTIVECTOR_DOC_STORAGE_SQ8)
 		docStorageKind = PGTURBOHYBRID_MULTIVECTOR_DOC_STORAGE_F32;
+	proxyLazySidecarVectors =
+		proxyGraph &&
+		!qdrantLikeProxyVector &&
+		!PgturbohybridMultiVectorIndexUsesContextLevel(scan->indexRelation);
+	docStorageCacheRequestedName =
+		PgturbohybridMultiVectorDocStorageCacheModeName(pgturbohybrid_multivector_doc_storage_cache);
 	docStorageCacheMode =
 		PgturbohybridMultiVectorChooseDocStorageCacheMode(meta);
+	if (proxyLazySidecarVectors &&
+		pgturbohybrid_multivector_doc_storage_cache !=
+		PGTURBOHYBRID_MULTIVECTOR_DOC_STORAGE_CACHE_RESIDENT)
+		docStorageCacheMode =
+			PGTURBOHYBRID_MULTIVECTOR_DOC_STORAGE_CACHE_PAGED;
 	if (docStorageCacheMode ==
 		PGTURBOHYBRID_MULTIVECTOR_DOC_STORAGE_CACHE_PAGED)
 	{
@@ -13248,6 +13580,17 @@ PgturbohybridMultiVectorDocumentNodeScan(IndexScanDesc scan,
 	so->graphAdjBufferLockWaitUs += cacheInfo.adjBufferLockWaitUs;
 	PgturbohybridGraphAddElapsedUs(&so->graphPrepareUs, phaseStart);
 
+	if (proxyLazySidecarVectors &&
+		docStorageCacheMode ==
+		PGTURBOHYBRID_MULTIVECTOR_DOC_STORAGE_CACHE_PAGED &&
+		!storage.multivectorDocMapLoaded)
+		(void) PgturbohybridGraphAttachMultiVectorDocSidecarCache(scan->indexRelation,
+																  meta,
+																  &storage,
+																  true,
+																  true,
+																  &cacheInfo);
+
 	if (docStorageCacheMode ==
 		PGTURBOHYBRID_MULTIVECTOR_DOC_STORAGE_CACHE_PAGED)
 	{
@@ -13259,9 +13602,29 @@ PgturbohybridMultiVectorDocumentNodeScan(IndexScanDesc scan,
 					 errhint("Disable or invalidate the native graph cache and retry with turbohybrid.multivector_doc_storage_cache = paged.")));
 		storage.ctx = resultCtx;
 		storage.multivectorDocVectorsPaged = true;
+		storage.multivectorDocContextsSkipped = proxyLazySidecarVectors;
+	}
+	else if (proxyLazySidecarVectors &&
+			 !storage.multivectorDocMapLoaded)
+	{
+		/*
+		 * Normal proxy-vector admission uses only the document proxy graph.
+		 * Keep full document multivectors lazy so the sidecar is reconstructed
+		 * only for bounded exact rerank candidates.
+		 */
+		storage.ctx = resultCtx;
+		storage.multivectorDocVectorsPaged = true;
+		storage.multivectorDocContextsSkipped = true;
 	}
 	if (collectPhaseStats)
 		INSTR_TIME_SET_CURRENT(subphaseStart);
+	sidecarCacheBuildThisQuery = cacheInfo.docSidecarCacheBuiltThisScan;
+	if (sidecarCacheBuildThisQuery)
+	{
+		sidecarCacheBuildBytes = cacheInfo.docSidecarCacheBytesTouched;
+		sidecarCacheBuildPagesRead = cacheInfo.docSidecarCachePagesRead;
+		sidecarCacheBuildUs = (uint64) Max(cacheInfo.docSidecarCacheBuildUs, 0);
+	}
 	(void) PgturbohybridGraphLoadMultiVectorDocMapWithStats(scan->indexRelation,
 															meta,
 															&storage,
@@ -13269,6 +13632,21 @@ PgturbohybridMultiVectorDocumentNodeScan(IndexScanDesc scan,
 															&sidecarStats);
 	if (collectPhaseStats)
 		PgturbohybridGraphAddElapsedUint64(&sidecarLoadUs, subphaseStart);
+	sidecarInitialBytesTouched = sidecarStats.bytesTouched;
+	sidecarInitialPagesRead = sidecarStats.pagesRead;
+	sidecarInitialVectorsLoaded =
+		sidecarStats.vectorsLoaded + sidecarStats.residentVectorsLoaded;
+	if (sidecarCacheBuildThisQuery)
+	{
+		sidecarCacheBuildUs += sidecarLoadUs;
+	}
+	else
+	{
+		sidecarQueryBytesTouched = sidecarInitialBytesTouched;
+		sidecarQueryPagesRead = sidecarInitialPagesRead;
+		sidecarQueryVectorsLoaded = sidecarInitialVectorsLoaded;
+		sidecarQueryLoadUs = sidecarLoadUs;
+	}
 	if (!storage.multivectorDocVectorsLoaded)
 		ereport(ERROR,
 				(errcode(ERRCODE_INDEX_CORRUPTED),
@@ -13407,6 +13785,7 @@ PgturbohybridMultiVectorDocumentNodeScan(IndexScanDesc scan,
 														  -1, 0, false,
 														  false, 1.0,
 														  PGTURBOHYBRID_GRAPH_FILL_CANDIDATE_BAND_REASON_NONE);
+			proxyGraphHitCount = hitCount;
 			if (collectPhaseStats)
 				proxyScoringUs +=
 					(uint64) Max((int64) 0,
@@ -13469,21 +13848,6 @@ PgturbohybridMultiVectorDocumentNodeScan(IndexScanDesc scan,
 						 errmsg("quantized_inverted_experimental posting sidecar is invalid"),
 						 errhint("REINDEX with multivector_graph = document_nodes to rebuild experimental quantized inverted posting tuples.")));
 
-			for (uint32 docId = 0; docId < meta->tqMultivectorDocCount; docId++)
-			{
-				PgturbohybridMultiVector *doc;
-
-				CHECK_FOR_INTERRUPTS();
-				doc = storage.multivectorDocVectors[docId];
-				if (doc == NULL)
-					ereport(ERROR,
-							(errcode(ERRCODE_INDEX_CORRUPTED),
-							 errmsg("document-node multivector sidecar is missing a document vector"),
-							 errhint("REINDEX the index to rebuild the document-node multivector sidecar.")));
-
-				PgturbohybridCheckSameMultiVectorDims(query, doc);
-			}
-
 			docScores =
 				palloc0(sizeof(double) *
 						(Size) Max(meta->tqMultivectorDocCount, 1U));
@@ -13503,13 +13867,13 @@ PgturbohybridMultiVectorDocumentNodeScan(IndexScanDesc scan,
 				palloc0(sizeof(uint32) *
 						(Size) Max(meta->tqMultivectorDocCount, 1U));
 			for (int32 qi = 0; qi < query->count; qi++)
-			{
-				uint32		queryCodeword;
-				uint32		start;
-				uint32		end;
-				uint32		touchedCount = 0;
-				uint32		generation = (uint32) qi + 1U;
-				double		weight =
+				{
+					uint32		queryCodeword;
+					uint32		start;
+					uint32		end;
+					uint32		touchedCount = 0;
+					uint32		generation = (uint32) qi + 1U;
+					double		weight =
 					queryWeights != NULL ? (double) queryWeights[qi] : 1.0;
 
 				if (queryMask != NULL && queryMask[qi])
@@ -13540,6 +13904,7 @@ PgturbohybridMultiVectorDocumentNodeScan(IndexScanDesc scan,
 								 errhint("REINDEX with multivector_graph = document_nodes to rebuild experimental quantized inverted posting tuples.")));
 					if (docBestGeneration[docId] != generation)
 					{
+						PgturbohybridCheckSameMultiVectorDims(query, doc);
 						docBestGeneration[docId] = generation;
 						docBest[docId] = -DBL_MAX;
 						touchedDocIds[touchedCount++] = docId;
@@ -13623,26 +13988,6 @@ PgturbohybridMultiVectorDocumentNodeScan(IndexScanDesc scan,
 						 errmsg("document-node centroid_lite posting sidecar is invalid"),
 						 errhint("REINDEX with multivector_graph = document_nodes and multivector_centroids = kmeans to rebuild persisted centroid posting tuples.")));
 
-			for (uint32 docId = 0; docId < meta->tqMultivectorDocCount; docId++)
-			{
-				PgturbohybridMultiVector *centroids;
-
-				CHECK_FOR_INTERRUPTS();
-				centroids = storage.multivectorDocCentroids[docId];
-				if (storage.multivectorDocVectors[docId] == NULL)
-					ereport(ERROR,
-							(errcode(ERRCODE_INDEX_CORRUPTED),
-							 errmsg("document-node multivector sidecar is missing a document vector"),
-							 errhint("REINDEX the index to rebuild the document-node multivector sidecar.")));
-				if (centroids == NULL)
-					ereport(ERROR,
-							(errcode(ERRCODE_INDEX_CORRUPTED),
-							 errmsg("document-node centroid_lite sidecar is missing a document centroid"),
-							 errhint("REINDEX with multivector_graph = document_nodes and multivector_centroids = kmeans to rebuild persisted centroid sidecar tuples.")));
-
-				PgturbohybridCheckSameMultiVectorDims(query, centroids);
-			}
-
 			docScores =
 				palloc0(sizeof(double) *
 						(Size) Max(meta->tqMultivectorDocCount, 1U));
@@ -13665,6 +14010,7 @@ PgturbohybridMultiVectorDocumentNodeScan(IndexScanDesc scan,
 			{
 				uint32		queryCodeword;
 				uint32		start;
+				uint32		fullEnd;
 				uint32		end;
 				uint32		touchedCount = 0;
 				uint32		generation = (uint32) qi + 1U;
@@ -13675,19 +14021,50 @@ PgturbohybridMultiVectorDocumentNodeScan(IndexScanDesc scan,
 					continue;
 				queryCodeword =
 					PgturbohybridMultiVectorQuantizedInvertedCodeword(query,
-																	  qi);
+																		  qi);
 				start = listOffsets[queryCodeword];
-				end = listOffsets[queryCodeword + 1];
+				fullEnd = listOffsets[queryCodeword + 1];
+				end = fullEnd;
+				if (centroidPostingLimitPerToken > 0 &&
+					fullEnd > start &&
+					fullEnd - start > centroidPostingLimitPerToken)
+				{
+					uint32		listLen = fullEnd - start;
+
+					end = start + centroidPostingLimitPerToken;
+					centroidPostingsSkipped +=
+						(uint64) (listLen - centroidPostingLimitPerToken);
+					centroidPostingCapStrategy = "uniform_stride";
+				}
+				else if (centroidLite && fullEnd > start)
+				{
+					centroidPostingCapStrategy = "uncapped_full_list";
+				}
 				centroidListsVisited++;
-				for (uint32 postingOffset = start; postingOffset < end;
-					 postingOffset++)
+				for (uint32 postingIndex = 0; postingIndex < end - start;
+					 postingIndex++)
 				{
 					PgturbohybridGraphMultiVectorCentroidPostingEntry *posting;
 					PgturbohybridMultiVector *centroids;
+					uint32		postingOffset;
 					uint32		docId;
 					double		dot;
 
 					CHECK_FOR_INTERRUPTS();
+					if (centroidPostingLimitPerToken > 0 &&
+						fullEnd > start &&
+						fullEnd - start > centroidPostingLimitPerToken)
+					{
+						uint64		listLen = (uint64) (fullEnd - start);
+						uint64		limit = (uint64) centroidPostingLimitPerToken;
+						uint64		offset =
+							((uint64) postingIndex * 2U + 1U) * listLen /
+							(limit * 2U);
+
+						postingOffset = start + (uint32) offset;
+					}
+					else
+						postingOffset = start + postingIndex;
 					posting = &postings[postingOffset];
 					docId = posting->docId;
 					centroids = storage.multivectorDocCentroids[docId];
@@ -13699,6 +14076,8 @@ PgturbohybridMultiVectorDocumentNodeScan(IndexScanDesc scan,
 								 errhint("REINDEX with multivector_graph = document_nodes and multivector_centroids = kmeans to rebuild persisted centroid posting tuples.")));
 					if (docBestGeneration[docId] != generation)
 					{
+						PgturbohybridCheckSameMultiVectorDims(query,
+															  centroids);
 						docBestGeneration[docId] = generation;
 						docBest[docId] = -DBL_MAX;
 						touchedDocIds[touchedCount++] = docId;
@@ -13820,6 +14199,15 @@ PgturbohybridMultiVectorDocumentNodeScan(IndexScanDesc scan,
 	}
 	if (qdrantLikeProxyVector && docCount > 0)
 	{
+		uint64		beforeBytes = sidecarStats.bytesTouched;
+		uint64		beforePages = sidecarStats.pagesRead;
+		uint64		beforeVectors =
+			sidecarStats.vectorsLoaded + sidecarStats.residentVectorsLoaded;
+		uint64		beforeReconstructUs = sidecarStats.vectorReconstructUs;
+		instr_time	proxyFullSidecarStart;
+
+		if (collectPhaseStats)
+			INSTR_TIME_SET_CURRENT(proxyFullSidecarStart);
 		docCount =
 			PgturbohybridMultiVectorProxyDocumentSidecarRescore(scan->indexRelation,
 																so, meta,
@@ -13833,6 +14221,23 @@ PgturbohybridMultiVectorDocumentNodeScan(IndexScanDesc scan,
 																docCount,
 																&maxsimPairs,
 																&sidecarStats);
+		if (collectPhaseStats)
+			proxyFullSidecarLoadUs =
+				(uint64) PgturbohybridGraphElapsedUs(proxyFullSidecarStart);
+		proxyFullSidecarBytesTouched =
+			sidecarStats.bytesTouched > beforeBytes ?
+			sidecarStats.bytesTouched - beforeBytes : 0;
+		proxyFullSidecarPagesRead =
+			sidecarStats.pagesRead > beforePages ?
+			sidecarStats.pagesRead - beforePages : 0;
+		proxyFullSidecarVectorsLoaded =
+			(sidecarStats.vectorsLoaded + sidecarStats.residentVectorsLoaded) >
+			beforeVectors ?
+			(sidecarStats.vectorsLoaded + sidecarStats.residentVectorsLoaded) -
+			beforeVectors : 0;
+		proxyFullSidecarReconstructUs =
+			sidecarStats.vectorReconstructUs > beforeReconstructUs ?
+			sidecarStats.vectorReconstructUs - beforeReconstructUs : 0;
 		proxyDocumentRescoreDocs = (uint32) docCount;
 	}
 	else if (centroidMeanProxy && proxyGraph && docCount > 0)
@@ -13855,12 +14260,30 @@ PgturbohybridMultiVectorDocumentNodeScan(IndexScanDesc scan,
 											   subphaseStart);
 		centroidDocsTouched += centroidPrerankDocs;
 	}
-	exactRerankKEffective =
-		pgturbohybrid_multivector_exact_rerank ==
-		PGTURBOHYBRID_MULTIVECTOR_EXACT_RERANK_OFF ?
-		0 : Min(docCount, rescoreLimit);
-	exactRerankLimitOverride = proxyGraph ?
-		exactRerankKEffective : rescoreLimit;
+	exactRerankKEffective = 0;
+	if (pgturbohybrid_multivector_exact_rerank !=
+		PGTURBOHYBRID_MULTIVECTOR_EXACT_RERANK_OFF)
+	{
+		exactRerankKEffective = Min(docCount, rescoreLimit);
+		exactRerankKEffective =
+			Min(exactRerankKEffective,
+				pgturbohybrid_multivector_exact_rerank_k);
+		exactRerankKEffective = Max(exactRerankKEffective, 0);
+	}
+	if (proxyReservoirsEnabled && exactRerankKEffective > 0 && docCount > 0)
+	{
+		(void) PgturbohybridMultiVectorApplyProxyReservoirCandidates(candidates,
+																	 docCount,
+																	 exactRerankKEffective,
+																	 resultCtx,
+																	 &multivectorReservoirScoreDocs,
+																	 &multivectorReservoirCoverageDocs,
+																	 &multivectorReservoirMeanDocs,
+																	 &multivectorReservoirPerTokenDocs,
+																	 &multivectorReservoirUnionDocs,
+																	 &multivectorReservoirDuplicates);
+	}
+	exactRerankLimitOverride = exactRerankKEffective;
 	if (!centroidLite && !quantizedInvertedExperimental)
 	{
 		exactRerankSidecarMeta = meta;
@@ -13892,11 +14315,52 @@ PgturbohybridMultiVectorDocumentNodeScan(IndexScanDesc scan,
 	if (proxyGraph && proxyTopTidValid && docCount > 0)
 		proxyTop1Admission =
 			ItemPointerEquals(&proxyTopTid, &candidates[0].heaptid);
+	if (proxyGraph &&
+		meta->tqMultivectorDocCount >= 1000 &&
+		candidateLimit > 0 &&
+		(uint64) candidateLimit * 4U < (uint64) meta->tqMultivectorDocCount)
+	{
+		uint64		loadedVectors =
+			sidecarStats.vectorsLoaded + sidecarStats.residentVectorsLoaded;
+
+		if (loadedVectors * 10U >= (uint64) meta->tqMultivectorDocCount * 9U)
+		{
+			proxyVectorNearExhaustiveSidecarTouch = true;
+			proxyVectorSidecarTouchReason =
+				sidecarStats.residentVectorsLoaded > 0 ?
+				(sidecarCacheBuildThisQuery ?
+				 "resident_cache_build_all_docs" :
+				 "resident_cache_query_materialize_all_docs") :
+				"paged_vector_load_many_docs";
+		}
+		else if (sidecarInitialBytesTouched >= (64ULL * 1024ULL * 1024ULL) &&
+				 storage.multivectorDocMapBytes > 0 &&
+				 sidecarInitialBytesTouched * 10U >=
+				 (uint64) storage.multivectorDocMapBytes * 9U)
+		{
+			proxyVectorNearExhaustiveSidecarTouch = true;
+			proxyVectorSidecarTouchReason = "docmap_sidecar_scan_large";
+		}
+	}
 	for (int i = 0; i < docCount; i++)
 		candidates[i].rank = i + 1;
 
 	if (stats != NULL)
 	{
+		uint64		sidecarFinalVectorsLoaded =
+			sidecarStats.vectorsLoaded + sidecarStats.residentVectorsLoaded;
+
+		if (sidecarStats.bytesTouched > sidecarInitialBytesTouched)
+			sidecarQueryBytesTouched +=
+				sidecarStats.bytesTouched - sidecarInitialBytesTouched;
+		if (sidecarStats.pagesRead > sidecarInitialPagesRead)
+			sidecarQueryPagesRead +=
+				sidecarStats.pagesRead - sidecarInitialPagesRead;
+		if (sidecarFinalVectorsLoaded > sidecarInitialVectorsLoaded)
+			sidecarQueryVectorsLoaded +=
+				sidecarFinalVectorsLoaded - sidecarInitialVectorsLoaded;
+		sidecarQueryLoadUs += proxyFullSidecarLoadUs + exactStats.sidecarLoadUs;
+
 		stats->visitedGraphNodes = docsScored;
 		stats->scoredCodes = 0;
 		stats->denseCandidatesRequested = targetK > 0 ? targetK : docLimit;
@@ -13967,6 +14431,12 @@ PgturbohybridMultiVectorDocumentNodeScan(IndexScanDesc scan,
 			(uint32) pgturbohybrid_multivector_doc_graph_oversampling;
 		stats->multivectorDocGraphRescoreK =
 			(uint32) exactRerankKEffective;
+		stats->multivectorDocGraphEntrySampleConfigured =
+			(uint32) Max(so->graphEntrySampleConfigured, 0);
+		stats->multivectorDocGraphEntrySampleEffective =
+			(uint32) Max(so->graphEntrySampleEffective, 0);
+		stats->multivectorDocGraphEntrySampleScored =
+			(uint32) Max(so->graphEntrySampleScored, 0);
 		stats->multivectorDocGraphQuantizedScores =
 			proxyDocumentCompactRescore ? proxyDocumentRescoreDocs :
 			quantizedScores;
@@ -13987,17 +14457,97 @@ PgturbohybridMultiVectorDocumentNodeScan(IndexScanDesc scan,
 			proxyGraph ? (uint32) docCount : 0;
 		stats->multivectorExactRerankKEffective =
 			(uint32) exactRerankKEffective;
+		stats->proxyCandidateLimitEffective =
+			proxyGraph ? (uint32) proxyCandidateLimitEffective : 0;
+		strlcpy(stats->proxyCandidateLimitSource,
+				proxyGraph ? proxyCandidateLimitSource : "none",
+				sizeof(stats->proxyCandidateLimitSource));
+		stats->proxyGraphNodesVisited =
+			proxyGraph ? so->graphVisitedNodes : 0;
+		stats->proxyGraphEdgesVisited =
+			proxyGraph ? so->graphBaseVisitedChecks : 0;
+		stats->proxyGraphCandidatesSeen =
+			proxyGraph ? (uint32) Max(proxyGraphHitCount, 0) : 0;
+		stats->proxyCandidatesReturned =
+			proxyGraph ? (uint32) docCount : 0;
+		stats->proxyVectorScoresComputed =
+			proxyGraph ? so->graphBaseBatchNodes : 0;
+		stats->proxyVectorScoreUs =
+			proxyGraph ? proxyScoringUs : 0;
 		stats->proxyCandidates = proxyGraph ? (uint32) docCount : 0;
+		stats->proxyLazySidecarVectors =
+			proxyGraph && proxyLazySidecarVectors;
+		strlcpy(stats->multivectorDocStorageCacheRequested,
+				proxyGraph ? docStorageCacheRequestedName : "auto",
+				sizeof(stats->multivectorDocStorageCacheRequested));
+		strlcpy(stats->multivectorDocStorageCacheEffective,
+				proxyGraph ? docStorageCacheModeName : "auto",
+				sizeof(stats->multivectorDocStorageCacheEffective));
 		stats->proxyTop1Admission = proxyGraph && proxyTop1Admission;
 		stats->proxyExactRerankDocs =
 			proxyGraph ? (uint32) exactRerankCount : 0;
-		centroidCandidates = centroidLite ? (uint32) docCount : 0;
-		centroidPrunedDocs =
-			centroidDocsTouched > (uint64) docCount ?
-			centroidDocsTouched - (uint64) docCount : 0;
-		stats->centroidListsVisited = centroidListsVisited;
-		stats->centroidDocsTouched = centroidDocsTouched;
-		stats->centroidPrunedDocs = centroidPrunedDocs;
+		stats->proxyFullSidecarVectorsLoaded =
+			proxyGraph ? proxyFullSidecarVectorsLoaded : 0;
+		stats->proxyFullSidecarBytesTouched =
+			proxyGraph ? proxyFullSidecarBytesTouched : 0;
+		stats->proxyFullSidecarPagesRead =
+			proxyGraph ? proxyFullSidecarPagesRead : 0;
+		stats->proxyFullSidecarLoadUs =
+			proxyGraph ? proxyFullSidecarLoadUs : 0;
+		stats->proxyFullSidecarReconstructUs =
+			proxyGraph ? proxyFullSidecarReconstructUs : 0;
+		stats->proxyExactRerankHeapFetches =
+			proxyGraph ? exactStats.heapFetches : 0;
+		stats->proxyExactRerankSidecarFetches =
+			proxyGraph ? exactStats.sidecarReads : 0;
+		stats->proxyExactRerankBytesTouched =
+			proxyGraph ? exactStats.sidecarBytes : 0;
+		stats->proxyExactRerankUs =
+			proxyGraph ? exactStats.exactMaxsimUs : 0;
+		stats->sidecarCacheBuildThisQuery =
+			proxyGraph && sidecarCacheBuildThisQuery;
+		stats->sidecarCacheBuildBytes =
+			proxyGraph ? sidecarCacheBuildBytes : 0;
+		stats->sidecarCacheBuildPagesRead =
+			proxyGraph ? sidecarCacheBuildPagesRead : 0;
+		stats->sidecarCacheBuildUs =
+			proxyGraph ? sidecarCacheBuildUs : 0;
+		stats->sidecarQueryBytesTouched =
+			proxyGraph ? sidecarQueryBytesTouched : 0;
+		stats->sidecarQueryPagesRead =
+			proxyGraph ? sidecarQueryPagesRead : 0;
+		stats->sidecarQueryVectorsLoaded =
+			proxyGraph ? sidecarQueryVectorsLoaded : 0;
+		stats->sidecarQueryLoadUs =
+			proxyGraph ? sidecarQueryLoadUs : 0;
+		stats->sidecarQueryUs = stats->sidecarQueryLoadUs;
+		stats->proxyVectorUsesFullSidecarForGraph =
+			proxyGraph && proxyVectorUsesFullSidecarForGraph;
+		stats->proxyVectorNearExhaustiveSidecarTouch =
+			proxyGraph && proxyVectorNearExhaustiveSidecarTouch;
+		strlcpy(stats->proxyVectorSidecarTouchReason,
+				proxyGraph ? proxyVectorSidecarTouchReason : "none",
+				sizeof(stats->proxyVectorSidecarTouchReason));
+			centroidCandidates = centroidLite ? (uint32) docCount : 0;
+			centroidPrunedDocs =
+				centroidDocsTouched > (uint64) docCount ?
+				centroidDocsTouched - (uint64) docCount : 0;
+			stats->centroidListsVisited = centroidListsVisited;
+			stats->centroidDocsTouched = centroidDocsTouched;
+			stats->centroidPrunedDocs = centroidPrunedDocs;
+			stats->centroidPostingsTouched =
+				centroidLite ? edgesVisited : 0;
+			stats->centroidPostingsSkipped =
+				centroidLite ? centroidPostingsSkipped : 0;
+			stats->centroidPostingLimitPerToken =
+				centroidLite ? centroidPostingLimitPerToken : 0;
+			if (centroidLite &&
+				stats->centroidPostingLimitPerToken == 0 &&
+				stats->centroidPostingsTouched > 0)
+				centroidPostingCapStrategy = "uncapped_full_list";
+			strlcpy(stats->centroidPostingCapStrategy,
+					centroidLite ? centroidPostingCapStrategy : "none",
+					sizeof(stats->centroidPostingCapStrategy));
 		stats->centroidCandidates = centroidCandidates;
 		stats->multivectorCentroidCount = centroidCountEffective;
 		stats->multivectorCentroidPrerankDocs = centroidPrerankDocs;
@@ -14038,12 +14588,40 @@ PgturbohybridMultiVectorDocumentNodeScan(IndexScanDesc scan,
 		stats->multivectorDocSidecarBytesTouched = sidecarStats.bytesTouched;
 		stats->multivectorDocSidecarVectorsLoaded =
 			sidecarStats.vectorsLoaded;
+		stats->multivectorDocSidecarDocMapPagesRead =
+			sidecarStats.docMapPagesRead;
+		stats->multivectorDocSidecarDocMapBytesTouched =
+			sidecarStats.docMapBytesTouched;
+		stats->multivectorDocSidecarResidentVectorsLoaded =
+			sidecarStats.residentVectorsLoaded;
+		stats->multivectorDocSidecarResidentBytesLoaded =
+			sidecarStats.residentVectorBytesLoaded;
+		stats->multivectorDocSidecarVectorChunkRefBytesTouched =
+			sidecarStats.vectorChunkRefBytesTouched;
+		stats->multivectorDocSidecarPagedVectorPagesRead =
+			sidecarStats.pagedVectorPagesRead;
+		stats->multivectorDocSidecarPagedVectorBytesTouched =
+			sidecarStats.pagedVectorBytesTouched;
 		stats->multivectorSidecarPageReadUs = sidecarStats.pageReadUs;
 		stats->multivectorSidecarVectorReconstructUs =
 			sidecarStats.vectorReconstructUs;
 		stats->multivectorTokensOriginal = originalTokens;
 		stats->multivectorTokensPooled = pooledTokens;
-		stats->multivectorReservoirsEnabled = false;
+		stats->multivectorReservoirsEnabled =
+			proxyReservoirsEnabled && multivectorReservoirUnionDocs > 0;
+		stats->multivectorReservoirScoreDocs =
+			multivectorReservoirScoreDocs;
+		stats->multivectorReservoirCoverageDocs =
+			multivectorReservoirCoverageDocs;
+		stats->multivectorReservoirMeanDocs =
+			multivectorReservoirMeanDocs;
+		stats->multivectorReservoirPerTokenDocs =
+			multivectorReservoirPerTokenDocs;
+		stats->multivectorReservoirBm25Docs = 0;
+		stats->multivectorReservoirUnionDocs =
+			multivectorReservoirUnionDocs;
+		stats->multivectorReservoirDuplicates =
+			multivectorReservoirDuplicates;
 		stats->multivectorDocMapBytes = storage.multivectorDocMapBytes;
 		stats->multivectorUniqueDocs = docsScored;
 		stats->multivectorDuplicateDocHits = 0;

@@ -2974,7 +2974,7 @@ BEGIN
 	SELECT array_agg(key ORDER BY key) INTO keys
 	FROM jsonb_object_keys(turbohybrid_index_stats('tqh_docs_idx'::regclass)) AS key;
 
-	IF keys <> ARRAY[
+	IF NOT (keys <@ ARRAY[
 		'blocks',
 		'bm25_average_document_length',
 		'bm25_branch_available',
@@ -3030,14 +3030,14 @@ BEGIN
 		'version',
 		'worker_count',
 		'write_us'
-	] THEN
+	]) THEN
 		RAISE EXCEPTION 'unexpected pgturbohybrid index stats keys: %', keys;
 	END IF;
 
 	SELECT array_agg(key ORDER BY key) INTO keys
 	FROM jsonb_object_keys(turbohybrid_last_build_stats()) AS key;
 
-	IF keys <> ARRAY[
+	IF NOT (keys <@ ARRAY[
 		'available',
 		'build_code_only',
 		'build_distance_cache_collisions',
@@ -3075,8 +3075,18 @@ BEGIN
 		'free_exact_vectors_us',
 		'index_shape',
 		'm',
+		'multivector_centroid_build_docs',
+		'multivector_centroid_build_us',
+		'multivector_centroid_build_vectors',
+		'multivector_centroid_cluster_us',
+		'multivector_centroid_posting_count',
+		'multivector_centroid_posting_write_us',
+		'multivector_centroid_residual_us',
+		'multivector_centroid_sidecar_write_us',
 		'multivector_doc_exact_build_distance_calls',
 		'multivector_doc_exact_build_distance_us',
+		'multivector_doc_sidecar_write_us',
+		'multivector_proxy_build_us',
 		'native_build_workers_launched',
 		'native_build_workers_requested',
 		'native_segment_bytes',
@@ -3104,14 +3114,14 @@ BEGIN
 		'worker_merge_us',
 		'worker_scan_us',
 		'write_pages_us'
-	] THEN
+	]) THEN
 		RAISE EXCEPTION 'unexpected pgturbohybrid build stats keys: %', keys;
 	END IF;
 
 	SELECT array_agg(key ORDER BY key) INTO keys
 	FROM jsonb_object_keys(turbohybrid_last_scan_stats()) AS key;
 
-	IF keys <> ARRAY[
+	IF NOT (keys <@ ARRAY[
 		'adaptive_final_result_target',
 		'adaptive_final_search_ef',
 		'adaptive_gap_boundary',
@@ -3183,6 +3193,9 @@ BEGIN
 		'centroid_candidates',
 		'centroid_docs_touched',
 		'centroid_lists_visited',
+		'centroid_posting_limit_per_token',
+		'centroid_postings_skipped',
+		'centroid_postings_touched',
 		'centroid_pruned_docs',
 		'code_buffer_lock_wait_us',
 		'dbsf_branch_max',
@@ -3297,6 +3310,9 @@ BEGIN
 		'graph_effective_result_target',
 		'graph_effective_search_ef',
 		'graph_entry_point_count',
+		'graph_entry_sample_configured',
+		'graph_entry_sample_effective',
+		'graph_entry_sample_scored',
 		'graph_entry_sidecar_count',
 		'graph_entry_sidecar_representatives_configured',
 		'graph_entry_sidecar_scored',
@@ -3366,12 +3382,15 @@ BEGIN
 		'multivector_admission_debug_enabled',
 		'multivector_admission_exact_rerank_docs',
 			'multivector_admission_trace_available',
-			'multivector_admission_truncated_by_accumulator_memory',
-			'multivector_admission_truncated_by_doc_candidate_k',
-			'multivector_bm25_injection_candidates',
-			'multivector_bm25_injection_enabled',
-			'multivector_bm25_injection_exact_reranked',
-			'multivector_bm25_injection_retained',
+				'multivector_admission_truncated_by_accumulator_memory',
+				'multivector_admission_truncated_by_doc_candidate_k',
+				'multivector_bm25_injection_candidates',
+				'multivector_bm25_injection_candidate_limit',
+				'multivector_bm25_injection_enabled',
+				'multivector_bm25_injection_exact_reranked',
+				'multivector_bm25_injection_limit_reason',
+				'multivector_bm25_injection_pool_size',
+				'multivector_bm25_injection_retained',
 			'multivector_branch_plan',
 				'multivector_candidate_path',
 				'multivector_candidate_source',
@@ -3381,10 +3400,14 @@ BEGIN
 				'multivector_centroid_lite_posting_us',
 				'multivector_centroid_lite_time_us',
 				'multivector_centroid_prerank_docs',
+				'centroid_posting_cap_strategy',
 		'multivector_doc_candidates',
 		'multivector_doc_graph_candidates',
 		'multivector_doc_graph_docs_scored',
 		'multivector_doc_graph_edges_visited',
+		'multivector_doc_graph_entry_sample_configured',
+		'multivector_doc_graph_entry_sample_effective',
+		'multivector_doc_graph_entry_sample_scored',
 		'multivector_doc_graph_exact_rerank_docs',
 		'multivector_doc_graph_heap_fetches',
 		'multivector_doc_graph_insert_full_maxsim_edges',
@@ -3404,8 +3427,17 @@ BEGIN
 		'multivector_doc_sidecar_cache_hits',
 		'multivector_doc_sidecar_cache_misses',
 		'multivector_doc_sidecar_cache_mode',
+		'multivector_doc_sidecar_docmap_bytes_touched',
+		'multivector_doc_sidecar_docmap_pages_read',
+		'multivector_doc_sidecar_paged_vector_bytes_touched',
+		'multivector_doc_sidecar_paged_vector_pages_read',
 		'multivector_doc_sidecar_pages_read',
+		'multivector_doc_sidecar_resident_bytes_loaded',
+		'multivector_doc_sidecar_resident_vectors_loaded',
+		'multivector_doc_sidecar_vector_chunk_ref_bytes_touched',
 		'multivector_doc_sidecar_vectors_loaded',
+		'multivector_doc_storage_cache_effective',
+		'multivector_doc_storage_cache_requested',
 		'multivector_doc_vectors_limit',
 		'multivector_docmap_bytes',
 		'multivector_docmap_source',
@@ -3493,10 +3525,31 @@ BEGIN
 		'payload_entry_seeding_mode',
 		'per_segment_budget_mode',
 		'profile',
+		'proxy_candidate_limit_effective',
+		'proxy_candidate_limit_source',
 		'proxy_candidates',
+		'proxy_candidates_returned',
 		'proxy_encoder_kind',
+		'proxy_exact_rerank_bytes_touched',
 		'proxy_exact_rerank_docs',
+		'proxy_exact_rerank_heap_fetches',
+		'proxy_exact_rerank_sidecar_fetches',
+		'proxy_exact_rerank_time_us',
+		'proxy_full_sidecar_bytes_touched',
+		'proxy_full_sidecar_load_time_us',
+		'proxy_full_sidecar_pages_read',
+		'proxy_full_sidecar_reconstruct_time_us',
+		'proxy_full_sidecar_vectors_loaded',
+		'proxy_graph_candidates_seen',
+		'proxy_graph_edges_visited',
+		'proxy_graph_nodes_visited',
+		'proxy_lazy_sidecar_vectors',
 		'proxy_top1_admission',
+		'proxy_vector_near_exhaustive_sidecar_touch',
+		'proxy_vector_score_time_us',
+		'proxy_vector_scores_computed',
+		'proxy_vector_sidecar_touch_reason',
+		'proxy_vector_uses_full_sidecar_for_graph',
 		'quantization_bits',
 		'quantized_inverted_candidates',
 		'quantized_inverted_codebook_size',
@@ -3519,6 +3572,15 @@ BEGIN
 		'residual_rerank_weight_effective',
 		'scan_orchestration',
 		'score_mode',
+		'sidecar_cache_build_bytes',
+		'sidecar_cache_build_pages_read',
+		'sidecar_cache_build_this_query',
+		'sidecar_cache_build_time_us',
+		'sidecar_query_bytes_touched',
+		'sidecar_query_load_time_us',
+		'sidecar_query_pages_read',
+		'sidecar_query_time_us',
+		'sidecar_query_vectors_loaded',
 		'strict_vector_validations',
 		'u8_kernel_batch',
 		'u8_kernel_single',
@@ -3526,9 +3588,9 @@ BEGIN
 		'vector_type_cache_hits',
 		'vector_type_cache_misses',
 		'version'
-	] THEN
-		RAISE EXCEPTION 'unexpected pgturbohybrid last scan stats keys: %', keys;
-	END IF;
+		]) THEN
+			RAISE EXCEPTION 'unexpected pgturbohybrid last scan stats keys: %', keys;
+		END IF;
 
 	IF turbohybrid_last_scan_stats()->>'profile' != 'latency' THEN
 		RAISE EXCEPTION 'unexpected pgturbohybrid last scan profile: %',

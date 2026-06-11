@@ -27,7 +27,9 @@ Current executable status:
 - Document-node indexes persist experimental codeword posting tuples in the
   multivector docmap sidecar. Query tokens are assigned deterministic
   codewords, matching persisted postings are accumulated into approximate
-  document scores, and candidates are exact-reranked with heap MaxSim.
+  document scores, and candidates are exact-reranked with heap MaxSim. The
+  scan validates document vectors lazily for touched postings rather than
+  pre-validating every document in the sidecar.
 - Token-node indexes fail explicitly with `feature_not_supported` because the
   branch needs document sidecar vectors for exact rerank.
 - Plain fallback is bypassed when the branch is selected so benchmark output

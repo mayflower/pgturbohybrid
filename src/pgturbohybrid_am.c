@@ -152,6 +152,7 @@ int			pgturbohybrid_multivector_doc_candidate_k = 100;
 int			pgturbohybrid_multivector_doc_graph_search_ef = 0;
 int			pgturbohybrid_multivector_doc_graph_oversampling = 1;
 int			pgturbohybrid_multivector_doc_graph_rescore_k = 0;
+int			pgturbohybrid_multivector_doc_graph_entry_sample_count = 0;
 int			pgturbohybrid_multivector_doc_storage =
 	PGTURBOHYBRID_MULTIVECTOR_DOC_STORAGE_F32;
 int			pgturbohybrid_multivector_doc_storage_cache =
@@ -184,6 +185,7 @@ int			pgturbohybrid_multivector_sparse_candidate_source =
 	PGTURBOHYBRID_MULTIVECTOR_SPARSE_CANDIDATE_SOURCE_OFF;
 int			pgturbohybrid_multivector_branch_plan =
 	PGTURBOHYBRID_BRANCH_PLAN_AUTO;
+int			pgturbohybrid_multivector_centroid_lite_max_postings_per_token = 0;
 static bool pgturbohybrid_bm25_strategy_user_set = false;
 static bool pgturbohybrid_bm25_impact_or_mode_user_set = false;
 static bool pgturbohybrid_bm25_hot_postings_cache_mb_user_set = false;
@@ -1322,6 +1324,9 @@ typedef struct PgturbohybridLastScanStats
 	uint32		multivectorDocGraphSearchEf;
 	uint32		multivectorDocGraphOversampling;
 	uint32		multivectorDocGraphRescoreK;
+	uint32		multivectorDocGraphEntrySampleConfigured;
+	uint32		multivectorDocGraphEntrySampleEffective;
+	uint32		multivectorDocGraphEntrySampleScored;
 	uint64		multivectorDocGraphQuantizedScores;
 	char		multivectorDocGraphStorageKind[16];
 	char		multivectorDocGraphRescoreSource[16];
@@ -1331,12 +1336,48 @@ typedef struct PgturbohybridLastScanStats
 	uint32		multivectorProxyCandidateTarget;
 	uint32		multivectorProxyCandidatesReturned;
 	uint32		multivectorExactRerankKEffective;
+	uint32		proxyCandidateLimitEffective;
+	char		proxyCandidateLimitSource[32];
+	uint64		proxyGraphNodesVisited;
+	uint64		proxyGraphEdgesVisited;
+	uint32		proxyGraphCandidatesSeen;
+	uint32		proxyCandidatesReturned;
+	uint64		proxyVectorScoresComputed;
+	uint64		proxyVectorScoreUs;
 	uint32		proxyCandidates;
+	bool		proxyLazySidecarVectors;
+	char		multivectorDocStorageCacheRequested[16];
+	char		multivectorDocStorageCacheEffective[16];
 	bool		proxyTop1Admission;
 	uint32		proxyExactRerankDocs;
+	uint64		proxyFullSidecarVectorsLoaded;
+	uint64		proxyFullSidecarBytesTouched;
+	uint64		proxyFullSidecarPagesRead;
+	uint64		proxyFullSidecarLoadUs;
+	uint64		proxyFullSidecarReconstructUs;
+	uint64		proxyExactRerankHeapFetches;
+	uint64		proxyExactRerankSidecarFetches;
+	uint64		proxyExactRerankBytesTouched;
+	uint64		proxyExactRerankUs;
+	bool		sidecarCacheBuildThisQuery;
+	uint64		sidecarCacheBuildBytes;
+	uint64		sidecarCacheBuildPagesRead;
+	uint64		sidecarCacheBuildUs;
+	uint64		sidecarQueryBytesTouched;
+	uint64		sidecarQueryPagesRead;
+	uint64		sidecarQueryVectorsLoaded;
+	uint64		sidecarQueryLoadUs;
+	uint64		sidecarQueryUs;
+	bool		proxyVectorUsesFullSidecarForGraph;
+	bool		proxyVectorNearExhaustiveSidecarTouch;
+	char		proxyVectorSidecarTouchReason[64];
 	uint64		centroidListsVisited;
 	uint64		centroidDocsTouched;
 	uint64		centroidPrunedDocs;
+	uint64		centroidPostingsTouched;
+	uint64		centroidPostingsSkipped;
+	uint32		centroidPostingLimitPerToken;
+	char		centroidPostingCapStrategy[32];
 	uint32		centroidCandidates;
 	uint32		multivectorCentroidCount;
 	uint32		multivectorCentroidPrerankDocs;
@@ -1356,6 +1397,13 @@ typedef struct PgturbohybridLastScanStats
 	uint64		multivectorDocSidecarCacheMisses;
 	uint64		multivectorDocSidecarBytesTouched;
 	uint64		multivectorDocSidecarVectorsLoaded;
+	uint64		multivectorDocSidecarDocMapPagesRead;
+	uint64		multivectorDocSidecarDocMapBytesTouched;
+	uint64		multivectorDocSidecarResidentVectorsLoaded;
+	uint64		multivectorDocSidecarResidentBytesLoaded;
+	uint64		multivectorDocSidecarVectorChunkRefBytesTouched;
+	uint64		multivectorDocSidecarPagedVectorPagesRead;
+	uint64		multivectorDocSidecarPagedVectorBytesTouched;
 	uint64		multivectorSidecarPageReadUs;
 	uint64		multivectorSidecarVectorReconstructUs;
 	uint64		multivectorTokensOriginal;
@@ -1370,6 +1418,9 @@ typedef struct PgturbohybridLastScanStats
 	uint32		multivectorReservoirDuplicates;
 	bool		multivectorBm25InjectionEnabled;
 	uint32		multivectorBm25InjectionCandidates;
+	uint32		multivectorBm25InjectionCandidateLimit;
+	uint32		multivectorBm25InjectionPoolSize;
+	char		multivectorBm25InjectionLimitReason[32];
 	uint32		multivectorBm25InjectionRetained;
 	uint32		multivectorBm25InjectionExactReranked;
 	uint32		learnedSparseCandidates;
@@ -1746,6 +1797,12 @@ PgturbohybridGetLastScanStatsSnapshot(PgturbohybridScanStatsSnapshot *stats)
 		pgturbohybrid_last_scan_state.multivectorDocGraphOversampling;
 	stats->multivectorDocGraphRescoreK =
 		pgturbohybrid_last_scan_state.multivectorDocGraphRescoreK;
+	stats->multivectorDocGraphEntrySampleConfigured =
+		pgturbohybrid_last_scan_state.multivectorDocGraphEntrySampleConfigured;
+	stats->multivectorDocGraphEntrySampleEffective =
+		pgturbohybrid_last_scan_state.multivectorDocGraphEntrySampleEffective;
+	stats->multivectorDocGraphEntrySampleScored =
+		pgturbohybrid_last_scan_state.multivectorDocGraphEntrySampleScored;
 	stats->multivectorDocGraphQuantizedScores =
 		pgturbohybrid_last_scan_state.multivectorDocGraphQuantizedScores;
 	strlcpy(stats->multivectorDocGraphStorageKind,
@@ -1767,18 +1824,95 @@ PgturbohybridGetLastScanStatsSnapshot(PgturbohybridScanStatsSnapshot *stats)
 		pgturbohybrid_last_scan_state.multivectorProxyCandidatesReturned;
 	stats->multivectorExactRerankKEffective =
 		pgturbohybrid_last_scan_state.multivectorExactRerankKEffective;
+	stats->proxyCandidateLimitEffective =
+		pgturbohybrid_last_scan_state.proxyCandidateLimitEffective;
+	strlcpy(stats->proxyCandidateLimitSource,
+			pgturbohybrid_last_scan_state.proxyCandidateLimitSource,
+			sizeof(stats->proxyCandidateLimitSource));
+	stats->proxyGraphNodesVisited =
+		pgturbohybrid_last_scan_state.proxyGraphNodesVisited;
+	stats->proxyGraphEdgesVisited =
+		pgturbohybrid_last_scan_state.proxyGraphEdgesVisited;
+	stats->proxyGraphCandidatesSeen =
+		pgturbohybrid_last_scan_state.proxyGraphCandidatesSeen;
+	stats->proxyCandidatesReturned =
+		pgturbohybrid_last_scan_state.proxyCandidatesReturned;
+	stats->proxyVectorScoresComputed =
+		pgturbohybrid_last_scan_state.proxyVectorScoresComputed;
+	stats->proxyVectorScoreUs =
+		pgturbohybrid_last_scan_state.proxyVectorScoreUs;
 	stats->proxyCandidates =
 		pgturbohybrid_last_scan_state.proxyCandidates;
+	stats->proxyLazySidecarVectors =
+		pgturbohybrid_last_scan_state.proxyLazySidecarVectors;
+	strlcpy(stats->multivectorDocStorageCacheRequested,
+			pgturbohybrid_last_scan_state.multivectorDocStorageCacheRequested,
+			sizeof(stats->multivectorDocStorageCacheRequested));
+	strlcpy(stats->multivectorDocStorageCacheEffective,
+			pgturbohybrid_last_scan_state.multivectorDocStorageCacheEffective,
+			sizeof(stats->multivectorDocStorageCacheEffective));
 	stats->proxyTop1Admission =
 		pgturbohybrid_last_scan_state.proxyTop1Admission;
 	stats->proxyExactRerankDocs =
 		pgturbohybrid_last_scan_state.proxyExactRerankDocs;
+	stats->proxyFullSidecarVectorsLoaded =
+		pgturbohybrid_last_scan_state.proxyFullSidecarVectorsLoaded;
+	stats->proxyFullSidecarBytesTouched =
+		pgturbohybrid_last_scan_state.proxyFullSidecarBytesTouched;
+	stats->proxyFullSidecarPagesRead =
+		pgturbohybrid_last_scan_state.proxyFullSidecarPagesRead;
+	stats->proxyFullSidecarLoadUs =
+		pgturbohybrid_last_scan_state.proxyFullSidecarLoadUs;
+	stats->proxyFullSidecarReconstructUs =
+		pgturbohybrid_last_scan_state.proxyFullSidecarReconstructUs;
+	stats->proxyExactRerankHeapFetches =
+		pgturbohybrid_last_scan_state.proxyExactRerankHeapFetches;
+	stats->proxyExactRerankSidecarFetches =
+		pgturbohybrid_last_scan_state.proxyExactRerankSidecarFetches;
+	stats->proxyExactRerankBytesTouched =
+		pgturbohybrid_last_scan_state.proxyExactRerankBytesTouched;
+	stats->proxyExactRerankUs =
+		pgturbohybrid_last_scan_state.proxyExactRerankUs;
+	stats->sidecarCacheBuildThisQuery =
+		pgturbohybrid_last_scan_state.sidecarCacheBuildThisQuery;
+	stats->sidecarCacheBuildBytes =
+		pgturbohybrid_last_scan_state.sidecarCacheBuildBytes;
+	stats->sidecarCacheBuildPagesRead =
+		pgturbohybrid_last_scan_state.sidecarCacheBuildPagesRead;
+	stats->sidecarCacheBuildUs =
+		pgturbohybrid_last_scan_state.sidecarCacheBuildUs;
+	stats->sidecarQueryBytesTouched =
+		pgturbohybrid_last_scan_state.sidecarQueryBytesTouched;
+	stats->sidecarQueryPagesRead =
+		pgturbohybrid_last_scan_state.sidecarQueryPagesRead;
+	stats->sidecarQueryVectorsLoaded =
+		pgturbohybrid_last_scan_state.sidecarQueryVectorsLoaded;
+	stats->sidecarQueryLoadUs =
+		pgturbohybrid_last_scan_state.sidecarQueryLoadUs;
+	stats->sidecarQueryUs =
+		pgturbohybrid_last_scan_state.sidecarQueryUs;
+	stats->proxyVectorUsesFullSidecarForGraph =
+		pgturbohybrid_last_scan_state.proxyVectorUsesFullSidecarForGraph;
+	stats->proxyVectorNearExhaustiveSidecarTouch =
+		pgturbohybrid_last_scan_state.proxyVectorNearExhaustiveSidecarTouch;
+	strlcpy(stats->proxyVectorSidecarTouchReason,
+			pgturbohybrid_last_scan_state.proxyVectorSidecarTouchReason,
+			sizeof(stats->proxyVectorSidecarTouchReason));
 	stats->centroidListsVisited =
 		pgturbohybrid_last_scan_state.centroidListsVisited;
 	stats->centroidDocsTouched =
 		pgturbohybrid_last_scan_state.centroidDocsTouched;
 	stats->centroidPrunedDocs =
 		pgturbohybrid_last_scan_state.centroidPrunedDocs;
+	stats->centroidPostingsTouched =
+		pgturbohybrid_last_scan_state.centroidPostingsTouched;
+	stats->centroidPostingsSkipped =
+		pgturbohybrid_last_scan_state.centroidPostingsSkipped;
+	stats->centroidPostingLimitPerToken =
+		pgturbohybrid_last_scan_state.centroidPostingLimitPerToken;
+	strlcpy(stats->centroidPostingCapStrategy,
+			pgturbohybrid_last_scan_state.centroidPostingCapStrategy,
+			sizeof(stats->centroidPostingCapStrategy));
 	stats->centroidCandidates =
 		pgturbohybrid_last_scan_state.centroidCandidates;
 	stats->multivectorCentroidCount =
@@ -1818,6 +1952,20 @@ PgturbohybridGetLastScanStatsSnapshot(PgturbohybridScanStatsSnapshot *stats)
 		pgturbohybrid_last_scan_state.multivectorDocSidecarBytesTouched;
 	stats->multivectorDocSidecarVectorsLoaded =
 		pgturbohybrid_last_scan_state.multivectorDocSidecarVectorsLoaded;
+	stats->multivectorDocSidecarDocMapPagesRead =
+		pgturbohybrid_last_scan_state.multivectorDocSidecarDocMapPagesRead;
+	stats->multivectorDocSidecarDocMapBytesTouched =
+		pgturbohybrid_last_scan_state.multivectorDocSidecarDocMapBytesTouched;
+	stats->multivectorDocSidecarResidentVectorsLoaded =
+		pgturbohybrid_last_scan_state.multivectorDocSidecarResidentVectorsLoaded;
+	stats->multivectorDocSidecarResidentBytesLoaded =
+		pgturbohybrid_last_scan_state.multivectorDocSidecarResidentBytesLoaded;
+	stats->multivectorDocSidecarVectorChunkRefBytesTouched =
+		pgturbohybrid_last_scan_state.multivectorDocSidecarVectorChunkRefBytesTouched;
+	stats->multivectorDocSidecarPagedVectorPagesRead =
+		pgturbohybrid_last_scan_state.multivectorDocSidecarPagedVectorPagesRead;
+	stats->multivectorDocSidecarPagedVectorBytesTouched =
+		pgturbohybrid_last_scan_state.multivectorDocSidecarPagedVectorBytesTouched;
 	stats->multivectorSidecarPageReadUs =
 		pgturbohybrid_last_scan_state.multivectorSidecarPageReadUs;
 	stats->multivectorSidecarVectorReconstructUs =
@@ -1846,6 +1994,13 @@ PgturbohybridGetLastScanStatsSnapshot(PgturbohybridScanStatsSnapshot *stats)
 		pgturbohybrid_last_scan_state.multivectorBm25InjectionEnabled;
 	stats->multivectorBm25InjectionCandidates =
 		pgturbohybrid_last_scan_state.multivectorBm25InjectionCandidates;
+	stats->multivectorBm25InjectionCandidateLimit =
+		pgturbohybrid_last_scan_state.multivectorBm25InjectionCandidateLimit;
+	stats->multivectorBm25InjectionPoolSize =
+		pgturbohybrid_last_scan_state.multivectorBm25InjectionPoolSize;
+	strlcpy(stats->multivectorBm25InjectionLimitReason,
+			pgturbohybrid_last_scan_state.multivectorBm25InjectionLimitReason,
+			sizeof(stats->multivectorBm25InjectionLimitReason));
 	stats->multivectorBm25InjectionRetained =
 		pgturbohybrid_last_scan_state.multivectorBm25InjectionRetained;
 	stats->multivectorBm25InjectionExactReranked =
@@ -4464,6 +4619,10 @@ PgturbohybridInjectMultiVectorBm25Candidates(IndexScanDesc scan,
 		return;
 	denseStats->multivectorBm25InjectionEnabled = false;
 	denseStats->multivectorBm25InjectionCandidates = 0;
+	denseStats->multivectorBm25InjectionCandidateLimit = 0;
+	denseStats->multivectorBm25InjectionPoolSize = 0;
+	strlcpy(denseStats->multivectorBm25InjectionLimitReason, "not_applicable",
+			sizeof(denseStats->multivectorBm25InjectionLimitReason));
 	denseStats->multivectorBm25InjectionRetained = 0;
 	denseStats->multivectorBm25InjectionExactReranked = 0;
 	denseStats->learnedSparseCandidates = 0;
@@ -4499,18 +4658,45 @@ PgturbohybridInjectMultiVectorBm25Candidates(IndexScanDesc scan,
 	if (learnedSparse)
 		denseStats->learnedSparseCandidates = (uint32) bm25Count;
 
-	candidateLimit = Max(*denseCount,
-						 PgturbohybridBudgetFinalTarget(query,
-														autoBudgetLimit));
+	candidateLimit = PgturbohybridBudgetFinalTarget(query, autoBudgetLimit);
+	if (*denseCount >= candidateLimit)
+	{
+		candidateLimit = *denseCount;
+		strlcpy(denseStats->multivectorBm25InjectionLimitReason, "dense_count",
+				sizeof(denseStats->multivectorBm25InjectionLimitReason));
+	}
+	else
+		strlcpy(denseStats->multivectorBm25InjectionLimitReason,
+				"final_target",
+				sizeof(denseStats->multivectorBm25InjectionLimitReason));
 	if (candidateLimit <= 0)
+	{
 		candidateLimit = bm25Count;
+		strlcpy(denseStats->multivectorBm25InjectionLimitReason, "bm25_count",
+				sizeof(denseStats->multivectorBm25InjectionLimitReason));
+	}
 	if (pgturbohybrid_multivector_doc_candidate_k > 0)
-		candidateLimit = Min(candidateLimit,
-							 pgturbohybrid_multivector_doc_candidate_k);
+	{
+		if (candidateLimit > pgturbohybrid_multivector_doc_candidate_k)
+		{
+			candidateLimit = pgturbohybrid_multivector_doc_candidate_k;
+			strlcpy(denseStats->multivectorBm25InjectionLimitReason,
+					"doc_candidate_k",
+					sizeof(denseStats->multivectorBm25InjectionLimitReason));
+		}
+	}
 	if (pgturbohybrid_multivector_exact_rerank_k > 0)
-		candidateLimit = Min(candidateLimit,
-							 pgturbohybrid_multivector_exact_rerank_k);
+	{
+		if (candidateLimit > pgturbohybrid_multivector_exact_rerank_k)
+		{
+			candidateLimit = pgturbohybrid_multivector_exact_rerank_k;
+			strlcpy(denseStats->multivectorBm25InjectionLimitReason,
+					"exact_rerank_k",
+					sizeof(denseStats->multivectorBm25InjectionLimitReason));
+		}
+	}
 	candidateLimit = Max(candidateLimit, 1);
+	denseStats->multivectorBm25InjectionCandidateLimit = (uint32) candidateLimit;
 
 	pool = MemoryContextAllocZero(memoryContext,
 								  sizeof(*pool) *
@@ -4582,6 +4768,7 @@ PgturbohybridInjectMultiVectorBm25Candidates(IndexScanDesc scan,
 	if (poolCount > 1)
 		qsort(pool, poolCount, sizeof(*pool),
 			  PgturbohybridMultiVectorBm25InjectionCompare);
+	denseStats->multivectorBm25InjectionPoolSize = (uint32) poolCount;
 
 	newDenseCount = Min(poolCount, candidateLimit);
 	newDense = MemoryContextAllocZero(memoryContext,
@@ -5699,6 +5886,12 @@ PgturbohybridCollectScanResults(IndexScanDesc scan, PgturbohybridScanState *stat
 		denseStats.multivectorDocGraphOversampling;
 	lastStats.multivectorDocGraphRescoreK =
 		denseStats.multivectorDocGraphRescoreK;
+	lastStats.multivectorDocGraphEntrySampleConfigured =
+		denseStats.multivectorDocGraphEntrySampleConfigured;
+	lastStats.multivectorDocGraphEntrySampleEffective =
+		denseStats.multivectorDocGraphEntrySampleEffective;
+	lastStats.multivectorDocGraphEntrySampleScored =
+		denseStats.multivectorDocGraphEntrySampleScored;
 	lastStats.multivectorDocGraphQuantizedScores =
 		denseStats.multivectorDocGraphQuantizedScores;
 	strlcpy(lastStats.multivectorDocGraphStorageKind,
@@ -5720,12 +5913,74 @@ PgturbohybridCollectScanResults(IndexScanDesc scan, PgturbohybridScanState *stat
 		denseStats.multivectorProxyCandidatesReturned;
 	lastStats.multivectorExactRerankKEffective =
 		denseStats.multivectorExactRerankKEffective;
+	lastStats.proxyCandidateLimitEffective =
+		denseStats.proxyCandidateLimitEffective;
+	strlcpy(lastStats.proxyCandidateLimitSource,
+			denseStats.proxyCandidateLimitSource,
+			sizeof(lastStats.proxyCandidateLimitSource));
+	lastStats.proxyGraphNodesVisited = denseStats.proxyGraphNodesVisited;
+	lastStats.proxyGraphEdgesVisited = denseStats.proxyGraphEdgesVisited;
+	lastStats.proxyGraphCandidatesSeen = denseStats.proxyGraphCandidatesSeen;
+	lastStats.proxyCandidatesReturned = denseStats.proxyCandidatesReturned;
+	lastStats.proxyVectorScoresComputed = denseStats.proxyVectorScoresComputed;
+	lastStats.proxyVectorScoreUs = denseStats.proxyVectorScoreUs;
 	lastStats.proxyCandidates = denseStats.proxyCandidates;
+	lastStats.proxyLazySidecarVectors = denseStats.proxyLazySidecarVectors;
+	strlcpy(lastStats.multivectorDocStorageCacheRequested,
+			denseStats.multivectorDocStorageCacheRequested,
+			sizeof(lastStats.multivectorDocStorageCacheRequested));
+	strlcpy(lastStats.multivectorDocStorageCacheEffective,
+			denseStats.multivectorDocStorageCacheEffective,
+			sizeof(lastStats.multivectorDocStorageCacheEffective));
 	lastStats.proxyTop1Admission = denseStats.proxyTop1Admission;
 	lastStats.proxyExactRerankDocs = denseStats.proxyExactRerankDocs;
+	lastStats.proxyFullSidecarVectorsLoaded =
+		denseStats.proxyFullSidecarVectorsLoaded;
+	lastStats.proxyFullSidecarBytesTouched =
+		denseStats.proxyFullSidecarBytesTouched;
+	lastStats.proxyFullSidecarPagesRead =
+		denseStats.proxyFullSidecarPagesRead;
+	lastStats.proxyFullSidecarLoadUs =
+		denseStats.proxyFullSidecarLoadUs;
+	lastStats.proxyFullSidecarReconstructUs =
+		denseStats.proxyFullSidecarReconstructUs;
+	lastStats.proxyExactRerankHeapFetches =
+		denseStats.proxyExactRerankHeapFetches;
+	lastStats.proxyExactRerankSidecarFetches =
+		denseStats.proxyExactRerankSidecarFetches;
+	lastStats.proxyExactRerankBytesTouched =
+		denseStats.proxyExactRerankBytesTouched;
+	lastStats.proxyExactRerankUs = denseStats.proxyExactRerankUs;
+	lastStats.sidecarCacheBuildThisQuery =
+		denseStats.sidecarCacheBuildThisQuery;
+	lastStats.sidecarCacheBuildBytes = denseStats.sidecarCacheBuildBytes;
+	lastStats.sidecarCacheBuildPagesRead =
+		denseStats.sidecarCacheBuildPagesRead;
+	lastStats.sidecarCacheBuildUs = denseStats.sidecarCacheBuildUs;
+	lastStats.sidecarQueryBytesTouched =
+		denseStats.sidecarQueryBytesTouched;
+	lastStats.sidecarQueryPagesRead = denseStats.sidecarQueryPagesRead;
+	lastStats.sidecarQueryVectorsLoaded =
+		denseStats.sidecarQueryVectorsLoaded;
+	lastStats.sidecarQueryLoadUs = denseStats.sidecarQueryLoadUs;
+	lastStats.sidecarQueryUs = denseStats.sidecarQueryUs;
+	lastStats.proxyVectorUsesFullSidecarForGraph =
+		denseStats.proxyVectorUsesFullSidecarForGraph;
+	lastStats.proxyVectorNearExhaustiveSidecarTouch =
+		denseStats.proxyVectorNearExhaustiveSidecarTouch;
+	strlcpy(lastStats.proxyVectorSidecarTouchReason,
+			denseStats.proxyVectorSidecarTouchReason,
+			sizeof(lastStats.proxyVectorSidecarTouchReason));
 	lastStats.centroidListsVisited = denseStats.centroidListsVisited;
 	lastStats.centroidDocsTouched = denseStats.centroidDocsTouched;
 	lastStats.centroidPrunedDocs = denseStats.centroidPrunedDocs;
+	lastStats.centroidPostingsTouched = denseStats.centroidPostingsTouched;
+	lastStats.centroidPostingsSkipped = denseStats.centroidPostingsSkipped;
+	lastStats.centroidPostingLimitPerToken =
+		denseStats.centroidPostingLimitPerToken;
+	strlcpy(lastStats.centroidPostingCapStrategy,
+			denseStats.centroidPostingCapStrategy,
+			sizeof(lastStats.centroidPostingCapStrategy));
 	lastStats.centroidCandidates = denseStats.centroidCandidates;
 	lastStats.multivectorCentroidCount =
 		denseStats.multivectorCentroidCount;
@@ -5764,6 +6019,20 @@ PgturbohybridCollectScanResults(IndexScanDesc scan, PgturbohybridScanState *stat
 		denseStats.multivectorDocSidecarBytesTouched;
 	lastStats.multivectorDocSidecarVectorsLoaded =
 		denseStats.multivectorDocSidecarVectorsLoaded;
+	lastStats.multivectorDocSidecarDocMapPagesRead =
+		denseStats.multivectorDocSidecarDocMapPagesRead;
+	lastStats.multivectorDocSidecarDocMapBytesTouched =
+		denseStats.multivectorDocSidecarDocMapBytesTouched;
+	lastStats.multivectorDocSidecarResidentVectorsLoaded =
+		denseStats.multivectorDocSidecarResidentVectorsLoaded;
+	lastStats.multivectorDocSidecarResidentBytesLoaded =
+		denseStats.multivectorDocSidecarResidentBytesLoaded;
+	lastStats.multivectorDocSidecarVectorChunkRefBytesTouched =
+		denseStats.multivectorDocSidecarVectorChunkRefBytesTouched;
+	lastStats.multivectorDocSidecarPagedVectorPagesRead =
+		denseStats.multivectorDocSidecarPagedVectorPagesRead;
+	lastStats.multivectorDocSidecarPagedVectorBytesTouched =
+		denseStats.multivectorDocSidecarPagedVectorBytesTouched;
 	lastStats.multivectorSidecarPageReadUs =
 		denseStats.multivectorSidecarPageReadUs;
 	lastStats.multivectorSidecarVectorReconstructUs =
@@ -5792,6 +6061,13 @@ PgturbohybridCollectScanResults(IndexScanDesc scan, PgturbohybridScanState *stat
 		denseStats.multivectorBm25InjectionEnabled;
 	lastStats.multivectorBm25InjectionCandidates =
 		denseStats.multivectorBm25InjectionCandidates;
+	lastStats.multivectorBm25InjectionCandidateLimit =
+		denseStats.multivectorBm25InjectionCandidateLimit;
+	lastStats.multivectorBm25InjectionPoolSize =
+		denseStats.multivectorBm25InjectionPoolSize;
+	strlcpy(lastStats.multivectorBm25InjectionLimitReason,
+			denseStats.multivectorBm25InjectionLimitReason,
+			sizeof(lastStats.multivectorBm25InjectionLimitReason));
 	lastStats.multivectorBm25InjectionRetained =
 		denseStats.multivectorBm25InjectionRetained;
 	lastStats.multivectorBm25InjectionExactReranked =
@@ -7180,7 +7456,7 @@ PgturbohybridInit(void)
 							 PGC_USERSET, 0, NULL, NULL, NULL);
 	DefineCustomEnumVariable("turbohybrid.multivector_doc_storage_cache",
 							 "Document-node multivector sidecar cache mode",
-							 "auto keeps the document sidecar resident for low-latency scans when it fits native_cache_max_mb and otherwise page-loads the sidecar through shared buffers; resident prefers the already loaded sidecar; paged reports per-scan sidecar page reads and bytes touched.",
+							 "auto keeps plain proxy_vector scans on the lazy paged sidecar path and may keep other low-latency document-node scans resident when the sidecar fits native_cache_max_mb; resident explicitly loads the sidecar; paged reports per-scan sidecar page reads and bytes touched.",
 							 &pgturbohybrid_multivector_doc_storage_cache,
 							 PGTURBOHYBRID_MULTIVECTOR_DOC_STORAGE_CACHE_AUTO,
 							 pgturbohybrid_multivector_doc_storage_cache_options,
@@ -7255,6 +7531,18 @@ PgturbohybridInit(void)
 							 PGTURBOHYBRID_BRANCH_PLAN_AUTO,
 							 pgturbohybrid_multivector_branch_plan_options,
 							 PGC_USERSET, 0, NULL, NULL, NULL);
+	DefineCustomIntVariable("turbohybrid.multivector_centroid_lite_max_postings_per_token",
+							"Maximum centroid_lite postings read per query token",
+							"Zero preserves the full experimental centroid_lite posting-list union; positive values cap each query-token posting list before exact MaxSim rerank so benchmarks can measure bounded admission tradeoffs.",
+							&pgturbohybrid_multivector_centroid_lite_max_postings_per_token,
+							0, 0, 10000000,
+							PGC_USERSET, 0, NULL, NULL, NULL);
+	DefineCustomIntVariable("turbohybrid.multivector_doc_graph_entry_sample_count",
+							"Document-node graph entry samples scored before traversal",
+							"Zero preserves the compiled default entry-sample cap. Positive values widen the deterministic proxy-entry sample used before document-node graph traversal without changing index storage.",
+							&pgturbohybrid_multivector_doc_graph_entry_sample_count,
+							0, 0, 1000000,
+							PGC_USERSET, 0, NULL, NULL, NULL);
 	DefineCustomEnumVariable("turbohybrid.multivector_plain_fallback",
 							 "Exact/plain heap fallback mode for multivector MaxSim scans",
 							 "auto uses exact heap MaxSim for small or near-exhaustive scans; off keeps the token candidate path; force always uses exact heap MaxSim.",

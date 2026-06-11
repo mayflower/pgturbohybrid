@@ -25,6 +25,7 @@
 #include "pgturbohybrid_quant.h"
 
 static PgturbohybridGraphNativeCache *pgturbohybridGraphCacheList = NULL;
+static PgturbohybridGraphDocSidecarCache *pgturbohybridGraphDocSidecarCacheList = NULL;
 
 #define PGTURBOHYBRID_GRAPH_SHARED_CACHE_MAGIC 0x54485343U
 #define PGTURBOHYBRID_GRAPH_SHARED_CACHE_VERSION 1U
@@ -135,8 +136,6 @@ PgturbohybridGraphNativeCacheMaxBytes(void)
 static bool
 PgturbohybridGraphShouldCacheMultiVectorDocSidecar(PgturbohybridGraphMetaPageData *meta)
 {
-	Size		cacheMaxBytes = PgturbohybridGraphNativeCacheMaxBytes();
-
 	if (meta->tqMultivectorGraphMode !=
 		PGTURBOHYBRID_MULTIVECTOR_GRAPH_DOCUMENT_NODES)
 		return true;
@@ -149,9 +148,15 @@ PgturbohybridGraphShouldCacheMultiVectorDocSidecar(PgturbohybridGraphMetaPageDat
 			return false;
 		case PGTURBOHYBRID_MULTIVECTOR_DOC_STORAGE_CACHE_AUTO:
 		default:
-			return pgturbohybrid_profile == PGTURBOHYBRID_PROFILE_LATENCY &&
-				cacheMaxBytes > 0 &&
-				(Size) meta->tqMultivectorDocMapBytes <= cacheMaxBytes;
+			/*
+			 * The native graph cache is shared/per-backend graph state.  In
+			 * document_nodes mode, auto must not silently materialize every
+			 * full document multivector before the candidate source is known;
+			 * proxy_vector can use a paged metadata cache and touch full
+			 * vectors only for bounded exact rerank.  Users can still force
+			 * full resident sidecar storage with the explicit resident mode.
+			 */
+			return false;
 	}
 }
 
@@ -962,6 +967,7 @@ PgturbohybridGraphLoadMultiVectorDocMapWithStats(Relation index,
 		if (stats != NULL)
 		{
 			stats->pagesRead++;
+			stats->docMapPagesRead++;
 			stats->cacheMisses++;
 			stats->pageReadUs +=
 				(uint64) PgturbohybridGraphElapsedUsSince(pageReadStart);
@@ -984,7 +990,10 @@ PgturbohybridGraphLoadMultiVectorDocMapWithStats(Relation index,
 			uint8		type = *((uint8 *) item);
 
 			if (stats != NULL)
+			{
 				stats->bytesTouched += itemSize;
+				stats->docMapBytesTouched += itemSize;
+			}
 			if (type ==
 				PGTURBOHYBRID_GRAPH_MULTIVECTOR_DOCMAP_NODE_TUPLE_TYPE)
 			{
@@ -1099,6 +1108,8 @@ PgturbohybridGraphLoadMultiVectorDocMapWithStats(Relation index,
 															 "document vector tuple range is invalid");
 				if (pagedDocVectors)
 				{
+					if (stats != NULL)
+						stats->vectorChunkRefBytesTouched += itemSize;
 					PgturbohybridGraphRememberMultiVectorDocVectorChunk(index,
 																		storage,
 																		tuple->docId,
@@ -1121,9 +1132,13 @@ PgturbohybridGraphLoadMultiVectorDocMapWithStats(Relation index,
 						mv->dim = meta->dimensions;
 						mv->count = entry->tokenCount;
 						storage->multivectorDocVectors[tuple->docId] = mv;
+						if (stats != NULL)
+							stats->residentVectorsLoaded++;
 					}
 					memcpy(mv->values + tuple->startFloat, tuple->values,
 						   sizeof(float) * tuple->count);
+					if (stats != NULL)
+						stats->residentVectorBytesLoaded += itemSize;
 				}
 				if (tuple->startFloat != vectorFloatCounts[tuple->docId])
 					PgturbohybridGraphMultiVectorDocMapError(index,
@@ -1444,8 +1459,12 @@ PgturbohybridGraphLoadMultiVectorDocMapWithStats(Relation index,
 															 "document context tuple range is invalid");
 				entry = &storage->multivectorDocMap[tuple->docId];
 				if (pagedDocVectors)
+				{
+					if (storage->multivectorDocContextsSkipped)
+						continue;
 					PgturbohybridGraphMultiVectorDocMapError(index,
 															 "paged document-node sidecar does not support context metadata yet");
+				}
 				if (tuple->contextCount > entry->tokenCount)
 					PgturbohybridGraphMultiVectorDocMapError(index,
 															 "document context tuple range is invalid");
@@ -1767,6 +1786,204 @@ PgturbohybridGraphLoadMultiVectorDocMapWithStats(Relation index,
 		pfree(quantizedPostingScratch);
 	if (quantizedPostingScratchCodewords != NULL)
 		pfree(quantizedPostingScratchCodewords);
+	return true;
+}
+
+static bool
+PgturbohybridGraphDocSidecarCacheMatches(PgturbohybridGraphDocSidecarCache *cache,
+										 Relation index,
+										 PgturbohybridGraphMetaPageData *meta,
+										 bool pagedDocVectors,
+										 bool contextsSkipped)
+{
+	return cache->relid == RelationGetRelid(index) &&
+		cache->relfilenumber == PgturbohybridGraphRelFileNumber(index) &&
+		cache->dimensions == meta->dimensions &&
+		cache->tqNodeCount == meta->tqNodeCount &&
+		cache->tqMultivectorDocMapStartBlkno == meta->tqMultivectorDocMapStartBlkno &&
+		cache->tqMultivectorDocMapPageCount == meta->tqMultivectorDocMapPageCount &&
+		cache->tqMultivectorDocCount == meta->tqMultivectorDocCount &&
+		cache->tqMultivectorDocMapBytes == meta->tqMultivectorDocMapBytes &&
+		cache->tqMultivectorDocMapVersion == meta->tqMultivectorDocMapVersion &&
+		cache->tqMultivectorDocMapFlags == meta->tqMultivectorDocMapFlags &&
+		cache->tqMultivectorGraphMode == meta->tqMultivectorGraphMode &&
+		cache->pagedDocVectors == pagedDocVectors &&
+		cache->contextsSkipped == contextsSkipped;
+}
+
+static void
+PgturbohybridGraphCopyDocSidecarStorage(PgturbohybridGraphScanStorage *dest,
+										PgturbohybridGraphScanStorage *src)
+{
+	dest->multivectorNodeMap = src->multivectorNodeMap;
+	dest->multivectorDocMap = src->multivectorDocMap;
+	dest->multivectorDocVectors = src->multivectorDocVectors;
+	dest->multivectorDocVectorChunks = src->multivectorDocVectorChunks;
+	dest->multivectorDocVectorFirstChunk = src->multivectorDocVectorFirstChunk;
+	dest->multivectorDocVectorChunkCounts = src->multivectorDocVectorChunkCounts;
+	dest->multivectorDocVectorChunkCount = src->multivectorDocVectorChunkCount;
+	dest->multivectorDocVectorChunkCapacity = src->multivectorDocVectorChunkCapacity;
+	dest->multivectorDocCentroids = src->multivectorDocCentroids;
+	dest->multivectorDocCentroidResiduals = src->multivectorDocCentroidResiduals;
+	dest->multivectorCentroidPostings = src->multivectorCentroidPostings;
+	dest->multivectorCentroidPostingListOffsets = src->multivectorCentroidPostingListOffsets;
+	dest->multivectorCentroidPostingCodebookSize = src->multivectorCentroidPostingCodebookSize;
+	dest->multivectorCentroidPostingCount = src->multivectorCentroidPostingCount;
+	dest->multivectorQuantizedInvertedPostings = src->multivectorQuantizedInvertedPostings;
+	dest->multivectorQuantizedInvertedListOffsets = src->multivectorQuantizedInvertedListOffsets;
+	dest->multivectorQuantizedInvertedCodebookSize = src->multivectorQuantizedInvertedCodebookSize;
+	dest->multivectorQuantizedInvertedPostingCount = src->multivectorQuantizedInvertedPostingCount;
+	dest->multivectorDocCount = src->multivectorDocCount;
+	dest->multivectorDocMapBytes = src->multivectorDocMapBytes;
+	dest->multivectorDocVectorsLoaded = src->multivectorDocVectorsLoaded;
+	dest->multivectorDocVectorsPaged = src->multivectorDocVectorsPaged;
+	dest->multivectorDocContextsSkipped = src->multivectorDocContextsSkipped;
+	dest->multivectorDocCentroidsLoaded = src->multivectorDocCentroidsLoaded;
+	dest->multivectorCentroidPostingsLoaded = src->multivectorCentroidPostingsLoaded;
+	dest->multivectorQuantizedInvertedPostingsLoaded =
+		src->multivectorQuantizedInvertedPostingsLoaded;
+	dest->multivectorDocMapLoaded = src->multivectorDocMapLoaded;
+}
+
+static PgturbohybridGraphDocSidecarCache *
+PgturbohybridGraphFindDocSidecarCache(Relation index,
+									  PgturbohybridGraphMetaPageData *meta,
+									  bool pagedDocVectors,
+									  bool contextsSkipped)
+{
+	PgturbohybridGraphDocSidecarCache **link =
+		&pgturbohybridGraphDocSidecarCacheList;
+
+	while (*link != NULL)
+	{
+		PgturbohybridGraphDocSidecarCache *cache = *link;
+
+		if (cache->relid == RelationGetRelid(index) &&
+			!PgturbohybridGraphDocSidecarCacheMatches(cache, index, meta,
+													  cache->pagedDocVectors,
+													  cache->contextsSkipped))
+		{
+			*link = cache->next;
+			MemoryContextDelete(cache->ctx);
+			continue;
+		}
+		if (PgturbohybridGraphDocSidecarCacheMatches(cache, index, meta,
+													 pagedDocVectors,
+													 contextsSkipped))
+			return cache;
+
+		link = &cache->next;
+	}
+
+	return NULL;
+}
+
+static PgturbohybridGraphDocSidecarCache *
+PgturbohybridGraphBuildDocSidecarCache(Relation index,
+									   PgturbohybridGraphMetaPageData *meta,
+									   bool pagedDocVectors,
+									   bool contextsSkipped)
+{
+	MemoryContext cacheCtx;
+	MemoryContext oldCtx;
+	PgturbohybridGraphDocSidecarCache *cache;
+	PgturbohybridMultiVectorDocSidecarAccessStats stats;
+	instr_time	buildStart;
+	instr_time	buildElapsed;
+
+	INSTR_TIME_SET_CURRENT(buildStart);
+	memset(&stats, 0, sizeof(stats));
+
+	cacheCtx = AllocSetContextCreate(CacheMemoryContext,
+									 "pgturbohybrid doc sidecar cache",
+									 ALLOCSET_DEFAULT_SIZES);
+	oldCtx = MemoryContextSwitchTo(cacheCtx);
+	cache = palloc0(sizeof(PgturbohybridGraphDocSidecarCache));
+	cache->relid = RelationGetRelid(index);
+	cache->relfilenumber = PgturbohybridGraphRelFileNumber(index);
+	cache->dimensions = meta->dimensions;
+	cache->tqNodeCount = meta->tqNodeCount;
+	cache->tqMultivectorDocMapStartBlkno =
+		meta->tqMultivectorDocMapStartBlkno;
+	cache->tqMultivectorDocMapPageCount =
+		meta->tqMultivectorDocMapPageCount;
+	cache->tqMultivectorDocCount = meta->tqMultivectorDocCount;
+	cache->tqMultivectorDocMapBytes = meta->tqMultivectorDocMapBytes;
+	cache->tqMultivectorDocMapVersion =
+		meta->tqMultivectorDocMapVersion;
+	cache->tqMultivectorDocMapFlags = meta->tqMultivectorDocMapFlags;
+	cache->tqMultivectorGraphMode = meta->tqMultivectorGraphMode;
+	cache->pagedDocVectors = pagedDocVectors;
+	cache->contextsSkipped = contextsSkipped;
+	cache->ctx = cacheCtx;
+	cache->storage.ctx = cacheCtx;
+	cache->storage.multivectorDocVectorsPaged = pagedDocVectors;
+	cache->storage.multivectorDocContextsSkipped = contextsSkipped;
+
+	if (!PgturbohybridGraphLoadMultiVectorDocMapWithStats(index, meta,
+														  &cache->storage,
+														  true,
+														  &stats))
+		ereport(ERROR,
+				(errcode(ERRCODE_INDEX_CORRUPTED),
+				 errmsg("document-node multivector sidecar cache could not be built"),
+				 errhint("REINDEX the index to rebuild the document-node multivector sidecar.")));
+	cache->buildBytesTouched = stats.bytesTouched;
+	cache->buildPagesRead = stats.pagesRead;
+	cache->next = pgturbohybridGraphDocSidecarCacheList;
+	pgturbohybridGraphDocSidecarCacheList = cache;
+	MemoryContextSwitchTo(oldCtx);
+
+	INSTR_TIME_SET_CURRENT(buildElapsed);
+	INSTR_TIME_SUBTRACT(buildElapsed, buildStart);
+	cache->buildUs = (int64) INSTR_TIME_GET_MICROSEC(buildElapsed);
+	return cache;
+}
+
+bool
+PgturbohybridGraphAttachMultiVectorDocSidecarCache(Relation index,
+									  PgturbohybridGraphMetaPageData *meta,
+									  PgturbohybridGraphScanStorage *storage,
+									  bool pagedDocVectors,
+									  bool contextsSkipped,
+									  PgturbohybridGraphCacheInitInfo *info)
+{
+	PgturbohybridGraphDocSidecarCache *cache;
+
+	if (index == NULL || meta == NULL || storage == NULL ||
+		!BlockNumberIsValid(meta->tqMultivectorDocMapStartBlkno) ||
+		meta->tqMultivectorDocMapVersion !=
+		PGTURBOHYBRID_GRAPH_MULTIVECTOR_DOCMAP_VERSION)
+		return false;
+	if (pgturbohybrid_native_cache_policy ==
+		PGTURBOHYBRID_NATIVE_CACHE_POLICY_OFF)
+		return false;
+
+	cache = PgturbohybridGraphFindDocSidecarCache(index, meta,
+												  pagedDocVectors,
+												  contextsSkipped);
+	if (cache == NULL)
+	{
+		cache = PgturbohybridGraphBuildDocSidecarCache(index, meta,
+													   pagedDocVectors,
+													   contextsSkipped);
+		if (info != NULL)
+		{
+			info->docSidecarCacheBuiltThisScan = true;
+			info->docSidecarCacheBuildUs = cache->buildUs;
+			info->docSidecarCacheBytesTouched = cache->buildBytesTouched;
+			info->docSidecarCachePagesRead = cache->buildPagesRead;
+		}
+	}
+	else if (info != NULL)
+		info->docSidecarCacheReused = true;
+
+	PgturbohybridGraphCopyDocSidecarStorage(storage, &cache->storage);
+	if (info != NULL)
+	{
+		info->docSidecarCacheUsed = true;
+		info->docMapBytes = (int64) cache->storage.multivectorDocMapBytes;
+	}
 	return true;
 }
 
@@ -2297,8 +2514,10 @@ PgturbohybridGraphLoadMultiVectorDocVector(Relation index,
 		if (stats != NULL)
 		{
 			stats->pagesRead++;
+			stats->pagedVectorPagesRead++;
 			stats->cacheMisses++;
 			stats->bytesTouched += itemSize;
+			stats->pagedVectorBytesTouched += itemSize;
 		}
 		UnlockReleaseBuffer(buf);
 	}
@@ -2427,6 +2646,8 @@ void
 PgturbohybridGraphInvalidateCaches(Relation index)
 {
 	PgturbohybridGraphNativeCache **link = &pgturbohybridGraphCacheList;
+	PgturbohybridGraphDocSidecarCache **docLink =
+		&pgturbohybridGraphDocSidecarCacheList;
 	Oid			relid = RelationGetRelid(index);
 
 	while (*link != NULL)
@@ -2441,6 +2662,20 @@ PgturbohybridGraphInvalidateCaches(Relation index)
 		}
 
 		link = &cache->next;
+	}
+
+	while (*docLink != NULL)
+	{
+		PgturbohybridGraphDocSidecarCache *cache = *docLink;
+
+		if (cache->relid == relid)
+		{
+			*docLink = cache->next;
+			MemoryContextDelete(cache->ctx);
+			continue;
+		}
+
+		docLink = &cache->next;
 	}
 }
 

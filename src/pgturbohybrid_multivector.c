@@ -149,8 +149,6 @@ static void PgturbohybridMultiVectorWarnSuspiciousTokenCount(uint32 tokenCount,
 															 uint32 maxTokenCount);
 static Vector *PgturbohybridMultiVectorSubvectorCopy(const PgturbohybridMultiVector *mv,
 													 int32 ordinal);
-static double PgturbohybridMultiVectorTokenCosine(const PgturbohybridMultiVector *mv,
-												  int32 a, int32 b);
 static void PgturbohybridMultiVectorNormalizeToken(float *values, int32 dim);
 static uint32 PgturbohybridMultiVectorProxyHash(uint32 a, uint32 b, uint32 salt);
 static void PgturbohybridMultiVectorProxyMean(const PgturbohybridMultiVector *mv,
@@ -1055,27 +1053,36 @@ PgturbohybridMultiVectorBuildFromFlatArray(ArrayType *array, int32 dim,
 }
 
 static double
-PgturbohybridMultiVectorTokenCosine(const PgturbohybridMultiVector *mv, int32 a,
-									int32 b)
+PgturbohybridMultiVectorTokenNorm(const PgturbohybridMultiVector *mv, int32 token)
+{
+	const float *values = PgturbohybridMultiVectorValues(mv, token);
+	double		norm = 0.0;
+
+	for (int32 dim = 0; dim < mv->dim; dim++)
+	{
+		double		x = values[dim];
+
+		norm += x * x;
+	}
+	return norm > 0.0 ? sqrt(norm) : 0.0;
+}
+
+static double
+PgturbohybridMultiVectorTokenCosineWithNorms(const PgturbohybridMultiVector *mv,
+											 int32 a, int32 b,
+											 const double *tokenNorms)
 {
 	const float *av = PgturbohybridMultiVectorValues(mv, a);
 	const float *bv = PgturbohybridMultiVectorValues(mv, b);
 	double		dot = 0.0;
-	double		anorm = 0.0;
-	double		bnorm = 0.0;
+	double		denom;
 
-	for (int32 dim = 0; dim < mv->dim; dim++)
-	{
-		double		ax = av[dim];
-		double		bx = bv[dim];
-
-		dot += ax * bx;
-		anorm += ax * ax;
-		bnorm += bx * bx;
-	}
-	if (anorm <= 0.0 || bnorm <= 0.0)
+	denom = tokenNorms[a] * tokenNorms[b];
+	if (denom <= 0.0)
 		return 0.0;
-	return dot / sqrt(anorm * bnorm);
+	for (int32 dim = 0; dim < mv->dim; dim++)
+		dot += (double) av[dim] * (double) bv[dim];
+	return dot / denom;
 }
 
 static void
@@ -1103,6 +1110,8 @@ PgturbohybridMultiVectorPoolDocumentTokens(const PgturbohybridMultiVector *mv,
 	int		   *selected;
 	bool	   *isSelected;
 	int		   *clusterCounts;
+	double	   *tokenNorms;
+	double	   *nearestSelectedSimilarity;
 	float	   *centroids;
 	float	   *sums;
 	Size		centroidBytes;
@@ -1141,12 +1150,26 @@ PgturbohybridMultiVectorPoolDocumentTokens(const PgturbohybridMultiVector *mv,
 	selected = palloc0(sizeof(int) * targetCount);
 	isSelected = palloc0(sizeof(bool) * mv->count);
 	clusterCounts = palloc0(sizeof(int) * targetCount);
+	tokenNorms = palloc0(sizeof(double) * mv->count);
+	nearestSelectedSimilarity = palloc0(sizeof(double) * mv->count);
 	centroidBytes = sizeof(float) * (Size) targetCount * (Size) mv->dim;
 	centroids = palloc0(centroidBytes);
 	sums = palloc0(centroidBytes);
 
+	for (int32 token = 0; token < mv->count; token++)
+		tokenNorms[token] = PgturbohybridMultiVectorTokenNorm(mv, token);
 	selected[0] = 0;
 	isSelected[0] = true;
+	for (int32 token = 0; token < mv->count; token++)
+	{
+		if (token == selected[0])
+			nearestSelectedSimilarity[token] = DBL_MAX;
+		else
+			nearestSelectedSimilarity[token] =
+				PgturbohybridMultiVectorTokenCosineWithNorms(mv, token,
+															 selected[0],
+															 tokenNorms);
+	}
 	for (int32 cluster = 1; cluster < targetCount; cluster++)
 	{
 		double		bestWorstSimilarity = DBL_MAX;
@@ -1154,18 +1177,12 @@ PgturbohybridMultiVectorPoolDocumentTokens(const PgturbohybridMultiVector *mv,
 
 		for (int32 token = 0; token < mv->count; token++)
 		{
-			double		bestSimilarity = -DBL_MAX;
-
 			if (isSelected[token])
 				continue;
-			for (int32 existing = 0; existing < cluster; existing++)
-				bestSimilarity =
-					Max(bestSimilarity,
-						PgturbohybridMultiVectorTokenCosine(mv, token,
-															selected[existing]));
-			if (bestToken < 0 || bestSimilarity < bestWorstSimilarity)
+			if (bestToken < 0 ||
+				nearestSelectedSimilarity[token] < bestWorstSimilarity)
 			{
-				bestWorstSimilarity = bestSimilarity;
+				bestWorstSimilarity = nearestSelectedSimilarity[token];
 				bestToken = token;
 			}
 		}
@@ -1173,6 +1190,20 @@ PgturbohybridMultiVectorPoolDocumentTokens(const PgturbohybridMultiVector *mv,
 			bestToken = cluster;
 		selected[cluster] = bestToken;
 		isSelected[bestToken] = true;
+		nearestSelectedSimilarity[bestToken] = DBL_MAX;
+		for (int32 token = 0; token < mv->count; token++)
+		{
+			double		similarity;
+
+			if (isSelected[token])
+				continue;
+			similarity =
+				PgturbohybridMultiVectorTokenCosineWithNorms(mv, token,
+															 bestToken,
+															 tokenNorms);
+			if (similarity > nearestSelectedSimilarity[token])
+				nearestSelectedSimilarity[token] = similarity;
+		}
 	}
 
 	for (int32 cluster = 0; cluster < targetCount; cluster++)
@@ -1232,6 +1263,8 @@ PgturbohybridMultiVectorPoolDocumentTokens(const PgturbohybridMultiVector *mv,
 	memcpy(pooled->values, centroids, centroidBytes);
 	pfree(sums);
 	pfree(centroids);
+	pfree(nearestSelectedSimilarity);
+	pfree(tokenNorms);
 	pfree(clusterCounts);
 	pfree(isSelected);
 	pfree(selected);

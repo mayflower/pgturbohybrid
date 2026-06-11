@@ -298,20 +298,36 @@ built with `multivector_centroids = kmeans`. On document-node indexes, build
 and incremental insert persist deterministic document-local k-means centroid
 vectors, a mean residual summary, and codeword posting tuples in the
 multivector docmap sidecar. Scans load those persisted posting lists, keep the
-original multivector sidecar for exact heap MaxSim rerank, and report
-`centroid_lists_visited`, `centroid_docs_touched`, `centroid_pruned_docs`, and
-`centroid_candidates`. On token-node indexes it is a compatibility mode that
-uses exact token-scan admission before exact heap MaxSim rerank and reports
+original multivector sidecar for exact heap MaxSim rerank, validate centroid
+sidecar entries lazily for documents reached through postings, and report
+`centroid_lists_visited`, `centroid_docs_touched`, `centroid_pruned_docs`,
+`centroid_postings_touched`, `centroid_postings_skipped`,
+`centroid_posting_limit_per_token`, and `centroid_candidates`. The optional
+`turbohybrid.multivector_centroid_lite_max_postings_per_token` GUC defaults to
+`0`, which preserves full posting-list admission; positive values cap each
+query-token posting list for benchmark tradeoff experiments before the exact
+MaxSim rerank. Positive caps use deterministic midpoint-spaced sampling across
+the posting list, not first-N truncation, and report
+`centroid_posting_cap_strategy = uniform_stride`. On token-node indexes it is a
+compatibility mode that uses exact token-scan admission before exact heap
+MaxSim rerank and reports
 `multivector_doc_graph_warning =
 token_node_centroid_lite_exact_token_prefilter`. It is opt-in benchmark
 plumbing, not the primary document-node path. Plain fallback is bypassed when
 `centroid_lite` is selected, so missing centroid configuration fails explicitly.
+For document-node serving checks, interpret `centroid_lite` latency by phase:
+the bounded exact MaxSim rerank must respect
+`turbohybrid.multivector_exact_rerank_k`, while high
+`centroid_docs_touched` or `docs_scored_near_table_size` means the centroid
+posting prefilter itself is near-exhaustive. That is a candidate-source
+admission problem, not a sidecar or SIMD rerank problem.
 `quantized_inverted_experimental` is a guarded research-only ColBERTSaR-style
 candidate source for document-node indexes. The current prototype uses
 persisted experimental deterministic codeword postings from the multivector
-docmap sidecar, then exact-reranks admitted heap documents with MaxSim.
-Token-node indexes fail explicitly, plain fallback is bypassed when the source
-is selected, and there is no production on-disk compatibility promise; see
+docmap sidecar, validates document vectors lazily for touched postings, then
+exact-reranks admitted heap documents with MaxSim. Token-node indexes fail
+explicitly, plain fallback is bypassed when the source is selected, and there
+is no production on-disk compatibility promise; see
 `docs/dev/multivector-colbertsar-research.md`.
 `exact_token_scan`, `exact_doc_scan`, and
 `doc_graph_prototype`
@@ -355,10 +371,13 @@ rerank. The diagnostic `multivector_doc_build_scorer = exact_symmetric` mode
 uses symmetrized document MaxSim during graph construction and is guarded by
 `turbohybrid.multivector_exact_symmetric_build_max_docs` unless
 `turbohybrid.multivector_allow_exact_symmetric_build = on`. Non-exhaustive
-scans traverse document graph adjacency, score visited candidates with the selected
-`turbohybrid.multivector_doc_storage = f32 | f16 | sq8` sidecar, and
-exact-rerank heap multivectors. Near-exhaustive scans use the exact float32
-sidecar scan. `turbohybrid_index_stats()` reports
+scans traverse document graph adjacency. `proxy_vector` candidate generation
+scores graph nodes with the fixed-dimensional proxy vector and only touches full
+document multivectors for bounded exact rerank or explicitly selected full
+document-node sidecar modes. Non-proxy document-node scans score visited
+candidates with the selected `turbohybrid.multivector_doc_storage = f32 | f16 |
+sq8` sidecar. Near-exhaustive scans use the exact float32 sidecar scan.
+`turbohybrid_index_stats()` reports
 `multivector_context_mode` and `multivector_field_mode` for benchmark
 provenance. `multivector_doc_graph_warning` reports
 `document_node_f32_sidecar_graph_traversal`,
@@ -372,15 +391,28 @@ Large document-node corpora can choose the sidecar cache policy explicitly:
 SET turbohybrid.multivector_doc_storage_cache = 'auto';     -- auto | resident | paged
 ```
 
-`auto` keeps the document sidecar resident for latency-profile scans when it
-fits `turbohybrid.native_cache_max_mb`, otherwise it uses paged sidecar access.
-`resident` prefers a loaded native sidecar, while `paged` keeps graph adjacency
-resident and loads/touches sidecar pages for the scan. Last-scan stats expose
+`auto` keeps plain `proxy_vector` document-node scans on the lazy paged sidecar
+path so graph admission uses only proxy vectors and full multivectors are
+touched only for bounded exact rerank. Other document-node scan modes may keep
+the document sidecar resident for latency-profile scans when it fits
+`turbohybrid.native_cache_max_mb`; explicit `resident` still forces loaded
+native sidecar storage, while `paged` keeps graph adjacency resident and
+loads/touches sidecar pages for the scan. Last-scan stats expose
 `multivector_doc_sidecar_cache_mode`,
 `multivector_doc_sidecar_pages_read`,
 `multivector_doc_sidecar_cache_hits`,
 `multivector_doc_sidecar_cache_misses`, and
-`multivector_doc_sidecar_bytes_touched`. Paged document-node scans also expose
+`multivector_doc_sidecar_bytes_touched`. These aggregate sidecar counters are
+kept for compatibility and can include first-scan cache construction. For
+document-node proxy scans, `sidecar_cache_build_bytes`,
+`sidecar_cache_build_pages_read`, and `sidecar_cache_build_time_us` separate
+native cache construction from per-query sidecar materialization/touches
+reported as
+`sidecar_query_bytes_touched`, `sidecar_query_pages_read`,
+`sidecar_query_vectors_loaded`, and `sidecar_query_time_us`. The proxy path also
+reports `proxy_candidate_limit_effective` and `proxy_candidate_limit_source`, so
+benchmarks can distinguish a requested candidate budget from an EF-limited graph
+traversal. Paged document-node scans also expose
 `multivector_doc_sidecar_vectors_loaded`, which counts document multivectors
 reconstructed from sidecar chunks during the scan.
 
@@ -455,6 +487,130 @@ quality thresholds, and choose `best_quality` when relevance dominates. Treat
 Markdown, local logs, and datasets should stay under `.nix-dev/tmp/` or another
 ignored path and must not be committed.
 
+The default serving grid stays compact. Use
+`--document-node-serving-grid-include-proxy-encoders` only for focused admission
+experiments that need the additional `proxy_max_pool_f16` and
+`proxy_random_projection_fde_f16` profile names; pair it with
+`--document-node-serving-grid-profiles` to avoid widening unrelated runs.
+Use `--document-node-serving-grid-include-bm25-rescue` only when admission loss
+is the question and the benchmark should build a BM25 key for lexical rescue
+profiles. The added `*_bm25_rescue` profiles are admission experiments: BM25
+can add candidate documents, but retained documents are still ordered by exact
+MaxSim. The benchmark sends `text_query` for these profiles so the rescue
+branch is active even though the profile remains dense-only for final ranking.
+Use `--document-node-serving-grid-include-centroid-lite-caps` only for focused
+centroid-lite pruning experiments. It adds capped profile rows such as
+`centroid_lite_f16_cap_016`, `centroid_lite_f16_cap_032`, and
+`centroid_lite_f16_cap_064`, driven by the scan-time
+`turbohybrid.multivector_centroid_lite_max_postings_per_token` GUC. These rows
+reuse the same persisted kmeans centroid sidecar as uncapped `centroid_lite_f16`
+and remain experimental admission evidence; final retained candidates are still
+ordered by exact MaxSim. Positive caps use deterministic uniform-stride posting
+sampling and expose `centroid_posting_cap_strategy` so reports distinguish
+uncapped full-list admission from capped sampling.
+If `--document-node-serving-grid-include-proxy-encoders` is also set, the grid
+adds `proxy_max_pool_f16_bm25_rescue` as a focused comparison for the stronger
+`max_pool` proxy baseline; the default BM25 rescue set remains unchanged.
+The rescue report records the effective rescue candidate limit, combined pool
+size, limit reason, retained candidates, and exact-reranked rescue count so a
+run can distinguish lexical underfill from dense/rerank cap truncation. The
+same aggregate rescue summaries are preserved in the serving recommendation
+rows, rejected-profile rows, and Markdown "why this profile won" text.
+Rejected rows also carry deterministic `admission_improvement_hints` so the
+next run can distinguish an EF cap, document-candidate cap, rerank cap, lexical
+underfill, learned-sparse fixture gap, or a broader candidate-source quality
+bottleneck. If exact rerank exhausts the admitted band and top-10 admission is
+still low, the hints point to the next focused candidate-quality experiment:
+`try_max_pool_or_centroid_mean_proxy`, `try_centroid_mean_proxy`,
+`try_sparse_rescue_or_centroid_lite`,
+`try_balanced_candidate_reservoirs`, or
+`try_bm25_or_learned_sparse_rescue`.
+Use `--document-node-serving-grid-include-reservoirs` only for focused
+candidate-admission experiments. Reservoir rows set
+`turbohybrid.multivector_candidate_reservoirs = balanced`. For explicit
+document-node `proxy_vector` scans, reservoir mode selects the bounded exact
+rerank band from proxy-ranked candidates using a score-prefix plus deterministic
+rank-spread sample. `conservative` keeps most of the proxy-ranked prefix;
+`balanced` allocates more of the band to rank-spread exploration. This is still
+a scan-time candidate-admission experiment, not a default serving profile:
+final ordering remains exact MaxSim over retained document candidates. A row is
+valid evidence only when
+`turbohybrid_last_scan_stats()` reports `multivector_reservoirs_enabled = true`
+and nonzero reservoir union docs; otherwise the benchmark marks it as
+`candidate_reservoirs_not_executed` and the row cannot become a safe serving
+recommendation. If proxy-encoder variants are also enabled, the grid can expose
+`proxy_max_pool_f16_reservoir_balanced`; interpret those rows through the same
+execution stats.
+Use `--document-node-serving-grid-include-learned-sparse-rescue` only when
+external learned-sparse document/query features are available. It adds
+`proxy_normalized_mean_f16_learned_sparse_rescue` and
+`centroid_mean_f16_learned_sparse_rescue`, requires
+`--learned-sparse-doc-jsonl` plus `--learned-sparse-query-jsonl`, and uses the
+learned-sparse postings branch only as an admission source before exact MaxSim
+final ordering. If proxy-encoder variants are also enabled, the grid adds
+`proxy_max_pool_f16_learned_sparse_rescue` as the matching focused comparison
+profile. Mixed BM25 and learned-sparse serving-grid runs use separate
+lexical index keys: BM25 rescue builds `body_tsv`, while learned-sparse rescue
+builds `learned_sparse_tsv`. Benchmark output includes learned-sparse
+document/query coverage ratios; partial JSONL fixture coverage is explicitly
+flagged and should not be treated as production serving evidence.
+Use `--document-node-serving-grid-include-entry-sidecar` only for focused graph
+entry admission experiments. It adds `proxy_normalized_mean_f16_entry_sidecar`
+and `centroid_mean_f16_entry_sidecar`, persists `entry_sidecar = on` graph entry
+representatives with 128 `hybrid_level_covering` entries by default, and reports
+the entry-sidecar settings plus `graph_entry_sidecar_*` scan counters in the
+serving-grid JSON and Markdown. These rows have distinct physical index
+signatures from the plain proxy profiles and should be read as candidate-quality
+evidence, not as default serving profiles. Final ranking remains exact MaxSim
+over the retained document candidates. If the proxy-encoder comparison switch is
+also enabled, `proxy_max_pool_f16_entry_sidecar` is added as the matching
+`max_pool` graph-entry admission experiment.
+For scan-time entry sampling experiments on an existing document-node graph, use
+`turbohybrid.multivector_doc_graph_entry_sample_count` or the benchmark flag
+`--multivector-doc-graph-entry-sample-count`. The default `0` preserves the
+compiled entry-sample heuristic. A positive value scores that many deterministic
+document proxy entry seeds, bounded by document count, before base-layer graph
+traversal. Last-scan stats report `graph_entry_sample_configured`,
+`graph_entry_sample_effective`, `graph_entry_sample_scored`, and the
+`multivector_doc_graph_entry_sample_*` aliases. This is a candidate-admission
+measurement knob only; it does not change persisted index format or final exact
+MaxSim ordering.
+Use `--document-node-serving-grid-include-entry-samples` for paired serving-grid
+evidence. It adds scan-time variants such as
+`proxy_normalized_mean_f16_entry_sample_032` and
+`centroid_mean_f16_entry_sample_032` using the counts from
+`--document-node-serving-grid-entry-sample-counts` (default `32,128`). These
+rows reuse the same physical document-node index as their baseline profile and
+only change graph-entry seeding during retrieval. The serving-grid JSON,
+Markdown, recommendation rows, and `candidate_source_deltas` report the
+effective entry-sample count and compare the variant against the matching
+baseline at the same EF, oversampling, and candidate budget.
+The serving-grid report also emits `candidate_source_deltas` for known paired
+variants: entry sampling, entry-sidecar, candidate reservoirs, BM25 rescue,
+learned-sparse rescue, centroid-lite caps, and proxy-encoder variants. Each delta compares
+against the matching plain baseline at the same EF, oversampling, and executed
+candidate budget, so candidate-source changes can be judged before widening a
+smoke into a larger x00k run. Delta rows also preserve compact experiment
+evidence such as entry-sample counts, entry-sidecar representative work,
+reservoir union/duplicate summaries, rescue-candidate summaries, and
+centroid-lite posting caps.
+The serving recommendation repeats the strongest deltas in
+`candidate_source_delta_summary`: best top-10 admission gain, best NDCG gain,
+best p95-latency gain, and best admission gain per comparison family. These
+fields are benchmark evidence only; they do not change SQL candidate generation
+or final exact MaxSim ordering.
+The first 2k DBpedia comparison with these opt-in proxy profiles kept
+`centroid_mean_f16` as the best quality/balanced safe profile. `max_pool`
+improved admission over `normalized_mean` but still trailed `centroid_mean`,
+while `random_projection_fde` was fast but too weak for admission.
+
+After the proxy sidecar fix, the decisive serving evidence should separate
+exact rerank cost from candidate-source cost. A centroid-lite run with
+`candidate_k = 800` and `exact_rerank_k = 100` should report
+`multivector_exact_rerank_docs = 100`; if latency is still high and
+`centroid_docs_touched` is near the document count, the next optimization is
+posting-list admission/pruning rather than sidecar caching or MaxSim SIMD.
+
 The serving-grid report includes explicit cost accounting. At the top level,
 `total_elapsed_ms`, `index_build_elapsed_ms_total`,
 `exact_baseline_elapsed_ms_total`, `retrieval_elapsed_ms_total`,
@@ -462,6 +618,24 @@ The serving-grid report includes explicit cost accounting. At the top level,
 spent time building indexes, recomputing exact admission baselines, or executing
 indexed retrieval. The same split is emitted per profile and per
 profile/EF/oversampling row.
+Build diagnostics for document-node centroid/proxy indexes are exposed through
+`turbohybrid_last_build_stats()`: `multivector_centroid_build_us`,
+`multivector_centroid_cluster_us`, `multivector_centroid_residual_us`,
+`multivector_centroid_build_docs`, `multivector_centroid_build_vectors`,
+`multivector_proxy_build_us`, `multivector_doc_sidecar_write_us`,
+`multivector_centroid_sidecar_write_us`,
+`multivector_centroid_posting_write_us`, and
+`multivector_centroid_posting_count`. Use these fields when a 10k/x00k
+serving-grid run spends most of its time in `CREATE INDEX`; they distinguish
+centroid construction, proxy construction, sidecar serialization, and centroid
+posting serialization from graph topology work.
+The benchmark harness exposes the same fields through
+`--document-node-serving-build-only`, which builds the selected serving profiles
+and skips retrieval/admission so build stalls can be diagnosed directly. The
+report derives `dominant_build_phase`, `build_phase_known_ms`, and
+`build_phase_unattributed_ms`; use the unattributed bucket as the signal for
+graph/topology build work or another phase not covered by the multivector
+timers.
 
 Missing or malformed document-node sidecar metadata fails with REINDEX guidance
 instead of silently falling back to token-node storage.

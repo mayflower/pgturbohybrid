@@ -1279,6 +1279,9 @@ typedef struct PgturbohybridGraphScanOpaqueData
 	int64		graphSearchEfBeforeSegmentScaling;
 	int64		graphSearchEfAfterSegmentScaling;
 	int64		graphEntryPointCount;
+	int64		graphEntrySampleConfigured;
+	int64		graphEntrySampleEffective;
+	int64		graphEntrySampleScored;
 	int64		graphEntrySidecarCount;
 	int64		graphEntrySidecarScored;
 	int64		graphEntrySidecarSelected;
@@ -1481,6 +1484,16 @@ typedef struct PgturbohybridNativeBuildStatsSnapshot
 	uint64		buildDistanceFallback;
 	uint64		multivectorDocExactBuildDistanceCalls;
 	uint64		multivectorDocExactBuildDistanceUs;
+	uint64		multivectorCentroidBuildUs;
+	uint64		multivectorCentroidClusterUs;
+	uint64		multivectorCentroidResidualUs;
+	uint64		multivectorCentroidBuildDocs;
+	uint64		multivectorCentroidBuildVectors;
+	uint64		multivectorProxyBuildUs;
+	uint64		multivectorDocSidecarWriteUs;
+	uint64		multivectorCentroidSidecarWriteUs;
+	uint64		multivectorCentroidPostingWriteUs;
+	uint64		multivectorCentroidPostingCount;
 	uint64		buildDistanceCacheHits;
 	uint64		buildDistanceCacheMisses;
 	uint64		buildDistanceCacheStores;
