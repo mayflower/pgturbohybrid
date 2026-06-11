@@ -283,6 +283,13 @@ typedef struct PgturbohybridScanStatsSnapshot
 	uint32		centroidBitsetDocsAfterThreshold;
 	uint64		centroidBitsetPrefilterUs;
 	uint64		centroidBitsetMemoryBytes;
+	bool		centroidUpperBoundEnabled;
+	uint64		centroidUpperBoundDocsChecked;
+	uint64		centroidUpperBoundDocsPruned;
+	uint64		centroidUpperBoundPruneUs;
+	uint64		centroidUpperBoundUnsafeFallbacks;
+	uint32		centroidCandidatesBeforeBound;
+	uint32		centroidCandidatesAfterBound;
 	uint32		multivectorCentroidCount;
 	uint32		multivectorCentroidPrerankDocs;
 	uint32		multivectorFullMaxsimRerankDocs;
@@ -480,6 +487,7 @@ extern int	pgturbohybrid_multivector_sparse_candidate_source;
 extern int	pgturbohybrid_multivector_branch_plan;
 extern int	pgturbohybrid_multivector_centroid_lite_max_postings_per_token;
 extern int	pgturbohybrid_multivector_centroid_lite_bitset_prefilter;
+extern int	pgturbohybrid_multivector_centroid_lite_pruning;
 extern int	pgturbohybrid_multivector_quantized_inverted_codebook;
 extern char *pgturbohybrid_multivector_quantized_inverted_codebook_path;
 extern int	pgturbohybrid_multivector_quantized_inverted_codebook_top_m;
@@ -496,6 +504,12 @@ typedef enum PgturbohybridMultiVectorCentroidLiteBitsetPrefilterMode
 	PGTURBOHYBRID_MULTIVECTOR_CENTROID_LITE_BITSET_PREFILTER_OFF,
 	PGTURBOHYBRID_MULTIVECTOR_CENTROID_LITE_BITSET_PREFILTER_EXPERIMENTAL
 }			PgturbohybridMultiVectorCentroidLiteBitsetPrefilterMode;
+
+typedef enum PgturbohybridMultiVectorCentroidLitePruningMode
+{
+	PGTURBOHYBRID_MULTIVECTOR_CENTROID_LITE_PRUNING_OFF,
+	PGTURBOHYBRID_MULTIVECTOR_CENTROID_LITE_PRUNING_SAFE_UPPER_BOUND
+}			PgturbohybridMultiVectorCentroidLitePruningMode;
 
 typedef enum PgturbohybridMultiVectorAdaptiveWideningMode
 {

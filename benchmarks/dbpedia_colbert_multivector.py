@@ -143,12 +143,16 @@ DOCUMENT_NODE_SERVING_GRID_PROXY_ADMISSION_FOCUS_PROFILES = (
 DOCUMENT_NODE_SERVING_GRID_PROXY_ADMISSION_FOCUS_EF = (100, 200, 400)
 DOCUMENT_NODE_SERVING_GRID_PROXY_ADMISSION_FOCUS_OVERSAMPLING = (1, 2)
 DOCUMENT_NODE_SERVING_GRID_CENTROID_LITE_FOCUS_PROFILES = (
-    "centroid_lite_f16",
-    "centroid_lite_f16_cap_016",
-    "centroid_lite_f16_cap_032",
-    "centroid_lite_f16_cap_064",
-    "centroid_lite_f16_pool_050",
-    "centroid_mean_f16",
+	"centroid_lite_f16",
+	"centroid_lite_f16_cap_016",
+	"centroid_lite_f16_cap_016_prune_safe_upper_bound",
+	"centroid_lite_f16_cap_032",
+	"centroid_lite_f16_cap_032_prune_safe_upper_bound",
+	"centroid_lite_f16_cap_064",
+	"centroid_lite_f16_cap_064_prune_safe_upper_bound",
+	"centroid_lite_f16_prune_safe_upper_bound",
+	"centroid_lite_f16_pool_050",
+	"centroid_mean_f16",
 )
 DOCUMENT_NODE_SERVING_GRID_TOKEN_POOLING_FOCUS_PROFILES = (
     "proxy_normalized_mean_f16",
@@ -261,6 +265,13 @@ SERVING_STATS_FIELD_GROUPS: dict[str, tuple[str, ...]] = {
         "centroid_bitset_docs_after_threshold",
         "centroid_bitset_prefilter_time_us",
         "centroid_bitset_memory_bytes",
+        "centroid_upper_bound_enabled",
+        "centroid_upper_bound_docs_checked",
+        "centroid_upper_bound_docs_pruned",
+        "centroid_upper_bound_prune_time_us",
+        "centroid_upper_bound_unsafe_fallbacks",
+        "centroid_candidates_before_bound",
+        "centroid_candidates_after_bound",
         "learned_projection_loaded",
         "learned_projection_dim",
         "learned_projection_weight_bytes",
@@ -423,6 +434,7 @@ class DocumentNodeServingProfile:
     per_token_doc_reservoir_k: int = 1
     coverage_reservoir_k: int = 10
     centroid_lite_max_postings_per_token: int = 0
+    centroid_lite_pruning: str = "off"
     entry_sample_count: int = 0
     entry_sidecar: bool = False
     entry_sidecar_representatives: int = 128
@@ -1322,6 +1334,9 @@ def set_colbert_gucs(conn: psycopg.Connection[Any], args: argparse.Namespace) ->
         "turbohybrid.multivector_centroid_lite_max_postings_per_token": str(
             args.multivector_centroid_lite_max_postings_per_token
         ),
+        "turbohybrid.multivector_centroid_lite_pruning": str(
+            args.multivector_centroid_lite_pruning
+        ),
         "turbohybrid.multivector_candidate_source": args.multivector_candidate_source,
         "turbohybrid.multivector_branch_plan": getattr(args, "multivector_branch_plan", "auto"),
         "turbohybrid.multivector_plain_fallback": args.multivector_plain_fallback,
@@ -1377,6 +1392,9 @@ def set_retrieval_gucs(conn: psycopg.Connection[Any], args: argparse.Namespace, 
         ),
         "turbohybrid.multivector_centroid_lite_max_postings_per_token": str(
             args.multivector_centroid_lite_max_postings_per_token
+        ),
+        "turbohybrid.multivector_centroid_lite_pruning": str(
+            args.multivector_centroid_lite_pruning
         ),
         "turbohybrid.multivector_candidate_source": args.multivector_candidate_source,
         "turbohybrid.multivector_branch_plan": getattr(args, "multivector_branch_plan", "auto"),
@@ -4319,6 +4337,28 @@ def document_node_serving_profiles(
             )
             for cap in centroid_lite_posting_caps
         )
+        profiles.append(
+            DocumentNodeServingProfile(
+                name="centroid_lite_f16_prune_safe_upper_bound",
+                candidate_source="centroid_lite",
+                centroids="kmeans",
+                centroid_count=centroid_count,
+                storage_kind="f16",
+                centroid_lite_pruning="safe_upper_bound",
+            )
+        )
+        for cap in centroid_lite_posting_caps:
+            profiles.append(
+                DocumentNodeServingProfile(
+                    name=f"centroid_lite_f16_cap_{int(cap):03d}_prune_safe_upper_bound",
+                    candidate_source="centroid_lite",
+                    centroids="kmeans",
+                    centroid_count=centroid_count,
+                    storage_kind="f16",
+                    centroid_lite_max_postings_per_token=int(cap),
+                    centroid_lite_pruning="safe_upper_bound",
+                )
+            )
     if include_token_pooling_focus:
         for ratio_label, ratio in (("075", 0.75), ("050", 0.5), ("033", 0.33)):
             profiles.extend(
@@ -5233,6 +5273,8 @@ def _self_check_document_node_serving_profiles() -> None:
     }
     assert "centroid_lite_f16_cap_016" in capped_centroid_lite_by_name
     assert "centroid_lite_f16_cap_032" in capped_centroid_lite_by_name
+    assert "centroid_lite_f16_prune_safe_upper_bound" in capped_centroid_lite_by_name
+    assert "centroid_lite_f16_cap_016_prune_safe_upper_bound" in capped_centroid_lite_by_name
     assert (
         capped_centroid_lite_by_name[
             "centroid_lite_f16_cap_016"
@@ -5244,6 +5286,12 @@ def _self_check_document_node_serving_profiles() -> None:
         == "centroid_lite"
     )
     assert capped_centroid_lite_by_name["centroid_lite_f16_cap_016"].centroids == "kmeans"
+    assert (
+        capped_centroid_lite_by_name[
+            "centroid_lite_f16_cap_016_prune_safe_upper_bound"
+        ].centroid_lite_pruning
+        == "safe_upper_bound"
+    )
     entry_sample_profiles = document_node_serving_profiles(
         include_experimental=False,
         include_proxy_encoder_variants=False,
@@ -5900,6 +5948,14 @@ def _self_check_document_node_serving_profiles() -> None:
         oversampling=1,
     )
     assert capped_profile_args.multivector_centroid_lite_max_postings_per_token == 32
+    pruned_profile_args = document_node_serving_profile_args(
+        signature_args,
+        capped_centroid_lite_by_name["centroid_lite_f16_cap_032_prune_safe_upper_bound"],
+        ef=100,
+        oversampling=1,
+    )
+    assert pruned_profile_args.multivector_centroid_lite_max_postings_per_token == 32
+    assert pruned_profile_args.multivector_centroid_lite_pruning == "safe_upper_bound"
     entry_sample_signature_profile_args = document_node_serving_profile_args(
         signature_args,
         entry_sample_profiles_by_name["proxy_normalized_mean_f16_entry_sample_032"],
@@ -6216,6 +6272,7 @@ def document_node_serving_profile_args(
         multivector_centroid_lite_max_postings_per_token=(
             profile.centroid_lite_max_postings_per_token
         ),
+        multivector_centroid_lite_pruning=profile.centroid_lite_pruning,
         entry_sidecar=profile.entry_sidecar,
         entry_sidecar_representatives=profile.entry_sidecar_representatives,
         entry_sidecar_strategy=profile.entry_sidecar_strategy,
@@ -6574,6 +6631,7 @@ def document_node_serving_summary_row(
         "centroid_lite_max_postings_per_token": (
             profile.centroid_lite_max_postings_per_token
         ),
+        "centroid_lite_pruning": profile.centroid_lite_pruning,
         "centroid_lite_warnings": centroid_lite_warnings,
         "ef": ef,
         "oversampling": oversampling,
@@ -6923,6 +6981,7 @@ def serving_candidate_delta_evidence(row: dict[str, Any]) -> dict[str, Any]:
         "learned_sparse_branch_latency_us",
         "learned_sparse_partial_coverage",
         "centroid_lite_max_postings_per_token",
+        "centroid_lite_pruning",
         "centroid_postings_touched",
         "centroid_postings_skipped",
         "centroid_posting_limit_per_token",
@@ -7385,6 +7444,7 @@ def serving_recommendation_row(row: dict[str, Any]) -> dict[str, Any]:
         "centroid_lite_max_postings_per_token": row.get(
             "centroid_lite_max_postings_per_token"
         ),
+        "centroid_lite_pruning": row.get("centroid_lite_pruning", "off"),
         "centroid_lite_warnings": row.get("centroid_lite_warnings", []),
         "ef": row.get("ef"),
         "oversampling": row.get("oversampling"),
@@ -10769,6 +10829,7 @@ def run_document_node_serving_grid(
                     "centroid_lite_max_postings_per_token": (
                         profile.centroid_lite_max_postings_per_token
                     ),
+                    "centroid_lite_pruning": profile.centroid_lite_pruning,
                     "index_signature": serializable_index_signature(signature),
                     "index_build_reused": profile_reused_index,
                     "index_build_reused_for_profiles": [
@@ -11177,6 +11238,7 @@ def document_node_serving_build_only_row(
         "centroid_lite_max_postings_per_token": (
             profile.centroid_lite_max_postings_per_token
         ),
+        "centroid_lite_pruning": profile.centroid_lite_pruning,
         "plain_fallback": profile.plain_fallback,
         "index_signature": serializable_index_signature(signature),
         "index_build_reused": profile_reused_index,
@@ -12577,6 +12639,7 @@ def run_document_node_serving_latency_only(
             "centroid_lite_max_postings_per_token": (
                 profile.centroid_lite_max_postings_per_token
             ),
+            "centroid_lite_pruning": profile.centroid_lite_pruning,
             "ef": int(args.serving_ef),
             "oversampling": int(args.serving_oversampling),
             "entry_sample_count": int(args.multivector_doc_graph_entry_sample_count),
@@ -14654,6 +14717,16 @@ def parse_args() -> argparse.Namespace:
         help=(
             "experimental centroid_lite posting-list cap per query token; "
             "0 leaves the persisted posting lists uncapped"
+        ),
+    )
+    parser.add_argument(
+        "--multivector-centroid-lite-pruning",
+        choices=("off", "safe_upper_bound"),
+        default="off",
+        help=(
+            "experimental centroid_lite pruning mode; safe_upper_bound keeps "
+            "unsafe candidates and only prunes when a persisted centroid bound "
+            "proves the document cannot enter the current candidate band"
         ),
     )
     parser.add_argument(

@@ -3828,6 +3828,20 @@ pgturbohybrid_last_scan_stats(PG_FUNCTION_ARGS)
 								scanStats.centroidBitsetPrefilterUs);
 	PgturbohybridJsonbAddUint64(&state, "centroid_bitset_memory_bytes",
 								scanStats.centroidBitsetMemoryBytes);
+	PgturbohybridJsonbAddBool(&state, "centroid_upper_bound_enabled",
+							  scanStats.centroidUpperBoundEnabled);
+	PgturbohybridJsonbAddUint64(&state, "centroid_upper_bound_docs_checked",
+								scanStats.centroidUpperBoundDocsChecked);
+	PgturbohybridJsonbAddUint64(&state, "centroid_upper_bound_docs_pruned",
+								scanStats.centroidUpperBoundDocsPruned);
+	PgturbohybridJsonbAddUint64(&state, "centroid_upper_bound_prune_time_us",
+								scanStats.centroidUpperBoundPruneUs);
+	PgturbohybridJsonbAddUint64(&state, "centroid_upper_bound_unsafe_fallbacks",
+								scanStats.centroidUpperBoundUnsafeFallbacks);
+	PgturbohybridJsonbAddInt64(&state, "centroid_candidates_before_bound",
+							   scanStats.centroidCandidatesBeforeBound);
+	PgturbohybridJsonbAddInt64(&state, "centroid_candidates_after_bound",
+							   scanStats.centroidCandidatesAfterBound);
 	PgturbohybridJsonbAddInt64(&state, "multivector_centroid_count",
 							   scanStats.multivectorCentroidCount);
 	PgturbohybridJsonbAddInt64(&state, "multivector_centroid_prerank_docs",

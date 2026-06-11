@@ -349,16 +349,23 @@ centroid-lite pruning experiments. It appends capped profile names such as
 `centroid_lite_f16_cap_064` using the scan-time
 `turbohybrid.multivector_centroid_lite_max_postings_per_token` GUC. Override
 the cap list with `--document-node-serving-grid-centroid-lite-posting-caps`.
-These rows reuse the same physical kmeans centroid index as uncapped
+It also adds guarded pruning rows such as
+`centroid_lite_f16_prune_safe_upper_bound` and
+`centroid_lite_f16_cap_032_prune_safe_upper_bound`, driven by the scan-time
+`turbohybrid.multivector_centroid_lite_pruning = safe_upper_bound` GUC. These
+rows reuse the same physical kmeans centroid index as uncapped
 `centroid_lite_f16`; they are not default serving profiles and should be read
 as admission/latency tradeoff evidence for the experimental centroid-lite path.
 Positive caps use deterministic uniform-stride posting sampling and expose
-`centroid_posting_cap_strategy` in scan stats.
+`centroid_posting_cap_strategy` in scan stats. Safe upper-bound pruning only
+drops candidates when the persisted residual summary proves the centroid score
+is exact for that document; otherwise it keeps the candidate and reports
+`centroid_upper_bound_unsafe_fallbacks`.
 Use `--document-node-serving-grid-centroid-lite-focus` when the only question is
-the centroid-lite cap tradeoff. It restricts the grid to uncapped
-`centroid_lite_f16`, capped `016/032/064` variants,
-`centroid_lite_f16_pool_050`, and the `centroid_mean_f16` baseline with the
-largest candidate budget by default.
+the centroid-lite cap/pruning tradeoff. It restricts the grid to uncapped
+`centroid_lite_f16`, capped `016/032/064` variants, the corresponding
+`safe_upper_bound` pruning rows, `centroid_lite_f16_pool_050`, and the
+`centroid_mean_f16` baseline with the largest candidate budget by default.
 Use `--document-node-serving-grid-token-pooling-focus` when the question is
 whether greedy token pooling reduces build cost, sidecar size, exact MaxSim
 pairs, and latency without losing admission quality. It compares

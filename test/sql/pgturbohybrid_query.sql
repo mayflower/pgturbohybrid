@@ -83,6 +83,7 @@ BEGIN
 			'turbohybrid.multivector_candidate_source',
 		'turbohybrid.multivector_centroid_lite_bitset_prefilter',
 		'turbohybrid.multivector_centroid_lite_max_postings_per_token',
+		'turbohybrid.multivector_centroid_lite_pruning',
 		'turbohybrid.multivector_coverage_reservoir_k',
 		'turbohybrid.multivector_debug_admission',
 		'turbohybrid.multivector_debug_skip_query_tokens',
@@ -155,6 +156,7 @@ BEGIN
 		current_setting('turbohybrid.multivector_branch_plan') != 'auto' OR
 		current_setting('turbohybrid.multivector_candidate_source') != 'graph' OR
 		current_setting('turbohybrid.multivector_centroid_lite_bitset_prefilter') != 'off' OR
+		current_setting('turbohybrid.multivector_centroid_lite_pruning') != 'off' OR
 		current_setting('turbohybrid.multivector_bm25_candidate_injection') != 'off' OR
 		current_setting('turbohybrid.multivector_sparse_candidate_source') != 'off' OR
 		current_setting('turbohybrid.multivector_candidate_reservoirs') != 'conservative' OR
@@ -187,7 +189,7 @@ BEGIN
 		current_setting('turbohybrid.multivector_debug_admission') != 'off' OR
 		current_setting('turbohybrid.multivector_debug_skip_query_tokens') != '' OR
 		current_setting('turbohybrid.multivector_debug_trace_limit') != '1000' THEN
-			RAISE EXCEPTION 'unexpected multivector defaults: doc %, query %, subvector %, unique %, raw %, adaptive %, branch_plan %, source %, centroid_lite_bitset_prefilter %, bm25_injection %, sparse_source %, reservoirs %, coverage_reservoir_k %, fallback %, fallback_fraction %, fallback_max_docs %, per_token_reservoir_k %, docmap %, docs %, doc_graph_entry_sample_count %, doc_graph_search_ef %, doc_graph_oversampling %, doc_graph_rescore_k %, doc_storage %, doc_storage_cache %, rerank %, rerank_k %, allow_exact_symmetric_build %, exact_symmetric_build_max_docs %, learned_projection_checksum %, learned_projection_model %, learned_projection_path %, model %, proxy_encoder %, quantized_codebook %, quantized_codebook_path %, quantized_codebook_top_m %, accumulator_mb %, debug %, skip_tokens %, trace_limit %',
+			RAISE EXCEPTION 'unexpected multivector defaults: doc %, query %, subvector %, unique %, raw %, adaptive %, branch_plan %, source %, centroid_lite_bitset_prefilter %, centroid_lite_pruning %, bm25_injection %, sparse_source %, reservoirs %, coverage_reservoir_k %, fallback %, fallback_fraction %, fallback_max_docs %, per_token_reservoir_k %, docmap %, docs %, doc_graph_entry_sample_count %, doc_graph_search_ef %, doc_graph_oversampling %, doc_graph_rescore_k %, doc_storage %, doc_storage_cache %, rerank %, rerank_k %, allow_exact_symmetric_build %, exact_symmetric_build_max_docs %, learned_projection_checksum %, learned_projection_model %, learned_projection_path %, model %, proxy_encoder %, quantized_codebook %, quantized_codebook_path %, quantized_codebook_top_m %, accumulator_mb %, debug %, skip_tokens %, trace_limit %',
 				current_setting('turbohybrid.multivector_max_doc_vectors'),
 			current_setting('turbohybrid.multivector_max_query_vectors'),
 			current_setting('turbohybrid.multivector_subvector_k'),
@@ -197,6 +199,7 @@ BEGIN
 			current_setting('turbohybrid.multivector_branch_plan'),
 			current_setting('turbohybrid.multivector_candidate_source'),
 			current_setting('turbohybrid.multivector_centroid_lite_bitset_prefilter'),
+			current_setting('turbohybrid.multivector_centroid_lite_pruning'),
 			current_setting('turbohybrid.multivector_bm25_candidate_injection'),
 			current_setting('turbohybrid.multivector_sparse_candidate_source'),
 			current_setting('turbohybrid.multivector_candidate_reservoirs'),

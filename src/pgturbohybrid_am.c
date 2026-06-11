@@ -195,6 +195,8 @@ int			pgturbohybrid_multivector_branch_plan =
 int			pgturbohybrid_multivector_centroid_lite_max_postings_per_token = 0;
 int			pgturbohybrid_multivector_centroid_lite_bitset_prefilter =
 	PGTURBOHYBRID_MULTIVECTOR_CENTROID_LITE_BITSET_PREFILTER_OFF;
+int			pgturbohybrid_multivector_centroid_lite_pruning =
+	PGTURBOHYBRID_MULTIVECTOR_CENTROID_LITE_PRUNING_OFF;
 static bool pgturbohybrid_bm25_strategy_user_set = false;
 static bool pgturbohybrid_bm25_impact_or_mode_user_set = false;
 static bool pgturbohybrid_bm25_hot_postings_cache_mb_user_set = false;
@@ -427,6 +429,12 @@ static const struct config_enum_entry pgturbohybrid_multivector_quantized_invert
 static const struct config_enum_entry pgturbohybrid_multivector_centroid_lite_bitset_prefilter_options[] = {
 	{"off", PGTURBOHYBRID_MULTIVECTOR_CENTROID_LITE_BITSET_PREFILTER_OFF, false},
 	{"experimental", PGTURBOHYBRID_MULTIVECTOR_CENTROID_LITE_BITSET_PREFILTER_EXPERIMENTAL, false},
+	{NULL, 0, false}
+};
+
+static const struct config_enum_entry pgturbohybrid_multivector_centroid_lite_pruning_options[] = {
+	{"off", PGTURBOHYBRID_MULTIVECTOR_CENTROID_LITE_PRUNING_OFF, false},
+	{"safe_upper_bound", PGTURBOHYBRID_MULTIVECTOR_CENTROID_LITE_PRUNING_SAFE_UPPER_BOUND, false},
 	{NULL, 0, false}
 };
 
@@ -1414,6 +1422,13 @@ typedef struct PgturbohybridLastScanStats
 	uint32		centroidBitsetDocsAfterThreshold;
 	uint64		centroidBitsetPrefilterUs;
 	uint64		centroidBitsetMemoryBytes;
+	bool		centroidUpperBoundEnabled;
+	uint64		centroidUpperBoundDocsChecked;
+	uint64		centroidUpperBoundDocsPruned;
+	uint64		centroidUpperBoundPruneUs;
+	uint64		centroidUpperBoundUnsafeFallbacks;
+	uint32		centroidCandidatesBeforeBound;
+	uint32		centroidCandidatesAfterBound;
 	uint32		multivectorCentroidCount;
 	uint32		multivectorCentroidPrerankDocs;
 	uint32		multivectorFullMaxsimRerankDocs;
@@ -1981,6 +1996,20 @@ PgturbohybridGetLastScanStatsSnapshot(PgturbohybridScanStatsSnapshot *stats)
 		pgturbohybrid_last_scan_state.centroidBitsetPrefilterUs;
 	stats->centroidBitsetMemoryBytes =
 		pgturbohybrid_last_scan_state.centroidBitsetMemoryBytes;
+	stats->centroidUpperBoundEnabled =
+		pgturbohybrid_last_scan_state.centroidUpperBoundEnabled;
+	stats->centroidUpperBoundDocsChecked =
+		pgturbohybrid_last_scan_state.centroidUpperBoundDocsChecked;
+	stats->centroidUpperBoundDocsPruned =
+		pgturbohybrid_last_scan_state.centroidUpperBoundDocsPruned;
+	stats->centroidUpperBoundPruneUs =
+		pgturbohybrid_last_scan_state.centroidUpperBoundPruneUs;
+	stats->centroidUpperBoundUnsafeFallbacks =
+		pgturbohybrid_last_scan_state.centroidUpperBoundUnsafeFallbacks;
+	stats->centroidCandidatesBeforeBound =
+		pgturbohybrid_last_scan_state.centroidCandidatesBeforeBound;
+	stats->centroidCandidatesAfterBound =
+		pgturbohybrid_last_scan_state.centroidCandidatesAfterBound;
 	stats->multivectorCentroidCount =
 		pgturbohybrid_last_scan_state.multivectorCentroidCount;
 	stats->multivectorCentroidPrerankDocs =
@@ -6083,6 +6112,20 @@ PgturbohybridCollectScanResults(IndexScanDesc scan, PgturbohybridScanState *stat
 		denseStats.centroidBitsetPrefilterUs;
 	lastStats.centroidBitsetMemoryBytes =
 		denseStats.centroidBitsetMemoryBytes;
+	lastStats.centroidUpperBoundEnabled =
+		denseStats.centroidUpperBoundEnabled;
+	lastStats.centroidUpperBoundDocsChecked =
+		denseStats.centroidUpperBoundDocsChecked;
+	lastStats.centroidUpperBoundDocsPruned =
+		denseStats.centroidUpperBoundDocsPruned;
+	lastStats.centroidUpperBoundPruneUs =
+		denseStats.centroidUpperBoundPruneUs;
+	lastStats.centroidUpperBoundUnsafeFallbacks =
+		denseStats.centroidUpperBoundUnsafeFallbacks;
+	lastStats.centroidCandidatesBeforeBound =
+		denseStats.centroidCandidatesBeforeBound;
+	lastStats.centroidCandidatesAfterBound =
+		denseStats.centroidCandidatesAfterBound;
 	lastStats.multivectorCentroidCount =
 		denseStats.multivectorCentroidCount;
 	lastStats.multivectorCentroidPrerankDocs =
@@ -7693,6 +7736,13 @@ PgturbohybridInit(void)
 							 &pgturbohybrid_multivector_centroid_lite_bitset_prefilter,
 							 PGTURBOHYBRID_MULTIVECTOR_CENTROID_LITE_BITSET_PREFILTER_OFF,
 							 pgturbohybrid_multivector_centroid_lite_bitset_prefilter_options,
+							 PGC_USERSET, 0, NULL, NULL, NULL);
+	DefineCustomEnumVariable("turbohybrid.multivector_centroid_lite_pruning",
+							 "Experimental centroid_lite upper-bound pruning",
+							 "off preserves current centroid_lite behavior; safe_upper_bound prunes only candidates with a proven safe query-centroid upper bound before exact MaxSim rerank.",
+							 &pgturbohybrid_multivector_centroid_lite_pruning,
+							 PGTURBOHYBRID_MULTIVECTOR_CENTROID_LITE_PRUNING_OFF,
+							 pgturbohybrid_multivector_centroid_lite_pruning_options,
 							 PGC_USERSET, 0, NULL, NULL, NULL);
 	DefineCustomIntVariable("turbohybrid.multivector_doc_graph_entry_sample_count",
 							"Document-node graph entry samples scored before traversal",
