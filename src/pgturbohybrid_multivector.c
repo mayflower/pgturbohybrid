@@ -183,10 +183,6 @@ typedef void (*TqDotProductF32BlockFunc) (const float *queryValues,
 										  double *dots);
 typedef double (*TqMultiVectorMaxSimFunc) (const PgturbohybridMultiVector *query,
 										   const PgturbohybridMultiVector *doc);
-typedef int64 (*TqCompactCodeScoreFunc) (const int16 *queryCodes,
-										 const int16 *docCodes,
-										 int32 count);
-
 static double TqMultiVectorSymmetricMaxSimAverageWithDotUnchecked(const PgturbohybridMultiVector *a,
 																  const PgturbohybridMultiVector *b,
 																  TqDotProductF32Func dotProduct,
@@ -2396,7 +2392,7 @@ TqMultiVectorMaxSimKernelName(void)
 	return "unknown";
 }
 
-static int64
+int64
 TqCompactCodeScoreScalar(const int16 *queryCodes, const int16 *docCodes,
 						 int32 count)
 {
@@ -2502,7 +2498,7 @@ TqCompactCodeScoreNeon(const int16 *queryCodes, const int16 *docCodes,
 }
 #endif
 
-static TqCompactCodeScoreFunc
+TqCompactCodeScoreFunc
 TqResolveCompactCodeScoreKernel(const char *forceKernel)
 {
 	if (forceKernel == NULL || pg_strcasecmp(forceKernel, "auto") == 0)
@@ -2580,7 +2576,7 @@ TqResolveCompactCodeScoreKernel(const char *forceKernel)
 	return TqCompactCodeScoreScalar;
 }
 
-static const char *
+const char *
 TqCompactCodeScoreKernelName(TqCompactCodeScoreFunc func)
 {
 	if (func == TqCompactCodeScoreScalar)

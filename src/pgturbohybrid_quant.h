@@ -648,6 +648,11 @@ typedef struct TqDenseCandidateStats
 	uint64		quantizedInvertedListOffsetBytes;
 	uint64		quantizedInvertedPostingBytes;
 	uint64		quantizedInvertedSidecarBytes;
+	char		quantizedInvertedCompactKernel[24];
+	uint64		quantizedInvertedCompactScoreUs;
+	uint64		quantizedInvertedCompactDocsScored;
+	uint64		quantizedInvertedCompactPayloadBytes;
+	bool		quantizedInvertedCompactTopKChangedVsScalar;
 	char		multivectorDocSidecarCacheMode[16];
 	uint64		multivectorDocSidecarPagesRead;
 	uint64		multivectorDocSidecarCacheHits;

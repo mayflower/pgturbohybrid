@@ -178,6 +178,8 @@ int			pgturbohybrid_multivector_quantized_inverted_codebook =
 	PGTURBOHYBRID_MULTIVECTOR_QUANTIZED_INVERTED_CODEBOOK_DETERMINISTIC;
 char	   *pgturbohybrid_multivector_quantized_inverted_codebook_path = "";
 int			pgturbohybrid_multivector_quantized_inverted_codebook_top_m = 1;
+int			pgturbohybrid_multivector_quantized_inverted_compact_scoring =
+	PGTURBOHYBRID_MULTIVECTOR_QUANTIZED_INVERTED_COMPACT_SCORING_OFF;
 int			pgturbohybrid_multivector_plain_fallback =
 	PGTURBOHYBRID_MULTIVECTOR_PLAIN_FALLBACK_AUTO;
 int			pgturbohybrid_multivector_plain_fallback_max_docs = 1000;
@@ -423,6 +425,12 @@ static const struct config_enum_entry pgturbohybrid_multivector_candidate_source
 static const struct config_enum_entry pgturbohybrid_multivector_quantized_inverted_codebook_options[] = {
 	{"deterministic", PGTURBOHYBRID_MULTIVECTOR_QUANTIZED_INVERTED_CODEBOOK_DETERMINISTIC, false},
 	{"external", PGTURBOHYBRID_MULTIVECTOR_QUANTIZED_INVERTED_CODEBOOK_EXTERNAL, false},
+	{NULL, 0, false}
+};
+
+static const struct config_enum_entry pgturbohybrid_multivector_quantized_inverted_compact_scoring_options[] = {
+	{"off", PGTURBOHYBRID_MULTIVECTOR_QUANTIZED_INVERTED_COMPACT_SCORING_OFF, false},
+	{"experimental", PGTURBOHYBRID_MULTIVECTOR_QUANTIZED_INVERTED_COMPACT_SCORING_EXPERIMENTAL, false},
 	{NULL, 0, false}
 };
 
@@ -1446,6 +1454,11 @@ typedef struct PgturbohybridLastScanStats
 	uint64		quantizedInvertedListOffsetBytes;
 	uint64		quantizedInvertedPostingBytes;
 	uint64		quantizedInvertedSidecarBytes;
+	char		quantizedInvertedCompactKernel[24];
+	uint64		quantizedInvertedCompactScoreUs;
+	uint64		quantizedInvertedCompactDocsScored;
+	uint64		quantizedInvertedCompactPayloadBytes;
+	bool		quantizedInvertedCompactTopKChangedVsScalar;
 	char		multivectorDocSidecarCacheMode[16];
 	uint64		multivectorDocSidecarPagesRead;
 	uint64		multivectorDocSidecarCacheHits;
@@ -2046,6 +2059,17 @@ PgturbohybridGetLastScanStatsSnapshot(PgturbohybridScanStatsSnapshot *stats)
 		pgturbohybrid_last_scan_state.quantizedInvertedPostingBytes;
 	stats->quantizedInvertedSidecarBytes =
 		pgturbohybrid_last_scan_state.quantizedInvertedSidecarBytes;
+	strlcpy(stats->quantizedInvertedCompactKernel,
+			pgturbohybrid_last_scan_state.quantizedInvertedCompactKernel,
+			sizeof(stats->quantizedInvertedCompactKernel));
+	stats->quantizedInvertedCompactScoreUs =
+		pgturbohybrid_last_scan_state.quantizedInvertedCompactScoreUs;
+	stats->quantizedInvertedCompactDocsScored =
+		pgturbohybrid_last_scan_state.quantizedInvertedCompactDocsScored;
+	stats->quantizedInvertedCompactPayloadBytes =
+		pgturbohybrid_last_scan_state.quantizedInvertedCompactPayloadBytes;
+	stats->quantizedInvertedCompactTopKChangedVsScalar =
+		pgturbohybrid_last_scan_state.quantizedInvertedCompactTopKChangedVsScalar;
 	strlcpy(stats->multivectorDocSidecarCacheMode,
 			pgturbohybrid_last_scan_state.multivectorDocSidecarCacheMode,
 			sizeof(stats->multivectorDocSidecarCacheMode));
@@ -6162,6 +6186,17 @@ PgturbohybridCollectScanResults(IndexScanDesc scan, PgturbohybridScanState *stat
 		denseStats.quantizedInvertedPostingBytes;
 	lastStats.quantizedInvertedSidecarBytes =
 		denseStats.quantizedInvertedSidecarBytes;
+	strlcpy(lastStats.quantizedInvertedCompactKernel,
+			denseStats.quantizedInvertedCompactKernel,
+			sizeof(lastStats.quantizedInvertedCompactKernel));
+	lastStats.quantizedInvertedCompactScoreUs =
+		denseStats.quantizedInvertedCompactScoreUs;
+	lastStats.quantizedInvertedCompactDocsScored =
+		denseStats.quantizedInvertedCompactDocsScored;
+	lastStats.quantizedInvertedCompactPayloadBytes =
+		denseStats.quantizedInvertedCompactPayloadBytes;
+	lastStats.quantizedInvertedCompactTopKChangedVsScalar =
+		denseStats.quantizedInvertedCompactTopKChangedVsScalar;
 	strlcpy(lastStats.multivectorDocSidecarCacheMode,
 			denseStats.multivectorDocSidecarCacheMode,
 			sizeof(lastStats.multivectorDocSidecarCacheMode));
@@ -7717,6 +7752,13 @@ PgturbohybridInit(void)
 							&pgturbohybrid_multivector_quantized_inverted_codebook_top_m,
 							1, 1, 16,
 							PGC_USERSET, 0, NULL, NULL, NULL);
+	DefineCustomEnumVariable("turbohybrid.multivector_quantized_inverted_compact_scoring",
+							 "Experimental compact-code scoring mode for quantized_inverted_experimental",
+							 "off preserves the existing float-token admission scorer. experimental uses compact score payloads for admission diagnostics only; final SQL ranking remains exact heap MaxSim.",
+							 &pgturbohybrid_multivector_quantized_inverted_compact_scoring,
+							 PGTURBOHYBRID_MULTIVECTOR_QUANTIZED_INVERTED_COMPACT_SCORING_OFF,
+							 pgturbohybrid_multivector_quantized_inverted_compact_scoring_options,
+							 PGC_USERSET, 0, NULL, NULL, NULL);
 	DefineCustomEnumVariable("turbohybrid.multivector_branch_plan",
 							 "Multivector branch planner mode",
 							 "auto preserves existing branch execution, dense_only exposes a dense-only branch plan, and qdrant_like emits nested prefetch-style branch diagnostics for multivector/hybrid scans.",

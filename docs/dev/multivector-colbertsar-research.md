@@ -142,6 +142,19 @@ The default benchmark grids should keep this branch opt-in because the storage
 format is explicitly unstable. It can be selected manually today to collect
 persisted-posting admission, storage, and latency numbers.
 
+Compact-code admission scoring is also explicit and diagnostic-only:
+
+```sql
+SET turbohybrid.multivector_quantized_inverted_compact_scoring = experimental;
+```
+
+The default is `off`. The current prototype uses the persisted posting
+`scorePayload` as a compact token-norm proxy and dispatches through the
+experimental compact scalar/SIMD scorer. It does not implement a stable residual
+or PQ payload format, and it does not change SQL result ordering: retained
+documents are still reranked with exact heap MaxSim over the original
+multivectors.
+
 Use the compact serving grid only with the experimental opt-in when comparing
 against `proxy_vector`, `document_nodes`, `centroid_mean`, and `centroid_lite`:
 
@@ -178,6 +191,11 @@ candidate source is selected:
 - `quantized_inverted_codebook_dim`
 - `quantized_inverted_codebook_checksum`
 - `quantized_inverted_codebook_top_m`
+- `quantized_inverted_compact_kernel`
+- `quantized_inverted_compact_score_us`
+- `quantized_inverted_compact_docs_scored`
+- `quantized_inverted_compact_payload_bytes`
+- `quantized_inverted_compact_topk_changed_vs_scalar`
 - `quantized_inverted_assignment_us`
 - `quantized_inverted_list_offset_bytes`
 - `quantized_inverted_posting_bytes`

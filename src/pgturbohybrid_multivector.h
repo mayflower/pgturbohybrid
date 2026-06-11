@@ -194,6 +194,14 @@ Vector	   *PgturbohybridMultiVectorBuildQueryProxyVector(const PgturbohybridMult
 														  int encoder,
 														  MemoryContext ctx);
 double		TqDotProductF32Scalar(const float *a, const float *b, int32 dim);
+typedef int64 (*TqCompactCodeScoreFunc) (const int16 *queryCodes,
+										 const int16 *docCodes,
+										 int32 count);
+int64		TqCompactCodeScoreScalar(const int16 *queryCodes,
+									 const int16 *docCodes,
+									 int32 count);
+TqCompactCodeScoreFunc TqResolveCompactCodeScoreKernel(const char *forceKernel);
+const char *TqCompactCodeScoreKernelName(TqCompactCodeScoreFunc func);
 double		TqMultiVectorMaxSimScalar(const PgturbohybridMultiVector *query,
 									   const PgturbohybridMultiVector *doc);
 double		TqMultiVectorMaxSimBlockedScalar(const PgturbohybridMultiVector *query,
