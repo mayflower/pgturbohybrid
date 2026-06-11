@@ -388,7 +388,10 @@ for whether graph entry selection is the admission bottleneck; final retained
 candidates are still ordered by exact MaxSim. When proxy-encoder variants are
 also enabled, the grid adds `proxy_max_pool_f16_entry_sidecar` so the stronger
 `max_pool` proxy baseline can be compared with the same graph-entry
-representative sidecar.
+representative sidecar. Candidate-source deltas label sidecar rows with
+`entry_sidecar_build_cost_high`, `entry_sidecar_no_admission_gain`, or
+`entry_sidecar_latency_regression` when the paired baseline shows that the
+extra physical index cost, admission result, or query latency is not justified.
 Use `--multivector-doc-graph-entry-sample-count` for scan-time entry sampling
 experiments without rebuilding the index. The default `0` keeps the compiled
 document-graph entry sampler. Positive values score that many deterministic
