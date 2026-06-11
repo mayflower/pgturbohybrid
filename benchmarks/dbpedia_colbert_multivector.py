@@ -10224,6 +10224,9 @@ def _self_check_document_node_serving_build_only_serialization() -> None:
             "multivector_centroid_sidecar_write_us": 40000,
             "multivector_centroid_posting_write_us": 50000,
             "multivector_centroid_posting_count": 160,
+            "multivector_graph_neighbor_search_us": 60000,
+            "multivector_graph_build_distance_proxy_calls": 1234,
+            "multivector_graph_build_distance_exact_calls": 0,
         },
     }
     row = document_node_serving_build_only_row(
@@ -10281,7 +10284,19 @@ def _self_check_document_node_serving_build_only_serialization() -> None:
         serialized["document_node_serving_build_only"]["results"][0][
             "build_phase_known_ms"
         ]
-        == 240.0
+        == 300.0
+    )
+    assert (
+        serialized["document_node_serving_build_only"]["results"][0][
+            "build_phase_times_ms"
+        ]["graph_neighbor_search"]
+        == 60.0
+    )
+    assert (
+        serialized["document_node_serving_build_only"]["results"][0][
+            "multivector_graph_build_distance_proxy_calls"
+        ]
+        == 1234
     )
     markdown = markdown_benchmark_summary(serialized)
     assert "### Document-node serving build-only" in markdown
@@ -10289,6 +10304,9 @@ def _self_check_document_node_serving_build_only_serialization() -> None:
     assert "centroid postings" in markdown
     assert "dominant build phase" in markdown
     assert "unattributed ms" in markdown
+    assert "#### Document-node topology build phases" in markdown
+    assert "proxy distance calls" in markdown
+    assert "1234" in markdown
 
 
 def _self_check_document_node_serving_latency_only() -> None:
@@ -11070,6 +11088,14 @@ def document_node_build_phase_summary(
         "doc_sidecar_write": phase_ms("multivector_doc_sidecar_write_us"),
         "centroid_sidecar_write": phase_ms("multivector_centroid_sidecar_write_us"),
         "centroid_posting_write": phase_ms("multivector_centroid_posting_write_us"),
+        "graph_node_assignment": phase_ms("multivector_graph_node_assignment_us"),
+        "graph_entry_search": phase_ms("multivector_graph_entry_search_us"),
+        "graph_neighbor_search": phase_ms("multivector_graph_neighbor_search_us"),
+        "graph_neighbor_select": phase_ms("multivector_graph_neighbor_select_us"),
+        "graph_link_insert": phase_ms("multivector_graph_link_insert_us"),
+        "graph_reciprocal_prune": phase_ms("multivector_graph_reciprocal_prune_us"),
+        "graph_segment_write": phase_ms("multivector_graph_segment_write_us"),
+        "graph_wal": phase_ms("multivector_graph_wal_us"),
     }
     centroid_subphase_times_ms = {
         "centroid_cluster": phase_ms("multivector_centroid_cluster_us"),
@@ -11184,6 +11210,42 @@ def document_node_serving_build_only_row(
         ),
         "multivector_centroid_posting_count": build_stats.get(
             "multivector_centroid_posting_count"
+        ),
+        "multivector_graph_node_assignment_us": build_stats.get(
+            "multivector_graph_node_assignment_us"
+        ),
+        "multivector_graph_entry_search_us": build_stats.get(
+            "multivector_graph_entry_search_us"
+        ),
+        "multivector_graph_neighbor_search_us": build_stats.get(
+            "multivector_graph_neighbor_search_us"
+        ),
+        "multivector_graph_neighbor_select_us": build_stats.get(
+            "multivector_graph_neighbor_select_us"
+        ),
+        "multivector_graph_link_insert_us": build_stats.get(
+            "multivector_graph_link_insert_us"
+        ),
+        "multivector_graph_reciprocal_prune_us": build_stats.get(
+            "multivector_graph_reciprocal_prune_us"
+        ),
+        "multivector_graph_segment_write_us": build_stats.get(
+            "multivector_graph_segment_write_us"
+        ),
+        "multivector_graph_wal_us": build_stats.get(
+            "multivector_graph_wal_us"
+        ),
+        "multivector_graph_build_distance_proxy_calls": build_stats.get(
+            "multivector_graph_build_distance_proxy_calls"
+        ),
+        "multivector_graph_build_distance_exact_calls": build_stats.get(
+            "multivector_graph_build_distance_exact_calls"
+        ),
+        "multivector_graph_build_distance_cache_hits": build_stats.get(
+            "multivector_graph_build_distance_cache_hits"
+        ),
+        "multivector_graph_build_distance_cache_misses": build_stats.get(
+            "multivector_graph_build_distance_cache_misses"
         ),
     }
 
@@ -13161,6 +13223,32 @@ def markdown_benchmark_summary(report: dict[str, Any]) -> str:
                     index_bytes=int(item.get("index_bytes", 0) or 0),
                 )
             )
+        if sorted_rows:
+            lines.extend([
+                "",
+                "#### Document-node topology build phases",
+                "",
+                "| profile | node assignment ms | entry search ms | neighbor search ms | neighbor select ms | link insert ms | reciprocal prune ms | segment write ms | wal ms | proxy distance calls | exact distance calls | distance cache hits | distance cache misses |",
+                "|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|",
+            ])
+            for item in sorted_rows:
+                lines.append(
+                    "| {profile} | {node_assignment:.3f} | {entry_search:.3f} | {neighbor_search:.3f} | {neighbor_select:.3f} | {link_insert:.3f} | {reciprocal_prune:.3f} | {segment_write:.3f} | {wal:.3f} | {proxy_calls} | {exact_calls} | {cache_hits} | {cache_misses} |".format(
+                        profile=item.get("profile", ""),
+                        node_assignment=float(item.get("multivector_graph_node_assignment_us", 0.0) or 0.0) / 1000.0,
+                        entry_search=float(item.get("multivector_graph_entry_search_us", 0.0) or 0.0) / 1000.0,
+                        neighbor_search=float(item.get("multivector_graph_neighbor_search_us", 0.0) or 0.0) / 1000.0,
+                        neighbor_select=float(item.get("multivector_graph_neighbor_select_us", 0.0) or 0.0) / 1000.0,
+                        link_insert=float(item.get("multivector_graph_link_insert_us", 0.0) or 0.0) / 1000.0,
+                        reciprocal_prune=float(item.get("multivector_graph_reciprocal_prune_us", 0.0) or 0.0) / 1000.0,
+                        segment_write=float(item.get("multivector_graph_segment_write_us", 0.0) or 0.0) / 1000.0,
+                        wal=float(item.get("multivector_graph_wal_us", 0.0) or 0.0) / 1000.0,
+                        proxy_calls=int(item.get("multivector_graph_build_distance_proxy_calls", 0) or 0),
+                        exact_calls=int(item.get("multivector_graph_build_distance_exact_calls", 0) or 0),
+                        cache_hits=int(item.get("multivector_graph_build_distance_cache_hits", 0) or 0),
+                        cache_misses=int(item.get("multivector_graph_build_distance_cache_misses", 0) or 0),
+                    )
+                )
 
     latency_only = report.get("document_node_serving_latency_only")
     if isinstance(latency_only, dict):
