@@ -444,6 +444,14 @@ unless `--admission-budget-sweep` is explicit. If more than 25 queries are
 loaded, the smoke run uses the first 25 and records `query_subset_used = true`.
 Treat this as a harness/runtime check, not serving evidence.
 
+#### Build-only first
+
+For 10k/x00k document-node experiments, run the build-only diagnostic before a
+full retrieval/admission grid whenever `CREATE INDEX` is slow or unmeasured.
+The build-only mode answers whether the bottleneck is index construction,
+sidecar serialization, centroid construction, or graph topology; a full serving
+grid should come after this evidence, not before it.
+
 If a 10k/x00k run stalls in `CREATE INDEX`, measure the build path directly
 before running admission or retrieval:
 
@@ -465,12 +473,34 @@ python benchmarks/dbpedia_colbert_multivector.py \
 The build-only report groups profiles by physical index signature and emits
 `turbohybrid_last_build_stats()` fields for centroid construction, proxy
 construction, document-sidecar writes, centroid-sidecar writes, and centroid
-posting writes. It also derives `dominant_build_phase`,
-`build_phase_known_ms`, and `build_phase_unattributed_ms`; a large
-unattributed bucket means the stall is likely normal graph/topology build work
-or another phase that is not yet covered by the multivector-specific timers. It
-intentionally skips retrieval and exact admission baselines, so it is a
-build-cost diagnostic rather than serving-quality evidence.
+posting writes. It also preserves the generic build timer aliases
+`build_edges_us`, `write_pages_us`, `wal_us`, and `total_us`, derives
+`dominant_build_phase`, `build_phase_known_ms`, and
+`build_phase_unattributed_ms`, and emits a build acceptance summary with
+slow-build warning labels such as `centroid_kmeans_dominates_build`,
+`centroid_posting_write_dominates_build`, `proxy_build_dominates_build`,
+`graph_edges_dominates_build`, `build_unattributed_high`, and
+`index_rebuild_not_reused`. A large unattributed bucket means the stall is
+likely normal graph/topology build work or another phase that is not yet
+covered by the multivector-specific timers. It intentionally skips retrieval
+and exact admission baselines, so it is a build-cost diagnostic rather than
+serving-quality evidence.
+
+Interpret the build-only report before changing query knobs:
+
+- If centroid build dominates, reduce the centroid count, test token pooling
+  before centroiding, or avoid `centroid_lite` for the current serving target.
+- If graph build dominates, compare cheaper proxy encoders first and test
+  `entry_sidecar` as a separate physical index variant rather than mixing it
+  into the same run.
+- If sidecar write dominates, compare `f16`/`sq8` document storage and token
+  pooling before tuning graph traversal.
+- If `build_phase_unattributed_ms` is high, instrument or inspect
+  graph/topology build before guessing at retrieval-side optimizations.
+
+Keep `multivector_doc_build_scorer = exact_symmetric` diagnostic-only for tiny
+corpora. x00k production builds should use proxy graph topology unless build
+and quality evidence explicitly prove another path is safe.
 
 For focused candidate-admission follow-up after build cost is bounded, keep the
 profile set narrow and override only the serving-grid EF/oversampling values you
