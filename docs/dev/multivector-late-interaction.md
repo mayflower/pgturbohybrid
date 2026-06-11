@@ -249,10 +249,12 @@ uses the same heap-backed exact document MaxSim path and reports:
 built with `multivector_graph = document_nodes`. It uses the index-persisted
 fixed-dimensional proxy encoder as the single-vector TurboQuant graph key for
 admission and then exact-reranks admitted heap documents with full MaxSim.
-`mean_pool` preserves the old representative-vector behavior; `max_pool` and
-`random_projection_fde` are benchmarkable alternatives. The
-`learned_projection_placeholder` value fails explicitly until learned projection
-weights are configured. Its stats report
+`normalized_mean` is the production document proxy for cosine/IP MaxSim
+models. `first_token`, `max_pool`, `random_projection_fde`, and
+`learned_projection_v1` are benchmarkable alternatives; `centroid_mean`
+requires `multivector_centroids = kmeans`. The
+`learned_projection_placeholder` value fails explicitly, while
+`learned_projection_v1` requires configured projection weights. Its stats report
 `multivector_candidate_source = proxy_vector`, `proxy_encoder_kind`,
 `proxy_candidates`, `proxy_top1_admission`, `proxy_exact_rerank_docs`, and
 `multivector_doc_graph_warning = document_node_proxy_vector_graph_traversal`.
@@ -304,7 +306,7 @@ WITH (
   multivector_graph = token_nodes,      -- default
   multivector_centroids = off,          -- off | kmeans
   multivector_centroid_count = 0,       -- 0 means auto
-  multivector_proxy_encoder = mean_pool -- mean_pool | max_pool | random_projection_fde | learned_projection_placeholder
+  multivector_proxy_encoder = normalized_mean -- normalized_mean | first_token | centroid_mean | max_pool | random_projection_fde | learned_projection_placeholder | learned_projection_v1
 )
 ```
 
