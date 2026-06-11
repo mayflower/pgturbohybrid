@@ -54,7 +54,7 @@ This repo (`pgturbohybrid`) is the **hybrid retrieval access method**. ValorBrai
   - `th-prove-installcheck` for TAP tests.
   - `th-smoke` for the minimal extension smoke test.
 - Verify the environment before validation with `echo "$IN_NIX_SHELL"` and
-  `pg_config --version`; the flake currently provides PostgreSQL 17. If TAP
+  `pg_config --version`; the flake currently provides PostgreSQL 18. If TAP
   modules appear unavailable, first re-check that the command is running inside
   `nix develop` before treating it as a project or system issue.
 - For live `pg_colbert_llama` development and validation, use the small 15m

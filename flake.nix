@@ -35,7 +35,7 @@
         let
           pkgs = import nixpkgs { inherit system; };
           lib = pkgs.lib;
-          postgresql = pkgs.postgresql_17;
+          postgresql = pkgs.postgresql_18;
           llamaCppColbert = pkgs.llama-cpp.overrideAttrs (old: {
             patches = (old.patches or [ ]) ++ [
               ./nix/patches/llama-cpp-get-key-or-arr-kv-overrides.patch
@@ -225,7 +225,7 @@
               );
 
               commonEnv = {
-                TH_ENV_NAME = "pg17-${suffix}";
+                TH_ENV_NAME = "pg18-${suffix}";
                 TH_PGPORT = "55432";
                 PGPORT = "55432";
                 PGDATABASE = "pgturbohybrid_dev";
