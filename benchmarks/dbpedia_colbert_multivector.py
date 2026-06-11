@@ -10299,6 +10299,10 @@ def _self_check_document_node_serving_build_only_serialization() -> None:
             "multivector_centroids": "kmeans",
         },
         "build_stats": {
+            "build_edges_us": 500000,
+            "write_pages_us": 11000,
+            "wal_us": 12000,
+            "total_us": 1200000,
             "multivector_centroid_build_us": 100000,
             "multivector_centroid_cluster_us": 70000,
             "multivector_centroid_residual_us": 20000,
@@ -10336,6 +10340,7 @@ def _self_check_document_node_serving_build_only_serialization() -> None:
             "index_build_group_count": 1,
             "index_reuse_count": 0,
             "effective_profiles": [profile.name],
+            "build_acceptance_summary": document_node_build_acceptance_summary([row]),
             "results": [row],
         },
     }
@@ -10383,6 +10388,28 @@ def _self_check_document_node_serving_build_only_serialization() -> None:
         ]
         == 1234
     )
+    assert (
+        serialized["document_node_serving_build_only"]["results"][0][
+            "build_edges_us"
+        ]
+        == 500000
+    )
+    assert (
+        serialized["document_node_serving_build_only"]["results"][0][
+            "write_pages_us"
+        ]
+        == 11000
+    )
+    warnings = serialized["document_node_serving_build_only"]["results"][0][
+        "build_slow_warnings"
+    ]
+    assert "centroid_kmeans_dominates_build" in warnings
+    assert "graph_edges_dominates_build" in warnings
+    assert "build_unattributed_high" in warnings
+    assert "index_rebuild_not_reused" in warnings
+    summary = serialized["document_node_serving_build_only"]["build_acceptance_summary"]
+    assert summary["fastest_profile"] == "centroid_mean_f16"
+    assert summary["build_slow_warning_counts"]["graph_edges_dominates_build"] == 1
     markdown = markdown_benchmark_summary(serialized)
     assert "### Document-node serving build-only" in markdown
     assert "centroid_mean_f16" in markdown
@@ -10392,6 +10419,9 @@ def _self_check_document_node_serving_build_only_serialization() -> None:
     assert "#### Document-node topology build phases" in markdown
     assert "proxy distance calls" in markdown
     assert "1234" in markdown
+    assert "#### Build acceptance summary" in markdown
+    assert "graph_edges_dominates_build" in markdown
+    assert "500.000" in markdown
 
 
 def _self_check_document_node_serving_latency_only() -> None:
@@ -11187,6 +11217,16 @@ def document_node_build_phase_summary(
         "centroid_cluster": phase_ms("multivector_centroid_cluster_us"),
         "centroid_residual": phase_ms("multivector_centroid_residual_us"),
     }
+    generic_phase_times_ms = {
+        "scan": phase_ms("scan_us"),
+        "fit_correction": phase_ms("fit_correction_us"),
+        "encode": phase_ms("encode_us"),
+        "build_edges": phase_ms("build_edges_us"),
+        "entry_sidecar": phase_ms("entry_sidecar_us"),
+        "write_pages": phase_ms("write_pages_us"),
+        "wal": phase_ms("wal_us"),
+        "total": phase_ms("total_us"),
+    }
     known_ms = round(sum(phase_times_ms.values()), 3)
     elapsed_ms = max(float(index_build_elapsed_ms or 0.0), 0.0)
     unattributed_ms = round(max(elapsed_ms - known_ms, 0.0), 3)
@@ -11202,10 +11242,19 @@ def document_node_build_phase_summary(
     )
     if dominant_centroid_subphase_ms <= 0.0:
         dominant_centroid_subphase = "unavailable"
+    dominant_generic_phase, dominant_generic_phase_ms = max(
+        generic_phase_times_ms.items(),
+        key=lambda item: (item[1], item[0]),
+    )
+    if dominant_generic_phase_ms <= 0.0:
+        dominant_generic_phase = "unavailable"
     return {
         "build_phase_times_ms": {key: round(value, 3) for key, value in phase_times_ms.items()},
         "build_centroid_subphase_times_ms": {
             key: round(value, 3) for key, value in centroid_subphase_times_ms.items()
+        },
+        "build_generic_phase_times_ms": {
+            key: round(value, 3) for key, value in generic_phase_times_ms.items()
         },
         "build_phase_known_ms": known_ms,
         "build_phase_unattributed_ms": unattributed_ms,
@@ -11218,6 +11267,109 @@ def document_node_build_phase_summary(
         "dominant_build_phase_ms": round(dominant_ms, 3),
         "dominant_centroid_build_subphase": dominant_centroid_subphase,
         "dominant_centroid_build_subphase_ms": round(dominant_centroid_subphase_ms, 3),
+        "dominant_generic_build_phase": dominant_generic_phase,
+        "dominant_generic_build_phase_ms": round(dominant_generic_phase_ms, 3),
+    }
+
+
+def document_node_build_slow_warnings(
+    *,
+    profile: DocumentNodeServingProfile,
+    build_stats: dict[str, Any],
+    phase_summary: dict[str, Any],
+    index_build_elapsed_ms: float,
+    profile_reused_index: bool,
+    grouped_profiles: list[DocumentNodeServingProfile],
+) -> list[str]:
+    warnings: list[str] = []
+    elapsed_ms = max(float(index_build_elapsed_ms or 0.0), 0.0)
+    dominant_phase = str(phase_summary.get("dominant_build_phase") or "")
+    phase_times = phase_summary.get("build_phase_times_ms", {})
+    if not isinstance(phase_times, dict):
+        phase_times = {}
+    generic_times = phase_summary.get("build_generic_phase_times_ms", {})
+    if not isinstance(generic_times, dict):
+        generic_times = {}
+
+    def phase_value_ms(mapping: dict[str, Any], key: str) -> float:
+        value = mapping.get(key)
+        if isinstance(value, bool) or value is None:
+            return 0.0
+        try:
+            return max(float(value), 0.0)
+        except (TypeError, ValueError):
+            return 0.0
+
+    def dominates(value_ms: float) -> bool:
+        if value_ms <= 0.0:
+            return False
+        if elapsed_ms <= 0.0:
+            return True
+        return value_ms >= max(250.0, elapsed_ms * 0.40)
+
+    centroid_ms = phase_value_ms(phase_times, "centroid_build")
+    posting_ms = phase_value_ms(phase_times, "centroid_posting_write")
+    proxy_ms = phase_value_ms(phase_times, "proxy_build")
+    build_edges_ms = phase_value_ms(generic_times, "build_edges")
+    unattributed_ms = float(phase_summary.get("build_phase_unattributed_ms", 0.0) or 0.0)
+
+    if profile.centroids == "kmeans" and (dominant_phase == "centroid_build" or dominates(centroid_ms)):
+        warnings.append("centroid_kmeans_dominates_build")
+    if dominant_phase == "centroid_posting_write" or dominates(posting_ms):
+        warnings.append("centroid_posting_write_dominates_build")
+    if dominant_phase == "proxy_build" or dominates(proxy_ms):
+        warnings.append("proxy_build_dominates_build")
+    if dominates(build_edges_ms):
+        warnings.append("graph_edges_dominates_build")
+    if elapsed_ms > 0.0 and unattributed_ms >= max(250.0, elapsed_ms * 0.25):
+        warnings.append("build_unattributed_high")
+    if not profile_reused_index and len(grouped_profiles) == 1:
+        warnings.append("index_rebuild_not_reused")
+
+    return unique_preserve_order(warnings)
+
+
+def document_node_build_acceptance_summary(rows: list[dict[str, Any]]) -> dict[str, Any]:
+    usable_rows = [row for row in rows if isinstance(row, dict)]
+    if not usable_rows:
+        return {
+            "profiles": 0,
+            "fastest_profile": None,
+            "slowest_profile": None,
+            "dominant_build_phase_counts": {},
+            "build_slow_warning_counts": {},
+            "profiles_requiring_unique_index": [],
+        }
+    sorted_by_build = sorted(
+        usable_rows,
+        key=lambda row: (
+            float(row.get("index_build_elapsed_ms", 0.0) or 0.0),
+            str(row.get("profile", "")),
+        ),
+    )
+    warning_counts: dict[str, int] = {}
+    dominant_counts: dict[str, int] = {}
+    unique_index_profiles: list[str] = []
+    for row in usable_rows:
+        dominant = str(row.get("dominant_build_phase") or "unavailable")
+        dominant_counts[dominant] = dominant_counts.get(dominant, 0) + 1
+        warnings = row.get("build_slow_warnings", [])
+        if not isinstance(warnings, list):
+            warnings = []
+        for warning in warnings:
+            warning_key = str(warning)
+            warning_counts[warning_key] = warning_counts.get(warning_key, 0) + 1
+        if "index_rebuild_not_reused" in warnings:
+            unique_index_profiles.append(str(row.get("profile", "")))
+    return {
+        "profiles": len(usable_rows),
+        "fastest_profile": sorted_by_build[0].get("profile"),
+        "fastest_index_build_elapsed_ms": sorted_by_build[0].get("index_build_elapsed_ms"),
+        "slowest_profile": sorted_by_build[-1].get("profile"),
+        "slowest_index_build_elapsed_ms": sorted_by_build[-1].get("index_build_elapsed_ms"),
+        "dominant_build_phase_counts": dominant_counts,
+        "build_slow_warning_counts": warning_counts,
+        "profiles_requiring_unique_index": unique_index_profiles,
     }
 
 
@@ -11243,6 +11395,20 @@ def document_node_serving_build_only_row(
         build_stats,
         index_build_elapsed_ms=index_build_elapsed_ms,
     )
+    slow_warnings = document_node_build_slow_warnings(
+        profile=profile,
+        build_stats=build_stats,
+        phase_summary=phase_summary,
+        index_build_elapsed_ms=index_build_elapsed_ms,
+        profile_reused_index=profile_reused_index,
+        grouped_profiles=grouped_profiles,
+    )
+    if profile_reused_index:
+        index_rebuild_reason = "reused_index_signature"
+    elif len(grouped_profiles) > 1:
+        index_rebuild_reason = "representative_build_for_shared_signature"
+    else:
+        index_rebuild_reason = "unique_index_signature"
     return {
         "profile": profile.name,
         "candidate_source": profile.candidate_source,
@@ -11267,6 +11433,7 @@ def document_node_serving_build_only_row(
         "plain_fallback": profile.plain_fallback,
         "index_signature": serializable_index_signature(signature),
         "index_build_reused": profile_reused_index,
+        "index_rebuild_reason": index_rebuild_reason,
         "index_build_reused_for_profiles": [
             grouped_profile.name for grouped_profile in grouped_profiles
         ],
@@ -11274,7 +11441,16 @@ def document_node_serving_build_only_row(
         "index_bytes": int(index_phase.get("index_bytes", 0) or 0),
         "index_stats": index_stats,
         "index_build_stats": build_stats,
+        "build_slow_warnings": slow_warnings,
         **phase_summary,
+        "scan_us": build_stats.get("scan_us"),
+        "fit_correction_us": build_stats.get("fit_correction_us"),
+        "encode_us": build_stats.get("encode_us"),
+        "build_edges_us": build_stats.get("build_edges_us"),
+        "entry_sidecar_us": build_stats.get("entry_sidecar_us"),
+        "write_pages_us": build_stats.get("write_pages_us"),
+        "wal_us": build_stats.get("wal_us"),
+        "total_us": build_stats.get("total_us"),
         "multivector_centroid_build_us": build_stats.get("multivector_centroid_build_us"),
         "multivector_centroid_cluster_us": build_stats.get(
             "multivector_centroid_cluster_us"
@@ -11401,6 +11577,7 @@ def run_document_node_serving_build_only(
 
     if last_index_phase is None:
         raise RuntimeError("document-node serving build-only selected no profiles")
+    build_acceptance = document_node_build_acceptance_summary(results)
 
     return {
         "enabled": True,
@@ -11423,6 +11600,7 @@ def run_document_node_serving_build_only(
             }
             for signature, grouped_profiles in profile_groups
         ],
+        "build_acceptance_summary": build_acceptance,
         "results": results,
         "last_index_phase": last_index_phase,
     }
@@ -13277,6 +13455,28 @@ def markdown_benchmark_summary(report: dict[str, Any]) -> str:
             f"- Index build groups: `{int(build_only.get('index_build_group_count', 0) or 0)}`; reuses: `{int(build_only.get('index_reuse_count', 0) or 0)}`",
             f"- Effective profiles: `{','.join(str(item) for item in build_only.get('effective_profiles', []))}`",
             "",
+            "#### Build acceptance summary",
+            "",
+        ])
+        build_acceptance = build_only.get("build_acceptance_summary", {})
+        if not isinstance(build_acceptance, dict):
+            build_acceptance = {}
+        warning_counts = build_acceptance.get("build_slow_warning_counts", {})
+        if not isinstance(warning_counts, dict):
+            warning_counts = {}
+        dominant_counts = build_acceptance.get("dominant_build_phase_counts", {})
+        if not isinstance(dominant_counts, dict):
+            dominant_counts = {}
+        unique_profiles = build_acceptance.get("profiles_requiring_unique_index", [])
+        if not isinstance(unique_profiles, list):
+            unique_profiles = []
+        lines.extend([
+            f"- Fastest profile: `{build_acceptance.get('fastest_profile', '')}` (`{float(build_acceptance.get('fastest_index_build_elapsed_ms', 0.0) or 0.0):.3f} ms`)",
+            f"- Slowest profile: `{build_acceptance.get('slowest_profile', '')}` (`{float(build_acceptance.get('slowest_index_build_elapsed_ms', 0.0) or 0.0):.3f} ms`)",
+            f"- Dominant phase counts: `{json.dumps(dominant_counts, sort_keys=True)}`",
+            f"- Slow-build warnings: `{json.dumps(warning_counts, sort_keys=True)}`",
+            f"- Unique index profiles: `{','.join(str(item) for item in unique_profiles)}`",
+            "",
             "| profile | source | proxy | centroids | entry sidecar | storage | pooling | reused | dominant build phase | index build ms | known phase ms | unattributed ms | centroid build ms | centroid cluster ms | centroid residual ms | proxy build ms | doc sidecar write ms | centroid sidecar write ms | centroid posting write ms | centroid postings | index bytes |",
             "|---|---|---|---|---|---|---|---|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|",
         ])
@@ -13312,6 +13512,28 @@ def markdown_benchmark_summary(report: dict[str, Any]) -> str:
                 )
             )
         if sorted_rows:
+            lines.extend([
+                "",
+                "#### Build slow-path warnings",
+                "",
+                "| profile | rebuild reason | warnings | generic total ms | build edges ms | write pages ms | wal ms |",
+                "|---|---|---|---:|---:|---:|---:|",
+            ])
+            for item in sorted_rows:
+                warnings = item.get("build_slow_warnings", [])
+                if not isinstance(warnings, list):
+                    warnings = []
+                lines.append(
+                    "| {profile} | {reason} | {warnings} | {total:.3f} | {edges:.3f} | {write_pages:.3f} | {wal:.3f} |".format(
+                        profile=item.get("profile", ""),
+                        reason=item.get("index_rebuild_reason", ""),
+                        warnings=", ".join(str(warning) for warning in warnings) or "none",
+                        total=float(item.get("total_us", 0.0) or 0.0) / 1000.0,
+                        edges=float(item.get("build_edges_us", 0.0) or 0.0) / 1000.0,
+                        write_pages=float(item.get("write_pages_us", 0.0) or 0.0) / 1000.0,
+                        wal=float(item.get("wal_us", 0.0) or 0.0) / 1000.0,
+                    )
+                )
             lines.extend([
                 "",
                 "#### Document-node topology build phases",

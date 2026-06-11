@@ -677,8 +677,13 @@ posting serialization from graph topology work.
 The benchmark harness exposes the same fields through
 `--document-node-serving-build-only`, which builds the selected serving profiles
 and skips retrieval/admission so build stalls can be diagnosed directly. The
-report derives `dominant_build_phase`, `build_phase_known_ms`, and
-`build_phase_unattributed_ms`; use the unattributed bucket as the signal for
+report derives `dominant_build_phase`, `build_phase_known_ms`,
+`build_phase_unattributed_ms`, preserves generic aliases such as
+`build_edges_us`, `write_pages_us`, `wal_us`, and `total_us`, and classifies
+slow build symptoms with labels including `centroid_kmeans_dominates_build`,
+`centroid_posting_write_dominates_build`, `proxy_build_dominates_build`,
+`graph_edges_dominates_build`, `build_unattributed_high`, and
+`index_rebuild_not_reused`. Use the unattributed bucket as the signal for
 graph/topology build work or another phase not covered by the multivector
 timers.
 
