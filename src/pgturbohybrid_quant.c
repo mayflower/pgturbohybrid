@@ -11304,6 +11304,44 @@ PgturbohybridMultiVectorCandidateHeapOffer(TqDenseCandidate *heap,
 	}
 }
 
+static bool
+PgturbohybridMultiVectorCentroidLitePruneBySafeUpperBound(TqDenseCandidate *heap,
+														  int count,
+														  int limit,
+														  const TqDenseCandidate *candidate,
+														  const PgturbohybridGraphScanStorage *storage,
+														  TqDocId docId,
+														  uint64 *unsafeFallbacks)
+{
+	float		residualMean;
+
+	if (count < limit || limit <= 0)
+		return false;
+	if (storage == NULL ||
+		storage->multivectorDocCentroidResiduals == NULL ||
+		docId >= storage->multivectorDocCount)
+	{
+		(*unsafeFallbacks)++;
+		return false;
+	}
+
+	/*
+	 * The persisted centroid residual is a mean summary, not a radius. It is
+	 * only a safe upper bound when it is exactly zero, because then the
+	 * centroid interaction equals the original document-token interaction for
+	 * this document. Otherwise keep the candidate and report the fallback.
+	 */
+	residualMean = storage->multivectorDocCentroidResiduals[docId];
+	if (!isfinite(residualMean) || residualMean > 1.0e-12f)
+	{
+		(*unsafeFallbacks)++;
+		return false;
+	}
+
+	return PgturbohybridMultiVectorDenseCandidateCompare(candidate,
+														 &heap[0]) >= 0;
+}
+
 static void
 PgturbohybridMultiVectorCandidateHeapSort(TqDenseCandidate *heap, int count)
 {
@@ -13641,6 +13679,10 @@ PgturbohybridMultiVectorDocumentNodeScan(IndexScanDesc scan,
 		centroidLite &&
 		pgturbohybrid_multivector_centroid_lite_bitset_prefilter ==
 		PGTURBOHYBRID_MULTIVECTOR_CENTROID_LITE_BITSET_PREFILTER_EXPERIMENTAL;
+	bool		centroidUpperBoundPruning =
+		centroidLite &&
+		pgturbohybrid_multivector_centroid_lite_pruning ==
+		PGTURBOHYBRID_MULTIVECTOR_CENTROID_LITE_PRUNING_SAFE_UPPER_BOUND;
 	bool		quantizedInvertedExperimental =
 		pgturbohybrid_multivector_candidate_source ==
 		PGTURBOHYBRID_MULTIVECTOR_CANDIDATE_SOURCE_QUANTIZED_INVERTED_EXPERIMENTAL;
@@ -13674,6 +13716,12 @@ PgturbohybridMultiVectorDocumentNodeScan(IndexScanDesc scan,
 	uint32		centroidBitsetDocsAfterThreshold = 0;
 	uint64		centroidBitsetPrefilterUs = 0;
 	uint64		centroidBitsetMemoryBytes = 0;
+	uint64		centroidUpperBoundDocsChecked = 0;
+	uint64		centroidUpperBoundDocsPruned = 0;
+	uint64		centroidUpperBoundPruneUs = 0;
+	uint64		centroidUpperBoundUnsafeFallbacks = 0;
+	uint32		centroidCandidatesBeforeBound = 0;
+	uint32		centroidCandidatesAfterBound = 0;
 	uint32		centroidCountEffective = 0;
 	uint32		centroidPrerankDocs = 0;
 	uint64		quantizedInvertedListsVisited = 0;
@@ -14549,6 +14597,7 @@ PgturbohybridMultiVectorDocumentNodeScan(IndexScanDesc scan,
 				uint32		docId = matchedDocIds[matchedIndex];
 				TqMultiVectorDocMapEntry *docEntry;
 				TqDenseCandidate candidate;
+				bool		prunedByUpperBound = false;
 
 				CHECK_FOR_INTERRUPTS();
 				docEntry = &storage.multivectorDocMap[docId];
@@ -14562,6 +14611,30 @@ PgturbohybridMultiVectorDocumentNodeScan(IndexScanDesc scan,
 				candidate.rank = 0;
 				candidate.hasDocId = true;
 				candidate.exactScored = false;
+				if (centroidUpperBoundPruning)
+				{
+					instr_time	pruneStart;
+
+					centroidUpperBoundDocsChecked++;
+					if (collectPhaseStats)
+						INSTR_TIME_SET_CURRENT(pruneStart);
+					prunedByUpperBound =
+						PgturbohybridMultiVectorCentroidLitePruneBySafeUpperBound(candidates,
+																				  docCount,
+																				  candidateLimit,
+																				  &candidate,
+																				  &storage,
+																				  docId,
+																				  &centroidUpperBoundUnsafeFallbacks);
+					if (collectPhaseStats)
+						PgturbohybridGraphAddElapsedUint64(&centroidUpperBoundPruneUs,
+														   pruneStart);
+					if (prunedByUpperBound)
+					{
+						centroidUpperBoundDocsPruned++;
+						continue;
+					}
+				}
 				PgturbohybridMultiVectorCandidateHeapOffer(candidates,
 														  &docCount,
 														  candidateLimit,
@@ -14570,6 +14643,8 @@ PgturbohybridMultiVectorDocumentNodeScan(IndexScanDesc scan,
 			docsScored = matchedDocCount;
 			centroidDocsTouched = matchedDocCount;
 			centroidBitsetDocsAfterThreshold = matchedDocCount;
+			centroidCandidatesBeforeBound = matchedDocCount;
+			centroidCandidatesAfterBound = (uint32) docCount;
 			edgesVisited = centroidPostingsTouched;
 			maxsimPairs = centroidPostingsTouched;
 			if (collectPhaseStats)
@@ -15023,6 +15098,19 @@ PgturbohybridMultiVectorDocumentNodeScan(IndexScanDesc scan,
 				centroidBitsetPrefilter ? centroidBitsetPrefilterUs : 0;
 			stats->centroidBitsetMemoryBytes =
 				centroidBitsetPrefilter ? centroidBitsetMemoryBytes : 0;
+			stats->centroidUpperBoundEnabled = centroidUpperBoundPruning;
+			stats->centroidUpperBoundDocsChecked =
+				centroidUpperBoundPruning ? centroidUpperBoundDocsChecked : 0;
+			stats->centroidUpperBoundDocsPruned =
+				centroidUpperBoundPruning ? centroidUpperBoundDocsPruned : 0;
+			stats->centroidUpperBoundPruneUs =
+				centroidUpperBoundPruning ? centroidUpperBoundPruneUs : 0;
+			stats->centroidUpperBoundUnsafeFallbacks =
+				centroidUpperBoundPruning ? centroidUpperBoundUnsafeFallbacks : 0;
+			stats->centroidCandidatesBeforeBound =
+				centroidUpperBoundPruning ? centroidCandidatesBeforeBound : 0;
+			stats->centroidCandidatesAfterBound =
+				centroidUpperBoundPruning ? centroidCandidatesAfterBound : 0;
 		stats->multivectorCentroidCount = centroidCountEffective;
 		stats->multivectorCentroidPrerankDocs = centroidPrerankDocs;
 		stats->multivectorFullMaxsimRerankDocs =

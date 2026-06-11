@@ -3628,6 +3628,7 @@ DECLARE
 	proxy_ids int[];
 	centroid_ids int[];
 	centroid_bitset_ids int[];
+	centroid_pruned_ids int[];
 	quantized_ids int[];
 	stats jsonb;
 	timing_key text;
@@ -3731,10 +3732,14 @@ BEGIN
 		stats->>'multivector_candidate_source' <> 'centroid_lite' OR
 		stats->>'multivector_doc_graph_warning' <> 'document_node_centroid_lite_prefilter' OR
 		stats->>'centroid_bitset_prefilter_enabled' <> 'false' OR
+		stats->>'centroid_upper_bound_enabled' <> 'false' OR
 		stats->>'multivector_plain_fallback_used' <> 'false' OR
 		(stats->>'centroid_lists_visited')::int <= 0 OR
 		(stats->>'centroid_docs_touched')::int <= 0 OR
 		(stats->>'centroid_candidates')::int <= 0 OR
+		(stats->>'centroid_upper_bound_docs_checked')::int <> 0 OR
+		(stats->>'centroid_candidates_before_bound')::int <> 0 OR
+		(stats->>'centroid_candidates_after_bound')::int <> 0 OR
 		stats->>'multivector_exact_rerank_source' <> 'heap' OR
 		(stats->>'multivector_doc_graph_exact_rerank_docs')::int < 3 OR
 		(stats->>'multivector_exact_rerank_docs')::int < 3 OR
@@ -3775,6 +3780,35 @@ BEGIN
 			exact_ids, centroid_bitset_ids, stats;
 	END IF;
 	PERFORM set_config('turbohybrid.multivector_centroid_lite_bitset_prefilter', 'off', true);
+
+	PERFORM set_config('turbohybrid.multivector_centroid_lite_pruning', 'safe_upper_bound', true);
+	SELECT array_agg(id ORDER BY distance, id) INTO centroid_pruned_ids
+	FROM (
+		SELECT id,
+		       colbert <~> turbohybrid_query(
+			       multivector_query => query_mv,
+			       dense_k => 4,
+			       final_k => 3
+		       ) AS distance
+		FROM mv_centroid_lite_docs
+		ORDER BY distance, id
+		LIMIT 3
+	) AS centroid_pruned_results;
+	stats := turbohybrid_last_scan_stats();
+
+	IF centroid_pruned_ids <> exact_ids OR
+		stats->>'multivector_candidate_source' <> 'centroid_lite' OR
+		stats->>'centroid_upper_bound_enabled' <> 'true' OR
+		(stats->>'centroid_upper_bound_docs_checked')::int <= 0 OR
+		(stats->>'centroid_upper_bound_docs_pruned')::int <> 0 OR
+		(stats->>'centroid_upper_bound_unsafe_fallbacks')::int <> 0 OR
+		(stats->>'centroid_candidates_before_bound')::int <= 0 OR
+		(stats->>'centroid_candidates_after_bound')::int <> (stats->>'centroid_candidates_before_bound')::int OR
+		(stats->>'centroid_upper_bound_prune_time_us')::bigint < 0 THEN
+		RAISE EXCEPTION 'centroid_lite safe upper-bound mode changed exact result or missing stats: exact %, pruned %, stats %',
+			exact_ids, centroid_pruned_ids, stats;
+	END IF;
+	PERFORM set_config('turbohybrid.multivector_centroid_lite_pruning', 'off', true);
 
 	PERFORM set_config('turbohybrid.multivector_candidate_source', 'quantized_inverted_experimental', true);
 	SELECT array_agg(id ORDER BY distance, id) INTO quantized_ids
@@ -3840,6 +3874,76 @@ EXCEPTION
 		IF SQLERRM NOT LIKE 'quantized_inverted_experimental multivector candidate source requires multivector_graph = document_nodes%' THEN
 			RAISE EXCEPTION 'unexpected quantized_inverted_experimental error: %', SQLERRM;
 		END IF;
+END
+$$;
+CREATE TEMP TABLE mv_centroid_lite_bound_docs (
+	id int,
+	colbert turbohybrid_multivector
+);
+INSERT INTO mv_centroid_lite_bound_docs VALUES
+	(1, turbohybrid_multivector(ARRAY['[1,0]'::vector, '[1,0]'::vector])),
+	(2, turbohybrid_multivector(ARRAY['[0.5,0]'::vector, '[0.5,0]'::vector])),
+	(3, turbohybrid_multivector(ARRAY['[0.1,0]'::vector, '[0.1,0]'::vector]));
+CREATE INDEX mv_centroid_lite_bound_docs_idx ON mv_centroid_lite_bound_docs
+USING turbohybrid (colbert multivector_cosine_turbohybrid_ops)
+WITH (
+	multivector_graph = document_nodes,
+	multivector_centroids = kmeans,
+	multivector_centroid_count = 2
+);
+DO $$
+DECLARE
+	exact_ids int[];
+	pruned_ids int[];
+	stats jsonb;
+BEGIN
+	PERFORM set_config('enable_seqscan', 'off', true);
+	PERFORM set_config('turbohybrid.multivector_plain_fallback', 'off', true);
+	PERFORM set_config('turbohybrid.multivector_candidate_source', 'exact_doc_scan', true);
+	PERFORM set_config('turbohybrid.multivector_doc_candidate_k', '2', true);
+	PERFORM set_config('turbohybrid.multivector_exact_rerank_k', '2', true);
+	PERFORM set_config('turbohybrid.multivector_doc_graph_search_ef', '3', true);
+
+	SELECT array_agg(id ORDER BY distance, id) INTO exact_ids
+	FROM (
+		SELECT id,
+		       colbert <~> turbohybrid_query(
+			       multivector_query => turbohybrid_multivector(ARRAY['[1,0]'::vector]),
+			       dense_k => 2,
+			       final_k => 2
+		       ) AS distance
+		FROM mv_centroid_lite_bound_docs
+		ORDER BY distance, id
+		LIMIT 2
+	) AS exact_results;
+
+	PERFORM set_config('turbohybrid.multivector_candidate_source', 'centroid_lite', true);
+	PERFORM set_config('turbohybrid.multivector_centroid_lite_pruning', 'safe_upper_bound', true);
+	SELECT array_agg(id ORDER BY distance, id) INTO pruned_ids
+	FROM (
+		SELECT id,
+		       colbert <~> turbohybrid_query(
+			       multivector_query => turbohybrid_multivector(ARRAY['[1,0]'::vector]),
+			       dense_k => 2,
+			       final_k => 2
+		       ) AS distance
+		FROM mv_centroid_lite_bound_docs
+		ORDER BY distance, id
+		LIMIT 2
+	) AS pruned_results;
+	stats := turbohybrid_last_scan_stats();
+
+	IF pruned_ids <> exact_ids OR
+		stats->>'centroid_upper_bound_enabled' <> 'true' OR
+		(stats->>'centroid_upper_bound_docs_checked')::int < 3 OR
+		(stats->>'centroid_upper_bound_docs_pruned')::int <= 0 OR
+		(stats->>'centroid_upper_bound_unsafe_fallbacks')::int <> 0 OR
+		(stats->>'centroid_candidates_before_bound')::int < 3 OR
+		(stats->>'centroid_candidates_after_bound')::int <> 2 THEN
+		RAISE EXCEPTION 'centroid_lite safe upper-bound pruning did not prune deterministic exact-centroid doc: exact %, pruned %, stats %',
+			exact_ids, pruned_ids, stats;
+	END IF;
+	PERFORM set_config('turbohybrid.multivector_centroid_lite_pruning', 'off', true);
 END
 $$;
 CREATE TEMP TABLE mv_doc_proxy_budget_docs (

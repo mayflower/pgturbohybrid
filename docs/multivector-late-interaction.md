@@ -331,6 +331,19 @@ this first slice, and reports `centroid_bitset_prefilter_enabled`,
 `centroid_bitset_lists_used`, `centroid_bitset_docs_set`,
 `centroid_bitset_docs_after_threshold`,
 `centroid_bitset_prefilter_time_us`, and `centroid_bitset_memory_bytes`.
+The guarded `turbohybrid.multivector_centroid_lite_pruning =
+safe_upper_bound` prototype is also off by default. It only drops a
+centroid-lite candidate after the current candidate band is full and the
+persisted centroid interaction is a proven safe bound for that document. The
+current sidecar stores a mean residual summary rather than a radius, so
+nonzero residual summaries are treated as unsafe and the document is retained.
+Stats expose `centroid_upper_bound_enabled`,
+`centroid_upper_bound_docs_checked`, `centroid_upper_bound_docs_pruned`,
+`centroid_upper_bound_prune_time_us`,
+`centroid_upper_bound_unsafe_fallbacks`,
+`centroid_candidates_before_bound`, and
+`centroid_candidates_after_bound`. Final retained documents are still ranked by
+exact MaxSim.
 See `docs/dev/multivector-centroid-bitset-prefilter.md` for the non-production
 design direction.
 `quantized_inverted_experimental` is a guarded research-only ColBERTSaR-style
@@ -514,15 +527,22 @@ Use `--document-node-serving-grid-include-centroid-lite-caps` only for focused
 centroid-lite pruning experiments. It adds capped profile rows such as
 `centroid_lite_f16_cap_016`, `centroid_lite_f16_cap_032`, and
 `centroid_lite_f16_cap_064`, driven by the scan-time
-`turbohybrid.multivector_centroid_lite_max_postings_per_token` GUC. These rows
+`turbohybrid.multivector_centroid_lite_max_postings_per_token` GUC. It also
+adds guarded rows such as `centroid_lite_f16_prune_safe_upper_bound` and
+`centroid_lite_f16_cap_032_prune_safe_upper_bound`, driven by
+`turbohybrid.multivector_centroid_lite_pruning = safe_upper_bound`. These rows
 reuse the same persisted kmeans centroid sidecar as uncapped `centroid_lite_f16`
 and remain experimental admission evidence; final retained candidates are still
 ordered by exact MaxSim. Positive caps use deterministic uniform-stride posting
 sampling and expose `centroid_posting_cap_strategy` so reports distinguish
-uncapped full-list admission from capped sampling.
+uncapped full-list admission from capped sampling. Safe upper-bound pruning only
+drops candidates when the persisted residual summary proves the centroid score
+is exact for that document; otherwise it keeps the candidate and reports
+`centroid_upper_bound_unsafe_fallbacks`.
 Use `--document-node-serving-grid-centroid-lite-focus` for a compact
-centroid-lite-only comparison of uncapped, capped `016/032/064`, pooled
-`centroid_lite_f16_pool_050`, and `centroid_mean_f16` baseline rows.
+centroid-lite-only comparison of uncapped, capped `016/032/064`, guarded
+`safe_upper_bound` pruning, pooled `centroid_lite_f16_pool_050`, and
+`centroid_mean_f16` baseline rows.
 Use `--document-node-serving-grid-token-pooling-focus` when the next decision is
 whether document-node token pooling is safe for serving. It compares
 `proxy_normalized_mean_f16` and `centroid_mean_f16`, each with pooling `off`

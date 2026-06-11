@@ -624,6 +624,13 @@ typedef struct TqDenseCandidateStats
 	uint32		centroidBitsetDocsAfterThreshold;
 	uint64		centroidBitsetPrefilterUs;
 	uint64		centroidBitsetMemoryBytes;
+	bool		centroidUpperBoundEnabled;
+	uint64		centroidUpperBoundDocsChecked;
+	uint64		centroidUpperBoundDocsPruned;
+	uint64		centroidUpperBoundPruneUs;
+	uint64		centroidUpperBoundUnsafeFallbacks;
+	uint32		centroidCandidatesBeforeBound;
+	uint32		centroidCandidatesAfterBound;
 	uint32		multivectorCentroidCount;
 	uint32		multivectorCentroidPrerankDocs;
 	uint32		multivectorFullMaxsimRerankDocs;
