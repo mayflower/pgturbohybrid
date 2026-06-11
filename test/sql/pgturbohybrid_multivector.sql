@@ -3440,6 +3440,7 @@ DO $$
 DECLARE
 	top_id int;
 	stats jsonb;
+	index_stats jsonb;
 BEGIN
 	PERFORM set_config('enable_seqscan', 'off', true);
 	PERFORM set_config('turbohybrid.multivector_candidate_source', 'quantized_inverted_experimental', true);
@@ -3464,7 +3465,12 @@ BEGIN
 		(stats->>'quantized_inverted_docs_scored')::int <= 0 OR
 		(stats->>'quantized_inverted_candidates')::int <= 0 OR
 		(stats->>'quantized_inverted_exact_rerank_docs')::int <= 0 OR
+		stats->>'quantized_inverted_codebook_source' <> 'deterministic' OR
 		(stats->>'quantized_inverted_codebook_size')::int <> 4 OR
+		(stats->>'quantized_inverted_codebook_dim')::int <> 2 OR
+		stats->>'quantized_inverted_codebook_checksum' <> 'deterministic' OR
+		(stats->>'quantized_inverted_codebook_top_m')::int <> 1 OR
+		NOT (stats ? 'quantized_inverted_assignment_us') OR
 		NOT (stats ? 'quantized_inverted_list_offset_bytes') OR
 		NOT (stats ? 'quantized_inverted_posting_bytes') OR
 		NOT (stats ? 'quantized_inverted_sidecar_bytes') OR
@@ -3478,8 +3484,154 @@ BEGIN
 		RAISE EXCEPTION 'quantized_inverted_experimental scan failed, top %, stats %',
 			top_id, stats;
 	END IF;
+
+	index_stats := turbohybrid_index_stats('mv_centroid_lite_docs_idx'::regclass);
+	IF index_stats->>'quantized_inverted_codebook_source' <> 'deterministic' OR
+		(index_stats->>'quantized_inverted_codebook_size')::int <> 4 OR
+		(index_stats->>'quantized_inverted_codebook_dim')::int <> 2 OR
+		index_stats->>'quantized_inverted_codebook_checksum' <> 'deterministic' OR
+		(index_stats->>'quantized_inverted_codebook_top_m')::int <> 1 THEN
+		RAISE EXCEPTION 'quantized_inverted_experimental index stats missing codebook metadata: %',
+			index_stats;
+	END IF;
 END
 $$;
+
+DO $$
+DECLARE
+	codebook_path text := current_setting('data_directory') || '/quantized_inverted_missing_codebook.txt';
+BEGIN
+	CREATE TEMP TABLE mv_quantized_external_missing_docs (
+		id int,
+		colbert turbohybrid_multivector
+	);
+	INSERT INTO mv_quantized_external_missing_docs VALUES
+		(1, turbohybrid_multivector(ARRAY['[1,0]'::vector]));
+	PERFORM set_config('turbohybrid.multivector_quantized_inverted_codebook', 'external', false);
+	PERFORM set_config('turbohybrid.multivector_quantized_inverted_codebook_path', codebook_path, false);
+	PERFORM set_config('turbohybrid.multivector_quantized_inverted_codebook_top_m', '1', false);
+	CREATE INDEX mv_quantized_external_missing_idx ON mv_quantized_external_missing_docs
+	USING turbohybrid (colbert multivector_cosine_turbohybrid_ops)
+	WITH (multivector_graph = document_nodes);
+	RAISE EXCEPTION 'external quantized_inverted codebook missing file unexpectedly built';
+EXCEPTION
+	WHEN others THEN
+		IF SQLERRM NOT LIKE 'could not open quantized_inverted_experimental codebook file%' THEN
+			RAISE EXCEPTION 'unexpected external missing-codebook error: %', SQLERRM;
+		END IF;
+END
+$$;
+
+DO $$
+DECLARE
+	codebook_path text := current_setting('data_directory') || '/quantized_inverted_dim_mismatch_codebook.txt';
+BEGIN
+	CREATE TEMP TABLE mv_quantized_external_dim_docs (
+		id int,
+		colbert turbohybrid_multivector
+	);
+	INSERT INTO mv_quantized_external_dim_docs VALUES
+		(1, turbohybrid_multivector(ARRAY['[1,0]'::vector]));
+	EXECUTE format(
+		'COPY (SELECT %L) TO %L',
+		'pgturbohybrid_quantized_inverted_codebook_v1 3 2 checksum_dim 1 0 0 0 1 0',
+		codebook_path
+	);
+	PERFORM set_config('turbohybrid.multivector_quantized_inverted_codebook', 'external', false);
+	PERFORM set_config('turbohybrid.multivector_quantized_inverted_codebook_path', codebook_path, false);
+	PERFORM set_config('turbohybrid.multivector_quantized_inverted_codebook_top_m', '1', false);
+	CREATE INDEX mv_quantized_external_dim_idx ON mv_quantized_external_dim_docs
+	USING turbohybrid (colbert multivector_cosine_turbohybrid_ops)
+	WITH (multivector_graph = document_nodes);
+	RAISE EXCEPTION 'external quantized_inverted codebook dimension mismatch unexpectedly built';
+EXCEPTION
+	WHEN data_exception THEN
+		IF SQLERRM NOT LIKE 'quantized_inverted_experimental codebook dimensions do not match multivector dimension%' THEN
+			RAISE EXCEPTION 'unexpected external dimension mismatch error: %', SQLERRM;
+		END IF;
+END
+$$;
+
+DO $$
+DECLARE
+	codebook_path text := current_setting('data_directory') || '/quantized_inverted_external_ok_codebook.txt';
+	mismatch_path text := current_setting('data_directory') || '/quantized_inverted_external_mismatch_codebook.txt';
+	stats jsonb;
+	index_stats jsonb;
+BEGIN
+	CREATE TEMP TABLE mv_quantized_external_docs (
+		id int,
+		colbert turbohybrid_multivector
+	);
+	INSERT INTO mv_quantized_external_docs VALUES
+		(1, turbohybrid_multivector(ARRAY['[1,0]'::vector, '[0,1]'::vector])),
+		(2, turbohybrid_multivector(ARRAY['[-1,0]'::vector, '[0,-1]'::vector]));
+	EXECUTE format(
+		'COPY (SELECT %L) TO %L',
+		'pgturbohybrid_quantized_inverted_codebook_v1 2 4 checksum_ok 1 0 -1 0 0 1 0 -1',
+		codebook_path
+	);
+	EXECUTE format(
+		'COPY (SELECT %L) TO %L',
+		'pgturbohybrid_quantized_inverted_codebook_v1 2 4 checksum_changed 1 0 -1 0 0 1 0 -1',
+		mismatch_path
+	);
+	PERFORM set_config('turbohybrid.multivector_quantized_inverted_codebook', 'external', false);
+	PERFORM set_config('turbohybrid.multivector_quantized_inverted_codebook_path', codebook_path, false);
+	PERFORM set_config('turbohybrid.multivector_quantized_inverted_codebook_top_m', '1', false);
+	CREATE INDEX mv_quantized_external_docs_idx ON mv_quantized_external_docs
+	USING turbohybrid (colbert multivector_cosine_turbohybrid_ops)
+	WITH (multivector_graph = document_nodes);
+	index_stats := turbohybrid_index_stats('mv_quantized_external_docs_idx'::regclass);
+	IF index_stats->>'quantized_inverted_codebook_source' <> 'external' OR
+		(index_stats->>'quantized_inverted_codebook_size')::int <> 4 OR
+		(index_stats->>'quantized_inverted_codebook_dim')::int <> 2 OR
+		index_stats->>'quantized_inverted_codebook_checksum' <> 'checksum_ok' OR
+		(index_stats->>'quantized_inverted_codebook_top_m')::int <> 1 THEN
+		RAISE EXCEPTION 'external quantized_inverted index stats missing codebook metadata: %',
+			index_stats;
+	END IF;
+
+	PERFORM set_config('enable_seqscan', 'off', true);
+	PERFORM set_config('turbohybrid.multivector_candidate_source', 'quantized_inverted_experimental', true);
+	PERFORM set_config('turbohybrid.multivector_plain_fallback', 'off', true);
+	PERFORM id
+	FROM mv_quantized_external_docs
+	ORDER BY colbert <~> turbohybrid_query(
+		multivector_query => turbohybrid_multivector(ARRAY['[1,0]'::vector]),
+		dense_k => 2,
+		final_k => 1
+	)
+	LIMIT 1;
+	stats := turbohybrid_last_scan_stats();
+	IF stats->>'quantized_inverted_codebook_source' <> 'external' OR
+		stats->>'quantized_inverted_codebook_checksum' <> 'checksum_ok' OR
+		(stats->>'quantized_inverted_assignment_us')::bigint < 0 THEN
+		RAISE EXCEPTION 'external quantized_inverted scan missing codebook stats: %',
+			stats;
+	END IF;
+
+	PERFORM set_config('turbohybrid.multivector_quantized_inverted_codebook_path', mismatch_path, false);
+	PERFORM id
+	FROM mv_quantized_external_docs
+	ORDER BY colbert <~> turbohybrid_query(
+		multivector_query => turbohybrid_multivector(ARRAY['[1,0]'::vector]),
+		dense_k => 2,
+		final_k => 1
+	)
+	LIMIT 1;
+	RAISE EXCEPTION 'external quantized_inverted codebook checksum mismatch unexpectedly queried';
+EXCEPTION
+	WHEN index_corrupted THEN
+		IF SQLERRM NOT LIKE 'quantized_inverted_experimental codebook metadata mismatch%' THEN
+			RAISE EXCEPTION 'unexpected external checksum mismatch error: %', SQLERRM;
+		END IF;
+END
+$$;
+
+RESET turbohybrid.multivector_quantized_inverted_codebook;
+RESET turbohybrid.multivector_quantized_inverted_codebook_path;
+RESET turbohybrid.multivector_quantized_inverted_codebook_top_m;
 
 DO $$
 DECLARE
@@ -3491,6 +3643,7 @@ DECLARE
 	exact_ids int[];
 	proxy_ids int[];
 	centroid_ids int[];
+	centroid_bitset_ids int[];
 	quantized_ids int[];
 	stats jsonb;
 	timing_key text;
@@ -3593,6 +3746,7 @@ BEGIN
 		stats->>'multivector_enabled' <> 'true' OR
 		stats->>'multivector_candidate_source' <> 'centroid_lite' OR
 		stats->>'multivector_doc_graph_warning' <> 'document_node_centroid_lite_prefilter' OR
+		stats->>'centroid_bitset_prefilter_enabled' <> 'false' OR
 		stats->>'multivector_plain_fallback_used' <> 'false' OR
 		(stats->>'centroid_lists_visited')::int <= 0 OR
 		(stats->>'centroid_docs_touched')::int <= 0 OR
@@ -3604,6 +3758,39 @@ BEGIN
 		RAISE EXCEPTION 'centroid_lite full-budget rerank did not match exact_doc_scan: exact %, centroid %, stats %',
 			exact_ids, centroid_ids, stats;
 	END IF;
+
+	PERFORM set_config('turbohybrid.multivector_centroid_lite_bitset_prefilter', 'experimental', true);
+	SELECT array_agg(id ORDER BY distance, id) INTO centroid_bitset_ids
+	FROM (
+		SELECT id,
+		       colbert <~> turbohybrid_query(
+			       multivector_query => query_mv,
+			       dense_k => 4,
+			       final_k => 3
+		       ) AS distance
+		FROM mv_centroid_lite_docs
+		ORDER BY distance, id
+		LIMIT 3
+	) AS centroid_bitset_results;
+	stats := turbohybrid_last_scan_stats();
+
+	IF centroid_bitset_ids <> exact_ids OR
+		stats->>'multivector_enabled' <> 'true' OR
+		stats->>'multivector_candidate_source' <> 'centroid_lite' OR
+		stats->>'multivector_doc_graph_warning' <> 'document_node_centroid_lite_prefilter' OR
+		stats->>'centroid_bitset_prefilter_enabled' <> 'true' OR
+		(stats->>'centroid_bitset_lists_used')::int <= 0 OR
+		(stats->>'centroid_bitset_docs_set')::int <= 0 OR
+		(stats->>'centroid_bitset_docs_after_threshold')::int <= 0 OR
+		(stats->>'centroid_bitset_memory_bytes')::bigint <= 0 OR
+		(stats->>'centroid_bitset_prefilter_time_us')::bigint < 0 OR
+		stats->>'multivector_exact_rerank_source' <> 'heap' OR
+		(stats->>'multivector_doc_graph_exact_rerank_docs')::int < 3 OR
+		(stats->>'multivector_exact_rerank_docs')::int < 3 THEN
+		RAISE EXCEPTION 'centroid_lite bitset prototype changed exact result or missing stats: exact %, bitset %, stats %',
+			exact_ids, centroid_bitset_ids, stats;
+	END IF;
+	PERFORM set_config('turbohybrid.multivector_centroid_lite_bitset_prefilter', 'off', true);
 
 	PERFORM set_config('turbohybrid.multivector_candidate_source', 'quantized_inverted_experimental', true);
 	SELECT array_agg(id ORDER BY distance, id) INTO quantized_ids

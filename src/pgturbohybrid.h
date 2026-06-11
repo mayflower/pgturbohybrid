@@ -1490,6 +1490,7 @@ typedef struct PgturbohybridNativeBuildStatsSnapshot
 	uint64		multivectorCentroidBuildDocs;
 	uint64		multivectorCentroidBuildVectors;
 	uint64		multivectorProxyBuildUs;
+	uint64		learnedProjectionDocEncodeBuildUs;
 	uint64		multivectorDocSidecarWriteUs;
 	uint64		multivectorCentroidSidecarWriteUs;
 	uint64		multivectorCentroidPostingWriteUs;

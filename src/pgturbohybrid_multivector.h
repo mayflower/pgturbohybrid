@@ -33,7 +33,8 @@ typedef enum PgturbohybridMultiVectorProxyEncoder
 	PGTURBOHYBRID_MULTIVECTOR_PROXY_ENCODER_NORMALIZED_MEAN = 4,
 	PGTURBOHYBRID_MULTIVECTOR_PROXY_ENCODER_FIRST_TOKEN = 5,
 	PGTURBOHYBRID_MULTIVECTOR_PROXY_ENCODER_MAX_ABS_MEAN = 6,
-	PGTURBOHYBRID_MULTIVECTOR_PROXY_ENCODER_CENTROID_MEAN = 7
+	PGTURBOHYBRID_MULTIVECTOR_PROXY_ENCODER_CENTROID_MEAN = 7,
+	PGTURBOHYBRID_MULTIVECTOR_PROXY_ENCODER_LEARNED_PROJECTION_V1 = 8
 } PgturbohybridMultiVectorProxyEncoder;
 
 #define PGTURBOHYBRID_MULTIVECTOR_PROXY_ENCODER_MEAN_POOL \
@@ -176,6 +177,11 @@ int			PgturbohybridMultiVectorCentroidCountForDoc(const PgturbohybridMultiVector
 float		PgturbohybridMultiVectorCentroidResidualMean(const PgturbohybridMultiVector *doc,
 														 const PgturbohybridMultiVector *centroids);
 const char *PgturbohybridMultiVectorProxyEncoderName(int encoder);
+bool		PgturbohybridMultiVectorLearnedProjectionInfo(bool *loaded,
+														  int32 *dim,
+														  uint64 *weightBytes,
+														  const char **model,
+														  const char **checksum);
 Vector	   *PgturbohybridMultiVectorBuildProxyVector(const PgturbohybridMultiVector *mv,
 													 int encoder,
 													 MemoryContext ctx);

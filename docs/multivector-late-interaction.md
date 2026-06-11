@@ -248,7 +248,7 @@ SET turbohybrid.multivector_max_raw_hits_per_token = 400;
 SET turbohybrid.multivector_adaptive_widening = 'auto'; -- off | auto | on
 SET turbohybrid.multivector_doc_candidate_k = 100;
 SET turbohybrid.multivector_candidate_source = 'graph'; -- graph | document_nodes | exact_token_scan | exact_doc_scan | doc_graph_prototype | proxy_vector | centroid_lite | quantized_inverted_experimental
-SET turbohybrid.multivector_proxy_encoder = 'normalized_mean'; -- normalized_mean | first_token | centroid_mean | max_pool | random_projection_fde | learned_projection_placeholder
+SET turbohybrid.multivector_proxy_encoder = 'normalized_mean'; -- normalized_mean | first_token | centroid_mean | max_pool | random_projection_fde | learned_projection_placeholder | learned_projection_v1
 SET turbohybrid.multivector_plain_fallback = 'auto'; -- auto | off | force
 SET turbohybrid.multivector_plain_fallback_max_docs = 1000;
 SET turbohybrid.multivector_plain_fallback_candidate_fraction = 0.5;
@@ -282,9 +282,12 @@ fixed-dimensional proxy encoder as the single-vector graph key for admission
 and exact-reranks admitted documents with full MaxSim. `normalized_mean` is the
 default document proxy. `first_token`, `max_pool`, and
 `random_projection_fde` are additional pluggable encoders for DBpedia admission
-comparison, while `learned_projection_placeholder` fails explicitly until
-learned projection weights are configured. `centroid_mean` is an optional
-quality mode that keeps one graph node per document, requires
+comparison. `learned_projection_placeholder` remains an explicit unsupported
+sentinel, while `learned_projection_v1` is an opt-in file-backed first slice
+that requires `turbohybrid.multivector_learned_projection_path` and keeps the
+projected proxy dimension equal to the multivector dimension to avoid an index
+format change. See [multivector-learned-projection-proxy.md](dev/multivector-learned-projection-proxy.md).
+`centroid_mean` is an optional quality mode that keeps one graph node per document, requires
 `multivector_centroids = kmeans`, stores compact centroids in the sidecar, uses
 the normalized mean of those centroids as the graph proxy vector, and runs a
 bounded centroid MaxSim pre-rerank before the unchanged full-token exact MaxSim
@@ -320,7 +323,16 @@ the bounded exact MaxSim rerank must respect
 `turbohybrid.multivector_exact_rerank_k`, while high
 `centroid_docs_touched` or `docs_scored_near_table_size` means the centroid
 posting prefilter itself is near-exhaustive. That is a candidate-source
-admission problem, not a sidecar or SIMD rerank problem.
+admission problem, not a sidecar or SIMD rerank problem. The guarded
+`turbohybrid.multivector_centroid_lite_bitset_prefilter = experimental` mode
+currently builds a scan-local posting-union bitset for measurement only. It is
+off by default, does not change persisted storage, does not prune candidates in
+this first slice, and reports `centroid_bitset_prefilter_enabled`,
+`centroid_bitset_lists_used`, `centroid_bitset_docs_set`,
+`centroid_bitset_docs_after_threshold`,
+`centroid_bitset_prefilter_time_us`, and `centroid_bitset_memory_bytes`.
+See `docs/dev/multivector-centroid-bitset-prefilter.md` for the non-production
+design direction.
 `quantized_inverted_experimental` is a guarded research-only ColBERTSaR-style
 candidate source for document-node indexes. The current prototype uses
 persisted experimental deterministic codeword postings from the multivector
@@ -508,6 +520,19 @@ and remain experimental admission evidence; final retained candidates are still
 ordered by exact MaxSim. Positive caps use deterministic uniform-stride posting
 sampling and expose `centroid_posting_cap_strategy` so reports distinguish
 uncapped full-list admission from capped sampling.
+Use `--document-node-serving-grid-centroid-lite-focus` for a compact
+centroid-lite-only comparison of uncapped, capped `016/032/064`, pooled
+`centroid_lite_f16_pool_050`, and `centroid_mean_f16` baseline rows.
+Use `--document-node-serving-grid-token-pooling-focus` when the next decision is
+whether document-node token pooling is safe for serving. It compares
+`proxy_normalized_mean_f16` and `centroid_mean_f16`, each with pooling `off`
+and `greedy_cosine` target ratios `0.75`, `0.50`, and `0.33`. Reports include
+pooled token counts, pooling ratio, exact rerank pairs, build time, latency,
+admission, and qrel metrics when available, plus
+`best_pooling_latency_safe`, `best_pooling_quality_safe`, and rejected pooling
+profiles. Pooling changes the persisted document multivectors, so pooled rows
+are separate index builds and final retained candidates are still ranked by
+exact MaxSim.
 If `--document-node-serving-grid-include-proxy-encoders` is also set, the grid
 adds `proxy_max_pool_f16_bm25_rescue` as a focused comparison for the stronger
 `max_pool` proxy baseline; the default BM25 rescue set remains unchanged.

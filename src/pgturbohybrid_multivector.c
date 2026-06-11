@@ -14,6 +14,7 @@
 #include "fmgr.h"
 #include "lib/stringinfo.h"
 #include "libpq/pqformat.h"
+#include "storage/fd.h"
 #include "portability/instr_time.h"
 #include "utils/fmgrprotos.h"
 #include "utils/array.h"
@@ -113,6 +114,9 @@ static Oid	pgturbohybrid_multivector_type_oid = InvalidOid;
 extern char *pgturbohybrid_multivector_model_name;
 extern int	pgturbohybrid_multivector_max_doc_vectors;
 extern int	pgturbohybrid_multivector_max_query_vectors;
+extern char *pgturbohybrid_multivector_learned_projection_path;
+extern char *pgturbohybrid_multivector_learned_projection_model;
+extern char *pgturbohybrid_multivector_learned_projection_checksum;
 
 #define PGTURBOHYBRID_MULTIVECTOR_BINARY_VERSION 1
 #define PGTURBOHYBRID_MULTIVECTOR_BINARY_VERSION_CONTEXTS 2
@@ -155,6 +159,21 @@ static void PgturbohybridMultiVectorProxyMean(const PgturbohybridMultiVector *mv
 											  Vector *vector);
 static void PgturbohybridMultiVectorProxyNormalizedMean(const PgturbohybridMultiVector *mv,
 														Vector *vector);
+static void PgturbohybridMultiVectorProxyLearnedProjectionV1(const PgturbohybridMultiVector *mv,
+															 Vector *vector);
+
+typedef struct PgturbohybridLearnedProjectionWeights
+{
+	char	   *path;
+	char	   *model;
+	char	   *checksum;
+	int32		inputDim;
+	int32		outputDim;
+	Size		weightBytes;
+	float	   *weights;
+} PgturbohybridLearnedProjectionWeights;
+
+static PgturbohybridLearnedProjectionWeights *pgturbohybrid_learned_projection_cache = NULL;
 
 typedef double (*TqDotProductF32Func) (const float *a, const float *b, int32 dim);
 typedef void (*TqDotProductF32BlockFunc) (const float *queryValues,
@@ -1357,6 +1376,217 @@ PgturbohybridMultiVectorProxyHash(uint32 a, uint32 b, uint32 salt)
 	return x;
 }
 
+static bool
+PgturbohybridStringIsEmpty(const char *value)
+{
+	return value == NULL || value[0] == '\0';
+}
+
+static void
+PgturbohybridLearnedProjectionFreeCache(void)
+{
+	if (pgturbohybrid_learned_projection_cache == NULL)
+		return;
+
+	pfree(pgturbohybrid_learned_projection_cache->path);
+	pfree(pgturbohybrid_learned_projection_cache->model);
+	pfree(pgturbohybrid_learned_projection_cache->checksum);
+	pfree(pgturbohybrid_learned_projection_cache->weights);
+	pfree(pgturbohybrid_learned_projection_cache);
+	pgturbohybrid_learned_projection_cache = NULL;
+}
+
+static void
+PgturbohybridValidateLearnedProjectionExpectedMetadata(const PgturbohybridLearnedProjectionWeights *projection)
+{
+	if (!PgturbohybridStringIsEmpty(pgturbohybrid_multivector_learned_projection_model) &&
+		strcmp(projection->model,
+			   pgturbohybrid_multivector_learned_projection_model) != 0)
+		ereport(ERROR,
+				(errcode(ERRCODE_INVALID_PARAMETER_VALUE),
+				 errmsg("learned_projection_v1 model mismatch"),
+				 errdetail("Projection file declares model \"%s\", but turbohybrid.multivector_learned_projection_model is \"%s\".",
+						   projection->model,
+						   pgturbohybrid_multivector_learned_projection_model)));
+	if (!PgturbohybridStringIsEmpty(pgturbohybrid_multivector_learned_projection_checksum) &&
+		strcmp(projection->checksum,
+			   pgturbohybrid_multivector_learned_projection_checksum) != 0)
+		ereport(ERROR,
+				(errcode(ERRCODE_INVALID_PARAMETER_VALUE),
+				 errmsg("learned_projection_v1 checksum mismatch"),
+				 errdetail("Projection file declares checksum \"%s\", but turbohybrid.multivector_learned_projection_checksum is \"%s\".",
+						   projection->checksum,
+						   pgturbohybrid_multivector_learned_projection_checksum)));
+}
+
+static PgturbohybridLearnedProjectionWeights *
+PgturbohybridLoadLearnedProjectionWeights(int32 dim)
+{
+	FILE	   *file;
+	char		magic[64];
+	char		model[128];
+	char		checksum[128];
+	int			inputDim;
+	int			outputDim;
+	Size		weightCount;
+	Size		weightBytes;
+	MemoryContext oldCtx;
+	PgturbohybridLearnedProjectionWeights *loaded;
+
+	if (PgturbohybridStringIsEmpty(pgturbohybrid_multivector_learned_projection_path))
+		ereport(ERROR,
+				(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
+				 errmsg("learned_projection_v1 multivector proxy encoder requires configured projection weights"),
+				 errhint("Set turbohybrid.multivector_learned_projection_path to an administrator-provided projection weight file, or use multivector_proxy_encoder = normalized_mean.")));
+
+	if (pgturbohybrid_learned_projection_cache != NULL &&
+		strcmp(pgturbohybrid_learned_projection_cache->path,
+			   pgturbohybrid_multivector_learned_projection_path) == 0)
+	{
+		PgturbohybridValidateLearnedProjectionExpectedMetadata(pgturbohybrid_learned_projection_cache);
+		if (pgturbohybrid_learned_projection_cache->inputDim != dim ||
+			pgturbohybrid_learned_projection_cache->outputDim != dim)
+			ereport(ERROR,
+					(errcode(ERRCODE_INVALID_PARAMETER_VALUE),
+					 errmsg("learned_projection_v1 dimensions do not match multivector dimension"),
+					 errdetail("Projection file has input_dim=%d and output_dim=%d, but the multivector dimension is %d.",
+							   pgturbohybrid_learned_projection_cache->inputDim,
+							   pgturbohybrid_learned_projection_cache->outputDim,
+							   dim)));
+		return pgturbohybrid_learned_projection_cache;
+	}
+
+	file = AllocateFile(pgturbohybrid_multivector_learned_projection_path, "r");
+	if (file == NULL)
+		ereport(ERROR,
+				(errcode_for_file_access(),
+				 errmsg("could not open learned_projection_v1 weights file \"%s\": %m",
+						pgturbohybrid_multivector_learned_projection_path)));
+
+	if (fscanf(file, "%63s %127s %d %d %127s",
+			   magic, model, &inputDim, &outputDim, checksum) != 5)
+	{
+		FreeFile(file);
+		ereport(ERROR,
+				(errcode(ERRCODE_INVALID_TEXT_REPRESENTATION),
+				 errmsg("invalid learned_projection_v1 weights header"),
+				 errdetail("Expected: pgturbohybrid_learned_projection_v1 <model> <input_dim> <output_dim> <checksum>.")));
+	}
+	if (strcmp(magic, "pgturbohybrid_learned_projection_v1") != 0)
+	{
+		FreeFile(file);
+		ereport(ERROR,
+				(errcode(ERRCODE_INVALID_TEXT_REPRESENTATION),
+				 errmsg("invalid learned_projection_v1 weights magic \"%s\"",
+						magic)));
+	}
+	if (!PgturbohybridStringIsEmpty(pgturbohybrid_multivector_learned_projection_model) &&
+		strcmp(model, pgturbohybrid_multivector_learned_projection_model) != 0)
+	{
+		FreeFile(file);
+		ereport(ERROR,
+				(errcode(ERRCODE_INVALID_PARAMETER_VALUE),
+				 errmsg("learned_projection_v1 model mismatch"),
+				 errdetail("Projection file declares model \"%s\", but turbohybrid.multivector_learned_projection_model is \"%s\".",
+						   model,
+						   pgturbohybrid_multivector_learned_projection_model)));
+	}
+	if (!PgturbohybridStringIsEmpty(pgturbohybrid_multivector_learned_projection_checksum) &&
+		strcmp(checksum, pgturbohybrid_multivector_learned_projection_checksum) != 0)
+	{
+		FreeFile(file);
+		ereport(ERROR,
+				(errcode(ERRCODE_INVALID_PARAMETER_VALUE),
+				 errmsg("learned_projection_v1 checksum mismatch"),
+				 errdetail("Projection file declares checksum \"%s\", but turbohybrid.multivector_learned_projection_checksum is \"%s\".",
+						   checksum,
+						   pgturbohybrid_multivector_learned_projection_checksum)));
+	}
+	if (inputDim <= 0 || outputDim <= 0 ||
+		inputDim > PGTURBOHYBRID_MULTIVECTOR_MAX_DIM ||
+		outputDim > PGTURBOHYBRID_MULTIVECTOR_MAX_DIM)
+	{
+		FreeFile(file);
+		ereport(ERROR,
+				(errcode(ERRCODE_INVALID_PARAMETER_VALUE),
+				 errmsg("learned_projection_v1 dimensions are out of range")));
+	}
+	if (inputDim != dim || outputDim != dim)
+	{
+		FreeFile(file);
+		ereport(ERROR,
+				(errcode(ERRCODE_INVALID_PARAMETER_VALUE),
+				 errmsg("learned_projection_v1 dimensions do not match multivector dimension"),
+				 errdetail("Projection file has input_dim=%d and output_dim=%d, but the multivector dimension is %d.",
+						   inputDim, outputDim, dim),
+				 errhint("This first safe slice keeps proxy vectors in the index multivector dimension; use a matching projection or rebuild with a compatible model profile.")));
+	}
+
+	weightCount = (Size) inputDim * (Size) outputDim;
+	weightBytes = sizeof(float) * weightCount;
+	oldCtx = MemoryContextSwitchTo(TopMemoryContext);
+	loaded = palloc0(sizeof(PgturbohybridLearnedProjectionWeights));
+	loaded->path = pstrdup(pgturbohybrid_multivector_learned_projection_path);
+	loaded->model = pstrdup(model);
+	loaded->checksum = pstrdup(checksum);
+	loaded->inputDim = inputDim;
+	loaded->outputDim = outputDim;
+	loaded->weightBytes = weightBytes;
+	loaded->weights = palloc0(weightBytes);
+	MemoryContextSwitchTo(oldCtx);
+
+	for (Size i = 0; i < weightCount; i++)
+	{
+		double		value;
+
+		if (fscanf(file, "%lf", &value) != 1)
+		{
+			FreeFile(file);
+			PgturbohybridLearnedProjectionFreeCache();
+			pfree(loaded->path);
+			pfree(loaded->model);
+			pfree(loaded->checksum);
+			pfree(loaded->weights);
+			pfree(loaded);
+			ereport(ERROR,
+					(errcode(ERRCODE_INVALID_TEXT_REPRESENTATION),
+					 errmsg("learned_projection_v1 weights file ended before all weights were read"),
+					 errdetail("Expected %zu float weights after the header.",
+							   weightCount)));
+		}
+		loaded->weights[i] = (float) value;
+	}
+	FreeFile(file);
+
+	PgturbohybridLearnedProjectionFreeCache();
+	pgturbohybrid_learned_projection_cache = loaded;
+	return loaded;
+}
+
+bool
+PgturbohybridMultiVectorLearnedProjectionInfo(bool *loaded,
+											  int32 *dim,
+											  uint64 *weightBytes,
+											  const char **model,
+											  const char **checksum)
+{
+	if (loaded != NULL)
+		*loaded = pgturbohybrid_learned_projection_cache != NULL;
+	if (dim != NULL)
+		*dim = pgturbohybrid_learned_projection_cache != NULL ?
+			pgturbohybrid_learned_projection_cache->outputDim : 0;
+	if (weightBytes != NULL)
+		*weightBytes = pgturbohybrid_learned_projection_cache != NULL ?
+			(uint64) pgturbohybrid_learned_projection_cache->weightBytes : 0;
+	if (model != NULL)
+		*model = pgturbohybrid_learned_projection_cache != NULL ?
+			pgturbohybrid_learned_projection_cache->model : "";
+	if (checksum != NULL)
+		*checksum = pgturbohybrid_learned_projection_cache != NULL ?
+			pgturbohybrid_learned_projection_cache->checksum : "";
+	return pgturbohybrid_learned_projection_cache != NULL;
+}
+
 const char *
 PgturbohybridMultiVectorProxyEncoderName(int encoder)
 {
@@ -1376,6 +1606,8 @@ PgturbohybridMultiVectorProxyEncoderName(int encoder)
 			return "random_projection_fde";
 		case PGTURBOHYBRID_MULTIVECTOR_PROXY_ENCODER_LEARNED_PROJECTION_PLACEHOLDER:
 			return "learned_projection_placeholder";
+		case PGTURBOHYBRID_MULTIVECTOR_PROXY_ENCODER_LEARNED_PROJECTION_V1:
+			return "learned_projection_v1";
 		case PGTURBOHYBRID_MULTIVECTOR_PROXY_ENCODER_MEAN:
 		default:
 			return "mean";
@@ -1430,6 +1662,41 @@ PgturbohybridMultiVectorProxyMaxAbsMean(const PgturbohybridMultiVector *mv,
 	}
 }
 
+static void
+PgturbohybridMultiVectorProxyLearnedProjectionV1(const PgturbohybridMultiVector *mv,
+												 Vector *vector)
+{
+	PgturbohybridLearnedProjectionWeights *projection;
+	float	   *source;
+
+	projection = PgturbohybridLoadLearnedProjectionWeights(mv->dim);
+	source = palloc0(sizeof(float) * (Size) mv->dim);
+
+	for (int32 token = 0; token < mv->count; token++)
+	{
+		const float *values = PgturbohybridMultiVectorValues(mv, token);
+
+		for (int32 dim = 0; dim < mv->dim; dim++)
+			source[dim] += values[dim];
+	}
+	for (int32 dim = 0; dim < mv->dim; dim++)
+		source[dim] /= (float) mv->count;
+	PgturbohybridMultiVectorNormalizeToken(source, mv->dim);
+
+	for (int32 outDim = 0; outDim < projection->outputDim; outDim++)
+	{
+		double		sum = 0.0;
+		const float *weights =
+			projection->weights + (Size) outDim * (Size) projection->inputDim;
+
+		for (int32 inDim = 0; inDim < projection->inputDim; inDim++)
+			sum += (double) weights[inDim] * (double) source[inDim];
+		vector->x[outDim] = (float) sum;
+	}
+	PgturbohybridMultiVectorNormalizeToken(vector->x, vector->dim);
+	pfree(source);
+}
+
 Vector *
 PgturbohybridMultiVectorBuildProxyVectorWithCentroids(const PgturbohybridMultiVector *mv,
 													  const PgturbohybridMultiVector *centroids,
@@ -1446,7 +1713,7 @@ PgturbohybridMultiVectorBuildProxyVectorWithCentroids(const PgturbohybridMultiVe
 		ereport(ERROR,
 				(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
 				 errmsg("learned multivector proxy projection is not configured"),
-				 errhint("Use multivector_proxy_encoder = normalized_mean, mean, first_token, max_abs_mean, centroid_mean, max_pool, or random_projection_fde until learned projection weights are supported.")));
+				 errhint("Use multivector_proxy_encoder = learned_projection_v1 with turbohybrid.multivector_learned_projection_path, or use normalized_mean, mean, first_token, max_abs_mean, centroid_mean, max_pool, or random_projection_fde.")));
 
 	vector = MemoryContextAllocZero(ctx, PGTURBOHYBRID_VECTOR_SIZE(mv->dim));
 	SET_VARSIZE(vector, PGTURBOHYBRID_VECTOR_SIZE(mv->dim));
@@ -1519,6 +1786,9 @@ PgturbohybridMultiVectorBuildProxyVectorWithCentroids(const PgturbohybridMultiVe
 					}
 				}
 			}
+			break;
+		case PGTURBOHYBRID_MULTIVECTOR_PROXY_ENCODER_LEARNED_PROJECTION_V1:
+			PgturbohybridMultiVectorProxyLearnedProjectionV1(mv, vector);
 			break;
 		case PGTURBOHYBRID_MULTIVECTOR_PROXY_ENCODER_MEAN:
 		default:

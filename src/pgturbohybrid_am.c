@@ -162,6 +162,9 @@ int			pgturbohybrid_multivector_exact_rerank =
 int			pgturbohybrid_multivector_exact_rerank_k = 100;
 int			pgturbohybrid_multivector_proxy_encoder =
 	PGTURBOHYBRID_DEFAULT_MULTIVECTOR_PROXY_ENCODER;
+char	   *pgturbohybrid_multivector_learned_projection_path = "";
+char	   *pgturbohybrid_multivector_learned_projection_model = "";
+char	   *pgturbohybrid_multivector_learned_projection_checksum = "";
 bool		pgturbohybrid_multivector_allow_exact_symmetric_build = false;
 int			pgturbohybrid_multivector_exact_symmetric_build_max_docs = 1000;
 int			pgturbohybrid_multivector_max_accumulator_mb = 64;
@@ -171,6 +174,10 @@ int			pgturbohybrid_multivector_debug_trace_limit = 1000;
 char	   *pgturbohybrid_multivector_debug_skip_query_tokens = "";
 int			pgturbohybrid_multivector_candidate_source =
 	PGTURBOHYBRID_MULTIVECTOR_CANDIDATE_SOURCE_GRAPH;
+int			pgturbohybrid_multivector_quantized_inverted_codebook =
+	PGTURBOHYBRID_MULTIVECTOR_QUANTIZED_INVERTED_CODEBOOK_DETERMINISTIC;
+char	   *pgturbohybrid_multivector_quantized_inverted_codebook_path = "";
+int			pgturbohybrid_multivector_quantized_inverted_codebook_top_m = 1;
 int			pgturbohybrid_multivector_plain_fallback =
 	PGTURBOHYBRID_MULTIVECTOR_PLAIN_FALLBACK_AUTO;
 int			pgturbohybrid_multivector_plain_fallback_max_docs = 1000;
@@ -186,6 +193,8 @@ int			pgturbohybrid_multivector_sparse_candidate_source =
 int			pgturbohybrid_multivector_branch_plan =
 	PGTURBOHYBRID_BRANCH_PLAN_AUTO;
 int			pgturbohybrid_multivector_centroid_lite_max_postings_per_token = 0;
+int			pgturbohybrid_multivector_centroid_lite_bitset_prefilter =
+	PGTURBOHYBRID_MULTIVECTOR_CENTROID_LITE_BITSET_PREFILTER_OFF;
 static bool pgturbohybrid_bm25_strategy_user_set = false;
 static bool pgturbohybrid_bm25_impact_or_mode_user_set = false;
 static bool pgturbohybrid_bm25_hot_postings_cache_mb_user_set = false;
@@ -386,6 +395,7 @@ static const struct config_enum_entry pgturbohybrid_multivector_proxy_encoder_op
 	{"max_pool", PGTURBOHYBRID_MULTIVECTOR_PROXY_ENCODER_MAX_POOL, false},
 	{"random_projection_fde", PGTURBOHYBRID_MULTIVECTOR_PROXY_ENCODER_RANDOM_PROJECTION_FDE, false},
 	{"learned_projection_placeholder", PGTURBOHYBRID_MULTIVECTOR_PROXY_ENCODER_LEARNED_PROJECTION_PLACEHOLDER, false},
+	{"learned_projection_v1", PGTURBOHYBRID_MULTIVECTOR_PROXY_ENCODER_LEARNED_PROJECTION_V1, false},
 	{NULL, 0, false}
 };
 
@@ -405,6 +415,18 @@ static const struct config_enum_entry pgturbohybrid_multivector_candidate_source
 	{"proxy_vector", PGTURBOHYBRID_MULTIVECTOR_CANDIDATE_SOURCE_PROXY_VECTOR, false},
 	{"centroid_lite", PGTURBOHYBRID_MULTIVECTOR_CANDIDATE_SOURCE_CENTROID_LITE, false},
 	{"quantized_inverted_experimental", PGTURBOHYBRID_MULTIVECTOR_CANDIDATE_SOURCE_QUANTIZED_INVERTED_EXPERIMENTAL, false},
+	{NULL, 0, false}
+};
+
+static const struct config_enum_entry pgturbohybrid_multivector_quantized_inverted_codebook_options[] = {
+	{"deterministic", PGTURBOHYBRID_MULTIVECTOR_QUANTIZED_INVERTED_CODEBOOK_DETERMINISTIC, false},
+	{"external", PGTURBOHYBRID_MULTIVECTOR_QUANTIZED_INVERTED_CODEBOOK_EXTERNAL, false},
+	{NULL, 0, false}
+};
+
+static const struct config_enum_entry pgturbohybrid_multivector_centroid_lite_bitset_prefilter_options[] = {
+	{"off", PGTURBOHYBRID_MULTIVECTOR_CENTROID_LITE_BITSET_PREFILTER_OFF, false},
+	{"experimental", PGTURBOHYBRID_MULTIVECTOR_CENTROID_LITE_BITSET_PREFILTER_EXPERIMENTAL, false},
 	{NULL, 0, false}
 };
 
@@ -559,6 +581,7 @@ static relopt_enum_elt_def pgturbohybrid_multivector_proxy_encoder_relopt_option
 	{"max_pool", PGTURBOHYBRID_MULTIVECTOR_PROXY_ENCODER_MAX_POOL},
 	{"random_projection_fde", PGTURBOHYBRID_MULTIVECTOR_PROXY_ENCODER_RANDOM_PROJECTION_FDE},
 	{"learned_projection_placeholder", PGTURBOHYBRID_MULTIVECTOR_PROXY_ENCODER_LEARNED_PROJECTION_PLACEHOLDER},
+	{"learned_projection_v1", PGTURBOHYBRID_MULTIVECTOR_PROXY_ENCODER_LEARNED_PROJECTION_V1},
 	{NULL, 0}
 };
 
@@ -1308,6 +1331,12 @@ typedef struct PgturbohybridLastScanStats
 	char		multivectorCandidateSource[48];
 	char		multivectorCandidatePath[48];
 	char		multivectorProxyEncoderKind[32];
+	bool		learnedProjectionLoaded;
+	uint32		learnedProjectionDim;
+	uint64		learnedProjectionWeightBytes;
+	char		learnedProjectionModel[128];
+	char		learnedProjectionChecksum[128];
+	uint64		learnedProjectionQueryEncodeUs;
 	char		multivectorGraphMode[24];
 	uint64		multivectorProxyGraphSearches;
 	bool		multivectorExactTokenScanEnabled;
@@ -1379,6 +1408,12 @@ typedef struct PgturbohybridLastScanStats
 	uint32		centroidPostingLimitPerToken;
 	char		centroidPostingCapStrategy[32];
 	uint32		centroidCandidates;
+	bool		centroidBitsetPrefilterEnabled;
+	uint32		centroidBitsetListsUsed;
+	uint32		centroidBitsetDocsSet;
+	uint32		centroidBitsetDocsAfterThreshold;
+	uint64		centroidBitsetPrefilterUs;
+	uint64		centroidBitsetMemoryBytes;
 	uint32		multivectorCentroidCount;
 	uint32		multivectorCentroidPrerankDocs;
 	uint32		multivectorFullMaxsimRerankDocs;
@@ -1387,7 +1422,12 @@ typedef struct PgturbohybridLastScanStats
 	uint64		quantizedInvertedDocsScored;
 	uint32		quantizedInvertedCandidates;
 	uint32		quantizedInvertedExactRerankDocs;
+	char		quantizedInvertedCodebookSource[16];
 	uint32		quantizedInvertedCodebookSize;
+	uint32		quantizedInvertedCodebookDim;
+	char		quantizedInvertedCodebookChecksum[128];
+	uint32		quantizedInvertedCodebookTopM;
+	uint64		quantizedInvertedAssignmentUs;
 	uint64		quantizedInvertedListOffsetBytes;
 	uint64		quantizedInvertedPostingBytes;
 	uint64		quantizedInvertedSidecarBytes;
@@ -1763,6 +1803,20 @@ PgturbohybridGetLastScanStatsSnapshot(PgturbohybridScanStatsSnapshot *stats)
 	strlcpy(stats->multivectorProxyEncoderKind,
 			pgturbohybrid_last_scan_state.multivectorProxyEncoderKind,
 			sizeof(stats->multivectorProxyEncoderKind));
+	stats->learnedProjectionLoaded =
+		pgturbohybrid_last_scan_state.learnedProjectionLoaded;
+	stats->learnedProjectionDim =
+		pgturbohybrid_last_scan_state.learnedProjectionDim;
+	stats->learnedProjectionWeightBytes =
+		pgturbohybrid_last_scan_state.learnedProjectionWeightBytes;
+	strlcpy(stats->learnedProjectionModel,
+			pgturbohybrid_last_scan_state.learnedProjectionModel,
+			sizeof(stats->learnedProjectionModel));
+	strlcpy(stats->learnedProjectionChecksum,
+			pgturbohybrid_last_scan_state.learnedProjectionChecksum,
+			sizeof(stats->learnedProjectionChecksum));
+	stats->learnedProjectionQueryEncodeUs =
+		pgturbohybrid_last_scan_state.learnedProjectionQueryEncodeUs;
 	strlcpy(stats->multivectorGraphMode,
 			pgturbohybrid_last_scan_state.multivectorGraphMode,
 			sizeof(stats->multivectorGraphMode));
@@ -1915,6 +1969,18 @@ PgturbohybridGetLastScanStatsSnapshot(PgturbohybridScanStatsSnapshot *stats)
 			sizeof(stats->centroidPostingCapStrategy));
 	stats->centroidCandidates =
 		pgturbohybrid_last_scan_state.centroidCandidates;
+	stats->centroidBitsetPrefilterEnabled =
+		pgturbohybrid_last_scan_state.centroidBitsetPrefilterEnabled;
+	stats->centroidBitsetListsUsed =
+		pgturbohybrid_last_scan_state.centroidBitsetListsUsed;
+	stats->centroidBitsetDocsSet =
+		pgturbohybrid_last_scan_state.centroidBitsetDocsSet;
+	stats->centroidBitsetDocsAfterThreshold =
+		pgturbohybrid_last_scan_state.centroidBitsetDocsAfterThreshold;
+	stats->centroidBitsetPrefilterUs =
+		pgturbohybrid_last_scan_state.centroidBitsetPrefilterUs;
+	stats->centroidBitsetMemoryBytes =
+		pgturbohybrid_last_scan_state.centroidBitsetMemoryBytes;
 	stats->multivectorCentroidCount =
 		pgturbohybrid_last_scan_state.multivectorCentroidCount;
 	stats->multivectorCentroidPrerankDocs =
@@ -1931,8 +1997,20 @@ PgturbohybridGetLastScanStatsSnapshot(PgturbohybridScanStatsSnapshot *stats)
 		pgturbohybrid_last_scan_state.quantizedInvertedCandidates;
 	stats->quantizedInvertedExactRerankDocs =
 		pgturbohybrid_last_scan_state.quantizedInvertedExactRerankDocs;
+	strlcpy(stats->quantizedInvertedCodebookSource,
+			pgturbohybrid_last_scan_state.quantizedInvertedCodebookSource,
+			sizeof(stats->quantizedInvertedCodebookSource));
 	stats->quantizedInvertedCodebookSize =
 		pgturbohybrid_last_scan_state.quantizedInvertedCodebookSize;
+	stats->quantizedInvertedCodebookDim =
+		pgturbohybrid_last_scan_state.quantizedInvertedCodebookDim;
+	strlcpy(stats->quantizedInvertedCodebookChecksum,
+			pgturbohybrid_last_scan_state.quantizedInvertedCodebookChecksum,
+			sizeof(stats->quantizedInvertedCodebookChecksum));
+	stats->quantizedInvertedCodebookTopM =
+		pgturbohybrid_last_scan_state.quantizedInvertedCodebookTopM;
+	stats->quantizedInvertedAssignmentUs =
+		pgturbohybrid_last_scan_state.quantizedInvertedAssignmentUs;
 	stats->quantizedInvertedListOffsetBytes =
 		pgturbohybrid_last_scan_state.quantizedInvertedListOffsetBytes;
 	stats->quantizedInvertedPostingBytes =
@@ -5852,6 +5930,18 @@ PgturbohybridCollectScanResults(IndexScanDesc scan, PgturbohybridScanState *stat
 	strlcpy(lastStats.multivectorProxyEncoderKind,
 			denseStats.multivectorProxyEncoderKind,
 			sizeof(lastStats.multivectorProxyEncoderKind));
+	lastStats.learnedProjectionLoaded = denseStats.learnedProjectionLoaded;
+	lastStats.learnedProjectionDim = denseStats.learnedProjectionDim;
+	lastStats.learnedProjectionWeightBytes =
+		denseStats.learnedProjectionWeightBytes;
+	strlcpy(lastStats.learnedProjectionModel,
+			denseStats.learnedProjectionModel,
+			sizeof(lastStats.learnedProjectionModel));
+	strlcpy(lastStats.learnedProjectionChecksum,
+			denseStats.learnedProjectionChecksum,
+			sizeof(lastStats.learnedProjectionChecksum));
+	lastStats.learnedProjectionQueryEncodeUs =
+		denseStats.learnedProjectionQueryEncodeUs;
 	strlcpy(lastStats.multivectorGraphMode,
 			denseStats.multivectorGraphMode,
 			sizeof(lastStats.multivectorGraphMode));
@@ -5982,6 +6072,17 @@ PgturbohybridCollectScanResults(IndexScanDesc scan, PgturbohybridScanState *stat
 			denseStats.centroidPostingCapStrategy,
 			sizeof(lastStats.centroidPostingCapStrategy));
 	lastStats.centroidCandidates = denseStats.centroidCandidates;
+	lastStats.centroidBitsetPrefilterEnabled =
+		denseStats.centroidBitsetPrefilterEnabled;
+	lastStats.centroidBitsetListsUsed =
+		denseStats.centroidBitsetListsUsed;
+	lastStats.centroidBitsetDocsSet = denseStats.centroidBitsetDocsSet;
+	lastStats.centroidBitsetDocsAfterThreshold =
+		denseStats.centroidBitsetDocsAfterThreshold;
+	lastStats.centroidBitsetPrefilterUs =
+		denseStats.centroidBitsetPrefilterUs;
+	lastStats.centroidBitsetMemoryBytes =
+		denseStats.centroidBitsetMemoryBytes;
 	lastStats.multivectorCentroidCount =
 		denseStats.multivectorCentroidCount;
 	lastStats.multivectorCentroidPrerankDocs =
@@ -5998,8 +6099,20 @@ PgturbohybridCollectScanResults(IndexScanDesc scan, PgturbohybridScanState *stat
 		denseStats.quantizedInvertedCandidates;
 	lastStats.quantizedInvertedExactRerankDocs =
 		denseStats.quantizedInvertedExactRerankDocs;
+	strlcpy(lastStats.quantizedInvertedCodebookSource,
+			denseStats.quantizedInvertedCodebookSource,
+			sizeof(lastStats.quantizedInvertedCodebookSource));
 	lastStats.quantizedInvertedCodebookSize =
 		denseStats.quantizedInvertedCodebookSize;
+	lastStats.quantizedInvertedCodebookDim =
+		denseStats.quantizedInvertedCodebookDim;
+	strlcpy(lastStats.quantizedInvertedCodebookChecksum,
+			denseStats.quantizedInvertedCodebookChecksum,
+			sizeof(lastStats.quantizedInvertedCodebookChecksum));
+	lastStats.quantizedInvertedCodebookTopM =
+		denseStats.quantizedInvertedCodebookTopM;
+	lastStats.quantizedInvertedAssignmentUs =
+		denseStats.quantizedInvertedAssignmentUs;
 	lastStats.quantizedInvertedListOffsetBytes =
 		denseStats.quantizedInvertedListOffsetBytes;
 	lastStats.quantizedInvertedPostingBytes =
@@ -7288,7 +7401,7 @@ PgturbohybridInit(void)
 					   "Fixed-dimensional proxy encoder for document-node proxy_vector admission.",
 					   pgturbohybrid_multivector_proxy_encoder_relopt_options,
 					   PGTURBOHYBRID_DEFAULT_MULTIVECTOR_PROXY_ENCODER,
-					   "Valid values are \"normalized_mean\", \"mean\", \"first_token\", \"max_abs_mean\", \"centroid_mean\", \"max_pool\", \"random_projection_fde\", and \"learned_projection_placeholder\".",
+					   "Valid values are \"normalized_mean\", \"mean\", \"first_token\", \"max_abs_mean\", \"centroid_mean\", \"max_pool\", \"random_projection_fde\", \"learned_projection_placeholder\", and \"learned_projection_v1\".",
 					   AccessExclusiveLock);
 	add_enum_reloption(pgturbohybrid_relopt_kind, "multivector_context_mode",
 					   "Long-context multivector scoring mode.",
@@ -7481,6 +7594,24 @@ PgturbohybridInit(void)
 							 PGTURBOHYBRID_DEFAULT_MULTIVECTOR_PROXY_ENCODER,
 							 pgturbohybrid_multivector_proxy_encoder_options,
 							 PGC_USERSET, 0, NULL, NULL, NULL);
+	DefineCustomStringVariable("turbohybrid.multivector_learned_projection_path",
+							   "Path to learned_projection_v1 proxy weights",
+							   "Empty disables learned_projection_v1. The first safe slice accepts an administrator-provided text weight file and keeps final exact MaxSim rerank unchanged.",
+							   &pgturbohybrid_multivector_learned_projection_path,
+							   "",
+							   PGC_USERSET, 0, NULL, NULL, NULL);
+	DefineCustomStringVariable("turbohybrid.multivector_learned_projection_model",
+							   "Expected learned_projection_v1 model profile name",
+							   "When non-empty, the loaded learned projection file must declare the same model name.",
+							   &pgturbohybrid_multivector_learned_projection_model,
+							   "",
+							   PGC_USERSET, 0, NULL, NULL, NULL);
+	DefineCustomStringVariable("turbohybrid.multivector_learned_projection_checksum",
+							   "Expected learned_projection_v1 projection checksum",
+							   "When non-empty, the loaded learned projection file must declare the same checksum string.",
+							   &pgturbohybrid_multivector_learned_projection_checksum,
+							   "",
+							   PGC_USERSET, 0, NULL, NULL, NULL);
 	DefineCustomBoolVariable("turbohybrid.multivector_allow_exact_symmetric_build",
 							 "Allow exact symmetric document MaxSim graph topology builds above the diagnostic size guard",
 							 "Off blocks multivector document-node exact_symmetric graph builds above turbohybrid.multivector_exact_symmetric_build_max_docs. This protects production builds and benchmarks from accidentally selecting O(doc_tokens^2 * dim) document-document MaxSim topology.",
@@ -7524,6 +7655,25 @@ PgturbohybridInit(void)
 							 PGTURBOHYBRID_MULTIVECTOR_CANDIDATE_SOURCE_GRAPH,
 							 pgturbohybrid_multivector_candidate_source_options,
 							 PGC_USERSET, 0, NULL, NULL, NULL);
+	DefineCustomEnumVariable("turbohybrid.multivector_quantized_inverted_codebook",
+							 "Experimental quantized-inverted codebook source",
+							 "deterministic preserves the temporary largest-magnitude codeword assignment; external loads an administrator-provided experimental text codebook and requires matching sidecar metadata.",
+							 &pgturbohybrid_multivector_quantized_inverted_codebook,
+							 PGTURBOHYBRID_MULTIVECTOR_QUANTIZED_INVERTED_CODEBOOK_DETERMINISTIC,
+							 pgturbohybrid_multivector_quantized_inverted_codebook_options,
+							 PGC_USERSET, 0, NULL, NULL, NULL);
+	DefineCustomStringVariable("turbohybrid.multivector_quantized_inverted_codebook_path",
+							   "Path to an experimental quantized-inverted external codebook",
+							   "Only used when turbohybrid.multivector_quantized_inverted_codebook = external. The file header is pgturbohybrid_quantized_inverted_codebook_v1 <dim> <codebook_size> <checksum>.",
+							   &pgturbohybrid_multivector_quantized_inverted_codebook_path,
+							   "",
+							   PGC_USERSET, 0, NULL, NULL, NULL);
+	DefineCustomIntVariable("turbohybrid.multivector_quantized_inverted_codebook_top_m",
+							"Number of codewords assigned per token for the experimental quantized-inverted branch",
+							"The current sidecar format supports top_m = 1 only; larger values error until a versioned posting format exists.",
+							&pgturbohybrid_multivector_quantized_inverted_codebook_top_m,
+							1, 1, 16,
+							PGC_USERSET, 0, NULL, NULL, NULL);
 	DefineCustomEnumVariable("turbohybrid.multivector_branch_plan",
 							 "Multivector branch planner mode",
 							 "auto preserves existing branch execution, dense_only exposes a dense-only branch plan, and qdrant_like emits nested prefetch-style branch diagnostics for multivector/hybrid scans.",
@@ -7537,6 +7687,13 @@ PgturbohybridInit(void)
 							&pgturbohybrid_multivector_centroid_lite_max_postings_per_token,
 							0, 0, 10000000,
 							PGC_USERSET, 0, NULL, NULL, NULL);
+	DefineCustomEnumVariable("turbohybrid.multivector_centroid_lite_bitset_prefilter",
+							 "Experimental centroid_lite scan-local bitset prefilter",
+							 "off preserves current centroid_lite behavior; experimental builds a scan-local posting-union bitset for measurement only before exact MaxSim rerank.",
+							 &pgturbohybrid_multivector_centroid_lite_bitset_prefilter,
+							 PGTURBOHYBRID_MULTIVECTOR_CENTROID_LITE_BITSET_PREFILTER_OFF,
+							 pgturbohybrid_multivector_centroid_lite_bitset_prefilter_options,
+							 PGC_USERSET, 0, NULL, NULL, NULL);
 	DefineCustomIntVariable("turbohybrid.multivector_doc_graph_entry_sample_count",
 							"Document-node graph entry samples scored before traversal",
 							"Zero preserves the compiled default entry-sample cap. Positive values widen the deterministic proxy-entry sample used before document-node graph traversal without changing index storage.",
