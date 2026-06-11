@@ -91,7 +91,8 @@ key. The proxy is produced by the configured proxy encoder, for example:
 - `mean_pool`;
 - `max_pool`;
 - `random_projection_fde`;
-- a future learned projection only after real weights and validation exist.
+- `learned_projection_v1` when an administrator-provided weight file is
+  configured and validated.
 
 The proxy vector is the build/search topology vector. It is not the final
 ColBERT score.

@@ -478,8 +478,8 @@ Current production slice:
   for now, because pooling changes token ordinals and must preserve or rebuild
   context-window metadata before it can be correct;
 - proxy-vector admission is controlled by the persisted index option
-  `multivector_proxy_encoder = normalized_mean | mean | first_token |
-  max_abs_mean | centroid_mean | max_pool | random_projection_fde |
+  `multivector_proxy_encoder = normalized_mean | mean | mean_pool |
+  first_token | max_abs_mean | centroid_mean | max_pool | random_projection_fde |
   learned_projection_placeholder | learned_projection_v1`.
   `normalized_mean` is the production document proxy for cosine/IP MaxSim
   models. `centroid_mean` requires `multivector_centroids = kmeans` and uses
@@ -530,8 +530,8 @@ Compatibility rules:
 Current index option:
 
 - `multivector_graph = token_nodes | document_nodes`
-- `multivector_proxy_encoder = normalized_mean | mean | first_token |
-  max_abs_mean | centroid_mean | max_pool | random_projection_fde |
+- `multivector_proxy_encoder = normalized_mean | mean | mean_pool |
+  first_token | max_abs_mean | centroid_mean | max_pool | random_projection_fde |
   learned_projection_placeholder | learned_projection_v1`
 - `multivector_context_mode = flat | context_level`
 - `multivector_field_mode = off | weighted`
