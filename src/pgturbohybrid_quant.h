@@ -19,6 +19,7 @@
 #define PGTURBOHYBRID_GRAPH_MULTIVECTOR_DOCMAP_CENTROID_TUPLE_TYPE 0x59
 #define PGTURBOHYBRID_GRAPH_MULTIVECTOR_DOCMAP_CENTROID_POSTING_TUPLE_TYPE 0x5A
 #define PGTURBOHYBRID_GRAPH_MULTIVECTOR_DOCMAP_QUANTIZED_POSTING_TUPLE_TYPE 0x5B
+#define PGTURBOHYBRID_GRAPH_MULTIVECTOR_DOCMAP_QUANTIZED_CODEBOOK_TUPLE_TYPE 0x5C
 #define PGTURBOHYBRID_GRAPH_EXACT_SLAB_MAGIC		0x54514553U
 #define PGTURBOHYBRID_GRAPH_MULTIVECTOR_DOCMAP_MAGIC 0x54514d56U
 #define PGTURBOHYBRID_GRAPH_MULTIVECTOR_DOCMAP_VERSION 3
@@ -27,6 +28,7 @@
 #define PGTURBOHYBRID_GRAPH_MULTIVECTOR_DOCMAP_FLAG_CENTROIDS 0x0004
 #define PGTURBOHYBRID_GRAPH_MULTIVECTOR_DOCMAP_FLAG_CENTROID_POSTINGS 0x0008
 #define PGTURBOHYBRID_GRAPH_MULTIVECTOR_DOCMAP_FLAG_QUANTIZED_POSTINGS 0x0010
+#define PGTURBOHYBRID_GRAPH_MULTIVECTOR_DOCMAP_FLAG_QUANTIZED_CODEBOOK 0x0020
 #define PGTURBOHYBRID_GRAPH_NODE_DEAD				0x0001
 #define PGTURBOHYBRID_GRAPH_TQ_PLUS				0x0001	/* metapage: ecShift/ecScale correction tuples present */
 #define PGTURBOHYBRID_GRAPH_TQ_WEIGHTED			0x0002	/* metapage: code tuples carry per-vector ec_correction */
@@ -254,6 +256,20 @@ typedef struct PgturbohybridGraphMultiVectorDocMapQuantizedPostingTupleData
 
 typedef PgturbohybridGraphMultiVectorDocMapQuantizedPostingTupleData *PgturbohybridGraphMultiVectorDocMapQuantizedPostingTuple;
 
+typedef struct PgturbohybridGraphMultiVectorDocMapQuantizedCodebookTupleData
+{
+	uint8		type;
+	uint8		version;
+	uint16		source;
+	uint32		magic;
+	uint32		dim;
+	uint32		codebookSize;
+	uint32		topM;
+	char		checksum[128];
+} PgturbohybridGraphMultiVectorDocMapQuantizedCodebookTupleData;
+
+typedef PgturbohybridGraphMultiVectorDocMapQuantizedCodebookTupleData *PgturbohybridGraphMultiVectorDocMapQuantizedCodebookTuple;
+
 typedef struct PgturbohybridGraphBuildNode
 {
 	ItemPointerData heaptid;
@@ -338,6 +354,7 @@ typedef struct PgturbohybridQuantBuildState
 	uint64		multivectorCentroidBuildDocs;
 	uint64		multivectorCentroidBuildVectors;
 	uint64		multivectorProxyBuildUs;
+	uint64		learnedProjectionDocEncodeBuildUs;
 	uint64		multivectorDocSidecarWriteUs;
 	uint64		multivectorCentroidSidecarWriteUs;
 	uint64		multivectorCentroidPostingWriteUs;
@@ -521,6 +538,12 @@ typedef struct TqDenseCandidateStats
 	char		multivectorCandidateSource[48];
 	char		multivectorCandidatePath[48];
 	char		multivectorProxyEncoderKind[32];
+	bool		learnedProjectionLoaded;
+	uint32		learnedProjectionDim;
+	uint64		learnedProjectionWeightBytes;
+	char		learnedProjectionModel[128];
+	char		learnedProjectionChecksum[128];
+	uint64		learnedProjectionQueryEncodeUs;
 	char		multivectorGraphMode[24];
 	uint64		multivectorProxyGraphSearches;
 	bool		multivectorExactTokenScanEnabled;
@@ -592,6 +615,12 @@ typedef struct TqDenseCandidateStats
 	uint32		centroidPostingLimitPerToken;
 	char		centroidPostingCapStrategy[32];
 	uint32		centroidCandidates;
+	bool		centroidBitsetPrefilterEnabled;
+	uint32		centroidBitsetListsUsed;
+	uint32		centroidBitsetDocsSet;
+	uint32		centroidBitsetDocsAfterThreshold;
+	uint64		centroidBitsetPrefilterUs;
+	uint64		centroidBitsetMemoryBytes;
 	uint32		multivectorCentroidCount;
 	uint32		multivectorCentroidPrerankDocs;
 	uint32		multivectorFullMaxsimRerankDocs;
@@ -600,7 +629,12 @@ typedef struct TqDenseCandidateStats
 	uint64		quantizedInvertedDocsScored;
 	uint32		quantizedInvertedCandidates;
 	uint32		quantizedInvertedExactRerankDocs;
+	char		quantizedInvertedCodebookSource[16];
 	uint32		quantizedInvertedCodebookSize;
+	uint32		quantizedInvertedCodebookDim;
+	char		quantizedInvertedCodebookChecksum[128];
+	uint32		quantizedInvertedCodebookTopM;
+	uint64		quantizedInvertedAssignmentUs;
 	uint64		quantizedInvertedListOffsetBytes;
 	uint64		quantizedInvertedPostingBytes;
 	uint64		quantizedInvertedSidecarBytes;
@@ -766,6 +800,10 @@ typedef struct PgturbohybridGraphScanStorage
 	PgturbohybridGraphMultiVectorQuantizedPostingEntry *multivectorQuantizedInvertedPostings;
 	uint32	   *multivectorQuantizedInvertedListOffsets;
 	uint32		multivectorQuantizedInvertedCodebookSize;
+	uint32		multivectorQuantizedInvertedCodebookDim;
+	uint32		multivectorQuantizedInvertedCodebookTopM;
+	int			multivectorQuantizedInvertedCodebookSource;
+	char		multivectorQuantizedInvertedCodebookChecksum[128];
 	uint32		multivectorQuantizedInvertedPostingCount;
 	uint32		payloadRefCount;
 	uint32		multivectorDocCount;

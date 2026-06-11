@@ -1250,6 +1250,149 @@ EXCEPTION WHEN feature_not_supported THEN
 END
 $$;
 
+DO $$
+BEGIN
+	EXECUTE 'CREATE INDEX mv_proxy_encoder_docs_learned_v1_missing_idx ON mv_proxy_encoder_docs USING turbohybrid ' ||
+		'(colbert multivector_cosine_turbohybrid_ops) WITH (multivector_graph = document_nodes, ' ||
+		'multivector_proxy_encoder = learned_projection_v1)';
+	RAISE EXCEPTION 'learned_projection_v1 without weights unexpectedly succeeded';
+EXCEPTION WHEN feature_not_supported THEN
+	IF SQLERRM NOT LIKE '%learned_projection_v1 multivector proxy encoder requires configured projection weights%' THEN
+		RAISE;
+	END IF;
+END
+$$;
+
+DO $$
+DECLARE
+	weight_path text := current_setting('data_directory') || '/learned_projection_v1_dim_mismatch.txt';
+BEGIN
+	EXECUTE format(
+		'COPY (SELECT %L) TO %L',
+		'pgturbohybrid_learned_projection_v1 tiny_mismatch 3 3 checksum_mismatch 1 0 0 0 1 0 0 0 1',
+		weight_path
+	);
+	PERFORM set_config('turbohybrid.multivector_learned_projection_path', weight_path, false);
+	PERFORM set_config('turbohybrid.multivector_learned_projection_model', 'tiny_mismatch', false);
+	PERFORM set_config('turbohybrid.multivector_learned_projection_checksum', 'checksum_mismatch', false);
+	EXECUTE 'CREATE INDEX mv_proxy_encoder_docs_learned_v1_mismatch_idx ON mv_proxy_encoder_docs USING turbohybrid ' ||
+		'(colbert multivector_cosine_turbohybrid_ops) WITH (multivector_graph = document_nodes, ' ||
+		'multivector_proxy_encoder = learned_projection_v1)';
+	RAISE EXCEPTION 'learned_projection_v1 dimension mismatch unexpectedly succeeded';
+EXCEPTION WHEN invalid_parameter_value THEN
+	IF SQLERRM NOT LIKE '%learned_projection_v1 dimensions do not match multivector dimension%' THEN
+		RAISE;
+	END IF;
+END
+$$;
+
+RESET turbohybrid.multivector_learned_projection_path;
+RESET turbohybrid.multivector_learned_projection_model;
+RESET turbohybrid.multivector_learned_projection_checksum;
+
+DO $$
+DECLARE
+	weight_path text := current_setting('data_directory') || '/learned_projection_v1_identity_4d.txt';
+BEGIN
+	EXECUTE format(
+		'COPY (SELECT %L) TO %L',
+		'pgturbohybrid_learned_projection_v1 tiny_identity_4d 4 4 checksum_identity_4d 1 0 0 0 0 1 0 0 0 0 1 0 0 0 0 1',
+		weight_path
+	);
+	PERFORM set_config('turbohybrid.multivector_learned_projection_path', weight_path, false);
+	PERFORM set_config('turbohybrid.multivector_learned_projection_model', 'tiny_identity_4d', false);
+	PERFORM set_config('turbohybrid.multivector_learned_projection_checksum', 'checksum_identity_4d', false);
+	EXECUTE 'CREATE INDEX mv_proxy_encoder_docs_learned_v1_idx ON mv_proxy_encoder_docs USING turbohybrid ' ||
+		'(colbert multivector_cosine_turbohybrid_ops) WITH (multivector_graph = document_nodes, ' ||
+		'multivector_proxy_encoder = learned_projection_v1)';
+END
+$$;
+
+DO $$
+DECLARE
+	q turbohybrid_multivector := turbohybrid_multivector(ARRAY[
+		'[1,0,0,0]'::vector,
+		'[0,1,0,0]'::vector
+	]);
+	stats jsonb;
+	index_stats jsonb;
+	build_stats jsonb;
+	proxy_top text;
+	exact_top text;
+BEGIN
+	index_stats := turbohybrid_index_stats('mv_proxy_encoder_docs_learned_v1_idx'::regclass);
+	build_stats := turbohybrid_last_build_stats();
+	IF index_stats->>'multivector_proxy_encoder' <> 'learned_projection_v1' OR
+		index_stats->>'learned_projection_loaded' <> 'true' OR
+		index_stats->>'learned_projection_model' <> 'tiny_identity_4d' OR
+		(index_stats->>'learned_projection_dim')::int <> 4 OR
+		index_stats->>'learned_projection_checksum' <> 'checksum_identity_4d' OR
+		NOT (build_stats ? 'learned_projection_doc_encode_build_us') THEN
+		RAISE EXCEPTION 'unexpected learned_projection_v1 index/build stats, index %, build %',
+			index_stats, build_stats;
+	END IF;
+
+	PERFORM set_config('turbohybrid.multivector_candidate_source', 'proxy_vector', true);
+	PERFORM set_config('turbohybrid.multivector_doc_candidate_k', '2', true);
+	PERFORM set_config('turbohybrid.multivector_exact_rerank_k', '2', true);
+	SELECT id INTO proxy_top
+	FROM mv_proxy_encoder_docs
+	ORDER BY colbert <~> turbohybrid_query(
+	  multivector_query => q,
+	  dense_k => 2,
+	  final_k => 1
+	)
+	LIMIT 1;
+	stats := turbohybrid_last_scan_stats();
+
+	PERFORM set_config('turbohybrid.multivector_candidate_source', 'exact_doc_scan', true);
+	SELECT id INTO exact_top
+	FROM mv_proxy_encoder_docs
+	ORDER BY colbert <~> turbohybrid_query(
+	  multivector_query => q,
+	  dense_k => 2,
+	  final_k => 1
+	)
+	LIMIT 1;
+
+	PERFORM set_config('turbohybrid.multivector_candidate_source', 'graph', true);
+
+	IF proxy_top <> exact_top OR
+		proxy_top <> 'alpha' OR
+		stats->>'proxy_encoder_kind' <> 'learned_projection_v1' OR
+		stats->>'learned_projection_loaded' <> 'true' OR
+		stats->>'learned_projection_model' <> 'tiny_identity_4d' OR
+		(stats->>'learned_projection_dim')::int <> 4 OR
+		stats->>'learned_projection_checksum' <> 'checksum_identity_4d' OR
+		NOT (stats ? 'learned_projection_query_encode_us') THEN
+		RAISE EXCEPTION 'expected learned_projection_v1 proxy/exact match, proxy %, exact %, stats %',
+			proxy_top, exact_top, stats;
+	END IF;
+
+	PERFORM set_config('turbohybrid.multivector_candidate_source', 'proxy_vector', true);
+	PERFORM id
+	FROM mv_proxy_encoder_docs
+	ORDER BY colbert <~> turbohybrid_query(
+	  multivector_query => q,
+	  dense_k => 2,
+	  final_k => 1
+	)
+	LIMIT 1;
+END
+$$;
+
+SELECT turbohybrid_last_scan_stats()->>'proxy_encoder_kind'
+  AS document_node_proxy_learned_projection_encoder,
+       turbohybrid_last_scan_stats()->>'learned_projection_model'
+  AS document_node_proxy_learned_projection_model,
+       (turbohybrid_last_scan_stats()->>'learned_projection_dim')::int
+  AS document_node_proxy_learned_projection_dim;
+
+DROP INDEX mv_proxy_encoder_docs_learned_v1_idx;
+RESET turbohybrid.multivector_learned_projection_path;
+RESET turbohybrid.multivector_learned_projection_model;
+RESET turbohybrid.multivector_learned_projection_checksum;
+
 DROP TABLE mv_proxy_encoder_docs;
 
 SET turbohybrid.multivector_branch_plan = qdrant_like;

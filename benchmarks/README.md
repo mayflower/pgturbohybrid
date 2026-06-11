@@ -354,6 +354,22 @@ These rows reuse the same physical kmeans centroid index as uncapped
 as admission/latency tradeoff evidence for the experimental centroid-lite path.
 Positive caps use deterministic uniform-stride posting sampling and expose
 `centroid_posting_cap_strategy` in scan stats.
+Use `--document-node-serving-grid-centroid-lite-focus` when the only question is
+the centroid-lite cap tradeoff. It restricts the grid to uncapped
+`centroid_lite_f16`, capped `016/032/064` variants,
+`centroid_lite_f16_pool_050`, and the `centroid_mean_f16` baseline with the
+largest candidate budget by default.
+Use `--document-node-serving-grid-token-pooling-focus` when the question is
+whether greedy token pooling reduces build cost, sidecar size, exact MaxSim
+pairs, and latency without losing admission quality. It compares
+`proxy_normalized_mean_f16` and `centroid_mean_f16` with pooling `off` and
+`greedy_cosine` target ratios `0.75`, `0.50`, and `0.33`. The JSON adds
+`document_node_token_pooling_recommendation` with
+`best_pooling_latency_safe`, `best_pooling_quality_safe`, and rejected pooling
+profiles; Markdown repeats pooled-token, pooling-ratio, exact-pair, build-time,
+latency, admission, and quality evidence. Pooling changes the physical index
+signature, so pooled rows are separate build variants rather than scan-time
+GUC-only comparisons.
 Add `--document-node-serving-grid-include-entry-sidecar` only for focused graph
 entry admission experiments. It appends `proxy_normalized_mean_f16_entry_sidecar`
 and `centroid_mean_f16_entry_sidecar`, builds `entry_sidecar = on` indexes with
@@ -542,6 +558,115 @@ normal graph edge construction. The benchmark derives
 `build_phase_unattributed_ms` from these counters so a 10k stall can be routed
 to centroid work, sidecar/posting serialization, or uninstrumented graph build
 work before adding another optimization.
+
+### Choosing the next x00k experiment
+
+Use this decision tree before widening a document-node benchmark:
+
+- If `CREATE INDEX` is slow, run build-only first and inspect
+  `dominant_build_phase`. Do not run the full serving grid until build cost is
+  attributed.
+- If query latency is slow, run latency-only and inspect phase timing before
+  changing C code. Separate exact rerank, graph traversal, sidecar/cache, and
+  SQL/Python harness overhead.
+- If `proxy_vector` is fast but admission is weak, try `centroid_mean`,
+  `max_pool`, entry sampling, entry sidecar, BM25 rescue, or learned-sparse
+  rescue as focused admission experiments.
+- If `centroid_lite` is slow, inspect
+  `centroid_docs_touched / doc_count`, posting counts, and posting-cap
+  warnings. Try centroid-lite caps or upper-bound pruning evidence before
+  tuning exact MaxSim.
+- If exact rerank dominates latency, lower `--serving-exact-rerank-k`, test
+  token pooling, verify the SIMD kernel, and then consider adaptive rerank
+  changes.
+- If sparse rescue helps, compare BM25 and learned sparse with cap accounting
+  and keep final exact MaxSim ranking.
+- If all proxy variants fail admission, run centroid-lite focus, optionally run
+  the quantized-inverted research branch, and consider the learned-projection
+  proxy path.
+
+Build-only:
+
+```sh
+nix develop .#bench
+python benchmarks/dbpedia_colbert_multivector.py \
+  --database pgturbohybrid_dbpedia_colbert_10k_build \
+  --precomputed-dataset johannhartmann/pgturbohybrid_dbpedia_colbert \
+  --max-docs 10000 \
+  --max-queries 25 \
+  --reuse-data \
+  --document-node-serving-build-only \
+  --document-node-serving-grid-profiles centroid_mean_f16,proxy_max_pool_f16,proxy_normalized_mean_f16 \
+  --output .nix-dev/tmp/dbpedia-colbert-serving-build-10k.json \
+  --markdown-output .nix-dev/tmp/dbpedia-colbert-serving-build-10k.md
+```
+
+Latency-only:
+
+```sh
+nix develop .#bench
+python benchmarks/dbpedia_colbert_multivector.py \
+  --database pgturbohybrid_dbpedia_colbert_10k_latency \
+  --precomputed-dataset johannhartmann/pgturbohybrid_dbpedia_colbert \
+  --max-docs 10000 \
+  --max-queries 25 \
+  --reuse-data \
+  --document-node-serving-latency-only \
+  --serving-profile-name proxy_normalized_mean_f16 \
+  --serving-candidate-k 800 \
+  --serving-exact-rerank-k 100 \
+  --serving-ef 100 \
+  --serving-oversampling 1 \
+  --serving-storage f16 \
+  --serving-cache auto \
+  --output .nix-dev/tmp/dbpedia-colbert-serving-latency-10k.json \
+  --markdown-output .nix-dev/tmp/dbpedia-colbert-serving-latency-10k.md
+```
+
+Proxy/entry admission focus:
+
+```sh
+nix develop .#bench
+python benchmarks/dbpedia_colbert_multivector.py \
+  --database pgturbohybrid_dbpedia_colbert_10k_proxy_focus \
+  --precomputed-dataset johannhartmann/pgturbohybrid_dbpedia_colbert \
+  --max-docs 10000 \
+  --max-queries 50 \
+  --reuse-data \
+  --document-node-serving-grid-proxy-admission-focus \
+  --output .nix-dev/tmp/dbpedia-colbert-proxy-admission-focus-10k.json \
+  --markdown-output .nix-dev/tmp/dbpedia-colbert-proxy-admission-focus-10k.md
+```
+
+Centroid-lite focus:
+
+```sh
+nix develop .#bench
+python benchmarks/dbpedia_colbert_multivector.py \
+  --database pgturbohybrid_dbpedia_colbert_10k_centroid_focus \
+  --precomputed-dataset johannhartmann/pgturbohybrid_dbpedia_colbert \
+  --max-docs 10000 \
+  --max-queries 50 \
+  --reuse-data \
+  --document-node-serving-grid-centroid-lite-focus \
+  --output .nix-dev/tmp/dbpedia-colbert-centroid-lite-focus-10k.json \
+  --markdown-output .nix-dev/tmp/dbpedia-colbert-centroid-lite-focus-10k.md
+```
+
+Token-pooling focus:
+
+```sh
+nix develop .#bench
+python benchmarks/dbpedia_colbert_multivector.py \
+  --database pgturbohybrid_dbpedia_colbert_10k_pooling_focus \
+  --precomputed-dataset johannhartmann/pgturbohybrid_dbpedia_colbert \
+  --max-docs 10000 \
+  --max-queries 50 \
+  --reuse-data \
+  --document-node-serving-grid-token-pooling-focus \
+  --output .nix-dev/tmp/dbpedia-colbert-token-pooling-focus-10k.json \
+  --markdown-output .nix-dev/tmp/dbpedia-colbert-token-pooling-focus-10k.md
+```
 
 For SPLADE/SPLATE-style exported sparse vectors, use the explicit sparse
 candidate-source switch:

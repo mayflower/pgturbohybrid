@@ -831,6 +831,11 @@ PgturbohybridGraphLoadMultiVectorDocMapWithStats(Relation index,
 		documentNodes &&
 		(meta->tqMultivectorDocMapFlags &
 		 PGTURBOHYBRID_GRAPH_MULTIVECTOR_DOCMAP_FLAG_QUANTIZED_POSTINGS) != 0;
+	bool		hasQuantizedCodebook =
+		hasQuantizedPostings &&
+		(meta->tqMultivectorDocMapFlags &
+		 PGTURBOHYBRID_GRAPH_MULTIVECTOR_DOCMAP_FLAG_QUANTIZED_CODEBOOK) != 0;
+	bool		quantizedCodebookSeen = false;
 	uint32		centroidPostingCodebookSize =
 		documentNodes ? (uint32) meta->dimensions * 2U : 0;
 	uint32		quantizedPostingCodebookSize =
@@ -928,7 +933,7 @@ PgturbohybridGraphLoadMultiVectorDocMapWithStats(Relation index,
 														   centroidPostingCodebookSize,
 														   "pgturbohybrid multivector centroid posting counts"));
 		}
-		if (hasQuantizedPostings)
+		if (hasQuantizedPostings && !hasQuantizedCodebook)
 			quantizedPostingListCounts =
 				palloc0(PgturbohybridCheckedArrayBytes(sizeof(uint32),
 													   quantizedPostingCodebookSize,
@@ -1317,6 +1322,46 @@ PgturbohybridGraphLoadMultiVectorDocMapWithStats(Relation index,
 				}
 			}
 			else if (type ==
+					 PGTURBOHYBRID_GRAPH_MULTIVECTOR_DOCMAP_QUANTIZED_CODEBOOK_TUPLE_TYPE)
+			{
+				PgturbohybridGraphMultiVectorDocMapQuantizedCodebookTuple tuple =
+					(PgturbohybridGraphMultiVectorDocMapQuantizedCodebookTuple) item;
+
+				if (!documentNodes)
+					PgturbohybridGraphMultiVectorDocMapError(index,
+															 "quantized codebook tuple found in token-node docmap");
+				if (!hasQuantizedPostings || !hasQuantizedCodebook)
+					PgturbohybridGraphMultiVectorDocMapError(index,
+															 "quantized codebook tuple found without quantized posting metadata flag");
+				if (quantizedCodebookSeen)
+					PgturbohybridGraphMultiVectorDocMapError(index,
+															 "duplicate quantized codebook metadata tuple");
+				if (itemSize < MAXALIGN(sizeof(PgturbohybridGraphMultiVectorDocMapQuantizedCodebookTupleData)) ||
+					tuple->magic != PGTURBOHYBRID_GRAPH_MULTIVECTOR_DOCMAP_MAGIC ||
+					tuple->version != PGTURBOHYBRID_GRAPH_MULTIVECTOR_DOCMAP_VERSION ||
+					tuple->dim != (uint32) meta->dimensions ||
+					tuple->codebookSize == 0 ||
+					tuple->topM == 0)
+					PgturbohybridGraphMultiVectorDocMapError(index,
+															 "malformed quantized codebook metadata tuple");
+				quantizedPostingCodebookSize = tuple->codebookSize;
+				storage->multivectorQuantizedInvertedCodebookSource =
+					tuple->source;
+				storage->multivectorQuantizedInvertedCodebookDim = tuple->dim;
+				storage->multivectorQuantizedInvertedCodebookTopM =
+					tuple->topM;
+				strlcpy(storage->multivectorQuantizedInvertedCodebookChecksum,
+						tuple->checksum,
+						sizeof(storage->multivectorQuantizedInvertedCodebookChecksum));
+				oldCtx = MemoryContextSwitchTo(storage->ctx);
+				quantizedPostingListCounts =
+					palloc0(PgturbohybridCheckedArrayBytes(sizeof(uint32),
+														   quantizedPostingCodebookSize,
+														   "pgturbohybrid multivector quantized posting counts"));
+				MemoryContextSwitchTo(oldCtx);
+				quantizedCodebookSeen = true;
+			}
+			else if (type ==
 					 PGTURBOHYBRID_GRAPH_MULTIVECTOR_DOCMAP_QUANTIZED_POSTING_TUPLE_TYPE)
 			{
 				PgturbohybridGraphMultiVectorDocMapQuantizedPostingTuple tuple =
@@ -1329,6 +1374,9 @@ PgturbohybridGraphLoadMultiVectorDocMapWithStats(Relation index,
 				if (!hasQuantizedPostings)
 					PgturbohybridGraphMultiVectorDocMapError(index,
 															 "quantized posting tuple found without posting storage flag");
+				if (quantizedPostingListCounts == NULL)
+					PgturbohybridGraphMultiVectorDocMapError(index,
+															 "quantized posting tuple found before codebook metadata");
 				if (itemSize < offsetof(PgturbohybridGraphMultiVectorDocMapQuantizedPostingTupleData,
 										entries) ||
 					tuple->magic != PGTURBOHYBRID_GRAPH_MULTIVECTOR_DOCMAP_MAGIC ||
@@ -1570,6 +1618,20 @@ PgturbohybridGraphLoadMultiVectorDocMapWithStats(Relation index,
 			uint32	   *docPostingCounts;
 			uint32		expectedPostings = 0;
 
+			if (hasQuantizedCodebook && !quantizedCodebookSeen)
+				PgturbohybridGraphMultiVectorDocMapError(index,
+														 "quantized posting sidecar is missing codebook metadata");
+			if (!hasQuantizedCodebook)
+			{
+				storage->multivectorQuantizedInvertedCodebookSource =
+					PGTURBOHYBRID_MULTIVECTOR_QUANTIZED_INVERTED_CODEBOOK_DETERMINISTIC;
+				storage->multivectorQuantizedInvertedCodebookDim =
+					(uint32) meta->dimensions;
+				storage->multivectorQuantizedInvertedCodebookTopM = 1;
+				strlcpy(storage->multivectorQuantizedInvertedCodebookChecksum,
+						"deterministic",
+						sizeof(storage->multivectorQuantizedInvertedCodebookChecksum));
+			}
 			for (uint32 docId = 0; docId < meta->tqMultivectorDocCount; docId++)
 			{
 				TqMultiVectorDocMapEntry *entry =
@@ -1832,6 +1894,12 @@ PgturbohybridGraphCopyDocSidecarStorage(PgturbohybridGraphScanStorage *dest,
 	dest->multivectorQuantizedInvertedPostings = src->multivectorQuantizedInvertedPostings;
 	dest->multivectorQuantizedInvertedListOffsets = src->multivectorQuantizedInvertedListOffsets;
 	dest->multivectorQuantizedInvertedCodebookSize = src->multivectorQuantizedInvertedCodebookSize;
+	dest->multivectorQuantizedInvertedCodebookDim = src->multivectorQuantizedInvertedCodebookDim;
+	dest->multivectorQuantizedInvertedCodebookTopM = src->multivectorQuantizedInvertedCodebookTopM;
+	dest->multivectorQuantizedInvertedCodebookSource = src->multivectorQuantizedInvertedCodebookSource;
+	strlcpy(dest->multivectorQuantizedInvertedCodebookChecksum,
+			src->multivectorQuantizedInvertedCodebookChecksum,
+			sizeof(dest->multivectorQuantizedInvertedCodebookChecksum));
 	dest->multivectorQuantizedInvertedPostingCount = src->multivectorQuantizedInvertedPostingCount;
 	dest->multivectorDocCount = src->multivectorDocCount;
 	dest->multivectorDocMapBytes = src->multivectorDocMapBytes;

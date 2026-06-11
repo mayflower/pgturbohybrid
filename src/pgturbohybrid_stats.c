@@ -2660,6 +2660,8 @@ pgturbohybrid_last_build_stats(PG_FUNCTION_ARGS)
 								s->multivectorDocSidecarWriteUs);
 	PgturbohybridJsonbAddUint64(&state, "multivector_proxy_build_us",
 								s->multivectorProxyBuildUs);
+	PgturbohybridJsonbAddUint64(&state, "learned_projection_doc_encode_build_us",
+								s->learnedProjectionDocEncodeBuildUs);
 	PgturbohybridJsonbAddUint64(&state, "build_distance_cache_hits",
 								s->buildDistanceCacheHits);
 	PgturbohybridJsonbAddUint64(&state, "build_distance_cache_misses",
@@ -3685,6 +3687,20 @@ pgturbohybrid_last_scan_stats(PG_FUNCTION_ARGS)
 			PgturbohybridJsonbAddString(&state, "proxy_encoder_kind",
 										scanStats.multivectorProxyEncoderKind[0] != '\0' ?
 										scanStats.multivectorProxyEncoderKind : "none");
+			PgturbohybridJsonbAddBool(&state, "learned_projection_loaded",
+									  scanStats.learnedProjectionLoaded);
+			PgturbohybridJsonbAddInt64(&state, "learned_projection_dim",
+									   scanStats.learnedProjectionDim);
+			PgturbohybridJsonbAddUint64(&state, "learned_projection_weight_bytes",
+										scanStats.learnedProjectionWeightBytes);
+			PgturbohybridJsonbAddString(&state, "learned_projection_model",
+										scanStats.learnedProjectionModel[0] != '\0' ?
+										scanStats.learnedProjectionModel : "");
+			PgturbohybridJsonbAddString(&state, "learned_projection_checksum",
+										scanStats.learnedProjectionChecksum[0] != '\0' ?
+										scanStats.learnedProjectionChecksum : "");
+			PgturbohybridJsonbAddUint64(&state, "learned_projection_query_encode_us",
+										scanStats.learnedProjectionQueryEncodeUs);
 		PgturbohybridJsonbAddInt64(&state, "proxy_candidate_limit_effective",
 								   scanStats.proxyCandidateLimitEffective);
 		PgturbohybridJsonbAddString(&state, "proxy_candidate_limit_source",
@@ -3776,6 +3792,18 @@ pgturbohybrid_last_scan_stats(PG_FUNCTION_ARGS)
 								scanStats.centroidPostingCapStrategy : "none");
 	PgturbohybridJsonbAddInt64(&state, "centroid_candidates",
 							   scanStats.centroidCandidates);
+	PgturbohybridJsonbAddBool(&state, "centroid_bitset_prefilter_enabled",
+							  scanStats.centroidBitsetPrefilterEnabled);
+	PgturbohybridJsonbAddInt64(&state, "centroid_bitset_lists_used",
+							   scanStats.centroidBitsetListsUsed);
+	PgturbohybridJsonbAddInt64(&state, "centroid_bitset_docs_set",
+							   scanStats.centroidBitsetDocsSet);
+	PgturbohybridJsonbAddInt64(&state, "centroid_bitset_docs_after_threshold",
+							   scanStats.centroidBitsetDocsAfterThreshold);
+	PgturbohybridJsonbAddUint64(&state, "centroid_bitset_prefilter_time_us",
+								scanStats.centroidBitsetPrefilterUs);
+	PgturbohybridJsonbAddUint64(&state, "centroid_bitset_memory_bytes",
+								scanStats.centroidBitsetMemoryBytes);
 	PgturbohybridJsonbAddInt64(&state, "multivector_centroid_count",
 							   scanStats.multivectorCentroidCount);
 	PgturbohybridJsonbAddInt64(&state, "multivector_centroid_prerank_docs",
@@ -3792,8 +3820,20 @@ pgturbohybrid_last_scan_stats(PG_FUNCTION_ARGS)
 							   scanStats.quantizedInvertedCandidates);
 	PgturbohybridJsonbAddInt64(&state, "quantized_inverted_exact_rerank_docs",
 							   scanStats.quantizedInvertedExactRerankDocs);
+	PgturbohybridJsonbAddString(&state, "quantized_inverted_codebook_source",
+								scanStats.quantizedInvertedCodebookSource[0] != '\0' ?
+								scanStats.quantizedInvertedCodebookSource :
+								"deterministic");
 	PgturbohybridJsonbAddInt64(&state, "quantized_inverted_codebook_size",
 							   scanStats.quantizedInvertedCodebookSize);
+	PgturbohybridJsonbAddInt64(&state, "quantized_inverted_codebook_dim",
+							   scanStats.quantizedInvertedCodebookDim);
+	PgturbohybridJsonbAddString(&state, "quantized_inverted_codebook_checksum",
+								scanStats.quantizedInvertedCodebookChecksum);
+	PgturbohybridJsonbAddInt64(&state, "quantized_inverted_codebook_top_m",
+							   scanStats.quantizedInvertedCodebookTopM);
+	PgturbohybridJsonbAddUint64(&state, "quantized_inverted_assignment_us",
+								scanStats.quantizedInvertedAssignmentUs);
 	PgturbohybridJsonbAddUint64(&state, "quantized_inverted_list_offset_bytes",
 								scanStats.quantizedInvertedListOffsetBytes);
 	PgturbohybridJsonbAddUint64(&state, "quantized_inverted_posting_bytes",

@@ -200,6 +200,12 @@ typedef struct PgturbohybridScanStatsSnapshot
 	char		multivectorCandidateSource[48];
 	char		multivectorCandidatePath[48];
 	char		multivectorProxyEncoderKind[32];
+	bool		learnedProjectionLoaded;
+	uint32		learnedProjectionDim;
+	uint64		learnedProjectionWeightBytes;
+	char		learnedProjectionModel[128];
+	char		learnedProjectionChecksum[128];
+	uint64		learnedProjectionQueryEncodeUs;
 	char		multivectorGraphMode[24];
 	uint64		multivectorProxyGraphSearches;
 	bool		multivectorExactTokenScanEnabled;
@@ -271,6 +277,12 @@ typedef struct PgturbohybridScanStatsSnapshot
 	uint32		centroidPostingLimitPerToken;
 	char		centroidPostingCapStrategy[32];
 	uint32		centroidCandidates;
+	bool		centroidBitsetPrefilterEnabled;
+	uint32		centroidBitsetListsUsed;
+	uint32		centroidBitsetDocsSet;
+	uint32		centroidBitsetDocsAfterThreshold;
+	uint64		centroidBitsetPrefilterUs;
+	uint64		centroidBitsetMemoryBytes;
 	uint32		multivectorCentroidCount;
 	uint32		multivectorCentroidPrerankDocs;
 	uint32		multivectorFullMaxsimRerankDocs;
@@ -279,7 +291,12 @@ typedef struct PgturbohybridScanStatsSnapshot
 	uint64		quantizedInvertedDocsScored;
 	uint32		quantizedInvertedCandidates;
 	uint32		quantizedInvertedExactRerankDocs;
+	char		quantizedInvertedCodebookSource[16];
 	uint32		quantizedInvertedCodebookSize;
+	uint32		quantizedInvertedCodebookDim;
+	char		quantizedInvertedCodebookChecksum[128];
+	uint32		quantizedInvertedCodebookTopM;
+	uint64		quantizedInvertedAssignmentUs;
 	uint64		quantizedInvertedListOffsetBytes;
 	uint64		quantizedInvertedPostingBytes;
 	uint64		quantizedInvertedSidecarBytes;
@@ -442,6 +459,9 @@ extern int	pgturbohybrid_multivector_doc_storage_cache;
 extern int	pgturbohybrid_multivector_exact_rerank;
 extern int	pgturbohybrid_multivector_exact_rerank_k;
 extern int	pgturbohybrid_multivector_proxy_encoder;
+extern char *pgturbohybrid_multivector_learned_projection_path;
+extern char *pgturbohybrid_multivector_learned_projection_model;
+extern char *pgturbohybrid_multivector_learned_projection_checksum;
 extern bool pgturbohybrid_multivector_allow_exact_symmetric_build;
 extern int	pgturbohybrid_multivector_exact_symmetric_build_max_docs;
 extern int	pgturbohybrid_multivector_max_accumulator_mb;
@@ -459,6 +479,10 @@ extern int	pgturbohybrid_multivector_bm25_candidate_injection;
 extern int	pgturbohybrid_multivector_sparse_candidate_source;
 extern int	pgturbohybrid_multivector_branch_plan;
 extern int	pgturbohybrid_multivector_centroid_lite_max_postings_per_token;
+extern int	pgturbohybrid_multivector_centroid_lite_bitset_prefilter;
+extern int	pgturbohybrid_multivector_quantized_inverted_codebook;
+extern char *pgturbohybrid_multivector_quantized_inverted_codebook_path;
+extern int	pgturbohybrid_multivector_quantized_inverted_codebook_top_m;
 
 typedef enum PgturbohybridMultiVectorExactRerankMode
 {
@@ -466,6 +490,12 @@ typedef enum PgturbohybridMultiVectorExactRerankMode
 	PGTURBOHYBRID_MULTIVECTOR_EXACT_RERANK_TOPK,
 	PGTURBOHYBRID_MULTIVECTOR_EXACT_RERANK_ADAPTIVE
 }			PgturbohybridMultiVectorExactRerankMode;
+
+typedef enum PgturbohybridMultiVectorCentroidLiteBitsetPrefilterMode
+{
+	PGTURBOHYBRID_MULTIVECTOR_CENTROID_LITE_BITSET_PREFILTER_OFF,
+	PGTURBOHYBRID_MULTIVECTOR_CENTROID_LITE_BITSET_PREFILTER_EXPERIMENTAL
+}			PgturbohybridMultiVectorCentroidLiteBitsetPrefilterMode;
 
 typedef enum PgturbohybridMultiVectorAdaptiveWideningMode
 {
@@ -513,6 +543,12 @@ typedef enum PgturbohybridMultiVectorCandidateSource
 	PGTURBOHYBRID_MULTIVECTOR_CANDIDATE_SOURCE_CENTROID_LITE,
 	PGTURBOHYBRID_MULTIVECTOR_CANDIDATE_SOURCE_QUANTIZED_INVERTED_EXPERIMENTAL
 }			PgturbohybridMultiVectorCandidateSource;
+
+typedef enum PgturbohybridMultiVectorQuantizedInvertedCodebookSource
+{
+	PGTURBOHYBRID_MULTIVECTOR_QUANTIZED_INVERTED_CODEBOOK_DETERMINISTIC,
+	PGTURBOHYBRID_MULTIVECTOR_QUANTIZED_INVERTED_CODEBOOK_EXTERNAL
+}			PgturbohybridMultiVectorQuantizedInvertedCodebookSource;
 
 typedef enum PgturbohybridMultiVectorPlainFallbackMode
 {

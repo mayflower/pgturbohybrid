@@ -26,6 +26,7 @@
 #include "port/pg_bitutils.h"
 #include "portability/instr_time.h"
 #include "storage/bufmgr.h"
+#include "storage/fd.h"
 #include "storage/barrier.h"
 #include "storage/condition_variable.h"
 #include "storage/lmgr.h"
@@ -55,6 +56,7 @@
 #include "pgturbohybrid_vector_compat.h"
 
 typedef struct PgturbohybridNativeParallelShared PgturbohybridNativeParallelShared;
+typedef struct PgturbohybridQuantizedInvertedCodebook PgturbohybridQuantizedInvertedCodebook;
 
 static int	PgturbohybridGraphResultCompare(const void *a, const void *b);
 static int	PgturbohybridGraphScanAdjSlot(PgturbohybridGraphMetaPageData *meta,
@@ -92,8 +94,13 @@ static double PgturbohybridMultiVectorIndexMaxSim(Relation index,
 												  const float4 *queryWeights,
 												  const bool *queryMask);
 static bool PgturbohybridGraphMultiVectorDocMapHasContexts(PgturbohybridQuantBuildState *state);
-static uint32 PgturbohybridMultiVectorQuantizedInvertedCodeword(const PgturbohybridMultiVector *mv,
-												  int32 token);
+static const char *PgturbohybridQuantizedInvertedCodebookSourceName(int source);
+static PgturbohybridQuantizedInvertedCodebook *PgturbohybridLoadQuantizedInvertedCodebook(int32 dim);
+static uint32 PgturbohybridMultiVectorDeterministicCodeword(const PgturbohybridMultiVector *mv,
+											 int32 token);
+static uint32 PgturbohybridMultiVectorQuantizedInvertedConfigurableCodeword(const PgturbohybridMultiVector *mv,
+															 int32 token,
+															 uint64 *assignmentUs);
 static uint16 PgturbohybridMultiVectorQuantizedInvertedScorePayload(const PgturbohybridMultiVector *mv,
 												  int32 token);
 
@@ -139,6 +146,19 @@ typedef struct PgturbohybridNativeParallelEdgeNode
 	int			level;
 	int32		payloads[PGTURBOHYBRID_GRAPH_MAX_PAYLOADS];
 } PgturbohybridNativeParallelEdgeNode;
+
+typedef struct PgturbohybridQuantizedInvertedCodebook
+{
+	char	   *path;
+	char	   *checksum;
+	int32		dim;
+	uint32		codebookSize;
+	uint32		topM;
+	Size		valueBytes;
+	float	   *values;
+} PgturbohybridQuantizedInvertedCodebook;
+
+static PgturbohybridQuantizedInvertedCodebook *pgturbohybrid_quantized_inverted_codebook_cache = NULL;
 
 typedef struct PgturbohybridNativeParallelShared
 {
@@ -1543,7 +1563,14 @@ PgturbohybridGraphAppendBuildMultiVectorDocument(PgturbohybridQuantBuildState *s
 															  state->multivectorProxyEncoder,
 															  state->multivectorCentroidCount,
 															  state->buildTupleCtx);
-	state->multivectorProxyBuildUs += PgturbohybridGraphElapsedUs(proxyStart);
+	{
+		uint64		proxyEncodeUs = PgturbohybridGraphElapsedUs(proxyStart);
+
+		state->multivectorProxyBuildUs += proxyEncodeUs;
+		if (state->multivectorProxyEncoder ==
+			PGTURBOHYBRID_MULTIVECTOR_PROXY_ENCODER_LEARNED_PROJECTION_V1)
+			state->learnedProjectionDocEncodeBuildUs += proxyEncodeUs;
+	}
 	nodeId = PgturbohybridGraphAppendBuildNode(state, tid,
 											   PointerGetDatum(vector),
 											   values, isnull);
@@ -4610,8 +4637,12 @@ PgturbohybridQuantInitMetaUpdateFromBuild(PgturbohybridQuantBuildState *state,
 	if (BlockNumberIsValid(docMapStart) &&
 		state->multivectorGraphMode ==
 		PGTURBOHYBRID_MULTIVECTOR_GRAPH_DOCUMENT_NODES)
+	{
 		update->tqMultivectorDocMapFlags |=
 			PGTURBOHYBRID_GRAPH_MULTIVECTOR_DOCMAP_FLAG_QUANTIZED_POSTINGS;
+		update->tqMultivectorDocMapFlags |=
+			PGTURBOHYBRID_GRAPH_MULTIVECTOR_DOCMAP_FLAG_QUANTIZED_CODEBOOK;
+	}
 	if (BlockNumberIsValid(docMapStart) &&
 		state->multivectorGraphMode ==
 		PGTURBOHYBRID_MULTIVECTOR_GRAPH_DOCUMENT_NODES &&
@@ -5174,8 +5205,8 @@ PgturbohybridGraphWriteMultiVectorCentroidPostingTuples(PgturbohybridQuantBuildS
 		for (int32 centroid = 0; centroid < centroids->count; centroid++)
 		{
 			uint32		codeword =
-				PgturbohybridMultiVectorQuantizedInvertedCodeword(centroids,
-																  centroid);
+				PgturbohybridMultiVectorDeterministicCodeword(centroids,
+															  centroid);
 
 			listCounts[codeword]++;
 			totalPostings++;
@@ -5205,8 +5236,8 @@ PgturbohybridGraphWriteMultiVectorCentroidPostingTuples(PgturbohybridQuantBuildS
 		for (int32 centroid = 0; centroid < centroids->count; centroid++)
 		{
 			uint32		codeword =
-				PgturbohybridMultiVectorQuantizedInvertedCodeword(centroids,
-																  centroid);
+				PgturbohybridMultiVectorDeterministicCodeword(centroids,
+															  centroid);
 			uint32		offset = listWrite[codeword]++;
 
 			postings[offset].docId = docId;
@@ -5275,12 +5306,18 @@ PgturbohybridGraphWriteMultiVectorQuantizedInvertedPostingTuples(PgturbohybridQu
 																 uint32 *docMapBytes)
 {
 	uint32		codebookSize;
+	uint32		codebookTopM = 1;
+	int			codebookSource =
+		pgturbohybrid_multivector_quantized_inverted_codebook;
+	const char *codebookChecksum = "deterministic";
 	uint32	   *listCounts;
 	uint32	   *listOffsets;
 	uint32	   *listWrite;
 	PgturbohybridGraphMultiVectorQuantizedPostingEntry *postings;
 	uint32		totalPostings = 0;
 	uint16		maxPostingCount;
+	Size		codebookTupleSize;
+	PgturbohybridGraphMultiVectorDocMapQuantizedCodebookTuple codebookTuple;
 
 	if (state->multivectorGraphMode !=
 		PGTURBOHYBRID_MULTIVECTOR_GRAPH_DOCUMENT_NODES ||
@@ -5288,7 +5325,25 @@ PgturbohybridGraphWriteMultiVectorQuantizedInvertedPostingTuples(PgturbohybridQu
 		state->dimensions <= 0)
 		return;
 
-	codebookSize = (uint32) state->dimensions * 2U;
+	if (codebookSource ==
+		PGTURBOHYBRID_MULTIVECTOR_QUANTIZED_INVERTED_CODEBOOK_EXTERNAL)
+	{
+		PgturbohybridQuantizedInvertedCodebook *codebook =
+			PgturbohybridLoadQuantizedInvertedCodebook(state->dimensions);
+
+		codebookSize = codebook->codebookSize;
+		codebookTopM = codebook->topM;
+		codebookChecksum = codebook->checksum;
+	}
+	else
+	{
+		if (pgturbohybrid_multivector_quantized_inverted_codebook_top_m != 1)
+			ereport(ERROR,
+					(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
+					 errmsg("quantized_inverted_experimental deterministic codebook top_m values greater than 1 are not supported yet"),
+					 errhint("Set turbohybrid.multivector_quantized_inverted_codebook_top_m = 1 until a versioned multi-posting sidecar format is available.")));
+		codebookSize = (uint32) state->dimensions * 2U;
+	}
 	listCounts = palloc0(sizeof(uint32) * (Size) codebookSize);
 	listOffsets = palloc0(sizeof(uint32) * ((Size) codebookSize + 1));
 	listWrite = palloc0(sizeof(uint32) * (Size) codebookSize);
@@ -5310,7 +5365,9 @@ PgturbohybridGraphWriteMultiVectorQuantizedInvertedPostingTuples(PgturbohybridQu
 		for (int32 token = 0; token < doc->count; token++)
 		{
 			uint32		codeword =
-				PgturbohybridMultiVectorQuantizedInvertedCodeword(doc, token);
+				PgturbohybridMultiVectorQuantizedInvertedConfigurableCodeword(doc,
+																			  token,
+																			  NULL);
 
 			listCounts[codeword]++;
 			totalPostings++;
@@ -5340,7 +5397,9 @@ PgturbohybridGraphWriteMultiVectorQuantizedInvertedPostingTuples(PgturbohybridQu
 		for (int32 token = 0; token < doc->count; token++)
 		{
 			uint32		codeword =
-				PgturbohybridMultiVectorQuantizedInvertedCodeword(doc, token);
+				PgturbohybridMultiVectorQuantizedInvertedConfigurableCodeword(doc,
+																			  token,
+																			  NULL);
 			uint32		offset = listWrite[codeword]++;
 
 			postings[offset].docId = docId;
@@ -5350,6 +5409,30 @@ PgturbohybridGraphWriteMultiVectorQuantizedInvertedPostingTuples(PgturbohybridQu
 																	  token);
 		}
 	}
+
+	codebookTupleSize =
+		MAXALIGN(sizeof(PgturbohybridGraphMultiVectorDocMapQuantizedCodebookTupleData));
+	codebookTuple = palloc0(codebookTupleSize);
+	codebookTuple->type =
+		PGTURBOHYBRID_GRAPH_MULTIVECTOR_DOCMAP_QUANTIZED_CODEBOOK_TUPLE_TYPE;
+	codebookTuple->version = PGTURBOHYBRID_GRAPH_MULTIVECTOR_DOCMAP_VERSION;
+	codebookTuple->source = (uint16) codebookSource;
+	codebookTuple->magic = PGTURBOHYBRID_GRAPH_MULTIVECTOR_DOCMAP_MAGIC;
+	codebookTuple->dim = (uint32) state->dimensions;
+	codebookTuple->codebookSize = codebookSize;
+	codebookTuple->topM = codebookTopM;
+	strlcpy(codebookTuple->checksum, codebookChecksum,
+			sizeof(codebookTuple->checksum));
+	PgturbohybridGraphWriteMultiVectorDocMapItem(state, buf, page,
+												 start, pageCount,
+												 (Item) codebookTuple,
+												 codebookTupleSize);
+	if (codebookTupleSize > UINT32_MAX - *docMapBytes)
+		ereport(ERROR,
+				(errcode(ERRCODE_PROGRAM_LIMIT_EXCEEDED),
+				 errmsg("pgturbohybrid multivector docmap sidecar is too large")));
+	*docMapBytes += (uint32) codebookTupleSize;
+	pfree(codebookTuple);
 
 	maxPostingCount =
 		PgturbohybridGraphMultiVectorDocMapQuantizedPostingTupleMaxCount();
@@ -6856,6 +6939,8 @@ tqgraphbuild(Relation heap, Relation index, IndexInfo *indexInfo)
 		buildStats.multivectorCentroidBuildVectors =
 			state.multivectorCentroidBuildVectors;
 		buildStats.multivectorProxyBuildUs = state.multivectorProxyBuildUs;
+		buildStats.learnedProjectionDocEncodeBuildUs =
+			state.learnedProjectionDocEncodeBuildUs;
 		buildStats.multivectorDocSidecarWriteUs =
 			state.multivectorDocSidecarWriteUs;
 		buildStats.multivectorCentroidSidecarWriteUs =
@@ -13203,8 +13288,8 @@ PgturbohybridMultiVectorDocumentGraphTraverse(Relation index,
 }
 
 static uint32
-PgturbohybridMultiVectorQuantizedInvertedCodeword(const PgturbohybridMultiVector *mv,
-												  int32 token)
+PgturbohybridMultiVectorDeterministicCodeword(const PgturbohybridMultiVector *mv,
+											  int32 token)
 {
 	const float *values;
 	double		bestAbs = -1.0;
@@ -13226,6 +13311,193 @@ PgturbohybridMultiVectorQuantizedInvertedCodeword(const PgturbohybridMultiVector
 	}
 
 	return (uint32) bestDim * 2U + (negative ? 1U : 0U);
+}
+
+static bool
+PgturbohybridQuantizedInvertedStringIsEmpty(const char *value)
+{
+	return value == NULL || value[0] == '\0';
+}
+
+static const char *
+PgturbohybridQuantizedInvertedCodebookSourceName(int source)
+{
+	switch (source)
+	{
+		case PGTURBOHYBRID_MULTIVECTOR_QUANTIZED_INVERTED_CODEBOOK_EXTERNAL:
+			return "external";
+		case PGTURBOHYBRID_MULTIVECTOR_QUANTIZED_INVERTED_CODEBOOK_DETERMINISTIC:
+		default:
+			return "deterministic";
+	}
+}
+
+static void
+PgturbohybridFreeQuantizedInvertedCodebookCache(void)
+{
+	if (pgturbohybrid_quantized_inverted_codebook_cache == NULL)
+		return;
+	pfree(pgturbohybrid_quantized_inverted_codebook_cache->path);
+	pfree(pgturbohybrid_quantized_inverted_codebook_cache->checksum);
+	pfree(pgturbohybrid_quantized_inverted_codebook_cache->values);
+	pfree(pgturbohybrid_quantized_inverted_codebook_cache);
+	pgturbohybrid_quantized_inverted_codebook_cache = NULL;
+}
+
+static PgturbohybridQuantizedInvertedCodebook *
+PgturbohybridLoadQuantizedInvertedCodebook(int32 dim)
+{
+	FILE	   *file;
+	char		magic[64];
+	char		checksum[128];
+	int			headerDim;
+	unsigned int codebookSize;
+	Size		valueCount;
+	Size		valueBytes;
+	MemoryContext oldCtx;
+	PgturbohybridQuantizedInvertedCodebook *loaded;
+
+	if (pgturbohybrid_multivector_quantized_inverted_codebook_top_m != 1)
+		ereport(ERROR,
+				(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
+				 errmsg("quantized_inverted_experimental codebook top_m values greater than 1 are not supported yet"),
+				 errhint("Set turbohybrid.multivector_quantized_inverted_codebook_top_m = 1 until a versioned multi-posting sidecar format is available.")));
+	if (PgturbohybridQuantizedInvertedStringIsEmpty(pgturbohybrid_multivector_quantized_inverted_codebook_path))
+		ereport(ERROR,
+				(errcode(ERRCODE_CONFIG_FILE_ERROR),
+				 errmsg("external quantized_inverted_experimental codebook requires a configured codebook path"),
+				 errhint("Set turbohybrid.multivector_quantized_inverted_codebook_path to a text file, or use turbohybrid.multivector_quantized_inverted_codebook = deterministic.")));
+	if (pgturbohybrid_quantized_inverted_codebook_cache != NULL &&
+		strcmp(pgturbohybrid_quantized_inverted_codebook_cache->path,
+			   pgturbohybrid_multivector_quantized_inverted_codebook_path) == 0)
+	{
+		if (pgturbohybrid_quantized_inverted_codebook_cache->dim != dim)
+			ereport(ERROR,
+					(errcode(ERRCODE_DATA_EXCEPTION),
+					 errmsg("quantized_inverted_experimental codebook dimension mismatch"),
+					 errdetail("Codebook dimension is %d but multivector dimension is %d.",
+							   pgturbohybrid_quantized_inverted_codebook_cache->dim,
+							   dim)));
+		return pgturbohybrid_quantized_inverted_codebook_cache;
+	}
+
+	file = AllocateFile(pgturbohybrid_multivector_quantized_inverted_codebook_path,
+						"r");
+	if (file == NULL)
+		ereport(ERROR,
+				(errcode_for_file_access(),
+				 errmsg("could not open quantized_inverted_experimental codebook file \"%s\": %m",
+						pgturbohybrid_multivector_quantized_inverted_codebook_path)));
+	if (fscanf(file, "%63s %d %u %127s",
+			   magic, &headerDim, &codebookSize, checksum) != 4)
+	{
+		FreeFile(file);
+		ereport(ERROR,
+				(errcode(ERRCODE_INVALID_TEXT_REPRESENTATION),
+				 errmsg("invalid quantized_inverted_experimental codebook header"),
+				 errdetail("Expected: pgturbohybrid_quantized_inverted_codebook_v1 <dim> <codebook_size> <checksum>.")));
+	}
+	if (strcmp(magic, "pgturbohybrid_quantized_inverted_codebook_v1") != 0)
+	{
+		FreeFile(file);
+		ereport(ERROR,
+				(errcode(ERRCODE_INVALID_TEXT_REPRESENTATION),
+				 errmsg("invalid quantized_inverted_experimental codebook magic \"%s\"",
+						magic)));
+	}
+	if (headerDim <= 0 || headerDim != dim || codebookSize == 0)
+	{
+		FreeFile(file);
+		ereport(ERROR,
+				(errcode(ERRCODE_DATA_EXCEPTION),
+				 errmsg("quantized_inverted_experimental codebook dimensions do not match multivector dimension"),
+				 errdetail("Codebook declares dim=%d codebook_size=%u, but multivector dimension is %d.",
+						   headerDim, codebookSize, dim)));
+	}
+	valueCount = (Size) headerDim * (Size) codebookSize;
+	if (codebookSize > PG_UINT32_MAX ||
+		valueCount > (Size) (MaxAllocSize / sizeof(float)))
+	{
+		FreeFile(file);
+		ereport(ERROR,
+				(errcode(ERRCODE_PROGRAM_LIMIT_EXCEEDED),
+				 errmsg("quantized_inverted_experimental codebook is too large")));
+	}
+	valueBytes = valueCount * sizeof(float);
+	oldCtx = MemoryContextSwitchTo(TopMemoryContext);
+	loaded = palloc0(sizeof(PgturbohybridQuantizedInvertedCodebook));
+	loaded->path =
+		pstrdup(pgturbohybrid_multivector_quantized_inverted_codebook_path);
+	loaded->checksum = pstrdup(checksum);
+	loaded->dim = headerDim;
+	loaded->codebookSize = (uint32) codebookSize;
+	loaded->topM = 1;
+	loaded->valueBytes = valueBytes;
+	loaded->values = palloc0(valueBytes);
+	MemoryContextSwitchTo(oldCtx);
+
+	for (Size i = 0; i < valueCount; i++)
+	{
+		double		value;
+
+		if (fscanf(file, "%lf", &value) != 1)
+		{
+			FreeFile(file);
+			PgturbohybridFreeQuantizedInvertedCodebookCache();
+			pfree(loaded->path);
+			pfree(loaded->checksum);
+			pfree(loaded->values);
+			pfree(loaded);
+			ereport(ERROR,
+					(errcode(ERRCODE_INVALID_TEXT_REPRESENTATION),
+					 errmsg("quantized_inverted_experimental codebook file ended before all values were read")));
+		}
+		loaded->values[i] = (float) value;
+	}
+	FreeFile(file);
+	PgturbohybridFreeQuantizedInvertedCodebookCache();
+	pgturbohybrid_quantized_inverted_codebook_cache = loaded;
+	return loaded;
+}
+
+static uint32
+PgturbohybridMultiVectorQuantizedInvertedConfigurableCodeword(const PgturbohybridMultiVector *mv,
+															 int32 token,
+															 uint64 *assignmentUs)
+{
+	if (pgturbohybrid_multivector_quantized_inverted_codebook ==
+		PGTURBOHYBRID_MULTIVECTOR_QUANTIZED_INVERTED_CODEBOOK_EXTERNAL)
+	{
+		PgturbohybridQuantizedInvertedCodebook *codebook;
+		const float *values;
+		double		best = -DBL_MAX;
+		uint32		bestCodeword = 0;
+		instr_time	start;
+
+		if (assignmentUs != NULL)
+			INSTR_TIME_SET_CURRENT(start);
+		codebook = PgturbohybridLoadQuantizedInvertedCodebook(mv->dim);
+		values = PgturbohybridMultiVectorValues(mv, token);
+		for (uint32 codeword = 0; codeword < codebook->codebookSize;
+			 codeword++)
+		{
+			const float *centroid =
+				&codebook->values[(Size) codeword * (Size) mv->dim];
+			double		dot = 0.0;
+
+			for (int32 dim = 0; dim < mv->dim; dim++)
+				dot += (double) values[dim] * (double) centroid[dim];
+			if (dot > best)
+			{
+				best = dot;
+				bestCodeword = codeword;
+			}
+		}
+		if (assignmentUs != NULL)
+			PgturbohybridGraphAddElapsedUint64(assignmentUs, start);
+		return bestCodeword;
+	}
+	return PgturbohybridMultiVectorDeterministicCodeword(mv, token);
 }
 
 static uint16
@@ -13323,6 +13595,10 @@ PgturbohybridMultiVectorDocumentNodeScan(IndexScanDesc scan,
 	bool		centroidLite =
 		pgturbohybrid_multivector_candidate_source ==
 		PGTURBOHYBRID_MULTIVECTOR_CANDIDATE_SOURCE_CENTROID_LITE;
+	bool		centroidBitsetPrefilter =
+		centroidLite &&
+		pgturbohybrid_multivector_centroid_lite_bitset_prefilter ==
+		PGTURBOHYBRID_MULTIVECTOR_CENTROID_LITE_BITSET_PREFILTER_EXPERIMENTAL;
 	bool		quantizedInvertedExperimental =
 		pgturbohybrid_multivector_candidate_source ==
 		PGTURBOHYBRID_MULTIVECTOR_CANDIDATE_SOURCE_QUANTIZED_INVERTED_EXPERIMENTAL;
@@ -13351,6 +13627,11 @@ PgturbohybridMultiVectorDocumentNodeScan(IndexScanDesc scan,
 					 0);
 	const char *centroidPostingCapStrategy = "none";
 	uint32		centroidCandidates = 0;
+	uint32		centroidBitsetListsUsed = 0;
+	uint32		centroidBitsetDocsSet = 0;
+	uint32		centroidBitsetDocsAfterThreshold = 0;
+	uint64		centroidBitsetPrefilterUs = 0;
+	uint64		centroidBitsetMemoryBytes = 0;
 	uint32		centroidCountEffective = 0;
 	uint32		centroidPrerankDocs = 0;
 	uint64		quantizedInvertedListsVisited = 0;
@@ -13408,8 +13689,10 @@ PgturbohybridMultiVectorDocumentNodeScan(IndexScanDesc scan,
 	uint64		proxyCandidateUs = 0;
 	uint64		proxyGraphTraversalUs = 0;
 	uint64		proxyScoringUs = 0;
+	uint64		learnedProjectionQueryEncodeUs = 0;
 	uint64		centroidLitePostingUs = 0;
 	uint64		quantizedInvertedPostingUs = 0;
+	uint64		quantizedInvertedAssignmentUs = 0;
 	uint64		sidecarLoadUs = 0;
 	uint64		finalSortUs = 0;
 	instr_time	candidateSourceStart;
@@ -13679,14 +13962,77 @@ PgturbohybridMultiVectorDocumentNodeScan(IndexScanDesc scan,
 				(errcode(ERRCODE_INDEX_CORRUPTED),
 				 errmsg("quantized_inverted_experimental posting sidecar is not loaded"),
 				 errhint("REINDEX with multivector_graph = document_nodes to rebuild experimental quantized inverted posting tuples.")));
+	if (quantizedInvertedExperimental)
+	{
+		int			requestedSource =
+			pgturbohybrid_multivector_quantized_inverted_codebook;
+
+		if (storage.multivectorQuantizedInvertedCodebookSource !=
+			requestedSource)
+			ereport(ERROR,
+					(errcode(ERRCODE_INDEX_CORRUPTED),
+					 errmsg("quantized_inverted_experimental codebook metadata mismatch"),
+					 errdetail("Index was built with codebook source \"%s\", but the active setting is \"%s\".",
+							   PgturbohybridQuantizedInvertedCodebookSourceName(storage.multivectorQuantizedInvertedCodebookSource),
+							   PgturbohybridQuantizedInvertedCodebookSourceName(requestedSource)),
+					 errhint("REINDEX with matching turbohybrid.multivector_quantized_inverted_codebook settings, or reset the GUCs to match the existing experimental sidecar.")));
+		if (storage.multivectorQuantizedInvertedCodebookTopM != 1)
+			ereport(ERROR,
+					(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
+					 errmsg("quantized_inverted_experimental sidecar uses unsupported codebook top_m"),
+					 errhint("REINDEX with turbohybrid.multivector_quantized_inverted_codebook_top_m = 1.")));
+		if (requestedSource ==
+			PGTURBOHYBRID_MULTIVECTOR_QUANTIZED_INVERTED_CODEBOOK_EXTERNAL)
+		{
+			PgturbohybridQuantizedInvertedCodebook *codebook =
+				PgturbohybridLoadQuantizedInvertedCodebook(query->dim);
+
+			if (storage.multivectorQuantizedInvertedCodebookDim !=
+				(uint32) query->dim ||
+				storage.multivectorQuantizedInvertedCodebookSize !=
+				codebook->codebookSize ||
+				storage.multivectorQuantizedInvertedCodebookTopM !=
+				codebook->topM ||
+				strcmp(storage.multivectorQuantizedInvertedCodebookChecksum,
+					   codebook->checksum) != 0)
+				ereport(ERROR,
+						(errcode(ERRCODE_INDEX_CORRUPTED),
+						 errmsg("quantized_inverted_experimental codebook metadata mismatch"),
+						 errdetail("Index metadata is dim=%u size=%u top_m=%u checksum=\"%s\", but the active external codebook is dim=%d size=%u top_m=%u checksum=\"%s\".",
+								   storage.multivectorQuantizedInvertedCodebookDim,
+								   storage.multivectorQuantizedInvertedCodebookSize,
+								   storage.multivectorQuantizedInvertedCodebookTopM,
+								   storage.multivectorQuantizedInvertedCodebookChecksum,
+								   codebook->dim,
+								   codebook->codebookSize,
+								   codebook->topM,
+								   codebook->checksum),
+						 errhint("REINDEX with the current external codebook, or restore the codebook file used to build this experimental sidecar.")));
+		}
+		else if (storage.multivectorQuantizedInvertedCodebookDim !=
+				 (uint32) query->dim ||
+				 storage.multivectorQuantizedInvertedCodebookSize !=
+				 (uint32) query->dim * 2U)
+			ereport(ERROR,
+					(errcode(ERRCODE_INDEX_CORRUPTED),
+					 errmsg("quantized_inverted_experimental deterministic codebook metadata mismatch"),
+					 errhint("REINDEX with multivector_graph = document_nodes to rebuild experimental quantized inverted posting tuples.")));
+	}
 	PgturbohybridMultiVectorDocTokenTotals(&storage, &originalTokens,
 										   &pooledTokens);
 	if (proxyGraph)
 	{
+		if (collectPhaseStats)
+			INSTR_TIME_SET_CURRENT(subphaseStart);
 		proxyQuery =
 			PgturbohybridMultiVectorBuildQueryProxyVector(query,
 														  proxyEncoder,
 														  resultCtx);
+		if (collectPhaseStats &&
+			proxyEncoder ==
+			PGTURBOHYBRID_MULTIVECTOR_PROXY_ENCODER_LEARNED_PROJECTION_V1)
+			learnedProjectionQueryEncodeUs =
+				PgturbohybridGraphElapsedUs(subphaseStart);
 		PgturbohybridGraphPrepareTqQueryWithBits(scan->indexRelation,
 												 &so->support,
 												 PointerGetDatum(proxyQuery),
@@ -13840,7 +14186,9 @@ PgturbohybridMultiVectorDocumentNodeScan(IndexScanDesc scan,
 			codebookSize = storage.multivectorQuantizedInvertedCodebookSize;
 			postings = storage.multivectorQuantizedInvertedPostings;
 			listOffsets = storage.multivectorQuantizedInvertedListOffsets;
-			if (codebookSize != (uint32) query->dim * 2U ||
+			if (codebookSize == 0 ||
+				storage.multivectorQuantizedInvertedCodebookDim !=
+				(uint32) query->dim ||
 				postings == NULL ||
 				listOffsets == NULL)
 				ereport(ERROR,
@@ -13879,8 +14227,9 @@ PgturbohybridMultiVectorDocumentNodeScan(IndexScanDesc scan,
 				if (queryMask != NULL && queryMask[qi])
 					continue;
 				queryCodeword =
-					PgturbohybridMultiVectorQuantizedInvertedCodeword(query,
-																	  qi);
+					PgturbohybridMultiVectorQuantizedInvertedConfigurableCodeword(query,
+																				  qi,
+																				  &quantizedInvertedAssignmentUs);
 				start = listOffsets[queryCodeword];
 				end = listOffsets[queryCodeword + 1];
 				quantizedInvertedListsVisited++;
@@ -13971,6 +14320,8 @@ PgturbohybridMultiVectorDocumentNodeScan(IndexScanDesc scan,
 			bool	   *docMatched;
 			uint32	   *matchedDocIds;
 			uint32	   *touchedDocIds;
+			uint8	   *centroidBitset = NULL;
+			Size		centroidBitsetBytes = 0;
 			uint32		codebookSize;
 			uint32		matchedDocCount = 0;
 			uint64		centroidPostingsTouched = 0;
@@ -14006,6 +14357,32 @@ PgturbohybridMultiVectorDocumentNodeScan(IndexScanDesc scan,
 			touchedDocIds =
 				palloc0(sizeof(uint32) *
 						(Size) Max(meta->tqMultivectorDocCount, 1U));
+			if (centroidBitsetPrefilter)
+			{
+				instr_time	bitsetStart;
+				uint64		bitsetLimitBytes;
+
+				if (collectPhaseStats)
+					INSTR_TIME_SET_CURRENT(bitsetStart);
+				centroidBitsetBytes =
+					((Size) meta->tqMultivectorDocCount + 7U) / 8U;
+				bitsetLimitBytes =
+					(uint64) Max(pgturbohybrid_multivector_max_accumulator_mb,
+								 1) * 1024ULL * 1024ULL;
+				if ((uint64) centroidBitsetBytes > bitsetLimitBytes)
+					ereport(ERROR,
+							(errcode(ERRCODE_PROGRAM_LIMIT_EXCEEDED),
+							 errmsg("centroid_lite bitset prefilter memory estimate %zu bytes exceeds configured limit %d MB",
+									centroidBitsetBytes,
+									pgturbohybrid_multivector_max_accumulator_mb),
+							 errhint("Increase turbohybrid.multivector_max_accumulator_mb or set turbohybrid.multivector_centroid_lite_bitset_prefilter = off.")));
+				centroidBitsetMemoryBytes = (uint64) centroidBitsetBytes;
+				centroidBitset =
+					palloc0(centroidBitsetBytes > 0 ? centroidBitsetBytes : 1);
+				if (collectPhaseStats)
+					PgturbohybridGraphAddElapsedUint64(&centroidBitsetPrefilterUs,
+													   bitsetStart);
+			}
 			for (int32 qi = 0; qi < query->count; qi++)
 			{
 				uint32		queryCodeword;
@@ -14020,8 +14397,8 @@ PgturbohybridMultiVectorDocumentNodeScan(IndexScanDesc scan,
 				if (queryMask != NULL && queryMask[qi])
 					continue;
 				queryCodeword =
-					PgturbohybridMultiVectorQuantizedInvertedCodeword(query,
-																		  qi);
+					PgturbohybridMultiVectorDeterministicCodeword(query,
+																  qi);
 				start = listOffsets[queryCodeword];
 				fullEnd = listOffsets[queryCodeword + 1];
 				end = fullEnd;
@@ -14041,6 +14418,8 @@ PgturbohybridMultiVectorDocumentNodeScan(IndexScanDesc scan,
 					centroidPostingCapStrategy = "uncapped_full_list";
 				}
 				centroidListsVisited++;
+				if (centroidBitsetPrefilter && fullEnd > start)
+					centroidBitsetListsUsed++;
 				for (uint32 postingIndex = 0; postingIndex < end - start;
 					 postingIndex++)
 				{
@@ -14096,6 +14475,23 @@ PgturbohybridMultiVectorDocumentNodeScan(IndexScanDesc scan,
 
 					if (docBest[docId] <= -DBL_MAX)
 						continue;
+					if (centroidBitset != NULL)
+					{
+						Size		byteIndex = (Size) docId >> 3;
+						uint8		mask = (uint8) (1U << (docId & 7U));
+						instr_time	bitsetStart;
+
+						if (collectPhaseStats)
+							INSTR_TIME_SET_CURRENT(bitsetStart);
+						if ((centroidBitset[byteIndex] & mask) == 0)
+						{
+							centroidBitset[byteIndex] |= mask;
+							centroidBitsetDocsSet++;
+						}
+						if (collectPhaseStats)
+							PgturbohybridGraphAddElapsedUint64(&centroidBitsetPrefilterUs,
+															   bitsetStart);
+					}
 					if (!docMatched[docId])
 					{
 						docMatched[docId] = true;
@@ -14131,6 +14527,7 @@ PgturbohybridMultiVectorDocumentNodeScan(IndexScanDesc scan,
 			}
 			docsScored = matchedDocCount;
 			centroidDocsTouched = matchedDocCount;
+			centroidBitsetDocsAfterThreshold = matchedDocCount;
 			edgesVisited = centroidPostingsTouched;
 			maxsimPairs = centroidPostingsTouched;
 			if (collectPhaseStats)
@@ -14407,6 +14804,30 @@ PgturbohybridMultiVectorDocumentNodeScan(IndexScanDesc scan,
 				PgturbohybridMultiVectorProxyEncoderName(proxyEncoder) :
 				"none",
 				sizeof(stats->multivectorProxyEncoderKind));
+		{
+			bool		projectionLoaded = false;
+			int32		projectionDim = 0;
+			uint64		projectionWeightBytes = 0;
+			const char *projectionModel = "";
+			const char *projectionChecksum = "";
+
+			PgturbohybridMultiVectorLearnedProjectionInfo(&projectionLoaded,
+														  &projectionDim,
+														  &projectionWeightBytes,
+														  &projectionModel,
+														  &projectionChecksum);
+			stats->learnedProjectionLoaded = projectionLoaded;
+			stats->learnedProjectionDim = (uint32) Max(projectionDim, 0);
+			stats->learnedProjectionWeightBytes = projectionWeightBytes;
+			strlcpy(stats->learnedProjectionModel,
+					projectionModel,
+					sizeof(stats->learnedProjectionModel));
+			strlcpy(stats->learnedProjectionChecksum,
+					projectionChecksum,
+					sizeof(stats->learnedProjectionChecksum));
+			stats->learnedProjectionQueryEncodeUs =
+				learnedProjectionQueryEncodeUs;
+		}
 		strlcpy(stats->multivectorGraphMode,
 				PgturbohybridMultiVectorGraphModeName(meta->tqMultivectorGraphMode),
 				sizeof(stats->multivectorGraphMode));
@@ -14548,7 +14969,18 @@ PgturbohybridMultiVectorDocumentNodeScan(IndexScanDesc scan,
 			strlcpy(stats->centroidPostingCapStrategy,
 					centroidLite ? centroidPostingCapStrategy : "none",
 					sizeof(stats->centroidPostingCapStrategy));
-		stats->centroidCandidates = centroidCandidates;
+			stats->centroidCandidates = centroidCandidates;
+			stats->centroidBitsetPrefilterEnabled = centroidBitsetPrefilter;
+			stats->centroidBitsetListsUsed =
+				centroidBitsetPrefilter ? centroidBitsetListsUsed : 0;
+			stats->centroidBitsetDocsSet =
+				centroidBitsetPrefilter ? centroidBitsetDocsSet : 0;
+			stats->centroidBitsetDocsAfterThreshold =
+				centroidBitsetPrefilter ? centroidBitsetDocsAfterThreshold : 0;
+			stats->centroidBitsetPrefilterUs =
+				centroidBitsetPrefilter ? centroidBitsetPrefilterUs : 0;
+			stats->centroidBitsetMemoryBytes =
+				centroidBitsetPrefilter ? centroidBitsetMemoryBytes : 0;
 		stats->multivectorCentroidCount = centroidCountEffective;
 		stats->multivectorCentroidPrerankDocs = centroidPrerankDocs;
 		stats->multivectorFullMaxsimRerankDocs =
@@ -14565,9 +14997,27 @@ PgturbohybridMultiVectorDocumentNodeScan(IndexScanDesc scan,
 			quantizedInvertedCandidates;
 		stats->quantizedInvertedExactRerankDocs =
 			quantizedInvertedExperimental ? (uint32) exactRerankCount : 0;
+		strlcpy(stats->quantizedInvertedCodebookSource,
+				quantizedInvertedExperimental ?
+				PgturbohybridQuantizedInvertedCodebookSourceName(storage.multivectorQuantizedInvertedCodebookSource) :
+				"",
+				sizeof(stats->quantizedInvertedCodebookSource));
 		stats->quantizedInvertedCodebookSize =
 			quantizedInvertedExperimental ?
 			storage.multivectorQuantizedInvertedCodebookSize : 0;
+		stats->quantizedInvertedCodebookDim =
+			quantizedInvertedExperimental ?
+			storage.multivectorQuantizedInvertedCodebookDim : 0;
+		strlcpy(stats->quantizedInvertedCodebookChecksum,
+				quantizedInvertedExperimental ?
+				storage.multivectorQuantizedInvertedCodebookChecksum : "",
+				sizeof(stats->quantizedInvertedCodebookChecksum));
+		stats->quantizedInvertedCodebookTopM =
+			quantizedInvertedExperimental ?
+			storage.multivectorQuantizedInvertedCodebookTopM : 0;
+		stats->quantizedInvertedAssignmentUs =
+			quantizedInvertedExperimental ?
+			quantizedInvertedAssignmentUs : 0;
 		stats->quantizedInvertedListOffsetBytes =
 			quantizedInvertedExperimental ?
 			((uint64) storage.multivectorQuantizedInvertedCodebookSize + 1) *

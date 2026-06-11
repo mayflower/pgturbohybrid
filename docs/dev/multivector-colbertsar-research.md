@@ -24,12 +24,13 @@ SET turbohybrid.multivector_candidate_source =
 Current executable status:
 
 - The GUC value is registered so benchmark and SQL plumbing can name the branch.
-- Document-node indexes persist experimental codeword posting tuples in the
-  multivector docmap sidecar. Query tokens are assigned deterministic
-  codewords, matching persisted postings are accumulated into approximate
-  document scores, and candidates are exact-reranked with heap MaxSim. The
-  scan validates document vectors lazily for touched postings rather than
-  pre-validating every document in the sidecar.
+- Document-node indexes persist experimental codeword metadata and posting
+  tuples in the multivector docmap sidecar. Query tokens are assigned with the
+  same deterministic or explicit external codebook metadata used at build time,
+  matching persisted postings are accumulated into approximate document scores,
+  and candidates are exact-reranked with heap MaxSim. The scan validates
+  document vectors lazily for touched postings rather than pre-validating every
+  document in the sidecar.
 - Token-node indexes fail explicitly with `feature_not_supported` because the
   branch needs document sidecar vectors for exact rerank.
 - Plain fallback is bypassed when the branch is selected so benchmark output
@@ -38,16 +39,40 @@ Current executable status:
   sidecar. The missing-sidecar error path is for old indexes and malformed
   sidecars, and reports REINDEX guidance rather than falling back.
 
-The current codeword assignment is deterministic and not learned yet: each
-token maps to the signed largest-magnitude dimension, so the temporary codebook
-has `2 * dim` terms. This is useful for validating the branch, stats, and
-benchmark comparison surface, but it is not a production ColBERTSaR index.
+The default codeword assignment is deterministic and not learned: each token
+maps to the signed largest-magnitude dimension, so the temporary codebook has
+`2 * dim` terms. This is useful for validating the branch, stats, and benchmark
+comparison surface, but it is not a production ColBERTSaR index.
+
+An explicit external text codebook can be selected for experiments:
+
+```sql
+SET turbohybrid.multivector_quantized_inverted_codebook = 'external';
+SET turbohybrid.multivector_quantized_inverted_codebook_path =
+  '/path/to/codebook.txt';
+SET turbohybrid.multivector_quantized_inverted_codebook_top_m = 1;
+```
+
+The first executable external format is intentionally small and administrator
+provided:
+
+```text
+pgturbohybrid_quantized_inverted_codebook_v1 <dim> <codebook_size> <checksum>
+<codebook_size * dim float values>
+```
+
+The checksum is stored as declared metadata and used as a mismatch guard. It is
+not a compatibility promise or a cryptographic verification layer. SQL table
+and model-profile codebook sources remain target-design items for later
+prototypes; they are not executable in this slice.
 
 ## Current Sidecar
 
-The current sidecar stores experimental inverted postings:
+The current sidecar stores experimental codebook metadata plus inverted
+postings:
 
 ```text
+codebook source, dim, codebook_size, top_m, checksum
 codeword -> docId, tokenOrdinal, approximate score payload
 ```
 
@@ -57,10 +82,17 @@ the quantized-postings flag, or when an empty document-node index is being
 bootstrapped. Older indexes without the sidecar fail explicitly and require
 `REINDEX` before the experimental branch can run.
 
-The current codeword assignment and score payload are deliberately simple:
-the codeword is the signed largest-magnitude dimension and the payload stores a
-quantized token-norm proxy. Exact rerank still uses the original float32
-document multivectors, not the payload.
+The deterministic codeword assignment and score payload are deliberately
+simple: the deterministic codeword is the signed largest-magnitude dimension
+and the payload stores a quantized token-norm proxy. External codebooks assign
+the nearest codeword by dot product. Exact rerank still uses the original
+float32 document multivectors, not the payload.
+
+External codebook metadata is part of the experimental sidecar. Query execution
+fails with REINDEX guidance if the active codebook source, dimension, size,
+`top_m`, or checksum does not match the index metadata. Existing deterministic
+indexes without the metadata tuple are treated as deterministic-only for
+backward compatibility.
 
 ## Target Design
 
@@ -141,7 +173,12 @@ candidate source is selected:
 - `quantized_inverted_docs_scored`
 - `quantized_inverted_candidates`
 - `quantized_inverted_exact_rerank_docs`
+- `quantized_inverted_codebook_source`
 - `quantized_inverted_codebook_size`
+- `quantized_inverted_codebook_dim`
+- `quantized_inverted_codebook_checksum`
+- `quantized_inverted_codebook_top_m`
+- `quantized_inverted_assignment_us`
 - `quantized_inverted_list_offset_bytes`
 - `quantized_inverted_posting_bytes`
 - `quantized_inverted_sidecar_bytes`
@@ -160,7 +197,11 @@ used only to admit documents into the bounded exact rerank band.
 
 ## Limitations
 
-- The codebook is deterministic and dimension-sign based, not learned.
+- The default codebook is deterministic and dimension-sign based, not learned.
+- External codebooks are file-only today; SQL-table and model-profile sources
+  are design targets for later prompts.
+- `top_m` values greater than 1 are rejected until the posting sidecar has an
+  explicitly versioned multi-assignment format.
 - The score payload is a temporary token-norm proxy, not a residual or
   calibrated ColBERTSaR payload.
 - The persisted posting layout is research-only and can change without
@@ -172,10 +213,8 @@ used only to admit documents into the bounded exact rerank band.
 
 ## Next Steps
 
-1. Replace signed-largest-dimension assignment with a trained or loaded
-   codebook.
-2. Add an explicit experimental magic/version for codebook, posting, and
-   residual payloads before any broader benchmark use.
+1. Add SQL-table and model-profile codebook sources with explicit metadata.
+2. Add a versioned multi-assignment posting format for `top_m > 1`.
 3. Store residual or compressed score payloads that can approximate MaxSim
    without consulting full document vectors during admission.
 4. Report separate codebook, posting, residual, and original multivector byte

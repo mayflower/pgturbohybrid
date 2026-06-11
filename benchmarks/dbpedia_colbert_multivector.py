@@ -21,6 +21,7 @@ import shlex
 import statistics
 import subprocess
 import sys
+import tempfile
 import threading
 import time
 from dataclasses import dataclass, field, replace
@@ -65,6 +66,7 @@ MULTIVECTOR_PROXY_ENCODER_CHOICES = (
     "max_pool",
     "random_projection_fde",
     "learned_projection_placeholder",
+    "learned_projection_v1",
 )
 MULTIVECTOR_SPARSE_CANDIDATE_SOURCE_CHOICES = ("off", "bm25", "learned_sparse")
 MULTIVECTOR_DOC_BUILD_SCORER_CHOICES = ("proxy", "exact_symmetric")
@@ -117,6 +119,47 @@ DOCUMENT_NODE_SERVING_GRID_ENTRY_SAMPLE_COUNTS = (32, 128)
 DOCUMENT_NODE_SERVING_GRID_ENTRY_SAMPLE_SWEEP = ",".join(
     str(count) for count in DOCUMENT_NODE_SERVING_GRID_ENTRY_SAMPLE_COUNTS
 )
+DOCUMENT_NODE_SERVING_GRID_ENTRY_SIDECAR_REPRESENTATIVES = (128, 256)
+DOCUMENT_NODE_SERVING_GRID_ENTRY_SIDECAR_SWEEP = ",".join(
+    str(count) for count in DOCUMENT_NODE_SERVING_GRID_ENTRY_SIDECAR_REPRESENTATIVES
+)
+DOCUMENT_NODE_SERVING_GRID_PROXY_ADMISSION_FOCUS_PROFILES = (
+    "proxy_normalized_mean_f16",
+    "proxy_max_pool_f16",
+    "centroid_mean_f16",
+    "proxy_normalized_mean_f16_entry_sample_032",
+    "proxy_normalized_mean_f16_entry_sample_128",
+    "proxy_max_pool_f16_entry_sample_032",
+    "proxy_max_pool_f16_entry_sample_128",
+    "centroid_mean_f16_entry_sample_032",
+    "centroid_mean_f16_entry_sample_128",
+    "proxy_normalized_mean_f16_entry_sidecar_128",
+    "proxy_normalized_mean_f16_entry_sidecar_256",
+    "proxy_max_pool_f16_entry_sidecar_128",
+    "proxy_max_pool_f16_entry_sidecar_256",
+    "centroid_mean_f16_entry_sidecar_128",
+    "centroid_mean_f16_entry_sidecar_256",
+)
+DOCUMENT_NODE_SERVING_GRID_PROXY_ADMISSION_FOCUS_EF = (100, 200, 400)
+DOCUMENT_NODE_SERVING_GRID_PROXY_ADMISSION_FOCUS_OVERSAMPLING = (1, 2)
+DOCUMENT_NODE_SERVING_GRID_CENTROID_LITE_FOCUS_PROFILES = (
+    "centroid_lite_f16",
+    "centroid_lite_f16_cap_016",
+    "centroid_lite_f16_cap_032",
+    "centroid_lite_f16_cap_064",
+    "centroid_lite_f16_pool_050",
+    "centroid_mean_f16",
+)
+DOCUMENT_NODE_SERVING_GRID_TOKEN_POOLING_FOCUS_PROFILES = (
+    "proxy_normalized_mean_f16",
+    "proxy_normalized_mean_f16_pool_075",
+    "proxy_normalized_mean_f16_pool_050",
+    "proxy_normalized_mean_f16_pool_033",
+    "centroid_mean_f16",
+    "centroid_mean_f16_pool_075",
+    "centroid_mean_f16_pool_050",
+    "centroid_mean_f16_pool_033",
+)
 DOCUMENT_NODE_SERVING_GRID_SMOKE_PROFILES = (
     "proxy_normalized_mean_f16",
     "centroid_mean_f16",
@@ -140,6 +183,14 @@ SERVING_STATS_FIELD_GROUPS: dict[str, tuple[str, ...]] = {
         "multivector_doc_candidates",
         "multivector_unique_docs",
         "multivector_doc_graph_exact_rerank_docs",
+        "multivector_doc_graph_search_ef",
+        "multivector_doc_graph_oversampling",
+        "multivector_proxy_candidate_target",
+        "multivector_proxy_candidates_returned",
+        "multivector_exact_rerank_k_effective",
+        "effective_result_target",
+        "graph_effective_result_target",
+        "final_k_effective",
         "multivector_doc_graph_entry_sample_configured",
         "multivector_doc_graph_entry_sample_effective",
         "multivector_doc_graph_entry_sample_scored",
@@ -204,6 +255,18 @@ SERVING_STATS_FIELD_GROUPS: dict[str, tuple[str, ...]] = {
         "centroid_posting_limit_per_token",
         "centroid_posting_cap_strategy",
         "centroid_candidates",
+        "centroid_bitset_prefilter_enabled",
+        "centroid_bitset_lists_used",
+        "centroid_bitset_docs_set",
+        "centroid_bitset_docs_after_threshold",
+        "centroid_bitset_prefilter_time_us",
+        "centroid_bitset_memory_bytes",
+        "learned_projection_loaded",
+        "learned_projection_dim",
+        "learned_projection_weight_bytes",
+        "learned_projection_model",
+        "learned_projection_checksum",
+        "learned_projection_query_encode_us",
     ),
     "storage_cache": (
         "multivector_doc_sidecar_cache_mode",
@@ -475,6 +538,25 @@ def summarize_ints(values: list[int]) -> dict[str, float]:
         "p95": round(percentile(as_float, 95), 3),
         "max": max(values) if values else 0,
         "count": len(values),
+    }
+
+
+def summarize_floats(values: list[float]) -> dict[str, float]:
+    finite: list[float] = []
+    for value in values:
+        try:
+            parsed = float(value)
+        except (TypeError, ValueError):
+            continue
+        if math.isfinite(parsed):
+            finite.append(parsed)
+    return {
+        "mean": round(statistics.mean(finite), 6) if finite else 0.0,
+        "min": round(min(finite), 6) if finite else 0.0,
+        "p50": round(percentile(finite, 50), 6),
+        "p95": round(percentile(finite, 95), 6),
+        "max": round(max(finite), 6) if finite else 0.0,
+        "count": len(finite),
     }
 
 
@@ -1228,6 +1310,15 @@ def set_colbert_gucs(conn: psycopg.Connection[Any], args: argparse.Namespace) ->
         "turbohybrid.multivector_doc_storage": args.multivector_doc_storage,
         "turbohybrid.multivector_doc_storage_cache": args.multivector_doc_storage_cache,
         "turbohybrid.multivector_proxy_encoder": args.multivector_proxy_encoder,
+        "turbohybrid.multivector_learned_projection_path": str(
+            getattr(args, "multivector_learned_projection_path", "") or ""
+        ),
+        "turbohybrid.multivector_learned_projection_model": str(
+            getattr(args, "multivector_learned_projection_model", "") or ""
+        ),
+        "turbohybrid.multivector_learned_projection_checksum": str(
+            getattr(args, "multivector_learned_projection_checksum", "") or ""
+        ),
         "turbohybrid.multivector_centroid_lite_max_postings_per_token": str(
             args.multivector_centroid_lite_max_postings_per_token
         ),
@@ -1275,6 +1366,15 @@ def set_retrieval_gucs(conn: psycopg.Connection[Any], args: argparse.Namespace, 
         "turbohybrid.multivector_doc_storage": args.multivector_doc_storage,
         "turbohybrid.multivector_doc_storage_cache": args.multivector_doc_storage_cache,
         "turbohybrid.multivector_proxy_encoder": args.multivector_proxy_encoder,
+        "turbohybrid.multivector_learned_projection_path": str(
+            getattr(args, "multivector_learned_projection_path", "") or ""
+        ),
+        "turbohybrid.multivector_learned_projection_model": str(
+            getattr(args, "multivector_learned_projection_model", "") or ""
+        ),
+        "turbohybrid.multivector_learned_projection_checksum": str(
+            getattr(args, "multivector_learned_projection_checksum", "") or ""
+        ),
         "turbohybrid.multivector_centroid_lite_max_postings_per_token": str(
             args.multivector_centroid_lite_max_postings_per_token
         ),
@@ -2222,6 +2322,15 @@ def scan_stat_int(stats: dict[str, Any], key: str) -> int:
         return 0
 
 
+def scan_stat_float(stats: dict[str, Any], key: str) -> float:
+    value = stats.get(key, 0.0)
+    try:
+        result = float(value)
+    except (TypeError, ValueError):
+        return 0.0
+    return result if math.isfinite(result) else 0.0
+
+
 def scan_stat_bool(stats: dict[str, Any], key: str) -> bool:
     return stats.get(key) is True or stats.get(key) == "true"
 
@@ -2652,11 +2761,23 @@ def fail_on_serving_slow_path_if_requested(
 def exact_rerank_work_from_stats(stats: dict[str, Any]) -> dict[str, Any]:
     return {
         "exact_rerank_candidates": scan_stat_int(stats, "exact_rerank_candidates"),
+        "exact_rerank_pairs": scan_stat_int(stats, "multivector_exact_rerank_pairs"),
         "exact_rerank_tokens_evaluated": scan_stat_int(stats, "exact_rerank_tokens_evaluated"),
         "exact_rerank_tokens_skipped": scan_stat_int(stats, "exact_rerank_tokens_skipped"),
         "exact_rerank_pairs_saved": scan_stat_int(stats, "exact_rerank_pairs_saved"),
         "adaptive_rerank_topk_changed_vs_full": bool(
             stats.get("adaptive_rerank_topk_changed_vs_full", False)
+        ),
+    }
+
+
+def token_pooling_work_from_stats(stats: dict[str, Any]) -> dict[str, Any]:
+    return {
+        "multivector_tokens_original": scan_stat_int(stats, "multivector_tokens_original"),
+        "multivector_tokens_pooled": scan_stat_int(stats, "multivector_tokens_pooled"),
+        "multivector_token_pooling_ratio": scan_stat_float(
+            stats,
+            "multivector_token_pooling_ratio",
         ),
     }
 
@@ -2696,8 +2817,23 @@ def quantized_inverted_work_from_stats(stats: dict[str, Any]) -> dict[str, Any]:
         "quantized_inverted_exact_rerank_docs": scan_stat_int(
             stats, "quantized_inverted_exact_rerank_docs"
         ),
+        "quantized_inverted_codebook_source": scan_stat_str(
+            stats, "quantized_inverted_codebook_source"
+        ),
         "quantized_inverted_codebook_size": scan_stat_int(
             stats, "quantized_inverted_codebook_size"
+        ),
+        "quantized_inverted_codebook_dim": scan_stat_int(
+            stats, "quantized_inverted_codebook_dim"
+        ),
+        "quantized_inverted_codebook_checksum": scan_stat_str(
+            stats, "quantized_inverted_codebook_checksum"
+        ),
+        "quantized_inverted_codebook_top_m": scan_stat_int(
+            stats, "quantized_inverted_codebook_top_m"
+        ),
+        "quantized_inverted_assignment_us": scan_stat_int(
+            stats, "quantized_inverted_assignment_us"
         ),
         "quantized_inverted_list_offset_bytes": scan_stat_int(
             stats, "quantized_inverted_list_offset_bytes"
@@ -3041,6 +3177,10 @@ def parse_int_grid(value: str, option_name: str) -> list[int]:
 def effective_serving_grid_budget_sweep(args: argparse.Namespace) -> list[int]:
     if bool(getattr(args, "admission_budget_sweep_explicit", False)):
         source = str(getattr(args, "admission_budget_sweep", "") or "")
+    elif bool(getattr(args, "document_node_serving_grid_proxy_admission_focus", False)) or bool(
+        getattr(args, "document_node_serving_grid_centroid_lite_focus", False)
+    ):
+        source = str(DOCUMENT_NODE_SERVING_LATENCY_DEFAULT_CANDIDATE_K)
     elif bool(getattr(args, "document_node_serving_grid_smoke", False)):
         source = ",".join(str(budget) for budget in DOCUMENT_NODE_SERVING_GRID_SMOKE_BUDGETS)
     elif (
@@ -3075,6 +3215,18 @@ def effective_document_node_serving_entry_sample_counts(args: argparse.Namespace
         or DOCUMENT_NODE_SERVING_GRID_ENTRY_SAMPLE_SWEEP
     )
     return parse_int_grid(source, "--document-node-serving-grid-entry-sample-counts")
+
+
+def effective_document_node_serving_entry_sidecar_representatives(args: argparse.Namespace) -> list[int]:
+    source = str(
+        getattr(
+            args,
+            "document_node_serving_grid_entry_sidecar_representatives",
+            DOCUMENT_NODE_SERVING_GRID_ENTRY_SIDECAR_SWEEP,
+        )
+        or DOCUMENT_NODE_SERVING_GRID_ENTRY_SIDECAR_SWEEP
+    )
+    return parse_int_grid(source, "--document-node-serving-grid-entry-sidecar-representatives")
 
 
 def effective_serving_grid_executed_budgets(args: argparse.Namespace) -> list[int]:
@@ -3264,8 +3416,29 @@ def run_admission_budget(
             "trace unavailable; admission is inferred only from final returned "
             "documents that survived the bounded exact rerank set"
         )
+    candidate_diagnostics = derive_candidate_underfill_diagnostics({
+        "candidate_budget": budget,
+        "candidate_source": candidate_source,
+        "final_k": args.final_k,
+        "multivector_doc_candidate_k": int(
+            getattr(args, "multivector_doc_candidate_k", 0) or 0
+        ),
+        "multivector_doc_graph_search_ef": scan_stat_int(
+            stats,
+            "multivector_doc_graph_search_ef",
+        )
+        or int(getattr(args, "multivector_doc_graph_search_ef", 0) or 0),
+        "multivector_doc_graph_oversampling": scan_stat_int(
+            stats,
+            "multivector_doc_graph_oversampling",
+        )
+        or int(getattr(args, "multivector_doc_graph_oversampling", 1) or 1),
+        "effective_exact_rerank_k": exact_rerank_k,
+        "last_scan_stats_sample": stats,
+    })
     return {
         "budget": budget,
+        **candidate_diagnostics,
         "admission_debug_mode": admission_debug_mode,
         "trace_enabled": admission_debug_mode == "trace",
         "serving_exact_rerank_mode": getattr(args, "serving_exact_rerank_mode", "admission_exhaustive"),
@@ -3283,6 +3456,22 @@ def run_admission_budget(
         "doc_graph_candidates": scan_stat_int(stats, "multivector_doc_graph_candidates"),
         "doc_graph_heap_fetches": scan_stat_int(stats, "multivector_doc_graph_heap_fetches"),
         "doc_graph_warning": stats.get("multivector_doc_graph_warning"),
+        "proxy_candidate_limit_effective": scan_stat_int(
+            stats,
+            "proxy_candidate_limit_effective",
+        ),
+        "proxy_candidate_limit_source": scan_stat_str(
+            stats,
+            "proxy_candidate_limit_source",
+        ),
+        "multivector_proxy_candidate_target": scan_stat_int(
+            stats,
+            "multivector_proxy_candidate_target",
+        ),
+        "multivector_proxy_candidates_returned": scan_stat_int(
+            stats,
+            "multivector_proxy_candidates_returned",
+        ),
         "reservoirs_enabled": scan_stat_bool(stats, "multivector_reservoirs_enabled"),
         "reservoir_score_docs": scan_stat_int(stats, "multivector_reservoir_score_docs"),
         "reservoir_coverage_docs": scan_stat_int(stats, "multivector_reservoir_coverage_docs"),
@@ -3319,6 +3508,7 @@ def run_admission_budget(
         "graph_edges_visited": graph_edges_visited,
         "exact_rerank_docs": exact_rerank_docs,
         **exact_rerank_work_from_stats(stats),
+        **token_pooling_work_from_stats(stats),
         **proxy_work_from_stats(stats),
         **centroid_work_from_stats(stats),
         **quantized_inverted_work_from_stats(stats),
@@ -3397,9 +3587,13 @@ def run_admission_debug(
     docs_scored_by_budget: dict[int, list[int]] = {budget: [] for budget in executed_budget_values}
     graph_edges_by_budget: dict[int, list[int]] = {budget: [] for budget in executed_budget_values}
     exact_rerank_docs_by_budget: dict[int, list[int]] = {budget: [] for budget in executed_budget_values}
+    exact_rerank_pairs_by_budget: dict[int, list[int]] = {budget: [] for budget in executed_budget_values}
     exact_rerank_tokens_evaluated_by_budget: dict[int, list[int]] = {budget: [] for budget in executed_budget_values}
     exact_rerank_tokens_skipped_by_budget: dict[int, list[int]] = {budget: [] for budget in executed_budget_values}
     exact_rerank_pairs_saved_by_budget: dict[int, list[int]] = {budget: [] for budget in executed_budget_values}
+    tokens_original_by_budget: dict[int, list[int]] = {budget: [] for budget in executed_budget_values}
+    tokens_pooled_by_budget: dict[int, list[int]] = {budget: [] for budget in executed_budget_values}
+    token_pooling_ratio_by_budget: dict[int, list[float]] = {budget: [] for budget in executed_budget_values}
     proxy_candidates_by_budget: dict[int, list[int]] = {budget: [] for budget in executed_budget_values}
     proxy_exact_rerank_docs_by_budget: dict[int, list[int]] = {budget: [] for budget in executed_budget_values}
     reservoirs_enabled_by_budget: dict[int, list[bool]] = {budget: [] for budget in executed_budget_values}
@@ -3413,6 +3607,12 @@ def run_admission_debug(
     centroid_lists_visited_by_budget: dict[int, list[int]] = {budget: [] for budget in executed_budget_values}
     centroid_docs_touched_by_budget: dict[int, list[int]] = {budget: [] for budget in executed_budget_values}
     centroid_pruned_docs_by_budget: dict[int, list[int]] = {budget: [] for budget in executed_budget_values}
+    centroid_postings_touched_by_budget: dict[int, list[int]] = {budget: [] for budget in executed_budget_values}
+    centroid_postings_skipped_by_budget: dict[int, list[int]] = {budget: [] for budget in executed_budget_values}
+    centroid_posting_limit_by_budget: dict[int, list[int]] = {budget: [] for budget in executed_budget_values}
+    centroid_posting_cap_strategy_by_budget: dict[int, list[str]] = {
+        budget: [] for budget in executed_budget_values
+    }
     centroid_candidates_by_budget: dict[int, list[int]] = {budget: [] for budget in executed_budget_values}
     learned_sparse_candidates_by_budget: dict[int, list[int]] = {budget: [] for budget in executed_budget_values}
     learned_sparse_retained_by_budget: dict[int, list[int]] = {budget: [] for budget in executed_budget_values}
@@ -3493,6 +3693,9 @@ def run_admission_debug(
             docs_scored_by_budget[budget].append(int(result["docs_scored"]))
             graph_edges_by_budget[budget].append(int(result["graph_edges_visited"]))
             exact_rerank_docs_by_budget[budget].append(int(result["exact_rerank_docs"]))
+            exact_rerank_pairs_by_budget[budget].append(
+                int(result.get("exact_rerank_pairs", 0))
+            )
             exact_rerank_tokens_evaluated_by_budget[budget].append(
                 int(result.get("exact_rerank_tokens_evaluated", 0))
             )
@@ -3501,6 +3704,15 @@ def run_admission_debug(
             )
             exact_rerank_pairs_saved_by_budget[budget].append(
                 int(result.get("exact_rerank_pairs_saved", 0))
+            )
+            tokens_original_by_budget[budget].append(
+                int(result.get("multivector_tokens_original", 0))
+            )
+            tokens_pooled_by_budget[budget].append(
+                int(result.get("multivector_tokens_pooled", 0))
+            )
+            token_pooling_ratio_by_budget[budget].append(
+                float(result.get("multivector_token_pooling_ratio", 0.0) or 0.0)
             )
             proxy_candidates_by_budget[budget].append(int(result.get("proxy_candidates", 0)))
             proxy_exact_rerank_docs_by_budget[budget].append(
@@ -3539,6 +3751,22 @@ def run_admission_debug(
             centroid_pruned_docs_by_budget[budget].append(
                 int(result.get("centroid_pruned_docs", 0))
             )
+            centroid_postings_touched_by_budget[budget].append(
+                int(result.get("centroid_postings_touched", 0))
+            )
+            centroid_postings_skipped_by_budget[budget].append(
+                int(result.get("centroid_postings_skipped", 0))
+            )
+            centroid_posting_limit_by_budget[budget].append(
+                int(result.get("centroid_posting_limit_per_token", 0))
+            )
+            centroid_posting_cap_strategy = str(
+                result.get("centroid_posting_cap_strategy", "") or ""
+            )
+            if centroid_posting_cap_strategy:
+                centroid_posting_cap_strategy_by_budget[budget].append(
+                    centroid_posting_cap_strategy
+                )
             centroid_candidates_by_budget[budget].append(
                 int(result.get("centroid_candidates", 0))
             )
@@ -3699,6 +3927,7 @@ def run_admission_debug(
                 "docs_scored": summarize_ints(docs_scored_by_budget[budget]),
                 "graph_edges_visited": summarize_ints(graph_edges_by_budget[budget]),
                 "exact_rerank_docs": summarize_ints(exact_rerank_docs_by_budget[budget]),
+                "exact_rerank_pairs": summarize_ints(exact_rerank_pairs_by_budget[budget]),
                 "exact_rerank_tokens_evaluated": summarize_ints(
                     exact_rerank_tokens_evaluated_by_budget[budget]
                 ),
@@ -3707,6 +3936,15 @@ def run_admission_debug(
                 ),
                 "exact_rerank_pairs_saved": summarize_ints(
                     exact_rerank_pairs_saved_by_budget[budget]
+                ),
+                "multivector_tokens_original": summarize_ints(
+                    tokens_original_by_budget[budget]
+                ),
+                "multivector_tokens_pooled": summarize_ints(
+                    tokens_pooled_by_budget[budget]
+                ),
+                "multivector_token_pooling_ratio": summarize_floats(
+                    token_pooling_ratio_by_budget[budget]
                 ),
                 "proxy_candidates": summarize_ints(proxy_candidates_by_budget[budget]),
                 "proxy_exact_rerank_docs": summarize_ints(
@@ -3744,6 +3982,18 @@ def run_admission_debug(
                 ),
                 "centroid_pruned_docs": summarize_ints(
                     centroid_pruned_docs_by_budget[budget]
+                ),
+                "centroid_postings_touched": summarize_ints(
+                    centroid_postings_touched_by_budget[budget]
+                ),
+                "centroid_postings_skipped": summarize_ints(
+                    centroid_postings_skipped_by_budget[budget]
+                ),
+                "centroid_posting_limit_per_token": summarize_ints(
+                    centroid_posting_limit_by_budget[budget]
+                ),
+                "centroid_posting_cap_strategy": summarize_strings(
+                    centroid_posting_cap_strategy_by_budget[budget]
                 ),
                 "centroid_candidates": summarize_ints(
                     centroid_candidates_by_budget[budget]
@@ -4004,10 +4254,14 @@ def document_node_serving_profiles(
     include_reservoirs: bool,
     include_centroid_lite_caps: bool = False,
     centroid_lite_posting_caps: Sequence[int] = (),
+    include_token_pooling_focus: bool = False,
     include_entry_samples: bool = False,
     entry_sample_counts: Sequence[int] = (),
     include_entry_sidecar: bool = False,
+    entry_sidecar_representatives: Sequence[int] = (),
+    explicit_entry_sidecar_profile_names: bool = False,
     centroid_count: str,
+    include_learned_projection: bool = False,
 ) -> list[DocumentNodeServingProfile]:
     profiles = [
         DocumentNodeServingProfile(
@@ -4065,6 +4319,30 @@ def document_node_serving_profiles(
             )
             for cap in centroid_lite_posting_caps
         )
+    if include_token_pooling_focus:
+        for ratio_label, ratio in (("075", 0.75), ("050", 0.5), ("033", 0.33)):
+            profiles.extend(
+                [
+                    DocumentNodeServingProfile(
+                        name=f"proxy_normalized_mean_f16_pool_{ratio_label}",
+                        candidate_source="proxy_vector",
+                        proxy_encoder="normalized_mean",
+                        storage_kind="f16",
+                        token_pooling="greedy_cosine",
+                        token_pooling_target_ratio=ratio,
+                    ),
+                    DocumentNodeServingProfile(
+                        name=f"centroid_mean_f16_pool_{ratio_label}",
+                        candidate_source="proxy_vector",
+                        proxy_encoder="centroid_mean",
+                        centroids="kmeans",
+                        centroid_count=centroid_count,
+                        storage_kind="f16",
+                        token_pooling="greedy_cosine",
+                        token_pooling_target_ratio=ratio,
+                    ),
+                ]
+            )
     if include_entry_samples:
         for count in entry_sample_counts:
             entry_sample_count = int(count)
@@ -4099,36 +4377,48 @@ def document_node_serving_profiles(
                     )
                 )
     if include_entry_sidecar:
-        profiles.extend(
-            [
-                DocumentNodeServingProfile(
-                    name="proxy_normalized_mean_f16_entry_sidecar",
-                    candidate_source="proxy_vector",
-                    proxy_encoder="normalized_mean",
-                    storage_kind="f16",
-                    entry_sidecar=True,
-                ),
-                DocumentNodeServingProfile(
-                    name="centroid_mean_f16_entry_sidecar",
-                    candidate_source="proxy_vector",
-                    proxy_encoder="centroid_mean",
-                    centroids="kmeans",
-                    centroid_count=centroid_count,
-                    storage_kind="f16",
-                    entry_sidecar=True,
-                ),
-            ]
-        )
-        if include_proxy_encoder_variants:
-            profiles.append(
-                DocumentNodeServingProfile(
-                    name="proxy_max_pool_f16_entry_sidecar",
-                    candidate_source="proxy_vector",
-                    proxy_encoder="max_pool",
-                    storage_kind="f16",
-                    entry_sidecar=True,
-                )
+        representative_counts = [
+            int(count)
+            for count in (entry_sidecar_representatives or (128,))
+            if int(count) > 0
+        ]
+        if not representative_counts:
+            representative_counts = [128]
+        for representatives in representative_counts:
+            suffix = f"_{representatives:03d}" if explicit_entry_sidecar_profile_names else ""
+            profiles.extend(
+                [
+                    DocumentNodeServingProfile(
+                        name=f"proxy_normalized_mean_f16_entry_sidecar{suffix}",
+                        candidate_source="proxy_vector",
+                        proxy_encoder="normalized_mean",
+                        storage_kind="f16",
+                        entry_sidecar=True,
+                        entry_sidecar_representatives=representatives,
+                    ),
+                    DocumentNodeServingProfile(
+                        name=f"centroid_mean_f16_entry_sidecar{suffix}",
+                        candidate_source="proxy_vector",
+                        proxy_encoder="centroid_mean",
+                        centroids="kmeans",
+                        centroid_count=centroid_count,
+                        storage_kind="f16",
+                        entry_sidecar=True,
+                        entry_sidecar_representatives=representatives,
+                    ),
+                ]
             )
+            if include_proxy_encoder_variants:
+                profiles.append(
+                    DocumentNodeServingProfile(
+                        name=f"proxy_max_pool_f16_entry_sidecar{suffix}",
+                        candidate_source="proxy_vector",
+                        proxy_encoder="max_pool",
+                        storage_kind="f16",
+                        entry_sidecar=True,
+                        entry_sidecar_representatives=representatives,
+                    )
+                )
     if include_proxy_encoder_variants:
         profiles.extend(
             [
@@ -4145,6 +4435,15 @@ def document_node_serving_profiles(
                     storage_kind="f16",
                 ),
             ]
+        )
+    if include_learned_projection:
+        profiles.append(
+            DocumentNodeServingProfile(
+                name="proxy_learned_projection_v1_f16",
+                candidate_source="proxy_vector",
+                proxy_encoder="learned_projection_v1",
+                storage_kind="f16",
+            )
         )
     if include_bm25_rescue:
         profiles.extend(
@@ -4274,10 +4573,23 @@ def validate_document_node_serving_profile_inputs(
 def effective_document_node_serving_profiles(
     args: argparse.Namespace,
 ) -> list[DocumentNodeServingProfile]:
+    proxy_admission_focus = bool(
+        getattr(args, "document_node_serving_grid_proxy_admission_focus", False)
+    )
+    centroid_lite_focus = bool(
+        getattr(args, "document_node_serving_grid_centroid_lite_focus", False)
+    )
+    token_pooling_focus = bool(
+        getattr(args, "document_node_serving_grid_token_pooling_focus", False)
+    )
     profiles = document_node_serving_profiles(
         include_experimental=args.document_node_serving_grid_include_experimental,
-        include_proxy_encoder_variants=bool(
-            getattr(args, "document_node_serving_grid_include_proxy_encoders", False)
+        include_proxy_encoder_variants=(
+            bool(getattr(args, "document_node_serving_grid_include_proxy_encoders", False))
+            or proxy_admission_focus
+        ),
+        include_learned_projection=bool(
+            getattr(args, "document_node_serving_grid_include_learned_projection", False)
         ),
         include_bm25_rescue=bool(
             getattr(args, "document_node_serving_grid_include_bm25_rescue", False)
@@ -4290,17 +4602,69 @@ def effective_document_node_serving_profiles(
         ),
         include_centroid_lite_caps=bool(
             getattr(args, "document_node_serving_grid_include_centroid_lite_caps", False)
-        ),
+        )
+        or centroid_lite_focus,
         centroid_lite_posting_caps=effective_document_node_serving_centroid_lite_caps(args),
+        include_token_pooling_focus=token_pooling_focus,
         include_entry_samples=bool(
             getattr(args, "document_node_serving_grid_include_entry_samples", False)
-        ),
+        )
+        or proxy_admission_focus,
         entry_sample_counts=effective_document_node_serving_entry_sample_counts(args),
         include_entry_sidecar=bool(
             getattr(args, "document_node_serving_grid_include_entry_sidecar", False)
+        )
+        or proxy_admission_focus,
+        entry_sidecar_representatives=(
+            effective_document_node_serving_entry_sidecar_representatives(args)
+            if proxy_admission_focus
+            else ()
         ),
+        explicit_entry_sidecar_profile_names=proxy_admission_focus,
         centroid_count=args.multivector_centroid_count,
     )
+    if proxy_admission_focus:
+        allowed = set(DOCUMENT_NODE_SERVING_GRID_PROXY_ADMISSION_FOCUS_PROFILES)
+        order = {
+            name: index
+            for index, name in enumerate(
+                DOCUMENT_NODE_SERVING_GRID_PROXY_ADMISSION_FOCUS_PROFILES
+            )
+        }
+        profiles = sorted(
+            [profile for profile in profiles if profile.name in allowed],
+            key=lambda profile: order[profile.name],
+        )
+        if not profiles:
+            raise SystemExit("--document-node-serving-grid-proxy-admission-focus produced no profiles")
+    if centroid_lite_focus:
+        allowed = set(DOCUMENT_NODE_SERVING_GRID_CENTROID_LITE_FOCUS_PROFILES)
+        order = {
+            name: index
+            for index, name in enumerate(
+                DOCUMENT_NODE_SERVING_GRID_CENTROID_LITE_FOCUS_PROFILES
+            )
+        }
+        profiles = sorted(
+            [profile for profile in profiles if profile.name in allowed],
+            key=lambda profile: order[profile.name],
+        )
+        if not profiles:
+            raise SystemExit("--document-node-serving-grid-centroid-lite-focus produced no profiles")
+    if token_pooling_focus:
+        allowed = set(DOCUMENT_NODE_SERVING_GRID_TOKEN_POOLING_FOCUS_PROFILES)
+        order = {
+            name: index
+            for index, name in enumerate(
+                DOCUMENT_NODE_SERVING_GRID_TOKEN_POOLING_FOCUS_PROFILES
+            )
+        }
+        profiles = sorted(
+            [profile for profile in profiles if profile.name in allowed],
+            key=lambda profile: order[profile.name],
+        )
+        if not profiles:
+            raise SystemExit("--document-node-serving-grid-token-pooling-focus produced no profiles")
     selected = str(getattr(args, "document_node_serving_grid_profiles", "") or "").strip()
     if selected:
         requested = [item.strip() for item in selected.split(",") if item.strip()]
@@ -4331,10 +4695,23 @@ def document_node_serving_profile_by_name(
     args: argparse.Namespace,
     name: str,
 ) -> DocumentNodeServingProfile:
+    proxy_admission_focus = bool(
+        getattr(args, "document_node_serving_grid_proxy_admission_focus", False)
+    )
+    centroid_lite_focus = bool(
+        getattr(args, "document_node_serving_grid_centroid_lite_focus", False)
+    )
+    token_pooling_focus = bool(
+        getattr(args, "document_node_serving_grid_token_pooling_focus", False)
+    )
     profiles = document_node_serving_profiles(
         include_experimental=args.document_node_serving_grid_include_experimental,
-        include_proxy_encoder_variants=bool(
-            getattr(args, "document_node_serving_grid_include_proxy_encoders", False)
+        include_proxy_encoder_variants=(
+            bool(getattr(args, "document_node_serving_grid_include_proxy_encoders", False))
+            or proxy_admission_focus
+        ),
+        include_learned_projection=bool(
+            getattr(args, "document_node_serving_grid_include_learned_projection", False)
         ),
         include_bm25_rescue=bool(
             getattr(args, "document_node_serving_grid_include_bm25_rescue", False)
@@ -4347,15 +4724,25 @@ def document_node_serving_profile_by_name(
         ),
         include_centroid_lite_caps=bool(
             getattr(args, "document_node_serving_grid_include_centroid_lite_caps", False)
-        ),
+        )
+        or centroid_lite_focus,
         centroid_lite_posting_caps=effective_document_node_serving_centroid_lite_caps(args),
+        include_token_pooling_focus=token_pooling_focus,
         include_entry_samples=bool(
             getattr(args, "document_node_serving_grid_include_entry_samples", False)
-        ),
+        )
+        or proxy_admission_focus,
         entry_sample_counts=effective_document_node_serving_entry_sample_counts(args),
         include_entry_sidecar=bool(
             getattr(args, "document_node_serving_grid_include_entry_sidecar", False)
+        )
+        or proxy_admission_focus,
+        entry_sidecar_representatives=(
+            effective_document_node_serving_entry_sidecar_representatives(args)
+            if proxy_admission_focus
+            else ()
         ),
+        explicit_entry_sidecar_profile_names=proxy_admission_focus,
         centroid_count=args.multivector_centroid_count,
     )
     by_name = {profile.name: profile for profile in profiles}
@@ -4424,6 +4811,8 @@ def effective_document_node_serving_ef_grid(args: argparse.Namespace) -> list[in
     values = getattr(args, "document_node_serving_ef_grid_values", None)
     if values is not None:
         return list(values)
+    if bool(getattr(args, "document_node_serving_grid_proxy_admission_focus", False)):
+        return list(DOCUMENT_NODE_SERVING_GRID_PROXY_ADMISSION_FOCUS_EF)
     if bool(getattr(args, "document_node_serving_grid_smoke", False)):
         return list(DOCUMENT_NODE_SERVING_GRID_SMOKE_EF)
     return list(DOCUMENT_NODE_SERVING_GRID_EF)
@@ -4433,6 +4822,8 @@ def effective_document_node_serving_oversampling_grid(args: argparse.Namespace) 
     values = getattr(args, "document_node_serving_oversampling_grid_values", None)
     if values is not None:
         return list(values)
+    if bool(getattr(args, "document_node_serving_grid_proxy_admission_focus", False)):
+        return list(DOCUMENT_NODE_SERVING_GRID_PROXY_ADMISSION_FOCUS_OVERSAMPLING)
     if bool(getattr(args, "document_node_serving_grid_smoke", False)):
         return list(DOCUMENT_NODE_SERVING_GRID_SMOKE_OVERSAMPLING)
     return list(DOCUMENT_NODE_SERVING_GRID_OVERSAMPLING)
@@ -4967,6 +5358,7 @@ def _self_check_document_node_serving_profiles() -> None:
         document_node_serving_grid_smoke=True,
         document_node_serving_grid_include_experimental=True,
         document_node_serving_grid_include_proxy_encoders=False,
+        document_node_serving_grid_include_learned_projection=False,
         document_node_serving_grid_include_bm25_rescue=False,
         document_node_serving_grid_include_learned_sparse_rescue=False,
         document_node_serving_grid_include_reservoirs=False,
@@ -4976,6 +5368,12 @@ def _self_check_document_node_serving_profiles() -> None:
             DOCUMENT_NODE_SERVING_GRID_ENTRY_SAMPLE_SWEEP
         ),
         document_node_serving_grid_include_entry_sidecar=False,
+        document_node_serving_grid_entry_sidecar_representatives=(
+            DOCUMENT_NODE_SERVING_GRID_ENTRY_SIDECAR_SWEEP
+        ),
+        document_node_serving_grid_proxy_admission_focus=False,
+        document_node_serving_grid_centroid_lite_focus=False,
+        document_node_serving_grid_token_pooling_focus=False,
         document_node_serving_grid_centroid_lite_posting_caps=(
             DOCUMENT_NODE_SERVING_GRID_CENTROID_LITE_CAP_SWEEP
         ),
@@ -5029,6 +5427,117 @@ def _self_check_document_node_serving_profiles() -> None:
     assert effective_document_node_serving_stage_mode(
         clone_args(full_args, document_node_serving_grid_stage_mode="two_stage")
     ) == "two_stage"
+    proxy_focus_args = clone_args(
+        full_args,
+        document_node_serving_grid_proxy_admission_focus=True,
+    )
+    assert effective_serving_grid_budget_sweep(proxy_focus_args) == [800]
+    assert effective_serving_grid_executed_budgets(proxy_focus_args) == [800]
+    assert effective_document_node_serving_ef_grid(proxy_focus_args) == [100, 200, 400]
+    assert effective_document_node_serving_oversampling_grid(proxy_focus_args) == [1, 2]
+    proxy_focus_profiles = effective_document_node_serving_profiles(proxy_focus_args)
+    assert [profile.name for profile in proxy_focus_profiles] == list(
+        DOCUMENT_NODE_SERVING_GRID_PROXY_ADMISSION_FOCUS_PROFILES
+    )
+    proxy_focus_by_name = {profile.name: profile for profile in proxy_focus_profiles}
+    assert (
+        proxy_focus_by_name[
+            "proxy_max_pool_f16_entry_sample_032"
+        ].entry_sample_count
+        == 32
+    )
+    assert (
+        proxy_focus_by_name[
+            "proxy_normalized_mean_f16_entry_sidecar_256"
+        ].entry_sidecar_representatives
+        == 256
+    )
+    centroid_focus_args = clone_args(
+        full_args,
+        document_node_serving_grid_centroid_lite_focus=True,
+    )
+    assert effective_serving_grid_budget_sweep(centroid_focus_args) == [800]
+    assert effective_serving_grid_executed_budgets(centroid_focus_args) == [800]
+    centroid_focus_profiles = effective_document_node_serving_profiles(centroid_focus_args)
+    assert [profile.name for profile in centroid_focus_profiles] == list(
+        DOCUMENT_NODE_SERVING_GRID_CENTROID_LITE_FOCUS_PROFILES
+    )
+    centroid_focus_by_name = {profile.name: profile for profile in centroid_focus_profiles}
+    assert (
+        centroid_focus_by_name[
+            "centroid_lite_f16_cap_016"
+        ].centroid_lite_max_postings_per_token
+        == 16
+    )
+    assert (
+        centroid_focus_by_name[
+            "centroid_lite_f16_cap_032"
+        ].centroid_lite_max_postings_per_token
+        == 32
+    )
+    assert (
+        centroid_focus_by_name["centroid_lite_f16_pool_050"].token_pooling
+        == "greedy_cosine"
+    )
+    assert centroid_focus_by_name["centroid_mean_f16"].candidate_source == "proxy_vector"
+    centroid_warning_profile = DocumentNodeServingProfile(
+        name="centroid_lite_f16_cap_016",
+        candidate_source="centroid_lite",
+        centroids="kmeans",
+        centroid_lite_max_postings_per_token=16,
+    )
+    centroid_warnings = centroid_lite_work_warnings(
+        profile=centroid_warning_profile,
+        largest_work={
+            "centroid_docs_touched": {"count": 3, "p95": 900.0},
+            "centroid_postings_touched": {"count": 3, "p95": 10000.0},
+            "centroid_postings_skipped": {"count": 3, "p95": 5000.0},
+            "centroid_candidates": {"count": 3, "p95": 100.0},
+        },
+        loaded_document_count=1000,
+        candidate_budget=800,
+    )
+    assert "centroid_lite_near_exhaustive_docs_touched" in centroid_warnings
+    assert "centroid_lite_postings_near_exhaustive" in centroid_warnings
+    assert "centroid_lite_cap_too_aggressive" in centroid_warnings
+    token_pooling_focus_args = clone_args(
+        full_args,
+        document_node_serving_grid_token_pooling_focus=True,
+    )
+    token_pooling_profiles = effective_document_node_serving_profiles(
+        token_pooling_focus_args
+    )
+    assert [profile.name for profile in token_pooling_profiles] == list(
+        DOCUMENT_NODE_SERVING_GRID_TOKEN_POOLING_FOCUS_PROFILES
+    )
+    token_pooling_by_name = {
+        profile.name: profile for profile in token_pooling_profiles
+    }
+    assert token_pooling_by_name["proxy_normalized_mean_f16"].token_pooling == "off"
+    assert (
+        token_pooling_by_name[
+            "proxy_normalized_mean_f16_pool_075"
+        ].token_pooling_target_ratio
+        == 0.75
+    )
+    assert (
+        token_pooling_by_name["centroid_mean_f16_pool_033"].proxy_encoder
+        == "centroid_mean"
+    )
+    assert (
+        token_pooling_by_name["centroid_mean_f16_pool_033"].centroids
+        == "kmeans"
+    )
+    assert (
+        serving_profile_index_signature(
+            token_pooling_focus_args,
+            token_pooling_by_name["proxy_normalized_mean_f16"],
+        )
+        != serving_profile_index_signature(
+            token_pooling_focus_args,
+            token_pooling_by_name["proxy_normalized_mean_f16_pool_050"],
+        )
+    )
     filtered_args = clone_args(
         full_args,
         document_node_serving_grid_profiles="centroid_mean_f16,proxy_normalized_mean_f16",
@@ -5046,6 +5555,29 @@ def _self_check_document_node_serving_profiles() -> None:
         "proxy_max_pool_f16",
         "proxy_random_projection_fde_f16",
     ]
+    learned_projection_filtered_args = clone_args(
+        full_args,
+        document_node_serving_grid_include_learned_projection=True,
+        document_node_serving_grid_profiles="proxy_learned_projection_v1_f16",
+    )
+    learned_projection_filtered = effective_document_node_serving_profiles(
+        learned_projection_filtered_args
+    )
+    assert [profile.name for profile in learned_projection_filtered] == [
+        "proxy_learned_projection_v1_f16",
+    ]
+    assert learned_projection_filtered[0].proxy_encoder == "learned_projection_v1"
+    try:
+        effective_document_node_serving_profiles(
+            clone_args(
+                full_args,
+                document_node_serving_grid_profiles="proxy_learned_projection_v1_f16",
+            )
+        )
+    except SystemExit as exc:
+        assert "unknown profile" in str(exc)
+    else:
+        raise AssertionError("learned-projection profile should require opt-in flag")
     capped_filtered_args = clone_args(
         full_args,
         document_node_serving_grid_include_centroid_lite_caps=True,
@@ -5287,6 +5819,10 @@ def _self_check_document_node_serving_profiles() -> None:
         profile.name: serving_profile_index_signature(signature_args, profile)
         for profile in entry_sidecar_proxy_variants
     }
+    proxy_focus_signature_by_name = {
+        profile.name: serving_profile_index_signature(signature_args, profile)
+        for profile in proxy_focus_profiles
+    }
     assert signature_by_name["proxy_normalized_mean_f16"] == signature_by_name["docnodes_normalized_mean_f16"]
     assert signature_by_name["proxy_normalized_mean_f16"] == signature_by_name["proxy_normalized_mean_sq8"]
     assert signature_by_name["proxy_normalized_mean_f16"] != bm25_signature_by_name["proxy_normalized_mean_f16_bm25_rescue"]
@@ -5300,12 +5836,28 @@ def _self_check_document_node_serving_profiles() -> None:
         == entry_sample_signature_by_name["proxy_normalized_mean_f16_entry_sample_032"]
     )
     assert (
+        signature_by_name["proxy_normalized_mean_f16"]
+        == proxy_focus_signature_by_name["proxy_normalized_mean_f16_entry_sample_128"]
+    )
+    assert (
         signature_by_name["centroid_mean_f16"]
         == entry_sample_signature_by_name["centroid_mean_f16_entry_sample_032"]
     )
     assert (
+        proxy_variant_signature_by_name["proxy_max_pool_f16"]
+        == proxy_focus_signature_by_name["proxy_max_pool_f16_entry_sample_032"]
+    )
+    assert (
         signature_by_name["proxy_normalized_mean_f16"]
         != entry_sidecar_signature_by_name["proxy_normalized_mean_f16_entry_sidecar"]
+    )
+    assert (
+        proxy_focus_signature_by_name["proxy_normalized_mean_f16_entry_sidecar_128"]
+        != proxy_focus_signature_by_name["proxy_normalized_mean_f16_entry_sidecar_256"]
+    )
+    assert (
+        proxy_focus_signature_by_name["proxy_max_pool_f16_entry_sidecar_128"]
+        != proxy_focus_signature_by_name["proxy_max_pool_f16_entry_sidecar_256"]
     )
     assert (
         signature_by_name["centroid_mean_f16"]
@@ -5593,6 +6145,50 @@ def _self_check_learned_sparse_evidence_annotation() -> None:
     assert recommendation["best_balanced"]["profile"] == "proxy_normalized_mean_f16"
 
 
+def _self_check_learned_sparse_jsonl_parser() -> None:
+    with tempfile.TemporaryDirectory() as tmpdir:
+        tmp = Path(tmpdir)
+        sparse_path = tmp / "sparse.jsonl"
+        sparse_path.write_text(
+            "\n".join(
+                [
+                    json.dumps({"doc_id": "d1", "term_ids": [1, 2], "weights": [0.5, 1.25]}),
+                    json.dumps({"id": "d2", "terms": [3], "scores": [2.0]}),
+                    "",
+                ]
+            ),
+            encoding="utf-8",
+        )
+        assert parse_sparse_jsonl(sparse_path, "doc_id") == [
+            ("d1", [1, 2], [0.5, 1.25]),
+            ("d2", [3], [2.0]),
+        ]
+
+        malformed_path = tmp / "malformed.jsonl"
+        malformed_path.write_text(
+            json.dumps({"query_id": "q1", "term_ids": [1, 2], "weights": [1.0]}),
+            encoding="utf-8",
+        )
+        try:
+            parse_sparse_jsonl(malformed_path, "query_id")
+        except SystemExit as exc:
+            assert "equal-length arrays" in str(exc)
+        else:
+            raise AssertionError("malformed learned-sparse JSONL should fail")
+
+    try:
+        require_complete_learned_sparse_args(
+            argparse.Namespace(
+                learned_sparse_doc_jsonl=Path("docs.jsonl"),
+                learned_sparse_query_jsonl=None,
+            )
+        )
+    except SystemExit as exc:
+        assert "must be supplied together" in str(exc)
+    else:
+        raise AssertionError("incomplete learned-sparse JSONL arguments should fail")
+
+
 def document_node_serving_profile_args(
     args: argparse.Namespace,
     profile: DocumentNodeServingProfile,
@@ -5803,6 +6399,44 @@ def serving_grid_scan_stats_sample(admission: dict[str, Any], largest_budget: in
     return sample if isinstance(sample, dict) else {}
 
 
+def centroid_lite_work_warnings(
+    *,
+    profile: DocumentNodeServingProfile,
+    largest_work: dict[str, Any],
+    loaded_document_count: int,
+    candidate_budget: int | None,
+) -> list[str]:
+    if profile.candidate_source != "centroid_lite":
+        return []
+    warnings: list[str] = []
+    docs_touched = summary_stat_float(largest_work.get("centroid_docs_touched"), "p95")
+    postings_touched = summary_stat_float(
+        largest_work.get("centroid_postings_touched"),
+        "p95",
+    )
+    postings_skipped = summary_stat_float(
+        largest_work.get("centroid_postings_skipped"),
+        "p95",
+    )
+    candidates = summary_stat_float(largest_work.get("centroid_candidates"), "p95")
+    if loaded_document_count > 0 and docs_touched >= max(100.0, loaded_document_count * 0.8):
+        warnings.append("centroid_lite_near_exhaustive_docs_touched")
+    if postings_touched > 0.0 and (
+        "centroid_lite_near_exhaustive_docs_touched" in warnings
+        or (profile.centroid_lite_max_postings_per_token <= 0 and postings_skipped <= 0.0)
+    ):
+        warnings.append("centroid_lite_postings_near_exhaustive")
+    if (
+        profile.centroid_lite_max_postings_per_token > 0
+        and candidate_budget is not None
+        and candidate_budget > 0
+        and candidates > 0.0
+        and candidates < candidate_budget * 0.5
+    ):
+        warnings.append("centroid_lite_cap_too_aggressive")
+    return sorted(dict.fromkeys(warnings))
+
+
 def document_node_serving_summary_row(
     *,
     profile: DocumentNodeServingProfile,
@@ -5857,6 +6491,14 @@ def document_node_serving_summary_row(
         if isinstance(index_stats, dict)
         else 0
     )
+
+    def first_sample_value(*keys: str) -> Any:
+        for key in keys:
+            value = stats_sample.get(key)
+            if value is not None:
+                return value
+        return None
+
     slow_path_args = clone_args(
         args,
         serving_loaded_document_count=loaded_document_count,
@@ -5878,11 +6520,36 @@ def document_node_serving_summary_row(
         )
         if reservoirs_enabled_queries <= 0 and not sample_reservoirs_enabled:
             evidence_warnings.append("candidate_reservoirs_not_executed")
+    candidate_diagnostics = derive_candidate_underfill_diagnostics({
+        "candidate_budget": largest_budget,
+        "candidate_source": profile.candidate_source,
+        "final_k": args.final_k,
+        "multivector_doc_candidate_k": int(
+            getattr(args, "multivector_doc_candidate_k", 0) or 0
+        ),
+        "multivector_doc_graph_search_ef": ef,
+        "multivector_doc_graph_oversampling": oversampling,
+        "effective_exact_rerank_k": largest_work.get("effective_exact_rerank_k"),
+        "proxy_candidates": largest_work.get("proxy_candidates"),
+        "centroid_candidates": largest_work.get("centroid_candidates"),
+        "quantized_inverted_candidates": largest_work.get("quantized_inverted_candidates"),
+        "last_scan_stats_sample": stats_sample,
+    })
+    centroid_lite_warnings = centroid_lite_work_warnings(
+        profile=profile,
+        largest_work=largest_work,
+        loaded_document_count=loaded_document_count,
+        candidate_budget=largest_budget,
+    )
     return {
         "profile": profile.name,
         "candidate_source": profile.candidate_source,
         "branch_plan": profile.branch_plan,
         "bm25_candidate_injection": profile.bm25_candidate_injection,
+        "bm25_text_query_available": (
+            profile.bm25_candidate_injection == "off"
+            or query_only_needs_text_query(args)
+        ),
         "sparse_candidate_source": profile.sparse_candidate_source,
         "graph_mode": "document_nodes",
         "proxy_encoder": profile.proxy_encoder,
@@ -5907,6 +6574,7 @@ def document_node_serving_summary_row(
         "centroid_lite_max_postings_per_token": (
             profile.centroid_lite_max_postings_per_token
         ),
+        "centroid_lite_warnings": centroid_lite_warnings,
         "ef": ef,
         "oversampling": oversampling,
         "run_elapsed_ms": aggregate.get("total_elapsed_ms", 0.0),
@@ -5930,6 +6598,7 @@ def document_node_serving_summary_row(
         ),
         "largest_budget": largest_budget,
         "candidate_budget": largest_budget,
+        **candidate_diagnostics,
         "serving_exact_rerank_mode": aggregate.get(
             "serving_exact_rerank_mode",
             getattr(args, "serving_exact_rerank_mode", "admission_exhaustive"),
@@ -5949,10 +6618,34 @@ def document_node_serving_summary_row(
         "exact_rerank_docs": exact_rerank_docs_work,
         "exact_rerank_docs_p50": exact_rerank_docs_work.get("p50"),
         "exact_rerank_docs_p95": exact_rerank_docs_work.get("p95"),
+        "exact_rerank_pairs": largest_work.get("exact_rerank_pairs"),
+        "exact_rerank_pairs_p50": summary_stat_float(
+            largest_work.get("exact_rerank_pairs"),
+            "p50",
+        ),
+        "multivector_tokens_original": largest_work.get("multivector_tokens_original"),
+        "multivector_tokens_pooled": largest_work.get("multivector_tokens_pooled"),
+        "multivector_token_pooling_ratio": largest_work.get(
+            "multivector_token_pooling_ratio"
+        ),
+        "tokens_original_p50": summary_stat_float(
+            largest_work.get("multivector_tokens_original"),
+            "p50",
+        ),
+        "tokens_pooled_p50": summary_stat_float(
+            largest_work.get("multivector_tokens_pooled"),
+            "p50",
+        ),
+        "token_pooling_ratio_p50": summary_stat_float(
+            largest_work.get("multivector_token_pooling_ratio"),
+            "p50",
+        ),
         "p50_ms": largest_latency.get("p50_ms"),
         "p95_ms": largest_latency.get("p95_ms"),
+        "p99_ms": largest_latency.get("p99_ms"),
         "p50_latency_ms_at_largest_budget": largest_latency.get("p50_ms"),
         "p95_latency_ms_at_largest_budget": largest_latency.get("p95_ms"),
+        "p99_latency_ms_at_largest_budget": largest_latency.get("p99_ms"),
         "exact_top1_admission_rate": aggregate.get("exact_top1_admission_rate", 0.0),
         "exact_top10_admission_recall": aggregate.get("exact_top10_admission_recall", 0.0),
         "recall@10": metrics.get("recall@10") if metrics else None,
@@ -5986,6 +6679,67 @@ def document_node_serving_summary_row(
         ),
         "learned_sparse_branch_latency_us": largest_work.get(
             "learned_sparse_branch_latency_us"
+        ),
+        "centroid_lists_visited": largest_work.get("centroid_lists_visited"),
+        "centroid_docs_touched": largest_work.get("centroid_docs_touched"),
+        "centroid_pruned_docs": largest_work.get("centroid_pruned_docs"),
+        "centroid_postings_touched": largest_work.get("centroid_postings_touched"),
+        "centroid_postings_skipped": largest_work.get("centroid_postings_skipped"),
+        "centroid_posting_limit_per_token": largest_work.get(
+            "centroid_posting_limit_per_token"
+        ),
+        "centroid_posting_cap_strategy": largest_work.get(
+            "centroid_posting_cap_strategy"
+        ),
+        "centroid_candidates": largest_work.get("centroid_candidates"),
+        "proxy_candidate_limit_effective": stats_sample.get(
+            "proxy_candidate_limit_effective"
+        ),
+        "proxy_candidate_limit_source": stats_sample.get("proxy_candidate_limit_source"),
+        "multivector_proxy_candidate_target": stats_sample.get(
+            "multivector_proxy_candidate_target"
+        ),
+        "multivector_proxy_candidates_returned": stats_sample.get(
+            "multivector_proxy_candidates_returned"
+        ),
+        "proxy_candidates_returned": first_sample_value(
+            "proxy_candidates_returned",
+            "multivector_proxy_candidates_returned",
+        ),
+        "graph_entry_sample_scored": first_sample_value(
+            "graph_entry_sample_scored",
+            "multivector_doc_graph_entry_sample_scored",
+        ),
+        "graph_entry_sidecar_scored": first_sample_value("graph_entry_sidecar_scored"),
+        "graph_entry_sidecar_selected": first_sample_value("graph_entry_sidecar_selected"),
+        "graph_traversal_time_us": first_sample_value(
+            "document_graph_traversal_time_us",
+            "multivector_document_graph_traversal_time_us",
+            "graph_traverse_us",
+        ),
+        "exact_rerank_time_us": first_sample_value(
+            "exact_maxsim_rerank_time_us",
+            "multivector_exact_maxsim_rerank_time_us",
+            "graph_heap_rescore_us",
+            "graph_rescore_us",
+        ),
+        "sidecar_query_bytes_touched": first_sample_value(
+            "sidecar_query_bytes_touched",
+            "multivector_doc_sidecar_bytes_touched",
+        ),
+        "sidecar_query_time_us": first_sample_value(
+            "sidecar_query_time_us",
+            "sidecar_query_load_time_us",
+            "sidecar_load_time_us",
+            "multivector_sidecar_load_time_us",
+        ),
+        "multivector_doc_graph_search_ef": stats_sample.get(
+            "multivector_doc_graph_search_ef",
+            ef,
+        ),
+        "multivector_doc_graph_oversampling": stats_sample.get(
+            "multivector_doc_graph_oversampling",
+            oversampling,
         ),
         "serving_stats_by_budget": stats_by_budget,
         "stats_available": merge_document_node_serving_stats_available(stats_by_budget),
@@ -6042,6 +6796,11 @@ def serving_candidate_delta_baseline(profile_name: str) -> tuple[str, str] | Non
         baseline, count_text = profile_name.rsplit(marker, 1)
         if baseline and count_text.isdigit():
             return baseline, "entry_sample"
+    marker = "_entry_sidecar_"
+    if marker in profile_name:
+        baseline, count_text = profile_name.rsplit(marker, 1)
+        if baseline and count_text.isdigit():
+            return baseline, "entry_sidecar"
     suffix_baselines = (
         ("_reservoir_balanced", "candidate_reservoir"),
         ("_learned_sparse_rescue", "learned_sparse_rescue"),
@@ -6351,6 +7110,16 @@ def compute_document_node_candidate_source_deltas(
             top10_delta is not None and float(top10_delta) > 0.0
         )
         delta_row["latency_improved"] = p95_delta is not None and float(p95_delta) < 0.0
+        if comparison == "centroid_lite_posting_cap":
+            for warning_name in row.get("centroid_lite_warnings", []) or []:
+                evidence_warnings.append(str(warning_name))
+            if top10_delta is not None and float(top10_delta) <= 0.0:
+                evidence_warnings.append("centroid_lite_no_admission_gain")
+            if top10_delta is not None and float(top10_delta) < -0.02:
+                evidence_warnings.append("centroid_lite_cap_too_aggressive")
+            if p95_delta is not None and float(p95_delta) > 0.0:
+                evidence_warnings.append("centroid_lite_latency_regression")
+            delta_row["evidence_warnings"] = sorted(dict.fromkeys(evidence_warnings))
         deltas.append(delta_row)
     deltas.sort(
         key=lambda item: (
@@ -6589,6 +7358,7 @@ def serving_recommendation_row(row: dict[str, Any]) -> dict[str, Any]:
         "experimental": serving_row_experimental(row),
         "branch_plan": row.get("branch_plan"),
         "bm25_candidate_injection": row.get("bm25_candidate_injection"),
+        "bm25_text_query_available": row.get("bm25_text_query_available"),
         "sparse_candidate_source": row.get("sparse_candidate_source"),
         "proxy_encoder": row.get("proxy_encoder"),
         "centroids": row.get("centroids"),
@@ -6596,6 +7366,12 @@ def serving_recommendation_row(row: dict[str, Any]) -> dict[str, Any]:
         "cache_mode": row.get("cache_mode"),
         "token_pooling": row.get("token_pooling"),
         "token_pooling_target_ratio": row.get("token_pooling_target_ratio"),
+        "multivector_tokens_original": row.get("multivector_tokens_original"),
+        "multivector_tokens_pooled": row.get("multivector_tokens_pooled"),
+        "multivector_token_pooling_ratio": row.get("multivector_token_pooling_ratio"),
+        "tokens_original_p50": row.get("tokens_original_p50"),
+        "tokens_pooled_p50": row.get("tokens_pooled_p50"),
+        "token_pooling_ratio_p50": row.get("token_pooling_ratio_p50"),
         "candidate_reservoirs": row.get("candidate_reservoirs"),
         "per_token_doc_reservoir_k": row.get("per_token_doc_reservoir_k"),
         "coverage_reservoir_k": row.get("coverage_reservoir_k"),
@@ -6609,10 +7385,23 @@ def serving_recommendation_row(row: dict[str, Any]) -> dict[str, Any]:
         "centroid_lite_max_postings_per_token": row.get(
             "centroid_lite_max_postings_per_token"
         ),
+        "centroid_lite_warnings": row.get("centroid_lite_warnings", []),
         "ef": row.get("ef"),
         "oversampling": row.get("oversampling"),
         "largest_budget": row.get("largest_budget"),
         "candidate_budget": row.get("candidate_budget", row.get("largest_budget")),
+        "requested_candidate_k": row.get("requested_candidate_k"),
+        "effective_candidate_k": row.get("effective_candidate_k"),
+        "candidate_underfill": row.get("candidate_underfill"),
+        "candidate_underfill_ratio": row.get("candidate_underfill_ratio"),
+        "candidate_underfill_reason": row.get("candidate_underfill_reason"),
+        "next_admission_hint": row.get("next_admission_hint"),
+        "proxy_candidate_limit_effective": row.get("proxy_candidate_limit_effective"),
+        "proxy_candidate_limit_source": row.get("proxy_candidate_limit_source"),
+        "multivector_proxy_candidate_target": row.get("multivector_proxy_candidate_target"),
+        "multivector_proxy_candidates_returned": row.get(
+            "multivector_proxy_candidates_returned"
+        ),
         "serving_exact_rerank_mode": row.get("serving_exact_rerank_mode"),
         "admission_debug_mode": row.get("admission_debug_mode"),
         "trace_enabled": row.get("trace_enabled"),
@@ -6622,16 +7411,26 @@ def serving_recommendation_row(row: dict[str, Any]) -> dict[str, Any]:
         "effective_exact_rerank_k": row.get("effective_exact_rerank_k"),
         "exact_rerank_docs_p50": row.get("exact_rerank_docs_p50"),
         "exact_rerank_docs_p95": row.get("exact_rerank_docs_p95"),
+        "exact_rerank_pairs": row.get("exact_rerank_pairs"),
+        "exact_rerank_pairs_p50": row.get("exact_rerank_pairs_p50"),
         "p50_ms": row.get("p50_ms"),
         "p95_ms": row.get("p95_ms"),
         "p50_latency_ms_at_largest_budget": row.get("p50_latency_ms_at_largest_budget"),
         "p95_latency_ms_at_largest_budget": row.get("p95_latency_ms_at_largest_budget"),
         "exact_top10_admission_recall": row.get("exact_top10_admission_recall"),
+        "exact_top10_admission_recall_delta": row.get(
+            "exact_top10_admission_recall_delta"
+        ),
+        "bm25_admission_delta": row.get("bm25_admission_delta"),
         "exact_top1_admission_rate": row.get("exact_top1_admission_rate"),
         "recall@10": row.get("recall@10"),
         "ndcg@10": row.get("ndcg@10"),
         "mrr@10": row.get("mrr@10"),
+        "p95_ms_delta": row.get("p95_ms_delta"),
+        "bm25_latency_delta_ms": row.get("bm25_latency_delta_ms"),
         "index_bytes": row.get("index_bytes"),
+        "profile_elapsed_ms": row.get("profile_elapsed_ms"),
+        "index_build_elapsed_ms": row.get("index_build_elapsed_ms"),
         "index_signature": row.get("index_signature"),
         "index_build_reused": row.get("index_build_reused"),
         "index_build_reused_for_profiles": row.get("index_build_reused_for_profiles", []),
@@ -6668,6 +7467,14 @@ def serving_recommendation_row(row: dict[str, Any]) -> dict[str, Any]:
         "learned_sparse_retained_for_maxsim": row.get("learned_sparse_retained_for_maxsim"),
         "learned_sparse_branch_latency_us": row.get("learned_sparse_branch_latency_us"),
         "learned_sparse_partial_coverage": row.get("learned_sparse_partial_coverage"),
+        "centroid_lists_visited": row.get("centroid_lists_visited"),
+        "centroid_docs_touched": row.get("centroid_docs_touched"),
+        "centroid_pruned_docs": row.get("centroid_pruned_docs"),
+        "centroid_postings_touched": row.get("centroid_postings_touched"),
+        "centroid_postings_skipped": row.get("centroid_postings_skipped"),
+        "centroid_posting_limit_per_token": row.get("centroid_posting_limit_per_token"),
+        "centroid_posting_cap_strategy": row.get("centroid_posting_cap_strategy"),
+        "centroid_candidates": row.get("centroid_candidates"),
         "evidence_warnings": row.get("evidence_warnings", []),
         "stats_available": row.get("stats_available", {}),
         "last_scan_stats_sample": row.get("last_scan_stats_sample", {}),
@@ -6686,6 +7493,178 @@ def serving_row_candidate_budget(row: dict[str, Any]) -> int | None:
         if budget > 0:
             return budget
     return None
+
+
+def int_from_mapping(mapping: dict[str, Any], *keys: str) -> int:
+    for key in keys:
+        value = mapping.get(key)
+        if value is None or isinstance(value, bool):
+            continue
+        try:
+            parsed = int(value)
+        except (TypeError, ValueError):
+            continue
+        return parsed
+    return 0
+
+
+def summary_p95_int(value: Any) -> int:
+    if isinstance(value, dict):
+        return int_from_mapping(value, "p95", "max", "mean")
+    if value is None or isinstance(value, bool):
+        return 0
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return 0
+
+
+def serving_candidate_effective_count(row: dict[str, Any], sample: dict[str, Any]) -> int:
+    direct = int_from_mapping(
+        row,
+        "effective_candidate_k",
+        "proxy_candidates_returned",
+        "multivector_proxy_candidates_returned",
+        "proxy_candidates",
+        "multivector_doc_graph_candidates",
+        "centroid_candidates",
+        "quantized_inverted_candidates",
+    )
+    if direct > 0:
+        return direct
+    for key in (
+        "proxy_candidates",
+        "multivector_proxy_candidates_returned",
+        "proxy_candidates_returned",
+        "multivector_doc_graph_candidates",
+        "centroid_candidates",
+        "quantized_inverted_candidates",
+    ):
+        summarized = summary_p95_int(row.get(key))
+        if summarized > 0:
+            return summarized
+    return int_from_mapping(
+        sample,
+        "proxy_candidates_returned",
+        "multivector_proxy_candidates_returned",
+        "proxy_candidates",
+        "multivector_doc_graph_candidates",
+        "centroid_candidates",
+        "quantized_inverted_candidates",
+    )
+
+
+def serving_candidate_underfill_reason(
+    row: dict[str, Any],
+    *,
+    requested_candidate_k: int,
+    effective_candidate_k: int,
+    sample: dict[str, Any],
+) -> str:
+    if requested_candidate_k <= 0 or effective_candidate_k <= 0:
+        return "unknown"
+    if effective_candidate_k >= requested_candidate_k:
+        exact_k = int_from_mapping(row, "effective_exact_rerank_k")
+        if exact_k > 0 and exact_k < effective_candidate_k:
+            return "exact_rerank_k_limits_rescue"
+        return "none"
+
+    limit_source = str(
+        row.get("proxy_candidate_limit_source")
+        or sample.get("proxy_candidate_limit_source")
+        or ""
+    )
+    if limit_source == "search_ef":
+        return "capped_by_search_ef"
+    if limit_source == "doc_candidate_k":
+        return "capped_by_doc_candidate_k"
+
+    search_ef = int_from_mapping(
+        row,
+        "multivector_doc_graph_search_ef",
+        "doc_graph_search_ef",
+        "ef",
+    ) or int_from_mapping(sample, "multivector_doc_graph_search_ef")
+    if search_ef > 0 and search_ef <= effective_candidate_k:
+        return "capped_by_search_ef"
+
+    target = int_from_mapping(row, "multivector_proxy_candidate_target") or int_from_mapping(
+        sample,
+        "multivector_proxy_candidate_target",
+    )
+    final_k = int_from_mapping(row, "final_k", "final_k_effective") or int_from_mapping(
+        sample,
+        "final_k_effective",
+        "effective_result_target",
+        "graph_effective_result_target",
+    )
+    oversampling = int_from_mapping(
+        row,
+        "multivector_doc_graph_oversampling",
+        "doc_graph_oversampling",
+        "oversampling",
+    ) or int_from_mapping(sample, "multivector_doc_graph_oversampling")
+    if (
+        target > 0
+        and final_k > 0
+        and oversampling > 0
+        and target <= max(final_k * oversampling, final_k)
+        and target <= effective_candidate_k
+    ):
+        return "capped_by_final_k_oversampling"
+
+    doc_candidate_k = int_from_mapping(row, "multivector_doc_candidate_k") or int_from_mapping(
+        sample,
+        "multivector_doc_candidate_k",
+    )
+    if doc_candidate_k > 0 and doc_candidate_k <= effective_candidate_k:
+        return "capped_by_doc_candidate_k"
+
+    return "candidate_source_underfilled"
+
+
+def next_admission_hint_for_underfill_reason(reason: str) -> str:
+    return {
+        "capped_by_search_ef": "try_higher_ef_or_entry_sample",
+        "capped_by_final_k_oversampling": "increase_oversampling",
+        "capped_by_doc_candidate_k": "increase_multivector_doc_candidate_k",
+        "candidate_source_underfilled": "try_entry_sidecar_or_stronger_proxy",
+        "exact_rerank_k_limits_rescue": "increase_serving_exact_rerank_k_or_candidate_reservoir",
+        "unknown": "inspect_candidate_limit_stats",
+        "none": "",
+    }.get(reason, "inspect_candidate_limit_stats")
+
+
+def derive_candidate_underfill_diagnostics(row: dict[str, Any]) -> dict[str, Any]:
+    sample = row.get("last_scan_stats_sample", row.get("serving_stats_sample", {}))
+    if not isinstance(sample, dict):
+        sample = {}
+    requested = serving_row_candidate_budget(row) or int_from_mapping(
+        sample,
+        "multivector_proxy_candidate_target",
+    )
+    effective = serving_candidate_effective_count(row, sample)
+    reason = serving_candidate_underfill_reason(
+        row,
+        requested_candidate_k=requested or 0,
+        effective_candidate_k=effective,
+        sample=sample,
+    )
+    ratio = (
+        round(min(max(effective / requested, 0.0), 1.0), 6)
+        if requested and effective >= 0
+        else None
+    )
+    underfill = bool(requested and effective > 0 and effective < requested)
+    hint = next_admission_hint_for_underfill_reason(reason)
+    return {
+        "requested_candidate_k": requested,
+        "effective_candidate_k": effective,
+        "candidate_underfill": underfill,
+        "candidate_underfill_ratio": ratio,
+        "candidate_underfill_reason": reason,
+        "next_admission_hint": hint,
+    }
 
 
 def serving_row_exhausted_admitted_band(row: dict[str, Any]) -> bool:
@@ -6767,6 +7746,13 @@ def serving_admission_improvement_hints(
     if not isinstance(sample, dict):
         sample = {}
 
+    candidate_hint = str(row.get("next_admission_hint") or "")
+    if candidate_hint:
+        hints.append(candidate_hint)
+    candidate_underfill_reason = str(row.get("candidate_underfill_reason") or "")
+    if candidate_underfill_reason and candidate_underfill_reason not in {"none", "unknown"}:
+        hints.append(candidate_underfill_reason)
+
     if serving_row_candidate_admission_bottleneck(
         row,
         min_top10_admission=min_top10_admission,
@@ -6835,6 +7821,8 @@ def serving_admission_improvement_hints(
     bm25_injection = row.get("bm25_candidate_injection")
     bm25_enabled_queries = int(row.get("bm25_injection_enabled_queries") or 0)
     if bm25_injection and bm25_injection != "off":
+        if row.get("bm25_text_query_available") is False:
+            hints.append("bm25_rescue_missing_text_query")
         if bm25_enabled_queries <= 0:
             hints.append("bm25_rescue_not_triggering")
         reason_counts = row.get("bm25_injection_limit_reason")
@@ -6844,11 +7832,33 @@ def serving_admission_improvement_hints(
             hints.append("bm25_rescue_limited_by_doc_candidate_k")
         if summary_reason_present(reason_counts, "bm25_count"):
             hints.append("bm25_rescue_lexical_underfill")
+            hints.append("bm25_rescue_underfilled")
+        if summary_stat_float(row.get("bm25_injection_candidates"), "p95") <= 0.0:
+            hints.append("bm25_rescue_underfilled")
         if (
             summary_stat_float(row.get("bm25_injection_candidates"), "p95") > 0.0
             and summary_stat_float(row.get("bm25_injection_retained"), "p95") <= 0.0
         ):
             hints.append("bm25_rescue_not_retained")
+        for admission_delta_key in (
+            "exact_top10_admission_recall_delta",
+            "bm25_admission_delta",
+        ):
+            if admission_delta_key in row:
+                try:
+                    if float(row.get(admission_delta_key) or 0.0) <= 0.0:
+                        hints.append("bm25_rescue_no_admission_gain")
+                except (TypeError, ValueError):
+                    pass
+                break
+        for latency_delta_key in ("p95_ms_delta", "bm25_latency_delta_ms"):
+            if latency_delta_key in row:
+                try:
+                    if float(row.get(latency_delta_key) or 0.0) > 0.0:
+                        hints.append("bm25_rescue_latency_regression")
+                except (TypeError, ValueError):
+                    pass
+                break
 
     sparse_source = row.get("sparse_candidate_source")
     if sparse_source == "learned_sparse":
@@ -6858,6 +7868,27 @@ def serving_admission_improvement_hints(
             hints.append("learned_sparse_no_candidates")
         elif summary_stat_float(row.get("learned_sparse_retained_for_maxsim"), "p95") <= 0.0:
             hints.append("learned_sparse_not_retained")
+
+    if row.get("candidate_source") == "centroid_lite":
+        for warning_name in row.get("centroid_lite_warnings", []) or []:
+            hints.append(str(warning_name))
+        if str(row.get("comparison", "")) == "centroid_lite_posting_cap":
+            try:
+                admission_delta = float(
+                    row.get("exact_top10_admission_recall_delta") or 0.0
+                )
+            except (TypeError, ValueError):
+                admission_delta = 0.0
+            try:
+                latency_delta = float(row.get("p95_ms_delta") or 0.0)
+            except (TypeError, ValueError):
+                latency_delta = 0.0
+            if admission_delta <= 0.0:
+                hints.append("centroid_lite_no_admission_gain")
+            if admission_delta < -0.02:
+                hints.append("centroid_lite_cap_too_aggressive")
+            if latency_delta > 0.0:
+                hints.append("centroid_lite_latency_regression")
 
     warning = str(sample.get("multivector_doc_graph_warning", "") or "")
     if "near_exhaustive" in warning:
@@ -7093,6 +8124,15 @@ def compute_document_node_serving_recommendation(
         )
         summary["threshold_pass"] = not failures
         summary["failure_reasons"] = failures
+        if (
+            summary["failure_reasons"]
+            and bool(summary.get("candidate_underfill"))
+            and "candidate_underfill" not in summary["failure_reasons"]
+        ):
+            summary["failure_reasons"] = [
+                *summary["failure_reasons"],
+                "candidate_underfill",
+            ]
         if candidate_bottleneck and "candidate_admission_bottleneck" not in summary["failure_reasons"]:
             summary["failure_reasons"] = [
                 *summary["failure_reasons"],
@@ -7293,6 +8333,133 @@ def compute_document_node_serving_recommendation(
     }
 
 
+def compute_document_node_token_pooling_recommendation(
+    serving_grid: dict[str, Any],
+    *,
+    exact_baseline: dict[str, Any],
+    min_top10_admission: float,
+    min_ndcg_ratio_vs_exact: float,
+    max_p95_ms: float,
+) -> dict[str, Any]:
+    raw_rows = serving_grid.get("results", serving_grid.get("summary_rows", []))
+    rows = [
+        item
+        for item in raw_rows
+        if isinstance(item, dict)
+        and str(item.get("profile", "")) in DOCUMENT_NODE_SERVING_GRID_TOKEN_POOLING_FOCUS_PROFILES
+    ]
+    exact_metrics = exact_baseline.get("metrics", {}) if isinstance(exact_baseline, dict) else {}
+    exact_baseline_ndcg = (
+        serving_row_metric({"ndcg@10": exact_metrics.get("ndcg@10")}, "ndcg@10")
+        if isinstance(exact_metrics, dict)
+        else None
+    )
+    threshold_rows: list[dict[str, Any]] = []
+    rejected_profiles: list[dict[str, Any]] = []
+    unavailable_criteria: set[str] = set()
+    for row in rows:
+        failures, unavailable = serving_threshold_failures(
+            row,
+            min_top10_admission=min_top10_admission,
+            min_ndcg_ratio_vs_exact=min_ndcg_ratio_vs_exact,
+            max_p95_ms=max_p95_ms,
+            exact_baseline_ndcg=exact_baseline_ndcg,
+        )
+        summary = serving_recommendation_row(row)
+        summary["threshold_pass"] = not failures
+        summary["failure_reasons"] = failures
+        summary["unavailable_criteria"] = unavailable
+        summary["selection_metrics"] = {
+            "p95_ms": serving_row_p95(row),
+            "exact_top10_admission_recall": serving_row_metric(
+                row,
+                "exact_top10_admission_recall",
+            ),
+            "ndcg@10": serving_row_metric(row, "ndcg@10"),
+            "tokens_pooled_p50": row.get("tokens_pooled_p50"),
+            "token_pooling_ratio_p50": row.get("token_pooling_ratio_p50"),
+            "exact_rerank_pairs_p50": row.get("exact_rerank_pairs_p50"),
+            "index_build_elapsed_ms": row.get("index_build_elapsed_ms"),
+        }
+        unavailable_criteria.update(str(item) for item in unavailable)
+        threshold_rows.append(summary)
+        if failures:
+            rejected_profiles.append(summary)
+
+    eligible = [
+        item for item in threshold_rows
+        if (
+            item["threshold_pass"]
+            and not serving_row_experimental(item)
+            and serving_row_p95(item) is not None
+        )
+    ]
+    best_pooling_latency_safe = min(
+        eligible,
+        key=lambda item: (
+            serving_row_p95(item) if serving_row_p95(item) is not None else float("inf"),
+            str(item.get("id", "")),
+        ),
+        default=None,
+    )
+    use_ndcg = serving_quality_available(rows)
+    best_pooling_quality_safe = max(
+        eligible,
+        key=lambda item: (
+            (serving_row_metric(item, "ndcg@10") or 0.0)
+            if use_ndcg
+            else (serving_row_metric(item, "exact_top10_admission_recall") or 0.0),
+            serving_row_metric(item, "exact_top10_admission_recall") or 0.0,
+            -(serving_row_p95(item) if serving_row_p95(item) is not None else float("inf")),
+            str(item.get("id", "")),
+        ),
+        default=None,
+    )
+    if best_pooling_latency_safe is not None:
+        best_pooling_latency_safe = {
+            **best_pooling_latency_safe,
+            "criteria_unavailable": sorted(unavailable_criteria),
+            "selection_basis": "lowest_p95_passing_thresholds",
+        }
+    if best_pooling_quality_safe is not None:
+        best_pooling_quality_safe = {
+            **best_pooling_quality_safe,
+            "criteria_unavailable": sorted(unavailable_criteria),
+            "selection_basis": "ndcg@10" if use_ndcg else "exact_top10_admission_recall",
+        }
+    return {
+        "available": bool(rows),
+        "profile_count": len(rows),
+        "thresholds": {
+            "serving_min_top10_admission": min_top10_admission,
+            "serving_min_ndcg_ratio_vs_exact": min_ndcg_ratio_vs_exact,
+            "serving_max_p95_ms": max_p95_ms,
+        },
+        "exact_baseline": exact_baseline,
+        "selection_basis": (
+            "qrels_ndcg_and_admission_latency"
+            if use_ndcg
+            else "admission_latency_without_qrels"
+        ),
+        "best_pooling_latency_safe": best_pooling_latency_safe,
+        "best_pooling_quality_safe": best_pooling_quality_safe,
+        "profile_thresholds": sorted(
+            threshold_rows,
+            key=lambda item: (
+                serving_row_p95(item) if serving_row_p95(item) is not None else float("inf"),
+                str(item.get("id", "")),
+            ),
+        ),
+        "rejected_pooling_profiles": sorted(
+            rejected_profiles,
+            key=lambda item: (
+                serving_row_p95(item) if serving_row_p95(item) is not None else float("inf"),
+                str(item.get("id", "")),
+            ),
+        ),
+    }
+
+
 def _synthetic_serving_row(
     profile: str,
     *,
@@ -7303,6 +8470,8 @@ def _synthetic_serving_row(
     candidate_source: str = "proxy_vector",
     proxy_encoder: str = "normalized_mean",
     centroids: str = "off",
+    token_pooling: str = "off",
+    token_pooling_target_ratio: float = 1.0,
     ef: int = 100,
     oversampling: int = 1,
     stats_sample: dict[str, Any] | None = None,
@@ -7316,8 +8485,8 @@ def _synthetic_serving_row(
         "centroids": centroids,
         "storage_kind": storage,
         "cache_mode": "auto",
-        "token_pooling": "off",
-        "token_pooling_target_ratio": 1.0,
+        "token_pooling": token_pooling,
+        "token_pooling_target_ratio": token_pooling_target_ratio,
         "ef": ef,
         "oversampling": oversampling,
         "largest_budget": 800,
@@ -7372,10 +8541,13 @@ def _self_check_document_node_serving_recommendation() -> None:
     )
     bm25_limited.update({
         "bm25_candidate_injection": "dense_with_text",
+        "bm25_text_query_available": False,
         "bm25_injection_enabled_queries": 4,
         "bm25_injection_candidates": {"count": 5, "p95": 12.0},
         "bm25_injection_retained": {"count": 5, "p95": 0.0},
         "bm25_injection_limit_reason": {"exact_rerank_k": 3, "bm25_count": 2},
+        "exact_top10_admission_recall_delta": 0.0,
+        "p95_ms_delta": 8.0,
     })
     learned_sparse_partial = _synthetic_serving_row(
         "learned_sparse_partial_low_admission",
@@ -7413,8 +8585,12 @@ def _self_check_document_node_serving_recommendation() -> None:
     assert "top10_admission_below_threshold" in rejected["latency_winner_fails_admission"]
     assert "proxy_candidates_capped_by_search_ef" in rejected_hints["latency_winner_fails_admission"]
     assert "bm25_rescue_limited_by_exact_rerank_k" in rejected_hints["bm25_limited_low_admission"]
+    assert "bm25_rescue_missing_text_query" in rejected_hints["bm25_limited_low_admission"]
+    assert "bm25_rescue_underfilled" in rejected_hints["bm25_limited_low_admission"]
     assert "bm25_rescue_lexical_underfill" in rejected_hints["bm25_limited_low_admission"]
     assert "bm25_rescue_not_retained" in rejected_hints["bm25_limited_low_admission"]
+    assert "bm25_rescue_no_admission_gain" in rejected_hints["bm25_limited_low_admission"]
+    assert "bm25_rescue_latency_regression" in rejected_hints["bm25_limited_low_admission"]
     assert "learned_sparse_partial_coverage" in rejected_hints["learned_sparse_partial_low_admission"]
     assert "learned_sparse_no_candidates" in rejected_hints["learned_sparse_partial_low_admission"]
     assert "missing_p95_latency" in rejected["missing_latency"]
@@ -7737,6 +8913,114 @@ def _self_check_document_node_serving_recommendation() -> None:
         max_p95_ms=0.0,
     )
     assert tie == tie_again
+
+
+def _self_check_document_node_token_pooling_recommendation() -> None:
+    rows = [
+        _synthetic_serving_row(
+            "proxy_normalized_mean_f16",
+            p95=12.0,
+            admission=0.84,
+            ndcg=0.84,
+            token_pooling="off",
+            token_pooling_target_ratio=1.0,
+        ),
+        _synthetic_serving_row(
+            "proxy_normalized_mean_f16_pool_075",
+            p95=9.0,
+            admission=0.79,
+            ndcg=0.80,
+            token_pooling="greedy_cosine",
+            token_pooling_target_ratio=0.75,
+        ),
+        _synthetic_serving_row(
+            "proxy_normalized_mean_f16_pool_050",
+            p95=8.0,
+            admission=0.83,
+            ndcg=0.82,
+            token_pooling="greedy_cosine",
+            token_pooling_target_ratio=0.5,
+        ),
+        _synthetic_serving_row(
+            "centroid_mean_f16_pool_033",
+            p95=20.0,
+            admission=0.92,
+            ndcg=0.90,
+            proxy_encoder="centroid_mean",
+            centroids="kmeans",
+            token_pooling="greedy_cosine",
+            token_pooling_target_ratio=0.33,
+        ),
+        _synthetic_serving_row(
+            "unrelated_profile",
+            p95=1.0,
+            admission=1.0,
+            ndcg=1.0,
+        ),
+    ]
+    rows[0].update({
+        "tokens_original_p50": 64.0,
+        "tokens_pooled_p50": 64.0,
+        "token_pooling_ratio_p50": 1.0,
+        "exact_rerank_pairs_p50": 6400.0,
+    })
+    rows[1].update({
+        "tokens_original_p50": 64.0,
+        "tokens_pooled_p50": 48.0,
+        "token_pooling_ratio_p50": 0.75,
+        "exact_rerank_pairs_p50": 4800.0,
+    })
+    rows[2].update({
+        "tokens_original_p50": 64.0,
+        "tokens_pooled_p50": 32.0,
+        "token_pooling_ratio_p50": 0.5,
+        "exact_rerank_pairs_p50": 3200.0,
+    })
+    rows[3].update({
+        "tokens_original_p50": 64.0,
+        "tokens_pooled_p50": 21.0,
+        "token_pooling_ratio_p50": 0.33,
+        "exact_rerank_pairs_p50": 2100.0,
+    })
+    rec = compute_document_node_token_pooling_recommendation(
+        {"results": rows},
+        exact_baseline={"available": True, "metrics": {"ndcg@10": 0.90}},
+        min_top10_admission=0.80,
+        min_ndcg_ratio_vs_exact=0.90,
+        max_p95_ms=0.0,
+    )
+    assert rec["available"] is True
+    assert rec["profile_count"] == 4
+    assert rec["best_pooling_latency_safe"]["profile"] == "proxy_normalized_mean_f16_pool_050"
+    assert rec["best_pooling_quality_safe"]["profile"] == "centroid_mean_f16_pool_033"
+    rejected = {
+        item["profile"]: item["failure_reasons"]
+        for item in rec["rejected_pooling_profiles"]
+    }
+    assert "top10_admission_below_threshold" in rejected["proxy_normalized_mean_f16_pool_075"]
+    assert rec["best_pooling_latency_safe"]["selection_metrics"]["tokens_pooled_p50"] == 32.0
+    no_qrels_rows = [
+        {
+            **row,
+            "ndcg@10": None,
+            "recall@10": None,
+            "mrr@10": None,
+        }
+        for row in rows
+    ]
+    no_qrels = compute_document_node_token_pooling_recommendation(
+        {"results": no_qrels_rows},
+        exact_baseline={"available": False},
+        min_top10_admission=0.80,
+        min_ndcg_ratio_vs_exact=0.95,
+        max_p95_ms=0.0,
+    )
+    assert no_qrels["best_pooling_latency_safe"]["profile"] == "proxy_normalized_mean_f16_pool_050"
+    assert no_qrels["best_pooling_quality_safe"]["profile"] == "centroid_mean_f16_pool_033"
+    assert (
+        no_qrels["best_pooling_quality_safe"]["selection_basis"]
+        == "exact_top10_admission_recall"
+    )
 
 
 def _self_check_document_node_serving_recommendation_schema_fixture() -> None:
@@ -8130,6 +9414,12 @@ def _self_check_document_node_serving_stats_extraction() -> None:
         "centroid_posting_limit_per_token": 75,
         "centroid_posting_cap_strategy": "uniform_stride",
         "centroid_candidates": 100,
+        "centroid_bitset_prefilter_enabled": True,
+        "centroid_bitset_lists_used": 8,
+        "centroid_bitset_docs_set": 101,
+        "centroid_bitset_docs_after_threshold": 99,
+        "centroid_bitset_prefilter_time_us": 44,
+        "centroid_bitset_memory_bytes": 128,
         "multivector_tokens_original": 6400,
         "multivector_tokens_pooled": 3200,
         "multivector_bm25_injection_enabled": False,
@@ -8176,6 +9466,12 @@ def _self_check_document_node_serving_stats_extraction() -> None:
     assert extracted["centroid_postings_skipped"] == 300
     assert extracted["centroid_posting_limit_per_token"] == 75
     assert extracted["centroid_posting_cap_strategy"] == "uniform_stride"
+    assert extracted["centroid_bitset_prefilter_enabled"] is True
+    assert extracted["centroid_bitset_lists_used"] == 8
+    assert extracted["centroid_bitset_docs_set"] == 101
+    assert extracted["centroid_bitset_docs_after_threshold"] == 99
+    assert extracted["centroid_bitset_prefilter_time_us"] == 44
+    assert extracted["centroid_bitset_memory_bytes"] == 128
     assert extracted["quantized_inverted_posting_bytes"] == 2048
     assert extracted["quantized_inverted_sidecar_bytes"] == 2304
     assert extracted["quantized_codeword_debug_counter"] == 7
@@ -8271,7 +9567,7 @@ def _self_check_document_node_serving_grid_serialization() -> None:
             "effective_budget_count": 1,
             "effective_budgets": [800],
             "latency_by_budget": {
-                "800": {"p50_ms": 12.5, "p95_ms": 21.0},
+                "800": {"p50_ms": 12.5, "p95_ms": 21.0, "p99_ms": 25.0},
             },
             "admission_by_budget": {
                 "800": {
@@ -8301,6 +9597,14 @@ def _self_check_document_node_serving_grid_serialization() -> None:
                             "multivector_candidate_source": "proxy_vector",
                             "proxy_encoder_kind": "normalized_mean",
                             "multivector_exact_kernel": "blocked_scalar",
+                            "multivector_proxy_candidates_returned": 777,
+                            "multivector_doc_graph_entry_sample_scored": 32,
+                            "graph_entry_sidecar_scored": 128,
+                            "graph_entry_sidecar_selected": 8,
+                            "multivector_document_graph_traversal_time_us": 1234,
+                            "multivector_exact_maxsim_rerank_time_us": 5678,
+                            "sidecar_query_bytes_touched": 65536,
+                            "sidecar_query_time_us": 9876,
                         },
                     },
                 ],
@@ -8324,6 +9628,7 @@ def _self_check_document_node_serving_grid_serialization() -> None:
     assert row["centroid_lite_max_postings_per_token"] == 0
     assert row["p50_ms"] == 12.5
     assert row["p95_ms"] == 21.0
+    assert row["p99_ms"] == 25.0
     assert row["run_elapsed_ms"] == 123.0
     assert row["exact_baseline_elapsed_ms"] == 23.0
     assert row["retrieval_elapsed_ms"] == 100.0
@@ -8348,6 +9653,14 @@ def _self_check_document_node_serving_grid_serialization() -> None:
     assert row["candidate_reservoirs"] == "off"
     assert row["reservoirs_enabled_queries"] == 0
     assert row["reservoir_union_docs"]["p95"] == 0.0
+    assert row["proxy_candidates_returned"] == 777
+    assert row["graph_entry_sample_scored"] == 32
+    assert row["graph_entry_sidecar_scored"] == 128
+    assert row["graph_entry_sidecar_selected"] == 8
+    assert row["graph_traversal_time_us"] == 1234
+    assert row["exact_rerank_time_us"] == 5678
+    assert row["sidecar_query_bytes_touched"] == 65536
+    assert row["sidecar_query_time_us"] == 9876
     assert row["last_scan_stats_sample"]["proxy_encoder_kind"] == "normalized_mean"
     rec = compute_document_node_serving_recommendation(
         {"summary_rows": [row]},
@@ -8515,6 +9828,113 @@ def _self_check_document_node_serving_grid_serialization() -> None:
     assert reservoir_profile_args.multivector_coverage_reservoir_k == 20
 
 
+def _self_check_candidate_underfill_diagnostics() -> None:
+    cases = [
+        (
+            {
+                "candidate_budget": 800,
+                "ef": 100,
+                "last_scan_stats_sample": {
+                    "proxy_candidates_returned": 100,
+                    "proxy_candidate_limit_source": "search_ef",
+                },
+            },
+            "capped_by_search_ef",
+            "try_higher_ef_or_entry_sample",
+        ),
+        (
+            {
+                "candidate_budget": 800,
+                "final_k": 10,
+                "oversampling": 2,
+                "last_scan_stats_sample": {
+                    "proxy_candidates_returned": 20,
+                    "multivector_proxy_candidate_target": 20,
+                },
+            },
+            "capped_by_final_k_oversampling",
+            "increase_oversampling",
+        ),
+        (
+            {
+                "candidate_budget": 800,
+                "multivector_doc_candidate_k": 200,
+                "last_scan_stats_sample": {"proxy_candidates_returned": 200},
+            },
+            "capped_by_doc_candidate_k",
+            "increase_multivector_doc_candidate_k",
+        ),
+        (
+            {
+                "candidate_budget": 800,
+                "ef": 1000,
+                "multivector_doc_candidate_k": 800,
+                "last_scan_stats_sample": {
+                    "proxy_candidates_returned": 300,
+                    "multivector_proxy_candidate_target": 800,
+                },
+            },
+            "candidate_source_underfilled",
+            "try_entry_sidecar_or_stronger_proxy",
+        ),
+        (
+            {
+                "candidate_budget": 800,
+                "effective_exact_rerank_k": 100,
+                "last_scan_stats_sample": {"proxy_candidates_returned": 800},
+            },
+            "exact_rerank_k_limits_rescue",
+            "increase_serving_exact_rerank_k_or_candidate_reservoir",
+        ),
+        (
+            {"candidate_budget": 800, "last_scan_stats_sample": {}},
+            "unknown",
+            "inspect_candidate_limit_stats",
+        ),
+    ]
+    for row, reason, hint in cases:
+        diagnostics = derive_candidate_underfill_diagnostics(row)
+        assert diagnostics["candidate_underfill_reason"] == reason
+        assert diagnostics["next_admission_hint"] == hint
+
+    ratio = derive_candidate_underfill_diagnostics({
+        "candidate_budget": 800,
+        "last_scan_stats_sample": {"proxy_candidates_returned": 100},
+    })["candidate_underfill_ratio"]
+    assert ratio == 0.125
+
+    underfill = derive_candidate_underfill_diagnostics({
+        "candidate_budget": 800,
+        "last_scan_stats_sample": {
+            "proxy_candidates_returned": 100,
+            "proxy_candidate_limit_source": "search_ef",
+        },
+    })
+    rejected_row = {
+        **_synthetic_serving_row(
+            "underfilled",
+            p95=10.0,
+            admission=0.40,
+            ndcg=0.40,
+            stats_sample={
+                "proxy_candidates_returned": 100,
+                "proxy_candidate_limit_source": "search_ef",
+            },
+        ),
+        **underfill,
+    }
+    rec = compute_document_node_serving_recommendation(
+        {"summary_rows": [rejected_row]},
+        exact_baseline={"available": False},
+        min_top10_admission=0.80,
+        min_ndcg_ratio_vs_exact=0.95,
+        max_p95_ms=0.0,
+    )
+    rejected = rec["rejected_profiles"][0]
+    assert "candidate_underfill" in rejected["failure_reasons"]
+    assert "try_higher_ef_or_entry_sample" in rejected["admission_improvement_hints"]
+
+
 def _self_check_document_node_candidate_source_deltas() -> None:
     def row(
         profile: str,
@@ -8596,6 +10016,19 @@ def _self_check_document_node_candidate_source_deltas() -> None:
         ),
         {
             **row(
+                "centroid_lite_f16",
+                top10=0.34,
+                p95=26.0,
+                ndcg=0.25,
+                source="centroid_lite",
+            ),
+            "centroid_docs_touched": {"count": 1, "p95": 900.0},
+            "centroid_postings_touched": {"count": 1, "p95": 5000.0},
+            "centroid_postings_skipped": {"count": 1, "p95": 0.0},
+            "centroid_candidates": {"count": 1, "p95": 800.0},
+        },
+        {
+            **row(
                 "centroid_mean_f16_reservoir_balanced",
                 top10=0.90,
                 p95=19.0,
@@ -8613,17 +10046,27 @@ def _self_check_document_node_candidate_source_deltas() -> None:
         row(
             "centroid_lite_f16_cap_032",
             top10=0.30,
-            p95=12.0,
+            p95=28.0,
             ndcg=0.20,
             source="centroid_lite",
-        ),
+        )
+        | {
+            "centroid_lite_warnings": ["centroid_lite_cap_too_aggressive"],
+            "centroid_lite_max_postings_per_token": 32,
+            "centroid_docs_touched": {"count": 1, "p95": 180.0},
+            "centroid_postings_touched": {"count": 1, "p95": 1200.0},
+            "centroid_postings_skipped": {"count": 1, "p95": 3800.0},
+            "centroid_posting_limit_per_token": {"count": 1, "p95": 32.0},
+            "centroid_posting_cap_strategy": {"count": 1, "values": ["uniform_stride"]},
+            "centroid_candidates": {"count": 1, "p95": 100.0},
+        },
     ]
     deltas = compute_document_node_candidate_source_deltas(rows)
-    assert deltas["comparison_count"] == 6
-    assert deltas["missing_baseline_count"] == 1
+    assert deltas["comparison_count"] == 8
+    assert deltas["missing_baseline_count"] == 0
     summary = document_node_candidate_source_delta_summary(deltas)
     assert summary["available"] is True
-    assert summary["usable_comparison_count"] == 5
+    assert summary["usable_comparison_count"] == 7
     assert summary["unusable_comparison_count"] == 1
     assert summary["best_admission_delta"]["profile"] == "proxy_max_pool_f16"
     assert summary["best_quality_delta"]["profile"] == "proxy_max_pool_f16"
@@ -8686,6 +10129,17 @@ def _self_check_document_node_candidate_source_deltas() -> None:
     assert (
         summary["best_admission_delta_by_comparison"]["candidate_reservoir"]
         is None
+    )
+    centroid_cap_delta = by_profile["centroid_lite_f16_cap_032"]
+    assert centroid_cap_delta["comparison"] == "centroid_lite_posting_cap"
+    assert "centroid_lite_cap_too_aggressive" in centroid_cap_delta["evidence_warnings"]
+    assert "centroid_lite_no_admission_gain" in centroid_cap_delta["evidence_warnings"]
+    assert "centroid_lite_latency_regression" in centroid_cap_delta["evidence_warnings"]
+    assert (
+        centroid_cap_delta["candidate_evidence"]["centroid_posting_limit_per_token"][
+            "p95"
+        ]
+        == 32.0
     )
 
     grid = {
@@ -9263,6 +10717,11 @@ def run_document_node_serving_grid(
                     profile_build_stats,
                     index_build_elapsed_ms=profile_index_build_elapsed_ms,
                 )
+                profile_elapsed_ms = elapsed_ms_since(profile_started)
+                for profile_row in profile_rows:
+                    profile_row["profile_elapsed_ms"] = profile_elapsed_ms
+                    profile_row["index_build_elapsed_ms"] = profile_index_build_elapsed_ms
+                    profile_row["build_phase_summary"] = profile_build_phase_summary
                 profile_summaries.append({
                     "stage": stage_name,
                     "profile": profile.name,
@@ -9302,7 +10761,7 @@ def run_document_node_serving_grid(
                     "admission_debug_mode": effective_admission_debug_mode(
                         clone_args(stage_args, admission_debug_context="serving_grid")
                     ),
-                    "profile_elapsed_ms": elapsed_ms_since(profile_started),
+                    "profile_elapsed_ms": profile_elapsed_ms,
                     "index_build_elapsed_ms": profile_index_build_elapsed_ms,
                     "index_build_stats": profile_build_stats,
                     **profile_build_phase_summary,
@@ -9317,6 +10776,9 @@ def run_document_node_serving_grid(
                     ),
                     "multivector_proxy_build_us": profile_build_stats.get(
                         "multivector_proxy_build_us"
+                    ),
+                    "learned_projection_doc_encode_build_us": profile_build_stats.get(
+                        "learned_projection_doc_encode_build_us"
                     ),
                     "multivector_doc_sidecar_write_us": profile_build_stats.get(
                         "multivector_doc_sidecar_write_us"
@@ -9513,14 +10975,21 @@ def run_document_node_serving_grid(
         ) == "trace",
         "include_experimental": args.document_node_serving_grid_include_experimental,
         "include_proxy_encoder_variants": args.document_node_serving_grid_include_proxy_encoders,
+        "include_learned_projection": args.document_node_serving_grid_include_learned_projection,
         "include_bm25_rescue": args.document_node_serving_grid_include_bm25_rescue,
         "include_learned_sparse_rescue": args.document_node_serving_grid_include_learned_sparse_rescue,
         "include_reservoirs": args.document_node_serving_grid_include_reservoirs,
         "include_centroid_lite_caps": args.document_node_serving_grid_include_centroid_lite_caps,
         "include_entry_samples": args.document_node_serving_grid_include_entry_samples,
         "include_entry_sidecar": args.document_node_serving_grid_include_entry_sidecar,
+        "proxy_admission_focus": args.document_node_serving_grid_proxy_admission_focus,
+        "centroid_lite_focus": args.document_node_serving_grid_centroid_lite_focus,
+        "token_pooling_focus": args.document_node_serving_grid_token_pooling_focus,
         "effective_centroid_lite_posting_caps": effective_document_node_serving_centroid_lite_caps(args),
         "effective_entry_sample_counts": effective_document_node_serving_entry_sample_counts(args),
+        "effective_entry_sidecar_representatives": (
+            effective_document_node_serving_entry_sidecar_representatives(args)
+        ),
         "total_elapsed_ms": elapsed_ms_since(grid_started),
         "index_build_elapsed_ms_total": round(index_build_elapsed_ms_total, 3),
         "exact_baseline_elapsed_ms_total": round(exact_baseline_elapsed_ms_total, 3),
@@ -9703,6 +11172,9 @@ def document_node_serving_build_only_row(
         "multivector_centroid_build_docs": build_stats.get("multivector_centroid_build_docs"),
         "multivector_centroid_build_vectors": build_stats.get("multivector_centroid_build_vectors"),
         "multivector_proxy_build_us": build_stats.get("multivector_proxy_build_us"),
+        "learned_projection_doc_encode_build_us": build_stats.get(
+            "learned_projection_doc_encode_build_us"
+        ),
         "multivector_doc_sidecar_write_us": build_stats.get("multivector_doc_sidecar_write_us"),
         "multivector_centroid_sidecar_write_us": build_stats.get(
             "multivector_centroid_sidecar_write_us"
@@ -11851,6 +13323,10 @@ def markdown_benchmark_summary(report: dict[str, Any]) -> str:
             f"- Effective centroid-lite posting caps: `{','.join(str(item) for item in serving_grid.get('effective_centroid_lite_posting_caps', []))}`",
             f"- Opt-in entry samples: `{bool(serving_grid.get('include_entry_samples', False))}`",
             f"- Effective entry sample counts: `{','.join(str(item) for item in serving_grid.get('effective_entry_sample_counts', []))}`",
+            f"- Proxy admission focus: `{bool(serving_grid.get('proxy_admission_focus', False))}`",
+            f"- Centroid-lite focus: `{bool(serving_grid.get('centroid_lite_focus', False))}`",
+            f"- Token-pooling focus: `{bool(serving_grid.get('token_pooling_focus', False))}`",
+            f"- Effective entry-sidecar representatives: `{','.join(str(item) for item in serving_grid.get('effective_entry_sidecar_representatives', []))}`",
             f"- Effective EF grid: `{','.join(str(item) for item in serving_grid.get('effective_ef_grid', []))}`",
             f"- Effective oversampling grid: `{','.join(str(item) for item in serving_grid.get('effective_oversampling_grid', []))}`",
             f"- Requested budget sweep: `{','.join(str(item) for item in serving_grid.get('effective_budget_sweep', serving_grid.get('budget_sweep', [])))}`",
@@ -11877,12 +13353,12 @@ def markdown_benchmark_summary(report: dict[str, Any]) -> str:
                 "",
             ])
         lines.extend([
-            "| profile | source | graph | proxy | centroids | reservoirs | centroid cap | entry samples | entry sidecar | storage | cache | pooling | ef | oversampling | candidate budget | exact rerank k | rerank docs p50 | top1 admission | top10 admission | recall@10 | ndcg@10 | mrr@10 | p50 ms | p95 ms | index bytes |",
-            "|---|---|---|---|---|---|---:|---:|---|---|---|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|",
+            "| profile | source | graph | proxy | centroids | reservoirs | centroid cap | entry samples | entry sidecar | storage | cache | pooling | ef | oversampling | candidate budget | effective candidates | underfill reason | exact rerank k | rerank docs p50 | top1 admission | top10 admission | recall@10 | ndcg@10 | mrr@10 | p50 ms | p95 ms | p99 ms | index bytes |",
+            "|---|---|---|---|---|---|---:|---:|---|---|---|---|---:|---:|---:|---:|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|",
         ])
         for item in sorted_rows:
             lines.append(
-                "| {profile} | {source} | {graph} | {proxy} | {centroids} | {reservoirs} | {cap} | {entry_samples} | {entry_sidecar} | {storage} | {cache} | {pooling}:{ratio:.2f} | {ef} | {oversampling} | {candidate_budget} | {exact_k} | {rerank_docs_p50:.3f} | {top1:.6f} | {top10:.6f} | {recall:.6f} | {ndcg:.6f} | {mrr:.6f} | {p50:.3f} | {p95:.3f} | {index_bytes} |".format(
+                "| {profile} | {source} | {graph} | {proxy} | {centroids} | {reservoirs} | {cap} | {entry_samples} | {entry_sidecar} | {storage} | {cache} | {pooling}:{ratio:.2f} | {ef} | {oversampling} | {candidate_budget} | {effective_candidates} | {underfill_reason} | {exact_k} | {rerank_docs_p50:.3f} | {top1:.6f} | {top10:.6f} | {recall:.6f} | {ndcg:.6f} | {mrr:.6f} | {p50:.3f} | {p95:.3f} | {p99:.3f} | {index_bytes} |".format(
                     profile=item.get("profile", ""),
                     source=item.get("candidate_source", ""),
                     graph=item.get("graph_mode", ""),
@@ -11909,6 +13385,8 @@ def markdown_benchmark_summary(report: dict[str, Any]) -> str:
                     ef=int(item.get("ef", 0) or 0),
                     oversampling=int(item.get("oversampling", 0) or 0),
                     candidate_budget=int(item.get("candidate_budget", item.get("largest_budget", 0)) or 0),
+                    effective_candidates=int(item.get("effective_candidate_k", 0) or 0),
+                    underfill_reason=item.get("candidate_underfill_reason", ""),
                     exact_k=int(item.get("effective_exact_rerank_k", 0) or 0),
                     rerank_docs_p50=float(item.get("exact_rerank_docs_p50", 0.0) or 0.0),
                     top1=float(item.get("exact_top1_admission_rate", 0.0) or 0.0),
@@ -11918,6 +13396,7 @@ def markdown_benchmark_summary(report: dict[str, Any]) -> str:
                     mrr=float(item.get("mrr@10", 0.0) or 0.0),
                     p50=float(item.get("p50_ms", item.get("p50_latency_ms_at_largest_budget", 0.0)) or 0.0),
                     p95=float(item.get("p95_ms", item.get("p95_latency_ms_at_largest_budget", 0.0)) or 0.0),
+                    p99=float(item.get("p99_ms", item.get("p99_latency_ms_at_largest_budget", 0.0)) or 0.0),
                     index_bytes=int(item.get("index_bytes", 0) or 0),
                 )
             )
@@ -12136,8 +13615,8 @@ def markdown_benchmark_summary(report: dict[str, Any]) -> str:
             f"- Why quality won: {serving_profile_explanation(best_quality)}",
             f"- Why balanced won: {serving_profile_explanation(best_balanced)}",
             "",
-            "| pass | profile | source | proxy | centroid cap | entry samples | entry sidecar | storage | pooling | ef | oversampling | budget | top10 admission | ndcg@10 | p95 ms | reasons | hints |",
-            "|---|---|---|---|---:|---:|---|---|---|---:|---:|---:|---:|---:|---:|---|---|",
+            "| pass | profile | source | proxy | centroid cap | entry samples | entry sidecar | storage | pooling | ef | oversampling | budget | effective candidates | underfill | top10 admission | ndcg@10 | p95 ms | reasons | hints |",
+            "|---|---|---|---|---:|---:|---|---|---|---:|---:|---:|---:|---|---:|---:|---:|---|---|",
         ])
         rows = serving_rec.get("profile_thresholds", [])
         if isinstance(rows, list):
@@ -12155,7 +13634,7 @@ def markdown_benchmark_summary(report: dict[str, Any]) -> str:
                 if not isinstance(hints, list):
                     hints = []
                 lines.append(
-                    "| {passed} | {profile} | {source} | {proxy} | {cap} | {entry_samples} | {entry_sidecar} | {storage} | {pooling}:{ratio:.2f} | {ef} | {oversampling} | {budget} | {admission:.6f} | {ndcg:.6f} | {p95:.3f} | {reasons} | {hints} |".format(
+                    "| {passed} | {profile} | {source} | {proxy} | {cap} | {entry_samples} | {entry_sidecar} | {storage} | {pooling}:{ratio:.2f} | {ef} | {oversampling} | {budget} | {effective_candidates} | {underfill} | {admission:.6f} | {ndcg:.6f} | {p95:.3f} | {reasons} | {hints} |".format(
                         passed="pass" if item.get("threshold_pass") else "fail",
                         profile=item.get("profile", ""),
                         source=item.get("candidate_source", ""),
@@ -12179,6 +13658,8 @@ def markdown_benchmark_summary(report: dict[str, Any]) -> str:
                         ef=int(item.get("ef", 0) or 0),
                         oversampling=int(item.get("oversampling", 0) or 0),
                         budget=int(item.get("largest_budget", 0) or 0),
+                        effective_candidates=int(item.get("effective_candidate_k", 0) or 0),
+                        underfill=item.get("candidate_underfill_reason", ""),
                         admission=float(item.get("exact_top10_admission_recall", 0.0) or 0.0),
                         ndcg=float(item.get("ndcg@10", 0.0) or 0.0),
                         p95=float(serving_row_p95(item) or 0.0),
@@ -12325,6 +13806,65 @@ def markdown_benchmark_summary(report: dict[str, Any]) -> str:
             "is explicitly experimental.",
         ])
 
+    token_pooling_rec = report.get("document_node_token_pooling_recommendation")
+    if not isinstance(token_pooling_rec, dict):
+        serving_grid_for_token_pooling = report.get("document_node_serving_grid")
+        if isinstance(serving_grid_for_token_pooling, dict):
+            token_pooling_rec = serving_grid_for_token_pooling.get(
+                "token_pooling_recommendation",
+            )
+    if isinstance(token_pooling_rec, dict):
+        best_pooling_latency_safe = token_pooling_rec.get("best_pooling_latency_safe") or {}
+        best_pooling_quality_safe = token_pooling_rec.get("best_pooling_quality_safe") or {}
+        if not isinstance(best_pooling_latency_safe, dict):
+            best_pooling_latency_safe = {}
+        if not isinstance(best_pooling_quality_safe, dict):
+            best_pooling_quality_safe = {}
+        lines.extend([
+            "",
+            "### Document-node token-pooling recommendation",
+            "",
+            f"- Available: `{bool(token_pooling_rec.get('available', False))}`",
+            f"- Profiles evaluated: `{int(token_pooling_rec.get('profile_count', 0) or 0)}`",
+            f"- Selection basis: `{token_pooling_rec.get('selection_basis', '')}`",
+            f"- Best pooling latency-safe: `{best_pooling_latency_safe.get('id', '')}`",
+            f"- Best pooling quality-safe: `{best_pooling_quality_safe.get('id', '')}`",
+            f"- Why latency-safe won: {serving_profile_explanation(best_pooling_latency_safe)}",
+            f"- Why quality-safe won: {serving_profile_explanation(best_pooling_quality_safe)}",
+            "",
+            "| pass | profile | proxy | pooling | tokens pooled p50 | pooling ratio p50 | exact pairs p50 | index build ms | top10 admission | ndcg@10 | p95 ms | reasons |",
+            "|---|---|---|---|---:|---:|---:|---:|---:|---:|---:|---|",
+        ])
+        token_rows = token_pooling_rec.get("profile_thresholds", [])
+        if isinstance(token_rows, list):
+            for item in token_rows:
+                if not isinstance(item, dict):
+                    continue
+                failures = item.get("failure_reasons", [])
+                unavailable = item.get("unavailable_criteria", [])
+                reasons: list[str] = []
+                if isinstance(failures, list):
+                    reasons.extend(str(reason) for reason in failures)
+                if isinstance(unavailable, list):
+                    reasons.extend(f"unavailable:{criterion}" for criterion in unavailable)
+                lines.append(
+                    "| {passed} | {profile} | {proxy} | {pooling}:{ratio:.2f} | {tokens_pooled:.3f} | {pooling_ratio:.6f} | {pairs:.3f} | {index_build:.3f} | {admission:.6f} | {ndcg:.6f} | {p95:.3f} | {reasons} |".format(
+                        passed="pass" if item.get("threshold_pass") else "fail",
+                        profile=item.get("profile", ""),
+                        proxy=item.get("proxy_encoder", ""),
+                        pooling=item.get("token_pooling", ""),
+                        ratio=float(item.get("token_pooling_target_ratio", 1.0) or 1.0),
+                        tokens_pooled=float(item.get("tokens_pooled_p50", 0.0) or 0.0),
+                        pooling_ratio=float(item.get("token_pooling_ratio_p50", 0.0) or 0.0),
+                        pairs=float(item.get("exact_rerank_pairs_p50", 0.0) or 0.0),
+                        index_build=float(item.get("index_build_elapsed_ms", 0.0) or 0.0),
+                        admission=float(item.get("exact_top10_admission_recall", 0.0) or 0.0),
+                        ndcg=float(item.get("ndcg@10", 0.0) or 0.0),
+                        p95=float(serving_row_p95(item) or 0.0),
+                        reasons=", ".join(reasons) if reasons else "",
+                    )
+                )
+
     hybrid_eval = report.get("hybrid_evaluation")
     if isinstance(hybrid_eval, dict):
         recommended = hybrid_eval.get("recommended_default_profile", {})
@@ -12424,13 +13964,16 @@ def run_self_checks() -> None:
     _self_check_document_node_serving_profiles()
     _self_check_exact_top_cache()
     _self_check_document_node_serving_recommendation()
+    _self_check_document_node_token_pooling_recommendation()
     _self_check_document_node_serving_recommendation_schema_fixture()
     _self_check_document_node_serving_stage_selection()
     _self_check_document_node_serving_stats_extraction()
     _self_check_document_node_serving_grid_serialization()
+    _self_check_candidate_underfill_diagnostics()
     _self_check_document_node_candidate_source_deltas()
     _self_check_document_node_serving_build_only_serialization()
     _self_check_document_node_serving_latency_only()
+    _self_check_learned_sparse_jsonl_parser()
     _self_check_learned_sparse_evidence_annotation()
 
 
@@ -12589,7 +14132,12 @@ def validate_args(args: argparse.Namespace) -> argparse.Namespace:
         raise SystemExit("--parallel-safety-max-sidecar-bytes must be non-negative")
     if args.force_parallel_retrieval and args.skip_parallel_retrieval:
         raise SystemExit("--force-parallel-retrieval and --skip-parallel-retrieval are mutually exclusive")
-    if args.document_node_serving_grid_smoke:
+    if (
+        args.document_node_serving_grid_smoke
+        or args.document_node_serving_grid_proxy_admission_focus
+        or args.document_node_serving_grid_centroid_lite_focus
+        or args.document_node_serving_grid_token_pooling_focus
+    ):
         args.document_node_serving_grid = True
     if args.document_node_serving_grid_budget_mode is None:
         args.document_node_serving_grid_budget_mode = (
@@ -12746,12 +14294,19 @@ def validate_args(args: argparse.Namespace) -> argparse.Namespace:
     args.document_node_serving_grid_entry_sample_count_values = (
         effective_document_node_serving_entry_sample_counts(args)
     )
+    args.document_node_serving_grid_entry_sidecar_representative_values = (
+        effective_document_node_serving_entry_sidecar_representatives(args)
+    )
     args.document_node_pooling_grid_values = parse_document_node_pooling_grid(
         args.document_node_pooling_grid,
     )
     args.document_node_proxy_encoder_grid_values = parse_choice_grid(
         args.document_node_proxy_encoder_grid,
-        tuple(choice for choice in MULTIVECTOR_PROXY_ENCODER_CHOICES if choice != "learned_projection_placeholder"),
+        tuple(
+            choice
+            for choice in MULTIVECTOR_PROXY_ENCODER_CHOICES
+            if choice not in {"learned_projection_placeholder", "learned_projection_v1"}
+        ),
         "--document-node-proxy-encoder-grid",
     )
     if args.recall_gate_budget < 1:
@@ -12976,6 +14531,24 @@ def parse_args() -> argparse.Namespace:
         help="document-node proxy_vector fixed-dimensional encoder used at index build and query time",
     )
     parser.add_argument(
+        "--multivector-learned-projection-path",
+        default="",
+        help=(
+            "administrator-provided learned_projection_v1 weight file used when "
+            "--multivector-proxy-encoder learned_projection_v1 is selected"
+        ),
+    )
+    parser.add_argument(
+        "--multivector-learned-projection-model",
+        default="",
+        help="expected learned_projection_v1 model profile name; empty accepts the file header",
+    )
+    parser.add_argument(
+        "--multivector-learned-projection-checksum",
+        default="",
+        help="expected learned_projection_v1 weight checksum/version string; empty accepts the file header",
+    )
+    parser.add_argument(
         "--multivector-centroids",
         choices=DOCUMENT_NODE_CENTROIDS_CHOICES,
         default="off",
@@ -13112,6 +14685,14 @@ def parse_args() -> argparse.Namespace:
         ),
     )
     parser.add_argument(
+        "--document-node-serving-grid-include-learned-projection",
+        action="store_true",
+        help=(
+            "include the opt-in proxy_learned_projection_v1_f16 serving-grid "
+            "profile; requires --multivector-learned-projection-path at runtime"
+        ),
+    )
+    parser.add_argument(
         "--document-node-serving-grid-include-bm25-rescue",
         action="store_true",
         help=(
@@ -13179,11 +14760,49 @@ def parse_args() -> argparse.Namespace:
         ),
     )
     parser.add_argument(
+        "--document-node-serving-grid-entry-sidecar-representatives",
+        default=DOCUMENT_NODE_SERVING_GRID_ENTRY_SIDECAR_SWEEP,
+        help=(
+            "comma-separated positive representative counts for "
+            "--document-node-serving-grid-proxy-admission-focus entry-sidecar "
+            f"variants; defaults to {DOCUMENT_NODE_SERVING_GRID_ENTRY_SIDECAR_SWEEP}"
+        ),
+    )
+    parser.add_argument(
+        "--document-node-serving-grid-proxy-admission-focus",
+        action="store_true",
+        help=(
+            "run a focused document-node proxy/entry admission grid: "
+            "normalized_mean, max_pool, centroid_mean, entry_sample_032/128, "
+            "entry_sidecar_128/256, EF 100/200/400, oversampling 1/2, and "
+            "largest-only candidate budget 800 unless overridden"
+        ),
+    )
+    parser.add_argument(
+        "--document-node-serving-grid-centroid-lite-focus",
+        action="store_true",
+        help=(
+            "run a focused centroid_lite cap grid: uncapped, posting caps "
+            "16/32/64, pooled centroid_lite, and centroid_mean baseline with "
+            "largest-only candidate budget 800 unless overridden"
+        ),
+    )
+    parser.add_argument(
+        "--document-node-serving-grid-token-pooling-focus",
+        action="store_true",
+        help=(
+            "run a focused token-pooling grid: normalized_mean and "
+            "centroid_mean with no pooling and greedy_cosine target ratios "
+            "0.75/0.50/0.33"
+        ),
+    )
+    parser.add_argument(
         "--document-node-serving-grid-centroid-lite-posting-caps",
         default=DOCUMENT_NODE_SERVING_GRID_CENTROID_LITE_CAP_SWEEP,
         help=(
             "comma-separated positive per-query-token posting caps used with "
-            "--document-node-serving-grid-include-centroid-lite-caps; defaults to "
+            "--document-node-serving-grid-include-centroid-lite-caps or "
+            "--document-node-serving-grid-centroid-lite-focus; defaults to "
             f"{DOCUMENT_NODE_SERVING_GRID_CENTROID_LITE_CAP_SWEEP}"
         ),
     )
@@ -13611,6 +15230,7 @@ def main() -> None:
             document_node_admission_grid = None
             document_node_serving_grid = None
             document_node_serving_recommendation = None
+            document_node_token_pooling_recommendation = None
             hybrid_evaluation = None
             token_ablation = None
         elif args.document_node_serving_latency_only:
@@ -13625,6 +15245,7 @@ def main() -> None:
             document_node_admission_grid = None
             document_node_serving_grid = None
             document_node_serving_recommendation = None
+            document_node_token_pooling_recommendation = None
             hybrid_evaluation = None
             token_ablation = None
         else:
@@ -13686,16 +15307,33 @@ def main() -> None:
             document_node_serving_recommendation = None
             if document_node_serving_grid is not None:
                 recommendation_started = time.perf_counter()
+                exact_baseline = serving_exact_baseline_from_results(result_methods)
                 document_node_serving_recommendation = compute_document_node_serving_recommendation(
                     document_node_serving_grid,
-                    exact_baseline=serving_exact_baseline_from_results(result_methods),
+                    exact_baseline=exact_baseline,
                     min_top10_admission=args.serving_min_top10_admission,
                     min_ndcg_ratio_vs_exact=args.serving_min_ndcg_ratio_vs_exact,
                     max_p95_ms=args.serving_max_p95_ms,
                 )
+                document_node_token_pooling_recommendation = None
+                if bool(document_node_serving_grid.get("token_pooling_focus", False)):
+                    document_node_token_pooling_recommendation = (
+                        compute_document_node_token_pooling_recommendation(
+                            document_node_serving_grid,
+                            exact_baseline=exact_baseline,
+                            min_top10_admission=args.serving_min_top10_admission,
+                            min_ndcg_ratio_vs_exact=args.serving_min_ndcg_ratio_vs_exact,
+                            max_p95_ms=args.serving_max_p95_ms,
+                        )
+                    )
+                    document_node_serving_grid["token_pooling_recommendation"] = (
+                        document_node_token_pooling_recommendation
+                    )
                 document_node_serving_grid["recommendation_elapsed_ms"] = elapsed_ms_since(
                     recommendation_started
                 )
+            else:
+                document_node_token_pooling_recommendation = None
             hybrid_evaluation = (
                 run_hybrid_evaluation_harness(conn, args, encoded_queries, qrels)
                 if args.hybrid_evaluation_harness
@@ -13797,12 +15435,17 @@ def main() -> None:
                 "document_node_serving_grid": args.document_node_serving_grid,
                 "document_node_serving_grid_include_experimental": args.document_node_serving_grid_include_experimental,
                 "document_node_serving_grid_include_proxy_encoders": args.document_node_serving_grid_include_proxy_encoders,
+                "document_node_serving_grid_include_learned_projection": args.document_node_serving_grid_include_learned_projection,
                 "document_node_serving_grid_include_bm25_rescue": args.document_node_serving_grid_include_bm25_rescue,
                 "document_node_serving_grid_include_learned_sparse_rescue": args.document_node_serving_grid_include_learned_sparse_rescue,
                 "document_node_serving_grid_include_reservoirs": args.document_node_serving_grid_include_reservoirs,
                 "document_node_serving_grid_include_entry_sidecar": args.document_node_serving_grid_include_entry_sidecar,
                 "document_node_serving_grid_include_entry_samples": args.document_node_serving_grid_include_entry_samples,
                 "document_node_serving_grid_entry_sample_counts": args.document_node_serving_grid_entry_sample_count_values,
+                "document_node_serving_grid_entry_sidecar_representatives": args.document_node_serving_grid_entry_sidecar_representative_values,
+                "document_node_serving_grid_proxy_admission_focus": args.document_node_serving_grid_proxy_admission_focus,
+                "document_node_serving_grid_centroid_lite_focus": args.document_node_serving_grid_centroid_lite_focus,
+                "document_node_serving_grid_token_pooling_focus": args.document_node_serving_grid_token_pooling_focus,
                 "document_node_serving_grid_stage_mode": args.document_node_serving_grid_stage_mode,
                 "serving_grid_probe_queries": args.serving_grid_probe_queries,
                 "serving_grid_finalists": args.serving_grid_finalists,
@@ -13869,6 +15512,10 @@ def main() -> None:
             output["document_node_serving_grid"] = document_node_serving_grid
         if document_node_serving_recommendation is not None:
             output["document_node_serving_recommendation"] = document_node_serving_recommendation
+        if document_node_token_pooling_recommendation is not None:
+            output["document_node_token_pooling_recommendation"] = (
+                document_node_token_pooling_recommendation
+            )
         if document_node_serving_latency_only is not None:
             output["document_node_serving_latency_only"] = document_node_serving_latency_only
         if document_node_serving_build_only is not None:
