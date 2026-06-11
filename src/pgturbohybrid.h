@@ -1484,6 +1484,18 @@ typedef struct PgturbohybridNativeBuildStatsSnapshot
 	uint64		buildDistanceFallback;
 	uint64		multivectorDocExactBuildDistanceCalls;
 	uint64		multivectorDocExactBuildDistanceUs;
+	uint64		multivectorGraphNodeAssignmentUs;
+	uint64		multivectorGraphEntrySearchUs;
+	uint64		multivectorGraphNeighborSearchUs;
+	uint64		multivectorGraphNeighborSelectUs;
+	uint64		multivectorGraphLinkInsertUs;
+	uint64		multivectorGraphReciprocalPruneUs;
+	uint64		multivectorGraphSegmentWriteUs;
+	uint64		multivectorGraphWalUs;
+	uint64		multivectorGraphBuildDistanceProxyCalls;
+	uint64		multivectorGraphBuildDistanceExactCalls;
+	uint64		multivectorGraphBuildDistanceCacheHits;
+	uint64		multivectorGraphBuildDistanceCacheMisses;
 	uint64		multivectorCentroidBuildUs;
 	uint64		multivectorCentroidClusterUs;
 	uint64		multivectorCentroidResidualUs;

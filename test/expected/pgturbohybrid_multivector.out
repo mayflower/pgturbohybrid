@@ -2374,6 +2374,22 @@ BEGIN
 			build_stats;
 	END IF;
 
+	IF NOT (build_stats ? 'multivector_graph_node_assignment_us') OR
+		NOT (build_stats ? 'multivector_graph_entry_search_us') OR
+		NOT (build_stats ? 'multivector_graph_neighbor_search_us') OR
+		NOT (build_stats ? 'multivector_graph_neighbor_select_us') OR
+		NOT (build_stats ? 'multivector_graph_link_insert_us') OR
+		NOT (build_stats ? 'multivector_graph_reciprocal_prune_us') OR
+		NOT (build_stats ? 'multivector_graph_segment_write_us') OR
+		NOT (build_stats ? 'multivector_graph_wal_us') OR
+		NOT (build_stats ? 'multivector_graph_build_distance_proxy_calls') OR
+		NOT (build_stats ? 'multivector_graph_build_distance_exact_calls') OR
+		NOT (build_stats ? 'multivector_graph_build_distance_cache_hits') OR
+		NOT (build_stats ? 'multivector_graph_build_distance_cache_misses') THEN
+		RAISE EXCEPTION 'document-node proxy regression missing graph topology build stats: %',
+			build_stats;
+	END IF;
+
 	IF (index_stats->>'build_fast_edges')::boolean IS DISTINCT FROM true OR
 		(build_stats->>'build_fast_edges')::boolean IS DISTINCT FROM true THEN
 		RAISE EXCEPTION 'document-node proxy regression did not use fast edges by default, build %, index %',

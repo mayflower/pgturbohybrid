@@ -408,7 +408,10 @@ typedef struct PgturbohybridQuantBuildState
 	uint64		buildDistanceFallback;
 	uint64		multivectorDocExactBuildDistanceCalls;
 	uint64		multivectorDocExactBuildDistanceUs;
+	uint64		buildGraphNodeAssignmentUs;
 	uint64		buildEdgeDistanceCalls;
+	uint64		buildEdgeEntrySearchUs;
+	uint64		buildEdgeNeighborSearchUs;
 	uint64		buildEdgeSearchLayerUs;
 	uint64		buildEdgeSelectNeighborUs;
 	uint64		buildEdgeAddNeighborUs;

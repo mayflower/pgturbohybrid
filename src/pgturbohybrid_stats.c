@@ -2640,6 +2640,30 @@ pgturbohybrid_last_build_stats(PG_FUNCTION_ARGS)
 								s->multivectorDocExactBuildDistanceCalls);
 	PgturbohybridJsonbAddUint64(&state, "multivector_doc_exact_build_distance_us",
 								s->multivectorDocExactBuildDistanceUs);
+	PgturbohybridJsonbAddUint64(&state, "multivector_graph_node_assignment_us",
+								s->multivectorGraphNodeAssignmentUs);
+	PgturbohybridJsonbAddUint64(&state, "multivector_graph_entry_search_us",
+								s->multivectorGraphEntrySearchUs);
+	PgturbohybridJsonbAddUint64(&state, "multivector_graph_neighbor_search_us",
+								s->multivectorGraphNeighborSearchUs);
+	PgturbohybridJsonbAddUint64(&state, "multivector_graph_neighbor_select_us",
+								s->multivectorGraphNeighborSelectUs);
+	PgturbohybridJsonbAddUint64(&state, "multivector_graph_link_insert_us",
+								s->multivectorGraphLinkInsertUs);
+	PgturbohybridJsonbAddUint64(&state, "multivector_graph_reciprocal_prune_us",
+								s->multivectorGraphReciprocalPruneUs);
+	PgturbohybridJsonbAddUint64(&state, "multivector_graph_segment_write_us",
+								s->multivectorGraphSegmentWriteUs);
+	PgturbohybridJsonbAddUint64(&state, "multivector_graph_wal_us",
+								s->multivectorGraphWalUs);
+	PgturbohybridJsonbAddUint64(&state, "multivector_graph_build_distance_proxy_calls",
+								s->multivectorGraphBuildDistanceProxyCalls);
+	PgturbohybridJsonbAddUint64(&state, "multivector_graph_build_distance_exact_calls",
+								s->multivectorGraphBuildDistanceExactCalls);
+	PgturbohybridJsonbAddUint64(&state, "multivector_graph_build_distance_cache_hits",
+								s->multivectorGraphBuildDistanceCacheHits);
+	PgturbohybridJsonbAddUint64(&state, "multivector_graph_build_distance_cache_misses",
+								s->multivectorGraphBuildDistanceCacheMisses);
 	PgturbohybridJsonbAddUint64(&state, "multivector_centroid_build_docs",
 								s->multivectorCentroidBuildDocs);
 	PgturbohybridJsonbAddUint64(&state, "multivector_centroid_build_us",

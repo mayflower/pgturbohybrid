@@ -227,6 +227,8 @@ typedef struct PgturbohybridNativeParallelShared
 	uint32		edgeEntryNodeId;
 	int			edgeEntryLevel;
 	uint64		edgeDistanceCalls;
+	uint64		edgeEntrySearchUs;
+	uint64		edgeNeighborSearchUs;
 	uint64		edgeSearchLayerUs;
 	uint64		edgeSelectNeighborUs;
 	uint64		edgeAddNeighborUs;
@@ -1642,13 +1644,18 @@ PgturbohybridGraphBuildCallback(Relation index, ItemPointer tid, Datum *values,
 		}
 		else
 		{
+			instr_time	nodeStart;
+
 			MemoryContextSwitchTo(state->ctx);
+			INSTR_TIME_SET_CURRENT(nodeStart);
 			if (state->multivectorGraphMode ==
 				PGTURBOHYBRID_MULTIVECTOR_GRAPH_DOCUMENT_NODES)
 				PgturbohybridGraphAppendBuildMultiVectorDocument(state, tid, mv,
 																 values, isnull);
 			else
 				PgturbohybridGraphAppendBuildMultiVector(state, tid, mv, values, isnull);
+			state->buildGraphNodeAssignmentUs +=
+				PgturbohybridGraphElapsedUs(nodeStart);
 			pgstat_progress_update_param(PROGRESS_CREATEIDX_TUPLES_DONE, state->nodeCount);
 		}
 		MemoryContextSwitchTo(oldCtx);
@@ -1669,7 +1676,12 @@ PgturbohybridGraphBuildCallback(Relation index, ItemPointer tid, Datum *values,
 		}
 		else
 		{
+			instr_time	nodeStart;
+
+			INSTR_TIME_SET_CURRENT(nodeStart);
 			PgturbohybridGraphAppendBuildNode(state, tid, value, values, isnull);
+			state->buildGraphNodeAssignmentUs +=
+				PgturbohybridGraphElapsedUs(nodeStart);
 			pgstat_progress_update_param(PROGRESS_CREATEIDX_TUPLES_DONE, state->nodeCount);
 		}
 	}
@@ -3332,7 +3344,7 @@ PgturbohybridGraphBuildEdgesRange(PgturbohybridQuantBuildState *state,
 				levelEntry = PgturbohybridGraphBuildGreedySearch(state, i,
 													  levelEntry.nodeId,
 													  level, inserted);
-				state->buildEdgeSearchLayerUs += PgturbohybridGraphElapsedUs(searchStart);
+				state->buildEdgeEntrySearchUs += PgturbohybridGraphElapsedUs(searchStart);
 			}
 		}
 
@@ -3349,7 +3361,7 @@ PgturbohybridGraphBuildEdgesRange(PgturbohybridQuantBuildState *state,
 			INSTR_TIME_SET_CURRENT(searchStart);
 			nearestCount = PgturbohybridGraphBuildSearchLayer(state, i, levelEntry, level,
 												   ef, nearest, inserted);
-			state->buildEdgeSearchLayerUs += PgturbohybridGraphElapsedUs(searchStart);
+			state->buildEdgeNeighborSearchUs += PgturbohybridGraphElapsedUs(searchStart);
 			state->buildEdgeNearestTotal += nearestCount;
 			state->buildEdgeNearestSamples++;
 			selectedCount = PgturbohybridGraphSelectNeighbors(state, i, nearest, nearestCount,
@@ -3656,7 +3668,7 @@ PgturbohybridNativeParallelEdgeBuildNodeLinks(PgturbohybridQuantBuildState *stat
 			levelEntry = PgturbohybridGraphBuildGreedySearch(state, nodeId,
 															 levelEntry.nodeId,
 															 level, inserted);
-			state->buildEdgeSearchLayerUs += PgturbohybridGraphElapsedUs(searchStart);
+			state->buildEdgeEntrySearchUs += PgturbohybridGraphElapsedUs(searchStart);
 		}
 	}
 
@@ -3675,7 +3687,7 @@ PgturbohybridNativeParallelEdgeBuildNodeLinks(PgturbohybridQuantBuildState *stat
 														  levelEntry, level,
 														  ef, nearest,
 														  inserted);
-		state->buildEdgeSearchLayerUs += PgturbohybridGraphElapsedUs(searchStart);
+		state->buildEdgeNeighborSearchUs += PgturbohybridGraphElapsedUs(searchStart);
 		state->buildEdgeNearestTotal += nearestCount;
 		state->buildEdgeNearestSamples++;
 		selectedCount = PgturbohybridGraphSelectNeighbors(state, nodeId,
@@ -3938,7 +3950,10 @@ PgturbohybridNativeParallelEdgeWorker(Relation indexRel,
 
 	SpinLockAcquire(&shared->mutex);
 	shared->edgeDistanceCalls += state.buildDistanceCalls;
-	shared->edgeSearchLayerUs += state.buildEdgeSearchLayerUs;
+	shared->edgeEntrySearchUs += state.buildEdgeEntrySearchUs;
+	shared->edgeNeighborSearchUs += state.buildEdgeNeighborSearchUs;
+	shared->edgeSearchLayerUs +=
+		state.buildEdgeEntrySearchUs + state.buildEdgeNeighborSearchUs;
 	shared->edgeSelectNeighborUs += state.buildEdgeSelectNeighborUs;
 	shared->edgeAddNeighborUs += state.buildEdgeAddNeighborUs;
 	shared->edgePruneNeighborUs += state.buildEdgePruneNeighborUs;
@@ -6791,7 +6806,10 @@ tqgraphbuild(Relation heap, Relation index, IndexInfo *indexInfo)
 			PgturbohybridNativeParallelApplyEdges(&state, edgeShared,
 												  &parallelEdgeRepairUs);
 			state.buildDistanceCalls += edgeShared->edgeDistanceCalls;
-			state.buildEdgeSearchLayerUs += edgeShared->edgeSearchLayerUs;
+			state.buildEdgeEntrySearchUs += edgeShared->edgeEntrySearchUs;
+			state.buildEdgeNeighborSearchUs += edgeShared->edgeNeighborSearchUs;
+			state.buildEdgeSearchLayerUs +=
+				edgeShared->edgeEntrySearchUs + edgeShared->edgeNeighborSearchUs;
 			state.buildEdgeSelectNeighborUs += edgeShared->edgeSelectNeighborUs;
 			state.buildEdgeAddNeighborUs += edgeShared->edgeAddNeighborUs;
 			state.buildEdgePruneNeighborUs += edgeShared->edgePruneNeighborUs;
@@ -6928,6 +6946,29 @@ tqgraphbuild(Relation heap, Relation index, IndexInfo *indexInfo)
 			state.multivectorDocExactBuildDistanceCalls;
 		buildStats.multivectorDocExactBuildDistanceUs =
 			state.multivectorDocExactBuildDistanceUs;
+		buildStats.multivectorGraphNodeAssignmentUs =
+			state.buildGraphNodeAssignmentUs;
+		buildStats.multivectorGraphEntrySearchUs =
+			state.buildEdgeEntrySearchUs;
+		buildStats.multivectorGraphNeighborSearchUs =
+			state.buildEdgeNeighborSearchUs;
+		buildStats.multivectorGraphNeighborSelectUs =
+			state.buildEdgeSelectNeighborUs;
+		buildStats.multivectorGraphLinkInsertUs =
+			state.buildEdgeAddNeighborUs;
+		buildStats.multivectorGraphReciprocalPruneUs =
+			state.buildEdgePruneNeighborUs;
+		buildStats.multivectorGraphSegmentWriteUs = writeUs;
+		buildStats.multivectorGraphWalUs = walUs;
+		buildStats.multivectorGraphBuildDistanceProxyCalls =
+			state.buildDistanceQuerySplit + state.buildDistancePacked +
+			state.buildDistanceWeighted + state.buildDistanceCodeCode;
+		buildStats.multivectorGraphBuildDistanceExactCalls =
+			state.buildDistanceExact + state.multivectorDocExactBuildDistanceCalls;
+		buildStats.multivectorGraphBuildDistanceCacheHits =
+			state.buildDistanceCacheHits;
+		buildStats.multivectorGraphBuildDistanceCacheMisses =
+			state.buildDistanceCacheMisses;
 		buildStats.multivectorCentroidBuildUs =
 			state.multivectorCentroidBuildUs;
 		buildStats.multivectorCentroidClusterUs =
@@ -6955,7 +6996,8 @@ tqgraphbuild(Relation heap, Relation index, IndexInfo *indexInfo)
 		buildStats.buildDistanceCacheCollisions =
 			state.buildDistanceCacheCollisions;
 		buildStats.buildEdgeDistanceCalls = state.buildEdgeDistanceCalls;
-		buildStats.buildEdgeSearchLayerUs = state.buildEdgeSearchLayerUs;
+		buildStats.buildEdgeSearchLayerUs =
+			state.buildEdgeEntrySearchUs + state.buildEdgeNeighborSearchUs;
 		buildStats.buildEdgeSelectNeighborUs = state.buildEdgeSelectNeighborUs;
 		buildStats.buildEdgeAddNeighborUs = state.buildEdgeAddNeighborUs;
 		buildStats.buildEdgePruneNeighborUs = state.buildEdgePruneNeighborUs;
