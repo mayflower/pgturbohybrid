@@ -723,7 +723,7 @@ BEGIN
 		(stats->>'multivector_doc_graph_candidates')::int <> 4 OR
 		(stats->>'multivector_doc_graph_exact_rerank_docs')::int <> 1 OR
 		(stats->>'multivector_doc_graph_quantized_scores')::int <> 0 OR
-		stats->>'multivector_doc_graph_storage_kind' <> 'f16' OR
+		stats->>'multivector_doc_graph_storage_kind' <> 'f32' OR
 		stats->>'multivector_doc_graph_rescore_source' <> 'sidecar' OR
 		stats->>'multivector_exact_rerank_source' <> 'sidecar' OR
 		(stats->>'multivector_doc_graph_heap_fetches')::int <> 0 OR
@@ -872,7 +872,7 @@ BEGIN
 		(stats->>'multivector_proxy_graph_searches')::int <> 1 OR
 		(stats->>'multivector_subvector_searches')::int <> 0 OR
 		(stats->>'multivector_doc_graph_quantized_scores')::int <> 0 OR
-		stats->>'multivector_doc_graph_storage_kind' <> 'sq8' OR
+		stats->>'multivector_doc_graph_storage_kind' <> 'f32' OR
 		stats->>'multivector_doc_graph_rescore_source' <> 'sidecar' OR
 		stats->>'multivector_exact_rerank_source' <> 'sidecar' OR
 		(stats->>'multivector_doc_graph_heap_fetches')::int <> 0 OR
@@ -966,9 +966,49 @@ BEGIN
 		stats->>'proxy_encoder_kind' <> 'normalized_mean' OR
 		(stats->>'multivector_doc_graph_candidates')::int <> 4 OR
 		(stats->>'multivector_doc_graph_exact_rerank_docs')::int <> 1 OR
+		NOT (stats ? 'proxy_graph_nodes_visited') OR
+		NOT (stats ? 'proxy_graph_edges_visited') OR
+		NOT (stats ? 'proxy_graph_candidates_seen') OR
+		NOT (stats ? 'proxy_candidates_returned') OR
+		NOT (stats ? 'proxy_candidate_limit_effective') OR
+		NOT (stats ? 'proxy_candidate_limit_source') OR
+		NOT (stats ? 'proxy_vector_scores_computed') OR
+		NOT (stats ? 'proxy_vector_score_time_us') OR
+		stats->>'proxy_lazy_sidecar_vectors' <> 'true' OR
+		stats->>'multivector_doc_storage_cache_requested' <> 'auto' OR
+		stats->>'multivector_doc_storage_cache_effective' <> 'paged' OR
+		stats->>'multivector_doc_sidecar_cache_mode' <> 'paged' OR
+		(stats->>'proxy_graph_nodes_visited')::int <= 0 OR
+		(stats->>'proxy_candidate_limit_effective')::int <> 4 OR
+		stats->>'proxy_candidate_limit_source' <> 'candidate_target' OR
 		(stats->>'proxy_candidates')::int <> 4 OR
+		(stats->>'proxy_candidates_returned')::int <> 4 OR
 		(stats->>'proxy_exact_rerank_docs')::int <> 1 OR
+		(stats->>'proxy_exact_rerank_sidecar_fetches')::int <> 1 OR
+		(stats->>'proxy_exact_rerank_heap_fetches')::int <> 0 OR
+		(stats->>'proxy_full_sidecar_vectors_loaded')::int <> 0 OR
+		(stats->>'proxy_full_sidecar_bytes_touched')::int <> 0 OR
+		(stats->>'proxy_vector_uses_full_sidecar_for_graph')::boolean OR
+		(stats->>'proxy_vector_near_exhaustive_sidecar_touch')::boolean OR
+		stats->>'proxy_vector_sidecar_touch_reason' <> 'none' OR
 		NOT (stats ? 'proxy_top1_admission') OR
+		NOT (stats ? 'sidecar_cache_build_this_query') OR
+		NOT (stats ? 'sidecar_cache_build_bytes') OR
+		NOT (stats ? 'sidecar_cache_build_pages_read') OR
+		NOT (stats ? 'sidecar_query_bytes_touched') OR
+		NOT (stats ? 'sidecar_query_time_us') OR
+		NOT (stats ? 'multivector_doc_sidecar_docmap_bytes_touched') OR
+		NOT (stats ? 'multivector_doc_sidecar_resident_vectors_loaded') OR
+		NOT (stats ? 'multivector_doc_sidecar_paged_vector_bytes_touched') OR
+		(stats->>'sidecar_query_vectors_loaded')::int <>
+			(stats->>'proxy_exact_rerank_sidecar_fetches')::int OR
+		(stats->>'sidecar_query_vectors_loaded')::int >= 4 OR
+		(stats->>'sidecar_query_bytes_touched')::int <= 0 OR
+		((stats->>'sidecar_cache_build_this_query')::boolean AND
+		 (stats->>'sidecar_cache_build_bytes')::int <= 0) OR
+		(NOT (stats->>'sidecar_cache_build_this_query')::boolean AND
+		 (stats->>'sidecar_cache_build_bytes')::int <> 0) OR
+		(stats->>'multivector_doc_sidecar_vectors_loaded')::int >= 4 OR
 		(stats->>'multivector_doc_graph_quantized_scores')::int <> 0 OR
 		stats->>'multivector_doc_graph_rescore_source' <> 'sidecar' OR
 		stats->>'multivector_exact_rerank_source' <> 'sidecar' OR
@@ -989,6 +1029,10 @@ SELECT turbohybrid_last_scan_stats()->>'multivector_candidate_source'
   AS document_node_proxy_encoder,
        (turbohybrid_last_scan_stats()->>'proxy_candidates')::int
   AS document_node_proxy_candidates,
+       (turbohybrid_last_scan_stats()->>'proxy_graph_nodes_visited')::int > 0
+  AS document_node_proxy_graph_nodes_visited,
+       (turbohybrid_last_scan_stats()->>'multivector_doc_sidecar_vectors_loaded')::int < 4
+  AS document_node_proxy_bounded_sidecar_vectors,
        (turbohybrid_last_scan_stats()->>'multivector_doc_graph_exact_rerank_docs')::int
   AS document_node_proxy_exact_rerank_docs;
 

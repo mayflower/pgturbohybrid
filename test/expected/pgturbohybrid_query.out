@@ -79,11 +79,13 @@ BEGIN
 		'turbohybrid.multivector_branch_plan',
 		'turbohybrid.multivector_candidate_reservoirs',
 			'turbohybrid.multivector_candidate_source',
+		'turbohybrid.multivector_centroid_lite_max_postings_per_token',
 		'turbohybrid.multivector_coverage_reservoir_k',
 		'turbohybrid.multivector_debug_admission',
 		'turbohybrid.multivector_debug_skip_query_tokens',
 		'turbohybrid.multivector_debug_trace_limit',
 		'turbohybrid.multivector_doc_candidate_k',
+		'turbohybrid.multivector_doc_graph_entry_sample_count',
 		'turbohybrid.multivector_doc_graph_oversampling',
 		'turbohybrid.multivector_doc_graph_rescore_k',
 		'turbohybrid.multivector_doc_graph_search_ef',
@@ -153,6 +155,7 @@ BEGIN
 		current_setting('turbohybrid.multivector_per_token_doc_reservoir_k') != '1' OR
 		current_setting('turbohybrid.multivector_docmap') != 'auto' OR
 		current_setting('turbohybrid.multivector_doc_candidate_k') != '100' OR
+		current_setting('turbohybrid.multivector_doc_graph_entry_sample_count') != '0' OR
 		current_setting('turbohybrid.multivector_doc_graph_search_ef') != '0' OR
 		current_setting('turbohybrid.multivector_doc_graph_oversampling') != '1' OR
 		current_setting('turbohybrid.multivector_doc_graph_rescore_k') != '0' OR
@@ -168,7 +171,7 @@ BEGIN
 		current_setting('turbohybrid.multivector_debug_admission') != 'off' OR
 		current_setting('turbohybrid.multivector_debug_skip_query_tokens') != '' OR
 		current_setting('turbohybrid.multivector_debug_trace_limit') != '1000' THEN
-			RAISE EXCEPTION 'unexpected multivector defaults: doc %, query %, subvector %, unique %, raw %, adaptive %, branch_plan %, source %, bm25_injection %, sparse_source %, reservoirs %, coverage_reservoir_k %, fallback %, fallback_fraction %, fallback_max_docs %, per_token_reservoir_k %, docmap %, docs %, doc_graph_search_ef %, doc_graph_oversampling %, doc_graph_rescore_k %, doc_storage %, doc_storage_cache %, rerank %, rerank_k %, allow_exact_symmetric_build %, exact_symmetric_build_max_docs %, model %, proxy_encoder %, accumulator_mb %, debug %, skip_tokens %, trace_limit %',
+			RAISE EXCEPTION 'unexpected multivector defaults: doc %, query %, subvector %, unique %, raw %, adaptive %, branch_plan %, source %, bm25_injection %, sparse_source %, reservoirs %, coverage_reservoir_k %, fallback %, fallback_fraction %, fallback_max_docs %, per_token_reservoir_k %, docmap %, docs %, doc_graph_entry_sample_count %, doc_graph_search_ef %, doc_graph_oversampling %, doc_graph_rescore_k %, doc_storage %, doc_storage_cache %, rerank %, rerank_k %, allow_exact_symmetric_build %, exact_symmetric_build_max_docs %, model %, proxy_encoder %, accumulator_mb %, debug %, skip_tokens %, trace_limit %',
 				current_setting('turbohybrid.multivector_max_doc_vectors'),
 			current_setting('turbohybrid.multivector_max_query_vectors'),
 			current_setting('turbohybrid.multivector_subvector_k'),
@@ -187,6 +190,7 @@ BEGIN
 			current_setting('turbohybrid.multivector_per_token_doc_reservoir_k'),
 			current_setting('turbohybrid.multivector_docmap'),
 			current_setting('turbohybrid.multivector_doc_candidate_k'),
+			current_setting('turbohybrid.multivector_doc_graph_entry_sample_count'),
 			current_setting('turbohybrid.multivector_doc_graph_search_ef'),
 			current_setting('turbohybrid.multivector_doc_graph_oversampling'),
 			current_setting('turbohybrid.multivector_doc_graph_rescore_k'),

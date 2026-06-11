@@ -26,7 +26,7 @@ import time
 from dataclasses import dataclass, field, replace
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Callable, Iterable
+from typing import Any, Callable, Iterable, Sequence
 
 try:
     import psycopg
@@ -109,6 +109,14 @@ DOCUMENT_NODE_SERVING_GRID_OVERSAMPLING = (1, 2)
 DOCUMENT_NODE_SERVING_GRID_SMOKE_BUDGETS = (200, 800)
 DOCUMENT_NODE_SERVING_GRID_SMOKE_EF = (50, 100)
 DOCUMENT_NODE_SERVING_GRID_SMOKE_OVERSAMPLING = (1,)
+DOCUMENT_NODE_SERVING_GRID_CENTROID_LITE_CAPS = (16, 32, 64)
+DOCUMENT_NODE_SERVING_GRID_CENTROID_LITE_CAP_SWEEP = ",".join(
+    str(cap) for cap in DOCUMENT_NODE_SERVING_GRID_CENTROID_LITE_CAPS
+)
+DOCUMENT_NODE_SERVING_GRID_ENTRY_SAMPLE_COUNTS = (32, 128)
+DOCUMENT_NODE_SERVING_GRID_ENTRY_SAMPLE_SWEEP = ",".join(
+    str(count) for count in DOCUMENT_NODE_SERVING_GRID_ENTRY_SAMPLE_COUNTS
+)
 DOCUMENT_NODE_SERVING_GRID_SMOKE_PROFILES = (
     "proxy_normalized_mean_f16",
     "centroid_mean_f16",
@@ -120,6 +128,7 @@ DOCUMENT_NODE_SERVING_LATENCY_DEFAULT_CANDIDATE_K = 800
 SERVING_STATS_FIELD_GROUPS: dict[str, tuple[str, ...]] = {
     "core": (
         "multivector_candidate_source",
+        "multivector_branch_plan",
         "multivector_plain_fallback_used",
         "multivector_plain_fallback_reason",
         "multivector_plain_fallback_docs_scored",
@@ -131,15 +140,57 @@ SERVING_STATS_FIELD_GROUPS: dict[str, tuple[str, ...]] = {
         "multivector_doc_candidates",
         "multivector_unique_docs",
         "multivector_doc_graph_exact_rerank_docs",
+        "multivector_doc_graph_entry_sample_configured",
+        "multivector_doc_graph_entry_sample_effective",
+        "multivector_doc_graph_entry_sample_scored",
         "multivector_exact_rerank_docs",
         "multivector_exact_rerank_pairs",
         "multivector_exact_kernel",
+        "graph_entry_sample_configured",
+        "graph_entry_sample_effective",
+        "graph_entry_sample_scored",
+        "graph_entry_sidecar_count",
+        "graph_entry_sidecar_scored",
+        "graph_entry_sidecar_selected",
+        "graph_entry_sidecar_representatives_configured",
+        "graph_entry_sidecar_strategy",
+        "graph_entry_sidecar_us",
     ),
     "proxy": (
         "proxy_encoder_kind",
+        "proxy_graph_nodes_visited",
+        "proxy_graph_edges_visited",
+        "proxy_graph_candidates_seen",
+        "proxy_candidates_returned",
+        "proxy_candidate_limit_effective",
+        "proxy_candidate_limit_source",
+        "proxy_vector_scores_computed",
+        "proxy_vector_score_time_us",
         "proxy_candidates",
+        "proxy_lazy_sidecar_vectors",
         "proxy_top1_admission",
         "proxy_exact_rerank_docs",
+        "proxy_full_sidecar_vectors_loaded",
+        "proxy_full_sidecar_bytes_touched",
+        "proxy_full_sidecar_pages_read",
+        "proxy_full_sidecar_load_time_us",
+        "proxy_full_sidecar_reconstruct_time_us",
+        "proxy_exact_rerank_heap_fetches",
+        "proxy_exact_rerank_sidecar_fetches",
+        "proxy_exact_rerank_bytes_touched",
+        "proxy_exact_rerank_time_us",
+        "sidecar_cache_build_this_query",
+        "sidecar_cache_build_bytes",
+        "sidecar_cache_build_pages_read",
+        "sidecar_cache_build_time_us",
+        "sidecar_query_bytes_touched",
+        "sidecar_query_pages_read",
+        "sidecar_query_vectors_loaded",
+        "sidecar_query_load_time_us",
+        "sidecar_query_time_us",
+        "proxy_vector_uses_full_sidecar_for_graph",
+        "proxy_vector_near_exhaustive_sidecar_touch",
+        "proxy_vector_sidecar_touch_reason",
         "multivector_centroid_count",
         "multivector_centroid_prerank_docs",
         "multivector_full_maxsim_rerank_docs",
@@ -148,17 +199,33 @@ SERVING_STATS_FIELD_GROUPS: dict[str, tuple[str, ...]] = {
         "centroid_lists_visited",
         "centroid_docs_touched",
         "centroid_pruned_docs",
+        "centroid_postings_touched",
+        "centroid_postings_skipped",
+        "centroid_posting_limit_per_token",
+        "centroid_posting_cap_strategy",
         "centroid_candidates",
     ),
     "storage_cache": (
         "multivector_doc_sidecar_cache_mode",
+        "multivector_doc_storage_cache_requested",
+        "multivector_doc_storage_cache_effective",
         "multivector_doc_sidecar_pages_read",
         "multivector_doc_sidecar_cache_hits",
         "multivector_doc_sidecar_cache_misses",
         "multivector_doc_sidecar_bytes_touched",
         "multivector_doc_sidecar_vectors_loaded",
+        "multivector_doc_sidecar_docmap_pages_read",
+        "multivector_doc_sidecar_docmap_bytes_touched",
+        "multivector_doc_sidecar_resident_vectors_loaded",
+        "multivector_doc_sidecar_resident_bytes_loaded",
+        "multivector_doc_sidecar_vector_chunk_ref_bytes_touched",
+        "multivector_doc_sidecar_paged_vector_pages_read",
+        "multivector_doc_sidecar_paged_vector_bytes_touched",
+        "native_cache_used",
         "native_cache_built_this_scan",
         "native_cache_reused",
+        "native_cache_bytes",
+        "native_cache_exact_bytes",
         "native_cache_mode",
         "native_cache_scope",
     ),
@@ -224,10 +291,24 @@ SERVING_STATS_FIELD_GROUPS: dict[str, tuple[str, ...]] = {
     "sparse_bm25_rescue": (
         "multivector_bm25_injection_enabled",
         "multivector_bm25_injection_candidates",
+        "multivector_bm25_injection_candidate_limit",
+        "multivector_bm25_injection_pool_size",
+        "multivector_bm25_injection_limit_reason",
         "multivector_bm25_injection_retained",
+        "multivector_bm25_injection_exact_reranked",
         "learned_sparse_candidates",
         "learned_sparse_retained_for_maxsim",
         "learned_sparse_branch_latency_us",
+    ),
+    "reservoirs": (
+        "multivector_reservoirs_enabled",
+        "multivector_reservoir_score_docs",
+        "multivector_reservoir_coverage_docs",
+        "multivector_reservoir_mean_docs",
+        "multivector_reservoir_per_token_docs",
+        "multivector_reservoir_bm25_docs",
+        "multivector_reservoir_union_docs",
+        "multivector_reservoir_duplicates",
     ),
 }
 
@@ -264,6 +345,9 @@ class PersistWorkerResult:
 class DocumentNodeServingProfile:
     name: str
     candidate_source: str
+    branch_plan: str = "dense_only"
+    bm25_candidate_injection: str = "off"
+    sparse_candidate_source: str = "off"
     proxy_encoder: str = "normalized_mean"
     centroids: str = "off"
     centroid_count: str = "auto"
@@ -272,6 +356,14 @@ class DocumentNodeServingProfile:
     token_pooling: str = "off"
     token_pooling_target_ratio: float = 1.0
     plain_fallback: str = "off"
+    candidate_reservoirs: str = "off"
+    per_token_doc_reservoir_k: int = 1
+    coverage_reservoir_k: int = 10
+    centroid_lite_max_postings_per_token: int = 0
+    entry_sample_count: int = 0
+    entry_sidecar: bool = False
+    entry_sidecar_representatives: int = 128
+    entry_sidecar_strategy: str = "hybrid_level_covering"
 
 
 @dataclass(frozen=True)
@@ -384,6 +476,15 @@ def summarize_ints(values: list[int]) -> dict[str, float]:
         "max": max(values) if values else 0,
         "count": len(values),
     }
+
+
+def summarize_strings(values: list[str]) -> dict[str, int]:
+    counts: dict[str, int] = {}
+    for value in values:
+        if not value:
+            continue
+        counts[value] = counts.get(value, 0) + 1
+    return dict(sorted(counts.items()))
 
 
 def elapsed_ms_since(started: float) -> float:
@@ -623,6 +724,119 @@ def loaded_document_count(conn: psycopg.Connection[Any]) -> int:
     return int(row[0]) if row else 0
 
 
+def learned_sparse_ratio(numerator: int, denominator: int) -> float | None:
+    if denominator <= 0:
+        return None
+    return round(float(numerator) / float(denominator), 6)
+
+
+def learned_sparse_coverage_warnings(
+    coverage: dict[str, Any],
+    *,
+    threshold: float = 0.95,
+) -> list[str]:
+    warnings: list[str] = []
+    doc_ratio = coverage.get("doc_coverage_ratio")
+    query_ratio = coverage.get("query_coverage_ratio")
+    if doc_ratio is not None and float(doc_ratio) < threshold:
+        warnings.append(
+            "learned_sparse_doc_coverage_below_{:.0f}pct".format(threshold * 100.0)
+        )
+    if query_ratio is not None and float(query_ratio) < threshold:
+        warnings.append(
+            "learned_sparse_query_coverage_below_{:.0f}pct".format(threshold * 100.0)
+        )
+    return warnings
+
+
+def learned_sparse_coverage_summary(conn: psycopg.Connection[Any]) -> dict[str, Any]:
+    row = fetch_one(
+        conn,
+        """
+        SELECT
+          coalesce((SELECT count(*) FROM dbpedia_colbert_docs WHERE colbert IS NOT NULL), 0),
+          coalesce((
+            SELECT count(*)
+            FROM dbpedia_colbert_docs
+            WHERE colbert IS NOT NULL AND learned_sparse IS NOT NULL
+          ), 0),
+          coalesce((SELECT count(*) FROM dbpedia_colbert_queries WHERE colbert IS NOT NULL), 0),
+          coalesce((
+            SELECT count(*)
+            FROM dbpedia_colbert_queries
+            WHERE colbert IS NOT NULL AND learned_sparse IS NOT NULL
+          ), 0)
+        """,
+    )
+    loaded_docs = int(row[0] or 0) if row else 0
+    sparse_docs = int(row[1] or 0) if row else 0
+    loaded_queries = int(row[2] or 0) if row else 0
+    sparse_queries = int(row[3] or 0) if row else 0
+    coverage = {
+        "loaded_documents": loaded_docs,
+        "learned_sparse_documents": sparse_docs,
+        "doc_coverage_ratio": learned_sparse_ratio(sparse_docs, loaded_docs),
+        "loaded_queries": loaded_queries,
+        "learned_sparse_queries": sparse_queries,
+        "query_coverage_ratio": learned_sparse_ratio(sparse_queries, loaded_queries),
+    }
+    warnings = learned_sparse_coverage_warnings(coverage)
+    coverage["partial_coverage"] = bool(warnings)
+    coverage["warnings"] = warnings
+    return coverage
+
+
+def annotate_learned_sparse_evidence(
+    row: dict[str, Any],
+    coverage: dict[str, Any],
+) -> None:
+    if row.get("sparse_candidate_source") != "learned_sparse":
+        return
+    warnings = coverage.get("warnings", [])
+    if not isinstance(warnings, list):
+        warnings = []
+    row["learned_sparse_coverage"] = coverage
+    row["learned_sparse_partial_coverage"] = bool(coverage.get("partial_coverage", False))
+    if warnings:
+        evidence_warnings = row.get("evidence_warnings", [])
+        if not isinstance(evidence_warnings, list):
+            evidence_warnings = []
+        row["evidence_warnings"] = sorted({*map(str, evidence_warnings), *map(str, warnings)})
+
+
+def annotate_serving_grid_learned_sparse_evidence(
+    serving_grid: dict[str, Any],
+    learned_sparse_phase: dict[str, Any],
+) -> None:
+    if not isinstance(serving_grid, dict) or not isinstance(learned_sparse_phase, dict):
+        return
+    if bool(learned_sparse_phase.get("skipped", False)):
+        return
+    coverage = learned_sparse_phase.get("coverage", {})
+    if not isinstance(coverage, dict):
+        return
+    serving_grid["learned_sparse_coverage"] = coverage
+    serving_grid["learned_sparse_partial_coverage"] = bool(
+        coverage.get("partial_coverage", False)
+    )
+    serving_grid["learned_sparse_evidence_warnings"] = list(
+        coverage.get("warnings", [])
+    )
+    for key in (
+        "results",
+        "summary_rows",
+        "stage1_results",
+        "stage2_results",
+        "profile_summaries",
+    ):
+        rows = serving_grid.get(key, [])
+        if not isinstance(rows, list):
+            continue
+        for row in rows:
+            if isinstance(row, dict):
+                annotate_learned_sparse_evidence(row, coverage)
+
+
 def multivector_dataset_stats(conn: psycopg.Connection[Any]) -> dict[str, Any]:
     row = fetch_one(
         conn,
@@ -760,12 +974,57 @@ def build_index_reloptions(args: argparse.Namespace) -> tuple[list[str], dict[st
         reloptions.append(f"graph_ef_search = {index_graph_ef_search}")
     if index_native_segments > 0:
         reloptions.append(f"native_segments = {index_native_segments}")
+    entry_sidecar = bool(getattr(args, "entry_sidecar", False))
+    if entry_sidecar:
+        representatives = int(getattr(args, "entry_sidecar_representatives", 128))
+        strategy = str(getattr(args, "entry_sidecar_strategy", "hybrid_level_covering"))
+        reloptions.extend([
+            "entry_sidecar = on",
+            f"entry_sidecar_representatives = {representatives}",
+            f"entry_sidecar_strategy = {strategy}",
+        ])
     return reloptions, {
         "index_graph_m": index_graph_m,
         "index_graph_ef_construction": index_graph_ef_construction,
         "index_graph_ef_search": index_graph_ef_search,
         "index_native_segments": index_native_segments,
+        "entry_sidecar": entry_sidecar,
+        "entry_sidecar_representatives": int(
+            getattr(args, "entry_sidecar_representatives", 128)
+        ),
+        "entry_sidecar_strategy": str(
+            getattr(args, "entry_sidecar_strategy", "hybrid_level_covering")
+        ),
     }
+
+
+def build_index_needs_lexical_key(args: argparse.Namespace) -> bool:
+    return build_index_lexical_column(args) is not None
+
+
+def build_index_lexical_column(args: argparse.Namespace) -> str | None:
+    methods = set(getattr(args, "methods", []))
+    bm25_injection = getattr(args, "multivector_bm25_candidate_injection", "off")
+    sparse_source = getattr(args, "multivector_sparse_candidate_source", "off")
+    learned_sparse_needed = sparse_source == "learned_sparse"
+    text_bm25_needed = (
+        RRF_METHOD in methods
+        or bool(getattr(args, "hybrid_evaluation_harness", False))
+        or bm25_injection != "off"
+        or sparse_source == "bm25"
+    )
+    if learned_sparse_needed and text_bm25_needed:
+        raise SystemExit(
+            "refusing benchmark index build: learned_sparse and BM25/body text "
+            "candidate sources need different lexical index columns"
+        )
+    if learned_sparse_needed:
+        return "learned_sparse_tsv"
+    if text_bm25_needed:
+        return "body_tsv"
+    if sparse_source not in {"off", "bm25", "learned_sparse"}:
+        raise SystemExit(f"unknown multivector sparse candidate source: {sparse_source!r}")
+    return None
 
 
 def serving_profile_index_signature(
@@ -782,6 +1041,8 @@ def serving_profile_index_signature(
     return (
         ("reloptions", tuple(reloptions)),
         ("index_option_values", tuple(sorted(index_option_values.items()))),
+        ("lexical_column", build_index_lexical_column(index_args)),
+        ("lexical_key_required", build_index_needs_lexical_key(index_args)),
     )
 
 
@@ -862,14 +1123,6 @@ def require_complete_learned_sparse_args(args: argparse.Namespace) -> None:
         )
 
 
-def has_learned_sparse_docs(conn: psycopg.Connection[Any]) -> bool:
-    row = fetch_one(
-        conn,
-        "SELECT EXISTS (SELECT 1 FROM dbpedia_colbert_docs WHERE learned_sparse IS NOT NULL)",
-    )
-    return bool(row and row[0])
-
-
 def learned_sparse_text_query_sql() -> str:
     return """
     CASE
@@ -877,6 +1130,19 @@ def learned_sparse_text_query_sql() -> str:
       ELSE websearch_to_tsquery('simple', q.query_text)
     END
     """
+
+
+def query_only_needs_text_query(args: argparse.Namespace) -> bool:
+    return (
+        getattr(args, "multivector_bm25_candidate_injection", "off") != "off"
+        or getattr(args, "multivector_sparse_candidate_source", "off") != "off"
+    )
+
+
+def query_only_text_query_sql(args: argparse.Namespace) -> str:
+    if getattr(args, "multivector_sparse_candidate_source", "off") == "learned_sparse":
+        return learned_sparse_text_query_sql()
+    return "websearch_to_tsquery('simple', q.query_text)"
 
 
 def load_learned_sparse_vectors(conn: psycopg.Connection[Any], args: argparse.Namespace) -> dict[str, Any]:
@@ -916,6 +1182,7 @@ def load_learned_sparse_vectors(conn: psycopg.Connection[Any], args: argparse.Na
     if query_rows_sparse and query_updates == 0:
         raise RuntimeError(f"no learned sparse query rows matched loaded queries from {args.learned_sparse_query_jsonl}")
 
+    coverage = learned_sparse_coverage_summary(conn)
     return {
         "skipped": False,
         "doc_jsonl": portable_path(args.learned_sparse_doc_jsonl),
@@ -924,6 +1191,9 @@ def load_learned_sparse_vectors(conn: psycopg.Connection[Any], args: argparse.Na
         "doc_rows_updated": doc_updates,
         "query_rows_read": len(query_rows_sparse),
         "query_rows_updated": query_updates,
+        "coverage": coverage,
+        "partial_coverage": bool(coverage.get("partial_coverage", False)),
+        "warnings": list(coverage.get("warnings", [])),
         "elapsed_ms": round((time.perf_counter() - started) * 1000.0, 3),
     }
 
@@ -952,10 +1222,17 @@ def set_colbert_gucs(conn: psycopg.Connection[Any], args: argparse.Namespace) ->
         "turbohybrid.multivector_doc_graph_search_ef": str(args.multivector_doc_graph_search_ef),
         "turbohybrid.multivector_doc_graph_oversampling": str(args.multivector_doc_graph_oversampling),
         "turbohybrid.multivector_doc_graph_rescore_k": str(args.multivector_doc_graph_rescore_k),
+        "turbohybrid.multivector_doc_graph_entry_sample_count": str(
+            args.multivector_doc_graph_entry_sample_count
+        ),
         "turbohybrid.multivector_doc_storage": args.multivector_doc_storage,
         "turbohybrid.multivector_doc_storage_cache": args.multivector_doc_storage_cache,
         "turbohybrid.multivector_proxy_encoder": args.multivector_proxy_encoder,
+        "turbohybrid.multivector_centroid_lite_max_postings_per_token": str(
+            args.multivector_centroid_lite_max_postings_per_token
+        ),
         "turbohybrid.multivector_candidate_source": args.multivector_candidate_source,
+        "turbohybrid.multivector_branch_plan": getattr(args, "multivector_branch_plan", "auto"),
         "turbohybrid.multivector_plain_fallback": args.multivector_plain_fallback,
         "turbohybrid.multivector_plain_fallback_max_docs": str(args.multivector_plain_fallback_max_docs),
         "turbohybrid.multivector_plain_fallback_candidate_fraction": str(args.multivector_plain_fallback_candidate_fraction),
@@ -992,10 +1269,17 @@ def set_retrieval_gucs(conn: psycopg.Connection[Any], args: argparse.Namespace, 
         "turbohybrid.multivector_doc_graph_search_ef": str(args.multivector_doc_graph_search_ef),
         "turbohybrid.multivector_doc_graph_oversampling": str(args.multivector_doc_graph_oversampling),
         "turbohybrid.multivector_doc_graph_rescore_k": str(args.multivector_doc_graph_rescore_k),
+        "turbohybrid.multivector_doc_graph_entry_sample_count": str(
+            args.multivector_doc_graph_entry_sample_count
+        ),
         "turbohybrid.multivector_doc_storage": args.multivector_doc_storage,
         "turbohybrid.multivector_doc_storage_cache": args.multivector_doc_storage_cache,
         "turbohybrid.multivector_proxy_encoder": args.multivector_proxy_encoder,
+        "turbohybrid.multivector_centroid_lite_max_postings_per_token": str(
+            args.multivector_centroid_lite_max_postings_per_token
+        ),
         "turbohybrid.multivector_candidate_source": args.multivector_candidate_source,
+        "turbohybrid.multivector_branch_plan": getattr(args, "multivector_branch_plan", "auto"),
         "turbohybrid.multivector_plain_fallback": args.multivector_plain_fallback,
         "turbohybrid.multivector_plain_fallback_max_docs": str(args.multivector_plain_fallback_max_docs),
         "turbohybrid.multivector_plain_fallback_candidate_fraction": str(args.multivector_plain_fallback_candidate_fraction),
@@ -1640,16 +1924,7 @@ def build_index(conn: psycopg.Connection[Any], args: argparse.Namespace) -> dict
 
     exec_sql(conn, "DROP INDEX IF EXISTS dbpedia_colbert_docs_colbert_idx")
     started = time.perf_counter()
-    needs_lexical_index = (
-        RRF_METHOD in set(getattr(args, "methods", []))
-        or bool(getattr(args, "hybrid_evaluation_harness", False))
-        or getattr(args, "multivector_bm25_candidate_injection", "off") != "off"
-        or getattr(args, "multivector_sparse_candidate_source", "off") != "off"
-        or getattr(args, "learned_sparse_doc_jsonl", None) is not None
-    )
-    lexical_column = None
-    if needs_lexical_index:
-        lexical_column = "learned_sparse_tsv" if has_learned_sparse_docs(conn) else "body_tsv"
+    lexical_column = build_index_lexical_column(args)
     reloptions_sql = ",\n              ".join(reloptions)
     if lexical_column is None:
         exec_sql(
@@ -1725,25 +2000,55 @@ def run_retrieval_query(
     dense_k: int | None = None,
 ) -> list[str]:
     if method == QUERY_ONLY_METHOD:
-        rows = fetch_all(
-            conn,
-            """
-            SELECT d.doc_id
-            FROM dbpedia_colbert_docs d
-            WHERE d.colbert IS NOT NULL
-            ORDER BY d.colbert <~> (
-              SELECT turbohybrid_query(
-                multivector_query => q.colbert,
-                dense_k => %s,
-                final_k => %s
-              )
-              FROM dbpedia_colbert_queries q
-              WHERE q.query_id = %s
+        if query_only_needs_text_query(args):
+            text_query_expr = query_only_text_query_sql(args)
+            rows = fetch_all(
+                conn,
+                f"""
+                SELECT d.doc_id
+                FROM dbpedia_colbert_docs d
+                WHERE d.colbert IS NOT NULL
+                ORDER BY d.colbert <~> (
+                  SELECT turbohybrid_query(
+                    multivector_query => q.colbert,
+                    text_query => {text_query_expr},
+                    dense_k => %s,
+                    bm25_k => %s,
+                    final_k => %s
+                  )
+                  FROM dbpedia_colbert_queries q
+                  WHERE q.query_id = %s
+                )
+                LIMIT %s
+                """,
+                (
+                    dense_k or args.dense_k,
+                    args.bm25_k,
+                    final_k,
+                    query.query_id,
+                    final_k,
+                ),
             )
-            LIMIT %s
-            """,
-            (dense_k or args.dense_k, final_k, query.query_id, final_k),
-        )
+        else:
+            rows = fetch_all(
+                conn,
+                """
+                SELECT d.doc_id
+                FROM dbpedia_colbert_docs d
+                WHERE d.colbert IS NOT NULL
+                ORDER BY d.colbert <~> (
+                  SELECT turbohybrid_query(
+                    multivector_query => q.colbert,
+                    dense_k => %s,
+                    final_k => %s
+                  )
+                  FROM dbpedia_colbert_queries q
+                  WHERE q.query_id = %s
+                )
+                LIMIT %s
+                """,
+                (dense_k or args.dense_k, final_k, query.query_id, final_k),
+            )
     elif method == EXACT_SCAN_METHOD:
         rows = fetch_all(
             conn,
@@ -2256,6 +2561,53 @@ def validate_serving_scan_path(
                 "doc_graph_docs_scored_near_table_size:"
                 f"observed={doc_graph_docs_scored},table={loaded_document_count}"
             )
+        if expected_source == "proxy_vector":
+            candidate_k = max(
+                scan_stat_int(stats, "multivector_proxy_candidate_target"),
+                scan_stat_int(stats, "multivector_doc_graph_candidates"),
+                scan_stat_int(stats, "proxy_candidates"),
+                int(getattr(args, "serving_candidate_k", 0) or 0),
+                int(getattr(args, "multivector_doc_candidate_k", 0) or 0),
+            )
+            sidecar_vectors_loaded = scan_stat_int(
+                stats, "multivector_doc_sidecar_vectors_loaded"
+            )
+            resident_vectors_loaded = scan_stat_int(
+                stats, "multivector_doc_sidecar_resident_vectors_loaded"
+            )
+            sidecar_bytes_touched = scan_stat_int(
+                stats, "multivector_doc_sidecar_bytes_touched"
+            )
+            sidecar_docmap_bytes = scan_stat_int(stats, "multivector_docmap_bytes")
+            docmap_bytes_touched = scan_stat_int(
+                stats, "multivector_doc_sidecar_docmap_bytes_touched"
+            )
+            bounded_proxy_candidate_band = candidate_k > 0 and candidate_k < near_threshold
+            if bounded_proxy_candidate_band and (
+                sidecar_vectors_loaded >= near_threshold
+                or resident_vectors_loaded >= near_threshold
+                or doc_graph_docs_scored >= near_threshold
+            ):
+                warnings.append(
+                    "proxy_vector_near_exhaustive_sidecar_touch:"
+                    f"candidate_k={candidate_k},table={loaded_document_count},"
+                    f"sidecar_vectors_loaded={sidecar_vectors_loaded},"
+                    f"resident_vectors_loaded={resident_vectors_loaded},"
+                    f"docs_scored={doc_graph_docs_scored}"
+                )
+            if (
+                bounded_proxy_candidate_band
+                and sidecar_docmap_bytes > 0
+                and max(sidecar_bytes_touched, docmap_bytes_touched)
+                >= int(math.floor(sidecar_docmap_bytes * 0.90))
+            ):
+                warnings.append(
+                    "proxy_vector_near_exhaustive_sidecar_touch:"
+                    f"candidate_k={candidate_k},table={loaded_document_count},"
+                    f"sidecar_bytes_touched={sidecar_bytes_touched},"
+                    f"docmap_bytes_touched={docmap_bytes_touched},"
+                    f"docmap_bytes={sidecar_docmap_bytes}"
+                )
 
     observed_cache_mode = scan_stat_str(stats, "multivector_doc_sidecar_cache_mode")
     pages_read = scan_stat_int(stats, "multivector_doc_sidecar_pages_read")
@@ -2371,6 +2723,32 @@ def learned_sparse_work_from_stats(stats: dict[str, Any]) -> dict[str, Any]:
     }
 
 
+def bm25_rescue_work_from_stats(stats: dict[str, Any]) -> dict[str, Any]:
+    return {
+        "bm25_injection_enabled": scan_stat_bool(
+            stats, "multivector_bm25_injection_enabled"
+        ),
+        "bm25_injection_candidates": scan_stat_int(
+            stats, "multivector_bm25_injection_candidates"
+        ),
+        "bm25_injection_candidate_limit": scan_stat_int(
+            stats, "multivector_bm25_injection_candidate_limit"
+        ),
+        "bm25_injection_pool_size": scan_stat_int(
+            stats, "multivector_bm25_injection_pool_size"
+        ),
+        "bm25_injection_limit_reason": scan_stat_str(
+            stats, "multivector_bm25_injection_limit_reason"
+        ),
+        "bm25_injection_retained": scan_stat_int(
+            stats, "multivector_bm25_injection_retained"
+        ),
+        "bm25_injection_exact_reranked": scan_stat_int(
+            stats, "multivector_bm25_injection_exact_reranked"
+        ),
+    }
+
+
 def is_experimental_quantized_stat_key(key: str) -> bool:
     lowered = key.lower()
     return (
@@ -2379,6 +2757,147 @@ def is_experimental_quantized_stat_key(key: str) -> bool:
         or "codeword" in lowered
         or "posting" in lowered
     )
+
+
+def _nested_dense_cache(stats: dict[str, Any]) -> dict[str, Any]:
+    dense = stats.get("dense", {})
+    if not isinstance(dense, dict):
+        return {}
+    cache = dense.get("cache", {})
+    return cache if isinstance(cache, dict) else {}
+
+
+def _set_if_absent(target: dict[str, Any], key: str, value: Any) -> None:
+    if key not in target and value is not None:
+        target[key] = value
+
+
+def _cache_bool(cache: dict[str, Any], key: str) -> bool | None:
+    if key not in cache:
+        return None
+    value = cache.get(key)
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, str):
+        lowered = value.lower()
+        if lowered in {"true", "on", "yes", "1"}:
+            return True
+        if lowered in {"false", "off", "no", "0"}:
+            return False
+    return None
+
+
+def _cache_int(cache: dict[str, Any], key: str) -> int | None:
+    return _serving_timing_number(cache.get(key))
+
+
+def _derive_serving_stats_from_nested_cache(
+    stats: dict[str, Any],
+    extracted: dict[str, Any],
+) -> None:
+    """Backfill flat serving fields from legacy nested dense.cache stats."""
+    cache = _nested_dense_cache(stats)
+    if not cache:
+        return
+
+    for key in SERVING_STATS_FIELD_GROUPS["storage_cache"]:
+        _set_if_absent(extracted, key, cache.get(key))
+
+    native_cache_built = _cache_bool(cache, "native_cache_built_this_scan")
+    native_cache_reused = _cache_bool(cache, "native_cache_reused")
+    sidecar_bytes = _cache_int(cache, "multivector_doc_sidecar_bytes_touched") or 0
+    sidecar_pages = _cache_int(cache, "multivector_doc_sidecar_pages_read") or 0
+    vectors_loaded = (
+        (_cache_int(cache, "multivector_doc_sidecar_vectors_loaded") or 0)
+        + (_cache_int(cache, "multivector_doc_sidecar_resident_vectors_loaded") or 0)
+    )
+    page_read_us = _serving_timing_number(
+        stats.get("multivector_sidecar_page_read_time_us")
+    ) or _serving_timing_number(cache.get("multivector_sidecar_page_read_time_us")) or 0
+    reconstruct_us = _serving_timing_number(
+        stats.get("multivector_sidecar_vector_reconstruct_time_us")
+    ) or _serving_timing_number(cache.get("multivector_sidecar_vector_reconstruct_time_us")) or 0
+    sidecar_time_us = page_read_us + reconstruct_us
+
+    if native_cache_built is not None:
+        _set_if_absent(extracted, "sidecar_cache_build_this_query", native_cache_built)
+    if native_cache_built:
+        _set_if_absent(extracted, "sidecar_cache_build_bytes", sidecar_bytes)
+        _set_if_absent(extracted, "sidecar_cache_build_pages_read", sidecar_pages)
+        _set_if_absent(extracted, "sidecar_cache_build_time_us", sidecar_time_us)
+        _set_if_absent(extracted, "sidecar_query_bytes_touched", 0)
+        _set_if_absent(extracted, "sidecar_query_pages_read", 0)
+        _set_if_absent(extracted, "sidecar_query_vectors_loaded", 0)
+        _set_if_absent(extracted, "sidecar_query_load_time_us", 0)
+        _set_if_absent(extracted, "sidecar_query_time_us", 0)
+    elif native_cache_built is False or native_cache_reused is True:
+        _set_if_absent(extracted, "sidecar_cache_build_bytes", 0)
+        _set_if_absent(extracted, "sidecar_cache_build_pages_read", 0)
+        _set_if_absent(extracted, "sidecar_cache_build_time_us", 0)
+        _set_if_absent(extracted, "sidecar_query_bytes_touched", sidecar_bytes)
+        _set_if_absent(extracted, "sidecar_query_pages_read", sidecar_pages)
+        _set_if_absent(extracted, "sidecar_query_vectors_loaded", vectors_loaded)
+        _set_if_absent(extracted, "sidecar_query_load_time_us", sidecar_time_us)
+        _set_if_absent(extracted, "sidecar_query_time_us", sidecar_time_us)
+
+    if (
+        stats.get("multivector_candidate_source") == "proxy_vector"
+        and stats.get("multivector_candidate_path") == "proxy_graph"
+    ):
+        _set_if_absent(extracted, "proxy_vector_uses_full_sidecar_for_graph", False)
+        _set_if_absent(extracted, "proxy_full_sidecar_vectors_loaded", 0)
+        _set_if_absent(extracted, "proxy_full_sidecar_bytes_touched", 0)
+        _set_if_absent(extracted, "proxy_full_sidecar_pages_read", 0)
+        _set_if_absent(extracted, "proxy_full_sidecar_load_time_us", 0)
+        _set_if_absent(extracted, "proxy_full_sidecar_reconstruct_time_us", 0)
+
+        observed_candidates = max(
+            scan_stat_int(stats, "proxy_candidates"),
+            scan_stat_int(stats, "multivector_doc_graph_candidates"),
+        )
+        search_ef = scan_stat_int(stats, "multivector_doc_graph_search_ef")
+        branch_limits = scan_stat_int_list(stats, "branch_candidate_limits")
+        target = branch_limits[0] if branch_limits else scan_stat_int(
+            stats, "multivector_proxy_candidate_target"
+        )
+        if observed_candidates:
+            _set_if_absent(
+                extracted,
+                "proxy_candidate_limit_effective",
+                observed_candidates,
+            )
+            if search_ef and observed_candidates == search_ef and (
+                target == 0 or target > observed_candidates
+            ):
+                source = "search_ef"
+            elif target and observed_candidates == target:
+                source = "candidate_target"
+            else:
+                source = "observed_candidates"
+            _set_if_absent(extracted, "proxy_candidate_limit_source", source)
+
+        doc_count = scan_stat_int(stats, "multivector_doc_graph_nodes")
+        near_exhaustive = (
+            bool(doc_count)
+            and bool(vectors_loaded)
+            and vectors_loaded * 10 >= doc_count * 9
+            and bool(target)
+            and target * 4 < doc_count
+        )
+        _set_if_absent(
+            extracted,
+            "proxy_vector_near_exhaustive_sidecar_touch",
+            near_exhaustive,
+        )
+        if near_exhaustive:
+            reason = (
+                "resident_cache_build_all_docs"
+                if native_cache_built
+                else "resident_cache_query_materialize_all_docs"
+            )
+        else:
+            reason = "none"
+        _set_if_absent(extracted, "proxy_vector_sidecar_touch_reason", reason)
 
 
 def extract_document_node_serving_stats(stats: dict[str, Any]) -> dict[str, Any]:
@@ -2391,6 +2910,7 @@ def extract_document_node_serving_stats(stats: dict[str, Any]) -> dict[str, Any]
     }
     extracted = {key: stats[key] for key in fields if key in stats}
     extracted.update(normalize_serving_phase_timings(stats))
+    _derive_serving_stats_from_nested_cache(stats, extracted)
     for key, value in stats.items():
         if is_experimental_quantized_stat_key(str(key)):
             extracted[str(key)] = value
@@ -2457,6 +2977,13 @@ def sidecar_stats_from_scan(stats: dict[str, Any]) -> dict[str, Any]:
         "multivector_doc_sidecar_cache_misses",
         "multivector_doc_sidecar_bytes_touched",
         "multivector_doc_sidecar_vectors_loaded",
+        "multivector_doc_sidecar_docmap_pages_read",
+        "multivector_doc_sidecar_docmap_bytes_touched",
+        "multivector_doc_sidecar_resident_vectors_loaded",
+        "multivector_doc_sidecar_resident_bytes_loaded",
+        "multivector_doc_sidecar_vector_chunk_ref_bytes_touched",
+        "multivector_doc_sidecar_paged_vector_pages_read",
+        "multivector_doc_sidecar_paged_vector_bytes_touched",
     )
     return {
         "sidecar_stats_available": any(key in stats for key in dedicated_keys),
@@ -2466,6 +2993,27 @@ def sidecar_stats_from_scan(stats: dict[str, Any]) -> dict[str, Any]:
         "sidecar_cache_hits": scan_stat_int(stats, "multivector_doc_sidecar_cache_hits"),
         "sidecar_cache_misses": scan_stat_int(stats, "multivector_doc_sidecar_cache_misses"),
         "sidecar_vectors_loaded": scan_stat_int(stats, "multivector_doc_sidecar_vectors_loaded"),
+        "sidecar_docmap_pages_read": scan_stat_int(
+            stats, "multivector_doc_sidecar_docmap_pages_read"
+        ),
+        "sidecar_docmap_bytes_touched": scan_stat_int(
+            stats, "multivector_doc_sidecar_docmap_bytes_touched"
+        ),
+        "sidecar_resident_vectors_loaded": scan_stat_int(
+            stats, "multivector_doc_sidecar_resident_vectors_loaded"
+        ),
+        "sidecar_resident_bytes_loaded": scan_stat_int(
+            stats, "multivector_doc_sidecar_resident_bytes_loaded"
+        ),
+        "sidecar_vector_chunk_ref_bytes_touched": scan_stat_int(
+            stats, "multivector_doc_sidecar_vector_chunk_ref_bytes_touched"
+        ),
+        "sidecar_paged_vector_pages_read": scan_stat_int(
+            stats, "multivector_doc_sidecar_paged_vector_pages_read"
+        ),
+        "sidecar_paged_vector_bytes_touched": scan_stat_int(
+            stats, "multivector_doc_sidecar_paged_vector_bytes_touched"
+        ),
         "native_cache_used": scan_stat_bool(stats, "native_cache_used"),
         "native_cache_reused": scan_stat_bool(stats, "native_cache_reused"),
         "native_cache_built_this_scan": scan_stat_bool(stats, "native_cache_built_this_scan"),
@@ -2495,11 +3043,38 @@ def effective_serving_grid_budget_sweep(args: argparse.Namespace) -> list[int]:
         source = str(getattr(args, "admission_budget_sweep", "") or "")
     elif bool(getattr(args, "document_node_serving_grid_smoke", False)):
         source = ",".join(str(budget) for budget in DOCUMENT_NODE_SERVING_GRID_SMOKE_BUDGETS)
-    elif bool(getattr(args, "document_node_serving_grid", False)):
+    elif (
+        bool(getattr(args, "document_node_serving_grid", False))
+        or bool(getattr(args, "document_node_serving_build_only", False))
+    ):
         source = DOCUMENT_NODE_SERVING_GRID_BUDGET_SWEEP
     else:
         source = DEFAULT_ADMISSION_BUDGET_SWEEP
     return parse_int_grid(source, "--admission-budget-sweep")
+
+
+def effective_document_node_serving_centroid_lite_caps(args: argparse.Namespace) -> list[int]:
+    source = str(
+        getattr(
+            args,
+            "document_node_serving_grid_centroid_lite_posting_caps",
+            DOCUMENT_NODE_SERVING_GRID_CENTROID_LITE_CAP_SWEEP,
+        )
+        or DOCUMENT_NODE_SERVING_GRID_CENTROID_LITE_CAP_SWEEP
+    )
+    return parse_int_grid(source, "--document-node-serving-grid-centroid-lite-posting-caps")
+
+
+def effective_document_node_serving_entry_sample_counts(args: argparse.Namespace) -> list[int]:
+    source = str(
+        getattr(
+            args,
+            "document_node_serving_grid_entry_sample_counts",
+            DOCUMENT_NODE_SERVING_GRID_ENTRY_SAMPLE_SWEEP,
+        )
+        or DOCUMENT_NODE_SERVING_GRID_ENTRY_SAMPLE_SWEEP
+    )
+    return parse_int_grid(source, "--document-node-serving-grid-entry-sample-counts")
 
 
 def effective_serving_grid_executed_budgets(args: argparse.Namespace) -> list[int]:
@@ -2716,10 +3291,7 @@ def run_admission_budget(
         "reservoir_bm25_docs": scan_stat_int(stats, "multivector_reservoir_bm25_docs"),
         "reservoir_union_docs": scan_stat_int(stats, "multivector_reservoir_union_docs"),
         "reservoir_duplicates": scan_stat_int(stats, "multivector_reservoir_duplicates"),
-        "bm25_injection_enabled": scan_stat_bool(stats, "multivector_bm25_injection_enabled"),
-        "bm25_injection_candidates": scan_stat_int(stats, "multivector_bm25_injection_candidates"),
-        "bm25_injection_retained": scan_stat_int(stats, "multivector_bm25_injection_retained"),
-        "bm25_injection_exact_reranked": scan_stat_int(stats, "multivector_bm25_injection_exact_reranked"),
+        **bm25_rescue_work_from_stats(stats),
         **learned_sparse_work_from_stats(stats),
         "latency_ms": latency_ms,
         "latency": {"ms": latency_ms},
@@ -2830,6 +3402,14 @@ def run_admission_debug(
     exact_rerank_pairs_saved_by_budget: dict[int, list[int]] = {budget: [] for budget in executed_budget_values}
     proxy_candidates_by_budget: dict[int, list[int]] = {budget: [] for budget in executed_budget_values}
     proxy_exact_rerank_docs_by_budget: dict[int, list[int]] = {budget: [] for budget in executed_budget_values}
+    reservoirs_enabled_by_budget: dict[int, list[bool]] = {budget: [] for budget in executed_budget_values}
+    reservoir_score_docs_by_budget: dict[int, list[int]] = {budget: [] for budget in executed_budget_values}
+    reservoir_coverage_docs_by_budget: dict[int, list[int]] = {budget: [] for budget in executed_budget_values}
+    reservoir_mean_docs_by_budget: dict[int, list[int]] = {budget: [] for budget in executed_budget_values}
+    reservoir_per_token_docs_by_budget: dict[int, list[int]] = {budget: [] for budget in executed_budget_values}
+    reservoir_bm25_docs_by_budget: dict[int, list[int]] = {budget: [] for budget in executed_budget_values}
+    reservoir_union_docs_by_budget: dict[int, list[int]] = {budget: [] for budget in executed_budget_values}
+    reservoir_duplicates_by_budget: dict[int, list[int]] = {budget: [] for budget in executed_budget_values}
     centroid_lists_visited_by_budget: dict[int, list[int]] = {budget: [] for budget in executed_budget_values}
     centroid_docs_touched_by_budget: dict[int, list[int]] = {budget: [] for budget in executed_budget_values}
     centroid_pruned_docs_by_budget: dict[int, list[int]] = {budget: [] for budget in executed_budget_values}
@@ -2837,6 +3417,19 @@ def run_admission_debug(
     learned_sparse_candidates_by_budget: dict[int, list[int]] = {budget: [] for budget in executed_budget_values}
     learned_sparse_retained_by_budget: dict[int, list[int]] = {budget: [] for budget in executed_budget_values}
     learned_sparse_latency_us_by_budget: dict[int, list[int]] = {budget: [] for budget in executed_budget_values}
+    bm25_injection_enabled_by_budget: dict[int, list[bool]] = {budget: [] for budget in executed_budget_values}
+    bm25_injection_candidates_by_budget: dict[int, list[int]] = {budget: [] for budget in executed_budget_values}
+    bm25_injection_candidate_limit_by_budget: dict[int, list[int]] = {
+        budget: [] for budget in executed_budget_values
+    }
+    bm25_injection_pool_size_by_budget: dict[int, list[int]] = {
+        budget: [] for budget in executed_budget_values
+    }
+    bm25_injection_limit_reason_by_budget: dict[int, list[str]] = {
+        budget: [] for budget in executed_budget_values
+    }
+    bm25_injection_retained_by_budget: dict[int, list[int]] = {budget: [] for budget in executed_budget_values}
+    bm25_injection_exact_reranked_by_budget: dict[int, list[int]] = {budget: [] for budget in executed_budget_values}
     quantized_inverted_candidates_by_budget: dict[int, list[int]] = {budget: [] for budget in executed_budget_values}
     quantized_inverted_postings_by_budget: dict[int, list[int]] = {budget: [] for budget in executed_budget_values}
     quantized_inverted_docs_by_budget: dict[int, list[int]] = {budget: [] for budget in executed_budget_values}
@@ -2913,6 +3506,30 @@ def run_admission_debug(
             proxy_exact_rerank_docs_by_budget[budget].append(
                 int(result.get("proxy_exact_rerank_docs", 0))
             )
+            reservoirs_enabled_by_budget[budget].append(
+                bool(result.get("reservoirs_enabled", False))
+            )
+            reservoir_score_docs_by_budget[budget].append(
+                int(result.get("reservoir_score_docs", 0))
+            )
+            reservoir_coverage_docs_by_budget[budget].append(
+                int(result.get("reservoir_coverage_docs", 0))
+            )
+            reservoir_mean_docs_by_budget[budget].append(
+                int(result.get("reservoir_mean_docs", 0))
+            )
+            reservoir_per_token_docs_by_budget[budget].append(
+                int(result.get("reservoir_per_token_docs", 0))
+            )
+            reservoir_bm25_docs_by_budget[budget].append(
+                int(result.get("reservoir_bm25_docs", 0))
+            )
+            reservoir_union_docs_by_budget[budget].append(
+                int(result.get("reservoir_union_docs", 0))
+            )
+            reservoir_duplicates_by_budget[budget].append(
+                int(result.get("reservoir_duplicates", 0))
+            )
             centroid_lists_visited_by_budget[budget].append(
                 int(result.get("centroid_lists_visited", 0))
             )
@@ -2933,6 +3550,27 @@ def run_admission_debug(
             )
             learned_sparse_latency_us_by_budget[budget].append(
                 int(result.get("learned_sparse_branch_latency_us", 0))
+            )
+            bm25_injection_enabled_by_budget[budget].append(
+                bool(result.get("bm25_injection_enabled", False))
+            )
+            bm25_injection_candidates_by_budget[budget].append(
+                int(result.get("bm25_injection_candidates", 0))
+            )
+            bm25_injection_candidate_limit_by_budget[budget].append(
+                int(result.get("bm25_injection_candidate_limit", 0))
+            )
+            bm25_injection_pool_size_by_budget[budget].append(
+                int(result.get("bm25_injection_pool_size", 0))
+            )
+            bm25_limit_reason = str(result.get("bm25_injection_limit_reason", "") or "")
+            if bm25_limit_reason:
+                bm25_injection_limit_reason_by_budget[budget].append(bm25_limit_reason)
+            bm25_injection_retained_by_budget[budget].append(
+                int(result.get("bm25_injection_retained", 0))
+            )
+            bm25_injection_exact_reranked_by_budget[budget].append(
+                int(result.get("bm25_injection_exact_reranked", 0))
             )
             quantized_inverted_candidates_by_budget[budget].append(
                 int(result.get("quantized_inverted_candidates", 0))
@@ -3074,6 +3712,30 @@ def run_admission_debug(
                 "proxy_exact_rerank_docs": summarize_ints(
                     proxy_exact_rerank_docs_by_budget[budget]
                 ),
+                "reservoirs_enabled_queries": sum(
+                    1 for value in reservoirs_enabled_by_budget[budget] if value
+                ),
+                "reservoir_score_docs": summarize_ints(
+                    reservoir_score_docs_by_budget[budget]
+                ),
+                "reservoir_coverage_docs": summarize_ints(
+                    reservoir_coverage_docs_by_budget[budget]
+                ),
+                "reservoir_mean_docs": summarize_ints(
+                    reservoir_mean_docs_by_budget[budget]
+                ),
+                "reservoir_per_token_docs": summarize_ints(
+                    reservoir_per_token_docs_by_budget[budget]
+                ),
+                "reservoir_bm25_docs": summarize_ints(
+                    reservoir_bm25_docs_by_budget[budget]
+                ),
+                "reservoir_union_docs": summarize_ints(
+                    reservoir_union_docs_by_budget[budget]
+                ),
+                "reservoir_duplicates": summarize_ints(
+                    reservoir_duplicates_by_budget[budget]
+                ),
                 "centroid_lists_visited": summarize_ints(
                     centroid_lists_visited_by_budget[budget]
                 ),
@@ -3094,6 +3756,27 @@ def run_admission_debug(
                 ),
                 "learned_sparse_branch_latency_us": summarize_ints(
                     learned_sparse_latency_us_by_budget[budget]
+                ),
+                "bm25_injection_enabled_queries": sum(
+                    1 for value in bm25_injection_enabled_by_budget[budget] if value
+                ),
+                "bm25_injection_candidates": summarize_ints(
+                    bm25_injection_candidates_by_budget[budget]
+                ),
+                "bm25_injection_candidate_limit": summarize_ints(
+                    bm25_injection_candidate_limit_by_budget[budget]
+                ),
+                "bm25_injection_pool_size": summarize_ints(
+                    bm25_injection_pool_size_by_budget[budget]
+                ),
+                "bm25_injection_limit_reason": summarize_strings(
+                    bm25_injection_limit_reason_by_budget[budget]
+                ),
+                "bm25_injection_retained": summarize_ints(
+                    bm25_injection_retained_by_budget[budget]
+                ),
+                "bm25_injection_exact_reranked": summarize_ints(
+                    bm25_injection_exact_reranked_by_budget[budget]
                 ),
                 "quantized_inverted_candidates": summarize_ints(
                     quantized_inverted_candidates_by_budget[budget]
@@ -3135,6 +3818,7 @@ def run_admission_debug(
         "doc_graph_search_ef": args.multivector_doc_graph_search_ef,
         "doc_graph_oversampling": args.multivector_doc_graph_oversampling,
         "doc_graph_rescore_k": args.multivector_doc_graph_rescore_k,
+        "doc_graph_entry_sample_count": args.multivector_doc_graph_entry_sample_count,
         "plain_fallback": args.multivector_plain_fallback,
         "candidate_reservoirs": args.multivector_candidate_reservoirs,
         "bm25_candidate_injection": args.multivector_bm25_candidate_injection,
@@ -3314,6 +3998,15 @@ def grid_admission_summary(
 def document_node_serving_profiles(
     *,
     include_experimental: bool,
+    include_proxy_encoder_variants: bool,
+    include_bm25_rescue: bool,
+    include_learned_sparse_rescue: bool,
+    include_reservoirs: bool,
+    include_centroid_lite_caps: bool = False,
+    centroid_lite_posting_caps: Sequence[int] = (),
+    include_entry_samples: bool = False,
+    entry_sample_counts: Sequence[int] = (),
+    include_entry_sidecar: bool = False,
     centroid_count: str,
 ) -> list[DocumentNodeServingProfile]:
     profiles = [
@@ -3360,6 +4053,198 @@ def document_node_serving_profiles(
             storage_kind="sq8",
         ),
     ]
+    if include_centroid_lite_caps:
+        profiles.extend(
+            DocumentNodeServingProfile(
+                name=f"centroid_lite_f16_cap_{int(cap):03d}",
+                candidate_source="centroid_lite",
+                centroids="kmeans",
+                centroid_count=centroid_count,
+                storage_kind="f16",
+                centroid_lite_max_postings_per_token=int(cap),
+            )
+            for cap in centroid_lite_posting_caps
+        )
+    if include_entry_samples:
+        for count in entry_sample_counts:
+            entry_sample_count = int(count)
+            profiles.extend(
+                [
+                    DocumentNodeServingProfile(
+                        name=f"proxy_normalized_mean_f16_entry_sample_{entry_sample_count:03d}",
+                        candidate_source="proxy_vector",
+                        proxy_encoder="normalized_mean",
+                        storage_kind="f16",
+                        entry_sample_count=entry_sample_count,
+                    ),
+                    DocumentNodeServingProfile(
+                        name=f"centroid_mean_f16_entry_sample_{entry_sample_count:03d}",
+                        candidate_source="proxy_vector",
+                        proxy_encoder="centroid_mean",
+                        centroids="kmeans",
+                        centroid_count=centroid_count,
+                        storage_kind="f16",
+                        entry_sample_count=entry_sample_count,
+                    ),
+                ]
+            )
+            if include_proxy_encoder_variants:
+                profiles.append(
+                    DocumentNodeServingProfile(
+                        name=f"proxy_max_pool_f16_entry_sample_{entry_sample_count:03d}",
+                        candidate_source="proxy_vector",
+                        proxy_encoder="max_pool",
+                        storage_kind="f16",
+                        entry_sample_count=entry_sample_count,
+                    )
+                )
+    if include_entry_sidecar:
+        profiles.extend(
+            [
+                DocumentNodeServingProfile(
+                    name="proxy_normalized_mean_f16_entry_sidecar",
+                    candidate_source="proxy_vector",
+                    proxy_encoder="normalized_mean",
+                    storage_kind="f16",
+                    entry_sidecar=True,
+                ),
+                DocumentNodeServingProfile(
+                    name="centroid_mean_f16_entry_sidecar",
+                    candidate_source="proxy_vector",
+                    proxy_encoder="centroid_mean",
+                    centroids="kmeans",
+                    centroid_count=centroid_count,
+                    storage_kind="f16",
+                    entry_sidecar=True,
+                ),
+            ]
+        )
+        if include_proxy_encoder_variants:
+            profiles.append(
+                DocumentNodeServingProfile(
+                    name="proxy_max_pool_f16_entry_sidecar",
+                    candidate_source="proxy_vector",
+                    proxy_encoder="max_pool",
+                    storage_kind="f16",
+                    entry_sidecar=True,
+                )
+            )
+    if include_proxy_encoder_variants:
+        profiles.extend(
+            [
+                DocumentNodeServingProfile(
+                    name="proxy_max_pool_f16",
+                    candidate_source="proxy_vector",
+                    proxy_encoder="max_pool",
+                    storage_kind="f16",
+                ),
+                DocumentNodeServingProfile(
+                    name="proxy_random_projection_fde_f16",
+                    candidate_source="proxy_vector",
+                    proxy_encoder="random_projection_fde",
+                    storage_kind="f16",
+                ),
+            ]
+        )
+    if include_bm25_rescue:
+        profiles.extend(
+            [
+                DocumentNodeServingProfile(
+                    name="proxy_normalized_mean_f16_bm25_rescue",
+                    candidate_source="proxy_vector",
+                    branch_plan="dense_only",
+                    bm25_candidate_injection="dense_with_text",
+                    proxy_encoder="normalized_mean",
+                    storage_kind="f16",
+                ),
+                DocumentNodeServingProfile(
+                    name="centroid_mean_f16_bm25_rescue",
+                    candidate_source="proxy_vector",
+                    branch_plan="dense_only",
+                    bm25_candidate_injection="dense_with_text",
+                    proxy_encoder="centroid_mean",
+                    centroids="kmeans",
+                    centroid_count=centroid_count,
+                    storage_kind="f16",
+                ),
+            ]
+        )
+        if include_proxy_encoder_variants:
+            profiles.append(
+                DocumentNodeServingProfile(
+                    name="proxy_max_pool_f16_bm25_rescue",
+                    candidate_source="proxy_vector",
+                    branch_plan="dense_only",
+                    bm25_candidate_injection="dense_with_text",
+                    proxy_encoder="max_pool",
+                    storage_kind="f16",
+                )
+            )
+    if include_learned_sparse_rescue:
+        profiles.extend(
+            [
+                DocumentNodeServingProfile(
+                    name="proxy_normalized_mean_f16_learned_sparse_rescue",
+                    candidate_source="proxy_vector",
+                    branch_plan="dense_only",
+                    sparse_candidate_source="learned_sparse",
+                    proxy_encoder="normalized_mean",
+                    storage_kind="f16",
+                ),
+                DocumentNodeServingProfile(
+                    name="centroid_mean_f16_learned_sparse_rescue",
+                    candidate_source="proxy_vector",
+                    branch_plan="dense_only",
+                    sparse_candidate_source="learned_sparse",
+                    proxy_encoder="centroid_mean",
+                    centroids="kmeans",
+                    centroid_count=centroid_count,
+                    storage_kind="f16",
+                ),
+            ]
+        )
+        if include_proxy_encoder_variants:
+            profiles.append(
+                DocumentNodeServingProfile(
+                    name="proxy_max_pool_f16_learned_sparse_rescue",
+                    candidate_source="proxy_vector",
+                    branch_plan="dense_only",
+                    sparse_candidate_source="learned_sparse",
+                    proxy_encoder="max_pool",
+                    storage_kind="f16",
+                )
+            )
+    if include_reservoirs:
+        profiles.extend(
+            [
+                DocumentNodeServingProfile(
+                    name="proxy_normalized_mean_f16_reservoir_balanced",
+                    candidate_source="proxy_vector",
+                    proxy_encoder="normalized_mean",
+                    storage_kind="f16",
+                    candidate_reservoirs="balanced",
+                ),
+                DocumentNodeServingProfile(
+                    name="centroid_mean_f16_reservoir_balanced",
+                    candidate_source="proxy_vector",
+                    proxy_encoder="centroid_mean",
+                    centroids="kmeans",
+                    centroid_count=centroid_count,
+                    storage_kind="f16",
+                    candidate_reservoirs="balanced",
+                ),
+            ]
+        )
+        if include_proxy_encoder_variants:
+            profiles.append(
+                DocumentNodeServingProfile(
+                    name="proxy_max_pool_f16_reservoir_balanced",
+                    candidate_source="proxy_vector",
+                    proxy_encoder="max_pool",
+                    storage_kind="f16",
+                    candidate_reservoirs="balanced",
+                )
+            )
     if include_experimental:
         profiles.append(
             DocumentNodeServingProfile(
@@ -3372,17 +4257,74 @@ def document_node_serving_profiles(
     return profiles
 
 
+def validate_document_node_serving_profile_inputs(
+    args: argparse.Namespace,
+    profiles: Sequence[DocumentNodeServingProfile],
+) -> None:
+    if not any(profile.sparse_candidate_source == "learned_sparse" for profile in profiles):
+        return
+    require_complete_learned_sparse_args(args)
+    if getattr(args, "learned_sparse_doc_jsonl", None) is None:
+        raise SystemExit(
+            "learned-sparse serving-grid profiles require "
+            "--learned-sparse-doc-jsonl and --learned-sparse-query-jsonl"
+        )
+
+
 def effective_document_node_serving_profiles(
     args: argparse.Namespace,
 ) -> list[DocumentNodeServingProfile]:
     profiles = document_node_serving_profiles(
         include_experimental=args.document_node_serving_grid_include_experimental,
+        include_proxy_encoder_variants=bool(
+            getattr(args, "document_node_serving_grid_include_proxy_encoders", False)
+        ),
+        include_bm25_rescue=bool(
+            getattr(args, "document_node_serving_grid_include_bm25_rescue", False)
+        ),
+        include_learned_sparse_rescue=bool(
+            getattr(args, "document_node_serving_grid_include_learned_sparse_rescue", False)
+        ),
+        include_reservoirs=bool(
+            getattr(args, "document_node_serving_grid_include_reservoirs", False)
+        ),
+        include_centroid_lite_caps=bool(
+            getattr(args, "document_node_serving_grid_include_centroid_lite_caps", False)
+        ),
+        centroid_lite_posting_caps=effective_document_node_serving_centroid_lite_caps(args),
+        include_entry_samples=bool(
+            getattr(args, "document_node_serving_grid_include_entry_samples", False)
+        ),
+        entry_sample_counts=effective_document_node_serving_entry_sample_counts(args),
+        include_entry_sidecar=bool(
+            getattr(args, "document_node_serving_grid_include_entry_sidecar", False)
+        ),
         centroid_count=args.multivector_centroid_count,
     )
-    if not bool(getattr(args, "document_node_serving_grid_smoke", False)):
-        return profiles
-    allowed = set(DOCUMENT_NODE_SERVING_GRID_SMOKE_PROFILES)
-    return [profile for profile in profiles if profile.name in allowed]
+    selected = str(getattr(args, "document_node_serving_grid_profiles", "") or "").strip()
+    if selected:
+        requested = [item.strip() for item in selected.split(",") if item.strip()]
+        if not requested:
+            raise SystemExit("--document-node-serving-grid-profiles must name at least one profile")
+        by_name = {profile.name: profile for profile in profiles}
+        unknown = [name for name in requested if name not in by_name]
+        if unknown:
+            known = ", ".join(sorted(by_name))
+            raise SystemExit(
+                "--document-node-serving-grid-profiles contains unknown profile(s): "
+                f"{', '.join(unknown)}; expected one of: {known}"
+            )
+        profiles = [by_name[name] for name in dict.fromkeys(requested)]
+    if bool(getattr(args, "document_node_serving_grid_smoke", False)):
+        allowed = set(DOCUMENT_NODE_SERVING_GRID_SMOKE_PROFILES)
+        profiles = [profile for profile in profiles if profile.name in allowed]
+        if not profiles:
+            raise SystemExit(
+                "--document-node-serving-grid-smoke only supports profiles: "
+                f"{', '.join(DOCUMENT_NODE_SERVING_GRID_SMOKE_PROFILES)}"
+            )
+    validate_document_node_serving_profile_inputs(args, profiles)
+    return profiles
 
 
 def document_node_serving_profile_by_name(
@@ -3391,11 +4333,35 @@ def document_node_serving_profile_by_name(
 ) -> DocumentNodeServingProfile:
     profiles = document_node_serving_profiles(
         include_experimental=args.document_node_serving_grid_include_experimental,
+        include_proxy_encoder_variants=bool(
+            getattr(args, "document_node_serving_grid_include_proxy_encoders", False)
+        ),
+        include_bm25_rescue=bool(
+            getattr(args, "document_node_serving_grid_include_bm25_rescue", False)
+        ),
+        include_learned_sparse_rescue=bool(
+            getattr(args, "document_node_serving_grid_include_learned_sparse_rescue", False)
+        ),
+        include_reservoirs=bool(
+            getattr(args, "document_node_serving_grid_include_reservoirs", False)
+        ),
+        include_centroid_lite_caps=bool(
+            getattr(args, "document_node_serving_grid_include_centroid_lite_caps", False)
+        ),
+        centroid_lite_posting_caps=effective_document_node_serving_centroid_lite_caps(args),
+        include_entry_samples=bool(
+            getattr(args, "document_node_serving_grid_include_entry_samples", False)
+        ),
+        entry_sample_counts=effective_document_node_serving_entry_sample_counts(args),
+        include_entry_sidecar=bool(
+            getattr(args, "document_node_serving_grid_include_entry_sidecar", False)
+        ),
         centroid_count=args.multivector_centroid_count,
     )
     by_name = {profile.name: profile for profile in profiles}
     profile = by_name.get(name)
     if profile is not None:
+        validate_document_node_serving_profile_inputs(args, [profile])
         return profile
     if name == "quantized_inverted_experimental_f32":
         raise SystemExit(
@@ -3455,12 +4421,18 @@ def document_node_serving_latency_args(
 
 
 def effective_document_node_serving_ef_grid(args: argparse.Namespace) -> list[int]:
+    values = getattr(args, "document_node_serving_ef_grid_values", None)
+    if values is not None:
+        return list(values)
     if bool(getattr(args, "document_node_serving_grid_smoke", False)):
         return list(DOCUMENT_NODE_SERVING_GRID_SMOKE_EF)
     return list(DOCUMENT_NODE_SERVING_GRID_EF)
 
 
 def effective_document_node_serving_oversampling_grid(args: argparse.Namespace) -> list[int]:
+    values = getattr(args, "document_node_serving_oversampling_grid_values", None)
+    if values is not None:
+        return list(values)
     if bool(getattr(args, "document_node_serving_grid_smoke", False)):
         return list(DOCUMENT_NODE_SERVING_GRID_SMOKE_OVERSAMPLING)
     return list(DOCUMENT_NODE_SERVING_GRID_OVERSAMPLING)
@@ -3586,6 +4558,10 @@ def select_document_node_serving_stage2_configs(
 def _self_check_document_node_serving_profiles() -> None:
     base = document_node_serving_profiles(
         include_experimental=False,
+        include_proxy_encoder_variants=False,
+        include_bm25_rescue=False,
+        include_learned_sparse_rescue=False,
+        include_reservoirs=False,
         centroid_count="auto",
     )
     assert [profile.name for profile in base] == [
@@ -3602,21 +4578,411 @@ def _self_check_document_node_serving_profiles() -> None:
     assert profiles_by_name["centroid_mean_f16"].centroids == "kmeans"
     assert profiles_by_name["centroid_lite_f16_pool_050"].token_pooling == "greedy_cosine"
     assert profiles_by_name["centroid_lite_f16_pool_050"].token_pooling_target_ratio == 0.5
+    assert profiles_by_name["proxy_normalized_mean_f16"].branch_plan == "dense_only"
+    assert profiles_by_name["proxy_normalized_mean_sq8"].branch_plan == "dense_only"
     experimental = document_node_serving_profiles(
         include_experimental=True,
+        include_proxy_encoder_variants=False,
+        include_bm25_rescue=False,
+        include_learned_sparse_rescue=False,
+        include_reservoirs=False,
         centroid_count="auto",
     )
     assert experimental[-1].name == "quantized_inverted_experimental_f32"
     assert experimental[-1].candidate_source == "quantized_inverted_experimental"
     assert experimental[-1].storage_kind == "f32"
     assert experimental[-1].plain_fallback == "off"
+    proxy_variants = document_node_serving_profiles(
+        include_experimental=False,
+        include_proxy_encoder_variants=True,
+        include_bm25_rescue=False,
+        include_learned_sparse_rescue=False,
+        include_reservoirs=False,
+        centroid_count="auto",
+    )
+    proxy_variants_by_name = {profile.name: profile for profile in proxy_variants}
+    assert proxy_variants_by_name["proxy_max_pool_f16"].proxy_encoder == "max_pool"
+    assert (
+        proxy_variants_by_name["proxy_random_projection_fde_f16"].proxy_encoder
+        == "random_projection_fde"
+    )
+    entry_sidecar_profiles = document_node_serving_profiles(
+        include_experimental=False,
+        include_proxy_encoder_variants=False,
+        include_bm25_rescue=False,
+        include_learned_sparse_rescue=False,
+        include_reservoirs=False,
+        include_entry_sidecar=True,
+        centroid_count="auto",
+    )
+    entry_sidecar_by_name = {profile.name: profile for profile in entry_sidecar_profiles}
+    assert "proxy_normalized_mean_f16_entry_sidecar" in entry_sidecar_by_name
+    assert "centroid_mean_f16_entry_sidecar" in entry_sidecar_by_name
+    assert entry_sidecar_by_name["proxy_normalized_mean_f16_entry_sidecar"].entry_sidecar is True
+    assert (
+        entry_sidecar_by_name["centroid_mean_f16_entry_sidecar"].proxy_encoder
+        == "centroid_mean"
+    )
+    assert (
+        entry_sidecar_by_name["centroid_mean_f16_entry_sidecar"].entry_sidecar_strategy
+        == "hybrid_level_covering"
+    )
+    entry_sidecar_proxy_variants = document_node_serving_profiles(
+        include_experimental=False,
+        include_proxy_encoder_variants=True,
+        include_bm25_rescue=False,
+        include_learned_sparse_rescue=False,
+        include_reservoirs=False,
+        include_entry_sidecar=True,
+        centroid_count="auto",
+    )
+    entry_sidecar_proxy_variants_by_name = {
+        profile.name: profile for profile in entry_sidecar_proxy_variants
+    }
+    assert (
+        entry_sidecar_proxy_variants_by_name[
+            "proxy_max_pool_f16_entry_sidecar"
+        ].proxy_encoder
+        == "max_pool"
+    )
+    assert (
+        entry_sidecar_proxy_variants_by_name[
+            "proxy_max_pool_f16_entry_sidecar"
+        ].entry_sidecar
+        is True
+    )
+    bm25_rescue = document_node_serving_profiles(
+        include_experimental=False,
+        include_proxy_encoder_variants=False,
+        include_bm25_rescue=True,
+        include_learned_sparse_rescue=False,
+        include_reservoirs=False,
+        centroid_count="auto",
+    )
+    bm25_rescue_by_name = {profile.name: profile for profile in bm25_rescue}
+    assert "proxy_normalized_mean_f16_bm25_rescue" in bm25_rescue_by_name
+    assert "centroid_mean_f16_bm25_rescue" in bm25_rescue_by_name
+    assert (
+        bm25_rescue_by_name["proxy_normalized_mean_f16_bm25_rescue"].bm25_candidate_injection
+        == "dense_with_text"
+    )
+    assert (
+        bm25_rescue_by_name["proxy_normalized_mean_f16_bm25_rescue"].branch_plan
+        == "dense_only"
+    )
+    assert (
+        bm25_rescue_by_name["centroid_mean_f16_bm25_rescue"].proxy_encoder
+        == "centroid_mean"
+    )
+    assert (
+        bm25_rescue_by_name["centroid_mean_f16_bm25_rescue"].branch_plan
+        == "dense_only"
+    )
+    assert "proxy_max_pool_f16_bm25_rescue" not in bm25_rescue_by_name
+    bm25_rescue_with_proxy_variants = document_node_serving_profiles(
+        include_experimental=False,
+        include_proxy_encoder_variants=True,
+        include_bm25_rescue=True,
+        include_learned_sparse_rescue=False,
+        include_reservoirs=False,
+        centroid_count="auto",
+    )
+    bm25_rescue_with_proxy_variants_by_name = {
+        profile.name: profile for profile in bm25_rescue_with_proxy_variants
+    }
+    assert "proxy_max_pool_f16_bm25_rescue" in bm25_rescue_with_proxy_variants_by_name
+    assert (
+        bm25_rescue_with_proxy_variants_by_name[
+            "proxy_max_pool_f16_bm25_rescue"
+        ].proxy_encoder
+        == "max_pool"
+    )
+    assert (
+        bm25_rescue_with_proxy_variants_by_name[
+            "proxy_max_pool_f16_bm25_rescue"
+        ].bm25_candidate_injection
+        == "dense_with_text"
+    )
+    learned_sparse_rescue = document_node_serving_profiles(
+        include_experimental=False,
+        include_proxy_encoder_variants=False,
+        include_bm25_rescue=False,
+        include_learned_sparse_rescue=True,
+        include_reservoirs=False,
+        centroid_count="auto",
+    )
+    learned_sparse_rescue_by_name = {
+        profile.name: profile for profile in learned_sparse_rescue
+    }
+    assert "proxy_normalized_mean_f16_learned_sparse_rescue" in learned_sparse_rescue_by_name
+    assert "centroid_mean_f16_learned_sparse_rescue" in learned_sparse_rescue_by_name
+    assert (
+        learned_sparse_rescue_by_name[
+            "proxy_normalized_mean_f16_learned_sparse_rescue"
+        ].sparse_candidate_source
+        == "learned_sparse"
+    )
+    assert (
+        learned_sparse_rescue_by_name[
+            "proxy_normalized_mean_f16_learned_sparse_rescue"
+        ].branch_plan
+        == "dense_only"
+    )
+    assert (
+        learned_sparse_rescue_by_name[
+            "centroid_mean_f16_learned_sparse_rescue"
+        ].proxy_encoder
+        == "centroid_mean"
+    )
+    assert (
+        learned_sparse_rescue_by_name[
+            "centroid_mean_f16_learned_sparse_rescue"
+        ].centroids
+        == "kmeans"
+    )
+    assert "proxy_max_pool_f16_learned_sparse_rescue" not in learned_sparse_rescue_by_name
+    learned_sparse_rescue_with_proxy_variants = document_node_serving_profiles(
+        include_experimental=False,
+        include_proxy_encoder_variants=True,
+        include_bm25_rescue=False,
+        include_learned_sparse_rescue=True,
+        include_reservoirs=False,
+        centroid_count="auto",
+    )
+    learned_sparse_rescue_with_proxy_variants_by_name = {
+        profile.name: profile for profile in learned_sparse_rescue_with_proxy_variants
+    }
+    assert (
+        "proxy_max_pool_f16_learned_sparse_rescue"
+        in learned_sparse_rescue_with_proxy_variants_by_name
+    )
+    assert (
+        learned_sparse_rescue_with_proxy_variants_by_name[
+            "proxy_max_pool_f16_learned_sparse_rescue"
+        ].proxy_encoder
+        == "max_pool"
+    )
+    assert (
+        learned_sparse_rescue_with_proxy_variants_by_name[
+            "proxy_max_pool_f16_learned_sparse_rescue"
+        ].sparse_candidate_source
+        == "learned_sparse"
+    )
+    reservoir_profiles = document_node_serving_profiles(
+        include_experimental=False,
+        include_proxy_encoder_variants=False,
+        include_bm25_rescue=False,
+        include_learned_sparse_rescue=False,
+        include_reservoirs=True,
+        centroid_count="auto",
+    )
+    reservoir_profiles_by_name = {
+        profile.name: profile for profile in reservoir_profiles
+    }
+    assert "proxy_normalized_mean_f16_reservoir_balanced" in reservoir_profiles_by_name
+    assert "centroid_mean_f16_reservoir_balanced" in reservoir_profiles_by_name
+    assert (
+        reservoir_profiles_by_name[
+            "proxy_normalized_mean_f16_reservoir_balanced"
+        ].candidate_reservoirs
+        == "balanced"
+    )
+    assert (
+        reservoir_profiles_by_name[
+            "centroid_mean_f16_reservoir_balanced"
+        ].proxy_encoder
+        == "centroid_mean"
+    )
+    assert (
+        reservoir_profiles_by_name[
+            "centroid_mean_f16_reservoir_balanced"
+        ].centroids
+        == "kmeans"
+    )
+    assert "proxy_max_pool_f16_reservoir_balanced" not in reservoir_profiles_by_name
+    reservoir_profiles_with_proxy_variants = document_node_serving_profiles(
+        include_experimental=False,
+        include_proxy_encoder_variants=True,
+        include_bm25_rescue=False,
+        include_learned_sparse_rescue=False,
+        include_reservoirs=True,
+        centroid_count="auto",
+    )
+    reservoir_profiles_with_proxy_variants_by_name = {
+        profile.name: profile for profile in reservoir_profiles_with_proxy_variants
+    }
+    assert (
+        "proxy_max_pool_f16_reservoir_balanced"
+        in reservoir_profiles_with_proxy_variants_by_name
+    )
+    assert (
+        reservoir_profiles_with_proxy_variants_by_name[
+            "proxy_max_pool_f16_reservoir_balanced"
+        ].proxy_encoder
+        == "max_pool"
+    )
+    assert (
+        reservoir_profiles_with_proxy_variants_by_name[
+            "proxy_max_pool_f16_reservoir_balanced"
+        ].candidate_reservoirs
+        == "balanced"
+    )
+    capped_centroid_lite = document_node_serving_profiles(
+        include_experimental=False,
+        include_proxy_encoder_variants=False,
+        include_bm25_rescue=False,
+        include_learned_sparse_rescue=False,
+        include_reservoirs=False,
+        include_centroid_lite_caps=True,
+        centroid_lite_posting_caps=[16, 32],
+        centroid_count="auto",
+    )
+    capped_centroid_lite_by_name = {
+        profile.name: profile for profile in capped_centroid_lite
+    }
+    assert "centroid_lite_f16_cap_016" in capped_centroid_lite_by_name
+    assert "centroid_lite_f16_cap_032" in capped_centroid_lite_by_name
+    assert (
+        capped_centroid_lite_by_name[
+            "centroid_lite_f16_cap_016"
+        ].centroid_lite_max_postings_per_token
+        == 16
+    )
+    assert (
+        capped_centroid_lite_by_name["centroid_lite_f16_cap_016"].candidate_source
+        == "centroid_lite"
+    )
+    assert capped_centroid_lite_by_name["centroid_lite_f16_cap_016"].centroids == "kmeans"
+    entry_sample_profiles = document_node_serving_profiles(
+        include_experimental=False,
+        include_proxy_encoder_variants=False,
+        include_bm25_rescue=False,
+        include_learned_sparse_rescue=False,
+        include_reservoirs=False,
+        include_entry_samples=True,
+        entry_sample_counts=[32],
+        centroid_count="auto",
+    )
+    entry_sample_profiles_by_name = {
+        profile.name: profile for profile in entry_sample_profiles
+    }
+    assert "proxy_normalized_mean_f16_entry_sample_032" in entry_sample_profiles_by_name
+    assert "centroid_mean_f16_entry_sample_032" in entry_sample_profiles_by_name
+    assert (
+        entry_sample_profiles_by_name[
+            "proxy_normalized_mean_f16_entry_sample_032"
+        ].entry_sample_count
+        == 32
+    )
+    assert (
+        entry_sample_profiles_by_name[
+            "centroid_mean_f16_entry_sample_032"
+        ].proxy_encoder
+        == "centroid_mean"
+    )
+    entry_sample_proxy_variants = document_node_serving_profiles(
+        include_experimental=False,
+        include_proxy_encoder_variants=True,
+        include_bm25_rescue=False,
+        include_learned_sparse_rescue=False,
+        include_reservoirs=False,
+        include_entry_samples=True,
+        entry_sample_counts=[128],
+        centroid_count="auto",
+    )
+    entry_sample_proxy_variants_by_name = {
+        profile.name: profile for profile in entry_sample_proxy_variants
+    }
+    assert "proxy_max_pool_f16_entry_sample_128" in entry_sample_proxy_variants_by_name
+    assert (
+        entry_sample_proxy_variants_by_name[
+            "proxy_max_pool_f16_entry_sample_128"
+        ].entry_sample_count
+        == 128
+    )
+    assert all(
+        profile.bm25_candidate_injection == "off"
+        for profile in base
+    )
+    dense_query_args = argparse.Namespace(
+        multivector_bm25_candidate_injection="off",
+        multivector_sparse_candidate_source="off",
+    )
+    bm25_query_args = argparse.Namespace(
+        multivector_bm25_candidate_injection="dense_with_text",
+        multivector_sparse_candidate_source="off",
+    )
+    learned_sparse_query_args = argparse.Namespace(
+        multivector_bm25_candidate_injection="off",
+        multivector_sparse_candidate_source="learned_sparse",
+    )
+    assert query_only_needs_text_query(dense_query_args) is False
+    assert query_only_needs_text_query(bm25_query_args) is True
+    assert query_only_needs_text_query(learned_sparse_query_args) is True
+    assert query_only_text_query_sql(bm25_query_args) == "websearch_to_tsquery('simple', q.query_text)"
+    assert "turbohybrid_sparse_vector_to_tsquery" in query_only_text_query_sql(
+        learned_sparse_query_args
+    )
+    assert build_index_lexical_column(dense_query_args) is None
+    assert build_index_lexical_column(bm25_query_args) == "body_tsv"
+    assert build_index_lexical_column(learned_sparse_query_args) == "learned_sparse_tsv"
+    partial_sparse_coverage = {
+        "loaded_documents": 100,
+        "learned_sparse_documents": 20,
+        "doc_coverage_ratio": learned_sparse_ratio(20, 100),
+        "loaded_queries": 10,
+        "learned_sparse_queries": 10,
+        "query_coverage_ratio": learned_sparse_ratio(10, 10),
+    }
+    assert partial_sparse_coverage["doc_coverage_ratio"] == 0.2
+    assert learned_sparse_coverage_warnings(partial_sparse_coverage) == [
+        "learned_sparse_doc_coverage_below_95pct"
+    ]
+    complete_sparse_coverage = {
+        "loaded_documents": 100,
+        "learned_sparse_documents": 100,
+        "doc_coverage_ratio": learned_sparse_ratio(100, 100),
+        "loaded_queries": 10,
+        "learned_sparse_queries": 10,
+        "query_coverage_ratio": learned_sparse_ratio(10, 10),
+    }
+    assert learned_sparse_coverage_warnings(complete_sparse_coverage) == []
+    try:
+        build_index_lexical_column(
+            argparse.Namespace(
+                methods=[],
+                hybrid_evaluation_harness=False,
+                multivector_bm25_candidate_injection="dense_with_text",
+                multivector_sparse_candidate_source="learned_sparse",
+            )
+        )
+    except SystemExit as exc:
+        assert "different lexical index columns" in str(exc)
+    else:
+        raise AssertionError("mixed BM25 and learned-sparse lexical sources should fail")
     smoke_args = argparse.Namespace(
         admission_budget_sweep=None,
         admission_budget_sweep_explicit=False,
         document_node_serving_grid=True,
         document_node_serving_grid_smoke=True,
         document_node_serving_grid_include_experimental=True,
+        document_node_serving_grid_include_proxy_encoders=False,
+        document_node_serving_grid_include_bm25_rescue=False,
+        document_node_serving_grid_include_learned_sparse_rescue=False,
+        document_node_serving_grid_include_reservoirs=False,
+        document_node_serving_grid_include_centroid_lite_caps=False,
+        document_node_serving_grid_include_entry_samples=False,
+        document_node_serving_grid_entry_sample_counts=(
+            DOCUMENT_NODE_SERVING_GRID_ENTRY_SAMPLE_SWEEP
+        ),
+        document_node_serving_grid_include_entry_sidecar=False,
+        document_node_serving_grid_centroid_lite_posting_caps=(
+            DOCUMENT_NODE_SERVING_GRID_CENTROID_LITE_CAP_SWEEP
+        ),
+        document_node_serving_grid_profiles="",
         document_node_serving_grid_budget_mode="largest_only",
+        document_node_serving_ef_grid_values=None,
+        document_node_serving_oversampling_grid_values=None,
         multivector_centroid_count="auto",
     )
     assert effective_serving_grid_budget_sweep(smoke_args) == [200, 800]
@@ -3643,6 +5009,13 @@ def _self_check_document_node_serving_profiles() -> None:
     ]
     assert effective_document_node_serving_ef_grid(smoke_args) == [50, 100]
     assert effective_document_node_serving_oversampling_grid(smoke_args) == [1]
+    smoke_override_args = clone_args(
+        smoke_args,
+        document_node_serving_ef_grid_values=[400, 800],
+        document_node_serving_oversampling_grid_values=[1, 2],
+    )
+    assert effective_document_node_serving_ef_grid(smoke_override_args) == [400, 800]
+    assert effective_document_node_serving_oversampling_grid(smoke_override_args) == [1, 2]
     assert effective_document_node_serving_stage_mode(smoke_args) == "two_stage"
     full_args = clone_args(
         smoke_args,
@@ -3650,10 +5023,183 @@ def _self_check_document_node_serving_profiles() -> None:
     )
     assert effective_serving_grid_budget_sweep(full_args) == [50, 100, 200, 400, 800]
     assert effective_serving_grid_executed_budgets(full_args) == [800]
+    assert effective_document_node_serving_ef_grid(full_args) == [50, 100, 200]
+    assert effective_document_node_serving_oversampling_grid(full_args) == [1, 2]
     assert effective_document_node_serving_stage_mode(full_args) == "single"
     assert effective_document_node_serving_stage_mode(
         clone_args(full_args, document_node_serving_grid_stage_mode="two_stage")
     ) == "two_stage"
+    filtered_args = clone_args(
+        full_args,
+        document_node_serving_grid_profiles="centroid_mean_f16,proxy_normalized_mean_f16",
+    )
+    assert [profile.name for profile in effective_document_node_serving_profiles(filtered_args)] == [
+        "centroid_mean_f16",
+        "proxy_normalized_mean_f16",
+    ]
+    proxy_variant_filtered_args = clone_args(
+        full_args,
+        document_node_serving_grid_include_proxy_encoders=True,
+        document_node_serving_grid_profiles="proxy_max_pool_f16,proxy_random_projection_fde_f16",
+    )
+    assert [profile.name for profile in effective_document_node_serving_profiles(proxy_variant_filtered_args)] == [
+        "proxy_max_pool_f16",
+        "proxy_random_projection_fde_f16",
+    ]
+    capped_filtered_args = clone_args(
+        full_args,
+        document_node_serving_grid_include_centroid_lite_caps=True,
+        document_node_serving_grid_centroid_lite_posting_caps="16,32",
+        document_node_serving_grid_profiles="centroid_lite_f16_cap_016",
+    )
+    capped_filtered = effective_document_node_serving_profiles(capped_filtered_args)
+    assert [profile.name for profile in capped_filtered] == [
+        "centroid_lite_f16_cap_016",
+    ]
+    assert capped_filtered[0].centroid_lite_max_postings_per_token == 16
+    try:
+        effective_document_node_serving_profiles(
+            clone_args(
+                full_args,
+                document_node_serving_grid_profiles="centroid_lite_f16_cap_016",
+            )
+        )
+    except SystemExit as exc:
+        assert "unknown profile" in str(exc)
+    else:
+        raise AssertionError("capped centroid-lite profile should require opt-in flag")
+    entry_sample_filtered_args = clone_args(
+        full_args,
+        document_node_serving_grid_include_entry_samples=True,
+        document_node_serving_grid_entry_sample_counts="32,128",
+        document_node_serving_grid_profiles="proxy_normalized_mean_f16_entry_sample_032",
+    )
+    entry_sample_filtered = effective_document_node_serving_profiles(
+        entry_sample_filtered_args
+    )
+    assert [profile.name for profile in entry_sample_filtered] == [
+        "proxy_normalized_mean_f16_entry_sample_032",
+    ]
+    assert entry_sample_filtered[0].entry_sample_count == 32
+    entry_sample_profile_args = document_node_serving_profile_args(
+        full_args,
+        entry_sample_filtered[0],
+        ef=100,
+        oversampling=1,
+    )
+    assert entry_sample_profile_args.multivector_doc_graph_entry_sample_count == 32
+    try:
+        effective_document_node_serving_profiles(
+            clone_args(
+                full_args,
+                document_node_serving_grid_profiles="proxy_normalized_mean_f16_entry_sample_032",
+            )
+        )
+    except SystemExit as exc:
+        assert "unknown profile" in str(exc)
+    else:
+        raise AssertionError("entry-sample profile should require opt-in flag")
+    entry_sidecar_filtered_args = clone_args(
+        full_args,
+        document_node_serving_grid_include_entry_sidecar=True,
+        document_node_serving_grid_profiles="proxy_normalized_mean_f16_entry_sidecar",
+    )
+    entry_sidecar_filtered = effective_document_node_serving_profiles(
+        entry_sidecar_filtered_args
+    )
+    assert [profile.name for profile in entry_sidecar_filtered] == [
+        "proxy_normalized_mean_f16_entry_sidecar",
+    ]
+    assert entry_sidecar_filtered[0].entry_sidecar is True
+    try:
+        effective_document_node_serving_profiles(
+            clone_args(
+                full_args,
+                document_node_serving_grid_profiles="proxy_normalized_mean_f16_entry_sidecar",
+            )
+        )
+    except SystemExit as exc:
+        assert "unknown profile" in str(exc)
+    else:
+        raise AssertionError("entry-sidecar profile should require opt-in flag")
+    bm25_rescue_filtered_args = clone_args(
+        full_args,
+        document_node_serving_grid_include_bm25_rescue=True,
+        document_node_serving_grid_profiles="centroid_mean_f16_bm25_rescue",
+    )
+    bm25_rescue_filtered = effective_document_node_serving_profiles(
+        bm25_rescue_filtered_args
+    )
+    assert [profile.name for profile in bm25_rescue_filtered] == [
+        "centroid_mean_f16_bm25_rescue",
+    ]
+    assert bm25_rescue_filtered[0].bm25_candidate_injection == "dense_with_text"
+    learned_sparse_rescue_filtered_args = clone_args(
+        full_args,
+        document_node_serving_grid_include_learned_sparse_rescue=True,
+        document_node_serving_grid_profiles="proxy_normalized_mean_f16_learned_sparse_rescue",
+        learned_sparse_doc_jsonl=Path("learned-docs.jsonl"),
+        learned_sparse_query_jsonl=Path("learned-queries.jsonl"),
+    )
+    learned_sparse_rescue_filtered = effective_document_node_serving_profiles(
+        learned_sparse_rescue_filtered_args
+    )
+    assert [profile.name for profile in learned_sparse_rescue_filtered] == [
+        "proxy_normalized_mean_f16_learned_sparse_rescue",
+    ]
+    assert learned_sparse_rescue_filtered[0].sparse_candidate_source == "learned_sparse"
+    try:
+        effective_document_node_serving_profiles(
+            clone_args(
+                full_args,
+                document_node_serving_grid_include_learned_sparse_rescue=True,
+                document_node_serving_grid_profiles="proxy_normalized_mean_f16_learned_sparse_rescue",
+                learned_sparse_doc_jsonl=None,
+                learned_sparse_query_jsonl=None,
+            )
+        )
+    except SystemExit as exc:
+        assert "learned-sparse serving-grid profiles require" in str(exc)
+    else:
+        raise AssertionError("learned-sparse serving-grid profile should require JSONL inputs")
+    reservoir_filtered_args = clone_args(
+        full_args,
+        document_node_serving_grid_include_reservoirs=True,
+        document_node_serving_grid_profiles="proxy_normalized_mean_f16_reservoir_balanced",
+    )
+    reservoir_filtered = effective_document_node_serving_profiles(
+        reservoir_filtered_args
+    )
+    assert [profile.name for profile in reservoir_filtered] == [
+        "proxy_normalized_mean_f16_reservoir_balanced",
+    ]
+    assert reservoir_filtered[0].candidate_reservoirs == "balanced"
+    try:
+        effective_document_node_serving_profiles(
+            clone_args(
+                full_args,
+                document_node_serving_grid_profiles="proxy_normalized_mean_f16_reservoir_balanced",
+            )
+        )
+    except SystemExit as exc:
+        assert "unknown profile" in str(exc)
+    else:
+        raise AssertionError("reservoir profile should require opt-in flag")
+    smoke_filtered_args = clone_args(
+        smoke_args,
+        document_node_serving_grid_profiles="proxy_normalized_mean_f16,proxy_normalized_mean_sq8",
+    )
+    assert [profile.name for profile in effective_document_node_serving_profiles(smoke_filtered_args)] == [
+        "proxy_normalized_mean_f16",
+    ]
+    try:
+        effective_document_node_serving_profiles(
+            clone_args(full_args, document_node_serving_grid_profiles="missing_profile")
+        )
+    except SystemExit as exc:
+        assert "unknown profile" in str(exc)
+    else:
+        raise AssertionError("unknown serving-grid profile should fail")
     sweep_args = clone_args(
         full_args,
         document_node_serving_grid_budget_mode="sweep",
@@ -3713,13 +5259,116 @@ def _self_check_document_node_serving_profiles() -> None:
         profile.name: serving_profile_index_signature(signature_args, profile)
         for profile in base
     }
+    proxy_variant_signature_by_name = {
+        profile.name: serving_profile_index_signature(signature_args, profile)
+        for profile in proxy_variants
+    }
+    bm25_signature_by_name = {
+        profile.name: serving_profile_index_signature(signature_args, profile)
+        for profile in bm25_rescue
+    }
+    learned_sparse_signature_by_name = {
+        profile.name: serving_profile_index_signature(signature_args, profile)
+        for profile in learned_sparse_rescue
+    }
+    capped_signature_by_name = {
+        profile.name: serving_profile_index_signature(signature_args, profile)
+        for profile in capped_centroid_lite
+    }
+    entry_sample_signature_by_name = {
+        profile.name: serving_profile_index_signature(signature_args, profile)
+        for profile in entry_sample_profiles
+    }
+    entry_sidecar_signature_by_name = {
+        profile.name: serving_profile_index_signature(signature_args, profile)
+        for profile in entry_sidecar_profiles
+    }
+    entry_sidecar_proxy_variant_signature_by_name = {
+        profile.name: serving_profile_index_signature(signature_args, profile)
+        for profile in entry_sidecar_proxy_variants
+    }
     assert signature_by_name["proxy_normalized_mean_f16"] == signature_by_name["docnodes_normalized_mean_f16"]
     assert signature_by_name["proxy_normalized_mean_f16"] == signature_by_name["proxy_normalized_mean_sq8"]
+    assert signature_by_name["proxy_normalized_mean_f16"] != bm25_signature_by_name["proxy_normalized_mean_f16_bm25_rescue"]
+    assert signature_by_name["centroid_mean_f16"] != bm25_signature_by_name["centroid_mean_f16_bm25_rescue"]
     assert signature_by_name["centroid_mean_f16"] != signature_by_name["centroid_lite_f16"]
     assert signature_by_name["centroid_lite_f16"] != signature_by_name["centroid_lite_f16_pool_050"]
+    assert signature_by_name["centroid_lite_f16"] == capped_signature_by_name["centroid_lite_f16_cap_016"]
+    assert signature_by_name["centroid_lite_f16"] == capped_signature_by_name["centroid_lite_f16_cap_032"]
+    assert (
+        signature_by_name["proxy_normalized_mean_f16"]
+        == entry_sample_signature_by_name["proxy_normalized_mean_f16_entry_sample_032"]
+    )
+    assert (
+        signature_by_name["centroid_mean_f16"]
+        == entry_sample_signature_by_name["centroid_mean_f16_entry_sample_032"]
+    )
+    assert (
+        signature_by_name["proxy_normalized_mean_f16"]
+        != entry_sidecar_signature_by_name["proxy_normalized_mean_f16_entry_sidecar"]
+    )
+    assert (
+        signature_by_name["centroid_mean_f16"]
+        != entry_sidecar_signature_by_name["centroid_mean_f16_entry_sidecar"]
+    )
+    assert (
+        entry_sidecar_signature_by_name["proxy_normalized_mean_f16_entry_sidecar"]
+        != entry_sidecar_signature_by_name["centroid_mean_f16_entry_sidecar"]
+    )
+    assert (
+        entry_sidecar_signature_by_name["proxy_normalized_mean_f16_entry_sidecar"]
+        != entry_sidecar_proxy_variant_signature_by_name[
+            "proxy_max_pool_f16_entry_sidecar"
+        ]
+    )
+    assert (
+        proxy_variant_signature_by_name["proxy_max_pool_f16"]
+        != entry_sidecar_proxy_variant_signature_by_name[
+            "proxy_max_pool_f16_entry_sidecar"
+        ]
+    )
     proxy_reloptions = dict(signature_by_name["proxy_normalized_mean_f16"])["reloptions"]
+    entry_sidecar_reloptions = dict(
+        entry_sidecar_signature_by_name["proxy_normalized_mean_f16_entry_sidecar"]
+    )["reloptions"]
     assert not any("multivector_doc_storage" in str(item) for item in proxy_reloptions)
     assert any("multivector_proxy_encoder = normalized_mean" in str(item) for item in proxy_reloptions)
+    assert any("entry_sidecar = on" in str(item) for item in entry_sidecar_reloptions)
+    assert any(
+        "entry_sidecar_strategy = hybrid_level_covering" in str(item)
+        for item in entry_sidecar_reloptions
+    )
+    assert dict(signature_by_name["proxy_normalized_mean_f16"])["lexical_key_required"] is False
+    assert dict(bm25_signature_by_name["proxy_normalized_mean_f16_bm25_rescue"])["lexical_key_required"] is True
+    assert dict(bm25_signature_by_name["proxy_normalized_mean_f16_bm25_rescue"])["lexical_column"] == "body_tsv"
+    capped_profile_args = document_node_serving_profile_args(
+        signature_args,
+        capped_centroid_lite_by_name["centroid_lite_f16_cap_032"],
+        ef=100,
+        oversampling=1,
+    )
+    assert capped_profile_args.multivector_centroid_lite_max_postings_per_token == 32
+    entry_sample_signature_profile_args = document_node_serving_profile_args(
+        signature_args,
+        entry_sample_profiles_by_name["proxy_normalized_mean_f16_entry_sample_032"],
+        ef=100,
+        oversampling=1,
+    )
+    assert (
+        entry_sample_signature_profile_args.multivector_doc_graph_entry_sample_count
+        == 32
+    )
+    assert dict(learned_sparse_signature_by_name[
+        "proxy_normalized_mean_f16_learned_sparse_rescue"
+    ])["lexical_key_required"] is True
+    assert dict(learned_sparse_signature_by_name[
+        "proxy_normalized_mean_f16_learned_sparse_rescue"
+    ])["lexical_column"] == "learned_sparse_tsv"
+    assert bm25_signature_by_name[
+        "proxy_normalized_mean_f16_bm25_rescue"
+    ] != learned_sparse_signature_by_name[
+        "proxy_normalized_mean_f16_learned_sparse_rescue"
+    ]
     validate_serving_profile_index_reuse(
         args=signature_args,
         profile=profiles_by_name["proxy_normalized_mean_f16"],
@@ -3735,6 +5384,55 @@ def _self_check_document_node_serving_profiles() -> None:
         },
         expected_signature=signature_by_name["proxy_normalized_mean_f16"],
     )
+    validate_serving_profile_index_reuse(
+        args=signature_args,
+        profile=entry_sidecar_by_name["proxy_normalized_mean_f16_entry_sidecar"],
+        index_phase={
+            "index_signature_tuple": entry_sidecar_signature_by_name[
+                "proxy_normalized_mean_f16_entry_sidecar"
+            ],
+            "index_stats": {
+                "multivector_graph_mode": "document_nodes",
+                "multivector_doc_build_scorer": "proxy",
+                "multivector_proxy_encoder": "normalized_mean",
+                "multivector_centroids": "off",
+                "multivector_centroid_count": 0,
+                "entry_sidecar_count": 8,
+                "entry_sidecar_representatives_configured": 128,
+                "entry_sidecar_strategy": "hybrid_level_covering",
+            },
+        },
+        expected_signature=entry_sidecar_signature_by_name[
+            "proxy_normalized_mean_f16_entry_sidecar"
+        ],
+    )
+    try:
+        validate_serving_profile_index_reuse(
+            args=signature_args,
+            profile=entry_sidecar_by_name["proxy_normalized_mean_f16_entry_sidecar"],
+            index_phase={
+                "index_signature_tuple": entry_sidecar_signature_by_name[
+                    "proxy_normalized_mean_f16_entry_sidecar"
+                ],
+                "index_stats": {
+                    "multivector_graph_mode": "document_nodes",
+                    "multivector_doc_build_scorer": "proxy",
+                    "multivector_proxy_encoder": "normalized_mean",
+                    "multivector_centroids": "off",
+                    "multivector_centroid_count": 0,
+                    "entry_sidecar_count": 0,
+                    "entry_sidecar_representatives_configured": 128,
+                    "entry_sidecar_strategy": "hybrid_level_covering",
+                },
+            },
+            expected_signature=entry_sidecar_signature_by_name[
+                "proxy_normalized_mean_f16_entry_sidecar"
+            ],
+        )
+    except RuntimeError as exc:
+        assert "entry_sidecar_count > 0" in str(exc)
+    else:
+        raise AssertionError("entry-sidecar profile should reject missing entry sidecar stats")
     try:
         validate_serving_profile_index_reuse(
             args=signature_args,
@@ -3826,6 +5524,75 @@ def _self_check_exact_top_cache() -> None:
         raise AssertionError("document count mismatch should reject exact top cache")
 
 
+def _self_check_learned_sparse_evidence_annotation() -> None:
+    coverage = {
+        "loaded_documents": 100,
+        "learned_sparse_documents": 20,
+        "doc_coverage_ratio": learned_sparse_ratio(20, 100),
+        "loaded_queries": 10,
+        "learned_sparse_queries": 10,
+        "query_coverage_ratio": learned_sparse_ratio(10, 10),
+    }
+    coverage["warnings"] = learned_sparse_coverage_warnings(coverage)
+    coverage["partial_coverage"] = bool(coverage["warnings"])
+    learned_sparse_row = {
+        "profile": "proxy_normalized_mean_f16_learned_sparse_rescue",
+        "candidate_source": "proxy_vector",
+        "sparse_candidate_source": "learned_sparse",
+        "proxy_encoder": "normalized_mean",
+        "storage_kind": "f16",
+        "ef": 50,
+        "oversampling": 1,
+        "largest_budget": 800,
+        "p95_ms": 1.0,
+        "exact_top10_admission_recall": 1.0,
+        "ndcg@10": 1.0,
+    }
+    dense_row = {
+        "profile": "proxy_normalized_mean_f16",
+        "candidate_source": "proxy_vector",
+        "sparse_candidate_source": "off",
+        "proxy_encoder": "normalized_mean",
+        "storage_kind": "f16",
+        "ef": 50,
+        "oversampling": 1,
+        "largest_budget": 800,
+        "p95_ms": 10.0,
+        "exact_top10_admission_recall": 0.9,
+        "ndcg@10": 0.9,
+    }
+    grid = {
+        "results": [learned_sparse_row, dense_row],
+        "summary_rows": [learned_sparse_row, dense_row],
+    }
+    annotate_serving_grid_learned_sparse_evidence(
+        grid,
+        {
+            "skipped": False,
+            "coverage": coverage,
+            "warnings": coverage["warnings"],
+        },
+    )
+    assert learned_sparse_row["learned_sparse_partial_coverage"] is True
+    assert "learned_sparse_doc_coverage_below_95pct" in learned_sparse_row["evidence_warnings"]
+    assert "learned_sparse_partial_coverage" in serving_threshold_failures(
+        learned_sparse_row,
+        min_top10_admission=0.8,
+        min_ndcg_ratio_vs_exact=0.95,
+        max_p95_ms=0.0,
+        exact_baseline_ndcg=None,
+    )[0]
+    recommendation = compute_document_node_serving_recommendation(
+        grid,
+        exact_baseline={"available": False},
+        min_top10_admission=0.8,
+        min_ndcg_ratio_vs_exact=0.95,
+        max_p95_ms=0.0,
+    )
+    assert recommendation["best_latency_safe"]["profile"] == "proxy_normalized_mean_f16"
+    assert recommendation["best_balanced"]["profile"] == "proxy_normalized_mean_f16"
+
+
 def document_node_serving_profile_args(
     args: argparse.Namespace,
     profile: DocumentNodeServingProfile,
@@ -3840,6 +5607,9 @@ def document_node_serving_profile_args(
         multivector_graph="document_nodes",
         multivector_doc_build_scorer="proxy",
         multivector_candidate_source=profile.candidate_source,
+        multivector_branch_plan=profile.branch_plan,
+        multivector_bm25_candidate_injection=profile.bm25_candidate_injection,
+        multivector_sparse_candidate_source=profile.sparse_candidate_source,
         multivector_proxy_encoder=profile.proxy_encoder,
         multivector_centroids=profile.centroids,
         multivector_centroid_count=profile.centroid_count,
@@ -3847,11 +5617,24 @@ def document_node_serving_profile_args(
         multivector_doc_storage_cache=profile.cache_mode,
         multivector_token_pooling=profile.token_pooling,
         multivector_token_pooling_target_ratio=profile.token_pooling_target_ratio,
+        multivector_centroid_lite_max_postings_per_token=(
+            profile.centroid_lite_max_postings_per_token
+        ),
+        entry_sidecar=profile.entry_sidecar,
+        entry_sidecar_representatives=profile.entry_sidecar_representatives,
+        entry_sidecar_strategy=profile.entry_sidecar_strategy,
         multivector_plain_fallback=profile.plain_fallback,
-        multivector_candidate_reservoirs="off",
+        multivector_candidate_reservoirs=profile.candidate_reservoirs,
+        multivector_per_token_doc_reservoir_k=profile.per_token_doc_reservoir_k,
+        multivector_coverage_reservoir_k=profile.coverage_reservoir_k,
         multivector_doc_graph_search_ef=ef,
         multivector_doc_graph_oversampling=oversampling,
         multivector_doc_graph_rescore_k=0,
+        multivector_doc_graph_entry_sample_count=(
+            profile.entry_sample_count
+            if profile.entry_sample_count > 0
+            else int(getattr(args, "multivector_doc_graph_entry_sample_count", 0) or 0)
+        ),
         admission_budget_sweep=budget_sweep_text,
         reuse_index=False,
     )
@@ -3916,6 +5699,55 @@ def validate_serving_profile_index_reuse(
                 f"{profile.name}: multivector_centroid_count expected "
                 f"{expected_centroid_count}, observed {observed_centroid_count_int}"
             )
+
+    observed_entry_sidecar_count = index_stats.get("entry_sidecar_count")
+    if observed_entry_sidecar_count is not None:
+        try:
+            observed_entry_sidecar_count_int = int(observed_entry_sidecar_count)
+        except (TypeError, ValueError) as exc:
+            raise RuntimeError(
+                "serving-grid index reuse stats mismatch for "
+                f"{profile.name}: entry_sidecar_count is not an integer: "
+                f"{observed_entry_sidecar_count!r}"
+            ) from exc
+        if profile.entry_sidecar and observed_entry_sidecar_count_int <= 0:
+            raise RuntimeError(
+                "serving-grid index reuse stats mismatch for "
+                f"{profile.name}: expected entry_sidecar_count > 0"
+            )
+        if not profile.entry_sidecar and observed_entry_sidecar_count_int != 0:
+            raise RuntimeError(
+                "serving-grid index reuse stats mismatch for "
+                f"{profile.name}: expected entry_sidecar_count = 0, "
+                f"observed {observed_entry_sidecar_count_int}"
+            )
+    observed_entry_sidecar_reps = index_stats.get("entry_sidecar_representatives_configured")
+    if profile.entry_sidecar and observed_entry_sidecar_reps is not None:
+        try:
+            observed_entry_sidecar_reps_int = int(observed_entry_sidecar_reps)
+        except (TypeError, ValueError) as exc:
+            raise RuntimeError(
+                "serving-grid index reuse stats mismatch for "
+                f"{profile.name}: entry_sidecar_representatives_configured is not an integer: "
+                f"{observed_entry_sidecar_reps!r}"
+            ) from exc
+        if observed_entry_sidecar_reps_int != profile.entry_sidecar_representatives:
+            raise RuntimeError(
+                "serving-grid index reuse stats mismatch for "
+                f"{profile.name}: entry_sidecar_representatives_configured expected "
+                f"{profile.entry_sidecar_representatives}, observed {observed_entry_sidecar_reps_int}"
+            )
+    observed_entry_sidecar_strategy = index_stats.get("entry_sidecar_strategy")
+    if (
+        profile.entry_sidecar
+        and observed_entry_sidecar_strategy is not None
+        and str(observed_entry_sidecar_strategy) != profile.entry_sidecar_strategy
+    ):
+        raise RuntimeError(
+            "serving-grid index reuse stats mismatch for "
+            f"{profile.name}: entry_sidecar_strategy expected "
+            f"{profile.entry_sidecar_strategy!r}, observed {observed_entry_sidecar_strategy!r}"
+        )
 
 
 def serving_grid_scan_stats_by_budget(admission: dict[str, Any]) -> dict[str, dict[str, Any]]:
@@ -4017,6 +5849,9 @@ def document_node_serving_summary_row(
     stats_by_budget = serving_grid_scan_stats_by_budget(admission)
     stats_sample = serving_grid_scan_stats_sample(admission, largest_budget)
     index_stats = index_phase.get("index_stats", {})
+    index_build_stats = index_phase.get("build_stats", {})
+    if not isinstance(index_build_stats, dict):
+        index_build_stats = {}
     loaded_document_count = (
         scan_stat_int(index_stats, "node_count")
         if isinstance(index_stats, dict)
@@ -4031,9 +5866,24 @@ def document_node_serving_summary_row(
         if stats_sample
         else []
     )
+    evidence_warnings: list[str] = []
+    if profile.candidate_reservoirs != "off":
+        reservoirs_enabled_queries = int(
+            largest_work.get("reservoirs_enabled_queries") or 0
+        )
+        sample_reservoirs_enabled = (
+            bool(stats_sample.get("multivector_reservoirs_enabled"))
+            if isinstance(stats_sample, dict)
+            else False
+        )
+        if reservoirs_enabled_queries <= 0 and not sample_reservoirs_enabled:
+            evidence_warnings.append("candidate_reservoirs_not_executed")
     return {
         "profile": profile.name,
         "candidate_source": profile.candidate_source,
+        "branch_plan": profile.branch_plan,
+        "bm25_candidate_injection": profile.bm25_candidate_injection,
+        "sparse_candidate_source": profile.sparse_candidate_source,
         "graph_mode": "document_nodes",
         "proxy_encoder": profile.proxy_encoder,
         "centroids": profile.centroids,
@@ -4044,6 +5894,19 @@ def document_node_serving_summary_row(
         "token_pooling": profile.token_pooling,
         "token_pooling_target_ratio": profile.token_pooling_target_ratio,
         "token_pooling_min_tokens": args.multivector_token_pooling_min_tokens,
+        "candidate_reservoirs": profile.candidate_reservoirs,
+        "per_token_doc_reservoir_k": profile.per_token_doc_reservoir_k,
+        "coverage_reservoir_k": profile.coverage_reservoir_k,
+        "entry_sample_count": profile.entry_sample_count,
+        "effective_entry_sample_count": int(
+            getattr(args, "multivector_doc_graph_entry_sample_count", 0) or 0
+        ),
+        "entry_sidecar": profile.entry_sidecar,
+        "entry_sidecar_representatives": profile.entry_sidecar_representatives,
+        "entry_sidecar_strategy": profile.entry_sidecar_strategy,
+        "centroid_lite_max_postings_per_token": (
+            profile.centroid_lite_max_postings_per_token
+        ),
         "ef": ef,
         "oversampling": oversampling,
         "run_elapsed_ms": aggregate.get("total_elapsed_ms", 0.0),
@@ -4098,9 +5961,32 @@ def document_node_serving_summary_row(
         "metrics": metrics,
         "index_bytes": index_phase.get("index_bytes", 0),
         "index_stats": index_phase.get("index_stats", {}),
+        "index_build_stats": index_build_stats,
         "index_signature": index_phase.get("index_signature"),
         "index_build_reused_for_profiles": index_phase.get("index_build_reused_for_profiles", []),
         "largest_budget_work": largest_work,
+        "bm25_injection_enabled_queries": largest_work.get("bm25_injection_enabled_queries"),
+        "bm25_injection_candidates": largest_work.get("bm25_injection_candidates"),
+        "bm25_injection_candidate_limit": largest_work.get("bm25_injection_candidate_limit"),
+        "bm25_injection_pool_size": largest_work.get("bm25_injection_pool_size"),
+        "bm25_injection_limit_reason": largest_work.get("bm25_injection_limit_reason"),
+        "bm25_injection_retained": largest_work.get("bm25_injection_retained"),
+        "bm25_injection_exact_reranked": largest_work.get("bm25_injection_exact_reranked"),
+        "reservoirs_enabled_queries": largest_work.get("reservoirs_enabled_queries"),
+        "reservoir_score_docs": largest_work.get("reservoir_score_docs"),
+        "reservoir_coverage_docs": largest_work.get("reservoir_coverage_docs"),
+        "reservoir_mean_docs": largest_work.get("reservoir_mean_docs"),
+        "reservoir_per_token_docs": largest_work.get("reservoir_per_token_docs"),
+        "reservoir_bm25_docs": largest_work.get("reservoir_bm25_docs"),
+        "reservoir_union_docs": largest_work.get("reservoir_union_docs"),
+        "reservoir_duplicates": largest_work.get("reservoir_duplicates"),
+        "learned_sparse_candidates": largest_work.get("learned_sparse_candidates"),
+        "learned_sparse_retained_for_maxsim": largest_work.get(
+            "learned_sparse_retained_for_maxsim"
+        ),
+        "learned_sparse_branch_latency_us": largest_work.get(
+            "learned_sparse_branch_latency_us"
+        ),
         "serving_stats_by_budget": stats_by_budget,
         "stats_available": merge_document_node_serving_stats_available(stats_by_budget),
         "serving_stats_sample": stats_sample,
@@ -4110,6 +5996,7 @@ def document_node_serving_summary_row(
             serving_slow_path_warnings
             and getattr(args, "serving_fail_on_slow_path", False)
         ),
+        "evidence_warnings": evidence_warnings,
     }
 
 
@@ -4149,6 +6036,504 @@ def serving_row_metric(row: dict[str, Any], key: str) -> float | None:
     return metric if math.isfinite(metric) else None
 
 
+def serving_candidate_delta_baseline(profile_name: str) -> tuple[str, str] | None:
+    marker = "_entry_sample_"
+    if marker in profile_name:
+        baseline, count_text = profile_name.rsplit(marker, 1)
+        if baseline and count_text.isdigit():
+            return baseline, "entry_sample"
+    suffix_baselines = (
+        ("_reservoir_balanced", "candidate_reservoir"),
+        ("_learned_sparse_rescue", "learned_sparse_rescue"),
+        ("_bm25_rescue", "bm25_rescue"),
+        ("_entry_sidecar", "entry_sidecar"),
+    )
+    for suffix, comparison in suffix_baselines:
+        if profile_name.endswith(suffix):
+            baseline = profile_name[: -len(suffix)]
+            if baseline:
+                return baseline, comparison
+    if profile_name.startswith("centroid_lite_f16_cap_"):
+        return "centroid_lite_f16", "centroid_lite_posting_cap"
+    proxy_variants = {
+        "docnodes_normalized_mean_f16": ("proxy_normalized_mean_f16", "candidate_source_variant"),
+        "centroid_mean_f16": ("proxy_normalized_mean_f16", "proxy_encoder_variant"),
+        "centroid_lite_f16": ("centroid_mean_f16", "candidate_source_variant"),
+        "proxy_max_pool_f16": ("proxy_normalized_mean_f16", "proxy_encoder_variant"),
+        "proxy_random_projection_fde_f16": (
+            "proxy_normalized_mean_f16",
+            "proxy_encoder_variant",
+        ),
+    }
+    return proxy_variants.get(profile_name)
+
+
+def serving_candidate_delta_key(row: dict[str, Any], profile_name: str) -> tuple[Any, ...]:
+    return (
+        profile_name,
+        str(row.get("stage", "")),
+        int(row.get("ef", 0) or 0),
+        int(row.get("oversampling", 0) or 0),
+        int(row.get("candidate_budget", row.get("largest_budget", 0)) or 0),
+    )
+
+
+def serving_candidate_delta_number(row: dict[str, Any], key: str) -> float | None:
+    if key == "p95_ms":
+        return serving_row_p95(row)
+    if key == "p50_ms":
+        value = row.get("p50_ms")
+        if value is None:
+            value = row.get("p50_latency_ms_at_largest_budget")
+        if value is not None:
+            try:
+                metric = float(value)
+            except (TypeError, ValueError):
+                return None
+            return metric if math.isfinite(metric) else None
+    return serving_row_metric(row, key)
+
+
+def serving_candidate_delta_value(
+    candidate: dict[str, Any],
+    baseline: dict[str, Any],
+    key: str,
+) -> dict[str, Any]:
+    candidate_value = serving_candidate_delta_number(candidate, key)
+    baseline_value = serving_candidate_delta_number(baseline, key)
+    if candidate_value is None or baseline_value is None:
+        return {
+            key: candidate_value,
+            f"baseline_{key}": baseline_value,
+            f"{key}_delta": None,
+        }
+    return {
+        key: candidate_value,
+        f"baseline_{key}": baseline_value,
+        f"{key}_delta": candidate_value - baseline_value,
+    }
+
+
+def serving_candidate_delta_evidence(row: dict[str, Any]) -> dict[str, Any]:
+    evidence: dict[str, Any] = {}
+    sample = row.get("last_scan_stats_sample", row.get("serving_stats_sample", {}))
+    if not isinstance(sample, dict):
+        sample = {}
+
+    def usable(value: Any) -> bool:
+        return value is not None and value != "" and value != {}
+
+    def add_row(key: str) -> None:
+        value = row.get(key)
+        if usable(value):
+            evidence[key] = value
+
+    def add_sample(out_key: str, *sample_keys: str) -> None:
+        if out_key in evidence:
+            return
+        for sample_key in sample_keys:
+            value = sample.get(sample_key)
+            if usable(value):
+                evidence[out_key] = value
+                return
+
+    for key in (
+        "effective_entry_sample_count",
+        "entry_sample_count",
+        "entry_sidecar",
+        "entry_sidecar_representatives",
+        "entry_sidecar_strategy",
+        "candidate_reservoirs",
+        "reservoirs_enabled_queries",
+        "reservoir_score_docs",
+        "reservoir_coverage_docs",
+        "reservoir_mean_docs",
+        "reservoir_per_token_docs",
+        "reservoir_bm25_docs",
+        "reservoir_union_docs",
+        "reservoir_duplicates",
+        "bm25_injection_enabled_queries",
+        "bm25_injection_candidates",
+        "bm25_injection_candidate_limit",
+        "bm25_injection_pool_size",
+        "bm25_injection_limit_reason",
+        "bm25_injection_retained",
+        "bm25_injection_exact_reranked",
+        "learned_sparse_candidates",
+        "learned_sparse_retained_for_maxsim",
+        "learned_sparse_branch_latency_us",
+        "learned_sparse_partial_coverage",
+        "centroid_lite_max_postings_per_token",
+        "centroid_postings_touched",
+        "centroid_postings_skipped",
+        "centroid_posting_limit_per_token",
+        "centroid_posting_cap_strategy",
+    ):
+        add_row(key)
+
+    add_sample(
+        "graph_entry_sample_configured",
+        "multivector_doc_graph_entry_sample_configured",
+        "graph_entry_sample_configured",
+    )
+    add_sample(
+        "graph_entry_sample_effective",
+        "multivector_doc_graph_entry_sample_effective",
+        "graph_entry_sample_effective",
+    )
+    add_sample(
+        "graph_entry_sample_scored",
+        "multivector_doc_graph_entry_sample_scored",
+        "graph_entry_sample_scored",
+    )
+    add_sample("graph_entry_sidecar_count", "graph_entry_sidecar_count")
+    add_sample("graph_entry_sidecar_scored", "graph_entry_sidecar_scored")
+    add_sample("graph_entry_sidecar_selected", "graph_entry_sidecar_selected")
+    add_sample(
+        "graph_entry_sidecar_strategy",
+        "graph_entry_sidecar_strategy",
+        "entry_sidecar_scan_strategy",
+    )
+    add_sample("multivector_reservoirs_enabled", "multivector_reservoirs_enabled")
+    return evidence
+
+
+def serving_candidate_delta_evidence_text(evidence: dict[str, Any]) -> str:
+    if not isinstance(evidence, dict) or not evidence:
+        return ""
+
+    def summary_value(value: Any, key: str = "p95") -> str:
+        if isinstance(value, dict):
+            selected = value.get(key)
+            if selected is None:
+                selected = value.get("mean")
+            if selected is None:
+                selected = value.get("max")
+            if selected is None:
+                selected = value.get("count")
+            return str(selected) if selected is not None else ""
+        return str(value)
+
+    parts: list[str] = []
+    entry_sample = evidence.get("effective_entry_sample_count", evidence.get("entry_sample_count"))
+    if entry_sample not in (None, "", 0):
+        entry_part = f"entry_sample={entry_sample}"
+        scored = evidence.get("graph_entry_sample_scored")
+        if scored not in (None, ""):
+            entry_part += f"/scored={scored}"
+        parts.append(entry_part)
+    if bool(evidence.get("entry_sidecar", False)) or evidence.get("graph_entry_sidecar_count") not in (None, ""):
+        sidecar_part = "entry_sidecar"
+        scored = evidence.get("graph_entry_sidecar_scored")
+        selected = evidence.get("graph_entry_sidecar_selected")
+        if scored not in (None, ""):
+            sidecar_part += f"/scored={scored}"
+        if selected not in (None, ""):
+            sidecar_part += f"/selected={selected}"
+        parts.append(sidecar_part)
+    if evidence.get("candidate_reservoirs") not in (None, "", "off"):
+        reservoir_part = f"reservoirs={evidence.get('candidate_reservoirs')}"
+        enabled = evidence.get("reservoirs_enabled_queries")
+        if enabled not in (None, ""):
+            reservoir_part += f"/enabled={enabled}"
+        union = summary_value(evidence.get("reservoir_union_docs"))
+        if union:
+            reservoir_part += f"/union_p95={union}"
+        duplicates = summary_value(evidence.get("reservoir_duplicates"))
+        if duplicates:
+            reservoir_part += f"/dups_p95={duplicates}"
+        parts.append(reservoir_part)
+    bm25_enabled = evidence.get("bm25_injection_enabled_queries")
+    if bm25_enabled not in (None, "", 0):
+        bm25_part = f"bm25_queries={bm25_enabled}"
+        retained = summary_value(evidence.get("bm25_injection_retained"))
+        if retained:
+            bm25_part += f"/retained_p95={retained}"
+        parts.append(bm25_part)
+    learned_sparse = summary_value(evidence.get("learned_sparse_candidates"))
+    if learned_sparse:
+        parts.append(f"learned_sparse_candidates_p95={learned_sparse}")
+    cap = evidence.get(
+        "centroid_posting_limit_per_token",
+        evidence.get("centroid_lite_max_postings_per_token"),
+    )
+    if cap not in (None, "", 0):
+        cap_part = f"centroid_cap={cap}"
+        touched = summary_value(evidence.get("centroid_postings_touched"))
+        skipped = summary_value(evidence.get("centroid_postings_skipped"))
+        if touched:
+            cap_part += f"/touched_p95={touched}"
+        if skipped:
+            cap_part += f"/skipped_p95={skipped}"
+        parts.append(cap_part)
+    return "; ".join(parts)
+
+
+def compute_document_node_candidate_source_deltas(
+    rows: Sequence[dict[str, Any]],
+) -> dict[str, Any]:
+    valid_rows = [row for row in rows if isinstance(row, dict)]
+    rows_by_key = {
+        serving_candidate_delta_key(row, str(row.get("profile", ""))): row
+        for row in valid_rows
+    }
+    deltas: list[dict[str, Any]] = []
+    missing_baselines: list[dict[str, Any]] = []
+    for row in valid_rows:
+        profile_name = str(row.get("profile", ""))
+        baseline_info = serving_candidate_delta_baseline(profile_name)
+        if baseline_info is None:
+            continue
+        baseline_profile, comparison = baseline_info
+        baseline_key = serving_candidate_delta_key(row, baseline_profile)
+        baseline = rows_by_key.get(baseline_key)
+        if baseline is None:
+            missing_baselines.append({
+                "profile": profile_name,
+                "baseline_profile": baseline_profile,
+                "comparison": comparison,
+                "stage": row.get("stage"),
+                "ef": row.get("ef"),
+                "oversampling": row.get("oversampling"),
+                "candidate_budget": row.get("candidate_budget", row.get("largest_budget")),
+            })
+            continue
+        delta_row: dict[str, Any] = {
+            "comparison": comparison,
+            "profile": profile_name,
+            "baseline_profile": baseline_profile,
+            "stage": row.get("stage"),
+            "candidate_source": row.get("candidate_source"),
+            "baseline_candidate_source": baseline.get("candidate_source"),
+            "proxy_encoder": row.get("proxy_encoder"),
+            "baseline_proxy_encoder": baseline.get("proxy_encoder"),
+            "centroids": row.get("centroids"),
+            "baseline_centroids": baseline.get("centroids"),
+            "entry_sample_count": row.get("entry_sample_count"),
+            "baseline_entry_sample_count": baseline.get("entry_sample_count"),
+            "entry_sidecar": bool(row.get("entry_sidecar", False)),
+            "baseline_entry_sidecar": bool(baseline.get("entry_sidecar", False)),
+            "candidate_reservoirs": row.get("candidate_reservoirs"),
+            "baseline_candidate_reservoirs": baseline.get("candidate_reservoirs"),
+            "candidate_evidence": serving_candidate_delta_evidence(row),
+            "baseline_evidence": serving_candidate_delta_evidence(baseline),
+            "storage_kind": row.get("storage_kind"),
+            "storage_cache_mode": row.get("storage_cache_mode", row.get("cache_mode")),
+            "ef": int(row.get("ef", 0) or 0),
+            "oversampling": int(row.get("oversampling", 0) or 0),
+            "candidate_budget": int(
+                row.get("candidate_budget", row.get("largest_budget", 0)) or 0
+            ),
+        }
+        evidence_warnings: list[str] = []
+        if serving_row_unsupported_reservoir_evidence(row):
+            evidence_warnings.append("candidate_reservoirs_not_executed")
+        if serving_row_unsupported_reservoir_evidence(baseline):
+            evidence_warnings.append("baseline_candidate_reservoirs_not_executed")
+        delta_row["evidence_usable"] = not evidence_warnings
+        delta_row["evidence_warnings"] = evidence_warnings
+        delta_row["unsupported_reservoir_evidence"] = (
+            serving_row_unsupported_reservoir_evidence(row)
+        )
+        for metric_key in (
+            "exact_top1_admission_rate",
+            "exact_top10_admission_recall",
+            "recall@10",
+            "ndcg@10",
+            "mrr@10",
+            "p50_ms",
+            "p95_ms",
+        ):
+            delta_row.update(serving_candidate_delta_value(row, baseline, metric_key))
+        top10_delta = delta_row.get("exact_top10_admission_recall_delta")
+        p95_delta = delta_row.get("p95_ms_delta")
+        delta_row["admission_improved"] = (
+            top10_delta is not None and float(top10_delta) > 0.0
+        )
+        delta_row["latency_improved"] = p95_delta is not None and float(p95_delta) < 0.0
+        deltas.append(delta_row)
+    deltas.sort(
+        key=lambda item: (
+            str(item.get("comparison", "")),
+            str(item.get("profile", "")),
+            int(item.get("ef", 0) or 0),
+            int(item.get("oversampling", 0) or 0),
+            int(item.get("candidate_budget", 0) or 0),
+        )
+    )
+    missing_baselines.sort(
+        key=lambda item: (
+            str(item.get("comparison", "")),
+            str(item.get("profile", "")),
+            int(item.get("ef", 0) or 0),
+            int(item.get("oversampling", 0) or 0),
+            int(item.get("candidate_budget", 0) or 0),
+        )
+    )
+    return {
+        "enabled": True,
+        "rows": deltas,
+        "missing_baselines": missing_baselines,
+        "comparison_count": len(deltas),
+        "missing_baseline_count": len(missing_baselines),
+    }
+
+
+def document_node_candidate_source_delta_summary(
+    candidate_source_deltas: dict[str, Any] | None,
+) -> dict[str, Any]:
+    if not isinstance(candidate_source_deltas, dict):
+        return {
+            "available": False,
+            "reason": "candidate_source_deltas missing",
+        }
+    rows = [
+        item
+        for item in candidate_source_deltas.get("rows", [])
+        if isinstance(item, dict)
+    ]
+    if not rows:
+        return {
+            "available": False,
+            "reason": "no paired candidate-source delta rows",
+            "missing_baseline_count": int(
+                candidate_source_deltas.get("missing_baseline_count", 0) or 0
+            ),
+        }
+
+    def metric(item: dict[str, Any], key: str) -> float | None:
+        value = item.get(key)
+        if value is None or isinstance(value, bool):
+            return None
+        try:
+            number = float(value)
+        except (TypeError, ValueError):
+            return None
+        return number if math.isfinite(number) else None
+
+    def compact(item: dict[str, Any] | None, *, basis: str) -> dict[str, Any] | None:
+        if item is None:
+            return None
+        return {
+            "basis": basis,
+            "comparison": item.get("comparison"),
+            "profile": item.get("profile"),
+            "baseline_profile": item.get("baseline_profile"),
+            "ef": item.get("ef"),
+            "oversampling": item.get("oversampling"),
+            "candidate_budget": item.get("candidate_budget"),
+            "exact_top10_admission_recall_delta": item.get(
+                "exact_top10_admission_recall_delta"
+            ),
+            "ndcg@10_delta": item.get("ndcg@10_delta"),
+            "p95_ms_delta": item.get("p95_ms_delta"),
+            "exact_top10_admission_recall": item.get("exact_top10_admission_recall"),
+            "baseline_exact_top10_admission_recall": item.get(
+                "baseline_exact_top10_admission_recall"
+            ),
+            "ndcg@10": item.get("ndcg@10"),
+            "baseline_ndcg@10": item.get("baseline_ndcg@10"),
+            "p95_ms": item.get("p95_ms"),
+            "baseline_p95_ms": item.get("baseline_p95_ms"),
+            "evidence_usable": item.get("evidence_usable", True),
+            "evidence_warnings": item.get("evidence_warnings", []),
+            "candidate_evidence_summary": serving_candidate_delta_evidence_text(
+                item.get("candidate_evidence", {})
+            ),
+        }
+
+    usable_rows = [
+        item for item in rows
+        if bool(item.get("evidence_usable", True))
+    ]
+
+    positive_admission = [
+        item
+        for item in usable_rows
+        if (metric(item, "exact_top10_admission_recall_delta") or 0.0) > 0.0
+    ]
+    positive_quality = [
+        item
+        for item in usable_rows
+        if (metric(item, "ndcg@10_delta") or 0.0) > 0.0
+    ]
+    latency_improved = [
+        item
+        for item in usable_rows
+        if (metric(item, "p95_ms_delta") or 0.0) < 0.0
+    ]
+
+    best_admission = max(
+        positive_admission,
+        key=lambda item: (
+            metric(item, "exact_top10_admission_recall_delta") or 0.0,
+            metric(item, "ndcg@10_delta") or 0.0,
+            -(metric(item, "p95_ms_delta") or 0.0),
+            str(item.get("profile", "")),
+        ),
+        default=None,
+    )
+    best_quality = max(
+        positive_quality,
+        key=lambda item: (
+            metric(item, "ndcg@10_delta") or 0.0,
+            metric(item, "exact_top10_admission_recall_delta") or 0.0,
+            -(metric(item, "p95_ms_delta") or 0.0),
+            str(item.get("profile", "")),
+        ),
+        default=None,
+    )
+    best_latency = min(
+        latency_improved,
+        key=lambda item: (
+            metric(item, "p95_ms_delta") or 0.0,
+            -(metric(item, "exact_top10_admission_recall_delta") or 0.0),
+            str(item.get("profile", "")),
+        ),
+        default=None,
+    )
+
+    by_comparison: dict[str, dict[str, Any]] = {}
+    for comparison in sorted({str(item.get("comparison", "")) for item in rows}):
+        comparison_rows = [
+            item for item in positive_admission
+            if str(item.get("comparison", "")) == comparison
+        ]
+        by_comparison[comparison] = compact(
+            max(
+                comparison_rows,
+                key=lambda item: (
+                    metric(item, "exact_top10_admission_recall_delta") or 0.0,
+                    metric(item, "ndcg@10_delta") or 0.0,
+                    -(metric(item, "p95_ms_delta") or 0.0),
+                    str(item.get("profile", "")),
+                ),
+                default=None,
+            ),
+            basis="top10_admission_delta",
+        )
+
+    return {
+        "available": True,
+        "comparison_count": len(rows),
+        "usable_comparison_count": len(usable_rows),
+        "unusable_comparison_count": len(rows) - len(usable_rows),
+        "positive_admission_delta_count": len(positive_admission),
+        "positive_quality_delta_count": len(positive_quality),
+        "latency_improvement_count": len(latency_improved),
+        "missing_baseline_count": int(
+            candidate_source_deltas.get("missing_baseline_count", 0) or 0
+        ),
+        "best_admission_delta": compact(
+            best_admission,
+            basis="top10_admission_delta",
+        ),
+        "best_quality_delta": compact(best_quality, basis="ndcg@10_delta"),
+        "best_latency_delta": compact(best_latency, basis="p95_ms_delta"),
+        "best_admission_delta_by_comparison": by_comparison,
+    }
+
+
 def serving_storage_penalty(row: dict[str, Any]) -> int:
     return {
         "sq8": 0,
@@ -4166,6 +6551,28 @@ def serving_row_experimental(row: dict[str, Any]) -> bool:
     )
 
 
+def serving_row_reservoirs_requested(row: dict[str, Any]) -> bool:
+    return str(row.get("candidate_reservoirs") or "off") != "off"
+
+
+def serving_row_reservoirs_executed(row: dict[str, Any]) -> bool:
+    enabled_queries = row.get("reservoirs_enabled_queries")
+    try:
+        if enabled_queries is not None and int(enabled_queries) > 0:
+            return True
+    except (TypeError, ValueError):
+        pass
+
+    sample = row.get("last_scan_stats_sample", row.get("serving_stats_sample", {}))
+    if isinstance(sample, dict) and bool(sample.get("multivector_reservoirs_enabled")):
+        return True
+    return False
+
+
+def serving_row_unsupported_reservoir_evidence(row: dict[str, Any]) -> bool:
+    return serving_row_reservoirs_requested(row) and not serving_row_reservoirs_executed(row)
+
+
 def serving_row_has_usable_metrics(row: dict[str, Any]) -> bool:
     return (
         serving_row_p95(row) is not None
@@ -4180,12 +6587,28 @@ def serving_recommendation_row(row: dict[str, Any]) -> dict[str, Any]:
         "profile": row.get("profile"),
         "candidate_source": row.get("candidate_source"),
         "experimental": serving_row_experimental(row),
+        "branch_plan": row.get("branch_plan"),
+        "bm25_candidate_injection": row.get("bm25_candidate_injection"),
+        "sparse_candidate_source": row.get("sparse_candidate_source"),
         "proxy_encoder": row.get("proxy_encoder"),
         "centroids": row.get("centroids"),
         "storage_kind": row.get("storage_kind"),
         "cache_mode": row.get("cache_mode"),
         "token_pooling": row.get("token_pooling"),
         "token_pooling_target_ratio": row.get("token_pooling_target_ratio"),
+        "candidate_reservoirs": row.get("candidate_reservoirs"),
+        "per_token_doc_reservoir_k": row.get("per_token_doc_reservoir_k"),
+        "coverage_reservoir_k": row.get("coverage_reservoir_k"),
+        "reservoirs_executed": serving_row_reservoirs_executed(row),
+        "unsupported_reservoir_evidence": serving_row_unsupported_reservoir_evidence(row),
+        "entry_sample_count": row.get("entry_sample_count"),
+        "effective_entry_sample_count": row.get("effective_entry_sample_count"),
+        "entry_sidecar": row.get("entry_sidecar"),
+        "entry_sidecar_representatives": row.get("entry_sidecar_representatives"),
+        "entry_sidecar_strategy": row.get("entry_sidecar_strategy"),
+        "centroid_lite_max_postings_per_token": row.get(
+            "centroid_lite_max_postings_per_token"
+        ),
         "ef": row.get("ef"),
         "oversampling": row.get("oversampling"),
         "largest_budget": row.get("largest_budget"),
@@ -4212,9 +6635,237 @@ def serving_recommendation_row(row: dict[str, Any]) -> dict[str, Any]:
         "index_signature": row.get("index_signature"),
         "index_build_reused": row.get("index_build_reused"),
         "index_build_reused_for_profiles": row.get("index_build_reused_for_profiles", []),
+        "bm25_injection_enabled_queries": row.get("bm25_injection_enabled_queries"),
+        "bm25_injection_candidates": row.get("bm25_injection_candidates"),
+        "bm25_injection_candidate_limit": row.get("bm25_injection_candidate_limit"),
+        "bm25_injection_pool_size": row.get("bm25_injection_pool_size"),
+        "bm25_injection_limit_reason": row.get("bm25_injection_limit_reason"),
+        "bm25_injection_retained": row.get("bm25_injection_retained"),
+        "bm25_injection_exact_reranked": row.get("bm25_injection_exact_reranked"),
+        "reservoirs_enabled_queries": row.get("reservoirs_enabled_queries"),
+        "reservoir_score_docs": row.get(
+            "reservoir_score_docs", row.get("multivector_reservoir_score_docs")
+        ),
+        "reservoir_coverage_docs": row.get(
+            "reservoir_coverage_docs", row.get("multivector_reservoir_coverage_docs")
+        ),
+        "reservoir_mean_docs": row.get(
+            "reservoir_mean_docs", row.get("multivector_reservoir_mean_docs")
+        ),
+        "reservoir_per_token_docs": row.get(
+            "reservoir_per_token_docs", row.get("multivector_reservoir_per_token_docs")
+        ),
+        "reservoir_bm25_docs": row.get(
+            "reservoir_bm25_docs", row.get("multivector_reservoir_bm25_docs")
+        ),
+        "reservoir_union_docs": row.get(
+            "reservoir_union_docs", row.get("multivector_reservoir_union_docs")
+        ),
+        "reservoir_duplicates": row.get(
+            "reservoir_duplicates", row.get("multivector_reservoir_duplicates")
+        ),
+        "learned_sparse_candidates": row.get("learned_sparse_candidates"),
+        "learned_sparse_retained_for_maxsim": row.get("learned_sparse_retained_for_maxsim"),
+        "learned_sparse_branch_latency_us": row.get("learned_sparse_branch_latency_us"),
+        "learned_sparse_partial_coverage": row.get("learned_sparse_partial_coverage"),
+        "evidence_warnings": row.get("evidence_warnings", []),
         "stats_available": row.get("stats_available", {}),
         "last_scan_stats_sample": row.get("last_scan_stats_sample", {}),
     }
+
+
+def serving_row_candidate_budget(row: dict[str, Any]) -> int | None:
+    for key in ("candidate_budget", "largest_budget"):
+        value = row.get(key)
+        if value is None:
+            continue
+        try:
+            budget = int(value)
+        except (TypeError, ValueError):
+            continue
+        if budget > 0:
+            return budget
+    return None
+
+
+def serving_row_exhausted_admitted_band(row: dict[str, Any]) -> bool:
+    budget = serving_row_candidate_budget(row)
+    if budget is None:
+        return False
+    mode = str(row.get("serving_exact_rerank_mode") or "")
+    effective_rerank = row.get("effective_exact_rerank_k")
+    try:
+        effective_rerank_int = int(effective_rerank)
+    except (TypeError, ValueError):
+        effective_rerank_int = 0
+    rerank_docs_p95 = row.get("exact_rerank_docs_p95")
+    try:
+        rerank_docs_p95_float = float(rerank_docs_p95)
+    except (TypeError, ValueError):
+        rerank_docs_p95_float = 0.0
+    if mode == "admission_exhaustive":
+        return True
+    return effective_rerank_int >= budget and rerank_docs_p95_float >= budget * 0.95
+
+
+def serving_row_candidate_admission_bottleneck(
+    row: dict[str, Any],
+    *,
+    min_top10_admission: float,
+) -> bool:
+    admission = serving_row_metric(row, "exact_top10_admission_recall")
+    if admission is None or admission >= min_top10_admission:
+        return False
+    return serving_row_exhausted_admitted_band(row)
+
+
+def summary_stat_float(value: Any, key: str, default: float = 0.0) -> float:
+    if isinstance(value, dict):
+        value = value.get(key, default)
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return default
+
+
+def summary_reason_present(value: Any, reason: str) -> bool:
+    if isinstance(value, dict):
+        return summary_stat_float(value.get(reason), "count", 0.0) > 0.0
+    return str(value or "") == reason
+
+
+def summary_stat_float_any(
+    row: dict[str, Any],
+    keys: tuple[str, ...],
+    stat: str,
+    default: float = 0.0,
+) -> float:
+    for key in keys:
+        value = row.get(key)
+        if value is None:
+            continue
+        result = summary_stat_float(value, stat, default)
+        if result != default:
+            return result
+    return default
+
+
+def serving_admission_improvement_hints(
+    row: dict[str, Any],
+    *,
+    min_top10_admission: float,
+) -> list[str]:
+    if serving_row_unsupported_reservoir_evidence(row):
+        return ["candidate_reservoirs_not_executed"]
+
+    admission = serving_row_metric(row, "exact_top10_admission_recall")
+    if admission is not None and admission >= min_top10_admission:
+        return []
+
+    hints: list[str] = []
+    sample = row.get("last_scan_stats_sample", {})
+    if not isinstance(sample, dict):
+        sample = {}
+
+    if serving_row_candidate_admission_bottleneck(
+        row,
+        min_top10_admission=min_top10_admission,
+    ):
+        hints.append("candidate_source_quality_bottleneck")
+        hints.append("admitted_band_exhausted")
+        proxy_encoder = str(row.get("proxy_encoder") or sample.get("proxy_encoder_kind") or "")
+        candidate_source = str(row.get("candidate_source") or sample.get("multivector_candidate_source") or "")
+        sparse_source_for_bottleneck = str(row.get("sparse_candidate_source") or "off")
+        bm25_for_bottleneck = str(row.get("bm25_candidate_injection") or "off")
+        reservoirs_for_bottleneck = str(row.get("candidate_reservoirs") or "off")
+        if candidate_source == "proxy_vector":
+            entry_sample_count = int(
+                row.get(
+                    "effective_entry_sample_count",
+                    row.get("entry_sample_count", 0),
+                )
+                or 0
+            )
+            if entry_sample_count <= 0:
+                hints.append("try_entry_sample_sweep")
+            if proxy_encoder == "normalized_mean":
+                hints.append("try_max_pool_or_centroid_mean_proxy")
+            elif proxy_encoder == "max_pool":
+                hints.append("try_centroid_mean_proxy")
+            elif proxy_encoder == "centroid_mean":
+                hints.append("try_sparse_rescue_or_centroid_lite")
+        if reservoirs_for_bottleneck == "off":
+            hints.append("try_balanced_candidate_reservoirs")
+        if sparse_source_for_bottleneck == "off" and bm25_for_bottleneck == "off":
+            hints.append("try_bm25_or_learned_sparse_rescue")
+
+    if row.get("candidate_reservoirs") not in (None, "off"):
+        if serving_row_unsupported_reservoir_evidence(row):
+            hints.append("candidate_reservoirs_not_executed")
+        reservoir_union_p95 = summary_stat_float_any(
+            row,
+            ("multivector_reservoir_union_docs", "reservoir_union_docs"),
+            "p95",
+        )
+        reservoir_score_p95 = summary_stat_float_any(
+            row,
+            ("multivector_reservoir_score_docs", "reservoir_score_docs"),
+            "p95",
+        )
+        reservoir_duplicates_p95 = summary_stat_float_any(
+            row,
+            ("multivector_reservoir_duplicates", "reservoir_duplicates"),
+            "p95",
+        )
+        if reservoir_union_p95 <= 0.0:
+            hints.append("candidate_reservoirs_no_union")
+        elif reservoir_score_p95 > 0.0 and reservoir_union_p95 <= reservoir_score_p95:
+            hints.append("candidate_reservoirs_no_extra_docs")
+        if reservoir_duplicates_p95 > reservoir_union_p95 and reservoir_union_p95 > 0.0:
+            hints.append("candidate_reservoirs_high_duplicates")
+
+    proxy_limit_source = row.get("proxy_candidate_limit_source")
+    if proxy_limit_source is None:
+        proxy_limit_source = sample.get("proxy_candidate_limit_source")
+    if proxy_limit_source == "search_ef":
+        hints.append("proxy_candidates_capped_by_search_ef")
+    elif proxy_limit_source == "doc_candidate_k":
+        hints.append("proxy_candidates_capped_by_doc_candidate_k")
+
+    bm25_injection = row.get("bm25_candidate_injection")
+    bm25_enabled_queries = int(row.get("bm25_injection_enabled_queries") or 0)
+    if bm25_injection and bm25_injection != "off":
+        if bm25_enabled_queries <= 0:
+            hints.append("bm25_rescue_not_triggering")
+        reason_counts = row.get("bm25_injection_limit_reason")
+        if summary_reason_present(reason_counts, "exact_rerank_k"):
+            hints.append("bm25_rescue_limited_by_exact_rerank_k")
+        if summary_reason_present(reason_counts, "doc_candidate_k"):
+            hints.append("bm25_rescue_limited_by_doc_candidate_k")
+        if summary_reason_present(reason_counts, "bm25_count"):
+            hints.append("bm25_rescue_lexical_underfill")
+        if (
+            summary_stat_float(row.get("bm25_injection_candidates"), "p95") > 0.0
+            and summary_stat_float(row.get("bm25_injection_retained"), "p95") <= 0.0
+        ):
+            hints.append("bm25_rescue_not_retained")
+
+    sparse_source = row.get("sparse_candidate_source")
+    if sparse_source == "learned_sparse":
+        if bool(row.get("learned_sparse_partial_coverage", False)):
+            hints.append("learned_sparse_partial_coverage")
+        if summary_stat_float(row.get("learned_sparse_candidates"), "p95") <= 0.0:
+            hints.append("learned_sparse_no_candidates")
+        elif summary_stat_float(row.get("learned_sparse_retained_for_maxsim"), "p95") <= 0.0:
+            hints.append("learned_sparse_not_retained")
+
+    warning = str(sample.get("multivector_doc_graph_warning", "") or "")
+    if "near_exhaustive" in warning:
+        hints.append("candidate_source_near_exhaustive_scan")
+
+    if not hints:
+        hints.append("try_higher_quality_candidate_source_or_rescue")
+    return sorted(dict.fromkeys(hints))
 
 
 def serving_profile_explanation(row: dict[str, Any]) -> str:
@@ -4230,8 +6881,30 @@ def serving_profile_explanation(row: dict[str, Any]) -> str:
     ]
     if row.get("ndcg@10") is not None:
         parts.append(f"ndcg@10={float(row.get('ndcg@10') or 0.0):.6f}")
+    if row.get("entry_sidecar") is not None:
+        parts.append(f"entry_sidecar={bool(row.get('entry_sidecar'))}")
+    if row.get("entry_sidecar_representatives") is not None:
+        parts.append(f"entry_sidecar_reps={row.get('entry_sidecar_representatives')}")
+    if row.get("entry_sidecar_strategy") is not None:
+        parts.append(f"entry_sidecar_strategy={row.get('entry_sidecar_strategy')}")
+    if row.get("candidate_reservoirs") not in (None, "off"):
+        parts.append(f"reservoirs={row.get('candidate_reservoirs')}")
     for key, label in (
+        ("bm25_injection_enabled_queries", "bm25_enabled_queries"),
+        ("bm25_injection_candidates", "bm25_candidates_summary"),
+        ("bm25_injection_candidate_limit", "bm25_candidate_limit_summary"),
+        ("bm25_injection_pool_size", "bm25_pool_size_summary"),
+        ("bm25_injection_limit_reason", "bm25_limit_reason_summary"),
+        ("bm25_injection_retained", "bm25_retained_summary"),
+        ("bm25_injection_exact_reranked", "bm25_exact_reranked_summary"),
+        ("learned_sparse_candidates", "learned_sparse_candidates_summary"),
+        ("learned_sparse_retained_for_maxsim", "learned_sparse_retained_summary"),
+        ("learned_sparse_branch_latency_us", "learned_sparse_latency_us_summary"),
         ("multivector_doc_graph_warning", "warning"),
+        ("graph_entry_sidecar_count", "entry_sidecar_count"),
+        ("graph_entry_sidecar_scored", "entry_sidecar_scored"),
+        ("graph_entry_sidecar_selected", "entry_sidecar_selected"),
+        ("graph_entry_sidecar_strategy", "entry_sidecar_scan_strategy"),
         ("proxy_encoder_kind", "proxy"),
         ("proxy_candidates", "proxy_candidates"),
         ("centroid_candidates", "centroid_candidates"),
@@ -4242,11 +6915,41 @@ def serving_profile_explanation(row: dict[str, Any]) -> str:
         ("multivector_exact_kernel", "kernel"),
         ("multivector_doc_sidecar_cache_mode", "sidecar_cache"),
         ("multivector_doc_sidecar_bytes_touched", "sidecar_bytes"),
+        ("multivector_doc_sidecar_docmap_bytes_touched", "sidecar_docmap_bytes"),
+        ("multivector_doc_sidecar_resident_vectors_loaded", "sidecar_resident_vectors"),
+        ("multivector_doc_sidecar_resident_bytes_loaded", "sidecar_resident_bytes"),
+        ("multivector_doc_sidecar_vector_chunk_ref_bytes_touched", "sidecar_chunk_ref_bytes"),
+        ("multivector_doc_sidecar_paged_vector_bytes_touched", "sidecar_paged_vector_bytes"),
         ("multivector_tokens_original", "tokens_original"),
         ("multivector_tokens_pooled", "tokens_pooled"),
+        ("multivector_bm25_injection_enabled", "bm25_injection"),
+        ("multivector_bm25_injection_candidates", "bm25_candidates"),
+        ("multivector_bm25_injection_candidate_limit", "bm25_candidate_limit"),
+        ("multivector_bm25_injection_pool_size", "bm25_pool_size"),
+        ("multivector_bm25_injection_limit_reason", "bm25_limit_reason"),
+        ("multivector_bm25_injection_retained", "bm25_retained"),
+        ("multivector_bm25_injection_exact_reranked", "bm25_exact_reranked"),
+        ("learned_sparse_candidates", "learned_sparse_candidates"),
+        ("learned_sparse_retained_for_maxsim", "learned_sparse_retained"),
+        ("reservoirs_enabled_queries", "reservoirs_enabled_queries"),
+        ("reservoir_score_docs", "reservoir_score_docs_summary"),
+        ("reservoir_coverage_docs", "reservoir_coverage_docs_summary"),
+        ("reservoir_mean_docs", "reservoir_mean_docs_summary"),
+        ("reservoir_per_token_docs", "reservoir_per_token_docs_summary"),
+        ("reservoir_union_docs", "reservoir_union_docs_summary"),
+        ("reservoir_duplicates", "reservoir_duplicates_summary"),
+        ("multivector_reservoirs_enabled", "reservoirs_enabled"),
+        ("multivector_reservoir_score_docs", "reservoir_score_docs"),
+        ("multivector_reservoir_coverage_docs", "reservoir_coverage_docs"),
+        ("multivector_reservoir_mean_docs", "reservoir_mean_docs"),
+        ("multivector_reservoir_per_token_docs", "reservoir_per_token_docs"),
+        ("multivector_reservoir_union_docs", "reservoir_union_docs"),
+        ("multivector_reservoir_duplicates", "reservoir_duplicates"),
         ("quantized_inverted_postings_touched", "quantized_postings"),
     ):
-        if key in sample:
+        if key in row and row.get(key) is not None:
+            parts.append(f"{label}={row[key]}")
+        elif key in sample:
             parts.append(f"{label}={sample[key]}")
     return "; ".join(parts)
 
@@ -4303,6 +7006,11 @@ def serving_threshold_failures(
         failures.append("missing_ndcg@10")
     elif ndcg < exact_baseline_ndcg * min_ndcg_ratio_vs_exact:
         failures.append("ndcg_ratio_below_threshold")
+
+    if bool(row.get("learned_sparse_partial_coverage", False)):
+        failures.append("learned_sparse_partial_coverage")
+    if serving_row_unsupported_reservoir_evidence(row):
+        failures.append("candidate_reservoirs_not_executed")
 
     return failures, unavailable
 
@@ -4379,11 +7087,30 @@ def compute_document_node_serving_recommendation(
             exact_baseline_ndcg=exact_baseline_ndcg,
         )
         summary = serving_recommendation_row(row)
+        candidate_bottleneck = serving_row_candidate_admission_bottleneck(
+            row,
+            min_top10_admission=min_top10_admission,
+        )
         summary["threshold_pass"] = not failures
         summary["failure_reasons"] = failures
+        if candidate_bottleneck and "candidate_admission_bottleneck" not in summary["failure_reasons"]:
+            summary["failure_reasons"] = [
+                *summary["failure_reasons"],
+                "candidate_admission_bottleneck",
+            ]
         summary["unavailable_criteria"] = unavailable
+        summary["candidate_admission_bottleneck"] = candidate_bottleneck
+        if candidate_bottleneck:
+            summary["candidate_admission_bottleneck_reason"] = (
+                "exact rerank exhausted the admitted candidate band, but "
+                "exact_top10_admission_recall remained below threshold"
+            )
+        summary["admission_improvement_hints"] = serving_admission_improvement_hints(
+            summary,
+            min_top10_admission=min_top10_admission,
+        )
         threshold_rows.append(summary)
-        if failures:
+        if summary["failure_reasons"]:
             rejected_profiles.append(summary)
 
     eligible = [
@@ -4413,13 +7140,18 @@ def compute_document_node_serving_recommendation(
         }
 
     use_ndcg = serving_quality_available(rows)
+    quality_rows = [
+        row for row in rows
+        if not serving_row_unsupported_reservoir_evidence(row)
+    ] or rows
     best_quality_row = max(
-        rows,
+        quality_rows,
         key=lambda item: (
             (serving_row_metric(item, "ndcg@10") or 0.0)
             if use_ndcg
             else (serving_row_metric(item, "exact_top10_admission_recall") or 0.0),
             serving_row_metric(item, "exact_top10_admission_recall") or 0.0,
+            0 if not serving_row_unsupported_reservoir_evidence(item) else -1,
             0 if not serving_row_experimental(item) else -1,
             -(serving_row_p95(item) if serving_row_p95(item) is not None else float("inf")),
             str(item.get("profile", "")),
@@ -4467,12 +7199,26 @@ def compute_document_node_serving_recommendation(
             if serving_row_experimental(row) and non_experimental_has_usable_metrics
             else 0
         )
+        partial_evidence_penalty = (
+            500_000
+            if bool(row.get("learned_sparse_partial_coverage", False))
+            and non_experimental_has_usable_metrics
+            else 0
+        )
+        unsupported_reservoir_penalty = (
+            500_000
+            if serving_row_unsupported_reservoir_evidence(row)
+            and non_experimental_has_usable_metrics
+            else 0
+        )
         score = (
             latency_rank.get(serving_row_id(row), len(rows) + 1)
             + admission_loss_penalty
             + quality_loss_penalty
             + storage_penalty
             + experimental_penalty
+            + partial_evidence_penalty
+            + unsupported_reservoir_penalty
         )
         balanced_candidates.append({
             **serving_recommendation_row(row),
@@ -4483,6 +7229,8 @@ def compute_document_node_serving_recommendation(
                 "quality_loss_penalty": quality_loss_penalty,
                 "storage_penalty": storage_penalty,
                 "experimental_penalty": experimental_penalty,
+                "partial_evidence_penalty": partial_evidence_penalty,
+                "unsupported_reservoir_penalty": unsupported_reservoir_penalty,
             },
         })
     best_balanced = min(
@@ -4509,7 +7257,8 @@ def compute_document_node_serving_recommendation(
             "score = latency_rank + max(0,best_admission-admission)*100 "
             "+ max(0,best_ndcg-ndcg)*100 when qrels exist + storage_penalty; "
             "storage_penalty is sq8=0, f16=1, f32=2, other=3; "
-            "experimental_penalty is 1000000 when any non-experimental profile has usable metrics"
+            "experimental_penalty is 1000000 when any non-experimental profile has usable metrics; "
+            "learned-sparse partial-coverage and unsupported-reservoir penalties are 500000 under the same condition"
         ),
         "pareto_frontier_latency_quality": pareto_frontier_latency_quality(rows),
         "pareto_frontier": pareto_frontier_latency_quality(rows),
@@ -4519,6 +7268,20 @@ def compute_document_node_serving_recommendation(
                 serving_row_p95(item) if serving_row_p95(item) is not None else float("inf"),
                 str(item.get("id", "")),
             ),
+        ),
+        "candidate_admission_bottlenecks": sorted(
+            [
+                item for item in threshold_rows
+                if item.get("candidate_admission_bottleneck")
+            ],
+            key=lambda item: (
+                float(item.get("exact_top10_admission_recall") or 0.0),
+                serving_row_p95(item) if serving_row_p95(item) is not None else float("inf"),
+                str(item.get("id", "")),
+            ),
+        ),
+        "candidate_source_delta_summary": document_node_candidate_source_delta_summary(
+            serving_grid.get("candidate_source_deltas")
         ),
         "rejected_profiles": sorted(
             rejected_profiles,
@@ -4573,7 +7336,14 @@ def _synthetic_serving_row(
 
 def _self_check_document_node_serving_recommendation() -> None:
     rows = [
-        _synthetic_serving_row("latency_winner_fails_admission", p95=8.0, admission=0.55, ndcg=0.70, storage="sq8"),
+        _synthetic_serving_row(
+            "latency_winner_fails_admission",
+            p95=8.0,
+            admission=0.55,
+            ndcg=0.70,
+            storage="sq8",
+            stats_sample={"proxy_candidate_limit_source": "search_ef"},
+        ),
         _synthetic_serving_row("latency_safe_winner", p95=12.0, admission=0.86, ndcg=0.86, storage="f16"),
         _synthetic_serving_row(
             "balanced_winner",
@@ -4593,6 +7363,34 @@ def _self_check_document_node_serving_recommendation() -> None:
         _synthetic_serving_row("quality_winner_slow", p95=80.0, admission=0.91, ndcg=0.90, storage="f32"),
         _synthetic_serving_row("missing_latency", p95=None, admission=0.88, ndcg=0.86, storage="f16"),
     ]
+    bm25_limited = _synthetic_serving_row(
+        "bm25_limited_low_admission",
+        p95=30.0,
+        admission=0.60,
+        ndcg=0.70,
+        storage="f16",
+    )
+    bm25_limited.update({
+        "bm25_candidate_injection": "dense_with_text",
+        "bm25_injection_enabled_queries": 4,
+        "bm25_injection_candidates": {"count": 5, "p95": 12.0},
+        "bm25_injection_retained": {"count": 5, "p95": 0.0},
+        "bm25_injection_limit_reason": {"exact_rerank_k": 3, "bm25_count": 2},
+    })
+    learned_sparse_partial = _synthetic_serving_row(
+        "learned_sparse_partial_low_admission",
+        p95=35.0,
+        admission=0.62,
+        ndcg=0.72,
+        storage="f16",
+    )
+    learned_sparse_partial.update({
+        "sparse_candidate_source": "learned_sparse",
+        "learned_sparse_partial_coverage": True,
+        "learned_sparse_candidates": {"count": 5, "p95": 0.0},
+        "learned_sparse_retained_for_maxsim": {"count": 5, "p95": 0.0},
+    })
+    rows.extend([bm25_limited, learned_sparse_partial])
     grid = {"results": rows}
     exact = {"available": True, "metrics": {"ndcg@10": 0.90}}
     rec = compute_document_node_serving_recommendation(
@@ -4608,7 +7406,17 @@ def _self_check_document_node_serving_recommendation() -> None:
     assert rec["best_balanced"]["profile"] != rec["best_latency_safe"]["profile"]
     assert rec["best_balanced"]["profile"] != rec["best_quality"]["profile"]
     rejected = {item["profile"]: item["failure_reasons"] for item in rec["rejected_profiles"]}
+    rejected_hints = {
+        item["profile"]: item["admission_improvement_hints"]
+        for item in rec["rejected_profiles"]
+    }
     assert "top10_admission_below_threshold" in rejected["latency_winner_fails_admission"]
+    assert "proxy_candidates_capped_by_search_ef" in rejected_hints["latency_winner_fails_admission"]
+    assert "bm25_rescue_limited_by_exact_rerank_k" in rejected_hints["bm25_limited_low_admission"]
+    assert "bm25_rescue_lexical_underfill" in rejected_hints["bm25_limited_low_admission"]
+    assert "bm25_rescue_not_retained" in rejected_hints["bm25_limited_low_admission"]
+    assert "learned_sparse_partial_coverage" in rejected_hints["learned_sparse_partial_low_admission"]
+    assert "learned_sparse_no_candidates" in rejected_hints["learned_sparse_partial_low_admission"]
     assert "missing_p95_latency" in rejected["missing_latency"]
     rec_again = compute_document_node_serving_recommendation(
         grid,
@@ -4670,6 +7478,213 @@ def _self_check_document_node_serving_recommendation() -> None:
     none_pass_rejected = {item["profile"]: item["failure_reasons"] for item in none_pass["rejected_profiles"]}
     assert "top10_admission_below_threshold" in none_pass_rejected["too_low_admission"]
     assert "p95_latency_above_cap" in none_pass_rejected["too_slow"]
+
+    bottleneck_row = _synthetic_serving_row(
+        "centroid_mean_exhaustive_low_admission",
+        p95=113.0,
+        admission=0.388,
+        ndcg=0.369,
+        storage="f16",
+        proxy_encoder="centroid_mean",
+        centroids="kmeans",
+    )
+    bottleneck_row.update({
+        "serving_exact_rerank_mode": "admission_exhaustive",
+        "candidate_budget": 800,
+        "effective_exact_rerank_k": 800,
+        "exact_rerank_docs_p95": 800.0,
+    })
+    bottleneck_rec = compute_document_node_serving_recommendation(
+        {"results": [bottleneck_row]},
+        exact_baseline=exact,
+        min_top10_admission=0.80,
+        min_ndcg_ratio_vs_exact=0.95,
+        max_p95_ms=0.0,
+    )
+    bottlenecks = bottleneck_rec["candidate_admission_bottlenecks"]
+    assert len(bottlenecks) == 1
+    assert bottlenecks[0]["profile"] == "centroid_mean_exhaustive_low_admission"
+    assert bottlenecks[0]["candidate_admission_bottleneck"] is True
+    bottleneck_rejected = {
+        item["profile"]: item["failure_reasons"]
+        for item in bottleneck_rec["rejected_profiles"]
+    }
+    assert (
+        "candidate_admission_bottleneck"
+        in bottleneck_rejected["centroid_mean_exhaustive_low_admission"]
+    )
+    bottleneck_hints = {
+        item["profile"]: item["admission_improvement_hints"]
+        for item in bottleneck_rec["rejected_profiles"]
+    }
+    assert "admitted_band_exhausted" in bottleneck_hints["centroid_mean_exhaustive_low_admission"]
+    assert (
+        "try_sparse_rescue_or_centroid_lite"
+        in bottleneck_hints["centroid_mean_exhaustive_low_admission"]
+    )
+    assert (
+        "try_balanced_candidate_reservoirs"
+        in bottleneck_hints["centroid_mean_exhaustive_low_admission"]
+    )
+    assert (
+        "try_bm25_or_learned_sparse_rescue"
+        in bottleneck_hints["centroid_mean_exhaustive_low_admission"]
+    )
+    bottleneck_markdown = markdown_benchmark_summary({
+        "document_node_serving_recommendation": bottleneck_rec,
+    })
+    assert "#### Candidate admission bottlenecks" in bottleneck_markdown
+    assert "try_sparse_rescue_or_centroid_lite" in bottleneck_markdown
+
+    reservoir_bottleneck = _synthetic_serving_row(
+        "centroid_mean_reservoir_low_admission",
+        p95=118.0,
+        admission=0.45,
+        ndcg=0.40,
+        storage="f16",
+        proxy_encoder="centroid_mean",
+        centroids="kmeans",
+    )
+    reservoir_bottleneck.update({
+        "candidate_reservoirs": "balanced",
+        "serving_exact_rerank_mode": "admission_exhaustive",
+        "candidate_budget": 800,
+        "effective_exact_rerank_k": 800,
+        "exact_rerank_docs_p95": 800.0,
+        "reservoirs_enabled_queries": 5,
+        "multivector_reservoir_score_docs": {"count": 5, "p95": 800.0},
+        "multivector_reservoir_union_docs": {"count": 5, "p95": 800.0},
+        "multivector_reservoir_duplicates": {"count": 5, "p95": 900.0},
+    })
+    reservoir_rec = compute_document_node_serving_recommendation(
+        {"results": [reservoir_bottleneck]},
+        exact_baseline=exact,
+        min_top10_admission=0.80,
+        min_ndcg_ratio_vs_exact=0.95,
+        max_p95_ms=0.0,
+    )
+    reservoir_hints = {
+        item["profile"]: item["admission_improvement_hints"]
+        for item in reservoir_rec["rejected_profiles"]
+    }
+    assert (
+        "try_balanced_candidate_reservoirs"
+        not in reservoir_hints["centroid_mean_reservoir_low_admission"]
+    )
+    assert (
+        "candidate_reservoirs_no_extra_docs"
+        in reservoir_hints["centroid_mean_reservoir_low_admission"]
+    )
+    assert (
+        "candidate_reservoirs_high_duplicates"
+        in reservoir_hints["centroid_mean_reservoir_low_admission"]
+    )
+
+    reservoir_noop = _synthetic_serving_row(
+        "centroid_mean_reservoir_noop",
+        p95=60.0,
+        admission=0.90,
+        ndcg=0.90,
+        storage="f16",
+        proxy_encoder="centroid_mean",
+        centroids="kmeans",
+    )
+    reservoir_noop.update({
+        "candidate_reservoirs": "balanced",
+        "reservoirs_enabled_queries": 0,
+        "last_scan_stats_sample": {
+            "multivector_reservoirs_enabled": False,
+        },
+    })
+    reservoir_supported = _synthetic_serving_row(
+        "centroid_mean_reservoir_supported",
+        p95=70.0,
+        admission=0.88,
+        ndcg=0.88,
+        storage="f16",
+        proxy_encoder="centroid_mean",
+        centroids="kmeans",
+    )
+    reservoir_supported.update({
+        "candidate_reservoirs": "balanced",
+        "reservoirs_enabled_queries": 10,
+        "last_scan_stats_sample": {
+            "multivector_reservoirs_enabled": True,
+        },
+    })
+    reservoir_noop_rec = compute_document_node_serving_recommendation(
+        {"results": [reservoir_noop, reservoir_supported]},
+        exact_baseline=exact,
+        min_top10_admission=0.80,
+        min_ndcg_ratio_vs_exact=0.80,
+        max_p95_ms=0.0,
+    )
+    assert (
+        reservoir_noop_rec["best_latency_safe"]["profile"]
+        == "centroid_mean_reservoir_supported"
+    )
+    assert (
+        reservoir_noop_rec["best_quality"]["profile"]
+        == "centroid_mean_reservoir_supported"
+    )
+    reservoir_noop_rejections = {
+        item["profile"]: item
+        for item in reservoir_noop_rec["rejected_profiles"]
+    }
+    assert "candidate_reservoirs_not_executed" in reservoir_noop_rejections[
+        "centroid_mean_reservoir_noop"
+    ]["failure_reasons"]
+    assert "candidate_reservoirs_not_executed" in reservoir_noop_rejections[
+        "centroid_mean_reservoir_noop"
+    ]["admission_improvement_hints"]
+    assert reservoir_noop_rejections["centroid_mean_reservoir_noop"][
+        "unsupported_reservoir_evidence"
+    ] is True
+
+    normalized_mean_bottleneck = _synthetic_serving_row(
+        "normalized_mean_exhaustive_low_admission",
+        p95=80.0,
+        admission=0.30,
+        ndcg=0.25,
+        storage="f16",
+        proxy_encoder="normalized_mean",
+    )
+    normalized_mean_bottleneck.update({
+        "serving_exact_rerank_mode": "admission_exhaustive",
+        "candidate_budget": 800,
+        "effective_exact_rerank_k": 800,
+        "exact_rerank_docs_p95": 800.0,
+    })
+    max_pool_bottleneck = _synthetic_serving_row(
+        "max_pool_exhaustive_low_admission",
+        p95=82.0,
+        admission=0.35,
+        ndcg=0.28,
+        storage="f16",
+        proxy_encoder="max_pool",
+    )
+    max_pool_bottleneck.update({
+        "serving_exact_rerank_mode": "admission_exhaustive",
+        "candidate_budget": 800,
+        "effective_exact_rerank_k": 800,
+        "exact_rerank_docs_p95": 800.0,
+    })
+    proxy_hint_rec = compute_document_node_serving_recommendation(
+        {"results": [normalized_mean_bottleneck, max_pool_bottleneck]},
+        exact_baseline=exact,
+        min_top10_admission=0.80,
+        min_ndcg_ratio_vs_exact=0.95,
+        max_p95_ms=0.0,
+    )
+    proxy_hint_rejected = {
+        item["profile"]: item["admission_improvement_hints"]
+        for item in proxy_hint_rec["rejected_profiles"]
+    }
+    assert (
+        "try_max_pool_or_centroid_mean_proxy"
+        in proxy_hint_rejected["normalized_mean_exhaustive_low_admission"]
+    )
+    assert "try_centroid_mean_proxy" in proxy_hint_rejected["max_pool_exhaustive_low_admission"]
 
     experimental_rows = [
         _synthetic_serving_row(
@@ -4760,6 +7775,18 @@ def _self_check_document_node_serving_recommendation_schema_fixture() -> None:
             candidate_source="quantized_inverted_experimental",
         ),
     ]
+    fixture_rows[1].update({
+        "bm25_injection_enabled_queries": 8,
+        "bm25_injection_candidates": {"count": 10, "mean": 4.5, "p95": 12.0},
+        "bm25_injection_candidate_limit": {"count": 10, "mean": 100.0, "p95": 100.0},
+        "bm25_injection_pool_size": {"count": 10, "mean": 840.0, "p95": 900.0},
+        "bm25_injection_limit_reason": {"exact_rerank_k": 7, "doc_candidate_k": 3},
+        "bm25_injection_retained": {"count": 10, "mean": 3.0, "p95": 9.0},
+        "bm25_injection_exact_reranked": {"count": 10, "mean": 4.0, "p95": 12.0},
+        "learned_sparse_candidates": {"count": 10, "mean": 0.0, "p95": 0.0},
+        "learned_sparse_retained_for_maxsim": {"count": 10, "mean": 0.0, "p95": 0.0},
+        "learned_sparse_branch_latency_us": {"count": 10, "mean": 0.0, "p95": 0.0},
+    })
     report = {
         "document_node_serving_grid": {
             "enabled": True,
@@ -4776,6 +7803,11 @@ def _self_check_document_node_serving_recommendation_schema_fixture() -> None:
     rec = report["document_node_serving_recommendation"]
     assert rec
     assert rec["best_latency_safe"]["profile"] == "centroid_mean_f16"
+    assert rec["best_latency_safe"]["bm25_injection_enabled_queries"] == 8
+    assert rec["best_latency_safe"]["bm25_injection_limit_reason"] == {
+        "exact_rerank_k": 7,
+        "doc_candidate_k": 3,
+    }
     assert rec["best_quality"]["profile"] == "centroid_lite_f16"
     balanced_profile = rec["best_balanced"]["profile"]
     assert balanced_profile == "centroid_lite_f16"
@@ -4789,6 +7821,7 @@ def _self_check_document_node_serving_recommendation_schema_fixture() -> None:
     assert repeat["best_balanced"]["profile"] == balanced_profile
     thresholds = {item["profile"]: item for item in rec["profile_thresholds"]}
     assert thresholds["quantized_inverted_experimental_f32"]["experimental"] is True
+    assert thresholds["centroid_mean_f16"]["bm25_injection_pool_size"]["p95"] == 900.0
     assert rec["best_latency_safe"]["profile"] != "quantized_inverted_experimental_f32"
     rejected = {item["profile"]: item["failure_reasons"] for item in rec["rejected_profiles"]}
     assert rejected["proxy_normalized_mean_f16"] == ["top10_admission_below_threshold"]
@@ -4796,11 +7829,17 @@ def _self_check_document_node_serving_recommendation_schema_fixture() -> None:
     assert "### Document-node serving recommendation" in markdown
     assert "centroid_mean_f16" in markdown
     assert "quantized_inverted_experimental_f32" in markdown
+    assert "bm25_limit_reason_summary" in markdown
+    assert "exact_rerank_k" in markdown
 
 
 def _self_check_document_node_serving_stage_selection() -> None:
     profiles = document_node_serving_profiles(
         include_experimental=True,
+        include_proxy_encoder_variants=False,
+        include_bm25_rescue=False,
+        include_learned_sparse_rescue=False,
+        include_reservoirs=False,
         centroid_count="auto",
     )
     profile_by_name = {profile.name: profile for profile in profiles}
@@ -4990,6 +8029,53 @@ def _self_check_document_node_serving_stats_extraction() -> None:
     assert extracted_timing["sidecar_vector_reconstruct_time_us"] == 66
     assert extracted_timing["multivector_doc_sidecar_pages_read"] == 42
 
+    legacy_cache_stats = {
+        "multivector_candidate_source": "proxy_vector",
+        "multivector_candidate_path": "proxy_graph",
+        "multivector_doc_graph_warning": "document_node_proxy_vector_graph_traversal",
+        "multivector_doc_graph_nodes": 10000,
+        "multivector_doc_graph_candidates": 100,
+        "multivector_doc_graph_search_ef": 100,
+        "proxy_candidates": 100,
+        "branch_candidate_limits": [800],
+        "multivector_sidecar_page_read_time_us": 51000,
+        "multivector_sidecar_vector_reconstruct_time_us": 2000,
+        "dense": {
+            "cache": {
+                "multivector_doc_sidecar_cache_mode": "resident",
+                "multivector_doc_sidecar_pages_read": 34072,
+                "multivector_doc_sidecar_bytes_touched": 257899824,
+                "multivector_doc_sidecar_docmap_pages_read": 34072,
+                "multivector_doc_sidecar_docmap_bytes_touched": 257899824,
+                "multivector_doc_sidecar_resident_vectors_loaded": 10000,
+                "multivector_doc_sidecar_resident_bytes_loaded": 253653888,
+                "multivector_doc_sidecar_vectors_loaded": 0,
+                "native_cache_used": True,
+                "native_cache_reused": True,
+                "native_cache_built_this_scan": False,
+                "native_cache_bytes": 314572800,
+                "native_cache_exact_bytes": 253653888,
+            },
+        },
+    }
+    legacy_extracted = extract_document_node_serving_stats(legacy_cache_stats)
+    assert legacy_extracted["native_cache_reused"] is True
+    assert legacy_extracted["sidecar_cache_build_this_query"] is False
+    assert legacy_extracted["sidecar_cache_build_bytes"] == 0
+    assert legacy_extracted["sidecar_query_bytes_touched"] == 257899824
+    assert legacy_extracted["sidecar_query_pages_read"] == 34072
+    assert legacy_extracted["sidecar_query_vectors_loaded"] == 10000
+    assert legacy_extracted["sidecar_query_time_us"] == 53000
+    assert legacy_extracted["proxy_vector_uses_full_sidecar_for_graph"] is False
+    assert legacy_extracted["proxy_full_sidecar_vectors_loaded"] == 0
+    assert legacy_extracted["proxy_candidate_limit_effective"] == 100
+    assert legacy_extracted["proxy_candidate_limit_source"] == "search_ef"
+    assert legacy_extracted["proxy_vector_near_exhaustive_sidecar_touch"] is True
+    assert (
+        legacy_extracted["proxy_vector_sidecar_touch_reason"]
+        == "resident_cache_query_materialize_all_docs"
+    )
+
     partial_stats = {
         "multivector_candidate_source": "proxy_vector",
         "multivector_doc_graph_warning": "document_node_proxy_vector_graph_traversal",
@@ -4999,13 +8085,60 @@ def _self_check_document_node_serving_stats_extraction() -> None:
         "multivector_exact_rerank_pairs": 123456,
         "multivector_exact_kernel": "blocked_neon",
         "proxy_encoder_kind": "normalized_mean",
+        "proxy_graph_nodes_visited": 90,
+        "proxy_graph_edges_visited": 91,
+        "proxy_graph_candidates_seen": 92,
+        "proxy_candidates_returned": 93,
+        "proxy_candidate_limit_effective": 100,
+        "proxy_candidate_limit_source": "search_ef",
+        "proxy_vector_scores_computed": 94,
+        "proxy_vector_score_time_us": 95,
         "proxy_candidates": 800,
         "proxy_top1_admission": True,
+        "proxy_exact_rerank_docs": 100,
+        "proxy_full_sidecar_vectors_loaded": 0,
+        "proxy_full_sidecar_bytes_touched": 0,
+        "proxy_full_sidecar_pages_read": 0,
+        "proxy_full_sidecar_load_time_us": 0,
+        "proxy_full_sidecar_reconstruct_time_us": 0,
+        "proxy_exact_rerank_heap_fetches": 0,
+        "proxy_exact_rerank_sidecar_fetches": 100,
+        "proxy_exact_rerank_bytes_touched": 65536,
+        "proxy_exact_rerank_time_us": 1234,
+        "sidecar_cache_build_this_query": True,
+        "sidecar_cache_build_bytes": 4096,
+        "sidecar_cache_build_pages_read": 1,
+        "sidecar_cache_build_time_us": 77,
+        "sidecar_query_bytes_touched": 2048,
+        "sidecar_query_pages_read": 3,
+        "sidecar_query_vectors_loaded": 2,
+        "sidecar_query_load_time_us": 88,
+        "sidecar_query_time_us": 88,
+        "proxy_vector_uses_full_sidecar_for_graph": False,
+        "proxy_vector_near_exhaustive_sidecar_touch": False,
+        "proxy_vector_sidecar_touch_reason": "none",
         "multivector_doc_sidecar_cache_mode": "resident",
         "multivector_doc_sidecar_cache_hits": 20,
+        "multivector_doc_sidecar_docmap_bytes_touched": 4096,
+        "multivector_doc_sidecar_resident_vectors_loaded": 8,
+        "multivector_doc_sidecar_resident_bytes_loaded": 2048,
+        "centroid_lists_visited": 16,
+        "centroid_docs_touched": 700,
+        "centroid_pruned_docs": 600,
+        "centroid_postings_touched": 1200,
+        "centroid_postings_skipped": 300,
+        "centroid_posting_limit_per_token": 75,
+        "centroid_posting_cap_strategy": "uniform_stride",
+        "centroid_candidates": 100,
         "multivector_tokens_original": 6400,
         "multivector_tokens_pooled": 3200,
         "multivector_bm25_injection_enabled": False,
+        "multivector_bm25_injection_candidates": 140,
+        "multivector_bm25_injection_candidate_limit": 100,
+        "multivector_bm25_injection_pool_size": 900,
+        "multivector_bm25_injection_limit_reason": "exact_rerank_k",
+        "multivector_bm25_injection_retained": 32,
+        "multivector_bm25_injection_exact_reranked": 140,
         "learned_sparse_candidates": 0,
         "quantized_inverted_postings_touched": 0,
         "quantized_inverted_posting_bytes": 2048,
@@ -5015,8 +8148,34 @@ def _self_check_document_node_serving_stats_extraction() -> None:
     }
     extracted = extract_document_node_serving_stats(partial_stats)
     assert extracted["multivector_candidate_source"] == "proxy_vector"
+    assert extracted["proxy_graph_nodes_visited"] == 90
+    assert extracted["proxy_graph_edges_visited"] == 91
+    assert extracted["proxy_graph_candidates_seen"] == 92
+    assert extracted["proxy_candidates_returned"] == 93
+    assert extracted["proxy_candidate_limit_effective"] == 100
+    assert extracted["proxy_candidate_limit_source"] == "search_ef"
+    assert extracted["proxy_vector_scores_computed"] == 94
+    assert extracted["proxy_vector_score_time_us"] == 95
     assert extracted["proxy_candidates"] == 800
+    assert extracted["proxy_exact_rerank_sidecar_fetches"] == 100
+    assert extracted["proxy_exact_rerank_bytes_touched"] == 65536
+    assert extracted["sidecar_cache_build_this_query"] is True
+    assert extracted["sidecar_cache_build_pages_read"] == 1
+    assert extracted["multivector_bm25_injection_candidate_limit"] == 100
+    assert extracted["multivector_bm25_injection_pool_size"] == 900
+    assert extracted["multivector_bm25_injection_limit_reason"] == "exact_rerank_k"
+    assert extracted["multivector_bm25_injection_exact_reranked"] == 140
+    assert extracted["sidecar_query_vectors_loaded"] == 2
+    assert extracted["sidecar_query_time_us"] == 88
+    assert extracted["proxy_vector_uses_full_sidecar_for_graph"] is False
+    assert extracted["proxy_vector_near_exhaustive_sidecar_touch"] is False
     assert extracted["multivector_doc_sidecar_cache_hits"] == 20
+    assert extracted["multivector_doc_sidecar_docmap_bytes_touched"] == 4096
+    assert extracted["multivector_doc_sidecar_resident_vectors_loaded"] == 8
+    assert extracted["centroid_postings_touched"] == 1200
+    assert extracted["centroid_postings_skipped"] == 300
+    assert extracted["centroid_posting_limit_per_token"] == 75
+    assert extracted["centroid_posting_cap_strategy"] == "uniform_stride"
     assert extracted["quantized_inverted_posting_bytes"] == 2048
     assert extracted["quantized_inverted_sidecar_bytes"] == 2304
     assert extracted["quantized_codeword_debug_counter"] == 7
@@ -5024,6 +8183,7 @@ def _self_check_document_node_serving_stats_extraction() -> None:
     available = document_node_serving_stats_available(extracted)
     assert available["core"] is True
     assert available["proxy"] is True
+    assert available["centroid_lite"] is True
     assert available["storage_cache"] is True
     assert available["pooling"] is True
     assert available["sparse_bm25_rescue"] is True
@@ -5123,6 +8283,8 @@ def _self_check_document_node_serving_grid_serialization() -> None:
                     "requested_serving_exact_rerank_k": 100,
                     "effective_exact_rerank_k": 100,
                     "exact_rerank_docs": {"p50": 100, "p95": 100},
+                    "reservoirs_enabled_queries": 0,
+                    "reservoir_union_docs": {"count": 1, "mean": 0.0, "p95": 0.0},
                 },
             },
             "exact_top1_admission_rate": 0.75,
@@ -5159,6 +8321,7 @@ def _self_check_document_node_serving_grid_serialization() -> None:
     )
     assert row["graph_mode"] == "document_nodes"
     assert row["storage_cache_mode"] == "auto"
+    assert row["centroid_lite_max_postings_per_token"] == 0
     assert row["p50_ms"] == 12.5
     assert row["p95_ms"] == 21.0
     assert row["run_elapsed_ms"] == 123.0
@@ -5182,6 +8345,9 @@ def _self_check_document_node_serving_grid_serialization() -> None:
     assert row["effective_exact_rerank_k"] == 100
     assert row["exact_rerank_docs_p50"] == 100
     assert row["exact_rerank_docs_p95"] == 100
+    assert row["candidate_reservoirs"] == "off"
+    assert row["reservoirs_enabled_queries"] == 0
+    assert row["reservoir_union_docs"]["p95"] == 0.0
     assert row["last_scan_stats_sample"]["proxy_encoder_kind"] == "normalized_mean"
     rec = compute_document_node_serving_recommendation(
         {"summary_rows": [row]},
@@ -5206,6 +8372,8 @@ def _self_check_document_node_serving_grid_serialization() -> None:
             "requested_serving_exact_rerank_k": 100,
             "admission_debug_mode": "summary",
             "trace_enabled": False,
+            "include_centroid_lite_caps": False,
+            "effective_centroid_lite_posting_caps": [16, 32, 64],
             "total_elapsed_ms": 130.0,
             "index_build_elapsed_ms_total": 7.0,
             "exact_baseline_elapsed_ms_total": 23.0,
@@ -5327,11 +8495,353 @@ def _self_check_document_node_serving_grid_serialization() -> None:
         oversampling=1,
     )
     assert profile_args.admission_budget_sweep == "25,50"
+    reservoir_profile = DocumentNodeServingProfile(
+        name="proxy_normalized_mean_f16_reservoir_balanced",
+        candidate_source="proxy_vector",
+        proxy_encoder="normalized_mean",
+        storage_kind="f16",
+        candidate_reservoirs="balanced",
+        per_token_doc_reservoir_k=2,
+        coverage_reservoir_k=20,
+    )
+    reservoir_profile_args = document_node_serving_profile_args(
+        base_args,
+        reservoir_profile,
+        ef=50,
+        oversampling=1,
+    )
+    assert reservoir_profile_args.multivector_candidate_reservoirs == "balanced"
+    assert reservoir_profile_args.multivector_per_token_doc_reservoir_k == 2
+    assert reservoir_profile_args.multivector_coverage_reservoir_k == 20
+
+
+def _self_check_document_node_candidate_source_deltas() -> None:
+    def row(
+        profile: str,
+        *,
+        top10: float,
+        p95: float,
+        ndcg: float,
+        source: str = "proxy_vector",
+        proxy: str = "normalized_mean",
+    ) -> dict[str, Any]:
+        return {
+            "stage": "single",
+            "profile": profile,
+            "candidate_source": source,
+            "proxy_encoder": proxy,
+            "centroids": "off",
+            "storage_kind": "f16",
+            "storage_cache_mode": "auto",
+            "ef": 50,
+            "oversampling": 1,
+            "largest_budget": 800,
+            "candidate_budget": 800,
+            "exact_top1_admission_rate": top10 / 2.0,
+            "exact_top10_admission_recall": top10,
+            "ndcg@10": ndcg,
+            "p50_ms": p95 / 2.0,
+            "p95_ms": p95,
+        }
+
+    rows = [
+        row("proxy_normalized_mean_f16", top10=0.42, p95=20.0, ndcg=0.40),
+        {
+            **row(
+                "proxy_normalized_mean_f16_entry_sample_032",
+                top10=0.50,
+                p95=21.0,
+                ndcg=0.45,
+            ),
+            "entry_sample_count": 32,
+            "effective_entry_sample_count": 32,
+            "last_scan_stats_sample": {
+                "multivector_doc_graph_entry_sample_effective": 32,
+                "multivector_doc_graph_entry_sample_scored": 32,
+            },
+        },
+        row(
+            "proxy_max_pool_f16",
+            top10=0.66,
+            p95=18.0,
+            ndcg=0.62,
+            proxy="max_pool",
+        ),
+        row(
+            "proxy_normalized_mean_f16_entry_sidecar",
+            top10=0.42,
+            p95=22.0,
+            ndcg=0.40,
+        ) | {
+            "entry_sidecar": True,
+            "last_scan_stats_sample": {
+                "graph_entry_sidecar_count": 128,
+                "graph_entry_sidecar_scored": 115,
+                "graph_entry_sidecar_selected": 8,
+            },
+        },
+        row(
+            "proxy_max_pool_f16_bm25_rescue",
+            top10=0.72,
+            p95=24.0,
+            ndcg=0.68,
+            proxy="max_pool",
+        ),
+        row(
+            "centroid_mean_f16",
+            top10=0.54,
+            p95=25.0,
+            ndcg=0.55,
+            proxy="centroid_mean",
+        ),
+        {
+            **row(
+                "centroid_mean_f16_reservoir_balanced",
+                top10=0.90,
+                p95=19.0,
+                ndcg=0.88,
+                proxy="centroid_mean",
+            ),
+            "candidate_reservoirs": "balanced",
+            "reservoirs_enabled_queries": 0,
+            "reservoir_union_docs": {"count": 5, "p95": 0.0},
+            "reservoir_duplicates": {"count": 5, "p95": 0.0},
+            "last_scan_stats_sample": {
+                "multivector_reservoirs_enabled": False,
+            },
+        },
+        row(
+            "centroid_lite_f16_cap_032",
+            top10=0.30,
+            p95=12.0,
+            ndcg=0.20,
+            source="centroid_lite",
+        ),
+    ]
+    deltas = compute_document_node_candidate_source_deltas(rows)
+    assert deltas["comparison_count"] == 6
+    assert deltas["missing_baseline_count"] == 1
+    summary = document_node_candidate_source_delta_summary(deltas)
+    assert summary["available"] is True
+    assert summary["usable_comparison_count"] == 5
+    assert summary["unusable_comparison_count"] == 1
+    assert summary["best_admission_delta"]["profile"] == "proxy_max_pool_f16"
+    assert summary["best_quality_delta"]["profile"] == "proxy_max_pool_f16"
+    assert summary["best_latency_delta"]["profile"] == "proxy_max_pool_f16"
+    assert (
+        summary["best_admission_delta_by_comparison"]["bm25_rescue"]["profile"]
+        == "proxy_max_pool_f16_bm25_rescue"
+    )
+    assert (
+        summary["best_admission_delta_by_comparison"]["entry_sample"]["profile"]
+        == "proxy_normalized_mean_f16_entry_sample_032"
+    )
+    by_profile = {
+        item["profile"]: item
+        for item in deltas["rows"]
+    }
+    def close(value: Any, expected: float) -> bool:
+        return abs(float(value) - expected) < 1e-9
+
+    assert by_profile["proxy_max_pool_f16"]["baseline_profile"] == "proxy_normalized_mean_f16"
+    assert by_profile["proxy_max_pool_f16"]["comparison"] == "proxy_encoder_variant"
+    assert close(by_profile["proxy_max_pool_f16"]["exact_top10_admission_recall_delta"], 0.24)
+    assert close(by_profile["proxy_max_pool_f16"]["p95_ms_delta"], -2.0)
+    assert by_profile["proxy_normalized_mean_f16_entry_sample_032"]["comparison"] == "entry_sample"
+    assert by_profile["proxy_normalized_mean_f16_entry_sample_032"]["entry_sample_count"] == 32
+    assert (
+        by_profile["proxy_normalized_mean_f16_entry_sample_032"]["candidate_evidence"][
+            "graph_entry_sample_scored"
+        ]
+        == 32
+    )
+    assert close(
+        by_profile[
+            "proxy_normalized_mean_f16_entry_sample_032"
+        ]["exact_top10_admission_recall_delta"],
+        0.08,
+    )
+    assert by_profile["proxy_normalized_mean_f16_entry_sidecar"]["comparison"] == "entry_sidecar"
+    assert (
+        by_profile["proxy_normalized_mean_f16_entry_sidecar"]["candidate_evidence"][
+            "graph_entry_sidecar_selected"
+        ]
+        == 8
+    )
+    assert close(by_profile["proxy_normalized_mean_f16_entry_sidecar"]["p95_ms_delta"], 2.0)
+    assert by_profile["proxy_max_pool_f16_bm25_rescue"]["baseline_profile"] == "proxy_max_pool_f16"
+    assert by_profile["proxy_max_pool_f16_bm25_rescue"]["comparison"] == "bm25_rescue"
+    assert by_profile["centroid_mean_f16"]["comparison"] == "proxy_encoder_variant"
+    assert by_profile["centroid_mean_f16_reservoir_balanced"]["evidence_usable"] is False
+    assert (
+        by_profile["centroid_mean_f16_reservoir_balanced"]["candidate_evidence"][
+            "reservoir_union_docs"
+        ]["p95"]
+        == 0.0
+    )
+    assert (
+        "candidate_reservoirs_not_executed"
+        in by_profile["centroid_mean_f16_reservoir_balanced"]["evidence_warnings"]
+    )
+    assert (
+        summary["best_admission_delta_by_comparison"]["candidate_reservoir"]
+        is None
+    )
+
+    grid = {
+        "document_node_serving_grid": {
+            "enabled": True,
+            "mode": "full",
+            "stage_mode": "single",
+            "probe_queries": 10,
+            "finalists": 6,
+            "smoke_only": False,
+            "serving_evidence": True,
+            "budget_mode": "largest_only",
+            "serving_exact_rerank_mode": "serving",
+            "requested_serving_exact_rerank_k": 100,
+            "admission_debug_mode": "summary",
+            "trace_enabled": False,
+            "effective_profiles": [item["profile"] for item in rows],
+            "effective_ef_grid": [50],
+            "effective_oversampling_grid": [1],
+            "effective_budget_sweep": [800],
+            "executed_budgets": [800],
+            "queries_run": 1,
+            "queries_available": 1,
+            "results": rows,
+            "candidate_source_deltas": deltas,
+        }
+    }
+    grid["document_node_serving_recommendation"] = (
+        compute_document_node_serving_recommendation(
+            grid["document_node_serving_grid"],
+            exact_baseline={
+                "available": True,
+                "metrics": {"ndcg@10": 0.75},
+                "method": EXACT_SCAN_METHOD,
+            },
+            min_top10_admission=0.8,
+            min_ndcg_ratio_vs_exact=0.95,
+            max_p95_ms=0.0,
+        )
+    )
+    markdown = markdown_benchmark_summary(grid)
+    assert "#### Candidate-source deltas" in markdown
+    assert "proxy_max_pool_f16_bm25_rescue" in markdown
+    assert "entry_sample=32/scored=32" in markdown
+    assert "entry_sidecar/scored=115/selected=8" in markdown
+    assert "reservoirs=balanced/enabled=0/union_p95=0.0" in markdown
+    assert "candidate_reservoirs_not_executed" in markdown
+    assert "#### Candidate-source delta summary" in markdown
+    assert "0.240000" in markdown
+
+
+def _self_check_document_node_serving_build_only_serialization() -> None:
+    profile = document_node_serving_profiles(
+        include_experimental=False,
+        include_proxy_encoder_variants=False,
+        include_bm25_rescue=False,
+        include_learned_sparse_rescue=False,
+        include_reservoirs=False,
+        centroid_count="auto",
+    )[2]
+    signature = (
+        ("multivector_centroids", "kmeans"),
+        ("multivector_proxy_encoder", "centroid_mean"),
+    )
+    index_phase = {
+        "elapsed_ms": 1234.5,
+        "index_bytes": 987654,
+        "index_stats": {
+            "multivector_graph_mode": "document_nodes",
+            "multivector_doc_build_scorer": "proxy",
+            "multivector_proxy_encoder": "centroid_mean",
+            "multivector_centroids": "kmeans",
+        },
+        "build_stats": {
+            "multivector_centroid_build_us": 100000,
+            "multivector_centroid_cluster_us": 70000,
+            "multivector_centroid_residual_us": 20000,
+            "multivector_centroid_build_docs": 10,
+            "multivector_centroid_build_vectors": 80,
+            "multivector_proxy_build_us": 20000,
+            "multivector_doc_sidecar_write_us": 30000,
+            "multivector_centroid_sidecar_write_us": 40000,
+            "multivector_centroid_posting_write_us": 50000,
+            "multivector_centroid_posting_count": 160,
+        },
+    }
+    row = document_node_serving_build_only_row(
+        profile=profile,
+        index_phase=index_phase,
+        signature=signature,
+        profile_reused_index=False,
+        grouped_profiles=[profile],
+    )
+    report = {
+        "dataset": {"documents": 10, "queries": 0, "qrels": 0},
+        "settings": {},
+        "results": [],
+        "document_node_serving_build_only": {
+            "enabled": True,
+            "retrieval_skipped": True,
+            "admission_skipped": True,
+            "total_elapsed_ms": 1300.0,
+            "index_build_elapsed_ms_total": 1234.5,
+            "profiles_run": 1,
+            "index_builds": 1,
+            "index_build_group_count": 1,
+            "index_reuse_count": 0,
+            "effective_profiles": [profile.name],
+            "results": [row],
+        },
+    }
+    serialized = json.loads(json.dumps(report))
+    assert serialized["document_node_serving_build_only"]["results"][0]["profile"] == "centroid_mean_f16"
+    assert (
+        serialized["document_node_serving_build_only"]["results"][0][
+            "multivector_centroid_posting_count"
+        ]
+        == 160
+    )
+    assert (
+        serialized["document_node_serving_build_only"]["results"][0][
+            "dominant_build_phase"
+        ]
+        == "centroid_build"
+    )
+    assert (
+        serialized["document_node_serving_build_only"]["results"][0][
+            "dominant_centroid_build_subphase"
+        ]
+        == "centroid_cluster"
+    )
+    assert (
+        serialized["document_node_serving_build_only"]["results"][0][
+            "multivector_centroid_residual_us"
+        ]
+        == 20000
+    )
+    assert (
+        serialized["document_node_serving_build_only"]["results"][0][
+            "build_phase_known_ms"
+        ]
+        == 240.0
+    )
+    markdown = markdown_benchmark_summary(serialized)
+    assert "### Document-node serving build-only" in markdown
+    assert "centroid_mean_f16" in markdown
+    assert "centroid postings" in markdown
+    assert "dominant build phase" in markdown
+    assert "unattributed ms" in markdown
 
 
 def _self_check_document_node_serving_latency_only() -> None:
     args = argparse.Namespace(
         document_node_serving_grid_include_experimental=False,
+        document_node_serving_grid_include_proxy_encoders=False,
+        document_node_serving_grid_include_bm25_rescue=False,
         multivector_centroid_count="auto",
         serving_profile_name=None,
         serving_storage=None,
@@ -5343,6 +8853,7 @@ def _self_check_document_node_serving_latency_only() -> None:
         final_k=10,
         reuse_index=False,
         serving_fail_on_slow_path=False,
+        serving_latency_warmup_queries=1,
         serving_loaded_document_count=1000,
         admission_budget_sweep=None,
         admission_budget_sweep_explicit=False,
@@ -5371,6 +8882,7 @@ def _self_check_document_node_serving_latency_only() -> None:
     assert latency_args.multivector_doc_candidate_k == 800
     assert latency_args.multivector_exact_rerank == "topk"
     assert latency_args.multivector_exact_rerank_k == 100
+    assert latency_args.multivector_branch_plan == "dense_only"
     assert latency_args.dense_k == 800
     assert effective_rerank_k == 100
 
@@ -5397,6 +8909,7 @@ def _self_check_document_node_serving_latency_only() -> None:
         return [f"{query.query_id}-doc-{i}" for i in range(final_k)]
 
     def fake_stats(conn: psycopg.Connection[Any]) -> dict[str, Any]:
+        call_number = len(calls)
         return {
             "index_used": True,
             "multivector_enabled": True,
@@ -5407,6 +8920,14 @@ def _self_check_document_node_serving_latency_only() -> None:
             "multivector_exact_rerank_docs": 100,
             "multivector_exact_rerank_pairs": 320000,
             "multivector_exact_kernel": "blocked_scalar",
+            "sidecar_cache_build_this_query": call_number == 1,
+            "sidecar_cache_build_bytes": 4096 if call_number == 1 else 0,
+            "sidecar_cache_build_pages_read": 1 if call_number == 1 else 0,
+            "sidecar_query_bytes_touched": 0,
+            "sidecar_query_pages_read": 0,
+            "sidecar_query_vectors_loaded": 0,
+            "sidecar_query_time_us": 0,
+            "native_cache_reused": call_number > 1,
         }
 
     loop = run_serving_latency_query_loop(
@@ -5418,9 +8939,15 @@ def _self_check_document_node_serving_latency_only() -> None:
         stats_provider=fake_stats,
     )
     assert loop["query_count"] == 2
+    assert loop["warmup_query_count"] == 1
+    assert loop["warmup_excluded"] is True
+    assert loop["warmup_latency"]["runs"] == 1
+    assert loop["cache_build_queries"] == 1
+    assert loop["warm_queries"] == 2
+    assert loop["cache_reused_on_warm_queries"] == 2
     assert loop["exact_admission_baseline_calls"] == 0
     assert loop["serving_slow_path_failed"] is False
-    assert calls == [("q1", 800), ("q2", 800)]
+    assert calls == [("q1", 800), ("q1", 800), ("q2", 800)]
     assert loop["latency"]["runs"] == 2
     scan = loop["scan_stats_summary"]
     assert scan["field_summary"]["multivector_exact_rerank_docs"]["p50"] == 100
@@ -5440,8 +8967,14 @@ def _self_check_document_node_serving_latency_only() -> None:
                 "oversampling": 1,
                 "candidate_k": 800,
                 "effective_exact_rerank_k": 100,
+                "warmup_queries": 1,
             },
+            "warmup_latency": loop["warmup_latency"],
+            "warmup_excluded": loop["warmup_excluded"],
             "latency": loop["latency"],
+            "cache_build_queries": loop["cache_build_queries"],
+            "warm_queries": loop["warm_queries"],
+            "cache_reused_on_warm_queries": loop["cache_reused_on_warm_queries"],
             "query_count": loop["query_count"],
             "admission_metrics": {
                 "available": False,
@@ -5478,6 +9011,11 @@ def _self_check_document_node_serving_latency_only() -> None:
         "multivector_doc_graph_docs_scored": 950,
         "multivector_doc_sidecar_cache_mode": "paged",
         "multivector_doc_sidecar_pages_read": 200,
+        "multivector_doc_sidecar_vectors_loaded": 950,
+        "multivector_doc_sidecar_resident_vectors_loaded": 0,
+        "multivector_doc_sidecar_bytes_touched": 10_000,
+        "multivector_doc_sidecar_docmap_bytes_touched": 10_000,
+        "multivector_docmap_bytes": 10_000,
         "multivector_exact_kernel": "scalar",
         "native_cache_built_this_scan": True,
     }
@@ -5501,6 +9039,7 @@ def _self_check_document_node_serving_latency_only() -> None:
     assert any("exact_rerank_docs_exceeds_serving_budget" in warning for warning in warnings)
     assert any("docs_scored_near_table_size" in warning for warning in warnings)
     assert any("doc_graph_docs_scored_near_table_size" in warning for warning in warnings)
+    assert any("proxy_vector_near_exhaustive_sidecar_touch" in warning for warning in warnings)
     assert any("paged_sidecar_high_pages_read" in warning for warning in warnings)
     assert any("exact_kernel_scalar" in warning for warning in warnings)
     assert "native_cache_built_this_scan" in warnings
@@ -5713,16 +9252,46 @@ def run_document_node_serving_grid(
                     float(item.get("run_elapsed_ms", 0.0) or 0.0)
                     for item in profile_rows
                 )
+                profile_build_stats = index_phase.get("build_stats", {})
+                if not isinstance(profile_build_stats, dict):
+                    profile_build_stats = {}
+                profile_index_build_elapsed_ms = round(
+                    0.0 if profile_reused_index else index_build_elapsed_ms,
+                    3,
+                )
+                profile_build_phase_summary = document_node_build_phase_summary(
+                    profile_build_stats,
+                    index_build_elapsed_ms=profile_index_build_elapsed_ms,
+                )
                 profile_summaries.append({
                     "stage": stage_name,
                     "profile": profile.name,
                     "candidate_source": profile.candidate_source,
+                    "branch_plan": profile.branch_plan,
+                    "bm25_candidate_injection": profile.bm25_candidate_injection,
+                    "sparse_candidate_source": profile.sparse_candidate_source,
                     "proxy_encoder": profile.proxy_encoder,
                     "centroids": profile.centroids,
                     "storage_kind": profile.storage_kind,
                     "storage_cache_mode": profile.cache_mode,
                     "token_pooling": profile.token_pooling,
                     "token_pooling_target_ratio": profile.token_pooling_target_ratio,
+                    "entry_sample_count": profile.entry_sample_count,
+                    "effective_entry_sample_count": (
+                        document_node_serving_profile_args(
+                            stage_args,
+                            profile,
+                            ef=0,
+                            oversampling=1,
+                            budget_sweep=stage_budget_sweep,
+                        ).multivector_doc_graph_entry_sample_count
+                    ),
+                    "entry_sidecar": profile.entry_sidecar,
+                    "entry_sidecar_representatives": profile.entry_sidecar_representatives,
+                    "entry_sidecar_strategy": profile.entry_sidecar_strategy,
+                    "centroid_lite_max_postings_per_token": (
+                        profile.centroid_lite_max_postings_per_token
+                    ),
                     "index_signature": serializable_index_signature(signature),
                     "index_build_reused": profile_reused_index,
                     "index_build_reused_for_profiles": [
@@ -5734,9 +9303,32 @@ def run_document_node_serving_grid(
                         clone_args(stage_args, admission_debug_context="serving_grid")
                     ),
                     "profile_elapsed_ms": elapsed_ms_since(profile_started),
-                    "index_build_elapsed_ms": round(
-                        0.0 if profile_reused_index else index_build_elapsed_ms,
-                        3,
+                    "index_build_elapsed_ms": profile_index_build_elapsed_ms,
+                    "index_build_stats": profile_build_stats,
+                    **profile_build_phase_summary,
+                    "multivector_centroid_build_us": profile_build_stats.get(
+                        "multivector_centroid_build_us"
+                    ),
+                    "multivector_centroid_cluster_us": profile_build_stats.get(
+                        "multivector_centroid_cluster_us"
+                    ),
+                    "multivector_centroid_residual_us": profile_build_stats.get(
+                        "multivector_centroid_residual_us"
+                    ),
+                    "multivector_proxy_build_us": profile_build_stats.get(
+                        "multivector_proxy_build_us"
+                    ),
+                    "multivector_doc_sidecar_write_us": profile_build_stats.get(
+                        "multivector_doc_sidecar_write_us"
+                    ),
+                    "multivector_centroid_sidecar_write_us": profile_build_stats.get(
+                        "multivector_centroid_sidecar_write_us"
+                    ),
+                    "multivector_centroid_posting_write_us": profile_build_stats.get(
+                        "multivector_centroid_posting_write_us"
+                    ),
+                    "multivector_centroid_posting_count": profile_build_stats.get(
+                        "multivector_centroid_posting_count"
                     ),
                     "admission_debug_elapsed_ms_total": round(profile_admission_debug_elapsed_ms, 3),
                     "exact_baseline_elapsed_ms_total": round(profile_exact_baseline_elapsed_ms, 3),
@@ -5896,6 +9488,7 @@ def run_document_node_serving_grid(
         for item in stage.get("index_build_reused_for_profiles", [])
         if isinstance(item, dict)
     ]
+    candidate_source_deltas = compute_document_node_candidate_source_deltas(stage_results)
 
     return {
         "enabled": True,
@@ -5919,6 +9512,15 @@ def run_document_node_serving_grid(
             clone_args(args, admission_debug_context="serving_grid")
         ) == "trace",
         "include_experimental": args.document_node_serving_grid_include_experimental,
+        "include_proxy_encoder_variants": args.document_node_serving_grid_include_proxy_encoders,
+        "include_bm25_rescue": args.document_node_serving_grid_include_bm25_rescue,
+        "include_learned_sparse_rescue": args.document_node_serving_grid_include_learned_sparse_rescue,
+        "include_reservoirs": args.document_node_serving_grid_include_reservoirs,
+        "include_centroid_lite_caps": args.document_node_serving_grid_include_centroid_lite_caps,
+        "include_entry_samples": args.document_node_serving_grid_include_entry_samples,
+        "include_entry_sidecar": args.document_node_serving_grid_include_entry_sidecar,
+        "effective_centroid_lite_posting_caps": effective_document_node_serving_centroid_lite_caps(args),
+        "effective_entry_sample_counts": effective_document_node_serving_entry_sample_counts(args),
         "total_elapsed_ms": elapsed_ms_since(grid_started),
         "index_build_elapsed_ms_total": round(index_build_elapsed_ms_total, 3),
         "exact_baseline_elapsed_ms_total": round(exact_baseline_elapsed_ms_total, 3),
@@ -5971,10 +9573,237 @@ def run_document_node_serving_grid(
         "cache_grid": ["auto"],
         "profiles": [profile.__dict__ for profile in profiles],
         "profile_summaries": profile_summaries,
+        "candidate_source_deltas": candidate_source_deltas,
         "queries": int(active_stage.get("queries_run", len(effective_queries)) or 0),
         "results": stage_results,
         "summary_rows": stage_results,
         "admission_debug_runs": full_admission,
+    }
+
+
+def document_node_build_phase_summary(
+    build_stats: dict[str, Any],
+    *,
+    index_build_elapsed_ms: float,
+) -> dict[str, Any]:
+    def phase_ms(key: str) -> float:
+        value = build_stats.get(key)
+        if isinstance(value, bool) or value is None:
+            return 0.0
+        try:
+            return max(float(value), 0.0) / 1000.0
+        except (TypeError, ValueError):
+            return 0.0
+
+    phase_times_ms = {
+        "centroid_build": phase_ms("multivector_centroid_build_us"),
+        "proxy_build": phase_ms("multivector_proxy_build_us"),
+        "doc_sidecar_write": phase_ms("multivector_doc_sidecar_write_us"),
+        "centroid_sidecar_write": phase_ms("multivector_centroid_sidecar_write_us"),
+        "centroid_posting_write": phase_ms("multivector_centroid_posting_write_us"),
+    }
+    centroid_subphase_times_ms = {
+        "centroid_cluster": phase_ms("multivector_centroid_cluster_us"),
+        "centroid_residual": phase_ms("multivector_centroid_residual_us"),
+    }
+    known_ms = round(sum(phase_times_ms.values()), 3)
+    elapsed_ms = max(float(index_build_elapsed_ms or 0.0), 0.0)
+    unattributed_ms = round(max(elapsed_ms - known_ms, 0.0), 3)
+    dominant_phase, dominant_ms = max(
+        phase_times_ms.items(),
+        key=lambda item: (item[1], item[0]),
+    )
+    if dominant_ms <= 0.0:
+        dominant_phase = "unavailable"
+    dominant_centroid_subphase, dominant_centroid_subphase_ms = max(
+        centroid_subphase_times_ms.items(),
+        key=lambda item: (item[1], item[0]),
+    )
+    if dominant_centroid_subphase_ms <= 0.0:
+        dominant_centroid_subphase = "unavailable"
+    return {
+        "build_phase_times_ms": {key: round(value, 3) for key, value in phase_times_ms.items()},
+        "build_centroid_subphase_times_ms": {
+            key: round(value, 3) for key, value in centroid_subphase_times_ms.items()
+        },
+        "build_phase_known_ms": known_ms,
+        "build_phase_unattributed_ms": unattributed_ms,
+        "build_phase_known_ratio": (
+            round(min(known_ms / elapsed_ms, 1.0), 6)
+            if elapsed_ms > 0.0
+            else None
+        ),
+        "dominant_build_phase": dominant_phase,
+        "dominant_build_phase_ms": round(dominant_ms, 3),
+        "dominant_centroid_build_subphase": dominant_centroid_subphase,
+        "dominant_centroid_build_subphase_ms": round(dominant_centroid_subphase_ms, 3),
+    }
+
+
+def document_node_serving_build_only_row(
+    *,
+    profile: DocumentNodeServingProfile,
+    index_phase: dict[str, Any],
+    signature: tuple[tuple[str, Any], ...],
+    profile_reused_index: bool,
+    grouped_profiles: list[DocumentNodeServingProfile],
+) -> dict[str, Any]:
+    build_stats = index_phase.get("build_stats", {})
+    if not isinstance(build_stats, dict):
+        build_stats = {}
+    index_stats = index_phase.get("index_stats", {})
+    if not isinstance(index_stats, dict):
+        index_stats = {}
+    index_build_elapsed_ms = round(
+        0.0 if profile_reused_index else float(index_phase.get("elapsed_ms", 0.0) or 0.0),
+        3,
+    )
+    phase_summary = document_node_build_phase_summary(
+        build_stats,
+        index_build_elapsed_ms=index_build_elapsed_ms,
+    )
+    return {
+        "profile": profile.name,
+        "candidate_source": profile.candidate_source,
+        "branch_plan": profile.branch_plan,
+        "bm25_candidate_injection": profile.bm25_candidate_injection,
+        "sparse_candidate_source": profile.sparse_candidate_source,
+        "graph_mode": "document_nodes",
+        "proxy_encoder": profile.proxy_encoder,
+        "centroids": profile.centroids,
+        "centroid_count": profile.centroid_count,
+        "storage_kind": profile.storage_kind,
+        "storage_cache_mode": profile.cache_mode,
+        "token_pooling": profile.token_pooling,
+        "token_pooling_target_ratio": profile.token_pooling_target_ratio,
+        "entry_sidecar": profile.entry_sidecar,
+        "entry_sidecar_representatives": profile.entry_sidecar_representatives,
+        "entry_sidecar_strategy": profile.entry_sidecar_strategy,
+        "centroid_lite_max_postings_per_token": (
+            profile.centroid_lite_max_postings_per_token
+        ),
+        "plain_fallback": profile.plain_fallback,
+        "index_signature": serializable_index_signature(signature),
+        "index_build_reused": profile_reused_index,
+        "index_build_reused_for_profiles": [
+            grouped_profile.name for grouped_profile in grouped_profiles
+        ],
+        "index_build_elapsed_ms": index_build_elapsed_ms,
+        "index_bytes": int(index_phase.get("index_bytes", 0) or 0),
+        "index_stats": index_stats,
+        "index_build_stats": build_stats,
+        **phase_summary,
+        "multivector_centroid_build_us": build_stats.get("multivector_centroid_build_us"),
+        "multivector_centroid_cluster_us": build_stats.get(
+            "multivector_centroid_cluster_us"
+        ),
+        "multivector_centroid_residual_us": build_stats.get(
+            "multivector_centroid_residual_us"
+        ),
+        "multivector_centroid_build_docs": build_stats.get("multivector_centroid_build_docs"),
+        "multivector_centroid_build_vectors": build_stats.get("multivector_centroid_build_vectors"),
+        "multivector_proxy_build_us": build_stats.get("multivector_proxy_build_us"),
+        "multivector_doc_sidecar_write_us": build_stats.get("multivector_doc_sidecar_write_us"),
+        "multivector_centroid_sidecar_write_us": build_stats.get(
+            "multivector_centroid_sidecar_write_us"
+        ),
+        "multivector_centroid_posting_write_us": build_stats.get(
+            "multivector_centroid_posting_write_us"
+        ),
+        "multivector_centroid_posting_count": build_stats.get(
+            "multivector_centroid_posting_count"
+        ),
+    }
+
+
+def run_document_node_serving_build_only(
+    conn: psycopg.Connection[Any],
+    args: argparse.Namespace,
+) -> dict[str, Any]:
+    started = time.perf_counter()
+    profiles = effective_document_node_serving_profiles(args)
+    budget_sweep = effective_serving_grid_budget_sweep(args)
+    profile_groups: list[tuple[tuple[tuple[str, Any], ...], list[DocumentNodeServingProfile]]] = []
+    profile_groups_by_signature: dict[
+        tuple[tuple[str, Any], ...],
+        list[DocumentNodeServingProfile],
+    ] = {}
+    for profile in profiles:
+        signature = serving_profile_index_signature(args, profile)
+        if signature not in profile_groups_by_signature:
+            profile_groups_by_signature[signature] = []
+            profile_groups.append((signature, profile_groups_by_signature[signature]))
+        profile_groups_by_signature[signature].append(profile)
+
+    results: list[dict[str, Any]] = []
+    index_build_elapsed_ms_total = 0.0
+    last_index_phase: dict[str, Any] | None = None
+    for signature, grouped_profiles in profile_groups:
+        representative_profile = grouped_profiles[0]
+        index_args = document_node_serving_profile_args(
+            args,
+            representative_profile,
+            ef=0,
+            oversampling=1,
+            budget_sweep=budget_sweep,
+        )
+        index_phase = build_index(conn, index_args)
+        index_phase["index_signature_tuple"] = signature
+        index_phase["index_signature"] = serializable_index_signature(signature)
+        index_phase["index_build_reused_for_profiles"] = [
+            profile.name for profile in grouped_profiles
+        ]
+        last_index_phase = index_phase
+        index_build_elapsed_ms_total += float(index_phase.get("elapsed_ms", 0.0) or 0.0)
+        for profile_index, profile in enumerate(grouped_profiles):
+            validate_serving_profile_index_reuse(
+                args=document_node_serving_profile_args(
+                    args,
+                    profile,
+                    ef=0,
+                    oversampling=1,
+                    budget_sweep=budget_sweep,
+                ),
+                profile=profile,
+                index_phase=index_phase,
+                expected_signature=signature,
+            )
+            results.append(
+                document_node_serving_build_only_row(
+                    profile=profile,
+                    index_phase=index_phase,
+                    signature=signature,
+                    profile_reused_index=profile_index > 0,
+                    grouped_profiles=grouped_profiles,
+                )
+            )
+
+    if last_index_phase is None:
+        raise RuntimeError("document-node serving build-only selected no profiles")
+
+    return {
+        "enabled": True,
+        "mode": "build_only",
+        "retrieval_skipped": True,
+        "admission_skipped": True,
+        "reason": "measure CREATE INDEX and document-node sidecar construction cost only",
+        "total_elapsed_ms": elapsed_ms_since(started),
+        "index_build_elapsed_ms_total": round(index_build_elapsed_ms_total, 3),
+        "profiles_run": len(profiles),
+        "index_builds": len(profile_groups),
+        "index_build_group_count": len(profile_groups),
+        "index_reuse_count": max(len(profiles) - len(profile_groups), 0),
+        "effective_profiles": [profile.name for profile in profiles],
+        "effective_budget_sweep": budget_sweep,
+        "index_build_reused_for_profiles": [
+            {
+                "index_signature": serializable_index_signature(signature),
+                "profiles": [profile.name for profile in grouped_profiles],
+            }
+            for signature, grouped_profiles in profile_groups
+        ],
+        "results": results,
+        "last_index_phase": last_index_phase,
     }
 
 
@@ -7062,11 +10891,36 @@ def run_serving_latency_query_loop(
     stats_provider: Callable[[psycopg.Connection[Any]], dict[str, Any]] = last_scan_stats,
 ) -> dict[str, Any]:
     started = time.perf_counter()
+    warmup_latencies_ms: list[float] = []
+    warmup_scan_stats: list[dict[str, Any]] = []
     latencies_ms: list[float] = []
     scan_stats: list[dict[str, Any]] = []
     top_docs: dict[str, list[str]] = {}
     slow_path_warnings: list[str] = []
     dense_k = int(args.multivector_doc_candidate_k)
+    warmup_query_count = max(0, int(getattr(args, "serving_latency_warmup_queries", 0) or 0))
+    warmup_queries = queries[: min(warmup_query_count, len(queries))]
+    for query in warmup_queries:
+        query_started = time.perf_counter()
+        retrieval_provider(
+            conn,
+            QUERY_ONLY_METHOD,
+            query,
+            args,
+            args.final_k,
+            dense_k,
+        )
+        latency_ms = elapsed_ms_since(query_started)
+        warmup_latencies_ms.append(latency_ms)
+        stats = stats_provider(conn)
+        if isinstance(stats, dict):
+            stats = {
+                **stats,
+                "observed_latency_ms": latency_ms,
+                "serving_latency_warmup_query": True,
+            }
+        warmup_scan_stats.append(stats)
+    measured_started = time.perf_counter()
     for query in queries:
         query_started = time.perf_counter()
         docs = retrieval_provider(
@@ -7088,7 +10942,7 @@ def run_serving_latency_query_loop(
             slow_path_warnings.append(f"{query.query_id}:{warning}")
     native_cache_rebuilds_after_warmup = sum(
         1
-        for stats in scan_stats[2:]
+        for stats in scan_stats
         if scan_stat_bool(stats, "native_cache_built_this_scan")
     )
     if native_cache_rebuilds_after_warmup > 0:
@@ -7097,27 +10951,53 @@ def run_serving_latency_query_loop(
             f"count={native_cache_rebuilds_after_warmup}"
         )
     total_elapsed_ms = elapsed_ms_since(started)
+    measured_elapsed_ms = elapsed_ms_since(measured_started)
     latency = summarize_ms(latencies_ms)
+    warmup_latency = summarize_ms(warmup_latencies_ms)
+    warm_cache_reuse_count = sum(
+        1 for stats in scan_stats if scan_stat_bool(stats, "native_cache_reused")
+    )
+    cache_build_query_count = sum(
+        1
+        for stats in (*warmup_scan_stats, *scan_stats)
+        if scan_stat_bool(stats, "sidecar_cache_build_this_query")
+        or scan_stat_bool(stats, "native_cache_built_this_scan")
+    )
     unique_warnings = unique_preserve_order(slow_path_warnings)
     return {
         "total_elapsed_ms": total_elapsed_ms,
+        "measured_elapsed_ms": measured_elapsed_ms,
+        "warmup_latencies_ms": warmup_latencies_ms,
         "latencies_ms": latencies_ms,
+        "warmup_latency": {
+            **warmup_latency,
+            "total_elapsed_ms": round(sum(warmup_latencies_ms), 3),
+        },
         "latency": {
             **latency,
-            "total_elapsed_ms": total_elapsed_ms,
-            "qps_total": round((len(queries) * 1000.0) / total_elapsed_ms, 3)
-            if total_elapsed_ms > 0
+            "total_elapsed_ms": measured_elapsed_ms,
+            "qps_total": round((len(queries) * 1000.0) / measured_elapsed_ms, 3)
+            if measured_elapsed_ms > 0
             else 0.0,
         },
+        "warmup_excluded": bool(warmup_queries),
+        "warmup_query_count": len(warmup_queries),
         "query_count": len(queries),
         "retrieval_query_count": len(queries),
+        "cache_build_queries": cache_build_query_count,
+        "warm_queries": len(queries),
+        "cache_reused_on_warm_queries": warm_cache_reuse_count,
         "exact_admission_baseline_calls": 0,
         "serving_slow_path_warnings": unique_warnings,
         "serving_slow_path_failed": bool(
             unique_warnings and getattr(args, "serving_fail_on_slow_path", False)
         ),
         "top_docs_by_query": top_docs,
+        "warmup_scan_stats": warmup_scan_stats,
         "scan_stats": scan_stats,
+        "warmup_scan_stats_summary": summarize_document_node_latency_scan_stats(
+            warmup_scan_stats
+        ),
         "scan_stats_summary": summarize_document_node_latency_scan_stats(scan_stats),
     }
 
@@ -7143,26 +11023,44 @@ def run_document_node_serving_latency_only(
     return {
         "enabled": True,
         "profile": profile.name,
-        "settings": {
-            "profile": profile.name,
-            "candidate_source": profile.candidate_source,
-            "graph_mode": "document_nodes",
-            "proxy_encoder": profile.proxy_encoder,
+            "settings": {
+                "profile": profile.name,
+                "candidate_source": profile.candidate_source,
+                "branch_plan": profile.branch_plan,
+                "bm25_candidate_injection": profile.bm25_candidate_injection,
+                "sparse_candidate_source": profile.sparse_candidate_source,
+                "graph_mode": "document_nodes",
+                "proxy_encoder": profile.proxy_encoder,
             "centroids": profile.centroids,
             "centroid_count": profile.centroid_count,
             "storage_kind": profile.storage_kind,
             "storage_cache_mode": profile.cache_mode,
             "token_pooling": profile.token_pooling,
             "token_pooling_target_ratio": profile.token_pooling_target_ratio,
+            "entry_sidecar": profile.entry_sidecar,
+            "entry_sidecar_representatives": profile.entry_sidecar_representatives,
+            "entry_sidecar_strategy": profile.entry_sidecar_strategy,
+            "centroid_lite_max_postings_per_token": (
+                profile.centroid_lite_max_postings_per_token
+            ),
             "ef": int(args.serving_ef),
             "oversampling": int(args.serving_oversampling),
+            "entry_sample_count": int(args.multivector_doc_graph_entry_sample_count),
             "candidate_k": int(args.serving_candidate_k),
             "requested_exact_rerank_k": int(args.serving_exact_rerank_k),
             "effective_exact_rerank_k": effective_rerank_k,
             "final_k": int(args.final_k),
+            "warmup_queries": int(getattr(args, "serving_latency_warmup_queries", 0) or 0),
         },
+        "total_elapsed_ms": loop["total_elapsed_ms"],
+        "measured_elapsed_ms": loop["measured_elapsed_ms"],
+        "warmup_excluded": loop["warmup_excluded"],
+        "warmup_latency": loop["warmup_latency"],
         "latency": loop["latency"],
         "qps": loop["latency"].get("qps_total", 0.0),
+        "cache_build_queries": loop["cache_build_queries"],
+        "warm_queries": loop["warm_queries"],
+        "cache_reused_on_warm_queries": loop["cache_reused_on_warm_queries"],
         "query_count": loop["query_count"],
         "retrieval_query_count": loop["retrieval_query_count"],
         "admission_metrics": {
@@ -7172,6 +11070,7 @@ def run_document_node_serving_latency_only(
         "exact_admission_baseline_calls": 0,
         "serving_slow_path_warnings": loop["serving_slow_path_warnings"],
         "serving_slow_path_failed": loop["serving_slow_path_failed"],
+        "warmup_scan_stats_summary": loop["warmup_scan_stats_summary"],
         "scan_stats_summary": loop["scan_stats_summary"],
         "top10_by_query": {
             query_id: docs[:10]
@@ -7486,6 +11385,7 @@ def markdown_benchmark_summary(report: dict[str, Any]) -> str:
         f"- Doc graph search EF: `{settings.get('multivector_doc_graph_search_ef', 0)}`",
         f"- Doc graph oversampling: `{settings.get('multivector_doc_graph_oversampling', 1)}`",
         f"- Doc graph rescore K: `{settings.get('multivector_doc_graph_rescore_k', 0)}`",
+        f"- Doc graph entry sample count: `{settings.get('multivector_doc_graph_entry_sample_count', 0)}`",
         f"- Plain fallback: `{settings.get('multivector_plain_fallback', '')}`",
         f"- Reservoirs: `{settings.get('multivector_candidate_reservoirs', '')}`",
         "",
@@ -7542,6 +11442,40 @@ def markdown_benchmark_summary(report: dict[str, Any]) -> str:
                     error=parallel.get("error", ""),
                 )
             )
+
+    phases = report.get("phases", {})
+    learned_sparse_phase = {}
+    if isinstance(phases, dict):
+        candidate_phase = phases.get("load_learned_sparse_vectors", {})
+        if isinstance(candidate_phase, dict):
+            learned_sparse_phase = candidate_phase
+    if learned_sparse_phase and not bool(learned_sparse_phase.get("skipped", False)):
+        coverage = learned_sparse_phase.get("coverage", {})
+        if not isinstance(coverage, dict):
+            coverage = {}
+        warnings = learned_sparse_phase.get("warnings", coverage.get("warnings", []))
+        if not isinstance(warnings, list):
+            warnings = []
+        doc_ratio = coverage.get("doc_coverage_ratio")
+        query_ratio = coverage.get("query_coverage_ratio")
+        lines.extend([
+            "",
+            "### Learned-sparse fixture coverage",
+            "",
+            f"- Documents covered: `{int(coverage.get('learned_sparse_documents', 0) or 0)}` / `{int(coverage.get('loaded_documents', 0) or 0)}`",
+            f"- Document coverage ratio: `{float(doc_ratio) if doc_ratio is not None else 0.0:.6f}`",
+            f"- Queries covered: `{int(coverage.get('learned_sparse_queries', 0) or 0)}` / `{int(coverage.get('loaded_queries', 0) or 0)}`",
+            f"- Query coverage ratio: `{float(query_ratio) if query_ratio is not None else 0.0:.6f}`",
+            f"- Partial coverage: `{bool(learned_sparse_phase.get('partial_coverage', coverage.get('partial_coverage', False)))}`",
+        ])
+        if warnings:
+            lines.append("- Warnings: `" + ",".join(str(item) for item in warnings) + "`")
+            lines.append(
+                "- Learned-sparse rescue results with partial fixture coverage are "
+                "candidate-source plumbing evidence, not production serving evidence."
+            )
+        else:
+            lines.append("- Warnings: `none`")
 
     admission = report.get("admission_debug")
     if isinstance(admission, dict):
@@ -7696,6 +11630,66 @@ def markdown_benchmark_summary(report: dict[str, Any]) -> str:
             "counters as the available storage footprint signal.",
         ])
 
+    build_only = report.get("document_node_serving_build_only")
+    if isinstance(build_only, dict):
+        rows = build_only.get("results", [])
+        if isinstance(rows, list):
+            sorted_rows = sorted(
+                [item for item in rows if isinstance(item, dict)],
+                key=lambda item: (
+                    float(item.get("index_build_elapsed_ms", 0.0) or 0.0),
+                    str(item.get("profile", "")),
+                ),
+                reverse=True,
+            )
+        else:
+            sorted_rows = []
+        lines.extend([
+            "",
+            "### Document-node serving build-only",
+            "",
+            f"- Retrieval skipped: `{bool(build_only.get('retrieval_skipped', False))}`",
+            f"- Admission skipped: `{bool(build_only.get('admission_skipped', False))}`",
+            f"- Total elapsed: `{float(build_only.get('total_elapsed_ms', 0.0) or 0.0):.3f} ms`",
+            f"- Index build elapsed: `{float(build_only.get('index_build_elapsed_ms_total', 0.0) or 0.0):.3f} ms` across `{int(build_only.get('index_builds', 0) or 0)}` builds",
+            f"- Index build groups: `{int(build_only.get('index_build_group_count', 0) or 0)}`; reuses: `{int(build_only.get('index_reuse_count', 0) or 0)}`",
+            f"- Effective profiles: `{','.join(str(item) for item in build_only.get('effective_profiles', []))}`",
+            "",
+            "| profile | source | proxy | centroids | entry sidecar | storage | pooling | reused | dominant build phase | index build ms | known phase ms | unattributed ms | centroid build ms | centroid cluster ms | centroid residual ms | proxy build ms | doc sidecar write ms | centroid sidecar write ms | centroid posting write ms | centroid postings | index bytes |",
+            "|---|---|---|---|---|---|---|---|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|",
+        ])
+        for item in sorted_rows:
+            lines.append(
+                "| {profile} | {source} | {proxy} | {centroids} | {entry_sidecar} | {storage} | {pooling}:{ratio:.2f} | {reused} | {dominant} | {index:.3f} | {known:.3f} | {unknown:.3f} | {centroid:.3f} | {centroid_cluster:.3f} | {centroid_residual:.3f} | {proxy_build:.3f} | {doc_sidecar:.3f} | {centroid_sidecar:.3f} | {posting:.3f} | {posting_count} | {index_bytes} |".format(
+                    profile=item.get("profile", ""),
+                    source=item.get("candidate_source", ""),
+                    proxy=item.get("proxy_encoder", ""),
+                    centroids=item.get("centroids", ""),
+                    entry_sidecar=(
+                        f"on:{item.get('entry_sidecar_representatives', '')}:{item.get('entry_sidecar_strategy', '')}"
+                        if bool(item.get("entry_sidecar", False))
+                        else "off"
+                    ),
+                    storage=item.get("storage_kind", ""),
+                    pooling=item.get("token_pooling", ""),
+                    ratio=float(item.get("token_pooling_target_ratio", 1.0) or 1.0),
+                    reused=bool(item.get("index_build_reused", False)),
+                    dominant=item.get("dominant_build_phase", ""),
+                    index=float(item.get("index_build_elapsed_ms", 0.0) or 0.0),
+                    known=float(item.get("build_phase_known_ms", 0.0) or 0.0),
+                    unknown=float(item.get("build_phase_unattributed_ms", 0.0) or 0.0),
+                    centroid=float(item.get("multivector_centroid_build_us", 0.0) or 0.0) / 1000.0,
+                    centroid_cluster=float(item.get("multivector_centroid_cluster_us", 0.0) or 0.0) / 1000.0,
+                    centroid_residual=float(item.get("multivector_centroid_residual_us", 0.0) or 0.0) / 1000.0,
+                    proxy_build=float(item.get("multivector_proxy_build_us", 0.0) or 0.0) / 1000.0,
+                    doc_sidecar=float(item.get("multivector_doc_sidecar_write_us", 0.0) or 0.0) / 1000.0,
+                    centroid_sidecar=float(item.get("multivector_centroid_sidecar_write_us", 0.0) or 0.0) / 1000.0,
+                    posting=float(item.get("multivector_centroid_posting_write_us", 0.0) or 0.0) / 1000.0,
+                    posting_count=int(item.get("multivector_centroid_posting_count", 0) or 0),
+                    index_bytes=int(item.get("index_bytes", 0) or 0),
+                )
+            )
+
     latency_only = report.get("document_node_serving_latency_only")
     if isinstance(latency_only, dict):
         settings = latency_only.get("settings", {})
@@ -7710,6 +11704,9 @@ def markdown_benchmark_summary(report: dict[str, Any]) -> str:
             admission_metrics = {}
         if not isinstance(scan_stats, dict):
             scan_stats = {}
+        warmup_latency = latency_only.get("warmup_latency", {})
+        if not isinstance(warmup_latency, dict):
+            warmup_latency = {}
         slow_path_warnings = latency_only.get("serving_slow_path_warnings", [])
         if not isinstance(slow_path_warnings, list):
             slow_path_warnings = []
@@ -7742,13 +11739,22 @@ def markdown_benchmark_summary(report: dict[str, Any]) -> str:
             f"- Centroids: `{settings.get('centroids', '')}`",
             f"- Storage/cache: `{settings.get('storage_kind', '')}/{settings.get('storage_cache_mode', '')}`",
             f"- EF / oversampling: `{settings.get('ef', 0)}` / `{settings.get('oversampling', 0)}`",
+            f"- Entry sample count: `{settings.get('entry_sample_count', 0)}`",
             f"- Candidate K / exact rerank K: `{settings.get('candidate_k', 0)}` / `{settings.get('effective_exact_rerank_k', 0)}`",
             f"- Queries: `{int(latency_only.get('query_count', 0) or 0)}`",
+            f"- Warmup queries: `{int(settings.get('warmup_queries', 0) or 0)}`; excluded from measured latency: `{bool(latency_only.get('warmup_excluded', False))}`",
+            f"- Cache build queries: `{int(latency_only.get('cache_build_queries', 0) or 0)}`; cache reused on warm queries: `{int(latency_only.get('cache_reused_on_warm_queries', 0) or 0)}` / `{int(latency_only.get('warm_queries', 0) or 0)}`",
             f"- Admission metrics: `{bool(admission_metrics.get('available', False))}` ({admission_metrics.get('reason', '')})",
             "",
-            "| p50 ms | p95 ms | p99 ms | qps | graph docs p50 | graph edges p50 | exact rerank docs p50 | exact pairs p50 | kernel |",
-            "|---:|---:|---:|---:|---:|---:|---:|---:|---|",
-            "| {p50:.3f} | {p95:.3f} | {p99:.3f} | {qps:.3f} | {docs:.3f} | {edges:.3f} | {rerank:.3f} | {pairs:.3f} | {kernel} |".format(
+            "| phase | p50 ms | p95 ms | p99 ms | qps | graph docs p50 | graph edges p50 | exact rerank docs p50 | exact pairs p50 | kernel |",
+            "|---|---:|---:|---:|---:|---:|---:|---:|---:|---|",
+            "| warmup/cold | {p50:.3f} | {p95:.3f} | {p99:.3f} | {qps:.3f} |  |  |  |  |  |".format(
+                p50=float(warmup_latency.get("p50_ms", 0.0) or 0.0),
+                p95=float(warmup_latency.get("p95_ms", 0.0) or 0.0),
+                p99=float(warmup_latency.get("p99_ms", 0.0) or 0.0),
+                qps=float(warmup_latency.get("qps", 0.0) or 0.0),
+            ),
+            "| measured/warm | {p50:.3f} | {p95:.3f} | {p99:.3f} | {qps:.3f} | {docs:.3f} | {edges:.3f} | {rerank:.3f} | {pairs:.3f} | {kernel} |".format(
                 p50=float(latency.get("p50_ms", 0.0) or 0.0),
                 p95=float(latency.get("p95_ms", 0.0) or 0.0),
                 p99=float(latency.get("p99_ms", 0.0) or 0.0),
@@ -7822,12 +11828,14 @@ def markdown_benchmark_summary(report: dict[str, Any]) -> str:
             )
         else:
             sorted_rows = []
+        serving_grid_mode = str(serving_grid.get("mode", "full") or "full")
+        serving_grid_stage_mode = str(serving_grid.get("stage_mode", "single") or "single")
         lines.extend([
             "",
             "### Document-node serving grid",
             "",
-            f"- Mode: `{serving_grid.get('mode', 'full')}`",
-            f"- Stage mode: `{serving_grid.get('stage_mode', 'single')}`",
+            f"- Mode: `{serving_grid_mode}`",
+            f"- Stage mode: `{serving_grid_stage_mode}`",
             f"- Probe queries: `{int(serving_grid.get('probe_queries', 0) or 0)}`",
             f"- Finalists: `{int(serving_grid.get('finalists', 0) or 0)}`",
             f"- Smoke-only: `{bool(serving_grid.get('smoke_only', False))}`",
@@ -7838,6 +11846,11 @@ def markdown_benchmark_summary(report: dict[str, Any]) -> str:
             f"- Admission debug mode: `{serving_grid.get('admission_debug_mode', 'summary')}`",
             f"- Trace enabled: `{bool(serving_grid.get('trace_enabled', False))}`",
             f"- Effective profiles: `{','.join(str(item) for item in serving_grid.get('effective_profiles', []))}`",
+            f"- Opt-in reservoirs: `{bool(serving_grid.get('include_reservoirs', False))}`",
+            f"- Opt-in centroid-lite caps: `{bool(serving_grid.get('include_centroid_lite_caps', False))}`",
+            f"- Effective centroid-lite posting caps: `{','.join(str(item) for item in serving_grid.get('effective_centroid_lite_posting_caps', []))}`",
+            f"- Opt-in entry samples: `{bool(serving_grid.get('include_entry_samples', False))}`",
+            f"- Effective entry sample counts: `{','.join(str(item) for item in serving_grid.get('effective_entry_sample_counts', []))}`",
             f"- Effective EF grid: `{','.join(str(item) for item in serving_grid.get('effective_ef_grid', []))}`",
             f"- Effective oversampling grid: `{','.join(str(item) for item in serving_grid.get('effective_oversampling_grid', []))}`",
             f"- Requested budget sweep: `{','.join(str(item) for item in serving_grid.get('effective_budget_sweep', serving_grid.get('budget_sweep', [])))}`",
@@ -7845,28 +11858,50 @@ def markdown_benchmark_summary(report: dict[str, Any]) -> str:
             f"- Query subset used: `{bool(serving_grid.get('query_subset_used', False))}`",
             f"- Queries: `{int(serving_grid.get('queries_run', serving_grid.get('queries', 0)) or 0)}` of `{int(serving_grid.get('queries_available', serving_grid.get('queries', 0)) or 0)}` loaded",
             "",
-            "Smoke mode is a smoke-only runtime check and must not be treated as serving evidence.",
-            "",
-            "Two-stage mode probes all effective configs on the first probe queries, "
-            "ranks non-experimental configs by p95 rank plus admission loss, and "
-            "fully evaluates only the finalists. Recommendations use the final "
-            "stage rows.",
-            "",
-            f"- Stage 1 rows: `{len(serving_grid.get('stage1_results', []) if isinstance(serving_grid.get('stage1_results', []), list) else [])}`",
-            f"- Stage 2 rows: `{len(serving_grid.get('stage2_results', []) if isinstance(serving_grid.get('stage2_results', []), list) else [])}`",
-            f"- Pruned configs: `{len(serving_grid.get('pruned_configs', []) if isinstance(serving_grid.get('pruned_configs', []), list) else [])}`",
-            "",
-            "| profile | source | graph | proxy | centroids | storage | cache | pooling | ef | oversampling | candidate budget | exact rerank k | rerank docs p50 | top1 admission | top10 admission | recall@10 | ndcg@10 | mrr@10 | p50 ms | p95 ms | index bytes |",
-            "|---|---|---|---|---|---|---|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|",
+        ])
+        if serving_grid_mode == "smoke":
+            lines.extend([
+                "Smoke mode is a smoke-only runtime check and must not be treated as serving evidence.",
+                "",
+            ])
+        if serving_grid_stage_mode == "two_stage":
+            lines.extend([
+                "Two-stage mode probes all effective configs on the first probe queries, "
+                "ranks non-experimental configs by p95 rank plus admission loss, and "
+                "fully evaluates only the finalists. Recommendations use the final "
+                "stage rows.",
+                "",
+                f"- Stage 1 rows: `{len(serving_grid.get('stage1_results', []) if isinstance(serving_grid.get('stage1_results', []), list) else [])}`",
+                f"- Stage 2 rows: `{len(serving_grid.get('stage2_results', []) if isinstance(serving_grid.get('stage2_results', []), list) else [])}`",
+                f"- Pruned configs: `{len(serving_grid.get('pruned_configs', []) if isinstance(serving_grid.get('pruned_configs', []), list) else [])}`",
+                "",
+            ])
+        lines.extend([
+            "| profile | source | graph | proxy | centroids | reservoirs | centroid cap | entry samples | entry sidecar | storage | cache | pooling | ef | oversampling | candidate budget | exact rerank k | rerank docs p50 | top1 admission | top10 admission | recall@10 | ndcg@10 | mrr@10 | p50 ms | p95 ms | index bytes |",
+            "|---|---|---|---|---|---|---:|---:|---|---|---|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|",
         ])
         for item in sorted_rows:
             lines.append(
-                "| {profile} | {source} | {graph} | {proxy} | {centroids} | {storage} | {cache} | {pooling}:{ratio:.2f} | {ef} | {oversampling} | {candidate_budget} | {exact_k} | {rerank_docs_p50:.3f} | {top1:.6f} | {top10:.6f} | {recall:.6f} | {ndcg:.6f} | {mrr:.6f} | {p50:.3f} | {p95:.3f} | {index_bytes} |".format(
+                "| {profile} | {source} | {graph} | {proxy} | {centroids} | {reservoirs} | {cap} | {entry_samples} | {entry_sidecar} | {storage} | {cache} | {pooling}:{ratio:.2f} | {ef} | {oversampling} | {candidate_budget} | {exact_k} | {rerank_docs_p50:.3f} | {top1:.6f} | {top10:.6f} | {recall:.6f} | {ndcg:.6f} | {mrr:.6f} | {p50:.3f} | {p95:.3f} | {index_bytes} |".format(
                     profile=item.get("profile", ""),
                     source=item.get("candidate_source", ""),
                     graph=item.get("graph_mode", ""),
                     proxy=item.get("proxy_encoder", ""),
                     centroids=item.get("centroids", ""),
+                    reservoirs=item.get("candidate_reservoirs", "off"),
+                    cap=int(item.get("centroid_lite_max_postings_per_token", 0) or 0),
+                    entry_samples=int(
+                        item.get(
+                            "effective_entry_sample_count",
+                            item.get("entry_sample_count", 0),
+                        )
+                        or 0
+                    ),
+                    entry_sidecar=(
+                        f"on:{item.get('entry_sidecar_representatives', '')}:{item.get('entry_sidecar_strategy', '')}"
+                        if bool(item.get("entry_sidecar", False))
+                        else "off"
+                    ),
                     storage=item.get("storage_kind", ""),
                     cache=item.get("storage_cache_mode", item.get("cache_mode", "")),
                     pooling=item.get("token_pooling", ""),
@@ -7922,6 +11957,81 @@ def markdown_benchmark_summary(report: dict[str, Any]) -> str:
                         unattributed=sample_ms("phase_timing_unattributed_sql_ms"),
                     )
                 )
+        candidate_source_deltas = serving_grid.get("candidate_source_deltas", {})
+        if isinstance(candidate_source_deltas, dict):
+            delta_rows = candidate_source_deltas.get("rows", [])
+            if not isinstance(delta_rows, list):
+                delta_rows = []
+            sorted_delta_rows = sorted(
+                [item for item in delta_rows if isinstance(item, dict)],
+                key=lambda item: (
+                    0 if bool(item.get("evidence_usable", True)) else 1,
+                    -float(item.get("exact_top10_admission_recall_delta", 0.0) or 0.0),
+                    float(item.get("p95_ms_delta", 0.0) or 0.0),
+                    str(item.get("comparison", "")),
+                    str(item.get("profile", "")),
+                ),
+            )
+            lines.extend([
+                "",
+                "#### Candidate-source deltas",
+                "",
+            ])
+            if sorted_delta_rows:
+                lines.extend([
+                    "Paired rows compare opt-in candidate-source variants against their "
+                    "matching plain baseline at the same EF, oversampling, and executed "
+                    "candidate budget.",
+                    "",
+                    "| comparison | profile | baseline | evidence | detail | ef | oversampling | budget | top10 delta | ndcg delta | p95 delta ms | top10 | baseline top10 | p95 ms | baseline p95 ms |",
+                    "|---|---|---|---|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|",
+                ])
+                for item in sorted_delta_rows:
+                    def delta_float(key: str) -> float:
+                        value = item.get(key)
+                        if isinstance(value, bool) or value is None:
+                            return 0.0
+                        try:
+                            return float(value)
+                        except (TypeError, ValueError):
+                            return 0.0
+
+                    lines.append(
+                        "| {comparison} | {profile} | {baseline} | {evidence} | {detail} | {ef} | {oversampling} | {budget} | {top10_delta:.6f} | {ndcg_delta:.6f} | {p95_delta:.3f} | {top10:.6f} | {baseline_top10:.6f} | {p95:.3f} | {baseline_p95:.3f} |".format(
+                            comparison=item.get("comparison", ""),
+                            profile=item.get("profile", ""),
+                            baseline=item.get("baseline_profile", ""),
+                            evidence=(
+                                "usable"
+                                if bool(item.get("evidence_usable", True))
+                                else ",".join(
+                                    str(warning)
+                                    for warning in item.get("evidence_warnings", [])
+                                )
+                            ),
+                            detail=serving_candidate_delta_evidence_text(
+                                item.get("candidate_evidence", {})
+                            ),
+                            ef=int(item.get("ef", 0) or 0),
+                            oversampling=int(item.get("oversampling", 0) or 0),
+                            budget=int(item.get("candidate_budget", 0) or 0),
+                            top10_delta=delta_float("exact_top10_admission_recall_delta"),
+                            ndcg_delta=delta_float("ndcg@10_delta"),
+                            p95_delta=delta_float("p95_ms_delta"),
+                            top10=delta_float("exact_top10_admission_recall"),
+                            baseline_top10=delta_float("baseline_exact_top10_admission_recall"),
+                            p95=delta_float("p95_ms"),
+                            baseline_p95=delta_float("baseline_p95_ms"),
+                        )
+                    )
+            else:
+                lines.append("- No paired candidate-source variants were available.")
+            missing = candidate_source_deltas.get("missing_baselines", [])
+            if isinstance(missing, list) and missing:
+                lines.extend([
+                    "",
+                    f"- Missing paired baselines: `{len(missing)}`",
+                ])
         lines.extend([
             "",
             "### Serving grid cost breakdown",
@@ -7936,8 +12046,8 @@ def markdown_benchmark_summary(report: dict[str, Any]) -> str:
             f"- Retrieval queries: `{int(serving_grid.get('retrieval_query_count', 0) or 0)}`",
             f"- Exact top cache: `enabled={bool(serving_grid.get('exact_top_cache_enabled', False))}, hits={int(serving_grid.get('exact_top_cache_hits', 0) or 0)}, misses={int(serving_grid.get('exact_top_cache_misses', 0) or 0)}, entries={int(serving_grid.get('exact_top_cache_entries', 0) or 0)}`",
             "",
-            "| profile | elapsed ms | index build ms | exact baseline ms | retrieval ms | exact scans | retrieval queries | runs |",
-            "|---|---:|---:|---:|---:|---:|---:|---:|",
+            "| profile | elapsed ms | index build ms | dominant build phase | known build ms | unattributed build ms | centroid build ms | centroid cluster ms | centroid residual ms | proxy build ms | doc sidecar write ms | centroid sidecar write ms | centroid posting write ms | exact baseline ms | retrieval ms | exact scans | retrieval queries | runs |",
+            "|---|---:|---:|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|",
         ])
         profile_summaries = serving_grid.get("profile_summaries", [])
         if isinstance(profile_summaries, list):
@@ -7945,10 +12055,20 @@ def markdown_benchmark_summary(report: dict[str, Any]) -> str:
                 if not isinstance(item, dict):
                     continue
                 lines.append(
-                    "| {profile} | {elapsed:.3f} | {index:.3f} | {exact:.3f} | {retrieval:.3f} | {exact_count} | {retrieval_count} | {runs} |".format(
+                    "| {profile} | {elapsed:.3f} | {index:.3f} | {dominant} | {known:.3f} | {unknown:.3f} | {centroid:.3f} | {centroid_cluster:.3f} | {centroid_residual:.3f} | {proxy:.3f} | {doc_sidecar:.3f} | {centroid_sidecar:.3f} | {posting:.3f} | {exact:.3f} | {retrieval:.3f} | {exact_count} | {retrieval_count} | {runs} |".format(
                         profile=item.get("profile", ""),
                         elapsed=float(item.get("profile_elapsed_ms", 0.0) or 0.0),
                         index=float(item.get("index_build_elapsed_ms", 0.0) or 0.0),
+                        dominant=item.get("dominant_build_phase", ""),
+                        known=float(item.get("build_phase_known_ms", 0.0) or 0.0),
+                        unknown=float(item.get("build_phase_unattributed_ms", 0.0) or 0.0),
+                        centroid=float(item.get("multivector_centroid_build_us", 0.0) or 0.0) / 1000.0,
+                        centroid_cluster=float(item.get("multivector_centroid_cluster_us", 0.0) or 0.0) / 1000.0,
+                        centroid_residual=float(item.get("multivector_centroid_residual_us", 0.0) or 0.0) / 1000.0,
+                        proxy=float(item.get("multivector_proxy_build_us", 0.0) or 0.0) / 1000.0,
+                        doc_sidecar=float(item.get("multivector_doc_sidecar_write_us", 0.0) or 0.0) / 1000.0,
+                        centroid_sidecar=float(item.get("multivector_centroid_sidecar_write_us", 0.0) or 0.0) / 1000.0,
+                        posting=float(item.get("multivector_centroid_posting_write_us", 0.0) or 0.0) / 1000.0,
                         exact=float(item.get("exact_baseline_elapsed_ms_total", 0.0) or 0.0),
                         retrieval=float(item.get("retrieval_elapsed_ms_total", 0.0) or 0.0),
                         exact_count=int(item.get("exact_baseline_query_count", 0) or 0),
@@ -8016,8 +12136,8 @@ def markdown_benchmark_summary(report: dict[str, Any]) -> str:
             f"- Why quality won: {serving_profile_explanation(best_quality)}",
             f"- Why balanced won: {serving_profile_explanation(best_balanced)}",
             "",
-            "| pass | profile | source | proxy | storage | pooling | ef | oversampling | budget | top10 admission | ndcg@10 | p95 ms | reasons |",
-            "|---|---|---|---|---|---|---:|---:|---:|---:|---:|---:|---|",
+            "| pass | profile | source | proxy | centroid cap | entry samples | entry sidecar | storage | pooling | ef | oversampling | budget | top10 admission | ndcg@10 | p95 ms | reasons | hints |",
+            "|---|---|---|---|---:|---:|---|---|---|---:|---:|---:|---:|---:|---:|---|---|",
         ])
         rows = serving_rec.get("profile_thresholds", [])
         if isinstance(rows, list):
@@ -8031,12 +12151,28 @@ def markdown_benchmark_summary(report: dict[str, Any]) -> str:
                     reasons.extend(str(reason) for reason in failures)
                 if isinstance(unavailable, list):
                     reasons.extend(f"unavailable:{criterion}" for criterion in unavailable)
+                hints = item.get("admission_improvement_hints", [])
+                if not isinstance(hints, list):
+                    hints = []
                 lines.append(
-                    "| {passed} | {profile} | {source} | {proxy} | {storage} | {pooling}:{ratio:.2f} | {ef} | {oversampling} | {budget} | {admission:.6f} | {ndcg:.6f} | {p95:.3f} | {reasons} |".format(
+                    "| {passed} | {profile} | {source} | {proxy} | {cap} | {entry_samples} | {entry_sidecar} | {storage} | {pooling}:{ratio:.2f} | {ef} | {oversampling} | {budget} | {admission:.6f} | {ndcg:.6f} | {p95:.3f} | {reasons} | {hints} |".format(
                         passed="pass" if item.get("threshold_pass") else "fail",
                         profile=item.get("profile", ""),
                         source=item.get("candidate_source", ""),
                         proxy=item.get("proxy_encoder", ""),
+                        cap=int(item.get("centroid_lite_max_postings_per_token", 0) or 0),
+                        entry_samples=int(
+                            item.get(
+                                "effective_entry_sample_count",
+                                item.get("entry_sample_count", 0),
+                            )
+                            or 0
+                        ),
+                        entry_sidecar=(
+                            f"on:{item.get('entry_sidecar_representatives', '')}:{item.get('entry_sidecar_strategy', '')}"
+                            if bool(item.get("entry_sidecar", False))
+                            else "off"
+                        ),
                         storage=item.get("storage_kind", ""),
                         pooling=item.get("token_pooling", ""),
                         ratio=float(item.get("token_pooling_target_ratio", 1.0) or 1.0),
@@ -8047,7 +12183,133 @@ def markdown_benchmark_summary(report: dict[str, Any]) -> str:
                         ndcg=float(item.get("ndcg@10", 0.0) or 0.0),
                         p95=float(serving_row_p95(item) or 0.0),
                         reasons=", ".join(reasons) if reasons else "",
+                        hints=", ".join(str(hint) for hint in hints),
                     )
+                )
+        bottlenecks = serving_rec.get("candidate_admission_bottlenecks", [])
+        if isinstance(bottlenecks, list) and bottlenecks:
+            lines.extend([
+                "",
+                "#### Candidate admission bottlenecks",
+                "",
+                "These rows exhausted the admitted candidate band during exact rerank "
+                "but still missed the top-10 admission threshold. Increase rerank depth "
+                "only after improving candidate generation.",
+                "",
+                "| profile | source | proxy | entry samples | entry sidecar | ef | oversampling | budget | top10 admission | p95 ms | reason | hints |",
+                "|---|---|---|---:|---|---:|---:|---:|---:|---:|---|---|",
+            ])
+            for item in bottlenecks:
+                if not isinstance(item, dict):
+                    continue
+                hints = item.get("admission_improvement_hints", [])
+                if not isinstance(hints, list):
+                    hints = []
+                lines.append(
+                    "| {profile} | {source} | {proxy} | {entry_samples} | {entry_sidecar} | {ef} | {oversampling} | {budget} | {admission:.6f} | {p95:.3f} | {reason} | {hints} |".format(
+                        profile=item.get("profile", ""),
+                        source=item.get("candidate_source", ""),
+                        proxy=item.get("proxy_encoder", ""),
+                        entry_samples=int(
+                            item.get(
+                                "effective_entry_sample_count",
+                                item.get("entry_sample_count", 0),
+                            )
+                            or 0
+                        ),
+                        entry_sidecar=(
+                            f"on:{item.get('entry_sidecar_representatives', '')}:{item.get('entry_sidecar_strategy', '')}"
+                            if bool(item.get("entry_sidecar", False))
+                            else "off"
+                        ),
+                        ef=int(item.get("ef", 0) or 0),
+                        oversampling=int(item.get("oversampling", 0) or 0),
+                        budget=int(item.get("largest_budget", 0) or 0),
+                        admission=float(item.get("exact_top10_admission_recall", 0.0) or 0.0),
+                        p95=float(serving_row_p95(item) or 0.0),
+                        reason=item.get("candidate_admission_bottleneck_reason", ""),
+                        hints=", ".join(str(hint) for hint in hints),
+                    )
+                )
+        delta_summary = serving_rec.get("candidate_source_delta_summary", {})
+        if isinstance(delta_summary, dict):
+            lines.extend([
+                "",
+                "#### Candidate-source delta summary",
+                "",
+            ])
+            if delta_summary.get("available"):
+                def delta_item_line(label: str, item: Any) -> str:
+                    if not isinstance(item, dict) or not item:
+                        return f"- {label}: unavailable"
+                    return (
+                        "- {label}: `{profile}` vs `{baseline}` "
+                        "({comparison}, ef={ef}, os={oversampling}, budget={budget}); "
+                        "top10 delta `{top10:.6f}`, ndcg delta `{ndcg:.6f}`, "
+                        "p95 delta `{p95:.3f} ms`"
+                    ).format(
+                        label=label,
+                        profile=item.get("profile", ""),
+                        baseline=item.get("baseline_profile", ""),
+                        comparison=item.get("comparison", ""),
+                        ef=int(item.get("ef", 0) or 0),
+                        oversampling=int(item.get("oversampling", 0) or 0),
+                        budget=int(item.get("candidate_budget", 0) or 0),
+                        top10=float(
+                            item.get("exact_top10_admission_recall_delta", 0.0)
+                            or 0.0
+                        ),
+                        ndcg=float(item.get("ndcg@10_delta", 0.0) or 0.0),
+                        p95=float(item.get("p95_ms_delta", 0.0) or 0.0),
+                    )
+
+                lines.extend([
+                    f"- Paired comparisons: `{int(delta_summary.get('comparison_count', 0) or 0)}`",
+                    f"- Usable paired comparisons: `{int(delta_summary.get('usable_comparison_count', 0) or 0)}`",
+                    f"- Unusable paired comparisons: `{int(delta_summary.get('unusable_comparison_count', 0) or 0)}`",
+                    f"- Positive admission deltas: `{int(delta_summary.get('positive_admission_delta_count', 0) or 0)}`",
+                    f"- Positive quality deltas: `{int(delta_summary.get('positive_quality_delta_count', 0) or 0)}`",
+                    f"- Latency-improving deltas: `{int(delta_summary.get('latency_improvement_count', 0) or 0)}`",
+                    delta_item_line(
+                        "Best admission delta",
+                        delta_summary.get("best_admission_delta"),
+                    ),
+                    delta_item_line(
+                        "Best quality delta",
+                        delta_summary.get("best_quality_delta"),
+                    ),
+                    delta_item_line(
+                        "Best latency delta",
+                        delta_summary.get("best_latency_delta"),
+                    ),
+                ])
+                by_comparison = delta_summary.get("best_admission_delta_by_comparison", {})
+                if isinstance(by_comparison, dict) and by_comparison:
+                    lines.extend([
+                        "",
+                        "| comparison | best admission profile | baseline | top10 delta | ndcg delta | p95 delta ms |",
+                        "|---|---|---|---:|---:|---:|",
+                    ])
+                    for comparison in sorted(by_comparison):
+                        item = by_comparison.get(comparison)
+                        if not isinstance(item, dict) or not item:
+                            continue
+                        lines.append(
+                            "| {comparison} | {profile} | {baseline} | {top10:.6f} | {ndcg:.6f} | {p95:.3f} |".format(
+                                comparison=comparison,
+                                profile=item.get("profile", ""),
+                                baseline=item.get("baseline_profile", ""),
+                                top10=float(
+                                    item.get("exact_top10_admission_recall_delta", 0.0)
+                                    or 0.0
+                                ),
+                                ndcg=float(item.get("ndcg@10_delta", 0.0) or 0.0),
+                                p95=float(item.get("p95_ms_delta", 0.0) or 0.0),
+                            )
+                        )
+            else:
+                lines.append(
+                    f"- Unavailable: `{delta_summary.get('reason', 'unknown')}`"
                 )
         lines.extend([
             "",
@@ -8056,8 +12318,11 @@ def markdown_benchmark_summary(report: dict[str, Any]) -> str:
             "penalty (`sq8=0`, `f16=1`, `f32=2`). Experimental profiles remain "
             "opt-in and should not be baked into serving defaults; they receive "
             "a large balanced-score penalty whenever a non-experimental profile "
-            "has usable metrics. Final ranking remains exact heap MaxSim unless "
-            "the candidate source is explicitly experimental.",
+            "has usable metrics. Learned-sparse rows with partial fixture coverage "
+            "and reservoir rows without execution evidence also receive a large "
+            "penalty and fail the latency-safe threshold. "
+            "Final ranking remains exact heap MaxSim unless the candidate source "
+            "is explicitly experimental.",
         ])
 
     hybrid_eval = report.get("hybrid_evaluation")
@@ -8163,7 +12428,10 @@ def run_self_checks() -> None:
     _self_check_document_node_serving_stage_selection()
     _self_check_document_node_serving_stats_extraction()
     _self_check_document_node_serving_grid_serialization()
+    _self_check_document_node_candidate_source_deltas()
+    _self_check_document_node_serving_build_only_serialization()
     _self_check_document_node_serving_latency_only()
+    _self_check_learned_sparse_evidence_annotation()
 
 
 def run_multivector_recall_gate(conn: psycopg.Connection[Any], args: argparse.Namespace) -> dict[str, Any]:
@@ -8250,6 +12518,10 @@ def validate_args(args: argparse.Namespace) -> argparse.Namespace:
         args.learned_sparse_query_jsonl = args.learned_sparse_query_jsonl.resolve()
         if not args.learned_sparse_query_jsonl.is_file():
             raise SystemExit(f"learned sparse query JSONL does not exist: {args.learned_sparse_query_jsonl}")
+    if args.document_node_serving_grid or args.document_node_serving_build_only:
+        effective_document_node_serving_profiles(args)
+    if args.document_node_serving_latency_only:
+        document_node_serving_latency_profile(args)
 
     args.model_path = args.model_path.resolve()
     if args.precomputed_dataset is None and not args.model_path.is_file() and not args.multivector_recall_gate:
@@ -8330,7 +12602,11 @@ def validate_args(args: argparse.Namespace) -> argparse.Namespace:
     if args.serving_exact_rerank_mode is None:
         args.serving_exact_rerank_mode = (
             "serving"
-            if args.document_node_serving_grid or args.document_node_serving_latency_only
+            if (
+                args.document_node_serving_grid
+                or args.document_node_serving_latency_only
+                or args.document_node_serving_build_only
+            )
             else "admission_exhaustive"
         )
     if args.admission_k < 1:
@@ -8355,7 +12631,10 @@ def validate_args(args: argparse.Namespace) -> argparse.Namespace:
         raise SystemExit("--serving-oversampling must be at least 1")
     if args.serving_candidate_k < 1:
         raise SystemExit("--serving-candidate-k must be positive")
-    if args.document_node_serving_latency_only and args.serving_profile_name is not None:
+    if (
+        args.document_node_serving_latency_only
+        or args.document_node_serving_build_only
+    ) and args.serving_profile_name is not None:
         document_node_serving_profile_by_name(args, str(args.serving_profile_name))
     if args.serving_grid_probe_queries < 1:
         raise SystemExit("--serving-grid-probe-queries must be positive")
@@ -8385,6 +12664,8 @@ def validate_args(args: argparse.Namespace) -> argparse.Namespace:
         raise SystemExit("--multivector-token-pooling-target-ratio must be in (0, 1]")
     if args.multivector_token_pooling_min_tokens < 1:
         raise SystemExit("--multivector-token-pooling-min-tokens must be positive")
+    if args.multivector_centroid_lite_max_postings_per_token < 0:
+        raise SystemExit("--multivector-centroid-lite-max-postings-per-token must be non-negative")
     if args.multivector_per_token_doc_reservoir_k < 0:
         raise SystemExit("--multivector-per-token-doc-reservoir-k must be non-negative")
     if args.multivector_coverage_reservoir_k < 0:
@@ -8442,6 +12723,28 @@ def validate_args(args: argparse.Namespace) -> argparse.Namespace:
     args.document_node_oversampling_grid_values = parse_int_grid(
         args.document_node_oversampling_grid,
         "--document-node-oversampling-grid",
+    )
+    args.document_node_serving_ef_grid_values = (
+        parse_int_grid(
+            args.document_node_serving_ef_grid,
+            "--document-node-serving-ef-grid",
+        )
+        if args.document_node_serving_ef_grid
+        else None
+    )
+    args.document_node_serving_oversampling_grid_values = (
+        parse_int_grid(
+            args.document_node_serving_oversampling_grid,
+            "--document-node-serving-oversampling-grid",
+        )
+        if args.document_node_serving_oversampling_grid
+        else None
+    )
+    args.document_node_serving_grid_centroid_lite_posting_cap_values = (
+        effective_document_node_serving_centroid_lite_caps(args)
+    )
+    args.document_node_serving_grid_entry_sample_count_values = (
+        effective_document_node_serving_entry_sample_counts(args)
     )
     args.document_node_pooling_grid_values = parse_document_node_pooling_grid(
         args.document_node_pooling_grid,
@@ -8604,6 +12907,15 @@ def parse_args() -> argparse.Namespace:
         help="document-node candidate rescore budget; 0 follows multivector_doc_candidate_k",
     )
     parser.add_argument(
+        "--multivector-doc-graph-entry-sample-count",
+        type=int,
+        default=0,
+        help=(
+            "document-node graph entry samples scored before traversal; "
+            "0 preserves the extension default"
+        ),
+    )
+    parser.add_argument(
         "--index-graph-m",
         type=int,
         default=0,
@@ -8673,6 +12985,15 @@ def parse_args() -> argparse.Namespace:
         "--multivector-centroid-count",
         default="auto",
         help="per-document centroid count for centroid_lite; 'auto' maps to the extension default",
+    )
+    parser.add_argument(
+        "--multivector-centroid-lite-max-postings-per-token",
+        type=int,
+        default=0,
+        help=(
+            "experimental centroid_lite posting-list cap per query token; "
+            "0 leaves the persisted posting lists uncapped"
+        ),
     )
     parser.add_argument(
         "--multivector-candidate-source",
@@ -8782,6 +13103,100 @@ def parse_args() -> argparse.Namespace:
         ),
     )
     parser.add_argument(
+        "--document-node-serving-grid-include-proxy-encoders",
+        action="store_true",
+        help=(
+            "include opt-in proxy encoder comparison profiles "
+            "proxy_max_pool_f16 and proxy_random_projection_fde_f16 in the "
+            "document-node serving grid/profile lookup"
+        ),
+    )
+    parser.add_argument(
+        "--document-node-serving-grid-include-bm25-rescue",
+        action="store_true",
+        help=(
+            "include opt-in BM25 rescue profiles for candidate-admission "
+            "experiments; this uses existing dense_with_text injection and is "
+            "not part of the default serving grid; pair with "
+            "--document-node-serving-grid-include-proxy-encoders to also add "
+            "proxy_max_pool_f16_bm25_rescue"
+        ),
+    )
+    parser.add_argument(
+        "--document-node-serving-grid-include-learned-sparse-rescue",
+        action="store_true",
+        help=(
+            "include opt-in learned-sparse rescue profiles for candidate-admission "
+            "experiments; requires --learned-sparse-doc-jsonl and "
+            "--learned-sparse-query-jsonl to run; pair with "
+            "--document-node-serving-grid-include-proxy-encoders to also add "
+            "proxy_max_pool_f16_learned_sparse_rescue"
+        ),
+    )
+    parser.add_argument(
+        "--document-node-serving-grid-include-reservoirs",
+        action="store_true",
+        help=(
+            "include opt-in balanced candidate-reservoir profiles for "
+            "document-node serving admission experiments; these use the existing "
+            "bounded reservoir GUCs before exact MaxSim rerank and are not part "
+            "of the default serving grid"
+        ),
+    )
+    parser.add_argument(
+        "--document-node-serving-grid-include-centroid-lite-caps",
+        action="store_true",
+        help=(
+            "include opt-in capped centroid_lite profiles for posting-list pruning "
+            "experiments; capped rows are not part of the default serving grid"
+        ),
+    )
+    parser.add_argument(
+        "--document-node-serving-grid-include-entry-samples",
+        action="store_true",
+        help=(
+            "include opt-in proxy_vector entry-sample profiles for scan-time "
+            "graph-entry admission experiments; these do not change the persisted "
+            "index format and are not part of the default serving grid"
+        ),
+    )
+    parser.add_argument(
+        "--document-node-serving-grid-entry-sample-counts",
+        default=DOCUMENT_NODE_SERVING_GRID_ENTRY_SAMPLE_SWEEP,
+        help=(
+            "comma-separated positive entry-sample counts used with "
+            "--document-node-serving-grid-include-entry-samples; defaults to "
+            f"{DOCUMENT_NODE_SERVING_GRID_ENTRY_SAMPLE_SWEEP}"
+        ),
+    )
+    parser.add_argument(
+        "--document-node-serving-grid-include-entry-sidecar",
+        action="store_true",
+        help=(
+            "include opt-in proxy_vector entry-sidecar profiles for candidate-admission "
+            "experiments; these persist graph entry representatives and are not part "
+            "of the default serving grid"
+        ),
+    )
+    parser.add_argument(
+        "--document-node-serving-grid-centroid-lite-posting-caps",
+        default=DOCUMENT_NODE_SERVING_GRID_CENTROID_LITE_CAP_SWEEP,
+        help=(
+            "comma-separated positive per-query-token posting caps used with "
+            "--document-node-serving-grid-include-centroid-lite-caps; defaults to "
+            f"{DOCUMENT_NODE_SERVING_GRID_CENTROID_LITE_CAP_SWEEP}"
+        ),
+    )
+    parser.add_argument(
+        "--document-node-serving-grid-profiles",
+        default="",
+        help=(
+            "comma-separated subset of document-node serving-grid profile names; "
+            "defaults to all serving profiles, or the smoke subset with "
+            "--document-node-serving-grid-smoke"
+        ),
+    )
+    parser.add_argument(
         "--document-node-serving-grid-smoke",
         action="store_true",
         help=(
@@ -8806,6 +13221,24 @@ def parse_args() -> argparse.Namespace:
         help=(
             "serving-grid config execution mode; default is two_stage for "
             "--document-node-serving-grid-smoke and single for full serving-grid runs"
+        ),
+    )
+    parser.add_argument(
+        "--document-node-serving-ef-grid",
+        default=None,
+        help=(
+            "comma-separated document-node graph search EF values for "
+            "--document-node-serving-grid; defaults to 50,100,200, or 50,100 "
+            "for --document-node-serving-grid-smoke"
+        ),
+    )
+    parser.add_argument(
+        "--document-node-serving-oversampling-grid",
+        default=None,
+        help=(
+            "comma-separated document-node graph oversampling values for "
+            "--document-node-serving-grid; defaults to 1,2, or 1 for "
+            "--document-node-serving-grid-smoke"
         ),
     )
     parser.add_argument(
@@ -8834,6 +13267,14 @@ def parse_args() -> argparse.Namespace:
         help=(
             "run one document-node serving profile as normal retrieval queries only; "
             "does not compute exact admission baselines"
+        ),
+    )
+    parser.add_argument(
+        "--document-node-serving-build-only",
+        action="store_true",
+        help=(
+            "build the selected document-node serving profiles and report CREATE INDEX "
+            "and sidecar construction costs without running retrieval or admission"
         ),
     )
     parser.add_argument(
@@ -8878,6 +13319,15 @@ def parse_args() -> argparse.Namespace:
         "--serving-fail-on-slow-path",
         action="store_true",
         help="fail serving latency-only runs when scan stats indicate an accidental slow path",
+    )
+    parser.add_argument(
+        "--serving-latency-warmup-queries",
+        type=int,
+        default=1,
+        help=(
+            "number of latency-only warmup queries to run before measured "
+            "serving queries; warmup stats are reported separately"
+        ),
     )
     parser.add_argument(
         "--serving-min-top10-admission",
@@ -9148,8 +13598,22 @@ def main() -> None:
         learned_sparse_phase = load_learned_sparse_vectors(conn, args)
         encoded_queries = load_encoded_queries(conn)
         document_node_serving_latency_only = None
+        document_node_serving_build_only = None
 
-        if args.document_node_serving_latency_only:
+        if args.document_node_serving_build_only:
+            document_node_serving_build_only = run_document_node_serving_build_only(
+                conn,
+                args,
+            )
+            index_phase = document_node_serving_build_only["last_index_phase"]
+            result_methods = []
+            admission_debug = None
+            document_node_admission_grid = None
+            document_node_serving_grid = None
+            document_node_serving_recommendation = None
+            hybrid_evaluation = None
+            token_ablation = None
+        elif args.document_node_serving_latency_only:
             document_node_serving_latency_only = run_document_node_serving_latency_only(
                 conn,
                 args,
@@ -9214,6 +13678,11 @@ def main() -> None:
                 if args.document_node_serving_grid
                 else None
             )
+            if document_node_serving_grid is not None:
+                annotate_serving_grid_learned_sparse_evidence(
+                    document_node_serving_grid,
+                    learned_sparse_phase,
+                )
             document_node_serving_recommendation = None
             if document_node_serving_grid is not None:
                 recommendation_started = time.perf_counter()
@@ -9300,6 +13769,7 @@ def main() -> None:
                 "multivector_doc_graph_search_ef": args.multivector_doc_graph_search_ef,
                 "multivector_doc_graph_oversampling": args.multivector_doc_graph_oversampling,
                 "multivector_doc_graph_rescore_k": args.multivector_doc_graph_rescore_k,
+                "multivector_doc_graph_entry_sample_count": args.multivector_doc_graph_entry_sample_count,
                 "index_graph_m": args.index_graph_m,
                 "index_graph_ef_construction": args.index_graph_ef_construction,
                 "index_graph_ef_search": args.index_graph_ef_search,
@@ -9326,10 +13796,18 @@ def main() -> None:
                 "document_node_admission_grid": args.document_node_admission_grid,
                 "document_node_serving_grid": args.document_node_serving_grid,
                 "document_node_serving_grid_include_experimental": args.document_node_serving_grid_include_experimental,
+                "document_node_serving_grid_include_proxy_encoders": args.document_node_serving_grid_include_proxy_encoders,
+                "document_node_serving_grid_include_bm25_rescue": args.document_node_serving_grid_include_bm25_rescue,
+                "document_node_serving_grid_include_learned_sparse_rescue": args.document_node_serving_grid_include_learned_sparse_rescue,
+                "document_node_serving_grid_include_reservoirs": args.document_node_serving_grid_include_reservoirs,
+                "document_node_serving_grid_include_entry_sidecar": args.document_node_serving_grid_include_entry_sidecar,
+                "document_node_serving_grid_include_entry_samples": args.document_node_serving_grid_include_entry_samples,
+                "document_node_serving_grid_entry_sample_counts": args.document_node_serving_grid_entry_sample_count_values,
                 "document_node_serving_grid_stage_mode": args.document_node_serving_grid_stage_mode,
                 "serving_grid_probe_queries": args.serving_grid_probe_queries,
                 "serving_grid_finalists": args.serving_grid_finalists,
                 "document_node_serving_latency_only": args.document_node_serving_latency_only,
+                "document_node_serving_build_only": args.document_node_serving_build_only,
                 "serving_profile_name": args.serving_profile_name,
                 "serving_ef": args.serving_ef,
                 "serving_oversampling": args.serving_oversampling,
@@ -9393,6 +13871,8 @@ def main() -> None:
             output["document_node_serving_recommendation"] = document_node_serving_recommendation
         if document_node_serving_latency_only is not None:
             output["document_node_serving_latency_only"] = document_node_serving_latency_only
+        if document_node_serving_build_only is not None:
+            output["document_node_serving_build_only"] = document_node_serving_build_only
         if hybrid_evaluation is not None:
             output["hybrid_evaluation"] = hybrid_evaluation
         if token_ablation is not None:
