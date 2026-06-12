@@ -2410,7 +2410,7 @@ DECLARE
 	q turbohybrid_multivector;
 	index_ids int[];
 	brute_ids int[];
-	stats jsonb;
+	index_stats jsonb;
 BEGIN
 	SELECT colbert INTO q
 	FROM mv_document_node_proxy_regression_docs
@@ -2430,6 +2430,8 @@ BEGIN
 		LIMIT 10
 	) AS ranked;
 
+	index_stats := turbohybrid_last_scan_stats();
+
 	SELECT array_agg(id ORDER BY distance, id)
 	INTO brute_ids
 	FROM (
@@ -2440,21 +2442,20 @@ BEGIN
 		LIMIT 10
 	) AS ranked;
 
-	stats := turbohybrid_last_scan_stats();
 	IF index_ids <> brute_ids THEN
 		RAISE EXCEPTION 'document-node proxy regression rerank disagrees with brute force, index %, brute %, stats %',
-			index_ids, brute_ids, stats;
+			index_ids, brute_ids, index_stats;
 	END IF;
 
-	IF stats->>'multivector_graph_mode' <> 'document_nodes' OR
-		stats->>'multivector_candidate_source' <> 'graph' OR
-		stats->>'multivector_candidate_path' NOT IN ('proxy_graph', 'exact_doc_scan') OR
-		(stats->>'multivector_subvector_searches')::int <> 0 OR
-		stats->>'multivector_exact_rerank_source' <> 'sidecar' OR
-		(stats->>'multivector_exact_rerank_heap_fetches')::int <> 0 OR
-		(stats->>'multivector_doc_graph_exact_rerank_docs')::int < 10 THEN
+	IF index_stats->>'multivector_graph_mode' <> 'document_nodes' OR
+		index_stats->>'multivector_candidate_source' <> 'graph' OR
+		index_stats->>'multivector_candidate_path' NOT IN ('proxy_graph', 'exact_doc_scan') OR
+		(index_stats->>'multivector_subvector_searches')::int <> 0 OR
+		index_stats->>'multivector_exact_rerank_source' <> 'sidecar' OR
+		(index_stats->>'multivector_exact_rerank_heap_fetches')::int <> 0 OR
+		(index_stats->>'multivector_doc_graph_exact_rerank_docs')::int < 10 THEN
 		RAISE EXCEPTION 'document-node proxy regression used unexpected query path: %',
-			stats;
+			index_stats;
 	END IF;
 END
 $$;
