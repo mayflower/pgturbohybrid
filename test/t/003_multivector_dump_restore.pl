@@ -2,7 +2,15 @@ use strict;
 use warnings FATAL => 'all';
 use Test::More;
 use File::Temp qw(tempfile);
-use PostgreSQL::Test::Cluster;
+
+BEGIN
+{
+	eval {
+		require PostgreSQL::Test::Cluster;
+		PostgreSQL::Test::Cluster->import();
+		1;
+	} or plan skip_all => 'PostgreSQL::Test::Cluster is not available';
+}
 
 my $node = PostgreSQL::Test::Cluster->new('multivector_dump_restore');
 $node->init;

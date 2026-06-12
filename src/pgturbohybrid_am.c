@@ -3801,7 +3801,7 @@ PgturbohybridApplyFinalDiversity(IndexScanDesc scan,
 	int			payloadSlot = pgturbohybrid_final_diversity_payload_slot;
 	int			poolMultiplier = Max(pgturbohybrid_final_diversity_pool_multiplier, 1);
 	int			poolCount;
-	int			selectedCount = 0;
+	volatile int selectedCount = 0;
 	double		bestScore;
 	double		worstScore;
 	double		scoreRange;
@@ -3810,7 +3810,7 @@ PgturbohybridApplyFinalDiversity(IndexScanDesc scan,
 	int			afterDuplicates;
 	instr_time	start;
 	instr_time	lockStart;
-	bool		applied = false;
+	volatile bool applied = false;
 
 	stats->finalDiversityMode = pgturbohybrid_final_diversity;
 	stats->finalDiversityPayloadSlot = payloadSlot;
