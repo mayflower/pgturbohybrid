@@ -4508,7 +4508,7 @@ turbohybrid_scorer_bench(PG_FUNCTION_ARGS)
 			INSTR_TIME_SET_CURRENT(t0);
 			for (int i = 0; i < n; i++)
 			{
-				double		d;
+				double		d = 0.0;
 
 				PgturbohybridGraphTqCodeSignedSplitDistance(&tq, arena + (Size) idx[i] * cb, scales[idx[i]], &d);
 				sink += d;
@@ -4545,7 +4545,7 @@ turbohybrid_scorer_bench(PG_FUNCTION_ARGS)
 			INSTR_TIME_SET_CURRENT(t0);
 			for (int i = 0; i < n; i++)
 			{
-				double		d;
+				double		d = 0.0;
 
 				PgturbohybridGraphTqCodeU8SimdDistance(&tq, arena + (Size) idx[i] * cb, scales[idx[i]], &d);
 				sink += d;
