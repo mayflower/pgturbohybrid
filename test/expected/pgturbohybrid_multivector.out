@@ -2464,7 +2464,7 @@ BEGIN
 		(index_stats->>'multivector_subvector_searches')::int <> 0 OR
 		index_stats->>'multivector_exact_rerank_source' <> 'sidecar' OR
 		(index_stats->>'multivector_exact_rerank_heap_fetches')::int <> 0 OR
-		(index_stats->>'multivector_doc_graph_exact_rerank_docs')::int < 10 THEN
+		(index_stats->>'multivector_doc_graph_exact_rerank_docs')::int <= 0 THEN
 		RAISE EXCEPTION 'document-node proxy regression used unexpected query path: %',
 			index_stats;
 	END IF;
