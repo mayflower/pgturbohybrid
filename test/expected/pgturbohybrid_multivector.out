@@ -2437,7 +2437,11 @@ BEGIN
 		         final_k => 10
 		       ) AS distance
 		FROM mv_document_node_proxy_regression_docs
-		ORDER BY distance, id
+		ORDER BY colbert <~> turbohybrid_query(
+		         multivector_query => q,
+		         dense_k => 200,
+		         final_k => 10
+		       )
 		LIMIT 10
 	) AS ranked;
 
