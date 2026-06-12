@@ -641,9 +641,10 @@ PgturbohybridGraphRepairDryRun(Relation index, int sampleNodes, int searchEf,
 	PgturbohybridGraphScanOpaqueData so;
 	PgturbohybridGraphRepairCandidate *candidates;
 	int			targetSamples;
+	int			effectiveCandidateLimit;
 	uint32		step;
 	uint32		start;
-	double		overlapSum = 0.0;
+	volatile double overlapSum = 0.0;
 	instr_time	startTime;
 
 	memset(stats, 0, sizeof(*stats));
@@ -685,13 +686,13 @@ PgturbohybridGraphRepairDryRun(Relation index, int sampleNodes, int searchEf,
 		return;
 	}
 
-	candidateLimit = Min(candidateLimit, searchEf);
-	candidateLimit = Min(candidateLimit, (int) meta.tqNodeCount);
-	stats->candidateLimit = candidateLimit;
+	effectiveCandidateLimit = Min(candidateLimit, searchEf);
+	effectiveCandidateLimit = Min(effectiveCandidateLimit, (int) meta.tqNodeCount);
+	stats->candidateLimit = effectiveCandidateLimit;
 
 	memset(&so, 0, sizeof(so));
 	PgturbohybridGraphInitScanStorage(index, &meta, &storage, NULL);
-	candidates = palloc0(sizeof(*candidates) * candidateLimit);
+	candidates = palloc0(sizeof(*candidates) * effectiveCandidateLimit);
 	step = Max(1U, meta.tqNodeCount / (uint32) targetSamples);
 	start = step > 1 ? step / 2 : 0;
 
@@ -716,7 +717,7 @@ PgturbohybridGraphRepairDryRun(Relation index, int sampleNodes, int searchEf,
 				!PgturbohybridGraphLoadAdjPage(index, &so, &meta, &storage, nodeId, 0))
 				continue;
 
-			memset(candidates, 0, sizeof(*candidates) * candidateLimit);
+			memset(candidates, 0, sizeof(*candidates) * effectiveCandidateLimit);
 			slot = PgturbohybridGraphScanAdjSlot(&meta, nodeId, 0);
 			directCount = storage.neighborCounts[slot];
 			candidateCount = PgturbohybridGraphRepairCollectCandidates(index, &so,
@@ -724,7 +725,7 @@ PgturbohybridGraphRepairDryRun(Relation index, int sampleNodes, int searchEf,
 																	   &storage,
 																	   nodeId,
 																	   candidates,
-																	   candidateLimit);
+																	   effectiveCandidateLimit);
 			compareCount = Min(directCount, candidateCount);
 			for (int i = 0; i < compareCount; i++)
 			{
@@ -15365,8 +15366,8 @@ PgturbohybridGraphCollectMultiVectorDenseCandidates(IndexScanDesc scan,
 	PgturbohybridGraphScanStorage storage;
 	PgturbohybridGraphCacheInitInfo cacheInfo;
 	PgturbohybridMultiVector *mv;
-	HTAB	   *docHash;
-	HTAB	   *docIdHash = NULL;
+	HTAB	   *volatile docHash = NULL;
+	HTAB	   *volatile docIdHash = NULL;
 	HASHCTL		hashCtl;
 	HASHCTL		docIdHashCtl;
 	HASH_SEQ_STATUS seq;
@@ -15378,7 +15379,7 @@ PgturbohybridGraphCollectMultiVectorDenseCandidates(IndexScanDesc scan,
 	MemoryContext tokenCtx;
 	instr_time	lockStart;
 	instr_time	phaseStart;
-	int			rawTarget;
+	volatile int rawTarget;
 	int			searchEf;
 	int			initialRawTarget;
 	int			maxRawTarget;
@@ -15387,26 +15388,26 @@ PgturbohybridGraphCollectMultiVectorDenseCandidates(IndexScanDesc scan,
 	int			docCount = 0;
 	int			exactRerankCount = 0;
 	uint64		multivectorDocCapacity = 0;
-	Size		multivectorMemoryEstimate = 0;
-	uint64		multivectorRawSubvectorHits = 0;
-	uint64		multivectorUniqueDocs = 0;
-	uint64		multivectorDuplicateDocHits = 0;
-	uint64		multivectorMaxsimUpdates = 0;
+	volatile Size multivectorMemoryEstimate = 0;
+	volatile uint64 multivectorRawSubvectorHits = 0;
+	volatile uint64 multivectorUniqueDocs = 0;
+	volatile uint64 multivectorDuplicateDocHits = 0;
+	volatile uint64 multivectorMaxsimUpdates = 0;
 	uint64		multivectorExactPairs = 0;
 	PgturbohybridMultiVectorExactRerankWorkStats exactStats;
 	uint64		multivectorExactTokenScanNodesScored = 0;
 	uint32		multivectorReservoirScoreDocs = 0;
 	uint32		multivectorReservoirCoverageDocs = 0;
 	uint32		multivectorReservoirMeanDocs = 0;
-	uint32		multivectorReservoirPerTokenDocs = 0;
+	volatile uint32 multivectorReservoirPerTokenDocs = 0;
 	uint32		multivectorReservoirBm25Docs = 0;
-	uint32		multivectorReservoirUnionDocs = 0;
+	volatile uint32 multivectorReservoirUnionDocs = 0;
 	uint32		multivectorReservoirDuplicates = 0;
 	uint64		nextDocOrdinal = 0;
 	uint32		admissionCandidatesBeforeRerank = 0;
-	uint32		admissionTraceCount = 0;
-	uint32		skippedQueryTokens = 0;
-	uint32		tokenStatsCount = 0;
+	volatile uint32 admissionTraceCount = 0;
+	volatile uint32 skippedQueryTokens = 0;
+	volatile uint32 tokenStatsCount = 0;
 	int			exactRerankLimit = 0;
 	bool		adaptiveWidening =
 		pgturbohybrid_multivector_adaptive_widening !=
@@ -15417,7 +15418,7 @@ PgturbohybridGraphCollectMultiVectorDenseCandidates(IndexScanDesc scan,
 	bool		admissionTraceEnabled =
 		pgturbohybrid_multivector_debug_admission ==
 		PGTURBOHYBRID_MULTIVECTOR_DEBUG_ADMISSION_TRACE;
-	bool		exactTokenScan =
+	volatile bool exactTokenScan =
 		pgturbohybrid_multivector_candidate_source ==
 		PGTURBOHYBRID_MULTIVECTOR_CANDIDATE_SOURCE_EXACT_TOKEN_SCAN;
 	bool		exactDocScan =
@@ -15484,11 +15485,16 @@ PgturbohybridGraphCollectMultiVectorDenseCandidates(IndexScanDesc scan,
 	if (stats != NULL)
 		memset(stats, 0, sizeof(*stats));
 	skipQueryToken = palloc0(sizeof(bool) * (Size) mv->count);
-	PgturbohybridMultiVectorParseSkipQueryTokens(
-		pgturbohybrid_multivector_debug_skip_query_tokens,
-		mv->count,
-		skipQueryToken,
-		&skippedQueryTokens);
+	{
+		uint32		skippedQueryTokensLocal = 0;
+
+		PgturbohybridMultiVectorParseSkipQueryTokens(
+			pgturbohybrid_multivector_debug_skip_query_tokens,
+			mv->count,
+			skipQueryToken,
+			&skippedQueryTokensLocal);
+		skippedQueryTokens = skippedQueryTokensLocal;
+	}
 	if (queryMask != NULL)
 	{
 		for (int qi = 0; qi < mv->count; qi++)
@@ -15868,6 +15874,7 @@ PgturbohybridGraphCollectMultiVectorDenseCandidates(IndexScanDesc scan,
 					TqDocId		docId;
 					bool		tokenUniqueDoc;
 					PgturbohybridGraphResult docHit = hits[i];
+					uint64		maxsimUpdates = multivectorMaxsimUpdates;
 
 					multivectorRawSubvectorHits++;
 					if (useDocMapSidecar)
@@ -15903,7 +15910,8 @@ PgturbohybridGraphCollectMultiVectorDenseCandidates(IndexScanDesc scan,
 														  queryWeights != NULL ?
 														  (double) queryWeights[qi] : 1.0,
 														  !tokenUniqueDoc,
-														  &multivectorMaxsimUpdates);
+														  &maxsimUpdates);
+					multivectorMaxsimUpdates = maxsimUpdates;
 					if (tokenUniqueDoc)
 					{
 						tokenUniqueDocs++;
@@ -15985,6 +15993,9 @@ PgturbohybridGraphCollectMultiVectorDenseCandidates(IndexScanDesc scan,
 	candidates = palloc0(sizeof(TqDenseCandidate) * docLimit);
 	if (reservoirsEnabled)
 	{
+		uint32		reservoirPerTokenDocs = 0;
+		uint32		reservoirUnionDocs = 0;
+
 		PgturbohybridMultiVectorBuildReservoirCandidates(docHash, mv->count,
 														 queryWeightSum,
 														 docLimit,
@@ -15994,10 +16005,12 @@ PgturbohybridGraphCollectMultiVectorDenseCandidates(IndexScanDesc scan,
 														 &multivectorReservoirScoreDocs,
 														 &multivectorReservoirCoverageDocs,
 														 &multivectorReservoirMeanDocs,
-														 &multivectorReservoirPerTokenDocs,
+														 &reservoirPerTokenDocs,
 														 &multivectorReservoirBm25Docs,
-														 &multivectorReservoirUnionDocs,
+														 &reservoirUnionDocs,
 														 &multivectorReservoirDuplicates);
+		multivectorReservoirPerTokenDocs = reservoirPerTokenDocs;
+		multivectorReservoirUnionDocs = reservoirUnionDocs;
 	}
 	else
 	{
