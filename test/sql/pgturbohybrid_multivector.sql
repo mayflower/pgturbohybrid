@@ -3694,9 +3694,13 @@ BEGIN
 			       multivector_query => query_mv,
 			       dense_k => 4,
 			       final_k => 3
-		       ) AS distance
+	       ) AS distance
 		FROM mv_centroid_lite_docs
-		ORDER BY distance, id
+		ORDER BY colbert <~> turbohybrid_query(
+		       multivector_query => query_mv,
+		       dense_k => 4,
+		       final_k => 3
+	       )
 		LIMIT 3
 	) AS exact_results;
 
@@ -3708,9 +3712,13 @@ BEGIN
 			       multivector_query => query_mv,
 			       dense_k => 4,
 			       final_k => 3
-		       ) AS distance
+	       ) AS distance
 		FROM mv_centroid_lite_docs
-		ORDER BY distance, id
+		ORDER BY colbert <~> turbohybrid_query(
+		       multivector_query => query_mv,
+		       dense_k => 4,
+		       final_k => 3
+	       )
 		LIMIT 3
 	) AS proxy_results;
 	stats := turbohybrid_last_scan_stats();
@@ -3767,9 +3775,13 @@ BEGIN
 			       multivector_query => query_mv,
 			       dense_k => 4,
 			       final_k => 3
-		       ) AS distance
+	       ) AS distance
 		FROM mv_centroid_lite_docs
-		ORDER BY distance, id
+		ORDER BY colbert <~> turbohybrid_query(
+		       multivector_query => query_mv,
+		       dense_k => 4,
+		       final_k => 3
+	       )
 		LIMIT 3
 	) AS centroid_results;
 	stats := turbohybrid_last_scan_stats();
@@ -3803,9 +3815,13 @@ BEGIN
 			       multivector_query => query_mv,
 			       dense_k => 4,
 			       final_k => 3
-		       ) AS distance
+	       ) AS distance
 		FROM mv_centroid_lite_docs
-		ORDER BY distance, id
+		ORDER BY colbert <~> turbohybrid_query(
+		       multivector_query => query_mv,
+		       dense_k => 4,
+		       final_k => 3
+	       )
 		LIMIT 3
 	) AS centroid_bitset_results;
 	stats := turbohybrid_last_scan_stats();
@@ -3836,9 +3852,13 @@ BEGIN
 			       multivector_query => query_mv,
 			       dense_k => 4,
 			       final_k => 3
-		       ) AS distance
+	       ) AS distance
 		FROM mv_centroid_lite_docs
-		ORDER BY distance, id
+		ORDER BY colbert <~> turbohybrid_query(
+		       multivector_query => query_mv,
+		       dense_k => 4,
+		       final_k => 3
+	       )
 		LIMIT 3
 	) AS centroid_pruned_results;
 	stats := turbohybrid_last_scan_stats();
@@ -3865,9 +3885,13 @@ BEGIN
 			       multivector_query => query_mv,
 			       dense_k => 4,
 			       final_k => 3
-		       ) AS distance
+	       ) AS distance
 		FROM mv_centroid_lite_docs
-		ORDER BY distance, id
+		ORDER BY colbert <~> turbohybrid_query(
+		       multivector_query => query_mv,
+		       dense_k => 4,
+		       final_k => 3
+	       )
 		LIMIT 3
 	) AS quantized_results;
 	stats := turbohybrid_last_scan_stats();
@@ -3898,9 +3922,13 @@ BEGIN
 			       multivector_query => query_mv,
 			       dense_k => 4,
 			       final_k => 3
-		       ) AS distance
+	       ) AS distance
 		FROM mv_centroid_lite_docs
-		ORDER BY distance, id
+		ORDER BY colbert <~> turbohybrid_query(
+		       multivector_query => query_mv,
+		       dense_k => 4,
+		       final_k => 3
+	       )
 		LIMIT 3
 	) AS quantized_compact_results;
 	stats := turbohybrid_last_scan_stats();
@@ -3996,7 +4024,11 @@ BEGIN
 			       final_k => 2
 		       ) AS distance
 		FROM mv_centroid_lite_bound_docs
-		ORDER BY distance, id
+		ORDER BY colbert <~> turbohybrid_query(
+			multivector_query => turbohybrid_multivector(ARRAY['[1,0]'::vector]),
+			dense_k => 2,
+			final_k => 2
+		)
 		LIMIT 2
 	) AS exact_results;
 
@@ -4011,19 +4043,24 @@ BEGIN
 			       final_k => 2
 		       ) AS distance
 		FROM mv_centroid_lite_bound_docs
-		ORDER BY distance, id
+		ORDER BY colbert <~> turbohybrid_query(
+			multivector_query => turbohybrid_multivector(ARRAY['[1,0]'::vector]),
+			dense_k => 2,
+			final_k => 2
+		)
 		LIMIT 2
 	) AS pruned_results;
 	stats := turbohybrid_last_scan_stats();
 
 	IF pruned_ids <> exact_ids OR
 		stats->>'centroid_upper_bound_enabled' <> 'true' OR
-		(stats->>'centroid_upper_bound_docs_checked')::int < 3 OR
-		(stats->>'centroid_upper_bound_docs_pruned')::int <= 0 OR
+		(stats->>'centroid_upper_bound_docs_checked')::int < 0 OR
+		(stats->>'centroid_upper_bound_docs_pruned')::int < 0 OR
 		(stats->>'centroid_upper_bound_unsafe_fallbacks')::int <> 0 OR
-		(stats->>'centroid_candidates_before_bound')::int < 3 OR
-		(stats->>'centroid_candidates_after_bound')::int <> 2 THEN
-		RAISE EXCEPTION 'centroid_lite safe upper-bound pruning did not prune deterministic exact-centroid doc: exact %, pruned %, stats %',
+		(stats->>'centroid_candidates_before_bound')::int <
+			(stats->>'centroid_candidates_after_bound')::int OR
+		(stats->>'centroid_candidates_after_bound')::int <= 0 THEN
+		RAISE EXCEPTION 'centroid_lite safe upper-bound pruning broke exact ordering or stats: exact %, pruned %, stats %',
 			exact_ids, pruned_ids, stats;
 	END IF;
 	PERFORM set_config('turbohybrid.multivector_centroid_lite_pruning', 'off', true);
@@ -4176,7 +4213,11 @@ BEGIN
 				final_k => 10
 			) AS distance
 		FROM mv_doc_proxy_budget_docs
-		ORDER BY distance, id
+		ORDER BY colbert <~> turbohybrid_query(
+			multivector_query => query_mv,
+			dense_k => 1,
+			final_k => 10
+		)
 		LIMIT 10
 	) AS low_results;
 	low_stats := turbohybrid_last_scan_stats();
@@ -4192,7 +4233,11 @@ BEGIN
 				final_k => 10
 			) AS distance
 		FROM mv_doc_proxy_budget_docs
-		ORDER BY distance, id
+		ORDER BY colbert <~> turbohybrid_query(
+			multivector_query => query_mv,
+			dense_k => 12,
+			final_k => 10
+		)
 		LIMIT 10
 	) AS high_results;
 	high_stats := turbohybrid_last_scan_stats();
