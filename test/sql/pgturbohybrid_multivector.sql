@@ -2398,7 +2398,7 @@ $$;
 
 SET enable_seqscan = off;
 SET turbohybrid.multivector_plain_fallback = off;
-SET turbohybrid.multivector_candidate_source = graph;
+SET turbohybrid.multivector_candidate_source = proxy_vector;
 SET turbohybrid.multivector_doc_candidate_k = 200;
 SET turbohybrid.multivector_exact_rerank_k = 200;
 SET turbohybrid.multivector_doc_graph_search_ef = 200;
@@ -2448,7 +2448,7 @@ BEGIN
 	END IF;
 
 	IF index_stats->>'multivector_graph_mode' <> 'document_nodes' OR
-		index_stats->>'multivector_candidate_source' <> 'graph' OR
+		index_stats->>'multivector_candidate_source' <> 'proxy_vector' OR
 		index_stats->>'multivector_candidate_path' NOT IN ('proxy_graph', 'exact_doc_scan') OR
 		(index_stats->>'multivector_subvector_searches')::int <> 0 OR
 		index_stats->>'multivector_exact_rerank_source' <> 'sidecar' OR
