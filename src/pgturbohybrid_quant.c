@@ -10791,7 +10791,12 @@ PgturbohybridMultiVectorExactPlainFallback(IndexScanDesc scan,
 	slot = table_slot_create(scan->heapRelation, NULL);
 
 	INSTR_TIME_SET_CURRENT(start);
+#if PG_VERSION_NUM >= 190000
+	heapScan = table_beginscan(scan->heapRelation, scan->xs_snapshot, 0, NULL,
+							   SO_NONE);
+#else
 	heapScan = table_beginscan(scan->heapRelation, scan->xs_snapshot, 0, NULL);
+#endif
 	while (table_scan_getnextslot(heapScan, ForwardScanDirection, slot))
 	{
 		Datum		value;
