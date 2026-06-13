@@ -2709,6 +2709,41 @@ ORDER BY colbert <~> turbohybrid_query(
 LIMIT 1;
 RESET enable_seqscan;
 
+-- Regression: dead_node_ratio must be visible after VACUUM on document-node
+-- indexes.  The stability-check.sh bloat monitor reads this stat to schedule
+-- REINDEX before p95 degrades.  After deleting id=1 and updating id=3, at
+-- least one node must be marked dead and counted.
+DO $$
+DECLARE
+	stats jsonb;
+	dead_ratio numeric;
+	dead_count int;
+	live_count int;
+	node_count int;
+BEGIN
+	stats := turbohybrid_index_stats('mv_document_node_docs_idx'::regclass);
+	dead_ratio := COALESCE((stats->>'dead_node_ratio')::numeric, -1);
+	dead_count := COALESCE((stats->>'dead_node_count')::int, -1);
+	live_count := COALESCE((stats->>'live_node_count')::int, -1);
+	node_count := (stats->>'node_count')::int;
+
+	IF dead_count < 1 THEN
+		RAISE EXCEPTION 'expected dead_node_count >= 1 after VACUUM churn, got % (stats=%)',
+			dead_count, stats;
+	END IF;
+
+	IF dead_ratio <= 0 THEN
+		RAISE EXCEPTION 'expected dead_node_ratio > 0 after VACUUM churn, got % (stats=%)',
+			dead_ratio, stats;
+	END IF;
+
+	IF live_count + dead_count <> node_count THEN
+		RAISE EXCEPTION 'live_node_count + dead_node_count <> node_count: % + % <> % (stats=%)',
+			live_count, dead_count, node_count, stats;
+	END IF;
+END
+$$;
+
 DROP TABLE mv_document_node_docs;
 
 CREATE TABLE mv_document_node_pool_docs (
