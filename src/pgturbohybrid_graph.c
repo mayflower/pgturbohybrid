@@ -1048,9 +1048,54 @@ pgturbohybrid_index_stats(PG_FUNCTION_ARGS)
 										hasLexicalKey && hasBm25Meta);
 	PgturbohybridIndexStatsJsonbAddUInt32(&jsonState, "blocks", nblocks);
 	PgturbohybridIndexStatsJsonbAddUInt32(&jsonState, "node_count",
-										  meta.tqNodeCount);
+									  meta.tqNodeCount);
+
+	/*
+	 * Walk the code chain to count dead vs live nodes.  This gives operators
+	 * visibility into index bloat that VACUUM/compaction has not reclaimed
+	 * (e.g. multivector docmap indexes where compaction is intentionally
+	 * skipped to preserve docmap correctness).  The walk is O(node_count)
+	 * and touches only the code chain pages.
+	 */
+	if (meta.tqNodeCount > 0 && BlockNumberIsValid(meta.tqCodeStartBlkno))
+	{
+		int64		statsLiveNodes = 0;
+		int64		statsDeadNodes = 0;
+		int64		statsAdjRefs = 0;
+		int64		statsDeadAdjRefs = 0;
+
+		PgturbohybridGraphCollectVacuumStats(index, &meta,
+											  &statsLiveNodes, &statsDeadNodes,
+											  &statsAdjRefs, &statsDeadAdjRefs);
+		PgturbohybridIndexStatsJsonbAddUInt32(&jsonState, "live_node_count",
+										  (uint32) statsLiveNodes);
+		PgturbohybridIndexStatsJsonbAddUInt32(&jsonState, "dead_node_count",
+										  (uint32) statsDeadNodes);
+		if (meta.tqNodeCount > 0)
+		{
+			/* dead_node_ratio is a percentage (0-100) rounded to 2 decimals */
+			float8		ratio = 100.0 * (double) statsDeadNodes /
+				(double) meta.tqNodeCount;
+
+			PgturbohybridIndexStatsJsonbAddFloat8(&jsonState, "dead_node_ratio",
+											   ratio);
+		}
+		if (statsAdjRefs > 0)
+		{
+			float8		deadRefRatio = 100.0 * (double) statsDeadAdjRefs /
+				(double) statsAdjRefs;
+
+			PgturbohybridIndexStatsJsonbAddFloat8(&jsonState, "dead_neighbor_ref_ratio",
+											   deadRefRatio);
+		}
+	}
+	else
+	{
+		PgturbohybridIndexStatsJsonbAddUInt32(&jsonState, "live_node_count", 0);
+		PgturbohybridIndexStatsJsonbAddUInt32(&jsonState, "dead_node_count", 0);
+	}
 	PgturbohybridIndexStatsJsonbAddUInt32(&jsonState, "dimensions",
-										  meta.dimensions);
+									  meta.dimensions);
 	PgturbohybridIndexStatsJsonbAddUInt32(&jsonState, "graph_m", graphM);
 	PgturbohybridIndexStatsJsonbAddUInt32(&jsonState, "graph_ef_construction",
 										  graphEfConstruction);

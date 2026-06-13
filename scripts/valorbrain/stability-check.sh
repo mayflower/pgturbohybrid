@@ -154,7 +154,40 @@ else
   pass "documents_fts dead tuples ${dead_pct:-0}%"
 fi
 
-# 6) Native cache disk (if visible)
+# 6) pgturbohybrid index bloat (dead-node ratio)
+#
+# After the docmap compaction guard (skip compaction for multivector docmap
+# indexes), dead nodes accumulate silently until REINDEX.  This check surfaces
+# the dead_node_ratio from turbohybrid_index_stats() so operators can schedule
+# REINDEX before p95 latency degrades.
+BLOAT_THRESHOLD="${STABILITY_INDEX_BLOAT_RATIO:-25.0}"
+bloat_rows="$("${PSQL[@]}" -tAc "
+  SELECT c.oid::regclass::text
+  FROM pg_class c
+  JOIN pg_am am ON am.oid = c.relam
+  WHERE am.amname = 'turbohybrid'
+    AND c.relkind = 'i';
+" 2>/dev/null || true)"
+if [[ -z "$bloat_rows" ]]; then
+  note "no turbohybrid indexes found (bloat check skipped)"
+else
+  while IFS= read -r idx_name; do
+    [[ -z "$idx_name" ]] && continue
+    stats_json="$("${PSQL[@]}" -tAc "
+      SELECT turbohybrid_index_stats('${idx_name}'::regclass)::jsonb;
+    " 2>/dev/null || echo '{}')"
+    dead_ratio="$(echo "$stats_json" | sed -n 's/.*\"dead_node_ratio\"[[:space:]]*:[[:space:]]*\([0-9.]*\).*/\1/p' || echo '0')"
+    live_nodes="$(echo "$stats_json" | sed -n 's/.*\"live_node_count\"[[:space:]]*:[[:space:]]*\([0-9]*\).*/\1/p' || echo '0')"
+    dead_nodes="$(echo "$stats_json" | sed -n 's/.*\"dead_node_count\"[[:space:]]*:[[:space:]]*\([0-9]*\).*/\1/p' || echo '0')"
+    if awk -v r="${dead_ratio:-0}" -v t="$BLOAT_THRESHOLD" 'BEGIN { exit !(r+0 >= t+0) }'; then
+      warn "index ${idx_name} dead_node_ratio ${dead_ratio} (>= ${BLOAT_THRESHOLD}) — live=${live_nodes} dead=${dead_nodes}, schedule REINDEX"
+    else
+      pass "index ${idx_name} dead_node_ratio ${dead_ratio:-0} (live=${live_nodes} dead=${dead_nodes})"
+    fi
+  done <<<"$bloat_rows"
+fi
+
+# 7) Native cache disk (if visible)
 for cache_dir in /var/lib/postgresql/*/main/pg_turbohybrid_cache; do
   if [[ -d "$cache_dir" ]]; then
     cache_mb="$(du -sm "$cache_dir" | awk '{print $1}')"
@@ -166,14 +199,14 @@ for cache_dir in /var/lib/postgresql/*/main/pg_turbohybrid_cache; do
   fi
 done
 
-# 7) Scalar fallback guard (hybrid must use Index Scan)
+# 8) Scalar fallback guard (hybrid must use Index Scan)
 if ! bash "$ROOT_DIR/scripts/valorbrain/scalar-fallback-guard.sh" >/dev/null 2>&1; then
   fail "scalar fallback guard"
 else
   pass "scalar fallback guard"
 fi
 
-# 8) Light concurrent hybrid reads
+# 9) Light concurrent hybrid reads
 hybrid_worker() {
   local wid="$1"
   local round
@@ -207,7 +240,7 @@ for pid in "${pids[@]}"; do
 done
 pass "concurrent hybrid queries (${WORKERS}x${ROUNDS})"
 
-# 9) Engine health (optional — skip if engine down)
+# 10) Engine health (optional — skip if engine down)
 if curl -sf "${ENGINE_URL}/health" >/tmp/vb-health.json 2>/dev/null; then
   if grep -q '"status":"ok"' /tmp/vb-health.json; then
     pass "valorbrain engine /health ok"
@@ -218,7 +251,7 @@ else
   note "WARN: valorbrain engine not reachable at ${ENGINE_URL}/health (skipped)"
 fi
 
-# 10) Recent PG errors (pgturbohybrid / BM25)
+# 11) Recent PG errors (pgturbohybrid / BM25)
 if command -v journalctl >/dev/null 2>&1; then
   err_count="$(journalctl -u postgresql --since "15 min ago" --no-pager 2>/dev/null \
     | grep -ciE 'pgturbohybrid|BM25 page kind|unexpected' || true)"
@@ -228,7 +261,7 @@ if command -v journalctl >/dev/null 2>&1; then
     pass "no pgturbohybrid errors in PG logs (15m)"
   fi
 
-  # 10b) UAT #8 — zero segfault / pg_ripple crash signals (7d)
+  # 11b) UAT #8 — zero segfault / pg_ripple crash signals (7d)
   segfault_count="$(journalctl -u postgresql --since "7 days ago" --no-pager 2>/dev/null \
     | grep -ciE 'segfault|signal 11|pg_ripple.*(crash|fatal|panic)' || true)"
   if [[ "${segfault_count:-0}" -gt 0 ]]; then
