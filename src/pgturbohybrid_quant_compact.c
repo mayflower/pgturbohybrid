@@ -549,6 +549,20 @@ PgturbohybridGraphMaybeCompactPageChains(Relation index)
 		!BlockNumberIsValid(meta.tqCodeStartBlkno))
 		return;
 
+	/*
+	 * Multivector indexes with a docmap sidecar cannot be compacted yet.
+	 * The compaction phases remap nodeIds in the code/adj/exact chains and
+	 * reduce tqNodeCount, but the docmap sidecar's node/doc tuples still
+	 * reference the old nodeIds.  Rewriting the docmap would require a
+	 * dedicated phase that remaps firstNodeId in every node tuple and doc
+	 * tuple entry — until that exists, skipping compaction keeps the index
+	 * correct (dead nodes stay marked and are skipped at scan time) at the
+	 * cost of retaining dead-node page bloat.  REINDEX remains the full
+	 * compaction path for these indexes.
+	 */
+	if (BlockNumberIsValid(meta.tqMultivectorDocMapStartBlkno))
+		return;
+
 	threshold = PgturbohybridGraphGetPageCompactionThreshold(index);
 	if (threshold <= 0)
 		return;

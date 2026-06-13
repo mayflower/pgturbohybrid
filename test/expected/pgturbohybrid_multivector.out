@@ -2697,6 +2697,28 @@ END
 $$;
 RESET enable_seqscan;
 RESET turbohybrid.multivector_plain_fallback;
+-- Regression: multivector docmap sidecar must survive VACUUM with heavy churn.
+-- Compaction is skipped for docmap-backed indexes (nodeId remapping would
+-- invalidate the sidecar).  This test exercises delete + update + VACUUM and
+-- confirms the index remains queryable without "docmap sidecar is invalid".
+DELETE FROM mv_document_node_docs WHERE id = 1;
+UPDATE mv_document_node_docs
+SET colbert = turbohybrid_multivector(ARRAY['[-0.5,0.5]'::vector])
+WHERE id = 3;
+VACUUM mv_document_node_docs;
+SET enable_seqscan = off;
+SELECT id <> 1 AS document_node_compaction_guard_survived
+FROM mv_document_node_docs
+ORDER BY colbert <~> turbohybrid_query(
+  multivector_query => turbohybrid_multivector(ARRAY['[-0.5,0.5]'::vector]),
+  dense_k => 4,
+  final_k => 1
+)
+LIMIT 1;
+document_node_compaction_guard_survived
+t
+(1 row)
+RESET enable_seqscan;
 DROP TABLE mv_document_node_docs;
 CREATE TABLE mv_document_node_pool_docs (
   id int PRIMARY KEY,
