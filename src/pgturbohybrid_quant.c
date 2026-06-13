@@ -15999,10 +15999,35 @@ tqgraphbulkdelete(IndexVacuumInfo *info, IndexBulkDeleteResult *stats,
 IndexBulkDeleteResult *
 tqgraphvacuumcleanup(IndexVacuumInfo *info, IndexBulkDeleteResult *stats)
 {
-	(void) info;
+	Relation	index = info->index;
+	PgturbohybridGraphMetaPageData meta;
 
 	if (stats == NULL)
+	{
+		/*
+		 * Autovacuum estimate pass: no bulkdelete ran.  Populate
+		 * num_index_tuples so the planner/autovacuum scheduler sees a
+		 * realistic live-tuple count instead of zero.  Without this,
+		 * autovacuum treats the index as empty and never schedules
+		 * cleanup cycles, allowing dead-node bloat to grow unbounded.
+		 */
 		stats = palloc0(sizeof(IndexBulkDeleteResult));
+		stats->estimated_count = true;
+
+		if (PgturbohybridGraphReadMeta(index, &meta) && meta.tqNodeCount > 0)
+		{
+			int64		liveNodes = 0;
+			int64		deadNodes = 0;
+			int64		adjacencyRefs = 0;
+			int64		deadNeighborRefs = 0;
+
+			PgturbohybridGraphCollectVacuumStats(index, &meta,
+												 &liveNodes, &deadNodes,
+												 &adjacencyRefs, &deadNeighborRefs);
+			stats->num_index_tuples = liveNodes;
+			stats->tuples_removed = deadNodes;
+		}
+	}
 
 	return stats;
 }
