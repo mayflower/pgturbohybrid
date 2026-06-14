@@ -70,6 +70,15 @@ static relopt_enum_elt_def pgturbohybrid_multivector_doc_build_scorer_relopt_opt
 	{NULL, 0}
 };
 
+static relopt_enum_elt_def pgturbohybrid_multivector_doc_storage_relopt_options[] = {
+	{"f32", PGTURBOHYBRID_MULTIVECTOR_DOC_STORAGE_F32},
+	{"f16", PGTURBOHYBRID_MULTIVECTOR_DOC_STORAGE_F16},
+	{"sq8", PGTURBOHYBRID_MULTIVECTOR_DOC_STORAGE_SQ8},
+	{"centroid_only", PGTURBOHYBRID_MULTIVECTOR_DOC_STORAGE_CENTROID_ONLY},
+	{"proxy_only", PGTURBOHYBRID_MULTIVECTOR_DOC_STORAGE_PROXY_ONLY},
+	{NULL, 0}
+};
+
 static void
 PgturbohybridIndexStatsJsonbAddKey(PgturbohybridJsonbState *state, const char *key)
 {
@@ -675,6 +684,12 @@ PgturbohybridGraphInit(void)
 					   PGTURBOHYBRID_DEFAULT_MULTIVECTOR_DOC_BUILD_SCORER,
 					   "Valid values are \"proxy\" and \"exact_symmetric\". Only meaningful with multivector_graph = document_nodes.",
 					   AccessExclusiveLock);
+	add_enum_reloption(pgturbohybrid_relopt_kind, "multivector_doc_storage",
+					   "Document-node multivector sidecar storage mode.",
+					   pgturbohybrid_multivector_doc_storage_relopt_options,
+					   PGTURBOHYBRID_MULTIVECTOR_DOC_STORAGE_F32,
+					   "Valid values are \"f32\", \"f16\", \"sq8\", experimental \"centroid_only\", and experimental \"proxy_only\".",
+					   AccessExclusiveLock);
 
 	PgturbohybridGraphControlInit();
 }
@@ -892,6 +907,9 @@ pgturbohybrid_index_stats(PG_FUNCTION_ARGS)
 	PgturbohybridOptions *opts;
 	PgturbohybridJsonbState jsonState;
 	Jsonb	   *result;
+	int			multivectorDocStorage;
+	bool		proxyOnlyIndex;
+	bool		fullMultivectorSidecarAvailable;
 
 	index = index_open(indexOid, AccessShareLock);
 	opts = (PgturbohybridOptions *) index->rd_options;
@@ -913,6 +931,15 @@ pgturbohybrid_index_stats(PG_FUNCTION_ARGS)
 	routingEntryBytes = meta.tqRoutingEntryBytes;
 	residualRerankBytes = meta.tqResidualRerankBytes;
 	routing = opts != NULL ? opts->routing : PGTURBOHYBRID_ROUTING_AUTO;
+	multivectorDocStorage = opts != NULL ? opts->multivectorDocStorage :
+		PGTURBOHYBRID_MULTIVECTOR_DOC_STORAGE_F32;
+	proxyOnlyIndex =
+		multivectorDocStorage == PGTURBOHYBRID_MULTIVECTOR_DOC_STORAGE_PROXY_ONLY ||
+		((meta.tqMultivectorDocMapFlags &
+		  PGTURBOHYBRID_GRAPH_MULTIVECTOR_DOCMAP_FLAG_PROXY_ONLY) != 0);
+	fullMultivectorSidecarAvailable =
+		(meta.tqMultivectorDocMapFlags &
+		 PGTURBOHYBRID_GRAPH_MULTIVECTOR_DOCMAP_FLAG_DOC_VECTORS) != 0;
 	tqBm25MetaStartBlkno = meta.tqBm25MetaStartBlkno;
 	hasLexicalKey = PgturbohybridIndexHasLexical(index);
 	modelInfo =
@@ -1011,6 +1038,16 @@ pgturbohybrid_index_stats(PG_FUNCTION_ARGS)
 											  opts != NULL ?
 											  opts->multivectorDocBuildScorer :
 											  PGTURBOHYBRID_DEFAULT_MULTIVECTOR_DOC_BUILD_SCORER));
+	PgturbohybridIndexStatsJsonbAddString(&jsonState, "multivector_doc_storage",
+										  PgturbohybridMultiVectorDocStorageKindName(
+											  proxyOnlyIndex ?
+											  PGTURBOHYBRID_MULTIVECTOR_DOC_STORAGE_PROXY_ONLY :
+											  multivectorDocStorage));
+	PgturbohybridIndexStatsJsonbAddBool(&jsonState, "proxy_only_index",
+										proxyOnlyIndex);
+	PgturbohybridIndexStatsJsonbAddBool(&jsonState,
+										"full_multivector_sidecar_available",
+										fullMultivectorSidecarAvailable);
 	PgturbohybridIndexStatsJsonbAddString(&jsonState, "multivector_proxy_encoder",
 										  PgturbohybridMultiVectorProxyEncoderName(
 											  opts != NULL ?
@@ -1114,10 +1151,15 @@ pgturbohybrid_index_stats(PG_FUNCTION_ARGS)
 		PgturbohybridIndexStatsJsonbAddUInt32(&jsonState,
 											  "quantized_inverted_codebook_top_m",
 											  codebookStorage.multivectorQuantizedInvertedCodebookTopM);
+		PgturbohybridIndexStatsJsonbAddUInt32(&jsonState,
+											  "quantized_inverted_codebook_version",
+											  PGTURBOHYBRID_GRAPH_MULTIVECTOR_DOCMAP_VERSION);
 	}
 	PgturbohybridIndexStatsJsonbAddBool(&jsonState, "bm25_branch_available",
 										hasLexicalKey && hasBm25Meta);
 	PgturbohybridIndexStatsJsonbAddUInt32(&jsonState, "blocks", nblocks);
+	PgturbohybridIndexStatsJsonbAddUInt64(&jsonState, "index_bytes",
+										  (uint64) nblocks * BLCKSZ);
 	PgturbohybridIndexStatsJsonbAddUInt32(&jsonState, "node_count",
 										  meta.tqNodeCount);
 	PgturbohybridIndexStatsJsonbAddUInt32(&jsonState, "dimensions",

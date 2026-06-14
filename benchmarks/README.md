@@ -340,11 +340,78 @@ external learned-sparse features are available through
 uses learned-sparse postings only for admission before exact MaxSim final
 ordering. When proxy-encoder variants are also enabled, it adds
 `proxy_max_pool_f16_learned_sparse_rescue` for the same focused proxy-quality
-comparison. Mixed BM25 and learned-sparse runs build separate physical index
-groups: BM25 rescue uses `body_tsv`, while learned-sparse rescue uses
-`learned_sparse_tsv`. The report records learned-sparse document/query coverage
-after JSONL import; partial coverage is flagged and should be treated as
-candidate-source plumbing evidence, not production serving evidence.
+comparison. When learned-sparse rescue, proxy-encoder variants, and reservoirs
+are all enabled, the grid also adds
+`proxy_max_pool_f16_reservoir_balanced_learned_sparse_rescue` to test whether the
+fast `max_pool` proxy can become safe with both rescue mechanisms. Use
+`--document-node-serving-grid-learned-sparse-focus` for the compact comparison
+set around this question. Mixed BM25 and learned-sparse runs build separate
+physical index groups: BM25 rescue uses `body_tsv`, while learned-sparse rescue
+uses `learned_sparse_tsv`. The report records learned-sparse document/query
+coverage after JSONL import; partial coverage is flagged and should be treated
+as candidate-source plumbing evidence, not production serving evidence.
+JSONL files whose filename or metadata indicates `hash`, `toy`, `sample`, or
+`plumbing_only` are also classified as plumbing-only even when their row counts
+match the loaded docs and queries. The local hash sparse JSONL fixtures validate
+benchmark wiring only; they must not be used to promote learned-sparse rescue to
+safe serving evidence. A real learned-sparse artifact should include either a
+metadata header row or sidecar manifest with stable provenance, for example:
+
+```json
+{
+  "kind": "metadata",
+  "feature_source": "splade",
+  "feature_version": "feature-generator-v1",
+  "model_name": "example/sparse-model",
+  "model_checksum": "sha256:...",
+  "plumbing_only": false,
+  "expected_doc_count": 10000,
+  "expected_query_count": 100
+}
+```
+
+If no metadata is present but coverage is complete, the run remains reportable
+and eligible as benchmark evidence, but the report adds
+`feature_provenance_unknown`. Treat that as a follow-up requirement before
+turning the profile into serving guidance.
+
+Production readiness for learned-sparse rescue requires all of the following
+evidence before it is used as a serving profile:
+
+- Document JSONL coverage is 100% for the served corpus.
+- Query JSONL coverage is 100% for the benchmark queries.
+- The JSONL provenance is real learned-sparse evidence, not hash/toy/sample
+  plumbing.
+- The `term_id` vocabulary is stable across document and query feature files.
+- The feature-generator version is recorded in the benchmark artifact.
+- The feature-generator model name and checksum are recorded when available.
+- `learned_sparse_tsv` is built and indexed; learned-sparse profiles must not
+  silently use `body_tsv`.
+- The query path uses `turbohybrid_sparse_vector_to_tsquery(q.learned_sparse)`,
+  not the web-search text fallback.
+- Final ranking remains exact MaxSim over retained multivector candidates.
+- Rescue cap accounting is present, including learned-sparse candidates,
+  retained-for-MaxSim counts, and branch latency.
+- p95 latency and admission thresholds pass on the target corpus, not only on a
+  tiny plumbing smoke.
+
+Before adding or updating any SQL-visible
+`turbohybrid.multivector_serving_profile` mapping, validate the evidence
+artifact explicitly:
+
+```bash
+SERVING_GRID_JSON=.nix-dev/tmp/dbpedia-colbert-serving-validation-10k.json \
+nix --extra-experimental-features 'nix-command flakes' develop --command \
+  python benchmarks/dbpedia_colbert_multivector.py \
+    --validate-serving-profile-guc-evidence
+```
+
+The gate refuses smoke-only artifacts, undersized runs, incomplete
+learned-sparse coverage, experimental profiles, missing admission or qrel
+quality metrics, and slow-path warnings. `ALLOW_UNSAFE_PROFILE=1` is the only
+override path and must be present explicitly in the prompt that requests the
+GUC change.
+
 Add `--document-node-serving-grid-include-centroid-lite-caps` only for focused
 centroid-lite pruning experiments. It appends capped profile names such as
 `centroid_lite_f16_cap_016`, `centroid_lite_f16_cap_032`, and

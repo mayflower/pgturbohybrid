@@ -298,6 +298,8 @@ static const struct config_enum_entry pgturbohybrid_multivector_doc_storage_opti
 	{"f32", PGTURBOHYBRID_MULTIVECTOR_DOC_STORAGE_F32, false},
 	{"f16", PGTURBOHYBRID_MULTIVECTOR_DOC_STORAGE_F16, false},
 	{"sq8", PGTURBOHYBRID_MULTIVECTOR_DOC_STORAGE_SQ8, false},
+	{"centroid_only", PGTURBOHYBRID_MULTIVECTOR_DOC_STORAGE_CENTROID_ONLY, false},
+	{"proxy_only", PGTURBOHYBRID_MULTIVECTOR_DOC_STORAGE_PROXY_ONLY, false},
 	{NULL, 0, false}
 };
 
@@ -571,6 +573,15 @@ static relopt_enum_elt_def pgturbohybrid_multivector_graph_relopt_options[] = {
 static relopt_enum_elt_def pgturbohybrid_multivector_doc_build_scorer_relopt_options[] = {
 	{"proxy", PGTURBOHYBRID_MULTIVECTOR_DOC_BUILD_SCORER_PROXY},
 	{"exact_symmetric", PGTURBOHYBRID_MULTIVECTOR_DOC_BUILD_SCORER_EXACT_SYMMETRIC},
+	{NULL, 0}
+};
+
+static relopt_enum_elt_def pgturbohybrid_multivector_doc_storage_relopt_options[] = {
+	{"f32", PGTURBOHYBRID_MULTIVECTOR_DOC_STORAGE_F32},
+	{"f16", PGTURBOHYBRID_MULTIVECTOR_DOC_STORAGE_F16},
+	{"sq8", PGTURBOHYBRID_MULTIVECTOR_DOC_STORAGE_SQ8},
+	{"centroid_only", PGTURBOHYBRID_MULTIVECTOR_DOC_STORAGE_CENTROID_ONLY},
+	{"proxy_only", PGTURBOHYBRID_MULTIVECTOR_DOC_STORAGE_PROXY_ONLY},
 	{NULL, 0}
 };
 
@@ -1374,6 +1385,8 @@ typedef struct PgturbohybridLastScanStats
 	uint32		multivectorDocGraphEntrySampleScored;
 	uint64		multivectorDocGraphQuantizedScores;
 	char		multivectorDocGraphStorageKind[16];
+	bool		proxyOnlyIndex;
+	bool		fullMultivectorSidecarAvailable;
 	char		multivectorDocGraphRescoreSource[16];
 	uint32		multivectorDocGraphExactRerankDocs;
 	uint64		multivectorDocGraphHeapFetches;
@@ -1890,6 +1903,10 @@ PgturbohybridGetLastScanStatsSnapshot(PgturbohybridScanStatsSnapshot *stats)
 	strlcpy(stats->multivectorDocGraphStorageKind,
 			pgturbohybrid_last_scan_state.multivectorDocGraphStorageKind,
 			sizeof(stats->multivectorDocGraphStorageKind));
+	stats->proxyOnlyIndex =
+		pgturbohybrid_last_scan_state.proxyOnlyIndex;
+	stats->fullMultivectorSidecarAvailable =
+		pgturbohybrid_last_scan_state.fullMultivectorSidecarAvailable;
 	strlcpy(stats->multivectorDocGraphRescoreSource,
 			pgturbohybrid_last_scan_state.multivectorDocGraphRescoreSource,
 			sizeof(stats->multivectorDocGraphRescoreSource));
@@ -6040,6 +6057,9 @@ PgturbohybridCollectScanResults(IndexScanDesc scan, PgturbohybridScanState *stat
 	strlcpy(lastStats.multivectorDocGraphStorageKind,
 			denseStats.multivectorDocGraphStorageKind,
 			sizeof(lastStats.multivectorDocGraphStorageKind));
+	lastStats.proxyOnlyIndex = denseStats.proxyOnlyIndex;
+	lastStats.fullMultivectorSidecarAvailable =
+		denseStats.fullMultivectorSidecarAvailable;
 	strlcpy(lastStats.multivectorDocGraphRescoreSource,
 			denseStats.multivectorDocGraphRescoreSource,
 			sizeof(lastStats.multivectorDocGraphRescoreSource));
@@ -7305,6 +7325,7 @@ pgturbohybridamoptions(Datum reloptions, bool validate)
 		PGTURBOHYBRID_RELOPT_PARSE("residual_rerank_bytes", RELOPT_TYPE_INT, residualRerankBytes),
 		PGTURBOHYBRID_RELOPT_PARSE("multivector_graph", RELOPT_TYPE_ENUM, multivectorGraphMode),
 		PGTURBOHYBRID_RELOPT_PARSE("multivector_doc_build_scorer", RELOPT_TYPE_ENUM, multivectorDocBuildScorer),
+		PGTURBOHYBRID_RELOPT_PARSE("multivector_doc_storage", RELOPT_TYPE_ENUM, multivectorDocStorage),
 		PGTURBOHYBRID_RELOPT_PARSE("multivector_token_pooling", RELOPT_TYPE_ENUM, multivectorTokenPooling),
 		PGTURBOHYBRID_RELOPT_PARSE("multivector_token_pooling_target_ratio", RELOPT_TYPE_REAL, multivectorTokenPoolingTargetRatio),
 		PGTURBOHYBRID_RELOPT_PARSE("multivector_token_pooling_min_tokens", RELOPT_TYPE_INT, multivectorTokenPoolingMinTokens),
@@ -7448,6 +7469,12 @@ PgturbohybridInit(void)
 					   pgturbohybrid_multivector_doc_build_scorer_relopt_options,
 					   PGTURBOHYBRID_DEFAULT_MULTIVECTOR_DOC_BUILD_SCORER,
 					   "Valid values are \"proxy\" and \"exact_symmetric\". Only meaningful with multivector_graph = document_nodes.",
+					   AccessExclusiveLock);
+	add_enum_reloption(pgturbohybrid_relopt_kind, "multivector_doc_storage",
+					   "Document-node multivector sidecar storage mode.",
+					   pgturbohybrid_multivector_doc_storage_relopt_options,
+					   PGTURBOHYBRID_MULTIVECTOR_DOC_STORAGE_F32,
+		"Valid values are \"f32\", \"f16\", \"sq8\", experimental \"centroid_only\", and experimental \"proxy_only\". \"centroid_only\" stores centroid sidecars for centroid_lite with heap exact rerank; \"proxy_only\" stores graph proxy vectors and doc mapping only.",
 					   AccessExclusiveLock);
 	add_enum_reloption(pgturbohybrid_relopt_kind, "multivector_token_pooling",
 					   "Index-time document-token pooling mode for multivector document_nodes indexes.",
@@ -7640,7 +7667,7 @@ PgturbohybridInit(void)
 							PGC_USERSET, 0, NULL, NULL, NULL);
 	DefineCustomEnumVariable("turbohybrid.multivector_doc_storage",
 							 "Document-node multivector sidecar scoring storage",
-							 "f32 uses the exact float32 sidecar for traversal; f16 and sq8 build compact in-memory scoring sidecars and keep exact heap rerank for final ordering.",
+							 "f32 uses the exact float32 sidecar for traversal; f16 and sq8 build compact in-memory scoring sidecars and keep exact heap rerank for final ordering; proxy_only is an experimental index reloption for proxy graph admission with heap exact rerank.",
 							 &pgturbohybrid_multivector_doc_storage,
 							 PGTURBOHYBRID_MULTIVECTOR_DOC_STORAGE_F32,
 							 pgturbohybrid_multivector_doc_storage_options,

@@ -919,6 +919,19 @@ PgturbohybridGraphGetMultiVectorDocBuildScorerOption(Relation index)
 }
 
 int
+PgturbohybridGraphGetMultiVectorDocStorageOption(Relation index)
+{
+	TqOptions  *opts;
+
+	if (!PgturbohybridGraphIspgturbohybridIndex(index))
+		return PGTURBOHYBRID_MULTIVECTOR_DOC_STORAGE_F32;
+
+	opts = (TqOptions *) index->rd_options;
+	return opts != NULL ? opts->multivectorDocStorage :
+		PGTURBOHYBRID_MULTIVECTOR_DOC_STORAGE_F32;
+}
+
+int
 PgturbohybridGraphGetMultiVectorTokenPoolingOption(Relation index)
 {
 	TqOptions  *opts;

@@ -3492,6 +3492,7 @@ BEGIN
 		stats->>'quantized_inverted_codebook_checksum' <> 'deterministic' OR
 		(stats->>'quantized_inverted_codebook_top_m')::int <> 1 OR
 		NOT (stats ? 'quantized_inverted_assignment_us') OR
+		NOT (stats ? 'quantized_inverted_assignment_time_us') OR
 		NOT (stats ? 'quantized_inverted_list_offset_bytes') OR
 		NOT (stats ? 'quantized_inverted_posting_bytes') OR
 		NOT (stats ? 'quantized_inverted_sidecar_bytes') OR
@@ -3520,7 +3521,8 @@ BEGIN
 		(index_stats->>'quantized_inverted_codebook_size')::int <> 4 OR
 		(index_stats->>'quantized_inverted_codebook_dim')::int <> 2 OR
 		index_stats->>'quantized_inverted_codebook_checksum' <> 'deterministic' OR
-		(index_stats->>'quantized_inverted_codebook_top_m')::int <> 1 THEN
+		(index_stats->>'quantized_inverted_codebook_top_m')::int <> 1 OR
+		(index_stats->>'quantized_inverted_codebook_version')::int <= 0 THEN
 		RAISE EXCEPTION 'quantized_inverted_experimental index stats missing codebook metadata: %',
 			index_stats;
 	END IF;
@@ -3617,7 +3619,8 @@ BEGIN
 		(index_stats->>'quantized_inverted_codebook_size')::int <> 4 OR
 		(index_stats->>'quantized_inverted_codebook_dim')::int <> 2 OR
 		index_stats->>'quantized_inverted_codebook_checksum' <> 'checksum_ok' OR
-		(index_stats->>'quantized_inverted_codebook_top_m')::int <> 1 THEN
+		(index_stats->>'quantized_inverted_codebook_top_m')::int <> 1 OR
+		(index_stats->>'quantized_inverted_codebook_version')::int <= 0 THEN
 		RAISE EXCEPTION 'external quantized_inverted index stats missing codebook metadata: %',
 			index_stats;
 	END IF;
@@ -3636,7 +3639,8 @@ BEGIN
 	stats := turbohybrid_last_scan_stats();
 	IF stats->>'quantized_inverted_codebook_source' <> 'external' OR
 		stats->>'quantized_inverted_codebook_checksum' <> 'checksum_ok' OR
-		(stats->>'quantized_inverted_assignment_us')::bigint < 0 THEN
+		(stats->>'quantized_inverted_assignment_us')::bigint < 0 OR
+		(stats->>'quantized_inverted_assignment_time_us')::bigint < 0 THEN
 		RAISE EXCEPTION 'external quantized_inverted scan missing codebook stats: %',
 			stats;
 	END IF;
@@ -3797,6 +3801,9 @@ BEGIN
 		(stats->>'centroid_docs_touched')::int <= 0 OR
 		(stats->>'centroid_candidates')::int <= 0 OR
 		(stats->>'centroid_upper_bound_docs_checked')::int <> 0 OR
+		(stats->>'centroid_upper_bound_docs_pruned')::int <> 0 OR
+		(stats->>'centroid_upper_bound_prune_ratio')::float8 <> 0.0 OR
+		(stats->>'centroid_upper_bound_time_us')::bigint <> 0 OR
 		(stats->>'centroid_candidates_before_bound')::int <> 0 OR
 		(stats->>'centroid_candidates_after_bound')::int <> 0 OR
 		stats->>'multivector_exact_rerank_source' <> 'heap' OR
@@ -3834,8 +3841,13 @@ BEGIN
 		(stats->>'centroid_bitset_lists_used')::int <= 0 OR
 		(stats->>'centroid_bitset_docs_set')::int <= 0 OR
 		(stats->>'centroid_bitset_docs_after_threshold')::int <= 0 OR
+		(stats->>'centroid_bitset_candidates')::int <>
+			(stats->>'centroid_bitset_docs_after_threshold')::int OR
 		(stats->>'centroid_bitset_memory_bytes')::bigint <= 0 OR
+		(stats->>'centroid_bitset_memory_bytes')::bigint >
+			(current_setting('turbohybrid.multivector_max_accumulator_mb')::bigint * 1024 * 1024) OR
 		(stats->>'centroid_bitset_prefilter_time_us')::bigint < 0 OR
+		(stats->>'centroid_bitset_time_us')::bigint < 0 OR
 		stats->>'multivector_exact_rerank_source' <> 'heap' OR
 		(stats->>'multivector_doc_graph_exact_rerank_docs')::int < 3 OR
 		(stats->>'multivector_exact_rerank_docs')::int < 3 THEN
@@ -3871,7 +3883,9 @@ BEGIN
 		(stats->>'centroid_upper_bound_unsafe_fallbacks')::int <> 0 OR
 		(stats->>'centroid_candidates_before_bound')::int <= 0 OR
 		(stats->>'centroid_candidates_after_bound')::int <> (stats->>'centroid_candidates_before_bound')::int OR
-		(stats->>'centroid_upper_bound_prune_time_us')::bigint < 0 THEN
+		(stats->>'centroid_upper_bound_prune_time_us')::bigint < 0 OR
+		(stats->>'centroid_upper_bound_time_us')::bigint < 0 OR
+		(stats->>'centroid_upper_bound_prune_ratio')::float8 <> 0.0 THEN
 		RAISE EXCEPTION 'centroid_lite safe upper-bound mode changed exact result or missing stats: exact %, pruned %, stats %',
 			exact_ids, centroid_pruned_ids, stats;
 	END IF;
@@ -4054,12 +4068,14 @@ BEGIN
 
 	IF pruned_ids <> exact_ids OR
 		stats->>'centroid_upper_bound_enabled' <> 'true' OR
-		(stats->>'centroid_upper_bound_docs_checked')::int < 0 OR
-		(stats->>'centroid_upper_bound_docs_pruned')::int < 0 OR
+		(stats->>'centroid_upper_bound_docs_checked')::int <= 0 OR
+		(stats->>'centroid_upper_bound_docs_pruned')::int <= 0 OR
 		(stats->>'centroid_upper_bound_unsafe_fallbacks')::int <> 0 OR
 		(stats->>'centroid_candidates_before_bound')::int <
 			(stats->>'centroid_candidates_after_bound')::int OR
-		(stats->>'centroid_candidates_after_bound')::int <= 0 THEN
+		(stats->>'centroid_candidates_after_bound')::int <= 0 OR
+		(stats->>'centroid_upper_bound_time_us')::bigint < 0 OR
+		(stats->>'centroid_upper_bound_prune_ratio')::float8 <= 0.0 THEN
 		RAISE EXCEPTION 'centroid_lite safe upper-bound pruning broke exact ordering or stats: exact %, pruned %, stats %',
 			exact_ids, pruned_ids, stats;
 	END IF;
@@ -4291,6 +4307,309 @@ BEGIN
 END
 $$;
 
+CREATE TEMP TABLE mv_doc_proxy_only_docs (
+	id int,
+	colbert turbohybrid_multivector
+);
+
+INSERT INTO mv_doc_proxy_only_docs VALUES
+	(1, turbohybrid_multivector(ARRAY['[1,0]'::vector, '[0,1]'::vector])),
+	(2, turbohybrid_multivector(ARRAY['[0.9,0.1]'::vector, '[0.8,0.2]'::vector])),
+	(3, turbohybrid_multivector(ARRAY['[-1,0]'::vector, '[-1,0]'::vector])),
+	(4, turbohybrid_multivector(ARRAY['[0,1]'::vector, '[0,1]'::vector]));
+
+CREATE INDEX mv_doc_proxy_only_docs_idx ON mv_doc_proxy_only_docs
+USING turbohybrid (colbert multivector_cosine_turbohybrid_ops)
+WITH (
+	quantization_bits = 4,
+	exact_storage = off,
+	multivector_graph = document_nodes,
+	multivector_doc_build_scorer = proxy,
+	multivector_proxy_encoder = normalized_mean,
+	multivector_doc_storage = proxy_only
+);
+
+DO $$
+DECLARE
+	stats jsonb;
+	scan_stats jsonb;
+	query_mv turbohybrid_multivector :=
+		turbohybrid_multivector(ARRAY['[1,0]'::vector, '[0,1]'::vector]);
+	proxy_ids int[];
+BEGIN
+	stats := turbohybrid_index_stats('mv_doc_proxy_only_docs_idx'::regclass);
+	IF stats->>'multivector_doc_storage' <> 'proxy_only' OR
+		stats->>'proxy_only_index' <> 'true' OR
+		stats->>'full_multivector_sidecar_available' <> 'false' OR
+		(stats->>'node_count')::int <> 4 OR
+		(stats->>'index_bytes')::bigint <= 0 THEN
+		RAISE EXCEPTION 'unexpected proxy_only index stats: %', stats;
+	END IF;
+
+	PERFORM set_config('enable_seqscan', 'off', true);
+	PERFORM set_config('turbohybrid.multivector_candidate_source', 'proxy_vector', true);
+	PERFORM set_config('turbohybrid.multivector_plain_fallback', 'off', true);
+	PERFORM set_config('turbohybrid.multivector_doc_candidate_k', '4', true);
+	PERFORM set_config('turbohybrid.multivector_exact_rerank_k', '4', true);
+	PERFORM set_config('turbohybrid.multivector_doc_graph_search_ef', '4', true);
+
+	SELECT array_agg(id ORDER BY distance, id) INTO proxy_ids
+	FROM (
+		SELECT id,
+		       colbert <~> turbohybrid_query(
+			       multivector_query => query_mv,
+			       dense_k => 4,
+			       final_k => 4
+		       ) AS distance
+		FROM mv_doc_proxy_only_docs
+		ORDER BY colbert <~> turbohybrid_query(
+			multivector_query => query_mv,
+			dense_k => 4,
+			final_k => 4
+		)
+		LIMIT 4
+	) AS proxy_results;
+	scan_stats := turbohybrid_last_scan_stats();
+
+	IF proxy_ids IS NULL OR array_length(proxy_ids, 1) <> 4 OR
+		scan_stats->>'multivector_candidate_source' <> 'proxy_vector' OR
+		scan_stats->>'multivector_doc_storage' <> 'proxy_only' OR
+		scan_stats->>'proxy_only_index' <> 'true' OR
+		scan_stats->>'full_multivector_sidecar_available' <> 'false' OR
+		scan_stats->>'multivector_exact_rerank_source' <> 'heap' OR
+		(scan_stats->>'heap_fetches')::int <= 0 OR
+		(scan_stats->>'multivector_exact_rerank_heap_fetches')::int <= 0 THEN
+		RAISE EXCEPTION 'unexpected proxy_only scan stats: ids %, stats %',
+			proxy_ids, scan_stats;
+	END IF;
+END
+$$;
+
+DO $$
+DECLARE
+	exact_ids int[];
+	proxy_ids int[];
+	query_mv turbohybrid_multivector :=
+		turbohybrid_multivector(ARRAY['[1,0]'::vector, '[0,1]'::vector]);
+BEGIN
+	CREATE TEMP TABLE mv_doc_proxy_only_full_docs AS
+	SELECT * FROM mv_doc_proxy_only_docs;
+	CREATE INDEX mv_doc_proxy_only_full_docs_idx ON mv_doc_proxy_only_full_docs
+	USING turbohybrid (colbert multivector_cosine_turbohybrid_ops)
+	WITH (
+		quantization_bits = 4,
+		exact_storage = off,
+		multivector_graph = document_nodes,
+		multivector_doc_build_scorer = proxy,
+		multivector_proxy_encoder = normalized_mean
+	);
+
+	PERFORM set_config('enable_seqscan', 'off', true);
+	PERFORM set_config('turbohybrid.multivector_plain_fallback', 'off', true);
+	PERFORM set_config('turbohybrid.multivector_doc_candidate_k', '4', true);
+	PERFORM set_config('turbohybrid.multivector_exact_rerank_k', '4', true);
+	PERFORM set_config('turbohybrid.multivector_doc_graph_search_ef', '4', true);
+
+	PERFORM set_config('turbohybrid.multivector_candidate_source', 'exact_doc_scan', true);
+	SELECT array_agg(id ORDER BY distance, id) INTO exact_ids
+	FROM (
+		SELECT id,
+		       colbert <~> turbohybrid_query(
+			       multivector_query => query_mv,
+			       dense_k => 4,
+			       final_k => 4
+		       ) AS distance
+		FROM mv_doc_proxy_only_full_docs
+		ORDER BY colbert <~> turbohybrid_query(
+			multivector_query => query_mv,
+			dense_k => 4,
+			final_k => 4
+		)
+		LIMIT 4
+	) AS exact_results;
+
+	PERFORM set_config('turbohybrid.multivector_candidate_source', 'proxy_vector', true);
+	SELECT array_agg(id ORDER BY distance, id) INTO proxy_ids
+	FROM (
+		SELECT id,
+		       colbert <~> turbohybrid_query(
+			       multivector_query => query_mv,
+			       dense_k => 4,
+			       final_k => 4
+		       ) AS distance
+		FROM mv_doc_proxy_only_docs
+		ORDER BY colbert <~> turbohybrid_query(
+			multivector_query => query_mv,
+			dense_k => 4,
+			final_k => 4
+		)
+		LIMIT 4
+	) AS proxy_results;
+
+	IF proxy_ids <> exact_ids THEN
+		RAISE EXCEPTION 'proxy_only exhaustive proxy_vector result did not match exact_doc_scan: exact %, proxy %',
+			exact_ids, proxy_ids;
+	END IF;
+
+	DROP TABLE mv_doc_proxy_only_full_docs;
+END
+$$;
+
+DO $$
+DECLARE
+	errmsg text;
+BEGIN
+	PERFORM set_config('enable_seqscan', 'off', true);
+	PERFORM set_config('turbohybrid.multivector_plain_fallback', 'force', true);
+	PERFORM set_config('turbohybrid.multivector_candidate_source', 'centroid_lite', true);
+	BEGIN
+		PERFORM id
+		FROM mv_doc_proxy_only_docs
+		ORDER BY colbert <~> turbohybrid_query(
+			multivector_query => turbohybrid_multivector(ARRAY['[1,0]'::vector]),
+			dense_k => 4,
+			final_k => 2
+		)
+		LIMIT 1;
+		RAISE EXCEPTION 'expected centroid_lite to reject proxy_only index';
+	EXCEPTION
+		WHEN feature_not_supported THEN
+			GET STACKED DIAGNOSTICS errmsg = MESSAGE_TEXT;
+			IF errmsg NOT LIKE 'multivector_doc_storage = proxy_only only supports proxy_vector%' THEN
+				RAISE EXCEPTION 'unexpected proxy_only centroid_lite error: %', errmsg;
+			END IF;
+	END;
+
+	PERFORM set_config('turbohybrid.multivector_candidate_source', 'quantized_inverted_experimental', true);
+	BEGIN
+		PERFORM id
+		FROM mv_doc_proxy_only_docs
+		ORDER BY colbert <~> turbohybrid_query(
+			multivector_query => turbohybrid_multivector(ARRAY['[1,0]'::vector]),
+			dense_k => 4,
+			final_k => 2
+		)
+		LIMIT 1;
+		RAISE EXCEPTION 'expected quantized_inverted_experimental to reject proxy_only index';
+	EXCEPTION
+		WHEN feature_not_supported THEN
+			GET STACKED DIAGNOSTICS errmsg = MESSAGE_TEXT;
+			IF errmsg NOT LIKE 'multivector_doc_storage = proxy_only only supports proxy_vector%' THEN
+				RAISE EXCEPTION 'unexpected proxy_only quantized_inverted error: %', errmsg;
+			END IF;
+	END;
+
+	PERFORM set_config('turbohybrid.multivector_candidate_source', 'exact_doc_scan', true);
+	BEGIN
+		PERFORM id
+		FROM mv_doc_proxy_only_docs
+		ORDER BY colbert <~> turbohybrid_query(
+			multivector_query => turbohybrid_multivector(ARRAY['[1,0]'::vector]),
+			dense_k => 4,
+			final_k => 2
+		)
+		LIMIT 1;
+		RAISE EXCEPTION 'expected exact_doc_scan to reject proxy_only index';
+	EXCEPTION
+		WHEN feature_not_supported THEN
+			GET STACKED DIAGNOSTICS errmsg = MESSAGE_TEXT;
+			IF errmsg NOT LIKE 'multivector_doc_storage = proxy_only only supports proxy_vector%' THEN
+				RAISE EXCEPTION 'unexpected proxy_only exact_doc_scan error: %', errmsg;
+			END IF;
+	END;
+END
+$$;
+
+CREATE TEMP TABLE mv_doc_centroid_only_docs AS
+SELECT * FROM mv_doc_proxy_only_docs;
+
+CREATE INDEX mv_doc_centroid_only_docs_idx ON mv_doc_centroid_only_docs
+USING turbohybrid (colbert multivector_cosine_turbohybrid_ops)
+WITH (
+	quantization_bits = 4,
+	exact_storage = off,
+	multivector_graph = document_nodes,
+	multivector_doc_build_scorer = proxy,
+	multivector_proxy_encoder = normalized_mean,
+	multivector_centroids = kmeans,
+	multivector_doc_storage = centroid_only
+);
+
+DO $$
+DECLARE
+	stats jsonb;
+	scan_stats jsonb;
+	centroid_ids int[];
+	query_mv turbohybrid_multivector :=
+		turbohybrid_multivector(ARRAY['[1,0]'::vector, '[0,1]'::vector]);
+	errmsg text;
+BEGIN
+	stats := turbohybrid_index_stats('mv_doc_centroid_only_docs_idx'::regclass);
+	IF stats->>'multivector_doc_storage' <> 'centroid_only' OR
+		stats->>'full_multivector_sidecar_available' <> 'false' OR
+		stats->>'multivector_centroids' <> 'kmeans' OR
+		(stats->>'index_bytes')::bigint <= 0 THEN
+		RAISE EXCEPTION 'unexpected centroid_only index stats: %', stats;
+	END IF;
+
+	PERFORM set_config('enable_seqscan', 'off', true);
+	PERFORM set_config('turbohybrid.multivector_candidate_source', 'centroid_lite', true);
+	PERFORM set_config('turbohybrid.multivector_plain_fallback', 'force', true);
+	PERFORM set_config('turbohybrid.multivector_doc_candidate_k', '4', true);
+	PERFORM set_config('turbohybrid.multivector_exact_rerank_k', '4', true);
+
+	SELECT array_agg(id ORDER BY distance, id) INTO centroid_ids
+	FROM (
+		SELECT id,
+		       colbert <~> turbohybrid_query(
+			       multivector_query => query_mv,
+			       dense_k => 4,
+			       final_k => 4
+		       ) AS distance
+		FROM mv_doc_centroid_only_docs
+		ORDER BY colbert <~> turbohybrid_query(
+			multivector_query => query_mv,
+			dense_k => 4,
+			final_k => 4
+		)
+		LIMIT 4
+	) AS centroid_results;
+	scan_stats := turbohybrid_last_scan_stats();
+
+	IF centroid_ids IS NULL OR array_length(centroid_ids, 1) < 1 OR
+		scan_stats->>'multivector_candidate_source' <> 'centroid_lite' OR
+		scan_stats->>'multivector_doc_storage' <> 'centroid_only' OR
+		scan_stats->>'full_multivector_sidecar_available' <> 'false' OR
+		scan_stats->>'multivector_exact_rerank_source' <> 'heap' OR
+		(scan_stats->>'multivector_exact_rerank_heap_fetches')::int <= 0 OR
+		(scan_stats->>'centroid_candidates')::int <= 0 THEN
+		RAISE EXCEPTION 'unexpected centroid_only centroid_lite stats: ids %, stats %',
+			centroid_ids, scan_stats;
+	END IF;
+
+	PERFORM set_config('turbohybrid.multivector_candidate_source', 'exact_doc_scan', true);
+	BEGIN
+		PERFORM id
+		FROM mv_doc_centroid_only_docs
+		ORDER BY colbert <~> turbohybrid_query(
+			multivector_query => query_mv,
+			dense_k => 4,
+			final_k => 2
+		)
+		LIMIT 1;
+		RAISE EXCEPTION 'expected exact_doc_scan to reject centroid_only index';
+	EXCEPTION
+		WHEN feature_not_supported THEN
+			GET STACKED DIAGNOSTICS errmsg = MESSAGE_TEXT;
+			IF errmsg NOT LIKE 'multivector_doc_storage = centroid_only only supports proxy_vector and centroid_lite%' THEN
+				RAISE EXCEPTION 'unexpected centroid_only exact_doc_scan error: %', errmsg;
+			END IF;
+	END;
+END
+$$;
+
+DROP TABLE mv_doc_centroid_only_docs;
+
 CREATE TEMP TABLE mv_proxy_diag_dense_docs (
 	id int,
 	embedding vector(2)
@@ -4323,6 +4642,7 @@ END
 $$;
 
 DROP TABLE mv_proxy_diag_dense_docs;
+DROP TABLE mv_doc_proxy_only_docs;
 DROP TABLE mv_doc_proxy_budget_docs;
 DROP TABLE mv_centroid_lite_docs;
 

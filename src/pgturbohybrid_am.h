@@ -61,6 +61,7 @@ typedef struct PgturbohybridOptions
 	int			residualRerankBytes;
 	int			multivectorGraphMode;
 	int			multivectorDocBuildScorer;
+	int			multivectorDocStorage;
 	int			multivectorTokenPooling;
 	float8		multivectorTokenPoolingTargetRatio;
 	int			multivectorTokenPoolingMinTokens;
@@ -227,6 +228,8 @@ typedef struct PgturbohybridScanStatsSnapshot
 	uint32		multivectorDocGraphEntrySampleScored;
 	uint64		multivectorDocGraphQuantizedScores;
 	char		multivectorDocGraphStorageKind[16];
+	bool		proxyOnlyIndex;
+	bool		fullMultivectorSidecarAvailable;
 	char		multivectorDocGraphRescoreSource[16];
 	uint32		multivectorDocGraphExactRerankDocs;
 	uint64		multivectorDocGraphHeapFetches;
@@ -535,7 +538,9 @@ typedef enum PgturbohybridMultiVectorDocStorageMode
 {
 	PGTURBOHYBRID_MULTIVECTOR_DOC_STORAGE_F32,
 	PGTURBOHYBRID_MULTIVECTOR_DOC_STORAGE_F16,
-	PGTURBOHYBRID_MULTIVECTOR_DOC_STORAGE_SQ8
+	PGTURBOHYBRID_MULTIVECTOR_DOC_STORAGE_SQ8,
+	PGTURBOHYBRID_MULTIVECTOR_DOC_STORAGE_CENTROID_ONLY,
+	PGTURBOHYBRID_MULTIVECTOR_DOC_STORAGE_PROXY_ONLY
 }			PgturbohybridMultiVectorDocStorageMode;
 
 typedef enum PgturbohybridMultiVectorDocStorageCacheMode

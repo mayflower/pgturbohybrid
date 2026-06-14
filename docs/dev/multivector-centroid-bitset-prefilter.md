@@ -82,7 +82,9 @@ Default is `off`.
 
 In `experimental` mode the centroid-lite scan builds a scan-local bitset while
 walking the existing posting lists. The bitset records the posting-union document
-set but does not prune candidates. Therefore:
+set, popcounts the scan-local bitset to expose candidate cardinality after the
+current threshold, and keeps candidate admission conservative for this first
+prototype. Therefore:
 
 - no persisted format changes,
 - no default behavior change,
@@ -100,7 +102,9 @@ whether a persisted compressed bitset sidecar is worth building.
 - `centroid_bitset_lists_used`
 - `centroid_bitset_docs_set`
 - `centroid_bitset_docs_after_threshold`
-- `centroid_bitset_prefilter_time_us`
+- `centroid_bitset_candidates`
+- `centroid_bitset_time_us`
+- `centroid_bitset_prefilter_time_us` (compatibility alias)
 - `centroid_bitset_memory_bytes`
 
 Benchmarks should compare these with:
