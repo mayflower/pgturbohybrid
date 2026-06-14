@@ -3464,15 +3464,18 @@ PgturbohybridGraphCodeCodeWeightedRawSimdSelf(const uint8 *code, int dimensions,
 		codebookScaleSq = PGTURBOHYBRID_GRAPH_CODEBOOK2_SCALE * PGTURBOHYBRID_GRAPH_CODEBOOK2_SCALE;
 
 #if PGTURBOHYBRID_GRAPH_COMPILE_ARM_DOT
-	if (bits == PGTURBOHYBRID_DEFAULT_BITS)
-		rawI64 = PgturbohybridGraphCodeCodeWeightedRawNeonSdot(code, code,
-													dPrimeSqI16,
-													dimensions);
-	else
-		rawI64 = PgturbohybridGraphCodeCode2WeightedRawNeonSdot(code, code,
-													 dPrimeSqI16,
-													 dimensions);
-	simdRan = true;
+	if (PgturbohybridGraphArmDotprodAvailable())
+	{
+		if (bits == PGTURBOHYBRID_DEFAULT_BITS)
+			rawI64 = PgturbohybridGraphCodeCodeWeightedRawNeonSdot(code, code,
+														dPrimeSqI16,
+														dimensions);
+		else
+			rawI64 = PgturbohybridGraphCodeCode2WeightedRawNeonSdot(code, code,
+														 dPrimeSqI16,
+														 dimensions);
+		simdRan = true;
+	}
 #endif
 #if PGTURBOHYBRID_GRAPH_COMPILE_AVX2
 	if (!simdRan && PgturbohybridGraphAvx2Available())

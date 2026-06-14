@@ -158,7 +158,19 @@ NeedsUpdated(PgturbohybridGraphVacuumState * vacuumstate, PgturbohybridGraphElem
 	buf = ReadBufferExtended(index, MAIN_FORKNUM, element->neighborPage, RBM_NORMAL, bas);
 	LockBuffer(buf, BUFFER_LOCK_SHARE);
 	page = BufferGetPage(buf);
-	ntup = (PgturbohybridGraphNeighborTuple) PageGetItem(page, PageGetItemId(page, element->neighborOffno));
+
+	/* Validate item before dereferencing: a stale offset number from
+	 * a compacted or corrupted page could read garbage data. */
+	{
+		ItemId		itemId = PageGetItemId(page, element->neighborOffno);
+
+		if (!ItemIdIsUsed(itemId) || !ItemIdIsNormal(itemId))
+		{
+			UnlockReleaseBuffer(buf);
+			return false;
+		}
+		ntup = (PgturbohybridGraphNeighborTuple) PageGetItem(page, itemId);
+	}
 
 	Assert(PgturbohybridGraphIsNeighborTuple(ntup));
 
@@ -182,10 +194,12 @@ NeedsUpdated(PgturbohybridGraphVacuumState * vacuumstate, PgturbohybridGraphElem
 	/* This could indicate too many candidates being deleted during insert */
 	if (!needsUpdated)
 	{
-		/* Keep clang-tidy happy */
-		Assert(ntup->count > 0);
-
-		needsUpdated = !ItemPointerIsValid(&ntup->indextids[ntup->count - 1]);
+		/* Guard against count == 0: uint16 underflow would wrap to 65535,
+		 * causing an out-of-bounds read past the tuple's indextids array. */
+		if (ntup->count > 0)
+			needsUpdated = !ItemPointerIsValid(&ntup->indextids[ntup->count - 1]);
+		else
+			needsUpdated = true;
 	}
 
 	UnlockReleaseBuffer(buf);
@@ -540,9 +554,18 @@ MarkDeleted(PgturbohybridGraphVacuumState * vacuumstate)
 			ntup = (PgturbohybridGraphNeighborTuple) PageGetItem(npage, PageGetItemId(npage, neighborOffno));
 
 			/* Overwrite element */
-			/* Use memset instead of MemSet to keep clang-tidy happy */
+			/* Use memset instead of MemSet to keep clang-tidy happy.
+			 * Use the ItemId length (authoritative) instead of VARSIZE_ANY
+			 * (reads the varlena header which could be corrupt from a torn page). */
 			etup->deleted = 1;
-			memset(&etup->data, 0, VARSIZE_ANY(&etup->data));
+			{
+				ItemId		eitemId = PageGetItemId(page, offno);
+				Size		itemLen = ItemIdGetLength(eitemId);
+				Size		dataOffset = offsetof(PgturbohybridGraphElementTupleData, data);
+				Size		zeroLen = (itemLen > dataOffset) ? itemLen - dataOffset : 0;
+
+				memset(&etup->data, 0, zeroLen);
+			}
 
 			/* Overwrite neighbors */
 			for (int i = 0; i < ntup->count; i++)

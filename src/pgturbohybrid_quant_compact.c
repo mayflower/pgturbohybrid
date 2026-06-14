@@ -328,7 +328,18 @@ PgturbohybridGraphCompactPhase3RewriteAdj(Relation index,
 			newNodeId = nodeIdMap[oldNodeId];
 			level = tuple->level;
 
-			/* Remap neighbors: drop dead, remap live */
+			/* Remap neighbors: drop dead, remap live.
+			 *
+			 * NOTE: Clear the tuple BEFORE writing neighbors, not after.
+			 * The previous code did memset(newTuple, 0, ...) at line 352 AFTER
+			 * the neighbor loop had already populated newTuple->neighbors[],
+			 * silently zeroing all adjacency data while keeping count > 0.
+			 */
+			memset(newTuple, 0, maxTupleSize);
+			newTuple->type = PGTURBOHYBRID_GRAPH_ADJ_TUPLE_TYPE;
+			newTuple->level = level;
+			newTuple->nodeId = newNodeId;
+
 			for (uint16 j = 0; j < tuple->count; j++)
 			{
 				uint32 nbr = tuple->neighbors[j];
@@ -339,6 +350,7 @@ PgturbohybridGraphCompactPhase3RewriteAdj(Relation index,
 				newTuple->neighbors[newCount++] = nodeIdMap[nbr];
 			}
 
+			newTuple->count = newCount;
 			tupleSize = PgturbohybridGraphAdjTupleSize(newCount);
 
 			if (!BufferIsValid(buf) || PageGetFreeSpace(page) < tupleSize)
@@ -348,12 +360,6 @@ PgturbohybridGraphCompactPhase3RewriteAdj(Relation index,
 				if (!BlockNumberIsValid(start))
 					start = BufferGetBlockNumber(buf);
 			}
-
-			memset(newTuple, 0, maxTupleSize);
-			newTuple->type = PGTURBOHYBRID_GRAPH_ADJ_TUPLE_TYPE;
-			newTuple->level = level;
-			newTuple->count = newCount;
-			newTuple->nodeId = newNodeId;
 
 			if (PageAddItem(page, (Item) newTuple, tupleSize,
 							InvalidOffsetNumber, false, false) == InvalidOffsetNumber)

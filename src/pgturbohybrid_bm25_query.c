@@ -2445,6 +2445,10 @@ PgturbohybridBm25ScoreDelta(const PgturbohybridBm25MetaTupleData *meta,
 		df = term->baseDf + term->deltaDf;
 		idf = log(1.0 + (corpusDocCount - (double) df + 0.5) /
 				  ((double) df + 0.5));
+		/* Clamp: stale delta stats or concurrent inserts can cause df > corpusDocCount,
+		 * producing a negative IDF that inverts search rankings. */
+		if (idf < 0.0)
+			idf = 0.0;
 		for (uint32 i = 0; i < deltaEntry->postingCount; i++)
 		{
 			PgturbohybridBm25DeltaCachePosting *posting = &deltaEntry->postings[i];
@@ -2688,6 +2692,9 @@ PgturbohybridBm25AnalyzeQuerySignals(Relation index, TSQuery query,
 
 		idf = log(1.0 + (corpusDocCount - (double) df + 0.5) /
 				  ((double) df + 0.5));
+		/* Clamp negative IDF from stale delta stats — see above. */
+		if (idf < 0.0)
+			idf = 0.0;
 		idfSum += idf;
 		maxIdf = Max(maxIdf, idf);
 		minPostings = Min(minPostings, df);
@@ -3081,6 +3088,9 @@ PgturbohybridBm25EnsureImpactHead(Relation index,
 	idf = log(1.0 + (corpusDocCount -
 					 (double) (term->baseDf + term->deltaDf) + 0.5) /
 			  ((double) (term->baseDf + term->deltaDf) + 0.5));
+	/* Clamp negative IDF from stale delta stats — see above. */
+	if (idf < 0.0)
+		idf = 0.0;
 	postingsBlkno = term->lexicon.postingsBlkno;
 	postingsOffno = term->lexicon.postingsOffno;
 
@@ -4538,6 +4548,9 @@ PgturbohybridBm25ScoreBaseWand(Relation index,
 		df = term->baseDf + term->deltaDf;
 		idf = log(1.0 + (corpusDocCount - (double) df + 0.5) /
 				  ((double) df + 0.5));
+		/* Clamp negative IDF from stale delta stats — see above. */
+		if (idf < 0.0)
+			idf = 0.0;
 		if (PgturbohybridBm25IteratorInit(&iterators[iteratorCount], index, cache,
 									 term, idf, avgDocLen, docLens,
 									 liveNodes, graphMeta->tqNodeCount,
@@ -5093,6 +5106,9 @@ PgturbohybridBm25TopK(Relation index, TSQuery query, int32 k, bool useWand,
 					 (double) bm25Meta.deltaTotalDocLen) / corpusDocCount;
 		idf = log(1.0 + (corpusDocCount - (double) df + 0.5) /
 				  ((double) df + 0.5));
+		/* Clamp negative IDF from stale delta stats — see above. */
+		if (idf < 0.0)
+			idf = 0.0;
 		postingsBlkno = term->lexicon.postingsBlkno;
 		postingsOffno = term->lexicon.postingsOffno;
 		chunkLimit = Max(term->lexicon.postingsChunkCount, 1);
