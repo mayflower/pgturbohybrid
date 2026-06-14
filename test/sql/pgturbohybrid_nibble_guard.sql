@@ -1,3 +1,4 @@
+SET client_min_messages = warning;
 -- Guard against regressions where packed 4-bit (or 2-bit) codes are scored as
 -- linear nibbles 0..15 instead of through the non-uniform codebook.
 --

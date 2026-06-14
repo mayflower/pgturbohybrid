@@ -1,3 +1,4 @@
+SET client_min_messages = warning;
 -- Unsigned-codebook (u8) 4-bit query-split scorer: parity, codebook
 -- correctness, and default selection.
 --
@@ -10,9 +11,7 @@
 --   * be far from a raw 0..15 nibble interpretation (adversarial control);
 --   * be selected by default on amd64 when the SIMD is available.
 CREATE EXTENSION IF NOT EXISTS vector;
-NOTICE:  extension "vector" already exists, skipping
 CREATE EXTENSION IF NOT EXISTS pgturbohybrid;
-NOTICE:  extension "pgturbohybrid" already exists, skipping
 SET enable_seqscan = off;
 SET jit = off;
 -- (1) Per-kernel parity on deliberately non-linear 1536-dim pairs.
@@ -94,7 +93,6 @@ RESET turbohybrid.dense_graph_avxvnni;
 -- (2) Selection: a real 1536-dim 4-bit dense scan must use the u8 scorer by
 -- default on amd64 (never the LUT gather), and honor the impl GUC.
 DROP TABLE IF EXISTS u8_docs;
-NOTICE:  table "u8_docs" does not exist, skipping
 CREATE TABLE u8_docs (id int PRIMARY KEY, embedding vector(1536));
 INSERT INTO u8_docs(id, embedding)
 SELECT i,

@@ -1,3 +1,4 @@
+SET client_min_messages = warning;
 -- Parity of the integer query-split dense scorers (AVX2 / AVX-VNNI / AVX-512
 -- VNNI / NEON) against each other and against the scalar/LUT reference path.
 --

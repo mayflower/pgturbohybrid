@@ -1,3 +1,4 @@
+SET client_min_messages = warning;
 -- VB-3202 spike: episode-scoped hybrid pattern (doc_id IN filter + turbohybrid_query).
 -- Proves scoped ORDER BY turbohybrid_query works when candidate set is pre-filtered.
 

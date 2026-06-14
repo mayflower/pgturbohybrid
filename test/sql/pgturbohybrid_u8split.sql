@@ -1,3 +1,4 @@
+SET client_min_messages = warning;
 -- Unsigned-codebook (u8) 4-bit query-split scorer: parity, codebook
 -- correctness, and default selection.
 --

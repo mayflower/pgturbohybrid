@@ -1,3 +1,4 @@
+SET client_min_messages = warning;
 -- Pre-refactor safety net for the dense scoring kernels.
 --
 -- This file pins the invariants the upcoming dense-scoring refactor must
@@ -27,9 +28,7 @@
 -- bit-exact equalities hold trivially and the scan-path assertions are gated on
 -- whether the kernel actually runs; the file never falsely fails.
 CREATE EXTENSION IF NOT EXISTS vector;
-NOTICE:  extension "vector" already exists, skipping
 CREATE EXTENSION IF NOT EXISTS pgturbohybrid;
-NOTICE:  extension "pgturbohybrid" already exists, skipping
 SET jit = off;
 SET enable_seqscan = off;
 -- ----------------------------------------------------------------------------

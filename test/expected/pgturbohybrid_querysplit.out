@@ -1,3 +1,4 @@
+SET client_min_messages = warning;
 -- Parity of the integer query-split dense scorers (AVX2 / AVX-VNNI / AVX-512
 -- VNNI / NEON) against each other and against the scalar/LUT reference path.
 --
@@ -13,9 +14,7 @@
 -- query-split SIMD kernel is available (e.g. SIMD disabled) every config falls
 -- back to scalar and the parity holds trivially.
 CREATE EXTENSION IF NOT EXISTS vector;
-NOTICE:  extension "vector" already exists, skipping
 CREATE EXTENSION IF NOT EXISTS pgturbohybrid;
-NOTICE:  extension "pgturbohybrid" already exists, skipping
 SET enable_seqscan = off;
 SET jit = off;
 SELECT setseed(0.42);
@@ -31,11 +30,9 @@ SELECT setseed(0.42);
 -- nearest), while docs 21..500 are random and far.  This dense-only test uses a
 -- one-key turbohybrid index and passes no text_query.
 DROP TABLE IF EXISTS qs_basis;
-NOTICE:  table "qs_basis" does not exist, skipping
 CREATE TABLE qs_basis (q real[]);
 INSERT INTO qs_basis SELECT array_agg(random() * 2 - 1) FROM generate_series(1, 1536);
 DROP TABLE IF EXISTS qs_docs;
-NOTICE:  table "qs_docs" does not exist, skipping
 CREATE TABLE qs_docs (id int PRIMARY KEY, embedding vector(1536));
 INSERT INTO qs_docs(id, embedding)
 SELECT i,
@@ -49,14 +46,11 @@ SELECT i,
        (SELECT array_agg(random() * 2 - 1)::real[]::vector FROM generate_series(1, 1536))
 FROM generate_series(21, 500) AS i;
 DROP TABLE IF EXISTS qs_query;
-NOTICE:  table "qs_query" does not exist, skipping
 CREATE TABLE qs_query (embedding vector(1536));
 INSERT INTO qs_query SELECT (q)::vector FROM qs_basis;
 DROP TABLE IF EXISTS qs_results;
-NOTICE:  table "qs_results" does not exist, skipping
 CREATE TABLE qs_results (label text, bits int, rank int, id int);
 DROP TABLE IF EXISTS qs_kernel;
-NOTICE:  table "qs_kernel" does not exist, skipping
 CREATE TABLE qs_kernel (label text, bits int, kernel text);
 -- Run one dense top-20 query under the current GUCs (near-exhaustive dense_k so
 -- graph recall is not the variable under test), recording the ordered ids and
@@ -168,7 +162,6 @@ END;
 $$;
 -- 4-bit index parity.
 DROP INDEX IF EXISTS qs_idx;
-NOTICE:  index "qs_idx" does not exist, skipping
 CREATE INDEX qs_idx ON qs_docs USING turbohybrid (embedding vector_cosine_turbohybrid_ops)
     WITH (quantization_bits = 4);
 ANALYZE qs_docs;

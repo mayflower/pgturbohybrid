@@ -1,3 +1,4 @@
+SET client_min_messages = warning;
 -- Guard against regressions where packed 4-bit (or 2-bit) codes are scored as
 -- linear nibbles 0..15 instead of through the non-uniform codebook.
 --
@@ -12,9 +13,7 @@
 -- (so the check is meaningful) across 4-bit/2-bit and tail (non-multiple-of-16)
 -- and exact (1536) dimensions.
 CREATE EXTENSION IF NOT EXISTS vector;
-NOTICE:  extension "vector" already exists, skipping
 CREATE EXTENSION IF NOT EXISTS pgturbohybrid;
-NOTICE:  extension "pgturbohybrid" already exists, skipping
 SET jit = off;
 -- Deterministic query (mixed signs + magnitudes) and doc (wide range so the
 -- code uses many low/centre/high codebook bins) at an arbitrary dimension.

@@ -1,3 +1,4 @@
+SET client_min_messages = warning;
 -- Codebook correctness: prove the dense approximate scorers expand 4-bit codes
 -- through the non-uniform codebook (PgturbohybridGraphCodebookI8 =
 -- {-127,-96,-75,-58,-44,-31,-18,-6,6,18,31,44,58,75,96,127}), NOT as raw 0..15

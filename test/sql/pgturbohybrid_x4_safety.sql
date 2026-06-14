@@ -1,3 +1,4 @@
+SET client_min_messages = warning;
 -- Pre-refactor safety net for the dense scoring kernels.
 --
 -- This file pins the invariants the upcoming dense-scoring refactor must

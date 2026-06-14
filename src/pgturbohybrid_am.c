@@ -6164,6 +6164,11 @@ pgturbohybridamrescan(IndexScanDesc scan, ScanKey keys, int nkeys, ScanKey order
 		so->tqHybridState = state;
 		MemoryContextSwitchTo(oldCtx);
 		PgturbohybridEnsureOrderByStorage(scan, so->tmpCtx);
+
+		/* Free the detoasted copy now that it has been copied into tmpCtx.
+		 * Without this, every rescan in a parameterized nested-loop join
+		 * leaks one PG_DETOAST_DATUM_COPY-sized allocation. */
+		pfree(hybridQuery);
 	}
 	else if (scan->opaque != NULL)
 	{
