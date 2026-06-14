@@ -2746,6 +2746,39 @@ BEGIN
 END
 $$;
 
+-- Regression: page-bloat-only compaction (no dead nodes) must be safe for
+-- docmap-backed indexes.  When there are no dead nodes the nodeIdMap is
+-- identity, so the docmap's nodeId references stay valid.  This test
+-- inserts documents, runs VACUUM (no deletes → no dead nodes), and
+-- confirms the index remains queryable.
+CREATE TABLE mv_docmap_bloatonly_docs (
+  id int PRIMARY KEY,
+  colbert turbohybrid_multivector
+);
+
+INSERT INTO mv_docmap_bloatonly_docs VALUES
+  (1, turbohybrid_multivector(ARRAY['[1,0,0,0]'::vector, '[0,1,0,0]'::vector])),
+  (2, turbohybrid_multivector(ARRAY['[0,0,1,0]'::vector, '[0,0,0,1]'::vector]));
+
+CREATE INDEX mv_docmap_bloatonly_docs_idx ON mv_docmap_bloatonly_docs USING turbohybrid
+  (colbert multivector_cosine_turbohybrid_ops)
+  WITH (multivector_graph = document_nodes);
+
+VACUUM mv_docmap_bloatonly_docs;
+
+SET enable_seqscan = off;
+SELECT id AS docmap_bloatonly_query_ok
+FROM mv_docmap_bloatonly_docs
+ORDER BY colbert <~> turbohybrid_query(
+  multivector_query => turbohybrid_multivector(ARRAY['[1,0,0,0]'::vector]),
+  dense_k => 4,
+  final_k => 1
+)
+LIMIT 1;
+RESET enable_seqscan;
+
+DROP TABLE mv_docmap_bloatonly_docs;
+
 DROP TABLE mv_document_node_docs;
 
 CREATE TABLE mv_document_node_pool_docs (
