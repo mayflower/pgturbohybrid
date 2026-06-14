@@ -1259,6 +1259,14 @@ PgturbohybridGraphAppendInsertedMultiVectorDocMap(Relation index,
 	uint16		docMapFlags = meta->tqMultivectorDocMapFlags;
 	int			centroidMode =
 		PgturbohybridGraphGetMultiVectorCentroidsOption(index);
+	bool		proxyOnlyDocStorage =
+		PgturbohybridGraphGetMultiVectorDocStorageOption(index) ==
+		PGTURBOHYBRID_MULTIVECTOR_DOC_STORAGE_PROXY_ONLY;
+	bool		proxyOnlyDocMap =
+		documentNodes &&
+		(proxyOnlyDocStorage ||
+		 (docMapFlags &
+		  PGTURBOHYBRID_GRAPH_MULTIVECTOR_DOCMAP_FLAG_PROXY_ONLY) != 0);
 	bool		appendCentroidSidecar;
 	bool		appendQuantizedPostings;
 
@@ -1275,6 +1283,7 @@ PgturbohybridGraphAppendInsertedMultiVectorDocMap(Relation index,
 	if (documentNodes && mv == NULL)
 		elog(ERROR, "document-node multivector insert requires document vector sidecar data");
 	appendCentroidSidecar =
+		!proxyOnlyDocMap &&
 		centroidMode == PGTURBOHYBRID_MULTIVECTOR_CENTROIDS_KMEANS &&
 		(meta->tqMultivectorDocCount == 0 ||
 		 ((docMapFlags &
@@ -1283,9 +1292,12 @@ PgturbohybridGraphAppendInsertedMultiVectorDocMap(Relation index,
 		   PGTURBOHYBRID_GRAPH_MULTIVECTOR_DOCMAP_FLAG_CENTROID_POSTINGS) != 0));
 	appendQuantizedPostings =
 		documentNodes &&
+		!proxyOnlyDocMap &&
 		(meta->tqMultivectorDocCount == 0 ||
 		 (docMapFlags &
 		  PGTURBOHYBRID_GRAPH_MULTIVECTOR_DOCMAP_FLAG_QUANTIZED_POSTINGS) != 0);
+	if (proxyOnlyDocMap)
+		docMapFlags |= PGTURBOHYBRID_GRAPH_MULTIVECTOR_DOCMAP_FLAG_PROXY_ONLY;
 
 	docId = PgturbohybridMultiVectorMakeDocId(meta->tqMultivectorDocCount);
 	nodeMapCount = documentNodes ? 1 : tokenCount;
@@ -1340,7 +1352,7 @@ PgturbohybridGraphAppendInsertedMultiVectorDocMap(Relation index,
 										&tqGraphDocMapAppendCursor);
 	pfree(docTuple);
 
-	if (documentNodes)
+	if (documentNodes && !proxyOnlyDocMap)
 	{
 		uint16		maxVectorCount =
 			PgturbohybridGraphInsertMultiVectorDocMapVectorTupleMaxCount();

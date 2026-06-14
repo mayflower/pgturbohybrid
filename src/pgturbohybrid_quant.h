@@ -20,6 +20,7 @@
 #define PGTURBOHYBRID_GRAPH_MULTIVECTOR_DOCMAP_CENTROID_POSTING_TUPLE_TYPE 0x5A
 #define PGTURBOHYBRID_GRAPH_MULTIVECTOR_DOCMAP_QUANTIZED_POSTING_TUPLE_TYPE 0x5B
 #define PGTURBOHYBRID_GRAPH_MULTIVECTOR_DOCMAP_QUANTIZED_CODEBOOK_TUPLE_TYPE 0x5C
+#define PGTURBOHYBRID_GRAPH_MULTIVECTOR_DOCMAP_CENTROID_F16_TUPLE_TYPE 0x5D
 #define PGTURBOHYBRID_GRAPH_EXACT_SLAB_MAGIC		0x54514553U
 #define PGTURBOHYBRID_GRAPH_MULTIVECTOR_DOCMAP_MAGIC 0x54514d56U
 #define PGTURBOHYBRID_GRAPH_MULTIVECTOR_DOCMAP_VERSION 3
@@ -29,6 +30,8 @@
 #define PGTURBOHYBRID_GRAPH_MULTIVECTOR_DOCMAP_FLAG_CENTROID_POSTINGS 0x0008
 #define PGTURBOHYBRID_GRAPH_MULTIVECTOR_DOCMAP_FLAG_QUANTIZED_POSTINGS 0x0010
 #define PGTURBOHYBRID_GRAPH_MULTIVECTOR_DOCMAP_FLAG_QUANTIZED_CODEBOOK 0x0020
+#define PGTURBOHYBRID_GRAPH_MULTIVECTOR_DOCMAP_FLAG_PROXY_ONLY 0x0040
+#define PGTURBOHYBRID_GRAPH_MULTIVECTOR_DOCMAP_FLAG_CENTROIDS_F16 0x0080
 #define PGTURBOHYBRID_GRAPH_NODE_DEAD				0x0001
 #define PGTURBOHYBRID_GRAPH_TQ_PLUS				0x0001	/* metapage: ecShift/ecScale correction tuples present */
 #define PGTURBOHYBRID_GRAPH_TQ_WEIGHTED			0x0002	/* metapage: code tuples carry per-vector ec_correction */
@@ -216,6 +219,22 @@ typedef struct PgturbohybridGraphMultiVectorDocMapCentroidTupleData
 
 typedef PgturbohybridGraphMultiVectorDocMapCentroidTupleData *PgturbohybridGraphMultiVectorDocMapCentroidTuple;
 
+typedef struct PgturbohybridGraphMultiVectorDocMapCentroidF16TupleData
+{
+	uint8		type;
+	uint8		version;
+	uint16		count;
+	uint32		magic;
+	uint32		docId;
+	uint16		centroidCount;
+	uint16		flags;
+	uint32		startFloat;
+	float		residualMean;
+	uint16		values[FLEXIBLE_ARRAY_MEMBER];
+} PgturbohybridGraphMultiVectorDocMapCentroidF16TupleData;
+
+typedef PgturbohybridGraphMultiVectorDocMapCentroidF16TupleData *PgturbohybridGraphMultiVectorDocMapCentroidF16Tuple;
+
 typedef struct PgturbohybridGraphMultiVectorCentroidPostingEntry
 {
 	uint32		docId;
@@ -330,6 +349,7 @@ typedef struct PgturbohybridQuantBuildState
 	bool		multivectorBuild;	/* heap tuple expands into one graph node per subvector */
 	int			multivectorGraphMode;
 	int			multivectorDocBuildScorer;
+	int			multivectorDocStorage;
 	int			multivectorTokenPooling;
 	double		multivectorTokenPoolingTargetRatio;
 	int			multivectorTokenPoolingMinTokens;
@@ -359,6 +379,7 @@ typedef struct PgturbohybridQuantBuildState
 	uint64		multivectorCentroidSidecarWriteUs;
 	uint64		multivectorCentroidPostingWriteUs;
 	uint64		multivectorCentroidPostingCount;
+	uint64		multivectorDocMapBytesEstimate;
 	struct PgturbohybridGraphBuildDistanceCacheEntry *buildDistanceCache;
 	uint32		buildDistanceCacheMask;
 	uint64		buildDistanceCacheHits;
@@ -568,6 +589,8 @@ typedef struct TqDenseCandidateStats
 	uint32		multivectorDocGraphEntrySampleScored;
 	uint64		multivectorDocGraphQuantizedScores;
 	char		multivectorDocGraphStorageKind[16];
+	bool		proxyOnlyIndex;
+	bool		fullMultivectorSidecarAvailable;
 	char		multivectorDocGraphRescoreSource[16];
 	uint32		multivectorDocGraphExactRerankDocs;
 	uint64		multivectorDocGraphHeapFetches;
@@ -1257,6 +1280,16 @@ PgturbohybridGraphMultiVectorDocMapCentroidTupleSize(uint16 count)
 					PgturbohybridCheckedArrayBytes(sizeof(float),
 												   count,
 												   "pgturbohybrid multivector docmap centroid tuple"));
+}
+
+static inline Size
+PgturbohybridGraphMultiVectorDocMapCentroidF16TupleSize(uint16 count)
+{
+	return MAXALIGN(offsetof(PgturbohybridGraphMultiVectorDocMapCentroidF16TupleData,
+							 values) +
+					PgturbohybridCheckedArrayBytes(sizeof(uint16),
+												   count,
+												   "pgturbohybrid multivector docmap f16 centroid tuple"));
 }
 
 static inline Size

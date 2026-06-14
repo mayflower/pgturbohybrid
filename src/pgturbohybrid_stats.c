@@ -3826,6 +3826,10 @@ pgturbohybrid_last_scan_stats(PG_FUNCTION_ARGS)
 							   scanStats.centroidBitsetDocsAfterThreshold);
 	PgturbohybridJsonbAddUint64(&state, "centroid_bitset_prefilter_time_us",
 								scanStats.centroidBitsetPrefilterUs);
+	PgturbohybridJsonbAddUint64(&state, "centroid_bitset_time_us",
+								scanStats.centroidBitsetPrefilterUs);
+	PgturbohybridJsonbAddInt64(&state, "centroid_bitset_candidates",
+							   scanStats.centroidBitsetDocsAfterThreshold);
 	PgturbohybridJsonbAddUint64(&state, "centroid_bitset_memory_bytes",
 								scanStats.centroidBitsetMemoryBytes);
 	PgturbohybridJsonbAddBool(&state, "centroid_upper_bound_enabled",
@@ -3836,8 +3840,14 @@ pgturbohybrid_last_scan_stats(PG_FUNCTION_ARGS)
 								scanStats.centroidUpperBoundDocsPruned);
 	PgturbohybridJsonbAddUint64(&state, "centroid_upper_bound_prune_time_us",
 								scanStats.centroidUpperBoundPruneUs);
+	PgturbohybridJsonbAddUint64(&state, "centroid_upper_bound_time_us",
+								scanStats.centroidUpperBoundPruneUs);
 	PgturbohybridJsonbAddUint64(&state, "centroid_upper_bound_unsafe_fallbacks",
 								scanStats.centroidUpperBoundUnsafeFallbacks);
+	PgturbohybridJsonbAddFloat8(&state, "centroid_upper_bound_prune_ratio",
+								scanStats.centroidUpperBoundDocsChecked > 0 ?
+								(double) scanStats.centroidUpperBoundDocsPruned /
+								(double) scanStats.centroidUpperBoundDocsChecked : 0.0);
 	PgturbohybridJsonbAddInt64(&state, "centroid_candidates_before_bound",
 							   scanStats.centroidCandidatesBeforeBound);
 	PgturbohybridJsonbAddInt64(&state, "centroid_candidates_after_bound",
@@ -3870,7 +3880,11 @@ pgturbohybrid_last_scan_stats(PG_FUNCTION_ARGS)
 								scanStats.quantizedInvertedCodebookChecksum);
 	PgturbohybridJsonbAddInt64(&state, "quantized_inverted_codebook_top_m",
 							   scanStats.quantizedInvertedCodebookTopM);
+	PgturbohybridJsonbAddInt64(&state, "quantized_inverted_codebook_version",
+							   PGTURBOHYBRID_GRAPH_MULTIVECTOR_DOCMAP_VERSION);
 	PgturbohybridJsonbAddUint64(&state, "quantized_inverted_assignment_us",
+								scanStats.quantizedInvertedAssignmentUs);
+	PgturbohybridJsonbAddUint64(&state, "quantized_inverted_assignment_time_us",
 								scanStats.quantizedInvertedAssignmentUs);
 	PgturbohybridJsonbAddUint64(&state, "quantized_inverted_list_offset_bytes",
 								scanStats.quantizedInvertedListOffsetBytes);
@@ -3954,6 +3968,14 @@ pgturbohybrid_last_scan_stats(PG_FUNCTION_ARGS)
 		PgturbohybridJsonbAddString(&state,
 									"multivector_doc_graph_storage_kind",
 									"f32");
+	PgturbohybridJsonbAddString(&state,
+								"multivector_doc_storage",
+								scanStats.multivectorDocGraphStorageKind[0] != '\0' ?
+								scanStats.multivectorDocGraphStorageKind : "f32");
+	PgturbohybridJsonbAddBool(&state, "proxy_only_index",
+							  scanStats.proxyOnlyIndex);
+	PgturbohybridJsonbAddBool(&state, "full_multivector_sidecar_available",
+							  scanStats.fullMultivectorSidecarAvailable);
 	if (scanStats.multivectorDocGraphRescoreSource[0] != '\0')
 		PgturbohybridJsonbAddString(&state,
 									"multivector_doc_graph_rescore_source",
@@ -4088,6 +4110,8 @@ pgturbohybrid_last_scan_stats(PG_FUNCTION_ARGS)
 									"off");
 	PgturbohybridJsonbAddUint64(&state,
 								"multivector_exact_rerank_heap_fetches",
+								scanStats.multivectorExactRerankHeapFetches);
+	PgturbohybridJsonbAddUint64(&state, "heap_fetches",
 								scanStats.multivectorExactRerankHeapFetches);
 	PgturbohybridJsonbAddUint64(&state,
 								"multivector_exact_rerank_sidecar_reads",

@@ -13,6 +13,8 @@
 from __future__ import annotations
 
 import argparse
+import hashlib
+import importlib.util
 import json
 import math
 import os
@@ -54,7 +56,7 @@ COLBERT_MODEL_DIMENSIONS = {
     "vidore/colpali-v1.2": 128,
     "colpali-like-visual": 128,
 }
-DOCUMENT_NODE_STORAGE_CHOICES = ("f32", "f16", "sq8")
+DOCUMENT_NODE_STORAGE_CHOICES = ("f32", "f16", "sq8", "centroid_only")
 DOCUMENT_NODE_STORAGE_CACHE_CHOICES = ("auto", "resident", "paged")
 DOCUMENT_NODE_TOKEN_POOLING_CHOICES = ("off", "kmeans", "greedy_cosine")
 DOCUMENT_NODE_CENTROIDS_CHOICES = ("off", "kmeans")
@@ -123,6 +125,14 @@ DOCUMENT_NODE_SERVING_GRID_ENTRY_SIDECAR_REPRESENTATIVES = (128, 256)
 DOCUMENT_NODE_SERVING_GRID_ENTRY_SIDECAR_SWEEP = ",".join(
     str(count) for count in DOCUMENT_NODE_SERVING_GRID_ENTRY_SIDECAR_REPRESENTATIVES
 )
+DOCUMENT_NODE_COLBERT_1M_GRID_BUDGETS = (100, 200, 400, 800, 1600)
+DOCUMENT_NODE_COLBERT_1M_GRID_BUDGET_SWEEP = ",".join(
+    str(budget) for budget in DOCUMENT_NODE_COLBERT_1M_GRID_BUDGETS
+)
+DOCUMENT_NODE_COLBERT_1M_GRID_EF = (200, 400, 800)
+DOCUMENT_NODE_COLBERT_1M_GRID_OVERSAMPLING = (1, 2)
+SERVING_PROFILE_GUC_MIN_DOCS = 10000
+SERVING_PROFILE_GUC_MIN_QUERIES = 100
 DOCUMENT_NODE_SERVING_GRID_PROXY_ADMISSION_FOCUS_PROFILES = (
     "proxy_normalized_mean_f16",
     "proxy_max_pool_f16",
@@ -142,17 +152,72 @@ DOCUMENT_NODE_SERVING_GRID_PROXY_ADMISSION_FOCUS_PROFILES = (
 )
 DOCUMENT_NODE_SERVING_GRID_PROXY_ADMISSION_FOCUS_EF = (100, 200, 400)
 DOCUMENT_NODE_SERVING_GRID_PROXY_ADMISSION_FOCUS_OVERSAMPLING = (1, 2)
+DOCUMENT_NODE_COLBERT_ENTRY_FOCUS_BUDGETS = (800, 1600)
+DOCUMENT_NODE_COLBERT_ENTRY_FOCUS_BUDGET_SWEEP = ",".join(
+    str(budget) for budget in DOCUMENT_NODE_COLBERT_ENTRY_FOCUS_BUDGETS
+)
+DOCUMENT_NODE_COLBERT_ENTRY_FOCUS_EF = (200, 400, 800)
+DOCUMENT_NODE_COLBERT_ENTRY_FOCUS_OVERSAMPLING = (1,)
+DOCUMENT_NODE_COLBERT_ENTRY_FOCUS_ENTRY_SAMPLE_COUNTS = (32, 128, 512)
+DOCUMENT_NODE_COLBERT_ENTRY_FOCUS_ENTRY_SAMPLE_SWEEP = ",".join(
+    str(count) for count in DOCUMENT_NODE_COLBERT_ENTRY_FOCUS_ENTRY_SAMPLE_COUNTS
+)
+DOCUMENT_NODE_COLBERT_ENTRY_FOCUS_ENTRY_SIDECAR_REPRESENTATIVES = (128, 256, 512)
+DOCUMENT_NODE_COLBERT_ENTRY_FOCUS_ENTRY_SIDECAR_SWEEP = ",".join(
+    str(count) for count in DOCUMENT_NODE_COLBERT_ENTRY_FOCUS_ENTRY_SIDECAR_REPRESENTATIVES
+)
+DOCUMENT_NODE_COLBERT_ENTRY_FOCUS_PROFILES = (
+    "proxy_normalized_mean_f16",
+    "proxy_max_pool_f16",
+    "centroid_mean_f16",
+    "proxy_normalized_mean_f16_entry_sample_032",
+    "proxy_normalized_mean_f16_entry_sample_128",
+    "proxy_normalized_mean_f16_entry_sample_512",
+    "proxy_max_pool_f16_entry_sample_032",
+    "proxy_max_pool_f16_entry_sample_128",
+    "proxy_max_pool_f16_entry_sample_512",
+    "centroid_mean_f16_entry_sample_032",
+    "centroid_mean_f16_entry_sample_128",
+    "centroid_mean_f16_entry_sample_512",
+    "proxy_normalized_mean_f16_entry_sidecar_128",
+    "proxy_normalized_mean_f16_entry_sidecar_256",
+    "proxy_normalized_mean_f16_entry_sidecar_512",
+    "proxy_max_pool_f16_entry_sidecar_128",
+    "proxy_max_pool_f16_entry_sidecar_256",
+    "proxy_max_pool_f16_entry_sidecar_512",
+    "centroid_mean_f16_entry_sidecar_128",
+    "centroid_mean_f16_entry_sidecar_256",
+    "centroid_mean_f16_entry_sidecar_512",
+)
+DOCUMENT_NODE_COLBERT_CENTROID_LITE_FOCUS_BUDGETS = (800, 1600)
+DOCUMENT_NODE_COLBERT_CENTROID_LITE_FOCUS_BUDGET_SWEEP = ",".join(
+    str(budget) for budget in DOCUMENT_NODE_COLBERT_CENTROID_LITE_FOCUS_BUDGETS
+)
+DOCUMENT_NODE_COLBERT_CENTROID_LITE_FOCUS_PROFILES = (
+    "centroid_mean_f16",
+    "centroid_lite_f16",
+    "centroid_lite_f16_prune_safe_upper_bound",
+    "centroid_lite_f16_cap_016",
+    "centroid_lite_f16_cap_016_prune_safe_upper_bound",
+    "centroid_lite_f16_cap_032",
+    "centroid_lite_f16_cap_032_prune_safe_upper_bound",
+    "centroid_lite_f16_cap_064",
+    "centroid_lite_f16_cap_064_prune_safe_upper_bound",
+    "centroid_lite_f16_pool_050",
+    "centroid_lite_f16_pool_050_cap_032",
+    "centroid_lite_f16_pool_050_cap_032_prune_safe_upper_bound",
+)
 DOCUMENT_NODE_SERVING_GRID_CENTROID_LITE_FOCUS_PROFILES = (
-	"centroid_lite_f16",
-	"centroid_lite_f16_cap_016",
-	"centroid_lite_f16_cap_016_prune_safe_upper_bound",
-	"centroid_lite_f16_cap_032",
-	"centroid_lite_f16_cap_032_prune_safe_upper_bound",
-	"centroid_lite_f16_cap_064",
-	"centroid_lite_f16_cap_064_prune_safe_upper_bound",
-	"centroid_lite_f16_prune_safe_upper_bound",
-	"centroid_lite_f16_pool_050",
-	"centroid_mean_f16",
+    "centroid_lite_f16",
+    "centroid_lite_f16_cap_016",
+    "centroid_lite_f16_cap_016_prune_safe_upper_bound",
+    "centroid_lite_f16_cap_032",
+    "centroid_lite_f16_cap_032_prune_safe_upper_bound",
+    "centroid_lite_f16_cap_064",
+    "centroid_lite_f16_cap_064_prune_safe_upper_bound",
+    "centroid_lite_f16_prune_safe_upper_bound",
+    "centroid_lite_f16_pool_050",
+    "centroid_mean_f16",
 )
 DOCUMENT_NODE_SERVING_GRID_TOKEN_POOLING_FOCUS_PROFILES = (
     "proxy_normalized_mean_f16",
@@ -164,10 +229,98 @@ DOCUMENT_NODE_SERVING_GRID_TOKEN_POOLING_FOCUS_PROFILES = (
     "centroid_mean_f16_pool_050",
     "centroid_mean_f16_pool_033",
 )
+DOCUMENT_NODE_SERVING_GRID_LEARNED_SPARSE_FOCUS_PROFILES = (
+    "proxy_normalized_mean_f16",
+    "proxy_max_pool_f16",
+    "proxy_normalized_mean_f16_learned_sparse_rescue",
+    "proxy_max_pool_f16_learned_sparse_rescue",
+    "proxy_max_pool_f16_reservoir_balanced",
+    "proxy_max_pool_f16_reservoir_balanced_learned_sparse_rescue",
+    "centroid_mean_f16_learned_sparse_rescue",
+)
+DOCUMENT_NODE_SERVING_GRID_PROXY_ORACLE_FOCUS_PROFILES = (
+    "proxy_normalized_mean_f16",
+    "proxy_exact_scan_normalized_mean_f16",
+    "proxy_max_pool_f16",
+    "proxy_exact_scan_max_pool_f16",
+    "centroid_mean_f16",
+    "proxy_exact_scan_centroid_mean_f16",
+)
 DOCUMENT_NODE_SERVING_GRID_SMOKE_PROFILES = (
     "proxy_normalized_mean_f16",
     "centroid_mean_f16",
     "centroid_lite_f16",
+)
+DOCUMENT_NODE_COLBERT_1M_GRID_BASE_PROFILES = (
+    "proxy_normalized_mean_proxy_only",
+    "proxy_normalized_mean_f16",
+    "proxy_max_pool_f16",
+    "centroid_mean_f16",
+    "centroid_lite_centroid_only",
+    "centroid_lite_centroid_only_cap_016",
+    "centroid_lite_centroid_only_cap_032",
+    "centroid_lite_centroid_only_cap_064",
+    "centroid_lite_centroid_only_pool_050",
+)
+DOCUMENT_NODE_COLBERT_1M_GRID_ENTRY_SAMPLE_PROFILES = (
+    "proxy_normalized_mean_f16_entry_sample_032",
+    "proxy_normalized_mean_f16_entry_sample_128",
+    "proxy_max_pool_f16_entry_sample_032",
+    "proxy_max_pool_f16_entry_sample_128",
+    "centroid_mean_f16_entry_sample_032",
+    "centroid_mean_f16_entry_sample_128",
+)
+DOCUMENT_NODE_COLBERT_1M_GRID_ENTRY_SIDECAR_PROFILES = (
+    "proxy_normalized_mean_f16_entry_sidecar_128",
+    "proxy_normalized_mean_f16_entry_sidecar_256",
+    "proxy_max_pool_f16_entry_sidecar_128",
+    "proxy_max_pool_f16_entry_sidecar_256",
+    "centroid_mean_f16_entry_sidecar_128",
+    "centroid_mean_f16_entry_sidecar_256",
+)
+DOCUMENT_NODE_COLBERT_1M_GRID_EXPERIMENTAL_PROFILES = (
+    "quantized_inverted_experimental_f32",
+)
+DOCUMENT_NODE_COLBERT_1M_SINGLE_INDEX_PROFILES = (
+    *DOCUMENT_NODE_COLBERT_1M_GRID_BASE_PROFILES,
+)
+DOCUMENT_NODE_COLBERT_BEIR_QUALITY_PROFILES = (
+    "proxy_normalized_mean_proxy_only",
+    "proxy_normalized_mean_f16",
+    "proxy_max_pool_f16",
+    "centroid_mean_f16",
+    "centroid_lite_centroid_only",
+    "centroid_lite_centroid_only_cap_032",
+    "centroid_lite_centroid_only_cap_064",
+    "centroid_lite_centroid_only_pool_050",
+)
+DOCUMENT_NODE_COLBERT_BEIR_QUALITY_EXPERIMENTAL_PROFILES = (
+    "quantized_inverted_experimental_f32",
+)
+DOCUMENT_NODE_COLBERT_SAMPLED_ADMISSION_PROFILES = (
+    "proxy_normalized_mean_proxy_only",
+    "centroid_lite_centroid_only",
+    "centroid_lite_centroid_only_cap_032",
+    "centroid_lite_centroid_only_pool_050",
+)
+DOCUMENT_NODE_COLBERT_SAMPLED_ADMISSION_EXPERIMENTAL_PROFILES = (
+    "quantized_inverted_experimental_f32",
+)
+DOCUMENT_NODE_COLBERT_CANDIDATE_SOURCE_FOCUS_PROFILES = (
+    "proxy_normalized_mean_proxy_only",
+    "centroid_lite_centroid_only",
+    "centroid_lite_centroid_only_cap_032",
+    "centroid_lite_centroid_only_cap_064",
+    "centroid_lite_centroid_only_pool_050",
+)
+DOCUMENT_NODE_COLBERT_CANDIDATE_SOURCE_FOCUS_EXPERIMENTAL_PROFILES = (
+    "quantized_inverted_experimental_f32",
+)
+DOCUMENT_NODE_DOCMAP_FORMAT_LIMIT_BYTES = (1 << 32) - 1
+DOCUMENT_NODE_COLBERT_QUANTIZED_INVERTED_FOCUS_PROFILES = (
+    "centroid_mean_f16",
+    "centroid_lite_f16",
+    "quantized_inverted_experimental_f32",
 )
 DOCUMENT_NODE_SERVING_GRID_SMOKE_MAX_QUERIES = 25
 DOCUMENT_NODE_SERVING_LATENCY_DEFAULT_PROFILE = "proxy_normalized_mean_f16"
@@ -250,6 +403,20 @@ SERVING_STATS_FIELD_GROUPS: dict[str, tuple[str, ...]] = {
         "multivector_centroid_prerank_docs",
         "multivector_full_maxsim_rerank_docs",
     ),
+    "proxy_oracle": (
+        "proxy_exact_scan_enabled",
+        "proxy_exact_scan_diagnostic_only",
+        "proxy_exact_scan_docs_scored",
+        "proxy_exact_scan_time_us",
+        "proxy_exact_scan_candidates",
+        "proxy_exact_scan_top10_admission_recall",
+        "proxy_exact_scan_top1_admission",
+        "proxy_exact_scan_vs_hnsw_gap",
+        "hnsw_vs_exact_proxy_top10_gap",
+        "proxy_exact_rank_of_exact_top1",
+        "proxy_exact_rank_of_exact_top10_p50",
+        "proxy_exact_rank_of_exact_top10_p95",
+    ),
     "centroid_lite": (
         "centroid_lists_visited",
         "centroid_docs_touched",
@@ -264,12 +431,16 @@ SERVING_STATS_FIELD_GROUPS: dict[str, tuple[str, ...]] = {
         "centroid_bitset_docs_set",
         "centroid_bitset_docs_after_threshold",
         "centroid_bitset_prefilter_time_us",
+        "centroid_bitset_time_us",
+        "centroid_bitset_candidates",
         "centroid_bitset_memory_bytes",
         "centroid_upper_bound_enabled",
         "centroid_upper_bound_docs_checked",
         "centroid_upper_bound_docs_pruned",
         "centroid_upper_bound_prune_time_us",
+        "centroid_upper_bound_time_us",
         "centroid_upper_bound_unsafe_fallbacks",
+        "centroid_upper_bound_prune_ratio",
         "centroid_candidates_before_bound",
         "centroid_candidates_after_bound",
         "learned_projection_loaded",
@@ -394,6 +565,22 @@ class QueryItem:
 
 
 @dataclass
+class ProxyExactScanDoc:
+    doc_id: str
+    heap_block: int
+    heap_offset: int
+    vectors: list[list[float]]
+    proxies: dict[tuple[str, str], list[float]] = field(default_factory=dict)
+
+
+@dataclass
+class ProxyExactScanOracle:
+    docs: list[ProxyExactScanDoc]
+    queries: dict[str, list[list[float]]]
+    dimension: int
+
+
+@dataclass
 class WorkerResult:
     client_id: int
     warm_durations_ms: list[float] = field(default_factory=list)
@@ -439,6 +626,7 @@ class DocumentNodeServingProfile:
     entry_sidecar: bool = False
     entry_sidecar_representatives: int = 128
     entry_sidecar_strategy: str = "hybrid_level_covering"
+    diagnostic_only: bool = False
 
 
 @dataclass(frozen=True)
@@ -516,6 +704,394 @@ def git_sha() -> str | None:
         return None
     sha = result.stdout.strip()
     return sha or None
+
+
+INCREMENTAL_OUTPUT_SCHEMA_VERSION = 1
+
+
+def utc_now_iso() -> str:
+    return datetime.now(timezone.utc).isoformat()
+
+
+def stable_json_dumps(value: Any) -> str:
+    return json.dumps(value, sort_keys=True, separators=(",", ":"), default=str)
+
+
+def stable_json_hash(value: Any) -> str:
+    return hashlib.sha256(stable_json_dumps(value).encode("utf-8")).hexdigest()
+
+
+def atomic_write_json(path: Path, payload: dict[str, Any]) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    tmp = path.with_name(f".{path.name}.{os.getpid()}.tmp")
+    with tmp.open("w", encoding="utf-8") as handle:
+        handle.write(json.dumps(payload, indent=2, sort_keys=True) + "\n")
+        handle.flush()
+        os.fsync(handle.fileno())
+    os.replace(tmp, path)
+    directory_flag = getattr(os, "O_DIRECTORY", 0)
+    try:
+        dir_fd = os.open(str(path.parent), os.O_RDONLY | directory_flag)
+    except OSError:
+        return
+    try:
+        os.fsync(dir_fd)
+    finally:
+        os.close(dir_fd)
+
+
+def load_incremental_output(path: Path | None) -> dict[str, Any]:
+    if path is None or not path.exists():
+        return {
+            "schema_version": INCREMENTAL_OUTPUT_SCHEMA_VERSION,
+            "created_at": utc_now_iso(),
+            "updated_at": utc_now_iso(),
+            "records": [],
+        }
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+    except json.JSONDecodeError as exc:
+        raise SystemExit(f"incremental output is not valid JSON: {path}: {exc}") from exc
+    if isinstance(payload, list):
+        payload = {
+            "schema_version": INCREMENTAL_OUTPUT_SCHEMA_VERSION,
+            "created_at": utc_now_iso(),
+            "updated_at": utc_now_iso(),
+            "records": payload,
+        }
+    if not isinstance(payload, dict):
+        raise SystemExit(f"incremental output must be a JSON object or records array: {path}")
+    records = payload.get("records", [])
+    if not isinstance(records, list):
+        raise SystemExit(f"incremental output records must be a JSON array: {path}")
+    payload.setdefault("schema_version", INCREMENTAL_OUTPUT_SCHEMA_VERSION)
+    payload.setdefault("created_at", utc_now_iso())
+    payload["records"] = records
+    return payload
+
+
+class IncrementalRecorder:
+    def __init__(
+        self,
+        path: Path | None,
+        *,
+        initial_state: dict[str, Any] | None = None,
+    ) -> None:
+        self.path = path
+        self.state = initial_state or load_incremental_output(path)
+        self.state.setdefault("schema_version", INCREMENTAL_OUTPUT_SCHEMA_VERSION)
+        self.state.setdefault("created_at", utc_now_iso())
+        self.state.setdefault("records", [])
+
+    @property
+    def enabled(self) -> bool:
+        return self.path is not None
+
+    @property
+    def records(self) -> list[dict[str, Any]]:
+        records = self.state.setdefault("records", [])
+        return [record for record in records if isinstance(record, dict)]
+
+    def record(self, kind: str, **payload: Any) -> dict[str, Any]:
+        record = {
+            "id": f"{len(self.records) + 1:08d}",
+            "kind": kind,
+            "created_at": utc_now_iso(),
+            **payload,
+        }
+        records = self.state.setdefault("records", [])
+        if isinstance(records, list):
+            records.append(record)
+        else:
+            self.state["records"] = [record]
+        self.state["updated_at"] = utc_now_iso()
+        if self.path is not None:
+            atomic_write_json(self.path, self.state)
+        return record
+
+
+def latest_incremental_record(
+    records: list[dict[str, Any]],
+    kind: str,
+) -> dict[str, Any] | None:
+    for record in reversed(records):
+        if record.get("kind") == kind:
+            return record
+    return None
+
+
+def incremental_completed_row_map(records: list[dict[str, Any]]) -> dict[str, dict[str, Any]]:
+    completed: dict[str, dict[str, Any]] = {}
+    for record in records:
+        if record.get("kind") != "query_evaluation_succeeded":
+            continue
+        row_id = str(record.get("row_id") or "")
+        row = record.get("row")
+        if row_id and isinstance(row, dict):
+            completed[row_id] = row
+    return completed
+
+
+def incremental_completed_profile_summary_map(
+    records: list[dict[str, Any]],
+) -> dict[str, dict[str, Any]]:
+    completed: dict[str, dict[str, Any]] = {}
+    for record in records:
+        if record.get("kind") != "profile_completed":
+            continue
+        key = str(record.get("profile_key") or "")
+        summary = record.get("summary")
+        if key and isinstance(summary, dict):
+            completed[key] = summary
+    return completed
+
+
+def incremental_failed_records(records: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    return [
+        record
+        for record in records
+        if isinstance(record.get("kind"), str) and str(record["kind"]).endswith("_failed")
+    ]
+
+
+def benchmark_incremental_options(args: argparse.Namespace) -> dict[str, Any]:
+    option_names = (
+        "max_docs",
+        "max_queries",
+        "precomputed_dataset",
+        "document_node_serving_grid",
+        "document_node_colbert_1m_grid",
+        "document_node_colbert_1m_include_entry_samples",
+        "document_node_colbert_1m_include_entry_sidecar",
+        "document_node_colbert_1m_include_centroid_lite_caps",
+        "document_node_colbert_1m_include_experimental",
+        "document_node_serving_grid_profiles",
+        "document_node_serving_grid_budget_mode",
+        "serving_exact_rerank_mode",
+        "serving_exact_rerank_k",
+        "admission_debug_mode",
+        "admission_budget_sweep",
+        "max_estimated_index_build_mb",
+        "max_estimated_index_bytes",
+        "skip_profile_if_estimate_exceeds_limit",
+        "fail_if_estimate_exceeds_limit",
+        "document_node_serving_ef_grid",
+        "document_node_serving_oversampling_grid",
+        "serving_min_top10_admission",
+        "serving_min_ndcg_ratio_vs_exact",
+        "serving_max_p95_ms",
+        "final_k",
+        "quality_k",
+        "admission_k",
+    )
+    return {name: getattr(args, name, None) for name in option_names}
+
+
+def document_node_serving_plan_metadata(
+    *,
+    args: argparse.Namespace,
+    mode: str,
+    profiles: list["DocumentNodeServingProfile"],
+    configs: list["DocumentNodeServingConfig"],
+    budget_sweep: list[int],
+    ef_grid: list[int],
+    oversampling_grid: list[int],
+    docs_loaded: int,
+    queries_available: int,
+    effective_queries: int,
+    query_subset_used: bool,
+) -> dict[str, Any]:
+    profile_plan = [
+        {
+            "config_id": document_node_serving_config_id(config),
+            "profile": config.profile.name,
+            "ef": config.ef,
+            "oversampling": config.oversampling,
+            "index_signature": serializable_index_signature(
+                serving_profile_index_signature(args, config.profile)
+            ),
+        }
+        for config in configs
+    ]
+    options = benchmark_incremental_options(args)
+    profile_plan_hash = stable_json_hash(profile_plan)
+    benchmark_options_hash = stable_json_hash(options)
+    return {
+        "schema_version": INCREMENTAL_OUTPUT_SCHEMA_VERSION,
+        "git_sha": git_sha(),
+        "dataset_path": args.precomputed_dataset
+        or (portable_path(args.dataset) if getattr(args, "dataset", None) else None),
+        "docs_loaded": docs_loaded,
+        "queries_available": queries_available,
+        "effective_queries": effective_queries,
+        "query_subset_used": query_subset_used,
+        "mode": mode,
+        "budget_sweep": budget_sweep,
+        "ef_grid": ef_grid,
+        "oversampling_grid": oversampling_grid,
+        "profile_names": [profile.name for profile in profiles],
+        "profile_plan": profile_plan,
+        "profile_plan_hash": profile_plan_hash,
+        "benchmark_options": options,
+        "benchmark_options_hash": benchmark_options_hash,
+    }
+
+
+def validate_incremental_resume(
+    records: list[dict[str, Any]],
+    current_metadata: dict[str, Any],
+) -> None:
+    previous = latest_incremental_record(records, "run_metadata")
+    if previous is None:
+        raise SystemExit(
+            "resume incremental output is incompatible: missing run_metadata record"
+        )
+    previous_metadata = previous.get("metadata")
+    if not isinstance(previous_metadata, dict):
+        raise SystemExit(
+            "resume incremental output is incompatible: malformed run_metadata record"
+        )
+    mismatch_fields = []
+    for key in (
+        "git_sha",
+        "dataset_path",
+        "docs_loaded",
+        "queries_available",
+        "effective_queries",
+        "profile_plan_hash",
+        "benchmark_options_hash",
+    ):
+        if previous_metadata.get(key) != current_metadata.get(key):
+            mismatch_fields.append(
+                {
+                    "field": key,
+                    "previous": previous_metadata.get(key),
+                    "current": current_metadata.get(key),
+                }
+            )
+    if mismatch_fields:
+        formatted = "; ".join(
+            f"{item['field']} previous={item['previous']!r} current={item['current']!r}"
+            for item in mismatch_fields
+        )
+        raise SystemExit(f"resume incremental output is incompatible: {formatted}")
+
+
+def summarize_incremental_records(records: list[dict[str, Any]]) -> dict[str, Any]:
+    counts: dict[str, int] = {}
+    for record in records:
+        kind = str(record.get("kind", "unknown"))
+        counts[kind] = counts.get(kind, 0) + 1
+    completed_rows = list(incremental_completed_row_map(records).values())
+    profile_summaries = list(incremental_completed_profile_summary_map(records).values())
+    metadata_record = latest_incremental_record(records, "run_metadata")
+    metadata = metadata_record.get("metadata", {}) if isinstance(metadata_record, dict) else {}
+    if not isinstance(metadata, dict):
+        metadata = {}
+    failed = incremental_failed_records(records)
+    result: dict[str, Any] = {
+        "schema_version": INCREMENTAL_OUTPUT_SCHEMA_VERSION,
+        "generated_at": utc_now_iso(),
+        "incremental_summary": {
+            "record_count": len(records),
+            "counts_by_kind": dict(sorted(counts.items())),
+            "completed_rows": len(completed_rows),
+            "completed_profiles": len(profile_summaries),
+            "failed_records": failed,
+            "partial": latest_incremental_record(records, "run_completed") is None,
+            "metadata": metadata,
+        },
+        "document_node_serving_grid": {
+            "enabled": True,
+            "incremental_partial": latest_incremental_record(records, "run_completed") is None,
+            "mode": metadata.get("mode"),
+            "budget_sweep": metadata.get("budget_sweep", []),
+            "effective_budget_sweep": metadata.get("budget_sweep", []),
+            "effective_profiles": metadata.get("profile_names", []),
+            "effective_ef_grid": metadata.get("ef_grid", []),
+            "effective_oversampling_grid": metadata.get("oversampling_grid", []),
+            "results": completed_rows,
+            "summary_rows": completed_rows,
+            "profile_summaries": profile_summaries,
+        },
+    }
+    if completed_rows:
+        result["document_node_serving_recommendation"] = (
+            compute_document_node_serving_recommendation(
+                result["document_node_serving_grid"],
+                exact_baseline={"available": False},
+                min_top10_admission=0.80,
+                min_ndcg_ratio_vs_exact=0.95,
+                max_p95_ms=0.0,
+            )
+        )
+    return result
+
+
+def markdown_incremental_summary(report: dict[str, Any]) -> str:
+    summary = report.get("incremental_summary", {})
+    if not isinstance(summary, dict):
+        summary = {}
+    grid = report.get("document_node_serving_grid", {})
+    rows = grid.get("summary_rows", []) if isinstance(grid, dict) else []
+    if not isinstance(rows, list):
+        rows = []
+    sorted_rows = sorted(
+        [row for row in rows if isinstance(row, dict)],
+        key=lambda row: (
+            serving_row_p95(row) if serving_row_p95(row) is not None else float("inf"),
+            str(row.get("profile", "")),
+            int(row.get("ef", 0) or 0),
+            int(row.get("oversampling", 0) or 0),
+        ),
+    )
+    lines = [
+        "# Incremental DBpedia ColBERT benchmark summary",
+        "",
+        f"- Partial: `{bool(summary.get('partial', True))}`",
+        f"- Records: `{int(summary.get('record_count', 0) or 0)}`",
+        f"- Completed rows: `{int(summary.get('completed_rows', 0) or 0)}`",
+        f"- Completed profiles: `{int(summary.get('completed_profiles', 0) or 0)}`",
+    ]
+    failed = summary.get("failed_records", [])
+    if isinstance(failed, list) and failed:
+        lines.append(f"- Failed records: `{len(failed)}`")
+        for record in failed[:10]:
+            if isinstance(record, dict):
+                lines.append(
+                    f"  - `{record.get('kind', '')}` `{record.get('profile', '')}` "
+                    f"{record.get('error', '')}"
+                )
+    lines.extend([
+        "",
+        "| profile | ef | oversampling | top10 admission | ndcg@10 | p95 ms |",
+        "|---|---:|---:|---:|---:|---:|",
+    ])
+    for row in sorted_rows[:50]:
+        lines.append(
+            "| {profile} | {ef} | {oversampling} | {top10:.6f} | {ndcg:.6f} | {p95:.3f} |".format(
+                profile=row.get("profile", ""),
+                ef=int(row.get("ef", 0) or 0),
+                oversampling=int(row.get("oversampling", 0) or 0),
+                top10=float(row.get("exact_top10_admission_recall", 0.0) or 0.0),
+                ndcg=float(row.get("ndcg@10", 0.0) or 0.0),
+                p95=float(row.get("p95_ms", 0.0) or 0.0),
+            )
+        )
+    return "\n".join(lines) + "\n"
+
+
+def run_incremental_summary_only(path: Path) -> dict[str, Any]:
+    state = load_incremental_output(path)
+    records = state.get("records", [])
+    if not isinstance(records, list):
+        records = []
+    report = summarize_incremental_records(
+        [record for record in records if isinstance(record, dict)]
+    )
+    report["source"] = portable_path(path)
+    report["markdown_summary"] = markdown_incremental_summary(report)
+    return report
 
 
 def percentile(values: list[float], pct: float) -> float:
@@ -827,7 +1403,7 @@ def learned_sparse_ratio(numerator: int, denominator: int) -> float | None:
 def learned_sparse_coverage_warnings(
     coverage: dict[str, Any],
     *,
-    threshold: float = 0.95,
+    threshold: float = 1.0,
 ) -> list[str]:
     warnings: list[str] = []
     doc_ratio = coverage.get("doc_coverage_ratio")
@@ -869,28 +1445,58 @@ def learned_sparse_coverage_summary(conn: psycopg.Connection[Any]) -> dict[str, 
     coverage = {
         "loaded_documents": loaded_docs,
         "learned_sparse_documents": sparse_docs,
+        "learned_sparse_doc_rows": sparse_docs,
+        "learned_sparse_missing_doc_count": max(loaded_docs - sparse_docs, 0),
+        "learned_sparse_extra_doc_count": 0,
         "doc_coverage_ratio": learned_sparse_ratio(sparse_docs, loaded_docs),
         "loaded_queries": loaded_queries,
         "learned_sparse_queries": sparse_queries,
+        "learned_sparse_query_rows": sparse_queries,
+        "learned_sparse_missing_query_count": max(loaded_queries - sparse_queries, 0),
+        "learned_sparse_extra_query_count": 0,
         "query_coverage_ratio": learned_sparse_ratio(sparse_queries, loaded_queries),
     }
     warnings = learned_sparse_coverage_warnings(coverage)
     coverage["partial_coverage"] = bool(warnings)
     coverage["warnings"] = warnings
+    coverage["learned_sparse_plumbing_only"] = bool(warnings)
+    coverage["learned_sparse_safe_serving_evidence"] = not bool(warnings)
+    coverage["not_safe_serving_evidence"] = bool(warnings)
     return coverage
 
 
 def annotate_learned_sparse_evidence(
     row: dict[str, Any],
     coverage: dict[str, Any],
+    metadata: dict[str, Any] | None = None,
 ) -> None:
     if row.get("sparse_candidate_source") != "learned_sparse":
         return
+    metadata = metadata or {}
     warnings = coverage.get("warnings", [])
     if not isinstance(warnings, list):
         warnings = []
     row["learned_sparse_coverage"] = coverage
+    row["learned_sparse_doc_coverage"] = coverage.get("doc_coverage_ratio")
+    row["learned_sparse_query_coverage"] = coverage.get("query_coverage_ratio")
+    row["learned_sparse_doc_rows"] = coverage.get("learned_sparse_doc_rows")
+    row["learned_sparse_query_rows"] = coverage.get("learned_sparse_query_rows")
+    row["learned_sparse_missing_doc_count"] = coverage.get("learned_sparse_missing_doc_count")
+    row["learned_sparse_missing_query_count"] = coverage.get("learned_sparse_missing_query_count")
+    row["learned_sparse_extra_doc_count"] = coverage.get("learned_sparse_extra_doc_count")
+    row["learned_sparse_extra_query_count"] = coverage.get("learned_sparse_extra_query_count")
+    row["learned_sparse_feature_source"] = metadata.get("learned_sparse_feature_source")
+    row["learned_sparse_feature_details"] = metadata.get("learned_sparse_feature_details")
+    row["learned_sparse_feature_version"] = metadata.get("learned_sparse_feature_version")
+    row["learned_sparse_feature_model_name"] = metadata.get("learned_sparse_feature_model_name")
+    row["learned_sparse_feature_model_checksum"] = metadata.get("learned_sparse_feature_model_checksum")
+    row["learned_sparse_feature_warnings"] = metadata.get("learned_sparse_feature_warnings")
     row["learned_sparse_partial_coverage"] = bool(coverage.get("partial_coverage", False))
+    row["learned_sparse_plumbing_only"] = bool(coverage.get("learned_sparse_plumbing_only", False))
+    row["learned_sparse_safe_serving_evidence"] = bool(
+        coverage.get("learned_sparse_safe_serving_evidence", False)
+    )
+    row["not_safe_serving_evidence"] = bool(coverage.get("not_safe_serving_evidence", False))
     if warnings:
         evidence_warnings = row.get("evidence_warnings", [])
         if not isinstance(evidence_warnings, list):
@@ -910,8 +1516,19 @@ def annotate_serving_grid_learned_sparse_evidence(
     if not isinstance(coverage, dict):
         return
     serving_grid["learned_sparse_coverage"] = coverage
+    metadata = learned_sparse_metadata_from_phase(learned_sparse_phase)
+    serving_grid.update(metadata)
     serving_grid["learned_sparse_partial_coverage"] = bool(
         coverage.get("partial_coverage", False)
+    )
+    serving_grid["learned_sparse_plumbing_only"] = bool(
+        coverage.get("learned_sparse_plumbing_only", False)
+    )
+    serving_grid["learned_sparse_safe_serving_evidence"] = bool(
+        coverage.get("learned_sparse_safe_serving_evidence", False)
+    )
+    serving_grid["not_safe_serving_evidence"] = bool(
+        coverage.get("not_safe_serving_evidence", False)
     )
     serving_grid["learned_sparse_evidence_warnings"] = list(
         coverage.get("warnings", [])
@@ -928,7 +1545,222 @@ def annotate_serving_grid_learned_sparse_evidence(
             continue
         for row in rows:
             if isinstance(row, dict):
-                annotate_learned_sparse_evidence(row, coverage)
+                annotate_learned_sparse_evidence(row, coverage, metadata)
+    serving_grid["learned_sparse_rescue_focus"] = learned_sparse_rescue_focus_block(
+        serving_grid
+    )
+
+
+def serving_row_uses_learned_sparse(row: dict[str, Any]) -> bool:
+    return (
+        str(row.get("sparse_candidate_source") or "off") == "learned_sparse"
+        or "learned_sparse_rescue" in str(row.get("profile") or "")
+    )
+
+
+def learned_sparse_coverage_failure_reasons(row: dict[str, Any]) -> list[str]:
+    if not serving_row_uses_learned_sparse(row):
+        return []
+    coverage = row.get("learned_sparse_coverage")
+    if not isinstance(coverage, dict):
+        coverage = {}
+    reasons: list[str] = []
+    feature_source = str(
+        row.get(
+            "learned_sparse_feature_source",
+            coverage.get("learned_sparse_feature_source", ""),
+        )
+        or ""
+    )
+    feature_warnings = row.get(
+        "learned_sparse_feature_warnings",
+        coverage.get("learned_sparse_feature_warnings", []),
+    )
+    if not isinstance(feature_warnings, list):
+        feature_warnings = []
+    if (
+        bool(row.get("learned_sparse_plumbing_only", coverage.get("learned_sparse_plumbing_only", False)))
+        or feature_source in {"hash_plumbing", "unknown_plumbing"}
+        or "learned_sparse_hash_plumbing_only" in feature_warnings
+        or "learned_sparse_plumbing_only" in feature_warnings
+    ):
+        reasons.append("learned_sparse_plumbing_only")
+    if bool(row.get("learned_sparse_partial_coverage", coverage.get("partial_coverage", False))):
+        reasons.append("learned_sparse_partial_coverage")
+    if not coverage:
+        reasons.extend([
+            "learned_sparse_missing_doc_features",
+            "learned_sparse_missing_query_features",
+        ])
+        return sorted(dict.fromkeys(reasons))
+
+    def coverage_int(key: str) -> int:
+        value = coverage.get(key)
+        try:
+            return int(value)
+        except (TypeError, ValueError):
+            return 0
+
+    loaded_docs = coverage_int("loaded_documents")
+    sparse_docs = coverage_int("learned_sparse_documents")
+    loaded_queries = coverage_int("loaded_queries")
+    sparse_queries = coverage_int("learned_sparse_queries")
+    doc_ratio = coverage.get("doc_coverage_ratio")
+    query_ratio = coverage.get("query_coverage_ratio")
+    if loaded_docs > 0 and sparse_docs < loaded_docs:
+        reasons.append("learned_sparse_partial_doc_coverage")
+        reasons.append("learned_sparse_missing_doc_features")
+    elif doc_ratio is not None:
+        try:
+            if float(doc_ratio) < 1.0:
+                reasons.append("learned_sparse_partial_doc_coverage")
+                reasons.append("learned_sparse_missing_doc_features")
+        except (TypeError, ValueError):
+            pass
+    if loaded_queries > 0 and sparse_queries < loaded_queries:
+        reasons.append("learned_sparse_partial_query_coverage")
+        reasons.append("learned_sparse_missing_query_features")
+    elif query_ratio is not None:
+        try:
+            if float(query_ratio) < 1.0:
+                reasons.append("learned_sparse_partial_query_coverage")
+                reasons.append("learned_sparse_missing_query_features")
+        except (TypeError, ValueError):
+            pass
+    return sorted(dict.fromkeys(reasons))
+
+
+def learned_sparse_rescue_focus_row(row: dict[str, Any]) -> dict[str, Any]:
+    sample = row.get("last_scan_stats_sample", row.get("serving_stats_sample", {}))
+    if not isinstance(sample, dict):
+        sample = {}
+    coverage = row.get("learned_sparse_coverage")
+    if not isinstance(coverage, dict):
+        coverage = {}
+    return {
+        "profile": row.get("profile"),
+        "candidate_source": row.get("candidate_source"),
+        "proxy_encoder": row.get("proxy_encoder"),
+        "sparse_candidate_source": row.get("sparse_candidate_source"),
+        "bm25_candidate_injection": row.get("bm25_candidate_injection"),
+        "learned_sparse_doc_coverage": coverage.get("doc_coverage_ratio"),
+        "learned_sparse_query_coverage": coverage.get("query_coverage_ratio"),
+        "learned_sparse_doc_rows": row.get(
+            "learned_sparse_doc_rows",
+            coverage.get("learned_sparse_doc_rows"),
+        ),
+        "learned_sparse_query_rows": row.get(
+            "learned_sparse_query_rows",
+            coverage.get("learned_sparse_query_rows"),
+        ),
+        "learned_sparse_feature_source": row.get("learned_sparse_feature_source"),
+        "learned_sparse_feature_details": row.get("learned_sparse_feature_details"),
+        "learned_sparse_feature_version": row.get("learned_sparse_feature_version"),
+        "learned_sparse_feature_model_name": row.get("learned_sparse_feature_model_name"),
+        "learned_sparse_feature_model_checksum": row.get("learned_sparse_feature_model_checksum"),
+        "learned_sparse_feature_warnings": row.get("learned_sparse_feature_warnings"),
+        "learned_sparse_missing_doc_count": row.get(
+            "learned_sparse_missing_doc_count",
+            coverage.get("learned_sparse_missing_doc_count"),
+        ),
+        "learned_sparse_missing_query_count": row.get(
+            "learned_sparse_missing_query_count",
+            coverage.get("learned_sparse_missing_query_count"),
+        ),
+        "learned_sparse_extra_doc_count": row.get(
+            "learned_sparse_extra_doc_count",
+            coverage.get("learned_sparse_extra_doc_count"),
+        ),
+        "learned_sparse_extra_query_count": row.get(
+            "learned_sparse_extra_query_count",
+            coverage.get("learned_sparse_extra_query_count"),
+        ),
+        "learned_sparse_partial_coverage": bool(
+            row.get("learned_sparse_partial_coverage", coverage.get("partial_coverage", False))
+        ),
+        "learned_sparse_plumbing_only": bool(
+            row.get("learned_sparse_plumbing_only", coverage.get("learned_sparse_plumbing_only", False))
+        ),
+        "learned_sparse_safe_serving_evidence": bool(
+            row.get(
+                "learned_sparse_safe_serving_evidence",
+                coverage.get("learned_sparse_safe_serving_evidence", False),
+            )
+        ),
+        "not_safe_serving_evidence": bool(
+            row.get("not_safe_serving_evidence", coverage.get("not_safe_serving_evidence", False))
+        ),
+        "learned_sparse_coverage_failures": learned_sparse_coverage_failure_reasons(row),
+        "learned_sparse_candidates": row.get("learned_sparse_candidates"),
+        "learned_sparse_retained_for_maxsim": row.get("learned_sparse_retained_for_maxsim"),
+        "learned_sparse_branch_latency_us": row.get("learned_sparse_branch_latency_us"),
+        "exact_rerank_docs": row.get("exact_rerank_docs"),
+        "exact_rerank_docs_p50": row.get("exact_rerank_docs_p50"),
+        "exact_rerank_docs_p95": row.get("exact_rerank_docs_p95"),
+        "exact_rerank_time_us": row.get("exact_rerank_time_us")
+        or sample.get("multivector_exact_maxsim_rerank_time_us")
+        or sample.get("exact_maxsim_rerank_time_us")
+        or sample.get("graph_heap_rescore_us"),
+        "final_maxsim_exact_kernel": sample.get(
+            "multivector_exact_kernel",
+            row.get("multivector_exact_kernel"),
+        ),
+        "p50_ms": row.get("p50_ms", row.get("p50_latency_ms_at_largest_budget")),
+        "p95_ms": row.get("p95_ms", row.get("p95_latency_ms_at_largest_budget")),
+        "p99_ms": row.get("p99_ms", row.get("p99_latency_ms_at_largest_budget")),
+        "exact_top1_admission_rate": row.get("exact_top1_admission_rate"),
+        "exact_top10_admission_recall": row.get("exact_top10_admission_recall"),
+        "recall@10": row.get("recall@10"),
+        "ndcg@10": row.get("ndcg@10"),
+        "mrr@10": row.get("mrr@10"),
+    }
+
+
+def learned_sparse_rescue_focus_block(serving_grid: dict[str, Any]) -> dict[str, Any]:
+    raw_rows = serving_grid.get("results", serving_grid.get("summary_rows", []))
+    rows = [item for item in raw_rows if isinstance(item, dict)]
+    focus_names = set(DOCUMENT_NODE_SERVING_GRID_LEARNED_SPARSE_FOCUS_PROFILES)
+    focus_rows = [
+        row
+        for row in rows
+        if row.get("profile") in focus_names or serving_row_uses_learned_sparse(row)
+    ]
+    if not focus_rows:
+        return {
+            "enabled": bool(serving_grid.get("learned_sparse_focus", False)),
+            "available": False,
+            "reason": "no learned-sparse focus rows",
+        }
+    coverage = serving_grid.get("learned_sparse_coverage", {})
+    if not isinstance(coverage, dict):
+        coverage = {}
+    return {
+        "enabled": bool(serving_grid.get("learned_sparse_focus", False)),
+        "available": True,
+        "coverage": coverage,
+        "partial_coverage": bool(
+            serving_grid.get(
+                "learned_sparse_partial_coverage",
+                coverage.get("partial_coverage", False),
+            )
+        ),
+        "coverage_warnings": list(
+            serving_grid.get("learned_sparse_evidence_warnings", coverage.get("warnings", []))
+            or []
+        ),
+        "profiles": [
+            learned_sparse_rescue_focus_row(row)
+            for row in sorted(
+                focus_rows,
+                key=lambda item: (
+                    serving_row_p95(item) if serving_row_p95(item) is not None else float("inf"),
+                    str(item.get("profile", "")),
+                    int(item.get("ef", 0) or 0),
+                    int(item.get("oversampling", 0) or 0),
+                ),
+            )
+        ],
+    }
 
 
 def multivector_dataset_stats(conn: psycopg.Connection[Any]) -> dict[str, Any]:
@@ -980,6 +1812,345 @@ def multivector_dataset_stats(conn: psycopg.Connection[Any]) -> dict[str, Any]:
         "dim_min": dim_min,
         "dim_max": dim_max,
     }
+
+
+def multivector_dataset_stats_for_build_estimate(
+    conn: psycopg.Connection[Any],
+    profile: DocumentNodeServingProfile | None,
+) -> dict[str, Any]:
+    """Return dataset stats for build estimates without forcing huge detoast scans.
+
+    The full token distribution is useful for sidecar-heavy profile estimates, but
+    proxy-only 1M build triage needs to reach CREATE INDEX quickly.  Proxy-only
+    storage does not persist the full multivector sidecar, so an approximate token
+    distribution is enough for the skip/fail estimate.
+    """
+    if profile is None or profile.storage_kind != "proxy_only":
+        return multivector_dataset_stats(conn)
+
+    row = fetch_one(
+        conn,
+        """
+        SELECT
+          count(*)::bigint,
+          (
+            SELECT turbohybrid_multivector_dims(colbert)::int
+            FROM dbpedia_colbert_docs
+            WHERE colbert IS NOT NULL
+            LIMIT 1
+          ) AS dim
+        FROM dbpedia_colbert_docs
+        WHERE colbert IS NOT NULL
+        """,
+    )
+    docs = int(row[0]) if row else 0
+    dim = int(row[1] or 0) if row else 0
+    return {
+        "docs": docs,
+        "avg_tokens": 0.0,
+        "p50_tokens": 0.0,
+        "p90_tokens": 0.0,
+        "min_tokens": 0,
+        "max_tokens": 0,
+        "dim": dim,
+        "dim_min": dim,
+        "dim_max": dim,
+        "estimate_stats_source": "proxy_only_fast_count",
+    }
+
+
+def index_build_estimate_int(value: float | int) -> int:
+    if isinstance(value, bool):
+        return 0
+    try:
+        return max(int(math.ceil(float(value))), 0)
+    except (TypeError, ValueError, OverflowError):
+        return 0
+
+
+def index_build_storage_bytes(storage_kind: str) -> int:
+    return {
+        "f32": 4,
+        "f16": 2,
+        "sq8": 1,
+        "proxy_only": 0,
+        "centroid_only": 0,
+    }.get(str(storage_kind), 4)
+
+
+def estimated_effective_token_stats(
+    *,
+    avg_tokens: float,
+    max_tokens: int,
+    args: argparse.Namespace,
+) -> tuple[float, int]:
+    mode = str(getattr(args, "multivector_token_pooling", "off") or "off")
+    if mode == "off":
+        return max(avg_tokens, 0.0), max(int(max_tokens), 0)
+    ratio = float(getattr(args, "multivector_token_pooling_target_ratio", 1.0) or 1.0)
+    min_tokens = int(getattr(args, "multivector_token_pooling_min_tokens", 16) or 16)
+    ratio = min(max(ratio, 0.0), 1.0)
+    pooled_avg = min(max(avg_tokens, 0.0), max(float(min_tokens), avg_tokens * ratio))
+    pooled_max = min(max(int(max_tokens), 0), max(min_tokens, int(math.ceil(max_tokens * ratio))))
+    return pooled_avg, pooled_max
+
+
+def estimated_centroid_count(avg_tokens: float, centroid_count: Any) -> int:
+    if isinstance(centroid_count, str) and centroid_count.lower() == "auto":
+        return proxy_centroid_count(max(index_build_estimate_int(avg_tokens), 1), "auto")
+    try:
+        return max(int(centroid_count), 0)
+    except (TypeError, ValueError):
+        return proxy_centroid_count(max(index_build_estimate_int(avg_tokens), 1), "auto")
+
+
+def estimate_index_build_resources(
+    dataset_stats: dict[str, Any],
+    args: argparse.Namespace,
+    profile: DocumentNodeServingProfile | None = None,
+) -> dict[str, Any]:
+    """Conservative benchmark-side estimate for CREATE INDEX resource pressure."""
+    docs = max(int(dataset_stats.get("docs", 0) or 0), 0)
+    avg_tokens_raw = max(float(dataset_stats.get("avg_tokens", 0.0) or 0.0), 0.0)
+    max_tokens_raw = max(int(dataset_stats.get("max_tokens", 0) or 0), 0)
+    dim = int(
+        dataset_stats.get("dim")
+        or dataset_stats.get("dim_max")
+        or dataset_stats.get("dim_min")
+        or 0
+    )
+    dim = max(dim, 0)
+    avg_tokens, max_tokens = estimated_effective_token_stats(
+        avg_tokens=avg_tokens_raw,
+        max_tokens=max_tokens_raw,
+        args=args,
+    )
+    total_vectors = docs * avg_tokens
+    storage_kind = str(getattr(args, "multivector_doc_storage", "f32") or "f32")
+    storage_bytes = index_build_storage_bytes(storage_kind)
+    # Full document vectors in the document-node docmap are f32 tuples. The
+    # experimental centroid_only format skips those tuples and writes centroids
+    # as f16 tuples for centroid_lite heap-rerank admission.
+    persisted_sidecar_bytes_per_value = 4
+    centroids = str(getattr(args, "multivector_centroids", "off") or "off")
+    centroid_count = estimated_centroid_count(
+        avg_tokens,
+        getattr(args, "multivector_centroid_count", "auto"),
+    )
+    candidate_source = str(getattr(args, "multivector_candidate_source", "proxy_vector"))
+    if profile is not None:
+        storage_kind = profile.storage_kind
+        storage_bytes = index_build_storage_bytes(storage_kind)
+        centroids = profile.centroids
+        centroid_count = estimated_centroid_count(avg_tokens, profile.centroid_count)
+        candidate_source = profile.candidate_source
+
+    graph_m = int(getattr(args, "index_graph_m", 0) or 0)
+    graph_m_effective = graph_m if graph_m > 0 else 16
+    ef_construction = int(getattr(args, "index_graph_ef_construction", 0) or 0)
+    ef_construction_effective = (
+        ef_construction if ef_construction > 0 else max(64, graph_m_effective * 4)
+    )
+    native_segments = int(getattr(args, "index_native_segments", 0) or 0)
+    native_segments_effective = native_segments if native_segments > 0 else 1
+    entry_sidecar = bool(getattr(args, "entry_sidecar", False))
+    entry_sidecar_representatives = int(
+        getattr(args, "entry_sidecar_representatives", 128) or 128
+    )
+    if profile is not None:
+        entry_sidecar = bool(profile.entry_sidecar)
+        entry_sidecar_representatives = int(profile.entry_sidecar_representatives or 128)
+
+    graph_nodes = docs * 64
+    graph_edges = index_build_estimate_int(docs * graph_m_effective * 2 * 8 * 1.35)
+    proxy_vectors = index_build_estimate_int(docs * dim * 4)
+    docmap = docs * 40
+    full_sidecar = index_build_estimate_int(
+        total_vectors * dim * persisted_sidecar_bytes_per_value + docs * 24
+    )
+    if storage_kind in {"proxy_only", "centroid_only"}:
+        full_sidecar = 0
+    centroid_vectors = 0
+    centroid_postings = 0
+    if centroids == "kmeans":
+        centroid_bytes_per_value = 2 if storage_kind == "centroid_only" else 4
+        centroid_vectors = index_build_estimate_int(
+            docs * centroid_count * dim * centroid_bytes_per_value
+        )
+        centroid_postings = index_build_estimate_int(total_vectors * 16)
+    quantized_postings = 0
+    if candidate_source == "quantized_inverted_experimental":
+        quantized_postings = index_build_estimate_int(total_vectors * 12 + docs * 16)
+    entry_sidecar_bytes = 0
+    if entry_sidecar:
+        entry_sidecar_bytes = index_build_estimate_int(
+            entry_sidecar_representatives * dim * 4
+            + entry_sidecar_representatives * 64
+            + docs * 8
+        )
+    temporary_build_arrays = index_build_estimate_int(
+        docs * max(ef_construction_effective, graph_m_effective) * 16
+        + total_vectors * 8
+        + max_tokens * dim * 4 * max(native_segments_effective, 1)
+        + (centroid_vectors * 0.25)
+        + (full_sidecar * 0.10)
+    )
+    components = {
+        "graph_nodes": graph_nodes,
+        "graph_edges": graph_edges,
+        "proxy_vectors": proxy_vectors,
+        "docmap": docmap,
+        "full_multivector_sidecar": full_sidecar,
+        "centroid_vectors": centroid_vectors,
+        "centroid_postings": centroid_postings,
+        "quantized_postings": quantized_postings,
+        "entry_sidecar": entry_sidecar_bytes,
+        "temporary_build_arrays": temporary_build_arrays,
+    }
+    persisted_keys = (
+        "graph_nodes",
+        "graph_edges",
+        "proxy_vectors",
+        "docmap",
+        "full_multivector_sidecar",
+        "centroid_vectors",
+        "centroid_postings",
+        "quantized_postings",
+        "entry_sidecar",
+    )
+    estimated_index_bytes = sum(int(components[key]) for key in persisted_keys)
+    docmap_payload_bytes = (
+        docmap
+        + full_sidecar
+        + centroid_vectors
+        + centroid_postings
+        + quantized_postings
+    )
+    estimated_build_memory_bytes = estimated_index_bytes + temporary_build_arrays
+    return {
+        "estimated_build_memory_mb": round(
+            estimated_build_memory_bytes / (1024.0 * 1024.0),
+            3,
+        ),
+        "estimated_build_memory_bytes": int(estimated_build_memory_bytes),
+        "estimated_index_bytes": int(estimated_index_bytes),
+        "estimate_components": components,
+        "estimate_inputs": {
+            "docs": docs,
+            "avg_tokens": round(avg_tokens, 3),
+            "avg_tokens_before_pooling": round(avg_tokens_raw, 3),
+            "max_tokens": max_tokens,
+            "max_tokens_before_pooling": max_tokens_raw,
+            "dimension": dim,
+            "storage_kind": storage_kind,
+            "storage_bytes_per_value": storage_bytes,
+            "persisted_sidecar_bytes_per_value": persisted_sidecar_bytes_per_value,
+            "centroid_bytes_per_value": (
+                2 if storage_kind == "centroid_only" and centroids == "kmeans" else 4
+            ),
+            "docmap_format_limit_bytes": DOCUMENT_NODE_DOCMAP_FORMAT_LIMIT_BYTES,
+            "docmap_payload_bytes": int(docmap_payload_bytes),
+            "docmap_format_limit_exceeded": (
+                docmap_payload_bytes > DOCUMENT_NODE_DOCMAP_FORMAT_LIMIT_BYTES
+            ),
+            "centroids": centroids,
+            "centroid_count": centroid_count,
+            "centroid_postings_enabled": centroids == "kmeans",
+            "token_pooling": str(getattr(args, "multivector_token_pooling", "off")),
+            "token_pooling_target_ratio": float(
+                getattr(args, "multivector_token_pooling_target_ratio", 1.0) or 1.0
+            ),
+            "graph_m": graph_m,
+            "graph_m_effective": graph_m_effective,
+            "ef_construction": ef_construction,
+            "ef_construction_effective": ef_construction_effective,
+            "entry_sidecar": entry_sidecar,
+            "entry_sidecar_representatives": entry_sidecar_representatives,
+            "native_segments": native_segments,
+            "native_segments_effective": native_segments_effective,
+            "candidate_source": candidate_source,
+        },
+        "estimate_notes": [
+            "benchmark_side_conservative_estimate",
+            "extension_build_algorithm_unchanged",
+            (
+                "centroid_only_skips_full_multivector_sidecar_and_persists_f16_centroids"
+                if storage_kind == "centroid_only"
+                else "document_node_docmap_sidecar_currently_persists_f32_values"
+            ),
+            "temporary_build_arrays_are_approximate",
+        ],
+    }
+
+
+def index_build_estimate_decision(
+    estimate: dict[str, Any],
+    args: argparse.Namespace,
+) -> dict[str, Any]:
+    max_memory_mb = int(getattr(args, "max_estimated_index_build_mb", 0) or 0)
+    max_index_bytes = int(getattr(args, "max_estimated_index_bytes", 0) or 0)
+    memory_mb = float(estimate.get("estimated_build_memory_mb", 0.0) or 0.0)
+    index_bytes = int(estimate.get("estimated_index_bytes", 0) or 0)
+    inputs = estimate.get("estimate_inputs", {})
+    components = estimate.get("estimate_components", {})
+    reasons: list[str] = []
+    format_limit_exceeded = bool(
+        isinstance(inputs, dict)
+        and inputs.get("docmap_format_limit_exceeded")
+        and int(components.get("full_multivector_sidecar", 0) or 0)
+        > DOCUMENT_NODE_DOCMAP_FORMAT_LIMIT_BYTES
+    )
+    if format_limit_exceeded:
+        reasons.append(
+            "estimated full_multivector_sidecar exceeds current 32-bit "
+            f"document-node docmap format limit ({DOCUMENT_NODE_DOCMAP_FORMAT_LIMIT_BYTES} bytes)"
+        )
+    if max_memory_mb > 0 and memory_mb > max_memory_mb:
+        reasons.append(
+            f"estimated_build_memory_mb {memory_mb:.3f} exceeds limit {max_memory_mb}"
+        )
+    if max_index_bytes > 0 and index_bytes > max_index_bytes:
+        reasons.append(
+            f"estimated_index_bytes {index_bytes} exceeds limit {max_index_bytes}"
+        )
+    exceeded = bool(reasons)
+    action = "none"
+    if exceeded:
+        if format_limit_exceeded:
+            action = "skip" if bool(
+                getattr(args, "skip_profile_if_estimate_exceeds_limit", False)
+            ) else "fail"
+        elif bool(getattr(args, "fail_if_estimate_exceeds_limit", False)):
+            action = "fail"
+        elif bool(getattr(args, "skip_profile_if_estimate_exceeds_limit", False)):
+            action = "skip"
+        else:
+            action = "warn"
+    return {
+        "limit_exceeded": exceeded,
+        "action": action,
+        "reasons": reasons,
+        "format_limit_exceeded": format_limit_exceeded,
+        "max_estimated_index_build_mb": max_memory_mb or None,
+        "max_estimated_index_bytes": max_index_bytes or None,
+    }
+
+
+def fail_index_build_estimate_if_requested(
+    *,
+    profile_name: str,
+    estimate: dict[str, Any],
+    decision: dict[str, Any],
+) -> None:
+    if decision.get("action") != "fail":
+        return
+    reasons = "; ".join(str(reason) for reason in decision.get("reasons", []))
+    raise SystemExit(
+        f"refusing CREATE INDEX for profile {profile_name}: resource estimate "
+        f"exceeds configured limit: {reasons}; "
+        f"estimated_build_memory_mb={estimate.get('estimated_build_memory_mb')}, "
+        f"estimated_index_bytes={estimate.get('estimated_index_bytes')}"
+    )
 
 
 def validate_document_node_proxy_build(
@@ -1044,11 +2215,13 @@ def build_index_reloptions(args: argparse.Namespace) -> tuple[list[str], dict[st
     else:
         centroid_count_sql = int(centroid_count)
     proxy_encoder = getattr(args, "multivector_proxy_encoder", "normalized_mean")
+    doc_storage = getattr(args, "multivector_doc_storage", "f32")
     reloptions = [
         "quantization_bits = 4",
         "exact_storage = off",
         f"multivector_graph = {args.multivector_graph}",
         f"multivector_doc_build_scorer = {args.multivector_doc_build_scorer}",
+        f"multivector_doc_storage = {doc_storage}",
         f"multivector_token_pooling = {pooling_mode}",
         f"multivector_token_pooling_target_ratio = {pooling_ratio}",
         f"multivector_token_pooling_min_tokens = {pooling_min_tokens}",
@@ -1082,6 +2255,7 @@ def build_index_reloptions(args: argparse.Namespace) -> tuple[list[str], dict[st
         "index_graph_ef_construction": index_graph_ef_construction,
         "index_graph_ef_search": index_graph_ef_search,
         "index_native_segments": index_native_segments,
+        "multivector_doc_storage": doc_storage,
         "entry_sidecar": entry_sidecar,
         "entry_sidecar_representatives": int(
             getattr(args, "entry_sidecar_representatives", 128)
@@ -1170,11 +2344,19 @@ def copy_rows(conn: psycopg.Connection[Any], sql: str, rows: Iterable[tuple[Any,
     return count
 
 
-def parse_sparse_jsonl(path: Path, preferred_id_key: str) -> list[tuple[str, list[int], list[float]]]:
+def parse_sparse_jsonl(
+    path: Path,
+    preferred_id_key: str,
+    *,
+    reject_duplicate_ids: bool = False,
+) -> list[tuple[str, list[int], list[float]]]:
     rows: list[tuple[str, list[int], list[float]]] = []
+    seen_ids: set[str] = set()
     id_keys = (preferred_id_key, "id")
     term_keys = ("term_ids", "terms", "indices")
     weight_keys = ("weights", "scores", "values")
+    if not path.is_file():
+        raise SystemExit(f"learned-sparse JSONL file does not exist: {path}")
     with path.open("r", encoding="utf-8") as handle:
         for line_no, raw_line in enumerate(handle, start=1):
             line = raw_line.strip()
@@ -1186,6 +2368,8 @@ def parse_sparse_jsonl(path: Path, preferred_id_key: str) -> list[tuple[str, lis
                 raise SystemExit(f"{path}:{line_no}: invalid JSONL row") from exc
             if not isinstance(item, dict):
                 raise SystemExit(f"{path}:{line_no}: expected a JSON object")
+            if str(item.get("kind") or "").lower() == "metadata":
+                continue
 
             sparse_id = next((item[key] for key in id_keys if key in item), None)
             terms = next((item[key] for key in term_keys if key in item), None)
@@ -1194,6 +2378,10 @@ def parse_sparse_jsonl(path: Path, preferred_id_key: str) -> list[tuple[str, lis
                 raise SystemExit(
                     f"{path}:{line_no}: expected {preferred_id_key!r}, term_ids, and weights fields"
                 )
+            sparse_id = str(sparse_id)
+            if reject_duplicate_ids and sparse_id in seen_ids:
+                raise SystemExit(f"{path}:{line_no}: duplicate learned-sparse id {sparse_id!r}")
+            seen_ids.add(sparse_id)
             if not isinstance(terms, list) or not isinstance(weights, list) or len(terms) != len(weights):
                 raise SystemExit(f"{path}:{line_no}: term_ids and weights must be equal-length arrays")
 
@@ -1206,8 +2394,687 @@ def parse_sparse_jsonl(path: Path, preferred_id_key: str) -> list[tuple[str, lis
                     raise SystemExit(f"{path}:{line_no}: sparse terms must be non-negative and weights finite")
                 term_ids.append(term_id)
                 sparse_weights.append(sparse_weight)
-            rows.append((str(sparse_id), term_ids, sparse_weights))
+            rows.append((sparse_id, term_ids, sparse_weights))
     return rows
+
+
+def learned_sparse_jsonl_manifest_paths(path: Path) -> list[Path]:
+    candidates = [
+        path.with_name(path.name + ".manifest.json"),
+        path.with_suffix(path.suffix + ".manifest.json"),
+        path.with_suffix(".manifest.json"),
+    ]
+    deduped: list[Path] = []
+    seen: set[Path] = set()
+    for candidate in candidates:
+        if candidate not in seen:
+            deduped.append(candidate)
+            seen.add(candidate)
+    return deduped
+
+
+def read_json_object_file(path: Path) -> dict[str, Any]:
+    try:
+        item = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return {}
+    return item if isinstance(item, dict) else {}
+
+
+def learned_sparse_jsonl_declared_metadata(path: Path) -> dict[str, Any]:
+    metadata: dict[str, Any] = {}
+    for manifest_path in learned_sparse_jsonl_manifest_paths(path):
+        if manifest_path.is_file():
+            metadata.update(read_json_object_file(manifest_path))
+            break
+    first_row = first_jsonl_object(path)
+    if str(first_row.get("kind") or "").lower() == "metadata":
+        metadata.update(first_row)
+    else:
+        for key in (
+            "feature_source",
+            "learned_sparse_feature_source",
+            "feature_version",
+            "learned_sparse_feature_version",
+            "feature_generator",
+            "feature_generator_version",
+            "model",
+            "model_name",
+            "model_checksum",
+            "checksum",
+            "plumbing_only",
+            "expected_doc_count",
+            "expected_query_count",
+        ):
+            if key in first_row:
+                metadata[key] = first_row[key]
+    return metadata
+
+
+def learned_sparse_metadata_value(
+    metadata_items: Sequence[dict[str, Any]],
+    keys: Sequence[str],
+) -> Any:
+    for key in keys:
+        for metadata in metadata_items:
+            value = metadata.get(key)
+            if value not in (None, ""):
+                return value
+    return None
+
+
+def learned_sparse_metadata_contains_token(
+    metadata_items: Sequence[dict[str, Any]],
+    paths: Sequence[Path],
+    tokens: Sequence[str],
+) -> bool:
+    haystack_parts = [path.name for path in paths]
+    for metadata in metadata_items:
+        for value in metadata.values():
+            if isinstance(value, (str, int, float, bool)):
+                haystack_parts.append(str(value))
+            elif isinstance(value, dict):
+                haystack_parts.extend(str(item) for item in value.values())
+    haystack = " ".join(haystack_parts).lower()
+    return any(token in haystack for token in tokens)
+
+
+def learned_sparse_jsonl_coverage_from_rows(
+    rows: list[tuple[str, list[int], list[float]]],
+    expected_ids: Iterable[str],
+    *,
+    loaded_key: str,
+    sparse_key: str,
+    row_key: str,
+    missing_key: str,
+    extra_key: str,
+    ratio_key: str,
+) -> dict[str, Any]:
+    expected = {str(item) for item in expected_ids}
+    observed = {str(row[0]) for row in rows}
+    missing = expected - observed
+    extra = observed - expected
+    covered = len(expected) - len(missing)
+    return {
+        loaded_key: len(expected),
+        sparse_key: covered,
+        row_key: len(rows),
+        missing_key: len(missing),
+        extra_key: len(extra),
+        ratio_key: learned_sparse_ratio(covered, len(expected)),
+        "missing_ids_sample": sorted(missing)[:10],
+        "extra_ids_sample": sorted(extra)[:10],
+    }
+
+
+def learned_sparse_duplicate_summary(
+    rows: list[tuple[str, list[int], list[float]]],
+) -> dict[str, Any]:
+    seen: set[str] = set()
+    duplicate_ids: list[str] = []
+    duplicate_count = 0
+    for sparse_id, _, _ in rows:
+        sparse_id = str(sparse_id)
+        if sparse_id in seen:
+            duplicate_count += 1
+            if len(duplicate_ids) < 10 and sparse_id not in duplicate_ids:
+                duplicate_ids.append(sparse_id)
+        else:
+            seen.add(sparse_id)
+    return {
+        "duplicate_count": duplicate_count,
+        "duplicate_ids_sample": sorted(duplicate_ids),
+    }
+
+
+def validate_learned_sparse_jsonl_coverage(
+    conn: psycopg.Connection[Any] | None,
+    args: argparse.Namespace,
+    expected_doc_ids: Iterable[str],
+    expected_query_ids: Iterable[str],
+    *,
+    reject_duplicate_ids: bool = True,
+    enforce_strict: bool = True,
+) -> dict[str, Any]:
+    del conn
+    require_complete_learned_sparse_args(args)
+    if args.learned_sparse_doc_jsonl is None:
+        return {
+            "skipped": True,
+            "reason": "no learned sparse JSONL files supplied",
+        }
+
+    doc_rows = parse_sparse_jsonl(
+        args.learned_sparse_doc_jsonl,
+        "doc_id",
+        reject_duplicate_ids=reject_duplicate_ids,
+    )
+    query_rows_sparse = parse_sparse_jsonl(
+        args.learned_sparse_query_jsonl,
+        "query_id",
+        reject_duplicate_ids=reject_duplicate_ids,
+    )
+    doc_duplicates = learned_sparse_duplicate_summary(doc_rows)
+    query_duplicates = learned_sparse_duplicate_summary(query_rows_sparse)
+    doc_coverage = learned_sparse_jsonl_coverage_from_rows(
+        doc_rows,
+        expected_doc_ids,
+        loaded_key="loaded_documents",
+        sparse_key="learned_sparse_documents",
+        row_key="learned_sparse_doc_rows",
+        missing_key="learned_sparse_missing_doc_count",
+        extra_key="learned_sparse_extra_doc_count",
+        ratio_key="doc_coverage_ratio",
+    )
+    query_coverage = learned_sparse_jsonl_coverage_from_rows(
+        query_rows_sparse,
+        expected_query_ids,
+        loaded_key="loaded_queries",
+        sparse_key="learned_sparse_queries",
+        row_key="learned_sparse_query_rows",
+        missing_key="learned_sparse_missing_query_count",
+        extra_key="learned_sparse_extra_query_count",
+        ratio_key="query_coverage_ratio",
+    )
+    coverage = {
+        **{key: value for key, value in doc_coverage.items() if not key.endswith("_ids_sample")},
+        **{key: value for key, value in query_coverage.items() if not key.endswith("_ids_sample")},
+        "missing_doc_ids_sample": doc_coverage["missing_ids_sample"],
+        "extra_doc_ids_sample": doc_coverage["extra_ids_sample"],
+        "missing_query_ids_sample": query_coverage["missing_ids_sample"],
+        "extra_query_ids_sample": query_coverage["extra_ids_sample"],
+        "learned_sparse_duplicate_doc_count": doc_duplicates["duplicate_count"],
+        "learned_sparse_duplicate_query_count": query_duplicates["duplicate_count"],
+        "duplicate_doc_ids_sample": doc_duplicates["duplicate_ids_sample"],
+        "duplicate_query_ids_sample": query_duplicates["duplicate_ids_sample"],
+    }
+    metadata = learned_sparse_feature_metadata(
+        args.learned_sparse_doc_jsonl,
+        args.learned_sparse_query_jsonl,
+    )
+    coverage_warnings = learned_sparse_coverage_warnings(coverage, threshold=1.0)
+    if doc_duplicates["duplicate_count"]:
+        coverage_warnings.append("learned_sparse_duplicate_doc_ids")
+    if query_duplicates["duplicate_count"]:
+        coverage_warnings.append("learned_sparse_duplicate_query_ids")
+    provenance_warnings = list(metadata.get("learned_sparse_feature_warnings", []) or [])
+    coverage["partial_coverage"] = bool(coverage_warnings)
+    coverage["warnings"] = sorted(dict.fromkeys(coverage_warnings + provenance_warnings))
+    coverage["learned_sparse_feature_source"] = metadata.get("learned_sparse_feature_source")
+    coverage["learned_sparse_feature_details"] = metadata.get("learned_sparse_feature_details")
+    coverage["learned_sparse_feature_version"] = metadata.get("learned_sparse_feature_version")
+    coverage["learned_sparse_feature_model_name"] = metadata.get("learned_sparse_feature_model_name")
+    coverage["learned_sparse_feature_model_checksum"] = metadata.get("learned_sparse_feature_model_checksum")
+    coverage["learned_sparse_feature_warnings"] = provenance_warnings
+    coverage["learned_sparse_expected_doc_count"] = metadata.get("learned_sparse_expected_doc_count")
+    coverage["learned_sparse_expected_query_count"] = metadata.get("learned_sparse_expected_query_count")
+    metadata_plumbing = bool(metadata.get("learned_sparse_plumbing_only", False))
+    coverage["learned_sparse_plumbing_only"] = bool(coverage_warnings) or metadata_plumbing
+    coverage["learned_sparse_safe_serving_evidence"] = not bool(
+        coverage_warnings or metadata_plumbing
+    )
+    coverage["not_safe_serving_evidence"] = not bool(
+        coverage["learned_sparse_safe_serving_evidence"]
+    )
+    if (
+        enforce_strict
+        and bool(getattr(args, "learned_sparse_require_full_coverage", False))
+        and coverage_warnings
+    ):
+        raise SystemExit(
+            "learned-sparse JSONL coverage is incomplete: "
+            f"missing_docs={coverage['learned_sparse_missing_doc_count']}, "
+            f"missing_queries={coverage['learned_sparse_missing_query_count']}; "
+            "rerun with complete learned-sparse document/query features or omit "
+            "--learned-sparse-require-full-coverage for plumbing-only smoke evidence"
+        )
+    return {
+        "skipped": False,
+        "coverage": coverage,
+        "doc_rows": doc_rows,
+        "query_rows": query_rows_sparse,
+        "metadata": metadata,
+    }
+
+
+def document_node_serving_args_request_learned_sparse(
+    args: argparse.Namespace,
+) -> bool:
+    if not (
+        bool(getattr(args, "document_node_serving_grid", False))
+        or bool(getattr(args, "document_node_serving_build_only", False))
+    ):
+        return False
+    selected = str(getattr(args, "document_node_serving_grid_profiles", "") or "")
+    return (
+        bool(getattr(args, "document_node_serving_grid_learned_sparse_focus", False))
+        or bool(getattr(args, "document_node_serving_grid_include_learned_sparse_rescue", False))
+        or "learned_sparse" in selected
+    )
+
+
+def learned_sparse_serving_validation_command(args: argparse.Namespace) -> str:
+    def value(item: Any, placeholder: str) -> str:
+        if item in (None, ""):
+            return placeholder
+        return shlex.quote(str(item))
+
+    lines = [
+        "python benchmarks/dbpedia_colbert_multivector.py \\",
+        f"  --database {value(getattr(args, 'database', None), '<database>')} \\",
+        "  --reuse-data \\",
+        "  --validate-learned-sparse-jsonl-only \\",
+        (
+            "  --learned-sparse-doc-jsonl "
+            f"{value(getattr(args, 'learned_sparse_doc_jsonl', None), '<doc-jsonl>')} \\"
+        ),
+        (
+            "  --learned-sparse-query-jsonl "
+            f"{value(getattr(args, 'learned_sparse_query_jsonl', None), '<query-jsonl>')}"
+        ),
+    ]
+    if bool(getattr(args, "learned_sparse_require_full_coverage", False)):
+        lines[-1] += " \\"
+        lines.append("  --learned-sparse-require-full-coverage")
+    return "\n".join(lines)
+
+
+def learned_sparse_paths_look_plumbing(*paths: Path | None) -> bool:
+    haystack = " ".join(str(path) for path in paths if path is not None).lower()
+    return any(token in haystack for token in ("hash", "toy", "sample", "10q"))
+
+
+def learned_sparse_paths_are_local_10q_hash(*paths: Path | None) -> bool:
+    haystack = " ".join(str(path) for path in paths if path is not None).lower()
+    return "hash" in haystack and "10q" in haystack
+
+
+def learned_sparse_serving_preflight_summary(
+    args: argparse.Namespace,
+    expected_doc_ids: Iterable[str],
+    expected_query_ids: Iterable[str],
+) -> dict[str, Any]:
+    expected_doc_ids = [str(item) for item in expected_doc_ids]
+    expected_query_ids = [str(item) for item in expected_query_ids]
+    doc_path = getattr(args, "learned_sparse_doc_jsonl", None)
+    query_path = getattr(args, "learned_sparse_query_jsonl", None)
+    doc_path = Path(doc_path) if doc_path is not None else None
+    query_path = Path(query_path) if query_path is not None else None
+    doc_exists = bool(doc_path is not None and doc_path.is_file())
+    query_exists = bool(query_path is not None and query_path.is_file())
+
+    doc_rows: list[tuple[str, list[int], list[float]]] = []
+    query_rows: list[tuple[str, list[int], list[float]]] = []
+    if doc_exists:
+        doc_rows = parse_sparse_jsonl(doc_path, "doc_id", reject_duplicate_ids=False)
+    if query_exists:
+        query_rows = parse_sparse_jsonl(query_path, "query_id", reject_duplicate_ids=False)
+
+    doc_coverage = learned_sparse_jsonl_coverage_from_rows(
+        doc_rows,
+        expected_doc_ids,
+        loaded_key="loaded_documents",
+        sparse_key="learned_sparse_documents",
+        row_key="learned_sparse_doc_rows",
+        missing_key="learned_sparse_missing_doc_count",
+        extra_key="learned_sparse_extra_doc_count",
+        ratio_key="doc_coverage_ratio",
+    )
+    query_coverage = learned_sparse_jsonl_coverage_from_rows(
+        query_rows,
+        expected_query_ids,
+        loaded_key="loaded_queries",
+        sparse_key="learned_sparse_queries",
+        row_key="learned_sparse_query_rows",
+        missing_key="learned_sparse_missing_query_count",
+        extra_key="learned_sparse_extra_query_count",
+        ratio_key="query_coverage_ratio",
+    )
+    doc_duplicates = learned_sparse_duplicate_summary(doc_rows)
+    query_duplicates = learned_sparse_duplicate_summary(query_rows)
+    metadata = (
+        learned_sparse_feature_metadata(doc_path, query_path)
+        if doc_exists and query_exists and doc_path is not None and query_path is not None
+        else {
+            "learned_sparse_feature_source": (
+                "hash_plumbing"
+                if learned_sparse_paths_look_plumbing(doc_path, query_path)
+                else "unknown"
+            ),
+            "learned_sparse_plumbing_only": learned_sparse_paths_look_plumbing(
+                doc_path, query_path
+            ),
+            "learned_sparse_feature_warnings": (
+                ["learned_sparse_hash_plumbing_only"]
+                if learned_sparse_paths_look_plumbing(doc_path, query_path)
+                else []
+            ),
+        }
+    )
+    missing_doc_file = bool(doc_path is None or not doc_exists)
+    missing_query_file = bool(query_path is None or not query_exists)
+    missing_doc_count = int(doc_coverage["learned_sparse_missing_doc_count"])
+    missing_query_count = int(query_coverage["learned_sparse_missing_query_count"])
+    duplicate_doc_count = int(doc_duplicates["duplicate_count"])
+    duplicate_query_count = int(query_duplicates["duplicate_count"])
+    incomplete = bool(
+        missing_doc_file
+        or missing_query_file
+        or missing_doc_count > 0
+        or missing_query_count > 0
+        or duplicate_doc_count > 0
+        or duplicate_query_count > 0
+    )
+    plumbing = bool(
+        metadata.get("learned_sparse_plumbing_only", False)
+        or learned_sparse_paths_look_plumbing(doc_path, query_path)
+    )
+    return {
+        "expected_doc_count": len(expected_doc_ids),
+        "expected_query_count": len(expected_query_ids),
+        "doc_jsonl": portable_path(doc_path) if doc_path is not None else None,
+        "query_jsonl": portable_path(query_path) if query_path is not None else None,
+        "doc_jsonl_exists": doc_exists,
+        "query_jsonl_exists": query_exists,
+        "actual_doc_jsonl_rows": int(doc_coverage["learned_sparse_doc_rows"]),
+        "actual_query_jsonl_rows": int(query_coverage["learned_sparse_query_rows"]),
+        "missing_doc_count": missing_doc_count,
+        "missing_query_count": missing_query_count,
+        "duplicate_doc_count": duplicate_doc_count,
+        "duplicate_query_count": duplicate_query_count,
+        "appears_hash_plumbing": plumbing,
+        "local_10q_hash_files": learned_sparse_paths_are_local_10q_hash(
+            doc_path, query_path
+        ),
+        "feature_source": metadata.get("learned_sparse_feature_source"),
+        "feature_warnings": metadata.get("learned_sparse_feature_warnings", []),
+        "strict": bool(getattr(args, "learned_sparse_require_full_coverage", False)),
+        "incomplete": incomplete,
+        "missing_files": missing_doc_file or missing_query_file,
+        "coverage": {
+            **{key: value for key, value in doc_coverage.items() if not key.endswith("_ids_sample")},
+            **{key: value for key, value in query_coverage.items() if not key.endswith("_ids_sample")},
+        },
+    }
+
+
+def format_learned_sparse_serving_preflight_error(
+    args: argparse.Namespace,
+    summary: dict[str, Any],
+) -> str:
+    lines = [
+        "learned-sparse serving-grid preflight failed before index build/retrieval.",
+        "",
+        f"Expected doc count: {summary['expected_doc_count']}",
+        f"Expected query count: {summary['expected_query_count']}",
+        f"Actual doc JSONL rows: {summary['actual_doc_jsonl_rows']}",
+        f"Actual query JSONL rows: {summary['actual_query_jsonl_rows']}",
+        f"Missing doc feature count: {summary['missing_doc_count']}",
+        f"Missing query feature count: {summary['missing_query_count']}",
+        f"Duplicate doc feature rows: {summary['duplicate_doc_count']}",
+        f"Duplicate query feature rows: {summary['duplicate_query_count']}",
+        f"Doc JSONL: {summary.get('doc_jsonl') or '<missing>'}",
+        f"Query JSONL: {summary.get('query_jsonl') or '<missing>'}",
+        f"Doc JSONL exists: {bool(summary['doc_jsonl_exists'])}",
+        f"Query JSONL exists: {bool(summary['query_jsonl_exists'])}",
+        f"Appears hash/plumbing: {bool(summary['appears_hash_plumbing'])}",
+        f"Feature source: {summary.get('feature_source') or 'unknown'}",
+    ]
+    warnings = summary.get("feature_warnings") or []
+    if warnings:
+        lines.append(f"Feature warnings: {', '.join(map(str, warnings))}")
+    if bool(summary.get("local_10q_hash_files", False)):
+        lines.append(
+            "These files are suitable for plumbing smoke only, not safe serving evidence."
+        )
+    lines.extend(
+        [
+            "",
+            "Validate coverage with:",
+            learned_sparse_serving_validation_command(args),
+        ]
+    )
+    return "\n".join(lines)
+
+
+def preflight_learned_sparse_serving_inputs(
+    args: argparse.Namespace,
+    expected_doc_ids: Iterable[str],
+    expected_query_ids: Iterable[str],
+) -> dict[str, Any] | None:
+    if not document_node_serving_args_request_learned_sparse(args):
+        return None
+    summary = learned_sparse_serving_preflight_summary(
+        args,
+        expected_doc_ids,
+        expected_query_ids,
+    )
+    if bool(summary["missing_files"]) or (
+        bool(getattr(args, "learned_sparse_require_full_coverage", False))
+        and bool(summary["incomplete"])
+    ):
+        raise SystemExit(format_learned_sparse_serving_preflight_error(args, summary))
+    return summary
+
+
+def learned_sparse_jsonl_validation_report_from_expected(
+    args: argparse.Namespace,
+    expected_doc_ids: Iterable[str],
+    expected_query_ids: Iterable[str],
+) -> dict[str, Any]:
+    started = time.perf_counter()
+    preflight = validate_learned_sparse_jsonl_coverage(
+        None,
+        args,
+        expected_doc_ids,
+        expected_query_ids,
+        reject_duplicate_ids=False,
+        enforce_strict=False,
+    )
+    coverage = preflight["coverage"]
+    report = {
+        "suite": "learned_sparse_jsonl_validation",
+        "generated_at": datetime.now(timezone.utc).isoformat(),
+        "command": command_metadata(),
+        "database": getattr(args, "database", None),
+        "doc_jsonl": portable_path(args.learned_sparse_doc_jsonl),
+        "query_jsonl": portable_path(args.learned_sparse_query_jsonl),
+        "strict": bool(getattr(args, "learned_sparse_require_full_coverage", False)),
+        "expected_doc_count": int(coverage.get("loaded_documents", 0) or 0),
+        "expected_query_count": int(coverage.get("loaded_queries", 0) or 0),
+        "doc_rows": int(coverage.get("learned_sparse_doc_rows", 0) or 0),
+        "query_rows": int(coverage.get("learned_sparse_query_rows", 0) or 0),
+        "doc_coverage": float(coverage.get("doc_coverage_ratio", 0.0) or 0.0),
+        "query_coverage": float(coverage.get("query_coverage_ratio", 0.0) or 0.0),
+        "missing_doc_count": int(coverage.get("learned_sparse_missing_doc_count", 0) or 0),
+        "missing_query_count": int(coverage.get("learned_sparse_missing_query_count", 0) or 0),
+        "duplicate_doc_count": int(coverage.get("learned_sparse_duplicate_doc_count", 0) or 0),
+        "duplicate_query_count": int(coverage.get("learned_sparse_duplicate_query_count", 0) or 0),
+        "extra_doc_count": int(coverage.get("learned_sparse_extra_doc_count", 0) or 0),
+        "extra_query_count": int(coverage.get("learned_sparse_extra_query_count", 0) or 0),
+        "feature_source": coverage.get("learned_sparse_feature_source"),
+        "feature_version": coverage.get("learned_sparse_feature_version"),
+        "feature_model_name": coverage.get("learned_sparse_feature_model_name"),
+        "feature_model_checksum": coverage.get("learned_sparse_feature_model_checksum"),
+        "feature_warnings": coverage.get("learned_sparse_feature_warnings", []),
+        "plumbing_only": bool(coverage.get("learned_sparse_plumbing_only", False)),
+        "safe_serving_evidence": bool(coverage.get("learned_sparse_safe_serving_evidence", False)),
+        "not_safe_serving_evidence": bool(coverage.get("not_safe_serving_evidence", True)),
+        "warnings": coverage.get("warnings", []),
+        "missing_doc_ids_sample": coverage.get("missing_doc_ids_sample", []),
+        "missing_query_ids_sample": coverage.get("missing_query_ids_sample", []),
+        "duplicate_doc_ids_sample": coverage.get("duplicate_doc_ids_sample", []),
+        "duplicate_query_ids_sample": coverage.get("duplicate_query_ids_sample", []),
+        "extra_doc_ids_sample": coverage.get("extra_doc_ids_sample", []),
+        "extra_query_ids_sample": coverage.get("extra_query_ids_sample", []),
+        "elapsed_ms": round((time.perf_counter() - started) * 1000.0, 3),
+    }
+    report["strict_failure"] = learned_sparse_jsonl_validation_strict_failed(report)
+    return {
+        "learned_sparse_jsonl_validation": report,
+    }
+
+
+def learned_sparse_jsonl_validation_strict_failed(report: dict[str, Any]) -> bool:
+    validation = report.get("learned_sparse_jsonl_validation", report)
+    if not isinstance(validation, dict):
+        return True
+    if not bool(validation.get("strict", False)):
+        return False
+    return any(
+        int(validation.get(key, 0) or 0) > 0
+        for key in (
+            "missing_doc_count",
+            "missing_query_count",
+            "duplicate_doc_count",
+            "duplicate_query_count",
+        )
+    )
+
+
+def run_learned_sparse_jsonl_validation_only(
+    conn: psycopg.Connection[Any],
+    args: argparse.Namespace,
+) -> dict[str, Any]:
+    expected_doc_ids = selected_doc_ids(conn, 0)
+    expected_query_ids = selected_query_ids(conn)
+    return learned_sparse_jsonl_validation_report_from_expected(
+        args,
+        expected_doc_ids,
+        expected_query_ids,
+    )
+
+
+def first_jsonl_object(path: Path) -> dict[str, Any]:
+    with path.open("r", encoding="utf-8") as handle:
+        for raw_line in handle:
+            line = raw_line.strip()
+            if not line:
+                continue
+            try:
+                item = json.loads(line)
+            except json.JSONDecodeError:
+                return {}
+            return item if isinstance(item, dict) else {}
+    return {}
+
+
+def learned_sparse_feature_metadata(doc_jsonl: Path, query_jsonl: Path) -> dict[str, Any]:
+    doc_meta = learned_sparse_jsonl_declared_metadata(doc_jsonl)
+    query_meta = learned_sparse_jsonl_declared_metadata(query_jsonl)
+    metadata_items = (doc_meta, query_meta)
+    version_keys = (
+        "learned_sparse_feature_version",
+        "feature_version",
+        "feature_generator_version",
+        "generator_version",
+        "version",
+    )
+    source_keys = (
+        "learned_sparse_feature_source",
+        "feature_source",
+        "feature_generator",
+        "generator",
+        "model",
+        "model_name",
+        "model_checksum",
+        "checksum",
+    )
+    expected_doc_count = learned_sparse_metadata_value(metadata_items, ("expected_doc_count",))
+    expected_query_count = learned_sparse_metadata_value(metadata_items, ("expected_query_count",))
+
+    feature_details: dict[str, Any] = {
+        "doc_jsonl": portable_path(doc_jsonl),
+        "query_jsonl": portable_path(query_jsonl),
+    }
+    source_details: dict[str, Any] = {}
+    for key in source_keys:
+        doc_value = doc_meta.get(key)
+        query_value = query_meta.get(key)
+        if doc_value in (None, "") and query_value in (None, ""):
+            continue
+        if doc_value == query_value:
+            source_details[key] = doc_value
+        else:
+            source_details[key] = {
+                "doc": doc_value,
+                "query": query_value,
+            }
+    if source_details:
+        feature_details["metadata"] = source_details
+
+    declared_plumbing = any(bool(metadata.get("plumbing_only", False)) for metadata in metadata_items)
+    hash_plumbing = learned_sparse_metadata_contains_token(
+        metadata_items,
+        (doc_jsonl, query_jsonl),
+        ("hash",),
+    )
+    unknown_plumbing = learned_sparse_metadata_contains_token(
+        metadata_items,
+        (doc_jsonl, query_jsonl),
+        ("toy", "sample"),
+    )
+    has_declared_metadata = bool(doc_meta or query_meta)
+    warnings: list[str] = []
+    if hash_plumbing:
+        feature_source = "hash_plumbing"
+        plumbing_only = True
+        warnings.append("learned_sparse_hash_plumbing_only")
+    elif declared_plumbing or unknown_plumbing:
+        feature_source = "unknown_plumbing"
+        plumbing_only = True
+        warnings.append("learned_sparse_plumbing_only")
+    else:
+        declared_source = learned_sparse_metadata_value(
+            metadata_items,
+            ("learned_sparse_feature_source", "feature_source", "feature_generator"),
+        )
+        feature_source = str(declared_source) if declared_source not in (None, "") else "unknown"
+        plumbing_only = False
+        if not has_declared_metadata:
+            warnings.append("feature_provenance_unknown")
+
+    return {
+        "learned_sparse_feature_source": feature_source,
+        "learned_sparse_feature_details": feature_details,
+        "learned_sparse_feature_version": learned_sparse_metadata_value(metadata_items, version_keys),
+        "learned_sparse_feature_model_name": learned_sparse_metadata_value(
+            metadata_items,
+            ("model_name", "model"),
+        ),
+        "learned_sparse_feature_model_checksum": learned_sparse_metadata_value(
+            metadata_items,
+            ("model_checksum", "checksum"),
+        ),
+        "learned_sparse_expected_doc_count": expected_doc_count,
+        "learned_sparse_expected_query_count": expected_query_count,
+        "learned_sparse_plumbing_only": plumbing_only,
+        "learned_sparse_feature_warnings": sorted(dict.fromkeys(warnings)),
+    }
+
+
+def learned_sparse_metadata_from_phase(learned_sparse_phase: dict[str, Any]) -> dict[str, Any]:
+    return {
+        "learned_sparse_feature_source": learned_sparse_phase.get("learned_sparse_feature_source"),
+        "learned_sparse_feature_details": learned_sparse_phase.get("learned_sparse_feature_details"),
+        "learned_sparse_feature_version": learned_sparse_phase.get("learned_sparse_feature_version"),
+        "learned_sparse_feature_model_name": learned_sparse_phase.get("learned_sparse_feature_model_name"),
+        "learned_sparse_feature_model_checksum": learned_sparse_phase.get("learned_sparse_feature_model_checksum"),
+        "learned_sparse_feature_warnings": learned_sparse_phase.get("learned_sparse_feature_warnings"),
+        "learned_sparse_expected_doc_count": learned_sparse_phase.get("learned_sparse_expected_doc_count"),
+        "learned_sparse_expected_query_count": learned_sparse_phase.get("learned_sparse_expected_query_count"),
+        "learned_sparse_doc_rows": learned_sparse_phase.get("learned_sparse_doc_rows"),
+        "learned_sparse_query_rows": learned_sparse_phase.get("learned_sparse_query_rows"),
+        "learned_sparse_missing_doc_count": learned_sparse_phase.get("learned_sparse_missing_doc_count"),
+        "learned_sparse_missing_query_count": learned_sparse_phase.get("learned_sparse_missing_query_count"),
+        "learned_sparse_extra_doc_count": learned_sparse_phase.get("learned_sparse_extra_doc_count"),
+        "learned_sparse_extra_query_count": learned_sparse_phase.get("learned_sparse_extra_query_count"),
+        "learned_sparse_plumbing_only": learned_sparse_phase.get("learned_sparse_plumbing_only"),
+        "learned_sparse_safe_serving_evidence": learned_sparse_phase.get(
+            "learned_sparse_safe_serving_evidence"
+        ),
+        "not_safe_serving_evidence": learned_sparse_phase.get("not_safe_serving_evidence"),
+    }
 
 
 def require_complete_learned_sparse_args(args: argparse.Namespace) -> None:
@@ -1245,31 +3112,74 @@ def load_learned_sparse_vectors(conn: psycopg.Connection[Any], args: argparse.Na
         return {"skipped": True, "reason": "no learned sparse JSONL files supplied"}
 
     started = time.perf_counter()
-    doc_rows = parse_sparse_jsonl(args.learned_sparse_doc_jsonl, "doc_id")
-    query_rows_sparse = parse_sparse_jsonl(args.learned_sparse_query_jsonl, "query_id")
+    preflight = validate_learned_sparse_jsonl_coverage(
+        conn,
+        args,
+        selected_doc_ids(conn, 0),
+        selected_query_ids(conn),
+    )
+    doc_rows = preflight.get("doc_rows", [])
+    query_rows_sparse = preflight.get("query_rows", [])
+    feature_metadata = learned_sparse_feature_metadata(
+        args.learned_sparse_doc_jsonl,
+        args.learned_sparse_query_jsonl,
+    )
     doc_updates = 0
     query_updates = 0
     with conn.cursor() as cur:
-        for doc_id, term_ids, weights in doc_rows:
+        if doc_rows:
             cur.execute(
                 """
-                UPDATE dbpedia_colbert_docs
-                SET learned_sparse = turbohybrid_sparse_vector_from_arrays(%s::int[], %s::real[])
-                WHERE doc_id = %s
-                """,
-                (term_ids, weights, doc_id),
+                CREATE TEMP TABLE tmp_learned_sparse_docs (
+                    doc_id text,
+                    term_ids int[],
+                    weights real[]
+                )
+                """
             )
-            doc_updates += cur.rowcount
-        for query_id, term_ids, weights in query_rows_sparse:
+            cur.executemany(
+                """
+                INSERT INTO tmp_learned_sparse_docs (doc_id, term_ids, weights)
+                VALUES (%s, %s::int[], %s::real[])
+                """,
+                doc_rows,
+            )
             cur.execute(
                 """
-                UPDATE dbpedia_colbert_queries
-                SET learned_sparse = turbohybrid_sparse_vector_from_arrays(%s::int[], %s::real[])
-                WHERE query_id = %s
-                """,
-                (term_ids, weights, query_id),
+                UPDATE dbpedia_colbert_docs d
+                SET learned_sparse = turbohybrid_sparse_vector_from_arrays(s.term_ids, s.weights)
+                FROM tmp_learned_sparse_docs s
+                WHERE d.doc_id = s.doc_id
+                """
             )
-            query_updates += cur.rowcount
+            doc_updates = cur.rowcount
+
+        if query_rows_sparse:
+            cur.execute(
+                """
+                CREATE TEMP TABLE tmp_learned_sparse_queries (
+                    query_id text,
+                    term_ids int[],
+                    weights real[]
+                )
+                """
+            )
+            cur.executemany(
+                """
+                INSERT INTO tmp_learned_sparse_queries (query_id, term_ids, weights)
+                VALUES (%s, %s::int[], %s::real[])
+                """,
+                query_rows_sparse,
+            )
+            cur.execute(
+                """
+                UPDATE dbpedia_colbert_queries q
+                SET learned_sparse = turbohybrid_sparse_vector_from_arrays(s.term_ids, s.weights)
+                FROM tmp_learned_sparse_queries s
+                WHERE q.query_id = s.query_id
+                """
+            )
+            query_updates = cur.rowcount
 
     if doc_rows and doc_updates == 0:
         raise RuntimeError(f"no learned sparse document rows matched loaded docs from {args.learned_sparse_doc_jsonl}")
@@ -1277,10 +3187,70 @@ def load_learned_sparse_vectors(conn: psycopg.Connection[Any], args: argparse.Na
         raise RuntimeError(f"no learned sparse query rows matched loaded queries from {args.learned_sparse_query_jsonl}")
 
     coverage = learned_sparse_coverage_summary(conn)
+    preflight_coverage = preflight.get("coverage", {})
+    if isinstance(preflight_coverage, dict):
+        for key in (
+            "learned_sparse_doc_rows",
+            "learned_sparse_query_rows",
+            "learned_sparse_extra_doc_count",
+            "learned_sparse_extra_query_count",
+            "missing_doc_ids_sample",
+            "missing_query_ids_sample",
+            "extra_doc_ids_sample",
+            "extra_query_ids_sample",
+            "learned_sparse_feature_source",
+            "learned_sparse_feature_details",
+            "learned_sparse_feature_version",
+            "learned_sparse_feature_model_name",
+            "learned_sparse_feature_model_checksum",
+            "learned_sparse_feature_warnings",
+            "learned_sparse_expected_doc_count",
+            "learned_sparse_expected_query_count",
+            "learned_sparse_plumbing_only",
+            "learned_sparse_safe_serving_evidence",
+            "not_safe_serving_evidence",
+        ):
+            if key in preflight_coverage:
+                coverage[key] = preflight_coverage[key]
+        coverage["warnings"] = sorted({
+            *map(str, coverage.get("warnings", []) or []),
+            *map(str, preflight_coverage.get("warnings", []) or []),
+        })
+        coverage["partial_coverage"] = bool(
+            coverage.get("partial_coverage", False)
+            or preflight_coverage.get("partial_coverage", False)
+        )
+        coverage["learned_sparse_plumbing_only"] = bool(
+            coverage.get("learned_sparse_plumbing_only", False)
+            or preflight_coverage.get("learned_sparse_plumbing_only", False)
+        )
+        coverage["learned_sparse_safe_serving_evidence"] = not bool(
+            coverage.get("learned_sparse_plumbing_only", False)
+        )
+        coverage["not_safe_serving_evidence"] = bool(
+            coverage.get("learned_sparse_plumbing_only", False)
+        )
     return {
         "skipped": False,
         "doc_jsonl": portable_path(args.learned_sparse_doc_jsonl),
         "query_jsonl": portable_path(args.learned_sparse_query_jsonl),
+        "learned_sparse_doc_rows": coverage.get("learned_sparse_doc_rows", len(doc_rows)),
+        "learned_sparse_query_rows": coverage.get(
+            "learned_sparse_query_rows",
+            len(query_rows_sparse),
+        ),
+        "learned_sparse_doc_coverage": coverage.get("doc_coverage_ratio"),
+        "learned_sparse_query_coverage": coverage.get("query_coverage_ratio"),
+        "learned_sparse_missing_doc_count": coverage.get("learned_sparse_missing_doc_count"),
+        "learned_sparse_missing_query_count": coverage.get("learned_sparse_missing_query_count"),
+        "learned_sparse_extra_doc_count": coverage.get("learned_sparse_extra_doc_count"),
+        "learned_sparse_extra_query_count": coverage.get("learned_sparse_extra_query_count"),
+        "learned_sparse_plumbing_only": coverage.get("learned_sparse_plumbing_only"),
+        "learned_sparse_safe_serving_evidence": coverage.get(
+            "learned_sparse_safe_serving_evidence"
+        ),
+        "not_safe_serving_evidence": coverage.get("not_safe_serving_evidence"),
+        **feature_metadata,
         "doc_rows_read": len(doc_rows),
         "doc_rows_updated": doc_updates,
         "query_rows_read": len(query_rows_sparse),
@@ -1624,6 +3594,155 @@ def selected_query_ids(conn: psycopg.Connection[Any]) -> list[str]:
     return [str(row[0]) for row in rows]
 
 
+def learned_sparse_input_id_checksum(ids: Sequence[str]) -> str:
+    payload = json.dumps(list(ids), ensure_ascii=False, separators=(",", ":"))
+    return hashlib.sha256(payload.encode("utf-8")).hexdigest()
+
+
+def write_jsonl_objects(path: Path, rows: Iterable[dict[str, Any]]) -> int:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    count = 0
+    with path.open("w", encoding="utf-8") as handle:
+        for row in rows:
+            handle.write(json.dumps(row, ensure_ascii=False, sort_keys=True) + "\n")
+            count += 1
+    return count
+
+
+def export_learned_sparse_input_jsonl_from_rows(
+    doc_rows: Sequence[tuple[str, str]],
+    query_rows: Sequence[tuple[str, str]],
+    *,
+    doc_output: Path,
+    query_output: Path,
+) -> dict[str, Any]:
+    doc_ids = [str(doc_id) for doc_id, _ in doc_rows]
+    query_ids = [str(query_id) for query_id, _ in query_rows]
+    doc_count = write_jsonl_objects(
+        doc_output,
+        (
+            {"doc_id": str(doc_id), "text": str(text)}
+            for doc_id, text in doc_rows
+        ),
+    )
+    query_count = write_jsonl_objects(
+        query_output,
+        (
+            {"query_id": str(query_id), "text": str(text)}
+            for query_id, text in query_rows
+        ),
+    )
+    return {
+        "doc_count": doc_count,
+        "query_count": query_count,
+        "doc_output": portable_path(doc_output),
+        "query_output": portable_path(query_output),
+        "doc_id_checksum": learned_sparse_input_id_checksum(doc_ids),
+        "query_id_checksum": learned_sparse_input_id_checksum(query_ids),
+        "doc_ids_sample": doc_ids[:10],
+        "query_ids_sample": query_ids[:10],
+    }
+
+
+def learned_sparse_input_doc_rows(
+    conn: psycopg.Connection[Any],
+    max_docs: int,
+) -> list[tuple[str, str]]:
+    if max_docs > 0:
+        rows = fetch_all(
+            conn,
+            """
+            SELECT doc_id, concat_ws(' ', nullif(title, ''), body) AS text
+            FROM dbpedia_colbert_docs
+            ORDER BY doc_id
+            LIMIT %s
+            """,
+            (max_docs,),
+        )
+    else:
+        rows = fetch_all(
+            conn,
+            """
+            SELECT doc_id, concat_ws(' ', nullif(title, ''), body) AS text
+            FROM dbpedia_colbert_docs
+            ORDER BY doc_id
+            """,
+        )
+    return [(str(row[0]), str(row[1] or "")) for row in rows]
+
+
+def learned_sparse_input_query_rows(
+    conn: psycopg.Connection[Any],
+    max_queries: int,
+) -> list[tuple[str, str]]:
+    if max_queries > 0:
+        rows = fetch_all(
+            conn,
+            """
+            SELECT query_id, query_text
+            FROM dbpedia_colbert_queries
+            ORDER BY query_id
+            LIMIT %s
+            """,
+            (max_queries,),
+        )
+    else:
+        rows = fetch_all(
+            conn,
+            """
+            SELECT query_id, query_text
+            FROM dbpedia_colbert_queries
+            ORDER BY query_id
+            """,
+        )
+    return [(str(row[0]), str(row[1] or "")) for row in rows]
+
+
+def export_learned_sparse_inputs_only(
+    conn: psycopg.Connection[Any],
+    args: argparse.Namespace,
+) -> dict[str, Any]:
+    started = time.perf_counter()
+    doc_rows = learned_sparse_input_doc_rows(conn, args.max_docs)
+    query_rows = learned_sparse_input_query_rows(conn, args.max_queries)
+    if not doc_rows:
+        raise SystemExit("no loaded DBpedia documents found in dbpedia_colbert_docs")
+    if not query_rows:
+        raise SystemExit("no loaded DBpedia queries found in dbpedia_colbert_queries")
+    report = export_learned_sparse_input_jsonl_from_rows(
+        doc_rows,
+        query_rows,
+        doc_output=args.learned_sparse_input_doc_jsonl,
+        query_output=args.learned_sparse_input_query_jsonl,
+    )
+    report.update({
+        "suite": "learned_sparse_input_export",
+        "generated_at": datetime.now(timezone.utc).isoformat(),
+        "database": getattr(args, "database", None),
+        "max_docs": args.max_docs,
+        "max_queries": args.max_queries,
+        "elapsed_ms": round((time.perf_counter() - started) * 1000.0, 3),
+    })
+    return {"learned_sparse_input_export": report}
+
+
+def markdown_learned_sparse_input_export(report: dict[str, Any]) -> str:
+    export = report.get("learned_sparse_input_export", {})
+    lines = [
+        "# Learned-sparse input export",
+        "",
+        f"- Documents: `{int(export.get('doc_count', 0) or 0)}`",
+        f"- Queries: `{int(export.get('query_count', 0) or 0)}`",
+        f"- Doc output: `{export.get('doc_output', '')}`",
+        f"- Query output: `{export.get('query_output', '')}`",
+        f"- Doc ID checksum: `{export.get('doc_id_checksum', '')}`",
+        f"- Query ID checksum: `{export.get('query_id_checksum', '')}`",
+        "",
+        "These files contain text inputs only. They do not contain learned-sparse features.",
+    ]
+    return "\n".join(lines) + "\n"
+
+
 def loaded_qrels(conn: psycopg.Connection[Any]) -> dict[str, dict[str, int]]:
     rows = fetch_all(
         conn,
@@ -1637,6 +3756,228 @@ def loaded_qrels(conn: psycopg.Connection[Any]) -> dict[str, dict[str, int]]:
     for query_id, doc_id, relevance in rows:
         qrels.setdefault(str(query_id), {})[str(doc_id)] = int(relevance)
     return qrels
+
+
+def huggingface_hub_available() -> bool:
+    return importlib.util.find_spec("huggingface_hub") is not None
+
+
+def local_precomputed_dataset_path(
+    args: argparse.Namespace,
+    load_phase: dict[str, Any] | None = None,
+) -> str | None:
+    candidates: list[str] = []
+    if load_phase:
+        source = load_phase.get("source")
+        if source:
+            candidates.append(str(source))
+    if getattr(args, "precomputed_dataset", None):
+        candidates.append(str(args.precomputed_dataset))
+    seen: set[str] = set()
+    for candidate in candidates:
+        if candidate in seen:
+            continue
+        seen.add(candidate)
+        path = Path(candidate)
+        if path.exists():
+            return portable_path(path)
+    return None
+
+
+def dbpedia_colbert_loaded_counts(conn: psycopg.Connection[Any]) -> dict[str, int]:
+    row = fetch_one(
+        conn,
+        """
+        SELECT
+          coalesce((SELECT count(*) FROM dbpedia_colbert_docs WHERE colbert IS NOT NULL), 0),
+          coalesce((SELECT count(*) FROM dbpedia_colbert_queries WHERE colbert IS NOT NULL), 0),
+          coalesce((SELECT count(*) FROM dbpedia_colbert_qrels), 0),
+          coalesce((
+            SELECT count(*)
+            FROM dbpedia_colbert_qrels q
+            JOIN dbpedia_colbert_docs d
+              ON d.doc_id = q.doc_id
+             AND d.colbert IS NOT NULL
+            JOIN dbpedia_colbert_queries bq
+              ON bq.query_id = q.query_id
+             AND bq.colbert IS NOT NULL
+          ), 0)
+        """,
+    )
+    if not row:
+        return {
+            "docs_loaded": 0,
+            "queries_loaded": 0,
+            "qrels_loaded": 0,
+            "qrels_covered": 0,
+        }
+    return {
+        "docs_loaded": int(row[0] or 0),
+        "queries_loaded": int(row[1] or 0),
+        "qrels_loaded": int(row[2] or 0),
+        "qrels_covered": int(row[3] or 0),
+    }
+
+
+def document_node_colbert_1m_preflight_summary(
+    *,
+    docs_loaded: int,
+    queries_loaded: int,
+    qrels_loaded: int,
+    qrels_covered: int,
+    requested_max_docs: int,
+    requested_max_queries: int,
+    local_dataset_path: str | None,
+    hf_hub_available: bool,
+    strict_query_count: bool,
+    precomputed_dataset: str | None = None,
+) -> dict[str, Any]:
+    requested_queries = int(requested_max_queries or 0)
+    effective_max_queries = (
+        min(requested_queries, queries_loaded)
+        if requested_queries > 0
+        else queries_loaded
+    )
+    query_count_limited = (
+        requested_queries > 0 and queries_loaded < requested_queries
+    )
+    acceptance_blockers: list[str] = []
+    fatal_blockers: list[str] = []
+    if docs_loaded <= 0:
+        acceptance_blockers.append("no document embeddings loaded")
+        fatal_blockers.append("no document embeddings loaded")
+    if queries_loaded <= 0:
+        acceptance_blockers.append("no query embeddings loaded")
+        fatal_blockers.append("no query embeddings loaded")
+    if qrels_loaded <= 0:
+        acceptance_blockers.append("no qrels loaded")
+    if qrels_covered <= 0:
+        acceptance_blockers.append("no qrels covered by loaded docs and queries")
+    strict_query_count_error = None
+    if query_count_limited:
+        strict_query_count_error = (
+            f"requested {requested_queries} queries but only {queries_loaded} available"
+        )
+        acceptance_blockers.append(strict_query_count_error)
+        if strict_query_count:
+            fatal_blockers.append(strict_query_count_error)
+    can_run_with_effective_queries = (
+        docs_loaded > 0 and queries_loaded > 0 and qrels_covered > 0
+    )
+    can_run_acceptance = can_run_with_effective_queries and not acceptance_blockers
+    return {
+        "docs_loaded": docs_loaded,
+        "queries_loaded": queries_loaded,
+        "qrels_loaded": qrels_loaded,
+        "qrels_covered": qrels_covered,
+        "requested_max_docs": requested_max_docs,
+        "requested_max_queries": requested_max_queries,
+        "effective_max_queries": effective_max_queries,
+        "query_count_limited_by_artifact": query_count_limited,
+        "local_dataset_path": local_dataset_path,
+        "hf_hub_available": hf_hub_available,
+        "strict_query_count": strict_query_count,
+        "strict_query_count_failed": bool(strict_query_count and query_count_limited),
+        "strict_query_count_error": strict_query_count_error,
+        "can_run_acceptance": can_run_acceptance,
+        "can_run_with_effective_queries": can_run_with_effective_queries,
+        "acceptance_blockers": acceptance_blockers,
+        "fatal_acceptance_blockers": fatal_blockers,
+    }
+
+
+def document_node_colbert_1m_query_limit_summary(
+    *,
+    requested_max_queries: int,
+    queries_loaded: int,
+    strict_query_count: bool,
+) -> dict[str, Any]:
+    query_count_limited = (
+        int(requested_max_queries or 0) > 0
+        and int(queries_loaded) < int(requested_max_queries or 0)
+    )
+    message = None
+    if query_count_limited:
+        message = (
+            f"requested {int(requested_max_queries or 0)} queries but only "
+            f"{int(queries_loaded)} available"
+        )
+    return {
+        "requested_max_queries": int(requested_max_queries or 0),
+        "queries_available": int(queries_loaded),
+        "effective_max_queries": int(queries_loaded),
+        "query_count_limited_by_artifact": bool(query_count_limited),
+        "strict_query_count": bool(strict_query_count),
+        "strict_query_count_failed": bool(strict_query_count and query_count_limited),
+        "strict_query_count_error": message if strict_query_count and query_count_limited else None,
+        "query_count_limit_message": message,
+    }
+
+
+def run_document_node_colbert_1m_preflight_only(
+    conn: psycopg.Connection[Any],
+    args: argparse.Namespace,
+    load_phase: dict[str, Any],
+) -> dict[str, Any]:
+    started = time.perf_counter()
+    counts = dbpedia_colbert_loaded_counts(conn)
+    preflight = document_node_colbert_1m_preflight_summary(
+        docs_loaded=counts["docs_loaded"],
+        queries_loaded=counts["queries_loaded"],
+        qrels_loaded=counts["qrels_loaded"],
+        qrels_covered=counts["qrels_covered"],
+        requested_max_docs=args.max_docs,
+        requested_max_queries=args.max_queries,
+        local_dataset_path=local_precomputed_dataset_path(args, load_phase),
+        hf_hub_available=huggingface_hub_available(),
+        strict_query_count=bool(args.strict_query_count),
+        precomputed_dataset=args.precomputed_dataset,
+    )
+    preflight["elapsed_ms"] = round((time.perf_counter() - started) * 1000.0, 3)
+    preflight["load_phase"] = load_phase
+    return {
+        "suite": "dbpedia_colbert_multivector",
+        "layer": "ir_quality_and_systems",
+        "generated_at": datetime.now(timezone.utc).isoformat(),
+        "command": command_metadata(),
+        "dataset": {
+            "name": "dbpedia-colbert-multivector",
+            "precomputed_dataset": args.precomputed_dataset,
+            "max_docs": args.max_docs,
+            "max_queries": args.max_queries,
+            "reuse_data": args.reuse_data,
+        },
+        "document_node_colbert_1m_preflight": preflight,
+    }
+
+
+def markdown_document_node_colbert_1m_preflight(report: dict[str, Any]) -> str:
+    preflight = report.get("document_node_colbert_1m_preflight", {})
+    blockers = preflight.get("acceptance_blockers", [])
+    if not isinstance(blockers, list):
+        blockers = []
+    lines = [
+        "# Pure ColBERT DBpedia 1M preflight",
+        "",
+        f"- Documents loaded: `{int(preflight.get('docs_loaded', 0) or 0)}`",
+        f"- Query embeddings loaded: `{int(preflight.get('queries_loaded', 0) or 0)}`",
+        f"- Qrels loaded: `{int(preflight.get('qrels_loaded', 0) or 0)}`",
+        f"- Qrels covered by loaded docs/queries: `{int(preflight.get('qrels_covered', 0) or 0)}`",
+        f"- Requested max docs: `{int(preflight.get('requested_max_docs', 0) or 0)}`",
+        f"- Requested max queries: `{int(preflight.get('requested_max_queries', 0) or 0)}`",
+        f"- Effective max queries: `{int(preflight.get('effective_max_queries', 0) or 0)}`",
+        f"- Query count limited by artifact: `{bool(preflight.get('query_count_limited_by_artifact', False))}`",
+        f"- Local dataset path: `{preflight.get('local_dataset_path') or ''}`",
+        f"- huggingface_hub available: `{bool(preflight.get('hf_hub_available', False))}`",
+        f"- Can run requested acceptance shape: `{bool(preflight.get('can_run_acceptance', False))}`",
+        f"- Can run with effective query count: `{bool(preflight.get('can_run_with_effective_queries', False))}`",
+        "",
+        "This preflight does not build indexes, run retrieval, or run exact admission scans.",
+    ]
+    if blockers:
+        lines.extend(["", "Acceptance blockers:", ""])
+        lines.extend(f"- {blocker}" for blocker in blockers)
+    return "\n".join(lines) + "\n"
 
 
 def measure_generation_sample(
@@ -2014,31 +4355,67 @@ def load_precomputed_multivectors(conn: psycopg.Connection[Any], args: argparse.
     )
 
 
+def read_existing_colbert_index_phase(
+    conn: psycopg.Connection[Any],
+    args: argparse.Namespace,
+    *,
+    require_existing: bool = False,
+) -> dict[str, Any] | None:
+    reloptions, index_option_values = build_index_reloptions(args)
+    row = fetch_one(conn, "SELECT to_regclass('dbpedia_colbert_docs_colbert_idx') IS NOT NULL")
+    if not row or not bool(row[0]):
+        if require_existing:
+            raise SystemExit(
+                "required existing index dbpedia_colbert_docs_colbert_idx is missing; "
+                "build exactly one matching profile first with "
+                "--document-node-colbert-1m-build-only, or remove "
+                "--document-node-colbert-1m-evaluate-only/--require-existing-index"
+            )
+        return None
+
+    stats = fetch_one(conn, "SELECT turbohybrid_index_stats('dbpedia_colbert_docs_colbert_idx'::regclass)")
+    build_stats = fetch_one(conn, "SELECT turbohybrid_last_build_stats()")
+    size = fetch_one(conn, "SELECT pg_relation_size('dbpedia_colbert_docs_colbert_idx'::regclass)")
+    index_stats = jsonb_value(stats[0]) if stats else {}
+    build_stats_value = jsonb_value(build_stats[0]) if build_stats else {}
+    row_count = loaded_document_count(conn)
+    return {
+        "reused": True,
+        "required_existing_index": bool(require_existing),
+        "no_create_index": bool(getattr(args, "no_create_index", False)),
+        "reloptions": reloptions,
+        **index_option_values,
+        "index_bytes": int(size[0]) if size else 0,
+        "index_stats": index_stats,
+        "build_stats": build_stats_value,
+        "safety_checks": validate_document_node_proxy_build(
+            args=args,
+            index_stats=index_stats,
+            build_stats={},
+            row_count=row_count,
+        ),
+    }
+
+
 def build_index(conn: psycopg.Connection[Any], args: argparse.Namespace) -> dict[str, Any]:
     reloptions, index_option_values = build_index_reloptions(args)
     if args.reuse_index:
-        row = fetch_one(conn, "SELECT to_regclass('dbpedia_colbert_docs_colbert_idx') IS NOT NULL")
-        if row and bool(row[0]):
-            stats = fetch_one(conn, "SELECT turbohybrid_index_stats('dbpedia_colbert_docs_colbert_idx'::regclass)")
-            build_stats = fetch_one(conn, "SELECT turbohybrid_last_build_stats()")
-            size = fetch_one(conn, "SELECT pg_relation_size('dbpedia_colbert_docs_colbert_idx'::regclass)")
-            index_stats = jsonb_value(stats[0]) if stats else {}
-            build_stats_value = jsonb_value(build_stats[0]) if build_stats else {}
-            row_count = loaded_document_count(conn)
-            return {
-                "reused": True,
-                "reloptions": reloptions,
-                **index_option_values,
-                "index_bytes": int(size[0]) if size else 0,
-                "index_stats": index_stats,
-                "build_stats": build_stats_value,
-                "safety_checks": validate_document_node_proxy_build(
-                    args=args,
-                    index_stats=index_stats,
-                    build_stats={},
-                    row_count=row_count,
-                ),
-            }
+        existing = read_existing_colbert_index_phase(
+            conn,
+            args,
+            require_existing=bool(
+                getattr(args, "require_existing_index", False)
+                or getattr(args, "no_create_index", False)
+            ),
+        )
+        if existing is not None:
+            return existing
+
+    if bool(getattr(args, "no_create_index", False)):
+        raise SystemExit(
+            "--no-create-index was set and dbpedia_colbert_docs_colbert_idx "
+            "could not be reused; refusing to run CREATE INDEX"
+        )
 
     exec_sql(conn, "DROP INDEX IF EXISTS dbpedia_colbert_docs_colbert_idx")
     started = time.perf_counter()
@@ -2261,10 +4638,572 @@ def exact_admission_top(
     return result
 
 
+def query_vector_checksum(conn: psycopg.Connection[Any], query_id: str) -> str | None:
+    row = fetch_one(
+        conn,
+        """
+        SELECT md5(colbert::text)
+        FROM dbpedia_colbert_queries
+        WHERE query_id = %s
+          AND colbert IS NOT NULL
+        """,
+        (query_id,),
+    )
+    return str(row[0]) if row and row[0] is not None else None
+
+
+def colbert_oracle_id_checksums(conn: psycopg.Connection[Any]) -> dict[str, Any]:
+    row = fetch_one(
+        conn,
+        """
+        SELECT
+          coalesce((SELECT count(*) FROM dbpedia_colbert_docs WHERE colbert IS NOT NULL), 0),
+          coalesce((SELECT md5(string_agg(doc_id, E'\n' ORDER BY doc_id))
+                    FROM dbpedia_colbert_docs
+                    WHERE colbert IS NOT NULL), ''),
+          coalesce((SELECT count(*) FROM dbpedia_colbert_queries WHERE colbert IS NOT NULL), 0),
+          coalesce((SELECT md5(string_agg(query_id, E'\n' ORDER BY query_id))
+                    FROM dbpedia_colbert_queries
+                    WHERE colbert IS NOT NULL), ''),
+          coalesce((SELECT count(*) FROM dbpedia_colbert_qrels), 0)
+        """,
+    )
+    if not row:
+        return {
+            "doc_count": 0,
+            "doc_id_checksum": "",
+            "query_count": 0,
+            "query_id_checksum": "",
+            "qrel_count": 0,
+        }
+    return {
+        "doc_count": int(row[0]),
+        "doc_id_checksum": str(row[1] or ""),
+        "query_count": int(row[2]),
+        "query_id_checksum": str(row[3] or ""),
+        "qrel_count": int(row[4]),
+    }
+
+
+def colbert_exact_oracle_dataset_fingerprint(
+    conn: psycopg.Connection[Any],
+) -> dict[str, Any]:
+    checksums = colbert_oracle_id_checksums(conn)
+    fingerprint_payload = {
+        "doc_count": checksums["doc_count"],
+        "doc_id_checksum": checksums["doc_id_checksum"],
+        "query_count": checksums["query_count"],
+        "query_id_checksum": checksums["query_id_checksum"],
+        "qrel_count": checksums["qrel_count"],
+    }
+    return {
+        **checksums,
+        "fingerprint": stable_json_hash(fingerprint_payload),
+    }
+
+
+def parse_oracle_query_ids_file(path: Path) -> list[str]:
+    text = path.read_text(encoding="utf-8")
+    stripped = text.strip()
+    if not stripped:
+        return []
+    if stripped[0] in "[{":
+        try:
+            payload = json.loads(stripped)
+        except json.JSONDecodeError:
+            payload = None
+        if isinstance(payload, list):
+            return [str(item) for item in payload]
+        if isinstance(payload, dict):
+            ids = payload.get("query_ids")
+            if isinstance(ids, list):
+                return [str(item) for item in ids]
+    query_ids: list[str] = []
+    for line in text.splitlines():
+        line = line.strip()
+        if not line or line.startswith("#"):
+            continue
+        if line.startswith("{"):
+            try:
+                payload = json.loads(line)
+            except json.JSONDecodeError:
+                payload = None
+            if isinstance(payload, dict) and payload.get("query_id") is not None:
+                query_ids.append(str(payload["query_id"]))
+                continue
+        query_ids.append(line.split()[0])
+    return query_ids
+
+
+def load_exact_oracle_artifact(path: Path | None) -> dict[str, Any]:
+    if path is None or not path.exists():
+        return {
+            "schema_version": 1,
+            "kind": "document_node_colbert_exact_oracle",
+            "created_at": utc_now_iso(),
+            "updated_at": utc_now_iso(),
+            "metadata": {},
+            "records": [],
+        }
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+    except json.JSONDecodeError as exc:
+        raise SystemExit(f"exact oracle artifact is not valid JSON: {path}: {exc}") from exc
+    if not isinstance(payload, dict):
+        raise SystemExit(f"exact oracle artifact must be a JSON object: {path}")
+    records = payload.get("records")
+    if not isinstance(records, list):
+        raise SystemExit(f"exact oracle artifact records must be a JSON array: {path}")
+    return payload
+
+
+def exact_oracle_completed_query_ids(artifact: dict[str, Any]) -> set[str]:
+    completed: set[str] = set()
+    for record in artifact.get("records", []):
+        if not isinstance(record, dict):
+            continue
+        if record.get("status") == "completed" and record.get("query_id") is not None:
+            completed.add(str(record["query_id"]))
+    return completed
+
+
+def exact_oracle_failed_records(artifact: dict[str, Any]) -> list[dict[str, Any]]:
+    return [
+        record
+        for record in artifact.get("records", [])
+        if isinstance(record, dict) and record.get("status") == "failed"
+    ]
+
+
+def validate_exact_oracle_resume_metadata(
+    artifact: dict[str, Any],
+    metadata: dict[str, Any],
+) -> None:
+    previous = artifact.get("metadata")
+    if not previous:
+        return
+    keys = (
+        "git_sha",
+        "dataset_fingerprint",
+        "doc_count",
+        "query_count",
+        "top_k",
+    )
+    mismatches = [
+        {
+            "field": key,
+            "previous": previous.get(key),
+            "current": metadata.get(key),
+        }
+        for key in keys
+        if previous.get(key) != metadata.get(key)
+    ]
+    if mismatches:
+        formatted = "; ".join(
+            f"{item['field']}: previous={item['previous']!r}, current={item['current']!r}"
+            for item in mismatches
+        )
+        raise SystemExit(f"exact oracle resume metadata mismatch: {formatted}")
+
+
+def exact_oracle_append_record(
+    path: Path,
+    artifact: dict[str, Any],
+    record: dict[str, Any],
+) -> None:
+    records = artifact.setdefault("records", [])
+    if not isinstance(records, list):
+        raise RuntimeError("exact oracle artifact records must be a list")
+    records.append(record)
+    artifact["updated_at"] = utc_now_iso()
+    atomic_write_json(path, artifact)
+
+
+def exact_oracle_query_selection(
+    conn: psycopg.Connection[Any],
+    args: argparse.Namespace,
+) -> list[QueryItem]:
+    available = load_encoded_queries(conn)
+    by_id = {query.query_id: query for query in available}
+    if args.oracle_query_ids is not None:
+        requested_ids = parse_oracle_query_ids_file(args.oracle_query_ids)
+        missing = [query_id for query_id in requested_ids if query_id not in by_id]
+        if missing:
+            raise SystemExit(
+                "--oracle-query-ids contains query IDs without loaded embeddings: "
+                + ", ".join(missing[:10])
+                + ("..." if len(missing) > 10 else "")
+            )
+        selected = [by_id[query_id] for query_id in requested_ids]
+    else:
+        selected = available
+    if args.oracle_query_limit and args.oracle_query_limit > 0:
+        selected = selected[: args.oracle_query_limit]
+    return selected
+
+
+def run_document_node_colbert_exact_oracle_build(
+    conn: psycopg.Connection[Any],
+    args: argparse.Namespace,
+    *,
+    exact_top_provider: ExactTopProvider = exact_admission_top,
+) -> dict[str, Any]:
+    if args.oracle_output is None:
+        raise SystemExit("--document-node-colbert-exact-oracle-build requires --oracle-output")
+    metadata_base = colbert_exact_oracle_dataset_fingerprint(conn)
+    doc_count = int(metadata_base["doc_count"])
+    query_count = int(metadata_base["query_count"])
+    if doc_count <= 0:
+        raise SystemExit("exact oracle build requires loaded document multivectors")
+    if query_count <= 0:
+        raise SystemExit("exact oracle build requires loaded query multivectors")
+    queries = exact_oracle_query_selection(conn, args)
+    if not queries:
+        raise SystemExit("exact oracle build selected zero queries")
+
+    metadata = {
+        "git_sha": git_sha(),
+        "dataset_fingerprint": metadata_base["fingerprint"],
+        "doc_count": doc_count,
+        "query_count": query_count,
+        "qrel_count": int(metadata_base["qrel_count"]),
+        "doc_id_checksum": metadata_base["doc_id_checksum"],
+        "query_id_checksum": metadata_base["query_id_checksum"],
+        "top_k": int(args.oracle_top_k),
+        "pure_colbert_only": True,
+        "offline_oracle": True,
+        "serving_path": False,
+        "created_by": "document_node_colbert_exact_oracle_build",
+    }
+    artifact = load_exact_oracle_artifact(args.oracle_output if args.oracle_resume else None)
+    if args.oracle_resume:
+        validate_exact_oracle_resume_metadata(artifact, metadata)
+    else:
+        artifact = {
+            "schema_version": 1,
+            "kind": "document_node_colbert_exact_oracle",
+            "created_at": utc_now_iso(),
+            "updated_at": utc_now_iso(),
+            "metadata": metadata,
+            "records": [],
+        }
+        atomic_write_json(args.oracle_output, artifact)
+    artifact["metadata"] = metadata
+    completed = exact_oracle_completed_query_ids(artifact)
+    started = time.perf_counter()
+    attempted = 0
+    completed_this_run = 0
+    failed_this_run = 0
+    skipped_resume = 0
+    timeout_ms = int(args.oracle_timeout_per_query_ms or 0)
+    remaining_limit = int(args.oracle_max_queries or 0)
+
+    for query in queries:
+        if query.query_id in completed:
+            skipped_resume += 1
+            continue
+        if remaining_limit > 0 and attempted >= remaining_limit:
+            break
+        attempted += 1
+        query_checksum = query_vector_checksum(conn, query.query_id)
+        previous_timeout = None
+        if timeout_ms > 0:
+            row = fetch_one(conn, "SHOW statement_timeout")
+            previous_timeout = str(row[0]) if row else "0"
+            exec_sql(conn, "SET statement_timeout = %s", (f"{timeout_ms}ms",))
+        query_started = time.perf_counter()
+        try:
+            exact_top = exact_top_provider(conn, query, int(args.oracle_top_k))
+            elapsed = elapsed_ms_since(query_started)
+            record = {
+                "record_type": "query_oracle",
+                "status": "completed",
+                "query_id": query.query_id,
+                "top_k": int(args.oracle_top_k),
+                "doc_ids": [str(item.get("doc_id")) for item in exact_top],
+                "heap_tids": [
+                    {
+                        "heap_block": item.get("heap_block"),
+                        "heap_offset": item.get("heap_offset"),
+                    }
+                    for item in exact_top
+                ],
+                "distances": [float(item.get("distance", 0.0)) for item in exact_top],
+                "maxsim": [float(item.get("maxsim", 0.0)) for item in exact_top],
+                "rows": exact_top,
+                "elapsed_ms": round(elapsed, 3),
+                "docs_scored": doc_count,
+                "exact_pairs": None,
+                "git_sha": metadata["git_sha"],
+                "dataset_fingerprint": metadata["dataset_fingerprint"],
+                "doc_count": doc_count,
+                "query_vector_checksum": query_checksum,
+                "created_at": utc_now_iso(),
+            }
+            completed.add(query.query_id)
+            completed_this_run += 1
+        except Exception as exc:
+            elapsed = elapsed_ms_since(query_started)
+            failed_this_run += 1
+            record = {
+                "record_type": "query_oracle",
+                "status": "failed",
+                "query_id": query.query_id,
+                "top_k": int(args.oracle_top_k),
+                "elapsed_ms": round(elapsed, 3),
+                "docs_scored": doc_count,
+                "exact_pairs": None,
+                "git_sha": metadata["git_sha"],
+                "dataset_fingerprint": metadata["dataset_fingerprint"],
+                "doc_count": doc_count,
+                "query_vector_checksum": query_checksum,
+                "error": str(exc),
+                "error_type": type(exc).__name__,
+                "created_at": utc_now_iso(),
+            }
+        finally:
+            if timeout_ms > 0:
+                exec_sql(conn, "SET statement_timeout = %s", (previous_timeout or "0",))
+        exact_oracle_append_record(args.oracle_output, artifact, record)
+
+    summary = summarize_exact_oracle_artifact(artifact)
+    result = {
+        "suite": "dbpedia_colbert_exact_oracle",
+        "generated_at": utc_now_iso(),
+        "command": command_metadata(),
+        "document_node_colbert_exact_oracle_build": {
+            "enabled": True,
+            "pure_colbert_only": True,
+            "offline_oracle": True,
+            "not_serving_path": True,
+            "oracle_output": portable_path(args.oracle_output),
+            "top_k": int(args.oracle_top_k),
+            "selected_queries": len(queries),
+            "attempted_queries": attempted,
+            "completed_this_run": completed_this_run,
+            "failed_this_run": failed_this_run,
+            "skipped_resume": skipped_resume,
+            "elapsed_ms": round(elapsed_ms_since(started), 3),
+            "metadata": metadata,
+            "summary": summary["document_node_colbert_exact_oracle_summary"],
+        },
+    }
+    result["markdown_summary"] = markdown_exact_oracle_summary(result)
+    return result
+
+
+def summarize_exact_oracle_artifact(artifact: dict[str, Any]) -> dict[str, Any]:
+    records = [
+        record
+        for record in artifact.get("records", [])
+        if isinstance(record, dict) and record.get("record_type") == "query_oracle"
+    ]
+    completed = [record for record in records if record.get("status") == "completed"]
+    failed = [record for record in records if record.get("status") == "failed"]
+    elapsed_values = [
+        float(record["elapsed_ms"])
+        for record in completed
+        if isinstance(record.get("elapsed_ms"), (int, float))
+    ]
+    docs_values = [
+        int(record["docs_scored"])
+        for record in completed
+        if isinstance(record.get("docs_scored"), int)
+    ]
+    metadata = artifact.get("metadata") if isinstance(artifact.get("metadata"), dict) else {}
+    top_k = int(metadata.get("top_k", 0) or 0)
+    enough_for_sampled_admission = bool(completed) and top_k >= 10
+    invalid_records = [
+        str(record.get("query_id", "<unknown>"))
+        for record in completed
+        if len(record.get("doc_ids", [])) < min(top_k, 10 if top_k else 0)
+    ]
+    summary = {
+        "queries_completed": len(completed),
+        "queries_failed": len(failed),
+        "median_exact_time_ms": percentile(elapsed_values, 0.50),
+        "p95_exact_time_ms": percentile(elapsed_values, 0.95),
+        "docs_scored": {
+            "min": min(docs_values) if docs_values else 0,
+            "max": max(docs_values) if docs_values else 0,
+            "mean": round(statistics.mean(docs_values), 3) if docs_values else 0.0,
+        },
+        "output_valid": not invalid_records,
+        "invalid_query_ids": invalid_records[:20],
+        "enough_oracle_queries_for_sampled_admission": enough_for_sampled_admission,
+        "top_k": top_k,
+        "metadata": metadata,
+        "completed_query_ids": [str(record.get("query_id")) for record in completed],
+        "failed_query_ids": [str(record.get("query_id")) for record in failed],
+    }
+    return {
+        "document_node_colbert_exact_oracle_summary": summary,
+    }
+
+
+def summarize_exact_oracle_path(path: Path) -> dict[str, Any]:
+    artifact = load_exact_oracle_artifact(path)
+    report = summarize_exact_oracle_artifact(artifact)
+    report["document_node_colbert_exact_oracle_summary"]["oracle_path"] = portable_path(path)
+    report["markdown_summary"] = markdown_exact_oracle_summary(report)
+    return report
+
+
+def markdown_exact_oracle_summary(report: dict[str, Any]) -> str:
+    summary = report.get(
+        "document_node_colbert_exact_oracle_summary",
+        report.get("document_node_colbert_exact_oracle_build", {}).get("summary", {}),
+    )
+    if "document_node_colbert_exact_oracle_build" in report:
+        summary = report["document_node_colbert_exact_oracle_build"].get("summary", summary)
+    metadata = summary.get("metadata", {})
+    median_ms = float(summary.get("median_exact_time_ms", 0.0) or 0.0)
+    p95_ms = float(summary.get("p95_exact_time_ms", 0.0) or 0.0)
+    lines = [
+        "### Pure ColBERT exact MaxSim oracle",
+        "",
+        "This is an offline oracle artifact. It is not a serving path and does not build indexes.",
+        "",
+        f"- Oracle path: `{summary.get('oracle_path', report.get('document_node_colbert_exact_oracle_build', {}).get('oracle_output', ''))}`",
+        f"- Top K: `{summary.get('top_k', metadata.get('top_k', ''))}`",
+        f"- Queries completed: `{summary.get('queries_completed', 0)}`",
+        f"- Queries failed: `{summary.get('queries_failed', 0)}`",
+        f"- Median exact time: `{median_ms:.3f}` ms",
+        f"- p95 exact time: `{p95_ms:.3f}` ms",
+        f"- Output valid: `{bool(summary.get('output_valid', False))}`",
+        f"- Enough for sampled admission: `{bool(summary.get('enough_oracle_queries_for_sampled_admission', False))}`",
+        "",
+    ]
+    return "\n".join(lines)
+
+
 ExactTopProvider = Callable[
     [Any, QueryItem, int],
     list[dict[str, Any]],
 ]
+
+
+def completed_exact_oracle_records(
+    artifact: dict[str, Any],
+) -> list[dict[str, Any]]:
+    records = artifact.get("records")
+    if not isinstance(records, list):
+        return []
+    return [
+        record
+        for record in records
+        if isinstance(record, dict)
+        and record.get("record_type") == "query_oracle"
+        and record.get("status") == "completed"
+        and record.get("query_id") is not None
+    ]
+
+
+def exact_oracle_record_top_rows(record: dict[str, Any]) -> list[dict[str, Any]]:
+    rows = record.get("rows")
+    if isinstance(rows, list) and rows:
+        normalized_rows: list[dict[str, Any]] = []
+        for rank, row in enumerate(rows, start=1):
+            if not isinstance(row, dict) or row.get("doc_id") is None:
+                continue
+            normalized_rows.append({
+                **row,
+                "rank": int(row.get("rank", rank) or rank),
+                "doc_id": str(row["doc_id"]),
+            })
+        return normalized_rows
+
+    doc_ids = record.get("doc_ids")
+    if not isinstance(doc_ids, list):
+        return []
+    distances = record.get("distances") if isinstance(record.get("distances"), list) else []
+    maxsim_values = record.get("maxsim") if isinstance(record.get("maxsim"), list) else []
+    heap_tids = record.get("heap_tids") if isinstance(record.get("heap_tids"), list) else []
+    normalized: list[dict[str, Any]] = []
+    for index, doc_id in enumerate(doc_ids):
+        if doc_id is None:
+            continue
+        item: dict[str, Any] = {
+            "rank": index + 1,
+            "doc_id": str(doc_id),
+        }
+        if index < len(distances) and isinstance(distances[index], (int, float)):
+            item["distance"] = float(distances[index])
+        if index < len(maxsim_values) and isinstance(maxsim_values[index], (int, float)):
+            item["maxsim"] = float(maxsim_values[index])
+        if index < len(heap_tids) and isinstance(heap_tids[index], dict):
+            item.update(heap_tids[index])
+        normalized.append(item)
+    return normalized
+
+
+def sampled_oracle_admission_for_query(
+    *,
+    retrieved_doc_ids: Sequence[str],
+    exact_rows: Sequence[dict[str, Any]],
+    oracle_top_k: int,
+) -> dict[str, Any]:
+    retrieved = {str(doc_id) for doc_id in retrieved_doc_ids}
+    exact_doc_ids = [
+        str(row["doc_id"])
+        for row in exact_rows
+        if isinstance(row, dict) and row.get("doc_id") is not None
+    ]
+    top1_doc_id = exact_doc_ids[0] if exact_doc_ids else None
+    top10_doc_ids = exact_doc_ids[: min(10, len(exact_doc_ids))]
+    topk_doc_ids = exact_doc_ids[: min(max(oracle_top_k, 0), len(exact_doc_ids))]
+    top1_admitted = bool(top1_doc_id is not None and top1_doc_id in retrieved)
+    top10_hits = sum(1 for doc_id in top10_doc_ids if doc_id in retrieved)
+    topk_hits = sum(1 for doc_id in topk_doc_ids if doc_id in retrieved)
+    return {
+        "top1_doc_id": top1_doc_id,
+        "exact_top1_admitted": top1_admitted,
+        "exact_top10_hits": top10_hits,
+        "exact_top10_denominator": len(top10_doc_ids),
+        "exact_top10_admission_recall": (
+            round(top10_hits / len(top10_doc_ids), 6) if top10_doc_ids else None
+        ),
+        "exact_topk_hits": topk_hits,
+        "exact_topk_denominator": len(topk_doc_ids),
+        "exact_topk_admission_recall": (
+            round(topk_hits / len(topk_doc_ids), 6) if topk_doc_ids else None
+        ),
+        "retrieved_docs": len(retrieved_doc_ids),
+        "oracle_docs": len(exact_doc_ids),
+    }
+
+
+def aggregate_sampled_oracle_admission(
+    per_query: Sequence[dict[str, Any]],
+) -> dict[str, Any]:
+    rows = [
+        row
+        for row in per_query
+        if isinstance(row, dict)
+        and row.get("exact_top10_admission_recall") is not None
+    ]
+    if not rows:
+        return {
+            "exact_top1_admission_rate": None,
+            "exact_top10_admission_recall": None,
+            "exact_topk_admission_recall": None,
+            "queries_compared": 0,
+        }
+    top1_values = [1.0 if row.get("exact_top1_admitted") else 0.0 for row in rows]
+    top10_values = [float(row["exact_top10_admission_recall"]) for row in rows]
+    topk_values = [
+        float(row["exact_topk_admission_recall"])
+        for row in rows
+        if row.get("exact_topk_admission_recall") is not None
+    ]
+    return {
+        "exact_top1_admission_rate": round(statistics.mean(top1_values), 6),
+        "exact_top10_admission_recall": round(statistics.mean(top10_values), 6),
+        "exact_topk_admission_recall": (
+            round(statistics.mean(topk_values), 6) if topk_values else None
+        ),
+        "queries_compared": len(rows),
+    }
 
 
 def exact_top_cache_key(query_id: str, admission_k: int) -> str:
@@ -2295,6 +5234,461 @@ def cached_exact_admission_top(
     if exact_top_cache is not None:
         exact_top_cache[key] = exact_top
     return exact_top, exact_elapsed_ms, False
+
+
+def parse_vector_text(value: Any) -> list[float]:
+    if isinstance(value, (list, tuple)):
+        return [float(item) for item in value]
+    text = str(value).strip()
+    if text.startswith("[") and text.endswith("]"):
+        text = text[1:-1]
+    if not text:
+        return []
+    return [float(item.strip()) for item in text.split(",") if item.strip()]
+
+
+def parse_vector_text_array(value: Any) -> list[list[float]]:
+    if value is None:
+        return []
+    if isinstance(value, (list, tuple)):
+        return [parse_vector_text(item) for item in value]
+    text = str(value).strip()
+    if not text:
+        return []
+    if text.startswith("{") and text.endswith("}"):
+        items: list[str] = []
+        current: list[str] = []
+        quoted = False
+        escaped = False
+        for char in text[1:-1]:
+            if escaped:
+                current.append(char)
+                escaped = False
+            elif char == "\\":
+                escaped = True
+            elif char == '"':
+                quoted = not quoted
+            elif char == "," and not quoted:
+                items.append("".join(current))
+                current = []
+            else:
+                current.append(char)
+        items.append("".join(current))
+        return [parse_vector_text(item) for item in items if item.strip()]
+    raise ValueError(f"cannot parse vector array value: {text[:80]!r}")
+
+
+def vector_dot(left: list[float], right: list[float]) -> float:
+    return sum(a * b for a, b in zip(left, right))
+
+
+def vector_norm(vector: list[float]) -> float:
+    return math.sqrt(sum(value * value for value in vector))
+
+
+def vector_normalized(vector: list[float]) -> list[float]:
+    norm = vector_norm(vector)
+    if norm <= 0.0:
+        return list(vector)
+    return [value / norm for value in vector]
+
+
+def multivector_mean(vectors: list[list[float]]) -> list[float]:
+    if not vectors:
+        return []
+    dim = len(vectors[0])
+    totals = [0.0] * dim
+    for vector in vectors:
+        for index, value in enumerate(vector[:dim]):
+            totals[index] += float(value)
+    scale = 1.0 / float(len(vectors))
+    return [value * scale for value in totals]
+
+
+def multivector_max_pool(vectors: list[list[float]]) -> list[float]:
+    if not vectors:
+        return []
+    dim = len(vectors[0])
+    pooled = [float("-inf")] * dim
+    for vector in vectors:
+        for index, value in enumerate(vector[:dim]):
+            if value > pooled[index]:
+                pooled[index] = float(value)
+    return [0.0 if value == float("-inf") else value for value in pooled]
+
+
+def cosine_similarity(left: list[float], right: list[float]) -> float:
+    left_norm = vector_norm(left)
+    right_norm = vector_norm(right)
+    if left_norm <= 0.0 or right_norm <= 0.0:
+        return 0.0
+    return vector_dot(left, right) / (left_norm * right_norm)
+
+
+def proxy_centroid_count(token_count: int, configured: str) -> int:
+    if token_count <= 0:
+        return 0
+    if configured and str(configured).lower() != "auto":
+        return max(1, min(token_count, int(configured)))
+    if token_count <= 4:
+        return token_count
+    count = int(math.ceil(math.sqrt(float(token_count))))
+    count = max(4, count)
+    count = min(64, count)
+    return min(token_count, count)
+
+
+def kmeans_pool_tokens(vectors: list[list[float]], target_count: int) -> list[list[float]]:
+    if target_count <= 0 or not vectors:
+        return []
+    if target_count >= len(vectors):
+        return [list(vector) for vector in vectors]
+    dim = len(vectors[0])
+    selected = [0]
+    nearest = [
+        float("inf") if index == 0 else cosine_similarity(vector, vectors[0])
+        for index, vector in enumerate(vectors)
+    ]
+    while len(selected) < target_count:
+        next_index = min(
+            (index for index in range(len(vectors)) if index not in selected),
+            key=lambda index: (nearest[index], index),
+        )
+        selected.append(next_index)
+        for index, vector in enumerate(vectors):
+            if index in selected:
+                nearest[index] = float("inf")
+            else:
+                nearest[index] = max(
+                    nearest[index],
+                    cosine_similarity(vector, vectors[next_index]),
+                )
+    centroids = [list(vectors[index][:dim]) for index in selected]
+    for _ in range(4):
+        sums = [[0.0] * dim for _ in range(target_count)]
+        counts = [0] * target_count
+        for vector in vectors:
+            cluster = max(
+                range(target_count),
+                key=lambda index: (vector_dot(vector, centroids[index]), -index),
+            )
+            counts[cluster] += 1
+            for dim_index, value in enumerate(vector[:dim]):
+                sums[cluster][dim_index] += float(value)
+        for index in range(target_count):
+            if counts[index] <= 0:
+                centroids[index] = list(vectors[selected[index]][:dim])
+            else:
+                scale = 1.0 / float(counts[index])
+                centroids[index] = vector_normalized(
+                    [value * scale for value in sums[index]]
+                )
+    return centroids
+
+
+def build_proxy_exact_scan_vector(
+    vectors: list[list[float]],
+    encoder: str,
+    centroid_count: str = "auto",
+) -> list[float]:
+    if not vectors:
+        return []
+    if encoder in {"mean", "mean_pool"}:
+        return multivector_mean(vectors)
+    if encoder == "normalized_mean":
+        return vector_normalized(multivector_mean(vectors))
+    if encoder == "first_token":
+        return list(vectors[0])
+    if encoder == "max_pool":
+        return multivector_max_pool(vectors)
+    if encoder == "centroid_mean":
+        count = proxy_centroid_count(len(vectors), centroid_count)
+        return vector_normalized(multivector_mean(kmeans_pool_tokens(vectors, count)))
+    raise ValueError(
+        "proxy_exact_scan diagnostic supports normalized_mean, centroid_mean, "
+        f"max_pool, mean_pool, and first_token; got {encoder!r}"
+    )
+
+
+def proxy_exact_scan_doc_proxy(
+    doc: ProxyExactScanDoc,
+    encoder: str,
+    centroid_count: str,
+) -> list[float]:
+    key = (encoder, str(centroid_count))
+    proxy = doc.proxies.get(key)
+    if proxy is None:
+        proxy = build_proxy_exact_scan_vector(doc.vectors, encoder, str(centroid_count))
+        doc.proxies[key] = proxy
+    return proxy
+
+
+def exact_maxsim_score(query_vectors: list[list[float]], doc_vectors: list[list[float]]) -> float:
+    if not query_vectors or not doc_vectors:
+        return 0.0
+    total = 0.0
+    for query_vector in query_vectors:
+        total += max(vector_dot(query_vector, doc_vector) for doc_vector in doc_vectors)
+    return total
+
+
+def load_proxy_exact_scan_oracle(conn: psycopg.Connection[Any]) -> ProxyExactScanOracle:
+    doc_rows = fetch_all(
+        conn,
+        """
+        SELECT d.doc_id,
+               d.ctid::text,
+               ARRAY(
+                 SELECT v::text
+                 FROM unnest(turbohybrid_multivector_to_vector_array(d.colbert)) AS v
+               ) AS vectors
+        FROM dbpedia_colbert_docs d
+        WHERE d.colbert IS NOT NULL
+        ORDER BY d.doc_id
+        """,
+    )
+    query_rows = fetch_all(
+        conn,
+        """
+        SELECT q.query_id,
+               ARRAY(
+                 SELECT v::text
+                 FROM unnest(turbohybrid_multivector_to_vector_array(q.colbert)) AS v
+               ) AS vectors
+        FROM dbpedia_colbert_queries q
+        WHERE q.colbert IS NOT NULL
+        ORDER BY q.query_id
+        """,
+    )
+    docs: list[ProxyExactScanDoc] = []
+    dimension = 0
+    for doc_id, tid_text, vectors_value in doc_rows:
+        vectors = parse_vector_text_array(vectors_value)
+        if vectors and dimension == 0:
+            dimension = len(vectors[0])
+        block, offset = tid_parts(str(tid_text))
+        docs.append(
+            ProxyExactScanDoc(
+                doc_id=str(doc_id),
+                heap_block=block,
+                heap_offset=offset,
+                vectors=vectors,
+            )
+        )
+    queries = {
+        str(query_id): parse_vector_text_array(vectors_value)
+        for query_id, vectors_value in query_rows
+    }
+    if not docs:
+        raise RuntimeError("proxy_exact_scan diagnostic found no loaded document multivectors")
+    if not queries:
+        raise RuntimeError("proxy_exact_scan diagnostic found no loaded query multivectors")
+    return ProxyExactScanOracle(docs=docs, queries=queries, dimension=dimension)
+
+
+def proxy_exact_rank_summary(exact_top_with_admission: list[dict[str, Any]]) -> dict[str, Any]:
+    ranks = [
+        int(item["candidate_rank_before_rerank"])
+        for item in exact_top_with_admission[:10]
+        if item.get("candidate_rank_before_rerank") is not None
+    ]
+    return {
+        "proxy_exact_rank_of_exact_top1": (
+            int(exact_top_with_admission[0]["candidate_rank_before_rerank"])
+            if exact_top_with_admission
+            and exact_top_with_admission[0].get("candidate_rank_before_rerank") is not None
+            else None
+        ),
+        "proxy_exact_rank_of_exact_top10_p50": (
+            round(percentile([float(rank) for rank in ranks], 50), 3) if ranks else None
+        ),
+        "proxy_exact_rank_of_exact_top10_p95": (
+            round(percentile([float(rank) for rank in ranks], 95), 3) if ranks else None
+        ),
+    }
+
+
+def run_proxy_exact_scan_admission_budget(
+    oracle: ProxyExactScanOracle,
+    query: QueryItem,
+    args: argparse.Namespace,
+    budget: int,
+    exact_top: list[dict[str, Any]],
+    exact_rerank_k: int,
+) -> dict[str, Any]:
+    if str(getattr(args, "multivector_graph", "")) != "document_nodes":
+        raise RuntimeError("proxy_exact_scan requires multivector_graph = document_nodes")
+    query_vectors = oracle.queries.get(query.query_id)
+    if query_vectors is None:
+        raise RuntimeError(f"proxy_exact_scan query {query.query_id!r} has no multivector")
+    encoder = str(getattr(args, "multivector_proxy_encoder", "normalized_mean") or "normalized_mean")
+    centroid_count = str(getattr(args, "multivector_centroid_count", "auto") or "auto")
+    final_k = max(args.final_k, args.admission_k)
+    started = time.perf_counter()
+    query_proxy = build_proxy_exact_scan_vector(query_vectors, encoder, centroid_count)
+    scored = [
+        (vector_dot(query_proxy, proxy_exact_scan_doc_proxy(doc, encoder, centroid_count)), doc)
+        for doc in oracle.docs
+    ]
+    scored.sort(key=lambda item: (-item[0], item[1].doc_id))
+    proxy_scan_time_us = int(round((time.perf_counter() - started) * 1_000_000.0))
+    proxy_rank_by_doc_id = {
+        doc.doc_id: rank
+        for rank, (_score, doc) in enumerate(scored, start=1)
+    }
+    candidates = [doc for _score, doc in scored[: max(0, int(budget))]]
+    rerank_docs = candidates[: max(0, min(int(exact_rerank_k), len(candidates)))]
+    rerank_started = time.perf_counter()
+    exact_scores = [
+        (exact_maxsim_score(query_vectors, doc.vectors), doc)
+        for doc in rerank_docs
+    ]
+    exact_scores.sort(key=lambda item: (-item[0], item[1].doc_id))
+    exact_rerank_time_us = int(round((time.perf_counter() - rerank_started) * 1_000_000.0))
+    docs = [doc.doc_id for _score, doc in exact_scores[:final_k]]
+    result_rank_by_doc_id = {
+        doc_id: rank
+        for rank, doc_id in enumerate(docs, start=1)
+    }
+    exact_score_by_doc_id = {
+        doc.doc_id: score
+        for score, doc in exact_scores
+    }
+    exact_top_with_admission: list[dict[str, Any]] = []
+    for exact in exact_top:
+        doc_id = str(exact["doc_id"])
+        proxy_rank = proxy_rank_by_doc_id.get(doc_id)
+        admitted = proxy_rank is not None and proxy_rank <= int(budget)
+        retained = proxy_rank is not None and proxy_rank <= len(rerank_docs)
+        exact_top_with_admission.append({
+            "rank": exact["rank"],
+            "doc_id": doc_id,
+            "admitted_before_rerank": admitted,
+            "admission_evidence": "proxy_exact_scan",
+            "candidate_rank_before_rerank": proxy_rank,
+            "retained_for_exact_rerank": retained,
+            "exact_rerank_score": exact_score_by_doc_id.get(doc_id),
+            "exact_rerank_rank": result_rank_by_doc_id.get(doc_id),
+        })
+    top10 = exact_top[: min(10, len(exact_top))]
+    top10_admitted = sum(
+        1
+        for item in exact_top_with_admission[: len(top10)]
+        if item["admitted_before_rerank"]
+    )
+    top1_admission = bool(
+        exact_top_with_admission and exact_top_with_admission[0]["admitted_before_rerank"]
+    )
+    rank_summary = proxy_exact_rank_summary(exact_top_with_admission)
+    exact_rerank_pairs = len(query_vectors) * sum(len(doc.vectors) for doc in rerank_docs)
+    latency_ms = (proxy_scan_time_us + exact_rerank_time_us) / 1000.0
+    stats = {
+        "observed_latency_ms": latency_ms,
+        "multivector_candidate_source": "proxy_exact_scan",
+        "multivector_doc_graph_warning": "benchmark_proxy_exact_scan_diagnostic_only",
+        "multivector_doc_graph_rescore_source": "proxy_exact_scan_sidecar",
+        "proxy_encoder_kind": encoder,
+        "proxy_exact_scan_enabled": True,
+        "proxy_exact_scan_diagnostic_only": True,
+        "proxy_exact_scan_docs_scored": len(oracle.docs),
+        "proxy_exact_scan_time_us": proxy_scan_time_us,
+        "proxy_exact_scan_candidates": len(candidates),
+        "proxy_exact_scan_top10_admission_recall": (
+            round(top10_admitted / len(top10), 6) if top10 else 0.0
+        ),
+        "proxy_exact_scan_top1_admission": top1_admission,
+        "proxy_exact_scan_vs_hnsw_gap": None,
+        "hnsw_vs_exact_proxy_top10_gap": None,
+        **rank_summary,
+        "proxy_candidates": len(candidates),
+        "proxy_candidates_returned": len(candidates),
+        "multivector_proxy_candidates_returned": len(candidates),
+        "multivector_doc_graph_docs_scored": len(oracle.docs),
+        "multivector_doc_graph_candidates": len(candidates),
+        "multivector_exact_rerank_docs": len(rerank_docs),
+        "multivector_exact_rerank_pairs": exact_rerank_pairs,
+        "multivector_exact_kernel": "python_scalar_diagnostic",
+        "multivector_candidate_source_time_us": proxy_scan_time_us,
+        "multivector_proxy_candidate_time_us": proxy_scan_time_us,
+        "multivector_proxy_scoring_time_us": proxy_scan_time_us,
+        "multivector_exact_maxsim_rerank_time_us": exact_rerank_time_us,
+    }
+    candidate_diagnostics = derive_candidate_underfill_diagnostics({
+        "candidate_budget": budget,
+        "candidate_source": "proxy_exact_scan",
+        "final_k": args.final_k,
+        "effective_exact_rerank_k": exact_rerank_k,
+        "proxy_candidates": len(candidates),
+        "last_scan_stats_sample": stats,
+    })
+    return {
+        "budget": budget,
+        **candidate_diagnostics,
+        "admission_debug_mode": effective_admission_debug_mode(args),
+        "trace_enabled": False,
+        "serving_exact_rerank_mode": getattr(args, "serving_exact_rerank_mode", "admission_exhaustive"),
+        "requested_serving_exact_rerank_k": int(getattr(args, "serving_exact_rerank_k", 100)),
+        "effective_exact_rerank_k": exact_rerank_k,
+        "candidate_source": "proxy_exact_scan",
+        "plain_fallback_used": False,
+        "plain_fallback_reason": "not_applicable",
+        "doc_graph_docs_scored": len(oracle.docs),
+        "doc_graph_edges_visited": 0,
+        "doc_graph_candidates": len(candidates),
+        "doc_graph_heap_fetches": 0,
+        "doc_graph_warning": "benchmark_proxy_exact_scan_diagnostic_only",
+        "proxy_candidates": len(candidates),
+        "proxy_exact_rerank_docs": len(rerank_docs),
+        "latency_ms": latency_ms,
+        "latency": {"ms": latency_ms},
+        "retrieval_elapsed_ms": latency_ms,
+        "retrieval_query_count": 1,
+        "result_doc_ids": docs,
+        "exact_top1_admission": top1_admission,
+        "exact_top1_admitted": top1_admission,
+        "exact_top1_admitted_before_rerank": top1_admission,
+        "exact_top10_admission_recall": round(top10_admitted / len(top10), 6) if top10 else 0.0,
+        "exact_top1_candidate_rank_before_rerank": rank_summary["proxy_exact_rank_of_exact_top1"],
+        "exact_top1_rank": (
+            exact_top_with_admission[0]["exact_rerank_rank"] if exact_top_with_admission else None
+        ),
+        "exact_top1_exact_rerank_rank": (
+            exact_top_with_admission[0]["exact_rerank_rank"] if exact_top_with_admission else None
+        ),
+        "docs_scored": len(oracle.docs),
+        "graph_edges_visited": 0,
+        "exact_rerank_docs": len(rerank_docs),
+        "exact_rerank_pairs": exact_rerank_pairs,
+        "exact_rerank_tokens_evaluated": exact_rerank_pairs,
+        "exact_rerank_tokens_skipped": 0,
+        "exact_rerank_pairs_saved": 0,
+        "sidecar_stats": {
+            "sidecar_vectors_loaded": len(rerank_docs),
+            "sidecar_bytes_touched": 0,
+            "sidecar_pages_read": 0,
+        },
+        "doc_graph_rescore_source": "proxy_exact_scan_sidecar",
+        "trace_available": False,
+        "trace_entries": 0,
+        "admission_inferred_from_result_docs": False,
+        "admission_evidence_mode": "proxy_exact_scan",
+        "pre_rerank_admission_source": "proxy_exact_scan",
+        "pre_rerank_admission_limitations": None,
+        "exact_top": exact_top_with_admission,
+        "scan_stats": stats,
+        **rank_summary,
+        "proxy_exact_scan_enabled": True,
+        "proxy_exact_scan_diagnostic_only": True,
+        "proxy_exact_scan_docs_scored": len(oracle.docs),
+        "proxy_exact_scan_time_us": proxy_scan_time_us,
+        "proxy_exact_scan_candidates": len(candidates),
+        "proxy_exact_scan_top10_admission_recall": (
+            round(top10_admitted / len(top10), 6) if top10 else 0.0
+        ),
+        "proxy_exact_scan_top1_admission": top1_admission,
+        "proxy_exact_scan_vs_hnsw_gap": None,
+        "hnsw_vs_exact_proxy_top10_gap": None,
+    }
 
 
 def trace_key(entry: dict[str, Any]) -> tuple[int, int] | None:
@@ -2705,6 +6099,12 @@ def validate_serving_scan_path(
             sidecar_bytes_touched = scan_stat_int(
                 stats, "multivector_doc_sidecar_bytes_touched"
             )
+            proxy_full_sidecar_bytes = scan_stat_int(
+                stats, "proxy_full_sidecar_bytes_touched"
+            )
+            proxy_near_exhaustive_flag = scan_stat_bool(
+                stats, "proxy_vector_near_exhaustive_sidecar_touch"
+            )
             sidecar_docmap_bytes = scan_stat_int(stats, "multivector_docmap_bytes")
             docmap_bytes_touched = scan_stat_int(
                 stats, "multivector_doc_sidecar_docmap_bytes_touched"
@@ -2724,8 +6124,9 @@ def validate_serving_scan_path(
                 )
             if (
                 bounded_proxy_candidate_band
+                and proxy_near_exhaustive_flag
                 and sidecar_docmap_bytes > 0
-                and max(sidecar_bytes_touched, docmap_bytes_touched)
+                and max(proxy_full_sidecar_bytes, sidecar_bytes_touched - docmap_bytes_touched)
                 >= int(math.floor(sidecar_docmap_bytes * 0.90))
             ):
                 warnings.append(
@@ -2733,6 +6134,7 @@ def validate_serving_scan_path(
                     f"candidate_k={candidate_k},table={loaded_document_count},"
                     f"sidecar_bytes_touched={sidecar_bytes_touched},"
                     f"docmap_bytes_touched={docmap_bytes_touched},"
+                    f"proxy_full_sidecar_bytes_touched={proxy_full_sidecar_bytes},"
                     f"docmap_bytes={sidecar_docmap_bytes}"
                 )
 
@@ -2806,6 +6208,48 @@ def proxy_work_from_stats(stats: dict[str, Any]) -> dict[str, Any]:
         "proxy_candidates": scan_stat_int(stats, "proxy_candidates"),
         "proxy_top1_admission": scan_stat_bool(stats, "proxy_top1_admission"),
         "proxy_exact_rerank_docs": scan_stat_int(stats, "proxy_exact_rerank_docs"),
+        "proxy_exact_scan_enabled": scan_stat_bool(stats, "proxy_exact_scan_enabled"),
+        "proxy_exact_scan_diagnostic_only": scan_stat_bool(
+            stats,
+            "proxy_exact_scan_diagnostic_only",
+        ),
+        "proxy_exact_scan_docs_scored": scan_stat_int(
+            stats,
+            "proxy_exact_scan_docs_scored",
+        ),
+        "proxy_exact_scan_time_us": scan_stat_int(stats, "proxy_exact_scan_time_us"),
+        "proxy_exact_scan_candidates": scan_stat_int(
+            stats,
+            "proxy_exact_scan_candidates",
+        ),
+        "proxy_exact_scan_top10_admission_recall": scan_stat_float(
+            stats,
+            "proxy_exact_scan_top10_admission_recall",
+        ),
+        "proxy_exact_scan_top1_admission": scan_stat_bool(
+            stats,
+            "proxy_exact_scan_top1_admission",
+        ),
+        "proxy_exact_scan_vs_hnsw_gap": scan_stat_float(
+            stats,
+            "proxy_exact_scan_vs_hnsw_gap",
+        ),
+        "hnsw_vs_exact_proxy_top10_gap": scan_stat_float(
+            stats,
+            "hnsw_vs_exact_proxy_top10_gap",
+        ),
+        "proxy_exact_rank_of_exact_top1": scan_stat_int(
+            stats,
+            "proxy_exact_rank_of_exact_top1",
+        ),
+        "proxy_exact_rank_of_exact_top10_p50": scan_stat_float(
+            stats,
+            "proxy_exact_rank_of_exact_top10_p50",
+        ),
+        "proxy_exact_rank_of_exact_top10_p95": scan_stat_float(
+            stats,
+            "proxy_exact_rank_of_exact_top10_p95",
+        ),
     }
 
 
@@ -2850,8 +6294,16 @@ def quantized_inverted_work_from_stats(stats: dict[str, Any]) -> dict[str, Any]:
         "quantized_inverted_codebook_top_m": scan_stat_int(
             stats, "quantized_inverted_codebook_top_m"
         ),
+        "quantized_inverted_codebook_version": scan_stat_int(
+            stats, "quantized_inverted_codebook_version"
+        ),
         "quantized_inverted_assignment_us": scan_stat_int(
             stats, "quantized_inverted_assignment_us"
+        ),
+        "quantized_inverted_assignment_time_us": (
+            scan_stat_int(stats, "quantized_inverted_assignment_time_us")
+            if stats.get("quantized_inverted_assignment_time_us") is not None
+            else scan_stat_int(stats, "quantized_inverted_assignment_us")
         ),
         "quantized_inverted_list_offset_bytes": scan_stat_int(
             stats, "quantized_inverted_list_offset_bytes"
@@ -3210,6 +6662,14 @@ def parse_int_grid(value: str, option_name: str) -> list[int]:
 def effective_serving_grid_budget_sweep(args: argparse.Namespace) -> list[int]:
     if bool(getattr(args, "admission_budget_sweep_explicit", False)):
         source = str(getattr(args, "admission_budget_sweep", "") or "")
+    elif bool(getattr(args, "document_node_colbert_centroid_lite_focus", False)):
+        source = DOCUMENT_NODE_COLBERT_CENTROID_LITE_FOCUS_BUDGET_SWEEP
+    elif bool(getattr(args, "document_node_colbert_quantized_inverted_focus", False)):
+        source = DOCUMENT_NODE_COLBERT_CENTROID_LITE_FOCUS_BUDGET_SWEEP
+    elif bool(getattr(args, "document_node_colbert_entry_focus", False)):
+        source = DOCUMENT_NODE_COLBERT_ENTRY_FOCUS_BUDGET_SWEEP
+    elif bool(getattr(args, "document_node_colbert_1m_grid", False)):
+        source = DOCUMENT_NODE_COLBERT_1M_GRID_BUDGET_SWEEP
     elif bool(getattr(args, "document_node_serving_grid_proxy_admission_focus", False)) or bool(
         getattr(args, "document_node_serving_grid_centroid_lite_focus", False)
     ):
@@ -3247,6 +6707,11 @@ def effective_document_node_serving_entry_sample_counts(args: argparse.Namespace
         )
         or DOCUMENT_NODE_SERVING_GRID_ENTRY_SAMPLE_SWEEP
     )
+    if (
+        bool(getattr(args, "document_node_colbert_entry_focus", False))
+        and source == DOCUMENT_NODE_SERVING_GRID_ENTRY_SAMPLE_SWEEP
+    ):
+        source = DOCUMENT_NODE_COLBERT_ENTRY_FOCUS_ENTRY_SAMPLE_SWEEP
     return parse_int_grid(source, "--document-node-serving-grid-entry-sample-counts")
 
 
@@ -3259,6 +6724,11 @@ def effective_document_node_serving_entry_sidecar_representatives(args: argparse
         )
         or DOCUMENT_NODE_SERVING_GRID_ENTRY_SIDECAR_SWEEP
     )
+    if (
+        bool(getattr(args, "document_node_colbert_entry_focus", False))
+        and source == DOCUMENT_NODE_SERVING_GRID_ENTRY_SIDECAR_SWEEP
+    ):
+        source = DOCUMENT_NODE_COLBERT_ENTRY_FOCUS_ENTRY_SIDECAR_SWEEP
     return parse_int_grid(source, "--document-node-serving-grid-entry-sidecar-representatives")
 
 
@@ -3350,9 +6820,21 @@ def run_admission_budget(
     args: argparse.Namespace,
     budget: int,
     exact_top: list[dict[str, Any]],
+    proxy_exact_oracle: ProxyExactScanOracle | None = None,
 ) -> dict[str, Any]:
     exact_rerank_k = effective_admission_exact_rerank_k(args, budget)
     admission_debug_mode = effective_admission_debug_mode(args)
+    if str(getattr(args, "multivector_candidate_source", "")) == "proxy_exact_scan":
+        if proxy_exact_oracle is None:
+            raise RuntimeError("proxy_exact_scan requires a loaded benchmark oracle")
+        return run_proxy_exact_scan_admission_budget(
+            proxy_exact_oracle,
+            query,
+            args,
+            budget,
+            exact_top,
+            exact_rerank_k,
+        )
     exec_sql(conn, "SELECT set_config('turbohybrid.multivector_doc_candidate_k', %s, false)", (str(budget),))
     exec_sql(
         conn,
@@ -3571,6 +7053,7 @@ def run_admission_debug(
     exact_top_cache_document_count: int | None = None,
     exact_top_provider: ExactTopProvider = exact_admission_top,
     executed_budgets: list[int] | None = None,
+    query_batch_callback: Callable[[dict[str, Any]], None] | None = None,
 ) -> dict[str, Any]:
     debug_started = time.perf_counter()
     exact_top_cache_current_doc_count = (
@@ -3601,7 +7084,13 @@ def run_admission_debug(
         )
 
     admission_debug_mode = effective_admission_debug_mode(args)
-    set_retrieval_gucs(conn, args, "dbpedia_colbert_admission_debug")
+    proxy_exact_scan_enabled = str(getattr(args, "multivector_candidate_source", "")) == "proxy_exact_scan"
+    retrieval_guc_args = (
+        clone_args(args, multivector_candidate_source="proxy_vector")
+        if proxy_exact_scan_enabled
+        else args
+    )
+    set_retrieval_gucs(conn, retrieval_guc_args, "dbpedia_colbert_admission_debug")
     exec_sql(
         conn,
         "SELECT set_config('turbohybrid.multivector_debug_admission', %s, false)",
@@ -3673,6 +7162,24 @@ def run_admission_debug(
     sidecar_bytes_touched_by_budget: dict[int, list[int]] = {budget: [] for budget in executed_budget_values}
     sidecar_cache_hits_by_budget: dict[int, list[int]] = {budget: [] for budget in executed_budget_values}
     sidecar_vectors_loaded_by_budget: dict[int, list[int]] = {budget: [] for budget in executed_budget_values}
+    proxy_exact_scan_docs_scored_by_budget: dict[int, list[int]] = {
+        budget: [] for budget in executed_budget_values
+    }
+    proxy_exact_scan_time_us_by_budget: dict[int, list[int]] = {
+        budget: [] for budget in executed_budget_values
+    }
+    proxy_exact_scan_candidates_by_budget: dict[int, list[int]] = {
+        budget: [] for budget in executed_budget_values
+    }
+    proxy_exact_rank_top1_by_budget: dict[int, list[int]] = {
+        budget: [] for budget in executed_budget_values
+    }
+    proxy_exact_rank_top10_p50_by_budget: dict[int, list[float]] = {
+        budget: [] for budget in executed_budget_values
+    }
+    proxy_exact_rank_top10_p95_by_budget: dict[int, list[float]] = {
+        budget: [] for budget in executed_budget_values
+    }
     top1_first_budget_values: list[int] = []
     top1_admitted_queries = 0
     top10_recall_values: list[float] = []
@@ -3689,8 +7196,9 @@ def run_admission_debug(
     }
     trace_entries_by_budget: dict[int, int] = {budget: 0 for budget in executed_budget_values}
     trace_entry_count = 0
+    proxy_exact_oracle = load_proxy_exact_scan_oracle(conn) if proxy_exact_scan_enabled else None
 
-    for query in queries:
+    for query_index, query in enumerate(queries, start=1):
         exact_top, exact_elapsed_ms, exact_top_cache_hit = cached_exact_admission_top(
             conn,
             query,
@@ -3709,7 +7217,14 @@ def run_admission_debug(
         top1_candidate_rank: int | None = None
         top1_exact_rank: int | None = None
         for budget in executed_budget_values:
-            result = run_admission_budget(conn, query, args, budget, exact_top)
+            result = run_admission_budget(
+                conn,
+                query,
+                args,
+                budget,
+                exact_top,
+                proxy_exact_oracle=proxy_exact_oracle,
+            )
             evidence_mode = str(result.get("admission_evidence_mode", "unavailable") or "unavailable")
             admission_evidence_modes[evidence_mode] = admission_evidence_modes.get(evidence_mode, 0) + 1
             budget_evidence_modes = admission_evidence_modes_by_budget[budget]
@@ -3844,6 +7359,27 @@ def run_admission_debug(
             )
             if result["exact_top1_exact_rerank_rank"] is not None:
                 exact_top1_rank_by_budget[budget].append(int(result["exact_top1_exact_rerank_rank"]))
+            proxy_exact_scan_docs_scored_by_budget[budget].append(
+                int(result.get("proxy_exact_scan_docs_scored", 0))
+            )
+            proxy_exact_scan_time_us_by_budget[budget].append(
+                int(result.get("proxy_exact_scan_time_us", 0))
+            )
+            proxy_exact_scan_candidates_by_budget[budget].append(
+                int(result.get("proxy_exact_scan_candidates", 0))
+            )
+            if result.get("proxy_exact_rank_of_exact_top1") is not None:
+                proxy_exact_rank_top1_by_budget[budget].append(
+                    int(result["proxy_exact_rank_of_exact_top1"])
+                )
+            if result.get("proxy_exact_rank_of_exact_top10_p50") is not None:
+                proxy_exact_rank_top10_p50_by_budget[budget].append(
+                    float(result["proxy_exact_rank_of_exact_top10_p50"])
+                )
+            if result.get("proxy_exact_rank_of_exact_top10_p95") is not None:
+                proxy_exact_rank_top10_p95_by_budget[budget].append(
+                    float(result["proxy_exact_rank_of_exact_top10_p95"])
+                )
             sidecar_stats = result.get("sidecar_stats", {})
             if isinstance(sidecar_stats, dict):
                 native_cache_bytes_by_budget[budget].append(int(sidecar_stats.get("native_cache_bytes", 0)))
@@ -3882,6 +7418,18 @@ def run_admission_debug(
             "exact_top1_exact_rerank_rank": top1_exact_rank,
             "budgets": budget_results,
         })
+        if query_batch_callback is not None:
+            query_batch_callback({
+                "query_id": query.query_id,
+                "query_index": query_index,
+                "query_count": len(queries),
+                "executed_budgets": executed_budget_values,
+                "budget_results_count": len(budget_results),
+                "retrieval_query_count": retrieval_query_count,
+                "exact_baseline_query_count": exact_baseline_query_count,
+                "exact_top_cache_hits": exact_top_cache_hits,
+                "exact_top_cache_misses": exact_top_cache_misses,
+            })
 
     total_elapsed_ms = elapsed_ms_since(debug_started)
     aggregate = {
@@ -4070,6 +7618,37 @@ def run_admission_debug(
                 "quantized_inverted_docs_scored": summarize_ints(
                     quantized_inverted_docs_by_budget[budget]
                 ),
+                "proxy_exact_scan_enabled": proxy_exact_scan_enabled,
+                "proxy_exact_scan_diagnostic_only": proxy_exact_scan_enabled,
+                "proxy_exact_scan_docs_scored": summarize_ints(
+                    proxy_exact_scan_docs_scored_by_budget[budget]
+                ),
+                "proxy_exact_scan_time_us": summarize_ints(
+                    proxy_exact_scan_time_us_by_budget[budget]
+                ),
+                "proxy_exact_scan_candidates": summarize_ints(
+                    proxy_exact_scan_candidates_by_budget[budget]
+                ),
+                "proxy_exact_scan_top10_admission_recall": round(
+                    statistics.mean(top10_recall_by_budget[budget]),
+                    6,
+                ) if proxy_exact_scan_enabled and top10_recall_by_budget[budget] else None,
+                "proxy_exact_scan_top1_admission": round(
+                    sum(1 for value in top1_by_budget[budget] if value)
+                    / len(top1_by_budget[budget]),
+                    6,
+                ) if proxy_exact_scan_enabled and top1_by_budget[budget] else None,
+                "proxy_exact_scan_vs_hnsw_gap": None,
+                "hnsw_vs_exact_proxy_top10_gap": None,
+                "proxy_exact_rank_of_exact_top1": summarize_ints(
+                    proxy_exact_rank_top1_by_budget[budget]
+                ),
+                "proxy_exact_rank_of_exact_top10_p50": summarize_floats(
+                    proxy_exact_rank_top10_p50_by_budget[budget]
+                ),
+                "proxy_exact_rank_of_exact_top10_p95": summarize_floats(
+                    proxy_exact_rank_top10_p95_by_budget[budget]
+                ),
                 "exact_top1_rank": summarize_ints(exact_top1_rank_by_budget[budget]),
                 "native_cache_bytes": summarize_ints(native_cache_bytes_by_budget[budget]),
                 "native_cache_exact_bytes": summarize_ints(native_cache_exact_bytes_by_budget[budget]),
@@ -4087,7 +7666,7 @@ def run_admission_debug(
         "run_at_largest_budget": run_at_largest_budget,
     }
 
-    set_retrieval_gucs(conn, args, "dbpedia_colbert_serial")
+    set_retrieval_gucs(conn, retrieval_guc_args, "dbpedia_colbert_serial")
     return {
         "enabled": True,
         "candidate_source": args.multivector_candidate_source,
@@ -4295,8 +7874,15 @@ def document_node_serving_profiles(
     explicit_entry_sidecar_profile_names: bool = False,
     centroid_count: str,
     include_learned_projection: bool = False,
+    include_proxy_exact_scan: bool = False,
 ) -> list[DocumentNodeServingProfile]:
     profiles = [
+        DocumentNodeServingProfile(
+            name="proxy_normalized_mean_proxy_only",
+            candidate_source="proxy_vector",
+            proxy_encoder="normalized_mean",
+            storage_kind="proxy_only",
+        ),
         DocumentNodeServingProfile(
             name="proxy_normalized_mean_f16",
             candidate_source="proxy_vector",
@@ -4334,6 +7920,22 @@ def document_node_serving_profiles(
             token_pooling_target_ratio=0.5,
         ),
         DocumentNodeServingProfile(
+            name="centroid_lite_centroid_only",
+            candidate_source="centroid_lite",
+            centroids="kmeans",
+            centroid_count=centroid_count,
+            storage_kind="centroid_only",
+        ),
+        DocumentNodeServingProfile(
+            name="centroid_lite_centroid_only_pool_050",
+            candidate_source="centroid_lite",
+            centroids="kmeans",
+            centroid_count=centroid_count,
+            storage_kind="centroid_only",
+            token_pooling="greedy_cosine",
+            token_pooling_target_ratio=0.5,
+        ),
+        DocumentNodeServingProfile(
             name="proxy_normalized_mean_sq8",
             candidate_source="proxy_vector",
             proxy_encoder="normalized_mean",
@@ -4348,6 +7950,17 @@ def document_node_serving_profiles(
                 centroids="kmeans",
                 centroid_count=centroid_count,
                 storage_kind="f16",
+                centroid_lite_max_postings_per_token=int(cap),
+            )
+            for cap in centroid_lite_posting_caps
+        )
+        profiles.extend(
+            DocumentNodeServingProfile(
+                name=f"centroid_lite_centroid_only_cap_{int(cap):03d}",
+                candidate_source="centroid_lite",
+                centroids="kmeans",
+                centroid_count=centroid_count,
+                storage_kind="centroid_only",
                 centroid_lite_max_postings_per_token=int(cap),
             )
             for cap in centroid_lite_posting_caps
@@ -4371,6 +7984,44 @@ def document_node_serving_profiles(
                     centroid_count=centroid_count,
                     storage_kind="f16",
                     centroid_lite_max_postings_per_token=int(cap),
+                    centroid_lite_pruning="safe_upper_bound",
+            )
+        )
+        if 32 in {int(cap) for cap in centroid_lite_posting_caps}:
+            profiles.append(
+                DocumentNodeServingProfile(
+                    name="centroid_lite_f16_pool_050_cap_032",
+                    candidate_source="centroid_lite",
+                    centroids="kmeans",
+                    centroid_count=centroid_count,
+                    storage_kind="f16",
+                    token_pooling="greedy_cosine",
+                    token_pooling_target_ratio=0.5,
+                    centroid_lite_max_postings_per_token=32,
+                )
+            )
+            profiles.append(
+                DocumentNodeServingProfile(
+                    name="centroid_lite_centroid_only_pool_050_cap_032",
+                    candidate_source="centroid_lite",
+                    centroids="kmeans",
+                    centroid_count=centroid_count,
+                    storage_kind="centroid_only",
+                    token_pooling="greedy_cosine",
+                    token_pooling_target_ratio=0.5,
+                    centroid_lite_max_postings_per_token=32,
+                )
+            )
+            profiles.append(
+                DocumentNodeServingProfile(
+                    name="centroid_lite_f16_pool_050_cap_032_prune_safe_upper_bound",
+                    candidate_source="centroid_lite",
+                    centroids="kmeans",
+                    centroid_count=centroid_count,
+                    storage_kind="f16",
+                    token_pooling="greedy_cosine",
+                    token_pooling_target_ratio=0.5,
+                    centroid_lite_max_postings_per_token=32,
                     centroid_lite_pruning="safe_upper_bound",
                 )
             )
@@ -4491,6 +8142,34 @@ def document_node_serving_profiles(
                 ),
             ]
         )
+    if include_proxy_exact_scan:
+        profiles.extend(
+            [
+                DocumentNodeServingProfile(
+                    name="proxy_exact_scan_normalized_mean_f16",
+                    candidate_source="proxy_exact_scan",
+                    proxy_encoder="normalized_mean",
+                    storage_kind="f16",
+                    diagnostic_only=True,
+                ),
+                DocumentNodeServingProfile(
+                    name="proxy_exact_scan_centroid_mean_f16",
+                    candidate_source="proxy_exact_scan",
+                    proxy_encoder="centroid_mean",
+                    centroids="kmeans",
+                    centroid_count=centroid_count,
+                    storage_kind="f16",
+                    diagnostic_only=True,
+                ),
+                DocumentNodeServingProfile(
+                    name="proxy_exact_scan_max_pool_f16",
+                    candidate_source="proxy_exact_scan",
+                    proxy_encoder="max_pool",
+                    storage_kind="f16",
+                    diagnostic_only=True,
+                ),
+            ]
+        )
     if include_learned_projection:
         profiles.append(
             DocumentNodeServingProfile(
@@ -4599,6 +8278,18 @@ def document_node_serving_profiles(
                     candidate_reservoirs="balanced",
                 )
             )
+            if include_learned_sparse_rescue:
+                profiles.append(
+                    DocumentNodeServingProfile(
+                        name="proxy_max_pool_f16_reservoir_balanced_learned_sparse_rescue",
+                        candidate_source="proxy_vector",
+                        branch_plan="dense_only",
+                        sparse_candidate_source="learned_sparse",
+                        proxy_encoder="max_pool",
+                        storage_kind="f16",
+                        candidate_reservoirs="balanced",
+                    )
+                )
     if include_experimental:
         profiles.append(
             DocumentNodeServingProfile(
@@ -4617,12 +8308,20 @@ def validate_document_node_serving_profile_inputs(
 ) -> None:
     if not any(profile.sparse_candidate_source == "learned_sparse" for profile in profiles):
         return
-    require_complete_learned_sparse_args(args)
-    if getattr(args, "learned_sparse_doc_jsonl", None) is None:
-        raise SystemExit(
-            "learned-sparse serving-grid profiles require "
-            "--learned-sparse-doc-jsonl and --learned-sparse-query-jsonl"
-        )
+    # Detailed missing/incomplete learned-sparse JSONL errors need the loaded
+    # benchmark doc/query IDs, so serving-grid runs validate this after data load
+    # and before index build/retrieval.
+
+
+def document_node_colbert_1m_profile_names(args: argparse.Namespace) -> tuple[str, ...]:
+    names: list[str] = list(DOCUMENT_NODE_COLBERT_1M_GRID_BASE_PROFILES)
+    if bool(getattr(args, "document_node_colbert_1m_include_entry_samples", False)):
+        names.extend(DOCUMENT_NODE_COLBERT_1M_GRID_ENTRY_SAMPLE_PROFILES)
+    if bool(getattr(args, "document_node_colbert_1m_include_entry_sidecar", False)):
+        names.extend(DOCUMENT_NODE_COLBERT_1M_GRID_ENTRY_SIDECAR_PROFILES)
+    if bool(getattr(args, "document_node_colbert_1m_include_experimental", False)):
+        names.extend(DOCUMENT_NODE_COLBERT_1M_GRID_EXPERIMENTAL_PROFILES)
+    return tuple(dict.fromkeys(names))
 
 
 def effective_document_node_serving_profiles(
@@ -4637,47 +8336,125 @@ def effective_document_node_serving_profiles(
     token_pooling_focus = bool(
         getattr(args, "document_node_serving_grid_token_pooling_focus", False)
     )
+    learned_sparse_focus = bool(
+        getattr(args, "document_node_serving_grid_learned_sparse_focus", False)
+    )
+    proxy_oracle_focus = bool(
+        getattr(args, "document_node_serving_grid_proxy_oracle_focus", False)
+        or getattr(args, "document_node_colbert_proxy_oracle_focus", False)
+    )
+    colbert_centroid_lite_focus = bool(
+        getattr(args, "document_node_colbert_centroid_lite_focus", False)
+    )
+    colbert_entry_focus = bool(
+        getattr(args, "document_node_colbert_entry_focus", False)
+    )
+    colbert_quantized_inverted_focus = bool(
+        getattr(args, "document_node_colbert_quantized_inverted_focus", False)
+    )
+    colbert_1m_grid = bool(getattr(args, "document_node_colbert_1m_grid", False))
     profiles = document_node_serving_profiles(
-        include_experimental=args.document_node_serving_grid_include_experimental,
+        include_experimental=(
+            bool(getattr(args, "document_node_colbert_1m_include_experimental", False))
+            if colbert_1m_grid
+            else (
+                bool(args.document_node_serving_grid_include_experimental)
+                or colbert_quantized_inverted_focus
+            )
+        ),
         include_proxy_encoder_variants=(
             bool(getattr(args, "document_node_serving_grid_include_proxy_encoders", False))
             or proxy_admission_focus
+            or learned_sparse_focus
+            or proxy_oracle_focus
+            or colbert_centroid_lite_focus
+            or colbert_entry_focus
+            or colbert_quantized_inverted_focus
+            or colbert_1m_grid
         ),
-        include_learned_projection=bool(
+        include_learned_projection=(not colbert_1m_grid) and bool(
             getattr(args, "document_node_serving_grid_include_learned_projection", False)
         ),
-        include_bm25_rescue=bool(
-            getattr(args, "document_node_serving_grid_include_bm25_rescue", False)
+        include_bm25_rescue=(not colbert_1m_grid) and (
+            bool(getattr(args, "document_node_serving_grid_include_bm25_rescue", False))
+            or learned_sparse_focus
         ),
-        include_learned_sparse_rescue=bool(
-            getattr(args, "document_node_serving_grid_include_learned_sparse_rescue", False)
+        include_learned_sparse_rescue=(not colbert_1m_grid) and (
+            bool(
+                getattr(args, "document_node_serving_grid_include_learned_sparse_rescue", False)
+            )
+            or learned_sparse_focus
         ),
-        include_reservoirs=bool(
-            getattr(args, "document_node_serving_grid_include_reservoirs", False)
+        include_reservoirs=(not colbert_1m_grid) and (
+            bool(getattr(args, "document_node_serving_grid_include_reservoirs", False))
+            or learned_sparse_focus
         ),
         include_centroid_lite_caps=bool(
             getattr(args, "document_node_serving_grid_include_centroid_lite_caps", False)
         )
-        or centroid_lite_focus,
+        or centroid_lite_focus
+        or colbert_centroid_lite_focus
+        or colbert_1m_grid,
         centroid_lite_posting_caps=effective_document_node_serving_centroid_lite_caps(args),
         include_token_pooling_focus=token_pooling_focus,
         include_entry_samples=bool(
             getattr(args, "document_node_serving_grid_include_entry_samples", False)
         )
-        or proxy_admission_focus,
+        or proxy_admission_focus
+        or colbert_entry_focus
+        or bool(getattr(args, "document_node_colbert_1m_include_entry_samples", False)),
         entry_sample_counts=effective_document_node_serving_entry_sample_counts(args),
         include_entry_sidecar=bool(
             getattr(args, "document_node_serving_grid_include_entry_sidecar", False)
         )
-        or proxy_admission_focus,
+        or proxy_admission_focus
+        or colbert_entry_focus
+        or bool(getattr(args, "document_node_colbert_1m_include_entry_sidecar", False)),
         entry_sidecar_representatives=(
             effective_document_node_serving_entry_sidecar_representatives(args)
             if proxy_admission_focus
+            or colbert_entry_focus
+            or bool(getattr(args, "document_node_colbert_1m_include_entry_sidecar", False))
             else ()
         ),
-        explicit_entry_sidecar_profile_names=proxy_admission_focus,
+        explicit_entry_sidecar_profile_names=(
+            proxy_admission_focus
+            or colbert_entry_focus
+            or bool(getattr(args, "document_node_colbert_1m_include_entry_sidecar", False))
+        ),
         centroid_count=args.multivector_centroid_count,
+        include_proxy_exact_scan=proxy_oracle_focus,
     )
+    if colbert_1m_grid:
+        if document_node_colbert_1m_single_index_mode_requested(args):
+            ordered_names = document_node_colbert_1m_single_index_profile_names(args)
+        else:
+            ordered_names = document_node_colbert_1m_profile_names(args)
+        allowed = set(ordered_names)
+        order = {name: index for index, name in enumerate(ordered_names)}
+        profiles = sorted(
+            [profile for profile in profiles if profile.name in allowed],
+            key=lambda profile: order[profile.name],
+        )
+        selected_colbert_profile = str(
+            getattr(args, "document_node_colbert_1m_profile", "") or ""
+        ).strip()
+        if selected_colbert_profile:
+            by_name = {profile.name: profile for profile in profiles}
+            if selected_colbert_profile not in by_name:
+                known = ", ".join(sorted(by_name))
+                if selected_colbert_profile in DOCUMENT_NODE_COLBERT_1M_GRID_EXPERIMENTAL_PROFILES:
+                    raise SystemExit(
+                        f"--document-node-colbert-1m-profile {selected_colbert_profile} "
+                        "requires --document-node-colbert-1m-include-experimental"
+                    )
+                raise SystemExit(
+                    "--document-node-colbert-1m-profile contains unknown pure-ColBERT "
+                    f"profile {selected_colbert_profile!r}; expected one of: {known}"
+                )
+            profiles = [by_name[selected_colbert_profile]]
+        if not profiles:
+            raise SystemExit("--document-node-colbert-1m-grid produced no pure ColBERT profiles")
     if proxy_admission_focus:
         allowed = set(DOCUMENT_NODE_SERVING_GRID_PROXY_ADMISSION_FOCUS_PROFILES)
         order = {
@@ -4692,6 +8469,46 @@ def effective_document_node_serving_profiles(
         )
         if not profiles:
             raise SystemExit("--document-node-serving-grid-proxy-admission-focus produced no profiles")
+    if colbert_centroid_lite_focus:
+        allowed = set(DOCUMENT_NODE_COLBERT_CENTROID_LITE_FOCUS_PROFILES)
+        order = {
+            name: index
+            for index, name in enumerate(DOCUMENT_NODE_COLBERT_CENTROID_LITE_FOCUS_PROFILES)
+        }
+        profiles = sorted(
+            [profile for profile in profiles if profile.name in allowed],
+            key=lambda profile: order[profile.name],
+        )
+        if not profiles:
+            raise SystemExit("--document-node-colbert-centroid-lite-focus produced no profiles")
+    if colbert_entry_focus:
+        allowed = set(DOCUMENT_NODE_COLBERT_ENTRY_FOCUS_PROFILES)
+        order = {
+            name: index
+            for index, name in enumerate(DOCUMENT_NODE_COLBERT_ENTRY_FOCUS_PROFILES)
+        }
+        profiles = sorted(
+            [profile for profile in profiles if profile.name in allowed],
+            key=lambda profile: order[profile.name],
+        )
+        if not profiles:
+            raise SystemExit("--document-node-colbert-entry-focus produced no profiles")
+    if colbert_quantized_inverted_focus:
+        allowed = set(DOCUMENT_NODE_COLBERT_QUANTIZED_INVERTED_FOCUS_PROFILES)
+        order = {
+            name: index
+            for index, name in enumerate(
+                DOCUMENT_NODE_COLBERT_QUANTIZED_INVERTED_FOCUS_PROFILES
+            )
+        }
+        profiles = sorted(
+            [profile for profile in profiles if profile.name in allowed],
+            key=lambda profile: order[profile.name],
+        )
+        if not profiles:
+            raise SystemExit(
+                "--document-node-colbert-quantized-inverted-focus produced no profiles"
+            )
     if centroid_lite_focus:
         allowed = set(DOCUMENT_NODE_SERVING_GRID_CENTROID_LITE_FOCUS_PROFILES)
         order = {
@@ -4720,6 +8537,34 @@ def effective_document_node_serving_profiles(
         )
         if not profiles:
             raise SystemExit("--document-node-serving-grid-token-pooling-focus produced no profiles")
+    if learned_sparse_focus:
+        allowed = set(DOCUMENT_NODE_SERVING_GRID_LEARNED_SPARSE_FOCUS_PROFILES)
+        order = {
+            name: index
+            for index, name in enumerate(
+                DOCUMENT_NODE_SERVING_GRID_LEARNED_SPARSE_FOCUS_PROFILES
+            )
+        }
+        profiles = sorted(
+            [profile for profile in profiles if profile.name in allowed],
+            key=lambda profile: order[profile.name],
+        )
+        if not profiles:
+            raise SystemExit("--document-node-serving-grid-learned-sparse-focus produced no profiles")
+    if proxy_oracle_focus:
+        allowed = set(DOCUMENT_NODE_SERVING_GRID_PROXY_ORACLE_FOCUS_PROFILES)
+        order = {
+            name: index
+            for index, name in enumerate(
+                DOCUMENT_NODE_SERVING_GRID_PROXY_ORACLE_FOCUS_PROFILES
+            )
+        }
+        profiles = sorted(
+            [profile for profile in profiles if profile.name in allowed],
+            key=lambda profile: order[profile.name],
+        )
+        if not profiles:
+            raise SystemExit("--document-node-serving-grid-proxy-oracle-focus produced no profiles")
     selected = str(getattr(args, "document_node_serving_grid_profiles", "") or "").strip()
     if selected:
         requested = [item.strip() for item in selected.split(",") if item.strip()]
@@ -4759,46 +8604,77 @@ def document_node_serving_profile_by_name(
     token_pooling_focus = bool(
         getattr(args, "document_node_serving_grid_token_pooling_focus", False)
     )
+    learned_sparse_focus = bool(
+        getattr(args, "document_node_serving_grid_learned_sparse_focus", False)
+    )
+    proxy_oracle_focus = bool(
+        getattr(args, "document_node_serving_grid_proxy_oracle_focus", False)
+        or getattr(args, "document_node_colbert_proxy_oracle_focus", False)
+    )
+    colbert_centroid_lite_focus = bool(
+        getattr(args, "document_node_colbert_centroid_lite_focus", False)
+    )
+    colbert_entry_focus = bool(
+        getattr(args, "document_node_colbert_entry_focus", False)
+    )
+    colbert_quantized_inverted_focus = bool(
+        getattr(args, "document_node_colbert_quantized_inverted_focus", False)
+    )
     profiles = document_node_serving_profiles(
-        include_experimental=args.document_node_serving_grid_include_experimental,
+        include_experimental=(
+            args.document_node_serving_grid_include_experimental
+            or colbert_quantized_inverted_focus
+        ),
         include_proxy_encoder_variants=(
             bool(getattr(args, "document_node_serving_grid_include_proxy_encoders", False))
             or proxy_admission_focus
+            or learned_sparse_focus
+            or proxy_oracle_focus
+            or colbert_centroid_lite_focus
+            or colbert_entry_focus
+            or colbert_quantized_inverted_focus
         ),
         include_learned_projection=bool(
             getattr(args, "document_node_serving_grid_include_learned_projection", False)
         ),
         include_bm25_rescue=bool(
             getattr(args, "document_node_serving_grid_include_bm25_rescue", False)
-        ),
+        )
+        or learned_sparse_focus,
         include_learned_sparse_rescue=bool(
             getattr(args, "document_node_serving_grid_include_learned_sparse_rescue", False)
-        ),
+        )
+        or learned_sparse_focus,
         include_reservoirs=bool(
             getattr(args, "document_node_serving_grid_include_reservoirs", False)
-        ),
+        )
+        or learned_sparse_focus,
         include_centroid_lite_caps=bool(
             getattr(args, "document_node_serving_grid_include_centroid_lite_caps", False)
         )
-        or centroid_lite_focus,
+        or centroid_lite_focus
+        or colbert_centroid_lite_focus,
         centroid_lite_posting_caps=effective_document_node_serving_centroid_lite_caps(args),
         include_token_pooling_focus=token_pooling_focus,
         include_entry_samples=bool(
             getattr(args, "document_node_serving_grid_include_entry_samples", False)
         )
-        or proxy_admission_focus,
+        or proxy_admission_focus
+        or colbert_entry_focus,
         entry_sample_counts=effective_document_node_serving_entry_sample_counts(args),
         include_entry_sidecar=bool(
             getattr(args, "document_node_serving_grid_include_entry_sidecar", False)
         )
-        or proxy_admission_focus,
+        or proxy_admission_focus
+        or colbert_entry_focus,
         entry_sidecar_representatives=(
             effective_document_node_serving_entry_sidecar_representatives(args)
-            if proxy_admission_focus
+            if proxy_admission_focus or colbert_entry_focus
             else ()
         ),
-        explicit_entry_sidecar_profile_names=proxy_admission_focus,
+        explicit_entry_sidecar_profile_names=proxy_admission_focus or colbert_entry_focus,
         centroid_count=args.multivector_centroid_count,
+        include_proxy_exact_scan=proxy_oracle_focus,
     )
     by_name = {profile.name: profile for profile in profiles}
     profile = by_name.get(name)
@@ -4809,6 +8685,11 @@ def document_node_serving_profile_by_name(
         raise SystemExit(
             "--serving-profile-name quantized_inverted_experimental_f32 requires "
             "--document-node-serving-grid-include-experimental"
+        )
+    if name.startswith("proxy_exact_scan_"):
+        raise SystemExit(
+            f"--serving-profile-name {name} requires "
+            "--document-node-serving-grid-proxy-oracle-focus"
         )
     known = ", ".join(sorted(by_name))
     raise SystemExit(f"unknown --serving-profile-name {name!r}; expected one of: {known}")
@@ -4830,6 +8711,287 @@ def document_node_serving_latency_profile(
     if cache is not None:
         profile = replace(profile, cache_mode=str(cache))
     return profile
+
+
+def document_node_colbert_beir_quality_profiles(
+    args: argparse.Namespace,
+) -> list[DocumentNodeServingProfile]:
+    include_experimental = bool(
+        getattr(args, "document_node_colbert_include_experimental", False)
+        or getattr(args, "document_node_colbert_1m_include_experimental", False)
+    )
+    profile_args = clone_args(
+        args,
+        document_node_serving_grid=True,
+        document_node_colbert_1m_grid=False,
+        document_node_serving_grid_include_experimental=include_experimental,
+        document_node_serving_grid_include_proxy_encoders=True,
+        document_node_serving_grid_include_bm25_rescue=False,
+        document_node_serving_grid_include_learned_sparse_rescue=False,
+        document_node_serving_grid_include_reservoirs=False,
+        document_node_serving_grid_learned_sparse_focus=False,
+        document_node_serving_grid_include_centroid_lite_caps=True,
+        document_node_colbert_1m_include_experimental=include_experimental,
+        hybrid_evaluation_harness=False,
+    )
+    allowed_names = list(DOCUMENT_NODE_COLBERT_BEIR_QUALITY_PROFILES)
+    if include_experimental:
+        allowed_names.extend(DOCUMENT_NODE_COLBERT_BEIR_QUALITY_EXPERIMENTAL_PROFILES)
+    allowed = set(allowed_names)
+    order = {name: index for index, name in enumerate(allowed_names)}
+    profiles = [
+        profile
+        for profile in effective_document_node_serving_profiles(profile_args)
+        if profile.name in allowed
+    ]
+    return sorted(profiles, key=lambda profile: order[profile.name])
+
+
+def document_node_colbert_beir_quality_profile(
+    args: argparse.Namespace,
+) -> DocumentNodeServingProfile:
+    name = str(
+        getattr(args, "document_node_colbert_profile", "") or "proxy_normalized_mean_proxy_only"
+    ).strip()
+    profiles = document_node_colbert_beir_quality_profiles(args)
+    by_name = {profile.name: profile for profile in profiles}
+    profile = by_name.get(name)
+    if profile is None:
+        experimental = set(DOCUMENT_NODE_COLBERT_BEIR_QUALITY_EXPERIMENTAL_PROFILES)
+        if name in experimental:
+            raise SystemExit(
+                f"--document-node-colbert-profile {name} requires "
+                "--document-node-colbert-include-experimental"
+            )
+        known = ", ".join(sorted(by_name))
+        raise SystemExit(
+            "--document-node-colbert-profile contains unknown pure-ColBERT "
+            f"profile {name!r}; expected one of: {known}"
+        )
+    cap = int(getattr(args, "document_node_colbert_centroid_lite_cap", 0) or 0)
+    if cap > 0 and profile.candidate_source == "centroid_lite":
+        profile = replace(profile, centroid_lite_max_postings_per_token=cap)
+    return profile
+
+
+def document_node_colbert_sampled_admission_profiles(
+    args: argparse.Namespace,
+) -> list[DocumentNodeServingProfile]:
+    include_experimental = bool(
+        getattr(args, "document_node_colbert_include_experimental", False)
+    )
+    profile_args = clone_args(
+        args,
+        document_node_serving_grid=True,
+        document_node_colbert_1m_grid=False,
+        document_node_serving_grid_include_experimental=include_experimental,
+        document_node_serving_grid_include_proxy_encoders=False,
+        document_node_serving_grid_include_bm25_rescue=False,
+        document_node_serving_grid_include_learned_sparse_rescue=False,
+        document_node_serving_grid_include_reservoirs=False,
+        document_node_serving_grid_learned_sparse_focus=False,
+        document_node_serving_grid_include_centroid_lite_caps=True,
+        document_node_colbert_1m_include_experimental=include_experimental,
+        hybrid_evaluation_harness=False,
+    )
+    allowed_names = list(DOCUMENT_NODE_COLBERT_SAMPLED_ADMISSION_PROFILES)
+    if include_experimental:
+        allowed_names.extend(DOCUMENT_NODE_COLBERT_SAMPLED_ADMISSION_EXPERIMENTAL_PROFILES)
+    allowed = set(allowed_names)
+    order = {name: index for index, name in enumerate(allowed_names)}
+    profiles = [
+        profile
+        for profile in effective_document_node_serving_profiles(profile_args)
+        if profile.name in allowed
+    ]
+    return sorted(profiles, key=lambda profile: order[profile.name])
+
+
+def document_node_colbert_sampled_admission_profile(
+    args: argparse.Namespace,
+) -> DocumentNodeServingProfile:
+    name = str(
+        getattr(args, "document_node_colbert_profile", "") or "proxy_normalized_mean_proxy_only"
+    ).strip()
+    profiles = document_node_colbert_sampled_admission_profiles(args)
+    by_name = {profile.name: profile for profile in profiles}
+    profile = by_name.get(name)
+    if profile is None:
+        experimental = set(DOCUMENT_NODE_COLBERT_SAMPLED_ADMISSION_EXPERIMENTAL_PROFILES)
+        if name in experimental:
+            raise SystemExit(
+                f"--document-node-colbert-profile {name} requires "
+                "--document-node-colbert-include-experimental"
+            )
+        known = ", ".join(sorted(by_name))
+        raise SystemExit(
+            "--document-node-colbert-profile contains unknown sampled-admission "
+            f"profile {name!r}; expected one of: {known}"
+        )
+    cap = int(getattr(args, "document_node_colbert_centroid_lite_cap", 0) or 0)
+    if cap > 0 and profile.candidate_source == "centroid_lite":
+        profile = replace(profile, centroid_lite_max_postings_per_token=cap)
+    return profile
+
+
+def effective_document_node_colbert_candidate_source_focus_budgets(
+    args: argparse.Namespace,
+) -> list[int]:
+    source = str(getattr(args, "candidate_budgets", "") or "800,1600")
+    return parse_int_grid(source, "--candidate-budgets")
+
+
+def effective_document_node_colbert_candidate_source_focus_caps(
+    args: argparse.Namespace,
+) -> list[int]:
+    source = str(getattr(args, "centroid_lite_caps", "") or "32,64")
+    return parse_int_grid(source, "--centroid-lite-caps")
+
+
+def document_node_colbert_candidate_source_focus_profiles(
+    args: argparse.Namespace,
+) -> list[DocumentNodeServingProfile]:
+    include_experimental = bool(
+        getattr(args, "include_quantized_inverted_experimental", False)
+        or getattr(args, "document_node_colbert_include_experimental", False)
+    )
+    cap_values = effective_document_node_colbert_candidate_source_focus_caps(args)
+    profile_args = clone_args(
+        args,
+        document_node_serving_grid=True,
+        document_node_colbert_1m_grid=False,
+        document_node_serving_grid_include_experimental=include_experimental,
+        document_node_serving_grid_include_proxy_encoders=False,
+        document_node_serving_grid_include_bm25_rescue=False,
+        document_node_serving_grid_include_learned_sparse_rescue=False,
+        document_node_serving_grid_include_reservoirs=False,
+        document_node_serving_grid_learned_sparse_focus=False,
+        document_node_serving_grid_include_centroid_lite_caps=True,
+        document_node_serving_grid_centroid_lite_posting_caps=",".join(
+            str(cap) for cap in cap_values
+        ),
+        document_node_colbert_1m_include_experimental=include_experimental,
+        hybrid_evaluation_harness=False,
+    )
+    allowed_names = list(DOCUMENT_NODE_COLBERT_CANDIDATE_SOURCE_FOCUS_PROFILES)
+    if include_experimental:
+        allowed_names.extend(
+            DOCUMENT_NODE_COLBERT_CANDIDATE_SOURCE_FOCUS_EXPERIMENTAL_PROFILES
+        )
+    allowed = set(allowed_names)
+    order = {name: index for index, name in enumerate(allowed_names)}
+    profiles = [
+        profile
+        for profile in effective_document_node_serving_profiles(profile_args)
+        if profile.name in allowed
+    ]
+    return sorted(profiles, key=lambda profile: order[profile.name])
+
+
+def document_node_colbert_candidate_source_focus_mode_requested(
+    args: argparse.Namespace,
+) -> bool:
+    return bool(getattr(args, "document_node_colbert_candidate_source_focus", False))
+
+
+def document_node_colbert_candidate_source_focus_args(
+    args: argparse.Namespace,
+    profile: DocumentNodeServingProfile,
+    candidate_k: int,
+) -> tuple[argparse.Namespace, int]:
+    if candidate_k < 1:
+        raise SystemExit("--candidate-budgets must contain positive integers")
+    requested_rerank_k = int(getattr(args, "exact_rerank_k", 0) or 0)
+    if requested_rerank_k < 1:
+        raise SystemExit("--exact-rerank-k must be positive")
+    effective_rerank_k = min(requested_rerank_k, candidate_k)
+    mode_args = document_node_serving_profile_args(
+        args,
+        profile,
+        ef=int(getattr(args, "document_node_colbert_ef", 0) or 0),
+        oversampling=int(getattr(args, "document_node_colbert_oversampling", 0) or 0),
+        budget_sweep=[candidate_k],
+    )
+    mode_args = clone_args(
+        mode_args,
+        dense_k=candidate_k,
+        multivector_doc_candidate_k=candidate_k,
+        multivector_exact_rerank="topk",
+        multivector_exact_rerank_k=effective_rerank_k,
+        reuse_index=args.reuse_index,
+        admission_debug_context="colbert_candidate_source_focus",
+    )
+    return mode_args, effective_rerank_k
+
+
+def document_node_colbert_beir_quality_mode_requested(args: argparse.Namespace) -> bool:
+    return bool(getattr(args, "document_node_colbert_1m_beir_quality_only", False))
+
+
+def document_node_colbert_sampled_admission_mode_requested(
+    args: argparse.Namespace,
+) -> bool:
+    return bool(getattr(args, "document_node_colbert_sampled_admission", False))
+
+
+def document_node_colbert_beir_quality_args(
+    args: argparse.Namespace,
+) -> tuple[argparse.Namespace, DocumentNodeServingProfile, int]:
+    profile = document_node_colbert_beir_quality_profile(args)
+    candidate_k = int(getattr(args, "document_node_colbert_candidate_k", 0) or 0)
+    if candidate_k < 1:
+        raise SystemExit("--document-node-colbert-candidate-k must be positive")
+    requested_rerank_k = int(getattr(args, "document_node_colbert_exact_rerank_k", 0) or 0)
+    if requested_rerank_k < 1:
+        raise SystemExit("--document-node-colbert-exact-rerank-k must be positive")
+    effective_rerank_k = min(requested_rerank_k, candidate_k)
+    mode_args = document_node_serving_profile_args(
+        args,
+        profile,
+        ef=int(getattr(args, "document_node_colbert_ef", 0) or 0),
+        oversampling=int(getattr(args, "document_node_colbert_oversampling", 0) or 0),
+        budget_sweep=[candidate_k],
+    )
+    mode_args = clone_args(
+        mode_args,
+        dense_k=candidate_k,
+        multivector_doc_candidate_k=candidate_k,
+        multivector_exact_rerank="topk",
+        multivector_exact_rerank_k=effective_rerank_k,
+        reuse_index=args.reuse_index,
+        admission_debug_context="colbert_beir_quality_only",
+    )
+    return mode_args, profile, effective_rerank_k
+
+
+def document_node_colbert_sampled_admission_args(
+    args: argparse.Namespace,
+) -> tuple[argparse.Namespace, DocumentNodeServingProfile, int]:
+    profile = document_node_colbert_sampled_admission_profile(args)
+    candidate_k = int(getattr(args, "document_node_colbert_candidate_k", 0) or 0)
+    if candidate_k < 1:
+        raise SystemExit("--document-node-colbert-candidate-k must be positive")
+    requested_rerank_k = int(getattr(args, "document_node_colbert_exact_rerank_k", 0) or 0)
+    if requested_rerank_k < 1:
+        raise SystemExit("--document-node-colbert-exact-rerank-k must be positive")
+    effective_rerank_k = min(requested_rerank_k, candidate_k)
+    mode_args = document_node_serving_profile_args(
+        args,
+        profile,
+        ef=int(getattr(args, "document_node_colbert_ef", 0) or 0),
+        oversampling=int(getattr(args, "document_node_colbert_oversampling", 0) or 0),
+        budget_sweep=[candidate_k],
+    )
+    mode_args = clone_args(
+        mode_args,
+        dense_k=candidate_k,
+        multivector_doc_candidate_k=candidate_k,
+        multivector_exact_rerank="topk",
+        multivector_exact_rerank_k=effective_rerank_k,
+        reuse_index=args.reuse_index,
+        admission_debug_context="colbert_sampled_admission",
+    )
+    return mode_args, profile, effective_rerank_k
 
 
 def document_node_serving_latency_args(
@@ -4866,6 +9028,14 @@ def effective_document_node_serving_ef_grid(args: argparse.Namespace) -> list[in
     values = getattr(args, "document_node_serving_ef_grid_values", None)
     if values is not None:
         return list(values)
+    if bool(getattr(args, "document_node_colbert_centroid_lite_focus", False)):
+        return list(DOCUMENT_NODE_COLBERT_1M_GRID_EF)
+    if bool(getattr(args, "document_node_colbert_quantized_inverted_focus", False)):
+        return list(DOCUMENT_NODE_COLBERT_1M_GRID_EF)
+    if bool(getattr(args, "document_node_colbert_entry_focus", False)):
+        return list(DOCUMENT_NODE_COLBERT_ENTRY_FOCUS_EF)
+    if bool(getattr(args, "document_node_colbert_1m_grid", False)):
+        return list(DOCUMENT_NODE_COLBERT_1M_GRID_EF)
     if bool(getattr(args, "document_node_serving_grid_proxy_admission_focus", False)):
         return list(DOCUMENT_NODE_SERVING_GRID_PROXY_ADMISSION_FOCUS_EF)
     if bool(getattr(args, "document_node_serving_grid_smoke", False)):
@@ -4877,6 +9047,14 @@ def effective_document_node_serving_oversampling_grid(args: argparse.Namespace) 
     values = getattr(args, "document_node_serving_oversampling_grid_values", None)
     if values is not None:
         return list(values)
+    if bool(getattr(args, "document_node_colbert_centroid_lite_focus", False)):
+        return list(DOCUMENT_NODE_COLBERT_ENTRY_FOCUS_OVERSAMPLING)
+    if bool(getattr(args, "document_node_colbert_quantized_inverted_focus", False)):
+        return list(DOCUMENT_NODE_COLBERT_ENTRY_FOCUS_OVERSAMPLING)
+    if bool(getattr(args, "document_node_colbert_entry_focus", False)):
+        return list(DOCUMENT_NODE_COLBERT_ENTRY_FOCUS_OVERSAMPLING)
+    if bool(getattr(args, "document_node_colbert_1m_grid", False)):
+        return list(DOCUMENT_NODE_COLBERT_1M_GRID_OVERSAMPLING)
     if bool(getattr(args, "document_node_serving_grid_proxy_admission_focus", False)):
         return list(DOCUMENT_NODE_SERVING_GRID_PROXY_ADMISSION_FOCUS_OVERSAMPLING)
     if bool(getattr(args, "document_node_serving_grid_smoke", False)):
@@ -5011,11 +9189,14 @@ def _self_check_document_node_serving_profiles() -> None:
         centroid_count="auto",
     )
     assert [profile.name for profile in base] == [
+        "proxy_normalized_mean_proxy_only",
         "proxy_normalized_mean_f16",
         "docnodes_normalized_mean_f16",
         "centroid_mean_f16",
         "centroid_lite_f16",
         "centroid_lite_f16_pool_050",
+        "centroid_lite_centroid_only",
+        "centroid_lite_centroid_only_pool_050",
         "proxy_normalized_mean_sq8",
     ]
     assert all(profile.candidate_source != "quantized_inverted_experimental" for profile in base)
@@ -5024,6 +9205,11 @@ def _self_check_document_node_serving_profiles() -> None:
     assert profiles_by_name["centroid_mean_f16"].centroids == "kmeans"
     assert profiles_by_name["centroid_lite_f16_pool_050"].token_pooling == "greedy_cosine"
     assert profiles_by_name["centroid_lite_f16_pool_050"].token_pooling_target_ratio == 0.5
+    assert profiles_by_name["centroid_lite_centroid_only"].storage_kind == "centroid_only"
+    assert (
+        profiles_by_name["centroid_lite_centroid_only_pool_050"].token_pooling
+        == "greedy_cosine"
+    )
     assert profiles_by_name["proxy_normalized_mean_f16"].branch_plan == "dense_only"
     assert profiles_by_name["proxy_normalized_mean_sq8"].branch_plan == "dense_only"
     experimental = document_node_serving_profiles(
@@ -5052,6 +9238,23 @@ def _self_check_document_node_serving_profiles() -> None:
         proxy_variants_by_name["proxy_random_projection_fde_f16"].proxy_encoder
         == "random_projection_fde"
     )
+    proxy_oracle_profiles = document_node_serving_profiles(
+        include_experimental=False,
+        include_proxy_encoder_variants=True,
+        include_bm25_rescue=False,
+        include_learned_sparse_rescue=False,
+        include_reservoirs=False,
+        include_proxy_exact_scan=True,
+        centroid_count="auto",
+    )
+    proxy_oracle_by_name = {profile.name: profile for profile in proxy_oracle_profiles}
+    assert (
+        proxy_oracle_by_name["proxy_exact_scan_normalized_mean_f16"].candidate_source
+        == "proxy_exact_scan"
+    )
+    assert proxy_oracle_by_name["proxy_exact_scan_normalized_mean_f16"].diagnostic_only is True
+    assert proxy_oracle_by_name["proxy_exact_scan_centroid_mean_f16"].centroids == "kmeans"
+    assert proxy_oracle_by_name["proxy_exact_scan_max_pool_f16"].proxy_encoder == "max_pool"
     entry_sidecar_profiles = document_node_serving_profiles(
         include_experimental=False,
         include_proxy_encoder_variants=False,
@@ -5273,6 +9476,27 @@ def _self_check_document_node_serving_profiles() -> None:
         ].candidate_reservoirs
         == "balanced"
     )
+    assert (
+        "proxy_max_pool_f16_reservoir_balanced_learned_sparse_rescue"
+        not in reservoir_profiles_with_proxy_variants_by_name
+    )
+    combined_sparse_reservoir_profiles = document_node_serving_profiles(
+        include_experimental=False,
+        include_proxy_encoder_variants=True,
+        include_bm25_rescue=False,
+        include_learned_sparse_rescue=True,
+        include_reservoirs=True,
+        centroid_count="auto",
+    )
+    combined_sparse_reservoir_by_name = {
+        profile.name: profile for profile in combined_sparse_reservoir_profiles
+    }
+    combined_sparse_reservoir = combined_sparse_reservoir_by_name[
+        "proxy_max_pool_f16_reservoir_balanced_learned_sparse_rescue"
+    ]
+    assert combined_sparse_reservoir.proxy_encoder == "max_pool"
+    assert combined_sparse_reservoir.sparse_candidate_source == "learned_sparse"
+    assert combined_sparse_reservoir.candidate_reservoirs == "balanced"
     capped_centroid_lite = document_node_serving_profiles(
         include_experimental=False,
         include_proxy_encoder_variants=False,
@@ -5291,6 +9515,10 @@ def _self_check_document_node_serving_profiles() -> None:
     assert "centroid_lite_f16_prune_safe_upper_bound" in capped_centroid_lite_by_name
     assert "centroid_lite_f16_cap_016_prune_safe_upper_bound" in capped_centroid_lite_by_name
     assert (
+        "centroid_lite_f16_pool_050_cap_032_prune_safe_upper_bound"
+        in capped_centroid_lite_by_name
+    )
+    assert (
         capped_centroid_lite_by_name[
             "centroid_lite_f16_cap_016"
         ].centroid_lite_max_postings_per_token
@@ -5307,6 +9535,11 @@ def _self_check_document_node_serving_profiles() -> None:
         ].centroid_lite_pruning
         == "safe_upper_bound"
     )
+    pooled_pruned = capped_centroid_lite_by_name[
+        "centroid_lite_f16_pool_050_cap_032_prune_safe_upper_bound"
+    ]
+    assert pooled_pruned.token_pooling == "greedy_cosine"
+    assert pooled_pruned.centroid_lite_pruning == "safe_upper_bound"
     entry_sample_profiles = document_node_serving_profiles(
         include_experimental=False,
         include_proxy_encoder_variants=False,
@@ -5383,14 +9616,16 @@ def _self_check_document_node_serving_profiles() -> None:
     partial_sparse_coverage = {
         "loaded_documents": 100,
         "learned_sparse_documents": 20,
+        "learned_sparse_missing_doc_count": 80,
         "doc_coverage_ratio": learned_sparse_ratio(20, 100),
         "loaded_queries": 10,
         "learned_sparse_queries": 10,
+        "learned_sparse_missing_query_count": 0,
         "query_coverage_ratio": learned_sparse_ratio(10, 10),
     }
     assert partial_sparse_coverage["doc_coverage_ratio"] == 0.2
     assert learned_sparse_coverage_warnings(partial_sparse_coverage) == [
-        "learned_sparse_doc_coverage_below_95pct"
+        "learned_sparse_doc_coverage_below_100pct"
     ]
     complete_sparse_coverage = {
         "loaded_documents": 100,
@@ -5419,6 +9654,16 @@ def _self_check_document_node_serving_profiles() -> None:
         admission_budget_sweep_explicit=False,
         document_node_serving_grid=True,
         document_node_serving_grid_smoke=True,
+        document_node_colbert_1m_grid=False,
+        document_node_colbert_1m_profile="",
+        document_node_colbert_1m_index_signature="",
+        document_node_colbert_1m_plan_only=False,
+        document_node_colbert_1m_build_only=False,
+        document_node_colbert_1m_evaluate_only=False,
+        document_node_colbert_1m_include_entry_samples=False,
+        document_node_colbert_1m_include_entry_sidecar=False,
+        document_node_colbert_1m_include_centroid_lite_caps=False,
+        document_node_colbert_1m_include_experimental=False,
         document_node_serving_grid_include_experimental=True,
         document_node_serving_grid_include_proxy_encoders=False,
         document_node_serving_grid_include_learned_projection=False,
@@ -5437,6 +9682,12 @@ def _self_check_document_node_serving_profiles() -> None:
         document_node_serving_grid_proxy_admission_focus=False,
         document_node_serving_grid_centroid_lite_focus=False,
         document_node_serving_grid_token_pooling_focus=False,
+        document_node_serving_grid_learned_sparse_focus=False,
+        document_node_serving_grid_proxy_oracle_focus=False,
+        document_node_colbert_proxy_oracle_focus=False,
+        document_node_colbert_centroid_lite_focus=False,
+        document_node_colbert_quantized_inverted_focus=False,
+        document_node_colbert_entry_focus=False,
         document_node_serving_grid_centroid_lite_posting_caps=(
             DOCUMENT_NODE_SERVING_GRID_CENTROID_LITE_CAP_SWEEP
         ),
@@ -5478,10 +9729,98 @@ def _self_check_document_node_serving_profiles() -> None:
     assert effective_document_node_serving_ef_grid(smoke_override_args) == [400, 800]
     assert effective_document_node_serving_oversampling_grid(smoke_override_args) == [1, 2]
     assert effective_document_node_serving_stage_mode(smoke_args) == "two_stage"
+    learned_sparse_focus_args = clone_args(
+        smoke_args,
+        document_node_serving_grid_smoke=False,
+        document_node_serving_grid_include_experimental=False,
+        document_node_serving_grid_learned_sparse_focus=True,
+        learned_sparse_doc_jsonl=Path("docs.jsonl"),
+        learned_sparse_query_jsonl=Path("queries.jsonl"),
+    )
+    assert [
+        profile.name for profile in effective_document_node_serving_profiles(
+            learned_sparse_focus_args
+        )
+    ] == list(DOCUMENT_NODE_SERVING_GRID_LEARNED_SPARSE_FOCUS_PROFILES)
+    learned_sparse_focus_with_proxy_variants = clone_args(
+        learned_sparse_focus_args,
+        document_node_serving_grid_include_proxy_encoders=True,
+    )
+    assert [
+        profile.name for profile in effective_document_node_serving_profiles(
+            learned_sparse_focus_with_proxy_variants
+        )
+    ] == list(DOCUMENT_NODE_SERVING_GRID_LEARNED_SPARSE_FOCUS_PROFILES)
+    learned_sparse_reservoir_opt_in_args = clone_args(
+        learned_sparse_focus_args,
+        document_node_serving_grid_learned_sparse_focus=False,
+        document_node_serving_grid_include_proxy_encoders=True,
+        document_node_serving_grid_include_learned_sparse_rescue=True,
+        document_node_serving_grid_include_reservoirs=True,
+    )
+    assert (
+        "proxy_max_pool_f16_reservoir_balanced_learned_sparse_rescue"
+        in [
+            profile.name for profile in effective_document_node_serving_profiles(
+                learned_sparse_reservoir_opt_in_args
+            )
+        ]
+    )
+    proxy_oracle_focus_args = clone_args(
+        learned_sparse_focus_args,
+        document_node_serving_grid_learned_sparse_focus=False,
+        document_node_colbert_proxy_oracle_focus=True,
+    )
+    proxy_oracle_focus_profiles = effective_document_node_serving_profiles(
+        proxy_oracle_focus_args
+    )
+    assert [profile.name for profile in proxy_oracle_focus_profiles] == list(
+        DOCUMENT_NODE_SERVING_GRID_PROXY_ORACLE_FOCUS_PROFILES
+    )
+    assert any(profile.diagnostic_only for profile in proxy_oracle_focus_profiles)
+    assert any(
+        profile.sparse_candidate_source == "learned_sparse"
+        for profile in effective_document_node_serving_profiles(
+            clone_args(
+                learned_sparse_focus_args,
+                learned_sparse_query_jsonl=None,
+            )
+        )
+    )
     full_args = clone_args(
         smoke_args,
         document_node_serving_grid_smoke=False,
     )
+    entry_focus_args = clone_args(
+        full_args,
+        document_node_colbert_entry_focus=True,
+        document_node_serving_grid_budget_mode="sweep",
+    )
+    entry_focus_profiles = effective_document_node_serving_profiles(entry_focus_args)
+    assert [profile.name for profile in entry_focus_profiles] == list(
+        DOCUMENT_NODE_COLBERT_ENTRY_FOCUS_PROFILES
+    )
+    assert effective_serving_grid_budget_sweep(entry_focus_args) == [800, 1600]
+    assert effective_serving_grid_executed_budgets(entry_focus_args) == [800, 1600]
+    assert effective_document_node_serving_ef_grid(entry_focus_args) == [200, 400, 800]
+    assert effective_document_node_serving_oversampling_grid(entry_focus_args) == [1]
+    entry_focus_by_name = {profile.name: profile for profile in entry_focus_profiles}
+    assert (
+        entry_focus_by_name[
+            "proxy_normalized_mean_f16_entry_sample_512"
+        ].entry_sample_count
+        == 512
+    )
+    assert (
+        entry_focus_by_name[
+            "proxy_max_pool_f16_entry_sidecar_512"
+        ].entry_sidecar_representatives
+        == 512
+    )
+    assert entry_focus_by_name["proxy_max_pool_f16"].proxy_encoder == "max_pool"
+    assert entry_focus_by_name["centroid_mean_f16"].proxy_encoder == "centroid_mean"
+    assert all(profile.bm25_candidate_injection == "off" for profile in entry_focus_profiles)
+    assert all(profile.sparse_candidate_source == "off" for profile in entry_focus_profiles)
     assert effective_serving_grid_budget_sweep(full_args) == [50, 100, 200, 400, 800]
     assert effective_serving_grid_executed_budgets(full_args) == [800]
     assert effective_document_node_serving_ef_grid(full_args) == [50, 100, 200]
@@ -5490,6 +9829,252 @@ def _self_check_document_node_serving_profiles() -> None:
     assert effective_document_node_serving_stage_mode(
         clone_args(full_args, document_node_serving_grid_stage_mode="two_stage")
     ) == "two_stage"
+    colbert_1m_args = clone_args(
+        full_args,
+        document_node_colbert_1m_grid=True,
+        document_node_serving_grid_include_experimental=True,
+    )
+    colbert_1m_profiles = effective_document_node_serving_profiles(colbert_1m_args)
+    assert [profile.name for profile in colbert_1m_profiles] == list(
+        DOCUMENT_NODE_COLBERT_1M_GRID_BASE_PROFILES
+    )
+    assert effective_serving_grid_budget_sweep(colbert_1m_args) == [100, 200, 400, 800, 1600]
+    assert effective_serving_grid_executed_budgets(colbert_1m_args) == [1600]
+    assert effective_document_node_serving_ef_grid(colbert_1m_args) == [200, 400, 800]
+    assert effective_document_node_serving_oversampling_grid(colbert_1m_args) == [1, 2]
+    assert all(profile.bm25_candidate_injection == "off" for profile in colbert_1m_profiles)
+    assert all(profile.sparse_candidate_source == "off" for profile in colbert_1m_profiles)
+    assert all(profile.candidate_reservoirs == "off" for profile in colbert_1m_profiles)
+    assert "quantized_inverted_experimental_f32" not in [
+        profile.name for profile in colbert_1m_profiles
+    ]
+    colbert_1m_experimental_args = clone_args(
+        colbert_1m_args,
+        document_node_colbert_1m_include_experimental=True,
+    )
+    assert [
+        profile.name
+        for profile in effective_document_node_serving_profiles(colbert_1m_experimental_args)
+    ][-1:] == ["quantized_inverted_experimental_f32"]
+    quantized_focus_args = clone_args(
+        colbert_1m_args,
+        document_node_colbert_1m_grid=False,
+        document_node_serving_grid_include_experimental=False,
+        document_node_colbert_quantized_inverted_focus=True,
+        document_node_serving_grid_budget_mode="sweep",
+    )
+    quantized_focus_profiles = effective_document_node_serving_profiles(
+        quantized_focus_args
+    )
+    assert [profile.name for profile in quantized_focus_profiles] == list(
+        DOCUMENT_NODE_COLBERT_QUANTIZED_INVERTED_FOCUS_PROFILES
+    )
+    assert any(
+        profile.candidate_source == "quantized_inverted_experimental"
+        for profile in quantized_focus_profiles
+    )
+    assert all(profile.bm25_candidate_injection == "off" for profile in quantized_focus_profiles)
+    assert all(profile.sparse_candidate_source == "off" for profile in quantized_focus_profiles)
+    assert effective_serving_grid_budget_sweep(quantized_focus_args) == [800, 1600]
+    assert effective_serving_grid_executed_budgets(quantized_focus_args) == [800, 1600]
+    assert effective_document_node_serving_ef_grid(quantized_focus_args) == [200, 400, 800]
+    assert effective_document_node_serving_oversampling_grid(quantized_focus_args) == [1]
+    quantized_readiness = document_node_colbert_quantized_inverted_readiness(
+        [
+            {
+                "profile": "centroid_lite_f16",
+                "candidate_source": "centroid_lite",
+                "exact_top10_admission_recall": 0.30,
+                "p95_ms": 20.0,
+            },
+            {
+                "profile": "quantized_inverted_experimental_f32",
+                "candidate_source": "quantized_inverted_experimental",
+                "exact_top10_admission_recall": 0.40,
+                "p95_ms": 25.0,
+                "quantized_inverted_docs_scored": {"p95": 9000},
+                "quantized_inverted_postings_touched": {"p95": 9500},
+                "quantized_inverted_codebook_source": "deterministic",
+                "quantized_inverted_codebook_size": 256,
+            },
+        ],
+        loaded_document_count=10000,
+    )
+    assert quantized_readiness["experimental_only"] is True
+    assert quantized_readiness["production_ready"] is False
+    assert quantized_readiness["admission_improves_over_centroid_lite"] is True
+    assert quantized_readiness["docs_scored_near_exhaustive"] is True
+    assert quantized_readiness["postings_touched_near_exhaustive"] is True
+    assert (
+        quantized_readiness["codebook_readiness"][
+            "deterministic_codeword_assignment_warning"
+        ]
+        is True
+    )
+    colbert_1m_entry_args = clone_args(
+        colbert_1m_args,
+        document_node_serving_grid_include_experimental=False,
+        document_node_colbert_1m_include_entry_samples=True,
+        document_node_colbert_1m_include_entry_sidecar=True,
+    )
+    colbert_1m_entry_names = [
+        profile.name for profile in effective_document_node_serving_profiles(colbert_1m_entry_args)
+    ]
+    assert colbert_1m_entry_names[: len(DOCUMENT_NODE_COLBERT_1M_GRID_BASE_PROFILES)] == list(
+        DOCUMENT_NODE_COLBERT_1M_GRID_BASE_PROFILES
+    )
+    assert all(
+        name in colbert_1m_entry_names
+        for name in DOCUMENT_NODE_COLBERT_1M_GRID_ENTRY_SAMPLE_PROFILES
+    )
+    assert all(
+        name in colbert_1m_entry_names
+        for name in DOCUMENT_NODE_COLBERT_1M_GRID_ENTRY_SIDECAR_PROFILES
+    )
+    colbert_1m_selected = effective_document_node_serving_profiles(
+        clone_args(
+            colbert_1m_args,
+            document_node_serving_grid_include_experimental=False,
+            document_node_serving_grid_profiles=(
+                "centroid_lite_centroid_only_cap_032,proxy_max_pool_f16"
+            ),
+        )
+    )
+    assert [profile.name for profile in colbert_1m_selected] == [
+        "centroid_lite_centroid_only_cap_032",
+        "proxy_max_pool_f16",
+    ]
+    single_profile_args = clone_args(
+        colbert_1m_args,
+        document_node_colbert_1m_profile="centroid_lite_centroid_only_cap_032",
+    )
+    single_profile_plan = document_node_colbert_1m_plan(single_profile_args)
+    assert single_profile_plan["pure_colbert_only"] is True
+    assert single_profile_plan["profile_names"] == ["centroid_lite_centroid_only_cap_032"]
+    assert single_profile_plan["profile_count"] == 1
+    assert single_profile_plan["index_signature_count"] == 1
+    assert single_profile_plan["physical_index_signatures"][0]["profiles"] == [
+        "centroid_lite_centroid_only_cap_032"
+    ]
+    assert (
+        document_node_colbert_1m_plan(single_profile_args)["physical_index_signatures"]
+        == single_profile_plan["physical_index_signatures"]
+    )
+    signature = document_node_colbert_1m_profile_groups(single_profile_args)[0][0]
+    signature_id = document_node_colbert_1m_signature_id(signature)
+    assert document_node_colbert_1m_signature_matches(signature, signature_id)
+    assert document_node_colbert_1m_signature_matches(
+        signature,
+        document_node_colbert_1m_signature_hash(signature)[:20],
+    )
+    selected_signature = document_node_colbert_1m_select_one_signature(
+        clone_args(
+            colbert_1m_args,
+            document_node_colbert_1m_build_only=True,
+            document_node_colbert_1m_index_signature=signature_id,
+        ),
+        require_selector=True,
+    )
+    assert selected_signature[0] == signature
+    try:
+        document_node_colbert_1m_select_one_signature(
+            clone_args(colbert_1m_args, document_node_colbert_1m_build_only=True),
+            require_selector=True,
+        )
+    except SystemExit as exc:
+        assert "requires" in str(exc)
+    else:
+        raise AssertionError("build-only must require a profile or signature selector")
+    try:
+        document_node_colbert_1m_select_one_signature(
+            clone_args(
+                colbert_1m_args,
+                document_node_colbert_1m_build_only=True,
+                document_node_colbert_1m_index_signature="does-not-exist",
+            ),
+            require_selector=True,
+        )
+    except SystemExit as exc:
+        assert "did not match" in str(exc)
+    else:
+        raise AssertionError("unknown physical index signature must fail")
+    try:
+        document_node_colbert_1m_effective_profiles(
+            clone_args(
+                colbert_1m_args,
+                document_node_colbert_1m_profile="quantized_inverted_experimental_f32",
+                document_node_colbert_1m_include_experimental=False,
+            )
+        )
+    except SystemExit as exc:
+        assert "requires --document-node-colbert-1m-include-experimental" in str(exc)
+    else:
+        raise AssertionError("experimental 1M profile must require explicit opt-in")
+    try:
+        effective_document_node_serving_profiles(
+            clone_args(
+                colbert_1m_args,
+                document_node_serving_grid_profiles="proxy_normalized_mean_f16_bm25_rescue",
+            )
+        )
+    except SystemExit as exc:
+        assert "unknown profile" in str(exc)
+    else:
+        raise AssertionError("pure ColBERT 1M grid must reject BM25 rescue profiles")
+    colbert_centroid_lite_focus_args = clone_args(
+        full_args,
+        document_node_colbert_centroid_lite_focus=True,
+        document_node_serving_grid_budget_mode="sweep",
+    )
+    colbert_centroid_lite_profiles = effective_document_node_serving_profiles(
+        colbert_centroid_lite_focus_args
+    )
+    assert [profile.name for profile in colbert_centroid_lite_profiles] == list(
+        DOCUMENT_NODE_COLBERT_CENTROID_LITE_FOCUS_PROFILES
+    )
+    assert effective_serving_grid_budget_sweep(colbert_centroid_lite_focus_args) == [
+        800,
+        1600,
+    ]
+    assert effective_serving_grid_executed_budgets(colbert_centroid_lite_focus_args) == [
+        800,
+        1600,
+    ]
+    assert effective_document_node_serving_ef_grid(colbert_centroid_lite_focus_args) == [
+        200,
+        400,
+        800,
+    ]
+    assert effective_document_node_serving_oversampling_grid(
+        colbert_centroid_lite_focus_args
+    ) == [1]
+    colbert_centroid_lite_by_name = {
+        profile.name: profile for profile in colbert_centroid_lite_profiles
+    }
+    assert (
+        colbert_centroid_lite_by_name[
+            "centroid_lite_f16_pool_050_cap_032"
+        ].centroid_lite_max_postings_per_token
+        == 32
+    )
+    assert (
+        colbert_centroid_lite_by_name[
+            "centroid_lite_f16_pool_050_cap_032"
+        ].token_pooling
+        == "greedy_cosine"
+    )
+    assert all(
+        profile.bm25_candidate_injection == "off"
+        for profile in colbert_centroid_lite_profiles
+    )
+    assert all(
+        profile.sparse_candidate_source == "off"
+        for profile in colbert_centroid_lite_profiles
+    )
+    assert all(
+        profile.candidate_reservoirs == "off"
+        for profile in colbert_centroid_lite_profiles
+    )
     proxy_focus_args = clone_args(
         full_args,
         document_node_serving_grid_proxy_admission_focus=True,
@@ -5743,8 +10328,9 @@ def _self_check_document_node_serving_profiles() -> None:
         "proxy_normalized_mean_f16_learned_sparse_rescue",
     ]
     assert learned_sparse_rescue_filtered[0].sparse_candidate_source == "learned_sparse"
-    try:
-        effective_document_node_serving_profiles(
+    assert any(
+        profile.sparse_candidate_source == "learned_sparse"
+        for profile in effective_document_node_serving_profiles(
             clone_args(
                 full_args,
                 document_node_serving_grid_include_learned_sparse_rescue=True,
@@ -5753,10 +10339,7 @@ def _self_check_document_node_serving_profiles() -> None:
                 learned_sparse_query_jsonl=None,
             )
         )
-    except SystemExit as exc:
-        assert "learned-sparse serving-grid profiles require" in str(exc)
-    else:
-        raise AssertionError("learned-sparse serving-grid profile should require JSONL inputs")
+    )
     reservoir_filtered_args = clone_args(
         full_args,
         document_node_serving_grid_include_reservoirs=True,
@@ -5886,8 +10469,16 @@ def _self_check_document_node_serving_profiles() -> None:
         profile.name: serving_profile_index_signature(signature_args, profile)
         for profile in proxy_focus_profiles
     }
+    colbert_centroid_lite_signature_by_name = {
+        profile.name: serving_profile_index_signature(signature_args, profile)
+        for profile in colbert_centroid_lite_profiles
+    }
+    entry_focus_signature_by_name = {
+        profile.name: serving_profile_index_signature(signature_args, profile)
+        for profile in entry_focus_profiles
+    }
     assert signature_by_name["proxy_normalized_mean_f16"] == signature_by_name["docnodes_normalized_mean_f16"]
-    assert signature_by_name["proxy_normalized_mean_f16"] == signature_by_name["proxy_normalized_mean_sq8"]
+    assert signature_by_name["proxy_normalized_mean_f16"] != signature_by_name["proxy_normalized_mean_sq8"]
     assert signature_by_name["proxy_normalized_mean_f16"] != bm25_signature_by_name["proxy_normalized_mean_f16_bm25_rescue"]
     assert signature_by_name["centroid_mean_f16"] != bm25_signature_by_name["centroid_mean_f16_bm25_rescue"]
     assert signature_by_name["centroid_mean_f16"] != signature_by_name["centroid_lite_f16"]
@@ -5901,6 +10492,18 @@ def _self_check_document_node_serving_profiles() -> None:
     assert (
         signature_by_name["proxy_normalized_mean_f16"]
         == proxy_focus_signature_by_name["proxy_normalized_mean_f16_entry_sample_128"]
+    )
+    assert (
+        signature_by_name["proxy_normalized_mean_f16"]
+        == entry_focus_signature_by_name["proxy_normalized_mean_f16_entry_sample_512"]
+    )
+    assert (
+        proxy_variant_signature_by_name["proxy_max_pool_f16"]
+        == entry_focus_signature_by_name["proxy_max_pool_f16_entry_sample_512"]
+    )
+    assert (
+        signature_by_name["centroid_mean_f16"]
+        == entry_focus_signature_by_name["centroid_mean_f16_entry_sample_512"]
     )
     assert (
         signature_by_name["centroid_mean_f16"]
@@ -5923,6 +10526,22 @@ def _self_check_document_node_serving_profiles() -> None:
         != proxy_focus_signature_by_name["proxy_max_pool_f16_entry_sidecar_256"]
     )
     assert (
+        signature_by_name["proxy_normalized_mean_f16"]
+        != entry_focus_signature_by_name["proxy_normalized_mean_f16_entry_sidecar_512"]
+    )
+    assert (
+        entry_focus_signature_by_name["proxy_normalized_mean_f16_entry_sidecar_128"]
+        != entry_focus_signature_by_name["proxy_normalized_mean_f16_entry_sidecar_512"]
+    )
+    assert (
+        proxy_variant_signature_by_name["proxy_max_pool_f16"]
+        != entry_focus_signature_by_name["proxy_max_pool_f16_entry_sidecar_512"]
+    )
+    assert (
+        signature_by_name["centroid_mean_f16"]
+        != entry_focus_signature_by_name["centroid_mean_f16_entry_sidecar_512"]
+    )
+    assert (
         signature_by_name["centroid_mean_f16"]
         != entry_sidecar_signature_by_name["centroid_mean_f16_entry_sidecar"]
     )
@@ -5943,10 +10562,21 @@ def _self_check_document_node_serving_profiles() -> None:
         ]
     )
     proxy_reloptions = dict(signature_by_name["proxy_normalized_mean_f16"])["reloptions"]
+    proxy_only_reloptions = dict(
+        signature_by_name["proxy_normalized_mean_proxy_only"]
+    )["reloptions"]
     entry_sidecar_reloptions = dict(
         entry_sidecar_signature_by_name["proxy_normalized_mean_f16_entry_sidecar"]
     )["reloptions"]
-    assert not any("multivector_doc_storage" in str(item) for item in proxy_reloptions)
+    assert any("multivector_doc_storage = f16" in str(item) for item in proxy_reloptions)
+    assert any(
+        "multivector_doc_storage = proxy_only" in str(item)
+        for item in proxy_only_reloptions
+    )
+    assert (
+        signature_by_name["proxy_normalized_mean_proxy_only"]
+        != signature_by_name["proxy_normalized_mean_f16"]
+    )
     assert any("multivector_proxy_encoder = normalized_mean" in str(item) for item in proxy_reloptions)
     assert any("entry_sidecar = on" in str(item) for item in entry_sidecar_reloptions)
     assert any(
@@ -5971,6 +10601,27 @@ def _self_check_document_node_serving_profiles() -> None:
     )
     assert pruned_profile_args.multivector_centroid_lite_max_postings_per_token == 32
     assert pruned_profile_args.multivector_centroid_lite_pruning == "safe_upper_bound"
+    pooled_capped_profile_args = document_node_serving_profile_args(
+        signature_args,
+        colbert_centroid_lite_by_name["centroid_lite_f16_pool_050_cap_032"],
+        ef=100,
+        oversampling=1,
+    )
+    assert pooled_capped_profile_args.multivector_centroid_lite_max_postings_per_token == 32
+    assert pooled_capped_profile_args.multivector_token_pooling == "greedy_cosine"
+    assert pooled_capped_profile_args.multivector_token_pooling_target_ratio == 0.5
+    assert (
+        colbert_centroid_lite_signature_by_name["centroid_lite_f16_pool_050"]
+        == colbert_centroid_lite_signature_by_name["centroid_lite_f16_pool_050_cap_032"]
+    )
+    assert (
+        colbert_centroid_lite_signature_by_name["centroid_lite_f16"]
+        == colbert_centroid_lite_signature_by_name["centroid_lite_f16_cap_064"]
+    )
+    assert (
+        colbert_centroid_lite_signature_by_name["centroid_lite_f16"]
+        != colbert_centroid_lite_signature_by_name["centroid_lite_f16_pool_050"]
+    )
     entry_sample_signature_profile_args = document_node_serving_profile_args(
         signature_args,
         entry_sample_profiles_by_name["proxy_normalized_mean_f16_entry_sample_032"],
@@ -6151,9 +10802,11 @@ def _self_check_learned_sparse_evidence_annotation() -> None:
     coverage = {
         "loaded_documents": 100,
         "learned_sparse_documents": 20,
+        "learned_sparse_missing_doc_count": 80,
         "doc_coverage_ratio": learned_sparse_ratio(20, 100),
         "loaded_queries": 10,
         "learned_sparse_queries": 10,
+        "learned_sparse_missing_query_count": 0,
         "query_coverage_ratio": learned_sparse_ratio(10, 10),
     }
     coverage["warnings"] = learned_sparse_coverage_warnings(coverage)
@@ -6193,18 +10846,36 @@ def _self_check_learned_sparse_evidence_annotation() -> None:
         {
             "skipped": False,
             "coverage": coverage,
+            "learned_sparse_feature_source": "fixture_sparse",
+            "learned_sparse_feature_details": {
+                "doc_jsonl": "fixtures/docs.jsonl",
+                "query_jsonl": "fixtures/queries.jsonl",
+            },
+            "learned_sparse_feature_version": "fixture-v1",
+            "learned_sparse_missing_doc_count": 80,
+            "learned_sparse_missing_query_count": 0,
             "warnings": coverage["warnings"],
         },
     )
     assert learned_sparse_row["learned_sparse_partial_coverage"] is True
-    assert "learned_sparse_doc_coverage_below_95pct" in learned_sparse_row["evidence_warnings"]
-    assert "learned_sparse_partial_coverage" in serving_threshold_failures(
+    assert learned_sparse_row["learned_sparse_doc_coverage"] == learned_sparse_ratio(20, 100)
+    assert learned_sparse_row["learned_sparse_query_coverage"] == learned_sparse_ratio(10, 10)
+    assert learned_sparse_row["learned_sparse_missing_doc_count"] == 80
+    assert learned_sparse_row["learned_sparse_missing_query_count"] == 0
+    assert learned_sparse_row["learned_sparse_feature_version"] == "fixture-v1"
+    assert learned_sparse_row["learned_sparse_feature_source"] == "fixture_sparse"
+    assert learned_sparse_row["learned_sparse_feature_details"]["doc_jsonl"] == "fixtures/docs.jsonl"
+    assert "learned_sparse_doc_coverage_below_100pct" in learned_sparse_row["evidence_warnings"]
+    failures = serving_threshold_failures(
         learned_sparse_row,
         min_top10_admission=0.8,
         min_ndcg_ratio_vs_exact=0.95,
         max_p95_ms=0.0,
         exact_baseline_ndcg=None,
     )[0]
+    assert "learned_sparse_partial_coverage" in failures
+    assert "learned_sparse_missing_doc_features" in failures
+    assert "learned_sparse_missing_query_features" not in failures
     recommendation = compute_document_node_serving_recommendation(
         grid,
         exact_baseline={"available": False},
@@ -6214,6 +10885,15 @@ def _self_check_learned_sparse_evidence_annotation() -> None:
     )
     assert recommendation["best_latency_safe"]["profile"] == "proxy_normalized_mean_f16"
     assert recommendation["best_balanced"]["profile"] == "proxy_normalized_mean_f16"
+    focus_block = grid["learned_sparse_rescue_focus"]
+    assert focus_block["available"] is True
+    assert focus_block["profiles"][0]["profile"] == "proxy_normalized_mean_f16_learned_sparse_rescue"
+    assert focus_block["profiles"][0]["learned_sparse_feature_version"] == "fixture-v1"
+    assert focus_block["profiles"][0]["learned_sparse_missing_doc_count"] == 80
+    assert "learned_sparse_missing_doc_features" in focus_block["profiles"][0]["learned_sparse_coverage_failures"]
+    markdown = markdown_benchmark_summary({"document_node_serving_grid": grid})
+    assert "#### Learned sparse rescue focus" in markdown
+    assert "Final SQL ranking still uses exact MaxSim" in markdown
 
 
 def _self_check_learned_sparse_jsonl_parser() -> None:
@@ -6223,8 +10903,19 @@ def _self_check_learned_sparse_jsonl_parser() -> None:
         sparse_path.write_text(
             "\n".join(
                 [
+                    json.dumps({
+                        "kind": "metadata",
+                        "feature_source": "splade_fixture",
+                        "feature_version": "fixture-v2",
+                        "model_name": "fixture-sparse-model",
+                        "model_checksum": "sha256:test",
+                    }),
                     json.dumps({"doc_id": "d1", "term_ids": [1, 2], "weights": [0.5, 1.25]}),
-                    json.dumps({"id": "d2", "terms": [3], "scores": [2.0]}),
+                    json.dumps({
+                        "id": "d2",
+                        "terms": [3],
+                        "scores": [2.0],
+                    }),
                     "",
                 ]
             ),
@@ -6234,6 +10925,24 @@ def _self_check_learned_sparse_jsonl_parser() -> None:
             ("d1", [1, 2], [0.5, 1.25]),
             ("d2", [3], [2.0]),
         ]
+        sparse_query_path = tmp / "queries.jsonl"
+        sparse_query_path.write_text(
+            json.dumps({
+                "query_id": "q1",
+                "term_ids": [1],
+                "weights": [1.0],
+                "feature_generator_version": "fixture-v2",
+            }),
+            encoding="utf-8",
+        )
+        metadata = learned_sparse_feature_metadata(sparse_path, sparse_query_path)
+        assert metadata["learned_sparse_feature_source"] == "splade_fixture"
+        assert metadata["learned_sparse_feature_details"]["doc_jsonl"].endswith("sparse.jsonl")
+        assert metadata["learned_sparse_feature_details"]["query_jsonl"].endswith("queries.jsonl")
+        assert metadata["learned_sparse_feature_version"] == "fixture-v2"
+        assert metadata["learned_sparse_feature_model_name"] == "fixture-sparse-model"
+        assert metadata["learned_sparse_feature_model_checksum"] == "sha256:test"
+        assert metadata["learned_sparse_plumbing_only"] is False
 
         malformed_path = tmp / "malformed.jsonl"
         malformed_path.write_text(
@@ -6247,6 +10956,23 @@ def _self_check_learned_sparse_jsonl_parser() -> None:
         else:
             raise AssertionError("malformed learned-sparse JSONL should fail")
 
+        duplicate_path = tmp / "duplicate.jsonl"
+        duplicate_path.write_text(
+            "\n".join(
+                [
+                    json.dumps({"doc_id": "d1", "term_ids": [1], "weights": [1.0]}),
+                    json.dumps({"doc_id": "d1", "term_ids": [2], "weights": [2.0]}),
+                ]
+            ),
+            encoding="utf-8",
+        )
+        try:
+            parse_sparse_jsonl(duplicate_path, "doc_id", reject_duplicate_ids=True)
+        except SystemExit as exc:
+            assert "duplicate learned-sparse id" in str(exc)
+        else:
+            raise AssertionError("duplicate learned-sparse IDs should fail in strict mode")
+
     try:
         require_complete_learned_sparse_args(
             argparse.Namespace(
@@ -6258,6 +10984,454 @@ def _self_check_learned_sparse_jsonl_parser() -> None:
         assert "must be supplied together" in str(exc)
     else:
         raise AssertionError("incomplete learned-sparse JSONL arguments should fail")
+
+
+def _self_check_learned_sparse_jsonl_coverage_preflight() -> None:
+    def write_jsonl(path: Path, rows: list[dict[str, Any]]) -> None:
+        path.write_text(
+            "\n".join(json.dumps(row, sort_keys=True) for row in rows) + "\n",
+            encoding="utf-8",
+        )
+
+    def sparse_args(
+        doc_jsonl: Path,
+        query_jsonl: Path,
+        *,
+        require_full_coverage: bool = False,
+    ) -> argparse.Namespace:
+        return argparse.Namespace(
+            learned_sparse_doc_jsonl=doc_jsonl,
+            learned_sparse_query_jsonl=query_jsonl,
+            learned_sparse_require_full_coverage=require_full_coverage,
+        )
+
+    with tempfile.TemporaryDirectory() as tmpdir:
+        tmp = Path(tmpdir)
+        docs = tmp / "docs.jsonl"
+        queries = tmp / "queries.jsonl"
+        write_jsonl(
+            docs,
+            [
+                {"doc_id": "d1", "term_ids": [1, 2], "weights": [0.5, 1.0]},
+                {"doc_id": "d2", "term_ids": [3], "weights": [2.0]},
+            ],
+        )
+        write_jsonl(
+            queries,
+            [
+                {"query_id": "q1", "term_ids": [1], "weights": [1.0]},
+                {"query_id": "q2", "term_ids": [2, 3], "weights": [0.7, 0.3]},
+            ],
+        )
+        full = validate_learned_sparse_jsonl_coverage(
+            None,
+            sparse_args(docs, queries, require_full_coverage=True),
+            ["d1", "d2"],
+            ["q1", "q2"],
+        )
+        full_coverage = full["coverage"]
+        assert full_coverage["learned_sparse_doc_rows"] == 2
+        assert full_coverage["learned_sparse_query_rows"] == 2
+        assert full_coverage["learned_sparse_missing_doc_count"] == 0
+        assert full_coverage["learned_sparse_missing_query_count"] == 0
+        assert full_coverage["learned_sparse_extra_doc_count"] == 0
+        assert full_coverage["learned_sparse_extra_query_count"] == 0
+        assert full_coverage["learned_sparse_duplicate_doc_count"] == 0
+        assert full_coverage["learned_sparse_duplicate_query_count"] == 0
+        assert full_coverage["doc_coverage_ratio"] == 1.0
+        assert full_coverage["query_coverage_ratio"] == 1.0
+        assert full_coverage["learned_sparse_plumbing_only"] is False
+        assert full_coverage["learned_sparse_safe_serving_evidence"] is True
+        assert full_coverage["not_safe_serving_evidence"] is False
+        assert full_coverage["learned_sparse_feature_source"] == "unknown"
+        assert "feature_provenance_unknown" in full_coverage["warnings"]
+        validation_report = learned_sparse_jsonl_validation_report_from_expected(
+            sparse_args(docs, queries, require_full_coverage=True),
+            ["d1", "d2"],
+            ["q1", "q2"],
+        )
+        validation = validation_report["learned_sparse_jsonl_validation"]
+        assert validation["expected_doc_count"] == 2
+        assert validation["expected_query_count"] == 2
+        assert validation["doc_rows"] == 2
+        assert validation["query_rows"] == 2
+        assert validation["doc_coverage"] == 1.0
+        assert validation["query_coverage"] == 1.0
+        assert validation["missing_doc_count"] == 0
+        assert validation["missing_query_count"] == 0
+        assert validation["duplicate_doc_count"] == 0
+        assert validation["duplicate_query_count"] == 0
+        assert validation["extra_doc_count"] == 0
+        assert validation["extra_query_count"] == 0
+        assert validation["safe_serving_evidence"] is True
+        assert learned_sparse_jsonl_validation_strict_failed(validation_report) is False
+        markdown_validation = markdown_learned_sparse_jsonl_validation(validation_report)
+        assert "Learned-sparse JSONL validation" in markdown_validation
+        assert "| docs | 2 | 2 | 1.000000 | 0 | 0 | 0 |" in markdown_validation
+
+        hash_docs = tmp / "hash-docs.jsonl"
+        hash_queries = tmp / "hash-queries.jsonl"
+        write_jsonl(
+            hash_docs,
+            [{"doc_id": "d1", "term_ids": [1], "weights": [1.0]}],
+        )
+        write_jsonl(
+            hash_queries,
+            [{"query_id": "q1", "term_ids": [1], "weights": [1.0]}],
+        )
+        hash_coverage = validate_learned_sparse_jsonl_coverage(
+            None,
+            sparse_args(hash_docs, hash_queries),
+            ["d1"],
+            ["q1"],
+        )["coverage"]
+        assert hash_coverage["learned_sparse_feature_source"] == "hash_plumbing"
+        assert hash_coverage["learned_sparse_plumbing_only"] is True
+        assert hash_coverage["learned_sparse_safe_serving_evidence"] is False
+        assert "learned_sparse_hash_plumbing_only" in hash_coverage["warnings"]
+
+        plumbing_docs = tmp / "plumbing-docs.jsonl"
+        plumbing_queries = tmp / "plumbing-queries.jsonl"
+        write_jsonl(
+            plumbing_docs,
+            [
+                {
+                    "kind": "metadata",
+                    "feature_source": "fixture_sparse",
+                    "feature_version": "fixture-v1",
+                    "plumbing_only": True,
+                    "expected_doc_count": 1,
+                },
+                {"doc_id": "d1", "term_ids": [1], "weights": [1.0]},
+            ],
+        )
+        write_jsonl(
+            plumbing_queries,
+            [
+                {
+                    "kind": "metadata",
+                    "feature_source": "fixture_sparse",
+                    "feature_version": "fixture-v1",
+                    "plumbing_only": True,
+                    "expected_query_count": 1,
+                },
+                {"query_id": "q1", "term_ids": [1], "weights": [1.0]},
+            ],
+        )
+        plumbing_coverage = validate_learned_sparse_jsonl_coverage(
+            None,
+            sparse_args(plumbing_docs, plumbing_queries),
+            ["d1"],
+            ["q1"],
+        )["coverage"]
+        assert plumbing_coverage["learned_sparse_feature_source"] == "unknown_plumbing"
+        assert plumbing_coverage["learned_sparse_plumbing_only"] is True
+        assert plumbing_coverage["learned_sparse_expected_doc_count"] == 1
+        assert plumbing_coverage["learned_sparse_expected_query_count"] == 1
+        assert "learned_sparse_plumbing_only" in learned_sparse_coverage_failure_reasons({
+            "profile": "proxy_normalized_mean_f16_learned_sparse_rescue",
+            "sparse_candidate_source": "learned_sparse",
+            "learned_sparse_coverage": plumbing_coverage,
+        })
+
+        real_docs = tmp / "real-docs.jsonl"
+        real_queries = tmp / "real-queries.jsonl"
+        write_jsonl(
+            real_docs,
+            [{"doc_id": "d1", "term_ids": [1], "weights": [1.0]}],
+        )
+        write_jsonl(
+            real_queries,
+            [{"query_id": "q1", "term_ids": [1], "weights": [1.0]}],
+        )
+        (tmp / "real-docs.jsonl.manifest.json").write_text(
+            json.dumps({
+                "kind": "metadata",
+                "feature_source": "splade_real",
+                "feature_version": "real-v1",
+                "model_name": "splade-model",
+                "model_checksum": "sha256:real",
+                "plumbing_only": False,
+                "expected_doc_count": 1,
+            }),
+            encoding="utf-8",
+        )
+        (tmp / "real-queries.jsonl.manifest.json").write_text(
+            json.dumps({
+                "kind": "metadata",
+                "feature_source": "splade_real",
+                "feature_version": "real-v1",
+                "model_name": "splade-model",
+                "model_checksum": "sha256:real",
+                "plumbing_only": False,
+                "expected_query_count": 1,
+            }),
+            encoding="utf-8",
+        )
+        real_coverage = validate_learned_sparse_jsonl_coverage(
+            None,
+            sparse_args(real_docs, real_queries),
+            ["d1"],
+            ["q1"],
+        )["coverage"]
+        assert real_coverage["learned_sparse_feature_source"] == "splade_real"
+        assert real_coverage["learned_sparse_feature_version"] == "real-v1"
+        assert real_coverage["learned_sparse_feature_model_name"] == "splade-model"
+        assert real_coverage["learned_sparse_feature_model_checksum"] == "sha256:real"
+        assert real_coverage["learned_sparse_plumbing_only"] is False
+        assert real_coverage["learned_sparse_safe_serving_evidence"] is True
+        assert real_coverage["warnings"] == []
+
+        partial = validate_learned_sparse_jsonl_coverage(
+            None,
+            sparse_args(docs, queries),
+            ["d1", "d2", "d3"],
+            ["q1", "q2", "q3"],
+        )
+        partial_coverage = partial["coverage"]
+        assert partial_coverage["learned_sparse_missing_doc_count"] == 1
+        assert partial_coverage["learned_sparse_missing_query_count"] == 1
+        assert partial_coverage["learned_sparse_plumbing_only"] is True
+        assert partial_coverage["learned_sparse_safe_serving_evidence"] is False
+        assert partial_coverage["not_safe_serving_evidence"] is True
+        assert "learned_sparse_doc_coverage_below_100pct" in partial_coverage["warnings"]
+        assert "learned_sparse_query_coverage_below_100pct" in partial_coverage["warnings"]
+        partial_report = learned_sparse_jsonl_validation_report_from_expected(
+            sparse_args(docs, queries, require_full_coverage=True),
+            ["d1", "d2", "d3"],
+            ["q1", "q2", "q3"],
+        )
+        assert partial_report["learned_sparse_jsonl_validation"]["missing_doc_count"] == 1
+        assert partial_report["learned_sparse_jsonl_validation"]["missing_query_count"] == 1
+        assert learned_sparse_jsonl_validation_strict_failed(partial_report) is True
+
+        try:
+            validate_learned_sparse_jsonl_coverage(
+                None,
+                sparse_args(docs, queries, require_full_coverage=True),
+                ["d1", "d2", "d3"],
+                ["q1", "q2", "q3"],
+            )
+        except SystemExit as exc:
+            assert "learned-sparse JSONL coverage is incomplete" in str(exc)
+            assert "missing_docs=1" in str(exc)
+            assert "missing_queries=1" in str(exc)
+        else:
+            raise AssertionError("strict learned-sparse coverage should fail partial fixtures")
+
+        extra = validate_learned_sparse_jsonl_coverage(
+            None,
+            sparse_args(docs, queries),
+            ["d1"],
+            ["q1"],
+        )["coverage"]
+        assert extra["learned_sparse_extra_doc_count"] == 1
+        assert extra["learned_sparse_extra_query_count"] == 1
+        extra_report = learned_sparse_jsonl_validation_report_from_expected(
+            sparse_args(docs, queries),
+            ["d1"],
+            ["q1"],
+        )
+        assert extra_report["learned_sparse_jsonl_validation"]["extra_doc_count"] == 1
+        assert extra_report["learned_sparse_jsonl_validation"]["extra_query_count"] == 1
+
+        duplicate_docs = tmp / "duplicate-docs.jsonl"
+        write_jsonl(
+            duplicate_docs,
+            [
+                {"doc_id": "d1", "term_ids": [1], "weights": [1.0]},
+                {"doc_id": "d1", "term_ids": [2], "weights": [2.0]},
+            ],
+        )
+        try:
+            validate_learned_sparse_jsonl_coverage(
+                None,
+                sparse_args(duplicate_docs, queries),
+                ["d1"],
+                ["q1", "q2"],
+            )
+        except SystemExit as exc:
+            assert "duplicate learned-sparse id" in str(exc)
+        else:
+            raise AssertionError("strict learned-sparse preflight should reject duplicate IDs")
+        duplicate_report = learned_sparse_jsonl_validation_report_from_expected(
+            sparse_args(duplicate_docs, queries),
+            ["d1"],
+            ["q1", "q2"],
+        )
+        duplicate_validation = duplicate_report["learned_sparse_jsonl_validation"]
+        assert duplicate_validation["duplicate_doc_count"] == 1
+        assert duplicate_validation["duplicate_query_count"] == 0
+        assert duplicate_validation["safe_serving_evidence"] is False
+        assert "learned_sparse_duplicate_doc_ids" in duplicate_validation["warnings"]
+
+        malformed_queries = tmp / "malformed-queries.jsonl"
+        write_jsonl(
+            malformed_queries,
+            [{"query_id": "q1", "term_ids": [1, 2], "weights": [1.0]}],
+        )
+        try:
+            validate_learned_sparse_jsonl_coverage(
+                None,
+                sparse_args(docs, malformed_queries),
+                ["d1", "d2"],
+                ["q1"],
+            )
+        except SystemExit as exc:
+            assert "equal-length arrays" in str(exc)
+        else:
+            raise AssertionError("strict learned-sparse preflight should reject malformed arrays")
+
+        def serving_sparse_args(
+            doc_jsonl: Path | None,
+            query_jsonl: Path | None,
+            *,
+            require_full_coverage: bool = True,
+        ) -> argparse.Namespace:
+            return argparse.Namespace(
+                database="fixture_db",
+                document_node_serving_grid=True,
+                document_node_serving_build_only=False,
+                document_node_serving_grid_include_learned_sparse_rescue=True,
+                document_node_serving_grid_learned_sparse_focus=False,
+                document_node_serving_grid_profiles=(
+                    "proxy_normalized_mean_f16_learned_sparse_rescue"
+                ),
+                learned_sparse_doc_jsonl=doc_jsonl,
+                learned_sparse_query_jsonl=query_jsonl,
+                learned_sparse_require_full_coverage=require_full_coverage,
+            )
+
+        missing_doc = tmp / "missing-docs.jsonl"
+        try:
+            preflight_learned_sparse_serving_inputs(
+                serving_sparse_args(missing_doc, queries),
+                ["d1", "d2"],
+                ["q1", "q2"],
+            )
+        except SystemExit as exc:
+            message = str(exc)
+            assert "failed before index build/retrieval" in message
+            assert "Expected doc count: 2" in message
+            assert "Expected query count: 2" in message
+            assert "Actual doc JSONL rows: 0" in message
+            assert "Actual query JSONL rows: 2" in message
+            assert "Missing doc feature count: 2" in message
+            assert "python benchmarks/dbpedia_colbert_multivector.py \\" in message
+            assert "--validate-learned-sparse-jsonl-only" in message
+        else:
+            raise AssertionError("missing learned-sparse doc JSONL should fail preflight")
+
+        missing_query = tmp / "missing-queries.jsonl"
+        try:
+            preflight_learned_sparse_serving_inputs(
+                serving_sparse_args(docs, missing_query),
+                ["d1", "d2"],
+                ["q1", "q2"],
+            )
+        except SystemExit as exc:
+            message = str(exc)
+            assert "Actual doc JSONL rows: 2" in message
+            assert "Actual query JSONL rows: 0" in message
+            assert "Missing query feature count: 2" in message
+            assert "Query JSONL exists: False" in message
+        else:
+            raise AssertionError("missing learned-sparse query JSONL should fail preflight")
+
+        tenq_docs = tmp / "dbpedia-learned-sparse-hash-docs-10q.jsonl"
+        tenq_queries = tmp / "dbpedia-learned-sparse-hash-queries-10q.jsonl"
+        write_jsonl(
+            tenq_docs,
+            [{"doc_id": "d1", "term_ids": [1], "weights": [1.0]}],
+        )
+        write_jsonl(
+            tenq_queries,
+            [{"query_id": "q1", "term_ids": [1], "weights": [1.0]}],
+        )
+        try:
+            preflight_learned_sparse_serving_inputs(
+                serving_sparse_args(tenq_docs, tenq_queries),
+                ["d1", "d2"],
+                ["q1", "q2"],
+            )
+        except SystemExit as exc:
+            message = str(exc)
+            assert "Actual doc JSONL rows: 1" in message
+            assert "Actual query JSONL rows: 1" in message
+            assert "Missing doc feature count: 1" in message
+            assert "Missing query feature count: 1" in message
+            assert "Appears hash/plumbing: True" in message
+            assert (
+                "These files are suitable for plumbing smoke only, not safe serving evidence."
+                in message
+            )
+        else:
+            raise AssertionError("partial 10q hash JSONL should fail strict serving preflight")
+
+        assert (
+            preflight_learned_sparse_serving_inputs(
+                serving_sparse_args(real_docs, real_queries),
+                ["d1"],
+                ["q1"],
+            )["incomplete"]
+            is False
+        )
+
+
+def _self_check_learned_sparse_input_export() -> None:
+    doc_rows = [
+        ("d1", "Title one Body one"),
+        ("d2", "Body two"),
+    ]
+    query_rows = [
+        ("q1", "first query"),
+        ("q2", "second query"),
+    ]
+    with tempfile.TemporaryDirectory() as tmpdir:
+        tmp = Path(tmpdir)
+        doc_output = tmp / "inputs" / "docs.jsonl"
+        query_output = tmp / "inputs" / "queries.jsonl"
+        report = export_learned_sparse_input_jsonl_from_rows(
+            doc_rows,
+            query_rows,
+            doc_output=doc_output,
+            query_output=query_output,
+        )
+        second_report = export_learned_sparse_input_jsonl_from_rows(
+            doc_rows,
+            query_rows,
+            doc_output=tmp / "second-docs.jsonl",
+            query_output=tmp / "second-queries.jsonl",
+        )
+        assert report["doc_count"] == 2
+        assert report["query_count"] == 2
+        assert report["doc_id_checksum"] == learned_sparse_input_id_checksum(["d1", "d2"])
+        assert report["query_id_checksum"] == learned_sparse_input_id_checksum(["q1", "q2"])
+        assert report["doc_id_checksum"] == second_report["doc_id_checksum"]
+        assert report["query_id_checksum"] == second_report["query_id_checksum"]
+        doc_lines = [
+            json.loads(line)
+            for line in doc_output.read_text(encoding="utf-8").splitlines()
+            if line
+        ]
+        query_lines = [
+            json.loads(line)
+            for line in query_output.read_text(encoding="utf-8").splitlines()
+            if line
+        ]
+        assert doc_lines == [
+            {"doc_id": "d1", "text": "Title one Body one"},
+            {"doc_id": "d2", "text": "Body two"},
+        ]
+        assert query_lines == [
+            {"query_id": "q1", "text": "first query"},
+            {"query_id": "q2", "text": "second query"},
+        ]
+        markdown = markdown_learned_sparse_input_export({
+            "learned_sparse_input_export": report,
+        })
+        assert "Learned-sparse input export" in markdown
+        assert report["doc_id_checksum"] in markdown
 
 
 def document_node_serving_profile_args(
@@ -6312,6 +11486,224 @@ def serializable_index_signature(signature: tuple[tuple[str, Any], ...]) -> list
     return [[key, value] for key, value in signature]
 
 
+def document_node_colbert_1m_single_index_mode_requested(args: argparse.Namespace) -> bool:
+    return (
+        bool(getattr(args, "document_node_colbert_1m_plan_only", False))
+        or bool(getattr(args, "document_node_colbert_1m_build_only", False))
+        or bool(getattr(args, "document_node_colbert_1m_evaluate_only", False))
+        or bool(str(getattr(args, "document_node_colbert_1m_profile", "") or "").strip())
+        or bool(str(getattr(args, "document_node_colbert_1m_index_signature", "") or "").strip())
+    )
+
+
+def document_node_colbert_1m_single_index_profile_names(
+    args: argparse.Namespace,
+) -> tuple[str, ...]:
+    names = list(DOCUMENT_NODE_COLBERT_1M_SINGLE_INDEX_PROFILES)
+    if bool(getattr(args, "document_node_colbert_1m_include_experimental", False)):
+        names.extend(DOCUMENT_NODE_COLBERT_1M_GRID_EXPERIMENTAL_PROFILES)
+    return tuple(dict.fromkeys(names))
+
+
+def document_node_colbert_1m_signature_hash(
+    signature: tuple[tuple[str, Any], ...],
+) -> str:
+    return stable_json_hash(serializable_index_signature(signature))
+
+
+def document_node_colbert_1m_signature_id(
+    signature: tuple[tuple[str, Any], ...],
+) -> str:
+    return document_node_colbert_1m_signature_hash(signature)[:16]
+
+
+def document_node_colbert_1m_signature_matches(
+    signature: tuple[tuple[str, Any], ...],
+    selector: str,
+) -> bool:
+    needle = selector.strip()
+    if not needle:
+        return True
+    signature_id = document_node_colbert_1m_signature_id(signature)
+    signature_hash = document_node_colbert_1m_signature_hash(signature)
+    signature_json = json.dumps(
+        serializable_index_signature(signature),
+        sort_keys=True,
+        separators=(",", ":"),
+    )
+    return (
+        needle == signature_id
+        or signature_hash.startswith(needle)
+        or needle == signature_hash
+        or needle == signature_json
+    )
+
+
+def document_node_colbert_1m_effective_profiles(
+    args: argparse.Namespace,
+) -> list[DocumentNodeServingProfile]:
+    profile_args = clone_args(
+        args,
+        document_node_colbert_1m_grid=True,
+        document_node_serving_grid=True,
+        document_node_colbert_1m_include_entry_samples=False,
+        document_node_colbert_1m_include_entry_sidecar=False,
+        document_node_serving_grid_include_bm25_rescue=False,
+        document_node_serving_grid_include_learned_sparse_rescue=False,
+        document_node_serving_grid_include_reservoirs=False,
+        document_node_serving_grid_learned_sparse_focus=False,
+        hybrid_evaluation_harness=False,
+    )
+    allowed_names = document_node_colbert_1m_single_index_profile_names(profile_args)
+    allowed = set(allowed_names)
+    order = {name: index for index, name in enumerate(allowed_names)}
+    profiles = [
+        profile
+        for profile in effective_document_node_serving_profiles(profile_args)
+        if profile.name in allowed
+    ]
+    profiles = sorted(profiles, key=lambda profile: order[profile.name])
+    selected = str(getattr(args, "document_node_colbert_1m_profile", "") or "").strip()
+    if selected:
+        by_name = {profile.name: profile for profile in profiles}
+        if selected not in by_name:
+            known = ", ".join(sorted(by_name))
+            if selected in DOCUMENT_NODE_COLBERT_1M_GRID_EXPERIMENTAL_PROFILES:
+                raise SystemExit(
+                    f"--document-node-colbert-1m-profile {selected} requires "
+                    "--document-node-colbert-1m-include-experimental"
+                )
+            raise SystemExit(
+                "--document-node-colbert-1m-profile contains unknown pure-ColBERT "
+                f"profile {selected!r}; expected one of: {known}"
+            )
+        profiles = [by_name[selected]]
+    if not profiles:
+        raise SystemExit("pure ColBERT 1M single-index mode selected no profiles")
+    return profiles
+
+
+def document_node_colbert_1m_profile_groups(
+    args: argparse.Namespace,
+) -> list[tuple[tuple[tuple[str, Any], ...], list[DocumentNodeServingProfile]]]:
+    groups: list[tuple[tuple[tuple[str, Any], ...], list[DocumentNodeServingProfile]]] = []
+    by_signature: dict[tuple[tuple[str, Any], ...], list[DocumentNodeServingProfile]] = {}
+    for profile in document_node_colbert_1m_effective_profiles(args):
+        signature = serving_profile_index_signature(args, profile)
+        if signature not in by_signature:
+            by_signature[signature] = []
+            groups.append((signature, by_signature[signature]))
+        by_signature[signature].append(profile)
+    selector = str(getattr(args, "document_node_colbert_1m_index_signature", "") or "").strip()
+    if selector:
+        groups = [
+            (signature, profiles)
+            for signature, profiles in groups
+            if document_node_colbert_1m_signature_matches(signature, selector)
+        ]
+        if not groups:
+            raise SystemExit(
+                "--document-node-colbert-1m-index-signature did not match any "
+                f"planned physical index signature: {selector}"
+            )
+    return groups
+
+
+def document_node_colbert_1m_signature_record(
+    signature: tuple[tuple[str, Any], ...],
+    profiles: list[DocumentNodeServingProfile],
+) -> dict[str, Any]:
+    signature_items = dict(signature)
+    reloptions = signature_items.get("reloptions", ())
+    index_option_values = signature_items.get("index_option_values", ())
+    return {
+        "physical_index_signature": document_node_colbert_1m_signature_id(signature),
+        "physical_index_signature_hash": document_node_colbert_1m_signature_hash(signature),
+        "index_signature": serializable_index_signature(signature),
+        "reloptions": list(reloptions) if isinstance(reloptions, tuple) else reloptions,
+        "index_option_values": (
+            [[key, value] for key, value in index_option_values]
+            if isinstance(index_option_values, tuple)
+            else index_option_values
+        ),
+        "lexical_column": signature_items.get("lexical_column"),
+        "lexical_key_required": bool(signature_items.get("lexical_key_required")),
+        "profiles": [profile.name for profile in profiles],
+        "representative_profile": profiles[0].name if profiles else None,
+    }
+
+
+def document_node_colbert_1m_plan(args: argparse.Namespace) -> dict[str, Any]:
+    profiles = document_node_colbert_1m_effective_profiles(args)
+    groups = document_node_colbert_1m_profile_groups(args)
+    return {
+        "enabled": True,
+        "pure_colbert_only": True,
+        "mode": "plan_only",
+        "build_skipped": True,
+        "evaluation_skipped": True,
+        "profile": str(getattr(args, "document_node_colbert_1m_profile", "") or "") or None,
+        "index_signature_selector": (
+            str(getattr(args, "document_node_colbert_1m_index_signature", "") or "")
+            or None
+        ),
+        "profile_count": len(profiles),
+        "index_signature_count": len(groups),
+        "profiles": [profile.__dict__ for profile in profiles],
+        "profile_names": [profile.name for profile in profiles],
+        "physical_index_signatures": [
+            document_node_colbert_1m_signature_record(signature, grouped_profiles)
+            for signature, grouped_profiles in groups
+        ],
+        "budget_sweep": effective_serving_grid_budget_sweep(args),
+        "executed_budgets": effective_serving_grid_executed_budgets(args),
+        "ef_grid": effective_document_node_serving_ef_grid(args),
+        "oversampling_grid": effective_document_node_serving_oversampling_grid(args),
+    }
+
+
+def markdown_document_node_colbert_1m_plan(report: dict[str, Any]) -> str:
+    plan = report.get("document_node_colbert_1m_plan", {})
+    if not isinstance(plan, dict):
+        plan = {}
+    lines = [
+        "# Pure ColBERT DBpedia 1M single-index plan",
+        "",
+        f"- Pure ColBERT only: `{bool(plan.get('pure_colbert_only', False))}`",
+        f"- Profile filter: `{plan.get('profile') or 'none'}`",
+        f"- Index signature filter: `{plan.get('index_signature_selector') or 'none'}`",
+        f"- Profiles: `{int(plan.get('profile_count', 0) or 0)}`",
+        f"- Physical index signatures: `{int(plan.get('index_signature_count', 0) or 0)}`",
+        f"- Budget sweep: `{','.join(str(item) for item in plan.get('budget_sweep', []))}`",
+        f"- Executed budgets: `{','.join(str(item) for item in plan.get('executed_budgets', []))}`",
+        f"- EF grid: `{','.join(str(item) for item in plan.get('ef_grid', []))}`",
+        f"- Oversampling grid: `{','.join(str(item) for item in plan.get('oversampling_grid', []))}`",
+        "",
+        "| signature | representative profile | shared profiles | reloptions |",
+        "|---|---|---|---|",
+    ]
+    signatures = plan.get("physical_index_signatures", [])
+    if isinstance(signatures, list):
+        for item in signatures:
+            if not isinstance(item, dict):
+                continue
+            lines.append(
+                "| {signature} | {representative} | {profiles} | {reloptions} |".format(
+                    signature=item.get("physical_index_signature", ""),
+                    representative=item.get("representative_profile", ""),
+                    profiles=", ".join(str(profile) for profile in item.get("profiles", [])),
+                    reloptions="<br>".join(str(option) for option in item.get("reloptions", [])),
+                )
+            )
+    lines.extend([
+        "",
+        "Plan-only mode does not build indexes or run retrieval. Use the signature "
+        "ID from this table with `--document-node-colbert-1m-index-signature` to "
+        "build or evaluate one physical layout at a time.",
+    ])
+    return "\n".join(lines) + "\n"
+
+
 def expected_centroid_count_value(value: Any) -> int:
     if isinstance(value, str) and value.lower() == "auto":
         return 0
@@ -6339,8 +11731,10 @@ def validate_serving_profile_index_reuse(
     expected = {
         "multivector_graph_mode": "document_nodes",
         "multivector_doc_build_scorer": "proxy",
+        "multivector_doc_storage": profile.storage_kind,
         "multivector_proxy_encoder": profile.proxy_encoder,
         "multivector_centroids": profile.centroids,
+        "multivector_token_pooling": profile.token_pooling,
     }
     for key, expected_value in expected.items():
         observed_value = index_stats.get(key)
@@ -6613,9 +12007,20 @@ def document_node_serving_summary_row(
         loaded_document_count=loaded_document_count,
         candidate_budget=largest_budget,
     )
+    centroid_docs_touched_ratio: dict[str, float] | None = None
+    centroid_docs_touched = largest_work.get("centroid_docs_touched")
+    if isinstance(centroid_docs_touched, dict) and loaded_document_count > 0:
+        centroid_docs_touched_ratio = {
+            key: round(summary_stat_float(centroid_docs_touched, key) / loaded_document_count, 6)
+            for key in ("mean", "min", "p50", "p95", "max")
+        }
+        centroid_docs_touched_ratio["count"] = int(
+            summary_stat_float(centroid_docs_touched, "count")
+        )
     return {
         "profile": profile.name,
         "candidate_source": profile.candidate_source,
+        "diagnostic_only": bool(profile.diagnostic_only),
         "branch_plan": profile.branch_plan,
         "bm25_candidate_injection": profile.bm25_candidate_injection,
         "bm25_text_query_available": (
@@ -6696,6 +12101,38 @@ def document_node_serving_summary_row(
             largest_work.get("exact_rerank_pairs"),
             "p50",
         ),
+        "proxy_exact_scan_enabled": bool(
+            largest_work.get("proxy_exact_scan_enabled")
+            or stats_sample.get("proxy_exact_scan_enabled")
+        ),
+        "proxy_exact_scan_diagnostic_only": bool(
+            profile.diagnostic_only
+            or largest_work.get("proxy_exact_scan_diagnostic_only")
+            or stats_sample.get("proxy_exact_scan_diagnostic_only")
+        ),
+        "proxy_exact_scan_docs_scored": largest_work.get("proxy_exact_scan_docs_scored"),
+        "proxy_exact_scan_time_us": largest_work.get("proxy_exact_scan_time_us"),
+        "proxy_exact_scan_candidates": largest_work.get("proxy_exact_scan_candidates"),
+        "proxy_exact_scan_top10_admission_recall": largest_work.get(
+            "proxy_exact_scan_top10_admission_recall"
+        ),
+        "proxy_exact_scan_top1_admission": largest_work.get(
+            "proxy_exact_scan_top1_admission"
+        ),
+        "proxy_exact_scan_vs_hnsw_gap": largest_work.get("proxy_exact_scan_vs_hnsw_gap"),
+        "hnsw_vs_exact_proxy_top10_gap": largest_work.get(
+            "hnsw_vs_exact_proxy_top10_gap",
+            largest_work.get("proxy_exact_scan_vs_hnsw_gap"),
+        ),
+        "proxy_exact_rank_of_exact_top1": largest_work.get(
+            "proxy_exact_rank_of_exact_top1"
+        ),
+        "proxy_exact_rank_of_exact_top10_p50": largest_work.get(
+            "proxy_exact_rank_of_exact_top10_p50"
+        ),
+        "proxy_exact_rank_of_exact_top10_p95": largest_work.get(
+            "proxy_exact_rank_of_exact_top10_p95"
+        ),
         "multivector_tokens_original": largest_work.get("multivector_tokens_original"),
         "multivector_tokens_pooled": largest_work.get("multivector_tokens_pooled"),
         "multivector_token_pooling_ratio": largest_work.get(
@@ -6755,6 +12192,7 @@ def document_node_serving_summary_row(
         ),
         "centroid_lists_visited": largest_work.get("centroid_lists_visited"),
         "centroid_docs_touched": largest_work.get("centroid_docs_touched"),
+        "centroid_docs_touched_ratio": centroid_docs_touched_ratio,
         "centroid_pruned_docs": largest_work.get("centroid_pruned_docs"),
         "centroid_postings_touched": largest_work.get("centroid_postings_touched"),
         "centroid_postings_skipped": largest_work.get("centroid_postings_skipped"),
@@ -6765,6 +12203,50 @@ def document_node_serving_summary_row(
             "centroid_posting_cap_strategy"
         ),
         "centroid_candidates": largest_work.get("centroid_candidates"),
+        "quantized_inverted_lists_visited": (
+            largest_work.get("quantized_inverted_lists_visited")
+            or stats_sample.get("quantized_inverted_lists_visited")
+        ),
+        "quantized_inverted_postings_touched": (
+            largest_work.get("quantized_inverted_postings_touched")
+            or stats_sample.get("quantized_inverted_postings_touched")
+        ),
+        "quantized_inverted_docs_scored": (
+            largest_work.get("quantized_inverted_docs_scored")
+            or stats_sample.get("quantized_inverted_docs_scored")
+        ),
+        "quantized_inverted_candidates": (
+            largest_work.get("quantized_inverted_candidates")
+            or stats_sample.get("quantized_inverted_candidates")
+        ),
+        "quantized_inverted_exact_rerank_docs": (
+            largest_work.get("quantized_inverted_exact_rerank_docs")
+            or stats_sample.get("quantized_inverted_exact_rerank_docs")
+        ),
+        "quantized_inverted_codebook_source": stats_sample.get(
+            "quantized_inverted_codebook_source"
+        ),
+        "quantized_inverted_codebook_size": stats_sample.get(
+            "quantized_inverted_codebook_size"
+        ),
+        "quantized_inverted_codebook_version": stats_sample.get(
+            "quantized_inverted_codebook_version"
+        ),
+        "quantized_inverted_codebook_top_m": stats_sample.get(
+            "quantized_inverted_codebook_top_m"
+        ),
+        "quantized_inverted_assignment_time_us": (
+            largest_work.get("quantized_inverted_assignment_time_us")
+            or largest_work.get("quantized_inverted_assignment_us")
+            or stats_sample.get("quantized_inverted_assignment_time_us")
+            or stats_sample.get("quantized_inverted_assignment_us")
+        ),
+        "quantized_inverted_posting_bytes": stats_sample.get(
+            "quantized_inverted_posting_bytes"
+        ),
+        "quantized_inverted_sidecar_bytes": stats_sample.get(
+            "quantized_inverted_sidecar_bytes"
+        ),
         "proxy_candidate_limit_effective": stats_sample.get(
             "proxy_candidate_limit_effective"
         ),
@@ -6779,6 +12261,11 @@ def document_node_serving_summary_row(
             "proxy_candidates_returned",
             "multivector_proxy_candidates_returned",
         ),
+        "proxy_candidates": largest_work.get("proxy_candidates")
+        or largest_work.get("proxy_candidates_returned")
+        or stats_sample.get("proxy_candidates")
+        or stats_sample.get("proxy_candidates_returned")
+        or stats_sample.get("multivector_proxy_candidates_returned"),
         "graph_entry_sample_scored": first_sample_value(
             "graph_entry_sample_scored",
             "multivector_doc_graph_entry_sample_scored",
@@ -6887,11 +12374,29 @@ def serving_candidate_delta_baseline(profile_name: str) -> tuple[str, str] | Non
                 return baseline, comparison
     if profile_name.startswith("centroid_lite_f16_cap_"):
         return "centroid_lite_f16", "centroid_lite_posting_cap"
+    if profile_name.startswith("centroid_lite_centroid_only_cap_"):
+        return "centroid_lite_centroid_only", "centroid_lite_posting_cap"
     proxy_variants = {
         "docnodes_normalized_mean_f16": ("proxy_normalized_mean_f16", "candidate_source_variant"),
         "centroid_mean_f16": ("proxy_normalized_mean_f16", "proxy_encoder_variant"),
         "centroid_lite_f16": ("centroid_mean_f16", "candidate_source_variant"),
+        "centroid_lite_centroid_only": (
+            "proxy_normalized_mean_proxy_only",
+            "candidate_source_variant",
+        ),
         "proxy_max_pool_f16": ("proxy_normalized_mean_f16", "proxy_encoder_variant"),
+        "proxy_exact_scan_normalized_mean_f16": (
+            "proxy_normalized_mean_f16",
+            "proxy_exact_scan_vs_hnsw",
+        ),
+        "proxy_exact_scan_centroid_mean_f16": (
+            "centroid_mean_f16",
+            "proxy_exact_scan_vs_hnsw",
+        ),
+        "proxy_exact_scan_max_pool_f16": (
+            "proxy_max_pool_f16",
+            "proxy_exact_scan_vs_hnsw",
+        ),
         "proxy_random_projection_fde_f16": (
             "proxy_normalized_mean_f16",
             "proxy_encoder_variant",
@@ -7248,6 +12753,42 @@ def compute_document_node_candidate_source_deltas(
     }
 
 
+def annotate_proxy_exact_scan_vs_hnsw_gap(rows: Sequence[dict[str, Any]]) -> None:
+    valid_rows = [row for row in rows if isinstance(row, dict)]
+    rows_by_key = {
+        serving_candidate_delta_key(row, str(row.get("profile", ""))): row
+        for row in valid_rows
+    }
+    for row in valid_rows:
+        if str(row.get("candidate_source", "")) != "proxy_exact_scan":
+            continue
+        profile_name = str(row.get("profile", ""))
+        baseline_info = serving_candidate_delta_baseline(profile_name)
+        if baseline_info is None:
+            continue
+        baseline_profile, comparison = baseline_info
+        if comparison != "proxy_exact_scan_vs_hnsw":
+            continue
+        baseline = rows_by_key.get(serving_candidate_delta_key(row, baseline_profile))
+        if baseline is None:
+            continue
+        oracle_recall = serving_candidate_delta_number(
+            row, "exact_top10_admission_recall"
+        )
+        hnsw_recall = serving_candidate_delta_number(
+            baseline, "exact_top10_admission_recall"
+        )
+        if oracle_recall is None or hnsw_recall is None:
+            continue
+        gap = round(float(oracle_recall) - float(hnsw_recall), 6)
+        row["proxy_exact_scan_vs_hnsw_gap"] = gap
+        row["hnsw_vs_exact_proxy_top10_gap"] = gap
+        sample = row.get("last_scan_stats_sample", row.get("serving_stats_sample"))
+        if isinstance(sample, dict):
+            sample["proxy_exact_scan_vs_hnsw_gap"] = gap
+            sample["hnsw_vs_exact_proxy_top10_gap"] = gap
+
+
 def document_node_candidate_source_delta_summary(
     candidate_source_deltas: dict[str, Any] | None,
 ) -> dict[str, Any]:
@@ -7403,6 +12944,100 @@ def document_node_candidate_source_delta_summary(
     }
 
 
+def document_node_graph_entry_selection_bottleneck(
+    candidate_source_deltas: dict[str, Any] | None,
+) -> dict[str, Any]:
+    min_top10_delta = 0.10
+    max_p95_regression_ratio = 0.25
+    if not isinstance(candidate_source_deltas, dict):
+        return {
+            "available": False,
+            "graph_entry_selection_bottleneck_confirmed": False,
+            "reason": "candidate_source_deltas missing",
+            "thresholds": {
+                "min_entry_sidecar_top10_admission_delta": min_top10_delta,
+                "max_entry_sidecar_p95_regression_ratio": max_p95_regression_ratio,
+            },
+        }
+    rows = [
+        item
+        for item in candidate_source_deltas.get("rows", [])
+        if isinstance(item, dict)
+        and str(item.get("comparison", "")) == "entry_sidecar"
+        and bool(item.get("evidence_usable", True))
+    ]
+
+    def metric(item: dict[str, Any], key: str) -> float | None:
+        value = item.get(key)
+        if value is None or isinstance(value, bool):
+            return None
+        try:
+            number = float(value)
+        except (TypeError, ValueError):
+            return None
+        return number if math.isfinite(number) else None
+
+    confirming: list[dict[str, Any]] = []
+    for item in rows:
+        top10_delta = metric(item, "exact_top10_admission_recall_delta")
+        p95_delta = metric(item, "p95_ms_delta")
+        baseline_p95 = metric(item, "baseline_p95_ms")
+        if top10_delta is None or p95_delta is None or baseline_p95 is None:
+            continue
+        if baseline_p95 <= 0.0:
+            continue
+        p95_regression_ratio = max(p95_delta, 0.0) / baseline_p95
+        if (
+            top10_delta > min_top10_delta
+            and p95_regression_ratio < max_p95_regression_ratio
+        ):
+            confirming.append({
+                "comparison": item.get("comparison"),
+                "profile": item.get("profile"),
+                "baseline_profile": item.get("baseline_profile"),
+                "ef": item.get("ef"),
+                "oversampling": item.get("oversampling"),
+                "candidate_budget": item.get("candidate_budget"),
+                "exact_top10_admission_recall_delta": item.get(
+                    "exact_top10_admission_recall_delta"
+                ),
+                "exact_top10_admission_recall": item.get(
+                    "exact_top10_admission_recall"
+                ),
+                "baseline_exact_top10_admission_recall": item.get(
+                    "baseline_exact_top10_admission_recall"
+                ),
+                "p95_ms_delta": item.get("p95_ms_delta"),
+                "p95_ms": item.get("p95_ms"),
+                "baseline_p95_ms": item.get("baseline_p95_ms"),
+                "p95_regression_ratio": round(p95_regression_ratio, 6),
+                "candidate_evidence_summary": serving_candidate_delta_evidence_text(
+                    item.get("candidate_evidence", {})
+                ),
+            })
+    confirming.sort(
+        key=lambda item: (
+            -float(item.get("exact_top10_admission_recall_delta", 0.0) or 0.0),
+            float(item.get("p95_regression_ratio", 0.0) or 0.0),
+            str(item.get("profile", "")),
+            int(item.get("ef", 0) or 0),
+            int(item.get("candidate_budget", 0) or 0),
+        )
+    )
+    return {
+        "available": True,
+        "graph_entry_selection_bottleneck_confirmed": bool(confirming),
+        "thresholds": {
+            "min_entry_sidecar_top10_admission_delta": min_top10_delta,
+            "max_entry_sidecar_p95_regression_ratio": max_p95_regression_ratio,
+        },
+        "entry_sidecar_comparison_count": len(rows),
+        "confirming_count": len(confirming),
+        "best_confirming_delta": confirming[0] if confirming else None,
+        "confirming_deltas": confirming[:10],
+    }
+
+
 def serving_storage_penalty(row: dict[str, Any]) -> int:
     return {
         "sq8": 0,
@@ -7415,8 +13050,12 @@ def serving_row_experimental(row: dict[str, Any]) -> bool:
     profile = str(row.get("profile", ""))
     return (
         str(row.get("candidate_source", "")) == "quantized_inverted_experimental"
+        or str(row.get("candidate_source", "")) == "proxy_exact_scan"
+        or bool(row.get("diagnostic_only", False))
+        or bool(row.get("proxy_exact_scan_diagnostic_only", False))
         or profile == "quantized_inverted_experimental"
         or profile.startswith("quantized_inverted_experimental_")
+        or profile.startswith("proxy_exact_scan_")
     )
 
 
@@ -7456,6 +13095,8 @@ def serving_recommendation_row(row: dict[str, Any]) -> dict[str, Any]:
         "profile": row.get("profile"),
         "candidate_source": row.get("candidate_source"),
         "experimental": serving_row_experimental(row),
+        "diagnostic_only": row.get("diagnostic_only"),
+        "proxy_exact_scan_diagnostic_only": row.get("proxy_exact_scan_diagnostic_only"),
         "branch_plan": row.get("branch_plan"),
         "bm25_candidate_injection": row.get("bm25_candidate_injection"),
         "bm25_text_query_available": row.get("bm25_text_query_available"),
@@ -7514,6 +13155,26 @@ def serving_recommendation_row(row: dict[str, Any]) -> dict[str, Any]:
         "exact_rerank_docs_p95": row.get("exact_rerank_docs_p95"),
         "exact_rerank_pairs": row.get("exact_rerank_pairs"),
         "exact_rerank_pairs_p50": row.get("exact_rerank_pairs_p50"),
+        "proxy_exact_scan_enabled": row.get("proxy_exact_scan_enabled"),
+        "proxy_exact_scan_docs_scored": row.get("proxy_exact_scan_docs_scored"),
+        "proxy_exact_scan_time_us": row.get("proxy_exact_scan_time_us"),
+        "proxy_exact_scan_candidates": row.get("proxy_exact_scan_candidates"),
+        "proxy_exact_scan_top10_admission_recall": row.get(
+            "proxy_exact_scan_top10_admission_recall"
+        ),
+        "proxy_exact_scan_top1_admission": row.get("proxy_exact_scan_top1_admission"),
+        "proxy_exact_scan_vs_hnsw_gap": row.get("proxy_exact_scan_vs_hnsw_gap"),
+        "hnsw_vs_exact_proxy_top10_gap": row.get(
+            "hnsw_vs_exact_proxy_top10_gap",
+            row.get("proxy_exact_scan_vs_hnsw_gap"),
+        ),
+        "proxy_exact_rank_of_exact_top1": row.get("proxy_exact_rank_of_exact_top1"),
+        "proxy_exact_rank_of_exact_top10_p50": row.get(
+            "proxy_exact_rank_of_exact_top10_p50"
+        ),
+        "proxy_exact_rank_of_exact_top10_p95": row.get(
+            "proxy_exact_rank_of_exact_top10_p95"
+        ),
         "p50_ms": row.get("p50_ms"),
         "p95_ms": row.get("p95_ms"),
         "p50_latency_ms_at_largest_budget": row.get("p50_latency_ms_at_largest_budget"),
@@ -7567,7 +13228,26 @@ def serving_recommendation_row(row: dict[str, Any]) -> dict[str, Any]:
         "learned_sparse_candidates": row.get("learned_sparse_candidates"),
         "learned_sparse_retained_for_maxsim": row.get("learned_sparse_retained_for_maxsim"),
         "learned_sparse_branch_latency_us": row.get("learned_sparse_branch_latency_us"),
+        "learned_sparse_coverage": row.get("learned_sparse_coverage"),
+        "learned_sparse_doc_coverage": row.get("learned_sparse_doc_coverage"),
+        "learned_sparse_query_coverage": row.get("learned_sparse_query_coverage"),
+        "learned_sparse_doc_rows": row.get("learned_sparse_doc_rows"),
+        "learned_sparse_query_rows": row.get("learned_sparse_query_rows"),
+        "learned_sparse_feature_source": row.get("learned_sparse_feature_source"),
+        "learned_sparse_feature_details": row.get("learned_sparse_feature_details"),
+        "learned_sparse_feature_version": row.get("learned_sparse_feature_version"),
+        "learned_sparse_feature_model_name": row.get("learned_sparse_feature_model_name"),
+        "learned_sparse_feature_model_checksum": row.get("learned_sparse_feature_model_checksum"),
+        "learned_sparse_feature_warnings": row.get("learned_sparse_feature_warnings"),
+        "learned_sparse_missing_doc_count": row.get("learned_sparse_missing_doc_count"),
+        "learned_sparse_missing_query_count": row.get("learned_sparse_missing_query_count"),
+        "learned_sparse_extra_doc_count": row.get("learned_sparse_extra_doc_count"),
+        "learned_sparse_extra_query_count": row.get("learned_sparse_extra_query_count"),
         "learned_sparse_partial_coverage": row.get("learned_sparse_partial_coverage"),
+        "learned_sparse_plumbing_only": row.get("learned_sparse_plumbing_only"),
+        "learned_sparse_safe_serving_evidence": row.get("learned_sparse_safe_serving_evidence"),
+        "not_safe_serving_evidence": row.get("not_safe_serving_evidence"),
+        "learned_sparse_coverage_failures": learned_sparse_coverage_failure_reasons(row),
         "centroid_lists_visited": row.get("centroid_lists_visited"),
         "centroid_docs_touched": row.get("centroid_docs_touched"),
         "centroid_pruned_docs": row.get("centroid_pruned_docs"),
@@ -7577,6 +13257,7 @@ def serving_recommendation_row(row: dict[str, Any]) -> dict[str, Any]:
         "centroid_posting_cap_strategy": row.get("centroid_posting_cap_strategy"),
         "centroid_candidates": row.get("centroid_candidates"),
         "evidence_warnings": row.get("evidence_warnings", []),
+        "report_classification": row.get("report_classification", []),
         "stats_available": row.get("stats_available", {}),
         "last_scan_stats_sample": row.get("last_scan_stats_sample", {}),
     }
@@ -7594,6 +13275,53 @@ def serving_row_candidate_budget(row: dict[str, Any]) -> int | None:
         if budget > 0:
             return budget
     return None
+
+
+def serving_row_is_pure_proxy(row: dict[str, Any]) -> bool:
+    sample = row.get("last_scan_stats_sample", row.get("serving_stats_sample", {}))
+    if not isinstance(sample, dict):
+        sample = {}
+    candidate_source = str(
+        row.get("candidate_source") or sample.get("multivector_candidate_source") or ""
+    )
+    sparse_source = str(row.get("sparse_candidate_source") or "off")
+    bm25_source = str(row.get("bm25_candidate_injection") or "off")
+    reservoirs = str(row.get("candidate_reservoirs") or "off")
+    return (
+        candidate_source == "proxy_vector"
+        and sparse_source == "off"
+        and bm25_source == "off"
+        and reservoirs == "off"
+    )
+
+
+def serving_row_proxy_high_budget_low_admission(row: dict[str, Any]) -> bool:
+    admission = serving_row_metric(row, "exact_top10_admission_recall")
+    if admission is None or admission >= 0.25:
+        return False
+    budget = serving_row_candidate_budget(row) or 0
+    ef = int_from_mapping(row, "ef", "multivector_doc_graph_search_ef")
+    return serving_row_is_pure_proxy(row) and ef >= 400 and budget >= 400
+
+
+def serving_proxy_report_classification(
+    row: dict[str, Any],
+    *,
+    min_top10_admission: float,
+) -> list[str]:
+    if not serving_row_is_pure_proxy(row):
+        return []
+    classifications: list[str] = []
+    admission = serving_row_metric(row, "exact_top10_admission_recall")
+    if admission is not None and admission < min_top10_admission:
+        classifications.append("proxy_admission_failure")
+    if serving_row_proxy_high_budget_low_admission(row):
+        classifications.append("proxy_quality_not_threshold_limited")
+        p95 = serving_row_p95(row)
+        proxy_encoder = str(row.get("proxy_encoder") or "")
+        if proxy_encoder == "normalized_mean" and p95 is not None and p95 <= 25.0:
+            classifications.insert(0, "fast_unsafe_proxy_baseline")
+    return sorted(dict.fromkeys(classifications))
 
 
 def int_from_mapping(mapping: dict[str, Any], *keys: str) -> int:
@@ -7841,6 +13569,18 @@ def serving_admission_improvement_hints(
     admission = serving_row_metric(row, "exact_top10_admission_recall")
     if admission is not None and admission >= min_top10_admission:
         return []
+    if serving_row_proxy_high_budget_low_admission(row):
+        proxy_encoder = str(row.get("proxy_encoder") or "")
+        hints = [
+            "try_learned_sparse_rescue",
+            "try_bm25_rescue",
+            "try_centroid_lite_focus",
+            "try_quantized_inverted_experimental",
+            "try_learned_projection_or_fde",
+        ]
+        if proxy_encoder not in {"max_pool", "centroid_mean"}:
+            hints.append("try_max_pool_or_centroid_mean_proxy_secondary")
+        return sorted(dict.fromkeys(hints))
 
     hints: list[str] = []
     sample = row.get("last_scan_stats_sample", {})
@@ -7916,6 +13656,7 @@ def serving_admission_improvement_hints(
         proxy_limit_source = sample.get("proxy_candidate_limit_source")
     if proxy_limit_source == "search_ef":
         hints.append("proxy_candidates_capped_by_search_ef")
+        hints.append("try_higher_ef_or_entry_sample")
     elif proxy_limit_source == "doc_candidate_k":
         hints.append("proxy_candidates_capped_by_doc_candidate_k")
 
@@ -7963,8 +13704,7 @@ def serving_admission_improvement_hints(
 
     sparse_source = row.get("sparse_candidate_source")
     if sparse_source == "learned_sparse":
-        if bool(row.get("learned_sparse_partial_coverage", False)):
-            hints.append("learned_sparse_partial_coverage")
+        hints.extend(learned_sparse_coverage_failure_reasons(row))
         if summary_stat_float(row.get("learned_sparse_candidates"), "p95") <= 0.0:
             hints.append("learned_sparse_no_candidates")
         elif summary_stat_float(row.get("learned_sparse_retained_for_maxsim"), "p95") <= 0.0:
@@ -8013,6 +13753,12 @@ def serving_profile_explanation(row: dict[str, Any]) -> str:
     ]
     if row.get("ndcg@10") is not None:
         parts.append(f"ndcg@10={float(row.get('ndcg@10') or 0.0):.6f}")
+    classifications = row.get("report_classification")
+    if isinstance(classifications, list) and classifications:
+        parts.append(
+            "classification="
+            + ",".join(str(classification) for classification in classifications)
+        )
     if row.get("entry_sidecar") is not None:
         parts.append(f"entry_sidecar={bool(row.get('entry_sidecar'))}")
     if row.get("entry_sidecar_representatives") is not None:
@@ -8116,6 +13862,7 @@ def serving_threshold_failures(
     min_ndcg_ratio_vs_exact: float,
     max_p95_ms: float,
     exact_baseline_ndcg: float | None,
+    accept_partial_learned_sparse_coverage: bool = False,
 ) -> tuple[list[str], list[str]]:
     failures: list[str] = []
     unavailable: list[str] = []
@@ -8139,12 +13886,12 @@ def serving_threshold_failures(
     elif ndcg < exact_baseline_ndcg * min_ndcg_ratio_vs_exact:
         failures.append("ndcg_ratio_below_threshold")
 
-    if bool(row.get("learned_sparse_partial_coverage", False)):
-        failures.append("learned_sparse_partial_coverage")
+    if not accept_partial_learned_sparse_coverage:
+        failures.extend(learned_sparse_coverage_failure_reasons(row))
     if serving_row_unsupported_reservoir_evidence(row):
         failures.append("candidate_reservoirs_not_executed")
 
-    return failures, unavailable
+    return sorted(dict.fromkeys(failures)), unavailable
 
 
 def pareto_frontier_latency_quality(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
@@ -8195,6 +13942,7 @@ def compute_document_node_serving_recommendation(
     min_top10_admission: float,
     min_ndcg_ratio_vs_exact: float,
     max_p95_ms: float,
+    accept_partial_learned_sparse_coverage: bool = False,
 ) -> dict[str, Any]:
     raw_rows = serving_grid.get("results", serving_grid.get("summary_rows", []))
     rows = [
@@ -8202,6 +13950,23 @@ def compute_document_node_serving_recommendation(
         for item in raw_rows
         if isinstance(item, dict)
     ]
+    pure_colbert_only = bool(serving_grid.get("pure_colbert_only", False))
+
+    def pure_colbert_hints(hints: Sequence[Any]) -> list[str]:
+        if not pure_colbert_only:
+            return [str(item) for item in hints if item]
+        blocked = ("bm25", "learned_sparse", "sparse_rescue", "sparse")
+        return [
+            str(item)
+            for item in hints
+            if item and not any(token in str(item).lower() for token in blocked)
+        ]
+
+    def row_allowed_for_named_selection(row: dict[str, Any]) -> bool:
+        if accept_partial_learned_sparse_coverage:
+            return True
+        return not bool(learned_sparse_coverage_failure_reasons(row))
+
     exact_metrics = exact_baseline.get("metrics", {}) if isinstance(exact_baseline, dict) else {}
     exact_baseline_ndcg = (
         serving_row_metric({"ndcg@10": exact_metrics.get("ndcg@10")}, "ndcg@10")
@@ -8217,10 +13982,15 @@ def compute_document_node_serving_recommendation(
             min_ndcg_ratio_vs_exact=min_ndcg_ratio_vs_exact,
             max_p95_ms=max_p95_ms,
             exact_baseline_ndcg=exact_baseline_ndcg,
+            accept_partial_learned_sparse_coverage=accept_partial_learned_sparse_coverage,
         )
         summary = serving_recommendation_row(row)
+        summary["report_classification"] = serving_proxy_report_classification(
+            summary,
+            min_top10_admission=min_top10_admission,
+        )
         candidate_bottleneck = serving_row_candidate_admission_bottleneck(
-            row,
+            summary,
             min_top10_admission=min_top10_admission,
         )
         summary["threshold_pass"] = not failures
@@ -8246,9 +14016,11 @@ def compute_document_node_serving_recommendation(
                 "exact rerank exhausted the admitted candidate band, but "
                 "exact_top10_admission_recall remained below threshold"
             )
-        summary["admission_improvement_hints"] = serving_admission_improvement_hints(
-            summary,
-            min_top10_admission=min_top10_admission,
+        summary["admission_improvement_hints"] = pure_colbert_hints(
+            serving_admission_improvement_hints(
+                summary,
+                min_top10_admission=min_top10_admission,
+            )
         )
         threshold_rows.append(summary)
         if summary["failure_reasons"]:
@@ -8283,8 +14055,15 @@ def compute_document_node_serving_recommendation(
     use_ndcg = serving_quality_available(rows)
     quality_rows = [
         row for row in rows
-        if not serving_row_unsupported_reservoir_evidence(row)
+        if (
+            not serving_row_unsupported_reservoir_evidence(row)
+            and row_allowed_for_named_selection(row)
+        )
     ] or rows
+    quality_rows = [
+        row for row in quality_rows
+        if row_allowed_for_named_selection(row)
+    ]
     best_quality_row = max(
         quality_rows,
         key=lambda item: (
@@ -8330,6 +14109,8 @@ def compute_document_node_serving_recommendation(
     )
     balanced_candidates: list[dict[str, Any]] = []
     for row in rows:
+        if not row_allowed_for_named_selection(row):
+            continue
         admission = serving_row_metric(row, "exact_top10_admission_recall") or 0.0
         ndcg = serving_row_metric(row, "ndcg@10") or 0.0
         admission_loss_penalty = round(max(0.0, best_admission - admission) * 100.0, 3)
@@ -8342,7 +14123,8 @@ def compute_document_node_serving_recommendation(
         )
         partial_evidence_penalty = (
             500_000
-            if bool(row.get("learned_sparse_partial_coverage", False))
+            if not accept_partial_learned_sparse_coverage
+            and bool(learned_sparse_coverage_failure_reasons(row))
             and non_experimental_has_usable_metrics
             else 0
         )
@@ -8384,23 +14166,64 @@ def compute_document_node_serving_recommendation(
         default=None,
     )
 
-    return {
+    balanced_formula = (
+        "score = latency_rank + max(0,best_admission-admission)*100 "
+        "+ max(0,best_ndcg-ndcg)*100 when qrels exist + storage_penalty; "
+        "storage_penalty is sq8=0, f16=1, f32=2, other=3; "
+        "experimental_penalty is 1000000 when any non-experimental profile has usable metrics"
+    )
+    if not pure_colbert_only:
+        balanced_formula += (
+            "; learned-sparse incomplete feature coverage and unsupported-reservoir "
+            "penalties are 500000 under the same condition"
+        )
+
+    def strip_non_colbert_recommendation_fields(value: Any) -> Any:
+        if not pure_colbert_only:
+            return value
+        blocked = ("bm25", "learned_sparse", "sparse")
+        if isinstance(value, dict):
+            return {
+                key: strip_non_colbert_recommendation_fields(item)
+                for key, item in value.items()
+                if not any(token in str(key).lower() for token in blocked)
+            }
+        if isinstance(value, list):
+            return [
+                strip_non_colbert_recommendation_fields(item)
+                for item in value
+            ]
+        return value
+
+    recommendation_notes = (
+        [
+            (
+                "Pure proxy ANN is not a safe ColBERT retrieval path for "
+                "this artifact; use it only as a latency baseline."
+            )
+        ]
+        if any(
+            "fast_unsafe_proxy_baseline" in item.get("report_classification", [])
+            or "proxy_quality_not_threshold_limited" in item.get("report_classification", [])
+            for item in threshold_rows
+        )
+        else []
+    )
+
+    recommendation = {
         "thresholds": {
             "serving_min_top10_admission": min_top10_admission,
             "serving_min_ndcg_ratio_vs_exact": min_ndcg_ratio_vs_exact,
             "serving_max_p95_ms": max_p95_ms,
+            "serving_accept_partial_learned_sparse_coverage": (
+                accept_partial_learned_sparse_coverage
+            ),
         },
         "exact_baseline": exact_baseline,
         "best_latency_safe": best_latency_safe,
         "best_quality": best_quality,
         "best_balanced": best_balanced,
-        "balanced_formula": (
-            "score = latency_rank + max(0,best_admission-admission)*100 "
-            "+ max(0,best_ndcg-ndcg)*100 when qrels exist + storage_penalty; "
-            "storage_penalty is sq8=0, f16=1, f32=2, other=3; "
-            "experimental_penalty is 1000000 when any non-experimental profile has usable metrics; "
-            "learned-sparse partial-coverage and unsupported-reservoir penalties are 500000 under the same condition"
-        ),
+        "balanced_formula": balanced_formula,
         "pareto_frontier_latency_quality": pareto_frontier_latency_quality(rows),
         "pareto_frontier": pareto_frontier_latency_quality(rows),
         "profile_thresholds": sorted(
@@ -8421,6 +14244,7 @@ def compute_document_node_serving_recommendation(
                 str(item.get("id", "")),
             ),
         ),
+        "recommendation_notes": recommendation_notes,
         "candidate_source_delta_summary": document_node_candidate_source_delta_summary(
             serving_grid.get("candidate_source_deltas")
         ),
@@ -8432,6 +14256,747 @@ def compute_document_node_serving_recommendation(
             ),
         ),
     }
+    return strip_non_colbert_recommendation_fields(recommendation)
+
+
+def serving_profile_gate_effective_count(
+    dataset: dict[str, Any],
+    max_key: str,
+    loaded_key: str,
+) -> int | None:
+    for key in (max_key, loaded_key):
+        value = dataset.get(key)
+        try:
+            parsed = int(value)
+        except (TypeError, ValueError):
+            continue
+        if parsed > 0:
+            return parsed
+    return None
+
+
+def serving_profile_gate_row(
+    selected: dict[str, Any],
+    rows_by_id: dict[str, dict[str, Any]],
+    rows_by_profile: dict[str, dict[str, Any]],
+) -> dict[str, Any]:
+    if not isinstance(selected, dict) or not selected:
+        return {}
+    row_id = str(selected.get("id") or "")
+    profile = str(selected.get("profile") or "")
+    if row_id and row_id in rows_by_id:
+        return {**rows_by_id[row_id], **selected}
+    if profile and profile in rows_by_profile:
+        return {**rows_by_profile[profile], **selected}
+    return selected
+
+
+def serving_profile_gate_slow_warnings(row: dict[str, Any], grid: dict[str, Any]) -> list[str]:
+    warnings: list[str] = []
+    for source in (grid.get("serving_slow_path_warnings"), row.get("serving_slow_path_warnings")):
+        if isinstance(source, list):
+            warnings.extend(str(item) for item in source if item)
+        elif source:
+            warnings.append(str(source))
+    sample = row.get("last_scan_stats_sample", row.get("serving_stats_sample", {}))
+    if isinstance(sample, dict):
+        sample_warning = sample.get("multivector_doc_graph_warning")
+        if sample_warning:
+            warnings.append(str(sample_warning))
+    return sorted(dict.fromkeys(warnings))
+
+
+def serving_profile_gate_learned_sparse_coverage_ok(
+    row: dict[str, Any],
+    grid: dict[str, Any],
+) -> tuple[bool, list[str]]:
+    if not serving_row_uses_learned_sparse(row):
+        return True, []
+    coverage = row.get("learned_sparse_coverage")
+    if not isinstance(coverage, dict):
+        coverage = grid.get("learned_sparse_coverage")
+    if not isinstance(coverage, dict):
+        return False, [
+            "learned_sparse_missing_doc_features",
+            "learned_sparse_missing_query_features",
+        ]
+    reasons = learned_sparse_coverage_failure_reasons({**row, "learned_sparse_coverage": coverage})
+    return not reasons, reasons
+
+
+def serving_profile_guc_validation_command() -> str:
+    return (
+        "nix develop .#bench\n"
+        "python benchmarks/dbpedia_colbert_multivector.py \\\n"
+        "  --database pgturbohybrid_dbpedia_colbert_10k_rescue_validation \\\n"
+        "  --precomputed-dataset johannhartmann/pgturbohybrid_dbpedia_colbert \\\n"
+        "  --max-docs 10000 \\\n"
+        "  --max-queries 100 \\\n"
+        "  --reuse-data \\\n"
+        "  --document-node-serving-grid \\\n"
+        "  --serving-min-top10-admission 0.80 \\\n"
+        "  --output .nix-dev/tmp/dbpedia-colbert-serving-validation-10k.json"
+    )
+
+
+def validate_serving_profile_guc_evidence(
+    report: dict[str, Any],
+    *,
+    min_docs: int = SERVING_PROFILE_GUC_MIN_DOCS,
+    min_queries: int = SERVING_PROFILE_GUC_MIN_QUERIES,
+    allow_unsafe: bool = False,
+) -> dict[str, Any]:
+    reasons: list[str] = []
+    warnings: list[str] = []
+    selected_profiles: dict[str, dict[str, Any] | None] = {}
+
+    grid = report.get("document_node_serving_grid")
+    if not isinstance(grid, dict):
+        reasons.append("missing_document_node_serving_grid")
+        grid = {}
+    rec = report.get("document_node_serving_recommendation")
+    if not isinstance(rec, dict):
+        reasons.append("missing_document_node_serving_recommendation")
+        rec = {}
+    dataset = report.get("dataset")
+    if not isinstance(dataset, dict):
+        reasons.append("missing_dataset_metadata")
+        dataset = {}
+
+    settings = report.get("settings")
+    if not isinstance(settings, dict):
+        settings = {}
+    smoke_mode = (
+        str(grid.get("mode") or "").lower() == "smoke"
+        or bool(grid.get("smoke_only"))
+        or bool(settings.get("document_node_serving_grid_smoke"))
+    )
+    if smoke_mode:
+        reasons.append("artifact_is_smoke_only")
+
+    docs = serving_profile_gate_effective_count(dataset, "max_docs", "documents")
+    queries = serving_profile_gate_effective_count(dataset, "max_queries", "queries")
+    if docs is None:
+        reasons.append("missing_max_docs")
+    elif docs < min_docs:
+        reasons.append(f"max_docs_below_minimum:{docs}<{min_docs}")
+    if queries is None:
+        reasons.append("missing_max_queries")
+    elif queries < min_queries:
+        reasons.append(f"max_queries_below_minimum:{queries}<{min_queries}")
+
+    raw_rows = grid.get("results", grid.get("summary_rows", []))
+    rows = [row for row in raw_rows if isinstance(row, dict)] if isinstance(raw_rows, list) else []
+    rows_by_id = {serving_row_id(row): row for row in rows}
+    rows_by_profile = {
+        str(row.get("profile")): row
+        for row in rows
+        if row.get("profile") is not None
+    }
+
+    thresholds = rec.get("thresholds", {}) if isinstance(rec, dict) else {}
+    if not isinstance(thresholds, dict):
+        thresholds = {}
+    try:
+        min_top10 = float(thresholds.get("serving_min_top10_admission", 0.80))
+    except (TypeError, ValueError):
+        min_top10 = 0.80
+    quality_waived = allow_unsafe or bool(rec.get("quality_metrics_waived"))
+
+    for key in ("best_latency_safe", "best_balanced", "best_quality"):
+        selected = rec.get(key) if isinstance(rec, dict) else None
+        row = serving_profile_gate_row(
+            selected if isinstance(selected, dict) else {},
+            rows_by_id,
+            rows_by_profile,
+        )
+        selected_profiles[key] = serving_recommendation_row(row) if row else None
+        if not row:
+            reasons.append(f"{key}_missing")
+            continue
+        profile = str(row.get("profile") or key)
+        if serving_row_experimental(row):
+            reasons.append(f"{profile}:experimental_profile")
+        if str(row.get("candidate_source") or "") == "quantized_inverted_experimental":
+            reasons.append(f"{profile}:experimental_candidate_source")
+
+        admission = serving_row_metric(row, "exact_top10_admission_recall")
+        if admission is None:
+            reasons.append(f"{profile}:missing_exact_top10_admission_recall")
+        elif admission < min_top10:
+            reasons.append(f"{profile}:top10_admission_below_threshold")
+
+        ndcg = serving_row_metric(row, "ndcg@10")
+        recall = serving_row_metric(row, "recall@10")
+        mrr = serving_row_metric(row, "mrr@10")
+        if ndcg is None and recall is None and mrr is None and not quality_waived:
+            reasons.append(f"{profile}:missing_qrels_quality_metrics")
+
+        coverage_ok, coverage_reasons = serving_profile_gate_learned_sparse_coverage_ok(row, grid)
+        if not coverage_ok:
+            reasons.extend(f"{profile}:{reason}" for reason in coverage_reasons)
+
+        slow_warnings = serving_profile_gate_slow_warnings(row, grid)
+        if slow_warnings:
+            warnings.extend(f"{profile}:{warning}" for warning in slow_warnings)
+            reasons.append(f"{profile}:slow_path_warnings_present")
+
+    unsafe_reasons = sorted(dict.fromkeys(reasons))
+    accepted = not unsafe_reasons or allow_unsafe
+    return {
+        "accepted": accepted,
+        "unsafe_override": bool(allow_unsafe and unsafe_reasons),
+        "reasons": [] if accepted and allow_unsafe else unsafe_reasons,
+        "unsafe_reasons": unsafe_reasons,
+        "warnings": sorted(dict.fromkeys(warnings)),
+        "minimums": {
+            "min_docs": min_docs,
+            "min_queries": min_queries,
+        },
+        "observed": {
+            "max_docs": docs,
+            "max_queries": queries,
+            "mode": grid.get("mode"),
+            "smoke_only": smoke_mode,
+        },
+        "selected_profiles": selected_profiles,
+        "suggested_validation_command": (
+            None if accepted and not unsafe_reasons else serving_profile_guc_validation_command()
+        ),
+    }
+
+
+def compare_metric(value: Any) -> float | None:
+    if value is None:
+        return None
+    try:
+        parsed = float(value)
+    except (TypeError, ValueError):
+        return None
+    return parsed if math.isfinite(parsed) else None
+
+
+SERVING_EVIDENCE_LEVELS = (
+    "smoke",
+    "validation",
+    "production_candidate",
+    "plumbing_only",
+)
+
+
+def serving_report_counts(report: dict[str, Any]) -> tuple[int | None, int | None]:
+    dataset = report.get("dataset")
+    grid = report.get("document_node_serving_grid")
+    if not isinstance(dataset, dict):
+        dataset = {}
+    if not isinstance(grid, dict):
+        grid = {}
+
+    def first_positive_int(*values: Any) -> int | None:
+        for value in values:
+            try:
+                parsed = int(value)
+            except (TypeError, ValueError):
+                continue
+            if parsed > 0:
+                return parsed
+        return None
+
+    return (
+        first_positive_int(
+            dataset.get("max_docs"),
+            dataset.get("documents"),
+            grid.get("max_docs"),
+            grid.get("loaded_documents"),
+        ),
+        first_positive_int(
+            dataset.get("max_queries"),
+            dataset.get("queries"),
+            grid.get("max_queries"),
+            grid.get("loaded_queries"),
+            grid.get("queries_run"),
+        ),
+    )
+
+
+def learned_sparse_plumbing_evidence_from_coverage(coverage: dict[str, Any]) -> bool:
+    if bool(coverage.get("partial_coverage", False)):
+        return True
+    if bool(coverage.get("learned_sparse_plumbing_only", False)):
+        return True
+    if bool(coverage.get("not_safe_serving_evidence", False)):
+        return True
+    warnings = coverage.get("warnings", coverage.get("learned_sparse_feature_warnings", []))
+    if not isinstance(warnings, list):
+        warnings = [warnings] if warnings else []
+    warning_text = " ".join(str(item).lower() for item in warnings)
+    if "hash" in warning_text or "toy" in warning_text or "plumbing" in warning_text:
+        return True
+    source = str(
+        coverage.get("learned_sparse_feature_source")
+        or coverage.get("feature_source")
+        or ""
+    ).lower()
+    return any(token in source for token in ("hash", "toy", "plumbing"))
+
+
+def serving_report_has_sparse_plumbing_only(report: dict[str, Any]) -> bool:
+    grid = report.get("document_node_serving_grid")
+    if not isinstance(grid, dict):
+        grid = {}
+    coverage = grid.get("learned_sparse_coverage")
+    grid_coverage_is_complete = False
+    if isinstance(coverage, dict) and learned_sparse_plumbing_evidence_from_coverage(coverage):
+        return True
+    if isinstance(coverage, dict):
+        grid_coverage_is_complete = True
+    for row in serving_rows_from_artifact(report):
+        if not serving_row_uses_learned_sparse(row):
+            continue
+        row_coverage = row.get("learned_sparse_coverage")
+        if isinstance(row_coverage, dict) and learned_sparse_plumbing_evidence_from_coverage(row_coverage):
+            return True
+        if not isinstance(row_coverage, dict) and grid_coverage_is_complete:
+            continue
+        row_for_reasons = (
+            {**row, "learned_sparse_coverage": coverage}
+            if isinstance(coverage, dict)
+            else row
+        )
+        if learned_sparse_coverage_failure_reasons(row_for_reasons):
+            return True
+    return False
+
+
+def serving_report_slow_path_warnings(report: dict[str, Any]) -> list[str]:
+    grid = report.get("document_node_serving_grid")
+    if not isinstance(grid, dict):
+        grid = {}
+    warnings: list[str] = []
+    for item in grid.get("serving_slow_path_warnings", []) or []:
+        warnings.append(str(item))
+    rec = report.get("document_node_serving_recommendation")
+    selected: list[dict[str, Any]] = []
+    if isinstance(rec, dict):
+        for key in ("best_latency_safe", "best_quality", "best_balanced"):
+            value = rec.get(key)
+            if isinstance(value, dict):
+                selected.append(value)
+    for row in selected:
+        warnings.extend(serving_profile_gate_slow_warnings(row, grid))
+    return sorted(dict.fromkeys(item for item in warnings if item))
+
+
+def serving_report_evidence_level(report: dict[str, Any]) -> str:
+    grid = report.get("document_node_serving_grid")
+    if not isinstance(grid, dict):
+        grid = {}
+    settings = report.get("settings")
+    if not isinstance(settings, dict):
+        settings = {}
+
+    if serving_report_has_sparse_plumbing_only(report):
+        return "plumbing_only"
+
+    docs, queries = serving_report_counts(report)
+    smoke = (
+        str(grid.get("mode") or "").lower() == "smoke"
+        or bool(grid.get("smoke_only", False))
+        or bool(settings.get("document_node_serving_grid_smoke", False))
+        or docs is None
+        or queries is None
+        or docs < SERVING_PROFILE_GUC_MIN_DOCS
+        or queries < SERVING_PROFILE_GUC_MIN_QUERIES
+    )
+    if smoke:
+        return "smoke"
+
+    rec = report.get("document_node_serving_recommendation")
+    best_latency_safe = rec.get("best_latency_safe") if isinstance(rec, dict) else None
+    if (
+        isinstance(best_latency_safe, dict)
+        and best_latency_safe
+        and not serving_report_slow_path_warnings(report)
+    ):
+        return "production_candidate"
+
+    return "validation"
+
+
+def serving_evidence_safety_label(evidence_level: str) -> str:
+    return {
+        "smoke": "safe_within_smoke_only",
+        "validation": "validation_candidate",
+        "production_candidate": "production_candidate",
+        "plumbing_only": "plumbing_only_not_safe_serving_evidence",
+    }.get(evidence_level, "unknown_evidence_level")
+
+
+def annotate_serving_recommendation_evidence_level(report: dict[str, Any]) -> None:
+    rec = report.get("document_node_serving_recommendation")
+    if not isinstance(rec, dict):
+        return
+    evidence_level = serving_report_evidence_level(report)
+    rec["evidence_level"] = evidence_level
+    rec["evidence_safety_label"] = serving_evidence_safety_label(evidence_level)
+    rec["slow_path_warnings"] = serving_report_slow_path_warnings(report)
+    for key in ("best_latency_safe", "best_quality", "best_balanced"):
+        selected = rec.get(key)
+        if isinstance(selected, dict) and selected:
+            selected["evidence_level"] = evidence_level
+            selected["safety_label"] = serving_evidence_safety_label(evidence_level)
+
+
+def compare_artifact_mode(path: Path, report: dict[str, Any]) -> dict[str, Any]:
+    grid = report.get("document_node_serving_grid", {})
+    if not isinstance(grid, dict):
+        grid = {}
+    dataset = report.get("dataset", {})
+    if not isinstance(dataset, dict):
+        dataset = {}
+    mode = str(grid.get("mode") or "")
+    max_docs = dataset.get("max_docs")
+    max_queries = dataset.get("max_queries")
+    filename_smoke = "smoke" in path.name.lower()
+    explicit_smoke = mode == "smoke" or filename_smoke
+    notes: list[str] = []
+    if explicit_smoke:
+        notes.append("smoke")
+    elif mode:
+        notes.append(mode)
+    else:
+        notes.append("unknown_mode")
+    for key, label in (("max_docs", "docs"), ("max_queries", "queries")):
+        value = dataset.get(key)
+        if value is not None:
+            notes.append(f"{label}={value}")
+    if filename_smoke and mode != "smoke":
+        notes.append("filename_smoke")
+    evidence_level = serving_report_evidence_level(report)
+    notes.append(f"evidence_level={evidence_level}")
+    if evidence_level == "smoke" and any(
+        serving_row_uses_learned_sparse(row)
+        for row in serving_rows_from_artifact(report)
+    ):
+        notes.append(
+            "hypothesis: learned_sparse may beat BM25 quality; needs full coverage validation"
+        )
+    return {
+        "mode": mode or ("smoke" if explicit_smoke else "unknown"),
+        "max_docs": max_docs,
+        "max_queries": max_queries,
+        "evidence_level": evidence_level,
+        "notes": notes,
+    }
+
+
+def compare_profile_settings(row: dict[str, Any]) -> dict[str, Any]:
+    return {
+        "candidate_source": row.get("candidate_source"),
+        "proxy_encoder": row.get("proxy_encoder"),
+        "centroids": row.get("centroids"),
+        "centroid_count": row.get("centroid_count"),
+        "storage_kind": row.get("storage_kind"),
+        "storage_cache_mode": row.get(
+            "storage_cache_mode",
+            row.get("cache_mode"),
+        ),
+        "token_pooling": row.get("token_pooling"),
+        "token_pooling_target_ratio": row.get("token_pooling_target_ratio"),
+        "candidate_reservoirs": row.get("candidate_reservoirs"),
+        "bm25_candidate_injection": row.get("bm25_candidate_injection"),
+        "sparse_candidate_source": row.get("sparse_candidate_source"),
+        "branch_plan": row.get("branch_plan"),
+    }
+
+
+def compact_compare_profile(row: dict[str, Any] | None) -> dict[str, Any] | None:
+    if not isinstance(row, dict) or not row:
+        return None
+    return {
+        "id": row.get("id", serving_row_id(row)),
+        "profile": row.get("profile"),
+        "p50_ms": compare_metric(
+            row.get("p50_ms", row.get("p50_latency_ms_at_largest_budget"))
+        ),
+        "p95_ms": serving_row_p95(row),
+        "exact_top1_admission_rate": compare_metric(row.get("exact_top1_admission_rate")),
+        "exact_top10_admission_recall": compare_metric(
+            row.get("exact_top10_admission_recall")
+        ),
+        "recall@10": compare_metric(row.get("recall@10")),
+        "ndcg@10": compare_metric(row.get("ndcg@10")),
+        "mrr@10": compare_metric(row.get("mrr@10")),
+        "index_bytes": row.get("index_bytes"),
+        "settings": compare_profile_settings(row),
+        "evidence_level": row.get("evidence_level"),
+        "safety_label": row.get("safety_label"),
+        "learned_sparse_coverage": row.get("learned_sparse_coverage"),
+        "learned_sparse_doc_coverage": row.get("learned_sparse_doc_coverage"),
+        "learned_sparse_query_coverage": row.get("learned_sparse_query_coverage"),
+        "learned_sparse_feature_source": row.get("learned_sparse_feature_source"),
+        "learned_sparse_feature_version": row.get("learned_sparse_feature_version"),
+        "learned_sparse_missing_doc_count": row.get("learned_sparse_missing_doc_count"),
+        "learned_sparse_missing_query_count": row.get("learned_sparse_missing_query_count"),
+        "learned_sparse_partial_coverage": row.get("learned_sparse_partial_coverage"),
+        "failure_reasons": list(row.get("failure_reasons", []) or []),
+        "unavailable_criteria": list(row.get("unavailable_criteria", []) or []),
+    }
+
+
+def serving_rows_from_artifact(report: dict[str, Any]) -> list[dict[str, Any]]:
+    grid = report.get("document_node_serving_grid", {})
+    if not isinstance(grid, dict):
+        return []
+    raw_rows = grid.get("results", grid.get("summary_rows", []))
+    if not isinstance(raw_rows, list):
+        return []
+    return [row for row in raw_rows if isinstance(row, dict)]
+
+
+def compare_recommendation_row(
+    rec: dict[str, Any],
+    key: str,
+    rows_by_id: dict[str, dict[str, Any]],
+    rows_by_profile: dict[str, dict[str, Any]],
+) -> dict[str, Any] | None:
+    row = rec.get(key)
+    if not isinstance(row, dict) or not row:
+        return None
+    source = row
+    row_id = str(row.get("id") or "")
+    profile = str(row.get("profile") or "")
+    if row_id and row_id in rows_by_id:
+        source = {**rows_by_id[row_id], **row}
+    elif profile and profile in rows_by_profile:
+        source = {**rows_by_profile[profile], **row}
+    return compact_compare_profile(source)
+
+
+def promising_rejected_profiles(
+    rec: dict[str, Any],
+    rows: list[dict[str, Any]],
+    *,
+    limit: int = 5,
+) -> list[dict[str, Any]]:
+    rejected = rec.get("rejected_profiles", [])
+    if not isinstance(rejected, list) or not rejected:
+        rejected = [
+            row for row in rows
+            if serving_row_has_usable_metrics(row)
+        ]
+    compacted = [
+        compact_compare_profile(row)
+        for row in rejected
+        if isinstance(row, dict)
+    ]
+    compacted = [row for row in compacted if row is not None]
+    return sorted(
+        compacted,
+        key=lambda row: (
+            -(row.get("exact_top10_admission_recall") or 0.0),
+            -(row.get("ndcg@10") or 0.0),
+            row.get("p95_ms") if row.get("p95_ms") is not None else float("inf"),
+            str(row.get("profile") or ""),
+        ),
+    )[:limit]
+
+
+def compare_single_serving_artifact(path: Path, report: dict[str, Any]) -> dict[str, Any]:
+    rows = serving_rows_from_artifact(report)
+    rows_by_id = {
+        serving_row_id(row): row for row in rows
+    }
+    rows_by_profile = {
+        str(row.get("profile")): row for row in rows
+        if row.get("profile") is not None
+    }
+    rec = report.get("document_node_serving_recommendation", {})
+    if not isinstance(rec, dict):
+        rec = {}
+    grid = report.get("document_node_serving_grid", {})
+    if not isinstance(grid, dict):
+        grid = {}
+    coverage = grid.get("learned_sparse_coverage")
+    if not isinstance(coverage, dict):
+        coverage = None
+    artifact_report = {
+        **report,
+        "document_node_serving_recommendation": rec,
+        "document_node_serving_grid": grid,
+    }
+    annotate_serving_recommendation_evidence_level(artifact_report)
+    rec = artifact_report.get("document_node_serving_recommendation", rec)
+    if not isinstance(rec, dict):
+        rec = {}
+    evidence_level = serving_report_evidence_level(artifact_report)
+
+    return {
+        "artifact": portable_path(path),
+        "artifact_name": path.name,
+        "mode": compare_artifact_mode(path, report),
+        "evidence_level": evidence_level,
+        "evidence_safety_label": serving_evidence_safety_label(evidence_level),
+        "profile_count": len(rows),
+        "best_latency_safe": compare_recommendation_row(
+            rec,
+            "best_latency_safe",
+            rows_by_id,
+            rows_by_profile,
+        ),
+        "best_quality": compare_recommendation_row(
+            rec,
+            "best_quality",
+            rows_by_id,
+            rows_by_profile,
+        ),
+        "best_balanced": compare_recommendation_row(
+            rec,
+            "best_balanced",
+            rows_by_id,
+            rows_by_profile,
+        ),
+        "top_promising_rejected_profiles": promising_rejected_profiles(rec, rows),
+        "learned_sparse_coverage": coverage,
+        "has_recommendation": bool(rec),
+    }
+
+
+def compare_serving_artifacts(paths: Sequence[Path]) -> dict[str, Any]:
+    artifacts: list[dict[str, Any]] = []
+    for path in paths:
+        report = json.loads(path.read_text(encoding="utf-8"))
+        if not isinstance(report, dict):
+            raise SystemExit(f"artifact is not a JSON object: {path}")
+        artifacts.append(compare_single_serving_artifact(path, report))
+    return {
+        "suite": "dbpedia_colbert_serving_artifact_compare",
+        "generated_at": datetime.now(timezone.utc).isoformat(),
+        "artifacts": artifacts,
+        "artifact_count": len(artifacts),
+    }
+
+
+def markdown_compare_serving_artifacts(report: dict[str, Any]) -> str:
+    lines = [
+        "# DBpedia ColBERT Serving Artifact Comparison",
+        "",
+        "| artifact | evidence | mode | best_latency_safe | best_quality | best_balanced | p50 ms | p95 ms | top1 | top10 | recall@10 | ndcg@10 | mrr@10 | index bytes | coverage | notes |",
+        "|---|---|---|---|---|---|---:|---:|---:|---:|---:|---:|---:|---:|---|---|",
+    ]
+
+    def metric_text(row: dict[str, Any] | None, key: str) -> str:
+        if not isinstance(row, dict):
+            return ""
+        value = row.get(key)
+        if value is None:
+            return ""
+        if isinstance(value, float):
+            return f"{value:.6f}" if key.endswith("@10") or "admission" in key else f"{value:.3f}"
+        return str(value)
+
+    def profile_text(row: dict[str, Any] | None) -> str:
+        if not isinstance(row, dict) or not row:
+            return ""
+        return str(row.get("profile") or row.get("id") or "")
+
+    for artifact in report.get("artifacts", []):
+        if not isinstance(artifact, dict):
+            continue
+        best = artifact.get("best_latency_safe")
+        if not isinstance(best, dict):
+            best = artifact.get("best_quality")
+        if not isinstance(best, dict):
+            best = artifact.get("best_balanced")
+        if not isinstance(best, dict):
+            best = {}
+        mode = artifact.get("mode", {})
+        if not isinstance(mode, dict):
+            mode = {}
+        coverage = artifact.get("learned_sparse_coverage")
+        coverage_text = ""
+        if isinstance(coverage, dict):
+            coverage_text = "docs={doc} queries={query} partial={partial}".format(
+                doc=coverage.get("doc_coverage_ratio", ""),
+                query=coverage.get("query_coverage_ratio", ""),
+                partial=bool(coverage.get("partial_coverage", False)),
+            )
+        notes = list(mode.get("notes", []) or [])
+        if artifact.get("evidence_level") == "smoke" and any(
+            serving_row_uses_learned_sparse(item)
+            for item in [
+                artifact.get("best_latency_safe") or {},
+                artifact.get("best_quality") or {},
+                artifact.get("best_balanced") or {},
+                *(artifact.get("top_promising_rejected_profiles", []) or []),
+            ]
+            if isinstance(item, dict)
+        ):
+            notes.append(
+                "hypothesis: learned_sparse may beat BM25 quality; needs full coverage validation"
+            )
+        lines.append(
+            "| {artifact} | {evidence} | {mode} | {latency} | {quality} | {balanced} | {p50} | {p95} | {top1} | {top10} | {recall} | {ndcg} | {mrr} | {index_bytes} | {coverage} | {notes} |".format(
+                artifact=artifact.get("artifact_name", ""),
+                evidence=artifact.get("evidence_level", mode.get("evidence_level", "")),
+                mode=mode.get("mode", ""),
+                latency=profile_text(artifact.get("best_latency_safe")),
+                quality=profile_text(artifact.get("best_quality")),
+                balanced=profile_text(artifact.get("best_balanced")),
+                p50=metric_text(best, "p50_ms"),
+                p95=metric_text(best, "p95_ms"),
+                top1=metric_text(best, "exact_top1_admission_rate"),
+                top10=metric_text(best, "exact_top10_admission_recall"),
+                recall=metric_text(best, "recall@10"),
+                ndcg=metric_text(best, "ndcg@10"),
+                mrr=metric_text(best, "mrr@10"),
+                index_bytes=best.get("index_bytes", "") if isinstance(best, dict) else "",
+                coverage=coverage_text,
+                notes=", ".join(str(note) for note in dict.fromkeys(notes)),
+            )
+        )
+
+    lines.extend(["", "## Promising Rejected Profiles", ""])
+    for artifact in report.get("artifacts", []):
+        if not isinstance(artifact, dict):
+            continue
+        rejected = artifact.get("top_promising_rejected_profiles", [])
+        if not isinstance(rejected, list) or not rejected:
+            lines.extend([f"### {artifact.get('artifact_name', '')}", "", "- None", ""])
+            continue
+        lines.extend([
+            f"### {artifact.get('artifact_name', '')}",
+            "",
+            "| profile | evidence | p95 ms | top10 | ndcg@10 | reasons | settings |",
+            "|---|---|---:|---:|---:|---|---|",
+        ])
+        for row in rejected:
+            if not isinstance(row, dict):
+                continue
+            settings = row.get("settings", {})
+            if not isinstance(settings, dict):
+                settings = {}
+            setting_text = ", ".join(
+                f"{key}={value}"
+                for key, value in settings.items()
+                if value not in (None, "", "off")
+            )
+            reasons = row.get("failure_reasons", [])
+            if not isinstance(reasons, list):
+                reasons = []
+            lines.append(
+                "| {profile} | {evidence} | {p95} | {top10} | {ndcg} | {reasons} | {settings} |".format(
+                    profile=row.get("profile", ""),
+                    evidence=row.get("evidence_level", artifact.get("evidence_level", "")),
+                    p95=metric_text(row, "p95_ms"),
+                    top10=metric_text(row, "exact_top10_admission_recall"),
+                    ndcg=metric_text(row, "ndcg@10"),
+                    reasons=", ".join(str(reason) for reason in reasons),
+                    settings=setting_text,
+                )
+            )
+        lines.append("")
+    return "\n".join(lines)
 
 
 def compute_document_node_token_pooling_recommendation(
@@ -8739,6 +15304,107 @@ def _self_check_document_node_serving_recommendation() -> None:
     assert exact_baseline_missing["best_quality"]["profile"] == "baseline_missing_quality"
     assert exact_baseline_missing["best_quality"]["selection_basis"] == "ndcg@10"
 
+    sparse_full = _synthetic_serving_row(
+        "proxy_normalized_mean_f16_learned_sparse_rescue",
+        p95=6.0,
+        admission=0.95,
+        ndcg=0.88,
+        storage="f16",
+    )
+    sparse_full.update({
+        "sparse_candidate_source": "learned_sparse",
+        "learned_sparse_coverage": {
+            "loaded_documents": 100,
+            "learned_sparse_documents": 100,
+            "doc_coverage_ratio": 1.0,
+            "loaded_queries": 20,
+            "learned_sparse_queries": 20,
+            "query_coverage_ratio": 1.0,
+            "partial_coverage": False,
+            "warnings": [],
+        },
+        "learned_sparse_partial_coverage": False,
+    })
+    sparse_partial = _synthetic_serving_row(
+        "proxy_partial_learned_sparse",
+        p95=4.0,
+        admission=0.99,
+        ndcg=0.89,
+        storage="f16",
+    )
+    sparse_partial.update({
+        "sparse_candidate_source": "learned_sparse",
+        "learned_sparse_coverage": {
+            "loaded_documents": 100,
+            "learned_sparse_documents": 80,
+            "doc_coverage_ratio": 0.8,
+            "loaded_queries": 20,
+            "learned_sparse_queries": 10,
+            "query_coverage_ratio": 0.5,
+            "partial_coverage": True,
+            "warnings": [
+                "learned_sparse_doc_coverage_below_100pct",
+                "learned_sparse_query_coverage_below_100pct",
+            ],
+        },
+        "learned_sparse_partial_coverage": True,
+    })
+    sparse_plumbing = _synthetic_serving_row(
+        "proxy_hash_plumbing_learned_sparse",
+        p95=3.0,
+        admission=0.99,
+        ndcg=0.89,
+        storage="f16",
+    )
+    sparse_plumbing.update({
+        "sparse_candidate_source": "learned_sparse",
+        "learned_sparse_feature_source": "hash_plumbing",
+        "learned_sparse_feature_warnings": ["learned_sparse_hash_plumbing_only"],
+        "learned_sparse_plumbing_only": True,
+        "learned_sparse_safe_serving_evidence": False,
+        "learned_sparse_coverage": {
+            "loaded_documents": 100,
+            "learned_sparse_documents": 100,
+            "doc_coverage_ratio": 1.0,
+            "loaded_queries": 20,
+            "learned_sparse_queries": 20,
+            "query_coverage_ratio": 1.0,
+            "partial_coverage": False,
+            "warnings": ["learned_sparse_hash_plumbing_only"],
+            "learned_sparse_plumbing_only": True,
+            "learned_sparse_safe_serving_evidence": False,
+        },
+        "learned_sparse_partial_coverage": False,
+    })
+    sparse_rec = compute_document_node_serving_recommendation(
+        {"results": [sparse_partial, sparse_full, sparse_plumbing]},
+        exact_baseline={"available": True, "metrics": {"ndcg@10": 0.90}},
+        min_top10_admission=0.80,
+        min_ndcg_ratio_vs_exact=0.95,
+        max_p95_ms=0.0,
+    )
+    assert (
+        sparse_rec["best_latency_safe"]["profile"]
+        == "proxy_normalized_mean_f16_learned_sparse_rescue"
+    )
+    sparse_rejected = {
+        item["profile"]: item["failure_reasons"]
+        for item in sparse_rec["rejected_profiles"]
+    }
+    assert "learned_sparse_partial_coverage" in sparse_rejected["proxy_partial_learned_sparse"]
+    assert "learned_sparse_missing_doc_features" in sparse_rejected["proxy_partial_learned_sparse"]
+    assert "learned_sparse_missing_query_features" in sparse_rejected["proxy_partial_learned_sparse"]
+    assert "learned_sparse_plumbing_only" in sparse_rejected["proxy_hash_plumbing_learned_sparse"]
+    sparse_accepted = compute_document_node_serving_recommendation(
+        {"results": [sparse_partial, sparse_full]},
+        exact_baseline={"available": True, "metrics": {"ndcg@10": 0.90}},
+        min_top10_admission=0.80,
+        min_ndcg_ratio_vs_exact=0.95,
+        max_p95_ms=0.0,
+        accept_partial_learned_sparse_coverage=True,
+    )
+    assert sparse_accepted["best_latency_safe"]["profile"] == "proxy_partial_learned_sparse"
+
     none_pass = compute_document_node_serving_recommendation(
         {
             "results": [
@@ -8962,6 +15628,109 @@ def _self_check_document_node_serving_recommendation() -> None:
         in proxy_hint_rejected["normalized_mean_exhaustive_low_admission"]
     )
     assert "try_centroid_mean_proxy" in proxy_hint_rejected["max_pool_exhaustive_low_admission"]
+
+    fast_unsafe_proxy = _synthetic_serving_row(
+        "proxy_normalized_mean_f16",
+        p95=20.0,
+        admission=0.14,
+        ndcg=0.14,
+        storage="f16",
+        proxy_encoder="normalized_mean",
+        ef=800,
+        oversampling=1,
+    )
+    centroid_proxy_failure = _synthetic_serving_row(
+        "centroid_mean_f16",
+        p95=18.869,
+        admission=0.174,
+        ndcg=0.224,
+        storage="f16",
+        proxy_encoder="centroid_mean",
+        centroids="kmeans",
+        ef=200,
+        oversampling=2,
+    )
+    low_ef_proxy = _synthetic_serving_row(
+        "proxy_normalized_mean_low_ef",
+        p95=18.0,
+        admission=0.70,
+        ndcg=0.70,
+        storage="f16",
+        proxy_encoder="normalized_mean",
+        ef=100,
+        stats_sample={"proxy_candidate_limit_source": "search_ef"},
+    )
+    proxy_quality_rec = compute_document_node_serving_recommendation(
+        {"results": [fast_unsafe_proxy, centroid_proxy_failure, low_ef_proxy]},
+        exact_baseline=exact,
+        min_top10_admission=0.80,
+        min_ndcg_ratio_vs_exact=0.95,
+        max_p95_ms=0.0,
+    )
+    proxy_quality_rejected = {
+        item["profile"]: item
+        for item in proxy_quality_rec["rejected_profiles"]
+    }
+    assert (
+        "fast_unsafe_proxy_baseline"
+        in proxy_quality_rejected["proxy_normalized_mean_f16"]["report_classification"]
+    )
+    assert (
+        "proxy_quality_not_threshold_limited"
+        in proxy_quality_rejected["proxy_normalized_mean_f16"]["report_classification"]
+    )
+    assert (
+        "proxy_admission_failure"
+        in proxy_quality_rejected["centroid_mean_f16"]["report_classification"]
+    )
+    assert (
+        "fast_unsafe_proxy_baseline"
+        not in proxy_quality_rejected["centroid_mean_f16"]["report_classification"]
+    )
+    high_ef_hints = proxy_quality_rejected["proxy_normalized_mean_f16"][
+        "admission_improvement_hints"
+    ]
+    assert "try_higher_ef_or_entry_sample" not in high_ef_hints
+    assert "try_learned_sparse_rescue" in high_ef_hints
+    assert "try_bm25_rescue" in high_ef_hints
+    assert "try_centroid_lite_focus" in high_ef_hints
+    assert "try_quantized_inverted_experimental" in high_ef_hints
+    assert "try_learned_projection_or_fde" in high_ef_hints
+    assert (
+        "try_max_pool_or_centroid_mean_proxy_secondary"
+        in high_ef_hints
+    )
+    low_ef_hints = proxy_quality_rejected["proxy_normalized_mean_low_ef"][
+        "admission_improvement_hints"
+    ]
+    assert "try_higher_ef_or_entry_sample" in low_ef_hints
+    assert proxy_quality_rec["recommendation_notes"] == [
+        (
+            "Pure proxy ANN is not a safe ColBERT retrieval path for this "
+            "artifact; use it only as a latency baseline."
+        )
+    ]
+    proxy_quality_markdown = markdown_benchmark_summary({
+        "document_node_serving_recommendation": proxy_quality_rec,
+    })
+    assert "Pure proxy ANN is not a safe ColBERT retrieval path" in proxy_quality_markdown
+    assert "fast_unsafe_proxy_baseline" in proxy_quality_markdown
+    pure_colbert_proxy_rec = compute_document_node_serving_recommendation(
+        {
+            "pure_colbert_only": True,
+            "results": [fast_unsafe_proxy, centroid_proxy_failure, low_ef_proxy],
+        },
+        exact_baseline=exact,
+        min_top10_admission=0.80,
+        min_ndcg_ratio_vs_exact=0.95,
+        max_p95_ms=0.0,
+    )
+    pure_colbert_rec_text = json.dumps(pure_colbert_proxy_rec, sort_keys=True)
+    assert "bm25" not in pure_colbert_rec_text.lower()
+    assert "learned_sparse" not in pure_colbert_rec_text.lower()
+    assert "try_centroid_lite_focus" in pure_colbert_rec_text
+    assert "try_quantized_inverted_experimental" in pure_colbert_rec_text
+    assert "try_learned_projection_or_fde" in pure_colbert_rec_text
 
     experimental_rows = [
         _synthetic_serving_row(
@@ -9520,6 +16289,8 @@ def _self_check_document_node_serving_stats_extraction() -> None:
         "centroid_bitset_docs_set": 101,
         "centroid_bitset_docs_after_threshold": 99,
         "centroid_bitset_prefilter_time_us": 44,
+        "centroid_bitset_time_us": 44,
+        "centroid_bitset_candidates": 99,
         "centroid_bitset_memory_bytes": 128,
         "multivector_tokens_original": 6400,
         "multivector_tokens_pooled": 3200,
@@ -9532,6 +16303,8 @@ def _self_check_document_node_serving_stats_extraction() -> None:
         "multivector_bm25_injection_exact_reranked": 140,
         "learned_sparse_candidates": 0,
         "quantized_inverted_postings_touched": 0,
+        "quantized_inverted_codebook_version": 3,
+        "quantized_inverted_assignment_time_us": 42,
         "quantized_inverted_posting_bytes": 2048,
         "quantized_inverted_sidecar_bytes": 2304,
         "quantized_inverted_compact_kernel": "neon",
@@ -9577,9 +16350,13 @@ def _self_check_document_node_serving_stats_extraction() -> None:
     assert extracted["centroid_bitset_docs_set"] == 101
     assert extracted["centroid_bitset_docs_after_threshold"] == 99
     assert extracted["centroid_bitset_prefilter_time_us"] == 44
+    assert extracted["centroid_bitset_time_us"] == 44
+    assert extracted["centroid_bitset_candidates"] == 99
     assert extracted["centroid_bitset_memory_bytes"] == 128
     assert extracted["quantized_inverted_posting_bytes"] == 2048
     assert extracted["quantized_inverted_sidecar_bytes"] == 2304
+    assert extracted["quantized_inverted_codebook_version"] == 3
+    assert extracted["quantized_inverted_assignment_time_us"] == 42
     assert extracted["quantized_inverted_compact_kernel"] == "neon"
     assert extracted["quantized_inverted_compact_score_us"] == 321
     assert extracted["quantized_inverted_compact_docs_scored"] == 12
@@ -9692,6 +16469,22 @@ def _self_check_document_node_serving_grid_serialization() -> None:
                     "exact_rerank_docs": {"p50": 100, "p95": 100},
                     "reservoirs_enabled_queries": 0,
                     "reservoir_union_docs": {"count": 1, "mean": 0.0, "p95": 0.0},
+                    "centroid_lists_visited": {"count": 1, "p95": 12.0},
+                    "centroid_docs_touched": {
+                        "count": 1,
+                        "mean": 200.0,
+                        "p50": 200.0,
+                        "p95": 250.0,
+                        "max": 250.0,
+                    },
+                    "centroid_pruned_docs": {"count": 1, "p95": 50.0},
+                    "centroid_postings_touched": {"count": 1, "p95": 1200.0},
+                    "centroid_postings_skipped": {"count": 1, "p95": 300.0},
+                    "centroid_posting_cap_strategy": {
+                        "count": 1,
+                        "values": ["uniform_stride"],
+                    },
+                    "centroid_candidates": {"count": 1, "p95": 800.0},
                 },
             },
             "exact_top1_admission_rate": 0.75,
@@ -9729,7 +16522,10 @@ def _self_check_document_node_serving_grid_serialization() -> None:
         oversampling=2,
         index_phase={
             "index_bytes": 4096,
-            "index_stats": {"multivector_proxy_encoder": "normalized_mean"},
+            "index_stats": {
+                "multivector_proxy_encoder": "normalized_mean",
+                "node_count": 1000,
+            },
         },
         admission=admission,
         qrels={},
@@ -9768,6 +16564,8 @@ def _self_check_document_node_serving_grid_serialization() -> None:
     assert row["graph_entry_sample_scored"] == 32
     assert row["graph_entry_sidecar_scored"] == 128
     assert row["graph_entry_sidecar_selected"] == 8
+    assert row["centroid_docs_touched_ratio"]["p95"] == 0.25
+    assert row["centroid_posting_cap_strategy"]["values"] == ["uniform_stride"]
     assert row["graph_traversal_time_us"] == 1234
     assert row["exact_rerank_time_us"] == 5678
     assert row["sidecar_query_bytes_touched"] == 65536
@@ -9903,6 +16701,32 @@ def _self_check_document_node_serving_grid_serialization() -> None:
     assert "candidate budget" in markdown
     assert "exact rerank k" in markdown
 
+    colbert_grid = json.loads(json.dumps({
+        "document_node_serving_grid": {
+            **grid["document_node_serving_grid"],
+            "mode": "colbert_1m",
+            "colbert_1m_grid": True,
+            "pure_colbert_only": True,
+            "smoke_only": False,
+            "serving_evidence": True,
+            "effective_budget_sweep": list(DOCUMENT_NODE_COLBERT_1M_GRID_BUDGETS),
+            "executed_budgets": [max(DOCUMENT_NODE_COLBERT_1M_GRID_BUDGETS)],
+            "effective_profiles": list(DOCUMENT_NODE_COLBERT_1M_GRID_BASE_PROFILES),
+            "effective_ef_grid": list(DOCUMENT_NODE_COLBERT_1M_GRID_EF),
+            "effective_oversampling_grid": list(DOCUMENT_NODE_COLBERT_1M_GRID_OVERSAMPLING),
+        },
+        "document_node_colbert_1m_grid": {
+            **grid["document_node_serving_grid"],
+            "mode": "colbert_1m",
+            "colbert_1m_grid": True,
+            "pure_colbert_only": True,
+        },
+    }))
+    colbert_markdown = markdown_benchmark_summary(colbert_grid)
+    assert "### Pure ColBERT DBpedia 1M Grid" in colbert_markdown
+    assert "Pure ColBERT only: `True`" in colbert_markdown
+    assert "Final SQL ranking remains exact MaxSim" in colbert_markdown
+
     base_args = argparse.Namespace(
         admission_budget_sweep="25,50",
         admission_budget_sweep_explicit=True,
@@ -9937,6 +16761,28 @@ def _self_check_document_node_serving_grid_serialization() -> None:
     assert reservoir_profile_args.multivector_candidate_reservoirs == "balanced"
     assert reservoir_profile_args.multivector_per_token_doc_reservoir_k == 2
     assert reservoir_profile_args.multivector_coverage_reservoir_k == 20
+    combined_rescue_profile = DocumentNodeServingProfile(
+        name="proxy_max_pool_f16_reservoir_balanced_learned_sparse_rescue",
+        candidate_source="proxy_vector",
+        branch_plan="dense_only",
+        sparse_candidate_source="learned_sparse",
+        proxy_encoder="max_pool",
+        storage_kind="f16",
+        candidate_reservoirs="balanced",
+        per_token_doc_reservoir_k=2,
+        coverage_reservoir_k=20,
+    )
+    combined_rescue_args = document_node_serving_profile_args(
+        base_args,
+        combined_rescue_profile,
+        ef=50,
+        oversampling=1,
+    )
+    assert combined_rescue_args.multivector_proxy_encoder == "max_pool"
+    assert combined_rescue_args.multivector_sparse_candidate_source == "learned_sparse"
+    assert combined_rescue_args.multivector_candidate_reservoirs == "balanced"
+    assert combined_rescue_args.multivector_candidate_source == "proxy_vector"
+    assert combined_rescue_profile.plain_fallback == "off"
 
 
 def _self_check_candidate_underfill_diagnostics() -> None:
@@ -10178,6 +17024,50 @@ def _self_check_document_node_candidate_source_deltas() -> None:
     deltas = compute_document_node_candidate_source_deltas(rows)
     assert deltas["comparison_count"] == 8
     assert deltas["missing_baseline_count"] == 0
+    no_bottleneck = document_node_graph_entry_selection_bottleneck(deltas)
+    assert no_bottleneck["available"] is True
+    assert no_bottleneck["graph_entry_selection_bottleneck_confirmed"] is False
+    confirming_bottleneck = document_node_graph_entry_selection_bottleneck({
+        "rows": [
+            {
+                "comparison": "entry_sidecar",
+                "profile": "proxy_normalized_mean_f16_entry_sidecar_128",
+                "baseline_profile": "proxy_normalized_mean_f16",
+                "ef": 800,
+                "oversampling": 1,
+                "candidate_budget": 1600,
+                "exact_top10_admission_recall_delta": 0.125,
+                "exact_top10_admission_recall": 0.45,
+                "baseline_exact_top10_admission_recall": 0.325,
+                "p95_ms_delta": 4.0,
+                "p95_ms": 24.0,
+                "baseline_p95_ms": 20.0,
+                "evidence_usable": True,
+                "candidate_evidence": {
+                    "graph_entry_sidecar_scored": 512,
+                    "graph_entry_sidecar_selected": 32,
+                },
+            },
+            {
+                "comparison": "entry_sidecar",
+                "profile": "proxy_max_pool_f16_entry_sidecar_128",
+                "baseline_profile": "proxy_max_pool_f16",
+                "ef": 800,
+                "oversampling": 1,
+                "candidate_budget": 1600,
+                "exact_top10_admission_recall_delta": 0.20,
+                "p95_ms_delta": 10.0,
+                "p95_ms": 30.0,
+                "baseline_p95_ms": 20.0,
+                "evidence_usable": True,
+            },
+        ],
+    })
+    assert confirming_bottleneck["graph_entry_selection_bottleneck_confirmed"] is True
+    assert (
+        confirming_bottleneck["best_confirming_delta"]["profile"]
+        == "proxy_normalized_mean_f16_entry_sidecar_128"
+    )
     summary = document_node_candidate_source_delta_summary(deltas)
     assert summary["available"] is True
     assert summary["usable_comparison_count"] == 7
@@ -10297,6 +17187,8 @@ def _self_check_document_node_candidate_source_deltas() -> None:
             "queries_available": 1,
             "results": rows,
             "candidate_source_deltas": deltas,
+            "graph_entry_selection_bottleneck": no_bottleneck,
+            "graph_entry_selection_bottleneck_confirmed": False,
         }
     }
     grid["document_node_serving_recommendation"] = (
@@ -10317,6 +17209,7 @@ def _self_check_document_node_candidate_source_deltas() -> None:
     assert "proxy_max_pool_f16_bm25_rescue" in markdown
     assert "entry_sample=32/scored=32" in markdown
     assert "entry_sidecar/scored=115/selected=8" in markdown
+    assert "Graph entry selection bottleneck confirmed: `False`" in markdown
     assert "reservoirs=balanced/enabled=0/union_p95=0.0" in markdown
     assert "candidate_reservoirs_not_executed" in markdown
     assert "#### Candidate-source delta summary" in markdown
@@ -10324,14 +17217,15 @@ def _self_check_document_node_candidate_source_deltas() -> None:
 
 
 def _self_check_document_node_serving_build_only_serialization() -> None:
-    profile = document_node_serving_profiles(
+    profiles = document_node_serving_profiles(
         include_experimental=False,
         include_proxy_encoder_variants=False,
         include_bm25_rescue=False,
         include_learned_sparse_rescue=False,
         include_reservoirs=False,
         centroid_count="auto",
-    )[2]
+    )
+    profile = {item.name: item for item in profiles}["centroid_mean_f16"]
     signature = (
         ("multivector_centroids", "kmeans"),
         ("multivector_proxy_encoder", "centroid_mean"),
@@ -10678,6 +17572,35 @@ def _self_check_document_node_serving_latency_only() -> None:
     assert any("exact_kernel_scalar" in warning for warning in warnings)
     assert "native_cache_built_this_scan" in warnings
 
+    proxy_only_docmap_stats = {
+        "multivector_candidate_source": "proxy_vector",
+        "multivector_doc_graph_docs_scored": 800,
+        "multivector_doc_graph_candidates": 800,
+        "proxy_candidates": 800,
+        "multivector_doc_sidecar_vectors_loaded": 0,
+        "multivector_doc_sidecar_resident_vectors_loaded": 0,
+        "multivector_doc_sidecar_bytes_touched": 28_110_784,
+        "multivector_doc_sidecar_docmap_bytes_touched": 28_110_784,
+        "multivector_docmap_bytes": 28_110_784,
+        "proxy_full_sidecar_bytes_touched": 0,
+        "proxy_vector_uses_full_sidecar_for_graph": False,
+        "proxy_vector_near_exhaustive_sidecar_touch": False,
+        "multivector_doc_sidecar_cache_mode": "resident",
+        "multivector_doc_sidecar_pages_read": 0,
+        "multivector_exact_rerank_docs": 100,
+        "multivector_exact_kernel": "blocked_neon",
+        "native_cache_built_this_scan": False,
+    }
+    proxy_only_warnings = validate_serving_scan_path(
+        proxy_only_docmap_stats,
+        slow_args,
+        slow_profile,
+    )
+    assert not any(
+        "proxy_vector_near_exhaustive_sidecar_touch" in warning
+        for warning in proxy_only_warnings
+    )
+
     try:
         fail_on_serving_slow_path_if_requested(
             warnings,
@@ -10714,6 +17637,925 @@ def _self_check_document_node_serving_latency_only() -> None:
     assert rec["best_latency_safe"]["profile"] == "warned"
 
 
+def _self_check_document_node_colbert_beir_quality_only() -> None:
+    args = argparse.Namespace(
+        document_node_colbert_include_experimental=False,
+        document_node_colbert_1m_include_experimental=False,
+        document_node_colbert_profile="proxy_normalized_mean_proxy_only",
+        document_node_colbert_candidate_k=800,
+        document_node_colbert_exact_rerank_k=100,
+        document_node_colbert_ef=800,
+        document_node_colbert_oversampling=1,
+        document_node_colbert_centroid_lite_cap=0,
+        document_node_serving_grid_include_experimental=False,
+        document_node_serving_grid_include_proxy_encoders=False,
+        document_node_serving_grid_include_learned_projection=False,
+        document_node_serving_grid_include_bm25_rescue=False,
+        document_node_serving_grid_include_learned_sparse_rescue=False,
+        document_node_serving_grid_include_reservoirs=False,
+        document_node_serving_grid_include_centroid_lite_caps=False,
+        document_node_serving_grid_include_entry_samples=False,
+        document_node_serving_grid_include_entry_sidecar=False,
+        document_node_serving_grid_proxy_admission_focus=False,
+        document_node_serving_grid_centroid_lite_focus=False,
+        document_node_serving_grid_token_pooling_focus=False,
+        document_node_serving_grid_learned_sparse_focus=False,
+        document_node_serving_grid_proxy_oracle_focus=False,
+        document_node_colbert_proxy_oracle_focus=False,
+        document_node_colbert_centroid_lite_focus=False,
+        document_node_colbert_entry_focus=False,
+        document_node_colbert_quantized_inverted_focus=False,
+        document_node_colbert_1m_grid=False,
+        document_node_colbert_1m_include_entry_samples=False,
+        document_node_colbert_1m_include_entry_sidecar=False,
+        document_node_colbert_1m_profile="",
+        document_node_colbert_1m_index_signature="",
+        document_node_colbert_1m_plan_only=False,
+        document_node_colbert_1m_build_only=False,
+        document_node_colbert_1m_evaluate_only=False,
+        document_node_serving_grid_profiles="",
+        document_node_serving_grid_smoke=False,
+        document_node_serving_grid_centroid_lite_posting_caps=(
+            DOCUMENT_NODE_SERVING_GRID_CENTROID_LITE_CAP_SWEEP
+        ),
+        document_node_serving_grid_entry_sample_counts=(
+            DOCUMENT_NODE_SERVING_GRID_ENTRY_SAMPLE_SWEEP
+        ),
+        document_node_serving_grid_entry_sidecar_representatives=(
+            DOCUMENT_NODE_SERVING_GRID_ENTRY_SIDECAR_SWEEP
+        ),
+        multivector_centroid_count="auto",
+        multivector_token_pooling_min_tokens=16,
+        reuse_index=False,
+        require_existing_index=False,
+        no_create_index=False,
+        final_k=10,
+        quality_k=10,
+    )
+    profile = document_node_colbert_beir_quality_profile(args)
+    assert profile.name == "proxy_normalized_mean_proxy_only"
+    assert profile.candidate_source == "proxy_vector"
+    mode_args, selected_profile, effective_rerank_k = (
+        document_node_colbert_beir_quality_args(args)
+    )
+    assert selected_profile.name == profile.name
+    assert effective_rerank_k == 100
+    assert mode_args.multivector_doc_candidate_k == 800
+    assert mode_args.multivector_exact_rerank_k == 100
+    assert mode_args.multivector_sparse_candidate_source == "off"
+    assert mode_args.multivector_bm25_candidate_injection == "off"
+    assert mode_args.multivector_branch_plan == "dense_only"
+
+    capped_args, _, capped_rerank_k = document_node_colbert_beir_quality_args(
+        clone_args(
+            args,
+            document_node_colbert_candidate_k=25,
+            document_node_colbert_exact_rerank_k=100,
+        )
+    )
+    assert capped_args.multivector_doc_candidate_k == 25
+    assert capped_args.multivector_exact_rerank_k == 25
+    assert capped_rerank_k == 25
+
+    try:
+        document_node_colbert_beir_quality_profile(
+            clone_args(
+                args,
+                document_node_colbert_profile="quantized_inverted_experimental_f32",
+            )
+        )
+    except SystemExit as exc:
+        assert "--document-node-colbert-include-experimental" in str(exc)
+    else:
+        raise AssertionError("experimental BEIR-quality profile was not guarded")
+
+    loop = {
+        "latency": {
+            "p50_ms": 1.0,
+            "p95_ms": 2.0,
+            "p99_ms": 3.0,
+            "qps_total": 10.0,
+        },
+        "query_count": 2,
+        "retrieval_query_count": 2,
+        "top_docs_by_query": {
+            "q1": ["d1", "d3"],
+            "q2": ["d4", "d9"],
+        },
+        "scan_stats_summary": {
+            "first_selected": {
+                "multivector_candidate_source": "proxy_vector",
+                "proxy_encoder_kind": "normalized_mean",
+            },
+            "last_selected": {
+                "multivector_exact_kernel": "blocked_neon",
+            },
+            "stats_available": {"core": True, "phase_timing": True},
+            "field_summary": {
+                "multivector_doc_graph_docs_scored": {"p50": 800, "p95": 900},
+                "multivector_doc_graph_edges_visited": {"p50": 2400, "p95": 2600},
+                "multivector_exact_rerank_docs": {"p50": 100, "p95": 100},
+                "multivector_exact_rerank_pairs": {"p50": 227000, "p95": 250000},
+                "multivector_exact_maxsim_rerank_time_us": {
+                    "p50": 5000,
+                    "p95": 8000,
+                },
+            },
+        },
+        "serving_slow_path_warnings": [],
+        "serving_slow_path_failed": False,
+    }
+    qrels = {
+        "q1": {"d1": 1, "d2": 1},
+        "q2": {"d9": 1},
+    }
+    report = build_document_node_colbert_beir_quality_report(
+        args=args,
+        profile=profile,
+        effective_rerank_k=effective_rerank_k,
+        index_phase={"index_bytes": 1234, "reloptions": []},
+        loop=loop,
+        qrels=qrels,
+        counts={"docs_loaded": 1000, "queries_loaded": 2, "qrels_loaded": 3},
+        query_limit={
+            "requested_max_queries": 2,
+            "effective_max_queries": 2,
+            "query_count_limited_by_artifact": False,
+        },
+        started=time.perf_counter(),
+    )
+    assert report["pure_colbert_only"] is True
+    assert report["exact_admission_available"] is False
+    assert report["exact_admission_baseline_calls"] == 0
+    assert report["recall@10"] == 0.75
+    assert report["mrr@10"] == 0.75
+    assert report["qrels_covered"] == 3
+    assert report["candidate_source_stats"]["last_selected"]["multivector_exact_kernel"] == "blocked_neon"
+
+    markdown = markdown_benchmark_summary({
+        "document_node_colbert_1m_beir_quality": report
+    })
+    assert "### Pure ColBERT BEIR quality, no exact admission" in markdown
+    assert "indexed retrieval only" in markdown
+
+    try:
+        build_document_node_colbert_beir_quality_report(
+            args=args,
+            profile=profile,
+            effective_rerank_k=effective_rerank_k,
+            index_phase={},
+            loop=loop,
+            qrels={},
+            counts={"docs_loaded": 0, "queries_loaded": 0, "qrels_loaded": 0},
+            query_limit={},
+            started=time.perf_counter(),
+        )
+    except SystemExit as exc:
+        assert "requires qrels" in str(exc)
+    else:
+        raise AssertionError("BEIR-quality report should fail without qrels")
+
+    names = set(run_document_node_colbert_1m_beir_quality_only.__code__.co_names)
+    assert "exact_admission_top" not in names
+    assert "run_admission_debug" not in names
+    assert "EXACT_SCAN_METHOD" not in names
+
+
+def _self_check_document_node_colbert_sampled_admission() -> None:
+    args = argparse.Namespace(
+        document_node_colbert_include_experimental=False,
+        document_node_colbert_1m_include_experimental=False,
+        document_node_colbert_profile="proxy_normalized_mean_proxy_only",
+        document_node_colbert_candidate_k=800,
+        document_node_colbert_exact_rerank_k=100,
+        document_node_colbert_ef=800,
+        document_node_colbert_oversampling=1,
+        document_node_colbert_centroid_lite_cap=0,
+        document_node_serving_grid_include_experimental=False,
+        document_node_serving_grid_include_proxy_encoders=False,
+        document_node_serving_grid_include_learned_projection=False,
+        document_node_serving_grid_include_bm25_rescue=False,
+        document_node_serving_grid_include_learned_sparse_rescue=False,
+        document_node_serving_grid_include_reservoirs=False,
+        document_node_serving_grid_include_centroid_lite_caps=False,
+        document_node_serving_grid_include_entry_samples=False,
+        document_node_serving_grid_include_entry_sidecar=False,
+        document_node_serving_grid_proxy_admission_focus=False,
+        document_node_serving_grid_centroid_lite_focus=False,
+        document_node_serving_grid_token_pooling_focus=False,
+        document_node_serving_grid_learned_sparse_focus=False,
+        document_node_serving_grid_proxy_oracle_focus=False,
+        document_node_colbert_proxy_oracle_focus=False,
+        document_node_colbert_centroid_lite_focus=False,
+        document_node_colbert_entry_focus=False,
+        document_node_colbert_quantized_inverted_focus=False,
+        document_node_colbert_1m_grid=False,
+        document_node_colbert_1m_include_entry_samples=False,
+        document_node_colbert_1m_include_entry_sidecar=False,
+        document_node_colbert_1m_profile="",
+        document_node_colbert_1m_index_signature="",
+        document_node_colbert_1m_plan_only=False,
+        document_node_colbert_1m_build_only=False,
+        document_node_colbert_1m_evaluate_only=False,
+        document_node_serving_grid_profiles="",
+        document_node_serving_grid_smoke=False,
+        document_node_serving_grid_centroid_lite_posting_caps=(
+            DOCUMENT_NODE_SERVING_GRID_CENTROID_LITE_CAP_SWEEP
+        ),
+        document_node_serving_grid_entry_sample_counts=(
+            DOCUMENT_NODE_SERVING_GRID_ENTRY_SAMPLE_SWEEP
+        ),
+        document_node_serving_grid_entry_sidecar_representatives=(
+            DOCUMENT_NODE_SERVING_GRID_ENTRY_SIDECAR_SWEEP
+        ),
+        multivector_centroid_count="auto",
+        multivector_token_pooling_min_tokens=16,
+        reuse_index=False,
+        require_existing_index=False,
+        no_create_index=False,
+        final_k=10,
+        quality_k=10,
+        oracle_input=Path("oracle.json"),
+    )
+    profile = document_node_colbert_sampled_admission_profile(args)
+    assert profile.name == "proxy_normalized_mean_proxy_only"
+    mode_args, selected_profile, effective_rerank_k = (
+        document_node_colbert_sampled_admission_args(args)
+    )
+    assert selected_profile.name == profile.name
+    assert effective_rerank_k == 100
+    assert mode_args.multivector_doc_candidate_k == 800
+    assert mode_args.multivector_exact_rerank_k == 100
+    assert mode_args.multivector_sparse_candidate_source == "off"
+    assert mode_args.multivector_bm25_candidate_injection == "off"
+    assert mode_args.multivector_branch_plan == "dense_only"
+
+    capped_args, capped_profile, capped_rerank_k = (
+        document_node_colbert_sampled_admission_args(
+            clone_args(
+                args,
+                document_node_colbert_profile="centroid_lite_centroid_only_cap_032",
+                document_node_colbert_candidate_k=25,
+                document_node_colbert_exact_rerank_k=100,
+            )
+        )
+    )
+    assert capped_profile.candidate_source == "centroid_lite"
+    assert capped_args.multivector_doc_candidate_k == 25
+    assert capped_args.multivector_exact_rerank_k == 25
+    assert capped_rerank_k == 25
+
+    try:
+        document_node_colbert_sampled_admission_profile(
+            clone_args(
+                args,
+                document_node_colbert_profile="quantized_inverted_experimental_f32",
+            )
+        )
+    except SystemExit as exc:
+        assert "--document-node-colbert-include-experimental" in str(exc)
+    else:
+        raise AssertionError("experimental sampled-admission profile was not guarded")
+
+    oracle_artifact = {
+        "metadata": {"top_k": 10, "doc_count": 1000, "query_count": 3},
+        "records": [
+            {
+                "record_type": "query_oracle",
+                "status": "completed",
+                "query_id": "q1",
+                "top_k": 10,
+                "doc_ids": ["d1", "d2", "d3"],
+            },
+            {
+                "record_type": "query_oracle",
+                "status": "completed",
+                "query_id": "q2",
+                "top_k": 10,
+                "rows": [
+                    {"doc_id": "d9", "rank": 1},
+                    {"doc_id": "d8", "rank": 2},
+                ],
+            },
+            {
+                "record_type": "query_oracle",
+                "status": "completed",
+                "query_id": "q_missing",
+                "top_k": 10,
+                "doc_ids": ["d10"],
+            },
+            {
+                "record_type": "query_oracle",
+                "status": "failed",
+                "query_id": "q_failed",
+            },
+        ],
+    }
+    completed = completed_exact_oracle_records(oracle_artifact)
+    assert [record["query_id"] for record in completed] == ["q1", "q2", "q_missing"]
+    q1_admission = sampled_oracle_admission_for_query(
+        retrieved_doc_ids=["d2", "d4", "d1"],
+        exact_rows=exact_oracle_record_top_rows(completed[0]),
+        oracle_top_k=10,
+    )
+    assert q1_admission["exact_top1_admitted"] is True
+    assert q1_admission["exact_top10_admission_recall"] == round(2 / 3, 6)
+    q2_admission = sampled_oracle_admission_for_query(
+        retrieved_doc_ids=["d7"],
+        exact_rows=exact_oracle_record_top_rows(completed[1]),
+        oracle_top_k=10,
+    )
+    aggregate = aggregate_sampled_oracle_admission([q1_admission, q2_admission])
+    assert aggregate["exact_top1_admission_rate"] == 0.5
+    assert aggregate["exact_top10_admission_recall"] == round((round(2 / 3, 6) + 0.0) / 2, 6)
+
+    loop = {
+        "latency": {
+            "p50_ms": 1.0,
+            "p95_ms": 2.0,
+            "p99_ms": 3.0,
+            "qps_total": 10.0,
+        },
+        "query_count": 2,
+        "retrieval_query_count": 2,
+        "top_docs_by_query": {
+            "q1": ["d2", "d4", "d1"],
+            "q2": ["d7"],
+        },
+        "scan_stats_summary": {
+            "first_selected": {"multivector_candidate_source": "proxy_vector"},
+            "last_selected": {"multivector_exact_kernel": "blocked_neon"},
+            "stats_available": {"core": True},
+            "field_summary": {
+                "multivector_exact_rerank_docs": {"p50": 100, "p95": 100},
+                "multivector_exact_maxsim_rerank_time_us": {"p50": 5000, "p95": 8000},
+            },
+        },
+        "serving_slow_path_warnings": [],
+        "serving_slow_path_failed": False,
+    }
+    report = build_document_node_colbert_sampled_admission_report(
+        args=args,
+        profile=profile,
+        effective_rerank_k=effective_rerank_k,
+        index_phase={"index_bytes": 1234, "reloptions": []},
+        loop=loop,
+        qrels={"q1": {"d1": 1}, "q2": {"d7": 1}},
+        counts={"docs_loaded": 1000, "queries_loaded": 3, "qrels_loaded": 2},
+        oracle_artifact=oracle_artifact,
+        oracle_records=completed[:2],
+        missing_loaded_query_ids=["q_missing"],
+        started=time.perf_counter(),
+    )
+    assert report["admission_evidence"] == "sampled_exact_oracle"
+    assert report["exact_admission_available"] == "sampled"
+    assert report["full_available_query_admission"] is False
+    assert report["oracle_query_count"] == 2
+    assert report["oracle_queries_missing_loaded_embeddings"] == 1
+    assert report["exact_top1_admission_rate"] == 0.5
+    assert report["exact_top10_admission_recall"] == aggregate["exact_top10_admission_recall"]
+    assert report["recall@10"] == 1.0
+    assert report["candidate_source_stats"]["last_selected"]["multivector_exact_kernel"] == "blocked_neon"
+
+    markdown = markdown_benchmark_summary({
+        "document_node_colbert_sampled_admission": report
+    })
+    assert "### Pure ColBERT sampled exact-oracle admission" in markdown
+    assert "sampled_exact_oracle" in markdown
+
+    names = set(run_document_node_colbert_sampled_admission.__code__.co_names)
+    assert "exact_admission_top" not in names
+    assert "run_admission_debug" not in names
+    assert "EXACT_SCAN_METHOD" not in names
+
+
+def _self_check_document_node_colbert_candidate_source_focus() -> None:
+    args = argparse.Namespace(
+        document_node_colbert_candidate_source_focus=True,
+        document_node_colbert_include_experimental=False,
+        document_node_colbert_1m_include_experimental=False,
+        document_node_colbert_profile="proxy_normalized_mean_proxy_only",
+        document_node_colbert_candidate_k=800,
+        document_node_colbert_exact_rerank_k=100,
+        document_node_colbert_ef=800,
+        document_node_colbert_oversampling=1,
+        document_node_colbert_centroid_lite_cap=0,
+        include_quantized_inverted_experimental=False,
+        candidate_budgets="800,1600",
+        exact_rerank_k=100,
+        centroid_lite_caps="32,64",
+        query_limit=25,
+        document_node_serving_grid_include_experimental=False,
+        document_node_serving_grid_include_proxy_encoders=False,
+        document_node_serving_grid_include_learned_projection=False,
+        document_node_serving_grid_include_bm25_rescue=False,
+        document_node_serving_grid_include_learned_sparse_rescue=False,
+        document_node_serving_grid_include_reservoirs=False,
+        document_node_serving_grid_include_centroid_lite_caps=False,
+        document_node_serving_grid_include_entry_samples=False,
+        document_node_serving_grid_include_entry_sidecar=False,
+        document_node_serving_grid_proxy_admission_focus=False,
+        document_node_serving_grid_centroid_lite_focus=False,
+        document_node_serving_grid_token_pooling_focus=False,
+        document_node_serving_grid_learned_sparse_focus=False,
+        document_node_serving_grid_proxy_oracle_focus=False,
+        document_node_colbert_proxy_oracle_focus=False,
+        document_node_colbert_centroid_lite_focus=False,
+        document_node_colbert_entry_focus=False,
+        document_node_colbert_quantized_inverted_focus=False,
+        document_node_colbert_1m_grid=False,
+        document_node_colbert_1m_include_entry_samples=False,
+        document_node_colbert_1m_include_entry_sidecar=False,
+        document_node_colbert_1m_profile="",
+        document_node_colbert_1m_index_signature="",
+        document_node_colbert_1m_plan_only=False,
+        document_node_colbert_1m_build_only=False,
+        document_node_colbert_1m_evaluate_only=False,
+        document_node_serving_grid_profiles="",
+        document_node_serving_grid_smoke=False,
+        document_node_serving_grid_centroid_lite_posting_caps=(
+            DOCUMENT_NODE_SERVING_GRID_CENTROID_LITE_CAP_SWEEP
+        ),
+        document_node_serving_grid_entry_sample_counts=(
+            DOCUMENT_NODE_SERVING_GRID_ENTRY_SAMPLE_SWEEP
+        ),
+        document_node_serving_grid_entry_sidecar_representatives=(
+            DOCUMENT_NODE_SERVING_GRID_ENTRY_SIDECAR_SWEEP
+        ),
+        multivector_centroid_count="auto",
+        multivector_token_pooling_min_tokens=16,
+        reuse_index=False,
+        require_existing_index=False,
+        no_create_index=False,
+        final_k=10,
+        quality_k=10,
+        oracle_input=None,
+        max_estimated_index_build_mb=0,
+        max_estimated_index_bytes=0,
+        skip_profile_if_estimate_exceeds_limit=False,
+        fail_if_estimate_exceeds_limit=False,
+    )
+    profiles = document_node_colbert_candidate_source_focus_profiles(args)
+    assert [profile.name for profile in profiles] == [
+        "proxy_normalized_mean_proxy_only",
+        "centroid_lite_centroid_only",
+        "centroid_lite_centroid_only_cap_032",
+        "centroid_lite_centroid_only_cap_064",
+        "centroid_lite_centroid_only_pool_050",
+    ]
+    assert all(profile.bm25_candidate_injection == "off" for profile in profiles)
+    assert all(profile.sparse_candidate_source == "off" for profile in profiles)
+    assert all(profile.branch_plan == "dense_only" for profile in profiles)
+    assert effective_document_node_colbert_candidate_source_focus_budgets(args) == [
+        800,
+        1600,
+    ]
+    assert effective_document_node_colbert_candidate_source_focus_caps(args) == [32, 64]
+
+    experimental_profiles = document_node_colbert_candidate_source_focus_profiles(
+        clone_args(args, include_quantized_inverted_experimental=True)
+    )
+    assert [profile.name for profile in experimental_profiles][-1] == (
+        "quantized_inverted_experimental_f32"
+    )
+
+    mode_args, effective_rerank_k = document_node_colbert_candidate_source_focus_args(
+        args,
+        profiles[0],
+        800,
+    )
+    assert effective_rerank_k == 100
+    assert mode_args.multivector_doc_candidate_k == 800
+    assert mode_args.multivector_exact_rerank_k == 100
+    assert mode_args.multivector_sparse_candidate_source == "off"
+    assert mode_args.multivector_bm25_candidate_injection == "off"
+    assert mode_args.multivector_branch_plan == "dense_only"
+
+    loop = {
+        "latency": {
+            "p50_ms": 10.0,
+            "p95_ms": 20.0,
+            "p99_ms": 30.0,
+            "qps_total": 50.0,
+        },
+        "query_count": 2,
+        "retrieval_query_count": 2,
+        "top_docs_by_query": {
+            "q1": ["d1", "d2", "d3"],
+            "q2": ["d4", "d5"],
+        },
+        "scan_stats_summary": {
+            "first_selected": {"multivector_candidate_source": "centroid_lite"},
+            "last_selected": {
+                "multivector_exact_kernel": "blocked_neon",
+                "centroid_posting_cap_strategy": "uniform_cap",
+                "proxy_candidate_limit_source": "candidate_k",
+            },
+            "stats_available": {"core": True, "centroid_lite": True},
+            "field_summary": {
+                "multivector_exact_rerank_docs": {"p50": 100, "p95": 100},
+                "multivector_exact_maxsim_rerank_time_us": {
+                    "p50": 4000,
+                    "p95": 8000,
+                },
+                "centroid_lists_visited": {"p50": 64, "p95": 96},
+                "centroid_docs_touched": {"p50": 500, "p95": 900},
+                "centroid_pruned_docs": {"p50": 10, "p95": 20},
+                "centroid_postings_touched": {"p50": 1200, "p95": 2400},
+                "centroid_postings_skipped": {"p50": 100, "p95": 200},
+                "centroid_candidates": {"p50": 800, "p95": 800},
+                "proxy_candidates": {"p50": 800, "p95": 800},
+            },
+        },
+        "serving_slow_path_warnings": [],
+        "serving_slow_path_failed": False,
+    }
+    row = build_document_node_colbert_candidate_source_focus_row(
+        args=args,
+        profile=profiles[1],
+        candidate_k=800,
+        effective_rerank_k=100,
+        index_phase={"index_bytes": 1234},
+        loop=loop,
+        qrels={"q1": {"d1": 1}, "q2": {"d5": 1}},
+        counts={"docs_loaded": 1000, "queries_loaded": 2, "qrels_loaded": 2},
+        oracle_artifact=None,
+        oracle_records=[],
+    )
+    assert row["admission_evidence"] == "unavailable"
+    assert row["exact_top1_admission_rate"] is None
+    assert row["recall@10"] == 1.0
+    assert row["centroid_docs_touched_ratio"] == 0.9
+    assert row["candidate_source_stats"]["last_selected"]["multivector_exact_kernel"] == (
+        "blocked_neon"
+    )
+    skipped_row = document_node_colbert_candidate_source_focus_skipped_row(
+        profile=profiles[1],
+        candidate_k=800,
+        effective_rerank_k=100,
+        estimate={
+            "estimated_build_memory_mb": 123.0,
+            "estimated_index_bytes": 456,
+            "estimate_components": {"full_multivector_sidecar": 456},
+        },
+        decision={
+            "action": "skip",
+            "reasons": ["estimated full_multivector_sidecar exceeds current 32-bit document-node docmap format limit"],
+            "format_limit_exceeded": True,
+        },
+        counts={"docs_loaded": 1000},
+    )
+    assert skipped_row["index_build_skipped"] is True
+    assert skipped_row["admission_evidence"] == "unavailable"
+    assert "index_build_skipped_estimate_exceeds_limit" in skipped_row[
+        "serving_slow_path_warnings"
+    ]
+
+    oracle_artifact = {
+        "metadata": {"top_k": 10, "doc_count": 1000, "query_count": 2},
+        "records": [
+            {
+                "record_type": "query_oracle",
+                "status": "completed",
+                "query_id": "q1",
+                "top_k": 10,
+                "doc_ids": ["d1", "d9"],
+            },
+            {
+                "record_type": "query_oracle",
+                "status": "completed",
+                "query_id": "q2",
+                "top_k": 10,
+                "doc_ids": ["d4", "d8"],
+            },
+        ],
+    }
+    oracle_row = build_document_node_colbert_candidate_source_focus_row(
+        args=args,
+        profile=profiles[1],
+        candidate_k=800,
+        effective_rerank_k=100,
+        index_phase={"index_bytes": 1234},
+        loop=loop,
+        qrels={"q1": {"d1": 1}, "q2": {"d5": 1}},
+        counts={"docs_loaded": 1000, "queries_loaded": 2, "qrels_loaded": 2},
+        oracle_artifact=oracle_artifact,
+        oracle_records=completed_exact_oracle_records(oracle_artifact),
+    )
+    assert oracle_row["admission_evidence"] == "sampled_exact_oracle"
+    assert oracle_row["exact_admission_available"] == "sampled"
+    assert oracle_row["exact_top1_admission_rate"] == 1.0
+    assert oracle_row["exact_top10_admission_recall"] == 0.5
+
+    recommendation = document_node_colbert_candidate_source_focus_recommendation(
+        [
+            {
+                "profile": "proxy_normalized_mean_proxy_only",
+                "candidate_source": "proxy_vector",
+                "ndcg@10": 0.1,
+                "p95_ms": 10.0,
+            },
+            {
+                "profile": "centroid_lite_centroid_only",
+                "candidate_source": "centroid_lite",
+                "ndcg@10": 0.3,
+                "p95_ms": 100.0,
+                "centroid_docs_touched_ratio": 0.9,
+            },
+            {
+                "profile": "centroid_lite_centroid_only_cap_032",
+                "candidate_source": "centroid_lite",
+                "ndcg@10": 0.12,
+                "p95_ms": 15.0,
+                "centroid_lite_max_postings_per_token": 32,
+            },
+            {
+                "profile": "quantized_inverted_experimental_f32",
+                "candidate_source": "quantized_inverted_experimental",
+                "ndcg@10": 0.4,
+                "p95_ms": 30.0,
+            },
+        ],
+        docs_loaded=1000,
+    )
+    assert "centroid_pruning_or_bitset_prefilter" in recommendation["recommendations"]
+    assert "uniform_centroid_caps_insufficient" in recommendation["recommendations"]
+    assert "prioritize_quantized_codebook_postings" in recommendation["recommendations"]
+
+    fallback_recommendation = document_node_colbert_candidate_source_focus_recommendation(
+        [
+            {
+                "profile": "proxy_normalized_mean_proxy_only",
+                "candidate_source": "proxy_vector",
+                "ndcg@10": 0.2,
+                "p95_ms": 10.0,
+            },
+            {
+                "profile": "centroid_lite_centroid_only",
+                "candidate_source": "centroid_lite",
+                "ndcg@10": 0.1,
+                "p95_ms": 50.0,
+            },
+        ],
+        docs_loaded=1000,
+    )
+    assert (
+        "learned_fde_or_different_native_colbert_admission"
+        in fallback_recommendation["recommendations"]
+    )
+
+    markdown = markdown_benchmark_summary({
+        "document_node_colbert_candidate_source_focus": {
+            "enabled": True,
+            "pure_colbert_only": True,
+            "admission_evidence": "beir_qrels_only",
+            "exact_admission_available": False,
+            "profiles": [profile.name for profile in profiles],
+            "candidate_budgets": [800],
+            "exact_rerank_k": 100,
+            "queries_evaluated": 2,
+            "oracle_queries_compared": 0,
+            "experimental_included": False,
+            "recommendation": fallback_recommendation,
+            "results": [row],
+        }
+    })
+    assert "### Pure ColBERT candidate-source focus" in markdown
+    assert "sampled top1" in markdown
+    assert "does not call exact admission scans by default" in markdown
+
+    names = set(run_document_node_colbert_candidate_source_focus.__code__.co_names)
+    assert "exact_admission_top" not in names
+    assert "run_admission_debug" not in names
+    assert "EXACT_SCAN_METHOD" not in names
+
+
+def serving_row_value(row: dict[str, Any], key: str, stat: str = "p95") -> Any:
+    value = row.get(key)
+    if isinstance(value, dict):
+        if stat in value:
+            return value.get(stat)
+        if "p95" in value:
+            return value.get("p95")
+        if "p50" in value:
+            return value.get("p50")
+        if "mean" in value:
+            return value.get("mean")
+    if value is not None:
+        return value
+    sample = row.get("last_scan_stats_sample")
+    if isinstance(sample, dict):
+        return sample.get(key)
+    return None
+
+
+def serving_row_float_value(row: dict[str, Any], key: str, stat: str = "p95") -> float | None:
+    value = serving_row_value(row, key, stat)
+    if isinstance(value, bool) or value is None:
+        return None
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return None
+
+
+def serving_row_str_value(row: dict[str, Any], key: str) -> str | None:
+    value = serving_row_value(row, key)
+    if value is None:
+        return None
+    return str(value)
+
+
+def document_node_colbert_quantized_inverted_readiness(
+    rows: Sequence[dict[str, Any]],
+    *,
+    loaded_document_count: int | None,
+) -> dict[str, Any]:
+    quantized_rows = [
+        row
+        for row in rows
+        if isinstance(row, dict)
+        and str(row.get("candidate_source", "")) == "quantized_inverted_experimental"
+    ]
+    baseline_rows = [
+        row
+        for row in rows
+        if isinstance(row, dict)
+        and str(row.get("candidate_source", "")) != "quantized_inverted_experimental"
+    ]
+    quantized = min(
+        quantized_rows,
+        key=lambda row: (
+            serving_row_p95(row) if serving_row_p95(row) is not None else float("inf"),
+            str(row.get("profile", "")),
+            int(row.get("ef", 0) or 0),
+            int(row.get("oversampling", 0) or 0),
+        ),
+        default=None,
+    )
+
+    def row_summary(row: dict[str, Any] | None) -> dict[str, Any] | None:
+        if row is None:
+            return None
+        return {
+            "profile": row.get("profile"),
+            "candidate_source": row.get("candidate_source"),
+            "proxy_encoder": row.get("proxy_encoder"),
+            "p50_ms": row.get("p50_ms"),
+            "p95_ms": row.get("p95_ms"),
+            "exact_top1_admission_rate": row.get("exact_top1_admission_rate"),
+            "exact_top10_admission_recall": row.get("exact_top10_admission_recall"),
+            "ndcg@10": row.get("ndcg@10"),
+            "quantized_inverted_lists_visited": row.get(
+                "quantized_inverted_lists_visited"
+            ),
+            "quantized_inverted_postings_touched": row.get(
+                "quantized_inverted_postings_touched"
+            ),
+            "quantized_inverted_docs_scored": row.get(
+                "quantized_inverted_docs_scored"
+            ),
+            "quantized_inverted_candidates": row.get("quantized_inverted_candidates"),
+            "quantized_inverted_exact_rerank_docs": serving_row_value(
+                row, "quantized_inverted_exact_rerank_docs"
+            ),
+            "quantized_inverted_codebook_size": serving_row_value(
+                row, "quantized_inverted_codebook_size"
+            ),
+            "quantized_inverted_codebook_source": serving_row_str_value(
+                row, "quantized_inverted_codebook_source"
+            ),
+            "quantized_inverted_codebook_version": serving_row_value(
+                row, "quantized_inverted_codebook_version"
+            ),
+            "quantized_inverted_codebook_top_m": serving_row_value(
+                row, "quantized_inverted_codebook_top_m"
+            ),
+            "quantized_inverted_assignment_time_us": serving_row_value(
+                row, "quantized_inverted_assignment_time_us"
+            ),
+            "quantized_inverted_posting_bytes": serving_row_value(
+                row, "quantized_inverted_posting_bytes"
+            ),
+            "quantized_inverted_sidecar_bytes": serving_row_value(
+                row, "quantized_inverted_sidecar_bytes"
+            ),
+            "index_bytes": row.get("index_bytes"),
+        }
+
+    baseline_summaries = [
+        summary for summary in (row_summary(row) for row in baseline_rows) if summary is not None
+    ]
+    centroid_lite_baseline = next(
+        (
+            row
+            for row in baseline_rows
+            if str(row.get("candidate_source", "")) == "centroid_lite"
+        ),
+        None,
+    )
+    proxy_baselines = [
+        row
+        for row in baseline_rows
+        if str(row.get("candidate_source", "")) == "proxy_vector"
+    ]
+    quantized_top10 = (
+        float(quantized.get("exact_top10_admission_recall", 0.0) or 0.0)
+        if isinstance(quantized, dict)
+        else None
+    )
+    centroid_lite_top10 = (
+        float(centroid_lite_baseline.get("exact_top10_admission_recall", 0.0) or 0.0)
+        if isinstance(centroid_lite_baseline, dict)
+        else None
+    )
+    proxy_top10_best = (
+        max(float(row.get("exact_top10_admission_recall", 0.0) or 0.0) for row in proxy_baselines)
+        if proxy_baselines
+        else None
+    )
+    docs_scored_p95 = (
+        serving_row_float_value(quantized, "quantized_inverted_docs_scored", "p95")
+        if isinstance(quantized, dict)
+        else None
+    )
+    postings_touched_p95 = (
+        serving_row_float_value(quantized, "quantized_inverted_postings_touched", "p95")
+        if isinstance(quantized, dict)
+        else None
+    )
+    loaded_docs = int(loaded_document_count or 0)
+    docs_near_exhaustive = (
+        docs_scored_p95 is not None
+        and loaded_docs > 0
+        and docs_scored_p95 >= loaded_docs * 0.80
+    )
+    postings_near_exhaustive = (
+        postings_touched_p95 is not None
+        and loaded_docs > 0
+        and postings_touched_p95 >= loaded_docs * 0.80
+    )
+    codebook_source = (
+        serving_row_str_value(quantized, "quantized_inverted_codebook_source")
+        if isinstance(quantized, dict)
+        else None
+    )
+    return {
+        "enabled": bool(quantized_rows),
+        "experimental_only": True,
+        "production_ready": False,
+        "final_ranking": "exact_maxsim_over_retained_candidates",
+        "codebook_readiness": {
+            "external_codebook_implemented": False,
+            "codebook_source": codebook_source,
+            "codebook_size": (
+                serving_row_value(quantized, "quantized_inverted_codebook_size")
+                if isinstance(quantized, dict)
+                else None
+            ),
+            "codebook_version": (
+                serving_row_value(quantized, "quantized_inverted_codebook_version")
+                if isinstance(quantized, dict)
+                else None
+            ),
+            "codebook_top_m": (
+                serving_row_value(quantized, "quantized_inverted_codebook_top_m")
+                if isinstance(quantized, dict)
+                else None
+            ),
+            "deterministic_codeword_assignment_warning": True,
+            "warning": (
+                "quantized_inverted_experimental currently uses deterministic "
+                "temporary codeword assignment; treat this as research-only "
+                "admission evidence, not a production codebook."
+            ),
+            "expected_failure_modes": [
+                "temporary_codewords_may_not_preserve_colbert_token_geometry",
+                "posting_lists_can_touch_near_exhaustive_document_sets",
+                "admission_can_improve_or_regress_independently_of_final_exact_rerank",
+                "no_on_disk_compatibility_promise_for_experimental_payloads",
+            ],
+        },
+        "quantized_profile": row_summary(quantized),
+        "baseline_profiles": baseline_summaries,
+        "admission_improves_over_centroid_lite": (
+            quantized_top10 > centroid_lite_top10
+            if quantized_top10 is not None and centroid_lite_top10 is not None
+            else None
+        ),
+        "admission_improves_over_proxy": (
+            quantized_top10 > proxy_top10_best
+            if quantized_top10 is not None and proxy_top10_best is not None
+            else None
+        ),
+        "docs_scored_near_exhaustive": bool(docs_near_exhaustive),
+        "postings_touched_near_exhaustive": bool(postings_near_exhaustive),
+        "near_exhaustive_threshold_ratio": 0.80,
+        "loaded_document_count": loaded_docs if loaded_docs > 0 else None,
+        "recommended_status": "research_only_not_production",
+    }
+
+
 def run_document_node_serving_grid(
     conn: psycopg.Connection[Any],
     args: argparse.Namespace,
@@ -10721,7 +18563,21 @@ def run_document_node_serving_grid(
     qrels: dict[str, dict[str, int]],
 ) -> dict[str, Any]:
     grid_started = time.perf_counter()
-    mode = "smoke" if args.document_node_serving_grid_smoke else "full"
+    if bool(getattr(args, "document_node_colbert_1m_grid", False)):
+        mode = "colbert_1m"
+    elif bool(getattr(args, "document_node_colbert_centroid_lite_focus", False)):
+        mode = "colbert_centroid_lite_focus"
+    elif bool(getattr(args, "document_node_colbert_quantized_inverted_focus", False)):
+        mode = "colbert_quantized_inverted_focus"
+    elif bool(getattr(args, "document_node_colbert_entry_focus", False)):
+        mode = "colbert_entry_focus"
+    elif bool(
+        getattr(args, "document_node_serving_grid_proxy_oracle_focus", False)
+        or getattr(args, "document_node_colbert_proxy_oracle_focus", False)
+    ):
+        mode = "proxy_oracle"
+    else:
+        mode = "smoke" if args.document_node_serving_grid_smoke else "full"
     stage_mode = effective_document_node_serving_stage_mode(args)
     profiles = effective_document_node_serving_profiles(args)
     ef_grid = effective_document_node_serving_ef_grid(args)
@@ -10739,6 +18595,54 @@ def run_document_node_serving_grid(
         effective_queries = queries[:DOCUMENT_NODE_SERVING_GRID_SMOKE_MAX_QUERIES]
     exact_top_cache: dict[str, list[dict[str, Any]]] = {}
     exact_top_cache_loaded_document_count = loaded_document_count(conn)
+    incremental_path = getattr(args, "incremental_output", None)
+    resume_path = getattr(args, "resume_incremental_output", None)
+    incremental_state = load_incremental_output(resume_path or incremental_path)
+    recorder = IncrementalRecorder(
+        incremental_path,
+        initial_state=incremental_state,
+    )
+    plan_metadata = document_node_serving_plan_metadata(
+        args=args,
+        mode=mode,
+        profiles=profiles,
+        configs=all_configs,
+        budget_sweep=budget_sweep,
+        ef_grid=ef_grid,
+        oversampling_grid=oversampling_grid,
+        docs_loaded=exact_top_cache_loaded_document_count,
+        queries_available=queries_available,
+        effective_queries=len(effective_queries),
+        query_subset_used=query_subset_used,
+    )
+    if resume_path is not None:
+        validate_incremental_resume(recorder.records, plan_metadata)
+    if recorder.enabled:
+        recorder.record(
+            "run_metadata",
+            metadata=plan_metadata,
+            resume_from=portable_path(resume_path) if resume_path is not None else None,
+        )
+        recorder.record(
+            "import_preflight",
+            docs_loaded=exact_top_cache_loaded_document_count,
+            queries_available=queries_available,
+            effective_queries=len(effective_queries),
+            qrels_loaded=sum(len(values) for values in qrels.values()),
+            query_subset_used=query_subset_used,
+        )
+        for config in all_configs:
+            recorder.record(
+                "planned_profile",
+                row_id=f"planned:{document_node_serving_config_id(config)}",
+                config_id=document_node_serving_config_id(config),
+                profile=config.profile.name,
+                ef=config.ef,
+                oversampling=config.oversampling,
+                index_signature=serializable_index_signature(
+                    serving_profile_index_signature(args, config.profile)
+                ),
+            )
 
     def run_stage(
         *,
@@ -10761,6 +18665,17 @@ def run_document_node_serving_grid(
         exact_top_cache_hits = 0
         exact_top_cache_misses = 0
         index_builds = 0
+        dataset_stats_for_estimate = multivector_dataset_stats(conn)
+        completed_rows = incremental_completed_row_map(recorder.records)
+        completed_profile_summaries = incremental_completed_profile_summary_map(
+            recorder.records
+        )
+
+        def config_row_id(config: DocumentNodeServingConfig) -> str:
+            return f"{stage_name}:{document_node_serving_config_id(config)}"
+
+        def profile_summary_key(profile: DocumentNodeServingProfile) -> str:
+            return f"{stage_name}:{profile.name}"
 
         profiles_by_name: dict[str, DocumentNodeServingProfile] = {}
         configs_by_profile: dict[str, list[DocumentNodeServingConfig]] = {}
@@ -10789,6 +18704,41 @@ def run_document_node_serving_grid(
 
         for signature, grouped_profiles in profile_groups:
             representative_profile = grouped_profiles[0]
+            group_configs = [
+                config
+                for profile in grouped_profiles
+                for config in configs_by_profile.get(profile.name, [])
+            ]
+            group_row_ids = [config_row_id(config) for config in group_configs]
+            if group_row_ids and all(row_id in completed_rows for row_id in group_row_ids):
+                for config in group_configs:
+                    row = dict(completed_rows[config_row_id(config)])
+                    summary_rows.append(row)
+                    full_admission.append({
+                        "stage": stage_name,
+                        "profile": config.profile.name,
+                        "ef": config.ef,
+                        "oversampling": config.oversampling,
+                        "index_signature": serializable_index_signature(signature),
+                        "index_build_reused": True,
+                        "admission_debug": {
+                            "skipped": True,
+                            "reason": "resumed_completed_row",
+                        },
+                    })
+                for profile in grouped_profiles:
+                    summary = completed_profile_summaries.get(profile_summary_key(profile))
+                    if isinstance(summary, dict):
+                        profile_summaries.append(summary)
+                if recorder.enabled:
+                    recorder.record(
+                        "index_build_skipped",
+                        stage=stage_name,
+                        index_signature=serializable_index_signature(signature),
+                        reason="all_rows_completed_in_incremental_output",
+                        profiles=[profile.name for profile in grouped_profiles],
+                    )
+                continue
             index_args = document_node_serving_profile_args(
                 stage_args,
                 representative_profile,
@@ -10796,20 +18746,193 @@ def run_document_node_serving_grid(
                 oversampling=1,
                 budget_sweep=stage_budget_sweep,
             )
-            index_phase = build_index(conn, index_args)
+            build_estimate = estimate_index_build_resources(
+                dataset_stats_for_estimate,
+                index_args,
+                representative_profile,
+            )
+            build_estimate_decision = index_build_estimate_decision(
+                build_estimate,
+                stage_args,
+            )
+            if build_estimate_decision.get("action") == "fail":
+                if recorder.enabled:
+                    recorder.record(
+                        "index_build_failed",
+                        stage=stage_name,
+                        index_signature=serializable_index_signature(signature),
+                        representative_profile=representative_profile.name,
+                        profiles=[profile.name for profile in grouped_profiles],
+                        error="estimate_exceeds_limit",
+                        build_resource_estimate=build_estimate,
+                        build_resource_estimate_decision=build_estimate_decision,
+                    )
+                fail_index_build_estimate_if_requested(
+                    profile_name=representative_profile.name,
+                    estimate=build_estimate,
+                    decision=build_estimate_decision,
+                )
+            if build_estimate_decision.get("action") == "skip":
+                skipped_rows = [
+                    document_node_serving_skipped_grid_row(
+                        config=config,
+                        args=stage_args,
+                        signature=signature,
+                        grouped_profiles=grouped_profiles,
+                        estimate=build_estimate,
+                        decision=build_estimate_decision,
+                        stage_name=stage_name,
+                        stage_executed_budgets=stage_executed_budgets,
+                    )
+                    for config in group_configs
+                ]
+                summary_rows.extend(skipped_rows)
+                for row in skipped_rows:
+                    full_admission.append({
+                        "stage": stage_name,
+                        "profile": row.get("profile"),
+                        "ef": row.get("ef"),
+                        "oversampling": row.get("oversampling"),
+                        "index_signature": serializable_index_signature(signature),
+                        "index_build_skipped": True,
+                        "admission_debug": {
+                            "skipped": True,
+                            "reason": "estimate_exceeds_limit",
+                            "build_resource_estimate": build_estimate,
+                            "build_resource_estimate_decision": build_estimate_decision,
+                        },
+                    })
+                for profile in grouped_profiles:
+                    profile_rows = [
+                        row for row in skipped_rows if row.get("profile") == profile.name
+                    ]
+                    profile_summary = {
+                        "stage": stage_name,
+                        "profile": profile.name,
+                        "candidate_source": profile.candidate_source,
+                        "proxy_encoder": profile.proxy_encoder,
+                        "centroids": profile.centroids,
+                        "storage_kind": profile.storage_kind,
+                        "storage_cache_mode": profile.cache_mode,
+                        "token_pooling": profile.token_pooling,
+                        "token_pooling_target_ratio": profile.token_pooling_target_ratio,
+                        "index_build_skipped": True,
+                        "skip_reason": "estimate_exceeds_limit",
+                        "skip_reasons": list(build_estimate_decision.get("reasons", [])),
+                        "estimated_build_memory_mb": build_estimate.get(
+                            "estimated_build_memory_mb"
+                        ),
+                        "estimated_index_bytes": build_estimate.get(
+                            "estimated_index_bytes"
+                        ),
+                        "runs": len(profile_rows),
+                    }
+                    profile_summaries.append(profile_summary)
+                    if recorder.enabled:
+                        recorder.record(
+                            "profile_completed",
+                            stage=stage_name,
+                            profile_key=profile_summary_key(profile),
+                            profile=profile.name,
+                            summary=profile_summary,
+                        )
+                if recorder.enabled:
+                    recorder.record(
+                        "index_build_skipped",
+                        stage=stage_name,
+                        index_signature=serializable_index_signature(signature),
+                        representative_profile=representative_profile.name,
+                        profiles=[profile.name for profile in grouped_profiles],
+                        reason="estimate_exceeds_limit",
+                        build_resource_estimate=build_estimate,
+                        build_resource_estimate_decision=build_estimate_decision,
+                    )
+                    for config, row in zip(group_configs, skipped_rows, strict=False):
+                        recorder.record(
+                            "query_evaluation_succeeded",
+                            stage=stage_name,
+                            row_id=config_row_id(config),
+                            profile=config.profile.name,
+                            ef=config.ef,
+                            oversampling=config.oversampling,
+                            row=row,
+                            aggregate={
+                                "skipped": True,
+                                "reason": "estimate_exceeds_limit",
+                            },
+                        )
+                continue
+            if recorder.enabled:
+                recorder.record(
+                    "index_build_started",
+                    stage=stage_name,
+                    index_signature=serializable_index_signature(signature),
+                    representative_profile=representative_profile.name,
+                    profiles=[profile.name for profile in grouped_profiles],
+                    build_resource_estimate=build_estimate,
+                    build_resource_estimate_decision=build_estimate_decision,
+                )
+            try:
+                index_phase = build_index(conn, index_args)
+            except Exception as exc:
+                if recorder.enabled:
+                    recorder.record(
+                        "index_build_failed",
+                        stage=stage_name,
+                        index_signature=serializable_index_signature(signature),
+                        representative_profile=representative_profile.name,
+                        profiles=[profile.name for profile in grouped_profiles],
+                        error=repr(exc),
+                        build_resource_estimate=build_estimate,
+                        build_resource_estimate_decision=build_estimate_decision,
+                    )
+                raise
             index_phase["index_signature_tuple"] = signature
             index_phase["index_signature"] = serializable_index_signature(signature)
+            index_phase["build_resource_estimate"] = build_estimate
+            index_phase["build_resource_estimate_decision"] = build_estimate_decision
             index_phase["index_build_reused_for_profiles"] = [
                 profile.name for profile in grouped_profiles
             ]
             index_builds += 1
             index_build_elapsed_ms = float(index_phase.get("elapsed_ms", 0.0) or 0.0)
             index_build_elapsed_ms_total += index_build_elapsed_ms
+            if recorder.enabled:
+                recorder.record(
+                    "index_build_succeeded",
+                    stage=stage_name,
+                    index_signature=serializable_index_signature(signature),
+                    representative_profile=representative_profile.name,
+                    profiles=[profile.name for profile in grouped_profiles],
+                    elapsed_ms=index_build_elapsed_ms,
+                    index_stats=index_phase.get("index_stats", {}),
+                    build_stats=index_phase.get("build_stats", {}),
+                    build_resource_estimate=build_estimate,
+                    build_resource_estimate_decision=build_estimate_decision,
+                )
             for profile_index, profile in enumerate(grouped_profiles):
                 profile_started = time.perf_counter()
                 profile_rows: list[dict[str, Any]] = []
                 profile_reused_index = profile_index > 0
                 for config in configs_by_profile.get(profile.name, []):
+                    row_id = config_row_id(config)
+                    if row_id in completed_rows:
+                        row = dict(completed_rows[row_id])
+                        summary_rows.append(row)
+                        profile_rows.append(row)
+                        full_admission.append({
+                            "stage": stage_name,
+                            "profile": profile.name,
+                            "ef": config.ef,
+                            "oversampling": config.oversampling,
+                            "index_signature": serializable_index_signature(signature),
+                            "index_build_reused": True,
+                            "admission_debug": {
+                                "skipped": True,
+                                "reason": "resumed_completed_row",
+                            },
+                        })
+                        continue
                     mode_args = document_node_serving_profile_args(
                         stage_args,
                         profile,
@@ -10824,14 +18947,57 @@ def run_document_node_serving_grid(
                         expected_signature=signature,
                     )
                     mode_args = clone_args(mode_args, admission_debug_context="serving_grid")
-                    admission = run_admission_debug(
-                        conn,
-                        mode_args,
-                        stage_queries,
-                        exact_top_cache=exact_top_cache,
-                        exact_top_cache_document_count=exact_top_cache_loaded_document_count,
-                        executed_budgets=stage_executed_budgets,
-                    )
+                    if recorder.enabled:
+                        recorder.record(
+                            "query_evaluation_started",
+                            stage=stage_name,
+                            row_id=row_id,
+                            profile=profile.name,
+                            ef=config.ef,
+                            oversampling=config.oversampling,
+                            index_signature=serializable_index_signature(signature),
+                            query_count=len(stage_queries),
+                            executed_budgets=stage_executed_budgets,
+                        )
+
+                    def query_batch_callback(payload: dict[str, Any]) -> None:
+                        if recorder.enabled and getattr(
+                            args,
+                            "write_after_each_query_batch",
+                            False,
+                        ):
+                            recorder.record(
+                                "query_evaluation_partial_batch",
+                                stage=stage_name,
+                                row_id=row_id,
+                                profile=profile.name,
+                                ef=config.ef,
+                                oversampling=config.oversampling,
+                                **payload,
+                            )
+
+                    try:
+                        admission = run_admission_debug(
+                            conn,
+                            mode_args,
+                            stage_queries,
+                            exact_top_cache=exact_top_cache,
+                            exact_top_cache_document_count=exact_top_cache_loaded_document_count,
+                            executed_budgets=stage_executed_budgets,
+                            query_batch_callback=query_batch_callback,
+                        )
+                    except Exception as exc:
+                        if recorder.enabled:
+                            recorder.record(
+                                "query_evaluation_failed",
+                                stage=stage_name,
+                                row_id=row_id,
+                                profile=profile.name,
+                                ef=config.ef,
+                                oversampling=config.oversampling,
+                                error=repr(exc),
+                            )
+                        raise
                     aggregate = admission.get("aggregate", {})
                     if not isinstance(aggregate, dict):
                         aggregate = {}
@@ -10871,8 +19037,28 @@ def run_document_node_serving_grid(
                     row["index_build_reused_for_profiles"] = [
                         grouped_profile.name for grouped_profile in grouped_profiles
                     ]
+                    row["estimated_build_memory_mb"] = build_estimate.get(
+                        "estimated_build_memory_mb"
+                    )
+                    row["estimated_index_bytes"] = build_estimate.get(
+                        "estimated_index_bytes"
+                    )
+                    row["estimate_components"] = build_estimate.get("estimate_components")
+                    row["build_resource_estimate"] = build_estimate
+                    row["build_resource_estimate_decision"] = build_estimate_decision
                     summary_rows.append(row)
                     profile_rows.append(row)
+                    if recorder.enabled:
+                        recorder.record(
+                            "query_evaluation_succeeded",
+                            stage=stage_name,
+                            row_id=row_id,
+                            profile=profile.name,
+                            ef=config.ef,
+                            oversampling=config.oversampling,
+                            row=row,
+                            aggregate=aggregate,
+                        )
 
                 profile_exact_baseline_elapsed_ms = sum(
                     float(item.get("exact_baseline_elapsed_ms", 0.0) or 0.0)
@@ -10902,7 +19088,7 @@ def run_document_node_serving_grid(
                     profile_row["profile_elapsed_ms"] = profile_elapsed_ms
                     profile_row["index_build_elapsed_ms"] = profile_index_build_elapsed_ms
                     profile_row["build_phase_summary"] = profile_build_phase_summary
-                profile_summaries.append({
+                profile_summary = {
                     "stage": stage_name,
                     "profile": profile.name,
                     "candidate_source": profile.candidate_source,
@@ -10945,6 +19131,15 @@ def run_document_node_serving_grid(
                     "profile_elapsed_ms": profile_elapsed_ms,
                     "index_build_elapsed_ms": profile_index_build_elapsed_ms,
                     "index_build_stats": profile_build_stats,
+                    "estimated_build_memory_mb": build_estimate.get(
+                        "estimated_build_memory_mb"
+                    ),
+                    "estimated_index_bytes": build_estimate.get(
+                        "estimated_index_bytes"
+                    ),
+                    "estimate_components": build_estimate.get("estimate_components"),
+                    "build_resource_estimate": build_estimate,
+                    "build_resource_estimate_decision": build_estimate_decision,
                     **profile_build_phase_summary,
                     "multivector_centroid_build_us": profile_build_stats.get(
                         "multivector_centroid_build_us"
@@ -10985,7 +19180,16 @@ def run_document_node_serving_grid(
                         for item in profile_rows
                     ),
                     "runs": len(profile_rows),
-                })
+                }
+                profile_summaries.append(profile_summary)
+                if recorder.enabled:
+                    recorder.record(
+                        "profile_completed",
+                        stage=stage_name,
+                        profile_key=profile_summary_key(profile),
+                        profile=profile.name,
+                        summary=profile_summary,
+                    )
 
         return {
             "stage": stage_name,
@@ -11131,11 +19335,35 @@ def run_document_node_serving_grid(
         for item in stage.get("index_build_reused_for_profiles", [])
         if isinstance(item, dict)
     ]
+    annotate_proxy_exact_scan_vs_hnsw_gap(stage_results)
     candidate_source_deltas = compute_document_node_candidate_source_deltas(stage_results)
+    graph_entry_bottleneck = document_node_graph_entry_selection_bottleneck(
+        candidate_source_deltas
+    )
+    quantized_inverted_readiness = document_node_colbert_quantized_inverted_readiness(
+        stage_results,
+        loaded_document_count=exact_top_cache_loaded_document_count,
+    )
 
-    return {
+    result = {
         "enabled": True,
         "production_oriented": True,
+        "colbert_1m_grid": bool(getattr(args, "document_node_colbert_1m_grid", False)),
+        "colbert_centroid_lite_focus": bool(
+            getattr(args, "document_node_colbert_centroid_lite_focus", False)
+        ),
+        "colbert_entry_focus": bool(getattr(args, "document_node_colbert_entry_focus", False)),
+        "colbert_quantized_inverted_focus": bool(
+            getattr(args, "document_node_colbert_quantized_inverted_focus", False)
+        ),
+        "pure_colbert_only": bool(
+            getattr(args, "document_node_colbert_1m_grid", False)
+            or getattr(args, "document_node_colbert_centroid_lite_focus", False)
+            or getattr(args, "document_node_colbert_entry_focus", False)
+            or getattr(args, "document_node_colbert_quantized_inverted_focus", False)
+            or getattr(args, "document_node_serving_grid_proxy_oracle_focus", False)
+            or getattr(args, "document_node_colbert_proxy_oracle_focus", False)
+        ),
         "mode": mode,
         "stage_mode": stage_mode,
         "probe_queries": int(args.serving_grid_probe_queries),
@@ -11144,7 +19372,7 @@ def run_document_node_serving_grid(
         "stage2_results": stage2_results,
         "pruned_configs": pruned_configs,
         "smoke_only": mode == "smoke",
-        "serving_evidence": mode == "full",
+        "serving_evidence": mode in {"full", "colbert_1m"},
         "budget_mode": args.document_node_serving_grid_budget_mode,
         "serving_exact_rerank_mode": args.serving_exact_rerank_mode,
         "requested_serving_exact_rerank_k": args.serving_exact_rerank_k,
@@ -11154,7 +19382,10 @@ def run_document_node_serving_grid(
         "trace_enabled": effective_admission_debug_mode(
             clone_args(args, admission_debug_context="serving_grid")
         ) == "trace",
-        "include_experimental": args.document_node_serving_grid_include_experimental,
+        "include_experimental": (
+            args.document_node_serving_grid_include_experimental
+            or bool(getattr(args, "document_node_colbert_quantized_inverted_focus", False))
+        ),
         "include_proxy_encoder_variants": args.document_node_serving_grid_include_proxy_encoders,
         "include_learned_projection": args.document_node_serving_grid_include_learned_projection,
         "include_bm25_rescue": args.document_node_serving_grid_include_bm25_rescue,
@@ -11163,9 +19394,39 @@ def run_document_node_serving_grid(
         "include_centroid_lite_caps": args.document_node_serving_grid_include_centroid_lite_caps,
         "include_entry_samples": args.document_node_serving_grid_include_entry_samples,
         "include_entry_sidecar": args.document_node_serving_grid_include_entry_sidecar,
+        "include_colbert_entry_samples": bool(
+            getattr(args, "document_node_colbert_1m_include_entry_samples", False)
+        ),
+        "include_colbert_entry_sidecar": bool(
+            getattr(args, "document_node_colbert_1m_include_entry_sidecar", False)
+        ),
+        "include_colbert_centroid_lite_caps": (
+            bool(getattr(args, "document_node_colbert_1m_grid", False))
+            or bool(getattr(args, "document_node_colbert_1m_include_centroid_lite_caps", False))
+            or bool(getattr(args, "document_node_colbert_centroid_lite_focus", False))
+        ),
+        "include_colbert_experimental": bool(
+            getattr(args, "document_node_colbert_1m_include_experimental", False)
+            or getattr(args, "document_node_colbert_quantized_inverted_focus", False)
+        ),
         "proxy_admission_focus": args.document_node_serving_grid_proxy_admission_focus,
-        "centroid_lite_focus": args.document_node_serving_grid_centroid_lite_focus,
+        "entry_focus": bool(getattr(args, "document_node_colbert_entry_focus", False)),
+        "quantized_inverted_focus": bool(
+            getattr(args, "document_node_colbert_quantized_inverted_focus", False)
+        ),
+        "centroid_lite_focus": (
+            args.document_node_serving_grid_centroid_lite_focus
+            or bool(getattr(args, "document_node_colbert_centroid_lite_focus", False))
+        ),
         "token_pooling_focus": args.document_node_serving_grid_token_pooling_focus,
+        "learned_sparse_focus": args.document_node_serving_grid_learned_sparse_focus,
+        "proxy_oracle_focus": bool(
+            getattr(args, "document_node_serving_grid_proxy_oracle_focus", False)
+            or getattr(args, "document_node_colbert_proxy_oracle_focus", False)
+        ),
+        "diagnostic_profiles": [
+            profile.name for profile in profiles if bool(profile.diagnostic_only)
+        ],
         "effective_centroid_lite_posting_caps": effective_document_node_serving_centroid_lite_caps(args),
         "effective_entry_sample_counts": effective_document_node_serving_entry_sample_counts(args),
         "effective_entry_sidecar_representatives": (
@@ -11181,6 +19442,7 @@ def run_document_node_serving_grid(
         "index_build_group_count": index_build_group_count,
         "index_reuse_count": index_reuse_count,
         "index_build_reused_for_profiles": index_build_reused_for_profiles,
+        "physical_index_signatures": index_build_reused_for_profiles,
         "ef_values_run": active_stage.get("ef_values_run", []),
         "oversampling_values_run": active_stage.get("oversampling_values_run", []),
         "budgets_run": active_stage.get("budgets_run", []),
@@ -11224,11 +19486,34 @@ def run_document_node_serving_grid(
         "profiles": [profile.__dict__ for profile in profiles],
         "profile_summaries": profile_summaries,
         "candidate_source_deltas": candidate_source_deltas,
+        "graph_entry_selection_bottleneck": graph_entry_bottleneck,
+        "quantized_inverted_readiness": quantized_inverted_readiness,
+        "codebook_readiness": quantized_inverted_readiness.get("codebook_readiness"),
+        "graph_entry_selection_bottleneck_confirmed": bool(
+            graph_entry_bottleneck.get(
+                "graph_entry_selection_bottleneck_confirmed", False
+            )
+        ),
         "queries": int(active_stage.get("queries_run", len(effective_queries)) or 0),
         "results": stage_results,
         "summary_rows": stage_results,
         "admission_debug_runs": full_admission,
     }
+    if recorder.enabled:
+        result["incremental_output"] = portable_path(recorder.path) if recorder.path else None
+        result["incremental_records"] = len(recorder.records)
+        recorder.record(
+            "run_completed",
+            summary={
+                "mode": mode,
+                "stage_mode": stage_mode,
+                "profiles_run": len(profiles),
+                "rows": len(stage_results),
+                "index_builds": index_builds,
+                "elapsed_ms": result["total_elapsed_ms"],
+            },
+        )
+    return result
 
 
 def document_node_build_phase_summary(
@@ -11557,6 +19842,147 @@ def document_node_serving_build_only_row(
         "multivector_graph_build_distance_cache_misses": build_stats.get(
             "multivector_graph_build_distance_cache_misses"
         ),
+        "estimated_build_memory_mb": (
+            index_phase.get("build_resource_estimate", {}).get(
+                "estimated_build_memory_mb"
+            )
+            if isinstance(index_phase.get("build_resource_estimate"), dict)
+            else None
+        ),
+        "estimated_index_bytes": (
+            index_phase.get("build_resource_estimate", {}).get("estimated_index_bytes")
+            if isinstance(index_phase.get("build_resource_estimate"), dict)
+            else None
+        ),
+        "estimate_components": (
+            index_phase.get("build_resource_estimate", {}).get("estimate_components")
+            if isinstance(index_phase.get("build_resource_estimate"), dict)
+            else None
+        ),
+    }
+
+
+def document_node_serving_skipped_build_row(
+    *,
+    profile: DocumentNodeServingProfile,
+    signature: tuple[tuple[str, Any], ...],
+    grouped_profiles: list[DocumentNodeServingProfile],
+    estimate: dict[str, Any],
+    decision: dict[str, Any],
+) -> dict[str, Any]:
+    return {
+        "profile": profile.name,
+        "candidate_source": profile.candidate_source,
+        "branch_plan": profile.branch_plan,
+        "bm25_candidate_injection": profile.bm25_candidate_injection,
+        "sparse_candidate_source": profile.sparse_candidate_source,
+        "graph_mode": "document_nodes",
+        "proxy_encoder": profile.proxy_encoder,
+        "centroids": profile.centroids,
+        "centroid_count": profile.centroid_count,
+        "storage_kind": profile.storage_kind,
+        "storage_cache_mode": profile.cache_mode,
+        "token_pooling": profile.token_pooling,
+        "token_pooling_target_ratio": profile.token_pooling_target_ratio,
+        "entry_sidecar": profile.entry_sidecar,
+        "entry_sidecar_representatives": profile.entry_sidecar_representatives,
+        "entry_sidecar_strategy": profile.entry_sidecar_strategy,
+        "centroid_lite_max_postings_per_token": (
+            profile.centroid_lite_max_postings_per_token
+        ),
+        "centroid_lite_pruning": profile.centroid_lite_pruning,
+        "plain_fallback": profile.plain_fallback,
+        "index_signature": serializable_index_signature(signature),
+        "index_build_skipped": True,
+        "index_build_reused": False,
+        "index_rebuild_reason": "estimate_exceeds_limit",
+        "skip_reason": "estimate_exceeds_limit",
+        "skip_reasons": list(decision.get("reasons", [])),
+        "index_build_reused_for_profiles": [
+            grouped_profile.name for grouped_profile in grouped_profiles
+        ],
+        "index_build_elapsed_ms": 0.0,
+        "index_bytes": 0,
+        "estimated_build_memory_mb": estimate.get("estimated_build_memory_mb"),
+        "estimated_index_bytes": estimate.get("estimated_index_bytes"),
+        "estimate_components": estimate.get("estimate_components"),
+        "build_resource_estimate": estimate,
+        "build_resource_estimate_decision": decision,
+        "build_slow_warnings": ["index_build_skipped_estimate_exceeds_limit"],
+    }
+
+
+def document_node_serving_skipped_grid_row(
+    *,
+    config: DocumentNodeServingConfig,
+    args: argparse.Namespace,
+    signature: tuple[tuple[str, Any], ...],
+    grouped_profiles: list[DocumentNodeServingProfile],
+    estimate: dict[str, Any],
+    decision: dict[str, Any],
+    stage_name: str,
+    stage_executed_budgets: list[int],
+) -> dict[str, Any]:
+    profile = config.profile
+    return {
+        "stage": stage_name,
+        "profile": profile.name,
+        "candidate_source": profile.candidate_source,
+        "branch_plan": profile.branch_plan,
+        "bm25_candidate_injection": profile.bm25_candidate_injection,
+        "sparse_candidate_source": profile.sparse_candidate_source,
+        "graph_mode": "document_nodes",
+        "proxy_encoder": profile.proxy_encoder,
+        "centroids": profile.centroids,
+        "centroid_count": profile.centroid_count,
+        "storage_kind": profile.storage_kind,
+        "storage_cache_mode": profile.cache_mode,
+        "token_pooling": profile.token_pooling,
+        "token_pooling_target_ratio": profile.token_pooling_target_ratio,
+        "entry_sidecar": profile.entry_sidecar,
+        "entry_sidecar_representatives": profile.entry_sidecar_representatives,
+        "entry_sidecar_strategy": profile.entry_sidecar_strategy,
+        "centroid_lite_max_postings_per_token": (
+            profile.centroid_lite_max_postings_per_token
+        ),
+        "centroid_lite_pruning": profile.centroid_lite_pruning,
+        "ef": config.ef,
+        "oversampling": config.oversampling,
+        "largest_budget": max(stage_executed_budgets) if stage_executed_budgets else None,
+        "effective_budget_count": len(stage_executed_budgets),
+        "effective_budgets": stage_executed_budgets,
+        "index_signature": serializable_index_signature(signature),
+        "index_build_skipped": True,
+        "index_build_reused": False,
+        "index_build_reused_for_profiles": [
+            grouped_profile.name for grouped_profile in grouped_profiles
+        ],
+        "skip_reason": "estimate_exceeds_limit",
+        "skip_reasons": list(decision.get("reasons", [])),
+        "run_elapsed_ms": 0.0,
+        "index_build_elapsed_ms": 0.0,
+        "retrieval_elapsed_ms": 0.0,
+        "exact_baseline_elapsed_ms": 0.0,
+        "retrieval_query_count": 0,
+        "exact_baseline_query_count": 0,
+        "admission_metrics_available": False,
+        "admission_evidence_mode": "unavailable",
+        "p50_ms": None,
+        "p95_ms": None,
+        "p99_ms": None,
+        "exact_top1_admission_rate": None,
+        "exact_top10_admission_recall": None,
+        "recall@10": None,
+        "ndcg@10": None,
+        "mrr@10": None,
+        "index_bytes": 0,
+        "estimated_build_memory_mb": estimate.get("estimated_build_memory_mb"),
+        "estimated_index_bytes": estimate.get("estimated_index_bytes"),
+        "estimate_components": estimate.get("estimate_components"),
+        "build_resource_estimate": estimate,
+        "build_resource_estimate_decision": decision,
+        "serving_slow_path_warnings": ["index_build_skipped_estimate_exceeds_limit"],
+        "serving_slow_path_failed": False,
     }
 
 
@@ -11581,6 +20007,7 @@ def run_document_node_serving_build_only(
 
     results: list[dict[str, Any]] = []
     index_build_elapsed_ms_total = 0.0
+    index_builds = 0
     last_index_phase: dict[str, Any] | None = None
     for signature, grouped_profiles in profile_groups:
         representative_profile = grouped_profiles[0]
@@ -11591,12 +20018,42 @@ def run_document_node_serving_build_only(
             oversampling=1,
             budget_sweep=budget_sweep,
         )
+        dataset_stats_for_estimate = multivector_dataset_stats_for_build_estimate(
+            conn,
+            representative_profile,
+        )
+        build_estimate = estimate_index_build_resources(
+            dataset_stats_for_estimate,
+            index_args,
+            representative_profile,
+        )
+        build_estimate_decision = index_build_estimate_decision(build_estimate, args)
+        fail_index_build_estimate_if_requested(
+            profile_name=representative_profile.name,
+            estimate=build_estimate,
+            decision=build_estimate_decision,
+        )
+        if build_estimate_decision.get("action") == "skip":
+            for profile in grouped_profiles:
+                results.append(
+                    document_node_serving_skipped_build_row(
+                        profile=profile,
+                        signature=signature,
+                        grouped_profiles=grouped_profiles,
+                        estimate=build_estimate,
+                        decision=build_estimate_decision,
+                    )
+                )
+            continue
         index_phase = build_index(conn, index_args)
         index_phase["index_signature_tuple"] = signature
         index_phase["index_signature"] = serializable_index_signature(signature)
+        index_phase["build_resource_estimate"] = build_estimate
+        index_phase["build_resource_estimate_decision"] = build_estimate_decision
         index_phase["index_build_reused_for_profiles"] = [
             profile.name for profile in grouped_profiles
         ]
+        index_builds += 1
         last_index_phase = index_phase
         index_build_elapsed_ms_total += float(index_phase.get("elapsed_ms", 0.0) or 0.0)
         for profile_index, profile in enumerate(grouped_profiles):
@@ -11622,8 +20079,17 @@ def run_document_node_serving_build_only(
                 )
             )
 
-    if last_index_phase is None:
+    if last_index_phase is None and not results:
         raise RuntimeError("document-node serving build-only selected no profiles")
+    if last_index_phase is None:
+        last_index_phase = {
+            "skipped": True,
+            "reason": "all_selected_index_builds_skipped_by_estimate",
+            "reloptions": [],
+            "index_stats": {},
+            "build_stats": {},
+            "index_bytes": 0,
+        }
     build_acceptance = document_node_build_acceptance_summary(results)
 
     return {
@@ -11635,7 +20101,7 @@ def run_document_node_serving_build_only(
         "total_elapsed_ms": elapsed_ms_since(started),
         "index_build_elapsed_ms_total": round(index_build_elapsed_ms_total, 3),
         "profiles_run": len(profiles),
-        "index_builds": len(profile_groups),
+        "index_builds": index_builds,
         "index_build_group_count": len(profile_groups),
         "index_reuse_count": max(len(profiles) - len(profile_groups), 0),
         "effective_profiles": [profile.name for profile in profiles],
@@ -11651,6 +20117,557 @@ def run_document_node_serving_build_only(
         "results": results,
         "last_index_phase": last_index_phase,
     }
+
+
+def document_node_colbert_1m_select_one_signature(
+    args: argparse.Namespace,
+    *,
+    require_selector: bool,
+) -> tuple[tuple[tuple[str, Any], ...], list[DocumentNodeServingProfile]]:
+    groups = document_node_colbert_1m_profile_groups(args)
+    if require_selector and not (
+        str(getattr(args, "document_node_colbert_1m_profile", "") or "").strip()
+        or str(getattr(args, "document_node_colbert_1m_index_signature", "") or "").strip()
+    ):
+        raise SystemExit(
+            "single-index build/evaluate mode requires "
+            "--document-node-colbert-1m-profile or "
+            "--document-node-colbert-1m-index-signature"
+        )
+    if len(groups) != 1:
+        signatures = ", ".join(
+            document_node_colbert_1m_signature_id(signature)
+            for signature, _profiles in groups
+        )
+        raise SystemExit(
+            "single-index build/evaluate mode selected more than one physical "
+            f"index signature: {signatures}; pass --document-node-colbert-1m-profile "
+            "or --document-node-colbert-1m-index-signature"
+        )
+    return groups[0]
+
+
+def run_document_node_colbert_1m_build_only(
+    conn: psycopg.Connection[Any],
+    args: argparse.Namespace,
+) -> dict[str, Any]:
+    started = time.perf_counter()
+    budget_sweep = effective_serving_grid_budget_sweep(args)
+    ef_grid = effective_document_node_serving_ef_grid(args)
+    oversampling_grid = effective_document_node_serving_oversampling_grid(args)
+    signature, grouped_profiles = document_node_colbert_1m_select_one_signature(
+        args,
+        require_selector=True,
+    )
+    representative_profile = grouped_profiles[0]
+    index_args = document_node_serving_profile_args(
+        args,
+        representative_profile,
+        ef=0,
+        oversampling=1,
+        budget_sweep=budget_sweep,
+    )
+    dataset_stats_for_estimate = multivector_dataset_stats_for_build_estimate(
+        conn,
+        representative_profile,
+    )
+    loaded_docs = int(dataset_stats_for_estimate.get("docs", 0) or 0)
+    queries_available = len(selected_query_ids(conn))
+    incremental_path = getattr(args, "incremental_output", None)
+    recorder = IncrementalRecorder(incremental_path)
+    if recorder.enabled:
+        configs = document_node_serving_configs(
+            grouped_profiles,
+            ef_grid,
+            oversampling_grid,
+        )
+        plan_metadata = document_node_serving_plan_metadata(
+            args=args,
+            mode="colbert_1m_build_only",
+            profiles=grouped_profiles,
+            configs=configs,
+            budget_sweep=budget_sweep,
+            ef_grid=ef_grid,
+            oversampling_grid=oversampling_grid,
+            docs_loaded=loaded_docs,
+            queries_available=queries_available,
+            effective_queries=0,
+            query_subset_used=False,
+        )
+        recorder.record("run_metadata", metadata=plan_metadata)
+        recorder.record(
+            "import_preflight",
+            docs_loaded=loaded_docs,
+            queries_available=queries_available,
+            effective_queries=0,
+            query_subset_used=False,
+        )
+        for profile in grouped_profiles:
+            recorder.record(
+                "planned_profile",
+                row_id=f"build_only:{profile.name}",
+                profile=profile.name,
+                index_signature=serializable_index_signature(signature),
+            )
+    build_estimate = estimate_index_build_resources(
+        dataset_stats_for_estimate,
+        index_args,
+        representative_profile,
+    )
+    build_estimate_decision = index_build_estimate_decision(build_estimate, args)
+    if recorder.enabled:
+        recorder.record(
+            "index_build_started",
+            stage="build_only",
+            index_signature=serializable_index_signature(signature),
+            representative_profile=representative_profile.name,
+            profiles=[profile.name for profile in grouped_profiles],
+            physical_index_signature=document_node_colbert_1m_signature_id(signature),
+            build_resource_estimate=build_estimate,
+            build_resource_estimate_decision=build_estimate_decision,
+        )
+    if build_estimate_decision.get("action") == "fail" and recorder.enabled:
+        recorder.record(
+            "index_build_failed",
+            stage="build_only",
+            index_signature=serializable_index_signature(signature),
+            representative_profile=representative_profile.name,
+            profiles=[profile.name for profile in grouped_profiles],
+            physical_index_signature=document_node_colbert_1m_signature_id(signature),
+            reason="estimate_exceeds_limit",
+            build_resource_estimate=build_estimate,
+            build_resource_estimate_decision=build_estimate_decision,
+        )
+    fail_index_build_estimate_if_requested(
+        profile_name=representative_profile.name,
+        estimate=build_estimate,
+        decision=build_estimate_decision,
+    )
+    if build_estimate_decision.get("action") == "skip":
+        results = [
+            document_node_serving_skipped_build_row(
+                profile=profile,
+                signature=signature,
+                grouped_profiles=grouped_profiles,
+                estimate=build_estimate,
+                decision=build_estimate_decision,
+            )
+            for profile in grouped_profiles
+        ]
+        result = {
+            "enabled": True,
+            "pure_colbert_only": True,
+            "mode": "build_only",
+            "retrieval_skipped": True,
+            "admission_skipped": True,
+            "index_build_skipped": True,
+            "reason": "single pure-ColBERT 1M physical index build skipped by estimate",
+            "skip_reason": "estimate_exceeds_limit",
+            "skip_reasons": list(build_estimate_decision.get("reasons", [])),
+            "total_elapsed_ms": elapsed_ms_since(started),
+            "physical_index_signature": document_node_colbert_1m_signature_id(signature),
+            "physical_index_signature_hash": document_node_colbert_1m_signature_hash(signature),
+            "index_signature": serializable_index_signature(signature),
+            "reloptions": document_node_colbert_1m_signature_record(
+                signature,
+                grouped_profiles,
+            ).get("reloptions", []),
+            "profiles_run": len(grouped_profiles),
+            "index_builds": 0,
+            "index_build_group_count": 1,
+            "index_reuse_count": 0,
+            "effective_profiles": [profile.name for profile in grouped_profiles],
+            "index_build_reused_for_profiles": [
+                document_node_colbert_1m_signature_record(signature, grouped_profiles)
+            ],
+            "index_build_elapsed_ms_total": 0.0,
+            "estimated_build_memory_mb": build_estimate.get("estimated_build_memory_mb"),
+            "estimated_index_bytes": build_estimate.get("estimated_index_bytes"),
+            "estimate_components": build_estimate.get("estimate_components"),
+            "build_resource_estimate": build_estimate,
+            "build_resource_estimate_decision": build_estimate_decision,
+            "build_acceptance_summary": document_node_build_acceptance_summary(results),
+            "results": results,
+            "last_index_phase": {
+                "skipped": True,
+                "reason": "estimate_exceeds_limit",
+                "reloptions": [],
+                "index_stats": {},
+                "build_stats": {},
+                "index_bytes": 0,
+                "build_resource_estimate": build_estimate,
+                "build_resource_estimate_decision": build_estimate_decision,
+            },
+        }
+        if recorder.enabled:
+            result["incremental_output"] = portable_path(recorder.path) if recorder.path else None
+            recorder.record(
+                "index_build_skipped",
+                stage="build_only",
+                index_signature=serializable_index_signature(signature),
+                representative_profile=representative_profile.name,
+                profiles=[profile.name for profile in grouped_profiles],
+                physical_index_signature=document_node_colbert_1m_signature_id(signature),
+                reason="estimate_exceeds_limit",
+                build_resource_estimate=build_estimate,
+                build_resource_estimate_decision=build_estimate_decision,
+            )
+            recorder.record(
+                "run_completed",
+                summary={
+                    "mode": "colbert_1m_build_only",
+                    "profiles_run": len(grouped_profiles),
+                    "index_builds": 0,
+                    "index_build_skipped": True,
+                    "elapsed_ms": result["total_elapsed_ms"],
+                },
+            )
+        return result
+    try:
+        index_phase = build_index(conn, index_args)
+    except Exception as exc:
+        if recorder.enabled:
+            recorder.record(
+                "index_build_failed",
+                stage="build_only",
+                index_signature=serializable_index_signature(signature),
+                representative_profile=representative_profile.name,
+                profiles=[profile.name for profile in grouped_profiles],
+                physical_index_signature=document_node_colbert_1m_signature_id(signature),
+                error=repr(exc),
+                build_resource_estimate=build_estimate,
+                build_resource_estimate_decision=build_estimate_decision,
+            )
+        raise
+    index_phase["index_signature_tuple"] = signature
+    index_phase["index_signature"] = serializable_index_signature(signature)
+    index_phase["build_resource_estimate"] = build_estimate
+    index_phase["build_resource_estimate_decision"] = build_estimate_decision
+    index_phase["index_build_reused_for_profiles"] = [
+        profile.name for profile in grouped_profiles
+    ]
+    if recorder.enabled:
+        recorder.record(
+            "index_build_succeeded",
+            stage="build_only",
+            index_signature=serializable_index_signature(signature),
+            representative_profile=representative_profile.name,
+            profiles=[profile.name for profile in grouped_profiles],
+            physical_index_signature=document_node_colbert_1m_signature_id(signature),
+            elapsed_ms=float(index_phase.get("elapsed_ms", 0.0) or 0.0),
+            index_bytes=int(index_phase.get("index_bytes", 0) or 0),
+            index_stats=index_phase.get("index_stats", {}),
+            build_stats=index_phase.get("build_stats", {}),
+            build_resource_estimate=build_estimate,
+            build_resource_estimate_decision=build_estimate_decision,
+        )
+    results = []
+    for profile_index, profile in enumerate(grouped_profiles):
+        mode_args = document_node_serving_profile_args(
+            args,
+            profile,
+            ef=0,
+            oversampling=1,
+            budget_sweep=budget_sweep,
+        )
+        validate_serving_profile_index_reuse(
+            args=mode_args,
+            profile=profile,
+            index_phase=index_phase,
+            expected_signature=signature,
+        )
+        results.append(
+            document_node_serving_build_only_row(
+                profile=profile,
+                index_phase=index_phase,
+                signature=signature,
+                profile_reused_index=profile_index > 0,
+                grouped_profiles=grouped_profiles,
+            )
+        )
+    result = {
+        "enabled": True,
+        "pure_colbert_only": True,
+        "mode": "build_only",
+        "retrieval_skipped": True,
+        "admission_skipped": True,
+        "reason": "single pure-ColBERT 1M physical index build",
+        "total_elapsed_ms": elapsed_ms_since(started),
+        "physical_index_signature": document_node_colbert_1m_signature_id(signature),
+        "physical_index_signature_hash": document_node_colbert_1m_signature_hash(signature),
+        "index_signature": serializable_index_signature(signature),
+        "reloptions": document_node_colbert_1m_signature_record(
+            signature,
+            grouped_profiles,
+        ).get("reloptions", []),
+        "profiles_run": len(grouped_profiles),
+        "index_builds": 1,
+        "index_build_group_count": 1,
+        "index_reuse_count": max(len(grouped_profiles) - 1, 0),
+        "effective_profiles": [profile.name for profile in grouped_profiles],
+        "index_build_reused_for_profiles": [
+            document_node_colbert_1m_signature_record(signature, grouped_profiles)
+        ],
+        "index_build_elapsed_ms_total": round(
+            float(index_phase.get("elapsed_ms", 0.0) or 0.0),
+            3,
+        ),
+        "estimated_build_memory_mb": build_estimate.get("estimated_build_memory_mb"),
+        "estimated_index_bytes": build_estimate.get("estimated_index_bytes"),
+        "estimate_components": build_estimate.get("estimate_components"),
+        "build_resource_estimate": build_estimate,
+        "build_resource_estimate_decision": build_estimate_decision,
+        "build_acceptance_summary": document_node_build_acceptance_summary(results),
+        "results": results,
+        "last_index_phase": index_phase,
+    }
+    if recorder.enabled:
+        result["incremental_output"] = portable_path(recorder.path) if recorder.path else None
+        recorder.record(
+            "run_completed",
+            summary={
+                "mode": "colbert_1m_build_only",
+                "profiles_run": len(grouped_profiles),
+                "index_builds": 1,
+                "elapsed_ms": result["total_elapsed_ms"],
+            },
+        )
+    return result
+
+
+def run_document_node_colbert_1m_evaluate_only(
+    conn: psycopg.Connection[Any],
+    args: argparse.Namespace,
+    queries: list[QueryItem],
+    qrels: dict[str, dict[str, int]],
+) -> dict[str, Any]:
+    started = time.perf_counter()
+    query_limit = document_node_colbert_1m_query_limit_summary(
+        requested_max_queries=int(getattr(args, "max_queries", 0) or 0),
+        queries_loaded=len(queries),
+        strict_query_count=bool(getattr(args, "strict_query_count", False)),
+    )
+    if query_limit["strict_query_count_failed"]:
+        raise SystemExit(query_limit["strict_query_count_error"])
+    budget_sweep = effective_serving_grid_budget_sweep(args)
+    executed_budgets = effective_serving_grid_executed_budgets(args)
+    ef_grid = effective_document_node_serving_ef_grid(args)
+    oversampling_grid = effective_document_node_serving_oversampling_grid(args)
+    signature, grouped_profiles = document_node_colbert_1m_select_one_signature(
+        args,
+        require_selector=True,
+    )
+    if len(grouped_profiles) != 1:
+        raise SystemExit(
+            "evaluate-only requires exactly one profile; pass "
+            "--document-node-colbert-1m-profile when an index signature is "
+            "shared by multiple profiles"
+        )
+    profile = grouped_profiles[0]
+    index_args = document_node_serving_profile_args(
+        args,
+        profile,
+        ef=0,
+        oversampling=1,
+        budget_sweep=budget_sweep,
+    )
+    index_args = clone_args(
+        index_args,
+        reuse_index=True,
+        require_existing_index=True,
+        no_create_index=True,
+    )
+    index_phase = read_existing_colbert_index_phase(
+        conn,
+        index_args,
+        require_existing=True,
+    )
+    if index_phase is None:
+        raise SystemExit(
+            "required existing index dbpedia_colbert_docs_colbert_idx is missing"
+        )
+    index_phase["build_stats"] = {}
+    index_phase["build_stats_source"] = "not_collected_in_evaluate_only"
+    index_phase["index_signature_tuple"] = signature
+    index_phase["index_signature"] = serializable_index_signature(signature)
+    validate_serving_profile_index_reuse(
+        args=index_args,
+        profile=profile,
+        index_phase=index_phase,
+        expected_signature=signature,
+    )
+    loaded_docs = loaded_document_count(conn)
+    exact_top_cache: dict[str, list[dict[str, Any]]] = {}
+    incremental_path = getattr(args, "incremental_output", None)
+    recorder = IncrementalRecorder(incremental_path)
+    if recorder.enabled:
+        plan_metadata = document_node_serving_plan_metadata(
+            args=args,
+            mode="colbert_1m_evaluate_only",
+            profiles=[profile],
+            configs=document_node_serving_configs([profile], ef_grid, oversampling_grid),
+            budget_sweep=budget_sweep,
+            ef_grid=ef_grid,
+            oversampling_grid=oversampling_grid,
+            docs_loaded=loaded_docs,
+            queries_available=len(queries),
+            effective_queries=len(queries),
+            query_subset_used=bool(query_limit["query_count_limited_by_artifact"]),
+        )
+        recorder.record("run_metadata", metadata=plan_metadata)
+        recorder.record(
+            "import_preflight",
+            docs_loaded=loaded_docs,
+            queries_available=len(queries),
+            effective_queries=len(queries),
+            qrels_loaded=sum(len(values) for values in qrels.values()),
+            query_subset_used=bool(query_limit["query_count_limited_by_artifact"]),
+            query_count_limited_by_artifact=query_limit["query_count_limited_by_artifact"],
+            requested_max_queries=query_limit["requested_max_queries"],
+        )
+    results: list[dict[str, Any]] = []
+    full_admission: list[dict[str, Any]] = []
+    exact_baseline_elapsed_ms_total = 0.0
+    retrieval_elapsed_ms_total = 0.0
+    exact_baseline_query_count = 0
+    retrieval_query_count = 0
+    for config in document_node_serving_configs([profile], ef_grid, oversampling_grid):
+        row_id = f"evaluate_only:{document_node_serving_config_id(config)}"
+        mode_args = document_node_serving_profile_args(
+            args,
+            profile,
+            ef=config.ef,
+            oversampling=config.oversampling,
+            budget_sweep=budget_sweep,
+        )
+        validate_serving_profile_index_reuse(
+            args=mode_args,
+            profile=profile,
+            index_phase=index_phase,
+            expected_signature=signature,
+        )
+        mode_args = clone_args(mode_args, admission_debug_context="serving_grid")
+        if recorder.enabled:
+            recorder.record(
+                "query_evaluation_started",
+                stage="evaluate_only",
+                row_id=row_id,
+                profile=profile.name,
+                ef=config.ef,
+                oversampling=config.oversampling,
+                index_signature=serializable_index_signature(signature),
+                query_count=len(queries),
+                executed_budgets=executed_budgets,
+            )
+        admission = run_admission_debug(
+            conn,
+            mode_args,
+            queries,
+            exact_top_cache=exact_top_cache,
+            exact_top_cache_document_count=loaded_docs,
+            executed_budgets=executed_budgets,
+        )
+        aggregate = admission.get("aggregate", {})
+        if not isinstance(aggregate, dict):
+            aggregate = {}
+        exact_baseline_elapsed_ms_total += float(
+            aggregate.get("exact_baseline_elapsed_ms_total", 0.0) or 0.0
+        )
+        retrieval_elapsed_ms_total += float(
+            aggregate.get("retrieval_elapsed_ms_total", 0.0) or 0.0
+        )
+        exact_baseline_query_count += int(aggregate.get("exact_baseline_query_count", 0) or 0)
+        retrieval_query_count += int(aggregate.get("retrieval_query_count", 0) or 0)
+        row = document_node_serving_summary_row(
+            profile=profile,
+            args=mode_args,
+            ef=config.ef,
+            oversampling=config.oversampling,
+            index_phase=index_phase,
+            admission=admission,
+            qrels=qrels,
+        )
+        row["stage"] = "evaluate_only"
+        row["index_signature"] = serializable_index_signature(signature)
+        row["physical_index_signature"] = document_node_colbert_1m_signature_id(signature)
+        row["index_build_reused"] = True
+        results.append(row)
+        full_admission.append({
+            "stage": "evaluate_only",
+            "profile": profile.name,
+            "ef": config.ef,
+            "oversampling": config.oversampling,
+            "index_signature": serializable_index_signature(signature),
+            "index_build_reused": True,
+            "admission_debug": admission,
+        })
+        if recorder.enabled:
+            recorder.record(
+                "query_evaluation_succeeded",
+                stage="evaluate_only",
+                row_id=row_id,
+                profile=profile.name,
+                ef=config.ef,
+                oversampling=config.oversampling,
+                row=row,
+            )
+    result = {
+        "enabled": True,
+        "production_oriented": True,
+        "pure_colbert_only": True,
+        "mode": "colbert_1m_evaluate_only",
+        "colbert_1m_grid": True,
+        "evaluation_only": True,
+        "physical_index_signature": document_node_colbert_1m_signature_id(signature),
+        "physical_index_signature_hash": document_node_colbert_1m_signature_hash(signature),
+        "index_signature": serializable_index_signature(signature),
+        "reloptions": document_node_colbert_1m_signature_record(signature, [profile]).get(
+            "reloptions",
+            [],
+        ),
+        "profiles_run": 1,
+        "effective_profiles": [profile.name],
+        "effective_ef_grid": ef_grid,
+        "effective_oversampling_grid": oversampling_grid,
+        "effective_budget_sweep": budget_sweep,
+        "executed_budgets": executed_budgets,
+        "index_builds": 0,
+        "index_build_group_count": 1,
+        "index_reuse_count": 1,
+        "index_build_elapsed_ms_total": 0.0,
+        "exact_baseline_elapsed_ms_total": round(exact_baseline_elapsed_ms_total, 3),
+        "retrieval_elapsed_ms_total": round(retrieval_elapsed_ms_total, 3),
+        "exact_baseline_query_count": exact_baseline_query_count,
+        "retrieval_query_count": retrieval_query_count,
+        "queries_run": len(queries),
+        "queries_available": len(queries),
+        "requested_max_queries": query_limit["requested_max_queries"],
+        "effective_max_queries": query_limit["effective_max_queries"],
+        "query_count_limited_by_artifact": query_limit["query_count_limited_by_artifact"],
+        "strict_query_count": query_limit["strict_query_count"],
+        "query_count_limit_message": query_limit["query_count_limit_message"],
+        "require_existing_index": True,
+        "no_create_index": True,
+        "total_elapsed_ms": elapsed_ms_since(started),
+        "profile_summaries": [],
+        "summary_rows": results,
+        "results": results,
+        "admission_debug_runs": full_admission,
+        "index_phase": index_phase,
+    }
+    if recorder.enabled:
+        result["incremental_output"] = portable_path(recorder.path) if recorder.path else None
+        recorder.record(
+            "run_completed",
+            summary={
+                "mode": "colbert_1m_evaluate_only",
+                "profiles_run": 1,
+                "rows": len(results),
+                "index_builds": 0,
+                "elapsed_ms": result["total_elapsed_ms"],
+            },
+        )
+    return result
 
 
 def run_document_node_admission_grid(
@@ -12927,6 +21944,1294 @@ def run_document_node_serving_latency_only(
     }
 
 
+def qrel_metrics_for_retrieval_run(
+    run: dict[str, list[str]],
+    qrels: dict[str, dict[str, int]],
+    *,
+    final_k: int,
+    quality_k: int,
+) -> dict[str, float]:
+    metrics = method_metrics(run, qrels, final_k, quality_k)
+    if final_k >= 100:
+        metrics.update(metrics_for_run(run, qrels, 100))
+    return metrics
+
+
+def scan_summary_value(
+    scan_stats_summary: dict[str, Any],
+    key: str,
+    stat: str,
+) -> Any:
+    field_summary = scan_stats_summary.get("field_summary", {})
+    if not isinstance(field_summary, dict):
+        return None
+    value = field_summary.get(key)
+    if not isinstance(value, dict):
+        return None
+    return value.get(stat)
+
+
+def first_scan_summary_value(
+    scan_stats_summary: dict[str, Any],
+    keys: Sequence[str],
+    stat: str,
+) -> Any:
+    for key in keys:
+        value = scan_summary_value(scan_stats_summary, key, stat)
+        if value is not None:
+            return value
+    return None
+
+
+def colbert_beir_candidate_source_stats(
+    scan_stats_summary: dict[str, Any],
+) -> dict[str, Any]:
+    first_selected = scan_stats_summary.get("first_selected", {})
+    last_selected = scan_stats_summary.get("last_selected", {})
+    stats_available = scan_stats_summary.get("stats_available", {})
+    field_summary = scan_stats_summary.get("field_summary", {})
+    if not isinstance(first_selected, dict):
+        first_selected = {}
+    if not isinstance(last_selected, dict):
+        last_selected = {}
+    if not isinstance(stats_available, dict):
+        stats_available = {}
+    if not isinstance(field_summary, dict):
+        field_summary = {}
+    interesting_fields = (
+        "multivector_candidate_source",
+        "proxy_encoder_kind",
+        "multivector_doc_graph_docs_scored",
+        "multivector_doc_graph_edges_visited",
+        "multivector_doc_graph_candidates",
+        "proxy_candidate_limit_source",
+        "proxy_candidates",
+        "proxy_candidates_returned",
+        "proxy_graph_nodes_visited",
+        "centroid_lists_visited",
+        "centroid_docs_touched",
+        "centroid_pruned_docs",
+        "centroid_postings_touched",
+        "centroid_postings_skipped",
+        "centroid_posting_cap_strategy",
+        "centroid_candidates",
+        "quantized_inverted_lists_visited",
+        "quantized_inverted_postings_touched",
+        "quantized_inverted_docs_scored",
+        "quantized_inverted_candidates",
+        "multivector_exact_rerank_docs",
+        "multivector_exact_rerank_pairs",
+        "multivector_exact_kernel",
+        "multivector_exact_maxsim_rerank_time_us",
+        "exact_maxsim_rerank_time_us",
+        "multivector_candidate_source_time_us",
+        "multivector_doc_sidecar_bytes_touched",
+        "multivector_doc_sidecar_vectors_loaded",
+    )
+    return {
+        "first_selected": {
+            key: first_selected[key]
+            for key in interesting_fields
+            if key in first_selected
+        },
+        "last_selected": {
+            key: last_selected[key]
+            for key in interesting_fields
+            if key in last_selected
+        },
+        "stats_available": dict(sorted(stats_available.items())),
+        "field_summary": {
+            key: field_summary[key]
+            for key in interesting_fields
+            if key in field_summary
+        },
+    }
+
+
+def qrel_coverage_for_query_ids(
+    qrels: dict[str, dict[str, int]],
+    query_ids: Sequence[str],
+) -> dict[str, Any]:
+    selected = {str(query_id) for query_id in query_ids}
+    covered_qrels = {
+        qid: values
+        for qid, values in qrels.items()
+        if qid in selected and values
+    }
+    return {
+        "queries_with_qrels": len(covered_qrels),
+        "qrels_covered": sum(len(values) for values in covered_qrels.values()),
+        "query_qrel_coverage": (
+            round(len(covered_qrels) / len(selected), 6) if selected else 0.0
+        ),
+    }
+
+
+def build_document_node_colbert_beir_quality_report(
+    *,
+    args: argparse.Namespace,
+    profile: DocumentNodeServingProfile,
+    effective_rerank_k: int,
+    index_phase: dict[str, Any],
+    loop: dict[str, Any],
+    qrels: dict[str, dict[str, int]],
+    counts: dict[str, int],
+    query_limit: dict[str, Any],
+    started: float,
+) -> dict[str, Any]:
+    if not qrels:
+        raise SystemExit(
+            "--document-node-colbert-1m-beir-quality-only requires qrels in "
+            "dbpedia_colbert_qrels"
+        )
+    top_docs = loop.get("top_docs_by_query", {})
+    if not isinstance(top_docs, dict):
+        top_docs = {}
+    run = {
+        str(query_id): [str(doc_id) for doc_id in docs]
+        for query_id, docs in top_docs.items()
+        if isinstance(docs, list)
+    }
+    metrics = qrel_metrics_for_retrieval_run(
+        run,
+        qrels,
+        final_k=int(getattr(args, "final_k", 10) or 10),
+        quality_k=int(getattr(args, "quality_k", 10) or 10),
+    )
+    latency = loop.get("latency", {})
+    if not isinstance(latency, dict):
+        latency = {}
+    scan_stats_summary = loop.get("scan_stats_summary", {})
+    if not isinstance(scan_stats_summary, dict):
+        scan_stats_summary = {}
+    query_ids = list(run)
+    qrel_coverage = qrel_coverage_for_query_ids(qrels, query_ids)
+    exact_rerank_docs = first_scan_summary_value(
+        scan_stats_summary,
+        ("multivector_exact_rerank_docs", "proxy_exact_rerank_docs"),
+        "p50",
+    )
+    exact_rerank_time_us = first_scan_summary_value(
+        scan_stats_summary,
+        (
+            "multivector_exact_maxsim_rerank_time_us",
+            "exact_maxsim_rerank_time_us",
+            "proxy_exact_rerank_time_us",
+        ),
+        "p50",
+    )
+    return {
+        "enabled": True,
+        "pure_colbert_only": True,
+        "exact_admission_available": False,
+        "exact_admission_reason": "not_requested",
+        "exact_admission_baseline_calls": 0,
+        "docs": int(counts.get("docs_loaded", 0) or 0),
+        "queries_available": int(counts.get("queries_loaded", 0) or 0),
+        "queries_evaluated": int(loop.get("query_count", len(run)) or len(run)),
+        "qrels_loaded": int(counts.get("qrels_loaded", 0) or 0),
+        "qrels_covered": int(qrel_coverage.get("qrels_covered", 0) or 0),
+        "queries_with_qrels": int(qrel_coverage.get("queries_with_qrels", 0) or 0),
+        "query_qrel_coverage": qrel_coverage.get("query_qrel_coverage", 0.0),
+        "requested_max_queries": query_limit.get("requested_max_queries"),
+        "effective_max_queries": query_limit.get("effective_max_queries"),
+        "query_count_limited_by_artifact": query_limit.get(
+            "query_count_limited_by_artifact",
+            False,
+        ),
+        "profile": profile.name,
+        "candidate_source": profile.candidate_source,
+        "proxy_encoder": profile.proxy_encoder,
+        "centroids": profile.centroids,
+        "storage_kind": profile.storage_kind,
+        "storage_cache_mode": profile.cache_mode,
+        "token_pooling": profile.token_pooling,
+        "token_pooling_target_ratio": profile.token_pooling_target_ratio,
+        "centroid_lite_max_postings_per_token": profile.centroid_lite_max_postings_per_token,
+        "settings": {
+            "profile": profile.name,
+            "candidate_source": profile.candidate_source,
+            "graph_mode": "document_nodes",
+            "proxy_encoder": profile.proxy_encoder,
+            "centroids": profile.centroids,
+            "storage_kind": profile.storage_kind,
+            "storage_cache_mode": profile.cache_mode,
+            "token_pooling": profile.token_pooling,
+            "token_pooling_target_ratio": profile.token_pooling_target_ratio,
+            "candidate_k": int(getattr(args, "document_node_colbert_candidate_k", 0) or 0),
+            "requested_exact_rerank_k": int(
+                getattr(args, "document_node_colbert_exact_rerank_k", 0) or 0
+            ),
+            "effective_exact_rerank_k": effective_rerank_k,
+            "ef": int(getattr(args, "document_node_colbert_ef", 0) or 0),
+            "oversampling": int(getattr(args, "document_node_colbert_oversampling", 0) or 0),
+            "final_k": int(getattr(args, "final_k", 10) or 10),
+        },
+        "p50_ms": latency.get("p50_ms"),
+        "p95_ms": latency.get("p95_ms"),
+        "p99_ms": latency.get("p99_ms"),
+        "qps": latency.get("qps_total", latency.get("qps", 0.0)),
+        "latency": latency,
+        "recall@10": metrics.get("recall@10"),
+        "ndcg@10": metrics.get("ndcg@10"),
+        "mrr@10": metrics.get("mrr@10"),
+        "metrics": metrics,
+        "scan_stats_summary": scan_stats_summary,
+        "exact_rerank_docs": exact_rerank_docs,
+        "exact_rerank_time_us": exact_rerank_time_us,
+        "candidate_source_stats": colbert_beir_candidate_source_stats(
+            scan_stats_summary
+        ),
+        "serving_slow_path_warnings": loop.get("serving_slow_path_warnings", []),
+        "serving_slow_path_failed": loop.get("serving_slow_path_failed", False),
+        "top10_by_query": {
+            query_id: docs[:10]
+            for query_id, docs in run.items()
+        },
+        "index_phase": index_phase,
+        "total_elapsed_ms": elapsed_ms_since(started),
+    }
+
+
+def build_document_node_colbert_sampled_admission_report(
+    *,
+    args: argparse.Namespace,
+    profile: DocumentNodeServingProfile,
+    effective_rerank_k: int,
+    index_phase: dict[str, Any],
+    loop: dict[str, Any],
+    qrels: dict[str, dict[str, int]],
+    counts: dict[str, int],
+    oracle_artifact: dict[str, Any],
+    oracle_records: Sequence[dict[str, Any]],
+    missing_loaded_query_ids: Sequence[str],
+    started: float,
+) -> dict[str, Any]:
+    top_docs = loop.get("top_docs_by_query", {})
+    if not isinstance(top_docs, dict):
+        top_docs = {}
+    run = {
+        str(query_id): [str(doc_id) for doc_id in docs]
+        for query_id, docs in top_docs.items()
+        if isinstance(docs, list)
+    }
+    oracle_metadata = (
+        oracle_artifact.get("metadata")
+        if isinstance(oracle_artifact.get("metadata"), dict)
+        else {}
+    )
+    oracle_top_k = int(oracle_metadata.get("top_k", 0) or 0)
+    if oracle_top_k <= 0:
+        oracle_top_k = max(
+            (
+                int(record.get("top_k", 0) or 0)
+                for record in oracle_records
+                if isinstance(record, dict)
+            ),
+            default=0,
+        )
+    per_query: list[dict[str, Any]] = []
+    for record in oracle_records:
+        query_id = str(record.get("query_id"))
+        docs = run.get(query_id)
+        if docs is None:
+            continue
+        exact_rows = exact_oracle_record_top_rows(record)
+        per_query.append({
+            "query_id": query_id,
+            **sampled_oracle_admission_for_query(
+                retrieved_doc_ids=docs,
+                exact_rows=exact_rows,
+                oracle_top_k=oracle_top_k,
+            ),
+        })
+    admission = aggregate_sampled_oracle_admission(per_query)
+    metrics: dict[str, float] = {}
+    qrel_coverage = {
+        "queries_with_qrels": 0,
+        "qrels_covered": 0,
+        "query_qrel_coverage": 0.0,
+    }
+    if qrels:
+        metrics = qrel_metrics_for_retrieval_run(
+            run,
+            qrels,
+            final_k=int(getattr(args, "final_k", 10) or 10),
+            quality_k=int(getattr(args, "quality_k", 10) or 10),
+        )
+        qrel_coverage = qrel_coverage_for_query_ids(qrels, list(run))
+
+    latency = loop.get("latency", {})
+    if not isinstance(latency, dict):
+        latency = {}
+    scan_stats_summary = loop.get("scan_stats_summary", {})
+    if not isinstance(scan_stats_summary, dict):
+        scan_stats_summary = {}
+    exact_rerank_docs = first_scan_summary_value(
+        scan_stats_summary,
+        ("multivector_exact_rerank_docs", "proxy_exact_rerank_docs"),
+        "p50",
+    )
+    exact_rerank_time_us = first_scan_summary_value(
+        scan_stats_summary,
+        (
+            "multivector_exact_maxsim_rerank_time_us",
+            "exact_maxsim_rerank_time_us",
+            "proxy_exact_rerank_time_us",
+        ),
+        "p50",
+    )
+    queries_available = int(counts.get("queries_loaded", 0) or 0)
+    oracle_query_count = len(oracle_records)
+    full_available_query_coverage = bool(
+        queries_available > 0 and oracle_query_count >= queries_available
+    )
+    return {
+        "enabled": True,
+        "pure_colbert_only": True,
+        "admission_evidence": "sampled_exact_oracle",
+        "exact_admission_available": "sampled",
+        "exact_admission_reason": "loaded from --oracle-input; no exact scan recomputed",
+        "full_1m_admission": full_available_query_coverage,
+        "full_available_query_admission": full_available_query_coverage,
+        "exact_admission_baseline_calls": 0,
+        "oracle_input": portable_path(args.oracle_input) if args.oracle_input else None,
+        "oracle_query_count": oracle_query_count,
+        "oracle_top_k": oracle_top_k,
+        "oracle_queries_compared": int(admission.get("queries_compared", 0) or 0),
+        "oracle_queries_missing_loaded_embeddings": len(missing_loaded_query_ids),
+        "missing_oracle_query_ids": list(missing_loaded_query_ids)[:50],
+        "docs": int(counts.get("docs_loaded", 0) or 0),
+        "queries_available": queries_available,
+        "queries_evaluated": int(loop.get("query_count", len(run)) or len(run)),
+        "qrels_loaded": int(counts.get("qrels_loaded", 0) or 0),
+        "qrels_covered": int(qrel_coverage.get("qrels_covered", 0) or 0),
+        "queries_with_qrels": int(qrel_coverage.get("queries_with_qrels", 0) or 0),
+        "query_qrel_coverage": qrel_coverage.get("query_qrel_coverage", 0.0),
+        "profile": profile.name,
+        "candidate_source": profile.candidate_source,
+        "proxy_encoder": profile.proxy_encoder,
+        "centroids": profile.centroids,
+        "storage_kind": profile.storage_kind,
+        "storage_cache_mode": profile.cache_mode,
+        "token_pooling": profile.token_pooling,
+        "token_pooling_target_ratio": profile.token_pooling_target_ratio,
+        "centroid_lite_max_postings_per_token": profile.centroid_lite_max_postings_per_token,
+        "settings": {
+            "profile": profile.name,
+            "candidate_source": profile.candidate_source,
+            "graph_mode": "document_nodes",
+            "proxy_encoder": profile.proxy_encoder,
+            "centroids": profile.centroids,
+            "storage_kind": profile.storage_kind,
+            "storage_cache_mode": profile.cache_mode,
+            "token_pooling": profile.token_pooling,
+            "token_pooling_target_ratio": profile.token_pooling_target_ratio,
+            "candidate_k": int(getattr(args, "document_node_colbert_candidate_k", 0) or 0),
+            "requested_exact_rerank_k": int(
+                getattr(args, "document_node_colbert_exact_rerank_k", 0) or 0
+            ),
+            "effective_exact_rerank_k": effective_rerank_k,
+            "ef": int(getattr(args, "document_node_colbert_ef", 0) or 0),
+            "oversampling": int(getattr(args, "document_node_colbert_oversampling", 0) or 0),
+            "final_k": int(getattr(args, "final_k", 10) or 10),
+        },
+        "candidate_budget": int(getattr(args, "document_node_colbert_candidate_k", 0) or 0),
+        "exact_rerank_k": effective_rerank_k,
+        "exact_top1_admission_rate": admission.get("exact_top1_admission_rate"),
+        "exact_top10_admission_recall": admission.get("exact_top10_admission_recall"),
+        "exact_topk_admission_recall": admission.get("exact_topk_admission_recall"),
+        "admission": admission,
+        "p50_ms": latency.get("p50_ms"),
+        "p95_ms": latency.get("p95_ms"),
+        "p99_ms": latency.get("p99_ms"),
+        "qps": latency.get("qps_total", latency.get("qps", 0.0)),
+        "latency": latency,
+        "recall@10": metrics.get("recall@10"),
+        "ndcg@10": metrics.get("ndcg@10"),
+        "mrr@10": metrics.get("mrr@10"),
+        "metrics": metrics,
+        "scan_stats_summary": scan_stats_summary,
+        "exact_rerank_docs": exact_rerank_docs,
+        "exact_rerank_time_us": exact_rerank_time_us,
+        "candidate_source_stats": colbert_beir_candidate_source_stats(
+            scan_stats_summary
+        ),
+        "serving_slow_path_warnings": loop.get("serving_slow_path_warnings", []),
+        "serving_slow_path_failed": loop.get("serving_slow_path_failed", False),
+        "per_query_admission": per_query,
+        "top10_by_query": {
+            query_id: docs[:10]
+            for query_id, docs in run.items()
+        },
+        "index_phase": index_phase,
+        "oracle_metadata": oracle_metadata,
+        "total_elapsed_ms": elapsed_ms_since(started),
+    }
+
+
+def run_document_node_colbert_sampled_admission(
+    conn: psycopg.Connection[Any],
+    args: argparse.Namespace,
+    queries: list[QueryItem],
+    qrels: dict[str, dict[str, int]],
+) -> dict[str, Any]:
+    started = time.perf_counter()
+    if args.oracle_input is None:
+        raise SystemExit("--document-node-colbert-sampled-admission requires --oracle-input")
+    oracle_artifact = load_exact_oracle_artifact(args.oracle_input)
+    oracle_records_all = completed_exact_oracle_records(oracle_artifact)
+    if not oracle_records_all:
+        raise SystemExit(f"--oracle-input has no completed exact oracle records: {args.oracle_input}")
+    by_query_id = {query.query_id: query for query in queries}
+    missing_loaded_query_ids = [
+        str(record.get("query_id"))
+        for record in oracle_records_all
+        if str(record.get("query_id")) not in by_query_id
+    ]
+    oracle_records = [
+        record
+        for record in oracle_records_all
+        if str(record.get("query_id")) in by_query_id
+    ]
+    if not oracle_records:
+        raise SystemExit(
+            "--oracle-input query IDs do not match any loaded query embeddings; "
+            f"missing examples: {', '.join(missing_loaded_query_ids[:10])}"
+        )
+    selected_queries = [by_query_id[str(record.get("query_id"))] for record in oracle_records]
+    sampled_args, profile, effective_rerank_k = document_node_colbert_sampled_admission_args(args)
+    index_phase = build_index(conn, sampled_args)
+    sampled_args = clone_args(
+        sampled_args,
+        serving_loaded_document_count=loaded_document_count(conn),
+    )
+    set_retrieval_gucs(conn, sampled_args, "dbpedia_colbert_sampled_admission")
+    exec_sql(conn, "SELECT set_config('turbohybrid.multivector_debug_admission', 'off', false)")
+    loop = run_serving_latency_query_loop(conn, sampled_args, selected_queries, profile)
+    fail_on_serving_slow_path_if_requested(
+        loop["serving_slow_path_warnings"],
+        sampled_args,
+    )
+    counts = dbpedia_colbert_loaded_counts(conn)
+    return build_document_node_colbert_sampled_admission_report(
+        args=args,
+        profile=profile,
+        effective_rerank_k=effective_rerank_k,
+        index_phase=index_phase,
+        loop=loop,
+        qrels=qrels,
+        counts=counts,
+        oracle_artifact=oracle_artifact,
+        oracle_records=oracle_records,
+        missing_loaded_query_ids=missing_loaded_query_ids,
+        started=started,
+    )
+
+
+def sampled_oracle_admission_for_run(
+    *,
+    run: dict[str, list[str]],
+    oracle_artifact: dict[str, Any] | None,
+    oracle_records: Sequence[dict[str, Any]],
+) -> tuple[dict[str, Any], list[dict[str, Any]]]:
+    if oracle_artifact is None or not oracle_records:
+        return {
+            "available": False,
+            "reason": "oracle_input_not_supplied",
+            "admission_evidence": "unavailable",
+        }, []
+    oracle_metadata = (
+        oracle_artifact.get("metadata")
+        if isinstance(oracle_artifact.get("metadata"), dict)
+        else {}
+    )
+    oracle_top_k = int(oracle_metadata.get("top_k", 0) or 0)
+    if oracle_top_k <= 0:
+        oracle_top_k = max(
+            (
+                int(record.get("top_k", 0) or 0)
+                for record in oracle_records
+                if isinstance(record, dict)
+            ),
+            default=0,
+        )
+    per_query: list[dict[str, Any]] = []
+    missing_result_ids: list[str] = []
+    for record in oracle_records:
+        query_id = str(record.get("query_id"))
+        retrieved = run.get(query_id)
+        if retrieved is None:
+            missing_result_ids.append(query_id)
+            continue
+        exact_rows = exact_oracle_record_top_rows(record)
+        per_query.append({
+            "query_id": query_id,
+            **sampled_oracle_admission_for_query(
+                retrieved_doc_ids=retrieved,
+                exact_rows=exact_rows,
+                oracle_top_k=oracle_top_k,
+            ),
+        })
+    aggregate = aggregate_sampled_oracle_admission(per_query)
+    return {
+        "available": bool(per_query),
+        "admission_evidence": "sampled_exact_oracle" if per_query else "unavailable",
+        "exact_admission_available": "sampled" if per_query else "unavailable",
+        "oracle_top_k": oracle_top_k,
+        "oracle_query_count": len(oracle_records),
+        "oracle_queries_compared": int(aggregate.get("queries_compared", 0) or 0),
+        "oracle_queries_missing_results": len(missing_result_ids),
+        "missing_oracle_result_query_ids": missing_result_ids[:50],
+        **aggregate,
+    }, per_query
+
+
+def build_document_node_colbert_candidate_source_focus_row(
+    *,
+    args: argparse.Namespace,
+    profile: DocumentNodeServingProfile,
+    candidate_k: int,
+    effective_rerank_k: int,
+    index_phase: dict[str, Any],
+    loop: dict[str, Any],
+    qrels: dict[str, dict[str, int]],
+    counts: dict[str, int],
+    oracle_artifact: dict[str, Any] | None,
+    oracle_records: Sequence[dict[str, Any]],
+) -> dict[str, Any]:
+    top_docs = loop.get("top_docs_by_query", {})
+    if not isinstance(top_docs, dict):
+        top_docs = {}
+    run = {
+        str(query_id): [str(doc_id) for doc_id in docs]
+        for query_id, docs in top_docs.items()
+        if isinstance(docs, list)
+    }
+    metrics = qrel_metrics_for_retrieval_run(
+        run,
+        qrels,
+        final_k=int(getattr(args, "final_k", 10) or 10),
+        quality_k=int(getattr(args, "quality_k", 10) or 10),
+    )
+    sampled_admission, per_query_admission = sampled_oracle_admission_for_run(
+        run=run,
+        oracle_artifact=oracle_artifact,
+        oracle_records=oracle_records,
+    )
+    latency = loop.get("latency", {})
+    if not isinstance(latency, dict):
+        latency = {}
+    scan_stats_summary = loop.get("scan_stats_summary", {})
+    if not isinstance(scan_stats_summary, dict):
+        scan_stats_summary = {}
+    field_summary = scan_stats_summary.get("field_summary", {})
+    if not isinstance(field_summary, dict):
+        field_summary = {}
+
+    def p50(key: str) -> Any:
+        value = field_summary.get(key, {})
+        return value.get("p50") if isinstance(value, dict) else None
+
+    def p95(key: str) -> Any:
+        value = field_summary.get(key, {})
+        return value.get("p95") if isinstance(value, dict) else None
+
+    docs_loaded = int(counts.get("docs_loaded", 0) or 0)
+    centroid_docs_touched_p95 = p95("centroid_docs_touched")
+    centroid_docs_touched_ratio = (
+        round(float(centroid_docs_touched_p95) / docs_loaded, 6)
+        if docs_loaded > 0 and centroid_docs_touched_p95 is not None
+        else None
+    )
+    qrel_coverage = qrel_coverage_for_query_ids(qrels, list(run))
+    row = {
+        "profile": profile.name,
+        "candidate_source": profile.candidate_source,
+        "graph_mode": "document_nodes",
+        "proxy_encoder": profile.proxy_encoder,
+        "centroids": profile.centroids,
+        "centroid_count": profile.centroid_count,
+        "storage_kind": profile.storage_kind,
+        "storage_cache_mode": profile.cache_mode,
+        "token_pooling": profile.token_pooling,
+        "token_pooling_target_ratio": profile.token_pooling_target_ratio,
+        "centroid_lite_max_postings_per_token": (
+            profile.centroid_lite_max_postings_per_token
+        ),
+        "candidate_budget": candidate_k,
+        "exact_rerank_k": effective_rerank_k,
+        "effective_exact_rerank_k": effective_rerank_k,
+        "p50_ms": latency.get("p50_ms"),
+        "p95_ms": latency.get("p95_ms"),
+        "p99_ms": latency.get("p99_ms"),
+        "qps": latency.get("qps_total", latency.get("qps", 0.0)),
+        "latency": latency,
+        "recall@10": metrics.get("recall@10"),
+        "ndcg@10": metrics.get("ndcg@10"),
+        "mrr@10": metrics.get("mrr@10"),
+        "metrics": metrics,
+        "qrels_covered": int(qrel_coverage.get("qrels_covered", 0) or 0),
+        "queries_with_qrels": int(qrel_coverage.get("queries_with_qrels", 0) or 0),
+        "exact_top1_admission_rate": sampled_admission.get(
+            "exact_top1_admission_rate"
+        ),
+        "exact_top10_admission_recall": sampled_admission.get(
+            "exact_top10_admission_recall"
+        ),
+        "exact_topk_admission_recall": sampled_admission.get(
+            "exact_topk_admission_recall"
+        ),
+        "sampled_admission": sampled_admission,
+        "admission_evidence": sampled_admission.get("admission_evidence"),
+        "exact_admission_available": sampled_admission.get(
+            "exact_admission_available", False
+        ),
+        "oracle_queries_compared": sampled_admission.get("oracle_queries_compared", 0),
+        "exact_rerank_docs": p50("multivector_exact_rerank_docs"),
+        "exact_rerank_docs_p95": p95("multivector_exact_rerank_docs"),
+        "exact_rerank_time_us": first_scan_summary_value(
+            scan_stats_summary,
+            (
+                "multivector_exact_maxsim_rerank_time_us",
+                "exact_maxsim_rerank_time_us",
+                "proxy_exact_rerank_time_us",
+            ),
+            "p50",
+        ),
+        "centroid_lists_visited": p50("centroid_lists_visited"),
+        "centroid_docs_touched": p50("centroid_docs_touched"),
+        "centroid_docs_touched_p95": centroid_docs_touched_p95,
+        "centroid_docs_touched_ratio": centroid_docs_touched_ratio,
+        "centroid_pruned_docs": p50("centroid_pruned_docs"),
+        "centroid_postings_touched": p50("centroid_postings_touched"),
+        "centroid_postings_skipped": p50("centroid_postings_skipped"),
+        "centroid_candidates": p50("centroid_candidates"),
+        "centroid_posting_cap_strategy": (
+            scan_stats_summary.get("last_selected", {}).get("centroid_posting_cap_strategy")
+            if isinstance(scan_stats_summary.get("last_selected", {}), dict)
+            else None
+        ),
+        "quantized_inverted_lists_visited": p50("quantized_inverted_lists_visited"),
+        "quantized_inverted_postings_touched": p50(
+            "quantized_inverted_postings_touched"
+        ),
+        "quantized_inverted_docs_scored": p50("quantized_inverted_docs_scored"),
+        "quantized_inverted_candidates": p50("quantized_inverted_candidates"),
+        "proxy_candidates_returned": first_scan_summary_value(
+            scan_stats_summary,
+            ("proxy_candidates_returned", "proxy_candidates"),
+            "p50",
+        ),
+        "proxy_candidate_limit_source": (
+            scan_stats_summary.get("last_selected", {}).get("proxy_candidate_limit_source")
+            if isinstance(scan_stats_summary.get("last_selected", {}), dict)
+            else None
+        ),
+        "proxy_graph_stats": {
+            "docs_scored": p50("multivector_doc_graph_docs_scored"),
+            "edges_visited": p50("multivector_doc_graph_edges_visited"),
+            "candidates": p50("multivector_doc_graph_candidates"),
+            "nodes_visited": p50("proxy_graph_nodes_visited"),
+        },
+        "scan_stats_summary": scan_stats_summary,
+        "candidate_source_stats": colbert_beir_candidate_source_stats(
+            scan_stats_summary
+        ),
+        "serving_slow_path_warnings": loop.get("serving_slow_path_warnings", []),
+        "serving_slow_path_failed": loop.get("serving_slow_path_failed", False),
+        "per_query_admission": per_query_admission,
+        "top10_by_query": {
+            query_id: docs[:10]
+            for query_id, docs in run.items()
+        },
+        "index_phase": index_phase,
+    }
+    return row
+
+
+def document_node_colbert_candidate_source_focus_skipped_row(
+    *,
+    profile: DocumentNodeServingProfile,
+    candidate_k: int,
+    effective_rerank_k: int,
+    estimate: dict[str, Any],
+    decision: dict[str, Any],
+    counts: dict[str, int],
+) -> dict[str, Any]:
+    docs_loaded = int(counts.get("docs_loaded", 0) or 0)
+    return {
+        "profile": profile.name,
+        "candidate_source": profile.candidate_source,
+        "graph_mode": "document_nodes",
+        "proxy_encoder": profile.proxy_encoder,
+        "centroids": profile.centroids,
+        "centroid_count": profile.centroid_count,
+        "storage_kind": profile.storage_kind,
+        "storage_cache_mode": profile.cache_mode,
+        "token_pooling": profile.token_pooling,
+        "token_pooling_target_ratio": profile.token_pooling_target_ratio,
+        "centroid_lite_max_postings_per_token": (
+            profile.centroid_lite_max_postings_per_token
+        ),
+        "candidate_budget": candidate_k,
+        "exact_rerank_k": effective_rerank_k,
+        "effective_exact_rerank_k": effective_rerank_k,
+        "docs": docs_loaded,
+        "index_build_skipped": True,
+        "index_rebuild_reason": "estimate_exceeds_limit",
+        "skip_reason": "estimate_exceeds_limit",
+        "skip_reasons": list(decision.get("reasons", [])),
+        "p50_ms": None,
+        "p95_ms": None,
+        "p99_ms": None,
+        "qps": None,
+        "recall@10": None,
+        "ndcg@10": None,
+        "mrr@10": None,
+        "metrics": {},
+        "qrels_covered": 0,
+        "queries_with_qrels": 0,
+        "exact_top1_admission_rate": None,
+        "exact_top10_admission_recall": None,
+        "exact_topk_admission_recall": None,
+        "sampled_admission": {
+            "admission_evidence": "unavailable",
+            "exact_admission_available": False,
+            "reason": "index_build_skipped",
+        },
+        "admission_evidence": "unavailable",
+        "exact_admission_available": False,
+        "oracle_queries_compared": 0,
+        "scan_stats_summary": {},
+        "candidate_source_stats": {},
+        "serving_slow_path_warnings": ["index_build_skipped_estimate_exceeds_limit"],
+        "serving_slow_path_failed": False,
+        "index_phase": {
+            "skipped": True,
+            "reason": "estimate_exceeds_limit",
+            "build_resource_estimate": estimate,
+            "build_resource_estimate_decision": decision,
+            "index_bytes": 0,
+            "index_stats": {},
+            "build_stats": {},
+        },
+        "estimated_build_memory_mb": estimate.get("estimated_build_memory_mb"),
+        "estimated_index_bytes": estimate.get("estimated_index_bytes"),
+        "estimate_components": estimate.get("estimate_components"),
+        "build_resource_estimate": estimate,
+        "build_resource_estimate_decision": decision,
+    }
+
+
+def document_node_colbert_candidate_source_focus_recommendation(
+    rows: Sequence[dict[str, Any]],
+    *,
+    docs_loaded: int,
+) -> dict[str, Any]:
+    valid_rows = [row for row in rows if isinstance(row, dict)]
+    proxy_rows = [
+        row
+        for row in valid_rows
+        if row.get("profile") == "proxy_normalized_mean_proxy_only"
+    ]
+    proxy_best = max(
+        proxy_rows,
+        key=lambda row: float(row.get("ndcg@10", 0.0) or 0.0),
+        default=None,
+    )
+    proxy_ndcg = float(proxy_best.get("ndcg@10", 0.0) or 0.0) if proxy_best else 0.0
+    centroid_rows = [
+        row
+        for row in valid_rows
+        if str(row.get("candidate_source", "")) == "centroid_lite"
+    ]
+    centroid_best = max(
+        centroid_rows,
+        key=lambda row: float(row.get("ndcg@10", 0.0) or 0.0),
+        default=None,
+    )
+    capped_rows = [
+        row
+        for row in centroid_rows
+        if int(row.get("centroid_lite_max_postings_per_token", 0) or 0) > 0
+    ]
+    capped_best = max(
+        capped_rows,
+        key=lambda row: float(row.get("ndcg@10", 0.0) or 0.0),
+        default=None,
+    )
+    quantized_rows = [
+        row
+        for row in valid_rows
+        if str(row.get("candidate_source", "")) == "quantized_inverted_experimental"
+    ]
+    quantized_best = max(
+        quantized_rows,
+        key=lambda row: float(row.get("ndcg@10", 0.0) or 0.0),
+        default=None,
+    )
+    recommendations: list[str] = []
+    if centroid_best is not None:
+        centroid_ndcg = float(centroid_best.get("ndcg@10", 0.0) or 0.0)
+        touched_ratio = centroid_best.get("centroid_docs_touched_ratio")
+        if (
+            centroid_ndcg > proxy_ndcg
+            and touched_ratio is not None
+            and float(touched_ratio) >= 0.80
+        ):
+            recommendations.append("centroid_pruning_or_bitset_prefilter")
+    if centroid_best is not None and capped_best is not None:
+        centroid_ndcg = float(centroid_best.get("ndcg@10", 0.0) or 0.0)
+        capped_ndcg = float(capped_best.get("ndcg@10", 0.0) or 0.0)
+        capped_p95 = float(capped_best.get("p95_ms", 0.0) or 0.0)
+        centroid_p95 = float(centroid_best.get("p95_ms", 0.0) or 0.0)
+        if centroid_ndcg - capped_ndcg >= 0.10 and (
+            capped_p95 <= centroid_p95 or capped_p95 > 0.0
+        ):
+            recommendations.append("uniform_centroid_caps_insufficient")
+    if quantized_best is not None:
+        quantized_ndcg = float(quantized_best.get("ndcg@10", 0.0) or 0.0)
+        quantized_admission = quantized_best.get("exact_top10_admission_recall")
+        centroid_ndcg = (
+            float(centroid_best.get("ndcg@10", 0.0) or 0.0)
+            if centroid_best is not None
+            else 0.0
+        )
+        if quantized_ndcg > max(proxy_ndcg, centroid_ndcg) or (
+            quantized_admission is not None
+            and float(quantized_admission) >= 0.80
+        ):
+            recommendations.append("prioritize_quantized_codebook_postings")
+    best_native = max(
+        valid_rows,
+        key=lambda row: (
+            float(row.get("ndcg@10", 0.0) or 0.0),
+            -float(row.get("p95_ms", 1e12) or 1e12),
+        ),
+        default=None,
+    )
+    if best_native is not None and proxy_best is not None:
+        best_ndcg = float(best_native.get("ndcg@10", 0.0) or 0.0)
+        if best_native.get("profile") == proxy_best.get("profile") or best_ndcg <= proxy_ndcg:
+            recommendations.append("learned_fde_or_different_native_colbert_admission")
+    return {
+        "docs_loaded": docs_loaded,
+        "best_proxy_baseline": proxy_best.get("profile") if proxy_best else None,
+        "best_centroid_lite": centroid_best.get("profile") if centroid_best else None,
+        "best_quantized": quantized_best.get("profile") if quantized_best else None,
+        "best_overall_by_ndcg": best_native.get("profile") if best_native else None,
+        "recommendations": unique_preserve_order(recommendations),
+    }
+
+
+def run_document_node_colbert_candidate_source_focus(
+    conn: psycopg.Connection[Any],
+    args: argparse.Namespace,
+    queries: list[QueryItem],
+    qrels: dict[str, dict[str, int]],
+) -> dict[str, Any]:
+    started = time.perf_counter()
+    if not qrels:
+        raise SystemExit(
+            "--document-node-colbert-candidate-source-focus requires loaded qrels; "
+            "reuse an imported DB with dbpedia_colbert_qrels or load BEIR qrels first"
+        )
+    query_limit = int(getattr(args, "query_limit", 0) or 0)
+    selected_queries = queries[:query_limit] if query_limit > 0 else list(queries)
+    if not selected_queries:
+        raise SystemExit("--document-node-colbert-candidate-source-focus has no queries")
+    counts = dbpedia_colbert_loaded_counts(conn)
+    recorder = IncrementalRecorder(getattr(args, "incremental_output", None))
+    oracle_artifact: dict[str, Any] | None = None
+    oracle_records_all: list[dict[str, Any]] = []
+    oracle_records: list[dict[str, Any]] = []
+    oracle_missing_loaded_query_ids: list[str] = []
+    if args.oracle_input is not None:
+        oracle_artifact = load_exact_oracle_artifact(args.oracle_input)
+        oracle_records_all = completed_exact_oracle_records(oracle_artifact)
+        selected_query_ids = {query.query_id for query in selected_queries}
+        loaded_query_ids = {query.query_id for query in queries}
+        oracle_missing_loaded_query_ids = [
+            str(record.get("query_id"))
+            for record in oracle_records_all
+            if str(record.get("query_id")) not in loaded_query_ids
+        ]
+        oracle_records = [
+            record
+            for record in oracle_records_all
+            if str(record.get("query_id")) in selected_query_ids
+        ]
+    profiles = document_node_colbert_candidate_source_focus_profiles(args)
+    budgets = effective_document_node_colbert_candidate_source_focus_budgets(args)
+    if recorder.enabled:
+        recorder.record(
+            "run_metadata",
+            metadata={
+                "mode": "document_node_colbert_candidate_source_focus",
+                "pure_colbert_only": True,
+                "exact_admission_available": bool(oracle_artifact),
+                "admission_evidence": (
+                    "sampled_exact_oracle"
+                    if oracle_artifact is not None
+                    else "beir_qrels_only"
+                ),
+                "profiles": [profile.name for profile in profiles],
+                "candidate_budgets": budgets,
+                "exact_rerank_k": int(getattr(args, "exact_rerank_k", 0) or 0),
+                "query_limit": query_limit,
+                "docs_loaded": int(counts.get("docs_loaded", 0) or 0),
+                "queries_available": len(queries),
+                "queries_evaluated": len(selected_queries),
+                "qrels_loaded": int(counts.get("qrels_loaded", 0) or 0),
+                "oracle_input": portable_path(args.oracle_input)
+                if args.oracle_input
+                else None,
+            },
+        )
+        recorder.record(
+            "import_preflight",
+            docs_loaded=int(counts.get("docs_loaded", 0) or 0),
+            queries_available=len(queries),
+            effective_queries=len(selected_queries),
+            qrels_loaded=int(counts.get("qrels_loaded", 0) or 0),
+            oracle_query_count=len(oracle_records_all),
+        )
+        for profile in profiles:
+            recorder.record(
+                "planned_profile",
+                row_id=f"planned:{profile.name}",
+                profile=profile.name,
+                candidate_source=profile.candidate_source,
+                physical_index_signature=serializable_index_signature(
+                    serving_profile_index_signature(args, profile)
+                ),
+            )
+    rows: list[dict[str, Any]] = []
+    index_phases: list[dict[str, Any]] = []
+    for profile in profiles:
+        if not budgets:
+            continue
+        estimate_args, first_effective_rerank_k = (
+            document_node_colbert_candidate_source_focus_args(
+                args,
+                profile,
+                budgets[0],
+            )
+        )
+        dataset_stats_for_estimate = multivector_dataset_stats_for_build_estimate(
+            conn,
+            profile,
+        )
+        build_estimate = estimate_index_build_resources(
+            dataset_stats_for_estimate,
+            estimate_args,
+            profile,
+        )
+        decision_args = (
+            args
+            if bool(getattr(args, "fail_if_estimate_exceeds_limit", False))
+            else clone_args(args, skip_profile_if_estimate_exceeds_limit=True)
+        )
+        build_estimate_decision = index_build_estimate_decision(
+            build_estimate,
+            decision_args,
+        )
+        if build_estimate_decision.get("action") == "fail" and recorder.enabled:
+            recorder.record(
+                "index_build_failed",
+                row_id=f"index:{profile.name}",
+                profile=profile.name,
+                reason="estimate_exceeds_limit",
+                build_resource_estimate=build_estimate,
+                build_resource_estimate_decision=build_estimate_decision,
+            )
+        fail_index_build_estimate_if_requested(
+            profile_name=profile.name,
+            estimate=build_estimate,
+            decision=build_estimate_decision,
+        )
+        if build_estimate_decision.get("action") == "skip":
+            skipped_index_phase = {
+                "profile": profile.name,
+                "skipped": True,
+                "reason": "estimate_exceeds_limit",
+                "build_resource_estimate": build_estimate,
+                "build_resource_estimate_decision": build_estimate_decision,
+                "index_bytes": 0,
+                "index_stats": {},
+                "build_stats": {},
+            }
+            index_phases.append({
+                "profile": profile.name,
+                "candidate_budget": budgets[0],
+                "index_phase": skipped_index_phase,
+            })
+            if recorder.enabled:
+                recorder.record(
+                    "index_build_skipped",
+                    row_id=f"index:{profile.name}",
+                    profile=profile.name,
+                    reason="estimate_exceeds_limit",
+                    candidate_source=profile.candidate_source,
+                    physical_index_signature=serializable_index_signature(
+                        serving_profile_index_signature(args, profile)
+                    ),
+                    build_resource_estimate=build_estimate,
+                    build_resource_estimate_decision=build_estimate_decision,
+                )
+            for candidate_k in budgets:
+                _focus_args, effective_rerank_k = (
+                    document_node_colbert_candidate_source_focus_args(
+                        args,
+                        profile,
+                        candidate_k,
+                    )
+                )
+                row = document_node_colbert_candidate_source_focus_skipped_row(
+                    profile=profile,
+                    candidate_k=candidate_k,
+                    effective_rerank_k=effective_rerank_k,
+                    estimate=build_estimate,
+                    decision=build_estimate_decision,
+                    counts=counts,
+                )
+                rows.append(row)
+                if recorder.enabled:
+                    recorder.record(
+                        "query_evaluation_skipped",
+                        row_id=f"{profile.name}:candidate_k={candidate_k}",
+                        profile=profile.name,
+                        candidate_budget=candidate_k,
+                        reason="index_build_skipped",
+                        row=row,
+                    )
+            if recorder.enabled:
+                recorder.record(
+                    "profile_completed",
+                    row_id=f"profile:{profile.name}",
+                    profile=profile.name,
+                    budgets=budgets,
+                    skipped=True,
+                    rows=[
+                        row
+                        for row in rows
+                        if isinstance(row, dict) and row.get("profile") == profile.name
+                    ],
+                )
+            continue
+        profile_index_phase: dict[str, Any] | None = None
+        for budget_index, candidate_k in enumerate(budgets):
+            row_id = f"{profile.name}:candidate_k={candidate_k}"
+            focus_args, effective_rerank_k = (
+                document_node_colbert_candidate_source_focus_args(
+                    args,
+                    profile,
+                    candidate_k,
+                )
+            )
+            if budget_index == 0:
+                if recorder.enabled:
+                    recorder.record(
+                        "index_build_started",
+                        row_id=f"index:{profile.name}",
+                        profile=profile.name,
+                        candidate_source=profile.candidate_source,
+                        physical_index_signature=serializable_index_signature(
+                            serving_profile_index_signature(args, profile)
+                        ),
+                    )
+                try:
+                    profile_index_phase = build_index(conn, focus_args)
+                except Exception as exc:
+                    if recorder.enabled:
+                        recorder.record(
+                            "index_build_failed",
+                            row_id=f"index:{profile.name}",
+                            profile=profile.name,
+                            error=str(exc),
+                            error_type=type(exc).__name__,
+                        )
+                    raise
+                if recorder.enabled:
+                    recorder.record(
+                        "index_build_succeeded",
+                        row_id=f"index:{profile.name}",
+                        profile=profile.name,
+                        index_phase=profile_index_phase,
+                    )
+                index_phases.append({
+                    "profile": profile.name,
+                    "candidate_budget": candidate_k,
+                    "index_phase": profile_index_phase,
+                })
+            assert profile_index_phase is not None
+            focus_args = clone_args(
+                focus_args,
+                serving_loaded_document_count=loaded_document_count(conn),
+            )
+            set_retrieval_gucs(conn, focus_args, "dbpedia_colbert_candidate_source_focus")
+            exec_sql(
+                conn,
+                "SELECT set_config('turbohybrid.multivector_debug_admission', 'off', false)",
+            )
+            if recorder.enabled:
+                recorder.record(
+                    "query_evaluation_started",
+                    row_id=row_id,
+                    profile=profile.name,
+                    candidate_budget=candidate_k,
+                    query_count=len(selected_queries),
+                )
+            try:
+                loop = run_serving_latency_query_loop(
+                    conn,
+                    focus_args,
+                    selected_queries,
+                    profile,
+                )
+            except Exception as exc:
+                if recorder.enabled:
+                    recorder.record(
+                        "query_evaluation_failed",
+                        row_id=row_id,
+                        profile=profile.name,
+                        candidate_budget=candidate_k,
+                        error=str(exc),
+                        error_type=type(exc).__name__,
+                    )
+                raise
+            fail_on_serving_slow_path_if_requested(
+                loop["serving_slow_path_warnings"],
+                focus_args,
+            )
+            row = build_document_node_colbert_candidate_source_focus_row(
+                args=args,
+                profile=profile,
+                candidate_k=candidate_k,
+                effective_rerank_k=effective_rerank_k,
+                index_phase=profile_index_phase,
+                loop=loop,
+                qrels=qrels,
+                counts=counts,
+                oracle_artifact=oracle_artifact,
+                oracle_records=oracle_records,
+            )
+            rows.append(row)
+            if recorder.enabled:
+                recorder.record(
+                    "query_evaluation_succeeded",
+                    row_id=row_id,
+                    profile=profile.name,
+                    candidate_budget=candidate_k,
+                    row=row,
+                )
+        if recorder.enabled:
+            recorder.record(
+                "profile_completed",
+                row_id=f"profile:{profile.name}",
+                profile=profile.name,
+                budgets=budgets,
+                rows=[
+                    row
+                    for row in rows
+                    if isinstance(row, dict) and row.get("profile") == profile.name
+                ],
+            )
+    recommendation = document_node_colbert_candidate_source_focus_recommendation(
+        rows,
+        docs_loaded=int(counts.get("docs_loaded", 0) or 0),
+    )
+    return {
+        "enabled": True,
+        "pure_colbert_only": True,
+        "exact_admission_available": "sampled" if oracle_artifact else False,
+        "exact_admission_reason": (
+            "sampled_exact_oracle_from_oracle_input"
+            if oracle_artifact is not None
+            else "not_requested"
+        ),
+        "admission_evidence": (
+            "sampled_exact_oracle" if oracle_artifact is not None else "beir_qrels_only"
+        ),
+        "oracle_input": portable_path(args.oracle_input) if args.oracle_input else None,
+        "oracle_query_count": len(oracle_records_all),
+        "oracle_queries_compared": max(
+            (int(row.get("oracle_queries_compared", 0) or 0) for row in rows),
+            default=0,
+        ),
+        "oracle_queries_missing_loaded_embeddings": len(oracle_missing_loaded_query_ids),
+        "missing_oracle_query_ids": oracle_missing_loaded_query_ids[:50],
+        "profiles": [profile.name for profile in profiles],
+        "candidate_budgets": budgets,
+        "exact_rerank_k": int(getattr(args, "exact_rerank_k", 0) or 0),
+        "centroid_lite_caps": effective_document_node_colbert_candidate_source_focus_caps(
+            args
+        ),
+        "query_limit": query_limit,
+        "queries_available": len(queries),
+        "queries_evaluated": len(selected_queries),
+        "docs": int(counts.get("docs_loaded", 0) or 0),
+        "qrels_loaded": int(counts.get("qrels_loaded", 0) or 0),
+        "experimental_included": bool(
+            getattr(args, "include_quantized_inverted_experimental", False)
+            or getattr(args, "document_node_colbert_include_experimental", False)
+        ),
+        "index_phases": index_phases,
+        "results": rows,
+        "recommendation": recommendation,
+        "total_elapsed_ms": elapsed_ms_since(started),
+        "incremental_output": portable_path(recorder.path) if recorder.path else None,
+        "incremental_records": len(recorder.records),
+    }
+
+
+def run_document_node_colbert_1m_beir_quality_only(
+    conn: psycopg.Connection[Any],
+    args: argparse.Namespace,
+    queries: list[QueryItem],
+    qrels: dict[str, dict[str, int]],
+) -> dict[str, Any]:
+    started = time.perf_counter()
+    if not qrels:
+        raise SystemExit(
+            "--document-node-colbert-1m-beir-quality-only requires loaded qrels; "
+            "reuse an imported DB with dbpedia_colbert_qrels or load BEIR qrels first"
+        )
+    query_limit = document_node_colbert_1m_query_limit_summary(
+        requested_max_queries=int(getattr(args, "max_queries", 0) or 0),
+        queries_loaded=len(queries),
+        strict_query_count=bool(getattr(args, "strict_query_count", False)),
+    )
+    if query_limit["strict_query_count_failed"]:
+        raise SystemExit(query_limit["strict_query_count_error"])
+    quality_args, profile, effective_rerank_k = document_node_colbert_beir_quality_args(args)
+    index_phase = build_index(conn, quality_args)
+    quality_args = clone_args(
+        quality_args,
+        serving_loaded_document_count=loaded_document_count(conn),
+    )
+    set_retrieval_gucs(conn, quality_args, "dbpedia_colbert_beir_quality_only")
+    exec_sql(conn, "SELECT set_config('turbohybrid.multivector_debug_admission', 'off', false)")
+    loop = run_serving_latency_query_loop(conn, quality_args, queries, profile)
+    fail_on_serving_slow_path_if_requested(
+        loop["serving_slow_path_warnings"],
+        quality_args,
+    )
+    counts = dbpedia_colbert_loaded_counts(conn)
+    return build_document_node_colbert_beir_quality_report(
+        args=args,
+        profile=profile,
+        effective_rerank_k=effective_rerank_k,
+        index_phase=index_phase,
+        loop=loop,
+        qrels=qrels,
+        counts=counts,
+        query_limit=query_limit,
+        started=started,
+    )
+
+
 SYNTHETIC_GATE_QUERY = """turbohybrid_multivector(ARRAY[
     '[1,0,0,0]'::vector,
     '[0,1,0,0]'::vector,
@@ -13208,6 +23513,57 @@ def markdown_recall_gate_summary(report: dict[str, Any]) -> str:
         "",
     ])
     return "\n".join(lines)
+
+
+def markdown_learned_sparse_jsonl_validation(report: dict[str, Any]) -> str:
+    validation = report.get("learned_sparse_jsonl_validation", {})
+    if not isinstance(validation, dict):
+        validation = {}
+    warnings = validation.get("warnings", [])
+    if not isinstance(warnings, list):
+        warnings = []
+    lines = [
+        "## Learned-sparse JSONL validation",
+        "",
+        f"- Database: `{validation.get('database', '')}`",
+        f"- Document JSONL: `{validation.get('doc_jsonl', '')}`",
+        f"- Query JSONL: `{validation.get('query_jsonl', '')}`",
+        f"- Strict mode: `{bool(validation.get('strict', False))}`",
+        f"- Safe serving evidence: `{bool(validation.get('safe_serving_evidence', False))}`",
+        f"- Plumbing only: `{bool(validation.get('plumbing_only', False))}`",
+        f"- Feature source: `{validation.get('feature_source', '')}`",
+        f"- Feature version: `{validation.get('feature_version', '')}`",
+        f"- Elapsed: `{float(validation.get('elapsed_ms', 0.0) or 0.0):.3f} ms`",
+        "",
+        "| side | expected | rows | coverage | missing | duplicate rows | extra |",
+        "|---|---:|---:|---:|---:|---:|---:|",
+        "| docs | {expected} | {rows} | {coverage:.6f} | {missing} | {duplicates} | {extra} |".format(
+            expected=int(validation.get("expected_doc_count", 0) or 0),
+            rows=int(validation.get("doc_rows", 0) or 0),
+            coverage=float(validation.get("doc_coverage", 0.0) or 0.0),
+            missing=int(validation.get("missing_doc_count", 0) or 0),
+            duplicates=int(validation.get("duplicate_doc_count", 0) or 0),
+            extra=int(validation.get("extra_doc_count", 0) or 0),
+        ),
+        "| queries | {expected} | {rows} | {coverage:.6f} | {missing} | {duplicates} | {extra} |".format(
+            expected=int(validation.get("expected_query_count", 0) or 0),
+            rows=int(validation.get("query_rows", 0) or 0),
+            coverage=float(validation.get("query_coverage", 0.0) or 0.0),
+            missing=int(validation.get("missing_query_count", 0) or 0),
+            duplicates=int(validation.get("duplicate_query_count", 0) or 0),
+            extra=int(validation.get("extra_query_count", 0) or 0),
+        ),
+        "",
+        "This mode validates sparse feature files only. It does not build indexes, run retrieval, or run exact scans.",
+    ]
+    if warnings:
+        lines.extend([
+            "",
+            "Warnings:",
+            "",
+        ])
+        lines.extend(f"- `{warning}`" for warning in warnings)
+    return "\n".join(lines) + "\n"
 
 
 def markdown_benchmark_summary(report: dict[str, Any]) -> str:
@@ -13730,6 +24086,209 @@ def markdown_benchmark_summary(report: dict[str, Any]) -> str:
         else:
             lines.append("- None")
 
+    colbert_beir_quality = report.get("document_node_colbert_1m_beir_quality")
+    if isinstance(colbert_beir_quality, dict):
+        metrics = colbert_beir_quality.get("metrics", {})
+        latency = colbert_beir_quality.get("latency", {})
+        settings = colbert_beir_quality.get("settings", {})
+        scan_stats = colbert_beir_quality.get("scan_stats_summary", {})
+        if not isinstance(metrics, dict):
+            metrics = {}
+        if not isinstance(latency, dict):
+            latency = {}
+        if not isinstance(settings, dict):
+            settings = {}
+        if not isinstance(scan_stats, dict):
+            scan_stats = {}
+        field_summary = scan_stats.get("field_summary", {})
+        if not isinstance(field_summary, dict):
+            field_summary = {}
+
+        def quality_scan_p50(key: str) -> float:
+            value = field_summary.get(key, {})
+            return float(value.get("p50", 0.0) or 0.0) if isinstance(value, dict) else 0.0
+
+        def quality_scan_p95(key: str) -> float:
+            value = field_summary.get(key, {})
+            return float(value.get("p95", 0.0) or 0.0) if isinstance(value, dict) else 0.0
+
+        lines.extend([
+            "",
+            "### Pure ColBERT BEIR quality, no exact admission",
+            "",
+            f"- Pure ColBERT only: `{bool(colbert_beir_quality.get('pure_colbert_only', False))}`",
+            f"- Profile: `{colbert_beir_quality.get('profile', '')}`",
+            f"- Candidate source: `{colbert_beir_quality.get('candidate_source', '')}`",
+            f"- Proxy encoder: `{colbert_beir_quality.get('proxy_encoder', '')}`",
+            f"- Centroids: `{colbert_beir_quality.get('centroids', '')}`",
+            f"- Storage/cache: `{colbert_beir_quality.get('storage_kind', '')}/{colbert_beir_quality.get('storage_cache_mode', '')}`",
+            f"- Candidate K / exact rerank K: `{settings.get('candidate_k', 0)}` / `{settings.get('effective_exact_rerank_k', 0)}`",
+            f"- EF / oversampling: `{settings.get('ef', 0)}` / `{settings.get('oversampling', 0)}`",
+            f"- Exact admission: `{bool(colbert_beir_quality.get('exact_admission_available', False))}` ({colbert_beir_quality.get('exact_admission_reason', '')})",
+            f"- Queries evaluated: `{int(colbert_beir_quality.get('queries_evaluated', 0) or 0)}` / `{int(colbert_beir_quality.get('queries_available', 0) or 0)}`",
+            f"- Qrels covered: `{int(colbert_beir_quality.get('qrels_covered', 0) or 0)}`",
+            "",
+            "| recall@10 | ndcg@10 | mrr@10 | p50 ms | p95 ms | p99 ms | qps | exact rerank docs p50 | exact rerank us p50 | graph docs p95 | graph edges p95 |",
+            "|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|",
+            "| {recall:.6f} | {ndcg:.6f} | {mrr:.6f} | {p50:.3f} | {p95:.3f} | {p99:.3f} | {qps:.3f} | {rerank_docs:.3f} | {rerank_us:.3f} | {docs_p95:.3f} | {edges_p95:.3f} |".format(
+                recall=float(metrics.get("recall@10", 0.0) or 0.0),
+                ndcg=float(metrics.get("ndcg@10", 0.0) or 0.0),
+                mrr=float(metrics.get("mrr@10", 0.0) or 0.0),
+                p50=float(latency.get("p50_ms", 0.0) or 0.0),
+                p95=float(latency.get("p95_ms", 0.0) or 0.0),
+                p99=float(latency.get("p99_ms", 0.0) or 0.0),
+                qps=float(latency.get("qps_total", latency.get("qps", 0.0)) or 0.0),
+                rerank_docs=quality_scan_p50("multivector_exact_rerank_docs"),
+                rerank_us=quality_scan_p50("multivector_exact_maxsim_rerank_time_us"),
+                docs_p95=quality_scan_p95("multivector_doc_graph_docs_scored"),
+                edges_p95=quality_scan_p95("multivector_doc_graph_edges_visited"),
+            ),
+            "",
+            "This mode runs indexed retrieval only and computes BEIR qrel metrics "
+            "from returned document IDs. It intentionally does not call exact "
+            "MaxSim admission or exact document scan baselines.",
+        ])
+
+    sampled_admission = report.get("document_node_colbert_sampled_admission")
+    if isinstance(sampled_admission, dict):
+        metrics = sampled_admission.get("metrics", {})
+        latency = sampled_admission.get("latency", {})
+        settings = sampled_admission.get("settings", {})
+        scan_stats = sampled_admission.get("scan_stats_summary", {})
+        if not isinstance(metrics, dict):
+            metrics = {}
+        if not isinstance(latency, dict):
+            latency = {}
+        if not isinstance(settings, dict):
+            settings = {}
+        if not isinstance(scan_stats, dict):
+            scan_stats = {}
+        field_summary = scan_stats.get("field_summary", {})
+        if not isinstance(field_summary, dict):
+            field_summary = {}
+
+        def sampled_scan_p50(key: str) -> float:
+            value = field_summary.get(key, {})
+            return float(value.get("p50", 0.0) or 0.0) if isinstance(value, dict) else 0.0
+
+        lines.extend([
+            "",
+            "### Pure ColBERT sampled exact-oracle admission",
+            "",
+            "This mode runs indexed retrieval only and compares returned documents "
+            "against a checkpointed exact MaxSim oracle. It does not recompute "
+            "exact admission scans.",
+            "",
+            f"- Admission evidence: `{sampled_admission.get('admission_evidence', '')}`",
+            f"- Exact admission availability: `{sampled_admission.get('exact_admission_available', '')}`",
+            f"- Full available-query admission: `{bool(sampled_admission.get('full_available_query_admission', False))}`",
+            f"- Oracle coverage: `{int(sampled_admission.get('oracle_query_count', 0) or 0)}` / `{int(sampled_admission.get('queries_available', 0) or 0)}` loaded queries",
+            f"- Oracle top K: `{int(sampled_admission.get('oracle_top_k', 0) or 0)}`",
+            f"- Profile: `{sampled_admission.get('profile', '')}`",
+            f"- Candidate source: `{sampled_admission.get('candidate_source', '')}`",
+            f"- Proxy encoder: `{sampled_admission.get('proxy_encoder', '')}`",
+            f"- Centroids: `{sampled_admission.get('centroids', '')}`",
+            f"- Storage/cache: `{sampled_admission.get('storage_kind', '')}/{sampled_admission.get('storage_cache_mode', '')}`",
+            f"- Candidate K / exact rerank K: `{settings.get('candidate_k', 0)}` / `{settings.get('effective_exact_rerank_k', 0)}`",
+            f"- EF / oversampling: `{settings.get('ef', 0)}` / `{settings.get('oversampling', 0)}`",
+            "",
+            "| top1 admission | top10 admission | topK admission | recall@10 | ndcg@10 | mrr@10 | p50 ms | p95 ms | p99 ms | qps | exact rerank docs p50 | exact rerank us p50 |",
+            "|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|",
+            "| {top1:.6f} | {top10:.6f} | {topk:.6f} | {recall:.6f} | {ndcg:.6f} | {mrr:.6f} | {p50:.3f} | {p95:.3f} | {p99:.3f} | {qps:.3f} | {rerank_docs:.3f} | {rerank_us:.3f} |".format(
+                top1=float(sampled_admission.get("exact_top1_admission_rate", 0.0) or 0.0),
+                top10=float(sampled_admission.get("exact_top10_admission_recall", 0.0) or 0.0),
+                topk=float(sampled_admission.get("exact_topk_admission_recall", 0.0) or 0.0),
+                recall=float(metrics.get("recall@10", 0.0) or 0.0),
+                ndcg=float(metrics.get("ndcg@10", 0.0) or 0.0),
+                mrr=float(metrics.get("mrr@10", 0.0) or 0.0),
+                p50=float(latency.get("p50_ms", 0.0) or 0.0),
+                p95=float(latency.get("p95_ms", 0.0) or 0.0),
+                p99=float(latency.get("p99_ms", 0.0) or 0.0),
+                qps=float(latency.get("qps_total", latency.get("qps", 0.0)) or 0.0),
+                rerank_docs=sampled_scan_p50("multivector_exact_rerank_docs"),
+                rerank_us=sampled_scan_p50("multivector_exact_maxsim_rerank_time_us"),
+            ),
+        ])
+        missing = sampled_admission.get("missing_oracle_query_ids", [])
+        if isinstance(missing, list) and missing:
+            lines.extend([
+                "",
+                f"- Oracle query IDs skipped because embeddings were not loaded: `{len(missing)}` shown of `{int(sampled_admission.get('oracle_queries_missing_loaded_embeddings', 0) or 0)}`",
+            ])
+
+    colbert_candidate_focus = report.get("document_node_colbert_candidate_source_focus")
+    if isinstance(colbert_candidate_focus, dict):
+        rows = colbert_candidate_focus.get("results", [])
+        if isinstance(rows, list):
+            sorted_rows = sorted(
+                [row for row in rows if isinstance(row, dict)],
+                key=lambda row: (
+                    str(row.get("profile", "")),
+                    int(row.get("candidate_budget", 0) or 0),
+                ),
+            )
+        else:
+            sorted_rows = []
+        recommendation = colbert_candidate_focus.get("recommendation", {})
+        if not isinstance(recommendation, dict):
+            recommendation = {}
+        lines.extend([
+            "",
+            "### Pure ColBERT candidate-source focus",
+            "",
+            f"- Pure ColBERT only: `{bool(colbert_candidate_focus.get('pure_colbert_only', False))}`",
+            f"- Admission evidence: `{colbert_candidate_focus.get('admission_evidence', '')}`",
+            f"- Exact admission availability: `{colbert_candidate_focus.get('exact_admission_available', '')}`",
+            f"- Profiles: `{','.join(str(item) for item in colbert_candidate_focus.get('profiles', []))}`",
+            f"- Candidate budgets: `{','.join(str(item) for item in colbert_candidate_focus.get('candidate_budgets', []))}`",
+            f"- Exact rerank K: `{int(colbert_candidate_focus.get('exact_rerank_k', 0) or 0)}`",
+            f"- Queries evaluated: `{int(colbert_candidate_focus.get('queries_evaluated', 0) or 0)}` / `{int(colbert_candidate_focus.get('queries_available', 0) or 0)}`",
+            f"- Oracle queries compared: `{int(colbert_candidate_focus.get('oracle_queries_compared', 0) or 0)}` / `{int(colbert_candidate_focus.get('oracle_query_count', 0) or 0)}`",
+            f"- Experimental quantized included: `{bool(colbert_candidate_focus.get('experimental_included', False))}`",
+            f"- Recommendation hints: `{','.join(str(item) for item in recommendation.get('recommendations', []))}`",
+            "",
+            "| profile | source | budget | p50 ms | p95 ms | p99 ms | recall@10 | ndcg@10 | mrr@10 | sampled top1 | sampled top10 | exact rerank docs | exact rerank us | centroid docs ratio | centroid postings | quantized postings | proxy candidates |",
+            "|---|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|",
+        ])
+        for row in sorted_rows:
+            top1 = row.get("exact_top1_admission_rate")
+            top10 = row.get("exact_top10_admission_recall")
+            top1_text = "" if top1 is None else f"{float(top1 or 0.0):.6f}"
+            top10_text = "" if top10 is None else f"{float(top10 or 0.0):.6f}"
+            lines.append(
+                "| {profile} | {source} | {budget} | {p50:.3f} | {p95:.3f} | {p99:.3f} | {recall:.6f} | {ndcg:.6f} | {mrr:.6f} | {top1} | {top10} | {rerank_docs:.3f} | {rerank_us:.3f} | {centroid_ratio} | {centroid_postings:.3f} | {quantized_postings:.3f} | {proxy_candidates:.3f} |".format(
+                    profile=row.get("profile", ""),
+                    source=row.get("candidate_source", ""),
+                    budget=int(row.get("candidate_budget", 0) or 0),
+                    p50=float(row.get("p50_ms", 0.0) or 0.0),
+                    p95=float(row.get("p95_ms", 0.0) or 0.0),
+                    p99=float(row.get("p99_ms", 0.0) or 0.0),
+                    recall=float(row.get("recall@10", 0.0) or 0.0),
+                    ndcg=float(row.get("ndcg@10", 0.0) or 0.0),
+                    mrr=float(row.get("mrr@10", 0.0) or 0.0),
+                    top1=top1_text,
+                    top10=top10_text,
+                    rerank_docs=float(row.get("exact_rerank_docs", 0.0) or 0.0),
+                    rerank_us=float(row.get("exact_rerank_time_us", 0.0) or 0.0),
+                    centroid_ratio=(
+                        ""
+                        if row.get("centroid_docs_touched_ratio") is None
+                        else f"{float(row.get('centroid_docs_touched_ratio') or 0.0):.6f}"
+                    ),
+                    centroid_postings=float(row.get("centroid_postings_touched", 0.0) or 0.0),
+                    quantized_postings=float(
+                        row.get("quantized_inverted_postings_touched", 0.0) or 0.0
+                    ),
+                    proxy_candidates=float(row.get("proxy_candidates_returned", 0.0) or 0.0),
+                )
+            )
+        lines.extend([
+            "",
+            "This focus mode does not call exact admission scans by default. "
+            "When `--oracle-input` is supplied, sampled admission is computed "
+            "from the checkpointed oracle and labeled as sampled evidence.",
+        ])
+
     serving_grid = report.get("document_node_serving_grid")
     if isinstance(serving_grid, dict):
         rows = serving_grid.get("results", serving_grid.get("summary_rows", []))
@@ -13747,11 +24306,29 @@ def markdown_benchmark_summary(report: dict[str, Any]) -> str:
             sorted_rows = []
         serving_grid_mode = str(serving_grid.get("mode", "full") or "full")
         serving_grid_stage_mode = str(serving_grid.get("stage_mode", "single") or "single")
+        serving_grid_heading = (
+            "### Pure ColBERT DBpedia 1M Grid"
+            if bool(serving_grid.get("colbert_1m_grid", False))
+            else (
+                "### Pure ColBERT centroid-lite focus"
+                if bool(serving_grid.get("colbert_centroid_lite_focus", False))
+                else (
+                    "### Pure ColBERT quantized-inverted focus"
+                    if bool(serving_grid.get("colbert_quantized_inverted_focus", False))
+                    else (
+                        "### Pure ColBERT entry selection focus"
+                        if bool(serving_grid.get("colbert_entry_focus", False))
+                        else "### Document-node serving grid"
+                    )
+                )
+            )
+        )
         lines.extend([
             "",
-            "### Document-node serving grid",
+            serving_grid_heading,
             "",
             f"- Mode: `{serving_grid_mode}`",
+            f"- Pure ColBERT only: `{bool(serving_grid.get('pure_colbert_only', False))}`",
             f"- Stage mode: `{serving_grid_stage_mode}`",
             f"- Probe queries: `{int(serving_grid.get('probe_queries', 0) or 0)}`",
             f"- Finalists: `{int(serving_grid.get('finalists', 0) or 0)}`",
@@ -13769,8 +24346,12 @@ def markdown_benchmark_summary(report: dict[str, Any]) -> str:
             f"- Opt-in entry samples: `{bool(serving_grid.get('include_entry_samples', False))}`",
             f"- Effective entry sample counts: `{','.join(str(item) for item in serving_grid.get('effective_entry_sample_counts', []))}`",
             f"- Proxy admission focus: `{bool(serving_grid.get('proxy_admission_focus', False))}`",
+            f"- Entry focus: `{bool(serving_grid.get('entry_focus', serving_grid.get('colbert_entry_focus', False)))}`",
+            f"- Graph entry selection bottleneck confirmed: `{bool(serving_grid.get('graph_entry_selection_bottleneck_confirmed', False))}`",
             f"- Centroid-lite focus: `{bool(serving_grid.get('centroid_lite_focus', False))}`",
+            f"- Quantized-inverted focus: `{bool(serving_grid.get('quantized_inverted_focus', False))}`",
             f"- Token-pooling focus: `{bool(serving_grid.get('token_pooling_focus', False))}`",
+            f"- Proxy oracle focus: `{bool(serving_grid.get('proxy_oracle_focus', False))}`",
             f"- Effective entry-sidecar representatives: `{','.join(str(item) for item in serving_grid.get('effective_entry_sidecar_representatives', []))}`",
             f"- Effective EF grid: `{','.join(str(item) for item in serving_grid.get('effective_ef_grid', []))}`",
             f"- Effective oversampling grid: `{','.join(str(item) for item in serving_grid.get('effective_oversampling_grid', []))}`",
@@ -13783,6 +24364,28 @@ def markdown_benchmark_summary(report: dict[str, Any]) -> str:
         if serving_grid_mode == "smoke":
             lines.extend([
                 "Smoke mode is a smoke-only runtime check and must not be treated as serving evidence.",
+                "",
+            ])
+        if bool(serving_grid.get("pure_colbert_only", False)):
+            lines.extend([
+                "This grid intentionally excludes BM25, learned-sparse, and hybrid rescue modes. "
+                "Final SQL ranking remains exact MaxSim over the retained ColBERT candidates.",
+                "",
+            ])
+        if bool(serving_grid.get("proxy_oracle_focus", False)):
+            lines.extend([
+                "Proxy oracle focus is diagnostic-only: `proxy_exact_scan` scans all "
+                "document proxy vectors in the benchmark harness, keeps the proxy top "
+                "candidate band, then preserves exact MaxSim final ordering over that "
+                "band. These rows must not be used as production serving defaults.",
+                "",
+            ])
+        if bool(serving_grid.get("quantized_inverted_focus", False)):
+            lines.extend([
+                "`quantized_inverted_experimental` is research-only: it uses guarded "
+                "experimental postings for candidate admission and preserves exact "
+                "MaxSim final ordering over retained candidates. It must not be used "
+                "as a production default.",
                 "",
             ])
         if serving_grid_stage_mode == "two_stage":
@@ -13845,6 +24448,137 @@ def markdown_benchmark_summary(report: dict[str, Any]) -> str:
                     index_bytes=int(item.get("index_bytes", 0) or 0),
                 )
             )
+        quantized_readiness = serving_grid.get("quantized_inverted_readiness")
+        if isinstance(quantized_readiness, dict) and quantized_readiness.get("enabled"):
+            codebook = quantized_readiness.get("codebook_readiness", {})
+            if not isinstance(codebook, dict):
+                codebook = {}
+            expected_failures = codebook.get("expected_failure_modes", [])
+            if not isinstance(expected_failures, list):
+                expected_failures = []
+            quantized_profile = quantized_readiness.get("quantized_profile")
+            baseline_profiles = quantized_readiness.get("baseline_profiles", [])
+            if not isinstance(baseline_profiles, list):
+                baseline_profiles = []
+            readiness_rows = []
+            if isinstance(quantized_profile, dict):
+                readiness_rows.append(quantized_profile)
+            readiness_rows.extend(
+                row for row in baseline_profiles if isinstance(row, dict)
+            )
+            lines.extend([
+                "",
+                "#### Quantized-inverted codebook readiness",
+                "",
+                f"- Experimental only: `{bool(quantized_readiness.get('experimental_only', True))}`",
+                f"- Production ready: `{bool(quantized_readiness.get('production_ready', False))}`",
+                f"- Final ranking: `{quantized_readiness.get('final_ranking', '')}`",
+                f"- Codebook source: `{codebook.get('codebook_source', '')}`",
+                f"- Codebook size: `{codebook.get('codebook_size', '')}`",
+                f"- Codebook version: `{codebook.get('codebook_version', '')}`",
+                f"- Codebook top_m: `{codebook.get('codebook_top_m', '')}`",
+                f"- Deterministic codeword warning: `{bool(codebook.get('deterministic_codeword_assignment_warning', True))}`",
+                f"- Admission improves over centroid_lite: `{quantized_readiness.get('admission_improves_over_centroid_lite')}`",
+                f"- Admission improves over proxy: `{quantized_readiness.get('admission_improves_over_proxy')}`",
+                f"- Docs scored near-exhaustive: `{bool(quantized_readiness.get('docs_scored_near_exhaustive', False))}`",
+                f"- Postings touched near-exhaustive: `{bool(quantized_readiness.get('postings_touched_near_exhaustive', False))}`",
+                f"- Expected failure modes: `{','.join(str(item) for item in expected_failures)}`",
+                "",
+                "| profile | source | p50 ms | p95 ms | top1 admission | top10 admission | ndcg@10 | lists visited | postings touched | docs scored | candidates | exact rerank docs | codebook size | version | top_m | assignment us | posting bytes | sidecar bytes | index bytes |",
+                "|---|---|---:|---:|---:|---:|---:|---|---|---|---|---|---|---|---|---|---|---|---:|",
+            ])
+            for item in readiness_rows:
+                lines.append(
+                    "| {profile} | {source} | {p50:.3f} | {p95:.3f} | {top1:.6f} | {top10:.6f} | {ndcg:.6f} | {lists} | {postings} | {docs} | {candidates} | {rerank_docs} | {codebook_size} | {codebook_version} | {codebook_top_m} | {assignment_us} | {posting_bytes} | {sidecar_bytes} | {index_bytes} |".format(
+                        profile=item.get("profile", ""),
+                        source=item.get("candidate_source", ""),
+                        p50=float(item.get("p50_ms", 0.0) or 0.0),
+                        p95=float(item.get("p95_ms", 0.0) or 0.0),
+                        top1=float(item.get("exact_top1_admission_rate", 0.0) or 0.0),
+                        top10=float(item.get("exact_top10_admission_recall", 0.0) or 0.0),
+                        ndcg=float(item.get("ndcg@10", 0.0) or 0.0),
+                        lists=item.get("quantized_inverted_lists_visited", ""),
+                        postings=item.get("quantized_inverted_postings_touched", ""),
+                        docs=item.get("quantized_inverted_docs_scored", ""),
+                        candidates=item.get("quantized_inverted_candidates", ""),
+                        rerank_docs=item.get("quantized_inverted_exact_rerank_docs", ""),
+                        codebook_size=item.get("quantized_inverted_codebook_size", ""),
+                        codebook_version=item.get("quantized_inverted_codebook_version", ""),
+                        codebook_top_m=item.get("quantized_inverted_codebook_top_m", ""),
+                        assignment_us=item.get("quantized_inverted_assignment_time_us", ""),
+                        posting_bytes=item.get("quantized_inverted_posting_bytes", ""),
+                        sidecar_bytes=item.get("quantized_inverted_sidecar_bytes", ""),
+                        index_bytes=int(item.get("index_bytes", 0) or 0),
+                    )
+                )
+        learned_sparse_focus = serving_grid.get("learned_sparse_rescue_focus")
+        if isinstance(learned_sparse_focus, dict) and learned_sparse_focus.get("available"):
+            coverage = learned_sparse_focus.get("coverage", {})
+            if not isinstance(coverage, dict):
+                coverage = {}
+            focus_rows = learned_sparse_focus.get("profiles", [])
+            if not isinstance(focus_rows, list):
+                focus_rows = []
+            warnings = learned_sparse_focus.get("coverage_warnings", [])
+            if not isinstance(warnings, list):
+                warnings = []
+            lines.extend([
+                "",
+                "#### Learned sparse rescue focus",
+                "",
+                f"- Enabled: `{bool(learned_sparse_focus.get('enabled', False))}`",
+                f"- Documents covered: `{int(coverage.get('learned_sparse_documents', 0) or 0)}` / `{int(coverage.get('loaded_documents', 0) or 0)}`",
+                f"- Queries covered: `{int(coverage.get('learned_sparse_queries', 0) or 0)}` / `{int(coverage.get('loaded_queries', 0) or 0)}`",
+                f"- Partial coverage: `{bool(learned_sparse_focus.get('partial_coverage', False))}`",
+                f"- Warnings: `{','.join(str(item) for item in warnings) if warnings else 'none'}`",
+                "",
+                "| profile | sparse source | proxy | coverage failures | candidates p95 | retained p95 | sparse latency p95 us | exact docs p50 | exact rerank us | kernel | top1 | top10 | recall@10 | ndcg@10 | mrr@10 | p50 ms | p95 ms | p99 ms |",
+                "|---|---|---|---|---:|---:|---:|---:|---:|---|---:|---:|---:|---:|---:|---:|---:|---:|",
+            ])
+            for item in focus_rows:
+                if not isinstance(item, dict):
+                    continue
+
+                def summary_value(key: str, stat: str = "p95") -> float:
+                    value = item.get(key)
+                    if isinstance(value, dict):
+                        value = value.get(stat)
+                    try:
+                        return float(value)
+                    except (TypeError, ValueError):
+                        return 0.0
+
+                failures = item.get("learned_sparse_coverage_failures", [])
+                if not isinstance(failures, list):
+                    failures = []
+                lines.append(
+                    "| {profile} | {sparse} | {proxy} | {failures} | {candidates:.3f} | {retained:.3f} | {latency:.3f} | {rerank_docs:.3f} | {rerank_us:.3f} | {kernel} | {top1:.6f} | {top10:.6f} | {recall:.6f} | {ndcg:.6f} | {mrr:.6f} | {p50:.3f} | {p95:.3f} | {p99:.3f} |".format(
+                        profile=item.get("profile", ""),
+                        sparse=item.get("sparse_candidate_source", ""),
+                        proxy=item.get("proxy_encoder", ""),
+                        failures=", ".join(str(failure) for failure in failures) or "none",
+                        candidates=summary_value("learned_sparse_candidates"),
+                        retained=summary_value("learned_sparse_retained_for_maxsim"),
+                        latency=summary_value("learned_sparse_branch_latency_us"),
+                        rerank_docs=summary_value("exact_rerank_docs", "p50")
+                        or float(item.get("exact_rerank_docs_p50", 0.0) or 0.0),
+                        rerank_us=float(item.get("exact_rerank_time_us", 0.0) or 0.0),
+                        kernel=item.get("final_maxsim_exact_kernel", ""),
+                        top1=float(item.get("exact_top1_admission_rate", 0.0) or 0.0),
+                        top10=float(item.get("exact_top10_admission_recall", 0.0) or 0.0),
+                        recall=float(item.get("recall@10", 0.0) or 0.0),
+                        ndcg=float(item.get("ndcg@10", 0.0) or 0.0),
+                        mrr=float(item.get("mrr@10", 0.0) or 0.0),
+                        p50=float(item.get("p50_ms", 0.0) or 0.0),
+                        p95=float(item.get("p95_ms", 0.0) or 0.0),
+                        p99=float(item.get("p99_ms", 0.0) or 0.0),
+                    )
+                )
+            lines.extend([
+                "",
+                "Learned-sparse rescue remains an opt-in candidate admission branch. "
+                "Final SQL ranking still uses exact MaxSim over the admitted documents.",
+            ])
         if sorted_rows:
             lines.extend([
                 "",
@@ -14050,6 +24784,8 @@ def markdown_benchmark_summary(report: dict[str, Any]) -> str:
             "",
             "### Document-node serving recommendation",
             "",
+            f"- Evidence level: `{serving_rec.get('evidence_level', '')}`",
+            f"- Safety label: `{serving_rec.get('evidence_safety_label', '')}`",
             f"- Minimum top-10 admission: `{float(thresholds.get('serving_min_top10_admission', 0.0)):.3f}`",
             f"- Minimum NDCG ratio vs exact: `{float(thresholds.get('serving_min_ndcg_ratio_vs_exact', 0.0)):.3f}`",
             f"- Maximum p95 ms: `{float(thresholds.get('serving_max_p95_ms', 0.0)):.3f}` (`0` means no hard cap)",
@@ -14060,8 +24796,19 @@ def markdown_benchmark_summary(report: dict[str, Any]) -> str:
             f"- Why quality won: {serving_profile_explanation(best_quality)}",
             f"- Why balanced won: {serving_profile_explanation(best_balanced)}",
             "",
-            "| pass | profile | source | proxy | centroid cap | entry samples | entry sidecar | storage | pooling | ef | oversampling | budget | effective candidates | underfill | top10 admission | ndcg@10 | p95 ms | reasons | hints |",
-            "|---|---|---|---|---:|---:|---|---|---|---:|---:|---:|---:|---|---:|---:|---:|---|---|",
+        ])
+        recommendation_notes = serving_rec.get("recommendation_notes", [])
+        if isinstance(recommendation_notes, list):
+            lines.extend(
+                f"- Note: {note}"
+                for note in recommendation_notes
+                if str(note)
+            )
+            if recommendation_notes:
+                lines.append("")
+        lines.extend([
+            "| pass | profile | classification | source | proxy | centroid cap | entry samples | entry sidecar | storage | pooling | ef | oversampling | budget | effective candidates | underfill | top10 admission | ndcg@10 | p95 ms | reasons | hints |",
+            "|---|---|---|---|---|---:|---:|---|---|---|---:|---:|---:|---:|---|---:|---:|---:|---|---|",
         ])
         rows = serving_rec.get("profile_thresholds", [])
         if isinstance(rows, list):
@@ -14078,10 +24825,14 @@ def markdown_benchmark_summary(report: dict[str, Any]) -> str:
                 hints = item.get("admission_improvement_hints", [])
                 if not isinstance(hints, list):
                     hints = []
+                classifications = item.get("report_classification", [])
+                if not isinstance(classifications, list):
+                    classifications = []
                 lines.append(
-                    "| {passed} | {profile} | {source} | {proxy} | {cap} | {entry_samples} | {entry_sidecar} | {storage} | {pooling}:{ratio:.2f} | {ef} | {oversampling} | {budget} | {effective_candidates} | {underfill} | {admission:.6f} | {ndcg:.6f} | {p95:.3f} | {reasons} | {hints} |".format(
+                    "| {passed} | {profile} | {classification} | {source} | {proxy} | {cap} | {entry_samples} | {entry_sidecar} | {storage} | {pooling}:{ratio:.2f} | {ef} | {oversampling} | {budget} | {effective_candidates} | {underfill} | {admission:.6f} | {ndcg:.6f} | {p95:.3f} | {reasons} | {hints} |".format(
                         passed="pass" if item.get("threshold_pass") else "fail",
                         profile=item.get("profile", ""),
+                        classification=", ".join(str(value) for value in classifications),
                         source=item.get("candidate_source", ""),
                         proxy=item.get("proxy_encoder", ""),
                         cap=int(item.get("centroid_lite_max_postings_per_token", 0) or 0),
@@ -14405,6 +25156,999 @@ def markdown_benchmark_summary(report: dict[str, Any]) -> str:
     return "\n".join(lines)
 
 
+def _self_check_compare_serving_artifacts() -> None:
+    def valid_report(row: dict[str, Any]) -> dict[str, Any]:
+        grid = {
+            "mode": "full",
+            "results": [row],
+            "learned_sparse_coverage": {
+                "loaded_documents": 10000,
+                "learned_sparse_documents": 10000,
+                "learned_sparse_missing_doc_count": 0,
+                "doc_coverage_ratio": 1.0,
+                "loaded_queries": 100,
+                "learned_sparse_queries": 100,
+                "learned_sparse_missing_query_count": 0,
+                "query_coverage_ratio": 1.0,
+                "partial_coverage": False,
+                "warnings": [],
+            },
+        }
+        rec = compute_document_node_serving_recommendation(
+            grid,
+            exact_baseline={"available": True, "metrics": {"ndcg@10": 0.8}},
+            min_top10_admission=0.8,
+            min_ndcg_ratio_vs_exact=0.95,
+            max_p95_ms=0.0,
+        )
+        return {
+            "dataset": {
+                "max_docs": 10000,
+                "max_queries": 100,
+                "documents": 10000,
+                "queries": 100,
+            },
+            "document_node_serving_grid": grid,
+            "document_node_serving_recommendation": rec,
+        }
+
+    learned_sparse_row = _synthetic_serving_row(
+        "proxy_normalized_mean_f16_learned_sparse_rescue",
+        p95=14.0,
+        admission=0.9,
+        ndcg=0.78,
+    )
+    learned_sparse_row.update({
+        "sparse_candidate_source": "learned_sparse",
+        "learned_sparse_coverage": {
+            "loaded_documents": 10000,
+            "learned_sparse_documents": 10000,
+            "learned_sparse_missing_doc_count": 0,
+            "doc_coverage_ratio": 1.0,
+            "loaded_queries": 100,
+            "learned_sparse_queries": 100,
+            "learned_sparse_missing_query_count": 0,
+            "query_coverage_ratio": 1.0,
+            "partial_coverage": False,
+            "warnings": [],
+        },
+        "learned_sparse_partial_coverage": False,
+    })
+    valid = validate_serving_profile_guc_evidence(valid_report(learned_sparse_row))
+    assert valid["accepted"] is True
+    assert valid["unsafe_reasons"] == []
+
+    smoke = valid_report(learned_sparse_row)
+    smoke["document_node_serving_grid"]["mode"] = "smoke"
+    smoke_rejected = validate_serving_profile_guc_evidence(smoke)
+    assert smoke_rejected["accepted"] is False
+    assert "artifact_is_smoke_only" in smoke_rejected["unsafe_reasons"]
+    smoke_override = validate_serving_profile_guc_evidence(smoke, allow_unsafe=True)
+    assert smoke_override["accepted"] is True
+    assert smoke_override["unsafe_override"] is True
+    annotate_serving_recommendation_evidence_level(smoke)
+    assert smoke["document_node_serving_recommendation"]["evidence_level"] == "smoke"
+    assert (
+        smoke["document_node_serving_recommendation"]["best_latency_safe"]["safety_label"]
+        == "safe_within_smoke_only"
+    )
+
+    too_small = valid_report(learned_sparse_row)
+    too_small["dataset"]["max_docs"] = 9999
+    too_small_rejected = validate_serving_profile_guc_evidence(too_small)
+    assert too_small_rejected["accepted"] is False
+    assert "max_docs_below_minimum:9999<10000" in too_small_rejected["unsafe_reasons"]
+
+    partial_coverage = {
+        "loaded_documents": 10000,
+        "learned_sparse_documents": 9999,
+        "learned_sparse_missing_doc_count": 1,
+        "doc_coverage_ratio": 0.9999,
+        "loaded_queries": 100,
+        "learned_sparse_queries": 100,
+        "learned_sparse_missing_query_count": 0,
+        "query_coverage_ratio": 1.0,
+        "partial_coverage": True,
+        "warnings": ["learned_sparse_doc_coverage_below_100pct"],
+    }
+    partial_row = {**learned_sparse_row}
+    partial_row["learned_sparse_coverage"] = partial_coverage
+    partial_row["learned_sparse_partial_coverage"] = True
+    partial_sparse = valid_report(partial_row)
+    partial_sparse["document_node_serving_grid"]["learned_sparse_coverage"] = partial_coverage
+    partial_sparse["document_node_serving_recommendation"].update({
+        "best_latency_safe": {
+            "id": serving_row_id(partial_row),
+            "profile": partial_row["profile"],
+        },
+        "best_balanced": {
+            "id": serving_row_id(partial_row),
+            "profile": partial_row["profile"],
+        },
+        "best_quality": {
+            "id": serving_row_id(partial_row),
+            "profile": partial_row["profile"],
+        },
+    })
+    partial_rejected = validate_serving_profile_guc_evidence(partial_sparse)
+    assert partial_rejected["accepted"] is False
+    assert any(
+        reason.endswith("learned_sparse_missing_doc_features")
+        for reason in partial_rejected["unsafe_reasons"]
+    )
+    assert serving_report_evidence_level(partial_sparse) == "plumbing_only"
+
+    experimental_row = _synthetic_serving_row(
+        "quantized_inverted_experimental_f32",
+        p95=7.0,
+        admission=0.95,
+        ndcg=0.78,
+        candidate_source="quantized_inverted_experimental",
+    )
+    experimental_rejected = validate_serving_profile_guc_evidence(valid_report(experimental_row))
+    assert experimental_rejected["accepted"] is False
+    assert any(
+        reason.endswith("experimental_profile")
+        for reason in experimental_rejected["unsafe_reasons"]
+    )
+
+    no_quality = valid_report(
+        _synthetic_serving_row(
+            "proxy_normalized_mean_f16",
+            p95=12.0,
+            admission=0.9,
+            ndcg=None,
+        )
+    )
+    quality_rejected = validate_serving_profile_guc_evidence(no_quality)
+    assert quality_rejected["accepted"] is False
+    assert any(
+        reason.endswith("missing_qrels_quality_metrics")
+        for reason in quality_rejected["unsafe_reasons"]
+    )
+    validation_only = valid_report(
+        _synthetic_serving_row(
+            "proxy_normalized_mean_f16",
+            p95=12.0,
+            admission=0.7,
+            ndcg=0.7,
+        )
+    )
+    assert serving_report_evidence_level(validation_only) == "validation"
+    production = valid_report(learned_sparse_row)
+    annotate_serving_recommendation_evidence_level(production)
+    assert production["document_node_serving_recommendation"]["evidence_level"] == "production_candidate"
+    assert (
+        production["document_node_serving_recommendation"]["best_latency_safe"]["safety_label"]
+        == "production_candidate"
+    )
+
+    artifact_a = {
+        "dataset": {"max_docs": 200, "max_queries": 5},
+        "document_node_serving_grid": {
+            "mode": "smoke",
+            "learned_sparse_coverage": {
+                "doc_coverage_ratio": 1.0,
+                "query_coverage_ratio": 1.0,
+                "partial_coverage": False,
+            },
+            "results": [
+                {
+                    "profile": "fast_rejected",
+                    "candidate_source": "proxy_vector",
+                    "proxy_encoder": "normalized_mean",
+                    "storage_kind": "f16",
+                    "p50_ms": 8.0,
+                    "p95_ms": 10.0,
+                    "exact_top1_admission_rate": 1.0,
+                    "exact_top10_admission_recall": 0.72,
+                    "recall@10": 0.8,
+                    "ndcg@10": 0.6,
+                    "mrr@10": 1.0,
+                    "index_bytes": 123,
+                },
+                {
+                    "profile": "safe_profile",
+                    "candidate_source": "proxy_vector",
+                    "proxy_encoder": "centroid_mean",
+                    "storage_kind": "f16",
+                    "sparse_candidate_source": "learned_sparse",
+                    "p50_ms": 12.0,
+                    "p95_ms": 14.0,
+                    "exact_top1_admission_rate": 1.0,
+                    "exact_top10_admission_recall": 0.9,
+                    "recall@10": 0.9,
+                    "ndcg@10": 0.75,
+                    "mrr@10": 1.0,
+                    "index_bytes": 456,
+                },
+            ],
+        },
+        "document_node_serving_recommendation": {
+            "best_latency_safe": {
+                "id": "safe_profile_ef0_os0",
+                "profile": "safe_profile",
+                "candidate_source": "proxy_vector",
+                "proxy_encoder": "centroid_mean",
+                "storage_kind": "f16",
+                "p50_ms": 12.0,
+                "p95_ms": 14.0,
+                "exact_top10_admission_recall": 0.9,
+                "ndcg@10": 0.75,
+            },
+            "best_quality": {
+                "id": "safe_profile_ef0_os0",
+                "profile": "safe_profile",
+                "ndcg@10": 0.75,
+                "p95_ms": 14.0,
+            },
+            "best_balanced": {
+                "id": "safe_profile_ef0_os0",
+                "profile": "safe_profile",
+                "p95_ms": 14.0,
+            },
+            "rejected_profiles": [
+                {
+                    "profile": "fast_rejected",
+                    "candidate_source": "proxy_vector",
+                    "proxy_encoder": "normalized_mean",
+                    "storage_kind": "f16",
+                    "p95_ms": 10.0,
+                    "exact_top10_admission_recall": 0.72,
+                    "ndcg@10": 0.6,
+                    "failure_reasons": ["top10_admission_below_threshold"],
+                }
+            ],
+        },
+    }
+    artifact_b = {
+        "dataset": {"max_docs": 10000, "max_queries": 100},
+        "document_node_serving_grid": {
+            "mode": "full",
+            "results": [
+                {
+                    "profile": "promising_without_recommendation",
+                    "candidate_source": "proxy_vector",
+                    "proxy_encoder": "max_pool",
+                    "storage_kind": "f16",
+                    "p50_ms": 9.0,
+                    "p95_ms": 11.0,
+                    "exact_top1_admission_rate": 1.0,
+                    "exact_top10_admission_recall": 0.79,
+                    "recall@10": 0.8,
+                    "ndcg@10": 0.7,
+                    "mrr@10": 1.0,
+                    "index_bytes": 789,
+                }
+            ],
+        },
+        "document_node_serving_recommendation": {
+            "best_latency_safe": None,
+            "best_quality": None,
+            "best_balanced": None,
+            "rejected_profiles": [
+                {
+                    "profile": "promising_without_recommendation",
+                    "candidate_source": "proxy_vector",
+                    "proxy_encoder": "max_pool",
+                    "storage_kind": "f16",
+                    "p95_ms": 11.0,
+                    "exact_top10_admission_recall": 0.79,
+                    "ndcg@10": 0.7,
+                    "failure_reasons": ["top10_admission_below_threshold"],
+                }
+            ],
+        },
+    }
+
+    with tempfile.TemporaryDirectory() as tmp:
+        path_a = Path(tmp) / "artifact-a-smoke.json"
+        path_b = Path(tmp) / "artifact-b.json"
+        path_a.write_text(json.dumps(artifact_a), encoding="utf-8")
+        path_b.write_text(json.dumps(artifact_b), encoding="utf-8")
+        first = compare_serving_artifacts([path_a, path_b])
+        second = compare_serving_artifacts([path_a, path_b])
+        first_sans_time = {**first, "generated_at": ""}
+        second_sans_time = {**second, "generated_at": ""}
+        assert first_sans_time == second_sans_time
+        assert first["artifact_count"] == 2
+        first_artifact = first["artifacts"][0]
+        assert first_artifact["best_latency_safe"]["profile"] == "safe_profile"
+        assert first_artifact["evidence_level"] == "smoke"
+        assert first_artifact["best_latency_safe"]["safety_label"] == "safe_within_smoke_only"
+        assert first_artifact["learned_sparse_coverage"]["doc_coverage_ratio"] == 1.0
+        second_artifact = first["artifacts"][1]
+        assert second_artifact["evidence_level"] == "validation"
+        assert second_artifact["best_latency_safe"] is None
+        assert (
+            second_artifact["top_promising_rejected_profiles"][0]["profile"]
+            == "promising_without_recommendation"
+        )
+        markdown = markdown_compare_serving_artifacts(first)
+        assert "DBpedia ColBERT Serving Artifact Comparison" in markdown
+        assert "hypothesis: learned_sparse may beat BM25 quality; needs full coverage validation" in markdown
+        assert "safe_profile" in markdown
+        assert "promising_without_recommendation" in markdown
+
+
+def _self_check_proxy_exact_scan_oracle() -> None:
+    oracle = ProxyExactScanOracle(
+        docs=[
+            ProxyExactScanDoc("exact", 0, 1, [[1.0, 0.0], [-1.0, 0.0], [0.0, 1.0]]),
+            ProxyExactScanDoc("proxy", 0, 2, [[0.8, 0.0]]),
+            ProxyExactScanDoc("other", 0, 3, [[0.0, 0.2]]),
+        ],
+        queries={"q1": [[1.0, 0.0]]},
+        dimension=2,
+    )
+    args = argparse.Namespace(
+        final_k=2,
+        admission_k=2,
+        multivector_graph="document_nodes",
+        multivector_candidate_source="proxy_exact_scan",
+        multivector_proxy_encoder="normalized_mean",
+        multivector_centroid_count="auto",
+        serving_exact_rerank_mode="serving",
+        serving_exact_rerank_k=2,
+        multivector_exact_rerank_k=2,
+    )
+    exact_top = [
+        {
+            "rank": 1,
+            "doc_id": "exact",
+            "heap_block": 0,
+            "heap_offset": 1,
+            "distance": -1.0,
+            "maxsim": 1.0,
+        },
+        {
+            "rank": 2,
+            "doc_id": "proxy",
+            "heap_block": 0,
+            "heap_offset": 2,
+            "distance": -0.8,
+            "maxsim": 0.8,
+        },
+    ]
+    result = run_proxy_exact_scan_admission_budget(
+        oracle,
+        QueryItem("q1", "fixture"),
+        args,
+        budget=2,
+        exact_top=exact_top,
+        exact_rerank_k=2,
+    )
+    assert result["candidate_source"] == "proxy_exact_scan"
+    assert result["proxy_exact_scan_enabled"] is True
+    assert result["proxy_exact_scan_diagnostic_only"] is True
+    assert result["proxy_exact_scan_docs_scored"] == 3
+    assert result["proxy_exact_scan_candidates"] == 2
+    assert result["proxy_exact_rank_of_exact_top1"] == 2
+    assert result["result_doc_ids"][0] == "exact"
+    assert result["exact_top1_admission"] is True
+    assert result["exact_top10_admission_recall"] == 1.0
+    exhaustive_top = exact_top + [
+        {
+            "rank": 3,
+            "doc_id": "other",
+            "heap_block": 0,
+            "heap_offset": 3,
+            "distance": -0.2,
+            "maxsim": 0.2,
+        }
+    ]
+    exhaustive = run_proxy_exact_scan_admission_budget(
+        oracle,
+        QueryItem("q1", "fixture"),
+        args,
+        budget=3,
+        exact_top=exhaustive_top,
+        exact_rerank_k=3,
+    )
+    assert exhaustive["proxy_exact_scan_candidates"] == 3
+    assert exhaustive["result_doc_ids"][:2] == ["exact", "proxy"]
+    token_node_args = clone_args(args, multivector_graph="token_nodes")
+    try:
+        run_proxy_exact_scan_admission_budget(
+            oracle,
+            QueryItem("q1", "fixture"),
+            token_node_args,
+            budget=2,
+            exact_top=exact_top,
+            exact_rerank_k=2,
+        )
+    except RuntimeError as exc:
+        assert "document_nodes" in str(exc)
+    else:
+        raise AssertionError("proxy_exact_scan must reject token_nodes")
+
+    diagnostic_row = {
+        "profile": "proxy_exact_scan_max_pool_f16",
+        "candidate_source": "proxy_exact_scan",
+        "diagnostic_only": True,
+        "proxy_exact_scan_diagnostic_only": True,
+        "p95_ms": 1.0,
+        "exact_top10_admission_recall": 1.0,
+        "ndcg@10": 1.0,
+    }
+    normal_row = {
+        "profile": "proxy_normalized_mean_f16",
+        "candidate_source": "proxy_vector",
+        "p95_ms": 10.0,
+        "exact_top10_admission_recall": 0.9,
+        "ndcg@10": 0.9,
+    }
+    recommendation = compute_document_node_serving_recommendation(
+        {"summary_rows": [diagnostic_row, normal_row]},
+        exact_baseline={"available": False},
+        min_top10_admission=0.8,
+        min_ndcg_ratio_vs_exact=0.95,
+        max_p95_ms=0.0,
+    )
+    assert serving_row_experimental(diagnostic_row) is True
+    assert recommendation["best_latency_safe"]["profile"] == "proxy_normalized_mean_f16"
+
+
+def _self_check_document_node_colbert_1m_preflight() -> None:
+    summary = document_node_colbert_1m_preflight_summary(
+        docs_loaded=1_000_000,
+        queries_loaded=381,
+        qrels_loaded=6_411,
+        qrels_covered=6_411,
+        requested_max_docs=1_000_000,
+        requested_max_queries=1_000,
+        local_dataset_path=".nix-dev/hf-datasets/dbpedia-colbert-multivector-1m-f16",
+        hf_hub_available=False,
+        strict_query_count=False,
+        precomputed_dataset="johannhartmann/pgturbohybrid_dbpedia_colbert",
+    )
+    assert summary["query_count_limited_by_artifact"] is True
+    assert summary["effective_max_queries"] == 381
+    assert summary["strict_query_count_failed"] is False
+    assert summary["can_run_acceptance"] is False
+    assert summary["can_run_with_effective_queries"] is True
+    assert (
+        "requested 1000 queries but only 381 available"
+        in summary["acceptance_blockers"]
+    )
+    assert summary["hf_hub_available"] is False
+    assert summary["local_dataset_path"].endswith(
+        "dbpedia-colbert-multivector-1m-f16"
+    )
+
+    strict_summary = document_node_colbert_1m_preflight_summary(
+        docs_loaded=1_000_000,
+        queries_loaded=381,
+        qrels_loaded=6_411,
+        qrels_covered=6_411,
+        requested_max_docs=1_000_000,
+        requested_max_queries=1_000,
+        local_dataset_path=None,
+        hf_hub_available=True,
+        strict_query_count=True,
+        precomputed_dataset=None,
+    )
+    assert strict_summary["strict_query_count_failed"] is True
+    assert strict_summary["strict_query_count_error"] == (
+        "requested 1000 queries but only 381 available"
+    )
+    assert strict_summary["fatal_acceptance_blockers"] == [
+        "requested 1000 queries but only 381 available"
+    ]
+
+    enough_queries = document_node_colbert_1m_preflight_summary(
+        docs_loaded=10_000,
+        queries_loaded=100,
+        qrels_loaded=500,
+        qrels_covered=500,
+        requested_max_docs=10_000,
+        requested_max_queries=100,
+        local_dataset_path=None,
+        hf_hub_available=True,
+        strict_query_count=True,
+        precomputed_dataset=None,
+    )
+    assert enough_queries["query_count_limited_by_artifact"] is False
+    assert enough_queries["effective_max_queries"] == 100
+    assert enough_queries["can_run_acceptance"] is True
+
+    with tempfile.TemporaryDirectory() as tmp:
+        local_dataset = Path(tmp) / "dataset"
+        local_dataset.mkdir()
+        args = argparse.Namespace(precomputed_dataset=str(local_dataset))
+        assert local_precomputed_dataset_path(args, None) == portable_path(local_dataset)
+
+    markdown = markdown_document_node_colbert_1m_preflight(
+        {"document_node_colbert_1m_preflight": summary}
+    )
+    assert "Pure ColBERT DBpedia 1M preflight" in markdown
+    assert "requested 1000 queries but only 381 available" in markdown
+
+
+def _self_check_document_node_colbert_1m_evaluate_only_guards() -> None:
+    limited = document_node_colbert_1m_query_limit_summary(
+        requested_max_queries=1000,
+        queries_loaded=381,
+        strict_query_count=False,
+    )
+    assert limited["query_count_limited_by_artifact"] is True
+    assert limited["effective_max_queries"] == 381
+    assert limited["strict_query_count_failed"] is False
+    assert limited["query_count_limit_message"] == (
+        "requested 1000 queries but only 381 available"
+    )
+
+    strict_limited = document_node_colbert_1m_query_limit_summary(
+        requested_max_queries=1000,
+        queries_loaded=381,
+        strict_query_count=True,
+    )
+    assert strict_limited["strict_query_count_failed"] is True
+    assert strict_limited["strict_query_count_error"] == (
+        "requested 1000 queries but only 381 available"
+    )
+
+    profile = DocumentNodeServingProfile(
+        name="proxy_normalized_mean_f16",
+        candidate_source="proxy_vector",
+        proxy_encoder="normalized_mean",
+        storage_kind="f16",
+        centroids="off",
+    )
+    signature = (("multivector_graph", "document_nodes"),)
+    index_phase = {
+        "index_signature_tuple": signature,
+        "index_stats": {
+            "multivector_graph_mode": "document_nodes",
+            "multivector_doc_build_scorer": "proxy",
+            "multivector_proxy_encoder": "normalized_mean",
+            "multivector_centroids": "off",
+            "multivector_centroid_count": 0,
+        },
+    }
+    validate_serving_profile_index_reuse(
+        args=argparse.Namespace(),
+        profile=profile,
+        index_phase=index_phase,
+        expected_signature=signature,
+    )
+
+    mismatched_phase = {
+        **index_phase,
+        "index_stats": {
+            **index_phase["index_stats"],
+            "multivector_proxy_encoder": "max_pool",
+        },
+    }
+    try:
+        validate_serving_profile_index_reuse(
+            args=argparse.Namespace(),
+            profile=profile,
+            index_phase=mismatched_phase,
+            expected_signature=signature,
+        )
+    except RuntimeError as exc:
+        assert "multivector_proxy_encoder" in str(exc)
+    else:
+        raise AssertionError("evaluate-only index stats mismatch was not rejected")
+
+
+def _self_check_incremental_output() -> None:
+    with tempfile.TemporaryDirectory() as tmp:
+        path = Path(tmp) / "incremental.json"
+        metadata = {
+            "git_sha": "abc123",
+            "dataset_path": "local-dataset",
+            "docs_loaded": 1000,
+            "queries_available": 25,
+            "effective_queries": 25,
+            "profile_plan_hash": "plan",
+            "benchmark_options_hash": "options",
+            "mode": "colbert_1m",
+            "budget_sweep": [800],
+            "ef_grid": [800],
+            "oversampling_grid": [1],
+            "profile_names": ["proxy_normalized_mean_f16"],
+        }
+        recorder = IncrementalRecorder(path)
+        recorder.record("run_metadata", metadata=metadata)
+        recorder.record(
+            "planned_profile",
+            row_id="planned:proxy_normalized_mean_f16_ef800_os1",
+            profile="proxy_normalized_mean_f16",
+        )
+        recorder.record(
+            "index_build_started",
+            stage="single",
+            index_signature={"reloptions": []},
+        )
+        recorder.record(
+            "index_build_succeeded",
+            stage="single",
+            index_signature={"reloptions": []},
+            elapsed_ms=123.0,
+        )
+        row = {
+            "profile": "proxy_normalized_mean_f16",
+            "ef": 800,
+            "oversampling": 1,
+            "exact_top10_admission_recall": 0.8,
+            "ndcg@10": 0.5,
+            "p95_ms": 42.0,
+        }
+        recorder.record(
+            "query_evaluation_succeeded",
+            stage="single",
+            row_id="single:proxy_normalized_mean_f16_ef800_os1",
+            profile="proxy_normalized_mean_f16",
+            row=row,
+        )
+        recorder.record(
+            "profile_completed",
+            stage="single",
+            profile_key="single:proxy_normalized_mean_f16",
+            profile="proxy_normalized_mean_f16",
+            summary={"profile": "proxy_normalized_mean_f16", "runs": 1},
+        )
+        recorder.record(
+            "query_evaluation_failed",
+            stage="single",
+            row_id="single:failed",
+            profile="proxy_normalized_mean_f16",
+            error="simulated",
+        )
+        loaded = load_incremental_output(path)
+        records = [
+            item for item in loaded.get("records", []) if isinstance(item, dict)
+        ]
+        completed = incremental_completed_row_map(records)
+        if "single:proxy_normalized_mean_f16_ef800_os1" not in completed:
+            raise AssertionError("incremental completed row was not recoverable")
+        if completed["single:proxy_normalized_mean_f16_ef800_os1"]["p95_ms"] != 42.0:
+            raise AssertionError("incremental completed row contents changed")
+        partial = run_incremental_summary_only(path)
+        summary = partial.get("incremental_summary", {})
+        if not isinstance(summary, dict):
+            raise AssertionError("incremental summary missing")
+        if int(summary.get("completed_rows", 0) or 0) != 1:
+            raise AssertionError("incremental summary did not count completed row")
+        if not summary.get("partial"):
+            raise AssertionError("incremental summary should be partial without run_completed")
+        failures = summary.get("failed_records", [])
+        if not isinstance(failures, list) or not failures:
+            raise AssertionError("incremental summary did not preserve failed records")
+        markdown = markdown_incremental_summary(partial)
+        if "proxy_normalized_mean_f16" not in markdown:
+            raise AssertionError("incremental markdown omitted completed profile")
+
+        validate_incremental_resume(records, metadata)
+        bad_metadata = dict(metadata)
+        bad_metadata["profile_plan_hash"] = "changed"
+        try:
+            validate_incremental_resume(records, bad_metadata)
+        except SystemExit as exc:
+            if "profile_plan_hash" not in str(exc):
+                raise AssertionError("resume mismatch did not name profile_plan_hash") from exc
+        else:
+            raise AssertionError("resume mismatch was not rejected")
+
+
+def _self_check_index_build_resource_estimates() -> None:
+    def make_args(**overrides: Any) -> argparse.Namespace:
+        values = {
+            "multivector_token_pooling": "off",
+            "multivector_token_pooling_target_ratio": 1.0,
+            "multivector_token_pooling_min_tokens": 16,
+            "multivector_doc_storage": "f16",
+            "multivector_centroids": "off",
+            "multivector_centroid_count": "auto",
+            "multivector_candidate_source": "proxy_vector",
+            "index_graph_m": 16,
+            "index_graph_ef_construction": 64,
+            "index_native_segments": 1,
+            "entry_sidecar": False,
+            "entry_sidecar_representatives": 128,
+            "max_estimated_index_build_mb": 0,
+            "max_estimated_index_bytes": 0,
+            "skip_profile_if_estimate_exceeds_limit": False,
+            "fail_if_estimate_exceeds_limit": False,
+        }
+        values.update(overrides)
+        return argparse.Namespace(**values)
+
+    small_stats = {
+        "docs": 1000,
+        "avg_tokens": 32,
+        "max_tokens": 64,
+        "dim": 128,
+        "dim_min": 128,
+        "dim_max": 128,
+    }
+    large_stats = {**small_stats, "docs": 2000}
+    proxy_profile = DocumentNodeServingProfile(
+        name="proxy_normalized_mean_f16",
+        candidate_source="proxy_vector",
+        proxy_encoder="normalized_mean",
+        storage_kind="f16",
+        centroids="off",
+    )
+    centroid_profile = DocumentNodeServingProfile(
+        name="centroid_lite_f16",
+        candidate_source="centroid_lite",
+        proxy_encoder="normalized_mean",
+        storage_kind="f16",
+        centroids="kmeans",
+    )
+    centroid_only_profile = DocumentNodeServingProfile(
+        name="centroid_lite_centroid_only",
+        candidate_source="centroid_lite",
+        proxy_encoder="normalized_mean",
+        storage_kind="centroid_only",
+        centroids="kmeans",
+    )
+    proxy_small = estimate_index_build_resources(small_stats, make_args(), proxy_profile)
+    proxy_large = estimate_index_build_resources(large_stats, make_args(), proxy_profile)
+    assert proxy_large["estimated_index_bytes"] > proxy_small["estimated_index_bytes"]
+    assert (
+        proxy_large["estimated_build_memory_bytes"]
+        > proxy_small["estimated_build_memory_bytes"]
+    )
+
+    proxy_only_profile = DocumentNodeServingProfile(
+        name="proxy_normalized_mean_proxy_only",
+        candidate_source="proxy_vector",
+        proxy_encoder="normalized_mean",
+        storage_kind="proxy_only",
+        centroids="off",
+    )
+    proxy_only_estimate = estimate_index_build_resources(
+        small_stats,
+        make_args(multivector_doc_storage="proxy_only"),
+        proxy_only_profile,
+    )
+    assert proxy_only_estimate["estimate_components"]["full_multivector_sidecar"] == 0
+    assert proxy_only_estimate["estimated_index_bytes"] < proxy_small["estimated_index_bytes"]
+    assert (
+        proxy_only_estimate["estimated_build_memory_bytes"]
+        < proxy_small["estimated_build_memory_bytes"]
+    )
+
+    centroid_estimate = estimate_index_build_resources(
+        small_stats,
+        make_args(),
+        centroid_profile,
+    )
+    assert (
+        centroid_estimate["estimated_index_bytes"]
+        > proxy_small["estimated_index_bytes"]
+    )
+    assert (
+        proxy_small["estimate_inputs"]["persisted_sidecar_bytes_per_value"] == 4
+    )
+    assert (
+        proxy_small["estimate_components"]["full_multivector_sidecar"]
+        > small_stats["docs"] * small_stats["avg_tokens"] * small_stats["dim"]
+        * index_build_storage_bytes("f16")
+    )
+
+    impossible_stats = {
+        "docs": 1_000_000,
+        "avg_tokens": 32,
+        "max_tokens": 64,
+        "dim": 128,
+        "dim_min": 128,
+        "dim_max": 128,
+    }
+    impossible_estimate = estimate_index_build_resources(
+        impossible_stats,
+        make_args(),
+        centroid_profile,
+    )
+    assert impossible_estimate["estimate_inputs"]["docmap_format_limit_exceeded"] is True
+    centroid_only_1m_estimate = estimate_index_build_resources(
+        impossible_stats,
+        make_args(multivector_doc_storage="centroid_only"),
+        centroid_only_profile,
+    )
+    assert (
+        centroid_only_1m_estimate["estimate_components"]["full_multivector_sidecar"]
+        == 0
+    )
+    assert centroid_only_1m_estimate["estimate_inputs"]["centroid_bytes_per_value"] == 2
+    assert (
+        centroid_only_1m_estimate["estimate_components"]["centroid_vectors"]
+        < impossible_estimate["estimate_components"]["centroid_vectors"]
+    )
+    assert (
+        centroid_only_1m_estimate["estimate_inputs"]["docmap_format_limit_exceeded"]
+        is False
+    )
+    impossible_skip_decision = index_build_estimate_decision(
+        impossible_estimate,
+        make_args(skip_profile_if_estimate_exceeds_limit=True),
+    )
+    assert impossible_skip_decision["action"] == "skip"
+    assert impossible_skip_decision["format_limit_exceeded"] is True
+    impossible_fail_decision = index_build_estimate_decision(
+        impossible_estimate,
+        make_args(),
+    )
+    assert impossible_fail_decision["action"] == "fail"
+
+    pooled_estimate = estimate_index_build_resources(
+        small_stats,
+        make_args(
+            multivector_token_pooling="greedy_cosine",
+            multivector_token_pooling_target_ratio=0.5,
+        ),
+        proxy_profile,
+    )
+    assert (
+        pooled_estimate["estimate_components"]["full_multivector_sidecar"]
+        < proxy_small["estimate_components"]["full_multivector_sidecar"]
+    )
+
+    skip_args = make_args(
+        max_estimated_index_build_mb=1,
+        skip_profile_if_estimate_exceeds_limit=True,
+    )
+    skip_decision = index_build_estimate_decision(proxy_small, skip_args)
+    assert skip_decision["action"] == "skip"
+    skipped_row = document_node_serving_skipped_build_row(
+        profile=proxy_profile,
+        signature=(("multivector_graph", "document_nodes"),),
+        grouped_profiles=[proxy_profile],
+        estimate=proxy_small,
+        decision=skip_decision,
+    )
+    assert skipped_row["index_build_skipped"] is True
+    assert skipped_row["estimated_index_bytes"] == proxy_small["estimated_index_bytes"]
+
+    fail_args = make_args(
+        max_estimated_index_build_mb=1,
+        fail_if_estimate_exceeds_limit=True,
+    )
+    fail_decision = index_build_estimate_decision(proxy_small, fail_args)
+    assert fail_decision["action"] == "fail"
+    try:
+        fail_index_build_estimate_if_requested(
+            profile_name=proxy_profile.name,
+            estimate=proxy_small,
+            decision=fail_decision,
+        )
+    except SystemExit as exc:
+        assert "resource estimate" in str(exc)
+    else:
+        raise AssertionError("fail estimate decision did not stop before CREATE INDEX")
+
+    no_limit_decision = index_build_estimate_decision(proxy_small, make_args())
+    assert no_limit_decision["action"] == "none"
+
+
+def _self_check_document_node_colbert_exact_oracle() -> None:
+    with tempfile.TemporaryDirectory() as tmpdir:
+        tmp = Path(tmpdir)
+        oracle_path = tmp / "oracle.json"
+        calls: list[str] = []
+
+        def fake_fingerprint(_conn: Any) -> dict[str, Any]:
+            return {
+                "doc_count": 3,
+                "doc_id_checksum": "docs",
+                "query_count": 2,
+                "query_id_checksum": "queries",
+                "qrel_count": 2,
+                "fingerprint": "fingerprint-a",
+            }
+
+        def fake_selection(_conn: Any, _args: argparse.Namespace) -> list[QueryItem]:
+            return [QueryItem("q1", "one"), QueryItem("q2", "two")]
+
+        def fake_checksum(_conn: Any, query_id: str) -> str:
+            return f"checksum-{query_id}"
+
+        def fake_exact_top(_conn: Any, query: QueryItem, top_k: int) -> list[dict[str, Any]]:
+            calls.append(query.query_id)
+            return [
+                {
+                    "rank": 1,
+                    "doc_id": f"d-{query.query_id}-1",
+                    "heap_block": 1,
+                    "heap_offset": 1,
+                    "distance": -2.0,
+                    "maxsim": 2.0,
+                },
+                {
+                    "rank": 2,
+                    "doc_id": f"d-{query.query_id}-2",
+                    "heap_block": 1,
+                    "heap_offset": 2,
+                    "distance": -1.0,
+                    "maxsim": 1.0,
+                },
+            ][:top_k]
+
+        args = argparse.Namespace(
+            oracle_output=oracle_path,
+            oracle_resume=False,
+            oracle_top_k=2,
+            oracle_query_limit=0,
+            oracle_query_ids=None,
+            oracle_timeout_per_query_ms=0,
+            oracle_max_queries=0,
+        )
+
+        original_fingerprint = globals()["colbert_exact_oracle_dataset_fingerprint"]
+        original_selection = globals()["exact_oracle_query_selection"]
+        original_checksum = globals()["query_vector_checksum"]
+        try:
+            globals()["colbert_exact_oracle_dataset_fingerprint"] = fake_fingerprint
+            globals()["exact_oracle_query_selection"] = fake_selection
+            globals()["query_vector_checksum"] = fake_checksum
+            report = run_document_node_colbert_exact_oracle_build(
+                object(),
+                args,
+                exact_top_provider=fake_exact_top,
+            )
+            build = report["document_node_colbert_exact_oracle_build"]
+            assert build["completed_this_run"] == 2
+            assert build["failed_this_run"] == 0
+            assert calls == ["q1", "q2"]
+            artifact = load_exact_oracle_artifact(oracle_path)
+            assert len(artifact["records"]) == 2
+            assert artifact["records"][0]["query_vector_checksum"] == "checksum-q1"
+            assert artifact["records"][0]["docs_scored"] == 3
+            assert artifact["records"][0]["doc_ids"] == ["d-q1-1", "d-q1-2"]
+            summary = summarize_exact_oracle_path(oracle_path)
+            summary_payload = summary["document_node_colbert_exact_oracle_summary"]
+            assert summary_payload["queries_completed"] == 2
+            assert summary_payload["queries_failed"] == 0
+            assert summary_payload["output_valid"] is True
+            assert "offline oracle" in summary["markdown_summary"]
+
+            args.oracle_resume = True
+            calls.clear()
+            resumed = run_document_node_colbert_exact_oracle_build(
+                object(),
+                args,
+                exact_top_provider=fake_exact_top,
+            )
+            resumed_build = resumed["document_node_colbert_exact_oracle_build"]
+            assert resumed_build["skipped_resume"] == 2
+            assert resumed_build["completed_this_run"] == 0
+            assert calls == []
+
+            def mismatched_fingerprint(_conn: Any) -> dict[str, Any]:
+                return {
+                    "doc_count": 4,
+                    "doc_id_checksum": "docs-b",
+                    "query_count": 2,
+                    "query_id_checksum": "queries",
+                    "qrel_count": 2,
+                    "fingerprint": "fingerprint-b",
+                }
+
+            globals()["colbert_exact_oracle_dataset_fingerprint"] = mismatched_fingerprint
+            try:
+                run_document_node_colbert_exact_oracle_build(
+                    object(),
+                    args,
+                    exact_top_provider=fake_exact_top,
+                )
+            except SystemExit as exc:
+                assert "metadata mismatch" in str(exc)
+            else:
+                raise AssertionError("oracle resume metadata mismatch was not rejected")
+        finally:
+            globals()["colbert_exact_oracle_dataset_fingerprint"] = original_fingerprint
+            globals()["exact_oracle_query_selection"] = original_selection
+            globals()["query_vector_checksum"] = original_checksum
+
+        code_names = set(run_document_node_colbert_exact_oracle_build.__code__.co_names)
+        assert "build_index" not in code_names
+        assert "run_retrieval_query" not in code_names
+
+
 def run_self_checks() -> None:
     _self_check_document_node_serving_profiles()
     _self_check_exact_top_cache()
@@ -14418,8 +26162,20 @@ def run_self_checks() -> None:
     _self_check_document_node_candidate_source_deltas()
     _self_check_document_node_serving_build_only_serialization()
     _self_check_document_node_serving_latency_only()
+    _self_check_document_node_colbert_beir_quality_only()
+    _self_check_document_node_colbert_sampled_admission()
+    _self_check_document_node_colbert_candidate_source_focus()
     _self_check_learned_sparse_jsonl_parser()
+    _self_check_learned_sparse_jsonl_coverage_preflight()
+    _self_check_learned_sparse_input_export()
     _self_check_learned_sparse_evidence_annotation()
+    _self_check_compare_serving_artifacts()
+    _self_check_proxy_exact_scan_oracle()
+    _self_check_document_node_colbert_1m_preflight()
+    _self_check_document_node_colbert_1m_evaluate_only_guards()
+    _self_check_incremental_output()
+    _self_check_index_build_resource_estimates()
+    _self_check_document_node_colbert_exact_oracle()
 
 
 def run_multivector_recall_gate(conn: psycopg.Connection[Any], args: argparse.Namespace) -> dict[str, Any]:
@@ -14478,7 +26234,248 @@ def validate_args(args: argparse.Namespace) -> argparse.Namespace:
         args.precomputed_dataset = env_precomputed
     if args.model_path is None:
         args.model_path = Path(env_model or DEFAULT_MODEL_PATH)
-    require_complete_learned_sparse_args(args)
+    if args.summarize_incremental_output is not None:
+        args.summarize_incremental_output = args.summarize_incremental_output.resolve()
+        if not args.summarize_incremental_output.is_file():
+            raise SystemExit(
+                f"incremental output does not exist: {args.summarize_incremental_output}"
+            )
+        if args.output is not None:
+            args.output = args.output.resolve()
+        if args.markdown_output is not None:
+            args.markdown_output = args.markdown_output.resolve()
+        return args
+    if args.document_node_colbert_exact_oracle_summary is not None:
+        args.document_node_colbert_exact_oracle_summary = (
+            args.document_node_colbert_exact_oracle_summary.resolve()
+        )
+        if not args.document_node_colbert_exact_oracle_summary.is_file():
+            raise SystemExit(
+                "exact oracle artifact does not exist: "
+                f"{args.document_node_colbert_exact_oracle_summary}"
+            )
+        if args.output is not None:
+            args.output = args.output.resolve()
+        if args.markdown_output is not None:
+            args.markdown_output = args.markdown_output.resolve()
+        return args
+    colbert_1m_single_mode = document_node_colbert_1m_single_index_mode_requested(args)
+    if colbert_1m_single_mode:
+        args.document_node_colbert_1m_grid = True
+        args.document_node_serving_grid = True
+    colbert_1m_mode_count = sum(
+        1
+        for enabled in (
+            args.document_node_colbert_1m_plan_only,
+            args.document_node_colbert_1m_build_only,
+            args.document_node_colbert_1m_evaluate_only,
+        )
+        if bool(enabled)
+    )
+    if colbert_1m_mode_count > 1:
+        raise SystemExit(
+            "--document-node-colbert-1m-plan-only, "
+            "--document-node-colbert-1m-build-only, and "
+            "--document-node-colbert-1m-evaluate-only are mutually exclusive"
+        )
+    if (
+        args.document_node_colbert_1m_beir_quality_only
+        or args.document_node_colbert_sampled_admission
+        or args.document_node_colbert_candidate_source_focus
+    ) and colbert_1m_mode_count:
+        raise SystemExit(
+            "--document-node-colbert-1m-beir-quality-only, "
+            "--document-node-colbert-sampled-admission, and "
+            "--document-node-colbert-candidate-source-focus cannot be combined "
+            "with --document-node-colbert-1m-plan-only, "
+            "--document-node-colbert-1m-build-only, or "
+            "--document-node-colbert-1m-evaluate-only"
+        )
+    single_colbert_quality_modes = [
+        enabled
+        for enabled in (
+            args.document_node_colbert_1m_beir_quality_only,
+            args.document_node_colbert_sampled_admission,
+            args.document_node_colbert_candidate_source_focus,
+        )
+        if bool(enabled)
+    ]
+    if len(single_colbert_quality_modes) > 1:
+        raise SystemExit(
+            "--document-node-colbert-1m-beir-quality-only, "
+            "--document-node-colbert-sampled-admission, and "
+            "--document-node-colbert-candidate-source-focus are mutually exclusive"
+        )
+    if args.document_node_colbert_exact_oracle_build and (
+        colbert_1m_mode_count
+        or args.document_node_colbert_1m_beir_quality_only
+        or args.document_node_colbert_sampled_admission
+        or args.document_node_colbert_candidate_source_focus
+    ):
+        raise SystemExit(
+            "--document-node-colbert-exact-oracle-build is an offline mode and "
+            "cannot be combined with ColBERT 1M build/evaluate/BEIR-quality/"
+            "sampled-admission/candidate-source-focus modes"
+        )
+    if args.document_node_colbert_exact_oracle_build:
+        if args.oracle_output is None:
+            raise SystemExit("--document-node-colbert-exact-oracle-build requires --oracle-output")
+        if not args.reuse_data:
+            raise SystemExit(
+                "--document-node-colbert-exact-oracle-build requires --reuse-data "
+                "and an imported DBpedia ColBERT database"
+            )
+        if args.force_reload:
+            raise SystemExit(
+                "--document-node-colbert-exact-oracle-build does not reload data; "
+                "remove --force-reload"
+            )
+        if args.oracle_top_k < 1:
+            raise SystemExit("--oracle-top-k must be positive")
+        if args.oracle_query_limit < 0:
+            raise SystemExit("--oracle-query-limit must be non-negative")
+        if args.oracle_max_queries < 0:
+            raise SystemExit("--oracle-max-queries must be non-negative")
+        if args.oracle_timeout_per_query_ms < 0:
+            raise SystemExit("--oracle-timeout-per-query-ms must be non-negative")
+        args.oracle_output = args.oracle_output.resolve()
+        if args.oracle_resume and not args.oracle_output.exists():
+            raise SystemExit(f"--oracle-resume requested but artifact does not exist: {args.oracle_output}")
+        if args.oracle_query_ids is not None:
+            args.oracle_query_ids = args.oracle_query_ids.resolve()
+            if not args.oracle_query_ids.is_file():
+                raise SystemExit(f"--oracle-query-ids file does not exist: {args.oracle_query_ids}")
+        if args.output is not None:
+            args.output = args.output.resolve()
+        if args.markdown_output is not None:
+            args.markdown_output = args.markdown_output.resolve()
+    if args.no_create_index:
+        args.require_existing_index = True
+    if args.document_node_colbert_1m_evaluate_only:
+        args.require_existing_index = True
+        args.no_create_index = True
+    if (
+        args.document_node_colbert_1m_index_signature
+        and not (
+            args.document_node_colbert_1m_plan_only
+            or args.document_node_colbert_1m_build_only
+            or args.document_node_colbert_1m_evaluate_only
+        )
+    ):
+        raise SystemExit(
+            "--document-node-colbert-1m-index-signature is only valid with "
+            "--document-node-colbert-1m-plan-only, "
+            "--document-node-colbert-1m-build-only, or "
+            "--document-node-colbert-1m-evaluate-only"
+        )
+    if (
+        args.document_node_colbert_1m_build_only
+        or args.document_node_colbert_1m_evaluate_only
+    ) and not (
+        str(args.document_node_colbert_1m_profile or "").strip()
+        or str(args.document_node_colbert_1m_index_signature or "").strip()
+    ):
+        raise SystemExit(
+            "single-index build/evaluate mode requires "
+            "--document-node-colbert-1m-profile or "
+            "--document-node-colbert-1m-index-signature"
+        )
+    if args.document_node_colbert_1m_grid:
+        forbidden_colbert_flags = {
+            "--document-node-serving-grid-include-bm25-rescue": args.document_node_serving_grid_include_bm25_rescue,
+            "--document-node-serving-grid-include-learned-sparse-rescue": args.document_node_serving_grid_include_learned_sparse_rescue,
+            "--document-node-serving-grid-learned-sparse-focus": args.document_node_serving_grid_learned_sparse_focus,
+            "--hybrid-evaluation-harness": args.hybrid_evaluation_harness,
+        }
+        enabled_forbidden = [
+            name for name, enabled in forbidden_colbert_flags.items() if bool(enabled)
+        ]
+        if enabled_forbidden:
+            raise SystemExit(
+                "--document-node-colbert-1m-grid is pure ColBERT and cannot be "
+                "combined with " + ", ".join(enabled_forbidden)
+            )
+        if (
+            args.document_node_serving_grid_include_experimental
+            and not args.document_node_colbert_1m_include_experimental
+        ):
+            raise SystemExit(
+                "--document-node-colbert-1m-grid only includes "
+                "quantized_inverted_experimental_f32 with "
+                "--document-node-colbert-1m-include-experimental"
+            )
+    if args.document_node_colbert_1m_beir_quality_only:
+        forbidden_colbert_quality_flags = {
+            "--document-node-serving-grid-include-bm25-rescue": args.document_node_serving_grid_include_bm25_rescue,
+            "--document-node-serving-grid-include-learned-sparse-rescue": args.document_node_serving_grid_include_learned_sparse_rescue,
+            "--document-node-serving-grid-learned-sparse-focus": args.document_node_serving_grid_learned_sparse_focus,
+            "--hybrid-evaluation-harness": args.hybrid_evaluation_harness,
+        }
+        enabled_forbidden = [
+            name for name, enabled in forbidden_colbert_quality_flags.items() if bool(enabled)
+        ]
+        if enabled_forbidden:
+            raise SystemExit(
+                "--document-node-colbert-1m-beir-quality-only is pure ColBERT "
+                "and cannot be combined with " + ", ".join(enabled_forbidden)
+            )
+        document_node_colbert_beir_quality_profile(args)
+    if args.document_node_colbert_sampled_admission:
+        forbidden_sampled_flags = {
+            "--document-node-serving-grid-include-bm25-rescue": args.document_node_serving_grid_include_bm25_rescue,
+            "--document-node-serving-grid-include-learned-sparse-rescue": args.document_node_serving_grid_include_learned_sparse_rescue,
+            "--document-node-serving-grid-learned-sparse-focus": args.document_node_serving_grid_learned_sparse_focus,
+            "--hybrid-evaluation-harness": args.hybrid_evaluation_harness,
+        }
+        enabled_forbidden = [
+            name for name, enabled in forbidden_sampled_flags.items() if bool(enabled)
+        ]
+        if enabled_forbidden:
+            raise SystemExit(
+                "--document-node-colbert-sampled-admission is pure ColBERT "
+                "sampled oracle evidence and cannot be combined with "
+                + ", ".join(enabled_forbidden)
+            )
+        if args.oracle_input is None:
+            raise SystemExit("--document-node-colbert-sampled-admission requires --oracle-input")
+        args.oracle_input = args.oracle_input.resolve()
+        if not args.oracle_input.is_file():
+            raise SystemExit(f"exact oracle input does not exist: {args.oracle_input}")
+        document_node_colbert_sampled_admission_profile(args)
+    if args.document_node_colbert_1m_plan_only:
+        if args.output is None:
+            args.output = Path(
+                "benchmarks/results/"
+                + datetime.now(timezone.utc).strftime(
+                    "dbpedia-colbert-1m-plan-%Y%m%dT%H%M%SZ.json"
+                )
+            )
+        args.output = args.output.resolve()
+        if args.markdown_output is not None:
+            args.markdown_output = args.markdown_output.resolve()
+        effective_document_node_serving_profiles(args)
+        document_node_colbert_1m_profile_groups(args)
+        return args
+    defer_learned_sparse_jsonl_validation = document_node_serving_args_request_learned_sparse(args)
+    if not defer_learned_sparse_jsonl_validation:
+        require_complete_learned_sparse_args(args)
+    if args.validate_learned_sparse_jsonl_only:
+        if args.learned_sparse_doc_jsonl is None or args.learned_sparse_query_jsonl is None:
+            raise SystemExit(
+                "--validate-learned-sparse-jsonl-only requires "
+                "--learned-sparse-doc-jsonl and --learned-sparse-query-jsonl"
+            )
+        args.learned_sparse_doc_jsonl = args.learned_sparse_doc_jsonl.resolve()
+        if not args.learned_sparse_doc_jsonl.is_file():
+            raise SystemExit(f"learned sparse document JSONL does not exist: {args.learned_sparse_doc_jsonl}")
+        args.learned_sparse_query_jsonl = args.learned_sparse_query_jsonl.resolve()
+        if not args.learned_sparse_query_jsonl.is_file():
+            raise SystemExit(f"learned sparse query JSONL does not exist: {args.learned_sparse_query_jsonl}")
+        if args.output is not None:
+            args.output = args.output.resolve()
+        if args.markdown_output is not None:
+            args.markdown_output = args.markdown_output.resolve()
+        return args
     if args.token_ablation_skip_tokens and not args.token_ablation_query_id:
         raise SystemExit("--token-ablation-skip-tokens requires --token-ablation-query-id")
     if args.token_ablation_final_k is not None and args.token_ablation_final_k <= 0:
@@ -14486,13 +26483,28 @@ def validate_args(args: argparse.Namespace) -> argparse.Namespace:
     if args.token_ablation_dense_k is not None and args.token_ablation_dense_k <= 0:
         raise SystemExit("--token-ablation-dense-k must be positive")
 
+    reuse_imported_colbert_only = (
+        (
+            args.document_node_colbert_1m_beir_quality_only
+            or args.document_node_colbert_sampled_admission
+            or args.document_node_colbert_exact_oracle_build
+            or args.document_node_colbert_candidate_source_focus
+        )
+        and args.reuse_data
+        and not args.force_reload
+    )
     if args.precomputed_dataset is None and not args.reuse_data and args.dataset is None and not args.multivector_recall_gate:
         raise SystemExit("pass --dataset or set DBPEDIA_DATASET")
     if args.dataset is not None:
         args.dataset = args.dataset.resolve()
         if not args.dataset.exists():
             raise SystemExit(f"dataset path does not exist: {args.dataset}")
-    if args.precomputed_dataset is None and args.beir_dataset is None and not args.multivector_recall_gate:
+    if (
+        args.precomputed_dataset is None
+        and args.beir_dataset is None
+        and not args.multivector_recall_gate
+        and not reuse_imported_colbert_only
+    ):
         raise SystemExit("pass --beir-dataset or set BEIR_DBPEDIA_DATASET")
     if args.beir_dataset is not None:
         args.beir_dataset = args.beir_dataset.resolve()
@@ -14500,19 +26512,36 @@ def validate_args(args: argparse.Namespace) -> argparse.Namespace:
         raise SystemExit(f"BEIR dataset path does not exist: {args.beir_dataset}")
     if args.learned_sparse_doc_jsonl is not None:
         args.learned_sparse_doc_jsonl = args.learned_sparse_doc_jsonl.resolve()
-        if not args.learned_sparse_doc_jsonl.is_file():
+        if (
+            not args.learned_sparse_doc_jsonl.is_file()
+            and not defer_learned_sparse_jsonl_validation
+        ):
             raise SystemExit(f"learned sparse document JSONL does not exist: {args.learned_sparse_doc_jsonl}")
     if args.learned_sparse_query_jsonl is not None:
         args.learned_sparse_query_jsonl = args.learned_sparse_query_jsonl.resolve()
-        if not args.learned_sparse_query_jsonl.is_file():
+        if (
+            not args.learned_sparse_query_jsonl.is_file()
+            and not defer_learned_sparse_jsonl_validation
+        ):
             raise SystemExit(f"learned sparse query JSONL does not exist: {args.learned_sparse_query_jsonl}")
     if args.document_node_serving_grid or args.document_node_serving_build_only:
         effective_document_node_serving_profiles(args)
     if args.document_node_serving_latency_only:
         document_node_serving_latency_profile(args)
+    if args.document_node_colbert_1m_beir_quality_only:
+        document_node_colbert_beir_quality_profile(args)
+    if args.document_node_colbert_sampled_admission:
+        document_node_colbert_sampled_admission_profile(args)
+    if args.document_node_colbert_candidate_source_focus:
+        document_node_colbert_candidate_source_focus_profiles(args)
 
     args.model_path = args.model_path.resolve()
-    if args.precomputed_dataset is None and not args.model_path.is_file() and not args.multivector_recall_gate:
+    if (
+        args.precomputed_dataset is None
+        and not args.model_path.is_file()
+        and not args.multivector_recall_gate
+        and not reuse_imported_colbert_only
+    ):
         raise SystemExit(
             f"model file does not exist: {args.model_path}\n"
             "Use johannhartmann/SauerkrautLM-Multi-ColBERT-15m-GGUF and pass --model-path."
@@ -14529,6 +26558,10 @@ def validate_args(args: argparse.Namespace) -> argparse.Namespace:
     if unknown:
         raise SystemExit(f"unknown method(s): {', '.join(unknown)}")
     args.methods = methods
+    if args.max_docs < 0:
+        raise SystemExit("--max-docs must be non-negative")
+    if args.max_queries < 0:
+        raise SystemExit("--max-queries must be non-negative")
     if args.generation_clients is None:
         args.generation_clients = args.clients
     if args.generation_clients < 1:
@@ -14553,6 +26586,26 @@ def validate_args(args: argparse.Namespace) -> argparse.Namespace:
         args.markdown_output = args.markdown_output.resolve()
     if args.recall_gate_markdown_output is not None:
         args.recall_gate_markdown_output = args.recall_gate_markdown_output.resolve()
+    if args.resume_incremental_output is not None:
+        args.resume_incremental_output = args.resume_incremental_output.resolve()
+        if not args.resume_incremental_output.is_file():
+            raise SystemExit(
+                f"resume incremental output does not exist: {args.resume_incremental_output}"
+            )
+        if args.incremental_output is None:
+            args.incremental_output = args.resume_incremental_output
+    if args.incremental_output is not None:
+        args.incremental_output = args.incremental_output.resolve()
+    if (
+        args.incremental_output is None
+        and (
+            args.write_after_each_profile
+            or args.write_after_each_index_build
+            or args.write_after_each_query_batch
+            or args.document_node_colbert_1m_evaluate_only
+        )
+    ):
+        args.incremental_output = args.output.with_suffix(".incremental.json")
     if args.quality_k > args.final_k:
         print(
             f"--quality-k {args.quality_k} is greater than --final-k {args.final_k}; "
@@ -14575,6 +26628,18 @@ def validate_args(args: argparse.Namespace) -> argparse.Namespace:
         raise SystemExit("--parallel-safety-max-exact-pairs must be non-negative")
     if args.parallel_safety_max_sidecar_bytes < 0:
         raise SystemExit("--parallel-safety-max-sidecar-bytes must be non-negative")
+    if args.max_estimated_index_build_mb < 0:
+        raise SystemExit("--max-estimated-index-build-mb must be non-negative")
+    if args.max_estimated_index_bytes < 0:
+        raise SystemExit("--max-estimated-index-bytes must be non-negative")
+    if (
+        args.skip_profile_if_estimate_exceeds_limit
+        and args.fail_if_estimate_exceeds_limit
+    ):
+        raise SystemExit(
+            "--skip-profile-if-estimate-exceeds-limit and "
+            "--fail-if-estimate-exceeds-limit are mutually exclusive"
+        )
     if args.force_parallel_retrieval and args.skip_parallel_retrieval:
         raise SystemExit("--force-parallel-retrieval and --skip-parallel-retrieval are mutually exclusive")
     if (
@@ -14582,11 +26647,204 @@ def validate_args(args: argparse.Namespace) -> argparse.Namespace:
         or args.document_node_serving_grid_proxy_admission_focus
         or args.document_node_serving_grid_centroid_lite_focus
         or args.document_node_serving_grid_token_pooling_focus
+        or args.document_node_serving_grid_learned_sparse_focus
+        or args.document_node_serving_grid_proxy_oracle_focus
+        or args.document_node_colbert_proxy_oracle_focus
+        or args.document_node_colbert_centroid_lite_focus
+        or args.document_node_colbert_quantized_inverted_focus
+        or args.document_node_colbert_entry_focus
+        or args.document_node_colbert_1m_grid
     ):
         args.document_node_serving_grid = True
+    if args.document_node_colbert_proxy_oracle_focus:
+        args.document_node_serving_grid_proxy_oracle_focus = True
+    if args.document_node_colbert_1m_grid:
+        forbidden_colbert_flags = {
+            "--document-node-serving-grid-include-bm25-rescue": args.document_node_serving_grid_include_bm25_rescue,
+            "--document-node-serving-grid-include-learned-sparse-rescue": args.document_node_serving_grid_include_learned_sparse_rescue,
+            "--document-node-serving-grid-learned-sparse-focus": args.document_node_serving_grid_learned_sparse_focus,
+            "--hybrid-evaluation-harness": args.hybrid_evaluation_harness,
+        }
+        enabled_forbidden = [
+            name for name, enabled in forbidden_colbert_flags.items() if bool(enabled)
+        ]
+        if enabled_forbidden:
+            raise SystemExit(
+                "--document-node-colbert-1m-grid is pure ColBERT and cannot be "
+                "combined with " + ", ".join(enabled_forbidden)
+            )
+        if (
+            args.document_node_serving_grid_include_experimental
+            and not args.document_node_colbert_1m_include_experimental
+        ):
+            raise SystemExit(
+                "--document-node-colbert-1m-grid only includes "
+                "quantized_inverted_experimental_f32 with "
+                "--document-node-colbert-1m-include-experimental"
+            )
+    if args.document_node_colbert_proxy_oracle_focus:
+        forbidden_oracle_flags = {
+            "--document-node-serving-grid-include-bm25-rescue": args.document_node_serving_grid_include_bm25_rescue,
+            "--document-node-serving-grid-include-learned-sparse-rescue": args.document_node_serving_grid_include_learned_sparse_rescue,
+            "--document-node-serving-grid-learned-sparse-focus": args.document_node_serving_grid_learned_sparse_focus,
+            "--hybrid-evaluation-harness": args.hybrid_evaluation_harness,
+        }
+        enabled_forbidden = [
+            name for name, enabled in forbidden_oracle_flags.items() if bool(enabled)
+        ]
+        if enabled_forbidden:
+            raise SystemExit(
+                "--document-node-colbert-proxy-oracle-focus is pure ColBERT "
+                "diagnostic evidence and cannot be combined with "
+                + ", ".join(enabled_forbidden)
+            )
+    if args.document_node_colbert_centroid_lite_focus:
+        forbidden_centroid_lite_flags = {
+            "--document-node-serving-grid-include-bm25-rescue": args.document_node_serving_grid_include_bm25_rescue,
+            "--document-node-serving-grid-include-learned-sparse-rescue": args.document_node_serving_grid_include_learned_sparse_rescue,
+            "--document-node-serving-grid-learned-sparse-focus": args.document_node_serving_grid_learned_sparse_focus,
+            "--hybrid-evaluation-harness": args.hybrid_evaluation_harness,
+        }
+        enabled_forbidden = [
+            name for name, enabled in forbidden_centroid_lite_flags.items() if bool(enabled)
+        ]
+        if enabled_forbidden:
+            raise SystemExit(
+                "--document-node-colbert-centroid-lite-focus is pure ColBERT "
+                "centroid-lite evidence and cannot be combined with "
+                + ", ".join(enabled_forbidden)
+            )
+    if args.document_node_colbert_quantized_inverted_focus:
+        forbidden_quantized_flags = {
+            "--document-node-serving-grid-include-bm25-rescue": args.document_node_serving_grid_include_bm25_rescue,
+            "--document-node-serving-grid-include-learned-sparse-rescue": args.document_node_serving_grid_include_learned_sparse_rescue,
+            "--document-node-serving-grid-learned-sparse-focus": args.document_node_serving_grid_learned_sparse_focus,
+            "--hybrid-evaluation-harness": args.hybrid_evaluation_harness,
+        }
+        enabled_forbidden = [
+            name for name, enabled in forbidden_quantized_flags.items() if bool(enabled)
+        ]
+        if enabled_forbidden:
+            raise SystemExit(
+                "--document-node-colbert-quantized-inverted-focus is pure "
+                "ColBERT experimental admission evidence and cannot be combined with "
+                + ", ".join(enabled_forbidden)
+            )
+    if args.document_node_colbert_entry_focus:
+        forbidden_entry_flags = {
+            "--document-node-serving-grid-include-bm25-rescue": args.document_node_serving_grid_include_bm25_rescue,
+            "--document-node-serving-grid-include-learned-sparse-rescue": args.document_node_serving_grid_include_learned_sparse_rescue,
+            "--document-node-serving-grid-learned-sparse-focus": args.document_node_serving_grid_learned_sparse_focus,
+            "--hybrid-evaluation-harness": args.hybrid_evaluation_harness,
+        }
+        enabled_forbidden = [
+            name for name, enabled in forbidden_entry_flags.items() if bool(enabled)
+        ]
+        if enabled_forbidden:
+            raise SystemExit(
+                "--document-node-colbert-entry-focus is pure ColBERT "
+                "entry-selection evidence and cannot be combined with "
+                + ", ".join(enabled_forbidden)
+            )
+    if args.document_node_colbert_1m_beir_quality_only:
+        forbidden_quality_flags = {
+            "--document-node-serving-grid-include-bm25-rescue": args.document_node_serving_grid_include_bm25_rescue,
+            "--document-node-serving-grid-include-learned-sparse-rescue": args.document_node_serving_grid_include_learned_sparse_rescue,
+            "--document-node-serving-grid-learned-sparse-focus": args.document_node_serving_grid_learned_sparse_focus,
+            "--hybrid-evaluation-harness": args.hybrid_evaluation_harness,
+        }
+        enabled_forbidden = [
+            name for name, enabled in forbidden_quality_flags.items() if bool(enabled)
+        ]
+        if enabled_forbidden:
+            raise SystemExit(
+                "--document-node-colbert-1m-beir-quality-only is pure ColBERT "
+                "quality evidence and cannot be combined with "
+                + ", ".join(enabled_forbidden)
+            )
+        if args.document_node_colbert_candidate_k < 1:
+            raise SystemExit("--document-node-colbert-candidate-k must be positive")
+        if args.document_node_colbert_exact_rerank_k < 1:
+            raise SystemExit("--document-node-colbert-exact-rerank-k must be positive")
+        if args.document_node_colbert_ef < 1:
+            raise SystemExit("--document-node-colbert-ef must be positive")
+        if args.document_node_colbert_oversampling < 1:
+            raise SystemExit("--document-node-colbert-oversampling must be at least 1")
+        if args.document_node_colbert_centroid_lite_cap < 0:
+            raise SystemExit("--document-node-colbert-centroid-lite-cap must be non-negative")
+        document_node_colbert_beir_quality_profile(args)
+    if args.document_node_colbert_sampled_admission:
+        forbidden_sampled_flags = {
+            "--document-node-serving-grid-include-bm25-rescue": args.document_node_serving_grid_include_bm25_rescue,
+            "--document-node-serving-grid-include-learned-sparse-rescue": args.document_node_serving_grid_include_learned_sparse_rescue,
+            "--document-node-serving-grid-learned-sparse-focus": args.document_node_serving_grid_learned_sparse_focus,
+            "--hybrid-evaluation-harness": args.hybrid_evaluation_harness,
+        }
+        enabled_forbidden = [
+            name for name, enabled in forbidden_sampled_flags.items() if bool(enabled)
+        ]
+        if enabled_forbidden:
+            raise SystemExit(
+                "--document-node-colbert-sampled-admission is pure ColBERT "
+                "sampled oracle evidence and cannot be combined with "
+                + ", ".join(enabled_forbidden)
+            )
+        if args.document_node_colbert_candidate_k < 1:
+            raise SystemExit("--document-node-colbert-candidate-k must be positive")
+        if args.document_node_colbert_exact_rerank_k < 1:
+            raise SystemExit("--document-node-colbert-exact-rerank-k must be positive")
+        if args.document_node_colbert_ef < 1:
+            raise SystemExit("--document-node-colbert-ef must be positive")
+        if args.document_node_colbert_oversampling < 1:
+            raise SystemExit("--document-node-colbert-oversampling must be at least 1")
+        if args.document_node_colbert_centroid_lite_cap < 0:
+            raise SystemExit("--document-node-colbert-centroid-lite-cap must be non-negative")
+        if args.oracle_input is None:
+            raise SystemExit("--document-node-colbert-sampled-admission requires --oracle-input")
+        args.oracle_input = args.oracle_input.resolve()
+        if not args.oracle_input.is_file():
+            raise SystemExit(f"exact oracle input does not exist: {args.oracle_input}")
+        document_node_colbert_sampled_admission_profile(args)
+    if args.document_node_colbert_candidate_source_focus:
+        forbidden_focus_flags = {
+            "--document-node-serving-grid-include-bm25-rescue": args.document_node_serving_grid_include_bm25_rescue,
+            "--document-node-serving-grid-include-learned-sparse-rescue": args.document_node_serving_grid_include_learned_sparse_rescue,
+            "--document-node-serving-grid-learned-sparse-focus": args.document_node_serving_grid_learned_sparse_focus,
+            "--hybrid-evaluation-harness": args.hybrid_evaluation_harness,
+        }
+        enabled_forbidden = [
+            name for name, enabled in forbidden_focus_flags.items() if bool(enabled)
+        ]
+        if enabled_forbidden:
+            raise SystemExit(
+                "--document-node-colbert-candidate-source-focus is pure ColBERT "
+                "candidate-source evidence and cannot be combined with "
+                + ", ".join(enabled_forbidden)
+            )
+        effective_document_node_colbert_candidate_source_focus_budgets(args)
+        effective_document_node_colbert_candidate_source_focus_caps(args)
+        if args.exact_rerank_k < 1:
+            raise SystemExit("--exact-rerank-k must be positive")
+        if args.document_node_colbert_ef < 1:
+            raise SystemExit("--document-node-colbert-ef must be positive")
+        if args.document_node_colbert_oversampling < 1:
+            raise SystemExit("--document-node-colbert-oversampling must be at least 1")
+        if args.query_limit < 0:
+            raise SystemExit("--query-limit must be non-negative")
+        if args.oracle_input is not None:
+            args.oracle_input = args.oracle_input.resolve()
+            if not args.oracle_input.is_file():
+                raise SystemExit(f"exact oracle input does not exist: {args.oracle_input}")
+        document_node_colbert_candidate_source_focus_profiles(args)
     if args.document_node_serving_grid_budget_mode is None:
         args.document_node_serving_grid_budget_mode = (
-            "largest_only" if args.document_node_serving_grid else "sweep"
+            "sweep"
+            if (
+                args.document_node_colbert_centroid_lite_focus
+                or args.document_node_colbert_quantized_inverted_focus
+                or args.document_node_colbert_entry_focus
+            )
+            else ("largest_only" if args.document_node_serving_grid else "sweep")
         )
     if args.document_node_serving_grid_stage_mode is None:
         args.document_node_serving_grid_stage_mode = (
@@ -14599,6 +26857,9 @@ def validate_args(args: argparse.Namespace) -> argparse.Namespace:
                 args.document_node_serving_grid
                 or args.document_node_serving_latency_only
                 or args.document_node_serving_build_only
+                or args.document_node_colbert_1m_beir_quality_only
+                or args.document_node_colbert_sampled_admission
+                or args.document_node_colbert_candidate_source_focus
             )
             else "admission_exhaustive"
         )
@@ -14765,6 +27026,85 @@ def parse_args() -> argparse.Namespace:
         "--self-check",
         action="store_true",
         help="run pure Python benchmark report construction self-checks and exit",
+    )
+    parser.add_argument(
+        "--compare-serving-artifacts",
+        type=Path,
+        nargs="+",
+        default=None,
+        metavar="FILE",
+        help=(
+            "read existing serving-grid JSON artifacts and write a merged "
+            "comparison report without PostgreSQL or benchmark execution"
+        ),
+    )
+    parser.add_argument(
+        "--incremental-output",
+        type=Path,
+        default=None,
+        help=(
+            "write crash-safe incremental serving-grid progress records to this JSON file"
+        ),
+    )
+    parser.add_argument(
+        "--resume-incremental-output",
+        type=Path,
+        default=None,
+        help=(
+            "resume a serving-grid run from a compatible incremental JSON file; "
+            "completed rows are skipped"
+        ),
+    )
+    parser.add_argument(
+        "--write-after-each-profile",
+        action="store_true",
+        help="force a durable incremental record after each serving-grid profile",
+    )
+    parser.add_argument(
+        "--write-after-each-index-build",
+        action="store_true",
+        help="force durable incremental records around each serving-grid index build",
+    )
+    parser.add_argument(
+        "--write-after-each-query-batch",
+        action="store_true",
+        help="write a durable incremental record after each serving-grid query batch",
+    )
+    parser.add_argument(
+        "--summarize-incremental-output",
+        type=Path,
+        default=None,
+        metavar="PATH",
+        help=(
+            "summarize a partial incremental serving-grid artifact without connecting "
+            "to PostgreSQL"
+        ),
+    )
+    parser.add_argument(
+        "--validate-serving-profile-guc-evidence",
+        action="store_true",
+        help=(
+            "validate SERVING_GRID_JSON before any SQL-visible "
+            "multivector_serving_profile mapping is implemented"
+        ),
+    )
+    parser.add_argument(
+        "--serving-profile-guc-min-docs",
+        type=int,
+        default=SERVING_PROFILE_GUC_MIN_DOCS,
+        help=(
+            "minimum max_docs required by --validate-serving-profile-guc-evidence; "
+            f"default {SERVING_PROFILE_GUC_MIN_DOCS}"
+        ),
+    )
+    parser.add_argument(
+        "--serving-profile-guc-min-queries",
+        type=int,
+        default=SERVING_PROFILE_GUC_MIN_QUERIES,
+        help=(
+            "minimum max_queries required by --validate-serving-profile-guc-evidence; "
+            f"default {SERVING_PROFILE_GUC_MIN_QUERIES}"
+        ),
     )
     parser.add_argument("--database", default=os.environ.get("PGDATABASE", "pgturbohybrid_dbpedia_colbert"))
     parser.add_argument("--dataset", type=Path, default=None, help="Qdrant DBpedia parquet dataset root")
@@ -15074,6 +27414,44 @@ def parse_args() -> argparse.Namespace:
         help="optional JSONL with query_id, term_ids, and weights for learned-sparse query admission",
     )
     parser.add_argument(
+        "--learned-sparse-require-full-coverage",
+        action="store_true",
+        help=(
+            "fail before benchmarking when learned-sparse JSONL files do not "
+            "cover every loaded document and query"
+        ),
+    )
+    parser.add_argument(
+        "--validate-learned-sparse-jsonl-only",
+        action="store_true",
+        help=(
+            "connect to the benchmark database and validate learned-sparse JSONL "
+            "schema/coverage without building indexes, running retrieval, or "
+            "running exact scans"
+        ),
+    )
+    parser.add_argument(
+        "--export-learned-sparse-inputs-only",
+        action="store_true",
+        help=(
+            "export loaded DBpedia document/query texts as JSONL inputs for an "
+            "external learned-sparse feature generator without building indexes "
+            "or running retrieval"
+        ),
+    )
+    parser.add_argument(
+        "--learned-sparse-input-doc-jsonl",
+        type=Path,
+        default=None,
+        help="output path for --export-learned-sparse-inputs-only document text JSONL",
+    )
+    parser.add_argument(
+        "--learned-sparse-input-query-jsonl",
+        type=Path,
+        default=None,
+        help="output path for --export-learned-sparse-inputs-only query text JSONL",
+    )
+    parser.add_argument(
         "--admission-debug",
         action="store_true",
         help="run exact-vs-candidate admission recall diagnostics after normal retrieval",
@@ -15100,6 +27478,8 @@ def parse_args() -> argparse.Namespace:
             "comma-separated multivector document candidate budgets to sweep; "
             "--document-node-serving-grid-smoke defaults to 200,800, "
             f"--document-node-serving-grid defaults to {DOCUMENT_NODE_SERVING_GRID_BUDGET_SWEEP}, "
+            f"--document-node-colbert-1m-grid defaults to {DOCUMENT_NODE_COLBERT_1M_GRID_BUDGET_SWEEP}, "
+            f"--document-node-colbert-entry-focus defaults to {DOCUMENT_NODE_COLBERT_ENTRY_FOCUS_BUDGET_SWEEP}, "
             f"other modes default to {DEFAULT_ADMISSION_BUDGET_SWEEP}"
         ),
     )
@@ -15128,6 +27508,329 @@ def parse_args() -> argparse.Namespace:
         help=(
             "include the guarded quantized_inverted_experimental_f32 profile in "
             "--document-node-serving-grid"
+        ),
+    )
+    parser.add_argument(
+        "--document-node-colbert-1m-grid",
+        action="store_true",
+        help=(
+            "run a pure ColBERT document-node grid for DBpedia-scale 1M serving "
+            "evidence; excludes BM25, learned-sparse, and hybrid modes"
+        ),
+    )
+    parser.add_argument(
+        "--document-node-colbert-1m-preflight-only",
+        action="store_true",
+        help=(
+            "load or reuse DBpedia ColBERT data and report pure-ColBERT 1M "
+            "acceptance readiness without building indexes, running retrieval, "
+            "or running exact admission scans"
+        ),
+    )
+    parser.add_argument(
+        "--document-node-colbert-1m-beir-quality-only",
+        action="store_true",
+        help=(
+            "run pure-ColBERT indexed retrieval over loaded DBpedia ColBERT "
+            "queries and qrels, compute BEIR qrel metrics, and skip exact "
+            "admission/exact_doc_scan baselines"
+        ),
+    )
+    parser.add_argument(
+        "--document-node-colbert-sampled-admission",
+        action="store_true",
+        help=(
+            "run pure-ColBERT indexed retrieval for query IDs present in an "
+            "offline exact MaxSim oracle artifact and compute sampled admission "
+            "without recomputing exact_doc_scan/admission baselines"
+        ),
+    )
+    parser.add_argument(
+        "--document-node-colbert-candidate-source-focus",
+        action="store_true",
+        help=(
+            "run a pure-ColBERT candidate-source focus grid over proxy-only, "
+            "centroid_lite, capped centroid_lite, pooled centroid_lite, and "
+            "optional quantized_inverted_experimental profiles; computes BEIR "
+            "qrel metrics by default and sampled oracle admission only when "
+            "--oracle-input is supplied"
+        ),
+    )
+    parser.add_argument(
+        "--document-node-colbert-exact-oracle-build",
+        action="store_true",
+        help=(
+            "offline pure-ColBERT mode that computes exact MaxSim top-K over "
+            "all loaded documents for selected queries, checkpointing one query "
+            "record at a time for reuse by later admission benchmarks"
+        ),
+    )
+    parser.add_argument(
+        "--document-node-colbert-exact-oracle-summary",
+        type=Path,
+        default=None,
+        metavar="PATH",
+        help=(
+            "summarize a partial or complete exact MaxSim oracle artifact "
+            "without connecting to PostgreSQL"
+        ),
+    )
+    parser.add_argument(
+        "--oracle-output",
+        type=Path,
+        default=None,
+        help="output JSON path for --document-node-colbert-exact-oracle-build",
+    )
+    parser.add_argument(
+        "--oracle-input",
+        type=Path,
+        default=None,
+        help=(
+            "input exact oracle JSON path for --document-node-colbert-sampled-admission "
+            "or optional sampled admission in --document-node-colbert-candidate-source-focus"
+        ),
+    )
+    parser.add_argument(
+        "--oracle-query-limit",
+        type=int,
+        default=0,
+        help="limit selected oracle queries before resume filtering; 0 means all selected queries",
+    )
+    parser.add_argument(
+        "--oracle-query-ids",
+        type=Path,
+        default=None,
+        help="optional text, JSON, or JSONL file listing query IDs for oracle materialization",
+    )
+    parser.add_argument(
+        "--oracle-top-k",
+        type=int,
+        default=10,
+        help="exact MaxSim top-K to materialize per query for the offline oracle",
+    )
+    parser.add_argument(
+        "--oracle-resume",
+        action="store_true",
+        help="resume an existing oracle artifact after validating metadata",
+    )
+    parser.add_argument(
+        "--oracle-timeout-per-query-ms",
+        type=int,
+        default=0,
+        help="optional PostgreSQL statement_timeout per exact oracle query in milliseconds; 0 disables",
+    )
+    parser.add_argument(
+        "--oracle-max-queries",
+        type=int,
+        default=0,
+        help="maximum new oracle queries to compute in this invocation after resume skips; 0 means no cap",
+    )
+    parser.add_argument(
+        "--document-node-colbert-profile",
+        default="proxy_normalized_mean_proxy_only",
+        help=(
+            "single pure-ColBERT profile for "
+            "--document-node-colbert-1m-beir-quality-only"
+        ),
+    )
+    parser.add_argument(
+        "--document-node-colbert-candidate-k",
+        type=int,
+        default=800,
+        help=(
+            "document candidate budget for "
+            "--document-node-colbert-1m-beir-quality-only"
+        ),
+    )
+    parser.add_argument(
+        "--document-node-colbert-exact-rerank-k",
+        type=int,
+        default=100,
+        help=(
+            "bounded exact MaxSim rerank count for "
+            "--document-node-colbert-1m-beir-quality-only"
+        ),
+    )
+    parser.add_argument(
+        "--document-node-colbert-ef",
+        type=int,
+        default=800,
+        help="document-node graph EF for pure-ColBERT BEIR-quality-only retrieval",
+    )
+    parser.add_argument(
+        "--document-node-colbert-oversampling",
+        type=int,
+        default=1,
+        help=(
+            "document-node graph oversampling for pure-ColBERT "
+            "BEIR-quality-only retrieval"
+        ),
+    )
+    parser.add_argument(
+        "--document-node-colbert-centroid-lite-cap",
+        type=int,
+        default=0,
+        help=(
+            "optional per-query-token centroid_lite posting cap override for "
+            "--document-node-colbert-1m-beir-quality-only; 0 uses the profile"
+        ),
+    )
+    parser.add_argument(
+        "--document-node-colbert-include-experimental",
+        action="store_true",
+        help=(
+            "allow quantized_inverted_experimental_f32 in "
+            "--document-node-colbert-1m-beir-quality-only"
+        ),
+    )
+    parser.add_argument(
+        "--include-quantized-inverted-experimental",
+        action="store_true",
+        help=(
+            "include quantized_inverted_experimental_f32 in "
+            "--document-node-colbert-candidate-source-focus"
+        ),
+    )
+    parser.add_argument(
+        "--candidate-budgets",
+        default="800,1600",
+        help=(
+            "comma-separated candidate budgets for "
+            "--document-node-colbert-candidate-source-focus"
+        ),
+    )
+    parser.add_argument(
+        "--exact-rerank-k",
+        type=int,
+        default=100,
+        help=(
+            "bounded exact MaxSim rerank count for "
+            "--document-node-colbert-candidate-source-focus"
+        ),
+    )
+    parser.add_argument(
+        "--centroid-lite-caps",
+        default="32,64",
+        help=(
+            "comma-separated centroid_lite posting caps for "
+            "--document-node-colbert-candidate-source-focus"
+        ),
+    )
+    parser.add_argument(
+        "--query-limit",
+        type=int,
+        default=0,
+        help=(
+            "limit loaded queries for --document-node-colbert-candidate-source-focus; "
+            "0 means all loaded queries"
+        ),
+    )
+    parser.add_argument(
+        "--document-node-colbert-1m-profile",
+        default="",
+        help=(
+            "run or plan exactly one pure-ColBERT 1M profile; this limits "
+            "CREATE INDEX execution to the selected profile's physical index "
+            "signature"
+        ),
+    )
+    parser.add_argument(
+        "--document-node-colbert-1m-index-signature",
+        default="",
+        help=(
+            "select one physical index signature ID or full hash from "
+            "--document-node-colbert-1m-plan-only for build/evaluate-only runs"
+        ),
+    )
+    parser.add_argument(
+        "--document-node-colbert-1m-plan-only",
+        action="store_true",
+        help=(
+            "expand the pure-ColBERT 1M profile grid, group profiles by physical "
+            "index signature, and write a plan without connecting to PostgreSQL "
+            "or building indexes"
+        ),
+    )
+    parser.add_argument(
+        "--document-node-colbert-1m-build-only",
+        action="store_true",
+        help=(
+            "build exactly one selected pure-ColBERT 1M profile/index signature "
+            "and skip retrieval/admission evaluation"
+        ),
+    )
+    parser.add_argument(
+        "--document-node-colbert-1m-evaluate-only",
+        action="store_true",
+        help=(
+            "reuse an existing matching index for one selected pure-ColBERT 1M "
+            "profile and run retrieval/admission without CREATE INDEX"
+        ),
+    )
+    parser.add_argument(
+        "--require-existing-index",
+        action="store_true",
+        help=(
+            "require dbpedia_colbert_docs_colbert_idx to exist before benchmark "
+            "evaluation; missing indexes fail instead of being created"
+        ),
+    )
+    parser.add_argument(
+        "--no-create-index",
+        action="store_true",
+        help=(
+            "forbid CREATE INDEX in this run; intended for evaluate-only "
+            "benchmark modes that must reuse an existing index"
+        ),
+    )
+    parser.add_argument(
+        "--strict-query-count",
+        action="store_true",
+        help=(
+            "for pure-ColBERT 1M preflight/evaluate-only, fail when the loaded "
+            "query artifact has fewer query embeddings than --max-queries requests"
+        ),
+    )
+    parser.add_argument(
+        "--document-node-colbert-1m-include-entry-samples",
+        action="store_true",
+        help=(
+            "include pure-ColBERT entry_sample_032 and entry_sample_128 physical "
+            "index variants in --document-node-colbert-1m-grid"
+        ),
+    )
+    parser.add_argument(
+        "--document-node-colbert-1m-include-entry-sidecar",
+        action="store_true",
+        help=(
+            "include pure-ColBERT entry_sidecar_128 and entry_sidecar_256 physical "
+            "index variants in --document-node-colbert-1m-grid"
+        ),
+    )
+    parser.add_argument(
+        "--document-node-colbert-1m-include-centroid-lite-caps",
+        action="store_true",
+        help=(
+            "explicitly document that capped centroid_lite rows are included in "
+            "--document-node-colbert-1m-grid; the 1M grid includes cap_016, "
+            "cap_032, and cap_064 by design"
+        ),
+    )
+    parser.add_argument(
+        "--document-node-colbert-1m-include-experimental",
+        action="store_true",
+        help=(
+            "include quantized_inverted_experimental_f32 in the pure-ColBERT "
+            "1M grid; this is opt-in research evidence only"
+        ),
+    )
+    parser.add_argument(
+        "--document-node-colbert-quantized-inverted-focus",
+        action="store_true",
+        help=(
+            "run a pure-ColBERT diagnostic grid comparing centroid_mean, "
+            "centroid_lite, and the guarded quantized_inverted_experimental "
+            "candidate source; research evidence only"
         ),
     )
     parser.add_argument(
@@ -15166,7 +27869,9 @@ def parse_args() -> argparse.Namespace:
             "experiments; requires --learned-sparse-doc-jsonl and "
             "--learned-sparse-query-jsonl to run; pair with "
             "--document-node-serving-grid-include-proxy-encoders to also add "
-            "proxy_max_pool_f16_learned_sparse_rescue"
+            "proxy_max_pool_f16_learned_sparse_rescue, and pair with "
+            "--document-node-serving-grid-include-reservoirs to add "
+            "proxy_max_pool_f16_reservoir_balanced_learned_sparse_rescue"
         ),
     )
     parser.add_argument(
@@ -15219,7 +27924,8 @@ def parse_args() -> argparse.Namespace:
         default=DOCUMENT_NODE_SERVING_GRID_ENTRY_SIDECAR_SWEEP,
         help=(
             "comma-separated positive representative counts for "
-            "--document-node-serving-grid-proxy-admission-focus entry-sidecar "
+            "--document-node-serving-grid-proxy-admission-focus and "
+            "--document-node-colbert-entry-focus entry-sidecar "
             f"variants; defaults to {DOCUMENT_NODE_SERVING_GRID_ENTRY_SIDECAR_SWEEP}"
         ),
     )
@@ -15252,12 +27958,64 @@ def parse_args() -> argparse.Namespace:
         ),
     )
     parser.add_argument(
+        "--document-node-serving-grid-learned-sparse-focus",
+        action="store_true",
+        help=(
+            "run a focused learned-sparse rescue grid with normalized_mean, "
+            "max_pool, max_pool reservoir, combined reservoir+learned-sparse, "
+            "and centroid_mean learned-sparse profiles; requires "
+            "--learned-sparse-doc-jsonl and --learned-sparse-query-jsonl"
+        ),
+    )
+    parser.add_argument(
+        "--document-node-serving-grid-proxy-oracle-focus",
+        action="store_true",
+        help=(
+            "run a diagnostic-only proxy oracle grid comparing proxy_vector HNSW "
+            "against benchmark-side exact scans over persisted proxy vectors for "
+            "normalized_mean, centroid_mean, and max_pool; final ordering remains "
+            "exact MaxSim over retained candidates and these rows are not serving "
+            "defaults"
+        ),
+    )
+    parser.add_argument(
+        "--document-node-colbert-proxy-oracle-focus",
+        action="store_true",
+        help=(
+            "alias for --document-node-serving-grid-proxy-oracle-focus; runs a "
+            "pure-ColBERT diagnostic proxy oracle grid with no BM25, learned-sparse, "
+            "or hybrid rescue modes"
+        ),
+    )
+    parser.add_argument(
+        "--document-node-colbert-entry-focus",
+        action="store_true",
+        help=(
+            "run a pure-ColBERT proxy_vector graph-entry grid over "
+            "normalized_mean, max_pool, and centroid_mean baselines plus "
+            "entry_sample_032/128/512 and entry_sidecar_128/256/512 variants; "
+            "uses EF 200,400,800 and candidate budgets 800,1600, excludes BM25, "
+            "learned-sparse, and hybrid modes, and keeps exact MaxSim final rerank"
+        ),
+    )
+    parser.add_argument(
+        "--document-node-colbert-centroid-lite-focus",
+        action="store_true",
+        help=(
+            "run a pure-ColBERT centroid_lite grid over centroid_mean baseline, "
+            "uncapped centroid_lite, posting caps 16/32/64, pooled centroid_lite, "
+            "and pooled cap_032; uses candidate budgets 800,1600, excludes BM25, "
+            "learned-sparse, and hybrid modes, and keeps exact MaxSim final rerank"
+        ),
+    )
+    parser.add_argument(
         "--document-node-serving-grid-centroid-lite-posting-caps",
         default=DOCUMENT_NODE_SERVING_GRID_CENTROID_LITE_CAP_SWEEP,
         help=(
             "comma-separated positive per-query-token posting caps used with "
             "--document-node-serving-grid-include-centroid-lite-caps or "
-            "--document-node-serving-grid-centroid-lite-focus; defaults to "
+            "--document-node-serving-grid-centroid-lite-focus or "
+            "--document-node-colbert-centroid-lite-focus; defaults to "
             f"{DOCUMENT_NODE_SERVING_GRID_CENTROID_LITE_CAP_SWEEP}"
         ),
     )
@@ -15303,7 +28061,8 @@ def parse_args() -> argparse.Namespace:
         help=(
             "comma-separated document-node graph search EF values for "
             "--document-node-serving-grid; defaults to 50,100,200, or 50,100 "
-            "for --document-node-serving-grid-smoke"
+            "for --document-node-serving-grid-smoke, or 200,400,800 for "
+            "--document-node-colbert-1m-grid and --document-node-colbert-entry-focus"
         ),
     )
     parser.add_argument(
@@ -15312,7 +28071,7 @@ def parse_args() -> argparse.Namespace:
         help=(
             "comma-separated document-node graph oversampling values for "
             "--document-node-serving-grid; defaults to 1,2, or 1 for "
-            "--document-node-serving-grid-smoke"
+            "--document-node-serving-grid-smoke and --document-node-colbert-entry-focus"
         ),
     )
     parser.add_argument(
@@ -15349,6 +28108,40 @@ def parse_args() -> argparse.Namespace:
         help=(
             "build the selected document-node serving profiles and report CREATE INDEX "
             "and sidecar construction costs without running retrieval or admission"
+        ),
+    )
+    parser.add_argument(
+        "--max-estimated-index-build-mb",
+        type=int,
+        default=0,
+        help=(
+            "benchmark-side conservative CREATE INDEX memory estimate limit in MiB; "
+            "0 emits estimates without enforcing a limit"
+        ),
+    )
+    parser.add_argument(
+        "--max-estimated-index-bytes",
+        type=int,
+        default=0,
+        help=(
+            "benchmark-side conservative persisted index-size estimate limit in bytes; "
+            "0 emits estimates without enforcing a limit"
+        ),
+    )
+    parser.add_argument(
+        "--skip-profile-if-estimate-exceeds-limit",
+        action="store_true",
+        help=(
+            "skip a serving-grid or build-only profile before CREATE INDEX when "
+            "the benchmark-side resource estimate exceeds a configured limit"
+        ),
+    )
+    parser.add_argument(
+        "--fail-if-estimate-exceeds-limit",
+        action="store_true",
+        help=(
+            "fail before CREATE INDEX when the benchmark-side resource estimate "
+            "exceeds a configured limit"
         ),
     )
     parser.add_argument(
@@ -15424,6 +28217,15 @@ def parse_args() -> argparse.Namespace:
         type=float,
         default=0.0,
         help="hard p95 latency cap for --document-node-serving-grid; 0 disables the cap",
+    )
+    parser.add_argument(
+        "--serving-accept-partial-learned-sparse-coverage",
+        action="store_true",
+        help=(
+            "allow learned-sparse rescue profiles with partial sparse feature "
+            "coverage to be selected as serving evidence; default rejects them "
+            "from best_latency_safe"
+        ),
     )
     parser.add_argument(
         "--document-node-storage-grid",
@@ -15592,6 +28394,59 @@ def parse_args() -> argparse.Namespace:
     args.admission_debug_mode_explicit = args.admission_debug_mode is not None
     if args.self_check:
         return args
+    if args.validate_serving_profile_guc_evidence:
+        serving_grid_json = os.environ.get("SERVING_GRID_JSON")
+        if not serving_grid_json:
+            raise SystemExit(
+                "SERVING_GRID_JSON is required for --validate-serving-profile-guc-evidence"
+            )
+        args.serving_grid_json = Path(serving_grid_json).resolve()
+        if not args.serving_grid_json.is_file():
+            raise SystemExit(f"SERVING_GRID_JSON does not exist: {args.serving_grid_json}")
+        if args.serving_profile_guc_min_docs < 1:
+            raise SystemExit("--serving-profile-guc-min-docs must be positive")
+        if args.serving_profile_guc_min_queries < 1:
+            raise SystemExit("--serving-profile-guc-min-queries must be positive")
+        if args.output is not None:
+            args.output = args.output.resolve()
+        if args.markdown_output is not None:
+            args.markdown_output = args.markdown_output.resolve()
+        return args
+    if args.compare_serving_artifacts:
+        args.compare_serving_artifacts = [
+            path.resolve() for path in args.compare_serving_artifacts
+        ]
+        missing = [
+            path for path in args.compare_serving_artifacts
+            if not path.is_file()
+        ]
+        if missing:
+            raise SystemExit(
+                "--compare-serving-artifacts file does not exist: "
+                + ", ".join(str(path) for path in missing)
+            )
+        if args.output is not None:
+            args.output = args.output.resolve()
+        if args.markdown_output is not None:
+            args.markdown_output = args.markdown_output.resolve()
+        return args
+    if args.export_learned_sparse_inputs_only:
+        if args.learned_sparse_input_doc_jsonl is None or args.learned_sparse_input_query_jsonl is None:
+            raise SystemExit(
+                "--export-learned-sparse-inputs-only requires "
+                "--learned-sparse-input-doc-jsonl and --learned-sparse-input-query-jsonl"
+            )
+        if args.max_docs < 0:
+            raise SystemExit("--max-docs must be non-negative")
+        if args.max_queries < 0:
+            raise SystemExit("--max-queries must be non-negative")
+        args.learned_sparse_input_doc_jsonl = args.learned_sparse_input_doc_jsonl.resolve()
+        args.learned_sparse_input_query_jsonl = args.learned_sparse_input_query_jsonl.resolve()
+        if args.output is not None:
+            args.output = args.output.resolve()
+        if args.markdown_output is not None:
+            args.markdown_output = args.markdown_output.resolve()
+        return args
     return validate_args(args)
 
 
@@ -15600,6 +28455,148 @@ def main() -> None:
     if args.self_check:
         run_self_checks()
         print("self-check ok")
+        return
+    if args.summarize_incremental_output is not None:
+        report = run_incremental_summary_only(args.summarize_incremental_output)
+        if args.output is not None:
+            args.output.parent.mkdir(parents=True, exist_ok=True)
+            args.output.write_text(
+                json.dumps(report, indent=2, sort_keys=True) + "\n",
+                encoding="utf-8",
+            )
+            print(args.output)
+        else:
+            print(json.dumps(report, indent=2, sort_keys=True))
+        if args.markdown_output is not None:
+            args.markdown_output.parent.mkdir(parents=True, exist_ok=True)
+            args.markdown_output.write_text(report["markdown_summary"], encoding="utf-8")
+            print(args.markdown_output)
+        return
+    if args.document_node_colbert_exact_oracle_summary is not None:
+        report = summarize_exact_oracle_path(args.document_node_colbert_exact_oracle_summary)
+        if args.output is not None:
+            args.output.parent.mkdir(parents=True, exist_ok=True)
+            args.output.write_text(
+                json.dumps(report, indent=2, sort_keys=True) + "\n",
+                encoding="utf-8",
+            )
+            print(args.output)
+        else:
+            print(json.dumps(report, indent=2, sort_keys=True))
+        if args.markdown_output is not None:
+            args.markdown_output.parent.mkdir(parents=True, exist_ok=True)
+            args.markdown_output.write_text(report["markdown_summary"], encoding="utf-8")
+            print(args.markdown_output)
+        return
+    if args.validate_serving_profile_guc_evidence:
+        report = json.loads(args.serving_grid_json.read_text(encoding="utf-8"))
+        if not isinstance(report, dict):
+            raise SystemExit(f"SERVING_GRID_JSON is not a JSON object: {args.serving_grid_json}")
+        validation = validate_serving_profile_guc_evidence(
+            report,
+            min_docs=args.serving_profile_guc_min_docs,
+            min_queries=args.serving_profile_guc_min_queries,
+            allow_unsafe=os.environ.get("ALLOW_UNSAFE_PROFILE") == "1",
+        )
+        validation_report = {
+            "serving_grid_json": portable_path(args.serving_grid_json),
+            "serving_profile_guc_evidence": validation,
+        }
+        if args.output is not None:
+            args.output.parent.mkdir(parents=True, exist_ok=True)
+            args.output.write_text(
+                json.dumps(validation_report, indent=2, sort_keys=True) + "\n",
+                encoding="utf-8",
+            )
+            print(args.output)
+        else:
+            print(json.dumps(validation_report, indent=2, sort_keys=True))
+        if not validation["accepted"]:
+            raise SystemExit(1)
+        return
+    if args.compare_serving_artifacts:
+        report = compare_serving_artifacts(args.compare_serving_artifacts)
+        report["markdown_summary"] = markdown_compare_serving_artifacts(report)
+        if args.output is not None:
+            args.output.parent.mkdir(parents=True, exist_ok=True)
+            args.output.write_text(
+                json.dumps(report, indent=2, sort_keys=True) + "\n",
+                encoding="utf-8",
+            )
+            print(args.output)
+        else:
+            print(json.dumps(report, indent=2, sort_keys=True))
+        if args.markdown_output is not None:
+            args.markdown_output.parent.mkdir(parents=True, exist_ok=True)
+            args.markdown_output.write_text(report["markdown_summary"], encoding="utf-8")
+            print(args.markdown_output)
+        return
+    if args.document_node_colbert_1m_plan_only:
+        report = {
+            "suite": "dbpedia_colbert_multivector",
+            "layer": "ir_quality_and_systems",
+            "generated_at": datetime.now(timezone.utc).isoformat(),
+            "command": command_metadata(),
+            "pgturbohybrid": {
+                "git_sha": git_sha(),
+            },
+            "document_node_colbert_1m_plan": document_node_colbert_1m_plan(args),
+        }
+        report["markdown_summary"] = markdown_document_node_colbert_1m_plan(report)
+        args.output.parent.mkdir(parents=True, exist_ok=True)
+        args.output.write_text(
+            json.dumps(report, indent=2, sort_keys=True) + "\n",
+            encoding="utf-8",
+        )
+        print(args.output)
+        if args.markdown_output is not None:
+            args.markdown_output.parent.mkdir(parents=True, exist_ok=True)
+            args.markdown_output.write_text(report["markdown_summary"], encoding="utf-8")
+            print(args.markdown_output)
+        return
+    if args.export_learned_sparse_inputs_only:
+        conn = connect(args)
+        try:
+            report = export_learned_sparse_inputs_only(conn, args)
+        finally:
+            conn.close()
+        report["markdown_summary"] = markdown_learned_sparse_input_export(report)
+        if args.output is not None:
+            args.output.parent.mkdir(parents=True, exist_ok=True)
+            args.output.write_text(
+                json.dumps(report, indent=2, sort_keys=True) + "\n",
+                encoding="utf-8",
+            )
+            print(args.output)
+        else:
+            print(json.dumps(report, indent=2, sort_keys=True))
+        if args.markdown_output is not None:
+            args.markdown_output.parent.mkdir(parents=True, exist_ok=True)
+            args.markdown_output.write_text(report["markdown_summary"], encoding="utf-8")
+            print(args.markdown_output)
+        return
+    if args.validate_learned_sparse_jsonl_only:
+        conn = connect(args)
+        try:
+            report = run_learned_sparse_jsonl_validation_only(conn, args)
+        finally:
+            conn.close()
+        report["markdown_summary"] = markdown_learned_sparse_jsonl_validation(report)
+        if args.output is not None:
+            args.output.parent.mkdir(parents=True, exist_ok=True)
+            args.output.write_text(
+                json.dumps(report, indent=2, sort_keys=True) + "\n",
+                encoding="utf-8",
+            )
+            print(args.output)
+        else:
+            print(json.dumps(report, indent=2, sort_keys=True))
+        if args.markdown_output is not None:
+            args.markdown_output.parent.mkdir(parents=True, exist_ok=True)
+            args.markdown_output.write_text(report["markdown_summary"], encoding="utf-8")
+            print(args.markdown_output)
+        if learned_sparse_jsonl_validation_strict_failed(report):
+            raise SystemExit(1)
         return
     if args.multivector_recall_gate:
         conn = connect(args)
@@ -15623,8 +28620,41 @@ def main() -> None:
         finally:
             conn.close()
         return
+    if args.document_node_colbert_exact_oracle_build:
+        conn = connect(args)
+        try:
+            setup_schema(conn, include_colbert_llama=False)
+            report = run_document_node_colbert_exact_oracle_build(conn, args)
+        finally:
+            conn.close()
+        if args.output is not None:
+            args.output.parent.mkdir(parents=True, exist_ok=True)
+            args.output.write_text(
+                json.dumps(report, indent=2, sort_keys=True) + "\n",
+                encoding="utf-8",
+            )
+            print(args.output)
+        else:
+            print(json.dumps(report, indent=2, sort_keys=True))
+        if args.markdown_output is not None:
+            args.markdown_output.parent.mkdir(parents=True, exist_ok=True)
+            args.markdown_output.write_text(report["markdown_summary"], encoding="utf-8")
+            print(args.markdown_output)
+        return
 
-    if args.precomputed_dataset is None:
+    reuse_imported_colbert_only = (
+        (
+            args.document_node_colbert_1m_beir_quality_only
+            or args.document_node_colbert_sampled_admission
+            or args.document_node_colbert_candidate_source_focus
+            or args.document_node_colbert_exact_oracle_build
+        )
+        and args.reuse_data
+        and not args.force_reload
+        and args.precomputed_dataset is None
+        and args.beir_dataset is None
+    )
+    if args.precomputed_dataset is None and not reuse_imported_colbert_only:
         queries = load_queries(args.beir_dataset)
         qrels_path = resolve_qrels_path(args.qrels, args.beir_dataset)
         all_qrels = read_qrels(qrels_path)
@@ -15640,8 +28670,44 @@ def main() -> None:
     try:
         setup_schema(conn, include_colbert_llama=args.precomputed_dataset is None)
         if args.precomputed_dataset is None:
-            embedding_health = validate_embedding_health(conn, args)
-            load_phase = load_data(conn, args, qids, queries, qrels)
+            embedding_health = (
+                {
+                    "validated": False,
+                    "skipped": True,
+                    "reason": "document-node ColBERT 1M preflight does not generate embeddings",
+                }
+                if args.document_node_colbert_1m_preflight_only
+                else {
+                    "validated": False,
+                    "skipped": True,
+                    "reason": (
+                        "pure-ColBERT BEIR quality-only/sampled-admission/"
+                        "candidate-source-focus reused imported multivectors "
+                        "and did not generate embeddings"
+                    ),
+                }
+                if reuse_imported_colbert_only
+                else validate_embedding_health(conn, args)
+            )
+            if reuse_imported_colbert_only:
+                loaded_counts = dbpedia_colbert_loaded_counts(conn)
+                load_phase = {
+                    "reused": True,
+                    "documents": int(loaded_counts.get("docs_loaded", 0) or 0),
+                    "queries": int(loaded_counts.get("queries_loaded", 0) or 0),
+                    "qrels": int(loaded_counts.get("qrels_loaded", 0) or 0),
+                    "qrels_in_loaded_docs": int(
+                        loaded_counts.get("qrels_covered", 0) or 0
+                    ),
+                    "partial_qrel_coverage_reported": True,
+                    "reason": (
+                        "pure-ColBERT BEIR quality-only/sampled-admission/"
+                        "candidate-source-focus reused imported tables and "
+                        "reports qrel coverage without reloading"
+                    ),
+                }
+            else:
+                load_phase = load_data(conn, args, qids, queries, qrels)
         else:
             embedding_health = {
                 "validated": True,
@@ -15649,12 +28715,65 @@ def main() -> None:
                 "reason": "precomputed multivectors loaded from dataset",
             }
             load_phase = load_precomputed_multivectors(conn, args)
+        if args.document_node_colbert_1m_preflight_only:
+            report = run_document_node_colbert_1m_preflight_only(
+                conn,
+                args,
+                load_phase,
+            )
+            report["model"] = {
+                "colbert_model_name": args.colbert_model_name,
+                "expected_dim": args.expected_dim,
+                "expected_dim_requested": args.expected_dim_requested,
+                "expected_dim_source": args.expected_dim_source,
+                "embedding_health": embedding_health,
+            }
+            report["markdown_summary"] = markdown_document_node_colbert_1m_preflight(
+                report
+            )
+            args.output.parent.mkdir(parents=True, exist_ok=True)
+            args.output.write_text(
+                json.dumps(report, indent=2, sort_keys=True) + "\n",
+                encoding="utf-8",
+            )
+            if args.markdown_output is not None:
+                args.markdown_output.parent.mkdir(parents=True, exist_ok=True)
+                args.markdown_output.write_text(
+                    report["markdown_summary"],
+                    encoding="utf-8",
+                )
+            print(args.output)
+            if args.markdown_output is not None:
+                print(args.markdown_output)
+            preflight = report["document_node_colbert_1m_preflight"]
+            if preflight.get("strict_query_count_failed"):
+                raise SystemExit(preflight.get("strict_query_count_error") or 1)
+            return
         doc_ids = selected_doc_ids(conn, args.max_docs)
         query_ids = selected_query_ids(conn)
         qrels = loaded_qrels(conn)
-        if args.precomputed_dataset is None:
+        if args.precomputed_dataset is None and not reuse_imported_colbert_only:
             generation_phase = measure_generation_sample(conn, args, doc_ids, query_ids)
             insert_phase = persist_multivectors(conn, args, doc_ids, query_ids)
+        elif reuse_imported_colbert_only:
+            generation_phase = {
+                "skipped": True,
+                "reason": (
+                    "pure-ColBERT BEIR quality-only/sampled-admission/"
+                    "candidate-source-focus reused imported multivectors"
+                ),
+            }
+            insert_phase = {
+                "reused": True,
+                "precomputed": False,
+                "documents": len(doc_ids),
+                "queries": len(query_ids),
+                "reason": (
+                    "pure-ColBERT BEIR quality-only/sampled-admission/"
+                    "candidate-source-focus does not regenerate or persist "
+                    "multivectors"
+                ),
+            }
         else:
             generation_phase = {
                 "skipped": True,
@@ -15668,13 +28787,94 @@ def main() -> None:
                 "source": args.precomputed_dataset,
                 "note": "runtime generation skipped; rows were loaded from precomputed multivector dataset",
             }
-        dataset_stats = multivector_dataset_stats(conn)
+        if (
+            args.document_node_colbert_1m_build_only
+            or args.document_node_colbert_1m_evaluate_only
+            or args.document_node_serving_latency_only
+            or args.document_node_colbert_1m_beir_quality_only
+            or args.document_node_colbert_sampled_admission
+            or args.document_node_colbert_candidate_source_focus
+        ):
+            if args.document_node_serving_latency_only:
+                representative_profile = document_node_serving_latency_profile(args)
+            elif args.document_node_colbert_1m_beir_quality_only:
+                representative_profile = document_node_colbert_beir_quality_profile(args)
+            elif args.document_node_colbert_sampled_admission:
+                representative_profile = document_node_colbert_sampled_admission_profile(args)
+            elif args.document_node_colbert_candidate_source_focus:
+                focus_profiles = document_node_colbert_candidate_source_focus_profiles(args)
+                representative_profile = focus_profiles[0] if focus_profiles else None
+            else:
+                colbert_1m_profiles = document_node_colbert_1m_effective_profiles(args)
+                representative_profile = colbert_1m_profiles[0] if colbert_1m_profiles else None
+            sample_dim = fetch_one(
+                conn,
+                """
+                SELECT turbohybrid_multivector_dims(colbert)::int
+                FROM dbpedia_colbert_docs
+                WHERE colbert IS NOT NULL
+                LIMIT 1
+                """,
+            )
+            dim = int(sample_dim[0] or 0) if sample_dim else 0
+            dataset_stats = {
+                "docs": len(doc_ids),
+                "avg_tokens": 0.0,
+                "p50_tokens": 0.0,
+                "p90_tokens": 0.0,
+                "min_tokens": 0,
+                "max_tokens": 0,
+                "dim": dim,
+                "dim_min": dim,
+                "dim_max": dim,
+                "estimate_stats_source": (
+                    "colbert_1m_proxy_only_fast_sample"
+                    if representative_profile is not None
+                    and representative_profile.storage_kind == "proxy_only"
+                    else "colbert_1m_single_index_fast_sample"
+                ),
+            }
+        else:
+            dataset_stats = multivector_dataset_stats(conn)
+        preflight_learned_sparse_serving_inputs(args, doc_ids, query_ids)
         learned_sparse_phase = load_learned_sparse_vectors(conn, args)
         encoded_queries = load_encoded_queries(conn)
         document_node_serving_latency_only = None
         document_node_serving_build_only = None
+        document_node_colbert_1m_beir_quality = None
+        document_node_colbert_sampled_admission = None
+        document_node_colbert_candidate_source_focus = None
 
-        if args.document_node_serving_build_only:
+        if args.document_node_colbert_1m_build_only:
+            document_node_serving_build_only = run_document_node_colbert_1m_build_only(
+                conn,
+                args,
+            )
+            index_phase = document_node_serving_build_only["last_index_phase"]
+            result_methods = []
+            admission_debug = None
+            document_node_admission_grid = None
+            document_node_serving_grid = None
+            document_node_serving_recommendation = None
+            document_node_token_pooling_recommendation = None
+            hybrid_evaluation = None
+            token_ablation = None
+        elif args.document_node_colbert_1m_evaluate_only:
+            document_node_serving_grid = run_document_node_colbert_1m_evaluate_only(
+                conn,
+                args,
+                encoded_queries,
+                qrels,
+            )
+            index_phase = document_node_serving_grid["index_phase"]
+            result_methods = []
+            admission_debug = None
+            document_node_admission_grid = None
+            document_node_serving_recommendation = None
+            document_node_token_pooling_recommendation = None
+            hybrid_evaluation = None
+            token_ablation = None
+        elif args.document_node_serving_build_only:
             document_node_serving_build_only = run_document_node_serving_build_only(
                 conn,
                 args,
@@ -15700,6 +28900,107 @@ def main() -> None:
             document_node_admission_grid = None
             document_node_serving_grid = None
             document_node_serving_recommendation = None
+            document_node_token_pooling_recommendation = None
+            hybrid_evaluation = None
+            token_ablation = None
+        elif args.document_node_colbert_1m_beir_quality_only:
+            document_node_colbert_1m_beir_quality = (
+                run_document_node_colbert_1m_beir_quality_only(
+                    conn,
+                    args,
+                    encoded_queries,
+                    qrels,
+                )
+            )
+            index_phase = document_node_colbert_1m_beir_quality["index_phase"]
+            result_methods = []
+            admission_debug = None
+            document_node_admission_grid = None
+            document_node_serving_grid = None
+            document_node_serving_recommendation = None
+            document_node_token_pooling_recommendation = None
+            hybrid_evaluation = None
+            token_ablation = None
+        elif args.document_node_colbert_sampled_admission:
+            document_node_colbert_sampled_admission = (
+                run_document_node_colbert_sampled_admission(
+                    conn,
+                    args,
+                    encoded_queries,
+                    qrels,
+                )
+            )
+            index_phase = document_node_colbert_sampled_admission["index_phase"]
+            result_methods = []
+            admission_debug = None
+            document_node_admission_grid = None
+            document_node_serving_grid = None
+            document_node_serving_recommendation = None
+            document_node_token_pooling_recommendation = None
+            hybrid_evaluation = None
+            token_ablation = None
+        elif args.document_node_colbert_candidate_source_focus:
+            document_node_colbert_candidate_source_focus = (
+                run_document_node_colbert_candidate_source_focus(
+                    conn,
+                    args,
+                    encoded_queries,
+                    qrels,
+                )
+            )
+            index_phase = {
+                "focus_mode": True,
+                "profile_index_phases": document_node_colbert_candidate_source_focus.get(
+                    "index_phases", []
+                ),
+            }
+            result_methods = []
+            admission_debug = None
+            document_node_admission_grid = None
+            document_node_serving_grid = None
+            document_node_serving_recommendation = None
+            document_node_token_pooling_recommendation = None
+            hybrid_evaluation = None
+            token_ablation = None
+        elif (
+            args.document_node_colbert_1m_grid
+            and str(args.document_node_colbert_1m_profile or "").strip()
+        ):
+            index_phase = {
+                "skipped": True,
+                "reason": (
+                    "single pure-ColBERT 1M profile mode runs only the serving "
+                    "grid index build for the selected profile"
+                ),
+                "reloptions": [],
+                "index_stats": {},
+                "build_stats": {},
+                "index_bytes": 0,
+            }
+            result_methods = []
+            admission_debug = None
+            document_node_admission_grid = None
+            document_node_serving_grid = run_document_node_serving_grid(
+                conn,
+                args,
+                encoded_queries,
+                qrels,
+            )
+            document_node_serving_recommendation = None
+            recommendation_started = time.perf_counter()
+            document_node_serving_recommendation = compute_document_node_serving_recommendation(
+                document_node_serving_grid,
+                exact_baseline={"available": False},
+                min_top10_admission=args.serving_min_top10_admission,
+                min_ndcg_ratio_vs_exact=args.serving_min_ndcg_ratio_vs_exact,
+                max_p95_ms=args.serving_max_p95_ms,
+                accept_partial_learned_sparse_coverage=(
+                    args.serving_accept_partial_learned_sparse_coverage
+                ),
+            )
+            document_node_serving_grid["recommendation_elapsed_ms"] = elapsed_ms_since(
+                recommendation_started
+            )
             document_node_token_pooling_recommendation = None
             hybrid_evaluation = None
             token_ablation = None
@@ -15769,6 +29070,9 @@ def main() -> None:
                     min_top10_admission=args.serving_min_top10_admission,
                     min_ndcg_ratio_vs_exact=args.serving_min_ndcg_ratio_vs_exact,
                     max_p95_ms=args.serving_max_p95_ms,
+                    accept_partial_learned_sparse_coverage=(
+                        args.serving_accept_partial_learned_sparse_coverage
+                    ),
                 )
                 document_node_token_pooling_recommendation = None
                 if bool(document_node_serving_grid.get("token_pooling_focus", False)):
@@ -15886,8 +29190,64 @@ def main() -> None:
                 "multivector_sparse_candidate_source": args.multivector_sparse_candidate_source,
                 "learned_sparse_doc_jsonl": portable_path(args.learned_sparse_doc_jsonl) if args.learned_sparse_doc_jsonl else None,
                 "learned_sparse_query_jsonl": portable_path(args.learned_sparse_query_jsonl) if args.learned_sparse_query_jsonl else None,
+                "learned_sparse_require_full_coverage": args.learned_sparse_require_full_coverage,
                 "document_node_admission_grid": args.document_node_admission_grid,
                 "document_node_serving_grid": args.document_node_serving_grid,
+                "document_node_colbert_1m_grid": args.document_node_colbert_1m_grid,
+                "document_node_colbert_1m_profile": args.document_node_colbert_1m_profile,
+                "document_node_colbert_1m_index_signature": (
+                    args.document_node_colbert_1m_index_signature
+                ),
+                "document_node_colbert_1m_plan_only": args.document_node_colbert_1m_plan_only,
+                "document_node_colbert_1m_build_only": args.document_node_colbert_1m_build_only,
+                "document_node_colbert_1m_evaluate_only": (
+                    args.document_node_colbert_1m_evaluate_only
+                ),
+                "document_node_colbert_1m_beir_quality_only": (
+                    args.document_node_colbert_1m_beir_quality_only
+                ),
+                "document_node_colbert_sampled_admission": (
+                    args.document_node_colbert_sampled_admission
+                ),
+                "document_node_colbert_candidate_source_focus": (
+                    args.document_node_colbert_candidate_source_focus
+                ),
+                "oracle_input": portable_path(args.oracle_input) if args.oracle_input else None,
+                "candidate_budgets": args.candidate_budgets,
+                "exact_rerank_k": args.exact_rerank_k,
+                "centroid_lite_caps": args.centroid_lite_caps,
+                "query_limit": args.query_limit,
+                "include_quantized_inverted_experimental": (
+                    args.include_quantized_inverted_experimental
+                ),
+                "document_node_colbert_profile": args.document_node_colbert_profile,
+                "document_node_colbert_candidate_k": args.document_node_colbert_candidate_k,
+                "document_node_colbert_exact_rerank_k": (
+                    args.document_node_colbert_exact_rerank_k
+                ),
+                "document_node_colbert_ef": args.document_node_colbert_ef,
+                "document_node_colbert_oversampling": args.document_node_colbert_oversampling,
+                "document_node_colbert_centroid_lite_cap": (
+                    args.document_node_colbert_centroid_lite_cap
+                ),
+                "document_node_colbert_include_experimental": (
+                    args.document_node_colbert_include_experimental
+                ),
+                "require_existing_index": args.require_existing_index,
+                "no_create_index": args.no_create_index,
+                "document_node_colbert_1m_include_entry_samples": args.document_node_colbert_1m_include_entry_samples,
+                "document_node_colbert_1m_include_entry_sidecar": args.document_node_colbert_1m_include_entry_sidecar,
+                "document_node_colbert_1m_include_centroid_lite_caps": args.document_node_colbert_1m_include_centroid_lite_caps,
+                "document_node_colbert_1m_include_experimental": args.document_node_colbert_1m_include_experimental,
+                "document_node_colbert_centroid_lite_focus": bool(
+                    getattr(args, "document_node_colbert_centroid_lite_focus", False)
+                ),
+                "document_node_colbert_quantized_inverted_focus": bool(
+                    getattr(args, "document_node_colbert_quantized_inverted_focus", False)
+                ),
+                "document_node_colbert_entry_focus": bool(
+                    getattr(args, "document_node_colbert_entry_focus", False)
+                ),
                 "document_node_serving_grid_include_experimental": args.document_node_serving_grid_include_experimental,
                 "document_node_serving_grid_include_proxy_encoders": args.document_node_serving_grid_include_proxy_encoders,
                 "document_node_serving_grid_include_learned_projection": args.document_node_serving_grid_include_learned_projection,
@@ -15901,11 +29261,38 @@ def main() -> None:
                 "document_node_serving_grid_proxy_admission_focus": args.document_node_serving_grid_proxy_admission_focus,
                 "document_node_serving_grid_centroid_lite_focus": args.document_node_serving_grid_centroid_lite_focus,
                 "document_node_serving_grid_token_pooling_focus": args.document_node_serving_grid_token_pooling_focus,
+                "document_node_serving_grid_learned_sparse_focus": args.document_node_serving_grid_learned_sparse_focus,
+                "document_node_serving_grid_proxy_oracle_focus": bool(
+                    getattr(args, "document_node_serving_grid_proxy_oracle_focus", False)
+                ),
+                "document_node_colbert_proxy_oracle_focus": bool(
+                    getattr(args, "document_node_colbert_proxy_oracle_focus", False)
+                ),
                 "document_node_serving_grid_stage_mode": args.document_node_serving_grid_stage_mode,
+                "incremental_output": (
+                    portable_path(args.incremental_output)
+                    if args.incremental_output is not None
+                    else None
+                ),
+                "resume_incremental_output": (
+                    portable_path(args.resume_incremental_output)
+                    if args.resume_incremental_output is not None
+                    else None
+                ),
+                "write_after_each_profile": args.write_after_each_profile,
+                "write_after_each_index_build": args.write_after_each_index_build,
+                "write_after_each_query_batch": args.write_after_each_query_batch,
+                "serving_accept_partial_learned_sparse_coverage": args.serving_accept_partial_learned_sparse_coverage,
                 "serving_grid_probe_queries": args.serving_grid_probe_queries,
                 "serving_grid_finalists": args.serving_grid_finalists,
                 "document_node_serving_latency_only": args.document_node_serving_latency_only,
                 "document_node_serving_build_only": args.document_node_serving_build_only,
+                "max_estimated_index_build_mb": args.max_estimated_index_build_mb,
+                "max_estimated_index_bytes": args.max_estimated_index_bytes,
+                "skip_profile_if_estimate_exceeds_limit": (
+                    args.skip_profile_if_estimate_exceeds_limit
+                ),
+                "fail_if_estimate_exceeds_limit": args.fail_if_estimate_exceeds_limit,
                 "serving_profile_name": args.serving_profile_name,
                 "serving_ef": args.serving_ef,
                 "serving_oversampling": args.serving_oversampling,
@@ -15965,16 +29352,54 @@ def main() -> None:
             output["document_node_admission_grid"] = document_node_admission_grid
         if document_node_serving_grid is not None:
             output["document_node_serving_grid"] = document_node_serving_grid
+            if bool(document_node_serving_grid.get("colbert_1m_grid", False)):
+                output["document_node_colbert_1m_grid"] = document_node_serving_grid
+            if bool(document_node_serving_grid.get("proxy_oracle_focus", False)):
+                output["document_node_colbert_proxy_oracle_focus"] = (
+                    document_node_serving_grid
+                )
+            if bool(document_node_serving_grid.get("colbert_centroid_lite_focus", False)):
+                output["document_node_colbert_centroid_lite_focus"] = (
+                    document_node_serving_grid
+                )
+            if bool(
+                document_node_serving_grid.get(
+                    "colbert_quantized_inverted_focus",
+                    False,
+                )
+            ):
+                output["document_node_colbert_quantized_inverted_focus"] = (
+                    document_node_serving_grid
+                )
+            if bool(document_node_serving_grid.get("colbert_entry_focus", False)):
+                output["document_node_colbert_entry_focus"] = document_node_serving_grid
         if document_node_serving_recommendation is not None:
             output["document_node_serving_recommendation"] = document_node_serving_recommendation
+            annotate_serving_recommendation_evidence_level(output)
         if document_node_token_pooling_recommendation is not None:
             output["document_node_token_pooling_recommendation"] = (
                 document_node_token_pooling_recommendation
             )
         if document_node_serving_latency_only is not None:
             output["document_node_serving_latency_only"] = document_node_serving_latency_only
+        if document_node_colbert_1m_beir_quality is not None:
+            output["document_node_colbert_1m_beir_quality"] = (
+                document_node_colbert_1m_beir_quality
+            )
+        if document_node_colbert_sampled_admission is not None:
+            output["document_node_colbert_sampled_admission"] = (
+                document_node_colbert_sampled_admission
+            )
+        if document_node_colbert_candidate_source_focus is not None:
+            output["document_node_colbert_candidate_source_focus"] = (
+                document_node_colbert_candidate_source_focus
+            )
         if document_node_serving_build_only is not None:
             output["document_node_serving_build_only"] = document_node_serving_build_only
+            if bool(document_node_serving_build_only.get("pure_colbert_only", False)):
+                output["document_node_colbert_1m_build_only"] = (
+                    document_node_serving_build_only
+                )
         if hybrid_evaluation is not None:
             output["hybrid_evaluation"] = hybrid_evaluation
         if token_ablation is not None:

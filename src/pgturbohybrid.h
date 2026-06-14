@@ -746,6 +746,7 @@ typedef struct TqOptions
 	int			residualRerankBytes;
 	int			multivectorGraphMode;	/* multivector_graph: token_nodes or document_nodes */
 	int			multivectorDocBuildScorer;	/* multivector_doc_build_scorer */
+	int			multivectorDocStorage;	/* multivector_doc_storage */
 	int			multivectorTokenPooling;	/* multivector_token_pooling: off, kmeans, or greedy_cosine */
 	double		multivectorTokenPoolingTargetRatio;
 	int			multivectorTokenPoolingMinTokens;
@@ -1562,6 +1563,7 @@ const char *PgturbohybridGraphTqExactSimdForceName(int force);
 const char *PgturbohybridGraphStorageKindName(int storageKind);
 const char *PgturbohybridMultiVectorGraphModeName(int mode);
 const char *PgturbohybridMultiVectorDocBuildScorerName(int scorer);
+const char *PgturbohybridMultiVectorDocStorageKindName(int kind);
 const char *PgturbohybridMultiVectorRerankSourceName(int source);
 const char *PgturbohybridParallelEdgeBuildDisabledReasonName(int reason);
 const char *PgturbohybridGraphDenseResidualRerankModeName(int mode);
@@ -1578,6 +1580,7 @@ bool		PgturbohybridGraphGetResidualRerankOption(Relation index);
 int			PgturbohybridGraphGetResidualRerankBytes(Relation index);
 int			PgturbohybridGraphGetMultiVectorGraphModeOption(Relation index);
 int			PgturbohybridGraphGetMultiVectorDocBuildScorerOption(Relation index);
+int			PgturbohybridGraphGetMultiVectorDocStorageOption(Relation index);
 int			PgturbohybridGraphGetMultiVectorTokenPoolingOption(Relation index);
 double		PgturbohybridGraphGetMultiVectorTokenPoolingTargetRatio(Relation index);
 int			PgturbohybridGraphGetMultiVectorTokenPoolingMinTokens(Relation index);

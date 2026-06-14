@@ -330,7 +330,9 @@ off by default, does not change persisted storage, does not prune candidates in
 this first slice, and reports `centroid_bitset_prefilter_enabled`,
 `centroid_bitset_lists_used`, `centroid_bitset_docs_set`,
 `centroid_bitset_docs_after_threshold`,
-`centroid_bitset_prefilter_time_us`, and `centroid_bitset_memory_bytes`.
+`centroid_bitset_candidates`, `centroid_bitset_time_us`
+(`centroid_bitset_prefilter_time_us` is kept as a compatibility alias), and
+`centroid_bitset_memory_bytes`.
 The guarded `turbohybrid.multivector_centroid_lite_pruning =
 safe_upper_bound` prototype is also off by default. It only drops a
 centroid-lite candidate after the current candidate band is full and the
@@ -339,7 +341,8 @@ current sidecar stores a mean residual summary rather than a radius, so
 nonzero residual summaries are treated as unsafe and the document is retained.
 Stats expose `centroid_upper_bound_enabled`,
 `centroid_upper_bound_docs_checked`, `centroid_upper_bound_docs_pruned`,
-`centroid_upper_bound_prune_time_us`,
+`centroid_upper_bound_time_us` (`centroid_upper_bound_prune_time_us` is kept
+as a compatibility alias), `centroid_upper_bound_prune_ratio`,
 `centroid_upper_bound_unsafe_fallbacks`,
 `centroid_candidates_before_bound`, and
 `centroid_candidates_after_bound`. Final retained documents are still ranked by
@@ -599,6 +602,34 @@ lexical index keys: BM25 rescue builds `body_tsv`, while learned-sparse rescue
 builds `learned_sparse_tsv`. Benchmark output includes learned-sparse
 document/query coverage ratios; partial JSONL fixture coverage is explicitly
 flagged and should not be treated as production serving evidence.
+
+Production readiness for learned-sparse rescue requires this checklist before a
+profile is promoted from benchmark evidence to serving guidance:
+
+- Document JSONL coverage is 100% for the served corpus, or partial coverage is
+  explicitly accepted and recorded as a limitation.
+- Query JSONL coverage is 100% for the benchmark query set.
+- The `term_id` vocabulary is stable across document and query feature files.
+- The feature-generator version is recorded.
+- The feature-generator model name and checksum are recorded when available.
+- `learned_sparse_tsv` is built and indexed; learned-sparse rescue must not
+  silently use the `body_tsv` BM25 key.
+- The query path uses the learned sparse tsquery generated from
+  `q.learned_sparse`, not the web-search text fallback.
+- Final SQL ranking remains exact MaxSim over retained multivector candidates.
+- Rescue cap accounting is present: learned-sparse candidates,
+  retained-for-MaxSim counts, branch latency, and exact rerank counts.
+- p95 latency and admission thresholds pass on the target corpus, not only on a
+  tiny smoke run.
+
+Any future SQL-visible `turbohybrid.multivector_serving_profile` mapping must
+first pass the benchmark gate:
+`SERVING_GRID_JSON=... python benchmarks/dbpedia_colbert_multivector.py --validate-serving-profile-guc-evidence`.
+The gate is expected to reject smoke-only or undersized artifacts, incomplete
+learned-sparse coverage, experimental profiles, missing qrel quality metrics,
+or slow-path warnings unless the prompt explicitly opts into
+`ALLOW_UNSAFE_PROFILE=1`.
+
 Use `--document-node-serving-grid-include-entry-sidecar` only for focused graph
 entry admission experiments. It adds `proxy_normalized_mean_f16_entry_sidecar`
 and `centroid_mean_f16_entry_sidecar`, persists `entry_sidecar = on` graph entry
