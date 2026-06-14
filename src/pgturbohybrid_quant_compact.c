@@ -225,7 +225,16 @@ PgturbohybridGraphCompactPhase2RewriteCode(Relation index,
 					start = BufferGetBlockNumber(buf);
 			}
 
-			/* Copy the tuple */
+			/* Copy the tuple — validate item size to avoid over-read on corrupt pages */
+			{
+				Size actualItemLen = ItemIdGetLength(iid);
+
+				if (actualItemLen < codeTupleSize)
+				{
+					/* Corrupt or truncated item — skip rather than over-read */
+					continue;
+				}
+			}
 			memcpy(newTuple, tuple, codeTupleSize);
 			newTuple->nodeId = nodeIdMap[tuple->nodeId];
 

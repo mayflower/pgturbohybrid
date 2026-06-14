@@ -1,7 +1,7 @@
 {
   "tool_name": "Bash",
-  "tool_input_preview": "{\"command\":\"PGHOST=127.0.0.1 PGPORT=5433 PGDATABASE=valorbrain PGUSER=postgres rtk psql -c \\\"\\nUPDATE documents_fts fts\\nSET embedding = cv.embedding\\nFROM content_vectors cv, documents d\\nWHERE d.has...",
-  "error": "Exit code 1\nERROR:  pgturbohybrid BM25 metadata pointer is invalid\nDETAIL:  Metapage points to block 2312, which is not a BM25 metadata page.",
-  "timestamp": "2026-06-09T16:59:45.366Z",
-  "retry_count": 2
+  "tool_input_preview": "{\"command\":\"PGHOST=127.0.0.1 PGPORT=5433 PGDATABASE=valorbrain PGUSER=postgres rtk psql -c \\\"\\n-- First, insert into content_vectors to trigger pgturbohybrid insert\\nINSERT INTO content_vectors (hash,...",
+  "error": "Exit code 1\nERROR:  invalid input syntax for type vector: \"0.5953850078833527,0.42415018621982425,0.5071037036963018,0.5300666853784557,0.5429824670517926,0.48656286589068,0.009395230555336198,0.13776405446701445,0.06886310699194054,0.11989291275259562,0.4052568143406343,0.34545847430245424,0.7829282109501521,0.5048158977413553,0.8307123570842623,0.3642940171069602,0.8147013891967758,0.3804141053533765,0.5190843610048435,0.5415499648275381,0.11048564848775455,0.20375505156057327,0.16119833646139...",
+  "timestamp": "2026-06-09T21:41:03.908Z",
+  "retry_count": 1
 }

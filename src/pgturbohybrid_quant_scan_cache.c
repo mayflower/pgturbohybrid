@@ -2461,6 +2461,12 @@ PgturbohybridGraphLoadAllAdjPages(Relation index, PgturbohybridGraphScanOpaque s
 			}
 			if (tuple->count > 0)
 			{
+				Size expectedAdjSize = PgturbohybridGraphAdjTupleSize(tuple->count);
+				Size actualAdjSize = ItemIdGetLength(iid);
+
+				/* Guard against corrupt/truncated items */
+				if (actualAdjSize < expectedAdjSize)
+					continue;
 				storage->neighbors[tupleSlot] =
 					MemoryContextAlloc(storage->ctx, sizeof(uint32) * tuple->count);
 				memcpy(storage->neighbors[tupleSlot], tuple->neighbors, sizeof(uint32) * tuple->count);

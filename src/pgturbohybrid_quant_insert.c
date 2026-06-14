@@ -446,6 +446,15 @@ PgturbohybridGraphLoadAdjTuple(Relation index, PgturbohybridGraphMetaPageData *m
 				tuple->nodeId == nodeId &&
 				tuple->level == level)
 			{
+				Size expectedSize = PgturbohybridGraphAdjTupleSize(Min(tuple->count, maxNeighbors));
+				Size actualSize = ItemIdGetLength(iid);
+
+				/* Guard against corrupt/truncated items */
+				if (actualSize < expectedSize)
+				{
+					UnlockReleaseBuffer(buf);
+					return false;
+				}
 				*count = Min(tuple->count, maxNeighbors);
 				memcpy(neighbors, tuple->neighbors, sizeof(uint32) * *count);
 				found = true;
