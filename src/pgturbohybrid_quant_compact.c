@@ -525,6 +525,64 @@ PgturbohybridGraphCompactPhase4RewriteExact(Relation index,
 }
 
 /*
+ * WAL-flush all pages in a newly written chain before the metapage swap.
+ *
+ * Compaction Phases 2-4 write new pages via PgturbohybridGraphAppendPage +
+ * MarkBufferDirty but without GenericXLog.  The Phase 5 metapage swap IS
+ * WAL-logged, so a crash between page writes and the swap would leave recovery
+ * pointing to unlogged pages that may be zeroed after crash recovery.
+ *
+ * This function walks the new chain starting at chainStart and writes a
+ * GENERIC_XLOG_FULL_IMAGE record for each page, ensuring the full page image
+ * is durable on WAL before the metapage commit.
+ */
+static void
+PgturbohybridGraphCompactFlushWal(Relation index, BlockNumber chainStart,
+								  uint16 expectedKind, BufferAccessStrategy strategy)
+{
+	BlockNumber		blkno = chainStart;
+	BlockNumber		nblocks;
+
+	if (!RelationNeedsWAL(index) || !BlockNumberIsValid(blkno))
+		return;
+
+	nblocks = RelationGetNumberOfBlocks(index);
+
+	while (BlockNumberIsValid(blkno) && blkno < nblocks)
+	{
+		Buffer			buf;
+		Page			page;
+		PgturbohybridGraphPageOpaque opaque;
+		GenericXLogState   *state;
+		BlockNumber		nextblkno;
+
+		CHECK_FOR_INTERRUPTS();
+
+		buf = ReadBufferExtended(index, MAIN_FORKNUM, blkno, RBM_NORMAL, strategy);
+		LockBuffer(buf, BUFFER_LOCK_EXCLUSIVE);
+
+		page = BufferGetPage(buf);
+		opaque = PgturbohybridGraphPageGetOpaque(page);
+
+		if ((opaque->pageKind & PGTURBOHYBRID_GRAPH_PAGE_KIND_MASK) != expectedKind)
+		{
+			UnlockReleaseBuffer(buf);
+			break;
+		}
+
+		/* Save nextblkno before GenericXLog may return a working copy */
+		nextblkno = opaque->nextblkno;
+
+		state = GenericXLogStart(index);
+		page = GenericXLogRegisterBuffer(state, buf, GENERIC_XLOG_FULL_IMAGE);
+		GenericXLogFinish(state);
+
+		UnlockReleaseBuffer(buf);
+		blkno = nextblkno;
+	}
+}
+
+/*
  * Top-level entry point: compact graph page chains by removing dead nodes.
  *
  * Called from amvacuumcleanup after tqgraphbulkdelete has marked dead nodes.
@@ -680,6 +738,29 @@ PgturbohybridGraphMaybeCompactPageChains(Relation index)
 																	 oldExactOffnoMap,
 																	 newExactBlkno,
 																	 newExactOffno);
+
+		/*
+		 * Flush WAL for all new pages BEFORE the metapage swap.
+		 * Without this, a crash between the page writes (Phases 2-4) and
+		 * the metapage update (Phase 5) could leave the metapage pointing
+		 * to pages that were never WAL-logged and may be zeroed or corrupt
+		 * after crash recovery.
+		 */
+		{
+			BufferAccessStrategy walStrategy = GetAccessStrategy(BAS_BULKREAD);
+
+			PgturbohybridGraphCompactFlushWal(index, newCodeStart,
+											  PGTURBOHYBRID_GRAPH_PAGE_KIND_QUANT_CODE,
+											  walStrategy);
+			PgturbohybridGraphCompactFlushWal(index, newAdjStart,
+											  PGTURBOHYBRID_GRAPH_PAGE_KIND_QUANT_ADJ,
+											  walStrategy);
+			if (BlockNumberIsValid(newExactStart))
+				PgturbohybridGraphCompactFlushWal(index, newExactStart,
+												  PGTURBOHYBRID_GRAPH_PAGE_KIND_QUANT_EXACT,
+												  walStrategy);
+			FreeAccessStrategy(walStrategy);
+		}
 
 		/*
 		 * ---------- Phase 5: atomic metapage swap ----------
