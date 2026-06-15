@@ -102,6 +102,11 @@ static bool PgturbohybridGraphMultiVectorDocMapStoresCentroids(PgturbohybridQuan
 static void PgturbohybridGraphAddMultiVectorDocMapBytesEstimate(PgturbohybridQuantBuildState *state,
 															   uint64 bytes,
 															   const char *component);
+static uint64 PgturbohybridGraphBuildMultiplyEstimate(uint64 left, uint64 right);
+static uint64 PgturbohybridGraphBuildAddEstimate(uint64 left, uint64 right);
+static void PgturbohybridGraphRefreshBuildMemoryEstimates(PgturbohybridQuantBuildState *state);
+static void PgturbohybridGraphRecordBuildMemorySnapshot(PgturbohybridQuantBuildState *state,
+													   const char *phase);
 static uint64 PgturbohybridGraphMultiVectorDocMapChunkedFloatTupleBytes(Size floatCount,
 																		uint16 maxCount,
 																		Size (*tupleSizer) (uint16));
@@ -1516,6 +1521,9 @@ PgturbohybridGraphStoreBuildMultiVectorCentroids(PgturbohybridQuantBuildState *s
 	stored = MemoryContextAlloc(state->ctx, centroidSize);
 	memcpy(stored, centroids, centroidSize);
 	state->multivectorDocCentroids[docOrdinal] = stored;
+	state->multivectorCentroidVectorBytes =
+		PgturbohybridGraphBuildAddEstimate(state->multivectorCentroidVectorBytes,
+										   (uint64) centroidSize);
 	INSTR_TIME_SET_CURRENT(residualStart);
 	state->multivectorDocCentroidResiduals[docOrdinal] =
 		PgturbohybridMultiVectorCentroidResidualMean(doc, stored);
@@ -1635,6 +1643,9 @@ PgturbohybridGraphAppendBuildMultiVectorDocument(PgturbohybridQuantBuildState *s
 			stored = MemoryContextAlloc(state->ctx, mvSize);
 			memcpy(stored, mv, mvSize);
 			state->multivectorDocVectors[docOrdinal] = stored;
+			state->multivectorDocVectorPayloadBytesEstimate =
+				PgturbohybridGraphBuildAddEstimate(state->multivectorDocVectorPayloadBytesEstimate,
+												   (uint64) mvSize);
 		}
 		else
 			stored = NULL;
@@ -5289,6 +5300,133 @@ PgturbohybridGraphMultiVectorDocMapStoresCentroids(PgturbohybridQuantBuildState 
 		PGTURBOHYBRID_MULTIVECTOR_CENTROIDS_KMEANS;
 }
 
+static uint64
+PgturbohybridGraphBuildMultiplyEstimate(uint64 left, uint64 right)
+{
+	if (left != 0 && right > PG_UINT64_MAX / left)
+		return PG_UINT64_MAX;
+	return left * right;
+}
+
+static uint64
+PgturbohybridGraphBuildAddEstimate(uint64 left, uint64 right)
+{
+	if (right > PG_UINT64_MAX - left)
+		return PG_UINT64_MAX;
+	return left + right;
+}
+
+static uint64
+PgturbohybridGraphBuildNeighborBytesEstimate(PgturbohybridQuantBuildState *state)
+{
+	uint64		perNode;
+	uint64		levelSlots;
+
+	if (state == NULL || state->nodeCapacity == 0)
+		return 0;
+
+	/*
+	 * Build-time neighbor storage is variable by random graph level.  Keep this
+	 * estimate cheap by accounting for level-0 slots, which dominate the dense
+	 * document-node builds that trigger the 1M memory peak.
+	 */
+	levelSlots = (uint64) PgturbohybridGraphLevelM(state->m, 0) + 1;
+	perNode = MAXALIGN(sizeof(uint32 *));
+	perNode = PgturbohybridGraphBuildAddEstimate(perNode,
+												 MAXALIGN(sizeof(double *)));
+	perNode = PgturbohybridGraphBuildAddEstimate(perNode,
+												 MAXALIGN(sizeof(int)));
+	perNode = PgturbohybridGraphBuildAddEstimate(perNode,
+												 MAXALIGN(PgturbohybridGraphBuildMultiplyEstimate(sizeof(uint32),
+																								  levelSlots)));
+	perNode = PgturbohybridGraphBuildAddEstimate(perNode,
+												 MAXALIGN(PgturbohybridGraphBuildMultiplyEstimate(sizeof(double),
+																								  levelSlots)));
+	return PgturbohybridGraphBuildMultiplyEstimate(perNode,
+												   (uint64) state->nodeCapacity);
+}
+
+static void
+PgturbohybridGraphRefreshBuildMemoryEstimates(PgturbohybridQuantBuildState *state)
+{
+	uint64		graphNodeBytes;
+
+	if (state == NULL)
+		return;
+
+	state->multivectorDocVectorsPointerBytes =
+		state->multivectorDocVectors != NULL ?
+		PgturbohybridGraphBuildMultiplyEstimate(sizeof(PgturbohybridMultiVector *),
+												(uint64) state->multivectorDocCapacity) : 0;
+	state->multivectorDocVectorChunkRefBytes =
+		state->multivectorDocVectorChunks != NULL ?
+		PgturbohybridGraphBuildMultiplyEstimate(sizeof(PgturbohybridGraphMultiVectorDocVectorChunkRef),
+												(uint64) state->multivectorDocVectorChunkCapacity) : 0;
+	if (state->multivectorDocVectorFirstChunk != NULL)
+		state->multivectorDocVectorChunkRefBytes =
+			PgturbohybridGraphBuildAddEstimate(state->multivectorDocVectorChunkRefBytes,
+											   PgturbohybridGraphBuildMultiplyEstimate(sizeof(uint32),
+																					  (uint64) state->multivectorDocCapacity));
+	if (state->multivectorDocVectorChunkCounts != NULL)
+		state->multivectorDocVectorChunkRefBytes =
+			PgturbohybridGraphBuildAddEstimate(state->multivectorDocVectorChunkRefBytes,
+											   PgturbohybridGraphBuildMultiplyEstimate(sizeof(uint32),
+																					  (uint64) state->multivectorDocCapacity));
+	state->multivectorCentroidResidualBytes =
+		state->multivectorDocCentroidResiduals != NULL ?
+		PgturbohybridGraphBuildMultiplyEstimate(sizeof(float),
+												(uint64) state->multivectorDocCapacity) : 0;
+	graphNodeBytes =
+		PgturbohybridGraphBuildMultiplyEstimate(sizeof(PgturbohybridGraphBuildNode),
+												(uint64) state->nodeCapacity);
+	if (state->multivectorNodeMap != NULL)
+		graphNodeBytes =
+			PgturbohybridGraphBuildAddEstimate(graphNodeBytes,
+											   PgturbohybridGraphBuildMultiplyEstimate(sizeof(TqMultiVectorNodeMapEntry),
+																					  (uint64) state->nodeCapacity));
+	state->graphNodeBytesEstimate = graphNodeBytes;
+	state->graphNeighborBytesEstimate =
+		PgturbohybridGraphBuildNeighborBytesEstimate(state);
+}
+
+static void
+PgturbohybridGraphRecordBuildMemorySnapshot(PgturbohybridQuantBuildState *state,
+											const char *phase)
+{
+	uint64		bytes;
+
+	if (state == NULL || state->ctx == NULL || phase == NULL)
+		return;
+
+	PgturbohybridGraphRefreshBuildMemoryEstimates(state);
+	bytes = (uint64) MemoryContextMemAllocated(state->ctx, true);
+	if (strcmp(phase, "heap_scan_decode") == 0)
+		state->buildMemoryHeapScanDecodeBytes = bytes;
+	else if (strcmp(phase, "token_pooling") == 0)
+		state->buildMemoryTokenPoolingBytes = bytes;
+	else if (strcmp(phase, "proxy_encoding") == 0)
+		state->buildMemoryProxyEncodingBytes = bytes;
+	else if (strcmp(phase, "centroid_clustering") == 0)
+		state->buildMemoryCentroidClusteringBytes = bytes;
+	else if (strcmp(phase, "centroid_residual_computation") == 0)
+		state->buildMemoryCentroidResidualBytes = bytes;
+	else if (strcmp(phase, "sidecar_tuple_construction") == 0)
+		state->buildMemorySidecarTupleBytes = bytes;
+	else if (strcmp(phase, "posting_tuple_construction") == 0)
+		state->buildMemoryPostingTupleBytes = bytes;
+	else if (strcmp(phase, "graph_edge_build") == 0)
+		state->buildMemoryGraphEdgeBytes = bytes;
+	else if (strcmp(phase, "page_wal_write") == 0)
+		state->buildMemoryPageWalBytes = bytes;
+
+	if (bytes > state->buildPeakMemoryContextBytes)
+	{
+		state->buildPeakMemoryContextBytes = bytes;
+		strlcpy(state->buildPeakMemoryPhase, phase,
+				sizeof(state->buildPeakMemoryPhase));
+	}
+}
+
 static uint16
 PgturbohybridGraphMultiVectorDocMapCentroidPostingTupleMaxCount(void)
 {
@@ -5449,6 +5587,9 @@ PgturbohybridGraphWriteMultiVectorCentroidPostingTuples(PgturbohybridQuantBuildS
 		ereport(ERROR,
 				(errcode(ERRCODE_PROGRAM_LIMIT_EXCEEDED),
 				 errmsg("pgturbohybrid centroid posting sidecar is too large")));
+	state->multivectorCentroidPostingBytes =
+		PgturbohybridGraphBuildMultiplyEstimate(sizeof(PgturbohybridGraphMultiVectorCentroidPostingEntry),
+												(uint64) totalPostings);
 
 	listOffsets[0] = 0;
 	for (uint32 codeword = 0; codeword < codebookSize; codeword++)
@@ -5459,6 +5600,8 @@ PgturbohybridGraphWriteMultiVectorCentroidPostingTuples(PgturbohybridQuantBuildS
 	postings =
 		palloc0(sizeof(PgturbohybridGraphMultiVectorCentroidPostingEntry) *
 				(Size) Max(totalPostings, 1U));
+	PgturbohybridGraphRecordBuildMemorySnapshot(state,
+												"posting_tuple_construction");
 	for (uint32 docId = 0; docId < state->multivectorDocCount; docId++)
 	{
 		PgturbohybridMultiVector *centroids =
@@ -7042,6 +7185,14 @@ tqgraphbuild(Relation heap, Relation index, IndexInfo *indexInfo)
 		state.buildEncodeOnAppend = false;
 		scanUs = PgturbohybridGraphElapsedUs(phaseStart);
 		PgturbohybridGraphDebugBuildPhaseDone(&state, "scan", phaseStart);
+		PgturbohybridGraphRecordBuildMemorySnapshot(&state,
+													"heap_scan_decode");
+		PgturbohybridGraphRecordBuildMemorySnapshot(&state, "token_pooling");
+		PgturbohybridGraphRecordBuildMemorySnapshot(&state, "proxy_encoding");
+		PgturbohybridGraphRecordBuildMemorySnapshot(&state,
+													"centroid_clustering");
+		PgturbohybridGraphRecordBuildMemorySnapshot(&state,
+													"centroid_residual_computation");
 	}
 
 	if (!parallelBuilt && !state.buildCodeOnly)
@@ -7060,6 +7211,17 @@ tqgraphbuild(Relation heap, Relation index, IndexInfo *indexInfo)
 	}
 
 	PgturbohybridGraphCheckExactSymmetricBuildAllowed(&state);
+	if (state.buildMemoryHeapScanDecodeBytes == 0)
+	{
+		PgturbohybridGraphRecordBuildMemorySnapshot(&state,
+													"heap_scan_decode");
+		PgturbohybridGraphRecordBuildMemorySnapshot(&state, "token_pooling");
+		PgturbohybridGraphRecordBuildMemorySnapshot(&state, "proxy_encoding");
+		PgturbohybridGraphRecordBuildMemorySnapshot(&state,
+													"centroid_clustering");
+		PgturbohybridGraphRecordBuildMemorySnapshot(&state,
+													"centroid_residual_computation");
+	}
 	state.buildFastEdges = PgturbohybridGraphUseFastBuildEdges(&state);
 	PgturbohybridGraphDebugBuildPhaseStart(&state, "build_edges");
 	INSTR_TIME_SET_CURRENT(phaseStart);
@@ -7125,6 +7287,7 @@ tqgraphbuild(Relation heap, Relation index, IndexInfo *indexInfo)
 	if (!parallelEdgeBuildEnabled)
 		edgesUs = PgturbohybridGraphElapsedUs(phaseStart);
 	PgturbohybridGraphDebugBuildPhaseDone(&state, "build_edges", phaseStart);
+	PgturbohybridGraphRecordBuildMemorySnapshot(&state, "graph_edge_build");
 
 	PgturbohybridGraphDebugBuildPhaseStart(&state, "free_exact_build_vectors");
 	INSTR_TIME_SET_CURRENT(phaseStart);
@@ -7165,6 +7328,9 @@ tqgraphbuild(Relation heap, Relation index, IndexInfo *indexInfo)
 	PgturbohybridGraphWriteIndex(&state);
 	writeUs = PgturbohybridGraphElapsedUs(phaseStart);
 	PgturbohybridGraphDebugBuildPhaseDone(&state, "write_pages", phaseStart);
+	PgturbohybridGraphRecordBuildMemorySnapshot(&state,
+												"sidecar_tuple_construction");
+	PgturbohybridGraphRecordBuildMemorySnapshot(&state, "page_wal_write");
 
 	if (RelationNeedsWAL(index))
 	{
@@ -7173,6 +7339,7 @@ tqgraphbuild(Relation heap, Relation index, IndexInfo *indexInfo)
 		log_newpage_range(index, MAIN_FORKNUM, 0, RelationGetNumberOfBlocks(index), true);
 		walUs = PgturbohybridGraphElapsedUs(phaseStart);
 		PgturbohybridGraphDebugBuildPhaseDone(&state, "wal_newpages", phaseStart);
+		PgturbohybridGraphRecordBuildMemorySnapshot(&state, "page_wal_write");
 	}
 
 	totalUs = PgturbohybridGraphElapsedUs(totalStart);
@@ -7272,6 +7439,46 @@ tqgraphbuild(Relation heap, Relation index, IndexInfo *indexInfo)
 			state.multivectorCentroidPostingWriteUs;
 		buildStats.multivectorCentroidPostingCount =
 			state.multivectorCentroidPostingCount;
+		PgturbohybridGraphRefreshBuildMemoryEstimates(&state);
+		buildStats.multivectorDocVectorsPointerBytes =
+			state.multivectorDocVectorsPointerBytes;
+		buildStats.multivectorDocVectorChunkRefBytes =
+			state.multivectorDocVectorChunkRefBytes;
+		buildStats.multivectorDocMapBytesEstimate =
+			state.multivectorDocMapBytesEstimate;
+		buildStats.multivectorCentroidVectorBytes =
+			state.multivectorCentroidVectorBytes;
+		buildStats.multivectorCentroidResidualBytes =
+			state.multivectorCentroidResidualBytes;
+		buildStats.multivectorCentroidPostingBytes =
+			state.multivectorCentroidPostingBytes;
+		buildStats.graphNodeBytesEstimate = state.graphNodeBytesEstimate;
+		buildStats.graphNeighborBytesEstimate =
+			state.graphNeighborBytesEstimate;
+		buildStats.buildPeakMemoryContextBytes =
+			state.buildPeakMemoryContextBytes;
+		strlcpy(buildStats.buildPeakMemoryPhase,
+				state.buildPeakMemoryPhase[0] != '\0' ?
+				state.buildPeakMemoryPhase : "unavailable",
+				sizeof(buildStats.buildPeakMemoryPhase));
+		buildStats.buildMemoryHeapScanDecodeBytes =
+			state.buildMemoryHeapScanDecodeBytes;
+		buildStats.buildMemoryTokenPoolingBytes =
+			state.buildMemoryTokenPoolingBytes;
+		buildStats.buildMemoryProxyEncodingBytes =
+			state.buildMemoryProxyEncodingBytes;
+		buildStats.buildMemoryCentroidClusteringBytes =
+			state.buildMemoryCentroidClusteringBytes;
+		buildStats.buildMemoryCentroidResidualBytes =
+			state.buildMemoryCentroidResidualBytes;
+		buildStats.buildMemorySidecarTupleBytes =
+			state.buildMemorySidecarTupleBytes;
+		buildStats.buildMemoryPostingTupleBytes =
+			state.buildMemoryPostingTupleBytes;
+		buildStats.buildMemoryGraphEdgeBytes =
+			state.buildMemoryGraphEdgeBytes;
+		buildStats.buildMemoryPageWalBytes =
+			state.buildMemoryPageWalBytes;
 		buildStats.buildDistanceCacheHits = state.buildDistanceCacheHits;
 		buildStats.buildDistanceCacheMisses = state.buildDistanceCacheMisses;
 		buildStats.buildDistanceCacheStores = state.buildDistanceCacheStores;
@@ -14008,6 +14215,7 @@ PgturbohybridMultiVectorDocumentNodeScan(IndexScanDesc scan,
 	uint64		exactPairs = 0;
 	PgturbohybridMultiVectorExactRerankWorkStats exactStats;
 	uint64		quantizedScores = 0;
+	uint64		compactMaxsimScoreUs = 0;
 	uint64		compactBytes = 0;
 	uint64		originalTokens = 0;
 	uint64		pooledTokens = 0;
@@ -14251,7 +14459,8 @@ PgturbohybridMultiVectorDocumentNodeScan(IndexScanDesc scan,
 					(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
 					 errmsg("paged document-node sidecar cache does not support this multivector candidate source"),
 					 errhint("Use turbohybrid.multivector_candidate_source = document_nodes or proxy_vector, or set turbohybrid.multivector_doc_storage_cache = resident.")));
-		docStorageKind = PGTURBOHYBRID_MULTIVECTOR_DOC_STORAGE_F32;
+		if (proxyGraph)
+			docStorageKind = PGTURBOHYBRID_MULTIVECTOR_DOC_STORAGE_F32;
 	}
 	compactTraversal =
 		!exhaustiveScan &&
@@ -14507,12 +14716,16 @@ PgturbohybridMultiVectorDocumentNodeScan(IndexScanDesc scan,
 	}
 	else if (compactTraversal)
 	{
-		INSTR_TIME_SET_CURRENT(phaseStart);
-		compact =
-			PgturbohybridMultiVectorBuildDocCompactStorage(meta, &storage,
-														   docStorageKind);
-		compactBytes = compact != NULL ? compact->bytes : 0;
-		PgturbohybridGraphAddElapsedUs(&so->graphPrepareUs, phaseStart);
+		if (docStorageCacheMode !=
+			PGTURBOHYBRID_MULTIVECTOR_DOC_STORAGE_CACHE_PAGED)
+		{
+			INSTR_TIME_SET_CURRENT(phaseStart);
+			compact =
+				PgturbohybridMultiVectorBuildDocCompactStorage(meta, &storage,
+															   docStorageKind);
+			compactBytes = compact != NULL ? compact->bytes : 0;
+			PgturbohybridGraphAddElapsedUs(&so->graphPrepareUs, phaseStart);
+		}
 	}
 
 	if (collectPhaseStats)
@@ -15096,6 +15309,8 @@ PgturbohybridMultiVectorDocumentNodeScan(IndexScanDesc scan,
 			PgturbohybridGraphAddElapsedUint64(&docGraphTraversalUs, phaseStart);
 		if (proxyGraph)
 			proxyGraphTraversalUs = docGraphTraversalUs;
+		if (compactTraversal)
+			compactMaxsimScoreUs = docGraphTraversalUs;
 		quantizedScores = compactTraversal ? docsScored : 0;
 		if (proxyGraph)
 			docGraphWarning = "document_node_proxy_vector_graph_traversal";
@@ -15224,7 +15439,10 @@ PgturbohybridMultiVectorDocumentNodeScan(IndexScanDesc scan,
 	exactRerankLimitOverride = exactRerankKEffective;
 	if (!centroidLite && !quantizedInvertedExperimental &&
 		fullSidecarAvailable && storage.multivectorDocVectorsLoaded &&
-		!proxyOnlyIndex)
+		!proxyOnlyIndex &&
+		!(compactTraversal &&
+		  docStorageCacheMode ==
+		  PGTURBOHYBRID_MULTIVECTOR_DOC_STORAGE_CACHE_PAGED))
 	{
 		exactRerankSidecarMeta = meta;
 		exactRerankSidecarStorage = &storage;
@@ -15405,11 +15623,24 @@ PgturbohybridMultiVectorDocumentNodeScan(IndexScanDesc scan,
 		stats->multivectorDocGraphQuantizedScores =
 			proxyDocumentCompactRescore ? proxyDocumentRescoreDocs :
 			quantizedScores;
+		stats->compactMaxsimScoreUs =
+			compactTraversal ? compactMaxsimScoreUs : 0;
+		stats->compactMaxsimPairs =
+			compactTraversal ? maxsimPairs : 0;
 		strlcpy(stats->multivectorDocGraphStorageKind,
 				docStorageKindName,
 				sizeof(stats->multivectorDocGraphStorageKind));
 		stats->proxyOnlyIndex = proxyOnlyIndex;
+		stats->centroidOnlyIndex = centroidOnlyIndex;
 		stats->fullMultivectorSidecarAvailable = fullSidecarAvailable;
+		stats->centroidSidecarAvailable =
+			(meta->tqMultivectorDocMapFlags &
+			 PGTURBOHYBRID_GRAPH_MULTIVECTOR_DOCMAP_FLAG_CENTROIDS) != 0;
+		stats->quantizedInvertedSidecarAvailable =
+			(meta->tqMultivectorDocMapFlags &
+			 PGTURBOHYBRID_GRAPH_MULTIVECTOR_DOCMAP_FLAG_QUANTIZED_POSTINGS) != 0 &&
+			(meta->tqMultivectorDocMapFlags &
+			 PGTURBOHYBRID_GRAPH_MULTIVECTOR_DOCMAP_FLAG_QUANTIZED_CODEBOOK) != 0;
 		strlcpy(stats->multivectorDocGraphRescoreSource,
 				PgturbohybridMultiVectorRerankSourceName(exactStats.source),
 				sizeof(stats->multivectorDocGraphRescoreSource));
@@ -15445,10 +15676,10 @@ PgturbohybridMultiVectorDocumentNodeScan(IndexScanDesc scan,
 		stats->proxyLazySidecarVectors =
 			proxyGraph && proxyLazySidecarVectors;
 		strlcpy(stats->multivectorDocStorageCacheRequested,
-				proxyGraph ? docStorageCacheRequestedName : "auto",
+				docStorageCacheRequestedName,
 				sizeof(stats->multivectorDocStorageCacheRequested));
 		strlcpy(stats->multivectorDocStorageCacheEffective,
-				proxyGraph ? docStorageCacheModeName : "auto",
+				docStorageCacheModeName,
 				sizeof(stats->multivectorDocStorageCacheEffective));
 		stats->proxyTop1Admission = proxyGraph && proxyTop1Admission;
 		stats->proxyExactRerankDocs =

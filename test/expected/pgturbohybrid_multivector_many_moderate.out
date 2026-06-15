@@ -885,6 +885,78 @@ SELECT turbohybrid_last_scan_stats()->>'multivector_doc_graph_storage_kind'
 document_node_sq8_storage_kind|document_node_sq8_rescore_source|document_node_sq8_quantized_scores
 f32|sidecar|f
 (1 row)
+CREATE TABLE mv_many_moderate_docs_sq8_paged AS
+SELECT * FROM mv_many_moderate_docs;
+CREATE INDEX mv_many_moderate_docs_sq8_paged_idx
+ON mv_many_moderate_docs_sq8_paged
+USING turbohybrid (colbert multivector_maxsim_ip_turbohybrid_ops)
+WITH (
+  multivector_graph = document_nodes,
+  multivector_doc_storage = sq8,
+  multivector_proxy_encoder = max_pool,
+  graph_m = 4,
+  graph_ef_construction = 8,
+  graph_ef_search = 8
+);
+SET turbohybrid.multivector_candidate_source = document_nodes;
+SET turbohybrid.multivector_doc_storage_cache = 'paged';
+SET turbohybrid.multivector_doc_candidate_k = 4;
+SET turbohybrid.multivector_exact_rerank_k = 2;
+SET turbohybrid.multivector_doc_graph_rescore_k = 2;
+SET turbohybrid.multivector_doc_graph_search_ef = 4;
+DO $$
+DECLARE
+	q turbohybrid_multivector := turbohybrid_multivector(ARRAY[
+		'[1,0,0,0]'::vector,
+		'[0,1,0,0]'::vector,
+		'[0,0,1,0]'::vector,
+		'[0,0,0,1]'::vector
+	]);
+	doc_node_top1 text;
+	stats jsonb;
+BEGIN
+	SELECT id INTO doc_node_top1
+	FROM mv_many_moderate_docs_sq8_paged
+	ORDER BY colbert <~> turbohybrid_query(
+	  multivector_query => q,
+	  dense_k => 1,
+	  final_k => 1
+	)
+	LIMIT 1;
+	stats := turbohybrid_last_scan_stats();
+
+	IF doc_node_top1 <> 'good' OR
+		stats->>'multivector_candidate_source' <> 'document_nodes' OR
+		stats->>'multivector_candidate_path' <> 'document_graph' OR
+		stats->>'multivector_doc_graph_warning' <>
+			'document_node_sq8_sidecar_graph_traversal' OR
+		stats->>'multivector_doc_graph_storage_kind' <> 'sq8' OR
+		stats->>'multivector_doc_sidecar_cache_mode' <> 'paged' OR
+		stats->>'multivector_doc_graph_rescore_source' <> 'heap' OR
+		stats->>'multivector_exact_rerank_source' <> 'heap' OR
+		(stats->>'multivector_doc_graph_quantized_scores')::int <= 0 OR
+		(stats->>'compact_maxsim_pairs')::int <= 0 OR
+		(stats->>'multivector_exact_rerank_heap_fetches')::int <= 0 OR
+		(stats->>'multivector_exact_rerank_sidecar_reads')::int <> 0 OR
+		stats->>'multivector_candidate_path' = 'exact_doc_scan' THEN
+		RAISE EXCEPTION 'expected sq8 paged document-node graph scoring with heap exact rerank, top %, stats %',
+			doc_node_top1, stats;
+	END IF;
+END
+$$;
+SELECT turbohybrid_last_scan_stats()->>'multivector_doc_graph_storage_kind'
+  AS document_node_sq8_paged_storage_kind,
+       turbohybrid_last_scan_stats()->>'multivector_doc_graph_rescore_source'
+  AS document_node_sq8_paged_rescore_source,
+       turbohybrid_last_scan_stats()->>'multivector_exact_rerank_source'
+  AS document_node_sq8_paged_exact_source,
+       (turbohybrid_last_scan_stats()->>'compact_maxsim_pairs')::int > 0
+  AS document_node_sq8_paged_compact_pairs;
+document_node_sq8_paged_storage_kind|document_node_sq8_paged_rescore_source|document_node_sq8_paged_exact_source|document_node_sq8_paged_compact_pairs
+sq8|heap|heap|t
+(1 row)
+DROP TABLE mv_many_moderate_docs_sq8_paged;
+RESET turbohybrid.multivector_doc_storage_cache;
 SET turbohybrid.multivector_doc_storage = 'f32';
 SET turbohybrid.multivector_candidate_source = document_nodes;
 DO $$

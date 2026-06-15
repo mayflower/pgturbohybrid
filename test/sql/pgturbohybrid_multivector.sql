@@ -4339,8 +4339,13 @@ DECLARE
 BEGIN
 	stats := turbohybrid_index_stats('mv_doc_proxy_only_docs_idx'::regclass);
 	IF stats->>'multivector_doc_storage' <> 'proxy_only' OR
+		stats->>'multivector_doc_storage_kind' <> 'proxy_only' OR
 		stats->>'proxy_only_index' <> 'true' OR
+		stats->>'centroid_only_index' <> 'false' OR
 		stats->>'full_multivector_sidecar_available' <> 'false' OR
+		stats->>'centroid_sidecar_available' <> 'false' OR
+		stats->>'quantized_inverted_sidecar_available' <> 'false' OR
+		stats->>'exact_rerank_source_supported' <> 'heap' OR
 		(stats->>'node_count')::int <> 4 OR
 		(stats->>'index_bytes')::bigint <= 0 THEN
 		RAISE EXCEPTION 'unexpected proxy_only index stats: %', stats;
@@ -4374,11 +4379,20 @@ BEGIN
 	IF proxy_ids IS NULL OR array_length(proxy_ids, 1) <> 4 OR
 		scan_stats->>'multivector_candidate_source' <> 'proxy_vector' OR
 		scan_stats->>'multivector_doc_storage' <> 'proxy_only' OR
+		scan_stats->>'multivector_doc_storage_kind' <> 'proxy_only' OR
 		scan_stats->>'proxy_only_index' <> 'true' OR
+		scan_stats->>'centroid_only_index' <> 'false' OR
 		scan_stats->>'full_multivector_sidecar_available' <> 'false' OR
+		scan_stats->>'centroid_sidecar_available' <> 'false' OR
+		scan_stats->>'quantized_inverted_sidecar_available' <> 'false' OR
+		scan_stats->>'exact_rerank_source_supported' <> 'heap' OR
 		scan_stats->>'multivector_exact_rerank_source' <> 'heap' OR
+		scan_stats->>'proxy_vector_uses_full_sidecar_for_graph' <> 'false' OR
+		(scan_stats->>'multivector_doc_sidecar_vectors_loaded')::int <> 0 OR
+		(scan_stats->>'proxy_full_sidecar_vectors_loaded')::int <> 0 OR
 		(scan_stats->>'heap_fetches')::int <= 0 OR
-		(scan_stats->>'multivector_exact_rerank_heap_fetches')::int <= 0 THEN
+		(scan_stats->>'multivector_exact_rerank_heap_fetches')::int <= 0 OR
+		(scan_stats->>'multivector_exact_rerank_sidecar_bytes')::int <> 0 THEN
 		RAISE EXCEPTION 'unexpected proxy_only scan stats: ids %, stats %',
 			proxy_ids, scan_stats;
 	END IF;
@@ -4546,7 +4560,13 @@ DECLARE
 BEGIN
 	stats := turbohybrid_index_stats('mv_doc_centroid_only_docs_idx'::regclass);
 	IF stats->>'multivector_doc_storage' <> 'centroid_only' OR
+		stats->>'multivector_doc_storage_kind' <> 'centroid_only' OR
+		stats->>'proxy_only_index' <> 'false' OR
+		stats->>'centroid_only_index' <> 'true' OR
 		stats->>'full_multivector_sidecar_available' <> 'false' OR
+		stats->>'centroid_sidecar_available' <> 'true' OR
+		stats->>'quantized_inverted_sidecar_available' <> 'false' OR
+		stats->>'exact_rerank_source_supported' <> 'heap' OR
 		stats->>'multivector_centroids' <> 'kmeans' OR
 		(stats->>'index_bytes')::bigint <= 0 THEN
 		RAISE EXCEPTION 'unexpected centroid_only index stats: %', stats;
@@ -4579,9 +4599,17 @@ BEGIN
 	IF centroid_ids IS NULL OR array_length(centroid_ids, 1) < 1 OR
 		scan_stats->>'multivector_candidate_source' <> 'centroid_lite' OR
 		scan_stats->>'multivector_doc_storage' <> 'centroid_only' OR
+		scan_stats->>'multivector_doc_storage_kind' <> 'centroid_only' OR
+		scan_stats->>'proxy_only_index' <> 'false' OR
+		scan_stats->>'centroid_only_index' <> 'true' OR
 		scan_stats->>'full_multivector_sidecar_available' <> 'false' OR
+		scan_stats->>'centroid_sidecar_available' <> 'true' OR
+		scan_stats->>'quantized_inverted_sidecar_available' <> 'false' OR
+		scan_stats->>'exact_rerank_source_supported' <> 'heap' OR
 		scan_stats->>'multivector_exact_rerank_source' <> 'heap' OR
 		(scan_stats->>'multivector_exact_rerank_heap_fetches')::int <= 0 OR
+		(scan_stats->>'heap_fetches')::int <= 0 OR
+		(scan_stats->>'multivector_exact_rerank_sidecar_bytes')::int <> 0 OR
 		(scan_stats->>'centroid_candidates')::int <= 0 THEN
 		RAISE EXCEPTION 'unexpected centroid_only centroid_lite stats: ids %, stats %',
 			centroid_ids, scan_stats;
@@ -4608,6 +4636,67 @@ BEGIN
 END
 $$;
 
+CREATE TEMP TABLE mv_doc_f16_docs AS
+SELECT * FROM mv_doc_proxy_only_docs;
+
+CREATE INDEX mv_doc_f16_docs_idx ON mv_doc_f16_docs
+USING turbohybrid (colbert multivector_cosine_turbohybrid_ops)
+WITH (
+	quantization_bits = 4,
+	exact_storage = off,
+	multivector_graph = document_nodes,
+	multivector_doc_build_scorer = proxy,
+	multivector_proxy_encoder = normalized_mean,
+	multivector_doc_storage = f16
+);
+
+CREATE TEMP TABLE mv_doc_sq8_docs AS
+SELECT * FROM mv_doc_proxy_only_docs;
+
+CREATE INDEX mv_doc_sq8_docs_idx ON mv_doc_sq8_docs
+USING turbohybrid (colbert multivector_cosine_turbohybrid_ops)
+WITH (
+	quantization_bits = 4,
+	exact_storage = off,
+	multivector_graph = document_nodes,
+	multivector_doc_build_scorer = proxy,
+	multivector_proxy_encoder = normalized_mean,
+	multivector_doc_storage = sq8
+);
+
+DO $$
+DECLARE
+	f16_stats jsonb;
+	sq8_stats jsonb;
+BEGIN
+	f16_stats := turbohybrid_index_stats('mv_doc_f16_docs_idx'::regclass);
+	IF f16_stats->>'multivector_doc_storage_kind' <> 'f16' OR
+		f16_stats->>'proxy_only_index' <> 'false' OR
+		f16_stats->>'centroid_only_index' <> 'false' OR
+		f16_stats->>'full_multivector_sidecar_available' <> 'true' OR
+		f16_stats->>'centroid_sidecar_available' <> 'false' OR
+		f16_stats->>'quantized_inverted_sidecar_available' <> 'true' OR
+		f16_stats->>'exact_rerank_source_supported' <> 'sidecar' THEN
+		RAISE EXCEPTION 'unexpected f16 document-node capability stats: %',
+			f16_stats;
+	END IF;
+
+	sq8_stats := turbohybrid_index_stats('mv_doc_sq8_docs_idx'::regclass);
+	IF sq8_stats->>'multivector_doc_storage_kind' <> 'sq8' OR
+		sq8_stats->>'proxy_only_index' <> 'false' OR
+		sq8_stats->>'centroid_only_index' <> 'false' OR
+		sq8_stats->>'full_multivector_sidecar_available' <> 'true' OR
+		sq8_stats->>'centroid_sidecar_available' <> 'false' OR
+		sq8_stats->>'quantized_inverted_sidecar_available' <> 'true' OR
+		sq8_stats->>'exact_rerank_source_supported' <> 'sidecar' THEN
+		RAISE EXCEPTION 'unexpected sq8 document-node capability stats: %',
+			sq8_stats;
+	END IF;
+END
+$$;
+
+DROP TABLE mv_doc_f16_docs;
+DROP TABLE mv_doc_sq8_docs;
 DROP TABLE mv_doc_centroid_only_docs;
 
 CREATE TEMP TABLE mv_proxy_diag_dense_docs (
