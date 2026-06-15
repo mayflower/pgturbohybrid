@@ -909,7 +909,12 @@ pgturbohybrid_index_stats(PG_FUNCTION_ARGS)
 	Jsonb	   *result;
 	int			multivectorDocStorage;
 	bool		proxyOnlyIndex;
+	bool		centroidOnlyIndex;
 	bool		fullMultivectorSidecarAvailable;
+	bool		centroidSidecarAvailable;
+	bool		quantizedInvertedSidecarAvailable;
+	int			effectiveMultivectorDocStorage;
+	const char *exactRerankSourceSupported;
 
 	index = index_open(indexOid, AccessShareLock);
 	opts = (PgturbohybridOptions *) index->rd_options;
@@ -937,9 +942,32 @@ pgturbohybrid_index_stats(PG_FUNCTION_ARGS)
 		multivectorDocStorage == PGTURBOHYBRID_MULTIVECTOR_DOC_STORAGE_PROXY_ONLY ||
 		((meta.tqMultivectorDocMapFlags &
 		  PGTURBOHYBRID_GRAPH_MULTIVECTOR_DOCMAP_FLAG_PROXY_ONLY) != 0);
+	centroidOnlyIndex =
+		multivectorDocStorage == PGTURBOHYBRID_MULTIVECTOR_DOC_STORAGE_CENTROID_ONLY ||
+		(!proxyOnlyIndex &&
+		 (meta.tqMultivectorDocMapFlags &
+		  PGTURBOHYBRID_GRAPH_MULTIVECTOR_DOCMAP_FLAG_CENTROIDS) != 0 &&
+		 (meta.tqMultivectorDocMapFlags &
+		  PGTURBOHYBRID_GRAPH_MULTIVECTOR_DOCMAP_FLAG_DOC_VECTORS) == 0);
 	fullMultivectorSidecarAvailable =
 		(meta.tqMultivectorDocMapFlags &
 		 PGTURBOHYBRID_GRAPH_MULTIVECTOR_DOCMAP_FLAG_DOC_VECTORS) != 0;
+	centroidSidecarAvailable =
+		(meta.tqMultivectorDocMapFlags &
+		 PGTURBOHYBRID_GRAPH_MULTIVECTOR_DOCMAP_FLAG_CENTROIDS) != 0;
+	quantizedInvertedSidecarAvailable =
+		(meta.tqMultivectorDocMapFlags &
+		 PGTURBOHYBRID_GRAPH_MULTIVECTOR_DOCMAP_FLAG_QUANTIZED_POSTINGS) != 0 &&
+		(meta.tqMultivectorDocMapFlags &
+		 PGTURBOHYBRID_GRAPH_MULTIVECTOR_DOCMAP_FLAG_QUANTIZED_CODEBOOK) != 0;
+	effectiveMultivectorDocStorage = proxyOnlyIndex ?
+		PGTURBOHYBRID_MULTIVECTOR_DOC_STORAGE_PROXY_ONLY :
+		(centroidOnlyIndex ?
+		 PGTURBOHYBRID_MULTIVECTOR_DOC_STORAGE_CENTROID_ONLY :
+		 multivectorDocStorage);
+	exactRerankSourceSupported =
+		(proxyOnlyIndex || centroidOnlyIndex) ? "heap" :
+		(fullMultivectorSidecarAvailable ? "sidecar" : "none");
 	tqBm25MetaStartBlkno = meta.tqBm25MetaStartBlkno;
 	hasLexicalKey = PgturbohybridIndexHasLexical(index);
 	modelInfo =
@@ -1040,14 +1068,27 @@ pgturbohybrid_index_stats(PG_FUNCTION_ARGS)
 											  PGTURBOHYBRID_DEFAULT_MULTIVECTOR_DOC_BUILD_SCORER));
 	PgturbohybridIndexStatsJsonbAddString(&jsonState, "multivector_doc_storage",
 										  PgturbohybridMultiVectorDocStorageKindName(
-											  proxyOnlyIndex ?
-											  PGTURBOHYBRID_MULTIVECTOR_DOC_STORAGE_PROXY_ONLY :
-											  multivectorDocStorage));
+											  effectiveMultivectorDocStorage));
+	PgturbohybridIndexStatsJsonbAddString(&jsonState,
+										  "multivector_doc_storage_kind",
+										  PgturbohybridMultiVectorDocStorageKindName(
+											  effectiveMultivectorDocStorage));
 	PgturbohybridIndexStatsJsonbAddBool(&jsonState, "proxy_only_index",
 										proxyOnlyIndex);
+	PgturbohybridIndexStatsJsonbAddBool(&jsonState, "centroid_only_index",
+										centroidOnlyIndex);
 	PgturbohybridIndexStatsJsonbAddBool(&jsonState,
 										"full_multivector_sidecar_available",
 										fullMultivectorSidecarAvailable);
+	PgturbohybridIndexStatsJsonbAddBool(&jsonState,
+										"centroid_sidecar_available",
+										centroidSidecarAvailable);
+	PgturbohybridIndexStatsJsonbAddBool(&jsonState,
+										"quantized_inverted_sidecar_available",
+										quantizedInvertedSidecarAvailable);
+	PgturbohybridIndexStatsJsonbAddString(&jsonState,
+										  "exact_rerank_source_supported",
+										  exactRerankSourceSupported);
 	PgturbohybridIndexStatsJsonbAddString(&jsonState, "multivector_proxy_encoder",
 										  PgturbohybridMultiVectorProxyEncoderName(
 											  opts != NULL ?

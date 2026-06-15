@@ -227,9 +227,14 @@ typedef struct PgturbohybridScanStatsSnapshot
 	uint32		multivectorDocGraphEntrySampleEffective;
 	uint32		multivectorDocGraphEntrySampleScored;
 	uint64		multivectorDocGraphQuantizedScores;
+	uint64		compactMaxsimScoreUs;
+	uint64		compactMaxsimPairs;
 	char		multivectorDocGraphStorageKind[16];
 	bool		proxyOnlyIndex;
+	bool		centroidOnlyIndex;
 	bool		fullMultivectorSidecarAvailable;
+	bool		centroidSidecarAvailable;
+	bool		quantizedInvertedSidecarAvailable;
 	char		multivectorDocGraphRescoreSource[16];
 	uint32		multivectorDocGraphExactRerankDocs;
 	uint64		multivectorDocGraphHeapFetches;

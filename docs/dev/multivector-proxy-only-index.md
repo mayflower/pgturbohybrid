@@ -1,6 +1,9 @@
-# Multivector Proxy-Only Document-Node Index Design
+# Multivector Proxy-Only And Centroid-Only Document-Node Indexes
 
-Status: design proposal only. No code in this document is implemented.
+Status: experimental implementation exists. `multivector_doc_storage =
+proxy_only` and `multivector_doc_storage = centroid_only` are SQL-visible
+document-node storage tiers. They are not defaults and do not change final SQL
+ordering: retained candidates are still exact MaxSim-ranked.
 
 ## Problem
 
@@ -27,7 +30,8 @@ The current document-node design stores:
 - graph adjacency and native TurboQuant graph storage
 - a fixed-dimensional proxy vector/code for the graph node
 - docmap metadata for document identity and heap TID resolution
-- full document multivectors in the multivector docmap sidecar
+- full document multivectors in the multivector docmap sidecar, unless the
+  index is explicitly built as `proxy_only` or `centroid_only`
 - optional centroid tuples and centroid posting tuples
 - optional experimental quantized inverted posting/codebook tuples
 - optional entry-sidecar representatives
@@ -88,22 +92,21 @@ These paths can operate without full document multivector sidecar storage:
   - It requires access to all fixed-dimensional proxy vectors, but not full
     document sidecar vectors.
 
-## Proposed Storage Modes
+## Implemented Storage Modes
 
-Introduce a versioned document-node sidecar/storage tier concept:
+The current implementation exposes these storage kinds:
 
 ```text
-full_sidecar       current behavior: proxy + docmap + full vectors + optional payloads
+f32/f16/sq8        proxy + docmap + full document multivector sidecar
 proxy_only         graph proxy + docmap, no full document multivector sidecar
-proxy_plus_entries proxy_only + entry-sidecar representatives
-proxy_plus_centroids
-                  optional future tier: proxy + docmap + centroid payloads, no full vectors
+centroid_only      graph proxy + docmap + kmeans centroid/posting payloads,
+                  no full document multivector sidecar
 ```
 
-The first implementation should be limited to `proxy_only` and, if needed for
-entry experiments, `proxy_plus_entries`. Centroid and quantized modes should
-continue to require full or explicitly compatible sidecar payloads until they
-have their own versioned compact storage design.
+`proxy_only` is valid only for proxy-vector admission paths that can exact-rerank
+from heap multivectors. `centroid_only` is valid for centroid-lite admission
+with heap exact rerank. Full-sidecar candidate sources must fail clearly with
+REINDEX guidance when the required payload is absent.
 
 ## Required Metadata
 
@@ -128,11 +131,14 @@ admission, visibility, final heap fetch, and diagnostics:
 - graph metadata
   - `multivector_graph = document_nodes`.
   - graph `m`, `ef_construction`, adjacency pages, node count, and doc count.
-- storage capability flags
-  - `has_full_multivector_sidecar = false`.
-  - `has_centroid_sidecar = false` unless a future tier adds it.
-  - `has_quantized_inverted_sidecar = false` unless explicitly built.
-  - `has_entry_sidecar = true|false`.
+- storage capability flags, visible in `turbohybrid_index_stats()`:
+  - `multivector_doc_storage_kind = f32|f16|sq8|centroid_only|proxy_only`.
+  - `proxy_only_index = true|false`.
+  - `centroid_only_index = true|false`.
+  - `full_multivector_sidecar_available = true|false`.
+  - `centroid_sidecar_available = true|false`.
+  - `quantized_inverted_sidecar_available = true|false`.
+  - `exact_rerank_source_supported = heap|sidecar|none`.
 
 The proxy-only metadata must be included in `turbohybrid_index_stats()` so
 benchmark artifacts can prove which physical index tier was used.
@@ -231,12 +237,12 @@ bounded. The design should report:
 
 ## Versioning And REINDEX
 
-Proxy-only storage changes physical index capabilities. It must be explicit and
-versioned.
+Proxy-only and centroid-only storage change physical index capabilities. They
+must be explicit and versioned.
 
 Required compatibility rules:
 
-- Add a capability flag or sidecar storage kind to the graph/docmap metadata.
+- Record capability flags and sidecar storage kind in graph/docmap metadata.
 - Preserve current full-sidecar indexes as readable.
 - Do not reinterpret old full-sidecar indexes as proxy-only.
 - Do not silently run full-sidecar candidate sources on proxy-only indexes.
@@ -255,11 +261,12 @@ HINT:   Rebuild the index with full document multivector sidecar storage, or use
 
 ## Failure Rules
 
-Proxy-only indexes should fail, not silently fall back, for these requests:
+Proxy-only indexes fail, not silently fall back, for these requests:
 
 - `candidate_source = document_nodes` when that source means full sidecar
   scoring.
-- `candidate_source = centroid_lite` without centroid sidecar payloads.
+- `candidate_source = centroid_lite` because proxy-only storage has no centroid
+  sidecar payloads.
 - `candidate_source = quantized_inverted_experimental` without quantized
   posting/codebook sidecar payloads.
 - `candidate_source = exact_doc_scan` when it expects exact float32 sidecar
@@ -270,21 +277,32 @@ Proxy-only indexes should fail, not silently fall back, for these requests:
   make resident. This should either become a no-op with a clear stat in
   proxy-only mode or fail if the user requested full-sidecar cache behavior.
 
+Centroid-only indexes fail, not silently fall back, for requests that require a
+full document multivector sidecar, including `candidate_source = exact_doc_scan`
+and full `document_nodes` sidecar scoring. `centroid_lite` may run on
+centroid-only storage and exact-rerank from heap multivectors.
+
 Allowed behavior:
 
 - `candidate_source = proxy_vector` uses proxy graph admission and heap exact
   rerank.
-- `candidate_source = proxy_exact_scan` remains diagnostic-only and scans
-  persisted proxy vectors, then heap exact-reranks retained candidates.
+- `candidate_source = proxy_exact_scan` remains diagnostic-only if enabled and
+  scans persisted proxy vectors, then heap exact-reranks retained candidates.
 - Entry-sidecar variants run only if their own representative metadata is
   present.
 
 ## Stats And Diagnostics
 
-Minimum stats needed to make proxy-only benchmark evidence trustworthy:
+Stats needed to make proxy-only and centroid-only benchmark evidence
+trustworthy:
 
-- `multivector_document_node_storage = proxy_only | full_sidecar`
-- `multivector_full_sidecar_available = true | false`
+- `multivector_doc_storage_kind = f32|f16|sq8|centroid_only|proxy_only`
+- `proxy_only_index = true|false`
+- `centroid_only_index = true|false`
+- `full_multivector_sidecar_available = true|false`
+- `centroid_sidecar_available = true|false`
+- `quantized_inverted_sidecar_available = true|false`
+- `exact_rerank_source_supported = heap|sidecar|none`
 - `multivector_proxy_vector_bytes`
 - `multivector_docmap_bytes`
 - `multivector_full_sidecar_bytes`
@@ -300,10 +318,10 @@ Minimum stats needed to make proxy-only benchmark evidence trustworthy:
 
 Slow-path warnings should include:
 
-- `proxy_only_full_sidecar_source_requested`
-- `proxy_only_heap_rerank_exceeded_budget`
-- `proxy_only_exact_doc_scan_requested`
-- `proxy_only_centroid_payload_missing`
+- `proxy_only_full_sidecar_unexpected`
+- `centroid_only_full_sidecar_unexpected`
+- `exact_sidecar_requested_but_missing`
+- `heap_rerank_unbounded`
 
 ## Benchmark Plan
 
@@ -332,24 +350,19 @@ The acceptance threshold for proxy-only is not recall improvement. It should
 match the same proxy candidate source quality while reducing index size and
 keeping exact heap rerank latency within an agreed budget.
 
-## Open Questions For Review
+## Remaining Review Questions
 
-- Should proxy-only be a reloption, for example
-  `multivector_doc_storage = proxy_only`, or a new sidecar capability selected
-  automatically when exact sidecar storage is off?
-- Should `proxy_vector` default to heap exact rerank on proxy-only indexes, or
-  should users explicitly set `multivector_exact_rerank_source = heap`?
-- Should entry-sidecar representatives be allowed in the first proxy-only
-  implementation, or deferred to keep the first storage tier minimal?
-- Should proxy-only indexes keep token count metadata for query/model
-  validation even though token vectors are absent?
-- What is the minimum heap rerank latency target that justifies dropping the
-  full sidecar for x00k and 1M DBpedia serving?
+- Whether entry-sidecar representatives should be a common companion to
+  `proxy_only` for graph-entry experiments.
+- Whether centroid-only should grow a compact exact-rerank payload later, or
+  remain heap-rerank only.
+- What heap rerank latency target justifies dropping the full sidecar for x00k
+  and 1M DBpedia serving.
 
 ## Non-Goals
 
 - No change to final SQL ordering.
 - No approximate final ranking.
 - No production promise for `quantized_inverted_experimental`.
-- No new centroid or quantized payload format in this design.
-- No implementation until the design and failure rules are reviewed.
+- No new centroid or quantized payload format here.
+- No promotion of proxy-only or centroid-only to default serving profiles.

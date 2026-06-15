@@ -311,7 +311,9 @@ sidecar entries lazily for documents reached through postings, and report
 query-token posting list for benchmark tradeoff experiments before the exact
 MaxSim rerank. Positive caps use deterministic midpoint-spaced sampling across
 the posting list, not first-N truncation, and report
-`centroid_posting_cap_strategy = uniform_stride`. On token-node indexes it is a
+`centroid_posting_cap_strategy = uniform_stride`. Treat these uniform caps as
+diagnostic negative controls: they cannot be promoted unless admission recall
+improves while `centroid_docs_touched / doc_count` also drops. On token-node indexes it is a
 compatibility mode that uses exact token-scan admission before exact heap
 MaxSim rerank and reports
 `multivector_doc_graph_warning =
@@ -393,7 +395,10 @@ explicit `turbohybrid_multivector_field_weighted_maxsim()` scorer until the
 query payload carries field weights.
 
 Explicit `document_nodes` indexes store one graph node per heap document and a
-versioned float32 multivector sidecar. Production builds use a fixed-dimensional
+document-node storage tier. The full-sidecar tiers `f32`, `f16`, and `sq8`
+persist document multivectors in the docmap sidecar; `proxy_only` persists only
+the proxy graph/docmap data; `centroid_only` persists proxy graph/docmap data
+plus k-means centroid/posting sidecars. Production builds use a fixed-dimensional
 proxy vector for graph topology and reserve exact MaxSim for bounded final
 rerank. The diagnostic `multivector_doc_build_scorer = exact_symmetric` mode
 uses symmetrized document MaxSim during graph construction and is guarded by
@@ -404,10 +409,17 @@ scores graph nodes with the fixed-dimensional proxy vector and only touches full
 document multivectors for bounded exact rerank or explicitly selected full
 document-node sidecar modes. Non-proxy document-node scans score visited
 candidates with the selected `turbohybrid.multivector_doc_storage = f32 | f16 |
-sq8` sidecar. Near-exhaustive scans use the exact float32 sidecar scan.
+sq8` sidecar. `proxy_only` and `centroid_only` do not silently substitute a
+full-sidecar path: unsupported candidate sources fail with REINDEX guidance, and
+bounded exact rerank fetches heap multivectors. Near-exhaustive scans use the
+exact float32 sidecar scan only when that sidecar exists.
 `turbohybrid_index_stats()` reports
 `multivector_context_mode` and `multivector_field_mode` for benchmark
-provenance. `multivector_doc_graph_warning` reports
+provenance, plus storage capabilities:
+`multivector_doc_storage_kind`, `proxy_only_index`, `centroid_only_index`,
+`full_multivector_sidecar_available`, `centroid_sidecar_available`,
+`quantized_inverted_sidecar_available`, and
+`exact_rerank_source_supported`. `multivector_doc_graph_warning` reports
 `document_node_f32_sidecar_graph_traversal`,
 `document_node_f16_sidecar_graph_traversal`,
 `document_node_sq8_sidecar_graph_traversal`, or
@@ -419,10 +431,13 @@ Large document-node corpora can choose the sidecar cache policy explicitly:
 SET turbohybrid.multivector_doc_storage_cache = 'auto';     -- auto | resident | paged
 ```
 
-`auto` keeps plain `proxy_vector` document-node scans on the lazy paged sidecar
-path so graph admission uses only proxy vectors and full multivectors are
-touched only for bounded exact rerank. Other document-node scan modes may keep
-the document sidecar resident for latency-profile scans when it fits
+`auto` keeps plain `proxy_vector` document-node scans from loading the full
+sidecar for graph admission. On full-sidecar indexes, full multivectors are
+touched only for bounded exact rerank or explicit sidecar-scoring modes. On
+`proxy_only` and `centroid_only` indexes, bounded exact rerank uses heap
+multivectors because `full_multivector_sidecar_available = false`. Other
+document-node scan modes may keep the document sidecar resident for
+latency-profile scans when it fits
 `turbohybrid.native_cache_max_mb`; explicit `resident` still forces loaded
 native sidecar storage, while `paged` keeps graph adjacency resident and
 loads/touches sidecar pages for the scan. Last-scan stats expose
@@ -520,6 +535,18 @@ The default serving grid stays compact. Use
 experiments that need the additional `proxy_max_pool_f16` and
 `proxy_random_projection_fde_f16` profile names; pair it with
 `--document-node-serving-grid-profiles` to avoid widening unrelated runs.
+Use `--document-node-serving-grid-pure-dense-proxy-focus` when evaluating a
+replacement for the weak `normalized_mean` proxy admission baseline without
+BM25, learned sparse, or hybrid rescue. This mode compares
+`proxy_normalized_mean_proxy_only`, `proxy_max_pool_proxy_only`, and
+`proxy_random_projection_fde_proxy_only` over candidate budgets `800,1600,3200`
+and exact rerank `k = 100,400,800`; if
+`--multivector-learned-projection-path` is supplied, it also includes
+`proxy_learned_projection_v1_proxy_only`. Missing learned-projection weights
+fail before index build, and final retained candidates remain exact MaxSim
+ranked. Treat normalized mean as a latency baseline in this report, not as the
+main short-term ColBERT admission path when a stronger pure-dense proxy has
+nonzero admission at acceptable latency.
 Use `--document-node-serving-grid-include-bm25-rescue` only when admission loss
 is the question and the benchmark should build a BM25 key for lexical rescue
 profiles. The added `*_bm25_rescue` profiles are admission experiments: BM25
@@ -538,24 +565,37 @@ reuse the same persisted kmeans centroid sidecar as uncapped `centroid_lite_f16`
 and remain experimental admission evidence; final retained candidates are still
 ordered by exact MaxSim. Positive caps use deterministic uniform-stride posting
 sampling and expose `centroid_posting_cap_strategy` so reports distinguish
-uncapped full-list admission from capped sampling. Safe upper-bound pruning only
+uncapped full-list admission from capped sampling. Uniform cap rows are
+diagnostic only and should stay rejected unless they both improve admission
+recall and reduce documents touched; zero-quality cap rows are negative
+controls, not serving candidates. Safe upper-bound pruning only
 drops candidates when the persisted residual summary proves the centroid score
 is exact for that document; otherwise it keeps the candidate and reports
 `centroid_upper_bound_unsafe_fallbacks`.
 Use `--document-node-serving-grid-centroid-lite-focus` for a compact
 centroid-lite-only comparison of uncapped, capped `016/032/064`, guarded
-`safe_upper_bound` pruning, pooled `centroid_lite_f16_pool_050`, and
-`centroid_mean_f16` baseline rows.
-Use `--document-node-serving-grid-token-pooling-focus` when the next decision is
-whether document-node token pooling is safe for serving. It compares
-`proxy_normalized_mean_f16` and `centroid_mean_f16`, each with pooling `off`
-and `greedy_cosine` target ratios `0.75`, `0.50`, and `0.33`. Reports include
-pooled token counts, pooling ratio, exact rerank pairs, build time, latency,
-admission, and qrel metrics when available, plus
-`best_pooling_latency_safe`, `best_pooling_quality_safe`, and rejected pooling
-profiles. Pooling changes the persisted document multivectors, so pooled rows
-are separate index builds and final retained candidates are still ranked by
-exact MaxSim.
+`safe_upper_bound` pruning, scan-local bitset-prefilter measurement rows,
+pooled `centroid_lite_f16_pool_050`, and `centroid_mean_f16` baseline rows.
+Use `--document-node-serving-grid-token-pooling-memory-focus` when the next
+decision is whether document-node token pooling is the safest storage reduction
+path for 1M ColBERT indexes. The legacy
+`--document-node-serving-grid-token-pooling-focus` flag is an alias. The focus
+grid compares pure-ColBERT rows only: `proxy_max_pool_proxy_only`,
+`proxy_random_projection_fde_proxy_only`, and
+`document_nodes_sq8_paged_maxsim`, each with pooling `off` plus
+`greedy_cosine` target ratios `0.75` and `0.50`.
+`document_nodes_sq8_paged_maxsim` uses document-node graph admission with `sq8`
+storage, paged document sidecar access, approximate full MaxSim graph scoring,
+and exact heap MaxSim rerank for retained candidates. It excludes BM25 rescue,
+learned-sparse rescue, and centroid-lite cap rows. Reports include
+index/docmap/sidecar/graph bytes, memory gain versus the unpooled family
+baseline, pooled token counts, pooling ratio, exact rerank pairs, build time,
+latency, admission, `compact_maxsim_score_us`, `compact_maxsim_pairs`, and qrel
+metrics when available, plus
+`best_memory_safe_pooling`, `best_latency_safe_pooling`,
+`best_pooling_quality_safe`, and rejected pooling profiles. Pooling changes the
+persisted document multivectors, so pooled rows are separate index builds and
+final retained candidates are still ranked by exact MaxSim.
 If `--document-node-serving-grid-include-proxy-encoders` is also set, the grid
 adds `proxy_max_pool_f16_bm25_rescue` as a focused comparison for the stronger
 `max_pool` proxy baseline; the default BM25 rescue set remains unchanged.

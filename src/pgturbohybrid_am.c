@@ -1384,9 +1384,14 @@ typedef struct PgturbohybridLastScanStats
 	uint32		multivectorDocGraphEntrySampleEffective;
 	uint32		multivectorDocGraphEntrySampleScored;
 	uint64		multivectorDocGraphQuantizedScores;
+	uint64		compactMaxsimScoreUs;
+	uint64		compactMaxsimPairs;
 	char		multivectorDocGraphStorageKind[16];
 	bool		proxyOnlyIndex;
+	bool		centroidOnlyIndex;
 	bool		fullMultivectorSidecarAvailable;
+	bool		centroidSidecarAvailable;
+	bool		quantizedInvertedSidecarAvailable;
 	char		multivectorDocGraphRescoreSource[16];
 	uint32		multivectorDocGraphExactRerankDocs;
 	uint64		multivectorDocGraphHeapFetches;
@@ -1900,13 +1905,23 @@ PgturbohybridGetLastScanStatsSnapshot(PgturbohybridScanStatsSnapshot *stats)
 		pgturbohybrid_last_scan_state.multivectorDocGraphEntrySampleScored;
 	stats->multivectorDocGraphQuantizedScores =
 		pgturbohybrid_last_scan_state.multivectorDocGraphQuantizedScores;
+	stats->compactMaxsimScoreUs =
+		pgturbohybrid_last_scan_state.compactMaxsimScoreUs;
+	stats->compactMaxsimPairs =
+		pgturbohybrid_last_scan_state.compactMaxsimPairs;
 	strlcpy(stats->multivectorDocGraphStorageKind,
 			pgturbohybrid_last_scan_state.multivectorDocGraphStorageKind,
 			sizeof(stats->multivectorDocGraphStorageKind));
 	stats->proxyOnlyIndex =
 		pgturbohybrid_last_scan_state.proxyOnlyIndex;
+	stats->centroidOnlyIndex =
+		pgturbohybrid_last_scan_state.centroidOnlyIndex;
 	stats->fullMultivectorSidecarAvailable =
 		pgturbohybrid_last_scan_state.fullMultivectorSidecarAvailable;
+	stats->centroidSidecarAvailable =
+		pgturbohybrid_last_scan_state.centroidSidecarAvailable;
+	stats->quantizedInvertedSidecarAvailable =
+		pgturbohybrid_last_scan_state.quantizedInvertedSidecarAvailable;
 	strlcpy(stats->multivectorDocGraphRescoreSource,
 			pgturbohybrid_last_scan_state.multivectorDocGraphRescoreSource,
 			sizeof(stats->multivectorDocGraphRescoreSource));
@@ -6054,12 +6069,21 @@ PgturbohybridCollectScanResults(IndexScanDesc scan, PgturbohybridScanState *stat
 		denseStats.multivectorDocGraphEntrySampleScored;
 	lastStats.multivectorDocGraphQuantizedScores =
 		denseStats.multivectorDocGraphQuantizedScores;
+	lastStats.compactMaxsimScoreUs =
+		denseStats.compactMaxsimScoreUs;
+	lastStats.compactMaxsimPairs =
+		denseStats.compactMaxsimPairs;
 	strlcpy(lastStats.multivectorDocGraphStorageKind,
 			denseStats.multivectorDocGraphStorageKind,
 			sizeof(lastStats.multivectorDocGraphStorageKind));
 	lastStats.proxyOnlyIndex = denseStats.proxyOnlyIndex;
+	lastStats.centroidOnlyIndex = denseStats.centroidOnlyIndex;
 	lastStats.fullMultivectorSidecarAvailable =
 		denseStats.fullMultivectorSidecarAvailable;
+	lastStats.centroidSidecarAvailable =
+		denseStats.centroidSidecarAvailable;
+	lastStats.quantizedInvertedSidecarAvailable =
+		denseStats.quantizedInvertedSidecarAvailable;
 	strlcpy(lastStats.multivectorDocGraphRescoreSource,
 			denseStats.multivectorDocGraphRescoreSource,
 			sizeof(lastStats.multivectorDocGraphRescoreSource));

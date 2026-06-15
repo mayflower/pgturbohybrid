@@ -1039,6 +1039,7 @@ PgturbohybridGraphLoadMultiVectorDocMapWithStats(Relation index,
 			Size		itemSize = ItemIdGetLength(iid);
 			uint8		type = *((uint8 *) item);
 
+			CHECK_FOR_INTERRUPTS();
 			if (stats != NULL)
 			{
 				stats->bytesTouched += itemSize;
@@ -1071,6 +1072,7 @@ PgturbohybridGraphLoadMultiVectorDocMapWithStats(Relation index,
 					TqMultiVectorNodeMapEntry *entry =
 						&tuple->entries[i];
 
+					CHECK_FOR_INTERRUPTS();
 					if (nodeSeen[nodeId] ||
 						entry->docId >= meta->tqMultivectorDocCount)
 						PgturbohybridGraphMultiVectorDocMapError(index,
@@ -1107,6 +1109,7 @@ PgturbohybridGraphLoadMultiVectorDocMapWithStats(Relation index,
 					TqMultiVectorDocMapEntry *entry =
 						&tuple->entries[i];
 
+					CHECK_FOR_INTERRUPTS();
 					if (docSeen[docId] ||
 						entry->tokenCount == 0 ||
 						entry->firstNodeId >= meta->tqNodeCount ||
@@ -1322,8 +1325,11 @@ PgturbohybridGraphLoadMultiVectorDocMapWithStats(Relation index,
 					PgturbohybridGraphMultiVectorDocMapError(index,
 															 "document f16 centroid tuple chunks are not contiguous");
 				for (uint16 i = 0; i < tuple->count; i++)
+				{
+					CHECK_FOR_INTERRUPTS();
 					centroids->values[tuple->startFloat + i] =
 						PgturbohybridGraphHalfToFloat(tuple->values[i]);
+				}
 				centroidFloatCounts[tuple->docId] += tuple->count;
 			}
 			else if (type ==
@@ -1422,6 +1428,7 @@ PgturbohybridGraphLoadMultiVectorDocMapWithStats(Relation index,
 					PgturbohybridGraphMultiVectorCentroidPostingEntry *entry =
 						&tuple->entries[i];
 
+					CHECK_FOR_INTERRUPTS();
 					if (entry->docId >= meta->tqMultivectorDocCount ||
 						entry->unused != 0)
 						PgturbohybridGraphMultiVectorDocMapError(index,
@@ -1573,6 +1580,7 @@ PgturbohybridGraphLoadMultiVectorDocMapWithStats(Relation index,
 					PgturbohybridGraphMultiVectorQuantizedPostingEntry *entry =
 						&tuple->entries[i];
 
+					CHECK_FOR_INTERRUPTS();
 					if (entry->docId >= meta->tqMultivectorDocCount)
 						PgturbohybridGraphMultiVectorDocMapError(index,
 																 "quantized posting entry is invalid");
@@ -1692,6 +1700,7 @@ PgturbohybridGraphLoadMultiVectorDocMapWithStats(Relation index,
 		TqMultiVectorDocMapEntry *docEntry =
 			&storage->multivectorDocMap[nodeEntry->docId];
 
+		CHECK_FOR_INTERRUPTS();
 		if (nodeEntry->tokenOrdinal >= docEntry->tokenCount ||
 			(!documentNodes &&
 			 (nodeId < docEntry->firstNodeId ||
@@ -1715,6 +1724,7 @@ PgturbohybridGraphLoadMultiVectorDocMapWithStats(Relation index,
 					PgturbohybridMultiVectorFloatCount(entry->tokenCount,
 													   meta->dimensions);
 
+				CHECK_FOR_INTERRUPTS();
 				if (storage->multivectorDocVectors[docId] == NULL ||
 					vectorFloatCounts[docId] != totalFloats)
 				{
@@ -1755,6 +1765,7 @@ PgturbohybridGraphLoadMultiVectorDocMapWithStats(Relation index,
 				TqMultiVectorDocMapEntry *entry =
 					&storage->multivectorDocMap[docId];
 
+				CHECK_FOR_INTERRUPTS();
 				if ((uint64) expectedPostings + (uint64) entry->tokenCount >
 					(uint64) PG_UINT32_MAX)
 					PgturbohybridGraphMultiVectorDocMapError(index,
@@ -1788,6 +1799,7 @@ PgturbohybridGraphLoadMultiVectorDocMapWithStats(Relation index,
 			for (uint32 codeword = 0; codeword < quantizedPostingCodebookSize;
 				 codeword++)
 			{
+				CHECK_FOR_INTERRUPTS();
 				listOffsets[codeword + 1] =
 					listOffsets[codeword] + quantizedPostingListCounts[codeword];
 				listWrite[codeword] = listOffsets[codeword];
@@ -1803,6 +1815,7 @@ PgturbohybridGraphLoadMultiVectorDocMapWithStats(Relation index,
 				TqMultiVectorDocMapEntry *docEntry;
 				uint32		offset;
 
+				CHECK_FOR_INTERRUPTS();
 				if (codeword >= quantizedPostingCodebookSize)
 					PgturbohybridGraphMultiVectorDocMapError(index,
 															 "quantized posting entry has invalid codeword");
@@ -1820,6 +1833,7 @@ PgturbohybridGraphLoadMultiVectorDocMapWithStats(Relation index,
 				TqMultiVectorDocMapEntry *entry =
 					&storage->multivectorDocMap[docId];
 
+				CHECK_FOR_INTERRUPTS();
 				if (docPostingCounts[docId] != (uint32) entry->tokenCount)
 					PgturbohybridGraphMultiVectorDocMapError(index,
 															 "quantized posting sidecar does not cover every document token");
@@ -1841,6 +1855,7 @@ PgturbohybridGraphLoadMultiVectorDocMapWithStats(Relation index,
 					storage->multivectorDocCentroids[docId];
 				Size		totalFloats;
 
+				CHECK_FOR_INTERRUPTS();
 				if (centroids == NULL)
 					PgturbohybridGraphMultiVectorDocMapError(index,
 															 "document-node docmap does not cover every document centroid");
@@ -1864,6 +1879,7 @@ PgturbohybridGraphLoadMultiVectorDocMapWithStats(Relation index,
 					PgturbohybridMultiVector *centroids =
 						storage->multivectorDocCentroids[docId];
 
+					CHECK_FOR_INTERRUPTS();
 					if ((uint64) expectedPostings + (uint64) centroids->count >
 						(uint64) PG_UINT32_MAX)
 						PgturbohybridGraphMultiVectorDocMapError(index,
@@ -1897,6 +1913,7 @@ PgturbohybridGraphLoadMultiVectorDocMapWithStats(Relation index,
 				for (uint32 codeword = 0; codeword < centroidPostingCodebookSize;
 					 codeword++)
 				{
+					CHECK_FOR_INTERRUPTS();
 					listOffsets[codeword + 1] =
 						listOffsets[codeword] + centroidPostingListCounts[codeword];
 					listWrite[codeword] = listOffsets[codeword];
@@ -1912,6 +1929,7 @@ PgturbohybridGraphLoadMultiVectorDocMapWithStats(Relation index,
 					PgturbohybridMultiVector *centroids;
 					uint32		offset;
 
+					CHECK_FOR_INTERRUPTS();
 					if (codeword >= centroidPostingCodebookSize)
 						PgturbohybridGraphMultiVectorDocMapError(index,
 																 "centroid posting entry has invalid codeword");
@@ -1929,6 +1947,7 @@ PgturbohybridGraphLoadMultiVectorDocMapWithStats(Relation index,
 					PgturbohybridMultiVector *centroids =
 						storage->multivectorDocCentroids[docId];
 
+					CHECK_FOR_INTERRUPTS();
 					if (docPostingCounts[docId] != (uint32) centroids->count)
 						PgturbohybridGraphMultiVectorDocMapError(index,
 																 "centroid posting sidecar does not cover every document centroid");

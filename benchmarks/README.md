@@ -133,8 +133,12 @@ grid can still measure those branches directly.
 Prompt 11 has started the production document-node path by adding the persisted
 index option `multivector_graph = token_nodes | document_nodes` and the
 `turbohybrid_index_stats()` field `multivector_graph_mode`. Explicit
-`document_nodes` indexes store one graph node per heap document plus a versioned
-index-resident float32 multivector sidecar. Build-time edge selection uses
+`document_nodes` indexes store one graph node per heap document plus an explicit
+document-node storage tier. `f32`, `f16`, and `sq8` include a full multivector
+sidecar. `proxy_only` includes proxy graph/docmap data without the full
+multivector sidecar. `centroid_only` includes proxy graph/docmap data plus
+k-means centroid/posting payloads without the full multivector sidecar.
+Build-time edge selection uses
 symmetrized document MaxSim. Incremental document-node inserts use the same
 document-level scorer for candidate collection, neighbor selection, and
 reciprocal pruning; the representative vector stored in the dense graph is not
@@ -142,16 +146,21 @@ used as a silent graph-link fallback. Non-exhaustive scans traverse document gra
 adjacency and score visited candidates with the selected document sidecar scoring
 storage before heap rerank; near-exhaustive scans use the exact float32 sidecar
 scan as the correctness reference. Set
-`turbohybrid.multivector_doc_storage = f32 | f16 | sq8` or pass
-`--multivector-doc-storage f32|f16|sq8` in the DBpedia benchmark. Control
+`turbohybrid.multivector_doc_storage = f32 | f16 | sq8 | proxy_only |
+centroid_only` or pass
+`--multivector-doc-storage f32|f16|sq8|proxy_only|centroid_only` in the DBpedia
+benchmark. Control
 whether the document sidecar is reused as resident cache or loaded through
 shared-buffer page reads with
 `turbohybrid.multivector_doc_storage_cache = auto | resident | paged` or
 `--multivector-doc-storage-cache auto|resident|paged`. For plain `proxy_vector`
-document-node serving, `auto` uses the lazy paged sidecar path so proxy graph
-admission stays on fixed-dimensional proxy data and full document multivectors
-are touched only for bounded exact rerank. Other document-node scan modes may
-keep low-latency profile scans resident when the sidecar fits
+document-node serving, graph admission stays on fixed-dimensional proxy data.
+Full-sidecar indexes touch full document multivectors only for bounded exact
+rerank or explicit sidecar-scoring modes. `proxy_only` and `centroid_only`
+indexes have `full_multivector_sidecar_available = false`; their bounded exact
+rerank fetches heap multivectors and unsupported full-sidecar candidate sources
+fail with REINDEX guidance instead of falling back. Other document-node scan
+modes may keep low-latency profile scans resident when the sidecar fits
 `turbohybrid.native_cache_max_mb`; explicit `resident` still forces loaded
 sidecar storage, and explicit `paged` is useful for cold-sidecar measurements
 because graph adjacency can remain native-cached while document sidecar page
@@ -160,7 +169,10 @@ reads are counted per scan. The warning is
 `document_node_f16_sidecar_graph_traversal`,
 `document_node_sq8_sidecar_graph_traversal`, or
 `document_node_f32_sidecar_exact_scan`. Scan stats report
-`multivector_doc_graph_storage_kind`,
+`multivector_doc_graph_storage_kind`, `multivector_doc_storage_kind`,
+`proxy_only_index`, `centroid_only_index`,
+`full_multivector_sidecar_available`, `centroid_sidecar_available`,
+`quantized_inverted_sidecar_available`, `exact_rerank_source_supported`,
 `multivector_doc_graph_quantized_scores`, and
 `multivector_doc_graph_rescore_source`; sidecar cache stats report
 `multivector_doc_sidecar_cache_mode`,
@@ -280,7 +292,18 @@ default; add `--document-node-serving-grid-include-experimental` only for
 research runs. Add `--document-node-serving-grid-include-proxy-encoders` only
 when explicitly comparing additional proxy encoders; it adds
 `proxy_max_pool_f16` and `proxy_random_projection_fde_f16` to the known profile
-set without changing the default compact grid. Add
+set without changing the default compact grid. Use
+`--document-node-serving-grid-pure-dense-proxy-focus` when the comparison should
+stop treating `normalized_mean` as the main short-term ColBERT proxy admission
+path and focus only on stronger pure-dense proxy encoders. That mode compares
+`proxy_normalized_mean_proxy_only`, `proxy_max_pool_proxy_only`, and
+`proxy_random_projection_fde_proxy_only` over candidate budgets `800,1600,3200`
+and exact rerank `k = 100,400,800`; if
+`--multivector-learned-projection-path` is supplied, it also includes
+`proxy_learned_projection_v1_proxy_only`. Missing learned-projection weights
+fail before index build. The mode excludes BM25 rescue, learned-sparse rescue,
+hybrid fusion, and in-PostgreSQL training; final retained candidates remain
+exact MaxSim ranked. Add
 `--document-node-serving-grid-include-bm25-rescue` only for focused
 candidate-admission experiments that should compare lexical rescue against the
 dense-only profiles; it adds `proxy_normalized_mean_f16_bm25_rescue` and
@@ -426,26 +449,40 @@ rows reuse the same physical kmeans centroid index as uncapped
 `centroid_lite_f16`; they are not default serving profiles and should be read
 as admission/latency tradeoff evidence for the experimental centroid-lite path.
 Positive caps use deterministic uniform-stride posting sampling and expose
-`centroid_posting_cap_strategy` in scan stats. Safe upper-bound pruning only
+`centroid_posting_cap_strategy` in scan stats. Uniform cap rows are diagnostic
+negative controls: do not promote them unless admission recall improves and
+`centroid_docs_touched / doc_count` drops. Safe upper-bound pruning only
 drops candidates when the persisted residual summary proves the centroid score
 is exact for that document; otherwise it keeps the candidate and reports
 `centroid_upper_bound_unsafe_fallbacks`.
 Use `--document-node-serving-grid-centroid-lite-focus` when the only question is
 the centroid-lite cap/pruning tradeoff. It restricts the grid to uncapped
 `centroid_lite_f16`, capped `016/032/064` variants, the corresponding
-`safe_upper_bound` pruning rows, `centroid_lite_f16_pool_050`, and the
-`centroid_mean_f16` baseline with the largest candidate budget by default.
-Use `--document-node-serving-grid-token-pooling-focus` when the question is
-whether greedy token pooling reduces build cost, sidecar size, exact MaxSim
-pairs, and latency without losing admission quality. It compares
-`proxy_normalized_mean_f16` and `centroid_mean_f16` with pooling `off` and
-`greedy_cosine` target ratios `0.75`, `0.50`, and `0.33`. The JSON adds
+`safe_upper_bound` pruning rows, scan-local bitset-prefilter measurement rows,
+`centroid_lite_f16_pool_050`, and the `centroid_mean_f16` baseline with the
+largest candidate budget by default.
+Use `--document-node-serving-grid-token-pooling-memory-focus` when the question
+is whether greedy token pooling can make 1M document-node storage/builds
+tractable before tuning centroid-lite caps. The legacy
+`--document-node-serving-grid-token-pooling-focus` flag is an alias. The focus
+grid compares pure-ColBERT storage-reduction rows only:
+`proxy_max_pool_proxy_only`, `proxy_random_projection_fde_proxy_only`, and
+`document_nodes_sq8_paged_maxsim`, each with pooling `off` plus
+`greedy_cosine` target ratios `0.75` and `0.50`.
+`document_nodes_sq8_paged_maxsim` builds a document-node `sq8` index, keeps the
+document sidecar paged during graph admission, scores graph candidates with
+approximate full MaxSim, and exact-reranks retained candidates from heap
+multivectors. It does not include BM25 rescue, learned-sparse rescue, or
+centroid-lite cap rows. The JSON adds
 `document_node_token_pooling_recommendation` with
-`best_pooling_latency_safe`, `best_pooling_quality_safe`, and rejected pooling
-profiles; Markdown repeats pooled-token, pooling-ratio, exact-pair, build-time,
-latency, admission, and quality evidence. Pooling changes the physical index
-signature, so pooled rows are separate build variants rather than scan-time
-GUC-only comparisons.
+`best_memory_safe_pooling`, `best_latency_safe_pooling`,
+`best_pooling_quality_safe`, rejected pooling profiles, index bytes, docmap
+bytes, sidecar bytes, graph bytes, pooled-token counts, pooling ratio, exact
+pair counts, `compact_maxsim_score_us`, `compact_maxsim_pairs`, build time,
+latency, admission, and qrel metrics when available.
+Pooling changes the physical index signature, so pooled rows are separate build
+variants rather than scan-time GUC-only comparisons. Final retained candidates
+are still ranked by exact MaxSim.
 Add `--document-node-serving-grid-include-entry-sidecar` only for focused graph
 entry admission experiments. It appends `proxy_normalized_mean_f16_entry_sidecar`
 and `centroid_mean_f16_entry_sidecar`, builds `entry_sidecar = on` indexes with
@@ -683,8 +720,8 @@ Use this decision tree before widening a document-node benchmark:
   rescue as focused admission experiments.
 - If `centroid_lite` is slow, inspect
   `centroid_docs_touched / doc_count`, posting counts, and posting-cap
-  warnings. Try centroid-lite caps or upper-bound pruning evidence before
-  tuning exact MaxSim.
+  warnings. Treat uniform caps as diagnostics only; use upper-bound pruning or
+  bitset-prefilter evidence before tuning exact MaxSim.
 - If exact rerank dominates latency, lower `--serving-exact-rerank-k`, test
   token pooling, verify the SIMD kernel, and then consider adaptive rerank
   changes.
@@ -773,9 +810,9 @@ python benchmarks/dbpedia_colbert_multivector.py \
   --max-docs 10000 \
   --max-queries 50 \
   --reuse-data \
-  --document-node-serving-grid-token-pooling-focus \
-  --output .nix-dev/tmp/dbpedia-colbert-token-pooling-focus-10k.json \
-  --markdown-output .nix-dev/tmp/dbpedia-colbert-token-pooling-focus-10k.md
+  --document-node-serving-grid-token-pooling-memory-focus \
+  --output .nix-dev/tmp/dbpedia-colbert-token-pooling-memory-focus-10k.json \
+  --markdown-output .nix-dev/tmp/dbpedia-colbert-token-pooling-memory-focus-10k.md
 ```
 
 For SPLADE/SPLATE-style exported sparse vectors, use the explicit sparse

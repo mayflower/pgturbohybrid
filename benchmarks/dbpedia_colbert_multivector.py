@@ -37,6 +37,68 @@ except ImportError:  # pragma: no cover - exercised by --help without bench deps
     psycopg = None  # type: ignore[assignment]
 
 
+class SyntheticQueryCanceled(Exception):
+    """Local stand-in for psycopg QueryCanceled in pure-Python self-checks."""
+
+
+def query_canceled_exception_types() -> tuple[type[BaseException], ...]:
+    if psycopg is None:
+        return (SyntheticQueryCanceled,)
+    return (psycopg.errors.QueryCanceled, SyntheticQueryCanceled)
+
+
+def psycopg_error_exception_types() -> tuple[type[BaseException], ...]:
+    if psycopg is None:
+        return ()
+    return (psycopg.Error,)
+
+
+def connection_is_closed(conn: Any) -> bool:
+    return bool(getattr(conn, "closed", False))
+
+
+def start_query_hard_timeout_watchdog(
+    conn: Any,
+    timeout_ms: int,
+) -> tuple[threading.Event, Callable[[], None]]:
+    triggered = threading.Event()
+    stopped = threading.Event()
+    if timeout_ms <= 0 or psycopg is None or conn is None or connection_is_closed(conn):
+        return triggered, stopped.set
+    backend_pid = getattr(getattr(conn, "info", None), "backend_pid", None)
+    if backend_pid is None:
+        return triggered, stopped.set
+    try:
+        params = dict(conn.info.get_parameters())
+    except Exception:
+        return triggered, stopped.set
+    hard_timeout_ms = timeout_ms + min(max(1000, timeout_ms // 10), 5000)
+
+    def terminate_backend_after_timeout() -> None:
+        if stopped.wait(hard_timeout_ms / 1000.0):
+            return
+        triggered.set()
+        try:
+            with psycopg.connect(**params, autocommit=True) as guard_conn:
+                with guard_conn.cursor() as cur:
+                    cur.execute("SELECT pg_terminate_backend(%s)", (backend_pid,))
+        except Exception:
+            pass
+
+    thread = threading.Thread(
+        target=terminate_backend_after_timeout,
+        name="pgturbohybrid-query-hard-timeout",
+        daemon=True,
+    )
+    thread.start()
+
+    def stop() -> None:
+        stopped.set()
+        thread.join(timeout=0.05)
+
+    return triggered, stop
+
+
 DEFAULT_METHODS = "pgturbohybrid_colbert_multivector_query_only"
 QUERY_ONLY_METHOD = "pgturbohybrid_colbert_multivector_query_only"
 RRF_METHOD = "pgturbohybrid_colbert_multivector_rrf"
@@ -56,7 +118,16 @@ COLBERT_MODEL_DIMENSIONS = {
     "vidore/colpali-v1.2": 128,
     "colpali-like-visual": 128,
 }
-DOCUMENT_NODE_STORAGE_CHOICES = ("f32", "f16", "sq8", "centroid_only")
+DOCUMENT_NODE_STORAGE_CHOICES = ("f32", "f16", "sq8", "centroid_only", "proxy_only")
+STORAGE_CAPABILITY_KEYS = (
+    "multivector_doc_storage_kind",
+    "proxy_only_index",
+    "centroid_only_index",
+    "full_multivector_sidecar_available",
+    "centroid_sidecar_available",
+    "quantized_inverted_sidecar_available",
+    "exact_rerank_source_supported",
+)
 DOCUMENT_NODE_STORAGE_CACHE_CHOICES = ("auto", "resident", "paged")
 DOCUMENT_NODE_TOKEN_POOLING_CHOICES = ("off", "kmeans", "greedy_cosine")
 DOCUMENT_NODE_CENTROIDS_CHOICES = ("off", "kmeans")
@@ -196,22 +267,27 @@ DOCUMENT_NODE_COLBERT_CENTROID_LITE_FOCUS_BUDGET_SWEEP = ",".join(
 DOCUMENT_NODE_COLBERT_CENTROID_LITE_FOCUS_PROFILES = (
     "centroid_mean_f16",
     "centroid_lite_f16",
+    "centroid_lite_f16_bitset_prefilter",
     "centroid_lite_f16_prune_safe_upper_bound",
     "centroid_lite_f16_cap_016",
     "centroid_lite_f16_cap_016_prune_safe_upper_bound",
     "centroid_lite_f16_cap_032",
+    "centroid_lite_f16_cap_032_bitset_prefilter",
     "centroid_lite_f16_cap_032_prune_safe_upper_bound",
     "centroid_lite_f16_cap_064",
     "centroid_lite_f16_cap_064_prune_safe_upper_bound",
     "centroid_lite_f16_pool_050",
     "centroid_lite_f16_pool_050_cap_032",
+    "centroid_lite_f16_pool_050_cap_032_bitset_prefilter",
     "centroid_lite_f16_pool_050_cap_032_prune_safe_upper_bound",
 )
 DOCUMENT_NODE_SERVING_GRID_CENTROID_LITE_FOCUS_PROFILES = (
     "centroid_lite_f16",
+    "centroid_lite_f16_bitset_prefilter",
     "centroid_lite_f16_cap_016",
     "centroid_lite_f16_cap_016_prune_safe_upper_bound",
     "centroid_lite_f16_cap_032",
+    "centroid_lite_f16_cap_032_bitset_prefilter",
     "centroid_lite_f16_cap_032_prune_safe_upper_bound",
     "centroid_lite_f16_cap_064",
     "centroid_lite_f16_cap_064_prune_safe_upper_bound",
@@ -220,14 +296,32 @@ DOCUMENT_NODE_SERVING_GRID_CENTROID_LITE_FOCUS_PROFILES = (
     "centroid_mean_f16",
 )
 DOCUMENT_NODE_SERVING_GRID_TOKEN_POOLING_FOCUS_PROFILES = (
-    "proxy_normalized_mean_f16",
-    "proxy_normalized_mean_f16_pool_075",
-    "proxy_normalized_mean_f16_pool_050",
-    "proxy_normalized_mean_f16_pool_033",
-    "centroid_mean_f16",
-    "centroid_mean_f16_pool_075",
-    "centroid_mean_f16_pool_050",
-    "centroid_mean_f16_pool_033",
+    "proxy_max_pool_proxy_only",
+    "proxy_max_pool_proxy_only_pool_075",
+    "proxy_max_pool_proxy_only_pool_050",
+    "proxy_random_projection_fde_proxy_only",
+    "proxy_random_projection_fde_proxy_only_pool_075",
+    "proxy_random_projection_fde_proxy_only_pool_050",
+    "document_nodes_sq8_paged_maxsim",
+    "document_nodes_sq8_paged_maxsim_pool_075",
+    "document_nodes_sq8_paged_maxsim_pool_050",
+)
+DOCUMENT_NODE_SERVING_GRID_PURE_DENSE_PROXY_FOCUS_PROFILES = (
+    "proxy_normalized_mean_proxy_only",
+    "proxy_max_pool_proxy_only",
+    "proxy_random_projection_fde_proxy_only",
+)
+DOCUMENT_NODE_SERVING_GRID_PURE_DENSE_PROXY_FOCUS_LEARNED_PROFILES = (
+    "proxy_learned_projection_v1_proxy_only",
+)
+DOCUMENT_NODE_SERVING_GRID_PURE_DENSE_PROXY_BUDGET_SWEEP = "800,1600,3200"
+DOCUMENT_NODE_SERVING_GRID_PURE_DENSE_PROXY_EF = (800,)
+DOCUMENT_NODE_SERVING_GRID_PURE_DENSE_PROXY_OVERSAMPLING = (1,)
+DOCUMENT_NODE_SERVING_GRID_PURE_DENSE_PROXY_RERANK_K = (100, 400, 800)
+DOCUMENT_NODE_SERVING_GRID_PURE_DENSE_PROXY_STRONG_ENCODERS = (
+    "max_pool",
+    "random_projection_fde",
+    "learned_projection_v1",
 )
 DOCUMENT_NODE_SERVING_GRID_LEARNED_SPARSE_FOCUS_PROFILES = (
     "proxy_normalized_mean_f16",
@@ -259,6 +353,8 @@ DOCUMENT_NODE_COLBERT_1M_GRID_BASE_PROFILES = (
     "centroid_lite_centroid_only",
     "centroid_lite_centroid_only_cap_016",
     "centroid_lite_centroid_only_cap_032",
+    "centroid_lite_centroid_only_cap_032_bitset_prefilter",
+    "centroid_lite_centroid_only_cap_032_prune_safe_upper_bound",
     "centroid_lite_centroid_only_cap_064",
     "centroid_lite_centroid_only_pool_050",
 )
@@ -291,6 +387,8 @@ DOCUMENT_NODE_COLBERT_BEIR_QUALITY_PROFILES = (
     "centroid_mean_f16",
     "centroid_lite_centroid_only",
     "centroid_lite_centroid_only_cap_032",
+    "centroid_lite_centroid_only_cap_032_bitset_prefilter",
+    "centroid_lite_centroid_only_cap_032_prune_safe_upper_bound",
     "centroid_lite_centroid_only_cap_064",
     "centroid_lite_centroid_only_pool_050",
 )
@@ -301,6 +399,8 @@ DOCUMENT_NODE_COLBERT_SAMPLED_ADMISSION_PROFILES = (
     "proxy_normalized_mean_proxy_only",
     "centroid_lite_centroid_only",
     "centroid_lite_centroid_only_cap_032",
+    "centroid_lite_centroid_only_cap_032_bitset_prefilter",
+    "centroid_lite_centroid_only_cap_032_prune_safe_upper_bound",
     "centroid_lite_centroid_only_pool_050",
 )
 DOCUMENT_NODE_COLBERT_SAMPLED_ADMISSION_EXPERIMENTAL_PROFILES = (
@@ -310,11 +410,17 @@ DOCUMENT_NODE_COLBERT_CANDIDATE_SOURCE_FOCUS_PROFILES = (
     "proxy_normalized_mean_proxy_only",
     "centroid_lite_centroid_only",
     "centroid_lite_centroid_only_cap_032",
+    "centroid_lite_centroid_only_cap_032_bitset_prefilter",
+    "centroid_lite_centroid_only_cap_032_prune_safe_upper_bound",
     "centroid_lite_centroid_only_cap_064",
     "centroid_lite_centroid_only_pool_050",
 )
 DOCUMENT_NODE_COLBERT_CANDIDATE_SOURCE_FOCUS_EXPERIMENTAL_PROFILES = (
     "quantized_inverted_experimental_f32",
+)
+DOCUMENT_NODE_ORACLE_QUALITY_CHECK_PROFILES = (
+    "proxy_normalized_mean_proxy_only",
+    "centroid_lite_centroid_only_cap_032",
 )
 DOCUMENT_NODE_DOCMAP_FORMAT_LIMIT_BYTES = (1 << 32) - 1
 DOCUMENT_NODE_COLBERT_QUANTIZED_INVERTED_FOCUS_PROFILES = (
@@ -488,6 +594,8 @@ SERVING_STATS_FIELD_GROUPS: dict[str, tuple[str, ...]] = {
         "multivector_exact_heap_fetch_time_us",
         "multivector_exact_maxsim_rerank_time_us",
         "multivector_final_sort_time_us",
+        "compact_maxsim_score_us",
+        "compact_maxsim_pairs",
         "multivector_candidate_source_us",
         "multivector_doc_graph_traversal_us",
         "multivector_proxy_scoring_us",
@@ -622,6 +730,7 @@ class DocumentNodeServingProfile:
     coverage_reservoir_k: int = 10
     centroid_lite_max_postings_per_token: int = 0
     centroid_lite_pruning: str = "off"
+    centroid_lite_bitset_prefilter: str = "off"
     entry_sample_count: int = 0
     entry_sidecar: bool = False
     entry_sidecar_representatives: int = 128
@@ -634,6 +743,7 @@ class DocumentNodeServingConfig:
     profile: DocumentNodeServingProfile
     ef: int
     oversampling: int
+    exact_rerank_k: int | None = None
 
 
 def require_pyarrow() -> Any:
@@ -907,8 +1017,13 @@ def document_node_serving_plan_metadata(
             "profile": config.profile.name,
             "ef": config.ef,
             "oversampling": config.oversampling,
+            "exact_rerank_k": config.exact_rerank_k,
             "index_signature": serializable_index_signature(
                 serving_profile_index_signature(args, config.profile)
+            ),
+            "storage_capabilities": storage_capabilities_from_stats(
+                None,
+                fallback_storage_kind=config.profile.storage_kind,
             ),
         }
         for config in configs
@@ -929,6 +1044,10 @@ def document_node_serving_plan_metadata(
         "budget_sweep": budget_sweep,
         "ef_grid": ef_grid,
         "oversampling_grid": oversampling_grid,
+        "exact_rerank_grid": sorted(
+            value for value in {config.exact_rerank_k for config in configs}
+            if value is not None
+        ),
         "profile_names": [profile.name for profile in profiles],
         "profile_plan": profile_plan,
         "profile_plan_hash": profile_plan_hash,
@@ -3307,6 +3426,9 @@ def set_colbert_gucs(conn: psycopg.Connection[Any], args: argparse.Namespace) ->
         "turbohybrid.multivector_centroid_lite_pruning": str(
             args.multivector_centroid_lite_pruning
         ),
+        "turbohybrid.multivector_centroid_lite_bitset_prefilter": str(
+            args.multivector_centroid_lite_bitset_prefilter
+        ),
         "turbohybrid.multivector_candidate_source": args.multivector_candidate_source,
         "turbohybrid.multivector_branch_plan": getattr(args, "multivector_branch_plan", "auto"),
         "turbohybrid.multivector_plain_fallback": args.multivector_plain_fallback,
@@ -3365,6 +3487,9 @@ def set_retrieval_gucs(conn: psycopg.Connection[Any], args: argparse.Namespace, 
         ),
         "turbohybrid.multivector_centroid_lite_pruning": str(
             args.multivector_centroid_lite_pruning
+        ),
+        "turbohybrid.multivector_centroid_lite_bitset_prefilter": str(
+            args.multivector_centroid_lite_bitset_prefilter
         ),
         "turbohybrid.multivector_candidate_source": args.multivector_candidate_source,
         "turbohybrid.multivector_branch_plan": getattr(args, "multivector_branch_plan", "auto"),
@@ -5206,6 +5331,192 @@ def aggregate_sampled_oracle_admission(
     }
 
 
+def qrel_metrics_for_single_query(
+    doc_ids: Sequence[str],
+    relevant: dict[str, int],
+    *,
+    k: int = 10,
+) -> dict[str, float]:
+    docs = [str(doc_id) for doc_id in doc_ids[:k]]
+    rels = [int(relevant.get(doc_id, 0) or 0) for doc_id in docs]
+    ideal = sorted((int(value) for value in relevant.values()), reverse=True)[:k]
+    ideal_dcg = dcg(ideal)
+    hits = sum(1 for rel in rels if rel > 0)
+    rr = 0.0
+    for rank, rel in enumerate(rels, start=1):
+        if rel > 0:
+            rr = 1.0 / rank
+            break
+    return {
+        f"recall@{k}": round(hits / min(len(relevant), k), 6)
+        if relevant
+        else 0.0,
+        f"ndcg@{k}": round(dcg(rels) / ideal_dcg, 6) if ideal_dcg > 0 else 0.0,
+        f"mrr@{k}": round(rr, 6),
+    }
+
+
+def oracle_quality_docid_mapping_warnings(
+    *,
+    relevant: dict[str, int],
+    exact_doc_ids: Sequence[str],
+    candidate_doc_ids: Sequence[str],
+) -> list[str]:
+    warnings: list[str] = []
+    if not relevant:
+        return warnings
+    relevant_ids = {str(doc_id) for doc_id in relevant}
+    exact_ids = {str(doc_id) for doc_id in exact_doc_ids}
+    candidate_ids = {str(doc_id) for doc_id in candidate_doc_ids}
+    if exact_ids and exact_ids.isdisjoint(relevant_ids):
+        warnings.append("exact_doc_scan_top10_no_qrel_overlap")
+    if candidate_ids and candidate_ids.isdisjoint(relevant_ids):
+        warnings.append("candidate_source_top10_no_qrel_overlap")
+    return warnings
+
+
+def oracle_quality_query_row(
+    *,
+    query_id: str,
+    relevant: dict[str, int],
+    exact_doc_ids: Sequence[str],
+    candidate_doc_ids: Sequence[str],
+    candidate_source: str,
+) -> dict[str, Any]:
+    exact_metrics = qrel_metrics_for_single_query(exact_doc_ids, relevant, k=10)
+    candidate_metrics = qrel_metrics_for_single_query(candidate_doc_ids, relevant, k=10)
+    admission = sampled_oracle_admission_for_query(
+        retrieved_doc_ids=candidate_doc_ids,
+        exact_rows=[
+            {"rank": index + 1, "doc_id": str(doc_id)}
+            for index, doc_id in enumerate(exact_doc_ids[:10])
+        ],
+        oracle_top_k=10,
+    )
+    warnings = oracle_quality_docid_mapping_warnings(
+        relevant=relevant,
+        exact_doc_ids=exact_doc_ids[:10],
+        candidate_doc_ids=candidate_doc_ids[:10],
+    )
+    return {
+        "query_id": str(query_id),
+        "qrels_count": len(relevant),
+        "exact_doc_scan_top10_docids": [str(doc_id) for doc_id in exact_doc_ids[:10]],
+        "exact_doc_scan_recall@10": exact_metrics["recall@10"],
+        "exact_doc_scan_ndcg@10": exact_metrics["ndcg@10"],
+        "exact_doc_scan_mrr@10": exact_metrics["mrr@10"],
+        "candidate_source": candidate_source,
+        "candidate_source_top10_docids": [
+            str(doc_id) for doc_id in candidate_doc_ids[:10]
+        ],
+        "exact_top1_admitted": admission.get("exact_top1_admitted"),
+        "exact_top10_admission_recall": admission.get(
+            "exact_top10_admission_recall"
+        ),
+        "exact_topk_admission_recall": admission.get("exact_topk_admission_recall"),
+        "candidate_source_exact_top1_admitted": admission.get("exact_top1_admitted"),
+        "candidate_source_exact_top10_admission_recall": admission.get(
+            "exact_top10_admission_recall"
+        ),
+        "recall@10": candidate_metrics["recall@10"],
+        "ndcg@10": candidate_metrics["ndcg@10"],
+        "mrr@10": candidate_metrics["mrr@10"],
+        "docid_mapping_warnings": warnings,
+    }
+
+
+def classify_oracle_quality_gate(
+    query_rows: Sequence[dict[str, Any]],
+    *,
+    min_queries_for_stable_decision: int = 5,
+    min_qrels_for_stable_decision: int = 10,
+    zero_threshold: float = 1e-9,
+) -> dict[str, Any]:
+    rows = [row for row in query_rows if isinstance(row, dict)]
+    qrels_total = sum(int(row.get("qrels_count", 0) or 0) for row in rows)
+    exact_recall_values = [
+        float(row.get("exact_doc_scan_recall@10", 0.0) or 0.0) for row in rows
+    ]
+    exact_ndcg_values = [
+        float(row.get("exact_doc_scan_ndcg@10", 0.0) or 0.0) for row in rows
+    ]
+    candidate_top10_values = [
+        float(row.get("candidate_source_exact_top10_admission_recall", 0.0) or 0.0)
+        for row in rows
+        if row.get("candidate_source_exact_top10_admission_recall") is not None
+    ]
+    candidate_recall_values = [
+        float(row.get("recall@10", 0.0) or 0.0) for row in rows
+    ]
+    candidate_ndcg_values = [float(row.get("ndcg@10", 0.0) or 0.0) for row in rows]
+    mean_exact_recall = (
+        round(statistics.mean(exact_recall_values), 6) if exact_recall_values else 0.0
+    )
+    mean_exact_ndcg = (
+        round(statistics.mean(exact_ndcg_values), 6) if exact_ndcg_values else 0.0
+    )
+    mean_candidate_top10 = (
+        round(statistics.mean(candidate_top10_values), 6)
+        if candidate_top10_values
+        else None
+    )
+    mean_candidate_recall = (
+        round(statistics.mean(candidate_recall_values), 6)
+        if candidate_recall_values
+        else 0.0
+    )
+    mean_candidate_ndcg = (
+        round(statistics.mean(candidate_ndcg_values), 6) if candidate_ndcg_values else 0.0
+    )
+    classifications: list[str] = []
+    if len(rows) < min_queries_for_stable_decision or qrels_total < min_qrels_for_stable_decision:
+        classifications.append("qrels_sparse")
+    any_mapping_warning = any(
+        row.get("docid_mapping_warnings")
+        for row in rows
+        if isinstance(row.get("docid_mapping_warnings"), list)
+    )
+    if any_mapping_warning and mean_exact_recall <= zero_threshold and mean_exact_ndcg <= zero_threshold:
+        classifications.append("docid_mapping_suspect")
+    if mean_exact_recall <= zero_threshold and mean_exact_ndcg <= zero_threshold:
+        classifications.append("exact_oracle_quality_zero")
+    elif (
+        mean_candidate_top10 is not None
+        and mean_candidate_top10 <= zero_threshold
+        and mean_candidate_recall <= zero_threshold
+        and mean_candidate_ndcg <= zero_threshold
+    ):
+        classifications.append("admission_zero_but_oracle_nonzero")
+    primary = classifications[0] if classifications else "oracle_quality_nonzero"
+    return {
+        "primary_classification": primary,
+        "classifications": classifications,
+        "query_count": len(rows),
+        "qrels_total": qrels_total,
+        "mean_exact_doc_scan_recall@10": mean_exact_recall,
+        "mean_exact_doc_scan_ndcg@10": mean_exact_ndcg,
+        "mean_candidate_exact_top10_admission_recall": mean_candidate_top10,
+        "mean_candidate_recall@10": mean_candidate_recall,
+        "mean_candidate_ndcg@10": mean_candidate_ndcg,
+        "stop_recommending_index_changes": "exact_oracle_quality_zero" in classifications,
+        "continue_candidate_generator_work": (
+            "admission_zero_but_oracle_nonzero" in classifications
+        ),
+    }
+
+
+def path_is_under_nix_dev_tmp(path: Path) -> bool:
+    try:
+        resolved = path.expanduser().resolve()
+    except OSError:
+        resolved = path.expanduser().absolute()
+    tmp_root = (Path.cwd() / ".nix-dev" / "tmp").resolve()
+    try:
+        return resolved.is_relative_to(tmp_root)
+    except AttributeError:
+        return str(resolved).startswith(str(tmp_root) + os.sep)
+
+
 def exact_top_cache_key(query_id: str, admission_k: int) -> str:
     return f"{admission_k}:{query_id}"
 
@@ -5752,6 +6063,124 @@ def scan_stat_str(stats: dict[str, Any], key: str) -> str | None:
     return value if isinstance(value, str) else None
 
 
+def storage_capabilities_from_stats(
+    stats: dict[str, Any] | None,
+    *,
+    fallback_storage_kind: str | None = None,
+) -> dict[str, Any]:
+    if not isinstance(stats, dict):
+        stats = {}
+    storage_kind = (
+        scan_stat_str(stats, "multivector_doc_storage_kind")
+        or scan_stat_str(stats, "multivector_doc_storage")
+        or fallback_storage_kind
+    )
+    return {
+        "multivector_doc_storage_kind": storage_kind,
+        "proxy_only_index": (
+            scan_stat_bool(stats, "proxy_only_index")
+            if "proxy_only_index" in stats
+            else (storage_kind == "proxy_only" if storage_kind is not None else None)
+        ),
+        "centroid_only_index": (
+            scan_stat_bool(stats, "centroid_only_index")
+            if "centroid_only_index" in stats
+            else (storage_kind == "centroid_only" if storage_kind is not None else None)
+        ),
+        "full_multivector_sidecar_available": (
+            scan_stat_bool(stats, "full_multivector_sidecar_available")
+            if "full_multivector_sidecar_available" in stats
+            else (
+                storage_kind not in {"proxy_only", "centroid_only"}
+                if storage_kind is not None
+                else None
+            )
+        ),
+        "centroid_sidecar_available": (
+            scan_stat_bool(stats, "centroid_sidecar_available")
+            if "centroid_sidecar_available" in stats
+            else None
+        ),
+        "quantized_inverted_sidecar_available": (
+            scan_stat_bool(stats, "quantized_inverted_sidecar_available")
+            if "quantized_inverted_sidecar_available" in stats
+            else None
+        ),
+        "exact_rerank_source_supported": scan_stat_str(
+            stats,
+            "exact_rerank_source_supported",
+        ),
+    }
+
+
+def serving_storage_memory_fields(
+    *,
+    build_stats: dict[str, Any],
+    index_phase: dict[str, Any],
+) -> dict[str, Any]:
+    estimate = index_phase.get("build_resource_estimate", {})
+    if not isinstance(estimate, dict):
+        estimate = {}
+    estimate_components = estimate.get("estimate_components", {})
+    if not isinstance(estimate_components, dict):
+        estimate_components = {}
+
+    def stat_int(*keys: str) -> int | None:
+        for key in keys:
+            value = build_stats.get(key)
+            if value is None or isinstance(value, bool):
+                continue
+            try:
+                return max(int(value), 0)
+            except (TypeError, ValueError, OverflowError):
+                continue
+        return None
+
+    def estimate_int(*keys: str) -> int:
+        total = 0
+        for key in keys:
+            try:
+                total += max(int(estimate_components.get(key, 0) or 0), 0)
+            except (TypeError, ValueError, OverflowError):
+                continue
+        return total
+
+    source = "build_stats"
+    docmap_bytes = stat_int("multivector_docmap_bytes_estimate")
+    if docmap_bytes is None:
+        docmap_bytes = estimate_int("docmap")
+        source = "estimate"
+
+    sidecar_bytes = stat_int("multivector_doc_sidecar_bytes_estimate")
+    if sidecar_bytes is None:
+        sidecar_bytes = estimate_int(
+            "full_multivector_sidecar",
+            "centroid_vectors",
+            "centroid_postings",
+            "quantized_postings",
+            "entry_sidecar",
+        )
+        source = "estimate"
+
+    graph_node_bytes = stat_int("graph_node_bytes_estimate")
+    graph_neighbor_bytes = stat_int("graph_neighbor_bytes_estimate")
+    graph_bytes: int | None = None
+    if graph_node_bytes is not None or graph_neighbor_bytes is not None:
+        graph_bytes = int(graph_node_bytes or 0) + int(graph_neighbor_bytes or 0)
+    if graph_bytes is None:
+        graph_bytes = estimate_int("graph_nodes", "graph_edges", "proxy_vectors")
+        source = "estimate"
+
+    return {
+        "docmap_bytes": int(docmap_bytes or 0),
+        "sidecar_bytes": int(sidecar_bytes or 0),
+        "graph_bytes": int(graph_bytes or 0),
+        "storage_memory_bytes_source": (
+            source if any((docmap_bytes, sidecar_bytes, graph_bytes)) else "unavailable"
+        ),
+    }
+
+
 def _serving_timing_number(value: Any, *, allow_zero: bool = True) -> int | None:
     if isinstance(value, bool) or value is None:
         return None
@@ -6051,6 +6480,27 @@ def validate_serving_scan_path(
     ):
         warnings.append(f"doc_graph_warning:{doc_warning}")
 
+    storage_caps = storage_capabilities_from_stats(
+        stats,
+        fallback_storage_kind=profile.storage_kind,
+    )
+    storage_kind = storage_caps.get("multivector_doc_storage_kind")
+    full_sidecar_available = storage_caps.get("full_multivector_sidecar_available")
+    if storage_kind == "proxy_only" and full_sidecar_available is True:
+        warnings.append("proxy_only_full_sidecar_unexpected")
+    if storage_kind == "centroid_only" and full_sidecar_available is True:
+        warnings.append("centroid_only_full_sidecar_unexpected")
+    exact_source_supported = storage_caps.get("exact_rerank_source_supported")
+    runtime_exact_source = scan_stat_str(stats, "multivector_exact_rerank_source")
+    if (
+        exact_source_supported in {"heap", "none"}
+        and runtime_exact_source == "sidecar"
+    ):
+        warnings.append(
+            "exact_sidecar_requested_but_missing:"
+            f"storage={storage_kind},supported={exact_source_supported}"
+        )
+
     exact_rerank_docs = scan_exact_rerank_docs(stats)
     configured_rerank_k = int(
         getattr(
@@ -6066,6 +6516,11 @@ def validate_serving_scan_path(
             "exact_rerank_docs_exceeds_serving_budget:"
             f"observed={exact_rerank_docs},limit={configured_rerank_k},tolerance={rerank_tolerance}"
         )
+        if runtime_exact_source == "heap":
+            warnings.append(
+                "heap_rerank_unbounded:"
+                f"observed={exact_rerank_docs},limit={configured_rerank_k},tolerance={rerank_tolerance}"
+            )
 
     loaded_document_count = int(getattr(args, "serving_loaded_document_count", 0) or 0)
     docs_scored = scan_docs_scored(stats)
@@ -6670,6 +7125,8 @@ def effective_serving_grid_budget_sweep(args: argparse.Namespace) -> list[int]:
         source = DOCUMENT_NODE_COLBERT_ENTRY_FOCUS_BUDGET_SWEEP
     elif bool(getattr(args, "document_node_colbert_1m_grid", False)):
         source = DOCUMENT_NODE_COLBERT_1M_GRID_BUDGET_SWEEP
+    elif document_node_pure_dense_proxy_focus_enabled(args):
+        source = DOCUMENT_NODE_SERVING_GRID_PURE_DENSE_PROXY_BUDGET_SWEEP
     elif bool(getattr(args, "document_node_serving_grid_proxy_admission_focus", False)) or bool(
         getattr(args, "document_node_serving_grid_centroid_lite_focus", False)
     ):
@@ -6740,6 +7197,14 @@ def effective_serving_grid_executed_budgets(args: argparse.Namespace) -> list[in
     if mode == "sweep":
         return budget_sweep
     raise SystemExit("--document-node-serving-grid-budget-mode must be largest_only or sweep")
+
+
+def effective_document_node_serving_exact_rerank_grid(
+    args: argparse.Namespace,
+) -> list[int | None]:
+    if document_node_pure_dense_proxy_focus_enabled(args):
+        return list(DOCUMENT_NODE_SERVING_GRID_PURE_DENSE_PROXY_RERANK_K)
+    return [None]
 
 
 def effective_document_node_serving_stage_mode(args: argparse.Namespace) -> str:
@@ -7033,6 +7498,10 @@ def run_admission_budget(
         "doc_graph_rescore_k": scan_stat_int(stats, "multivector_doc_graph_rescore_k"),
         "doc_graph_storage_kind": scan_stat_str(stats, "multivector_doc_graph_storage_kind"),
         "doc_graph_rescore_source": scan_stat_str(stats, "multivector_doc_graph_rescore_source"),
+        **storage_capabilities_from_stats(
+            stats,
+            fallback_storage_kind=getattr(args, "multivector_doc_storage", None),
+        ),
         "memory_bytes_estimate": memory_estimate_from_stats(stats),
         "trace_available": scan_stat_bool(stats, "multivector_admission_trace_available"),
         "trace_entries": len(trace_entries),
@@ -7875,6 +8344,7 @@ def document_node_serving_profiles(
     centroid_count: str,
     include_learned_projection: bool = False,
     include_proxy_exact_scan: bool = False,
+    include_pure_dense_proxy_focus: bool = False,
 ) -> list[DocumentNodeServingProfile]:
     profiles = [
         DocumentNodeServingProfile(
@@ -7925,6 +8395,7 @@ def document_node_serving_profiles(
             centroids="kmeans",
             centroid_count=centroid_count,
             storage_kind="centroid_only",
+            cache_mode="resident",
         ),
         DocumentNodeServingProfile(
             name="centroid_lite_centroid_only_pool_050",
@@ -7932,6 +8403,7 @@ def document_node_serving_profiles(
             centroids="kmeans",
             centroid_count=centroid_count,
             storage_kind="centroid_only",
+            cache_mode="resident",
             token_pooling="greedy_cosine",
             token_pooling_target_ratio=0.5,
         ),
@@ -7961,6 +8433,7 @@ def document_node_serving_profiles(
                 centroids="kmeans",
                 centroid_count=centroid_count,
                 storage_kind="centroid_only",
+                cache_mode="resident",
                 centroid_lite_max_postings_per_token=int(cap),
             )
             for cap in centroid_lite_posting_caps
@@ -7975,6 +8448,16 @@ def document_node_serving_profiles(
                 centroid_lite_pruning="safe_upper_bound",
             )
         )
+        profiles.append(
+            DocumentNodeServingProfile(
+                name="centroid_lite_f16_bitset_prefilter",
+                candidate_source="centroid_lite",
+                centroids="kmeans",
+                centroid_count=centroid_count,
+                storage_kind="f16",
+                centroid_lite_bitset_prefilter="experimental",
+            )
+        )
         for cap in centroid_lite_posting_caps:
             profiles.append(
                 DocumentNodeServingProfile(
@@ -7985,8 +8468,8 @@ def document_node_serving_profiles(
                     storage_kind="f16",
                     centroid_lite_max_postings_per_token=int(cap),
                     centroid_lite_pruning="safe_upper_bound",
+                )
             )
-        )
         if 32 in {int(cap) for cap in centroid_lite_posting_caps}:
             profiles.append(
                 DocumentNodeServingProfile(
@@ -8002,14 +8485,50 @@ def document_node_serving_profiles(
             )
             profiles.append(
                 DocumentNodeServingProfile(
+                    name="centroid_lite_f16_cap_032_bitset_prefilter",
+                    candidate_source="centroid_lite",
+                    centroids="kmeans",
+                    centroid_count=centroid_count,
+                    storage_kind="f16",
+                    centroid_lite_max_postings_per_token=32,
+                    centroid_lite_bitset_prefilter="experimental",
+                )
+            )
+            profiles.append(
+                DocumentNodeServingProfile(
                     name="centroid_lite_centroid_only_pool_050_cap_032",
                     candidate_source="centroid_lite",
                     centroids="kmeans",
                     centroid_count=centroid_count,
                     storage_kind="centroid_only",
+                    cache_mode="resident",
                     token_pooling="greedy_cosine",
                     token_pooling_target_ratio=0.5,
                     centroid_lite_max_postings_per_token=32,
+                )
+            )
+            profiles.append(
+                DocumentNodeServingProfile(
+                    name="centroid_lite_centroid_only_cap_032_bitset_prefilter",
+                    candidate_source="centroid_lite",
+                    centroids="kmeans",
+                    centroid_count=centroid_count,
+                    storage_kind="centroid_only",
+                    cache_mode="resident",
+                    centroid_lite_max_postings_per_token=32,
+                    centroid_lite_bitset_prefilter="experimental",
+                )
+            )
+            profiles.append(
+                DocumentNodeServingProfile(
+                    name="centroid_lite_centroid_only_cap_032_prune_safe_upper_bound",
+                    candidate_source="centroid_lite",
+                    centroids="kmeans",
+                    centroid_count=centroid_count,
+                    storage_kind="centroid_only",
+                    cache_mode="resident",
+                    centroid_lite_max_postings_per_token=32,
+                    centroid_lite_pruning="safe_upper_bound",
                 )
             )
             profiles.append(
@@ -8025,30 +8544,85 @@ def document_node_serving_profiles(
                     centroid_lite_pruning="safe_upper_bound",
                 )
             )
-    if include_token_pooling_focus:
-        for ratio_label, ratio in (("075", 0.75), ("050", 0.5), ("033", 0.33)):
-            profiles.extend(
-                [
-                    DocumentNodeServingProfile(
-                        name=f"proxy_normalized_mean_f16_pool_{ratio_label}",
-                        candidate_source="proxy_vector",
-                        proxy_encoder="normalized_mean",
-                        storage_kind="f16",
-                        token_pooling="greedy_cosine",
-                        token_pooling_target_ratio=ratio,
-                    ),
-                    DocumentNodeServingProfile(
-                        name=f"centroid_mean_f16_pool_{ratio_label}",
-                        candidate_source="proxy_vector",
-                        proxy_encoder="centroid_mean",
-                        centroids="kmeans",
-                        centroid_count=centroid_count,
-                        storage_kind="f16",
-                        token_pooling="greedy_cosine",
-                        token_pooling_target_ratio=ratio,
-                    ),
-                ]
+            profiles.append(
+                DocumentNodeServingProfile(
+                    name="centroid_lite_f16_pool_050_cap_032_bitset_prefilter",
+                    candidate_source="centroid_lite",
+                    centroids="kmeans",
+                    centroid_count=centroid_count,
+                    storage_kind="f16",
+                    token_pooling="greedy_cosine",
+                    token_pooling_target_ratio=0.5,
+                    centroid_lite_max_postings_per_token=32,
+                    centroid_lite_bitset_prefilter="experimental",
+                )
             )
+    if include_token_pooling_focus:
+        token_pooling_focus_bases = [
+            (
+                "proxy_max_pool_proxy_only",
+                "proxy_vector",
+                "max_pool",
+                "proxy_only",
+            ),
+            (
+                "proxy_random_projection_fde_proxy_only",
+                "proxy_vector",
+                "random_projection_fde",
+                "proxy_only",
+            ),
+            (
+                "document_nodes_sq8_paged_maxsim",
+                "document_nodes",
+                "max_pool",
+                "sq8",
+                "paged",
+            ),
+        ]
+        for item in token_pooling_focus_bases:
+            if len(item) == 5:
+                name, candidate_source, proxy_encoder, storage_kind, cache_mode = item
+            else:
+                name, candidate_source, proxy_encoder, storage_kind = item
+                cache_mode = "auto"
+            profiles.append(
+                DocumentNodeServingProfile(
+                    name=name,
+                    candidate_source=candidate_source,
+                    proxy_encoder=proxy_encoder,
+                    storage_kind=storage_kind,
+                    cache_mode=cache_mode,
+                )
+            )
+            for ratio_label, ratio in (("075", 0.75), ("050", 0.5)):
+                profiles.append(
+                    DocumentNodeServingProfile(
+                        name=f"{name}_pool_{ratio_label}",
+                        candidate_source=candidate_source,
+                        proxy_encoder=proxy_encoder,
+                        storage_kind=storage_kind,
+                        cache_mode=cache_mode,
+                        token_pooling="greedy_cosine",
+                        token_pooling_target_ratio=ratio,
+                    )
+                )
+    if include_pure_dense_proxy_focus:
+        profiles.extend(
+            [
+                DocumentNodeServingProfile(
+                    name="proxy_max_pool_proxy_only",
+                    candidate_source="proxy_vector",
+                    proxy_encoder="max_pool",
+                    storage_kind="proxy_only",
+                ),
+                DocumentNodeServingProfile(
+                    name="proxy_random_projection_fde_proxy_only",
+                    candidate_source="proxy_vector",
+                    proxy_encoder="random_projection_fde",
+                    storage_kind="proxy_only",
+                ),
+            ]
+        )
     if include_entry_samples:
         for count in entry_sample_counts:
             entry_sample_count = int(count)
@@ -8179,6 +8753,15 @@ def document_node_serving_profiles(
                 storage_kind="f16",
             )
         )
+        if include_pure_dense_proxy_focus:
+            profiles.append(
+                DocumentNodeServingProfile(
+                    name="proxy_learned_projection_v1_proxy_only",
+                    candidate_source="proxy_vector",
+                    proxy_encoder="learned_projection_v1",
+                    storage_kind="proxy_only",
+                )
+            )
     if include_bm25_rescue:
         profiles.extend(
             [
@@ -8299,13 +8882,63 @@ def document_node_serving_profiles(
                 plain_fallback="off",
             )
         )
-    return profiles
+    deduped: list[DocumentNodeServingProfile] = []
+    seen_names: set[str] = set()
+    for profile in profiles:
+        if profile.name in seen_names:
+            continue
+        seen_names.add(profile.name)
+        deduped.append(profile)
+    return deduped
+
+
+def document_node_token_pooling_memory_focus_enabled(args: argparse.Namespace) -> bool:
+    return bool(
+        getattr(args, "document_node_serving_grid_token_pooling_memory_focus", False)
+        or getattr(args, "document_node_serving_grid_token_pooling_focus", False)
+    )
+
+
+def document_node_pure_dense_proxy_focus_enabled(args: argparse.Namespace) -> bool:
+    return bool(getattr(args, "document_node_serving_grid_pure_dense_proxy_focus", False))
+
+
+def proxy_encoder_focus_metadata(profile: DocumentNodeServingProfile) -> dict[str, Any]:
+    if profile.proxy_encoder == "random_projection_fde":
+        seed_payload = {
+            "proxy_encoder": profile.proxy_encoder,
+            "storage_kind": profile.storage_kind,
+            "candidate_source": profile.candidate_source,
+            "version": 1,
+        }
+        return {
+            "random_projection_fde_seed": 0,
+            "random_projection_fde_checksum": stable_json_hash(seed_payload),
+        }
+    if profile.proxy_encoder == "learned_projection_v1":
+        return {
+            "learned_projection_required": True,
+        }
+    return {}
 
 
 def validate_document_node_serving_profile_inputs(
     args: argparse.Namespace,
     profiles: Sequence[DocumentNodeServingProfile],
 ) -> None:
+    if any(profile.proxy_encoder == "learned_projection_v1" for profile in profiles):
+        path_text = str(getattr(args, "multivector_learned_projection_path", "") or "")
+        if not path_text:
+            raise SystemExit(
+                "learned_projection_v1 proxy profiles require "
+                "--multivector-learned-projection-path"
+            )
+        path = Path(path_text).expanduser()
+        if not path.is_file():
+            raise SystemExit(
+                "learned_projection_v1 proxy profile requires an existing "
+                f"--multivector-learned-projection-path: {path}"
+            )
     if not any(profile.sparse_candidate_source == "learned_sparse" for profile in profiles):
         return
     # Detailed missing/incomplete learned-sparse JSONL errors need the loaded
@@ -8333,12 +8966,11 @@ def effective_document_node_serving_profiles(
     centroid_lite_focus = bool(
         getattr(args, "document_node_serving_grid_centroid_lite_focus", False)
     )
-    token_pooling_focus = bool(
-        getattr(args, "document_node_serving_grid_token_pooling_focus", False)
-    )
+    token_pooling_focus = document_node_token_pooling_memory_focus_enabled(args)
     learned_sparse_focus = bool(
         getattr(args, "document_node_serving_grid_learned_sparse_focus", False)
     )
+    pure_dense_proxy_focus = document_node_pure_dense_proxy_focus_enabled(args)
     proxy_oracle_focus = bool(
         getattr(args, "document_node_serving_grid_proxy_oracle_focus", False)
         or getattr(args, "document_node_colbert_proxy_oracle_focus", False)
@@ -8371,9 +9003,14 @@ def effective_document_node_serving_profiles(
             or colbert_entry_focus
             or colbert_quantized_inverted_focus
             or colbert_1m_grid
+            or pure_dense_proxy_focus
         ),
-        include_learned_projection=(not colbert_1m_grid) and bool(
-            getattr(args, "document_node_serving_grid_include_learned_projection", False)
+        include_learned_projection=(not colbert_1m_grid) and (
+            bool(getattr(args, "document_node_serving_grid_include_learned_projection", False))
+            or (
+                pure_dense_proxy_focus
+                and bool(str(getattr(args, "multivector_learned_projection_path", "") or ""))
+            )
         ),
         include_bm25_rescue=(not colbert_1m_grid) and (
             bool(getattr(args, "document_node_serving_grid_include_bm25_rescue", False))
@@ -8424,6 +9061,7 @@ def effective_document_node_serving_profiles(
         ),
         centroid_count=args.multivector_centroid_count,
         include_proxy_exact_scan=proxy_oracle_focus,
+        include_pure_dense_proxy_focus=pure_dense_proxy_focus,
     )
     if colbert_1m_grid:
         if document_node_colbert_1m_single_index_mode_requested(args):
@@ -8537,6 +9175,20 @@ def effective_document_node_serving_profiles(
         )
         if not profiles:
             raise SystemExit("--document-node-serving-grid-token-pooling-focus produced no profiles")
+    if pure_dense_proxy_focus:
+        ordered_names = list(DOCUMENT_NODE_SERVING_GRID_PURE_DENSE_PROXY_FOCUS_PROFILES)
+        if bool(str(getattr(args, "multivector_learned_projection_path", "") or "")):
+            ordered_names.extend(DOCUMENT_NODE_SERVING_GRID_PURE_DENSE_PROXY_FOCUS_LEARNED_PROFILES)
+        allowed = set(ordered_names)
+        order = {name: index for index, name in enumerate(ordered_names)}
+        profiles = sorted(
+            [profile for profile in profiles if profile.name in allowed],
+            key=lambda profile: order[profile.name],
+        )
+        if not profiles:
+            raise SystemExit(
+                "--document-node-serving-grid-pure-dense-proxy-focus produced no profiles"
+            )
     if learned_sparse_focus:
         allowed = set(DOCUMENT_NODE_SERVING_GRID_LEARNED_SPARSE_FOCUS_PROFILES)
         order = {
@@ -8601,12 +9253,11 @@ def document_node_serving_profile_by_name(
     centroid_lite_focus = bool(
         getattr(args, "document_node_serving_grid_centroid_lite_focus", False)
     )
-    token_pooling_focus = bool(
-        getattr(args, "document_node_serving_grid_token_pooling_focus", False)
-    )
+    token_pooling_focus = document_node_token_pooling_memory_focus_enabled(args)
     learned_sparse_focus = bool(
         getattr(args, "document_node_serving_grid_learned_sparse_focus", False)
     )
+    pure_dense_proxy_focus = document_node_pure_dense_proxy_focus_enabled(args)
     proxy_oracle_focus = bool(
         getattr(args, "document_node_serving_grid_proxy_oracle_focus", False)
         or getattr(args, "document_node_colbert_proxy_oracle_focus", False)
@@ -8633,9 +9284,14 @@ def document_node_serving_profile_by_name(
             or colbert_centroid_lite_focus
             or colbert_entry_focus
             or colbert_quantized_inverted_focus
+            or pure_dense_proxy_focus
         ),
         include_learned_projection=bool(
             getattr(args, "document_node_serving_grid_include_learned_projection", False)
+        )
+        or (
+            pure_dense_proxy_focus
+            and bool(str(getattr(args, "multivector_learned_projection_path", "") or ""))
         ),
         include_bm25_rescue=bool(
             getattr(args, "document_node_serving_grid_include_bm25_rescue", False)
@@ -8675,6 +9331,7 @@ def document_node_serving_profile_by_name(
         explicit_entry_sidecar_profile_names=proxy_admission_focus or colbert_entry_focus,
         centroid_count=args.multivector_centroid_count,
         include_proxy_exact_scan=proxy_oracle_focus,
+        include_pure_dense_proxy_focus=pure_dense_proxy_focus,
     )
     by_name = {profile.name: profile for profile in profiles}
     profile = by_name.get(name)
@@ -8885,7 +9542,21 @@ def document_node_colbert_candidate_source_focus_profiles(
         for profile in effective_document_node_serving_profiles(profile_args)
         if profile.name in allowed
     ]
-    return sorted(profiles, key=lambda profile: order[profile.name])
+    profiles = sorted(profiles, key=lambda profile: order[profile.name])
+    selected = str(
+        getattr(args, "document_node_colbert_candidate_source_profiles", "") or ""
+    ).strip()
+    if not selected:
+        return profiles
+    selected_names = [name.strip() for name in selected.split(",") if name.strip()]
+    unknown = [name for name in selected_names if name not in allowed]
+    if unknown:
+        raise SystemExit(
+            "--document-node-colbert-candidate-source-profiles contains unsupported "
+            f"pure-ColBERT profiles: {', '.join(unknown)}"
+        )
+    profiles_by_name = {profile.name: profile for profile in profiles}
+    return [profiles_by_name[name] for name in selected_names if name in profiles_by_name]
 
 
 def document_node_colbert_candidate_source_focus_mode_requested(
@@ -8994,6 +9665,100 @@ def document_node_colbert_sampled_admission_args(
     return mode_args, profile, effective_rerank_k
 
 
+def document_node_oracle_quality_check_profiles(
+    args: argparse.Namespace,
+) -> list[DocumentNodeServingProfile]:
+    profile_args = clone_args(
+        args,
+        document_node_serving_grid=True,
+        document_node_colbert_1m_grid=False,
+        document_node_serving_grid_include_experimental=False,
+        document_node_serving_grid_include_proxy_encoders=False,
+        document_node_serving_grid_include_bm25_rescue=False,
+        document_node_serving_grid_include_learned_sparse_rescue=False,
+        document_node_serving_grid_include_reservoirs=False,
+        document_node_serving_grid_learned_sparse_focus=False,
+        document_node_serving_grid_include_centroid_lite_caps=True,
+        document_node_colbert_1m_include_experimental=False,
+        hybrid_evaluation_harness=False,
+    )
+    profiles = {
+        profile.name: profile
+        for profile in effective_document_node_serving_profiles(profile_args)
+    }
+    missing = [
+        name for name in DOCUMENT_NODE_ORACLE_QUALITY_CHECK_PROFILES if name not in profiles
+    ]
+    if missing:
+        raise SystemExit(
+            "--document-node-serving-grid-oracle-quality-check could not expand "
+            "required pure-ColBERT profiles: " + ", ".join(missing)
+        )
+    return [profiles[name] for name in DOCUMENT_NODE_ORACLE_QUALITY_CHECK_PROFILES]
+
+
+def document_node_oracle_quality_check_args(
+    args: argparse.Namespace,
+    profile: DocumentNodeServingProfile,
+) -> tuple[argparse.Namespace, int]:
+    candidate_k = int(getattr(args, "document_node_colbert_candidate_k", 0) or 0)
+    if candidate_k < 1:
+        raise SystemExit("--document-node-colbert-candidate-k must be positive")
+    requested_rerank_k = int(getattr(args, "document_node_colbert_exact_rerank_k", 0) or 0)
+    if requested_rerank_k < 1:
+        raise SystemExit("--document-node-colbert-exact-rerank-k must be positive")
+    effective_rerank_k = min(requested_rerank_k, candidate_k)
+    mode_args = document_node_serving_profile_args(
+        args,
+        profile,
+        ef=int(getattr(args, "document_node_colbert_ef", 0) or 0),
+        oversampling=int(getattr(args, "document_node_colbert_oversampling", 0) or 0),
+        budget_sweep=[candidate_k],
+    )
+    mode_args = clone_args(
+        mode_args,
+        dense_k=candidate_k,
+        multivector_doc_candidate_k=candidate_k,
+        multivector_exact_rerank="topk",
+        multivector_exact_rerank_k=effective_rerank_k,
+        reuse_index=True,
+        require_existing_index=True,
+        no_create_index=True,
+        admission_debug_context="oracle_quality_check",
+    )
+    return mode_args, effective_rerank_k
+
+
+def existing_index_profile_mismatch_reasons(
+    index_phase: dict[str, Any] | None,
+    profile: DocumentNodeServingProfile,
+) -> list[str]:
+    if index_phase is None:
+        return ["missing_existing_index"]
+    index_stats = index_phase.get("index_stats", {})
+    if not isinstance(index_stats, dict):
+        return ["missing_index_stats"]
+    expected = {
+        "multivector_graph_mode": "document_nodes",
+        "multivector_doc_storage": profile.storage_kind,
+        "multivector_proxy_encoder": profile.proxy_encoder,
+        "multivector_centroids": profile.centroids,
+        "multivector_token_pooling": profile.token_pooling,
+    }
+    reasons: list[str] = []
+    for key, expected_value in expected.items():
+        observed = index_stats.get(key)
+        if observed is None:
+            reasons.append(f"missing_index_stat:{key}")
+        elif str(observed) != str(expected_value):
+            reasons.append(f"{key}:expected={expected_value}:observed={observed}")
+    if profile.centroids == "kmeans":
+        observed_centroid_count = index_stats.get("multivector_centroid_count")
+        if observed_centroid_count is None:
+            reasons.append("missing_index_stat:multivector_centroid_count")
+    return reasons
+
+
 def document_node_serving_latency_args(
     args: argparse.Namespace,
 ) -> tuple[argparse.Namespace, DocumentNodeServingProfile, int]:
@@ -9036,6 +9801,8 @@ def effective_document_node_serving_ef_grid(args: argparse.Namespace) -> list[in
         return list(DOCUMENT_NODE_COLBERT_ENTRY_FOCUS_EF)
     if bool(getattr(args, "document_node_colbert_1m_grid", False)):
         return list(DOCUMENT_NODE_COLBERT_1M_GRID_EF)
+    if document_node_pure_dense_proxy_focus_enabled(args):
+        return list(DOCUMENT_NODE_SERVING_GRID_PURE_DENSE_PROXY_EF)
     if bool(getattr(args, "document_node_serving_grid_proxy_admission_focus", False)):
         return list(DOCUMENT_NODE_SERVING_GRID_PROXY_ADMISSION_FOCUS_EF)
     if bool(getattr(args, "document_node_serving_grid_smoke", False)):
@@ -9055,6 +9822,8 @@ def effective_document_node_serving_oversampling_grid(args: argparse.Namespace) 
         return list(DOCUMENT_NODE_COLBERT_ENTRY_FOCUS_OVERSAMPLING)
     if bool(getattr(args, "document_node_colbert_1m_grid", False)):
         return list(DOCUMENT_NODE_COLBERT_1M_GRID_OVERSAMPLING)
+    if document_node_pure_dense_proxy_focus_enabled(args):
+        return list(DOCUMENT_NODE_SERVING_GRID_PURE_DENSE_PROXY_OVERSAMPLING)
     if bool(getattr(args, "document_node_serving_grid_proxy_admission_focus", False)):
         return list(DOCUMENT_NODE_SERVING_GRID_PROXY_ADMISSION_FOCUS_OVERSAMPLING)
     if bool(getattr(args, "document_node_serving_grid_smoke", False)):
@@ -9066,17 +9835,30 @@ def document_node_serving_configs(
     profiles: list[DocumentNodeServingProfile],
     ef_grid: list[int],
     oversampling_grid: list[int],
+    exact_rerank_grid: list[int | None] | None = None,
 ) -> list[DocumentNodeServingConfig]:
+    exact_rerank_values = exact_rerank_grid if exact_rerank_grid is not None else [None]
     return [
-        DocumentNodeServingConfig(profile=profile, ef=ef, oversampling=oversampling)
+        DocumentNodeServingConfig(
+            profile=profile,
+            ef=ef,
+            oversampling=oversampling,
+            exact_rerank_k=exact_rerank_k,
+        )
         for profile in profiles
         for ef in ef_grid
         for oversampling in oversampling_grid
+        for exact_rerank_k in exact_rerank_values
     ]
 
 
 def document_node_serving_config_id(config: DocumentNodeServingConfig) -> str:
-    return f"{config.profile.name}_ef{int(config.ef)}_os{int(config.oversampling)}"
+    suffix = (
+        f"_rk{int(config.exact_rerank_k)}"
+        if config.exact_rerank_k is not None
+        else ""
+    )
+    return f"{config.profile.name}_ef{int(config.ef)}_os{int(config.oversampling)}{suffix}"
 
 
 def serving_stage1_score_rows(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
@@ -9514,6 +10296,8 @@ def _self_check_document_node_serving_profiles() -> None:
     assert "centroid_lite_f16_cap_032" in capped_centroid_lite_by_name
     assert "centroid_lite_f16_prune_safe_upper_bound" in capped_centroid_lite_by_name
     assert "centroid_lite_f16_cap_016_prune_safe_upper_bound" in capped_centroid_lite_by_name
+    assert "centroid_lite_f16_bitset_prefilter" in capped_centroid_lite_by_name
+    assert "centroid_lite_f16_cap_032_bitset_prefilter" in capped_centroid_lite_by_name
     assert (
         "centroid_lite_f16_pool_050_cap_032_prune_safe_upper_bound"
         in capped_centroid_lite_by_name
@@ -9540,6 +10324,12 @@ def _self_check_document_node_serving_profiles() -> None:
     ]
     assert pooled_pruned.token_pooling == "greedy_cosine"
     assert pooled_pruned.centroid_lite_pruning == "safe_upper_bound"
+    assert (
+        capped_centroid_lite_by_name[
+            "centroid_lite_f16_cap_032_bitset_prefilter"
+        ].centroid_lite_bitset_prefilter
+        == "experimental"
+    )
     entry_sample_profiles = document_node_serving_profiles(
         include_experimental=False,
         include_proxy_encoder_variants=False,
@@ -10063,6 +10853,12 @@ def _self_check_document_node_serving_profiles() -> None:
         ].token_pooling
         == "greedy_cosine"
     )
+    assert (
+        colbert_centroid_lite_by_name[
+            "centroid_lite_f16_pool_050_cap_032_bitset_prefilter"
+        ].centroid_lite_bitset_prefilter
+        == "experimental"
+    )
     assert all(
         profile.bm25_candidate_injection == "off"
         for profile in colbert_centroid_lite_profiles
@@ -10151,6 +10947,7 @@ def _self_check_document_node_serving_profiles() -> None:
     token_pooling_focus_args = clone_args(
         full_args,
         document_node_serving_grid_token_pooling_focus=True,
+        document_node_serving_grid_token_pooling_memory_focus=True,
     )
     token_pooling_profiles = effective_document_node_serving_profiles(
         token_pooling_focus_args
@@ -10161,31 +10958,155 @@ def _self_check_document_node_serving_profiles() -> None:
     token_pooling_by_name = {
         profile.name: profile for profile in token_pooling_profiles
     }
-    assert token_pooling_by_name["proxy_normalized_mean_f16"].token_pooling == "off"
+    assert token_pooling_by_name["proxy_max_pool_proxy_only"].token_pooling == "off"
+    assert token_pooling_by_name["proxy_max_pool_proxy_only"].storage_kind == "proxy_only"
+    assert token_pooling_by_name["proxy_max_pool_proxy_only"].proxy_encoder == "max_pool"
     assert (
         token_pooling_by_name[
-            "proxy_normalized_mean_f16_pool_075"
+            "proxy_max_pool_proxy_only_pool_075"
         ].token_pooling_target_ratio
         == 0.75
     )
     assert (
-        token_pooling_by_name["centroid_mean_f16_pool_033"].proxy_encoder
-        == "centroid_mean"
+        token_pooling_by_name["proxy_max_pool_proxy_only_pool_050"].token_pooling
+        == "greedy_cosine"
     )
     assert (
-        token_pooling_by_name["centroid_mean_f16_pool_033"].centroids
-        == "kmeans"
+        token_pooling_by_name["proxy_random_projection_fde_proxy_only"].proxy_encoder
+        == "random_projection_fde"
+    )
+    assert (
+        token_pooling_by_name["proxy_random_projection_fde_proxy_only"].storage_kind
+        == "proxy_only"
+    )
+    assert (
+        token_pooling_by_name["document_nodes_sq8_paged_maxsim"].candidate_source
+        == "document_nodes"
+    )
+    assert token_pooling_by_name["document_nodes_sq8_paged_maxsim"].storage_kind == "sq8"
+    assert token_pooling_by_name["document_nodes_sq8_paged_maxsim"].cache_mode == "paged"
+    assert token_pooling_by_name["document_nodes_sq8_paged_maxsim"].proxy_encoder == "max_pool"
+    assert (
+        token_pooling_by_name[
+            "document_nodes_sq8_paged_maxsim_pool_050"
+        ].token_pooling_target_ratio
+        == 0.5
     )
     assert (
         serving_profile_index_signature(
             token_pooling_focus_args,
-            token_pooling_by_name["proxy_normalized_mean_f16"],
+            token_pooling_by_name["proxy_max_pool_proxy_only"],
         )
         != serving_profile_index_signature(
             token_pooling_focus_args,
-            token_pooling_by_name["proxy_normalized_mean_f16_pool_050"],
+            token_pooling_by_name["proxy_max_pool_proxy_only_pool_050"],
         )
     )
+    assert (
+        serving_profile_index_signature(
+            token_pooling_focus_args,
+            token_pooling_by_name["proxy_max_pool_proxy_only_pool_075"],
+        )
+        != serving_profile_index_signature(
+            token_pooling_focus_args,
+            token_pooling_by_name["proxy_max_pool_proxy_only_pool_050"],
+        )
+    )
+    pure_dense_proxy_focus_args = clone_args(
+        full_args,
+        document_node_serving_grid_pure_dense_proxy_focus=True,
+        document_node_serving_grid_budget_mode="sweep",
+    )
+    pure_dense_proxy_focus_profiles = effective_document_node_serving_profiles(
+        pure_dense_proxy_focus_args
+    )
+    assert [profile.name for profile in pure_dense_proxy_focus_profiles] == list(
+        DOCUMENT_NODE_SERVING_GRID_PURE_DENSE_PROXY_FOCUS_PROFILES
+    )
+    pure_dense_proxy_by_name = {
+        profile.name: profile for profile in pure_dense_proxy_focus_profiles
+    }
+    assert (
+        pure_dense_proxy_by_name["proxy_normalized_mean_proxy_only"].proxy_encoder
+        == "normalized_mean"
+    )
+    assert (
+        pure_dense_proxy_by_name["proxy_max_pool_proxy_only"].proxy_encoder
+        == "max_pool"
+    )
+    assert (
+        pure_dense_proxy_by_name["proxy_random_projection_fde_proxy_only"].proxy_encoder
+        == "random_projection_fde"
+    )
+    assert all(
+        profile.storage_kind == "proxy_only"
+        and profile.candidate_source == "proxy_vector"
+        and profile.bm25_candidate_injection == "off"
+        and profile.sparse_candidate_source == "off"
+        for profile in pure_dense_proxy_focus_profiles
+    )
+    assert effective_serving_grid_budget_sweep(pure_dense_proxy_focus_args) == [
+        800,
+        1600,
+        3200,
+    ]
+    assert effective_serving_grid_executed_budgets(pure_dense_proxy_focus_args) == [
+        800,
+        1600,
+        3200,
+    ]
+    assert effective_document_node_serving_ef_grid(pure_dense_proxy_focus_args) == [800]
+    assert effective_document_node_serving_oversampling_grid(
+        pure_dense_proxy_focus_args
+    ) == [1]
+    assert effective_document_node_serving_exact_rerank_grid(
+        pure_dense_proxy_focus_args
+    ) == [100, 400, 800]
+    pure_dense_proxy_configs = document_node_serving_configs(
+        pure_dense_proxy_focus_profiles,
+        effective_document_node_serving_ef_grid(pure_dense_proxy_focus_args),
+        effective_document_node_serving_oversampling_grid(pure_dense_proxy_focus_args),
+        effective_document_node_serving_exact_rerank_grid(pure_dense_proxy_focus_args),
+    )
+    assert len(pure_dense_proxy_configs) == 9
+    assert {
+        config.exact_rerank_k for config in pure_dense_proxy_configs
+    } == {100, 400, 800}
+    assert any(
+        document_node_serving_config_id(config).endswith("_rk800")
+        for config in pure_dense_proxy_configs
+    )
+    fde_metadata = proxy_encoder_focus_metadata(
+        pure_dense_proxy_by_name["proxy_random_projection_fde_proxy_only"]
+    )
+    assert fde_metadata["random_projection_fde_seed"] == 0
+    assert fde_metadata["random_projection_fde_checksum"]
+    try:
+        effective_document_node_serving_profiles(
+            clone_args(
+                pure_dense_proxy_focus_args,
+                multivector_learned_projection_path="/path/does/not/exist.bin",
+            )
+        )
+    except SystemExit as exc:
+        assert "--multivector-learned-projection-path" in str(exc)
+    else:
+        raise AssertionError("missing learned_projection_v1 weights should fail")
+    with tempfile.NamedTemporaryFile() as learned_projection_file:
+        pure_dense_learned_args = clone_args(
+            pure_dense_proxy_focus_args,
+            multivector_learned_projection_path=learned_projection_file.name,
+        )
+        pure_dense_learned_profiles = effective_document_node_serving_profiles(
+            pure_dense_learned_args
+        )
+        assert [
+            profile.name for profile in pure_dense_learned_profiles
+        ] == list(DOCUMENT_NODE_SERVING_GRID_PURE_DENSE_PROXY_FOCUS_PROFILES) + [
+            "proxy_learned_projection_v1_proxy_only",
+        ]
+        assert pure_dense_learned_profiles[-1].proxy_encoder == "learned_projection_v1"
+        assert pure_dense_learned_profiles[-1].storage_kind == "proxy_only"
     filtered_args = clone_args(
         full_args,
         document_node_serving_grid_profiles="centroid_mean_f16,proxy_normalized_mean_f16",
@@ -10203,18 +11124,32 @@ def _self_check_document_node_serving_profiles() -> None:
         "proxy_max_pool_f16",
         "proxy_random_projection_fde_f16",
     ]
-    learned_projection_filtered_args = clone_args(
-        full_args,
-        document_node_serving_grid_include_learned_projection=True,
-        document_node_serving_grid_profiles="proxy_learned_projection_v1_f16",
-    )
-    learned_projection_filtered = effective_document_node_serving_profiles(
-        learned_projection_filtered_args
-    )
-    assert [profile.name for profile in learned_projection_filtered] == [
-        "proxy_learned_projection_v1_f16",
-    ]
-    assert learned_projection_filtered[0].proxy_encoder == "learned_projection_v1"
+    try:
+        effective_document_node_serving_profiles(
+            clone_args(
+                full_args,
+                document_node_serving_grid_include_learned_projection=True,
+                document_node_serving_grid_profiles="proxy_learned_projection_v1_f16",
+            )
+        )
+    except SystemExit as exc:
+        assert "--multivector-learned-projection-path" in str(exc)
+    else:
+        raise AssertionError("learned-projection profile should require weights")
+    with tempfile.NamedTemporaryFile() as learned_projection_file:
+        learned_projection_filtered_args = clone_args(
+            full_args,
+            document_node_serving_grid_include_learned_projection=True,
+            document_node_serving_grid_profiles="proxy_learned_projection_v1_f16",
+            multivector_learned_projection_path=learned_projection_file.name,
+        )
+        learned_projection_filtered = effective_document_node_serving_profiles(
+            learned_projection_filtered_args
+        )
+        assert [profile.name for profile in learned_projection_filtered] == [
+            "proxy_learned_projection_v1_f16",
+        ]
+        assert learned_projection_filtered[0].proxy_encoder == "learned_projection_v1"
     try:
         effective_document_node_serving_profiles(
             clone_args(
@@ -10601,6 +11536,14 @@ def _self_check_document_node_serving_profiles() -> None:
     )
     assert pruned_profile_args.multivector_centroid_lite_max_postings_per_token == 32
     assert pruned_profile_args.multivector_centroid_lite_pruning == "safe_upper_bound"
+    bitset_profile_args = document_node_serving_profile_args(
+        signature_args,
+        capped_centroid_lite_by_name["centroid_lite_f16_cap_032_bitset_prefilter"],
+        ef=100,
+        oversampling=1,
+    )
+    assert bitset_profile_args.multivector_centroid_lite_max_postings_per_token == 32
+    assert bitset_profile_args.multivector_centroid_lite_bitset_prefilter == "experimental"
     pooled_capped_profile_args = document_node_serving_profile_args(
         signature_args,
         colbert_centroid_lite_by_name["centroid_lite_f16_pool_050_cap_032"],
@@ -10617,6 +11560,18 @@ def _self_check_document_node_serving_profiles() -> None:
     assert (
         colbert_centroid_lite_signature_by_name["centroid_lite_f16"]
         == colbert_centroid_lite_signature_by_name["centroid_lite_f16_cap_064"]
+    )
+    assert (
+        colbert_centroid_lite_signature_by_name["centroid_lite_f16"]
+        == colbert_centroid_lite_signature_by_name[
+            "centroid_lite_f16_bitset_prefilter"
+        ]
+    )
+    assert (
+        colbert_centroid_lite_signature_by_name["centroid_lite_f16_cap_032"]
+        == colbert_centroid_lite_signature_by_name[
+            "centroid_lite_f16_cap_032_bitset_prefilter"
+        ]
     )
     assert (
         colbert_centroid_lite_signature_by_name["centroid_lite_f16"]
@@ -11462,6 +12417,9 @@ def document_node_serving_profile_args(
             profile.centroid_lite_max_postings_per_token
         ),
         multivector_centroid_lite_pruning=profile.centroid_lite_pruning,
+        multivector_centroid_lite_bitset_prefilter=(
+            profile.centroid_lite_bitset_prefilter
+        ),
         entry_sidecar=profile.entry_sidecar,
         entry_sidecar_representatives=profile.entry_sidecar_representatives,
         entry_sidecar_strategy=profile.entry_sidecar_strategy,
@@ -11949,9 +12907,29 @@ def document_node_serving_summary_row(
     stats_by_budget = serving_grid_scan_stats_by_budget(admission)
     stats_sample = serving_grid_scan_stats_sample(admission, largest_budget)
     index_stats = index_phase.get("index_stats", {})
+    index_storage_capabilities = storage_capabilities_from_stats(
+        index_stats if isinstance(index_stats, dict) else {},
+        fallback_storage_kind=profile.storage_kind,
+    )
+    scan_storage_capabilities = storage_capabilities_from_stats(
+        stats_sample,
+        fallback_storage_kind=profile.storage_kind,
+    )
+    storage_capabilities = {
+        key: (
+            scan_storage_capabilities.get(key)
+            if scan_storage_capabilities.get(key) is not None
+            else index_storage_capabilities.get(key)
+        )
+        for key in STORAGE_CAPABILITY_KEYS
+    }
     index_build_stats = index_phase.get("build_stats", {})
     if not isinstance(index_build_stats, dict):
         index_build_stats = {}
+    storage_memory = serving_storage_memory_fields(
+        build_stats=index_build_stats,
+        index_phase=index_phase,
+    )
     loaded_document_count = (
         scan_stat_int(index_stats, "node_count")
         if isinstance(index_stats, dict)
@@ -12030,9 +13008,13 @@ def document_node_serving_summary_row(
         "sparse_candidate_source": profile.sparse_candidate_source,
         "graph_mode": "document_nodes",
         "proxy_encoder": profile.proxy_encoder,
+        "proxy_encoder_kind": first_sample_value("proxy_encoder_kind") or profile.proxy_encoder,
+        **proxy_encoder_focus_metadata(profile),
         "centroids": profile.centroids,
         "centroid_count": profile.centroid_count,
         "storage_kind": profile.storage_kind,
+        "storage_capabilities": storage_capabilities,
+        **storage_capabilities,
         "cache_mode": profile.cache_mode,
         "storage_cache_mode": profile.cache_mode,
         "token_pooling": profile.token_pooling,
@@ -12052,6 +13034,7 @@ def document_node_serving_summary_row(
             profile.centroid_lite_max_postings_per_token
         ),
         "centroid_lite_pruning": profile.centroid_lite_pruning,
+        "centroid_lite_bitset_prefilter": profile.centroid_lite_bitset_prefilter,
         "centroid_lite_warnings": centroid_lite_warnings,
         "ef": ef,
         "oversampling": oversampling,
@@ -12093,6 +13076,7 @@ def document_node_serving_summary_row(
             int(getattr(args, "serving_exact_rerank_k", 100)),
         ),
         "effective_exact_rerank_k": largest_work.get("effective_exact_rerank_k"),
+        "config_exact_rerank_k": largest_work.get("effective_exact_rerank_k"),
         "exact_rerank_docs": exact_rerank_docs_work,
         "exact_rerank_docs_p50": exact_rerank_docs_work.get("p50"),
         "exact_rerank_docs_p95": exact_rerank_docs_work.get("p95"),
@@ -12163,6 +13147,7 @@ def document_node_serving_summary_row(
         "mrr@10": metrics.get("mrr@10") if metrics else None,
         "metrics": metrics,
         "index_bytes": index_phase.get("index_bytes", 0),
+        **storage_memory,
         "index_stats": index_phase.get("index_stats", {}),
         "index_build_stats": index_build_stats,
         "index_signature": index_phase.get("index_signature"),
@@ -12203,6 +13188,19 @@ def document_node_serving_summary_row(
             "centroid_posting_cap_strategy"
         ),
         "centroid_candidates": largest_work.get("centroid_candidates"),
+        "centroid_candidates_before_bound": largest_work.get(
+            "centroid_candidates_before_bound"
+        ),
+        "centroid_candidates_after_bound": largest_work.get(
+            "centroid_candidates_after_bound"
+        ),
+        "centroid_upper_bound_docs_pruned": largest_work.get(
+            "centroid_upper_bound_docs_pruned"
+        ),
+        "centroid_bitset_docs_set": largest_work.get("centroid_bitset_docs_set"),
+        "centroid_bitset_memory_bytes": largest_work.get(
+            "centroid_bitset_memory_bytes"
+        ),
         "quantized_inverted_lists_visited": (
             largest_work.get("quantized_inverted_lists_visited")
             or stats_sample.get("quantized_inverted_lists_visited")
@@ -12266,6 +13264,38 @@ def document_node_serving_summary_row(
         or stats_sample.get("proxy_candidates")
         or stats_sample.get("proxy_candidates_returned")
         or stats_sample.get("multivector_proxy_candidates_returned"),
+        "proxy_vector_score_us": first_sample_value(
+            "proxy_vector_score_us",
+            "proxy_vector_score_time_us",
+            "multivector_proxy_scoring_time_us",
+        ),
+        "proxy_vector_score_time_us": first_sample_value(
+            "proxy_vector_score_time_us",
+            "proxy_vector_score_us",
+            "multivector_proxy_scoring_time_us",
+        ),
+        "proxy_graph_nodes_visited": first_sample_value(
+            "proxy_graph_nodes_visited",
+            "multivector_proxy_graph_nodes_visited",
+            "multivector_doc_graph_nodes_visited",
+        ),
+        "proxy_graph_edges_visited": first_sample_value(
+            "proxy_graph_edges_visited",
+            "multivector_proxy_graph_edges_visited",
+            "multivector_doc_graph_edges_visited",
+        ),
+        "heap_exact_rerank_docs": exact_rerank_docs_work,
+        "heap_exact_rerank_fetches": first_sample_value(
+            "heap_fetches",
+            "exact_heap_fetches",
+            "multivector_exact_heap_fetches",
+        ),
+        "heap_exact_rerank_time_us": first_sample_value(
+            "exact_maxsim_rerank_time_us",
+            "multivector_exact_maxsim_rerank_time_us",
+            "graph_heap_rescore_us",
+            "graph_rescore_us",
+        ),
         "graph_entry_sample_scored": first_sample_value(
             "graph_entry_sample_scored",
             "multivector_doc_graph_entry_sample_scored",
@@ -12315,10 +13345,20 @@ def document_node_serving_summary_row(
 
 
 def serving_row_id(row: dict[str, Any]) -> str:
-    return "{profile}_ef{ef}_os{oversampling}".format(
+    rerank_k = row.get("config_exact_rerank_k")
+    if rerank_k is None:
+        rerank_k = row.get("effective_exact_rerank_k")
+    rerank_suffix = ""
+    try:
+        if rerank_k is not None:
+            rerank_suffix = f"_rk{int(rerank_k)}"
+    except (TypeError, ValueError):
+        rerank_suffix = ""
+    return "{profile}_ef{ef}_os{oversampling}{rerank}".format(
         profile=row.get("profile", ""),
         ef=int(row.get("ef", 0) or 0),
         oversampling=int(row.get("oversampling", 0) or 0),
+        rerank=rerank_suffix,
     )
 
 
@@ -12502,6 +13542,7 @@ def serving_candidate_delta_evidence(row: dict[str, Any]) -> dict[str, Any]:
         "learned_sparse_partial_coverage",
         "centroid_lite_max_postings_per_token",
         "centroid_lite_pruning",
+        "centroid_lite_bitset_prefilter",
         "centroid_postings_touched",
         "centroid_postings_skipped",
         "centroid_posting_limit_per_token",
@@ -13102,8 +14143,17 @@ def serving_recommendation_row(row: dict[str, Any]) -> dict[str, Any]:
         "bm25_text_query_available": row.get("bm25_text_query_available"),
         "sparse_candidate_source": row.get("sparse_candidate_source"),
         "proxy_encoder": row.get("proxy_encoder"),
+        "proxy_encoder_kind": row.get("proxy_encoder_kind", row.get("proxy_encoder")),
+        "random_projection_fde_seed": row.get("random_projection_fde_seed"),
+        "random_projection_fde_checksum": row.get("random_projection_fde_checksum"),
+        "learned_projection_required": row.get("learned_projection_required"),
         "centroids": row.get("centroids"),
         "storage_kind": row.get("storage_kind"),
+        "index_bytes": row.get("index_bytes"),
+        "docmap_bytes": row.get("docmap_bytes"),
+        "sidecar_bytes": row.get("sidecar_bytes"),
+        "graph_bytes": row.get("graph_bytes"),
+        "storage_memory_bytes_source": row.get("storage_memory_bytes_source"),
         "cache_mode": row.get("cache_mode"),
         "token_pooling": row.get("token_pooling"),
         "token_pooling_target_ratio": row.get("token_pooling_target_ratio"),
@@ -13127,6 +14177,9 @@ def serving_recommendation_row(row: dict[str, Any]) -> dict[str, Any]:
             "centroid_lite_max_postings_per_token"
         ),
         "centroid_lite_pruning": row.get("centroid_lite_pruning", "off"),
+        "centroid_lite_bitset_prefilter": row.get(
+            "centroid_lite_bitset_prefilter", "off"
+        ),
         "centroid_lite_warnings": row.get("centroid_lite_warnings", []),
         "ef": row.get("ef"),
         "oversampling": row.get("oversampling"),
@@ -13150,6 +14203,7 @@ def serving_recommendation_row(row: dict[str, Any]) -> dict[str, Any]:
         "admission_evidence_mode": row.get("admission_evidence_mode"),
         "trace_entries": row.get("trace_entries"),
         "requested_serving_exact_rerank_k": row.get("requested_serving_exact_rerank_k"),
+        "config_exact_rerank_k": row.get("config_exact_rerank_k"),
         "effective_exact_rerank_k": row.get("effective_exact_rerank_k"),
         "exact_rerank_docs_p50": row.get("exact_rerank_docs_p50"),
         "exact_rerank_docs_p95": row.get("exact_rerank_docs_p95"),
@@ -13177,8 +14231,10 @@ def serving_recommendation_row(row: dict[str, Any]) -> dict[str, Any]:
         ),
         "p50_ms": row.get("p50_ms"),
         "p95_ms": row.get("p95_ms"),
+        "p99_ms": row.get("p99_ms", row.get("p99_latency_ms_at_largest_budget")),
         "p50_latency_ms_at_largest_budget": row.get("p50_latency_ms_at_largest_budget"),
         "p95_latency_ms_at_largest_budget": row.get("p95_latency_ms_at_largest_budget"),
+        "p99_latency_ms_at_largest_budget": row.get("p99_latency_ms_at_largest_budget"),
         "exact_top10_admission_recall": row.get("exact_top10_admission_recall"),
         "exact_top10_admission_recall_delta": row.get(
             "exact_top10_admission_recall_delta"
@@ -13188,6 +14244,19 @@ def serving_recommendation_row(row: dict[str, Any]) -> dict[str, Any]:
         "recall@10": row.get("recall@10"),
         "ndcg@10": row.get("ndcg@10"),
         "mrr@10": row.get("mrr@10"),
+        "proxy_candidates_returned": row.get(
+            "proxy_candidates_returned",
+            row.get("multivector_proxy_candidates_returned"),
+        ),
+        "proxy_vector_score_us": row.get("proxy_vector_score_us"),
+        "proxy_vector_score_time_us": row.get("proxy_vector_score_time_us"),
+        "proxy_graph_nodes_visited": row.get("proxy_graph_nodes_visited"),
+        "proxy_graph_edges_visited": row.get("proxy_graph_edges_visited"),
+        "exact_rerank_docs": row.get("exact_rerank_docs"),
+        "exact_rerank_time_us": row.get("exact_rerank_time_us"),
+        "heap_exact_rerank_docs": row.get("heap_exact_rerank_docs"),
+        "heap_exact_rerank_fetches": row.get("heap_exact_rerank_fetches"),
+        "heap_exact_rerank_time_us": row.get("heap_exact_rerank_time_us"),
         "p95_ms_delta": row.get("p95_ms_delta"),
         "bm25_latency_delta_ms": row.get("bm25_latency_delta_ms"),
         "index_bytes": row.get("index_bytes"),
@@ -13836,6 +14905,68 @@ def serving_quality_available(rows: list[dict[str, Any]]) -> bool:
     return any(serving_row_metric(row, "ndcg@10") is not None for row in rows)
 
 
+def serving_qrels_available(rows: list[dict[str, Any]]) -> bool:
+    return any(
+        serving_row_metric(row, key) is not None
+        for row in rows
+        for key in ("recall@10", "ndcg@10", "mrr@10")
+    )
+
+
+def serving_oracle_admission_available(rows: list[dict[str, Any]]) -> bool:
+    return any(
+        serving_row_metric(row, "exact_top10_admission_recall") is not None
+        for row in rows
+    )
+
+
+def serving_row_proxy_encoder(row: dict[str, Any]) -> str:
+    sample = row.get("last_scan_stats_sample", row.get("serving_stats_sample", {}))
+    if not isinstance(sample, dict):
+        sample = {}
+    return str(
+        row.get("proxy_encoder_kind")
+        or row.get("proxy_encoder")
+        or sample.get("proxy_encoder_kind")
+        or ""
+    )
+
+
+def serving_pure_dense_proxy_stronger_nonzero_available(
+    rows: list[dict[str, Any]],
+    *,
+    max_p95_ms: float,
+) -> bool:
+    for row in rows:
+        if not serving_row_is_pure_proxy(row):
+            continue
+        if serving_row_proxy_encoder(row) not in DOCUMENT_NODE_SERVING_GRID_PURE_DENSE_PROXY_STRONG_ENCODERS:
+            continue
+        admission = serving_row_metric(row, "exact_top10_admission_recall")
+        if admission is None or admission <= 0.0:
+            continue
+        p95 = serving_row_p95(row)
+        if p95 is None:
+            continue
+        if max_p95_ms > 0.0 and p95 > max_p95_ms:
+            continue
+        return True
+    return False
+
+
+def serving_exact_baseline_has_nonzero_quality(exact_baseline: dict[str, Any]) -> bool:
+    metrics = exact_baseline.get("metrics", {}) if isinstance(exact_baseline, dict) else {}
+    if not isinstance(metrics, dict):
+        return False
+    return any(
+        (
+            serving_row_metric({key: metrics.get(key)}, key) or 0.0
+        )
+        > 0.0
+        for key in ("recall@10", "ndcg@10", "mrr@10")
+    )
+
+
 def serving_exact_baseline_from_results(results: list[dict[str, Any]]) -> dict[str, Any]:
     for item in results:
         if not isinstance(item, dict):
@@ -13853,6 +14984,64 @@ def serving_exact_baseline_from_results(results: list[dict[str, Any]]) -> dict[s
         "available": False,
         "reason": "exact scan method was not included in this benchmark run",
     }
+
+
+def serving_profile_promotion_failures(
+    row: dict[str, Any],
+    *,
+    qrels_available: bool,
+    oracle_admission_available: bool,
+    exact_oracle_has_nonzero_quality: bool,
+) -> list[str]:
+    failures: list[str] = []
+    recall = serving_row_metric(row, "recall@10")
+    ndcg = serving_row_metric(row, "ndcg@10")
+    admission = serving_row_metric(row, "exact_top10_admission_recall")
+    zero_qrels_quality = False
+    if qrels_available:
+        zero_qrels_quality = (
+            (recall is not None and recall <= 0.0)
+            or (ndcg is not None and ndcg <= 0.0)
+        )
+        if zero_qrels_quality:
+            failures.append("rejected_zero_qrels_quality")
+
+    zero_admission = False
+    if oracle_admission_available and admission is not None and admission <= 0.0:
+        zero_admission = True
+        failures.append("rejected_zero_exact_admission")
+    if exact_oracle_has_nonzero_quality and admission is not None and admission <= 0.0:
+        zero_admission = True
+        failures.append("rejected_zero_exact_admission")
+
+    if not qrels_available and not oracle_admission_available:
+        failures.append("rejected_oracle_quality_unproven")
+
+    if serving_row_is_pure_proxy(row) and (zero_qrels_quality or zero_admission):
+        failures.append("rejected_fast_but_dead_proxy")
+
+    if (
+        str(row.get("candidate_source") or "") == "centroid_lite"
+        and zero_qrels_quality
+    ):
+        failures.append("rejected_centroid_lite_slow_and_zero_quality")
+
+    return sorted(dict.fromkeys(failures))
+
+
+def serving_negative_control_next_action(row: dict[str, Any]) -> str:
+    reasons = set(str(reason) for reason in row.get("failure_reasons", []) or [])
+    if "rejected_oracle_quality_unproven" in reasons:
+        return "run_oracle_quality_check_before_promotion"
+    if "rejected_fast_but_dead_proxy" in reasons:
+        return "keep_as_latency_baseline; test_native_colbert_candidate_generation"
+    if "rejected_centroid_lite_slow_and_zero_quality" in reasons:
+        return "keep_as_negative_control; inspect_centroid_candidate_generation"
+    if "rejected_zero_exact_admission" in reasons:
+        return "do_not_promote; improve_candidate_admission"
+    if "rejected_zero_qrels_quality" in reasons:
+        return "do_not_promote; verify_oracle_quality_and_docid_alignment"
+    return "inspect_rejection_reasons"
 
 
 def serving_threshold_failures(
@@ -13951,6 +15140,15 @@ def compute_document_node_serving_recommendation(
         if isinstance(item, dict)
     ]
     pure_colbert_only = bool(serving_grid.get("pure_colbert_only", False))
+    pure_dense_proxy_focus = bool(serving_grid.get("pure_dense_proxy_focus", False))
+    stronger_proxy_nonzero_available = (
+        serving_pure_dense_proxy_stronger_nonzero_available(
+            rows,
+            max_p95_ms=max_p95_ms,
+        )
+        if pure_dense_proxy_focus
+        else False
+    )
 
     def pure_colbert_hints(hints: Sequence[Any]) -> list[str]:
         if not pure_colbert_only:
@@ -13973,6 +15171,11 @@ def compute_document_node_serving_recommendation(
         if isinstance(exact_metrics, dict)
         else None
     )
+    qrels_available = serving_qrels_available(rows)
+    oracle_admission_available = serving_oracle_admission_available(rows)
+    exact_oracle_has_nonzero_quality = serving_exact_baseline_has_nonzero_quality(
+        exact_baseline if isinstance(exact_baseline, dict) else {}
+    )
     threshold_rows: list[dict[str, Any]] = []
     rejected_profiles: list[dict[str, Any]] = []
     for row in rows:
@@ -13984,6 +15187,22 @@ def compute_document_node_serving_recommendation(
             exact_baseline_ndcg=exact_baseline_ndcg,
             accept_partial_learned_sparse_coverage=accept_partial_learned_sparse_coverage,
         )
+        failures.extend(
+            serving_profile_promotion_failures(
+                row,
+                qrels_available=qrels_available,
+                oracle_admission_available=oracle_admission_available,
+                exact_oracle_has_nonzero_quality=exact_oracle_has_nonzero_quality,
+            )
+        )
+        if (
+            pure_dense_proxy_focus
+            and serving_row_is_pure_proxy(row)
+            and serving_row_proxy_encoder(row) == "normalized_mean"
+            and stronger_proxy_nonzero_available
+        ):
+            failures.append("rejected_normalized_mean_superseded_by_stronger_proxy")
+        failures = sorted(dict.fromkeys(failures))
         summary = serving_recommendation_row(row)
         summary["report_classification"] = serving_proxy_report_classification(
             summary,
@@ -14011,6 +15230,14 @@ def compute_document_node_serving_recommendation(
             ]
         summary["unavailable_criteria"] = unavailable
         summary["candidate_admission_bottleneck"] = candidate_bottleneck
+        summary["next_action"] = (
+            serving_negative_control_next_action(summary)
+            if any(
+                str(reason).startswith("rejected_")
+                for reason in summary["failure_reasons"]
+            )
+            else ""
+        )
         if candidate_bottleneck:
             summary["candidate_admission_bottleneck_reason"] = (
                 "exact rerank exhausted the admitted candidate band, but "
@@ -14034,6 +15261,14 @@ def compute_document_node_serving_recommendation(
             and serving_row_p95(item) is not None
         )
     ]
+    hard_rejected_ids = {
+        serving_row_id(item)
+        for item in threshold_rows
+        if any(
+            str(reason).startswith("rejected_")
+            for reason in item.get("failure_reasons", []) or []
+        )
+    }
     best_latency_safe = min(
         eligible,
         key=lambda item: (
@@ -14058,8 +15293,9 @@ def compute_document_node_serving_recommendation(
         if (
             not serving_row_unsupported_reservoir_evidence(row)
             and row_allowed_for_named_selection(row)
+            and serving_row_id(row) not in hard_rejected_ids
         )
-    ] or rows
+    ]
     quality_rows = [
         row for row in quality_rows
         if row_allowed_for_named_selection(row)
@@ -14110,6 +15346,8 @@ def compute_document_node_serving_recommendation(
     balanced_candidates: list[dict[str, Any]] = []
     for row in rows:
         if not row_allowed_for_named_selection(row):
+            continue
+        if serving_row_id(row) in hard_rejected_ids:
             continue
         admission = serving_row_metric(row, "exact_top10_admission_recall") or 0.0
         ndcg = serving_row_metric(row, "ndcg@10") or 0.0
@@ -14209,6 +15447,21 @@ def compute_document_node_serving_recommendation(
         )
         else []
     )
+    if pure_dense_proxy_focus:
+        pure_proxy_rows = [row for row in rows if serving_row_is_pure_proxy(row)]
+        known_admissions = [
+            serving_row_metric(row, "exact_top10_admission_recall")
+            for row in pure_proxy_rows
+        ]
+        if known_admissions and all(
+            admission is not None and admission <= 0.0
+            for admission in known_admissions
+        ):
+            recommendation_notes.append(
+                "All pure dense proxy profiles had zero exact top10 admission; "
+                "next pure-ColBERT targets are document-node MaxSim graph or "
+                "quantized_inverted_experimental, not BM25 or learned sparse."
+            )
 
     recommendation = {
         "thresholds": {
@@ -14241,6 +15494,21 @@ def compute_document_node_serving_recommendation(
             key=lambda item: (
                 float(item.get("exact_top10_admission_recall") or 0.0),
                 serving_row_p95(item) if serving_row_p95(item) is not None else float("inf"),
+                str(item.get("id", "")),
+            ),
+        ),
+        "rejected_fast_profiles": sorted(
+            [
+                item for item in threshold_rows
+                if any(
+                    str(reason).startswith("rejected_")
+                    for reason in item.get("failure_reasons", []) or []
+                )
+            ],
+            key=lambda item: (
+                serving_row_p95(item)
+                if serving_row_p95(item) is not None
+                else float("inf"),
                 str(item.get("id", "")),
             ),
         ),
@@ -15022,7 +16290,41 @@ def compute_document_node_token_pooling_recommendation(
     )
     threshold_rows: list[dict[str, Any]] = []
     rejected_profiles: list[dict[str, Any]] = []
+    rejected_pooling_too_lossy: list[dict[str, Any]] = []
+    rejected_pooling_no_memory_gain: list[dict[str, Any]] = []
+    rejected_pooling_build_failed: list[dict[str, Any]] = []
     unavailable_criteria: set[str] = set()
+    baseline_memory_by_family: dict[str, int] = {}
+
+    def pooling_family(profile: str) -> str:
+        for suffix in ("_pool_075", "_pool_050", "_pool_033"):
+            if profile.endswith(suffix):
+                return profile[: -len(suffix)]
+        return profile
+
+    def row_memory_bytes(row: dict[str, Any]) -> int:
+        for key in ("index_bytes", "estimated_index_bytes"):
+            value = row.get(key)
+            try:
+                parsed = int(value)
+            except (TypeError, ValueError):
+                continue
+            if parsed > 0:
+                return parsed
+        return (
+            int(row.get("docmap_bytes") or 0)
+            + int(row.get("sidecar_bytes") or 0)
+            + int(row.get("graph_bytes") or 0)
+        )
+
+    for row in rows:
+        if str(row.get("token_pooling", "off")) == "off":
+            memory_bytes = row_memory_bytes(row)
+            if memory_bytes > 0:
+                baseline_memory_by_family[pooling_family(str(row.get("profile", "")))] = (
+                    memory_bytes
+                )
+
     for row in rows:
         failures, unavailable = serving_threshold_failures(
             row,
@@ -15032,9 +16334,56 @@ def compute_document_node_token_pooling_recommendation(
             exact_baseline_ndcg=exact_baseline_ndcg,
         )
         summary = serving_recommendation_row(row)
+        profile_name = str(summary.get("profile", ""))
+        family = pooling_family(profile_name)
+        memory_bytes = row_memory_bytes(row)
+        baseline_memory_bytes = baseline_memory_by_family.get(family, 0)
+        token_pooling = str(summary.get("token_pooling") or row.get("token_pooling") or "off")
+        pooled_row = token_pooling != "off"
+        memory_gain_ratio = (
+            round(1.0 - (memory_bytes / baseline_memory_bytes), 6)
+            if memory_bytes > 0 and baseline_memory_bytes > 0
+            else None
+        )
+        build_failed = bool(
+            row.get("build_failed")
+            or row.get("skipped")
+            or row.get("index_build_failed")
+            or str(row.get("terminated_or_completed", "")).lower() in {"failed", "skipped"}
+            or (memory_bytes <= 0 and row.get("index_bytes") is not None)
+        )
+        if build_failed and "rejected_pooling_build_failed" not in failures:
+            failures.append("rejected_pooling_build_failed")
+        if (
+            pooled_row
+            and baseline_memory_bytes > 0
+            and memory_bytes > 0
+            and memory_bytes >= baseline_memory_bytes
+            and "rejected_pooling_no_memory_gain" not in failures
+        ):
+            failures.append("rejected_pooling_no_memory_gain")
+        if (
+            pooled_row
+            and any(
+                reason in failures
+                for reason in (
+                    "top10_admission_below_threshold",
+                    "ndcg_below_exact_ratio",
+                    "rejected_zero_qrels_quality",
+                    "rejected_zero_exact_admission",
+                )
+            )
+            and "rejected_pooling_too_lossy" not in failures
+        ):
+            failures.append("rejected_pooling_too_lossy")
+        failures = sorted(dict.fromkeys(failures))
         summary["threshold_pass"] = not failures
         summary["failure_reasons"] = failures
         summary["unavailable_criteria"] = unavailable
+        summary["pooling_family"] = family
+        summary["memory_bytes"] = memory_bytes
+        summary["baseline_memory_bytes"] = baseline_memory_bytes or None
+        summary["memory_gain_ratio_vs_unpooled"] = memory_gain_ratio
         summary["selection_metrics"] = {
             "p95_ms": serving_row_p95(row),
             "exact_top10_admission_recall": serving_row_metric(
@@ -15046,11 +16395,22 @@ def compute_document_node_token_pooling_recommendation(
             "token_pooling_ratio_p50": row.get("token_pooling_ratio_p50"),
             "exact_rerank_pairs_p50": row.get("exact_rerank_pairs_p50"),
             "index_build_elapsed_ms": row.get("index_build_elapsed_ms"),
+            "index_bytes": row.get("index_bytes"),
+            "docmap_bytes": row.get("docmap_bytes"),
+            "sidecar_bytes": row.get("sidecar_bytes"),
+            "graph_bytes": row.get("graph_bytes"),
+            "memory_gain_ratio_vs_unpooled": memory_gain_ratio,
         }
         unavailable_criteria.update(str(item) for item in unavailable)
         threshold_rows.append(summary)
         if failures:
             rejected_profiles.append(summary)
+        if "rejected_pooling_too_lossy" in failures:
+            rejected_pooling_too_lossy.append(summary)
+        if "rejected_pooling_no_memory_gain" in failures:
+            rejected_pooling_no_memory_gain.append(summary)
+        if "rejected_pooling_build_failed" in failures:
+            rejected_pooling_build_failed.append(summary)
 
     eligible = [
         item for item in threshold_rows
@@ -15060,17 +16420,33 @@ def compute_document_node_token_pooling_recommendation(
             and serving_row_p95(item) is not None
         )
     ]
+    pooled_eligible = [
+        item
+        for item in eligible
+        if str(item.get("token_pooling") or "off") != "off"
+        and int(item.get("memory_bytes") or 0) > 0
+    ]
+    best_memory_safe_pooling = min(
+        pooled_eligible,
+        key=lambda item: (
+            int(item.get("memory_bytes") or 0),
+            serving_row_p95(item) if serving_row_p95(item) is not None else float("inf"),
+            str(item.get("id", "")),
+        ),
+        default=None,
+    )
     best_pooling_latency_safe = min(
-        eligible,
+        pooled_eligible,
         key=lambda item: (
             serving_row_p95(item) if serving_row_p95(item) is not None else float("inf"),
+            int(item.get("memory_bytes") or 0),
             str(item.get("id", "")),
         ),
         default=None,
     )
     use_ndcg = serving_quality_available(rows)
     best_pooling_quality_safe = max(
-        eligible,
+        pooled_eligible,
         key=lambda item: (
             (serving_row_metric(item, "ndcg@10") or 0.0)
             if use_ndcg
@@ -15086,6 +16462,12 @@ def compute_document_node_token_pooling_recommendation(
             **best_pooling_latency_safe,
             "criteria_unavailable": sorted(unavailable_criteria),
             "selection_basis": "lowest_p95_passing_thresholds",
+        }
+    if best_memory_safe_pooling is not None:
+        best_memory_safe_pooling = {
+            **best_memory_safe_pooling,
+            "criteria_unavailable": sorted(unavailable_criteria),
+            "selection_basis": "lowest_index_bytes_passing_thresholds",
         }
     if best_pooling_quality_safe is not None:
         best_pooling_quality_safe = {
@@ -15107,6 +16489,8 @@ def compute_document_node_token_pooling_recommendation(
             if use_ndcg
             else "admission_latency_without_qrels"
         ),
+        "best_memory_safe_pooling": best_memory_safe_pooling,
+        "best_latency_safe_pooling": best_pooling_latency_safe,
         "best_pooling_latency_safe": best_pooling_latency_safe,
         "best_pooling_quality_safe": best_pooling_quality_safe,
         "profile_thresholds": sorted(
@@ -15122,6 +16506,18 @@ def compute_document_node_token_pooling_recommendation(
                 serving_row_p95(item) if serving_row_p95(item) is not None else float("inf"),
                 str(item.get("id", "")),
             ),
+        ),
+        "rejected_pooling_too_lossy": sorted(
+            rejected_pooling_too_lossy,
+            key=lambda item: (str(item.get("pooling_family", "")), str(item.get("id", ""))),
+        ),
+        "rejected_pooling_no_memory_gain": sorted(
+            rejected_pooling_no_memory_gain,
+            key=lambda item: (str(item.get("pooling_family", "")), str(item.get("id", ""))),
+        ),
+        "rejected_pooling_build_failed": sorted(
+            rejected_pooling_build_failed,
+            key=lambda item: (str(item.get("pooling_family", "")), str(item.get("id", ""))),
         ),
     }
 
@@ -15284,6 +16680,156 @@ def _self_check_document_node_serving_recommendation() -> None:
     assert "ndcg_ratio_vs_exact" in no_qrels["best_latency_safe"]["criteria_unavailable"]
     assert no_qrels["best_quality"]["profile"] == "quality_no_qrels"
     assert no_qrels["best_quality"]["selection_basis"] == "exact_top10_admission_recall"
+
+    zero_quality_fast = _synthetic_serving_row(
+        "proxy_normalized_mean_proxy_only",
+        p95=11.4,
+        admission=0.90,
+        ndcg=0.0,
+        storage="proxy_only",
+        candidate_source="proxy_vector",
+        proxy_encoder="normalized_mean",
+        ef=800,
+    )
+    zero_quality_fast.update({
+        "recall@10": 0.0,
+        "mrr@10": 0.0,
+        "p99_ms": 20.0,
+        "proxy_candidates_returned": 800,
+        "proxy_candidate_limit_effective": 800,
+        "proxy_candidate_limit_source": "doc_candidate_k",
+        "exact_rerank_docs": 100,
+        "exact_rerank_time_us": 12000,
+    })
+    nonzero_quality_slower = _synthetic_serving_row(
+        "centroid_lite_nonzero_quality",
+        p95=150.0,
+        admission=0.85,
+        ndcg=0.40,
+        storage="f16",
+        candidate_source="centroid_lite",
+        centroids="kmeans",
+    )
+    zero_quality_rec = compute_document_node_serving_recommendation(
+        {"results": [zero_quality_fast, nonzero_quality_slower]},
+        exact_baseline={"available": True, "metrics": {"ndcg@10": 0.50, "recall@10": 0.50}},
+        min_top10_admission=0.80,
+        min_ndcg_ratio_vs_exact=0.50,
+        max_p95_ms=0.0,
+    )
+    assert zero_quality_rec["best_latency_safe"]["profile"] == "centroid_lite_nonzero_quality"
+    assert zero_quality_rec["best_quality"]["profile"] == "centroid_lite_nonzero_quality"
+    assert zero_quality_rec["best_balanced"]["profile"] == "centroid_lite_nonzero_quality"
+    zero_quality_rejected = {
+        item["profile"]: item for item in zero_quality_rec["rejected_profiles"]
+    }
+    assert "rejected_zero_qrels_quality" in zero_quality_rejected[
+        "proxy_normalized_mean_proxy_only"
+    ]["failure_reasons"]
+    assert "rejected_fast_but_dead_proxy" in zero_quality_rejected[
+        "proxy_normalized_mean_proxy_only"
+    ]["failure_reasons"]
+    rejected_fast = {
+        item["profile"]: item for item in zero_quality_rec["rejected_fast_profiles"]
+    }
+    assert rejected_fast["proxy_normalized_mean_proxy_only"]["proxy_candidates_returned"] == 800
+    assert rejected_fast["proxy_normalized_mean_proxy_only"]["exact_rerank_time_us"] == 12000
+    zero_quality_markdown = markdown_benchmark_summary({
+        "document_node_serving_recommendation": zero_quality_rec,
+    })
+    assert "#### Rejected fast profiles" in zero_quality_markdown
+    assert "rejected_fast_but_dead_proxy" in zero_quality_markdown
+
+    zero_admission_high_quality = _synthetic_serving_row(
+        "zero_admission_high_quality",
+        p95=5.0,
+        admission=0.0,
+        ndcg=0.90,
+        storage="f16",
+    )
+    zero_admission_fallback = _synthetic_serving_row(
+        "nonzero_admission_fallback",
+        p95=50.0,
+        admission=0.82,
+        ndcg=0.50,
+        storage="f16",
+    )
+    zero_admission_rec = compute_document_node_serving_recommendation(
+        {"results": [zero_admission_high_quality, zero_admission_fallback]},
+        exact_baseline={"available": True, "metrics": {"ndcg@10": 0.50, "recall@10": 0.50}},
+        min_top10_admission=0.80,
+        min_ndcg_ratio_vs_exact=0.50,
+        max_p95_ms=0.0,
+    )
+    assert zero_admission_rec["best_quality"]["profile"] == "nonzero_admission_fallback"
+    zero_admission_rejected = {
+        item["profile"]: item["failure_reasons"]
+        for item in zero_admission_rec["rejected_profiles"]
+    }
+    assert "rejected_zero_exact_admission" in zero_admission_rejected[
+        "zero_admission_high_quality"
+    ]
+
+    qrelless_oracle_rec = compute_document_node_serving_recommendation(
+        {
+            "results": [
+                _synthetic_serving_row(
+                    "qrelless_oracle_fast",
+                    p95=9.0,
+                    admission=0.81,
+                    ndcg=None,
+                    storage="sq8",
+                ),
+                _synthetic_serving_row(
+                    "qrelless_oracle_best_admission",
+                    p95=40.0,
+                    admission=0.95,
+                    ndcg=None,
+                    storage="f16",
+                ),
+            ]
+        },
+        exact_baseline={"available": False},
+        min_top10_admission=0.80,
+        min_ndcg_ratio_vs_exact=0.95,
+        max_p95_ms=0.0,
+    )
+    assert qrelless_oracle_rec["best_latency_safe"]["profile"] == "qrelless_oracle_fast"
+    assert qrelless_oracle_rec["best_quality"]["profile"] == "qrelless_oracle_best_admission"
+
+    qrelless_unproven_rows = [
+        _synthetic_serving_row(
+            "qrelless_oracleless_fast",
+            p95=6.0,
+            admission=None,  # type: ignore[arg-type]
+            ndcg=None,
+            storage="sq8",
+        ),
+        _synthetic_serving_row(
+            "qrelless_oracleless_slow",
+            p95=60.0,
+            admission=None,  # type: ignore[arg-type]
+            ndcg=None,
+            storage="f16",
+        ),
+    ]
+    qrelless_unproven_rec = compute_document_node_serving_recommendation(
+        {"results": qrelless_unproven_rows},
+        exact_baseline={"available": False},
+        min_top10_admission=0.80,
+        min_ndcg_ratio_vs_exact=0.95,
+        max_p95_ms=0.0,
+    )
+    assert qrelless_unproven_rec["best_latency_safe"] is None
+    assert qrelless_unproven_rec["best_quality"] is None
+    assert qrelless_unproven_rec["best_balanced"] is None
+    qrelless_unproven_rejected = {
+        item["profile"]: item["failure_reasons"]
+        for item in qrelless_unproven_rec["rejected_profiles"]
+    }
+    assert "rejected_oracle_quality_unproven" in qrelless_unproven_rejected[
+        "qrelless_oracleless_fast"
+    ]
 
     exact_baseline_missing_rows = [
         _synthetic_serving_row("baseline_missing_fast", p95=7.0, admission=0.82, ndcg=0.50, storage="sq8"),
@@ -15732,6 +17278,89 @@ def _self_check_document_node_serving_recommendation() -> None:
     assert "try_quantized_inverted_experimental" in pure_colbert_rec_text
     assert "try_learned_projection_or_fde" in pure_colbert_rec_text
 
+    pure_dense_zero_normalized = _synthetic_serving_row(
+        "proxy_normalized_mean_proxy_only",
+        p95=11.0,
+        admission=0.0,
+        ndcg=0.20,
+        storage="proxy_only",
+        proxy_encoder="normalized_mean",
+    )
+    pure_dense_nonzero_max_pool = _synthetic_serving_row(
+        "proxy_max_pool_proxy_only",
+        p95=18.0,
+        admission=0.82,
+        ndcg=0.35,
+        storage="proxy_only",
+        proxy_encoder="max_pool",
+    )
+    pure_dense_proxy_rec = compute_document_node_serving_recommendation(
+        {
+            "pure_colbert_only": True,
+            "pure_dense_proxy_focus": True,
+            "results": [pure_dense_zero_normalized, pure_dense_nonzero_max_pool],
+        },
+        exact_baseline={"available": True, "metrics": {"ndcg@10": 0.50}},
+        min_top10_admission=0.80,
+        min_ndcg_ratio_vs_exact=0.50,
+        max_p95_ms=0.0,
+    )
+    assert pure_dense_proxy_rec["best_latency_safe"]["profile"] == (
+        "proxy_max_pool_proxy_only"
+    )
+    pure_dense_rejected = {
+        item["profile"]: item["failure_reasons"]
+        for item in pure_dense_proxy_rec["rejected_profiles"]
+    }
+    assert "rejected_zero_exact_admission" in pure_dense_rejected[
+        "proxy_normalized_mean_proxy_only"
+    ]
+    assert "rejected_normalized_mean_superseded_by_stronger_proxy" in (
+        pure_dense_rejected["proxy_normalized_mean_proxy_only"]
+    )
+
+    pure_dense_all_zero_rec = compute_document_node_serving_recommendation(
+        {
+            "pure_colbert_only": True,
+            "pure_dense_proxy_focus": True,
+            "results": [
+                _synthetic_serving_row(
+                    "proxy_normalized_mean_proxy_only",
+                    p95=10.0,
+                    admission=0.0,
+                    ndcg=0.20,
+                    storage="proxy_only",
+                    proxy_encoder="normalized_mean",
+                ),
+                _synthetic_serving_row(
+                    "proxy_max_pool_proxy_only",
+                    p95=12.0,
+                    admission=0.0,
+                    ndcg=0.21,
+                    storage="proxy_only",
+                    proxy_encoder="max_pool",
+                ),
+                _synthetic_serving_row(
+                    "proxy_random_projection_fde_proxy_only",
+                    p95=14.0,
+                    admission=0.0,
+                    ndcg=0.22,
+                    storage="proxy_only",
+                    proxy_encoder="random_projection_fde",
+                ),
+            ],
+        },
+        exact_baseline={"available": True, "metrics": {"ndcg@10": 0.50}},
+        min_top10_admission=0.80,
+        min_ndcg_ratio_vs_exact=0.50,
+        max_p95_ms=0.0,
+    )
+    pure_dense_all_zero_text = json.dumps(pure_dense_all_zero_rec, sort_keys=True)
+    assert "document-node MaxSim graph or quantized_inverted_experimental" in (
+        pure_dense_all_zero_text
+    )
+    assert "not BM25 or learned sparse" in pure_dense_all_zero_text
+
     experimental_rows = [
         _synthetic_serving_row(
             "quantized_inverted_experimental_f32",
@@ -15786,72 +17415,158 @@ def _self_check_document_node_serving_recommendation() -> None:
 
 
 def _self_check_document_node_token_pooling_recommendation() -> None:
+    def pooling_row(
+        profile: str,
+        *,
+        p95: float | None,
+        admission: float,
+        ndcg: float | None,
+        storage: str,
+        proxy_encoder: str,
+        candidate_source: str = "proxy_vector",
+        token_pooling: str = "off",
+        ratio: float = 1.0,
+        index_bytes: int = 1_000_000,
+        build_failed: bool = False,
+    ) -> dict[str, Any]:
+        row = _synthetic_serving_row(
+            profile,
+            p95=p95,
+            admission=admission,
+            ndcg=ndcg,
+            storage=storage,
+            candidate_source=candidate_source,
+            proxy_encoder=proxy_encoder,
+            token_pooling=token_pooling,
+            token_pooling_target_ratio=ratio,
+        )
+        row.update({
+            "index_bytes": index_bytes,
+            "docmap_bytes": int(index_bytes * 0.10),
+            "sidecar_bytes": int(index_bytes * 0.55),
+            "graph_bytes": int(index_bytes * 0.35),
+            "tokens_original_p50": 64.0,
+            "tokens_pooled_p50": round(64.0 * ratio, 3),
+            "token_pooling_ratio_p50": ratio,
+            "exact_rerank_pairs_p50": round(6400.0 * ratio, 3),
+        })
+        if build_failed:
+            row.update({
+                "index_bytes": 0,
+                "docmap_bytes": 0,
+                "sidecar_bytes": 0,
+                "graph_bytes": 0,
+                "index_build_failed": True,
+                "terminated_or_completed": "failed",
+            })
+        return row
+
     rows = [
-        _synthetic_serving_row(
-            "proxy_normalized_mean_f16",
-            p95=12.0,
-            admission=0.84,
+        pooling_row(
+            "proxy_max_pool_proxy_only",
+            p95=14.0,
+            admission=0.86,
             ndcg=0.84,
-            token_pooling="off",
-            token_pooling_target_ratio=1.0,
+            storage="proxy_only",
+            proxy_encoder="max_pool",
+            index_bytes=1_000_000,
         ),
-        _synthetic_serving_row(
-            "proxy_normalized_mean_f16_pool_075",
-            p95=9.0,
-            admission=0.79,
-            ndcg=0.80,
+        pooling_row(
+            "proxy_max_pool_proxy_only_pool_075",
+            p95=12.0,
+            admission=0.85,
+            ndcg=0.83,
+            storage="proxy_only",
+            proxy_encoder="max_pool",
             token_pooling="greedy_cosine",
-            token_pooling_target_ratio=0.75,
+            ratio=0.75,
+            index_bytes=760_000,
         ),
-        _synthetic_serving_row(
-            "proxy_normalized_mean_f16_pool_050",
-            p95=8.0,
+        pooling_row(
+            "proxy_max_pool_proxy_only_pool_050",
+            p95=11.0,
             admission=0.83,
             ndcg=0.82,
+            storage="proxy_only",
+            proxy_encoder="max_pool",
             token_pooling="greedy_cosine",
-            token_pooling_target_ratio=0.5,
+            ratio=0.5,
+            index_bytes=540_000,
         ),
-        _synthetic_serving_row(
-            "centroid_mean_f16_pool_033",
-            p95=20.0,
-            admission=0.92,
-            ndcg=0.90,
-            proxy_encoder="centroid_mean",
-            centroids="kmeans",
+        pooling_row(
+            "proxy_random_projection_fde_proxy_only",
+            p95=13.0,
+            admission=0.84,
+            ndcg=0.83,
+            storage="proxy_only",
+            proxy_encoder="random_projection_fde",
+            index_bytes=1_100_000,
+        ),
+        pooling_row(
+            "proxy_random_projection_fde_proxy_only_pool_075",
+            p95=12.5,
+            admission=0.78,
+            ndcg=0.79,
+            storage="proxy_only",
+            proxy_encoder="random_projection_fde",
             token_pooling="greedy_cosine",
-            token_pooling_target_ratio=0.33,
+            ratio=0.75,
+            index_bytes=830_000,
         ),
-        _synthetic_serving_row(
+        pooling_row(
+            "proxy_random_projection_fde_proxy_only_pool_050",
+            p95=12.0,
+            admission=0.82,
+            ndcg=0.81,
+            storage="proxy_only",
+            proxy_encoder="random_projection_fde",
+            token_pooling="greedy_cosine",
+            ratio=0.5,
+            index_bytes=1_200_000,
+        ),
+        pooling_row(
+            "document_nodes_sq8_paged_maxsim",
+            p95=40.0,
+            admission=0.90,
+            ndcg=0.86,
+            storage="sq8",
+            proxy_encoder="max_pool",
+            candidate_source="document_nodes",
+            index_bytes=2_000_000,
+        ),
+        pooling_row(
+            "document_nodes_sq8_paged_maxsim_pool_075",
+            p95=None,
+            admission=0.0,
+            ndcg=None,
+            storage="sq8",
+            proxy_encoder="max_pool",
+            candidate_source="document_nodes",
+            token_pooling="greedy_cosine",
+            ratio=0.75,
+            build_failed=True,
+        ),
+        pooling_row(
+            "document_nodes_sq8_paged_maxsim_pool_050",
+            p95=28.0,
+            admission=0.88,
+            ndcg=0.84,
+            storage="sq8",
+            proxy_encoder="max_pool",
+            candidate_source="document_nodes",
+            token_pooling="greedy_cosine",
+            ratio=0.5,
+            index_bytes=1_050_000,
+        ),
+        pooling_row(
             "unrelated_profile",
             p95=1.0,
             admission=1.0,
             ndcg=1.0,
+            storage="f16",
+            proxy_encoder="normalized_mean",
         ),
     ]
-    rows[0].update({
-        "tokens_original_p50": 64.0,
-        "tokens_pooled_p50": 64.0,
-        "token_pooling_ratio_p50": 1.0,
-        "exact_rerank_pairs_p50": 6400.0,
-    })
-    rows[1].update({
-        "tokens_original_p50": 64.0,
-        "tokens_pooled_p50": 48.0,
-        "token_pooling_ratio_p50": 0.75,
-        "exact_rerank_pairs_p50": 4800.0,
-    })
-    rows[2].update({
-        "tokens_original_p50": 64.0,
-        "tokens_pooled_p50": 32.0,
-        "token_pooling_ratio_p50": 0.5,
-        "exact_rerank_pairs_p50": 3200.0,
-    })
-    rows[3].update({
-        "tokens_original_p50": 64.0,
-        "tokens_pooled_p50": 21.0,
-        "token_pooling_ratio_p50": 0.33,
-        "exact_rerank_pairs_p50": 2100.0,
-    })
     rec = compute_document_node_token_pooling_recommendation(
         {"results": rows},
         exact_baseline={"available": True, "metrics": {"ndcg@10": 0.90}},
@@ -15860,15 +17575,30 @@ def _self_check_document_node_token_pooling_recommendation() -> None:
         max_p95_ms=0.0,
     )
     assert rec["available"] is True
-    assert rec["profile_count"] == 4
-    assert rec["best_pooling_latency_safe"]["profile"] == "proxy_normalized_mean_f16_pool_050"
-    assert rec["best_pooling_quality_safe"]["profile"] == "centroid_mean_f16_pool_033"
+    assert rec["profile_count"] == 9
+    assert rec["best_memory_safe_pooling"]["profile"] == "proxy_max_pool_proxy_only_pool_050"
+    assert rec["best_latency_safe_pooling"]["profile"] == "proxy_max_pool_proxy_only_pool_050"
+    assert rec["best_pooling_latency_safe"]["profile"] == "proxy_max_pool_proxy_only_pool_050"
+    assert rec["best_memory_safe_pooling"]["memory_gain_ratio_vs_unpooled"] == 0.46
     rejected = {
         item["profile"]: item["failure_reasons"]
         for item in rec["rejected_pooling_profiles"]
     }
-    assert "top10_admission_below_threshold" in rejected["proxy_normalized_mean_f16_pool_075"]
-    assert rec["best_pooling_latency_safe"]["selection_metrics"]["tokens_pooled_p50"] == 32.0
+    assert "rejected_pooling_too_lossy" in rejected[
+        "proxy_random_projection_fde_proxy_only_pool_075"
+    ]
+    assert "rejected_pooling_no_memory_gain" in rejected[
+        "proxy_random_projection_fde_proxy_only_pool_050"
+    ]
+    assert "rejected_pooling_build_failed" in rejected["document_nodes_sq8_paged_maxsim_pool_075"]
+    assert "proxy_random_projection_fde_proxy_only_pool_075" in {
+        item["profile"] for item in rec["rejected_pooling_too_lossy"]
+    }
+    assert rec["rejected_pooling_no_memory_gain"][0]["profile"] == (
+        "proxy_random_projection_fde_proxy_only_pool_050"
+    )
+    assert rec["rejected_pooling_build_failed"][0]["profile"] == "document_nodes_sq8_paged_maxsim_pool_075"
+    assert rec["best_latency_safe_pooling"]["selection_metrics"]["tokens_pooled_p50"] == 32.0
     no_qrels_rows = [
         {
             **row,
@@ -15885,11 +17615,24 @@ def _self_check_document_node_token_pooling_recommendation() -> None:
         min_ndcg_ratio_vs_exact=0.95,
         max_p95_ms=0.0,
     )
-    assert no_qrels["best_pooling_latency_safe"]["profile"] == "proxy_normalized_mean_f16_pool_050"
-    assert no_qrels["best_pooling_quality_safe"]["profile"] == "centroid_mean_f16_pool_033"
+    assert no_qrels["best_memory_safe_pooling"]["profile"] == "proxy_max_pool_proxy_only_pool_050"
+    assert no_qrels["best_latency_safe_pooling"]["profile"] == "proxy_max_pool_proxy_only_pool_050"
+    assert no_qrels["best_pooling_quality_safe"]["profile"] == "document_nodes_sq8_paged_maxsim_pool_050"
     assert (
         no_qrels["best_pooling_quality_safe"]["selection_basis"]
         == "exact_top10_admission_recall"
+    )
+    markdown = markdown_benchmark_summary({
+        "document_node_token_pooling_recommendation": rec,
+    })
+    assert "Best memory-safe pooling" in markdown
+    assert "memory gain" in markdown
+    assert "proxy_max_pool_proxy_only_pool_050" in markdown
+    assert path_is_under_nix_dev_tmp(
+        Path(".nix-dev/tmp/dbpedia-colbert-token-pooling-memory-focus-1m.json")
+    )
+    assert not path_is_under_nix_dev_tmp(
+        Path("dbpedia-colbert-token-pooling-memory-focus-1m.json")
     )
 
 
@@ -17239,6 +18982,18 @@ def _self_check_document_node_serving_build_only_serialization() -> None:
             "multivector_proxy_encoder": "centroid_mean",
             "multivector_centroids": "kmeans",
         },
+        "build_resource_estimate": {
+            "estimated_build_memory_bytes": 2_000_000,
+            "estimate_inputs": {"docs": 10},
+            "estimate_components": {
+                "docmap": 1000,
+                "full_multivector_sidecar": 2000,
+                "centroid_vectors": 3000,
+                "centroid_postings": 4000,
+                "graph_nodes": 5000,
+                "graph_edges": 6000,
+            },
+        },
         "build_stats": {
             "build_edges_us": 500000,
             "write_pages_us": 11000,
@@ -17257,6 +19012,25 @@ def _self_check_document_node_serving_build_only_serialization() -> None:
             "multivector_graph_neighbor_search_us": 60000,
             "multivector_graph_build_distance_proxy_calls": 1234,
             "multivector_graph_build_distance_exact_calls": 0,
+            "multivector_doc_vectors_pointer_bytes": 1024,
+            "multivector_doc_vector_chunk_ref_bytes": 2048,
+            "multivector_docmap_bytes_estimate": 4096,
+            "multivector_centroid_vector_bytes": 8192,
+            "multivector_centroid_residual_bytes": 512,
+            "multivector_centroid_posting_bytes": 16384,
+            "graph_node_bytes_estimate": 32768,
+            "graph_neighbor_bytes_estimate": 65536,
+            "build_peak_memory_context_bytes": 131072,
+            "build_peak_memory_phase": "graph_edge_build",
+            "build_memory_heap_scan_decode_bytes": 20000,
+            "build_memory_token_pooling_bytes": 21000,
+            "build_memory_proxy_encoding_bytes": 22000,
+            "build_memory_centroid_clustering_bytes": 23000,
+            "build_memory_centroid_residual_bytes": 24000,
+            "build_memory_sidecar_tuple_bytes": 25000,
+            "build_memory_posting_tuple_bytes": 26000,
+            "build_memory_graph_edge_bytes": 131072,
+            "build_memory_page_wal_bytes": 27000,
         },
     }
     row = document_node_serving_build_only_row(
@@ -17337,6 +19111,24 @@ def _self_check_document_node_serving_build_only_serialization() -> None:
     )
     assert (
         serialized["document_node_serving_build_only"]["results"][0][
+            "build_failure_classification"
+        ]
+        == "graph_edges_memory_peak"
+    )
+    assert (
+        serialized["document_node_serving_build_only"]["results"][0][
+            "build_memory_breakdown"
+        ]["dominant_memory_component"]
+        == "graph_neighbors"
+    )
+    assert (
+        serialized["document_node_serving_build_only"]["results"][0][
+            "build_memory_breakdown"
+        ]["peak_phase"]
+        == "graph_edge_build"
+    )
+    assert (
+        serialized["document_node_serving_build_only"]["results"][0][
             "write_pages_us"
         ]
         == 11000
@@ -17361,8 +19153,92 @@ def _self_check_document_node_serving_build_only_serialization() -> None:
     assert "proxy distance calls" in markdown
     assert "1234" in markdown
     assert "#### Build acceptance summary" in markdown
+    assert "#### Build memory breakdown" in markdown
+    assert "graph_edges_memory_peak" in markdown
     assert "graph_edges_dominates_build" in markdown
     assert "500.000" in markdown
+
+
+def _self_check_document_node_build_memory_breakdown() -> None:
+    base_profile = DocumentNodeServingProfile(
+        name="centroid_lite_f16",
+        candidate_source="centroid_lite",
+        centroids="kmeans",
+        storage_kind="f16",
+        cache_mode="auto",
+    )
+    missing = document_node_build_memory_breakdown(
+        profile=base_profile,
+        build_stats={},
+        index_phase={"build_resource_estimate": {"estimate_inputs": {"docs": 10}}},
+    )
+    assert missing["dominant_memory_component"] == "unavailable"
+    assert missing["build_failure_classification"] == "unattributed_build_memory_peak"
+
+    centroid = document_node_build_memory_breakdown(
+        profile=base_profile,
+        build_stats={
+            "multivector_centroid_vector_bytes": 10_000,
+            "build_memory_centroid_clustering_bytes": 20_000,
+        },
+        index_phase={"build_resource_estimate": {"estimate_inputs": {"docs": 10}}},
+    )
+    assert centroid["dominant_memory_component"] == "centroid_vectors"
+    assert centroid["peak_phase"] == "centroid_clustering"
+    assert centroid["build_failure_classification"] == "centroid_kmeans_memory_peak"
+
+    posting = document_node_build_memory_breakdown(
+        profile=base_profile,
+        build_stats={
+            "multivector_centroid_posting_bytes": 30_000,
+            "build_memory_posting_tuple_bytes": 40_000,
+        },
+        index_phase={"build_resource_estimate": {"estimate_inputs": {"docs": 10}}},
+    )
+    assert posting["build_failure_classification"] == "centroid_postings_memory_peak"
+
+    proxy_only = replace(base_profile, storage_kind="proxy_only", centroids="off")
+    proxy_only_breakdown = document_node_build_memory_breakdown(
+        profile=proxy_only,
+        build_stats={"multivector_docmap_bytes_estimate": 1234},
+        index_phase={"build_resource_estimate": {"estimate_inputs": {"docs": 10}}},
+    )
+    assert proxy_only_breakdown["full_multivector_sidecar_present"] is False
+
+    centroid_only = replace(base_profile, storage_kind="centroid_only")
+    centroid_only_breakdown = document_node_build_memory_breakdown(
+        profile=centroid_only,
+        build_stats={"multivector_docmap_bytes_estimate": 1234},
+        index_phase={"build_resource_estimate": {"estimate_inputs": {"docs": 10}}},
+    )
+    assert centroid_only_breakdown["full_multivector_sidecar_present"] is False
+
+    resident_heavy = replace(
+        base_profile,
+        storage_kind="f16",
+        cache_mode="resident",
+        centroids="kmeans",
+    )
+    warnings = document_node_build_memory_guardrail_warnings(
+        args=argparse.Namespace(allow_memory_heavy_document_node_build=False),
+        profile=resident_heavy,
+        index_stats={"multivector_doc_build_scorer": "exact_symmetric"},
+        breakdown={
+            "max_docs": 1_000_000,
+            "full_multivector_sidecar_present": True,
+        },
+    )
+    assert "memory_heavy_full_sidecar_kmeans_exact_symmetric_resident_cache" in warnings
+    allowed = document_node_build_memory_guardrail_warnings(
+        args=argparse.Namespace(allow_memory_heavy_document_node_build=True),
+        profile=resident_heavy,
+        index_stats={"multivector_doc_build_scorer": "exact_symmetric"},
+        breakdown={
+            "max_docs": 1_000_000,
+            "full_multivector_sidecar_present": True,
+        },
+    )
+    assert allowed == []
 
 
 def _self_check_document_node_serving_latency_only() -> None:
@@ -17601,6 +19477,49 @@ def _self_check_document_node_serving_latency_only() -> None:
         for warning in proxy_only_warnings
     )
 
+    proxy_only_bad_stats = {
+        "multivector_candidate_source": "proxy_vector",
+        "multivector_doc_storage_kind": "proxy_only",
+        "full_multivector_sidecar_available": True,
+        "exact_rerank_source_supported": "heap",
+        "multivector_exact_rerank_source": "sidecar",
+        "multivector_exact_rerank_docs": 140,
+        "multivector_exact_kernel": "blocked_neon",
+    }
+    proxy_only_bad_warnings = validate_serving_scan_path(
+        proxy_only_bad_stats,
+        slow_args,
+        slow_profile,
+    )
+    assert "proxy_only_full_sidecar_unexpected" in proxy_only_bad_warnings
+    assert any(
+        "exact_sidecar_requested_but_missing" in warning
+        for warning in proxy_only_bad_warnings
+    )
+
+    centroid_only_profile = replace(
+        slow_profile,
+        name="centroid_lite_centroid_only",
+        candidate_source="centroid_lite",
+        storage_kind="centroid_only",
+    )
+    centroid_only_bad_stats = {
+        "multivector_candidate_source": "centroid_lite",
+        "multivector_doc_storage_kind": "centroid_only",
+        "full_multivector_sidecar_available": True,
+        "exact_rerank_source_supported": "heap",
+        "multivector_exact_rerank_source": "heap",
+        "multivector_exact_rerank_docs": 140,
+        "multivector_exact_kernel": "blocked_neon",
+    }
+    centroid_only_bad_warnings = validate_serving_scan_path(
+        centroid_only_bad_stats,
+        slow_args,
+        centroid_only_profile,
+    )
+    assert "centroid_only_full_sidecar_unexpected" in centroid_only_bad_warnings
+    assert any("heap_rerank_unbounded" in warning for warning in centroid_only_bad_warnings)
+
     try:
         fail_on_serving_slow_path_if_requested(
             warnings,
@@ -17716,6 +19635,13 @@ def _self_check_document_node_colbert_beir_quality_only() -> None:
     assert capped_args.multivector_doc_candidate_k == 25
     assert capped_args.multivector_exact_rerank_k == 25
     assert capped_rerank_k == 25
+
+    centroid_args, centroid_profile, _ = document_node_colbert_beir_quality_args(
+        clone_args(args, document_node_colbert_profile="centroid_lite_centroid_only")
+    )
+    assert centroid_profile.storage_kind == "centroid_only"
+    assert centroid_profile.cache_mode == "resident"
+    assert centroid_args.multivector_doc_storage_cache == "resident"
 
     try:
         document_node_colbert_beir_quality_profile(
@@ -18045,6 +19971,9 @@ def _self_check_document_node_colbert_candidate_source_focus() -> None:
         exact_rerank_k=100,
         centroid_lite_caps="32,64",
         query_limit=25,
+        document_node_colbert_candidate_source_profiles="",
+        document_node_colbert_query_timeout_ms=0,
+        document_node_colbert_abort_profile_on_query_timeout=False,
         document_node_serving_grid_include_experimental=False,
         document_node_serving_grid_include_proxy_encoders=False,
         document_node_serving_grid_include_learned_projection=False,
@@ -18100,9 +20029,34 @@ def _self_check_document_node_colbert_candidate_source_focus() -> None:
         "proxy_normalized_mean_proxy_only",
         "centroid_lite_centroid_only",
         "centroid_lite_centroid_only_cap_032",
+        "centroid_lite_centroid_only_cap_032_bitset_prefilter",
+        "centroid_lite_centroid_only_cap_032_prune_safe_upper_bound",
         "centroid_lite_centroid_only_cap_064",
         "centroid_lite_centroid_only_pool_050",
     ]
+    filtered_profiles = document_node_colbert_candidate_source_focus_profiles(
+        clone_args(
+            args,
+            document_node_colbert_candidate_source_profiles=(
+                "centroid_lite_centroid_only_cap_032,proxy_normalized_mean_proxy_only"
+            ),
+        )
+    )
+    assert [profile.name for profile in filtered_profiles] == [
+        "centroid_lite_centroid_only_cap_032",
+        "proxy_normalized_mean_proxy_only",
+    ]
+    try:
+        document_node_colbert_candidate_source_focus_profiles(
+            clone_args(
+                args,
+                document_node_colbert_candidate_source_profiles="bm25_rescue",
+            )
+        )
+    except SystemExit as exc:
+        assert "unsupported pure-ColBERT profiles" in str(exc)
+    else:
+        raise AssertionError("candidate-source profile filter accepted non-ColBERT profile")
     assert all(profile.bm25_candidate_injection == "off" for profile in profiles)
     assert all(profile.sparse_candidate_source == "off" for profile in profiles)
     assert all(profile.branch_plan == "dense_only" for profile in profiles)
@@ -18140,6 +20094,13 @@ def _self_check_document_node_colbert_candidate_source_focus() -> None:
         },
         "query_count": 2,
         "retrieval_query_count": 2,
+        "planned_query_count": 2,
+        "query_evaluation_partial": False,
+        "query_evaluation_failed": False,
+        "query_failure": None,
+        "query_timeout_ms": 0,
+        "query_timeouts": 0,
+        "query_timeout_query_ids": [],
         "top_docs_by_query": {
             "q1": ["d1", "d2", "d3"],
             "q2": ["d4", "d5"],
@@ -18186,9 +20147,44 @@ def _self_check_document_node_colbert_candidate_source_focus() -> None:
     assert row["exact_top1_admission_rate"] is None
     assert row["recall@10"] == 1.0
     assert row["centroid_docs_touched_ratio"] == 0.9
+    assert row["completed_query_count"] == 2
+    assert row["query_evaluation_failed"] is False
     assert row["candidate_source_stats"]["last_selected"]["multivector_exact_kernel"] == (
         "blocked_neon"
     )
+
+    def timeout_provider(
+        _conn: psycopg.Connection[Any],
+        _method: str,
+        _query: QueryItem,
+        _args: argparse.Namespace,
+        _final_k: int,
+        _dense_k: int | None,
+    ) -> list[str]:
+        raise SyntheticQueryCanceled("canceling statement due to statement timeout")
+
+    timeout_loop = run_serving_latency_query_loop(
+        None,  # type: ignore[arg-type]
+        clone_args(
+            mode_args,
+            document_node_colbert_query_timeout_ms=0,
+            document_node_colbert_abort_profile_on_query_timeout=True,
+            serving_latency_warmup_queries=0,
+            serving_loaded_document_count=1000,
+        ),
+        [
+            QueryItem("q-timeout", ""),
+            QueryItem("q-unreached", ""),
+        ],
+        profiles[0],
+        retrieval_provider=timeout_provider,
+        stats_provider=lambda _conn: {},
+    )
+    assert timeout_loop["query_evaluation_failed"] is True
+    assert timeout_loop["query_evaluation_partial"] is True
+    assert timeout_loop["query_timeouts"] == 1
+    assert timeout_loop["query_timeout_query_ids"] == ["q-timeout"]
+    assert timeout_loop["query_count"] == 0
     skipped_row = document_node_colbert_candidate_source_focus_skipped_row(
         profile=profiles[1],
         candidate_k=800,
@@ -18279,7 +20275,9 @@ def _self_check_document_node_colbert_candidate_source_focus() -> None:
         docs_loaded=1000,
     )
     assert "centroid_pruning_or_bitset_prefilter" in recommendation["recommendations"]
+    assert "uniform_centroid_caps_diagnostic_only" in recommendation["recommendations"]
     assert "uniform_centroid_caps_insufficient" in recommendation["recommendations"]
+    assert "uniform_centroid_cap_not_promotable" in recommendation["recommendations"]
     assert "prioritize_quantized_codebook_postings" in recommendation["recommendations"]
 
     fallback_recommendation = document_node_colbert_candidate_source_focus_recommendation(
@@ -18571,6 +20569,8 @@ def run_document_node_serving_grid(
         mode = "colbert_quantized_inverted_focus"
     elif bool(getattr(args, "document_node_colbert_entry_focus", False)):
         mode = "colbert_entry_focus"
+    elif document_node_pure_dense_proxy_focus_enabled(args):
+        mode = "pure_dense_proxy_focus"
     elif bool(
         getattr(args, "document_node_serving_grid_proxy_oracle_focus", False)
         or getattr(args, "document_node_colbert_proxy_oracle_focus", False)
@@ -18583,7 +20583,13 @@ def run_document_node_serving_grid(
     ef_grid = effective_document_node_serving_ef_grid(args)
     oversampling_grid = effective_document_node_serving_oversampling_grid(args)
     budget_sweep = effective_serving_grid_budget_sweep(args)
-    all_configs = document_node_serving_configs(profiles, ef_grid, oversampling_grid)
+    exact_rerank_grid = effective_document_node_serving_exact_rerank_grid(args)
+    all_configs = document_node_serving_configs(
+        profiles,
+        ef_grid,
+        oversampling_grid,
+        exact_rerank_grid,
+    )
     query_subset_used = False
     queries_available = len(queries)
     effective_queries = queries
@@ -18639,6 +20645,7 @@ def run_document_node_serving_grid(
                 profile=config.profile.name,
                 ef=config.ef,
                 oversampling=config.oversampling,
+                exact_rerank_k=config.exact_rerank_k,
                 index_signature=serializable_index_signature(
                     serving_profile_index_signature(args, config.profile)
                 ),
@@ -18719,6 +20726,7 @@ def run_document_node_serving_grid(
                         "profile": config.profile.name,
                         "ef": config.ef,
                         "oversampling": config.oversampling,
+                        "exact_rerank_k": config.exact_rerank_k,
                         "index_signature": serializable_index_signature(signature),
                         "index_build_reused": True,
                         "admission_debug": {
@@ -18793,6 +20801,7 @@ def run_document_node_serving_grid(
                         "profile": row.get("profile"),
                         "ef": row.get("ef"),
                         "oversampling": row.get("oversampling"),
+                        "exact_rerank_k": row.get("config_exact_rerank_k"),
                         "index_signature": serializable_index_signature(signature),
                         "index_build_skipped": True,
                         "admission_debug": {
@@ -18855,6 +20864,7 @@ def run_document_node_serving_grid(
                             profile=config.profile.name,
                             ef=config.ef,
                             oversampling=config.oversampling,
+                            exact_rerank_k=config.exact_rerank_k,
                             row=row,
                             aggregate={
                                 "skipped": True,
@@ -18925,6 +20935,7 @@ def run_document_node_serving_grid(
                             "profile": profile.name,
                             "ef": config.ef,
                             "oversampling": config.oversampling,
+                            "exact_rerank_k": config.exact_rerank_k,
                             "index_signature": serializable_index_signature(signature),
                             "index_build_reused": True,
                             "admission_debug": {
@@ -18940,6 +20951,11 @@ def run_document_node_serving_grid(
                         oversampling=config.oversampling,
                         budget_sweep=stage_budget_sweep,
                     )
+                    if config.exact_rerank_k is not None:
+                        mode_args = clone_args(
+                            mode_args,
+                            serving_exact_rerank_k=int(config.exact_rerank_k),
+                        )
                     validate_serving_profile_index_reuse(
                         args=mode_args,
                         profile=profile,
@@ -18955,6 +20971,7 @@ def run_document_node_serving_grid(
                             profile=profile.name,
                             ef=config.ef,
                             oversampling=config.oversampling,
+                            exact_rerank_k=config.exact_rerank_k,
                             index_signature=serializable_index_signature(signature),
                             query_count=len(stage_queries),
                             executed_budgets=stage_executed_budgets,
@@ -18973,6 +20990,7 @@ def run_document_node_serving_grid(
                                 profile=profile.name,
                                 ef=config.ef,
                                 oversampling=config.oversampling,
+                                exact_rerank_k=config.exact_rerank_k,
                                 **payload,
                             )
 
@@ -18995,6 +21013,7 @@ def run_document_node_serving_grid(
                                 profile=profile.name,
                                 ef=config.ef,
                                 oversampling=config.oversampling,
+                                exact_rerank_k=config.exact_rerank_k,
                                 error=repr(exc),
                             )
                         raise
@@ -19018,6 +21037,7 @@ def run_document_node_serving_grid(
                         "profile": profile.name,
                         "ef": config.ef,
                         "oversampling": config.oversampling,
+                        "exact_rerank_k": config.exact_rerank_k,
                         "index_signature": serializable_index_signature(signature),
                         "index_build_reused": profile_reused_index,
                         "admission_debug": admission,
@@ -19032,6 +21052,8 @@ def run_document_node_serving_grid(
                         qrels=qrels,
                     )
                     row["stage"] = stage_name
+                    row["config_id"] = document_node_serving_config_id(config)
+                    row["config_exact_rerank_k"] = config.exact_rerank_k
                     row["index_signature"] = serializable_index_signature(signature)
                     row["index_build_reused"] = profile_reused_index
                     row["index_build_reused_for_profiles"] = [
@@ -19056,6 +21078,7 @@ def run_document_node_serving_grid(
                             profile=profile.name,
                             ef=config.ef,
                             oversampling=config.oversampling,
+                            exact_rerank_k=config.exact_rerank_k,
                             row=row,
                             aggregate=aggregate,
                         )
@@ -19118,6 +21141,9 @@ def run_document_node_serving_grid(
                         profile.centroid_lite_max_postings_per_token
                     ),
                     "centroid_lite_pruning": profile.centroid_lite_pruning,
+                    "centroid_lite_bitset_prefilter": (
+                        profile.centroid_lite_bitset_prefilter
+                    ),
                     "index_signature": serializable_index_signature(signature),
                     "index_build_reused": profile_reused_index,
                     "index_build_reused_for_profiles": [
@@ -19209,6 +21235,11 @@ def run_document_node_serving_grid(
             "exact_top_cache_misses": exact_top_cache_misses,
             "ef_values_run": sorted({config.ef for config in configs}),
             "oversampling_values_run": sorted({config.oversampling for config in configs}),
+            "exact_rerank_values_run": sorted(
+                value
+                for value in {config.exact_rerank_k for config in configs}
+                if value is not None
+            ),
             "budgets_run": stage_executed_budgets,
             "budget_sweep": stage_budget_sweep,
             "executed_budgets": stage_executed_budgets,
@@ -19361,9 +21392,11 @@ def run_document_node_serving_grid(
             or getattr(args, "document_node_colbert_centroid_lite_focus", False)
             or getattr(args, "document_node_colbert_entry_focus", False)
             or getattr(args, "document_node_colbert_quantized_inverted_focus", False)
+            or document_node_pure_dense_proxy_focus_enabled(args)
             or getattr(args, "document_node_serving_grid_proxy_oracle_focus", False)
             or getattr(args, "document_node_colbert_proxy_oracle_focus", False)
         ),
+        "pure_dense_proxy_focus": document_node_pure_dense_proxy_focus_enabled(args),
         "mode": mode,
         "stage_mode": stage_mode,
         "probe_queries": int(args.serving_grid_probe_queries),
@@ -19410,6 +21443,7 @@ def run_document_node_serving_grid(
             or getattr(args, "document_node_colbert_quantized_inverted_focus", False)
         ),
         "proxy_admission_focus": args.document_node_serving_grid_proxy_admission_focus,
+        "dense_proxy_focus": document_node_pure_dense_proxy_focus_enabled(args),
         "entry_focus": bool(getattr(args, "document_node_colbert_entry_focus", False)),
         "quantized_inverted_focus": bool(
             getattr(args, "document_node_colbert_quantized_inverted_focus", False)
@@ -19418,7 +21452,8 @@ def run_document_node_serving_grid(
             args.document_node_serving_grid_centroid_lite_focus
             or bool(getattr(args, "document_node_colbert_centroid_lite_focus", False))
         ),
-        "token_pooling_focus": args.document_node_serving_grid_token_pooling_focus,
+        "token_pooling_focus": document_node_token_pooling_memory_focus_enabled(args),
+        "token_pooling_memory_focus": document_node_token_pooling_memory_focus_enabled(args),
         "learned_sparse_focus": args.document_node_serving_grid_learned_sparse_focus,
         "proxy_oracle_focus": bool(
             getattr(args, "document_node_serving_grid_proxy_oracle_focus", False)
@@ -19445,6 +21480,7 @@ def run_document_node_serving_grid(
         "physical_index_signatures": index_build_reused_for_profiles,
         "ef_values_run": active_stage.get("ef_values_run", []),
         "oversampling_values_run": active_stage.get("oversampling_values_run", []),
+        "exact_rerank_values_run": active_stage.get("exact_rerank_values_run", []),
         "budgets_run": active_stage.get("budgets_run", []),
         "queries_run": int(active_stage.get("queries_run", len(effective_queries)) or 0),
         "retrieval_query_count": retrieval_query_count,
@@ -19469,6 +21505,9 @@ def run_document_node_serving_grid(
         "effective_profiles": [profile.name for profile in profiles],
         "effective_ef_grid": ef_grid,
         "effective_oversampling_grid": oversampling_grid,
+        "effective_exact_rerank_grid": [
+            value for value in exact_rerank_grid if value is not None
+        ],
         "effective_stage2_configs": [
             document_node_serving_config_id(config)
             for config in selected_configs
@@ -19604,11 +21643,185 @@ def document_node_build_phase_summary(
     }
 
 
-def document_node_build_slow_warnings(
+BUILD_MEMORY_COMPONENT_KEYS = {
+    "doc_vectors_pointer": "multivector_doc_vectors_pointer_bytes",
+    "doc_vector_chunk_refs": "multivector_doc_vector_chunk_ref_bytes",
+    "docmap": "multivector_docmap_bytes_estimate",
+    "centroid_vectors": "multivector_centroid_vector_bytes",
+    "centroid_residuals": "multivector_centroid_residual_bytes",
+    "centroid_postings": "multivector_centroid_posting_bytes",
+    "graph_nodes": "graph_node_bytes_estimate",
+    "graph_neighbors": "graph_neighbor_bytes_estimate",
+}
+
+BUILD_MEMORY_PHASE_KEYS = {
+    "heap_scan_decode": "build_memory_heap_scan_decode_bytes",
+    "token_pooling": "build_memory_token_pooling_bytes",
+    "proxy_encoding": "build_memory_proxy_encoding_bytes",
+    "centroid_clustering": "build_memory_centroid_clustering_bytes",
+    "centroid_residual_computation": "build_memory_centroid_residual_bytes",
+    "sidecar_tuple_construction": "build_memory_sidecar_tuple_bytes",
+    "posting_tuple_construction": "build_memory_posting_tuple_bytes",
+    "graph_edge_build": "build_memory_graph_edge_bytes",
+    "page_wal_write": "build_memory_page_wal_bytes",
+}
+
+
+def build_memory_int(mapping: dict[str, Any], key: str) -> int:
+    value = mapping.get(key)
+    if isinstance(value, bool) or value is None:
+        return 0
+    try:
+        return max(int(value), 0)
+    except (TypeError, ValueError, OverflowError):
+        return 0
+
+
+def dominant_build_memory_item(items: dict[str, int]) -> tuple[str, int]:
+    if not items:
+        return "unavailable", 0
+    key, value = max(items.items(), key=lambda item: (item[1], item[0]))
+    if value <= 0:
+        return "unavailable", 0
+    return key, value
+
+
+def classify_document_node_build_memory_failure(
+    *,
+    dominant_component: str,
+    peak_phase: str,
+) -> str:
+    component = str(dominant_component or "")
+    phase = str(peak_phase or "")
+    if component in {"doc_vectors_pointer", "doc_vector_chunk_refs", "docmap"}:
+        return "full_sidecar_build_memory_peak"
+    if component in {"centroid_vectors", "centroid_residuals"} or phase in {
+        "centroid_clustering",
+        "centroid_residual_computation",
+    }:
+        return "centroid_kmeans_memory_peak"
+    if component == "centroid_postings" or phase == "posting_tuple_construction":
+        return "centroid_postings_memory_peak"
+    if component in {"graph_nodes", "graph_neighbors"} or phase == "graph_edge_build":
+        return "graph_edges_memory_peak"
+    return "unattributed_build_memory_peak"
+
+
+def document_node_build_memory_breakdown(
     *,
     profile: DocumentNodeServingProfile,
     build_stats: dict[str, Any],
+    index_phase: dict[str, Any],
+) -> dict[str, Any]:
+    if not isinstance(build_stats, dict):
+        build_stats = {}
+    estimate = index_phase.get("build_resource_estimate", {})
+    if not isinstance(estimate, dict):
+        estimate = {}
+    estimate_inputs = estimate.get("estimate_inputs", {})
+    if not isinstance(estimate_inputs, dict):
+        estimate_inputs = {}
+    components = {
+        name: build_memory_int(build_stats, key)
+        for name, key in BUILD_MEMORY_COMPONENT_KEYS.items()
+    }
+    estimate_components = estimate.get("estimate_components", {})
+    if not isinstance(estimate_components, dict):
+        estimate_components = {}
+    if not any(components.values()) and estimate_components:
+        components.update(
+            {
+                "docmap": int(estimate_components.get("docmap", 0) or 0)
+                + int(estimate_components.get("full_multivector_sidecar", 0) or 0),
+                "centroid_vectors": int(
+                    estimate_components.get("centroid_vectors", 0) or 0
+                ),
+                "centroid_postings": int(
+                    estimate_components.get("centroid_postings", 0) or 0
+                ),
+                "graph_nodes": int(estimate_components.get("graph_nodes", 0) or 0),
+                "graph_neighbors": int(
+                    estimate_components.get("graph_edges", 0) or 0
+                ),
+            }
+        )
+    phases = {
+        name: build_memory_int(build_stats, key)
+        for name, key in BUILD_MEMORY_PHASE_KEYS.items()
+    }
+    dominant_component, dominant_component_bytes = dominant_build_memory_item(components)
+    dominant_phase, dominant_phase_bytes = dominant_build_memory_item(phases)
+    reported_peak_phase = str(build_stats.get("build_peak_memory_phase") or "")
+    peak_phase = reported_peak_phase if reported_peak_phase and reported_peak_phase != "unavailable" else dominant_phase
+    peak_context_bytes = build_memory_int(build_stats, "build_peak_memory_context_bytes")
+    if peak_context_bytes <= 0:
+        peak_context_bytes = dominant_phase_bytes
+    if peak_context_bytes <= 0:
+        peak_context_bytes = int(estimate.get("estimated_build_memory_bytes", 0) or 0)
+    full_sidecar_present = (
+        profile.storage_kind not in {"proxy_only", "centroid_only"}
+        and int(components.get("docmap", 0) or 0) > 0
+    )
+    breakdown = {
+        "storage_kind": profile.storage_kind,
+        "token_pooling": profile.token_pooling,
+        "centroid_count": profile.centroid_count,
+        "max_docs": int(estimate_inputs.get("docs", 0) or 0),
+        "index_bytes": int(index_phase.get("index_bytes", 0) or 0),
+        "terminated_or_completed": (
+            "skipped"
+            if bool(index_phase.get("skipped", False))
+            else "completed"
+        ),
+        "peak_memory_estimate": peak_context_bytes,
+        "peak_memory_estimate_mb": round(peak_context_bytes / (1024.0 * 1024.0), 3),
+        "peak_phase": peak_phase or "unavailable",
+        "dominant_memory_component": dominant_component,
+        "dominant_memory_component_bytes": dominant_component_bytes,
+        "memory_components": components,
+        "memory_phase_snapshots": phases,
+        "full_multivector_sidecar_present": full_sidecar_present,
+        "build_failure_classification": classify_document_node_build_memory_failure(
+            dominant_component=dominant_component,
+            peak_phase=peak_phase,
+        ),
+    }
+    return breakdown
+
+
+def document_node_build_memory_guardrail_warnings(
+    *,
+    args: argparse.Namespace | None,
+    profile: DocumentNodeServingProfile,
+    index_stats: dict[str, Any],
+    breakdown: dict[str, Any],
+) -> list[str]:
+    warnings: list[str] = []
+    if bool(getattr(args, "allow_memory_heavy_document_node_build", False)):
+        return warnings
+    max_docs = int(breakdown.get("max_docs", 0) or 0)
+    scorer = str(index_stats.get("multivector_doc_build_scorer") or "")
+    full_sidecar = bool(breakdown.get("full_multivector_sidecar_present", False))
+    resident_cache = profile.cache_mode == "resident"
+    if (
+        max_docs >= 100_000
+        and full_sidecar
+        and profile.centroids == "kmeans"
+        and scorer == "exact_symmetric"
+        and resident_cache
+    ):
+        warnings.append("memory_heavy_full_sidecar_kmeans_exact_symmetric_resident_cache")
+    return warnings
+
+
+def document_node_build_slow_warnings(
+    *,
+    args: argparse.Namespace | None = None,
+    profile: DocumentNodeServingProfile,
+    build_stats: dict[str, Any],
     phase_summary: dict[str, Any],
+    memory_breakdown: dict[str, Any] | None = None,
+    index_stats: dict[str, Any] | None = None,
     index_build_elapsed_ms: float,
     profile_reused_index: bool,
     grouped_profiles: list[DocumentNodeServingProfile],
@@ -19657,6 +21870,19 @@ def document_node_build_slow_warnings(
         warnings.append("build_unattributed_high")
     if not profile_reused_index and len(grouped_profiles) == 1:
         warnings.append("index_rebuild_not_reused")
+    if memory_breakdown is not None:
+        warnings.append(
+            "build_memory_peak:"
+            f"{memory_breakdown.get('build_failure_classification', 'unattributed_build_memory_peak')}"
+        )
+        warnings.extend(
+            document_node_build_memory_guardrail_warnings(
+                args=args,
+                profile=profile,
+                index_stats=index_stats if isinstance(index_stats, dict) else {},
+                breakdown=memory_breakdown,
+            )
+        )
 
     return unique_preserve_order(warnings)
 
@@ -19707,6 +21933,7 @@ def document_node_build_acceptance_summary(rows: list[dict[str, Any]]) -> dict[s
 
 def document_node_serving_build_only_row(
     *,
+    args: argparse.Namespace | None = None,
     profile: DocumentNodeServingProfile,
     index_phase: dict[str, Any],
     signature: tuple[tuple[str, Any], ...],
@@ -19727,10 +21954,18 @@ def document_node_serving_build_only_row(
         build_stats,
         index_build_elapsed_ms=index_build_elapsed_ms,
     )
+    memory_breakdown = document_node_build_memory_breakdown(
+        profile=profile,
+        build_stats=build_stats,
+        index_phase=index_phase,
+    )
     slow_warnings = document_node_build_slow_warnings(
+        args=args,
         profile=profile,
         build_stats=build_stats,
         phase_summary=phase_summary,
+        memory_breakdown=memory_breakdown,
+        index_stats=index_stats,
         index_build_elapsed_ms=index_build_elapsed_ms,
         profile_reused_index=profile_reused_index,
         grouped_profiles=grouped_profiles,
@@ -19762,6 +21997,7 @@ def document_node_serving_build_only_row(
             profile.centroid_lite_max_postings_per_token
         ),
         "centroid_lite_pruning": profile.centroid_lite_pruning,
+        "centroid_lite_bitset_prefilter": profile.centroid_lite_bitset_prefilter,
         "plain_fallback": profile.plain_fallback,
         "index_signature": serializable_index_signature(signature),
         "index_build_reused": profile_reused_index,
@@ -19774,6 +22010,21 @@ def document_node_serving_build_only_row(
         "index_stats": index_stats,
         "index_build_stats": build_stats,
         "build_slow_warnings": slow_warnings,
+        "build_memory_breakdown": memory_breakdown,
+        "build_failure_classification": memory_breakdown.get(
+            "build_failure_classification"
+        ),
+        "build_peak_memory_context_bytes": build_stats.get(
+            "build_peak_memory_context_bytes"
+        ),
+        "build_peak_memory_phase": build_stats.get("build_peak_memory_phase"),
+        "dominant_memory_component": memory_breakdown.get(
+            "dominant_memory_component"
+        ),
+        "peak_memory_estimate": memory_breakdown.get("peak_memory_estimate"),
+        "peak_memory_estimate_mb": memory_breakdown.get(
+            "peak_memory_estimate_mb"
+        ),
         **phase_summary,
         "scan_us": build_stats.get("scan_us"),
         "fit_correction_us": build_stats.get("fit_correction_us"),
@@ -19870,6 +22121,15 @@ def document_node_serving_skipped_build_row(
     estimate: dict[str, Any],
     decision: dict[str, Any],
 ) -> dict[str, Any]:
+    memory_breakdown = document_node_build_memory_breakdown(
+        profile=profile,
+        build_stats={},
+        index_phase={
+            "skipped": True,
+            "index_bytes": 0,
+            "build_resource_estimate": estimate,
+        },
+    )
     return {
         "profile": profile.name,
         "candidate_source": profile.candidate_source,
@@ -19891,6 +22151,7 @@ def document_node_serving_skipped_build_row(
             profile.centroid_lite_max_postings_per_token
         ),
         "centroid_lite_pruning": profile.centroid_lite_pruning,
+        "centroid_lite_bitset_prefilter": profile.centroid_lite_bitset_prefilter,
         "plain_fallback": profile.plain_fallback,
         "index_signature": serializable_index_signature(signature),
         "index_build_skipped": True,
@@ -19908,6 +22169,17 @@ def document_node_serving_skipped_build_row(
         "estimate_components": estimate.get("estimate_components"),
         "build_resource_estimate": estimate,
         "build_resource_estimate_decision": decision,
+        "build_memory_breakdown": memory_breakdown,
+        "build_failure_classification": memory_breakdown.get(
+            "build_failure_classification"
+        ),
+        "dominant_memory_component": memory_breakdown.get(
+            "dominant_memory_component"
+        ),
+        "peak_memory_estimate": memory_breakdown.get("peak_memory_estimate"),
+        "peak_memory_estimate_mb": memory_breakdown.get(
+            "peak_memory_estimate_mb"
+        ),
         "build_slow_warnings": ["index_build_skipped_estimate_exceeds_limit"],
     }
 
@@ -19946,6 +22218,7 @@ def document_node_serving_skipped_grid_row(
             profile.centroid_lite_max_postings_per_token
         ),
         "centroid_lite_pruning": profile.centroid_lite_pruning,
+        "centroid_lite_bitset_prefilter": profile.centroid_lite_bitset_prefilter,
         "ef": config.ef,
         "oversampling": config.oversampling,
         "largest_budget": max(stage_executed_budgets) if stage_executed_budgets else None,
@@ -20071,6 +22344,7 @@ def run_document_node_serving_build_only(
             )
             results.append(
                 document_node_serving_build_only_row(
+                    args=args,
                     profile=profile,
                     index_phase=index_phase,
                     signature=signature,
@@ -20378,6 +22652,7 @@ def run_document_node_colbert_1m_build_only(
         )
         results.append(
             document_node_serving_build_only_row(
+                args=args,
                 profile=profile,
                 index_phase=index_phase,
                 signature=signature,
@@ -21761,48 +24036,143 @@ def run_serving_latency_query_loop(
     top_docs: dict[str, list[str]] = {}
     slow_path_warnings: list[str] = []
     dense_k = int(args.multivector_doc_candidate_k)
+    timeout_ms = int(getattr(args, "document_node_colbert_query_timeout_ms", 0) or 0)
+    abort_on_timeout = bool(
+        getattr(args, "document_node_colbert_abort_profile_on_query_timeout", False)
+    )
+    query_timeout_ids: list[str] = []
+    query_failure: dict[str, Any] | None = None
+    previous_statement_timeout: str | None = None
+    if timeout_ms > 0:
+        timeout_row = fetch_one(conn, "SHOW statement_timeout")
+        previous_statement_timeout = str(timeout_row[0]) if timeout_row else "0"
+        exec_sql(
+            conn,
+            "SELECT set_config('statement_timeout', %s, false)",
+            (f"{timeout_ms}ms",),
+        )
     warmup_query_count = max(0, int(getattr(args, "serving_latency_warmup_queries", 0) or 0))
     warmup_queries = queries[: min(warmup_query_count, len(queries))]
-    for query in warmup_queries:
-        query_started = time.perf_counter()
-        retrieval_provider(
-            conn,
-            QUERY_ONLY_METHOD,
-            query,
-            args,
-            args.final_k,
-            dense_k,
-        )
-        latency_ms = elapsed_ms_since(query_started)
-        warmup_latencies_ms.append(latency_ms)
-        stats = stats_provider(conn)
-        if isinstance(stats, dict):
-            stats = {
-                **stats,
-                "observed_latency_ms": latency_ms,
-                "serving_latency_warmup_query": True,
-            }
-        warmup_scan_stats.append(stats)
-    measured_started = time.perf_counter()
-    for query in queries:
-        query_started = time.perf_counter()
-        docs = retrieval_provider(
-            conn,
-            QUERY_ONLY_METHOD,
-            query,
-            args,
-            args.final_k,
-            dense_k,
-        )
-        latency_ms = elapsed_ms_since(query_started)
-        latencies_ms.append(latency_ms)
-        top_docs[query.query_id] = docs[: args.final_k]
-        stats = stats_provider(conn)
-        if isinstance(stats, dict):
-            stats = {**stats, "observed_latency_ms": latency_ms}
-        scan_stats.append(stats)
-        for warning in validate_serving_scan_path(stats, args, profile):
-            slow_path_warnings.append(f"{query.query_id}:{warning}")
+    try:
+        for query in warmup_queries:
+            query_started = time.perf_counter()
+            hard_timeout_triggered, stop_hard_timeout = start_query_hard_timeout_watchdog(
+                conn, timeout_ms
+            )
+            try:
+                retrieval_provider(
+                    conn,
+                    QUERY_ONLY_METHOD,
+                    query,
+                    args,
+                    args.final_k,
+                    dense_k,
+                )
+            except query_canceled_exception_types() as exc:
+                query_timeout_ids.append(query.query_id)
+                query_failure = {
+                    "query_id": query.query_id,
+                    "phase": "warmup",
+                    "error_type": type(exc).__name__,
+                    "error": str(exc),
+                    "timeout_ms": timeout_ms,
+                }
+                if abort_on_timeout:
+                    break
+                continue
+            except psycopg_error_exception_types() as exc:
+                query_timeout_ids.append(query.query_id)
+                query_failure = {
+                    "query_id": query.query_id,
+                    "phase": "warmup",
+                    "error_type": "HardQueryTimeout"
+                    if hard_timeout_triggered.is_set()
+                    else type(exc).__name__,
+                    "error": str(exc),
+                    "timeout_ms": timeout_ms,
+                    "hard_timeout_triggered": hard_timeout_triggered.is_set(),
+                }
+                slow_path_warnings.append(
+                    f"{query.query_id}:query_timeout_ms={timeout_ms}"
+                )
+                break
+            finally:
+                stop_hard_timeout()
+            latency_ms = elapsed_ms_since(query_started)
+            warmup_latencies_ms.append(latency_ms)
+            stats = stats_provider(conn)
+            if isinstance(stats, dict):
+                stats = {
+                    **stats,
+                    "observed_latency_ms": latency_ms,
+                    "serving_latency_warmup_query": True,
+                }
+            warmup_scan_stats.append(stats)
+        measured_started = time.perf_counter()
+        if query_failure is None or not abort_on_timeout:
+            for query in queries:
+                query_started = time.perf_counter()
+                hard_timeout_triggered, stop_hard_timeout = (
+                    start_query_hard_timeout_watchdog(conn, timeout_ms)
+                )
+                try:
+                    docs = retrieval_provider(
+                        conn,
+                        QUERY_ONLY_METHOD,
+                        query,
+                        args,
+                        args.final_k,
+                        dense_k,
+                    )
+                except query_canceled_exception_types() as exc:
+                    query_timeout_ids.append(query.query_id)
+                    query_failure = {
+                        "query_id": query.query_id,
+                        "phase": "measured",
+                        "error_type": type(exc).__name__,
+                        "error": str(exc),
+                        "timeout_ms": timeout_ms,
+                    }
+                    slow_path_warnings.append(
+                        f"{query.query_id}:query_timeout_ms={timeout_ms}"
+                    )
+                    if abort_on_timeout:
+                        break
+                    continue
+                except psycopg_error_exception_types() as exc:
+                    query_timeout_ids.append(query.query_id)
+                    query_failure = {
+                        "query_id": query.query_id,
+                        "phase": "measured",
+                        "error_type": "HardQueryTimeout"
+                        if hard_timeout_triggered.is_set()
+                        else type(exc).__name__,
+                        "error": str(exc),
+                        "timeout_ms": timeout_ms,
+                        "hard_timeout_triggered": hard_timeout_triggered.is_set(),
+                    }
+                    slow_path_warnings.append(
+                        f"{query.query_id}:query_timeout_ms={timeout_ms}"
+                    )
+                    break
+                finally:
+                    stop_hard_timeout()
+                latency_ms = elapsed_ms_since(query_started)
+                latencies_ms.append(latency_ms)
+                top_docs[query.query_id] = docs[: args.final_k]
+                stats = stats_provider(conn)
+                if isinstance(stats, dict):
+                    stats = {**stats, "observed_latency_ms": latency_ms}
+                scan_stats.append(stats)
+                for warning in validate_serving_scan_path(stats, args, profile):
+                    slow_path_warnings.append(f"{query.query_id}:{warning}")
+    finally:
+        if timeout_ms > 0 and not connection_is_closed(conn):
+            exec_sql(
+                conn,
+                "SELECT set_config('statement_timeout', %s, false)",
+                (previous_statement_timeout or "0",),
+            )
     native_cache_rebuilds_after_warmup = sum(
         1
         for stats in scan_stats
@@ -21839,16 +24209,23 @@ def run_serving_latency_query_loop(
         "latency": {
             **latency,
             "total_elapsed_ms": measured_elapsed_ms,
-            "qps_total": round((len(queries) * 1000.0) / measured_elapsed_ms, 3)
-            if measured_elapsed_ms > 0
+            "qps_total": round((len(latencies_ms) * 1000.0) / measured_elapsed_ms, 3)
+            if measured_elapsed_ms > 0 and latencies_ms
             else 0.0,
         },
         "warmup_excluded": bool(warmup_queries),
         "warmup_query_count": len(warmup_queries),
-        "query_count": len(queries),
-        "retrieval_query_count": len(queries),
+        "planned_query_count": len(queries),
+        "query_count": len(latencies_ms),
+        "retrieval_query_count": len(latencies_ms),
+        "query_timeout_ms": timeout_ms,
+        "query_timeouts": len(query_timeout_ids),
+        "query_timeout_query_ids": query_timeout_ids[:50],
+        "query_evaluation_failed": query_failure is not None,
+        "query_failure": query_failure,
+        "query_evaluation_partial": len(latencies_ms) < len(queries),
         "cache_build_queries": cache_build_query_count,
-        "warm_queries": len(queries),
+        "warm_queries": len(latencies_ms),
         "cache_reused_on_warm_queries": warm_cache_reuse_count,
         "exact_admission_baseline_calls": 0,
         "serving_slow_path_warnings": unique_warnings,
@@ -21907,6 +24284,7 @@ def run_document_node_serving_latency_only(
                 profile.centroid_lite_max_postings_per_token
             ),
             "centroid_lite_pruning": profile.centroid_lite_pruning,
+            "centroid_lite_bitset_prefilter": profile.centroid_lite_bitset_prefilter,
             "ef": int(args.serving_ef),
             "oversampling": int(args.serving_oversampling),
             "entry_sample_count": int(args.multivector_doc_graph_entry_sample_count),
@@ -22172,6 +24550,14 @@ def build_document_node_colbert_beir_quality_report(
         "p99_ms": latency.get("p99_ms"),
         "qps": latency.get("qps_total", latency.get("qps", 0.0)),
         "latency": latency,
+        "planned_query_count": loop.get("planned_query_count"),
+        "completed_query_count": loop.get("query_count"),
+        "query_evaluation_partial": loop.get("query_evaluation_partial", False),
+        "query_evaluation_failed": loop.get("query_evaluation_failed", False),
+        "query_failure": loop.get("query_failure"),
+        "query_timeout_ms": loop.get("query_timeout_ms"),
+        "query_timeouts": loop.get("query_timeouts", 0),
+        "query_timeout_query_ids": loop.get("query_timeout_query_ids", []),
         "recall@10": metrics.get("recall@10"),
         "ndcg@10": metrics.get("ndcg@10"),
         "mrr@10": metrics.get("mrr@10"),
@@ -22189,6 +24575,265 @@ def build_document_node_colbert_beir_quality_report(
             for query_id, docs in run.items()
         },
         "index_phase": index_phase,
+        "total_elapsed_ms": elapsed_ms_since(started),
+    }
+
+
+def oracle_quality_exact_rows_for_query(
+    conn: psycopg.Connection[Any],
+    query: QueryItem,
+    *,
+    top_k: int = 10,
+) -> tuple[list[dict[str, Any]], float]:
+    started = time.perf_counter()
+    rows = exact_admission_top(conn, query, top_k)
+    return rows, elapsed_ms_since(started)
+
+
+def run_oracle_quality_candidate_profile(
+    conn: psycopg.Connection[Any],
+    args: argparse.Namespace,
+    profile: DocumentNodeServingProfile,
+    queries: Sequence[QueryItem],
+    qrels: dict[str, dict[str, int]],
+    exact_docs_by_query: dict[str, list[str]],
+    index_phase: dict[str, Any] | None,
+) -> dict[str, Any]:
+    mode_args, effective_rerank_k = document_node_oracle_quality_check_args(args, profile)
+    mismatch_reasons = existing_index_profile_mismatch_reasons(index_phase, profile)
+    if mismatch_reasons:
+        return {
+            "profile": profile.name,
+            "candidate_source": profile.candidate_source,
+            "skipped": True,
+            "skip_reason": "existing_index_mismatch",
+            "index_mismatch_reasons": mismatch_reasons,
+            "per_query": [],
+        }
+
+    mode_args = clone_args(
+        mode_args,
+        serving_loaded_document_count=loaded_document_count(conn),
+    )
+    set_retrieval_gucs(conn, mode_args, "dbpedia_colbert_oracle_quality_check")
+    exec_sql(conn, "SELECT set_config('turbohybrid.multivector_debug_admission', 'off', false)")
+    latencies_ms: list[float] = []
+    scan_stats: list[dict[str, Any]] = []
+    run: dict[str, list[str]] = {}
+    per_query: list[dict[str, Any]] = []
+    for query in queries:
+        query_started = time.perf_counter()
+        docs = run_retrieval_query(
+            conn,
+            QUERY_ONLY_METHOD,
+            query,
+            mode_args,
+            int(getattr(args, "final_k", 10) or 10),
+            int(mode_args.multivector_doc_candidate_k),
+        )
+        latency_ms = elapsed_ms_since(query_started)
+        latencies_ms.append(latency_ms)
+        stats = last_scan_stats(conn)
+        if isinstance(stats, dict):
+            scan_stats.append({**stats, "observed_latency_ms": latency_ms})
+        run[query.query_id] = docs
+        per_query.append(
+            oracle_quality_query_row(
+                query_id=query.query_id,
+                relevant=qrels.get(query.query_id, {}),
+                exact_doc_ids=exact_docs_by_query.get(query.query_id, []),
+                candidate_doc_ids=docs,
+                candidate_source=profile.candidate_source,
+            )
+        )
+    metrics = qrel_metrics_for_retrieval_run(
+        run,
+        qrels,
+        final_k=int(getattr(args, "final_k", 10) or 10),
+        quality_k=int(getattr(args, "quality_k", 10) or 10),
+    )
+    admission = aggregate_sampled_oracle_admission(per_query)
+    classification = classify_oracle_quality_gate(per_query)
+    latency = summarize_ms(latencies_ms)
+    scan_stats_summary = summarize_document_node_latency_scan_stats(scan_stats)
+    return {
+        "profile": profile.name,
+        "candidate_source": profile.candidate_source,
+        "proxy_encoder": profile.proxy_encoder,
+        "centroids": profile.centroids,
+        "storage_kind": profile.storage_kind,
+        "storage_cache_mode": profile.cache_mode,
+        "token_pooling": profile.token_pooling,
+        "centroid_lite_max_postings_per_token": profile.centroid_lite_max_postings_per_token,
+        "skipped": False,
+        "candidate_k": int(getattr(args, "document_node_colbert_candidate_k", 0) or 0),
+        "effective_exact_rerank_k": effective_rerank_k,
+        "ef": int(getattr(args, "document_node_colbert_ef", 0) or 0),
+        "oversampling": int(getattr(args, "document_node_colbert_oversampling", 0) or 0),
+        "queries_evaluated": len(per_query),
+        "latency": latency,
+        "p50_ms": latency.get("p50_ms"),
+        "p95_ms": latency.get("p95_ms"),
+        "p99_ms": latency.get("p99_ms"),
+        "recall@10": metrics.get("recall@10"),
+        "ndcg@10": metrics.get("ndcg@10"),
+        "mrr@10": metrics.get("mrr@10"),
+        "metrics": metrics,
+        "exact_top1_admission_rate": admission.get("exact_top1_admission_rate"),
+        "exact_top10_admission_recall": admission.get("exact_top10_admission_recall"),
+        "admission": admission,
+        "classification": classification,
+        "scan_stats_summary": scan_stats_summary,
+        "candidate_source_stats": colbert_beir_candidate_source_stats(scan_stats_summary),
+        "per_query": per_query,
+    }
+
+
+def run_document_node_serving_grid_oracle_quality_check(
+    conn: psycopg.Connection[Any],
+    args: argparse.Namespace,
+    queries: list[QueryItem],
+    qrels: dict[str, dict[str, int]],
+) -> dict[str, Any]:
+    started = time.perf_counter()
+    if not qrels:
+        raise SystemExit(
+            "--document-node-serving-grid-oracle-quality-check requires qrels in "
+            "dbpedia_colbert_qrels"
+        )
+    query_limit = document_node_colbert_1m_query_limit_summary(
+        requested_max_queries=int(getattr(args, "max_queries", 0) or 0),
+        queries_loaded=len(queries),
+        strict_query_count=bool(getattr(args, "strict_query_count", False)),
+    )
+    if query_limit["strict_query_count_failed"]:
+        raise SystemExit(query_limit["strict_query_count_error"])
+    effective_query_count = int(query_limit.get("effective_max_queries", 0) or 0)
+    selected_queries = (
+        queries[:effective_query_count] if effective_query_count > 0 else list(queries)
+    )
+    if not selected_queries:
+        raise SystemExit("--document-node-serving-grid-oracle-quality-check has no queries")
+    counts = dbpedia_colbert_loaded_counts(conn)
+    exact_docs_by_query: dict[str, list[str]] = {}
+    exact_run: dict[str, list[str]] = {}
+    exact_per_query: list[dict[str, Any]] = []
+    exact_latencies_ms: list[float] = []
+    for query in selected_queries:
+        exact_rows, elapsed_ms = oracle_quality_exact_rows_for_query(conn, query, top_k=10)
+        exact_latencies_ms.append(elapsed_ms)
+        exact_doc_ids = [str(row.get("doc_id")) for row in exact_rows if row.get("doc_id") is not None]
+        exact_docs_by_query[query.query_id] = exact_doc_ids
+        exact_run[query.query_id] = exact_doc_ids
+        metrics = qrel_metrics_for_single_query(
+            exact_doc_ids,
+            qrels.get(query.query_id, {}),
+            k=10,
+        )
+        exact_per_query.append({
+            "query_id": query.query_id,
+            "qrels_count": len(qrels.get(query.query_id, {})),
+            "exact_doc_scan_top10_docids": exact_doc_ids[:10],
+            "exact_doc_scan_recall@10": metrics["recall@10"],
+            "exact_doc_scan_ndcg@10": metrics["ndcg@10"],
+            "exact_doc_scan_mrr@10": metrics["mrr@10"],
+            "exact_doc_scan_elapsed_ms": elapsed_ms,
+            "docid_mapping_warnings": oracle_quality_docid_mapping_warnings(
+                relevant=qrels.get(query.query_id, {}),
+                exact_doc_ids=exact_doc_ids[:10],
+                candidate_doc_ids=[],
+            ),
+        })
+    exact_metrics = qrel_metrics_for_retrieval_run(
+        exact_run,
+        qrels,
+        final_k=10,
+        quality_k=10,
+    )
+    exact_classification = classify_oracle_quality_gate([
+        {
+            **row,
+            "candidate_source_exact_top10_admission_recall": 1.0,
+            "recall@10": row["exact_doc_scan_recall@10"],
+            "ndcg@10": row["exact_doc_scan_ndcg@10"],
+        }
+        for row in exact_per_query
+    ])
+    index_phase = read_existing_colbert_index_phase(
+        conn,
+        clone_args(args, no_create_index=True, require_existing_index=False),
+        require_existing=False,
+    )
+    profiles = document_node_oracle_quality_check_profiles(args)
+    candidate_results = [
+        run_oracle_quality_candidate_profile(
+            conn,
+            args,
+            profile,
+            selected_queries,
+            qrels,
+            exact_docs_by_query,
+            index_phase,
+        )
+        for profile in profiles
+    ]
+    evaluated = [row for row in candidate_results if not row.get("skipped")]
+    candidate_classification = (
+        evaluated[0].get("classification")
+        if evaluated and isinstance(evaluated[0].get("classification"), dict)
+        else None
+    )
+    if (
+        candidate_classification is None
+        and exact_classification.get("primary_classification")
+        == "exact_oracle_quality_zero"
+    ):
+        primary_classification = exact_classification
+    elif candidate_classification is None:
+        primary_classification = {
+            "primary_classification": "candidate_source_unavailable",
+            "classifications": ["candidate_source_unavailable"],
+        }
+    else:
+        primary_classification = candidate_classification
+    return {
+        "enabled": True,
+        "pure_colbert_only": True,
+        "rebuilds_index": False,
+        "exact_admission_available": "exact_doc_scan_sample",
+        "admission_evidence": "exact_doc_scan_oracle_quality_gate",
+        "docs": int(counts.get("docs_loaded", 0) or 0),
+        "queries_available": len(queries),
+        "queries_evaluated": len(selected_queries),
+        "qrels_loaded": int(counts.get("qrels_loaded", 0) or 0),
+        "qrels_covered": int(counts.get("qrels_covered", 0) or 0),
+        "requested_max_queries": query_limit.get("requested_max_queries"),
+        "effective_max_queries": query_limit.get("effective_max_queries"),
+        "query_count_limited_by_artifact": query_limit.get(
+            "query_count_limited_by_artifact",
+            False,
+        ),
+        "exact_doc_scan": {
+            "profile": "exact_doc_scan",
+            "candidate_source": "exact_doc_scan",
+            "queries_evaluated": len(exact_per_query),
+            "latency": summarize_ms(exact_latencies_ms),
+            "recall@10": exact_metrics.get("recall@10"),
+            "ndcg@10": exact_metrics.get("ndcg@10"),
+            "mrr@10": exact_metrics.get("mrr@10"),
+            "metrics": exact_metrics,
+            "classification": exact_classification,
+            "per_query": exact_per_query,
+        },
+        "candidate_results": candidate_results,
+        "classification": primary_classification,
+        "index_phase": index_phase
+        if index_phase is not None
+        else {"skipped": True, "reason": "no_existing_index"},
+        "notes": [
+            "If exact_oracle_quality_zero is present, stop optimizing candidate generators and inspect qrels/docid/model alignment.",
+            "If admission_zero_but_oracle_nonzero is present, continue pure-ColBERT candidate-generator work.",
+        ],
         "total_elapsed_ms": elapsed_ms_since(started),
     }
 
@@ -22347,6 +24992,14 @@ def build_document_node_colbert_sampled_admission_report(
         "p99_ms": latency.get("p99_ms"),
         "qps": latency.get("qps_total", latency.get("qps", 0.0)),
         "latency": latency,
+        "planned_query_count": loop.get("planned_query_count"),
+        "completed_query_count": loop.get("query_count"),
+        "query_evaluation_partial": loop.get("query_evaluation_partial", False),
+        "query_evaluation_failed": loop.get("query_evaluation_failed", False),
+        "query_failure": loop.get("query_failure"),
+        "query_timeout_ms": loop.get("query_timeout_ms"),
+        "query_timeouts": loop.get("query_timeouts", 0),
+        "query_timeout_query_ids": loop.get("query_timeout_query_ids", []),
         "recall@10": metrics.get("recall@10"),
         "ndcg@10": metrics.get("ndcg@10"),
         "mrr@10": metrics.get("mrr@10"),
@@ -22567,6 +25220,14 @@ def build_document_node_colbert_candidate_source_focus_row(
         "p99_ms": latency.get("p99_ms"),
         "qps": latency.get("qps_total", latency.get("qps", 0.0)),
         "latency": latency,
+        "planned_query_count": loop.get("planned_query_count"),
+        "completed_query_count": loop.get("query_count"),
+        "query_evaluation_partial": loop.get("query_evaluation_partial", False),
+        "query_evaluation_failed": loop.get("query_evaluation_failed", False),
+        "query_failure": loop.get("query_failure"),
+        "query_timeout_ms": loop.get("query_timeout_ms"),
+        "query_timeouts": loop.get("query_timeouts", 0),
+        "query_timeout_query_ids": loop.get("query_timeout_query_ids", []),
         "recall@10": metrics.get("recall@10"),
         "ndcg@10": metrics.get("ndcg@10"),
         "mrr@10": metrics.get("mrr@10"),
@@ -22729,6 +25390,26 @@ def document_node_colbert_candidate_source_focus_recommendation(
     *,
     docs_loaded: int,
 ) -> dict[str, Any]:
+    def metric_float(row: dict[str, Any] | None, key: str, default: float = 0.0) -> float:
+        if row is None:
+            return default
+        value = row.get(key)
+        if isinstance(value, dict):
+            for summary_key in ("p50", "mean", "max", "value"):
+                summary_value = value.get(summary_key)
+                if summary_value is not None:
+                    try:
+                        return float(summary_value)
+                    except (TypeError, ValueError):
+                        return default
+            return default
+        if value is None:
+            return default
+        try:
+            return float(value)
+        except (TypeError, ValueError):
+            return default
+
     valid_rows = [row for row in rows if isinstance(row, dict)]
     proxy_rows = [
         row
@@ -22761,6 +25442,19 @@ def document_node_colbert_candidate_source_focus_recommendation(
         key=lambda row: float(row.get("ndcg@10", 0.0) or 0.0),
         default=None,
     )
+    uncapped_centroid_rows = [
+        row
+        for row in centroid_rows
+        if int(row.get("centroid_lite_max_postings_per_token", 0) or 0) == 0
+    ]
+    uncapped_centroid_best = max(
+        uncapped_centroid_rows,
+        key=lambda row: (
+            metric_float(row, "exact_top10_admission_recall"),
+            metric_float(row, "ndcg@10"),
+        ),
+        default=None,
+    )
     quantized_rows = [
         row
         for row in valid_rows
@@ -22773,23 +25467,51 @@ def document_node_colbert_candidate_source_focus_recommendation(
     )
     recommendations: list[str] = []
     if centroid_best is not None:
-        centroid_ndcg = float(centroid_best.get("ndcg@10", 0.0) or 0.0)
-        touched_ratio = centroid_best.get("centroid_docs_touched_ratio")
+        centroid_ndcg = metric_float(centroid_best, "ndcg@10")
+        touched_ratio = metric_float(
+            centroid_best, "centroid_docs_touched_ratio", default=-1.0
+        )
         if (
             centroid_ndcg > proxy_ndcg
-            and touched_ratio is not None
-            and float(touched_ratio) >= 0.80
+            and touched_ratio >= 0.80
         ):
             recommendations.append("centroid_pruning_or_bitset_prefilter")
     if centroid_best is not None and capped_best is not None:
-        centroid_ndcg = float(centroid_best.get("ndcg@10", 0.0) or 0.0)
-        capped_ndcg = float(capped_best.get("ndcg@10", 0.0) or 0.0)
-        capped_p95 = float(capped_best.get("p95_ms", 0.0) or 0.0)
-        centroid_p95 = float(centroid_best.get("p95_ms", 0.0) or 0.0)
+        recommendations.append("uniform_centroid_caps_diagnostic_only")
+        centroid_ndcg = metric_float(uncapped_centroid_best, "ndcg@10")
+        capped_ndcg = metric_float(capped_best, "ndcg@10")
+        capped_p95 = metric_float(capped_best, "p95_ms")
+        centroid_p95 = metric_float(uncapped_centroid_best, "p95_ms")
         if centroid_ndcg - capped_ndcg >= 0.10 and (
             capped_p95 <= centroid_p95 or capped_p95 > 0.0
         ):
             recommendations.append("uniform_centroid_caps_insufficient")
+        uncapped_admission = metric_float(
+            uncapped_centroid_best, "exact_top10_admission_recall"
+        )
+        capped_admission = metric_float(capped_best, "exact_top10_admission_recall")
+        uncapped_docs_touched = metric_float(
+            uncapped_centroid_best, "centroid_docs_touched_ratio", default=-1.0
+        )
+        capped_docs_touched = metric_float(
+            capped_best, "centroid_docs_touched_ratio", default=-1.0
+        )
+        if uncapped_docs_touched < 0.0:
+            uncapped_docs_touched = metric_float(
+                uncapped_centroid_best, "centroid_docs_touched", default=-1.0
+            )
+        if capped_docs_touched < 0.0:
+            capped_docs_touched = metric_float(
+                capped_best, "centroid_docs_touched", default=-1.0
+            )
+        cap_improves_admission = capped_admission > uncapped_admission
+        cap_reduces_docs = (
+            uncapped_docs_touched >= 0.0
+            and capped_docs_touched >= 0.0
+            and capped_docs_touched < uncapped_docs_touched
+        )
+        if not (cap_improves_admission and cap_reduces_docs):
+            recommendations.append("uniform_centroid_cap_not_promotable")
     if quantized_best is not None:
         quantized_ndcg = float(quantized_best.get("ndcg@10", 0.0) or 0.0)
         quantized_admission = quantized_best.get("exact_top10_admission_recall")
@@ -23126,6 +25848,10 @@ def run_document_node_colbert_candidate_source_focus(
                     candidate_budget=candidate_k,
                     row=row,
                 )
+            if loop.get("query_evaluation_failed") and bool(
+                getattr(focus_args, "document_node_colbert_abort_profile_on_query_timeout", False)
+            ):
+                break
         if recorder.enabled:
             recorder.record(
                 "profile_completed",
@@ -23205,6 +25931,10 @@ def run_document_node_colbert_1m_beir_quality_only(
     )
     if query_limit["strict_query_count_failed"]:
         raise SystemExit(query_limit["strict_query_count_error"])
+    effective_query_count = int(query_limit.get("effective_max_queries", 0) or 0)
+    selected_queries = (
+        queries[:effective_query_count] if effective_query_count > 0 else list(queries)
+    )
     quality_args, profile, effective_rerank_k = document_node_colbert_beir_quality_args(args)
     index_phase = build_index(conn, quality_args)
     quality_args = clone_args(
@@ -23213,7 +25943,7 @@ def run_document_node_colbert_1m_beir_quality_only(
     )
     set_retrieval_gucs(conn, quality_args, "dbpedia_colbert_beir_quality_only")
     exec_sql(conn, "SELECT set_config('turbohybrid.multivector_debug_admission', 'off', false)")
-    loop = run_serving_latency_query_loop(conn, quality_args, queries, profile)
+    loop = run_serving_latency_query_loop(conn, quality_args, selected_queries, profile)
     fail_on_serving_slow_path_if_requested(
         loop["serving_slow_path_warnings"],
         quality_args,
@@ -23917,6 +26647,32 @@ def markdown_benchmark_summary(report: dict[str, Any]) -> str:
         if sorted_rows:
             lines.extend([
                 "",
+                "#### Build memory breakdown",
+                "",
+                "| profile | storage | pooling | centroid count | max docs | index bytes | peak MB | peak phase | status | dominant memory component | classification |",
+                "|---|---|---|---:|---:|---:|---:|---|---|---|---|",
+            ])
+            for item in sorted_rows:
+                breakdown = item.get("build_memory_breakdown", {})
+                if not isinstance(breakdown, dict):
+                    breakdown = {}
+                lines.append(
+                    "| {profile} | {storage} | {pooling} | {centroid_count} | {max_docs} | {index_bytes} | {peak_mb:.3f} | {peak_phase} | {status} | {component} | {classification} |".format(
+                        profile=item.get("profile", ""),
+                        storage=breakdown.get("storage_kind", item.get("storage_kind", "")),
+                        pooling=breakdown.get("token_pooling", item.get("token_pooling", "")),
+                        centroid_count=breakdown.get("centroid_count", item.get("centroid_count", "")),
+                        max_docs=int(breakdown.get("max_docs", 0) or 0),
+                        index_bytes=int(breakdown.get("index_bytes", item.get("index_bytes", 0)) or 0),
+                        peak_mb=float(breakdown.get("peak_memory_estimate_mb", 0.0) or 0.0),
+                        peak_phase=breakdown.get("peak_phase", ""),
+                        status=breakdown.get("terminated_or_completed", ""),
+                        component=breakdown.get("dominant_memory_component", ""),
+                        classification=breakdown.get("build_failure_classification", ""),
+                    )
+                )
+            lines.extend([
+                "",
                 "#### Build slow-path warnings",
                 "",
                 "| profile | rebuild reason | warnings | generic total ms | build edges ms | write pages ms | wal ms |",
@@ -24216,6 +26972,90 @@ def markdown_benchmark_summary(report: dict[str, Any]) -> str:
                 f"- Oracle query IDs skipped because embeddings were not loaded: `{len(missing)}` shown of `{int(sampled_admission.get('oracle_queries_missing_loaded_embeddings', 0) or 0)}`",
             ])
 
+    oracle_quality = report.get("document_node_serving_grid_oracle_quality_check")
+    if isinstance(oracle_quality, dict):
+        classification = oracle_quality.get("classification", {})
+        if not isinstance(classification, dict):
+            classification = {}
+        exact_doc_scan = oracle_quality.get("exact_doc_scan", {})
+        if not isinstance(exact_doc_scan, dict):
+            exact_doc_scan = {}
+        exact_metrics = exact_doc_scan.get("metrics", {})
+        if not isinstance(exact_metrics, dict):
+            exact_metrics = {}
+        exact_latency = exact_doc_scan.get("latency", {})
+        if not isinstance(exact_latency, dict):
+            exact_latency = {}
+        candidate_results = oracle_quality.get("candidate_results", [])
+        if not isinstance(candidate_results, list):
+            candidate_results = []
+        lines.extend([
+            "",
+            "### Oracle quality gate",
+            "",
+            "This gate checks whether exact document MaxSim has non-zero qrel "
+            "quality before changing candidate generators. It does not build "
+            "indexes, and candidate-source rows are skipped when the existing "
+            "index does not match the profile.",
+            "",
+            f"- Admission evidence: `{oracle_quality.get('admission_evidence', '')}`",
+            f"- Classification: `{classification.get('primary_classification', '')}`",
+            f"- Classifications: `{','.join(str(item) for item in classification.get('classifications', []) if item)}`",
+            f"- Queries evaluated: `{int(oracle_quality.get('queries_evaluated', 0) or 0)}` / `{int(oracle_quality.get('queries_available', 0) or 0)}`",
+            f"- Qrels loaded/covered: `{int(oracle_quality.get('qrels_loaded', 0) or 0)}` / `{int(oracle_quality.get('qrels_covered', 0) or 0)}`",
+            f"- Stop recommending index changes: `{bool(classification.get('stop_recommending_index_changes', False))}`",
+            f"- Continue candidate-generator work: `{bool(classification.get('continue_candidate_generator_work', False))}`",
+            "",
+            "| profile | skipped | source | p50 ms | p95 ms | exact top1 admission | exact top10 admission | recall@10 | ndcg@10 | mrr@10 | classification |",
+            "|---|---|---|---:|---:|---:|---:|---:|---:|---:|---|",
+            "| exact_doc_scan | no | exact_doc_scan | {p50:.3f} | {p95:.3f} | 1.000000 | 1.000000 | {recall:.6f} | {ndcg:.6f} | {mrr:.6f} | {classification} |".format(
+                p50=float(exact_latency.get("p50_ms", 0.0) or 0.0),
+                p95=float(exact_latency.get("p95_ms", 0.0) or 0.0),
+                recall=float(exact_metrics.get("recall@10", 0.0) or 0.0),
+                ndcg=float(exact_metrics.get("ndcg@10", 0.0) or 0.0),
+                mrr=float(exact_metrics.get("mrr@10", 0.0) or 0.0),
+                classification=(
+                    exact_doc_scan.get("classification", {}).get("primary_classification", "")
+                    if isinstance(exact_doc_scan.get("classification"), dict)
+                    else ""
+                ),
+            ),
+        ])
+        for row in candidate_results:
+            if not isinstance(row, dict):
+                continue
+            row_classification = row.get("classification", {})
+            if not isinstance(row_classification, dict):
+                row_classification = {}
+            if bool(row.get("skipped", False)):
+                lines.append(
+                    "| {profile} | yes | {source} |  |  |  |  |  |  |  | {reason} |".format(
+                        profile=row.get("profile", ""),
+                        source=row.get("candidate_source", ""),
+                        reason=",".join(str(item) for item in row.get("index_mismatch_reasons", []))
+                        or row.get("skip_reason", ""),
+                    )
+                )
+                continue
+            lines.append(
+                "| {profile} | no | {source} | {p50:.3f} | {p95:.3f} | {top1:.6f} | {top10:.6f} | {recall:.6f} | {ndcg:.6f} | {mrr:.6f} | {classification} |".format(
+                    profile=row.get("profile", ""),
+                    source=row.get("candidate_source", ""),
+                    p50=float(row.get("p50_ms", 0.0) or 0.0),
+                    p95=float(row.get("p95_ms", 0.0) or 0.0),
+                    top1=float(row.get("exact_top1_admission_rate", 0.0) or 0.0),
+                    top10=float(row.get("exact_top10_admission_recall", 0.0) or 0.0),
+                    recall=float(row.get("recall@10", 0.0) or 0.0),
+                    ndcg=float(row.get("ndcg@10", 0.0) or 0.0),
+                    mrr=float(row.get("mrr@10", 0.0) or 0.0),
+                    classification=row_classification.get("primary_classification", ""),
+                )
+            )
+        notes = oracle_quality.get("notes", [])
+        if isinstance(notes, list) and notes:
+            lines.extend(["", "Notes:"])
+            lines.extend(f"- {note}" for note in notes)
+
     colbert_candidate_focus = report.get("document_node_colbert_candidate_source_focus")
     if isinstance(colbert_candidate_focus, dict):
         rows = colbert_candidate_focus.get("results", [])
@@ -24316,9 +27156,13 @@ def markdown_benchmark_summary(report: dict[str, Any]) -> str:
                     "### Pure ColBERT quantized-inverted focus"
                     if bool(serving_grid.get("colbert_quantized_inverted_focus", False))
                     else (
-                        "### Pure ColBERT entry selection focus"
-                        if bool(serving_grid.get("colbert_entry_focus", False))
+                    "### Pure ColBERT entry selection focus"
+                    if bool(serving_grid.get("colbert_entry_focus", False))
+                    else (
+                        "### Pure dense proxy focus"
+                        if bool(serving_grid.get("pure_dense_proxy_focus", False))
                         else "### Document-node serving grid"
+                    )
                     )
                 )
             )
@@ -24346,6 +27190,7 @@ def markdown_benchmark_summary(report: dict[str, Any]) -> str:
             f"- Opt-in entry samples: `{bool(serving_grid.get('include_entry_samples', False))}`",
             f"- Effective entry sample counts: `{','.join(str(item) for item in serving_grid.get('effective_entry_sample_counts', []))}`",
             f"- Proxy admission focus: `{bool(serving_grid.get('proxy_admission_focus', False))}`",
+            f"- Pure dense proxy focus: `{bool(serving_grid.get('pure_dense_proxy_focus', False))}`",
             f"- Entry focus: `{bool(serving_grid.get('entry_focus', serving_grid.get('colbert_entry_focus', False)))}`",
             f"- Graph entry selection bottleneck confirmed: `{bool(serving_grid.get('graph_entry_selection_bottleneck_confirmed', False))}`",
             f"- Centroid-lite focus: `{bool(serving_grid.get('centroid_lite_focus', False))}`",
@@ -24355,6 +27200,7 @@ def markdown_benchmark_summary(report: dict[str, Any]) -> str:
             f"- Effective entry-sidecar representatives: `{','.join(str(item) for item in serving_grid.get('effective_entry_sidecar_representatives', []))}`",
             f"- Effective EF grid: `{','.join(str(item) for item in serving_grid.get('effective_ef_grid', []))}`",
             f"- Effective oversampling grid: `{','.join(str(item) for item in serving_grid.get('effective_oversampling_grid', []))}`",
+            f"- Effective exact rerank grid: `{','.join(str(item) for item in serving_grid.get('effective_exact_rerank_grid', serving_grid.get('exact_rerank_values_run', [])))}`",
             f"- Requested budget sweep: `{','.join(str(item) for item in serving_grid.get('effective_budget_sweep', serving_grid.get('budget_sweep', [])))}`",
             f"- Executed budgets: `{','.join(str(item) for item in serving_grid.get('executed_budgets', serving_grid.get('budgets_run', [])))}`",
             f"- Query subset used: `{bool(serving_grid.get('query_subset_used', False))}`",
@@ -24370,6 +27216,14 @@ def markdown_benchmark_summary(report: dict[str, Any]) -> str:
             lines.extend([
                 "This grid intentionally excludes BM25, learned-sparse, and hybrid rescue modes. "
                 "Final SQL ranking remains exact MaxSim over the retained ColBERT candidates.",
+                "",
+            ])
+        if bool(serving_grid.get("pure_dense_proxy_focus", False)):
+            lines.extend([
+                "Pure dense proxy focus compares fixed-dimensional proxy encoders as "
+                "candidate admission only. `normalized_mean` is a latency baseline; "
+                "stronger dense proxies are preferred when they produce nonzero "
+                "exact admission at acceptable latency.",
                 "",
             ])
         if bool(serving_grid.get("proxy_oracle_focus", False)):
@@ -24448,6 +27302,40 @@ def markdown_benchmark_summary(report: dict[str, Any]) -> str:
                     index_bytes=int(item.get("index_bytes", 0) or 0),
                 )
             )
+        if bool(serving_grid.get("pure_dense_proxy_focus", False)):
+            lines.extend([
+                "",
+                "#### Pure dense proxy counters",
+                "",
+                "| profile | proxy | budget | rerank k | p95 ms | top1 admission | top10 admission | proxy candidates | limit source | score us | graph nodes | graph edges | heap rerank docs | heap fetches | heap rerank us |",
+                "|---|---|---:|---:|---:|---:|---:|---|---|---|---|---|---|---|---|",
+            ])
+            for item in sorted_rows:
+                lines.append(
+                    "| {profile} | {proxy} | {budget} | {rerank_k} | {p95:.3f} | {top1:.6f} | {top10:.6f} | {proxy_candidates} | {limit_source} | {score_us} | {graph_nodes} | {graph_edges} | {heap_docs} | {heap_fetches} | {heap_us} |".format(
+                        profile=item.get("profile", ""),
+                        proxy=item.get("proxy_encoder_kind", item.get("proxy_encoder", "")),
+                        budget=int(item.get("candidate_budget", item.get("largest_budget", 0)) or 0),
+                        rerank_k=int(
+                            item.get(
+                                "config_exact_rerank_k",
+                                item.get("effective_exact_rerank_k", 0),
+                            )
+                            or 0
+                        ),
+                        p95=float(item.get("p95_ms", item.get("p95_latency_ms_at_largest_budget", 0.0)) or 0.0),
+                        top1=float(item.get("exact_top1_admission_rate", 0.0) or 0.0),
+                        top10=float(item.get("exact_top10_admission_recall", 0.0) or 0.0),
+                        proxy_candidates=item.get("proxy_candidates_returned", item.get("proxy_candidates", "")),
+                        limit_source=item.get("proxy_candidate_limit_source", ""),
+                        score_us=item.get("proxy_vector_score_us", item.get("proxy_vector_score_time_us", "")),
+                        graph_nodes=item.get("proxy_graph_nodes_visited", ""),
+                        graph_edges=item.get("proxy_graph_edges_visited", ""),
+                        heap_docs=item.get("heap_exact_rerank_docs", item.get("exact_rerank_docs", "")),
+                        heap_fetches=item.get("heap_exact_rerank_fetches", ""),
+                        heap_us=item.get("heap_exact_rerank_time_us", item.get("exact_rerank_time_us", "")),
+                    )
+                )
         quantized_readiness = serving_grid.get("quantized_inverted_readiness")
         if isinstance(quantized_readiness, dict) and quantized_readiness.get("enabled"):
             codebook = quantized_readiness.get("codebook_readiness", {})
@@ -24863,6 +27751,37 @@ def markdown_benchmark_summary(report: dict[str, Any]) -> str:
                         hints=", ".join(str(hint) for hint in hints),
                     )
                 )
+        rejected_fast_profiles = serving_rec.get("rejected_fast_profiles", [])
+        if isinstance(rejected_fast_profiles, list) and rejected_fast_profiles:
+            lines.extend([
+                "",
+                "#### Rejected fast profiles",
+                "",
+                "These profiles remain useful as negative controls, but are not "
+                "eligible for latency-safe, quality, or balanced recommendations.",
+                "",
+                "| profile | p95 ms | recall@10 | ndcg@10 | exact top10 admission | rejection reason | next action |",
+                "|---|---:|---:|---:|---:|---|---|",
+            ])
+            for item in rejected_fast_profiles:
+                if not isinstance(item, dict):
+                    continue
+                reasons = [
+                    str(reason)
+                    for reason in item.get("failure_reasons", []) or []
+                    if str(reason).startswith("rejected_")
+                ]
+                lines.append(
+                    "| {profile} | {p95:.3f} | {recall:.6f} | {ndcg:.6f} | {admission:.6f} | {reason} | {next_action} |".format(
+                        profile=item.get("profile", ""),
+                        p95=float(serving_row_p95(item) or 0.0),
+                        recall=float(item.get("recall@10", 0.0) or 0.0),
+                        ndcg=float(item.get("ndcg@10", 0.0) or 0.0),
+                        admission=float(item.get("exact_top10_admission_recall", 0.0) or 0.0),
+                        reason=", ".join(reasons),
+                        next_action=item.get("next_action", ""),
+                    )
+                )
         bottlenecks = serving_rec.get("candidate_admission_bottlenecks", [])
         if isinstance(bottlenecks, list) and bottlenecks:
             lines.extend([
@@ -25010,8 +27929,15 @@ def markdown_benchmark_summary(report: dict[str, Any]) -> str:
                 "token_pooling_recommendation",
             )
     if isinstance(token_pooling_rec, dict):
-        best_pooling_latency_safe = token_pooling_rec.get("best_pooling_latency_safe") or {}
+        best_memory_safe_pooling = token_pooling_rec.get("best_memory_safe_pooling") or {}
+        best_pooling_latency_safe = (
+            token_pooling_rec.get("best_latency_safe_pooling")
+            or token_pooling_rec.get("best_pooling_latency_safe")
+            or {}
+        )
         best_pooling_quality_safe = token_pooling_rec.get("best_pooling_quality_safe") or {}
+        if not isinstance(best_memory_safe_pooling, dict):
+            best_memory_safe_pooling = {}
         if not isinstance(best_pooling_latency_safe, dict):
             best_pooling_latency_safe = {}
         if not isinstance(best_pooling_quality_safe, dict):
@@ -25023,13 +27949,15 @@ def markdown_benchmark_summary(report: dict[str, Any]) -> str:
             f"- Available: `{bool(token_pooling_rec.get('available', False))}`",
             f"- Profiles evaluated: `{int(token_pooling_rec.get('profile_count', 0) or 0)}`",
             f"- Selection basis: `{token_pooling_rec.get('selection_basis', '')}`",
-            f"- Best pooling latency-safe: `{best_pooling_latency_safe.get('id', '')}`",
+            f"- Best memory-safe pooling: `{best_memory_safe_pooling.get('id', '')}`",
+            f"- Best latency-safe pooling: `{best_pooling_latency_safe.get('id', '')}`",
             f"- Best pooling quality-safe: `{best_pooling_quality_safe.get('id', '')}`",
+            f"- Why memory-safe won: {serving_profile_explanation(best_memory_safe_pooling)}",
             f"- Why latency-safe won: {serving_profile_explanation(best_pooling_latency_safe)}",
             f"- Why quality-safe won: {serving_profile_explanation(best_pooling_quality_safe)}",
             "",
-            "| pass | profile | proxy | pooling | tokens pooled p50 | pooling ratio p50 | exact pairs p50 | index build ms | top10 admission | ndcg@10 | p95 ms | reasons |",
-            "|---|---|---|---|---:|---:|---:|---:|---:|---:|---:|---|",
+            "| pass | profile | proxy | storage | pooling | index bytes | memory gain | tokens pooled p50 | pooling ratio p50 | exact pairs p50 | index build ms | top10 admission | ndcg@10 | p95 ms | reasons |",
+            "|---|---|---|---|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---|",
         ])
         token_rows = token_pooling_rec.get("profile_thresholds", [])
         if isinstance(token_rows, list):
@@ -25044,12 +27972,19 @@ def markdown_benchmark_summary(report: dict[str, Any]) -> str:
                 if isinstance(unavailable, list):
                     reasons.extend(f"unavailable:{criterion}" for criterion in unavailable)
                 lines.append(
-                    "| {passed} | {profile} | {proxy} | {pooling}:{ratio:.2f} | {tokens_pooled:.3f} | {pooling_ratio:.6f} | {pairs:.3f} | {index_build:.3f} | {admission:.6f} | {ndcg:.6f} | {p95:.3f} | {reasons} |".format(
+                    "| {passed} | {profile} | {proxy} | {storage} | {pooling}:{ratio:.2f} | {memory} | {memory_gain} | {tokens_pooled:.3f} | {pooling_ratio:.6f} | {pairs:.3f} | {index_build:.3f} | {admission:.6f} | {ndcg:.6f} | {p95:.3f} | {reasons} |".format(
                         passed="pass" if item.get("threshold_pass") else "fail",
                         profile=item.get("profile", ""),
                         proxy=item.get("proxy_encoder", ""),
+                        storage=item.get("storage_kind", ""),
                         pooling=item.get("token_pooling", ""),
                         ratio=float(item.get("token_pooling_target_ratio", 1.0) or 1.0),
+                        memory=int(item.get("memory_bytes", 0) or 0),
+                        memory_gain=(
+                            f"{float(item.get('memory_gain_ratio_vs_unpooled')):.6f}"
+                            if item.get("memory_gain_ratio_vs_unpooled") is not None
+                            else ""
+                        ),
                         tokens_pooled=float(item.get("tokens_pooled_p50", 0.0) or 0.0),
                         pooling_ratio=float(item.get("token_pooling_ratio_p50", 0.0) or 0.0),
                         pairs=float(item.get("exact_rerank_pairs_p50", 0.0) or 0.0),
@@ -26149,6 +29084,112 @@ def _self_check_document_node_colbert_exact_oracle() -> None:
         assert "run_retrieval_query" not in code_names
 
 
+def _self_check_document_node_oracle_quality_check() -> None:
+    zero_rows = [
+        oracle_quality_query_row(
+            query_id=f"q{i}",
+            relevant={f"rel{i}a": 1, f"rel{i}b": 1},
+            exact_doc_ids=[f"miss{i}a", f"miss{i}b"],
+            candidate_doc_ids=[f"cand{i}a", f"cand{i}b"],
+            candidate_source="proxy_vector",
+        )
+        for i in range(5)
+    ]
+    zero_classification = classify_oracle_quality_gate(zero_rows)
+    assert "exact_oracle_quality_zero" in zero_classification["classifications"]
+    assert zero_classification["stop_recommending_index_changes"] is True
+
+    oracle_nonzero_rows = [
+        oracle_quality_query_row(
+            query_id=f"q{i}",
+            relevant={f"rel{i}a": 1, f"rel{i}b": 1},
+            exact_doc_ids=[f"rel{i}a", f"rel{i}b"],
+            candidate_doc_ids=[f"cand{i}a", f"cand{i}b"],
+            candidate_source="proxy_vector",
+        )
+        for i in range(5)
+    ]
+    admission_failure = classify_oracle_quality_gate(oracle_nonzero_rows)
+    assert "admission_zero_but_oracle_nonzero" in admission_failure["classifications"]
+    assert admission_failure["continue_candidate_generator_work"] is True
+
+    sparse = classify_oracle_quality_gate(oracle_nonzero_rows[:1])
+    assert "qrels_sparse" in sparse["classifications"]
+
+    mapping_suspect = classify_oracle_quality_gate(zero_rows)
+    assert "docid_mapping_suspect" in mapping_suspect["classifications"]
+
+    row = oracle_nonzero_rows[0]
+    assert row["query_id"] == "q0"
+    assert row["qrels_count"] == 2
+    assert row["exact_doc_scan_top10_docids"] == ["rel0a", "rel0b"]
+    assert row["candidate_source_exact_top1_admitted"] is False
+    assert row["exact_top10_admission_recall"] == 0.0
+
+    assert path_is_under_nix_dev_tmp(Path(".nix-dev/tmp/oracle-quality.json"))
+    assert not path_is_under_nix_dev_tmp(Path("benchmarks/results/oracle-quality.json"))
+
+    report = {
+        "dataset": {"documents": 10, "queries": 5, "qrels": 10},
+        "settings": {
+            "final_k": 10,
+            "clients": 1,
+            "multivector_graph": "document_nodes",
+            "multivector_candidate_source": "proxy_vector",
+        },
+        "results": [],
+        "document_node_serving_grid_oracle_quality_check": {
+            "enabled": True,
+            "pure_colbert_only": True,
+            "admission_evidence": "exact_doc_scan_oracle_quality_gate",
+            "queries_evaluated": 5,
+            "queries_available": 5,
+            "qrels_loaded": 10,
+            "qrels_covered": 10,
+            "classification": admission_failure,
+            "exact_doc_scan": {
+                "latency": {"p50_ms": 100.0, "p95_ms": 200.0},
+                "metrics": {
+                    "recall@10": 1.0,
+                    "ndcg@10": 1.0,
+                    "mrr@10": 1.0,
+                },
+                "classification": {
+                    "primary_classification": "oracle_quality_nonzero",
+                },
+            },
+            "candidate_results": [
+                {
+                    "profile": "proxy_normalized_mean_proxy_only",
+                    "candidate_source": "proxy_vector",
+                    "skipped": False,
+                    "p50_ms": 10.0,
+                    "p95_ms": 20.0,
+                    "exact_top1_admission_rate": 0.0,
+                    "exact_top10_admission_recall": 0.0,
+                    "recall@10": 0.0,
+                    "ndcg@10": 0.0,
+                    "mrr@10": 0.0,
+                    "classification": admission_failure,
+                },
+                {
+                    "profile": "centroid_lite_centroid_only_cap_032",
+                    "candidate_source": "centroid_lite",
+                    "skipped": True,
+                    "skip_reason": "existing_index_mismatch",
+                    "index_mismatch_reasons": ["missing_existing_index"],
+                },
+            ],
+            "notes": ["fixture note"],
+        },
+    }
+    markdown = markdown_benchmark_summary(report)
+    assert "Oracle quality gate" in markdown
+    assert "admission_zero_but_oracle_nonzero" in markdown
+    assert "proxy_normalized_mean_proxy_only" in markdown
+    assert "missing_existing_index" in markdown
+
+
 def run_self_checks() -> None:
     _self_check_document_node_serving_profiles()
     _self_check_exact_top_cache()
@@ -26161,6 +29202,7 @@ def run_self_checks() -> None:
     _self_check_candidate_underfill_diagnostics()
     _self_check_document_node_candidate_source_deltas()
     _self_check_document_node_serving_build_only_serialization()
+    _self_check_document_node_build_memory_breakdown()
     _self_check_document_node_serving_latency_only()
     _self_check_document_node_colbert_beir_quality_only()
     _self_check_document_node_colbert_sampled_admission()
@@ -26176,6 +29218,7 @@ def run_self_checks() -> None:
     _self_check_incremental_output()
     _self_check_index_build_resource_estimates()
     _self_check_document_node_colbert_exact_oracle()
+    _self_check_document_node_oracle_quality_check()
 
 
 def run_multivector_recall_gate(conn: psycopg.Connection[Any], args: argparse.Namespace) -> dict[str, Any]:
@@ -26282,11 +29325,13 @@ def validate_args(args: argparse.Namespace) -> argparse.Namespace:
         args.document_node_colbert_1m_beir_quality_only
         or args.document_node_colbert_sampled_admission
         or args.document_node_colbert_candidate_source_focus
+        or args.document_node_serving_grid_oracle_quality_check
     ) and colbert_1m_mode_count:
         raise SystemExit(
             "--document-node-colbert-1m-beir-quality-only, "
             "--document-node-colbert-sampled-admission, and "
-            "--document-node-colbert-candidate-source-focus cannot be combined "
+            "--document-node-colbert-candidate-source-focus, and "
+            "--document-node-serving-grid-oracle-quality-check cannot be combined "
             "with --document-node-colbert-1m-plan-only, "
             "--document-node-colbert-1m-build-only, or "
             "--document-node-colbert-1m-evaluate-only"
@@ -26297,6 +29342,7 @@ def validate_args(args: argparse.Namespace) -> argparse.Namespace:
             args.document_node_colbert_1m_beir_quality_only,
             args.document_node_colbert_sampled_admission,
             args.document_node_colbert_candidate_source_focus,
+            args.document_node_serving_grid_oracle_quality_check,
         )
         if bool(enabled)
     ]
@@ -26304,18 +29350,20 @@ def validate_args(args: argparse.Namespace) -> argparse.Namespace:
         raise SystemExit(
             "--document-node-colbert-1m-beir-quality-only, "
             "--document-node-colbert-sampled-admission, and "
-            "--document-node-colbert-candidate-source-focus are mutually exclusive"
+            "--document-node-colbert-candidate-source-focus, and "
+            "--document-node-serving-grid-oracle-quality-check are mutually exclusive"
         )
     if args.document_node_colbert_exact_oracle_build and (
         colbert_1m_mode_count
         or args.document_node_colbert_1m_beir_quality_only
         or args.document_node_colbert_sampled_admission
         or args.document_node_colbert_candidate_source_focus
+        or args.document_node_serving_grid_oracle_quality_check
     ):
         raise SystemExit(
             "--document-node-colbert-exact-oracle-build is an offline mode and "
             "cannot be combined with ColBERT 1M build/evaluate/BEIR-quality/"
-            "sampled-admission/candidate-source-focus modes"
+            "sampled-admission/candidate-source-focus/oracle-quality-check modes"
         )
     if args.document_node_colbert_exact_oracle_build:
         if args.oracle_output is None:
@@ -26351,6 +29399,8 @@ def validate_args(args: argparse.Namespace) -> argparse.Namespace:
             args.markdown_output = args.markdown_output.resolve()
     if args.no_create_index:
         args.require_existing_index = True
+    if args.document_node_colbert_query_timeout_ms < 0:
+        raise SystemExit("--document-node-colbert-query-timeout-ms must be non-negative")
     if args.document_node_colbert_1m_evaluate_only:
         args.require_existing_index = True
         args.no_create_index = True
@@ -26442,6 +29492,35 @@ def validate_args(args: argparse.Namespace) -> argparse.Namespace:
         if not args.oracle_input.is_file():
             raise SystemExit(f"exact oracle input does not exist: {args.oracle_input}")
         document_node_colbert_sampled_admission_profile(args)
+    if args.document_node_serving_grid_oracle_quality_check:
+        forbidden_oracle_quality_flags = {
+            "--document-node-serving-grid-include-bm25-rescue": args.document_node_serving_grid_include_bm25_rescue,
+            "--document-node-serving-grid-include-learned-sparse-rescue": args.document_node_serving_grid_include_learned_sparse_rescue,
+            "--document-node-serving-grid-learned-sparse-focus": args.document_node_serving_grid_learned_sparse_focus,
+            "--hybrid-evaluation-harness": args.hybrid_evaluation_harness,
+        }
+        enabled_forbidden = [
+            name
+            for name, enabled in forbidden_oracle_quality_flags.items()
+            if bool(enabled)
+        ]
+        if enabled_forbidden:
+            raise SystemExit(
+                "--document-node-serving-grid-oracle-quality-check is pure "
+                "ColBERT and cannot be combined with "
+                + ", ".join(enabled_forbidden)
+            )
+        for path, flag_name in (
+            (args.output, "--output"),
+            (args.markdown_output, "--markdown-output"),
+        ):
+            if path is not None and not path_is_under_nix_dev_tmp(path):
+                raise SystemExit(
+                    "--document-node-serving-grid-oracle-quality-check writes "
+                    "generated artifacts only under .nix-dev/tmp; "
+                    f"{flag_name} was {path}"
+                )
+        document_node_oracle_quality_check_profiles(args)
     if args.document_node_colbert_1m_plan_only:
         if args.output is None:
             args.output = Path(
@@ -26489,6 +29568,7 @@ def validate_args(args: argparse.Namespace) -> argparse.Namespace:
             or args.document_node_colbert_sampled_admission
             or args.document_node_colbert_exact_oracle_build
             or args.document_node_colbert_candidate_source_focus
+            or args.document_node_serving_grid_oracle_quality_check
         )
         and args.reuse_data
         and not args.force_reload
@@ -26534,6 +29614,8 @@ def validate_args(args: argparse.Namespace) -> argparse.Namespace:
         document_node_colbert_sampled_admission_profile(args)
     if args.document_node_colbert_candidate_source_focus:
         document_node_colbert_candidate_source_focus_profiles(args)
+    if args.document_node_serving_grid_oracle_quality_check:
+        document_node_oracle_quality_check_profiles(args)
 
     args.model_path = args.model_path.resolve()
     if (
@@ -26579,11 +29661,30 @@ def validate_args(args: argparse.Namespace) -> argparse.Namespace:
     if args.generation_n_batch < 1:
         raise SystemExit("--generation-n-batch must be at least 1")
     if args.output is None:
-        output_stem = "multivector-recall-gate" if args.multivector_recall_gate else "dbpedia-colbert-multivector"
-        args.output = Path("benchmarks/results/" + datetime.now(timezone.utc).strftime(f"{output_stem}-%Y%m%dT%H%M%SZ.json"))
+        if args.document_node_serving_grid_oracle_quality_check:
+            args.output = Path(
+                ".nix-dev/tmp/"
+                + datetime.now(timezone.utc).strftime(
+                    "dbpedia-colbert-oracle-quality-check-%Y%m%dT%H%M%SZ.json"
+                )
+            )
+        else:
+            output_stem = "multivector-recall-gate" if args.multivector_recall_gate else "dbpedia-colbert-multivector"
+            args.output = Path("benchmarks/results/" + datetime.now(timezone.utc).strftime(f"{output_stem}-%Y%m%dT%H%M%SZ.json"))
     args.output = args.output.resolve()
     if args.markdown_output is not None:
         args.markdown_output = args.markdown_output.resolve()
+    if args.document_node_serving_grid_oracle_quality_check:
+        for path, flag_name in (
+            (args.output, "--output"),
+            (args.markdown_output, "--markdown-output"),
+        ):
+            if path is not None and not path_is_under_nix_dev_tmp(path):
+                raise SystemExit(
+                    "--document-node-serving-grid-oracle-quality-check writes "
+                    "generated artifacts only under .nix-dev/tmp; "
+                    f"{flag_name} was {path}"
+                )
     if args.recall_gate_markdown_output is not None:
         args.recall_gate_markdown_output = args.recall_gate_markdown_output.resolve()
     if args.resume_incremental_output is not None:
@@ -26646,7 +29747,8 @@ def validate_args(args: argparse.Namespace) -> argparse.Namespace:
         args.document_node_serving_grid_smoke
         or args.document_node_serving_grid_proxy_admission_focus
         or args.document_node_serving_grid_centroid_lite_focus
-        or args.document_node_serving_grid_token_pooling_focus
+        or document_node_token_pooling_memory_focus_enabled(args)
+        or document_node_pure_dense_proxy_focus_enabled(args)
         or args.document_node_serving_grid_learned_sparse_focus
         or args.document_node_serving_grid_proxy_oracle_focus
         or args.document_node_colbert_proxy_oracle_focus
@@ -26658,6 +29760,22 @@ def validate_args(args: argparse.Namespace) -> argparse.Namespace:
         args.document_node_serving_grid = True
     if args.document_node_colbert_proxy_oracle_focus:
         args.document_node_serving_grid_proxy_oracle_focus = True
+    if document_node_pure_dense_proxy_focus_enabled(args):
+        forbidden_dense_proxy_flags = {
+            "--document-node-serving-grid-include-bm25-rescue": args.document_node_serving_grid_include_bm25_rescue,
+            "--document-node-serving-grid-include-learned-sparse-rescue": args.document_node_serving_grid_include_learned_sparse_rescue,
+            "--document-node-serving-grid-learned-sparse-focus": args.document_node_serving_grid_learned_sparse_focus,
+            "--hybrid-evaluation-harness": args.hybrid_evaluation_harness,
+        }
+        enabled_forbidden = [
+            name for name, enabled in forbidden_dense_proxy_flags.items() if bool(enabled)
+        ]
+        if enabled_forbidden:
+            raise SystemExit(
+                "--document-node-serving-grid-pure-dense-proxy-focus is pure "
+                "ColBERT proxy evidence and cannot be combined with "
+                + ", ".join(enabled_forbidden)
+            )
     if args.document_node_colbert_1m_grid:
         forbidden_colbert_flags = {
             "--document-node-serving-grid-include-bm25-rescue": args.document_node_serving_grid_include_bm25_rescue,
@@ -26843,6 +29961,7 @@ def validate_args(args: argparse.Namespace) -> argparse.Namespace:
                 args.document_node_colbert_centroid_lite_focus
                 or args.document_node_colbert_quantized_inverted_focus
                 or args.document_node_colbert_entry_focus
+                or document_node_pure_dense_proxy_focus_enabled(args)
             )
             else ("largest_only" if args.document_node_serving_grid else "sweep")
         )
@@ -26860,6 +29979,7 @@ def validate_args(args: argparse.Namespace) -> argparse.Namespace:
                 or args.document_node_colbert_1m_beir_quality_only
                 or args.document_node_colbert_sampled_admission
                 or args.document_node_colbert_candidate_source_focus
+                or args.document_node_serving_grid_oracle_quality_check
             )
             else "admission_exhaustive"
         )
@@ -27364,6 +30484,16 @@ def parse_args() -> argparse.Namespace:
         ),
     )
     parser.add_argument(
+        "--multivector-centroid-lite-bitset-prefilter",
+        choices=("off", "experimental"),
+        default="off",
+        help=(
+            "experimental centroid_lite scan-local bitset prefilter; "
+            "builds non-persisted posting-union bitsets for measured "
+            "PLAID/EMVB-style admission experiments"
+        ),
+    )
+    parser.add_argument(
         "--multivector-candidate-source",
         choices=("graph", "document_nodes", "exact_token_scan", "exact_doc_scan", "doc_graph_prototype", "proxy_vector", "centroid_lite", "quantized_inverted_experimental"),
         default="graph",
@@ -27478,6 +30608,8 @@ def parse_args() -> argparse.Namespace:
             "comma-separated multivector document candidate budgets to sweep; "
             "--document-node-serving-grid-smoke defaults to 200,800, "
             f"--document-node-serving-grid defaults to {DOCUMENT_NODE_SERVING_GRID_BUDGET_SWEEP}, "
+            "--document-node-serving-grid-pure-dense-proxy-focus defaults to "
+            f"{DOCUMENT_NODE_SERVING_GRID_PURE_DENSE_PROXY_BUDGET_SWEEP}, "
             f"--document-node-colbert-1m-grid defaults to {DOCUMENT_NODE_COLBERT_1M_GRID_BUDGET_SWEEP}, "
             f"--document-node-colbert-entry-focus defaults to {DOCUMENT_NODE_COLBERT_ENTRY_FOCUS_BUDGET_SWEEP}, "
             f"other modes default to {DEFAULT_ADMISSION_BUDGET_SWEEP}"
@@ -27554,6 +30686,15 @@ def parse_args() -> argparse.Namespace:
             "optional quantized_inverted_experimental profiles; computes BEIR "
             "qrel metrics by default and sampled oracle admission only when "
             "--oracle-input is supplied"
+        ),
+    )
+    parser.add_argument(
+        "--document-node-serving-grid-oracle-quality-check",
+        action="store_true",
+        help=(
+            "run a bounded pure-ColBERT exact_doc_scan oracle quality gate, "
+            "then compare available proxy/centroid candidate sources without "
+            "building indexes; generated outputs must stay under .nix-dev/tmp"
         ),
     )
     parser.add_argument(
@@ -27723,6 +30864,33 @@ def parse_args() -> argparse.Namespace:
         help=(
             "limit loaded queries for --document-node-colbert-candidate-source-focus; "
             "0 means all loaded queries"
+        ),
+    )
+    parser.add_argument(
+        "--document-node-colbert-candidate-source-profiles",
+        default="",
+        help=(
+            "comma-separated subset of pure-ColBERT profiles to run in "
+            "--document-node-colbert-candidate-source-focus; empty runs the "
+            "default focus set"
+        ),
+    )
+    parser.add_argument(
+        "--document-node-colbert-query-timeout-ms",
+        type=int,
+        default=0,
+        help=(
+            "optional PostgreSQL statement_timeout per indexed ColBERT query "
+            "for BEIR-quality/candidate-source focus modes; 0 disables"
+        ),
+    )
+    parser.add_argument(
+        "--document-node-colbert-abort-profile-on-query-timeout",
+        action="store_true",
+        help=(
+            "when --document-node-colbert-query-timeout-ms is set, stop the "
+            "current profile/budget after the first timed-out query and emit a "
+            "partial row"
         ),
     )
     parser.add_argument(
@@ -27952,9 +31120,26 @@ def parse_args() -> argparse.Namespace:
         "--document-node-serving-grid-token-pooling-focus",
         action="store_true",
         help=(
-            "run a focused token-pooling grid: normalized_mean and "
-            "centroid_mean with no pooling and greedy_cosine target ratios "
-            "0.75/0.50/0.33"
+            "alias for --document-node-serving-grid-token-pooling-memory-focus"
+        ),
+    )
+    parser.add_argument(
+        "--document-node-serving-grid-token-pooling-memory-focus",
+        action="store_true",
+        help=(
+            "run a focused pure-ColBERT token-pooling memory grid: "
+            "proxy-only max_pool and random_projection_fde plus document_nodes sq8, "
+            "each with no pooling and greedy_cosine target ratios 0.75/0.50"
+        ),
+    )
+    parser.add_argument(
+        "--document-node-serving-grid-pure-dense-proxy-focus",
+        action="store_true",
+        help=(
+            "run a focused pure-dense ColBERT proxy-only grid comparing "
+            "normalized_mean, max_pool, random_projection_fde, and "
+            "learned_projection_v1 when --multivector-learned-projection-path "
+            "is provided; excludes BM25, learned-sparse, and hybrid rescue modes"
         ),
     )
     parser.add_argument(
@@ -28142,6 +31327,15 @@ def parse_args() -> argparse.Namespace:
         help=(
             "fail before CREATE INDEX when the benchmark-side resource estimate "
             "exceeds a configured limit"
+        ),
+    )
+    parser.add_argument(
+        "--allow-memory-heavy-document-node-build",
+        action="store_true",
+        help=(
+            "suppress benchmark-side warnings for explicitly requested "
+            "document-node builds that combine full sidecar storage, kmeans "
+            "centroids, exact_symmetric build scoring, and resident sidecar cache"
         ),
     )
     parser.add_argument(
@@ -28648,6 +31842,7 @@ def main() -> None:
             or args.document_node_colbert_sampled_admission
             or args.document_node_colbert_candidate_source_focus
             or args.document_node_colbert_exact_oracle_build
+            or args.document_node_serving_grid_oracle_quality_check
         )
         and args.reuse_data
         and not args.force_reload
@@ -28682,8 +31877,8 @@ def main() -> None:
                     "skipped": True,
                     "reason": (
                         "pure-ColBERT BEIR quality-only/sampled-admission/"
-                        "candidate-source-focus reused imported multivectors "
-                        "and did not generate embeddings"
+                        "candidate-source-focus/oracle-quality-check reused "
+                        "imported multivectors and did not generate embeddings"
                     ),
                 }
                 if reuse_imported_colbert_only
@@ -28702,8 +31897,9 @@ def main() -> None:
                     "partial_qrel_coverage_reported": True,
                     "reason": (
                         "pure-ColBERT BEIR quality-only/sampled-admission/"
-                        "candidate-source-focus reused imported tables and "
-                        "reports qrel coverage without reloading"
+                        "candidate-source-focus/oracle-quality-check reused "
+                        "imported tables and reports qrel coverage without "
+                        "reloading"
                     ),
                 }
             else:
@@ -28760,7 +31956,8 @@ def main() -> None:
                 "skipped": True,
                 "reason": (
                     "pure-ColBERT BEIR quality-only/sampled-admission/"
-                    "candidate-source-focus reused imported multivectors"
+                    "candidate-source-focus/oracle-quality-check reused "
+                    "imported multivectors"
                 ),
             }
             insert_phase = {
@@ -28770,8 +31967,8 @@ def main() -> None:
                 "queries": len(query_ids),
                 "reason": (
                     "pure-ColBERT BEIR quality-only/sampled-admission/"
-                    "candidate-source-focus does not regenerate or persist "
-                    "multivectors"
+                    "candidate-source-focus/oracle-quality-check does not "
+                    "regenerate or persist multivectors"
                 ),
             }
         else:
@@ -28794,6 +31991,7 @@ def main() -> None:
             or args.document_node_colbert_1m_beir_quality_only
             or args.document_node_colbert_sampled_admission
             or args.document_node_colbert_candidate_source_focus
+            or args.document_node_serving_grid_oracle_quality_check
         ):
             if args.document_node_serving_latency_only:
                 representative_profile = document_node_serving_latency_profile(args)
@@ -28804,6 +32002,9 @@ def main() -> None:
             elif args.document_node_colbert_candidate_source_focus:
                 focus_profiles = document_node_colbert_candidate_source_focus_profiles(args)
                 representative_profile = focus_profiles[0] if focus_profiles else None
+            elif args.document_node_serving_grid_oracle_quality_check:
+                oracle_profiles = document_node_oracle_quality_check_profiles(args)
+                representative_profile = oracle_profiles[0] if oracle_profiles else None
             else:
                 colbert_1m_profiles = document_node_colbert_1m_effective_profiles(args)
                 representative_profile = colbert_1m_profiles[0] if colbert_1m_profiles else None
@@ -28844,6 +32045,7 @@ def main() -> None:
         document_node_colbert_1m_beir_quality = None
         document_node_colbert_sampled_admission = None
         document_node_colbert_candidate_source_focus = None
+        document_node_serving_grid_oracle_quality_check = None
 
         if args.document_node_colbert_1m_build_only:
             document_node_serving_build_only = run_document_node_colbert_1m_build_only(
@@ -28954,6 +32156,27 @@ def main() -> None:
                     "index_phases", []
                 ),
             }
+            result_methods = []
+            admission_debug = None
+            document_node_admission_grid = None
+            document_node_serving_grid = None
+            document_node_serving_recommendation = None
+            document_node_token_pooling_recommendation = None
+            hybrid_evaluation = None
+            token_ablation = None
+        elif args.document_node_serving_grid_oracle_quality_check:
+            document_node_serving_grid_oracle_quality_check = (
+                run_document_node_serving_grid_oracle_quality_check(
+                    conn,
+                    args,
+                    encoded_queries,
+                    qrels,
+                )
+            )
+            index_phase = document_node_serving_grid_oracle_quality_check.get(
+                "index_phase",
+                {"skipped": True, "reason": "oracle_quality_check_no_index_phase"},
+            )
             result_methods = []
             admission_debug = None
             document_node_admission_grid = None
@@ -29212,6 +32435,9 @@ def main() -> None:
                 "document_node_colbert_candidate_source_focus": (
                     args.document_node_colbert_candidate_source_focus
                 ),
+                "document_node_serving_grid_oracle_quality_check": (
+                    args.document_node_serving_grid_oracle_quality_check
+                ),
                 "oracle_input": portable_path(args.oracle_input) if args.oracle_input else None,
                 "candidate_budgets": args.candidate_budgets,
                 "exact_rerank_k": args.exact_rerank_k,
@@ -29261,6 +32487,7 @@ def main() -> None:
                 "document_node_serving_grid_proxy_admission_focus": args.document_node_serving_grid_proxy_admission_focus,
                 "document_node_serving_grid_centroid_lite_focus": args.document_node_serving_grid_centroid_lite_focus,
                 "document_node_serving_grid_token_pooling_focus": args.document_node_serving_grid_token_pooling_focus,
+                "document_node_serving_grid_token_pooling_memory_focus": args.document_node_serving_grid_token_pooling_memory_focus,
                 "document_node_serving_grid_learned_sparse_focus": args.document_node_serving_grid_learned_sparse_focus,
                 "document_node_serving_grid_proxy_oracle_focus": bool(
                     getattr(args, "document_node_serving_grid_proxy_oracle_focus", False)
@@ -29393,6 +32620,10 @@ def main() -> None:
         if document_node_colbert_candidate_source_focus is not None:
             output["document_node_colbert_candidate_source_focus"] = (
                 document_node_colbert_candidate_source_focus
+            )
+        if document_node_serving_grid_oracle_quality_check is not None:
+            output["document_node_serving_grid_oracle_quality_check"] = (
+                document_node_serving_grid_oracle_quality_check
             )
         if document_node_serving_build_only is not None:
             output["document_node_serving_build_only"] = document_node_serving_build_only
