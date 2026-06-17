@@ -3845,17 +3845,42 @@ pgturbohybrid_last_scan_stats(PG_FUNCTION_ARGS)
 								scanStats.centroidPrunedDocs);
 	PgturbohybridJsonbAddUint64(&state, "centroid_postings_touched",
 								scanStats.centroidPostingsTouched);
-	PgturbohybridJsonbAddUint64(&state, "centroid_postings_skipped",
-								scanStats.centroidPostingsSkipped);
-	PgturbohybridJsonbAddInt64(&state, "centroid_posting_limit_per_token",
-							   scanStats.centroidPostingLimitPerToken);
+	PgturbohybridJsonbAddUint64(&state, "centroid_postings_selected",
+								scanStats.centroidPostingsSelected);
+		PgturbohybridJsonbAddUint64(&state, "centroid_postings_skipped",
+									scanStats.centroidPostingsSkipped);
+		PgturbohybridJsonbAddUint64(&state, "centroid_probe_time_us",
+									scanStats.centroidProbeUs);
+		PgturbohybridJsonbAddUint64(&state, "centroid_posting_scan_time_us",
+									scanStats.centroidPostingScanUs);
+		PgturbohybridJsonbAddUint64(&state, "centroid_accumulate_time_us",
+									scanStats.centroidAccumulateUs);
+		PgturbohybridJsonbAddUint64(&state, "centroid_candidate_heap_time_us",
+									scanStats.centroidCandidateHeapUs);
+		PgturbohybridJsonbAddInt64(&state, "centroid_posting_limit_per_token",
+								   scanStats.centroidPostingLimitPerToken);
+	PgturbohybridJsonbAddInt64(&state, "centroid_probe_centroids_per_token",
+							   scanStats.centroidProbeCentroidsPerToken);
+	PgturbohybridJsonbAddInt64(&state, "centroid_codeword_top_m",
+							   scanStats.centroidCodewordTopM);
+	PgturbohybridJsonbAddFloat8(&state, "centroid_score_threshold",
+								scanStats.centroidScoreThreshold);
+	PgturbohybridJsonbAddFloat8(&state, "centroid_score_drop_from_best",
+								scanStats.centroidScoreDropFromBest);
+	PgturbohybridJsonbAddUint64(&state, "centroid_lists_skipped_by_threshold",
+								scanStats.centroidListsSkippedByThreshold);
 	PgturbohybridJsonbAddString(&state, "centroid_posting_cap_strategy",
 								scanStats.centroidPostingCapStrategy[0] != '\0' ?
 								scanStats.centroidPostingCapStrategy : "none");
+	PgturbohybridJsonbAddString(&state, "centroid_candidate_scoring",
+								scanStats.centroidCandidateScoring[0] != '\0' ?
+								scanStats.centroidCandidateScoring : "none");
 	PgturbohybridJsonbAddInt64(&state, "centroid_candidates",
 							   scanStats.centroidCandidates);
 	PgturbohybridJsonbAddBool(&state, "centroid_bitset_prefilter_enabled",
 							  scanStats.centroidBitsetPrefilterEnabled);
+	PgturbohybridJsonbAddInt64(&state, "centroid_bitset_min_token_matches",
+							   scanStats.centroidBitsetMinTokenMatches);
 	PgturbohybridJsonbAddInt64(&state, "centroid_bitset_lists_used",
 							   scanStats.centroidBitsetListsUsed);
 	PgturbohybridJsonbAddInt64(&state, "centroid_bitset_docs_set",
@@ -3900,6 +3925,17 @@ pgturbohybrid_last_scan_stats(PG_FUNCTION_ARGS)
 								scanStats.quantizedInvertedListsVisited);
 	PgturbohybridJsonbAddUint64(&state, "quantized_inverted_postings_touched",
 								scanStats.quantizedInvertedPostingsTouched);
+	PgturbohybridJsonbAddUint64(&state, "quantized_inverted_postings_selected",
+								scanStats.quantizedInvertedPostingsSelected);
+	PgturbohybridJsonbAddUint64(&state, "quantized_inverted_postings_skipped",
+								scanStats.quantizedInvertedPostingsSkipped);
+		PgturbohybridJsonbAddInt64(&state, "quantized_inverted_posting_limit_per_token",
+								   scanStats.quantizedInvertedPostingLimitPerToken);
+		PgturbohybridJsonbAddInt64(&state, "quantized_inverted_probe_codewords_per_token",
+								   scanStats.quantizedInvertedProbeCodewordsPerToken);
+		PgturbohybridJsonbAddString(&state, "quantized_inverted_posting_cap_strategy",
+								scanStats.quantizedInvertedPostingCapStrategy[0] != '\0' ?
+								scanStats.quantizedInvertedPostingCapStrategy : "none");
 	PgturbohybridJsonbAddUint64(&state, "quantized_inverted_docs_scored",
 								scanStats.quantizedInvertedDocsScored);
 	PgturbohybridJsonbAddInt64(&state, "quantized_inverted_candidates",
@@ -3924,6 +3960,10 @@ pgturbohybrid_last_scan_stats(PG_FUNCTION_ARGS)
 								scanStats.quantizedInvertedAssignmentUs);
 	PgturbohybridJsonbAddUint64(&state, "quantized_inverted_assignment_time_us",
 								scanStats.quantizedInvertedAssignmentUs);
+	PgturbohybridJsonbAddUint64(&state, "quantized_inverted_query_codeword_score_us",
+								scanStats.quantizedInvertedQueryCodewordScoreUs);
+	PgturbohybridJsonbAddUint64(&state, "quantized_inverted_query_codeword_score_time_us",
+								scanStats.quantizedInvertedQueryCodewordScoreUs);
 	PgturbohybridJsonbAddUint64(&state, "quantized_inverted_list_offset_bytes",
 								scanStats.quantizedInvertedListOffsetBytes);
 	PgturbohybridJsonbAddUint64(&state, "quantized_inverted_posting_bytes",
@@ -3934,6 +3974,10 @@ pgturbohybrid_last_scan_stats(PG_FUNCTION_ARGS)
 								scanStats.quantizedInvertedCompactKernel[0] != '\0' ?
 								scanStats.quantizedInvertedCompactKernel :
 								"off");
+	PgturbohybridJsonbAddString(&state, "quantized_inverted_compact_score_source",
+								scanStats.quantizedInvertedCompactScoreSource[0] != '\0' ?
+								scanStats.quantizedInvertedCompactScoreSource :
+								"none");
 	PgturbohybridJsonbAddUint64(&state, "quantized_inverted_compact_score_us",
 								scanStats.quantizedInvertedCompactScoreUs);
 	PgturbohybridJsonbAddUint64(&state, "quantized_inverted_compact_docs_scored",
@@ -3942,6 +3986,40 @@ pgturbohybrid_last_scan_stats(PG_FUNCTION_ARGS)
 								scanStats.quantizedInvertedCompactPayloadBytes);
 	PgturbohybridJsonbAddBool(&state, "quantized_inverted_compact_topk_changed_vs_scalar",
 							  scanStats.quantizedInvertedCompactTopKChangedVsScalar);
+	PgturbohybridJsonbAddString(&state, "quantized_inverted_token_coverage_mode",
+								scanStats.quantizedInvertedTokenCoverageMode[0] != '\0' ?
+								scanStats.quantizedInvertedTokenCoverageMode :
+								"off");
+	PgturbohybridJsonbAddInt64(&state, "quantized_inverted_active_query_tokens",
+							   scanStats.quantizedInvertedActiveQueryTokens);
+	PgturbohybridJsonbAddUint64(&state, "quantized_inverted_token_matches_total",
+								scanStats.quantizedInvertedTokenMatchesTotal);
+	PgturbohybridJsonbAddInt64(&state, "quantized_inverted_token_matches_max",
+							   scanStats.quantizedInvertedTokenMatchesMax);
+	PgturbohybridJsonbAddInt64(&state, "quantized_inverted_min_token_matches",
+							   scanStats.quantizedInvertedMinTokenMatches);
+	PgturbohybridJsonbAddUint64(&state, "quantized_inverted_token_match_filtered_docs",
+								scanStats.quantizedInvertedTokenMatchFilteredDocs);
+	PgturbohybridJsonbAddBool(&state, "quantized_inverted_score_bound_pruning_enabled",
+							  scanStats.quantizedInvertedScoreBoundPruningEnabled);
+	PgturbohybridJsonbAddUint64(&state, "quantized_inverted_score_bound_docs_checked",
+								scanStats.quantizedInvertedScoreBoundDocsChecked);
+	PgturbohybridJsonbAddUint64(&state, "quantized_inverted_score_bound_docs_pruned",
+								scanStats.quantizedInvertedScoreBoundDocsPruned);
+	PgturbohybridJsonbAddUint64(&state, "quantized_inverted_score_bound_prune_time_us",
+								scanStats.quantizedInvertedScoreBoundPruneUs);
+	PgturbohybridJsonbAddUint64(&state, "quantized_inverted_score_bound_time_us",
+								scanStats.quantizedInvertedScoreBoundPruneUs);
+	PgturbohybridJsonbAddUint64(&state, "quantized_inverted_score_bound_unsafe_fallbacks",
+								scanStats.quantizedInvertedScoreBoundUnsafeFallbacks);
+	PgturbohybridJsonbAddFloat8(&state, "quantized_inverted_score_bound_prune_ratio",
+								scanStats.quantizedInvertedScoreBoundDocsChecked > 0 ?
+								(double) scanStats.quantizedInvertedScoreBoundDocsPruned /
+								(double) scanStats.quantizedInvertedScoreBoundDocsChecked : 0.0);
+	PgturbohybridJsonbAddInt64(&state, "quantized_inverted_candidates_before_bound",
+							   scanStats.quantizedInvertedCandidatesBeforeBound);
+	PgturbohybridJsonbAddInt64(&state, "quantized_inverted_candidates_after_bound",
+							   scanStats.quantizedInvertedCandidatesAfterBound);
 	if (scanStats.multivectorGraphMode[0] != '\0')
 		PgturbohybridJsonbAddString(&state, "multivector_graph_mode",
 									scanStats.multivectorGraphMode);
@@ -3993,6 +4071,16 @@ pgturbohybrid_last_scan_stats(PG_FUNCTION_ARGS)
 								scanStats.compactMaxsimScoreUs);
 	PgturbohybridJsonbAddUint64(&state, "compact_maxsim_pairs",
 								scanStats.compactMaxsimPairs);
+	PgturbohybridJsonbAddUint64(&state, "compact_maxsim_cache_hits",
+								scanStats.compactMaxsimCacheHits);
+	PgturbohybridJsonbAddUint64(&state, "compact_maxsim_cache_misses",
+								scanStats.compactMaxsimCacheMisses);
+	PgturbohybridJsonbAddUint64(&state, "compact_maxsim_bound_checks",
+								scanStats.compactMaxsimBoundChecks);
+	PgturbohybridJsonbAddUint64(&state, "compact_maxsim_docs_pruned",
+								scanStats.compactMaxsimDocsPruned);
+	PgturbohybridJsonbAddUint64(&state, "compact_maxsim_tokens_skipped",
+								scanStats.compactMaxsimTokensSkipped);
 	PgturbohybridJsonbAddUint64(&state,
 								"multivector_doc_graph_insert_full_maxsim_edges",
 								pgturbohybrid_last_doc_insert_stats.fullMaxsimEdges);
@@ -4026,6 +4114,8 @@ pgturbohybrid_last_scan_stats(PG_FUNCTION_ARGS)
 							  scanStats.fullMultivectorSidecarAvailable);
 	PgturbohybridJsonbAddBool(&state, "centroid_sidecar_available",
 							  scanStats.centroidSidecarAvailable);
+	PgturbohybridJsonbAddBool(&state, "centroid_doc_codes_available",
+							  scanStats.centroidDocCodesAvailable);
 	PgturbohybridJsonbAddBool(&state,
 							  "quantized_inverted_sidecar_available",
 							  scanStats.quantizedInvertedSidecarAvailable);

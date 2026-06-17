@@ -4,6 +4,7 @@
 #include <math.h>
 
 #include "access/amapi.h"
+#include "access/parallel.h"
 #include "access/relscan.h"
 #include "access/reloptions.h"
 #include "access/sysattr.h"
@@ -77,6 +78,7 @@ typedef enum PgturbohybridBm25HeapTSVectorRerankMode
 static relopt_kind pgturbohybrid_relopt_kind;
 static List *pgturbohybrid_plannedstmt_stack = NIL;
 static PlannedStmt *pgturbohybrid_current_plannedstmt = NULL;
+static bool pgturbohybrid_am_init_done = false;
 
 int			pgturbohybrid_profile = PGTURBOHYBRID_PROFILE_LATENCY;
 bool		pgturbohybrid_enable_wand = true;
@@ -180,6 +182,11 @@ char	   *pgturbohybrid_multivector_quantized_inverted_codebook_path = "";
 int			pgturbohybrid_multivector_quantized_inverted_codebook_top_m = 1;
 int			pgturbohybrid_multivector_quantized_inverted_compact_scoring =
 	PGTURBOHYBRID_MULTIVECTOR_QUANTIZED_INVERTED_COMPACT_SCORING_OFF;
+int			pgturbohybrid_multivector_quantized_inverted_token_coverage =
+	PGTURBOHYBRID_MULTIVECTOR_QUANTIZED_INVERTED_TOKEN_COVERAGE_OFF;
+int			pgturbohybrid_multivector_quantized_inverted_min_token_matches = 0;
+int			pgturbohybrid_multivector_quantized_inverted_pruning =
+	PGTURBOHYBRID_MULTIVECTOR_QUANTIZED_INVERTED_PRUNING_OFF;
 int			pgturbohybrid_multivector_plain_fallback =
 	PGTURBOHYBRID_MULTIVECTOR_PLAIN_FALLBACK_AUTO;
 int			pgturbohybrid_multivector_plain_fallback_max_docs = 1000;
@@ -195,10 +202,23 @@ int			pgturbohybrid_multivector_sparse_candidate_source =
 int			pgturbohybrid_multivector_branch_plan =
 	PGTURBOHYBRID_BRANCH_PLAN_AUTO;
 int			pgturbohybrid_multivector_centroid_lite_max_postings_per_token = 0;
+int			pgturbohybrid_multivector_centroid_lite_probe_centroids_per_token = 1;
+int			pgturbohybrid_multivector_centroid_lite_codeword_top_m = 1;
+int			pgturbohybrid_multivector_centroid_lite_posting_selection =
+	PGTURBOHYBRID_MULTIVECTOR_POSTING_SELECTION_UNIFORM_STRIDE;
+int			pgturbohybrid_multivector_centroid_lite_candidate_scoring =
+	PGTURBOHYBRID_MULTIVECTOR_CENTROID_LITE_CANDIDATE_SCORING_POSTING_PAYLOAD;
 int			pgturbohybrid_multivector_centroid_lite_bitset_prefilter =
 	PGTURBOHYBRID_MULTIVECTOR_CENTROID_LITE_BITSET_PREFILTER_OFF;
+int			pgturbohybrid_multivector_centroid_lite_bitset_min_token_matches = 1;
 int			pgturbohybrid_multivector_centroid_lite_pruning =
 	PGTURBOHYBRID_MULTIVECTOR_CENTROID_LITE_PRUNING_OFF;
+double		pgturbohybrid_multivector_centroid_lite_score_threshold = -1.0;
+double		pgturbohybrid_multivector_centroid_lite_score_drop_from_best = -1.0;
+int			pgturbohybrid_multivector_quantized_inverted_max_postings_per_token = 0;
+int			pgturbohybrid_multivector_quantized_inverted_probe_codewords_per_token = 1;
+int			pgturbohybrid_multivector_quantized_inverted_posting_selection =
+	PGTURBOHYBRID_MULTIVECTOR_POSTING_SELECTION_SCORE_TOPK;
 static bool pgturbohybrid_bm25_strategy_user_set = false;
 static bool pgturbohybrid_bm25_impact_or_mode_user_set = false;
 static bool pgturbohybrid_bm25_hot_postings_cache_mb_user_set = false;
@@ -436,6 +456,12 @@ static const struct config_enum_entry pgturbohybrid_multivector_quantized_invert
 	{NULL, 0, false}
 };
 
+static const struct config_enum_entry pgturbohybrid_multivector_quantized_inverted_token_coverage_options[] = {
+	{"off", PGTURBOHYBRID_MULTIVECTOR_QUANTIZED_INVERTED_TOKEN_COVERAGE_OFF, false},
+	{"linear", PGTURBOHYBRID_MULTIVECTOR_QUANTIZED_INVERTED_TOKEN_COVERAGE_LINEAR, false},
+	{NULL, 0, false}
+};
+
 static const struct config_enum_entry pgturbohybrid_multivector_centroid_lite_bitset_prefilter_options[] = {
 	{"off", PGTURBOHYBRID_MULTIVECTOR_CENTROID_LITE_BITSET_PREFILTER_OFF, false},
 	{"experimental", PGTURBOHYBRID_MULTIVECTOR_CENTROID_LITE_BITSET_PREFILTER_EXPERIMENTAL, false},
@@ -445,6 +471,27 @@ static const struct config_enum_entry pgturbohybrid_multivector_centroid_lite_bi
 static const struct config_enum_entry pgturbohybrid_multivector_centroid_lite_pruning_options[] = {
 	{"off", PGTURBOHYBRID_MULTIVECTOR_CENTROID_LITE_PRUNING_OFF, false},
 	{"safe_upper_bound", PGTURBOHYBRID_MULTIVECTOR_CENTROID_LITE_PRUNING_SAFE_UPPER_BOUND, false},
+	{"score_bound_experimental", PGTURBOHYBRID_MULTIVECTOR_CENTROID_LITE_PRUNING_SCORE_BOUND_EXPERIMENTAL, false},
+	{NULL, 0, false}
+};
+
+static const struct config_enum_entry pgturbohybrid_multivector_quantized_inverted_pruning_options[] = {
+	{"off", PGTURBOHYBRID_MULTIVECTOR_QUANTIZED_INVERTED_PRUNING_OFF, false},
+	{"score_bound_experimental", PGTURBOHYBRID_MULTIVECTOR_QUANTIZED_INVERTED_PRUNING_SCORE_BOUND_EXPERIMENTAL, false},
+	{NULL, 0, false}
+};
+
+static const struct config_enum_entry pgturbohybrid_multivector_posting_selection_options[] = {
+	{"uniform_stride", PGTURBOHYBRID_MULTIVECTOR_POSTING_SELECTION_UNIFORM_STRIDE, false},
+	{"score_topk", PGTURBOHYBRID_MULTIVECTOR_POSTING_SELECTION_SCORE_TOPK, false},
+	{"union_score", PGTURBOHYBRID_MULTIVECTOR_POSTING_SELECTION_UNION_SCORE, false},
+	{NULL, 0, false}
+};
+
+static const struct config_enum_entry pgturbohybrid_multivector_centroid_lite_candidate_scoring_options[] = {
+	{"posting_payload", PGTURBOHYBRID_MULTIVECTOR_CENTROID_LITE_CANDIDATE_SCORING_POSTING_PAYLOAD, false},
+	{"codeword_maxsim", PGTURBOHYBRID_MULTIVECTOR_CENTROID_LITE_CANDIDATE_SCORING_CODEWORD_MAXSIM, false},
+	{"doc_centroid_maxsim", PGTURBOHYBRID_MULTIVECTOR_CENTROID_LITE_CANDIDATE_SCORING_DOC_CENTROID_MAXSIM, false},
 	{NULL, 0, false}
 };
 
@@ -1386,12 +1433,18 @@ typedef struct PgturbohybridLastScanStats
 	uint64		multivectorDocGraphQuantizedScores;
 	uint64		compactMaxsimScoreUs;
 	uint64		compactMaxsimPairs;
+	uint64		compactMaxsimCacheHits;
+	uint64		compactMaxsimCacheMisses;
+	uint64		compactMaxsimBoundChecks;
+	uint64		compactMaxsimDocsPruned;
+	uint64		compactMaxsimTokensSkipped;
 	char		multivectorDocGraphStorageKind[16];
 	bool		proxyOnlyIndex;
 	bool		centroidOnlyIndex;
-	bool		fullMultivectorSidecarAvailable;
-	bool		centroidSidecarAvailable;
-	bool		quantizedInvertedSidecarAvailable;
+		bool		fullMultivectorSidecarAvailable;
+		bool		centroidSidecarAvailable;
+		bool		centroidDocCodesAvailable;
+		bool		quantizedInvertedSidecarAvailable;
 	char		multivectorDocGraphRescoreSource[16];
 	uint32		multivectorDocGraphExactRerankDocs;
 	uint64		multivectorDocGraphHeapFetches;
@@ -1438,11 +1491,23 @@ typedef struct PgturbohybridLastScanStats
 	uint64		centroidDocsTouched;
 	uint64		centroidPrunedDocs;
 	uint64		centroidPostingsTouched;
+	uint64		centroidPostingsSelected;
 	uint64		centroidPostingsSkipped;
+	uint64		centroidProbeUs;
+	uint64		centroidPostingScanUs;
+	uint64		centroidAccumulateUs;
+	uint64		centroidCandidateHeapUs;
 	uint32		centroidPostingLimitPerToken;
+	uint32		centroidProbeCentroidsPerToken;
+	uint32		centroidCodewordTopM;
+	double		centroidScoreThreshold;
+	double		centroidScoreDropFromBest;
+	uint64		centroidListsSkippedByThreshold;
 	char		centroidPostingCapStrategy[32];
+	char		centroidCandidateScoring[32];
 	uint32		centroidCandidates;
 	bool		centroidBitsetPrefilterEnabled;
+	uint32		centroidBitsetMinTokenMatches;
 	uint32		centroidBitsetListsUsed;
 	uint32		centroidBitsetDocsSet;
 	uint32		centroidBitsetDocsAfterThreshold;
@@ -1460,6 +1525,11 @@ typedef struct PgturbohybridLastScanStats
 	uint32		multivectorFullMaxsimRerankDocs;
 	uint64		quantizedInvertedListsVisited;
 	uint64		quantizedInvertedPostingsTouched;
+	uint64		quantizedInvertedPostingsSelected;
+	uint64		quantizedInvertedPostingsSkipped;
+	uint32		quantizedInvertedPostingLimitPerToken;
+	uint32		quantizedInvertedProbeCodewordsPerToken;
+	char		quantizedInvertedPostingCapStrategy[32];
 	uint64		quantizedInvertedDocsScored;
 	uint32		quantizedInvertedCandidates;
 	uint32		quantizedInvertedExactRerankDocs;
@@ -1469,14 +1539,29 @@ typedef struct PgturbohybridLastScanStats
 	char		quantizedInvertedCodebookChecksum[128];
 	uint32		quantizedInvertedCodebookTopM;
 	uint64		quantizedInvertedAssignmentUs;
+	uint64		quantizedInvertedQueryCodewordScoreUs;
 	uint64		quantizedInvertedListOffsetBytes;
 	uint64		quantizedInvertedPostingBytes;
 	uint64		quantizedInvertedSidecarBytes;
 	char		quantizedInvertedCompactKernel[24];
+	char		quantizedInvertedCompactScoreSource[32];
 	uint64		quantizedInvertedCompactScoreUs;
 	uint64		quantizedInvertedCompactDocsScored;
 	uint64		quantizedInvertedCompactPayloadBytes;
 	bool		quantizedInvertedCompactTopKChangedVsScalar;
+	char		quantizedInvertedTokenCoverageMode[24];
+	uint32		quantizedInvertedActiveQueryTokens;
+	uint64		quantizedInvertedTokenMatchesTotal;
+	uint32		quantizedInvertedTokenMatchesMax;
+	uint32		quantizedInvertedMinTokenMatches;
+	uint64		quantizedInvertedTokenMatchFilteredDocs;
+	bool		quantizedInvertedScoreBoundPruningEnabled;
+	uint64		quantizedInvertedScoreBoundDocsChecked;
+	uint64		quantizedInvertedScoreBoundDocsPruned;
+	uint64		quantizedInvertedScoreBoundPruneUs;
+	uint64		quantizedInvertedScoreBoundUnsafeFallbacks;
+	uint32		quantizedInvertedCandidatesBeforeBound;
+	uint32		quantizedInvertedCandidatesAfterBound;
 	char		multivectorDocSidecarCacheMode[16];
 	uint64		multivectorDocSidecarPagesRead;
 	uint64		multivectorDocSidecarCacheHits;
@@ -1909,6 +1994,16 @@ PgturbohybridGetLastScanStatsSnapshot(PgturbohybridScanStatsSnapshot *stats)
 		pgturbohybrid_last_scan_state.compactMaxsimScoreUs;
 	stats->compactMaxsimPairs =
 		pgturbohybrid_last_scan_state.compactMaxsimPairs;
+	stats->compactMaxsimCacheHits =
+		pgturbohybrid_last_scan_state.compactMaxsimCacheHits;
+	stats->compactMaxsimCacheMisses =
+		pgturbohybrid_last_scan_state.compactMaxsimCacheMisses;
+	stats->compactMaxsimBoundChecks =
+		pgturbohybrid_last_scan_state.compactMaxsimBoundChecks;
+	stats->compactMaxsimDocsPruned =
+		pgturbohybrid_last_scan_state.compactMaxsimDocsPruned;
+	stats->compactMaxsimTokensSkipped =
+		pgturbohybrid_last_scan_state.compactMaxsimTokensSkipped;
 	strlcpy(stats->multivectorDocGraphStorageKind,
 			pgturbohybrid_last_scan_state.multivectorDocGraphStorageKind,
 			sizeof(stats->multivectorDocGraphStorageKind));
@@ -1920,6 +2015,8 @@ PgturbohybridGetLastScanStatsSnapshot(PgturbohybridScanStatsSnapshot *stats)
 		pgturbohybrid_last_scan_state.fullMultivectorSidecarAvailable;
 	stats->centroidSidecarAvailable =
 		pgturbohybrid_last_scan_state.centroidSidecarAvailable;
+	stats->centroidDocCodesAvailable =
+		pgturbohybrid_last_scan_state.centroidDocCodesAvailable;
 	stats->quantizedInvertedSidecarAvailable =
 		pgturbohybrid_last_scan_state.quantizedInvertedSidecarAvailable;
 	strlcpy(stats->multivectorDocGraphRescoreSource,
@@ -2020,17 +2117,42 @@ PgturbohybridGetLastScanStatsSnapshot(PgturbohybridScanStatsSnapshot *stats)
 		pgturbohybrid_last_scan_state.centroidPrunedDocs;
 	stats->centroidPostingsTouched =
 		pgturbohybrid_last_scan_state.centroidPostingsTouched;
+	stats->centroidPostingsSelected =
+		pgturbohybrid_last_scan_state.centroidPostingsSelected;
 	stats->centroidPostingsSkipped =
 		pgturbohybrid_last_scan_state.centroidPostingsSkipped;
+	stats->centroidProbeUs =
+		pgturbohybrid_last_scan_state.centroidProbeUs;
+	stats->centroidPostingScanUs =
+		pgturbohybrid_last_scan_state.centroidPostingScanUs;
+	stats->centroidAccumulateUs =
+		pgturbohybrid_last_scan_state.centroidAccumulateUs;
+	stats->centroidCandidateHeapUs =
+		pgturbohybrid_last_scan_state.centroidCandidateHeapUs;
 	stats->centroidPostingLimitPerToken =
 		pgturbohybrid_last_scan_state.centroidPostingLimitPerToken;
+	stats->centroidProbeCentroidsPerToken =
+		pgturbohybrid_last_scan_state.centroidProbeCentroidsPerToken;
+	stats->centroidCodewordTopM =
+		pgturbohybrid_last_scan_state.centroidCodewordTopM;
+	stats->centroidScoreThreshold =
+		pgturbohybrid_last_scan_state.centroidScoreThreshold;
+	stats->centroidScoreDropFromBest =
+		pgturbohybrid_last_scan_state.centroidScoreDropFromBest;
+	stats->centroidListsSkippedByThreshold =
+		pgturbohybrid_last_scan_state.centroidListsSkippedByThreshold;
 	strlcpy(stats->centroidPostingCapStrategy,
 			pgturbohybrid_last_scan_state.centroidPostingCapStrategy,
 			sizeof(stats->centroidPostingCapStrategy));
+	strlcpy(stats->centroidCandidateScoring,
+			pgturbohybrid_last_scan_state.centroidCandidateScoring,
+			sizeof(stats->centroidCandidateScoring));
 	stats->centroidCandidates =
 		pgturbohybrid_last_scan_state.centroidCandidates;
 	stats->centroidBitsetPrefilterEnabled =
 		pgturbohybrid_last_scan_state.centroidBitsetPrefilterEnabled;
+	stats->centroidBitsetMinTokenMatches =
+		pgturbohybrid_last_scan_state.centroidBitsetMinTokenMatches;
 	stats->centroidBitsetListsUsed =
 		pgturbohybrid_last_scan_state.centroidBitsetListsUsed;
 	stats->centroidBitsetDocsSet =
@@ -2065,6 +2187,17 @@ PgturbohybridGetLastScanStatsSnapshot(PgturbohybridScanStatsSnapshot *stats)
 		pgturbohybrid_last_scan_state.quantizedInvertedListsVisited;
 	stats->quantizedInvertedPostingsTouched =
 		pgturbohybrid_last_scan_state.quantizedInvertedPostingsTouched;
+	stats->quantizedInvertedPostingsSelected =
+		pgturbohybrid_last_scan_state.quantizedInvertedPostingsSelected;
+	stats->quantizedInvertedPostingsSkipped =
+		pgturbohybrid_last_scan_state.quantizedInvertedPostingsSkipped;
+	stats->quantizedInvertedPostingLimitPerToken =
+		pgturbohybrid_last_scan_state.quantizedInvertedPostingLimitPerToken;
+	stats->quantizedInvertedProbeCodewordsPerToken =
+		pgturbohybrid_last_scan_state.quantizedInvertedProbeCodewordsPerToken;
+	strlcpy(stats->quantizedInvertedPostingCapStrategy,
+			pgturbohybrid_last_scan_state.quantizedInvertedPostingCapStrategy,
+			sizeof(stats->quantizedInvertedPostingCapStrategy));
 	stats->quantizedInvertedDocsScored =
 		pgturbohybrid_last_scan_state.quantizedInvertedDocsScored;
 	stats->quantizedInvertedCandidates =
@@ -2085,6 +2218,8 @@ PgturbohybridGetLastScanStatsSnapshot(PgturbohybridScanStatsSnapshot *stats)
 		pgturbohybrid_last_scan_state.quantizedInvertedCodebookTopM;
 	stats->quantizedInvertedAssignmentUs =
 		pgturbohybrid_last_scan_state.quantizedInvertedAssignmentUs;
+	stats->quantizedInvertedQueryCodewordScoreUs =
+		pgturbohybrid_last_scan_state.quantizedInvertedQueryCodewordScoreUs;
 	stats->quantizedInvertedListOffsetBytes =
 		pgturbohybrid_last_scan_state.quantizedInvertedListOffsetBytes;
 	stats->quantizedInvertedPostingBytes =
@@ -2094,6 +2229,9 @@ PgturbohybridGetLastScanStatsSnapshot(PgturbohybridScanStatsSnapshot *stats)
 	strlcpy(stats->quantizedInvertedCompactKernel,
 			pgturbohybrid_last_scan_state.quantizedInvertedCompactKernel,
 			sizeof(stats->quantizedInvertedCompactKernel));
+	strlcpy(stats->quantizedInvertedCompactScoreSource,
+			pgturbohybrid_last_scan_state.quantizedInvertedCompactScoreSource,
+			sizeof(stats->quantizedInvertedCompactScoreSource));
 	stats->quantizedInvertedCompactScoreUs =
 		pgturbohybrid_last_scan_state.quantizedInvertedCompactScoreUs;
 	stats->quantizedInvertedCompactDocsScored =
@@ -2102,6 +2240,33 @@ PgturbohybridGetLastScanStatsSnapshot(PgturbohybridScanStatsSnapshot *stats)
 		pgturbohybrid_last_scan_state.quantizedInvertedCompactPayloadBytes;
 	stats->quantizedInvertedCompactTopKChangedVsScalar =
 		pgturbohybrid_last_scan_state.quantizedInvertedCompactTopKChangedVsScalar;
+	strlcpy(stats->quantizedInvertedTokenCoverageMode,
+			pgturbohybrid_last_scan_state.quantizedInvertedTokenCoverageMode,
+			sizeof(stats->quantizedInvertedTokenCoverageMode));
+	stats->quantizedInvertedActiveQueryTokens =
+		pgturbohybrid_last_scan_state.quantizedInvertedActiveQueryTokens;
+	stats->quantizedInvertedTokenMatchesTotal =
+		pgturbohybrid_last_scan_state.quantizedInvertedTokenMatchesTotal;
+	stats->quantizedInvertedTokenMatchesMax =
+		pgturbohybrid_last_scan_state.quantizedInvertedTokenMatchesMax;
+	stats->quantizedInvertedMinTokenMatches =
+		pgturbohybrid_last_scan_state.quantizedInvertedMinTokenMatches;
+	stats->quantizedInvertedTokenMatchFilteredDocs =
+		pgturbohybrid_last_scan_state.quantizedInvertedTokenMatchFilteredDocs;
+	stats->quantizedInvertedScoreBoundPruningEnabled =
+		pgturbohybrid_last_scan_state.quantizedInvertedScoreBoundPruningEnabled;
+	stats->quantizedInvertedScoreBoundDocsChecked =
+		pgturbohybrid_last_scan_state.quantizedInvertedScoreBoundDocsChecked;
+	stats->quantizedInvertedScoreBoundDocsPruned =
+		pgturbohybrid_last_scan_state.quantizedInvertedScoreBoundDocsPruned;
+	stats->quantizedInvertedScoreBoundPruneUs =
+		pgturbohybrid_last_scan_state.quantizedInvertedScoreBoundPruneUs;
+	stats->quantizedInvertedScoreBoundUnsafeFallbacks =
+		pgturbohybrid_last_scan_state.quantizedInvertedScoreBoundUnsafeFallbacks;
+	stats->quantizedInvertedCandidatesBeforeBound =
+		pgturbohybrid_last_scan_state.quantizedInvertedCandidatesBeforeBound;
+	stats->quantizedInvertedCandidatesAfterBound =
+		pgturbohybrid_last_scan_state.quantizedInvertedCandidatesAfterBound;
 	strlcpy(stats->multivectorDocSidecarCacheMode,
 			pgturbohybrid_last_scan_state.multivectorDocSidecarCacheMode,
 			sizeof(stats->multivectorDocSidecarCacheMode));
@@ -6073,6 +6238,16 @@ PgturbohybridCollectScanResults(IndexScanDesc scan, PgturbohybridScanState *stat
 		denseStats.compactMaxsimScoreUs;
 	lastStats.compactMaxsimPairs =
 		denseStats.compactMaxsimPairs;
+	lastStats.compactMaxsimCacheHits =
+		denseStats.compactMaxsimCacheHits;
+	lastStats.compactMaxsimCacheMisses =
+		denseStats.compactMaxsimCacheMisses;
+	lastStats.compactMaxsimBoundChecks =
+		denseStats.compactMaxsimBoundChecks;
+	lastStats.compactMaxsimDocsPruned =
+		denseStats.compactMaxsimDocsPruned;
+	lastStats.compactMaxsimTokensSkipped =
+		denseStats.compactMaxsimTokensSkipped;
 	strlcpy(lastStats.multivectorDocGraphStorageKind,
 			denseStats.multivectorDocGraphStorageKind,
 			sizeof(lastStats.multivectorDocGraphStorageKind));
@@ -6082,6 +6257,8 @@ PgturbohybridCollectScanResults(IndexScanDesc scan, PgturbohybridScanState *stat
 		denseStats.fullMultivectorSidecarAvailable;
 	lastStats.centroidSidecarAvailable =
 		denseStats.centroidSidecarAvailable;
+	lastStats.centroidDocCodesAvailable =
+		denseStats.centroidDocCodesAvailable;
 	lastStats.quantizedInvertedSidecarAvailable =
 		denseStats.quantizedInvertedSidecarAvailable;
 	strlcpy(lastStats.multivectorDocGraphRescoreSource,
@@ -6162,15 +6339,32 @@ PgturbohybridCollectScanResults(IndexScanDesc scan, PgturbohybridScanState *stat
 	lastStats.centroidDocsTouched = denseStats.centroidDocsTouched;
 	lastStats.centroidPrunedDocs = denseStats.centroidPrunedDocs;
 	lastStats.centroidPostingsTouched = denseStats.centroidPostingsTouched;
+	lastStats.centroidPostingsSelected = denseStats.centroidPostingsSelected;
 	lastStats.centroidPostingsSkipped = denseStats.centroidPostingsSkipped;
+	lastStats.centroidProbeUs = denseStats.centroidProbeUs;
+	lastStats.centroidPostingScanUs = denseStats.centroidPostingScanUs;
+	lastStats.centroidAccumulateUs = denseStats.centroidAccumulateUs;
+	lastStats.centroidCandidateHeapUs = denseStats.centroidCandidateHeapUs;
 	lastStats.centroidPostingLimitPerToken =
 		denseStats.centroidPostingLimitPerToken;
+	lastStats.centroidProbeCentroidsPerToken =
+		denseStats.centroidProbeCentroidsPerToken;
+	lastStats.centroidCodewordTopM = denseStats.centroidCodewordTopM;
+	lastStats.centroidScoreThreshold = denseStats.centroidScoreThreshold;
+	lastStats.centroidScoreDropFromBest = denseStats.centroidScoreDropFromBest;
+	lastStats.centroidListsSkippedByThreshold =
+		denseStats.centroidListsSkippedByThreshold;
 	strlcpy(lastStats.centroidPostingCapStrategy,
 			denseStats.centroidPostingCapStrategy,
 			sizeof(lastStats.centroidPostingCapStrategy));
+	strlcpy(lastStats.centroidCandidateScoring,
+			denseStats.centroidCandidateScoring,
+			sizeof(lastStats.centroidCandidateScoring));
 	lastStats.centroidCandidates = denseStats.centroidCandidates;
 	lastStats.centroidBitsetPrefilterEnabled =
 		denseStats.centroidBitsetPrefilterEnabled;
+	lastStats.centroidBitsetMinTokenMatches =
+		denseStats.centroidBitsetMinTokenMatches;
 	lastStats.centroidBitsetListsUsed =
 		denseStats.centroidBitsetListsUsed;
 	lastStats.centroidBitsetDocsSet = denseStats.centroidBitsetDocsSet;
@@ -6204,6 +6398,17 @@ PgturbohybridCollectScanResults(IndexScanDesc scan, PgturbohybridScanState *stat
 		denseStats.quantizedInvertedListsVisited;
 	lastStats.quantizedInvertedPostingsTouched =
 		denseStats.quantizedInvertedPostingsTouched;
+	lastStats.quantizedInvertedPostingsSelected =
+		denseStats.quantizedInvertedPostingsSelected;
+	lastStats.quantizedInvertedPostingsSkipped =
+		denseStats.quantizedInvertedPostingsSkipped;
+	lastStats.quantizedInvertedPostingLimitPerToken =
+		denseStats.quantizedInvertedPostingLimitPerToken;
+	lastStats.quantizedInvertedProbeCodewordsPerToken =
+		denseStats.quantizedInvertedProbeCodewordsPerToken;
+	strlcpy(lastStats.quantizedInvertedPostingCapStrategy,
+			denseStats.quantizedInvertedPostingCapStrategy,
+			sizeof(lastStats.quantizedInvertedPostingCapStrategy));
 	lastStats.quantizedInvertedDocsScored =
 		denseStats.quantizedInvertedDocsScored;
 	lastStats.quantizedInvertedCandidates =
@@ -6224,6 +6429,8 @@ PgturbohybridCollectScanResults(IndexScanDesc scan, PgturbohybridScanState *stat
 		denseStats.quantizedInvertedCodebookTopM;
 	lastStats.quantizedInvertedAssignmentUs =
 		denseStats.quantizedInvertedAssignmentUs;
+	lastStats.quantizedInvertedQueryCodewordScoreUs =
+		denseStats.quantizedInvertedQueryCodewordScoreUs;
 	lastStats.quantizedInvertedListOffsetBytes =
 		denseStats.quantizedInvertedListOffsetBytes;
 	lastStats.quantizedInvertedPostingBytes =
@@ -6233,6 +6440,9 @@ PgturbohybridCollectScanResults(IndexScanDesc scan, PgturbohybridScanState *stat
 	strlcpy(lastStats.quantizedInvertedCompactKernel,
 			denseStats.quantizedInvertedCompactKernel,
 			sizeof(lastStats.quantizedInvertedCompactKernel));
+	strlcpy(lastStats.quantizedInvertedCompactScoreSource,
+			denseStats.quantizedInvertedCompactScoreSource,
+			sizeof(lastStats.quantizedInvertedCompactScoreSource));
 	lastStats.quantizedInvertedCompactScoreUs =
 		denseStats.quantizedInvertedCompactScoreUs;
 	lastStats.quantizedInvertedCompactDocsScored =
@@ -6241,6 +6451,33 @@ PgturbohybridCollectScanResults(IndexScanDesc scan, PgturbohybridScanState *stat
 		denseStats.quantizedInvertedCompactPayloadBytes;
 	lastStats.quantizedInvertedCompactTopKChangedVsScalar =
 		denseStats.quantizedInvertedCompactTopKChangedVsScalar;
+	strlcpy(lastStats.quantizedInvertedTokenCoverageMode,
+			denseStats.quantizedInvertedTokenCoverageMode,
+			sizeof(lastStats.quantizedInvertedTokenCoverageMode));
+	lastStats.quantizedInvertedActiveQueryTokens =
+		denseStats.quantizedInvertedActiveQueryTokens;
+	lastStats.quantizedInvertedTokenMatchesTotal =
+		denseStats.quantizedInvertedTokenMatchesTotal;
+	lastStats.quantizedInvertedTokenMatchesMax =
+		denseStats.quantizedInvertedTokenMatchesMax;
+	lastStats.quantizedInvertedMinTokenMatches =
+		denseStats.quantizedInvertedMinTokenMatches;
+	lastStats.quantizedInvertedTokenMatchFilteredDocs =
+		denseStats.quantizedInvertedTokenMatchFilteredDocs;
+	lastStats.quantizedInvertedScoreBoundPruningEnabled =
+		denseStats.quantizedInvertedScoreBoundPruningEnabled;
+	lastStats.quantizedInvertedScoreBoundDocsChecked =
+		denseStats.quantizedInvertedScoreBoundDocsChecked;
+	lastStats.quantizedInvertedScoreBoundDocsPruned =
+		denseStats.quantizedInvertedScoreBoundDocsPruned;
+	lastStats.quantizedInvertedScoreBoundPruneUs =
+		denseStats.quantizedInvertedScoreBoundPruneUs;
+	lastStats.quantizedInvertedScoreBoundUnsafeFallbacks =
+		denseStats.quantizedInvertedScoreBoundUnsafeFallbacks;
+	lastStats.quantizedInvertedCandidatesBeforeBound =
+		denseStats.quantizedInvertedCandidatesBeforeBound;
+	lastStats.quantizedInvertedCandidatesAfterBound =
+		denseStats.quantizedInvertedCandidatesAfterBound;
 	strlcpy(lastStats.multivectorDocSidecarCacheMode,
 			denseStats.multivectorDocSidecarCacheMode,
 			sizeof(lastStats.multivectorDocSidecarCacheMode));
@@ -7431,6 +7668,12 @@ pgturbohybridamvalidate(Oid opclassoid)
 void
 PgturbohybridInit(void)
 {
+	bool		gucsAlreadyDefined;
+
+	if (pgturbohybrid_am_init_done)
+		return;
+	pgturbohybrid_am_init_done = true;
+
 	pgturbohybrid_relopt_kind = add_reloption_kind();
 	RegisterXactCallback(PgturbohybridXactCallback, NULL);
 	RegisterSubXactCallback(PgturbohybridSubXactCallback, NULL);
@@ -7544,6 +7787,14 @@ PgturbohybridInit(void)
 					   PGTURBOHYBRID_MULTIVECTOR_FIELD_MODE_OFF,
 					   "Valid values are \"off\" and \"weighted\".",
 					   AccessExclusiveLock);
+
+	if (IsParallelWorker())
+		return;
+
+	gucsAlreadyDefined =
+		GetConfigOption("turbohybrid.default_dense_k", true, false) != NULL;
+	if (gucsAlreadyDefined)
+		return;
 
 	DefineCustomIntVariable("turbohybrid.default_dense_k", "Default dense candidate budget for turbohybrid_query callers",
 							NULL, &pgturbohybrid_default_dense_k,
@@ -7799,7 +8050,7 @@ PgturbohybridInit(void)
 							   PGC_USERSET, 0, NULL, NULL, NULL);
 	DefineCustomIntVariable("turbohybrid.multivector_quantized_inverted_codebook_top_m",
 							"Number of codewords assigned per token for the experimental quantized-inverted branch",
-							"The current sidecar format supports top_m = 1 only; larger values error until a versioned posting format exists.",
+							"External experimental codebooks support top_m 1-16 multi-posting assignment; deterministic codebooks remain top_m = 1.",
 							&pgturbohybrid_multivector_quantized_inverted_codebook_top_m,
 							1, 1, 16,
 							PGC_USERSET, 0, NULL, NULL, NULL);
@@ -7809,6 +8060,26 @@ PgturbohybridInit(void)
 							 &pgturbohybrid_multivector_quantized_inverted_compact_scoring,
 							 PGTURBOHYBRID_MULTIVECTOR_QUANTIZED_INVERTED_COMPACT_SCORING_OFF,
 							 pgturbohybrid_multivector_quantized_inverted_compact_scoring_options,
+							 PGC_USERSET, 0, NULL, NULL, NULL);
+	DefineCustomEnumVariable("turbohybrid.multivector_quantized_inverted_token_coverage",
+							 "Experimental query-token coverage adjustment for quantized_inverted_experimental",
+							 "off preserves the existing summed compact-code admission score. linear multiplies the approximate document score by matched query-token coverage before exact heap MaxSim rerank.",
+							 &pgturbohybrid_multivector_quantized_inverted_token_coverage,
+							 PGTURBOHYBRID_MULTIVECTOR_QUANTIZED_INVERTED_TOKEN_COVERAGE_OFF,
+							 pgturbohybrid_multivector_quantized_inverted_token_coverage_options,
+							 PGC_USERSET, 0, NULL, NULL, NULL);
+	DefineCustomIntVariable("turbohybrid.multivector_quantized_inverted_min_token_matches",
+							"Minimum matched query tokens for quantized_inverted_experimental candidates",
+							"Zero preserves existing behavior. Positive values drop approximate quantized-inverted candidates that matched fewer query tokens before bounded exact heap MaxSim rerank.",
+							&pgturbohybrid_multivector_quantized_inverted_min_token_matches,
+							0, 0, 1024,
+							PGC_USERSET, 0, NULL, NULL, NULL);
+	DefineCustomEnumVariable("turbohybrid.multivector_quantized_inverted_pruning",
+							 "Experimental score-bound pruning for quantized_inverted_experimental",
+							 "off preserves current behavior. score_bound_experimental skips compact full-doc codeword scoring when an approximate posting-score bound cannot enter the retained candidate heap; final SQL ranking remains exact heap MaxSim over retained candidates.",
+							 &pgturbohybrid_multivector_quantized_inverted_pruning,
+							 PGTURBOHYBRID_MULTIVECTOR_QUANTIZED_INVERTED_PRUNING_OFF,
+							 pgturbohybrid_multivector_quantized_inverted_pruning_options,
 							 PGC_USERSET, 0, NULL, NULL, NULL);
 	DefineCustomEnumVariable("turbohybrid.multivector_branch_plan",
 							 "Multivector branch planner mode",
@@ -7823,6 +8094,32 @@ PgturbohybridInit(void)
 							&pgturbohybrid_multivector_centroid_lite_max_postings_per_token,
 							0, 0, 10000000,
 							PGC_USERSET, 0, NULL, NULL, NULL);
+	DefineCustomIntVariable("turbohybrid.multivector_centroid_lite_probe_centroids_per_token",
+							"Maximum centroid_lite posting lists probed per query token",
+							"One preserves existing deterministic centroid_lite behavior; larger values probe the best deterministic centroid lists for each query token before exact heap MaxSim rerank.",
+							&pgturbohybrid_multivector_centroid_lite_probe_centroids_per_token,
+							1, 1, 1024,
+							PGC_USERSET, 0, NULL, NULL, NULL);
+	DefineCustomIntVariable("turbohybrid.multivector_centroid_lite_codeword_top_m",
+							"Number of centroid_lite codeword posting lists assigned per document centroid",
+							"One preserves existing persisted centroid_lite postings. Larger values are experimental and build denser deterministic posting lists before exact heap MaxSim rerank.",
+							&pgturbohybrid_multivector_centroid_lite_codeword_top_m,
+							1, 1, 16,
+							PGC_USERSET, 0, NULL, NULL, NULL);
+	DefineCustomEnumVariable("turbohybrid.multivector_centroid_lite_posting_selection",
+							 "Experimental centroid_lite posting selection strategy",
+							 "uniform_stride preserves diagnostic capped posting-list sampling; score_topk keeps the best payload-sorted postings per list; union_score unions probed centroid posting lists, scores documents by compact query-centroid MaxSim, and keeps the best document pool before exact heap MaxSim rerank.",
+							 &pgturbohybrid_multivector_centroid_lite_posting_selection,
+							 PGTURBOHYBRID_MULTIVECTOR_POSTING_SELECTION_UNIFORM_STRIDE,
+							 pgturbohybrid_multivector_posting_selection_options,
+							 PGC_USERSET, 0, NULL, NULL, NULL);
+	DefineCustomEnumVariable("turbohybrid.multivector_centroid_lite_candidate_scoring",
+							 "Experimental centroid_lite candidate scoring strategy",
+							 "posting_payload ranks touched documents by bounded posting payload scores; codeword_maxsim accumulates a PLAID-style approximate MaxSim over selected centroid codewords; doc_centroid_maxsim re-ranks touched documents by approximate MaxSim over persisted document centroids before exact heap MaxSim rerank.",
+							 &pgturbohybrid_multivector_centroid_lite_candidate_scoring,
+							 PGTURBOHYBRID_MULTIVECTOR_CENTROID_LITE_CANDIDATE_SCORING_POSTING_PAYLOAD,
+							 pgturbohybrid_multivector_centroid_lite_candidate_scoring_options,
+							 PGC_USERSET, 0, NULL, NULL, NULL);
 	DefineCustomEnumVariable("turbohybrid.multivector_centroid_lite_bitset_prefilter",
 							 "Experimental centroid_lite scan-local bitset prefilter",
 							 "off preserves current centroid_lite behavior; experimental builds a scan-local posting-union bitset for measurement only before exact MaxSim rerank.",
@@ -7830,12 +8127,49 @@ PgturbohybridInit(void)
 							 PGTURBOHYBRID_MULTIVECTOR_CENTROID_LITE_BITSET_PREFILTER_OFF,
 							 pgturbohybrid_multivector_centroid_lite_bitset_prefilter_options,
 							 PGC_USERSET, 0, NULL, NULL, NULL);
+	DefineCustomIntVariable("turbohybrid.multivector_centroid_lite_bitset_min_token_matches",
+							"Minimum query-token posting-list matches for centroid_lite bitset prefilter",
+							"One preserves the posting-union behavior. Larger values are experimental EMVB-style scan-local filtering before exact heap MaxSim rerank.",
+							&pgturbohybrid_multivector_centroid_lite_bitset_min_token_matches,
+							1, 1, 64,
+							PGC_USERSET, 0, NULL, NULL, NULL);
+	DefineCustomRealVariable("turbohybrid.multivector_centroid_lite_score_threshold",
+							 "Minimum query-centroid score for centroid_lite posting-list expansion",
+							 "-1.0 preserves existing behavior for normalized ColBERT vectors. Higher values skip weak centroid posting lists before exact heap MaxSim rerank.",
+							 &pgturbohybrid_multivector_centroid_lite_score_threshold,
+							 -1.0, -1.0, 1.0,
+							 PGC_USERSET, 0, NULL, NULL, NULL);
+	DefineCustomRealVariable("turbohybrid.multivector_centroid_lite_score_drop_from_best",
+							 "Maximum centroid_lite score drop from the best probed centroid per query token",
+							 "-1.0 disables relative pruning. Non-negative values keep only probed centroid posting lists whose query-centroid score is at least best_score - drop before exact heap MaxSim rerank.",
+							 &pgturbohybrid_multivector_centroid_lite_score_drop_from_best,
+							 -1.0, -1.0, 2.0,
+							 PGC_USERSET, 0, NULL, NULL, NULL);
 	DefineCustomEnumVariable("turbohybrid.multivector_centroid_lite_pruning",
 							 "Experimental centroid_lite upper-bound pruning",
 							 "off preserves current centroid_lite behavior; safe_upper_bound prunes only candidates with a proven safe query-centroid upper bound before exact MaxSim rerank.",
 							 &pgturbohybrid_multivector_centroid_lite_pruning,
 							 PGTURBOHYBRID_MULTIVECTOR_CENTROID_LITE_PRUNING_OFF,
 							 pgturbohybrid_multivector_centroid_lite_pruning_options,
+							 PGC_USERSET, 0, NULL, NULL, NULL);
+	DefineCustomIntVariable("turbohybrid.multivector_quantized_inverted_max_postings_per_token",
+							"Maximum quantized_inverted_experimental postings retained per query token",
+							"Zero preserves the full experimental quantized-inverted posting-list union; positive values keep a bounded set of postings selected by the configured posting-selection strategy before exact heap MaxSim rerank.",
+							&pgturbohybrid_multivector_quantized_inverted_max_postings_per_token,
+							0, 0, 10000000,
+							PGC_USERSET, 0, NULL, NULL, NULL);
+	DefineCustomIntVariable("turbohybrid.multivector_quantized_inverted_probe_codewords_per_token",
+							"Maximum quantized_inverted_experimental posting lists probed per query token",
+							"One preserves existing codeword assignment behavior; larger values probe the best codeword lists for each query token before exact heap MaxSim rerank.",
+							&pgturbohybrid_multivector_quantized_inverted_probe_codewords_per_token,
+							1, 1, 1024,
+							PGC_USERSET, 0, NULL, NULL, NULL);
+	DefineCustomEnumVariable("turbohybrid.multivector_quantized_inverted_posting_selection",
+							 "Experimental quantized_inverted_experimental posting selection strategy",
+							 "score_topk keeps the best capped postings by compact/code or exact token score before exact heap MaxSim rerank; uniform_stride is diagnostic compatibility sampling.",
+							 &pgturbohybrid_multivector_quantized_inverted_posting_selection,
+							 PGTURBOHYBRID_MULTIVECTOR_POSTING_SELECTION_SCORE_TOPK,
+							 pgturbohybrid_multivector_posting_selection_options,
 							 PGC_USERSET, 0, NULL, NULL, NULL);
 	DefineCustomIntVariable("turbohybrid.multivector_doc_graph_entry_sample_count",
 							"Document-node graph entry samples scored before traversal",

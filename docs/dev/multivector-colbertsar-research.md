@@ -66,6 +66,55 @@ not a compatibility promise or a cryptographic verification layer. SQL table
 and model-profile codebook sources remain target-design items for later
 prototypes; they are not executable in this slice.
 
+The DBpedia benchmark can exercise the same path without changing production
+defaults by selecting the experimental external-codebook profile. First build a
+sampled cosine k-means codebook from already imported document token vectors:
+
+```bash
+python benchmarks/dbpedia_colbert_multivector.py \
+  --database pgturbohybrid_dbpedia_colbert_1m_colbert \
+  --reuse-data \
+  --document-node-colbert-quantized-codebook-build-only \
+  --quantized-inverted-codebook-output \
+    .nix-dev/tmp/dbpedia-colbert-1m-quantized-codebook.txt \
+  --quantized-inverted-codebook-size 256 \
+  --quantized-inverted-codebook-sample-docs 10000 \
+  --quantized-inverted-codebook-sample-tokens 100000 \
+  --quantized-inverted-codebook-kmeans-iterations 20
+```
+
+Then run the explicit external-codebook profile:
+
+```bash
+python benchmarks/dbpedia_colbert_multivector.py \
+  --database pgturbohybrid_dbpedia_colbert_1m_colbert \
+  --reuse-data \
+  --document-node-colbert-candidate-source-focus \
+  --include-quantized-inverted-experimental \
+  --document-node-colbert-candidate-source-profiles \
+    quantized_inverted_external_centroid_only_compact_topk_032 \
+  --multivector-quantized-inverted-codebook-path \
+    .nix-dev/tmp/dbpedia-colbert-1m-quantized-codebook.txt \
+  --candidate-budgets 800,1600 \
+  --exact-rerank-k 100
+```
+
+The named profile is still experimental. It sets the candidate source to
+`quantized_inverted_experimental`, uses compact score-top-k admission, records
+the external codebook metadata in the physical index signature, and reranks the
+retained heap documents with exact MaxSim.
+
+For 1M-scale experiments prefer the `centroid_only` compact external profile:
+it stores centroids plus quantized posting/codeword payloads, not a full f32
+document multivector sidecar. The older
+`quantized_inverted_external_f32_compact_topk_032` profile remains useful only
+when explicitly measuring full-sidecar behavior.
+
+The codebook builder is benchmark plumbing, not a production trainer: it samples
+loaded document token vectors, runs deterministic cosine k-means in Python, and
+writes the current text file format. It does not build an index, run retrieval,
+or introduce a compatibility promise.
+
 ## Current Sidecar
 
 The current sidecar stores experimental codebook metadata plus inverted

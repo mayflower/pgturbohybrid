@@ -3232,6 +3232,7 @@ BEGIN
 		(stats->>'centroid_postings_touched')::int <= 0 OR
 		(stats->>'centroid_postings_skipped')::int <> 0 OR
 		(stats->>'centroid_posting_limit_per_token')::int <> 0 OR
+		(stats->>'centroid_probe_centroids_per_token')::int <> 1 OR
 		stats->>'centroid_posting_cap_strategy' <> 'uncapped_full_list' OR
 		(stats->>'centroid_candidates')::int <= 0 OR
 		NOT (stats ? 'multivector_centroid_lite_time_us') OR
@@ -3279,6 +3280,7 @@ BEGIN
 			(stats->>'centroid_lists_visited')::int *
 			(stats->>'centroid_posting_limit_per_token')::int OR
 		(stats->>'centroid_postings_skipped')::int <= 0 OR
+		(stats->>'centroid_probe_centroids_per_token')::int <> 1 OR
 		(stats->>'multivector_doc_graph_exact_rerank_docs')::int <= 0 THEN
 		RAISE EXCEPTION 'centroid_lite posting cap stats missing, stats %',
 			stats;
@@ -3440,6 +3442,7 @@ BEGIN
 	PERFORM set_config('turbohybrid.multivector_candidate_source', 'quantized_inverted_experimental', true);
 	PERFORM set_config('turbohybrid.multivector_plain_fallback', 'force', true);
 	PERFORM set_config('turbohybrid.multivector_doc_candidate_k', '3', true);
+	PERFORM set_config('turbohybrid.multivector_quantized_inverted_compact_scoring', 'experimental', true);
 	SELECT id INTO top_id
 	FROM mv_centroid_lite_docs
 	ORDER BY colbert <~> turbohybrid_query(
@@ -3455,6 +3458,7 @@ BEGIN
 		stats->>'multivector_accumulator_kind' <> 'quantized_inverted_experimental' OR
 		stats->>'multivector_doc_graph_warning' <> 'quantized_inverted_experimental_persisted_postings' OR
 		(stats->>'quantized_inverted_lists_visited')::int <> 1 OR
+		(stats->>'quantized_inverted_probe_codewords_per_token')::int <> 1 OR
 		(stats->>'quantized_inverted_postings_touched')::int <= 0 OR
 		(stats->>'quantized_inverted_docs_scored')::int <= 0 OR
 		(stats->>'quantized_inverted_candidates')::int <= 0 OR
@@ -3470,16 +3474,20 @@ BEGIN
 		NOT (stats ? 'quantized_inverted_posting_bytes') OR
 		NOT (stats ? 'quantized_inverted_sidecar_bytes') OR
 		NOT (stats ? 'quantized_inverted_compact_kernel') OR
+		NOT (stats ? 'quantized_inverted_compact_score_source') OR
 		NOT (stats ? 'quantized_inverted_compact_score_us') OR
-		NOT (stats ? 'quantized_inverted_compact_docs_scored') OR
-		NOT (stats ? 'quantized_inverted_compact_payload_bytes') OR
-		NOT (stats ? 'quantized_inverted_compact_topk_changed_vs_scalar') OR
-		(stats->>'quantized_inverted_list_offset_bytes')::bigint <= 0 OR
+			NOT (stats ? 'quantized_inverted_compact_docs_scored') OR
+			NOT (stats ? 'quantized_inverted_compact_payload_bytes') OR
+			NOT (stats ? 'quantized_inverted_compact_topk_changed_vs_scalar') OR
+			NOT (stats ? 'quantized_inverted_token_coverage_mode') OR
+			stats->>'quantized_inverted_token_coverage_mode' <> 'off' OR
+			(stats->>'quantized_inverted_list_offset_bytes')::bigint <= 0 OR
 		(stats->>'quantized_inverted_posting_bytes')::bigint <= 0 OR
 		(stats->>'quantized_inverted_sidecar_bytes')::bigint <= 0 OR
-		stats->>'quantized_inverted_compact_kernel' <> 'off' OR
-		(stats->>'quantized_inverted_compact_docs_scored')::int <> 0 OR
-		(stats->>'quantized_inverted_compact_payload_bytes')::bigint <> 0 OR
+		stats->>'quantized_inverted_compact_kernel' NOT IN ('scalar', 'avx2', 'avx512', 'neon') OR
+		stats->>'quantized_inverted_compact_score_source' <> 'full_doc_codeword_maxsim' OR
+		(stats->>'quantized_inverted_compact_docs_scored')::int <= 0 OR
+		(stats->>'quantized_inverted_compact_payload_bytes')::bigint <= 0 OR
 		stats->>'quantized_inverted_compact_topk_changed_vs_scalar' <> 'false' OR
 		stats->>'multivector_plain_fallback_used' <> 'false' OR
 		stats->>'multivector_exact_rerank_source' <> 'heap' OR
@@ -3489,12 +3497,42 @@ BEGIN
 			top_id, stats;
 	END IF;
 
+	PERFORM set_config('turbohybrid.multivector_quantized_inverted_max_postings_per_token', '1', true);
+	PERFORM set_config('turbohybrid.multivector_quantized_inverted_posting_selection', 'score_topk', true);
+	SELECT id INTO top_id
+	FROM mv_centroid_lite_docs
+	ORDER BY colbert <~> turbohybrid_query(
+		multivector_query => turbohybrid_multivector(ARRAY['[1,0]'::vector]),
+		dense_k => 3,
+		final_k => 1
+	)
+	LIMIT 1;
+	stats := turbohybrid_last_scan_stats();
+
+	IF top_id <> 1 OR
+		stats->>'multivector_candidate_source' <> 'quantized_inverted_experimental' OR
+		stats->>'quantized_inverted_posting_cap_strategy' <> 'score_topk_payload_sorted' OR
+		(stats->>'quantized_inverted_posting_limit_per_token')::int <> 1 OR
+		(stats->>'quantized_inverted_postings_touched')::int >
+			(stats->>'quantized_inverted_lists_visited')::int OR
+		(stats->>'quantized_inverted_postings_selected')::int >
+			(stats->>'quantized_inverted_lists_visited')::int OR
+		(stats->>'quantized_inverted_postings_skipped')::int <= 0 OR
+		stats->>'multivector_exact_rerank_source' <> 'heap' THEN
+		RAISE EXCEPTION 'quantized_inverted score_topk payload ordering failed, top %, stats %',
+			top_id, stats;
+	END IF;
+	PERFORM set_config('turbohybrid.multivector_quantized_inverted_max_postings_per_token', '0', true);
+
+	PERFORM set_config('turbohybrid.multivector_quantized_inverted_compact_scoring', 'off', true);
+
 	index_stats := turbohybrid_index_stats('mv_centroid_lite_docs_idx'::regclass);
 	IF index_stats->>'quantized_inverted_codebook_source' <> 'deterministic' OR
 		(index_stats->>'quantized_inverted_codebook_size')::int <> 4 OR
 		(index_stats->>'quantized_inverted_codebook_dim')::int <> 2 OR
 		index_stats->>'quantized_inverted_codebook_checksum' <> 'deterministic' OR
 		(index_stats->>'quantized_inverted_codebook_top_m')::int <> 1 OR
+		index_stats->>'centroid_doc_codes_available' <> 'true' OR
 		(index_stats->>'quantized_inverted_codebook_version')::int <= 0 THEN
 		RAISE EXCEPTION 'quantized_inverted_experimental index stats missing codebook metadata: %',
 			index_stats;
@@ -3580,7 +3618,7 @@ BEGIN
 	);
 	PERFORM set_config('turbohybrid.multivector_quantized_inverted_codebook', 'external', false);
 	PERFORM set_config('turbohybrid.multivector_quantized_inverted_codebook_path', codebook_path, false);
-	PERFORM set_config('turbohybrid.multivector_quantized_inverted_codebook_top_m', '1', false);
+	PERFORM set_config('turbohybrid.multivector_quantized_inverted_codebook_top_m', '2', false);
 	CREATE INDEX mv_quantized_external_docs_idx ON mv_quantized_external_docs
 	USING turbohybrid (colbert multivector_cosine_turbohybrid_ops)
 	WITH (multivector_graph = document_nodes);
@@ -3589,7 +3627,7 @@ BEGIN
 		(index_stats->>'quantized_inverted_codebook_size')::int <> 4 OR
 		(index_stats->>'quantized_inverted_codebook_dim')::int <> 2 OR
 		index_stats->>'quantized_inverted_codebook_checksum' <> 'checksum_ok' OR
-		(index_stats->>'quantized_inverted_codebook_top_m')::int <> 1 OR
+		(index_stats->>'quantized_inverted_codebook_top_m')::int <> 2 OR
 		(index_stats->>'quantized_inverted_codebook_version')::int <= 0 THEN
 		RAISE EXCEPTION 'external quantized_inverted index stats missing codebook metadata: %',
 			index_stats;
@@ -3609,6 +3647,7 @@ BEGIN
 	stats := turbohybrid_last_scan_stats();
 	IF stats->>'quantized_inverted_codebook_source' <> 'external' OR
 		stats->>'quantized_inverted_codebook_checksum' <> 'checksum_ok' OR
+		(stats->>'quantized_inverted_codebook_top_m')::int <> 2 OR
 		(stats->>'quantized_inverted_assignment_us')::bigint < 0 OR
 		(stats->>'quantized_inverted_assignment_time_us')::bigint < 0 THEN
 		RAISE EXCEPTION 'external quantized_inverted scan missing codebook stats: %',
@@ -3651,14 +3690,20 @@ DECLARE
 	quantized_compact_ids int[];
 	stats jsonb;
 	timing_key text;
-BEGIN
-	PERFORM set_config('enable_seqscan', 'off', true);
-	PERFORM set_config('turbohybrid.multivector_plain_fallback', 'off', true);
-	PERFORM set_config('turbohybrid.multivector_doc_candidate_k', '4', true);
-	PERFORM set_config('turbohybrid.multivector_exact_rerank_k', '4', true);
-	PERFORM set_config('turbohybrid.multivector_doc_graph_search_ef', '4', true);
+	BEGIN
+		PERFORM set_config('enable_seqscan', 'off', true);
+		PERFORM set_config('turbohybrid.multivector_plain_fallback', 'off', true);
+		PERFORM set_config('turbohybrid.multivector_doc_candidate_k', '4', true);
+		PERFORM set_config('turbohybrid.multivector_exact_rerank_k', '4', true);
+		PERFORM set_config('turbohybrid.multivector_doc_graph_search_ef', '4', true);
+		PERFORM set_config('turbohybrid.multivector_centroid_lite_posting_selection', 'uniform_stride', true);
+		PERFORM set_config('turbohybrid.multivector_centroid_lite_max_postings_per_token', '0', true);
+		PERFORM set_config('turbohybrid.multivector_centroid_lite_probe_centroids_per_token', '1', true);
+		PERFORM set_config('turbohybrid.multivector_centroid_lite_bitset_prefilter', 'off', true);
+		PERFORM set_config('turbohybrid.multivector_centroid_lite_pruning', 'off', true);
+		PERFORM set_config('turbohybrid.multivector_quantized_inverted_compact_scoring', 'off', true);
 
-	PERFORM set_config('turbohybrid.multivector_candidate_source', 'exact_doc_scan', true);
+		PERFORM set_config('turbohybrid.multivector_candidate_source', 'exact_doc_scan', true);
 	SELECT array_agg(id ORDER BY distance, id) INTO exact_ids
 	FROM (
 		SELECT id,
@@ -3762,6 +3807,7 @@ BEGIN
 		stats->>'multivector_enabled' <> 'true' OR
 		stats->>'multivector_candidate_source' <> 'centroid_lite' OR
 		stats->>'multivector_doc_graph_warning' <> 'document_node_centroid_lite_prefilter' OR
+		stats->>'centroid_candidate_scoring' <> 'exact_centroid_token' OR
 		stats->>'centroid_bitset_prefilter_enabled' <> 'false' OR
 		stats->>'centroid_upper_bound_enabled' <> 'false' OR
 		stats->>'multivector_plain_fallback_used' <> 'false' OR
@@ -3781,6 +3827,126 @@ BEGIN
 		RAISE EXCEPTION 'centroid_lite full-budget rerank did not match exact_doc_scan: exact %, centroid %, stats %',
 			exact_ids, centroid_ids, stats;
 	END IF;
+
+	PERFORM set_config('turbohybrid.multivector_centroid_lite_posting_selection', 'score_topk', true);
+	PERFORM set_config('turbohybrid.multivector_centroid_lite_max_postings_per_token', '1', true);
+	PERFORM set_config('turbohybrid.multivector_centroid_lite_probe_centroids_per_token', '2', true);
+	SELECT array_agg(id ORDER BY distance, id) INTO centroid_ids
+	FROM (
+		SELECT id,
+		       colbert <~> turbohybrid_query(
+			       multivector_query => query_mv,
+			       dense_k => 4,
+			       final_k => 3
+	       ) AS distance
+		FROM mv_centroid_lite_docs
+		ORDER BY colbert <~> turbohybrid_query(
+		       multivector_query => query_mv,
+		       dense_k => 4,
+		       final_k => 3
+	       )
+		LIMIT 3
+	) AS centroid_compact_results;
+	stats := turbohybrid_last_scan_stats();
+
+	IF centroid_ids IS NULL OR
+		array_length(centroid_ids, 1) = 0 OR
+		current_setting('turbohybrid.multivector_centroid_lite_posting_selection') <> 'score_topk' OR
+		stats->>'multivector_candidate_source' <> 'centroid_lite' OR
+		stats->>'multivector_exact_rerank_source' <> 'heap' OR
+		stats->>'centroid_posting_cap_strategy' <> 'score_topk_payload_sorted' OR
+		stats->>'centroid_candidate_scoring' <> 'posting_payload' OR
+		(stats->>'centroid_posting_limit_per_token')::int <> 1 OR
+		(stats->>'centroid_probe_centroids_per_token')::int <> 2 OR
+		(stats->>'compact_maxsim_pairs')::int <= 0 OR
+		(stats->>'multivector_doc_graph_quantized_scores')::int <= 0 OR
+		(stats->>'centroid_postings_skipped')::int <= 0 OR
+		(stats->>'multivector_exact_rerank_docs')::int <= 0 OR
+		(stats->>'multivector_exact_rerank_docs')::int <>
+			(stats->>'multivector_doc_graph_candidates')::int THEN
+		RAISE EXCEPTION 'centroid_lite compact scoring did not use bounded payload candidates with heap rerank: exact %, compact %, stats %',
+			exact_ids, centroid_ids, stats;
+	END IF;
+
+	PERFORM set_config('turbohybrid.multivector_centroid_lite_candidate_scoring', 'codeword_maxsim', true);
+	SELECT array_agg(id ORDER BY distance, id) INTO centroid_ids
+	FROM (
+		SELECT id,
+		       colbert <~> turbohybrid_query(
+			       multivector_query => query_mv,
+			       dense_k => 4,
+			       final_k => 3
+	       ) AS distance
+		FROM mv_centroid_lite_docs
+		ORDER BY colbert <~> turbohybrid_query(
+		       multivector_query => query_mv,
+		       dense_k => 4,
+		       final_k => 3
+	       )
+		LIMIT 3
+	) AS centroid_codeword_results;
+	stats := turbohybrid_last_scan_stats();
+
+	IF centroid_ids IS NULL OR
+		array_length(centroid_ids, 1) = 0 OR
+		current_setting('turbohybrid.multivector_centroid_lite_candidate_scoring') <> 'codeword_maxsim' OR
+		stats->>'multivector_candidate_source' <> 'centroid_lite' OR
+		stats->>'multivector_exact_rerank_source' <> 'heap' OR
+		stats->>'centroid_posting_cap_strategy' <> 'score_topk_payload_sorted' OR
+		stats->>'centroid_candidate_scoring' <> 'codeword_maxsim' OR
+		stats->>'centroid_doc_codes_available' <> 'true' OR
+		(stats->>'centroid_posting_limit_per_token')::int <> 1 OR
+		(stats->>'centroid_probe_centroids_per_token')::int <> 2 OR
+		(stats->>'compact_maxsim_pairs')::int <= 0 OR
+		(stats->>'multivector_doc_graph_quantized_scores')::int <= 0 OR
+		(stats->>'multivector_exact_rerank_docs')::int <= 0 OR
+		(stats->>'multivector_exact_rerank_docs')::int <>
+			(stats->>'multivector_doc_graph_candidates')::int THEN
+		RAISE EXCEPTION 'centroid_lite codeword candidate scoring did not use compact candidates with heap rerank: exact %, compact %, stats %',
+			exact_ids, centroid_ids, stats;
+	END IF;
+
+	PERFORM set_config('turbohybrid.multivector_centroid_lite_candidate_scoring', 'doc_centroid_maxsim', true);
+	SELECT array_agg(id ORDER BY distance, id) INTO centroid_ids
+	FROM (
+		SELECT id,
+		       colbert <~> turbohybrid_query(
+			       multivector_query => query_mv,
+			       dense_k => 4,
+			       final_k => 3
+	       ) AS distance
+		FROM mv_centroid_lite_docs
+		ORDER BY colbert <~> turbohybrid_query(
+		       multivector_query => query_mv,
+		       dense_k => 4,
+		       final_k => 3
+	       )
+		LIMIT 3
+	) AS centroid_docmaxsim_results;
+	stats := turbohybrid_last_scan_stats();
+
+	IF centroid_ids IS NULL OR
+		array_length(centroid_ids, 1) = 0 OR
+		current_setting('turbohybrid.multivector_centroid_lite_candidate_scoring') <> 'doc_centroid_maxsim' OR
+		stats->>'multivector_candidate_source' <> 'centroid_lite' OR
+		stats->>'multivector_exact_rerank_source' <> 'heap' OR
+		stats->>'centroid_posting_cap_strategy' <> 'score_topk_payload_sorted' OR
+		stats->>'centroid_candidate_scoring' <> 'doc_centroid_maxsim' OR
+		(stats->>'centroid_posting_limit_per_token')::int <> 1 OR
+		(stats->>'centroid_probe_centroids_per_token')::int <> 2 OR
+		(stats->>'multivector_centroid_prerank_docs')::int <= 0 OR
+		(stats->>'compact_maxsim_pairs')::int <= 0 OR
+		(stats->>'multivector_doc_graph_quantized_scores')::int <= 0 OR
+		(stats->>'multivector_exact_rerank_docs')::int <= 0 OR
+		(stats->>'multivector_exact_rerank_docs')::int <>
+			(stats->>'multivector_doc_graph_candidates')::int THEN
+		RAISE EXCEPTION 'centroid_lite doc-centroid candidate scoring did not use bounded centroid candidates with heap rerank: exact %, compact %, stats %',
+			exact_ids, centroid_ids, stats;
+	END IF;
+	PERFORM set_config('turbohybrid.multivector_centroid_lite_candidate_scoring', 'posting_payload', true);
+	PERFORM set_config('turbohybrid.multivector_centroid_lite_probe_centroids_per_token', '1', true);
+	PERFORM set_config('turbohybrid.multivector_centroid_lite_max_postings_per_token', '0', true);
+	PERFORM set_config('turbohybrid.multivector_centroid_lite_posting_selection', 'uniform_stride', true);
 
 	PERFORM set_config('turbohybrid.multivector_centroid_lite_bitset_prefilter', 'experimental', true);
 	SELECT array_agg(id ORDER BY distance, id) INTO centroid_bitset_ids
@@ -3806,6 +3972,7 @@ BEGIN
 		stats->>'multivector_candidate_source' <> 'centroid_lite' OR
 		stats->>'multivector_doc_graph_warning' <> 'document_node_centroid_lite_prefilter' OR
 		stats->>'centroid_bitset_prefilter_enabled' <> 'true' OR
+		(stats->>'centroid_bitset_min_token_matches')::int <> 1 OR
 		(stats->>'centroid_bitset_lists_used')::int <= 0 OR
 		(stats->>'centroid_bitset_docs_set')::int <= 0 OR
 		(stats->>'centroid_bitset_docs_after_threshold')::int <= 0 OR
@@ -3816,6 +3983,9 @@ BEGIN
 			(current_setting('turbohybrid.multivector_max_accumulator_mb')::bigint * 1024 * 1024) OR
 		(stats->>'centroid_bitset_prefilter_time_us')::bigint < 0 OR
 		(stats->>'centroid_bitset_time_us')::bigint < 0 OR
+		(stats->>'centroid_score_drop_from_best')::float8 <> -1.0 OR
+		(stats->>'centroid_score_threshold')::float8 <> -1.0 OR
+		(stats->>'centroid_lists_skipped_by_threshold')::int <> 0 OR
 		stats->>'multivector_exact_rerank_source' <> 'heap' OR
 		(stats->>'multivector_doc_graph_exact_rerank_docs')::int < 3 OR
 		(stats->>'multivector_exact_rerank_docs')::int < 3 THEN
@@ -3860,6 +4030,7 @@ BEGIN
 	PERFORM set_config('turbohybrid.multivector_centroid_lite_pruning', 'off', true);
 
 	PERFORM set_config('turbohybrid.multivector_candidate_source', 'quantized_inverted_experimental', true);
+	PERFORM set_config('turbohybrid.multivector_quantized_inverted_compact_scoring', 'experimental', true);
 	SELECT array_agg(id ORDER BY distance, id) INTO quantized_ids
 	FROM (
 		SELECT id,
@@ -3883,6 +4054,7 @@ BEGIN
 		stats->>'multivector_candidate_source' <> 'quantized_inverted_experimental' OR
 		stats->>'multivector_doc_graph_warning' <> 'quantized_inverted_experimental_persisted_postings' OR
 		stats->>'multivector_plain_fallback_used' <> 'false' OR
+		(stats->>'quantized_inverted_probe_codewords_per_token')::int <> 1 OR
 		(stats->>'quantized_inverted_postings_touched')::int <= 0 OR
 		(stats->>'quantized_inverted_docs_scored')::int < 3 OR
 		(stats->>'quantized_inverted_candidates')::int < 3 OR
@@ -3896,7 +4068,6 @@ BEGIN
 			exact_ids, quantized_ids, stats;
 	END IF;
 
-	PERFORM set_config('turbohybrid.multivector_quantized_inverted_compact_scoring', 'experimental', true);
 	SELECT array_agg(id ORDER BY distance, id) INTO quantized_compact_ids
 	FROM (
 		SELECT id,
@@ -3919,6 +4090,8 @@ BEGIN
 		stats->>'multivector_candidate_source' <> 'quantized_inverted_experimental' OR
 		stats->>'multivector_doc_graph_warning' <> 'quantized_inverted_experimental_persisted_postings' OR
 		stats->>'quantized_inverted_compact_kernel' NOT IN ('scalar', 'avx2', 'avx512', 'neon') OR
+		stats->>'quantized_inverted_compact_score_source' <> 'full_doc_codeword_maxsim' OR
+		(stats->>'quantized_inverted_probe_codewords_per_token')::int <> 1 OR
 		(stats->>'quantized_inverted_compact_docs_scored')::int < 3 OR
 		(stats->>'quantized_inverted_compact_payload_bytes')::bigint <= 0 OR
 		(stats->>'quantized_inverted_compact_score_us')::bigint < 0 OR
@@ -3929,7 +4102,65 @@ BEGIN
 		RAISE EXCEPTION 'quantized_inverted_experimental compact scoring changed final exact result or missing stats: exact %, compact %, stats %',
 			exact_ids, quantized_compact_ids, stats;
 	END IF;
+	PERFORM set_config('turbohybrid.multivector_quantized_inverted_token_coverage', 'linear', true);
+	SELECT array_agg(id ORDER BY distance, id) INTO quantized_compact_ids
+	FROM (
+		SELECT id,
+		       colbert <~> turbohybrid_query(
+			       multivector_query => query_mv,
+			       dense_k => 4,
+			       final_k => 3
+	       ) AS distance
+		FROM mv_centroid_lite_docs
+		ORDER BY colbert <~> turbohybrid_query(
+		       multivector_query => query_mv,
+		       dense_k => 4,
+		       final_k => 3
+	       )
+		LIMIT 3
+	) AS quantized_compact_coverage_results;
+	stats := turbohybrid_last_scan_stats();
+
+	IF quantized_compact_ids <> exact_ids OR
+		stats->>'quantized_inverted_token_coverage_mode' <> 'linear' OR
+		(stats->>'quantized_inverted_active_query_tokens')::int <= 0 OR
+		(stats->>'quantized_inverted_token_matches_total')::int <= 0 OR
+		(stats->>'quantized_inverted_token_matches_max')::int <= 0 OR
+		stats->>'multivector_exact_rerank_source' <> 'heap' THEN
+		RAISE EXCEPTION 'quantized_inverted_experimental coverage scoring changed final exact result or missing stats: exact %, compact %, stats %',
+			exact_ids, quantized_compact_ids, stats;
+	END IF;
+	PERFORM set_config('turbohybrid.multivector_quantized_inverted_token_coverage', 'off', true);
+	PERFORM set_config('turbohybrid.multivector_quantized_inverted_min_token_matches', '1', true);
+	SELECT array_agg(id ORDER BY distance, id) INTO quantized_compact_ids
+	FROM (
+		SELECT id,
+		       colbert <~> turbohybrid_query(
+			       multivector_query => query_mv,
+			       dense_k => 4,
+			       final_k => 3
+	       ) AS distance
+		FROM mv_centroid_lite_docs
+		ORDER BY colbert <~> turbohybrid_query(
+		       multivector_query => query_mv,
+		       dense_k => 4,
+		       final_k => 3
+	       )
+		LIMIT 3
+	) AS quantized_compact_minmatch_results;
+	stats := turbohybrid_last_scan_stats();
+
+	IF quantized_compact_ids <> exact_ids OR
+		(stats->>'quantized_inverted_min_token_matches')::int <> 1 OR
+		(stats->>'quantized_inverted_token_match_filtered_docs')::int < 0 OR
+		stats->>'quantized_inverted_token_coverage_mode' <> 'off' OR
+		stats->>'multivector_exact_rerank_source' <> 'heap' THEN
+		RAISE EXCEPTION 'quantized_inverted_experimental min-token filter changed final exact result or missing stats: exact %, compact %, stats %',
+			exact_ids, quantized_compact_ids, stats;
+	END IF;
 	PERFORM set_config('turbohybrid.multivector_quantized_inverted_compact_scoring', 'off', true);
+	PERFORM set_config('turbohybrid.multivector_quantized_inverted_token_coverage', 'off', true);
+	PERFORM set_config('turbohybrid.multivector_quantized_inverted_min_token_matches', '0', true);
 END
 $$;
 DO $$
@@ -4577,12 +4808,224 @@ BEGIN
 	EXCEPTION
 		WHEN feature_not_supported THEN
 			GET STACKED DIAGNOSTICS errmsg = MESSAGE_TEXT;
-			IF errmsg NOT LIKE 'multivector_doc_storage = centroid_only only supports proxy_vector and centroid_lite%' THEN
+			IF errmsg NOT LIKE 'multivector_doc_storage = centroid_only only supports proxy_vector, centroid_lite, and compact quantized_inverted_experimental%' THEN
 				RAISE EXCEPTION 'unexpected centroid_only exact_doc_scan error: %', errmsg;
 			END IF;
 	END;
 END
 $$;
+CREATE TEMP TABLE mv_doc_centroid_only_quantized_docs AS
+SELECT * FROM mv_doc_proxy_only_docs;
+DO $$
+DECLARE
+	codebook_path text := current_setting('data_directory') || '/quantized_inverted_external_ok_codebook.txt';
+	stats jsonb;
+	scan_stats jsonb;
+	brute_ids int[];
+	quantized_ids int[];
+	query_mv turbohybrid_multivector :=
+		turbohybrid_multivector(ARRAY['[1,0]'::vector, '[0,1]'::vector]);
+	errmsg text;
+BEGIN
+	PERFORM set_config('turbohybrid.multivector_quantized_inverted_codebook', 'external', false);
+	PERFORM set_config('turbohybrid.multivector_quantized_inverted_codebook_path', codebook_path, false);
+	PERFORM set_config('turbohybrid.multivector_quantized_inverted_codebook_top_m', '1', false);
+
+	CREATE INDEX mv_doc_centroid_only_quantized_docs_idx
+	ON mv_doc_centroid_only_quantized_docs
+	USING turbohybrid (colbert multivector_cosine_turbohybrid_ops)
+	WITH (
+		quantization_bits = 4,
+		exact_storage = off,
+		multivector_graph = document_nodes,
+		multivector_doc_build_scorer = proxy,
+		multivector_proxy_encoder = normalized_mean,
+		multivector_centroids = kmeans,
+		multivector_doc_storage = centroid_only
+	);
+
+	stats := turbohybrid_index_stats('mv_doc_centroid_only_quantized_docs_idx'::regclass);
+	IF stats->>'multivector_doc_storage_kind' <> 'centroid_only' OR
+		stats->>'centroid_only_index' <> 'true' OR
+		stats->>'full_multivector_sidecar_available' <> 'false' OR
+		stats->>'centroid_sidecar_available' <> 'true' OR
+		stats->>'quantized_inverted_sidecar_available' <> 'true' OR
+		stats->>'exact_rerank_source_supported' <> 'heap' OR
+		stats->>'quantized_inverted_codebook_source' <> 'external' OR
+		stats->>'quantized_inverted_codebook_checksum' <> 'checksum_ok' THEN
+		RAISE EXCEPTION 'unexpected centroid_only compact quantized index stats: %',
+			stats;
+	END IF;
+
+	SELECT array_agg(id ORDER BY score DESC, id) INTO brute_ids
+	FROM (
+		SELECT id, turbohybrid_multivector_maxsim(query_mv, colbert) AS score
+		FROM mv_doc_centroid_only_quantized_docs
+		ORDER BY score DESC, id
+		LIMIT 4
+	) AS brute;
+
+	PERFORM set_config('enable_seqscan', 'off', true);
+	PERFORM set_config('turbohybrid.multivector_candidate_source', 'quantized_inverted_experimental', true);
+	PERFORM set_config('turbohybrid.multivector_quantized_inverted_compact_scoring', 'experimental', true);
+	PERFORM set_config('turbohybrid.multivector_quantized_inverted_posting_selection', 'score_topk', true);
+	PERFORM set_config('turbohybrid.multivector_quantized_inverted_max_postings_per_token', '8', true);
+	PERFORM set_config('turbohybrid.multivector_quantized_inverted_probe_codewords_per_token', '4', true);
+	PERFORM set_config('turbohybrid.multivector_plain_fallback', 'off', true);
+	PERFORM set_config('turbohybrid.multivector_doc_candidate_k', '4', true);
+	PERFORM set_config('turbohybrid.multivector_exact_rerank_k', '4', true);
+
+	SELECT array_agg(id ORDER BY distance, id) INTO quantized_ids
+	FROM (
+		SELECT id,
+		       colbert <~> turbohybrid_query(
+			       multivector_query => query_mv,
+			       dense_k => 4,
+			       final_k => 4
+		       ) AS distance
+		FROM mv_doc_centroid_only_quantized_docs
+		ORDER BY colbert <~> turbohybrid_query(
+			multivector_query => query_mv,
+			dense_k => 4,
+			final_k => 4
+		)
+		LIMIT 4
+	) AS quantized_results;
+	scan_stats := turbohybrid_last_scan_stats();
+
+	IF quantized_ids <> brute_ids OR
+		scan_stats->>'multivector_candidate_source' <> 'quantized_inverted_experimental' OR
+		scan_stats->>'multivector_doc_storage_kind' <> 'centroid_only' OR
+		scan_stats->>'centroid_only_index' <> 'true' OR
+		scan_stats->>'full_multivector_sidecar_available' <> 'false' OR
+		scan_stats->>'centroid_sidecar_available' <> 'true' OR
+		scan_stats->>'quantized_inverted_sidecar_available' <> 'true' OR
+		scan_stats->>'exact_rerank_source_supported' <> 'heap' OR
+		scan_stats->>'multivector_exact_rerank_source' <> 'heap' OR
+		scan_stats->>'quantized_inverted_codebook_source' <> 'external' OR
+		scan_stats->>'quantized_inverted_codebook_checksum' <> 'checksum_ok' OR
+		scan_stats->>'quantized_inverted_compact_kernel' NOT IN ('scalar', 'avx2', 'avx512', 'neon') OR
+		scan_stats->>'quantized_inverted_compact_score_source' <> 'full_doc_codeword_maxsim' OR
+		(scan_stats->>'quantized_inverted_postings_touched')::int <= 0 OR
+		(scan_stats->>'quantized_inverted_docs_scored')::int < 4 OR
+		(scan_stats->>'quantized_inverted_candidates')::int < 4 OR
+		(scan_stats->>'quantized_inverted_compact_docs_scored')::int < 4 OR
+		(scan_stats->>'quantized_inverted_compact_payload_bytes')::bigint <= 0 OR
+		(scan_stats->>'multivector_exact_rerank_heap_fetches')::int <= 0 OR
+		(scan_stats->>'multivector_exact_rerank_sidecar_bytes')::int <> 0 THEN
+		RAISE EXCEPTION 'unexpected centroid_only compact quantized scan: brute %, quantized %, stats %',
+			brute_ids, quantized_ids, scan_stats;
+	END IF;
+
+	PERFORM set_config('turbohybrid.multivector_quantized_inverted_compact_scoring', 'off', true);
+	BEGIN
+		PERFORM id
+		FROM mv_doc_centroid_only_quantized_docs
+		ORDER BY colbert <~> turbohybrid_query(
+			multivector_query => query_mv,
+			dense_k => 4,
+			final_k => 1
+		)
+		LIMIT 1;
+		RAISE EXCEPTION 'expected non-compact quantized_inverted_experimental to reject centroid_only index';
+	EXCEPTION
+		WHEN feature_not_supported THEN
+			GET STACKED DIAGNOSTICS errmsg = MESSAGE_TEXT;
+			IF errmsg NOT LIKE 'multivector_doc_storage = centroid_only only supports proxy_vector, centroid_lite, and compact quantized_inverted_experimental%' THEN
+				RAISE EXCEPTION 'unexpected centroid_only quantized error: %', errmsg;
+			END IF;
+	END;
+END
+$$;
+CREATE TEMP TABLE mv_doc_centroid_only_quantized_only_docs AS
+SELECT * FROM mv_doc_proxy_only_docs;
+DO $$
+DECLARE
+	codebook_path text := current_setting('data_directory') || '/quantized_inverted_external_ok_codebook.txt';
+	stats jsonb;
+	scan_stats jsonb;
+	quantized_ids int[];
+	query_mv turbohybrid_multivector :=
+		turbohybrid_multivector(ARRAY['[1,0]'::vector, '[0,1]'::vector]);
+BEGIN
+	PERFORM set_config('turbohybrid.multivector_quantized_inverted_codebook', 'external', false);
+	PERFORM set_config('turbohybrid.multivector_quantized_inverted_codebook_path', codebook_path, false);
+	PERFORM set_config('turbohybrid.multivector_quantized_inverted_codebook_top_m', '1', false);
+
+	CREATE INDEX mv_doc_centroid_only_quantized_only_docs_idx
+	ON mv_doc_centroid_only_quantized_only_docs
+	USING turbohybrid (colbert multivector_cosine_turbohybrid_ops)
+	WITH (
+		quantization_bits = 4,
+		exact_storage = off,
+		multivector_graph = document_nodes,
+		multivector_doc_build_scorer = proxy,
+		multivector_proxy_encoder = normalized_mean,
+		multivector_centroids = off,
+		multivector_doc_storage = centroid_only
+	);
+
+	stats := turbohybrid_index_stats('mv_doc_centroid_only_quantized_only_docs_idx'::regclass);
+	IF stats->>'multivector_doc_storage_kind' <> 'centroid_only' OR
+		stats->>'centroid_only_index' <> 'true' OR
+		stats->>'full_multivector_sidecar_available' <> 'false' OR
+		stats->>'centroid_sidecar_available' <> 'false' OR
+		stats->>'quantized_inverted_sidecar_available' <> 'true' OR
+		stats->>'exact_rerank_source_supported' <> 'heap' OR
+		stats->>'quantized_inverted_codebook_source' <> 'external' THEN
+		RAISE EXCEPTION 'unexpected quantized-only centroid_only index stats: %',
+			stats;
+	END IF;
+
+	PERFORM set_config('enable_seqscan', 'off', true);
+	PERFORM set_config('turbohybrid.multivector_candidate_source', 'quantized_inverted_experimental', true);
+	PERFORM set_config('turbohybrid.multivector_quantized_inverted_compact_scoring', 'experimental', true);
+	PERFORM set_config('turbohybrid.multivector_quantized_inverted_posting_selection', 'score_topk', true);
+	PERFORM set_config('turbohybrid.multivector_quantized_inverted_max_postings_per_token', '8', true);
+	PERFORM set_config('turbohybrid.multivector_quantized_inverted_probe_codewords_per_token', '4', true);
+	PERFORM set_config('turbohybrid.multivector_plain_fallback', 'off', true);
+	PERFORM set_config('turbohybrid.multivector_doc_candidate_k', '4', true);
+	PERFORM set_config('turbohybrid.multivector_exact_rerank_k', '4', true);
+
+	SELECT array_agg(id ORDER BY distance, id) INTO quantized_ids
+	FROM (
+		SELECT id,
+		       colbert <~> turbohybrid_query(
+			       multivector_query => query_mv,
+			       dense_k => 4,
+			       final_k => 4
+		       ) AS distance
+		FROM mv_doc_centroid_only_quantized_only_docs
+		ORDER BY colbert <~> turbohybrid_query(
+			multivector_query => query_mv,
+			dense_k => 4,
+			final_k => 4
+		)
+		LIMIT 4
+	) AS quantized_results;
+	scan_stats := turbohybrid_last_scan_stats();
+
+	IF cardinality(quantized_ids) <> 4 OR
+		scan_stats->>'multivector_candidate_source' <> 'quantized_inverted_experimental' OR
+		scan_stats->>'multivector_doc_storage_kind' <> 'centroid_only' OR
+		scan_stats->>'centroid_sidecar_available' <> 'false' OR
+		scan_stats->>'quantized_inverted_sidecar_available' <> 'true' OR
+		scan_stats->>'multivector_exact_rerank_source' <> 'heap' OR
+		(scan_stats->>'quantized_inverted_postings_touched')::int <= 0 OR
+		(scan_stats->>'quantized_inverted_candidates')::int < 4 THEN
+		RAISE EXCEPTION 'unexpected quantized-only centroid_only scan: ids %, stats %',
+			quantized_ids, scan_stats;
+	END IF;
+END
+$$;
+RESET turbohybrid.multivector_quantized_inverted_codebook;
+RESET turbohybrid.multivector_quantized_inverted_codebook_path;
+RESET turbohybrid.multivector_quantized_inverted_codebook_top_m;
+RESET turbohybrid.multivector_quantized_inverted_compact_scoring;
+RESET turbohybrid.multivector_quantized_inverted_posting_selection;
+RESET turbohybrid.multivector_quantized_inverted_max_postings_per_token;
+RESET turbohybrid.multivector_quantized_inverted_min_token_matches;
+RESET turbohybrid.multivector_quantized_inverted_probe_codewords_per_token;
 CREATE TEMP TABLE mv_doc_f16_docs AS
 SELECT * FROM mv_doc_proxy_only_docs;
 CREATE INDEX mv_doc_f16_docs_idx ON mv_doc_f16_docs

@@ -912,6 +912,7 @@ pgturbohybrid_index_stats(PG_FUNCTION_ARGS)
 	bool		centroidOnlyIndex;
 	bool		fullMultivectorSidecarAvailable;
 	bool		centroidSidecarAvailable;
+	bool		centroidDocCodesAvailable;
 	bool		quantizedInvertedSidecarAvailable;
 	int			effectiveMultivectorDocStorage;
 	const char *exactRerankSourceSupported;
@@ -955,6 +956,9 @@ pgturbohybrid_index_stats(PG_FUNCTION_ARGS)
 	centroidSidecarAvailable =
 		(meta.tqMultivectorDocMapFlags &
 		 PGTURBOHYBRID_GRAPH_MULTIVECTOR_DOCMAP_FLAG_CENTROIDS) != 0;
+	centroidDocCodesAvailable =
+		(meta.tqMultivectorDocMapFlags &
+		 PGTURBOHYBRID_GRAPH_MULTIVECTOR_DOCMAP_FLAG_CENTROID_DOC_CODES) != 0;
 	quantizedInvertedSidecarAvailable =
 		(meta.tqMultivectorDocMapFlags &
 		 PGTURBOHYBRID_GRAPH_MULTIVECTOR_DOCMAP_FLAG_QUANTIZED_POSTINGS) != 0 &&
@@ -1083,6 +1087,9 @@ pgturbohybrid_index_stats(PG_FUNCTION_ARGS)
 	PgturbohybridIndexStatsJsonbAddBool(&jsonState,
 										"centroid_sidecar_available",
 										centroidSidecarAvailable);
+	PgturbohybridIndexStatsJsonbAddBool(&jsonState,
+										"centroid_doc_codes_available",
+										centroidDocCodesAvailable);
 	PgturbohybridIndexStatsJsonbAddBool(&jsonState,
 										"quantized_inverted_sidecar_available",
 										quantizedInvertedSidecarAvailable);

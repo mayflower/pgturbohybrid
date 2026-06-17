@@ -75,6 +75,20 @@ PgturbohybridGraphInsertMultiVectorDocMapCentroidTupleMaxCount(void)
 	return (uint16) Max(1, Min((Size) UINT16_MAX, maxCount));
 }
 
+static uint16
+PgturbohybridGraphInsertMultiVectorDocMapCentroidDocCodeTupleMaxCount(void)
+{
+	Size		header = MAXALIGN(offsetof(PgturbohybridGraphMultiVectorDocMapCentroidDocCodeTupleData,
+										   codes));
+	Size		usable = PgturbohybridGraphDocMapMaxItemSize();
+	Size		maxCount;
+
+	if (header >= usable)
+		return 1;
+	maxCount = (usable - header) / sizeof(uint32);
+	return (uint16) Max(1, Min((Size) UINT16_MAX, maxCount));
+}
+
 static uint32
 PgturbohybridGraphInsertMultiVectorCentroidCodeword(const PgturbohybridMultiVector *mv,
 													int32 token)
@@ -1284,12 +1298,12 @@ PgturbohybridGraphAppendInsertedMultiVectorDocMap(Relation index,
 		elog(ERROR, "document-node multivector insert requires document vector sidecar data");
 	appendCentroidSidecar =
 		!proxyOnlyDocMap &&
-		centroidMode == PGTURBOHYBRID_MULTIVECTOR_CENTROIDS_KMEANS &&
-		(meta->tqMultivectorDocCount == 0 ||
-		 ((docMapFlags &
+		(((docMapFlags &
 		   PGTURBOHYBRID_GRAPH_MULTIVECTOR_DOCMAP_FLAG_CENTROIDS) != 0 &&
 		  (docMapFlags &
-		   PGTURBOHYBRID_GRAPH_MULTIVECTOR_DOCMAP_FLAG_CENTROID_POSTINGS) != 0));
+		   PGTURBOHYBRID_GRAPH_MULTIVECTOR_DOCMAP_FLAG_CENTROID_POSTINGS) != 0) ||
+		 (meta->tqMultivectorDocCount == 0 &&
+		  centroidMode == PGTURBOHYBRID_MULTIVECTOR_CENTROIDS_KMEANS));
 	appendQuantizedPostings =
 		documentNodes &&
 		!proxyOnlyDocMap &&
@@ -1354,88 +1368,91 @@ PgturbohybridGraphAppendInsertedMultiVectorDocMap(Relation index,
 
 	if (documentNodes && !proxyOnlyDocMap)
 	{
-		uint16		maxVectorCount =
-			PgturbohybridGraphInsertMultiVectorDocMapVectorTupleMaxCount();
-		Size		totalFloats =
-			PgturbohybridMultiVectorFloatCount(mv->count, mv->dim);
-
-		docMapFlags |= PGTURBOHYBRID_GRAPH_MULTIVECTOR_DOCMAP_FLAG_DOC_VECTORS;
-		for (uint32 startFloat = 0; startFloat < totalFloats;)
+		if ((docMapFlags &
+			 PGTURBOHYBRID_GRAPH_MULTIVECTOR_DOCMAP_FLAG_DOC_VECTORS) != 0)
 		{
-			uint16		count =
-				(uint16) Min((Size) maxVectorCount,
-							 totalFloats - (Size) startFloat);
-			Size		tupleSize =
-				PgturbohybridGraphMultiVectorDocMapVectorTupleSize(count);
-			PgturbohybridGraphMultiVectorDocMapVectorTuple tuple =
-				palloc0(tupleSize);
+			uint16		maxVectorCount =
+				PgturbohybridGraphInsertMultiVectorDocMapVectorTupleMaxCount();
+			Size		totalFloats =
+				PgturbohybridMultiVectorFloatCount(mv->count, mv->dim);
 
-			if ((uint64) meta->tqMultivectorDocMapBytes + nodeTupleSize +
-				docTupleSize + vectorBytes + tupleSize > UINT32_MAX)
-				ereport(ERROR,
-						(errcode(ERRCODE_PROGRAM_LIMIT_EXCEEDED),
-						 errmsg("pgturbohybrid multivector docmap sidecar is too large")));
-			tuple->type =
-				PGTURBOHYBRID_GRAPH_MULTIVECTOR_DOCMAP_VECTOR_TUPLE_TYPE;
-			tuple->version = PGTURBOHYBRID_GRAPH_MULTIVECTOR_DOCMAP_VERSION;
-			tuple->count = count;
-			tuple->magic = PGTURBOHYBRID_GRAPH_MULTIVECTOR_DOCMAP_MAGIC;
-			tuple->docId = docId;
-			tuple->startFloat = startFloat;
-			memcpy(tuple->values, mv->values + startFloat,
-				   sizeof(float) * count);
-			(void) PgturbohybridGraphAppendTupleWithCursor(index,
-											&docMapStart,
-											PGTURBOHYBRID_GRAPH_PAGE_KIND_MULTIVECTOR_DOCMAP,
-											(Item) tuple, tupleSize,
-											PGTURBOHYBRID_GRAPH_GRAPH_OP_ELEMENT_INSERT,
-											&insertBlkno,
-											&tqGraphDocMapAppendCursor);
-			vectorBytes += (uint32) tupleSize;
-			pfree(tuple);
-			startFloat += count;
-		}
-		if (PgturbohybridMultiVectorHasContexts(mv))
-		{
-			int32		contextCount =
-				PgturbohybridMultiVectorContextCount(mv);
-			const int32 *offsets =
-				PgturbohybridMultiVectorContextOffsets(mv);
-			const int32 *fields = PgturbohybridMultiVectorContextFields(mv);
-			bool		hasFields = fields != NULL;
-			Size		tupleSize =
-				PgturbohybridGraphMultiVectorDocMapContextTupleSize((uint16) contextCount,
-																	hasFields);
-			PgturbohybridGraphMultiVectorDocMapContextTuple tuple =
-				palloc0(tupleSize);
+			for (uint32 startFloat = 0; startFloat < totalFloats;)
+			{
+				uint16		count =
+					(uint16) Min((Size) maxVectorCount,
+								 totalFloats - (Size) startFloat);
+				Size		tupleSize =
+					PgturbohybridGraphMultiVectorDocMapVectorTupleSize(count);
+				PgturbohybridGraphMultiVectorDocMapVectorTuple tuple =
+					palloc0(tupleSize);
 
-			if ((uint64) meta->tqMultivectorDocMapBytes + nodeTupleSize +
-				docTupleSize + vectorBytes + tupleSize > UINT32_MAX)
-				ereport(ERROR,
-						(errcode(ERRCODE_PROGRAM_LIMIT_EXCEEDED),
-						 errmsg("pgturbohybrid multivector docmap sidecar is too large")));
-			tuple->type =
-				PGTURBOHYBRID_GRAPH_MULTIVECTOR_DOCMAP_CONTEXT_TUPLE_TYPE;
-			tuple->version = PGTURBOHYBRID_GRAPH_MULTIVECTOR_DOCMAP_VERSION;
-			tuple->contextCount = (uint16) contextCount;
-			tuple->magic = PGTURBOHYBRID_GRAPH_MULTIVECTOR_DOCMAP_MAGIC;
-			tuple->docId = docId;
-			tuple->flags = mv->flags;
-			memcpy(tuple->values, offsets,
-				   sizeof(int32) * (Size) contextCount);
-			if (hasFields)
-				memcpy(tuple->values + contextCount, fields,
+				if ((uint64) meta->tqMultivectorDocMapBytes + nodeTupleSize +
+					docTupleSize + vectorBytes + tupleSize > UINT32_MAX)
+					ereport(ERROR,
+							(errcode(ERRCODE_PROGRAM_LIMIT_EXCEEDED),
+							 errmsg("pgturbohybrid multivector docmap sidecar is too large")));
+				tuple->type =
+					PGTURBOHYBRID_GRAPH_MULTIVECTOR_DOCMAP_VECTOR_TUPLE_TYPE;
+				tuple->version = PGTURBOHYBRID_GRAPH_MULTIVECTOR_DOCMAP_VERSION;
+				tuple->count = count;
+				tuple->magic = PGTURBOHYBRID_GRAPH_MULTIVECTOR_DOCMAP_MAGIC;
+				tuple->docId = docId;
+				tuple->startFloat = startFloat;
+				memcpy(tuple->values, mv->values + startFloat,
+					   sizeof(float) * count);
+				(void) PgturbohybridGraphAppendTupleWithCursor(index,
+												&docMapStart,
+												PGTURBOHYBRID_GRAPH_PAGE_KIND_MULTIVECTOR_DOCMAP,
+												(Item) tuple, tupleSize,
+												PGTURBOHYBRID_GRAPH_GRAPH_OP_ELEMENT_INSERT,
+												&insertBlkno,
+												&tqGraphDocMapAppendCursor);
+				vectorBytes += (uint32) tupleSize;
+				pfree(tuple);
+				startFloat += count;
+			}
+			if (PgturbohybridMultiVectorHasContexts(mv))
+			{
+				int32		contextCount =
+					PgturbohybridMultiVectorContextCount(mv);
+				const int32 *offsets =
+					PgturbohybridMultiVectorContextOffsets(mv);
+				const int32 *fields = PgturbohybridMultiVectorContextFields(mv);
+				bool		hasFields = fields != NULL;
+				Size		tupleSize =
+					PgturbohybridGraphMultiVectorDocMapContextTupleSize((uint16) contextCount,
+																		hasFields);
+				PgturbohybridGraphMultiVectorDocMapContextTuple tuple =
+					palloc0(tupleSize);
+
+				if ((uint64) meta->tqMultivectorDocMapBytes + nodeTupleSize +
+					docTupleSize + vectorBytes + tupleSize > UINT32_MAX)
+					ereport(ERROR,
+							(errcode(ERRCODE_PROGRAM_LIMIT_EXCEEDED),
+							 errmsg("pgturbohybrid multivector docmap sidecar is too large")));
+				tuple->type =
+					PGTURBOHYBRID_GRAPH_MULTIVECTOR_DOCMAP_CONTEXT_TUPLE_TYPE;
+				tuple->version = PGTURBOHYBRID_GRAPH_MULTIVECTOR_DOCMAP_VERSION;
+				tuple->contextCount = (uint16) contextCount;
+				tuple->magic = PGTURBOHYBRID_GRAPH_MULTIVECTOR_DOCMAP_MAGIC;
+				tuple->docId = docId;
+				tuple->flags = mv->flags;
+				memcpy(tuple->values, offsets,
 					   sizeof(int32) * (Size) contextCount);
-			(void) PgturbohybridGraphAppendTupleWithCursor(index,
-											&docMapStart,
-											PGTURBOHYBRID_GRAPH_PAGE_KIND_MULTIVECTOR_DOCMAP,
-											(Item) tuple, tupleSize,
-											PGTURBOHYBRID_GRAPH_GRAPH_OP_ELEMENT_INSERT,
-											&insertBlkno,
-											&tqGraphDocMapAppendCursor);
-			vectorBytes += (uint32) tupleSize;
-			docMapFlags |= PGTURBOHYBRID_GRAPH_MULTIVECTOR_DOCMAP_FLAG_CONTEXTS;
-			pfree(tuple);
+				if (hasFields)
+					memcpy(tuple->values + contextCount, fields,
+						   sizeof(int32) * (Size) contextCount);
+				(void) PgturbohybridGraphAppendTupleWithCursor(index,
+												&docMapStart,
+												PGTURBOHYBRID_GRAPH_PAGE_KIND_MULTIVECTOR_DOCMAP,
+												(Item) tuple, tupleSize,
+												PGTURBOHYBRID_GRAPH_GRAPH_OP_ELEMENT_INSERT,
+												&insertBlkno,
+												&tqGraphDocMapAppendCursor);
+				vectorBytes += (uint32) tupleSize;
+				docMapFlags |= PGTURBOHYBRID_GRAPH_MULTIVECTOR_DOCMAP_FLAG_CONTEXTS;
+				pfree(tuple);
+			}
 		}
 		if (appendCentroidSidecar)
 		{
@@ -1501,6 +1518,47 @@ PgturbohybridGraphAppendInsertedMultiVectorDocMap(Relation index,
 				pfree(tuple);
 				startFloat += count;
 			}
+			for (uint32 startCode = 0;
+				 startCode < (uint32) centroids->count;)
+			{
+				uint16		maxCodeCount =
+					PgturbohybridGraphInsertMultiVectorDocMapCentroidDocCodeTupleMaxCount();
+				uint16		count =
+					(uint16) Min((uint32) maxCodeCount,
+								 (uint32) centroids->count - startCode);
+				Size		tupleSize =
+					PgturbohybridGraphMultiVectorDocMapCentroidDocCodeTupleSize(count);
+				PgturbohybridGraphMultiVectorDocMapCentroidDocCodeTuple tuple =
+					palloc0(tupleSize);
+
+				if ((uint64) meta->tqMultivectorDocMapBytes + nodeTupleSize +
+					docTupleSize + vectorBytes + tupleSize > UINT32_MAX)
+					ereport(ERROR,
+							(errcode(ERRCODE_PROGRAM_LIMIT_EXCEEDED),
+							 errmsg("pgturbohybrid multivector docmap sidecar is too large")));
+				tuple->type =
+					PGTURBOHYBRID_GRAPH_MULTIVECTOR_DOCMAP_CENTROID_DOC_CODE_TUPLE_TYPE;
+				tuple->version = PGTURBOHYBRID_GRAPH_MULTIVECTOR_DOCMAP_VERSION;
+				tuple->count = count;
+				tuple->magic = PGTURBOHYBRID_GRAPH_MULTIVECTOR_DOCMAP_MAGIC;
+				tuple->docId = docId;
+				tuple->codebookSize = (uint32) centroids->dim * 2U;
+				tuple->startCode = startCode;
+				for (uint16 i = 0; i < count; i++)
+					tuple->codes[i] =
+						PgturbohybridGraphInsertMultiVectorCentroidCodeword(centroids,
+																			(int32) startCode + i);
+				(void) PgturbohybridGraphAppendTupleWithCursor(index,
+											&docMapStart,
+											PGTURBOHYBRID_GRAPH_PAGE_KIND_MULTIVECTOR_DOCMAP,
+											(Item) tuple, tupleSize,
+											PGTURBOHYBRID_GRAPH_GRAPH_OP_ELEMENT_INSERT,
+											&insertBlkno,
+											&tqGraphDocMapAppendCursor);
+				vectorBytes += (uint32) tupleSize;
+				pfree(tuple);
+				startCode += count;
+			}
 			for (int32 centroid = 0; centroid < centroids->count; centroid++)
 			{
 				Size		tupleSize =
@@ -1524,7 +1582,7 @@ PgturbohybridGraphAppendInsertedMultiVectorDocMap(Relation index,
 				tuple->startOffset = 0;
 				tuple->entries[0].docId = docId;
 				tuple->entries[0].centroidOrdinal = (uint16) centroid;
-				tuple->entries[0].unused = 0;
+				tuple->entries[0].scorePayload = 0;
 				(void) PgturbohybridGraphAppendTupleWithCursor(index,
 											&docMapStart,
 											PGTURBOHYBRID_GRAPH_PAGE_KIND_MULTIVECTOR_DOCMAP,
@@ -1538,6 +1596,8 @@ PgturbohybridGraphAppendInsertedMultiVectorDocMap(Relation index,
 			docMapFlags |= PGTURBOHYBRID_GRAPH_MULTIVECTOR_DOCMAP_FLAG_CENTROIDS;
 			docMapFlags |=
 				PGTURBOHYBRID_GRAPH_MULTIVECTOR_DOCMAP_FLAG_CENTROID_POSTINGS;
+			docMapFlags |=
+				PGTURBOHYBRID_GRAPH_MULTIVECTOR_DOCMAP_FLAG_CENTROID_DOC_CODES;
 			if (centroids != mv)
 				pfree(centroids);
 		}

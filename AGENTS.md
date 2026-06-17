@@ -22,6 +22,30 @@
   `nix --extra-experimental-features 'nix-command flakes' develop`
 - If running commands non-interactively, wrap them with:
   `nix --extra-experimental-features 'nix-command flakes' develop --command ...`
+- For iterative work, use one persistent `nix develop` shell and keep using it.
+  Before starting a new validation or benchmark command, first check whether a
+  suitable dev shell is already running in the current session and reuse it.
+  Do not repeatedly wrap every validation or benchmark command in a fresh
+  `nix develop --command`; that rebuilds or re-materializes the dev closure and
+  wastes time.
+- At the start of a work session, verify the persistent shell once with
+  `echo "$IN_NIX_SHELL"` and `pg_config --version`, then run subsequent
+  commands directly inside that shell.
+- For Python-only or benchmark-harness-only edits, do not refresh the Nix shell.
+  Reuse the existing shell and run the Python self-checks or benchmark command
+  directly.
+- For long benchmark sessions, keep PostgreSQL and the benchmark shell alive
+  across follow-up prompts. Do not rediscover the environment, recreate the
+  shell, or restart the cluster unless the previous shell is gone, C extension
+  code changed, or the user explicitly asks for a clean environment.
+- For C extension changes, the running PostgreSQL process may keep the old
+  shared library mapped. Refresh the Nix shell once so the dirty source is
+  rebuilt into the flake-provided PostgreSQL-with-extensions wrapper, then
+  restart/reset the dev cluster before SQL validation. Do not keep rediscovering
+  this workflow each turn.
+- Do not run plain `make install` against the flake `PG_CONFIG`; it tries to
+  install into the immutable Nix store and fails with permission errors. Use the
+  flake helper commands from the refreshed shell instead.
 - Prefer the flake helper commands inside the dev shell:
   - `th-pg-init` to initialize/start the local PostgreSQL cluster.
   - `th-installcheck` for SQL regression tests.

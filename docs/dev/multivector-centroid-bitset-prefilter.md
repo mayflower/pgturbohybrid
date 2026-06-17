@@ -75,30 +75,57 @@ whether it can be returned.
 The first guarded slice adds:
 
 ```sql
+SET turbohybrid.multivector_centroid_lite_posting_selection = score_topk;
+SET turbohybrid.multivector_centroid_lite_probe_centroids_per_token = 4;
+SET turbohybrid.multivector_centroid_lite_score_threshold = 0.0;
 SET turbohybrid.multivector_centroid_lite_bitset_prefilter = experimental;
+SET turbohybrid.multivector_centroid_lite_bitset_min_token_matches = 2;
 ```
 
 Default is `off`.
 
-In `experimental` mode the centroid-lite scan builds a scan-local bitset while
-walking the existing posting lists. The bitset records the posting-union document
-set, popcounts the scan-local bitset to expose candidate cardinality after the
-current threshold, and keeps candidate admission conservative for this first
-prototype. Therefore:
+In `score_topk` mode the centroid-lite scan probes centroid lists and, on
+freshly built indexes, reads their payload-sorted posting prefixes instead of
+sampling arbitrary postings. It scores retained candidate documents with
+compact deterministic query-centroid MaxSim before exact heap MaxSim rerank.
+The experimental
+`turbohybrid.multivector_centroid_lite_candidate_scoring = codeword_maxsim`
+variant reports that scoring explicitly as a PLAID-style codeword MaxSim over
+selected centroid/codeword matches and does not load the document-centroid
+sidecar. The stronger but slower
+`turbohybrid.multivector_centroid_lite_candidate_scoring = doc_centroid_maxsim`
+variant uses the persisted document-centroid sidecar to pre-rank touched
+documents with approximate full-MaxSim over document centroids. This remains a
+scan-time admission scorer: it does not change the persisted bitset proposal
+and it does not replace exact heap MaxSim final ordering.
+The threshold is applied before broad document touching; the retained
+approximate pool is bounded by the normal document candidate budget. The
+relative `multivector_centroid_lite_score_drop_from_best` filter serves the
+same bounded-probe purpose by keeping only centroid lists near the best
+per-token codeword score, and benchmark focus rows apply both filters to the
+compact `codeword_maxsim` scorer as well as the stronger `doc_centroid_maxsim`
+rescoring path. In
+`experimental` bitset mode the scan builds a scan-local bitset while walking
+the selected posting lists. The bitset records the posting document set,
+popcounts it, and can require a configurable minimum number of matched
+query-token lists before a document reaches the candidate heap. Therefore:
 
 - no persisted format changes,
 - no default behavior change,
 - no candidate-order change,
 - final ranking remains exact MaxSim over retained documents.
 
-The purpose is to measure bitset memory and bookkeeping cost before deciding
-whether a persisted compressed bitset sidecar is worth building.
+The purpose is to measure whether bounded centroid probing, compact posting
+scoring, and scan-local bitsets reduce broad posting/doc touches enough to
+justify a future persisted compressed bitset or posting-block sidecar. Such a
+future format would need explicit versioning and REINDEX guidance.
 
 ## Stats
 
 `turbohybrid_last_scan_stats()` reports:
 
 - `centroid_bitset_prefilter_enabled`
+- `centroid_bitset_min_token_matches`
 - `centroid_bitset_lists_used`
 - `centroid_bitset_docs_set`
 - `centroid_bitset_docs_after_threshold`
@@ -106,6 +133,11 @@ whether a persisted compressed bitset sidecar is worth building.
 - `centroid_bitset_time_us`
 - `centroid_bitset_prefilter_time_us` (compatibility alias)
 - `centroid_bitset_memory_bytes`
+- `centroid_probe_centroids_per_token`
+- `centroid_postings_selected`
+- `centroid_postings_skipped`
+- `centroid_score_threshold`
+- `centroid_lists_skipped_by_threshold`
 
 Benchmarks should compare these with:
 
@@ -122,6 +154,7 @@ Do not graduate this feature without evidence that:
 
 - the bitset stage reduces documents/postings reaching exact rerank or a later
   safe bound,
+- compact posting scoring improves admission at the same posting budget,
 - exhaustive-budget final top-k still matches `exact_doc_scan`,
 - memory stays bounded for x00k-scale corpora,
 - a persisted format, if added, is explicitly versioned and guarded,
