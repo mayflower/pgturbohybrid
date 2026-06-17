@@ -194,14 +194,35 @@ Vector	   *PgturbohybridMultiVectorBuildQueryProxyVector(const PgturbohybridMult
 														  int encoder,
 														  MemoryContext ctx);
 double		TqDotProductF32Scalar(const float *a, const float *b, int32 dim);
+typedef void (*TqDotProductF32BlockFunc) (const float *queryValues,
+										  const float *docValues,
+										  int32 dim,
+										  int32 blockCount,
+										  double *dots);
+TqDotProductF32BlockFunc TqResolveDotProductF32BlockKernel(void);
+void		TqDotProductF32BlockAuto(const float *queryValues,
+									   const float *docValues,
+									   int32 dim,
+									   int32 blockCount,
+									   double *dots);
 typedef int64 (*TqCompactCodeScoreFunc) (const int16 *queryCodes,
 										 const int16 *docCodes,
 										 int32 count);
+typedef void (*TqCompactCodeScoreBatchFunc) (int16 queryCode,
+											 const int16 *docCodes,
+											 int32 count,
+											 int64 *scores);
 int64		TqCompactCodeScoreScalar(const int16 *queryCodes,
 									 const int16 *docCodes,
 									 int32 count);
+void		TqCompactCodeScoreBatchScalar(int16 queryCode,
+										   const int16 *docCodes,
+										   int32 count,
+										   int64 *scores);
 TqCompactCodeScoreFunc TqResolveCompactCodeScoreKernel(const char *forceKernel);
 const char *TqCompactCodeScoreKernelName(TqCompactCodeScoreFunc func);
+TqCompactCodeScoreBatchFunc TqResolveCompactCodeScoreBatchKernel(const char *forceKernel);
+const char *TqCompactCodeScoreBatchKernelName(TqCompactCodeScoreBatchFunc func);
 double		TqMultiVectorMaxSimScalar(const PgturbohybridMultiVector *query,
 									   const PgturbohybridMultiVector *doc);
 double		TqMultiVectorMaxSimBlockedScalar(const PgturbohybridMultiVector *query,

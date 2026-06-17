@@ -176,11 +176,6 @@ typedef struct PgturbohybridLearnedProjectionWeights
 static PgturbohybridLearnedProjectionWeights *pgturbohybrid_learned_projection_cache = NULL;
 
 typedef double (*TqDotProductF32Func) (const float *a, const float *b, int32 dim);
-typedef void (*TqDotProductF32BlockFunc) (const float *queryValues,
-										  const float *docValues,
-										  int32 dim,
-										  int32 blockCount,
-										  double *dots);
 typedef double (*TqMultiVectorMaxSimFunc) (const PgturbohybridMultiVector *query,
 										   const PgturbohybridMultiVector *doc);
 static double TqMultiVectorSymmetricMaxSimAverageWithDotUnchecked(const PgturbohybridMultiVector *a,
@@ -2179,6 +2174,36 @@ TqDotProductF32BlockScalar(const float *queryValues, const float *docValues,
 	}
 }
 
+TqDotProductF32BlockFunc
+TqResolveDotProductF32BlockKernel(void)
+{
+	if (pgturbohybrid_dense_exact_simd_force == PGTURBOHYBRID_EXACT_SIMD_FORCE_SCALAR)
+		return TqDotProductF32BlockScalar;
+
+#if PGTURBOHYBRID_MULTIVECTOR_COMPILE_AVX512F
+	if (TqMultiVectorAvx512fAvailable())
+		return TqDotProductF32BlockAvx512f;
+#endif
+#if PGTURBOHYBRID_MULTIVECTOR_COMPILE_AVX2
+	if (TqMultiVectorAvx2Available())
+		return TqDotProductF32BlockAvx2;
+#endif
+#if PGTURBOHYBRID_MULTIVECTOR_COMPILE_NEON
+	return TqDotProductF32BlockNeon;
+#endif
+	return TqDotProductF32BlockScalar;
+}
+
+void
+TqDotProductF32BlockAuto(const float *queryValues, const float *docValues,
+						 int32 dim, int32 blockCount, double *dots)
+{
+	Assert(blockCount > 0 &&
+		   blockCount <= PGTURBOHYBRID_MULTIVECTOR_BLOCKED_SCALAR_Q);
+	TqResolveDotProductF32BlockKernel()(queryValues, docValues, dim, blockCount,
+										dots);
+}
+
 double
 TqMultiVectorMaxSimScalar(const PgturbohybridMultiVector *query,
 						  const PgturbohybridMultiVector *doc)
@@ -2403,13 +2428,32 @@ TqCompactCodeScoreScalar(const int16 *queryCodes, const int16 *docCodes,
 	return score;
 }
 
+void
+TqCompactCodeScoreBatchScalar(int16 queryCode, const int16 *docCodes,
+							  int32 count, int64 *scores)
+{
+	for (int32 i = 0; i < count; i++)
+		scores[i] = (int64) queryCode * (int64) docCodes[i];
+}
+
 #if PGTURBOHYBRID_MULTIVECTOR_COMPILE_AVX2
+static inline int64 PGTURBOHYBRID_MULTIVECTOR_AVX2_TARGET
+TqCompactCodeHsum256Epi32(__m256i values)
+{
+	__m128i		low = _mm256_castsi256_si128(values);
+	__m128i		high = _mm256_extracti128_si256(values, 1);
+	__m128i		sum = _mm_add_epi32(low, high);
+
+	sum = _mm_hadd_epi32(sum, sum);
+	sum = _mm_hadd_epi32(sum, sum);
+	return (int64) _mm_cvtsi128_si32(sum);
+}
+
 static int64 PGTURBOHYBRID_MULTIVECTOR_AVX2_TARGET
 TqCompactCodeScoreAvx2(const int16 *queryCodes, const int16 *docCodes,
 					   int32 count)
 {
 	int32		i = 0;
-	int32		tmp[8];
 	int64		score = 0;
 
 	for (; i + 16 <= count; i += 16)
@@ -2418,14 +2462,35 @@ TqCompactCodeScoreAvx2(const int16 *queryCodes, const int16 *docCodes,
 		__m256i		d = _mm256_loadu_si256((const __m256i *) (docCodes + i));
 		__m256i		prod = _mm256_madd_epi16(q, d);
 
-		_mm256_storeu_si256((__m256i *) tmp, prod);
-		for (int lane = 0; lane < 8; lane++)
-			score += (int64) tmp[lane];
+		score += TqCompactCodeHsum256Epi32(prod);
 	}
 
 	for (; i < count; i++)
 		score += (int64) queryCodes[i] * (int64) docCodes[i];
 	return score;
+}
+
+static void PGTURBOHYBRID_MULTIVECTOR_AVX2_TARGET
+TqCompactCodeScoreBatchAvx2(int16 queryCode, const int16 *docCodes,
+							int32 count, int64 *scores)
+{
+	__m256i		q = _mm256_set1_epi32((int32) queryCode);
+	int32		i = 0;
+	int32		tmp[8];
+
+	for (; i + 8 <= count; i += 8)
+	{
+		__m128i		packed = _mm_loadu_si128((const __m128i *) (docCodes + i));
+		__m256i		d = _mm256_cvtepi16_epi32(packed);
+		__m256i		prod = _mm256_mullo_epi32(q, d);
+
+		_mm256_storeu_si256((__m256i *) tmp, prod);
+		for (int lane = 0; lane < 8; lane++)
+			scores[i + lane] = (int64) tmp[lane];
+	}
+
+	for (; i < count; i++)
+		scores[i] = (int64) queryCode * (int64) docCodes[i];
 }
 #endif
 
@@ -2448,7 +2513,6 @@ TqCompactCodeScoreAvx512(const int16 *queryCodes, const int16 *docCodes,
 						 int32 count)
 {
 	int32		i = 0;
-	int32		tmp[16];
 	int64		score = 0;
 
 	for (; i + 32 <= count; i += 32)
@@ -2457,14 +2521,35 @@ TqCompactCodeScoreAvx512(const int16 *queryCodes, const int16 *docCodes,
 		__m512i		d = _mm512_loadu_si512((const void *) (docCodes + i));
 		__m512i		prod = _mm512_madd_epi16(q, d);
 
-		_mm512_storeu_si512((void *) tmp, prod);
-		for (int lane = 0; lane < 16; lane++)
-			score += (int64) tmp[lane];
+		score += (int64) _mm512_reduce_add_epi32(prod);
 	}
 
 	for (; i < count; i++)
 		score += (int64) queryCodes[i] * (int64) docCodes[i];
 	return score;
+}
+
+static void PGTURBOHYBRID_MULTIVECTOR_AVX512BW_TARGET
+TqCompactCodeScoreBatchAvx512(int16 queryCode, const int16 *docCodes,
+							  int32 count, int64 *scores)
+{
+	__m512i		q = _mm512_set1_epi32((int32) queryCode);
+	int32		i = 0;
+	int32		tmp[16];
+
+	for (; i + 16 <= count; i += 16)
+	{
+		__m256i		packed = _mm256_loadu_si256((const __m256i *) (docCodes + i));
+		__m512i		d = _mm512_cvtepi16_epi32(packed);
+		__m512i		prod = _mm512_mullo_epi32(q, d);
+
+		_mm512_storeu_si512((void *) tmp, prod);
+		for (int lane = 0; lane < 16; lane++)
+			scores[i + lane] = (int64) tmp[lane];
+	}
+
+	for (; i < count; i++)
+		scores[i] = (int64) queryCode * (int64) docCodes[i];
 }
 #endif
 
@@ -2473,7 +2558,6 @@ static int64
 TqCompactCodeScoreNeon(const int16 *queryCodes, const int16 *docCodes,
 					   int32 count)
 {
-	int32		tmp[4];
 	int64		score = 0;
 	int32		i = 0;
 
@@ -2484,17 +2568,39 @@ TqCompactCodeScoreNeon(const int16 *queryCodes, const int16 *docCodes,
 		int32x4_t	prod0 = vmull_s16(vget_low_s16(q), vget_low_s16(d));
 		int32x4_t	prod1 = vmull_s16(vget_high_s16(q), vget_high_s16(d));
 
-		vst1q_s32(tmp, prod0);
-		for (int lane = 0; lane < 4; lane++)
-			score += (int64) tmp[lane];
-		vst1q_s32(tmp, prod1);
-		for (int lane = 0; lane < 4; lane++)
-			score += (int64) tmp[lane];
+		score += (int64) vaddvq_s32(prod0);
+		score += (int64) vaddvq_s32(prod1);
 	}
 
 	for (; i < count; i++)
 		score += (int64) queryCodes[i] * (int64) docCodes[i];
 	return score;
+}
+
+static void
+TqCompactCodeScoreBatchNeon(int16 queryCode, const int16 *docCodes,
+							int32 count, int64 *scores)
+{
+	int32		tmp[8];
+	int32		i = 0;
+	int32x4_t	q = vdupq_n_s32((int32) queryCode);
+
+	for (; i + 8 <= count; i += 8)
+	{
+		int16x8_t	packed = vld1q_s16(docCodes + i);
+		int32x4_t	low = vmovl_s16(vget_low_s16(packed));
+		int32x4_t	high = vmovl_s16(vget_high_s16(packed));
+		int32x4_t	prod0 = vmulq_s32(q, low);
+		int32x4_t	prod1 = vmulq_s32(q, high);
+
+		vst1q_s32(tmp, prod0);
+		vst1q_s32(tmp + 4, prod1);
+		for (int lane = 0; lane < 8; lane++)
+			scores[i + lane] = (int64) tmp[lane];
+	}
+
+	for (; i < count; i++)
+		scores[i] = (int64) queryCode * (int64) docCodes[i];
 }
 #endif
 
@@ -2591,6 +2697,104 @@ TqCompactCodeScoreKernelName(TqCompactCodeScoreFunc func)
 #endif
 #if PGTURBOHYBRID_MULTIVECTOR_COMPILE_NEON
 	if (func == TqCompactCodeScoreNeon)
+		return "compact_neon";
+#endif
+	return "unknown";
+}
+
+TqCompactCodeScoreBatchFunc
+TqResolveCompactCodeScoreBatchKernel(const char *forceKernel)
+{
+	if (forceKernel == NULL || pg_strcasecmp(forceKernel, "auto") == 0)
+	{
+		if (pgturbohybrid_dense_exact_simd_force ==
+			PGTURBOHYBRID_EXACT_SIMD_FORCE_SCALAR)
+			return TqCompactCodeScoreBatchScalar;
+#if PGTURBOHYBRID_MULTIVECTOR_COMPILE_AVX512BW
+		if (TqMultiVectorAvx512bwAvailable())
+			return TqCompactCodeScoreBatchAvx512;
+#endif
+#if PGTURBOHYBRID_MULTIVECTOR_COMPILE_AVX2
+		if (TqMultiVectorAvx2Available())
+			return TqCompactCodeScoreBatchAvx2;
+#endif
+#if PGTURBOHYBRID_MULTIVECTOR_COMPILE_NEON
+		return TqCompactCodeScoreBatchNeon;
+#endif
+		return TqCompactCodeScoreBatchScalar;
+	}
+
+	if (pg_strcasecmp(forceKernel, "scalar") == 0 ||
+		pg_strcasecmp(forceKernel, "compact_scalar") == 0)
+		return TqCompactCodeScoreBatchScalar;
+#if PGTURBOHYBRID_MULTIVECTOR_COMPILE_AVX512BW
+	if (pg_strcasecmp(forceKernel, "avx512") == 0 ||
+		pg_strcasecmp(forceKernel, "compact_avx512") == 0)
+	{
+		if (TqMultiVectorAvx512bwAvailable())
+			return TqCompactCodeScoreBatchAvx512;
+		ereport(ERROR,
+				(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
+				 errmsg("compact code scoring kernel \"compact_avx512\" is not available")));
+	}
+#else
+	if (pg_strcasecmp(forceKernel, "avx512") == 0 ||
+		pg_strcasecmp(forceKernel, "compact_avx512") == 0)
+		ereport(ERROR,
+				(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
+				 errmsg("compact code scoring kernel \"compact_avx512\" is not available")));
+#endif
+#if PGTURBOHYBRID_MULTIVECTOR_COMPILE_AVX2
+	if (pg_strcasecmp(forceKernel, "avx2") == 0 ||
+		pg_strcasecmp(forceKernel, "compact_avx2") == 0)
+	{
+		if (TqMultiVectorAvx2Available())
+			return TqCompactCodeScoreBatchAvx2;
+		ereport(ERROR,
+				(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
+				 errmsg("compact code scoring kernel \"compact_avx2\" is not available")));
+	}
+#else
+	if (pg_strcasecmp(forceKernel, "avx2") == 0 ||
+		pg_strcasecmp(forceKernel, "compact_avx2") == 0)
+		ereport(ERROR,
+				(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
+				 errmsg("compact code scoring kernel \"compact_avx2\" is not available")));
+#endif
+#if PGTURBOHYBRID_MULTIVECTOR_COMPILE_NEON
+	if (pg_strcasecmp(forceKernel, "neon") == 0 ||
+		pg_strcasecmp(forceKernel, "compact_neon") == 0)
+		return TqCompactCodeScoreBatchNeon;
+#else
+	if (pg_strcasecmp(forceKernel, "neon") == 0 ||
+		pg_strcasecmp(forceKernel, "compact_neon") == 0)
+		ereport(ERROR,
+				(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
+				 errmsg("compact code scoring kernel \"compact_neon\" is not available")));
+#endif
+
+	ereport(ERROR,
+			(errcode(ERRCODE_INVALID_PARAMETER_VALUE),
+			 errmsg("unknown compact code scoring kernel \"%s\"", forceKernel),
+			 errhint("Use auto, scalar, avx2, avx512, or neon.")));
+	return TqCompactCodeScoreBatchScalar;
+}
+
+const char *
+TqCompactCodeScoreBatchKernelName(TqCompactCodeScoreBatchFunc func)
+{
+	if (func == TqCompactCodeScoreBatchScalar)
+		return "compact_scalar";
+#if PGTURBOHYBRID_MULTIVECTOR_COMPILE_AVX512BW
+	if (func == TqCompactCodeScoreBatchAvx512)
+		return "compact_avx512";
+#endif
+#if PGTURBOHYBRID_MULTIVECTOR_COMPILE_AVX2
+	if (func == TqCompactCodeScoreBatchAvx2)
+		return "compact_avx2";
+#endif
+#if PGTURBOHYBRID_MULTIVECTOR_COMPILE_NEON
+	if (func == TqCompactCodeScoreBatchNeon)
 		return "compact_neon";
 #endif
 	return "unknown";

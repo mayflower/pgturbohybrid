@@ -137,7 +137,10 @@ index option `multivector_graph = token_nodes | document_nodes` and the
 document-node storage tier. `f32`, `f16`, and `sq8` include a full multivector
 sidecar. `proxy_only` includes proxy graph/docmap data without the full
 multivector sidecar. `centroid_only` includes proxy graph/docmap data plus
-k-means centroid/posting payloads without the full multivector sidecar.
+k-means centroid/posting payloads without the full multivector sidecar; when an
+external `quantized_inverted_experimental` codebook is selected at build time it
+can also persist compact quantized posting/codeword payloads for the explicit
+compact experimental path.
 Build-time edge selection uses
 symmetrized document MaxSim. Incremental document-node inserts use the same
 document-level scorer for candidate collection, neighbor selection, and
@@ -158,8 +161,11 @@ document-node serving, graph admission stays on fixed-dimensional proxy data.
 Full-sidecar indexes touch full document multivectors only for bounded exact
 rerank or explicit sidecar-scoring modes. `proxy_only` and `centroid_only`
 indexes have `full_multivector_sidecar_available = false`; their bounded exact
-rerank fetches heap multivectors and unsupported full-sidecar candidate sources
-fail with REINDEX guidance instead of falling back. Other document-node scan
+rerank fetches heap multivectors. `centroid_only` supports `centroid_lite` and
+the guarded compact `quantized_inverted_experimental` path when
+`quantized_inverted_sidecar_available = true`; unsupported full-sidecar
+candidate sources fail with REINDEX guidance instead of falling back. Other
+document-node scan
 modes may keep low-latency profile scans resident when the sidecar fits
 `turbohybrid.native_cache_max_mb`; explicit `resident` still forces loaded
 sidecar storage, and explicit `paged` is useful for cold-sidecar measurements
@@ -258,6 +264,20 @@ experiments, set `--multivector-centroid-lite-max-postings-per-token <n>`.
 The default `0` preserves full posting-list admission. Positive caps use
 deterministic midpoint-spaced sampling across each posting list and report
 `centroid_posting_cap_strategy = uniform_stride`.
+Set `--multivector-centroid-lite-posting-selection score_topk` to use
+payload-sorted posting prefixes on freshly rebuilt centroid indexes. The
+benchmark also exposes `_score_topk_codeword_maxsim` profile rows, which set
+`turbohybrid.multivector_centroid_lite_candidate_scoring = codeword_maxsim`
+for PLAID-style codeword MaxSim over selected posting matches without loading
+document-centroid vectors. `_score_topk_docmaxsim` profile rows set
+`turbohybrid.multivector_centroid_lite_candidate_scoring = doc_centroid_maxsim`
+so touched documents are pre-ranked by approximate MaxSim over persisted
+document centroids before the bounded exact heap MaxSim rerank. Both modes are
+admission experiments only; final SQL ordering remains exact MaxSim over
+retained heap documents. The candidate-source focus grid can generate
+`_threshold_NNN` and `_drop_NNN` rows for both `_score_topk_codeword_maxsim`
+and `_score_topk_docmaxsim`; these rows reuse the same physical index and only
+change scan-time posting-list filtering.
 Current 2k DBpedia smoke evidence shows the exact rerank cap is honored
 (`exact_rerank_docs = 100` for `--serving-exact-rerank-k 100`), but
 `centroid_lite` still visits one posting list per query token and can touch
@@ -279,6 +299,55 @@ It remains outside normal CI and default single-run retrieval because the
 codebook/posting sidecar has no production compatibility promise; the opt-in
 document-node admission grid includes it so research comparisons produce
 explicit experimental stats without falling through to another candidate source.
+The pure-ColBERT candidate-source focus can also run the explicit external
+codebook variant. Build a sampled experimental codebook from the already
+imported ColBERT document-token vectors first:
+
+```bash
+python benchmarks/dbpedia_colbert_multivector.py \
+  --database pgturbohybrid_dbpedia_colbert_1m_colbert \
+  --reuse-data \
+  --document-node-colbert-quantized-codebook-build-only \
+  --quantized-inverted-codebook-output \
+    .nix-dev/tmp/dbpedia-colbert-1m-quantized-codebook.txt \
+  --quantized-inverted-codebook-size 256 \
+  --quantized-inverted-codebook-sample-docs 10000 \
+  --quantized-inverted-codebook-sample-tokens 100000 \
+  --quantized-inverted-codebook-kmeans-iterations 20 \
+  --output .nix-dev/tmp/dbpedia-colbert-1m-quantized-codebook.json \
+  --markdown-output .nix-dev/tmp/dbpedia-colbert-1m-quantized-codebook.md
+```
+
+Then point the experimental candidate-source focus at that artifact:
+
+```bash
+python benchmarks/dbpedia_colbert_multivector.py \
+  --database pgturbohybrid_dbpedia_colbert_1m_colbert \
+  --reuse-data \
+  --document-node-colbert-candidate-source-focus \
+  --include-quantized-inverted-experimental \
+  --multivector-quantized-inverted-codebook-path \
+    .nix-dev/tmp/dbpedia-colbert-1m-quantized-codebook.txt
+```
+
+With an external codebook and `--include-quantized-inverted-experimental`, the
+candidate-source focus default is the current measured pure-ColBERT working
+path:
+`quantized_inverted_external_centroid_only_compact_topk_128_probe_016_topm_01_score_bound`,
+candidate budget `8192`, and exact heap MaxSim rerank K `512`. This profile is
+still experimental. It uses the external codebook only when a real codebook file
+is supplied, includes the codebook source/path/top-m in the physical index
+signature, and keeps final SQL ordering as exact heap MaxSim over the retained
+candidates. The `centroid_only` compact variant writes centroids plus quantized
+posting/codeword payloads and does not store a full document multivector sidecar;
+use explicit `--document-node-colbert-candidate-source-profiles` and
+`--quantized-inverted-posting-caps` / `--quantized-inverted-probes` only when
+running diagnostics instead of the locked comparison path. Score-bound pruning
+remains experimental and is part of this benchmark default because it is the
+current best measured comparison path. The sampled codebook
+builder does not build an index, run retrieval, or train inside PostgreSQL; it is
+an offline benchmark utility for producing the current
+`pgturbohybrid_quantized_inverted_codebook_v1` text format.
 
 ### x00k document-node serving selection
 
@@ -451,9 +520,12 @@ as admission/latency tradeoff evidence for the experimental centroid-lite path.
 Positive caps use deterministic uniform-stride posting sampling and expose
 `centroid_posting_cap_strategy` in scan stats. Uniform cap rows are diagnostic
 negative controls: do not promote them unless admission recall improves and
-`centroid_docs_touched / doc_count` drops. Safe upper-bound pruning only
-drops candidates when the persisted residual summary proves the centroid score
-is exact for that document; otherwise it keeps the candidate and reports
+`centroid_docs_touched / doc_count` drops. `score_topk` rows require a freshly
+built centroid index to benefit from payload-sorted centroid postings; older
+centroid-only artifacts remain readable but need REINDEX/rebuild before this
+bounded posting order is meaningful. Safe upper-bound pruning only drops
+candidates when the persisted residual summary proves the centroid score is
+exact for that document; otherwise it keeps the candidate and reports
 `centroid_upper_bound_unsafe_fallbacks`.
 Use `--document-node-serving-grid-centroid-lite-focus` when the only question is
 the centroid-lite cap/pruning tradeoff. It restricts the grid to uncapped
@@ -1137,6 +1209,49 @@ top-10 admission `0.690000`. Treat this as proof that externally supplied
 learned-sparse vectors are ingested, indexed, reported, and used for admission;
 real learned-sparse model exports are still required before recommending this
 mode for quality.
+
+## NextPlaid reference on the same DBpedia corpus
+
+Use `--next-plaid-beir-quality-only` to evaluate an external NextPlaid index
+against the same DBpedia corpus, query text, and qrels already imported into
+PostgreSQL. This is a reference benchmark, not a native pgturbohybrid path: it
+does not build a pgturbohybrid index, does not run exact MaxSim admission
+scans, and does not use BM25, learned sparse, or hybrid fusion.
+
+Start NextPlaid separately from the sibling checkout, for example with the
+project's Docker instructions in `../next-plaid`. Then run the benchmark from
+this repository's bench shell:
+
+```sh
+nix develop .#bench
+python benchmarks/dbpedia_colbert_multivector.py \
+  --database pgturbohybrid_dbpedia_colbert_1m_colbert \
+  --reuse-data \
+  --next-plaid-beir-quality-only \
+  --next-plaid-url http://localhost:8080 \
+  --next-plaid-index-name dbpedia_colbert_1m \
+  --next-plaid-top-k 100 \
+  --next-plaid-n-ivf-probe 8 \
+  --next-plaid-n-full-scores 4096 \
+  --max-queries 381 \
+  --output .nix-dev/tmp/dbpedia-colbert-1m-next-plaid-beir-quality.json \
+  --markdown-output .nix-dev/tmp/dbpedia-colbert-1m-next-plaid-beir-quality.md
+```
+
+If the NextPlaid index does not already exist, add
+`--next-plaid-create-index --next-plaid-add-documents --next-plaid-wait-for-index`.
+The benchmark uploads document text from `dbpedia_colbert_docs` and stores
+metadata `doc_id` for every document. That metadata is required because
+NextPlaid result IDs are engine-local IDs; qrel evaluation maps results back to
+`dbpedia_colbert_qrels.doc_id` through `metadata.doc_id`. If the metadata is
+missing, the JSON and Markdown mark `docid_mapping_suspect = true` and the qrel
+metrics should not be treated as valid.
+
+The output key is `next_plaid_beir_quality`. It reports p50/p95/p99 latency,
+QPS, recall@10, ndcg@10, mrr@10, qrel coverage, NextPlaid index metadata, and
+the exact search parameters. Exact admission remains explicitly unavailable in
+this mode; use the sampled exact oracle modes when candidate-admission evidence
+is needed.
 
 For long-context ColBERT/ModernColBERT fixtures, keep each RAG chunk as one
 database row and build document-node indexes with explicit context mode:

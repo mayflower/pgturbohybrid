@@ -13,6 +13,7 @@
 from __future__ import annotations
 
 import argparse
+import base64
 import hashlib
 import importlib.util
 import json
@@ -21,12 +22,13 @@ import os
 import platform
 import shlex
 import statistics
+import struct
 import subprocess
 import sys
 import tempfile
 import threading
 import time
-from dataclasses import dataclass, field, replace
+from dataclasses import asdict, dataclass, field, replace
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Callable, Iterable, Sequence
@@ -125,6 +127,7 @@ STORAGE_CAPABILITY_KEYS = (
     "centroid_only_index",
     "full_multivector_sidecar_available",
     "centroid_sidecar_available",
+    "centroid_doc_codes_available",
     "quantized_inverted_sidecar_available",
     "exact_rerank_source_supported",
 )
@@ -351,8 +354,12 @@ DOCUMENT_NODE_COLBERT_1M_GRID_BASE_PROFILES = (
     "proxy_max_pool_f16",
     "centroid_mean_f16",
     "centroid_lite_centroid_only",
+    "centroid_lite_centroid_only_probe_008_union_score_codeword_maxsim",
+    "centroid_lite_centroid_only_probe_008_cap_128_score_topk_codeword_maxsim",
     "centroid_lite_centroid_only_cap_016",
     "centroid_lite_centroid_only_cap_032",
+    "centroid_lite_centroid_only_cap_032_score_topk_codeword_maxsim",
+    "centroid_lite_centroid_only_cap_032_score_topk_docmaxsim",
     "centroid_lite_centroid_only_cap_032_bitset_prefilter",
     "centroid_lite_centroid_only_cap_032_prune_safe_upper_bound",
     "centroid_lite_centroid_only_cap_064",
@@ -376,6 +383,12 @@ DOCUMENT_NODE_COLBERT_1M_GRID_ENTRY_SIDECAR_PROFILES = (
 )
 DOCUMENT_NODE_COLBERT_1M_GRID_EXPERIMENTAL_PROFILES = (
     "quantized_inverted_experimental_f32",
+    "quantized_inverted_external_f32_compact_topk_032",
+    "quantized_inverted_external_f32_compact_topk_032_topm_02",
+    "quantized_inverted_external_centroid_only_compact_topk_032",
+    "quantized_inverted_external_centroid_only_compact_topk_032_coverage",
+    "quantized_inverted_external_centroid_only_compact_topk_032_topm_02",
+    "quantized_inverted_external_centroid_only_compact_topk_032_pool_050",
 )
 DOCUMENT_NODE_COLBERT_1M_SINGLE_INDEX_PROFILES = (
     *DOCUMENT_NODE_COLBERT_1M_GRID_BASE_PROFILES,
@@ -386,7 +399,12 @@ DOCUMENT_NODE_COLBERT_BEIR_QUALITY_PROFILES = (
     "proxy_max_pool_f16",
     "centroid_mean_f16",
     "centroid_lite_centroid_only",
+    "centroid_lite_centroid_only_probe_008_union_score_codeword_maxsim",
+    "centroid_lite_centroid_only_probe_008_cap_128_score_topk_codeword_maxsim",
     "centroid_lite_centroid_only_cap_032",
+    "centroid_lite_centroid_only_cap_032_score_topk",
+    "centroid_lite_centroid_only_cap_032_score_topk_codeword_maxsim",
+    "centroid_lite_centroid_only_cap_032_score_topk_docmaxsim",
     "centroid_lite_centroid_only_cap_032_bitset_prefilter",
     "centroid_lite_centroid_only_cap_032_prune_safe_upper_bound",
     "centroid_lite_centroid_only_cap_064",
@@ -394,30 +412,64 @@ DOCUMENT_NODE_COLBERT_BEIR_QUALITY_PROFILES = (
 )
 DOCUMENT_NODE_COLBERT_BEIR_QUALITY_EXPERIMENTAL_PROFILES = (
     "quantized_inverted_experimental_f32",
+    "quantized_inverted_external_f32_compact_topk_032",
+    "quantized_inverted_external_f32_compact_topk_032_topm_02",
+    "quantized_inverted_external_centroid_only_compact_topk_032",
+    "quantized_inverted_external_centroid_only_compact_topk_032_coverage",
+    "quantized_inverted_external_centroid_only_compact_topk_032_topm_02",
+    "quantized_inverted_external_centroid_only_compact_topk_032_pool_050",
 )
 DOCUMENT_NODE_COLBERT_SAMPLED_ADMISSION_PROFILES = (
     "proxy_normalized_mean_proxy_only",
     "centroid_lite_centroid_only",
+    "centroid_lite_centroid_only_probe_008_union_score_codeword_maxsim",
+    "centroid_lite_centroid_only_probe_008_cap_128_score_topk_codeword_maxsim",
     "centroid_lite_centroid_only_cap_032",
+    "centroid_lite_centroid_only_cap_032_score_topk",
+    "centroid_lite_centroid_only_cap_032_score_topk_codeword_maxsim",
+    "centroid_lite_centroid_only_cap_032_score_topk_docmaxsim",
     "centroid_lite_centroid_only_cap_032_bitset_prefilter",
     "centroid_lite_centroid_only_cap_032_prune_safe_upper_bound",
     "centroid_lite_centroid_only_pool_050",
 )
 DOCUMENT_NODE_COLBERT_SAMPLED_ADMISSION_EXPERIMENTAL_PROFILES = (
     "quantized_inverted_experimental_f32",
+    "quantized_inverted_external_f32_compact_topk_032",
+    "quantized_inverted_external_f32_compact_topk_032_topm_02",
+    "quantized_inverted_external_centroid_only_compact_topk_032",
+    "quantized_inverted_external_centroid_only_compact_topk_032_coverage",
+    "quantized_inverted_external_centroid_only_compact_topk_032_topm_02",
+    "quantized_inverted_external_centroid_only_compact_topk_032_pool_050",
 )
 DOCUMENT_NODE_COLBERT_CANDIDATE_SOURCE_FOCUS_PROFILES = (
     "proxy_normalized_mean_proxy_only",
     "centroid_lite_centroid_only",
-    "centroid_lite_centroid_only_cap_032",
-    "centroid_lite_centroid_only_cap_032_bitset_prefilter",
-    "centroid_lite_centroid_only_cap_032_prune_safe_upper_bound",
-    "centroid_lite_centroid_only_cap_064",
+    "centroid_lite_centroid_only_probe_008_union_score_codeword_maxsim",
+    "centroid_lite_centroid_only_probe_008_cap_128_score_topk_codeword_maxsim",
+    "centroid_lite_centroid_only_cap_032_score_topk_codeword_maxsim",
+    "centroid_lite_centroid_only_cap_032_score_topk_docmaxsim",
     "centroid_lite_centroid_only_pool_050",
 )
 DOCUMENT_NODE_COLBERT_CANDIDATE_SOURCE_FOCUS_EXPERIMENTAL_PROFILES = (
     "quantized_inverted_experimental_f32",
+    "quantized_inverted_experimental_f32_compact_topk_032",
+    "quantized_inverted_external_f32_compact_topk_032",
+    "quantized_inverted_external_f32_compact_topk_032_topm_02",
+    "quantized_inverted_external_centroid_only_compact_topk_032",
+    "quantized_inverted_external_centroid_only_compact_topk_032_coverage",
+    "quantized_inverted_external_centroid_only_compact_topk_032_topm_02",
+    "quantized_inverted_external_centroid_only_compact_topk_032_pool_050",
 )
+DOCUMENT_NODE_COLBERT_CANDIDATE_SOURCE_DEFAULT_EXTERNAL_QUANTIZED_PROFILE = (
+    "quantized_inverted_external_centroid_only"
+    "_compact_topk_128_probe_016_topm_01"
+    "_score_bound"
+)
+DOCUMENT_NODE_COLBERT_CANDIDATE_SOURCE_DEFAULT_BUDGETS = "8192"
+DOCUMENT_NODE_COLBERT_CANDIDATE_SOURCE_DEFAULT_EXACT_RERANK_K = 512
+DOCUMENT_NODE_COLBERT_CANDIDATE_SOURCE_DEFAULT_QUANTIZED_CAPS = "128"
+DOCUMENT_NODE_COLBERT_CANDIDATE_SOURCE_DEFAULT_QUANTIZED_PROBES = "16"
+DOCUMENT_NODE_COLBERT_CANDIDATE_SOURCE_DEFAULT_QUANTIZED_TOP_MS = "1"
 DOCUMENT_NODE_ORACLE_QUALITY_CHECK_PROFILES = (
     "proxy_normalized_mean_proxy_only",
     "centroid_lite_centroid_only_cap_032",
@@ -427,6 +479,12 @@ DOCUMENT_NODE_COLBERT_QUANTIZED_INVERTED_FOCUS_PROFILES = (
     "centroid_mean_f16",
     "centroid_lite_f16",
     "quantized_inverted_experimental_f32",
+    "quantized_inverted_external_f32_compact_topk_032",
+    "quantized_inverted_external_f32_compact_topk_032_topm_02",
+    "quantized_inverted_external_centroid_only_compact_topk_032",
+    "quantized_inverted_external_centroid_only_compact_topk_032_coverage",
+    "quantized_inverted_external_centroid_only_compact_topk_032_topm_02",
+    "quantized_inverted_external_centroid_only_compact_topk_032_pool_050",
 )
 DOCUMENT_NODE_SERVING_GRID_SMOKE_MAX_QUERIES = 25
 DOCUMENT_NODE_SERVING_LATENCY_DEFAULT_PROFILE = "proxy_normalized_mean_f16"
@@ -528,11 +586,18 @@ SERVING_STATS_FIELD_GROUPS: dict[str, tuple[str, ...]] = {
         "centroid_docs_touched",
         "centroid_pruned_docs",
         "centroid_postings_touched",
+        "centroid_postings_selected",
         "centroid_postings_skipped",
         "centroid_posting_limit_per_token",
+        "centroid_probe_centroids_per_token",
+        "centroid_score_threshold",
+        "centroid_score_drop_from_best",
+        "centroid_lists_skipped_by_threshold",
         "centroid_posting_cap_strategy",
+        "centroid_candidate_scoring",
         "centroid_candidates",
         "centroid_bitset_prefilter_enabled",
+        "centroid_bitset_min_token_matches",
         "centroid_bitset_lists_used",
         "centroid_bitset_docs_set",
         "centroid_bitset_docs_after_threshold",
@@ -555,6 +620,22 @@ SERVING_STATS_FIELD_GROUPS: dict[str, tuple[str, ...]] = {
         "learned_projection_model",
         "learned_projection_checksum",
         "learned_projection_query_encode_us",
+        "quantized_inverted_postings_selected",
+        "quantized_inverted_postings_skipped",
+        "quantized_inverted_posting_limit_per_token",
+        "quantized_inverted_probe_codewords_per_token",
+        "quantized_inverted_posting_cap_strategy",
+        "quantized_inverted_min_token_matches",
+        "quantized_inverted_token_match_filtered_docs",
+        "quantized_inverted_score_bound_pruning_enabled",
+        "quantized_inverted_score_bound_docs_checked",
+        "quantized_inverted_score_bound_docs_pruned",
+        "quantized_inverted_score_bound_prune_time_us",
+        "quantized_inverted_score_bound_time_us",
+        "quantized_inverted_score_bound_unsafe_fallbacks",
+        "quantized_inverted_score_bound_prune_ratio",
+        "quantized_inverted_candidates_before_bound",
+        "quantized_inverted_candidates_after_bound",
     ),
     "storage_cache": (
         "multivector_doc_sidecar_cache_mode",
@@ -587,7 +668,23 @@ SERVING_STATS_FIELD_GROUPS: dict[str, tuple[str, ...]] = {
         "multivector_proxy_graph_traversal_time_us",
         "multivector_proxy_scoring_time_us",
         "multivector_centroid_lite_time_us",
+        "centroid_probe_time_us",
+        "centroid_posting_scan_time_us",
+        "centroid_accumulate_time_us",
+        "centroid_candidate_heap_time_us",
         "multivector_quantized_inverted_time_us",
+        "quantized_inverted_assignment_us",
+        "quantized_inverted_assignment_time_us",
+        "quantized_inverted_query_codeword_score_us",
+        "quantized_inverted_query_codeword_score_time_us",
+        "quantized_inverted_compact_score_us",
+        "quantized_inverted_score_bound_time_us",
+        "quantized_inverted_score_bound_docs_checked",
+        "quantized_inverted_score_bound_docs_pruned",
+        "quantized_inverted_compact_score_source",
+        "quantized_inverted_compact_docs_scored",
+        "quantized_inverted_compact_payload_bytes",
+        "quantized_inverted_compact_kernel",
         "multivector_sidecar_load_time_us",
         "multivector_sidecar_page_read_time_us",
         "multivector_sidecar_vector_reconstruct_time_us",
@@ -596,6 +693,11 @@ SERVING_STATS_FIELD_GROUPS: dict[str, tuple[str, ...]] = {
         "multivector_final_sort_time_us",
         "compact_maxsim_score_us",
         "compact_maxsim_pairs",
+        "compact_maxsim_cache_hits",
+        "compact_maxsim_cache_misses",
+        "compact_maxsim_bound_checks",
+        "compact_maxsim_docs_pruned",
+        "compact_maxsim_tokens_skipped",
         "multivector_candidate_source_us",
         "multivector_doc_graph_traversal_us",
         "multivector_proxy_scoring_us",
@@ -729,8 +831,25 @@ class DocumentNodeServingProfile:
     per_token_doc_reservoir_k: int = 1
     coverage_reservoir_k: int = 10
     centroid_lite_max_postings_per_token: int = 0
+    centroid_lite_probe_centroids_per_token: int = 1
+    centroid_lite_codeword_top_m: int = 1
+    centroid_lite_posting_selection: str = "uniform_stride"
+    centroid_lite_candidate_scoring: str = "posting_payload"
+    centroid_lite_score_threshold: float = -1.0
+    centroid_lite_score_drop_from_best: float = -1.0
     centroid_lite_pruning: str = "off"
     centroid_lite_bitset_prefilter: str = "off"
+    centroid_lite_bitset_min_token_matches: int = 1
+    quantized_inverted_max_postings_per_token: int = 0
+    quantized_inverted_probe_codewords_per_token: int = 1
+    quantized_inverted_posting_selection: str = "score_topk"
+    quantized_inverted_compact_scoring: str = "off"
+    quantized_inverted_token_coverage: str = "off"
+    quantized_inverted_min_token_matches: int = 0
+    quantized_inverted_pruning: str = "off"
+    quantized_inverted_codebook: str = ""
+    quantized_inverted_codebook_path: str = ""
+    quantized_inverted_codebook_top_m: int = 0
     entry_sample_count: int = 0
     entry_sidecar: bool = False
     entry_sidecar_representatives: int = 128
@@ -2389,6 +2508,40 @@ def build_index_needs_lexical_key(args: argparse.Namespace) -> bool:
     return build_index_lexical_column(args) is not None
 
 
+def effective_quantized_inverted_codebook_settings(
+    args: argparse.Namespace,
+    profile: DocumentNodeServingProfile,
+) -> tuple[str, str, int]:
+    source = str(
+        profile.quantized_inverted_codebook
+        or getattr(args, "multivector_quantized_inverted_codebook", "deterministic")
+        or "deterministic"
+    )
+    path = str(
+        profile.quantized_inverted_codebook_path
+        or getattr(args, "multivector_quantized_inverted_codebook_path", "")
+        or ""
+    )
+    if source == "external" and path:
+        path = str(Path(path).expanduser().resolve())
+    top_m = int(
+        profile.quantized_inverted_codebook_top_m
+        or getattr(args, "multivector_quantized_inverted_codebook_top_m", 1)
+        or 1
+    )
+    return source, path, top_m
+
+
+def effective_quantized_inverted_min_token_matches(
+    args: argparse.Namespace,
+    profile: DocumentNodeServingProfile,
+) -> int:
+    profile_value = int(profile.quantized_inverted_min_token_matches or 0)
+    if profile_value > 0:
+        return profile_value
+    return int(getattr(args, "multivector_quantized_inverted_min_token_matches", 0) or 0)
+
+
 def build_index_lexical_column(args: argparse.Namespace) -> str | None:
     methods = set(getattr(args, "methods", []))
     bm25_injection = getattr(args, "multivector_bm25_candidate_injection", "off")
@@ -2428,6 +2581,18 @@ def serving_profile_index_signature(
     return (
         ("reloptions", tuple(reloptions)),
         ("index_option_values", tuple(sorted(index_option_values.items()))),
+        (
+            "centroid_lite_codeword_top_m",
+            int(getattr(index_args, "multivector_centroid_lite_codeword_top_m", 1) or 1),
+        ),
+        (
+            "quantized_inverted_codebook",
+            (
+                effective_quantized_inverted_codebook_settings(args, profile)
+                if profile.candidate_source == "quantized_inverted_experimental"
+                else None
+            ),
+        ),
         ("lexical_column", build_index_lexical_column(index_args)),
         ("lexical_key_required", build_index_needs_lexical_key(index_args)),
     )
@@ -3423,11 +3588,62 @@ def set_colbert_gucs(conn: psycopg.Connection[Any], args: argparse.Namespace) ->
         "turbohybrid.multivector_centroid_lite_max_postings_per_token": str(
             args.multivector_centroid_lite_max_postings_per_token
         ),
+        "turbohybrid.multivector_centroid_lite_probe_centroids_per_token": str(
+            args.multivector_centroid_lite_probe_centroids_per_token
+        ),
+        "turbohybrid.multivector_centroid_lite_codeword_top_m": str(
+            args.multivector_centroid_lite_codeword_top_m
+        ),
+        "turbohybrid.multivector_centroid_lite_posting_selection": str(
+            args.multivector_centroid_lite_posting_selection
+        ),
+        "turbohybrid.multivector_centroid_lite_candidate_scoring": str(
+            getattr(args, "multivector_centroid_lite_candidate_scoring", "posting_payload")
+        ),
+        "turbohybrid.multivector_centroid_lite_score_threshold": str(
+            args.multivector_centroid_lite_score_threshold
+        ),
+        "turbohybrid.multivector_centroid_lite_score_drop_from_best": str(
+            args.multivector_centroid_lite_score_drop_from_best
+        ),
         "turbohybrid.multivector_centroid_lite_pruning": str(
             args.multivector_centroid_lite_pruning
         ),
         "turbohybrid.multivector_centroid_lite_bitset_prefilter": str(
             args.multivector_centroid_lite_bitset_prefilter
+        ),
+        "turbohybrid.multivector_centroid_lite_bitset_min_token_matches": str(
+            args.multivector_centroid_lite_bitset_min_token_matches
+        ),
+        "turbohybrid.multivector_quantized_inverted_max_postings_per_token": str(
+            args.multivector_quantized_inverted_max_postings_per_token
+        ),
+        "turbohybrid.multivector_quantized_inverted_probe_codewords_per_token": str(
+            args.multivector_quantized_inverted_probe_codewords_per_token
+        ),
+        "turbohybrid.multivector_quantized_inverted_posting_selection": str(
+            args.multivector_quantized_inverted_posting_selection
+        ),
+        "turbohybrid.multivector_quantized_inverted_compact_scoring": str(
+            args.multivector_quantized_inverted_compact_scoring
+        ),
+        "turbohybrid.multivector_quantized_inverted_token_coverage": str(
+            getattr(args, "multivector_quantized_inverted_token_coverage", "off")
+        ),
+        "turbohybrid.multivector_quantized_inverted_min_token_matches": str(
+            getattr(args, "multivector_quantized_inverted_min_token_matches", 0)
+        ),
+        "turbohybrid.multivector_quantized_inverted_pruning": str(
+            getattr(args, "multivector_quantized_inverted_pruning", "off")
+        ),
+        "turbohybrid.multivector_quantized_inverted_codebook": str(
+            getattr(args, "multivector_quantized_inverted_codebook", "deterministic")
+        ),
+        "turbohybrid.multivector_quantized_inverted_codebook_path": str(
+            getattr(args, "multivector_quantized_inverted_codebook_path", "") or ""
+        ),
+        "turbohybrid.multivector_quantized_inverted_codebook_top_m": str(
+            getattr(args, "multivector_quantized_inverted_codebook_top_m", 1)
         ),
         "turbohybrid.multivector_candidate_source": args.multivector_candidate_source,
         "turbohybrid.multivector_branch_plan": getattr(args, "multivector_branch_plan", "auto"),
@@ -3485,11 +3701,62 @@ def set_retrieval_gucs(conn: psycopg.Connection[Any], args: argparse.Namespace, 
         "turbohybrid.multivector_centroid_lite_max_postings_per_token": str(
             args.multivector_centroid_lite_max_postings_per_token
         ),
+        "turbohybrid.multivector_centroid_lite_probe_centroids_per_token": str(
+            args.multivector_centroid_lite_probe_centroids_per_token
+        ),
+        "turbohybrid.multivector_centroid_lite_codeword_top_m": str(
+            args.multivector_centroid_lite_codeword_top_m
+        ),
+        "turbohybrid.multivector_centroid_lite_posting_selection": str(
+            args.multivector_centroid_lite_posting_selection
+        ),
+        "turbohybrid.multivector_centroid_lite_candidate_scoring": str(
+            getattr(args, "multivector_centroid_lite_candidate_scoring", "posting_payload")
+        ),
+        "turbohybrid.multivector_centroid_lite_score_threshold": str(
+            args.multivector_centroid_lite_score_threshold
+        ),
+        "turbohybrid.multivector_centroid_lite_score_drop_from_best": str(
+            args.multivector_centroid_lite_score_drop_from_best
+        ),
         "turbohybrid.multivector_centroid_lite_pruning": str(
             args.multivector_centroid_lite_pruning
         ),
         "turbohybrid.multivector_centroid_lite_bitset_prefilter": str(
             args.multivector_centroid_lite_bitset_prefilter
+        ),
+        "turbohybrid.multivector_centroid_lite_bitset_min_token_matches": str(
+            args.multivector_centroid_lite_bitset_min_token_matches
+        ),
+        "turbohybrid.multivector_quantized_inverted_max_postings_per_token": str(
+            args.multivector_quantized_inverted_max_postings_per_token
+        ),
+        "turbohybrid.multivector_quantized_inverted_probe_codewords_per_token": str(
+            args.multivector_quantized_inverted_probe_codewords_per_token
+        ),
+        "turbohybrid.multivector_quantized_inverted_posting_selection": str(
+            args.multivector_quantized_inverted_posting_selection
+        ),
+        "turbohybrid.multivector_quantized_inverted_compact_scoring": str(
+            args.multivector_quantized_inverted_compact_scoring
+        ),
+        "turbohybrid.multivector_quantized_inverted_token_coverage": str(
+            getattr(args, "multivector_quantized_inverted_token_coverage", "off")
+        ),
+        "turbohybrid.multivector_quantized_inverted_min_token_matches": str(
+            getattr(args, "multivector_quantized_inverted_min_token_matches", 0)
+        ),
+        "turbohybrid.multivector_quantized_inverted_pruning": str(
+            getattr(args, "multivector_quantized_inverted_pruning", "off")
+        ),
+        "turbohybrid.multivector_quantized_inverted_codebook": str(
+            getattr(args, "multivector_quantized_inverted_codebook", "deterministic")
+        ),
+        "turbohybrid.multivector_quantized_inverted_codebook_path": str(
+            getattr(args, "multivector_quantized_inverted_codebook_path", "") or ""
+        ),
+        "turbohybrid.multivector_quantized_inverted_codebook_top_m": str(
+            getattr(args, "multivector_quantized_inverted_codebook_top_m", 1)
         ),
         "turbohybrid.multivector_candidate_source": args.multivector_candidate_source,
         "turbohybrid.multivector_branch_plan": getattr(args, "multivector_branch_plan", "auto"),
@@ -4105,6 +4372,280 @@ def markdown_document_node_colbert_1m_preflight(report: dict[str, Any]) -> str:
     return "\n".join(lines) + "\n"
 
 
+def quantized_codebook_checksum(centroids: Any) -> str:
+    try:
+        import numpy as np
+    except ImportError as exc:  # pragma: no cover - covered by runtime guard
+        raise SystemExit(
+            "numpy is required to build an experimental quantized-inverted codebook"
+        ) from exc
+    array = np.asarray(centroids, dtype="<f4")
+    digest = hashlib.sha256()
+    digest.update(f"dim={array.shape[1]};size={array.shape[0]};".encode("ascii"))
+    digest.update(array.tobytes(order="C"))
+    return digest.hexdigest()
+
+
+def atomic_write_text(path: Path, text: str) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    tmp = path.with_name(f".{path.name}.{os.getpid()}.tmp")
+    with tmp.open("w", encoding="utf-8") as handle:
+        handle.write(text)
+        handle.flush()
+        os.fsync(handle.fileno())
+    os.replace(tmp, path)
+    directory_flag = getattr(os, "O_DIRECTORY", 0)
+    try:
+        dir_fd = os.open(str(path.parent), os.O_RDONLY | directory_flag)
+    except OSError:
+        return
+    try:
+        os.fsync(dir_fd)
+    finally:
+        os.close(dir_fd)
+
+
+def quantized_codebook_text(centroids: Any, checksum: str) -> str:
+    try:
+        import numpy as np
+    except ImportError as exc:  # pragma: no cover - covered by runtime guard
+        raise SystemExit(
+            "numpy is required to build an experimental quantized-inverted codebook"
+        ) from exc
+    array = np.asarray(centroids, dtype=np.float32)
+    if array.ndim != 2 or array.shape[0] < 1 or array.shape[1] < 1:
+        raise ValueError("quantized codebook centroids must be a non-empty 2D array")
+    lines = [
+        f"pgturbohybrid_quantized_inverted_codebook_v1 {array.shape[1]} {array.shape[0]} {checksum}"
+    ]
+    for centroid in array:
+        lines.append(" ".join(f"{float(value):.9g}" for value in centroid))
+    return "\n".join(lines) + "\n"
+
+
+def normalize_numpy_rows(array: Any) -> Any:
+    try:
+        import numpy as np
+    except ImportError as exc:  # pragma: no cover - covered by runtime guard
+        raise SystemExit(
+            "numpy is required to build an experimental quantized-inverted codebook"
+        ) from exc
+    norms = np.linalg.norm(array, axis=1, keepdims=True)
+    return np.divide(array, np.maximum(norms, 1e-12), dtype=np.float32)
+
+
+def sampled_cosine_kmeans_codebook(
+    vectors: Sequence[Sequence[float]],
+    *,
+    codebook_size: int,
+    iterations: int,
+    seed: int,
+    batch_size: int,
+) -> tuple[Any, dict[str, Any]]:
+    try:
+        import numpy as np
+    except ImportError as exc:  # pragma: no cover - covered by runtime guard
+        raise SystemExit(
+            "numpy is required to build an experimental quantized-inverted codebook"
+        ) from exc
+    if codebook_size < 1:
+        raise ValueError("codebook_size must be positive")
+    if iterations < 1:
+        raise ValueError("iterations must be positive")
+    if batch_size < 1:
+        raise ValueError("batch_size must be positive")
+    matrix = np.asarray(vectors, dtype=np.float32)
+    if matrix.ndim != 2 or matrix.shape[0] < 1 or matrix.shape[1] < 1:
+        raise ValueError("sampled token vectors must be a non-empty 2D matrix")
+    matrix = normalize_numpy_rows(matrix)
+    if matrix.shape[0] < codebook_size:
+        raise ValueError(
+            f"sampled token count {matrix.shape[0]} is smaller than codebook size {codebook_size}"
+        )
+    rng = np.random.default_rng(seed)
+    initial = rng.choice(matrix.shape[0], size=codebook_size, replace=False)
+    centroids = np.array(matrix[initial], dtype=np.float32, copy=True)
+    mean_assignment_score = 0.0
+    empty_clusters: list[int] = []
+    for _ in range(iterations):
+        sums = np.zeros((codebook_size, matrix.shape[1]), dtype=np.float64)
+        counts = np.zeros(codebook_size, dtype=np.int64)
+        score_total = 0.0
+        for offset in range(0, matrix.shape[0], batch_size):
+            batch = matrix[offset : offset + batch_size]
+            scores = batch @ centroids.T
+            labels = np.argmax(scores, axis=1)
+            score_total += float(scores[np.arange(batch.shape[0]), labels].sum())
+            np.add.at(sums, labels, batch.astype(np.float64, copy=False))
+            counts += np.bincount(labels, minlength=codebook_size)
+        empty_clusters = [
+            int(cluster_id)
+            for cluster_id, count in enumerate(counts.tolist())
+            if int(count) == 0
+        ]
+        for cluster_id in range(codebook_size):
+            if counts[cluster_id] > 0:
+                centroids[cluster_id] = (
+                    sums[cluster_id] / float(counts[cluster_id])
+                ).astype(np.float32)
+            else:
+                centroids[cluster_id] = matrix[int(rng.integers(0, matrix.shape[0]))]
+        centroids = normalize_numpy_rows(centroids)
+        mean_assignment_score = score_total / float(matrix.shape[0])
+    checksum = quantized_codebook_checksum(centroids)
+    stats = {
+        "codebook_size": int(codebook_size),
+        "dim": int(matrix.shape[1]),
+        "tokens_sampled": int(matrix.shape[0]),
+        "iterations": int(iterations),
+        "seed": int(seed),
+        "batch_size": int(batch_size),
+        "mean_assignment_score": round(float(mean_assignment_score), 9),
+        "empty_clusters_last_iteration": empty_clusters,
+        "checksum": checksum,
+    }
+    return centroids, stats
+
+
+def sampled_colbert_token_vectors_for_codebook(
+    conn: psycopg.Connection[Any],
+    args: argparse.Namespace,
+) -> tuple[list[list[float]], dict[str, Any]]:
+    sample_docs = int(args.quantized_inverted_codebook_sample_docs)
+    sample_tokens = int(args.quantized_inverted_codebook_sample_tokens)
+    seed_text = str(int(args.quantized_inverted_codebook_seed))
+    rows = fetch_all(
+        conn,
+        """
+        WITH sampled_docs AS MATERIALIZED (
+          SELECT doc_id, colbert
+          FROM dbpedia_colbert_docs
+          WHERE colbert IS NOT NULL
+          ORDER BY md5(doc_id::text || %s), doc_id
+          LIMIT %s
+        )
+        SELECT sd.doc_id::text, token.ordinality::int, token.v::text
+        FROM sampled_docs sd
+        CROSS JOIN LATERAL
+          unnest(turbohybrid_multivector_to_vector_array(sd.colbert))
+          WITH ORDINALITY AS token(v, ordinality)
+        ORDER BY md5(sd.doc_id::text || %s), sd.doc_id, token.ordinality
+        LIMIT %s
+        """,
+        (seed_text, sample_docs, seed_text, sample_tokens),
+    )
+    vectors: list[list[float]] = []
+    sampled_doc_ids: set[str] = set()
+    dim = 0
+    for doc_id, _ordinal, vector_text in rows:
+        vector = parse_vector_text(vector_text)
+        if not vector:
+            continue
+        if dim == 0:
+            dim = len(vector)
+        elif len(vector) != dim:
+            raise RuntimeError(
+                f"sampled vector dimension mismatch: expected {dim}, got {len(vector)}"
+            )
+        sampled_doc_ids.add(str(doc_id))
+        vectors.append(vector)
+    if not vectors:
+        raise RuntimeError("no ColBERT token vectors were sampled from dbpedia_colbert_docs")
+    counts = dbpedia_colbert_loaded_counts(conn)
+    metadata = {
+        "docs_loaded": int(counts.get("docs_loaded", 0) or 0),
+        "queries_loaded": int(counts.get("queries_loaded", 0) or 0),
+        "qrels_loaded": int(counts.get("qrels_loaded", 0) or 0),
+        "sample_docs_requested": sample_docs,
+        "sample_tokens_requested": sample_tokens,
+        "docs_sampled": len(sampled_doc_ids),
+        "tokens_sampled": len(vectors),
+        "dim": dim,
+        "sample_order": "md5(doc_id || seed), doc_id, token_ordinal",
+    }
+    return vectors, metadata
+
+
+def run_document_node_colbert_quantized_codebook_build_only(
+    conn: psycopg.Connection[Any],
+    args: argparse.Namespace,
+) -> dict[str, Any]:
+    started = time.perf_counter()
+    vectors, sample_metadata = sampled_colbert_token_vectors_for_codebook(conn, args)
+    centroids, kmeans_stats = sampled_cosine_kmeans_codebook(
+        vectors,
+        codebook_size=int(args.quantized_inverted_codebook_size),
+        iterations=int(args.quantized_inverted_codebook_kmeans_iterations),
+        seed=int(args.quantized_inverted_codebook_seed),
+        batch_size=int(args.quantized_inverted_codebook_batch_size),
+    )
+    codebook_output = args.quantized_inverted_codebook_output
+    checksum = str(kmeans_stats["checksum"])
+    atomic_write_text(codebook_output, quantized_codebook_text(centroids, checksum))
+    elapsed_ms = round((time.perf_counter() - started) * 1000.0, 3)
+    codebook_report = {
+        "enabled": True,
+        "pure_colbert_only": True,
+        "experimental": True,
+        "serving_path": False,
+        "builds_index": False,
+        "runs_retrieval": False,
+        "output_path": portable_path(codebook_output),
+        "format": "pgturbohybrid_quantized_inverted_codebook_v1",
+        "codebook_size": int(kmeans_stats["codebook_size"]),
+        "dim": int(kmeans_stats["dim"]),
+        "checksum": checksum,
+        "top_m_supported_by_current_sidecar": 1,
+        "sample": sample_metadata,
+        "kmeans": kmeans_stats,
+        "elapsed_ms": elapsed_ms,
+        "use_with": [
+            "--multivector-quantized-inverted-codebook external",
+            f"--multivector-quantized-inverted-codebook-path {portable_path(codebook_output)}",
+            "--multivector-quantized-inverted-codebook-top-m 1",
+        ],
+    }
+    report = {
+        "suite": "dbpedia_colbert_multivector",
+        "layer": "ir_quality_and_systems",
+        "generated_at": datetime.now(timezone.utc).isoformat(),
+        "command": command_metadata(),
+        "pgturbohybrid": {
+            "git_sha": git_sha(),
+        },
+        "document_node_colbert_quantized_codebook_build": codebook_report,
+    }
+    report["markdown_summary"] = markdown_quantized_codebook_build(report)
+    return report
+
+
+def markdown_quantized_codebook_build(report: dict[str, Any]) -> str:
+    build = report.get("document_node_colbert_quantized_codebook_build", {})
+    sample = build.get("sample", {})
+    kmeans = build.get("kmeans", {})
+    lines = [
+        "### Pure ColBERT quantized-inverted codebook build",
+        "",
+        "This is an experimental offline codebook artifact. It does not build an index, run retrieval, or change final exact MaxSim ranking.",
+        "",
+        f"- Output path: `{build.get('output_path', '')}`",
+        f"- Format: `{build.get('format', '')}`",
+        f"- Codebook size: `{build.get('codebook_size', '')}`",
+        f"- Dimension: `{build.get('dim', '')}`",
+        f"- Checksum: `{build.get('checksum', '')}`",
+        f"- Documents loaded: `{sample.get('docs_loaded', '')}`",
+        f"- Documents sampled: `{sample.get('docs_sampled', '')}`",
+        f"- Tokens sampled: `{sample.get('tokens_sampled', '')}`",
+        f"- K-means iterations: `{kmeans.get('iterations', '')}`",
+        f"- Seed: `{kmeans.get('seed', '')}`",
+        f"- Mean assignment score: `{kmeans.get('mean_assignment_score', '')}`",
+        f"- Elapsed: `{float(build.get('elapsed_ms', 0.0) or 0.0):.3f}` ms",
+        "",
+        "Use it only with the explicit experimental quantized_inverted path and `--multivector-quantized-inverted-codebook-top-m 1`.",
+    ]
+    return "\n".join(lines) + "\n"
+
+
 def measure_generation_sample(
     conn: psycopg.Connection[Any],
     args: argparse.Namespace,
@@ -4543,6 +5084,7 @@ def build_index(conn: psycopg.Connection[Any], args: argparse.Namespace) -> dict
         )
 
     exec_sql(conn, "DROP INDEX IF EXISTS dbpedia_colbert_docs_colbert_idx")
+    set_colbert_gucs(conn, args)
     started = time.perf_counter()
     lexical_column = build_index_lexical_column(args)
     reloptions_sql = ",\n              ".join(reloptions)
@@ -6101,6 +6643,11 @@ def storage_capabilities_from_stats(
             if "centroid_sidecar_available" in stats
             else None
         ),
+        "centroid_doc_codes_available": (
+            scan_stat_bool(stats, "centroid_doc_codes_available")
+            if "centroid_doc_codes_available" in stats
+            else None
+        ),
         "quantized_inverted_sidecar_available": (
             scan_stat_bool(stats, "quantized_inverted_sidecar_available")
             if "quantized_inverted_sidecar_available" in stats
@@ -6713,7 +7260,34 @@ def centroid_work_from_stats(stats: dict[str, Any]) -> dict[str, Any]:
         "centroid_lists_visited": scan_stat_int(stats, "centroid_lists_visited"),
         "centroid_docs_touched": scan_stat_int(stats, "centroid_docs_touched"),
         "centroid_pruned_docs": scan_stat_int(stats, "centroid_pruned_docs"),
+        "centroid_postings_touched": scan_stat_int(stats, "centroid_postings_touched"),
+        "centroid_postings_selected": scan_stat_int(stats, "centroid_postings_selected"),
+        "centroid_postings_skipped": scan_stat_int(stats, "centroid_postings_skipped"),
+        "centroid_posting_limit_per_token": scan_stat_int(
+            stats, "centroid_posting_limit_per_token"
+        ),
+        "centroid_probe_centroids_per_token": scan_stat_int(
+            stats, "centroid_probe_centroids_per_token"
+        ),
+        "centroid_score_threshold": scan_stat_float(
+            stats, "centroid_score_threshold"
+        ),
+        "centroid_score_drop_from_best": scan_stat_float(
+            stats, "centroid_score_drop_from_best"
+        ),
+        "centroid_lists_skipped_by_threshold": scan_stat_int(
+            stats, "centroid_lists_skipped_by_threshold"
+        ),
+        "centroid_posting_cap_strategy": scan_stat_str(
+            stats, "centroid_posting_cap_strategy"
+        ),
+        "centroid_candidate_scoring": scan_stat_str(
+            stats, "centroid_candidate_scoring"
+        ),
         "centroid_candidates": scan_stat_int(stats, "centroid_candidates"),
+        "centroid_bitset_min_token_matches": scan_stat_int(
+            stats, "centroid_bitset_min_token_matches"
+        ),
     }
 
 
@@ -6724,6 +7298,21 @@ def quantized_inverted_work_from_stats(stats: dict[str, Any]) -> dict[str, Any]:
         ),
         "quantized_inverted_postings_touched": scan_stat_int(
             stats, "quantized_inverted_postings_touched"
+        ),
+        "quantized_inverted_postings_selected": scan_stat_int(
+            stats, "quantized_inverted_postings_selected"
+        ),
+        "quantized_inverted_postings_skipped": scan_stat_int(
+            stats, "quantized_inverted_postings_skipped"
+        ),
+        "quantized_inverted_posting_limit_per_token": scan_stat_int(
+            stats, "quantized_inverted_posting_limit_per_token"
+        ),
+        "quantized_inverted_probe_codewords_per_token": scan_stat_int(
+            stats, "quantized_inverted_probe_codewords_per_token"
+        ),
+        "quantized_inverted_posting_cap_strategy": scan_stat_str(
+            stats, "quantized_inverted_posting_cap_strategy"
         ),
         "quantized_inverted_docs_scored": scan_stat_int(
             stats, "quantized_inverted_docs_scored"
@@ -6760,6 +7349,14 @@ def quantized_inverted_work_from_stats(stats: dict[str, Any]) -> dict[str, Any]:
             if stats.get("quantized_inverted_assignment_time_us") is not None
             else scan_stat_int(stats, "quantized_inverted_assignment_us")
         ),
+        "quantized_inverted_query_codeword_score_us": scan_stat_int(
+            stats, "quantized_inverted_query_codeword_score_us"
+        ),
+        "quantized_inverted_query_codeword_score_time_us": (
+            scan_stat_int(stats, "quantized_inverted_query_codeword_score_time_us")
+            if stats.get("quantized_inverted_query_codeword_score_time_us") is not None
+            else scan_stat_int(stats, "quantized_inverted_query_codeword_score_us")
+        ),
         "quantized_inverted_list_offset_bytes": scan_stat_int(
             stats, "quantized_inverted_list_offset_bytes"
         ),
@@ -6772,6 +7369,9 @@ def quantized_inverted_work_from_stats(stats: dict[str, Any]) -> dict[str, Any]:
         "quantized_inverted_compact_kernel": scan_stat_str(
             stats, "quantized_inverted_compact_kernel"
         ),
+        "quantized_inverted_compact_score_source": scan_stat_str(
+            stats, "quantized_inverted_compact_score_source"
+        ),
         "quantized_inverted_compact_score_us": scan_stat_int(
             stats, "quantized_inverted_compact_score_us"
         ),
@@ -6783,6 +7383,51 @@ def quantized_inverted_work_from_stats(stats: dict[str, Any]) -> dict[str, Any]:
         ),
         "quantized_inverted_compact_topk_changed_vs_scalar": scan_stat_bool(
             stats, "quantized_inverted_compact_topk_changed_vs_scalar"
+        ),
+        "quantized_inverted_token_coverage_mode": scan_stat_str(
+            stats, "quantized_inverted_token_coverage_mode"
+        ),
+        "quantized_inverted_active_query_tokens": scan_stat_int(
+            stats, "quantized_inverted_active_query_tokens"
+        ),
+        "quantized_inverted_token_matches_total": scan_stat_int(
+            stats, "quantized_inverted_token_matches_total"
+        ),
+        "quantized_inverted_token_matches_max": scan_stat_int(
+            stats, "quantized_inverted_token_matches_max"
+        ),
+        "quantized_inverted_min_token_matches": scan_stat_int(
+            stats, "quantized_inverted_min_token_matches"
+        ),
+        "quantized_inverted_token_match_filtered_docs": scan_stat_int(
+            stats, "quantized_inverted_token_match_filtered_docs"
+        ),
+        "quantized_inverted_score_bound_pruning_enabled": scan_stat_bool(
+            stats, "quantized_inverted_score_bound_pruning_enabled"
+        ),
+        "quantized_inverted_score_bound_docs_checked": scan_stat_int(
+            stats, "quantized_inverted_score_bound_docs_checked"
+        ),
+        "quantized_inverted_score_bound_docs_pruned": scan_stat_int(
+            stats, "quantized_inverted_score_bound_docs_pruned"
+        ),
+        "quantized_inverted_score_bound_prune_time_us": scan_stat_int(
+            stats, "quantized_inverted_score_bound_prune_time_us"
+        ),
+        "quantized_inverted_score_bound_time_us": scan_stat_int(
+            stats, "quantized_inverted_score_bound_time_us"
+        ),
+        "quantized_inverted_score_bound_unsafe_fallbacks": scan_stat_int(
+            stats, "quantized_inverted_score_bound_unsafe_fallbacks"
+        ),
+        "quantized_inverted_score_bound_prune_ratio": scan_stat_float(
+            stats, "quantized_inverted_score_bound_prune_ratio"
+        ),
+        "quantized_inverted_candidates_before_bound": scan_stat_int(
+            stats, "quantized_inverted_candidates_before_bound"
+        ),
+        "quantized_inverted_candidates_after_bound": scan_stat_int(
+            stats, "quantized_inverted_candidates_after_bound"
         ),
     }
 
@@ -7112,6 +7757,30 @@ def parse_int_grid(value: str, option_name: str) -> list[int]:
     if not items:
         raise SystemExit(f"{option_name} must contain at least one positive integer")
     return items
+
+
+def parse_nonnegative_int_grid(value: str, option_name: str) -> list[int]:
+    try:
+        items = [int(item.strip()) for item in value.split(",") if item.strip()]
+    except ValueError as exc:
+        raise SystemExit(f"{option_name} must contain comma-separated integers") from exc
+    items = sorted({item for item in items if item >= 0})
+    if not items:
+        raise SystemExit(
+            f"{option_name} must contain at least one non-negative integer"
+        )
+    return items
+
+
+def parse_float_grid(value: str, option_name: str) -> list[float]:
+    try:
+        items = [float(item.strip()) for item in value.split(",") if item.strip()]
+    except ValueError as exc:
+        raise SystemExit(f"{option_name} must contain comma-separated floats") from exc
+    unique = sorted(set(items))
+    if not unique:
+        raise SystemExit(f"{option_name} must contain at least one float")
+    return unique
 
 
 def effective_serving_grid_budget_sweep(args: argparse.Namespace) -> list[int]:
@@ -8342,9 +9011,11 @@ def document_node_serving_profiles(
     entry_sidecar_representatives: Sequence[int] = (),
     explicit_entry_sidecar_profile_names: bool = False,
     centroid_count: str,
+    centroid_lite_probe_counts: Sequence[int] = (4,),
     include_learned_projection: bool = False,
     include_proxy_exact_scan: bool = False,
     include_pure_dense_proxy_focus: bool = False,
+    include_external_quantized_codebook_profile: bool = False,
 ) -> list[DocumentNodeServingProfile]:
     profiles = [
         DocumentNodeServingProfile(
@@ -8398,6 +9069,35 @@ def document_node_serving_profiles(
             cache_mode="resident",
         ),
         DocumentNodeServingProfile(
+            name=(
+                "centroid_lite_centroid_only_probe_008_cap_128_"
+                "score_topk_codeword_maxsim"
+            ),
+            candidate_source="centroid_lite",
+            centroids="kmeans",
+            centroid_count=centroid_count,
+            storage_kind="centroid_only",
+            cache_mode="resident",
+            centroid_lite_max_postings_per_token=128,
+            centroid_lite_probe_centroids_per_token=8,
+            centroid_lite_posting_selection="score_topk",
+            centroid_lite_candidate_scoring="codeword_maxsim",
+        ),
+        DocumentNodeServingProfile(
+            name=(
+                "centroid_lite_centroid_only_probe_008_"
+                "union_score_codeword_maxsim"
+            ),
+            candidate_source="centroid_lite",
+            centroids="kmeans",
+            centroid_count=centroid_count,
+            storage_kind="centroid_only",
+            cache_mode="resident",
+            centroid_lite_probe_centroids_per_token=8,
+            centroid_lite_posting_selection="union_score",
+            centroid_lite_candidate_scoring="codeword_maxsim",
+        ),
+        DocumentNodeServingProfile(
             name="centroid_lite_centroid_only_pool_050",
             candidate_source="centroid_lite",
             centroids="kmeans",
@@ -8428,6 +9128,126 @@ def document_node_serving_profiles(
         )
         profiles.extend(
             DocumentNodeServingProfile(
+                name=f"centroid_lite_f16_cap_{int(cap):03d}_score_topk",
+                candidate_source="centroid_lite",
+                centroids="kmeans",
+                centroid_count=centroid_count,
+                storage_kind="f16",
+                centroid_lite_max_postings_per_token=int(cap),
+                centroid_lite_posting_selection="score_topk",
+            )
+            for cap in centroid_lite_posting_caps
+        )
+        profiles.extend(
+            DocumentNodeServingProfile(
+                name=f"centroid_lite_f16_cap_{int(cap):03d}_score_topk_docmaxsim",
+                candidate_source="centroid_lite",
+                centroids="kmeans",
+                centroid_count=centroid_count,
+                storage_kind="f16",
+                centroid_lite_max_postings_per_token=int(cap),
+                centroid_lite_posting_selection="score_topk",
+                centroid_lite_candidate_scoring="doc_centroid_maxsim",
+            )
+            for cap in centroid_lite_posting_caps
+        )
+        profiles.extend(
+            DocumentNodeServingProfile(
+                name=f"centroid_lite_f16_cap_{int(cap):03d}_score_topk_codeword_maxsim",
+                candidate_source="centroid_lite",
+                centroids="kmeans",
+                centroid_count=centroid_count,
+                storage_kind="f16",
+                centroid_lite_max_postings_per_token=int(cap),
+                centroid_lite_posting_selection="score_topk",
+                centroid_lite_candidate_scoring="codeword_maxsim",
+            )
+            for cap in centroid_lite_posting_caps
+        )
+        profiles.extend(
+            DocumentNodeServingProfile(
+                name=(
+                    f"centroid_lite_f16_cap_{int(cap):03d}"
+                    "_score_topk_codeword_topm_004"
+                ),
+                candidate_source="centroid_lite",
+                centroids="kmeans",
+                centroid_count=centroid_count,
+                storage_kind="f16",
+                centroid_lite_max_postings_per_token=int(cap),
+                centroid_lite_codeword_top_m=4,
+                centroid_lite_posting_selection="score_topk",
+                centroid_lite_candidate_scoring="codeword_maxsim",
+            )
+            for cap in centroid_lite_posting_caps
+        )
+        profiles.extend(
+            DocumentNodeServingProfile(
+                name=f"centroid_lite_f16_probe_004_cap_{int(cap):03d}_score_topk",
+                candidate_source="centroid_lite",
+                centroids="kmeans",
+                centroid_count=centroid_count,
+                storage_kind="f16",
+                centroid_lite_max_postings_per_token=int(cap),
+                centroid_lite_probe_centroids_per_token=4,
+                centroid_lite_posting_selection="score_topk",
+            )
+            for cap in centroid_lite_posting_caps
+        )
+        profiles.extend(
+            DocumentNodeServingProfile(
+                name=(
+                    f"centroid_lite_f16_probe_004_cap_{int(cap):03d}"
+                    "_score_topk_docmaxsim"
+                ),
+                candidate_source="centroid_lite",
+                centroids="kmeans",
+                centroid_count=centroid_count,
+                storage_kind="f16",
+                centroid_lite_max_postings_per_token=int(cap),
+                centroid_lite_probe_centroids_per_token=4,
+                centroid_lite_posting_selection="score_topk",
+                centroid_lite_candidate_scoring="doc_centroid_maxsim",
+            )
+            for cap in centroid_lite_posting_caps
+        )
+        profiles.extend(
+            DocumentNodeServingProfile(
+                name=(
+                    f"centroid_lite_f16_probe_004_cap_{int(cap):03d}"
+                    "_score_topk_codeword_maxsim"
+                ),
+                candidate_source="centroid_lite",
+                centroids="kmeans",
+                centroid_count=centroid_count,
+                storage_kind="f16",
+                centroid_lite_max_postings_per_token=int(cap),
+                centroid_lite_probe_centroids_per_token=4,
+                centroid_lite_posting_selection="score_topk",
+                centroid_lite_candidate_scoring="codeword_maxsim",
+            )
+            for cap in centroid_lite_posting_caps
+        )
+        profiles.extend(
+            DocumentNodeServingProfile(
+                name=(
+                    f"centroid_lite_f16_probe_004_cap_{int(cap):03d}"
+                    "_score_topk_codeword_topm_004"
+                ),
+                candidate_source="centroid_lite",
+                centroids="kmeans",
+                centroid_count=centroid_count,
+                storage_kind="f16",
+                centroid_lite_max_postings_per_token=int(cap),
+                centroid_lite_probe_centroids_per_token=4,
+                centroid_lite_codeword_top_m=4,
+                centroid_lite_posting_selection="score_topk",
+                centroid_lite_candidate_scoring="codeword_maxsim",
+            )
+            for cap in centroid_lite_posting_caps
+        )
+        profiles.extend(
+            DocumentNodeServingProfile(
                 name=f"centroid_lite_centroid_only_cap_{int(cap):03d}",
                 candidate_source="centroid_lite",
                 centroids="kmeans",
@@ -8438,6 +9258,271 @@ def document_node_serving_profiles(
             )
             for cap in centroid_lite_posting_caps
         )
+        profiles.extend(
+            DocumentNodeServingProfile(
+                name=f"centroid_lite_centroid_only_cap_{int(cap):03d}_score_topk",
+                candidate_source="centroid_lite",
+                centroids="kmeans",
+                centroid_count=centroid_count,
+                storage_kind="centroid_only",
+                cache_mode="resident",
+                centroid_lite_max_postings_per_token=int(cap),
+                centroid_lite_posting_selection="score_topk",
+            )
+            for cap in centroid_lite_posting_caps
+        )
+        profiles.extend(
+            DocumentNodeServingProfile(
+                name=(
+                    f"centroid_lite_centroid_only_cap_{int(cap):03d}"
+                    "_score_topk_docmaxsim"
+                ),
+                candidate_source="centroid_lite",
+                centroids="kmeans",
+                centroid_count=centroid_count,
+                storage_kind="centroid_only",
+                cache_mode="resident",
+                centroid_lite_max_postings_per_token=int(cap),
+                centroid_lite_posting_selection="score_topk",
+                centroid_lite_candidate_scoring="doc_centroid_maxsim",
+            )
+            for cap in centroid_lite_posting_caps
+        )
+        profiles.extend(
+            DocumentNodeServingProfile(
+                name=(
+                    f"centroid_lite_centroid_only_cap_{int(cap):03d}"
+                    "_score_topk_codeword_maxsim"
+                ),
+                candidate_source="centroid_lite",
+                centroids="kmeans",
+                centroid_count=centroid_count,
+                storage_kind="centroid_only",
+                cache_mode="resident",
+                centroid_lite_max_postings_per_token=int(cap),
+                centroid_lite_posting_selection="score_topk",
+                centroid_lite_candidate_scoring="codeword_maxsim",
+            )
+            for cap in centroid_lite_posting_caps
+        )
+        profiles.extend(
+            DocumentNodeServingProfile(
+                name=(
+                    f"centroid_lite_centroid_only_cap_{int(cap):03d}"
+                    "_score_topk_codeword_topm_004"
+                ),
+                candidate_source="centroid_lite",
+                centroids="kmeans",
+                centroid_count=centroid_count,
+                storage_kind="centroid_only",
+                cache_mode="resident",
+                centroid_lite_max_postings_per_token=int(cap),
+                centroid_lite_codeword_top_m=4,
+                centroid_lite_posting_selection="score_topk",
+                centroid_lite_candidate_scoring="codeword_maxsim",
+            )
+            for cap in centroid_lite_posting_caps
+        )
+        profiles.extend(
+            DocumentNodeServingProfile(
+                name=(
+                    f"centroid_lite_centroid_only_probe_004_cap_{int(cap):03d}"
+                    "_score_topk"
+                ),
+                candidate_source="centroid_lite",
+                centroids="kmeans",
+                centroid_count=centroid_count,
+                storage_kind="centroid_only",
+                cache_mode="resident",
+                centroid_lite_max_postings_per_token=int(cap),
+                centroid_lite_probe_centroids_per_token=4,
+                centroid_lite_posting_selection="score_topk",
+            )
+            for cap in centroid_lite_posting_caps
+        )
+        profiles.extend(
+            DocumentNodeServingProfile(
+                name=(
+                    f"centroid_lite_centroid_only_probe_004_cap_{int(cap):03d}"
+                    "_score_topk_docmaxsim"
+                ),
+                candidate_source="centroid_lite",
+                centroids="kmeans",
+                centroid_count=centroid_count,
+                storage_kind="centroid_only",
+                cache_mode="resident",
+                centroid_lite_max_postings_per_token=int(cap),
+                centroid_lite_probe_centroids_per_token=4,
+                centroid_lite_posting_selection="score_topk",
+                centroid_lite_candidate_scoring="doc_centroid_maxsim",
+            )
+            for cap in centroid_lite_posting_caps
+        )
+        profiles.extend(
+            DocumentNodeServingProfile(
+                name=(
+                    f"centroid_lite_centroid_only_probe_004_cap_{int(cap):03d}"
+                    "_score_topk_codeword_maxsim"
+                ),
+                candidate_source="centroid_lite",
+                centroids="kmeans",
+                centroid_count=centroid_count,
+                storage_kind="centroid_only",
+                cache_mode="resident",
+                centroid_lite_max_postings_per_token=int(cap),
+                centroid_lite_probe_centroids_per_token=4,
+                centroid_lite_posting_selection="score_topk",
+                centroid_lite_candidate_scoring="codeword_maxsim",
+            )
+            for cap in centroid_lite_posting_caps
+        )
+        profiles.extend(
+            DocumentNodeServingProfile(
+                name=(
+                    f"centroid_lite_centroid_only_probe_004_cap_{int(cap):03d}"
+                    "_score_topk_codeword_topm_004"
+                ),
+                candidate_source="centroid_lite",
+                centroids="kmeans",
+                centroid_count=centroid_count,
+                storage_kind="centroid_only",
+                cache_mode="resident",
+                centroid_lite_max_postings_per_token=int(cap),
+                centroid_lite_probe_centroids_per_token=4,
+                centroid_lite_codeword_top_m=4,
+                centroid_lite_posting_selection="score_topk",
+                centroid_lite_candidate_scoring="codeword_maxsim",
+            )
+            for cap in centroid_lite_posting_caps
+        )
+        for probe in centroid_lite_probe_counts:
+            probe_int = int(probe)
+            if probe_int == 4:
+                continue
+            probe_suffix = f"{probe_int:03d}"
+            for cap in centroid_lite_posting_caps:
+                cap_int = int(cap)
+                cap_suffix = f"{cap_int:03d}"
+                profiles.extend(
+                    [
+                        DocumentNodeServingProfile(
+                            name=(
+                                f"centroid_lite_f16_probe_{probe_suffix}_cap_{cap_suffix}"
+                                "_score_topk"
+                            ),
+                            candidate_source="centroid_lite",
+                            centroids="kmeans",
+                            centroid_count=centroid_count,
+                            storage_kind="f16",
+                            centroid_lite_max_postings_per_token=cap_int,
+                            centroid_lite_probe_centroids_per_token=probe_int,
+                            centroid_lite_posting_selection="score_topk",
+                        ),
+                        DocumentNodeServingProfile(
+                            name=(
+                                f"centroid_lite_f16_probe_{probe_suffix}_cap_{cap_suffix}"
+                                "_score_topk_docmaxsim"
+                            ),
+                            candidate_source="centroid_lite",
+                            centroids="kmeans",
+                            centroid_count=centroid_count,
+                            storage_kind="f16",
+                            centroid_lite_max_postings_per_token=cap_int,
+                            centroid_lite_probe_centroids_per_token=probe_int,
+                            centroid_lite_posting_selection="score_topk",
+                            centroid_lite_candidate_scoring="doc_centroid_maxsim",
+                        ),
+                        DocumentNodeServingProfile(
+                            name=(
+                                f"centroid_lite_f16_probe_{probe_suffix}_cap_{cap_suffix}"
+                                "_score_topk_codeword_maxsim"
+                            ),
+                            candidate_source="centroid_lite",
+                            centroids="kmeans",
+                            centroid_count=centroid_count,
+                            storage_kind="f16",
+                            centroid_lite_max_postings_per_token=cap_int,
+                            centroid_lite_probe_centroids_per_token=probe_int,
+                            centroid_lite_posting_selection="score_topk",
+                            centroid_lite_candidate_scoring="codeword_maxsim",
+                        ),
+                        DocumentNodeServingProfile(
+                            name=(
+                                f"centroid_lite_f16_probe_{probe_suffix}_cap_{cap_suffix}"
+                                "_score_topk_codeword_topm_004"
+                            ),
+                            candidate_source="centroid_lite",
+                            centroids="kmeans",
+                            centroid_count=centroid_count,
+                            storage_kind="f16",
+                            centroid_lite_max_postings_per_token=cap_int,
+                            centroid_lite_probe_centroids_per_token=probe_int,
+                            centroid_lite_codeword_top_m=4,
+                            centroid_lite_posting_selection="score_topk",
+                            centroid_lite_candidate_scoring="codeword_maxsim",
+                        ),
+                        DocumentNodeServingProfile(
+                            name=(
+                                f"centroid_lite_centroid_only_probe_{probe_suffix}_cap_{cap_suffix}"
+                                "_score_topk"
+                            ),
+                            candidate_source="centroid_lite",
+                            centroids="kmeans",
+                            centroid_count=centroid_count,
+                            storage_kind="centroid_only",
+                            cache_mode="resident",
+                            centroid_lite_max_postings_per_token=cap_int,
+                            centroid_lite_probe_centroids_per_token=probe_int,
+                            centroid_lite_posting_selection="score_topk",
+                        ),
+                        DocumentNodeServingProfile(
+                            name=(
+                                f"centroid_lite_centroid_only_probe_{probe_suffix}_cap_{cap_suffix}"
+                                "_score_topk_docmaxsim"
+                            ),
+                            candidate_source="centroid_lite",
+                            centroids="kmeans",
+                            centroid_count=centroid_count,
+                            storage_kind="centroid_only",
+                            cache_mode="resident",
+                            centroid_lite_max_postings_per_token=cap_int,
+                            centroid_lite_probe_centroids_per_token=probe_int,
+                            centroid_lite_posting_selection="score_topk",
+                            centroid_lite_candidate_scoring="doc_centroid_maxsim",
+                        ),
+                        DocumentNodeServingProfile(
+                            name=(
+                                f"centroid_lite_centroid_only_probe_{probe_suffix}_cap_{cap_suffix}"
+                                "_score_topk_codeword_maxsim"
+                            ),
+                            candidate_source="centroid_lite",
+                            centroids="kmeans",
+                            centroid_count=centroid_count,
+                            storage_kind="centroid_only",
+                            cache_mode="resident",
+                            centroid_lite_max_postings_per_token=cap_int,
+                            centroid_lite_probe_centroids_per_token=probe_int,
+                            centroid_lite_posting_selection="score_topk",
+                            centroid_lite_candidate_scoring="codeword_maxsim",
+                        ),
+                        DocumentNodeServingProfile(
+                            name=(
+                                f"centroid_lite_centroid_only_probe_{probe_suffix}_cap_{cap_suffix}"
+                                "_score_topk_codeword_topm_004"
+                            ),
+                            candidate_source="centroid_lite",
+                            centroids="kmeans",
+                            centroid_count=centroid_count,
+                            storage_kind="centroid_only",
+                            cache_mode="resident",
+                            centroid_lite_max_postings_per_token=cap_int,
+                            centroid_lite_probe_centroids_per_token=probe_int,
+                            centroid_lite_codeword_top_m=4,
+                            centroid_lite_posting_selection="score_topk",
+                            centroid_lite_candidate_scoring="codeword_maxsim",
+                        ),
+                    ]
+                )
         profiles.append(
             DocumentNodeServingProfile(
                 name="centroid_lite_f16_prune_safe_upper_bound",
@@ -8882,6 +9967,147 @@ def document_node_serving_profiles(
                 plain_fallback="off",
             )
         )
+        profiles.append(
+            DocumentNodeServingProfile(
+                name="quantized_inverted_experimental_f32_compact_topk_032",
+                candidate_source="quantized_inverted_experimental",
+                storage_kind="f32",
+                plain_fallback="off",
+                quantized_inverted_max_postings_per_token=32,
+                quantized_inverted_probe_codewords_per_token=4,
+                quantized_inverted_posting_selection="score_topk",
+                quantized_inverted_compact_scoring="experimental",
+            )
+        )
+        profiles.append(
+            DocumentNodeServingProfile(
+                name="quantized_inverted_experimental_f32_compact_topk_032_coverage",
+                candidate_source="quantized_inverted_experimental",
+                storage_kind="f32",
+                plain_fallback="off",
+                quantized_inverted_max_postings_per_token=32,
+                quantized_inverted_probe_codewords_per_token=4,
+                quantized_inverted_posting_selection="score_topk",
+                quantized_inverted_compact_scoring="experimental",
+                quantized_inverted_token_coverage="linear",
+            )
+        )
+        if include_external_quantized_codebook_profile:
+            profiles.append(
+                DocumentNodeServingProfile(
+                    name="quantized_inverted_external_f32_compact_topk_032",
+                    candidate_source="quantized_inverted_experimental",
+                    storage_kind="f32",
+                    plain_fallback="off",
+                    quantized_inverted_max_postings_per_token=32,
+                    quantized_inverted_probe_codewords_per_token=4,
+                    quantized_inverted_posting_selection="score_topk",
+                    quantized_inverted_compact_scoring="experimental",
+                    quantized_inverted_codebook="external",
+                    quantized_inverted_codebook_top_m=1,
+                )
+            )
+            profiles.append(
+                DocumentNodeServingProfile(
+                    name="quantized_inverted_external_f32_compact_topk_032_topm_02",
+                    candidate_source="quantized_inverted_experimental",
+                    storage_kind="f32",
+                    plain_fallback="off",
+                    quantized_inverted_max_postings_per_token=32,
+                    quantized_inverted_probe_codewords_per_token=4,
+                    quantized_inverted_posting_selection="score_topk",
+                    quantized_inverted_compact_scoring="experimental",
+                    quantized_inverted_codebook="external",
+                    quantized_inverted_codebook_top_m=2,
+                )
+            )
+            profiles.append(
+                DocumentNodeServingProfile(
+                    name="quantized_inverted_external_centroid_only_compact_topk_032",
+                    candidate_source="quantized_inverted_experimental",
+                    storage_kind="centroid_only",
+                    centroids="off",
+                    centroid_count=centroid_count,
+                    plain_fallback="off",
+                    quantized_inverted_max_postings_per_token=32,
+                    quantized_inverted_probe_codewords_per_token=4,
+                    quantized_inverted_posting_selection="score_topk",
+                    quantized_inverted_compact_scoring="experimental",
+                    quantized_inverted_codebook="external",
+                    quantized_inverted_codebook_top_m=1,
+                )
+            )
+            profiles.append(
+                DocumentNodeServingProfile(
+                    name="quantized_inverted_external_centroid_only_compact_topk_032_score_bound",
+                    candidate_source="quantized_inverted_experimental",
+                    storage_kind="centroid_only",
+                    centroids="off",
+                    centroid_count=centroid_count,
+                    plain_fallback="off",
+                    quantized_inverted_max_postings_per_token=32,
+                    quantized_inverted_probe_codewords_per_token=4,
+                    quantized_inverted_posting_selection="score_topk",
+                    quantized_inverted_compact_scoring="experimental",
+                    quantized_inverted_pruning="score_bound_experimental",
+                    quantized_inverted_codebook="external",
+                    quantized_inverted_codebook_top_m=1,
+                )
+            )
+            profiles.append(
+                DocumentNodeServingProfile(
+                    name=(
+                        "quantized_inverted_external_centroid_only"
+                        "_compact_topk_032_coverage"
+                    ),
+                    candidate_source="quantized_inverted_experimental",
+                    storage_kind="centroid_only",
+                    centroids="off",
+                    centroid_count=centroid_count,
+                    plain_fallback="off",
+                    quantized_inverted_max_postings_per_token=32,
+                    quantized_inverted_probe_codewords_per_token=4,
+                    quantized_inverted_posting_selection="score_topk",
+                    quantized_inverted_compact_scoring="experimental",
+                    quantized_inverted_token_coverage="linear",
+                    quantized_inverted_codebook="external",
+                    quantized_inverted_codebook_top_m=1,
+                )
+            )
+            profiles.append(
+                DocumentNodeServingProfile(
+                    name="quantized_inverted_external_centroid_only_compact_topk_032_topm_02",
+                    candidate_source="quantized_inverted_experimental",
+                    storage_kind="centroid_only",
+                    centroids="off",
+                    centroid_count=centroid_count,
+                    plain_fallback="off",
+                    quantized_inverted_max_postings_per_token=32,
+                    quantized_inverted_probe_codewords_per_token=4,
+                    quantized_inverted_posting_selection="score_topk",
+                    quantized_inverted_compact_scoring="experimental",
+                    quantized_inverted_codebook="external",
+                    quantized_inverted_codebook_top_m=2,
+                )
+            )
+            profiles.append(
+                DocumentNodeServingProfile(
+                    name="quantized_inverted_external_centroid_only_compact_topk_032_pool_050",
+                    candidate_source="quantized_inverted_experimental",
+                    storage_kind="centroid_only",
+                    centroids="off",
+                    centroid_count=centroid_count,
+                    token_pooling="greedy_cosine",
+                    token_pooling_target_ratio=0.5,
+                    plain_fallback="off",
+                    quantized_inverted_max_postings_per_token=32,
+                    quantized_inverted_probe_codewords_per_token=4,
+                    quantized_inverted_posting_selection="score_topk",
+                    quantized_inverted_compact_scoring="experimental",
+                    quantized_inverted_codebook="external",
+                    quantized_inverted_codebook_top_m=1,
+                )
+            )
     deduped: list[DocumentNodeServingProfile] = []
     seen_names: set[str] = set()
     for profile in profiles:
@@ -8939,6 +10165,47 @@ def validate_document_node_serving_profile_inputs(
                 "learned_projection_v1 proxy profile requires an existing "
                 f"--multivector-learned-projection-path: {path}"
             )
+    for profile in profiles:
+        if profile.candidate_source != "quantized_inverted_experimental":
+            continue
+        source, path_text, top_m = effective_quantized_inverted_codebook_settings(
+            args, profile
+        )
+        if source not in {"deterministic", "external"}:
+            raise SystemExit(
+                "quantized_inverted_experimental profiles require "
+                "--multivector-quantized-inverted-codebook to be "
+                "deterministic or external"
+            )
+        if not 1 <= top_m <= 16:
+            raise SystemExit(
+                "quantized_inverted_experimental benchmark profiles require "
+                "--multivector-quantized-inverted-codebook-top-m in [1, 16]"
+            )
+        if source != "external" and top_m != 1:
+            raise SystemExit(
+                "quantized_inverted_experimental deterministic codebook "
+                "profiles require --multivector-quantized-inverted-codebook-top-m 1"
+            )
+        if source == "external":
+            if not path_text:
+                raise SystemExit(
+                    f"{profile.name} requires "
+                    "--multivector-quantized-inverted-codebook-path"
+                )
+            path = Path(path_text).expanduser()
+            if not path.is_file():
+                raise SystemExit(
+                    f"{profile.name} requires an existing external "
+                    "quantized-inverted codebook file: "
+                    f"{path}"
+                )
+            if not profile.quantized_inverted_codebook_path:
+                setattr(
+                    args,
+                    "multivector_quantized_inverted_codebook_path",
+                    str(path.resolve()),
+                )
     if not any(profile.sparse_candidate_source == "learned_sparse" for profile in profiles):
         return
     # Detailed missing/incomplete learned-sparse JSONL errors need the loaded
@@ -8983,6 +10250,9 @@ def effective_document_node_serving_profiles(
     )
     colbert_quantized_inverted_focus = bool(
         getattr(args, "document_node_colbert_quantized_inverted_focus", False)
+    )
+    colbert_candidate_source_focus = bool(
+        getattr(args, "document_node_colbert_candidate_source_focus", False)
     )
     colbert_1m_grid = bool(getattr(args, "document_node_colbert_1m_grid", False))
     profiles = document_node_serving_profiles(
@@ -9060,8 +10330,21 @@ def effective_document_node_serving_profiles(
             or bool(getattr(args, "document_node_colbert_1m_include_entry_sidecar", False))
         ),
         centroid_count=args.multivector_centroid_count,
+        centroid_lite_probe_counts=(
+            effective_document_node_colbert_candidate_source_focus_probes(args)
+            if colbert_candidate_source_focus
+            else (4,)
+        ),
         include_proxy_exact_scan=proxy_oracle_focus,
         include_pure_dense_proxy_focus=pure_dense_proxy_focus,
+        include_external_quantized_codebook_profile=(
+            bool(str(getattr(args, "multivector_quantized_inverted_codebook_path", "") or ""))
+            or str(
+                getattr(args, "multivector_quantized_inverted_codebook", "")
+                or ""
+            )
+            == "external"
+        ),
     )
     if colbert_1m_grid:
         if document_node_colbert_1m_single_index_mode_requested(args):
@@ -9271,6 +10554,9 @@ def document_node_serving_profile_by_name(
     colbert_quantized_inverted_focus = bool(
         getattr(args, "document_node_colbert_quantized_inverted_focus", False)
     )
+    colbert_candidate_source_focus = bool(
+        getattr(args, "document_node_colbert_candidate_source_focus", False)
+    )
     profiles = document_node_serving_profiles(
         include_experimental=(
             args.document_node_serving_grid_include_experimental
@@ -9330,8 +10616,21 @@ def document_node_serving_profile_by_name(
         ),
         explicit_entry_sidecar_profile_names=proxy_admission_focus or colbert_entry_focus,
         centroid_count=args.multivector_centroid_count,
+        centroid_lite_probe_counts=(
+            effective_document_node_colbert_candidate_source_focus_probes(args)
+            if colbert_candidate_source_focus
+            else (4,)
+        ),
         include_proxy_exact_scan=proxy_oracle_focus,
         include_pure_dense_proxy_focus=pure_dense_proxy_focus,
+        include_external_quantized_codebook_profile=(
+            bool(str(getattr(args, "multivector_quantized_inverted_codebook_path", "") or ""))
+            or str(
+                getattr(args, "multivector_quantized_inverted_codebook", "")
+                or ""
+            )
+            == "external"
+        ),
     )
     by_name = {profile.name: profile for profile in profiles}
     profile = by_name.get(name)
@@ -9494,7 +10793,10 @@ def document_node_colbert_sampled_admission_profile(
 def effective_document_node_colbert_candidate_source_focus_budgets(
     args: argparse.Namespace,
 ) -> list[int]:
-    source = str(getattr(args, "candidate_budgets", "") or "800,1600")
+    source = str(
+        getattr(args, "candidate_budgets", "")
+        or DOCUMENT_NODE_COLBERT_CANDIDATE_SOURCE_DEFAULT_BUDGETS
+    )
     return parse_int_grid(source, "--candidate-budgets")
 
 
@@ -9505,6 +10807,119 @@ def effective_document_node_colbert_candidate_source_focus_caps(
     return parse_int_grid(source, "--centroid-lite-caps")
 
 
+def effective_document_node_colbert_candidate_source_focus_probes(
+    args: argparse.Namespace,
+) -> list[int]:
+    source = str(getattr(args, "centroid_lite_probes", "") or "4")
+    return parse_int_grid(source, "--centroid-lite-probes")
+
+
+def effective_document_node_colbert_candidate_source_focus_quantized_caps(
+    args: argparse.Namespace,
+) -> list[int]:
+    source = str(
+        getattr(args, "quantized_inverted_posting_caps", "")
+        or DOCUMENT_NODE_COLBERT_CANDIDATE_SOURCE_DEFAULT_QUANTIZED_CAPS
+    )
+    caps = parse_nonnegative_int_grid(
+        source, "--quantized-inverted-posting-caps"
+    )
+    invalid = [cap for cap in caps if cap < 0]
+    if invalid:
+        raise SystemExit(
+            "--quantized-inverted-posting-caps values must be non-negative; "
+            "use 0 for uncapped full selected posting lists"
+        )
+    return caps
+
+
+def effective_document_node_colbert_candidate_source_focus_quantized_probes(
+    args: argparse.Namespace,
+) -> list[int]:
+    source = str(
+        getattr(args, "quantized_inverted_probes", "")
+        or DOCUMENT_NODE_COLBERT_CANDIDATE_SOURCE_DEFAULT_QUANTIZED_PROBES
+    )
+    probes = parse_int_grid(source, "--quantized-inverted-probes")
+    invalid = [probe for probe in probes if probe < 1]
+    if invalid:
+        raise SystemExit("--quantized-inverted-probes values must be positive")
+    return probes
+
+
+def effective_document_node_colbert_candidate_source_focus_quantized_top_ms(
+    args: argparse.Namespace,
+) -> list[int]:
+    source = str(
+        getattr(args, "quantized_inverted_codebook_top_ms", "")
+        or DOCUMENT_NODE_COLBERT_CANDIDATE_SOURCE_DEFAULT_QUANTIZED_TOP_MS
+    )
+    top_ms = parse_int_grid(source, "--quantized-inverted-codebook-top-ms")
+    invalid = [top_m for top_m in top_ms if not 1 <= top_m <= 16]
+    if invalid:
+        raise SystemExit(
+            "--quantized-inverted-codebook-top-ms values must be in [1, 16]"
+        )
+    return top_ms
+
+
+def effective_document_node_colbert_candidate_source_focus_score_thresholds(
+    args: argparse.Namespace,
+) -> list[float]:
+    source = str(getattr(args, "centroid_lite_score_thresholds", "") or "-1")
+    thresholds = parse_float_grid(source, "--centroid-lite-score-thresholds")
+    invalid = [threshold for threshold in thresholds if not -1.0 <= threshold <= 1.0]
+    if invalid:
+        raise SystemExit("--centroid-lite-score-thresholds values must be in [-1, 1]")
+    return thresholds
+
+
+def effective_document_node_colbert_candidate_source_focus_score_drops(
+    args: argparse.Namespace,
+) -> list[float]:
+    source = str(
+        getattr(args, "centroid_lite_score_drop_from_best_values", "") or "-1"
+    )
+    drops = parse_float_grid(source, "--centroid-lite-score-drop-from-best-values")
+    invalid = [drop for drop in drops if not -1.0 <= drop <= 2.0]
+    if invalid:
+        raise SystemExit(
+            "--centroid-lite-score-drop-from-best-values values must be in [-1, 2]"
+        )
+    return drops
+
+
+def centroid_lite_score_threshold_suffix(threshold: float) -> str:
+    scaled = int(round(threshold * 100.0))
+    if scaled < 0:
+        return f"m{abs(scaled):03d}"
+    return f"{scaled:03d}"
+
+
+def centroid_lite_threshold_profile_name(base_name: str, threshold: float) -> str:
+    return f"{base_name}_threshold_{centroid_lite_score_threshold_suffix(threshold)}"
+
+
+def centroid_lite_score_drop_suffix(drop: float) -> str:
+    scaled = int(round(drop * 100.0))
+    if scaled < 0:
+        return f"m{abs(scaled):03d}"
+    return f"{scaled:03d}"
+
+
+def centroid_lite_score_drop_profile_name(base_name: str, drop: float) -> str:
+    return f"{base_name}_drop_{centroid_lite_score_drop_suffix(drop)}"
+
+
+def centroid_lite_threshold_profile_base(profile: DocumentNodeServingProfile) -> bool:
+    return (
+        profile.candidate_source == "centroid_lite"
+        and profile.centroid_lite_posting_selection == "score_topk"
+        and profile.centroid_lite_candidate_scoring
+        in {"codeword_maxsim", "doc_centroid_maxsim"}
+    )
+
+
 def document_node_colbert_candidate_source_focus_profiles(
     args: argparse.Namespace,
 ) -> list[DocumentNodeServingProfile]:
@@ -9513,6 +10928,22 @@ def document_node_colbert_candidate_source_focus_profiles(
         or getattr(args, "document_node_colbert_include_experimental", False)
     )
     cap_values = effective_document_node_colbert_candidate_source_focus_caps(args)
+    probe_values = effective_document_node_colbert_candidate_source_focus_probes(args)
+    quantized_cap_values = (
+        effective_document_node_colbert_candidate_source_focus_quantized_caps(args)
+    )
+    quantized_probe_values = (
+        effective_document_node_colbert_candidate_source_focus_quantized_probes(args)
+    )
+    quantized_top_m_values = (
+        effective_document_node_colbert_candidate_source_focus_quantized_top_ms(args)
+    )
+    threshold_values = (
+        effective_document_node_colbert_candidate_source_focus_score_thresholds(args)
+    )
+    score_drop_values = (
+        effective_document_node_colbert_candidate_source_focus_score_drops(args)
+    )
     profile_args = clone_args(
         args,
         document_node_serving_grid=True,
@@ -9530,10 +10961,190 @@ def document_node_colbert_candidate_source_focus_profiles(
         document_node_colbert_1m_include_experimental=include_experimental,
         hybrid_evaluation_harness=False,
     )
-    allowed_names = list(DOCUMENT_NODE_COLBERT_CANDIDATE_SOURCE_FOCUS_PROFILES)
+    dynamic_cap_names: list[str] = []
+    for cap in cap_values:
+        cap_int = int(cap)
+        cap_suffix = f"{cap_int:03d}"
+        dynamic_cap_names.extend(
+            [
+                f"centroid_lite_f16_cap_{cap_suffix}",
+                f"centroid_lite_f16_cap_{cap_suffix}_score_topk",
+                f"centroid_lite_f16_cap_{cap_suffix}_score_topk_codeword_maxsim",
+                (
+                    f"centroid_lite_f16_cap_{cap_suffix}"
+                    "_score_topk_codeword_topm_004"
+                ),
+                f"centroid_lite_f16_cap_{cap_suffix}_score_topk_docmaxsim",
+                f"centroid_lite_f16_probe_004_cap_{cap_suffix}_score_topk",
+                (
+                    f"centroid_lite_f16_probe_004_cap_{cap_suffix}"
+                    "_score_topk_codeword_maxsim"
+                ),
+                (
+                    f"centroid_lite_f16_probe_004_cap_{cap_suffix}"
+                    "_score_topk_codeword_topm_004"
+                ),
+                f"centroid_lite_f16_probe_004_cap_{cap_suffix}_score_topk_docmaxsim",
+                f"centroid_lite_centroid_only_cap_{cap_suffix}",
+                f"centroid_lite_centroid_only_cap_{cap_suffix}_score_topk",
+                (
+                    f"centroid_lite_centroid_only_cap_{cap_suffix}"
+                    "_score_topk_codeword_maxsim"
+                ),
+                (
+                    f"centroid_lite_centroid_only_cap_{cap_suffix}"
+                    "_score_topk_codeword_topm_004"
+                ),
+                f"centroid_lite_centroid_only_cap_{cap_suffix}_score_topk_docmaxsim",
+                (
+                    f"centroid_lite_centroid_only_probe_004_cap_{cap_suffix}"
+                    "_score_topk"
+                ),
+                (
+                    f"centroid_lite_centroid_only_probe_004_cap_{cap_suffix}"
+                    "_score_topk_codeword_maxsim"
+                ),
+                (
+                    f"centroid_lite_centroid_only_probe_004_cap_{cap_suffix}"
+                    "_score_topk_codeword_topm_004"
+                ),
+                (
+                    f"centroid_lite_centroid_only_probe_004_cap_{cap_suffix}"
+                "_score_topk_docmaxsim"
+                ),
+            ]
+        )
+        for probe in probe_values:
+            probe_int = int(probe)
+            if probe_int == 4:
+                continue
+            probe_suffix = f"{probe_int:03d}"
+            dynamic_cap_names.extend(
+                [
+                    f"centroid_lite_f16_probe_{probe_suffix}_cap_{cap_suffix}_score_topk",
+                    (
+                        f"centroid_lite_f16_probe_{probe_suffix}_cap_{cap_suffix}"
+                        "_score_topk_codeword_maxsim"
+                    ),
+                    (
+                        f"centroid_lite_f16_probe_{probe_suffix}_cap_{cap_suffix}"
+                        "_score_topk_codeword_topm_004"
+                    ),
+                    (
+                        f"centroid_lite_f16_probe_{probe_suffix}_cap_{cap_suffix}"
+                        "_score_topk_docmaxsim"
+                    ),
+                    (
+                        f"centroid_lite_centroid_only_probe_{probe_suffix}_cap_{cap_suffix}"
+                        "_score_topk"
+                    ),
+                    (
+                        f"centroid_lite_centroid_only_probe_{probe_suffix}_cap_{cap_suffix}"
+                        "_score_topk_codeword_maxsim"
+                    ),
+                    (
+                        f"centroid_lite_centroid_only_probe_{probe_suffix}_cap_{cap_suffix}"
+                        "_score_topk_codeword_topm_004"
+                    ),
+                    (
+                        f"centroid_lite_centroid_only_probe_{probe_suffix}_cap_{cap_suffix}"
+                        "_score_topk_docmaxsim"
+                    ),
+                ]
+            )
+    if 32 in {int(cap) for cap in cap_values}:
+        dynamic_cap_names.extend(
+            [
+                "centroid_lite_centroid_only_cap_032_bitset_prefilter",
+                "centroid_lite_centroid_only_cap_032_prune_safe_upper_bound",
+            ]
+        )
+    allowed_names = unique_preserve_order(
+        [
+            *DOCUMENT_NODE_COLBERT_CANDIDATE_SOURCE_FOCUS_PROFILES,
+            *dynamic_cap_names,
+        ]
+    )
     if include_experimental:
         allowed_names.extend(
             DOCUMENT_NODE_COLBERT_CANDIDATE_SOURCE_FOCUS_EXPERIMENTAL_PROFILES
+        )
+        allowed_names = unique_preserve_order(allowed_names)
+    quantized_dynamic_profiles: list[DocumentNodeServingProfile] = []
+    quantized_external_enabled = bool(
+        include_experimental
+        and (
+            str(
+                getattr(args, "multivector_quantized_inverted_codebook_path", "")
+                or ""
+            ).strip()
+            or str(
+                getattr(args, "multivector_quantized_inverted_codebook", "") or ""
+            ).strip()
+            == "external"
+        )
+    )
+    if quantized_external_enabled:
+        for cap in quantized_cap_values:
+            cap_int = int(cap)
+            cap_suffix = "full" if cap_int == 0 else f"{cap_int:03d}"
+            for probe in quantized_probe_values:
+                probe_int = int(probe)
+                probe_suffix = f"{probe_int:03d}"
+                for top_m in quantized_top_m_values:
+                    top_m_int = int(top_m)
+                    top_m_suffix = f"{top_m_int:02d}"
+                    if cap_int == 32 and probe_int == 4 and top_m_int == 1:
+                        continue
+                    if cap_int == 32 and probe_int == 4 and top_m_int == 2:
+                        continue
+                    quantized_dynamic_profiles.append(
+                        DocumentNodeServingProfile(
+                            name=(
+                                "quantized_inverted_external_centroid_only"
+                                f"_compact_topk_{cap_suffix}"
+                                f"_probe_{probe_suffix}"
+                                f"_topm_{top_m_suffix}"
+                            ),
+                            candidate_source="quantized_inverted_experimental",
+                            storage_kind="centroid_only",
+                            centroids="off",
+                            centroid_count="auto",
+                            plain_fallback="off",
+                            quantized_inverted_max_postings_per_token=cap_int,
+                            quantized_inverted_probe_codewords_per_token=probe_int,
+                            quantized_inverted_posting_selection="score_topk",
+                            quantized_inverted_compact_scoring="experimental",
+                            quantized_inverted_codebook="external",
+                            quantized_inverted_codebook_top_m=top_m_int,
+                        )
+                    )
+                    quantized_dynamic_profiles.append(
+                        DocumentNodeServingProfile(
+                            name=(
+                                "quantized_inverted_external_centroid_only"
+                                f"_compact_topk_{cap_suffix}"
+                                f"_probe_{probe_suffix}"
+                                f"_topm_{top_m_suffix}"
+                                "_score_bound"
+                            ),
+                            candidate_source="quantized_inverted_experimental",
+                            storage_kind="centroid_only",
+                            centroids="off",
+                            centroid_count="auto",
+                            plain_fallback="off",
+                            quantized_inverted_max_postings_per_token=cap_int,
+                            quantized_inverted_probe_codewords_per_token=probe_int,
+                            quantized_inverted_posting_selection="score_topk",
+                            quantized_inverted_compact_scoring="experimental",
+                            quantized_inverted_pruning="score_bound_experimental",
+                            quantized_inverted_codebook="external",
+                            quantized_inverted_codebook_top_m=top_m_int,
+                        )
+                    )
+    if quantized_dynamic_profiles:
+        allowed_names = unique_preserve_order(
+            [*allowed_names, *(profile.name for profile in quantized_dynamic_profiles)]
         )
     allowed = set(allowed_names)
     order = {name: index for index, name in enumerate(allowed_names)}
@@ -9543,12 +11154,78 @@ def document_node_colbert_candidate_source_focus_profiles(
         if profile.name in allowed
     ]
     profiles = sorted(profiles, key=lambda profile: order[profile.name])
+    if quantized_dynamic_profiles:
+        profiles = [*profiles, *quantized_dynamic_profiles]
+    threshold_profiles: list[DocumentNodeServingProfile] = []
+    for threshold in threshold_values:
+        if threshold == -1.0:
+            continue
+        for profile in profiles:
+            if not centroid_lite_threshold_profile_base(profile):
+                continue
+            threshold_profiles.append(
+                replace(
+                    profile,
+                    name=centroid_lite_threshold_profile_name(profile.name, threshold),
+                    centroid_lite_score_threshold=threshold,
+                )
+            )
+    if threshold_profiles:
+        profiles = [*profiles, *threshold_profiles]
+        allowed_names = unique_preserve_order(
+            [*allowed_names, *(profile.name for profile in threshold_profiles)]
+        )
+        allowed = set(allowed_names)
+    drop_profiles: list[DocumentNodeServingProfile] = []
+    for drop in score_drop_values:
+        if drop == -1.0:
+            continue
+        for profile in profiles:
+            if not centroid_lite_threshold_profile_base(profile):
+                continue
+            drop_profiles.append(
+                replace(
+                    profile,
+                    name=centroid_lite_score_drop_profile_name(profile.name, drop),
+                    centroid_lite_score_drop_from_best=drop,
+                )
+            )
+    if drop_profiles:
+        profiles = [*profiles, *drop_profiles]
+        allowed_names = unique_preserve_order(
+            [*allowed_names, *(profile.name for profile in drop_profiles)]
+        )
+        allowed = set(allowed_names)
     selected = str(
         getattr(args, "document_node_colbert_candidate_source_profiles", "") or ""
     ).strip()
     if not selected:
+        if (
+            quantized_external_enabled
+            and DOCUMENT_NODE_COLBERT_CANDIDATE_SOURCE_DEFAULT_EXTERNAL_QUANTIZED_PROFILE
+            in allowed
+        ):
+            selected = (
+                DOCUMENT_NODE_COLBERT_CANDIDATE_SOURCE_DEFAULT_EXTERNAL_QUANTIZED_PROFILE
+            )
+        else:
+            return profiles
+    if not selected:
         return profiles
     selected_names = [name.strip() for name in selected.split(",") if name.strip()]
+    external_profile_names = {
+        name for name in allowed_names if name.startswith("quantized_inverted_external_")
+    }
+    external_selected_names = [
+        name for name in selected_names if name in external_profile_names
+    ]
+    if external_selected_names and not str(
+        getattr(args, "multivector_quantized_inverted_codebook_path", "") or ""
+    ).strip():
+        raise SystemExit(
+            f"{', '.join(external_selected_names)} requires "
+            "--multivector-quantized-inverted-codebook-path"
+        )
     unknown = [name for name in selected_names if name not in allowed]
     if unknown:
         raise SystemExit(
@@ -9556,6 +11233,13 @@ def document_node_colbert_candidate_source_focus_profiles(
             f"pure-ColBERT profiles: {', '.join(unknown)}"
         )
     profiles_by_name = {profile.name: profile for profile in profiles}
+    unavailable = [name for name in selected_names if name not in profiles_by_name]
+    if unavailable:
+        raise SystemExit(
+            "--document-node-colbert-candidate-source-profiles selected profiles "
+            "that are not available with the current flags: "
+            + ", ".join(unavailable)
+        )
     return [profiles_by_name[name] for name in selected_names if name in profiles_by_name]
 
 
@@ -9978,6 +11662,14 @@ def _self_check_document_node_serving_profiles() -> None:
         "centroid_lite_f16",
         "centroid_lite_f16_pool_050",
         "centroid_lite_centroid_only",
+        (
+            "centroid_lite_centroid_only_probe_008_cap_128_"
+            "score_topk_codeword_maxsim"
+        ),
+        (
+            "centroid_lite_centroid_only_probe_008_"
+            "union_score_codeword_maxsim"
+        ),
         "centroid_lite_centroid_only_pool_050",
         "proxy_normalized_mean_sq8",
     ]
@@ -9988,6 +11680,25 @@ def _self_check_document_node_serving_profiles() -> None:
     assert profiles_by_name["centroid_lite_f16_pool_050"].token_pooling == "greedy_cosine"
     assert profiles_by_name["centroid_lite_f16_pool_050"].token_pooling_target_ratio == 0.5
     assert profiles_by_name["centroid_lite_centroid_only"].storage_kind == "centroid_only"
+    nextplaid_profile = profiles_by_name[
+        (
+            "centroid_lite_centroid_only_probe_008_cap_128_"
+            "score_topk_codeword_maxsim"
+        )
+    ]
+    assert nextplaid_profile.storage_kind == "centroid_only"
+    assert nextplaid_profile.centroid_lite_probe_centroids_per_token == 8
+    assert nextplaid_profile.centroid_lite_max_postings_per_token == 128
+    assert nextplaid_profile.centroid_lite_posting_selection == "score_topk"
+    assert nextplaid_profile.centroid_lite_candidate_scoring == "codeword_maxsim"
+    union_profile = profiles_by_name[
+        "centroid_lite_centroid_only_probe_008_union_score_codeword_maxsim"
+    ]
+    assert union_profile.storage_kind == "centroid_only"
+    assert union_profile.centroid_lite_probe_centroids_per_token == 8
+    assert union_profile.centroid_lite_posting_selection == "union_score"
+    assert union_profile.centroid_lite_candidate_scoring == "codeword_maxsim"
+    assert nextplaid_profile.centroid_lite_score_threshold == -1.0
     assert (
         profiles_by_name["centroid_lite_centroid_only_pool_050"].token_pooling
         == "greedy_cosine"
@@ -10002,10 +11713,88 @@ def _self_check_document_node_serving_profiles() -> None:
         include_reservoirs=False,
         centroid_count="auto",
     )
-    assert experimental[-1].name == "quantized_inverted_experimental_f32"
-    assert experimental[-1].candidate_source == "quantized_inverted_experimental"
-    assert experimental[-1].storage_kind == "f32"
-    assert experimental[-1].plain_fallback == "off"
+    experimental_by_name = {profile.name: profile for profile in experimental}
+    assert (
+        experimental_by_name["quantized_inverted_experimental_f32"].candidate_source
+        == "quantized_inverted_experimental"
+    )
+    assert experimental_by_name["quantized_inverted_experimental_f32"].storage_kind == "f32"
+    assert experimental_by_name["quantized_inverted_experimental_f32"].plain_fallback == "off"
+    compact_topk = experimental_by_name[
+        "quantized_inverted_experimental_f32_compact_topk_032"
+    ]
+    assert compact_topk.quantized_inverted_max_postings_per_token == 32
+    assert compact_topk.quantized_inverted_probe_codewords_per_token == 4
+    assert compact_topk.quantized_inverted_posting_selection == "score_topk"
+    assert compact_topk.quantized_inverted_compact_scoring == "experimental"
+    coverage_topk = experimental_by_name[
+        "quantized_inverted_experimental_f32_compact_topk_032_coverage"
+    ]
+    assert coverage_topk.quantized_inverted_compact_scoring == "experimental"
+    assert coverage_topk.quantized_inverted_token_coverage == "linear"
+    assert "quantized_inverted_external_f32_compact_topk_032" not in experimental_by_name
+    external_experimental = document_node_serving_profiles(
+        include_experimental=True,
+        include_proxy_encoder_variants=False,
+        include_bm25_rescue=False,
+        include_learned_sparse_rescue=False,
+        include_reservoirs=False,
+        include_external_quantized_codebook_profile=True,
+        centroid_count="auto",
+    )
+    external_experimental_by_name = {
+        profile.name: profile for profile in external_experimental
+    }
+    external_compact_topk = external_experimental_by_name[
+        "quantized_inverted_external_f32_compact_topk_032"
+    ]
+    external_centroid_only_topk = external_experimental_by_name[
+        "quantized_inverted_external_centroid_only_compact_topk_032"
+    ]
+    external_compact_topk_2 = external_experimental_by_name[
+        "quantized_inverted_external_f32_compact_topk_032_topm_02"
+    ]
+    external_centroid_only_topk_2 = external_experimental_by_name[
+        "quantized_inverted_external_centroid_only_compact_topk_032_topm_02"
+    ]
+    assert external_compact_topk.candidate_source == "quantized_inverted_experimental"
+    assert external_compact_topk.quantized_inverted_codebook == "external"
+    assert external_compact_topk.quantized_inverted_codebook_top_m == 1
+    assert external_compact_topk.quantized_inverted_max_postings_per_token == 32
+    assert external_compact_topk.quantized_inverted_probe_codewords_per_token == 4
+    assert external_compact_topk.quantized_inverted_posting_selection == "score_topk"
+    assert external_compact_topk.quantized_inverted_compact_scoring == "experimental"
+    assert external_centroid_only_topk.candidate_source == "quantized_inverted_experimental"
+    assert external_centroid_only_topk.storage_kind == "centroid_only"
+    assert external_centroid_only_topk.centroids == "off"
+    assert external_centroid_only_topk.quantized_inverted_codebook == "external"
+    assert external_centroid_only_topk.quantized_inverted_max_postings_per_token == 32
+    assert (
+        external_centroid_only_topk.quantized_inverted_compact_scoring
+        == "experimental"
+    )
+    assert external_compact_topk_2.candidate_source == "quantized_inverted_experimental"
+    assert external_compact_topk_2.quantized_inverted_codebook == "external"
+    assert external_compact_topk_2.quantized_inverted_codebook_top_m == 2
+    assert external_centroid_only_topk_2.candidate_source == "quantized_inverted_experimental"
+    assert external_centroid_only_topk_2.storage_kind == "centroid_only"
+    assert external_centroid_only_topk_2.quantized_inverted_codebook == "external"
+    assert external_centroid_only_topk_2.quantized_inverted_codebook_top_m == 2
+    capped = document_node_serving_profiles(
+        include_experimental=False,
+        include_proxy_encoder_variants=False,
+        include_bm25_rescue=False,
+        include_learned_sparse_rescue=False,
+        include_reservoirs=False,
+        include_centroid_lite_caps=True,
+        centroid_lite_posting_caps=(32,),
+        centroid_count="auto",
+    )
+    capped_by_name = {profile.name: profile for profile in capped}
+    bounded_probe = capped_by_name["centroid_lite_f16_probe_004_cap_032_score_topk"]
+    assert bounded_probe.centroid_lite_max_postings_per_token == 32
+    assert bounded_probe.centroid_lite_probe_centroids_per_token == 4
+    assert bounded_probe.centroid_lite_posting_selection == "score_topk"
     proxy_variants = document_node_serving_profiles(
         include_experimental=False,
         include_proxy_encoder_variants=True,
@@ -10657,7 +12446,9 @@ def _self_check_document_node_serving_profiles() -> None:
         quantized_focus_args
     )
     assert [profile.name for profile in quantized_focus_profiles] == list(
-        DOCUMENT_NODE_COLBERT_QUANTIZED_INVERTED_FOCUS_PROFILES
+        name
+        for name in DOCUMENT_NODE_COLBERT_QUANTIZED_INVERTED_FOCUS_PROFILES
+        if not name.startswith("quantized_inverted_external_")
     )
     assert any(
         profile.candidate_source == "quantized_inverted_experimental"
@@ -10669,6 +12460,39 @@ def _self_check_document_node_serving_profiles() -> None:
     assert effective_serving_grid_executed_budgets(quantized_focus_args) == [800, 1600]
     assert effective_document_node_serving_ef_grid(quantized_focus_args) == [200, 400, 800]
     assert effective_document_node_serving_oversampling_grid(quantized_focus_args) == [1]
+    with tempfile.TemporaryDirectory() as tmpdir:
+        codebook_path = Path(tmpdir) / "codebook.txt"
+        codebook_path.write_text(
+            "pgturbohybrid_quantized_inverted_codebook_v1 2 2 test\n"
+            "1.0 0.0\n"
+            "0.0 1.0\n",
+            encoding="utf-8",
+        )
+        quantized_external_focus_profiles = effective_document_node_serving_profiles(
+            clone_args(
+                quantized_focus_args,
+                multivector_quantized_inverted_codebook_path=str(codebook_path),
+            )
+        )
+        external_source, external_path, external_top_m = (
+            effective_quantized_inverted_codebook_settings(
+                clone_args(
+                    quantized_focus_args,
+                    multivector_quantized_inverted_codebook_path=str(codebook_path),
+                ),
+                quantized_external_focus_profiles[-1],
+            )
+        )
+        assert external_source == "external"
+        assert external_path == str(codebook_path.resolve())
+        assert external_top_m == 1
+    assert [profile.name for profile in quantized_external_focus_profiles] == list(
+        DOCUMENT_NODE_COLBERT_QUANTIZED_INVERTED_FOCUS_PROFILES
+    )
+    assert (
+        quantized_external_focus_profiles[-1].quantized_inverted_codebook
+        == "external"
+    )
     quantized_readiness = document_node_colbert_quantized_inverted_readiness(
         [
             {
@@ -11544,6 +13368,8 @@ def _self_check_document_node_serving_profiles() -> None:
     )
     assert bitset_profile_args.multivector_centroid_lite_max_postings_per_token == 32
     assert bitset_profile_args.multivector_centroid_lite_bitset_prefilter == "experimental"
+    assert bitset_profile_args.multivector_centroid_lite_bitset_min_token_matches == 1
+    assert bitset_profile_args.multivector_centroid_lite_score_threshold == -1.0
     pooled_capped_profile_args = document_node_serving_profile_args(
         signature_args,
         colbert_centroid_lite_by_name["centroid_lite_f16_pool_050_cap_032"],
@@ -12398,6 +14224,9 @@ def document_node_serving_profile_args(
     budget_sweep: list[int] | None = None,
 ) -> argparse.Namespace:
     budget_sweep_text = ",".join(str(item) for item in (budget_sweep or effective_serving_grid_budget_sweep(args)))
+    codebook_source, codebook_path, codebook_top_m = (
+        effective_quantized_inverted_codebook_settings(args, profile)
+    )
     return clone_args(
         args,
         multivector_graph="document_nodes",
@@ -12416,10 +14245,53 @@ def document_node_serving_profile_args(
         multivector_centroid_lite_max_postings_per_token=(
             profile.centroid_lite_max_postings_per_token
         ),
+        multivector_centroid_lite_probe_centroids_per_token=(
+            profile.centroid_lite_probe_centroids_per_token
+        ),
+        multivector_centroid_lite_codeword_top_m=(
+            profile.centroid_lite_codeword_top_m
+        ),
+        multivector_centroid_lite_posting_selection=(
+            profile.centroid_lite_posting_selection
+        ),
+        multivector_centroid_lite_candidate_scoring=(
+            profile.centroid_lite_candidate_scoring
+        ),
+        multivector_centroid_lite_score_threshold=(
+            profile.centroid_lite_score_threshold
+        ),
+        multivector_centroid_lite_score_drop_from_best=(
+            profile.centroid_lite_score_drop_from_best
+        ),
         multivector_centroid_lite_pruning=profile.centroid_lite_pruning,
         multivector_centroid_lite_bitset_prefilter=(
             profile.centroid_lite_bitset_prefilter
         ),
+        multivector_centroid_lite_bitset_min_token_matches=(
+            profile.centroid_lite_bitset_min_token_matches
+        ),
+        multivector_quantized_inverted_max_postings_per_token=(
+            profile.quantized_inverted_max_postings_per_token
+        ),
+        multivector_quantized_inverted_probe_codewords_per_token=(
+            profile.quantized_inverted_probe_codewords_per_token
+        ),
+        multivector_quantized_inverted_posting_selection=(
+            profile.quantized_inverted_posting_selection
+        ),
+        multivector_quantized_inverted_compact_scoring=(
+            profile.quantized_inverted_compact_scoring
+        ),
+        multivector_quantized_inverted_token_coverage=(
+            profile.quantized_inverted_token_coverage
+        ),
+        multivector_quantized_inverted_min_token_matches=(
+            effective_quantized_inverted_min_token_matches(args, profile)
+        ),
+        multivector_quantized_inverted_pruning=profile.quantized_inverted_pruning,
+        multivector_quantized_inverted_codebook=codebook_source,
+        multivector_quantized_inverted_codebook_path=codebook_path,
+        multivector_quantized_inverted_codebook_top_m=codebook_top_m,
         entry_sidecar=profile.entry_sidecar,
         entry_sidecar_representatives=profile.entry_sidecar_representatives,
         entry_sidecar_strategy=profile.entry_sidecar_strategy,
@@ -13033,8 +14905,33 @@ def document_node_serving_summary_row(
         "centroid_lite_max_postings_per_token": (
             profile.centroid_lite_max_postings_per_token
         ),
+        "centroid_lite_probe_centroids_per_token": (
+            profile.centroid_lite_probe_centroids_per_token
+        ),
+        "centroid_lite_codeword_top_m": profile.centroid_lite_codeword_top_m,
+        "centroid_lite_posting_selection": profile.centroid_lite_posting_selection,
+        "centroid_lite_candidate_scoring": profile.centroid_lite_candidate_scoring,
+        "centroid_lite_score_threshold": profile.centroid_lite_score_threshold,
+        "centroid_lite_score_drop_from_best": (
+            profile.centroid_lite_score_drop_from_best
+        ),
         "centroid_lite_pruning": profile.centroid_lite_pruning,
         "centroid_lite_bitset_prefilter": profile.centroid_lite_bitset_prefilter,
+        "centroid_lite_bitset_min_token_matches": (
+            profile.centroid_lite_bitset_min_token_matches
+        ),
+        "quantized_inverted_max_postings_per_token": (
+            profile.quantized_inverted_max_postings_per_token
+        ),
+        "quantized_inverted_probe_codewords_per_token": (
+            profile.quantized_inverted_probe_codewords_per_token
+        ),
+        "quantized_inverted_posting_selection": (
+            profile.quantized_inverted_posting_selection
+        ),
+        "quantized_inverted_compact_scoring": profile.quantized_inverted_compact_scoring,
+        "quantized_inverted_token_coverage": profile.quantized_inverted_token_coverage,
+        "quantized_inverted_pruning": profile.quantized_inverted_pruning,
         "centroid_lite_warnings": centroid_lite_warnings,
         "ef": ef,
         "oversampling": oversampling,
@@ -13184,6 +15081,13 @@ def document_node_serving_summary_row(
         "centroid_posting_limit_per_token": largest_work.get(
             "centroid_posting_limit_per_token"
         ),
+        "centroid_probe_centroids_per_token": largest_work.get(
+            "centroid_probe_centroids_per_token"
+        ),
+        "centroid_score_threshold": largest_work.get("centroid_score_threshold"),
+        "centroid_lists_skipped_by_threshold": largest_work.get(
+            "centroid_lists_skipped_by_threshold"
+        ),
         "centroid_posting_cap_strategy": largest_work.get(
             "centroid_posting_cap_strategy"
         ),
@@ -13198,6 +15102,9 @@ def document_node_serving_summary_row(
             "centroid_upper_bound_docs_pruned"
         ),
         "centroid_bitset_docs_set": largest_work.get("centroid_bitset_docs_set"),
+        "centroid_bitset_min_token_matches": largest_work.get(
+            "centroid_bitset_min_token_matches"
+        ),
         "centroid_bitset_memory_bytes": largest_work.get(
             "centroid_bitset_memory_bytes"
         ),
@@ -13216,6 +15123,10 @@ def document_node_serving_summary_row(
         "quantized_inverted_candidates": (
             largest_work.get("quantized_inverted_candidates")
             or stats_sample.get("quantized_inverted_candidates")
+        ),
+        "quantized_inverted_probe_codewords_per_token": (
+            largest_work.get("quantized_inverted_probe_codewords_per_token")
+            or stats_sample.get("quantized_inverted_probe_codewords_per_token")
         ),
         "quantized_inverted_exact_rerank_docs": (
             largest_work.get("quantized_inverted_exact_rerank_docs")
@@ -13541,11 +15452,19 @@ def serving_candidate_delta_evidence(row: dict[str, Any]) -> dict[str, Any]:
         "learned_sparse_branch_latency_us",
         "learned_sparse_partial_coverage",
         "centroid_lite_max_postings_per_token",
+        "centroid_lite_probe_centroids_per_token",
+        "centroid_lite_codeword_top_m",
+        "centroid_lite_posting_selection",
+        "centroid_lite_candidate_scoring",
+        "centroid_lite_score_threshold",
+        "centroid_lite_score_drop_from_best",
         "centroid_lite_pruning",
         "centroid_lite_bitset_prefilter",
+        "centroid_lite_bitset_min_token_matches",
         "centroid_postings_touched",
         "centroid_postings_skipped",
         "centroid_posting_limit_per_token",
+        "centroid_lists_skipped_by_threshold",
         "centroid_posting_cap_strategy",
     ):
         add_row(key)
@@ -14176,9 +16095,26 @@ def serving_recommendation_row(row: dict[str, Any]) -> dict[str, Any]:
         "centroid_lite_max_postings_per_token": row.get(
             "centroid_lite_max_postings_per_token"
         ),
+        "centroid_lite_probe_centroids_per_token": row.get(
+            "centroid_lite_probe_centroids_per_token"
+        ),
+        "centroid_lite_codeword_top_m": row.get("centroid_lite_codeword_top_m"),
+        "centroid_lite_posting_selection": row.get(
+            "centroid_lite_posting_selection"
+        ),
+        "centroid_lite_candidate_scoring": row.get(
+            "centroid_lite_candidate_scoring"
+        ),
+        "centroid_lite_score_threshold": row.get("centroid_lite_score_threshold"),
+        "centroid_lite_score_drop_from_best": row.get(
+            "centroid_lite_score_drop_from_best"
+        ),
         "centroid_lite_pruning": row.get("centroid_lite_pruning", "off"),
         "centroid_lite_bitset_prefilter": row.get(
             "centroid_lite_bitset_prefilter", "off"
+        ),
+        "centroid_lite_bitset_min_token_matches": row.get(
+            "centroid_lite_bitset_min_token_matches"
         ),
         "centroid_lite_warnings": row.get("centroid_lite_warnings", []),
         "ef": row.get("ef"),
@@ -18023,11 +19959,17 @@ def _self_check_document_node_serving_stats_extraction() -> None:
         "centroid_docs_touched": 700,
         "centroid_pruned_docs": 600,
         "centroid_postings_touched": 1200,
+        "centroid_postings_selected": 900,
         "centroid_postings_skipped": 300,
         "centroid_posting_limit_per_token": 75,
+        "centroid_probe_centroids_per_token": 4,
+        "centroid_score_threshold": 0.25,
+        "centroid_lists_skipped_by_threshold": 2,
         "centroid_posting_cap_strategy": "uniform_stride",
+        "centroid_candidate_scoring": "doc_centroid_maxsim",
         "centroid_candidates": 100,
         "centroid_bitset_prefilter_enabled": True,
+        "centroid_bitset_min_token_matches": 2,
         "centroid_bitset_lists_used": 8,
         "centroid_bitset_docs_set": 101,
         "centroid_bitset_docs_after_threshold": 99,
@@ -18046,15 +19988,23 @@ def _self_check_document_node_serving_stats_extraction() -> None:
         "multivector_bm25_injection_exact_reranked": 140,
         "learned_sparse_candidates": 0,
         "quantized_inverted_postings_touched": 0,
+        "quantized_inverted_probe_codewords_per_token": 4,
         "quantized_inverted_codebook_version": 3,
         "quantized_inverted_assignment_time_us": 42,
         "quantized_inverted_posting_bytes": 2048,
         "quantized_inverted_sidecar_bytes": 2304,
         "quantized_inverted_compact_kernel": "neon",
+        "quantized_inverted_compact_score_source": "full_doc_codeword_maxsim",
         "quantized_inverted_compact_score_us": 321,
         "quantized_inverted_compact_docs_scored": 12,
         "quantized_inverted_compact_payload_bytes": 64,
         "quantized_inverted_compact_topk_changed_vs_scalar": False,
+        "quantized_inverted_token_coverage_mode": "linear",
+        "quantized_inverted_active_query_tokens": 3,
+        "quantized_inverted_token_matches_total": 20,
+        "quantized_inverted_token_matches_max": 3,
+        "quantized_inverted_min_token_matches": 2,
+        "quantized_inverted_token_match_filtered_docs": 5,
         "quantized_codeword_debug_counter": 7,
         "unrelated_large_field": "ignored",
     }
@@ -18085,10 +20035,16 @@ def _self_check_document_node_serving_stats_extraction() -> None:
     assert extracted["multivector_doc_sidecar_docmap_bytes_touched"] == 4096
     assert extracted["multivector_doc_sidecar_resident_vectors_loaded"] == 8
     assert extracted["centroid_postings_touched"] == 1200
+    assert extracted["centroid_postings_selected"] == 900
     assert extracted["centroid_postings_skipped"] == 300
     assert extracted["centroid_posting_limit_per_token"] == 75
+    assert extracted["centroid_probe_centroids_per_token"] == 4
+    assert extracted["centroid_score_threshold"] == 0.25
+    assert extracted["centroid_lists_skipped_by_threshold"] == 2
     assert extracted["centroid_posting_cap_strategy"] == "uniform_stride"
+    assert extracted["centroid_candidate_scoring"] == "doc_centroid_maxsim"
     assert extracted["centroid_bitset_prefilter_enabled"] is True
+    assert extracted["centroid_bitset_min_token_matches"] == 2
     assert extracted["centroid_bitset_lists_used"] == 8
     assert extracted["centroid_bitset_docs_set"] == 101
     assert extracted["centroid_bitset_docs_after_threshold"] == 99
@@ -18097,14 +20053,25 @@ def _self_check_document_node_serving_stats_extraction() -> None:
     assert extracted["centroid_bitset_candidates"] == 99
     assert extracted["centroid_bitset_memory_bytes"] == 128
     assert extracted["quantized_inverted_posting_bytes"] == 2048
+    assert extracted["quantized_inverted_probe_codewords_per_token"] == 4
     assert extracted["quantized_inverted_sidecar_bytes"] == 2304
     assert extracted["quantized_inverted_codebook_version"] == 3
     assert extracted["quantized_inverted_assignment_time_us"] == 42
     assert extracted["quantized_inverted_compact_kernel"] == "neon"
+    assert (
+        extracted["quantized_inverted_compact_score_source"]
+        == "full_doc_codeword_maxsim"
+    )
     assert extracted["quantized_inverted_compact_score_us"] == 321
     assert extracted["quantized_inverted_compact_docs_scored"] == 12
     assert extracted["quantized_inverted_compact_payload_bytes"] == 64
     assert extracted["quantized_inverted_compact_topk_changed_vs_scalar"] is False
+    assert extracted["quantized_inverted_token_coverage_mode"] == "linear"
+    assert extracted["quantized_inverted_active_query_tokens"] == 3
+    assert extracted["quantized_inverted_token_matches_total"] == 20
+    assert extracted["quantized_inverted_token_matches_max"] == 3
+    assert extracted["quantized_inverted_min_token_matches"] == 2
+    assert extracted["quantized_inverted_token_match_filtered_docs"] == 5
     assert extracted["quantized_codeword_debug_counter"] == 7
     assert "unrelated_large_field" not in extracted
     available = document_node_serving_stats_available(extracted)
@@ -19624,7 +21591,6 @@ def _self_check_document_node_colbert_beir_quality_only() -> None:
     assert mode_args.multivector_sparse_candidate_source == "off"
     assert mode_args.multivector_bm25_candidate_injection == "off"
     assert mode_args.multivector_branch_plan == "dense_only"
-
     capped_args, _, capped_rerank_k = document_node_colbert_beir_quality_args(
         clone_args(
             args,
@@ -19747,6 +21713,84 @@ def _self_check_document_node_colbert_beir_quality_only() -> None:
     assert "EXACT_SCAN_METHOD" not in names
 
 
+def _self_check_next_plaid_beir_quality_only() -> None:
+    args = argparse.Namespace(
+        next_plaid_url="http://localhost:8080",
+        next_plaid_index_name="dbpedia_colbert_1m",
+        next_plaid_sdk_path=Path("../next-plaid/next-plaid-api/python-sdk"),
+        next_plaid_create_index=False,
+        next_plaid_delete_existing_index=False,
+        next_plaid_add_documents=False,
+        next_plaid_nbits=4,
+        next_plaid_index_batch_size=50000,
+        next_plaid_upload_batch_size=64,
+        next_plaid_pool_factor=None,
+        next_plaid_top_k=100,
+        next_plaid_n_ivf_probe=8,
+        next_plaid_n_full_scores=4096,
+        next_plaid_centroid_score_threshold=0.4,
+        next_plaid_timeout_s=60.0,
+        quality_k=10,
+        final_k=10,
+    )
+    run = {
+        "q1": ["d1", "d3"],
+        "q2": ["d4", "d9"],
+    }
+    qrels = {
+        "q1": {"d1": 1, "d2": 1},
+        "q2": {"d9": 1},
+    }
+    report = build_next_plaid_beir_quality_report(
+        args=args,
+        run=run,
+        latencies_ms=[5.0, 10.0],
+        qrels=qrels,
+        counts={"docs_loaded": 1000, "queries_loaded": 2, "qrels_loaded": 3},
+        query_limit={
+            "requested_max_queries": 2,
+            "effective_max_queries": 2,
+            "query_count_limited_by_artifact": False,
+        },
+        index_info={"name": "dbpedia_colbert_1m", "num_documents": 1000},
+        health={"status": "healthy", "loaded_indices": 1},
+        upload_phase={"enabled": False},
+        docid_mapping_warnings=[],
+        started=time.perf_counter(),
+    )
+    assert report["engine"] == "next-plaid"
+    assert report["native_index"] is False
+    assert report["pure_colbert_only"] is True
+    assert report["exact_admission_available"] is False
+    assert report["exact_admission_baseline_calls"] == 0
+    assert report["recall@10"] == 0.75
+    assert report["mrr@10"] == 0.75
+    assert report["qrels_covered"] == 3
+    assert report["settings"]["n_full_scores"] == 4096
+    assert report["docid_mapping_suspect"] is False
+
+    doc_id, warning = next_plaid_doc_id_from_result(
+        internal_id=42,
+        metadata={"doc_id": "dbpedia_42"},
+    )
+    assert doc_id == "dbpedia_42"
+    assert warning is None
+    fallback_doc_id, fallback_warning = next_plaid_doc_id_from_result(
+        internal_id=43,
+        metadata=None,
+    )
+    assert fallback_doc_id == "43"
+    assert fallback_warning == "missing_result_doc_id_metadata"
+
+    markdown = markdown_benchmark_summary({"next_plaid_beir_quality": report})
+    assert "### NextPlaid BEIR quality reference" in markdown
+    assert "does not call native exact admission" in markdown
+
+    names = set(run_next_plaid_beir_quality_only.__code__.co_names)
+    assert "exact_admission_top" not in names
+    assert "EXACT_SCAN_METHOD" not in names
+
+
 def _self_check_document_node_colbert_sampled_admission() -> None:
     args = argparse.Namespace(
         document_node_colbert_include_experimental=False,
@@ -19830,6 +21874,52 @@ def _self_check_document_node_colbert_sampled_admission() -> None:
     assert capped_args.multivector_doc_candidate_k == 25
     assert capped_args.multivector_exact_rerank_k == 25
     assert capped_rerank_k == 25
+
+    score_topk_args, score_topk_profile, _ = (
+        document_node_colbert_sampled_admission_args(
+            clone_args(
+                args,
+                document_node_colbert_profile="centroid_lite_centroid_only_cap_032_score_topk",
+            )
+        )
+    )
+    assert score_topk_profile.candidate_source == "centroid_lite"
+    assert score_topk_args.multivector_centroid_lite_max_postings_per_token == 32
+    assert score_topk_args.multivector_centroid_lite_posting_selection == "score_topk"
+    codeword_args, codeword_profile, _ = (
+        document_node_colbert_sampled_admission_args(
+            clone_args(
+                args,
+                document_node_colbert_profile=(
+                    "centroid_lite_centroid_only_cap_032_score_topk_codeword_maxsim"
+                ),
+            )
+        )
+    )
+    assert codeword_profile.candidate_source == "centroid_lite"
+    assert codeword_args.multivector_centroid_lite_max_postings_per_token == 32
+    assert codeword_args.multivector_centroid_lite_posting_selection == "score_topk"
+    assert (
+        codeword_args.multivector_centroid_lite_candidate_scoring
+        == "codeword_maxsim"
+    )
+    docmaxsim_args, docmaxsim_profile, _ = (
+        document_node_colbert_sampled_admission_args(
+            clone_args(
+                args,
+                document_node_colbert_profile=(
+                    "centroid_lite_centroid_only_cap_032_score_topk_docmaxsim"
+                ),
+            )
+        )
+    )
+    assert docmaxsim_profile.candidate_source == "centroid_lite"
+    assert docmaxsim_args.multivector_centroid_lite_max_postings_per_token == 32
+    assert docmaxsim_args.multivector_centroid_lite_posting_selection == "score_topk"
+    assert (
+        docmaxsim_args.multivector_centroid_lite_candidate_scoring
+        == "doc_centroid_maxsim"
+    )
 
     try:
         document_node_colbert_sampled_admission_profile(
@@ -19967,9 +22057,18 @@ def _self_check_document_node_colbert_candidate_source_focus() -> None:
         document_node_colbert_oversampling=1,
         document_node_colbert_centroid_lite_cap=0,
         include_quantized_inverted_experimental=False,
-        candidate_budgets="800,1600",
-        exact_rerank_k=100,
+        candidate_budgets=DOCUMENT_NODE_COLBERT_CANDIDATE_SOURCE_DEFAULT_BUDGETS,
+        exact_rerank_k=DOCUMENT_NODE_COLBERT_CANDIDATE_SOURCE_DEFAULT_EXACT_RERANK_K,
         centroid_lite_caps="32,64",
+        quantized_inverted_posting_caps=(
+            DOCUMENT_NODE_COLBERT_CANDIDATE_SOURCE_DEFAULT_QUANTIZED_CAPS
+        ),
+        quantized_inverted_probes=(
+            DOCUMENT_NODE_COLBERT_CANDIDATE_SOURCE_DEFAULT_QUANTIZED_PROBES
+        ),
+        quantized_inverted_codebook_top_ms=(
+            DOCUMENT_NODE_COLBERT_CANDIDATE_SOURCE_DEFAULT_QUANTIZED_TOP_MS
+        ),
         query_limit=25,
         document_node_colbert_candidate_source_profiles="",
         document_node_colbert_query_timeout_ms=0,
@@ -20023,29 +22122,156 @@ def _self_check_document_node_colbert_candidate_source_focus() -> None:
         max_estimated_index_bytes=0,
         skip_profile_if_estimate_exceeds_limit=False,
         fail_if_estimate_exceeds_limit=False,
+        centroid_lite_score_thresholds="-1",
+        centroid_lite_score_drop_from_best_values="-1",
+        multivector_centroid_lite_score_drop_from_best=-1.0,
     )
     profiles = document_node_colbert_candidate_source_focus_profiles(args)
+    minmatch_args = clone_args(args, multivector_quantized_inverted_min_token_matches=3)
+    minmatch_mode_args, _ = document_node_colbert_candidate_source_focus_args(
+        minmatch_args,
+        profiles[0],
+        800,
+    )
+    assert minmatch_mode_args.multivector_quantized_inverted_min_token_matches == 3
     assert [profile.name for profile in profiles] == [
         "proxy_normalized_mean_proxy_only",
         "centroid_lite_centroid_only",
+        (
+            "centroid_lite_centroid_only_probe_008_"
+            "union_score_codeword_maxsim"
+        ),
+        (
+            "centroid_lite_centroid_only_probe_008_cap_128_"
+            "score_topk_codeword_maxsim"
+        ),
+        "centroid_lite_centroid_only_cap_032_score_topk_codeword_maxsim",
+        "centroid_lite_centroid_only_cap_032_score_topk_docmaxsim",
+        "centroid_lite_centroid_only_pool_050",
+        "centroid_lite_f16_cap_032",
+        "centroid_lite_f16_cap_032_score_topk",
+        "centroid_lite_f16_cap_032_score_topk_codeword_maxsim",
+        "centroid_lite_f16_cap_032_score_topk_codeword_topm_004",
+        "centroid_lite_f16_cap_032_score_topk_docmaxsim",
+        "centroid_lite_f16_probe_004_cap_032_score_topk",
+        "centroid_lite_f16_probe_004_cap_032_score_topk_codeword_maxsim",
+        "centroid_lite_f16_probe_004_cap_032_score_topk_codeword_topm_004",
+        "centroid_lite_f16_probe_004_cap_032_score_topk_docmaxsim",
         "centroid_lite_centroid_only_cap_032",
+        "centroid_lite_centroid_only_cap_032_score_topk",
+        "centroid_lite_centroid_only_cap_032_score_topk_codeword_topm_004",
+        "centroid_lite_centroid_only_probe_004_cap_032_score_topk",
+        "centroid_lite_centroid_only_probe_004_cap_032_score_topk_codeword_maxsim",
+        "centroid_lite_centroid_only_probe_004_cap_032_score_topk_codeword_topm_004",
+        "centroid_lite_centroid_only_probe_004_cap_032_score_topk_docmaxsim",
+        "centroid_lite_f16_cap_064",
+        "centroid_lite_f16_cap_064_score_topk",
+        "centroid_lite_f16_cap_064_score_topk_codeword_maxsim",
+        "centroid_lite_f16_cap_064_score_topk_codeword_topm_004",
+        "centroid_lite_f16_cap_064_score_topk_docmaxsim",
+        "centroid_lite_f16_probe_004_cap_064_score_topk",
+        "centroid_lite_f16_probe_004_cap_064_score_topk_codeword_maxsim",
+        "centroid_lite_f16_probe_004_cap_064_score_topk_codeword_topm_004",
+        "centroid_lite_f16_probe_004_cap_064_score_topk_docmaxsim",
+        "centroid_lite_centroid_only_cap_064",
+        "centroid_lite_centroid_only_cap_064_score_topk",
+        "centroid_lite_centroid_only_cap_064_score_topk_codeword_maxsim",
+        "centroid_lite_centroid_only_cap_064_score_topk_codeword_topm_004",
+        "centroid_lite_centroid_only_cap_064_score_topk_docmaxsim",
+        "centroid_lite_centroid_only_probe_004_cap_064_score_topk",
+        "centroid_lite_centroid_only_probe_004_cap_064_score_topk_codeword_maxsim",
+        "centroid_lite_centroid_only_probe_004_cap_064_score_topk_codeword_topm_004",
+        "centroid_lite_centroid_only_probe_004_cap_064_score_topk_docmaxsim",
         "centroid_lite_centroid_only_cap_032_bitset_prefilter",
         "centroid_lite_centroid_only_cap_032_prune_safe_upper_bound",
-        "centroid_lite_centroid_only_cap_064",
-        "centroid_lite_centroid_only_pool_050",
     ]
     filtered_profiles = document_node_colbert_candidate_source_focus_profiles(
         clone_args(
             args,
             document_node_colbert_candidate_source_profiles=(
-                "centroid_lite_centroid_only_cap_032,proxy_normalized_mean_proxy_only"
+                "centroid_lite_f16_probe_004_cap_032_score_topk,"
+                "centroid_lite_centroid_only_cap_032,"
+                "proxy_normalized_mean_proxy_only"
             ),
         )
     )
     assert [profile.name for profile in filtered_profiles] == [
+        "centroid_lite_f16_probe_004_cap_032_score_topk",
         "centroid_lite_centroid_only_cap_032",
         "proxy_normalized_mean_proxy_only",
     ]
+    cap128_profiles = document_node_colbert_candidate_source_focus_profiles(
+        clone_args(
+            args,
+            centroid_lite_caps="128",
+            document_node_colbert_candidate_source_profiles=(
+                "centroid_lite_centroid_only_probe_004_cap_128_score_topk"
+            ),
+        )
+    )
+    assert [profile.name for profile in cap128_profiles] == [
+        "centroid_lite_centroid_only_probe_004_cap_128_score_topk"
+    ]
+    assert cap128_profiles[0].centroid_lite_probe_centroids_per_token == 4
+    assert cap128_profiles[0].centroid_lite_max_postings_per_token == 128
+    assert cap128_profiles[0].centroid_lite_posting_selection == "score_topk"
+    cap128_docmaxsim_profiles = document_node_colbert_candidate_source_focus_profiles(
+        clone_args(
+            args,
+            centroid_lite_caps="128",
+            document_node_colbert_candidate_source_profiles=(
+                "centroid_lite_centroid_only_probe_004_cap_128_score_topk_docmaxsim"
+            ),
+        )
+    )
+    assert [profile.name for profile in cap128_docmaxsim_profiles] == [
+        "centroid_lite_centroid_only_probe_004_cap_128_score_topk_docmaxsim"
+    ]
+    assert cap128_docmaxsim_profiles[0].centroid_lite_probe_centroids_per_token == 4
+    assert cap128_docmaxsim_profiles[0].centroid_lite_max_postings_per_token == 128
+    assert cap128_docmaxsim_profiles[0].centroid_lite_posting_selection == "score_topk"
+    assert (
+        cap128_docmaxsim_profiles[0].centroid_lite_candidate_scoring
+        == "doc_centroid_maxsim"
+    )
+    cap128_codeword_profiles = document_node_colbert_candidate_source_focus_profiles(
+        clone_args(
+            args,
+            centroid_lite_caps="128",
+            document_node_colbert_candidate_source_profiles=(
+                "centroid_lite_centroid_only_probe_004_cap_128_score_topk_codeword_maxsim"
+            ),
+        )
+    )
+    assert [profile.name for profile in cap128_codeword_profiles] == [
+        "centroid_lite_centroid_only_probe_004_cap_128_score_topk_codeword_maxsim"
+    ]
+    assert cap128_codeword_profiles[0].centroid_lite_probe_centroids_per_token == 4
+    assert cap128_codeword_profiles[0].centroid_lite_max_postings_per_token == 128
+    assert cap128_codeword_profiles[0].centroid_lite_posting_selection == "score_topk"
+    assert (
+        cap128_codeword_profiles[0].centroid_lite_candidate_scoring
+        == "codeword_maxsim"
+    )
+    cap128_topm_profiles = document_node_colbert_candidate_source_focus_profiles(
+        clone_args(
+            args,
+            centroid_lite_caps="128",
+            document_node_colbert_candidate_source_profiles=(
+                "centroid_lite_centroid_only_probe_004_cap_128_score_topk_codeword_topm_004"
+            ),
+        )
+    )
+    assert [profile.name for profile in cap128_topm_profiles] == [
+        "centroid_lite_centroid_only_probe_004_cap_128_score_topk_codeword_topm_004"
+    ]
+    assert cap128_topm_profiles[0].centroid_lite_probe_centroids_per_token == 4
+    assert cap128_topm_profiles[0].centroid_lite_codeword_top_m == 4
+    assert cap128_topm_profiles[0].centroid_lite_posting_selection == "score_topk"
+    assert (
+        cap128_topm_profiles[0].centroid_lite_candidate_scoring
+        == "codeword_maxsim"
+    )
     try:
         document_node_colbert_candidate_source_focus_profiles(
             clone_args(
@@ -20060,27 +22286,415 @@ def _self_check_document_node_colbert_candidate_source_focus() -> None:
     assert all(profile.bm25_candidate_injection == "off" for profile in profiles)
     assert all(profile.sparse_candidate_source == "off" for profile in profiles)
     assert all(profile.branch_plan == "dense_only" for profile in profiles)
+    nextplaid_profile = [
+        profile
+        for profile in profiles
+        if profile.name
+        == (
+            "centroid_lite_centroid_only_probe_008_cap_128_"
+            "score_topk_codeword_maxsim"
+        )
+    ][0]
+    assert nextplaid_profile.candidate_source == "centroid_lite"
+    assert nextplaid_profile.storage_kind == "centroid_only"
+    assert nextplaid_profile.centroid_lite_probe_centroids_per_token == 8
+    assert nextplaid_profile.centroid_lite_max_postings_per_token == 128
+    assert nextplaid_profile.centroid_lite_posting_selection == "score_topk"
+    assert nextplaid_profile.centroid_lite_candidate_scoring == "codeword_maxsim"
+    assert nextplaid_profile.centroid_lite_score_threshold == -1.0
     assert effective_document_node_colbert_candidate_source_focus_budgets(args) == [
-        800,
-        1600,
+        8192,
     ]
     assert effective_document_node_colbert_candidate_source_focus_caps(args) == [32, 64]
+    assert effective_document_node_colbert_candidate_source_focus_probes(args) == [4]
+    assert (
+        effective_document_node_colbert_candidate_source_focus_score_thresholds(args)
+        == [-1.0]
+    )
+    assert effective_document_node_colbert_candidate_source_focus_score_drops(args) == [
+        -1.0
+    ]
+    probe8_docmaxsim_profiles = document_node_colbert_candidate_source_focus_profiles(
+        clone_args(
+            args,
+            centroid_lite_caps="128",
+            centroid_lite_probes="8",
+            document_node_colbert_candidate_source_profiles=(
+                "centroid_lite_centroid_only_probe_008_cap_128_score_topk_docmaxsim"
+            ),
+        )
+    )
+    assert [profile.name for profile in probe8_docmaxsim_profiles] == [
+        "centroid_lite_centroid_only_probe_008_cap_128_score_topk_docmaxsim"
+    ]
+    assert probe8_docmaxsim_profiles[0].centroid_lite_probe_centroids_per_token == 8
+    assert probe8_docmaxsim_profiles[0].centroid_lite_max_postings_per_token == 128
+    assert (
+        probe8_docmaxsim_profiles[0].centroid_lite_candidate_scoring
+        == "doc_centroid_maxsim"
+    )
+    threshold_docmaxsim_profiles = document_node_colbert_candidate_source_focus_profiles(
+        clone_args(
+            args,
+            centroid_lite_caps="128",
+            centroid_lite_probes="8",
+            centroid_lite_score_thresholds="-1,0.4",
+            document_node_colbert_candidate_source_profiles=(
+                "centroid_lite_centroid_only_probe_008_cap_128_"
+                "score_topk_docmaxsim_threshold_040"
+            ),
+        )
+    )
+    assert [profile.name for profile in threshold_docmaxsim_profiles] == [
+        "centroid_lite_centroid_only_probe_008_cap_128_"
+        "score_topk_docmaxsim_threshold_040"
+    ]
+    assert (
+        threshold_docmaxsim_profiles[0].centroid_lite_probe_centroids_per_token == 8
+    )
+    assert threshold_docmaxsim_profiles[0].centroid_lite_max_postings_per_token == 128
+    assert threshold_docmaxsim_profiles[0].centroid_lite_score_threshold == 0.4
+    assert (
+        threshold_docmaxsim_profiles[0].centroid_lite_candidate_scoring
+        == "doc_centroid_maxsim"
+    )
+    assert (
+        serving_profile_index_signature(args, cap128_docmaxsim_profiles[0])
+        == serving_profile_index_signature(args, threshold_docmaxsim_profiles[0])
+    )
+    threshold_codeword_profiles = document_node_colbert_candidate_source_focus_profiles(
+        clone_args(
+            args,
+            centroid_lite_caps="128",
+            centroid_lite_probes="8",
+            centroid_lite_score_thresholds="-1,0.4",
+            document_node_colbert_candidate_source_profiles=(
+                "centroid_lite_centroid_only_probe_008_cap_128_"
+                "score_topk_codeword_maxsim_threshold_040"
+            ),
+        )
+    )
+    assert [profile.name for profile in threshold_codeword_profiles] == [
+        "centroid_lite_centroid_only_probe_008_cap_128_"
+        "score_topk_codeword_maxsim_threshold_040"
+    ]
+    assert (
+        threshold_codeword_profiles[0].centroid_lite_probe_centroids_per_token == 8
+    )
+    assert threshold_codeword_profiles[0].centroid_lite_max_postings_per_token == 128
+    assert threshold_codeword_profiles[0].centroid_lite_score_threshold == 0.4
+    assert (
+        threshold_codeword_profiles[0].centroid_lite_candidate_scoring
+        == "codeword_maxsim"
+    )
+    assert (
+        serving_profile_index_signature(args, cap128_codeword_profiles[0])
+        == serving_profile_index_signature(args, threshold_codeword_profiles[0])
+    )
+    drop_docmaxsim_profiles = document_node_colbert_candidate_source_focus_profiles(
+        clone_args(
+            args,
+            centroid_lite_caps="128",
+            centroid_lite_probes="8",
+            centroid_lite_score_drop_from_best_values="-1,0.1",
+            document_node_colbert_candidate_source_profiles=(
+                "centroid_lite_centroid_only_probe_008_cap_128_"
+                "score_topk_docmaxsim_drop_010"
+            ),
+        )
+    )
+    assert [profile.name for profile in drop_docmaxsim_profiles] == [
+        "centroid_lite_centroid_only_probe_008_cap_128_"
+        "score_topk_docmaxsim_drop_010"
+    ]
+    assert drop_docmaxsim_profiles[0].centroid_lite_score_drop_from_best == 0.1
+    assert (
+        drop_docmaxsim_profiles[0].centroid_lite_score_threshold == -1.0
+    )
+    assert (
+        serving_profile_index_signature(args, cap128_docmaxsim_profiles[0])
+        == serving_profile_index_signature(args, drop_docmaxsim_profiles[0])
+    )
+    drop_codeword_profiles = document_node_colbert_candidate_source_focus_profiles(
+        clone_args(
+            args,
+            centroid_lite_caps="128",
+            centroid_lite_probes="8",
+            centroid_lite_score_drop_from_best_values="-1,0.1",
+            document_node_colbert_candidate_source_profiles=(
+                "centroid_lite_centroid_only_probe_008_cap_128_"
+                "score_topk_codeword_maxsim_drop_010"
+            ),
+        )
+    )
+    assert [profile.name for profile in drop_codeword_profiles] == [
+        "centroid_lite_centroid_only_probe_008_cap_128_"
+        "score_topk_codeword_maxsim_drop_010"
+    ]
+    assert drop_codeword_profiles[0].centroid_lite_score_drop_from_best == 0.1
+    assert (
+        drop_codeword_profiles[0].centroid_lite_score_threshold == -1.0
+    )
+    assert (
+        drop_codeword_profiles[0].centroid_lite_candidate_scoring
+        == "codeword_maxsim"
+    )
+    assert (
+        serving_profile_index_signature(args, cap128_codeword_profiles[0])
+        == serving_profile_index_signature(args, drop_codeword_profiles[0])
+    )
 
     experimental_profiles = document_node_colbert_candidate_source_focus_profiles(
         clone_args(args, include_quantized_inverted_experimental=True)
     )
-    assert [profile.name for profile in experimental_profiles][-1] == (
+    assert [profile.name for profile in experimental_profiles][-2:] == [
+        "quantized_inverted_experimental_f32",
+        "quantized_inverted_experimental_f32_compact_topk_032",
+    ]
+    compact_quantized = [
+        profile
+        for profile in experimental_profiles
+        if profile.name == "quantized_inverted_experimental_f32_compact_topk_032"
+    ][0]
+    assert compact_quantized.quantized_inverted_max_postings_per_token == 32
+    assert compact_quantized.quantized_inverted_probe_codewords_per_token == 4
+    assert compact_quantized.quantized_inverted_posting_selection == "score_topk"
+    assert compact_quantized.quantized_inverted_compact_scoring == "experimental"
+    assert [profile.name for profile in experimental_profiles][-2] == (
         "quantized_inverted_experimental_f32"
     )
+    try:
+        document_node_colbert_candidate_source_focus_profiles(
+            clone_args(
+                args,
+                include_quantized_inverted_experimental=True,
+                document_node_colbert_candidate_source_profiles=(
+                    "quantized_inverted_external_centroid_only_compact_topk_032"
+                ),
+            )
+        )
+    except SystemExit as exc:
+        assert "--multivector-quantized-inverted-codebook-path" in str(exc)
+    else:
+        raise AssertionError("external quantized profile accepted without codebook path")
+    with tempfile.TemporaryDirectory() as tmpdir:
+        codebook_path = Path(tmpdir) / "codebook.txt"
+        codebook_path.write_text(
+            "pgturbohybrid_quantized_inverted_codebook_v1 2 2 test\n"
+            "1.0 0.0\n"
+            "0.0 1.0\n",
+            encoding="utf-8",
+        )
+        external_args = clone_args(
+            args,
+            include_quantized_inverted_experimental=True,
+            multivector_quantized_inverted_codebook_path=str(codebook_path),
+            document_node_colbert_candidate_source_profiles=(
+                "quantized_inverted_external_centroid_only_compact_topk_032,"
+                "quantized_inverted_external_centroid_only_compact_topk_032_coverage,"
+                "quantized_inverted_external_centroid_only_compact_topk_032_topm_02"
+            ),
+        )
+        external_profiles = document_node_colbert_candidate_source_focus_profiles(
+            external_args
+        )
+        assert [profile.name for profile in external_profiles] == [
+            "quantized_inverted_external_centroid_only_compact_topk_032",
+            "quantized_inverted_external_centroid_only_compact_topk_032_coverage",
+            "quantized_inverted_external_centroid_only_compact_topk_032_topm_02",
+        ]
+        external_profile = external_profiles[0]
+        external_coverage_profile = external_profiles[1]
+        external_topm_profile = external_profiles[2]
+        assert external_profile.quantized_inverted_codebook == "external"
+        assert external_profile.storage_kind == "centroid_only"
+        assert external_profile.centroids == "off"
+        assert external_coverage_profile.quantized_inverted_codebook == "external"
+        assert external_coverage_profile.quantized_inverted_token_coverage == "linear"
+        assert external_topm_profile.quantized_inverted_codebook == "external"
+        assert external_topm_profile.quantized_inverted_codebook_top_m == 2
+        validate_document_node_serving_profile_inputs(external_args, external_profiles)
+        assert Path(
+            external_args.multivector_quantized_inverted_codebook_path
+        ) == codebook_path.resolve()
+        external_mode_args, external_effective_rerank_k = (
+            document_node_colbert_candidate_source_focus_args(
+                external_args,
+                external_profile,
+                800,
+            )
+        )
+        assert (
+            external_effective_rerank_k
+            == DOCUMENT_NODE_COLBERT_CANDIDATE_SOURCE_DEFAULT_EXACT_RERANK_K
+        )
+        assert (
+            external_mode_args.multivector_quantized_inverted_codebook == "external"
+        )
+        assert Path(
+            external_mode_args.multivector_quantized_inverted_codebook_path
+        ) == codebook_path.resolve()
+        assert external_mode_args.multivector_quantized_inverted_codebook_top_m == 1
+        external_coverage_mode_args, external_coverage_effective_rerank_k = (
+            document_node_colbert_candidate_source_focus_args(
+                external_args,
+                external_coverage_profile,
+                800,
+            )
+        )
+        assert (
+            external_coverage_effective_rerank_k
+            == DOCUMENT_NODE_COLBERT_CANDIDATE_SOURCE_DEFAULT_EXACT_RERANK_K
+        )
+        assert (
+            external_coverage_mode_args.multivector_quantized_inverted_codebook
+            == "external"
+        )
+        assert (
+            external_coverage_mode_args.multivector_quantized_inverted_token_coverage
+            == "linear"
+        )
+        external_topm_mode_args, external_topm_effective_rerank_k = (
+            document_node_colbert_candidate_source_focus_args(
+                external_args,
+                external_topm_profile,
+                800,
+            )
+        )
+        assert (
+            external_topm_effective_rerank_k
+            == DOCUMENT_NODE_COLBERT_CANDIDATE_SOURCE_DEFAULT_EXACT_RERANK_K
+        )
+        assert (
+            external_topm_mode_args.multivector_quantized_inverted_codebook
+            == "external"
+        )
+        assert (
+            external_topm_mode_args.multivector_quantized_inverted_codebook_top_m
+            == 2
+        )
+        assert (
+            serving_profile_index_signature(external_args, external_profile)
+            != serving_profile_index_signature(args, compact_quantized)
+        )
+        assert (
+            serving_profile_index_signature(external_args, external_profile)
+            == serving_profile_index_signature(external_args, external_coverage_profile)
+        )
+        assert (
+            serving_profile_index_signature(external_args, external_profile)
+            != serving_profile_index_signature(external_args, external_topm_profile)
+        )
+        external_sweep_args = clone_args(
+            args,
+            include_quantized_inverted_experimental=True,
+            multivector_quantized_inverted_codebook_path=str(codebook_path),
+            quantized_inverted_posting_caps="32,64",
+            quantized_inverted_probes="4,8",
+            quantized_inverted_codebook_top_ms="1,2",
+            document_node_colbert_candidate_source_profiles=(
+                "quantized_inverted_external_centroid_only"
+                "_compact_topk_064_probe_008_topm_02"
+            ),
+        )
+        external_sweep_profiles = document_node_colbert_candidate_source_focus_profiles(
+            external_sweep_args
+        )
+        assert [profile.name for profile in external_sweep_profiles] == [
+            "quantized_inverted_external_centroid_only"
+            "_compact_topk_064_probe_008_topm_02"
+        ]
+        external_sweep_profile = external_sweep_profiles[0]
+        assert external_sweep_profile.storage_kind == "centroid_only"
+        assert external_sweep_profile.centroids == "off"
+        assert external_sweep_profile.quantized_inverted_max_postings_per_token == 64
+        assert external_sweep_profile.quantized_inverted_probe_codewords_per_token == 8
+        assert external_sweep_profile.quantized_inverted_codebook_top_m == 2
+        external_sweep_mode_args, external_sweep_effective_rerank_k = (
+            document_node_colbert_candidate_source_focus_args(
+                external_sweep_args,
+                external_sweep_profile,
+                800,
+            )
+        )
+        assert (
+            external_sweep_effective_rerank_k
+            == DOCUMENT_NODE_COLBERT_CANDIDATE_SOURCE_DEFAULT_EXACT_RERANK_K
+        )
+        assert (
+            external_sweep_mode_args.multivector_quantized_inverted_max_postings_per_token
+            == 64
+        )
+        assert (
+            external_sweep_mode_args.multivector_quantized_inverted_probe_codewords_per_token
+            == 8
+        )
+        assert (
+            external_sweep_mode_args.multivector_quantized_inverted_codebook_top_m
+            == 2
+        )
+        default_external_args = clone_args(
+            args,
+            include_quantized_inverted_experimental=True,
+            multivector_quantized_inverted_codebook_path=str(codebook_path),
+            document_node_colbert_candidate_source_profiles="",
+        )
+        default_external_profiles = (
+            document_node_colbert_candidate_source_focus_profiles(
+                default_external_args
+            )
+        )
+        assert [profile.name for profile in default_external_profiles] == [
+            DOCUMENT_NODE_COLBERT_CANDIDATE_SOURCE_DEFAULT_EXTERNAL_QUANTIZED_PROFILE
+        ]
+        default_external_profile = default_external_profiles[0]
+        assert default_external_profile.storage_kind == "centroid_only"
+        assert default_external_profile.centroids == "off"
+        assert (
+            default_external_profile.quantized_inverted_max_postings_per_token == 128
+        )
+        assert (
+            default_external_profile.quantized_inverted_probe_codewords_per_token == 16
+        )
+        assert default_external_profile.quantized_inverted_codebook_top_m == 1
+        assert (
+            default_external_profile.quantized_inverted_pruning
+            == "score_bound_experimental"
+        )
+        assert effective_document_node_colbert_candidate_source_focus_budgets(
+            default_external_args
+        ) == [8192]
+        default_external_mode_args, default_external_effective_rerank_k = (
+            document_node_colbert_candidate_source_focus_args(
+                default_external_args,
+                default_external_profile,
+                8192,
+            )
+        )
+        assert default_external_effective_rerank_k == 512
+        assert default_external_mode_args.multivector_doc_candidate_k == 8192
+        assert default_external_mode_args.multivector_exact_rerank_k == 512
+        assert (
+            default_external_mode_args.multivector_quantized_inverted_max_postings_per_token
+            == 128
+        )
+        assert (
+            default_external_mode_args.multivector_quantized_inverted_probe_codewords_per_token
+            == 16
+        )
+        assert (
+            default_external_mode_args.multivector_quantized_inverted_pruning
+            == "score_bound_experimental"
+        )
 
     mode_args, effective_rerank_k = document_node_colbert_candidate_source_focus_args(
         args,
         profiles[0],
-        800,
+        4096,
     )
-    assert effective_rerank_k == 100
-    assert mode_args.multivector_doc_candidate_k == 800
-    assert mode_args.multivector_exact_rerank_k == 100
+    assert effective_rerank_k == 512
+    assert mode_args.multivector_doc_candidate_k == 4096
+    assert mode_args.multivector_exact_rerank_k == 512
     assert mode_args.multivector_sparse_candidate_source == "off"
     assert mode_args.multivector_bm25_candidate_injection == "off"
     assert mode_args.multivector_branch_plan == "dense_only"
@@ -20110,6 +22724,7 @@ def _self_check_document_node_colbert_candidate_source_focus() -> None:
             "last_selected": {
                 "multivector_exact_kernel": "blocked_neon",
                 "centroid_posting_cap_strategy": "uniform_cap",
+                "centroid_candidate_scoring": "posting_payload",
                 "proxy_candidate_limit_source": "candidate_k",
             },
             "stats_available": {"core": True, "centroid_lite": True},
@@ -20147,10 +22762,15 @@ def _self_check_document_node_colbert_candidate_source_focus() -> None:
     assert row["exact_top1_admission_rate"] is None
     assert row["recall@10"] == 1.0
     assert row["centroid_docs_touched_ratio"] == 0.9
+    assert row["centroid_lite_candidate_scoring"] == "posting_payload"
+    assert row["centroid_candidate_scoring"] == "posting_payload"
     assert row["completed_query_count"] == 2
     assert row["query_evaluation_failed"] is False
     assert row["candidate_source_stats"]["last_selected"]["multivector_exact_kernel"] == (
         "blocked_neon"
+    )
+    assert row["candidate_source_stats"]["last_selected"]["centroid_candidate_scoring"] == (
+        "posting_payload"
     )
 
     def timeout_provider(
@@ -20186,6 +22806,7 @@ def _self_check_document_node_colbert_candidate_source_focus() -> None:
     assert timeout_loop["query_timeout_query_ids"] == ["q-timeout"]
     assert timeout_loop["query_count"] == 0
     skipped_row = document_node_colbert_candidate_source_focus_skipped_row(
+        args=argparse.Namespace(),
         profile=profiles[1],
         candidate_k=800,
         effective_rerank_k=100,
@@ -20203,6 +22824,7 @@ def _self_check_document_node_colbert_candidate_source_focus() -> None:
     )
     assert skipped_row["index_build_skipped"] is True
     assert skipped_row["admission_evidence"] == "unavailable"
+    assert skipped_row["centroid_lite_candidate_scoring"] == "posting_payload"
     assert "index_build_skipped_estimate_exceeds_limit" in skipped_row[
         "serving_slow_path_warnings"
     ]
@@ -20271,6 +22893,17 @@ def _self_check_document_node_colbert_candidate_source_focus() -> None:
                 "ndcg@10": 0.4,
                 "p95_ms": 30.0,
             },
+            {
+                "profile": "quantized_inverted_external_centroid_only_compact_topk_032",
+                "candidate_source": "quantized_inverted_experimental",
+                "candidate_budget": 800,
+                "effective_exact_rerank_k": 100,
+                "quantized_inverted_candidates": 800,
+                "quantized_inverted_docs_scored": 885,
+                "exact_rerank_docs": 100,
+                "ndcg@10": 0.08,
+                "p95_ms": 9.0,
+            },
         ],
         docs_loaded=1000,
     )
@@ -20279,6 +22912,19 @@ def _self_check_document_node_colbert_candidate_source_focus() -> None:
     assert "uniform_centroid_caps_insufficient" in recommendation["recommendations"]
     assert "uniform_centroid_cap_not_promotable" in recommendation["recommendations"]
     assert "prioritize_quantized_codebook_postings" in recommendation["recommendations"]
+    assert "quantized_compact_ranking_bottleneck" in recommendation["recommendations"]
+    assert "sweep_exact_rerank_k_for_quantized" in recommendation["recommendations"]
+    assert recommendation["quantized_rank_limited_profiles"] == [
+        {
+            "profile": "quantized_inverted_external_centroid_only_compact_topk_032",
+            "candidate_budget": 800,
+            "effective_exact_rerank_k": 100,
+            "quantized_inverted_candidates": 800,
+            "quantized_inverted_docs_scored": 885,
+            "exact_rerank_docs": 100,
+            "ndcg@10": 0.08,
+        }
+    ]
 
     fallback_recommendation = document_node_colbert_candidate_source_focus_recommendation(
         [
@@ -21140,9 +23786,30 @@ def run_document_node_serving_grid(
                     "centroid_lite_max_postings_per_token": (
                         profile.centroid_lite_max_postings_per_token
                     ),
+                    "centroid_lite_probe_centroids_per_token": (
+                        profile.centroid_lite_probe_centroids_per_token
+                    ),
+                    "centroid_lite_codeword_top_m": (
+                        profile.centroid_lite_codeword_top_m
+                    ),
+                    "centroid_lite_posting_selection": (
+                        profile.centroid_lite_posting_selection
+                    ),
+                    "centroid_lite_candidate_scoring": (
+                        profile.centroid_lite_candidate_scoring
+                    ),
+                    "centroid_lite_score_threshold": (
+                        profile.centroid_lite_score_threshold
+                    ),
+                    "centroid_lite_score_drop_from_best": (
+                        profile.centroid_lite_score_drop_from_best
+                    ),
                     "centroid_lite_pruning": profile.centroid_lite_pruning,
                     "centroid_lite_bitset_prefilter": (
                         profile.centroid_lite_bitset_prefilter
+                    ),
+                    "centroid_lite_bitset_min_token_matches": (
+                        profile.centroid_lite_bitset_min_token_matches
                     ),
                     "index_signature": serializable_index_signature(signature),
                     "index_build_reused": profile_reused_index,
@@ -21996,8 +24663,21 @@ def document_node_serving_build_only_row(
         "centroid_lite_max_postings_per_token": (
             profile.centroid_lite_max_postings_per_token
         ),
+        "centroid_lite_probe_centroids_per_token": (
+            profile.centroid_lite_probe_centroids_per_token
+        ),
+        "centroid_lite_codeword_top_m": profile.centroid_lite_codeword_top_m,
+        "centroid_lite_posting_selection": profile.centroid_lite_posting_selection,
+        "centroid_lite_candidate_scoring": profile.centroid_lite_candidate_scoring,
+        "centroid_lite_score_threshold": profile.centroid_lite_score_threshold,
+        "centroid_lite_score_drop_from_best": (
+            profile.centroid_lite_score_drop_from_best
+        ),
         "centroid_lite_pruning": profile.centroid_lite_pruning,
         "centroid_lite_bitset_prefilter": profile.centroid_lite_bitset_prefilter,
+        "centroid_lite_bitset_min_token_matches": (
+            profile.centroid_lite_bitset_min_token_matches
+        ),
         "plain_fallback": profile.plain_fallback,
         "index_signature": serializable_index_signature(signature),
         "index_build_reused": profile_reused_index,
@@ -22150,8 +24830,21 @@ def document_node_serving_skipped_build_row(
         "centroid_lite_max_postings_per_token": (
             profile.centroid_lite_max_postings_per_token
         ),
+        "centroid_lite_probe_centroids_per_token": (
+            profile.centroid_lite_probe_centroids_per_token
+        ),
+        "centroid_lite_codeword_top_m": profile.centroid_lite_codeword_top_m,
+        "centroid_lite_posting_selection": profile.centroid_lite_posting_selection,
+        "centroid_lite_candidate_scoring": profile.centroid_lite_candidate_scoring,
+        "centroid_lite_score_threshold": profile.centroid_lite_score_threshold,
+        "centroid_lite_score_drop_from_best": (
+            profile.centroid_lite_score_drop_from_best
+        ),
         "centroid_lite_pruning": profile.centroid_lite_pruning,
         "centroid_lite_bitset_prefilter": profile.centroid_lite_bitset_prefilter,
+        "centroid_lite_bitset_min_token_matches": (
+            profile.centroid_lite_bitset_min_token_matches
+        ),
         "plain_fallback": profile.plain_fallback,
         "index_signature": serializable_index_signature(signature),
         "index_build_skipped": True,
@@ -22217,8 +24910,21 @@ def document_node_serving_skipped_grid_row(
         "centroid_lite_max_postings_per_token": (
             profile.centroid_lite_max_postings_per_token
         ),
+        "centroid_lite_probe_centroids_per_token": (
+            profile.centroid_lite_probe_centroids_per_token
+        ),
+        "centroid_lite_codeword_top_m": profile.centroid_lite_codeword_top_m,
+        "centroid_lite_posting_selection": profile.centroid_lite_posting_selection,
+        "centroid_lite_candidate_scoring": profile.centroid_lite_candidate_scoring,
+        "centroid_lite_score_threshold": profile.centroid_lite_score_threshold,
+        "centroid_lite_score_drop_from_best": (
+            profile.centroid_lite_score_drop_from_best
+        ),
         "centroid_lite_pruning": profile.centroid_lite_pruning,
         "centroid_lite_bitset_prefilter": profile.centroid_lite_bitset_prefilter,
+        "centroid_lite_bitset_min_token_matches": (
+            profile.centroid_lite_bitset_min_token_matches
+        ),
         "ef": config.ef,
         "oversampling": config.oversampling,
         "largest_budget": max(stage_executed_budgets) if stage_executed_budgets else None,
@@ -24283,8 +26989,21 @@ def run_document_node_serving_latency_only(
             "centroid_lite_max_postings_per_token": (
                 profile.centroid_lite_max_postings_per_token
             ),
+            "centroid_lite_probe_centroids_per_token": (
+                profile.centroid_lite_probe_centroids_per_token
+            ),
+            "centroid_lite_codeword_top_m": profile.centroid_lite_codeword_top_m,
+            "centroid_lite_posting_selection": profile.centroid_lite_posting_selection,
+            "centroid_lite_candidate_scoring": profile.centroid_lite_candidate_scoring,
+            "centroid_lite_score_threshold": profile.centroid_lite_score_threshold,
+            "centroid_lite_score_drop_from_best": (
+                profile.centroid_lite_score_drop_from_best
+            ),
             "centroid_lite_pruning": profile.centroid_lite_pruning,
             "centroid_lite_bitset_prefilter": profile.centroid_lite_bitset_prefilter,
+            "centroid_lite_bitset_min_token_matches": (
+                profile.centroid_lite_bitset_min_token_matches
+            ),
             "ef": int(args.serving_ef),
             "oversampling": int(args.serving_oversampling),
             "entry_sample_count": int(args.multivector_doc_graph_entry_sample_count),
@@ -24390,13 +27109,43 @@ def colbert_beir_candidate_source_stats(
         "centroid_docs_touched",
         "centroid_pruned_docs",
         "centroid_postings_touched",
+        "centroid_postings_selected",
         "centroid_postings_skipped",
+        "centroid_probe_centroids_per_token",
+        "centroid_score_threshold",
+        "centroid_lists_skipped_by_threshold",
         "centroid_posting_cap_strategy",
+        "centroid_candidate_scoring",
         "centroid_candidates",
+        "centroid_bitset_min_token_matches",
         "quantized_inverted_lists_visited",
         "quantized_inverted_postings_touched",
+        "quantized_inverted_postings_selected",
+        "quantized_inverted_postings_skipped",
+        "quantized_inverted_probe_codewords_per_token",
+        "quantized_inverted_token_coverage_mode",
+        "quantized_inverted_active_query_tokens",
+        "quantized_inverted_token_matches_total",
+        "quantized_inverted_token_matches_max",
+        "quantized_inverted_min_token_matches",
+        "quantized_inverted_token_match_filtered_docs",
+        "quantized_inverted_score_bound_pruning_enabled",
+        "quantized_inverted_score_bound_docs_checked",
+        "quantized_inverted_score_bound_docs_pruned",
+        "quantized_inverted_score_bound_time_us",
+        "quantized_inverted_score_bound_prune_ratio",
+        "quantized_inverted_candidates_before_bound",
+        "quantized_inverted_candidates_after_bound",
         "quantized_inverted_docs_scored",
         "quantized_inverted_candidates",
+        "quantized_inverted_query_codeword_score_us",
+        "quantized_inverted_query_codeword_score_time_us",
+        "quantized_inverted_compact_kernel",
+        "quantized_inverted_compact_score_source",
+        "quantized_inverted_compact_score_us",
+        "quantized_inverted_compact_docs_scored",
+        "quantized_inverted_compact_payload_bytes",
+        "quantized_inverted_compact_topk_changed_vs_scalar",
         "multivector_exact_rerank_docs",
         "multivector_exact_rerank_pairs",
         "multivector_exact_kernel",
@@ -24577,6 +27326,640 @@ def build_document_node_colbert_beir_quality_report(
         "index_phase": index_phase,
         "total_elapsed_ms": elapsed_ms_since(started),
     }
+
+
+def next_plaid_sdk_path(args: argparse.Namespace) -> Path:
+    raw = getattr(args, "next_plaid_sdk_path", None)
+    if raw is None:
+        raw = Path("../next-plaid/next-plaid-api/python-sdk")
+    path = Path(raw)
+    if not path.is_absolute():
+        path = (Path.cwd() / path).resolve()
+    return path
+
+
+def import_next_plaid_sdk(args: argparse.Namespace) -> tuple[Any, Any, Any]:
+    sdk_path = next_plaid_sdk_path(args)
+    if not sdk_path.is_dir():
+        raise SystemExit(
+            "NextPlaid Python SDK path does not exist: "
+            f"{sdk_path}. Use --next-plaid-sdk-path."
+        )
+    sdk_path_text = str(sdk_path)
+    if sdk_path_text not in sys.path:
+        sys.path.insert(0, sdk_path_text)
+    try:
+        from next_plaid_client import IndexConfig, NextPlaidClient, SearchParams
+    except Exception as exc:
+        raise SystemExit(
+            "failed to import NextPlaid Python SDK from "
+            f"{sdk_path}: {exc}"
+        ) from exc
+    return NextPlaidClient, IndexConfig, SearchParams
+
+
+def dataclass_to_plain(value: Any) -> dict[str, Any]:
+    if value is None:
+        return {}
+    try:
+        return asdict(value)
+    except TypeError:
+        data = getattr(value, "__dict__", None)
+        return dict(data) if isinstance(data, dict) else {}
+
+
+def next_plaid_doc_id_from_result(
+    *,
+    internal_id: Any,
+    metadata: Any,
+) -> tuple[str, str | None]:
+    if isinstance(metadata, dict):
+        for key in ("doc_id", "id"):
+            value = metadata.get(key)
+            if value is not None:
+                return str(value), None
+    return str(internal_id), "missing_result_doc_id_metadata"
+
+
+def build_next_plaid_beir_quality_report(
+    *,
+    args: argparse.Namespace,
+    run: dict[str, list[str]],
+    latencies_ms: list[float],
+    qrels: dict[str, dict[str, int]],
+    counts: dict[str, int],
+    query_limit: dict[str, Any],
+    index_info: dict[str, Any],
+    health: dict[str, Any],
+    upload_phase: dict[str, Any],
+    docid_mapping_warnings: list[dict[str, Any]],
+    started: float,
+) -> dict[str, Any]:
+    if not qrels:
+        raise SystemExit(
+            "--next-plaid-beir-quality-only requires qrels in dbpedia_colbert_qrels"
+        )
+    metrics = qrel_metrics_for_retrieval_run(
+        run,
+        qrels,
+        final_k=int(getattr(args, "next_plaid_top_k", 0) or getattr(args, "final_k", 10) or 10),
+        quality_k=int(getattr(args, "quality_k", 10) or 10),
+    )
+    latency = summarize_ms(latencies_ms)
+    query_ids = list(run)
+    qrel_coverage = qrel_coverage_for_query_ids(qrels, query_ids)
+    top_k = int(getattr(args, "next_plaid_top_k", 10) or 10)
+    return {
+        "enabled": True,
+        "engine": "next-plaid",
+        "external_reference": True,
+        "pure_colbert_only": True,
+        "native_index": False,
+        "exact_admission_available": False,
+        "exact_admission_reason": "not_requested",
+        "exact_admission_baseline_calls": 0,
+        "docs": int(counts.get("docs_loaded", 0) or 0),
+        "queries_available": int(counts.get("queries_loaded", 0) or 0),
+        "queries_evaluated": len(run),
+        "qrels_loaded": int(counts.get("qrels_loaded", 0) or 0),
+        "qrels_covered": int(qrel_coverage.get("qrels_covered", 0) or 0),
+        "queries_with_qrels": int(qrel_coverage.get("queries_with_qrels", 0) or 0),
+        "query_qrel_coverage": qrel_coverage.get("query_qrel_coverage", 0.0),
+        "requested_max_queries": query_limit.get("requested_max_queries"),
+        "effective_max_queries": query_limit.get("effective_max_queries"),
+        "query_count_limited_by_artifact": query_limit.get(
+            "query_count_limited_by_artifact",
+            False,
+        ),
+        "settings": {
+            "url": getattr(args, "next_plaid_url", "http://localhost:8080"),
+            "index_name": getattr(args, "next_plaid_index_name", ""),
+            "sdk_path": portable_path(next_plaid_sdk_path(args)),
+            "create_index": bool(getattr(args, "next_plaid_create_index", False)),
+            "delete_existing_index": bool(
+                getattr(args, "next_plaid_delete_existing_index", False)
+            ),
+            "add_documents": bool(getattr(args, "next_plaid_add_documents", False)),
+            "use_precomputed_embeddings": bool(
+                getattr(args, "next_plaid_use_precomputed_embeddings", False)
+            ),
+            "nbits": int(getattr(args, "next_plaid_nbits", 4) or 4),
+            "index_batch_size": int(
+                getattr(args, "next_plaid_index_batch_size", 50000) or 50000
+            ),
+            "start_from_scratch": int(
+                getattr(args, "next_plaid_start_from_scratch", 0) or 0
+            ),
+            "upload_batch_size": int(
+                getattr(args, "next_plaid_upload_batch_size", 64) or 64
+            ),
+            "pool_factor": getattr(args, "next_plaid_pool_factor", None),
+            "top_k": top_k,
+            "n_ivf_probe": int(getattr(args, "next_plaid_n_ivf_probe", 8) or 8),
+            "n_full_scores": int(getattr(args, "next_plaid_n_full_scores", 4096) or 4096),
+            "centroid_score_threshold": getattr(
+                args,
+                "next_plaid_centroid_score_threshold",
+                0.4,
+            ),
+            "timeout_s": float(getattr(args, "next_plaid_timeout_s", 60.0) or 60.0),
+        },
+        "index_info": index_info,
+        "health": health,
+        "upload_phase": upload_phase,
+        "p50_ms": latency.get("p50_ms"),
+        "p95_ms": latency.get("p95_ms"),
+        "p99_ms": latency.get("p99_ms"),
+        "qps": latency.get("qps", 0.0),
+        "latency": latency,
+        "recall@10": metrics.get("recall@10"),
+        "ndcg@10": metrics.get("ndcg@10"),
+        "mrr@10": metrics.get("mrr@10"),
+        "metrics": metrics,
+        "docid_mapping_suspect": bool(docid_mapping_warnings),
+        "docid_mapping_warnings": docid_mapping_warnings[:50],
+        "docid_mapping_warning_count": len(docid_mapping_warnings),
+        "top10_by_query": {query_id: docs[:10] for query_id, docs in run.items()},
+        "total_elapsed_ms": elapsed_ms_since(started),
+    }
+
+
+def next_plaid_upload_documents(
+    *,
+    client: Any,
+    index_name: str,
+    doc_rows: list[tuple[str, str]],
+    batch_size: int,
+    pool_factor: int | None,
+) -> dict[str, Any]:
+    started = time.perf_counter()
+    if batch_size < 1:
+        raise SystemExit("--next-plaid-upload-batch-size must be positive")
+    batches = 0
+    for offset in range(0, len(doc_rows), batch_size):
+        batch = doc_rows[offset : offset + batch_size]
+        client.add(
+            index_name,
+            [text for _, text in batch],
+            metadata=[{"doc_id": doc_id} for doc_id, _ in batch],
+            pool_factor=pool_factor,
+        )
+        batches += 1
+        if batches % 10 == 0:
+            print(
+                f"next-plaid upload: {min(offset + batch_size, len(doc_rows))}/{len(doc_rows)} docs",
+                flush=True,
+            )
+    return {
+        "enabled": True,
+        "documents_submitted": len(doc_rows),
+        "batches": batches,
+        "batch_size": batch_size,
+        "pool_factor": pool_factor,
+        "elapsed_ms": elapsed_ms_since(started),
+        "note": (
+            "NextPlaid text updates are server-side operations; this reports "
+            "submission time. Use --next-plaid-wait-for-index to wait for the "
+            "document count before search."
+        ),
+    }
+
+
+def next_plaid_embedding_payload_from_multivector_send(value: bytes) -> dict[str, Any]:
+    if len(value) < 16:
+        raise ValueError("invalid turbohybrid_multivector_send payload: too short")
+    _version, dim, count, _context_count = struct.unpack("!iiii", value[:16])
+    if dim <= 0 or count <= 0:
+        raise ValueError(
+            f"invalid turbohybrid_multivector_send shape: count={count}, dim={dim}"
+        )
+    expected = 16 + count * dim * 4
+    if len(value) < expected:
+        raise ValueError(
+            "invalid turbohybrid_multivector_send payload: expected at least "
+            f"{expected} bytes, got {len(value)}"
+        )
+    try:
+        import numpy as np
+    except ImportError as exc:  # pragma: no cover - benchmark dependency guard
+        raise SystemExit("precomputed NextPlaid embedding upload requires numpy") from exc
+    matrix = np.frombuffer(value, dtype=">f4", count=count * dim, offset=16)
+    little_endian = matrix.astype("<f4", copy=False).tobytes()
+    return {
+        "embeddings_b64": base64.b64encode(little_endian).decode("ascii"),
+        "shape": [count, dim],
+    }
+
+
+def next_plaid_upload_precomputed_embeddings(
+    *,
+    conn: psycopg.Connection[Any],
+    client: Any,
+    index_name: str,
+    max_docs: int,
+    batch_size: int,
+    endpoint: str,
+    wait_mode: str,
+    wait_timeout_s: float,
+) -> dict[str, Any]:
+    started = time.perf_counter()
+    if batch_size < 1:
+        raise SystemExit("--next-plaid-upload-batch-size must be positive")
+    if endpoint not in {"update", "documents"}:
+        raise SystemExit(
+            "--next-plaid-upload-endpoint must be either 'update' or 'documents'"
+        )
+    if wait_mode not in {"batch", "final"}:
+        raise SystemExit("--next-plaid-upload-wait-mode must be either 'batch' or 'final'")
+    wait_after_each_batch = wait_mode == "batch"
+    limit_sql = "LIMIT %s" if max_docs and max_docs > 0 else ""
+    params: tuple[Any, ...] = (max_docs,) if max_docs and max_docs > 0 else ()
+    docs_submitted = 0
+    batches = 0
+    observed_dim: int | None = None
+    observed_tokens = 0
+    batch_wait_elapsed_ms = 0.0
+    batch_wait_failures: list[dict[str, Any]] = []
+    seed_documents_via_update = 0
+
+    def wait_for_visible(expected_docs: int) -> None:
+        nonlocal batch_wait_elapsed_ms
+        wait_started = time.perf_counter()
+        deadline = wait_started + max(wait_timeout_s, 0.0)
+        observed_docs = 0
+        last_info: dict[str, Any] = {}
+        last_error: str | None = None
+        while True:
+            try:
+                last_info = dataclass_to_plain(client.get_index(index_name))
+                observed_docs = int(last_info.get("num_documents", 0) or 0)
+                last_error = None
+            except Exception as exc:  # pragma: no cover - external API race
+                last_error = str(exc)
+            if observed_docs >= expected_docs:
+                break
+            if time.perf_counter() >= deadline:
+                batch_wait_failures.append(
+                    {
+                        "expected_documents": expected_docs,
+                        "observed_documents": observed_docs,
+                        "last_index_info": last_info,
+                        "last_error": last_error,
+                    }
+                )
+                break
+            time.sleep(0.2)
+        batch_wait_elapsed_ms += elapsed_ms_since(wait_started)
+        if batch_wait_failures:
+            raise SystemExit(
+                "NextPlaid precomputed upload did not make batch visible "
+                "before the next batch. Last wait failure: "
+                f"{batch_wait_failures[-1]}"
+            )
+
+    with conn.transaction():
+        with conn.cursor(name="next_plaid_doc_embedding_upload") as cur:
+            cur.itersize = max(batch_size, 1)
+            cur.execute(
+                f"""
+                SELECT doc_id::text, turbohybrid_multivector_send(colbert) AS colbert_binary
+                FROM dbpedia_colbert_docs
+                ORDER BY doc_id
+                {limit_sql}
+                """,
+                params,
+            )
+            while True:
+                rows = cur.fetchmany(batch_size)
+                if not rows:
+                    break
+                documents: list[dict[str, Any]] = []
+                metadata: list[dict[str, Any]] = []
+                for doc_id, payload in rows:
+                    embedding = next_plaid_embedding_payload_from_multivector_send(payload)
+                    shape = embedding["shape"]
+                    if observed_dim is None:
+                        observed_dim = int(shape[1])
+                    elif observed_dim != int(shape[1]):
+                        raise SystemExit(
+                            "NextPlaid precomputed embedding dimension mismatch: "
+                            f"expected {observed_dim}, got {shape[1]} for {doc_id}"
+                        )
+                    observed_tokens += int(shape[0])
+                    documents.append(embedding)
+                    metadata.append({"doc_id": doc_id})
+                if endpoint == "documents" and docs_submitted == 0:
+                    try:
+                        dataclass_to_plain(client.get_index(index_name))
+                    except Exception:
+                        client.add(index_name, documents[:1], metadata=metadata[:1])
+                        docs_submitted += 1
+                        seed_documents_via_update += 1
+                        wait_for_visible(docs_submitted)
+                        documents = documents[1:]
+                        metadata = metadata[1:]
+                if not documents:
+                    batches += 1
+                    continue
+                if endpoint == "documents":
+                    client._request(
+                        "POST",
+                        f"/indices/{index_name}/documents",
+                        json={"documents": documents, "metadata": metadata},
+                    )
+                else:
+                    client.add(index_name, documents, metadata=metadata)
+                docs_submitted += len(documents)
+                batches += 1
+                if wait_after_each_batch:
+                    wait_for_visible(docs_submitted)
+                if batches % 10 == 0:
+                    print(
+                        f"next-plaid embedding upload: {docs_submitted} docs",
+                        flush=True,
+                    )
+    return {
+        "enabled": True,
+        "precomputed_embeddings": True,
+        "documents_submitted": docs_submitted,
+        "batches": batches,
+        "batch_size": batch_size,
+        "endpoint": endpoint,
+        "seed_documents_via_update": seed_documents_via_update,
+        "wait_mode": wait_mode,
+        "wait_after_each_batch": wait_after_each_batch,
+        "batch_wait_elapsed_ms": batch_wait_elapsed_ms,
+        "embedding_dim": observed_dim,
+        "embeddings_submitted": observed_tokens,
+        "elapsed_ms": elapsed_ms_since(started),
+        "note": (
+            "Submitted existing PostgreSQL ColBERT multivectors to NextPlaid; "
+            "no text encoding was performed."
+        ),
+    }
+
+
+def next_plaid_query_embedding_payloads(
+    conn: psycopg.Connection[Any],
+    query_ids: Sequence[str],
+) -> dict[str, dict[str, Any]]:
+    if not query_ids:
+        return {}
+    with conn.cursor() as cur:
+        cur.execute(
+            """
+            SELECT query_id::text, turbohybrid_multivector_send(colbert) AS colbert_binary
+            FROM dbpedia_colbert_queries
+            WHERE query_id = ANY(%s)
+            """,
+            (list(query_ids),),
+        )
+        return {
+            str(query_id): next_plaid_embedding_payload_from_multivector_send(payload)
+            for query_id, payload in cur.fetchall()
+        }
+
+
+def next_plaid_wait_for_index_documents(
+    *,
+    client: Any,
+    index_name: str,
+    expected_docs: int,
+    timeout_s: float,
+    poll_s: float = 5.0,
+) -> dict[str, Any]:
+    started = time.perf_counter()
+    deadline = started + max(timeout_s, 0.0)
+    last_info: dict[str, Any] = {}
+    last_error: str | None = None
+    while True:
+        try:
+            info = dataclass_to_plain(client.get_index(index_name))
+            last_info = info
+            num_documents = int(info.get("num_documents", 0) or 0)
+            last_error = None
+        except Exception as exc:  # pragma: no cover - external API race
+            num_documents = 0
+            last_error = str(exc)
+        if num_documents >= expected_docs:
+            return {
+                "waited": True,
+                "ready": True,
+                "expected_documents": expected_docs,
+                "observed_documents": num_documents,
+                "elapsed_ms": elapsed_ms_since(started),
+            }
+        if time.perf_counter() >= deadline:
+            return {
+                "waited": True,
+                "ready": False,
+                "expected_documents": expected_docs,
+                "observed_documents": num_documents,
+                "elapsed_ms": elapsed_ms_since(started),
+                "last_index_info": last_info,
+                "last_error": last_error,
+            }
+        time.sleep(poll_s)
+
+
+def run_next_plaid_beir_quality_only(
+    conn: psycopg.Connection[Any],
+    args: argparse.Namespace,
+) -> dict[str, Any]:
+    started = time.perf_counter()
+    counts = dbpedia_colbert_loaded_counts(conn)
+    qrels = loaded_qrels(conn)
+    if not qrels:
+        raise SystemExit(
+            "--next-plaid-beir-quality-only requires loaded qrels; reuse an "
+            "imported DB with dbpedia_colbert_qrels"
+        )
+    query_rows = learned_sparse_input_query_rows(conn, int(getattr(args, "max_queries", 0) or 0))
+    query_limit = document_node_colbert_1m_query_limit_summary(
+        requested_max_queries=int(getattr(args, "max_queries", 0) or 0),
+        queries_loaded=int(counts.get("queries_loaded", len(query_rows)) or len(query_rows)),
+        strict_query_count=bool(getattr(args, "strict_query_count", False)),
+    )
+    if query_limit["strict_query_count_failed"]:
+        raise SystemExit(query_limit["strict_query_count_error"])
+    effective_query_count = int(query_limit.get("effective_max_queries", 0) or 0)
+    selected_queries = (
+        query_rows[:effective_query_count]
+        if effective_query_count > 0
+        else list(query_rows)
+    )
+    if not selected_queries:
+        raise SystemExit("no loaded DBpedia queries found in dbpedia_colbert_queries")
+
+    NextPlaidClient, IndexConfig, SearchParams = import_next_plaid_sdk(args)
+    client = NextPlaidClient(
+        getattr(args, "next_plaid_url", "http://localhost:8080"),
+        timeout=float(getattr(args, "next_plaid_timeout_s", 60.0) or 60.0),
+    )
+    try:
+        health = dataclass_to_plain(client.health())
+    except Exception as exc:
+        raise SystemExit(
+            "NextPlaid server is not reachable at "
+            f"{getattr(args, 'next_plaid_url', 'http://localhost:8080')}: {exc}"
+        ) from exc
+
+    index_name = str(getattr(args, "next_plaid_index_name", "dbpedia_colbert_1m") or "")
+    if not index_name:
+        raise SystemExit("--next-plaid-index-name must not be empty")
+    existing_indices = set(client.list_indices())
+    if getattr(args, "next_plaid_delete_existing_index", False) and index_name in existing_indices:
+        client.delete_index(index_name)
+        existing_indices.discard(index_name)
+    if getattr(args, "next_plaid_create_index", False):
+        if index_name in existing_indices:
+            raise SystemExit(
+                f"NextPlaid index already exists: {index_name}. Use "
+                "--next-plaid-delete-existing-index to replace it."
+            )
+        config = IndexConfig(
+            nbits=int(getattr(args, "next_plaid_nbits", 4) or 4),
+            batch_size=int(getattr(args, "next_plaid_index_batch_size", 50000) or 50000),
+            start_from_scratch=int(
+                getattr(args, "next_plaid_start_from_scratch", 0) or 0
+            ),
+            max_documents=int(counts.get("docs_loaded", 0) or 0) or None,
+        )
+        client.create_index(index_name, config)
+        existing_indices.add(index_name)
+    if index_name not in existing_indices:
+        raise SystemExit(
+            f"NextPlaid index does not exist: {index_name}. Start/build the "
+            "external NextPlaid index first or pass --next-plaid-create-index "
+            "and --next-plaid-add-documents."
+        )
+
+    upload_phase: dict[str, Any] = {"enabled": False}
+    if getattr(args, "next_plaid_add_documents", False):
+        if getattr(args, "next_plaid_use_precomputed_embeddings", False):
+            upload_phase = next_plaid_upload_precomputed_embeddings(
+                conn=conn,
+                client=client,
+                index_name=index_name,
+                max_docs=int(getattr(args, "max_docs", 0) or 0),
+                batch_size=int(getattr(args, "next_plaid_upload_batch_size", 64) or 64),
+                endpoint=str(getattr(args, "next_plaid_upload_endpoint", "update") or "update"),
+                wait_mode=str(getattr(args, "next_plaid_upload_wait_mode", "batch") or "batch"),
+                wait_timeout_s=float(
+                    getattr(args, "next_plaid_wait_timeout_s", 1800.0) or 1800.0
+                ),
+            )
+        else:
+            doc_rows = learned_sparse_input_doc_rows(conn, int(getattr(args, "max_docs", 0) or 0))
+            if not doc_rows:
+                raise SystemExit("no loaded DBpedia documents found in dbpedia_colbert_docs")
+            upload_phase = next_plaid_upload_documents(
+                client=client,
+                index_name=index_name,
+                doc_rows=doc_rows,
+                batch_size=int(getattr(args, "next_plaid_upload_batch_size", 64) or 64),
+                pool_factor=getattr(args, "next_plaid_pool_factor", None),
+            )
+        if getattr(args, "next_plaid_wait_for_index", False):
+            upload_phase["wait_for_index"] = next_plaid_wait_for_index_documents(
+                client=client,
+                index_name=index_name,
+                expected_docs=int(
+                    upload_phase.get("documents_submitted")
+                    or counts.get("docs_loaded", 0)
+                    or 0
+                ),
+                timeout_s=float(getattr(args, "next_plaid_wait_timeout_s", 1800.0) or 1800.0),
+            )
+            if not upload_phase["wait_for_index"].get("ready", False):
+                raise SystemExit(
+                    "NextPlaid index did not reach the expected document count: "
+                    f"{upload_phase['wait_for_index']}"
+                )
+
+    index_info = dataclass_to_plain(client.get_index(index_name))
+    indexed_docs = int(index_info.get("num_documents", 0) or 0)
+    expected_docs = int(counts.get("docs_loaded", 0) or 0)
+    if indexed_docs < expected_docs and not getattr(args, "next_plaid_allow_partial_index", False):
+        raise SystemExit(
+            f"NextPlaid index {index_name} has {indexed_docs} documents, but "
+            f"the Postgres corpus has {expected_docs}. Pass "
+            "--next-plaid-allow-partial-index only for diagnostic partial runs."
+        )
+
+    params = SearchParams(
+        top_k=int(getattr(args, "next_plaid_top_k", 100) or 100),
+        n_ivf_probe=int(getattr(args, "next_plaid_n_ivf_probe", 8) or 8),
+        n_full_scores=int(getattr(args, "next_plaid_n_full_scores", 4096) or 4096),
+        centroid_score_threshold=getattr(args, "next_plaid_centroid_score_threshold", 0.4),
+    )
+    run: dict[str, list[str]] = {}
+    latencies_ms: list[float] = []
+    mapping_warnings: list[dict[str, Any]] = []
+    query_embeddings: dict[str, dict[str, Any]] = {}
+    if getattr(args, "next_plaid_use_precomputed_embeddings", False):
+        query_embeddings = next_plaid_query_embedding_payloads(
+            conn,
+            [str(query_id) for query_id, _query_text in selected_queries],
+        )
+    for query_id, query_text in selected_queries:
+        query_started = time.perf_counter()
+        if getattr(args, "next_plaid_use_precomputed_embeddings", False):
+            query_payload = query_embeddings.get(str(query_id))
+            if query_payload is None:
+                raise SystemExit(
+                    "missing precomputed NextPlaid query embedding for "
+                    f"query_id={query_id}"
+                )
+            result = client._request(
+                "POST",
+                f"/indices/{index_name}/search",
+                json={"queries": [query_payload], "params": params.to_dict()},
+            )
+            query_results = result.get("results", [])
+        else:
+            result = client.search(index_name, [query_text], params=params)
+            query_results = getattr(result, "results", [])
+        latency_ms = elapsed_ms_since(query_started)
+        latencies_ms.append(latency_ms)
+        docs: list[str] = []
+        if query_results:
+            qr = query_results[0]
+            if isinstance(qr, dict):
+                metadata_items = qr.get("metadata") or []
+                internal_ids = list(qr.get("document_ids") or [])
+            else:
+                metadata_items = getattr(qr, "metadata", None) or []
+                internal_ids = list(getattr(qr, "document_ids", []) or [])
+            for rank, internal_id in enumerate(internal_ids, start=1):
+                metadata = metadata_items[rank - 1] if rank - 1 < len(metadata_items) else None
+                doc_id, warning = next_plaid_doc_id_from_result(
+                    internal_id=internal_id,
+                    metadata=metadata,
+                )
+                docs.append(doc_id)
+                if warning is not None:
+                    mapping_warnings.append({
+                        "query_id": query_id,
+                        "rank": rank,
+                        "warning": warning,
+                        "internal_document_id": internal_id,
+                    })
+        run[str(query_id)] = docs
+
+    return build_next_plaid_beir_quality_report(
+        args=args,
+        run=run,
+        latencies_ms=latencies_ms,
+        qrels=qrels,
+        counts=counts,
+        query_limit=query_limit,
+        index_info=index_info,
+        health=health,
+        upload_phase=upload_phase,
+        docid_mapping_warnings=mapping_warnings,
+        started=started,
+    )
 
 
 def oracle_quality_exact_rows_for_query(
@@ -25181,6 +28564,10 @@ def build_document_node_colbert_candidate_source_focus_row(
     field_summary = scan_stats_summary.get("field_summary", {})
     if not isinstance(field_summary, dict):
         field_summary = {}
+    index_stats = index_phase.get("index_stats", {})
+    if not isinstance(index_stats, dict):
+        index_stats = {}
+    index_storage_capabilities = storage_capabilities_from_stats(index_stats)
 
     def p50(key: str) -> Any:
         value = field_summary.get(key, {})
@@ -25197,6 +28584,9 @@ def build_document_node_colbert_candidate_source_focus_row(
         if docs_loaded > 0 and centroid_docs_touched_p95 is not None
         else None
     )
+    codebook_source, codebook_path, codebook_top_m = (
+        effective_quantized_inverted_codebook_settings(args, profile)
+    )
     qrel_coverage = qrel_coverage_for_query_ids(qrels, list(run))
     row = {
         "profile": profile.name,
@@ -25212,6 +28602,48 @@ def build_document_node_colbert_candidate_source_focus_row(
         "centroid_lite_max_postings_per_token": (
             profile.centroid_lite_max_postings_per_token
         ),
+        "centroid_lite_probe_centroids_per_token": (
+            profile.centroid_lite_probe_centroids_per_token
+        ),
+        "centroid_lite_codeword_top_m": profile.centroid_lite_codeword_top_m,
+        "centroid_lite_posting_selection": profile.centroid_lite_posting_selection,
+        "centroid_lite_candidate_scoring": profile.centroid_lite_candidate_scoring,
+        "centroid_lite_score_threshold": profile.centroid_lite_score_threshold,
+        "centroid_lite_score_drop_from_best": (
+            profile.centroid_lite_score_drop_from_best
+        ),
+        "centroid_lite_pruning": profile.centroid_lite_pruning,
+        "centroid_lite_bitset_prefilter": profile.centroid_lite_bitset_prefilter,
+        "centroid_lite_bitset_min_token_matches": (
+            profile.centroid_lite_bitset_min_token_matches
+        ),
+        "quantized_inverted_codebook": codebook_source,
+        "quantized_inverted_codebook_path": (
+            portable_path(Path(codebook_path)) if codebook_path else ""
+        ),
+        "quantized_inverted_codebook_top_m": codebook_top_m,
+        "quantized_inverted_max_postings_per_token": (
+            profile.quantized_inverted_max_postings_per_token
+        ),
+        "quantized_inverted_probe_codewords_per_token_config": (
+            profile.quantized_inverted_probe_codewords_per_token
+        ),
+        "quantized_inverted_posting_selection": (
+            profile.quantized_inverted_posting_selection
+        ),
+        "quantized_inverted_compact_scoring": (
+            profile.quantized_inverted_compact_scoring
+        ),
+        "quantized_inverted_token_coverage": (
+            profile.quantized_inverted_token_coverage
+        ),
+        "quantized_inverted_min_token_matches_config": (
+            effective_quantized_inverted_min_token_matches(args, profile)
+        ),
+        "index_bytes": int(index_phase.get("index_bytes", 0) or 0),
+        "index_stats": index_stats,
+        "storage_capabilities": index_storage_capabilities,
+        **index_storage_capabilities,
         "candidate_budget": candidate_k,
         "exact_rerank_k": effective_rerank_k,
         "effective_exact_rerank_k": effective_rerank_k,
@@ -25266,10 +28698,23 @@ def build_document_node_colbert_candidate_source_focus_row(
         "centroid_docs_touched_ratio": centroid_docs_touched_ratio,
         "centroid_pruned_docs": p50("centroid_pruned_docs"),
         "centroid_postings_touched": p50("centroid_postings_touched"),
+        "centroid_postings_selected": p50("centroid_postings_selected"),
         "centroid_postings_skipped": p50("centroid_postings_skipped"),
+        "centroid_probe_centroids_per_token": p50(
+            "centroid_probe_centroids_per_token"
+        ),
+        "centroid_score_drop_from_best": p50("centroid_score_drop_from_best"),
+        "centroid_lists_skipped_by_threshold": p50(
+            "centroid_lists_skipped_by_threshold"
+        ),
         "centroid_candidates": p50("centroid_candidates"),
         "centroid_posting_cap_strategy": (
             scan_stats_summary.get("last_selected", {}).get("centroid_posting_cap_strategy")
+            if isinstance(scan_stats_summary.get("last_selected", {}), dict)
+            else None
+        ),
+        "centroid_candidate_scoring": (
+            scan_stats_summary.get("last_selected", {}).get("centroid_candidate_scoring")
             if isinstance(scan_stats_summary.get("last_selected", {}), dict)
             else None
         ),
@@ -25277,8 +28722,39 @@ def build_document_node_colbert_candidate_source_focus_row(
         "quantized_inverted_postings_touched": p50(
             "quantized_inverted_postings_touched"
         ),
+        "quantized_inverted_postings_selected": p50(
+            "quantized_inverted_postings_selected"
+        ),
+        "quantized_inverted_postings_skipped": p50(
+            "quantized_inverted_postings_skipped"
+        ),
         "quantized_inverted_docs_scored": p50("quantized_inverted_docs_scored"),
         "quantized_inverted_candidates": p50("quantized_inverted_candidates"),
+        "quantized_inverted_probe_codewords_per_token": p50(
+            "quantized_inverted_probe_codewords_per_token"
+        ),
+        "quantized_inverted_token_coverage_mode": (
+            scan_stats_summary.get("last_selected", {}).get(
+                "quantized_inverted_token_coverage_mode"
+            )
+            if isinstance(scan_stats_summary.get("last_selected", {}), dict)
+            else None
+        ),
+        "quantized_inverted_active_query_tokens": p50(
+            "quantized_inverted_active_query_tokens"
+        ),
+        "quantized_inverted_token_matches_total": p50(
+            "quantized_inverted_token_matches_total"
+        ),
+        "quantized_inverted_token_matches_max": p50(
+            "quantized_inverted_token_matches_max"
+        ),
+        "quantized_inverted_min_token_matches": p50(
+            "quantized_inverted_min_token_matches"
+        ),
+        "quantized_inverted_token_match_filtered_docs": p50(
+            "quantized_inverted_token_match_filtered_docs"
+        ),
         "proxy_candidates_returned": first_scan_summary_value(
             scan_stats_summary,
             ("proxy_candidates_returned", "proxy_candidates"),
@@ -25313,6 +28789,7 @@ def build_document_node_colbert_candidate_source_focus_row(
 
 def document_node_colbert_candidate_source_focus_skipped_row(
     *,
+    args: argparse.Namespace,
     profile: DocumentNodeServingProfile,
     candidate_k: int,
     effective_rerank_k: int,
@@ -25321,6 +28798,9 @@ def document_node_colbert_candidate_source_focus_skipped_row(
     counts: dict[str, int],
 ) -> dict[str, Any]:
     docs_loaded = int(counts.get("docs_loaded", 0) or 0)
+    codebook_source, codebook_path, codebook_top_m = (
+        effective_quantized_inverted_codebook_settings(args, profile)
+    )
     return {
         "profile": profile.name,
         "candidate_source": profile.candidate_source,
@@ -25334,6 +28814,44 @@ def document_node_colbert_candidate_source_focus_skipped_row(
         "token_pooling_target_ratio": profile.token_pooling_target_ratio,
         "centroid_lite_max_postings_per_token": (
             profile.centroid_lite_max_postings_per_token
+        ),
+        "centroid_lite_probe_centroids_per_token": (
+            profile.centroid_lite_probe_centroids_per_token
+        ),
+        "centroid_lite_codeword_top_m": profile.centroid_lite_codeword_top_m,
+        "centroid_lite_posting_selection": profile.centroid_lite_posting_selection,
+        "centroid_lite_candidate_scoring": profile.centroid_lite_candidate_scoring,
+        "centroid_lite_score_threshold": profile.centroid_lite_score_threshold,
+        "centroid_lite_score_drop_from_best": (
+            profile.centroid_lite_score_drop_from_best
+        ),
+        "centroid_lite_pruning": profile.centroid_lite_pruning,
+        "centroid_lite_bitset_prefilter": profile.centroid_lite_bitset_prefilter,
+        "centroid_lite_bitset_min_token_matches": (
+            profile.centroid_lite_bitset_min_token_matches
+        ),
+        "quantized_inverted_codebook": codebook_source,
+        "quantized_inverted_codebook_path": (
+            portable_path(Path(codebook_path)) if codebook_path else ""
+        ),
+        "quantized_inverted_codebook_top_m": codebook_top_m,
+        "quantized_inverted_max_postings_per_token": (
+            profile.quantized_inverted_max_postings_per_token
+        ),
+        "quantized_inverted_probe_codewords_per_token_config": (
+            profile.quantized_inverted_probe_codewords_per_token
+        ),
+        "quantized_inverted_posting_selection": (
+            profile.quantized_inverted_posting_selection
+        ),
+        "quantized_inverted_compact_scoring": (
+            profile.quantized_inverted_compact_scoring
+        ),
+        "quantized_inverted_token_coverage": (
+            profile.quantized_inverted_token_coverage
+        ),
+        "quantized_inverted_min_token_matches_config": (
+            effective_quantized_inverted_min_token_matches(args, profile)
         ),
         "candidate_budget": candidate_k,
         "exact_rerank_k": effective_rerank_k,
@@ -25465,6 +28983,33 @@ def document_node_colbert_candidate_source_focus_recommendation(
         key=lambda row: float(row.get("ndcg@10", 0.0) or 0.0),
         default=None,
     )
+    quantized_rank_limited_profiles: list[dict[str, Any]] = []
+    for row in quantized_rows:
+        candidates = metric_float(row, "quantized_inverted_candidates")
+        docs_scored = metric_float(row, "quantized_inverted_docs_scored")
+        exact_docs = metric_float(row, "exact_rerank_docs")
+        effective_rerank_k = metric_float(row, "effective_exact_rerank_k")
+        ndcg = metric_float(row, "ndcg@10")
+        candidate_pool = max(candidates, docs_scored)
+        if (
+            candidate_pool > 0.0
+            and exact_docs > 0.0
+            and candidate_pool > exact_docs * 1.5
+            and ndcg < 0.30
+        ):
+            quantized_rank_limited_profiles.append(
+                {
+                    "profile": row.get("profile"),
+                    "candidate_budget": row.get("candidate_budget"),
+                    "effective_exact_rerank_k": (
+                        int(effective_rerank_k) if effective_rerank_k else None
+                    ),
+                    "quantized_inverted_candidates": int(candidates),
+                    "quantized_inverted_docs_scored": int(docs_scored),
+                    "exact_rerank_docs": int(exact_docs),
+                    "ndcg@10": ndcg,
+                }
+            )
     recommendations: list[str] = []
     if centroid_best is not None:
         centroid_ndcg = metric_float(centroid_best, "ndcg@10")
@@ -25525,6 +29070,9 @@ def document_node_colbert_candidate_source_focus_recommendation(
             and float(quantized_admission) >= 0.80
         ):
             recommendations.append("prioritize_quantized_codebook_postings")
+        if quantized_rank_limited_profiles:
+            recommendations.append("quantized_compact_ranking_bottleneck")
+            recommendations.append("sweep_exact_rerank_k_for_quantized")
     best_native = max(
         valid_rows,
         key=lambda row: (
@@ -25543,6 +29091,7 @@ def document_node_colbert_candidate_source_focus_recommendation(
         "best_centroid_lite": centroid_best.get("profile") if centroid_best else None,
         "best_quantized": quantized_best.get("profile") if quantized_best else None,
         "best_overall_by_ndcg": best_native.get("profile") if best_native else None,
+        "quantized_rank_limited_profiles": quantized_rank_limited_profiles,
         "recommendations": unique_preserve_order(recommendations),
     }
 
@@ -25586,6 +29135,14 @@ def run_document_node_colbert_candidate_source_focus(
         ]
     profiles = document_node_colbert_candidate_source_focus_profiles(args)
     budgets = effective_document_node_colbert_candidate_source_focus_budgets(args)
+    centroid_lite_caps = effective_document_node_colbert_candidate_source_focus_caps(args)
+    centroid_lite_probes = effective_document_node_colbert_candidate_source_focus_probes(args)
+    centroid_lite_score_thresholds = (
+        effective_document_node_colbert_candidate_source_focus_score_thresholds(args)
+    )
+    centroid_lite_score_drops = (
+        effective_document_node_colbert_candidate_source_focus_score_drops(args)
+    )
     if recorder.enabled:
         recorder.record(
             "run_metadata",
@@ -25600,6 +29157,10 @@ def run_document_node_colbert_candidate_source_focus(
                 ),
                 "profiles": [profile.name for profile in profiles],
                 "candidate_budgets": budgets,
+                "centroid_lite_caps": centroid_lite_caps,
+                "centroid_lite_probes": centroid_lite_probes,
+                "centroid_lite_score_thresholds": centroid_lite_score_thresholds,
+                "centroid_lite_score_drop_from_best_values": centroid_lite_score_drops,
                 "exact_rerank_k": int(getattr(args, "exact_rerank_k", 0) or 0),
                 "query_limit": query_limit,
                 "docs_loaded": int(counts.get("docs_loaded", 0) or 0),
@@ -25631,9 +29192,12 @@ def run_document_node_colbert_candidate_source_focus(
             )
     rows: list[dict[str, Any]] = []
     index_phases: list[dict[str, Any]] = []
+    built_index_phases: dict[tuple[tuple[str, Any], ...], dict[str, Any]] = {}
+    built_index_profile_names: dict[tuple[tuple[str, Any], ...], list[str]] = {}
     for profile in profiles:
         if not budgets:
             continue
+        profile_signature = serving_profile_index_signature(args, profile)
         estimate_args, first_effective_rerank_k = (
             document_node_colbert_candidate_source_focus_args(
                 args,
@@ -25711,6 +29275,7 @@ def run_document_node_colbert_candidate_source_focus(
                     )
                 )
                 row = document_node_colbert_candidate_source_focus_skipped_row(
+                    args=args,
                     profile=profile,
                     candidate_k=candidate_k,
                     effective_rerank_k=effective_rerank_k,
@@ -25743,6 +29308,7 @@ def run_document_node_colbert_candidate_source_focus(
                 )
             continue
         profile_index_phase: dict[str, Any] | None = None
+        profile_reused_index = profile_signature in built_index_phases
         for budget_index, candidate_k in enumerate(budgets):
             row_id = f"{profile.name}:candidate_k={candidate_k}"
             focus_args, effective_rerank_k = (
@@ -25753,41 +29319,92 @@ def run_document_node_colbert_candidate_source_focus(
                 )
             )
             if budget_index == 0:
-                if recorder.enabled:
-                    recorder.record(
-                        "index_build_started",
-                        row_id=f"index:{profile.name}",
-                        profile=profile.name,
-                        candidate_source=profile.candidate_source,
-                        physical_index_signature=serializable_index_signature(
-                            serving_profile_index_signature(args, profile)
-                        ),
+                if profile_reused_index:
+                    profile_index_phase = built_index_phases[profile_signature]
+                    validate_serving_profile_index_reuse(
+                        args=focus_args,
+                        profile=profile,
+                        index_phase=profile_index_phase,
+                        expected_signature=profile_signature,
                     )
-                try:
-                    profile_index_phase = build_index(conn, focus_args)
-                except Exception as exc:
+                    reused_for = built_index_profile_names.setdefault(
+                        profile_signature,
+                        [],
+                    )
+                    if profile.name not in reused_for:
+                        reused_for.append(profile.name)
+                    profile_index_phase["index_build_reused_for_profiles"] = list(
+                        reused_for
+                    )
                     if recorder.enabled:
                         recorder.record(
-                            "index_build_failed",
+                            "index_build_reused",
                             row_id=f"index:{profile.name}",
                             profile=profile.name,
-                            error=str(exc),
-                            error_type=type(exc).__name__,
+                            candidate_source=profile.candidate_source,
+                            physical_index_signature=serializable_index_signature(
+                                profile_signature
+                            ),
+                            reused_from_profiles=[
+                                name for name in reused_for if name != profile.name
+                            ],
                         )
-                    raise
-                if recorder.enabled:
-                    recorder.record(
-                        "index_build_succeeded",
-                        row_id=f"index:{profile.name}",
-                        profile=profile.name,
-                        index_phase=profile_index_phase,
+                else:
+                    if recorder.enabled:
+                        recorder.record(
+                            "index_build_started",
+                            row_id=f"index:{profile.name}",
+                            profile=profile.name,
+                            candidate_source=profile.candidate_source,
+                            physical_index_signature=serializable_index_signature(
+                                profile_signature
+                            ),
+                        )
+                    try:
+                        profile_index_phase = build_index(conn, focus_args)
+                    except Exception as exc:
+                        if recorder.enabled:
+                            recorder.record(
+                                "index_build_failed",
+                                row_id=f"index:{profile.name}",
+                                profile=profile.name,
+                                error=str(exc),
+                                error_type=type(exc).__name__,
+                            )
+                        raise
+                    profile_index_phase["index_signature_tuple"] = profile_signature
+                    profile_index_phase["index_signature"] = serializable_index_signature(
+                        profile_signature
                     )
+                    built_index_phases[profile_signature] = profile_index_phase
+                    built_index_profile_names[profile_signature] = [profile.name]
+                    profile_index_phase["index_build_reused_for_profiles"] = [
+                        profile.name
+                    ]
+                    if recorder.enabled:
+                        recorder.record(
+                            "index_build_succeeded",
+                            row_id=f"index:{profile.name}",
+                            profile=profile.name,
+                            index_phase=profile_index_phase,
+                        )
                 index_phases.append({
                     "profile": profile.name,
                     "candidate_budget": candidate_k,
+                    "index_build_reused": profile_reused_index,
+                    "index_build_reused_for_profiles": list(
+                        built_index_profile_names.get(profile_signature, [profile.name])
+                    ),
+                    "index_signature": serializable_index_signature(profile_signature),
                     "index_phase": profile_index_phase,
                 })
             assert profile_index_phase is not None
+            validate_serving_profile_index_reuse(
+                args=focus_args,
+                profile=profile,
+                index_phase=profile_index_phase,
+                expected_signature=profile_signature,
+            )
             focus_args = clone_args(
                 focus_args,
                 serving_loaded_document_count=loaded_document_count(conn),
@@ -25838,6 +29455,11 @@ def run_document_node_colbert_candidate_source_focus(
                 counts=counts,
                 oracle_artifact=oracle_artifact,
                 oracle_records=oracle_records,
+            )
+            row["index_signature"] = serializable_index_signature(profile_signature)
+            row["index_build_reused"] = profile_reused_index
+            row["index_build_reused_for_profiles"] = list(
+                built_index_profile_names.get(profile_signature, [profile.name])
             )
             rows.append(row)
             if recorder.enabled:
@@ -25891,9 +29513,10 @@ def run_document_node_colbert_candidate_source_focus(
         "profiles": [profile.name for profile in profiles],
         "candidate_budgets": budgets,
         "exact_rerank_k": int(getattr(args, "exact_rerank_k", 0) or 0),
-        "centroid_lite_caps": effective_document_node_colbert_candidate_source_focus_caps(
-            args
-        ),
+        "centroid_lite_caps": centroid_lite_caps,
+        "centroid_lite_probes": centroid_lite_probes,
+        "centroid_lite_score_thresholds": centroid_lite_score_thresholds,
+        "centroid_lite_score_drop_from_best_values": centroid_lite_score_drops,
         "query_limit": query_limit,
         "queries_available": len(queries),
         "queries_evaluated": len(selected_queries),
@@ -26904,6 +30527,60 @@ def markdown_benchmark_summary(report: dict[str, Any]) -> str:
             "from returned document IDs. It intentionally does not call exact "
             "MaxSim admission or exact document scan baselines.",
         ])
+
+    next_plaid_quality = report.get("next_plaid_beir_quality")
+    if isinstance(next_plaid_quality, dict):
+        metrics = next_plaid_quality.get("metrics", {})
+        latency = next_plaid_quality.get("latency", {})
+        settings = next_plaid_quality.get("settings", {})
+        index_info = next_plaid_quality.get("index_info", {})
+        if not isinstance(metrics, dict):
+            metrics = {}
+        if not isinstance(latency, dict):
+            latency = {}
+        if not isinstance(settings, dict):
+            settings = {}
+        if not isinstance(index_info, dict):
+            index_info = {}
+        lines.extend([
+            "",
+            "### NextPlaid BEIR quality reference",
+            "",
+            f"- External engine: `{next_plaid_quality.get('engine', 'next-plaid')}`",
+            f"- Pure ColBERT only: `{bool(next_plaid_quality.get('pure_colbert_only', False))}`",
+            f"- Native pgturbohybrid index: `{bool(next_plaid_quality.get('native_index', True))}`",
+            f"- URL/index: `{settings.get('url', '')}` / `{settings.get('index_name', '')}`",
+            f"- Indexed documents reported by NextPlaid: `{int(index_info.get('num_documents', 0) or 0)}`",
+            f"- Search top_k / n_ivf_probe / n_full_scores: `{settings.get('top_k', 0)}` / `{settings.get('n_ivf_probe', 0)}` / `{settings.get('n_full_scores', 0)}`",
+            f"- Exact admission: `{bool(next_plaid_quality.get('exact_admission_available', False))}` ({next_plaid_quality.get('exact_admission_reason', '')})",
+            f"- Queries evaluated: `{int(next_plaid_quality.get('queries_evaluated', 0) or 0)}` / `{int(next_plaid_quality.get('queries_available', 0) or 0)}`",
+            f"- Qrels covered: `{int(next_plaid_quality.get('qrels_covered', 0) or 0)}`",
+            f"- DocID mapping suspect: `{bool(next_plaid_quality.get('docid_mapping_suspect', False))}`",
+            "",
+            "| recall@10 | ndcg@10 | mrr@10 | p50 ms | p95 ms | p99 ms | qps |",
+            "|---:|---:|---:|---:|---:|---:|---:|",
+            "| {recall:.6f} | {ndcg:.6f} | {mrr:.6f} | {p50:.3f} | {p95:.3f} | {p99:.3f} | {qps:.3f} |".format(
+                recall=float(metrics.get("recall@10", 0.0) or 0.0),
+                ndcg=float(metrics.get("ndcg@10", 0.0) or 0.0),
+                mrr=float(metrics.get("mrr@10", 0.0) or 0.0),
+                p50=float(latency.get("p50_ms", 0.0) or 0.0),
+                p95=float(latency.get("p95_ms", 0.0) or 0.0),
+                p99=float(latency.get("p99_ms", 0.0) or 0.0),
+                qps=float(latency.get("qps", 0.0) or 0.0),
+            ),
+            "",
+            "This mode evaluates an external NextPlaid index against the same "
+            "DBpedia qrels stored in PostgreSQL. It does not call native exact "
+            "admission baselines or build a pgturbohybrid index.",
+        ])
+        warning_count = int(next_plaid_quality.get("docid_mapping_warning_count", 0) or 0)
+        if warning_count:
+            lines.extend([
+                "",
+                f"- DocID mapping warnings: `{warning_count}`. Ensure indexed "
+                "NextPlaid documents include metadata `doc_id` matching "
+                "`dbpedia_colbert_qrels.doc_id`.",
+            ])
 
     sampled_admission = report.get("document_node_colbert_sampled_admission")
     if isinstance(sampled_admission, dict):
@@ -28821,6 +32498,18 @@ def _self_check_index_build_resource_estimates() -> None:
         storage_kind="centroid_only",
         centroids="kmeans",
     )
+    quantized_external_centroid_only_profile = DocumentNodeServingProfile(
+        name="quantized_inverted_external_centroid_only_compact_topk_032",
+        candidate_source="quantized_inverted_experimental",
+        proxy_encoder="normalized_mean",
+        storage_kind="centroid_only",
+        centroids="off",
+        quantized_inverted_codebook="external",
+        quantized_inverted_max_postings_per_token=32,
+        quantized_inverted_probe_codewords_per_token=4,
+        quantized_inverted_posting_selection="score_topk",
+        quantized_inverted_compact_scoring="experimental",
+    )
     proxy_small = estimate_index_build_resources(small_stats, make_args(), proxy_profile)
     proxy_large = estimate_index_build_resources(large_stats, make_args(), proxy_profile)
     assert proxy_large["estimated_index_bytes"] > proxy_small["estimated_index_bytes"]
@@ -28896,6 +32585,35 @@ def _self_check_index_build_resource_estimates() -> None:
     )
     assert (
         centroid_only_1m_estimate["estimate_inputs"]["docmap_format_limit_exceeded"]
+        is False
+    )
+    quantized_external_centroid_only_estimate = estimate_index_build_resources(
+        impossible_stats,
+        make_args(multivector_doc_storage="centroid_only"),
+        quantized_external_centroid_only_profile,
+    )
+    assert (
+        quantized_external_centroid_only_estimate["estimate_components"][
+            "full_multivector_sidecar"
+        ]
+        == 0
+    )
+    assert (
+        quantized_external_centroid_only_estimate["estimate_components"][
+            "centroid_vectors"
+        ]
+        == 0
+    )
+    assert (
+        quantized_external_centroid_only_estimate["estimate_components"][
+            "quantized_postings"
+        ]
+        > 0
+    )
+    assert (
+        quantized_external_centroid_only_estimate["estimate_inputs"][
+            "docmap_format_limit_exceeded"
+        ]
         is False
     )
     impossible_skip_decision = index_build_estimate_decision(
@@ -29190,6 +32908,67 @@ def _self_check_document_node_oracle_quality_check() -> None:
     assert "missing_existing_index" in markdown
 
 
+def _self_check_quantized_codebook_build() -> None:
+    try:
+        import numpy as np
+    except ImportError:
+        return
+    assert parse_vector_text("[1, 2.5, -3e-1]") == [1.0, 2.5, -0.3]
+    vectors = [
+        [1.0, 0.0],
+        [0.98, 0.02],
+        [0.0, 1.0],
+        [0.02, 0.98],
+        [-1.0, 0.0],
+        [-0.98, -0.02],
+    ]
+    centroids_a, stats_a = sampled_cosine_kmeans_codebook(
+        vectors,
+        codebook_size=3,
+        iterations=4,
+        seed=7,
+        batch_size=2,
+    )
+    centroids_b, stats_b = sampled_cosine_kmeans_codebook(
+        vectors,
+        codebook_size=3,
+        iterations=4,
+        seed=7,
+        batch_size=3,
+    )
+    assert np.allclose(centroids_a, centroids_b, atol=1e-6)
+    assert stats_a["checksum"] == stats_b["checksum"]
+    assert stats_a["dim"] == 2
+    assert stats_a["tokens_sampled"] == len(vectors)
+    text = quantized_codebook_text(centroids_a, stats_a["checksum"])
+    lines = text.strip().splitlines()
+    assert lines[0].startswith("pgturbohybrid_quantized_inverted_codebook_v1 2 3 ")
+    assert len(lines) == 4
+    with tempfile.TemporaryDirectory() as tmpdir:
+        path = Path(tmpdir) / "codebook.txt"
+        atomic_write_text(path, text)
+        assert path.read_text(encoding="utf-8") == text
+    report = {
+        "document_node_colbert_quantized_codebook_build": {
+            "output_path": ".nix-dev/tmp/codebook.txt",
+            "format": "pgturbohybrid_quantized_inverted_codebook_v1",
+            "codebook_size": 3,
+            "dim": 2,
+            "checksum": stats_a["checksum"],
+            "sample": {
+                "docs_loaded": 10,
+                "docs_sampled": 3,
+                "tokens_sampled": len(vectors),
+            },
+            "kmeans": stats_a,
+            "elapsed_ms": 1.25,
+        }
+    }
+    markdown = markdown_quantized_codebook_build(report)
+    assert "Pure ColBERT quantized-inverted codebook build" in markdown
+    assert "pgturbohybrid_quantized_inverted_codebook_v1" in markdown
+
+
 def run_self_checks() -> None:
     _self_check_document_node_serving_profiles()
     _self_check_exact_top_cache()
@@ -29205,6 +32984,7 @@ def run_self_checks() -> None:
     _self_check_document_node_build_memory_breakdown()
     _self_check_document_node_serving_latency_only()
     _self_check_document_node_colbert_beir_quality_only()
+    _self_check_next_plaid_beir_quality_only()
     _self_check_document_node_colbert_sampled_admission()
     _self_check_document_node_colbert_candidate_source_focus()
     _self_check_learned_sparse_jsonl_parser()
@@ -29219,6 +32999,7 @@ def run_self_checks() -> None:
     _self_check_index_build_resource_estimates()
     _self_check_document_node_colbert_exact_oracle()
     _self_check_document_node_oracle_quality_check()
+    _self_check_quantized_codebook_build()
 
 
 def run_multivector_recall_gate(conn: psycopg.Connection[Any], args: argparse.Namespace) -> dict[str, Any]:
@@ -29326,12 +33107,16 @@ def validate_args(args: argparse.Namespace) -> argparse.Namespace:
         or args.document_node_colbert_sampled_admission
         or args.document_node_colbert_candidate_source_focus
         or args.document_node_serving_grid_oracle_quality_check
+        or args.document_node_colbert_quantized_codebook_build_only
+        or args.next_plaid_beir_quality_only
     ) and colbert_1m_mode_count:
         raise SystemExit(
             "--document-node-colbert-1m-beir-quality-only, "
             "--document-node-colbert-sampled-admission, and "
             "--document-node-colbert-candidate-source-focus, and "
-            "--document-node-serving-grid-oracle-quality-check cannot be combined "
+            "--document-node-serving-grid-oracle-quality-check, "
+            "--document-node-colbert-quantized-codebook-build-only, and "
+            "--next-plaid-beir-quality-only cannot be combined "
             "with --document-node-colbert-1m-plan-only, "
             "--document-node-colbert-1m-build-only, or "
             "--document-node-colbert-1m-evaluate-only"
@@ -29343,6 +33128,8 @@ def validate_args(args: argparse.Namespace) -> argparse.Namespace:
             args.document_node_colbert_sampled_admission,
             args.document_node_colbert_candidate_source_focus,
             args.document_node_serving_grid_oracle_quality_check,
+            args.document_node_colbert_quantized_codebook_build_only,
+            args.next_plaid_beir_quality_only,
         )
         if bool(enabled)
     ]
@@ -29351,7 +33138,9 @@ def validate_args(args: argparse.Namespace) -> argparse.Namespace:
             "--document-node-colbert-1m-beir-quality-only, "
             "--document-node-colbert-sampled-admission, and "
             "--document-node-colbert-candidate-source-focus, and "
-            "--document-node-serving-grid-oracle-quality-check are mutually exclusive"
+            "--document-node-serving-grid-oracle-quality-check, "
+            "--document-node-colbert-quantized-codebook-build-only, and "
+            "--next-plaid-beir-quality-only are mutually exclusive"
         )
     if args.document_node_colbert_exact_oracle_build and (
         colbert_1m_mode_count
@@ -29359,11 +33148,14 @@ def validate_args(args: argparse.Namespace) -> argparse.Namespace:
         or args.document_node_colbert_sampled_admission
         or args.document_node_colbert_candidate_source_focus
         or args.document_node_serving_grid_oracle_quality_check
+        or args.document_node_colbert_quantized_codebook_build_only
+        or args.next_plaid_beir_quality_only
     ):
         raise SystemExit(
             "--document-node-colbert-exact-oracle-build is an offline mode and "
             "cannot be combined with ColBERT 1M build/evaluate/BEIR-quality/"
-            "sampled-admission/candidate-source-focus/oracle-quality-check modes"
+            "sampled-admission/candidate-source-focus/oracle-quality-check/"
+            "quantized-codebook-build/NextPlaid reference modes"
         )
     if args.document_node_colbert_exact_oracle_build:
         if args.oracle_output is None:
@@ -29393,6 +33185,52 @@ def validate_args(args: argparse.Namespace) -> argparse.Namespace:
             args.oracle_query_ids = args.oracle_query_ids.resolve()
             if not args.oracle_query_ids.is_file():
                 raise SystemExit(f"--oracle-query-ids file does not exist: {args.oracle_query_ids}")
+        if args.output is not None:
+            args.output = args.output.resolve()
+        if args.markdown_output is not None:
+            args.markdown_output = args.markdown_output.resolve()
+    if args.document_node_colbert_quantized_codebook_build_only:
+        if args.quantized_inverted_codebook_output is None:
+            raise SystemExit(
+                "--document-node-colbert-quantized-codebook-build-only requires "
+                "--quantized-inverted-codebook-output"
+            )
+        if not args.reuse_data:
+            raise SystemExit(
+                "--document-node-colbert-quantized-codebook-build-only requires "
+                "--reuse-data and an imported DBpedia ColBERT database"
+            )
+        if args.force_reload:
+            raise SystemExit(
+                "--document-node-colbert-quantized-codebook-build-only does not "
+                "reload data; remove --force-reload"
+            )
+        for name in (
+            "quantized_inverted_codebook_size",
+            "quantized_inverted_codebook_sample_docs",
+            "quantized_inverted_codebook_sample_tokens",
+            "quantized_inverted_codebook_kmeans_iterations",
+            "quantized_inverted_codebook_batch_size",
+        ):
+            if int(getattr(args, name)) < 1:
+                raise SystemExit(f"--{name.replace('_', '-')} must be positive")
+        args.quantized_inverted_codebook_output = (
+            args.quantized_inverted_codebook_output.resolve()
+        )
+        for path, flag_name in (
+            (
+                args.quantized_inverted_codebook_output,
+                "--quantized-inverted-codebook-output",
+            ),
+            (args.output, "--output"),
+            (args.markdown_output, "--markdown-output"),
+        ):
+            if path is not None and not path_is_under_nix_dev_tmp(path):
+                raise SystemExit(
+                    "--document-node-colbert-quantized-codebook-build-only writes "
+                    "generated artifacts only under .nix-dev/tmp; "
+                    f"{flag_name} was {path}"
+                )
         if args.output is not None:
             args.output = args.output.resolve()
         if args.markdown_output is not None:
@@ -29470,6 +33308,59 @@ def validate_args(args: argparse.Namespace) -> argparse.Namespace:
                 "and cannot be combined with " + ", ".join(enabled_forbidden)
             )
         document_node_colbert_beir_quality_profile(args)
+    if args.next_plaid_beir_quality_only:
+        if not args.reuse_data:
+            raise SystemExit(
+                "--next-plaid-beir-quality-only requires --reuse-data and an "
+                "imported DBpedia ColBERT database"
+            )
+        if args.force_reload:
+            raise SystemExit(
+                "--next-plaid-beir-quality-only does not reload data; remove "
+                "--force-reload"
+            )
+        if args.next_plaid_delete_existing_index and not args.next_plaid_create_index:
+            raise SystemExit(
+                "--next-plaid-delete-existing-index requires "
+                "--next-plaid-create-index"
+            )
+        if args.next_plaid_add_documents and not args.next_plaid_create_index:
+            raise SystemExit(
+                "--next-plaid-add-documents requires --next-plaid-create-index "
+                "for a fresh, metadata-mapped reference index"
+            )
+        for name in (
+            "next_plaid_nbits",
+            "next_plaid_index_batch_size",
+            "next_plaid_upload_batch_size",
+            "next_plaid_top_k",
+            "next_plaid_n_ivf_probe",
+            "next_plaid_n_full_scores",
+        ):
+            if int(getattr(args, name)) < 1:
+                raise SystemExit(f"--{name.replace('_', '-')} must be positive")
+        if args.next_plaid_start_from_scratch < 0:
+            raise SystemExit("--next-plaid-start-from-scratch must be non-negative")
+        if args.next_plaid_pool_factor is not None and args.next_plaid_pool_factor < 1:
+            raise SystemExit("--next-plaid-pool-factor must be positive")
+        if args.next_plaid_wait_timeout_s < 0:
+            raise SystemExit("--next-plaid-wait-timeout-s must be non-negative")
+        if args.next_plaid_timeout_s <= 0:
+            raise SystemExit("--next-plaid-timeout-s must be positive")
+        forbidden_next_plaid_flags = {
+            "--document-node-serving-grid-include-bm25-rescue": args.document_node_serving_grid_include_bm25_rescue,
+            "--document-node-serving-grid-include-learned-sparse-rescue": args.document_node_serving_grid_include_learned_sparse_rescue,
+            "--document-node-serving-grid-learned-sparse-focus": args.document_node_serving_grid_learned_sparse_focus,
+            "--hybrid-evaluation-harness": args.hybrid_evaluation_harness,
+        }
+        enabled_forbidden = [
+            name for name, enabled in forbidden_next_plaid_flags.items() if bool(enabled)
+        ]
+        if enabled_forbidden:
+            raise SystemExit(
+                "--next-plaid-beir-quality-only is a pure ColBERT reference "
+                "and cannot be combined with " + ", ".join(enabled_forbidden)
+            )
     if args.document_node_colbert_sampled_admission:
         forbidden_sampled_flags = {
             "--document-node-serving-grid-include-bm25-rescue": args.document_node_serving_grid_include_bm25_rescue,
@@ -29569,6 +33460,8 @@ def validate_args(args: argparse.Namespace) -> argparse.Namespace:
             or args.document_node_colbert_exact_oracle_build
             or args.document_node_colbert_candidate_source_focus
             or args.document_node_serving_grid_oracle_quality_check
+            or args.document_node_colbert_quantized_codebook_build_only
+            or args.next_plaid_beir_quality_only
         )
         and args.reuse_data
         and not args.force_reload
@@ -29941,6 +33834,8 @@ def validate_args(args: argparse.Namespace) -> argparse.Namespace:
             )
         effective_document_node_colbert_candidate_source_focus_budgets(args)
         effective_document_node_colbert_candidate_source_focus_caps(args)
+        effective_document_node_colbert_candidate_source_focus_score_thresholds(args)
+        effective_document_node_colbert_candidate_source_focus_score_drops(args)
         if args.exact_rerank_k < 1:
             raise SystemExit("--exact-rerank-k must be positive")
         if args.document_node_colbert_ef < 1:
@@ -30040,6 +33935,52 @@ def validate_args(args: argparse.Namespace) -> argparse.Namespace:
         raise SystemExit("--multivector-token-pooling-min-tokens must be positive")
     if args.multivector_centroid_lite_max_postings_per_token < 0:
         raise SystemExit("--multivector-centroid-lite-max-postings-per-token must be non-negative")
+    if args.multivector_centroid_lite_probe_centroids_per_token < 1:
+        raise SystemExit("--multivector-centroid-lite-probe-centroids-per-token must be positive")
+    if not 1 <= args.multivector_centroid_lite_codeword_top_m <= 16:
+        raise SystemExit("--multivector-centroid-lite-codeword-top-m must be in [1, 16]")
+    if not -1.0 <= args.multivector_centroid_lite_score_threshold <= 1.0:
+        raise SystemExit("--multivector-centroid-lite-score-threshold must be in [-1, 1]")
+    if not -1.0 <= args.multivector_centroid_lite_score_drop_from_best <= 2.0:
+        raise SystemExit(
+            "--multivector-centroid-lite-score-drop-from-best must be in [-1, 2]"
+        )
+    if args.multivector_centroid_lite_bitset_min_token_matches < 1:
+        raise SystemExit("--multivector-centroid-lite-bitset-min-token-matches must be positive")
+    if args.multivector_quantized_inverted_max_postings_per_token < 0:
+        raise SystemExit("--multivector-quantized-inverted-max-postings-per-token must be non-negative")
+    if args.multivector_quantized_inverted_min_token_matches < 0:
+        raise SystemExit("--multivector-quantized-inverted-min-token-matches must be non-negative")
+    if getattr(args, "multivector_quantized_inverted_pruning", "off") not in {
+        "off",
+        "score_bound_experimental",
+    }:
+        raise SystemExit(
+            "--multivector-quantized-inverted-pruning must be off or "
+            "score_bound_experimental"
+        )
+    if args.multivector_quantized_inverted_probe_codewords_per_token < 1:
+        raise SystemExit("--multivector-quantized-inverted-probe-codewords-per-token must be positive")
+    if not 1 <= args.multivector_quantized_inverted_codebook_top_m <= 16:
+        raise SystemExit(
+            "--multivector-quantized-inverted-codebook-top-m must be in [1, 16]"
+        )
+    if (
+        args.multivector_quantized_inverted_codebook != "external"
+        and args.multivector_quantized_inverted_codebook_top_m != 1
+    ):
+        raise SystemExit(
+            "--multivector-quantized-inverted-codebook-top-m > 1 requires "
+            "--multivector-quantized-inverted-codebook external"
+        )
+    if (
+        args.multivector_quantized_inverted_codebook == "external"
+        and not str(args.multivector_quantized_inverted_codebook_path or "").strip()
+    ):
+        raise SystemExit(
+            "--multivector-quantized-inverted-codebook external requires "
+            "--multivector-quantized-inverted-codebook-path"
+        )
     if args.multivector_per_token_doc_reservoir_k < 0:
         raise SystemExit("--multivector-per-token-doc-reservoir-k must be non-negative")
     if args.multivector_coverage_reservoir_k < 0:
@@ -30474,6 +34415,69 @@ def parse_args() -> argparse.Namespace:
         ),
     )
     parser.add_argument(
+        "--multivector-centroid-lite-probe-centroids-per-token",
+        type=int,
+        default=1,
+        help=(
+            "experimental centroid_lite centroid probes per query token; "
+            "1 preserves the original single-codeword behavior"
+        ),
+    )
+    parser.add_argument(
+        "--multivector-centroid-lite-codeword-top-m",
+        type=int,
+        default=1,
+        help=(
+            "experimental centroid_lite index-time codeword assignments per "
+            "document centroid; 1 preserves existing persisted postings"
+        ),
+    )
+    parser.add_argument(
+        "--multivector-centroid-lite-posting-selection",
+        choices=("uniform_stride", "score_topk", "union_score"),
+        default="uniform_stride",
+        help=(
+            "experimental centroid_lite cap strategy; uniform_stride preserves "
+            "the existing diagnostic cap, score_topk uses payload-sorted "
+            "centroid postings from newly built indexes, and union_score scans "
+            "the selected centroid-list union before compact document scoring"
+        ),
+    )
+    parser.add_argument(
+        "--multivector-centroid-lite-candidate-scoring",
+        choices=("posting_payload", "codeword_maxsim", "doc_centroid_maxsim"),
+        default="posting_payload",
+        help=(
+            "experimental centroid_lite candidate scoring; posting_payload "
+            "uses bounded posting payload scores, codeword_maxsim accumulates "
+            "a PLAID-style approximate MaxSim over selected centroid codewords, "
+            "doc_centroid_maxsim re-ranks touched documents by approximate "
+            "MaxSim over persisted document centroids before exact heap MaxSim "
+            "rerank"
+        ),
+    )
+    parser.add_argument(
+        "--multivector-centroid-lite-score-threshold",
+        type=float,
+        default=-1.0,
+        help=(
+            "experimental centroid_lite minimum query-centroid score required "
+            "before expanding a posting list; -1 preserves normalized-vector "
+            "behavior"
+        ),
+    )
+    parser.add_argument(
+        "--multivector-centroid-lite-score-drop-from-best",
+        type=float,
+        default=-1.0,
+        help=(
+            "experimental centroid_lite relative centroid probe filter; "
+            "-1 disables it, otherwise posting lists whose query-centroid score "
+            "is more than this value below the best probed centroid for the "
+            "query token are skipped before exact heap MaxSim rerank"
+        ),
+    )
+    parser.add_argument(
         "--multivector-centroid-lite-pruning",
         choices=("off", "safe_upper_bound"),
         default="off",
@@ -30491,6 +34495,166 @@ def parse_args() -> argparse.Namespace:
             "experimental centroid_lite scan-local bitset prefilter; "
             "builds non-persisted posting-union bitsets for measured "
             "PLAID/EMVB-style admission experiments"
+        ),
+    )
+    parser.add_argument(
+        "--multivector-centroid-lite-bitset-min-token-matches",
+        type=int,
+        default=1,
+        help=(
+            "experimental centroid_lite bitset prefilter threshold; 1 preserves "
+            "posting-union behavior, larger values require a doc to match more "
+            "query-token posting lists before exact heap MaxSim rerank"
+        ),
+    )
+    parser.add_argument(
+        "--multivector-quantized-inverted-compact-scoring",
+        choices=("off", "experimental"),
+        default="off",
+        help=(
+            "experimental quantized_inverted code-payload admission scorer; "
+            "final retained candidates are still reranked by exact heap MaxSim"
+        ),
+    )
+    parser.add_argument(
+        "--multivector-quantized-inverted-token-coverage",
+        choices=("off", "linear"),
+        default="off",
+        help=(
+            "experimental quantized_inverted query-token coverage adjustment; "
+            "linear penalizes approximate candidates matching fewer query tokens "
+            "before exact heap MaxSim rerank"
+        ),
+    )
+    parser.add_argument(
+        "--multivector-quantized-inverted-min-token-matches",
+        type=int,
+        default=0,
+        help=(
+            "experimental quantized_inverted candidate filter; 0 preserves "
+            "current behavior, positive values require a document to match at "
+            "least this many query-token codeword posting lists before exact "
+            "heap MaxSim rerank"
+        ),
+    )
+    parser.add_argument(
+        "--multivector-quantized-inverted-pruning",
+        choices=("off", "score_bound_experimental"),
+        default="off",
+        help=(
+            "experimental quantized_inverted score-bound pruning before compact "
+            "full-doc codeword scoring; final retained candidates are still "
+            "reranked by exact heap MaxSim"
+        ),
+    )
+    parser.add_argument(
+        "--multivector-quantized-inverted-codebook",
+        choices=("deterministic", "external"),
+        default="deterministic",
+        help=(
+            "experimental quantized_inverted codebook source; external requires "
+            "--multivector-quantized-inverted-codebook-path and remains "
+            "research-only"
+        ),
+    )
+    parser.add_argument(
+        "--multivector-quantized-inverted-codebook-path",
+        default="",
+        help=(
+            "path to an external experimental quantized_inverted codebook file "
+            "with header pgturbohybrid_quantized_inverted_codebook_v1"
+        ),
+    )
+    parser.add_argument(
+        "--multivector-quantized-inverted-codebook-top-m",
+        type=int,
+        default=1,
+        help=(
+            "experimental quantized_inverted codebook assignments per vector; "
+            "external experimental codebooks support 1-16 multi-posting "
+            "assignments; deterministic remains top_m=1"
+        ),
+    )
+    parser.add_argument(
+        "--document-node-colbert-quantized-codebook-build-only",
+        action="store_true",
+        help=(
+            "build an experimental sampled cosine k-means codebook for "
+            "quantized_inverted_experimental from already imported ColBERT "
+            "document token vectors; no index build or retrieval is run"
+        ),
+    )
+    parser.add_argument(
+        "--quantized-inverted-codebook-output",
+        type=Path,
+        default=None,
+        help=(
+            "output path for --document-node-colbert-quantized-codebook-build-only; "
+            "generated artifacts must be under .nix-dev/tmp"
+        ),
+    )
+    parser.add_argument(
+        "--quantized-inverted-codebook-size",
+        type=int,
+        default=256,
+        help="experimental sampled quantized_inverted external codebook size",
+    )
+    parser.add_argument(
+        "--quantized-inverted-codebook-sample-docs",
+        type=int,
+        default=10000,
+        help="loaded documents to sample while building the experimental codebook",
+    )
+    parser.add_argument(
+        "--quantized-inverted-codebook-sample-tokens",
+        type=int,
+        default=100000,
+        help="maximum document token vectors to sample for codebook training",
+    )
+    parser.add_argument(
+        "--quantized-inverted-codebook-kmeans-iterations",
+        type=int,
+        default=20,
+        help="cosine k-means iterations for sampled experimental codebook training",
+    )
+    parser.add_argument(
+        "--quantized-inverted-codebook-seed",
+        type=int,
+        default=13,
+        help="deterministic seed for sampled experimental codebook training",
+    )
+    parser.add_argument(
+        "--quantized-inverted-codebook-batch-size",
+        type=int,
+        default=8192,
+        help="token batch size for sampled cosine k-means assignment",
+    )
+    parser.add_argument(
+        "--multivector-quantized-inverted-max-postings-per-token",
+        type=int,
+        default=0,
+        help=(
+            "experimental quantized_inverted posting cap per query token; "
+            "0 leaves persisted posting lists uncapped"
+        ),
+    )
+    parser.add_argument(
+        "--multivector-quantized-inverted-probe-codewords-per-token",
+        type=int,
+        default=1,
+        help=(
+            "experimental quantized_inverted codeword probes per query token; "
+            "1 preserves the original single-codeword behavior"
+        ),
+    )
+    parser.add_argument(
+        "--multivector-quantized-inverted-posting-selection",
+        choices=("uniform_stride", "score_topk"),
+        default="score_topk",
+        help=(
+            "experimental quantized_inverted cap strategy; score_topk ranks "
+            "postings by compact/code or exact token score before exact heap "
+            "MaxSim rerank"
         ),
     )
     parser.add_argument(
@@ -30767,6 +34931,90 @@ def parse_args() -> argparse.Namespace:
         help="maximum new oracle queries to compute in this invocation after resume skips; 0 means no cap",
     )
     parser.add_argument(
+        "--next-plaid-beir-quality-only",
+        action="store_true",
+        help=(
+            "run an external NextPlaid BEIR quality reference on the same "
+            "loaded DBpedia corpus/queries/qrels; does not build native indexes "
+            "or compute exact admission"
+        ),
+    )
+    parser.add_argument("--next-plaid-url", default="http://localhost:8080")
+    parser.add_argument("--next-plaid-index-name", default="dbpedia_colbert_1m")
+    parser.add_argument(
+        "--next-plaid-sdk-path",
+        type=Path,
+        default=Path("../next-plaid/next-plaid-api/python-sdk"),
+        help="path to the local next-plaid Python SDK checkout",
+    )
+    parser.add_argument("--next-plaid-create-index", action="store_true")
+    parser.add_argument("--next-plaid-delete-existing-index", action="store_true")
+    parser.add_argument("--next-plaid-add-documents", action="store_true")
+    parser.add_argument(
+        "--next-plaid-use-precomputed-embeddings",
+        action="store_true",
+        help=(
+            "upload/search existing dbpedia_colbert_* turbohybrid_multivector "
+            "embeddings instead of sending text to the NextPlaid encoder"
+        ),
+    )
+    parser.add_argument("--next-plaid-wait-for-index", action="store_true")
+    parser.add_argument(
+        "--next-plaid-wait-timeout-s",
+        type=float,
+        default=1800.0,
+        help="seconds to wait for a NextPlaid async document upload to become visible",
+    )
+    parser.add_argument(
+        "--next-plaid-allow-partial-index",
+        action="store_true",
+        help="allow diagnostic NextPlaid runs where the external index has fewer docs than Postgres",
+    )
+    parser.add_argument("--next-plaid-nbits", type=int, default=4)
+    parser.add_argument("--next-plaid-index-batch-size", type=int, default=50000)
+    parser.add_argument(
+        "--next-plaid-start-from-scratch",
+        type=int,
+        default=0,
+        help=(
+            "NextPlaid index update rebuild threshold; 0 keeps large benchmark "
+            "uploads on the incremental update path"
+        ),
+    )
+    parser.add_argument("--next-plaid-upload-batch-size", type=int, default=64)
+    parser.add_argument(
+        "--next-plaid-upload-endpoint",
+        choices=("update", "documents"),
+        default="update",
+        help=(
+            "NextPlaid endpoint for precomputed embedding uploads. 'update' uses "
+            "the SDK-compatible queued update path; 'documents' posts directly "
+            "to /indices/{name}/documents."
+        ),
+    )
+    parser.add_argument(
+        "--next-plaid-upload-wait-mode",
+        choices=("batch", "final"),
+        default="batch",
+        help=(
+            "For precomputed NextPlaid uploads, wait after every submitted "
+            "batch or submit all batches and wait only for the final index "
+            "document count. Use 'final' with --next-plaid-wait-for-index to "
+            "exercise NextPlaid's server-side update batching."
+        ),
+    )
+    parser.add_argument("--next-plaid-pool-factor", type=int, default=None)
+    parser.add_argument("--next-plaid-top-k", type=int, default=100)
+    parser.add_argument("--next-plaid-n-ivf-probe", type=int, default=8)
+    parser.add_argument("--next-plaid-n-full-scores", type=int, default=4096)
+    parser.add_argument(
+        "--next-plaid-centroid-score-threshold",
+        type=float,
+        default=0.4,
+        help="NextPlaid centroid pruning threshold",
+    )
+    parser.add_argument("--next-plaid-timeout-s", type=float, default=60.0)
+    parser.add_argument(
         "--document-node-colbert-profile",
         default="proxy_normalized_mean_proxy_only",
         help=(
@@ -30834,7 +35082,7 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument(
         "--candidate-budgets",
-        default="800,1600",
+        default=DOCUMENT_NODE_COLBERT_CANDIDATE_SOURCE_DEFAULT_BUDGETS,
         help=(
             "comma-separated candidate budgets for "
             "--document-node-colbert-candidate-source-focus"
@@ -30843,7 +35091,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--exact-rerank-k",
         type=int,
-        default=100,
+        default=DOCUMENT_NODE_COLBERT_CANDIDATE_SOURCE_DEFAULT_EXACT_RERANK_K,
         help=(
             "bounded exact MaxSim rerank count for "
             "--document-node-colbert-candidate-source-focus"
@@ -30855,6 +35103,61 @@ def parse_args() -> argparse.Namespace:
         help=(
             "comma-separated centroid_lite posting caps for "
             "--document-node-colbert-candidate-source-focus"
+        ),
+    )
+    parser.add_argument(
+        "--centroid-lite-probes",
+        default="4",
+        help=(
+            "comma-separated centroid_lite probe counts for generated "
+            "probe_NNN profiles in --document-node-colbert-candidate-source-focus"
+        ),
+    )
+    parser.add_argument(
+        "--quantized-inverted-posting-caps",
+        default=DOCUMENT_NODE_COLBERT_CANDIDATE_SOURCE_DEFAULT_QUANTIZED_CAPS,
+        help=(
+            "comma-separated per-query-token posting caps for generated external "
+            "quantized_inverted centroid_only profiles in "
+            "--document-node-colbert-candidate-source-focus"
+        ),
+    )
+    parser.add_argument(
+        "--quantized-inverted-probes",
+        default=DOCUMENT_NODE_COLBERT_CANDIDATE_SOURCE_DEFAULT_QUANTIZED_PROBES,
+        help=(
+            "comma-separated codeword probe counts for generated external "
+            "quantized_inverted centroid_only profiles in "
+            "--document-node-colbert-candidate-source-focus"
+        ),
+    )
+    parser.add_argument(
+        "--quantized-inverted-codebook-top-ms",
+        default=DOCUMENT_NODE_COLBERT_CANDIDATE_SOURCE_DEFAULT_QUANTIZED_TOP_MS,
+        help=(
+            "comma-separated external codebook top_m values for generated "
+            "quantized_inverted centroid_only profiles in "
+            "--document-node-colbert-candidate-source-focus"
+        ),
+    )
+    parser.add_argument(
+        "--centroid-lite-score-thresholds",
+        default="-1",
+        help=(
+            "comma-separated centroid_lite centroid-score thresholds for generated "
+            "threshold_NNN score_topk_codeword_maxsim and score_topk_docmaxsim "
+            "profiles in --document-node-colbert-candidate-source-focus; "
+            "-1 disables thresholding"
+        ),
+    )
+    parser.add_argument(
+        "--centroid-lite-score-drop-from-best-values",
+        default="-1",
+        help=(
+            "comma-separated centroid_lite relative score-drop values for generated "
+            "drop_NNN score_topk_codeword_maxsim and score_topk_docmaxsim profiles "
+            "in --document-node-colbert-candidate-source-focus; -1 disables "
+            "relative centroid probe filtering"
         ),
     )
     parser.add_argument(
@@ -31835,6 +36138,27 @@ def main() -> None:
             args.markdown_output.write_text(report["markdown_summary"], encoding="utf-8")
             print(args.markdown_output)
         return
+    if args.document_node_colbert_quantized_codebook_build_only:
+        conn = connect(args)
+        try:
+            setup_schema(conn, include_colbert_llama=False)
+            report = run_document_node_colbert_quantized_codebook_build_only(conn, args)
+        finally:
+            conn.close()
+        if args.output is not None:
+            args.output.parent.mkdir(parents=True, exist_ok=True)
+            args.output.write_text(
+                json.dumps(report, indent=2, sort_keys=True) + "\n",
+                encoding="utf-8",
+            )
+            print(args.output)
+        else:
+            print(json.dumps(report, indent=2, sort_keys=True))
+        if args.markdown_output is not None:
+            args.markdown_output.parent.mkdir(parents=True, exist_ok=True)
+            args.markdown_output.write_text(report["markdown_summary"], encoding="utf-8")
+            print(args.markdown_output)
+        return
 
     reuse_imported_colbert_only = (
         (
@@ -31843,6 +36167,8 @@ def main() -> None:
             or args.document_node_colbert_candidate_source_focus
             or args.document_node_colbert_exact_oracle_build
             or args.document_node_serving_grid_oracle_quality_check
+            or args.document_node_colbert_quantized_codebook_build_only
+            or args.next_plaid_beir_quality_only
         )
         and args.reuse_data
         and not args.force_reload
@@ -31877,8 +36203,9 @@ def main() -> None:
                     "skipped": True,
                     "reason": (
                         "pure-ColBERT BEIR quality-only/sampled-admission/"
-                        "candidate-source-focus/oracle-quality-check reused "
-                        "imported multivectors and did not generate embeddings"
+                        "candidate-source-focus/oracle-quality-check/NextPlaid "
+                        "reference reused imported multivectors and did not "
+                        "generate embeddings"
                     ),
                 }
                 if reuse_imported_colbert_only
@@ -31897,9 +36224,9 @@ def main() -> None:
                     "partial_qrel_coverage_reported": True,
                     "reason": (
                         "pure-ColBERT BEIR quality-only/sampled-admission/"
-                        "candidate-source-focus/oracle-quality-check reused "
-                        "imported tables and reports qrel coverage without "
-                        "reloading"
+                        "candidate-source-focus/oracle-quality-check/NextPlaid "
+                        "reference reused imported tables and reports qrel "
+                        "coverage without reloading"
                     ),
                 }
             else:
@@ -31956,8 +36283,8 @@ def main() -> None:
                 "skipped": True,
                 "reason": (
                     "pure-ColBERT BEIR quality-only/sampled-admission/"
-                    "candidate-source-focus/oracle-quality-check reused "
-                    "imported multivectors"
+                    "candidate-source-focus/oracle-quality-check/NextPlaid "
+                    "reference reused imported multivectors"
                 ),
             }
             insert_phase = {
@@ -31967,8 +36294,8 @@ def main() -> None:
                 "queries": len(query_ids),
                 "reason": (
                     "pure-ColBERT BEIR quality-only/sampled-admission/"
-                    "candidate-source-focus/oracle-quality-check does not "
-                    "regenerate or persist multivectors"
+                    "candidate-source-focus/oracle-quality-check/NextPlaid "
+                    "reference does not regenerate or persist multivectors"
                 ),
             }
         else:
@@ -31992,6 +36319,7 @@ def main() -> None:
             or args.document_node_colbert_sampled_admission
             or args.document_node_colbert_candidate_source_focus
             or args.document_node_serving_grid_oracle_quality_check
+            or args.next_plaid_beir_quality_only
         ):
             if args.document_node_serving_latency_only:
                 representative_profile = document_node_serving_latency_profile(args)
@@ -32005,6 +36333,8 @@ def main() -> None:
             elif args.document_node_serving_grid_oracle_quality_check:
                 oracle_profiles = document_node_oracle_quality_check_profiles(args)
                 representative_profile = oracle_profiles[0] if oracle_profiles else None
+            elif args.next_plaid_beir_quality_only:
+                representative_profile = None
             else:
                 colbert_1m_profiles = document_node_colbert_1m_effective_profiles(args)
                 representative_profile = colbert_1m_profiles[0] if colbert_1m_profiles else None
@@ -32046,6 +36376,7 @@ def main() -> None:
         document_node_colbert_sampled_admission = None
         document_node_colbert_candidate_source_focus = None
         document_node_serving_grid_oracle_quality_check = None
+        next_plaid_beir_quality = None
 
         if args.document_node_colbert_1m_build_only:
             document_node_serving_build_only = run_document_node_colbert_1m_build_only(
@@ -32115,6 +36446,25 @@ def main() -> None:
                 )
             )
             index_phase = document_node_colbert_1m_beir_quality["index_phase"]
+            result_methods = []
+            admission_debug = None
+            document_node_admission_grid = None
+            document_node_serving_grid = None
+            document_node_serving_recommendation = None
+            document_node_token_pooling_recommendation = None
+            hybrid_evaluation = None
+            token_ablation = None
+        elif args.next_plaid_beir_quality_only:
+            next_plaid_beir_quality = run_next_plaid_beir_quality_only(conn, args)
+            index_phase = {
+                "skipped": True,
+                "reason": (
+                    "NextPlaid reference mode uses an external NextPlaid index "
+                    "and does not build a native pgturbohybrid index"
+                ),
+                "external_engine": "next-plaid",
+                "next_plaid_index_info": next_plaid_beir_quality.get("index_info", {}),
+            }
             result_methods = []
             admission_debug = None
             document_node_admission_grid = None
@@ -32429,6 +36779,18 @@ def main() -> None:
                 "document_node_colbert_1m_beir_quality_only": (
                     args.document_node_colbert_1m_beir_quality_only
                 ),
+                "next_plaid_beir_quality_only": args.next_plaid_beir_quality_only,
+                "next_plaid_url": args.next_plaid_url,
+                "next_plaid_index_name": args.next_plaid_index_name,
+                "next_plaid_sdk_path": portable_path(args.next_plaid_sdk_path),
+                "next_plaid_create_index": args.next_plaid_create_index,
+                "next_plaid_add_documents": args.next_plaid_add_documents,
+                "next_plaid_top_k": args.next_plaid_top_k,
+                "next_plaid_n_ivf_probe": args.next_plaid_n_ivf_probe,
+                "next_plaid_n_full_scores": args.next_plaid_n_full_scores,
+                "next_plaid_centroid_score_threshold": (
+                    args.next_plaid_centroid_score_threshold
+                ),
                 "document_node_colbert_sampled_admission": (
                     args.document_node_colbert_sampled_admission
                 ),
@@ -32613,6 +36975,8 @@ def main() -> None:
             output["document_node_colbert_1m_beir_quality"] = (
                 document_node_colbert_1m_beir_quality
             )
+        if next_plaid_beir_quality is not None:
+            output["next_plaid_beir_quality"] = next_plaid_beir_quality
         if document_node_colbert_sampled_admission is not None:
             output["document_node_colbert_sampled_admission"] = (
                 document_node_colbert_sampled_admission

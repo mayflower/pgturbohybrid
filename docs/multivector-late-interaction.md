@@ -307,14 +307,39 @@ sidecar entries lazily for documents reached through postings, and report
 `centroid_postings_touched`, `centroid_postings_skipped`,
 `centroid_posting_limit_per_token`, and `centroid_candidates`. The optional
 `turbohybrid.multivector_centroid_lite_max_postings_per_token` GUC defaults to
-`0`, which preserves full posting-list admission; positive values cap each
-query-token posting list for benchmark tradeoff experiments before the exact
-MaxSim rerank. Positive caps use deterministic midpoint-spaced sampling across
-the posting list, not first-N truncation, and report
-`centroid_posting_cap_strategy = uniform_stride`. Treat these uniform caps as
-diagnostic negative controls: they cannot be promoted unless admission recall
-improves while `centroid_docs_touched / doc_count` also drops. On token-node indexes it is a
-compatibility mode that uses exact token-scan admission before exact heap
+`0`, which preserves full posting-list admission. With
+`turbohybrid.multivector_centroid_lite_posting_selection = uniform_stride`,
+positive values cap each query-token posting list for benchmark tradeoff
+experiments before the exact MaxSim rerank. Positive uniform caps use
+deterministic midpoint-spaced sampling across the posting list, not first-N
+truncation, and report `centroid_posting_cap_strategy = uniform_stride`.
+The experimental
+`turbohybrid.multivector_centroid_lite_posting_selection = score_topk` mode
+instead uses newly persisted centroid posting payloads to keep the strongest
+bounded postings from the probed centroid lists, scores retained candidates
+with compact query-centroid MaxSim, and keeps the best document pool for exact
+heap MaxSim rerank. Existing centroid indexes built before posting payloads
+remain readable but need REINDEX/rebuild before `score_topk` can use the
+payload-sorted posting order. The scan-time
+`turbohybrid.multivector_centroid_lite_candidate_scoring` GUC defaults to
+`posting_payload`; the experimental `codeword_maxsim` value accumulates a
+PLAID-style approximate MaxSim over the selected centroid/codeword matches
+without loading document-centroid vectors, and `doc_centroid_maxsim` re-ranks
+touched documents by approximate MaxSim over the persisted document-centroid
+sidecar before the exact heap rerank. These are admission-only scorers:
+retained documents are always exact heap MaxSim-reranked. The companion
+`turbohybrid.multivector_centroid_lite_probe_centroids_per_token` GUC expands
+each query token to multiple deterministic centroid probes, and
+`turbohybrid.multivector_centroid_lite_score_threshold` can skip weak centroid
+lists before broad document touching. The relative
+`turbohybrid.multivector_centroid_lite_score_drop_from_best` filter keeps
+only probed lists close to the best centroid score for each query token. The
+benchmark applies these scan-time filters to both `codeword_maxsim` and
+`doc_centroid_maxsim` rows so the compact-code scorer can be measured before
+the slower document-centroid rescoring path. Treat uniform caps as diagnostic
+negative controls: they cannot be promoted unless admission recall improves
+while `centroid_docs_touched / doc_count` also drops. On token-node indexes it
+is a compatibility mode that uses exact token-scan admission before exact heap
 MaxSim rerank and reports
 `multivector_doc_graph_warning =
 token_node_centroid_lite_exact_token_prefilter`. It is opt-in benchmark
@@ -327,14 +352,18 @@ the bounded exact MaxSim rerank must respect
 posting prefilter itself is near-exhaustive. That is a candidate-source
 admission problem, not a sidecar or SIMD rerank problem. The guarded
 `turbohybrid.multivector_centroid_lite_bitset_prefilter = experimental` mode
-currently builds a scan-local posting-union bitset for measurement only. It is
-off by default, does not change persisted storage, does not prune candidates in
-this first slice, and reports `centroid_bitset_prefilter_enabled`,
+currently builds a scan-local posting-union bitset from selected posting lists.
+It is off by default, does not change persisted storage, and can require a
+document to appear in at least
+`turbohybrid.multivector_centroid_lite_bitset_min_token_matches` selected
+query-token lists before the document reaches the candidate heap. It reports
+`centroid_bitset_prefilter_enabled`,
 `centroid_bitset_lists_used`, `centroid_bitset_docs_set`,
 `centroid_bitset_docs_after_threshold`,
 `centroid_bitset_candidates`, `centroid_bitset_time_us`
 (`centroid_bitset_prefilter_time_us` is kept as a compatibility alias), and
-`centroid_bitset_memory_bytes`.
+`centroid_bitset_memory_bytes`. This is a scan-local prototype only: there is
+no persisted bitset or posting-block layout in the stable index format.
 The guarded `turbohybrid.multivector_centroid_lite_pruning =
 safe_upper_bound` prototype is also off by default. It only drops a
 centroid-lite candidate after the current candidate band is full and the
@@ -355,10 +384,19 @@ design direction.
 candidate source for document-node indexes. The current prototype uses
 persisted experimental deterministic codeword postings from the multivector
 docmap sidecar, validates document vectors lazily for touched postings, then
-exact-reranks admitted heap documents with MaxSim. Token-node indexes fail
-explicitly, plain fallback is bypassed when the source is selected, and there
-is no production on-disk compatibility promise; see
+exact-reranks admitted heap documents with MaxSim. It supports bounded
+multi-codeword probing and `score_topk` posting selection using the same
+compact deterministic codeword scorer used for measurement in centroid-lite.
+Token-node indexes fail explicitly, plain fallback is bypassed when the source
+is selected, and there is no production on-disk compatibility promise; see
 `docs/dev/multivector-colbertsar-research.md`.
+For pure-ColBERT candidate-source focus runs with an explicit external
+codebook, the benchmark default is the measured compact path
+`quantized_inverted_external_centroid_only_compact_topk_128_probe_016_topm_01_score_bound`
+with candidate budget `8192` and exact heap MaxSim rerank K `512`; this is a
+benchmark default only, not a production SQL default. The score-bound pruning
+variant remains experimental and is selected here only as the current measured
+candidate-source focus path.
 `exact_token_scan`, `exact_doc_scan`, and
 `doc_graph_prototype`
 are developer validation modes for separating token graph recall, token-top-K
@@ -398,7 +436,10 @@ Explicit `document_nodes` indexes store one graph node per heap document and a
 document-node storage tier. The full-sidecar tiers `f32`, `f16`, and `sq8`
 persist document multivectors in the docmap sidecar; `proxy_only` persists only
 the proxy graph/docmap data; `centroid_only` persists proxy graph/docmap data
-plus k-means centroid/posting sidecars. Production builds use a fixed-dimensional
+plus k-means centroid/posting sidecars. When an external
+`quantized_inverted_experimental` codebook is selected at build time,
+`centroid_only` can also persist compact quantized posting/codeword payloads for
+the explicit compact experimental path. Production builds use a fixed-dimensional
 proxy vector for graph topology and reserve exact MaxSim for bounded final
 rerank. The diagnostic `multivector_doc_build_scorer = exact_symmetric` mode
 uses symmetrized document MaxSim during graph construction and is guarded by
@@ -411,8 +452,10 @@ document-node sidecar modes. Non-proxy document-node scans score visited
 candidates with the selected `turbohybrid.multivector_doc_storage = f32 | f16 |
 sq8` sidecar. `proxy_only` and `centroid_only` do not silently substitute a
 full-sidecar path: unsupported candidate sources fail with REINDEX guidance, and
-bounded exact rerank fetches heap multivectors. Near-exhaustive scans use the
-exact float32 sidecar scan only when that sidecar exists.
+bounded exact rerank fetches heap multivectors. `centroid_only` supports
+`centroid_lite` and the guarded compact `quantized_inverted_experimental` path
+when `quantized_inverted_sidecar_available = true`. Near-exhaustive scans use
+the exact float32 sidecar scan only when that sidecar exists.
 `turbohybrid_index_stats()` reports
 `multivector_context_mode` and `multivector_field_mode` for benchmark
 provenance, plus storage capabilities:
