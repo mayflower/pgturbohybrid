@@ -157,9 +157,6 @@ PgturbohybridMultiVectorQuantizedInvertedBestExternalCodewordAndScore(const Pgtu
 															 int32 token,
 															 const PgturbohybridQuantizedInvertedCodebook *codebook,
 															 TqDotProductF32BlockFunc blockDotProduct);
-static uint32 PgturbohybridMultiVectorQuantizedInvertedConfigurableCodeword(const PgturbohybridMultiVector *mv,
-															 int32 token,
-															 uint64 *assignmentUs);
 static uint32 PgturbohybridMultiVectorQuantizedInvertedConfigurableCodewords(const PgturbohybridMultiVector *mv,
 															  int32 token,
 															  uint32 limit,
@@ -15898,16 +15895,6 @@ PgturbohybridMultiVectorQuantizedInvertedBestExternalCodewordAndScore(const Pgtu
 }
 
 static uint32
-PgturbohybridMultiVectorQuantizedInvertedConfigurableCodeword(const PgturbohybridMultiVector *mv,
-															 int32 token,
-															 uint64 *assignmentUs)
-{
-	return PgturbohybridMultiVectorQuantizedInvertedBestCodewordAndScore(mv,
-																		 token,
-																		 assignmentUs).codeword;
-}
-
-static uint32
 PgturbohybridMultiVectorQuantizedInvertedConfigurableCodewords(const PgturbohybridMultiVector *mv,
 															  int32 token,
 															  uint32 limit,
@@ -18624,7 +18611,6 @@ PgturbohybridMultiVectorDocumentNodeScan(IndexScanDesc scan,
 						INSTR_TIME_SET_CURRENT(postingScanStart);
 					if (usePerListScoreTopK)
 					{
-						uint32		listLen = fullEnd - start;
 						uint32		sampleCount =
 							Min(listLen, postingLimitForList);
 						PgturbohybridMultiVectorPostingScoreCandidate *selected;
