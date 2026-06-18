@@ -336,6 +336,13 @@ typedef struct PgturbohybridScanStatsSnapshot
 	uint32		quantizedInvertedCodebookTopM;
 	uint64		quantizedInvertedAssignmentUs;
 	uint64		quantizedInvertedQueryCodewordScoreUs;
+	char		quantizedInvertedQueryCodewordKernel[16];
+	uint64		quantizedInvertedQueryCodewordScoresComputed;
+	uint64		quantizedInvertedQueryCodewordBlocks;
+	uint64		quantizedInvertedQueryCodewordTopkUs;
+	bool		quantizedInvertedQueryCodewordFullMatrixMaterialized;
+	uint32		quantizedInvertedQueryCodewordActiveQueryTokens;
+	uint32		quantizedInvertedQueryCodewordSkippedQueryTokens;
 	uint64		quantizedInvertedListOffsetBytes;
 	uint64		quantizedInvertedPostingBytes;
 	uint64		quantizedInvertedSidecarBytes;
@@ -344,7 +351,31 @@ typedef struct PgturbohybridScanStatsSnapshot
 	uint64		quantizedInvertedCompactScoreUs;
 	uint64		quantizedInvertedCompactDocsScored;
 	uint64		quantizedInvertedCompactPayloadBytes;
+	char		quantizedInvertedCompactDocOrder[16];
+	uint64		quantizedInvertedCompactInnerAllocations;
+	uint32		quantizedInvertedCompactActiveQueryTokens;
+	uint64		quantizedInvertedCompactPairsEvaluated;
+	uint64		quantizedInvertedCompactPairsSkipped;
+	uint64		quantizedInvertedCompactPrefetches;
+	double		quantizedInvertedCompactAvgDocTokens;
+	double		quantizedInvertedCompactUsPerDoc;
+	double		quantizedInvertedCompactPayloadBytesPerDoc;
 	bool		quantizedInvertedCompactTopKChangedVsScalar;
+	bool		quantizedInvertedPrecompactEnabled;
+	char		quantizedInvertedPrecompactMode[32];
+	uint32		quantizedInvertedDocsTouchedBeforePrecompact;
+	uint32		quantizedInvertedPrecompactScoreK;
+	uint32		quantizedInvertedPrecompactCoverageK;
+	uint32		quantizedInvertedPrecompactPerTokenK;
+	uint32		quantizedInvertedCompactMaxDocs;
+	uint32		quantizedInvertedPrecompactScoreDocs;
+	uint32		quantizedInvertedPrecompactCoverageDocs;
+	uint32		quantizedInvertedPrecompactPerTokenDocs;
+	uint32		quantizedInvertedPrecompactUnionDocs;
+	uint32		quantizedInvertedPrecompactDuplicates;
+	uint32		quantizedInvertedPrecompactPrunedDocs;
+	uint64		quantizedInvertedPrecompactUs;
+	uint32		quantizedInvertedCompactDocsSkippedByPrecompact;
 	char		quantizedInvertedTokenCoverageMode[24];
 	uint32		quantizedInvertedActiveQueryTokens;
 	uint64		quantizedInvertedTokenMatchesTotal;
@@ -550,6 +581,13 @@ extern int	pgturbohybrid_multivector_quantized_inverted_codebook;
 extern char *pgturbohybrid_multivector_quantized_inverted_codebook_path;
 extern int	pgturbohybrid_multivector_quantized_inverted_codebook_top_m;
 extern int	pgturbohybrid_multivector_quantized_inverted_compact_scoring;
+extern int	pgturbohybrid_multivector_quantized_inverted_compact_doc_order;
+extern int	pgturbohybrid_multivector_quantized_inverted_query_codeword_kernel;
+extern int	pgturbohybrid_multivector_quantized_inverted_precompact;
+extern int	pgturbohybrid_multivector_quantized_inverted_precompact_score_k;
+extern int	pgturbohybrid_multivector_quantized_inverted_precompact_coverage_k;
+extern int	pgturbohybrid_multivector_quantized_inverted_precompact_per_token_k;
+extern int	pgturbohybrid_multivector_quantized_inverted_compact_max_docs;
 extern int	pgturbohybrid_multivector_quantized_inverted_token_coverage;
 extern int	pgturbohybrid_multivector_quantized_inverted_min_token_matches;
 extern int	pgturbohybrid_multivector_quantized_inverted_pruning;
@@ -657,6 +695,26 @@ typedef enum PgturbohybridMultiVectorQuantizedInvertedCompactScoringMode
 	PGTURBOHYBRID_MULTIVECTOR_QUANTIZED_INVERTED_COMPACT_SCORING_OFF,
 	PGTURBOHYBRID_MULTIVECTOR_QUANTIZED_INVERTED_COMPACT_SCORING_EXPERIMENTAL
 }			PgturbohybridMultiVectorQuantizedInvertedCompactScoringMode;
+
+typedef enum PgturbohybridMultiVectorQuantizedInvertedCompactDocOrderMode
+{
+	PGTURBOHYBRID_MULTIVECTOR_QUANTIZED_INVERTED_COMPACT_DOC_ORDER_ORIGINAL,
+	PGTURBOHYBRID_MULTIVECTOR_QUANTIZED_INVERTED_COMPACT_DOC_ORDER_DOCID
+}			PgturbohybridMultiVectorQuantizedInvertedCompactDocOrderMode;
+
+typedef enum PgturbohybridMultiVectorQuantizedInvertedQueryCodewordKernelMode
+{
+	PGTURBOHYBRID_MULTIVECTOR_QUANTIZED_INVERTED_QUERY_CODEWORD_KERNEL_AUTO,
+	PGTURBOHYBRID_MULTIVECTOR_QUANTIZED_INVERTED_QUERY_CODEWORD_KERNEL_SCALAR,
+	PGTURBOHYBRID_MULTIVECTOR_QUANTIZED_INVERTED_QUERY_CODEWORD_KERNEL_BLOCKED
+}			PgturbohybridMultiVectorQuantizedInvertedQueryCodewordKernelMode;
+
+typedef enum PgturbohybridMultiVectorQuantizedInvertedPrecompactMode
+{
+	PGTURBOHYBRID_MULTIVECTOR_QUANTIZED_INVERTED_PRECOMPACT_OFF,
+	PGTURBOHYBRID_MULTIVECTOR_QUANTIZED_INVERTED_PRECOMPACT_CENTROID_MAXSIM_TOPK,
+	PGTURBOHYBRID_MULTIVECTOR_QUANTIZED_INVERTED_PRECOMPACT_CENTROID_MAXSIM_RESERVOIR
+}			PgturbohybridMultiVectorQuantizedInvertedPrecompactMode;
 
 typedef enum PgturbohybridMultiVectorQuantizedInvertedTokenCoverageMode
 {

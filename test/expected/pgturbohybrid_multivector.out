@@ -3435,7 +3435,9 @@ $$;
 DO $$
 DECLARE
 	top_id int;
+	original_top_id int;
 	stats jsonb;
+	original_stats jsonb;
 	index_stats jsonb;
 BEGIN
 	PERFORM set_config('enable_seqscan', 'off', true);
@@ -3443,6 +3445,7 @@ BEGIN
 	PERFORM set_config('turbohybrid.multivector_plain_fallback', 'force', true);
 	PERFORM set_config('turbohybrid.multivector_doc_candidate_k', '3', true);
 	PERFORM set_config('turbohybrid.multivector_quantized_inverted_compact_scoring', 'experimental', true);
+	PERFORM set_config('turbohybrid.multivector_quantized_inverted_compact_doc_order', 'docid', true);
 	SELECT id INTO top_id
 	FROM mv_centroid_lite_docs
 	ORDER BY colbert <~> turbohybrid_query(
@@ -3476,18 +3479,33 @@ BEGIN
 		NOT (stats ? 'quantized_inverted_compact_kernel') OR
 		NOT (stats ? 'quantized_inverted_compact_score_source') OR
 		NOT (stats ? 'quantized_inverted_compact_score_us') OR
-			NOT (stats ? 'quantized_inverted_compact_docs_scored') OR
-			NOT (stats ? 'quantized_inverted_compact_payload_bytes') OR
-			NOT (stats ? 'quantized_inverted_compact_topk_changed_vs_scalar') OR
-			NOT (stats ? 'quantized_inverted_token_coverage_mode') OR
-			stats->>'quantized_inverted_token_coverage_mode' <> 'off' OR
-			(stats->>'quantized_inverted_list_offset_bytes')::bigint <= 0 OR
+		NOT (stats ? 'quantized_inverted_compact_docs_scored') OR
+		NOT (stats ? 'quantized_inverted_compact_payload_bytes') OR
+		NOT (stats ? 'quantized_inverted_compact_doc_order') OR
+		NOT (stats ? 'quantized_inverted_compact_inner_allocations') OR
+		NOT (stats ? 'quantized_inverted_compact_active_query_tokens') OR
+		NOT (stats ? 'quantized_inverted_compact_pairs_evaluated') OR
+		NOT (stats ? 'quantized_inverted_compact_pairs_skipped') OR
+		NOT (stats ? 'quantized_inverted_compact_prefetches') OR
+		NOT (stats ? 'quantized_inverted_compact_avg_doc_tokens') OR
+		NOT (stats ? 'quantized_inverted_compact_us_per_doc') OR
+		NOT (stats ? 'quantized_inverted_compact_payload_bytes_per_doc') OR
+		NOT (stats ? 'quantized_inverted_compact_topk_changed_vs_scalar') OR
+		NOT (stats ? 'quantized_inverted_token_coverage_mode') OR
+		stats->>'quantized_inverted_token_coverage_mode' <> 'off' OR
+		(stats->>'quantized_inverted_list_offset_bytes')::bigint <= 0 OR
 		(stats->>'quantized_inverted_posting_bytes')::bigint <= 0 OR
 		(stats->>'quantized_inverted_sidecar_bytes')::bigint <= 0 OR
 		stats->>'quantized_inverted_compact_kernel' NOT IN ('scalar', 'avx2', 'avx512', 'neon') OR
 		stats->>'quantized_inverted_compact_score_source' <> 'full_doc_codeword_maxsim' OR
 		(stats->>'quantized_inverted_compact_docs_scored')::int <= 0 OR
 		(stats->>'quantized_inverted_compact_payload_bytes')::bigint <= 0 OR
+		stats->>'quantized_inverted_compact_doc_order' <> 'docid' OR
+		(stats->>'quantized_inverted_compact_inner_allocations')::bigint <> 0 OR
+		(stats->>'quantized_inverted_compact_active_query_tokens')::int <= 0 OR
+		(stats->>'quantized_inverted_compact_pairs_evaluated')::bigint <= 0 OR
+		(stats->>'quantized_inverted_compact_avg_doc_tokens')::float8 <= 0 OR
+		(stats->>'quantized_inverted_compact_payload_bytes_per_doc')::float8 <= 0 OR
 		stats->>'quantized_inverted_compact_topk_changed_vs_scalar' <> 'false' OR
 		stats->>'multivector_plain_fallback_used' <> 'false' OR
 		stats->>'multivector_exact_rerank_source' <> 'heap' OR
@@ -3496,6 +3514,24 @@ BEGIN
 		RAISE EXCEPTION 'quantized_inverted_experimental scan failed, top %, stats %',
 			top_id, stats;
 	END IF;
+
+	PERFORM set_config('turbohybrid.multivector_quantized_inverted_compact_doc_order', 'original', true);
+	SELECT id INTO original_top_id
+	FROM mv_centroid_lite_docs
+	ORDER BY colbert <~> turbohybrid_query(
+		multivector_query => turbohybrid_multivector(ARRAY['[1,0]'::vector]),
+		dense_k => 3,
+		final_k => 1
+	)
+	LIMIT 1;
+	original_stats := turbohybrid_last_scan_stats();
+	IF original_top_id <> top_id OR
+		original_stats->>'quantized_inverted_compact_doc_order' <> 'original' OR
+		original_stats->>'quantized_inverted_compact_topk_changed_vs_scalar' <> 'false' THEN
+		RAISE EXCEPTION 'quantized_inverted_experimental compact doc order changed result, docid top %, original top %, stats %',
+			top_id, original_top_id, original_stats;
+	END IF;
+	PERFORM set_config('turbohybrid.multivector_quantized_inverted_compact_doc_order', 'docid', true);
 
 	PERFORM set_config('turbohybrid.multivector_quantized_inverted_max_postings_per_token', '1', true);
 	PERFORM set_config('turbohybrid.multivector_quantized_inverted_posting_selection', 'score_topk', true);
@@ -4102,6 +4138,54 @@ DECLARE
 		RAISE EXCEPTION 'quantized_inverted_experimental compact scoring changed final exact result or missing stats: exact %, compact %, stats %',
 			exact_ids, quantized_compact_ids, stats;
 	END IF;
+
+	PERFORM set_config('turbohybrid.multivector_quantized_inverted_precompact', 'centroid_maxsim_reservoir', true);
+	PERFORM set_config('turbohybrid.multivector_quantized_inverted_precompact_score_k', '4', true);
+	PERFORM set_config('turbohybrid.multivector_quantized_inverted_precompact_coverage_k', '4', true);
+	PERFORM set_config('turbohybrid.multivector_quantized_inverted_precompact_per_token_k', '1', true);
+	PERFORM set_config('turbohybrid.multivector_quantized_inverted_compact_max_docs', '4', true);
+	SELECT array_agg(id ORDER BY distance, id) INTO quantized_compact_ids
+	FROM (
+		SELECT id,
+		       colbert <~> turbohybrid_query(
+			       multivector_query => query_mv,
+			       dense_k => 4,
+			       final_k => 3
+	       ) AS distance
+		FROM mv_centroid_lite_docs
+		ORDER BY colbert <~> turbohybrid_query(
+		       multivector_query => query_mv,
+		       dense_k => 4,
+		       final_k => 3
+	       )
+		LIMIT 3
+	) AS quantized_precompact_results;
+	stats := turbohybrid_last_scan_stats();
+
+	IF quantized_compact_ids <> exact_ids OR
+		stats->>'quantized_inverted_precompact_enabled' <> 'true' OR
+		stats->>'quantized_inverted_precompact_mode' <> 'centroid_maxsim_reservoir' OR
+		(stats->>'quantized_inverted_docs_touched_before_precompact')::int <= 0 OR
+		(stats->>'quantized_inverted_precompact_score_k')::int <> 4 OR
+		(stats->>'quantized_inverted_precompact_coverage_k')::int <> 4 OR
+		(stats->>'quantized_inverted_precompact_per_token_k')::int <> 1 OR
+		(stats->>'quantized_inverted_compact_max_docs')::int <> 4 OR
+		(stats->>'quantized_inverted_precompact_score_docs')::int <= 0 OR
+		(stats->>'quantized_inverted_precompact_coverage_docs')::int <= 0 OR
+		(stats->>'quantized_inverted_precompact_union_docs')::int <= 0 OR
+		(stats->>'quantized_inverted_precompact_pruned_docs')::int < 0 OR
+		(stats->>'quantized_inverted_precompact_us')::bigint < 0 OR
+		(stats->>'quantized_inverted_compact_docs_skipped_by_precompact')::int < 0 OR
+		stats->>'multivector_exact_rerank_source' <> 'heap' THEN
+		RAISE EXCEPTION 'quantized_inverted_experimental precompact mode changed final exact result or missing stats: exact %, compact %, stats %',
+			exact_ids, quantized_compact_ids, stats;
+	END IF;
+	PERFORM set_config('turbohybrid.multivector_quantized_inverted_precompact', 'off', true);
+	PERFORM set_config('turbohybrid.multivector_quantized_inverted_precompact_score_k', '4096', true);
+	PERFORM set_config('turbohybrid.multivector_quantized_inverted_precompact_coverage_k', '512', true);
+	PERFORM set_config('turbohybrid.multivector_quantized_inverted_precompact_per_token_k', '16', true);
+	PERFORM set_config('turbohybrid.multivector_quantized_inverted_compact_max_docs', '6144', true);
+
 	PERFORM set_config('turbohybrid.multivector_quantized_inverted_token_coverage', 'linear', true);
 	SELECT array_agg(id ORDER BY distance, id) INTO quantized_compact_ids
 	FROM (
@@ -4823,6 +4907,10 @@ DECLARE
 	scan_stats jsonb;
 	brute_ids int[];
 	quantized_ids int[];
+	scalar_ids int[];
+	blocked_ids int[];
+	scalar_stats jsonb;
+	blocked_stats jsonb;
 	query_mv turbohybrid_multivector :=
 		turbohybrid_multivector(ARRAY['[1,0]'::vector, '[0,1]'::vector]);
 	errmsg text;
@@ -4906,6 +4994,10 @@ BEGIN
 		scan_stats->>'quantized_inverted_codebook_checksum' <> 'checksum_ok' OR
 		scan_stats->>'quantized_inverted_compact_kernel' NOT IN ('scalar', 'avx2', 'avx512', 'neon') OR
 		scan_stats->>'quantized_inverted_compact_score_source' <> 'full_doc_codeword_maxsim' OR
+		scan_stats->>'quantized_inverted_query_codeword_kernel' NOT IN ('scalar', 'blocked') OR
+		(scan_stats->>'quantized_inverted_query_codeword_scores_computed')::int <= 0 OR
+		(scan_stats->>'quantized_inverted_query_codeword_active_query_tokens')::int <= 0 OR
+		scan_stats->>'quantized_inverted_query_codeword_full_matrix_materialized' <> 'true' OR
 		(scan_stats->>'quantized_inverted_postings_touched')::int <= 0 OR
 		(scan_stats->>'quantized_inverted_docs_scored')::int < 4 OR
 		(scan_stats->>'quantized_inverted_candidates')::int < 4 OR
@@ -4916,6 +5008,85 @@ BEGIN
 		RAISE EXCEPTION 'unexpected centroid_only compact quantized scan: brute %, quantized %, stats %',
 			brute_ids, quantized_ids, scan_stats;
 	END IF;
+
+	PERFORM set_config('turbohybrid.multivector_quantized_inverted_query_codeword_kernel', 'scalar', true);
+	SELECT array_agg(id ORDER BY distance, id) INTO scalar_ids
+	FROM (
+		SELECT id,
+		       colbert <~> turbohybrid_query(
+			       multivector_query => query_mv,
+			       dense_k => 4,
+			       final_k => 4
+		       ) AS distance
+		FROM mv_doc_centroid_only_quantized_docs
+		ORDER BY colbert <~> turbohybrid_query(
+			multivector_query => query_mv,
+			dense_k => 4,
+			final_k => 4
+		)
+		LIMIT 4
+	) AS scalar_results;
+	scalar_stats := turbohybrid_last_scan_stats();
+
+	PERFORM set_config('turbohybrid.multivector_quantized_inverted_query_codeword_kernel', 'blocked', true);
+	SELECT array_agg(id ORDER BY distance, id) INTO blocked_ids
+	FROM (
+		SELECT id,
+		       colbert <~> turbohybrid_query(
+			       multivector_query => query_mv,
+			       dense_k => 4,
+			       final_k => 4
+		       ) AS distance
+		FROM mv_doc_centroid_only_quantized_docs
+		ORDER BY colbert <~> turbohybrid_query(
+			multivector_query => query_mv,
+			dense_k => 4,
+			final_k => 4
+		)
+		LIMIT 4
+	) AS blocked_results;
+	blocked_stats := turbohybrid_last_scan_stats();
+
+	IF scalar_ids <> brute_ids OR blocked_ids <> brute_ids OR
+		scalar_stats->>'quantized_inverted_query_codeword_kernel' <> 'scalar' OR
+		blocked_stats->>'quantized_inverted_query_codeword_kernel' <> 'blocked' OR
+		(scalar_stats->>'quantized_inverted_query_codeword_scores_computed')::int <= 0 OR
+		(blocked_stats->>'quantized_inverted_query_codeword_scores_computed')::int <= 0 OR
+		(blocked_stats->>'quantized_inverted_query_codeword_blocks')::int <= 0 OR
+		scalar_stats->>'quantized_inverted_query_codeword_full_matrix_materialized' <> 'true' OR
+		blocked_stats->>'quantized_inverted_query_codeword_full_matrix_materialized' <> 'true' OR
+		(scalar_stats->>'quantized_inverted_query_codeword_active_query_tokens')::int <= 0 OR
+		(blocked_stats->>'quantized_inverted_query_codeword_active_query_tokens')::int <= 0 THEN
+		RAISE EXCEPTION 'unexpected query-codeword scalar/blocked scan: brute %, scalar % stats %, blocked % stats %',
+			brute_ids, scalar_ids, scalar_stats, blocked_ids, blocked_stats;
+	END IF;
+
+	SELECT array_agg(id ORDER BY distance, id) INTO blocked_ids
+	FROM (
+		SELECT id,
+		       colbert <~> turbohybrid_query(
+			       multivector_query => query_mv,
+			       query_token_mask => ARRAY[false,true],
+			       dense_k => 4,
+			       final_k => 4
+		       ) AS distance
+		FROM mv_doc_centroid_only_quantized_docs
+		ORDER BY colbert <~> turbohybrid_query(
+			multivector_query => query_mv,
+			query_token_mask => ARRAY[false,true],
+			dense_k => 4,
+			final_k => 4
+		)
+		LIMIT 4
+	) AS blocked_mask_results;
+	blocked_stats := turbohybrid_last_scan_stats();
+	IF blocked_stats->>'quantized_inverted_query_codeword_kernel' <> 'blocked' OR
+		(blocked_stats->>'quantized_inverted_query_codeword_skipped_query_tokens')::int <> 1 OR
+		(blocked_stats->>'quantized_inverted_query_codeword_active_query_tokens')::int <> 1 THEN
+		RAISE EXCEPTION 'unexpected query-codeword masked scan stats: ids %, stats %',
+			blocked_ids, blocked_stats;
+	END IF;
+	PERFORM set_config('turbohybrid.multivector_quantized_inverted_query_codeword_kernel', 'auto', true);
 
 	PERFORM set_config('turbohybrid.multivector_quantized_inverted_compact_scoring', 'off', true);
 	BEGIN
@@ -5026,6 +5197,7 @@ RESET turbohybrid.multivector_quantized_inverted_posting_selection;
 RESET turbohybrid.multivector_quantized_inverted_max_postings_per_token;
 RESET turbohybrid.multivector_quantized_inverted_min_token_matches;
 RESET turbohybrid.multivector_quantized_inverted_probe_codewords_per_token;
+RESET turbohybrid.multivector_quantized_inverted_query_codeword_kernel;
 CREATE TEMP TABLE mv_doc_f16_docs AS
 SELECT * FROM mv_doc_proxy_only_docs;
 CREATE INDEX mv_doc_f16_docs_idx ON mv_doc_f16_docs

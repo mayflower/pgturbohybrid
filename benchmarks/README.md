@@ -333,21 +333,68 @@ python benchmarks/dbpedia_colbert_multivector.py \
 With an external codebook and `--include-quantized-inverted-experimental`, the
 candidate-source focus default is the current measured pure-ColBERT working
 path:
-`quantized_inverted_external_centroid_only_compact_topk_128_probe_016_topm_01_score_bound`,
+`quantized_inverted_external_centroid_only_precompact_topk_8192_docid_rk512_topk`,
 candidate budget `8192`, and exact heap MaxSim rerank K `512`. This profile is
-still experimental. It uses the external codebook only when a real codebook file
-is supplied, includes the codebook source/path/top-m in the physical index
-signature, and keeps final SQL ordering as exact heap MaxSim over the retained
-candidates. The `centroid_only` compact variant writes centroids plus quantized
-posting/codeword payloads and does not store a full document multivector sidecar;
-use explicit `--document-node-colbert-candidate-source-profiles` and
+still experimental. It uses the external codebook only when a real codebook
+file is supplied, includes the codebook source/path/top-m in the physical index
+signature, keeps final SQL ordering as exact heap MaxSim over the retained
+candidates, and enables the measured precompact top-k/docId-order/blocked
+query-codeword path. The `centroid_only` compact variant writes centroids plus
+quantized posting/codeword payloads and does not store a full document
+multivector sidecar; use explicit
+`--document-node-colbert-candidate-source-profiles` and
 `--quantized-inverted-posting-caps` / `--quantized-inverted-probes` only when
 running diagnostics instead of the locked comparison path. Score-bound pruning
-remains experimental and is part of this benchmark default because it is the
-current best measured comparison path. The sampled codebook
-builder does not build an index, run retrieval, or train inside PostgreSQL; it is
-an offline benchmark utility for producing the current
+remains experimental and is still available through the previous comparison
+profile
+`quantized_inverted_external_centroid_only_compact_topk_128_probe_016_topm_01_score_bound`.
+The sampled codebook builder does not build an index, run retrieval, or train
+inside PostgreSQL; it is an offline benchmark utility for producing the current
 `pgturbohybrid_quantized_inverted_codebook_v1` text format.
+
+#### Quantized-inverted acceptance gate
+
+Use the acceptance report before renaming or promoting an opt-in
+`quantized_inverted_experimental` profile as the current default-quality
+candidate. The report reads existing benchmark artifacts only; it does not
+connect to PostgreSQL, build indexes, or run retrieval:
+
+```bash
+python benchmarks/dbpedia_colbert_multivector.py \
+  --quantized-inverted-default-quality-acceptance-report \
+  --precompact-grid-json \
+    .nix-dev/tmp/dbpedia-colbert-50k-precompact-docorder-25q.json \
+  --query-codeword-grid-json \
+    .nix-dev/tmp/dbpedia-colbert-50k-precompact-kernel-25q.json \
+  --compact-layout-grid-json \
+    .nix-dev/tmp/dbpedia-colbert-50k-precompact-docorder-25q.json \
+  --exact-rerank-grid-json \
+    .nix-dev/tmp/dbpedia-colbert-50k-exact-rerank-focus-25q.json \
+  --output .nix-dev/tmp/dbpedia-colbert-50k-quantized-acceptance-report.json \
+  --markdown-output \
+    .nix-dev/tmp/dbpedia-colbert-50k-quantized-acceptance-report.md
+```
+
+The same paths can be supplied through `PRECOMPACT_GRID_JSON`,
+`QUERY_CODEWORD_GRID_JSON`, `COMPACT_LAYOUT_GRID_JSON`, and
+`EXACT_RERANK_GRID_JSON`. The hard gates keep this path experimental and
+pure-ColBERT: the candidate source must be
+`quantized_inverted_experimental`, final ranking must be exact heap MaxSim,
+BM25 and learned sparse must be inactive, top-10 exact admission must be at
+least `0.80`, top-1 exact admission at least `0.94`, Recall@10 and NDCG@10 may
+drop by at most `0.01` from the baseline row, p95 must be at most `0.75x` the
+baseline p95, compact scoring must normally touch at most `6000` documents,
+and generated acceptance artifacts must stay under `.nix-dev/tmp/`.
+
+The latest 50k/25-query artifacts did not pass the strict admission gate, but
+the best selected row became the experimental benchmark default because it is
+both faster and better on the available qrels than the local precompact-off
+baseline. It reduced p95 from `117.839 ms` to `69.828 ms` and compact score
+time from `13751 us` to `6007 us`, while improving Recall@10 from `0.348762`
+to `0.459810` and NDCG@10 from `0.306454` to `0.389044`. The caveat is still
+important: top-1 admission was `0.76`, top-10 admission was `0.604`, and
+compact scoring still touched `8192` documents, so this is an experimental
+benchmark default rather than a production-safe profile.
 
 ### x00k document-node serving selection
 

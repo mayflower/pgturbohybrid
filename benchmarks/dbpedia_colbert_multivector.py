@@ -460,16 +460,45 @@ DOCUMENT_NODE_COLBERT_CANDIDATE_SOURCE_FOCUS_EXPERIMENTAL_PROFILES = (
     "quantized_inverted_external_centroid_only_compact_topk_032_topm_02",
     "quantized_inverted_external_centroid_only_compact_topk_032_pool_050",
 )
-DOCUMENT_NODE_COLBERT_CANDIDATE_SOURCE_DEFAULT_EXTERNAL_QUANTIZED_PROFILE = (
+DOCUMENT_NODE_COLBERT_CANDIDATE_SOURCE_PREVIOUS_EXTERNAL_QUANTIZED_PROFILE = (
     "quantized_inverted_external_centroid_only"
     "_compact_topk_128_probe_016_topm_01"
     "_score_bound"
+)
+DOCUMENT_NODE_COLBERT_CANDIDATE_SOURCE_DEFAULT_EXTERNAL_QUANTIZED_PROFILE = (
+    "quantized_inverted_external_centroid_only"
+    "_precompact_topk_8192_docid_rk512_topk"
 )
 DOCUMENT_NODE_COLBERT_CANDIDATE_SOURCE_DEFAULT_BUDGETS = "8192"
 DOCUMENT_NODE_COLBERT_CANDIDATE_SOURCE_DEFAULT_EXACT_RERANK_K = 512
 DOCUMENT_NODE_COLBERT_CANDIDATE_SOURCE_DEFAULT_QUANTIZED_CAPS = "128"
 DOCUMENT_NODE_COLBERT_CANDIDATE_SOURCE_DEFAULT_QUANTIZED_PROBES = "16"
 DOCUMENT_NODE_COLBERT_CANDIDATE_SOURCE_DEFAULT_QUANTIZED_TOP_MS = "1"
+DOCUMENT_NODE_COLBERT_QUANTIZED_INVERTED_PRECOMPACT_BASELINE_PROFILE = (
+    DOCUMENT_NODE_COLBERT_CANDIDATE_SOURCE_PREVIOUS_EXTERNAL_QUANTIZED_PROFILE
+)
+DOCUMENT_NODE_COLBERT_QUANTIZED_INVERTED_PRECOMPACT_SCORE_GRID = "2048,4096,6144,8192"
+DOCUMENT_NODE_COLBERT_QUANTIZED_INVERTED_PRECOMPACT_COVERAGE_K = 512
+DOCUMENT_NODE_COLBERT_QUANTIZED_INVERTED_PRECOMPACT_PER_TOKEN_K = 16
+DOCUMENT_NODE_COLBERT_QUANTIZED_INVERTED_PRECOMPACT_COMPACT_DOC_GATE = 6000
+DOCUMENT_NODE_COLBERT_QUANTIZED_INVERTED_EXACT_RERANK_GRID = "256,384,512"
+DOCUMENT_NODE_COLBERT_QUANTIZED_INVERTED_EXACT_RERANK_MODES = "topk,adaptive"
+DOCUMENT_NODE_COLBERT_QUANTIZED_INVERTED_PROMOTED_PROFILE = (
+    "quantized_inverted_external_centroid_only_"
+    "precompact_topk_8192_docid_rk512_topk"
+)
+DOCUMENT_NODE_COLBERT_QUANTIZED_INVERTED_PRECOMPACT_BASELINE = {
+    "profile": DOCUMENT_NODE_COLBERT_QUANTIZED_INVERTED_PRECOMPACT_BASELINE_PROFILE,
+    "candidate_source": "quantized_inverted_experimental",
+    "candidate_budget": 8192,
+    "exact_rerank_k": 512,
+    "exact_top1_admission_rate": 0.96,
+    "exact_top10_admission_recall": 0.832,
+    "recall@10": 0.539333,
+    "ndcg@10": 0.458704,
+    "p95_ms": 1914.798,
+    "quantized_inverted_compact_docs_scored": 23400,
+}
 DOCUMENT_NODE_ORACLE_QUALITY_CHECK_PROFILES = (
     "proxy_normalized_mean_proxy_only",
     "centroid_lite_centroid_only_cap_032",
@@ -636,6 +665,21 @@ SERVING_STATS_FIELD_GROUPS: dict[str, tuple[str, ...]] = {
         "quantized_inverted_score_bound_prune_ratio",
         "quantized_inverted_candidates_before_bound",
         "quantized_inverted_candidates_after_bound",
+        "quantized_inverted_precompact_enabled",
+        "quantized_inverted_precompact_mode",
+        "quantized_inverted_docs_touched_before_precompact",
+        "quantized_inverted_precompact_score_k",
+        "quantized_inverted_precompact_coverage_k",
+        "quantized_inverted_precompact_per_token_k",
+        "quantized_inverted_compact_max_docs",
+        "quantized_inverted_precompact_score_docs",
+        "quantized_inverted_precompact_coverage_docs",
+        "quantized_inverted_precompact_per_token_docs",
+        "quantized_inverted_precompact_union_docs",
+        "quantized_inverted_precompact_duplicates",
+        "quantized_inverted_precompact_pruned_docs",
+        "quantized_inverted_precompact_us",
+        "quantized_inverted_compact_docs_skipped_by_precompact",
     ),
     "storage_cache": (
         "multivector_doc_sidecar_cache_mode",
@@ -677,6 +721,13 @@ SERVING_STATS_FIELD_GROUPS: dict[str, tuple[str, ...]] = {
         "quantized_inverted_assignment_time_us",
         "quantized_inverted_query_codeword_score_us",
         "quantized_inverted_query_codeword_score_time_us",
+        "quantized_inverted_query_codeword_kernel",
+        "quantized_inverted_query_codeword_scores_computed",
+        "quantized_inverted_query_codeword_blocks",
+        "quantized_inverted_query_codeword_topk_us",
+        "quantized_inverted_query_codeword_full_matrix_materialized",
+        "quantized_inverted_query_codeword_active_query_tokens",
+        "quantized_inverted_query_codeword_skipped_query_tokens",
         "quantized_inverted_compact_score_us",
         "quantized_inverted_score_bound_time_us",
         "quantized_inverted_score_bound_docs_checked",
@@ -685,6 +736,15 @@ SERVING_STATS_FIELD_GROUPS: dict[str, tuple[str, ...]] = {
         "quantized_inverted_compact_docs_scored",
         "quantized_inverted_compact_payload_bytes",
         "quantized_inverted_compact_kernel",
+        "quantized_inverted_compact_doc_order",
+        "quantized_inverted_compact_inner_allocations",
+        "quantized_inverted_compact_active_query_tokens",
+        "quantized_inverted_compact_pairs_evaluated",
+        "quantized_inverted_compact_pairs_skipped",
+        "quantized_inverted_compact_prefetches",
+        "quantized_inverted_compact_avg_doc_tokens",
+        "quantized_inverted_compact_us_per_doc",
+        "quantized_inverted_compact_payload_bytes_per_doc",
         "multivector_sidecar_load_time_us",
         "multivector_sidecar_page_read_time_us",
         "multivector_sidecar_vector_reconstruct_time_us",
@@ -850,6 +910,15 @@ class DocumentNodeServingProfile:
     quantized_inverted_codebook: str = ""
     quantized_inverted_codebook_path: str = ""
     quantized_inverted_codebook_top_m: int = 0
+    quantized_inverted_query_codeword_kernel: str = "auto"
+    quantized_inverted_compact_doc_order: str = "docid"
+    quantized_inverted_precompact: str = "off"
+    quantized_inverted_precompact_score_k: int = 0
+    quantized_inverted_precompact_coverage_k: int = 0
+    quantized_inverted_precompact_per_token_k: int = 0
+    quantized_inverted_compact_max_docs: int = 0
+    exact_rerank_mode: str = "topk"
+    exact_rerank_k: int = 0
     entry_sample_count: int = 0
     entry_sidecar: bool = False
     entry_sidecar_representatives: int = 128
@@ -3627,6 +3696,12 @@ def set_colbert_gucs(conn: psycopg.Connection[Any], args: argparse.Namespace) ->
         "turbohybrid.multivector_quantized_inverted_compact_scoring": str(
             args.multivector_quantized_inverted_compact_scoring
         ),
+        "turbohybrid.multivector_quantized_inverted_query_codeword_kernel": str(
+            getattr(args, "multivector_quantized_inverted_query_codeword_kernel", "auto")
+        ),
+        "turbohybrid.multivector_quantized_inverted_compact_doc_order": str(
+            getattr(args, "multivector_quantized_inverted_compact_doc_order", "docid")
+        ),
         "turbohybrid.multivector_quantized_inverted_token_coverage": str(
             getattr(args, "multivector_quantized_inverted_token_coverage", "off")
         ),
@@ -3635,6 +3710,21 @@ def set_colbert_gucs(conn: psycopg.Connection[Any], args: argparse.Namespace) ->
         ),
         "turbohybrid.multivector_quantized_inverted_pruning": str(
             getattr(args, "multivector_quantized_inverted_pruning", "off")
+        ),
+        "turbohybrid.multivector_quantized_inverted_precompact": str(
+            getattr(args, "multivector_quantized_inverted_precompact", "off")
+        ),
+        "turbohybrid.multivector_quantized_inverted_precompact_score_k": str(
+            getattr(args, "multivector_quantized_inverted_precompact_score_k", 4096)
+        ),
+        "turbohybrid.multivector_quantized_inverted_precompact_coverage_k": str(
+            getattr(args, "multivector_quantized_inverted_precompact_coverage_k", 512)
+        ),
+        "turbohybrid.multivector_quantized_inverted_precompact_per_token_k": str(
+            getattr(args, "multivector_quantized_inverted_precompact_per_token_k", 16)
+        ),
+        "turbohybrid.multivector_quantized_inverted_compact_max_docs": str(
+            getattr(args, "multivector_quantized_inverted_compact_max_docs", 6144)
         ),
         "turbohybrid.multivector_quantized_inverted_codebook": str(
             getattr(args, "multivector_quantized_inverted_codebook", "deterministic")
@@ -3740,6 +3830,12 @@ def set_retrieval_gucs(conn: psycopg.Connection[Any], args: argparse.Namespace, 
         "turbohybrid.multivector_quantized_inverted_compact_scoring": str(
             args.multivector_quantized_inverted_compact_scoring
         ),
+        "turbohybrid.multivector_quantized_inverted_query_codeword_kernel": str(
+            getattr(args, "multivector_quantized_inverted_query_codeword_kernel", "auto")
+        ),
+        "turbohybrid.multivector_quantized_inverted_compact_doc_order": str(
+            getattr(args, "multivector_quantized_inverted_compact_doc_order", "docid")
+        ),
         "turbohybrid.multivector_quantized_inverted_token_coverage": str(
             getattr(args, "multivector_quantized_inverted_token_coverage", "off")
         ),
@@ -3748,6 +3844,21 @@ def set_retrieval_gucs(conn: psycopg.Connection[Any], args: argparse.Namespace, 
         ),
         "turbohybrid.multivector_quantized_inverted_pruning": str(
             getattr(args, "multivector_quantized_inverted_pruning", "off")
+        ),
+        "turbohybrid.multivector_quantized_inverted_precompact": str(
+            getattr(args, "multivector_quantized_inverted_precompact", "off")
+        ),
+        "turbohybrid.multivector_quantized_inverted_precompact_score_k": str(
+            getattr(args, "multivector_quantized_inverted_precompact_score_k", 4096)
+        ),
+        "turbohybrid.multivector_quantized_inverted_precompact_coverage_k": str(
+            getattr(args, "multivector_quantized_inverted_precompact_coverage_k", 512)
+        ),
+        "turbohybrid.multivector_quantized_inverted_precompact_per_token_k": str(
+            getattr(args, "multivector_quantized_inverted_precompact_per_token_k", 16)
+        ),
+        "turbohybrid.multivector_quantized_inverted_compact_max_docs": str(
+            getattr(args, "multivector_quantized_inverted_compact_max_docs", 6144)
         ),
         "turbohybrid.multivector_quantized_inverted_codebook": str(
             getattr(args, "multivector_quantized_inverted_codebook", "deterministic")
@@ -7384,6 +7495,54 @@ def quantized_inverted_work_from_stats(stats: dict[str, Any]) -> dict[str, Any]:
         "quantized_inverted_compact_topk_changed_vs_scalar": scan_stat_bool(
             stats, "quantized_inverted_compact_topk_changed_vs_scalar"
         ),
+        "quantized_inverted_compact_doc_order": scan_stat_str(
+            stats, "quantized_inverted_compact_doc_order"
+        ),
+        "quantized_inverted_compact_inner_allocations": scan_stat_int(
+            stats, "quantized_inverted_compact_inner_allocations"
+        ),
+        "quantized_inverted_compact_active_query_tokens": scan_stat_int(
+            stats, "quantized_inverted_compact_active_query_tokens"
+        ),
+        "quantized_inverted_compact_pairs_evaluated": scan_stat_int(
+            stats, "quantized_inverted_compact_pairs_evaluated"
+        ),
+        "quantized_inverted_compact_pairs_skipped": scan_stat_int(
+            stats, "quantized_inverted_compact_pairs_skipped"
+        ),
+        "quantized_inverted_compact_prefetches": scan_stat_int(
+            stats, "quantized_inverted_compact_prefetches"
+        ),
+        "quantized_inverted_compact_avg_doc_tokens": scan_stat_float(
+            stats, "quantized_inverted_compact_avg_doc_tokens"
+        ),
+        "quantized_inverted_compact_us_per_doc": scan_stat_float(
+            stats, "quantized_inverted_compact_us_per_doc"
+        ),
+        "quantized_inverted_compact_payload_bytes_per_doc": scan_stat_float(
+            stats, "quantized_inverted_compact_payload_bytes_per_doc"
+        ),
+        "quantized_inverted_query_codeword_kernel": scan_stat_str(
+            stats, "quantized_inverted_query_codeword_kernel"
+        ),
+        "quantized_inverted_query_codeword_scores_computed": scan_stat_int(
+            stats, "quantized_inverted_query_codeword_scores_computed"
+        ),
+        "quantized_inverted_query_codeword_blocks": scan_stat_int(
+            stats, "quantized_inverted_query_codeword_blocks"
+        ),
+        "quantized_inverted_query_codeword_topk_us": scan_stat_int(
+            stats, "quantized_inverted_query_codeword_topk_us"
+        ),
+        "quantized_inverted_query_codeword_full_matrix_materialized": scan_stat_bool(
+            stats, "quantized_inverted_query_codeword_full_matrix_materialized"
+        ),
+        "quantized_inverted_query_codeword_active_query_tokens": scan_stat_int(
+            stats, "quantized_inverted_query_codeword_active_query_tokens"
+        ),
+        "quantized_inverted_query_codeword_skipped_query_tokens": scan_stat_int(
+            stats, "quantized_inverted_query_codeword_skipped_query_tokens"
+        ),
         "quantized_inverted_token_coverage_mode": scan_stat_str(
             stats, "quantized_inverted_token_coverage_mode"
         ),
@@ -7428,6 +7587,51 @@ def quantized_inverted_work_from_stats(stats: dict[str, Any]) -> dict[str, Any]:
         ),
         "quantized_inverted_candidates_after_bound": scan_stat_int(
             stats, "quantized_inverted_candidates_after_bound"
+        ),
+        "quantized_inverted_precompact_enabled": scan_stat_bool(
+            stats, "quantized_inverted_precompact_enabled"
+        ),
+        "quantized_inverted_precompact_mode": scan_stat_str(
+            stats, "quantized_inverted_precompact_mode"
+        ),
+        "quantized_inverted_docs_touched_before_precompact": scan_stat_int(
+            stats, "quantized_inverted_docs_touched_before_precompact"
+        ),
+        "quantized_inverted_precompact_score_k": scan_stat_int(
+            stats, "quantized_inverted_precompact_score_k"
+        ),
+        "quantized_inverted_precompact_coverage_k": scan_stat_int(
+            stats, "quantized_inverted_precompact_coverage_k"
+        ),
+        "quantized_inverted_precompact_per_token_k": scan_stat_int(
+            stats, "quantized_inverted_precompact_per_token_k"
+        ),
+        "quantized_inverted_compact_max_docs": scan_stat_int(
+            stats, "quantized_inverted_compact_max_docs"
+        ),
+        "quantized_inverted_precompact_score_docs": scan_stat_int(
+            stats, "quantized_inverted_precompact_score_docs"
+        ),
+        "quantized_inverted_precompact_coverage_docs": scan_stat_int(
+            stats, "quantized_inverted_precompact_coverage_docs"
+        ),
+        "quantized_inverted_precompact_per_token_docs": scan_stat_int(
+            stats, "quantized_inverted_precompact_per_token_docs"
+        ),
+        "quantized_inverted_precompact_union_docs": scan_stat_int(
+            stats, "quantized_inverted_precompact_union_docs"
+        ),
+        "quantized_inverted_precompact_duplicates": scan_stat_int(
+            stats, "quantized_inverted_precompact_duplicates"
+        ),
+        "quantized_inverted_precompact_pruned_docs": scan_stat_int(
+            stats, "quantized_inverted_precompact_pruned_docs"
+        ),
+        "quantized_inverted_precompact_us": scan_stat_int(
+            stats, "quantized_inverted_precompact_us"
+        ),
+        "quantized_inverted_compact_docs_skipped_by_precompact": scan_stat_int(
+            stats, "quantized_inverted_compact_docs_skipped_by_precompact"
         ),
     }
 
@@ -10863,6 +11067,104 @@ def effective_document_node_colbert_candidate_source_focus_quantized_top_ms(
     return top_ms
 
 
+def effective_quantized_inverted_precompact_score_grid(
+    args: argparse.Namespace,
+) -> list[int]:
+    source = str(
+        getattr(args, "quantized_inverted_precompact_score_grid", "")
+        or DOCUMENT_NODE_COLBERT_QUANTIZED_INVERTED_PRECOMPACT_SCORE_GRID
+    )
+    values = parse_int_grid(source, "--quantized-inverted-precompact-score-grid")
+    invalid = [value for value in values if value < 1]
+    if invalid:
+        raise SystemExit(
+            "--quantized-inverted-precompact-score-grid values must be positive"
+        )
+    return values
+
+
+def effective_quantized_inverted_exact_rerank_grid(
+    args: argparse.Namespace,
+) -> list[int]:
+    source = str(
+        getattr(args, "quantized_inverted_exact_rerank_grid", "")
+        or DOCUMENT_NODE_COLBERT_QUANTIZED_INVERTED_EXACT_RERANK_GRID
+    )
+    return parse_int_grid(source, "--quantized-inverted-exact-rerank-grid")
+
+
+def effective_quantized_inverted_exact_rerank_modes(
+    args: argparse.Namespace,
+) -> list[str]:
+    source = str(
+        getattr(args, "quantized_inverted_exact_rerank_modes", "")
+        or DOCUMENT_NODE_COLBERT_QUANTIZED_INVERTED_EXACT_RERANK_MODES
+    )
+    modes = [item.strip() for item in source.split(",") if item.strip()]
+    if not modes:
+        raise SystemExit(
+            "--quantized-inverted-exact-rerank-modes must contain at least one mode"
+        )
+    allowed = {"topk", "adaptive"}
+    invalid = sorted(set(modes) - allowed)
+    if invalid:
+        raise SystemExit(
+            "--quantized-inverted-exact-rerank-modes supports only: "
+            + ", ".join(sorted(allowed))
+        )
+    return unique_preserve_order(modes)
+
+
+def effective_quantized_inverted_precompact_coverage_k(args: argparse.Namespace) -> int:
+    value = int(
+        getattr(
+            args,
+            "quantized_inverted_precompact_coverage_k",
+            DOCUMENT_NODE_COLBERT_QUANTIZED_INVERTED_PRECOMPACT_COVERAGE_K,
+        )
+        or 0
+    )
+    if value < 0:
+        raise SystemExit("--quantized-inverted-precompact-coverage-k must be non-negative")
+    return value
+
+
+def effective_quantized_inverted_precompact_per_token_k(args: argparse.Namespace) -> int:
+    value = int(
+        getattr(
+            args,
+            "quantized_inverted_precompact_per_token_k",
+            DOCUMENT_NODE_COLBERT_QUANTIZED_INVERTED_PRECOMPACT_PER_TOKEN_K,
+        )
+        or 0
+    )
+    if value < 0:
+        raise SystemExit("--quantized-inverted-precompact-per-token-k must be non-negative")
+    return value
+
+
+def effective_quantized_inverted_compact_max_docs(
+    args: argparse.Namespace,
+    *,
+    score_k: int,
+    active_query_tokens: int | None = None,
+) -> int:
+    override = int(getattr(args, "quantized_inverted_compact_max_docs", 0) or 0)
+    if override < 0:
+        raise SystemExit("--quantized-inverted-compact-max-docs must be non-negative")
+    if override > 0:
+        return override
+    query_tokens = int(
+        active_query_tokens
+        if active_query_tokens is not None
+        else getattr(args, "max_query_vectors", 0)
+        or 0
+    )
+    coverage_k = effective_quantized_inverted_precompact_coverage_k(args)
+    per_token_k = effective_quantized_inverted_precompact_per_token_k(args)
+    return max(int(score_k), int(score_k) + coverage_k + query_tokens * per_token_k)
+
+
 def effective_document_node_colbert_candidate_source_focus_score_thresholds(
     args: argparse.Namespace,
 ) -> list[float]:
@@ -10920,9 +11222,202 @@ def centroid_lite_threshold_profile_base(profile: DocumentNodeServingProfile) ->
     )
 
 
+def document_node_colbert_quantized_inverted_precompact_focus_profiles(
+    args: argparse.Namespace,
+    *,
+    active_query_tokens: int | None = None,
+) -> list[DocumentNodeServingProfile]:
+    codebook_path = str(
+        getattr(args, "multivector_quantized_inverted_codebook_path", "") or ""
+    ).strip()
+    if not codebook_path:
+        raise SystemExit(
+            "--document-node-colbert-quantized-inverted-precompact-focus "
+            "requires --multivector-quantized-inverted-codebook-path"
+        )
+    base_args = clone_args(
+        args,
+        document_node_colbert_quantized_inverted_precompact_focus=False,
+        document_node_colbert_quantized_inverted_exact_rerank_focus=False,
+        document_node_colbert_candidate_source_focus=True,
+        include_quantized_inverted_experimental=True,
+        document_node_colbert_candidate_source_profiles=(
+            DOCUMENT_NODE_COLBERT_QUANTIZED_INVERTED_PRECOMPACT_BASELINE_PROFILE
+        ),
+        quantized_inverted_posting_caps=(
+            DOCUMENT_NODE_COLBERT_CANDIDATE_SOURCE_DEFAULT_QUANTIZED_CAPS
+        ),
+        quantized_inverted_probes=(
+            DOCUMENT_NODE_COLBERT_CANDIDATE_SOURCE_DEFAULT_QUANTIZED_PROBES
+        ),
+        quantized_inverted_codebook_top_ms=(
+            DOCUMENT_NODE_COLBERT_CANDIDATE_SOURCE_DEFAULT_QUANTIZED_TOP_MS
+        ),
+    )
+    base_profiles = document_node_colbert_candidate_source_focus_profiles(
+        base_args,
+        active_query_tokens=active_query_tokens,
+    )
+    if len(base_profiles) != 1:
+        raise SystemExit(
+            "--document-node-colbert-quantized-inverted-precompact-focus expected "
+            "exactly one external quantized baseline profile"
+        )
+    base = base_profiles[0]
+    score_grid = effective_quantized_inverted_precompact_score_grid(args)
+    coverage_k = effective_quantized_inverted_precompact_coverage_k(args)
+    per_token_k = effective_quantized_inverted_precompact_per_token_k(args)
+    profiles: list[DocumentNodeServingProfile] = [
+        replace(
+            base,
+            name="precompact_off",
+            quantized_inverted_precompact="off",
+            quantized_inverted_precompact_score_k=0,
+            quantized_inverted_precompact_coverage_k=0,
+            quantized_inverted_precompact_per_token_k=0,
+            quantized_inverted_compact_max_docs=0,
+        )
+    ]
+    for score_k in score_grid:
+        profiles.append(
+            replace(
+                base,
+                name=f"precompact_topk_{int(score_k)}",
+                quantized_inverted_precompact="centroid_maxsim_topk",
+                quantized_inverted_precompact_score_k=int(score_k),
+                quantized_inverted_precompact_coverage_k=0,
+                quantized_inverted_precompact_per_token_k=0,
+                quantized_inverted_compact_max_docs=0,
+            )
+        )
+    for score_k in score_grid:
+        profiles.append(
+            replace(
+                base,
+                name=f"precompact_reservoir_{int(score_k)}",
+                quantized_inverted_precompact="centroid_maxsim_reservoir",
+                quantized_inverted_precompact_score_k=int(score_k),
+                quantized_inverted_precompact_coverage_k=coverage_k,
+                quantized_inverted_precompact_per_token_k=per_token_k,
+                quantized_inverted_compact_max_docs=(
+                    effective_quantized_inverted_compact_max_docs(
+                        args,
+                        score_k=int(score_k),
+                        active_query_tokens=active_query_tokens,
+                    )
+                ),
+            )
+        )
+    kernel_score_k = 4096 if 4096 in score_grid else score_grid[0]
+    for kernel in ("scalar", "blocked"):
+        profiles.append(
+            replace(
+                base,
+                name=f"precompact_topk_{int(kernel_score_k)}_{kernel}",
+                quantized_inverted_query_codeword_kernel=kernel,
+                quantized_inverted_precompact="centroid_maxsim_topk",
+                quantized_inverted_precompact_score_k=int(kernel_score_k),
+                quantized_inverted_precompact_coverage_k=0,
+                quantized_inverted_precompact_per_token_k=0,
+                quantized_inverted_compact_max_docs=0,
+            )
+        )
+        profiles.append(
+            replace(
+                base,
+                name=f"precompact_reservoir_{int(kernel_score_k)}_{kernel}",
+                quantized_inverted_query_codeword_kernel=kernel,
+                quantized_inverted_precompact="centroid_maxsim_reservoir",
+                quantized_inverted_precompact_score_k=int(kernel_score_k),
+                quantized_inverted_precompact_coverage_k=coverage_k,
+                quantized_inverted_precompact_per_token_k=per_token_k,
+                quantized_inverted_compact_max_docs=(
+                    effective_quantized_inverted_compact_max_docs(
+                        args,
+                        score_k=int(kernel_score_k),
+                        active_query_tokens=active_query_tokens,
+                    )
+                ),
+            )
+        )
+    doc_order_score_k = score_grid[-1]
+    for doc_order in ("original", "docid"):
+        profiles.append(
+            replace(
+                base,
+                name=f"precompact_topk_{int(doc_order_score_k)}_{doc_order}",
+                quantized_inverted_query_codeword_kernel="blocked",
+                quantized_inverted_compact_doc_order=doc_order,
+                quantized_inverted_precompact="centroid_maxsim_topk",
+                quantized_inverted_precompact_score_k=int(doc_order_score_k),
+                quantized_inverted_precompact_coverage_k=0,
+                quantized_inverted_precompact_per_token_k=0,
+                quantized_inverted_compact_max_docs=0,
+            )
+        )
+    return profiles
+
+
+def document_node_colbert_quantized_inverted_exact_rerank_focus_profiles(
+    args: argparse.Namespace,
+    *,
+    active_query_tokens: int | None = None,
+) -> list[DocumentNodeServingProfile]:
+    precompact_profiles = document_node_colbert_quantized_inverted_precompact_focus_profiles(
+        args,
+        active_query_tokens=active_query_tokens,
+    )
+    score_grid = effective_quantized_inverted_precompact_score_grid(args)
+    default_base_name = f"precompact_topk_{int(score_grid[-1])}_docid"
+    requested_base_name = str(
+        getattr(args, "quantized_inverted_exact_rerank_focus_profile", "")
+        or default_base_name
+    ).strip()
+    profiles_by_name = {profile.name: profile for profile in precompact_profiles}
+    if requested_base_name not in profiles_by_name:
+        raise SystemExit(
+            "--quantized-inverted-exact-rerank-focus-profile is not available: "
+            f"{requested_base_name}. Available profiles: "
+            + ", ".join(sorted(profiles_by_name))
+        )
+    base = profiles_by_name[requested_base_name]
+    exact_ks = effective_quantized_inverted_exact_rerank_grid(args)
+    exact_modes = effective_quantized_inverted_exact_rerank_modes(args)
+    profiles: list[DocumentNodeServingProfile] = []
+    for exact_k in exact_ks:
+        for mode in exact_modes:
+            profiles.append(
+                replace(
+                    base,
+                    name=f"{base.name}_rk{int(exact_k)}_{mode}",
+                    exact_rerank_k=int(exact_k),
+                    exact_rerank_mode=mode,
+                )
+            )
+    return profiles
+
+
 def document_node_colbert_candidate_source_focus_profiles(
     args: argparse.Namespace,
+    *,
+    active_query_tokens: int | None = None,
 ) -> list[DocumentNodeServingProfile]:
+    if bool(
+        getattr(
+            args,
+            "document_node_colbert_quantized_inverted_exact_rerank_focus",
+            False,
+        )
+    ):
+        return document_node_colbert_quantized_inverted_exact_rerank_focus_profiles(
+            args,
+            active_query_tokens=active_query_tokens,
+        )
+    if bool(getattr(args, "document_node_colbert_quantized_inverted_precompact_focus", False)):
+        return document_node_colbert_quantized_inverted_precompact_focus_profiles(
+            args,
+            active_query_tokens=active_query_tokens,
+        )
     include_experimental = bool(
         getattr(args, "include_quantized_inverted_experimental", False)
         or getattr(args, "document_node_colbert_include_experimental", False)
@@ -11142,6 +11637,50 @@ def document_node_colbert_candidate_source_focus_profiles(
                             quantized_inverted_codebook_top_m=top_m_int,
                         )
                     )
+        default_cap = int(
+            DOCUMENT_NODE_COLBERT_CANDIDATE_SOURCE_DEFAULT_QUANTIZED_CAPS
+        )
+        default_probe = int(
+            DOCUMENT_NODE_COLBERT_CANDIDATE_SOURCE_DEFAULT_QUANTIZED_PROBES
+        )
+        default_top_m = int(
+            DOCUMENT_NODE_COLBERT_CANDIDATE_SOURCE_DEFAULT_QUANTIZED_TOP_MS
+        )
+        if (
+            default_cap in {int(cap) for cap in quantized_cap_values}
+            and default_probe in {int(probe) for probe in quantized_probe_values}
+            and default_top_m in {int(top_m) for top_m in quantized_top_m_values}
+        ):
+            quantized_dynamic_profiles.append(
+                DocumentNodeServingProfile(
+                    name=(
+                        DOCUMENT_NODE_COLBERT_CANDIDATE_SOURCE_DEFAULT_EXTERNAL_QUANTIZED_PROFILE
+                    ),
+                    candidate_source="quantized_inverted_experimental",
+                    storage_kind="centroid_only",
+                    centroids="off",
+                    centroid_count="auto",
+                    plain_fallback="off",
+                    quantized_inverted_max_postings_per_token=default_cap,
+                    quantized_inverted_probe_codewords_per_token=default_probe,
+                    quantized_inverted_posting_selection="score_topk",
+                    quantized_inverted_compact_scoring="experimental",
+                    quantized_inverted_pruning="score_bound_experimental",
+                    quantized_inverted_codebook="external",
+                    quantized_inverted_codebook_top_m=default_top_m,
+                    quantized_inverted_query_codeword_kernel="blocked",
+                    quantized_inverted_compact_doc_order="docid",
+                    quantized_inverted_precompact="centroid_maxsim_topk",
+                    quantized_inverted_precompact_score_k=8192,
+                    quantized_inverted_precompact_coverage_k=0,
+                    quantized_inverted_precompact_per_token_k=0,
+                    quantized_inverted_compact_max_docs=0,
+                    exact_rerank_mode="topk",
+                    exact_rerank_k=(
+                        DOCUMENT_NODE_COLBERT_CANDIDATE_SOURCE_DEFAULT_EXACT_RERANK_K
+                    ),
+                )
+            )
     if quantized_dynamic_profiles:
         allowed_names = unique_preserve_order(
             [*allowed_names, *(profile.name for profile in quantized_dynamic_profiles)]
@@ -11256,10 +11795,13 @@ def document_node_colbert_candidate_source_focus_args(
 ) -> tuple[argparse.Namespace, int]:
     if candidate_k < 1:
         raise SystemExit("--candidate-budgets must contain positive integers")
-    requested_rerank_k = int(getattr(args, "exact_rerank_k", 0) or 0)
+    requested_rerank_k = int(
+        profile.exact_rerank_k or getattr(args, "exact_rerank_k", 0) or 0
+    )
     if requested_rerank_k < 1:
         raise SystemExit("--exact-rerank-k must be positive")
     effective_rerank_k = min(requested_rerank_k, candidate_k)
+    exact_rerank_mode = str(profile.exact_rerank_mode or "topk")
     mode_args = document_node_serving_profile_args(
         args,
         profile,
@@ -11271,7 +11813,7 @@ def document_node_colbert_candidate_source_focus_args(
         mode_args,
         dense_k=candidate_k,
         multivector_doc_candidate_k=candidate_k,
-        multivector_exact_rerank="topk",
+        multivector_exact_rerank=exact_rerank_mode,
         multivector_exact_rerank_k=effective_rerank_k,
         reuse_index=args.reuse_index,
         admission_debug_context="colbert_candidate_source_focus",
@@ -14282,6 +14824,12 @@ def document_node_serving_profile_args(
         multivector_quantized_inverted_compact_scoring=(
             profile.quantized_inverted_compact_scoring
         ),
+        multivector_quantized_inverted_query_codeword_kernel=(
+            profile.quantized_inverted_query_codeword_kernel
+        ),
+        multivector_quantized_inverted_compact_doc_order=(
+            profile.quantized_inverted_compact_doc_order
+        ),
         multivector_quantized_inverted_token_coverage=(
             profile.quantized_inverted_token_coverage
         ),
@@ -14289,6 +14837,21 @@ def document_node_serving_profile_args(
             effective_quantized_inverted_min_token_matches(args, profile)
         ),
         multivector_quantized_inverted_pruning=profile.quantized_inverted_pruning,
+        multivector_quantized_inverted_precompact=(
+            profile.quantized_inverted_precompact
+        ),
+        multivector_quantized_inverted_precompact_score_k=(
+            profile.quantized_inverted_precompact_score_k
+        ),
+        multivector_quantized_inverted_precompact_coverage_k=(
+            profile.quantized_inverted_precompact_coverage_k
+        ),
+        multivector_quantized_inverted_precompact_per_token_k=(
+            profile.quantized_inverted_precompact_per_token_k
+        ),
+        multivector_quantized_inverted_compact_max_docs=(
+            profile.quantized_inverted_compact_max_docs
+        ),
         multivector_quantized_inverted_codebook=codebook_source,
         multivector_quantized_inverted_codebook_path=codebook_path,
         multivector_quantized_inverted_codebook_top_m=codebook_top_m,
@@ -19999,6 +20562,37 @@ def _self_check_document_node_serving_stats_extraction() -> None:
         "quantized_inverted_compact_docs_scored": 12,
         "quantized_inverted_compact_payload_bytes": 64,
         "quantized_inverted_compact_topk_changed_vs_scalar": False,
+        "quantized_inverted_compact_doc_order": "docid",
+        "quantized_inverted_compact_inner_allocations": 0,
+        "quantized_inverted_compact_active_query_tokens": 31,
+        "quantized_inverted_compact_pairs_evaluated": 2048,
+        "quantized_inverted_compact_pairs_skipped": 64,
+        "quantized_inverted_compact_prefetches": 0,
+        "quantized_inverted_compact_avg_doc_tokens": 16.0,
+        "quantized_inverted_compact_us_per_doc": 2.5,
+        "quantized_inverted_compact_payload_bytes_per_doc": 64.0,
+        "quantized_inverted_query_codeword_kernel": "blocked",
+        "quantized_inverted_query_codeword_scores_computed": 4096,
+        "quantized_inverted_query_codeword_blocks": 128,
+        "quantized_inverted_query_codeword_topk_us": 17,
+        "quantized_inverted_query_codeword_full_matrix_materialized": True,
+        "quantized_inverted_query_codeword_active_query_tokens": 31,
+        "quantized_inverted_query_codeword_skipped_query_tokens": 1,
+        "quantized_inverted_precompact_enabled": True,
+        "quantized_inverted_precompact_mode": "centroid_maxsim_reservoir",
+        "quantized_inverted_docs_touched_before_precompact": 4096,
+        "quantized_inverted_precompact_score_k": 2048,
+        "quantized_inverted_precompact_coverage_k": 512,
+        "quantized_inverted_precompact_per_token_k": 16,
+        "quantized_inverted_compact_max_docs": 3072,
+        "quantized_inverted_precompact_score_docs": 2048,
+        "quantized_inverted_precompact_coverage_docs": 512,
+        "quantized_inverted_precompact_per_token_docs": 128,
+        "quantized_inverted_precompact_union_docs": 2304,
+        "quantized_inverted_precompact_duplicates": 384,
+        "quantized_inverted_precompact_pruned_docs": 1792,
+        "quantized_inverted_precompact_us": 99,
+        "quantized_inverted_compact_docs_skipped_by_precompact": 1792,
         "quantized_inverted_token_coverage_mode": "linear",
         "quantized_inverted_active_query_tokens": 3,
         "quantized_inverted_token_matches_total": 20,
@@ -20066,6 +20660,40 @@ def _self_check_document_node_serving_stats_extraction() -> None:
     assert extracted["quantized_inverted_compact_docs_scored"] == 12
     assert extracted["quantized_inverted_compact_payload_bytes"] == 64
     assert extracted["quantized_inverted_compact_topk_changed_vs_scalar"] is False
+    assert extracted["quantized_inverted_compact_doc_order"] == "docid"
+    assert extracted["quantized_inverted_compact_inner_allocations"] == 0
+    assert extracted["quantized_inverted_compact_active_query_tokens"] == 31
+    assert extracted["quantized_inverted_compact_pairs_evaluated"] == 2048
+    assert extracted["quantized_inverted_compact_pairs_skipped"] == 64
+    assert extracted["quantized_inverted_compact_prefetches"] == 0
+    assert extracted["quantized_inverted_compact_avg_doc_tokens"] == 16.0
+    assert extracted["quantized_inverted_compact_us_per_doc"] == 2.5
+    assert extracted["quantized_inverted_compact_payload_bytes_per_doc"] == 64.0
+    assert extracted["quantized_inverted_query_codeword_kernel"] == "blocked"
+    assert extracted["quantized_inverted_query_codeword_scores_computed"] == 4096
+    assert extracted["quantized_inverted_query_codeword_blocks"] == 128
+    assert extracted["quantized_inverted_query_codeword_topk_us"] == 17
+    assert (
+        extracted["quantized_inverted_query_codeword_full_matrix_materialized"]
+        is True
+    )
+    assert extracted["quantized_inverted_query_codeword_active_query_tokens"] == 31
+    assert extracted["quantized_inverted_query_codeword_skipped_query_tokens"] == 1
+    assert extracted["quantized_inverted_precompact_enabled"] is True
+    assert extracted["quantized_inverted_precompact_mode"] == "centroid_maxsim_reservoir"
+    assert extracted["quantized_inverted_docs_touched_before_precompact"] == 4096
+    assert extracted["quantized_inverted_precompact_score_k"] == 2048
+    assert extracted["quantized_inverted_precompact_coverage_k"] == 512
+    assert extracted["quantized_inverted_precompact_per_token_k"] == 16
+    assert extracted["quantized_inverted_compact_max_docs"] == 3072
+    assert extracted["quantized_inverted_precompact_score_docs"] == 2048
+    assert extracted["quantized_inverted_precompact_coverage_docs"] == 512
+    assert extracted["quantized_inverted_precompact_per_token_docs"] == 128
+    assert extracted["quantized_inverted_precompact_union_docs"] == 2304
+    assert extracted["quantized_inverted_precompact_duplicates"] == 384
+    assert extracted["quantized_inverted_precompact_pruned_docs"] == 1792
+    assert extracted["quantized_inverted_precompact_us"] == 99
+    assert extracted["quantized_inverted_compact_docs_skipped_by_precompact"] == 1792
     assert extracted["quantized_inverted_token_coverage_mode"] == "linear"
     assert extracted["quantized_inverted_active_query_tokens"] == 3
     assert extracted["quantized_inverted_token_matches_total"] == 20
@@ -21551,6 +22179,7 @@ def _self_check_document_node_colbert_beir_quality_only() -> None:
         document_node_colbert_centroid_lite_focus=False,
         document_node_colbert_entry_focus=False,
         document_node_colbert_quantized_inverted_focus=False,
+        document_node_colbert_quantized_inverted_precompact_focus=False,
         document_node_colbert_1m_grid=False,
         document_node_colbert_1m_include_entry_samples=False,
         document_node_colbert_1m_include_entry_sidecar=False,
@@ -21819,6 +22448,8 @@ def _self_check_document_node_colbert_sampled_admission() -> None:
         document_node_colbert_centroid_lite_focus=False,
         document_node_colbert_entry_focus=False,
         document_node_colbert_quantized_inverted_focus=False,
+        document_node_colbert_quantized_inverted_precompact_focus=False,
+        document_node_colbert_quantized_inverted_exact_rerank_focus=False,
         document_node_colbert_1m_grid=False,
         document_node_colbert_1m_include_entry_samples=False,
         document_node_colbert_1m_include_entry_sidecar=False,
@@ -22125,8 +22756,46 @@ def _self_check_document_node_colbert_candidate_source_focus() -> None:
         centroid_lite_score_thresholds="-1",
         centroid_lite_score_drop_from_best_values="-1",
         multivector_centroid_lite_score_drop_from_best=-1.0,
+        max_query_vectors=32,
+        quantized_inverted_precompact_score_grid=(
+            DOCUMENT_NODE_COLBERT_QUANTIZED_INVERTED_PRECOMPACT_SCORE_GRID
+        ),
+        quantized_inverted_precompact_coverage_k=(
+            DOCUMENT_NODE_COLBERT_QUANTIZED_INVERTED_PRECOMPACT_COVERAGE_K
+        ),
+        quantized_inverted_precompact_per_token_k=(
+            DOCUMENT_NODE_COLBERT_QUANTIZED_INVERTED_PRECOMPACT_PER_TOKEN_K
+        ),
+        quantized_inverted_compact_max_docs=0,
+        quantized_inverted_exact_rerank_grid=(
+            DOCUMENT_NODE_COLBERT_QUANTIZED_INVERTED_EXACT_RERANK_GRID
+        ),
+        quantized_inverted_exact_rerank_modes=(
+            DOCUMENT_NODE_COLBERT_QUANTIZED_INVERTED_EXACT_RERANK_MODES
+        ),
+        quantized_inverted_exact_rerank_focus_profile="",
+        multivector_quantized_inverted_precompact="off",
+        multivector_quantized_inverted_precompact_score_k=4096,
+        multivector_quantized_inverted_precompact_coverage_k=512,
+        multivector_quantized_inverted_precompact_per_token_k=16,
+        multivector_quantized_inverted_compact_max_docs=6144,
+        multivector_quantized_inverted_query_codeword_kernel="auto",
     )
-    profiles = document_node_colbert_candidate_source_focus_profiles(args)
+    precompact_focus = bool(
+        getattr(args, "document_node_colbert_quantized_inverted_precompact_focus", False)
+    )
+    exact_rerank_focus = bool(
+        getattr(
+            args,
+            "document_node_colbert_quantized_inverted_exact_rerank_focus",
+            False,
+        )
+    )
+    active_query_tokens = int(getattr(args, "max_query_vectors", 0) or 0)
+    profiles = document_node_colbert_candidate_source_focus_profiles(
+        args,
+        active_query_tokens=active_query_tokens,
+    )
     minmatch_args = clone_args(args, multivector_quantized_inverted_min_token_matches=3)
     minmatch_mode_args, _ = document_node_colbert_candidate_source_focus_args(
         minmatch_args,
@@ -22661,6 +23330,21 @@ def _self_check_document_node_colbert_candidate_source_focus() -> None:
             default_external_profile.quantized_inverted_pruning
             == "score_bound_experimental"
         )
+        assert (
+            default_external_profile.quantized_inverted_query_codeword_kernel
+            == "blocked"
+        )
+        assert default_external_profile.quantized_inverted_compact_doc_order == "docid"
+        assert (
+            default_external_profile.quantized_inverted_precompact
+            == "centroid_maxsim_topk"
+        )
+        assert default_external_profile.quantized_inverted_precompact_score_k == 8192
+        assert default_external_profile.quantized_inverted_precompact_coverage_k == 0
+        assert default_external_profile.quantized_inverted_precompact_per_token_k == 0
+        assert default_external_profile.quantized_inverted_compact_max_docs == 0
+        assert default_external_profile.exact_rerank_k == 512
+        assert default_external_profile.exact_rerank_mode == "topk"
         assert effective_document_node_colbert_candidate_source_focus_budgets(
             default_external_args
         ) == [8192]
@@ -22685,6 +23369,188 @@ def _self_check_document_node_colbert_candidate_source_focus() -> None:
         assert (
             default_external_mode_args.multivector_quantized_inverted_pruning
             == "score_bound_experimental"
+        )
+        assert (
+            default_external_mode_args.multivector_quantized_inverted_precompact
+            == "centroid_maxsim_topk"
+        )
+        assert (
+            default_external_mode_args.multivector_quantized_inverted_precompact_score_k
+            == 8192
+        )
+        assert (
+            default_external_mode_args.multivector_quantized_inverted_compact_doc_order
+            == "docid"
+        )
+        previous_external_args = clone_args(
+            default_external_args,
+            document_node_colbert_candidate_source_profiles=(
+                DOCUMENT_NODE_COLBERT_CANDIDATE_SOURCE_PREVIOUS_EXTERNAL_QUANTIZED_PROFILE
+            ),
+        )
+        previous_external_profiles = (
+            document_node_colbert_candidate_source_focus_profiles(
+                previous_external_args
+            )
+        )
+        assert [profile.name for profile in previous_external_profiles] == [
+            DOCUMENT_NODE_COLBERT_CANDIDATE_SOURCE_PREVIOUS_EXTERNAL_QUANTIZED_PROFILE
+        ]
+        assert previous_external_profiles[0].quantized_inverted_precompact == "off"
+        assert (
+            previous_external_profiles[0].quantized_inverted_pruning
+            == "score_bound_experimental"
+        )
+        precompact_args = clone_args(
+            args,
+            document_node_colbert_candidate_source_focus=False,
+            document_node_colbert_quantized_inverted_precompact_focus=True,
+            multivector_quantized_inverted_codebook_path=str(codebook_path),
+            quantized_inverted_precompact_score_grid="2048,4096",
+            max_query_vectors=8,
+        )
+        precompact_profiles = document_node_colbert_candidate_source_focus_profiles(
+            precompact_args,
+            active_query_tokens=8,
+        )
+        assert [profile.name for profile in precompact_profiles] == [
+            "precompact_off",
+            "precompact_topk_2048",
+            "precompact_topk_4096",
+            "precompact_reservoir_2048",
+            "precompact_reservoir_4096",
+            "precompact_topk_4096_scalar",
+            "precompact_reservoir_4096_scalar",
+            "precompact_topk_4096_blocked",
+            "precompact_reservoir_4096_blocked",
+            "precompact_topk_4096_original",
+            "precompact_topk_4096_docid",
+        ]
+        assert precompact_profiles[0].candidate_source == (
+            "quantized_inverted_experimental"
+        )
+        assert precompact_profiles[0].quantized_inverted_precompact == "off"
+        assert (
+            precompact_profiles[1].quantized_inverted_precompact
+            == "centroid_maxsim_topk"
+        )
+        assert precompact_profiles[1].quantized_inverted_precompact_score_k == 2048
+        assert (
+            precompact_profiles[3].quantized_inverted_precompact
+            == "centroid_maxsim_reservoir"
+        )
+        assert precompact_profiles[3].quantized_inverted_precompact_coverage_k == 512
+        assert precompact_profiles[3].quantized_inverted_precompact_per_token_k == 16
+        assert precompact_profiles[3].quantized_inverted_compact_max_docs == (
+            2048 + 512 + 8 * 16
+        )
+        scalar_kernel_profile = precompact_profiles[5]
+        blocked_kernel_profile = precompact_profiles[8]
+        assert scalar_kernel_profile.quantized_inverted_query_codeword_kernel == "scalar"
+        assert scalar_kernel_profile.quantized_inverted_precompact == (
+            "centroid_maxsim_topk"
+        )
+        assert blocked_kernel_profile.quantized_inverted_query_codeword_kernel == (
+            "blocked"
+        )
+        assert blocked_kernel_profile.quantized_inverted_precompact == (
+            "centroid_maxsim_reservoir"
+        )
+        original_order_profile = precompact_profiles[9]
+        docid_order_profile = precompact_profiles[10]
+        assert original_order_profile.quantized_inverted_query_codeword_kernel == (
+            "blocked"
+        )
+        assert docid_order_profile.quantized_inverted_query_codeword_kernel == (
+            "blocked"
+        )
+        assert (
+            original_order_profile.quantized_inverted_compact_doc_order == "original"
+        )
+        assert docid_order_profile.quantized_inverted_compact_doc_order == "docid"
+        assert original_order_profile.quantized_inverted_precompact == (
+            "centroid_maxsim_topk"
+        )
+        assert docid_order_profile.quantized_inverted_precompact == (
+            "centroid_maxsim_topk"
+        )
+        precompact_mode_args, precompact_effective_rerank_k = (
+            document_node_colbert_candidate_source_focus_args(
+                precompact_args,
+                blocked_kernel_profile,
+                8192,
+            )
+        )
+        assert precompact_effective_rerank_k == 512
+        assert (
+            precompact_mode_args.multivector_quantized_inverted_precompact
+            == "centroid_maxsim_reservoir"
+        )
+        assert (
+            precompact_mode_args.multivector_quantized_inverted_query_codeword_kernel
+            == "blocked"
+        )
+        assert (
+            precompact_mode_args.multivector_quantized_inverted_precompact_score_k
+            == 4096
+        )
+        assert (
+            precompact_mode_args.multivector_quantized_inverted_precompact_coverage_k
+            == 512
+        )
+        assert (
+            precompact_mode_args.multivector_quantized_inverted_precompact_per_token_k
+            == 16
+        )
+        assert (
+            precompact_mode_args.multivector_quantized_inverted_compact_max_docs
+            == 4736
+        )
+        exact_focus_args = clone_args(
+            args,
+            document_node_colbert_candidate_source_focus=False,
+            document_node_colbert_quantized_inverted_precompact_focus=False,
+            document_node_colbert_quantized_inverted_exact_rerank_focus=True,
+            multivector_quantized_inverted_codebook_path=str(codebook_path),
+            quantized_inverted_precompact_score_grid="4096",
+            quantized_inverted_exact_rerank_grid="256,512",
+            quantized_inverted_exact_rerank_modes="topk,adaptive",
+            max_query_vectors=8,
+        )
+        exact_profiles = document_node_colbert_candidate_source_focus_profiles(
+            exact_focus_args,
+            active_query_tokens=8,
+        )
+        assert [profile.name for profile in exact_profiles] == [
+            "precompact_topk_4096_docid_rk256_topk",
+            "precompact_topk_4096_docid_rk256_adaptive",
+            "precompact_topk_4096_docid_rk512_topk",
+            "precompact_topk_4096_docid_rk512_adaptive",
+        ]
+        assert all(
+            profile.candidate_source == "quantized_inverted_experimental"
+            for profile in exact_profiles
+        )
+        assert all(profile.bm25_candidate_injection == "off" for profile in exact_profiles)
+        assert all(profile.sparse_candidate_source == "off" for profile in exact_profiles)
+        exact_mode_args, exact_effective_rerank_k = (
+            document_node_colbert_candidate_source_focus_args(
+                exact_focus_args,
+                exact_profiles[1],
+                8192,
+            )
+        )
+        assert exact_effective_rerank_k == 256
+        assert exact_mode_args.multivector_doc_candidate_k == 8192
+        assert exact_mode_args.multivector_exact_rerank == "adaptive"
+        assert exact_mode_args.multivector_exact_rerank_k == 256
+        assert (
+            exact_mode_args.multivector_quantized_inverted_precompact
+            == "centroid_maxsim_topk"
+        )
+        assert (
+            exact_mode_args.multivector_quantized_inverted_compact_doc_order
+            == "docid"
         )
 
     mode_args, effective_rerank_k = document_node_colbert_candidate_source_focus_args(
@@ -22723,6 +23589,7 @@ def _self_check_document_node_colbert_candidate_source_focus() -> None:
             "first_selected": {"multivector_candidate_source": "centroid_lite"},
             "last_selected": {
                 "multivector_exact_kernel": "blocked_neon",
+                "adaptive_rerank_topk_changed_vs_full": False,
                 "centroid_posting_cap_strategy": "uniform_cap",
                 "centroid_candidate_scoring": "posting_payload",
                 "proxy_candidate_limit_source": "candidate_k",
@@ -22730,9 +23597,18 @@ def _self_check_document_node_colbert_candidate_source_focus() -> None:
             "stats_available": {"core": True, "centroid_lite": True},
             "field_summary": {
                 "multivector_exact_rerank_docs": {"p50": 100, "p95": 100},
+                "multivector_exact_rerank_pairs": {"p50": 12345, "p95": 23456},
+                "exact_rerank_candidates": {"p50": 512, "p95": 512},
+                "exact_rerank_tokens_evaluated": {"p50": 1000, "p95": 1200},
+                "exact_rerank_tokens_skipped": {"p50": 200, "p95": 300},
+                "exact_rerank_pairs_saved": {"p50": 300, "p95": 400},
                 "multivector_exact_maxsim_rerank_time_us": {
                     "p50": 4000,
                     "p95": 8000,
+                },
+                "multivector_exact_heap_fetch_time_us": {
+                    "p50": 700,
+                    "p95": 900,
                 },
                 "centroid_lists_visited": {"p50": 64, "p95": 96},
                 "centroid_docs_touched": {"p50": 500, "p95": 900},
@@ -22766,6 +23642,19 @@ def _self_check_document_node_colbert_candidate_source_focus() -> None:
     assert row["centroid_candidate_scoring"] == "posting_payload"
     assert row["completed_query_count"] == 2
     assert row["query_evaluation_failed"] is False
+    assert row["exact_rerank_mode"] == "topk"
+    assert row["requested_exact_rerank_k"] == 512
+    assert row["effective_exact_rerank_k"] == 100
+    assert row["exact_rerank_pairs"] == 12345
+    assert row["exact_rerank_tokens_evaluated"] == 1000
+    assert row["exact_rerank_tokens_skipped"] == 200
+    assert row["exact_rerank_pairs_saved"] == 300
+    assert row["exact_heap_fetch_time_us"] == 700
+    assert row["exact_rerank_phase_breakdown"]["heap_fetch_us"] == 700
+    assert row["exact_rerank_phase_breakdown"]["maxsim_compute_us"] == 4000
+    assert row["exact_rerank_phase_breakdown"]["tokens_evaluated"] == 1000
+    assert row["exact_rerank_phase_breakdown"]["pairs_saved"] == 300
+    assert row["exact_rerank_phase_breakdown"]["exact_kernel"] == "blocked_neon"
     assert row["candidate_source_stats"]["last_selected"]["multivector_exact_kernel"] == (
         "blocked_neon"
     )
@@ -22948,6 +23837,113 @@ def _self_check_document_node_colbert_candidate_source_focus() -> None:
         in fallback_recommendation["recommendations"]
     )
 
+    precompact_safe_row = {
+        "profile": "precompact_reservoir_4096",
+        "candidate_source": "quantized_inverted_experimental",
+        "candidate_budget": 8192,
+        "p95_ms": 1000.0,
+        "exact_top1_admission_rate": 0.96,
+        "exact_top10_admission_recall": 0.84,
+        "recall@10": 0.535,
+        "ndcg@10": 0.452,
+        "quantized_inverted_compact_docs_scored": 5500,
+        "final_ranking_source": "exact_heap_maxsim",
+        "bm25_or_sparse_rescue_active": False,
+    }
+    precompact_low_admission = dict(
+        precompact_safe_row,
+        profile="precompact_topk_2048",
+        exact_top10_admission_recall=0.50,
+        p95_ms=500.0,
+    )
+    precompact_too_many_docs = dict(
+        precompact_safe_row,
+        profile="precompact_reservoir_8192",
+        quantized_inverted_compact_docs_scored=7000,
+    )
+    precompact_rec = quantized_inverted_precompact_focus_recommendation(
+        [precompact_low_admission, precompact_too_many_docs, precompact_safe_row]
+    )
+    assert (
+        precompact_rec["best_quantized_inverted_precompact"]["profile"]
+        == "precompact_reservoir_4096"
+    )
+    rejected_by_profile = {
+        item["profile"]: item["rejection_reasons"]
+        for item in precompact_rec["rejected_profiles"]
+    }
+    assert "rejected_top10_admission_below_gate" in rejected_by_profile[
+        "precompact_topk_2048"
+    ]
+    assert "rejected_compact_docs_too_high" in rejected_by_profile[
+        "precompact_reservoir_8192"
+    ]
+    qrels_less_precompact = dict(precompact_safe_row)
+    qrels_less_precompact.pop("recall@10")
+    qrels_less_precompact.pop("ndcg@10")
+    qrels_less_rec = quantized_inverted_precompact_focus_recommendation(
+        [qrels_less_precompact]
+    )
+    assert (
+        qrels_less_rec["best_quantized_inverted_precompact"]["profile"]
+        == "precompact_reservoir_4096"
+    )
+
+    exact_baseline_512 = {
+        "profile": "precompact_topk_4096_docid_rk512_topk",
+        "candidate_source": "quantized_inverted_experimental",
+        "candidate_budget": 8192,
+        "exact_rerank_mode": "topk",
+        "effective_exact_rerank_k": 512,
+        "p95_ms": 100.0,
+        "exact_top1_admission_rate": 0.96,
+        "exact_top10_admission_recall": 0.84,
+        "recall@10": 0.500,
+        "ndcg@10": 0.400,
+        "final_ranking_source": "exact_heap_maxsim",
+        "bm25_or_sparse_rescue_active": False,
+        "adaptive_rerank_topk_changed_vs_full": False,
+    }
+    exact_safe_384 = {
+        **exact_baseline_512,
+        "profile": "precompact_topk_4096_docid_rk384_adaptive",
+        "exact_rerank_mode": "adaptive",
+        "effective_exact_rerank_k": 384,
+        "p95_ms": 80.0,
+        "recall@10": 0.497,
+        "ndcg@10": 0.396,
+    }
+    exact_risky_256 = {
+        **exact_baseline_512,
+        "profile": "precompact_topk_4096_docid_rk256_adaptive",
+        "exact_rerank_mode": "adaptive",
+        "effective_exact_rerank_k": 256,
+        "p95_ms": 60.0,
+        "recall@10": 0.490,
+        "ndcg@10": 0.390,
+        "adaptive_rerank_topk_changed_vs_full": True,
+    }
+    exact_rec = quantized_inverted_exact_rerank_focus_recommendation(
+        [exact_baseline_512, exact_safe_384, exact_risky_256]
+    )
+    assert (
+        exact_rec["best_exact_rerank_setting"]["profile"]
+        == "precompact_topk_4096_docid_rk384_adaptive"
+    )
+    exact_rejected_by_profile = {
+        item["profile"]: item["rejection_reasons"]
+        for item in exact_rec["rejected_profiles"]
+    }
+    assert "quality_risk_lower_exact_rerank_k" in exact_rejected_by_profile[
+        "precompact_topk_4096_docid_rk256_adaptive"
+    ]
+    assert "rejected_adaptive_topk_changed" in exact_rejected_by_profile[
+        "precompact_topk_4096_docid_rk256_adaptive"
+    ]
+    assert "rejected_recall_drop_vs_512" in exact_rejected_by_profile[
+        "precompact_topk_4096_docid_rk256_adaptive"
+    ]
+
     markdown = markdown_benchmark_summary({
         "document_node_colbert_candidate_source_focus": {
             "enabled": True,
@@ -22967,6 +23963,124 @@ def _self_check_document_node_colbert_candidate_source_focus() -> None:
     assert "### Pure ColBERT candidate-source focus" in markdown
     assert "sampled top1" in markdown
     assert "does not call exact admission scans by default" in markdown
+
+    precompact_markdown = markdown_benchmark_summary({
+        "document_node_colbert_quantized_inverted_precompact_focus": {
+            "enabled": True,
+            "pure_colbert_only": True,
+            "quantized_inverted_precompact_focus": True,
+            "admission_evidence": "sampled_exact_oracle",
+            "exact_admission_available": "sampled",
+            "profiles": ["precompact_off", "precompact_reservoir_4096"],
+            "candidate_budgets": [8192],
+            "exact_rerank_k": 512,
+            "quantized_inverted_precompact_score_grid": [2048, 4096],
+            "quantized_inverted_precompact_coverage_k": 512,
+            "quantized_inverted_precompact_per_token_k": 16,
+            "quantized_inverted_precompact_active_query_tokens": 8,
+            "precompact_recommendation": precompact_rec,
+            "results": [precompact_safe_row],
+        }
+    })
+    assert "### Quantized inverted precompact focus" in precompact_markdown
+    assert "compact docs" in precompact_markdown
+
+    exact_markdown = markdown_benchmark_summary({
+        "document_node_colbert_quantized_inverted_exact_rerank_focus": {
+            "enabled": True,
+            "pure_colbert_only": True,
+            "quantized_inverted_exact_rerank_focus": True,
+            "admission_evidence": "sampled_exact_oracle",
+            "exact_admission_available": "sampled",
+            "profiles": [
+                "precompact_topk_4096_docid_rk256_adaptive",
+                "precompact_topk_4096_docid_rk512_topk",
+            ],
+            "candidate_budgets": [8192],
+            "quantized_inverted_exact_rerank_grid": [256, 512],
+            "quantized_inverted_exact_rerank_modes": ["topk", "adaptive"],
+            "exact_rerank_recommendation": exact_rec,
+            "results": [
+                {
+                    **exact_safe_384,
+                    "exact_rerank_docs": 384,
+                    "exact_rerank_phase_breakdown": {
+                        "heap_fetch_us": 700,
+                        "maxsim_compute_us": 4000,
+                        "tokens_evaluated": 1000,
+                        "tokens_skipped": 200,
+                        "pairs_saved": 300,
+                        "exact_kernel": "blocked_neon",
+                    },
+                }
+            ],
+        }
+    })
+    assert "### Quantized inverted exact rerank focus" in exact_markdown
+    assert "heap fetch us" in exact_markdown
+    assert "within 0.005 of the 512-doc baseline" in exact_markdown
+
+    acceptance_report_rejected = (
+        run_quantized_inverted_default_quality_acceptance_report_from_rows(
+            precompact_rows=[precompact_low_admission],
+            exact_rows=[
+                {
+                    **exact_risky_256,
+                    "exact_top10_admission_recall": 0.50,
+                    "exact_top1_admission_rate": 0.80,
+                    "quantized_inverted_compact_docs_scored": 5000,
+                }
+            ],
+            output_path=Path(".nix-dev/tmp/synthetic-acceptance.json"),
+        )
+    )
+    assert acceptance_report_rejected["accepted"] is False
+    assert acceptance_report_rejected["experimental_default_quality_candidate"] is None
+    assert "rejected_top10_admission_below_gate" in acceptance_report_rejected[
+        "rejection_reasons"
+    ]
+    assert (
+        acceptance_report_rejected["previous_default_quality"]
+        == DOCUMENT_NODE_COLBERT_CANDIDATE_SOURCE_PREVIOUS_EXTERNAL_QUANTIZED_PROFILE
+    )
+    assert (
+        acceptance_report_rejected["current_benchmark_default_profile"]
+        == DOCUMENT_NODE_COLBERT_CANDIDATE_SOURCE_DEFAULT_EXTERNAL_QUANTIZED_PROFILE
+    )
+    assert (
+        acceptance_report_rejected["experimental_default_quality_selected_despite_gate"]
+        == DOCUMENT_NODE_COLBERT_CANDIDATE_SOURCE_DEFAULT_EXTERNAL_QUANTIZED_PROFILE
+    )
+
+    accepted_exact = {
+        **exact_baseline_512,
+        "profile": "precompact_reservoir_4096_rk512_topk",
+        "p95_ms": 80.0,
+        "exact_top1_admission_rate": 0.96,
+        "exact_top10_admission_recall": 0.84,
+        "recall@10": 0.535,
+        "ndcg@10": 0.452,
+        "quantized_inverted_compact_docs_scored": 5000,
+        "quantized_inverted_compact_score_us": 2000,
+        "exact_rerank_time_us": 10000,
+    }
+    acceptance_report_accepted = (
+        run_quantized_inverted_default_quality_acceptance_report_from_rows(
+            precompact_rows=[precompact_safe_row],
+            exact_rows=[accepted_exact],
+            output_path=Path(".nix-dev/tmp/synthetic-acceptance.json"),
+        )
+    )
+    assert acceptance_report_accepted["accepted"] is True
+    assert (
+        acceptance_report_accepted["experimental_default_quality_candidate"]
+        == DOCUMENT_NODE_COLBERT_QUANTIZED_INVERTED_PROMOTED_PROFILE
+    )
+    acceptance_markdown = markdown_quantized_inverted_default_quality_acceptance(
+        acceptance_report_rejected
+    )
+    assert "Quantized Inverted Experimental Acceptance Report" in acceptance_markdown
+    assert "exact heap MaxSim" in acceptance_markdown
 
     names = set(run_document_node_colbert_candidate_source_focus.__code__.co_names)
     assert "exact_admission_top" not in names
@@ -27146,6 +28260,15 @@ def colbert_beir_candidate_source_stats(
         "quantized_inverted_compact_docs_scored",
         "quantized_inverted_compact_payload_bytes",
         "quantized_inverted_compact_topk_changed_vs_scalar",
+        "quantized_inverted_compact_doc_order",
+        "quantized_inverted_compact_inner_allocations",
+        "quantized_inverted_compact_active_query_tokens",
+        "quantized_inverted_compact_pairs_evaluated",
+        "quantized_inverted_compact_pairs_skipped",
+        "quantized_inverted_compact_prefetches",
+        "quantized_inverted_compact_avg_doc_tokens",
+        "quantized_inverted_compact_us_per_doc",
+        "quantized_inverted_compact_payload_bytes_per_doc",
         "multivector_exact_rerank_docs",
         "multivector_exact_rerank_pairs",
         "multivector_exact_kernel",
@@ -28634,17 +29757,40 @@ def build_document_node_colbert_candidate_source_focus_row(
         "quantized_inverted_compact_scoring": (
             profile.quantized_inverted_compact_scoring
         ),
+        "quantized_inverted_query_codeword_kernel": (
+            profile.quantized_inverted_query_codeword_kernel
+        ),
+        "quantized_inverted_compact_doc_order": (
+            profile.quantized_inverted_compact_doc_order
+        ),
         "quantized_inverted_token_coverage": (
             profile.quantized_inverted_token_coverage
         ),
         "quantized_inverted_min_token_matches_config": (
             effective_quantized_inverted_min_token_matches(args, profile)
         ),
+        "quantized_inverted_precompact_mode": profile.quantized_inverted_precompact,
+        "quantized_inverted_precompact_score_k": (
+            profile.quantized_inverted_precompact_score_k
+        ),
+        "quantized_inverted_precompact_coverage_k": (
+            profile.quantized_inverted_precompact_coverage_k
+        ),
+        "quantized_inverted_precompact_per_token_k": (
+            profile.quantized_inverted_precompact_per_token_k
+        ),
+        "quantized_inverted_compact_max_docs": (
+            profile.quantized_inverted_compact_max_docs
+        ),
         "index_bytes": int(index_phase.get("index_bytes", 0) or 0),
         "index_stats": index_stats,
         "storage_capabilities": index_storage_capabilities,
         **index_storage_capabilities,
         "candidate_budget": candidate_k,
+        "exact_rerank_mode": profile.exact_rerank_mode,
+        "requested_exact_rerank_k": int(
+            profile.exact_rerank_k or getattr(args, "exact_rerank_k", 0) or 0
+        ),
         "exact_rerank_k": effective_rerank_k,
         "effective_exact_rerank_k": effective_rerank_k,
         "p50_ms": latency.get("p50_ms"),
@@ -28683,12 +29829,85 @@ def build_document_node_colbert_candidate_source_focus_row(
         "oracle_queries_compared": sampled_admission.get("oracle_queries_compared", 0),
         "exact_rerank_docs": p50("multivector_exact_rerank_docs"),
         "exact_rerank_docs_p95": p95("multivector_exact_rerank_docs"),
+        "exact_rerank_pairs": p50("multivector_exact_rerank_pairs"),
+        "exact_rerank_pairs_p95": p95("multivector_exact_rerank_pairs"),
+        "exact_rerank_candidates": p50("exact_rerank_candidates"),
+        "exact_rerank_tokens_evaluated": p50("exact_rerank_tokens_evaluated"),
+        "exact_rerank_tokens_skipped": p50("exact_rerank_tokens_skipped"),
+        "exact_rerank_pairs_saved": p50("exact_rerank_pairs_saved"),
+        "adaptive_rerank_topk_changed_vs_full": (
+            scan_stats_summary.get("last_selected", {}).get(
+                "adaptive_rerank_topk_changed_vs_full"
+            )
+            if isinstance(scan_stats_summary.get("last_selected", {}), dict)
+            else None
+        ),
+        "exact_kernel": (
+            scan_stats_summary.get("last_selected", {}).get("multivector_exact_kernel")
+            if isinstance(scan_stats_summary.get("last_selected", {}), dict)
+            else None
+        ),
         "exact_rerank_time_us": first_scan_summary_value(
             scan_stats_summary,
             (
                 "multivector_exact_maxsim_rerank_time_us",
                 "exact_maxsim_rerank_time_us",
                 "proxy_exact_rerank_time_us",
+            ),
+            "p50",
+        ),
+        "exact_heap_fetch_time_us": first_scan_summary_value(
+            scan_stats_summary,
+            (
+                "multivector_exact_heap_fetch_time_us",
+                "exact_heap_fetch_time_us",
+                "graph_heap_fetch_us",
+            ),
+            "p50",
+        ),
+        "exact_rerank_phase_breakdown": {
+            "heap_fetch_us": first_scan_summary_value(
+                scan_stats_summary,
+                (
+                    "multivector_exact_heap_fetch_time_us",
+                    "exact_heap_fetch_time_us",
+                    "graph_heap_fetch_us",
+                ),
+                "p50",
+            ),
+            "maxsim_compute_us": first_scan_summary_value(
+                scan_stats_summary,
+                (
+                    "multivector_exact_maxsim_rerank_time_us",
+                    "exact_maxsim_rerank_time_us",
+                    "proxy_exact_rerank_time_us",
+                ),
+                "p50",
+            ),
+            "adaptive_pruning_us": first_scan_summary_value(
+                scan_stats_summary,
+                ("adaptive_rerank_pruning_us",),
+                "p50",
+            ),
+            "tokens_evaluated": p50("exact_rerank_tokens_evaluated"),
+            "tokens_skipped": p50("exact_rerank_tokens_skipped"),
+            "pairs_saved": p50("exact_rerank_pairs_saved"),
+            "exact_kernel": (
+                scan_stats_summary.get("last_selected", {}).get(
+                    "multivector_exact_kernel"
+                )
+                if isinstance(scan_stats_summary.get("last_selected", {}), dict)
+                else None
+            ),
+            "docs_reranked": p50("multivector_exact_rerank_docs"),
+            "pairs": p50("multivector_exact_rerank_pairs"),
+        },
+        "final_sort_time_us": first_scan_summary_value(
+            scan_stats_summary,
+            (
+                "multivector_final_sort_time_us",
+                "final_sort_time_us",
+                "graph_sort_us",
             ),
             "p50",
         ),
@@ -28730,6 +29949,111 @@ def build_document_node_colbert_candidate_source_focus_row(
         ),
         "quantized_inverted_docs_scored": p50("quantized_inverted_docs_scored"),
         "quantized_inverted_candidates": p50("quantized_inverted_candidates"),
+        "quantized_inverted_docs_touched_before_precompact": p50(
+            "quantized_inverted_docs_touched_before_precompact"
+        ),
+        "quantized_inverted_precompact_score_docs": p50(
+            "quantized_inverted_precompact_score_docs"
+        ),
+        "quantized_inverted_precompact_coverage_docs": p50(
+            "quantized_inverted_precompact_coverage_docs"
+        ),
+        "quantized_inverted_precompact_per_token_docs": p50(
+            "quantized_inverted_precompact_per_token_docs"
+        ),
+        "quantized_inverted_precompact_union_docs": p50(
+            "quantized_inverted_precompact_union_docs"
+        ),
+        "quantized_inverted_precompact_duplicates": p50(
+            "quantized_inverted_precompact_duplicates"
+        ),
+        "quantized_inverted_precompact_pruned_docs": p50(
+            "quantized_inverted_precompact_pruned_docs"
+        ),
+        "quantized_inverted_compact_docs_skipped_by_precompact": p50(
+            "quantized_inverted_compact_docs_skipped_by_precompact"
+        ),
+        "quantized_inverted_compact_docs_scored": first_scan_summary_value(
+            scan_stats_summary,
+            ("quantized_inverted_compact_docs_scored",),
+            "p50",
+        ),
+        "quantized_inverted_query_codeword_score_us": first_scan_summary_value(
+            scan_stats_summary,
+            (
+                "quantized_inverted_query_codeword_score_us",
+                "quantized_inverted_query_codeword_score_time_us",
+            ),
+            "p50",
+        ),
+        "quantized_inverted_query_codeword_kernel_observed": (
+            scan_stats_summary.get("last_selected", {}).get(
+                "quantized_inverted_query_codeword_kernel"
+            )
+            if isinstance(scan_stats_summary.get("last_selected", {}), dict)
+            else None
+        ),
+        "quantized_inverted_query_codeword_scores_computed": p50(
+            "quantized_inverted_query_codeword_scores_computed"
+        ),
+        "quantized_inverted_query_codeword_blocks": p50(
+            "quantized_inverted_query_codeword_blocks"
+        ),
+        "quantized_inverted_query_codeword_topk_us": p50(
+            "quantized_inverted_query_codeword_topk_us"
+        ),
+        "quantized_inverted_query_codeword_full_matrix_materialized": (
+            scan_stats_summary.get("last_selected", {}).get(
+                "quantized_inverted_query_codeword_full_matrix_materialized"
+            )
+            if isinstance(scan_stats_summary.get("last_selected", {}), dict)
+            else None
+        ),
+        "quantized_inverted_query_codeword_active_query_tokens": p50(
+            "quantized_inverted_query_codeword_active_query_tokens"
+        ),
+        "quantized_inverted_query_codeword_skipped_query_tokens": p50(
+            "quantized_inverted_query_codeword_skipped_query_tokens"
+        ),
+        "quantized_inverted_precompact_us": p50(
+            "quantized_inverted_precompact_us"
+        ),
+        "quantized_inverted_compact_score_us": first_scan_summary_value(
+            scan_stats_summary,
+            ("quantized_inverted_compact_score_us",),
+            "p50",
+        ),
+        "quantized_inverted_compact_doc_order_observed": (
+            scan_stats_summary.get("last_selected", {}).get(
+                "quantized_inverted_compact_doc_order"
+            )
+            if isinstance(scan_stats_summary.get("last_selected", {}), dict)
+            else None
+        ),
+        "quantized_inverted_compact_inner_allocations": p50(
+            "quantized_inverted_compact_inner_allocations"
+        ),
+        "quantized_inverted_compact_active_query_tokens": p50(
+            "quantized_inverted_compact_active_query_tokens"
+        ),
+        "quantized_inverted_compact_pairs_evaluated": p50(
+            "quantized_inverted_compact_pairs_evaluated"
+        ),
+        "quantized_inverted_compact_pairs_skipped": p50(
+            "quantized_inverted_compact_pairs_skipped"
+        ),
+        "quantized_inverted_compact_prefetches": p50(
+            "quantized_inverted_compact_prefetches"
+        ),
+        "quantized_inverted_compact_avg_doc_tokens": p50(
+            "quantized_inverted_compact_avg_doc_tokens"
+        ),
+        "quantized_inverted_compact_us_per_doc": p50(
+            "quantized_inverted_compact_us_per_doc"
+        ),
+        "quantized_inverted_compact_payload_bytes_per_doc": p50(
+            "quantized_inverted_compact_payload_bytes_per_doc"
+        ),
         "quantized_inverted_probe_codewords_per_token": p50(
             "quantized_inverted_probe_codewords_per_token"
         ),
@@ -28774,6 +30098,14 @@ def build_document_node_colbert_candidate_source_focus_row(
         "scan_stats_summary": scan_stats_summary,
         "candidate_source_stats": colbert_beir_candidate_source_stats(
             scan_stats_summary
+        ),
+        "sidecar_pages_read": p50("multivector_doc_sidecar_pages_read"),
+        "sidecar_bytes_touched": p50("multivector_doc_sidecar_bytes_touched"),
+        "sidecar_vectors_loaded": p50("multivector_doc_sidecar_vectors_loaded"),
+        "final_ranking_source": "exact_heap_maxsim",
+        "bm25_or_sparse_rescue_active": (
+            profile.bm25_candidate_injection != "off"
+            or profile.sparse_candidate_source != "off"
         ),
         "serving_slow_path_warnings": loop.get("serving_slow_path_warnings", []),
         "serving_slow_path_failed": loop.get("serving_slow_path_failed", False),
@@ -28847,13 +30179,36 @@ def document_node_colbert_candidate_source_focus_skipped_row(
         "quantized_inverted_compact_scoring": (
             profile.quantized_inverted_compact_scoring
         ),
+        "quantized_inverted_query_codeword_kernel": (
+            profile.quantized_inverted_query_codeword_kernel
+        ),
+        "quantized_inverted_compact_doc_order": (
+            profile.quantized_inverted_compact_doc_order
+        ),
         "quantized_inverted_token_coverage": (
             profile.quantized_inverted_token_coverage
         ),
         "quantized_inverted_min_token_matches_config": (
             effective_quantized_inverted_min_token_matches(args, profile)
         ),
+        "quantized_inverted_precompact_mode": profile.quantized_inverted_precompact,
+        "quantized_inverted_precompact_score_k": (
+            profile.quantized_inverted_precompact_score_k
+        ),
+        "quantized_inverted_precompact_coverage_k": (
+            profile.quantized_inverted_precompact_coverage_k
+        ),
+        "quantized_inverted_precompact_per_token_k": (
+            profile.quantized_inverted_precompact_per_token_k
+        ),
+        "quantized_inverted_compact_max_docs": (
+            profile.quantized_inverted_compact_max_docs
+        ),
         "candidate_budget": candidate_k,
+        "exact_rerank_mode": profile.exact_rerank_mode,
+        "requested_exact_rerank_k": int(
+            profile.exact_rerank_k or getattr(args, "exact_rerank_k", 0) or 0
+        ),
         "exact_rerank_k": effective_rerank_k,
         "effective_exact_rerank_k": effective_rerank_k,
         "docs": docs_loaded,
@@ -28884,6 +30239,11 @@ def document_node_colbert_candidate_source_focus_skipped_row(
         "oracle_queries_compared": 0,
         "scan_stats_summary": {},
         "candidate_source_stats": {},
+        "final_ranking_source": "unavailable",
+        "bm25_or_sparse_rescue_active": (
+            profile.bm25_candidate_injection != "off"
+            or profile.sparse_candidate_source != "off"
+        ),
         "serving_slow_path_warnings": ["index_build_skipped_estimate_exceeds_limit"],
         "serving_slow_path_failed": False,
         "index_phase": {
@@ -29096,6 +30456,721 @@ def document_node_colbert_candidate_source_focus_recommendation(
     }
 
 
+def _row_float_metric(
+    row: dict[str, Any],
+    key: str,
+    *,
+    stat: str = "p95",
+) -> float | None:
+    value = row.get(key)
+    if isinstance(value, dict):
+        for candidate_key in (stat, "p95", "p50", "mean", "value"):
+            candidate = value.get(candidate_key)
+            if candidate is None:
+                continue
+            try:
+                return float(candidate)
+            except (TypeError, ValueError):
+                return None
+        return None
+    if value is None or isinstance(value, bool):
+        return None
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return None
+
+
+def quantized_inverted_precompact_rejection_reasons(
+    row: dict[str, Any],
+    baseline: dict[str, Any] | None = None,
+) -> list[str]:
+    baseline = baseline or DOCUMENT_NODE_COLBERT_QUANTIZED_INVERTED_PRECOMPACT_BASELINE
+    reasons: list[str] = []
+    if str(row.get("candidate_source", "")) != "quantized_inverted_experimental":
+        reasons.append("rejected_wrong_candidate_source")
+    if bool(row.get("bm25_or_sparse_rescue_active", False)):
+        reasons.append("rejected_sparse_or_bm25_rescue_active")
+    if str(row.get("final_ranking_source", "")) != "exact_heap_maxsim":
+        reasons.append("rejected_final_ranking_not_exact_maxsim")
+
+    top1 = _row_float_metric(row, "exact_top1_admission_rate", stat="p50")
+    if top1 is None or top1 < 0.94:
+        reasons.append("rejected_top1_admission_below_gate")
+    top10 = _row_float_metric(row, "exact_top10_admission_recall", stat="p50")
+    if top10 is None or top10 < 0.80:
+        reasons.append("rejected_top10_admission_below_gate")
+
+    recall = _row_float_metric(row, "recall@10", stat="p50")
+    baseline_recall = float(baseline.get("recall@10", 0.0) or 0.0)
+    if recall is not None and recall < baseline_recall - 0.01:
+        reasons.append("rejected_recall_drop")
+    ndcg = _row_float_metric(row, "ndcg@10", stat="p50")
+    baseline_ndcg = float(baseline.get("ndcg@10", 0.0) or 0.0)
+    if ndcg is not None and ndcg < baseline_ndcg - 0.01:
+        reasons.append("rejected_ndcg_drop")
+
+    p95 = _row_float_metric(row, "p95_ms", stat="p95")
+    baseline_p95 = float(baseline.get("p95_ms", 0.0) or 0.0)
+    if p95 is None or baseline_p95 <= 0.0 or p95 > baseline_p95 * 0.75:
+        reasons.append("rejected_latency_not_improved")
+
+    compact_docs = _row_float_metric(
+        row,
+        "quantized_inverted_compact_docs_scored",
+        stat="p95",
+    )
+    if compact_docs is None:
+        compact_docs = _row_float_metric(row, "quantized_inverted_docs_scored", stat="p95")
+    if (
+        compact_docs is None
+        or compact_docs
+        > DOCUMENT_NODE_COLBERT_QUANTIZED_INVERTED_PRECOMPACT_COMPACT_DOC_GATE
+    ):
+        reasons.append("rejected_compact_docs_too_high")
+    return unique_preserve_order(reasons)
+
+
+def quantized_inverted_precompact_focus_recommendation(
+    rows: Sequence[dict[str, Any]],
+) -> dict[str, Any]:
+    baseline = dict(DOCUMENT_NODE_COLBERT_QUANTIZED_INVERTED_PRECOMPACT_BASELINE)
+    valid_rows = [row for row in rows if isinstance(row, dict)]
+    rejected_profiles: list[dict[str, Any]] = []
+    accepted_rows: list[dict[str, Any]] = []
+    for row in valid_rows:
+        reasons = quantized_inverted_precompact_rejection_reasons(row, baseline)
+        if reasons:
+            rejected_profiles.append(
+                {
+                    "profile": row.get("profile"),
+                    "candidate_budget": row.get("candidate_budget"),
+                    "p95_ms": row.get("p95_ms"),
+                    "exact_top1_admission_rate": row.get("exact_top1_admission_rate"),
+                    "exact_top10_admission_recall": row.get(
+                        "exact_top10_admission_recall"
+                    ),
+                    "recall@10": row.get("recall@10"),
+                    "ndcg@10": row.get("ndcg@10"),
+                    "quantized_inverted_compact_docs_scored": row.get(
+                        "quantized_inverted_compact_docs_scored"
+                    ),
+                    "rejection_reasons": reasons,
+                }
+            )
+        else:
+            accepted_rows.append(row)
+    accepted_rows = sorted(
+        accepted_rows,
+        key=lambda row: (
+            _row_float_metric(row, "p95_ms") if _row_float_metric(row, "p95_ms") is not None else float("inf"),
+            _row_float_metric(row, "quantized_inverted_compact_docs_scored") if _row_float_metric(row, "quantized_inverted_compact_docs_scored") is not None else float("inf"),
+            str(row.get("profile", "")),
+        ),
+    )
+    return {
+        "baseline": baseline,
+        "thresholds": {
+            "min_exact_top1_admission_rate": 0.94,
+            "min_exact_top10_admission_recall": 0.80,
+            "min_recall_delta_vs_baseline": -0.01,
+            "min_ndcg_delta_vs_baseline": -0.01,
+            "max_p95_ms": float(baseline["p95_ms"]) * 0.75,
+            "max_compact_docs_scored": (
+                DOCUMENT_NODE_COLBERT_QUANTIZED_INVERTED_PRECOMPACT_COMPACT_DOC_GATE
+            ),
+        },
+        "best_quantized_inverted_precompact": (
+            accepted_rows[0] if accepted_rows else None
+        ),
+        "accepted_profiles": accepted_rows,
+        "rejected_profiles": rejected_profiles,
+    }
+
+
+def quantized_inverted_exact_rerank_focus_recommendation(
+    rows: Sequence[dict[str, Any]],
+) -> dict[str, Any]:
+    valid_rows = [row for row in rows if isinstance(row, dict)]
+    if not valid_rows:
+        return {
+            "baseline": None,
+            "thresholds": {
+                "baseline_exact_rerank_k": 512,
+                "min_exact_top1_admission_rate": 0.94,
+                "min_exact_top10_admission_recall": 0.80,
+                "max_recall_drop_vs_512": 0.005,
+                "max_ndcg_drop_vs_512": 0.005,
+            },
+            "best_exact_rerank_setting": None,
+            "accepted_profiles": [],
+            "rejected_profiles": [],
+        }
+    baseline_candidates = [
+        row
+        for row in valid_rows
+        if int(row.get("effective_exact_rerank_k", 0) or 0) == 512
+        and str(row.get("exact_rerank_mode", "")) == "topk"
+    ]
+    if not baseline_candidates:
+        baseline_candidates = [
+            row
+            for row in valid_rows
+            if int(row.get("effective_exact_rerank_k", 0) or 0)
+            == max(int(item.get("effective_exact_rerank_k", 0) or 0) for item in valid_rows)
+        ]
+    baseline = sorted(
+        baseline_candidates,
+        key=lambda row: (
+            str(row.get("exact_rerank_mode", "")) != "topk",
+            str(row.get("profile", "")),
+        ),
+    )[0]
+    baseline_recall = _row_float_metric(baseline, "recall@10", stat="p50")
+    baseline_ndcg = _row_float_metric(baseline, "ndcg@10", stat="p50")
+    baseline_k = int(baseline.get("effective_exact_rerank_k", 0) or 0)
+
+    accepted_rows: list[dict[str, Any]] = []
+    rejected_profiles: list[dict[str, Any]] = []
+    for row in valid_rows:
+        reasons: list[str] = []
+        if str(row.get("candidate_source", "")) != "quantized_inverted_experimental":
+            reasons.append("rejected_wrong_candidate_source")
+        if bool(row.get("bm25_or_sparse_rescue_active", False)):
+            reasons.append("rejected_sparse_or_bm25_rescue_active")
+        if str(row.get("final_ranking_source", "")) != "exact_heap_maxsim":
+            reasons.append("rejected_final_ranking_not_exact_maxsim")
+        top1 = _row_float_metric(row, "exact_top1_admission_rate", stat="p50")
+        if top1 is None:
+            reasons.append("rejected_exact_top1_admission_unavailable")
+        elif top1 < 0.94:
+            reasons.append("rejected_top1_admission_below_gate")
+        top10 = _row_float_metric(row, "exact_top10_admission_recall", stat="p50")
+        if top10 is None:
+            reasons.append("rejected_exact_top10_admission_unavailable")
+        elif top10 < 0.80:
+            reasons.append("rejected_top10_admission_below_gate")
+
+        row_k = int(row.get("effective_exact_rerank_k", 0) or 0)
+        if row_k < baseline_k:
+            recall = _row_float_metric(row, "recall@10", stat="p50")
+            if baseline_recall is not None and recall is not None:
+                if recall < baseline_recall - 0.005:
+                    reasons.append("rejected_recall_drop_vs_512")
+            elif baseline_recall is not None:
+                reasons.append("rejected_recall_unavailable")
+            ndcg = _row_float_metric(row, "ndcg@10", stat="p50")
+            if baseline_ndcg is not None and ndcg is not None:
+                if ndcg < baseline_ndcg - 0.005:
+                    reasons.append("rejected_ndcg_drop_vs_512")
+            elif baseline_ndcg is not None:
+                reasons.append("rejected_ndcg_unavailable")
+            adaptive_changed = row.get("adaptive_rerank_topk_changed_vs_full")
+            if str(row.get("exact_rerank_mode", "")) == "adaptive" and (
+                adaptive_changed is True or str(adaptive_changed).lower() == "true"
+            ):
+                reasons.append("rejected_adaptive_topk_changed")
+        if row_k < baseline_k and reasons:
+            reasons.append("quality_risk_lower_exact_rerank_k")
+        if reasons:
+            rejected_profiles.append(
+                {
+                    "profile": row.get("profile"),
+                    "exact_rerank_mode": row.get("exact_rerank_mode"),
+                    "effective_exact_rerank_k": row.get("effective_exact_rerank_k"),
+                    "candidate_budget": row.get("candidate_budget"),
+                    "p95_ms": row.get("p95_ms"),
+                    "exact_top1_admission_rate": row.get("exact_top1_admission_rate"),
+                    "exact_top10_admission_recall": row.get(
+                        "exact_top10_admission_recall"
+                    ),
+                    "recall@10": row.get("recall@10"),
+                    "ndcg@10": row.get("ndcg@10"),
+                    "exact_rerank_time_us": row.get("exact_rerank_time_us"),
+                    "exact_heap_fetch_time_us": row.get("exact_heap_fetch_time_us"),
+                    "rejection_reasons": unique_preserve_order(reasons),
+                }
+            )
+        else:
+            accepted_rows.append(row)
+    accepted_rows = sorted(
+        accepted_rows,
+        key=lambda row: (
+            _row_float_metric(row, "p95_ms")
+            if _row_float_metric(row, "p95_ms") is not None
+            else float("inf"),
+            int(row.get("effective_exact_rerank_k", 0) or 0),
+            str(row.get("exact_rerank_mode", "")),
+            str(row.get("profile", "")),
+        ),
+    )
+    return {
+        "baseline": baseline,
+        "thresholds": {
+            "baseline_exact_rerank_k": baseline_k,
+            "min_exact_top1_admission_rate": 0.94,
+            "min_exact_top10_admission_recall": 0.80,
+            "max_recall_drop_vs_512": 0.005,
+            "max_ndcg_drop_vs_512": 0.005,
+        },
+        "best_exact_rerank_setting": accepted_rows[0] if accepted_rows else None,
+        "accepted_profiles": accepted_rows,
+        "rejected_profiles": rejected_profiles,
+    }
+
+
+def _quantized_acceptance_artifact_section(report: dict[str, Any]) -> dict[str, Any]:
+    for key in (
+        "document_node_colbert_quantized_inverted_precompact_focus",
+        "document_node_colbert_quantized_inverted_exact_rerank_focus",
+        "document_node_colbert_candidate_source_focus",
+    ):
+        value = report.get(key)
+        if isinstance(value, dict):
+            return value
+    return {}
+
+
+def _quantized_acceptance_rows(report: dict[str, Any]) -> list[dict[str, Any]]:
+    section = _quantized_acceptance_artifact_section(report)
+    rows = section.get("results") or []
+    return [row for row in rows if isinstance(row, dict)]
+
+
+def _quantized_acceptance_find_row(
+    rows: Sequence[dict[str, Any]],
+    *,
+    name: str | None = None,
+    contains: str | None = None,
+) -> dict[str, Any] | None:
+    candidates: list[dict[str, Any]] = []
+    for row in rows:
+        profile = str(row.get("profile", ""))
+        if name is not None and profile == name:
+            candidates.append(row)
+        elif contains is not None and contains in profile:
+            candidates.append(row)
+    if not candidates:
+        return None
+    return sorted(
+        candidates,
+        key=lambda row: (
+            _row_float_metric(row, "p95_ms")
+            if _row_float_metric(row, "p95_ms") is not None
+            else float("inf"),
+            str(row.get("profile", "")),
+        ),
+    )[0]
+
+
+def _quantized_acceptance_best_row(
+    rows: Sequence[dict[str, Any]],
+    *,
+    prefer_admission: bool = False,
+) -> dict[str, Any] | None:
+    valid = [
+        row
+        for row in rows
+        if isinstance(row, dict)
+        and str(row.get("candidate_source", "")) == "quantized_inverted_experimental"
+    ]
+    if not valid:
+        return None
+    if prefer_admission:
+        valid = sorted(
+            valid,
+            key=lambda row: (
+                -(_row_float_metric(row, "exact_top10_admission_recall") or -1.0),
+                -(_row_float_metric(row, "exact_top1_admission_rate") or -1.0),
+                _row_float_metric(row, "p95_ms")
+                if _row_float_metric(row, "p95_ms") is not None
+                else float("inf"),
+                str(row.get("profile", "")),
+            ),
+        )
+    else:
+        valid = sorted(
+            valid,
+            key=lambda row: (
+                _row_float_metric(row, "p95_ms")
+                if _row_float_metric(row, "p95_ms") is not None
+                else float("inf"),
+                _row_float_metric(row, "quantized_inverted_compact_docs_scored")
+                if _row_float_metric(row, "quantized_inverted_compact_docs_scored")
+                is not None
+                else float("inf"),
+                str(row.get("profile", "")),
+            ),
+        )
+    return valid[0]
+
+
+def _quantized_acceptance_metric(row: dict[str, Any] | None, key: str) -> Any:
+    if not row:
+        return None
+    return row.get(key)
+
+
+def _quantized_acceptance_row_summary(row: dict[str, Any] | None) -> dict[str, Any] | None:
+    if not row:
+        return None
+    return {
+        "profile": row.get("profile"),
+        "candidate_source": row.get("candidate_source"),
+        "candidate_budget": row.get("candidate_budget"),
+        "exact_rerank_k": row.get("effective_exact_rerank_k")
+        or row.get("exact_rerank_k"),
+        "exact_rerank_mode": row.get("exact_rerank_mode"),
+        "final_ranking_source": row.get("final_ranking_source"),
+        "p95_ms": row.get("p95_ms"),
+        "exact_top1_admission_rate": row.get("exact_top1_admission_rate"),
+        "exact_top10_admission_recall": row.get("exact_top10_admission_recall"),
+        "recall@10": row.get("recall@10"),
+        "ndcg@10": row.get("ndcg@10"),
+        "compact_docs_scored": row.get("quantized_inverted_compact_docs_scored"),
+        "compact_score_us": row.get("quantized_inverted_compact_score_us"),
+        "query_codeword_us": row.get("quantized_inverted_query_codeword_us"),
+        "exact_rerank_us": row.get("exact_rerank_time_us")
+        or row.get("multivector_exact_rerank_us"),
+        "exact_heap_fetch_us": row.get("exact_heap_fetch_time_us"),
+        "exact_kernel": row.get("exact_kernel"),
+        "bm25_or_sparse_rescue_active": bool(
+            row.get("bm25_or_sparse_rescue_active", False)
+        ),
+    }
+
+
+def quantized_inverted_default_quality_acceptance_rejection_reasons(
+    row: dict[str, Any] | None,
+    baseline: dict[str, Any] | None,
+    *,
+    output_path: Path | None = None,
+) -> list[str]:
+    if row is None:
+        return ["missing_candidate_row"]
+    reasons: list[str] = []
+    if str(row.get("candidate_source", "")) != "quantized_inverted_experimental":
+        reasons.append("rejected_wrong_candidate_source")
+    if str(row.get("final_ranking_source", "")) != "exact_heap_maxsim":
+        reasons.append("rejected_final_ranking_not_exact_maxsim")
+    if bool(row.get("bm25_or_sparse_rescue_active", False)):
+        reasons.append("rejected_bm25_or_learned_sparse_active")
+    top10 = _row_float_metric(row, "exact_top10_admission_recall")
+    if top10 is None or top10 < 0.80:
+        reasons.append("rejected_top10_admission_below_gate")
+    top1 = _row_float_metric(row, "exact_top1_admission_rate")
+    if top1 is None or top1 < 0.94:
+        reasons.append("rejected_top1_admission_below_gate")
+    if baseline is not None:
+        baseline_recall = _row_float_metric(baseline, "recall@10")
+        recall = _row_float_metric(row, "recall@10")
+        if baseline_recall is not None:
+            if recall is None or recall < baseline_recall - 0.01:
+                reasons.append("rejected_recall_drop_vs_baseline")
+        baseline_ndcg = _row_float_metric(baseline, "ndcg@10")
+        ndcg = _row_float_metric(row, "ndcg@10")
+        if baseline_ndcg is not None:
+            if ndcg is None or ndcg < baseline_ndcg - 0.01:
+                reasons.append("rejected_ndcg_drop_vs_baseline")
+        baseline_p95 = _row_float_metric(baseline, "p95_ms")
+        p95 = _row_float_metric(row, "p95_ms")
+        if baseline_p95 is not None:
+            if p95 is None or p95 > baseline_p95 * 0.75:
+                reasons.append("rejected_p95_not_25_percent_faster_than_baseline")
+    compact_docs = _row_float_metric(row, "quantized_inverted_compact_docs_scored")
+    if compact_docs is None:
+        compact_docs = _row_float_metric(row, "compact_docs_scored")
+    compact_score_us = _row_float_metric(row, "quantized_inverted_compact_score_us")
+    exact_rerank_us = _row_float_metric(row, "exact_rerank_time_us")
+    if exact_rerank_us is None:
+        exact_rerank_us = _row_float_metric(row, "multivector_exact_rerank_us")
+    candidate_source_us = _row_float_metric(row, "multivector_candidate_source_time_us")
+    compact_not_top_two = False
+    if compact_score_us is not None:
+        phase_values = [
+            value
+            for value in (compact_score_us, exact_rerank_us, candidate_source_us)
+            if value is not None
+        ]
+        if len(phase_values) >= 2:
+            compact_not_top_two = compact_score_us < sorted(phase_values, reverse=True)[1]
+    if compact_docs is None:
+        reasons.append("rejected_compact_docs_scored_unavailable")
+    elif (
+        compact_docs
+        > DOCUMENT_NODE_COLBERT_QUANTIZED_INVERTED_PRECOMPACT_COMPACT_DOC_GATE
+        and not compact_not_top_two
+    ):
+        reasons.append("rejected_compact_docs_scored_above_gate")
+    if output_path is not None and ".nix-dev/tmp" not in output_path.as_posix():
+        reasons.append("rejected_generated_output_not_under_nix_dev_tmp")
+    return unique_preserve_order(reasons)
+
+
+def run_quantized_inverted_default_quality_acceptance_report(
+    precompact_path: Path,
+    *,
+    query_codeword_path: Path | None = None,
+    compact_layout_path: Path | None = None,
+    exact_rerank_path: Path | None = None,
+    output_path: Path | None = None,
+) -> dict[str, Any]:
+    artifact_paths = {
+        "precompact_grid": precompact_path,
+        "query_codeword_grid": query_codeword_path,
+        "compact_layout_grid": compact_layout_path,
+        "exact_rerank_grid": exact_rerank_path,
+    }
+    artifacts: dict[str, dict[str, Any] | None] = {}
+    for key, path in artifact_paths.items():
+        if path is None:
+            artifacts[key] = None
+            continue
+        artifacts[key] = json.loads(path.read_text(encoding="utf-8"))
+        if not isinstance(artifacts[key], dict):
+            raise SystemExit(f"{key} is not a JSON object: {path}")
+
+    precompact_rows = _quantized_acceptance_rows(artifacts["precompact_grid"] or {})
+    query_codeword_rows = _quantized_acceptance_rows(artifacts["query_codeword_grid"] or {})
+    compact_layout_rows = _quantized_acceptance_rows(artifacts["compact_layout_grid"] or {})
+    exact_rows = _quantized_acceptance_rows(artifacts["exact_rerank_grid"] or {})
+    report = run_quantized_inverted_default_quality_acceptance_report_from_rows(
+        precompact_rows=precompact_rows,
+        query_codeword_rows=query_codeword_rows,
+        compact_layout_rows=compact_layout_rows,
+        exact_rows=exact_rows,
+        exact_rerank_recommendation=(
+            (_quantized_acceptance_artifact_section(artifacts["exact_rerank_grid"] or {})).get(
+                "exact_rerank_recommendation"
+            )
+            if artifacts["exact_rerank_grid"]
+            else None
+        ),
+        artifact_paths=artifact_paths,
+        output_path=output_path,
+    )
+    return report
+
+
+def run_quantized_inverted_default_quality_acceptance_report_from_rows(
+    *,
+    precompact_rows: Sequence[dict[str, Any]],
+    query_codeword_rows: Sequence[dict[str, Any]] | None = None,
+    compact_layout_rows: Sequence[dict[str, Any]] | None = None,
+    exact_rows: Sequence[dict[str, Any]] | None = None,
+    exact_rerank_recommendation: dict[str, Any] | None = None,
+    artifact_paths: dict[str, Path | None] | None = None,
+    output_path: Path | None = None,
+) -> dict[str, Any]:
+    query_codeword_rows = query_codeword_rows or []
+    compact_layout_rows = compact_layout_rows or []
+    exact_rows = exact_rows or []
+    artifact_paths = artifact_paths or {
+        "precompact_grid": None,
+        "query_codeword_grid": None,
+        "compact_layout_grid": None,
+        "exact_rerank_grid": None,
+    }
+    current_baseline = (
+        _quantized_acceptance_find_row(precompact_rows, name="precompact_off")
+        or dict(DOCUMENT_NODE_COLBERT_QUANTIZED_INVERTED_PRECOMPACT_BASELINE)
+    )
+    best_precompact = _quantized_acceptance_best_row(precompact_rows)
+    best_query_codeword = (
+        _quantized_acceptance_best_row(query_codeword_rows)
+        if query_codeword_rows
+        else _quantized_acceptance_find_row(precompact_rows, contains="_blocked")
+    )
+    best_compact_layout = (
+        _quantized_acceptance_best_row(compact_layout_rows)
+        if compact_layout_rows
+        else _quantized_acceptance_find_row(precompact_rows, contains="_docid")
+    )
+    exact_rec: dict[str, Any] = (
+        exact_rerank_recommendation if isinstance(exact_rerank_recommendation, dict) else {}
+    )
+    best_exact = None
+    if exact_rec:
+        best_exact = exact_rec.get("best_exact_rerank_setting")
+    if not best_exact:
+        best_exact = _quantized_acceptance_best_row(exact_rows, prefer_admission=True)
+
+    final_candidate = best_exact or best_compact_layout or best_precompact
+    rejection_reasons = quantized_inverted_default_quality_acceptance_rejection_reasons(
+        final_candidate,
+        current_baseline,
+        output_path=output_path,
+    )
+    accepted = not rejection_reasons
+
+    before = _quantized_acceptance_row_summary(current_baseline)
+    after = _quantized_acceptance_row_summary(final_candidate)
+    summary = {
+        "before_p95_ms": _quantized_acceptance_metric(before, "p95_ms"),
+        "after_p95_ms": _quantized_acceptance_metric(after, "p95_ms"),
+        "compact_docs_before": _quantized_acceptance_metric(
+            before, "compact_docs_scored"
+        ),
+        "compact_docs_after": _quantized_acceptance_metric(
+            after, "compact_docs_scored"
+        ),
+        "compact_score_us_before": _quantized_acceptance_metric(
+            before, "compact_score_us"
+        ),
+        "compact_score_us_after": _quantized_acceptance_metric(
+            after, "compact_score_us"
+        ),
+        "query_codeword_us_before": _quantized_acceptance_metric(
+            before, "query_codeword_us"
+        ),
+        "query_codeword_us_after": _quantized_acceptance_metric(
+            after, "query_codeword_us"
+        ),
+        "exact_rerank_us_before": _quantized_acceptance_metric(
+            before, "exact_rerank_us"
+        ),
+        "exact_rerank_us_after": _quantized_acceptance_metric(
+            after, "exact_rerank_us"
+        ),
+        "recall_before": _quantized_acceptance_metric(before, "recall@10"),
+        "recall_after": _quantized_acceptance_metric(after, "recall@10"),
+        "ndcg_before": _quantized_acceptance_metric(before, "ndcg@10"),
+        "ndcg_after": _quantized_acceptance_metric(after, "ndcg@10"),
+    }
+    report = {
+        "suite": "dbpedia_colbert_quantized_inverted_acceptance",
+        "generated_at": datetime.now(timezone.utc).isoformat(),
+        "artifact_paths": {
+            key: portable_path(path) if path is not None else None
+            for key, path in artifact_paths.items()
+        },
+        "constraints": {
+            "bm25_allowed": False,
+            "learned_sparse_allowed": False,
+            "candidate_source": "quantized_inverted_experimental",
+            "experimental_only": True,
+            "final_ranking": "exact_heap_maxsim",
+        },
+        "thresholds": {
+            "min_exact_top10_admission_recall": 0.80,
+            "min_exact_top1_admission_rate": 0.94,
+            "max_recall_drop_vs_baseline": 0.01,
+            "max_ndcg_drop_vs_baseline": 0.01,
+            "max_p95_ratio_vs_baseline": 0.75,
+            "max_compact_docs_scored": (
+                DOCUMENT_NODE_COLBERT_QUANTIZED_INVERTED_PRECOMPACT_COMPACT_DOC_GATE
+            ),
+        },
+        "current_baseline_row": before,
+        "best_precompact_row": _quantized_acceptance_row_summary(best_precompact),
+        "best_query_codeword_kernel_row": _quantized_acceptance_row_summary(
+            best_query_codeword
+        ),
+        "best_compact_layout_row": _quantized_acceptance_row_summary(
+            best_compact_layout
+        ),
+        "best_exact_rerank_row": _quantized_acceptance_row_summary(best_exact),
+        "selected_candidate_row": after,
+        "recommended_profile_name": (
+            DOCUMENT_NODE_COLBERT_QUANTIZED_INVERTED_PROMOTED_PROFILE
+            if accepted
+            else None
+        ),
+        "previous_default_quality": (
+            DOCUMENT_NODE_COLBERT_CANDIDATE_SOURCE_PREVIOUS_EXTERNAL_QUANTIZED_PROFILE
+        ),
+        "current_benchmark_default_profile": (
+            DOCUMENT_NODE_COLBERT_CANDIDATE_SOURCE_DEFAULT_EXTERNAL_QUANTIZED_PROFILE
+        ),
+        "experimental_default_quality_candidate": (
+            DOCUMENT_NODE_COLBERT_QUANTIZED_INVERTED_PROMOTED_PROFILE
+            if accepted
+            else None
+        ),
+        "experimental_default_quality_selected_despite_gate": (
+            DOCUMENT_NODE_COLBERT_CANDIDATE_SOURCE_DEFAULT_EXTERNAL_QUANTIZED_PROFILE
+            if not accepted
+            else None
+        ),
+        "accepted": accepted,
+        "rejection_reasons": rejection_reasons,
+        "recommendation_summary": summary,
+        "exact_rerank_recommendation": exact_rec if isinstance(exact_rec, dict) else {},
+    }
+    report["markdown_summary"] = markdown_quantized_inverted_default_quality_acceptance(
+        report
+    )
+    return report
+
+
+def markdown_quantized_inverted_default_quality_acceptance(
+    report: dict[str, Any],
+) -> str:
+    def fmt(value: Any) -> str:
+        if value is None:
+            return ""
+        if isinstance(value, float):
+            return f"{value:.6g}"
+        return str(value)
+
+    rows = [
+        ("current baseline", report.get("current_baseline_row")),
+        ("best precompact", report.get("best_precompact_row")),
+        ("best query-codeword", report.get("best_query_codeword_kernel_row")),
+        ("best compact layout", report.get("best_compact_layout_row")),
+        ("best exact rerank", report.get("best_exact_rerank_row")),
+        ("selected", report.get("selected_candidate_row")),
+    ]
+    lines = [
+        "# Quantized Inverted Experimental Acceptance Report",
+        "",
+        f"- Accepted: `{bool(report.get('accepted'))}`",
+        f"- Previous default-quality profile: `{report.get('previous_default_quality')}`",
+        f"- Current benchmark default profile: `{report.get('current_benchmark_default_profile') or ''}`",
+        f"- Experimental default-quality candidate: `{report.get('experimental_default_quality_candidate') or ''}`",
+        f"- Selected despite gate: `{report.get('experimental_default_quality_selected_despite_gate') or ''}`",
+        f"- Rejection reasons: `{','.join(str(item) for item in report.get('rejection_reasons', []))}`",
+        "",
+        "This report is evidence gating for the opt-in `quantized_inverted_experimental` branch. It does not make the branch a production default and final SQL ordering remains exact heap MaxSim.",
+        "",
+        "| role | profile | p95 ms | top1 | top10 | recall@10 | ndcg@10 | compact docs | compact us | query-codeword us | exact rerank us |",
+        "| --- | --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |",
+    ]
+    for role, row in rows:
+        if not isinstance(row, dict):
+            continue
+        lines.append(
+            "| {role} | {profile} | {p95} | {top1} | {top10} | {recall} | {ndcg} | {compact_docs} | {compact_us} | {query_us} | {rerank_us} |".format(
+                role=role,
+                profile=row.get("profile", ""),
+                p95=fmt(row.get("p95_ms")),
+                top1=fmt(row.get("exact_top1_admission_rate")),
+                top10=fmt(row.get("exact_top10_admission_recall")),
+                recall=fmt(row.get("recall@10")),
+                ndcg=fmt(row.get("ndcg@10")),
+                compact_docs=fmt(row.get("compact_docs_scored")),
+                compact_us=fmt(row.get("compact_score_us")),
+                query_us=fmt(row.get("query_codeword_us")),
+                rerank_us=fmt(row.get("exact_rerank_us")),
+            )
+        )
+    lines.extend(
+        [
+            "",
+            "## Gate Summary",
+            "",
+            "- Candidate source must be `quantized_inverted_experimental`.",
+            "- BM25 and learned-sparse rescue must be inactive.",
+            "- Exact top-10 admission must be at least `0.80`; exact top-1 admission must be at least `0.94`.",
+            "- Recall@10 and ndcg@10 may drop by at most `0.01` from the baseline row.",
+            "- p95 must be at most `0.75x` the baseline p95.",
+            "- Compact docs scored must be at most `6000` unless compact scoring is no longer a top-two bottleneck.",
+            "- Generated acceptance artifacts must stay under `.nix-dev/tmp/`.",
+        ]
+    )
+    return "\n".join(lines) + "\n"
+
+
 def run_document_node_colbert_candidate_source_focus(
     conn: psycopg.Connection[Any],
     args: argparse.Namespace,
@@ -29133,7 +31208,21 @@ def run_document_node_colbert_candidate_source_focus(
             for record in oracle_records_all
             if str(record.get("query_id")) in selected_query_ids
         ]
-    profiles = document_node_colbert_candidate_source_focus_profiles(args)
+    precompact_focus = bool(
+        getattr(args, "document_node_colbert_quantized_inverted_precompact_focus", False)
+    )
+    exact_rerank_focus = bool(
+        getattr(
+            args,
+            "document_node_colbert_quantized_inverted_exact_rerank_focus",
+            False,
+        )
+    )
+    active_query_tokens = int(getattr(args, "max_query_vectors", 0) or 0)
+    profiles = document_node_colbert_candidate_source_focus_profiles(
+        args,
+        active_query_tokens=active_query_tokens,
+    )
     budgets = effective_document_node_colbert_candidate_source_focus_budgets(args)
     centroid_lite_caps = effective_document_node_colbert_candidate_source_focus_caps(args)
     centroid_lite_probes = effective_document_node_colbert_candidate_source_focus_probes(args)
@@ -29147,8 +31236,16 @@ def run_document_node_colbert_candidate_source_focus(
         recorder.record(
             "run_metadata",
             metadata={
-                "mode": "document_node_colbert_candidate_source_focus",
+                "mode": (
+                    "document_node_colbert_quantized_inverted_exact_rerank_focus"
+                    if exact_rerank_focus
+                    else "document_node_colbert_quantized_inverted_precompact_focus"
+                    if precompact_focus
+                    else "document_node_colbert_candidate_source_focus"
+                ),
                 "pure_colbert_only": True,
+                "quantized_inverted_precompact_focus": precompact_focus,
+                "quantized_inverted_exact_rerank_focus": exact_rerank_focus,
                 "exact_admission_available": bool(oracle_artifact),
                 "admission_evidence": (
                     "sampled_exact_oracle"
@@ -29161,7 +31258,35 @@ def run_document_node_colbert_candidate_source_focus(
                 "centroid_lite_probes": centroid_lite_probes,
                 "centroid_lite_score_thresholds": centroid_lite_score_thresholds,
                 "centroid_lite_score_drop_from_best_values": centroid_lite_score_drops,
+                "quantized_inverted_precompact_score_grid": (
+                    effective_quantized_inverted_precompact_score_grid(args)
+                    if precompact_focus or exact_rerank_focus
+                    else []
+                ),
+                "quantized_inverted_precompact_coverage_k": (
+                    effective_quantized_inverted_precompact_coverage_k(args)
+                    if precompact_focus or exact_rerank_focus
+                    else 0
+                ),
+                "quantized_inverted_precompact_per_token_k": (
+                    effective_quantized_inverted_precompact_per_token_k(args)
+                    if precompact_focus or exact_rerank_focus
+                    else 0
+                ),
+                "quantized_inverted_precompact_active_query_tokens": (
+                    active_query_tokens if precompact_focus or exact_rerank_focus else 0
+                ),
                 "exact_rerank_k": int(getattr(args, "exact_rerank_k", 0) or 0),
+                "quantized_inverted_exact_rerank_grid": (
+                    effective_quantized_inverted_exact_rerank_grid(args)
+                    if exact_rerank_focus
+                    else []
+                ),
+                "quantized_inverted_exact_rerank_modes": (
+                    effective_quantized_inverted_exact_rerank_modes(args)
+                    if exact_rerank_focus
+                    else []
+                ),
                 "query_limit": query_limit,
                 "docs_loaded": int(counts.get("docs_loaded", 0) or 0),
                 "queries_available": len(queries),
@@ -29490,9 +31615,21 @@ def run_document_node_colbert_candidate_source_focus(
         rows,
         docs_loaded=int(counts.get("docs_loaded", 0) or 0),
     )
+    precompact_recommendation = (
+        quantized_inverted_precompact_focus_recommendation(rows)
+        if precompact_focus
+        else None
+    )
+    exact_rerank_recommendation = (
+        quantized_inverted_exact_rerank_focus_recommendation(rows)
+        if exact_rerank_focus
+        else None
+    )
     return {
         "enabled": True,
         "pure_colbert_only": True,
+        "quantized_inverted_precompact_focus": precompact_focus,
+        "quantized_inverted_exact_rerank_focus": exact_rerank_focus,
         "exact_admission_available": "sampled" if oracle_artifact else False,
         "exact_admission_reason": (
             "sampled_exact_oracle_from_oracle_input"
@@ -29517,6 +31654,34 @@ def run_document_node_colbert_candidate_source_focus(
         "centroid_lite_probes": centroid_lite_probes,
         "centroid_lite_score_thresholds": centroid_lite_score_thresholds,
         "centroid_lite_score_drop_from_best_values": centroid_lite_score_drops,
+        "quantized_inverted_precompact_score_grid": (
+            effective_quantized_inverted_precompact_score_grid(args)
+            if precompact_focus or exact_rerank_focus
+            else []
+        ),
+        "quantized_inverted_precompact_coverage_k": (
+            effective_quantized_inverted_precompact_coverage_k(args)
+            if precompact_focus or exact_rerank_focus
+            else 0
+        ),
+        "quantized_inverted_precompact_per_token_k": (
+            effective_quantized_inverted_precompact_per_token_k(args)
+            if precompact_focus or exact_rerank_focus
+            else 0
+        ),
+        "quantized_inverted_precompact_active_query_tokens": (
+            active_query_tokens if precompact_focus or exact_rerank_focus else 0
+        ),
+        "quantized_inverted_exact_rerank_grid": (
+            effective_quantized_inverted_exact_rerank_grid(args)
+            if exact_rerank_focus
+            else []
+        ),
+        "quantized_inverted_exact_rerank_modes": (
+            effective_quantized_inverted_exact_rerank_modes(args)
+            if exact_rerank_focus
+            else []
+        ),
         "query_limit": query_limit,
         "queries_available": len(queries),
         "queries_evaluated": len(selected_queries),
@@ -29525,10 +31690,14 @@ def run_document_node_colbert_candidate_source_focus(
         "experimental_included": bool(
             getattr(args, "include_quantized_inverted_experimental", False)
             or getattr(args, "document_node_colbert_include_experimental", False)
+            or precompact_focus
+            or exact_rerank_focus
         ),
         "index_phases": index_phases,
         "results": rows,
         "recommendation": recommendation,
+        "precompact_recommendation": precompact_recommendation,
+        "exact_rerank_recommendation": exact_rerank_recommendation,
         "total_elapsed_ms": elapsed_ms_since(started),
         "incremental_output": portable_path(recorder.path) if recorder.path else None,
         "incremental_records": len(recorder.records),
@@ -30732,6 +32901,260 @@ def markdown_benchmark_summary(report: dict[str, Any]) -> str:
         if isinstance(notes, list) and notes:
             lines.extend(["", "Notes:"])
             lines.extend(f"- {note}" for note in notes)
+
+    precompact_focus = report.get(
+        "document_node_colbert_quantized_inverted_precompact_focus"
+    )
+    if not isinstance(precompact_focus, dict):
+        candidate_focus_alias = report.get("document_node_colbert_candidate_source_focus")
+        if (
+            isinstance(candidate_focus_alias, dict)
+            and bool(candidate_focus_alias.get("quantized_inverted_precompact_focus", False))
+        ):
+            precompact_focus = candidate_focus_alias
+    if isinstance(precompact_focus, dict):
+        rows = precompact_focus.get("results", [])
+        if isinstance(rows, list):
+            sorted_rows = sorted(
+                [row for row in rows if isinstance(row, dict)],
+                key=lambda row: (
+                    int(row.get("candidate_budget", 0) or 0),
+                    str(row.get("profile", "")),
+                ),
+            )
+        else:
+            sorted_rows = []
+        precompact_recommendation = precompact_focus.get(
+            "precompact_recommendation", {}
+        )
+        if not isinstance(precompact_recommendation, dict):
+            precompact_recommendation = {}
+        best_precompact = precompact_recommendation.get(
+            "best_quantized_inverted_precompact"
+        )
+        if not isinstance(best_precompact, dict):
+            best_precompact = {}
+        rejected_profiles = precompact_recommendation.get("rejected_profiles", [])
+        if not isinstance(rejected_profiles, list):
+            rejected_profiles = []
+        lines.extend([
+            "",
+            "### Quantized inverted precompact focus",
+            "",
+            f"- Pure ColBERT only: `{bool(precompact_focus.get('pure_colbert_only', False))}`",
+            f"- Candidate source: `quantized_inverted_experimental`",
+            f"- Admission evidence: `{precompact_focus.get('admission_evidence', '')}`",
+            f"- Profiles: `{','.join(str(item) for item in precompact_focus.get('profiles', []))}`",
+            f"- Candidate budgets: `{','.join(str(item) for item in precompact_focus.get('candidate_budgets', []))}`",
+            f"- Exact rerank K: `{int(precompact_focus.get('exact_rerank_k', 0) or 0)}`",
+            f"- Score grid: `{','.join(str(item) for item in precompact_focus.get('quantized_inverted_precompact_score_grid', []))}`",
+            f"- Reservoir coverage K: `{int(precompact_focus.get('quantized_inverted_precompact_coverage_k', 0) or 0)}`",
+            f"- Reservoir per-token K: `{int(precompact_focus.get('quantized_inverted_precompact_per_token_k', 0) or 0)}`",
+            f"- Active query tokens for compact_max_docs default: `{int(precompact_focus.get('quantized_inverted_precompact_active_query_tokens', 0) or 0)}`",
+            f"- Best gated row: `{best_precompact.get('profile') or ''}`",
+            "",
+            "| profile | mode | kernel | score k | coverage k | per-token k | compact max docs | budget | p95 ms | top1 | top10 | recall@10 | ndcg@10 | compact docs | qcw score us | qcw topk us | precompact us | rejected |",
+            "|---|---|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---|",
+        ])
+        rejection_by_profile = {
+            str(item.get("profile", "")): item.get("rejection_reasons", [])
+            for item in rejected_profiles
+            if isinstance(item, dict)
+        }
+        for row in sorted_rows:
+            top1 = row.get("exact_top1_admission_rate")
+            top10 = row.get("exact_top10_admission_recall")
+            recall = row.get("recall@10")
+            ndcg = row.get("ndcg@10")
+            compact_docs = row.get("quantized_inverted_compact_docs_scored")
+            qcw_score_us = row.get("quantized_inverted_query_codeword_score_us")
+            qcw_topk_us = row.get("quantized_inverted_query_codeword_topk_us")
+            precompact_us = row.get("quantized_inverted_precompact_us")
+            rejected = rejection_by_profile.get(str(row.get("profile", "")), [])
+            lines.append(
+                "| {profile} | {mode} | {kernel} | {score_k} | {coverage_k} | {per_token_k} | {compact_max_docs} | {budget} | {p95:.3f} | {top1} | {top10} | {recall} | {ndcg} | {compact_docs} | {qcw_score_us} | {qcw_topk_us} | {precompact_us} | {rejected} |".format(
+                    profile=row.get("profile", ""),
+                    mode=row.get("quantized_inverted_precompact_mode", ""),
+                    kernel=(
+                        row.get("quantized_inverted_query_codeword_kernel_observed")
+                        or row.get("quantized_inverted_query_codeword_kernel", "")
+                    ),
+                    score_k=int(row.get("quantized_inverted_precompact_score_k", 0) or 0),
+                    coverage_k=int(row.get("quantized_inverted_precompact_coverage_k", 0) or 0),
+                    per_token_k=int(row.get("quantized_inverted_precompact_per_token_k", 0) or 0),
+                    compact_max_docs=int(row.get("quantized_inverted_compact_max_docs", 0) or 0),
+                    budget=int(row.get("candidate_budget", 0) or 0),
+                    p95=float(row.get("p95_ms", 0.0) or 0.0),
+                    top1="" if top1 is None else f"{float(top1 or 0.0):.6f}",
+                    top10="" if top10 is None else f"{float(top10 or 0.0):.6f}",
+                    recall="" if recall is None else f"{float(recall or 0.0):.6f}",
+                    ndcg="" if ndcg is None else f"{float(ndcg or 0.0):.6f}",
+                    compact_docs=(
+                        ""
+                        if compact_docs is None
+                        else f"{float(compact_docs or 0.0):.3f}"
+                    ),
+                    qcw_score_us=(
+                        ""
+                        if qcw_score_us is None
+                        else f"{float(qcw_score_us or 0.0):.3f}"
+                    ),
+                    qcw_topk_us=(
+                        ""
+                        if qcw_topk_us is None
+                        else f"{float(qcw_topk_us or 0.0):.3f}"
+                    ),
+                    precompact_us=(
+                        ""
+                        if precompact_us is None
+                        else f"{float(precompact_us or 0.0):.3f}"
+                    ),
+                    rejected=",".join(str(reason) for reason in rejected),
+                )
+            )
+        lines.extend([
+            "",
+            "Precompact rows are research-only quantized-inverted evidence. "
+            "Promotion requires sampled admission/quality gates, lower p95 than "
+            "the baseline, compact docs at or below the gate, and exact heap "
+            "MaxSim as the final ranking source.",
+        ])
+
+    exact_rerank_focus_report = report.get(
+        "document_node_colbert_quantized_inverted_exact_rerank_focus"
+    )
+    if not isinstance(exact_rerank_focus_report, dict):
+        candidate_focus_alias = report.get("document_node_colbert_candidate_source_focus")
+        if (
+            isinstance(candidate_focus_alias, dict)
+            and bool(
+                candidate_focus_alias.get(
+                    "quantized_inverted_exact_rerank_focus",
+                    False,
+                )
+            )
+        ):
+            exact_rerank_focus_report = candidate_focus_alias
+    if isinstance(exact_rerank_focus_report, dict):
+        rows = exact_rerank_focus_report.get("results", [])
+        if isinstance(rows, list):
+            sorted_rows = sorted(
+                [row for row in rows if isinstance(row, dict)],
+                key=lambda row: (
+                    int(row.get("candidate_budget", 0) or 0),
+                    int(row.get("effective_exact_rerank_k", 0) or 0),
+                    str(row.get("exact_rerank_mode", "")),
+                    str(row.get("profile", "")),
+                ),
+            )
+        else:
+            sorted_rows = []
+        exact_recommendation = exact_rerank_focus_report.get(
+            "exact_rerank_recommendation", {}
+        )
+        if not isinstance(exact_recommendation, dict):
+            exact_recommendation = {}
+        best_exact = exact_recommendation.get("best_exact_rerank_setting")
+        if not isinstance(best_exact, dict):
+            best_exact = {}
+        rejected_profiles = exact_recommendation.get("rejected_profiles", [])
+        if not isinstance(rejected_profiles, list):
+            rejected_profiles = []
+        rejection_by_profile = {
+            (
+                str(item.get("profile", "")),
+                str(item.get("exact_rerank_mode", "")),
+                int(item.get("effective_exact_rerank_k", 0) or 0),
+            ): item.get("rejection_reasons", [])
+            for item in rejected_profiles
+            if isinstance(item, dict)
+        }
+        lines.extend([
+            "",
+            "### Quantized inverted exact rerank focus",
+            "",
+            f"- Pure ColBERT only: `{bool(exact_rerank_focus_report.get('pure_colbert_only', False))}`",
+            f"- Candidate source: `quantized_inverted_experimental`",
+            f"- Admission evidence: `{exact_rerank_focus_report.get('admission_evidence', '')}`",
+            f"- Profiles: `{','.join(str(item) for item in exact_rerank_focus_report.get('profiles', []))}`",
+            f"- Candidate budgets: `{','.join(str(item) for item in exact_rerank_focus_report.get('candidate_budgets', []))}`",
+            f"- Exact rerank grid: `{','.join(str(item) for item in exact_rerank_focus_report.get('quantized_inverted_exact_rerank_grid', []))}`",
+            f"- Exact rerank modes: `{','.join(str(item) for item in exact_rerank_focus_report.get('quantized_inverted_exact_rerank_modes', []))}`",
+            f"- Best gated setting: `{best_exact.get('profile') or ''}`",
+            "",
+            "| profile | mode | rerank k | budget | p95 ms | top1 | top10 | recall@10 | ndcg@10 | rerank docs | heap fetch us | maxsim us | tokens eval | tokens skipped | pairs saved | kernel | rejected |",
+            "|---|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---|---|",
+        ])
+        for row in sorted_rows:
+            top1 = row.get("exact_top1_admission_rate")
+            top10 = row.get("exact_top10_admission_recall")
+            recall = row.get("recall@10")
+            ndcg = row.get("ndcg@10")
+            phase = row.get("exact_rerank_phase_breakdown", {})
+            if not isinstance(phase, dict):
+                phase = {}
+            rerank_k = int(row.get("effective_exact_rerank_k", 0) or 0)
+            rejected = rejection_by_profile.get(
+                (
+                    str(row.get("profile", "")),
+                    str(row.get("exact_rerank_mode", "")),
+                    rerank_k,
+                ),
+                [],
+            )
+            lines.append(
+                "| {profile} | {mode} | {rerank_k} | {budget} | {p95:.3f} | {top1} | {top10} | {recall} | {ndcg} | {rerank_docs} | {heap_us} | {maxsim_us} | {tokens_eval} | {tokens_skipped} | {pairs_saved} | {kernel} | {rejected} |".format(
+                    profile=row.get("profile", ""),
+                    mode=row.get("exact_rerank_mode", ""),
+                    rerank_k=rerank_k,
+                    budget=int(row.get("candidate_budget", 0) or 0),
+                    p95=float(row.get("p95_ms", 0.0) or 0.0),
+                    top1="" if top1 is None else f"{float(top1 or 0.0):.6f}",
+                    top10="" if top10 is None else f"{float(top10 or 0.0):.6f}",
+                    recall="" if recall is None else f"{float(recall or 0.0):.6f}",
+                    ndcg="" if ndcg is None else f"{float(ndcg or 0.0):.6f}",
+                    rerank_docs=(
+                        ""
+                        if row.get("exact_rerank_docs") is None
+                        else f"{float(row.get('exact_rerank_docs') or 0.0):.3f}"
+                    ),
+                    heap_us=(
+                        ""
+                        if phase.get("heap_fetch_us") is None
+                        else f"{float(phase.get('heap_fetch_us') or 0.0):.3f}"
+                    ),
+                    maxsim_us=(
+                        ""
+                        if phase.get("maxsim_compute_us") is None
+                        else f"{float(phase.get('maxsim_compute_us') or 0.0):.3f}"
+                    ),
+                    tokens_eval=(
+                        ""
+                        if phase.get("tokens_evaluated") is None
+                        else f"{float(phase.get('tokens_evaluated') or 0.0):.3f}"
+                    ),
+                    tokens_skipped=(
+                        ""
+                        if phase.get("tokens_skipped") is None
+                        else f"{float(phase.get('tokens_skipped') or 0.0):.3f}"
+                    ),
+                    pairs_saved=(
+                        ""
+                        if phase.get("pairs_saved") is None
+                        else f"{float(phase.get('pairs_saved') or 0.0):.3f}"
+                    ),
+                    kernel=phase.get("exact_kernel") or row.get("exact_kernel") or "",
+                    rejected=",".join(str(reason) for reason in rejected),
+                )
+            )
+        lines.extend([
+            "",
+            "Lower exact-rerank K is promotion-eligible only when sampled "
+            "top10 admission stays at least 0.80, exact top1 admission stays "
+            "at least 0.94, recall@10 and ndcg@10 remain within 0.005 of "
+            "the 512-doc baseline, and final ordering remains exact heap "
+            "MaxSim over retained candidates.",
+        ])
 
     colbert_candidate_focus = report.get("document_node_colbert_candidate_source_focus")
     if isinstance(colbert_candidate_focus, dict):
@@ -33103,17 +35526,20 @@ def validate_args(args: argparse.Namespace) -> argparse.Namespace:
             "--document-node-colbert-1m-evaluate-only are mutually exclusive"
         )
     if (
-        args.document_node_colbert_1m_beir_quality_only
-        or args.document_node_colbert_sampled_admission
-        or args.document_node_colbert_candidate_source_focus
-        or args.document_node_serving_grid_oracle_quality_check
-        or args.document_node_colbert_quantized_codebook_build_only
-        or args.next_plaid_beir_quality_only
+            args.document_node_colbert_1m_beir_quality_only
+            or args.document_node_colbert_sampled_admission
+            or args.document_node_colbert_candidate_source_focus
+            or args.document_node_colbert_quantized_inverted_precompact_focus
+            or args.document_node_colbert_quantized_inverted_exact_rerank_focus
+            or args.document_node_serving_grid_oracle_quality_check
+            or args.document_node_colbert_quantized_codebook_build_only
+            or args.next_plaid_beir_quality_only
     ) and colbert_1m_mode_count:
         raise SystemExit(
             "--document-node-colbert-1m-beir-quality-only, "
             "--document-node-colbert-sampled-admission, and "
             "--document-node-colbert-candidate-source-focus, and "
+            "--document-node-colbert-quantized-inverted-precompact-focus, and "
             "--document-node-serving-grid-oracle-quality-check, "
             "--document-node-colbert-quantized-codebook-build-only, and "
             "--next-plaid-beir-quality-only cannot be combined "
@@ -33127,6 +35553,8 @@ def validate_args(args: argparse.Namespace) -> argparse.Namespace:
             args.document_node_colbert_1m_beir_quality_only,
             args.document_node_colbert_sampled_admission,
             args.document_node_colbert_candidate_source_focus,
+            args.document_node_colbert_quantized_inverted_precompact_focus,
+            args.document_node_colbert_quantized_inverted_exact_rerank_focus,
             args.document_node_serving_grid_oracle_quality_check,
             args.document_node_colbert_quantized_codebook_build_only,
             args.next_plaid_beir_quality_only,
@@ -33138,6 +35566,7 @@ def validate_args(args: argparse.Namespace) -> argparse.Namespace:
             "--document-node-colbert-1m-beir-quality-only, "
             "--document-node-colbert-sampled-admission, and "
             "--document-node-colbert-candidate-source-focus, and "
+            "--document-node-colbert-quantized-inverted-precompact-focus, and "
             "--document-node-serving-grid-oracle-quality-check, "
             "--document-node-colbert-quantized-codebook-build-only, and "
             "--next-plaid-beir-quality-only are mutually exclusive"
@@ -33147,6 +35576,8 @@ def validate_args(args: argparse.Namespace) -> argparse.Namespace:
         or args.document_node_colbert_1m_beir_quality_only
         or args.document_node_colbert_sampled_admission
         or args.document_node_colbert_candidate_source_focus
+        or args.document_node_colbert_quantized_inverted_precompact_focus
+        or args.document_node_colbert_quantized_inverted_exact_rerank_focus
         or args.document_node_serving_grid_oracle_quality_check
         or args.document_node_colbert_quantized_codebook_build_only
         or args.next_plaid_beir_quality_only
@@ -33155,7 +35586,8 @@ def validate_args(args: argparse.Namespace) -> argparse.Namespace:
             "--document-node-colbert-exact-oracle-build is an offline mode and "
             "cannot be combined with ColBERT 1M build/evaluate/BEIR-quality/"
             "sampled-admission/candidate-source-focus/oracle-quality-check/"
-            "quantized-codebook-build/NextPlaid reference modes"
+            "quantized-precompact-focus/quantized-codebook-build/"
+            "NextPlaid reference modes"
         )
     if args.document_node_colbert_exact_oracle_build:
         if args.oracle_output is None:
@@ -33459,6 +35891,8 @@ def validate_args(args: argparse.Namespace) -> argparse.Namespace:
             or args.document_node_colbert_sampled_admission
             or args.document_node_colbert_exact_oracle_build
             or args.document_node_colbert_candidate_source_focus
+            or args.document_node_colbert_quantized_inverted_precompact_focus
+            or args.document_node_colbert_quantized_inverted_exact_rerank_focus
             or args.document_node_serving_grid_oracle_quality_check
             or args.document_node_colbert_quantized_codebook_build_only
             or args.next_plaid_beir_quality_only
@@ -33505,7 +35939,11 @@ def validate_args(args: argparse.Namespace) -> argparse.Namespace:
         document_node_colbert_beir_quality_profile(args)
     if args.document_node_colbert_sampled_admission:
         document_node_colbert_sampled_admission_profile(args)
-    if args.document_node_colbert_candidate_source_focus:
+    if (
+        args.document_node_colbert_candidate_source_focus
+        or args.document_node_colbert_quantized_inverted_precompact_focus
+        or args.document_node_colbert_quantized_inverted_exact_rerank_focus
+    ):
         document_node_colbert_candidate_source_focus_profiles(args)
     if args.document_node_serving_grid_oracle_quality_check:
         document_node_oracle_quality_check_profiles(args)
@@ -33554,11 +35992,21 @@ def validate_args(args: argparse.Namespace) -> argparse.Namespace:
     if args.generation_n_batch < 1:
         raise SystemExit("--generation-n-batch must be at least 1")
     if args.output is None:
-        if args.document_node_serving_grid_oracle_quality_check:
+        if (
+            args.document_node_serving_grid_oracle_quality_check
+            or args.document_node_colbert_quantized_inverted_precompact_focus
+            or args.document_node_colbert_quantized_inverted_exact_rerank_focus
+        ):
+            if args.document_node_colbert_quantized_inverted_exact_rerank_focus:
+                default_name = "dbpedia-colbert-quantized-exact-rerank-focus"
+            elif args.document_node_colbert_quantized_inverted_precompact_focus:
+                default_name = "dbpedia-colbert-quantized-precompact-focus"
+            else:
+                default_name = "dbpedia-colbert-oracle-quality-check"
             args.output = Path(
                 ".nix-dev/tmp/"
                 + datetime.now(timezone.utc).strftime(
-                    "dbpedia-colbert-oracle-quality-check-%Y%m%dT%H%M%SZ.json"
+                    f"{default_name}-%Y%m%dT%H%M%SZ.json"
                 )
             )
         else:
@@ -33567,14 +36015,26 @@ def validate_args(args: argparse.Namespace) -> argparse.Namespace:
     args.output = args.output.resolve()
     if args.markdown_output is not None:
         args.markdown_output = args.markdown_output.resolve()
-    if args.document_node_serving_grid_oracle_quality_check:
+    if (
+        args.document_node_serving_grid_oracle_quality_check
+        or args.document_node_colbert_quantized_inverted_precompact_focus
+        or args.document_node_colbert_quantized_inverted_exact_rerank_focus
+    ):
+        mode_name = (
+            "--document-node-colbert-quantized-inverted-exact-rerank-focus"
+            if args.document_node_colbert_quantized_inverted_exact_rerank_focus
+            else "--document-node-colbert-quantized-inverted-precompact-focus"
+            if args.document_node_colbert_quantized_inverted_precompact_focus
+            else "--document-node-serving-grid-oracle-quality-check"
+        )
         for path, flag_name in (
             (args.output, "--output"),
             (args.markdown_output, "--markdown-output"),
+            (args.incremental_output, "--incremental-output"),
         ):
             if path is not None and not path_is_under_nix_dev_tmp(path):
                 raise SystemExit(
-                    "--document-node-serving-grid-oracle-quality-check writes "
+                    f"{mode_name} writes "
                     "generated artifacts only under .nix-dev/tmp; "
                     f"{flag_name} was {path}"
                 )
@@ -33816,7 +36276,11 @@ def validate_args(args: argparse.Namespace) -> argparse.Namespace:
         if not args.oracle_input.is_file():
             raise SystemExit(f"exact oracle input does not exist: {args.oracle_input}")
         document_node_colbert_sampled_admission_profile(args)
-    if args.document_node_colbert_candidate_source_focus:
+    if (
+        args.document_node_colbert_candidate_source_focus
+        or args.document_node_colbert_quantized_inverted_precompact_focus
+        or args.document_node_colbert_quantized_inverted_exact_rerank_focus
+    ):
         forbidden_focus_flags = {
             "--document-node-serving-grid-include-bm25-rescue": args.document_node_serving_grid_include_bm25_rescue,
             "--document-node-serving-grid-include-learned-sparse-rescue": args.document_node_serving_grid_include_learned_sparse_rescue,
@@ -33827,8 +36291,15 @@ def validate_args(args: argparse.Namespace) -> argparse.Namespace:
             name for name, enabled in forbidden_focus_flags.items() if bool(enabled)
         ]
         if enabled_forbidden:
+            focus_flag = (
+                "--document-node-colbert-quantized-inverted-exact-rerank-focus"
+                if args.document_node_colbert_quantized_inverted_exact_rerank_focus
+                else "--document-node-colbert-quantized-inverted-precompact-focus"
+                if args.document_node_colbert_quantized_inverted_precompact_focus
+                else "--document-node-colbert-candidate-source-focus"
+            )
             raise SystemExit(
-                "--document-node-colbert-candidate-source-focus is pure ColBERT "
+                f"{focus_flag} is pure ColBERT "
                 "candidate-source evidence and cannot be combined with "
                 + ", ".join(enabled_forbidden)
             )
@@ -33836,6 +36307,17 @@ def validate_args(args: argparse.Namespace) -> argparse.Namespace:
         effective_document_node_colbert_candidate_source_focus_caps(args)
         effective_document_node_colbert_candidate_source_focus_score_thresholds(args)
         effective_document_node_colbert_candidate_source_focus_score_drops(args)
+        if (
+            args.document_node_colbert_quantized_inverted_precompact_focus
+            or args.document_node_colbert_quantized_inverted_exact_rerank_focus
+        ):
+            effective_quantized_inverted_precompact_score_grid(args)
+            effective_quantized_inverted_precompact_coverage_k(args)
+            effective_quantized_inverted_precompact_per_token_k(args)
+            effective_quantized_inverted_compact_max_docs(args, score_k=1)
+        if args.document_node_colbert_quantized_inverted_exact_rerank_focus:
+            effective_quantized_inverted_exact_rerank_grid(args)
+            effective_quantized_inverted_exact_rerank_modes(args)
         if args.exact_rerank_k < 1:
             raise SystemExit("--exact-rerank-k must be positive")
         if args.document_node_colbert_ef < 1:
@@ -33874,6 +36356,8 @@ def validate_args(args: argparse.Namespace) -> argparse.Namespace:
                 or args.document_node_colbert_1m_beir_quality_only
                 or args.document_node_colbert_sampled_admission
                 or args.document_node_colbert_candidate_source_focus
+                or args.document_node_colbert_quantized_inverted_precompact_focus
+                or args.document_node_colbert_quantized_inverted_exact_rerank_focus
                 or args.document_node_serving_grid_oracle_quality_check
             )
             else "admission_exhaustive"
@@ -33951,6 +36435,22 @@ def validate_args(args: argparse.Namespace) -> argparse.Namespace:
         raise SystemExit("--multivector-quantized-inverted-max-postings-per-token must be non-negative")
     if args.multivector_quantized_inverted_min_token_matches < 0:
         raise SystemExit("--multivector-quantized-inverted-min-token-matches must be non-negative")
+    if args.multivector_quantized_inverted_precompact_score_k < 0:
+        raise SystemExit(
+            "--multivector-quantized-inverted-precompact-score-k must be non-negative"
+        )
+    if args.multivector_quantized_inverted_precompact_coverage_k < 0:
+        raise SystemExit(
+            "--multivector-quantized-inverted-precompact-coverage-k must be non-negative"
+        )
+    if args.multivector_quantized_inverted_precompact_per_token_k < 0:
+        raise SystemExit(
+            "--multivector-quantized-inverted-precompact-per-token-k must be non-negative"
+        )
+    if args.multivector_quantized_inverted_compact_max_docs < 0:
+        raise SystemExit(
+            "--multivector-quantized-inverted-compact-max-docs must be non-negative"
+        )
     if getattr(args, "multivector_quantized_inverted_pruning", "off") not in {
         "off",
         "score_bound_experimental",
@@ -34097,6 +36597,56 @@ def parse_args() -> argparse.Namespace:
         help=(
             "read existing serving-grid JSON artifacts and write a merged "
             "comparison report without PostgreSQL or benchmark execution"
+        ),
+    )
+    parser.add_argument(
+        "--quantized-inverted-default-quality-acceptance-report",
+        action="store_true",
+        help=(
+            "read quantized-inverted benchmark artifacts and apply the "
+            "experimental default-quality promotion gates without PostgreSQL "
+            "or benchmark execution"
+        ),
+    )
+    parser.add_argument(
+        "--precompact-grid-json",
+        type=Path,
+        default=None,
+        metavar="PATH",
+        help=(
+            "precompact benchmark JSON for "
+            "--quantized-inverted-default-quality-acceptance-report; defaults "
+            "to PRECOMPACT_GRID_JSON"
+        ),
+    )
+    parser.add_argument(
+        "--query-codeword-grid-json",
+        type=Path,
+        default=None,
+        metavar="PATH",
+        help=(
+            "optional query-codeword benchmark JSON for quantized-inverted "
+            "acceptance; defaults to QUERY_CODEWORD_GRID_JSON"
+        ),
+    )
+    parser.add_argument(
+        "--compact-layout-grid-json",
+        type=Path,
+        default=None,
+        metavar="PATH",
+        help=(
+            "optional compact-layout benchmark JSON for quantized-inverted "
+            "acceptance; defaults to COMPACT_LAYOUT_GRID_JSON"
+        ),
+    )
+    parser.add_argument(
+        "--exact-rerank-grid-json",
+        type=Path,
+        default=None,
+        metavar="PATH",
+        help=(
+            "optional exact-rerank benchmark JSON for quantized-inverted "
+            "acceptance; defaults to EXACT_RERANK_GRID_JSON"
         ),
     )
     parser.add_argument(
@@ -34517,6 +37067,27 @@ def parse_args() -> argparse.Namespace:
         ),
     )
     parser.add_argument(
+        "--multivector-quantized-inverted-query-codeword-kernel",
+        choices=("auto", "scalar", "blocked"),
+        default="auto",
+        help=(
+            "experimental quantized_inverted query-codeword scoring kernel; "
+            "auto uses the blocked scalar path where available, scalar is the "
+            "reference path, and blocked batches query-token/codeword dot "
+            "products while preserving exact heap MaxSim final rerank"
+        ),
+    )
+    parser.add_argument(
+        "--multivector-quantized-inverted-compact-doc-order",
+        choices=("original", "docid"),
+        default="docid",
+        help=(
+            "experimental quantized_inverted compact full-doc scoring order; "
+            "docid sorts the retained scan-local documents by docId for sidecar "
+            "locality, original preserves posting-discovery order"
+        ),
+    )
+    parser.add_argument(
         "--multivector-quantized-inverted-token-coverage",
         choices=("off", "linear"),
         default="off",
@@ -34546,6 +37117,40 @@ def parse_args() -> argparse.Namespace:
             "full-doc codeword scoring; final retained candidates are still "
             "reranked by exact heap MaxSim"
         ),
+    )
+    parser.add_argument(
+        "--multivector-quantized-inverted-precompact",
+        choices=("off", "centroid_maxsim_topk", "centroid_maxsim_reservoir"),
+        default="off",
+        help=(
+            "experimental quantized_inverted compact-doc prefilter before "
+            "compact full-doc code scoring; final retained candidates are still "
+            "reranked by exact heap MaxSim"
+        ),
+    )
+    parser.add_argument(
+        "--multivector-quantized-inverted-precompact-score-k",
+        type=int,
+        default=4096,
+        help="score-ranked documents retained by quantized_inverted precompact",
+    )
+    parser.add_argument(
+        "--multivector-quantized-inverted-precompact-coverage-k",
+        type=int,
+        default=512,
+        help="coverage documents retained by quantized_inverted reservoir precompact",
+    )
+    parser.add_argument(
+        "--multivector-quantized-inverted-precompact-per-token-k",
+        type=int,
+        default=16,
+        help="per-query-token documents retained by quantized_inverted reservoir precompact",
+    )
+    parser.add_argument(
+        "--multivector-quantized-inverted-compact-max-docs",
+        type=int,
+        default=6144,
+        help="maximum union documents retained by quantized_inverted precompact; 0 disables this cap",
     )
     parser.add_argument(
         "--multivector-quantized-inverted-codebook",
@@ -34853,6 +37458,25 @@ def parse_args() -> argparse.Namespace:
         ),
     )
     parser.add_argument(
+        "--document-node-colbert-quantized-inverted-precompact-focus",
+        action="store_true",
+        help=(
+            "run a pure-ColBERT quantized_inverted_experimental precompact "
+            "focus grid for the external centroid_only codebook baseline; "
+            "research evidence only and generated outputs must stay under "
+            ".nix-dev/tmp"
+        ),
+    )
+    parser.add_argument(
+        "--document-node-colbert-quantized-inverted-exact-rerank-focus",
+        action="store_true",
+        help=(
+            "run the best quantized_inverted precompact profile across exact "
+            "rerank K and topk/adaptive modes; keeps final ordering exact "
+            "heap MaxSim and writes generated outputs under .nix-dev/tmp"
+        ),
+    )
+    parser.add_argument(
         "--document-node-serving-grid-oracle-quality-check",
         action="store_true",
         help=(
@@ -35138,6 +37762,66 @@ def parse_args() -> argparse.Namespace:
             "comma-separated external codebook top_m values for generated "
             "quantized_inverted centroid_only profiles in "
             "--document-node-colbert-candidate-source-focus"
+        ),
+    )
+    parser.add_argument(
+        "--quantized-inverted-precompact-score-grid",
+        default=DOCUMENT_NODE_COLBERT_QUANTIZED_INVERTED_PRECOMPACT_SCORE_GRID,
+        help=(
+            "comma-separated score_k values for "
+            "--document-node-colbert-quantized-inverted-precompact-focus"
+        ),
+    )
+    parser.add_argument(
+        "--quantized-inverted-precompact-coverage-k",
+        type=int,
+        default=DOCUMENT_NODE_COLBERT_QUANTIZED_INVERTED_PRECOMPACT_COVERAGE_K,
+        help=(
+            "coverage_k retained by reservoir precompact rows in "
+            "--document-node-colbert-quantized-inverted-precompact-focus"
+        ),
+    )
+    parser.add_argument(
+        "--quantized-inverted-precompact-per-token-k",
+        type=int,
+        default=DOCUMENT_NODE_COLBERT_QUANTIZED_INVERTED_PRECOMPACT_PER_TOKEN_K,
+        help=(
+            "per-query-token reservoir retained by reservoir precompact rows "
+            "in --document-node-colbert-quantized-inverted-precompact-focus"
+        ),
+    )
+    parser.add_argument(
+        "--quantized-inverted-compact-max-docs",
+        type=int,
+        default=0,
+        help=(
+            "override compact_max_docs for precompact focus rows; 0 computes "
+            "max(score_k + coverage_k + max_query_vectors * per_token_k, score_k)"
+        ),
+    )
+    parser.add_argument(
+        "--quantized-inverted-exact-rerank-grid",
+        default=DOCUMENT_NODE_COLBERT_QUANTIZED_INVERTED_EXACT_RERANK_GRID,
+        help=(
+            "comma-separated exact rerank K values for "
+            "--document-node-colbert-quantized-inverted-exact-rerank-focus"
+        ),
+    )
+    parser.add_argument(
+        "--quantized-inverted-exact-rerank-modes",
+        default=DOCUMENT_NODE_COLBERT_QUANTIZED_INVERTED_EXACT_RERANK_MODES,
+        help=(
+            "comma-separated exact rerank modes, topk and/or adaptive, for "
+            "--document-node-colbert-quantized-inverted-exact-rerank-focus"
+        ),
+    )
+    parser.add_argument(
+        "--quantized-inverted-exact-rerank-focus-profile",
+        default="",
+        help=(
+            "precompact profile name to sweep in "
+            "--document-node-colbert-quantized-inverted-exact-rerank-focus; "
+            "empty uses the largest-score docid-order topk precompact profile"
         ),
     )
     parser.add_argument(
@@ -35927,6 +38611,46 @@ def parse_args() -> argparse.Namespace:
         if args.markdown_output is not None:
             args.markdown_output = args.markdown_output.resolve()
         return args
+    if args.quantized_inverted_default_quality_acceptance_report:
+        if args.precompact_grid_json is None:
+            env_path = os.environ.get("PRECOMPACT_GRID_JSON", "").strip()
+            if env_path:
+                args.precompact_grid_json = Path(env_path)
+        if args.query_codeword_grid_json is None:
+            env_path = os.environ.get("QUERY_CODEWORD_GRID_JSON", "").strip()
+            if env_path:
+                args.query_codeword_grid_json = Path(env_path)
+        if args.compact_layout_grid_json is None:
+            env_path = os.environ.get("COMPACT_LAYOUT_GRID_JSON", "").strip()
+            if env_path:
+                args.compact_layout_grid_json = Path(env_path)
+        if args.exact_rerank_grid_json is None:
+            env_path = os.environ.get("EXACT_RERANK_GRID_JSON", "").strip()
+            if env_path:
+                args.exact_rerank_grid_json = Path(env_path)
+        if args.precompact_grid_json is None:
+            raise SystemExit(
+                "--quantized-inverted-default-quality-acceptance-report requires "
+                "--precompact-grid-json or PRECOMPACT_GRID_JSON"
+            )
+        for option_name in (
+            "precompact_grid_json",
+            "query_codeword_grid_json",
+            "compact_layout_grid_json",
+            "exact_rerank_grid_json",
+        ):
+            path = getattr(args, option_name)
+            if path is None:
+                continue
+            path = path.resolve()
+            if not path.is_file():
+                raise SystemExit(f"--{option_name.replace('_', '-')} does not exist: {path}")
+            setattr(args, option_name, path)
+        if args.output is not None:
+            args.output = args.output.resolve()
+        if args.markdown_output is not None:
+            args.markdown_output = args.markdown_output.resolve()
+        return args
     if args.export_learned_sparse_inputs_only:
         if args.learned_sparse_input_doc_jsonl is None or args.learned_sparse_input_query_jsonl is None:
             raise SystemExit(
@@ -36014,6 +38738,28 @@ def main() -> None:
     if args.compare_serving_artifacts:
         report = compare_serving_artifacts(args.compare_serving_artifacts)
         report["markdown_summary"] = markdown_compare_serving_artifacts(report)
+        if args.output is not None:
+            args.output.parent.mkdir(parents=True, exist_ok=True)
+            args.output.write_text(
+                json.dumps(report, indent=2, sort_keys=True) + "\n",
+                encoding="utf-8",
+            )
+            print(args.output)
+        else:
+            print(json.dumps(report, indent=2, sort_keys=True))
+        if args.markdown_output is not None:
+            args.markdown_output.parent.mkdir(parents=True, exist_ok=True)
+            args.markdown_output.write_text(report["markdown_summary"], encoding="utf-8")
+            print(args.markdown_output)
+        return
+    if args.quantized_inverted_default_quality_acceptance_report:
+        report = run_quantized_inverted_default_quality_acceptance_report(
+            args.precompact_grid_json,
+            query_codeword_path=args.query_codeword_grid_json,
+            compact_layout_path=args.compact_layout_grid_json,
+            exact_rerank_path=args.exact_rerank_grid_json,
+            output_path=args.output,
+        )
         if args.output is not None:
             args.output.parent.mkdir(parents=True, exist_ok=True)
             args.output.write_text(
@@ -36165,6 +38911,8 @@ def main() -> None:
             args.document_node_colbert_1m_beir_quality_only
             or args.document_node_colbert_sampled_admission
             or args.document_node_colbert_candidate_source_focus
+            or args.document_node_colbert_quantized_inverted_precompact_focus
+            or args.document_node_colbert_quantized_inverted_exact_rerank_focus
             or args.document_node_colbert_exact_oracle_build
             or args.document_node_serving_grid_oracle_quality_check
             or args.document_node_colbert_quantized_codebook_build_only
@@ -36203,7 +38951,9 @@ def main() -> None:
                     "skipped": True,
                     "reason": (
                         "pure-ColBERT BEIR quality-only/sampled-admission/"
-                        "candidate-source-focus/oracle-quality-check/NextPlaid "
+                        "candidate-source-focus/quantized-precompact-focus/"
+                        "quantized-exact-rerank-focus/"
+                        "oracle-quality-check/NextPlaid "
                         "reference reused imported multivectors and did not "
                         "generate embeddings"
                     ),
@@ -36224,7 +38974,9 @@ def main() -> None:
                     "partial_qrel_coverage_reported": True,
                     "reason": (
                         "pure-ColBERT BEIR quality-only/sampled-admission/"
-                        "candidate-source-focus/oracle-quality-check/NextPlaid "
+                        "candidate-source-focus/quantized-precompact-focus/"
+                        "quantized-exact-rerank-focus/"
+                        "oracle-quality-check/NextPlaid "
                         "reference reused imported tables and reports qrel "
                         "coverage without reloading"
                     ),
@@ -36283,7 +39035,9 @@ def main() -> None:
                 "skipped": True,
                 "reason": (
                     "pure-ColBERT BEIR quality-only/sampled-admission/"
-                    "candidate-source-focus/oracle-quality-check/NextPlaid "
+                    "candidate-source-focus/quantized-precompact-focus/"
+                    "quantized-exact-rerank-focus/"
+                    "oracle-quality-check/NextPlaid "
                     "reference reused imported multivectors"
                 ),
             }
@@ -36294,7 +39048,9 @@ def main() -> None:
                 "queries": len(query_ids),
                 "reason": (
                     "pure-ColBERT BEIR quality-only/sampled-admission/"
-                    "candidate-source-focus/oracle-quality-check/NextPlaid "
+                    "candidate-source-focus/quantized-precompact-focus/"
+                    "quantized-exact-rerank-focus/"
+                    "oracle-quality-check/NextPlaid "
                     "reference does not regenerate or persist multivectors"
                 ),
             }
@@ -36318,6 +39074,8 @@ def main() -> None:
             or args.document_node_colbert_1m_beir_quality_only
             or args.document_node_colbert_sampled_admission
             or args.document_node_colbert_candidate_source_focus
+            or args.document_node_colbert_quantized_inverted_precompact_focus
+            or args.document_node_colbert_quantized_inverted_exact_rerank_focus
             or args.document_node_serving_grid_oracle_quality_check
             or args.next_plaid_beir_quality_only
         ):
@@ -36327,8 +39085,14 @@ def main() -> None:
                 representative_profile = document_node_colbert_beir_quality_profile(args)
             elif args.document_node_colbert_sampled_admission:
                 representative_profile = document_node_colbert_sampled_admission_profile(args)
-            elif args.document_node_colbert_candidate_source_focus:
-                focus_profiles = document_node_colbert_candidate_source_focus_profiles(args)
+            elif (
+                args.document_node_colbert_candidate_source_focus
+                or args.document_node_colbert_quantized_inverted_precompact_focus
+                or args.document_node_colbert_quantized_inverted_exact_rerank_focus
+            ):
+                focus_profiles = document_node_colbert_candidate_source_focus_profiles(
+                    args
+                )
                 representative_profile = focus_profiles[0] if focus_profiles else None
             elif args.document_node_serving_grid_oracle_quality_check:
                 oracle_profiles = document_node_oracle_quality_check_profiles(args)
@@ -36491,7 +39255,11 @@ def main() -> None:
             document_node_token_pooling_recommendation = None
             hybrid_evaluation = None
             token_ablation = None
-        elif args.document_node_colbert_candidate_source_focus:
+        elif (
+            args.document_node_colbert_candidate_source_focus
+            or args.document_node_colbert_quantized_inverted_precompact_focus
+            or args.document_node_colbert_quantized_inverted_exact_rerank_focus
+        ):
             document_node_colbert_candidate_source_focus = (
                 run_document_node_colbert_candidate_source_focus(
                     conn,
@@ -36797,6 +39565,12 @@ def main() -> None:
                 "document_node_colbert_candidate_source_focus": (
                     args.document_node_colbert_candidate_source_focus
                 ),
+                "document_node_colbert_quantized_inverted_precompact_focus": (
+                    args.document_node_colbert_quantized_inverted_precompact_focus
+                ),
+                "document_node_colbert_quantized_inverted_exact_rerank_focus": (
+                    args.document_node_colbert_quantized_inverted_exact_rerank_focus
+                ),
                 "document_node_serving_grid_oracle_quality_check": (
                     args.document_node_serving_grid_oracle_quality_check
                 ),
@@ -36804,6 +39578,27 @@ def main() -> None:
                 "candidate_budgets": args.candidate_budgets,
                 "exact_rerank_k": args.exact_rerank_k,
                 "centroid_lite_caps": args.centroid_lite_caps,
+                "quantized_inverted_precompact_score_grid": (
+                    args.quantized_inverted_precompact_score_grid
+                ),
+                "quantized_inverted_precompact_coverage_k": (
+                    args.quantized_inverted_precompact_coverage_k
+                ),
+                "quantized_inverted_precompact_per_token_k": (
+                    args.quantized_inverted_precompact_per_token_k
+                ),
+                "quantized_inverted_compact_max_docs": (
+                    args.quantized_inverted_compact_max_docs
+                ),
+                "quantized_inverted_exact_rerank_grid": (
+                    args.quantized_inverted_exact_rerank_grid
+                ),
+                "quantized_inverted_exact_rerank_modes": (
+                    args.quantized_inverted_exact_rerank_modes
+                ),
+                "quantized_inverted_exact_rerank_focus_profile": (
+                    args.quantized_inverted_exact_rerank_focus_profile
+                ),
                 "query_limit": args.query_limit,
                 "include_quantized_inverted_experimental": (
                     args.include_quantized_inverted_experimental
@@ -36985,6 +39780,24 @@ def main() -> None:
             output["document_node_colbert_candidate_source_focus"] = (
                 document_node_colbert_candidate_source_focus
             )
+            if bool(
+                document_node_colbert_candidate_source_focus.get(
+                    "quantized_inverted_precompact_focus",
+                    False,
+                )
+            ):
+                output[
+                    "document_node_colbert_quantized_inverted_precompact_focus"
+                ] = document_node_colbert_candidate_source_focus
+            if bool(
+                document_node_colbert_candidate_source_focus.get(
+                    "quantized_inverted_exact_rerank_focus",
+                    False,
+                )
+            ):
+                output[
+                    "document_node_colbert_quantized_inverted_exact_rerank_focus"
+                ] = document_node_colbert_candidate_source_focus
         if document_node_serving_grid_oracle_quality_check is not None:
             output["document_node_serving_grid_oracle_quality_check"] = (
                 document_node_serving_grid_oracle_quality_check

@@ -182,6 +182,16 @@ char	   *pgturbohybrid_multivector_quantized_inverted_codebook_path = "";
 int			pgturbohybrid_multivector_quantized_inverted_codebook_top_m = 1;
 int			pgturbohybrid_multivector_quantized_inverted_compact_scoring =
 	PGTURBOHYBRID_MULTIVECTOR_QUANTIZED_INVERTED_COMPACT_SCORING_OFF;
+int			pgturbohybrid_multivector_quantized_inverted_compact_doc_order =
+	PGTURBOHYBRID_MULTIVECTOR_QUANTIZED_INVERTED_COMPACT_DOC_ORDER_DOCID;
+int			pgturbohybrid_multivector_quantized_inverted_query_codeword_kernel =
+	PGTURBOHYBRID_MULTIVECTOR_QUANTIZED_INVERTED_QUERY_CODEWORD_KERNEL_AUTO;
+int			pgturbohybrid_multivector_quantized_inverted_precompact =
+	PGTURBOHYBRID_MULTIVECTOR_QUANTIZED_INVERTED_PRECOMPACT_OFF;
+int			pgturbohybrid_multivector_quantized_inverted_precompact_score_k = 4096;
+int			pgturbohybrid_multivector_quantized_inverted_precompact_coverage_k = 512;
+int			pgturbohybrid_multivector_quantized_inverted_precompact_per_token_k = 16;
+int			pgturbohybrid_multivector_quantized_inverted_compact_max_docs = 6144;
 int			pgturbohybrid_multivector_quantized_inverted_token_coverage =
 	PGTURBOHYBRID_MULTIVECTOR_QUANTIZED_INVERTED_TOKEN_COVERAGE_OFF;
 int			pgturbohybrid_multivector_quantized_inverted_min_token_matches = 0;
@@ -453,6 +463,26 @@ static const struct config_enum_entry pgturbohybrid_multivector_quantized_invert
 static const struct config_enum_entry pgturbohybrid_multivector_quantized_inverted_compact_scoring_options[] = {
 	{"off", PGTURBOHYBRID_MULTIVECTOR_QUANTIZED_INVERTED_COMPACT_SCORING_OFF, false},
 	{"experimental", PGTURBOHYBRID_MULTIVECTOR_QUANTIZED_INVERTED_COMPACT_SCORING_EXPERIMENTAL, false},
+	{NULL, 0, false}
+};
+
+static const struct config_enum_entry pgturbohybrid_multivector_quantized_inverted_compact_doc_order_options[] = {
+	{"original", PGTURBOHYBRID_MULTIVECTOR_QUANTIZED_INVERTED_COMPACT_DOC_ORDER_ORIGINAL, false},
+	{"docid", PGTURBOHYBRID_MULTIVECTOR_QUANTIZED_INVERTED_COMPACT_DOC_ORDER_DOCID, false},
+	{NULL, 0, false}
+};
+
+static const struct config_enum_entry pgturbohybrid_multivector_quantized_inverted_query_codeword_kernel_options[] = {
+	{"auto", PGTURBOHYBRID_MULTIVECTOR_QUANTIZED_INVERTED_QUERY_CODEWORD_KERNEL_AUTO, false},
+	{"scalar", PGTURBOHYBRID_MULTIVECTOR_QUANTIZED_INVERTED_QUERY_CODEWORD_KERNEL_SCALAR, false},
+	{"blocked", PGTURBOHYBRID_MULTIVECTOR_QUANTIZED_INVERTED_QUERY_CODEWORD_KERNEL_BLOCKED, false},
+	{NULL, 0, false}
+};
+
+static const struct config_enum_entry pgturbohybrid_multivector_quantized_inverted_precompact_options[] = {
+	{"off", PGTURBOHYBRID_MULTIVECTOR_QUANTIZED_INVERTED_PRECOMPACT_OFF, false},
+	{"centroid_maxsim_topk", PGTURBOHYBRID_MULTIVECTOR_QUANTIZED_INVERTED_PRECOMPACT_CENTROID_MAXSIM_TOPK, false},
+	{"centroid_maxsim_reservoir", PGTURBOHYBRID_MULTIVECTOR_QUANTIZED_INVERTED_PRECOMPACT_CENTROID_MAXSIM_RESERVOIR, false},
 	{NULL, 0, false}
 };
 
@@ -1540,6 +1570,13 @@ typedef struct PgturbohybridLastScanStats
 	uint32		quantizedInvertedCodebookTopM;
 	uint64		quantizedInvertedAssignmentUs;
 	uint64		quantizedInvertedQueryCodewordScoreUs;
+	char		quantizedInvertedQueryCodewordKernel[16];
+	uint64		quantizedInvertedQueryCodewordScoresComputed;
+	uint64		quantizedInvertedQueryCodewordBlocks;
+	uint64		quantizedInvertedQueryCodewordTopkUs;
+	bool		quantizedInvertedQueryCodewordFullMatrixMaterialized;
+	uint32		quantizedInvertedQueryCodewordActiveQueryTokens;
+	uint32		quantizedInvertedQueryCodewordSkippedQueryTokens;
 	uint64		quantizedInvertedListOffsetBytes;
 	uint64		quantizedInvertedPostingBytes;
 	uint64		quantizedInvertedSidecarBytes;
@@ -1548,7 +1585,31 @@ typedef struct PgturbohybridLastScanStats
 	uint64		quantizedInvertedCompactScoreUs;
 	uint64		quantizedInvertedCompactDocsScored;
 	uint64		quantizedInvertedCompactPayloadBytes;
+	char		quantizedInvertedCompactDocOrder[16];
+	uint64		quantizedInvertedCompactInnerAllocations;
+	uint32		quantizedInvertedCompactActiveQueryTokens;
+	uint64		quantizedInvertedCompactPairsEvaluated;
+	uint64		quantizedInvertedCompactPairsSkipped;
+	uint64		quantizedInvertedCompactPrefetches;
+	double		quantizedInvertedCompactAvgDocTokens;
+	double		quantizedInvertedCompactUsPerDoc;
+	double		quantizedInvertedCompactPayloadBytesPerDoc;
 	bool		quantizedInvertedCompactTopKChangedVsScalar;
+	bool		quantizedInvertedPrecompactEnabled;
+	char		quantizedInvertedPrecompactMode[32];
+	uint32		quantizedInvertedDocsTouchedBeforePrecompact;
+	uint32		quantizedInvertedPrecompactScoreK;
+	uint32		quantizedInvertedPrecompactCoverageK;
+	uint32		quantizedInvertedPrecompactPerTokenK;
+	uint32		quantizedInvertedCompactMaxDocs;
+	uint32		quantizedInvertedPrecompactScoreDocs;
+	uint32		quantizedInvertedPrecompactCoverageDocs;
+	uint32		quantizedInvertedPrecompactPerTokenDocs;
+	uint32		quantizedInvertedPrecompactUnionDocs;
+	uint32		quantizedInvertedPrecompactDuplicates;
+	uint32		quantizedInvertedPrecompactPrunedDocs;
+	uint64		quantizedInvertedPrecompactUs;
+	uint32		quantizedInvertedCompactDocsSkippedByPrecompact;
 	char		quantizedInvertedTokenCoverageMode[24];
 	uint32		quantizedInvertedActiveQueryTokens;
 	uint64		quantizedInvertedTokenMatchesTotal;
@@ -2220,6 +2281,21 @@ PgturbohybridGetLastScanStatsSnapshot(PgturbohybridScanStatsSnapshot *stats)
 		pgturbohybrid_last_scan_state.quantizedInvertedAssignmentUs;
 	stats->quantizedInvertedQueryCodewordScoreUs =
 		pgturbohybrid_last_scan_state.quantizedInvertedQueryCodewordScoreUs;
+	strlcpy(stats->quantizedInvertedQueryCodewordKernel,
+			pgturbohybrid_last_scan_state.quantizedInvertedQueryCodewordKernel,
+			sizeof(stats->quantizedInvertedQueryCodewordKernel));
+	stats->quantizedInvertedQueryCodewordScoresComputed =
+		pgturbohybrid_last_scan_state.quantizedInvertedQueryCodewordScoresComputed;
+	stats->quantizedInvertedQueryCodewordBlocks =
+		pgturbohybrid_last_scan_state.quantizedInvertedQueryCodewordBlocks;
+	stats->quantizedInvertedQueryCodewordTopkUs =
+		pgturbohybrid_last_scan_state.quantizedInvertedQueryCodewordTopkUs;
+	stats->quantizedInvertedQueryCodewordFullMatrixMaterialized =
+		pgturbohybrid_last_scan_state.quantizedInvertedQueryCodewordFullMatrixMaterialized;
+	stats->quantizedInvertedQueryCodewordActiveQueryTokens =
+		pgturbohybrid_last_scan_state.quantizedInvertedQueryCodewordActiveQueryTokens;
+	stats->quantizedInvertedQueryCodewordSkippedQueryTokens =
+		pgturbohybrid_last_scan_state.quantizedInvertedQueryCodewordSkippedQueryTokens;
 	stats->quantizedInvertedListOffsetBytes =
 		pgturbohybrid_last_scan_state.quantizedInvertedListOffsetBytes;
 	stats->quantizedInvertedPostingBytes =
@@ -2238,8 +2314,58 @@ PgturbohybridGetLastScanStatsSnapshot(PgturbohybridScanStatsSnapshot *stats)
 		pgturbohybrid_last_scan_state.quantizedInvertedCompactDocsScored;
 	stats->quantizedInvertedCompactPayloadBytes =
 		pgturbohybrid_last_scan_state.quantizedInvertedCompactPayloadBytes;
+	strlcpy(stats->quantizedInvertedCompactDocOrder,
+			pgturbohybrid_last_scan_state.quantizedInvertedCompactDocOrder,
+			sizeof(stats->quantizedInvertedCompactDocOrder));
+	stats->quantizedInvertedCompactInnerAllocations =
+		pgturbohybrid_last_scan_state.quantizedInvertedCompactInnerAllocations;
+	stats->quantizedInvertedCompactActiveQueryTokens =
+		pgturbohybrid_last_scan_state.quantizedInvertedCompactActiveQueryTokens;
+	stats->quantizedInvertedCompactPairsEvaluated =
+		pgturbohybrid_last_scan_state.quantizedInvertedCompactPairsEvaluated;
+	stats->quantizedInvertedCompactPairsSkipped =
+		pgturbohybrid_last_scan_state.quantizedInvertedCompactPairsSkipped;
+	stats->quantizedInvertedCompactPrefetches =
+		pgturbohybrid_last_scan_state.quantizedInvertedCompactPrefetches;
+	stats->quantizedInvertedCompactAvgDocTokens =
+		pgturbohybrid_last_scan_state.quantizedInvertedCompactAvgDocTokens;
+	stats->quantizedInvertedCompactUsPerDoc =
+		pgturbohybrid_last_scan_state.quantizedInvertedCompactUsPerDoc;
+	stats->quantizedInvertedCompactPayloadBytesPerDoc =
+		pgturbohybrid_last_scan_state.quantizedInvertedCompactPayloadBytesPerDoc;
 	stats->quantizedInvertedCompactTopKChangedVsScalar =
 		pgturbohybrid_last_scan_state.quantizedInvertedCompactTopKChangedVsScalar;
+	stats->quantizedInvertedPrecompactEnabled =
+		pgturbohybrid_last_scan_state.quantizedInvertedPrecompactEnabled;
+	strlcpy(stats->quantizedInvertedPrecompactMode,
+			pgturbohybrid_last_scan_state.quantizedInvertedPrecompactMode,
+			sizeof(stats->quantizedInvertedPrecompactMode));
+	stats->quantizedInvertedDocsTouchedBeforePrecompact =
+		pgturbohybrid_last_scan_state.quantizedInvertedDocsTouchedBeforePrecompact;
+	stats->quantizedInvertedPrecompactScoreK =
+		pgturbohybrid_last_scan_state.quantizedInvertedPrecompactScoreK;
+	stats->quantizedInvertedPrecompactCoverageK =
+		pgturbohybrid_last_scan_state.quantizedInvertedPrecompactCoverageK;
+	stats->quantizedInvertedPrecompactPerTokenK =
+		pgturbohybrid_last_scan_state.quantizedInvertedPrecompactPerTokenK;
+	stats->quantizedInvertedCompactMaxDocs =
+		pgturbohybrid_last_scan_state.quantizedInvertedCompactMaxDocs;
+	stats->quantizedInvertedPrecompactScoreDocs =
+		pgturbohybrid_last_scan_state.quantizedInvertedPrecompactScoreDocs;
+	stats->quantizedInvertedPrecompactCoverageDocs =
+		pgturbohybrid_last_scan_state.quantizedInvertedPrecompactCoverageDocs;
+	stats->quantizedInvertedPrecompactPerTokenDocs =
+		pgturbohybrid_last_scan_state.quantizedInvertedPrecompactPerTokenDocs;
+	stats->quantizedInvertedPrecompactUnionDocs =
+		pgturbohybrid_last_scan_state.quantizedInvertedPrecompactUnionDocs;
+	stats->quantizedInvertedPrecompactDuplicates =
+		pgturbohybrid_last_scan_state.quantizedInvertedPrecompactDuplicates;
+	stats->quantizedInvertedPrecompactPrunedDocs =
+		pgturbohybrid_last_scan_state.quantizedInvertedPrecompactPrunedDocs;
+	stats->quantizedInvertedPrecompactUs =
+		pgturbohybrid_last_scan_state.quantizedInvertedPrecompactUs;
+	stats->quantizedInvertedCompactDocsSkippedByPrecompact =
+		pgturbohybrid_last_scan_state.quantizedInvertedCompactDocsSkippedByPrecompact;
 	strlcpy(stats->quantizedInvertedTokenCoverageMode,
 			pgturbohybrid_last_scan_state.quantizedInvertedTokenCoverageMode,
 			sizeof(stats->quantizedInvertedTokenCoverageMode));
@@ -6431,6 +6557,21 @@ PgturbohybridCollectScanResults(IndexScanDesc scan, PgturbohybridScanState *stat
 		denseStats.quantizedInvertedAssignmentUs;
 	lastStats.quantizedInvertedQueryCodewordScoreUs =
 		denseStats.quantizedInvertedQueryCodewordScoreUs;
+	strlcpy(lastStats.quantizedInvertedQueryCodewordKernel,
+			denseStats.quantizedInvertedQueryCodewordKernel,
+			sizeof(lastStats.quantizedInvertedQueryCodewordKernel));
+	lastStats.quantizedInvertedQueryCodewordScoresComputed =
+		denseStats.quantizedInvertedQueryCodewordScoresComputed;
+	lastStats.quantizedInvertedQueryCodewordBlocks =
+		denseStats.quantizedInvertedQueryCodewordBlocks;
+	lastStats.quantizedInvertedQueryCodewordTopkUs =
+		denseStats.quantizedInvertedQueryCodewordTopkUs;
+	lastStats.quantizedInvertedQueryCodewordFullMatrixMaterialized =
+		denseStats.quantizedInvertedQueryCodewordFullMatrixMaterialized;
+	lastStats.quantizedInvertedQueryCodewordActiveQueryTokens =
+		denseStats.quantizedInvertedQueryCodewordActiveQueryTokens;
+	lastStats.quantizedInvertedQueryCodewordSkippedQueryTokens =
+		denseStats.quantizedInvertedQueryCodewordSkippedQueryTokens;
 	lastStats.quantizedInvertedListOffsetBytes =
 		denseStats.quantizedInvertedListOffsetBytes;
 	lastStats.quantizedInvertedPostingBytes =
@@ -6449,8 +6590,58 @@ PgturbohybridCollectScanResults(IndexScanDesc scan, PgturbohybridScanState *stat
 		denseStats.quantizedInvertedCompactDocsScored;
 	lastStats.quantizedInvertedCompactPayloadBytes =
 		denseStats.quantizedInvertedCompactPayloadBytes;
+	strlcpy(lastStats.quantizedInvertedCompactDocOrder,
+			denseStats.quantizedInvertedCompactDocOrder,
+			sizeof(lastStats.quantizedInvertedCompactDocOrder));
+	lastStats.quantizedInvertedCompactInnerAllocations =
+		denseStats.quantizedInvertedCompactInnerAllocations;
+	lastStats.quantizedInvertedCompactActiveQueryTokens =
+		denseStats.quantizedInvertedCompactActiveQueryTokens;
+	lastStats.quantizedInvertedCompactPairsEvaluated =
+		denseStats.quantizedInvertedCompactPairsEvaluated;
+	lastStats.quantizedInvertedCompactPairsSkipped =
+		denseStats.quantizedInvertedCompactPairsSkipped;
+	lastStats.quantizedInvertedCompactPrefetches =
+		denseStats.quantizedInvertedCompactPrefetches;
+	lastStats.quantizedInvertedCompactAvgDocTokens =
+		denseStats.quantizedInvertedCompactAvgDocTokens;
+	lastStats.quantizedInvertedCompactUsPerDoc =
+		denseStats.quantizedInvertedCompactUsPerDoc;
+	lastStats.quantizedInvertedCompactPayloadBytesPerDoc =
+		denseStats.quantizedInvertedCompactPayloadBytesPerDoc;
 	lastStats.quantizedInvertedCompactTopKChangedVsScalar =
 		denseStats.quantizedInvertedCompactTopKChangedVsScalar;
+	lastStats.quantizedInvertedPrecompactEnabled =
+		denseStats.quantizedInvertedPrecompactEnabled;
+	strlcpy(lastStats.quantizedInvertedPrecompactMode,
+			denseStats.quantizedInvertedPrecompactMode,
+			sizeof(lastStats.quantizedInvertedPrecompactMode));
+	lastStats.quantizedInvertedDocsTouchedBeforePrecompact =
+		denseStats.quantizedInvertedDocsTouchedBeforePrecompact;
+	lastStats.quantizedInvertedPrecompactScoreK =
+		denseStats.quantizedInvertedPrecompactScoreK;
+	lastStats.quantizedInvertedPrecompactCoverageK =
+		denseStats.quantizedInvertedPrecompactCoverageK;
+	lastStats.quantizedInvertedPrecompactPerTokenK =
+		denseStats.quantizedInvertedPrecompactPerTokenK;
+	lastStats.quantizedInvertedCompactMaxDocs =
+		denseStats.quantizedInvertedCompactMaxDocs;
+	lastStats.quantizedInvertedPrecompactScoreDocs =
+		denseStats.quantizedInvertedPrecompactScoreDocs;
+	lastStats.quantizedInvertedPrecompactCoverageDocs =
+		denseStats.quantizedInvertedPrecompactCoverageDocs;
+	lastStats.quantizedInvertedPrecompactPerTokenDocs =
+		denseStats.quantizedInvertedPrecompactPerTokenDocs;
+	lastStats.quantizedInvertedPrecompactUnionDocs =
+		denseStats.quantizedInvertedPrecompactUnionDocs;
+	lastStats.quantizedInvertedPrecompactDuplicates =
+		denseStats.quantizedInvertedPrecompactDuplicates;
+	lastStats.quantizedInvertedPrecompactPrunedDocs =
+		denseStats.quantizedInvertedPrecompactPrunedDocs;
+	lastStats.quantizedInvertedPrecompactUs =
+		denseStats.quantizedInvertedPrecompactUs;
+	lastStats.quantizedInvertedCompactDocsSkippedByPrecompact =
+		denseStats.quantizedInvertedCompactDocsSkippedByPrecompact;
 	strlcpy(lastStats.quantizedInvertedTokenCoverageMode,
 			denseStats.quantizedInvertedTokenCoverageMode,
 			sizeof(lastStats.quantizedInvertedTokenCoverageMode));
@@ -8061,6 +8252,51 @@ PgturbohybridInit(void)
 							 PGTURBOHYBRID_MULTIVECTOR_QUANTIZED_INVERTED_COMPACT_SCORING_OFF,
 							 pgturbohybrid_multivector_quantized_inverted_compact_scoring_options,
 							 PGC_USERSET, 0, NULL, NULL, NULL);
+	DefineCustomEnumVariable("turbohybrid.multivector_quantized_inverted_compact_doc_order",
+							 "Experimental document order for quantized-inverted compact scoring",
+							 "docid scores the scan-local retained document set in ascending docId order to improve compact sidecar locality; original preserves posting-discovery order. Final SQL ranking remains exact heap MaxSim.",
+							 &pgturbohybrid_multivector_quantized_inverted_compact_doc_order,
+							 PGTURBOHYBRID_MULTIVECTOR_QUANTIZED_INVERTED_COMPACT_DOC_ORDER_DOCID,
+							 pgturbohybrid_multivector_quantized_inverted_compact_doc_order_options,
+							 PGC_USERSET, 0, NULL, NULL, NULL);
+	DefineCustomEnumVariable("turbohybrid.multivector_quantized_inverted_query_codeword_kernel",
+							 "Experimental query-codeword scoring kernel for quantized_inverted_experimental",
+							 "auto uses the blocked scalar codebook path where available; scalar is a reference path; blocked batches query-token/codeword dot products while maintaining the top probe codewords. Final SQL ranking remains exact heap MaxSim.",
+							 &pgturbohybrid_multivector_quantized_inverted_query_codeword_kernel,
+							 PGTURBOHYBRID_MULTIVECTOR_QUANTIZED_INVERTED_QUERY_CODEWORD_KERNEL_AUTO,
+							 pgturbohybrid_multivector_quantized_inverted_query_codeword_kernel_options,
+							 PGC_USERSET, 0, NULL, NULL, NULL);
+	DefineCustomEnumVariable("turbohybrid.multivector_quantized_inverted_precompact",
+							 "Experimental precompact document gate for quantized_inverted_experimental",
+							 "off preserves current compact scoring. centroid_maxsim_topk and centroid_maxsim_reservoir retain a bounded touched-document set using cheap query-codeword scores before full compact-code MaxSim admission; final SQL ranking remains exact heap MaxSim over retained candidates.",
+							 &pgturbohybrid_multivector_quantized_inverted_precompact,
+							 PGTURBOHYBRID_MULTIVECTOR_QUANTIZED_INVERTED_PRECOMPACT_OFF,
+							 pgturbohybrid_multivector_quantized_inverted_precompact_options,
+							 PGC_USERSET, 0, NULL, NULL, NULL);
+	DefineCustomIntVariable("turbohybrid.multivector_quantized_inverted_precompact_score_k",
+							"Top cheap-score document count retained by quantized-inverted precompact",
+							"Zero disables the score-count limit for centroid_maxsim_topk. The reservoir mode treats zero as no score-ranked contribution.",
+							&pgturbohybrid_multivector_quantized_inverted_precompact_score_k,
+							4096, 0, 10000000,
+							PGC_USERSET, 0, NULL, NULL, NULL);
+	DefineCustomIntVariable("turbohybrid.multivector_quantized_inverted_precompact_coverage_k",
+							"Top query-token coverage document count retained by quantized-inverted reservoir precompact",
+							"Only used by centroid_maxsim_reservoir.",
+							&pgturbohybrid_multivector_quantized_inverted_precompact_coverage_k,
+							512, 0, 10000000,
+							PGC_USERSET, 0, NULL, NULL, NULL);
+	DefineCustomIntVariable("turbohybrid.multivector_quantized_inverted_precompact_per_token_k",
+							"Per-query-token reservoir width retained by quantized-inverted reservoir precompact",
+							"Only used by centroid_maxsim_reservoir.",
+							&pgturbohybrid_multivector_quantized_inverted_precompact_per_token_k,
+							16, 0, 100000,
+							PGC_USERSET, 0, NULL, NULL, NULL);
+	DefineCustomIntVariable("turbohybrid.multivector_quantized_inverted_compact_max_docs",
+							"Maximum document count compact-scored after quantized-inverted reservoir precompact",
+							"Zero disables the final reservoir union clamp.",
+							&pgturbohybrid_multivector_quantized_inverted_compact_max_docs,
+							6144, 0, 10000000,
+							PGC_USERSET, 0, NULL, NULL, NULL);
 	DefineCustomEnumVariable("turbohybrid.multivector_quantized_inverted_token_coverage",
 							 "Experimental query-token coverage adjustment for quantized_inverted_experimental",
 							 "off preserves the existing summed compact-code admission score. linear multiplies the approximate document score by matched query-token coverage before exact heap MaxSim rerank.",

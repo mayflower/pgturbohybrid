@@ -119,14 +119,21 @@ BEGIN
 		'turbohybrid.multivector_plain_fallback_max_docs',
 		'turbohybrid.multivector_proxy_encoder',
 		'turbohybrid.multivector_quantized_inverted_codebook',
-					'turbohybrid.multivector_quantized_inverted_codebook_path',
-					'turbohybrid.multivector_quantized_inverted_codebook_top_m',
-						'turbohybrid.multivector_quantized_inverted_compact_scoring',
+						'turbohybrid.multivector_quantized_inverted_codebook_path',
+							'turbohybrid.multivector_quantized_inverted_codebook_top_m',
+							'turbohybrid.multivector_quantized_inverted_compact_doc_order',
+							'turbohybrid.multivector_quantized_inverted_compact_max_docs',
+							'turbohybrid.multivector_quantized_inverted_compact_scoring',
 						'turbohybrid.multivector_quantized_inverted_max_postings_per_token',
 						'turbohybrid.multivector_quantized_inverted_min_token_matches',
 						'turbohybrid.multivector_quantized_inverted_posting_selection',
+						'turbohybrid.multivector_quantized_inverted_precompact',
+						'turbohybrid.multivector_quantized_inverted_precompact_coverage_k',
+						'turbohybrid.multivector_quantized_inverted_precompact_per_token_k',
+						'turbohybrid.multivector_quantized_inverted_precompact_score_k',
 						'turbohybrid.multivector_quantized_inverted_probe_codewords_per_token',
 						'turbohybrid.multivector_quantized_inverted_pruning',
+						'turbohybrid.multivector_quantized_inverted_query_codeword_kernel',
 						'turbohybrid.multivector_quantized_inverted_token_coverage',
 				'turbohybrid.multivector_sparse_candidate_source',
 		'turbohybrid.multivector_subvector_k',
@@ -202,20 +209,27 @@ BEGIN
 		current_setting('turbohybrid.multivector_model_name') != '' OR
 		current_setting('turbohybrid.multivector_proxy_encoder') != 'normalized_mean' OR
 		current_setting('turbohybrid.multivector_quantized_inverted_codebook') != 'deterministic' OR
-			current_setting('turbohybrid.multivector_quantized_inverted_codebook_path') != '' OR
-			current_setting('turbohybrid.multivector_quantized_inverted_codebook_top_m') != '1' OR
+					current_setting('turbohybrid.multivector_quantized_inverted_codebook_path') != '' OR
+					current_setting('turbohybrid.multivector_quantized_inverted_codebook_top_m') != '1' OR
+					current_setting('turbohybrid.multivector_quantized_inverted_compact_doc_order') != 'docid' OR
 					current_setting('turbohybrid.multivector_quantized_inverted_compact_scoring') != 'off' OR
+						current_setting('turbohybrid.multivector_quantized_inverted_precompact') != 'off' OR
+						current_setting('turbohybrid.multivector_quantized_inverted_precompact_score_k') != '4096' OR
+						current_setting('turbohybrid.multivector_quantized_inverted_precompact_coverage_k') != '512' OR
+						current_setting('turbohybrid.multivector_quantized_inverted_precompact_per_token_k') != '16' OR
+						current_setting('turbohybrid.multivector_quantized_inverted_compact_max_docs') != '6144' OR
 						current_setting('turbohybrid.multivector_quantized_inverted_token_coverage') != 'off' OR
 						current_setting('turbohybrid.multivector_quantized_inverted_max_postings_per_token') != '0' OR
 						current_setting('turbohybrid.multivector_quantized_inverted_min_token_matches') != '0' OR
 						current_setting('turbohybrid.multivector_quantized_inverted_pruning') != 'off' OR
+						current_setting('turbohybrid.multivector_quantized_inverted_query_codeword_kernel') != 'auto' OR
 					current_setting('turbohybrid.multivector_quantized_inverted_probe_codewords_per_token') != '1' OR
 					current_setting('turbohybrid.multivector_quantized_inverted_posting_selection') != 'score_topk' OR
 				current_setting('turbohybrid.multivector_max_accumulator_mb') != '64' OR
 			current_setting('turbohybrid.multivector_debug_admission') != 'off' OR
 			current_setting('turbohybrid.multivector_debug_skip_query_tokens') != '' OR
 			current_setting('turbohybrid.multivector_debug_trace_limit') != '1000' THEN
-						RAISE EXCEPTION 'unexpected multivector defaults: doc %, query %, subvector %, unique %, raw %, adaptive %, branch_plan %, source %, centroid_lite_bitset_prefilter %, centroid_lite_bitset_min_token_matches %, centroid_lite_candidate_scoring %, centroid_lite_codeword_top_m %, centroid_lite_probe_centroids %, centroid_lite_posting_selection %, centroid_lite_score_drop_from_best %, centroid_lite_score_threshold %, centroid_lite_pruning %, bm25_injection %, sparse_source %, reservoirs %, coverage_reservoir_k %, fallback %, fallback_fraction %, fallback_max_docs %, per_token_reservoir_k %, docmap %, docs %, doc_graph_entry_sample_count %, doc_graph_search_ef %, doc_graph_oversampling %, doc_graph_rescore_k %, doc_storage %, doc_storage_cache %, rerank %, rerank_k %, allow_exact_symmetric_build %, exact_symmetric_build_max_docs %, learned_projection_checksum %, learned_projection_model %, learned_projection_path %, model %, proxy_encoder %, quantized_codebook %, quantized_codebook_path %, quantized_codebook_top_m %, quantized_compact_scoring %, quantized_token_coverage %, quantized_posting_limit %, quantized_min_token_matches %, quantized_pruning %, quantized_probe_codewords %, quantized_posting_selection %, accumulator_mb %, debug %, skip_tokens %, trace_limit %',
+						RAISE EXCEPTION 'unexpected multivector defaults: doc %, query %, subvector %, unique %, raw %, adaptive %, branch_plan %, source %, centroid_lite_bitset_prefilter %, centroid_lite_bitset_min_token_matches %, centroid_lite_candidate_scoring %, centroid_lite_codeword_top_m %, centroid_lite_probe_centroids %, centroid_lite_posting_selection %, centroid_lite_score_drop_from_best %, centroid_lite_score_threshold %, centroid_lite_pruning %, bm25_injection %, sparse_source %, reservoirs %, coverage_reservoir_k %, fallback %, fallback_fraction %, fallback_max_docs %, per_token_reservoir_k %, docmap %, docs %, doc_graph_entry_sample_count %, doc_graph_search_ef %, doc_graph_oversampling %, doc_graph_rescore_k %, doc_storage %, doc_storage_cache %, rerank %, rerank_k %, allow_exact_symmetric_build %, exact_symmetric_build_max_docs %, learned_projection_checksum %, learned_projection_model %, learned_projection_path %, model %, proxy_encoder %, quantized_codebook %, quantized_codebook_path %, quantized_codebook_top_m %, quantized_compact_doc_order %, quantized_compact_scoring %, quantized_token_coverage %, quantized_posting_limit %, quantized_min_token_matches %, quantized_pruning %, quantized_probe_codewords %, quantized_posting_selection %, accumulator_mb %, debug %, skip_tokens %, trace_limit %',
 				current_setting('turbohybrid.multivector_max_doc_vectors'),
 			current_setting('turbohybrid.multivector_max_query_vectors'),
 			current_setting('turbohybrid.multivector_subvector_k'),
@@ -258,10 +272,11 @@ BEGIN
 			current_setting('turbohybrid.multivector_learned_projection_path'),
 			current_setting('turbohybrid.multivector_model_name'),
 			current_setting('turbohybrid.multivector_proxy_encoder'),
-			current_setting('turbohybrid.multivector_quantized_inverted_codebook'),
-			current_setting('turbohybrid.multivector_quantized_inverted_codebook_path'),
-			current_setting('turbohybrid.multivector_quantized_inverted_codebook_top_m'),
-				current_setting('turbohybrid.multivector_quantized_inverted_compact_scoring'),
+				current_setting('turbohybrid.multivector_quantized_inverted_codebook'),
+				current_setting('turbohybrid.multivector_quantized_inverted_codebook_path'),
+				current_setting('turbohybrid.multivector_quantized_inverted_codebook_top_m'),
+					current_setting('turbohybrid.multivector_quantized_inverted_compact_doc_order'),
+					current_setting('turbohybrid.multivector_quantized_inverted_compact_scoring'),
 				current_setting('turbohybrid.multivector_quantized_inverted_token_coverage'),
 				current_setting('turbohybrid.multivector_quantized_inverted_max_postings_per_token'),
 				current_setting('turbohybrid.multivector_quantized_inverted_min_token_matches'),
