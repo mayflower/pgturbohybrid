@@ -12,7 +12,7 @@ permissions:
 jobs:
   zip:
     name: windows zip pg${{ matrix.postgres }}
-    runs-on: windows-2022
+    runs-on: windows-2025
     strategy:
       fail-fast: false
       matrix:
@@ -31,17 +31,24 @@ jobs:
           cd /d "%RUNNER_TEMP%\pgvector"
           for /f "usebackq tokens=*" %%i in (`"%ProgramFiles(x86)%\Microsoft Visual Studio\Installer\vswhere.exe" -latest -products * -requires Microsoft.VisualStudio.Component.VC.Tools.x86.x64 -property installationPath`) do set "VSINSTALLDIR=%%i"
           if not defined VSINSTALLDIR exit /b 1
-          call "%VSINSTALLDIR%\VC\Auxiliary\Build\vcvars64.bat" && ^
-          nmake /NOLOGO /F Makefile.win && ^
-          nmake /NOLOGO /F Makefile.win install
+          call "%VSINSTALLDIR%\VC\Auxiliary\Build\vcvars64.bat"
+          if errorlevel 1 exit /b 1
+          for /f "usebackq tokens=*" %%n in (`dir /b /s "%VSINSTALLDIR%\VC\Tools\MSVC\*\bin\Hostx64\x64\nmake.exe" 2^>nul`) do if not defined NMAKE set "NMAKE=%%n"
+          if not defined NMAKE exit /b 1
+          "%NMAKE%" /NOLOGO /F Makefile.win
+          if errorlevel 1 exit /b 1
+          "%NMAKE%" /NOLOGO /F Makefile.win install
 
       - name: Build pgturbohybrid
         shell: cmd
         run: |
           for /f "usebackq tokens=*" %%i in (`"%ProgramFiles(x86)%\Microsoft Visual Studio\Installer\vswhere.exe" -latest -products * -requires Microsoft.VisualStudio.Component.VC.Tools.x86.x64 -property installationPath`) do set "VSINSTALLDIR=%%i"
           if not defined VSINSTALLDIR exit /b 1
-          call "%VSINSTALLDIR%\VC\Auxiliary\Build\vcvars64.bat" && ^
-          nmake /NOLOGO /F Makefile.win
+          call "%VSINSTALLDIR%\VC\Auxiliary\Build\vcvars64.bat"
+          if errorlevel 1 exit /b 1
+          for /f "usebackq tokens=*" %%n in (`dir /b /s "%VSINSTALLDIR%\VC\Tools\MSVC\*\bin\Hostx64\x64\nmake.exe" 2^>nul`) do if not defined NMAKE set "NMAKE=%%n"
+          if not defined NMAKE exit /b 1
+          "%NMAKE%" /NOLOGO /F Makefile.win
 
       - name: Stage and zip
         shell: pwsh
