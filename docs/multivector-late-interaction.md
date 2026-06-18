@@ -391,17 +391,45 @@ Token-node indexes fail explicitly, plain fallback is bypassed when the source
 is selected, and there is no production on-disk compatibility promise; see
 `docs/dev/multivector-colbertsar-research.md`.
 For pure-ColBERT candidate-source focus runs with an explicit external
-codebook, the benchmark default is the measured compact path
-`quantized_inverted_external_centroid_only_compact_topk_128_probe_016_topm_01_score_bound`
-with candidate budget `8192` and exact heap MaxSim rerank K `512`; this is a
-benchmark default only, not a production SQL default. The score-bound pruning
-variant remains experimental and is selected here only as the current measured
-candidate-source focus path.
+codebook, named profiles encode the codebook source, posting caps, probe count,
+compact scoring mode, and exact rerank budget. These profiles are benchmark
+configurations only. They do not change SQL defaults, and they remain
+experimental until an acceptance report proves admission, qrel quality, latency,
+and work-counter gates on the target corpus.
 `exact_token_scan`, `exact_doc_scan`, and
 `doc_graph_prototype`
 are developer validation modes for separating token graph recall, token-top-K
 admission loss, exact document MaxSim, and document-level graph behavior. They
 are useful for benchmark diagnosis, not normal serving defaults.
+
+### ColBERT candidate-source metrics
+
+Every pure-ColBERT candidate-source row should be read in two layers:
+candidate admission first, exact heap MaxSim rerank second. A candidate source
+may be useful only if it admits relevant documents cheaply enough for the final
+exact rerank band. The final SQL order is still exact MaxSim over retained heap
+tuples; approximate proxy, centroid, or codeword scores are admission signals.
+
+Use these metric groups when comparing implementations:
+
+| Area | Fields |
+| --- | --- |
+| Latency | `p50_ms`, `p95_ms`, `p99_ms`, `qps`, `phase_total_time_us` |
+| Qrel quality | `recall@10`, `ndcg@10`, `mrr@10` |
+| Exact-oracle admission | `exact_top1_admission_rate`, `exact_top10_admission_recall`, `admission_evidence` |
+| Proxy graph admission | `proxy_candidates_returned`, `proxy_candidate_limit_effective`, `proxy_candidate_limit_source`, `proxy_graph_nodes_visited`, `proxy_graph_edges_visited`, `proxy_vector_score_time_us` |
+| Centroid-lite admission | `centroid_lists_visited`, `centroid_postings_touched`, `centroid_postings_selected`, `centroid_docs_touched`, `centroid_candidates`, `centroid_candidate_scoring` |
+| Centroid-lite filters | `centroid_bitset_docs_after_threshold`, `centroid_bitset_memory_bytes`, `centroid_upper_bound_docs_pruned`, `centroid_upper_bound_unsafe_fallbacks` |
+| Quantized-inverted admission | `quantized_inverted_postings_touched`, `quantized_inverted_docs_scored`, `quantized_inverted_candidates`, `quantized_inverted_precompact_pruned_docs` |
+| Compact code scoring | `quantized_inverted_compact_kernel`, `quantized_inverted_compact_score_us`, `quantized_inverted_compact_docs_scored`, `quantized_inverted_compact_pairs_evaluated`, `quantized_inverted_compact_pairs_skipped` |
+| Exact rerank | `multivector_exact_rerank_docs`, `multivector_exact_rerank_pairs`, `multivector_exact_kernel`, `multivector_exact_maxsim_rerank_time_us`, `multivector_exact_heap_fetch_time_us` |
+| Storage and cache | `multivector_doc_storage_kind`, `proxy_only_index`, `centroid_only_index`, `full_multivector_sidecar_available`, `multivector_doc_sidecar_bytes_touched`, `multivector_doc_sidecar_pages_read` |
+
+Interpret zero or near-zero `recall@10`/`ndcg@10` profiles as negative controls
+when qrels are available. Interpret missing exact admission separately: BEIR
+quality-only runs intentionally skip `exact_doc_scan`, while sampled-oracle
+runs label admission as `sampled_exact_oracle` and must report how many oracle
+queries were covered.
 
 `turbohybrid.multivector_plain_fallback = auto` switches to exact heap MaxSim
 when the estimated corpus is small enough or the requested candidate/rerank
