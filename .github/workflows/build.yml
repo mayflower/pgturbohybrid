@@ -331,7 +331,7 @@ jobs:
 
   windows:
     name: windows pg${{ matrix.postgres }} pgvector-${{ matrix.pgvector_ref }}
-    runs-on: windows-2025
+    runs-on: windows-2022
     strategy:
       fail-fast: false
       matrix:
