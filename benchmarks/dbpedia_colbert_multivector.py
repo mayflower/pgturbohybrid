@@ -460,11 +460,6 @@ DOCUMENT_NODE_COLBERT_CANDIDATE_SOURCE_FOCUS_EXPERIMENTAL_PROFILES = (
     "quantized_inverted_external_centroid_only_compact_topk_032_topm_02",
     "quantized_inverted_external_centroid_only_compact_topk_032_pool_050",
 )
-DOCUMENT_NODE_COLBERT_CANDIDATE_SOURCE_PREVIOUS_EXTERNAL_QUANTIZED_PROFILE = (
-    "quantized_inverted_external_centroid_only"
-    "_compact_topk_128_probe_016_topm_01"
-    "_score_bound"
-)
 DOCUMENT_NODE_COLBERT_CANDIDATE_SOURCE_DEFAULT_EXTERNAL_QUANTIZED_PROFILE = (
     "quantized_inverted_external_centroid_only"
     "_precompact_topk_8192_docid_rk512_topk"
@@ -474,8 +469,10 @@ DOCUMENT_NODE_COLBERT_CANDIDATE_SOURCE_DEFAULT_EXACT_RERANK_K = 512
 DOCUMENT_NODE_COLBERT_CANDIDATE_SOURCE_DEFAULT_QUANTIZED_CAPS = "128"
 DOCUMENT_NODE_COLBERT_CANDIDATE_SOURCE_DEFAULT_QUANTIZED_PROBES = "16"
 DOCUMENT_NODE_COLBERT_CANDIDATE_SOURCE_DEFAULT_QUANTIZED_TOP_MS = "1"
-DOCUMENT_NODE_COLBERT_QUANTIZED_INVERTED_PRECOMPACT_BASELINE_PROFILE = (
-    DOCUMENT_NODE_COLBERT_CANDIDATE_SOURCE_PREVIOUS_EXTERNAL_QUANTIZED_PROFILE
+DOCUMENT_NODE_COLBERT_QUANTIZED_INVERTED_ACCEPTANCE_BASELINE_PROFILE = (
+    "quantized_inverted_external_centroid_only"
+    "_compact_topk_128_probe_016_topm_01"
+    "_score_bound"
 )
 DOCUMENT_NODE_COLBERT_QUANTIZED_INVERTED_PRECOMPACT_SCORE_GRID = "2048,4096,6144,8192"
 DOCUMENT_NODE_COLBERT_QUANTIZED_INVERTED_PRECOMPACT_COVERAGE_K = 512
@@ -483,12 +480,8 @@ DOCUMENT_NODE_COLBERT_QUANTIZED_INVERTED_PRECOMPACT_PER_TOKEN_K = 16
 DOCUMENT_NODE_COLBERT_QUANTIZED_INVERTED_PRECOMPACT_COMPACT_DOC_GATE = 6000
 DOCUMENT_NODE_COLBERT_QUANTIZED_INVERTED_EXACT_RERANK_GRID = "256,384,512"
 DOCUMENT_NODE_COLBERT_QUANTIZED_INVERTED_EXACT_RERANK_MODES = "topk,adaptive"
-DOCUMENT_NODE_COLBERT_QUANTIZED_INVERTED_PROMOTED_PROFILE = (
-    "quantized_inverted_external_centroid_only_"
-    "precompact_topk_8192_docid_rk512_topk"
-)
 DOCUMENT_NODE_COLBERT_QUANTIZED_INVERTED_PRECOMPACT_BASELINE = {
-    "profile": DOCUMENT_NODE_COLBERT_QUANTIZED_INVERTED_PRECOMPACT_BASELINE_PROFILE,
+    "profile": DOCUMENT_NODE_COLBERT_QUANTIZED_INVERTED_ACCEPTANCE_BASELINE_PROFILE,
     "candidate_source": "quantized_inverted_experimental",
     "candidate_budget": 8192,
     "exact_rerank_k": 512,
@@ -11242,7 +11235,7 @@ def document_node_colbert_quantized_inverted_precompact_focus_profiles(
         document_node_colbert_candidate_source_focus=True,
         include_quantized_inverted_experimental=True,
         document_node_colbert_candidate_source_profiles=(
-            DOCUMENT_NODE_COLBERT_QUANTIZED_INVERTED_PRECOMPACT_BASELINE_PROFILE
+            DOCUMENT_NODE_COLBERT_QUANTIZED_INVERTED_ACCEPTANCE_BASELINE_PROFILE
         ),
         quantized_inverted_posting_caps=(
             DOCUMENT_NODE_COLBERT_CANDIDATE_SOURCE_DEFAULT_QUANTIZED_CAPS
@@ -11665,7 +11658,6 @@ def document_node_colbert_candidate_source_focus_profiles(
                     quantized_inverted_probe_codewords_per_token=default_probe,
                     quantized_inverted_posting_selection="score_topk",
                     quantized_inverted_compact_scoring="experimental",
-                    quantized_inverted_pruning="score_bound_experimental",
                     quantized_inverted_codebook="external",
                     quantized_inverted_codebook_top_m=default_top_m,
                     quantized_inverted_query_codeword_kernel="blocked",
@@ -15687,10 +15679,6 @@ def document_node_serving_summary_row(
             largest_work.get("quantized_inverted_candidates")
             or stats_sample.get("quantized_inverted_candidates")
         ),
-        "quantized_inverted_probe_codewords_per_token": (
-            largest_work.get("quantized_inverted_probe_codewords_per_token")
-            or stats_sample.get("quantized_inverted_probe_codewords_per_token")
-        ),
         "quantized_inverted_exact_rerank_docs": (
             largest_work.get("quantized_inverted_exact_rerank_docs")
             or stats_sample.get("quantized_inverted_exact_rerank_docs")
@@ -16758,7 +16746,6 @@ def serving_recommendation_row(row: dict[str, Any]) -> dict[str, Any]:
         "heap_exact_rerank_time_us": row.get("heap_exact_rerank_time_us"),
         "p95_ms_delta": row.get("p95_ms_delta"),
         "bm25_latency_delta_ms": row.get("bm25_latency_delta_ms"),
-        "index_bytes": row.get("index_bytes"),
         "profile_elapsed_ms": row.get("profile_elapsed_ms"),
         "index_build_elapsed_ms": row.get("index_build_elapsed_ms"),
         "index_signature": row.get("index_signature"),
@@ -22781,16 +22768,6 @@ def _self_check_document_node_colbert_candidate_source_focus() -> None:
         multivector_quantized_inverted_compact_max_docs=6144,
         multivector_quantized_inverted_query_codeword_kernel="auto",
     )
-    precompact_focus = bool(
-        getattr(args, "document_node_colbert_quantized_inverted_precompact_focus", False)
-    )
-    exact_rerank_focus = bool(
-        getattr(
-            args,
-            "document_node_colbert_quantized_inverted_exact_rerank_focus",
-            False,
-        )
-    )
     active_query_tokens = int(getattr(args, "max_query_vectors", 0) or 0)
     profiles = document_node_colbert_candidate_source_focus_profiles(
         args,
@@ -23326,10 +23303,7 @@ def _self_check_document_node_colbert_candidate_source_focus() -> None:
             default_external_profile.quantized_inverted_probe_codewords_per_token == 16
         )
         assert default_external_profile.quantized_inverted_codebook_top_m == 1
-        assert (
-            default_external_profile.quantized_inverted_pruning
-            == "score_bound_experimental"
-        )
+        assert default_external_profile.quantized_inverted_pruning == "off"
         assert (
             default_external_profile.quantized_inverted_query_codeword_kernel
             == "blocked"
@@ -23367,8 +23341,7 @@ def _self_check_document_node_colbert_candidate_source_focus() -> None:
             == 16
         )
         assert (
-            default_external_mode_args.multivector_quantized_inverted_pruning
-            == "score_bound_experimental"
+            default_external_mode_args.multivector_quantized_inverted_pruning == "off"
         )
         assert (
             default_external_mode_args.multivector_quantized_inverted_precompact
@@ -23381,25 +23354,6 @@ def _self_check_document_node_colbert_candidate_source_focus() -> None:
         assert (
             default_external_mode_args.multivector_quantized_inverted_compact_doc_order
             == "docid"
-        )
-        previous_external_args = clone_args(
-            default_external_args,
-            document_node_colbert_candidate_source_profiles=(
-                DOCUMENT_NODE_COLBERT_CANDIDATE_SOURCE_PREVIOUS_EXTERNAL_QUANTIZED_PROFILE
-            ),
-        )
-        previous_external_profiles = (
-            document_node_colbert_candidate_source_focus_profiles(
-                previous_external_args
-            )
-        )
-        assert [profile.name for profile in previous_external_profiles] == [
-            DOCUMENT_NODE_COLBERT_CANDIDATE_SOURCE_PREVIOUS_EXTERNAL_QUANTIZED_PROFILE
-        ]
-        assert previous_external_profiles[0].quantized_inverted_precompact == "off"
-        assert (
-            previous_external_profiles[0].quantized_inverted_pruning
-            == "score_bound_experimental"
         )
         precompact_args = clone_args(
             args,
@@ -24040,15 +23994,7 @@ def _self_check_document_node_colbert_candidate_source_focus() -> None:
         "rejection_reasons"
     ]
     assert (
-        acceptance_report_rejected["previous_default_quality"]
-        == DOCUMENT_NODE_COLBERT_CANDIDATE_SOURCE_PREVIOUS_EXTERNAL_QUANTIZED_PROFILE
-    )
-    assert (
-        acceptance_report_rejected["current_benchmark_default_profile"]
-        == DOCUMENT_NODE_COLBERT_CANDIDATE_SOURCE_DEFAULT_EXTERNAL_QUANTIZED_PROFILE
-    )
-    assert (
-        acceptance_report_rejected["experimental_default_quality_selected_despite_gate"]
+        acceptance_report_rejected["benchmark_default_profile"]
         == DOCUMENT_NODE_COLBERT_CANDIDATE_SOURCE_DEFAULT_EXTERNAL_QUANTIZED_PROFILE
     )
 
@@ -24074,7 +24020,7 @@ def _self_check_document_node_colbert_candidate_source_focus() -> None:
     assert acceptance_report_accepted["accepted"] is True
     assert (
         acceptance_report_accepted["experimental_default_quality_candidate"]
-        == DOCUMENT_NODE_COLBERT_QUANTIZED_INVERTED_PROMOTED_PROFILE
+        == DOCUMENT_NODE_COLBERT_CANDIDATE_SOURCE_DEFAULT_EXTERNAL_QUANTIZED_PROFILE
     )
     acceptance_markdown = markdown_quantized_inverted_default_quality_acceptance(
         acceptance_report_rejected
@@ -31072,24 +31018,16 @@ def run_quantized_inverted_default_quality_acceptance_report_from_rows(
         "best_exact_rerank_row": _quantized_acceptance_row_summary(best_exact),
         "selected_candidate_row": after,
         "recommended_profile_name": (
-            DOCUMENT_NODE_COLBERT_QUANTIZED_INVERTED_PROMOTED_PROFILE
+            DOCUMENT_NODE_COLBERT_CANDIDATE_SOURCE_DEFAULT_EXTERNAL_QUANTIZED_PROFILE
             if accepted
             else None
         ),
-        "previous_default_quality": (
-            DOCUMENT_NODE_COLBERT_CANDIDATE_SOURCE_PREVIOUS_EXTERNAL_QUANTIZED_PROFILE
-        ),
-        "current_benchmark_default_profile": (
+        "benchmark_default_profile": (
             DOCUMENT_NODE_COLBERT_CANDIDATE_SOURCE_DEFAULT_EXTERNAL_QUANTIZED_PROFILE
         ),
         "experimental_default_quality_candidate": (
-            DOCUMENT_NODE_COLBERT_QUANTIZED_INVERTED_PROMOTED_PROFILE
-            if accepted
-            else None
-        ),
-        "experimental_default_quality_selected_despite_gate": (
             DOCUMENT_NODE_COLBERT_CANDIDATE_SOURCE_DEFAULT_EXTERNAL_QUANTIZED_PROFILE
-            if not accepted
+            if accepted
             else None
         ),
         "accepted": accepted,
@@ -31125,10 +31063,8 @@ def markdown_quantized_inverted_default_quality_acceptance(
         "# Quantized Inverted Experimental Acceptance Report",
         "",
         f"- Accepted: `{bool(report.get('accepted'))}`",
-        f"- Previous default-quality profile: `{report.get('previous_default_quality')}`",
-        f"- Current benchmark default profile: `{report.get('current_benchmark_default_profile') or ''}`",
+        f"- Benchmark default profile: `{report.get('benchmark_default_profile') or ''}`",
         f"- Experimental default-quality candidate: `{report.get('experimental_default_quality_candidate') or ''}`",
-        f"- Selected despite gate: `{report.get('experimental_default_quality_selected_despite_gate') or ''}`",
         f"- Rejection reasons: `{','.join(str(item) for item in report.get('rejection_reasons', []))}`",
         "",
         "This report is evidence gating for the opt-in `quantized_inverted_experimental` branch. It does not make the branch a production default and final SQL ordering remains exact heap MaxSim.",
@@ -32942,7 +32878,7 @@ def markdown_benchmark_summary(report: dict[str, Any]) -> str:
             "### Quantized inverted precompact focus",
             "",
             f"- Pure ColBERT only: `{bool(precompact_focus.get('pure_colbert_only', False))}`",
-            f"- Candidate source: `quantized_inverted_experimental`",
+            "- Candidate source: `quantized_inverted_experimental`",
             f"- Admission evidence: `{precompact_focus.get('admission_evidence', '')}`",
             f"- Profiles: `{','.join(str(item) for item in precompact_focus.get('profiles', []))}`",
             f"- Candidate budgets: `{','.join(str(item) for item in precompact_focus.get('candidate_budgets', []))}`",
@@ -33074,7 +33010,7 @@ def markdown_benchmark_summary(report: dict[str, Any]) -> str:
             "### Quantized inverted exact rerank focus",
             "",
             f"- Pure ColBERT only: `{bool(exact_rerank_focus_report.get('pure_colbert_only', False))}`",
-            f"- Candidate source: `quantized_inverted_experimental`",
+            "- Candidate source: `quantized_inverted_experimental`",
             f"- Admission evidence: `{exact_rerank_focus_report.get('admission_evidence', '')}`",
             f"- Profiles: `{','.join(str(item) for item in exact_rerank_focus_report.get('profiles', []))}`",
             f"- Candidate budgets: `{','.join(str(item) for item in exact_rerank_focus_report.get('candidate_budgets', []))}`",
