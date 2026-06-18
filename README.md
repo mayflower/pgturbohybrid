@@ -151,17 +151,24 @@ ORDER BY colbert <~> turbohybrid_query(
 LIMIT 10;
 ```
 
-This path is intentionally narrow today:
+Current multivector contract:
 
-- dense-only multivector scans are supported;
-- `vector_query` and `multivector_query` cannot be mixed in one
+- dense-only multivector scans are supported with `multivector_query`;
+- `vector_query` and `multivector_query` are mutually exclusive in one
   `turbohybrid_query`;
-- hybrid multivector + text search is supported for document-level RRF fusion;
-- incremental insert/update expands each new multivector row into one graph
-  subnode per document vector and appends one BM25 delta when a lexical key is
-  present;
-- text input for `turbohybrid_multivector` remains intentionally unsupported;
-  construct values from `vector[]`.
+- hybrid multivector + `text_query` search is supported on two-key indexes with
+  a `tsvector` key. RRF and the normalized score-fusion modes `weighted`,
+  `fast_weighted`, `calibrated`, and `dbsf` are document-keyed; raw BM25 plus
+  raw MaxSim alpha fusion is rejected;
+- token-node indexes expand each row into one graph subnode per stored token
+  vector. Document-node indexes store one graph node per document and attach the
+  selected proxy, centroid, or sidecar payloads. Incremental insert/update
+  follows the same storage mode and appends BM25 delta data when a lexical key
+  is present;
+- textual literal input for `turbohybrid_multivector` remains intentionally
+  unsupported. Construct values from `vector[]`,
+  `turbohybrid_multivector_from_float4(...)`, or the context/field
+  constructors.
 
 Candidate collection is approximate: each query token searches the TurboQuant
 graph, then results are accumulated with document-level MaxSim. Tune the bounded
@@ -443,6 +450,68 @@ ORDER BY embedding <~> turbohybrid_query(
 )
 LIMIT 10;
 ```
+
+For tables that also store a ColBERT document column, use ColBERT as a reranker
+for a dense-vector + BM25 hybrid candidate set by keeping the first-stage hybrid
+query on the vector index and reranking only the bounded heap rows:
+
+```sql
+WITH q AS (
+    SELECT
+        turbohybrid_query(
+            vector_query => '[1,0,0]'::vector,
+            text_query => websearch_to_tsquery('english', 'postgres hybrid search'),
+            dense_k => 200,
+            bm25_k => 200,
+            final_k => 200
+        ) AS hybrid_query,
+        turbohybrid_multivector(ARRAY[
+            '[1,0,0]'::vector,
+            '[0,1,0]'::vector
+        ]) AS colbert_query
+),
+candidates AS MATERIALIZED (
+    SELECT d.id, d.body, d.colbert
+    FROM documents d, q
+    ORDER BY d.embedding <~> q.hybrid_query
+    LIMIT 200
+)
+SELECT c.id, c.body
+FROM candidates c, q
+ORDER BY turbohybrid_multivector_maxsim(q.colbert_query, c.colbert) DESC
+LIMIT 10;
+```
+
+This is the supported shape for ColBERT reranking a vector+BM25 hybrid today:
+`vector_query` and `multivector_query` still remain mutually exclusive inside
+one `turbohybrid_query`, so the reranker query is passed to the scalar MaxSim
+function instead of being mixed into the first-stage index payload.
+
+Current DBpedia ColBERT benchmark evidence for this pattern is positive but
+still bounded by the first-stage candidate window. With a dense+BM25 RRF
+first-stage window of 200 candidates and exact ColBERT MaxSim reranking over
+that window, top-10 quality changed as follows:
+
+| corpus | stage | recall@10 | ndcg@10 | mrr@10 | map@10 |
+|---|---|---:|---:|---:|---:|
+| 50k docs / 25 queries | RRF first stage | 0.188000 | 0.135688 | 0.240000 | - |
+| 50k docs / 25 queries | exact ColBERT rerank | 0.308000 | 0.251833 | 0.460000 | - |
+| 1M docs / 381 queries | RRF first stage | 0.098838 | 0.072247 | 0.120932 | 0.041474 |
+| 1M docs / 381 queries | exact ColBERT rerank | 0.128778 | 0.132511 | 0.241557 | 0.106777 |
+
+On the 1M run, exact ColBERT reranking improved recall@10 by `30.3%`,
+ndcg@10 by `83.4%`, mrr@10 by `99.7%`, and map@10 by `157.5%` relative to
+the RRF candidate ordering. The measured full-path latency for RRF retrieval
+plus exact ColBERT rerank over 200 candidates was p50 `30.745 ms`, p95
+`148.354 ms`, and p99 `367.001 ms` over 381 queries. The corresponding 50k
+run measured p50 `63.966 ms`, p95 `156.849 ms`, and p99 `483.225 ms` over 25
+queries.
+
+Treat these numbers as benchmark evidence for the rerank workflow, not as a
+default serving profile: this mode computes BEIR/qrel quality only and does not
+run a full exact MaxSim admission oracle. Recall is also limited by the RRF
+candidate window, so larger windows should be benchmarked when higher recall is
+the target.
 
 `text_query` requires a turbohybrid index with a `tsvector` key. A dense-only
 index accepts vector queries and rejects text or vector+text queries with a clear

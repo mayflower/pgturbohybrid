@@ -237,6 +237,51 @@ reported in `hybrid_budget_reason`, for example
 `admission_exact_dense_reduce_bm25`, or
 `admission_truncated_keep_bm25`.
 
+## ColBERT Reranking For Vector + BM25 Hybrid
+
+The native multivector hybrid path above uses ColBERT/MaxSim as the dense
+candidate branch. A different and often useful shape is:
+
+1. run the existing single-vector + BM25 hybrid index scan;
+2. keep a bounded candidate window;
+3. exact-rerank only those heap rows with ColBERT MaxSim.
+
+Use a materialized candidate CTE for that shape:
+
+```sql
+WITH q AS (
+  SELECT
+    turbohybrid_query(
+      vector_query => $1::vector,
+      text_query => websearch_to_tsquery('english', $2),
+      dense_k => 200,
+      bm25_k => 200,
+      final_k => 200
+    ) AS hybrid_query,
+    $3::turbohybrid_multivector AS colbert_query
+),
+candidates AS MATERIALIZED (
+  SELECT p.id, p.colbert
+  FROM passages p, q
+  ORDER BY p.embedding <~> q.hybrid_query
+  LIMIT 200
+)
+SELECT c.id
+FROM candidates c, q
+ORDER BY turbohybrid_multivector_maxsim(q.colbert_query, c.colbert) DESC
+LIMIT 10;
+```
+
+This keeps the first-stage index payload unambiguous: `vector_query` and
+`multivector_query` are still mutually exclusive in one `turbohybrid_query`.
+The ColBERT reranker query is passed to the scalar MaxSim function and therefore
+does not change the vector+BM25 fusion semantics. The final SQL ordering in the
+outer query is exact heap MaxSim over the retained candidate window.
+
+The candidate window is the quality/latency knob. Larger `dense_k`, `bm25_k`,
+`final_k`, and CTE `LIMIT` values give the reranker more documents to rescue but
+increase heap fetch and MaxSim work.
+
 ## Tuning Knobs
 
 Approximate candidate collection:
@@ -1049,11 +1094,15 @@ For resident-cache sizing, `turbohybrid_estimate_memory(index)` reports
   normalized token vectors while still using dot-product MaxSim internally.
 - `turbohybrid_query` cannot contain both `vector_query` and
   `multivector_query`.
-- Incremental insert/update into a multivector TurboHybrid index expands the new
-  tuple into one graph subnode per document vector. Hybrid indexes append one
-  BM25 delta for the inserted document when the lexical key is non-null.
-- Hybrid multivector search currently supports document-level RRF. Treat other
-  fusion modes as unsupported unless tests and docs for that mode say otherwise.
+- Incremental insert/update into a token-node multivector TurboHybrid index
+  expands the new tuple into one graph subnode per stored token vector.
+  Document-node indexes store one graph node per document and the selected
+  proxy, centroid, or sidecar payloads. Hybrid indexes append one BM25 delta for
+  the inserted document when the lexical key is non-null.
+- Hybrid multivector search is document-keyed. RRF is supported, and the
+  normalized score-fusion modes `weighted`, `fast_weighted`, `calibrated`, and
+  `dbsf` are supported where documented. Raw BM25 plus raw MaxSim alpha fusion
+  remains rejected.
 - SIMD MaxSim kernels are optional; scalar is always available and defines the
   semantics. SIMD-enabled builds may dispatch to AVX-512F, AVX2, or NEON exact
   rerank kernels.
