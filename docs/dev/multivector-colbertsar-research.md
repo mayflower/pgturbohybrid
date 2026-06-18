@@ -267,9 +267,8 @@ p95 from `117.839 ms` to `69.828 ms` and compact scoring from `13751 us` to
 `6007 us`, while improving Recall@10 from `0.348762` to `0.459810` and
 NDCG@10 from `0.306454` to `0.389044`. The caveat remains: top-1 admission
 was `0.76`, top-10 admission was `0.604`, and compact scoring still touched
-`8192` documents. The previous measured comparison profile remains explicitly
-experimental and selectable:
-`quantized_inverted_external_centroid_only_compact_topk_128_probe_016_topm_01_score_bound`.
+`8192` documents. Score-bound pruning remains an explicit experimental
+diagnostic, not part of the default candidate-source focus profile.
 
 ## Reported Fields
 

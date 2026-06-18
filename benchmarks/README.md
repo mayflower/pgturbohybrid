@@ -345,9 +345,8 @@ multivector sidecar; use explicit
 `--document-node-colbert-candidate-source-profiles` and
 `--quantized-inverted-posting-caps` / `--quantized-inverted-probes` only when
 running diagnostics instead of the locked comparison path. Score-bound pruning
-remains experimental and is still available through the previous comparison
-profile
-`quantized_inverted_external_centroid_only_compact_topk_128_probe_016_topm_01_score_bound`.
+remains an explicit experimental diagnostic; it is not part of the default
+candidate-source focus profile.
 The sampled codebook builder does not build an index, run retrieval, or train
 inside PostgreSQL; it is an offline benchmark utility for producing the current
 `pgturbohybrid_quantized_inverted_codebook_v1` text format.

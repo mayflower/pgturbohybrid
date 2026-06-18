@@ -188,10 +188,14 @@ int			pgturbohybrid_multivector_quantized_inverted_query_codeword_kernel =
 	PGTURBOHYBRID_MULTIVECTOR_QUANTIZED_INVERTED_QUERY_CODEWORD_KERNEL_AUTO;
 int			pgturbohybrid_multivector_quantized_inverted_precompact =
 	PGTURBOHYBRID_MULTIVECTOR_QUANTIZED_INVERTED_PRECOMPACT_OFF;
-int			pgturbohybrid_multivector_quantized_inverted_precompact_score_k = 4096;
-int			pgturbohybrid_multivector_quantized_inverted_precompact_coverage_k = 512;
-int			pgturbohybrid_multivector_quantized_inverted_precompact_per_token_k = 16;
-int			pgturbohybrid_multivector_quantized_inverted_compact_max_docs = 6144;
+int			pgturbohybrid_multivector_quantized_inverted_precompact_score_k =
+	4096;
+int			pgturbohybrid_multivector_quantized_inverted_precompact_coverage_k =
+	512;
+int			pgturbohybrid_multivector_quantized_inverted_precompact_per_token_k =
+	16;
+int			pgturbohybrid_multivector_quantized_inverted_compact_max_docs =
+	6144;
 int			pgturbohybrid_multivector_quantized_inverted_token_coverage =
 	PGTURBOHYBRID_MULTIVECTOR_QUANTIZED_INVERTED_TOKEN_COVERAGE_OFF;
 int			pgturbohybrid_multivector_quantized_inverted_min_token_matches = 0;

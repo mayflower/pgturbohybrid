@@ -17159,11 +17159,11 @@ PgturbohybridMultiVectorDocumentNodeScan(IndexScanDesc scan,
 			PgturbohybridGraphMultiVectorQuantizedPostingEntry *postings;
 			uint32	   *listOffsets;
 			double	   *docScores;
-				double	   *docBest;
-				uint32	   *docBestGeneration;
-				uint16	   *docTokenMatches = NULL;
-				bool	   *docMatched;
-				uint32	   *matchedDocIds;
+			double	   *docBest;
+			uint32	   *docBestGeneration;
+			uint16	   *docTokenMatches = NULL;
+			bool	   *docMatched;
+			uint32	   *matchedDocIds;
 			uint32	   *touchedDocIds;
 			float	   *queryCodewordScores = NULL;
 			uint32	   *queryProbeCodewords = NULL;
@@ -17213,16 +17213,16 @@ PgturbohybridMultiVectorDocumentNodeScan(IndexScanDesc scan,
 			docBest =
 				palloc0(sizeof(double) *
 						(Size) Max(meta->tqMultivectorDocCount, 1U));
-				docBestGeneration =
-					palloc0(sizeof(uint32) *
+			docBestGeneration =
+				palloc0(sizeof(uint32) *
+						(Size) Max(meta->tqMultivectorDocCount, 1U));
+			if (quantizedInvertedNeedsTokenMatches)
+				docTokenMatches =
+					palloc0(sizeof(uint16) *
 							(Size) Max(meta->tqMultivectorDocCount, 1U));
-				if (quantizedInvertedNeedsTokenMatches)
-					docTokenMatches =
-						palloc0(sizeof(uint16) *
-								(Size) Max(meta->tqMultivectorDocCount, 1U));
-				docMatched =
-					palloc0(sizeof(bool) *
-							(Size) Max(meta->tqMultivectorDocCount, 1U));
+			docMatched =
+				palloc0(sizeof(bool) *
+						(Size) Max(meta->tqMultivectorDocCount, 1U));
 			matchedDocIds =
 				palloc0(sizeof(uint32) *
 						(Size) Max(meta->tqMultivectorDocCount, 1U));
@@ -17239,8 +17239,8 @@ PgturbohybridMultiVectorDocumentNodeScan(IndexScanDesc scan,
 
 				precompactPerTokenSelected =
 					palloc0(PgturbohybridGraphArrayAllocSize(
-															sizeof(PgturbohybridMultiVectorPostingScoreCandidate),
-															perTokenSlots));
+						sizeof(PgturbohybridMultiVectorPostingScoreCandidate),
+						perTokenSlots));
 				precompactPerTokenCounts =
 					palloc0(PgturbohybridGraphArrayAllocSize(sizeof(uint32),
 															 (Size) query->count));
@@ -17427,11 +17427,11 @@ PgturbohybridMultiVectorDocumentNodeScan(IndexScanDesc scan,
 				double		weight =
 					queryWeights != NULL ? (double) queryWeights[qi] : 1.0;
 
-					if (queryMask != NULL && queryMask[qi])
-						continue;
-					quantizedInvertedActiveQueryTokens++;
-					probeCodewords =
-						palloc0(sizeof(uint32) * (Size) probeLimit);
+				if (queryMask != NULL && queryMask[qi])
+					continue;
+				quantizedInvertedActiveQueryTokens++;
+				probeCodewords =
+					palloc0(sizeof(uint32) * (Size) probeLimit);
 				if (quantizedInvertedCompactScoring &&
 					queryCodewordScores != NULL)
 				{
@@ -17881,38 +17881,38 @@ PgturbohybridMultiVectorDocumentNodeScan(IndexScanDesc scan,
 				{
 					uint32		docId = touchedDocIds[touchedIndex];
 
-						if (docBest[docId] <= -DBL_MAX)
-							continue;
-						if (!docMatched[docId])
-						{
-							docMatched[docId] = true;
-							matchedDocIds[matchedDocCount++] = docId;
-						}
-						docScores[docId] += weight * docBest[docId];
-						if (precompactPerTokenSelected != NULL &&
-							precompactPerTokenCounts != NULL &&
-							quantizedInvertedPrecompactPerTokenK > 0)
-						{
-							PgturbohybridMultiVectorPostingScoreCandidate scored;
-							PgturbohybridMultiVectorPostingScoreCandidate *selected =
-								precompactPerTokenSelected +
-								(Size) qi *
-								(Size) quantizedInvertedPrecompactPerTokenK;
-
-							scored.docId = docId;
-							scored.ordinal = (uint32) qi;
-							scored.score = weight * docBest[docId];
-							PgturbohybridMultiVectorPostingScoreCandidateOffer(
-																			  selected,
-																			  &precompactPerTokenCounts[qi],
-																			  quantizedInvertedPrecompactPerTokenK,
-																			  &scored);
-						}
-						if (docTokenMatches != NULL &&
-							docTokenMatches[docId] < UINT16_MAX)
-							docTokenMatches[docId]++;
-						}
+					if (docBest[docId] <= -DBL_MAX)
+						continue;
+					if (!docMatched[docId])
+					{
+						docMatched[docId] = true;
+						matchedDocIds[matchedDocCount++] = docId;
 					}
+					docScores[docId] += weight * docBest[docId];
+					if (precompactPerTokenSelected != NULL &&
+						precompactPerTokenCounts != NULL &&
+						quantizedInvertedPrecompactPerTokenK > 0)
+					{
+						PgturbohybridMultiVectorPostingScoreCandidate scored;
+						PgturbohybridMultiVectorPostingScoreCandidate *selected =
+							precompactPerTokenSelected +
+							(Size) qi *
+							(Size) quantizedInvertedPrecompactPerTokenK;
+
+						scored.docId = docId;
+						scored.ordinal = (uint32) qi;
+						scored.score = weight * docBest[docId];
+						PgturbohybridMultiVectorPostingScoreCandidateOffer(
+							selected,
+							&precompactPerTokenCounts[qi],
+							quantizedInvertedPrecompactPerTokenK,
+							&scored);
+					}
+					if (docTokenMatches != NULL &&
+						docTokenMatches[docId] < UINT16_MAX)
+						docTokenMatches[docId]++;
+				}
+			}
 
 			quantizedInvertedDocsTouchedBeforePrecompact = matchedDocCount;
 			if (quantizedInvertedPrecompactEnabled && matchedDocCount > 0)
@@ -17949,10 +17949,10 @@ PgturbohybridMultiVectorDocumentNodeScan(IndexScanDesc scan,
 							 matchedIndex < matchedDocCount;
 							 matchedIndex++)
 							PgturbohybridMultiVectorPrecompactMarkDoc(
-																	  precompactKeep,
-																	  rankedDocs[matchedIndex].docId,
-																	  &quantizedInvertedPrecompactUnionDocs,
-																	  &quantizedInvertedPrecompactDuplicates);
+								precompactKeep,
+								rankedDocs[matchedIndex].docId,
+								&quantizedInvertedPrecompactUnionDocs,
+								&quantizedInvertedPrecompactDuplicates);
 					}
 					else
 					{
@@ -17965,10 +17965,10 @@ PgturbohybridMultiVectorDocumentNodeScan(IndexScanDesc scan,
 							  PgturbohybridMultiVectorPrecompactDocScoreCompare);
 						for (uint32 i = 0; i < limit; i++)
 							PgturbohybridMultiVectorPrecompactMarkDoc(
-																	  precompactKeep,
-																	  rankedDocs[i].docId,
-																	  &quantizedInvertedPrecompactUnionDocs,
-																	  &quantizedInvertedPrecompactDuplicates);
+								precompactKeep,
+								rankedDocs[i].docId,
+								&quantizedInvertedPrecompactUnionDocs,
+								&quantizedInvertedPrecompactDuplicates);
 						quantizedInvertedPrecompactScoreDocs = limit;
 					}
 					if (quantizedInvertedPrecompactScoreDocs == 0)
@@ -17988,10 +17988,10 @@ PgturbohybridMultiVectorDocumentNodeScan(IndexScanDesc scan,
 							  PgturbohybridMultiVectorPrecompactDocScoreCompare);
 						for (uint32 i = 0; i < limit; i++)
 							PgturbohybridMultiVectorPrecompactMarkDoc(
-																	  precompactKeep,
-																	  rankedDocs[i].docId,
-																	  &quantizedInvertedPrecompactUnionDocs,
-																	  &quantizedInvertedPrecompactDuplicates);
+								precompactKeep,
+								rankedDocs[i].docId,
+								&quantizedInvertedPrecompactUnionDocs,
+								&quantizedInvertedPrecompactDuplicates);
 						quantizedInvertedPrecompactScoreDocs = limit;
 					}
 					if (quantizedInvertedPrecompactCoverageK > 0 &&
@@ -18006,10 +18006,10 @@ PgturbohybridMultiVectorDocumentNodeScan(IndexScanDesc scan,
 							  PgturbohybridMultiVectorPrecompactDocCoverageCompare);
 						for (uint32 i = 0; i < limit; i++)
 							PgturbohybridMultiVectorPrecompactMarkDoc(
-																	  precompactKeep,
-																	  rankedDocs[i].docId,
-																	  &quantizedInvertedPrecompactUnionDocs,
-																	  &quantizedInvertedPrecompactDuplicates);
+								precompactKeep,
+								rankedDocs[i].docId,
+								&quantizedInvertedPrecompactUnionDocs,
+								&quantizedInvertedPrecompactDuplicates);
 						quantizedInvertedPrecompactCoverageDocs = limit;
 					}
 					if (precompactPerTokenSelected != NULL &&
@@ -18028,10 +18028,10 @@ PgturbohybridMultiVectorDocumentNodeScan(IndexScanDesc scan,
 								selectedCount;
 							for (uint32 i = 0; i < selectedCount; i++)
 								PgturbohybridMultiVectorPrecompactMarkDoc(
-																		  precompactKeep,
-																		  selected[i].docId,
-																		  &quantizedInvertedPrecompactUnionDocs,
-																		  &quantizedInvertedPrecompactDuplicates);
+									precompactKeep,
+									selected[i].docId,
+									&quantizedInvertedPrecompactUnionDocs,
+									&quantizedInvertedPrecompactDuplicates);
 						}
 					}
 					if (quantizedInvertedCompactMaxDocs > 0 &&
@@ -18066,10 +18066,10 @@ PgturbohybridMultiVectorDocumentNodeScan(IndexScanDesc scan,
 						quantizedInvertedPrecompactUnionDocs = 0;
 						for (uint32 i = 0; i < limit; i++)
 							PgturbohybridMultiVectorPrecompactMarkDoc(
-																	  precompactKeep,
-																	  rankedDocs[i].docId,
-																	  &quantizedInvertedPrecompactUnionDocs,
-																	  &quantizedInvertedPrecompactDuplicates);
+								precompactKeep,
+								rankedDocs[i].docId,
+								&quantizedInvertedPrecompactUnionDocs,
+								&quantizedInvertedPrecompactDuplicates);
 					}
 				}
 				if (quantizedInvertedPrecompactUnionDocs < matchedDocCount)
@@ -18133,9 +18133,9 @@ PgturbohybridMultiVectorDocumentNodeScan(IndexScanDesc scan,
 				else
 					compactDocCount = matchedDocCount;
 
-			for (uint32 matchedIndex = 0; matchedIndex < compactDocCount;
-				 matchedIndex++)
-			{
+				for (uint32 matchedIndex = 0; matchedIndex < compactDocCount;
+					 matchedIndex++)
+				{
 					uint32		docId = compactDocIds != NULL ?
 						compactDocIds[matchedIndex] : matchedDocIds[matchedIndex];
 					TqMultiVectorDocMapEntry *docEntry;
@@ -18251,14 +18251,14 @@ PgturbohybridMultiVectorDocumentNodeScan(IndexScanDesc scan,
 					candidate.distance = -candidateScore;
 					candidate.similarity =
 						queryWeightSum > 0.0 ? candidateScore / queryWeightSum : 0.0;
-				candidate.rank = 0;
-				candidate.hasDocId = true;
-				candidate.exactScored = false;
-				PgturbohybridMultiVectorCandidateHeapOffer(candidates,
-														  &docCount,
-														  candidateLimit,
-														  &candidate);
-			}
+					candidate.rank = 0;
+					candidate.hasDocId = true;
+					candidate.exactScored = false;
+					PgturbohybridMultiVectorCandidateHeapOffer(candidates,
+															  &docCount,
+															  candidateLimit,
+															  &candidate);
+				}
 				if (compactDocIds != NULL)
 					pfree(compactDocIds);
 			}
@@ -18303,92 +18303,92 @@ PgturbohybridMultiVectorDocumentNodeScan(IndexScanDesc scan,
 				pfree(quantizedInvertedCompactBatchScores);
 				quantizedInvertedCompactBatchScores = NULL;
 			}
-			}
-			else if (centroidLite)
+		}
+		else if (centroidLite)
+		{
+			PgturbohybridGraphMultiVectorCentroidPostingEntry *postings;
+			uint32	   *listOffsets;
+			double	   *docScores;
+			double	   *docBest;
+			uint32	   *docBestGeneration;
+			bool	   *docMatched;
+			uint32	   *matchedDocIds;
+			uint32	   *touchedDocIds;
+			uint8	   *centroidBitset = NULL;
+			uint16	   *centroidBitsetTokenMatches = NULL;
+			uint16	   *centroidScoreBoundTokenMatches = NULL;
+			Size		centroidBitsetBytes = 0;
+			float	   *queryCodewordScores = NULL;
+			double	   *queryScoreBoundPrefix = NULL;
+			uint32		queryScoreBoundTokenCount = 0;
+			uint32		codebookSize;
+			uint32		matchedDocCount = 0;
+			uint64		centroidPostingsTouched = 0;
+			uint32		denseDocCount;
+
+			if (collectPhaseStats)
+				INSTR_TIME_SET_CURRENT(subphaseStart);
+			codebookSize = storage.multivectorCentroidPostingCodebookSize;
+			postings = storage.multivectorCentroidPostings;
+			listOffsets = storage.multivectorCentroidPostingListOffsets;
+			if (codebookSize != (uint32) query->dim * 2U ||
+				postings == NULL ||
+				listOffsets == NULL)
+				ereport(ERROR,
+						(errcode(ERRCODE_INDEX_CORRUPTED),
+						 errmsg("document-node centroid_lite posting sidecar is invalid"),
+						 errhint("REINDEX with multivector_graph = document_nodes and multivector_centroids = kmeans to rebuild persisted centroid posting tuples.")));
+			if (centroidLiteCodewordMaxsimScoring)
+			{
+				Size		scoreCount =
+					(Size) query->count * (Size) codebookSize;
+
+				queryCodewordScores =
+					palloc(sizeof(float) * Max(scoreCount, (Size) 1));
+				for (int32 qi = 0; qi < query->count; qi++)
 				{
-					PgturbohybridGraphMultiVectorCentroidPostingEntry *postings;
-					uint32	   *listOffsets;
-					double	   *docScores;
-					double	   *docBest;
-					uint32	   *docBestGeneration;
-					bool	   *docMatched;
-					uint32	   *matchedDocIds;
-					uint32	   *touchedDocIds;
-					uint8	   *centroidBitset = NULL;
-					uint16	   *centroidBitsetTokenMatches = NULL;
-					uint16	   *centroidScoreBoundTokenMatches = NULL;
-					Size		centroidBitsetBytes = 0;
-					float	   *queryCodewordScores = NULL;
-					double	   *queryScoreBoundPrefix = NULL;
-					uint32		queryScoreBoundTokenCount = 0;
-					uint32		codebookSize;
-					uint32		matchedDocCount = 0;
-					uint64		centroidPostingsTouched = 0;
-					uint32		denseDocCount;
+					float	   *tokenScores =
+						queryCodewordScores + (Size) qi * (Size) codebookSize;
 
-				if (collectPhaseStats)
-					INSTR_TIME_SET_CURRENT(subphaseStart);
-				codebookSize = storage.multivectorCentroidPostingCodebookSize;
-				postings = storage.multivectorCentroidPostings;
-				listOffsets = storage.multivectorCentroidPostingListOffsets;
-				if (codebookSize != (uint32) query->dim * 2U ||
-					postings == NULL ||
-					listOffsets == NULL)
-					ereport(ERROR,
-							(errcode(ERRCODE_INDEX_CORRUPTED),
-							 errmsg("document-node centroid_lite posting sidecar is invalid"),
-							 errhint("REINDEX with multivector_graph = document_nodes and multivector_centroids = kmeans to rebuild persisted centroid posting tuples.")));
-				if (centroidLiteCodewordMaxsimScoring)
-				{
-					Size		scoreCount =
-						(Size) query->count * (Size) codebookSize;
-
-					queryCodewordScores =
-						palloc(sizeof(float) * Max(scoreCount, (Size) 1));
-					for (int32 qi = 0; qi < query->count; qi++)
-					{
-						float	   *tokenScores =
-							queryCodewordScores + (Size) qi * (Size) codebookSize;
-
-						for (uint32 codeword = 0; codeword < codebookSize;
-							 codeword++)
-							tokenScores[codeword] =
-								(float) PgturbohybridMultiVectorDeterministicCodewordScore(query,
-																						   qi,
-																						   codeword);
-					}
-					if (centroidScoreBoundPruning)
-					{
-						queryScoreBoundPrefix =
-							PgturbohybridMultiVectorBuildCodewordScoreBoundPrefix(query,
-																				  queryWeights,
-																				  queryMask,
-																				  queryCodewordScores,
-																				  codebookSize,
-																				  &queryScoreBoundTokenCount);
-						if (queryScoreBoundPrefix == NULL)
-							centroidUpperBoundUnsafeFallbacks++;
-					}
+					for (uint32 codeword = 0; codeword < codebookSize;
+						 codeword++)
+						tokenScores[codeword] =
+							(float) PgturbohybridMultiVectorDeterministicCodewordScore(query,
+																					   qi,
+																					   codeword);
 				}
+				if (centroidScoreBoundPruning)
+				{
+					queryScoreBoundPrefix =
+						PgturbohybridMultiVectorBuildCodewordScoreBoundPrefix(query,
+																			  queryWeights,
+																			  queryMask,
+																			  queryCodewordScores,
+																			  codebookSize,
+																			  &queryScoreBoundTokenCount);
+					if (queryScoreBoundPrefix == NULL)
+						centroidUpperBoundUnsafeFallbacks++;
+				}
+			}
 
-					denseDocCount =
-						Max(storage.multivectorDocCount, meta->tqMultivectorDocCount);
-					docScores =
-						palloc0(sizeof(double) * (Size) Max(denseDocCount, 1U));
-					docBest =
-						palloc0(sizeof(double) * (Size) Max(denseDocCount, 1U));
-					docBestGeneration =
-						palloc0(sizeof(uint32) * (Size) Max(denseDocCount, 1U));
-					docMatched =
-						palloc0(sizeof(bool) * (Size) Max(denseDocCount, 1U));
-					matchedDocIds =
-						palloc0(sizeof(uint32) * (Size) Max(denseDocCount, 1U));
-					touchedDocIds =
-						palloc0(sizeof(uint32) * (Size) Max(denseDocCount, 1U));
-					if (centroidScoreBoundPruning)
-						centroidScoreBoundTokenMatches =
-							palloc0(sizeof(uint16) *
-									(Size) Max(denseDocCount, 1U));
+			denseDocCount =
+				Max(storage.multivectorDocCount, meta->tqMultivectorDocCount);
+			docScores =
+				palloc0(sizeof(double) * (Size) Max(denseDocCount, 1U));
+			docBest =
+				palloc0(sizeof(double) * (Size) Max(denseDocCount, 1U));
+			docBestGeneration =
+				palloc0(sizeof(uint32) * (Size) Max(denseDocCount, 1U));
+			docMatched =
+				palloc0(sizeof(bool) * (Size) Max(denseDocCount, 1U));
+			matchedDocIds =
+				palloc0(sizeof(uint32) * (Size) Max(denseDocCount, 1U));
+			touchedDocIds =
+				palloc0(sizeof(uint32) * (Size) Max(denseDocCount, 1U));
+			if (centroidScoreBoundPruning)
+				centroidScoreBoundTokenMatches =
+					palloc0(sizeof(uint16) *
+							(Size) Max(denseDocCount, 1U));
 			if (centroidBitsetPrefilter)
 			{
 				instr_time	bitsetStart;
@@ -18473,15 +18473,15 @@ PgturbohybridMultiVectorDocumentNodeScan(IndexScanDesc scan,
 						queryCodewordScore > bestProbeScore)
 					{
 						bestProbeScore = queryCodewordScore;
-							haveBestProbeScore = true;
-						}
+						haveBestProbeScore = true;
 					}
-					if (collectPhaseStats)
-						PgturbohybridGraphAddElapsedUint64(&centroidProbeUs,
-														   probeStart);
-					for (uint32 probeIndex = 0; probeIndex < probeCount;
-						 probeIndex++)
-					{
+				}
+				if (collectPhaseStats)
+					PgturbohybridGraphAddElapsedUint64(&centroidProbeUs,
+													   probeStart);
+				for (uint32 probeIndex = 0; probeIndex < probeCount;
+					 probeIndex++)
+				{
 					uint32		queryCodeword = probeCodewords[probeIndex];
 					double		queryCodewordScore = probeScores[probeIndex];
 					uint32		start;
@@ -18582,74 +18582,74 @@ PgturbohybridMultiVectorDocumentNodeScan(IndexScanDesc scan,
 						centroidBitsetListsUsed++;
 					if (collectPhaseStats)
 						INSTR_TIME_SET_CURRENT(postingScanStart);
-						if (usePerListScoreTopK)
+					if (usePerListScoreTopK)
+					{
+						uint32		listLen = fullEnd - start;
+						uint32		sampleCount =
+							Min(listLen, postingLimitForList);
+						PgturbohybridMultiVectorPostingScoreCandidate *selected;
+						uint32		selectedCount = 0;
+
+						selected =
+							palloc0(sizeof(PgturbohybridMultiVectorPostingScoreCandidate) *
+									(Size) sampleCount);
+						for (uint32 sampleIndex = 0; sampleIndex < sampleCount;
+							 sampleIndex++)
 						{
-							uint32		listLen = fullEnd - start;
-							uint32		sampleCount =
-								Min(listLen, postingLimitForList);
-							PgturbohybridMultiVectorPostingScoreCandidate *selected;
-							uint32		selectedCount = 0;
+							PgturbohybridGraphMultiVectorCentroidPostingEntry *posting;
+							uint32		postingOffset;
+							double		dot;
+							PgturbohybridMultiVectorPostingScoreCandidate scored;
 
-							selected =
-								palloc0(sizeof(PgturbohybridMultiVectorPostingScoreCandidate) *
-										(Size) sampleCount);
-							for (uint32 sampleIndex = 0; sampleIndex < sampleCount;
-								 sampleIndex++)
-							{
-								PgturbohybridGraphMultiVectorCentroidPostingEntry *posting;
-								uint32		postingOffset;
-								double		dot;
-								PgturbohybridMultiVectorPostingScoreCandidate scored;
-
-								CHECK_FOR_INTERRUPTS();
-								postingOffset = start + sampleIndex;
-								posting = &postings[postingOffset];
-								if (posting->docId >= storage.multivectorDocCount)
-									ereport(ERROR,
-											(errcode(ERRCODE_INDEX_CORRUPTED),
-											 errmsg("document-node centroid_lite posting sidecar references an out-of-range document"),
-											 errhint("REINDEX with multivector_graph = document_nodes and multivector_centroids = kmeans to rebuild persisted centroid posting tuples.")));
-								dot = queryCodewordScore *
-									PgturbohybridMultiVectorCentroidPostingPayloadScore(posting->scorePayload);
-								scored.docId = posting->docId;
-								scored.ordinal = posting->centroidOrdinal;
-								scored.score = dot;
-								PgturbohybridMultiVectorPostingScoreCandidateOffer(selected,
-																				   &selectedCount,
-																				   sampleCount,
-																				   &scored);
-							}
-							for (uint32 selectedIndex = 0;
-								 selectedIndex < selectedCount;
-								 selectedIndex++)
-							{
-								PgturbohybridMultiVectorPostingScoreCandidate *scored =
-									&selected[selectedIndex];
-								uint32		docId = scored->docId;
-
-								if (!docMatched[docId])
-								{
-									docMatched[docId] = true;
-									matchedDocIds[matchedDocCount++] = docId;
-								}
-								if (docBestGeneration[docId] != generation)
-								{
-									docBestGeneration[docId] = generation;
-									docBest[docId] = -DBL_MAX;
-									touchedDocIds[touchedCount++] = docId;
-								}
-								if (scored->score > docBest[docId])
-									docBest[docId] = scored->score;
-								centroidPostingsTouched++;
-							}
-							centroidPostingsSelected += selectedCount;
-							centroidPostingsSkipped += (uint64) (listLen - selectedCount);
-							centroidPostingCapStrategy =
-								postingLimitForList != centroidPostingLimitPerToken ?
-								"score_topk_payload_sorted_topm_expanded" :
-								"score_topk_payload_sorted";
-							pfree(selected);
+							CHECK_FOR_INTERRUPTS();
+							postingOffset = start + sampleIndex;
+							posting = &postings[postingOffset];
+							if (posting->docId >= storage.multivectorDocCount)
+								ereport(ERROR,
+										(errcode(ERRCODE_INDEX_CORRUPTED),
+										 errmsg("document-node centroid_lite posting sidecar references an out-of-range document"),
+										 errhint("REINDEX with multivector_graph = document_nodes and multivector_centroids = kmeans to rebuild persisted centroid posting tuples.")));
+							dot = queryCodewordScore *
+								PgturbohybridMultiVectorCentroidPostingPayloadScore(posting->scorePayload);
+							scored.docId = posting->docId;
+							scored.ordinal = posting->centroidOrdinal;
+							scored.score = dot;
+							PgturbohybridMultiVectorPostingScoreCandidateOffer(selected,
+																			   &selectedCount,
+																			   sampleCount,
+																			   &scored);
 						}
+						for (uint32 selectedIndex = 0;
+							 selectedIndex < selectedCount;
+							 selectedIndex++)
+						{
+							PgturbohybridMultiVectorPostingScoreCandidate *scored =
+								&selected[selectedIndex];
+							uint32		docId = scored->docId;
+
+							if (!docMatched[docId])
+							{
+								docMatched[docId] = true;
+								matchedDocIds[matchedDocCount++] = docId;
+							}
+							if (docBestGeneration[docId] != generation)
+							{
+								docBestGeneration[docId] = generation;
+								docBest[docId] = -DBL_MAX;
+								touchedDocIds[touchedCount++] = docId;
+							}
+							if (scored->score > docBest[docId])
+								docBest[docId] = scored->score;
+							centroidPostingsTouched++;
+						}
+						centroidPostingsSelected += selectedCount;
+						centroidPostingsSkipped += (uint64) (listLen - selectedCount);
+						centroidPostingCapStrategy =
+							postingLimitForList != centroidPostingLimitPerToken ?
+							"score_topk_payload_sorted_topm_expanded" :
+							"score_topk_payload_sorted";
+						pfree(selected);
+					}
 					else
 					{
 						for (uint32 postingIndex = 0; postingIndex < end - start;
@@ -18699,11 +18699,11 @@ PgturbohybridMultiVectorDocumentNodeScan(IndexScanDesc scan,
 											(errcode(ERRCODE_INDEX_CORRUPTED),
 											 errmsg("document-node centroid_lite posting sidecar is invalid"),
 											 errhint("REINDEX with multivector_graph = document_nodes and multivector_centroids = kmeans to rebuild persisted centroid posting tuples.")));
-									PgturbohybridCheckSameMultiVectorDims(query,
-																		  centroids);
-									dot = PgturbohybridMultiVectorTokenDot(query, qi,
-																		   centroids,
-																		   posting->centroidOrdinal);
+								PgturbohybridCheckSameMultiVectorDims(query,
+																	  centroids);
+								dot = PgturbohybridMultiVectorTokenDot(query, qi,
+																	   centroids,
+																	   posting->centroidOrdinal);
 							}
 							{
 								if (!docMatched[docId])
