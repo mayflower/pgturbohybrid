@@ -225,6 +225,52 @@ nix --extra-experimental-features 'nix-command flakes' develop --command \
 Generated JSON, Markdown, local logs, model files, and datasets are local
 artifacts and must not be committed.
 
+### Precompact and Acceptance Gate
+
+The current measured 50k path adds an admission-only precompact stage before
+the compact scorer and exact heap MaxSim rerank. The purpose is to bound how
+many posting-derived documents enter compact full-document scoring without
+changing final SQL ordering. Score-bound pruning alone was not enough to make
+the path promotion-safe, so promotion now goes through an explicit artifact
+gate:
+
+```bash
+python benchmarks/dbpedia_colbert_multivector.py \
+  --quantized-inverted-default-quality-acceptance-report \
+  --precompact-grid-json \
+    .nix-dev/tmp/dbpedia-colbert-50k-precompact-docorder-25q.json \
+  --query-codeword-grid-json \
+    .nix-dev/tmp/dbpedia-colbert-50k-precompact-kernel-25q.json \
+  --compact-layout-grid-json \
+    .nix-dev/tmp/dbpedia-colbert-50k-precompact-docorder-25q.json \
+  --exact-rerank-grid-json \
+    .nix-dev/tmp/dbpedia-colbert-50k-exact-rerank-focus-25q.json \
+  --output .nix-dev/tmp/dbpedia-colbert-50k-quantized-acceptance-report.json \
+  --markdown-output \
+    .nix-dev/tmp/dbpedia-colbert-50k-quantized-acceptance-report.md
+```
+
+The report is intentionally conservative. It can mark
+`quantized_inverted_external_centroid_only_precompact_topk_8192_docid_rk512_topk`
+as an `experimental_default_quality_candidate` only when all hard gates pass:
+the candidate source is `quantized_inverted_experimental`, BM25 and learned
+sparse are inactive, final ranking is exact heap MaxSim, top-10 exact admission
+is at least `0.80`, top-1 exact admission is at least `0.94`, Recall@10 and
+NDCG@10 stay within `0.01` of the baseline row, p95 improves by at least 25%,
+compact scoring normally touches at most `6000` documents, and generated
+acceptance artifacts stay under `.nix-dev/tmp/`.
+
+The latest 50k/25-query acceptance report rejected strict gate promotion, but
+the selected row is now the experimental benchmark default because it is faster
+and has better qrel quality than the local precompact-off baseline. It reduced
+p95 from `117.839 ms` to `69.828 ms` and compact scoring from `13751 us` to
+`6007 us`, while improving Recall@10 from `0.348762` to `0.459810` and
+NDCG@10 from `0.306454` to `0.389044`. The caveat remains: top-1 admission
+was `0.76`, top-10 admission was `0.604`, and compact scoring still touched
+`8192` documents. The previous measured comparison profile remains explicitly
+experimental and selectable:
+`quantized_inverted_external_centroid_only_compact_topk_128_probe_016_topm_01_score_bound`.
+
 ## Reported Fields
 
 `turbohybrid_last_scan_stats()` reports these branch-specific fields when the
@@ -249,6 +295,25 @@ candidate source is selected:
 - `quantized_inverted_list_offset_bytes`
 - `quantized_inverted_posting_bytes`
 - `quantized_inverted_sidecar_bytes`
+- `quantized_inverted_query_codeword_kernel`
+- `quantized_inverted_query_codeword_scores_computed`
+- `quantized_inverted_query_codeword_blocks`
+- `quantized_inverted_query_codeword_topk_us`
+- `quantized_inverted_compact_doc_order`
+- `quantized_inverted_compact_active_query_tokens`
+- `quantized_inverted_compact_pairs_evaluated`
+- `quantized_inverted_compact_pairs_skipped`
+- `quantized_inverted_compact_us_per_doc`
+- `quantized_inverted_precompact_enabled`
+- `quantized_inverted_precompact_mode`
+- `quantized_inverted_docs_touched_before_precompact`
+- `quantized_inverted_precompact_score_k`
+- `quantized_inverted_precompact_coverage_k`
+- `quantized_inverted_precompact_per_token_k`
+- `quantized_inverted_compact_max_docs`
+- `quantized_inverted_precompact_union_docs`
+- `quantized_inverted_precompact_pruned_docs`
+- `quantized_inverted_precompact_us`
 
 The benchmark harness carries those fields into admission rows, serving-grid
 rows, and Markdown summaries when present. Standard benchmark metrics still

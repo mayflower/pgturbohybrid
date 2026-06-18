@@ -64,6 +64,13 @@ typedef struct PgturbohybridMultiVectorPostingScoreCandidate
 	double		score;
 } PgturbohybridMultiVectorPostingScoreCandidate;
 
+typedef struct PgturbohybridMultiVectorPrecompactDoc
+{
+	uint32		docId;
+	uint32		coverage;
+	double		score;
+} PgturbohybridMultiVectorPrecompactDoc;
+
 #define PGTURBOHYBRID_QUANTIZED_INVERTED_COMPACT_BATCH 1024
 
 static int	PgturbohybridGraphResultCompare(const void *a, const void *b);
@@ -173,6 +180,15 @@ static double PgturbohybridMultiVectorCentroidCodewordMaxSimScore(const Pgturboh
 																  const float *queryCodewordScores,
 																  uint32 codebookSize,
 																  uint64 *pairs);
+static int	PgturbohybridMultiVectorPrecompactDocScoreCompare(const void *a,
+															 const void *b);
+static int	PgturbohybridMultiVectorPrecompactDocCoverageCompare(const void *a,
+																const void *b);
+static int	PgturbohybridUInt32AscCompare(const void *a, const void *b);
+static void PgturbohybridMultiVectorPrecompactMarkDoc(bool *keep,
+													  uint32 docId,
+													  uint32 *unionDocs,
+													  uint32 *duplicates);
 static uint16 PgturbohybridMultiVectorQuantizedInvertedScorePayload(const PgturbohybridMultiVector *mv,
 												  int32 token);
 static double PgturbohybridMultiVectorQuantizedInvertedCodewordScore(const PgturbohybridMultiVector *mv,
@@ -12452,6 +12468,80 @@ PgturbohybridMultiVectorPostingScoreCandidateBetter(
 }
 
 static int
+PgturbohybridMultiVectorPrecompactDocScoreCompare(const void *a, const void *b)
+{
+	const PgturbohybridMultiVectorPrecompactDoc *pa =
+		(const PgturbohybridMultiVectorPrecompactDoc *) a;
+	const PgturbohybridMultiVectorPrecompactDoc *pb =
+		(const PgturbohybridMultiVectorPrecompactDoc *) b;
+
+	if (pa->score > pb->score)
+		return -1;
+	if (pa->score < pb->score)
+		return 1;
+	if (pa->coverage > pb->coverage)
+		return -1;
+	if (pa->coverage < pb->coverage)
+		return 1;
+	if (pa->docId < pb->docId)
+		return -1;
+	if (pa->docId > pb->docId)
+		return 1;
+	return 0;
+}
+
+static int
+PgturbohybridMultiVectorPrecompactDocCoverageCompare(const void *a,
+													 const void *b)
+{
+	const PgturbohybridMultiVectorPrecompactDoc *pa =
+		(const PgturbohybridMultiVectorPrecompactDoc *) a;
+	const PgturbohybridMultiVectorPrecompactDoc *pb =
+		(const PgturbohybridMultiVectorPrecompactDoc *) b;
+
+	if (pa->coverage > pb->coverage)
+		return -1;
+	if (pa->coverage < pb->coverage)
+		return 1;
+	if (pa->score > pb->score)
+		return -1;
+	if (pa->score < pb->score)
+		return 1;
+	if (pa->docId < pb->docId)
+		return -1;
+	if (pa->docId > pb->docId)
+		return 1;
+	return 0;
+}
+
+static void
+PgturbohybridMultiVectorPrecompactMarkDoc(bool *keep, uint32 docId,
+										  uint32 *unionDocs,
+										  uint32 *duplicates)
+{
+	if (keep[docId])
+	{
+		(*duplicates)++;
+		return;
+	}
+	keep[docId] = true;
+	(*unionDocs)++;
+}
+
+static int
+PgturbohybridUInt32AscCompare(const void *a, const void *b)
+{
+	uint32		ia = *((const uint32 *) a);
+	uint32		ib = *((const uint32 *) b);
+
+	if (ia < ib)
+		return -1;
+	if (ia > ib)
+		return 1;
+	return 0;
+}
+
+static int
 PgturbohybridMultiVectorQuantizedPostingPayloadCompare(const void *a,
 													   const void *b)
 {
@@ -15531,7 +15621,6 @@ PgturbohybridMultiVectorCentroidCodewordMaxSimScore(const PgturbohybridMultiVect
 			const float *tokenScores =
 				queryCodewordScores + (Size) qi * (Size) codebookSize;
 
-			CHECK_FOR_INTERRUPTS();
 			for (uint32 codeIndex = 0; codeIndex < docCodeCount; codeIndex++)
 			{
 				uint32		codeword = docCodes[codeIndex];
@@ -15559,7 +15648,6 @@ PgturbohybridMultiVectorCentroidCodewordMaxSimScore(const PgturbohybridMultiVect
 		const float *tokenScores =
 			queryCodewordScores + (Size) qi * (Size) codebookSize;
 
-		CHECK_FOR_INTERRUPTS();
 		if (queryMask != NULL && queryMask[qi])
 			continue;
 		for (uint32 codeIndex = 0; codeIndex < docCodeCount; codeIndex++)
@@ -16111,6 +16199,18 @@ PgturbohybridMultiVectorDocumentNodeScan(IndexScanDesc scan,
 		quantizedInvertedExperimental &&
 		pgturbohybrid_multivector_quantized_inverted_compact_scoring ==
 		PGTURBOHYBRID_MULTIVECTOR_QUANTIZED_INVERTED_COMPACT_SCORING_EXPERIMENTAL;
+	int			quantizedInvertedPrecompactMode =
+		quantizedInvertedExperimental ?
+		pgturbohybrid_multivector_quantized_inverted_precompact :
+		PGTURBOHYBRID_MULTIVECTOR_QUANTIZED_INVERTED_PRECOMPACT_OFF;
+	bool		quantizedInvertedPrecompactEnabled =
+		quantizedInvertedCompactScoring &&
+		quantizedInvertedPrecompactMode !=
+		PGTURBOHYBRID_MULTIVECTOR_QUANTIZED_INVERTED_PRECOMPACT_OFF;
+	bool		quantizedInvertedPrecompactReservoir =
+		quantizedInvertedPrecompactEnabled &&
+		quantizedInvertedPrecompactMode ==
+		PGTURBOHYBRID_MULTIVECTOR_QUANTIZED_INVERTED_PRECOMPACT_CENTROID_MAXSIM_RESERVOIR;
 	bool		quantizedInvertedTokenCoverageLinear =
 		quantizedInvertedExperimental &&
 		pgturbohybrid_multivector_quantized_inverted_token_coverage ==
@@ -16126,7 +16226,8 @@ PgturbohybridMultiVectorDocumentNodeScan(IndexScanDesc scan,
 	bool		quantizedInvertedNeedsTokenMatches =
 		quantizedInvertedTokenCoverageLinear ||
 		quantizedInvertedMinTokenMatches > 0 ||
-		quantizedInvertedScoreBoundPruning;
+		quantizedInvertedScoreBoundPruning ||
+		quantizedInvertedPrecompactReservoir;
 	bool		candidateSourceNeedsLoadedDocVectors;
 	bool		exhaustiveSidecarScan;
 	bool		documentNodesSource =
@@ -16213,6 +16314,12 @@ PgturbohybridMultiVectorDocumentNodeScan(IndexScanDesc scan,
 	uint64		quantizedInvertedCompactScoreUs = 0;
 	uint64		quantizedInvertedCompactDocsScored = 0;
 	uint64		quantizedInvertedCompactPayloadBytes = 0;
+	const char *quantizedInvertedCompactDocOrder = "original";
+	uint64		quantizedInvertedCompactInnerAllocations = 0;
+	uint32		quantizedInvertedCompactActiveQueryTokens = 0;
+	uint64		quantizedInvertedCompactPairsEvaluated = 0;
+	uint64		quantizedInvertedCompactPairsSkipped = 0;
+	uint64		quantizedInvertedCompactPrefetches = 0;
 	bool		quantizedInvertedCompactTopKChangedVsScalar = false;
 	int16	   *quantizedInvertedCompactBatchCodes = NULL;
 	int64	   *quantizedInvertedCompactBatchScores = NULL;
@@ -16226,6 +16333,27 @@ PgturbohybridMultiVectorDocumentNodeScan(IndexScanDesc scan,
 	uint64		quantizedInvertedScoreBoundUnsafeFallbacks = 0;
 	uint32		quantizedInvertedCandidatesBeforeBound = 0;
 	uint32		quantizedInvertedCandidatesAfterBound = 0;
+	uint32		quantizedInvertedDocsTouchedBeforePrecompact = 0;
+	uint32		quantizedInvertedPrecompactScoreK =
+		(uint32) Max(pgturbohybrid_multivector_quantized_inverted_precompact_score_k,
+					 0);
+	uint32		quantizedInvertedPrecompactCoverageK =
+		(uint32) Max(pgturbohybrid_multivector_quantized_inverted_precompact_coverage_k,
+					 0);
+	uint32		quantizedInvertedPrecompactPerTokenK =
+		(uint32) Max(pgturbohybrid_multivector_quantized_inverted_precompact_per_token_k,
+					 0);
+	uint32		quantizedInvertedCompactMaxDocs =
+		(uint32) Max(pgturbohybrid_multivector_quantized_inverted_compact_max_docs,
+					 0);
+	uint32		quantizedInvertedPrecompactScoreDocs = 0;
+	uint32		quantizedInvertedPrecompactCoverageDocs = 0;
+	uint32		quantizedInvertedPrecompactPerTokenDocs = 0;
+	uint32		quantizedInvertedPrecompactUnionDocs = 0;
+	uint32		quantizedInvertedPrecompactDuplicates = 0;
+	uint32		quantizedInvertedPrecompactPrunedDocs = 0;
+	uint64		quantizedInvertedPrecompactUs = 0;
+	uint32		quantizedInvertedCompactDocsSkippedByPrecompact = 0;
 	uint32		multivectorReservoirScoreDocs = 0;
 	uint32		multivectorReservoirCoverageDocs = 0;
 	uint32		multivectorReservoirMeanDocs = 0;
@@ -16282,6 +16410,13 @@ PgturbohybridMultiVectorDocumentNodeScan(IndexScanDesc scan,
 	uint64		quantizedInvertedPostingUs = 0;
 	uint64		quantizedInvertedAssignmentUs = 0;
 	uint64		quantizedInvertedQueryCodewordScoreUs = 0;
+	const char *quantizedInvertedQueryCodewordKernel = "off";
+	uint64		quantizedInvertedQueryCodewordScoresComputed = 0;
+	uint64		quantizedInvertedQueryCodewordBlocks = 0;
+	uint64		quantizedInvertedQueryCodewordTopkUs = 0;
+	bool		quantizedInvertedQueryCodewordFullMatrixMaterialized = false;
+	uint32		quantizedInvertedQueryCodewordActiveQueryTokens = 0;
+	uint32		quantizedInvertedQueryCodewordSkippedQueryTokens = 0;
 	uint64		sidecarLoadUs = 0;
 	uint64		finalSortUs = 0;
 	instr_time	candidateSourceStart;
@@ -17034,6 +17169,9 @@ PgturbohybridMultiVectorDocumentNodeScan(IndexScanDesc scan,
 			uint32	   *queryProbeCodewords = NULL;
 			uint32	   *queryProbeCounts = NULL;
 			double	   *queryScoreBoundPrefix = NULL;
+			bool	   *precompactKeep = NULL;
+			PgturbohybridMultiVectorPostingScoreCandidate *precompactPerTokenSelected = NULL;
+			uint32	   *precompactPerTokenCounts = NULL;
 			uint32		queryScoreBoundTokenCount = 0;
 			uint32		queryProbeLimit = 0;
 			uint32		codebookSize;
@@ -17091,6 +17229,22 @@ PgturbohybridMultiVectorDocumentNodeScan(IndexScanDesc scan,
 			touchedDocIds =
 				palloc0(sizeof(uint32) *
 						(Size) Max(meta->tqMultivectorDocCount, 1U));
+			if (quantizedInvertedPrecompactReservoir &&
+				quantizedInvertedPrecompactPerTokenK > 0 &&
+				query->count > 0)
+			{
+				Size		perTokenSlots =
+					(Size) query->count *
+					(Size) quantizedInvertedPrecompactPerTokenK;
+
+				precompactPerTokenSelected =
+					palloc0(PgturbohybridGraphArrayAllocSize(
+															sizeof(PgturbohybridMultiVectorPostingScoreCandidate),
+															perTokenSlots));
+				precompactPerTokenCounts =
+					palloc0(PgturbohybridGraphArrayAllocSize(sizeof(uint32),
+															 (Size) query->count));
+			}
 			if (quantizedInvertedCompactScoring)
 			{
 				const char *kernelName;
@@ -17099,6 +17253,9 @@ PgturbohybridMultiVectorDocumentNodeScan(IndexScanDesc scan,
 				PgturbohybridQuantizedInvertedCodebook *externalCodebook = NULL;
 				TqDotProductF32BlockFunc blockDotProduct = NULL;
 				instr_time	queryCodewordStart;
+				bool		useBlockedCodewordKernel =
+					pgturbohybrid_multivector_quantized_inverted_query_codeword_kernel !=
+					PGTURBOHYBRID_MULTIVECTOR_QUANTIZED_INVERTED_QUERY_CODEWORD_KERNEL_SCALAR;
 
 				quantizedInvertedCompactScorer =
 					TqResolveCompactCodeScoreKernel("auto");
@@ -17120,10 +17277,15 @@ PgturbohybridMultiVectorDocumentNodeScan(IndexScanDesc scan,
 				{
 					externalCodebook =
 						PgturbohybridLoadQuantizedInvertedCodebook(query->dim);
-					blockDotProduct = TqResolveDotProductF32BlockKernel();
+					if (useBlockedCodewordKernel)
+						blockDotProduct = TqResolveDotProductF32BlockKernel();
 				}
+				quantizedInvertedQueryCodewordKernel =
+					externalCodebook != NULL && useBlockedCodewordKernel ?
+					"blocked" : "scalar";
 				queryCodewordScores =
-					palloc(sizeof(float) * Max(scoreCount, (Size) 1));
+					palloc0(sizeof(float) * Max(scoreCount, (Size) 1));
+				quantizedInvertedQueryCodewordFullMatrixMaterialized = true;
 				queryProbeLimit =
 					(uint32) Max(pgturbohybrid_multivector_quantized_inverted_probe_codewords_per_token,
 								 1);
@@ -17144,7 +17306,15 @@ PgturbohybridMultiVectorDocumentNodeScan(IndexScanDesc scan,
 								(Size) Max(queryProbeLimit, 1U));
 					uint32		selectedCount = 0;
 
-					if (externalCodebook != NULL)
+					if (queryMask != NULL && queryMask[qi])
+					{
+						quantizedInvertedQueryCodewordSkippedQueryTokens++;
+						pfree(selected);
+						continue;
+					}
+					quantizedInvertedQueryCodewordActiveQueryTokens++;
+
+					if (externalCodebook != NULL && useBlockedCodewordKernel)
 					{
 						const float *values =
 							PgturbohybridMultiVectorValues(query, qi);
@@ -17163,6 +17333,11 @@ PgturbohybridMultiVectorDocumentNodeScan(IndexScanDesc scan,
 							blockDotProduct(centroids, values, query->dim,
 											blockCount,
 											dotBlock);
+							quantizedInvertedQueryCodewordBlocks++;
+							quantizedInvertedQueryCodewordScoresComputed +=
+								(uint64) blockCount;
+							if (collectPhaseStats)
+								INSTR_TIME_SET_CURRENT(subphaseStart);
 							for (int32 blockIndex = 0; blockIndex < blockCount;
 								 blockIndex++)
 							{
@@ -17180,6 +17355,10 @@ PgturbohybridMultiVectorDocumentNodeScan(IndexScanDesc scan,
 																				   queryProbeLimit,
 																				   &scored);
 							}
+							if (collectPhaseStats)
+								PgturbohybridGraphAddElapsedUint64(
+									&quantizedInvertedQueryCodewordTopkUs,
+									subphaseStart);
 						}
 					}
 					else
@@ -17197,10 +17376,17 @@ PgturbohybridMultiVectorDocumentNodeScan(IndexScanDesc scan,
 							scored.docId = codeword;
 							scored.ordinal = 0;
 							scored.score = score;
+							quantizedInvertedQueryCodewordScoresComputed++;
+							if (collectPhaseStats)
+								INSTR_TIME_SET_CURRENT(subphaseStart);
 							PgturbohybridMultiVectorPostingScoreCandidateOffer(selected,
 																			   &selectedCount,
 																			   queryProbeLimit,
 																			   &scored);
+							if (collectPhaseStats)
+								PgturbohybridGraphAddElapsedUint64(
+									&quantizedInvertedQueryCodewordTopkUs,
+									subphaseStart);
 						}
 					}
 					queryProbeCounts[qi] = selectedCount;
@@ -17703,21 +17889,264 @@ PgturbohybridMultiVectorDocumentNodeScan(IndexScanDesc scan,
 							matchedDocIds[matchedDocCount++] = docId;
 						}
 						docScores[docId] += weight * docBest[docId];
+						if (precompactPerTokenSelected != NULL &&
+							precompactPerTokenCounts != NULL &&
+							quantizedInvertedPrecompactPerTokenK > 0)
+						{
+							PgturbohybridMultiVectorPostingScoreCandidate scored;
+							PgturbohybridMultiVectorPostingScoreCandidate *selected =
+								precompactPerTokenSelected +
+								(Size) qi *
+								(Size) quantizedInvertedPrecompactPerTokenK;
+
+							scored.docId = docId;
+							scored.ordinal = (uint32) qi;
+							scored.score = weight * docBest[docId];
+							PgturbohybridMultiVectorPostingScoreCandidateOffer(
+																			  selected,
+																			  &precompactPerTokenCounts[qi],
+																			  quantizedInvertedPrecompactPerTokenK,
+																			  &scored);
+						}
 						if (docTokenMatches != NULL &&
 							docTokenMatches[docId] < UINT16_MAX)
 							docTokenMatches[docId]++;
 						}
 					}
 
-			for (uint32 matchedIndex = 0; matchedIndex < matchedDocCount;
+			quantizedInvertedDocsTouchedBeforePrecompact = matchedDocCount;
+			if (quantizedInvertedPrecompactEnabled && matchedDocCount > 0)
+			{
+				PgturbohybridMultiVectorPrecompactDoc *rankedDocs;
+				instr_time	precompactStart;
+
+				if (collectPhaseStats)
+					INSTR_TIME_SET_CURRENT(precompactStart);
+				precompactKeep =
+					palloc0(PgturbohybridGraphArrayAllocSize(sizeof(bool),
+															 (Size) Max(meta->tqMultivectorDocCount, 1U)));
+				rankedDocs =
+					palloc0(PgturbohybridGraphArrayAllocSize(sizeof(PgturbohybridMultiVectorPrecompactDoc),
+															 (Size) matchedDocCount));
+				for (uint32 matchedIndex = 0; matchedIndex < matchedDocCount;
+					 matchedIndex++)
+				{
+					uint32		docId = matchedDocIds[matchedIndex];
+
+					rankedDocs[matchedIndex].docId = docId;
+					rankedDocs[matchedIndex].score = docScores[docId];
+					rankedDocs[matchedIndex].coverage =
+						docTokenMatches != NULL ? docTokenMatches[docId] : 0;
+				}
+
+				if (quantizedInvertedPrecompactMode ==
+					PGTURBOHYBRID_MULTIVECTOR_QUANTIZED_INVERTED_PRECOMPACT_CENTROID_MAXSIM_TOPK)
+				{
+					if (quantizedInvertedPrecompactScoreK == 0 ||
+						quantizedInvertedPrecompactScoreK >= matchedDocCount)
+					{
+						for (uint32 matchedIndex = 0;
+							 matchedIndex < matchedDocCount;
+							 matchedIndex++)
+							PgturbohybridMultiVectorPrecompactMarkDoc(
+																	  precompactKeep,
+																	  rankedDocs[matchedIndex].docId,
+																	  &quantizedInvertedPrecompactUnionDocs,
+																	  &quantizedInvertedPrecompactDuplicates);
+					}
+					else
+					{
+						uint32		limit =
+							Min(quantizedInvertedPrecompactScoreK,
+								matchedDocCount);
+
+						qsort(rankedDocs, matchedDocCount,
+							  sizeof(PgturbohybridMultiVectorPrecompactDoc),
+							  PgturbohybridMultiVectorPrecompactDocScoreCompare);
+						for (uint32 i = 0; i < limit; i++)
+							PgturbohybridMultiVectorPrecompactMarkDoc(
+																	  precompactKeep,
+																	  rankedDocs[i].docId,
+																	  &quantizedInvertedPrecompactUnionDocs,
+																	  &quantizedInvertedPrecompactDuplicates);
+						quantizedInvertedPrecompactScoreDocs = limit;
+					}
+					if (quantizedInvertedPrecompactScoreDocs == 0)
+						quantizedInvertedPrecompactScoreDocs =
+							quantizedInvertedPrecompactUnionDocs;
+				}
+				else if (quantizedInvertedPrecompactReservoir)
+				{
+					if (quantizedInvertedPrecompactScoreK > 0)
+					{
+						uint32		limit =
+							Min(quantizedInvertedPrecompactScoreK,
+								matchedDocCount);
+
+						qsort(rankedDocs, matchedDocCount,
+							  sizeof(PgturbohybridMultiVectorPrecompactDoc),
+							  PgturbohybridMultiVectorPrecompactDocScoreCompare);
+						for (uint32 i = 0; i < limit; i++)
+							PgturbohybridMultiVectorPrecompactMarkDoc(
+																	  precompactKeep,
+																	  rankedDocs[i].docId,
+																	  &quantizedInvertedPrecompactUnionDocs,
+																	  &quantizedInvertedPrecompactDuplicates);
+						quantizedInvertedPrecompactScoreDocs = limit;
+					}
+					if (quantizedInvertedPrecompactCoverageK > 0 &&
+						docTokenMatches != NULL)
+					{
+						uint32		limit =
+							Min(quantizedInvertedPrecompactCoverageK,
+								matchedDocCount);
+
+						qsort(rankedDocs, matchedDocCount,
+							  sizeof(PgturbohybridMultiVectorPrecompactDoc),
+							  PgturbohybridMultiVectorPrecompactDocCoverageCompare);
+						for (uint32 i = 0; i < limit; i++)
+							PgturbohybridMultiVectorPrecompactMarkDoc(
+																	  precompactKeep,
+																	  rankedDocs[i].docId,
+																	  &quantizedInvertedPrecompactUnionDocs,
+																	  &quantizedInvertedPrecompactDuplicates);
+						quantizedInvertedPrecompactCoverageDocs = limit;
+					}
+					if (precompactPerTokenSelected != NULL &&
+						precompactPerTokenCounts != NULL)
+					{
+						for (int32 qi = 0; qi < query->count; qi++)
+						{
+							PgturbohybridMultiVectorPostingScoreCandidate *selected =
+								precompactPerTokenSelected +
+								(Size) qi *
+								(Size) quantizedInvertedPrecompactPerTokenK;
+							uint32		selectedCount =
+								precompactPerTokenCounts[qi];
+
+							quantizedInvertedPrecompactPerTokenDocs +=
+								selectedCount;
+							for (uint32 i = 0; i < selectedCount; i++)
+								PgturbohybridMultiVectorPrecompactMarkDoc(
+																		  precompactKeep,
+																		  selected[i].docId,
+																		  &quantizedInvertedPrecompactUnionDocs,
+																		  &quantizedInvertedPrecompactDuplicates);
+						}
+					}
+					if (quantizedInvertedCompactMaxDocs > 0 &&
+						quantizedInvertedPrecompactUnionDocs >
+						quantizedInvertedCompactMaxDocs)
+					{
+						uint32		keptCount = 0;
+						uint32		limit =
+							Min(quantizedInvertedCompactMaxDocs,
+								quantizedInvertedPrecompactUnionDocs);
+
+						for (uint32 matchedIndex = 0;
+							 matchedIndex < matchedDocCount;
+							 matchedIndex++)
+						{
+							uint32		docId = matchedDocIds[matchedIndex];
+
+							if (!precompactKeep[docId])
+								continue;
+							rankedDocs[keptCount].docId = docId;
+							rankedDocs[keptCount].score = docScores[docId];
+							rankedDocs[keptCount].coverage =
+								docTokenMatches != NULL ? docTokenMatches[docId] : 0;
+							keptCount++;
+						}
+						qsort(rankedDocs, keptCount,
+							  sizeof(PgturbohybridMultiVectorPrecompactDoc),
+							  PgturbohybridMultiVectorPrecompactDocScoreCompare);
+						memset(precompactKeep, 0,
+							   PgturbohybridGraphArrayAllocSize(sizeof(bool),
+																(Size) Max(meta->tqMultivectorDocCount, 1U)));
+						quantizedInvertedPrecompactUnionDocs = 0;
+						for (uint32 i = 0; i < limit; i++)
+							PgturbohybridMultiVectorPrecompactMarkDoc(
+																	  precompactKeep,
+																	  rankedDocs[i].docId,
+																	  &quantizedInvertedPrecompactUnionDocs,
+																	  &quantizedInvertedPrecompactDuplicates);
+					}
+				}
+				if (quantizedInvertedPrecompactUnionDocs < matchedDocCount)
+					quantizedInvertedPrecompactPrunedDocs =
+						matchedDocCount - quantizedInvertedPrecompactUnionDocs;
+				else
+					quantizedInvertedPrecompactPrunedDocs = 0;
+				if (collectPhaseStats)
+					PgturbohybridGraphAddElapsedUint64(&quantizedInvertedPrecompactUs,
+													   precompactStart);
+				pfree(rankedDocs);
+			}
+
+			{
+				uint32	   *compactDocIds = NULL;
+				uint32		compactDocCount = 0;
+				bool		compactDocIdOrder =
+					quantizedInvertedCompactScoring &&
+					queryCodewordScores != NULL &&
+					pgturbohybrid_multivector_quantized_inverted_compact_doc_order ==
+					PGTURBOHYBRID_MULTIVECTOR_QUANTIZED_INVERTED_COMPACT_DOC_ORDER_DOCID;
+
+				if (quantizedInvertedCompactScoring && queryCodewordScores != NULL)
+				{
+					quantizedInvertedCompactActiveQueryTokens =
+						quantizedInvertedActiveQueryTokens > 0 ?
+						quantizedInvertedActiveQueryTokens :
+						quantizedInvertedQueryCodewordActiveQueryTokens;
+					if (quantizedInvertedCompactActiveQueryTokens == 0)
+					{
+						for (int32 qi = 0; qi < query->count; qi++)
+						{
+							if (queryMask != NULL && queryMask[qi])
+								continue;
+							quantizedInvertedCompactActiveQueryTokens++;
+						}
+					}
+				}
+				if (compactDocIdOrder && matchedDocCount > 0)
+				{
+					compactDocIds =
+						palloc(PgturbohybridGraphArrayAllocSize(sizeof(uint32),
+																(Size) matchedDocCount));
+					for (uint32 matchedIndex = 0;
+						 matchedIndex < matchedDocCount;
+						 matchedIndex++)
+					{
+						uint32		docId = matchedDocIds[matchedIndex];
+
+						if (quantizedInvertedPrecompactEnabled &&
+							precompactKeep != NULL &&
+							!precompactKeep[docId])
+							continue;
+						compactDocIds[compactDocCount++] = docId;
+					}
+					if (compactDocCount > 1)
+						qsort(compactDocIds, compactDocCount, sizeof(uint32),
+							  PgturbohybridUInt32AscCompare);
+					quantizedInvertedCompactDocOrder = "docid";
+				}
+				else
+					compactDocCount = matchedDocCount;
+
+			for (uint32 matchedIndex = 0; matchedIndex < compactDocCount;
 				 matchedIndex++)
 			{
-					uint32		docId = matchedDocIds[matchedIndex];
+					uint32		docId = compactDocIds != NULL ?
+						compactDocIds[matchedIndex] : matchedDocIds[matchedIndex];
 					TqMultiVectorDocMapEntry *docEntry;
 					TqDenseCandidate candidate;
 					double		candidateScore = docScores[docId];
 
 					CHECK_FOR_INTERRUPTS();
+					if (quantizedInvertedPrecompactEnabled &&
+						precompactKeep != NULL &&
+						!precompactKeep[docId])
+						continue;
 					docEntry = &storage.multivectorDocMap[docId];
 					if (quantizedInvertedCompactScoring &&
 						queryCodewordScores != NULL)
@@ -17786,6 +18215,13 @@ PgturbohybridMultiVectorDocumentNodeScan(IndexScanDesc scan,
 						if (collectPhaseStats)
 							PgturbohybridGraphAddElapsedUint64(&quantizedInvertedCompactScoreUs,
 															   compactStart);
+						quantizedInvertedCompactDocsScored++;
+						quantizedInvertedCompactPairsEvaluated += pairs;
+						if (query->count > (int32) quantizedInvertedCompactActiveQueryTokens)
+							quantizedInvertedCompactPairsSkipped +=
+								(uint64) (query->count -
+										  (int32) quantizedInvertedCompactActiveQueryTokens) *
+								(uint64) (end - start);
 						quantizedInvertedCompactPayloadBytes +=
 							(uint64) (end - start) * (uint64) sizeof(uint32);
 					}
@@ -17823,13 +18259,23 @@ PgturbohybridMultiVectorDocumentNodeScan(IndexScanDesc scan,
 														  candidateLimit,
 														  &candidate);
 			}
+				if (compactDocIds != NULL)
+					pfree(compactDocIds);
+			}
 			quantizedInvertedCandidatesBeforeBound = matchedDocCount;
 			quantizedInvertedCandidatesAfterBound = (uint32) docCount;
-			quantizedInvertedDocsScored =
-				matchedDocCount > quantizedInvertedScoreBoundDocsPruned ?
-				matchedDocCount - quantizedInvertedScoreBoundDocsPruned : 0;
-			quantizedInvertedCompactDocsScored =
-				quantizedInvertedCompactScoring ? quantizedInvertedDocsScored : 0;
+			if (quantizedInvertedCompactScoring)
+			{
+				quantizedInvertedDocsScored = quantizedInvertedCompactDocsScored;
+				if (quantizedInvertedPrecompactEnabled &&
+					matchedDocCount > quantizedInvertedCompactDocsScored)
+					quantizedInvertedCompactDocsSkippedByPrecompact =
+						matchedDocCount - (uint32) quantizedInvertedCompactDocsScored;
+			}
+			else
+				quantizedInvertedDocsScored =
+					matchedDocCount > quantizedInvertedScoreBoundDocsPruned ?
+					matchedDocCount - quantizedInvertedScoreBoundDocsPruned : 0;
 			if (collectPhaseStats)
 				PgturbohybridGraphAddElapsedUint64(&quantizedInvertedPostingUs,
 												   subphaseStart);
@@ -17839,6 +18285,12 @@ PgturbohybridMultiVectorDocumentNodeScan(IndexScanDesc scan,
 				pfree(queryProbeCodewords);
 			if (queryProbeCounts != NULL)
 				pfree(queryProbeCounts);
+			if (precompactKeep != NULL)
+				pfree(precompactKeep);
+			if (precompactPerTokenSelected != NULL)
+				pfree(precompactPerTokenSelected);
+			if (precompactPerTokenCounts != NULL)
+				pfree(precompactPerTokenCounts);
 			if (queryScoreBoundPrefix != NULL)
 				pfree(queryScoreBoundPrefix);
 			if (quantizedInvertedCompactBatchCodes != NULL)
@@ -19114,6 +19566,28 @@ PgturbohybridMultiVectorDocumentNodeScan(IndexScanDesc scan,
 		stats->quantizedInvertedQueryCodewordScoreUs =
 			quantizedInvertedExperimental ?
 			quantizedInvertedQueryCodewordScoreUs : 0;
+		strlcpy(stats->quantizedInvertedQueryCodewordKernel,
+				quantizedInvertedExperimental ?
+				quantizedInvertedQueryCodewordKernel : "off",
+				sizeof(stats->quantizedInvertedQueryCodewordKernel));
+		stats->quantizedInvertedQueryCodewordScoresComputed =
+			quantizedInvertedExperimental ?
+			quantizedInvertedQueryCodewordScoresComputed : 0;
+		stats->quantizedInvertedQueryCodewordBlocks =
+			quantizedInvertedExperimental ?
+			quantizedInvertedQueryCodewordBlocks : 0;
+		stats->quantizedInvertedQueryCodewordTopkUs =
+			quantizedInvertedExperimental ?
+			quantizedInvertedQueryCodewordTopkUs : 0;
+		stats->quantizedInvertedQueryCodewordFullMatrixMaterialized =
+			quantizedInvertedExperimental ?
+			quantizedInvertedQueryCodewordFullMatrixMaterialized : false;
+		stats->quantizedInvertedQueryCodewordActiveQueryTokens =
+			quantizedInvertedExperimental ?
+			quantizedInvertedQueryCodewordActiveQueryTokens : 0;
+		stats->quantizedInvertedQueryCodewordSkippedQueryTokens =
+			quantizedInvertedExperimental ?
+			quantizedInvertedQueryCodewordSkippedQueryTokens : 0;
 		stats->quantizedInvertedListOffsetBytes =
 			quantizedInvertedExperimental ?
 			((uint64) storage.multivectorQuantizedInvertedCodebookSize + 1) *
@@ -19138,12 +19612,110 @@ PgturbohybridMultiVectorDocumentNodeScan(IndexScanDesc scan,
 		stats->quantizedInvertedCompactDocsScored =
 			quantizedInvertedExperimental ?
 			quantizedInvertedCompactDocsScored : 0;
-			stats->quantizedInvertedCompactPayloadBytes =
+		stats->quantizedInvertedCompactPayloadBytes =
 				quantizedInvertedExperimental ?
 				quantizedInvertedCompactPayloadBytes : 0;
+			strlcpy(stats->quantizedInvertedCompactDocOrder,
+					quantizedInvertedExperimental &&
+					quantizedInvertedCompactScoring ?
+					quantizedInvertedCompactDocOrder : "original",
+					sizeof(stats->quantizedInvertedCompactDocOrder));
+			stats->quantizedInvertedCompactInnerAllocations =
+				quantizedInvertedExperimental ?
+				quantizedInvertedCompactInnerAllocations : 0;
+			stats->quantizedInvertedCompactActiveQueryTokens =
+				quantizedInvertedExperimental ?
+				quantizedInvertedCompactActiveQueryTokens : 0;
+			stats->quantizedInvertedCompactPairsEvaluated =
+				quantizedInvertedExperimental ?
+				quantizedInvertedCompactPairsEvaluated : 0;
+			stats->quantizedInvertedCompactPairsSkipped =
+				quantizedInvertedExperimental ?
+				quantizedInvertedCompactPairsSkipped : 0;
+			stats->quantizedInvertedCompactPrefetches =
+				quantizedInvertedExperimental ?
+				quantizedInvertedCompactPrefetches : 0;
+			stats->quantizedInvertedCompactAvgDocTokens =
+				quantizedInvertedExperimental &&
+				quantizedInvertedCompactDocsScored > 0 ?
+				(double) (quantizedInvertedCompactPayloadBytes / sizeof(uint32)) /
+				(double) quantizedInvertedCompactDocsScored : 0.0;
+			stats->quantizedInvertedCompactUsPerDoc =
+				quantizedInvertedExperimental &&
+				quantizedInvertedCompactDocsScored > 0 ?
+				(double) quantizedInvertedCompactScoreUs /
+				(double) quantizedInvertedCompactDocsScored : 0.0;
+			stats->quantizedInvertedCompactPayloadBytesPerDoc =
+				quantizedInvertedExperimental &&
+				quantizedInvertedCompactDocsScored > 0 ?
+				(double) quantizedInvertedCompactPayloadBytes /
+				(double) quantizedInvertedCompactDocsScored : 0.0;
 			stats->quantizedInvertedCompactTopKChangedVsScalar =
 				quantizedInvertedExperimental ?
 				quantizedInvertedCompactTopKChangedVsScalar : false;
+			stats->quantizedInvertedPrecompactEnabled =
+				quantizedInvertedExperimental &&
+				quantizedInvertedPrecompactEnabled;
+			strlcpy(stats->quantizedInvertedPrecompactMode,
+					quantizedInvertedExperimental &&
+					quantizedInvertedPrecompactEnabled ?
+					quantizedInvertedPrecompactMode ==
+					PGTURBOHYBRID_MULTIVECTOR_QUANTIZED_INVERTED_PRECOMPACT_CENTROID_MAXSIM_TOPK ?
+					"centroid_maxsim_topk" : "centroid_maxsim_reservoir" :
+					"off",
+					sizeof(stats->quantizedInvertedPrecompactMode));
+			stats->quantizedInvertedDocsTouchedBeforePrecompact =
+				quantizedInvertedExperimental &&
+				quantizedInvertedPrecompactEnabled ?
+				quantizedInvertedDocsTouchedBeforePrecompact : 0;
+			stats->quantizedInvertedPrecompactScoreK =
+				quantizedInvertedExperimental &&
+				quantizedInvertedPrecompactEnabled ?
+				quantizedInvertedPrecompactScoreK : 0;
+			stats->quantizedInvertedPrecompactCoverageK =
+				quantizedInvertedExperimental &&
+				quantizedInvertedPrecompactEnabled ?
+				quantizedInvertedPrecompactCoverageK : 0;
+			stats->quantizedInvertedPrecompactPerTokenK =
+				quantizedInvertedExperimental &&
+				quantizedInvertedPrecompactEnabled ?
+				quantizedInvertedPrecompactPerTokenK : 0;
+			stats->quantizedInvertedCompactMaxDocs =
+				quantizedInvertedExperimental &&
+				quantizedInvertedPrecompactEnabled ?
+				quantizedInvertedCompactMaxDocs : 0;
+			stats->quantizedInvertedPrecompactScoreDocs =
+				quantizedInvertedExperimental &&
+				quantizedInvertedPrecompactEnabled ?
+				quantizedInvertedPrecompactScoreDocs : 0;
+			stats->quantizedInvertedPrecompactCoverageDocs =
+				quantizedInvertedExperimental &&
+				quantizedInvertedPrecompactEnabled ?
+				quantizedInvertedPrecompactCoverageDocs : 0;
+			stats->quantizedInvertedPrecompactPerTokenDocs =
+				quantizedInvertedExperimental &&
+				quantizedInvertedPrecompactEnabled ?
+				quantizedInvertedPrecompactPerTokenDocs : 0;
+			stats->quantizedInvertedPrecompactUnionDocs =
+				quantizedInvertedExperimental &&
+				quantizedInvertedPrecompactEnabled ?
+				quantizedInvertedPrecompactUnionDocs : 0;
+			stats->quantizedInvertedPrecompactDuplicates =
+				quantizedInvertedExperimental &&
+				quantizedInvertedPrecompactEnabled ?
+				quantizedInvertedPrecompactDuplicates : 0;
+			stats->quantizedInvertedPrecompactPrunedDocs =
+				quantizedInvertedExperimental &&
+				quantizedInvertedPrecompactEnabled ?
+				quantizedInvertedPrecompactPrunedDocs : 0;
+			stats->quantizedInvertedPrecompactUs =
+				quantizedInvertedExperimental &&
+				quantizedInvertedPrecompactEnabled ?
+				quantizedInvertedPrecompactUs : 0;
+			stats->quantizedInvertedCompactDocsSkippedByPrecompact =
+				quantizedInvertedExperimental &&
+				quantizedInvertedPrecompactEnabled ?
+				quantizedInvertedCompactDocsSkippedByPrecompact : 0;
 			strlcpy(stats->quantizedInvertedTokenCoverageMode,
 					quantizedInvertedExperimental && quantizedInvertedTokenCoverageLinear ?
 					"linear" : "off",
