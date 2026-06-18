@@ -7860,6 +7860,29 @@ pgturbohybridamvalidate(Oid opclassoid)
 	return valid;
 }
 
+static void
+PgturbohybridDefineDefaultBudgetGUCs(void)
+{
+	DefineCustomIntVariable("turbohybrid.default_dense_k", "Default dense candidate budget for turbohybrid_query callers",
+							NULL, &pgturbohybrid_default_dense_k,
+							PGTURBOHYBRID_DEFAULT_DENSE_K, 0,
+							PGTURBOHYBRID_MAX_DEFAULT_DENSE_K,
+							PGC_USERSET, 0, PgturbohybridCheckDefaultDenseK,
+							PgturbohybridAssignQueryDefaultInt, NULL);
+	DefineCustomIntVariable("turbohybrid.default_bm25_k", "Default BM25 candidate budget for turbohybrid_query callers",
+							NULL, &pgturbohybrid_default_bm25_k,
+							PGTURBOHYBRID_DEFAULT_BM25_K, 0,
+							PGTURBOHYBRID_MAX_DEFAULT_BM25_K,
+							PGC_USERSET, 0, PgturbohybridCheckDefaultBm25K,
+							PgturbohybridAssignQueryDefaultInt, NULL);
+	DefineCustomIntVariable("turbohybrid.default_rrf_k", "Default RRF constant for turbohybrid_query callers",
+							NULL, &pgturbohybrid_default_rrf_k,
+							PGTURBOHYBRID_DEFAULT_RRF_K, 1,
+							PGTURBOHYBRID_MAX_RRF_K,
+							PGC_USERSET, 0, PgturbohybridCheckDefaultRrfK,
+							PgturbohybridAssignQueryDefaultInt, NULL);
+}
+
 void
 PgturbohybridInit(void)
 {
@@ -7991,24 +8014,7 @@ PgturbohybridInit(void)
 	if (gucsAlreadyDefined)
 		return;
 
-	DefineCustomIntVariable("turbohybrid.default_dense_k", "Default dense candidate budget for turbohybrid_query callers",
-							NULL, &pgturbohybrid_default_dense_k,
-							PGTURBOHYBRID_DEFAULT_DENSE_K, 0,
-							PGTURBOHYBRID_MAX_DEFAULT_DENSE_K,
-							PGC_USERSET, 0, PgturbohybridCheckDefaultDenseK,
-							PgturbohybridAssignQueryDefaultInt, NULL);
-	DefineCustomIntVariable("turbohybrid.default_bm25_k", "Default BM25 candidate budget for turbohybrid_query callers",
-							NULL, &pgturbohybrid_default_bm25_k,
-							PGTURBOHYBRID_DEFAULT_BM25_K, 0,
-							PGTURBOHYBRID_MAX_DEFAULT_BM25_K,
-							PGC_USERSET, 0, PgturbohybridCheckDefaultBm25K,
-							PgturbohybridAssignQueryDefaultInt, NULL);
-	DefineCustomIntVariable("turbohybrid.default_rrf_k", "Default RRF constant for turbohybrid_query callers",
-							NULL, &pgturbohybrid_default_rrf_k,
-							PGTURBOHYBRID_DEFAULT_RRF_K, 1,
-							PGTURBOHYBRID_MAX_RRF_K,
-							PGC_USERSET, 0, PgturbohybridCheckDefaultRrfK,
-							PgturbohybridAssignQueryDefaultInt, NULL);
+	PgturbohybridDefineDefaultBudgetGUCs();
 	DefineCustomBoolVariable("turbohybrid.enable_wand", "Enable WAND pruning for BM25 candidate generation",
 							 NULL, &pgturbohybrid_enable_wand,
 							 true, PGC_USERSET, 0, NULL, NULL, NULL);
