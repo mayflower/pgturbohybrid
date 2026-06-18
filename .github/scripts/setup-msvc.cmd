@@ -5,6 +5,9 @@ set "NMAKE="
 set "CLDIR="
 set "UCRT_INCLUDE="
 set "UCRT_LIB="
+set "SDK_SHARED_INCLUDE="
+set "SDK_UM_INCLUDE="
+set "SDK_UM_LIB="
 
 for /f "usebackq tokens=*" %%i in (`"%ProgramFiles(x86)%\Microsoft Visual Studio\Installer\vswhere.exe" -latest -products * -requires Microsoft.VisualStudio.Component.VC.Tools.x86.x64 -property installationPath`) do set "VSINSTALLDIR=%%i"
 if not defined VSINSTALLDIR exit /b 1
@@ -29,11 +32,21 @@ if defined UniversalCRTSdkDir if defined UCRTVersion if exist "%UniversalCRTSdkD
 
 for /d %%d in ("%ProgramFiles(x86)%\Windows Kits\10\Include\*") do if not defined UCRT_INCLUDE if exist "%%~fd\ucrt\crtdefs.h" set "UCRT_INCLUDE=%%~fd\ucrt"
 for /d %%d in ("%ProgramFiles(x86)%\Windows Kits\10\Lib\*") do if not defined UCRT_LIB if exist "%%~fd\ucrt\x64\ucrt.lib" set "UCRT_LIB=%%~fd\ucrt\x64"
+if not defined UCRT_INCLUDE for /f "delims=" %%u in ('where /R "%ProgramFiles(x86)%\Windows Kits\10\Include" crtdefs.h 2^>nul') do if not defined UCRT_INCLUDE set "UCRT_INCLUDE=%%~dpu"
+if not defined SDK_SHARED_INCLUDE for /f "delims=" %%u in ('where /R "%ProgramFiles(x86)%\Windows Kits\10\Include" winapifamily.h 2^>nul') do if not defined SDK_SHARED_INCLUDE set "SDK_SHARED_INCLUDE=%%~dpu"
+if not defined SDK_UM_INCLUDE for /f "delims=" %%u in ('where /R "%ProgramFiles(x86)%\Windows Kits\10\Include" windows.h 2^>nul') do if not defined SDK_UM_INCLUDE set "SDK_UM_INCLUDE=%%~dpu"
+if not defined UCRT_LIB for /f "delims=" %%u in ('where /R "%ProgramFiles(x86)%\Windows Kits\10\Lib" ucrt.lib 2^>nul') do if not defined UCRT_LIB set "UCRT_LIB=%%~dpu"
+if not defined SDK_UM_LIB for /f "delims=" %%u in ('where /R "%ProgramFiles(x86)%\Windows Kits\10\Lib" kernel32.lib 2^>nul') do if not defined SDK_UM_LIB set "SDK_UM_LIB=%%~dpu"
 if defined UCRT_INCLUDE set "INCLUDE=%UCRT_INCLUDE%;%INCLUDE%"
+if defined SDK_SHARED_INCLUDE set "INCLUDE=%SDK_SHARED_INCLUDE%;%INCLUDE%"
+if defined SDK_UM_INCLUDE set "INCLUDE=%SDK_UM_INCLUDE%;%INCLUDE%"
 if defined UCRT_LIB set "LIB=%UCRT_LIB%;%LIB%"
+if defined SDK_UM_LIB set "LIB=%SDK_UM_LIB%;%LIB%"
 
 where cl
 if errorlevel 1 exit /b 1
 if not exist "%NMAKE%" exit /b 1
+if not defined UCRT_INCLUDE exit /b 1
+if not exist "%UCRT_INCLUDE%crtdefs.h" if not exist "%UCRT_INCLUDE%\crtdefs.h" exit /b 1
 
 exit /b 0
