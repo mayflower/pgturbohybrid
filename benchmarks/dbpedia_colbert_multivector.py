@@ -5366,6 +5366,257 @@ def run_retrieval_query(
     return [str(row[0]) for row in rows]
 
 
+def build_colbert_hybrid_rerank_index(
+    conn: psycopg.Connection[Any],
+    args: argparse.Namespace,
+) -> dict[str, Any]:
+    if bool(getattr(args, "no_create_index", False)):
+        row = fetch_one(
+            conn,
+            "SELECT to_regclass('dbpedia_colbert_docs_hybrid_rerank_idx')",
+        )
+        if not row or row[0] is None:
+            raise SystemExit(
+                "--no-create-index was set and "
+                "dbpedia_colbert_docs_hybrid_rerank_idx does not exist"
+            )
+        size = fetch_one(
+            conn,
+            "SELECT pg_relation_size('dbpedia_colbert_docs_hybrid_rerank_idx'::regclass)",
+        )
+        return {
+            "reused": True,
+            "index_name": "dbpedia_colbert_docs_hybrid_rerank_idx",
+            "index_bytes": int(size[0]) if size else 0,
+            "elapsed_ms": 0.0,
+        }
+    if not bool(getattr(args, "reuse_index", False)):
+        exec_sql(conn, "DROP INDEX IF EXISTS dbpedia_colbert_docs_hybrid_rerank_idx")
+    existing = fetch_one(
+        conn,
+        "SELECT to_regclass('dbpedia_colbert_docs_hybrid_rerank_idx')",
+    )
+    if existing and existing[0] is not None:
+        size = fetch_one(
+            conn,
+            "SELECT pg_relation_size('dbpedia_colbert_docs_hybrid_rerank_idx'::regclass)",
+        )
+        return {
+            "reused": True,
+            "index_name": "dbpedia_colbert_docs_hybrid_rerank_idx",
+            "index_bytes": int(size[0]) if size else 0,
+            "elapsed_ms": 0.0,
+        }
+    started = time.perf_counter()
+    ensure_colbert_hybrid_proxy_tables(conn)
+    exec_sql(
+        conn,
+        """
+        CREATE INDEX dbpedia_colbert_docs_hybrid_rerank_idx
+        ON dbpedia_colbert_hybrid_proxy_docs USING turbohybrid (
+          hybrid_dense_proxy vector_cosine_turbohybrid_ops,
+          body_tsv bm25_tsvector_turbohybrid_ops
+        )
+        """,
+    )
+    size = fetch_one(
+        conn,
+        "SELECT pg_relation_size('dbpedia_colbert_docs_hybrid_rerank_idx'::regclass)",
+    )
+    return {
+        "reused": False,
+        "index_name": "dbpedia_colbert_docs_hybrid_rerank_idx",
+        "index_bytes": int(size[0]) if size else 0,
+        "elapsed_ms": elapsed_ms_since(started),
+    }
+
+
+def run_colbert_hybrid_rerank_query(
+    conn: psycopg.Connection[Any],
+    query: QueryItem,
+    args: argparse.Namespace,
+) -> tuple[list[str], list[str], float, dict[str, Any], int]:
+    candidate_window = int(getattr(args, "colbert_hybrid_rerank_window", 200) or 200)
+    final_k = int(getattr(args, "final_k", 10) or 10)
+    candidate_rows = fetch_all(
+        conn,
+        """
+        WITH q AS (
+          SELECT
+            p.hybrid_dense_proxy AS dense_query,
+            websearch_to_tsquery('simple', q.query_text) AS text_query
+          FROM dbpedia_colbert_queries q
+          JOIN dbpedia_colbert_hybrid_proxy_queries p
+            ON p.query_id = q.query_id
+          WHERE q.query_id = %s
+            AND q.colbert IS NOT NULL
+        )
+        SELECT d.doc_id
+        FROM dbpedia_colbert_hybrid_proxy_docs d
+        ORDER BY d.hybrid_dense_proxy <~> (
+          SELECT turbohybrid_query(
+            vector_query => q.dense_query,
+            text_query => q.text_query,
+            fusion => %s,
+            dense_k => %s,
+            bm25_k => %s,
+            rrf_k => %s,
+            final_k => %s
+          )
+          FROM q
+        )
+        LIMIT %s
+        """,
+        (
+            query.query_id,
+            args.colbert_hybrid_rerank_fusion,
+            args.colbert_hybrid_dense_k,
+            args.colbert_hybrid_bm25_k,
+            args.rrf_k,
+            candidate_window,
+            candidate_window,
+        ),
+    )
+    stats = last_scan_stats(conn)
+    first_stage = [str(row[0]) for row in candidate_rows]
+    if not first_stage:
+        return [], [], 0.0, stats, 0
+    rows = fetch_all(
+        conn,
+        """
+        WITH q AS (
+          SELECT q.colbert AS colbert_query
+          FROM dbpedia_colbert_queries q
+          WHERE q.query_id = %s
+            AND q.colbert IS NOT NULL
+        ),
+        candidate_pool AS (
+          SELECT
+            c.doc_id,
+            c.hybrid_rank
+          FROM unnest(%s::text[]) WITH ORDINALITY AS c(doc_id, hybrid_rank)
+        )
+        SELECT
+          c.doc_id,
+          c.hybrid_rank,
+          turbohybrid_multivector_maxsim_distance(q.colbert_query, d.colbert)
+            AS colbert_distance
+        FROM candidate_pool c
+        JOIN dbpedia_colbert_docs d
+          ON d.doc_id = c.doc_id
+        CROSS JOIN q
+        WHERE d.colbert IS NOT NULL
+        """,
+        (query.query_id, first_stage),
+    )
+    ranked_rows = [
+        {
+            "doc_id": str(row[0]),
+            "hybrid_rank": int(row[1]),
+            "colbert_distance": float(row[2]),
+        }
+        for row in rows
+    ]
+    reranked = [
+        item["doc_id"]
+        for item in sorted(
+            ranked_rows,
+            key=lambda item: (item["colbert_distance"], item["doc_id"]),
+        )[:final_k]
+    ]
+    return first_stage[:final_k], reranked, 0.0, stats, len(first_stage)
+
+
+def run_colbert_hybrid_rerank_benchmark(
+    conn: psycopg.Connection[Any],
+    args: argparse.Namespace,
+    queries: Sequence[QueryItem],
+    qrels: dict[str, dict[str, int]],
+) -> dict[str, Any]:
+    started = time.perf_counter()
+    proxy_phase = ensure_colbert_hybrid_dense_proxies(conn, args)
+    if proxy_phase["documents_ready"] != proxy_phase["documents_total"]:
+        raise SystemExit(
+            "hybrid dense proxy materialization incomplete for documents: "
+            f"{proxy_phase['documents_ready']} / {proxy_phase['documents_total']}"
+        )
+    if proxy_phase["queries_ready"] != proxy_phase["queries_total"]:
+        raise SystemExit(
+            "hybrid dense proxy materialization incomplete for queries: "
+            f"{proxy_phase['queries_ready']} / {proxy_phase['queries_total']}"
+        )
+    index_phase = build_colbert_hybrid_rerank_index(conn, args)
+    query_limit = int(getattr(args, "query_limit", 0) or 0)
+    selected_queries = list(queries[:query_limit] if query_limit > 0 else queries)
+    if not selected_queries:
+        raise SystemExit("no encoded ColBERT queries available for hybrid rerank benchmark")
+    first_stage_run: dict[str, list[str]] = {}
+    reranked_run: dict[str, list[str]] = {}
+    latencies: list[float] = []
+    scan_stats: list[dict[str, Any]] = []
+    candidate_counts: list[int] = []
+    exec_sql(conn, "SET enable_seqscan = off")
+    try:
+        for query in selected_queries:
+            query_started = time.perf_counter()
+            first_stage, reranked, _unused_elapsed, stats, candidate_count = (
+                run_colbert_hybrid_rerank_query(conn, query, args)
+            )
+            latencies.append((time.perf_counter() - query_started) * 1000.0)
+            first_stage_run[query.query_id] = first_stage
+            reranked_run[query.query_id] = reranked
+            scan_stats.append(stats)
+            candidate_counts.append(candidate_count)
+    finally:
+        exec_sql(conn, "RESET enable_seqscan")
+    first_stage_metrics = method_metrics(
+        first_stage_run,
+        qrels,
+        int(args.final_k),
+        int(args.quality_k),
+    ) if qrels else {}
+    reranked_metrics = method_metrics(
+        reranked_run,
+        qrels,
+        int(args.final_k),
+        int(args.quality_k),
+    ) if qrels else {}
+    return {
+        "enabled": True,
+        "mode": "vector_bm25_first_stage_colbert_maxsim_rerank",
+        "exact_admission_available": False,
+        "exact_admission_reason": "not_requested",
+        "final_ranking": "exact_colbert_maxsim_over_hybrid_candidate_window",
+        "dense_proxy": proxy_phase,
+        "index_phase": index_phase,
+        "settings": {
+            "dense_proxy_encoder": args.colbert_hybrid_dense_proxy_encoder,
+            "fusion": args.colbert_hybrid_rerank_fusion,
+            "candidate_window": int(args.colbert_hybrid_rerank_window),
+            "dense_k": int(args.colbert_hybrid_dense_k),
+            "bm25_k": int(args.colbert_hybrid_bm25_k),
+            "rrf_k": int(args.rrf_k),
+            "final_k": int(args.final_k),
+            "quality_k": int(args.quality_k),
+        },
+        "queries_evaluated": len(selected_queries),
+        "latency": summarize_ms(latencies),
+        "candidate_window_rows": summarize_ints(candidate_counts),
+        "first_stage": {
+            "retrieval_mode": "vector_bm25_hybrid",
+            "metrics": first_stage_metrics,
+            "top10_by_query": {qid: docs[:10] for qid, docs in first_stage_run.items()},
+        },
+        "colbert_rerank": {
+            "retrieval_mode": "exact_colbert_maxsim_rerank",
+            "metrics": reranked_metrics,
+            "top10_by_query": {qid: docs[:10] for qid, docs in reranked_run.items()},
+        },
+        "scan_summary": scan_summary(scan_stats),
+        "total_elapsed_ms": elapsed_ms_since(started),
+    }
+
+
 def uses_turbohybrid_index(method: str) -> bool:
     return method in {QUERY_ONLY_METHOD, RRF_METHOD}
 
@@ -6370,6 +6621,380 @@ def build_proxy_exact_scan_vector(
         "proxy_exact_scan diagnostic supports normalized_mean, centroid_mean, "
         f"max_pool, mean_pool, and first_token; got {encoder!r}"
     )
+
+
+def vector_literal(vector: Sequence[float]) -> str:
+    return "[" + ",".join(format(float(value), ".9g") for value in vector) + "]"
+
+
+def ensure_colbert_hybrid_proxy_tables(conn: psycopg.Connection[Any]) -> None:
+    exec_sql(
+        conn,
+        """
+        CREATE TABLE IF NOT EXISTS dbpedia_colbert_hybrid_proxy_docs (
+            doc_id text PRIMARY KEY,
+            body_tsv tsvector NOT NULL,
+            hybrid_dense_proxy vector NOT NULL
+        )
+        """,
+    )
+    exec_sql(
+        conn,
+        """
+        CREATE TABLE IF NOT EXISTS dbpedia_colbert_hybrid_proxy_queries (
+            query_id text PRIMARY KEY,
+            hybrid_dense_proxy vector NOT NULL
+        )
+        """,
+    )
+
+
+def materialize_colbert_hybrid_doc_proxy_batch(
+    conn: psycopg.Connection[Any],
+    *,
+    encoder: str,
+    centroid_count: str,
+    batch_size: int,
+) -> tuple[int, int]:
+    if encoder in {"normalized_mean", "mean", "mean_pool"}:
+        return materialize_colbert_hybrid_doc_proxy_sql_batch(
+            conn,
+            batch_size=batch_size,
+        )
+    rows_seen = 0
+    rows_updated = 0
+    last_id = ""
+    temp_table = "tmp_dbpedia_colbert_hybrid_proxy_docs"
+    exec_sql(conn, f"DROP TABLE IF EXISTS {temp_table}")
+    exec_sql(
+        conn,
+        f"""
+        CREATE TEMP TABLE {temp_table} (
+            row_id text PRIMARY KEY,
+            body_tsv text NOT NULL,
+            proxy text NOT NULL
+        )
+        """,
+    )
+    while True:
+        rows = fetch_all(
+            conn,
+            """
+            SELECT d.doc_id,
+                   d.body_tsv::text,
+                   ARRAY(
+                     SELECT v::text
+                     FROM unnest(turbohybrid_multivector_to_vector_array(d.colbert)) AS v
+                   ) AS vectors
+            FROM dbpedia_colbert_docs d
+            LEFT JOIN dbpedia_colbert_hybrid_proxy_docs p
+              ON p.doc_id = d.doc_id
+            WHERE d.colbert IS NOT NULL
+              AND p.doc_id IS NULL
+              AND d.doc_id > %s
+            ORDER BY d.doc_id
+            LIMIT %s
+            """,
+            (last_id, batch_size),
+        )
+        if not rows:
+            break
+        proxy_rows: list[tuple[str, str, str]] = []
+        for row_id, body_tsv, vectors_value in rows:
+            last_id = str(row_id)
+            vectors = parse_vector_text_array(vectors_value)
+            proxy = build_proxy_exact_scan_vector(vectors, encoder, centroid_count)
+            if proxy:
+                proxy_rows.append((last_id, str(body_tsv), vector_literal(proxy)))
+        rows_seen += len(rows)
+        if not proxy_rows:
+            continue
+        exec_sql(conn, f"TRUNCATE {temp_table}")
+        copy_rows(
+            conn,
+            f"COPY {temp_table} (row_id, body_tsv, proxy) FROM STDIN",
+            proxy_rows,
+        )
+        exec_sql(
+            conn,
+            f"""
+            INSERT INTO dbpedia_colbert_hybrid_proxy_docs (
+                doc_id,
+                body_tsv,
+                hybrid_dense_proxy
+            )
+            SELECT
+                p.row_id,
+                p.body_tsv::tsvector,
+                p.proxy::vector
+            FROM {temp_table} p
+            ON CONFLICT (doc_id) DO NOTHING
+            """,
+        )
+        rows_updated += len(proxy_rows)
+    return rows_seen, rows_updated
+
+
+def materialize_colbert_hybrid_doc_proxy_sql_batch(
+    conn: psycopg.Connection[Any],
+    *,
+    batch_size: int,
+) -> tuple[int, int]:
+    rows_seen = 0
+    rows_updated = 0
+    last_id = ""
+    while True:
+        rows = fetch_all(
+            conn,
+            """
+            SELECT d.doc_id
+            FROM dbpedia_colbert_docs d
+            LEFT JOIN dbpedia_colbert_hybrid_proxy_docs p
+              ON p.doc_id = d.doc_id
+            WHERE d.colbert IS NOT NULL
+              AND p.doc_id IS NULL
+              AND d.doc_id > %s
+            ORDER BY d.doc_id
+            LIMIT %s
+            """,
+            (last_id, batch_size),
+        )
+        if not rows:
+            break
+        doc_ids = [str(row[0]) for row in rows]
+        last_id = doc_ids[-1]
+        rows_seen += len(doc_ids)
+        inserted = fetch_all(
+            conn,
+            """
+            INSERT INTO dbpedia_colbert_hybrid_proxy_docs (
+                doc_id,
+                body_tsv,
+                hybrid_dense_proxy
+            )
+            SELECT
+                d.doc_id,
+                d.body_tsv,
+                (
+                  SELECT avg(v)
+                  FROM unnest(turbohybrid_multivector_to_vector_array(d.colbert)) AS u(v)
+                ) AS hybrid_dense_proxy
+            FROM dbpedia_colbert_docs d
+            WHERE d.doc_id = ANY(%s::text[])
+              AND d.colbert IS NOT NULL
+            ON CONFLICT (doc_id) DO NOTHING
+            RETURNING doc_id
+            """,
+            (doc_ids,),
+        )
+        rows_updated += len(inserted)
+    return rows_seen, rows_updated
+
+
+def materialize_colbert_hybrid_query_proxy_batch(
+    conn: psycopg.Connection[Any],
+    *,
+    encoder: str,
+    centroid_count: str,
+    batch_size: int,
+) -> tuple[int, int]:
+    if encoder in {"normalized_mean", "mean", "mean_pool"}:
+        return materialize_colbert_hybrid_query_proxy_sql_batch(
+            conn,
+            batch_size=batch_size,
+        )
+    rows_seen = 0
+    rows_updated = 0
+    last_id = ""
+    temp_table = "tmp_dbpedia_colbert_hybrid_proxy_queries"
+    exec_sql(conn, f"DROP TABLE IF EXISTS {temp_table}")
+    exec_sql(
+        conn,
+        f"""
+        CREATE TEMP TABLE {temp_table} (
+            row_id text PRIMARY KEY,
+            proxy text NOT NULL
+        )
+        """,
+    )
+    while True:
+        rows = fetch_all(
+            conn,
+            """
+            SELECT q.query_id,
+                   ARRAY(
+                     SELECT v::text
+                     FROM unnest(turbohybrid_multivector_to_vector_array(q.colbert)) AS v
+                   ) AS vectors
+            FROM dbpedia_colbert_queries q
+            LEFT JOIN dbpedia_colbert_hybrid_proxy_queries p
+              ON p.query_id = q.query_id
+            WHERE q.colbert IS NOT NULL
+              AND p.query_id IS NULL
+              AND q.query_id > %s
+            ORDER BY q.query_id
+            LIMIT %s
+            """,
+            (last_id, batch_size),
+        )
+        if not rows:
+            break
+        proxy_rows: list[tuple[str, str]] = []
+        for row_id, vectors_value in rows:
+            last_id = str(row_id)
+            vectors = parse_vector_text_array(vectors_value)
+            proxy = build_proxy_exact_scan_vector(vectors, encoder, centroid_count)
+            if proxy:
+                proxy_rows.append((last_id, vector_literal(proxy)))
+        rows_seen += len(rows)
+        if not proxy_rows:
+            continue
+        exec_sql(conn, f"TRUNCATE {temp_table}")
+        copy_rows(conn, f"COPY {temp_table} (row_id, proxy) FROM STDIN", proxy_rows)
+        exec_sql(
+            conn,
+            f"""
+            INSERT INTO dbpedia_colbert_hybrid_proxy_queries (
+                query_id,
+                hybrid_dense_proxy
+            )
+            SELECT
+                p.row_id,
+                p.proxy::vector
+            FROM {temp_table} p
+            ON CONFLICT (query_id) DO NOTHING
+            """,
+        )
+        rows_updated += len(proxy_rows)
+    return rows_seen, rows_updated
+
+
+def materialize_colbert_hybrid_query_proxy_sql_batch(
+    conn: psycopg.Connection[Any],
+    *,
+    batch_size: int,
+) -> tuple[int, int]:
+    rows_seen = 0
+    rows_updated = 0
+    last_id = ""
+    while True:
+        rows = fetch_all(
+            conn,
+            """
+            SELECT q.query_id
+            FROM dbpedia_colbert_queries q
+            LEFT JOIN dbpedia_colbert_hybrid_proxy_queries p
+              ON p.query_id = q.query_id
+            WHERE q.colbert IS NOT NULL
+              AND p.query_id IS NULL
+              AND q.query_id > %s
+            ORDER BY q.query_id
+            LIMIT %s
+            """,
+            (last_id, batch_size),
+        )
+        if not rows:
+            break
+        query_ids = [str(row[0]) for row in rows]
+        last_id = query_ids[-1]
+        rows_seen += len(query_ids)
+        inserted = fetch_all(
+            conn,
+            """
+            INSERT INTO dbpedia_colbert_hybrid_proxy_queries (
+                query_id,
+                hybrid_dense_proxy
+            )
+            SELECT
+                q.query_id,
+                (
+                  SELECT avg(v)
+                  FROM unnest(turbohybrid_multivector_to_vector_array(q.colbert)) AS u(v)
+                ) AS hybrid_dense_proxy
+            FROM dbpedia_colbert_queries q
+            WHERE q.query_id = ANY(%s::text[])
+              AND q.colbert IS NOT NULL
+            ON CONFLICT (query_id) DO NOTHING
+            RETURNING query_id
+            """,
+            (query_ids,),
+        )
+        rows_updated += len(inserted)
+    return rows_seen, rows_updated
+
+
+def ensure_colbert_hybrid_dense_proxies(
+    conn: psycopg.Connection[Any],
+    args: argparse.Namespace,
+) -> dict[str, Any]:
+    started = time.perf_counter()
+    ensure_colbert_hybrid_proxy_tables(conn)
+    encoder = str(getattr(args, "colbert_hybrid_dense_proxy_encoder", "normalized_mean"))
+    centroid_count = str(getattr(args, "multivector_centroid_count", "auto"))
+    batch_size = max(1, int(getattr(args, "colbert_hybrid_proxy_batch_size", 1024) or 1024))
+    if bool(getattr(args, "colbert_hybrid_rebuild_dense_proxy", False)):
+        exec_sql(conn, "TRUNCATE dbpedia_colbert_hybrid_proxy_docs")
+        exec_sql(conn, "TRUNCATE dbpedia_colbert_hybrid_proxy_queries")
+    before = fetch_one(
+        conn,
+        """
+        SELECT
+          (SELECT count(*) FILTER (WHERE colbert IS NOT NULL) FROM dbpedia_colbert_docs),
+          (SELECT count(*) FROM dbpedia_colbert_hybrid_proxy_docs),
+          (SELECT count(*) FILTER (WHERE colbert IS NOT NULL) FROM dbpedia_colbert_queries),
+          (SELECT count(*) FROM dbpedia_colbert_hybrid_proxy_queries)
+        """,
+    )
+    docs_total = int(before[0] or 0) if before else 0
+    docs_ready = int(before[1] or 0) if before else 0
+    queries_total = int(before[2] or 0) if before else 0
+    queries_ready = int(before[3] or 0) if before else 0
+    doc_seen = doc_updated = query_seen = query_updated = 0
+    if docs_ready < docs_total:
+        doc_seen, doc_updated = materialize_colbert_hybrid_doc_proxy_batch(
+            conn,
+            encoder=encoder,
+            centroid_count=centroid_count,
+            batch_size=batch_size,
+        )
+    if queries_ready < queries_total:
+        query_seen, query_updated = materialize_colbert_hybrid_query_proxy_batch(
+            conn,
+            encoder=encoder,
+            centroid_count=centroid_count,
+            batch_size=batch_size,
+        )
+    after = fetch_one(
+        conn,
+        """
+        SELECT
+          (SELECT count(*) FILTER (WHERE colbert IS NOT NULL) FROM dbpedia_colbert_docs),
+          (SELECT count(*) FROM dbpedia_colbert_hybrid_proxy_docs),
+          (SELECT count(*) FILTER (WHERE colbert IS NOT NULL) FROM dbpedia_colbert_queries),
+          (SELECT count(*) FROM dbpedia_colbert_hybrid_proxy_queries)
+        """,
+    )
+    return {
+        "encoder": encoder,
+        "centroid_count": centroid_count,
+        "document_proxy_table": "dbpedia_colbert_hybrid_proxy_docs",
+        "query_proxy_table": "dbpedia_colbert_hybrid_proxy_queries",
+        "batch_size": batch_size,
+        "elapsed_ms": elapsed_ms_since(started),
+        "documents_total": int(after[0] or 0) if after else docs_total,
+        "documents_ready": int(after[1] or 0) if after else docs_ready,
+        "queries_total": int(after[2] or 0) if after else queries_total,
+        "queries_ready": int(after[3] or 0) if after else queries_ready,
+        "document_rows_scanned": doc_seen,
+        "document_rows_updated": doc_updated,
+        "query_rows_scanned": query_seen,
+        "query_rows_updated": query_updated,
+        "reused": (
+            docs_ready == docs_total
+            and queries_ready == queries_total
+            and not bool(getattr(args, "colbert_hybrid_rebuild_dense_proxy", False))
+        ),
+    }
 
 
 def proxy_exact_scan_doc_proxy(
@@ -32458,6 +33083,79 @@ def markdown_benchmark_summary(report: dict[str, Any]) -> str:
                 "`dbpedia_colbert_qrels.doc_id`.",
             ])
 
+    colbert_hybrid = report.get("colbert_hybrid_rerank")
+    if isinstance(colbert_hybrid, dict):
+        latency = colbert_hybrid.get("latency", {})
+        settings = colbert_hybrid.get("settings", {})
+        first_stage = colbert_hybrid.get("first_stage", {})
+        rerank = colbert_hybrid.get("colbert_rerank", {})
+        proxy = colbert_hybrid.get("dense_proxy", {})
+        scan = colbert_hybrid.get("scan_summary", {})
+        if not isinstance(latency, dict):
+            latency = {}
+        if not isinstance(settings, dict):
+            settings = {}
+        if not isinstance(first_stage, dict):
+            first_stage = {}
+        if not isinstance(rerank, dict):
+            rerank = {}
+        if not isinstance(proxy, dict):
+            proxy = {}
+        if not isinstance(scan, dict):
+            scan = {}
+        first_metrics = first_stage.get("metrics", {})
+        rerank_metrics = rerank.get("metrics", {})
+        if not isinstance(first_metrics, dict):
+            first_metrics = {}
+        if not isinstance(rerank_metrics, dict):
+            rerank_metrics = {}
+        field_summary = scan.get("field_summary", {})
+        if not isinstance(field_summary, dict):
+            field_summary = {}
+
+        def hybrid_scan_p50(key: str) -> float:
+            value = field_summary.get(key, {})
+            return float(value.get("p50", 0.0) or 0.0) if isinstance(value, dict) else 0.0
+
+        lines.extend([
+            "",
+            "### ColBERT rerank for hybrid dense+BM25 candidates",
+            "",
+            "This benchmark first retrieves a bounded vector+BM25 candidate "
+            "window, then reranks that window with exact ColBERT MaxSim. It does "
+            "not compute an exact full-corpus ColBERT admission baseline.",
+            "",
+            f"- Dense proxy encoder: `{settings.get('dense_proxy_encoder', '')}`",
+            f"- Fusion: `{settings.get('fusion', '')}`",
+            f"- Dense K / BM25 K / window: `{settings.get('dense_k', 0)}` / `{settings.get('bm25_k', 0)}` / `{settings.get('candidate_window', 0)}`",
+            f"- Queries evaluated: `{int(colbert_hybrid.get('queries_evaluated', 0) or 0)}`",
+            f"- Dense proxy docs ready: `{int(proxy.get('documents_ready', 0) or 0)}` / `{int(proxy.get('documents_total', 0) or 0)}`",
+            f"- Dense proxy queries ready: `{int(proxy.get('queries_ready', 0) or 0)}` / `{int(proxy.get('queries_total', 0) or 0)}`",
+            f"- Final ranking: `{colbert_hybrid.get('final_ranking', '')}`",
+            "",
+            "| stage | recall@10 | ndcg@10 | mrr@10 | p50 ms | p95 ms | p99 ms | candidates p50 | exact rerank us p50 |",
+            "|---|---:|---:|---:|---:|---:|---:|---:|---:|",
+            "| vector+BM25 first stage | {recall:.6f} | {ndcg:.6f} | {mrr:.6f} |  |  |  |  |  |".format(
+                recall=float(first_metrics.get("recall@10", 0.0) or 0.0),
+                ndcg=float(first_metrics.get("ndcg@10", 0.0) or 0.0),
+                mrr=float(first_metrics.get("mrr@10", 0.0) or 0.0),
+            ),
+            "| exact ColBERT MaxSim rerank | {recall:.6f} | {ndcg:.6f} | {mrr:.6f} | {p50:.3f} | {p95:.3f} | {p99:.3f} | {candidates:.3f} | {rerank_us:.3f} |".format(
+                recall=float(rerank_metrics.get("recall@10", 0.0) or 0.0),
+                ndcg=float(rerank_metrics.get("ndcg@10", 0.0) or 0.0),
+                mrr=float(rerank_metrics.get("mrr@10", 0.0) or 0.0),
+                p50=float(latency.get("p50_ms", 0.0) or 0.0),
+                p95=float(latency.get("p95_ms", 0.0) or 0.0),
+                p99=float(latency.get("p99_ms", 0.0) or 0.0),
+                candidates=float(
+                    colbert_hybrid.get("candidate_window_rows", {}).get("p50", 0.0)
+                    if isinstance(colbert_hybrid.get("candidate_window_rows"), dict)
+                    else 0.0
+                ),
+                rerank_us=hybrid_scan_p50("multivector_exact_maxsim_rerank_time_us"),
+            ),
+        ])
+
     sampled_admission = report.get("document_node_colbert_sampled_admission")
     if isinstance(sampled_admission, dict):
         metrics = sampled_admission.get("metrics", {})
@@ -35099,6 +35797,62 @@ def _self_check_quantized_codebook_build() -> None:
     assert "pgturbohybrid_quantized_inverted_codebook_v1" in markdown
 
 
+def _self_check_colbert_hybrid_rerank() -> None:
+    query_sql = "\n".join(
+        str(constant)
+        for constant in run_colbert_hybrid_rerank_query.__code__.co_consts
+    )
+    assert "turbohybrid_query" in query_sql
+    assert "turbohybrid_multivector_maxsim_distance" in query_sql
+    assert "exact_admission_top" not in query_sql
+    report = {
+        "dataset": {"documents": 3, "queries": 2, "qrels": 2},
+        "settings": {
+            "final_k": 10,
+            "clients": 1,
+            "multivector_graph": "token_nodes",
+            "multivector_candidate_source": "graph",
+        },
+        "results": [],
+        "colbert_hybrid_rerank": {
+            "enabled": True,
+            "final_ranking": "exact_colbert_maxsim_over_hybrid_candidate_window",
+            "dense_proxy": {
+                "encoder": "normalized_mean",
+                "documents_ready": 3,
+                "documents_total": 3,
+                "queries_ready": 2,
+                "queries_total": 2,
+            },
+            "settings": {
+                "dense_proxy_encoder": "normalized_mean",
+                "fusion": "rrf",
+                "candidate_window": 20,
+                "dense_k": 20,
+                "bm25_k": 20,
+            },
+            "queries_evaluated": 2,
+            "latency": {"p50_ms": 1.0, "p95_ms": 2.0, "p99_ms": 2.5},
+            "candidate_window_rows": {"p50": 20.0},
+            "first_stage": {
+                "metrics": {"recall@10": 0.25, "ndcg@10": 0.20, "mrr@10": 0.5}
+            },
+            "colbert_rerank": {
+                "metrics": {"recall@10": 0.50, "ndcg@10": 0.40, "mrr@10": 1.0}
+            },
+            "scan_summary": {
+                "field_summary": {
+                    "multivector_exact_maxsim_rerank_time_us": {"p50": 100.0}
+                }
+            },
+        },
+    }
+    markdown = markdown_benchmark_summary(report)
+    assert "ColBERT rerank for hybrid dense+BM25 candidates" in markdown
+    assert "exact ColBERT MaxSim rerank" in markdown
+    assert "0.500000" in markdown
+
+
 def run_self_checks() -> None:
     _self_check_document_node_serving_profiles()
     _self_check_exact_top_cache()
@@ -35130,6 +35884,7 @@ def run_self_checks() -> None:
     _self_check_document_node_colbert_exact_oracle()
     _self_check_document_node_oracle_quality_check()
     _self_check_quantized_codebook_build()
+    _self_check_colbert_hybrid_rerank()
 
 
 def run_multivector_recall_gate(conn: psycopg.Connection[Any], args: argparse.Namespace) -> dict[str, Any]:
@@ -35241,6 +35996,7 @@ def validate_args(args: argparse.Namespace) -> argparse.Namespace:
             or args.document_node_serving_grid_oracle_quality_check
             or args.document_node_colbert_quantized_codebook_build_only
             or args.next_plaid_beir_quality_only
+            or args.colbert_hybrid_rerank
     ) and colbert_1m_mode_count:
         raise SystemExit(
             "--document-node-colbert-1m-beir-quality-only, "
@@ -35249,7 +36005,8 @@ def validate_args(args: argparse.Namespace) -> argparse.Namespace:
             "--document-node-colbert-quantized-inverted-precompact-focus, and "
             "--document-node-serving-grid-oracle-quality-check, "
             "--document-node-colbert-quantized-codebook-build-only, and "
-            "--next-plaid-beir-quality-only cannot be combined "
+            "--next-plaid-beir-quality-only, and --colbert-hybrid-rerank "
+            "cannot be combined "
             "with --document-node-colbert-1m-plan-only, "
             "--document-node-colbert-1m-build-only, or "
             "--document-node-colbert-1m-evaluate-only"
@@ -35265,6 +36022,7 @@ def validate_args(args: argparse.Namespace) -> argparse.Namespace:
             args.document_node_serving_grid_oracle_quality_check,
             args.document_node_colbert_quantized_codebook_build_only,
             args.next_plaid_beir_quality_only,
+            args.colbert_hybrid_rerank,
         )
         if bool(enabled)
     ]
@@ -35276,7 +36034,8 @@ def validate_args(args: argparse.Namespace) -> argparse.Namespace:
             "--document-node-colbert-quantized-inverted-precompact-focus, and "
             "--document-node-serving-grid-oracle-quality-check, "
             "--document-node-colbert-quantized-codebook-build-only, and "
-            "--next-plaid-beir-quality-only are mutually exclusive"
+            "--next-plaid-beir-quality-only, and --colbert-hybrid-rerank are "
+            "mutually exclusive"
         )
     if args.document_node_colbert_exact_oracle_build and (
         colbert_1m_mode_count
@@ -35288,13 +36047,14 @@ def validate_args(args: argparse.Namespace) -> argparse.Namespace:
         or args.document_node_serving_grid_oracle_quality_check
         or args.document_node_colbert_quantized_codebook_build_only
         or args.next_plaid_beir_quality_only
+        or args.colbert_hybrid_rerank
     ):
         raise SystemExit(
             "--document-node-colbert-exact-oracle-build is an offline mode and "
             "cannot be combined with ColBERT 1M build/evaluate/BEIR-quality/"
             "sampled-admission/candidate-source-focus/oracle-quality-check/"
             "quantized-precompact-focus/quantized-codebook-build/"
-            "NextPlaid reference modes"
+            "NextPlaid reference/ColBERT hybrid rerank modes"
         )
     if args.document_node_colbert_exact_oracle_build:
         if args.oracle_output is None:
@@ -35447,6 +36207,15 @@ def validate_args(args: argparse.Namespace) -> argparse.Namespace:
                 "and cannot be combined with " + ", ".join(enabled_forbidden)
             )
         document_node_colbert_beir_quality_profile(args)
+    if args.colbert_hybrid_rerank:
+        for name in (
+            "colbert_hybrid_rerank_window",
+            "colbert_hybrid_dense_k",
+            "colbert_hybrid_bm25_k",
+            "colbert_hybrid_proxy_batch_size",
+        ):
+            if int(getattr(args, name)) < 1:
+                raise SystemExit(f"--{name.replace('_', '-')} must be positive")
     if args.next_plaid_beir_quality_only:
         if not args.reuse_data:
             raise SystemExit(
@@ -35603,6 +36372,7 @@ def validate_args(args: argparse.Namespace) -> argparse.Namespace:
             or args.document_node_serving_grid_oracle_quality_check
             or args.document_node_colbert_quantized_codebook_build_only
             or args.next_plaid_beir_quality_only
+            or args.colbert_hybrid_rerank
         )
         and args.reuse_data
         and not args.force_reload
@@ -35703,11 +36473,14 @@ def validate_args(args: argparse.Namespace) -> argparse.Namespace:
             args.document_node_serving_grid_oracle_quality_check
             or args.document_node_colbert_quantized_inverted_precompact_focus
             or args.document_node_colbert_quantized_inverted_exact_rerank_focus
+            or args.colbert_hybrid_rerank
         ):
             if args.document_node_colbert_quantized_inverted_exact_rerank_focus:
                 default_name = "dbpedia-colbert-quantized-exact-rerank-focus"
             elif args.document_node_colbert_quantized_inverted_precompact_focus:
                 default_name = "dbpedia-colbert-quantized-precompact-focus"
+            elif args.colbert_hybrid_rerank:
+                default_name = "dbpedia-colbert-hybrid-rerank"
             else:
                 default_name = "dbpedia-colbert-oracle-quality-check"
             args.output = Path(
@@ -35726,12 +36499,15 @@ def validate_args(args: argparse.Namespace) -> argparse.Namespace:
         args.document_node_serving_grid_oracle_quality_check
         or args.document_node_colbert_quantized_inverted_precompact_focus
         or args.document_node_colbert_quantized_inverted_exact_rerank_focus
+        or args.colbert_hybrid_rerank
     ):
         mode_name = (
             "--document-node-colbert-quantized-inverted-exact-rerank-focus"
             if args.document_node_colbert_quantized_inverted_exact_rerank_focus
             else "--document-node-colbert-quantized-inverted-precompact-focus"
             if args.document_node_colbert_quantized_inverted_precompact_focus
+            else "--colbert-hybrid-rerank"
+            if args.colbert_hybrid_rerank
             else "--document-node-serving-grid-oracle-quality-check"
         )
         for path, flag_name in (
@@ -36501,6 +37277,56 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--dense-k", type=int, default=100)
     parser.add_argument("--bm25-k", type=int, default=100)
     parser.add_argument("--rrf-k", type=int, default=60)
+    parser.add_argument(
+        "--colbert-hybrid-rerank",
+        action="store_true",
+        help=(
+            "benchmark vector+BM25 first-stage retrieval over a materialized "
+            "ColBERT dense proxy, then exact ColBERT MaxSim rerank the bounded "
+            "candidate window"
+        ),
+    )
+    parser.add_argument(
+        "--colbert-hybrid-rerank-window",
+        type=int,
+        default=200,
+        help="first-stage vector+BM25 candidate window reranked by exact ColBERT MaxSim",
+    )
+    parser.add_argument(
+        "--colbert-hybrid-dense-k",
+        type=int,
+        default=200,
+        help="dense branch budget for --colbert-hybrid-rerank",
+    )
+    parser.add_argument(
+        "--colbert-hybrid-bm25-k",
+        type=int,
+        default=200,
+        help="BM25 branch budget for --colbert-hybrid-rerank",
+    )
+    parser.add_argument(
+        "--colbert-hybrid-rerank-fusion",
+        choices=("rrf", "weighted", "fast_weighted", "calibrated", "dbsf"),
+        default="rrf",
+        help="first-stage vector+BM25 fusion mode for --colbert-hybrid-rerank",
+    )
+    parser.add_argument(
+        "--colbert-hybrid-dense-proxy-encoder",
+        choices=("normalized_mean", "max_pool", "centroid_mean", "mean", "mean_pool", "first_token"),
+        default="normalized_mean",
+        help="benchmark-only dense proxy encoder materialized from ColBERT multivectors",
+    )
+    parser.add_argument(
+        "--colbert-hybrid-proxy-batch-size",
+        type=int,
+        default=1024,
+        help="batch size for materializing benchmark-only ColBERT dense proxy vectors",
+    )
+    parser.add_argument(
+        "--colbert-hybrid-rebuild-dense-proxy",
+        action="store_true",
+        help="clear and rebuild benchmark-only ColBERT dense proxy columns before running",
+    )
     parser.add_argument("--multivector-subvector-k", type=int, default=100)
     parser.add_argument("--multivector-unique-docs-per-token", type=int, default=100)
     parser.add_argument("--multivector-max-raw-hits-per-token", type=int, default=400)
@@ -38624,6 +39450,7 @@ def main() -> None:
             or args.document_node_serving_grid_oracle_quality_check
             or args.document_node_colbert_quantized_codebook_build_only
             or args.next_plaid_beir_quality_only
+            or args.colbert_hybrid_rerank
         )
         and args.reuse_data
         and not args.force_reload
@@ -38660,7 +39487,7 @@ def main() -> None:
                         "pure-ColBERT BEIR quality-only/sampled-admission/"
                         "candidate-source-focus/quantized-precompact-focus/"
                         "quantized-exact-rerank-focus/"
-                        "oracle-quality-check/NextPlaid "
+                        "oracle-quality-check/NextPlaid/ColBERT hybrid rerank "
                         "reference reused imported multivectors and did not "
                         "generate embeddings"
                     ),
@@ -38683,7 +39510,7 @@ def main() -> None:
                         "pure-ColBERT BEIR quality-only/sampled-admission/"
                         "candidate-source-focus/quantized-precompact-focus/"
                         "quantized-exact-rerank-focus/"
-                        "oracle-quality-check/NextPlaid "
+                        "oracle-quality-check/NextPlaid/ColBERT hybrid rerank "
                         "reference reused imported tables and reports qrel "
                         "coverage without reloading"
                     ),
@@ -38743,11 +39570,11 @@ def main() -> None:
                 "reason": (
                     "pure-ColBERT BEIR quality-only/sampled-admission/"
                     "candidate-source-focus/quantized-precompact-focus/"
-                    "quantized-exact-rerank-focus/"
-                    "oracle-quality-check/NextPlaid "
-                    "reference reused imported multivectors"
-                ),
-            }
+                        "quantized-exact-rerank-focus/"
+                        "oracle-quality-check/NextPlaid/ColBERT hybrid rerank "
+                        "reference reused imported multivectors"
+                    ),
+                }
             insert_phase = {
                 "reused": True,
                 "precomputed": False,
@@ -38756,11 +39583,11 @@ def main() -> None:
                 "reason": (
                     "pure-ColBERT BEIR quality-only/sampled-admission/"
                     "candidate-source-focus/quantized-precompact-focus/"
-                    "quantized-exact-rerank-focus/"
-                    "oracle-quality-check/NextPlaid "
-                    "reference does not regenerate or persist multivectors"
-                ),
-            }
+                        "quantized-exact-rerank-focus/"
+                        "oracle-quality-check/NextPlaid/ColBERT hybrid rerank "
+                        "reference does not regenerate or persist multivectors"
+                    ),
+                }
         else:
             generation_phase = {
                 "skipped": True,
@@ -38785,6 +39612,7 @@ def main() -> None:
             or args.document_node_colbert_quantized_inverted_exact_rerank_focus
             or args.document_node_serving_grid_oracle_quality_check
             or args.next_plaid_beir_quality_only
+            or args.colbert_hybrid_rerank
         ):
             if args.document_node_serving_latency_only:
                 representative_profile = document_node_serving_latency_profile(args)
@@ -38805,6 +39633,8 @@ def main() -> None:
                 oracle_profiles = document_node_oracle_quality_check_profiles(args)
                 representative_profile = oracle_profiles[0] if oracle_profiles else None
             elif args.next_plaid_beir_quality_only:
+                representative_profile = None
+            elif args.colbert_hybrid_rerank:
                 representative_profile = None
             else:
                 colbert_1m_profiles = document_node_colbert_1m_effective_profiles(args)
@@ -38848,6 +39678,7 @@ def main() -> None:
         document_node_colbert_candidate_source_focus = None
         document_node_serving_grid_oracle_quality_check = None
         next_plaid_beir_quality = None
+        colbert_hybrid_rerank = None
 
         if args.document_node_colbert_1m_build_only:
             document_node_serving_build_only = run_document_node_colbert_1m_build_only(
@@ -38936,6 +39767,22 @@ def main() -> None:
                 "external_engine": "next-plaid",
                 "next_plaid_index_info": next_plaid_beir_quality.get("index_info", {}),
             }
+            result_methods = []
+            admission_debug = None
+            document_node_admission_grid = None
+            document_node_serving_grid = None
+            document_node_serving_recommendation = None
+            document_node_token_pooling_recommendation = None
+            hybrid_evaluation = None
+            token_ablation = None
+        elif args.colbert_hybrid_rerank:
+            colbert_hybrid_rerank = run_colbert_hybrid_rerank_benchmark(
+                conn,
+                args,
+                encoded_queries,
+                qrels,
+            )
+            index_phase = colbert_hybrid_rerank["index_phase"]
             result_methods = []
             admission_debug = None
             document_node_admission_grid = None
@@ -39266,6 +40113,14 @@ def main() -> None:
                 "next_plaid_centroid_score_threshold": (
                     args.next_plaid_centroid_score_threshold
                 ),
+                "colbert_hybrid_rerank": args.colbert_hybrid_rerank,
+                "colbert_hybrid_rerank_window": args.colbert_hybrid_rerank_window,
+                "colbert_hybrid_dense_k": args.colbert_hybrid_dense_k,
+                "colbert_hybrid_bm25_k": args.colbert_hybrid_bm25_k,
+                "colbert_hybrid_rerank_fusion": args.colbert_hybrid_rerank_fusion,
+                "colbert_hybrid_dense_proxy_encoder": (
+                    args.colbert_hybrid_dense_proxy_encoder
+                ),
                 "document_node_colbert_sampled_admission": (
                     args.document_node_colbert_sampled_admission
                 ),
@@ -39479,6 +40334,8 @@ def main() -> None:
             )
         if next_plaid_beir_quality is not None:
             output["next_plaid_beir_quality"] = next_plaid_beir_quality
+        if colbert_hybrid_rerank is not None:
+            output["colbert_hybrid_rerank"] = colbert_hybrid_rerank
         if document_node_colbert_sampled_admission is not None:
             output["document_node_colbert_sampled_admission"] = (
                 document_node_colbert_sampled_admission
