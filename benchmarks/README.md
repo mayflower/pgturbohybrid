@@ -331,15 +331,14 @@ python benchmarks/dbpedia_colbert_multivector.py \
 ```
 
 With an external codebook and `--include-quantized-inverted-experimental`, the
-candidate-source focus default is the current measured pure-ColBERT working
-path:
+candidate-source focus can select the experimental preset
 `quantized_inverted_external_centroid_only_precompact_topk_8192_docid_rk512_topk`,
-candidate budget `8192`, and exact heap MaxSim rerank K `512`. This profile is
-still experimental. It uses the external codebook only when a real codebook
-file is supplied, includes the codebook source/path/top-m in the physical index
-signature, keeps final SQL ordering as exact heap MaxSim over the retained
-candidates, and enables the measured precompact top-k/docId-order/blocked
-query-codeword path. The `centroid_only` compact variant writes centroids plus
+which uses candidate budget `8192` and exact heap MaxSim rerank K `512`. This
+profile is still experimental. It uses the external codebook only when a real
+codebook file is supplied, includes the codebook source/path/top-m in the
+physical index signature, keeps final SQL ordering as exact heap MaxSim over
+the retained candidates, and enables precompact top-k/docId-order/blocked
+query-codeword scoring. The `centroid_only` compact variant writes centroids plus
 quantized posting/codeword payloads and does not store a full document
 multivector sidecar; use explicit
 `--document-node-colbert-candidate-source-profiles` and
@@ -385,15 +384,60 @@ drop by at most `0.01` from the baseline row, p95 must be at most `0.75x` the
 baseline p95, compact scoring must normally touch at most `6000` documents,
 and generated acceptance artifacts must stay under `.nix-dev/tmp/`.
 
-The latest 50k/25-query artifacts did not pass the strict admission gate, but
-the best selected row became the experimental benchmark default because it is
-both faster and better on the available qrels than the local precompact-off
-baseline. It reduced p95 from `117.839 ms` to `69.828 ms` and compact score
-time from `13751 us` to `6007 us`, while improving Recall@10 from `0.348762`
-to `0.459810` and NDCG@10 from `0.306454` to `0.389044`. The caveat is still
-important: top-1 admission was `0.76`, top-10 admission was `0.604`, and
-compact scoring still touched `8192` documents, so this is an experimental
-benchmark default rather than a production-safe profile.
+If the hard gates fail, keep the row as benchmark evidence only. Do not promote
+it as a safe serving profile just because it is faster than another candidate
+source on one artifact.
+
+#### Pure-ColBERT benchmark contract
+
+Pure-ColBERT benchmark modes must keep BM25, learned sparse, SPLADE/SPLATE,
+and hybrid fusion out of the profile set. They may compare proxy, centroid, and
+quantized-inverted candidate sources, but all rows must keep final SQL ordering
+as exact heap MaxSim over retained documents.
+
+Use this checklist when reading a ColBERT artifact:
+
+- `pure_colbert_only = true` means the run did not intentionally enable lexical
+  or sparse rescue.
+- `candidate_source` identifies the admission branch:
+  `proxy_vector`, `document_nodes`, `centroid_lite`, or
+  `quantized_inverted_experimental`.
+- `profile` and `physical_index_signature` identify whether the row uses
+  `proxy_only`, `centroid_only`, full `f16`/`sq8` sidecar storage, pooling, or
+  an external codebook.
+- `recall@10`, `ndcg@10`, and `mrr@10` are qrel quality metrics. They do not
+  prove exact MaxSim admission unless an oracle is present.
+- `exact_top1_admission_rate` and `exact_top10_admission_recall` are available
+  only for exact-admission runs or sampled exact-oracle runs. Artifacts must
+  label the evidence as full or sampled.
+- `exact_admission_available = false` is expected for BEIR-quality-only and
+  candidate-source-focus runs without `--oracle-input`.
+- Zero `recall@10` or zero `ndcg@10` rows are negative controls when qrels are
+  available; they should not be recommended as serving profiles even when p95
+  is low.
+
+Candidate-source work counters explain whether time is spent in candidate
+admission or in exact rerank:
+
+| Branch | Key counters |
+| --- | --- |
+| Proxy | `proxy_candidates_returned`, `proxy_candidate_limit_effective`, `proxy_candidate_limit_source`, `proxy_graph_nodes_visited`, `proxy_graph_edges_visited`, `proxy_vector_score_time_us` |
+| Centroid-lite | `centroid_lists_visited`, `centroid_postings_touched`, `centroid_docs_touched`, `centroid_docs_touched_ratio`, `centroid_candidates`, `centroid_candidate_scoring` |
+| Quantized inverted | `quantized_inverted_lists_visited`, `quantized_inverted_postings_touched`, `quantized_inverted_docs_scored`, `quantized_inverted_candidates`, `quantized_inverted_precompact_pruned_docs` |
+| Compact scoring | `quantized_inverted_compact_kernel`, `quantized_inverted_compact_score_us`, `quantized_inverted_compact_docs_scored`, `quantized_inverted_compact_pairs_evaluated`, `quantized_inverted_compact_pairs_skipped` |
+| Exact rerank | `multivector_exact_rerank_docs`, `multivector_exact_rerank_pairs`, `multivector_exact_kernel`, `multivector_exact_maxsim_rerank_time_us`, `multivector_exact_heap_fetch_time_us` |
+| Storage/cache | `multivector_doc_storage_kind`, `proxy_only_index`, `centroid_only_index`, `full_multivector_sidecar_available`, `multivector_doc_sidecar_bytes_touched`, `multivector_doc_sidecar_pages_read` |
+
+Interpretation rules:
+
+- A fast proxy-only row with weak qrel quality is a latency baseline, not a
+  quality candidate.
+- A centroid-lite row that touches a large fraction of documents is still too
+  broad, even if exact rerank time is small.
+- A quantized-inverted row is experimental unless it passes the admission,
+  quality, latency, and work-counter gates in the acceptance report.
+- A qrel-quality run without exact-oracle admission can reject bad profiles but
+  cannot prove safe admission.
 
 ### x00k document-node serving selection
 

@@ -189,6 +189,46 @@ SIMD support and `turbohybrid.simd` is enabled, the exact dot-product kernel may
 dispatch to AVX2 on x86 or NEON on ARM for the bounded rerank work; portable and
 `SIMD_BUILD=none` builds continue to use the scalar path.
 
+### Native ColBERT candidate generation
+
+For ColBERT-style models, `pgturbohybrid` can build document-node indexes that
+separate candidate generation from final ranking. Candidate sources are allowed
+to use approximate proxy, centroid, or compact-code scores to choose a bounded
+document set. The returned SQL order remains exact heap MaxSim over that
+retained set.
+
+The document-node storage tiers are selected with the `multivector_doc_storage`
+index option:
+
+- `f32`, `f16`, and `sq8` store a full document multivector sidecar for
+  document-node scoring experiments.
+- `proxy_only` stores only document IDs, heap TIDs, graph adjacency, and the
+  fixed-dimensional proxy vector. It is useful for low-memory proxy admission
+  and exact heap rerank.
+- `centroid_only` stores centroid and posting payloads without the full
+  multivector sidecar. It is intended for centroid and quantized-inverted
+  candidate-source experiments.
+
+The main pure-ColBERT candidate sources are:
+
+- `proxy_vector`: graph traversal over one proxy vector per document.
+- `document_nodes`: document-node graph scoring over the configured
+  document-node storage.
+- `centroid_lite`: experimental PLAID-style centroid posting admission.
+- `quantized_inverted_experimental`: research-only codeword/posting admission.
+- `exact_doc_scan` and `exact_token_scan`: diagnostic oracles, not serving
+  paths.
+
+Use `turbohybrid_last_scan_stats()` or the DBpedia ColBERT benchmark JSON to
+check whether a candidate source is healthy. The most useful fields are:
+latency (`p50_ms`, `p95_ms`, `p99_ms`), qrel quality (`recall@10`, `ndcg@10`,
+`mrr@10`), exact-oracle admission when available
+(`exact_top1_admission_rate`, `exact_top10_admission_recall`), candidate work
+(`proxy_candidates_returned`, `centroid_docs_touched`,
+`quantized_inverted_docs_scored`), and exact rerank cost
+(`multivector_exact_rerank_docs`, `multivector_exact_rerank_pairs`,
+`multivector_exact_maxsim_rerank_time_us`).
+
 Safety caps are controlled by `turbohybrid.multivector_max_doc_vectors`,
 `turbohybrid.multivector_max_query_vectors`, and
 `turbohybrid.multivector_max_dim`.
