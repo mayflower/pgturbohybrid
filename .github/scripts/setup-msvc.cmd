@@ -3,6 +3,8 @@
 set "VSINSTALLDIR="
 set "NMAKE="
 set "CLDIR="
+set "MSVC_INCLUDE="
+set "MSVC_LIB="
 set "UCRT_INCLUDE="
 set "UCRT_LIB="
 set "SDK_SHARED_INCLUDE="
@@ -22,10 +24,14 @@ if not defined KITSROOT if exist "%ProgramFiles(x86)%\Windows Kits\10" set "KITS
 if defined VCToolsInstallDir (
   if exist "%VCToolsInstallDir%bin\Hostx64\x64\nmake.exe" set "NMAKE=%VCToolsInstallDir%bin\Hostx64\x64\nmake.exe"
   if exist "%VCToolsInstallDir%bin\Hostx64\x64\cl.exe" set "CLDIR=%VCToolsInstallDir%bin\Hostx64\x64"
+  if exist "%VCToolsInstallDir%include\crtdefs.h" set "MSVC_INCLUDE=%VCToolsInstallDir%include"
+  if exist "%VCToolsInstallDir%lib\x64" set "MSVC_LIB=%VCToolsInstallDir%lib\x64"
 )
 
 if not defined NMAKE for /d %%d in ("%VSINSTALLDIR%\VC\Tools\MSVC\*") do if not defined NMAKE if exist "%%~fd\bin\Hostx64\x64\nmake.exe" set "NMAKE=%%~fd\bin\Hostx64\x64\nmake.exe"
 if not defined CLDIR for /d %%d in ("%VSINSTALLDIR%\VC\Tools\MSVC\*") do if not defined CLDIR if exist "%%~fd\bin\Hostx64\x64\cl.exe" set "CLDIR=%%~fd\bin\Hostx64\x64"
+if not defined MSVC_INCLUDE for /d %%d in ("%VSINSTALLDIR%\VC\Tools\MSVC\*") do if not defined MSVC_INCLUDE if exist "%%~fd\include\crtdefs.h" set "MSVC_INCLUDE=%%~fd\include"
+if not defined MSVC_LIB for /d %%d in ("%VSINSTALLDIR%\VC\Tools\MSVC\*") do if not defined MSVC_LIB if exist "%%~fd\lib\x64" set "MSVC_LIB=%%~fd\lib\x64"
 if not defined NMAKE exit /b 1
 if not defined CLDIR exit /b 1
 
@@ -40,18 +46,17 @@ if defined UniversalCRTSdkDir if defined UCRTVersion if exist "%UniversalCRTSdkD
 if defined KITSROOT if exist "%KITSROOT%Include" for /r "%KITSROOT%Include" %%u in (crtdefs.h) do if not defined UCRT_INCLUDE if exist "%%u" set "UCRT_INCLUDE=%%~dpu"
 if defined KITSROOT if exist "%KITSROOT%Include" for /r "%KITSROOT%Include" %%u in (winapifamily.h) do if not defined SDK_SHARED_INCLUDE if exist "%%u" set "SDK_SHARED_INCLUDE=%%~dpu"
 if defined KITSROOT if exist "%KITSROOT%Include" for /r "%KITSROOT%Include" %%u in (windows.h) do if not defined SDK_UM_INCLUDE if exist "%%u" set "SDK_UM_INCLUDE=%%~dpu"
-if defined KITSROOT if exist "%KITSROOT%Lib" for /r "%KITSROOT%Lib" %%u in (ucrt.lib) do if not defined UCRT_LIB if exist "%%u" set "UCRT_LIB=%%~dpu"
-if defined KITSROOT if exist "%KITSROOT%Lib" for /r "%KITSROOT%Lib" %%u in (kernel32.lib) do if not defined SDK_UM_LIB if exist "%%u" set "SDK_UM_LIB=%%~dpu"
 for /d %%d in ("%ProgramFiles(x86)%\Windows Kits\10\Include\*") do if not defined UCRT_INCLUDE if exist "%%~fd\ucrt\crtdefs.h" set "UCRT_INCLUDE=%%~fd\ucrt"
 for /d %%d in ("%ProgramFiles(x86)%\Windows Kits\10\Lib\*") do if not defined UCRT_LIB if exist "%%~fd\ucrt\x64\ucrt.lib" set "UCRT_LIB=%%~fd\ucrt\x64"
+for /d %%d in ("%ProgramFiles(x86)%\Windows Kits\10\Lib\*") do if not defined SDK_UM_LIB if exist "%%~fd\um\x64\kernel32.lib" set "SDK_UM_LIB=%%~fd\um\x64"
 if not defined UCRT_INCLUDE for /f "delims=" %%u in ('where /R "%ProgramFiles(x86)%\Windows Kits\10\Include" crtdefs.h 2^>nul') do if not defined UCRT_INCLUDE set "UCRT_INCLUDE=%%~dpu"
 if not defined SDK_SHARED_INCLUDE for /f "delims=" %%u in ('where /R "%ProgramFiles(x86)%\Windows Kits\10\Include" winapifamily.h 2^>nul') do if not defined SDK_SHARED_INCLUDE set "SDK_SHARED_INCLUDE=%%~dpu"
 if not defined SDK_UM_INCLUDE for /f "delims=" %%u in ('where /R "%ProgramFiles(x86)%\Windows Kits\10\Include" windows.h 2^>nul') do if not defined SDK_UM_INCLUDE set "SDK_UM_INCLUDE=%%~dpu"
-if not defined UCRT_LIB for /f "delims=" %%u in ('where /R "%ProgramFiles(x86)%\Windows Kits\10\Lib" ucrt.lib 2^>nul') do if not defined UCRT_LIB set "UCRT_LIB=%%~dpu"
-if not defined SDK_UM_LIB for /f "delims=" %%u in ('where /R "%ProgramFiles(x86)%\Windows Kits\10\Lib" kernel32.lib 2^>nul') do if not defined SDK_UM_LIB set "SDK_UM_LIB=%%~dpu"
+if defined MSVC_INCLUDE set "INCLUDE=%MSVC_INCLUDE%;%INCLUDE%"
 if defined UCRT_INCLUDE set "INCLUDE=%UCRT_INCLUDE%;%INCLUDE%"
 if defined SDK_SHARED_INCLUDE set "INCLUDE=%SDK_SHARED_INCLUDE%;%INCLUDE%"
 if defined SDK_UM_INCLUDE set "INCLUDE=%SDK_UM_INCLUDE%;%INCLUDE%"
+if defined MSVC_LIB set "LIB=%MSVC_LIB%;%LIB%"
 if defined UCRT_LIB set "LIB=%UCRT_LIB%;%LIB%"
 if defined SDK_UM_LIB set "LIB=%SDK_UM_LIB%;%LIB%"
 
@@ -62,12 +67,17 @@ echo VSINSTALLDIR=%VSINSTALLDIR%
 echo KITSROOT=%KITSROOT%
 echo UniversalCRTSdkDir=%UniversalCRTSdkDir%
 echo UCRTVersion=%UCRTVersion%
+echo MSVC_INCLUDE=%MSVC_INCLUDE%
+echo MSVC_LIB=%MSVC_LIB%
 echo UCRT_INCLUDE=%UCRT_INCLUDE%
 echo SDK_SHARED_INCLUDE=%SDK_SHARED_INCLUDE%
 echo SDK_UM_INCLUDE=%SDK_UM_INCLUDE%
 echo UCRT_LIB=%UCRT_LIB%
 echo SDK_UM_LIB=%SDK_UM_LIB%
-if not defined UCRT_INCLUDE exit /b 1
-if not exist "%UCRT_INCLUDE%crtdefs.h" if not exist "%UCRT_INCLUDE%\crtdefs.h" exit /b 1
+if not defined MSVC_INCLUDE if not defined UCRT_INCLUDE exit /b 1
+if defined MSVC_INCLUDE if exist "%MSVC_INCLUDE%\crtdefs.h" exit /b 0
+if defined UCRT_INCLUDE if exist "%UCRT_INCLUDE%crtdefs.h" exit /b 0
+if defined UCRT_INCLUDE if exist "%UCRT_INCLUDE%\crtdefs.h" exit /b 0
+exit /b 1
 
 exit /b 0
