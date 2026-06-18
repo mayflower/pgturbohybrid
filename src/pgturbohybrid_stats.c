@@ -621,6 +621,130 @@ PgturbohybridJsonbAddMultiVectorTokenStats(PgturbohybridJsonbState *state,
 	PgturbohybridJsonbPush(state, WJB_END_ARRAY, NULL);
 }
 
+static void
+PgturbohybridJsonbAddMultiVectorCentroidLiteStats(PgturbohybridJsonbState *state,
+												 const PgturbohybridScanStatsSnapshot *scanStats)
+{
+	PgturbohybridJsonbAddUint64(state, "centroid_lists_visited",
+								scanStats->centroidListsVisited);
+	PgturbohybridJsonbAddUint64(state, "centroid_docs_touched",
+								scanStats->centroidDocsTouched);
+	PgturbohybridJsonbAddUint64(state, "centroid_pruned_docs",
+								scanStats->centroidPrunedDocs);
+	PgturbohybridJsonbAddUint64(state, "centroid_postings_touched",
+								scanStats->centroidPostingsTouched);
+	PgturbohybridJsonbAddUint64(state, "centroid_postings_selected",
+								scanStats->centroidPostingsSelected);
+	PgturbohybridJsonbAddUint64(state, "centroid_postings_skipped",
+								scanStats->centroidPostingsSkipped);
+	PgturbohybridJsonbAddUint64(state, "centroid_probe_time_us",
+								scanStats->centroidProbeUs);
+	PgturbohybridJsonbAddUint64(state, "centroid_posting_scan_time_us",
+								scanStats->centroidPostingScanUs);
+	PgturbohybridJsonbAddUint64(state, "centroid_accumulate_time_us",
+								scanStats->centroidAccumulateUs);
+	PgturbohybridJsonbAddUint64(state, "centroid_candidate_heap_time_us",
+								scanStats->centroidCandidateHeapUs);
+	PgturbohybridJsonbAddInt64(state, "centroid_posting_limit_per_token",
+							   scanStats->centroidPostingLimitPerToken);
+	PgturbohybridJsonbAddInt64(state, "centroid_probe_centroids_per_token",
+							   scanStats->centroidProbeCentroidsPerToken);
+	PgturbohybridJsonbAddInt64(state, "centroid_codeword_top_m",
+							   scanStats->centroidCodewordTopM);
+	PgturbohybridJsonbAddFloat8(state, "centroid_score_threshold",
+								scanStats->centroidScoreThreshold);
+	PgturbohybridJsonbAddFloat8(state, "centroid_score_drop_from_best",
+								scanStats->centroidScoreDropFromBest);
+	PgturbohybridJsonbAddUint64(state, "centroid_lists_skipped_by_threshold",
+								scanStats->centroidListsSkippedByThreshold);
+	PgturbohybridJsonbAddString(state, "centroid_posting_cap_strategy",
+								scanStats->centroidPostingCapStrategy[0] != '\0' ?
+								scanStats->centroidPostingCapStrategy : "none");
+	PgturbohybridJsonbAddString(state, "centroid_candidate_scoring",
+								scanStats->centroidCandidateScoring[0] != '\0' ?
+								scanStats->centroidCandidateScoring : "none");
+	PgturbohybridJsonbAddInt64(state, "centroid_candidates",
+							   scanStats->centroidCandidates);
+	PgturbohybridJsonbAddBool(state, "centroid_bitset_prefilter_enabled",
+							  scanStats->centroidBitsetPrefilterEnabled);
+	PgturbohybridJsonbAddInt64(state, "centroid_bitset_min_token_matches",
+							   scanStats->centroidBitsetMinTokenMatches);
+	PgturbohybridJsonbAddInt64(state, "centroid_bitset_lists_used",
+							   scanStats->centroidBitsetListsUsed);
+	PgturbohybridJsonbAddInt64(state, "centroid_bitset_docs_set",
+							   scanStats->centroidBitsetDocsSet);
+	PgturbohybridJsonbAddInt64(state, "centroid_bitset_docs_after_threshold",
+							   scanStats->centroidBitsetDocsAfterThreshold);
+	PgturbohybridJsonbAddUint64(state, "centroid_bitset_prefilter_time_us",
+								scanStats->centroidBitsetPrefilterUs);
+	PgturbohybridJsonbAddUint64(state, "centroid_bitset_time_us",
+								scanStats->centroidBitsetPrefilterUs);
+	PgturbohybridJsonbAddInt64(state, "centroid_bitset_candidates",
+							   scanStats->centroidBitsetDocsAfterThreshold);
+	PgturbohybridJsonbAddUint64(state, "centroid_bitset_memory_bytes",
+								scanStats->centroidBitsetMemoryBytes);
+	PgturbohybridJsonbAddBool(state, "centroid_upper_bound_enabled",
+							  scanStats->centroidUpperBoundEnabled);
+	PgturbohybridJsonbAddUint64(state, "centroid_upper_bound_docs_checked",
+								scanStats->centroidUpperBoundDocsChecked);
+	PgturbohybridJsonbAddUint64(state, "centroid_upper_bound_docs_pruned",
+								scanStats->centroidUpperBoundDocsPruned);
+	PgturbohybridJsonbAddUint64(state, "centroid_upper_bound_prune_time_us",
+								scanStats->centroidUpperBoundPruneUs);
+	PgturbohybridJsonbAddUint64(state, "centroid_upper_bound_time_us",
+								scanStats->centroidUpperBoundPruneUs);
+	PgturbohybridJsonbAddUint64(state, "centroid_upper_bound_unsafe_fallbacks",
+								scanStats->centroidUpperBoundUnsafeFallbacks);
+	PgturbohybridJsonbAddFloat8(state, "centroid_upper_bound_prune_ratio",
+								scanStats->centroidUpperBoundDocsChecked > 0 ?
+								(double) scanStats->centroidUpperBoundDocsPruned /
+								(double) scanStats->centroidUpperBoundDocsChecked : 0.0);
+	PgturbohybridJsonbAddInt64(state, "centroid_candidates_before_bound",
+							   scanStats->centroidCandidatesBeforeBound);
+	PgturbohybridJsonbAddInt64(state, "centroid_candidates_after_bound",
+							   scanStats->centroidCandidatesAfterBound);
+	PgturbohybridJsonbAddInt64(state, "multivector_centroid_count",
+							   scanStats->multivectorCentroidCount);
+	PgturbohybridJsonbAddInt64(state, "multivector_centroid_prerank_docs",
+							   scanStats->multivectorCentroidPrerankDocs);
+	PgturbohybridJsonbAddInt64(state, "multivector_full_maxsim_rerank_docs",
+							   scanStats->multivectorFullMaxsimRerankDocs);
+}
+
+static void
+PgturbohybridJsonbAddMultiVectorDocStorageStats(PgturbohybridJsonbState *state,
+											   const PgturbohybridScanStatsSnapshot *scanStats)
+{
+	const char *storageKind =
+		scanStats->multivectorDocGraphStorageKind[0] != '\0' ?
+		scanStats->multivectorDocGraphStorageKind : "f32";
+
+	PgturbohybridJsonbAddString(state, "multivector_doc_graph_storage_kind",
+								storageKind);
+	PgturbohybridJsonbAddString(state, "multivector_doc_storage",
+								storageKind);
+	PgturbohybridJsonbAddString(state, "multivector_doc_storage_kind",
+								storageKind);
+	PgturbohybridJsonbAddBool(state, "proxy_only_index",
+							  scanStats->proxyOnlyIndex);
+	PgturbohybridJsonbAddBool(state, "centroid_only_index",
+							  scanStats->centroidOnlyIndex);
+	PgturbohybridJsonbAddBool(state, "full_multivector_sidecar_available",
+							  scanStats->fullMultivectorSidecarAvailable);
+	PgturbohybridJsonbAddBool(state, "centroid_sidecar_available",
+							  scanStats->centroidSidecarAvailable);
+	PgturbohybridJsonbAddBool(state, "centroid_doc_codes_available",
+							  scanStats->centroidDocCodesAvailable);
+	PgturbohybridJsonbAddBool(state,
+							  "quantized_inverted_sidecar_available",
+							  scanStats->quantizedInvertedSidecarAvailable);
+	PgturbohybridJsonbAddString(state, "exact_rerank_source_supported",
+								scanStats->proxyOnlyIndex ||
+								scanStats->centroidOnlyIndex ? "heap" :
+								(scanStats->fullMultivectorSidecarAvailable ?
+								 "sidecar" : "none"));
+}
+
 void
 PgturbohybridGraphRecordNativeBuildStats(const PgturbohybridNativeBuildStatsSnapshot *stats)
 {
@@ -3837,90 +3961,7 @@ pgturbohybrid_last_scan_stats(PG_FUNCTION_ARGS)
 	PgturbohybridJsonbAddString(&state, "proxy_vector_sidecar_touch_reason",
 								scanStats.proxyVectorSidecarTouchReason[0] != '\0' ?
 								scanStats.proxyVectorSidecarTouchReason : "none");
-	PgturbohybridJsonbAddUint64(&state, "centroid_lists_visited",
-								scanStats.centroidListsVisited);
-	PgturbohybridJsonbAddUint64(&state, "centroid_docs_touched",
-								scanStats.centroidDocsTouched);
-	PgturbohybridJsonbAddUint64(&state, "centroid_pruned_docs",
-								scanStats.centroidPrunedDocs);
-	PgturbohybridJsonbAddUint64(&state, "centroid_postings_touched",
-								scanStats.centroidPostingsTouched);
-	PgturbohybridJsonbAddUint64(&state, "centroid_postings_selected",
-								scanStats.centroidPostingsSelected);
-		PgturbohybridJsonbAddUint64(&state, "centroid_postings_skipped",
-									scanStats.centroidPostingsSkipped);
-		PgturbohybridJsonbAddUint64(&state, "centroid_probe_time_us",
-									scanStats.centroidProbeUs);
-		PgturbohybridJsonbAddUint64(&state, "centroid_posting_scan_time_us",
-									scanStats.centroidPostingScanUs);
-		PgturbohybridJsonbAddUint64(&state, "centroid_accumulate_time_us",
-									scanStats.centroidAccumulateUs);
-		PgturbohybridJsonbAddUint64(&state, "centroid_candidate_heap_time_us",
-									scanStats.centroidCandidateHeapUs);
-		PgturbohybridJsonbAddInt64(&state, "centroid_posting_limit_per_token",
-								   scanStats.centroidPostingLimitPerToken);
-	PgturbohybridJsonbAddInt64(&state, "centroid_probe_centroids_per_token",
-							   scanStats.centroidProbeCentroidsPerToken);
-	PgturbohybridJsonbAddInt64(&state, "centroid_codeword_top_m",
-							   scanStats.centroidCodewordTopM);
-	PgturbohybridJsonbAddFloat8(&state, "centroid_score_threshold",
-								scanStats.centroidScoreThreshold);
-	PgturbohybridJsonbAddFloat8(&state, "centroid_score_drop_from_best",
-								scanStats.centroidScoreDropFromBest);
-	PgturbohybridJsonbAddUint64(&state, "centroid_lists_skipped_by_threshold",
-								scanStats.centroidListsSkippedByThreshold);
-	PgturbohybridJsonbAddString(&state, "centroid_posting_cap_strategy",
-								scanStats.centroidPostingCapStrategy[0] != '\0' ?
-								scanStats.centroidPostingCapStrategy : "none");
-	PgturbohybridJsonbAddString(&state, "centroid_candidate_scoring",
-								scanStats.centroidCandidateScoring[0] != '\0' ?
-								scanStats.centroidCandidateScoring : "none");
-	PgturbohybridJsonbAddInt64(&state, "centroid_candidates",
-							   scanStats.centroidCandidates);
-	PgturbohybridJsonbAddBool(&state, "centroid_bitset_prefilter_enabled",
-							  scanStats.centroidBitsetPrefilterEnabled);
-	PgturbohybridJsonbAddInt64(&state, "centroid_bitset_min_token_matches",
-							   scanStats.centroidBitsetMinTokenMatches);
-	PgturbohybridJsonbAddInt64(&state, "centroid_bitset_lists_used",
-							   scanStats.centroidBitsetListsUsed);
-	PgturbohybridJsonbAddInt64(&state, "centroid_bitset_docs_set",
-							   scanStats.centroidBitsetDocsSet);
-	PgturbohybridJsonbAddInt64(&state, "centroid_bitset_docs_after_threshold",
-							   scanStats.centroidBitsetDocsAfterThreshold);
-	PgturbohybridJsonbAddUint64(&state, "centroid_bitset_prefilter_time_us",
-								scanStats.centroidBitsetPrefilterUs);
-	PgturbohybridJsonbAddUint64(&state, "centroid_bitset_time_us",
-								scanStats.centroidBitsetPrefilterUs);
-	PgturbohybridJsonbAddInt64(&state, "centroid_bitset_candidates",
-							   scanStats.centroidBitsetDocsAfterThreshold);
-	PgturbohybridJsonbAddUint64(&state, "centroid_bitset_memory_bytes",
-								scanStats.centroidBitsetMemoryBytes);
-	PgturbohybridJsonbAddBool(&state, "centroid_upper_bound_enabled",
-							  scanStats.centroidUpperBoundEnabled);
-	PgturbohybridJsonbAddUint64(&state, "centroid_upper_bound_docs_checked",
-								scanStats.centroidUpperBoundDocsChecked);
-	PgturbohybridJsonbAddUint64(&state, "centroid_upper_bound_docs_pruned",
-								scanStats.centroidUpperBoundDocsPruned);
-	PgturbohybridJsonbAddUint64(&state, "centroid_upper_bound_prune_time_us",
-								scanStats.centroidUpperBoundPruneUs);
-	PgturbohybridJsonbAddUint64(&state, "centroid_upper_bound_time_us",
-								scanStats.centroidUpperBoundPruneUs);
-	PgturbohybridJsonbAddUint64(&state, "centroid_upper_bound_unsafe_fallbacks",
-								scanStats.centroidUpperBoundUnsafeFallbacks);
-	PgturbohybridJsonbAddFloat8(&state, "centroid_upper_bound_prune_ratio",
-								scanStats.centroidUpperBoundDocsChecked > 0 ?
-								(double) scanStats.centroidUpperBoundDocsPruned /
-								(double) scanStats.centroidUpperBoundDocsChecked : 0.0);
-	PgturbohybridJsonbAddInt64(&state, "centroid_candidates_before_bound",
-							   scanStats.centroidCandidatesBeforeBound);
-	PgturbohybridJsonbAddInt64(&state, "centroid_candidates_after_bound",
-							   scanStats.centroidCandidatesAfterBound);
-	PgturbohybridJsonbAddInt64(&state, "multivector_centroid_count",
-							   scanStats.multivectorCentroidCount);
-	PgturbohybridJsonbAddInt64(&state, "multivector_centroid_prerank_docs",
-							   scanStats.multivectorCentroidPrerankDocs);
-	PgturbohybridJsonbAddInt64(&state, "multivector_full_maxsim_rerank_docs",
-							   scanStats.multivectorFullMaxsimRerankDocs);
+	PgturbohybridJsonbAddMultiVectorCentroidLiteStats(&state, &scanStats);
 	PgturbohybridJsonbAddUint64(&state, "quantized_inverted_lists_visited",
 								scanStats.quantizedInvertedListsVisited);
 	PgturbohybridJsonbAddUint64(&state, "quantized_inverted_postings_touched",
@@ -4156,40 +4197,7 @@ pgturbohybrid_last_scan_stats(PG_FUNCTION_ARGS)
 	PgturbohybridJsonbAddUint64(&state,
 								"multivector_doc_graph_insert_pairs_scored",
 								pgturbohybrid_last_doc_insert_stats.pairsScored);
-	if (scanStats.multivectorDocGraphStorageKind[0] != '\0')
-		PgturbohybridJsonbAddString(&state,
-									"multivector_doc_graph_storage_kind",
-									scanStats.multivectorDocGraphStorageKind);
-	else
-		PgturbohybridJsonbAddString(&state,
-									"multivector_doc_graph_storage_kind",
-									"f32");
-	PgturbohybridJsonbAddString(&state,
-								"multivector_doc_storage",
-								scanStats.multivectorDocGraphStorageKind[0] != '\0' ?
-								scanStats.multivectorDocGraphStorageKind : "f32");
-	PgturbohybridJsonbAddString(&state,
-								"multivector_doc_storage_kind",
-								scanStats.multivectorDocGraphStorageKind[0] != '\0' ?
-								scanStats.multivectorDocGraphStorageKind : "f32");
-	PgturbohybridJsonbAddBool(&state, "proxy_only_index",
-							  scanStats.proxyOnlyIndex);
-	PgturbohybridJsonbAddBool(&state, "centroid_only_index",
-							  scanStats.centroidOnlyIndex);
-	PgturbohybridJsonbAddBool(&state, "full_multivector_sidecar_available",
-							  scanStats.fullMultivectorSidecarAvailable);
-	PgturbohybridJsonbAddBool(&state, "centroid_sidecar_available",
-							  scanStats.centroidSidecarAvailable);
-	PgturbohybridJsonbAddBool(&state, "centroid_doc_codes_available",
-							  scanStats.centroidDocCodesAvailable);
-	PgturbohybridJsonbAddBool(&state,
-							  "quantized_inverted_sidecar_available",
-							  scanStats.quantizedInvertedSidecarAvailable);
-	PgturbohybridJsonbAddString(&state, "exact_rerank_source_supported",
-								scanStats.proxyOnlyIndex ||
-								scanStats.centroidOnlyIndex ? "heap" :
-								(scanStats.fullMultivectorSidecarAvailable ?
-								 "sidecar" : "none"));
+	PgturbohybridJsonbAddMultiVectorDocStorageStats(&state, &scanStats);
 	if (scanStats.multivectorDocGraphRescoreSource[0] != '\0')
 		PgturbohybridJsonbAddString(&state,
 									"multivector_doc_graph_rescore_source",

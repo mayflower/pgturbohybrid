@@ -16097,6 +16097,57 @@ PgturbohybridMultiVectorTokenDot(const PgturbohybridMultiVector *a,
 	return dot;
 }
 
+static void
+PgturbohybridMultiVectorDocumentNodeCheckStorageCapabilities(bool proxyOnlyIndex,
+															 bool centroidOnlyIndex,
+															 bool proxyGraph,
+															 bool centroidLite,
+															 bool quantizedInvertedExperimental,
+															 bool quantizedInvertedCompactScoring,
+															 int centroidMode)
+{
+	if (proxyOnlyIndex && !proxyGraph)
+		ereport(ERROR,
+				(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
+				 errmsg("multivector_doc_storage = proxy_only only supports proxy_vector document-node graph admission"),
+				 errhint("REINDEX with multivector_doc_storage = f32, f16, or sq8 to use full document multivector sidecar candidate sources.")));
+	if (centroidOnlyIndex &&
+		!(proxyGraph || centroidLite ||
+		  (quantizedInvertedExperimental && quantizedInvertedCompactScoring)))
+		ereport(ERROR,
+				(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
+				 errmsg("multivector_doc_storage = centroid_only only supports proxy_vector, centroid_lite, and compact quantized_inverted_experimental document-node graph admission"),
+				 errhint("REINDEX with multivector_doc_storage = f32, f16, or sq8 to use full document multivector sidecar candidate sources.")));
+	if (centroidLite &&
+		centroidMode != PGTURBOHYBRID_MULTIVECTOR_CENTROIDS_KMEANS)
+		ereport(ERROR,
+				(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
+				 errmsg("centroid_lite multivector candidate source requires multivector_centroids = kmeans"),
+				 errhint("REINDEX with multivector_graph = document_nodes, multivector_centroids = kmeans, or use turbohybrid.multivector_candidate_source = document_nodes.")));
+}
+
+static const char *
+PgturbohybridMultiVectorDocumentNodeGraphWarning(bool proxyGraph,
+												bool quantizedInvertedExperimental,
+												bool centroidLite,
+												bool compactTraversal,
+												int docStorageKind)
+{
+	if (proxyGraph)
+		return "document_node_proxy_vector_graph_traversal";
+	if (quantizedInvertedExperimental)
+		return "quantized_inverted_experimental_persisted_postings";
+	if (centroidLite)
+		return "document_node_centroid_lite_prefilter";
+	if (compactTraversal &&
+		docStorageKind == PGTURBOHYBRID_MULTIVECTOR_DOC_STORAGE_F16)
+		return "document_node_f16_sidecar_graph_traversal";
+	if (compactTraversal &&
+		docStorageKind == PGTURBOHYBRID_MULTIVECTOR_DOC_STORAGE_SQ8)
+		return "document_node_sq8_sidecar_graph_traversal";
+	return "document_node_f32_sidecar_graph_traversal";
+}
+
 static int
 PgturbohybridMultiVectorDocumentNodeScan(IndexScanDesc scan,
 										 PgturbohybridGraphScanOpaque so,
@@ -16444,24 +16495,13 @@ PgturbohybridMultiVectorDocumentNodeScan(IndexScanDesc scan,
 		qdrantLikeProxyVector = false;
 	if (centroidOnlyIndex)
 		qdrantLikeProxyVector = false;
-	if (proxyOnlyIndex && !proxyGraph)
-		ereport(ERROR,
-				(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
-				 errmsg("multivector_doc_storage = proxy_only only supports proxy_vector document-node graph admission"),
-				 errhint("REINDEX with multivector_doc_storage = f32, f16, or sq8 to use full document multivector sidecar candidate sources.")));
-	if (centroidOnlyIndex &&
-		!(proxyGraph || centroidLite ||
-		  (quantizedInvertedExperimental && quantizedInvertedCompactScoring)))
-		ereport(ERROR,
-				(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
-				 errmsg("multivector_doc_storage = centroid_only only supports proxy_vector, centroid_lite, and compact quantized_inverted_experimental document-node graph admission"),
-				 errhint("REINDEX with multivector_doc_storage = f32, f16, or sq8 to use full document multivector sidecar candidate sources.")));
-	if (centroidLite &&
-		centroidMode != PGTURBOHYBRID_MULTIVECTOR_CENTROIDS_KMEANS)
-		ereport(ERROR,
-				(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
-				 errmsg("centroid_lite multivector candidate source requires multivector_centroids = kmeans"),
-				 errhint("REINDEX with multivector_graph = document_nodes, multivector_centroids = kmeans, or use turbohybrid.multivector_candidate_source = document_nodes.")));
+	PgturbohybridMultiVectorDocumentNodeCheckStorageCapabilities(proxyOnlyIndex,
+																 centroidOnlyIndex,
+																 proxyGraph,
+																 centroidLite,
+																 quantizedInvertedExperimental,
+																 quantizedInvertedCompactScoring,
+																 centroidMode);
 
 	oldCtx = MemoryContextSwitchTo(resultCtx);
 	*outCandidates = NULL;
@@ -18995,27 +19035,19 @@ PgturbohybridMultiVectorDocumentNodeScan(IndexScanDesc scan,
 		quantizedScores =
 			compactTraversal ? docsScored :
 			centroidLiteCompactScoring ? centroidPostingsSelected : 0;
-		if (proxyGraph)
-			docGraphWarning = "document_node_proxy_vector_graph_traversal";
-		else if (quantizedInvertedExperimental)
+		if (quantizedInvertedExperimental)
 		{
 			docsScored = quantizedInvertedDocsScored;
 			edgesVisited = quantizedInvertedPostingsTouched;
 			maxsimPairs = quantizedInvertedPostingsTouched;
 			quantizedScores = quantizedInvertedPostingsTouched;
-			docGraphWarning =
-				"quantized_inverted_experimental_persisted_postings";
 		}
-		else if (centroidLite)
-			docGraphWarning = "document_node_centroid_lite_prefilter";
-		else if (compactTraversal &&
-			docStorageKind == PGTURBOHYBRID_MULTIVECTOR_DOC_STORAGE_F16)
-			docGraphWarning = "document_node_f16_sidecar_graph_traversal";
-		else if (compactTraversal &&
-				 docStorageKind == PGTURBOHYBRID_MULTIVECTOR_DOC_STORAGE_SQ8)
-			docGraphWarning = "document_node_sq8_sidecar_graph_traversal";
-		else
-			docGraphWarning = "document_node_f32_sidecar_graph_traversal";
+		docGraphWarning =
+			PgturbohybridMultiVectorDocumentNodeGraphWarning(proxyGraph,
+															quantizedInvertedExperimental,
+															centroidLite,
+															compactTraversal,
+															docStorageKind);
 	}
 	if (collectPhaseStats)
 		PgturbohybridGraphAddElapsedUint64(&candidateSourceUs,
