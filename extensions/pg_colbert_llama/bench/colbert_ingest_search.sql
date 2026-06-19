@@ -3,7 +3,7 @@
 
 CREATE EXTENSION IF NOT EXISTS vector;
 CREATE EXTENSION IF NOT EXISTS pgturbohybrid;
-CREATE EXTENSION IF NOT EXISTS pg_colbert_llama;
+CREATE EXTENSION IF NOT EXISTS llama_embed;
 
 \if :{?EXPECTED_DIM}
 SET pg_colbert_llama.expected_dim = :EXPECTED_DIM;
@@ -16,7 +16,7 @@ CREATE TABLE pg_colbert_llama_bench_passages (
   id int PRIMARY KEY,
   body text NOT NULL,
   body_tsv tsvector GENERATED ALWAYS AS (to_tsvector('simple', body)) STORED,
-  colbert turbohybrid_multivector
+  colbert multivector
 );
 
 INSERT INTO pg_colbert_llama_bench_passages (id, body)
@@ -44,9 +44,10 @@ BEGIN
   LOOP
     started_at := clock_timestamp();
     UPDATE pg_colbert_llama_bench_passages
-    SET colbert = colbert_mv(
-      current_setting('pg_colbert_llama_bench.model_alias') || ':doc',
-      passage.body
+    SET colbert = llama_embed_mv(
+      current_setting('pg_colbert_llama_bench.model_alias'),
+      passage.body,
+      '{"mode": "tokens", "prefix": "[D] "}'::jsonb
     )
     WHERE id = passage.id;
 
@@ -65,7 +66,7 @@ SELECT count(*) AS encoded_docs,
        max(elapsed_ms) AS max_doc_encode_ms
 FROM pg_colbert_llama_bench_encode_metrics;
 
-SELECT colbert_mv(:'model_alias' || ':query', 'alpha beta topic');
+SELECT llama_embed_mv(:'model_alias', 'alpha beta topic', '{"mode": "tokens", "prefix": "[Q] "}'::jsonb);
 
 CREATE INDEX pg_colbert_llama_bench_dense_idx
 ON pg_colbert_llama_bench_passages USING turbohybrid (
@@ -77,7 +78,7 @@ SET enable_seqscan = off;
 SELECT id
 FROM pg_colbert_llama_bench_passages
 ORDER BY colbert <~> turbohybrid_query(
-  multivector_query => colbert_mv(:'model_alias' || ':query', 'alpha beta topic'),
+  multivector_query => llama_embed_mv(:'model_alias', 'alpha beta topic', '{"mode": "tokens", "prefix": "[Q] "}'::jsonb),
   dense_k => 100,
   final_k => 10
 )
@@ -97,7 +98,7 @@ ON pg_colbert_llama_bench_passages USING turbohybrid (
 SELECT id
 FROM pg_colbert_llama_bench_passages
 ORDER BY colbert <~> turbohybrid_query(
-  multivector_query => colbert_mv(:'model_alias' || ':query', 'alpha beta topic'),
+  multivector_query => llama_embed_mv(:'model_alias', 'alpha beta topic', '{"mode": "tokens", "prefix": "[Q] "}'::jsonb),
   text_query => websearch_to_tsquery('simple', 'alpha beta topic'),
   fusion => 'rrf',
   dense_k => 100,

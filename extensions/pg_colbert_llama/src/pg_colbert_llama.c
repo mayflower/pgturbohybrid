@@ -22,6 +22,7 @@
 #include "utils/jsonb.h"
 #include "utils/lsyscache.h"
 #include "utils/memutils.h"
+#include "utils/numeric.h"
 #include "utils/syscache.h"
 
 #if PG_VERSION_NUM >= 160000
@@ -40,6 +41,13 @@ PG_FUNCTION_INFO_V1(pg_colbert_llama_colbert_mv);
 PG_FUNCTION_INFO_V1(pg_colbert_llama_colbert_mv_batch);
 PG_FUNCTION_INFO_V1(pg_colbert_llama_colbert_debug);
 PG_FUNCTION_INFO_V1(pg_colbert_llama_colbert_model_info);
+PG_FUNCTION_INFO_V1(pg_colbert_llama_llama_embed);
+PG_FUNCTION_INFO_V1(pg_colbert_llama_llama_embed_vector);
+PG_FUNCTION_INFO_V1(pg_colbert_llama_llama_embed_vector_batch);
+PG_FUNCTION_INFO_V1(pg_colbert_llama_llama_embed_tokens);
+PG_FUNCTION_INFO_V1(pg_colbert_llama_llama_embed_mv);
+PG_FUNCTION_INFO_V1(pg_colbert_llama_llama_embed_mv_batch);
+PG_FUNCTION_INFO_V1(pg_colbert_llama_llama_embed_model_info);
 
 #define PG_COLBERT_LLAMA_VECTOR_SIZE(_dim) \
 	(offsetof(PgColbertVector, x) + sizeof(float4) * (Size) (_dim))
@@ -79,6 +87,9 @@ static Oid PgColbertLookupPgturbohybridFunction(const char *funcname,
 												int nargs, Oid *argtypes,
 												bool missing_ok);
 static void PgColbertParseModel(text *modelText, PgColbertModelSpec *spec);
+static void PgLlamaEmbedParseModel(text *modelText, Jsonb *options,
+								   PgLlamaEmbedOutputMode defaultMode,
+								   PgColbertModelSpec *spec);
 static void PgColbertCheckAllowedModel(const char *alias);
 static void PgColbertLoadRuntimeProfile(PgColbertModelSpec *spec);
 static void PgColbertBuildGucFallbackProfile(PgColbertModelSpec *spec);
@@ -89,11 +100,24 @@ static void PgColbertEncodeOrError(text *modelText, text *inputText,
 								   PgColbertModelSpec *spec,
 								   PgColbertEngineOutput *output,
 								   bool debugTokens);
+static void PgLlamaEmbedEncodeOrError(text *modelText, text *inputText,
+									  Jsonb *options,
+									  PgLlamaEmbedOutputMode defaultMode,
+									  MemoryContext ctx,
+									  PgColbertModelSpec *spec,
+									  PgColbertEngineOutput *output);
 static int32 PgColbertEncodeBatchOrError(text *modelText, ArrayType *inputsArray,
 										 MemoryContext ctx,
 										 PgColbertModelSpec *spec,
 										 PgColbertEngineOutput **outputs,
 										 bool debugTokens);
+static int32 PgLlamaEmbedEncodeBatchOrError(text *modelText,
+											ArrayType *inputsArray,
+											Jsonb *options,
+											PgLlamaEmbedOutputMode defaultMode,
+											MemoryContext ctx,
+											PgColbertModelSpec *spec,
+											PgColbertEngineOutput **outputs);
 static PgColbertVector *PgColbertMakeVector(const float4 *values, int32 dim);
 static ArrayType *PgColbertBuildVectorArray(const PgColbertEngineOutput *output);
 static ArrayType *PgColbertBuildFloat4Array(const PgColbertEngineOutput *output);
@@ -102,6 +126,8 @@ static ArrayType *PgColbertBuildMultiVectorArray(PgColbertEngineOutput *outputs,
 												 int32 outputCount,
 												 Oid multivectorOid);
 static void PgColbertAppendJsonString(StringInfo buf, const char *value);
+static const char *PgLlamaEmbedOutputModeName(PgLlamaEmbedOutputMode mode);
+static const char *PgLlamaEmbedPoolingName(PgLlamaEmbedPooling pooling);
 static void PgColbertAppendOutputJson(StringInfo buf,
 									  const PgColbertModelSpec *spec,
 									  const PgColbertEngineOutput *output,
@@ -1319,6 +1345,10 @@ PgColbertParseModel(text *modelText, PgColbertModelSpec *spec)
 
 	memcpy(spec->alias, model, aliasLen);
 	spec->alias[aliasLen] = '\0';
+	spec->outputMode = PG_LLAMA_EMBED_OUTPUT_TOKENS;
+	spec->pooling = PG_LLAMA_EMBED_POOLING_NONE;
+	spec->checkExpectedDim = true;
+	spec->normalize = pg_colbert_llama_require_normalized;
 
 	if (strcmp(colon + 1, "query") == 0)
 	{
@@ -1355,25 +1385,284 @@ PgColbertParseModel(text *modelText, PgColbertModelSpec *spec)
 	PgColbertLoadRuntimeProfile(spec);
 }
 
+static bool
+PgLlamaEmbedJsonbGet(Jsonb *options, const char *key, JsonbValue *value)
+{
+	JsonbIterator *it;
+	JsonbIteratorToken token;
+	JsonbValue	current;
+
+	if (options == NULL || !JB_ROOT_IS_OBJECT(options))
+		return false;
+
+	it = JsonbIteratorInit(&options->root);
+	while ((token = JsonbIteratorNext(&it, &current, false)) != WJB_DONE)
+	{
+		if (token == WJB_KEY &&
+			current.type == jbvString &&
+			current.val.string.len == (int) strlen(key) &&
+			strncmp(current.val.string.val, key, current.val.string.len) == 0)
+		{
+			token = JsonbIteratorNext(&it, value, false);
+			return token == WJB_VALUE;
+		}
+	}
+	return false;
+}
+
+static char *
+PgLlamaEmbedJsonbGetString(Jsonb *options, const char *key)
+{
+	JsonbValue	value;
+
+	if (!PgLlamaEmbedJsonbGet(options, key, &value))
+		return NULL;
+	if (value.type != jbvString)
+		ereport(ERROR,
+				(errcode(ERRCODE_INVALID_PARAMETER_VALUE),
+				 errmsg("llama_embed option \"%s\" must be a string", key)));
+	return pnstrdup(value.val.string.val, value.val.string.len);
+}
+
+static bool
+PgLlamaEmbedJsonbGetBool(Jsonb *options, const char *key, bool defaultValue)
+{
+	JsonbValue	value;
+
+	if (!PgLlamaEmbedJsonbGet(options, key, &value))
+		return defaultValue;
+	if (value.type != jbvBool)
+		ereport(ERROR,
+				(errcode(ERRCODE_INVALID_PARAMETER_VALUE),
+				 errmsg("llama_embed option \"%s\" must be a boolean", key)));
+	return value.val.boolean;
+}
+
+static bool
+PgLlamaEmbedJsonbGetInt(Jsonb *options, const char *key, int *result)
+{
+	JsonbValue	value;
+
+	if (!PgLlamaEmbedJsonbGet(options, key, &value))
+		return false;
+	if (value.type != jbvNumeric)
+		ereport(ERROR,
+				(errcode(ERRCODE_INVALID_PARAMETER_VALUE),
+				 errmsg("llama_embed option \"%s\" must be an integer", key)));
+	*result = DatumGetInt32(DirectFunctionCall1(numeric_int4,
+											   NumericGetDatum(value.val.numeric)));
+	return true;
+}
+
+static PgLlamaEmbedOutputMode
+PgLlamaEmbedParseMode(const char *mode)
+{
+	if (mode == NULL || strcmp(mode, "tokens") == 0)
+		return PG_LLAMA_EMBED_OUTPUT_TOKENS;
+	if (strcmp(mode, "dense") == 0)
+		return PG_LLAMA_EMBED_OUTPUT_DENSE;
+	ereport(ERROR,
+			(errcode(ERRCODE_INVALID_PARAMETER_VALUE),
+			 errmsg("unknown llama_embed mode \"%s\"", mode),
+			 errhint("Use \"dense\" or \"tokens\".")));
+	return PG_LLAMA_EMBED_OUTPUT_TOKENS;
+}
+
+static PgLlamaEmbedPooling
+PgLlamaEmbedParsePooling(const char *pooling,
+						 PgLlamaEmbedOutputMode outputMode)
+{
+	if (pooling == NULL || strcmp(pooling, "model") == 0)
+		return outputMode == PG_LLAMA_EMBED_OUTPUT_DENSE ?
+			PG_LLAMA_EMBED_POOLING_MEAN : PG_LLAMA_EMBED_POOLING_NONE;
+	if (strcmp(pooling, "none") == 0)
+		return PG_LLAMA_EMBED_POOLING_NONE;
+	if (strcmp(pooling, "mean") == 0)
+		return PG_LLAMA_EMBED_POOLING_MEAN;
+	if (strcmp(pooling, "cls") == 0)
+		return PG_LLAMA_EMBED_POOLING_CLS;
+	if (strcmp(pooling, "last") == 0)
+		return PG_LLAMA_EMBED_POOLING_LAST;
+	if (strcmp(pooling, "rank") == 0)
+		return PG_LLAMA_EMBED_POOLING_RANK;
+	ereport(ERROR,
+			(errcode(ERRCODE_INVALID_PARAMETER_VALUE),
+			 errmsg("unknown llama_embed pooling \"%s\"", pooling),
+			 errhint("Use \"model\", \"none\", \"mean\", \"cls\", \"last\", or \"rank\".")));
+	return PG_LLAMA_EMBED_POOLING_NONE;
+}
+
+static void
+PgLlamaEmbedValidateAlias(const char *model, Size aliasLen)
+{
+	if (aliasLen == 0)
+		ereport(ERROR,
+				(errcode(ERRCODE_INVALID_PARAMETER_VALUE),
+				 errmsg("model alias cannot be empty")));
+	if (aliasLen > PG_COLBERT_LLAMA_MAX_ALIAS)
+		ereport(ERROR,
+				(errcode(ERRCODE_INVALID_PARAMETER_VALUE),
+				 errmsg("model alias is too long")));
+	if (model[0] == '.')
+		ereport(ERROR,
+				(errcode(ERRCODE_INVALID_PARAMETER_VALUE),
+				 errmsg("model alias cannot start with a dot")));
+
+	for (Size i = 0; i < aliasLen; i++)
+	{
+		unsigned char c = (unsigned char) model[i];
+
+		if (!(isalnum(c) || c == '_' || c == '-' || c == '.'))
+			ereport(ERROR,
+					(errcode(ERRCODE_INVALID_PARAMETER_VALUE),
+					 errmsg("model alias may contain only letters, digits, underscore, dot, and dash")));
+		if (model[i] == '.' && i + 1 < aliasLen && model[i + 1] == '.')
+			ereport(ERROR,
+					(errcode(ERRCODE_INVALID_PARAMETER_VALUE),
+					 errmsg("model alias cannot contain \"..\"")));
+	}
+}
+
+static void
+PgLlamaEmbedParseModel(text *modelText, Jsonb *options,
+					   PgLlamaEmbedOutputMode defaultMode,
+					   PgColbertModelSpec *spec)
+{
+	char	   *model = text_to_cstring(modelText);
+	char	   *colon = strrchr(model, ':');
+	char	   *modeText;
+	char	   *poolingText;
+	char	   *prefixText;
+	Size		aliasLen;
+	int			intValue;
+
+	memset(spec, 0, sizeof(*spec));
+	modeText = PgLlamaEmbedJsonbGetString(options, "mode");
+	spec->outputMode = modeText != NULL ?
+		PgLlamaEmbedParseMode(modeText) : defaultMode;
+	poolingText = PgLlamaEmbedJsonbGetString(options, "pooling");
+	spec->pooling = PgLlamaEmbedParsePooling(poolingText, spec->outputMode);
+	if (spec->outputMode == PG_LLAMA_EMBED_OUTPUT_DENSE &&
+		spec->pooling == PG_LLAMA_EMBED_POOLING_NONE)
+		ereport(ERROR,
+				(errcode(ERRCODE_INVALID_PARAMETER_VALUE),
+				 errmsg("dense llama_embed output requires pooled embeddings"),
+				 errhint("Use pooling \"mean\", \"cls\", \"last\", \"rank\", or \"model\".")));
+	if (spec->outputMode == PG_LLAMA_EMBED_OUTPUT_TOKENS &&
+		spec->pooling != PG_LLAMA_EMBED_POOLING_NONE)
+		ereport(ERROR,
+				(errcode(ERRCODE_INVALID_PARAMETER_VALUE),
+				 errmsg("token llama_embed output requires pooling \"none\"")));
+
+	aliasLen = colon == NULL ? strlen(model) : (Size) (colon - model);
+	PgLlamaEmbedValidateAlias(model, aliasLen);
+	memcpy(spec->alias, model, aliasLen);
+	spec->alias[aliasLen] = '\0';
+
+	spec->role = PG_COLBERT_ROLE_NONE;
+	spec->roleName = "generic";
+	spec->prefix = "";
+	spec->maxVectors = spec->outputMode == PG_LLAMA_EMBED_OUTPUT_DENSE ?
+		1 : pg_colbert_llama_max_doc_vectors;
+	if (colon != NULL)
+	{
+		if (strcmp(colon + 1, "query") == 0)
+		{
+			spec->role = PG_COLBERT_ROLE_QUERY;
+			spec->roleName = "query";
+			spec->prefix = pg_colbert_llama_query_prefix;
+			spec->maxVectors = pg_colbert_llama_max_query_vectors;
+		}
+		else if (strcmp(colon + 1, "doc") == 0)
+		{
+			spec->role = PG_COLBERT_ROLE_DOC;
+			spec->roleName = "doc";
+			spec->prefix = pg_colbert_llama_document_prefix;
+			spec->maxVectors = pg_colbert_llama_max_doc_vectors;
+		}
+		else
+			ereport(ERROR,
+					(errcode(ERRCODE_INVALID_PARAMETER_VALUE),
+					 errmsg("unknown model role \"%s\"", colon + 1),
+					 errhint("Use a plain alias or alias:query/alias:doc.")));
+	}
+
+	prefixText = PgLlamaEmbedJsonbGetString(options, "prefix");
+	if (prefixText != NULL)
+		spec->prefix = prefixText;
+	if (PgLlamaEmbedJsonbGetInt(options, "max_vectors", &intValue))
+	{
+		if (intValue < 1 || intValue > 4096)
+			ereport(ERROR,
+					(errcode(ERRCODE_INVALID_PARAMETER_VALUE),
+					 errmsg("llama_embed option \"max_vectors\" is out of range")));
+		spec->maxVectors = intValue;
+	}
+	spec->expectedDim = pg_colbert_llama_expected_dim;
+	spec->checkExpectedDim = false;
+	if (PgLlamaEmbedJsonbGetInt(options, "expected_dim", &intValue))
+	{
+		if (intValue < 1 || intValue > 16000)
+			ereport(ERROR,
+					(errcode(ERRCODE_INVALID_PARAMETER_VALUE),
+					 errmsg("llama_embed option \"expected_dim\" is out of range")));
+		spec->expectedDim = intValue;
+		spec->checkExpectedDim = true;
+	}
+	spec->normalize = PgLlamaEmbedJsonbGetBool(options, "normalize", true);
+	spec->modelDir = pg_colbert_llama_model_dir;
+	spec->threads = pg_colbert_llama_threads;
+	spec->nCtx = pg_colbert_llama_n_ctx;
+	spec->nBatch = pg_colbert_llama_n_batch;
+	spec->batchSequences = pg_colbert_llama_batch_sequences;
+	spec->nGpuLayers = pg_colbert_llama_n_gpu_layers;
+	spec->cacheSize = pg_colbert_llama_cache_size;
+	spec->queryLength = pg_colbert_llama_query_length;
+	spec->strictProfile = false;
+	spec->logTiming = pg_colbert_llama_log_timing;
+	spec->profile.loaded = false;
+	spec->profile.source = PG_COLBERT_PROFILE_SOURCE_GUC_FALLBACK;
+	strlcpy(spec->profile.sourceName, "generic",
+			sizeof(spec->profile.sourceName));
+	strlcpy(spec->profile.schema, "llama_embed_options",
+			sizeof(spec->profile.schema));
+	strlcpy(spec->profile.projectionKind, "model",
+			sizeof(spec->profile.projectionKind));
+	strlcpy(spec->profile.tokenizerStatus, "model",
+			sizeof(spec->profile.tokenizerStatus));
+	PgColbertCheckAllowedModel(spec->alias);
+}
+
 static void
 PgColbertValidateOutput(const PgColbertModelSpec *spec,
 						const PgColbertEngineOutput *output)
 {
+	const char *label = spec->outputMode == PG_LLAMA_EMBED_OUTPUT_DENSE ?
+		"llama_embed" : "ColBERT";
+
 	if (output->count <= 0)
 		ereport(ERROR,
 				(errcode(ERRCODE_DATA_EXCEPTION),
-				 errmsg("ColBERT engine returned no token vectors")));
+				 errmsg("%s engine returned no vectors", label)));
 	if (output->count > spec->maxVectors)
 		ereport(ERROR,
 				(errcode(ERRCODE_PROGRAM_LIMIT_EXCEEDED),
-				 errmsg("ColBERT engine returned %d vectors but limit is %d",
-						output->count, spec->maxVectors)));
-	if (output->dim != spec->expectedDim)
+				 errmsg("%s engine returned %d vectors but limit is %d",
+						label, output->count, spec->maxVectors)));
+	if (spec->checkExpectedDim && output->dim != spec->expectedDim)
+	{
+		if (spec->outputMode == PG_LLAMA_EMBED_OUTPUT_DENSE)
+			ereport(ERROR,
+					(errcode(ERRCODE_DATA_EXCEPTION),
+					 errmsg("llama_embed embedding dimension %d does not match expected dimension %d",
+							output->dim, spec->expectedDim)));
 		ereport(ERROR,
 				(errcode(ERRCODE_DATA_EXCEPTION),
-				 errmsg("ColBERT embedding dimension %d does not match expected dimension %d",
+				 errmsg("%s embedding dimension %d does not match expected dimension %d",
+						label,
 						output->dim, spec->expectedDim),
 				 errhint("The GGUF must include the ColBERT dense projection. Reconvert with llama.cpp convert_hf_to_gguf.py --sentence-transformers-dense-modules or provide a GGUF whose embedding output is 128-dimensional.")));
+	}
 
 	for (int32 i = 0; i < output->count * output->dim; i++)
 	{
@@ -1383,7 +1672,7 @@ PgColbertValidateOutput(const PgColbertModelSpec *spec,
 					 errmsg("ColBERT engine returned a non-finite value")));
 	}
 
-	if (pg_colbert_llama_require_normalized)
+	if (spec->normalize)
 	{
 		for (int32 i = 0; i < output->count; i++)
 		{
@@ -1417,6 +1706,24 @@ PgColbertEncodeOrError(text *modelText, text *inputText,
 		ereport(ERROR,
 				(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
 				 errmsg("%s", errorMessage != NULL ? errorMessage : "ColBERT engine failed")));
+	PgColbertValidateOutput(spec, output);
+}
+
+static void
+PgLlamaEmbedEncodeOrError(text *modelText, text *inputText, Jsonb *options,
+						  PgLlamaEmbedOutputMode defaultMode,
+						  MemoryContext ctx,
+						  PgColbertModelSpec *spec,
+						  PgColbertEngineOutput *output)
+{
+	char	   *input = text_to_cstring(inputText);
+	char	   *errorMessage = NULL;
+
+	PgLlamaEmbedParseModel(modelText, options, defaultMode, spec);
+	if (!PgColbertEngineEncode(spec, input, ctx, output, &errorMessage))
+		ereport(ERROR,
+				(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
+				 errmsg("%s", errorMessage != NULL ? errorMessage : "llama_embed engine failed")));
 	PgColbertValidateOutput(spec, output);
 }
 
@@ -1470,6 +1777,56 @@ PgColbertEncodeBatchOrError(text *modelText, ArrayType *inputsArray,
 	return (int32) inputCount;
 }
 
+static int32
+PgLlamaEmbedEncodeBatchOrError(text *modelText, ArrayType *inputsArray,
+							   Jsonb *options,
+							   PgLlamaEmbedOutputMode defaultMode,
+							   MemoryContext ctx,
+							   PgColbertModelSpec *spec,
+							   PgColbertEngineOutput **outputs)
+{
+	Datum	   *inputDatums;
+	bool	   *inputNulls;
+	int			inputCount;
+	const char **inputs;
+	char	   *errorMessage = NULL;
+
+	if (ARR_ELEMTYPE(inputsArray) != TEXTOID)
+		ereport(ERROR,
+				(errcode(ERRCODE_DATATYPE_MISMATCH),
+				 errmsg("llama_embed batch inputs must be text[]")));
+
+	deconstruct_array(inputsArray, TEXTOID, -1, false, TYPALIGN_INT,
+					  &inputDatums, &inputNulls, &inputCount);
+
+	PgLlamaEmbedParseModel(modelText, options, defaultMode, spec);
+	*outputs =
+		(PgColbertEngineOutput *) palloc0(sizeof(PgColbertEngineOutput) *
+										  (Size) inputCount);
+	if (inputCount == 0)
+		return 0;
+
+	inputs = (const char **) palloc0(sizeof(char *) * (Size) inputCount);
+	for (int i = 0; i < inputCount; i++)
+	{
+		if (inputNulls[i])
+			ereport(ERROR,
+					(errcode(ERRCODE_NULL_VALUE_NOT_ALLOWED),
+					 errmsg("llama_embed batch inputs cannot contain null elements")));
+		inputs[i] = TextDatumGetCString(inputDatums[i]);
+	}
+
+	if (!PgColbertEngineEncodeBatch(spec, inputs, inputCount, ctx, *outputs,
+									&errorMessage))
+		ereport(ERROR,
+				(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
+				 errmsg("%s", errorMessage != NULL ? errorMessage : "llama_embed engine failed")));
+	for (int i = 0; i < inputCount; i++)
+		PgColbertValidateOutput(spec, &(*outputs)[i]);
+
+	return (int32) inputCount;
+}
+
 static PgColbertVector *
 PgColbertMakeVector(const float4 *values, int32 dim)
 {
@@ -1507,6 +1864,40 @@ PgColbertBuildVectorArray(const PgColbertEngineOutput *output)
 	}
 
 	return construct_array(datums, output->count, vectorOid, typlen, typbyval,
+						   typalign);
+}
+
+static Datum
+PgColbertBuildDenseVector(const PgColbertEngineOutput *output)
+{
+	if (output->count != 1)
+		ereport(ERROR,
+				(errcode(ERRCODE_DATA_EXCEPTION),
+				 errmsg("llama_embed dense output expected one vector but engine returned %d",
+						output->count)));
+	return PointerGetDatum(PgColbertMakeVector(output->values, output->dim));
+}
+
+static ArrayType *
+PgColbertBuildDenseVectorArray(PgColbertEngineOutput *outputs,
+							   int32 outputCount)
+{
+	Datum	   *datums;
+	Oid			vectorOid;
+	int16		typlen;
+	bool		typbyval;
+	char		typalign;
+
+	vectorOid = PgColbertVectorTypeOid();
+	if (outputCount == 0)
+		return construct_empty_array(vectorOid);
+
+	get_typlenbyvalalign(vectorOid, &typlen, &typbyval, &typalign);
+	datums = (Datum *) palloc0(sizeof(Datum) * (Size) outputCount);
+	for (int32 i = 0; i < outputCount; i++)
+		datums[i] = PgColbertBuildDenseVector(&outputs[i]);
+
+	return construct_array(datums, outputCount, vectorOid, typlen, typbyval,
 						   typalign);
 }
 
@@ -1617,6 +2008,38 @@ PgColbertAppendJsonString(StringInfo buf, const char *value)
 	appendStringInfoChar(buf, '"');
 }
 
+static const char *
+PgLlamaEmbedOutputModeName(PgLlamaEmbedOutputMode mode)
+{
+	switch (mode)
+	{
+		case PG_LLAMA_EMBED_OUTPUT_DENSE:
+			return "dense";
+		case PG_LLAMA_EMBED_OUTPUT_TOKENS:
+			return "tokens";
+	}
+	return "tokens";
+}
+
+static const char *
+PgLlamaEmbedPoolingName(PgLlamaEmbedPooling pooling)
+{
+	switch (pooling)
+	{
+		case PG_LLAMA_EMBED_POOLING_NONE:
+			return "none";
+		case PG_LLAMA_EMBED_POOLING_MEAN:
+			return "mean";
+		case PG_LLAMA_EMBED_POOLING_CLS:
+			return "cls";
+		case PG_LLAMA_EMBED_POOLING_LAST:
+			return "last";
+		case PG_LLAMA_EMBED_POOLING_RANK:
+			return "rank";
+	}
+	return "none";
+}
+
 static void
 PgColbertAppendOutputJson(StringInfo buf,
 						  const PgColbertModelSpec *spec,
@@ -1630,6 +2053,10 @@ PgColbertAppendOutputJson(StringInfo buf,
 	PgColbertAppendJsonString(buf, spec->alias);
 	appendStringInfoString(buf, ",\"role\":");
 	PgColbertAppendJsonString(buf, spec->roleName);
+	appendStringInfoString(buf, ",\"mode\":");
+	PgColbertAppendJsonString(buf, PgLlamaEmbedOutputModeName(spec->outputMode));
+	appendStringInfoString(buf, ",\"pooling\":");
+	PgColbertAppendJsonString(buf, PgLlamaEmbedPoolingName(spec->pooling));
 	appendStringInfoString(buf, ",\"profile_source\":");
 	PgColbertAppendJsonString(buf, spec->profile.sourceName);
 	appendStringInfo(buf, ",\"dim\":%d,\"count\":%d,\"normalized\":%s",
@@ -1840,7 +2267,7 @@ PgColbertAppendModelInfoJson(StringInfo buf,
 {
 	const char *projectionStatus =
 		info->projectionStatus != NULL ? info->projectionStatus :
-		(info->nEmbdOut == spec->expectedDim ? "ok" :
+		(!spec->checkExpectedDim || info->nEmbdOut == spec->expectedDim ? "ok" :
 		 "missing_or_unexpected_dim");
 
 	appendStringInfoChar(buf, '{');
@@ -1852,6 +2279,10 @@ PgColbertAppendModelInfoJson(StringInfo buf,
 	PgColbertAppendJsonString(buf, spec->alias);
 	appendStringInfoString(buf, ",\"role\":");
 	PgColbertAppendJsonString(buf, spec->roleName);
+	appendStringInfoString(buf, ",\"mode\":");
+	PgColbertAppendJsonString(buf, PgLlamaEmbedOutputModeName(spec->outputMode));
+	appendStringInfoString(buf, ",\"pooling\":");
+	PgColbertAppendJsonString(buf, PgLlamaEmbedPoolingName(spec->pooling));
 	appendStringInfoString(buf, ",\"path\":");
 	PgColbertAppendJsonString(buf, info->path);
 	appendStringInfo(buf,
@@ -2002,6 +2433,137 @@ pg_colbert_llama_colbert_model_info(PG_FUNCTION_ARGS)
 		ereport(ERROR,
 				(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
 				 errmsg("%s", errorMessage != NULL ? errorMessage : "ColBERT engine failed")));
+
+	initStringInfo(&buf);
+	PgColbertAppendModelInfoJson(&buf, &spec, &info);
+
+	PG_RETURN_DATUM(PgColbertJsonbFromCString(buf.data));
+}
+
+Datum
+pg_colbert_llama_llama_embed(PG_FUNCTION_ARGS)
+{
+	PgColbertModelSpec spec;
+	PgColbertEngineOutput output;
+	StringInfoData buf;
+
+	PgLlamaEmbedEncodeOrError(PG_GETARG_TEXT_PP(0), PG_GETARG_TEXT_PP(1),
+							  PG_GETARG_JSONB_P(2),
+							  PG_LLAMA_EMBED_OUTPUT_TOKENS,
+							  CurrentMemoryContext, &spec, &output);
+	initStringInfo(&buf);
+	PgColbertAppendOutputJson(&buf, &spec, &output, true);
+	PG_RETURN_DATUM(PgColbertJsonbFromCString(buf.data));
+}
+
+Datum
+pg_colbert_llama_llama_embed_vector(PG_FUNCTION_ARGS)
+{
+	PgColbertModelSpec spec;
+	PgColbertEngineOutput output;
+
+	PgLlamaEmbedEncodeOrError(PG_GETARG_TEXT_PP(0), PG_GETARG_TEXT_PP(1),
+							  PG_GETARG_JSONB_P(2),
+							  PG_LLAMA_EMBED_OUTPUT_DENSE,
+							  CurrentMemoryContext, &spec, &output);
+	PG_RETURN_DATUM(PgColbertBuildDenseVector(&output));
+}
+
+Datum
+pg_colbert_llama_llama_embed_vector_batch(PG_FUNCTION_ARGS)
+{
+	PgColbertModelSpec spec;
+	PgColbertEngineOutput *outputs;
+	ArrayType  *array;
+	int32		outputCount;
+
+	outputCount =
+		PgLlamaEmbedEncodeBatchOrError(PG_GETARG_TEXT_PP(0),
+									   PG_GETARG_ARRAYTYPE_P(1),
+									   PG_GETARG_JSONB_P(2),
+									   PG_LLAMA_EMBED_OUTPUT_DENSE,
+									   CurrentMemoryContext,
+									   &spec,
+									   &outputs);
+	array = PgColbertBuildDenseVectorArray(outputs, outputCount);
+	PG_RETURN_ARRAYTYPE_P(array);
+}
+
+Datum
+pg_colbert_llama_llama_embed_tokens(PG_FUNCTION_ARGS)
+{
+	PgColbertModelSpec spec;
+	PgColbertEngineOutput output;
+	ArrayType  *array;
+
+	PgLlamaEmbedEncodeOrError(PG_GETARG_TEXT_PP(0), PG_GETARG_TEXT_PP(1),
+							  PG_GETARG_JSONB_P(2),
+							  PG_LLAMA_EMBED_OUTPUT_TOKENS,
+							  CurrentMemoryContext, &spec, &output);
+	array = PgColbertBuildVectorArray(&output);
+	PG_RETURN_ARRAYTYPE_P(array);
+}
+
+Datum
+pg_colbert_llama_llama_embed_mv(PG_FUNCTION_ARGS)
+{
+	PgColbertModelSpec spec;
+	PgColbertEngineOutput output;
+
+	PgLlamaEmbedEncodeOrError(PG_GETARG_TEXT_PP(0), PG_GETARG_TEXT_PP(1),
+							  PG_GETARG_JSONB_P(2),
+							  PG_LLAMA_EMBED_OUTPUT_TOKENS,
+							  CurrentMemoryContext, &spec, &output);
+	PG_RETURN_DATUM(PgColbertBuildMultiVector(&output));
+}
+
+Datum
+pg_colbert_llama_llama_embed_mv_batch(PG_FUNCTION_ARGS)
+{
+	PgColbertModelSpec spec;
+	PgColbertEngineOutput *outputs;
+	ArrayType  *array;
+	Oid			resultType;
+	Oid			multivectorOid;
+	int32		outputCount;
+
+	outputCount =
+		PgLlamaEmbedEncodeBatchOrError(PG_GETARG_TEXT_PP(0),
+									   PG_GETARG_ARRAYTYPE_P(1),
+									   PG_GETARG_JSONB_P(2),
+									   PG_LLAMA_EMBED_OUTPUT_TOKENS,
+									   CurrentMemoryContext,
+									   &spec,
+									   &outputs);
+	resultType = get_fn_expr_rettype(fcinfo->flinfo);
+	multivectorOid = OidIsValid(resultType) ? get_element_type(resultType) :
+		InvalidOid;
+	if (!OidIsValid(multivectorOid))
+		ereport(ERROR,
+				(errcode(ERRCODE_UNDEFINED_OBJECT),
+				 errmsg("could not resolve llama_embed_mv_batch result element type")));
+
+	array = PgColbertBuildMultiVectorArray(outputs, outputCount, multivectorOid);
+	PG_RETURN_ARRAYTYPE_P(array);
+}
+
+Datum
+pg_colbert_llama_llama_embed_model_info(PG_FUNCTION_ARGS)
+{
+	PgColbertModelSpec spec;
+	PgColbertEngineModelInfo info;
+	StringInfoData buf;
+	char	   *errorMessage = NULL;
+
+	PgLlamaEmbedParseModel(PG_GETARG_TEXT_PP(0),
+						   PG_NARGS() > 1 ? PG_GETARG_JSONB_P(1) : NULL,
+						   PG_LLAMA_EMBED_OUTPUT_DENSE,
+						   &spec);
+	if (!PgColbertEngineGetModelInfo(&spec, CurrentMemoryContext, &info,
+									 &errorMessage))
+		ereport(ERROR,
+				(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
+				 errmsg("%s", errorMessage != NULL ? errorMessage : "llama_embed engine failed")));
 
 	initStringInfo(&buf);
 	PgColbertAppendModelInfoJson(&buf, &spec, &info);

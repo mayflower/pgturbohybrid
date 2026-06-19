@@ -445,6 +445,17 @@ PgturbohybridMultiVectorTypeOid(void)
 	return pgturbohybrid_multivector_type_oid;
 }
 
+bool
+PgturbohybridTypeIsMultiVector(Oid typeOid)
+{
+	Oid			multivectorOid = PgturbohybridMultiVectorTypeOid();
+
+	if (!OidIsValid(multivectorOid) || !OidIsValid(typeOid))
+		return false;
+
+	return getBaseType(typeOid) == multivectorOid;
+}
+
 static void
 PgturbohybridCheckMultiVectorHeader(int32 count, int32 dim)
 {

@@ -30,7 +30,8 @@ PgColbertEngineEncode(const PgColbertModelSpec *spec,
 	(void) input;
 	(void) errorMessage;
 
-	count = spec->role == PG_COLBERT_ROLE_QUERY ? 2 : 3;
+	count = spec->outputMode == PG_LLAMA_EMBED_OUTPUT_DENSE ? 1 :
+		(spec->role == PG_COLBERT_ROLE_QUERY ? 2 : 3);
 	if (count > spec->maxVectors)
 		count = spec->maxVectors;
 
@@ -45,7 +46,7 @@ PgColbertEngineEncode(const PgColbertModelSpec *spec,
 	output->dim = dim;
 	output->count = count;
 	output->planTokenCount = count;
-	output->normalized = true;
+	output->normalized = spec->normalize;
 	output->loadedFromCache = false;
 	output->tokenIds = (int32 *) palloc0(sizeof(int32) * (Size) count);
 	output->values = (float4 *) palloc0(sizeof(float4) * (Size) count * (Size) dim);
@@ -69,15 +70,24 @@ PgColbertEngineEncode(const PgColbertModelSpec *spec,
 			output->tokenDebug[i].positionId = i;
 			output->tokenDebug[i].tokenTypeId =
 				spec->role == PG_COLBERT_ROLE_QUERY ?
-				spec->profile.queryTokenTypeId : spec->profile.documentTokenTypeId;
+				spec->profile.queryTokenTypeId :
+				(spec->role == PG_COLBERT_ROLE_DOC ?
+				 spec->profile.documentTokenTypeId : -1);
 			output->tokenDebug[i].attentionMask = 1;
 			output->tokenDebug[i].outputEnabled = true;
 			output->tokenDebug[i].retained = true;
 			output->tokenDebug[i].retainReason =
-				pstrdup(spec->role == PG_COLBERT_ROLE_QUERY ?
-					   "retained_query" : "retained_document");
+				pstrdup(spec->outputMode == PG_LLAMA_EMBED_OUTPUT_DENSE ?
+					   "retained_dense" :
+					   (spec->role == PG_COLBERT_ROLE_QUERY ?
+						"retained_query" : "retained_document"));
 		}
-		output->values[(Size) i * (Size) dim + (i % dim)] = 1.0f;
+		if (spec->normalize)
+			output->values[(Size) i * (Size) dim + (i % dim)] = 1.0f;
+		else
+			for (int32 j = 0; j < dim; j++)
+				output->values[(Size) i * (Size) dim + (Size) j] =
+					(float4) (i + j + 1);
 	}
 
 	MemoryContextSwitchTo(oldCtx);

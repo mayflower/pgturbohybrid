@@ -143,6 +143,7 @@ typedef struct PgturbohybridMultiVectorModelInfo
 
 PgturbohybridMultiVector *PgturbohybridDatumGetMultiVector(Datum value);
 Oid			PgturbohybridMultiVectorTypeOid(void);
+bool		PgturbohybridTypeIsMultiVector(Oid typeOid);
 void		PgturbohybridCheckMultiVector(const PgturbohybridMultiVector *mv);
 void		PgturbohybridCheckSameMultiVectorDims(const PgturbohybridMultiVector *a,
 												   const PgturbohybridMultiVector *b);

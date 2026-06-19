@@ -1468,11 +1468,10 @@ PgturbohybridGraphAppendBuildNode(PgturbohybridQuantBuildState *state, ItemPoint
 static bool
 PgturbohybridGraphIndexIsMultiVector(Relation index)
 {
-	Oid			multivectorOid = PgturbohybridMultiVectorTypeOid();
 	TupleDesc	desc = RelationGetDescr(index);
 
-	return OidIsValid(multivectorOid) &&
-		TupleDescAttr(desc, PGTURBOHYBRID_DENSE_KEY_INDEX)->atttypid == multivectorOid;
+	return PgturbohybridTypeIsMultiVector(
+		TupleDescAttr(desc, PGTURBOHYBRID_DENSE_KEY_INDEX)->atttypid);
 }
 
 static void

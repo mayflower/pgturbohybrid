@@ -1,7 +1,22 @@
-# pg_colbert_llama
+# llama_embed
 
-`pg_colbert_llama` is a companion extension that turns text into
-`pgturbohybrid` ColBERT multivectors.
+`llama_embed` is the SQL-facing companion extension for running llama.cpp
+embedding models inside PostgreSQL. It can return dense `vector` embeddings,
+token-level `vector[]` embeddings, or `pgturbohybrid` multivectors for ColBERT
+and other late-interaction models.
+
+The shared library and source directory are still named `pg_colbert_llama` for
+compatibility with the original ColBERT-only extension. Existing
+`CREATE EXTENSION pg_colbert_llama` and `colbert_*` calls keep working, but new
+SQL should use `CREATE EXTENSION llama_embed` and the `llama_embed_*` functions.
+
+The runtime GUC namespace is also still `pg_colbert_llama.*` in this
+compatibility slice. Treat `llama_embed` as the outside SQL extension name and
+`pg_colbert_llama` as the internal implementation namespace.
+
+For copyable SQL examples, including dense embeddings with pgvector and
+multivector embeddings with `pgturbohybrid`, see
+[`examples/README.md`](examples/README.md).
 
 The default build uses a deterministic stub engine for CI:
 
@@ -15,10 +30,36 @@ Use it with:
 ```sql
 CREATE EXTENSION vector;
 CREATE EXTENSION pgturbohybrid;
-CREATE EXTENSION pg_colbert_llama;
+CREATE EXTENSION llama_embed;
 
 SET pg_colbert_llama.expected_dim = 4; -- stub mode only
 
+SELECT llama_embed_vector('sauerkraut-modern', 'test');
+SELECT llama_embed_tokens('sauerkraut-modern', 'test');
+SELECT llama_embed_mv('sauerkraut-modern', 'test');
+```
+
+The generic API accepts model aliases without a `:query` or `:doc` suffix. Use
+JSON options for embedding mode and pooling:
+
+```sql
+SELECT llama_embed_vector(
+  'sauerkraut-modern',
+  'test',
+  '{"mode": "dense", "pooling": "mean"}'::jsonb
+);
+
+SELECT llama_embed_tokens(
+  'sauerkraut-modern',
+  'test',
+  '{"mode": "tokens"}'::jsonb
+);
+```
+
+Compatibility ColBERT calls still use the role suffixes and remain useful for
+existing late-interaction SQL:
+
+```sql
 SELECT colbert('sauerkraut-modern:query', 'test');
 SELECT colbert_vectors('sauerkraut-modern:doc', 'test');
 SELECT colbert_mv('sauerkraut-modern:query', 'test');
@@ -63,7 +104,8 @@ nix --extra-experimental-features 'nix-command flakes' develop --impure --comman
     th-colbert-live-test
 ```
 
-`colbert_model_info()` reports `profile_source`, `compatibility_level`,
+`llama_embed_model_info()` and `colbert_model_info()` report `profile_source`,
+`compatibility_level`,
 `attention_mask_status`, `tokenizer_status`, and `projection_status`.  Treat
 `shape` and `ranking_smoke` as usable-runtime evidence, not strict PyLate vector
 parity.  Strict parity requires token-plan and vector parity checks to pass.
