@@ -7,7 +7,7 @@
 #include "pgturbohybrid_multivector.h"
 #include "pgturbohybrid_vector_compat.h"
 
-#define PGTURBOHYBRID_QUERY_VERSION 2
+#define PGTURBOHYBRID_QUERY_VERSION 3
 
 #define PGTURBOHYBRID_QUERY_FLAG_HAS_VECTOR			0x0001
 #define PGTURBOHYBRID_QUERY_FLAG_HAS_TSQUERY			0x0002
@@ -47,9 +47,11 @@ typedef struct PgturbohybridQueryHeader
 	uint16		reserved;
 	float8		denseWeight;
 	float8		bm25Weight;
+	float8		multivectorWeight;
 	float8		alpha;
 	int32		rrfK;
 	int32		denseK;
+	int32		multivectorK;
 	int32		bm25K;
 	int32		finalK;
 	uint16		denseKind;
@@ -76,16 +78,14 @@ static inline bool
 PgturbohybridQueryHasVector(const PgturbohybridQueryHeader *query)
 {
 	return (query->flags & PGTURBOHYBRID_QUERY_FLAG_HAS_DENSE) != 0 &&
-		(query->flags & PGTURBOHYBRID_QUERY_FLAG_HAS_VECTOR) != 0 &&
-		PgturbohybridQueryDenseKind(query) == PGTURBOHYBRID_DENSE_QUERY_VECTOR;
+		(query->flags & PGTURBOHYBRID_QUERY_FLAG_HAS_VECTOR) != 0;
 }
 
 static inline bool
 PgturbohybridQueryHasMultiVector(const PgturbohybridQueryHeader *query)
 {
 	return (query->flags & PGTURBOHYBRID_QUERY_FLAG_HAS_DENSE) != 0 &&
-		(query->flags & PGTURBOHYBRID_QUERY_FLAG_HAS_MULTIVECTOR) != 0 &&
-		PgturbohybridQueryDenseKind(query) == PGTURBOHYBRID_DENSE_QUERY_MULTIVECTOR;
+		(query->flags & PGTURBOHYBRID_QUERY_FLAG_HAS_MULTIVECTOR) != 0;
 }
 
 static inline bool

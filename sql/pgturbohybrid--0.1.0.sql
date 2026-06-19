@@ -271,7 +271,9 @@ CREATE FUNCTION turbohybrid_query(
 	require_bm25_match pg_catalog.bool DEFAULT false,
 	multivector_query turbohybrid_multivector DEFAULT NULL,
 	query_token_weights pg_catalog.float4[] DEFAULT NULL,
-	query_token_mask pg_catalog.bool[] DEFAULT NULL
+	query_token_mask pg_catalog.bool[] DEFAULT NULL,
+	multivector_weight pg_catalog.float8 DEFAULT 1.0,
+	multivector_k pg_catalog.int4 DEFAULT NULL
 ) RETURNS turbohybrid_query
 	AS 'MODULE_PATHNAME', 'pgturbohybrid_query_constructor'
 	LANGUAGE C STABLE PARALLEL SAFE;
@@ -577,7 +579,7 @@ COMMENT ON TYPE turbohybrid_query IS 'TurboHybrid query payload for dense vector
 
 COMMENT ON FUNCTION turbohybrid_query_in(pg_catalog.cstring) IS 'Input function for turbohybrid_query';
 COMMENT ON FUNCTION turbohybrid_query_out(turbohybrid_query) IS 'Output function for turbohybrid_query';
-COMMENT ON FUNCTION turbohybrid_query(vector, pg_catalog.tsquery, pg_catalog.text, pg_catalog.float8, pg_catalog.float8, pg_catalog.float8, pg_catalog.int4, pg_catalog.int4, pg_catalog.int4, pg_catalog.int4, pg_catalog.bool, turbohybrid_multivector, pg_catalog.float4[], pg_catalog.bool[]) IS 'Constructs a TurboHybrid query payload';
+COMMENT ON FUNCTION turbohybrid_query(vector, pg_catalog.tsquery, pg_catalog.text, pg_catalog.float8, pg_catalog.float8, pg_catalog.float8, pg_catalog.int4, pg_catalog.int4, pg_catalog.int4, pg_catalog.int4, pg_catalog.bool, turbohybrid_multivector, pg_catalog.float4[], pg_catalog.bool[], pg_catalog.float8, pg_catalog.int4) IS 'Constructs a TurboHybrid query payload';
 COMMENT ON FUNCTION turbohybrid_distance(vector, turbohybrid_query) IS 'Default TurboHybrid distance between a vector and a query';
 COMMENT ON FUNCTION turbohybrid_l2_distance(vector, turbohybrid_query) IS 'L2 TurboHybrid distance between a vector and a query';
 COMMENT ON FUNCTION turbohybrid_negative_inner_product(vector, turbohybrid_query) IS 'Negative inner product TurboHybrid distance between a vector and a query';

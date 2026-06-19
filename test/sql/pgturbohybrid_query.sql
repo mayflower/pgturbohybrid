@@ -669,7 +669,7 @@ DO $$
 BEGIN
 	IF turbohybrid_query_out(turbohybrid_query(
 		multivector_query => turbohybrid_multivector(ARRAY['[1,0,0]'::vector, '[0,1,0]'::vector])
-	))::text != 'turbohybrid_query(fusion=rrf,vector=false,multivector=true,tsquery=false,dense_weight=1,bm25_weight=1,alpha=null,rrf_k=60,dense_k=100,bm25_k=100,final_k=null,require_bm25_match=false)' THEN
+	))::text != 'turbohybrid_query(fusion=rrf,vector=false,multivector=true,tsquery=false,dense_weight=1,multivector_weight=1,bm25_weight=1,alpha=null,rrf_k=60,dense_k=100,multivector_k=100,bm25_k=100,final_k=null,require_bm25_match=false)' THEN
 		RAISE EXCEPTION 'unexpected multivector query output';
 	END IF;
 END
@@ -680,7 +680,7 @@ BEGIN
 	IF turbohybrid_query_out(turbohybrid_query(
 		text_query => websearch_to_tsquery('english', 'postgres'),
 		multivector_query => turbohybrid_multivector(ARRAY['[1,0,0]'::vector, '[0,1,0]'::vector])
-	))::text != 'turbohybrid_query(fusion=rrf,vector=false,multivector=true,tsquery=true,dense_weight=1,bm25_weight=1,alpha=null,rrf_k=60,dense_k=100,bm25_k=100,final_k=null,require_bm25_match=false)' THEN
+	))::text != 'turbohybrid_query(fusion=rrf,vector=false,multivector=true,tsquery=true,dense_weight=1,multivector_weight=1,bm25_weight=1,alpha=null,rrf_k=60,dense_k=100,multivector_k=100,bm25_k=100,final_k=null,require_bm25_match=false)' THEN
 		RAISE EXCEPTION 'unexpected hybrid multivector query output';
 	END IF;
 END
@@ -688,12 +688,14 @@ $$;
 
 DO $$
 BEGIN
-	PERFORM turbohybrid_query(
+	IF turbohybrid_query_out(turbohybrid_query(
 		vector_query => '[1,0,0]'::vector,
-		multivector_query => turbohybrid_multivector(ARRAY['[1,0,0]'::vector])
-	);
-	RAISE EXCEPTION 'expected mixed dense payload rejection';
-EXCEPTION WHEN invalid_parameter_value THEN
+		multivector_query => turbohybrid_multivector(ARRAY['[1,0,0]'::vector]),
+		multivector_weight => 2.5,
+		multivector_k => 17
+	))::text != 'turbohybrid_query(fusion=rrf,vector=true,multivector=true,tsquery=false,dense_weight=1,multivector_weight=2.5,bm25_weight=1,alpha=null,rrf_k=60,dense_k=100,multivector_k=17,bm25_k=100,final_k=null,require_bm25_match=false)' THEN
+		RAISE EXCEPTION 'unexpected mixed vector/multivector query output';
+	END IF;
 END
 $$;
 

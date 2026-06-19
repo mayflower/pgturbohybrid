@@ -5584,6 +5584,16 @@ def run_colbert_hybrid_rerank_benchmark(
     return {
         "enabled": True,
         "mode": "vector_bm25_first_stage_colbert_maxsim_rerank",
+        "recommended_setup": {
+            "use_colbert_as": "bounded_exact_reranker",
+            "first_stage": "vector_bm25_hybrid",
+            "do_not_use_colbert_proxy_as_independent_branch": True,
+            "reason": (
+                "DBpedia 1M evidence shows dense+BM25 candidates improve after "
+                "exact ColBERT MaxSim rerank, while proxy-only ColBERT retrieval "
+                "has near-zero qrel quality and degrades naive three-branch RRF."
+            ),
+        },
         "exact_admission_available": False,
         "exact_admission_reason": "not_requested",
         "final_ranking": "exact_colbert_maxsim_over_hybrid_candidate_window",
@@ -33112,6 +33122,18 @@ def markdown_benchmark_summary(report: dict[str, Any]) -> str:
         field_summary = scan.get("field_summary", {})
         if not isinstance(field_summary, dict):
             field_summary = {}
+        recommended_setup = colbert_hybrid.get("recommended_setup", {})
+        if not isinstance(recommended_setup, dict):
+            recommended_setup = {}
+        recall_delta = float(rerank_metrics.get("recall@10", 0.0) or 0.0) - float(
+            first_metrics.get("recall@10", 0.0) or 0.0
+        )
+        ndcg_delta = float(rerank_metrics.get("ndcg@10", 0.0) or 0.0) - float(
+            first_metrics.get("ndcg@10", 0.0) or 0.0
+        )
+        mrr_delta = float(rerank_metrics.get("mrr@10", 0.0) or 0.0) - float(
+            first_metrics.get("mrr@10", 0.0) or 0.0
+        )
 
         def hybrid_scan_p50(key: str) -> float:
             value = field_summary.get(key, {})
@@ -33124,6 +33146,11 @@ def markdown_benchmark_summary(report: dict[str, Any]) -> str:
             "This benchmark first retrieves a bounded vector+BM25 candidate "
             "window, then reranks that window with exact ColBERT MaxSim. It does "
             "not compute an exact full-corpus ColBERT admission baseline.",
+            "",
+            f"- Recommended use: `{recommended_setup.get('use_colbert_as', 'bounded_exact_reranker')}`",
+            f"- First stage: `{recommended_setup.get('first_stage', 'vector_bm25_hybrid')}`",
+            "- Do not treat current proxy-only ColBERT retrieval as an "
+            "independent serving branch without new evidence.",
             "",
             f"- Dense proxy encoder: `{settings.get('dense_proxy_encoder', '')}`",
             f"- Fusion: `{settings.get('fusion', '')}`",
@@ -33154,6 +33181,10 @@ def markdown_benchmark_summary(report: dict[str, Any]) -> str:
                 ),
                 rerank_us=hybrid_scan_p50("multivector_exact_maxsim_rerank_time_us"),
             ),
+            "",
+            "Rerank delta versus the vector+BM25 candidate order: "
+            f"recall@10 `{recall_delta:+.6f}`, ndcg@10 `{ndcg_delta:+.6f}`, "
+            f"mrr@10 `{mrr_delta:+.6f}`.",
         ])
 
     sampled_admission = report.get("document_node_colbert_sampled_admission")
@@ -35817,6 +35848,11 @@ def _self_check_colbert_hybrid_rerank() -> None:
         "colbert_hybrid_rerank": {
             "enabled": True,
             "final_ranking": "exact_colbert_maxsim_over_hybrid_candidate_window",
+            "recommended_setup": {
+                "use_colbert_as": "bounded_exact_reranker",
+                "first_stage": "vector_bm25_hybrid",
+                "do_not_use_colbert_proxy_as_independent_branch": True,
+            },
             "dense_proxy": {
                 "encoder": "normalized_mean",
                 "documents_ready": 3,
@@ -35850,6 +35886,9 @@ def _self_check_colbert_hybrid_rerank() -> None:
     markdown = markdown_benchmark_summary(report)
     assert "ColBERT rerank for hybrid dense+BM25 candidates" in markdown
     assert "exact ColBERT MaxSim rerank" in markdown
+    assert "bounded_exact_reranker" in markdown
+    assert "Do not treat current proxy-only ColBERT retrieval" in markdown
+    assert 'recall@10 `+0.250000`' in markdown
     assert "0.500000" in markdown
 
 

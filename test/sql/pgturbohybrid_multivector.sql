@@ -612,8 +612,9 @@ DECLARE
 BEGIN
 	stats := turbohybrid_last_scan_stats();
 	IF stats->>'index_used' <> 'true' OR
-		stats->>'dense_branch_used' <> 'true' OR
-		(stats->>'dense_candidates')::int < 1 OR
+		stats->>'dense_branch_used' <> 'false' OR
+		stats->>'multivector_branch_used' <> 'true' OR
+		(stats->>'multivector_candidates')::int < 1 OR
 		stats->>'exact_rescore_source' <> 'heap' OR
 		(stats->>'heap_rescore_count')::int < 1 OR
 		stats->>'multivector_enabled' <> 'true' OR
@@ -704,8 +705,8 @@ DECLARE
 BEGIN
 	stats := turbohybrid_last_scan_stats();
 	IF stats->>'multivector_enabled' <> 'true' OR
-		(stats->>'dense_candidates_effective')::int <> 7 THEN
-		RAISE EXCEPTION 'expected multivector default dense_k to use dense budget, got %',
+		(stats->>'multivector_candidates_effective')::int <> 7 THEN
+		RAISE EXCEPTION 'expected multivector default dense_k to use multivector budget, got %',
 			stats;
 	END IF;
 END
@@ -1387,7 +1388,7 @@ DECLARE
 BEGIN
 	stats := turbohybrid_last_scan_stats();
 	IF stats->>'index_used' <> 'true' OR
-		stats->>'dense_branch_used' <> 'true' OR
+		stats->>'multivector_branch_used' <> 'true' OR
 		stats->>'bm25_branch_used' <> 'true' OR
 		(stats->>'both_match')::int < 1 OR
 		stats->>'fusion_strategy' NOT IN ('sorted_merge_doc', 'hash_doc') THEN
@@ -1694,6 +1695,61 @@ BEGIN
 		RAISE EXCEPTION 'expected branch-aware document-node hybrid scheduler stats, top %, stats %',
 			top_id, stats;
 	END IF;
+END
+$$;
+
+DO $$
+DECLARE
+BEGIN
+	BEGIN
+		PERFORM id
+		FROM mv_docnode_hybrid_scheduler_docs
+		ORDER BY colbert <~> turbohybrid_query(
+		  vector_query => '[1,0]'::vector,
+		  multivector_query => turbohybrid_multivector(ARRAY[
+		    '[1,0]'::vector,
+		    '[0,1]'::vector
+		  ]),
+		  text_query => to_tsquery('simple', 'common | needle'),
+		  dense_k => 3,
+		  multivector_k => 3,
+		  bm25_k => 3,
+		  final_k => 3,
+		  fusion => 'rrf'
+		)
+		LIMIT 1;
+		RAISE EXCEPTION 'expected vector_query on a document-node multivector index to fail';
+	EXCEPTION
+		WHEN feature_not_supported THEN
+			NULL;
+	END;
+END
+$$;
+
+DO $$
+BEGIN
+	BEGIN
+		PERFORM id
+		FROM mv_docnode_hybrid_scheduler_docs
+		ORDER BY colbert <~> turbohybrid_query(
+		  vector_query => '[1,0]'::vector,
+		  multivector_query => turbohybrid_multivector(ARRAY[
+		    '[1,0]'::vector,
+		    '[0,1]'::vector
+		  ]),
+		  text_query => to_tsquery('simple', 'common | needle'),
+		  dense_k => 3,
+		  multivector_k => 3,
+		  bm25_k => 3,
+		  final_k => 3,
+		  fusion => 'weighted'
+		)
+		LIMIT 1;
+		RAISE EXCEPTION 'expected vector plus multivector non-RRF fusion to fail';
+	EXCEPTION
+		WHEN feature_not_supported THEN
+			NULL;
+	END;
 END
 $$;
 

@@ -513,6 +513,14 @@ run a full exact MaxSim admission oracle. Recall is also limited by the RRF
 candidate window, so larger windows should be benchmarked when higher recall is
 the target.
 
+Do not read this as evidence for a three-branch dense+BM25+ColBERT proxy
+retriever. On the same 1M DBpedia corpus, the current proxy-only ColBERT branch
+was a fast but effectively dead candidate source (`recall@10 = 0.000262`,
+`ndcg@10 = 0.000364`), and naive RRF over dense, BM25, and that ColBERT branch
+reduced quality (`recall@10 = 0.010892`, `ndcg@10 = 0.005273`) compared with
+dense+BM25 RRF alone. Until native ColBERT candidate generation has stronger
+admission evidence, use ColBERT as the bounded exact reranker shown above.
+
 `text_query` requires a turbohybrid index with a `tsvector` key. A dense-only
 index accepts vector queries and rejects text or vector+text queries with a clear
 error.

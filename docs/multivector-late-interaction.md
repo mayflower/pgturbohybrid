@@ -282,6 +282,14 @@ The candidate window is the quality/latency knob. Larger `dense_k`, `bm25_k`,
 `final_k`, and CTE `LIMIT` values give the reranker more documents to rescue but
 increase heap fetch and MaxSim work.
 
+This is currently the recommended way to combine ColBERT with dense+BM25 on
+DBpedia-scale data. Treat ColBERT proxy/document-node retrieval as a diagnostic
+candidate-source path unless a new artifact proves admission and qrel quality:
+the latest 1M proxy-only branch was fast but had near-zero quality, and naive
+three-branch RRF with dense, BM25, and proxy-only ColBERT reduced quality versus
+dense+BM25 RRF alone. The reliable use of ColBERT today is exact MaxSim over the
+bounded vector+BM25 candidate window.
+
 ## Tuning Knobs
 
 Approximate candidate collection:
