@@ -136,10 +136,12 @@ typedef struct PgturbohybridScanStatsSnapshot
 	char		indexShape[16];
 	bool		bm25BranchAvailable;
 	bool		denseBranchUsed;
+	bool		multivectorBranchUsed;
 	bool		bm25BranchUsed;
 	PgturbohybridBranchPlan branchPlan;
 	uint32		denseCandidatesEffective;
 	bool		denseKDefaulted;
+	uint32		multivectorCandidatesEffective;
 	uint32		bm25CandidatesEffective;
 	bool		bm25KDefaulted;
 	bool		bm25CacheHit;

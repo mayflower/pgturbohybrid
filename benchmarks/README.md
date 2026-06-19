@@ -1396,6 +1396,39 @@ For 100k and 1M runs, keep the same command shape, increase `--max-docs`, and
 use larger `--max-queries` only when the qrels and runtime budget justify it.
 The harness is opt-in and is not part of normal CI.
 
+For current DBpedia 1M serving-quality experiments, prefer ColBERT as a bounded
+reranker over vector+BM25 candidates instead of as an independent retrieval
+branch. The current proxy-only ColBERT branch is useful as a negative control,
+but 1M qrel evidence showed near-zero quality and naive three-branch RRF made
+the dense+BM25 result worse. Use `--colbert-hybrid-rerank` for the supported
+setup:
+
+```sh
+nix develop .#bench
+python benchmarks/dbpedia_colbert_multivector.py \
+  --database pgturbohybrid_dbpedia_colbert_1m_hybrid_rerank \
+  --precomputed-dataset johannhartmann/pgturbohybrid_dbpedia_colbert \
+  --max-docs 1000000 \
+  --max-queries 381 \
+  --reuse-data \
+  --colbert-hybrid-rerank \
+  --colbert-hybrid-rerank-window 200 \
+  --colbert-hybrid-dense-k 800 \
+  --colbert-hybrid-bm25-k 800 \
+  --rrf-k 60 \
+  --final-k 10 \
+  --quality-k 10 \
+  --reuse-index \
+  --output .nix-dev/tmp/dbpedia-colbert-1m-hybrid-rerank.json \
+  --markdown-output .nix-dev/tmp/dbpedia-colbert-1m-hybrid-rerank.md
+```
+
+This mode materializes a benchmark-only dense proxy for the ColBERT vectors,
+uses a normal vector+BM25 turbohybrid index for first-stage retrieval, and
+orders the bounded candidate window with exact
+`turbohybrid_multivector_maxsim_distance()`. It does not build or use a
+multivector candidate-source index for the first stage.
+
 Latest qrel-backed 10k hybrid smoke evidence, using three queries and `126`
 loaded qrels, compared `exact_scan`, dense `document_nodes`,
 BM25 admission-only, BM25 RRF, BM25 DBSF, and `proxy_vector_document_nodes`.

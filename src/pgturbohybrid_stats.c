@@ -3310,8 +3310,9 @@ pgturbohybrid_last_scan_stats(PG_FUNCTION_ARGS)
 
 	PgturbohybridGetLastScanStatsSnapshot(&scanStats);
 	PgturbohybridGetValidationStats(&validationStats);
-	denseElapsedUs = scanStats.denseElapsedUs != 0 ? scanStats.denseElapsedUs :
-		pgturbohybrid_last_graph_total_us;
+	denseElapsedUs = scanStats.denseBranchUsed ?
+		(scanStats.denseElapsedUs != 0 ? scanStats.denseElapsedUs :
+		 pgturbohybrid_last_graph_total_us) : 0;
 	bm25ElapsedUs = scanStats.bm25ElapsedUs;
 	fusionElapsedUs = scanStats.fusionElapsedUs;
 	elapsedUs = scanStats.elapsedUs != 0 ? scanStats.elapsedUs :
@@ -3336,6 +3337,8 @@ pgturbohybrid_last_scan_stats(PG_FUNCTION_ARGS)
 							  scanStats.bm25BranchAvailable);
 	PgturbohybridJsonbAddBool(&state, "dense_branch_used",
 							  scanStats.denseBranchUsed);
+	PgturbohybridJsonbAddBool(&state, "multivector_branch_used",
+							  scanStats.multivectorBranchUsed);
 	PgturbohybridJsonbAddBool(&state, "bm25_branch_used",
 							  scanStats.bm25BranchUsed);
 	PgturbohybridJsonbAddBranchPlan(&state, &scanStats.branchPlan);
@@ -4467,6 +4470,10 @@ pgturbohybrid_last_scan_stats(PG_FUNCTION_ARGS)
 							   scanStats.denseCandidatesEffective);
 	PgturbohybridJsonbAddInt64(&state, "dense_k_effective",
 							   scanStats.denseCandidatesEffective);
+	PgturbohybridJsonbAddInt64(&state, "multivector_candidates_effective",
+							   scanStats.multivectorCandidatesEffective);
+	PgturbohybridJsonbAddInt64(&state, "multivector_k_effective",
+							   scanStats.multivectorCandidatesEffective);
 	PgturbohybridJsonbAddBool(&state, "dense_k_defaulted",
 							  scanStats.denseKDefaulted);
 	PgturbohybridJsonbAddInt64(&state, "bm25_candidates_effective",

@@ -342,6 +342,16 @@ PgturbohybridQueryValidateInternal(PgturbohybridQueryHeader *query, bool strict)
 				(errcode(ERRCODE_DATA_EXCEPTION),
 				 errmsg("invalid turbohybrid_query fusion mode %u", query->fusion)));
 
+	if (query->denseWeight < 0 || isnan(query->denseWeight) ||
+		isinf(query->denseWeight) ||
+		query->bm25Weight < 0 || isnan(query->bm25Weight) ||
+		isinf(query->bm25Weight) ||
+		query->multivectorWeight < 0 || isnan(query->multivectorWeight) ||
+		isinf(query->multivectorWeight))
+		ereport(ERROR,
+				(errcode(ERRCODE_DATA_EXCEPTION),
+				 errmsg("turbohybrid_query weights must be finite non-negative values")));
+
 	if (query->denseKind != PGTURBOHYBRID_DENSE_QUERY_NONE &&
 		query->denseKind != PGTURBOHYBRID_DENSE_QUERY_VECTOR &&
 		query->denseKind != PGTURBOHYBRID_DENSE_QUERY_MULTIVECTOR)
@@ -355,11 +365,13 @@ PgturbohybridQueryValidateInternal(PgturbohybridQueryHeader *query, bool strict)
 				(errcode(ERRCODE_DATA_EXCEPTION),
 				 errmsg("invalid turbohybrid_query payload size")));
 
-	if (((query->flags & PGTURBOHYBRID_QUERY_FLAG_HAS_VECTOR) != 0) &&
-		((query->flags & PGTURBOHYBRID_QUERY_FLAG_HAS_MULTIVECTOR) != 0))
+	if (query->rrfK <= 0 || query->denseK < 0 ||
+		query->multivectorK < 0 || query->bm25K < 0 ||
+		((query->flags & PGTURBOHYBRID_QUERY_FLAG_FINAL_K_IS_SET) != 0 &&
+		 query->finalK <= 0))
 		ereport(ERROR,
 				(errcode(ERRCODE_DATA_EXCEPTION),
-				 errmsg("turbohybrid_query cannot contain both vector and multivector payloads")));
+				 errmsg("turbohybrid_query rank budgets are inconsistent")));
 
 	if ((query->flags & PGTURBOHYBRID_QUERY_FLAG_HAS_DENSE) == 0 &&
 		query->denseKind != PGTURBOHYBRID_DENSE_QUERY_NONE)
@@ -368,7 +380,9 @@ PgturbohybridQueryValidateInternal(PgturbohybridQueryHeader *query, bool strict)
 				 errmsg("turbohybrid_query dense payload is inconsistent")));
 
 	if ((query->flags & PGTURBOHYBRID_QUERY_FLAG_HAS_DENSE) != 0 &&
-		query->denseKind == PGTURBOHYBRID_DENSE_QUERY_NONE)
+		(query->denseKind == PGTURBOHYBRID_DENSE_QUERY_NONE ||
+		 ((query->flags & (PGTURBOHYBRID_QUERY_FLAG_HAS_VECTOR |
+						   PGTURBOHYBRID_QUERY_FLAG_HAS_MULTIVECTOR)) == 0)))
 		ereport(ERROR,
 				(errcode(ERRCODE_DATA_EXCEPTION),
 				 errmsg("turbohybrid_query dense payload is inconsistent")));
@@ -384,8 +398,7 @@ PgturbohybridQueryValidateInternal(PgturbohybridQueryHeader *query, bool strict)
 		Vector	   *vector = (Vector *) ((char *) query + PgturbohybridQueryVectorOffset());
 		Size		vectorBytes;
 
-		if (query->denseKind != PGTURBOHYBRID_DENSE_QUERY_VECTOR ||
-			(query->flags & PGTURBOHYBRID_QUERY_FLAG_HAS_DENSE) == 0)
+		if ((query->flags & PGTURBOHYBRID_QUERY_FLAG_HAS_DENSE) == 0)
 			ereport(ERROR,
 					(errcode(ERRCODE_DATA_EXCEPTION),
 					 errmsg("turbohybrid_query vector payload is inconsistent")));
@@ -419,8 +432,7 @@ PgturbohybridQueryValidateInternal(PgturbohybridQueryHeader *query, bool strict)
 			(PgturbohybridMultiVector *) ((char *) query + multivectorOffset);
 		Size		multivectorBytes;
 
-		if (query->denseKind != PGTURBOHYBRID_DENSE_QUERY_MULTIVECTOR ||
-			(query->flags & PGTURBOHYBRID_QUERY_FLAG_HAS_DENSE) == 0)
+		if ((query->flags & PGTURBOHYBRID_QUERY_FLAG_HAS_DENSE) == 0)
 			ereport(ERROR,
 					(errcode(ERRCODE_DATA_EXCEPTION),
 					 errmsg("turbohybrid_query multivector payload is inconsistent")));
@@ -530,9 +542,14 @@ pgturbohybrid_query_out(PG_FUNCTION_ARGS)
 		appendStringInfoString(&buf, ",query_token_mask=true");
 
 	appendStringInfo(&buf,
-					 ",tsquery=%s,dense_weight=%g,bm25_weight=%g,alpha=",
+					 ",tsquery=%s,dense_weight=%g",
 					 PgturbohybridQueryHasText(query) ? "true" : "false",
-					 query->denseWeight,
+					 query->denseWeight);
+	if (PgturbohybridQueryHasMultiVector(query))
+		appendStringInfo(&buf, ",multivector_weight=%g",
+						 query->multivectorWeight);
+	appendStringInfo(&buf,
+					 ",bm25_weight=%g,alpha=",
 					 query->bm25Weight);
 	if (query->flags & PGTURBOHYBRID_QUERY_FLAG_ALPHA_IS_SET)
 		appendStringInfo(&buf, "%g", query->alpha);
@@ -540,9 +557,14 @@ pgturbohybrid_query_out(PG_FUNCTION_ARGS)
 		appendStringInfoString(&buf, "null");
 
 	appendStringInfo(&buf,
-					 ",rrf_k=%d,dense_k=%d,bm25_k=%d,final_k=",
+					 ",rrf_k=%d,dense_k=%d",
 					 query->rrfK,
-					 query->denseK,
+					 query->denseK);
+	if (PgturbohybridQueryHasMultiVector(query))
+		appendStringInfo(&buf, ",multivector_k=%d",
+						 query->multivectorK);
+	appendStringInfo(&buf,
+					 ",bm25_k=%d,final_k=",
 					 query->bm25K);
 	if (query->flags & PGTURBOHYBRID_QUERY_FLAG_FINAL_K_IS_SET)
 		appendStringInfo(&buf, "%d", query->finalK);
@@ -1053,9 +1075,11 @@ pgturbohybrid_query_constructor(PG_FUNCTION_ARGS)
 	uint16		fusion;
 	float8		denseWeight;
 	float8		bm25Weight;
+	float8		multivectorWeight;
 	float8		alpha = 0.0;
 	int32		rrfK;
 	int32		denseK;
+	int32		multivectorK;
 	int32		bm25K;
 	int32		finalK = 0;
 	bool		requireBm25Match;
@@ -1095,19 +1119,12 @@ pgturbohybrid_query_constructor(PG_FUNCTION_ARGS)
 	 * multivector_query is the optional 12th argument (index 11).  Guard the
 	 * read with PG_NARGS() so an extension still installed at the older 11-arg
 	 * signature (no multivector_query) does not make us read past the argument
-	 * array -- otherwise the out-of-bounds PG_ARGISNULL(11) reads garbage and
-	 * spuriously raises the "both vector and multivector" error for a plain
-	 * vector_query.  Keeps a new library backward compatible with a not-yet
+	 * array.  Keeps a new library backward compatible with a not-yet
 	 * re-created extension.
 	 */
 	if (PG_NARGS() > 11 && !PG_ARGISNULL(11))
 	{
 		PgturbohybridMultiVector *mv;
-
-		if ((flags & PGTURBOHYBRID_QUERY_FLAG_HAS_VECTOR) != 0)
-			ereport(ERROR,
-					(errcode(ERRCODE_INVALID_PARAMETER_VALUE),
-					 errmsg("turbohybrid_query cannot contain both vector_query and multivector_query")));
 
 		multivectorDatum = PG_DETOAST_DATUM_COPY(PG_GETARG_DATUM(11));
 		mv = (PgturbohybridMultiVector *) multivectorDatum;
@@ -1121,7 +1138,8 @@ pgturbohybrid_query_constructor(PG_FUNCTION_ARGS)
 		multivectorDim = mv->dim;
 		multivectorCount = mv->count;
 		flags |= PGTURBOHYBRID_QUERY_FLAG_HAS_MULTIVECTOR | PGTURBOHYBRID_QUERY_FLAG_HAS_DENSE;
-		denseKind = PGTURBOHYBRID_DENSE_QUERY_MULTIVECTOR;
+		if (denseKind == PGTURBOHYBRID_DENSE_QUERY_NONE)
+			denseKind = PGTURBOHYBRID_DENSE_QUERY_MULTIVECTOR;
 	}
 
 	if (PG_NARGS() > 12 && !PG_ARGISNULL(12))
@@ -1228,6 +1246,15 @@ pgturbohybrid_query_constructor(PG_FUNCTION_ARGS)
 				(errcode(ERRCODE_INVALID_PARAMETER_VALUE),
 				 errmsg("bm25_weight must be a finite non-negative value")));
 
+	if (PG_NARGS() > 14 && !PG_ARGISNULL(14))
+		multivectorWeight = PG_GETARG_FLOAT8(14);
+	else
+		multivectorWeight = 1.0;
+	if (multivectorWeight < 0 || isnan(multivectorWeight) || isinf(multivectorWeight))
+		ereport(ERROR,
+				(errcode(ERRCODE_INVALID_PARAMETER_VALUE),
+				 errmsg("multivector_weight must be a finite non-negative value")));
+
 	if (!PG_ARGISNULL(5))
 	{
 		alpha = PG_GETARG_FLOAT8(5);
@@ -1255,6 +1282,12 @@ pgturbohybrid_query_constructor(PG_FUNCTION_ARGS)
 	else
 		denseK = PG_GETARG_INT32(7);
 	PgturbohybridQueryCheckNonNegativeInt("dense_k", denseK);
+
+	if (PG_NARGS() > 15 && !PG_ARGISNULL(15))
+		multivectorK = PG_GETARG_INT32(15);
+	else
+		multivectorK = denseK;
+	PgturbohybridQueryCheckNonNegativeInt("multivector_k", multivectorK);
 
 	if (PG_ARGISNULL(8))
 	{
@@ -1297,9 +1330,11 @@ pgturbohybrid_query_constructor(PG_FUNCTION_ARGS)
 	result->fusion = fusion;
 	result->denseWeight = denseWeight;
 	result->bm25Weight = bm25Weight;
+	result->multivectorWeight = multivectorWeight;
 	result->alpha = alpha;
 	result->rrfK = rrfK;
 	result->denseK = denseK;
+	result->multivectorK = multivectorK;
 	result->bm25K = bm25K;
 	result->finalK = finalK;
 	result->denseKind = denseKind;
