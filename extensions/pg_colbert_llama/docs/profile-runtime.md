@@ -1,9 +1,10 @@
-# pg_colbert_llama Profile Runtime
+# llama_embed Profile Runtime
 
-`pg_colbert_llama` consumes `pg_colbert_profile_v1` metadata produced by
-`mayflower/colbert-gguf-converter`. The preferred runtime input is a
-llama.cpp-loadable GGUF with an embedded `pg_colbert.profile_json` profile or a
-matching sidecar named `<model>.gguf.colbert_profile.json`.
+`llama_embed` consumes `pg_colbert_profile_v1` metadata produced by
+`mayflower/colbert-gguf-converter` through the internal `pg_colbert_llama`
+runtime. The preferred runtime input is a llama.cpp-loadable GGUF with an
+embedded `pg_colbert.profile_json` profile or a matching sidecar named
+`<model>.gguf.colbert_profile.json`.
 
 The broad compatibility claim is intentionally limited:
 
@@ -12,7 +13,8 @@ The broad compatibility claim is intentionally limited:
 > ranking smoke behavior.
 
 Do not claim universal ColBERT support. Profile-backed models should be
-described by the compatibility level reported by `colbert_model_info()`.
+described by the compatibility level reported by `llama_embed_model_info()` or
+the legacy `colbert_model_info()`.
 
 ## Compatibility Levels
 

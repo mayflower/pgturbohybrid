@@ -1,20 +1,22 @@
-# pg_colbert_llama Companion Extension
+# llama_embed Companion Extension
 
-`pg_colbert_llama` is a companion PostgreSQL extension for generating
-ColBERT-style token multivectors with llama.cpp/libllama and searching them with
-`pgturbohybrid`.
+`llama_embed` is a companion PostgreSQL extension for generating dense and
+multivector embeddings with llama.cpp/libllama and searching them with
+`pgturbohybrid`. It started as the ColBERT-only `pg_colbert_llama` extension;
+that extension name and the `colbert_*` SQL functions remain compatibility
+entry points, but the public extension for new installs is `llama_embed`.
 
 It is intentionally separate from the `pgturbohybrid` access method:
 
 ```text
-pg_colbert_llama
+llama_embed
   -> loads GGUF models through llama.cpp/libllama
   -> tokenizes text
-  -> runs ModernBERT/ColBERT embedding
-  -> returns turbohybrid_multivector
+  -> runs embedding models
+  -> returns vector, vector[], jsonb, or multivector-compatible values
 
 pgturbohybrid
-  -> stores turbohybrid_multivector
+  -> stores multivector columns
   -> expands token vectors into graph subnodes
   -> runs approximate MaxSim search
   -> exact-reranks bounded document candidates
@@ -23,7 +25,11 @@ pgturbohybrid
 
 Keeping the split avoids making the index AM depend on llama.cpp. Model loading,
 GGUF conversion, hardware backends, and embedding policy can evolve in
-`pg_colbert_llama` while `pgturbohybrid` stays focused on storage and search.
+`llama_embed` while `pgturbohybrid` stays focused on storage and search.
+
+For copyable SQL examples that show dense embeddings with pgvector and
+multivector embeddings with `pgturbohybrid`, see
+[`extensions/pg_colbert_llama/examples/README.md`](../extensions/pg_colbert_llama/examples/README.md).
 
 ## Runtime Requirements
 
@@ -32,10 +38,22 @@ Install the dependencies first:
 ```sql
 CREATE EXTENSION vector;
 CREATE EXTENSION pgturbohybrid;
-CREATE EXTENSION pg_colbert_llama;
+CREATE EXTENSION llama_embed;
 ```
 
-`pg_colbert_llama` exposes:
+`llama_embed` exposes:
+
+```sql
+llama_embed(model text, input text, options jsonb DEFAULT '{}')              RETURNS jsonb
+llama_embed_vector(model text, input text, options jsonb DEFAULT '{}')       RETURNS vector
+llama_embed_vector_batch(model text, inputs text[], options jsonb DEFAULT '{}') RETURNS vector[]
+llama_embed_tokens(model text, input text, options jsonb DEFAULT '{}')       RETURNS vector[]
+llama_embed_mv(model text, input text, options jsonb DEFAULT '{}')           RETURNS multivector
+llama_embed_mv_batch(model text, inputs text[], options jsonb DEFAULT '{}')  RETURNS multivector[]
+llama_embed_model_info(model text)                                          RETURNS jsonb
+```
+
+The legacy `pg_colbert_llama` extension exposes compatibility functions:
 
 ```sql
 colbert(model text, input text)         RETURNS jsonb
@@ -46,20 +64,22 @@ colbert_mv(model text, input text)      RETURNS turbohybrid_multivector
 colbert_model_info(model text)          RETURNS jsonb
 ```
 
-The public `colbert_mv` path uses
+The public `llama_embed_mv` and compatibility `colbert_mv` paths use
 `turbohybrid_multivector_from_float4(real[], dim int)` when available and falls
 back to `turbohybrid_multivector(vector[])` for older `pgturbohybrid` builds.
+Store the result in the public `multivector` column type for new schemas.
 
 ## Model Strings
 
-SQL callers pass aliases, not arbitrary filesystem paths:
+SQL callers pass aliases, not arbitrary filesystem paths. The generic
+`llama_embed_*` API accepts plain aliases:
 
 ```sql
-SELECT colbert_mv('sauerkraut-modern:query', 'Was ist PostgreSQL?');
-SELECT colbert_mv('sauerkraut-modern:doc', body);
+SELECT llama_embed_vector('sauerkraut-modern', 'Was ist PostgreSQL?');
+SELECT llama_embed_mv('sauerkraut-modern', body, '{"mode": "tokens"}'::jsonb);
 ```
 
-The grammar is:
+The ColBERT compatibility API accepts role-qualified aliases:
 
 ```text
 <alias>:query
@@ -74,7 +94,22 @@ ${pg_colbert_llama.model_dir}/${alias}.gguf
 ```
 
 Optional `pg_colbert_llama.allowed_models` restricts aliases to an
-administrator-provided comma-separated allowlist.
+administrator-provided comma-separated allowlist. The GUC namespace remains
+`pg_colbert_llama.*` in this compatibility slice.
+
+## Modes And Pooling
+
+`llama_embed` supports two output modes:
+
+```text
+mode = dense   -- one pgvector vector, pooled by llama.cpp
+mode = tokens  -- one vector per retained token/subvector
+```
+
+Dense mode defaults to mean pooling and rejects `pooling = none`. Token mode
+uses per-token embeddings and rejects dense pooling. Supported pooling options
+are `mean`, `cls`, `last`, and `rank`, where backend support depends on the
+loaded llama.cpp model.
 
 ## GUCs
 
@@ -128,7 +163,7 @@ CREATE TABLE passages (
   body_tsv tsvector GENERATED ALWAYS AS (
     to_tsvector('simple', body)
   ) STORED,
-  colbert  turbohybrid_multivector NOT NULL
+  colbert  multivector NOT NULL
 );
 ```
 
@@ -138,7 +173,11 @@ version:
 
 ```sql
 INSERT INTO passages (doc_id, chunk_no, body, colbert)
-SELECT doc_id, chunk_no, body, colbert_mv('sauerkraut-modern:doc', body)
+SELECT doc_id, chunk_no, body, llama_embed_mv(
+  'sauerkraut-modern',
+  body,
+  '{"mode": "tokens", "prefix": "[D] "}'::jsonb
+)
 FROM staging_passages;
 ```
 
@@ -173,7 +212,11 @@ L2-normalized when the model expects cosine-like ColBERT scoring.
 SELECT id, doc_id, chunk_no, body
 FROM passages
 ORDER BY colbert <~> turbohybrid_query(
-  multivector_query => colbert_mv('sauerkraut-modern:query', $1),
+  multivector_query => llama_embed_mv(
+    'sauerkraut-modern',
+    $1,
+    '{"mode": "tokens", "prefix": "[Q] "}'::jsonb
+  ),
   text_query        => websearch_to_tsquery('simple', $1),
   fusion            => 'rrf',
   dense_k           => 300,
@@ -194,14 +237,15 @@ The llama engine should:
 1. Resolve the alias to an admin-installed local GGUF.
 2. Load the model with `llama_model_load_from_file`.
 3. Create a context with embeddings enabled.
-4. Use pooling type `LLAMA_POOLING_TYPE_NONE`.
+4. Use a pooling type matching the requested `llama_embed` mode and options.
 5. Use non-causal attention for encoder/embedding models.
 6. Tokenize `query_prefix || input` or `document_prefix || input` with
    `parse_special = true`.
-7. Run the model and read per-token embeddings with
-   `llama_get_embeddings_ith`.
-8. Require output dimension `pg_colbert_llama.expected_dim`, normally `128`.
-9. L2-normalize every retained token vector.
+7. Run the model and read either pooled sequence embeddings for dense mode or
+   per-token embeddings for token mode.
+8. Require output dimension `pg_colbert_llama.expected_dim` for compatibility
+   ColBERT calls or when `expected_dim` is passed explicitly.
+9. L2-normalize retained vectors when normalization is requested.
 10. Drop special/pad tokens where llama vocab APIs expose them safely.
 11. Cap query/doc vectors with the role-specific GUCs.
 

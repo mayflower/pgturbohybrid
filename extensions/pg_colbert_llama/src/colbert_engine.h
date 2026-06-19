@@ -12,9 +12,25 @@
 
 typedef enum PgColbertRole
 {
+	PG_COLBERT_ROLE_NONE = 0,
 	PG_COLBERT_ROLE_QUERY = 1,
 	PG_COLBERT_ROLE_DOC = 2
 } PgColbertRole;
+
+typedef enum PgLlamaEmbedOutputMode
+{
+	PG_LLAMA_EMBED_OUTPUT_TOKENS = 0,
+	PG_LLAMA_EMBED_OUTPUT_DENSE = 1
+} PgLlamaEmbedOutputMode;
+
+typedef enum PgLlamaEmbedPooling
+{
+	PG_LLAMA_EMBED_POOLING_NONE = 0,
+	PG_LLAMA_EMBED_POOLING_MEAN = 1,
+	PG_LLAMA_EMBED_POOLING_CLS = 2,
+	PG_LLAMA_EMBED_POOLING_LAST = 3,
+	PG_LLAMA_EMBED_POOLING_RANK = 4
+} PgLlamaEmbedPooling;
 
 typedef enum PgColbertProfileSource
 {
@@ -93,11 +109,15 @@ typedef struct PgColbertModelSpec
 {
 	char		alias[PG_COLBERT_LLAMA_MAX_ALIAS + 1];
 	PgColbertRole role;
+	PgLlamaEmbedOutputMode outputMode;
+	PgLlamaEmbedPooling pooling;
 	const char *roleName;
 	const char *prefix;
 	const char *modelDir;
 	int			maxVectors;
 	int			expectedDim;
+	bool		checkExpectedDim;
+	bool		normalize;
 	int			threads;
 	int			nCtx;
 	int			nBatch;

@@ -2741,7 +2741,6 @@ PgturbohybridValidateIndex(Relation index, IndexInfo *indexInfo)
 {
 	TupleDesc	desc = RelationGetDescr(index);
 	Oid			vectorOid;
-	Oid			multivectorOid;
 	Oid			denseType;
 	Oid			lexicalType = InvalidOid;
 	int			keyAttrs;
@@ -2780,17 +2779,16 @@ PgturbohybridValidateIndex(Relation index, IndexInfo *indexInfo)
 
 	denseType = TupleDescAttr(desc, PGTURBOHYBRID_DENSE_KEY_INDEX)->atttypid;
 	vectorOid = PgturbohybridVectorTypeOid();
-	multivectorOid = PgturbohybridMultiVectorTypeOid();
 	hasLexical = keyAttrs > PGTURBOHYBRID_LEXICAL_KEY_INDEX;
 	if (hasLexical)
 		lexicalType =
 			TupleDescAttr(desc, PGTURBOHYBRID_LEXICAL_KEY_INDEX)->atttypid;
 
 	if ((!OidIsValid(vectorOid) || denseType != vectorOid) &&
-		(!OidIsValid(multivectorOid) || denseType != multivectorOid))
+		!PgturbohybridTypeIsMultiVector(denseType))
 		ereport(ERROR,
 				(errcode(ERRCODE_DATATYPE_MISMATCH),
-				 errmsg("pgturbohybrid first key must be type vector or turbohybrid_multivector"),
+				 errmsg("pgturbohybrid first key must be type vector or multivector"),
 				 errdetail("Found %s.", format_type_be(denseType))));
 
 	if (hasLexical && lexicalType != TSVECTOROID)
@@ -2803,11 +2801,10 @@ PgturbohybridValidateIndex(Relation index, IndexInfo *indexInfo)
 static bool
 PgturbohybridIndexIsMultiVector(Relation index)
 {
-	Oid			multivectorOid = PgturbohybridMultiVectorTypeOid();
 	TupleDesc	desc = RelationGetDescr(index);
 
-	return OidIsValid(multivectorOid) &&
-		TupleDescAttr(desc, PGTURBOHYBRID_DENSE_KEY_INDEX)->atttypid == multivectorOid;
+	return PgturbohybridTypeIsMultiVector(
+		TupleDescAttr(desc, PGTURBOHYBRID_DENSE_KEY_INDEX)->atttypid);
 }
 
 static ScanKey

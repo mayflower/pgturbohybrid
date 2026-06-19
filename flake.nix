@@ -184,7 +184,7 @@
                 ];
 
                 meta = {
-                  description = "ColBERT embedding companion extension for pgturbohybrid";
+                  description = "llama.cpp embedding companion extension for pgturbohybrid";
                   homepage = "https://github.com/mayflower/pgturbohybrid";
                   license = lib.licenses.postgresql;
                   platforms = postgresql.meta.platforms;
@@ -301,6 +301,7 @@
                 psql --host="$PGHOST" --port="$TH_PGPORT" --username="$PGUSER" --dbname="$PGDATABASE" -v ON_ERROR_STOP=1 <<'SQL'
                 CREATE EXTENSION IF NOT EXISTS vector;
                 CREATE EXTENSION IF NOT EXISTS pgturbohybrid;
+                CREATE EXTENSION IF NOT EXISTS llama_embed;
                 CREATE EXTENSION IF NOT EXISTS pg_colbert_llama;
                 SQL
 
@@ -382,6 +383,7 @@
                 psql --host="$PGHOST" --port="$TH_PGPORT" --username="$PGUSER" --dbname="$PGDATABASE" -v ON_ERROR_STOP=1 <<'SQL'
                 CREATE EXTENSION IF NOT EXISTS vector;
                 CREATE EXTENSION IF NOT EXISTS pgturbohybrid;
+                CREATE EXTENSION IF NOT EXISTS llama_embed;
                 CREATE EXTENSION IF NOT EXISTS pg_colbert_llama;
                 SQL
 
@@ -781,10 +783,10 @@
                   th-test                run smoke + SQL regression tests
                   th-installcheck        run SQL regression tests
                   th-prove-installcheck  run TAP tests
-                  th-colbert-build-stub  build pg_colbert_llama with the stub engine
-                  th-colbert-test-stub   run pg_colbert_llama stub regression tests
-                  th-colbert-build-llama build pg_colbert_llama against llama.cpp
-                  th-colbert-live-test   run gated live ColBERT TAP tests
+                  th-colbert-build-stub  build llama_embed with the stub engine
+                  th-colbert-test-stub   run llama_embed/ColBERT stub regression tests
+                  th-colbert-build-llama build llama_embed against llama.cpp
+                  th-colbert-live-test   run gated live llama_embed TAP tests
 
                 Deterministic benchmark helpers:
                   th-bench-retrieval-quality
@@ -886,16 +888,16 @@
               dbpedia-colbert-generate-export = mkApp "Generate DBpedia ColBERT multivectors and export the Hugging Face dataset" (
                 stableScript "th-dbpedia-colbert-generate-export"
               );
-              colbert-build-stub = mkApp "Build pg_colbert_llama with the stub engine" (
+              colbert-build-stub = mkApp "Build llama_embed with the stub engine" (
                 stableScript "th-colbert-build-stub"
               );
-              colbert-test-stub = mkApp "Run pg_colbert_llama stub regression tests" (
+              colbert-test-stub = mkApp "Run llama_embed/ColBERT stub regression tests" (
                 stableScript "th-colbert-test-stub"
               );
-              colbert-build-llama = mkApp "Build pg_colbert_llama against llama.cpp" (
+              colbert-build-llama = mkApp "Build llama_embed against llama.cpp" (
                 stableScript "th-colbert-build-llama"
               );
-              colbert-live-test = mkApp "Run gated live pg_colbert_llama TAP tests" (
+              colbert-live-test = mkApp "Run gated live llama_embed TAP tests" (
                 stableScript "th-colbert-live-test"
               );
             };

@@ -77,6 +77,8 @@ typedef struct PgColbertCachedModel
 	int			nBatch;
 	int			nSeqMax;
 	int			nGpuLayers;
+	PgLlamaEmbedOutputMode outputMode;
+	PgLlamaEmbedPooling pooling;
 	struct llama_model *model;
 	struct llama_context *ctx;
 	int32		nCtxTrain;
@@ -131,6 +133,7 @@ static PgColbertCachedModel *PgColbertFindCachedModel(const PgColbertModelSpec *
 													  int nSeqMax);
 static void PgColbertFreeCachedModel(PgColbertCachedModel *entry);
 static void PgColbertEvictCache(int maxEntries, PgColbertCachedModel *protect);
+static enum llama_pooling_type PgColbertLlamaPoolingType(const PgColbertModelSpec *spec);
 static bool PgColbertLoadModel(const PgColbertModelSpec *spec,
 							   const char *path,
 							   int nSeqMax,
@@ -283,7 +286,9 @@ PgColbertFindCachedModel(const PgColbertModelSpec *spec, const char *path,
 			entry->nCtx == spec->nCtx &&
 			entry->nBatch == spec->nBatch &&
 			entry->nSeqMax == nSeqMax &&
-			entry->nGpuLayers == spec->nGpuLayers)
+			entry->nGpuLayers == spec->nGpuLayers &&
+			entry->outputMode == spec->outputMode &&
+			entry->pooling == spec->pooling)
 		{
 			entry->lastUsed = ++pg_colbert_llama_cache_clock;
 			return entry;
@@ -350,6 +355,25 @@ static bool
 PgColbertReadExact(FILE *file, void *ptr, size_t size)
 {
 	return fread(ptr, 1, size, file) == size;
+}
+
+static enum llama_pooling_type
+PgColbertLlamaPoolingType(const PgColbertModelSpec *spec)
+{
+	switch (spec->pooling)
+	{
+		case PG_LLAMA_EMBED_POOLING_NONE:
+			return LLAMA_POOLING_TYPE_NONE;
+		case PG_LLAMA_EMBED_POOLING_MEAN:
+			return LLAMA_POOLING_TYPE_MEAN;
+		case PG_LLAMA_EMBED_POOLING_CLS:
+			return LLAMA_POOLING_TYPE_CLS;
+		case PG_LLAMA_EMBED_POOLING_LAST:
+			return LLAMA_POOLING_TYPE_LAST;
+		case PG_LLAMA_EMBED_POOLING_RANK:
+			return LLAMA_POOLING_TYPE_RANK;
+	}
+	return LLAMA_POOLING_TYPE_NONE;
 }
 
 static bool
@@ -1713,6 +1737,8 @@ PgColbertLoadModel(const PgColbertModelSpec *spec, const char *path,
 	loaded->nBatch = spec->nBatch;
 	loaded->nSeqMax = nSeqMax;
 	loaded->nGpuLayers = spec->nGpuLayers;
+	loaded->outputMode = spec->outputMode;
+	loaded->pooling = spec->pooling;
 
 	if (!PgColbertLoadProjection(spec, path, loaded, ctx, errorMessage))
 	{
@@ -1722,7 +1748,7 @@ PgColbertLoadModel(const PgColbertModelSpec *spec, const char *path,
 
 	contextParams = llama_context_default_params();
 	contextParams.embeddings = true;
-	contextParams.pooling_type = LLAMA_POOLING_TYPE_NONE;
+	contextParams.pooling_type = PgColbertLlamaPoolingType(spec);
 	contextParams.attention_type = LLAMA_ATTENTION_TYPE_NON_CAUSAL;
 	contextParams.n_ctx = (uint32_t) spec->nCtx;
 	contextParams.n_batch = (uint32_t) spec->nBatch;
@@ -1951,7 +1977,9 @@ PgColbertBuildEncodePlan(const struct llama_vocab *vocab,
 
 		plan->positionIds[i] = i;
 		plan->tokenTypeIds[i] = spec->role == PG_COLBERT_ROLE_QUERY ?
-			spec->profile.queryTokenTypeId : spec->profile.documentTokenTypeId;
+			spec->profile.queryTokenTypeId :
+			(spec->role == PG_COLBERT_ROLE_DOC ?
+			 spec->profile.documentTokenTypeId : -1);
 		plan->attentionMask[i] = 1;
 		plan->retainMask[i] = retain;
 		plan->outputMask[i] = retain && outputCount < spec->maxVectors;
@@ -2014,7 +2042,7 @@ PgColbertEncodeBody(const PgColbertModelSpec *spec, const char *input,
 							&cacheOwned, errorMessage))
 		return false;
 
-	if (entry->nEmbdOut != spec->expectedDim)
+	if (spec->checkExpectedDim && entry->nEmbdOut != spec->expectedDim)
 	{
 		if (!cacheOwned)
 			PgColbertFreeCachedModel(entry);
@@ -2051,7 +2079,8 @@ PgColbertEncodeBody(const PgColbertModelSpec *spec, const char *input,
 		goto cleanup;
 	}
 
-	retained = plan.outputCount;
+	retained = spec->outputMode == PG_LLAMA_EMBED_OUTPUT_DENSE ? 1 :
+		plan.outputCount;
 
 	batch = llama_batch_init(plan.nTokens, 0, 1);
 	batchInitialized = true;
@@ -2102,7 +2131,7 @@ PgColbertEncodeBody(const PgColbertModelSpec *spec, const char *input,
 	output->dim = entry->nEmbdOut;
 	output->count = retained;
 	output->planTokenCount = plan.nTokens;
-	output->normalized = true;
+	output->normalized = spec->normalize;
 	output->loadedFromCache = loadedFromCache;
 	output->tokenIds = (int32 *) palloc0(sizeof(int32) * (Size) retained);
 	output->values = (float4 *) palloc0(sizeof(float4) * (Size) retained *
@@ -2148,61 +2177,95 @@ PgColbertEncodeBody(const PgColbertModelSpec *spec, const char *input,
 			goto oom;
 	}
 
-	embeddings = llama_get_embeddings(entry->ctx);
-	if (embeddings == NULL)
-	{
-		PgColbertSetError(ctx, errorMessage,
-						  "llama did not return token embeddings");
-		goto cleanup;
-	}
-
-	retained = 0;
-	INSTR_TIME_SET_CURRENT(phaseStart);
-	for (int32 i = 0; i < plan.nTokens && retained < output->count; i++)
+	if (spec->outputMode == PG_LLAMA_EMBED_OUTPUT_DENSE)
 	{
 		const float *vector;
 		int32		vectorDim;
 		double		norm = 0.0;
 
-		if (!plan.outputMask[i])
-			continue;
-
-		vector = embeddings + ((Size) i * (Size) entry->nEmbdModel);
-		vectorDim = entry->nEmbdModel;
-		if (entry->hasProjection)
+		vector = llama_get_embeddings_seq(entry->ctx, 0);
+		if (vector == NULL)
 		{
-			if (!PgColbertApplyProjectionChain(entry, vector,
-											   projectionWorkspaceA,
-											   projectionWorkspaceB,
-											   &vector, &vectorDim,
-											   ctx, errorMessage))
-				goto cleanup;
-			if (vectorDim != output->dim)
-			{
-				PgColbertSetError(ctx, errorMessage,
-								  "ColBERT projection output dimension is %d, expected %d",
-								  vectorDim, output->dim);
-				goto cleanup;
-			}
+			PgColbertSetError(ctx, errorMessage,
+							  "llama did not return pooled sequence embeddings");
+			goto cleanup;
 		}
-
-		for (int32 j = 0; j < output->dim; j++)
+		vectorDim = entry->nEmbdOut;
+		for (int32 j = 0; j < vectorDim; j++)
 			norm += (double) vector[j] * (double) vector[j];
 		if (norm <= 0.0 || !std::isfinite(norm))
 		{
 			PgColbertSetError(ctx, errorMessage,
-							  "llama returned a zero or non-finite token embedding");
+							  "llama returned a zero or non-finite embedding");
+			goto cleanup;
+		}
+		norm = sqrt(norm);
+		output->tokenIds[0] = 0;
+		INSTR_TIME_SET_CURRENT(phaseStart);
+		for (int32 j = 0; j < output->dim; j++)
+			output->values[j] = spec->normalize ?
+				(float4) (vector[j] / norm) : (float4) vector[j];
+		timing.projectionUs += PgColbertElapsedUs(phaseStart);
+	}
+	else
+	{
+		embeddings = llama_get_embeddings(entry->ctx);
+		if (embeddings == NULL)
+		{
+			PgColbertSetError(ctx, errorMessage,
+							  "llama did not return token embeddings");
 			goto cleanup;
 		}
 
-		norm = sqrt(norm);
-		output->tokenIds[retained] = plan.tokens[i];
-		for (int32 j = 0; j < output->dim; j++)
-			output->values[(Size) retained * (Size) output->dim + (Size) j] =
-				(float4) (vector[j] / norm);
-		retained++;
+		retained = 0;
+		INSTR_TIME_SET_CURRENT(phaseStart);
+		for (int32 i = 0; i < plan.nTokens && retained < output->count; i++)
+		{
+			const float *vector;
+			int32		vectorDim;
+			double		norm = 0.0;
+
+			if (!plan.outputMask[i])
+				continue;
+
+			vector = embeddings + ((Size) i * (Size) entry->nEmbdModel);
+			vectorDim = entry->nEmbdModel;
+			if (entry->hasProjection)
+			{
+				if (!PgColbertApplyProjectionChain(entry, vector,
+												   projectionWorkspaceA,
+												   projectionWorkspaceB,
+												   &vector, &vectorDim,
+												   ctx, errorMessage))
+					goto cleanup;
+				if (vectorDim != output->dim)
+				{
+					PgColbertSetError(ctx, errorMessage,
+									  "ColBERT projection output dimension is %d, expected %d",
+									  vectorDim, output->dim);
+					goto cleanup;
+				}
+			}
+
+			for (int32 j = 0; j < output->dim; j++)
+				norm += (double) vector[j] * (double) vector[j];
+			if (norm <= 0.0 || !std::isfinite(norm))
+			{
+				PgColbertSetError(ctx, errorMessage,
+								  "llama returned a zero or non-finite token embedding");
+				goto cleanup;
+			}
+
+			norm = sqrt(norm);
+			output->tokenIds[retained] = plan.tokens[i];
+			for (int32 j = 0; j < output->dim; j++)
+				output->values[(Size) retained * (Size) output->dim + (Size) j] =
+					spec->normalize ? (float4) (vector[j] / norm) :
+					(float4) vector[j];
+			retained++;
+		}
+		timing.projectionUs += PgColbertElapsedUs(phaseStart);
 	}
-	timing.projectionUs += PgColbertElapsedUs(phaseStart);
 	timing.inputs = 1;
 	timing.tokens = plan.nTokens;
 	timing.outputVectors = output->count;
@@ -2275,7 +2338,7 @@ PgColbertEncodeBatchBody(const PgColbertModelSpec *spec,
 							&loadedFromCache, &cacheOwned, errorMessage))
 		return false;
 
-	if (entry->nEmbdOut != spec->expectedDim)
+	if (spec->checkExpectedDim && entry->nEmbdOut != spec->expectedDim)
 	{
 		if (!cacheOwned)
 			PgColbertFreeCachedModel(entry);
@@ -2435,12 +2498,15 @@ PgColbertEncodeBatchBody(const PgColbertModelSpec *spec,
 			goto cleanup;
 		}
 
-		embeddings = llama_get_embeddings(entry->ctx);
-		if (embeddings == NULL)
+		if (spec->outputMode == PG_LLAMA_EMBED_OUTPUT_TOKENS)
 		{
-			PgColbertSetError(ctx, errorMessage,
-							  "llama did not return token embeddings");
-			goto cleanup;
+			embeddings = llama_get_embeddings(entry->ctx);
+			if (embeddings == NULL)
+			{
+				PgColbertSetError(ctx, errorMessage,
+								  "llama did not return token embeddings");
+				goto cleanup;
+			}
 		}
 
 		for (int32 inputIndex = start; inputIndex < end; inputIndex++)
@@ -2448,6 +2514,9 @@ PgColbertEncodeBatchBody(const PgColbertModelSpec *spec,
 			PgColbertEncodePlan *plan = &plans[inputIndex];
 			PgColbertEngineOutput *output = &outputs[inputIndex];
 			int32		retained = 0;
+			int32		outputCount =
+				spec->outputMode == PG_LLAMA_EMBED_OUTPUT_DENSE ? 1 :
+				plan->outputCount;
 
 			INSTR_TIME_SET_CURRENT(phaseStart);
 			oldCtx = MemoryContextSwitchTo(ctx);
@@ -2459,14 +2528,14 @@ PgColbertEncodeBatchBody(const PgColbertModelSpec *spec,
 			output->attentionMaskStatus = pstrdup(attentionMaskStatus);
 			output->knownLimitations = pstrdup(spec->profile.knownLimitations);
 			output->dim = entry->nEmbdOut;
-			output->count = plan->outputCount;
+			output->count = outputCount;
 			output->planTokenCount = plan->nTokens;
-			output->normalized = true;
+			output->normalized = spec->normalize;
 			output->loadedFromCache = loadedFromCache;
 			output->tokenIds =
-				(int32 *) palloc0(sizeof(int32) * (Size) plan->outputCount);
+				(int32 *) palloc0(sizeof(int32) * (Size) outputCount);
 			output->values =
-				(float4 *) palloc0(sizeof(float4) * (Size) plan->outputCount *
+				(float4 *) palloc0(sizeof(float4) * (Size) outputCount *
 								   (Size) entry->nEmbdOut);
 			MemoryContextSwitchTo(oldCtx);
 			timing.outputUs += PgColbertElapsedUs(phaseStart);
@@ -2508,60 +2577,92 @@ PgColbertEncodeBatchBody(const PgColbertModelSpec *spec,
 			}
 
 			INSTR_TIME_SET_CURRENT(phaseStart);
-			for (int32 tokenIndex = 0; tokenIndex < plan->nTokens; tokenIndex++)
+			if (spec->outputMode == PG_LLAMA_EMBED_OUTPUT_DENSE)
 			{
 				const float *vector;
-				int32		vectorDim;
 				double		norm = 0.0;
+				llama_seq_id seqId = inputIndex - start;
 
-				if (!plan->outputMask[tokenIndex])
+				vector = llama_get_embeddings_seq(entry->ctx, seqId);
+				if (vector == NULL)
 				{
-					readToken++;
-					continue;
+					PgColbertSetError(ctx, errorMessage,
+									  "llama did not return pooled sequence embeddings");
+					goto cleanup;
 				}
-
-				outputOrdinal++;
-				vector = embeddings + ((Size) readToken *
-									   (Size) entry->nEmbdModel);
-				readToken++;
-				vectorDim = entry->nEmbdModel;
-				if (entry->hasProjection)
-				{
-					if (!PgColbertApplyProjectionChain(entry, vector,
-													   projectionWorkspaceA,
-													   projectionWorkspaceB,
-													   &vector, &vectorDim,
-													   ctx, errorMessage))
-						goto cleanup;
-					if (vectorDim != output->dim)
-					{
-						PgColbertSetError(ctx, errorMessage,
-										  "ColBERT projection output dimension is %d, expected %d",
-										  vectorDim, output->dim);
-						goto cleanup;
-					}
-				}
-
 				for (int32 j = 0; j < output->dim; j++)
 					norm += (double) vector[j] * (double) vector[j];
 				if (norm <= 0.0 || !std::isfinite(norm))
 				{
 					PgColbertSetError(ctx, errorMessage,
-									  "llama returned a zero or non-finite token embedding");
+									  "llama returned a zero or non-finite embedding");
 					goto cleanup;
 				}
-
 				norm = sqrt(norm);
-				output->tokenIds[retained] = plan->tokens[tokenIndex];
+				output->tokenIds[0] = 0;
 				for (int32 j = 0; j < output->dim; j++)
-					output->values[(Size) retained * (Size) output->dim +
-								   (Size) j] = (float4) (vector[j] / norm);
-				retained++;
+					output->values[j] = spec->normalize ?
+						(float4) (vector[j] / norm) : (float4) vector[j];
+			}
+			else
+			{
+				for (int32 tokenIndex = 0; tokenIndex < plan->nTokens; tokenIndex++)
+				{
+					const float *vector;
+					int32		vectorDim;
+					double		norm = 0.0;
+
+					if (!plan->outputMask[tokenIndex])
+					{
+						readToken++;
+						continue;
+					}
+
+					outputOrdinal++;
+					vector = embeddings + ((Size) readToken *
+										   (Size) entry->nEmbdModel);
+					readToken++;
+					vectorDim = entry->nEmbdModel;
+					if (entry->hasProjection)
+					{
+						if (!PgColbertApplyProjectionChain(entry, vector,
+														   projectionWorkspaceA,
+														   projectionWorkspaceB,
+														   &vector, &vectorDim,
+														   ctx, errorMessage))
+							goto cleanup;
+						if (vectorDim != output->dim)
+						{
+							PgColbertSetError(ctx, errorMessage,
+											  "ColBERT projection output dimension is %d, expected %d",
+											  vectorDim, output->dim);
+							goto cleanup;
+						}
+					}
+
+					for (int32 j = 0; j < output->dim; j++)
+						norm += (double) vector[j] * (double) vector[j];
+					if (norm <= 0.0 || !std::isfinite(norm))
+					{
+						PgColbertSetError(ctx, errorMessage,
+										  "llama returned a zero or non-finite token embedding");
+						goto cleanup;
+					}
+
+					norm = sqrt(norm);
+					output->tokenIds[retained] = plan->tokens[tokenIndex];
+					for (int32 j = 0; j < output->dim; j++)
+						output->values[(Size) retained * (Size) output->dim +
+									   (Size) j] = spec->normalize ?
+							(float4) (vector[j] / norm) : (float4) vector[j];
+					retained++;
+				}
 			}
 			timing.projectionUs += PgColbertElapsedUs(phaseStart);
 		}
 
-		if (outputOrdinal != totalOutputs || readToken != totalTokens)
+		if (spec->outputMode == PG_LLAMA_EMBED_OUTPUT_TOKENS &&
+			(outputOrdinal != totalOutputs || readToken != totalTokens))
 		{
 			PgColbertSetError(ctx, errorMessage,
 							  "llama returned %d embeddings for %d requested outputs across %d tokens",
@@ -2635,7 +2736,8 @@ PgColbertModelInfoBody(const PgColbertModelSpec *spec, MemoryContext ctx,
 	info->nHead = entry->nHead;
 	info->tokenizerStatus = pstrdup(spec->profile.tokenizerStatus);
 	info->projectionKind = pstrdup(spec->profile.projectionKind);
-	info->projectionStatus = pstrdup(entry->nEmbdOut == spec->expectedDim ?
+	info->projectionStatus = pstrdup(!spec->checkExpectedDim ||
+									 entry->nEmbdOut == spec->expectedDim ?
 									 "ok" : "missing_or_unexpected_dim");
 	info->projectionModuleCount = entry->projectionModuleCount;
 	MemoryContextSwitchTo(oldCtx);

@@ -118,6 +118,39 @@ SELECT pg_catalog.length(
   )
 ) AS mv_binary_len;
 
+SELECT t.typname AS public_multivector_type,
+       bt.typname AS public_multivector_base_type
+FROM pg_type t
+JOIN pg_type bt ON bt.oid = t.typbasetype
+WHERE t.typname = 'multivector';
+
+DROP TABLE IF EXISTS tqh_public_multivector_docs;
+CREATE TABLE tqh_public_multivector_docs (
+  id int PRIMARY KEY,
+  colbert multivector NOT NULL
+);
+
+INSERT INTO tqh_public_multivector_docs (id, colbert)
+VALUES
+  (1, turbohybrid_multivector(ARRAY['[1,0]'::vector, '[0,1]'::vector])),
+  (2, turbohybrid_multivector(ARRAY['[0,1]'::vector, '[0,0.5]'::vector]));
+
+CREATE INDEX tqh_public_multivector_docs_idx
+ON tqh_public_multivector_docs USING turbohybrid (
+  colbert multivector_maxsim_ip_turbohybrid_ops
+);
+
+SELECT id
+FROM tqh_public_multivector_docs
+ORDER BY colbert <~> turbohybrid_query(
+  multivector_query => turbohybrid_multivector(ARRAY['[1,0]'::vector]),
+  dense_k => 10,
+  final_k => 2
+)
+LIMIT 2;
+
+DROP TABLE tqh_public_multivector_docs;
+
 DO $long_context$
 DECLARE
 	q turbohybrid_multivector :=

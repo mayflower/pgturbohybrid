@@ -117,7 +117,7 @@ Inspect `calibrated_fusion_enabled`,
 
 ## Multivector Late Interaction
 
-`pgturbohybrid` includes an experimental `turbohybrid_multivector` type for
+`pgturbohybrid` includes a public `multivector` column type for
 late-interaction retrieval models such as ColBERT-style MaxSim. A multivector
 stores several same-dimensional token vectors for one document row. The native
 graph build expands those token vectors into graph subnodes, while query output
@@ -127,7 +127,7 @@ times.
 ```sql
 CREATE TABLE passages (
   id bigint PRIMARY KEY,
-  colbert turbohybrid_multivector
+  colbert multivector
 );
 
 INSERT INTO passages VALUES
@@ -165,8 +165,8 @@ Current multivector contract:
   selected proxy, centroid, or sidecar payloads. Incremental insert/update
   follows the same storage mode and appends BM25 delta data when a lexical key
   is present;
-- textual literal input for `turbohybrid_multivector` remains intentionally
-  unsupported. Construct values from `vector[]`,
+- textual literal input for the underlying multivector value remains
+  intentionally unsupported. Construct values from `vector[]`,
   `turbohybrid_multivector_from_float4(...)`, or the context/field
   constructors.
 
@@ -246,9 +246,18 @@ limitations.
 
 For local ColBERT embedding inside PostgreSQL, see
 [`docs/colbert-llama-extension.md`](docs/colbert-llama-extension.md). It
-describes the companion `pg_colbert_llama` extension, which keeps llama.cpp
-model loading separate from the `pgturbohybrid` index AM and returns
-`turbohybrid_multivector` values through the public SQL API.
+describes the companion `llama_embed` extension, which keeps llama.cpp model
+loading separate from the `pgturbohybrid` index AM and returns dense `vector`,
+token-level `vector[]`, and multivector-compatible values through the public
+SQL API. Store late-interaction outputs in `multivector` columns. The
+implementation still ships from the `pg_colbert_llama` source
+directory for compatibility, and the legacy `CREATE EXTENSION
+pg_colbert_llama` / `colbert_*` API remains available for existing ColBERT
+callers.
+The standalone examples in
+[`extensions/pg_colbert_llama/examples/README.md`](extensions/pg_colbert_llama/examples/README.md)
+show dense `llama_embed_vector()` output stored in pgvector and multivector
+`llama_embed_mv()` output stored in `pgturbohybrid`.
 
 ## When It Is Useful
 

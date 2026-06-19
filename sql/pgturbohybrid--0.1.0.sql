@@ -139,6 +139,8 @@ CREATE TYPE turbohybrid_multivector (
 	ALIGNMENT = double
 );
 
+CREATE DOMAIN multivector AS turbohybrid_multivector;
+
 CREATE FUNCTION turbohybrid_multivector(vector[]) RETURNS turbohybrid_multivector
 	AS 'MODULE_PATHNAME', 'pgturbohybrid_multivector_constructor'
 	LANGUAGE C IMMUTABLE STRICT PARALLEL SAFE;
@@ -580,6 +582,7 @@ COMMENT ON TYPE turbohybrid_query IS 'TurboHybrid query payload for dense vector
 COMMENT ON FUNCTION turbohybrid_query_in(pg_catalog.cstring) IS 'Input function for turbohybrid_query';
 COMMENT ON FUNCTION turbohybrid_query_out(turbohybrid_query) IS 'Output function for turbohybrid_query';
 COMMENT ON FUNCTION turbohybrid_query(vector, pg_catalog.tsquery, pg_catalog.text, pg_catalog.float8, pg_catalog.float8, pg_catalog.float8, pg_catalog.int4, pg_catalog.int4, pg_catalog.int4, pg_catalog.int4, pg_catalog.bool, turbohybrid_multivector, pg_catalog.float4[], pg_catalog.bool[], pg_catalog.float8, pg_catalog.int4) IS 'Constructs a TurboHybrid query payload';
+COMMENT ON DOMAIN multivector IS 'Public SQL column type for late-interaction multivector embeddings. It is binary-compatible with turbohybrid_multivector.';
 COMMENT ON FUNCTION turbohybrid_distance(vector, turbohybrid_query) IS 'Default TurboHybrid distance between a vector and a query';
 COMMENT ON FUNCTION turbohybrid_l2_distance(vector, turbohybrid_query) IS 'L2 TurboHybrid distance between a vector and a query';
 COMMENT ON FUNCTION turbohybrid_negative_inner_product(vector, turbohybrid_query) IS 'Negative inner product TurboHybrid distance between a vector and a query';
