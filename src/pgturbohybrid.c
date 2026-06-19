@@ -24,6 +24,7 @@
 #include "pgturbohybrid_quant.h"
 #include "utils/json.h"
 #include "utils/lsyscache.h"
+#include "utils/memutils.h"
 #include "utils/rel.h"
 
 #if PG_VERSION_NUM >= 180000
@@ -42,6 +43,7 @@ typedef struct PgturbohybridGraphExecWrapperState
 typedef struct PgturbohybridGraphExecWrapperFrame
 {
 	List	   *owned_wrapper_states;
+	bool		restored;		/* true once RestorePrevious ran, prevents double-pop */
 }			PgturbohybridGraphExecWrapperFrame;
 
 static ExecutorStart_hook_type prev_ExecutorStart_hook = NULL;
@@ -209,11 +211,14 @@ PgturbohybridGraphExecutorStart(QueryDesc *queryDesc, int eflags)
 	(void) eflags;
 
 	{
+		MemoryContext oldCtx = MemoryContextSwitchTo(TopMemoryContext);
 		PgturbohybridGraphExecWrapperFrame *frame =
 			palloc(sizeof(PgturbohybridGraphExecWrapperFrame));
 
 		frame->owned_wrapper_states = NIL;
+		frame->restored = false;
 		tqgraph_exec_wrapper_frames = lappend(tqgraph_exec_wrapper_frames, frame);
+		MemoryContextSwitchTo(oldCtx);
 	}
 	PG_TRY();
 	{
@@ -260,9 +265,24 @@ PgturbohybridGraphExecutorRestorePrevious(void)
 	}
 
 	frame = llast(tqgraph_exec_wrapper_frames);
+
+	/* Prevent double-pop: if we already restored this frame, bail out.
+	 * This happens when a query errors during ExecutorRun (PG_CATCH pops here)
+	 * and then ExecutorEnd calls RestorePrevious again on the same frame. */
+	if (frame->restored)
+		return;
+	frame->restored = true;
+
 	foreach(lc, frame->owned_wrapper_states)
+	{
+		PgturbohybridGraphExecWrapperState *wrapper_state = lfirst(lc);
+
 		tqgraph_exec_wrapper_states =
-			list_delete_ptr(tqgraph_exec_wrapper_states, lfirst(lc));
+			list_delete_ptr(tqgraph_exec_wrapper_states, wrapper_state);
+		pfree(wrapper_state);
+	}
+	list_free(frame->owned_wrapper_states);
+	pfree(frame);
 	tqgraph_exec_wrapper_frames =
 		list_delete_last(tqgraph_exec_wrapper_frames);
 }
@@ -343,6 +363,7 @@ PgturbohybridGraphWrapControlledIndexScans(PlanState *planstate, LimitState *lim
 	if (PgturbohybridGraphIsIndexScanState(planstate) &&
 		PgturbohybridGraphIndexScanUsespgturbohybrid(castNode(IndexScanState, planstate)))
 	{
+		MemoryContext oldCtx = MemoryContextSwitchTo(TopMemoryContext);
 		PgturbohybridGraphExecWrapperState *wrapper_state =
 			palloc(sizeof(PgturbohybridGraphExecWrapperState));
 
@@ -358,6 +379,7 @@ PgturbohybridGraphWrapControlledIndexScans(PlanState *planstate, LimitState *lim
 			frame->owned_wrapper_states =
 				lappend(frame->owned_wrapper_states, wrapper_state);
 		}
+		MemoryContextSwitchTo(oldCtx);
 		ExecSetExecProcNode(planstate, PgturbohybridGraphExecIndexScanWithController);
 	}
 
