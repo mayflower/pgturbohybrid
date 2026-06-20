@@ -1535,6 +1535,30 @@ bool		PgturbohybridGraphResolveChainBlockNumber(Relation index, BlockNumber star
 										   int pageNo, int pageCount, uint16 pageKind,
 										   BlockNumber *blknos, BlockNumber *blkno);
 bool		PgturbohybridGraphReadMeta(Relation index, PgturbohybridGraphMetaPageData *meta);
+
+/*
+ * node_id <-> heap TID identity + liveness, recovered from the dense graph code
+ * pages.  Shared by the BM25 and sparse secondary branches (both key their
+ * postings on the dense graph node_id).  Defined in pgturbohybrid_bm25_build.c.
+ */
+typedef struct PgturbohybridTidNode
+{
+	ItemPointerData tid;
+	uint32		nodeId;
+} PgturbohybridTidNode;
+
+typedef struct PgturbohybridNodeState
+{
+	ItemPointerData tid;
+	bool		live;
+} PgturbohybridNodeState;
+
+/* Sorted (by TID) node_id<->TID map; pfree the result.  *count set to #nodes. */
+PgturbohybridTidNode *PgturbohybridReadNodeMap(Relation index, uint32 *count);
+/* Per-node {tid, live} indexed by node_id; pfree the result. */
+PgturbohybridNodeState *PgturbohybridReadNodeStates(Relation index,
+													PgturbohybridGraphMetaPageData *meta,
+													uint32 *count);
 void		PgturbohybridGraphFinishPage(Buffer buf);
 void		PgturbohybridGraphAppendPage(Relation index, ForkNumber forkNum, Buffer *buf,
 							Page *page, uint16 pageKind);
