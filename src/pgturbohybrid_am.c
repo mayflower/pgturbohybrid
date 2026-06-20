@@ -95,6 +95,7 @@ bool		pgturbohybrid_enable_wand = true;
 bool		pgturbohybrid_enable_sparse_wand = true;
 int			pgturbohybrid_sparse_hot_postings_cache_mb = 16;
 int			pgturbohybrid_sparse_hot_postings_cache_min_df = 256;
+int			pgturbohybrid_sparse_delta_compaction_threshold = 1000;
 int			pgturbohybrid_max_union_candidates = 100000;
 int			pgturbohybrid_default_dense_k = PGTURBOHYBRID_DEFAULT_DENSE_K;
 int			pgturbohybrid_default_bm25_k = PGTURBOHYBRID_DEFAULT_BM25_K;
@@ -1491,6 +1492,11 @@ typedef struct PgturbohybridLastScanStats
 	uint64		sparseHotCacheMisses;
 	uint64		sparseHotCacheBytes;
 	uint64		sparseHotCacheEvictions;
+	uint32		sparseDeltaPages;
+	uint32		sparseDeltaTerms;
+	uint64		sparseDeltaPostingsDecoded;
+	bool		sparseDeltaCacheHit;
+	uint32		sparseDeltaGeneration;
 	PgturbohybridBranchPlan branchPlan;
 	char		profile[16];
 	char		fusion[16];
@@ -2022,6 +2028,13 @@ PgturbohybridGetLastScanStatsSnapshot(PgturbohybridScanStatsSnapshot *stats)
 	stats->sparseHotCacheBytes = pgturbohybrid_last_scan_state.sparseHotCacheBytes;
 	stats->sparseHotCacheEvictions =
 		pgturbohybrid_last_scan_state.sparseHotCacheEvictions;
+	stats->sparseDeltaPages = pgturbohybrid_last_scan_state.sparseDeltaPages;
+	stats->sparseDeltaTerms = pgturbohybrid_last_scan_state.sparseDeltaTerms;
+	stats->sparseDeltaPostingsDecoded =
+		pgturbohybrid_last_scan_state.sparseDeltaPostingsDecoded;
+	stats->sparseDeltaCacheHit = pgturbohybrid_last_scan_state.sparseDeltaCacheHit;
+	stats->sparseDeltaGeneration =
+		pgturbohybrid_last_scan_state.sparseDeltaGeneration;
 	stats->branchPlan = pgturbohybrid_last_scan_state.branchPlan;
 	stats->denseCandidatesEffective =
 		pgturbohybrid_last_scan_state.denseCandidatesEffective;
@@ -2882,6 +2895,22 @@ PgturbohybridIndexGetLexicalDatum(Relation index, Datum *values, bool *isnull,
 		return false;
 
 	*lexicalValue = values[bm25Key];
+	return true;
+}
+
+/* Sparse-vector index value for an inserted row (false if no sparse key / NULL). */
+static bool
+PgturbohybridIndexGetSparseDatum(Relation index, Datum *values, bool *isnull,
+								 Datum *sparseValue)
+{
+	PgturbohybridIndexKeyMap map;
+
+	if (index == NULL || index->rd_index == NULL || values == NULL || isnull == NULL)
+		return false;
+	PgturbohybridBuildIndexKeyMap(index, NULL, &map);
+	if (map.sparseKey < 0 || isnull[map.sparseKey])
+		return false;
+	*sparseValue = values[map.sparseKey];
 	return true;
 }
 
@@ -6503,6 +6532,11 @@ PgturbohybridCollectSparseOnlyResults(IndexScanDesc scan,
 	lastStats->sparseHotCacheMisses = sstats.hotCacheMisses;
 	lastStats->sparseHotCacheBytes = sstats.hotCacheBytes;
 	lastStats->sparseHotCacheEvictions = sstats.hotCacheEvictions;
+	lastStats->sparseDeltaPages = sstats.deltaPages;
+	lastStats->sparseDeltaTerms = sstats.deltaTerms;
+	lastStats->sparseDeltaPostingsDecoded = sstats.deltaPostingsDecoded;
+	lastStats->sparseDeltaCacheHit = sstats.deltaCacheHit;
+	lastStats->sparseDeltaGeneration = sstats.deltaGeneration;
 	lastStats->sparseCandidatesRequested = originalQuery->sparseK;
 	lastStats->sparseCandidatesEffective = scanQuery->sparseK;
 	lastStats->sparseKDefaulted =
@@ -7070,6 +7104,11 @@ PgturbohybridCollectScanResults(IndexScanDesc scan, PgturbohybridScanState *stat
 	lastStats.sparseHotCacheMisses = sparseStats.hotCacheMisses;
 	lastStats.sparseHotCacheBytes = sparseStats.hotCacheBytes;
 	lastStats.sparseHotCacheEvictions = sparseStats.hotCacheEvictions;
+	lastStats.sparseDeltaPages = sparseStats.deltaPages;
+	lastStats.sparseDeltaTerms = sparseStats.deltaTerms;
+	lastStats.sparseDeltaPostingsDecoded = sparseStats.deltaPostingsDecoded;
+	lastStats.sparseDeltaCacheHit = sparseStats.deltaCacheHit;
+	lastStats.sparseDeltaGeneration = sparseStats.deltaGeneration;
 	if (hasSparseQuery)
 	{
 		lastStats.sparseCandidatesRequested = originalQuery->sparseK;
@@ -7916,6 +7955,7 @@ pgturbohybridaminsert(Relation index, Datum *values, bool *isnull, ItemPointer h
 {
 	Datum		value;
 	Datum		lexicalValue;
+	Datum		sparseValue;
 	const PgturbohybridGraphTypeInfo *typeInfo;
 	PgturbohybridGraphSupport support;
 	uint32		nodeId;
@@ -7945,6 +7985,12 @@ pgturbohybridaminsert(Relation index, Datum *values, bool *isnull, ItemPointer h
 			if (insertedNodes > 0 &&
 				PgturbohybridIndexGetLexicalDatum(index, values, isnull, &lexicalValue))
 				PgturbohybridBm25AppendDelta(index, nodeId, heap_tid, lexicalValue);
+			if (insertedNodes > 0 &&
+				PgturbohybridIndexGetSparseDatum(index, values, isnull, &sparseValue))
+			{
+				PgturbohybridSparseAppendDelta(index, nodeId, heap_tid, sparseValue);
+				PgturbohybridSparseMaybeCompact(index, false);
+			}
 		}
 		PG_CATCH();
 		{
@@ -7969,6 +8015,11 @@ pgturbohybridaminsert(Relation index, Datum *values, bool *isnull, ItemPointer h
 													  value, values, isnull);
 		if (PgturbohybridIndexGetLexicalDatum(index, values, isnull, &lexicalValue))
 			PgturbohybridBm25AppendDelta(index, nodeId, heap_tid, lexicalValue);
+		if (PgturbohybridIndexGetSparseDatum(index, values, isnull, &sparseValue))
+		{
+			PgturbohybridSparseAppendDelta(index, nodeId, heap_tid, sparseValue);
+			PgturbohybridSparseMaybeCompact(index, false);
+		}
 	}
 	PG_CATCH();
 	{
@@ -8985,6 +9036,9 @@ PgturbohybridInit(void)
 	DefineCustomIntVariable("turbohybrid.sparse_hot_postings_cache_min_df", "Minimum term document frequency to cache decoded sparse postings",
 							NULL, &pgturbohybrid_sparse_hot_postings_cache_min_df,
 							256, 1, 1000000000, PGC_USERSET, 0, NULL, NULL, NULL);
+	DefineCustomIntVariable("turbohybrid.sparse_delta_compaction_threshold", "Auto-compact the sparse delta chain once it holds this many documents (0 disables auto-compaction)",
+							NULL, &pgturbohybrid_sparse_delta_compaction_threshold,
+							1000, 0, 1000000000, PGC_USERSET, 0, NULL, NULL, NULL);
 	DefineCustomBoolVariable("turbohybrid.fast_weighted_score_bound_pruning",
 							 "Enable exact fused-score bound pruning for fast_weighted BM25 traversal",
 							 "Only applies to turbohybrid_query(fusion => 'fast_weighted'); RRF and distribution-normalized weighted fusion do not use this pruning path.",

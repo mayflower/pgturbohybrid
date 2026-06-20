@@ -67,8 +67,19 @@ PgturbohybridSparseScoredCompare(const void *a, const void *b)
 	return 0;
 }
 
+static int
+PgturbohybridSparseQEntryCompare(const void *a, const void *b)
+{
+	const PgturbohybridSparseVectorEntry *ea = (const PgturbohybridSparseVectorEntry *) a;
+	const PgturbohybridSparseVectorEntry *eb = (const PgturbohybridSparseVectorEntry *) b;
+
+	if (ea->termId != eb->termId)
+		return ea->termId < eb->termId ? -1 : 1;
+	return 0;
+}
+
 /* Read the sparse meta tuple into *out; return false if no sparse data. */
-static bool
+bool
 PgturbohybridSparseReadMeta(Relation index, BlockNumber metaBlkno,
 							PgturbohybridSparseMetaTupleData *out)
 {
@@ -201,10 +212,23 @@ typedef struct PgturbohybridSparseHotChunk
 	struct PgturbohybridSparseHotChunk *lruNext;
 } PgturbohybridSparseHotChunk;
 
+/* A merged delta posting (one term of one inserted row, exact f32 weight). */
+typedef struct PgturbohybridSparseDeltaPosting
+{
+	uint32		nodeId;
+	int32		termId;
+	float4		weight;
+} PgturbohybridSparseDeltaPosting;
+
 typedef struct PgturbohybridSparseCacheRel
 {
 	Oid			relid;
 	Oid			relfilenumber;
+	/* coherence keys: any change drops the cached base/state/delta data */
+	BlockNumber lexiconStartBlkno;
+	uint32		coherentNodeCount;
+	uint32		deltaGeneration;
+	bool		coherenceSet;
 	/* reader cache: lexicon + node states (heap TIDs + liveness) */
 	PgturbohybridSparseLexEntry *lexicon;
 	uint32		lexiconCount;
@@ -212,6 +236,11 @@ typedef struct PgturbohybridSparseCacheRel
 	PgturbohybridNodeState *states;
 	uint32		stateCount;
 	bool		statesLoaded;
+	/* cached delta postings (decoded), keyed by deltaGeneration */
+	PgturbohybridSparseDeltaPosting *delta;
+	uint32		deltaCount;
+	uint32		deltaDocs;
+	bool		deltaLoaded;
 	Size		readerBytes;
 	/* hot decoded-postings cache (LRU, MB-capped) */
 	PgturbohybridSparseHotChunk *buckets[PGTURBOHYBRID_SPARSE_HOT_BUCKETS];
@@ -252,9 +281,16 @@ PgturbohybridSparseCacheInvalidate(Oid relid)
 	}
 }
 
-/* Find (or create, invalidating on relfilenumber change) the per-relation cache. */
+/*
+ * Find (or rebuild) the per-relation cache.  Any change to relfilenumber
+ * (REINDEX), node count (insert), lexicon location (compaction) or delta
+ * generation (insert/compaction) drops the cached base/state/delta/hot data so
+ * stale results are never served.  Sets *hit when the cache was reused as-is.
+ */
 static PgturbohybridSparseCacheRel *
-PgturbohybridSparseCacheAcquire(Relation index)
+PgturbohybridSparseCacheAcquire(Relation index, uint32 nodeCount,
+								BlockNumber lexiconStartBlkno, uint32 deltaGeneration,
+								bool *hit)
 {
 	Oid			relid = RelationGetRelid(index);
 	Oid			relfile = PgturbohybridGraphRelFileNumber(index);
@@ -262,13 +298,20 @@ PgturbohybridSparseCacheAcquire(Relation index)
 	MemoryContext ctx;
 	MemoryContext oldCtx;
 
+	*hit = false;
 	for (; cache != NULL; cache = cache->next)
 	{
 		if (cache->relid != relid)
 			continue;
-		if (cache->relfilenumber == relfile)
+		if (cache->relfilenumber == relfile && cache->coherenceSet &&
+			cache->coherentNodeCount == nodeCount &&
+			cache->lexiconStartBlkno == lexiconStartBlkno &&
+			cache->deltaGeneration == deltaGeneration)
+		{
+			*hit = cache->lexiconLoaded && cache->statesLoaded && cache->deltaLoaded;
 			return cache;
-		PgturbohybridSparseCacheFree(cache); /* REINDEX: stale relfilenumber */
+		}
+		PgturbohybridSparseCacheFree(cache); /* stale: rebuild below */
 		break;
 	}
 
@@ -278,11 +321,81 @@ PgturbohybridSparseCacheAcquire(Relation index)
 	cache = (PgturbohybridSparseCacheRel *) palloc0(sizeof(PgturbohybridSparseCacheRel));
 	cache->relid = relid;
 	cache->relfilenumber = relfile;
+	cache->coherentNodeCount = nodeCount;
+	cache->lexiconStartBlkno = lexiconStartBlkno;
+	cache->deltaGeneration = deltaGeneration;
+	cache->coherenceSet = true;
 	cache->ctx = ctx;
 	cache->next = pgturbohybrid_sparse_cache_list;
 	pgturbohybrid_sparse_cache_list = cache;
 	MemoryContextSwitchTo(oldCtx);
 	return cache;
+}
+
+/* Load (and cache) the delta chain's postings into the per-relation cache. */
+static void
+PgturbohybridSparseCacheGetDelta(PgturbohybridSparseCacheRel *cache, Relation index,
+								 BlockNumber deltaStart, uint32 deltaDocCount,
+								 bool *built, uint64 *buildUs)
+{
+	if (cache->deltaLoaded)
+		return;
+	{
+		MemoryContext oldCtx = MemoryContextSwitchTo(cache->ctx);
+		instr_time	t0,
+					t1;
+		uint32		capacity = Max(deltaDocCount, 1u) * 4;
+		uint32		count = 0;
+		BlockNumber blk = deltaStart;
+		PgturbohybridSparseDeltaPosting *arr;
+
+		INSTR_TIME_SET_CURRENT(t0);
+		arr = (PgturbohybridSparseDeltaPosting *)
+			palloc(sizeof(PgturbohybridSparseDeltaPosting) * capacity);
+		while (blk != InvalidBlockNumber)
+		{
+			Buffer		buf = ReadBuffer(index, blk);
+			Page		page;
+			OffsetNumber maxoff;
+
+			LockBuffer(buf, BUFFER_LOCK_SHARE);
+			page = BufferGetPage(buf);
+			maxoff = PageGetMaxOffsetNumber(page);
+			for (OffsetNumber off = FirstOffsetNumber; off <= maxoff; off++)
+			{
+				PgturbohybridSparseDeltaTuple dt = (PgturbohybridSparseDeltaTuple)
+					PageGetItem(page, PageGetItemId(page, off));
+
+				if (dt->type != PGTURBOHYBRID_SPARSE_DELTA_TUPLE_TYPE)
+					continue;
+				cache->deltaDocs++;
+				for (uint16 e = 0; e < dt->termCount; e++)
+				{
+					if (count == capacity)
+					{
+						capacity *= 2;
+						arr = (PgturbohybridSparseDeltaPosting *)
+							repalloc(arr, sizeof(PgturbohybridSparseDeltaPosting) * capacity);
+					}
+					arr[count].nodeId = dt->nodeId;
+					arr[count].termId = dt->entries[e].termId;
+					arr[count].weight = dt->entries[e].weight;
+					count++;
+				}
+			}
+			blk = PgturbohybridGraphPageGetOpaque(page)->nextblkno;
+			UnlockReleaseBuffer(buf);
+		}
+		cache->delta = arr;
+		cache->deltaCount = count;
+		cache->deltaLoaded = true;
+		cache->readerBytes += (Size) count * sizeof(PgturbohybridSparseDeltaPosting);
+		INSTR_TIME_SET_CURRENT(t1);
+		INSTR_TIME_SUBTRACT(t1, t0);
+		*buildUs += (uint64) INSTR_TIME_GET_MICROSEC(t1);
+		*built = true;
+		MemoryContextSwitchTo(oldCtx);
+	}
 }
 
 /* LRU helpers for the hot-postings cache. */
@@ -1147,8 +1260,16 @@ PgturbohybridSparseCollectCandidates(Relation index, PgturbohybridQueryHeader *q
 	if (qCount == 0)
 		return 0;
 
-	/* Reader cache: cached lexicon + node states keyed by relfilenumber. */
-	cache = PgturbohybridSparseCacheAcquire(index);
+	/* Reader cache: lexicon + node states + delta, keyed by relfilenumber and
+	 * invalidated on node-count / lexicon-location / delta-generation changes. */
+	{
+		bool		readerHit;
+
+		cache = PgturbohybridSparseCacheAcquire(index, graphMeta.tqNodeCount,
+												meta.lexiconStartBlkno,
+												meta.deltaGeneration, &readerHit);
+		(void) readerHit;
+	}
 
 	oldCtx = MemoryContextSwitchTo(ctx);
 
@@ -1156,19 +1277,25 @@ PgturbohybridSparseCollectCandidates(Relation index, PgturbohybridQueryHeader *q
 												 &cacheBuilt, &cacheBuildUs);
 	states = PgturbohybridSparseCacheGetStates(cache, index, &graphMeta, &nodeCount,
 											   &cacheBuilt, &cacheBuildUs);
+	if (meta.deltaDocCount > 0)
+		PgturbohybridSparseCacheGetDelta(cache, index, meta.deltaStartBlkno,
+										 meta.deltaDocCount, &cacheBuilt, &cacheBuildUs);
 	if (stats != NULL)
 	{
 		stats->cacheHit = !cacheBuilt;
 		stats->cacheBuildUs = cacheBuildUs;
 		stats->cacheBytes = cache->readerBytes;
+		stats->deltaGeneration = meta.deltaGeneration;
+		stats->deltaCacheHit = meta.deltaDocCount > 0 && !cacheBuilt;
 	}
 
 	/*
 	 * Block-max WAND path (prompt 9): exact top-k with safe pruning, when the
-	 * index has a block-max directory and WAND is enabled.  Otherwise fall back
-	 * to the exact OR-accumulation (also the WAND correctness reference).
+	 * index has a block-max directory, WAND is enabled, and there are no pending
+	 * deltas (deltas are not in the block-max structure, so they force exact
+	 * accumulation).  Otherwise fall back to the exact OR-accumulation.
 	 */
-	if (wandEnabled && meta.hasBlockMax)
+	if (wandEnabled && meta.hasBlockMax && meta.deltaDocCount == 0)
 	{
 		resultCount = PgturbohybridSparseCollectWand(index, &meta, cache, lexicon,
 													 lexCount, qEntries, qCount, states,
@@ -1216,6 +1343,45 @@ PgturbohybridSparseCollectCandidates(Relation index, PgturbohybridQueryHeader *q
 															 scoreKernel,
 															 scores, nodeCount,
 															 &simdBlocks, &scalarTail);
+	}
+
+	/*
+	 * Merge delta postings (prompt 11): inserted/updated rows score exact f32
+	 * into the same accumulator; their node_ids are disjoint from the base
+	 * (updates create new nodes; the old node is filtered by liveness).
+	 */
+	if (cache->deltaLoaded && cache->deltaCount > 0)
+	{
+		PgturbohybridSparseVectorEntry *qSorted = (PgturbohybridSparseVectorEntry *)
+			palloc(sizeof(PgturbohybridSparseVectorEntry) * qCount);
+		uint64		mergedDelta = 0;
+
+		memcpy(qSorted, qEntries, sizeof(PgturbohybridSparseVectorEntry) * qCount);
+		qsort(qSorted, qCount, sizeof(PgturbohybridSparseVectorEntry),
+			  PgturbohybridSparseQEntryCompare);
+		for (uint32 d = 0; d < cache->deltaCount; d++)
+		{
+			PgturbohybridSparseVectorEntry key;
+			const PgturbohybridSparseVectorEntry *found;
+			uint32		node = cache->delta[d].nodeId;
+
+			key.termId = cache->delta[d].termId;
+			found = (const PgturbohybridSparseVectorEntry *)
+				bsearch(&key, qSorted, qCount,
+						sizeof(PgturbohybridSparseVectorEntry),
+						PgturbohybridSparseQEntryCompare);
+			if (found == NULL || found->weight == 0.0f || node >= nodeCount)
+				continue;
+			scores[node] += (double) found->weight * (double) cache->delta[d].weight;
+			mergedDelta++;
+		}
+		pfree(qSorted);
+		if (stats != NULL)
+		{
+			stats->deltaPages = cache->deltaDocs;
+			stats->deltaPostingsDecoded = cache->deltaCount;
+			stats->deltaTerms = (uint32) mergedDelta;
+		}
 	}
 
 	/* Collect live, non-zero-scoring nodes. */

@@ -44,6 +44,7 @@ struct PgturbohybridGraphMetaPageData;
 #define PGTURBOHYBRID_SPARSE_LEXICON_TUPLE_TYPE 0x72
 #define PGTURBOHYBRID_SPARSE_POSTINGS_TUPLE_TYPE 0x73
 #define PGTURBOHYBRID_SPARSE_BLOCKMAX_TUPLE_TYPE 0x74
+#define PGTURBOHYBRID_SPARSE_DELTA_TUPLE_TYPE 0x75
 
 /* Quantization mode (per_term_linear = scalar scale per term; f32 = no quant). */
 #define PGTURBOHYBRID_SPARSE_QUANT_F32 0
@@ -152,6 +153,9 @@ typedef struct PgturbohybridSparseMetaTupleData
 	uint8		hasBlockMax;	/* 1 if a block-max directory was written */
 	uint8		reservedB1;
 	uint16		reservedB2;
+	BlockNumber deltaStartBlkno;	/* head of the delta tuple chain (or Invalid) */
+	uint32		deltaGeneration;	/* bumped on every delta append and compaction */
+	uint32		deltaDocCount;		/* docs appended since the last compaction */
 } PgturbohybridSparseMetaTupleData;
 
 typedef PgturbohybridSparseMetaTupleData *PgturbohybridSparseMetaTuple;
@@ -198,6 +202,30 @@ typedef PgturbohybridSparseBlockMaxTupleData *PgturbohybridSparseBlockMaxTuple;
 	(MAXALIGN(offsetof(PgturbohybridSparseBlockMaxTupleData, entries) + \
 			  (Size) (n) * sizeof(PgturbohybridSparseBlockMax)))
 #define PGTURBOHYBRID_SPARSE_BLOCKMAX_PER_TUPLE 240
+
+/* One (term_id, exact f32 weight) entry of an inserted row's sparse vector. */
+typedef struct PgturbohybridSparseDeltaEntry
+{
+	int32		termId;
+	float4		weight;
+} PgturbohybridSparseDeltaEntry;
+
+/* Delta tuple: one inserted/updated row's sparse vector, keyed on its node_id. */
+typedef struct PgturbohybridSparseDeltaTupleData
+{
+	uint8		type;			/* PGTURBOHYBRID_SPARSE_DELTA_TUPLE_TYPE */
+	uint8		reserved1;
+	uint16		termCount;
+	uint32		nodeId;
+	ItemPointerData heaptid;
+	PgturbohybridSparseDeltaEntry entries[FLEXIBLE_ARRAY_MEMBER];
+} PgturbohybridSparseDeltaTupleData;
+
+typedef PgturbohybridSparseDeltaTupleData *PgturbohybridSparseDeltaTuple;
+
+#define PgturbohybridSparseDeltaTupleSize(n) \
+	(MAXALIGN(offsetof(PgturbohybridSparseDeltaTupleData, entries) + \
+			  (Size) (n) * sizeof(PgturbohybridSparseDeltaEntry)))
 
 typedef struct PgturbohybridSparseLexiconTupleData
 {
@@ -288,6 +316,11 @@ typedef struct PgturbohybridSparseScanStats
 	uint64		hotCacheMisses;		/* hot-postings chunk cache misses */
 	uint64		hotCacheBytes;		/* hot-postings cache resident bytes */
 	uint64		hotCacheEvictions;	/* hot-postings cache evictions */
+	uint32		deltaPages;			/* delta tuples merged this scan */
+	uint32		deltaTerms;			/* distinct delta terms merged */
+	uint64		deltaPostingsDecoded;	/* delta (term, node) postings decoded */
+	bool		deltaCacheHit;		/* delta postings served from the cache */
+	uint32		deltaGeneration;	/* delta generation at scan time */
 } PgturbohybridSparseScanStats;
 
 /* SoA score-kernel ISA family (combined with bit width for the stat name). */
@@ -359,6 +392,10 @@ int			PgturbohybridSparseCollectCandidates(Relation index,
 /* True iff the index has a sparse key with built sparse meta. */
 bool		PgturbohybridSparseIndexAvailable(Relation index);
 
+/* Read the sparse meta tuple at metaBlkno into *out; false if absent/malformed. */
+bool		PgturbohybridSparseReadMeta(Relation index, BlockNumber metaBlkno,
+										PgturbohybridSparseMetaTupleData *out);
+
 /* Per-backend memory estimate for the sparse branch (prompt 10). */
 typedef struct PgturbohybridSparseMemoryEstimate
 {
@@ -380,5 +417,20 @@ bool		PgturbohybridSparseEstimateMemory(Relation index,
 
 /* Drop the backend-local sparse cache for a relation (relfilenumber change). */
 void		PgturbohybridSparseCacheInvalidate(Oid relid);
+
+/*
+ * Append an inserted row's sparse vector to the delta chain (prompt 11), keyed
+ * on its dense graph node_id.  No-op if the index has no sparse data or the
+ * datum is NULL/empty.  Returns true if a delta tuple was written.
+ */
+bool		PgturbohybridSparseAppendDelta(Relation index, uint32 nodeId,
+										   ItemPointer heaptid, Datum sparseDatum);
+
+/*
+ * Compact the delta chain into the quantized base when the delta document count
+ * reaches the configured threshold (or force=true): rebuild postings/lexicon/
+ * block-max over the live base+delta postings and clear the delta chain.
+ */
+void		PgturbohybridSparseMaybeCompact(Relation index, bool force);
 
 #endif							/* PGTURBOHYBRID_SPARSE_H */

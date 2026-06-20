@@ -3420,6 +3420,16 @@ pgturbohybrid_last_scan_stats(PG_FUNCTION_ARGS)
 							   scanStats.sparseHotCacheBytes);
 	PgturbohybridJsonbAddInt64(&state, "sparse_hot_postings_cache_evictions",
 							   scanStats.sparseHotCacheEvictions);
+	PgturbohybridJsonbAddInt64(&state, "sparse_delta_pages",
+							   scanStats.sparseDeltaPages);
+	PgturbohybridJsonbAddInt64(&state, "sparse_delta_terms",
+							   scanStats.sparseDeltaTerms);
+	PgturbohybridJsonbAddInt64(&state, "sparse_delta_postings_decoded",
+							   scanStats.sparseDeltaPostingsDecoded);
+	PgturbohybridJsonbAddBool(&state, "sparse_delta_cache_hit",
+							  scanStats.sparseDeltaCacheHit);
+	PgturbohybridJsonbAddInt64(&state, "sparse_delta_generation",
+							   scanStats.sparseDeltaGeneration);
 	PgturbohybridJsonbAddBranchPlan(&state, &scanStats.branchPlan);
 	PgturbohybridJsonbAddInt64(&state, "quantization_bits",
 							   pgturbohybrid_last_graph_quantization_bits);

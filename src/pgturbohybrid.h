@@ -142,6 +142,7 @@ typedef enum PgturbohybridMultiVectorRerankSource
 #define PGTURBOHYBRID_GRAPH_PAGE_KIND_SPARSE_LEXICON	17
 #define PGTURBOHYBRID_GRAPH_PAGE_KIND_SPARSE_POSTINGS	18
 #define PGTURBOHYBRID_GRAPH_PAGE_KIND_SPARSE_BLOCKMAX	19
+#define PGTURBOHYBRID_GRAPH_PAGE_KIND_SPARSE_DELTA		20
 #define PGTURBOHYBRID_GRAPH_PAGE_KIND_MASK				0x00ff
 #define PGTURBOHYBRID_GRAPH_PAGE_GRAPH_OP_SHIFT		8
 
@@ -1721,6 +1722,7 @@ FUNCTION_PREFIX Datum pgturbohybrid_last_scan_stats(PG_FUNCTION_ARGS);
 FUNCTION_PREFIX Datum pgturbohybrid_last_build_stats(PG_FUNCTION_ARGS);
 FUNCTION_PREFIX Datum pgturbohybrid_index_stats(PG_FUNCTION_ARGS);
 FUNCTION_PREFIX Datum pgturbohybrid_estimate_memory(PG_FUNCTION_ARGS);
+FUNCTION_PREFIX Datum pgturbohybrid_sparse_compact(PG_FUNCTION_ARGS);
 FUNCTION_PREFIX Datum pgturbohybrid_prewarm(PG_FUNCTION_ARGS);
 FUNCTION_PREFIX Datum pgturbohybrid_multivector_proxy_diagnostics(PG_FUNCTION_ARGS);
 FUNCTION_PREFIX Datum pgturbohybrid_simd_capabilities(PG_FUNCTION_ARGS);

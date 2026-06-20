@@ -460,6 +460,10 @@ CREATE FUNCTION turbohybrid_estimate_memory(pg_catalog.regclass) RETURNS pg_cata
 	AS 'MODULE_PATHNAME', 'pgturbohybrid_estimate_memory'
 	LANGUAGE C STABLE STRICT PARALLEL SAFE;
 
+CREATE FUNCTION turbohybrid_sparse_compact(pg_catalog.regclass) RETURNS pg_catalog.bool
+	AS 'MODULE_PATHNAME', 'pgturbohybrid_sparse_compact'
+	LANGUAGE C VOLATILE STRICT PARALLEL UNSAFE;
+
 CREATE FUNCTION turbohybrid_prewarm(pg_catalog.regclass) RETURNS pg_catalog.jsonb
 	AS 'MODULE_PATHNAME', 'pgturbohybrid_prewarm'
 	LANGUAGE C STRICT PARALLEL RESTRICTED;

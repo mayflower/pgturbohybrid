@@ -153,6 +153,7 @@ BEGIN
 		'turbohybrid.payload_entry_seeding',
 		'turbohybrid.profile',
 		'turbohybrid.simd',
+		'turbohybrid.sparse_delta_compaction_threshold',
 		'turbohybrid.sparse_hot_postings_cache_mb',
 		'turbohybrid.sparse_hot_postings_cache_min_df',
 		'turbohybrid.sparse_rerank',

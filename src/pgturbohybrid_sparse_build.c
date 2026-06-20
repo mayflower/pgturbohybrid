@@ -14,7 +14,9 @@
 
 #include "access/generic_xlog.h"
 #include "access/genam.h"
+#include "access/table.h"
 #include "access/tableam.h"
+#include "catalog/index.h"
 #include "miscadmin.h"
 #include "storage/bufmgr.h"
 #include "storage/lmgr.h"
@@ -49,6 +51,7 @@ typedef struct PgturbohybridSparseCollector
 	int			encoding;		/* resolved PGTURBOHYBRID_SPARSE_ENCODING_* */
 	int			blockSize;		/* postings per chunk */
 	bool		blockMax;		/* write a block-max directory (WAND) */
+	uint32		deltaGeneration;	/* meta delta generation for the new base */
 } PgturbohybridSparseCollector;
 
 /* Resolve effective sparse build options (index->rd_options or defaults). */
@@ -220,6 +223,112 @@ PgturbohybridSparseSetMetaBlock(Relation index, BlockNumber metaBlkno)
 	PgturbohybridGraphLogGraphWalRecord(index, MAIN_FORKNUM,
 										PGTURBOHYBRID_GRAPH_METAPAGE_BLKNO,
 										PGTURBOHYBRID_GRAPH_GRAPH_OP_META_UPDATE);
+}
+
+/*
+ * Update the delta fields of the sparse meta tuple in place (the meta tuple sits
+ * at FirstOffsetNumber on the page anchored by graphMeta.tqSparseMetaStartBlkno).
+ */
+static void
+PgturbohybridSparseUpdateMetaDelta(Relation index, BlockNumber metaBlkno,
+								   BlockNumber deltaStart, uint32 deltaGeneration,
+								   uint32 deltaDocCount)
+{
+	Buffer		buf;
+	Page		page;
+	PgturbohybridSparseMetaTuple meta;
+	GenericXLogState *xlogState = NULL;
+
+	buf = ReadBuffer(index, metaBlkno);
+	LockBuffer(buf, BUFFER_LOCK_EXCLUSIVE);
+	if (RelationNeedsWAL(index))
+	{
+		xlogState = GenericXLogStart(index);
+		page = GenericXLogRegisterBuffer(xlogState, buf, 0);
+	}
+	else
+		page = BufferGetPage(buf);
+
+	meta = (PgturbohybridSparseMetaTuple)
+		PageGetItem(page, PageGetItemId(page, FirstOffsetNumber));
+	meta->deltaStartBlkno = deltaStart;
+	meta->deltaGeneration = deltaGeneration;
+	meta->deltaDocCount = deltaDocCount;
+	PgturbohybridGraphMarkPageGraphOp(page, PGTURBOHYBRID_GRAPH_GRAPH_OP_ELEMENT_INSERT);
+
+	if (xlogState != NULL)
+		GenericXLogFinish(xlogState);
+	else
+		MarkBufferDirty(buf);
+	UnlockReleaseBuffer(buf);
+	PgturbohybridGraphLogGraphWalRecord(index, MAIN_FORKNUM, metaBlkno,
+										PGTURBOHYBRID_GRAPH_GRAPH_OP_ELEMENT_INSERT);
+}
+
+bool
+PgturbohybridSparseAppendDelta(Relation index, uint32 nodeId, ItemPointer heaptid,
+							   Datum sparseDatum)
+{
+	PgturbohybridGraphMetaPageData graphMeta;
+	PgturbohybridSparseMetaTupleData meta;
+	struct varlena *detoasted;
+	const PgturbohybridSparseVectorEntry *entries;
+	uint32		entryCount;
+	PgturbohybridSparseDeltaTupleData *delta;
+	uint16		termCount = 0;
+	BlockNumber deltaStart;
+	BlockNumber insertBlkno;
+	Size		size;
+
+	if (!PgturbohybridGraphReadMeta(index, &graphMeta))
+		return false;
+	if (graphMeta.tqSparseMetaStartBlkno == InvalidBlockNumber ||
+		graphMeta.tqSparseMetaStartBlkno == 0)
+		return false;			/* no sparse base built (e.g. empty index) */
+	if (!PgturbohybridSparseReadMeta(index, graphMeta.tqSparseMetaStartBlkno, &meta))
+		return false;
+
+	detoasted = (struct varlena *) PG_DETOAST_DATUM(sparseDatum);
+	entries = PgturbohybridSparseVectorData(detoasted, &entryCount);
+
+	delta = (PgturbohybridSparseDeltaTupleData *)
+		palloc0(PgturbohybridSparseDeltaTupleSize(Max(entryCount, 1u)));
+	for (uint32 i = 0; i < entryCount; i++)
+	{
+		if (entries[i].weight == 0.0f)
+			continue;
+		delta->entries[termCount].termId = entries[i].termId;
+		delta->entries[termCount].weight = entries[i].weight;
+		termCount++;
+	}
+	if (termCount == 0)
+	{
+		pfree(delta);
+		if ((void *) detoasted != (void *) DatumGetPointer(sparseDatum))
+			pfree(detoasted);
+		return false;
+	}
+
+	delta->type = PGTURBOHYBRID_SPARSE_DELTA_TUPLE_TYPE;
+	delta->termCount = termCount;
+	delta->nodeId = nodeId;
+	delta->heaptid = *heaptid;
+
+	deltaStart = meta.deltaStartBlkno;
+	size = PgturbohybridSparseDeltaTupleSize(termCount);
+	(void) PgturbohybridGraphAppendTuple(index, MAIN_FORKNUM, &deltaStart,
+										 PGTURBOHYBRID_GRAPH_PAGE_KIND_SPARSE_DELTA,
+										 (Item) delta, size,
+										 PGTURBOHYBRID_GRAPH_GRAPH_OP_ELEMENT_INSERT,
+										 &insertBlkno);
+	PgturbohybridSparseUpdateMetaDelta(index, graphMeta.tqSparseMetaStartBlkno,
+									   deltaStart, meta.deltaGeneration + 1,
+									   meta.deltaDocCount + 1);
+
+	pfree(delta);
+	if ((void *) detoasted != (void *) DatumGetPointer(sparseDatum))
+		pfree(detoasted);
+	return true;
 }
 
 /* Worst-case encoded bytes per posting for a (bits, encoding) combination. */
@@ -563,6 +672,9 @@ PgturbohybridSparseWriteStorage(PgturbohybridSparseCollector *collector)
 	meta.blockSize = (uint32) collector->blockSize;
 	meta.blockMaxStartBlkno = blockMaxStart;
 	meta.hasBlockMax = (collector->blockMax && blockMaxStart != InvalidBlockNumber) ? 1 : 0;
+	meta.deltaStartBlkno = InvalidBlockNumber;	/* fresh base: delta chain cleared */
+	meta.deltaGeneration = collector->deltaGeneration;
+	meta.deltaDocCount = 0;
 	(void) PgturbohybridGraphAppendTuple(index, MAIN_FORKNUM, &metaStart,
 										 PGTURBOHYBRID_GRAPH_PAGE_KIND_SPARSE_META,
 										 (Item) &meta,
@@ -627,6 +739,21 @@ PgturbohybridSparseBuildCollect(Relation heap, Relation index, IndexInfo *indexI
 				(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
 				 errmsg("pgturbohybrid sparse collection requires native pgturbohybrid graph storage")));
 
+	/*
+	 * Monotonic delta generation: a rebuild (compaction) over an existing sparse
+	 * base bumps it so backend caches keyed on the generation invalidate.
+	 */
+	collector.deltaGeneration = 0;
+	if (graphMeta.tqSparseMetaStartBlkno != InvalidBlockNumber &&
+		graphMeta.tqSparseMetaStartBlkno != 0)
+	{
+		PgturbohybridSparseMetaTupleData oldMeta;
+
+		if (PgturbohybridSparseReadMeta(index, graphMeta.tqSparseMetaStartBlkno,
+										&oldMeta))
+			collector.deltaGeneration = oldMeta.deltaGeneration + 1;
+	}
+
 	if (graphMeta.tqNodeCount > 0)
 	{
 		collector.tidNodes = PgturbohybridReadNodeMap(index, &collector.tidNodeCount);
@@ -647,4 +774,48 @@ PgturbohybridSparseBuildCollect(Relation heap, Relation index, IndexInfo *indexI
 
 	MemoryContextSwitchTo(oldCtx);
 	MemoryContextDelete(ctx);
+}
+
+void
+PgturbohybridSparseMaybeCompact(Relation index, bool force)
+{
+	PgturbohybridGraphMetaPageData graphMeta;
+	PgturbohybridSparseMetaTupleData meta;
+	int			threshold = pgturbohybrid_sparse_delta_compaction_threshold;
+	Oid			heapOid;
+	Relation	heap;
+	IndexInfo  *indexInfo;
+
+	if (index == NULL || !PgturbohybridGraphReadMeta(index, &graphMeta))
+		return;
+	if (graphMeta.tqSparseMetaStartBlkno == InvalidBlockNumber ||
+		graphMeta.tqSparseMetaStartBlkno == 0)
+		return;
+	if (!PgturbohybridSparseReadMeta(index, graphMeta.tqSparseMetaStartBlkno, &meta))
+		return;
+	if (meta.deltaDocCount == 0)
+		return;					/* nothing to compact */
+	if (!force && (threshold <= 0 || meta.deltaDocCount < (uint32) threshold))
+		return;
+
+	/*
+	 * Rebuild the quantized base over the current live heap rows (which include
+	 * the delta-inserted rows and exclude vacuumed deletes); the fresh meta
+	 * clears the delta chain and bumps the generation.
+	 */
+	heapOid = IndexGetRelation(RelationGetRelid(index), false);
+	heap = table_open(heapOid, AccessShareLock);
+	indexInfo = BuildIndexInfo(index);
+	/* Serialize with concurrent inserts/compaction (re-entrant if held already). */
+	LockPage(index, PGTURBOHYBRID_GRAPH_UPDATE_LOCK, ExclusiveLock);
+	PG_TRY();
+	{
+		PgturbohybridSparseBuildCollect(heap, index, indexInfo);
+	}
+	PG_FINALLY();
+	{
+		UnlockPage(index, PGTURBOHYBRID_GRAPH_UPDATE_LOCK, ExclusiveLock);
+	}
+	PG_END_TRY();
+	table_close(heap, AccessShareLock);
 }
