@@ -324,10 +324,25 @@ CREATE FUNCTION turbohybrid_query(
 	query_token_weights pg_catalog.float4[] DEFAULT NULL,
 	query_token_mask pg_catalog.bool[] DEFAULT NULL,
 	multivector_weight pg_catalog.float8 DEFAULT 1.0,
-	multivector_k pg_catalog.int4 DEFAULT NULL
+	multivector_k pg_catalog.int4 DEFAULT NULL,
+	sparse_query turbohybrid_sparse_vector DEFAULT NULL,
+	sparse_weight pg_catalog.float8 DEFAULT 1.0,
+	sparse_k pg_catalog.int4 DEFAULT NULL,
+	require_sparse_match pg_catalog.bool DEFAULT false
 ) RETURNS turbohybrid_query
 	AS 'MODULE_PATHNAME', 'pgturbohybrid_query_constructor'
 	LANGUAGE C STABLE PARALLEL SAFE;
+
+CREATE FUNCTION turbohybrid_sparse_inner_product_distance(
+	turbohybrid_sparse_vector, turbohybrid_query
+) RETURNS pg_catalog.float8
+	AS 'MODULE_PATHNAME', 'pgturbohybrid_sparse_inner_product_distance'
+	LANGUAGE C STABLE STRICT PARALLEL RESTRICTED;
+
+CREATE OPERATOR <~*> (
+	LEFTARG = turbohybrid_sparse_vector, RIGHTARG = turbohybrid_query,
+	PROCEDURE = turbohybrid_sparse_inner_product_distance
+);
 
 CREATE FUNCTION turbohybrid_distance(vector, turbohybrid_query) RETURNS pg_catalog.float8
 	AS 'MODULE_PATHNAME', 'pgturbohybrid_distance'
@@ -630,7 +645,7 @@ COMMENT ON TYPE turbohybrid_query IS 'TurboHybrid query payload for dense vector
 
 COMMENT ON FUNCTION turbohybrid_query_in(pg_catalog.cstring) IS 'Input function for turbohybrid_query';
 COMMENT ON FUNCTION turbohybrid_query_out(turbohybrid_query) IS 'Output function for turbohybrid_query';
-COMMENT ON FUNCTION turbohybrid_query(vector, pg_catalog.tsquery, pg_catalog.text, pg_catalog.float8, pg_catalog.float8, pg_catalog.float8, pg_catalog.int4, pg_catalog.int4, pg_catalog.int4, pg_catalog.int4, pg_catalog.bool, turbohybrid_multivector, pg_catalog.float4[], pg_catalog.bool[], pg_catalog.float8, pg_catalog.int4) IS 'Constructs a TurboHybrid query payload';
+COMMENT ON FUNCTION turbohybrid_query(vector, pg_catalog.tsquery, pg_catalog.text, pg_catalog.float8, pg_catalog.float8, pg_catalog.float8, pg_catalog.int4, pg_catalog.int4, pg_catalog.int4, pg_catalog.int4, pg_catalog.bool, turbohybrid_multivector, pg_catalog.float4[], pg_catalog.bool[], pg_catalog.float8, pg_catalog.int4, turbohybrid_sparse_vector, pg_catalog.float8, pg_catalog.int4, pg_catalog.bool) IS 'Constructs a TurboHybrid query payload';
 COMMENT ON DOMAIN multivector IS 'Public SQL column type for late-interaction multivector embeddings. It is binary-compatible with turbohybrid_multivector.';
 COMMENT ON FUNCTION turbohybrid_distance(vector, turbohybrid_query) IS 'Default TurboHybrid distance between a vector and a query';
 COMMENT ON FUNCTION turbohybrid_l2_distance(vector, turbohybrid_query) IS 'L2 TurboHybrid distance between a vector and a query';

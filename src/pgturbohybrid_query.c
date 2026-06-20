@@ -32,6 +32,7 @@ FUNCTION_PREFIX PG_FUNCTION_INFO_V1(pgturbohybrid_sparse_vector_build);
 FUNCTION_PREFIX PG_FUNCTION_INFO_V1(pgturbohybrid_sparse_vector_term_ids);
 FUNCTION_PREFIX PG_FUNCTION_INFO_V1(pgturbohybrid_sparse_vector_weights);
 FUNCTION_PREFIX PG_FUNCTION_INFO_V1(pgturbohybrid_sparse_vector_count);
+FUNCTION_PREFIX PG_FUNCTION_INFO_V1(pgturbohybrid_sparse_inner_product_distance);
 FUNCTION_PREFIX PG_FUNCTION_INFO_V1(pgturbohybrid_query_constructor);
 FUNCTION_PREFIX PG_FUNCTION_INFO_V1(pgturbohybrid_distance);
 FUNCTION_PREFIX PG_FUNCTION_INFO_V1(pgturbohybrid_l2_distance);
@@ -67,6 +68,7 @@ static Size PgturbohybridQueryMultiVectorOffset(PgturbohybridQueryHeader *query)
 static Size PgturbohybridQueryTsQueryOffset(PgturbohybridQueryHeader *query);
 static Size PgturbohybridQueryTokenWeightsOffset(PgturbohybridQueryHeader *query);
 static Size PgturbohybridQueryTokenMaskOffset(PgturbohybridQueryHeader *query);
+static Size PgturbohybridQuerySparseOffset(PgturbohybridQueryHeader *query);
 static Size PgturbohybridQueryAlignedSize(Size value);
 static Size PgturbohybridQuerySizeAdd(Size a, Size b);
 static Size PgturbohybridQueryTokenWeightsBytes(PgturbohybridQueryHeader *query);
@@ -159,6 +161,14 @@ PgturbohybridQueryMultiVectorOffset(PgturbohybridQueryHeader *query)
 {
 	return PgturbohybridQuerySizeAdd(PgturbohybridQueryVectorOffset(),
 									 PgturbohybridQueryAlignedSize(query->vectorBytes));
+}
+
+/* Sparse payload is the last segment, after the token mask. */
+static Size
+PgturbohybridQuerySparseOffset(PgturbohybridQueryHeader *query)
+{
+	return PgturbohybridQuerySizeAdd(PgturbohybridQueryTokenMaskOffset(query),
+									 PgturbohybridQueryAlignedSize(PgturbohybridQueryTokenMaskBytes(query)));
 }
 
 static Size
@@ -277,6 +287,18 @@ PgturbohybridQueryGetTsQuery(PgturbohybridQueryHeader *query)
 	return (TSQuery) ((char *) query + PgturbohybridQueryTsQueryOffset(query));
 }
 
+struct varlena *
+PgturbohybridQueryGetSparseVector(PgturbohybridQueryHeader *query)
+{
+	PgturbohybridQueryValidateFast(query);
+
+	if (!PgturbohybridQueryHasSparse(query))
+		return NULL;
+
+	return (struct varlena *) ((char *) query +
+							   PgturbohybridQuerySparseOffset(query));
+}
+
 const char *
 PgturbohybridQueryFusionName(uint16 fusion)
 {
@@ -318,6 +340,7 @@ PgturbohybridQueryValidateInternal(PgturbohybridQueryHeader *query, bool strict)
 	Size		tsqueryOffset;
 	Size		tokenWeightsOffset;
 	Size		tokenMaskOffset;
+	Size		sparseOffset;
 	Size		expected;
 
 	if (query == NULL)
@@ -351,7 +374,9 @@ PgturbohybridQueryValidateInternal(PgturbohybridQueryHeader *query, bool strict)
 		query->bm25Weight < 0 || isnan(query->bm25Weight) ||
 		isinf(query->bm25Weight) ||
 		query->multivectorWeight < 0 || isnan(query->multivectorWeight) ||
-		isinf(query->multivectorWeight))
+		isinf(query->multivectorWeight) ||
+		query->sparseWeight < 0 || isnan(query->sparseWeight) ||
+		isinf(query->sparseWeight))
 		ereport(ERROR,
 				(errcode(ERRCODE_DATA_EXCEPTION),
 				 errmsg("turbohybrid_query weights must be finite non-negative values")));
@@ -371,6 +396,7 @@ PgturbohybridQueryValidateInternal(PgturbohybridQueryHeader *query, bool strict)
 
 	if (query->rrfK <= 0 || query->denseK < 0 ||
 		query->multivectorK < 0 || query->bm25K < 0 ||
+		query->sparseK < 0 ||
 		((query->flags & PGTURBOHYBRID_QUERY_FLAG_FINAL_K_IS_SET) != 0 &&
 		 query->finalK <= 0))
 		ereport(ERROR,
@@ -502,8 +528,42 @@ PgturbohybridQueryValidateInternal(PgturbohybridQueryHeader *query, bool strict)
 		ereport(ERROR,
 				(errcode(ERRCODE_DATA_EXCEPTION),
 				 errmsg("truncated turbohybrid_query token mask payload")));
-	expected = PgturbohybridQuerySizeAdd(tokenMaskOffset,
-										 PgturbohybridQueryAlignedSize(PgturbohybridQueryTokenMaskBytes(query)));
+
+	/* Sparse payload (last segment). */
+	if ((query->flags & PGTURBOHYBRID_QUERY_FLAG_HAS_SPARSE) == 0 &&
+		query->sparseBytes != 0)
+		ereport(ERROR,
+				(errcode(ERRCODE_DATA_EXCEPTION),
+				 errmsg("turbohybrid_query sparse payload is inconsistent")));
+	if (query->sparseBytes < 0)
+		ereport(ERROR,
+				(errcode(ERRCODE_DATA_EXCEPTION),
+				 errmsg("invalid turbohybrid_query payload size")));
+	if ((query->flags & PGTURBOHYBRID_QUERY_FLAG_REQUIRE_SPARSE_MATCH) != 0 &&
+		(query->flags & PGTURBOHYBRID_QUERY_FLAG_HAS_SPARSE) == 0)
+		ereport(ERROR,
+				(errcode(ERRCODE_DATA_EXCEPTION),
+				 errmsg("turbohybrid_query require_sparse_match requires sparse_query")));
+
+	sparseOffset = PgturbohybridQuerySparseOffset(query);
+	if (PgturbohybridQuerySizeAdd(sparseOffset, query->sparseBytes) > actual)
+		ereport(ERROR,
+				(errcode(ERRCODE_DATA_EXCEPTION),
+				 errmsg("truncated turbohybrid_query sparse payload")));
+	if ((query->flags & PGTURBOHYBRID_QUERY_FLAG_HAS_SPARSE) != 0)
+	{
+		struct varlena *sparse =
+			(struct varlena *) ((char *) query + sparseOffset);
+
+		if (query->sparseBytes <= 0 ||
+			(Size) query->sparseBytes != VARSIZE_ANY(sparse))
+			ereport(ERROR,
+					(errcode(ERRCODE_DATA_EXCEPTION),
+					 errmsg("turbohybrid_query sparse payload is inconsistent")));
+	}
+
+	expected = PgturbohybridQuerySizeAdd(sparseOffset,
+										 PgturbohybridQueryAlignedSize(query->sparseBytes));
 	if (actual != expected)
 		ereport(ERROR,
 				(errcode(ERRCODE_DATA_EXCEPTION),
@@ -576,8 +636,23 @@ pgturbohybrid_query_out(PG_FUNCTION_ARGS)
 		appendStringInfoString(&buf, "null");
 
 	appendStringInfo(&buf,
-					 ",require_bm25_match=%s)",
+					 ",require_bm25_match=%s",
 					 (query->flags & PGTURBOHYBRID_QUERY_FLAG_REQUIRE_BM25_MATCH) ? "true" : "false");
+
+	/* Sparse fields are emitted only when present (mirrors multivector), so a
+	 * query without sparse_query renders exactly as before. */
+	if (PgturbohybridQueryHasSparse(query))
+	{
+		appendStringInfo(&buf, ",sparse=true,sparse_weight=%g,sparse_k=",
+						 query->sparseWeight);
+		if (query->flags & PGTURBOHYBRID_QUERY_FLAG_SPARSE_K_DEFAULTED)
+			appendStringInfoString(&buf, "null");
+		else
+			appendStringInfo(&buf, "%d", query->sparseK);
+		appendStringInfo(&buf, ",require_sparse_match=%s",
+						 PgturbohybridQueryRequireSparseMatch(query) ? "true" : "false");
+	}
+	appendStringInfoChar(&buf, ')');
 
 	PG_RETURN_CSTRING(buf.data);
 }
@@ -1065,6 +1140,50 @@ pgturbohybrid_sparse_vector_count(PG_FUNCTION_ARGS)
 	PG_RETURN_INT32((int32) sparse->count);
 }
 
+/*
+ * Exact sparse inner-product distance: -dot(query_sparse, doc_sparse).
+ * Returned as a distance (negated) so ORDER BY ... ASC ranks the most similar
+ * documents first, matching the dense <~> convention.  This is the scalar
+ * reference used outside the index (no native sparse index scan yet); terms
+ * match on (term_id, field_id).  O(n*m) over the two vectors -- both may be
+ * unsorted (from_arrays does not canonicalize), so no merge assumption is made.
+ */
+Datum
+pgturbohybrid_sparse_inner_product_distance(PG_FUNCTION_ARGS)
+{
+	PgturbohybridSparseVector *doc =
+		(PgturbohybridSparseVector *) PG_DETOAST_DATUM(PG_GETARG_DATUM(0));
+	PgturbohybridQueryHeader *query = PG_GETARG_PGTURBOHYBRID_QUERY_P(1);
+	PgturbohybridSparseVector *qsparse;
+	PgturbohybridSparseVectorEntry *qe;
+	PgturbohybridSparseVectorEntry *de;
+	double		dot = 0.0;
+
+	PgturbohybridSparseVectorValidate(doc);
+	PgturbohybridQueryValidate(query);
+
+	qsparse = (PgturbohybridSparseVector *) PgturbohybridQueryGetSparseVector(query);
+	if (qsparse == NULL)
+		ereport(ERROR,
+				(errcode(ERRCODE_INVALID_PARAMETER_VALUE),
+				 errmsg("turbohybrid_query does not contain a sparse_query"),
+				 errhint("Pass sparse_query => ... to turbohybrid_query(...).")));
+
+	qe = PgturbohybridSparseVectorEntries(qsparse);
+	de = PgturbohybridSparseVectorEntries(doc);
+	for (uint32 i = 0; i < qsparse->count; i++)
+	{
+		for (uint32 j = 0; j < doc->count; j++)
+		{
+			if (qe[i].termId == de[j].termId &&
+				qe[i].fieldId == de[j].fieldId)
+				dot += (double) qe[i].weight * (double) de[j].weight;
+		}
+	}
+
+	PG_RETURN_FLOAT8(-dot);
+}
+
 static uint16
 PgturbohybridQueryParseFusion(text *fusion)
 {
@@ -1385,6 +1504,11 @@ pgturbohybrid_query_constructor(PG_FUNCTION_ARGS)
 	Size		tsquerySize = 0;
 	Size		tokenWeightsBytes = 0;
 	Size		tokenMaskBytes = 0;
+	struct varlena *sparseDatum = NULL;
+	int32		sparseBytes = 0;
+	Size		sparseSize = 0;
+	float8		sparseWeight;
+	int32		sparseK;
 	uint16		flags = 0;
 	uint16		denseKind = PGTURBOHYBRID_DENSE_QUERY_NONE;
 	uint16		fusion;
@@ -1534,11 +1658,6 @@ pgturbohybrid_query_constructor(PG_FUNCTION_ARGS)
 		flags |= PGTURBOHYBRID_QUERY_FLAG_HAS_TOKEN_MASK;
 	}
 
-	if ((flags & (PGTURBOHYBRID_QUERY_FLAG_HAS_DENSE | PGTURBOHYBRID_QUERY_FLAG_HAS_TSQUERY)) == 0)
-		ereport(ERROR,
-				(errcode(ERRCODE_INVALID_PARAMETER_VALUE),
-				 errmsg("turbohybrid_query requires a vector_query, multivector_query, or text_query")));
-
 	fusion = PgturbohybridQueryParseFusion(PG_ARGISNULL(2) ? NULL : PG_GETARG_TEXT_PP(2));
 
 	if (PG_ARGISNULL(3))
@@ -1628,6 +1747,58 @@ pgturbohybrid_query_constructor(PG_FUNCTION_ARGS)
 	if (requireBm25Match)
 		flags |= PGTURBOHYBRID_QUERY_FLAG_REQUIRE_BM25_MATCH;
 
+	/*
+	 * Sparse query payload is the optional 17th..20th args (indices 16-19).
+	 * Guard each with PG_NARGS() so a library running against an extension
+	 * still installed at the older 16-arg signature stays backward compatible.
+	 */
+	if (PG_NARGS() > 16 && !PG_ARGISNULL(16))
+	{
+		sparseDatum = PG_DETOAST_DATUM_COPY(PG_GETARG_DATUM(16));
+		PgturbohybridSparseVectorValidate((PgturbohybridSparseVector *) sparseDatum);
+		sparseSize = VARSIZE_ANY(sparseDatum);
+		if (sparseSize > PG_INT32_MAX)
+			ereport(ERROR,
+					(errcode(ERRCODE_PROGRAM_LIMIT_EXCEEDED),
+					 errmsg("turbohybrid_query sparse payload is too large")));
+		sparseBytes = (int32) sparseSize;
+		flags |= PGTURBOHYBRID_QUERY_FLAG_HAS_SPARSE;
+	}
+
+	if (PG_NARGS() > 17 && !PG_ARGISNULL(17))
+		sparseWeight = PG_GETARG_FLOAT8(17);
+	else
+		sparseWeight = 1.0;
+	if (sparseWeight < 0 || isnan(sparseWeight) || isinf(sparseWeight))
+		ereport(ERROR,
+				(errcode(ERRCODE_INVALID_PARAMETER_VALUE),
+				 errmsg("sparse_weight must be a finite non-negative value")));
+
+	if (PG_NARGS() > 18 && !PG_ARGISNULL(18))
+		sparseK = PG_GETARG_INT32(18);
+	else
+	{
+		sparseK = denseK;
+		flags |= PGTURBOHYBRID_QUERY_FLAG_SPARSE_K_DEFAULTED;
+	}
+	PgturbohybridQueryCheckNonNegativeInt("sparse_k", sparseK);
+
+	if (PG_NARGS() > 19 && !PG_ARGISNULL(19) && PG_GETARG_BOOL(19))
+	{
+		if ((flags & PGTURBOHYBRID_QUERY_FLAG_HAS_SPARSE) == 0)
+			ereport(ERROR,
+					(errcode(ERRCODE_INVALID_PARAMETER_VALUE),
+					 errmsg("require_sparse_match requires a sparse_query")));
+		flags |= PGTURBOHYBRID_QUERY_FLAG_REQUIRE_SPARSE_MATCH;
+	}
+
+	if ((flags & (PGTURBOHYBRID_QUERY_FLAG_HAS_DENSE |
+				  PGTURBOHYBRID_QUERY_FLAG_HAS_TSQUERY |
+				  PGTURBOHYBRID_QUERY_FLAG_HAS_SPARSE)) == 0)
+		ereport(ERROR,
+				(errcode(ERRCODE_INVALID_PARAMETER_VALUE),
+				 errmsg("turbohybrid_query requires a vector_query, multivector_query, text_query, or sparse_query")));
+
 	totalSize = PgturbohybridQuerySizeAdd(PgturbohybridQueryVectorOffset(),
 										  PgturbohybridQueryAlignedSize(vectorBytes));
 	totalSize = PgturbohybridQuerySizeAdd(totalSize,
@@ -1638,6 +1809,8 @@ pgturbohybrid_query_constructor(PG_FUNCTION_ARGS)
 										  PgturbohybridQueryAlignedSize(tokenWeightsBytes));
 	totalSize = PgturbohybridQuerySizeAdd(totalSize,
 										  PgturbohybridQueryAlignedSize(tokenMaskBytes));
+	totalSize = PgturbohybridQuerySizeAdd(totalSize,
+										  PgturbohybridQueryAlignedSize(sparseBytes));
 	result = palloc0(totalSize);
 	SET_VARSIZE(result, totalSize);
 	result->version = PGTURBOHYBRID_QUERY_VERSION;
@@ -1658,6 +1831,9 @@ pgturbohybrid_query_constructor(PG_FUNCTION_ARGS)
 	result->tsqueryBytes = tsqueryBytes;
 	result->multivectorDim = multivectorDim;
 	result->multivectorCount = multivectorCount;
+	result->sparseWeight = sparseWeight;
+	result->sparseBytes = sparseBytes;
+	result->sparseK = sparseK;
 
 	if (vectorDatum != NULL)
 	{
@@ -1686,6 +1862,12 @@ pgturbohybrid_query_constructor(PG_FUNCTION_ARGS)
 		memcpy((char *) result + PgturbohybridQueryTokenMaskOffset(result),
 			   tokenMask, tokenMaskBytes);
 		pfree(tokenMask);
+	}
+	if (sparseDatum != NULL)
+	{
+		memcpy((char *) result + PgturbohybridQuerySparseOffset(result),
+			   sparseDatum, sparseBytes);
+		pfree(sparseDatum);
 	}
 
 	PgturbohybridQueryValidate(result);
