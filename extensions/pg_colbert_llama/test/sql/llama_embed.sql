@@ -116,3 +116,65 @@ BEGIN
 END
 $allowed_models$;
 RESET pg_colbert_llama.allowed_models;
+
+-- ============================================================ sparse (Prompt 13)
+-- Deterministic stub sparse output: one term per token, weight = token length,
+-- duplicate tokens summed by default.  'red apple red fruit' has red twice.
+SELECT array_length(turbohybrid_sparse_vector_term_ids(
+         llama_embed_sparse('sauerkraut-modern', 'red apple red fruit')), 1) AS sparse_terms,
+       (SELECT sum(w)::int FROM unnest(turbohybrid_sparse_vector_weights(
+         llama_embed_sparse('sauerkraut-modern', 'red apple red fruit'))) w) AS weight_sum,
+       (SELECT max(w)::int FROM unnest(turbohybrid_sparse_vector_weights(
+         llama_embed_sparse('sauerkraut-modern', 'red apple red fruit'))) w) AS dedup_red_weight;
+
+-- top_k keeps only the heaviest term.
+SELECT array_length(turbohybrid_sparse_vector_term_ids(
+         llama_embed_sparse('sauerkraut-modern', 'alpha bb cccc', '{"top_k":1}')), 1) AS topk_terms,
+       (SELECT w::int FROM unnest(turbohybrid_sparse_vector_weights(
+         llama_embed_sparse('sauerkraut-modern', 'alpha bb cccc', '{"top_k":1}'))) w) AS topk_weight;
+
+-- min_weight drops short tokens (a=1, bb=2 dropped; cccc=4, dddd=4 kept).
+SELECT array_length(turbohybrid_sparse_vector_term_ids(
+         llama_embed_sparse('sauerkraut-modern', 'a bb cccc dddd', '{"min_weight":3}')), 1) AS minw_terms;
+
+-- "normalize" is a string mode here (passed through to the builder), not the
+-- dense boolean; the default "none" is a no-op.
+SELECT turbohybrid_sparse_vector_weights(
+         llama_embed_sparse('sauerkraut-modern', 'alpha bb cccc', '{"normalize":"none"}')) =
+       turbohybrid_sparse_vector_weights(
+         llama_embed_sparse('sauerkraut-modern', 'alpha bb cccc')) AS normalize_none_noop;
+
+-- empty input yields an empty sparse vector.
+SELECT array_length(turbohybrid_sparse_vector_term_ids(
+         llama_embed_sparse('sauerkraut-modern', '  ... ')), 1) AS empty_terms;
+
+-- JSON debug view (mode=sparse) reports the same post-processed terms.
+SELECT llama_embed('sauerkraut-modern', 'red apple', '{"mode":"sparse"}')->>'mode' AS json_mode,
+       (llama_embed('sauerkraut-modern', 'red apple', '{"mode":"sparse"}')->>'count')::int AS json_count,
+       (llama_embed('sauerkraut-modern', 'red apple', '{"mode":"sparse"}')->>'vocab_size')::int AS json_vocab;
+
+-- batch returns one sparse vector per input.
+SELECT array_length(llama_embed_sparse_batch('sauerkraut-modern', ARRAY['hello world', 'foo bar baz']), 1) AS batch_len;
+
+-- determinism: identical input -> identical terms.
+SELECT turbohybrid_sparse_vector_terms(llama_embed_sparse('sauerkraut-modern', 'quick brown fox')) =
+       turbohybrid_sparse_vector_terms(llama_embed_sparse('sauerkraut-modern', 'quick brown fox')) AS deterministic;
+
+-- invalid options are rejected.
+DO $sparse_invalid$
+DECLARE spec record;
+BEGIN
+	FOR spec IN
+		SELECT 'bad_mode' AS name, $q$SELECT llama_embed('sauerkraut-modern','x','{"mode":"bogus"}')$q$ AS sql
+		UNION ALL SELECT 'bad_pooling', $q$SELECT llama_embed_sparse('sauerkraut-modern','a b','{"pooling":"mean"}')$q$
+		UNION ALL SELECT 'bad_dedup', $q$SELECT llama_embed_sparse('sauerkraut-modern','a b','{"deduplicate":"bogus"}')$q$
+	LOOP
+		BEGIN
+			EXECUTE spec.sql;
+			RAISE EXCEPTION 'expected sparse option to fail: %', spec.name;
+		EXCEPTION WHEN invalid_parameter_value THEN
+			NULL;
+		END;
+	END LOOP;
+END
+$sparse_invalid$;

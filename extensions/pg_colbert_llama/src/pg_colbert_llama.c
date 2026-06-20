@@ -47,6 +47,8 @@ PG_FUNCTION_INFO_V1(pg_colbert_llama_llama_embed_vector_batch);
 PG_FUNCTION_INFO_V1(pg_colbert_llama_llama_embed_tokens);
 PG_FUNCTION_INFO_V1(pg_colbert_llama_llama_embed_mv);
 PG_FUNCTION_INFO_V1(pg_colbert_llama_llama_embed_mv_batch);
+PG_FUNCTION_INFO_V1(pg_colbert_llama_llama_embed_sparse);
+PG_FUNCTION_INFO_V1(pg_colbert_llama_llama_embed_sparse_batch);
 PG_FUNCTION_INFO_V1(pg_colbert_llama_llama_embed_model_info);
 
 #define PG_COLBERT_LLAMA_VECTOR_SIZE(_dim) \
@@ -78,11 +80,15 @@ static bool pg_colbert_llama_log_timing = false;
 static int	pg_colbert_llama_expected_dim = 128;
 static char *pg_colbert_llama_allowed_models = NULL;
 static Oid	pg_colbert_llama_vector_type_oid = InvalidOid;
+static Oid	pg_colbert_llama_sparse_type_oid = InvalidOid;
 
 void		_PG_init(void);
 
 static Oid PgColbertExtensionSchema(Oid extensionOid);
 static Oid PgColbertVectorTypeOid(void);
+static Oid PgColbertSparseVectorTypeOid(void);
+static Datum PgLlamaEmbedSparseBuild(const PgColbertEngineOutput *output,
+									 Jsonb *options);
 static Oid PgColbertLookupPgturbohybridFunction(const char *funcname,
 												int nargs, Oid *argtypes,
 												bool missing_ok);
@@ -332,6 +338,41 @@ PgColbertLookupPgturbohybridFunction(const char *funcname, int nargs,
 							 nargs, argtypes, missing_ok);
 	pfree(schemaName);
 	return funcOid;
+}
+
+/* Resolve (and cache) the pgturbohybrid turbohybrid_sparse_vector type Oid. */
+static Oid
+PgColbertSparseVectorTypeOid(void)
+{
+	Oid			extensionOid;
+	Oid			schemaOid;
+
+	if (OidIsValid(pg_colbert_llama_sparse_type_oid))
+		return pg_colbert_llama_sparse_type_oid;
+
+	extensionOid = get_extension_oid("pgturbohybrid", true);
+	if (!OidIsValid(extensionOid))
+		ereport(ERROR,
+				(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
+				 errmsg("pgturbohybrid extension is required by pg_colbert_llama"),
+				 errhint("Run CREATE EXTENSION pgturbohybrid before using pg_colbert_llama.")));
+
+	schemaOid = PgColbertExtensionSchema(extensionOid);
+	if (!OidIsValid(schemaOid))
+		ereport(ERROR,
+				(errcode(ERRCODE_UNDEFINED_SCHEMA),
+				 errmsg("could not find schema for pgturbohybrid extension")));
+
+	pg_colbert_llama_sparse_type_oid =
+		GetSysCacheOid2(TYPENAMENSP, Anum_pg_type_oid,
+						CStringGetDatum("turbohybrid_sparse_vector"),
+						ObjectIdGetDatum(schemaOid));
+	if (!OidIsValid(pg_colbert_llama_sparse_type_oid))
+		ereport(ERROR,
+				(errcode(ERRCODE_UNDEFINED_OBJECT),
+				 errmsg("could not find turbohybrid_sparse_vector type installed by pgturbohybrid")));
+
+	return pg_colbert_llama_sparse_type_oid;
 }
 
 static void
@@ -1461,10 +1502,12 @@ PgLlamaEmbedParseMode(const char *mode)
 		return PG_LLAMA_EMBED_OUTPUT_TOKENS;
 	if (strcmp(mode, "dense") == 0)
 		return PG_LLAMA_EMBED_OUTPUT_DENSE;
+	if (strcmp(mode, "sparse") == 0)
+		return PG_LLAMA_EMBED_OUTPUT_SPARSE;
 	ereport(ERROR,
 			(errcode(ERRCODE_INVALID_PARAMETER_VALUE),
 			 errmsg("unknown llama_embed mode \"%s\"", mode),
-			 errhint("Use \"dense\" or \"tokens\".")));
+			 errhint("Use \"dense\", \"tokens\", or \"sparse\".")));
 	return PG_LLAMA_EMBED_OUTPUT_TOKENS;
 }
 
@@ -1475,6 +1518,7 @@ PgLlamaEmbedParsePooling(const char *pooling,
 	if (pooling == NULL || strcmp(pooling, "model") == 0)
 		return outputMode == PG_LLAMA_EMBED_OUTPUT_DENSE ?
 			PG_LLAMA_EMBED_POOLING_MEAN : PG_LLAMA_EMBED_POOLING_NONE;
+	/* Sparse output is a per-vocabulary bag, not pooled token vectors. */
 	if (strcmp(pooling, "none") == 0)
 		return PG_LLAMA_EMBED_POOLING_NONE;
 	if (strcmp(pooling, "mean") == 0)
@@ -1553,6 +1597,11 @@ PgLlamaEmbedParseModel(text *modelText, Jsonb *options,
 		ereport(ERROR,
 				(errcode(ERRCODE_INVALID_PARAMETER_VALUE),
 				 errmsg("token llama_embed output requires pooling \"none\"")));
+	if (spec->outputMode == PG_LLAMA_EMBED_OUTPUT_SPARSE &&
+		spec->pooling != PG_LLAMA_EMBED_POOLING_NONE)
+		ereport(ERROR,
+				(errcode(ERRCODE_INVALID_PARAMETER_VALUE),
+				 errmsg("sparse llama_embed output requires pooling \"none\"")));
 
 	aliasLen = colon == NULL ? strlen(model) : (Size) (colon - model);
 	PgLlamaEmbedValidateAlias(model, aliasLen);
@@ -1609,7 +1658,14 @@ PgLlamaEmbedParseModel(text *modelText, Jsonb *options,
 		spec->expectedDim = intValue;
 		spec->checkExpectedDim = true;
 	}
-	spec->normalize = PgLlamaEmbedJsonbGetBool(options, "normalize", true);
+	/*
+	 * For dense/token output "normalize" is a boolean (whether to L2-normalize
+	 * the emitted vectors).  For sparse output "normalize" is instead a string
+	 * mode (none/l2/...) consumed by turbohybrid_sparse_vector_build, so leave
+	 * spec->normalize untouched and let the builder interpret the key.
+	 */
+	spec->normalize = spec->outputMode == PG_LLAMA_EMBED_OUTPUT_SPARSE ? false :
+		PgLlamaEmbedJsonbGetBool(options, "normalize", true);
 	spec->modelDir = pg_colbert_llama_model_dir;
 	spec->threads = pg_colbert_llama_threads;
 	spec->nCtx = pg_colbert_llama_n_ctx;
@@ -1637,7 +1693,43 @@ static void
 PgColbertValidateOutput(const PgColbertModelSpec *spec,
 						const PgColbertEngineOutput *output)
 {
-	const char *label = spec->outputMode == PG_LLAMA_EMBED_OUTPUT_DENSE ?
+	const char *label;
+
+	/*
+	 * Sparse output is a term/weight bag (no fixed dim or vector count), so it
+	 * has its own shape checks: non-negative term count, in-range term ids, and
+	 * finite weights.  Term de-duplication / filtering / normalization happen
+	 * later when the turbohybrid_sparse_vector is built.
+	 */
+	if (spec->outputMode == PG_LLAMA_EMBED_OUTPUT_SPARSE)
+	{
+		if (output->sparseCount < 0)
+			ereport(ERROR,
+					(errcode(ERRCODE_DATA_EXCEPTION),
+					 errmsg("llama_embed sparse engine returned a negative term count")));
+		if (output->sparseCount > 0 &&
+			(output->sparseTermIds == NULL || output->sparseWeights == NULL))
+			ereport(ERROR,
+					(errcode(ERRCODE_DATA_EXCEPTION),
+					 errmsg("llama_embed sparse engine returned a malformed term bag")));
+		for (int32 i = 0; i < output->sparseCount; i++)
+		{
+			if (output->sparseTermIds[i] < 0 ||
+				(output->sparseVocabSize > 0 &&
+				 output->sparseTermIds[i] >= output->sparseVocabSize))
+				ereport(ERROR,
+						(errcode(ERRCODE_DATA_EXCEPTION),
+						 errmsg("llama_embed sparse engine returned out-of-range term id %d",
+								output->sparseTermIds[i])));
+			if (!isfinite(output->sparseWeights[i]))
+				ereport(ERROR,
+						(errcode(ERRCODE_DATA_EXCEPTION),
+						 errmsg("llama_embed sparse engine returned a non-finite weight")));
+		}
+		return;
+	}
+
+	label = spec->outputMode == PG_LLAMA_EMBED_OUTPUT_DENSE ?
 		"llama_embed" : "ColBERT";
 
 	if (output->count <= 0)
@@ -2017,6 +2109,8 @@ PgLlamaEmbedOutputModeName(PgLlamaEmbedOutputMode mode)
 			return "dense";
 		case PG_LLAMA_EMBED_OUTPUT_TOKENS:
 			return "tokens";
+		case PG_LLAMA_EMBED_OUTPUT_SPARSE:
+			return "sparse";
 	}
 	return "tokens";
 }
@@ -2091,6 +2185,116 @@ PgColbertAppendOutputJson(StringInfo buf,
 		appendStringInfoChar(buf, ']');
 	}
 	appendStringInfoChar(buf, '}');
+}
+
+/*
+ * Build a turbohybrid_sparse_vector from the engine's raw (term_id, weight) bag.
+ * De-duplication, drop_non_positive, min_weight, top_k, sort and normalization
+ * are delegated to pgturbohybrid's turbohybrid_sparse_vector_build(int4[],
+ * float4[], jsonb), which reads those keys (with the documented defaults) out of
+ * the llama_embed options object passed straight through.
+ */
+static Datum
+PgLlamaEmbedSparseBuild(const PgColbertEngineOutput *output, Jsonb *options)
+{
+	Oid			argtypes[3];
+	Oid			buildOid;
+	Datum	   *idDatums;
+	Datum	   *weightDatums;
+	ArrayType  *idArray;
+	ArrayType  *weightArray;
+	int32		n = output->sparseCount;
+
+	argtypes[0] = INT4ARRAYOID;
+	argtypes[1] = FLOAT4ARRAYOID;
+	argtypes[2] = JSONBOID;
+	buildOid = PgColbertLookupPgturbohybridFunction("turbohybrid_sparse_vector_build",
+													3, argtypes, false);
+
+	idDatums = (Datum *) palloc(sizeof(Datum) * (Size) Max(n, 1));
+	weightDatums = (Datum *) palloc(sizeof(Datum) * (Size) Max(n, 1));
+	for (int32 i = 0; i < n; i++)
+	{
+		idDatums[i] = Int32GetDatum(output->sparseTermIds[i]);
+		weightDatums[i] = Float4GetDatum(output->sparseWeights[i]);
+	}
+	idArray = construct_array(idDatums, n, INT4OID, sizeof(int32), true,
+							  TYPALIGN_INT);
+	weightArray = construct_array(weightDatums, n, FLOAT4OID, sizeof(float4),
+								  true, TYPALIGN_INT);
+
+	return OidFunctionCall3(buildOid,
+							PointerGetDatum(idArray),
+							PointerGetDatum(weightArray),
+							PointerGetDatum(options));
+}
+
+/*
+ * Emit the post-processed sparse output (the same term_ids/weights that
+ * llama_embed_sparse would store) as a JSON object for the llama_embed debug
+ * view.  Reads them back from the built turbohybrid_sparse_vector so the JSON
+ * and typed paths are always consistent.
+ */
+static void
+PgLlamaEmbedAppendSparseJson(StringInfo buf, const PgColbertModelSpec *spec,
+							 const PgColbertEngineOutput *output, Jsonb *options)
+{
+	Datum		sparseDatum = PgLlamaEmbedSparseBuild(output, options);
+	Oid			sparseType = PgColbertSparseVectorTypeOid();
+	Oid			argtypes[1];
+	Oid			termIdsOid;
+	Oid			weightsOid;
+	ArrayType  *idArr;
+	ArrayType  *wtArr;
+	Datum	   *idDatums;
+	Datum	   *wtDatums;
+	bool	   *idNulls;
+	bool	   *wtNulls;
+	int			idCount;
+	int			wtCount;
+
+	argtypes[0] = sparseType;
+	termIdsOid =
+		PgColbertLookupPgturbohybridFunction("turbohybrid_sparse_vector_term_ids",
+											 1, argtypes, false);
+	weightsOid =
+		PgColbertLookupPgturbohybridFunction("turbohybrid_sparse_vector_weights",
+											 1, argtypes, false);
+	idArr = DatumGetArrayTypeP(OidFunctionCall1(termIdsOid, sparseDatum));
+	wtArr = DatumGetArrayTypeP(OidFunctionCall1(weightsOid, sparseDatum));
+	deconstruct_array(idArr, INT4OID, sizeof(int32), true, TYPALIGN_INT,
+					  &idDatums, &idNulls, &idCount);
+	deconstruct_array(wtArr, FLOAT4OID, sizeof(float4), true, TYPALIGN_INT,
+					  &wtDatums, &wtNulls, &wtCount);
+
+	appendStringInfoChar(buf, '{');
+	appendStringInfoString(buf, "\"engine\":");
+	PgColbertAppendJsonString(buf, output->engine);
+	appendStringInfoString(buf, ",\"alias\":");
+	PgColbertAppendJsonString(buf, spec->alias);
+	appendStringInfoString(buf, ",\"role\":");
+	PgColbertAppendJsonString(buf, spec->roleName);
+	appendStringInfoString(buf, ",\"mode\":");
+	PgColbertAppendJsonString(buf, PgLlamaEmbedOutputModeName(spec->outputMode));
+	appendStringInfoString(buf, ",\"profile_source\":");
+	PgColbertAppendJsonString(buf, spec->profile.sourceName);
+	appendStringInfo(buf, ",\"vocab_size\":%d,\"count\":%d",
+					 output->sparseVocabSize, idCount);
+	appendStringInfoString(buf, ",\"term_ids\":[");
+	for (int i = 0; i < idCount; i++)
+	{
+		if (i > 0)
+			appendStringInfoChar(buf, ',');
+		appendStringInfo(buf, "%d", DatumGetInt32(idDatums[i]));
+	}
+	appendStringInfoString(buf, "],\"weights\":[");
+	for (int i = 0; i < wtCount; i++)
+	{
+		if (i > 0)
+			appendStringInfoChar(buf, ',');
+		appendStringInfo(buf, "%.9g", (double) DatumGetFloat4(wtDatums[i]));
+	}
+	appendStringInfoString(buf, "]}");
 }
 
 static void
@@ -2446,14 +2650,68 @@ pg_colbert_llama_llama_embed(PG_FUNCTION_ARGS)
 	PgColbertModelSpec spec;
 	PgColbertEngineOutput output;
 	StringInfoData buf;
+	Jsonb	   *options = PG_GETARG_JSONB_P(2);
 
 	PgLlamaEmbedEncodeOrError(PG_GETARG_TEXT_PP(0), PG_GETARG_TEXT_PP(1),
-							  PG_GETARG_JSONB_P(2),
+							  options,
 							  PG_LLAMA_EMBED_OUTPUT_TOKENS,
 							  CurrentMemoryContext, &spec, &output);
 	initStringInfo(&buf);
-	PgColbertAppendOutputJson(&buf, &spec, &output, true);
+	if (spec.outputMode == PG_LLAMA_EMBED_OUTPUT_SPARSE)
+		PgLlamaEmbedAppendSparseJson(&buf, &spec, &output, options);
+	else
+		PgColbertAppendOutputJson(&buf, &spec, &output, true);
 	PG_RETURN_DATUM(PgColbertJsonbFromCString(buf.data));
+}
+
+Datum
+pg_colbert_llama_llama_embed_sparse(PG_FUNCTION_ARGS)
+{
+	PgColbertModelSpec spec;
+	PgColbertEngineOutput output;
+	Jsonb	   *options = PG_GETARG_JSONB_P(2);
+
+	PgLlamaEmbedEncodeOrError(PG_GETARG_TEXT_PP(0), PG_GETARG_TEXT_PP(1),
+							  options,
+							  PG_LLAMA_EMBED_OUTPUT_SPARSE,
+							  CurrentMemoryContext, &spec, &output);
+	PG_RETURN_DATUM(PgLlamaEmbedSparseBuild(&output, options));
+}
+
+Datum
+pg_colbert_llama_llama_embed_sparse_batch(PG_FUNCTION_ARGS)
+{
+	PgColbertModelSpec spec;
+	PgColbertEngineOutput *outputs;
+	Jsonb	   *options = PG_GETARG_JSONB_P(2);
+	Datum	   *datums;
+	ArrayType  *array;
+	Oid			sparseType;
+	int16		typlen;
+	bool		typbyval;
+	char		typalign;
+	int32		outputCount;
+
+	outputCount =
+		PgLlamaEmbedEncodeBatchOrError(PG_GETARG_TEXT_PP(0),
+									   PG_GETARG_ARRAYTYPE_P(1),
+									   options,
+									   PG_LLAMA_EMBED_OUTPUT_SPARSE,
+									   CurrentMemoryContext,
+									   &spec,
+									   &outputs);
+	sparseType = PgColbertSparseVectorTypeOid();
+	if (outputCount == 0)
+		PG_RETURN_ARRAYTYPE_P(construct_empty_array(sparseType));
+
+	get_typlenbyvalalign(sparseType, &typlen, &typbyval, &typalign);
+	datums = (Datum *) palloc0(sizeof(Datum) * (Size) outputCount);
+	for (int32 i = 0; i < outputCount; i++)
+		datums[i] = PgLlamaEmbedSparseBuild(&outputs[i], options);
+
+	array = construct_array(datums, outputCount, sparseType, typlen, typbyval,
+							typalign);
+	PG_RETURN_ARRAYTYPE_P(array);
 }
 
 Datum

@@ -20,7 +20,8 @@ typedef enum PgColbertRole
 typedef enum PgLlamaEmbedOutputMode
 {
 	PG_LLAMA_EMBED_OUTPUT_TOKENS = 0,
-	PG_LLAMA_EMBED_OUTPUT_DENSE = 1
+	PG_LLAMA_EMBED_OUTPUT_DENSE = 1,
+	PG_LLAMA_EMBED_OUTPUT_SPARSE = 2
 } PgLlamaEmbedOutputMode;
 
 typedef enum PgLlamaEmbedPooling
@@ -175,6 +176,17 @@ typedef struct PgColbertEngineOutput
 	PgColbertTokenDebug *tokenDebug;
 	int32	   *tokenIds;
 	float4	   *values;
+	/*
+	 * Sparse (SPLADE-style) output shape, populated only when the model spec's
+	 * outputMode is PG_LLAMA_EMBED_OUTPUT_SPARSE.  The engine emits raw
+	 * (term_id, weight) pairs (possibly with duplicate or non-positive terms);
+	 * the SQL layer applies top_k / min_weight / drop_non_positive / deduplicate
+	 * / normalize when building the turbohybrid_sparse_vector.
+	 */
+	int32		sparseCount;
+	int32		sparseVocabSize;
+	int32	   *sparseTermIds;
+	float4	   *sparseWeights;
 } PgColbertEngineOutput;
 
 typedef struct PgColbertEngineModelInfo

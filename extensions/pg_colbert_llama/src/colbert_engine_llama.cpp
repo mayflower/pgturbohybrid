@@ -2754,6 +2754,9 @@ PgColbertEngineEncode(const PgColbertModelSpec *spec,
 					  PgColbertEngineOutput *output,
 					  char **errorMessage)
 {
+	if (spec->outputMode == PG_LLAMA_EMBED_OUTPUT_SPARSE)
+		return PgColbertSetError(ctx, errorMessage,
+								 "sparse output is not supported by the llama backend; use the stub engine");
 	try
 	{
 		return PgColbertEncodeBody(spec, input, ctx, output, errorMessage);
@@ -2773,6 +2776,9 @@ PgColbertEngineEncodeBatch(const PgColbertModelSpec *spec,
 						   PgColbertEngineOutput *outputs,
 						   char **errorMessage)
 {
+	if (spec->outputMode == PG_LLAMA_EMBED_OUTPUT_SPARSE)
+		return PgColbertSetError(ctx, errorMessage,
+								 "sparse output is not supported by the llama backend; use the stub engine");
 	try
 	{
 		return PgColbertEncodeBatchBody(spec, inputs, inputCount, ctx, outputs,
