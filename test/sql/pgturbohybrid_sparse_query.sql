@@ -56,8 +56,10 @@ SELECT turbohybrid_sparse_vector_build(ARRAY[1]::int4[], ARRAY[1.0]::float4[])
 
 DROP TABLE sp_docs;
 
--- the sparse opclass exists, but native sparse index scan is not implemented:
--- CREATE INDEX with sparse_ip_turbohybrid_ops must be rejected cleanly.
+-- A sparse-only index (no dense/multivector graph key) is rejected: the native
+-- sparse branch is keyed on the dense graph's node identity (sparse-primary is
+-- deferred to a later prompt).  Dense+sparse indexes are exercised in
+-- pgturbohybrid_sparse_scan.
 CREATE TABLE sp_idx (id int, s turbohybrid_sparse_vector);
 CREATE INDEX ON sp_idx USING turbohybrid (s sparse_ip_turbohybrid_ops);
 DROP TABLE sp_idx;

@@ -138,6 +138,9 @@ typedef enum PgturbohybridMultiVectorRerankSource
 #define PGTURBOHYBRID_GRAPH_PAGE_KIND_BM25_IMPACT	13
 #define PGTURBOHYBRID_GRAPH_PAGE_KIND_BM25_DELTA_TERM 14
 #define PGTURBOHYBRID_GRAPH_PAGE_KIND_MULTIVECTOR_DOCMAP 15
+#define PGTURBOHYBRID_GRAPH_PAGE_KIND_SPARSE_META		16
+#define PGTURBOHYBRID_GRAPH_PAGE_KIND_SPARSE_LEXICON	17
+#define PGTURBOHYBRID_GRAPH_PAGE_KIND_SPARSE_POSTINGS	18
 #define PGTURBOHYBRID_GRAPH_PAGE_KIND_MASK				0x00ff
 #define PGTURBOHYBRID_GRAPH_PAGE_GRAPH_OP_SHIFT		8
 
@@ -1071,7 +1074,10 @@ typedef struct PgturbohybridGraphMetaPageData
 	uint64		buildEdgeUs;
 	uint64		buildWriteUs;
 	uint32		buildWorkerCount;
-	uint32		buildReserved;
+	/* Anchor for the sparse inverted-index meta tuple (0 / InvalidBlockNumber =
+	 * no sparse branch).  Reuses the former buildReserved padding word, so the
+	 * metapage layout is unchanged. */
+	BlockNumber tqSparseMetaStartBlkno;
 }			PgturbohybridGraphMetaPageData;
 
 typedef PgturbohybridGraphMetaPageData * PgturbohybridGraphMetaPage;

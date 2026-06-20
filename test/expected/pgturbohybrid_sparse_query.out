@@ -82,11 +82,13 @@ SELECT turbohybrid_sparse_vector_build(ARRAY[1]::int4[], ARRAY[1.0]::float4[])
 ERROR:  turbohybrid_query does not contain a sparse_query
 HINT:  Pass sparse_query => ... to turbohybrid_query(...).
 DROP TABLE sp_docs;
--- the sparse opclass exists, but native sparse index scan is not implemented:
--- CREATE INDEX with sparse_ip_turbohybrid_ops must be rejected cleanly.
+-- A sparse-only index (no dense/multivector graph key) is rejected: the native
+-- sparse branch is keyed on the dense graph's node identity (sparse-primary is
+-- deferred to a later prompt).  Dense+sparse indexes are exercised in
+-- pgturbohybrid_sparse_scan.
 CREATE TABLE sp_idx (id int, s turbohybrid_sparse_vector);
 CREATE INDEX ON sp_idx USING turbohybrid (s sparse_ip_turbohybrid_ops);
-ERROR:  pgturbohybrid sparse-vector index columns are not supported yet
-DETAIL:  sparse_ip_turbohybrid_ops is reserved for a future native sparse retrieval branch.
-HINT:  Use sparse_query => ... with turbohybrid_query(...) for exact sparse scoring.
+ERROR:  pgturbohybrid sparse-vector indexes require a vector or multivector key
+DETAIL:  The native sparse branch is keyed on the dense graph's node identity.
+HINT:  Add a vector or multivector key as the first index column, or use sparse_query => ... with turbohybrid_query(...) for exact sparse scoring without an index.
 DROP TABLE sp_idx;

@@ -25,6 +25,32 @@
 #define PGTURBOHYBRID_QUERY_FLAG_REQUIRE_SPARSE_MATCH	0x2000
 #define PGTURBOHYBRID_QUERY_FLAG_SPARSE_K_DEFAULTED	0x4000
 
+#define PGTURBOHYBRID_SPARSE_VECTOR_VERSION 1
+#define PGTURBOHYBRID_SPARSE_VECTOR_FIELD_NONE (-1)
+
+/* On-disk turbohybrid_sparse_vector datum layout (defined here so the sparse
+ * index branch can read entries; constructed/validated in pgturbohybrid_query.c). */
+typedef struct PgturbohybridSparseVectorEntry
+{
+	int32		termId;
+	float4		weight;
+	int16		fieldId;
+	uint16		reserved;
+} PgturbohybridSparseVectorEntry;
+
+typedef struct PgturbohybridSparseVector
+{
+	int32		vl_len_;
+	uint16		version;
+	uint16		flags;
+	uint32		count;
+	/* entries follow */
+} PgturbohybridSparseVector;
+
+/* Validate a detoasted sparse-vector datum and return its entries + count. */
+const PgturbohybridSparseVectorEntry *PgturbohybridSparseVectorData(struct varlena *sv,
+																	 uint32 *count);
+
 typedef enum PgturbohybridDenseQueryKind
 {
 	PGTURBOHYBRID_DENSE_QUERY_NONE = 0,

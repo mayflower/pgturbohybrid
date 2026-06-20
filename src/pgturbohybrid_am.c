@@ -48,6 +48,7 @@
 #include "pgturbohybrid_quant_score.h"
 #include "pgturbohybrid_am.h"
 #include "pgturbohybrid_bm25.h"
+#include "pgturbohybrid_sparse.h"
 
 #define PGTURBOHYBRID_DEFAULT_BM25_K1 1.2
 #define PGTURBOHYBRID_DEFAULT_BM25_B 0.75
@@ -1344,13 +1345,16 @@ typedef struct PgturbohybridResult
 	double		multivectorDistance;
 	double		multivectorSimilarity;
 	double		bm25Score;
+	double		sparseSimilarity;
 	double		fusedScore;
 	int32		denseRank;
 	int32		multivectorRank;
 	int32		bm25Rank;
+	int32		sparseRank;
 	bool		hasDense;
 	bool		hasMultivector;
 	bool		hasBm25;
+	bool		hasSparse;
 	bool		exactScored;
 } PgturbohybridResult;
 
@@ -1390,6 +1394,13 @@ typedef struct PgturbohybridLastScanStats
 	bool		denseBranchUsed;
 	bool		multivectorBranchUsed;
 	bool		bm25BranchUsed;
+	bool		sparseBranchAvailable;
+	bool		sparseBranchUsed;
+	uint32		sparseTerms;
+	uint32		sparseResolvedTerms;
+	uint64		sparsePostingsTouched;
+	uint64		sparseCandidatesScored;
+	uint64		sparseElapsedUs;
 	PgturbohybridBranchPlan branchPlan;
 	char		profile[16];
 	char		fusion[16];
@@ -1869,6 +1880,18 @@ PgturbohybridGetLastScanStatsSnapshot(PgturbohybridScanStatsSnapshot *stats)
 		pgturbohybrid_last_scan_state.multivectorBranchUsed;
 	stats->bm25BranchUsed =
 		pgturbohybrid_last_scan_state.bm25BranchUsed;
+	stats->sparseBranchAvailable =
+		pgturbohybrid_last_scan_state.sparseBranchAvailable;
+	stats->sparseBranchUsed =
+		pgturbohybrid_last_scan_state.sparseBranchUsed;
+	stats->sparseTerms = pgturbohybrid_last_scan_state.sparseTerms;
+	stats->sparseResolvedTerms =
+		pgturbohybrid_last_scan_state.sparseResolvedTerms;
+	stats->sparsePostingsTouched =
+		pgturbohybrid_last_scan_state.sparsePostingsTouched;
+	stats->sparseCandidatesScored =
+		pgturbohybrid_last_scan_state.sparseCandidatesScored;
+	stats->sparseElapsedUs = pgturbohybrid_last_scan_state.sparseElapsedUs;
 	stats->branchPlan = pgturbohybrid_last_scan_state.branchPlan;
 	stats->denseCandidatesEffective =
 		pgturbohybrid_last_scan_state.denseCandidatesEffective;
@@ -2749,17 +2772,27 @@ PgturbohybridIndexInfoHasLexical(Relation index, IndexInfo *indexInfo)
 static AttrNumber
 PgturbohybridPathLexicalAttno(IndexPath *path)
 {
+	Relation	index;
+	PgturbohybridIndexKeyMap map;
+	int			bm25Key;
+
 	/*
-	 * Planner context: only dense+bm25 / multivector+bm25 indexes are buildable
-	 * today (sparse keys are rejected), so the bm25 key is always the second
-	 * key column.  Prompt 4 (which enables 3-key dense+sparse+bm25 indexes) must
-	 * generalize this to discover the bm25 key position by type.
+	 * Discover the bm25 (tsvector) key position by type rather than assuming the
+	 * second column: with dense+sparse+bm25 indexes (enabled in prompt 4) the
+	 * bm25 key can be the third column, while the second is the sparse key.
 	 */
-	if (path == NULL || path->indexinfo == NULL ||
-		path->indexinfo->nkeycolumns <= PGTURBOHYBRID_LEXICAL_KEY_INDEX)
+	if (path == NULL || path->indexinfo == NULL)
 		return InvalidAttrNumber;
 
-	return path->indexinfo->indexkeys[PGTURBOHYBRID_LEXICAL_KEY_INDEX];
+	index = index_open(path->indexinfo->indexoid, NoLock);
+	PgturbohybridBuildIndexKeyMap(index, NULL, &map);
+	bm25Key = map.bm25Key;
+	index_close(index, NoLock);
+
+	if (bm25Key < 0 || bm25Key >= path->indexinfo->nkeycolumns)
+		return InvalidAttrNumber;
+
+	return path->indexinfo->indexkeys[bm25Key];
 }
 
 /*
@@ -2887,17 +2920,17 @@ PgturbohybridValidateIndex(Relation index, IndexInfo *indexInfo)
 	PgturbohybridBuildIndexKeyMap(index, indexInfo, &map);
 
 	/*
-	 * Native sparse-vector index retrieval is not implemented yet (the
-	 * sparse_ip_turbohybrid_ops opclass is a skeleton); the key map recognizes
-	 * the sparse key but the AM rejects building such an index for now.
-	 * Dense-present sparse is enabled in prompt 4, sparse-primary in prompt 12.
+	 * Dense-present sparse is enabled in prompt 4: a sparse-vector key is built
+	 * into a native inverted index keyed on the dense/multivector graph's
+	 * node_ids, so it requires a graph key in the same index.  Sparse-primary
+	 * (sparse key without a dense/multivector graph) is deferred to prompt 12.
 	 */
-	if (map.hasSparse)
+	if (map.hasSparse && map.graphKey < 0)
 		ereport(ERROR,
 				(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
-				 errmsg("pgturbohybrid sparse-vector index columns are not supported yet"),
-				 errdetail("sparse_ip_turbohybrid_ops is reserved for a future native sparse retrieval branch."),
-				 errhint("Use sparse_query => ... with turbohybrid_query(...) for exact sparse scoring.")));
+				 errmsg("pgturbohybrid sparse-vector indexes require a vector or multivector key"),
+				 errdetail("The native sparse branch is keyed on the dense graph's node identity."),
+				 errhint("Add a vector or multivector key as the first index column, or use sparse_query => ... with turbohybrid_query(...) for exact sparse scoring without an index.")));
 
 	/* The dense/multivector graph owns node identity; require it for now. */
 	if (map.graphKey < 0)
@@ -6039,6 +6072,76 @@ PgturbohybridFuseGenerationArray(IndexScanDesc scan,
 											 stats);
 }
 
+/*
+ * Sparse-as-sole-ORDER-BY scan (prompt 4): resolve the query's sparse_query
+ * against the native sparse inverted index, exact-OR-accumulate over live nodes,
+ * and fill state->results sorted by descending inner product.  fusedScore is set
+ * to the sparse score so amgettuple returns -score as the ORDER BY distance,
+ * matching turbohybrid_sparse_inner_product_distance().
+ */
+static void
+PgturbohybridCollectSparseOnlyResults(IndexScanDesc scan,
+									  PgturbohybridScanState *state,
+									  PgturbohybridQueryHeader *scanQuery,
+									  PgturbohybridQueryHeader *originalQuery,
+									  int autoBudgetLimit,
+									  MemoryContext tmpCtx,
+									  PgturbohybridLastScanStats *lastStats)
+{
+	PgturbohybridSparseCandidate *cands = NULL;
+	PgturbohybridSparseScanStats sstats;
+	PgturbohybridResult *results;
+	int			finalTarget;
+	int			candidateK;
+	int			n;
+
+	finalTarget = (int) PgturbohybridEffectiveFinalK(originalQuery, autoBudgetLimit);
+	if (finalTarget < 1)
+		finalTarget = 1;
+	candidateK = scanQuery->sparseK > 0 ? scanQuery->sparseK : finalTarget;
+	if (candidateK < finalTarget)
+		candidateK = finalTarget;
+
+	n = PgturbohybridSparseCollectCandidates(scan->indexRelation, scanQuery,
+											 candidateK, &cands, tmpCtx, &sstats);
+
+	results = (PgturbohybridResult *) palloc0(sizeof(PgturbohybridResult) *
+											  Max(n, 1));
+	for (int i = 0; i < n; i++)
+	{
+		results[i].nodeId = cands[i].nodeId;
+		results[i].heaptid = cands[i].heaptid;
+		results[i].hasSparse = true;
+		results[i].sparseSimilarity = cands[i].score;
+		results[i].sparseRank = i + 1;
+		results[i].fusedScore = cands[i].score;
+	}
+
+	state->results = results;
+	state->resultCount = n;
+	state->resultIndex = 0;
+	state->collectDone = true;
+
+	strlcpy(lastStats->indexShape, "sparse", sizeof(lastStats->indexShape));
+	strlcpy(lastStats->profile, PgturbohybridProfileName(pgturbohybrid_profile),
+			sizeof(lastStats->profile));
+	strlcpy(lastStats->fusion, PgturbohybridQueryFusionName(scanQuery->fusion),
+			sizeof(lastStats->fusion));
+	lastStats->sparseBranchAvailable = sstats.branchAvailable;
+	lastStats->sparseBranchUsed = sstats.branchUsed;
+	lastStats->sparseTerms = sstats.terms;
+	lastStats->sparseResolvedTerms = sstats.resolvedTerms;
+	lastStats->sparsePostingsTouched = sstats.postingsTouched;
+	lastStats->sparseCandidatesScored = sstats.candidatesScored;
+	lastStats->sparseElapsedUs = sstats.elapsedUs;
+	lastStats->finalResults = n;
+	lastStats->unionCandidates = n;
+	lastStats->finalKRequested = PgturbohybridRequestedFinalK(originalQuery);
+	lastStats->finalKEffective = finalTarget;
+	lastStats->detectedSqlLimit = autoBudgetLimit;
+	lastStats->autoBudgetLimit = autoBudgetLimit;
+}
+
 static void
 PgturbohybridCollectScanResults(IndexScanDesc scan, PgturbohybridScanState *state)
 {
@@ -6134,6 +6237,25 @@ PgturbohybridCollectScanResults(IndexScanDesc scan, PgturbohybridScanState *stat
 	indexIsMultiVector = PgturbohybridIndexIsMultiVector(scan->indexRelation);
 	canRunVectorBranch = hasVectorQuery && !indexIsMultiVector;
 	useDocumentFusionKey = hasMultivectorQuery;
+
+	/*
+	 * Sparse-as-sole-ORDER-BY (prompt 4): the query targets only the sparse
+	 * column.  Resolve it against the native sparse inverted index and return
+	 * candidates ranked by exact inner product, bypassing the dense/bm25 fusion
+	 * machinery.  Fusing sparse with dense/bm25 is prompt 5.
+	 */
+	if (PgturbohybridQueryHasSparse(scanQuery) &&
+		!hasVectorQuery && !hasMultivectorQuery && !hasTextQuery)
+	{
+		PgturbohybridCollectSparseOnlyResults(scan, state, scanQuery,
+											  originalQuery, autoBudgetLimit,
+											  so->tmpCtx, &lastStats);
+		lastStats.elapsedUs = PgturbohybridElapsedUs(totalStart);
+		pgturbohybrid_last_scan_state = lastStats;
+		state->query = originalQuery;
+		MemoryContextSwitchTo(oldCtx);
+		return;
+	}
 
 	PgturbohybridQueryValidateMultiVectorFusionSupport(scan->indexRelation,
 													   scanQuery);
@@ -7305,6 +7427,9 @@ pgturbohybridambuild(Relation heap, Relation index, IndexInfo *indexInfo)
 	if (PgturbohybridIndexInfoHasLexical(index, indexInfo))
 		PgturbohybridBm25BuildCollect(heap, index, indexInfo);
 
+	/* No-op unless the index has a sparse-vector key (self-guarded). */
+	PgturbohybridSparseBuildCollect(heap, index, indexInfo);
+
 	return result;
 }
 
@@ -7443,6 +7568,7 @@ pgturbohybridamrescan(IndexScanDesc scan, ScanKey keys, int nkeys, ScanKey order
 	bool		hasTextQuery = false;
 	bool		hasVectorQuery = false;
 	bool		hasMultiVectorQuery = false;
+	bool		hasSparseQuery = false;
 	bool		useScalarVectorOrderby = false;
 
 	if (orderbys != NULL && norderbys > 0 &&
@@ -7454,6 +7580,8 @@ pgturbohybridamrescan(IndexScanDesc scan, ScanKey keys, int nkeys, ScanKey order
 		hasVectorQuery = (hybridQuery->flags & PGTURBOHYBRID_QUERY_FLAG_HAS_VECTOR) != 0;
 		hasMultiVectorQuery =
 			(hybridQuery->flags & PGTURBOHYBRID_QUERY_FLAG_HAS_MULTIVECTOR) != 0;
+		hasSparseQuery =
+			(hybridQuery->flags & PGTURBOHYBRID_QUERY_FLAG_HAS_SPARSE) != 0;
 	}
 
 	if (PgturbohybridIndexIsMultiVector(scan->indexRelation))
@@ -7484,7 +7612,7 @@ pgturbohybridamrescan(IndexScanDesc scan, ScanKey keys, int nkeys, ScanKey order
 					 useScalarVectorOrderby ? denseOrderbys : NULL,
 					 useScalarVectorOrderby ? norderbys : 0);
 
-	if (hasTextQuery || hasVectorQuery || hasMultiVectorQuery)
+	if (hasTextQuery || hasVectorQuery || hasMultiVectorQuery || hasSparseQuery)
 	{
 		PgturbohybridGraphScanOpaque so = (PgturbohybridGraphScanOpaque) scan->opaque;
 		MemoryContext oldCtx = MemoryContextSwitchTo(so->tmpCtx);

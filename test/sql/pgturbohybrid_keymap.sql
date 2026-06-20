@@ -33,13 +33,15 @@ SELECT id FROM km ORDER BY v <~> turbohybrid_query(
 RESET enable_seqscan;
 DROP INDEX km_dense_bm25;
 
--- sparse key recognized by the map but native sparse index is rejected cleanly
-CREATE INDEX ON km USING turbohybrid (v vector_cosine_turbohybrid_ops, s sparse_ip_turbohybrid_ops);
--- sparse-only rejected (no graph key + sparse unsupported)
+-- dense+sparse builds (dense-present sparse branch; see pgturbohybrid_sparse_scan)
+CREATE INDEX km_dense_sparse ON km USING turbohybrid (v vector_cosine_turbohybrid_ops, s sparse_ip_turbohybrid_ops);
+DROP INDEX km_dense_sparse;
+-- sparse-only rejected: no dense/multivector graph key to own node identity
 CREATE INDEX ON km USING turbohybrid (s sparse_ip_turbohybrid_ops);
--- 3-key dense+sparse+bm25: the 2-key cap is lifted, then sparse is rejected
-CREATE INDEX ON km USING turbohybrid (
+-- 3-key dense+sparse+bm25: the 2-key cap is lifted and all three branches build
+CREATE INDEX km_dense_sparse_bm25 ON km USING turbohybrid (
   v vector_cosine_turbohybrid_ops, s sparse_ip_turbohybrid_ops, tsv bm25_tsvector_turbohybrid_ops);
+DROP INDEX km_dense_sparse_bm25;
 -- bm25-only rejected: no vector/multivector graph key
 CREATE INDEX ON km USING turbohybrid (tsv bm25_tsvector_turbohybrid_ops);
 -- reordered: graph key must be the first index column

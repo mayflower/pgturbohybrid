@@ -41,22 +41,18 @@ SELECT id FROM km ORDER BY v <~> turbohybrid_query(
 
 RESET enable_seqscan;
 DROP INDEX km_dense_bm25;
--- sparse key recognized by the map but native sparse index is rejected cleanly
-CREATE INDEX ON km USING turbohybrid (v vector_cosine_turbohybrid_ops, s sparse_ip_turbohybrid_ops);
-ERROR:  pgturbohybrid sparse-vector index columns are not supported yet
-DETAIL:  sparse_ip_turbohybrid_ops is reserved for a future native sparse retrieval branch.
-HINT:  Use sparse_query => ... with turbohybrid_query(...) for exact sparse scoring.
--- sparse-only rejected (no graph key + sparse unsupported)
+-- dense+sparse builds (dense-present sparse branch; see pgturbohybrid_sparse_scan)
+CREATE INDEX km_dense_sparse ON km USING turbohybrid (v vector_cosine_turbohybrid_ops, s sparse_ip_turbohybrid_ops);
+DROP INDEX km_dense_sparse;
+-- sparse-only rejected: no dense/multivector graph key to own node identity
 CREATE INDEX ON km USING turbohybrid (s sparse_ip_turbohybrid_ops);
-ERROR:  pgturbohybrid sparse-vector index columns are not supported yet
-DETAIL:  sparse_ip_turbohybrid_ops is reserved for a future native sparse retrieval branch.
-HINT:  Use sparse_query => ... with turbohybrid_query(...) for exact sparse scoring.
--- 3-key dense+sparse+bm25: the 2-key cap is lifted, then sparse is rejected
-CREATE INDEX ON km USING turbohybrid (
+ERROR:  pgturbohybrid sparse-vector indexes require a vector or multivector key
+DETAIL:  The native sparse branch is keyed on the dense graph's node identity.
+HINT:  Add a vector or multivector key as the first index column, or use sparse_query => ... with turbohybrid_query(...) for exact sparse scoring without an index.
+-- 3-key dense+sparse+bm25: the 2-key cap is lifted and all three branches build
+CREATE INDEX km_dense_sparse_bm25 ON km USING turbohybrid (
   v vector_cosine_turbohybrid_ops, s sparse_ip_turbohybrid_ops, tsv bm25_tsvector_turbohybrid_ops);
-ERROR:  pgturbohybrid sparse-vector index columns are not supported yet
-DETAIL:  sparse_ip_turbohybrid_ops is reserved for a future native sparse retrieval branch.
-HINT:  Use sparse_query => ... with turbohybrid_query(...) for exact sparse scoring.
+DROP INDEX km_dense_sparse_bm25;
 -- bm25-only rejected: no vector/multivector graph key
 CREATE INDEX ON km USING turbohybrid (tsv bm25_tsvector_turbohybrid_ops);
 ERROR:  pgturbohybrid index requires a vector or multivector key

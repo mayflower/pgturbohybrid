@@ -164,6 +164,13 @@ typedef struct PgturbohybridScanStatsSnapshot
 	bool		denseBranchUsed;
 	bool		multivectorBranchUsed;
 	bool		bm25BranchUsed;
+	bool		sparseBranchAvailable;
+	bool		sparseBranchUsed;
+	uint32		sparseTerms;
+	uint32		sparseResolvedTerms;
+	uint64		sparsePostingsTouched;
+	uint64		sparseCandidatesScored;
+	uint64		sparseElapsedUs;
 	PgturbohybridBranchPlan branchPlan;
 	uint32		denseCandidatesEffective;
 	bool		denseKDefaulted;
