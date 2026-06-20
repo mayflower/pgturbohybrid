@@ -19,14 +19,23 @@
 #define PGTURBOHYBRID_GRAPH_MULTIVECTOR_DOCMAP_CENTROID_TUPLE_TYPE 0x59
 #define PGTURBOHYBRID_GRAPH_MULTIVECTOR_DOCMAP_CENTROID_POSTING_TUPLE_TYPE 0x5A
 #define PGTURBOHYBRID_GRAPH_MULTIVECTOR_DOCMAP_QUANTIZED_POSTING_TUPLE_TYPE 0x5B
+#define PGTURBOHYBRID_GRAPH_MULTIVECTOR_DOCMAP_QUANTIZED_CODEBOOK_TUPLE_TYPE 0x5C
+#define PGTURBOHYBRID_GRAPH_MULTIVECTOR_DOCMAP_CENTROID_F16_TUPLE_TYPE 0x5D
+#define PGTURBOHYBRID_GRAPH_MULTIVECTOR_DOCMAP_VECTOR_F16_TUPLE_TYPE 0x5E
+#define PGTURBOHYBRID_GRAPH_MULTIVECTOR_DOCMAP_VECTOR_SQ8_TUPLE_TYPE 0x5F
+#define PGTURBOHYBRID_GRAPH_MULTIVECTOR_DOCMAP_CENTROID_DOC_CODE_TUPLE_TYPE 0x60
 #define PGTURBOHYBRID_GRAPH_EXACT_SLAB_MAGIC		0x54514553U
 #define PGTURBOHYBRID_GRAPH_MULTIVECTOR_DOCMAP_MAGIC 0x54514d56U
-#define PGTURBOHYBRID_GRAPH_MULTIVECTOR_DOCMAP_VERSION 3
+#define PGTURBOHYBRID_GRAPH_MULTIVECTOR_DOCMAP_VERSION 4
 #define PGTURBOHYBRID_GRAPH_MULTIVECTOR_DOCMAP_FLAG_DOC_VECTORS 0x0001
 #define PGTURBOHYBRID_GRAPH_MULTIVECTOR_DOCMAP_FLAG_CONTEXTS 0x0002
 #define PGTURBOHYBRID_GRAPH_MULTIVECTOR_DOCMAP_FLAG_CENTROIDS 0x0004
 #define PGTURBOHYBRID_GRAPH_MULTIVECTOR_DOCMAP_FLAG_CENTROID_POSTINGS 0x0008
 #define PGTURBOHYBRID_GRAPH_MULTIVECTOR_DOCMAP_FLAG_QUANTIZED_POSTINGS 0x0010
+#define PGTURBOHYBRID_GRAPH_MULTIVECTOR_DOCMAP_FLAG_QUANTIZED_CODEBOOK 0x0020
+#define PGTURBOHYBRID_GRAPH_MULTIVECTOR_DOCMAP_FLAG_PROXY_ONLY 0x0040
+#define PGTURBOHYBRID_GRAPH_MULTIVECTOR_DOCMAP_FLAG_CENTROIDS_F16 0x0080
+#define PGTURBOHYBRID_GRAPH_MULTIVECTOR_DOCMAP_FLAG_CENTROID_DOC_CODES 0x0100
 #define PGTURBOHYBRID_GRAPH_NODE_DEAD				0x0001
 #define PGTURBOHYBRID_GRAPH_TQ_PLUS				0x0001	/* metapage: ecShift/ecScale correction tuples present */
 #define PGTURBOHYBRID_GRAPH_TQ_WEIGHTED			0x0002	/* metapage: code tuples carry per-vector ec_correction */
@@ -177,12 +186,41 @@ typedef struct PgturbohybridGraphMultiVectorDocMapVectorTupleData
 
 typedef PgturbohybridGraphMultiVectorDocMapVectorTupleData *PgturbohybridGraphMultiVectorDocMapVectorTuple;
 
+typedef struct PgturbohybridGraphMultiVectorDocMapVectorF16TupleData
+{
+	uint8		type;
+	uint8		version;
+	uint16		count;
+	uint32		magic;
+	uint32		docId;
+	uint32		startFloat;
+	uint16		values[FLEXIBLE_ARRAY_MEMBER];
+} PgturbohybridGraphMultiVectorDocMapVectorF16TupleData;
+
+typedef PgturbohybridGraphMultiVectorDocMapVectorF16TupleData *PgturbohybridGraphMultiVectorDocMapVectorF16Tuple;
+
+typedef struct PgturbohybridGraphMultiVectorDocMapVectorSq8TupleData
+{
+	uint8		type;
+	uint8		version;
+	uint16		count;
+	uint32		magic;
+	uint32		docId;
+	uint32		startFloat;
+	float		scale;
+	int8		values[FLEXIBLE_ARRAY_MEMBER];
+} PgturbohybridGraphMultiVectorDocMapVectorSq8TupleData;
+
+typedef PgturbohybridGraphMultiVectorDocMapVectorSq8TupleData *PgturbohybridGraphMultiVectorDocMapVectorSq8Tuple;
+
 typedef struct PgturbohybridGraphMultiVectorDocVectorChunkRef
 {
 	BlockNumber blkno;
 	OffsetNumber offno;
 	uint32		startFloat;
 	uint16		count;
+	uint8		storageKind;
+	uint8		unused;
 } PgturbohybridGraphMultiVectorDocVectorChunkRef;
 
 typedef struct PgturbohybridGraphMultiVectorDocMapContextTupleData
@@ -214,11 +252,27 @@ typedef struct PgturbohybridGraphMultiVectorDocMapCentroidTupleData
 
 typedef PgturbohybridGraphMultiVectorDocMapCentroidTupleData *PgturbohybridGraphMultiVectorDocMapCentroidTuple;
 
+typedef struct PgturbohybridGraphMultiVectorDocMapCentroidF16TupleData
+{
+	uint8		type;
+	uint8		version;
+	uint16		count;
+	uint32		magic;
+	uint32		docId;
+	uint16		centroidCount;
+	uint16		flags;
+	uint32		startFloat;
+	float		residualMean;
+	uint16		values[FLEXIBLE_ARRAY_MEMBER];
+} PgturbohybridGraphMultiVectorDocMapCentroidF16TupleData;
+
+typedef PgturbohybridGraphMultiVectorDocMapCentroidF16TupleData *PgturbohybridGraphMultiVectorDocMapCentroidF16Tuple;
+
 typedef struct PgturbohybridGraphMultiVectorCentroidPostingEntry
 {
 	uint32		docId;
 	uint16		centroidOrdinal;
-	uint16		unused;
+	uint16		scorePayload;
 } PgturbohybridGraphMultiVectorCentroidPostingEntry;
 
 typedef struct PgturbohybridGraphMultiVectorDocMapCentroidPostingTupleData
@@ -234,12 +288,33 @@ typedef struct PgturbohybridGraphMultiVectorDocMapCentroidPostingTupleData
 
 typedef PgturbohybridGraphMultiVectorDocMapCentroidPostingTupleData *PgturbohybridGraphMultiVectorDocMapCentroidPostingTuple;
 
+typedef struct PgturbohybridGraphMultiVectorDocMapCentroidDocCodeTupleData
+{
+	uint8		type;
+	uint8		version;
+	uint16		count;
+	uint32		magic;
+	uint32		docId;
+	uint32		codebookSize;
+	uint32		startCode;
+	uint32		codes[FLEXIBLE_ARRAY_MEMBER];
+} PgturbohybridGraphMultiVectorDocMapCentroidDocCodeTupleData;
+
+typedef PgturbohybridGraphMultiVectorDocMapCentroidDocCodeTupleData *PgturbohybridGraphMultiVectorDocMapCentroidDocCodeTuple;
+
 typedef struct PgturbohybridGraphMultiVectorQuantizedPostingEntry
 {
 	uint32		docId;
 	uint16		tokenOrdinal;
 	uint16		scorePayload;
 } PgturbohybridGraphMultiVectorQuantizedPostingEntry;
+
+typedef struct PgturbohybridGraphMultiVectorQuantizedBuildPostingList
+{
+	PgturbohybridGraphMultiVectorQuantizedPostingEntry *postings;
+	uint32		count;
+	uint32		capacity;
+} PgturbohybridGraphMultiVectorQuantizedBuildPostingList;
 
 typedef struct PgturbohybridGraphMultiVectorDocMapQuantizedPostingTupleData
 {
@@ -253,6 +328,20 @@ typedef struct PgturbohybridGraphMultiVectorDocMapQuantizedPostingTupleData
 } PgturbohybridGraphMultiVectorDocMapQuantizedPostingTupleData;
 
 typedef PgturbohybridGraphMultiVectorDocMapQuantizedPostingTupleData *PgturbohybridGraphMultiVectorDocMapQuantizedPostingTuple;
+
+typedef struct PgturbohybridGraphMultiVectorDocMapQuantizedCodebookTupleData
+{
+	uint8		type;
+	uint8		version;
+	uint16		source;
+	uint32		magic;
+	uint32		dim;
+	uint32		codebookSize;
+	uint32		topM;
+	char		checksum[128];
+} PgturbohybridGraphMultiVectorDocMapQuantizedCodebookTupleData;
+
+typedef PgturbohybridGraphMultiVectorDocMapQuantizedCodebookTupleData *PgturbohybridGraphMultiVectorDocMapQuantizedCodebookTuple;
 
 typedef struct PgturbohybridGraphBuildNode
 {
@@ -314,6 +403,7 @@ typedef struct PgturbohybridQuantBuildState
 	bool		multivectorBuild;	/* heap tuple expands into one graph node per subvector */
 	int			multivectorGraphMode;
 	int			multivectorDocBuildScorer;
+	int			multivectorDocStorage;
 	int			multivectorTokenPooling;
 	double		multivectorTokenPoolingTargetRatio;
 	int			multivectorTokenPoolingMinTokens;
@@ -332,6 +422,41 @@ typedef struct PgturbohybridQuantBuildState
 	float	   *multivectorDocCentroidResiduals;
 	uint32		multivectorDocCount;
 	uint32		multivectorDocCapacity;
+	uint64		multivectorCentroidBuildUs;
+	uint64		multivectorCentroidClusterUs;
+	uint64		multivectorCentroidResidualUs;
+	uint64		multivectorCentroidBuildDocs;
+	uint64		multivectorCentroidBuildVectors;
+	uint64		multivectorProxyBuildUs;
+	uint64		learnedProjectionDocEncodeBuildUs;
+	uint64		multivectorDocSidecarWriteUs;
+	uint64		multivectorCentroidSidecarWriteUs;
+	uint64		multivectorCentroidPostingWriteUs;
+	uint64		multivectorCentroidPostingCount;
+	uint64		multivectorDocMapBytesEstimate;
+	uint64		multivectorDocVectorsPointerBytes;
+	uint64		multivectorDocVectorChunkRefBytes;
+	uint64		multivectorDocVectorPayloadBytesEstimate;
+	uint64		multivectorCentroidVectorBytes;
+	uint64		multivectorCentroidResidualBytes;
+	uint64		multivectorCentroidPostingBytes;
+	PgturbohybridGraphMultiVectorQuantizedBuildPostingList *multivectorQuantizedBuildPostingLists;
+	uint32		multivectorQuantizedBuildPostingCount;
+	uint32		multivectorQuantizedBuildCodebookSize;
+	uint64		multivectorQuantizedPostingBytes;
+	uint64		graphNodeBytesEstimate;
+	uint64		graphNeighborBytesEstimate;
+	uint64		buildPeakMemoryContextBytes;
+	char		buildPeakMemoryPhase[64];
+	uint64		buildMemoryHeapScanDecodeBytes;
+	uint64		buildMemoryTokenPoolingBytes;
+	uint64		buildMemoryProxyEncodingBytes;
+	uint64		buildMemoryCentroidClusteringBytes;
+	uint64		buildMemoryCentroidResidualBytes;
+	uint64		buildMemorySidecarTupleBytes;
+	uint64		buildMemoryPostingTupleBytes;
+	uint64		buildMemoryGraphEdgeBytes;
+	uint64		buildMemoryPageWalBytes;
 	struct PgturbohybridGraphBuildDistanceCacheEntry *buildDistanceCache;
 	uint32		buildDistanceCacheMask;
 	uint64		buildDistanceCacheHits;
@@ -381,7 +506,10 @@ typedef struct PgturbohybridQuantBuildState
 	uint64		buildDistanceFallback;
 	uint64		multivectorDocExactBuildDistanceCalls;
 	uint64		multivectorDocExactBuildDistanceUs;
+	uint64		buildGraphNodeAssignmentUs;
 	uint64		buildEdgeDistanceCalls;
+	uint64		buildEdgeEntrySearchUs;
+	uint64		buildEdgeNeighborSearchUs;
 	uint64		buildEdgeSearchLayerUs;
 	uint64		buildEdgeSelectNeighborUs;
 	uint64		buildEdgeAddNeighborUs;
@@ -511,6 +639,12 @@ typedef struct TqDenseCandidateStats
 	char		multivectorCandidateSource[48];
 	char		multivectorCandidatePath[48];
 	char		multivectorProxyEncoderKind[32];
+	bool		learnedProjectionLoaded;
+	uint32		learnedProjectionDim;
+	uint64		learnedProjectionWeightBytes;
+	char		learnedProjectionModel[128];
+	char		learnedProjectionChecksum[128];
+	uint64		learnedProjectionQueryEncodeUs;
 	char		multivectorGraphMode[24];
 	uint64		multivectorProxyGraphSearches;
 	bool		multivectorExactTokenScanEnabled;
@@ -527,8 +661,24 @@ typedef struct TqDenseCandidateStats
 	uint32		multivectorDocGraphSearchEf;
 	uint32		multivectorDocGraphOversampling;
 	uint32		multivectorDocGraphRescoreK;
+	uint32		multivectorDocGraphEntrySampleConfigured;
+	uint32		multivectorDocGraphEntrySampleEffective;
+	uint32		multivectorDocGraphEntrySampleScored;
 	uint64		multivectorDocGraphQuantizedScores;
+	uint64		compactMaxsimScoreUs;
+	uint64		compactMaxsimPairs;
+	uint64		compactMaxsimCacheHits;
+	uint64		compactMaxsimCacheMisses;
+	uint64		compactMaxsimBoundChecks;
+	uint64		compactMaxsimDocsPruned;
+	uint64		compactMaxsimTokensSkipped;
 	char		multivectorDocGraphStorageKind[16];
+	bool		proxyOnlyIndex;
+	bool		centroidOnlyIndex;
+	bool		fullMultivectorSidecarAvailable;
+	bool		centroidSidecarAvailable;
+	bool		centroidDocCodesAvailable;
+	bool		quantizedInvertedSidecarAvailable;
 	char		multivectorDocGraphRescoreSource[16];
 	uint32		multivectorDocGraphExactRerankDocs;
 	uint64		multivectorDocGraphHeapFetches;
@@ -536,28 +686,162 @@ typedef struct TqDenseCandidateStats
 	uint32		multivectorProxyCandidateTarget;
 	uint32		multivectorProxyCandidatesReturned;
 	uint32		multivectorExactRerankKEffective;
+	uint32		proxyCandidateLimitEffective;
+	char		proxyCandidateLimitSource[32];
+	uint64		proxyGraphNodesVisited;
+	uint64		proxyGraphEdgesVisited;
+	uint32		proxyGraphCandidatesSeen;
+	uint32		proxyCandidatesReturned;
+	uint64		proxyVectorScoresComputed;
+	uint64		proxyVectorScoreUs;
 	uint32		proxyCandidates;
+	bool		proxyLazySidecarVectors;
+	char		multivectorDocStorageCacheRequested[16];
+	char		multivectorDocStorageCacheEffective[16];
 	bool		proxyTop1Admission;
 	uint32		proxyExactRerankDocs;
+	uint64		proxyFullSidecarVectorsLoaded;
+	uint64		proxyFullSidecarBytesTouched;
+	uint64		proxyFullSidecarPagesRead;
+	uint64		proxyFullSidecarLoadUs;
+	uint64		proxyFullSidecarReconstructUs;
+	uint64		proxyExactRerankHeapFetches;
+	uint64		proxyExactRerankSidecarFetches;
+	uint64		proxyExactRerankBytesTouched;
+	uint64		proxyExactRerankUs;
+	bool		sidecarCacheBuildThisQuery;
+	uint64		sidecarCacheBuildBytes;
+	uint64		sidecarCacheBuildPagesRead;
+	uint64		sidecarCacheBuildUs;
+	uint64		sidecarQueryBytesTouched;
+	uint64		sidecarQueryPagesRead;
+	uint64		sidecarQueryVectorsLoaded;
+	uint64		sidecarQueryLoadUs;
+	uint64		sidecarQueryUs;
+	bool		proxyVectorUsesFullSidecarForGraph;
+	bool		proxyVectorNearExhaustiveSidecarTouch;
+	char		proxyVectorSidecarTouchReason[64];
 	uint64		centroidListsVisited;
 	uint64		centroidDocsTouched;
 	uint64		centroidPrunedDocs;
+	uint64		centroidPostingsTouched;
+	uint64		centroidPostingsSelected;
+	uint64		centroidPostingsSkipped;
+	uint64		centroidProbeUs;
+	uint64		centroidPostingScanUs;
+	uint64		centroidAccumulateUs;
+	uint64		centroidCandidateHeapUs;
+	uint32		centroidPostingLimitPerToken;
+	uint32		centroidProbeCentroidsPerToken;
+	uint32		centroidCodewordTopM;
+	double		centroidScoreThreshold;
+	double		centroidScoreDropFromBest;
+	uint64		centroidListsSkippedByThreshold;
+	char		centroidPostingCapStrategy[32];
+	char		centroidCandidateScoring[32];
 	uint32		centroidCandidates;
+	bool		centroidBitsetPrefilterEnabled;
+	uint32		centroidBitsetMinTokenMatches;
+	uint32		centroidBitsetListsUsed;
+	uint32		centroidBitsetDocsSet;
+	uint32		centroidBitsetDocsAfterThreshold;
+	uint64		centroidBitsetPrefilterUs;
+	uint64		centroidBitsetMemoryBytes;
+	bool		centroidUpperBoundEnabled;
+	uint64		centroidUpperBoundDocsChecked;
+	uint64		centroidUpperBoundDocsPruned;
+	uint64		centroidUpperBoundPruneUs;
+	uint64		centroidUpperBoundUnsafeFallbacks;
+	uint32		centroidCandidatesBeforeBound;
+	uint32		centroidCandidatesAfterBound;
 	uint32		multivectorCentroidCount;
 	uint32		multivectorCentroidPrerankDocs;
 	uint32		multivectorFullMaxsimRerankDocs;
 	uint64		quantizedInvertedListsVisited;
 	uint64		quantizedInvertedPostingsTouched;
+	uint64		quantizedInvertedPostingsSelected;
+	uint64		quantizedInvertedPostingsSkipped;
+	uint32		quantizedInvertedPostingLimitPerToken;
+	uint32		quantizedInvertedProbeCodewordsPerToken;
+	char		quantizedInvertedPostingCapStrategy[32];
 	uint64		quantizedInvertedDocsScored;
 	uint32		quantizedInvertedCandidates;
 	uint32		quantizedInvertedExactRerankDocs;
+	char		quantizedInvertedCodebookSource[16];
 	uint32		quantizedInvertedCodebookSize;
+	uint32		quantizedInvertedCodebookDim;
+	char		quantizedInvertedCodebookChecksum[128];
+	uint32		quantizedInvertedCodebookTopM;
+	uint64		quantizedInvertedAssignmentUs;
+	uint64		quantizedInvertedQueryCodewordScoreUs;
+	char		quantizedInvertedQueryCodewordKernel[16];
+	uint64		quantizedInvertedQueryCodewordScoresComputed;
+	uint64		quantizedInvertedQueryCodewordBlocks;
+	uint64		quantizedInvertedQueryCodewordTopkUs;
+	bool		quantizedInvertedQueryCodewordFullMatrixMaterialized;
+	uint32		quantizedInvertedQueryCodewordActiveQueryTokens;
+	uint32		quantizedInvertedQueryCodewordSkippedQueryTokens;
+	uint64		quantizedInvertedListOffsetBytes;
+	uint64		quantizedInvertedPostingBytes;
+	uint64		quantizedInvertedSidecarBytes;
+	char		quantizedInvertedCompactKernel[24];
+	char		quantizedInvertedCompactScoreSource[32];
+	uint64		quantizedInvertedCompactScoreUs;
+	uint64		quantizedInvertedCompactDocsScored;
+	uint64		quantizedInvertedCompactPayloadBytes;
+	char		quantizedInvertedCompactDocOrder[16];
+	uint64		quantizedInvertedCompactInnerAllocations;
+	uint32		quantizedInvertedCompactActiveQueryTokens;
+	uint64		quantizedInvertedCompactPairsEvaluated;
+	uint64		quantizedInvertedCompactPairsSkipped;
+	uint64		quantizedInvertedCompactPrefetches;
+	double		quantizedInvertedCompactAvgDocTokens;
+	double		quantizedInvertedCompactUsPerDoc;
+	double		quantizedInvertedCompactPayloadBytesPerDoc;
+	bool		quantizedInvertedCompactTopKChangedVsScalar;
+	bool		quantizedInvertedPrecompactEnabled;
+	char		quantizedInvertedPrecompactMode[32];
+	uint32		quantizedInvertedDocsTouchedBeforePrecompact;
+	uint32		quantizedInvertedPrecompactScoreK;
+	uint32		quantizedInvertedPrecompactCoverageK;
+	uint32		quantizedInvertedPrecompactPerTokenK;
+	uint32		quantizedInvertedCompactMaxDocs;
+	uint32		quantizedInvertedPrecompactScoreDocs;
+	uint32		quantizedInvertedPrecompactCoverageDocs;
+	uint32		quantizedInvertedPrecompactPerTokenDocs;
+	uint32		quantizedInvertedPrecompactUnionDocs;
+	uint32		quantizedInvertedPrecompactDuplicates;
+	uint32		quantizedInvertedPrecompactPrunedDocs;
+	uint64		quantizedInvertedPrecompactUs;
+	uint32		quantizedInvertedCompactDocsSkippedByPrecompact;
+	char		quantizedInvertedTokenCoverageMode[24];
+	uint32		quantizedInvertedActiveQueryTokens;
+	uint64		quantizedInvertedTokenMatchesTotal;
+	uint32		quantizedInvertedTokenMatchesMax;
+	uint32		quantizedInvertedMinTokenMatches;
+	uint64		quantizedInvertedTokenMatchFilteredDocs;
+	bool		quantizedInvertedScoreBoundPruningEnabled;
+	uint64		quantizedInvertedScoreBoundDocsChecked;
+	uint64		quantizedInvertedScoreBoundDocsPruned;
+	uint64		quantizedInvertedScoreBoundPruneUs;
+	uint64		quantizedInvertedScoreBoundUnsafeFallbacks;
+	uint32		quantizedInvertedCandidatesBeforeBound;
+	uint32		quantizedInvertedCandidatesAfterBound;
 	char		multivectorDocSidecarCacheMode[16];
 	uint64		multivectorDocSidecarPagesRead;
 	uint64		multivectorDocSidecarCacheHits;
 	uint64		multivectorDocSidecarCacheMisses;
 	uint64		multivectorDocSidecarBytesTouched;
 	uint64		multivectorDocSidecarVectorsLoaded;
+	uint64		multivectorDocSidecarDocMapPagesRead;
+	uint64		multivectorDocSidecarDocMapBytesTouched;
+	uint64		multivectorDocSidecarResidentVectorsLoaded;
+	uint64		multivectorDocSidecarResidentBytesLoaded;
+	uint64		multivectorDocSidecarVectorChunkRefBytesTouched;
+	uint64		multivectorDocSidecarPagedVectorPagesRead;
+	uint64		multivectorDocSidecarPagedVectorBytesTouched;
+	uint64		multivectorSidecarPageReadUs;
+	uint64		multivectorSidecarVectorReconstructUs;
 	uint64		multivectorTokensOriginal;
 	uint64		multivectorTokensPooled;
 	bool		multivectorReservoirsEnabled;
@@ -570,6 +854,9 @@ typedef struct TqDenseCandidateStats
 	uint32		multivectorReservoirDuplicates;
 	bool		multivectorBm25InjectionEnabled;
 	uint32		multivectorBm25InjectionCandidates;
+	uint32		multivectorBm25InjectionCandidateLimit;
+	uint32		multivectorBm25InjectionPoolSize;
+	char		multivectorBm25InjectionLimitReason[32];
 	uint32		multivectorBm25InjectionRetained;
 	uint32		multivectorBm25InjectionExactReranked;
 	uint32		learnedSparseCandidates;
@@ -589,6 +876,18 @@ typedef struct TqDenseCandidateStats
 	uint64		multivectorExactRerankHeapFetches;
 	uint64		multivectorExactRerankSidecarReads;
 	uint64		multivectorExactRerankSidecarBytes;
+	uint64		multivectorCandidateSourceUs;
+	uint64		multivectorDocGraphTraversalUs;
+	uint64		multivectorProxyCandidateUs;
+	uint64		multivectorProxyGraphTraversalUs;
+	uint64		multivectorProxyScoringUs;
+	uint64		multivectorCentroidLitePostingUs;
+	uint64		multivectorQuantizedInvertedPostingUs;
+	uint64		multivectorSidecarLoadUs;
+	uint64		multivectorHeapVisibilityUs;
+	uint64		multivectorExactHeapFetchUs;
+	uint64		multivectorExactRerankUs;
+	uint64		multivectorFinalSortUs;
 	uint32		exactRerankCandidates;
 	uint64		exactRerankTokensEvaluated;
 	uint64		exactRerankTokensSkipped;
@@ -685,20 +984,34 @@ typedef struct PgturbohybridGraphScanStorage
 	float	   *multivectorDocCentroidResiduals;
 	PgturbohybridGraphMultiVectorCentroidPostingEntry *multivectorCentroidPostings;
 	uint32	   *multivectorCentroidPostingListOffsets;
+	uint32	   *multivectorCentroidDocCodeOffsets;
+	uint32	   *multivectorCentroidDocCodes;
 	uint32		multivectorCentroidPostingCodebookSize;
 	uint32		multivectorCentroidPostingCount;
+	uint32		multivectorCentroidDocCodeCount;
 	PgturbohybridGraphMultiVectorQuantizedPostingEntry *multivectorQuantizedInvertedPostings;
 	uint32	   *multivectorQuantizedInvertedListOffsets;
+	uint32	   *multivectorQuantizedInvertedDocCodeOffsets;
+	uint32	   *multivectorQuantizedInvertedDocCodes;
 	uint32		multivectorQuantizedInvertedCodebookSize;
+	uint32		multivectorQuantizedInvertedCodebookDim;
+	uint32		multivectorQuantizedInvertedCodebookTopM;
+	int			multivectorQuantizedInvertedCodebookSource;
+	char		multivectorQuantizedInvertedCodebookChecksum[128];
 	uint32		multivectorQuantizedInvertedPostingCount;
+	uint32		multivectorQuantizedInvertedDocCodeCount;
 	uint32		payloadRefCount;
 	uint32		multivectorDocCount;
 	uint32		multivectorDocMapBytes;
 	bool		multivectorDocVectorsLoaded;
 	bool		multivectorDocVectorsPaged;
+	bool		multivectorDocContextsSkipped;
+	bool		multivectorDocCentroidVectorsSkipped;
 	bool		multivectorDocCentroidsLoaded;
 	bool		multivectorCentroidPostingsLoaded;
+	bool		multivectorCentroidDocCodesLoaded;
 	bool		multivectorQuantizedInvertedPostingsLoaded;
+	bool		multivectorQuantizedInvertedDocCodesLoaded;
 	bool		multivectorDocMapLoaded;
 	MemoryContext ctx;
 	int			codeTuplesPerPage;
@@ -716,7 +1029,28 @@ typedef struct PgturbohybridMultiVectorDocSidecarAccessStats
 	uint64		cacheMisses;
 	uint64		bytesTouched;
 	uint64		vectorsLoaded;
+	uint64		docMapPagesRead;
+	uint64		docMapBytesTouched;
+	uint64		residentVectorsLoaded;
+	uint64		residentVectorBytesLoaded;
+	uint64		vectorChunkRefBytesTouched;
+	uint64		pagedVectorPagesRead;
+	uint64		pagedVectorBytesTouched;
+	uint64		pageReadUs;
+	uint64		vectorReconstructUs;
 } PgturbohybridMultiVectorDocSidecarAccessStats;
+
+typedef bool (*PgturbohybridMultiVectorDocChunkCallback) (const float *values,
+														  uint16 count,
+														  uint32 startFloat,
+														  void *arg);
+
+typedef bool (*PgturbohybridMultiVectorDocCompactChunkCallback) (int storageKind,
+																 const void *values,
+																 float scale,
+																 uint16 count,
+																 uint32 startFloat,
+																 void *arg);
 
 typedef struct PgturbohybridGraphNativeCache
 {
@@ -766,6 +1100,29 @@ typedef struct PgturbohybridGraphNativeCache
 	struct PgturbohybridGraphNativeCache *next;
 } PgturbohybridGraphNativeCache;
 
+typedef struct PgturbohybridGraphDocSidecarCache
+{
+	Oid			relid;
+	Oid			relfilenumber;
+	uint32		dimensions;
+	uint32		tqNodeCount;
+	BlockNumber tqMultivectorDocMapStartBlkno;
+	uint32		tqMultivectorDocMapPageCount;
+	uint32		tqMultivectorDocCount;
+	uint32		tqMultivectorDocMapBytes;
+	uint16		tqMultivectorDocMapVersion;
+	uint16		tqMultivectorDocMapFlags;
+	uint16		tqMultivectorGraphMode;
+	bool		pagedDocVectors;
+	bool		contextsSkipped;
+	PgturbohybridGraphScanStorage storage;
+	MemoryContext ctx;
+	int64		buildUs;
+	uint64		buildBytesTouched;
+	uint64		buildPagesRead;
+	struct PgturbohybridGraphDocSidecarCache *next;
+} PgturbohybridGraphDocSidecarCache;
+
 /*
  * Out-param for PgturbohybridGraphInitScanStorage: how the scan's storage was
  * satisfied this scan (per-backend cache vs uncached per-scan loading), whether
@@ -790,6 +1147,12 @@ typedef struct PgturbohybridGraphCacheInitInfo
 	int64		adjBytes;
 	int64		exactBytes;
 	int64		docMapBytes;
+	bool		docSidecarCacheUsed;
+	bool		docSidecarCacheReused;
+	bool		docSidecarCacheBuiltThisScan;
+	int64		docSidecarCacheBuildUs;
+	uint64		docSidecarCacheBytesTouched;
+	uint64		docSidecarCachePagesRead;
 	bool		warning;
 	const char *warningReason;
 	int64		codeBufferLockWaitUs;
@@ -1069,6 +1432,26 @@ PgturbohybridGraphMultiVectorDocMapVectorTupleSize(uint16 count)
 }
 
 static inline Size
+PgturbohybridGraphMultiVectorDocMapVectorF16TupleSize(uint16 count)
+{
+	return MAXALIGN(offsetof(PgturbohybridGraphMultiVectorDocMapVectorF16TupleData,
+							 values) +
+					PgturbohybridCheckedArrayBytes(sizeof(uint16),
+												   count,
+												   "pgturbohybrid multivector docmap f16 vector tuple"));
+}
+
+static inline Size
+PgturbohybridGraphMultiVectorDocMapVectorSq8TupleSize(uint16 count)
+{
+	return MAXALIGN(offsetof(PgturbohybridGraphMultiVectorDocMapVectorSq8TupleData,
+							 values) +
+					PgturbohybridCheckedArrayBytes(sizeof(int8),
+												   count,
+												   "pgturbohybrid multivector docmap sq8 vector tuple"));
+}
+
+static inline Size
 PgturbohybridGraphMultiVectorDocMapContextTupleSize(uint16 contextCount,
 													bool hasFields)
 {
@@ -1092,13 +1475,33 @@ PgturbohybridGraphMultiVectorDocMapCentroidTupleSize(uint16 count)
 }
 
 static inline Size
+PgturbohybridGraphMultiVectorDocMapCentroidF16TupleSize(uint16 count)
+{
+	return MAXALIGN(offsetof(PgturbohybridGraphMultiVectorDocMapCentroidF16TupleData,
+							 values) +
+					PgturbohybridCheckedArrayBytes(sizeof(uint16),
+												   count,
+												   "pgturbohybrid multivector docmap f16 centroid tuple"));
+}
+
+static inline Size
 PgturbohybridGraphMultiVectorDocMapCentroidPostingTupleSize(uint16 count)
 {
 	return MAXALIGN(offsetof(PgturbohybridGraphMultiVectorDocMapCentroidPostingTupleData,
 							 entries) +
 					PgturbohybridCheckedArrayBytes(sizeof(PgturbohybridGraphMultiVectorCentroidPostingEntry),
 												   count,
-												   "pgturbohybrid multivector docmap centroid posting tuple"));
+													   "pgturbohybrid multivector docmap centroid posting tuple"));
+}
+
+static inline Size
+PgturbohybridGraphMultiVectorDocMapCentroidDocCodeTupleSize(uint16 count)
+{
+	return MAXALIGN(offsetof(PgturbohybridGraphMultiVectorDocMapCentroidDocCodeTupleData,
+							 codes) +
+					PgturbohybridCheckedArrayBytes(sizeof(uint32),
+												   count,
+												   "pgturbohybrid multivector docmap centroid doc-code tuple"));
 }
 
 static inline Size
@@ -1229,6 +1632,12 @@ void		PgturbohybridGraphInvalidateCaches(Relation index);
 void		PgturbohybridGraphInitScanStorage(Relation index, PgturbohybridGraphMetaPageData *meta,
 							   PgturbohybridGraphScanStorage *storage,
 							   PgturbohybridGraphCacheInitInfo *info);
+bool		PgturbohybridGraphAttachMultiVectorDocSidecarCache(Relation index,
+									 PgturbohybridGraphMetaPageData *meta,
+									 PgturbohybridGraphScanStorage *storage,
+									 bool pagedDocVectors,
+									 bool contextsSkipped,
+									 PgturbohybridGraphCacheInitInfo *info);
 bool		PgturbohybridGraphLoadMultiVectorDocMap(Relation index,
 									 PgturbohybridGraphMetaPageData *meta,
 									 PgturbohybridGraphScanStorage *storage,
@@ -1238,15 +1647,36 @@ bool		PgturbohybridGraphLoadMultiVectorDocMapWithStats(Relation index,
 									 PgturbohybridGraphScanStorage *storage,
 									 bool require,
 									 PgturbohybridMultiVectorDocSidecarAccessStats *stats);
+bool		PgturbohybridGraphLoadCentroidLiteCompactDocMapWithStats(Relation index,
+									 PgturbohybridGraphMetaPageData *meta,
+									 PgturbohybridGraphScanStorage *storage,
+										 const bool *selectedCodewords,
+										 uint32 codebookSize,
+										 bool requireFullDocCodes,
+										 PgturbohybridMultiVectorDocSidecarAccessStats *stats);
 PgturbohybridMultiVector *PgturbohybridGraphLoadMultiVectorDocVector(Relation index,
 									  PgturbohybridGraphMetaPageData *meta,
 									  PgturbohybridGraphScanStorage *storage,
 									  TqDocId docId,
 									  MemoryContext ctx,
 									  PgturbohybridMultiVectorDocSidecarAccessStats *stats);
-PgturbohybridMultiVector *PgturbohybridGraphReadMultiVectorDocFromSidecar(Relation index,
+bool		PgturbohybridGraphVisitMultiVectorDocVectorChunks(Relation index,
+										  PgturbohybridGraphMetaPageData *meta,
+										  PgturbohybridGraphScanStorage *storage,
+										  TqDocId docId,
+										  PgturbohybridMultiVectorDocChunkCallback callback,
+										  void *arg,
+										  PgturbohybridMultiVectorDocSidecarAccessStats *stats);
+bool		PgturbohybridGraphVisitMultiVectorDocCompactChunks(Relation index,
+										 PgturbohybridGraphMetaPageData *meta,
+										 PgturbohybridGraphScanStorage *storage,
 										 TqDocId docId,
-										 MemoryContext ctx);
+										 PgturbohybridMultiVectorDocCompactChunkCallback callback,
+										 void *arg,
+										 PgturbohybridMultiVectorDocSidecarAccessStats *stats);
+PgturbohybridMultiVector *PgturbohybridGraphReadMultiVectorDocFromSidecar(Relation index,
+											 TqDocId docId,
+											 MemoryContext ctx);
 PgturbohybridGraphNativeCache *PgturbohybridGraphInitInsertStorage(Relation index, PgturbohybridGraphMetaPageData *meta,
 										  PgturbohybridGraphScanStorage *storage);
 bool		PgturbohybridGraphEstimateMemory(Relation index,

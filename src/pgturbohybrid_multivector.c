@@ -14,6 +14,8 @@
 #include "fmgr.h"
 #include "lib/stringinfo.h"
 #include "libpq/pqformat.h"
+#include "storage/fd.h"
+#include "portability/instr_time.h"
 #include "utils/fmgrprotos.h"
 #include "utils/array.h"
 #include "utils/builtins.h"
@@ -61,6 +63,21 @@
 #define PGTURBOHYBRID_MULTIVECTOR_AVX512F_TARGET
 #endif
 
+#if !defined(PGTURBOHYBRID_DISABLE_SIMD) && \
+	(defined(__AVX512BW__) || (defined(__x86_64__) && (defined(__GNUC__) || defined(__clang__))))
+#define PGTURBOHYBRID_MULTIVECTOR_COMPILE_AVX512BW 1
+#else
+#define PGTURBOHYBRID_MULTIVECTOR_COMPILE_AVX512BW 0
+#endif
+
+#if PGTURBOHYBRID_MULTIVECTOR_COMPILE_AVX512BW && \
+	(!defined(__AVX512BW__) || !defined(__AVX512F__)) && \
+	(defined(__GNUC__) || defined(__clang__))
+#define PGTURBOHYBRID_MULTIVECTOR_AVX512BW_TARGET __attribute__((target("avx512bw,avx512f")))
+#else
+#define PGTURBOHYBRID_MULTIVECTOR_AVX512BW_TARGET
+#endif
+
 #if !defined(PGTURBOHYBRID_DISABLE_SIMD) && (defined(__aarch64__) || defined(_M_ARM64))
 #define PGTURBOHYBRID_MULTIVECTOR_COMPILE_NEON 1
 #include <arm_neon.h>
@@ -91,11 +108,15 @@ FUNCTION_PREFIX PG_FUNCTION_INFO_V1(pgturbohybrid_multivector_maxsim_blocked_sca
 FUNCTION_PREFIX PG_FUNCTION_INFO_V1(pgturbohybrid_multivector_maxsim_distance);
 FUNCTION_PREFIX PG_FUNCTION_INFO_V1(pgturbohybrid_multivector_query_distance);
 FUNCTION_PREFIX PG_FUNCTION_INFO_V1(pgturbohybrid_multivector_model_info);
+FUNCTION_PREFIX PG_FUNCTION_INFO_V1(pgturbohybrid_experimental_compact_code_score);
 
 static Oid	pgturbohybrid_multivector_type_oid = InvalidOid;
 extern char *pgturbohybrid_multivector_model_name;
 extern int	pgturbohybrid_multivector_max_doc_vectors;
 extern int	pgturbohybrid_multivector_max_query_vectors;
+extern char *pgturbohybrid_multivector_learned_projection_path;
+extern char *pgturbohybrid_multivector_learned_projection_model;
+extern char *pgturbohybrid_multivector_learned_projection_checksum;
 
 #define PGTURBOHYBRID_MULTIVECTOR_BINARY_VERSION 1
 #define PGTURBOHYBRID_MULTIVECTOR_BINARY_VERSION_CONTEXTS 2
@@ -110,6 +131,9 @@ static float4 TqMvParseFloat4(const char **cursor);
 static void TqMvExpectChar(const char **cursor, char expected);
 static void PgturbohybridMultiVectorRejectTextFallback(void);
 static int32 *PgturbohybridMultiVectorReadInt4Array(ArrayType *array,
+													const char *name,
+													int *nelems);
+static int16 *PgturbohybridMultiVectorReadInt2Array(ArrayType *array,
 													const char *name,
 													int *nelems);
 static float4 *PgturbohybridMultiVectorReadFloat4Array(ArrayType *array,
@@ -129,24 +153,31 @@ static void PgturbohybridMultiVectorWarnSuspiciousTokenCount(uint32 tokenCount,
 															 uint32 maxTokenCount);
 static Vector *PgturbohybridMultiVectorSubvectorCopy(const PgturbohybridMultiVector *mv,
 													 int32 ordinal);
-static double PgturbohybridMultiVectorTokenCosine(const PgturbohybridMultiVector *mv,
-												  int32 a, int32 b);
 static void PgturbohybridMultiVectorNormalizeToken(float *values, int32 dim);
 static uint32 PgturbohybridMultiVectorProxyHash(uint32 a, uint32 b, uint32 salt);
 static void PgturbohybridMultiVectorProxyMean(const PgturbohybridMultiVector *mv,
 											  Vector *vector);
 static void PgturbohybridMultiVectorProxyNormalizedMean(const PgturbohybridMultiVector *mv,
 														Vector *vector);
+static void PgturbohybridMultiVectorProxyLearnedProjectionV1(const PgturbohybridMultiVector *mv,
+															 Vector *vector);
+
+typedef struct PgturbohybridLearnedProjectionWeights
+{
+	char	   *path;
+	char	   *model;
+	char	   *checksum;
+	int32		inputDim;
+	int32		outputDim;
+	Size		weightBytes;
+	float	   *weights;
+} PgturbohybridLearnedProjectionWeights;
+
+static PgturbohybridLearnedProjectionWeights *pgturbohybrid_learned_projection_cache = NULL;
 
 typedef double (*TqDotProductF32Func) (const float *a, const float *b, int32 dim);
-typedef void (*TqDotProductF32BlockFunc) (const float *queryValues,
-										  const float *docValues,
-										  int32 dim,
-										  int32 blockCount,
-										  double *dots);
 typedef double (*TqMultiVectorMaxSimFunc) (const PgturbohybridMultiVector *query,
 										   const PgturbohybridMultiVector *doc);
-
 static double TqMultiVectorSymmetricMaxSimAverageWithDotUnchecked(const PgturbohybridMultiVector *a,
 																  const PgturbohybridMultiVector *b,
 																  TqDotProductF32Func dotProduct,
@@ -263,6 +294,32 @@ PgturbohybridMultiVectorModelJsonbAddInt32(PgturbohybridJsonbState *state,
 	value.type = jbvNumeric;
 	value.val.numeric = DatumGetNumeric(DirectFunctionCall1(int8_numeric,
 															Int64GetDatum((int64) val)));
+	PgturbohybridJsonbPush(state, WJB_VALUE, &value);
+}
+
+static void
+PgturbohybridMultiVectorModelJsonbAddInt64(PgturbohybridJsonbState *state,
+										   const char *key, int64 val)
+{
+	JsonbValue	value;
+
+	PgturbohybridMultiVectorModelJsonbAddKey(state, key);
+	value.type = jbvNumeric;
+	value.val.numeric = DatumGetNumeric(DirectFunctionCall1(int8_numeric,
+															Int64GetDatum(val)));
+	PgturbohybridJsonbPush(state, WJB_VALUE, &value);
+}
+
+static void
+PgturbohybridMultiVectorModelJsonbAddFloat8(PgturbohybridJsonbState *state,
+											const char *key, double val)
+{
+	JsonbValue	value;
+
+	PgturbohybridMultiVectorModelJsonbAddKey(state, key);
+	value.type = jbvNumeric;
+	value.val.numeric = DatumGetNumeric(DirectFunctionCall1(float8_numeric,
+															Float8GetDatum(val)));
 	PgturbohybridJsonbPush(state, WJB_VALUE, &value);
 }
 
@@ -386,6 +443,17 @@ PgturbohybridMultiVectorTypeOid(void)
 						CStringGetDatum("turbohybrid_multivector"),
 						ObjectIdGetDatum(schemaOid));
 	return pgturbohybrid_multivector_type_oid;
+}
+
+bool
+PgturbohybridTypeIsMultiVector(Oid typeOid)
+{
+	Oid			multivectorOid = PgturbohybridMultiVectorTypeOid();
+
+	if (!OidIsValid(multivectorOid) || !OidIsValid(typeOid))
+		return false;
+
+	return getBaseType(typeOid) == multivectorOid;
 }
 
 static void
@@ -823,6 +891,42 @@ PgturbohybridMultiVectorReadInt4Array(ArrayType *array, const char *name,
 	return values;
 }
 
+static int16 *
+PgturbohybridMultiVectorReadInt2Array(ArrayType *array, const char *name,
+									  int *nelems)
+{
+	Datum	   *elements;
+	bool	   *nulls;
+	int16	   *values;
+
+	if (array == NULL || ARR_NDIM(array) == 0)
+		ereport(ERROR,
+				(errcode(ERRCODE_DATA_EXCEPTION),
+				 errmsg("%s array cannot be empty", name)));
+	if (ARR_ELEMTYPE(array) != INT2OID)
+		ereport(ERROR,
+				(errcode(ERRCODE_DATATYPE_MISMATCH),
+				 errmsg("expected smallint[] input for %s", name)));
+
+	deconstruct_array(array, INT2OID, sizeof(int16), true, TYPALIGN_SHORT,
+					  &elements, &nulls, nelems);
+	if (*nelems <= 0)
+		ereport(ERROR,
+				(errcode(ERRCODE_DATA_EXCEPTION),
+				 errmsg("%s array cannot be empty", name)));
+
+	values = palloc(sizeof(int16) * (Size) *nelems);
+	for (int i = 0; i < *nelems; i++)
+	{
+		if (nulls[i])
+			ereport(ERROR,
+					(errcode(ERRCODE_NULL_VALUE_NOT_ALLOWED),
+					 errmsg("%s array cannot contain null elements", name)));
+		values[i] = DatumGetInt16(elements[i]);
+	}
+	return values;
+}
+
 static float4 *
 PgturbohybridMultiVectorReadFloat4Array(ArrayType *array, const char *name,
 										int *nelems)
@@ -970,27 +1074,36 @@ PgturbohybridMultiVectorBuildFromFlatArray(ArrayType *array, int32 dim,
 }
 
 static double
-PgturbohybridMultiVectorTokenCosine(const PgturbohybridMultiVector *mv, int32 a,
-									int32 b)
+PgturbohybridMultiVectorTokenNorm(const PgturbohybridMultiVector *mv, int32 token)
+{
+	const float *values = PgturbohybridMultiVectorValues(mv, token);
+	double		norm = 0.0;
+
+	for (int32 dim = 0; dim < mv->dim; dim++)
+	{
+		double		x = values[dim];
+
+		norm += x * x;
+	}
+	return norm > 0.0 ? sqrt(norm) : 0.0;
+}
+
+static double
+PgturbohybridMultiVectorTokenCosineWithNorms(const PgturbohybridMultiVector *mv,
+											 int32 a, int32 b,
+											 const double *tokenNorms)
 {
 	const float *av = PgturbohybridMultiVectorValues(mv, a);
 	const float *bv = PgturbohybridMultiVectorValues(mv, b);
 	double		dot = 0.0;
-	double		anorm = 0.0;
-	double		bnorm = 0.0;
+	double		denom;
 
-	for (int32 dim = 0; dim < mv->dim; dim++)
-	{
-		double		ax = av[dim];
-		double		bx = bv[dim];
-
-		dot += ax * bx;
-		anorm += ax * ax;
-		bnorm += bx * bx;
-	}
-	if (anorm <= 0.0 || bnorm <= 0.0)
+	denom = tokenNorms[a] * tokenNorms[b];
+	if (denom <= 0.0)
 		return 0.0;
-	return dot / sqrt(anorm * bnorm);
+	for (int32 dim = 0; dim < mv->dim; dim++)
+		dot += (double) av[dim] * (double) bv[dim];
+	return dot / denom;
 }
 
 static void
@@ -1018,6 +1131,8 @@ PgturbohybridMultiVectorPoolDocumentTokens(const PgturbohybridMultiVector *mv,
 	int		   *selected;
 	bool	   *isSelected;
 	int		   *clusterCounts;
+	double	   *tokenNorms;
+	double	   *nearestSelectedSimilarity;
 	float	   *centroids;
 	float	   *sums;
 	Size		centroidBytes;
@@ -1056,12 +1171,26 @@ PgturbohybridMultiVectorPoolDocumentTokens(const PgturbohybridMultiVector *mv,
 	selected = palloc0(sizeof(int) * targetCount);
 	isSelected = palloc0(sizeof(bool) * mv->count);
 	clusterCounts = palloc0(sizeof(int) * targetCount);
+	tokenNorms = palloc0(sizeof(double) * mv->count);
+	nearestSelectedSimilarity = palloc0(sizeof(double) * mv->count);
 	centroidBytes = sizeof(float) * (Size) targetCount * (Size) mv->dim;
 	centroids = palloc0(centroidBytes);
 	sums = palloc0(centroidBytes);
 
+	for (int32 token = 0; token < mv->count; token++)
+		tokenNorms[token] = PgturbohybridMultiVectorTokenNorm(mv, token);
 	selected[0] = 0;
 	isSelected[0] = true;
+	for (int32 token = 0; token < mv->count; token++)
+	{
+		if (token == selected[0])
+			nearestSelectedSimilarity[token] = DBL_MAX;
+		else
+			nearestSelectedSimilarity[token] =
+				PgturbohybridMultiVectorTokenCosineWithNorms(mv, token,
+															 selected[0],
+															 tokenNorms);
+	}
 	for (int32 cluster = 1; cluster < targetCount; cluster++)
 	{
 		double		bestWorstSimilarity = DBL_MAX;
@@ -1069,18 +1198,12 @@ PgturbohybridMultiVectorPoolDocumentTokens(const PgturbohybridMultiVector *mv,
 
 		for (int32 token = 0; token < mv->count; token++)
 		{
-			double		bestSimilarity = -DBL_MAX;
-
 			if (isSelected[token])
 				continue;
-			for (int32 existing = 0; existing < cluster; existing++)
-				bestSimilarity =
-					Max(bestSimilarity,
-						PgturbohybridMultiVectorTokenCosine(mv, token,
-															selected[existing]));
-			if (bestToken < 0 || bestSimilarity < bestWorstSimilarity)
+			if (bestToken < 0 ||
+				nearestSelectedSimilarity[token] < bestWorstSimilarity)
 			{
-				bestWorstSimilarity = bestSimilarity;
+				bestWorstSimilarity = nearestSelectedSimilarity[token];
 				bestToken = token;
 			}
 		}
@@ -1088,6 +1211,20 @@ PgturbohybridMultiVectorPoolDocumentTokens(const PgturbohybridMultiVector *mv,
 			bestToken = cluster;
 		selected[cluster] = bestToken;
 		isSelected[bestToken] = true;
+		nearestSelectedSimilarity[bestToken] = DBL_MAX;
+		for (int32 token = 0; token < mv->count; token++)
+		{
+			double		similarity;
+
+			if (isSelected[token])
+				continue;
+			similarity =
+				PgturbohybridMultiVectorTokenCosineWithNorms(mv, token,
+															 bestToken,
+															 tokenNorms);
+			if (similarity > nearestSelectedSimilarity[token])
+				nearestSelectedSimilarity[token] = similarity;
+		}
 	}
 
 	for (int32 cluster = 0; cluster < targetCount; cluster++)
@@ -1147,6 +1284,8 @@ PgturbohybridMultiVectorPoolDocumentTokens(const PgturbohybridMultiVector *mv,
 	memcpy(pooled->values, centroids, centroidBytes);
 	pfree(sums);
 	pfree(centroids);
+	pfree(nearestSelectedSimilarity);
+	pfree(tokenNorms);
 	pfree(clusterCounts);
 	pfree(isSelected);
 	pfree(selected);
@@ -1239,6 +1378,217 @@ PgturbohybridMultiVectorProxyHash(uint32 a, uint32 b, uint32 salt)
 	return x;
 }
 
+static bool
+PgturbohybridStringIsEmpty(const char *value)
+{
+	return value == NULL || value[0] == '\0';
+}
+
+static void
+PgturbohybridLearnedProjectionFreeCache(void)
+{
+	if (pgturbohybrid_learned_projection_cache == NULL)
+		return;
+
+	pfree(pgturbohybrid_learned_projection_cache->path);
+	pfree(pgturbohybrid_learned_projection_cache->model);
+	pfree(pgturbohybrid_learned_projection_cache->checksum);
+	pfree(pgturbohybrid_learned_projection_cache->weights);
+	pfree(pgturbohybrid_learned_projection_cache);
+	pgturbohybrid_learned_projection_cache = NULL;
+}
+
+static void
+PgturbohybridValidateLearnedProjectionExpectedMetadata(const PgturbohybridLearnedProjectionWeights *projection)
+{
+	if (!PgturbohybridStringIsEmpty(pgturbohybrid_multivector_learned_projection_model) &&
+		strcmp(projection->model,
+			   pgturbohybrid_multivector_learned_projection_model) != 0)
+		ereport(ERROR,
+				(errcode(ERRCODE_INVALID_PARAMETER_VALUE),
+				 errmsg("learned_projection_v1 model mismatch"),
+				 errdetail("Projection file declares model \"%s\", but turbohybrid.multivector_learned_projection_model is \"%s\".",
+						   projection->model,
+						   pgturbohybrid_multivector_learned_projection_model)));
+	if (!PgturbohybridStringIsEmpty(pgturbohybrid_multivector_learned_projection_checksum) &&
+		strcmp(projection->checksum,
+			   pgturbohybrid_multivector_learned_projection_checksum) != 0)
+		ereport(ERROR,
+				(errcode(ERRCODE_INVALID_PARAMETER_VALUE),
+				 errmsg("learned_projection_v1 checksum mismatch"),
+				 errdetail("Projection file declares checksum \"%s\", but turbohybrid.multivector_learned_projection_checksum is \"%s\".",
+						   projection->checksum,
+						   pgturbohybrid_multivector_learned_projection_checksum)));
+}
+
+static PgturbohybridLearnedProjectionWeights *
+PgturbohybridLoadLearnedProjectionWeights(int32 dim)
+{
+	FILE	   *file;
+	char		magic[64];
+	char		model[128];
+	char		checksum[128];
+	int			inputDim;
+	int			outputDim;
+	Size		weightCount;
+	Size		weightBytes;
+	MemoryContext oldCtx;
+	PgturbohybridLearnedProjectionWeights *loaded;
+
+	if (PgturbohybridStringIsEmpty(pgturbohybrid_multivector_learned_projection_path))
+		ereport(ERROR,
+				(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
+				 errmsg("learned_projection_v1 multivector proxy encoder requires configured projection weights"),
+				 errhint("Set turbohybrid.multivector_learned_projection_path to an administrator-provided projection weight file, or use multivector_proxy_encoder = normalized_mean.")));
+
+	if (pgturbohybrid_learned_projection_cache != NULL &&
+		strcmp(pgturbohybrid_learned_projection_cache->path,
+			   pgturbohybrid_multivector_learned_projection_path) == 0)
+	{
+		PgturbohybridValidateLearnedProjectionExpectedMetadata(pgturbohybrid_learned_projection_cache);
+		if (pgturbohybrid_learned_projection_cache->inputDim != dim ||
+			pgturbohybrid_learned_projection_cache->outputDim != dim)
+			ereport(ERROR,
+					(errcode(ERRCODE_INVALID_PARAMETER_VALUE),
+					 errmsg("learned_projection_v1 dimensions do not match multivector dimension"),
+					 errdetail("Projection file has input_dim=%d and output_dim=%d, but the multivector dimension is %d.",
+							   pgturbohybrid_learned_projection_cache->inputDim,
+							   pgturbohybrid_learned_projection_cache->outputDim,
+							   dim)));
+		return pgturbohybrid_learned_projection_cache;
+	}
+
+	file = AllocateFile(pgturbohybrid_multivector_learned_projection_path, "r");
+	if (file == NULL)
+		ereport(ERROR,
+				(errcode_for_file_access(),
+				 errmsg("could not open learned_projection_v1 weights file \"%s\": %m",
+						pgturbohybrid_multivector_learned_projection_path)));
+
+	if (fscanf(file, "%63s %127s %d %d %127s",
+			   magic, model, &inputDim, &outputDim, checksum) != 5)
+	{
+		FreeFile(file);
+		ereport(ERROR,
+				(errcode(ERRCODE_INVALID_TEXT_REPRESENTATION),
+				 errmsg("invalid learned_projection_v1 weights header"),
+				 errdetail("Expected: pgturbohybrid_learned_projection_v1 <model> <input_dim> <output_dim> <checksum>.")));
+	}
+	if (strcmp(magic, "pgturbohybrid_learned_projection_v1") != 0)
+	{
+		FreeFile(file);
+		ereport(ERROR,
+				(errcode(ERRCODE_INVALID_TEXT_REPRESENTATION),
+				 errmsg("invalid learned_projection_v1 weights magic \"%s\"",
+						magic)));
+	}
+	if (!PgturbohybridStringIsEmpty(pgturbohybrid_multivector_learned_projection_model) &&
+		strcmp(model, pgturbohybrid_multivector_learned_projection_model) != 0)
+	{
+		FreeFile(file);
+		ereport(ERROR,
+				(errcode(ERRCODE_INVALID_PARAMETER_VALUE),
+				 errmsg("learned_projection_v1 model mismatch"),
+				 errdetail("Projection file declares model \"%s\", but turbohybrid.multivector_learned_projection_model is \"%s\".",
+						   model,
+						   pgturbohybrid_multivector_learned_projection_model)));
+	}
+	if (!PgturbohybridStringIsEmpty(pgturbohybrid_multivector_learned_projection_checksum) &&
+		strcmp(checksum, pgturbohybrid_multivector_learned_projection_checksum) != 0)
+	{
+		FreeFile(file);
+		ereport(ERROR,
+				(errcode(ERRCODE_INVALID_PARAMETER_VALUE),
+				 errmsg("learned_projection_v1 checksum mismatch"),
+				 errdetail("Projection file declares checksum \"%s\", but turbohybrid.multivector_learned_projection_checksum is \"%s\".",
+						   checksum,
+						   pgturbohybrid_multivector_learned_projection_checksum)));
+	}
+	if (inputDim <= 0 || outputDim <= 0 ||
+		inputDim > PGTURBOHYBRID_MULTIVECTOR_MAX_DIM ||
+		outputDim > PGTURBOHYBRID_MULTIVECTOR_MAX_DIM)
+	{
+		FreeFile(file);
+		ereport(ERROR,
+				(errcode(ERRCODE_INVALID_PARAMETER_VALUE),
+				 errmsg("learned_projection_v1 dimensions are out of range")));
+	}
+	if (inputDim != dim || outputDim != dim)
+	{
+		FreeFile(file);
+		ereport(ERROR,
+				(errcode(ERRCODE_INVALID_PARAMETER_VALUE),
+				 errmsg("learned_projection_v1 dimensions do not match multivector dimension"),
+				 errdetail("Projection file has input_dim=%d and output_dim=%d, but the multivector dimension is %d.",
+						   inputDim, outputDim, dim),
+				 errhint("This first safe slice keeps proxy vectors in the index multivector dimension; use a matching projection or rebuild with a compatible model profile.")));
+	}
+
+	weightCount = (Size) inputDim * (Size) outputDim;
+	weightBytes = sizeof(float) * weightCount;
+	oldCtx = MemoryContextSwitchTo(TopMemoryContext);
+	loaded = palloc0(sizeof(PgturbohybridLearnedProjectionWeights));
+	loaded->path = pstrdup(pgturbohybrid_multivector_learned_projection_path);
+	loaded->model = pstrdup(model);
+	loaded->checksum = pstrdup(checksum);
+	loaded->inputDim = inputDim;
+	loaded->outputDim = outputDim;
+	loaded->weightBytes = weightBytes;
+	loaded->weights = palloc0(weightBytes);
+	MemoryContextSwitchTo(oldCtx);
+
+	for (Size i = 0; i < weightCount; i++)
+	{
+		double		value;
+
+		if (fscanf(file, "%lf", &value) != 1)
+		{
+			FreeFile(file);
+			PgturbohybridLearnedProjectionFreeCache();
+			pfree(loaded->path);
+			pfree(loaded->model);
+			pfree(loaded->checksum);
+			pfree(loaded->weights);
+			pfree(loaded);
+			ereport(ERROR,
+					(errcode(ERRCODE_INVALID_TEXT_REPRESENTATION),
+					 errmsg("learned_projection_v1 weights file ended before all weights were read"),
+					 errdetail("Expected %zu float weights after the header.",
+							   weightCount)));
+		}
+		loaded->weights[i] = (float) value;
+	}
+	FreeFile(file);
+
+	PgturbohybridLearnedProjectionFreeCache();
+	pgturbohybrid_learned_projection_cache = loaded;
+	return loaded;
+}
+
+bool
+PgturbohybridMultiVectorLearnedProjectionInfo(bool *loaded,
+											  int32 *dim,
+											  uint64 *weightBytes,
+											  const char **model,
+											  const char **checksum)
+{
+	if (loaded != NULL)
+		*loaded = pgturbohybrid_learned_projection_cache != NULL;
+	if (dim != NULL)
+		*dim = pgturbohybrid_learned_projection_cache != NULL ?
+			pgturbohybrid_learned_projection_cache->outputDim : 0;
+	if (weightBytes != NULL)
+		*weightBytes = pgturbohybrid_learned_projection_cache != NULL ?
+			(uint64) pgturbohybrid_learned_projection_cache->weightBytes : 0;
+	if (model != NULL)
+		*model = pgturbohybrid_learned_projection_cache != NULL ?
+			pgturbohybrid_learned_projection_cache->model : "";
+	if (checksum != NULL)
+		*checksum = pgturbohybrid_learned_projection_cache != NULL ?
+			pgturbohybrid_learned_projection_cache->checksum : "";
+	return pgturbohybrid_learned_projection_cache != NULL;
+}
+
 const char *
 PgturbohybridMultiVectorProxyEncoderName(int encoder)
 {
@@ -1258,6 +1608,8 @@ PgturbohybridMultiVectorProxyEncoderName(int encoder)
 			return "random_projection_fde";
 		case PGTURBOHYBRID_MULTIVECTOR_PROXY_ENCODER_LEARNED_PROJECTION_PLACEHOLDER:
 			return "learned_projection_placeholder";
+		case PGTURBOHYBRID_MULTIVECTOR_PROXY_ENCODER_LEARNED_PROJECTION_V1:
+			return "learned_projection_v1";
 		case PGTURBOHYBRID_MULTIVECTOR_PROXY_ENCODER_MEAN:
 		default:
 			return "mean";
@@ -1312,6 +1664,41 @@ PgturbohybridMultiVectorProxyMaxAbsMean(const PgturbohybridMultiVector *mv,
 	}
 }
 
+static void
+PgturbohybridMultiVectorProxyLearnedProjectionV1(const PgturbohybridMultiVector *mv,
+												 Vector *vector)
+{
+	PgturbohybridLearnedProjectionWeights *projection;
+	float	   *source;
+
+	projection = PgturbohybridLoadLearnedProjectionWeights(mv->dim);
+	source = palloc0(sizeof(float) * (Size) mv->dim);
+
+	for (int32 token = 0; token < mv->count; token++)
+	{
+		const float *values = PgturbohybridMultiVectorValues(mv, token);
+
+		for (int32 dim = 0; dim < mv->dim; dim++)
+			source[dim] += values[dim];
+	}
+	for (int32 dim = 0; dim < mv->dim; dim++)
+		source[dim] /= (float) mv->count;
+	PgturbohybridMultiVectorNormalizeToken(source, mv->dim);
+
+	for (int32 outDim = 0; outDim < projection->outputDim; outDim++)
+	{
+		double		sum = 0.0;
+		const float *weights =
+			projection->weights + (Size) outDim * (Size) projection->inputDim;
+
+		for (int32 inDim = 0; inDim < projection->inputDim; inDim++)
+			sum += (double) weights[inDim] * (double) source[inDim];
+		vector->x[outDim] = (float) sum;
+	}
+	PgturbohybridMultiVectorNormalizeToken(vector->x, vector->dim);
+	pfree(source);
+}
+
 Vector *
 PgturbohybridMultiVectorBuildProxyVectorWithCentroids(const PgturbohybridMultiVector *mv,
 													  const PgturbohybridMultiVector *centroids,
@@ -1328,7 +1715,7 @@ PgturbohybridMultiVectorBuildProxyVectorWithCentroids(const PgturbohybridMultiVe
 		ereport(ERROR,
 				(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
 				 errmsg("learned multivector proxy projection is not configured"),
-				 errhint("Use multivector_proxy_encoder = normalized_mean, mean, first_token, max_abs_mean, centroid_mean, max_pool, or random_projection_fde until learned projection weights are supported.")));
+				 errhint("Use multivector_proxy_encoder = learned_projection_v1 with turbohybrid.multivector_learned_projection_path, or use normalized_mean, mean, first_token, max_abs_mean, centroid_mean, max_pool, or random_projection_fde.")));
 
 	vector = MemoryContextAllocZero(ctx, PGTURBOHYBRID_VECTOR_SIZE(mv->dim));
 	SET_VARSIZE(vector, PGTURBOHYBRID_VECTOR_SIZE(mv->dim));
@@ -1401,6 +1788,9 @@ PgturbohybridMultiVectorBuildProxyVectorWithCentroids(const PgturbohybridMultiVe
 					}
 				}
 			}
+			break;
+		case PGTURBOHYBRID_MULTIVECTOR_PROXY_ENCODER_LEARNED_PROJECTION_V1:
+			PgturbohybridMultiVectorProxyLearnedProjectionV1(mv, vector);
 			break;
 		case PGTURBOHYBRID_MULTIVECTOR_PROXY_ENCODER_MEAN:
 		default:
@@ -1795,6 +2185,36 @@ TqDotProductF32BlockScalar(const float *queryValues, const float *docValues,
 	}
 }
 
+TqDotProductF32BlockFunc
+TqResolveDotProductF32BlockKernel(void)
+{
+	if (pgturbohybrid_dense_exact_simd_force == PGTURBOHYBRID_EXACT_SIMD_FORCE_SCALAR)
+		return TqDotProductF32BlockScalar;
+
+#if PGTURBOHYBRID_MULTIVECTOR_COMPILE_AVX512F
+	if (TqMultiVectorAvx512fAvailable())
+		return TqDotProductF32BlockAvx512f;
+#endif
+#if PGTURBOHYBRID_MULTIVECTOR_COMPILE_AVX2
+	if (TqMultiVectorAvx2Available())
+		return TqDotProductF32BlockAvx2;
+#endif
+#if PGTURBOHYBRID_MULTIVECTOR_COMPILE_NEON
+	return TqDotProductF32BlockNeon;
+#endif
+	return TqDotProductF32BlockScalar;
+}
+
+void
+TqDotProductF32BlockAuto(const float *queryValues, const float *docValues,
+						 int32 dim, int32 blockCount, double *dots)
+{
+	Assert(blockCount > 0 &&
+		   blockCount <= PGTURBOHYBRID_MULTIVECTOR_BLOCKED_SCALAR_Q);
+	TqResolveDotProductF32BlockKernel()(queryValues, docValues, dim, blockCount,
+										dots);
+}
+
 double
 TqMultiVectorMaxSimScalar(const PgturbohybridMultiVector *query,
 						  const PgturbohybridMultiVector *doc)
@@ -2004,6 +2424,389 @@ TqMultiVectorMaxSimKernelName(void)
 #if PGTURBOHYBRID_MULTIVECTOR_COMPILE_NEON
 	if (func == TqMultiVectorMaxSimBlockedNeon)
 		return "blocked_neon";
+#endif
+	return "unknown";
+}
+
+int64
+TqCompactCodeScoreScalar(const int16 *queryCodes, const int16 *docCodes,
+						 int32 count)
+{
+	int64		score = 0;
+
+	for (int32 i = 0; i < count; i++)
+		score += (int64) queryCodes[i] * (int64) docCodes[i];
+	return score;
+}
+
+void
+TqCompactCodeScoreBatchScalar(int16 queryCode, const int16 *docCodes,
+							  int32 count, int64 *scores)
+{
+	for (int32 i = 0; i < count; i++)
+		scores[i] = (int64) queryCode * (int64) docCodes[i];
+}
+
+#if PGTURBOHYBRID_MULTIVECTOR_COMPILE_AVX2
+static inline int64 PGTURBOHYBRID_MULTIVECTOR_AVX2_TARGET
+TqCompactCodeHsum256Epi32(__m256i values)
+{
+	__m128i		low = _mm256_castsi256_si128(values);
+	__m128i		high = _mm256_extracti128_si256(values, 1);
+	__m128i		sum = _mm_add_epi32(low, high);
+
+	sum = _mm_hadd_epi32(sum, sum);
+	sum = _mm_hadd_epi32(sum, sum);
+	return (int64) _mm_cvtsi128_si32(sum);
+}
+
+static int64 PGTURBOHYBRID_MULTIVECTOR_AVX2_TARGET
+TqCompactCodeScoreAvx2(const int16 *queryCodes, const int16 *docCodes,
+					   int32 count)
+{
+	int32		i = 0;
+	int64		score = 0;
+
+	for (; i + 16 <= count; i += 16)
+	{
+		__m256i		q = _mm256_loadu_si256((const __m256i *) (queryCodes + i));
+		__m256i		d = _mm256_loadu_si256((const __m256i *) (docCodes + i));
+		__m256i		prod = _mm256_madd_epi16(q, d);
+
+		score += TqCompactCodeHsum256Epi32(prod);
+	}
+
+	for (; i < count; i++)
+		score += (int64) queryCodes[i] * (int64) docCodes[i];
+	return score;
+}
+
+static void PGTURBOHYBRID_MULTIVECTOR_AVX2_TARGET
+TqCompactCodeScoreBatchAvx2(int16 queryCode, const int16 *docCodes,
+							int32 count, int64 *scores)
+{
+	__m256i		q = _mm256_set1_epi32((int32) queryCode);
+	int32		i = 0;
+	int32		tmp[8];
+
+	for (; i + 8 <= count; i += 8)
+	{
+		__m128i		packed = _mm_loadu_si128((const __m128i *) (docCodes + i));
+		__m256i		d = _mm256_cvtepi16_epi32(packed);
+		__m256i		prod = _mm256_mullo_epi32(q, d);
+
+		_mm256_storeu_si256((__m256i *) tmp, prod);
+		for (int lane = 0; lane < 8; lane++)
+			scores[i + lane] = (int64) tmp[lane];
+	}
+
+	for (; i < count; i++)
+		scores[i] = (int64) queryCode * (int64) docCodes[i];
+}
+#endif
+
+#if PGTURBOHYBRID_MULTIVECTOR_COMPILE_AVX512BW
+static bool
+TqMultiVectorAvx512bwAvailable(void)
+{
+#if defined(__AVX512BW__) && defined(__AVX512F__)
+	return true;
+#elif defined(__GNUC__) || defined(__clang__)
+	return __builtin_cpu_supports("avx512f") &&
+		__builtin_cpu_supports("avx512bw");
+#else
+	return false;
+#endif
+}
+
+static int64 PGTURBOHYBRID_MULTIVECTOR_AVX512BW_TARGET
+TqCompactCodeScoreAvx512(const int16 *queryCodes, const int16 *docCodes,
+						 int32 count)
+{
+	int32		i = 0;
+	int64		score = 0;
+
+	for (; i + 32 <= count; i += 32)
+	{
+		__m512i		q = _mm512_loadu_si512((const void *) (queryCodes + i));
+		__m512i		d = _mm512_loadu_si512((const void *) (docCodes + i));
+		__m512i		prod = _mm512_madd_epi16(q, d);
+
+		score += (int64) _mm512_reduce_add_epi32(prod);
+	}
+
+	for (; i < count; i++)
+		score += (int64) queryCodes[i] * (int64) docCodes[i];
+	return score;
+}
+
+static void PGTURBOHYBRID_MULTIVECTOR_AVX512BW_TARGET
+TqCompactCodeScoreBatchAvx512(int16 queryCode, const int16 *docCodes,
+							  int32 count, int64 *scores)
+{
+	__m512i		q = _mm512_set1_epi32((int32) queryCode);
+	int32		i = 0;
+	int32		tmp[16];
+
+	for (; i + 16 <= count; i += 16)
+	{
+		__m256i		packed = _mm256_loadu_si256((const __m256i *) (docCodes + i));
+		__m512i		d = _mm512_cvtepi16_epi32(packed);
+		__m512i		prod = _mm512_mullo_epi32(q, d);
+
+		_mm512_storeu_si512((void *) tmp, prod);
+		for (int lane = 0; lane < 16; lane++)
+			scores[i + lane] = (int64) tmp[lane];
+	}
+
+	for (; i < count; i++)
+		scores[i] = (int64) queryCode * (int64) docCodes[i];
+}
+#endif
+
+#if PGTURBOHYBRID_MULTIVECTOR_COMPILE_NEON
+static int64
+TqCompactCodeScoreNeon(const int16 *queryCodes, const int16 *docCodes,
+					   int32 count)
+{
+	int64		score = 0;
+	int32		i = 0;
+
+	for (; i + 8 <= count; i += 8)
+	{
+		int16x8_t	q = vld1q_s16(queryCodes + i);
+		int16x8_t	d = vld1q_s16(docCodes + i);
+		int32x4_t	prod0 = vmull_s16(vget_low_s16(q), vget_low_s16(d));
+		int32x4_t	prod1 = vmull_s16(vget_high_s16(q), vget_high_s16(d));
+
+		score += (int64) vaddvq_s32(prod0);
+		score += (int64) vaddvq_s32(prod1);
+	}
+
+	for (; i < count; i++)
+		score += (int64) queryCodes[i] * (int64) docCodes[i];
+	return score;
+}
+
+static void
+TqCompactCodeScoreBatchNeon(int16 queryCode, const int16 *docCodes,
+							int32 count, int64 *scores)
+{
+	int32		tmp[8];
+	int32		i = 0;
+	int32x4_t	q = vdupq_n_s32((int32) queryCode);
+
+	for (; i + 8 <= count; i += 8)
+	{
+		int16x8_t	packed = vld1q_s16(docCodes + i);
+		int32x4_t	low = vmovl_s16(vget_low_s16(packed));
+		int32x4_t	high = vmovl_s16(vget_high_s16(packed));
+		int32x4_t	prod0 = vmulq_s32(q, low);
+		int32x4_t	prod1 = vmulq_s32(q, high);
+
+		vst1q_s32(tmp, prod0);
+		vst1q_s32(tmp + 4, prod1);
+		for (int lane = 0; lane < 8; lane++)
+			scores[i + lane] = (int64) tmp[lane];
+	}
+
+	for (; i < count; i++)
+		scores[i] = (int64) queryCode * (int64) docCodes[i];
+}
+#endif
+
+TqCompactCodeScoreFunc
+TqResolveCompactCodeScoreKernel(const char *forceKernel)
+{
+	if (forceKernel == NULL || pg_strcasecmp(forceKernel, "auto") == 0)
+	{
+		if (pgturbohybrid_dense_exact_simd_force ==
+			PGTURBOHYBRID_EXACT_SIMD_FORCE_SCALAR)
+			return TqCompactCodeScoreScalar;
+#if PGTURBOHYBRID_MULTIVECTOR_COMPILE_AVX512BW
+		if (TqMultiVectorAvx512bwAvailable())
+			return TqCompactCodeScoreAvx512;
+#endif
+#if PGTURBOHYBRID_MULTIVECTOR_COMPILE_AVX2
+		if (TqMultiVectorAvx2Available())
+			return TqCompactCodeScoreAvx2;
+#endif
+#if PGTURBOHYBRID_MULTIVECTOR_COMPILE_NEON
+		return TqCompactCodeScoreNeon;
+#endif
+		return TqCompactCodeScoreScalar;
+	}
+
+	if (pg_strcasecmp(forceKernel, "scalar") == 0 ||
+		pg_strcasecmp(forceKernel, "compact_scalar") == 0)
+		return TqCompactCodeScoreScalar;
+#if PGTURBOHYBRID_MULTIVECTOR_COMPILE_AVX512BW
+	if (pg_strcasecmp(forceKernel, "avx512") == 0 ||
+		pg_strcasecmp(forceKernel, "compact_avx512") == 0)
+	{
+		if (TqMultiVectorAvx512bwAvailable())
+			return TqCompactCodeScoreAvx512;
+		ereport(ERROR,
+				(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
+				 errmsg("compact code scoring kernel \"compact_avx512\" is not available")));
+	}
+#else
+	if (pg_strcasecmp(forceKernel, "avx512") == 0 ||
+		pg_strcasecmp(forceKernel, "compact_avx512") == 0)
+		ereport(ERROR,
+				(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
+				 errmsg("compact code scoring kernel \"compact_avx512\" is not available")));
+#endif
+#if PGTURBOHYBRID_MULTIVECTOR_COMPILE_AVX2
+	if (pg_strcasecmp(forceKernel, "avx2") == 0 ||
+		pg_strcasecmp(forceKernel, "compact_avx2") == 0)
+	{
+		if (TqMultiVectorAvx2Available())
+			return TqCompactCodeScoreAvx2;
+		ereport(ERROR,
+				(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
+				 errmsg("compact code scoring kernel \"compact_avx2\" is not available")));
+	}
+#else
+	if (pg_strcasecmp(forceKernel, "avx2") == 0 ||
+		pg_strcasecmp(forceKernel, "compact_avx2") == 0)
+		ereport(ERROR,
+				(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
+				 errmsg("compact code scoring kernel \"compact_avx2\" is not available")));
+#endif
+#if PGTURBOHYBRID_MULTIVECTOR_COMPILE_NEON
+	if (pg_strcasecmp(forceKernel, "neon") == 0 ||
+		pg_strcasecmp(forceKernel, "compact_neon") == 0)
+		return TqCompactCodeScoreNeon;
+#else
+	if (pg_strcasecmp(forceKernel, "neon") == 0 ||
+		pg_strcasecmp(forceKernel, "compact_neon") == 0)
+		ereport(ERROR,
+				(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
+				 errmsg("compact code scoring kernel \"compact_neon\" is not available")));
+#endif
+
+	ereport(ERROR,
+			(errcode(ERRCODE_INVALID_PARAMETER_VALUE),
+			 errmsg("unknown compact code scoring kernel \"%s\"", forceKernel),
+			 errhint("Use auto, scalar, avx2, avx512, or neon.")));
+	return TqCompactCodeScoreScalar;
+}
+
+const char *
+TqCompactCodeScoreKernelName(TqCompactCodeScoreFunc func)
+{
+	if (func == TqCompactCodeScoreScalar)
+		return "compact_scalar";
+#if PGTURBOHYBRID_MULTIVECTOR_COMPILE_AVX512BW
+	if (func == TqCompactCodeScoreAvx512)
+		return "compact_avx512";
+#endif
+#if PGTURBOHYBRID_MULTIVECTOR_COMPILE_AVX2
+	if (func == TqCompactCodeScoreAvx2)
+		return "compact_avx2";
+#endif
+#if PGTURBOHYBRID_MULTIVECTOR_COMPILE_NEON
+	if (func == TqCompactCodeScoreNeon)
+		return "compact_neon";
+#endif
+	return "unknown";
+}
+
+TqCompactCodeScoreBatchFunc
+TqResolveCompactCodeScoreBatchKernel(const char *forceKernel)
+{
+	if (forceKernel == NULL || pg_strcasecmp(forceKernel, "auto") == 0)
+	{
+		if (pgturbohybrid_dense_exact_simd_force ==
+			PGTURBOHYBRID_EXACT_SIMD_FORCE_SCALAR)
+			return TqCompactCodeScoreBatchScalar;
+#if PGTURBOHYBRID_MULTIVECTOR_COMPILE_AVX512BW
+		if (TqMultiVectorAvx512bwAvailable())
+			return TqCompactCodeScoreBatchAvx512;
+#endif
+#if PGTURBOHYBRID_MULTIVECTOR_COMPILE_AVX2
+		if (TqMultiVectorAvx2Available())
+			return TqCompactCodeScoreBatchAvx2;
+#endif
+#if PGTURBOHYBRID_MULTIVECTOR_COMPILE_NEON
+		return TqCompactCodeScoreBatchNeon;
+#endif
+		return TqCompactCodeScoreBatchScalar;
+	}
+
+	if (pg_strcasecmp(forceKernel, "scalar") == 0 ||
+		pg_strcasecmp(forceKernel, "compact_scalar") == 0)
+		return TqCompactCodeScoreBatchScalar;
+#if PGTURBOHYBRID_MULTIVECTOR_COMPILE_AVX512BW
+	if (pg_strcasecmp(forceKernel, "avx512") == 0 ||
+		pg_strcasecmp(forceKernel, "compact_avx512") == 0)
+	{
+		if (TqMultiVectorAvx512bwAvailable())
+			return TqCompactCodeScoreBatchAvx512;
+		ereport(ERROR,
+				(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
+				 errmsg("compact code scoring kernel \"compact_avx512\" is not available")));
+	}
+#else
+	if (pg_strcasecmp(forceKernel, "avx512") == 0 ||
+		pg_strcasecmp(forceKernel, "compact_avx512") == 0)
+		ereport(ERROR,
+				(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
+				 errmsg("compact code scoring kernel \"compact_avx512\" is not available")));
+#endif
+#if PGTURBOHYBRID_MULTIVECTOR_COMPILE_AVX2
+	if (pg_strcasecmp(forceKernel, "avx2") == 0 ||
+		pg_strcasecmp(forceKernel, "compact_avx2") == 0)
+	{
+		if (TqMultiVectorAvx2Available())
+			return TqCompactCodeScoreBatchAvx2;
+		ereport(ERROR,
+				(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
+				 errmsg("compact code scoring kernel \"compact_avx2\" is not available")));
+	}
+#else
+	if (pg_strcasecmp(forceKernel, "avx2") == 0 ||
+		pg_strcasecmp(forceKernel, "compact_avx2") == 0)
+		ereport(ERROR,
+				(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
+				 errmsg("compact code scoring kernel \"compact_avx2\" is not available")));
+#endif
+#if PGTURBOHYBRID_MULTIVECTOR_COMPILE_NEON
+	if (pg_strcasecmp(forceKernel, "neon") == 0 ||
+		pg_strcasecmp(forceKernel, "compact_neon") == 0)
+		return TqCompactCodeScoreBatchNeon;
+#else
+	if (pg_strcasecmp(forceKernel, "neon") == 0 ||
+		pg_strcasecmp(forceKernel, "compact_neon") == 0)
+		ereport(ERROR,
+				(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
+				 errmsg("compact code scoring kernel \"compact_neon\" is not available")));
+#endif
+
+	ereport(ERROR,
+			(errcode(ERRCODE_INVALID_PARAMETER_VALUE),
+			 errmsg("unknown compact code scoring kernel \"%s\"", forceKernel),
+			 errhint("Use auto, scalar, avx2, avx512, or neon.")));
+	return TqCompactCodeScoreBatchScalar;
+}
+
+const char *
+TqCompactCodeScoreBatchKernelName(TqCompactCodeScoreBatchFunc func)
+{
+	if (func == TqCompactCodeScoreBatchScalar)
+		return "compact_scalar";
+#if PGTURBOHYBRID_MULTIVECTOR_COMPILE_AVX512BW
+	if (func == TqCompactCodeScoreBatchAvx512)
+		return "compact_avx512";
+#endif
+#if PGTURBOHYBRID_MULTIVECTOR_COMPILE_AVX2
+	if (func == TqCompactCodeScoreBatchAvx2)
+		return "compact_avx2";
+#endif
+#if PGTURBOHYBRID_MULTIVECTOR_COMPILE_NEON
+	if (func == TqCompactCodeScoreBatchNeon)
+		return "compact_neon";
 #endif
 	return "unknown";
 }
@@ -3057,6 +3860,80 @@ pgturbohybrid_multivector_maxsim_blocked_scalar(PG_FUNCTION_ARGS)
 	PgturbohybridMultiVector *doc = PG_GETARG_PGTURBOHYBRID_MULTIVECTOR_P(1);
 
 	PG_RETURN_FLOAT8(TqMultiVectorMaxSimBlockedScalar(query, doc));
+}
+
+Datum
+pgturbohybrid_experimental_compact_code_score(PG_FUNCTION_ARGS)
+{
+	ArrayType  *queryArray;
+	ArrayType  *docArray;
+	bool		experimental;
+	char	   *forceKernel = "auto";
+	int			queryCount;
+	int			docCount;
+	int16	   *queryCodes;
+	int16	   *docCodes;
+	TqCompactCodeScoreFunc scorer;
+	const char *kernelName;
+	instr_time	start;
+	instr_time	elapsed;
+	int64		score;
+	int64		scoreUs;
+	PgturbohybridJsonbState state;
+
+	if (PG_ARGISNULL(0) || PG_ARGISNULL(1))
+		ereport(ERROR,
+				(errcode(ERRCODE_NULL_VALUE_NOT_ALLOWED),
+				 errmsg("compact code arrays cannot be null")));
+	experimental = !PG_ARGISNULL(2) && PG_GETARG_BOOL(2);
+	if (!experimental)
+		ereport(ERROR,
+				(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
+				 errmsg("experimental compact-code scoring is disabled"),
+				 errhint("Pass experimental => true to call this diagnostic prototype. It is not used for final SQL ordering.")));
+	if (!PG_ARGISNULL(3))
+		forceKernel = text_to_cstring(PG_GETARG_TEXT_PP(3));
+
+	queryArray = PG_GETARG_ARRAYTYPE_P(0);
+	docArray = PG_GETARG_ARRAYTYPE_P(1);
+	queryCodes =
+		PgturbohybridMultiVectorReadInt2Array(queryArray, "query compact codes",
+											  &queryCount);
+	docCodes =
+		PgturbohybridMultiVectorReadInt2Array(docArray, "document compact codes",
+											  &docCount);
+	if (queryCount != docCount)
+		ereport(ERROR,
+				(errcode(ERRCODE_ARRAY_SUBSCRIPT_ERROR),
+				 errmsg("query and document compact code arrays must have the same length")));
+
+	scorer = TqResolveCompactCodeScoreKernel(forceKernel);
+	kernelName = TqCompactCodeScoreKernelName(scorer);
+	INSTR_TIME_SET_CURRENT(start);
+	score = scorer(queryCodes, docCodes, (int32) queryCount);
+	INSTR_TIME_SET_CURRENT(elapsed);
+	INSTR_TIME_SUBTRACT(elapsed, start);
+	scoreUs = (int64) INSTR_TIME_GET_MICROSEC(elapsed);
+
+	PgturbohybridJsonbStateInit(&state);
+	PgturbohybridJsonbBeginObject(&state);
+	PgturbohybridMultiVectorModelJsonbAddBool(&state, "experimental", true);
+	PgturbohybridMultiVectorModelJsonbAddString(&state,
+												"approximate_scoring_kernel",
+												kernelName);
+	PgturbohybridMultiVectorModelJsonbAddString(&state, "requested_kernel",
+												forceKernel);
+	PgturbohybridMultiVectorModelJsonbAddInt64(&state, "code_count",
+											   queryCount);
+	PgturbohybridMultiVectorModelJsonbAddFloat8(&state, "score",
+												(double) score);
+	PgturbohybridMultiVectorModelJsonbAddInt64(&state,
+											   "approximate_scoring_us",
+											   scoreUs);
+	PgturbohybridMultiVectorModelJsonbAddString(&state,
+												"final_sql_ordering",
+												"exact_heap_maxsim");
+	PG_RETURN_JSONB_P(PgturbohybridJsonbEndObject(&state));
 }
 
 Datum

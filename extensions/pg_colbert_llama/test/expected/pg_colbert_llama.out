@@ -81,7 +81,9 @@ search_path_safe_count
 2
 (1 row)
 RESET search_path;
+SET client_min_messages = warning;
 DROP SCHEMA colbert_llama_shadow CASCADE;
+RESET client_min_messages;
 SET pg_colbert_llama.max_query_vectors = 1;
 SELECT turbohybrid_multivector_count(colbert_mv('sauerkraut-modern:query', 'test')) AS capped_query_count;
 capped_query_count

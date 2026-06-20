@@ -1,8 +1,8 @@
-EXTENSION = pg_colbert_llama
+EXTENSION = pg_colbert_llama llama_embed
 EXTVERSION = 0.1.0
 
 MODULE_big = pg_colbert_llama
-DATA = sql/pg_colbert_llama--0.1.0.sql
+DATA = sql/pg_colbert_llama--0.1.0.sql sql/llama_embed--0.1.0.sql
 
 PG_CONFIG ?= pg_config
 PG_COLBERT_LLAMA_ENGINE ?= stub
@@ -33,7 +33,7 @@ endif
 
 $(OBJS): src/*.h
 
-REGRESS = pg_colbert_llama
+REGRESS = llama_embed pg_colbert_llama
 REGRESS_OPTS = --inputdir=test
 
 PGVECTOR_SERVER_INCLUDE := $(shell $(PG_CONFIG) --includedir-server)

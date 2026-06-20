@@ -15,10 +15,10 @@
 
   outputs =
     {
-      self,
       nixpkgs,
       pgvector-v082,
       pgvector-master,
+      ...
     }:
     let
       systems = [
@@ -34,7 +34,7 @@
         system:
         let
           pkgs = import nixpkgs { inherit system; };
-          lib = pkgs.lib;
+          inherit (pkgs) lib;
           postgresql = pkgs.postgresql_18;
           llamaCppColbert = pkgs.llama-cpp.overrideAttrs (old: {
             patches = (old.patches or [ ]) ++ [
@@ -58,7 +58,7 @@
           cleanSource = lib.cleanSourceWith {
             src = ./.;
             filter =
-              name: type:
+              name: _type:
               let
                 base = baseNameOf name;
               in
@@ -165,28 +165,26 @@
                 sourceRoot = "source/extensions/pg_colbert_llama";
                 enableUpdateScript = false;
 
-                buildInputs =
-                  [
-                    pgvector
-                    pgturbohybrid
-                  ]
-                  ++ lib.optionals (engine == "llama") [
-                    llamaCppColbert
-                  ];
-                makeFlags =
-                  [
-                    "VECTOR_INCLUDE=${pgvector}/include/server/extension/vector"
-                    "PG_COLBERT_LLAMA_ENGINE=${engine}"
-                  ]
-                  ++ lib.optionals (engine == "llama") [
-                    "LLAMA_CPP_INCLUDE=${llamaCppColbert}/include"
-                    "LLAMA_CPP_LIB=${llamaCppColbert}/lib"
-                    "LLAMA_CPP_BACKEND_DIR=${llamaCppColbert}/bin"
-                    "LLAMA_CPP_LDFLAGS=-Wl,-rpath,${llamaCppColbert}/lib"
-                  ];
+                buildInputs = [
+                  pgvector
+                  pgturbohybrid
+                ]
+                ++ lib.optionals (engine == "llama") [
+                  llamaCppColbert
+                ];
+                makeFlags = [
+                  "VECTOR_INCLUDE=${pgvector}/include/server/extension/vector"
+                  "PG_COLBERT_LLAMA_ENGINE=${engine}"
+                ]
+                ++ lib.optionals (engine == "llama") [
+                  "LLAMA_CPP_INCLUDE=${llamaCppColbert}/include"
+                  "LLAMA_CPP_LIB=${llamaCppColbert}/lib"
+                  "LLAMA_CPP_BACKEND_DIR=${llamaCppColbert}/bin"
+                  "LLAMA_CPP_LDFLAGS=-Wl,-rpath,${llamaCppColbert}/lib"
+                ];
 
                 meta = {
-                  description = "ColBERT embedding companion extension for pgturbohybrid";
+                  description = "llama.cpp embedding companion extension for pgturbohybrid";
                   homepage = "https://github.com/agentxagi/pgturbohybrid";
                   license = lib.licenses.postgresql;
                   platforms = postgresql.meta.platforms;
@@ -209,20 +207,16 @@
                 inherit pgvector pgturbohybrid;
                 engine = "llama";
               };
-              postgresWithExtensions = postgresql.withPackages (
-                _: [
-                  pgvector
-                  pgturbohybrid
-                  pgColbertLlamaStub
-                ]
-              );
-              postgresWithLlamaExtensions = postgresql.withPackages (
-                _: [
-                  pgvector
-                  pgturbohybrid
-                  pgColbertLlamaLlama
-                ]
-              );
+              postgresWithExtensions = postgresql.withPackages (_: [
+                pgvector
+                pgturbohybrid
+                pgColbertLlamaStub
+              ]);
+              postgresWithLlamaExtensions = postgresql.withPackages (_: [
+                pgvector
+                pgturbohybrid
+                pgColbertLlamaLlama
+              ]);
 
               commonEnv = {
                 TH_ENV_NAME = "pg18-${suffix}";
@@ -234,22 +228,20 @@
                 VECTOR_INCLUDE = "${pgvector}/include/server/extension/vector";
               };
 
-              mkScript =
-                name: text: mkScriptWithInputs [ ] name text;
+              mkScript = name: text: mkScriptWithInputs [ ] name text;
 
               mkScriptWithInputs =
                 extraRuntimeInputs: name: text:
                 pkgs.writeShellApplication {
                   inherit name;
-                  runtimeInputs =
-                    [
-                      postgresWithExtensions
-                      pkgs.coreutils
-                      pkgs.gnused
-                      pkgs.gnugrep
-                      pkgs.gnumake
-                    ]
-                    ++ extraRuntimeInputs;
+                  runtimeInputs = [
+                    postgresWithExtensions
+                    pkgs.coreutils
+                    pkgs.gnused
+                    pkgs.gnugrep
+                    pkgs.gnumake
+                  ]
+                  ++ extraRuntimeInputs;
                   text = ''
                     set -euo pipefail
 
@@ -309,6 +301,7 @@
                 psql --host="$PGHOST" --port="$TH_PGPORT" --username="$PGUSER" --dbname="$PGDATABASE" -v ON_ERROR_STOP=1 <<'SQL'
                 CREATE EXTENSION IF NOT EXISTS vector;
                 CREATE EXTENSION IF NOT EXISTS pgturbohybrid;
+                CREATE EXTENSION IF NOT EXISTS llama_embed;
                 CREATE EXTENSION IF NOT EXISTS pg_colbert_llama;
                 SQL
 
@@ -390,6 +383,7 @@
                 psql --host="$PGHOST" --port="$TH_PGPORT" --username="$PGUSER" --dbname="$PGDATABASE" -v ON_ERROR_STOP=1 <<'SQL'
                 CREATE EXTENSION IF NOT EXISTS vector;
                 CREATE EXTENSION IF NOT EXISTS pgturbohybrid;
+                CREATE EXTENSION IF NOT EXISTS llama_embed;
                 CREATE EXTENSION IF NOT EXISTS pg_colbert_llama;
                 SQL
 
@@ -449,23 +443,17 @@
                 ${installcheck}/bin/th-installcheck
               '';
 
-              benchRetrievalQuality =
-                psqlFileScript "th-bench-retrieval-quality" "benchmarks/dev/retrieval_quality_grid.sql";
+              benchRetrievalQuality = psqlFileScript "th-bench-retrieval-quality" "benchmarks/dev/retrieval_quality_grid.sql";
 
-              benchProfileGrid =
-                psqlFileScript "th-bench-profile-grid" "benchmarks/dev/profile_recall_latency_grid.sql";
+              benchProfileGrid = psqlFileScript "th-bench-profile-grid" "benchmarks/dev/profile_recall_latency_grid.sql";
 
-              benchResidualRerank =
-                psqlFileScript "th-bench-residual-rerank" "benchmarks/dev/residual_rerank_grid.sql";
+              benchResidualRerank = psqlFileScript "th-bench-residual-rerank" "benchmarks/dev/residual_rerank_grid.sql";
 
-              benchBm25PhraseRerank =
-                psqlFileScript "th-bench-bm25-phrase-rerank" "benchmarks/dev/bm25_phrase_rerank_grid.sql";
+              benchBm25PhraseRerank = psqlFileScript "th-bench-bm25-phrase-rerank" "benchmarks/dev/bm25_phrase_rerank_grid.sql";
 
-              benchDenseCandidateMiss =
-                psqlFileScript "th-bench-dense-candidate-miss" "benchmarks/dev/dense_candidate_miss_grid.sql";
+              benchDenseCandidateMiss = psqlFileScript "th-bench-dense-candidate-miss" "benchmarks/dev/dense_candidate_miss_grid.sql";
 
-              benchNativeCache =
-                psqlFileScript "th-bench-native-cache-memory" "benchmarks/dev/native_cache_memory_bench.sql";
+              benchNativeCache = psqlFileScript "th-bench-native-cache-memory" "benchmarks/dev/native_cache_memory_bench.sql";
 
               benchTuneProfile = mkScript "th-bench-tune-profile" ''
                 ${pgInit}/bin/th-pg-init >/dev/null
@@ -528,22 +516,24 @@
                 exec uv run "$TH_ROOT/benchmarks/dbpedia_colbert_hf_dataset.py" "$@"
               '';
 
-              dbpediaColbertGenerateExport = mkScriptWithInputs [ pkgs.uv ] "th-dbpedia-colbert-generate-export" ''
-                for arg in "$@"; do
-                  case "$arg" in
-                    -h|--help)
-                      exec uv run "$TH_ROOT/benchmarks/dbpedia_colbert_generate_export.py" "$@"
-                      ;;
-                  esac
-                done
-                if [ "''${TH_PGDATABASE_WAS_EXPLICIT:-0}" != "1" ]; then
-                  export PGDATABASE="''${DBPEDIA_COLBERT_PGDATABASE:-pgturbohybrid_dbpedia_colbert}"
-                fi
-                ${colbertLlamaEnv}
-                ${pgInitColbertLlama}/bin/th-pg-init-colbert-llama >/dev/null
-                export PGHOST PGPORT PGUSER PGDATABASE
-                exec uv run "$TH_ROOT/benchmarks/dbpedia_colbert_generate_export.py" "$@"
-              '';
+              dbpediaColbertGenerateExport =
+                mkScriptWithInputs [ pkgs.uv ] "th-dbpedia-colbert-generate-export"
+                  ''
+                    for arg in "$@"; do
+                      case "$arg" in
+                        -h|--help)
+                          exec uv run "$TH_ROOT/benchmarks/dbpedia_colbert_generate_export.py" "$@"
+                          ;;
+                      esac
+                    done
+                    if [ "''${TH_PGDATABASE_WAS_EXPLICIT:-0}" != "1" ]; then
+                      export PGDATABASE="''${DBPEDIA_COLBERT_PGDATABASE:-pgturbohybrid_dbpedia_colbert}"
+                    fi
+                    ${colbertLlamaEnv}
+                    ${pgInitColbertLlama}/bin/th-pg-init-colbert-llama >/dev/null
+                    export PGHOST PGPORT PGUSER PGDATABASE
+                    exec uv run "$TH_ROOT/benchmarks/dbpedia_colbert_generate_export.py" "$@"
+                  '';
 
               colbertBuildStub = mkScript "th-colbert-build-stub" ''
                 make -C "$TH_ROOT/extensions/pg_colbert_llama" \
@@ -553,31 +543,35 @@
                   "$@"
               '';
 
-              colbertTestStub = mkScriptWithInputs [
-                tapPerl
-                pkgs.python3
-              ] "th-colbert-test-stub" ''
-                ${pgInit}/bin/th-pg-init >/dev/null
-                make -C "$TH_ROOT/extensions/pg_colbert_llama" \
-                  PG_CONFIG="$PG_CONFIG" \
-                  VECTOR_INCLUDE="$VECTOR_INCLUDE" \
-                  PG_COLBERT_LLAMA_ENGINE=stub
-                make -C "$TH_ROOT/extensions/pg_colbert_llama" \
-                  PG_CONFIG="$PG_CONFIG" \
-                  VECTOR_INCLUDE="$VECTOR_INCLUDE" \
-                  PG_COLBERT_LLAMA_ENGINE=stub \
-                  installcheck
-                python3 -m unittest discover \
-                  "$TH_ROOT/extensions/pg_colbert_llama/test" \
-                  -p 'test_*.py'
-                export PERL5LIB="${postgresql.src}/src/test/perl:${postgresql.src}/test/perl:''${PERL5LIB:-}"
-                export PG_PROVE_FLAGS="-I ${postgresql.src}/src/test/perl ''${PG_PROVE_FLAGS:-}"
-                exec make -C "$TH_ROOT/extensions/pg_colbert_llama" \
-                  PG_CONFIG="$PG_CONFIG" \
-                  bindir="${postgresWithExtensions}/bin" \
-                  PG_PROVE_FLAGS="-I ${postgresql.src}/src/test/perl ''${PG_PROVE_FLAGS:-}" \
-                  prove_stub_installcheck
-              '';
+              colbertTestStub =
+                mkScriptWithInputs
+                  [
+                    tapPerl
+                    pkgs.python3
+                  ]
+                  "th-colbert-test-stub"
+                  ''
+                    ${pgInit}/bin/th-pg-init >/dev/null
+                    make -C "$TH_ROOT/extensions/pg_colbert_llama" \
+                      PG_CONFIG="$PG_CONFIG" \
+                      VECTOR_INCLUDE="$VECTOR_INCLUDE" \
+                      PG_COLBERT_LLAMA_ENGINE=stub
+                    make -C "$TH_ROOT/extensions/pg_colbert_llama" \
+                      PG_CONFIG="$PG_CONFIG" \
+                      VECTOR_INCLUDE="$VECTOR_INCLUDE" \
+                      PG_COLBERT_LLAMA_ENGINE=stub \
+                      installcheck
+                    python3 -m unittest discover \
+                      "$TH_ROOT/extensions/pg_colbert_llama/test" \
+                      -p 'test_*.py'
+                    export PERL5LIB="${postgresql.src}/src/test/perl:${postgresql.src}/test/perl:''${PERL5LIB:-}"
+                    export PG_PROVE_FLAGS="-I ${postgresql.src}/src/test/perl ''${PG_PROVE_FLAGS:-}"
+                    exec make -C "$TH_ROOT/extensions/pg_colbert_llama" \
+                      PG_CONFIG="$PG_CONFIG" \
+                      bindir="${postgresWithExtensions}/bin" \
+                      PG_PROVE_FLAGS="-I ${postgresql.src}/src/test/perl ''${PG_PROVE_FLAGS:-}" \
+                      prove_stub_installcheck
+                  '';
 
               colbertBuildLlama = mkScript "th-colbert-build-llama" ''
                 exec nix --extra-experimental-features 'nix-command flakes' \
@@ -586,53 +580,52 @@
                   "$@"
               '';
 
-              colbertLiveTest = mkScriptWithInputs [ tapPerl ] "th-colbert-live-test"
-                ''
-                  if [ -z "''${PG_COLBERT_LLAMA_TEST_MODEL:-}" ]; then
-                    echo "PG_COLBERT_LLAMA_TEST_MODEL is not set; skipping live pg_colbert_llama TAP tests"
-                    exit 0
-                  fi
+              colbertLiveTest = mkScriptWithInputs [ tapPerl ] "th-colbert-live-test" ''
+                if [ -z "''${PG_COLBERT_LLAMA_TEST_MODEL:-}" ]; then
+                  echo "PG_COLBERT_LLAMA_TEST_MODEL is not set; skipping live pg_colbert_llama TAP tests"
+                  exit 0
+                fi
 
-                  postgres_with_colbert="''${TH_COLBERT_LLAMA_POSTGRES:-}"
-                  if [ -z "$postgres_with_colbert" ]; then
-                    postgres_with_colbert="$(nix --extra-experimental-features 'nix-command flakes' \
-                      build "$TH_ROOT#postgres-with-colbert-llama" \
-                      --no-link \
-                      --print-out-paths)"
-                  fi
-                  export PATH="$postgres_with_colbert/bin:$PATH"
+                postgres_with_colbert="''${TH_COLBERT_LLAMA_POSTGRES:-}"
+                if [ -z "$postgres_with_colbert" ]; then
+                  postgres_with_colbert="$(nix --extra-experimental-features 'nix-command flakes' \
+                    build "$TH_ROOT#postgres-with-colbert-llama" \
+                    --no-link \
+                    --print-out-paths)"
+                fi
+                export PATH="$postgres_with_colbert/bin:$PATH"
 
-                  export TH_ENV_NAME="''${TH_COLBERT_LLAMA_ENV_NAME:-${commonEnv.TH_ENV_NAME}-colbert-llama}"
-                  export TH_STATE_DIR="$TH_ROOT/.nix-dev/$TH_ENV_NAME"
-                  export PGDATA="$TH_STATE_DIR/pgdata"
-                  export PGHOST="$TH_STATE_DIR/run"
-                  export TH_LOG_DIR="$TH_STATE_DIR/log"
-                  export TH_LOG_FILE="$TH_LOG_DIR/postgres.log"
-                  mkdir -p "$TH_STATE_DIR" "$PGHOST" "$TH_LOG_DIR"
+                export TH_ENV_NAME="''${TH_COLBERT_LLAMA_ENV_NAME:-${commonEnv.TH_ENV_NAME}-colbert-llama}"
+                export TH_STATE_DIR="$TH_ROOT/.nix-dev/$TH_ENV_NAME"
+                export PGDATA="$TH_STATE_DIR/pgdata"
+                export PGHOST="$TH_STATE_DIR/run"
+                export TH_LOG_DIR="$TH_STATE_DIR/log"
+                export TH_LOG_FILE="$TH_LOG_DIR/postgres.log"
+                mkdir -p "$TH_STATE_DIR" "$PGHOST" "$TH_LOG_DIR"
 
-                  if [ ! -s "$PGDATA/PG_VERSION" ]; then
-                    initdb -D "$PGDATA" --username="$PGUSER" --auth=trust --no-locale --encoding=UTF8
-                    {
-                      echo "unix_socket_directories = '$PGHOST'"
-                      echo "port = $TH_PGPORT"
-                      echo "listen_addresses = 'localhost'"
-                      echo "log_min_messages = warning"
-                      echo "client_min_messages = warning"
-                    } >> "$PGDATA/postgresql.conf"
-                  fi
+                if [ ! -s "$PGDATA/PG_VERSION" ]; then
+                  initdb -D "$PGDATA" --username="$PGUSER" --auth=trust --no-locale --encoding=UTF8
+                  {
+                    echo "unix_socket_directories = '$PGHOST'"
+                    echo "port = $TH_PGPORT"
+                    echo "listen_addresses = 'localhost'"
+                    echo "log_min_messages = warning"
+                    echo "client_min_messages = warning"
+                  } >> "$PGDATA/postgresql.conf"
+                fi
 
-                  if ! pg_ctl -D "$PGDATA" status >/dev/null 2>&1; then
-                    pg_ctl -D "$PGDATA" -l "$TH_LOG_FILE" -o "-k '$PGHOST' -p '$TH_PGPORT'" start
-                  fi
+                if ! pg_ctl -D "$PGDATA" status >/dev/null 2>&1; then
+                  pg_ctl -D "$PGDATA" -l "$TH_LOG_FILE" -o "-k '$PGHOST' -p '$TH_PGPORT'" start
+                fi
 
-                  export PERL5LIB="${postgresql.src}/src/test/perl:${postgresql.src}/test/perl:''${PERL5LIB:-}"
-                  export PG_PROVE_FLAGS="-I ${postgresql.src}/src/test/perl ''${PG_PROVE_FLAGS:-}"
-                  exec make -C "$TH_ROOT/extensions/pg_colbert_llama" \
-                    PG_CONFIG="$PG_CONFIG" \
-                    bindir="$postgres_with_colbert/bin" \
-                    PG_PROVE_FLAGS="-I ${postgresql.src}/src/test/perl ''${PG_PROVE_FLAGS:-}" \
-                    prove_live_installcheck
-                '';
+                export PERL5LIB="${postgresql.src}/src/test/perl:${postgresql.src}/test/perl:''${PERL5LIB:-}"
+                export PG_PROVE_FLAGS="-I ${postgresql.src}/src/test/perl ''${PG_PROVE_FLAGS:-}"
+                exec make -C "$TH_ROOT/extensions/pg_colbert_llama" \
+                  PG_CONFIG="$PG_CONFIG" \
+                  bindir="$postgres_with_colbert/bin" \
+                  PG_PROVE_FLAGS="-I ${postgresql.src}/src/test/perl ''${PG_PROVE_FLAGS:-}" \
+                  prove_live_installcheck
+              '';
 
               scripts = [
                 pgInit
@@ -719,26 +712,39 @@
               devSet,
               includeBenchDeps ? false,
             }:
+            let
+              styleToolPackages = [
+                pkgs.black
+                pkgs.clang-tools
+                pkgs.deadnix
+                pkgs.nixfmt
+                pkgs.pgformatter
+                pkgs.pre-commit
+                pkgs.ruff
+                pkgs.shellcheck
+                pkgs.shfmt
+                pkgs.statix
+              ];
+            in
             pkgs.mkShell {
-              packages =
-                [
-                  devSet.postgresWithExtensions
-                  postgresql.pg_config
-                  pkgs.clang-tools
-                  pkgs.git
-                  pkgs.gnumake
-                  pkgs.perl
-                  pkgs.perlPackages.IPCRun
-                  pkgs.pkg-config
-                  pkgs.python3
-                  pkgs.uv
-                ]
-                ++ lib.optionals includeBenchDeps [
-                  pkgs.python3Packages.numpy
-                  pkgs.python3Packages.pyarrow
-                  pkgs.python3Packages.psycopg
-                ]
-                ++ devSet.scripts;
+              packages = [
+                devSet.postgresWithExtensions
+                postgresql.pg_config
+                pkgs.git
+                pkgs.gnumake
+                pkgs.perl
+                pkgs.perlPackages.IPCRun
+                pkgs.pkg-config
+                pkgs.python3
+                pkgs.uv
+              ]
+              ++ styleToolPackages
+              ++ lib.optionals includeBenchDeps [
+                pkgs.python3Packages.numpy
+                pkgs.python3Packages.pyarrow
+                pkgs.python3Packages.psycopg
+              ]
+              ++ devSet.scripts;
 
               inherit (devSet.commonEnv)
                 TH_ENV_NAME
@@ -758,6 +764,7 @@
                 export TH_LOG_DIR="$TH_STATE_DIR/log"
                 export TH_LOG_FILE="$TH_LOG_DIR/postgres.log"
                 export PATH="${postgresql.pg_config}/bin:${devSet.postgresWithExtensions}/bin:$PATH"
+                export PATH="${lib.makeBinPath styleToolPackages}:$PATH"
 
                 cat <<EOF
                 pgturbohybrid Nix shell
@@ -776,10 +783,10 @@
                   th-test                run smoke + SQL regression tests
                   th-installcheck        run SQL regression tests
                   th-prove-installcheck  run TAP tests
-                  th-colbert-build-stub  build pg_colbert_llama with the stub engine
-                  th-colbert-test-stub   run pg_colbert_llama stub regression tests
-                  th-colbert-build-llama build pg_colbert_llama against llama.cpp
-                  th-colbert-live-test   run gated live ColBERT TAP tests
+                  th-colbert-build-stub  build llama_embed with the stub engine
+                  th-colbert-test-stub   run llama_embed/ColBERT stub regression tests
+                  th-colbert-build-llama build llama_embed against llama.cpp
+                  th-colbert-live-test   run gated live llama_embed TAP tests
 
                 Deterministic benchmark helpers:
                   th-bench-retrieval-quality
@@ -792,6 +799,13 @@
                   th-bench-dbpedia-colbert
                   th-dbpedia-colbert-hf-dataset
                   th-dbpedia-colbert-generate-export
+
+                Style helpers:
+                  clang-format / clang-tidy C formatter and static checks
+                  pg_format                SQL formatter
+                  black / ruff             Python formatting and linting
+                  nixfmt / statix / deadnix Nix formatting and linting
+                  shellcheck / shfmt        shell script linting and formatting
                 EOF
               '';
             };
@@ -808,11 +822,11 @@
             default = stable.postgresWithExtensions;
             postgres-with-extensions = stable.postgresWithExtensions;
             postgres-with-colbert-llama = stable.postgresWithLlamaExtensions;
-            pgturbohybrid = stable.pgturbohybrid;
+            inherit (stable) pgturbohybrid;
             pgturbohybrid-nosimd = pgturbohybridNoSimd;
             pg_colbert_llama = stable.pgColbertLlamaStub;
             pg_colbert_llama-llama = stable.pgColbertLlamaLlama;
-            pgvector = stable.pgvector;
+            inherit (stable) pgvector;
             postgres-with-extensions-pgvector-master = master.postgresWithExtensions;
             pgturbohybrid-pgvector-master = master.pgturbohybrid;
             pg_colbert_llama-pgvector-master = master.pgColbertLlamaStub;
@@ -829,7 +843,7 @@
           };
 
           checks = {
-            pgturbohybrid = stable.pgturbohybrid;
+            inherit (stable) pgturbohybrid;
             pg_colbert_llama = stable.pgColbertLlamaStub;
             pg_colbert_llama-stub-installcheck = stable.colbertStubInstallcheck;
             postgres-with-extensions = stable.postgresWithExtensions;
@@ -853,28 +867,39 @@
               smoke = mkApp "Run the pgturbohybrid smoke test" (stableScript "th-smoke");
               installcheck = mkApp "Run SQL regression tests" (stableScript "th-installcheck");
               test = mkApp "Run smoke and SQL regression tests" (stableScript "th-test");
-              bench-retrieval-quality =
-                mkApp "Run the deterministic retrieval quality grid" (stableScript "th-bench-retrieval-quality");
-              bench-profile-grid =
-                mkApp "Run the deterministic profile recall/latency grid" (stableScript "th-bench-profile-grid");
-              bench-tune-profile =
-                mkApp "Run the retrieval profile autotuning SQL harness" (stableScript "th-bench-tune-profile");
-              bench-concurrent-dense =
-                mkApp "Run the concurrent dense Python benchmark via uv" (stableScript "th-bench-concurrent-dense");
-              bench-dbpedia-colbert =
-                mkApp "Run the DBpedia ColBERT multivector benchmark via uv" (stableScript "th-bench-dbpedia-colbert");
-              dbpedia-colbert-hf-dataset =
-                mkApp "Export/import the DBpedia ColBERT multivector Hugging Face dataset" (stableScript "th-dbpedia-colbert-hf-dataset");
-              dbpedia-colbert-generate-export =
-                mkApp "Generate DBpedia ColBERT multivectors and export the Hugging Face dataset" (stableScript "th-dbpedia-colbert-generate-export");
-              colbert-build-stub =
-                mkApp "Build pg_colbert_llama with the stub engine" (stableScript "th-colbert-build-stub");
-              colbert-test-stub =
-                mkApp "Run pg_colbert_llama stub regression tests" (stableScript "th-colbert-test-stub");
-              colbert-build-llama =
-                mkApp "Build pg_colbert_llama against llama.cpp" (stableScript "th-colbert-build-llama");
-              colbert-live-test =
-                mkApp "Run gated live pg_colbert_llama TAP tests" (stableScript "th-colbert-live-test");
+              bench-retrieval-quality = mkApp "Run the deterministic retrieval quality grid" (
+                stableScript "th-bench-retrieval-quality"
+              );
+              bench-profile-grid = mkApp "Run the deterministic profile recall/latency grid" (
+                stableScript "th-bench-profile-grid"
+              );
+              bench-tune-profile = mkApp "Run the retrieval profile autotuning SQL harness" (
+                stableScript "th-bench-tune-profile"
+              );
+              bench-concurrent-dense = mkApp "Run the concurrent dense Python benchmark via uv" (
+                stableScript "th-bench-concurrent-dense"
+              );
+              bench-dbpedia-colbert = mkApp "Run the DBpedia ColBERT multivector benchmark via uv" (
+                stableScript "th-bench-dbpedia-colbert"
+              );
+              dbpedia-colbert-hf-dataset = mkApp "Export/import the DBpedia ColBERT multivector Hugging Face dataset" (
+                stableScript "th-dbpedia-colbert-hf-dataset"
+              );
+              dbpedia-colbert-generate-export = mkApp "Generate DBpedia ColBERT multivectors and export the Hugging Face dataset" (
+                stableScript "th-dbpedia-colbert-generate-export"
+              );
+              colbert-build-stub = mkApp "Build llama_embed with the stub engine" (
+                stableScript "th-colbert-build-stub"
+              );
+              colbert-test-stub = mkApp "Run llama_embed/ColBERT stub regression tests" (
+                stableScript "th-colbert-test-stub"
+              );
+              colbert-build-llama = mkApp "Build llama_embed against llama.cpp" (
+                stableScript "th-colbert-build-llama"
+              );
+              colbert-live-test = mkApp "Run gated live llama_embed TAP tests" (
+                stableScript "th-colbert-live-test"
+              );
             };
         };
     in

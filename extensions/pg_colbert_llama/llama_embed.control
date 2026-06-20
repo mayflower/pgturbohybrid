@@ -1,0 +1,4 @@
+comment = 'llama.cpp embedding extension for dense and multivector search'
+default_version = '0.1.0'
+module_pathname = '$libdir/pg_colbert_llama'
+relocatable = true
