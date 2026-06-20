@@ -190,6 +190,8 @@ typedef struct PgturbohybridScanStatsSnapshot
 	uint64		sparseExactRerankFetchUs;
 	uint64		sparseExactRerankScoreUs;
 	bool		sparseExactRerankTopkChanged;
+	int			sparseScoreKernel;
+	uint64		sparseSimdBlocks;
 	PgturbohybridBranchPlan branchPlan;
 	uint32		denseCandidatesEffective;
 	bool		denseKDefaulted;

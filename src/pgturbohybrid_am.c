@@ -1472,6 +1472,8 @@ typedef struct PgturbohybridLastScanStats
 	uint64		sparseExactRerankFetchUs;
 	uint64		sparseExactRerankScoreUs;
 	bool		sparseExactRerankTopkChanged;
+	int			sparseScoreKernel;
+	uint64		sparseSimdBlocks;
 	PgturbohybridBranchPlan branchPlan;
 	char		profile[16];
 	char		fusion[16];
@@ -1983,6 +1985,8 @@ PgturbohybridGetLastScanStatsSnapshot(PgturbohybridScanStatsSnapshot *stats)
 		pgturbohybrid_last_scan_state.sparseExactRerankScoreUs;
 	stats->sparseExactRerankTopkChanged =
 		pgturbohybrid_last_scan_state.sparseExactRerankTopkChanged;
+	stats->sparseScoreKernel = pgturbohybrid_last_scan_state.sparseScoreKernel;
+	stats->sparseSimdBlocks = pgturbohybrid_last_scan_state.sparseSimdBlocks;
 	stats->branchPlan = pgturbohybrid_last_scan_state.branchPlan;
 	stats->denseCandidatesEffective =
 		pgturbohybrid_last_scan_state.denseCandidatesEffective;
@@ -6402,7 +6406,8 @@ PgturbohybridCollectSparseOnlyResults(IndexScanDesc scan,
 		candidateK = finalTarget;
 
 	n = PgturbohybridSparseCollectCandidates(scan->indexRelation, scanQuery,
-											 candidateK, &cands, tmpCtx, &sstats);
+											 candidateK, pgturbohybrid_simd, &cands,
+											 tmpCtx, &sstats);
 
 	/* Exact f32 rerank of the top band (prompt 7); no-op for f32 indexes. */
 	PgturbohybridSparseRerankCandidates(scan, scanQuery, cands, n, autoBudgetLimit,
@@ -6446,6 +6451,8 @@ PgturbohybridCollectSparseOnlyResults(IndexScanDesc scan,
 	lastStats->sparseExactRerankFetchUs = sstats.exactRerankFetchUs;
 	lastStats->sparseExactRerankScoreUs = sstats.exactRerankScoreUs;
 	lastStats->sparseExactRerankTopkChanged = sstats.exactRerankTopkChanged;
+	lastStats->sparseScoreKernel = sstats.scoreKernel;
+	lastStats->sparseSimdBlocks = sstats.simdBlocks;
 	lastStats->sparseCandidatesRequested = originalQuery->sparseK;
 	lastStats->sparseCandidatesEffective = scanQuery->sparseK;
 	lastStats->sparseKDefaulted =
@@ -6767,6 +6774,7 @@ PgturbohybridCollectScanResults(IndexScanDesc scan, PgturbohybridScanState *stat
 		sparseCount = PgturbohybridSparseCollectCandidates(scan->indexRelation,
 														   scanQuery,
 														   scanQuery->sparseK,
+														   pgturbohybrid_simd,
 														   &sparse, so->tmpCtx,
 														   &sparseStats);
 		/* Exact f32 rerank before fusion so RRF ranks reflect exact scores. */
@@ -6995,6 +7003,8 @@ PgturbohybridCollectScanResults(IndexScanDesc scan, PgturbohybridScanState *stat
 	lastStats.sparseExactRerankFetchUs = sparseStats.exactRerankFetchUs;
 	lastStats.sparseExactRerankScoreUs = sparseStats.exactRerankScoreUs;
 	lastStats.sparseExactRerankTopkChanged = sparseStats.exactRerankTopkChanged;
+	lastStats.sparseScoreKernel = sparseStats.scoreKernel;
+	lastStats.sparseSimdBlocks = sparseStats.simdBlocks;
 	if (hasSparseQuery)
 	{
 		lastStats.sparseCandidatesRequested = originalQuery->sparseK;

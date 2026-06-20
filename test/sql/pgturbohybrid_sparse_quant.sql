@@ -37,9 +37,11 @@ BEGIN
   PERFORM id FROM sq ORDER BY s <~*> turbohybrid_query(
     sparse_query => turbohybrid_sparse_vector_build(ARRAY[2]::int4[], ARRAY[1.0]::float4[])) LIMIT 10;
   st := turbohybrid_last_scan_stats();
+  -- sparse_score_kernel is SIMD-host-dependent (see pgturbohybrid_sparse_simd_parity);
+  -- the decode kernel is always scalar.
   IF st->>'sparse_quant_bits' != '8' OR st->>'sparse_quant_mode' != 'per_term_linear'
      OR st->>'sparse_postings_encoding' != 'offset16_soa'
-     OR st->>'sparse_decode_kernel' != 'scalar' OR st->>'sparse_score_kernel' != 'scalar' THEN
+     OR st->>'sparse_decode_kernel' != 'scalar' THEN
     RAISE EXCEPTION 'unexpected q8 stats: %', st;
   END IF;
 END $$;

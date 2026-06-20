@@ -146,38 +146,17 @@ PgturbohybridSparseLoadLexicon(Relation index, BlockNumber start, uint32 termCou
 }
 
 /* Dequantize+accumulate one decoded posting into scores[]. */
-static inline void
-PgturbohybridSparseAddPosting(double *scores, uint32 nodeCount, uint32 nodeId,
-							  const char *weightPtr, int bits, double qWeight,
-							  double termMultiplier)
-{
-	if (nodeId >= nodeCount)
-		return;
-	if (bits == 0)
-	{
-		float4		w;
-
-		memcpy(&w, weightPtr, sizeof(float4));
-		scores[nodeId] += qWeight * (double) w;
-	}
-	else if (bits == 16)
-	{
-		uint16		q;
-
-		memcpy(&q, weightPtr, sizeof(uint16));
-		scores[nodeId] += termMultiplier * (double) q;
-	}
-	else
-	{
-		scores[nodeId] += termMultiplier * (double) (*(const uint8 *) weightPtr);
-	}
-}
-
-/* Decode + accumulate a single postings chunk (SoA or varint, any bit width). */
+/*
+ * Decode + accumulate a single postings chunk.  effMul is the effective
+ * per-posting multiplier already folding in the dequant scale (effMul = qWeight
+ * for f32, qWeight*scale for q8/q16).  SoA chunks route through the SIMD-capable
+ * kernel dispatch; varint chunks decode node deltas with a scalar walk.
+ */
 static void
 PgturbohybridSparseScoreChunk(PgturbohybridSparsePostingsTuple ct, int bits,
-							  double qWeight, double termMultiplier,
-							  double *scores, uint32 nodeCount)
+							  double effMul, int scoreKernel, double *scores,
+							  uint32 nodeCount, uint64 *simdBlocks,
+							  uint64 *scalarTail)
 {
 	uint32		n = ct->count;
 	uint32		base = ct->baseNodeId;
@@ -198,48 +177,59 @@ PgturbohybridSparseScoreChunk(PgturbohybridSparsePostingsTuple ct, int bits,
 		for (uint32 k = 0; k < n; k++)
 		{
 			int			consumed;
+			const char *wptr = payload + weightsStart + (Size) k * wwidth;
 
 			node += PgturbohybridSparseVarintDecode(deltas + pos, &consumed);
 			pos += consumed;
-			PgturbohybridSparseAddPosting(scores, nodeCount, node,
-										  payload + weightsStart + (Size) k * wwidth,
-										  bits, qWeight, termMultiplier);
+			if (node < nodeCount)
+			{
+				if (bits == 0)
+				{
+					float4		w;
+
+					memcpy(&w, wptr, sizeof(float4));
+					scores[node] += effMul * (double) w;
+				}
+				else if (bits == 16)
+				{
+					uint16		q;
+
+					memcpy(&q, wptr, sizeof(uint16));
+					scores[node] += effMul * (double) q;
+				}
+				else
+					scores[node] += effMul * (double) (*(const uint8 *) wptr);
+			}
 		}
+		*scalarTail += n;		/* varint node decode is inherently scalar */
 	}
 	else						/* SoA */
 	{
 		Size		offsetsStart = PgturbohybridSparseAlignUp((Size) n * wwidth, 2);
+		const uint16 *offsets = (const uint16 *) (payload + offsetsStart);
 
-		for (uint32 k = 0; k < n; k++)
-		{
-			uint16		off;
-			uint32		node;
-
-			memcpy(&off, payload + offsetsStart + (Size) k * sizeof(uint16),
-				   sizeof(uint16));
-			node = base + off;
-			PgturbohybridSparseAddPosting(scores, nodeCount, node,
-										  payload + (Size) k * wwidth,
-										  bits, qWeight, termMultiplier);
-		}
+		PgturbohybridSparseScoreSoa(scoreKernel, payload, offsets, n, base, bits,
+									effMul, scores, nodeCount, simdBlocks,
+									scalarTail);
 	}
 }
 
 /*
  * Accumulate one term's postings into scores[]: physically walk the term's
  * chunks from (blkno, offno) until df postings are consumed, dequantizing per
- * the index's bit width.  termMultiplier = qWeight * scale folds the per-term
- * dequant scale into the query weight for the quantized paths.
+ * the index's bit width.  effMul folds the per-term dequant scale into the
+ * query weight (= qWeight for f32, qWeight*scale otherwise).
  */
 static uint64
 PgturbohybridSparseAccumulateTerm(Relation index, BlockNumber blkno,
 								  OffsetNumber offno, uint32 df, double qWeight,
-								  double scale, int bits, double *scores,
-								  uint32 nodeCount)
+								  double scale, int bits, int scoreKernel,
+								  double *scores, uint32 nodeCount,
+								  uint64 *simdBlocks, uint64 *scalarTail)
 {
 	uint32		remaining = df;
 	uint64		touched = 0;
-	double		termMultiplier = qWeight * scale;
+	double		effMul = bits == 0 ? qWeight : qWeight * scale;
 
 	while (remaining > 0 && blkno != InvalidBlockNumber)
 	{
@@ -258,8 +248,9 @@ PgturbohybridSparseAccumulateTerm(Relation index, BlockNumber blkno,
 
 			if (ct->type == PGTURBOHYBRID_SPARSE_POSTINGS_TUPLE_TYPE)
 			{
-				PgturbohybridSparseScoreChunk(ct, bits, qWeight, termMultiplier,
-											  scores, nodeCount);
+				PgturbohybridSparseScoreChunk(ct, bits, effMul, scoreKernel,
+											  scores, nodeCount, simdBlocks,
+											  scalarTail);
 				touched += ct->count;
 				remaining -= Min(remaining, (uint32) ct->count);
 			}
@@ -275,7 +266,8 @@ PgturbohybridSparseAccumulateTerm(Relation index, BlockNumber blkno,
 
 int
 PgturbohybridSparseCollectCandidates(Relation index, PgturbohybridQueryHeader *query,
-									 int k, PgturbohybridSparseCandidate **out,
+									 int k, bool simdEnabled,
+									 PgturbohybridSparseCandidate **out,
 									 MemoryContext ctx, PgturbohybridSparseScanStats *stats)
 {
 	PgturbohybridGraphMetaPageData graphMeta;
@@ -287,6 +279,9 @@ PgturbohybridSparseCollectCandidates(Relation index, PgturbohybridQueryHeader *q
 	uint32		qCount = 0;
 	uint32		resolved = 0;
 	uint64		postingsTouched = 0;
+	uint64		simdBlocks = 0;
+	uint64		scalarTail = 0;
+	int			scoreKernel;
 	PgturbohybridNodeState *states;
 	uint32		nodeCount = 0;
 	double	   *scores;
@@ -313,6 +308,8 @@ PgturbohybridSparseCollectCandidates(Relation index, PgturbohybridQueryHeader *q
 		return 0;
 	if (stats != NULL)
 		stats->branchAvailable = true;
+	scoreKernel = PgturbohybridSparseResolveScoreKernel((int) meta.quantBits,
+														simdEnabled);
 
 	querySparse = PgturbohybridQueryGetSparseVector(query);
 	if (querySparse == NULL)
@@ -349,7 +346,9 @@ PgturbohybridSparseCollectCandidates(Relation index, PgturbohybridQueryHeader *q
 															 (double) qEntries[i].weight,
 															 (double) found->scale,
 															 (int) meta.quantBits,
-															 scores, nodeCount);
+															 scoreKernel,
+															 scores, nodeCount,
+															 &simdBlocks, &scalarTail);
 	}
 
 	/* Collect live, non-zero-scoring nodes. */
@@ -395,7 +394,9 @@ PgturbohybridSparseCollectCandidates(Relation index, PgturbohybridQueryHeader *q
 		stats->quantBits = (int) meta.quantBits;
 		stats->quantMode = (int) meta.quantMode;
 		stats->encoding = (int) meta.postingsEncoding;
-		stats->scalarTailPostings = postingsTouched;	/* all scalar in prompt 6 */
+		stats->scoreKernel = scoreKernel;
+		stats->simdBlocks = simdBlocks;
+		stats->scalarTailPostings = scalarTail;
 	}
 
 	if (out != NULL)

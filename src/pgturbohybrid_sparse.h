@@ -234,7 +234,54 @@ typedef struct PgturbohybridSparseScanStats
 	uint64		exactRerankFetchUs;
 	uint64		exactRerankScoreUs;
 	bool		exactRerankTopkChanged;
+	int			scoreKernel;		/* PGTURBOHYBRID_SPARSE_SCORE_* */
+	uint64		simdBlocks;			/* SoA blocks scored via SIMD */
 } PgturbohybridSparseScanStats;
+
+/* SoA score-kernel ISA family (combined with bit width for the stat name). */
+#define PGTURBOHYBRID_SPARSE_SCORE_SCALAR 0
+#define PGTURBOHYBRID_SPARSE_SCORE_AVX2 1
+#define PGTURBOHYBRID_SPARSE_SCORE_NEON 2
+
+/*
+ * SoA postings scorer (prompt 8): scores[base + offsets[k]] += termMul *
+ * dequant(weights[k]) over a chunk, where weights is uint8 (q8) / uint16 (q16)
+ * / float4 (f32).  SIMD kernels widen+multiply a block then scatter-add with a
+ * scalar loop; the scalar kernel is the correctness reference.
+ */
+int			PgturbohybridSparseResolveScoreKernel(int bits, bool simdEnabled);
+const char *PgturbohybridSparseScoreKernelName(int kernel, int bits);
+void		PgturbohybridSparseScoreSoa(int kernel, const void *weights,
+										const uint16 *offsets, uint32 count,
+										uint32 base, int bits, double termMul,
+										double *scores, uint32 nodeCount,
+										uint64 *simdBlocks, uint64 *scalarTail);
+
+/* ISA-specific SoA block kernels (defined in the per-arch SIMD files). */
+#if defined(__x86_64__) || defined(_M_X64) || defined(__i386) || defined(_M_IX86)
+void		PgturbohybridSparseScoreSoaAvx2Q8(const uint8 *weights,
+											  const uint16 *offsets, uint32 count,
+											  uint32 base, double termMul,
+											  double *scores, uint32 nodeCount,
+											  uint64 *simdBlocks, uint64 *scalarTail);
+void		PgturbohybridSparseScoreSoaAvx2Q16(const uint16 *weights,
+											   const uint16 *offsets, uint32 count,
+											   uint32 base, double termMul,
+											   double *scores, uint32 nodeCount,
+											   uint64 *simdBlocks, uint64 *scalarTail);
+#endif
+#if defined(__aarch64__) || defined(_M_ARM64)
+void		PgturbohybridSparseScoreSoaNeonQ8(const uint8 *weights,
+											  const uint16 *offsets, uint32 count,
+											  uint32 base, double termMul,
+											  double *scores, uint32 nodeCount,
+											  uint64 *simdBlocks, uint64 *scalarTail);
+void		PgturbohybridSparseScoreSoaNeonQ16(const uint16 *weights,
+											   const uint16 *offsets, uint32 count,
+											   uint32 base, double termMul,
+											   double *scores, uint32 nodeCount,
+											   uint64 *simdBlocks, uint64 *scalarTail);
+#endif
 
 /*
  * Build the sparse inverted index over the index's sparse key, after the dense
@@ -251,7 +298,7 @@ void		PgturbohybridSparseBuildCollect(Relation heap, Relation index,
  */
 int			PgturbohybridSparseCollectCandidates(Relation index,
 												 PgturbohybridQueryHeader *query,
-												 int k,
+												 int k, bool simdEnabled,
 												 PgturbohybridSparseCandidate **out,
 												 MemoryContext ctx,
 												 PgturbohybridSparseScanStats *stats);

@@ -1,0 +1,107 @@
+-- SIMD/scalar result parity for the sparse SoA scoring kernels (Prompt 8).
+-- Asserts that the AVX2/NEON q8/q16 kernels return the same ranking as the
+-- scalar reference across block/tail boundaries; rerank is disabled so the raw
+-- quantized kernel output is what is compared. Not a latency benchmark.
+SET client_min_messages = warning;
+CREATE EXTENSION IF NOT EXISTS vector;
+CREATE EXTENSION IF NOT EXISTS pgturbohybrid;
+RESET client_min_messages;
+
+-- Term (1000+t) appears in exactly t docs with distinct weights 1..t, so a query
+-- on it exercises a df=t scoring run (block count t/8, tail t%8).
+CREATE TABLE sp_simd (id serial, embedding vector(3), s turbohybrid_sparse_vector);
+INSERT INTO sp_simd (embedding, s)
+SELECT '[1,0,0]',
+       turbohybrid_sparse_vector_build(ARRAY[1000 + t]::int4[], ARRAY[k::float4])
+FROM unnest(ARRAY[1,2,3,7,15,16,17,31,32,33]) AS t,
+     generate_series(1, t) AS k;
+
+SET enable_seqscan = off;
+SET turbohybrid.sparse_rerank = off;   -- compare the raw quantized kernels
+
+-- For q8 and q16: every tail size must rank identically under simd on vs off.
+DO $$
+DECLARE
+  bits int;
+  t int;
+  ids_on int[];
+  ids_off int[];
+BEGIN
+  FOREACH bits IN ARRAY ARRAY[8,16]
+  LOOP
+    EXECUTE format('CREATE INDEX sp_simd_idx ON sp_simd USING turbohybrid '
+                   '(embedding vector_cosine_turbohybrid_ops, s sparse_ip_turbohybrid_ops) '
+                   'WITH (sparse_quant_bits = %s)', bits);
+    FOREACH t IN ARRAY ARRAY[1,2,3,7,15,16,17,31,32,33]
+    LOOP
+      SET LOCAL enable_seqscan = off;
+      SET LOCAL turbohybrid.sparse_rerank = off;
+      SET LOCAL turbohybrid.simd = on;
+      EXECUTE format($q$
+        SELECT array_agg(id) FROM (
+          SELECT id FROM sp_simd
+          ORDER BY s <~*> turbohybrid_query(
+            sparse_query => turbohybrid_sparse_vector_build(ARRAY[%s]::int4[], ARRAY[1.0]::float4[]))
+          LIMIT 100) q $q$, 1000 + t) INTO ids_on;
+
+      SET LOCAL turbohybrid.simd = off;
+      EXECUTE format($q$
+        SELECT array_agg(id) FROM (
+          SELECT id FROM sp_simd
+          ORDER BY s <~*> turbohybrid_query(
+            sparse_query => turbohybrid_sparse_vector_build(ARRAY[%s]::int4[], ARRAY[1.0]::float4[]))
+          LIMIT 100) q $q$, 1000 + t) INTO ids_off;
+
+      IF ids_on IS DISTINCT FROM ids_off THEN
+        RAISE EXCEPTION 'simd/scalar mismatch bits=% df=%: on=% off=%', bits, t, ids_on, ids_off;
+      END IF;
+      IF array_length(ids_on, 1) IS DISTINCT FROM t THEN
+        RAISE EXCEPTION 'expected % candidates for df=% (bits=%), got %', t, t, bits, ids_on;
+      END IF;
+    END LOOP;
+    DROP INDEX sp_simd_idx;
+  END LOOP;
+END $$;
+
+-- Kernel-stat checks: on an AVX2 host simd=on selects the avx2 kernel for a
+-- multi-block q8 run; simd=off forces scalar. Guarded so non-AVX2 / non-SIMD
+-- builds simply skip the avx2 expectation.
+CREATE INDEX sp_simd_q8 ON sp_simd USING turbohybrid
+  (embedding vector_cosine_turbohybrid_ops, s sparse_ip_turbohybrid_ops)
+  WITH (sparse_quant_bits = 8);
+DO $$
+DECLARE
+  st jsonb;
+  avx2 bool := turbohybrid_simd_capabilities()->>'compile_avx2' = 'true'
+               AND turbohybrid_simd_capabilities()->>'runtime_avx2' = 'true';
+BEGIN
+  SET LOCAL enable_seqscan = off;
+  SET LOCAL turbohybrid.sparse_rerank = off;
+
+  SET LOCAL turbohybrid.simd = on;
+  PERFORM id FROM sp_simd ORDER BY s <~*> turbohybrid_query(
+    sparse_query => turbohybrid_sparse_vector_build(ARRAY[1033]::int4[], ARRAY[1.0]::float4[])) LIMIT 100;
+  st := turbohybrid_last_scan_stats();
+  IF avx2 THEN
+    IF st->>'sparse_score_kernel' != 'avx2_q8' THEN
+      RAISE EXCEPTION 'expected avx2_q8 kernel on AVX2 host: %', st->>'sparse_score_kernel';
+    END IF;
+    IF (st->>'sparse_simd_blocks')::int < 1 THEN
+      RAISE EXCEPTION 'expected >=1 simd block: %', st;
+    END IF;
+  END IF;
+
+  SET LOCAL turbohybrid.simd = off;
+  PERFORM id FROM sp_simd ORDER BY s <~*> turbohybrid_query(
+    sparse_query => turbohybrid_sparse_vector_build(ARRAY[1033]::int4[], ARRAY[1.0]::float4[])) LIMIT 100;
+  st := turbohybrid_last_scan_stats();
+  IF st->>'sparse_score_kernel' != 'scalar' OR (st->>'sparse_simd_blocks')::int != 0 THEN
+    RAISE EXCEPTION 'simd=off must use the scalar kernel: %', st;
+  END IF;
+END $$;
+DROP INDEX sp_simd_q8;
+
+RESET turbohybrid.simd;
+RESET turbohybrid.sparse_rerank;
+RESET enable_seqscan;
+DROP TABLE sp_simd;
