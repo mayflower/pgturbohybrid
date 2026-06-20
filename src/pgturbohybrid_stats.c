@@ -13,6 +13,7 @@
 #include "pgturbohybrid_multivector.h"
 #include "pgturbohybrid_quant.h"
 #include "pgturbohybrid_am.h"
+#include "pgturbohybrid_sparse.h"
 #include "pgturbohybrid_bm25.h"
 #include "pgturbohybrid_vector_compat.h"
 #include "pgturbohybrid_jsonb_compat.h"
@@ -3363,6 +3364,18 @@ pgturbohybrid_last_scan_stats(PG_FUNCTION_ARGS)
 							   scanStats.sparseCandidates);
 	PgturbohybridJsonbAddBool(&state, "sparse_k_defaulted",
 							  scanStats.sparseKDefaulted);
+	PgturbohybridJsonbAddInt64(&state, "sparse_quant_bits",
+							   scanStats.sparseQuantBits);
+	PgturbohybridJsonbAddString(&state, "sparse_quant_mode",
+								scanStats.sparseQuantMode == PGTURBOHYBRID_SPARSE_QUANT_PER_TERM_LINEAR ?
+								"per_term_linear" : "f32");
+	PgturbohybridJsonbAddString(&state, "sparse_postings_encoding",
+								scanStats.sparseEncoding == PGTURBOHYBRID_SPARSE_ENCODING_VARINT ?
+								"varint" : "offset16_soa");
+	PgturbohybridJsonbAddString(&state, "sparse_decode_kernel", "scalar");
+	PgturbohybridJsonbAddString(&state, "sparse_score_kernel", "scalar");
+	PgturbohybridJsonbAddInt64(&state, "sparse_scalar_tail_postings",
+							   scanStats.sparseScalarTailPostings);
 	PgturbohybridJsonbAddBranchPlan(&state, &scanStats.branchPlan);
 	PgturbohybridJsonbAddInt64(&state, "quantization_bits",
 							   pgturbohybrid_last_graph_quantization_bits);

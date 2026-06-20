@@ -44,7 +44,43 @@ typedef struct PgturbohybridSparseCollector
 	uint64		count;
 	uint64		capacity;
 	uint64		docCount;		/* docs contributing >= 1 posting */
+	int			quantBits;		/* 0 (f32), 8, or 16 */
+	int			quantMode;		/* PGTURBOHYBRID_SPARSE_QUANT_* */
+	int			encoding;		/* resolved PGTURBOHYBRID_SPARSE_ENCODING_* */
+	int			blockSize;		/* postings per chunk */
 } PgturbohybridSparseCollector;
+
+/* Resolve effective sparse build options (index->rd_options or defaults). */
+static void
+PgturbohybridSparseResolveOptions(Relation index, int *bits, int *mode,
+								  int *encoding, int *blockSize)
+{
+	PgturbohybridOptions *opts = (PgturbohybridOptions *) index->rd_options;
+	int			optBits = opts != NULL ? opts->sparseQuantBits :
+		PGTURBOHYBRID_SPARSE_DEFAULT_QUANT_BITS;
+	int			optMode = opts != NULL ? opts->sparseQuantMode :
+		PGTURBOHYBRID_SPARSE_QUANT_PER_TERM_LINEAR;
+	int			optEnc = opts != NULL ? opts->sparsePostingsEncoding : 0;
+	int			optBlock = opts != NULL ? opts->sparseBlockSize :
+		PGTURBOHYBRID_SPARSE_DEFAULT_BLOCK_SIZE;
+
+	/* "f32" mode (or 0 bits) means exact f32 storage regardless of bit width. */
+	if (optMode == PGTURBOHYBRID_SPARSE_QUANT_F32)
+		optBits = 0;
+	*mode = optBits == 0 ? PGTURBOHYBRID_SPARSE_QUANT_F32 :
+		PGTURBOHYBRID_SPARSE_QUANT_PER_TERM_LINEAR;
+	*bits = optBits;
+
+	/* Reloption encoding: auto(0)->SoA, offset16_soa(1)->SoA, varint(2)->varint. */
+	*encoding = (optEnc == 2) ? PGTURBOHYBRID_SPARSE_ENCODING_VARINT :
+		PGTURBOHYBRID_SPARSE_ENCODING_SOA;
+
+	if (optBlock < 1)
+		optBlock = PGTURBOHYBRID_SPARSE_DEFAULT_BLOCK_SIZE;
+	if (optBlock > PGTURBOHYBRID_SPARSE_MAX_BLOCK_SIZE)
+		optBlock = PGTURBOHYBRID_SPARSE_MAX_BLOCK_SIZE;
+	*blockSize = optBlock;
+}
 
 static int
 PgturbohybridSparseTidCompare(const void *a, const void *b)
@@ -183,6 +219,115 @@ PgturbohybridSparseSetMetaBlock(Relation index, BlockNumber metaBlkno)
 										PGTURBOHYBRID_GRAPH_GRAPH_OP_META_UPDATE);
 }
 
+/* Worst-case encoded bytes per posting for a (bits, encoding) combination. */
+static uint32
+PgturbohybridSparsePerPostingBytes(int encoding, int bits)
+{
+	uint32		w = PgturbohybridSparseWeightWidth(bits);
+
+	if (encoding == PGTURBOHYBRID_SPARSE_ENCODING_VARINT)
+		return w + 5;			/* up to 5 varint bytes + weight */
+	return w + 2;				/* uint16 offset + weight (SoA) */
+}
+
+/* Max postings per chunk so the encoded tuple fits on a fresh page. */
+static uint32
+PgturbohybridSparseMaxChunkPostings(int encoding, int bits)
+{
+	Size		budget = BLCKSZ - 256;	/* conservative: page header + special + slack */
+	uint32		per = PgturbohybridSparsePerPostingBytes(encoding, bits);
+	Size		usable = budget - PGTURBOHYBRID_SPARSE_POSTINGS_HEADER - 8;
+
+	return (uint32) Max(usable / per, (Size) 1);
+}
+
+/* Write one quantized/f32 weight at dst for the given bit width. */
+static inline void
+PgturbohybridSparseWriteWeight(char *dst, float4 weight, float4 scale, int bits)
+{
+	if (bits == 0)
+		memcpy(dst, &weight, sizeof(float4));
+	else if (bits == 16)
+	{
+		uint16		q = (uint16) PgturbohybridSparseQuantize(weight, scale, 16);
+
+		memcpy(dst, &q, sizeof(uint16));
+	}
+	else
+	{
+		uint8		q = (uint8) PgturbohybridSparseQuantize(weight, scale, 8);
+
+		*(uint8 *) dst = q;
+	}
+}
+
+/*
+ * Encode triples[start, start+n) into the chunk buffer for the given encoding
+ * and bit width (node_ids relative to triples[start].nodeId).  Returns the
+ * MAXALIGN'd tuple size.
+ */
+static Size
+PgturbohybridSparseEncodeChunk(PgturbohybridSparsePostingsTupleData *chunk,
+							   int encoding, int bits, float4 scale,
+							   const PgturbohybridSparseTriple *triples,
+							   uint64 start, uint32 n)
+{
+	uint32		base = triples[start].nodeId;
+	uint32		wwidth = PgturbohybridSparseWeightWidth(bits);
+	char	   *payload = chunk->payload;
+	Size		payloadBytes;
+
+	chunk->type = PGTURBOHYBRID_SPARSE_POSTINGS_TUPLE_TYPE;
+	chunk->encoding = (uint8) encoding;
+	chunk->count = (uint16) n;
+	chunk->termId = triples[start].termId;
+	chunk->baseNodeId = base;
+
+	if (encoding == PGTURBOHYBRID_SPARSE_ENCODING_VARINT)
+	{
+		uint8	   *deltas = (uint8 *) (payload + sizeof(uint16));
+		int			pos = 0;
+		uint32		prev = base;
+		Size		weightsStart;
+
+		for (uint32 k = 0; k < n; k++)
+		{
+			uint32		node = triples[start + k].nodeId;
+
+			pos += PgturbohybridSparseVarintEncode(node - prev, deltas + pos);
+			prev = node;
+		}
+		{
+			uint16		deltaBytes = (uint16) pos;
+
+			memcpy(payload, &deltaBytes, sizeof(uint16));
+		}
+		weightsStart = PgturbohybridSparseAlignUp(sizeof(uint16) + (Size) pos, wwidth);
+		for (uint32 k = 0; k < n; k++)
+			PgturbohybridSparseWriteWeight(payload + weightsStart + (Size) k * wwidth,
+										   triples[start + k].weight, scale, bits);
+		payloadBytes = weightsStart + (Size) n * wwidth;
+	}
+	else						/* SoA: weights[] then uint16 offsets[] */
+	{
+		Size		offsetsStart = PgturbohybridSparseAlignUp((Size) n * wwidth, 2);
+
+		for (uint32 k = 0; k < n; k++)
+			PgturbohybridSparseWriteWeight(payload + (Size) k * wwidth,
+										   triples[start + k].weight, scale, bits);
+		for (uint32 k = 0; k < n; k++)
+		{
+			uint16		off = (uint16) (triples[start + k].nodeId - base);
+
+			memcpy(payload + offsetsStart + (Size) k * sizeof(uint16), &off,
+				   sizeof(uint16));
+		}
+		payloadBytes = offsetsStart + (Size) n * sizeof(uint16);
+	}
+
+	return MAXALIGN(PGTURBOHYBRID_SPARSE_POSTINGS_HEADER + payloadBytes);
+}
+
 /*
  * Write the sorted triples as per-term postings chunks + a lexicon, then the
  * meta tuple, and anchor it.  Returns nothing; sets the graph metapage anchor.
@@ -201,15 +346,18 @@ PgturbohybridSparseWriteStorage(PgturbohybridSparseCollector *collector)
 	PgturbohybridSparseLexiconEntry *lexEntries;
 	uint64		lexCapacity;
 	uint64		lexCount = 0;
-	Size		chunkMax;
-	Size		postingsTupleMax;
 	PgturbohybridSparsePostingsTupleData *chunk;
 	PgturbohybridSparseMetaTupleData meta;
 	uint64		i = 0;
+	int			bits = collector->quantBits;
+	int			encoding = collector->encoding;
+	uint32		maxq = PgturbohybridSparseQuantMax(bits);
+	uint32		chunkCap;
 
-	chunkMax = PgturbohybridSparsePostingsTupleSize(PGTURBOHYBRID_SPARSE_POSTINGS_PER_CHUNK);
-	postingsTupleMax = chunkMax;
-	chunk = (PgturbohybridSparsePostingsTupleData *) palloc0(postingsTupleMax);
+	/* Cap postings/chunk by both the configured block size and page capacity. */
+	chunkCap = (uint32) Min((uint64) collector->blockSize,
+							(uint64) PgturbohybridSparseMaxChunkPostings(encoding, bits));
+	chunk = (PgturbohybridSparsePostingsTupleData *) palloc0(BLCKSZ);
 
 	lexCapacity = 1024;
 	lexEntries = (PgturbohybridSparseLexiconEntry *)
@@ -224,7 +372,9 @@ PgturbohybridSparseWriteStorage(PgturbohybridSparseCollector *collector)
 		BlockNumber firstChunkBlkno = InvalidBlockNumber;
 		OffsetNumber firstChunkOffno = InvalidOffsetNumber;
 		float4		maxWeight = 0.0f;
+		float4		scale;
 		bool		firstChunkRecorded = false;
+		uint64		p;
 
 		while (i < collector->count && collector->triples[i].termId == termId)
 		{
@@ -233,27 +383,33 @@ PgturbohybridSparseWriteStorage(PgturbohybridSparseCollector *collector)
 			i++;
 		}
 		df = (uint32) (i - termStart);
+		scale = bits == 0 ? 0.0f : (maxWeight / (float4) maxq);
 
-		/* Emit ceil(df / PER_CHUNK) chunks, each (except the last) full. */
-		for (uint64 p = termStart; p < i; p += PGTURBOHYBRID_SPARSE_POSTINGS_PER_CHUNK)
+		/*
+		 * Emit chunks: at most chunkCap postings, and for the SoA encoding at
+		 * most a 2^16 node_id span (so offsets fit in uint16).
+		 */
+		p = termStart;
+		while (p < i)
 		{
-			uint32		n = (uint32) Min((uint64) PGTURBOHYBRID_SPARSE_POSTINGS_PER_CHUNK,
-										 i - p);
+			uint32		base = collector->triples[p].nodeId;
+			uint32		n = 0;
+			Size		size;
 			OffsetNumber off;
 
-			chunk->type = PGTURBOHYBRID_SPARSE_POSTINGS_TUPLE_TYPE;
-			chunk->reserved1 = 0;
-			chunk->count = (uint16) n;
-			chunk->termId = termId;
-			for (uint32 k = 0; k < n; k++)
+			while (p + n < i && n < chunkCap)
 			{
-				chunk->postings[k].nodeId = collector->triples[p + k].nodeId;
-				chunk->postings[k].weight = collector->triples[p + k].weight;
+				if (encoding == PGTURBOHYBRID_SPARSE_ENCODING_SOA &&
+					collector->triples[p + n].nodeId - base >= PGTURBOHYBRID_SPARSE_SOA_RANGE)
+					break;
+				n++;
 			}
+
+			size = PgturbohybridSparseEncodeChunk(chunk, encoding, bits, scale,
+												  collector->triples, p, n);
 			off = PgturbohybridGraphAppendTuple(index, MAIN_FORKNUM, &postingsStart,
 												PGTURBOHYBRID_GRAPH_PAGE_KIND_SPARSE_POSTINGS,
-												(Item) chunk,
-												PgturbohybridSparsePostingsTupleSize(n),
+												(Item) chunk, size,
 												PGTURBOHYBRID_GRAPH_GRAPH_OP_ELEMENT_INSERT,
 												&insertBlkno);
 			if (!firstChunkRecorded)
@@ -262,6 +418,7 @@ PgturbohybridSparseWriteStorage(PgturbohybridSparseCollector *collector)
 				firstChunkOffno = off;
 				firstChunkRecorded = true;
 			}
+			p += n;
 		}
 
 		if (lexCount == lexCapacity)
@@ -274,6 +431,7 @@ PgturbohybridSparseWriteStorage(PgturbohybridSparseCollector *collector)
 		lexEntries[lexCount].termId = termId;
 		lexEntries[lexCount].df = df;
 		lexEntries[lexCount].maxWeight = maxWeight;
+		lexEntries[lexCount].scale = scale;
 		lexEntries[lexCount].postingsBlkno = firstChunkBlkno;
 		lexEntries[lexCount].postingsOffno = firstChunkOffno;
 		lexEntries[lexCount].reserved = 0;
@@ -315,6 +473,9 @@ PgturbohybridSparseWriteStorage(PgturbohybridSparseCollector *collector)
 	/* Write the meta tuple + anchor it. */
 	memset(&meta, 0, sizeof(meta));
 	meta.type = PGTURBOHYBRID_SPARSE_META_TUPLE_TYPE;
+	meta.quantBits = (uint8) collector->quantBits;
+	meta.quantMode = (uint8) collector->quantMode;
+	meta.postingsEncoding = (uint8) collector->encoding;
 	meta.sparseVersion = PGTURBOHYBRID_SPARSE_VERSION;
 	meta.termCount = termCount;
 	meta.docCount = (uint32) collector->docCount;
@@ -322,6 +483,7 @@ PgturbohybridSparseWriteStorage(PgturbohybridSparseCollector *collector)
 	meta.lexiconStartBlkno = lexiconStart;
 	meta.lexiconPages = lexiconPages;
 	meta.postingsPages = postingsPages;
+	meta.blockSize = (uint32) collector->blockSize;
 	(void) PgturbohybridGraphAppendTuple(index, MAIN_FORKNUM, &metaStart,
 										 PGTURBOHYBRID_GRAPH_PAGE_KIND_SPARSE_META,
 										 (Item) &meta,
@@ -374,6 +536,9 @@ PgturbohybridSparseBuildCollect(Relation heap, Relation index, IndexInfo *indexI
 	memset(&collector, 0, sizeof(collector));
 	collector.index = index;
 	collector.sparseKey = map.sparseKey;
+	PgturbohybridSparseResolveOptions(index, &collector.quantBits,
+									  &collector.quantMode, &collector.encoding,
+									  &collector.blockSize);
 
 	if (!PgturbohybridGraphReadMeta(index, &graphMeta))
 		ereport(ERROR,

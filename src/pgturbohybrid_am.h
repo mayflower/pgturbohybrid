@@ -109,6 +109,10 @@ typedef struct PgturbohybridOptions
 	int			hybridDefaultDenseK;
 	int			hybridDefaultBm25K;
 	int			hybridDefaultRrfK;
+	int			sparseQuantBits;
+	int			sparseQuantMode;
+	int			sparsePostingsEncoding;
+	int			sparseBlockSize;
 }			PgturbohybridOptions;
 
 #define PGTURBOHYBRID_BRANCH_PLAN_MAX_BRANCHES 8
@@ -176,6 +180,10 @@ typedef struct PgturbohybridScanStatsSnapshot
 	uint32		sparseCandidatesEffective;
 	bool		sparseKDefaulted;
 	uint32		sparseCandidates;
+	int			sparseQuantBits;
+	int			sparseQuantMode;
+	int			sparseEncoding;
+	uint64		sparseScalarTailPostings;
 	PgturbohybridBranchPlan branchPlan;
 	uint32		denseCandidatesEffective;
 	bool		denseKDefaulted;

@@ -640,6 +640,26 @@ static relopt_enum_elt_def pgturbohybrid_native_segments_relopt_options[] = {
 	{NULL, 0}
 };
 
+/* Sparse-vector postings quantization mode. */
+#define PGTURBOHYBRID_SPARSE_QUANT_MODE_F32 0
+#define PGTURBOHYBRID_SPARSE_QUANT_MODE_PER_TERM_LINEAR 1
+static relopt_enum_elt_def pgturbohybrid_sparse_quant_mode_relopt_options[] = {
+	{"f32", PGTURBOHYBRID_SPARSE_QUANT_MODE_F32},
+	{"per_term_linear", PGTURBOHYBRID_SPARSE_QUANT_MODE_PER_TERM_LINEAR},
+	{NULL, 0}
+};
+
+/* Sparse-vector postings physical encoding (reloption; "auto" resolves at build). */
+#define PGTURBOHYBRID_SPARSE_ENCODING_OPT_AUTO 0
+#define PGTURBOHYBRID_SPARSE_ENCODING_OPT_OFFSET16_SOA 1
+#define PGTURBOHYBRID_SPARSE_ENCODING_OPT_VARINT 2
+static relopt_enum_elt_def pgturbohybrid_sparse_encoding_relopt_options[] = {
+	{"auto", PGTURBOHYBRID_SPARSE_ENCODING_OPT_AUTO},
+	{"offset16_soa", PGTURBOHYBRID_SPARSE_ENCODING_OPT_OFFSET16_SOA},
+	{"varint", PGTURBOHYBRID_SPARSE_ENCODING_OPT_VARINT},
+	{NULL, 0}
+};
+
 static relopt_enum_elt_def pgturbohybrid_entry_sidecar_strategy_relopt_options[] = {
 	{"hash", PGTURBOHYBRID_ENTRY_SIDECAR_HASH},
 	{"farthest_code", PGTURBOHYBRID_ENTRY_SIDECAR_FARTHEST_CODE},
@@ -1416,6 +1436,10 @@ typedef struct PgturbohybridLastScanStats
 	uint32		sparseCandidatesEffective;
 	bool		sparseKDefaulted;
 	uint32		sparseCandidates;
+	int			sparseQuantBits;
+	int			sparseQuantMode;
+	int			sparseEncoding;
+	uint64		sparseScalarTailPostings;
 	PgturbohybridBranchPlan branchPlan;
 	char		profile[16];
 	char		fusion[16];
@@ -1913,6 +1937,11 @@ PgturbohybridGetLastScanStatsSnapshot(PgturbohybridScanStatsSnapshot *stats)
 		pgturbohybrid_last_scan_state.sparseCandidatesEffective;
 	stats->sparseKDefaulted = pgturbohybrid_last_scan_state.sparseKDefaulted;
 	stats->sparseCandidates = pgturbohybrid_last_scan_state.sparseCandidates;
+	stats->sparseQuantBits = pgturbohybrid_last_scan_state.sparseQuantBits;
+	stats->sparseQuantMode = pgturbohybrid_last_scan_state.sparseQuantMode;
+	stats->sparseEncoding = pgturbohybrid_last_scan_state.sparseEncoding;
+	stats->sparseScalarTailPostings =
+		pgturbohybrid_last_scan_state.sparseScalarTailPostings;
 	stats->branchPlan = pgturbohybrid_last_scan_state.branchPlan;
 	stats->denseCandidatesEffective =
 		pgturbohybrid_last_scan_state.denseCandidatesEffective;
@@ -6184,6 +6213,10 @@ PgturbohybridCollectSparseOnlyResults(IndexScanDesc scan,
 	lastStats->sparsePostingsTouched = sstats.postingsTouched;
 	lastStats->sparseCandidatesScored = sstats.candidatesScored;
 	lastStats->sparseElapsedUs = sstats.elapsedUs;
+	lastStats->sparseQuantBits = sstats.quantBits;
+	lastStats->sparseQuantMode = sstats.quantMode;
+	lastStats->sparseEncoding = sstats.encoding;
+	lastStats->sparseScalarTailPostings = sstats.scalarTailPostings;
 	lastStats->sparseCandidatesRequested = originalQuery->sparseK;
 	lastStats->sparseCandidatesEffective = scanQuery->sparseK;
 	lastStats->sparseKDefaulted =
@@ -6720,6 +6753,10 @@ PgturbohybridCollectScanResults(IndexScanDesc scan, PgturbohybridScanState *stat
 	lastStats.sparseResolvedTerms = sparseStats.resolvedTerms;
 	lastStats.sparsePostingsTouched = sparseStats.postingsTouched;
 	lastStats.sparseCandidatesScored = sparseStats.candidatesScored;
+	lastStats.sparseQuantBits = sparseStats.quantBits;
+	lastStats.sparseQuantMode = sparseStats.quantMode;
+	lastStats.sparseEncoding = sparseStats.encoding;
+	lastStats.sparseScalarTailPostings = sparseStats.scalarTailPostings;
 	if (hasSparseQuery)
 	{
 		lastStats.sparseCandidatesRequested = originalQuery->sparseK;
@@ -8341,6 +8378,10 @@ pgturbohybridamoptions(Datum reloptions, bool validate)
 		PGTURBOHYBRID_RELOPT_PARSE("multivector_proxy_encoder", RELOPT_TYPE_ENUM, multivectorProxyEncoder),
 		PGTURBOHYBRID_RELOPT_PARSE("multivector_context_mode", RELOPT_TYPE_ENUM, multivectorContextMode),
 		PGTURBOHYBRID_RELOPT_PARSE("multivector_field_mode", RELOPT_TYPE_ENUM, multivectorFieldMode),
+		PGTURBOHYBRID_RELOPT_PARSE("sparse_quant_bits", RELOPT_TYPE_INT, sparseQuantBits),
+		PGTURBOHYBRID_RELOPT_PARSE("sparse_quant_mode", RELOPT_TYPE_ENUM, sparseQuantMode),
+		PGTURBOHYBRID_RELOPT_PARSE("sparse_postings_encoding", RELOPT_TYPE_ENUM, sparsePostingsEncoding),
+		PGTURBOHYBRID_RELOPT_PARSE("sparse_block_size", RELOPT_TYPE_INT, sparseBlockSize),
 	};
 	PgturbohybridOptions *opts = (PgturbohybridOptions *) build_reloptions(reloptions, validate,
 																 pgturbohybrid_relopt_kind,
@@ -8378,6 +8419,14 @@ pgturbohybridamoptions(Datum reloptions, bool validate)
 				(errcode(ERRCODE_INVALID_PARAMETER_VALUE),
 				 errmsg("invalid value %d for option \"quantization_bits\"", opts->tqBits),
 				 errdetail("Valid values are \"1\", \"2\", \"4\", and \"8\".")));
+
+	if (validate && opts != NULL &&
+		opts->sparseQuantBits != 0 && opts->sparseQuantBits != 8 &&
+		opts->sparseQuantBits != 16)
+		ereport(ERROR,
+				(errcode(ERRCODE_INVALID_PARAMETER_VALUE),
+				 errmsg("invalid value %d for option \"sparse_quant_bits\"", opts->sparseQuantBits),
+				 errdetail("Valid values are \"0\", \"8\", and \"16\".")));
 
 	return (bytea *) opts;
 }
@@ -8564,6 +8613,25 @@ PgturbohybridInit(void)
 					   PGTURBOHYBRID_MULTIVECTOR_FIELD_MODE_OFF,
 					   "Valid values are \"off\" and \"weighted\".",
 					   AccessExclusiveLock);
+	add_int_reloption(pgturbohybrid_relopt_kind, "sparse_quant_bits",
+					  "Sparse-vector postings quantization bit width (0=f32, 8, 16).",
+					  PGTURBOHYBRID_SPARSE_DEFAULT_QUANT_BITS, 0, 16, AccessExclusiveLock);
+	add_enum_reloption(pgturbohybrid_relopt_kind, "sparse_quant_mode",
+					   "Sparse-vector postings quantization mode.",
+					   pgturbohybrid_sparse_quant_mode_relopt_options,
+					   PGTURBOHYBRID_SPARSE_QUANT_MODE_PER_TERM_LINEAR,
+					   "Valid values are \"f32\" and \"per_term_linear\".",
+					   AccessExclusiveLock);
+	add_enum_reloption(pgturbohybrid_relopt_kind, "sparse_postings_encoding",
+					   "Sparse-vector postings physical encoding.",
+					   pgturbohybrid_sparse_encoding_relopt_options,
+					   PGTURBOHYBRID_SPARSE_ENCODING_OPT_AUTO,
+					   "Valid values are \"auto\", \"offset16_soa\", and \"varint\".",
+					   AccessExclusiveLock);
+	add_int_reloption(pgturbohybrid_relopt_kind, "sparse_block_size",
+					  "Sparse-vector postings per chunk.",
+					  PGTURBOHYBRID_SPARSE_DEFAULT_BLOCK_SIZE, 1,
+					  PGTURBOHYBRID_SPARSE_MAX_BLOCK_SIZE, AccessExclusiveLock);
 
 	if (IsParallelWorker())
 		return;

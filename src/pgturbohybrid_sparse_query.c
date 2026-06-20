@@ -27,6 +27,7 @@ typedef struct PgturbohybridSparseLexEntry
 {
 	int32		termId;
 	uint32		df;
+	float4		scale;
 	BlockNumber postingsBlkno;
 	OffsetNumber postingsOffno;
 } PgturbohybridSparseLexEntry;
@@ -127,6 +128,7 @@ PgturbohybridSparseLoadLexicon(Relation index, BlockNumber start, uint32 termCou
 			{
 				entries[count].termId = lt->entries[e].termId;
 				entries[count].df = lt->entries[e].df;
+				entries[count].scale = lt->entries[e].scale;
 				entries[count].postingsBlkno = lt->entries[e].postingsBlkno;
 				entries[count].postingsOffno = lt->entries[e].postingsOffno;
 				count++;
@@ -143,17 +145,101 @@ PgturbohybridSparseLoadLexicon(Relation index, BlockNumber start, uint32 termCou
 	return entries;
 }
 
+/* Dequantize+accumulate one decoded posting into scores[]. */
+static inline void
+PgturbohybridSparseAddPosting(double *scores, uint32 nodeCount, uint32 nodeId,
+							  const char *weightPtr, int bits, double qWeight,
+							  double termMultiplier)
+{
+	if (nodeId >= nodeCount)
+		return;
+	if (bits == 0)
+	{
+		float4		w;
+
+		memcpy(&w, weightPtr, sizeof(float4));
+		scores[nodeId] += qWeight * (double) w;
+	}
+	else if (bits == 16)
+	{
+		uint16		q;
+
+		memcpy(&q, weightPtr, sizeof(uint16));
+		scores[nodeId] += termMultiplier * (double) q;
+	}
+	else
+	{
+		scores[nodeId] += termMultiplier * (double) (*(const uint8 *) weightPtr);
+	}
+}
+
+/* Decode + accumulate a single postings chunk (SoA or varint, any bit width). */
+static void
+PgturbohybridSparseScoreChunk(PgturbohybridSparsePostingsTuple ct, int bits,
+							  double qWeight, double termMultiplier,
+							  double *scores, uint32 nodeCount)
+{
+	uint32		n = ct->count;
+	uint32		base = ct->baseNodeId;
+	uint32		wwidth = PgturbohybridSparseWeightWidth(bits);
+	const char *payload = ct->payload;
+
+	if (ct->encoding == PGTURBOHYBRID_SPARSE_ENCODING_VARINT)
+	{
+		uint16		deltaBytes;
+		Size		weightsStart;
+		const uint8 *deltas = (const uint8 *) (payload + sizeof(uint16));
+		int			pos = 0;
+		uint32		node = base;
+
+		memcpy(&deltaBytes, payload, sizeof(uint16));
+		weightsStart = PgturbohybridSparseAlignUp(sizeof(uint16) + (Size) deltaBytes,
+												  wwidth);
+		for (uint32 k = 0; k < n; k++)
+		{
+			int			consumed;
+
+			node += PgturbohybridSparseVarintDecode(deltas + pos, &consumed);
+			pos += consumed;
+			PgturbohybridSparseAddPosting(scores, nodeCount, node,
+										  payload + weightsStart + (Size) k * wwidth,
+										  bits, qWeight, termMultiplier);
+		}
+	}
+	else						/* SoA */
+	{
+		Size		offsetsStart = PgturbohybridSparseAlignUp((Size) n * wwidth, 2);
+
+		for (uint32 k = 0; k < n; k++)
+		{
+			uint16		off;
+			uint32		node;
+
+			memcpy(&off, payload + offsetsStart + (Size) k * sizeof(uint16),
+				   sizeof(uint16));
+			node = base + off;
+			PgturbohybridSparseAddPosting(scores, nodeCount, node,
+										  payload + (Size) k * wwidth,
+										  bits, qWeight, termMultiplier);
+		}
+	}
+}
+
 /*
- * Accumulate one term's postings into scores[]: walk ceil(df/PER_CHUNK)
- * consecutive chunks from (blkno, offno), adding qWeight * doc_weight per node.
+ * Accumulate one term's postings into scores[]: physically walk the term's
+ * chunks from (blkno, offno) until df postings are consumed, dequantizing per
+ * the index's bit width.  termMultiplier = qWeight * scale folds the per-term
+ * dequant scale into the query weight for the quantized paths.
  */
 static uint64
 PgturbohybridSparseAccumulateTerm(Relation index, BlockNumber blkno,
 								  OffsetNumber offno, uint32 df, double qWeight,
-								  double *scores, uint32 nodeCount)
+								  double scale, int bits, double *scores,
+								  uint32 nodeCount)
 {
 	uint32		remaining = df;
 	uint64		touched = 0;
+	double		termMultiplier = qWeight * scale;
 
 	while (remaining > 0 && blkno != InvalidBlockNumber)
 	{
@@ -172,13 +258,8 @@ PgturbohybridSparseAccumulateTerm(Relation index, BlockNumber blkno,
 
 			if (ct->type == PGTURBOHYBRID_SPARSE_POSTINGS_TUPLE_TYPE)
 			{
-				for (uint16 p = 0; p < ct->count; p++)
-				{
-					uint32		nodeId = ct->postings[p].nodeId;
-
-					if (nodeId < nodeCount)
-						scores[nodeId] += qWeight * (double) ct->postings[p].weight;
-				}
+				PgturbohybridSparseScoreChunk(ct, bits, qWeight, termMultiplier,
+											  scores, nodeCount);
 				touched += ct->count;
 				remaining -= Min(remaining, (uint32) ct->count);
 			}
@@ -266,6 +347,8 @@ PgturbohybridSparseCollectCandidates(Relation index, PgturbohybridQueryHeader *q
 															 found->postingsOffno,
 															 found->df,
 															 (double) qEntries[i].weight,
+															 (double) found->scale,
+															 (int) meta.quantBits,
 															 scores, nodeCount);
 	}
 
@@ -309,6 +392,10 @@ PgturbohybridSparseCollectCandidates(Relation index, PgturbohybridQueryHeader *q
 		stats->postingsTouched = postingsTouched;
 		stats->candidatesScored = scoredCount;
 		stats->elapsedUs = (uint64) INSTR_TIME_GET_MICROSEC(t1);
+		stats->quantBits = (int) meta.quantBits;
+		stats->quantMode = (int) meta.quantMode;
+		stats->encoding = (int) meta.postingsEncoding;
+		stats->scalarTailPostings = postingsTouched;	/* all scalar in prompt 6 */
 	}
 
 	if (out != NULL)

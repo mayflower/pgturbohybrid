@@ -14,8 +14,11 @@ INSERT INTO sp_scan VALUES
   (4, '[0,0,0,1]', turbohybrid_sparse_vector_build(ARRAY[2,5]::int4[], ARRAY[2.0,3.0]::float4[]));
 
 -- Dense+sparse index now builds (Prompt 4 lifts the dense-present gate).
+-- Pin exact f32 postings (sparse_quant_bits=0) so the distances below are exact;
+-- quantized (q8/q16) postings are exercised in pgturbohybrid_sparse_quant.
 CREATE INDEX sp_scan_idx ON sp_scan
-  USING turbohybrid (embedding vector_cosine_turbohybrid_ops, s sparse_ip_turbohybrid_ops);
+  USING turbohybrid (embedding vector_cosine_turbohybrid_ops, s sparse_ip_turbohybrid_ops)
+  WITH (sparse_quant_bits = 0);
 
 SET enable_seqscan = off;
 
