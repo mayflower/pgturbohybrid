@@ -2234,7 +2234,7 @@ ERROR:  multivector token count 2 exceeds configured limit 1
 RESET turbohybrid.multivector_max_doc_vectors;
 CREATE INDEX mv_docs_bad_order_idx ON mv_docs USING turbohybrid
   (body_tsv bm25_tsvector_turbohybrid_ops, colbert multivector_cosine_turbohybrid_ops);
-ERROR:  pgturbohybrid first key must be type vector or multivector
+ERROR:  pgturbohybrid requires the vector or multivector key to be the first index column
 SELECT turbohybrid_index_stats('mv_docs_hybrid_idx'::regclass)->>'multivector_graph_mode'
   AS default_multivector_graph_mode;
 default_multivector_graph_mode

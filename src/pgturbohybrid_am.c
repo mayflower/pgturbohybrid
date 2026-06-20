@@ -2697,31 +2697,51 @@ PgturbohybridSubXactCallback(SubXactEvent event, SubTransactionId mySubid,
 		PgturbohybridClearPlannedStmtStack();
 }
 
+/* Index-key position of the BM25 (tsvector) key, or -1.  Discovered by type so
+ * it works whether bm25 is the 2nd key (dense+bm25) or a later key (e.g.
+ * dense+sparse+bm25). */
+static int
+PgturbohybridIndexBm25KeyAttno(Relation index)
+{
+	PgturbohybridIndexKeyMap map;
+
+	if (index == NULL || index->rd_index == NULL)
+		return -1;
+	PgturbohybridBuildIndexKeyMap(index, NULL, &map);
+	return map.bm25Key;
+}
+
 bool
 PgturbohybridIndexHasLexical(Relation index)
 {
-	return index != NULL && index->rd_index != NULL &&
-		index->rd_index->indnkeyatts > PGTURBOHYBRID_LEXICAL_KEY_INDEX;
+	return PgturbohybridIndexBm25KeyAttno(index) >= 0;
 }
 
 bool
 PgturbohybridIndexGetLexicalDatum(Relation index, Datum *values, bool *isnull,
 							 Datum *lexicalValue)
 {
-	if (!PgturbohybridIndexHasLexical(index) || values == NULL || isnull == NULL)
+	int			bm25Key = PgturbohybridIndexBm25KeyAttno(index);
+
+	if (bm25Key < 0 || values == NULL || isnull == NULL)
 		return false;
-	if (isnull[PGTURBOHYBRID_LEXICAL_KEY_INDEX])
+	if (isnull[bm25Key])
 		return false;
 
-	*lexicalValue = values[PGTURBOHYBRID_LEXICAL_KEY_INDEX];
+	*lexicalValue = values[bm25Key];
 	return true;
 }
 
 static bool
 PgturbohybridIndexInfoHasLexical(Relation index, IndexInfo *indexInfo)
 {
+	PgturbohybridIndexKeyMap map;
+
 	if (indexInfo != NULL)
-		return indexInfo->ii_NumIndexKeyAttrs > PGTURBOHYBRID_LEXICAL_KEY_INDEX;
+	{
+		PgturbohybridBuildIndexKeyMap(index, indexInfo, &map);
+		return map.hasBm25;
+	}
 
 	return PgturbohybridIndexHasLexical(index);
 }
@@ -2729,6 +2749,12 @@ PgturbohybridIndexInfoHasLexical(Relation index, IndexInfo *indexInfo)
 static AttrNumber
 PgturbohybridPathLexicalAttno(IndexPath *path)
 {
+	/*
+	 * Planner context: only dense+bm25 / multivector+bm25 indexes are buildable
+	 * today (sparse keys are rejected), so the bm25 key is always the second
+	 * key column.  Prompt 4 (which enables 3-key dense+sparse+bm25 indexes) must
+	 * generalize this to discover the bm25 key position by type.
+	 */
 	if (path == NULL || path->indexinfo == NULL ||
 		path->indexinfo->nkeycolumns <= PGTURBOHYBRID_LEXICAL_KEY_INDEX)
 		return InvalidAttrNumber;
@@ -2736,80 +2762,159 @@ PgturbohybridPathLexicalAttno(IndexPath *path)
 	return path->indexinfo->indexkeys[PGTURBOHYBRID_LEXICAL_KEY_INDEX];
 }
 
-static void
-PgturbohybridValidateIndex(Relation index, IndexInfo *indexInfo)
+/*
+ * Discover which index key carries each retrieval signal, by type (not fixed
+ * position).  Validates structure: at most one of each kind, no unknown key
+ * types, 1..MAX key columns, at least one retrieval key.  Policy (which
+ * combinations are currently supported) is enforced by PgturbohybridValidateIndex.
+ */
+void
+PgturbohybridBuildIndexKeyMap(Relation index, IndexInfo *indexInfo,
+							  PgturbohybridIndexKeyMap *map)
 {
 	TupleDesc	desc = RelationGetDescr(index);
-	Oid			vectorOid;
-	Oid			denseType;
-	Oid			lexicalType = InvalidOid;
-	int			keyAttrs;
-	bool		hasLexical;
+	Oid			vectorOid = PgturbohybridVectorTypeOid();
+	int			keyCount;
+
+	map->denseKey = map->multivectorKey = map->sparseKey = map->bm25Key = -1;
+	map->graphKey = map->primaryKey = -1;
+	map->hasDense = map->hasMultivector = map->hasSparse = map->hasBm25 = false;
 
 	if (indexInfo != NULL)
 	{
-		keyAttrs = indexInfo->ii_NumIndexKeyAttrs;
-		if (keyAttrs != 1 && keyAttrs != 2)
-			ereport(ERROR,
-					(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
-					 errmsg("pgturbohybrid indexes require one or two key columns"),
-					 errdetail("Use one vector column, optionally followed by one tsvector column.")));
-
+		keyCount = indexInfo->ii_NumIndexKeyAttrs;
 		if (indexInfo->ii_Expressions != NIL)
 			ereport(ERROR,
 					(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
 					 errmsg("pgturbohybrid expression indexes are not supported yet")));
 	}
 	else if (index->rd_index != NULL)
-	{
-		keyAttrs = index->rd_index->indnkeyatts;
-		if (keyAttrs != 1 && keyAttrs != 2)
-			ereport(ERROR,
-					(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
-					 errmsg("pgturbohybrid indexes require one or two key columns"),
-					 errdetail("Use one vector column, optionally followed by one tsvector column.")));
-	}
+		keyCount = index->rd_index->indnkeyatts;
 	else
-		keyAttrs = desc->natts;
+		keyCount = desc->natts;
+	map->keyCount = keyCount;
 
-	if (desc->natts < keyAttrs)
+	if (keyCount < 1 || keyCount > PGTURBOHYBRID_MAX_INDEX_KEYS)
+		ereport(ERROR,
+				(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
+				 errmsg("pgturbohybrid indexes support 1 to %d key columns",
+						PGTURBOHYBRID_MAX_INDEX_KEYS)));
+
+	if (desc->natts < keyCount)
 		ereport(ERROR,
 				(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
 				 errmsg("pgturbohybrid index tuple descriptor is missing key columns")));
 
-	denseType = TupleDescAttr(desc, PGTURBOHYBRID_DENSE_KEY_INDEX)->atttypid;
-	vectorOid = PgturbohybridVectorTypeOid();
-	hasLexical = keyAttrs > PGTURBOHYBRID_LEXICAL_KEY_INDEX;
-	if (hasLexical)
-		lexicalType =
-			TupleDescAttr(desc, PGTURBOHYBRID_LEXICAL_KEY_INDEX)->atttypid;
+	for (int i = 0; i < keyCount; i++)
+	{
+		Oid			t = TupleDescAttr(desc, i)->atttypid;
+
+		if (OidIsValid(vectorOid) && t == vectorOid)
+		{
+			if (map->hasDense)
+				ereport(ERROR,
+						(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
+						 errmsg("pgturbohybrid index supports at most one vector key")));
+			map->denseKey = i;
+			map->hasDense = true;
+		}
+		else if (PgturbohybridTypeIsMultiVector(t))
+		{
+			if (map->hasMultivector)
+				ereport(ERROR,
+						(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
+						 errmsg("pgturbohybrid index supports at most one multivector key")));
+			map->multivectorKey = i;
+			map->hasMultivector = true;
+		}
+		else if (PgturbohybridTypeIsSparseVector(t))
+		{
+			if (map->hasSparse)
+				ereport(ERROR,
+						(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
+						 errmsg("pgturbohybrid index supports at most one sparse-vector key")));
+			map->sparseKey = i;
+			map->hasSparse = true;
+		}
+		else if (t == TSVECTOROID)
+		{
+			if (map->hasBm25)
+				ereport(ERROR,
+						(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
+						 errmsg("pgturbohybrid index supports at most one tsvector key")));
+			map->bm25Key = i;
+			map->hasBm25 = true;
+		}
+		else
+			ereport(ERROR,
+					(errcode(ERRCODE_DATATYPE_MISMATCH),
+					 errmsg("pgturbohybrid index key %d has unsupported type %s",
+							i + 1, format_type_be(t)),
+					 errdetail("Supported key types: vector, multivector, turbohybrid_sparse_vector, tsvector.")));
+	}
+
+	if (map->hasDense && map->hasMultivector)
+		ereport(ERROR,
+				(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
+				 errmsg("pgturbohybrid index supports at most one vector or multivector key")));
+
+	map->graphKey = map->hasDense ? map->denseKey :
+		(map->hasMultivector ? map->multivectorKey : -1);
+	map->primaryKey = map->graphKey >= 0 ? map->graphKey :
+		(map->hasSparse ? map->sparseKey :
+		 (map->hasBm25 ? map->bm25Key : -1));
+
+	if (map->primaryKey < 0)
+		ereport(ERROR,
+				(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
+				 errmsg("pgturbohybrid index requires a vector, multivector, sparse-vector, or tsvector key")));
+}
+
+int
+PgturbohybridIndexGraphKeyAttno(Relation index)
+{
+	PgturbohybridIndexKeyMap map;
+
+	PgturbohybridBuildIndexKeyMap(index, NULL, &map);
+	return map.graphKey;
+}
+
+static void
+PgturbohybridValidateIndex(Relation index, IndexInfo *indexInfo)
+{
+	PgturbohybridIndexKeyMap map;
+
+	PgturbohybridBuildIndexKeyMap(index, indexInfo, &map);
 
 	/*
 	 * Native sparse-vector index retrieval is not implemented yet (the
-	 * sparse_ip_turbohybrid_ops opclass is a skeleton).  Reject a sparse-typed
-	 * index key with a clear message rather than the generic dense/tsvector
-	 * type errors below.  See the sparse-branch milestones (prompts 3-4).
+	 * sparse_ip_turbohybrid_ops opclass is a skeleton); the key map recognizes
+	 * the sparse key but the AM rejects building such an index for now.
+	 * Dense-present sparse is enabled in prompt 4, sparse-primary in prompt 12.
 	 */
-	if (PgturbohybridTypeIsSparseVector(denseType) ||
-		(hasLexical && PgturbohybridTypeIsSparseVector(lexicalType)))
+	if (map.hasSparse)
 		ereport(ERROR,
 				(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
 				 errmsg("pgturbohybrid sparse-vector index columns are not supported yet"),
 				 errdetail("sparse_ip_turbohybrid_ops is reserved for a future native sparse retrieval branch."),
 				 errhint("Use sparse_query => ... with turbohybrid_query(...) for exact sparse scoring.")));
 
-	if ((!OidIsValid(vectorOid) || denseType != vectorOid) &&
-		!PgturbohybridTypeIsMultiVector(denseType))
+	/* The dense/multivector graph owns node identity; require it for now. */
+	if (map.graphKey < 0)
 		ereport(ERROR,
 				(errcode(ERRCODE_DATATYPE_MISMATCH),
-				 errmsg("pgturbohybrid first key must be type vector or multivector"),
-				 errdetail("Found %s.", format_type_be(denseType))));
+				 errmsg("pgturbohybrid index requires a vector or multivector key")));
 
-	if (hasLexical && lexicalType != TSVECTOROID)
+	/*
+	 * The graph key must be the first index column.  The dense/multivector
+	 * build and scan paths read it from key position 0; secondary keys (sparse,
+	 * bm25) are discovered by type and may follow in any order.  (Fully
+	 * arbitrary graph-key placement is a possible future extension.)
+	 */
+	if (map.graphKey != 0)
 		ereport(ERROR,
-				(errcode(ERRCODE_DATATYPE_MISMATCH),
-				 errmsg("pgturbohybrid second key must be type tsvector"),
-				 errdetail("Found %s.", format_type_be(lexicalType))));
+				(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
+				 errmsg("pgturbohybrid requires the vector or multivector key to be the first index column")));
 }
 
 static bool
@@ -5427,8 +5532,13 @@ PgturbohybridBm25HeapTSVectorRerank(IndexScanDesc scan,
 	if (limit <= 0)
 		return;
 
-	lexicalAttno =
-		scan->indexRelation->rd_index->indkey.values[PGTURBOHYBRID_LEXICAL_KEY_INDEX];
+	{
+		int			bm25Key = PgturbohybridIndexBm25KeyAttno(scan->indexRelation);
+
+		if (bm25Key < 0)
+			return;
+		lexicalAttno = scan->indexRelation->rd_index->indkey.values[bm25Key];
+	}
 	heap = scan->heapRelation;
 	desc = RelationGetDescr(heap);
 	if (lexicalAttno <= 0 || lexicalAttno > desc->natts)

@@ -22,6 +22,32 @@
 #define PGTURBOHYBRID_MAX_MULTIVECTOR_ACCUMULATOR_MB 1024
 #define PGTURBOHYBRID_DENSE_KEY_INDEX 0
 #define PGTURBOHYBRID_LEXICAL_KEY_INDEX 1
+/* Max index key columns: one vector/multivector graph key + sparse + bm25. */
+#define PGTURBOHYBRID_MAX_INDEX_KEYS 4
+
+/*
+ * Index key map: which index key attribute (0-based) carries each retrieval
+ * signal, discovered by key type rather than fixed position.  Replaces the
+ * hardcoded dense=key0 / lexical=key1 assumption so the AM can recognize
+ * sparse keys and (eventually) arbitrary key orders.  -1 means "absent".
+ * graphKey is the dense/multivector key that owns the node-identity graph;
+ * primaryKey is the node-space owner (graphKey if present, else sparse, else
+ * bm25).  Built by PgturbohybridBuildIndexKeyMap().
+ */
+typedef struct PgturbohybridIndexKeyMap
+{
+	int			denseKey;		/* plain vector key, or -1 */
+	int			multivectorKey; /* multivector key, or -1 */
+	int			sparseKey;		/* sparse-vector key, or -1 */
+	int			bm25Key;		/* tsvector/BM25 key, or -1 */
+	int			graphKey;		/* dense or multivector key, or -1 */
+	int			primaryKey;		/* node-space owner key, or -1 */
+	int			keyCount;
+	bool		hasDense;
+	bool		hasMultivector;
+	bool		hasSparse;
+	bool		hasBm25;
+} PgturbohybridIndexKeyMap;
 
 typedef enum PgturbohybridHybridBudgetPolicy
 {
@@ -827,5 +853,8 @@ void		PgturbohybridGetLastScanStatsSnapshot(PgturbohybridScanStatsSnapshot *stat
 bool		PgturbohybridIndexHasLexical(Relation index);
 bool		PgturbohybridIndexGetLexicalDatum(Relation index, Datum *values,
 										bool *isnull, Datum *lexicalValue);
+void		PgturbohybridBuildIndexKeyMap(Relation index, IndexInfo *indexInfo,
+										  PgturbohybridIndexKeyMap *map);
+int			PgturbohybridIndexGraphKeyAttno(Relation index);
 
 #endif
