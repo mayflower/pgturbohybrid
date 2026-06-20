@@ -1,3 +1,9 @@
+-- Suppress drop-cascade NOTICEs: when the llama_embed regression test ran first
+-- in the same database, dropping pgturbohybrid/vector cascades to the lingering
+-- llama_embed extension and emits a NOTICE that depends on server
+-- client_min_messages and test ordering.  Pin it to warning so this teardown is
+-- deterministic regardless of run order or cluster config.
+SET client_min_messages = warning;
 DO $$
 BEGIN
 	IF EXISTS (SELECT 1 FROM pg_extension WHERE extname = 'pg_colbert_llama') THEN
@@ -9,8 +15,12 @@ BEGIN
 	IF EXISTS (SELECT 1 FROM pg_extension WHERE extname = 'vector') THEN
 		EXECUTE 'DROP EXTENSION vector CASCADE';
 	END IF;
+	IF EXISTS (SELECT 1 FROM pg_extension WHERE extname = 'llama_embed') THEN
+		EXECUTE 'DROP EXTENSION llama_embed CASCADE';
+	END IF;
 END
 $$;
+RESET client_min_messages;
 
 CREATE EXTENSION vector;
 CREATE EXTENSION pgturbohybrid;

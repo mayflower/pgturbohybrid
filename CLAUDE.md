@@ -81,6 +81,11 @@ behavioral (SQL regression, recall, benchmarks) use the nix PG17 env.
   (own Makefile; `PG_COLBERT_LLAMA_ENGINE=stub` by default, `=llama` needs a
   llama.cpp backend). Its regression suite shares one DB, so run `llama_embed`
   before `pg_colbert_llama` only with that ordering in mind.
+- **Do not run `make` / `make clean` in the working tree while a nix
+  `th-installcheck` / `pg_regress` run is in progress.** `pg_regress` writes to
+  `./results/` in the working tree, and `make clean` deletes that directory —
+  the collision shows up as a spurious `cannot create …/results/…out.diff:
+  Directory nonexistent` bail-out, not a real test failure. Run one at a time.
 
 ## Naming conventions
 
