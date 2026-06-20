@@ -2390,6 +2390,7 @@ BEGIN
 		'bm25_tsvector_turbohybrid_ops',
 		'multivector_cosine_turbohybrid_ops',
 		'multivector_maxsim_ip_turbohybrid_ops',
+		'sparse_ip_turbohybrid_ops',
 		'vector_cosine_turbohybrid_ops',
 		'vector_ip_turbohybrid_ops',
 		'vector_l2_turbohybrid_ops'

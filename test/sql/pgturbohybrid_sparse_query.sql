@@ -55,3 +55,9 @@ SELECT turbohybrid_sparse_vector_build(ARRAY[1]::int4[], ARRAY[1.0]::float4[])
        <~*> turbohybrid_query(vector_query => '[1]'::vector);
 
 DROP TABLE sp_docs;
+
+-- the sparse opclass exists, but native sparse index scan is not implemented:
+-- CREATE INDEX with sparse_ip_turbohybrid_ops must be rejected cleanly.
+CREATE TABLE sp_idx (id int, s turbohybrid_sparse_vector);
+CREATE INDEX ON sp_idx USING turbohybrid (s sparse_ip_turbohybrid_ops);
+DROP TABLE sp_idx;

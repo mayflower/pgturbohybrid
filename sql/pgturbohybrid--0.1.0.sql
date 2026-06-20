@@ -443,6 +443,15 @@ CREATE OPERATOR CLASS bm25_tsvector_turbohybrid_ops
 	FOR TYPE pg_catalog.tsvector USING turbohybrid AS
 	STORAGE pg_catalog.tsvector;
 
+-- Sparse opclass skeleton: registers the <~*> ORDER BY operator so a future
+-- native sparse retrieval branch can use it.  Native sparse index scan is not
+-- implemented yet; CREATE INDEX with this opclass is rejected by the AM with a
+-- clear message (see PgturbohybridValidateIndex).
+CREATE OPERATOR CLASS sparse_ip_turbohybrid_ops
+	FOR TYPE turbohybrid_sparse_vector USING turbohybrid AS
+	OPERATOR 1 <~*> (turbohybrid_sparse_vector, turbohybrid_query) FOR ORDER BY pg_catalog.float_ops,
+	STORAGE turbohybrid_sparse_vector;
+
 CREATE FUNCTION turbohybrid_index_stats(pg_catalog.regclass) RETURNS pg_catalog.jsonb
 	AS 'MODULE_PATHNAME', 'pgturbohybrid_index_stats'
 	LANGUAGE C STABLE STRICT PARALLEL SAFE;

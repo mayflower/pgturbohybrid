@@ -2784,6 +2784,20 @@ PgturbohybridValidateIndex(Relation index, IndexInfo *indexInfo)
 		lexicalType =
 			TupleDescAttr(desc, PGTURBOHYBRID_LEXICAL_KEY_INDEX)->atttypid;
 
+	/*
+	 * Native sparse-vector index retrieval is not implemented yet (the
+	 * sparse_ip_turbohybrid_ops opclass is a skeleton).  Reject a sparse-typed
+	 * index key with a clear message rather than the generic dense/tsvector
+	 * type errors below.  See the sparse-branch milestones (prompts 3-4).
+	 */
+	if (PgturbohybridTypeIsSparseVector(denseType) ||
+		(hasLexical && PgturbohybridTypeIsSparseVector(lexicalType)))
+		ereport(ERROR,
+				(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
+				 errmsg("pgturbohybrid sparse-vector index columns are not supported yet"),
+				 errdetail("sparse_ip_turbohybrid_ops is reserved for a future native sparse retrieval branch."),
+				 errhint("Use sparse_query => ... with turbohybrid_query(...) for exact sparse scoring.")));
+
 	if ((!OidIsValid(vectorOid) || denseType != vectorOid) &&
 		!PgturbohybridTypeIsMultiVector(denseType))
 		ereport(ERROR,
@@ -8039,6 +8053,8 @@ pgturbohybridamvalidate(Oid opclassoid)
 		valid = opclass->opcintype == PgturbohybridMultiVectorTypeOid();
 	else if (strcmp(opcname, "bm25_tsvector_turbohybrid_ops") == 0)
 		valid = opclass->opcintype == TSVECTOROID;
+	else if (strcmp(opcname, "sparse_ip_turbohybrid_ops") == 0)
+		valid = opclass->opcintype == PgturbohybridSparseVectorTypeOid();
 
 	ReleaseSysCache(opclasstuple);
 	return valid;
