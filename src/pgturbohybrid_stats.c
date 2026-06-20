@@ -3376,6 +3376,18 @@ pgturbohybrid_last_scan_stats(PG_FUNCTION_ARGS)
 	PgturbohybridJsonbAddString(&state, "sparse_score_kernel", "scalar");
 	PgturbohybridJsonbAddInt64(&state, "sparse_scalar_tail_postings",
 							   scanStats.sparseScalarTailPostings);
+	PgturbohybridJsonbAddString(&state, "sparse_rerank_mode",
+								scanStats.sparseRerankMode == 1 ? "topk" :
+								scanStats.sparseRerankMode == 2 ? "band" :
+								scanStats.sparseRerankMode == 3 ? "auto" : "off");
+	PgturbohybridJsonbAddInt64(&state, "sparse_exact_rerank_count",
+							   scanStats.sparseExactRerankCount);
+	PgturbohybridJsonbAddInt64(&state, "sparse_exact_rerank_fetch_us",
+							   scanStats.sparseExactRerankFetchUs);
+	PgturbohybridJsonbAddInt64(&state, "sparse_exact_rerank_score_us",
+							   scanStats.sparseExactRerankScoreUs);
+	PgturbohybridJsonbAddBool(&state, "sparse_exact_rerank_topk_changed",
+							  scanStats.sparseExactRerankTopkChanged);
 	PgturbohybridJsonbAddBranchPlan(&state, &scanStats.branchPlan);
 	PgturbohybridJsonbAddInt64(&state, "quantization_bits",
 							   pgturbohybrid_last_graph_quantization_bits);

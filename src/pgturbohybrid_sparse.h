@@ -229,6 +229,11 @@ typedef struct PgturbohybridSparseScanStats
 	int			quantMode;			/* PGTURBOHYBRID_SPARSE_QUANT_* */
 	int			encoding;			/* PGTURBOHYBRID_SPARSE_ENCODING_* */
 	uint64		scalarTailPostings; /* postings scored by the scalar path */
+	int			rerankMode;			/* PgturbohybridSparseRerankMode */
+	uint64		exactRerankCount;	/* candidates exact-reranked from the heap */
+	uint64		exactRerankFetchUs;
+	uint64		exactRerankScoreUs;
+	bool		exactRerankTopkChanged;
 } PgturbohybridSparseScanStats;
 
 /*

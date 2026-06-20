@@ -77,6 +77,14 @@ typedef enum PgturbohybridBm25HeapTSVectorRerankMode
 	PGTURBOHYBRID_BM25_HEAP_TSVECTOR_RERANK_AUTO
 } PgturbohybridBm25HeapTSVectorRerankMode;
 
+typedef enum PgturbohybridSparseRerankMode
+{
+	PGTURBOHYBRID_SPARSE_RERANK_OFF,
+	PGTURBOHYBRID_SPARSE_RERANK_TOPK,
+	PGTURBOHYBRID_SPARSE_RERANK_BAND,
+	PGTURBOHYBRID_SPARSE_RERANK_AUTO
+} PgturbohybridSparseRerankMode;
+
 static relopt_kind pgturbohybrid_relopt_kind;
 static List *pgturbohybrid_plannedstmt_stack = NIL;
 static PlannedStmt *pgturbohybrid_current_plannedstmt = NULL;
@@ -118,6 +126,8 @@ int			pgturbohybrid_bm25_heap_tsvector_rerank =
 	PGTURBOHYBRID_BM25_HEAP_TSVECTOR_RERANK_OFF;
 int			pgturbohybrid_bm25_heap_tsvector_rerank_multiplier = 4;
 double		pgturbohybrid_bm25_heap_tsvector_rerank_weight = 0.10;
+int			pgturbohybrid_sparse_rerank = PGTURBOHYBRID_SPARSE_RERANK_AUTO;
+int			pgturbohybrid_sparse_rerank_k = 0;	/* 0 = follow final_k */
 int			pgturbohybrid_final_diversity =
 	PGTURBOHYBRID_FINAL_DIVERSITY_OFF;
 int			pgturbohybrid_final_diversity_payload_slot = -1;
@@ -301,6 +311,14 @@ static const struct config_enum_entry pgturbohybrid_bm25_heap_tsvector_rerank_op
 	{"topk", PGTURBOHYBRID_BM25_HEAP_TSVECTOR_RERANK_TOPK, false},
 	{"band", PGTURBOHYBRID_BM25_HEAP_TSVECTOR_RERANK_BAND, false},
 	{"auto", PGTURBOHYBRID_BM25_HEAP_TSVECTOR_RERANK_AUTO, false},
+	{NULL, 0, false}
+};
+
+static const struct config_enum_entry pgturbohybrid_sparse_rerank_options[] = {
+	{"off", PGTURBOHYBRID_SPARSE_RERANK_OFF, false},
+	{"topk", PGTURBOHYBRID_SPARSE_RERANK_TOPK, false},
+	{"band", PGTURBOHYBRID_SPARSE_RERANK_BAND, false},
+	{"auto", PGTURBOHYBRID_SPARSE_RERANK_AUTO, false},
 	{NULL, 0, false}
 };
 
@@ -657,6 +675,15 @@ static relopt_enum_elt_def pgturbohybrid_sparse_encoding_relopt_options[] = {
 	{"auto", PGTURBOHYBRID_SPARSE_ENCODING_OPT_AUTO},
 	{"offset16_soa", PGTURBOHYBRID_SPARSE_ENCODING_OPT_OFFSET16_SOA},
 	{"varint", PGTURBOHYBRID_SPARSE_ENCODING_OPT_VARINT},
+	{NULL, 0}
+};
+
+/* Sparse exact-storage mode (sidecar reserved for a later prompt; only off works). */
+#define PGTURBOHYBRID_SPARSE_EXACT_STORAGE_OFF 0
+#define PGTURBOHYBRID_SPARSE_EXACT_STORAGE_SIDECAR 1
+static relopt_enum_elt_def pgturbohybrid_sparse_exact_storage_relopt_options[] = {
+	{"off", PGTURBOHYBRID_SPARSE_EXACT_STORAGE_OFF},
+	{"sidecar", PGTURBOHYBRID_SPARSE_EXACT_STORAGE_SIDECAR},
 	{NULL, 0}
 };
 
@@ -1440,6 +1467,11 @@ typedef struct PgturbohybridLastScanStats
 	int			sparseQuantMode;
 	int			sparseEncoding;
 	uint64		sparseScalarTailPostings;
+	int			sparseRerankMode;
+	uint64		sparseExactRerankCount;
+	uint64		sparseExactRerankFetchUs;
+	uint64		sparseExactRerankScoreUs;
+	bool		sparseExactRerankTopkChanged;
 	PgturbohybridBranchPlan branchPlan;
 	char		profile[16];
 	char		fusion[16];
@@ -1942,6 +1974,15 @@ PgturbohybridGetLastScanStatsSnapshot(PgturbohybridScanStatsSnapshot *stats)
 	stats->sparseEncoding = pgturbohybrid_last_scan_state.sparseEncoding;
 	stats->sparseScalarTailPostings =
 		pgturbohybrid_last_scan_state.sparseScalarTailPostings;
+	stats->sparseRerankMode = pgturbohybrid_last_scan_state.sparseRerankMode;
+	stats->sparseExactRerankCount =
+		pgturbohybrid_last_scan_state.sparseExactRerankCount;
+	stats->sparseExactRerankFetchUs =
+		pgturbohybrid_last_scan_state.sparseExactRerankFetchUs;
+	stats->sparseExactRerankScoreUs =
+		pgturbohybrid_last_scan_state.sparseExactRerankScoreUs;
+	stats->sparseExactRerankTopkChanged =
+		pgturbohybrid_last_scan_state.sparseExactRerankTopkChanged;
 	stats->branchPlan = pgturbohybrid_last_scan_state.branchPlan;
 	stats->denseCandidatesEffective =
 		pgturbohybrid_last_scan_state.denseCandidatesEffective;
@@ -6151,6 +6192,185 @@ PgturbohybridFuseGenerationArray(IndexScanDesc scan,
 											 stats);
 }
 
+static int
+PgturbohybridSparseCandidateScoreCompare(const void *a, const void *b)
+{
+	const PgturbohybridSparseCandidate *ca = (const PgturbohybridSparseCandidate *) a;
+	const PgturbohybridSparseCandidate *cb = (const PgturbohybridSparseCandidate *) b;
+
+	if (ca->score != cb->score)
+		return ca->score > cb->score ? -1 : 1;	/* descending score */
+	if (ca->nodeId != cb->nodeId)
+		return ca->nodeId < cb->nodeId ? -1 : 1;	/* deterministic tiebreak */
+	return 0;
+}
+
+static int
+PgturbohybridSparseEntryTermCompare(const void *a, const void *b)
+{
+	const PgturbohybridSparseVectorEntry *ea = (const PgturbohybridSparseVectorEntry *) a;
+	const PgturbohybridSparseVectorEntry *eb = (const PgturbohybridSparseVectorEntry *) b;
+
+	if (ea->termId != eb->termId)
+		return ea->termId < eb->termId ? -1 : 1;
+	return 0;
+}
+
+/*
+ * Exact f32 sparse rerank (prompt 7): for the top candidate band of a quantized
+ * sparse scan, fetch the heap sparse column (MVCC-safe), recompute the exact
+ * float32 sparse inner product against the query, then re-sort the candidates.
+ * A no-op for f32 indexes under "auto"; mirrors PgturbohybridBm25HeapTSVectorRerank.
+ */
+static void
+PgturbohybridSparseRerankCandidates(IndexScanDesc scan,
+									PgturbohybridQueryHeader *query,
+									PgturbohybridSparseCandidate *cands, int count,
+									int autoBudgetLimit, int quantBits,
+									PgturbohybridSparseScanStats *stats)
+{
+	int			mode = pgturbohybrid_sparse_rerank;
+	Relation	heap;
+	AttrNumber	sparseAttno;
+	PgturbohybridIndexKeyMap map;
+	struct varlena *qsv;
+	const PgturbohybridSparseVectorEntry *qEntriesRaw;
+	PgturbohybridSparseVectorEntry *qSorted;
+	uint32		qCount = 0;
+	int			band;
+	int			finalTarget;
+	int			rerankK;
+	TupleTableSlot *slot;
+	uint32	   *beforeTopK = NULL;
+	int			beforeTopKCount = 0;
+	int			rescored = 0;
+	instr_time	t;
+
+	if (stats != NULL)
+		stats->rerankMode = mode;
+	if (mode == PGTURBOHYBRID_SPARSE_RERANK_OFF || cands == NULL || count <= 0)
+		return;
+	/* "auto" reranks only quantized indexes; an f32 index is already exact. */
+	if (mode == PGTURBOHYBRID_SPARSE_RERANK_AUTO && quantBits == 0)
+		return;
+	if (scan == NULL || scan->heapRelation == NULL ||
+		scan->indexRelation == NULL || scan->indexRelation->rd_index == NULL)
+		return;
+
+	PgturbohybridBuildIndexKeyMap(scan->indexRelation, NULL, &map);
+	if (map.sparseKey < 0)
+		return;
+	sparseAttno = scan->indexRelation->rd_index->indkey.values[map.sparseKey];
+	heap = scan->heapRelation;
+	if (sparseAttno <= 0 || sparseAttno > RelationGetDescr(heap)->natts)
+		return;
+
+	qsv = PgturbohybridQueryGetSparseVector(query);
+	if (qsv == NULL)
+		return;
+	qEntriesRaw = PgturbohybridSparseVectorData(qsv, &qCount);
+	if (qCount == 0)
+		return;
+	qSorted = (PgturbohybridSparseVectorEntry *)
+		palloc(sizeof(PgturbohybridSparseVectorEntry) * qCount);
+	memcpy(qSorted, qEntriesRaw, sizeof(PgturbohybridSparseVectorEntry) * qCount);
+	qsort(qSorted, qCount, sizeof(PgturbohybridSparseVectorEntry),
+		  PgturbohybridSparseEntryTermCompare);
+
+	finalTarget = PgturbohybridBudgetFinalTarget(query, autoBudgetLimit);
+	rerankK = pgturbohybrid_sparse_rerank_k > 0 ?
+		pgturbohybrid_sparse_rerank_k : finalTarget;
+	band = mode == PGTURBOHYBRID_SPARSE_RERANK_BAND ? count : Min(count, rerankK);
+	if (band <= 0)
+	{
+		pfree(qSorted);
+		return;
+	}
+
+	beforeTopKCount = Min(finalTarget, count);
+	if (beforeTopKCount > 0)
+	{
+		beforeTopK = palloc(sizeof(uint32) * beforeTopKCount);
+		for (int i = 0; i < beforeTopKCount; i++)
+			beforeTopK[i] = cands[i].nodeId;
+	}
+
+	slot = table_slot_create(heap, NULL);
+	for (int i = 0; i < band; i++)
+	{
+		Datum		value;
+		bool		isnull;
+		bool		visible;
+		struct varlena *docDatum;
+		const PgturbohybridSparseVectorEntry *docEntries;
+		uint32		docN = 0;
+		double		dot = 0.0;
+
+		CHECK_FOR_INTERRUPTS();
+		INSTR_TIME_SET_CURRENT(t);
+		visible = table_tuple_fetch_row_version(heap, &cands[i].heaptid,
+												scan->xs_snapshot, slot);
+		if (stats != NULL)
+			stats->exactRerankFetchUs += PgturbohybridElapsedUs(t);
+		if (!visible)
+		{
+			ExecClearTuple(slot);
+			continue;
+		}
+		value = slot_getattr(slot, sparseAttno, &isnull);
+		if (isnull)
+		{
+			ExecClearTuple(slot);
+			continue;
+		}
+
+		INSTR_TIME_SET_CURRENT(t);
+		docDatum = (struct varlena *) PG_DETOAST_DATUM(value);
+		docEntries = PgturbohybridSparseVectorData(docDatum, &docN);
+		for (uint32 d = 0; d < docN; d++)
+		{
+			PgturbohybridSparseVectorEntry key;
+			const PgturbohybridSparseVectorEntry *found;
+
+			key.termId = docEntries[d].termId;
+			found = (const PgturbohybridSparseVectorEntry *)
+				bsearch(&key, qSorted, qCount,
+						sizeof(PgturbohybridSparseVectorEntry),
+						PgturbohybridSparseEntryTermCompare);
+			if (found != NULL)
+				dot += (double) found->weight * (double) docEntries[d].weight;
+		}
+		cands[i].score = dot;
+		if (docDatum != (struct varlena *) DatumGetPointer(value))
+			pfree(docDatum);
+		if (stats != NULL)
+			stats->exactRerankScoreUs += PgturbohybridElapsedUs(t);
+		rescored++;
+		ExecClearTuple(slot);
+	}
+	ExecDropSingleTupleTableSlot(slot);
+
+	if (rescored > 0)
+	{
+		qsort(cands, count, sizeof(PgturbohybridSparseCandidate),
+			  PgturbohybridSparseCandidateScoreCompare);
+		for (int i = 0; i < beforeTopKCount; i++)
+		{
+			if (beforeTopK[i] != cands[i].nodeId)
+			{
+				if (stats != NULL)
+					stats->exactRerankTopkChanged = true;
+				break;
+			}
+		}
+	}
+	if (stats != NULL)
+		stats->exactRerankCount = rescored;
+	if (beforeTopK != NULL)
+		pfree(beforeTopK);
+	pfree(qSorted);
+}
+
 /*
  * Sparse-as-sole-ORDER-BY scan (prompt 4): resolve the query's sparse_query
  * against the native sparse inverted index, exact-OR-accumulate over live nodes,
@@ -6183,6 +6403,10 @@ PgturbohybridCollectSparseOnlyResults(IndexScanDesc scan,
 
 	n = PgturbohybridSparseCollectCandidates(scan->indexRelation, scanQuery,
 											 candidateK, &cands, tmpCtx, &sstats);
+
+	/* Exact f32 rerank of the top band (prompt 7); no-op for f32 indexes. */
+	PgturbohybridSparseRerankCandidates(scan, scanQuery, cands, n, autoBudgetLimit,
+										sstats.quantBits, &sstats);
 
 	results = (PgturbohybridResult *) palloc0(sizeof(PgturbohybridResult) *
 											  Max(n, 1));
@@ -6217,6 +6441,11 @@ PgturbohybridCollectSparseOnlyResults(IndexScanDesc scan,
 	lastStats->sparseQuantMode = sstats.quantMode;
 	lastStats->sparseEncoding = sstats.encoding;
 	lastStats->sparseScalarTailPostings = sstats.scalarTailPostings;
+	lastStats->sparseRerankMode = sstats.rerankMode;
+	lastStats->sparseExactRerankCount = sstats.exactRerankCount;
+	lastStats->sparseExactRerankFetchUs = sstats.exactRerankFetchUs;
+	lastStats->sparseExactRerankScoreUs = sstats.exactRerankScoreUs;
+	lastStats->sparseExactRerankTopkChanged = sstats.exactRerankTopkChanged;
 	lastStats->sparseCandidatesRequested = originalQuery->sparseK;
 	lastStats->sparseCandidatesEffective = scanQuery->sparseK;
 	lastStats->sparseKDefaulted =
@@ -6540,6 +6769,10 @@ PgturbohybridCollectScanResults(IndexScanDesc scan, PgturbohybridScanState *stat
 														   scanQuery->sparseK,
 														   &sparse, so->tmpCtx,
 														   &sparseStats);
+		/* Exact f32 rerank before fusion so RRF ranks reflect exact scores. */
+		PgturbohybridSparseRerankCandidates(scan, scanQuery, sparse, sparseCount,
+											autoBudgetLimit, sparseStats.quantBits,
+											&sparseStats);
 		lastStats.sparseElapsedUs = PgturbohybridElapsedUs(phaseStart);
 	}
 
@@ -6757,6 +6990,11 @@ PgturbohybridCollectScanResults(IndexScanDesc scan, PgturbohybridScanState *stat
 	lastStats.sparseQuantMode = sparseStats.quantMode;
 	lastStats.sparseEncoding = sparseStats.encoding;
 	lastStats.sparseScalarTailPostings = sparseStats.scalarTailPostings;
+	lastStats.sparseRerankMode = sparseStats.rerankMode;
+	lastStats.sparseExactRerankCount = sparseStats.exactRerankCount;
+	lastStats.sparseExactRerankFetchUs = sparseStats.exactRerankFetchUs;
+	lastStats.sparseExactRerankScoreUs = sparseStats.exactRerankScoreUs;
+	lastStats.sparseExactRerankTopkChanged = sparseStats.exactRerankTopkChanged;
 	if (hasSparseQuery)
 	{
 		lastStats.sparseCandidatesRequested = originalQuery->sparseK;
@@ -8382,6 +8620,7 @@ pgturbohybridamoptions(Datum reloptions, bool validate)
 		PGTURBOHYBRID_RELOPT_PARSE("sparse_quant_mode", RELOPT_TYPE_ENUM, sparseQuantMode),
 		PGTURBOHYBRID_RELOPT_PARSE("sparse_postings_encoding", RELOPT_TYPE_ENUM, sparsePostingsEncoding),
 		PGTURBOHYBRID_RELOPT_PARSE("sparse_block_size", RELOPT_TYPE_INT, sparseBlockSize),
+		PGTURBOHYBRID_RELOPT_PARSE("sparse_exact_storage", RELOPT_TYPE_ENUM, sparseExactStorage),
 	};
 	PgturbohybridOptions *opts = (PgturbohybridOptions *) build_reloptions(reloptions, validate,
 																 pgturbohybrid_relopt_kind,
@@ -8427,6 +8666,13 @@ pgturbohybridamoptions(Datum reloptions, bool validate)
 				(errcode(ERRCODE_INVALID_PARAMETER_VALUE),
 				 errmsg("invalid value %d for option \"sparse_quant_bits\"", opts->sparseQuantBits),
 				 errdetail("Valid values are \"0\", \"8\", and \"16\".")));
+
+	if (validate && opts != NULL &&
+		opts->sparseExactStorage == PGTURBOHYBRID_SPARSE_EXACT_STORAGE_SIDECAR)
+		ereport(ERROR,
+				(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
+				 errmsg("sparse_exact_storage=sidecar is not supported yet"),
+				 errhint("Exact sparse rerank fetches the heap sparse column; use sparse_exact_storage=off.")));
 
 	return (bytea *) opts;
 }
@@ -8632,6 +8878,12 @@ PgturbohybridInit(void)
 					  "Sparse-vector postings per chunk.",
 					  PGTURBOHYBRID_SPARSE_DEFAULT_BLOCK_SIZE, 1,
 					  PGTURBOHYBRID_SPARSE_MAX_BLOCK_SIZE, AccessExclusiveLock);
+	add_enum_reloption(pgturbohybrid_relopt_kind, "sparse_exact_storage",
+					   "Exact f32 sparse storage for rerank (only \"off\" is supported).",
+					   pgturbohybrid_sparse_exact_storage_relopt_options,
+					   PGTURBOHYBRID_SPARSE_EXACT_STORAGE_OFF,
+					   "Valid value is \"off\"; \"sidecar\" is reserved for a future release.",
+					   AccessExclusiveLock);
 
 	if (IsParallelWorker())
 		return;
@@ -9404,6 +9656,18 @@ PgturbohybridInit(void)
 							 "The adjustment is weight * rank / (rank + 1), so it is capped by this value.",
 							 &pgturbohybrid_bm25_heap_tsvector_rerank_weight,
 							 0.10, 0.0, 1.0, PGC_USERSET, 0, NULL, NULL, NULL);
+	DefineCustomEnumVariable("turbohybrid.sparse_rerank",
+							 "Exact f32 rerank policy for quantized sparse candidate bands",
+							 "Valid values are off, topk, band, and auto. auto reranks quantized (q8/q16) sparse indexes and is a no-op for exact f32 indexes.",
+							 &pgturbohybrid_sparse_rerank,
+							 PGTURBOHYBRID_SPARSE_RERANK_AUTO,
+							 pgturbohybrid_sparse_rerank_options,
+							 PGC_USERSET, 0, NULL, NULL, NULL);
+	DefineCustomIntVariable("turbohybrid.sparse_rerank_k",
+							"Number of top sparse candidates to exact-rerank (0 = follow final_k)",
+							"Applies to topk and auto modes; band mode reranks the whole returned candidate set.",
+							&pgturbohybrid_sparse_rerank_k,
+							0, 0, 1000000, PGC_USERSET, 0, NULL, NULL, NULL);
 	DefineCustomEnumVariable("turbohybrid.hybrid_budget_policy",
 							 "Hybrid branch budget policy",
 							 "Valid values are fixed and adaptive. Adaptive is approximate and may change dense_k, bm25_k, final_k, and rrf_k for defaulted hybrid queries.",

@@ -113,6 +113,7 @@ typedef struct PgturbohybridOptions
 	int			sparseQuantMode;
 	int			sparsePostingsEncoding;
 	int			sparseBlockSize;
+	int			sparseExactStorage;
 }			PgturbohybridOptions;
 
 #define PGTURBOHYBRID_BRANCH_PLAN_MAX_BRANCHES 8
@@ -184,6 +185,11 @@ typedef struct PgturbohybridScanStatsSnapshot
 	int			sparseQuantMode;
 	int			sparseEncoding;
 	uint64		sparseScalarTailPostings;
+	int			sparseRerankMode;
+	uint64		sparseExactRerankCount;
+	uint64		sparseExactRerankFetchUs;
+	uint64		sparseExactRerankScoreUs;
+	bool		sparseExactRerankTopkChanged;
 	PgturbohybridBranchPlan branchPlan;
 	uint32		denseCandidatesEffective;
 	bool		denseKDefaulted;
@@ -560,6 +566,8 @@ extern int	pgturbohybrid_bm25_hybrid_bound;
 extern int	pgturbohybrid_bm25_heap_tsvector_rerank;
 extern int	pgturbohybrid_bm25_heap_tsvector_rerank_multiplier;
 extern double pgturbohybrid_bm25_heap_tsvector_rerank_weight;
+extern int	pgturbohybrid_sparse_rerank;
+extern int	pgturbohybrid_sparse_rerank_k;
 extern bool pgturbohybrid_auto_budget;
 extern int	pgturbohybrid_auto_budget_min_dense_k;
 extern int	pgturbohybrid_auto_budget_min_bm25_k;

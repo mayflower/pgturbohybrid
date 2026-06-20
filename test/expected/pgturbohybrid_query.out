@@ -150,6 +150,8 @@ BEGIN
 		'turbohybrid.payload_entry_seeding',
 		'turbohybrid.profile',
 		'turbohybrid.simd',
+		'turbohybrid.sparse_rerank',
+		'turbohybrid.sparse_rerank_k',
 		'turbohybrid.warn_linear_fallback'
 	] THEN
 		RAISE EXCEPTION 'unexpected pgturbohybrid settings: %', settings;
