@@ -48,12 +48,13 @@ typedef struct PgturbohybridSparseCollector
 	int			quantMode;		/* PGTURBOHYBRID_SPARSE_QUANT_* */
 	int			encoding;		/* resolved PGTURBOHYBRID_SPARSE_ENCODING_* */
 	int			blockSize;		/* postings per chunk */
+	bool		blockMax;		/* write a block-max directory (WAND) */
 } PgturbohybridSparseCollector;
 
 /* Resolve effective sparse build options (index->rd_options or defaults). */
 static void
 PgturbohybridSparseResolveOptions(Relation index, int *bits, int *mode,
-								  int *encoding, int *blockSize)
+								  int *encoding, int *blockSize, bool *blockMax)
 {
 	PgturbohybridOptions *opts = (PgturbohybridOptions *) index->rd_options;
 	int			optBits = opts != NULL ? opts->sparseQuantBits :
@@ -63,6 +64,8 @@ PgturbohybridSparseResolveOptions(Relation index, int *bits, int *mode,
 	int			optEnc = opts != NULL ? opts->sparsePostingsEncoding : 0;
 	int			optBlock = opts != NULL ? opts->sparseBlockSize :
 		PGTURBOHYBRID_SPARSE_DEFAULT_BLOCK_SIZE;
+
+	*blockMax = opts != NULL ? opts->sparseBlockMax : true;
 
 	/* "f32" mode (or 0 bits) means exact f32 storage regardless of bit width. */
 	if (optMode == PGTURBOHYBRID_SPARSE_QUANT_F32)
@@ -338,6 +341,7 @@ PgturbohybridSparseWriteStorage(PgturbohybridSparseCollector *collector)
 	Relation	index = collector->index;
 	BlockNumber postingsStart = InvalidBlockNumber;
 	BlockNumber lexiconStart = InvalidBlockNumber;
+	BlockNumber blockMaxStart = InvalidBlockNumber;
 	BlockNumber metaStart = InvalidBlockNumber;
 	BlockNumber insertBlkno;
 	uint32		postingsPages = 0;
@@ -347,6 +351,9 @@ PgturbohybridSparseWriteStorage(PgturbohybridSparseCollector *collector)
 	uint64		lexCapacity;
 	uint64		lexCount = 0;
 	PgturbohybridSparsePostingsTupleData *chunk;
+	PgturbohybridSparseBlockMax *bmEntries;
+	uint64		bmCapacity;
+	PgturbohybridSparseBlockMaxTupleData *bmTuple = NULL;
 	PgturbohybridSparseMetaTupleData meta;
 	uint64		i = 0;
 	int			bits = collector->quantBits;
@@ -358,6 +365,12 @@ PgturbohybridSparseWriteStorage(PgturbohybridSparseCollector *collector)
 	chunkCap = (uint32) Min((uint64) collector->blockSize,
 							(uint64) PgturbohybridSparseMaxChunkPostings(encoding, bits));
 	chunk = (PgturbohybridSparsePostingsTupleData *) palloc0(BLCKSZ);
+
+	bmCapacity = 1024;
+	bmEntries = (PgturbohybridSparseBlockMax *)
+		palloc(sizeof(PgturbohybridSparseBlockMax) * bmCapacity);
+	if (collector->blockMax)
+		bmTuple = (PgturbohybridSparseBlockMaxTupleData *) palloc0(BLCKSZ);
 
 	lexCapacity = 1024;
 	lexEntries = (PgturbohybridSparseLexiconEntry *)
@@ -375,6 +388,7 @@ PgturbohybridSparseWriteStorage(PgturbohybridSparseCollector *collector)
 		float4		scale;
 		bool		firstChunkRecorded = false;
 		uint64		p;
+		uint64		nBlocks;
 
 		while (i < collector->count && collector->triples[i].termId == termId)
 		{
@@ -387,13 +401,16 @@ PgturbohybridSparseWriteStorage(PgturbohybridSparseCollector *collector)
 
 		/*
 		 * Emit chunks: at most chunkCap postings, and for the SoA encoding at
-		 * most a 2^16 node_id span (so offsets fit in uint16).
+		 * most a 2^16 node_id span (so offsets fit in uint16).  Collect one
+		 * block-max directory entry per chunk for WAND pruning.
 		 */
 		p = termStart;
+		nBlocks = 0;
 		while (p < i)
 		{
 			uint32		base = collector->triples[p].nodeId;
 			uint32		n = 0;
+			float4		chunkMax = 0.0f;
 			Size		size;
 			OffsetNumber off;
 
@@ -402,6 +419,8 @@ PgturbohybridSparseWriteStorage(PgturbohybridSparseCollector *collector)
 				if (encoding == PGTURBOHYBRID_SPARSE_ENCODING_SOA &&
 					collector->triples[p + n].nodeId - base >= PGTURBOHYBRID_SPARSE_SOA_RANGE)
 					break;
+				if (collector->triples[p + n].weight > chunkMax)
+					chunkMax = collector->triples[p + n].weight;
 				n++;
 			}
 
@@ -417,6 +436,23 @@ PgturbohybridSparseWriteStorage(PgturbohybridSparseCollector *collector)
 				firstChunkBlkno = insertBlkno;
 				firstChunkOffno = off;
 				firstChunkRecorded = true;
+			}
+			if (collector->blockMax)
+			{
+				if (nBlocks == bmCapacity)
+				{
+					bmCapacity *= 2;
+					bmEntries = (PgturbohybridSparseBlockMax *)
+						repalloc(bmEntries,
+								 sizeof(PgturbohybridSparseBlockMax) * bmCapacity);
+				}
+				bmEntries[nBlocks].firstNodeId = base;
+				bmEntries[nBlocks].lastNodeId = collector->triples[p + n - 1].nodeId;
+				bmEntries[nBlocks].maxWeight = chunkMax;
+				bmEntries[nBlocks].postingsBlkno = insertBlkno;
+				bmEntries[nBlocks].postingsOffno = off;
+				bmEntries[nBlocks].reserved = 0;
+				nBlocks++;
 			}
 			p += n;
 		}
@@ -435,6 +471,47 @@ PgturbohybridSparseWriteStorage(PgturbohybridSparseCollector *collector)
 		lexEntries[lexCount].postingsBlkno = firstChunkBlkno;
 		lexEntries[lexCount].postingsOffno = firstChunkOffno;
 		lexEntries[lexCount].reserved = 0;
+		lexEntries[lexCount].blockMaxBlkno = InvalidBlockNumber;
+		lexEntries[lexCount].blockMaxOffno = InvalidOffsetNumber;
+		lexEntries[lexCount].reserved2 = 0;
+		lexEntries[lexCount].blockCount = 0;
+
+		/* Write the term's block-max directory entries (split across tuples). */
+		if (collector->blockMax && nBlocks > 0)
+		{
+			uint64		b = 0;
+			bool		firstBmRecorded = false;
+
+			while (b < nBlocks)
+			{
+				uint32		bn = (uint32) Min((uint64) PGTURBOHYBRID_SPARSE_BLOCKMAX_PER_TUPLE,
+											  nBlocks - b);
+				OffsetNumber bmoff;
+
+				bmTuple->type = PGTURBOHYBRID_SPARSE_BLOCKMAX_TUPLE_TYPE;
+				bmTuple->reserved1 = 0;
+				bmTuple->count = (uint16) bn;
+				bmTuple->termId = termId;
+				memcpy(bmTuple->entries, &bmEntries[b],
+					   sizeof(PgturbohybridSparseBlockMax) * bn);
+				bmoff = PgturbohybridGraphAppendTuple(index, MAIN_FORKNUM,
+													  &blockMaxStart,
+													  PGTURBOHYBRID_GRAPH_PAGE_KIND_SPARSE_BLOCKMAX,
+													  (Item) bmTuple,
+													  PgturbohybridSparseBlockMaxTupleSize(bn),
+													  PGTURBOHYBRID_GRAPH_GRAPH_OP_ELEMENT_INSERT,
+													  &insertBlkno);
+				if (!firstBmRecorded)
+				{
+					lexEntries[lexCount].blockMaxBlkno = insertBlkno;
+					lexEntries[lexCount].blockMaxOffno = bmoff;
+					firstBmRecorded = true;
+				}
+				b += bn;
+			}
+			lexEntries[lexCount].blockCount = nBlocks;
+		}
+
 		lexCount++;
 		termCount++;
 	}
@@ -484,6 +561,8 @@ PgturbohybridSparseWriteStorage(PgturbohybridSparseCollector *collector)
 	meta.lexiconPages = lexiconPages;
 	meta.postingsPages = postingsPages;
 	meta.blockSize = (uint32) collector->blockSize;
+	meta.blockMaxStartBlkno = blockMaxStart;
+	meta.hasBlockMax = (collector->blockMax && blockMaxStart != InvalidBlockNumber) ? 1 : 0;
 	(void) PgturbohybridGraphAppendTuple(index, MAIN_FORKNUM, &metaStart,
 										 PGTURBOHYBRID_GRAPH_PAGE_KIND_SPARSE_META,
 										 (Item) &meta,
@@ -494,6 +573,9 @@ PgturbohybridSparseWriteStorage(PgturbohybridSparseCollector *collector)
 
 	pfree(chunk);
 	pfree(lexEntries);
+	pfree(bmEntries);
+	if (bmTuple != NULL)
+		pfree(bmTuple);
 }
 
 bool
@@ -538,7 +620,7 @@ PgturbohybridSparseBuildCollect(Relation heap, Relation index, IndexInfo *indexI
 	collector.sparseKey = map.sparseKey;
 	PgturbohybridSparseResolveOptions(index, &collector.quantBits,
 									  &collector.quantMode, &collector.encoding,
-									  &collector.blockSize);
+									  &collector.blockSize, &collector.blockMax);
 
 	if (!PgturbohybridGraphReadMeta(index, &graphMeta))
 		ereport(ERROR,

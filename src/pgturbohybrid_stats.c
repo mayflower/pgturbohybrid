@@ -3392,6 +3392,20 @@ pgturbohybrid_last_scan_stats(PG_FUNCTION_ARGS)
 							   scanStats.sparseExactRerankScoreUs);
 	PgturbohybridJsonbAddBool(&state, "sparse_exact_rerank_topk_changed",
 							  scanStats.sparseExactRerankTopkChanged);
+	PgturbohybridJsonbAddBool(&state, "sparse_used_wand",
+							  scanStats.sparseUsedWand);
+	PgturbohybridJsonbAddInt64(&state, "sparse_blocks_visited",
+							   scanStats.sparseBlocksVisited);
+	PgturbohybridJsonbAddInt64(&state, "sparse_blocks_skipped",
+							   scanStats.sparseBlocksSkipped);
+	PgturbohybridJsonbAddInt64(&state, "sparse_wand_pruned",
+							   scanStats.sparseWandPruned);
+	PgturbohybridJsonbAddInt64(&state, "sparse_wand_iterations",
+							   scanStats.sparseWandIterations);
+	PgturbohybridJsonbAddInt64(&state, "sparse_wand_threshold_updates",
+							   scanStats.sparseWandThresholdUpdates);
+	PgturbohybridJsonbAddInt64(&state, "sparse_wand_heap_updates",
+							   scanStats.sparseWandHeapUpdates);
 	PgturbohybridJsonbAddBranchPlan(&state, &scanStats.branchPlan);
 	PgturbohybridJsonbAddInt64(&state, "quantization_bits",
 							   pgturbohybrid_last_graph_quantization_bits);

@@ -92,6 +92,7 @@ static bool pgturbohybrid_am_init_done = false;
 
 int			pgturbohybrid_profile = PGTURBOHYBRID_PROFILE_LATENCY;
 bool		pgturbohybrid_enable_wand = true;
+bool		pgturbohybrid_enable_sparse_wand = true;
 int			pgturbohybrid_max_union_candidates = 100000;
 int			pgturbohybrid_default_dense_k = PGTURBOHYBRID_DEFAULT_DENSE_K;
 int			pgturbohybrid_default_bm25_k = PGTURBOHYBRID_DEFAULT_BM25_K;
@@ -1474,6 +1475,13 @@ typedef struct PgturbohybridLastScanStats
 	bool		sparseExactRerankTopkChanged;
 	int			sparseScoreKernel;
 	uint64		sparseSimdBlocks;
+	bool		sparseUsedWand;
+	uint64		sparseBlocksVisited;
+	uint64		sparseBlocksSkipped;
+	uint64		sparseWandPruned;
+	uint64		sparseWandIterations;
+	uint64		sparseWandThresholdUpdates;
+	uint64		sparseWandHeapUpdates;
 	PgturbohybridBranchPlan branchPlan;
 	char		profile[16];
 	char		fusion[16];
@@ -1987,6 +1995,16 @@ PgturbohybridGetLastScanStatsSnapshot(PgturbohybridScanStatsSnapshot *stats)
 		pgturbohybrid_last_scan_state.sparseExactRerankTopkChanged;
 	stats->sparseScoreKernel = pgturbohybrid_last_scan_state.sparseScoreKernel;
 	stats->sparseSimdBlocks = pgturbohybrid_last_scan_state.sparseSimdBlocks;
+	stats->sparseUsedWand = pgturbohybrid_last_scan_state.sparseUsedWand;
+	stats->sparseBlocksVisited = pgturbohybrid_last_scan_state.sparseBlocksVisited;
+	stats->sparseBlocksSkipped = pgturbohybrid_last_scan_state.sparseBlocksSkipped;
+	stats->sparseWandPruned = pgturbohybrid_last_scan_state.sparseWandPruned;
+	stats->sparseWandIterations =
+		pgturbohybrid_last_scan_state.sparseWandIterations;
+	stats->sparseWandThresholdUpdates =
+		pgturbohybrid_last_scan_state.sparseWandThresholdUpdates;
+	stats->sparseWandHeapUpdates =
+		pgturbohybrid_last_scan_state.sparseWandHeapUpdates;
 	stats->branchPlan = pgturbohybrid_last_scan_state.branchPlan;
 	stats->denseCandidatesEffective =
 		pgturbohybrid_last_scan_state.denseCandidatesEffective;
@@ -6406,7 +6424,8 @@ PgturbohybridCollectSparseOnlyResults(IndexScanDesc scan,
 		candidateK = finalTarget;
 
 	n = PgturbohybridSparseCollectCandidates(scan->indexRelation, scanQuery,
-											 candidateK, pgturbohybrid_simd, &cands,
+											 candidateK, pgturbohybrid_simd,
+											 pgturbohybrid_enable_sparse_wand, &cands,
 											 tmpCtx, &sstats);
 
 	/* Exact f32 rerank of the top band (prompt 7); no-op for f32 indexes. */
@@ -6453,6 +6472,13 @@ PgturbohybridCollectSparseOnlyResults(IndexScanDesc scan,
 	lastStats->sparseExactRerankTopkChanged = sstats.exactRerankTopkChanged;
 	lastStats->sparseScoreKernel = sstats.scoreKernel;
 	lastStats->sparseSimdBlocks = sstats.simdBlocks;
+	lastStats->sparseUsedWand = sstats.usedWand;
+	lastStats->sparseBlocksVisited = sstats.blocksVisited;
+	lastStats->sparseBlocksSkipped = sstats.blocksSkipped;
+	lastStats->sparseWandPruned = sstats.wandPruned;
+	lastStats->sparseWandIterations = sstats.wandIterations;
+	lastStats->sparseWandThresholdUpdates = sstats.wandThresholdUpdates;
+	lastStats->sparseWandHeapUpdates = sstats.wandHeapUpdates;
 	lastStats->sparseCandidatesRequested = originalQuery->sparseK;
 	lastStats->sparseCandidatesEffective = scanQuery->sparseK;
 	lastStats->sparseKDefaulted =
@@ -6775,6 +6801,7 @@ PgturbohybridCollectScanResults(IndexScanDesc scan, PgturbohybridScanState *stat
 														   scanQuery,
 														   scanQuery->sparseK,
 														   pgturbohybrid_simd,
+														   pgturbohybrid_enable_sparse_wand,
 														   &sparse, so->tmpCtx,
 														   &sparseStats);
 		/* Exact f32 rerank before fusion so RRF ranks reflect exact scores. */
@@ -7005,6 +7032,13 @@ PgturbohybridCollectScanResults(IndexScanDesc scan, PgturbohybridScanState *stat
 	lastStats.sparseExactRerankTopkChanged = sparseStats.exactRerankTopkChanged;
 	lastStats.sparseScoreKernel = sparseStats.scoreKernel;
 	lastStats.sparseSimdBlocks = sparseStats.simdBlocks;
+	lastStats.sparseUsedWand = sparseStats.usedWand;
+	lastStats.sparseBlocksVisited = sparseStats.blocksVisited;
+	lastStats.sparseBlocksSkipped = sparseStats.blocksSkipped;
+	lastStats.sparseWandPruned = sparseStats.wandPruned;
+	lastStats.sparseWandIterations = sparseStats.wandIterations;
+	lastStats.sparseWandThresholdUpdates = sparseStats.wandThresholdUpdates;
+	lastStats.sparseWandHeapUpdates = sparseStats.wandHeapUpdates;
 	if (hasSparseQuery)
 	{
 		lastStats.sparseCandidatesRequested = originalQuery->sparseK;
@@ -8631,6 +8665,7 @@ pgturbohybridamoptions(Datum reloptions, bool validate)
 		PGTURBOHYBRID_RELOPT_PARSE("sparse_postings_encoding", RELOPT_TYPE_ENUM, sparsePostingsEncoding),
 		PGTURBOHYBRID_RELOPT_PARSE("sparse_block_size", RELOPT_TYPE_INT, sparseBlockSize),
 		PGTURBOHYBRID_RELOPT_PARSE("sparse_exact_storage", RELOPT_TYPE_ENUM, sparseExactStorage),
+		PGTURBOHYBRID_RELOPT_PARSE("sparse_block_max", RELOPT_TYPE_BOOL, sparseBlockMax),
 	};
 	PgturbohybridOptions *opts = (PgturbohybridOptions *) build_reloptions(reloptions, validate,
 																 pgturbohybrid_relopt_kind,
@@ -8894,6 +8929,9 @@ PgturbohybridInit(void)
 					   PGTURBOHYBRID_SPARSE_EXACT_STORAGE_OFF,
 					   "Valid value is \"off\"; \"sidecar\" is reserved for a future release.",
 					   AccessExclusiveLock);
+	add_bool_reloption(pgturbohybrid_relopt_kind, "sparse_block_max",
+					   "Write a per-chunk block-max directory enabling sparse WAND pruning.",
+					   true, AccessExclusiveLock);
 
 	if (IsParallelWorker())
 		return;
@@ -8906,6 +8944,9 @@ PgturbohybridInit(void)
 	PgturbohybridDefineDefaultBudgetGUCs();
 	DefineCustomBoolVariable("turbohybrid.enable_wand", "Enable WAND pruning for BM25 candidate generation",
 							 NULL, &pgturbohybrid_enable_wand,
+							 true, PGC_USERSET, 0, NULL, NULL, NULL);
+	DefineCustomBoolVariable("turbohybrid.enable_sparse_wand", "Enable block-max WAND pruning for sparse candidate generation",
+							 NULL, &pgturbohybrid_enable_sparse_wand,
 							 true, PGC_USERSET, 0, NULL, NULL, NULL);
 	DefineCustomBoolVariable("turbohybrid.fast_weighted_score_bound_pruning",
 							 "Enable exact fused-score bound pruning for fast_weighted BM25 traversal",

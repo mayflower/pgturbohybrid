@@ -65,6 +65,7 @@ BEGIN
 		'turbohybrid.dense_uncertainty_retry',
 		'turbohybrid.dense_uncertainty_retry_max_passes',
 		'turbohybrid.dense_uncertainty_retry_multiplier',
+		'turbohybrid.enable_sparse_wand',
 		'turbohybrid.enable_wand',
 		'turbohybrid.fast_weighted_score_bound_pruning',
 		'turbohybrid.final_diversity',

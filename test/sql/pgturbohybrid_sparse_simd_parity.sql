@@ -18,6 +18,7 @@ FROM unnest(ARRAY[1,2,3,7,15,16,17,31,32,33]) AS t,
 
 SET enable_seqscan = off;
 SET turbohybrid.sparse_rerank = off;   -- compare the raw quantized kernels
+SET turbohybrid.enable_sparse_wand = off;   -- exercise the SIMD accumulate path
 
 -- For q8 and q16: every tail size must rank identically under simd on vs off.
 DO $$
@@ -36,6 +37,7 @@ BEGIN
     LOOP
       SET LOCAL enable_seqscan = off;
       SET LOCAL turbohybrid.sparse_rerank = off;
+      SET LOCAL turbohybrid.enable_sparse_wand = off;
       SET LOCAL turbohybrid.simd = on;
       EXECUTE format($q$
         SELECT array_agg(id) FROM (
@@ -77,6 +79,7 @@ DECLARE
 BEGIN
   SET LOCAL enable_seqscan = off;
   SET LOCAL turbohybrid.sparse_rerank = off;
+  SET LOCAL turbohybrid.enable_sparse_wand = off;
 
   SET LOCAL turbohybrid.simd = on;
   PERFORM id FROM sp_simd ORDER BY s <~*> turbohybrid_query(
@@ -103,5 +106,6 @@ DROP INDEX sp_simd_q8;
 
 RESET turbohybrid.simd;
 RESET turbohybrid.sparse_rerank;
+RESET turbohybrid.enable_sparse_wand;
 RESET enable_seqscan;
 DROP TABLE sp_simd;

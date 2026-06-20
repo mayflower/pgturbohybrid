@@ -41,6 +41,7 @@
 #define PGTURBOHYBRID_SPARSE_META_TUPLE_TYPE 0x71
 #define PGTURBOHYBRID_SPARSE_LEXICON_TUPLE_TYPE 0x72
 #define PGTURBOHYBRID_SPARSE_POSTINGS_TUPLE_TYPE 0x73
+#define PGTURBOHYBRID_SPARSE_BLOCKMAX_TUPLE_TYPE 0x74
 
 /* Quantization mode (per_term_linear = scalar scale per term; f32 = no quant). */
 #define PGTURBOHYBRID_SPARSE_QUANT_F32 0
@@ -145,6 +146,10 @@ typedef struct PgturbohybridSparseMetaTupleData
 	uint32		lexiconPages;
 	uint32		postingsPages;
 	uint32		blockSize;		/* postings per chunk (build-time block) */
+	BlockNumber blockMaxStartBlkno; /* head of block-max directory chain (or Invalid) */
+	uint8		hasBlockMax;	/* 1 if a block-max directory was written */
+	uint8		reservedB1;
+	uint16		reservedB2;
 } PgturbohybridSparseMetaTupleData;
 
 typedef PgturbohybridSparseMetaTupleData *PgturbohybridSparseMetaTuple;
@@ -154,12 +159,43 @@ typedef struct PgturbohybridSparseLexiconEntry
 {
 	int32		termId;
 	uint32		df;				/* # postings (docs) for this term */
-	float4		maxWeight;		/* max doc weight (also used for WAND later) */
+	float4		maxWeight;		/* max doc weight (WAND term upper bound basis) */
 	float4		scale;			/* dequant scale = maxWeight/(2^bits-1); 0 if f32 */
 	BlockNumber postingsBlkno;	/* first postings chunk for this term */
 	OffsetNumber postingsOffno;
 	uint16		reserved;
+	BlockNumber blockMaxBlkno;	/* first block-max directory entry (or Invalid) */
+	OffsetNumber blockMaxOffno;
+	uint16		reserved2;
+	uint32		blockCount;		/* # block-max entries (postings chunks) for this term */
 } PgturbohybridSparseLexiconEntry;
+
+/* One block-max directory entry per postings chunk (block-max WAND, prompt 9). */
+typedef struct PgturbohybridSparseBlockMax
+{
+	uint32		firstNodeId;	/* first node_id in the chunk (= chunk baseNodeId) */
+	uint32		lastNodeId;		/* last node_id in the chunk */
+	float4		maxWeight;		/* max doc weight in the chunk (block upper bound) */
+	BlockNumber postingsBlkno;	/* the chunk's location (for lazy loads) */
+	OffsetNumber postingsOffno;
+	uint16		reserved;
+} PgturbohybridSparseBlockMax;
+
+typedef struct PgturbohybridSparseBlockMaxTupleData
+{
+	uint8		type;			/* PGTURBOHYBRID_SPARSE_BLOCKMAX_TUPLE_TYPE */
+	uint8		reserved1;
+	uint16		count;			/* # entries in this tuple */
+	int32		termId;
+	PgturbohybridSparseBlockMax entries[FLEXIBLE_ARRAY_MEMBER];
+} PgturbohybridSparseBlockMaxTupleData;
+
+typedef PgturbohybridSparseBlockMaxTupleData *PgturbohybridSparseBlockMaxTuple;
+
+#define PgturbohybridSparseBlockMaxTupleSize(n) \
+	(MAXALIGN(offsetof(PgturbohybridSparseBlockMaxTupleData, entries) + \
+			  (Size) (n) * sizeof(PgturbohybridSparseBlockMax)))
+#define PGTURBOHYBRID_SPARSE_BLOCKMAX_PER_TUPLE 240
 
 typedef struct PgturbohybridSparseLexiconTupleData
 {
@@ -191,7 +227,7 @@ typedef struct PgturbohybridSparsePostingsTupleData
 } PgturbohybridSparsePostingsTupleData;
 
 #define PGTURBOHYBRID_SPARSE_POSTINGS_PER_CHUNK PGTURBOHYBRID_SPARSE_DEFAULT_BLOCK_SIZE
-#define PGTURBOHYBRID_SPARSE_LEXICON_PER_TUPLE 200
+#define PGTURBOHYBRID_SPARSE_LEXICON_PER_TUPLE 150
 
 typedef PgturbohybridSparsePostingsTupleData *PgturbohybridSparsePostingsTuple;
 
@@ -236,6 +272,13 @@ typedef struct PgturbohybridSparseScanStats
 	bool		exactRerankTopkChanged;
 	int			scoreKernel;		/* PGTURBOHYBRID_SPARSE_SCORE_* */
 	uint64		simdBlocks;			/* SoA blocks scored via SIMD */
+	bool		usedWand;			/* block-max WAND ran (vs exact accumulation) */
+	uint64		blocksVisited;		/* postings chunks read by WAND */
+	uint64		blocksSkipped;		/* postings chunks skipped via block-max */
+	uint64		wandPruned;			/* documents pruned (pivot upper bound <= theta) */
+	uint64		wandIterations;		/* WAND main-loop iterations */
+	uint64		wandThresholdUpdates;	/* top-k threshold (theta) raises */
+	uint64		wandHeapUpdates;	/* heap insert/replace operations */
 } PgturbohybridSparseScanStats;
 
 /* SoA score-kernel ISA family (combined with bit width for the stat name). */
@@ -299,6 +342,7 @@ void		PgturbohybridSparseBuildCollect(Relation heap, Relation index,
 int			PgturbohybridSparseCollectCandidates(Relation index,
 												 PgturbohybridQueryHeader *query,
 												 int k, bool simdEnabled,
+												 bool wandEnabled,
 												 PgturbohybridSparseCandidate **out,
 												 MemoryContext ctx,
 												 PgturbohybridSparseScanStats *stats);
