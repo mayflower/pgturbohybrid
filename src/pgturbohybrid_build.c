@@ -50,6 +50,7 @@
 #include "catalog/pg_type_d.h"
 #include "commands/progress.h"
 #include "pgturbohybrid.h"
+#include "pgturbohybrid_sparse.h"
 #include "miscadmin.h"
 #include "nodes/execnodes.h"
 #include "optimizer/optimizer.h"
@@ -1184,6 +1185,9 @@ pgturbohybridbuild(Relation heap, Relation index, IndexInfo *indexInfo)
 {
 	IndexBuildResult *result;
 
+	if (PgturbohybridSparseIsPrimary(index))
+		return PgturbohybridSparsePrimaryBuild(heap, index, indexInfo);
+
 	if (PgturbohybridGraphUseTqNativeGraph(index))
 		return tqgraphbuild(heap, index, indexInfo);
 
@@ -1212,6 +1216,12 @@ pgturbohybridbuild(Relation heap, Relation index, IndexInfo *indexInfo)
 void
 pgturbohybridbuildempty(Relation index)
 {
+	if (PgturbohybridSparseIsPrimary(index))
+	{
+		PgturbohybridSparsePrimaryBuildEmpty(index);
+		return;
+	}
+
 	if (PgturbohybridGraphUseTqNativeGraph(index))
 	{
 		tqgraphbuildempty(index);

@@ -56,10 +56,10 @@ SELECT turbohybrid_sparse_vector_build(ARRAY[1]::int4[], ARRAY[1.0]::float4[])
 
 DROP TABLE sp_docs;
 
--- A sparse-only index (no dense/multivector graph key) is rejected: the native
--- sparse branch is keyed on the dense graph's node identity (sparse-primary is
--- deferred to a later prompt).  Dense+sparse indexes are exercised in
--- pgturbohybrid_sparse_scan.
+-- A sparse-only index (no dense/multivector graph key) builds via the
+-- sparse-primary node space (prompt 12): node identity comes from a dedicated
+-- node-map chain.  Build/scan/DML are exercised in pgturbohybrid_sparse_primary;
+-- here we only confirm the create path is accepted.
 CREATE TABLE sp_idx (id int, s turbohybrid_sparse_vector);
 CREATE INDEX ON sp_idx USING turbohybrid (s sparse_ip_turbohybrid_ops);
 DROP TABLE sp_idx;

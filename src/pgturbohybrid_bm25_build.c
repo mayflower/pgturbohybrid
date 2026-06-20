@@ -20,6 +20,7 @@
 #include "pgturbohybrid_quant.h"
 #include "pgturbohybrid_am.h"
 #include "pgturbohybrid_bm25.h"
+#include "pgturbohybrid_sparse.h"
 
 /*
  * PgturbohybridTidNode / PgturbohybridNodeState and the PgturbohybridReadNodeMap
@@ -1082,8 +1083,78 @@ PgturbohybridReadNodeMap(Relation index, uint32 *count)
 
 	if (!PgturbohybridGraphReadMeta(index, &meta) ||
 		meta.storageKind != PGTURBOHYBRID_GRAPH_STORAGE_QUANT_GRAPH_NATIVE ||
-		meta.tqNodeCount == 0 ||
-		!BlockNumberIsValid(meta.tqCodeStartBlkno))
+		meta.tqNodeCount == 0)
+	{
+		*count = 0;
+		return NULL;
+	}
+
+	/*
+	 * Sparse-primary indexes own node identity in a dedicated node-map chain
+	 * (no dense codes).  Walk that chain instead of the QUANT_CODE tuples.  A
+	 * node-map chain never starts at block 0 (the metapage), so 0 means "no node
+	 * map" -- matching the dense metapage, where this end-appended field is left
+	 * zero by the memset in the dense creators.
+	 */
+	if (meta.tqNodeMapStartBlkno != InvalidBlockNumber &&
+		meta.tqNodeMapStartBlkno != 0)
+	{
+		BlockNumber blkno = meta.tqNodeMapStartBlkno;
+
+		map = palloc0(PgturbohybridCheckedArrayBytes(sizeof(PgturbohybridTidNode),
+													 meta.tqNodeCount,
+													 "pgturbohybrid sparse-primary TID map"));
+		while (BlockNumberIsValid(blkno))
+		{
+			Buffer		buf = ReadBuffer(index, blkno);
+			Page		page;
+			PgturbohybridGraphPageOpaque opaque;
+			OffsetNumber maxoff;
+			BlockNumber nextblkno;
+
+			LockBuffer(buf, BUFFER_LOCK_SHARE);
+			page = BufferGetPage(buf);
+			opaque = PgturbohybridGraphPageGetOpaque(page);
+			if ((opaque->pageKind & PGTURBOHYBRID_GRAPH_PAGE_KIND_MASK) !=
+				PGTURBOHYBRID_GRAPH_PAGE_KIND_NODEMAP)
+			{
+				UnlockReleaseBuffer(buf);
+				break;
+			}
+			nextblkno = opaque->nextblkno;
+			maxoff = PageGetMaxOffsetNumber(page);
+			for (OffsetNumber off = FirstOffsetNumber; off <= maxoff;
+				 off = OffsetNumberNext(off))
+			{
+				ItemId		iid = PageGetItemId(page, off);
+				PgturbohybridSparseNodeMapTuple nmt;
+
+				if (!ItemIdIsUsed(iid))
+					continue;
+				nmt = (PgturbohybridSparseNodeMapTuple) PageGetItem(page, iid);
+				if (nmt->type != PGTURBOHYBRID_SPARSE_NODEMAP_TUPLE_TYPE)
+					continue;
+				for (uint32 i = 0; i < nmt->count; i++)
+				{
+					uint32		nid = nmt->firstNodeId + i;
+
+					if (nid >= meta.tqNodeCount || seen >= meta.tqNodeCount)
+						continue;
+					map[seen].tid = nmt->tids[i];
+					map[seen].nodeId = nid;
+					seen++;
+				}
+			}
+			UnlockReleaseBuffer(buf);
+			blkno = nextblkno;
+		}
+
+		qsort(map, seen, sizeof(PgturbohybridTidNode), PgturbohybridTidNodeCompare);
+		*count = seen;
+		return map;
+	}
+
+	if (!BlockNumberIsValid(meta.tqCodeStartBlkno))
 	{
 		*count = 0;
 		return NULL;
@@ -1169,8 +1240,76 @@ PgturbohybridReadNodeStates(Relation index, PgturbohybridGraphMetaPageData *meta
 
 	if (!PgturbohybridGraphReadMeta(index, meta) ||
 		meta->storageKind != PGTURBOHYBRID_GRAPH_STORAGE_QUANT_GRAPH_NATIVE ||
-		meta->tqNodeCount == 0 ||
-		!BlockNumberIsValid(meta->tqCodeStartBlkno))
+		meta->tqNodeCount == 0)
+	{
+		*count = 0;
+		return NULL;
+	}
+
+	/*
+	 * Sparse-primary indexes carry node identity in the node-map chain.  Every
+	 * mapped node is reported live; heap-tuple visibility (filtered by the
+	 * executor) is the correctness guarantee for deleted/updated rows.  Block 0
+	 * is the metapage, so a 0 anchor means "no node map" (dense indexes leave
+	 * this end-appended field zeroed).
+	 */
+	if (meta->tqNodeMapStartBlkno != InvalidBlockNumber &&
+		meta->tqNodeMapStartBlkno != 0)
+	{
+		BlockNumber blkno = meta->tqNodeMapStartBlkno;
+
+		states = palloc0(PgturbohybridCheckedArrayBytes(sizeof(PgturbohybridNodeState),
+														meta->tqNodeCount,
+														"pgturbohybrid sparse-primary node state map"));
+		while (BlockNumberIsValid(blkno))
+		{
+			Buffer		buf = ReadBuffer(index, blkno);
+			Page		page;
+			PgturbohybridGraphPageOpaque opaque;
+			OffsetNumber maxoff;
+			BlockNumber nextblkno;
+
+			LockBuffer(buf, BUFFER_LOCK_SHARE);
+			page = BufferGetPage(buf);
+			opaque = PgturbohybridGraphPageGetOpaque(page);
+			if ((opaque->pageKind & PGTURBOHYBRID_GRAPH_PAGE_KIND_MASK) !=
+				PGTURBOHYBRID_GRAPH_PAGE_KIND_NODEMAP)
+			{
+				UnlockReleaseBuffer(buf);
+				break;
+			}
+			nextblkno = opaque->nextblkno;
+			maxoff = PageGetMaxOffsetNumber(page);
+			for (OffsetNumber off = FirstOffsetNumber; off <= maxoff;
+				 off = OffsetNumberNext(off))
+			{
+				ItemId		iid = PageGetItemId(page, off);
+				PgturbohybridSparseNodeMapTuple nmt;
+
+				if (!ItemIdIsUsed(iid))
+					continue;
+				nmt = (PgturbohybridSparseNodeMapTuple) PageGetItem(page, iid);
+				if (nmt->type != PGTURBOHYBRID_SPARSE_NODEMAP_TUPLE_TYPE)
+					continue;
+				for (uint32 i = 0; i < nmt->count; i++)
+				{
+					uint32		nid = nmt->firstNodeId + i;
+
+					if (nid >= meta->tqNodeCount)
+						continue;
+					states[nid].tid = nmt->tids[i];
+					states[nid].live = true;
+				}
+			}
+			UnlockReleaseBuffer(buf);
+			blkno = nextblkno;
+		}
+
+		*count = meta->tqNodeCount;
+		return states;
+	}
+
+	if (!BlockNumberIsValid(meta->tqCodeStartBlkno))
 	{
 		*count = 0;
 		return NULL;

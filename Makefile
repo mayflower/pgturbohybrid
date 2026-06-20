@@ -33,6 +33,7 @@ OBJS = \
 	src/pgturbohybrid_query.o \
 	src/pgturbohybrid_scan.o \
 	src/pgturbohybrid_sparse_build.o \
+	src/pgturbohybrid_sparse_primary.o \
 	src/pgturbohybrid_sparse_query.o \
 	src/pgturbohybrid_sparse_score.o \
 	src/pgturbohybrid_sparse_simd_x86.o \
@@ -45,7 +46,7 @@ HEADERS =
 
 $(OBJS): src/*.h
 
-REGRESS = extension pgturbohybrid pgturbohybrid_query pgturbohybrid_sparse pgturbohybrid_sparse_query pgturbohybrid_sparse_scan pgturbohybrid_sparse_fusion pgturbohybrid_sparse_quant pgturbohybrid_sparse_rerank pgturbohybrid_sparse_simd_parity pgturbohybrid_sparse_wand pgturbohybrid_sparse_cache pgturbohybrid_sparse_delta pgturbohybrid_keymap pgturbohybrid_querysplit pgturbohybrid_multivector pgturbohybrid_multivector_many_moderate pgturbohybrid_codebook pgturbohybrid_u8split pgturbohybrid_nibble_guard pgturbohybrid_x4_safety pgturbohybrid_simd_parity pgturbohybrid_rescore security
+REGRESS = extension pgturbohybrid pgturbohybrid_query pgturbohybrid_sparse pgturbohybrid_sparse_query pgturbohybrid_sparse_scan pgturbohybrid_sparse_fusion pgturbohybrid_sparse_quant pgturbohybrid_sparse_rerank pgturbohybrid_sparse_simd_parity pgturbohybrid_sparse_wand pgturbohybrid_sparse_cache pgturbohybrid_sparse_delta pgturbohybrid_sparse_primary pgturbohybrid_keymap pgturbohybrid_querysplit pgturbohybrid_multivector pgturbohybrid_multivector_many_moderate pgturbohybrid_codebook pgturbohybrid_u8split pgturbohybrid_nibble_guard pgturbohybrid_x4_safety pgturbohybrid_simd_parity pgturbohybrid_rescore security
 REGRESS_OPTS = --inputdir=test
 
 SIMD_BUILD ?= portable

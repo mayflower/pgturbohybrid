@@ -3079,23 +3079,21 @@ PgturbohybridValidateIndex(Relation index, IndexInfo *indexInfo)
 	PgturbohybridBuildIndexKeyMap(index, indexInfo, &map);
 
 	/*
-	 * Dense-present sparse is enabled in prompt 4: a sparse-vector key is built
-	 * into a native inverted index keyed on the dense/multivector graph's
-	 * node_ids, so it requires a graph key in the same index.  Sparse-primary
-	 * (sparse key without a dense/multivector graph) is deferred to prompt 12.
+	 * Sparse-primary (prompt 12): a sparse-vector key with no dense/multivector
+	 * graph (sparse-only or sparse+BM25).  Node identity then comes from the
+	 * sparse-primary node-map chain instead of the dense graph, so there is no
+	 * graph key to require or position.  BM25-only (tsvector without a sparse or
+	 * graph key) remains unsupported and falls through to the error below.
 	 */
-	if (map.hasSparse && map.graphKey < 0)
-		ereport(ERROR,
-				(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
-				 errmsg("pgturbohybrid sparse-vector indexes require a vector or multivector key"),
-				 errdetail("The native sparse branch is keyed on the dense graph's node identity."),
-				 errhint("Add a vector or multivector key as the first index column, or use sparse_query => ... with turbohybrid_query(...) for exact sparse scoring without an index.")));
-
-	/* The dense/multivector graph owns node identity; require it for now. */
 	if (map.graphKey < 0)
+	{
+		if (map.hasSparse)
+			return;
 		ereport(ERROR,
 				(errcode(ERRCODE_DATATYPE_MISMATCH),
-				 errmsg("pgturbohybrid index requires a vector or multivector key")));
+				 errmsg("pgturbohybrid index requires a vector, multivector, or sparse-vector key"),
+				 errhint("Add a vector or multivector key, or a turbohybrid_sparse_vector key, as an index column.")));
+	}
 
 	/*
 	 * The graph key must be the first index column.  The dense/multivector
@@ -7966,6 +7964,43 @@ pgturbohybridaminsert(Relation index, Datum *values, bool *isnull, ItemPointer h
 	(void) indexUnchanged;
 #endif
 	PgturbohybridValidateIndex(index, indexInfo);
+
+	/*
+	 * Sparse-primary (prompt 12): no dense graph.  Allocate a node_id from the
+	 * node-map chain (the heap TID is recorded there) and append the sparse /
+	 * BM25 deltas keyed on it.  Liveness comes from heap MVCC visibility.
+	 */
+	if (PgturbohybridSparseIsPrimary(index))
+	{
+		PgturbohybridIndexKeyMap map;
+
+		PgturbohybridBuildIndexKeyMap(index, indexInfo, &map);
+		if (isnull[map.primaryKey])
+			return false;
+
+		LockPage(index, PGTURBOHYBRID_GRAPH_UPDATE_LOCK, ExclusiveLock);
+		PG_TRY();
+		{
+			nodeId = PgturbohybridSparsePrimaryInsert(index, heap_tid);
+			if (PgturbohybridIndexGetLexicalDatum(index, values, isnull, &lexicalValue))
+				PgturbohybridBm25AppendDelta(index, nodeId, heap_tid, lexicalValue);
+			if (PgturbohybridIndexGetSparseDatum(index, values, isnull, &sparseValue))
+			{
+				PgturbohybridSparseAppendDelta(index, nodeId, heap_tid, sparseValue);
+				PgturbohybridSparseMaybeCompact(index, false);
+			}
+		}
+		PG_CATCH();
+		{
+			UnlockPage(index, PGTURBOHYBRID_GRAPH_UPDATE_LOCK, ExclusiveLock);
+			PG_RE_THROW();
+		}
+		PG_END_TRY();
+		UnlockPage(index, PGTURBOHYBRID_GRAPH_UPDATE_LOCK, ExclusiveLock);
+
+		return true;
+	}
+
 	if (isnull[0])
 		return false;
 
@@ -8037,6 +8072,20 @@ pgturbohybridambulkdelete(IndexVacuumInfo *info, IndexBulkDeleteResult *stats, I
 {
 	IndexBulkDeleteResult *result;
 
+	/*
+	 * Sparse-primary indexes have no flat/graph element storage to prune.  Node
+	 * liveness is delegated to heap-tuple MVCC visibility (the executor filters
+	 * dead TIDs), so bulkdelete is a no-op beyond cache invalidation; dead
+	 * node-map / posting entries are reclaimed by REINDEX or sparse compaction.
+	 */
+	if (PgturbohybridSparseIsPrimary(info->index))
+	{
+		if (stats == NULL)
+			stats = (IndexBulkDeleteResult *) palloc0(sizeof(IndexBulkDeleteResult));
+		PgturbohybridBm25InvalidateCache(info->index);
+		return stats;
+	}
+
 	if (PgturbohybridGraphUseTqNativeGraph(info->index))
 	{
 		result = tqgraphbulkdelete(info, stats, callback, callback_state);
@@ -8052,6 +8101,17 @@ static IndexBulkDeleteResult *
 pgturbohybridamvacuumcleanup(IndexVacuumInfo *info, IndexBulkDeleteResult *stats)
 {
 	IndexBulkDeleteResult *result;
+
+	if (PgturbohybridSparseIsPrimary(info->index))
+	{
+		if (stats == NULL)
+			stats = (IndexBulkDeleteResult *) palloc0(sizeof(IndexBulkDeleteResult));
+		if (!info->estimated_count)
+			stats->num_pages = RelationGetNumberOfBlocks(info->index);
+		(void) PgturbohybridBm25MaybeCompact(info->index);
+		PgturbohybridBm25InvalidateCache(info->index);
+		return stats;
+	}
 
 	if (PgturbohybridGraphUseTqNativeGraph(info->index))
 	{
@@ -8531,6 +8591,14 @@ pgturbohybridamcostestimate(PlannerInfo *root, IndexPath *path, double loop_coun
 		finalK = Max(denseK, 1);
 		termCount = 2;
 	}
+	/*
+	 * Sparse-primary indexes have no dense/multivector graph.  When the ORDER BY
+	 * query could not be const-folded (query == NULL), denseK defaults to a
+	 * positive value above; force it to zero here so the dense-graph work and
+	 * memory estimation (which assume a populated graph) are skipped.
+	 */
+	if (PgturbohybridSparseIsPrimary(index))
+		denseK = 0;
 	if (bm25K > 0)
 		(void) PgturbohybridBm25GetPlanningStats(index, &bm25Stats);
 	hasHeapFilter = PgturbohybridPathHasFilter(path);

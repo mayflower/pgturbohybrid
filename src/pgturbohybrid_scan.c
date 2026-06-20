@@ -24,6 +24,7 @@
 #endif
 
 #include "pgturbohybrid_vector_compat.h"
+#include "pgturbohybrid_sparse.h"
 
 static inline int64
 PgturbohybridGraphScanElapsedUs(instr_time start)
@@ -489,6 +490,30 @@ pgturbohybridbeginscan(Relation index, int nkeys, int norderbys)
 	IndexScanDesc scan;
 	PgturbohybridGraphScanOpaque so;
 
+	/*
+	 * Sparse-primary (prompt 12): no dense graph, so allocate a minimal scan
+	 * opaque (scan context + defaults) without the vector type info/support the
+	 * native and flat paths require.  The sparse scan runs through
+	 * PgturbohybridCollectScanResults' sole-sparse path, which only needs
+	 * so->tmpCtx and the hybrid state amrescan attaches.
+	 */
+	if (PgturbohybridSparseIsPrimary(index))
+	{
+		scan = RelationGetIndexScan(index, nkeys, norderbys);
+		so = palloc0(sizeof(PgturbohybridGraphScanOpaqueData));
+		so->typeInfo = NULL;
+		so->tmpCtx = AllocSetContextCreate(CurrentMemoryContext,
+										   "pgturbohybrid sparse-primary scan context",
+										   0, 8 * 1024, 256 * 1024);
+		so->efSearch = PgturbohybridGraphGetEfSearch(index);
+		so->graphStorageKind = PGTURBOHYBRID_GRAPH_STORAGE_QUANT_GRAPH_NATIVE;
+		so->first = true;
+		so->tqHybridState = NULL;
+		so->previousDistance = -get_float8_infinity();
+		scan->opaque = so;
+		return scan;
+	}
+
 	if (PgturbohybridGraphUseTqNativeGraph(index))
 		return tqgraphbeginscan(index, nkeys, norderbys);
 
@@ -565,6 +590,21 @@ void
 pgturbohybridrescan(IndexScanDesc scan, ScanKey keys, int nkeys, ScanKey orderbys, int norderbys)
 {
 	PgturbohybridGraphScanOpaque so;
+
+	if (PgturbohybridSparseIsPrimary(scan->indexRelation))
+	{
+		so = (PgturbohybridGraphScanOpaque) scan->opaque;
+		so->first = true;
+		so->returnedRows = 0;
+		so->previousDistance = -get_float8_infinity();
+		MemoryContextReset(so->tmpCtx);
+		if (keys && scan->numberOfKeys > 0)
+			memmove(scan->keyData, keys, scan->numberOfKeys * sizeof(ScanKeyData));
+		if (orderbys && scan->numberOfOrderBys > 0)
+			memmove(scan->orderByData, orderbys,
+					scan->numberOfOrderBys * sizeof(ScanKeyData));
+		return;
+	}
 
 	if (PgturbohybridGraphUseTqNativeGraph(scan->indexRelation))
 	{
@@ -735,6 +775,14 @@ pgturbohybridgettuple(IndexScanDesc scan, ScanDirection dir)
 	PgturbohybridGraphScanOpaque so = (PgturbohybridGraphScanOpaque) scan->opaque;
 	bool		result;
 
+	/*
+	 * Sparse-primary scans are driven entirely by the sole-sparse path in
+	 * pgturbohybridamgettuple (via the attached hybrid state).  Reaching here
+	 * means there was no sparse ORDER BY query to execute, so there are no rows.
+	 */
+	if (PgturbohybridSparseIsPrimary(scan->indexRelation))
+		return false;
+
 	if (PgturbohybridGraphUseTqNativeGraph(scan->indexRelation))
 	{
 		return tqgraphgettuple(scan, dir);
@@ -792,6 +840,19 @@ pgturbohybrid_graph_end_scan(IndexScanDesc scan)
 void
 pgturbohybridendscan(IndexScanDesc scan)
 {
+	if (PgturbohybridSparseIsPrimary(scan->indexRelation))
+	{
+		PgturbohybridGraphScanOpaque so = (PgturbohybridGraphScanOpaque) scan->opaque;
+
+		if (so != NULL)
+		{
+			MemoryContextDelete(so->tmpCtx);
+			pfree(so);
+		}
+		scan->opaque = NULL;
+		return;
+	}
+
 	if (PgturbohybridGraphUseTqNativeGraph(scan->indexRelation))
 	{
 		tqgraphendscan(scan);

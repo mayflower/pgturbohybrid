@@ -718,9 +718,11 @@ PgturbohybridSparseBuildCollect(Relation heap, Relation index, IndexInfo *indexI
 	PgturbohybridBuildIndexKeyMap(index, indexInfo, &map);
 	if (!map.hasSparse)
 		return;
-	/* Dense-present sparse only (prompt 4): the dense graph owns node identity. */
-	if (map.graphKey < 0)
-		return;
+	/*
+	 * Node identity comes from the dense graph's code tuples (dense-present,
+	 * prompt 4) or from the sparse-primary node-map chain (prompt 12); both are
+	 * read by PgturbohybridReadNodeMap below.  Either owner is fine here.
+	 */
 
 	ctx = AllocSetContextCreate(CurrentMemoryContext,
 								"pgturbohybrid sparse build collector",

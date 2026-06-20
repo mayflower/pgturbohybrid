@@ -36,13 +36,18 @@ DROP INDEX km_dense_bm25;
 -- dense+sparse builds (dense-present sparse branch; see pgturbohybrid_sparse_scan)
 CREATE INDEX km_dense_sparse ON km USING turbohybrid (v vector_cosine_turbohybrid_ops, s sparse_ip_turbohybrid_ops);
 DROP INDEX km_dense_sparse;
--- sparse-only rejected: no dense/multivector graph key to own node identity
-CREATE INDEX ON km USING turbohybrid (s sparse_ip_turbohybrid_ops);
+-- sparse-only builds (sparse-primary node space owns node identity; prompt 12)
+CREATE INDEX km_sparse_only ON km USING turbohybrid (s sparse_ip_turbohybrid_ops);
+DROP INDEX km_sparse_only;
 -- 3-key dense+sparse+bm25: the 2-key cap is lifted and all three branches build
 CREATE INDEX km_dense_sparse_bm25 ON km USING turbohybrid (
   v vector_cosine_turbohybrid_ops, s sparse_ip_turbohybrid_ops, tsv bm25_tsvector_turbohybrid_ops);
 DROP INDEX km_dense_sparse_bm25;
--- bm25-only rejected: no vector/multivector graph key
+-- sparse+bm25 (no dense): sparse-primary node space also serves the bm25 branch
+CREATE INDEX km_sparse_bm25 ON km USING turbohybrid (
+  s sparse_ip_turbohybrid_ops, tsv bm25_tsvector_turbohybrid_ops);
+DROP INDEX km_sparse_bm25;
+-- bm25-only rejected: no vector/multivector graph or sparse key
 CREATE INDEX ON km USING turbohybrid (tsv bm25_tsvector_turbohybrid_ops);
 -- reordered: graph key must be the first index column
 CREATE INDEX ON km USING turbohybrid (tsv bm25_tsvector_turbohybrid_ops, v vector_cosine_turbohybrid_ops);

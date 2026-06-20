@@ -45,6 +45,28 @@ struct PgturbohybridGraphMetaPageData;
 #define PGTURBOHYBRID_SPARSE_POSTINGS_TUPLE_TYPE 0x73
 #define PGTURBOHYBRID_SPARSE_BLOCKMAX_TUPLE_TYPE 0x74
 #define PGTURBOHYBRID_SPARSE_DELTA_TUPLE_TYPE 0x75
+#define PGTURBOHYBRID_SPARSE_NODEMAP_TUPLE_TYPE 0x76
+
+/*
+ * Sparse-primary node-map tuple (prompt 12): a run of heap TIDs, node_id =
+ * firstNodeId + index, so a sparse-only/sparse+BM25 index owns node identity
+ * without a dense graph.  Liveness is delegated to heap-tuple MVCC visibility
+ * (the executor filters dead TIDs), so all mapped nodes are treated as live.
+ */
+typedef struct PgturbohybridSparseNodeMapTupleData
+{
+	uint8		type;			/* PGTURBOHYBRID_SPARSE_NODEMAP_TUPLE_TYPE */
+	uint8		reserved1;
+	uint16		count;
+	uint32		firstNodeId;
+	ItemPointerData tids[FLEXIBLE_ARRAY_MEMBER];
+} PgturbohybridSparseNodeMapTupleData;
+
+typedef PgturbohybridSparseNodeMapTupleData *PgturbohybridSparseNodeMapTuple;
+
+#define PgturbohybridSparseNodeMapTupleSize(n) \
+	(MAXALIGN(offsetof(PgturbohybridSparseNodeMapTupleData, tids) + \
+			  (Size) (n) * sizeof(ItemPointerData)))
 
 /* Quantization mode (per_term_linear = scalar scale per term; f32 = no quant). */
 #define PGTURBOHYBRID_SPARSE_QUANT_F32 0
@@ -432,5 +454,20 @@ bool		PgturbohybridSparseAppendDelta(Relation index, uint32 nodeId,
  * block-max over the live base+delta postings and clear the delta chain.
  */
 void		PgturbohybridSparseMaybeCompact(Relation index, bool force);
+
+/* ---- Sparse-primary node space (prompt 12) ---------------------------- */
+
+/* True iff the index's primary key is sparse/bm25 (no dense/multivector graph). */
+bool		PgturbohybridSparseIsPrimary(Relation index);
+
+/* Build a sparse-primary index: create the node-space metapage + node map over
+ * the heap, then collect the sparse (and BM25) branches. */
+IndexBuildResult *PgturbohybridSparsePrimaryBuild(Relation heap, Relation index,
+												  IndexInfo *indexInfo);
+void		PgturbohybridSparsePrimaryBuildEmpty(Relation index);
+
+/* Allocate a node_id for an inserted row in the sparse-primary node space and
+ * append it to the node map; returns the new node_id. */
+uint32		PgturbohybridSparsePrimaryInsert(Relation index, ItemPointer heaptid);
 
 #endif							/* PGTURBOHYBRID_SPARSE_H */
