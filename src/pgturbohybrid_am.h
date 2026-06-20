@@ -61,6 +61,7 @@ typedef struct PgturbohybridOptions
 	int			residualRerankBytes;
 	int			multivectorGraphMode;
 	int			multivectorDocBuildScorer;
+	int			multivectorDocStorage;
 	int			multivectorTokenPooling;
 	float8		multivectorTokenPoolingTargetRatio;
 	int			multivectorTokenPoolingMinTokens;
@@ -136,10 +137,12 @@ typedef struct PgturbohybridScanStatsSnapshot
 	char		indexShape[16];
 	bool		bm25BranchAvailable;
 	bool		denseBranchUsed;
+	bool		multivectorBranchUsed;
 	bool		bm25BranchUsed;
 	PgturbohybridBranchPlan branchPlan;
 	uint32		denseCandidatesEffective;
 	bool		denseKDefaulted;
+	uint32		multivectorCandidatesEffective;
 	uint32		bm25CandidatesEffective;
 	bool		bm25KDefaulted;
 	bool		bm25CacheHit;
@@ -201,6 +204,12 @@ typedef struct PgturbohybridScanStatsSnapshot
 	char		multivectorCandidateSource[48];
 	char		multivectorCandidatePath[48];
 	char		multivectorProxyEncoderKind[32];
+	bool		learnedProjectionLoaded;
+	uint32		learnedProjectionDim;
+	uint64		learnedProjectionWeightBytes;
+	char		learnedProjectionModel[128];
+	char		learnedProjectionChecksum[128];
+	uint64		learnedProjectionQueryEncodeUs;
 	char		multivectorGraphMode[24];
 	uint64		multivectorProxyGraphSearches;
 	bool		multivectorExactTokenScanEnabled;
@@ -217,8 +226,24 @@ typedef struct PgturbohybridScanStatsSnapshot
 	uint32		multivectorDocGraphSearchEf;
 	uint32		multivectorDocGraphOversampling;
 	uint32		multivectorDocGraphRescoreK;
+	uint32		multivectorDocGraphEntrySampleConfigured;
+	uint32		multivectorDocGraphEntrySampleEffective;
+	uint32		multivectorDocGraphEntrySampleScored;
 	uint64		multivectorDocGraphQuantizedScores;
+	uint64		compactMaxsimScoreUs;
+	uint64		compactMaxsimPairs;
+	uint64		compactMaxsimCacheHits;
+	uint64		compactMaxsimCacheMisses;
+	uint64		compactMaxsimBoundChecks;
+	uint64		compactMaxsimDocsPruned;
+	uint64		compactMaxsimTokensSkipped;
 	char		multivectorDocGraphStorageKind[16];
+	bool		proxyOnlyIndex;
+	bool		centroidOnlyIndex;
+	bool		fullMultivectorSidecarAvailable;
+	bool		centroidSidecarAvailable;
+	bool		centroidDocCodesAvailable;
+	bool		quantizedInvertedSidecarAvailable;
 	char		multivectorDocGraphRescoreSource[16];
 	uint32		multivectorDocGraphExactRerankDocs;
 	uint64		multivectorDocGraphHeapFetches;
@@ -226,28 +251,162 @@ typedef struct PgturbohybridScanStatsSnapshot
 	uint32		multivectorProxyCandidateTarget;
 	uint32		multivectorProxyCandidatesReturned;
 	uint32		multivectorExactRerankKEffective;
+	uint32		proxyCandidateLimitEffective;
+	char		proxyCandidateLimitSource[32];
+	uint64		proxyGraphNodesVisited;
+	uint64		proxyGraphEdgesVisited;
+	uint32		proxyGraphCandidatesSeen;
+	uint32		proxyCandidatesReturned;
+	uint64		proxyVectorScoresComputed;
+	uint64		proxyVectorScoreUs;
 	uint32		proxyCandidates;
+	bool		proxyLazySidecarVectors;
+	char		multivectorDocStorageCacheRequested[16];
+	char		multivectorDocStorageCacheEffective[16];
 	bool		proxyTop1Admission;
 	uint32		proxyExactRerankDocs;
+	uint64		proxyFullSidecarVectorsLoaded;
+	uint64		proxyFullSidecarBytesTouched;
+	uint64		proxyFullSidecarPagesRead;
+	uint64		proxyFullSidecarLoadUs;
+	uint64		proxyFullSidecarReconstructUs;
+	uint64		proxyExactRerankHeapFetches;
+	uint64		proxyExactRerankSidecarFetches;
+	uint64		proxyExactRerankBytesTouched;
+	uint64		proxyExactRerankUs;
+	bool		sidecarCacheBuildThisQuery;
+	uint64		sidecarCacheBuildBytes;
+	uint64		sidecarCacheBuildPagesRead;
+	uint64		sidecarCacheBuildUs;
+	uint64		sidecarQueryBytesTouched;
+	uint64		sidecarQueryPagesRead;
+	uint64		sidecarQueryVectorsLoaded;
+	uint64		sidecarQueryLoadUs;
+	uint64		sidecarQueryUs;
+	bool		proxyVectorUsesFullSidecarForGraph;
+	bool		proxyVectorNearExhaustiveSidecarTouch;
+	char		proxyVectorSidecarTouchReason[64];
 	uint64		centroidListsVisited;
 	uint64		centroidDocsTouched;
 	uint64		centroidPrunedDocs;
+	uint64		centroidPostingsTouched;
+	uint64		centroidPostingsSelected;
+	uint64		centroidPostingsSkipped;
+	uint64		centroidProbeUs;
+	uint64		centroidPostingScanUs;
+	uint64		centroidAccumulateUs;
+	uint64		centroidCandidateHeapUs;
+	uint32		centroidPostingLimitPerToken;
+	uint32		centroidProbeCentroidsPerToken;
+	uint32		centroidCodewordTopM;
+	double		centroidScoreThreshold;
+	double		centroidScoreDropFromBest;
+	uint64		centroidListsSkippedByThreshold;
+	char		centroidPostingCapStrategy[32];
+	char		centroidCandidateScoring[32];
 	uint32		centroidCandidates;
+	bool		centroidBitsetPrefilterEnabled;
+	uint32		centroidBitsetMinTokenMatches;
+	uint32		centroidBitsetListsUsed;
+	uint32		centroidBitsetDocsSet;
+	uint32		centroidBitsetDocsAfterThreshold;
+	uint64		centroidBitsetPrefilterUs;
+	uint64		centroidBitsetMemoryBytes;
+	bool		centroidUpperBoundEnabled;
+	uint64		centroidUpperBoundDocsChecked;
+	uint64		centroidUpperBoundDocsPruned;
+	uint64		centroidUpperBoundPruneUs;
+	uint64		centroidUpperBoundUnsafeFallbacks;
+	uint32		centroidCandidatesBeforeBound;
+	uint32		centroidCandidatesAfterBound;
 	uint32		multivectorCentroidCount;
 	uint32		multivectorCentroidPrerankDocs;
 	uint32		multivectorFullMaxsimRerankDocs;
 	uint64		quantizedInvertedListsVisited;
 	uint64		quantizedInvertedPostingsTouched;
+	uint64		quantizedInvertedPostingsSelected;
+	uint64		quantizedInvertedPostingsSkipped;
+	uint32		quantizedInvertedPostingLimitPerToken;
+	uint32		quantizedInvertedProbeCodewordsPerToken;
+	char		quantizedInvertedPostingCapStrategy[32];
 	uint64		quantizedInvertedDocsScored;
 	uint32		quantizedInvertedCandidates;
 	uint32		quantizedInvertedExactRerankDocs;
+	char		quantizedInvertedCodebookSource[16];
 	uint32		quantizedInvertedCodebookSize;
+	uint32		quantizedInvertedCodebookDim;
+	char		quantizedInvertedCodebookChecksum[128];
+	uint32		quantizedInvertedCodebookTopM;
+	uint64		quantizedInvertedAssignmentUs;
+	uint64		quantizedInvertedQueryCodewordScoreUs;
+	char		quantizedInvertedQueryCodewordKernel[16];
+	uint64		quantizedInvertedQueryCodewordScoresComputed;
+	uint64		quantizedInvertedQueryCodewordBlocks;
+	uint64		quantizedInvertedQueryCodewordTopkUs;
+	bool		quantizedInvertedQueryCodewordFullMatrixMaterialized;
+	uint32		quantizedInvertedQueryCodewordActiveQueryTokens;
+	uint32		quantizedInvertedQueryCodewordSkippedQueryTokens;
+	uint64		quantizedInvertedListOffsetBytes;
+	uint64		quantizedInvertedPostingBytes;
+	uint64		quantizedInvertedSidecarBytes;
+	char		quantizedInvertedCompactKernel[24];
+	char		quantizedInvertedCompactScoreSource[32];
+	uint64		quantizedInvertedCompactScoreUs;
+	uint64		quantizedInvertedCompactDocsScored;
+	uint64		quantizedInvertedCompactPayloadBytes;
+	char		quantizedInvertedCompactDocOrder[16];
+	uint64		quantizedInvertedCompactInnerAllocations;
+	uint32		quantizedInvertedCompactActiveQueryTokens;
+	uint64		quantizedInvertedCompactPairsEvaluated;
+	uint64		quantizedInvertedCompactPairsSkipped;
+	uint64		quantizedInvertedCompactPrefetches;
+	double		quantizedInvertedCompactAvgDocTokens;
+	double		quantizedInvertedCompactUsPerDoc;
+	double		quantizedInvertedCompactPayloadBytesPerDoc;
+	bool		quantizedInvertedCompactTopKChangedVsScalar;
+	bool		quantizedInvertedPrecompactEnabled;
+	char		quantizedInvertedPrecompactMode[32];
+	uint32		quantizedInvertedDocsTouchedBeforePrecompact;
+	uint32		quantizedInvertedPrecompactScoreK;
+	uint32		quantizedInvertedPrecompactCoverageK;
+	uint32		quantizedInvertedPrecompactPerTokenK;
+	uint32		quantizedInvertedCompactMaxDocs;
+	uint32		quantizedInvertedPrecompactScoreDocs;
+	uint32		quantizedInvertedPrecompactCoverageDocs;
+	uint32		quantizedInvertedPrecompactPerTokenDocs;
+	uint32		quantizedInvertedPrecompactUnionDocs;
+	uint32		quantizedInvertedPrecompactDuplicates;
+	uint32		quantizedInvertedPrecompactPrunedDocs;
+	uint64		quantizedInvertedPrecompactUs;
+	uint32		quantizedInvertedCompactDocsSkippedByPrecompact;
+	char		quantizedInvertedTokenCoverageMode[24];
+	uint32		quantizedInvertedActiveQueryTokens;
+	uint64		quantizedInvertedTokenMatchesTotal;
+	uint32		quantizedInvertedTokenMatchesMax;
+	uint32		quantizedInvertedMinTokenMatches;
+	uint64		quantizedInvertedTokenMatchFilteredDocs;
+	bool		quantizedInvertedScoreBoundPruningEnabled;
+	uint64		quantizedInvertedScoreBoundDocsChecked;
+	uint64		quantizedInvertedScoreBoundDocsPruned;
+	uint64		quantizedInvertedScoreBoundPruneUs;
+	uint64		quantizedInvertedScoreBoundUnsafeFallbacks;
+	uint32		quantizedInvertedCandidatesBeforeBound;
+	uint32		quantizedInvertedCandidatesAfterBound;
 	char		multivectorDocSidecarCacheMode[16];
 	uint64		multivectorDocSidecarPagesRead;
 	uint64		multivectorDocSidecarCacheHits;
 	uint64		multivectorDocSidecarCacheMisses;
 	uint64		multivectorDocSidecarBytesTouched;
 	uint64		multivectorDocSidecarVectorsLoaded;
+	uint64		multivectorDocSidecarDocMapPagesRead;
+	uint64		multivectorDocSidecarDocMapBytesTouched;
+	uint64		multivectorDocSidecarResidentVectorsLoaded;
+	uint64		multivectorDocSidecarResidentBytesLoaded;
+	uint64		multivectorDocSidecarVectorChunkRefBytesTouched;
+	uint64		multivectorDocSidecarPagedVectorPagesRead;
+	uint64		multivectorDocSidecarPagedVectorBytesTouched;
+	uint64		multivectorSidecarPageReadUs;
+	uint64		multivectorSidecarVectorReconstructUs;
 	uint64		multivectorTokensOriginal;
 	uint64		multivectorTokensPooled;
 	bool		multivectorReservoirsEnabled;
@@ -260,6 +419,9 @@ typedef struct PgturbohybridScanStatsSnapshot
 	uint32		multivectorReservoirDuplicates;
 	bool		multivectorBm25InjectionEnabled;
 	uint32		multivectorBm25InjectionCandidates;
+	uint32		multivectorBm25InjectionCandidateLimit;
+	uint32		multivectorBm25InjectionPoolSize;
+	char		multivectorBm25InjectionLimitReason[32];
 	uint32		multivectorBm25InjectionRetained;
 	uint32		multivectorBm25InjectionExactReranked;
 	uint32		learnedSparseCandidates;
@@ -279,6 +441,18 @@ typedef struct PgturbohybridScanStatsSnapshot
 	uint64		multivectorExactRerankHeapFetches;
 	uint64		multivectorExactRerankSidecarReads;
 	uint64		multivectorExactRerankSidecarBytes;
+	uint64		multivectorCandidateSourceUs;
+	uint64		multivectorDocGraphTraversalUs;
+	uint64		multivectorProxyCandidateUs;
+	uint64		multivectorProxyGraphTraversalUs;
+	uint64		multivectorProxyScoringUs;
+	uint64		multivectorCentroidLitePostingUs;
+	uint64		multivectorQuantizedInvertedPostingUs;
+	uint64		multivectorSidecarLoadUs;
+	uint64		multivectorHeapVisibilityUs;
+	uint64		multivectorExactHeapFetchUs;
+	uint64		multivectorExactRerankUs;
+	uint64		multivectorFinalSortUs;
 	uint32		exactRerankCandidates;
 	uint64		exactRerankTokensEvaluated;
 	uint64		exactRerankTokensSkipped;
@@ -371,11 +545,15 @@ extern int	pgturbohybrid_multivector_doc_candidate_k;
 extern int	pgturbohybrid_multivector_doc_graph_search_ef;
 extern int	pgturbohybrid_multivector_doc_graph_oversampling;
 extern int	pgturbohybrid_multivector_doc_graph_rescore_k;
+extern int	pgturbohybrid_multivector_doc_graph_entry_sample_count;
 extern int	pgturbohybrid_multivector_doc_storage;
 extern int	pgturbohybrid_multivector_doc_storage_cache;
 extern int	pgturbohybrid_multivector_exact_rerank;
 extern int	pgturbohybrid_multivector_exact_rerank_k;
 extern int	pgturbohybrid_multivector_proxy_encoder;
+extern char *pgturbohybrid_multivector_learned_projection_path;
+extern char *pgturbohybrid_multivector_learned_projection_model;
+extern char *pgturbohybrid_multivector_learned_projection_checksum;
 extern bool pgturbohybrid_multivector_allow_exact_symmetric_build;
 extern int	pgturbohybrid_multivector_exact_symmetric_build_max_docs;
 extern int	pgturbohybrid_multivector_max_accumulator_mb;
@@ -392,6 +570,33 @@ extern int	pgturbohybrid_multivector_coverage_reservoir_k;
 extern int	pgturbohybrid_multivector_bm25_candidate_injection;
 extern int	pgturbohybrid_multivector_sparse_candidate_source;
 extern int	pgturbohybrid_multivector_branch_plan;
+extern int	pgturbohybrid_multivector_centroid_lite_max_postings_per_token;
+extern int	pgturbohybrid_multivector_centroid_lite_probe_centroids_per_token;
+extern int	pgturbohybrid_multivector_centroid_lite_codeword_top_m;
+extern int	pgturbohybrid_multivector_centroid_lite_posting_selection;
+extern int	pgturbohybrid_multivector_centroid_lite_candidate_scoring;
+extern int	pgturbohybrid_multivector_centroid_lite_bitset_prefilter;
+extern int	pgturbohybrid_multivector_centroid_lite_bitset_min_token_matches;
+extern int	pgturbohybrid_multivector_centroid_lite_pruning;
+extern double pgturbohybrid_multivector_centroid_lite_score_threshold;
+extern double pgturbohybrid_multivector_centroid_lite_score_drop_from_best;
+extern int	pgturbohybrid_multivector_quantized_inverted_codebook;
+extern char *pgturbohybrid_multivector_quantized_inverted_codebook_path;
+extern int	pgturbohybrid_multivector_quantized_inverted_codebook_top_m;
+extern int	pgturbohybrid_multivector_quantized_inverted_compact_scoring;
+extern int	pgturbohybrid_multivector_quantized_inverted_compact_doc_order;
+extern int	pgturbohybrid_multivector_quantized_inverted_query_codeword_kernel;
+extern int	pgturbohybrid_multivector_quantized_inverted_precompact;
+extern int	pgturbohybrid_multivector_quantized_inverted_precompact_score_k;
+extern int	pgturbohybrid_multivector_quantized_inverted_precompact_coverage_k;
+extern int	pgturbohybrid_multivector_quantized_inverted_precompact_per_token_k;
+extern int	pgturbohybrid_multivector_quantized_inverted_compact_max_docs;
+extern int	pgturbohybrid_multivector_quantized_inverted_token_coverage;
+extern int	pgturbohybrid_multivector_quantized_inverted_min_token_matches;
+extern int	pgturbohybrid_multivector_quantized_inverted_pruning;
+extern int	pgturbohybrid_multivector_quantized_inverted_max_postings_per_token;
+extern int	pgturbohybrid_multivector_quantized_inverted_probe_codewords_per_token;
+extern int	pgturbohybrid_multivector_quantized_inverted_posting_selection;
 
 typedef enum PgturbohybridMultiVectorExactRerankMode
 {
@@ -399,6 +604,39 @@ typedef enum PgturbohybridMultiVectorExactRerankMode
 	PGTURBOHYBRID_MULTIVECTOR_EXACT_RERANK_TOPK,
 	PGTURBOHYBRID_MULTIVECTOR_EXACT_RERANK_ADAPTIVE
 }			PgturbohybridMultiVectorExactRerankMode;
+
+typedef enum PgturbohybridMultiVectorCentroidLiteBitsetPrefilterMode
+{
+	PGTURBOHYBRID_MULTIVECTOR_CENTROID_LITE_BITSET_PREFILTER_OFF,
+	PGTURBOHYBRID_MULTIVECTOR_CENTROID_LITE_BITSET_PREFILTER_EXPERIMENTAL
+}			PgturbohybridMultiVectorCentroidLiteBitsetPrefilterMode;
+
+typedef enum PgturbohybridMultiVectorCentroidLitePruningMode
+{
+	PGTURBOHYBRID_MULTIVECTOR_CENTROID_LITE_PRUNING_OFF,
+	PGTURBOHYBRID_MULTIVECTOR_CENTROID_LITE_PRUNING_SAFE_UPPER_BOUND,
+	PGTURBOHYBRID_MULTIVECTOR_CENTROID_LITE_PRUNING_SCORE_BOUND_EXPERIMENTAL
+}			PgturbohybridMultiVectorCentroidLitePruningMode;
+
+typedef enum PgturbohybridMultiVectorQuantizedInvertedPruningMode
+{
+	PGTURBOHYBRID_MULTIVECTOR_QUANTIZED_INVERTED_PRUNING_OFF,
+	PGTURBOHYBRID_MULTIVECTOR_QUANTIZED_INVERTED_PRUNING_SCORE_BOUND_EXPERIMENTAL
+}			PgturbohybridMultiVectorQuantizedInvertedPruningMode;
+
+typedef enum PgturbohybridMultiVectorPostingSelectionMode
+{
+	PGTURBOHYBRID_MULTIVECTOR_POSTING_SELECTION_UNIFORM_STRIDE,
+	PGTURBOHYBRID_MULTIVECTOR_POSTING_SELECTION_SCORE_TOPK,
+	PGTURBOHYBRID_MULTIVECTOR_POSTING_SELECTION_UNION_SCORE
+}			PgturbohybridMultiVectorPostingSelectionMode;
+
+typedef enum PgturbohybridMultiVectorCentroidLiteCandidateScoringMode
+{
+	PGTURBOHYBRID_MULTIVECTOR_CENTROID_LITE_CANDIDATE_SCORING_POSTING_PAYLOAD,
+	PGTURBOHYBRID_MULTIVECTOR_CENTROID_LITE_CANDIDATE_SCORING_CODEWORD_MAXSIM,
+	PGTURBOHYBRID_MULTIVECTOR_CENTROID_LITE_CANDIDATE_SCORING_DOC_CENTROID_MAXSIM
+}			PgturbohybridMultiVectorCentroidLiteCandidateScoringMode;
 
 typedef enum PgturbohybridMultiVectorAdaptiveWideningMode
 {
@@ -418,7 +656,9 @@ typedef enum PgturbohybridMultiVectorDocStorageMode
 {
 	PGTURBOHYBRID_MULTIVECTOR_DOC_STORAGE_F32,
 	PGTURBOHYBRID_MULTIVECTOR_DOC_STORAGE_F16,
-	PGTURBOHYBRID_MULTIVECTOR_DOC_STORAGE_SQ8
+	PGTURBOHYBRID_MULTIVECTOR_DOC_STORAGE_SQ8,
+	PGTURBOHYBRID_MULTIVECTOR_DOC_STORAGE_CENTROID_ONLY,
+	PGTURBOHYBRID_MULTIVECTOR_DOC_STORAGE_PROXY_ONLY
 }			PgturbohybridMultiVectorDocStorageMode;
 
 typedef enum PgturbohybridMultiVectorDocStorageCacheMode
@@ -446,6 +686,44 @@ typedef enum PgturbohybridMultiVectorCandidateSource
 	PGTURBOHYBRID_MULTIVECTOR_CANDIDATE_SOURCE_CENTROID_LITE,
 	PGTURBOHYBRID_MULTIVECTOR_CANDIDATE_SOURCE_QUANTIZED_INVERTED_EXPERIMENTAL
 }			PgturbohybridMultiVectorCandidateSource;
+
+typedef enum PgturbohybridMultiVectorQuantizedInvertedCodebookSource
+{
+	PGTURBOHYBRID_MULTIVECTOR_QUANTIZED_INVERTED_CODEBOOK_DETERMINISTIC,
+	PGTURBOHYBRID_MULTIVECTOR_QUANTIZED_INVERTED_CODEBOOK_EXTERNAL
+}			PgturbohybridMultiVectorQuantizedInvertedCodebookSource;
+
+typedef enum PgturbohybridMultiVectorQuantizedInvertedCompactScoringMode
+{
+	PGTURBOHYBRID_MULTIVECTOR_QUANTIZED_INVERTED_COMPACT_SCORING_OFF,
+	PGTURBOHYBRID_MULTIVECTOR_QUANTIZED_INVERTED_COMPACT_SCORING_EXPERIMENTAL
+}			PgturbohybridMultiVectorQuantizedInvertedCompactScoringMode;
+
+typedef enum PgturbohybridMultiVectorQuantizedInvertedCompactDocOrderMode
+{
+	PGTURBOHYBRID_MULTIVECTOR_QUANTIZED_INVERTED_COMPACT_DOC_ORDER_ORIGINAL,
+	PGTURBOHYBRID_MULTIVECTOR_QUANTIZED_INVERTED_COMPACT_DOC_ORDER_DOCID
+}			PgturbohybridMultiVectorQuantizedInvertedCompactDocOrderMode;
+
+typedef enum PgturbohybridMultiVectorQuantizedInvertedQueryCodewordKernelMode
+{
+	PGTURBOHYBRID_MULTIVECTOR_QUANTIZED_INVERTED_QUERY_CODEWORD_KERNEL_AUTO,
+	PGTURBOHYBRID_MULTIVECTOR_QUANTIZED_INVERTED_QUERY_CODEWORD_KERNEL_SCALAR,
+	PGTURBOHYBRID_MULTIVECTOR_QUANTIZED_INVERTED_QUERY_CODEWORD_KERNEL_BLOCKED
+}			PgturbohybridMultiVectorQuantizedInvertedQueryCodewordKernelMode;
+
+typedef enum PgturbohybridMultiVectorQuantizedInvertedPrecompactMode
+{
+	PGTURBOHYBRID_MULTIVECTOR_QUANTIZED_INVERTED_PRECOMPACT_OFF,
+	PGTURBOHYBRID_MULTIVECTOR_QUANTIZED_INVERTED_PRECOMPACT_CENTROID_MAXSIM_TOPK,
+	PGTURBOHYBRID_MULTIVECTOR_QUANTIZED_INVERTED_PRECOMPACT_CENTROID_MAXSIM_RESERVOIR
+}			PgturbohybridMultiVectorQuantizedInvertedPrecompactMode;
+
+typedef enum PgturbohybridMultiVectorQuantizedInvertedTokenCoverageMode
+{
+	PGTURBOHYBRID_MULTIVECTOR_QUANTIZED_INVERTED_TOKEN_COVERAGE_OFF,
+	PGTURBOHYBRID_MULTIVECTOR_QUANTIZED_INVERTED_TOKEN_COVERAGE_LINEAR
+}			PgturbohybridMultiVectorQuantizedInvertedTokenCoverageMode;
 
 typedef enum PgturbohybridMultiVectorPlainFallbackMode
 {

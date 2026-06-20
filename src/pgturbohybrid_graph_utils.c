@@ -919,6 +919,19 @@ PgturbohybridGraphGetMultiVectorDocBuildScorerOption(Relation index)
 }
 
 int
+PgturbohybridGraphGetMultiVectorDocStorageOption(Relation index)
+{
+	TqOptions  *opts;
+
+	if (!PgturbohybridGraphIspgturbohybridIndex(index))
+		return PGTURBOHYBRID_MULTIVECTOR_DOC_STORAGE_F32;
+
+	opts = (TqOptions *) index->rd_options;
+	return opts != NULL ? opts->multivectorDocStorage :
+		PGTURBOHYBRID_MULTIVECTOR_DOC_STORAGE_F32;
+}
+
+int
 PgturbohybridGraphGetMultiVectorTokenPoolingOption(Relation index)
 {
 	TqOptions  *opts;
@@ -4508,7 +4521,7 @@ turbohybrid_scorer_bench(PG_FUNCTION_ARGS)
 			INSTR_TIME_SET_CURRENT(t0);
 			for (int i = 0; i < n; i++)
 			{
-				double		d;
+				double		d = 0.0;
 
 				PgturbohybridGraphTqCodeSignedSplitDistance(&tq, arena + (Size) idx[i] * cb, scales[idx[i]], &d);
 				sink += d;
@@ -4545,7 +4558,7 @@ turbohybrid_scorer_bench(PG_FUNCTION_ARGS)
 			INSTR_TIME_SET_CURRENT(t0);
 			for (int i = 0; i < n; i++)
 			{
-				double		d;
+				double		d = 0.0;
 
 				PgturbohybridGraphTqCodeU8SimdDistance(&tq, arena + (Size) idx[i] * cb, scales[idx[i]], &d);
 				sink += d;

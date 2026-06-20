@@ -143,7 +143,7 @@ Inspect `calibrated_fusion_enabled`,
 
 ## Multivector Late Interaction
 
-`pgturbohybrid` includes an experimental `turbohybrid_multivector` type for
+`pgturbohybrid` includes a public `multivector` column type for
 late-interaction retrieval models such as ColBERT-style MaxSim. A multivector
 stores several same-dimensional token vectors for one document row. The native
 graph build expands those token vectors into graph subnodes, while query output
@@ -153,7 +153,7 @@ times.
 ```sql
 CREATE TABLE passages (
   id bigint PRIMARY KEY,
-  colbert turbohybrid_multivector
+  colbert multivector
 );
 
 INSERT INTO passages VALUES
@@ -177,17 +177,24 @@ ORDER BY colbert <~> turbohybrid_query(
 LIMIT 10;
 ```
 
-This path is intentionally narrow today:
+Current multivector contract:
 
-- dense-only multivector scans are supported;
-- `vector_query` and `multivector_query` cannot be mixed in one
+- dense-only multivector scans are supported with `multivector_query`;
+- `vector_query` and `multivector_query` are mutually exclusive in one
   `turbohybrid_query`;
-- hybrid multivector + text search is supported for document-level RRF fusion;
-- incremental insert/update expands each new multivector row into one graph
-  subnode per document vector and appends one BM25 delta when a lexical key is
-  present;
-- text input for `turbohybrid_multivector` remains intentionally unsupported;
-  construct values from `vector[]`.
+- hybrid multivector + `text_query` search is supported on two-key indexes with
+  a `tsvector` key. RRF and the normalized score-fusion modes `weighted`,
+  `fast_weighted`, `calibrated`, and `dbsf` are document-keyed; raw BM25 plus
+  raw MaxSim alpha fusion is rejected;
+- token-node indexes expand each row into one graph subnode per stored token
+  vector. Document-node indexes store one graph node per document and attach the
+  selected proxy, centroid, or sidecar payloads. Incremental insert/update
+  follows the same storage mode and appends BM25 delta data when a lexical key
+  is present;
+- textual literal input for the underlying multivector value remains
+  intentionally unsupported. Construct values from `vector[]`,
+  `turbohybrid_multivector_from_float4(...)`, or the context/field
+  constructors.
 
 Candidate collection is approximate: each query token searches the TurboQuant
 graph, then results are accumulated with document-level MaxSim. Tune the bounded
@@ -215,6 +222,46 @@ SIMD support and `turbohybrid.simd` is enabled, the exact dot-product kernel may
 dispatch to AVX2 on x86 or NEON on ARM for the bounded rerank work; portable and
 `SIMD_BUILD=none` builds continue to use the scalar path.
 
+### Native ColBERT candidate generation
+
+For ColBERT-style models, `pgturbohybrid` can build document-node indexes that
+separate candidate generation from final ranking. Candidate sources are allowed
+to use approximate proxy, centroid, or compact-code scores to choose a bounded
+document set. The returned SQL order remains exact heap MaxSim over that
+retained set.
+
+The document-node storage tiers are selected with the `multivector_doc_storage`
+index option:
+
+- `f32`, `f16`, and `sq8` store a full document multivector sidecar for
+  document-node scoring experiments.
+- `proxy_only` stores only document IDs, heap TIDs, graph adjacency, and the
+  fixed-dimensional proxy vector. It is useful for low-memory proxy admission
+  and exact heap rerank.
+- `centroid_only` stores centroid and posting payloads without the full
+  multivector sidecar. It is intended for centroid and quantized-inverted
+  candidate-source experiments.
+
+The main pure-ColBERT candidate sources are:
+
+- `proxy_vector`: graph traversal over one proxy vector per document.
+- `document_nodes`: document-node graph scoring over the configured
+  document-node storage.
+- `centroid_lite`: experimental PLAID-style centroid posting admission.
+- `quantized_inverted_experimental`: research-only codeword/posting admission.
+- `exact_doc_scan` and `exact_token_scan`: diagnostic oracles, not serving
+  paths.
+
+Use `turbohybrid_last_scan_stats()` or the DBpedia ColBERT benchmark JSON to
+check whether a candidate source is healthy. The most useful fields are:
+latency (`p50_ms`, `p95_ms`, `p99_ms`), qrel quality (`recall@10`, `ndcg@10`,
+`mrr@10`), exact-oracle admission when available
+(`exact_top1_admission_rate`, `exact_top10_admission_recall`), candidate work
+(`proxy_candidates_returned`, `centroid_docs_touched`,
+`quantized_inverted_docs_scored`), and exact rerank cost
+(`multivector_exact_rerank_docs`, `multivector_exact_rerank_pairs`,
+`multivector_exact_maxsim_rerank_time_us`).
+
 Safety caps are controlled by `turbohybrid.multivector_max_doc_vectors`,
 `turbohybrid.multivector_max_query_vectors`, and
 `turbohybrid.multivector_max_dim`.
@@ -225,9 +272,18 @@ limitations.
 
 For local ColBERT embedding inside PostgreSQL, see
 [`docs/colbert-llama-extension.md`](docs/colbert-llama-extension.md). It
-describes the companion `pg_colbert_llama` extension, which keeps llama.cpp
-model loading separate from the `pgturbohybrid` index AM and returns
-`turbohybrid_multivector` values through the public SQL API.
+describes the companion `llama_embed` extension, which keeps llama.cpp model
+loading separate from the `pgturbohybrid` index AM and returns dense `vector`,
+token-level `vector[]`, and multivector-compatible values through the public
+SQL API. Store late-interaction outputs in `multivector` columns. The
+implementation still ships from the `pg_colbert_llama` source
+directory for compatibility, and the legacy `CREATE EXTENSION
+pg_colbert_llama` / `colbert_*` API remains available for existing ColBERT
+callers.
+The standalone examples in
+[`extensions/pg_colbert_llama/examples/README.md`](extensions/pg_colbert_llama/examples/README.md)
+show dense `llama_embed_vector()` output stored in pgvector and multivector
+`llama_embed_mv()` output stored in `pgturbohybrid`.
 
 ## When It Is Useful
 
@@ -429,6 +485,76 @@ ORDER BY embedding <~> turbohybrid_query(
 )
 LIMIT 10;
 ```
+
+For tables that also store a ColBERT document column, use ColBERT as a reranker
+for a dense-vector + BM25 hybrid candidate set by keeping the first-stage hybrid
+query on the vector index and reranking only the bounded heap rows:
+
+```sql
+WITH q AS (
+    SELECT
+        turbohybrid_query(
+            vector_query => '[1,0,0]'::vector,
+            text_query => websearch_to_tsquery('english', 'postgres hybrid search'),
+            dense_k => 200,
+            bm25_k => 200,
+            final_k => 200
+        ) AS hybrid_query,
+        turbohybrid_multivector(ARRAY[
+            '[1,0,0]'::vector,
+            '[0,1,0]'::vector
+        ]) AS colbert_query
+),
+candidates AS MATERIALIZED (
+    SELECT d.id, d.body, d.colbert
+    FROM documents d, q
+    ORDER BY d.embedding <~> q.hybrid_query
+    LIMIT 200
+)
+SELECT c.id, c.body
+FROM candidates c, q
+ORDER BY turbohybrid_multivector_maxsim(q.colbert_query, c.colbert) DESC
+LIMIT 10;
+```
+
+This is the supported shape for ColBERT reranking a vector+BM25 hybrid today:
+`vector_query` and `multivector_query` still remain mutually exclusive inside
+one `turbohybrid_query`, so the reranker query is passed to the scalar MaxSim
+function instead of being mixed into the first-stage index payload.
+
+Current DBpedia ColBERT benchmark evidence for this pattern is positive but
+still bounded by the first-stage candidate window. With a dense+BM25 RRF
+first-stage window of 200 candidates and exact ColBERT MaxSim reranking over
+that window, top-10 quality changed as follows:
+
+| corpus | stage | recall@10 | ndcg@10 | mrr@10 | map@10 |
+|---|---|---:|---:|---:|---:|
+| 50k docs / 25 queries | RRF first stage | 0.188000 | 0.135688 | 0.240000 | - |
+| 50k docs / 25 queries | exact ColBERT rerank | 0.308000 | 0.251833 | 0.460000 | - |
+| 1M docs / 381 queries | RRF first stage | 0.098838 | 0.072247 | 0.120932 | 0.041474 |
+| 1M docs / 381 queries | exact ColBERT rerank | 0.128778 | 0.132511 | 0.241557 | 0.106777 |
+
+On the 1M run, exact ColBERT reranking improved recall@10 by `30.3%`,
+ndcg@10 by `83.4%`, mrr@10 by `99.7%`, and map@10 by `157.5%` relative to
+the RRF candidate ordering. The measured full-path latency for RRF retrieval
+plus exact ColBERT rerank over 200 candidates was p50 `30.745 ms`, p95
+`148.354 ms`, and p99 `367.001 ms` over 381 queries. The corresponding 50k
+run measured p50 `63.966 ms`, p95 `156.849 ms`, and p99 `483.225 ms` over 25
+queries.
+
+Treat these numbers as benchmark evidence for the rerank workflow, not as a
+default serving profile: this mode computes BEIR/qrel quality only and does not
+run a full exact MaxSim admission oracle. Recall is also limited by the RRF
+candidate window, so larger windows should be benchmarked when higher recall is
+the target.
+
+Do not read this as evidence for a three-branch dense+BM25+ColBERT proxy
+retriever. On the same 1M DBpedia corpus, the current proxy-only ColBERT branch
+was a fast but effectively dead candidate source (`recall@10 = 0.000262`,
+`ndcg@10 = 0.000364`), and naive RRF over dense, BM25, and that ColBERT branch
+reduced quality (`recall@10 = 0.010892`, `ndcg@10 = 0.005273`) compared with
+dense+BM25 RRF alone. Until native ColBERT candidate generation has stronger
+admission evidence, use ColBERT as the bounded exact reranker shown above.
 
 `text_query` requires a turbohybrid index with a `tsvector` key. A dense-only
 index accepts vector queries and rejects text or vector+text queries with a clear

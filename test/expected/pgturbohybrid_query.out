@@ -78,12 +78,23 @@ BEGIN
 		'turbohybrid.multivector_bm25_candidate_injection',
 		'turbohybrid.multivector_branch_plan',
 		'turbohybrid.multivector_candidate_reservoirs',
-			'turbohybrid.multivector_candidate_source',
+					'turbohybrid.multivector_candidate_source',
+					'turbohybrid.multivector_centroid_lite_bitset_min_token_matches',
+					'turbohybrid.multivector_centroid_lite_bitset_prefilter',
+					'turbohybrid.multivector_centroid_lite_candidate_scoring',
+					'turbohybrid.multivector_centroid_lite_codeword_top_m',
+					'turbohybrid.multivector_centroid_lite_max_postings_per_token',
+					'turbohybrid.multivector_centroid_lite_posting_selection',
+					'turbohybrid.multivector_centroid_lite_probe_centroids_per_token',
+			'turbohybrid.multivector_centroid_lite_pruning',
+					'turbohybrid.multivector_centroid_lite_score_drop_from_best',
+					'turbohybrid.multivector_centroid_lite_score_threshold',
 		'turbohybrid.multivector_coverage_reservoir_k',
 		'turbohybrid.multivector_debug_admission',
 		'turbohybrid.multivector_debug_skip_query_tokens',
 		'turbohybrid.multivector_debug_trace_limit',
 		'turbohybrid.multivector_doc_candidate_k',
+		'turbohybrid.multivector_doc_graph_entry_sample_count',
 		'turbohybrid.multivector_doc_graph_oversampling',
 		'turbohybrid.multivector_doc_graph_rescore_k',
 		'turbohybrid.multivector_doc_graph_search_ef',
@@ -93,6 +104,9 @@ BEGIN
 		'turbohybrid.multivector_exact_rerank',
 		'turbohybrid.multivector_exact_rerank_k',
 		'turbohybrid.multivector_exact_symmetric_build_max_docs',
+		'turbohybrid.multivector_learned_projection_checksum',
+		'turbohybrid.multivector_learned_projection_model',
+		'turbohybrid.multivector_learned_projection_path',
 		'turbohybrid.multivector_max_accumulator_mb',
 		'turbohybrid.multivector_max_dim',
 		'turbohybrid.multivector_max_doc_vectors',
@@ -104,7 +118,24 @@ BEGIN
 		'turbohybrid.multivector_plain_fallback_candidate_fraction',
 		'turbohybrid.multivector_plain_fallback_max_docs',
 		'turbohybrid.multivector_proxy_encoder',
-		'turbohybrid.multivector_sparse_candidate_source',
+		'turbohybrid.multivector_quantized_inverted_codebook',
+						'turbohybrid.multivector_quantized_inverted_codebook_path',
+							'turbohybrid.multivector_quantized_inverted_codebook_top_m',
+							'turbohybrid.multivector_quantized_inverted_compact_doc_order',
+							'turbohybrid.multivector_quantized_inverted_compact_max_docs',
+							'turbohybrid.multivector_quantized_inverted_compact_scoring',
+						'turbohybrid.multivector_quantized_inverted_max_postings_per_token',
+						'turbohybrid.multivector_quantized_inverted_min_token_matches',
+						'turbohybrid.multivector_quantized_inverted_posting_selection',
+						'turbohybrid.multivector_quantized_inverted_precompact',
+						'turbohybrid.multivector_quantized_inverted_precompact_coverage_k',
+						'turbohybrid.multivector_quantized_inverted_precompact_per_token_k',
+						'turbohybrid.multivector_quantized_inverted_precompact_score_k',
+						'turbohybrid.multivector_quantized_inverted_probe_codewords_per_token',
+						'turbohybrid.multivector_quantized_inverted_pruning',
+						'turbohybrid.multivector_quantized_inverted_query_codeword_kernel',
+						'turbohybrid.multivector_quantized_inverted_token_coverage',
+				'turbohybrid.multivector_sparse_candidate_source',
 		'turbohybrid.multivector_subvector_k',
 		'turbohybrid.multivector_unique_docs_per_token',
 		'turbohybrid.native_build_workers',
@@ -141,9 +172,18 @@ BEGIN
 		current_setting('turbohybrid.multivector_subvector_k') != '100' OR
 		current_setting('turbohybrid.multivector_unique_docs_per_token') != '100' OR
 		current_setting('turbohybrid.multivector_max_raw_hits_per_token') != '400' OR
-		current_setting('turbohybrid.multivector_adaptive_widening') != 'auto' OR
-		current_setting('turbohybrid.multivector_branch_plan') != 'auto' OR
-		current_setting('turbohybrid.multivector_candidate_source') != 'graph' OR
+			current_setting('turbohybrid.multivector_adaptive_widening') != 'auto' OR
+			current_setting('turbohybrid.multivector_branch_plan') != 'auto' OR
+				current_setting('turbohybrid.multivector_candidate_source') != 'graph' OR
+				current_setting('turbohybrid.multivector_centroid_lite_bitset_prefilter') != 'off' OR
+				current_setting('turbohybrid.multivector_centroid_lite_bitset_min_token_matches') != '1' OR
+				current_setting('turbohybrid.multivector_centroid_lite_candidate_scoring') != 'posting_payload' OR
+				current_setting('turbohybrid.multivector_centroid_lite_codeword_top_m') != '1' OR
+				current_setting('turbohybrid.multivector_centroid_lite_probe_centroids_per_token') != '1' OR
+				current_setting('turbohybrid.multivector_centroid_lite_posting_selection') != 'uniform_stride' OR
+				current_setting('turbohybrid.multivector_centroid_lite_score_drop_from_best') != '-1' OR
+				current_setting('turbohybrid.multivector_centroid_lite_score_threshold') != '-1' OR
+			current_setting('turbohybrid.multivector_centroid_lite_pruning') != 'off' OR
 		current_setting('turbohybrid.multivector_bm25_candidate_injection') != 'off' OR
 		current_setting('turbohybrid.multivector_sparse_candidate_source') != 'off' OR
 		current_setting('turbohybrid.multivector_candidate_reservoirs') != 'conservative' OR
@@ -154,6 +194,7 @@ BEGIN
 		current_setting('turbohybrid.multivector_per_token_doc_reservoir_k') != '1' OR
 		current_setting('turbohybrid.multivector_docmap') != 'auto' OR
 		current_setting('turbohybrid.multivector_doc_candidate_k') != '100' OR
+		current_setting('turbohybrid.multivector_doc_graph_entry_sample_count') != '0' OR
 		current_setting('turbohybrid.multivector_doc_graph_search_ef') != '0' OR
 		current_setting('turbohybrid.multivector_doc_graph_oversampling') != '1' OR
 		current_setting('turbohybrid.multivector_doc_graph_rescore_k') != '0' OR
@@ -163,13 +204,33 @@ BEGIN
 		current_setting('turbohybrid.multivector_exact_rerank_k') != '100' OR
 		current_setting('turbohybrid.multivector_allow_exact_symmetric_build') != 'off' OR
 		current_setting('turbohybrid.multivector_exact_symmetric_build_max_docs') != '1000' OR
+		current_setting('turbohybrid.multivector_learned_projection_checksum') != '' OR
+		current_setting('turbohybrid.multivector_learned_projection_model') != '' OR
+		current_setting('turbohybrid.multivector_learned_projection_path') != '' OR
 		current_setting('turbohybrid.multivector_model_name') != '' OR
 		current_setting('turbohybrid.multivector_proxy_encoder') != 'normalized_mean' OR
-		current_setting('turbohybrid.multivector_max_accumulator_mb') != '64' OR
-		current_setting('turbohybrid.multivector_debug_admission') != 'off' OR
-		current_setting('turbohybrid.multivector_debug_skip_query_tokens') != '' OR
-		current_setting('turbohybrid.multivector_debug_trace_limit') != '1000' THEN
-			RAISE EXCEPTION 'unexpected multivector defaults: doc %, query %, subvector %, unique %, raw %, adaptive %, branch_plan %, source %, bm25_injection %, sparse_source %, reservoirs %, coverage_reservoir_k %, fallback %, fallback_fraction %, fallback_max_docs %, per_token_reservoir_k %, docmap %, docs %, doc_graph_search_ef %, doc_graph_oversampling %, doc_graph_rescore_k %, doc_storage %, doc_storage_cache %, rerank %, rerank_k %, allow_exact_symmetric_build %, exact_symmetric_build_max_docs %, model %, proxy_encoder %, accumulator_mb %, debug %, skip_tokens %, trace_limit %',
+		current_setting('turbohybrid.multivector_quantized_inverted_codebook') != 'deterministic' OR
+					current_setting('turbohybrid.multivector_quantized_inverted_codebook_path') != '' OR
+					current_setting('turbohybrid.multivector_quantized_inverted_codebook_top_m') != '1' OR
+					current_setting('turbohybrid.multivector_quantized_inverted_compact_doc_order') != 'docid' OR
+					current_setting('turbohybrid.multivector_quantized_inverted_compact_scoring') != 'off' OR
+						current_setting('turbohybrid.multivector_quantized_inverted_precompact') != 'off' OR
+						current_setting('turbohybrid.multivector_quantized_inverted_precompact_score_k') != '4096' OR
+						current_setting('turbohybrid.multivector_quantized_inverted_precompact_coverage_k') != '512' OR
+						current_setting('turbohybrid.multivector_quantized_inverted_precompact_per_token_k') != '16' OR
+						current_setting('turbohybrid.multivector_quantized_inverted_compact_max_docs') != '6144' OR
+						current_setting('turbohybrid.multivector_quantized_inverted_token_coverage') != 'off' OR
+						current_setting('turbohybrid.multivector_quantized_inverted_max_postings_per_token') != '0' OR
+						current_setting('turbohybrid.multivector_quantized_inverted_min_token_matches') != '0' OR
+						current_setting('turbohybrid.multivector_quantized_inverted_pruning') != 'off' OR
+						current_setting('turbohybrid.multivector_quantized_inverted_query_codeword_kernel') != 'auto' OR
+					current_setting('turbohybrid.multivector_quantized_inverted_probe_codewords_per_token') != '1' OR
+					current_setting('turbohybrid.multivector_quantized_inverted_posting_selection') != 'score_topk' OR
+				current_setting('turbohybrid.multivector_max_accumulator_mb') != '64' OR
+			current_setting('turbohybrid.multivector_debug_admission') != 'off' OR
+			current_setting('turbohybrid.multivector_debug_skip_query_tokens') != '' OR
+			current_setting('turbohybrid.multivector_debug_trace_limit') != '1000' THEN
+						RAISE EXCEPTION 'unexpected multivector defaults: doc %, query %, subvector %, unique %, raw %, adaptive %, branch_plan %, source %, centroid_lite_bitset_prefilter %, centroid_lite_bitset_min_token_matches %, centroid_lite_candidate_scoring %, centroid_lite_codeword_top_m %, centroid_lite_probe_centroids %, centroid_lite_posting_selection %, centroid_lite_score_drop_from_best %, centroid_lite_score_threshold %, centroid_lite_pruning %, bm25_injection %, sparse_source %, reservoirs %, coverage_reservoir_k %, fallback %, fallback_fraction %, fallback_max_docs %, per_token_reservoir_k %, docmap %, docs %, doc_graph_entry_sample_count %, doc_graph_search_ef %, doc_graph_oversampling %, doc_graph_rescore_k %, doc_storage %, doc_storage_cache %, rerank %, rerank_k %, allow_exact_symmetric_build %, exact_symmetric_build_max_docs %, learned_projection_checksum %, learned_projection_model %, learned_projection_path %, model %, proxy_encoder %, quantized_codebook %, quantized_codebook_path %, quantized_codebook_top_m %, quantized_compact_doc_order %, quantized_compact_scoring %, quantized_token_coverage %, quantized_posting_limit %, quantized_min_token_matches %, quantized_pruning %, quantized_probe_codewords %, quantized_posting_selection %, accumulator_mb %, debug %, skip_tokens %, trace_limit %',
 				current_setting('turbohybrid.multivector_max_doc_vectors'),
 			current_setting('turbohybrid.multivector_max_query_vectors'),
 			current_setting('turbohybrid.multivector_subvector_k'),
@@ -177,7 +238,16 @@ BEGIN
 			current_setting('turbohybrid.multivector_max_raw_hits_per_token'),
 			current_setting('turbohybrid.multivector_adaptive_widening'),
 			current_setting('turbohybrid.multivector_branch_plan'),
-			current_setting('turbohybrid.multivector_candidate_source'),
+				current_setting('turbohybrid.multivector_candidate_source'),
+				current_setting('turbohybrid.multivector_centroid_lite_bitset_prefilter'),
+				current_setting('turbohybrid.multivector_centroid_lite_bitset_min_token_matches'),
+				current_setting('turbohybrid.multivector_centroid_lite_candidate_scoring'),
+				current_setting('turbohybrid.multivector_centroid_lite_codeword_top_m'),
+				current_setting('turbohybrid.multivector_centroid_lite_probe_centroids_per_token'),
+				current_setting('turbohybrid.multivector_centroid_lite_posting_selection'),
+				current_setting('turbohybrid.multivector_centroid_lite_score_drop_from_best'),
+				current_setting('turbohybrid.multivector_centroid_lite_score_threshold'),
+			current_setting('turbohybrid.multivector_centroid_lite_pruning'),
 			current_setting('turbohybrid.multivector_bm25_candidate_injection'),
 			current_setting('turbohybrid.multivector_sparse_candidate_source'),
 			current_setting('turbohybrid.multivector_candidate_reservoirs'),
@@ -188,6 +258,7 @@ BEGIN
 			current_setting('turbohybrid.multivector_per_token_doc_reservoir_k'),
 			current_setting('turbohybrid.multivector_docmap'),
 			current_setting('turbohybrid.multivector_doc_candidate_k'),
+			current_setting('turbohybrid.multivector_doc_graph_entry_sample_count'),
 			current_setting('turbohybrid.multivector_doc_graph_search_ef'),
 			current_setting('turbohybrid.multivector_doc_graph_oversampling'),
 			current_setting('turbohybrid.multivector_doc_graph_rescore_k'),
@@ -197,8 +268,22 @@ BEGIN
 			current_setting('turbohybrid.multivector_exact_rerank_k'),
 			current_setting('turbohybrid.multivector_allow_exact_symmetric_build'),
 			current_setting('turbohybrid.multivector_exact_symmetric_build_max_docs'),
+			current_setting('turbohybrid.multivector_learned_projection_checksum'),
+			current_setting('turbohybrid.multivector_learned_projection_model'),
+			current_setting('turbohybrid.multivector_learned_projection_path'),
 			current_setting('turbohybrid.multivector_model_name'),
 			current_setting('turbohybrid.multivector_proxy_encoder'),
+				current_setting('turbohybrid.multivector_quantized_inverted_codebook'),
+				current_setting('turbohybrid.multivector_quantized_inverted_codebook_path'),
+				current_setting('turbohybrid.multivector_quantized_inverted_codebook_top_m'),
+					current_setting('turbohybrid.multivector_quantized_inverted_compact_doc_order'),
+					current_setting('turbohybrid.multivector_quantized_inverted_compact_scoring'),
+				current_setting('turbohybrid.multivector_quantized_inverted_token_coverage'),
+				current_setting('turbohybrid.multivector_quantized_inverted_max_postings_per_token'),
+				current_setting('turbohybrid.multivector_quantized_inverted_min_token_matches'),
+				current_setting('turbohybrid.multivector_quantized_inverted_pruning'),
+				current_setting('turbohybrid.multivector_quantized_inverted_probe_codewords_per_token'),
+				current_setting('turbohybrid.multivector_quantized_inverted_posting_selection'),
 			current_setting('turbohybrid.multivector_max_accumulator_mb'),
 			current_setting('turbohybrid.multivector_debug_admission'),
 			current_setting('turbohybrid.multivector_debug_skip_query_tokens'),
@@ -574,7 +659,7 @@ DO $$
 BEGIN
 	IF turbohybrid_query_out(turbohybrid_query(
 		multivector_query => turbohybrid_multivector(ARRAY['[1,0,0]'::vector, '[0,1,0]'::vector])
-	))::text != 'turbohybrid_query(fusion=rrf,vector=false,multivector=true,tsquery=false,dense_weight=1,bm25_weight=1,alpha=null,rrf_k=60,dense_k=100,bm25_k=100,final_k=null,require_bm25_match=false)' THEN
+	))::text != 'turbohybrid_query(fusion=rrf,vector=false,multivector=true,tsquery=false,dense_weight=1,multivector_weight=1,bm25_weight=1,alpha=null,rrf_k=60,dense_k=100,multivector_k=100,bm25_k=100,final_k=null,require_bm25_match=false)' THEN
 		RAISE EXCEPTION 'unexpected multivector query output';
 	END IF;
 END
@@ -584,19 +669,21 @@ BEGIN
 	IF turbohybrid_query_out(turbohybrid_query(
 		text_query => websearch_to_tsquery('english', 'postgres'),
 		multivector_query => turbohybrid_multivector(ARRAY['[1,0,0]'::vector, '[0,1,0]'::vector])
-	))::text != 'turbohybrid_query(fusion=rrf,vector=false,multivector=true,tsquery=true,dense_weight=1,bm25_weight=1,alpha=null,rrf_k=60,dense_k=100,bm25_k=100,final_k=null,require_bm25_match=false)' THEN
+	))::text != 'turbohybrid_query(fusion=rrf,vector=false,multivector=true,tsquery=true,dense_weight=1,multivector_weight=1,bm25_weight=1,alpha=null,rrf_k=60,dense_k=100,multivector_k=100,bm25_k=100,final_k=null,require_bm25_match=false)' THEN
 		RAISE EXCEPTION 'unexpected hybrid multivector query output';
 	END IF;
 END
 $$;
 DO $$
 BEGIN
-	PERFORM turbohybrid_query(
+	IF turbohybrid_query_out(turbohybrid_query(
 		vector_query => '[1,0,0]'::vector,
-		multivector_query => turbohybrid_multivector(ARRAY['[1,0,0]'::vector])
-	);
-	RAISE EXCEPTION 'expected mixed dense payload rejection';
-EXCEPTION WHEN invalid_parameter_value THEN
+		multivector_query => turbohybrid_multivector(ARRAY['[1,0,0]'::vector]),
+		multivector_weight => 2.5,
+		multivector_k => 17
+	))::text != 'turbohybrid_query(fusion=rrf,vector=true,multivector=true,tsquery=false,dense_weight=1,multivector_weight=2.5,bm25_weight=1,alpha=null,rrf_k=60,dense_k=100,multivector_k=17,bm25_k=100,final_k=null,require_bm25_match=false)' THEN
+		RAISE EXCEPTION 'unexpected mixed vector/multivector query output';
+	END IF;
 END
 $$;
 SET turbohybrid.profile = balanced;

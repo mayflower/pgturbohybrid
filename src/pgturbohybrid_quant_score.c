@@ -126,6 +126,7 @@
 #include "utils/lsyscache.h"
 #include "utils/memutils.h"
 
+#include "portability/instr_time.h"
 #include "pgturbohybrid_quant_score.h"
 #include "pgturbohybrid_quant_score_internal.h"
 

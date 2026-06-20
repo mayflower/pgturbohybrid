@@ -715,7 +715,7 @@ BEGIN
 		(stats->>'multivector_doc_graph_candidates')::int <> 4 OR
 		(stats->>'multivector_doc_graph_exact_rerank_docs')::int <> 1 OR
 		(stats->>'multivector_doc_graph_quantized_scores')::int <> 0 OR
-		stats->>'multivector_doc_graph_storage_kind' <> 'f16' OR
+		stats->>'multivector_doc_graph_storage_kind' <> 'f32' OR
 		stats->>'multivector_doc_graph_rescore_source' <> 'sidecar' OR
 		stats->>'multivector_exact_rerank_source' <> 'sidecar' OR
 		(stats->>'multivector_doc_graph_heap_fetches')::int <> 0 OR
@@ -744,7 +744,7 @@ SELECT (turbohybrid_last_scan_stats()->>'multivector_doc_graph_search_ef')::int
        turbohybrid_last_scan_stats()->>'multivector_doc_graph_rescore_source'
   AS document_node_knob_rescore_source;
 document_node_knob_search_ef|document_node_knob_oversampling|document_node_knob_rescore_k|document_node_knob_proxy_candidate_target|document_node_knob_candidates|document_node_knob_exact_rerank_docs|document_node_knob_storage_kind|document_node_knob_rescore_source
-4|2|1|4|4|1|f16|sidecar
+4|2|1|4|4|1|f32|sidecar
 (1 row)
 SET turbohybrid.multivector_doc_candidate_k = 10;
 SET turbohybrid.multivector_exact_rerank_k = 10;
@@ -864,7 +864,7 @@ BEGIN
 		(stats->>'multivector_proxy_graph_searches')::int <> 1 OR
 		(stats->>'multivector_subvector_searches')::int <> 0 OR
 		(stats->>'multivector_doc_graph_quantized_scores')::int <> 0 OR
-		stats->>'multivector_doc_graph_storage_kind' <> 'sq8' OR
+		stats->>'multivector_doc_graph_storage_kind' <> 'f32' OR
 		stats->>'multivector_doc_graph_rescore_source' <> 'sidecar' OR
 		stats->>'multivector_exact_rerank_source' <> 'sidecar' OR
 		(stats->>'multivector_doc_graph_heap_fetches')::int <> 0 OR
@@ -883,8 +883,80 @@ SELECT turbohybrid_last_scan_stats()->>'multivector_doc_graph_storage_kind'
        (turbohybrid_last_scan_stats()->>'multivector_doc_graph_quantized_scores')::int > 0
   AS document_node_sq8_quantized_scores;
 document_node_sq8_storage_kind|document_node_sq8_rescore_source|document_node_sq8_quantized_scores
-sq8|sidecar|f
+f32|sidecar|f
 (1 row)
+CREATE TABLE mv_many_moderate_docs_sq8_paged AS
+SELECT * FROM mv_many_moderate_docs;
+CREATE INDEX mv_many_moderate_docs_sq8_paged_idx
+ON mv_many_moderate_docs_sq8_paged
+USING turbohybrid (colbert multivector_maxsim_ip_turbohybrid_ops)
+WITH (
+  multivector_graph = document_nodes,
+  multivector_doc_storage = sq8,
+  multivector_proxy_encoder = max_pool,
+  graph_m = 4,
+  graph_ef_construction = 8,
+  graph_ef_search = 8
+);
+SET turbohybrid.multivector_candidate_source = document_nodes;
+SET turbohybrid.multivector_doc_storage_cache = 'paged';
+SET turbohybrid.multivector_doc_candidate_k = 4;
+SET turbohybrid.multivector_exact_rerank_k = 2;
+SET turbohybrid.multivector_doc_graph_rescore_k = 2;
+SET turbohybrid.multivector_doc_graph_search_ef = 4;
+DO $$
+DECLARE
+	q turbohybrid_multivector := turbohybrid_multivector(ARRAY[
+		'[1,0,0,0]'::vector,
+		'[0,1,0,0]'::vector,
+		'[0,0,1,0]'::vector,
+		'[0,0,0,1]'::vector
+	]);
+	doc_node_top1 text;
+	stats jsonb;
+BEGIN
+	SELECT id INTO doc_node_top1
+	FROM mv_many_moderate_docs_sq8_paged
+	ORDER BY colbert <~> turbohybrid_query(
+	  multivector_query => q,
+	  dense_k => 1,
+	  final_k => 1
+	)
+	LIMIT 1;
+	stats := turbohybrid_last_scan_stats();
+
+	IF doc_node_top1 <> 'good' OR
+		stats->>'multivector_candidate_source' <> 'document_nodes' OR
+		stats->>'multivector_candidate_path' <> 'document_graph' OR
+		stats->>'multivector_doc_graph_warning' <>
+			'document_node_sq8_sidecar_graph_traversal' OR
+		stats->>'multivector_doc_graph_storage_kind' <> 'sq8' OR
+		stats->>'multivector_doc_sidecar_cache_mode' <> 'paged' OR
+		stats->>'multivector_doc_graph_rescore_source' <> 'heap' OR
+		stats->>'multivector_exact_rerank_source' <> 'heap' OR
+		(stats->>'multivector_doc_graph_quantized_scores')::int <= 0 OR
+		(stats->>'compact_maxsim_pairs')::int <= 0 OR
+		(stats->>'multivector_exact_rerank_heap_fetches')::int <= 0 OR
+		(stats->>'multivector_exact_rerank_sidecar_reads')::int <> 0 OR
+		stats->>'multivector_candidate_path' = 'exact_doc_scan' THEN
+		RAISE EXCEPTION 'expected sq8 paged document-node graph scoring with heap exact rerank, top %, stats %',
+			doc_node_top1, stats;
+	END IF;
+END
+$$;
+SELECT turbohybrid_last_scan_stats()->>'multivector_doc_graph_storage_kind'
+  AS document_node_sq8_paged_storage_kind,
+       turbohybrid_last_scan_stats()->>'multivector_doc_graph_rescore_source'
+  AS document_node_sq8_paged_rescore_source,
+       turbohybrid_last_scan_stats()->>'multivector_exact_rerank_source'
+  AS document_node_sq8_paged_exact_source,
+       (turbohybrid_last_scan_stats()->>'compact_maxsim_pairs')::int > 0
+  AS document_node_sq8_paged_compact_pairs;
+document_node_sq8_paged_storage_kind|document_node_sq8_paged_rescore_source|document_node_sq8_paged_exact_source|document_node_sq8_paged_compact_pairs
+sq8|heap|heap|t
+(1 row)
+DROP TABLE mv_many_moderate_docs_sq8_paged;
+RESET turbohybrid.multivector_doc_storage_cache;
 SET turbohybrid.multivector_doc_storage = 'f32';
 SET turbohybrid.multivector_candidate_source = document_nodes;
 DO $$
@@ -958,9 +1030,49 @@ BEGIN
 		stats->>'proxy_encoder_kind' <> 'normalized_mean' OR
 		(stats->>'multivector_doc_graph_candidates')::int <> 4 OR
 		(stats->>'multivector_doc_graph_exact_rerank_docs')::int <> 1 OR
+		NOT (stats ? 'proxy_graph_nodes_visited') OR
+		NOT (stats ? 'proxy_graph_edges_visited') OR
+		NOT (stats ? 'proxy_graph_candidates_seen') OR
+		NOT (stats ? 'proxy_candidates_returned') OR
+		NOT (stats ? 'proxy_candidate_limit_effective') OR
+		NOT (stats ? 'proxy_candidate_limit_source') OR
+		NOT (stats ? 'proxy_vector_scores_computed') OR
+		NOT (stats ? 'proxy_vector_score_time_us') OR
+		stats->>'proxy_lazy_sidecar_vectors' <> 'true' OR
+		stats->>'multivector_doc_storage_cache_requested' <> 'auto' OR
+		stats->>'multivector_doc_storage_cache_effective' <> 'paged' OR
+		stats->>'multivector_doc_sidecar_cache_mode' <> 'paged' OR
+		(stats->>'proxy_graph_nodes_visited')::int <= 0 OR
+		(stats->>'proxy_candidate_limit_effective')::int <> 4 OR
+		stats->>'proxy_candidate_limit_source' <> 'candidate_target' OR
 		(stats->>'proxy_candidates')::int <> 4 OR
+		(stats->>'proxy_candidates_returned')::int <> 4 OR
 		(stats->>'proxy_exact_rerank_docs')::int <> 1 OR
+		(stats->>'proxy_exact_rerank_sidecar_fetches')::int <> 1 OR
+		(stats->>'proxy_exact_rerank_heap_fetches')::int <> 0 OR
+		(stats->>'proxy_full_sidecar_vectors_loaded')::int <> 0 OR
+		(stats->>'proxy_full_sidecar_bytes_touched')::int <> 0 OR
+		(stats->>'proxy_vector_uses_full_sidecar_for_graph')::boolean OR
+		(stats->>'proxy_vector_near_exhaustive_sidecar_touch')::boolean OR
+		stats->>'proxy_vector_sidecar_touch_reason' <> 'none' OR
 		NOT (stats ? 'proxy_top1_admission') OR
+		NOT (stats ? 'sidecar_cache_build_this_query') OR
+		NOT (stats ? 'sidecar_cache_build_bytes') OR
+		NOT (stats ? 'sidecar_cache_build_pages_read') OR
+		NOT (stats ? 'sidecar_query_bytes_touched') OR
+		NOT (stats ? 'sidecar_query_time_us') OR
+		NOT (stats ? 'multivector_doc_sidecar_docmap_bytes_touched') OR
+		NOT (stats ? 'multivector_doc_sidecar_resident_vectors_loaded') OR
+		NOT (stats ? 'multivector_doc_sidecar_paged_vector_bytes_touched') OR
+		(stats->>'sidecar_query_vectors_loaded')::int <>
+			(stats->>'proxy_exact_rerank_sidecar_fetches')::int OR
+		(stats->>'sidecar_query_vectors_loaded')::int >= 4 OR
+		(stats->>'sidecar_query_bytes_touched')::int <= 0 OR
+		((stats->>'sidecar_cache_build_this_query')::boolean AND
+		 (stats->>'sidecar_cache_build_bytes')::int <= 0) OR
+		(NOT (stats->>'sidecar_cache_build_this_query')::boolean AND
+		 (stats->>'sidecar_cache_build_bytes')::int <> 0) OR
+		(stats->>'multivector_doc_sidecar_vectors_loaded')::int >= 4 OR
 		(stats->>'multivector_doc_graph_quantized_scores')::int <> 0 OR
 		stats->>'multivector_doc_graph_rescore_source' <> 'sidecar' OR
 		stats->>'multivector_exact_rerank_source' <> 'sidecar' OR
@@ -980,10 +1092,14 @@ SELECT turbohybrid_last_scan_stats()->>'multivector_candidate_source'
   AS document_node_proxy_encoder,
        (turbohybrid_last_scan_stats()->>'proxy_candidates')::int
   AS document_node_proxy_candidates,
+       (turbohybrid_last_scan_stats()->>'proxy_graph_nodes_visited')::int > 0
+  AS document_node_proxy_graph_nodes_visited,
+       (turbohybrid_last_scan_stats()->>'multivector_doc_sidecar_vectors_loaded')::int < 4
+  AS document_node_proxy_bounded_sidecar_vectors,
        (turbohybrid_last_scan_stats()->>'multivector_doc_graph_exact_rerank_docs')::int
   AS document_node_proxy_exact_rerank_docs;
-document_node_proxy_source|document_node_proxy_warning|document_node_proxy_encoder|document_node_proxy_candidates|document_node_proxy_exact_rerank_docs
-proxy_vector|document_node_proxy_vector_graph_traversal|normalized_mean|4|1
+document_node_proxy_source|document_node_proxy_warning|document_node_proxy_encoder|document_node_proxy_candidates|document_node_proxy_graph_nodes_visited|document_node_proxy_bounded_sidecar_vectors|document_node_proxy_exact_rerank_docs
+proxy_vector|document_node_proxy_vector_graph_traversal|normalized_mean|4|t|t|1
 (1 row)
 CREATE TABLE mv_proxy_encoder_docs (
 	id text PRIMARY KEY,
@@ -1001,6 +1117,16 @@ INSERT INTO mv_proxy_encoder_docs VALUES
 CREATE INDEX mv_proxy_encoder_docs_max_idx ON mv_proxy_encoder_docs USING turbohybrid
   (colbert multivector_cosine_turbohybrid_ops)
   WITH (multivector_graph = document_nodes, multivector_proxy_encoder = max_pool);
+DO $$
+DECLARE
+	index_stats jsonb;
+BEGIN
+	index_stats := turbohybrid_index_stats('mv_proxy_encoder_docs_max_idx'::regclass);
+	IF index_stats->>'multivector_proxy_encoder' <> 'max_pool' THEN
+		RAISE EXCEPTION 'expected max_pool index stats, got %', index_stats;
+	END IF;
+END
+$$;
 DO $$
 DECLARE
 	q turbohybrid_multivector := turbohybrid_multivector(ARRAY[
@@ -1035,6 +1161,16 @@ DROP INDEX mv_proxy_encoder_docs_max_idx;
 CREATE INDEX mv_proxy_encoder_docs_fde_idx ON mv_proxy_encoder_docs USING turbohybrid
   (colbert multivector_cosine_turbohybrid_ops)
   WITH (multivector_graph = document_nodes, multivector_proxy_encoder = random_projection_fde);
+DO $$
+DECLARE
+	index_stats jsonb;
+BEGIN
+	index_stats := turbohybrid_index_stats('mv_proxy_encoder_docs_fde_idx'::regclass);
+	IF index_stats->>'multivector_proxy_encoder' <> 'random_projection_fde' THEN
+		RAISE EXCEPTION 'expected random_projection_fde index stats, got %', index_stats;
+	END IF;
+END
+$$;
 DO $$
 DECLARE
 	q turbohybrid_multivector := turbohybrid_multivector(ARRAY[
@@ -1170,6 +1306,145 @@ EXCEPTION WHEN feature_not_supported THEN
 	END IF;
 END
 $$;
+DO $$
+BEGIN
+	EXECUTE 'CREATE INDEX mv_proxy_encoder_docs_learned_v1_missing_idx ON mv_proxy_encoder_docs USING turbohybrid ' ||
+		'(colbert multivector_cosine_turbohybrid_ops) WITH (multivector_graph = document_nodes, ' ||
+		'multivector_proxy_encoder = learned_projection_v1)';
+	RAISE EXCEPTION 'learned_projection_v1 without weights unexpectedly succeeded';
+EXCEPTION WHEN feature_not_supported THEN
+	IF SQLERRM NOT LIKE '%learned_projection_v1 multivector proxy encoder requires configured projection weights%' THEN
+		RAISE;
+	END IF;
+END
+$$;
+DO $$
+DECLARE
+	weight_path text := current_setting('data_directory') || '/learned_projection_v1_dim_mismatch.txt';
+BEGIN
+	EXECUTE format(
+		'COPY (SELECT %L) TO %L',
+		'pgturbohybrid_learned_projection_v1 tiny_mismatch 3 3 checksum_mismatch 1 0 0 0 1 0 0 0 1',
+		weight_path
+	);
+	PERFORM set_config('turbohybrid.multivector_learned_projection_path', weight_path, false);
+	PERFORM set_config('turbohybrid.multivector_learned_projection_model', 'tiny_mismatch', false);
+	PERFORM set_config('turbohybrid.multivector_learned_projection_checksum', 'checksum_mismatch', false);
+	EXECUTE 'CREATE INDEX mv_proxy_encoder_docs_learned_v1_mismatch_idx ON mv_proxy_encoder_docs USING turbohybrid ' ||
+		'(colbert multivector_cosine_turbohybrid_ops) WITH (multivector_graph = document_nodes, ' ||
+		'multivector_proxy_encoder = learned_projection_v1)';
+	RAISE EXCEPTION 'learned_projection_v1 dimension mismatch unexpectedly succeeded';
+EXCEPTION WHEN invalid_parameter_value THEN
+	IF SQLERRM NOT LIKE '%learned_projection_v1 dimensions do not match multivector dimension%' THEN
+		RAISE;
+	END IF;
+END
+$$;
+RESET turbohybrid.multivector_learned_projection_path;
+RESET turbohybrid.multivector_learned_projection_model;
+RESET turbohybrid.multivector_learned_projection_checksum;
+DO $$
+DECLARE
+	weight_path text := current_setting('data_directory') || '/learned_projection_v1_identity_4d.txt';
+BEGIN
+	EXECUTE format(
+		'COPY (SELECT %L) TO %L',
+		'pgturbohybrid_learned_projection_v1 tiny_identity_4d 4 4 checksum_identity_4d 1 0 0 0 0 1 0 0 0 0 1 0 0 0 0 1',
+		weight_path
+	);
+	PERFORM set_config('turbohybrid.multivector_learned_projection_path', weight_path, false);
+	PERFORM set_config('turbohybrid.multivector_learned_projection_model', 'tiny_identity_4d', false);
+	PERFORM set_config('turbohybrid.multivector_learned_projection_checksum', 'checksum_identity_4d', false);
+	EXECUTE 'CREATE INDEX mv_proxy_encoder_docs_learned_v1_idx ON mv_proxy_encoder_docs USING turbohybrid ' ||
+		'(colbert multivector_cosine_turbohybrid_ops) WITH (multivector_graph = document_nodes, ' ||
+		'multivector_proxy_encoder = learned_projection_v1)';
+END
+$$;
+DO $$
+DECLARE
+	q turbohybrid_multivector := turbohybrid_multivector(ARRAY[
+		'[1,0,0,0]'::vector,
+		'[0,1,0,0]'::vector
+	]);
+	stats jsonb;
+	index_stats jsonb;
+	build_stats jsonb;
+	proxy_top text;
+	exact_top text;
+BEGIN
+	index_stats := turbohybrid_index_stats('mv_proxy_encoder_docs_learned_v1_idx'::regclass);
+	build_stats := turbohybrid_last_build_stats();
+	IF index_stats->>'multivector_proxy_encoder' <> 'learned_projection_v1' OR
+		index_stats->>'learned_projection_loaded' <> 'true' OR
+		index_stats->>'learned_projection_model' <> 'tiny_identity_4d' OR
+		(index_stats->>'learned_projection_dim')::int <> 4 OR
+		index_stats->>'learned_projection_checksum' <> 'checksum_identity_4d' OR
+		NOT (build_stats ? 'learned_projection_doc_encode_build_us') THEN
+		RAISE EXCEPTION 'unexpected learned_projection_v1 index/build stats, index %, build %',
+			index_stats, build_stats;
+	END IF;
+
+	PERFORM set_config('turbohybrid.multivector_candidate_source', 'proxy_vector', true);
+	PERFORM set_config('turbohybrid.multivector_doc_candidate_k', '2', true);
+	PERFORM set_config('turbohybrid.multivector_exact_rerank_k', '2', true);
+	SELECT id INTO proxy_top
+	FROM mv_proxy_encoder_docs
+	ORDER BY colbert <~> turbohybrid_query(
+	  multivector_query => q,
+	  dense_k => 2,
+	  final_k => 1
+	)
+	LIMIT 1;
+	stats := turbohybrid_last_scan_stats();
+
+	PERFORM set_config('turbohybrid.multivector_candidate_source', 'exact_doc_scan', true);
+	SELECT id INTO exact_top
+	FROM mv_proxy_encoder_docs
+	ORDER BY colbert <~> turbohybrid_query(
+	  multivector_query => q,
+	  dense_k => 2,
+	  final_k => 1
+	)
+	LIMIT 1;
+
+	PERFORM set_config('turbohybrid.multivector_candidate_source', 'graph', true);
+
+	IF proxy_top <> exact_top OR
+		proxy_top <> 'alpha' OR
+		stats->>'proxy_encoder_kind' <> 'learned_projection_v1' OR
+		stats->>'learned_projection_loaded' <> 'true' OR
+		stats->>'learned_projection_model' <> 'tiny_identity_4d' OR
+		(stats->>'learned_projection_dim')::int <> 4 OR
+		stats->>'learned_projection_checksum' <> 'checksum_identity_4d' OR
+		NOT (stats ? 'learned_projection_query_encode_us') THEN
+		RAISE EXCEPTION 'expected learned_projection_v1 proxy/exact match, proxy %, exact %, stats %',
+			proxy_top, exact_top, stats;
+	END IF;
+
+	PERFORM set_config('turbohybrid.multivector_candidate_source', 'proxy_vector', true);
+	PERFORM id
+	FROM mv_proxy_encoder_docs
+	ORDER BY colbert <~> turbohybrid_query(
+	  multivector_query => q,
+	  dense_k => 2,
+	  final_k => 1
+	)
+	LIMIT 1;
+END
+$$;
+SELECT turbohybrid_last_scan_stats()->>'proxy_encoder_kind'
+  AS document_node_proxy_learned_projection_encoder,
+       turbohybrid_last_scan_stats()->>'learned_projection_model'
+  AS document_node_proxy_learned_projection_model,
+       (turbohybrid_last_scan_stats()->>'learned_projection_dim')::int
+  AS document_node_proxy_learned_projection_dim;
+document_node_proxy_learned_projection_encoder|document_node_proxy_learned_projection_model|document_node_proxy_learned_projection_dim
+learned_projection_v1|tiny_identity_4d|4
+(1 row)
+DROP INDEX mv_proxy_encoder_docs_learned_v1_idx;
+RESET turbohybrid.multivector_learned_projection_path;
+RESET turbohybrid.multivector_learned_projection_model;
+RESET turbohybrid.multivector_learned_projection_checksum;
 DROP TABLE mv_proxy_encoder_docs;
 SET turbohybrid.multivector_branch_plan = qdrant_like;
 DO $$

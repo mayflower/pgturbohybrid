@@ -1,812 +1,816 @@
-## Current `pgturbohybrid` state to build from
+Below is a **copy-paste prompt pack** ordered for implementation. It keeps the current constraint: **no BM25 rescue, no learned-sparse rescue, final SQL ordering remains exact MaxSim**.
 
-`pgturbohybrid` is no longer only a token-node ColBERT approximation. The current docs show two paths: the legacy `token_nodes` path, where query tokens retrieve token/subvector graph hits and then aggregate to documents, and the new explicit `document_nodes` path, where one graph node represents one heap document/tuple version and search scoring is intended to be full document-level MaxSim.
-
-The current benchmark docs also show that Prompt 11 has already started a production document-node path: `multivector_graph = token_nodes | document_nodes`, one graph node per heap document, a versioned index-resident multivector sidecar, symmetrized document MaxSim for build-time edge selection, document-sidecar scoring before heap rerank, and storage modes `f32 | f16 | sq8`. It also now has `proxy_vector`, document-graph knobs, RRF, normalized score fusion, and adaptive hybrid budgeting.
-
-So the next best ideas are **not** “make token-node candidate generation wider.” The strongest direction is to make `document_nodes` fast, robust, hybrid-aware, and model-aware, while keeping `token_nodes` only as compatibility/debug mode.
+Run these in order.
 
 ---
 
-## What modern systems and papers are doing
-
-### Qdrant: point-level MaxSim + prefetch pipelines
-
-Qdrant’s multivectors store a variable number of same-shaped dense vectors per point, and its MaxSim comparator returns a **single combined score per point**, not per subvector. Qdrant explicitly defines `max_sim` as the sum of maximum similarities between vectors in the matrices, which matches the semantic direction `pgturbohybrid` is moving toward with `document_nodes`. ([Qdrant][1])
-
-Qdrant’s docs also recommend using ColBERT as a reranker over a small candidate set for large-scale retrieval, because ColBERT improves semantic granularity but costs more memory and speed than single-vector retrieval. They suggest dense retrieval for roughly 100–500 initial candidates followed by ColBERT reranking. ([Qdrant][2])
-
-The most copyable Qdrant API idea is its **prefetch/multi-stage query model**. It can run cheap first-stage retrieval, then rescore with a larger or multivector representation, and it supports nested prefetches such as byte-vector prefetch → full dense vector prefetch → ColBERT multivector final query. ([Qdrant][3])
-
-For hybrid, Qdrant exposes both RRF and DBSF. RRF fuses by ranks; DBSF keeps raw scores but normalizes each retriever’s returned-score distribution before summing, and Qdrant warns that no fusion method dominates universally, so an eval set should choose. ([Qdrant][3])
-
-**Copy:** nested branch/prefetch planning, explicit branch budgets, point-level MaxSim scoring, oversampling before exact rerank, DBSF-like score fusion.
-
----
-
-### Vespa: tensor-native ColBERT, long context, int8 compression, phased ranking
-
-Vespa’s long-context ColBERT implementation stores token vectors as tensors such as `tensor<int8>(context{}, token{}, v[16])`, with `context` representing sliding context windows and `token` representing token position. It uses compressed token vectors and can store them as paged attributes, allowing OS paging for large token tensors. ([Vespa Blog][4])
-
-Vespa expresses MaxSim directly in rank profiles using tensor operations. It supports context-level and cross-context MaxSim over long documents, and explicitly discusses using ColBERT as a second-phase ranking expression after a first-stage retrieval operator. ([Vespa Blog][4])
-
-Vespa also notes that structured fields can either be concatenated or stored as several ColBERT tensors, letting ranking expressions weight multiple MaxSim calculations per field. ([Vespa Blog][4])
-
-**Copy:** context-window-aware multivectors, field-specific MaxSim, paged sidecar storage, phased ranking, int8 token compression, and “ColBERT as second phase over constrained candidates” as an explicit planner mode.
-
----
-
-### Milvus: hybrid branch model + sparse WAND/MaxScore + normalized weighted fusion
-
-Milvus’ “multi-vector hybrid search” is not ColBERT MaxSim; it is multiple vector fields searched simultaneously, such as dense text, sparse BM25/SPLADE-like text, and image dense vectors. It then reranks/fuses the result sets. ([Milvus][5])
-
-Milvus’ sparse index supports BM25 with `DAAT_MAXSCORE`, and its docs list `DAAT_MAXSCORE`, `DAAT_WAND`, and `TAAT_NAIVE` as inverted-index algorithm choices. ([Milvus][5])
-
-Milvus’ `WeightedRanker` normalizes route scores into `[0,1]`, using an arctan transform because IP, L2, and other metrics live on different scales; its `RRFRanker` fuses by rank, typically with smoothing constant 60. ([Milvus][6])
-
-**Copy:** make hybrid retrieval branch-native, preserve per-branch score/rank provenance, add a calibrated route-normalization mode, and expose sparse branch algorithm choices similar to WAND/MaxScore.
-
----
-
-### PLAID / ColBERTv2: centroid interaction and progressive pruning
-
-PLAID accelerates ColBERTv2 by treating each passage as a lightweight bag of centroids, using centroid interaction and centroid pruning before exact scoring. The paper reports up to 7× GPU and 45× CPU speedups versus vanilla ColBERTv2 without quality loss. ([arXiv][7])
-
-A 2024 PLAID reproducibility study found that PLAID’s Pareto frontier depends on carefully balancing parameters, and that lexical reranking can be very competitive at low-latency points, but cannot reach peak exhaustive ColBERT effectiveness because lexical candidate recall is limited. ([arXiv][8])
-
-**Copy:** a PLAID-lite centroid sidecar for `token_nodes` compatibility and as an optional `document_nodes` candidate prefilter, but only after the current document-node path has DBpedia-scale admission data.
-
----
-
-### SPLATE / SLIM / learned sparse: inverted-index candidate generation for late interaction
-
-SPLATE maps frozen ColBERTv2 token embeddings into sparse vocabulary space so traditional sparse retrieval can generate candidates, then reranks with ColBERT MaxSim. The paper says it matches PLAID ColBERTv2 effectiveness by reranking 50 documents retrieved under 10 ms. ([arXiv][9])
-
-SLIM similarly maps contextual token vectors to sparse lexical space and uses inverted-index retrieval plus refinement, explicitly targeting compatibility with off-the-shelf lexical search libraries such as Lucene. ([arXiv][10])
-
-**Copy:** learned-sparse candidate injection using existing BM25/WAND infrastructure, with exact MaxSim final ranking. This is especially attractive for hybrid retrieval because it upgrades BM25 injection into semantic sparse injection.
-
----
-
-### MUVERA / LEMUR: reduce multivector search to single-vector ANN
-
-MUVERA generates fixed-dimensional encodings of query and document multivectors whose inner product approximates multivector similarity, allowing off-the-shelf MIPS/ANN. The paper reports 2–5× fewer retrieved candidates and 90% lower latency with improved average recall in its evaluations. ([arXiv][11])
-
-LEMUR, published in 2026, also reduces multivector similarity to single-vector search through a learned latent-space reduction and reports order-of-magnitude speedups on ColBERTv2 and modern multivector models. ([arXiv][12])
-
-**Copy:** upgrade the current `proxy_vector` prototype into a real learned/provable proxy branch: first heuristic representative vectors, then MUVERA-style fixed-dimensional encodings, then learned LEMUR-like projection if benchmarked.
-
----
-
-### WARP / Col-Bandit: exact MaxSim rerank cost reduction
-
-WARP targets multi-vector scoring speed with dynamic similarity imputation, implicit decompression, and two-stage reduction; it reports 41× speedup over an XTR reference implementation and 3× speedup over official PLAID while preserving quality. ([arXiv][13])
-
-Col-Bandit, a 2026 paper, reduces query-time MaxSim FLOPs by adaptively revealing only the document/query-token interactions needed to identify top-K, without index modifications or retraining. It reports up to 5× MaxSim FLOP reductions. ([arXiv][14])
-
-**Copy:** after admission recall is fixed, reduce exact rerank cost with adaptive per-query-token MaxSim pruning and two-stage MaxSim reductions.
-
----
-
-### Token pooling / ColBERTSaR: reduce storage and gather cost
-
-Token pooling clusters document token vectors during indexing to reduce the number of vectors stored. The 2024 paper reports a 50% footprint reduction with virtually no retrieval degradation, and further 66–75% reductions with degradation under 5% on most datasets. ([arXiv][15])
-
-A very recent 2026 paper, ColBERTSaR, proposes turning a ColBERT index into a true inverted index via embedding quantization and reports 50–70% smaller indexes than one-bit PLAID while retaining effectiveness. This is new enough that I would treat it as an experimental branch, not an immediate production dependency. ([arXiv][16])
-
-**Copy:** token pooling should be near-term because it is model-agnostic and simple. ColBERTSaR-style quantized inverted indexes are worth a research prototype later.
-
----
-
-### ModernColBERT / Jina-ColBERT-v2 / PyLate model compatibility
-
-Jina-ColBERT-v2 is a multilingual late-interaction retriever with architectural/training improvements for broader multilingual retrieval. ([arXiv][17])
-
-PyLate adds late-interaction support on top of Sentence Transformers and has enabled GTE-ModernColBERT and Reason-ModernColBERT. ([arXiv][18])
-
-Qdrant’s FastEmbed docs list supported late-interaction models such as `colbert-ir/colbertv2.0` and `answerdotai/answerai-colbert-small-v1`, with dimensions 128 and 96 respectively. ([Qdrant][2])
-
-**Copy:** model-metadata-driven multivector ingestion: dimensions, token limits, token masks, query/doc role, pooling policy, storage kind, normalization, and per-token weights must not be hardcoded to one ColBERT variant.
-
----
-
-# What `pgturbohybrid` should copy next
-
-## Highest priority
-
-1. **Document-node insert correctness.** Current build uses symmetrized MaxSim, but incremental insert must be audited so it does not link document nodes using only representative-vector geometry. This matters because document-node graph quality will drift after inserts if insert geometry differs from build geometry.
-
-2. **DBpedia-scale document-node admission/latency benchmark.** The synthetic gate proves top-1 admission on a constructed case, but the benchmark docs explicitly say DBpedia admission and recall quality are separate opt-in checks.
-
-3. **Qdrant-style branch/prefetch planner.** `pgturbohybrid` already has branches; make them explicit, nested, budgeted, and visible in stats.
-
-4. **Vespa-style long-context and field-aware MaxSim.** This is the clearest route for ModernColBERT and enterprise documents: title/body/section fields, context windows, and paged storage.
-
-5. **Rerank cost pruning.** As hybrid admission improves, candidate unions grow; copy WARP/Col-Bandit ideas to keep exact MaxSim affordable.
-
-## Medium priority
-
-6. **MUVERA/LEMUR proxy branch.** `proxy_vector` exists; make it a real branch with FDE/learned projections and admission benchmarks.
-
-7. **Token pooling.** It reduces storage and MaxSim cost without changing query-time logic.
-
-8. **Learned sparse branch.** Upgrade BM25 injection into SPLATE/SLIM-style semantic sparse injection.
-
-## Research priority
-
-9. **PLAID-lite centroids.** Useful for legacy `token_nodes` and possibly as a fast document-node sidecar prefilter.
-
-10. **ColBERTSaR-style quantized inverted index.** Promising but too new to make core yet.
-
----
-
-# Codex prompts
-
-Run these one at a time. They assume the current repository state with `document_nodes`, `f32|f16|sq8` sidecar storage, `proxy_vector`, normalized hybrid fusion, and admission-debug infrastructure.
-
----
-
-## Prompt 1 — Audit and fix document-node incremental insert geometry
+# Prompt 0 — Baseline audit for quantized-inverted hot path
 
 ```text
-You are working in agentxagi/pgturbohybrid.
+You are working in github.com/mayflower/pgturbohybrid.
 
 Goal:
-Ensure incremental insert/update for multivector_graph=document_nodes uses the same document-level MaxSim graph geometry as bulk build.
+Audit the current quantized_inverted_experimental implementation before changing behavior.
 
-Context:
-Bulk build for document_nodes uses one graph node per heap document and symmetrized document MaxSim for graph edge selection. Incremental insert must not link a new document node using only an averaged representative vector if that changes the graph topology semantics.
+Background:
+The current best default-quality row is:
 
-Tasks:
-1. Audit PgturbohybridGraphInsertMultiVectorBatchInPlace and related insert helpers.
-2. If document_nodes insert still uses a representative vector for graph neighbor search/link selection, implement a document-node-specific insert path.
-3. During insert:
-   - keep the inserted PgturbohybridMultiVector in memory;
-   - load existing document multivectors from the document-node sidecar/cache;
-   - score candidate neighbors with the same symmetrized MaxSim used by bulk build:
-     0.5 * (MaxSim(new, existing)/count(new) + MaxSim(existing, new)/count(existing));
-   - use that score for entry search, neighbor selection, and reciprocal pruning;
-   - append the document-node sidecar after graph insertion with WAL-safe metadata updates.
-4. Add stats:
-   - multivector_doc_graph_insert_full_maxsim_edges
-   - multivector_doc_graph_insert_representative_fallbacks
-   - multivector_doc_graph_insert_pairs_scored
-5. Add tests:
-   - build document_nodes index, insert a new many-moderate document, verify it is retrievable;
-   - compare bulk-build vs insert-after-build recall on the synthetic many-moderate corpus;
-   - update/delete/vacuum visibility still passes.
-6. Update docs/dev/multivector-document-graph-design.md and benchmarks/README.md.
+  quantized_inverted_external_centroid_only_compact_topk_128_probe_016_topm_01_score_bound
+  budget 8192
 
-Acceptance:
-- document_nodes insert never silently uses representative-vector geometry for graph links unless a clearly named debug fallback is enabled.
-- bulk and incremental paths use the same documented document-level scorer.
+Observed quality:
+- top1 admission: 0.96
+- top10 admission: 0.832
+- recall@10: 0.539333
+- ndcg@10: 0.458704
+- p95 latency: 1914.798 ms
+
+Observed p95 timing:
+- candidate source / quantized inverted path: ~1503 ms
+- compact scoring: ~1063 ms
+- query-codeword scoring: ~329 ms
+- exact MaxSim rerank: ~398 ms
+- heap fetch: ~183 ms
+- final sort: ~12 ms
+- sidecar I/O: effectively 0
+
+Observed work:
+- postings touched: ~60k
+- docs compact-scored: ~23.4k
+- compact payload touched: ~6.8 MB
+- exact rerank docs: 512
+- score-bound pruning prunes only about 24 / 23k docs
+
+Repository facts to verify:
+- quantized_inverted_experimental is research-only and final ranking remains exact heap MaxSim.
+- Current compact scoring uses temporary scorePayload-like compact payloads and is admission-only.
+- Current stats already include postings touched/selected/skipped, docs scored, compact score time, query-codeword time, token coverage, and score-bound pruning counters.
+- top_m > 1 is rejected unless there is an explicitly versioned posting format.
+
+Read:
+- docs/dev/multivector-colbertsar-research.md
+- docs/dev/multivector-document-graph-design.md
+- src/pgturbohybrid_am.h
+- src/pgturbohybrid_am.c
+- src/pgturbohybrid_stats.c
+- src/pgturbohybrid_quant.h
+- src/pgturbohybrid_quant_scan_cache.c
+- test/sql/pgturbohybrid_multivector.sql
+- test/expected/pgturbohybrid_multivector.out
+- benchmarks/config/result_schema.json
+- benchmarks/README.md
+
+Do not change files.
+
+Deliverable:
+1. A short implementation map:
+   - where quantized inverted postings are scanned
+   - where query-codeword scores are computed
+   - where document compact scores are computed
+   - where exact MaxSim rerank is invoked
+   - where score-bound pruning currently runs
+   - where token coverage filtering currently runs
+   - where last_scan_stats are populated
+
+2. A bottleneck table:
+   - phase
+   - current stat fields
+   - likely time cost
+   - memory/work driver
+   - whether it should be optimized in Prompt 1, 2, or 3
+
+3. Confirm whether the following fields already exist in last_scan_stats and benchmark JSON:
+   - quantized_inverted_postings_touched
+   - quantized_inverted_postings_selected
+   - quantized_inverted_postings_skipped
+   - quantized_inverted_docs_scored
+   - quantized_inverted_candidates
+   - quantized_inverted_query_codeword_score_us
+   - quantized_inverted_compact_score_us
+   - quantized_inverted_compact_docs_scored
+   - quantized_inverted_compact_payload_bytes
+   - quantized_inverted_token_coverage_mode
+   - quantized_inverted_active_query_tokens
+   - quantized_inverted_token_matches_total
+   - quantized_inverted_min_token_matches
+   - quantized_inverted_token_match_filtered_docs
+   - quantized_inverted_score_bound_pruning_enabled
+   - quantized_inverted_score_bound_docs_checked
+   - quantized_inverted_score_bound_docs_pruned
+   - quantized_inverted_candidates_before_bound
+   - quantized_inverted_candidates_after_bound
+
+4. Recommend exact file/function insertion points for Prompt 1.
+
+Constraints:
+- No BM25 rescue.
+- No learned-sparse rescue.
+- Do not change SQL behavior.
+- Do not change on-disk format.
+- Do not modify benchmark outputs.
 ```
 
 ---
 
-## Prompt 2 — Add DBpedia document-node admission benchmark gate
+# Prompt 1 — Implement precompact document gate
 
 ```text
-You are working in agentxagi/pgturbohybrid.
+You are working in github.com/mayflower/pgturbohybrid.
 
 Goal:
-Turn the current synthetic recall gate into a DBpedia-scale admission gate for document_nodes.
+Reduce quantized_inverted_experimental latency by adding a PLAID/NextPlaid-style precompact document gate before compact code scoring.
 
-Context:
-The synthetic gate proves exact top-1 admission on a constructed case. We now need DBpedia evidence for:
-- token_nodes,
-- exact_token_scan,
-- document_nodes f32/f16/sq8,
-- proxy_vector,
-- plain fallback,
-- exact_doc_scan.
+Core idea:
+Keep broad probe/cap settings for quality, but do not compact-score every touched document. First rank touched documents with a cheap centroid/codeword-level MaxSim approximation, retain a bounded document set, then run the existing compact scorer only on that set.
 
-Tasks:
-1. Extend benchmarks/dbpedia_colbert_multivector.py with:
-   --document-node-admission-grid
-   --document-node-storage-grid f32,f16,sq8
-   --document-node-ef-grid 50,100,200,400,800
-   --document-node-oversampling-grid 1,2,4,8
-2. For each query and mode, collect:
-   - exact_top1_admitted
-   - exact_top10_admission_recall
-   - exact_top1_rank
-   - final NDCG/Recall/MRR where qrels exist
-   - latency p50/p95
-   - docs_scored
-   - edges_visited
-   - exact_rerank_docs
-   - sidecar bytes read/cache hit stats
-   - storage kind
-3. Emit JSON and Markdown summaries.
-4. Add a benchmark README section with a required 10k DBpedia command and
-   optional 100k/1M scale-up commands.
-5. Do not require external DBpedia data in normal CI.
+Background:
+The current bottleneck is:
+- ~23.4k docs compact-scored per query
+- ~1063 ms compact scoring at p95
+- score-bound pruning only prunes about 24 docs, so it is ineffective
+- sidecar I/O is effectively zero, so this is a CPU/candidate-volume problem
 
-Acceptance:
-- The report can show whether document_nodes beats token_nodes and exact_token_scan on admission at lower budgets.
-- f16/sq8 quality loss is visible against f32.
-- 10k DBpedia evidence is sufficient for this prompt's acceptance gate; 100k
-  and 1M runs are optional scale checks, not required completion evidence.
+Constraints:
+- Do not use BM25 rescue.
+- Do not use learned-sparse rescue.
+- Keep final SQL ordering exact MaxSim.
+- Keep quantized_inverted_experimental opt-in.
+- Do not change stable on-disk formats.
+- Do not silently substitute another candidate source.
+- Do not change top_m > 1 behavior.
+- Approximate scores remain admission-only.
+
+Add GUC:
+  turbohybrid.multivector_quantized_inverted_precompact =
+    off | centroid_maxsim_topk | centroid_maxsim_reservoir
+
+Default:
+  off
+
+Add GUCs:
+  turbohybrid.multivector_quantized_inverted_precompact_score_k = 4096
+  turbohybrid.multivector_quantized_inverted_precompact_coverage_k = 512
+  turbohybrid.multivector_quantized_inverted_precompact_per_token_k = 16
+  turbohybrid.multivector_quantized_inverted_compact_max_docs = 6144
+
+Behavior:
+
+1. off
+   - Preserve current behavior exactly.
+   - All currently compact-scored docs remain compact-scored.
+
+2. centroid_maxsim_topk
+   - During posting accumulation, maintain a cheap per-document score:
+       cheap_score(doc) = sum over query token i of best query_codeword_score(i, matched_codeword)
+   - Use existing query-token x codeword scores; do not decode full document vectors.
+   - Retain only top precompact_score_k documents for compact scoring.
+   - If precompact_score_k <= 0, treat as no limit.
+   - Exact MaxSim final rerank remains unchanged.
+
+3. centroid_maxsim_reservoir
+   - Retain a document-keyed union of:
+       a. top precompact_score_k by cheap_score
+       b. top precompact_coverage_k by token coverage / token match count
+       c. per-query-token reservoirs of width precompact_per_token_k
+   - Deduplicate by docId.
+   - Clamp final precompact union to compact_max_docs if compact_max_docs > 0.
+   - Prefer score first, then coverage, then deterministic docId order for ties.
+   - This is the intended benchmark mode.
+
+Implementation requirements:
+- Avoid per-document heap fetches in the precompact stage.
+- Use PostgreSQL memory contexts and overflow-checked allocation sizes.
+- Do not allocate O(total_docs * query_tokens) unless already bounded and justified.
+- Prefer sparse/touched-doc accumulators.
+- Keep deterministic ordering for tests.
+- Do not regress current off-mode stats or results.
+
+Add stats:
+  quantized_inverted_precompact_enabled
+  quantized_inverted_precompact_mode
+  quantized_inverted_docs_touched_before_precompact
+  quantized_inverted_precompact_score_k
+  quantized_inverted_precompact_coverage_k
+  quantized_inverted_precompact_per_token_k
+  quantized_inverted_compact_max_docs
+  quantized_inverted_precompact_score_docs
+  quantized_inverted_precompact_coverage_docs
+  quantized_inverted_precompact_per_token_docs
+  quantized_inverted_precompact_union_docs
+  quantized_inverted_precompact_duplicates
+  quantized_inverted_precompact_pruned_docs
+  quantized_inverted_precompact_us
+  quantized_inverted_compact_docs_skipped_by_precompact
+
+Stats invariants:
+- compact_docs_skipped_by_precompact =
+    docs_touched_before_precompact - compact_docs_scored
+  when precompact is enabled and positive.
+- precompact_pruned_docs must never be negative.
+- off mode must report precompact_enabled = false and zero precompact pruning.
+
+Tests:
+1. SQL/C regression:
+   - off mode produces the same result order and same compact_docs_scored as before.
+   - centroid_maxsim_topk limits compact scoring on a synthetic dataset.
+   - centroid_maxsim_reservoir includes score, coverage, and per-token candidates.
+   - exhaustive precompact budget matches off mode.
+   - final SQL ordering remains exact MaxSim after rerank.
+
+2. Determinism:
+   - Tie cases sort deterministically by score, coverage, docId.
+
+3. Safety:
+   - Invalid GUC values fail or clamp clearly.
+   - No silent fallback to exact_doc_scan, proxy_vector, BM25, or learned_sparse.
+   - top_m > 1 behavior is unchanged.
+
+Validation:
+Run:
+  nix --extra-experimental-features 'nix-command flakes' develop --command th-installcheck
+  nix --extra-experimental-features 'nix-command flakes' develop --command th-smoke
+
+Do not commit generated benchmark output.
 ```
 
 ---
 
-## Prompt 3 — Implement Qdrant-style nested prefetch branch planner
+# Prompt 2 — Benchmark harness and recommendation gate for precompact
 
 ```text
-You are working in agentxagi/pgturbohybrid.
+You are working in github.com/mayflower/pgturbohybrid.
 
 Goal:
-Implement a branch-aware, nested prefetch planner for multivector/hybrid retrieval.
+Add a focused benchmark grid for the new quantized_inverted precompact modes and make the recommendation logic choose only quality-safe latency improvements.
 
-Inspiration:
-Qdrant supports prefetch pipelines where cheap candidates feed a more expensive scorer, and hybrid branches can be fused with RRF or DBSF.
+Precondition:
+Prompt 1 implemented:
+- turbohybrid.multivector_quantized_inverted_precompact
+- precompact stats
+- SQL regression tests
 
-Current state:
-pgturbohybrid already has dense multivector, BM25, proxy_vector, document_nodes, RRF, normalized score fusion, and adaptive hybrid budgeting.
+Background baseline:
+Current best default-quality row:
+  quantized_inverted_external_centroid_only_compact_topk_128_probe_016_topm_01_score_bound
+  budget 8192
 
-Tasks:
-1. Add an internal branch plan struct:
-   - branch kind: bm25, dense_single, proxy_vector, document_nodes, token_nodes, exact_doc_scan
-   - candidate_limit
-   - rescore_limit
-   - branch_rank
-   - branch_score
-   - branch_source flags
-2. Add a GUC:
-   turbohybrid.multivector_branch_plan = auto | dense_only | qdrant_like
-3. In qdrant_like mode support nested plans:
-   - proxy_vector -> document_nodes MaxSim -> exact heap MaxSim
-   - BM25/sparse -> exact MaxSim
-   - dense_single/proxy + BM25 -> RRF/DBSF/normalized fusion
-4. Preserve existing SQL API initially; this is internal planning.
-5. Add scan stats:
-   - branch_count
-   - branch_kinds
-   - branch_candidate_counts
-   - branch_truncated_flags
-   - branch_latency_us
-   - branch_fusion_mode
-6. Add tests:
-   - branch dedupe is heap/document keyed;
-   - dense-only with BM25 injection still ranks by exact MaxSim;
-   - RRF path preserves branch ranks;
-   - normalized fusion never combines raw BM25 and raw MaxSim without normalization.
+Baseline quality:
+- top1 admission: 0.96
+- top10 admission: 0.832
+- recall@10: 0.539333
+- ndcg@10: 0.458704
+- p95 latency: 1914.798 ms
 
-Acceptance:
-- Branch plans are deterministic and visible in turbohybrid_last_scan_stats().
-- Existing behavior remains default unless qdrant_like is selected.
+Target:
+Find a row that preserves the quality gate while reducing compact_docs_scored from ~23.4k to <= 6k and p95 latency by at least 25%.
+
+Constraints:
+- Do not use BM25 rescue.
+- Do not use learned-sparse rescue.
+- Keep final SQL ordering exact MaxSim.
+- Keep generated outputs under .nix-dev/tmp/.
+- Do not change C behavior in this prompt unless needed only for stats plumbing.
+
+Add benchmark mode:
+  --document-node-colbert-quantized-inverted-precompact-focus
+
+Default fixed settings:
+- candidate source: quantized_inverted_experimental
+- profile base: quantized_inverted_external_centroid_only_compact_topk_128_probe_016_topm_01_score_bound
+- budget: 8192
+- exact_rerank_k: 512
+- posting cap: 128
+- probe codewords per token: 16
+- top_m: 1
+- compact scoring: experimental
+- score bound: enabled if currently used by the baseline
+- codebook path: use --multivector-quantized-inverted-codebook-path
+
+Rows:
+1. precompact_off
+2. precompact_topk_2048
+3. precompact_topk_4096
+4. precompact_topk_6144
+5. precompact_topk_8192
+6. precompact_reservoir_2048
+7. precompact_reservoir_4096
+8. precompact_reservoir_6144
+9. precompact_reservoir_8192
+
+For reservoir rows:
+- coverage_k = 512
+- per_token_k = 16
+- compact_max_docs = max(score_k + coverage_k + active_query_tokens * per_token_k, score_k)
+- allow CLI overrides:
+    --quantized-inverted-precompact-score-grid
+    --quantized-inverted-precompact-coverage-k
+    --quantized-inverted-precompact-per-token-k
+    --quantized-inverted-compact-max-docs
+
+Report per row:
+- profile
+- precompact mode
+- precompact score_k
+- precompact coverage_k
+- precompact per_token_k
+- compact_max_docs
+- top1 admission
+- top10 admission
+- recall@10
+- ndcg@10
+- mrr@10
+- p50 / p95 / p99
+- quantized_inverted_postings_touched
+- quantized_inverted_postings_selected
+- quantized_inverted_docs_touched_before_precompact
+- quantized_inverted_precompact_union_docs
+- quantized_inverted_precompact_pruned_docs
+- quantized_inverted_compact_docs_scored
+- quantized_inverted_compact_docs_skipped_by_precompact
+- quantized_inverted_query_codeword_score_us
+- quantized_inverted_precompact_us
+- quantized_inverted_compact_score_us
+- exact_rerank_docs
+- exact_rerank_us
+- heap_fetch_us
+- final_sort_us
+- sidecar page/read stats
+
+Recommendation gates:
+A row may be promoted as best_quantized_inverted_precompact only if:
+- top10 admission >= 0.80
+- top1 admission >= 0.94
+- recall@10 >= baseline_recall@10 - 0.01
+- ndcg@10 >= baseline_ndcg@10 - 0.01
+- p95 <= baseline_p95 * 0.75
+- compact_docs_scored <= 6000
+- final ranking source is exact MaxSim
+- candidate source is quantized_inverted_experimental
+- BM25 and learned_sparse are not active
+
+Reject reasons:
+- rejected_top10_admission_below_gate
+- rejected_top1_admission_below_gate
+- rejected_recall_drop
+- rejected_ndcg_drop
+- rejected_latency_not_improved
+- rejected_compact_docs_too_high
+- rejected_wrong_candidate_source
+- rejected_sparse_or_bm25_rescue_active
+- rejected_final_ranking_not_exact_maxsim
+
+Markdown:
+Add a section:
+  Quantized inverted precompact focus
+
+Include:
+- baseline row
+- best accepted row
+- rejected rows table
+- latency breakdown table
+- compact-doc reduction table
+- recommendation and next action
+
+Tests:
+- profile expansion deterministic
+- CLI grid parsing deterministic
+- recommendation gate rejects low-admission fast rows
+- recommendation gate rejects rows with compact_docs_scored > 6000
+- recommendation gate accepts a synthetic quality-safe faster row
+- JSON/Markdown contain all new precompact fields
+- qrels-less mode can still rank by admission + p95 if admission metrics are present
+
+Validation:
+Run:
+  nix --extra-experimental-features 'nix-command flakes' develop --command \
+    python benchmarks/dbpedia_colbert_multivector.py --help
+
+Run Python/self-check tests.
+
+Do not commit generated outputs.
 ```
 
 ---
 
-## Prompt 4 — Add DBSF-style distribution-based score fusion
+# Prompt 3 — Query-codeword scoring kernel and top-probe selection
 
 ```text
-You are working in agentxagi/pgturbohybrid.
+You are working in github.com/mayflower/pgturbohybrid.
 
 Goal:
-Add Qdrant-style DBSF fusion for multivector hybrid retrieval.
+Reduce quantized_inverted query-codeword scoring time and avoid unnecessary full query-token × codebook materialization.
 
-Context:
-Qdrant DBSF normalizes each retriever’s returned score distribution before combining. pgturbohybrid already supports normalized score fusion modes, but we need an explicit DBSF mode with branch-local diagnostics.
+Background:
+Current timing shows query-codeword scoring at about 329 ms p95, which is a major part of the quantized inverted candidate-source cost. The codebook routing stage should be cheap and batched.
+
+Precondition:
+Prompt 1 and Prompt 2 are either implemented or their insertion points are known.
+
+Constraints:
+- Do not use BM25 rescue.
+- Do not use learned-sparse rescue.
+- Keep final SQL ordering exact MaxSim.
+- Keep quantized_inverted_experimental opt-in.
+- Do not change stable on-disk formats.
+- Do not change codebook checksum semantics.
+- top_m > 1 behavior remains unchanged unless a separate prompt explicitly versions the posting format.
 
 Tasks:
-1. Add fusion mode:
-   fusion => 'dbsf'
-2. For each branch:
-   - collect raw scores from the branch candidate set;
-   - compute mean and sample standard deviation;
-   - normalize using clipped 3-sigma endpoints or a documented robust alternative;
-   - handle degenerate stddev=0 safely.
-3. Combine normalized branch scores by sum or configurable weights.
-4. Add GUCs:
-   turbohybrid.dbsf_sigma = 3.0
-   turbohybrid.dbsf_min_branch_candidates = 10
-   turbohybrid.dbsf_robust = off | mad
+1. Audit current query-codeword scoring:
+   - how external codebook vectors are loaded
+   - whether they are normalized
+   - whether they are row-major or transposed
+   - whether full Q × C scores are materialized
+   - how top probe codewords per query token are selected
+   - whether masked/zero-weight query tokens are skipped early
+
+2. Add implementation mode:
+   turbohybrid.multivector_quantized_inverted_query_codeword_kernel =
+     auto | scalar | blocked
+
+Default:
+   auto
+
+3. Implement blocked scalar first:
+   - aligned codebook access
+   - batch query tokens against codebook blocks
+   - maintain top probe codewords per query token while scanning
+   - avoid retaining full Q × C matrix unless compact/precompact scoring requires it
+   - if compact/precompact scoring requires query-token/codeword lookup later, store only the needed codeword scores for probed/touched codewords, or use a compact score table keyed by codeword.
+
+4. Optional SIMD:
+   Add AVX2/AVX512/NEON only if the scalar blocked reference is correct and tested.
+   It is acceptable for this prompt to stop after blocked scalar if that is the safe slice.
+
 5. Add stats:
-   - dbsf_enabled
-   - dbsf_branch_mean/stddev
-   - dbsf_branch_min/max
-   - dbsf_degenerate_branches
-6. Tests:
-   - score scale mismatch: BM25 large values + MaxSim small values;
-   - degenerate branch with identical scores;
-   - RRF and calibrated modes unchanged.
+   - quantized_inverted_query_codeword_kernel
+   - quantized_inverted_query_codeword_scores_computed
+   - quantized_inverted_query_codeword_blocks
+   - quantized_inverted_query_codeword_topk_us
+   - quantized_inverted_query_codeword_full_matrix_materialized
+   - quantized_inverted_query_codeword_active_query_tokens
+   - quantized_inverted_query_codeword_skipped_query_tokens
 
-Acceptance:
-- DBSF is never used silently.
-- Fusion remains document-keyed.
-- Docs explain when RRF is safer than DBSF.
-```
+6. Preserve existing stat:
+   - quantized_inverted_query_codeword_score_us
 
----
-
-## Prompt 5 — Add Vespa-style long-context multivector support
-
-```text
-You are working in agentxagi/pgturbohybrid.
-
-Goal:
-Support long-context ColBERT/ModernColBERT documents without forcing users to split each context window into a separate SQL row.
-
-Inspiration:
-Vespa stores ColBERT as tensors with context and token dimensions and supports context-level and cross-context MaxSim.
-
-Tasks:
-1. Extend turbohybrid_multivector metadata or add a new internal layout that can represent:
-   - context/window ordinal
-   - token ordinal within context
-   - field id or section id
-2. Add builder function:
-   turbohybrid_multivector_from_contexts(raw_values real[], dim int, context_offsets int[])
-3. Add scoring modes:
-   - cross_context_maxsim: current global MaxSim across all doc tokens
-   - context_level_maxsim: score each context independently, then max or top-N aggregate
-   - field_weighted_maxsim: weighted sum of MaxSim across named fields/sections
-4. Add index options:
-   multivector_context_mode = flat | context_level
-   multivector_field_mode = off | weighted
-5. Add docs and examples for title/body/section fields.
-6. Add tests:
-   - cross-context equals current MaxSim when all tokens are flat;
-   - context-level max chooses the best window;
-   - field weights affect rank deterministically;
-   - MVCC and exact rerank still use heap/document identity.
-
-Acceptance:
-- Long documents can remain one SQL result row.
-- Context/field modes are explicit and benchmarkable.
-```
-
----
-
-## Prompt 6 — Add paged/cold document multivector sidecar mode
-
-```text
-You are working in agentxagi/pgturbohybrid.
-
-Goal:
-Add a Vespa-inspired cold/paged sidecar mode for large document-node multivector storage.
-
-Context:
-document_nodes currently uses index-resident sidecar storage. For large corpora, f32/f16/sq8 sidecar memory can dominate. Vespa uses paged attributes to let the OS page large tensors.
-
-Tasks:
-1. Design and implement:
-   multivector_doc_storage_cache = resident | paged | auto
-2. In paged mode:
-   - keep document-node graph adjacency and compact metadata resident;
-   - memory-map or page-load document sidecar chunks on demand;
-   - track page/cache misses separately from graph code pages.
-3. Add stats:
-   - multivector_doc_sidecar_cache_mode
-   - multivector_doc_sidecar_pages_read
-   - multivector_doc_sidecar_cache_hits
-   - multivector_doc_sidecar_bytes_touched
-4. Add fallback:
-   - for low latency profile, prefer resident if under memory cap;
-   - for large corpora, auto chooses paged.
-5. Add benchmark support for cache-cold and cache-warm document_nodes scans.
-
-Acceptance:
-- Large document_nodes indexes can run without loading all multivectors into backend memory.
-- Stats make random access cost visible.
-```
-
----
-
-## Prompt 7 — Implement token pooling for multivector storage reduction
-
-```text
-You are working in agentxagi/pgturbohybrid.
-
-Goal:
-Implement model-agnostic token pooling to reduce document multivector size before indexing.
-
-Inspiration:
-Recent token pooling work reports ~50% ColBERT index footprint reduction with minimal retrieval degradation.
-
-Tasks:
-1. Add optional index-time document token pooling:
-   multivector_token_pooling = off | kmeans | greedy_cosine
-   multivector_token_pooling_target_ratio = 0.5
-   multivector_token_pooling_min_tokens = 16
-2. Pool only document tokens, not query tokens.
-3. Store original token count and pooled token count in doc sidecar metadata.
-4. Exact rerank options:
-   - rerank over pooled sidecar;
-   - optionally heap exact over original multivector if heap value is available.
-5. Add stats:
-   - multivector_tokens_original
-   - multivector_tokens_pooled
-   - multivector_token_pooling_ratio
-6. Add benchmark grid:
-   ratios 1.0, 0.75, 0.5, 0.33
-   storage f32/f16/sq8
 7. Tests:
-   - deterministic pooling on small fixtures;
-   - pooled exact rerank remains stable;
-   - invalid ratios rejected.
+   - blocked scalar returns same top probe codewords as existing scalar on deterministic vectors
+   - masked query tokens are skipped
+   - zero-weight query tokens are skipped if existing scoring semantics allow it
+   - auto selects blocked scalar or existing scalar deterministically
+   - full-matrix and streaming-topk modes produce identical selected codewords
+   - final SQL ordering remains exact MaxSim
+
+8. Benchmark:
+   Extend precompact focus rows with:
+   - query_codeword_kernel = scalar
+   - query_codeword_kernel = blocked
+   only for the best two precompact rows from Prompt 2.
 
 Acceptance:
-- Pooling is opt-in.
-- Benchmark shows storage/latency/recall tradeoff.
+- Query-codeword scoring p95 improves by at least 30% on the focused grid, or the report explains why not.
+- Admission metrics must not change except for deterministic tie effects.
+- Final exact ranking must not change for exhaustive candidate tests.
+
+Validation:
+Run th-installcheck and th-smoke.
+Run focused DBpedia precompact benchmark.
+Do not commit generated outputs.
 ```
 
 ---
 
-## Prompt 8 — Upgrade proxy_vector toward MUVERA-style fixed-dimensional encodings
+# Prompt 4 — Compact scoring layout audit and docId-ordered scorer
 
 ```text
-You are working in agentxagi/pgturbohybrid.
+You are working in github.com/mayflower/pgturbohybrid.
 
 Goal:
-Turn the current proxy_vector prototype into a serious fixed-dimensional multivector proxy branch.
+Reduce per-document compact scoring overhead after precompact has reduced the number of compact-scored documents.
 
-Inspiration:
-MUVERA reduces multivector retrieval to single-vector MIPS using fixed-dimensional encodings. LEMUR similarly reduces multivector search to a learned latent single-vector search.
+Background:
+Qdrant-style multivector scoring is document/point-level: docId maps to a start/count range in flattened inner-vector storage, and the scorer scores the whole point. pgturbohybrid’s own design doc describes this shape for quantized multivector scoring: per-point offsets into flattened storage and score_point-like whole-document scoring.
 
-Current state:
-proxy_vector currently uses the existing single-vector TurboQuant graph over document representative vectors for admission, then exact MaxSim rerank.
+Current bottleneck before Prompt 1:
+- compact scoring ~1063 ms p95
+- compact docs scored ~23.4k
+- compact payload touched ~6.8 MB
 
-Tasks:
-1. Add a proxy encoder abstraction:
-   - mean_pool
-   - max_pool
-   - random_projection_fde
-   - learned_projection_placeholder
-2. Store proxy vector per document node as a normal dense graph key or sidecar.
-3. Add query proxy generation for the same encoder.
-4. Branch plan:
-   proxy_vector -> exact MaxSim rerank
-   proxy_vector -> document_nodes MaxSim -> exact heap MaxSim
-5. Add stats:
-   - proxy_encoder_kind
-   - proxy_candidates
-   - proxy_top1_admission
-   - proxy_exact_rerank_docs
-6. Add benchmark:
-   - compare proxy encoders against document_nodes and exact_doc_scan;
-   - report candidates required to admit exact top-1/top-10.
+After Prompt 1:
+Expected compact docs scored should fall to ~2k–6k. This prompt optimizes per-doc compact scoring cost.
 
-Acceptance:
-- Existing representative proxy remains available.
-- New proxy encoders are pluggable and benchmarked.
-```
-
----
-
-## Prompt 9 — Add learned sparse multivector candidate injection
-
-```text
-You are working in agentxagi/pgturbohybrid.
-
-Goal:
-Add a learned-sparse branch for ColBERT/ModernColBERT candidate generation, inspired by SPLATE/SLIM.
-
-Context:
-pgturbohybrid already has BM25, sparse/lexical infrastructure, BM25 candidate injection, and hybrid fusion. Learned sparse candidate generation can improve admission recall while keeping final exact MaxSim.
+Constraints:
+- Do not use BM25 rescue.
+- Do not use learned-sparse rescue.
+- Keep final SQL ordering exact MaxSim.
+- Keep quantized_inverted_experimental opt-in.
+- Do not change stable on-disk format in this prompt.
+- If a better persisted layout is needed, produce a design doc and stop before changing format.
 
 Tasks:
-1. Define a sparse sidecar/input format:
-   - document id
-   - sparse term ids
-   - weights
-   - optional field id
-2. Add SQL ingestion helper:
-   turbohybrid_sparse_vector_from_arrays(term_ids int[], weights real[])
-3. Add branch:
-   multivector_sparse_candidate_source = off | bm25 | learned_sparse
-4. Use existing sparse/BM25/WAND/impact infrastructure where possible.
-5. For dense-only-with-text:
-   - learned_sparse candidates are admission-only;
-   - final rank remains exact MaxSim.
-6. For hybrid:
-   - learned_sparse can participate in RRF/DBSF/calibrated fusion.
-7. Add stats:
-   - learned_sparse_candidates
-   - learned_sparse_retained_for_maxsim
-   - learned_sparse_branch_latency_us
-8. Add benchmark hooks for SPLADE/SPLATE-style exported sparse vectors.
+1. Audit compact scoring data access:
+   - docId to compact payload lookup
+   - token/codeword payload layout
+   - whether compact docs are scored in arbitrary order
+   - per-doc allocation or hash lookup inside scoring
+   - query-codeword score lookup pattern
+   - branch-heavy inner loops
+   - prefetch opportunities
 
-Acceptance:
-- No model training is required inside PostgreSQL.
-- Candidate injection is document-keyed and exact-MaxSim-reranked.
-```
+2. Implement scan-local docId ordering:
+   - after precompact selects docs, sort compact-scoring docIds ascending
+   - score docs in docId order to improve locality
+   - preserve final ranking by sorting candidates after scoring
+   - expose whether docId ordering changed compact score order
 
----
+3. Implement no-allocation compact scorer path:
+   - no palloc per doc
+   - reuse one query-token maxima buffer
+   - clear only active query-token slots
+   - skip masked query tokens
+   - use compact score table from Prompt 3 if available
 
-## Prompt 10 — Implement adaptive MaxSim rerank pruning
-
-```text
-You are working in agentxagi/pgturbohybrid.
-
-Goal:
-Reduce exact MaxSim rerank cost after candidate admission is fixed.
-
-Inspiration:
-WARP and Col-Bandit reduce MaxSim computation by avoiding unnecessary full interaction matrix computation.
-
-Tasks:
-1. Add exact rerank mode:
-   turbohybrid.multivector_exact_rerank = off | topk | adaptive
-2. Adaptive mode:
-   - compute cheap upper/lower bounds per candidate;
-   - process query tokens in an importance order;
-   - maintain top-K threshold;
-   - stop scoring a candidate once it cannot enter top-K;
-   - always allow exact/full mode for parity.
-3. Start with safe deterministic bounds:
-   - max possible remaining contribution from query-token norms;
-   - precomputed per-document token norm maxima;
-   - query-token IDF/importance order if available.
 4. Add stats:
-   - exact_rerank_candidates
-   - exact_rerank_tokens_evaluated
-   - exact_rerank_tokens_skipped
-   - exact_rerank_pairs_saved
-   - adaptive_rerank_topk_changed_vs_full
-5. Add tests:
-   - adaptive result equals full exact on deterministic fixtures;
-   - fallback to full exact when bounds are unsafe;
-   - benchmark DBpedia pair savings.
+   - quantized_inverted_compact_doc_order = original | docid
+   - quantized_inverted_compact_inner_allocations
+   - quantized_inverted_compact_active_query_tokens
+   - quantized_inverted_compact_pairs_evaluated
+   - quantized_inverted_compact_pairs_skipped
+   - quantized_inverted_compact_prefetches
+   - quantized_inverted_compact_avg_doc_tokens
+   - quantized_inverted_compact_us_per_doc
+   - quantized_inverted_compact_payload_bytes_per_doc
+
+5. Tests:
+   - docId-ordered compact scoring returns same top candidates as original order
+   - no-allocation path matches scalar reference
+   - masked query tokens are skipped
+   - final SQL ordering remains exact MaxSim
+   - compact_topk_changed_vs_scalar remains false or is reported accurately
+
+6. Benchmark:
+   Run only on:
+   - best precompact row from Prompt 2
+   - second-best precompact row from Prompt 2
+   Compare:
+   - compact_doc_order original
+   - compact_doc_order docid
+   - no-allocation on/off if exposed
 
 Acceptance:
-- Adaptive mode must be exact by default.
-- Any approximate relaxation needs a separate explicit GUC.
+- Compact score p95 improves by at least 15% on the best precompact row, or stats show compact scoring is no longer a top-two bottleneck.
+- Admission and qrels metrics do not regress beyond deterministic tie noise.
+- Final exact ranking remains unchanged for exhaustive tests.
+
+Validation:
+Run th-installcheck and th-smoke.
+Run focused DBpedia benchmark.
+Do not commit generated outputs.
 ```
 
 ---
 
-## Prompt 11 — Add query-token importance and masking
+# Prompt 5 — Exact rerank secondary optimization after candidate-source fix
 
 ```text
-You are working in agentxagi/pgturbohybrid.
+You are working in github.com/mayflower/pgturbohybrid.
 
 Goal:
-Support model/query-token importance for ModernColBERT and faster MaxSim.
+Optimize exact MaxSim rerank only after quantized inverted candidate-source work is reduced.
 
-Inspiration:
-Token-importance work improves late-interaction scoring by weighting query-token contributions. Vespa/Qdrant-style ColBERT deployments also benefit from token masking for punctuation/special/noisy tokens.
+Background:
+Current exact rerank is material but secondary:
+- exact MaxSim rerank ~398 ms p95
+- heap fetch ~183 ms
+- exact rerank docs: 512
+
+The primary bottleneck is compact scoring. This prompt should only run after precompact reduces compact scoring enough that exact rerank becomes top-two latency again.
+
+Constraints:
+- Do not use BM25 rescue.
+- Do not use learned-sparse rescue.
+- Final SQL ordering must remain exact MaxSim over retained candidates.
+- Do not lower exact_rerank_k as a hidden quality change.
+- Any adaptive rerank must preserve final top-k equivalence against full exact rerank for tested cases.
 
 Tasks:
-1. Extend turbohybrid_query multivector payload to optionally carry:
-   - query_token_weights real[]
-   - query_token_mask bool[]
-2. Extend MaxSim:
-   score(Q,D) = sum_i weight_i * max_j sim(q_i, d_j)
-3. Exact rerank and document-node sidecar scoring must both support weights/masks.
-4. Candidate generation:
-   - skip masked tokens in token_nodes;
-   - use weights to order adaptive exact rerank;
-   - document_nodes scoring uses weighted MaxSim.
-5. Add model metadata defaults:
-   - special token masking
-   - punctuation token masking
-   - IDF weighting hook
-6. Add tests:
-   - weights reproduce unweighted when all weights = 1;
-   - masked tokens do not affect exact score;
-   - weighted and unweighted rankings differ deterministically on fixture.
+1. Add exact rerank phase breakdown if missing:
+   - heap fetch us
+   - multivector decode us
+   - MaxSim compute us
+   - adaptive pruning us
+   - tokens evaluated
+   - tokens skipped
+   - pairs saved
+   - exact kernel
+   - docs reranked
 
-Acceptance:
-- ModernColBERT-specific token weighting is supported without hardcoding a model.
+2. Add focused exact rerank grid:
+   - exact_rerank_k 256,384,512
+   - adaptive exact rerank off/on
+   - only for best precompact profile
+   - no BM25/learned sparse rows
+
+3. Recommendation gate:
+   Do not promote lower exact_rerank_k unless:
+   - top10 admission remains >= 0.80
+   - recall@10 and ndcg@10 remain within 0.005 of the 512 baseline
+   - exact top1 admission remains >= 0.94
+   - final ranking is exact MaxSim for retained docs
+
+4. Tests:
+   - adaptive rerank equals full exact rerank on deterministic synthetic cases
+   - lower exact_rerank_k is reported as quality-risk if it changes top-k
+   - final SQL ordering remains exact MaxSim within retained docs
+   - stats distinguish heap fetch vs MaxSim compute
+
+Validation:
+Run th-installcheck and th-smoke.
+Run focused DBpedia exact-rerank grid.
 ```
 
 ---
 
-## Prompt 12 — Add ModernColBERT / ColPali model metadata registry
+# Prompt 6 — End-to-end acceptance and default-quality profile update
 
 ```text
-You are working in agentxagi/pgturbohybrid.
+You are working in github.com/mayflower/pgturbohybrid.
 
 Goal:
-Make pgturbohybrid robust to modern late-interaction models with different dimensions, query/doc token behavior, and pooling/masking rules.
+Choose the new best quantized_inverted default-quality experimental profile only after evidence from Prompts 1–5.
 
-Context:
-Current and emerging models include ColBERTv2, Jina-ColBERT-v2, AnswerAI ColBERT, GTE-ModernColBERT, Reason-ModernColBERT, and ColPali-style visual-document multivectors.
+Required input:
+  PRECOMPACT_GRID_JSON=.nix-dev/tmp/<precompact-grid>.json
+
+Optional input:
+  QUERY_CODEWORD_GRID_JSON=.nix-dev/tmp/<query-codeword-grid>.json
+  COMPACT_LAYOUT_GRID_JSON=.nix-dev/tmp/<compact-layout-grid>.json
+  EXACT_RERANK_GRID_JSON=.nix-dev/tmp/<exact-rerank-grid>.json
+
+Constraints:
+- Do not use BM25 rescue.
+- Do not use learned-sparse rescue.
+- Keep quantized_inverted_experimental opt-in.
+- Do not make experimental branch a production default.
+- Do not change final SQL ordering semantics.
+- Do not change on-disk formats.
+- Do not commit generated outputs.
 
 Tasks:
-1. Add a model metadata table or extension config:
-   - model_name
-   - dim
-   - default_query_max_tokens
-   - default_doc_max_tokens
-   - distance mode
-   - normalized tokens yes/no
-   - recommended storage kind f32/f16/sq8
-   - token mask policy
-   - optional field/context policy
-2. Add SQL helper:
-   turbohybrid_multivector_model_info(model_name text)
-3. Add validation:
-   - reject wrong dimensions with model-aware hints;
-   - warn on suspicious token counts;
-   - expose model metadata in index stats.
-4. Add benchmark support:
-   --colbert-model-name
-   --expected-dim auto
-5. Add docs:
-   - ColBERTv2
-   - AnswerAI ColBERT small
-   - Jina-ColBERT-v2
-   - GTE/Reason ModernColBERT placeholders
-   - ColPali-like visual multivectors
+1. Load benchmark JSONs and identify:
+   - current baseline row
+   - best precompact row
+   - best query-codeword kernel row
+   - best compact-layout row
+   - best exact-rerank row, if safe
 
-Acceptance:
-- No hardcoded assumption that ColBERT vectors are always 128 dimensions.
-- Model metadata improves error messages and benchmark reproducibility.
+2. Apply hard gates:
+   - candidate_source == quantized_inverted_experimental
+   - final ranking exact MaxSim
+   - BM25 inactive
+   - learned_sparse inactive
+   - top10 admission >= 0.80
+   - top1 admission >= 0.94
+   - recall@10 >= baseline - 0.01
+   - ndcg@10 >= baseline - 0.01
+   - p95 <= baseline * 0.75
+   - compact_docs_scored <= 6000, unless compact scoring is no longer top-two bottleneck and the report explains why
+   - generated output path under .nix-dev/tmp/
+
+3. Update benchmark profile naming only if gates pass:
+   New suggested profile name:
+     quantized_inverted_external_centroid_only_precompact_reservoir_4096_probe_016_cap_128_topm_01
+
+   Adjust score_k in name if a different value wins:
+     precompact_reservoir_2048
+     precompact_reservoir_6144
+     precompact_reservoir_8192
+
+4. Do not remove old profiles.
+   Mark old default-quality row as:
+     previous_default_quality
+   Mark new row as:
+     experimental_default_quality_candidate
+
+5. Update docs:
+   - benchmarks/README.md
+   - docs/dev/multivector-colbertsar-research.md
+
+   Document:
+   - why precompact exists
+   - why score-bound alone was not enough
+   - which stats prove the bottleneck moved
+   - exact MaxSim final ranking contract
+   - no BM25/learned-sparse rescue used
+
+6. Add recommendation summary:
+   - before p95
+   - after p95
+   - compact docs before/after
+   - compact score us before/after
+   - query-codeword us before/after
+   - exact rerank us before/after
+   - quality before/after
+   - rejection reasons for unsafe faster rows
+
+7. Tests:
+   - profile registry includes new profile only when explicitly selected
+   - old profile remains available
+   - recommendation refuses to promote rows that violate gates
+   - docs mention experimental status
+   - JSON/Markdown generated under .nix-dev/tmp/
+
+Validation:
+Run:
+  nix --extra-experimental-features 'nix-command flakes' develop --command \
+    python benchmarks/dbpedia_colbert_multivector.py --help
+
+Run Python/self-check tests.
+Run th-installcheck if profile/GUC behavior changed.
+
+Do not commit generated benchmark outputs.
 ```
 
 ---
 
-## Prompt 13 — PLAID-lite centroid sidecar for compatibility mode
+# Prompt 7 — Optional design-only prompt for future persisted layout
 
 ```text
-You are working in agentxagi/pgturbohybrid.
+You are working in github.com/mayflower/pgturbohybrid.
 
 Goal:
-Add a PLAID-lite centroid sidecar as an optional candidate generator, mainly for token_nodes compatibility and for fast prefiltering.
+Create a design doc for a future versioned persisted compact multivector layout, but do not implement it.
 
-Inspiration:
-PLAID uses centroid interaction and centroid pruning before exact ColBERT scoring.
+Background:
+If precompact and scan-local compact scoring still leave compact scoring as the bottleneck, the next step may require a Qdrant-like flattened point layout:
+  docId -> start,count
+  flat compact token/codeword payloads
+  docId-ordered scoring
+  optional SIMD/PQ/residual payloads
 
-Tasks:
-1. Add index option:
-   multivector_centroids = off | kmeans
-   multivector_centroid_count = auto | integer
-2. Build:
-   - cluster document token vectors into centroids;
-   - store per-document centroid ids and residual summary;
-   - preserve original document multivectors for exact rerank.
-3. Search:
-   - map query tokens to nearest centroids;
-   - collect documents from centroid postings;
-   - compute centroid-interaction approximate MaxSim;
-   - exact-rerank top documents.
+Constraints:
+- Design only.
+- Do not change code.
+- Do not change on-disk format.
+- Do not make compatibility promises.
+- Keep final SQL ordering exact MaxSim.
+
+Add:
+  docs/dev/multivector-quantized-inverted-compact-layout.md
+
+Cover:
+1. Current layout and bottleneck.
+2. Proposed layout:
+   - magic/version
+   - doc offset table
+   - flat compact codeword/token payload
+   - optional residual/PQ payload
+   - codebook metadata/checksum
+   - MVCC/heap TID mapping
+   - REINDEX requirements
+3. Query path:
+   - broad postings
+   - precompact document gate
+   - docId-ordered compact scoring
+   - exact heap MaxSim rerank
 4. Stats:
-   - centroid_lists_visited
-   - centroid_docs_touched
-   - centroid_pruned_docs
-   - centroid_candidates
-5. Benchmarks:
-   - token_nodes vs centroid_lite vs document_nodes;
-   - DBpedia admission and latency.
+   - layout version
+   - offset bytes
+   - payload bytes
+   - residual bytes
+   - docs compact-scored
+   - payload bytes touched
+   - compact us per doc
+5. Compatibility:
+   - old experimental layout remains readable or fails clearly
+   - mismatch gives REINDEX guidance
+   - top_m > 1 requires explicit version
+6. Benchmark gates:
+   - no quality regression
+   - p95 improvement target
+   - index byte target
+   - final exact MaxSim contract
 
-Acceptance:
-- This must not replace document_nodes as the primary path.
-- It must be opt-in and documented as compatibility/experimental.
-```
-
----
-
-## Prompt 14 — ColBERTSaR-style quantized inverted-index research branch
-
-```text
-You are working in agentxagi/pgturbohybrid.
-
-Goal:
-Create a research-only branch for quantized inverted-index ColBERT candidate generation.
-
-Inspiration:
-Recent ColBERTSaR work suggests embedding quantization can turn ColBERT indexing into a true inverted index and shrink indexes relative to one-bit PLAID.
-
-Tasks:
-1. Create docs/dev/multivector-colbertsar-research.md.
-2. Prototype only under:
-   turbohybrid.multivector_candidate_source = quantized_inverted_experimental
-3. Quantize token embeddings into learned/codebook terms.
-4. Build postings:
-   codeword -> docId, tokenOrdinal, quantized residual/score payload
-5. Query:
-   quantize query tokens;
-   retrieve postings;
-   approximate score;
-   exact MaxSim rerank.
-6. Add warnings:
-   - experimental;
-   - not default;
-   - storage format unstable.
-7. Benchmark against learned_sparse, PLAID-lite, token_nodes, and document_nodes.
-
-Acceptance:
-- No production on-disk compatibility promise.
-- Useful enough to compare storage size and admission recall.
-```
-
----
-
-## Prompt 15 — End-to-end hybrid evaluation harness
-
-```text
-You are working in agentxagi/pgturbohybrid.
-
-Goal:
-Add an end-to-end hybrid evaluation harness for document_nodes + BM25 + learned_sparse/proxy branches.
-
-Tasks:
-1. Extend benchmarks/dbpedia_colbert_multivector.py to run these modes:
-   - exact_scan
-   - document_nodes
-   - document_nodes + BM25 admission-only
-   - document_nodes + BM25 RRF
-   - document_nodes + BM25 DBSF
-   - proxy_vector -> document_nodes -> exact MaxSim
-   - learned_sparse -> exact MaxSim, if available
-2. For each mode report:
-   - BEIR metrics
-   - admission recall
-   - latency p50/p95
-   - branch latency
-   - branch candidates
-   - exact MaxSim pairs
-   - memory/sidecar bytes
-3. Add Markdown comparison output:
-   - best quality
-   - best latency under quality floor
-   - candidate admission failures
-   - recommended default GUC profile
-4. Add no external-data CI dependency.
-
-Acceptance:
-- The harness can justify default recommendations for latency, balanced, quality, and high_recall profiles.
-- 10k DBpedia evidence is sufficient for this prompt's acceptance gate; 100k
-  and 1M runs are optional scale checks, not required completion evidence.
+Validation:
+Run markdown checks if available.
+Do not modify C code.
 ```
 
 ---
 
 ## Suggested execution order
 
-Start with correctness and evidence:
-
 ```text
-1 -> 2 -> 3 -> 4
+0  audit current implementation
+1  implement precompact gate
+2  add focused benchmark/recommendation gate
+3  optimize query-codeword scoring
+4  optimize compact scoring order/layout in scan-local form
+5  optimize exact rerank only if it becomes top-two bottleneck
+6  update experimental default-quality profile after evidence
+7  design future persisted compact layout only if still needed
 ```
 
-Then make document-node scalable:
+The key implementation sprint is **Prompts 1–2**. They directly target the current failure mode: too many documents survive into compact scoring.
 
-```text
-6 -> 7 -> 10
-```
-
-Then improve hybrid recall:
-
-```text
-8 -> 9 -> 15
-```
-
-Then broaden model coverage:
-
-```text
-5 -> 11 -> 12
-```
-
-Then explore research branches:
-
-```text
-13 -> 14
-```
-
-The single most valuable next PR is probably **Prompt 2 plus Prompt 15**: a DBpedia document-node admission and hybrid benchmark. Without that, it is hard to know whether `f16`, `sq8`, `proxy_vector`, RRF, DBSF, and BM25 injection are actually improving the real failure case rather than only passing the synthetic top-1 gate.
-
-[1]: https://qdrant.tech/documentation/concepts/vectors/ "Vectors - Qdrant"
-[2]: https://qdrant.tech/documentation/fastembed/fastembed-colbert/ "Working with ColBERT - Qdrant"
-[3]: https://qdrant.tech/documentation/concepts/hybrid-queries/ "Hybrid Queries - Qdrant"
-[4]: https://blog.vespa.ai/announcing-long-context-colbert-in-vespa/ "Announcing Vespa Long-Context ColBERT | Vespa Blog"
-[5]: https://milvus.io/docs/multi-vector-search.md "Multi-Vector Hybrid Search | Milvus Documentation"
-[6]: https://milvus.io/docs/reranking.md "Reranking | Milvus Documentation"
-[7]: https://arxiv.org/abs/2205.09707?utm_source=chatgpt.com "PLAID: An Efficient Engine for Late Interaction Retrieval"
-[8]: https://arxiv.org/abs/2404.14989?utm_source=chatgpt.com "A Reproducibility Study of PLAID"
-[9]: https://arxiv.org/abs/2404.13950?utm_source=chatgpt.com "SPLATE: Sparse Late Interaction Retrieval"
-[10]: https://arxiv.org/abs/2302.06587?utm_source=chatgpt.com "SLIM: Sparsified Late Interaction for Multi-Vector Retrieval with Inverted Indexes"
-[11]: https://arxiv.org/abs/2405.19504?utm_source=chatgpt.com "MUVERA: Multi-Vector Retrieval via Fixed Dimensional Encodings"
-[12]: https://arxiv.org/abs/2601.21853?utm_source=chatgpt.com "LEMUR: Learned Multi-Vector Retrieval"
-[13]: https://arxiv.org/abs/2501.17788?utm_source=chatgpt.com "WARP: An Efficient Engine for Multi-Vector Retrieval"
-[14]: https://arxiv.org/abs/2602.02827?utm_source=chatgpt.com "Col-Bandit: Zero-Shot Query-Time Pruning for Late-Interaction Retrieval"
-[15]: https://arxiv.org/abs/2409.14683?utm_source=chatgpt.com "Reducing the Footprint of Multi-Vector Retrieval with Minimal Performance Impact via Token Pooling"
-[16]: https://arxiv.org/abs/2606.05568?utm_source=chatgpt.com "ColBERTSaR: Sparsified ColBERT Index via Product Quantization"
-[17]: https://arxiv.org/abs/2408.16672?utm_source=chatgpt.com "Jina-ColBERT-v2: A General-Purpose Multilingual Late Interaction Retriever"
-[18]: https://arxiv.org/abs/2508.03555?utm_source=chatgpt.com "PyLate: Flexible Training and Retrieval for Late Interaction Models"

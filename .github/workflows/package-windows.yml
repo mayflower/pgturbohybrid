@@ -29,15 +29,18 @@ jobs:
         run: |
           git clone --depth 1 --branch v0.8.2 https://github.com/pgvector/pgvector.git "%RUNNER_TEMP%\pgvector"
           cd /d "%RUNNER_TEMP%\pgvector"
-          call "C:\Program Files\Microsoft Visual Studio\2022\Enterprise\VC\Auxiliary\Build\vcvars64.bat" && ^
-          nmake /NOLOGO /F Makefile.win && ^
-          nmake /NOLOGO /F Makefile.win install
+          call "%GITHUB_WORKSPACE%\.github\scripts\setup-msvc.cmd"
+          if errorlevel 1 exit /b 1
+          "%NMAKE%" /NOLOGO /F Makefile.win
+          if errorlevel 1 exit /b 1
+          "%NMAKE%" /NOLOGO /F Makefile.win install
 
       - name: Build pgturbohybrid
         shell: cmd
         run: |
-          call "C:\Program Files\Microsoft Visual Studio\2022\Enterprise\VC\Auxiliary\Build\vcvars64.bat" && ^
-          nmake /NOLOGO /F Makefile.win
+          call "%GITHUB_WORKSPACE%\.github\scripts\setup-msvc.cmd"
+          if errorlevel 1 exit /b 1
+          "%NMAKE%" /NOLOGO /F Makefile.win
 
       - name: Stage and zip
         shell: pwsh

@@ -1,0 +1,118 @@
+DO $$
+BEGIN
+	IF EXISTS (SELECT 1 FROM pg_extension WHERE extname = 'llama_embed') THEN
+		EXECUTE 'DROP EXTENSION llama_embed CASCADE';
+	END IF;
+	IF EXISTS (SELECT 1 FROM pg_extension WHERE extname = 'pgturbohybrid') THEN
+		EXECUTE 'DROP EXTENSION pgturbohybrid CASCADE';
+	END IF;
+	IF EXISTS (SELECT 1 FROM pg_extension WHERE extname = 'vector') THEN
+		EXECUTE 'DROP EXTENSION vector CASCADE';
+	END IF;
+END
+$$;
+
+CREATE EXTENSION vector;
+CREATE EXTENSION pgturbohybrid;
+CREATE EXTENSION llama_embed;
+\pset format unaligned
+
+SELECT llama_embed_model_info('sauerkraut-modern')->>'engine' AS engine,
+       llama_embed_model_info('sauerkraut-modern')->>'mode' AS mode,
+       llama_embed_model_info('sauerkraut-modern')->>'projection_status' AS projection_status;
+
+SELECT llama_embed('sauerkraut-modern', 'test')->>'mode' AS default_mode,
+       llama_embed('sauerkraut-modern', 'test')->>'pooling' AS default_pooling,
+       llama_embed('sauerkraut-modern', 'test')->>'count' AS token_count;
+
+SELECT llama_embed_vector('sauerkraut-modern', 'test')::text AS dense_vector;
+
+SELECT array_length(llama_embed_vector_batch('sauerkraut-modern', ARRAY['alpha', 'beta']), 1) AS dense_batch_count,
+       (llama_embed_vector_batch('sauerkraut-modern', ARRAY['alpha', 'beta']))[1]::text AS first_dense;
+
+SELECT array_length(llama_embed_tokens('sauerkraut-modern', 'test'), 1) AS token_vectors,
+       (llama_embed_tokens('sauerkraut-modern', 'test'))[1]::text AS first_token_vector;
+
+SELECT turbohybrid_multivector_dims(llama_embed_mv('sauerkraut-modern', 'test')) AS mv_dims,
+       turbohybrid_multivector_count(llama_embed_mv('sauerkraut-modern', 'test')) AS mv_count;
+
+SELECT pg_typeof(llama_embed_mv('sauerkraut-modern', 'test'))::text AS llama_embed_mv_type,
+       pg_typeof(llama_embed_mv_batch('sauerkraut-modern', ARRAY['alpha', 'beta']))::text AS llama_embed_mv_batch_type;
+
+SELECT array_length(llama_embed_mv_batch('sauerkraut-modern', ARRAY['alpha', 'beta']), 1) AS mv_batch_count,
+       turbohybrid_multivector_count((llama_embed_mv_batch('sauerkraut-modern', ARRAY['alpha', 'beta']))[2]) AS second_mv_count;
+
+CREATE TEMP TABLE llama_embed_multivector_docs (
+  id int PRIMARY KEY,
+  colbert multivector NOT NULL
+);
+
+INSERT INTO llama_embed_multivector_docs (id, colbert)
+VALUES (1, llama_embed_mv('sauerkraut-modern', 'test'));
+
+SELECT pg_typeof(colbert)::text AS stored_mv_type,
+       turbohybrid_multivector_count(colbert) AS stored_mv_count
+FROM llama_embed_multivector_docs;
+
+SELECT llama_embed_vector('sauerkraut-modern', 'test', '{"normalize": false}'::jsonb)::text AS dense_not_normalized;
+
+DO $invalid_options$
+BEGIN
+	BEGIN
+		PERFORM llama_embed_vector('sauerkraut-modern', 'test', '{"pooling": "none"}'::jsonb);
+		RAISE EXCEPTION 'expected dense pooling none to fail';
+	EXCEPTION WHEN invalid_parameter_value THEN
+		NULL;
+	END;
+
+	BEGIN
+		PERFORM llama_embed_tokens('sauerkraut-modern', 'test', '{"pooling": "mean"}'::jsonb);
+		RAISE EXCEPTION 'expected token pooling mean to fail';
+	EXCEPTION WHEN invalid_parameter_value THEN
+		NULL;
+	END;
+
+	BEGIN
+		PERFORM llama_embed('sauerkraut-modern', 'test', '{"mode": "bad"}'::jsonb);
+		RAISE EXCEPTION 'expected bad mode to fail';
+	EXCEPTION WHEN invalid_parameter_value THEN
+		NULL;
+	END;
+END
+$invalid_options$;
+
+DO $invalid_models$
+DECLARE
+	spec record;
+BEGIN
+	FOR spec IN
+		SELECT 'empty_alias' AS name, $$SELECT llama_embed_model_info('')$$ AS sql
+		UNION ALL SELECT 'slash', $$SELECT llama_embed_model_info('x/y')$$
+		UNION ALL SELECT 'backslash', $$SELECT llama_embed_model_info('x\y')$$
+		UNION ALL SELECT 'dotdot', $$SELECT llama_embed_model_info('x..y')$$
+		UNION ALL SELECT 'hidden', $$SELECT llama_embed_model_info('.hidden')$$
+	LOOP
+		BEGIN
+			EXECUTE spec.sql;
+			RAISE EXCEPTION 'expected invalid model to fail: %', spec.name;
+		EXCEPTION WHEN invalid_parameter_value THEN
+			NULL;
+		END;
+	END LOOP;
+END
+$invalid_models$;
+
+SET pg_colbert_llama.allowed_models = 'sauerkraut-modern';
+SELECT llama_embed_model_info('sauerkraut-modern')->>'alias' AS allowed_alias;
+
+DO $allowed_models$
+BEGIN
+	BEGIN
+		PERFORM llama_embed_model_info('other-model');
+		RAISE EXCEPTION 'expected allowed_models to reject other-model';
+	EXCEPTION WHEN insufficient_privilege THEN
+		NULL;
+	END;
+END
+$allowed_models$;
+RESET pg_colbert_llama.allowed_models;

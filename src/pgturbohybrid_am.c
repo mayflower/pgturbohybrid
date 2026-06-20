@@ -4,6 +4,7 @@
 #include <math.h>
 
 #include "access/amapi.h"
+#include "access/parallel.h"
 #include "access/relscan.h"
 #include "access/reloptions.h"
 #include "access/sysattr.h"
@@ -77,6 +78,7 @@ typedef enum PgturbohybridBm25HeapTSVectorRerankMode
 static relopt_kind pgturbohybrid_relopt_kind;
 static List *pgturbohybrid_plannedstmt_stack = NIL;
 static PlannedStmt *pgturbohybrid_current_plannedstmt = NULL;
+static bool pgturbohybrid_am_init_done = false;
 
 int			pgturbohybrid_profile = PGTURBOHYBRID_PROFILE_LATENCY;
 bool		pgturbohybrid_enable_wand = true;
@@ -152,6 +154,7 @@ int			pgturbohybrid_multivector_doc_candidate_k = 100;
 int			pgturbohybrid_multivector_doc_graph_search_ef = 0;
 int			pgturbohybrid_multivector_doc_graph_oversampling = 1;
 int			pgturbohybrid_multivector_doc_graph_rescore_k = 0;
+int			pgturbohybrid_multivector_doc_graph_entry_sample_count = 0;
 int			pgturbohybrid_multivector_doc_storage =
 	PGTURBOHYBRID_MULTIVECTOR_DOC_STORAGE_F32;
 int			pgturbohybrid_multivector_doc_storage_cache =
@@ -161,6 +164,9 @@ int			pgturbohybrid_multivector_exact_rerank =
 int			pgturbohybrid_multivector_exact_rerank_k = 100;
 int			pgturbohybrid_multivector_proxy_encoder =
 	PGTURBOHYBRID_DEFAULT_MULTIVECTOR_PROXY_ENCODER;
+char	   *pgturbohybrid_multivector_learned_projection_path = "";
+char	   *pgturbohybrid_multivector_learned_projection_model = "";
+char	   *pgturbohybrid_multivector_learned_projection_checksum = "";
 bool		pgturbohybrid_multivector_allow_exact_symmetric_build = false;
 int			pgturbohybrid_multivector_exact_symmetric_build_max_docs = 1000;
 int			pgturbohybrid_multivector_max_accumulator_mb = 64;
@@ -170,6 +176,31 @@ int			pgturbohybrid_multivector_debug_trace_limit = 1000;
 char	   *pgturbohybrid_multivector_debug_skip_query_tokens = "";
 int			pgturbohybrid_multivector_candidate_source =
 	PGTURBOHYBRID_MULTIVECTOR_CANDIDATE_SOURCE_GRAPH;
+int			pgturbohybrid_multivector_quantized_inverted_codebook =
+	PGTURBOHYBRID_MULTIVECTOR_QUANTIZED_INVERTED_CODEBOOK_DETERMINISTIC;
+char	   *pgturbohybrid_multivector_quantized_inverted_codebook_path = "";
+int			pgturbohybrid_multivector_quantized_inverted_codebook_top_m = 1;
+int			pgturbohybrid_multivector_quantized_inverted_compact_scoring =
+	PGTURBOHYBRID_MULTIVECTOR_QUANTIZED_INVERTED_COMPACT_SCORING_OFF;
+int			pgturbohybrid_multivector_quantized_inverted_compact_doc_order =
+	PGTURBOHYBRID_MULTIVECTOR_QUANTIZED_INVERTED_COMPACT_DOC_ORDER_DOCID;
+int			pgturbohybrid_multivector_quantized_inverted_query_codeword_kernel =
+	PGTURBOHYBRID_MULTIVECTOR_QUANTIZED_INVERTED_QUERY_CODEWORD_KERNEL_AUTO;
+int			pgturbohybrid_multivector_quantized_inverted_precompact =
+	PGTURBOHYBRID_MULTIVECTOR_QUANTIZED_INVERTED_PRECOMPACT_OFF;
+int			pgturbohybrid_multivector_quantized_inverted_precompact_score_k =
+	4096;
+int			pgturbohybrid_multivector_quantized_inverted_precompact_coverage_k =
+	512;
+int			pgturbohybrid_multivector_quantized_inverted_precompact_per_token_k =
+	16;
+int			pgturbohybrid_multivector_quantized_inverted_compact_max_docs =
+	6144;
+int			pgturbohybrid_multivector_quantized_inverted_token_coverage =
+	PGTURBOHYBRID_MULTIVECTOR_QUANTIZED_INVERTED_TOKEN_COVERAGE_OFF;
+int			pgturbohybrid_multivector_quantized_inverted_min_token_matches = 0;
+int			pgturbohybrid_multivector_quantized_inverted_pruning =
+	PGTURBOHYBRID_MULTIVECTOR_QUANTIZED_INVERTED_PRUNING_OFF;
 int			pgturbohybrid_multivector_plain_fallback =
 	PGTURBOHYBRID_MULTIVECTOR_PLAIN_FALLBACK_AUTO;
 int			pgturbohybrid_multivector_plain_fallback_max_docs = 1000;
@@ -184,6 +215,24 @@ int			pgturbohybrid_multivector_sparse_candidate_source =
 	PGTURBOHYBRID_MULTIVECTOR_SPARSE_CANDIDATE_SOURCE_OFF;
 int			pgturbohybrid_multivector_branch_plan =
 	PGTURBOHYBRID_BRANCH_PLAN_AUTO;
+int			pgturbohybrid_multivector_centroid_lite_max_postings_per_token = 0;
+int			pgturbohybrid_multivector_centroid_lite_probe_centroids_per_token = 1;
+int			pgturbohybrid_multivector_centroid_lite_codeword_top_m = 1;
+int			pgturbohybrid_multivector_centroid_lite_posting_selection =
+	PGTURBOHYBRID_MULTIVECTOR_POSTING_SELECTION_UNIFORM_STRIDE;
+int			pgturbohybrid_multivector_centroid_lite_candidate_scoring =
+	PGTURBOHYBRID_MULTIVECTOR_CENTROID_LITE_CANDIDATE_SCORING_POSTING_PAYLOAD;
+int			pgturbohybrid_multivector_centroid_lite_bitset_prefilter =
+	PGTURBOHYBRID_MULTIVECTOR_CENTROID_LITE_BITSET_PREFILTER_OFF;
+int			pgturbohybrid_multivector_centroid_lite_bitset_min_token_matches = 1;
+int			pgturbohybrid_multivector_centroid_lite_pruning =
+	PGTURBOHYBRID_MULTIVECTOR_CENTROID_LITE_PRUNING_OFF;
+double		pgturbohybrid_multivector_centroid_lite_score_threshold = -1.0;
+double		pgturbohybrid_multivector_centroid_lite_score_drop_from_best = -1.0;
+int			pgturbohybrid_multivector_quantized_inverted_max_postings_per_token = 0;
+int			pgturbohybrid_multivector_quantized_inverted_probe_codewords_per_token = 1;
+int			pgturbohybrid_multivector_quantized_inverted_posting_selection =
+	PGTURBOHYBRID_MULTIVECTOR_POSTING_SELECTION_SCORE_TOPK;
 static bool pgturbohybrid_bm25_strategy_user_set = false;
 static bool pgturbohybrid_bm25_impact_or_mode_user_set = false;
 static bool pgturbohybrid_bm25_hot_postings_cache_mb_user_set = false;
@@ -283,6 +332,8 @@ static const struct config_enum_entry pgturbohybrid_multivector_doc_storage_opti
 	{"f32", PGTURBOHYBRID_MULTIVECTOR_DOC_STORAGE_F32, false},
 	{"f16", PGTURBOHYBRID_MULTIVECTOR_DOC_STORAGE_F16, false},
 	{"sq8", PGTURBOHYBRID_MULTIVECTOR_DOC_STORAGE_SQ8, false},
+	{"centroid_only", PGTURBOHYBRID_MULTIVECTOR_DOC_STORAGE_CENTROID_ONLY, false},
+	{"proxy_only", PGTURBOHYBRID_MULTIVECTOR_DOC_STORAGE_PROXY_ONLY, false},
 	{NULL, 0, false}
 };
 
@@ -384,6 +435,7 @@ static const struct config_enum_entry pgturbohybrid_multivector_proxy_encoder_op
 	{"max_pool", PGTURBOHYBRID_MULTIVECTOR_PROXY_ENCODER_MAX_POOL, false},
 	{"random_projection_fde", PGTURBOHYBRID_MULTIVECTOR_PROXY_ENCODER_RANDOM_PROJECTION_FDE, false},
 	{"learned_projection_placeholder", PGTURBOHYBRID_MULTIVECTOR_PROXY_ENCODER_LEARNED_PROJECTION_PLACEHOLDER, false},
+	{"learned_projection_v1", PGTURBOHYBRID_MULTIVECTOR_PROXY_ENCODER_LEARNED_PROJECTION_V1, false},
 	{NULL, 0, false}
 };
 
@@ -403,6 +455,77 @@ static const struct config_enum_entry pgturbohybrid_multivector_candidate_source
 	{"proxy_vector", PGTURBOHYBRID_MULTIVECTOR_CANDIDATE_SOURCE_PROXY_VECTOR, false},
 	{"centroid_lite", PGTURBOHYBRID_MULTIVECTOR_CANDIDATE_SOURCE_CENTROID_LITE, false},
 	{"quantized_inverted_experimental", PGTURBOHYBRID_MULTIVECTOR_CANDIDATE_SOURCE_QUANTIZED_INVERTED_EXPERIMENTAL, false},
+	{NULL, 0, false}
+};
+
+static const struct config_enum_entry pgturbohybrid_multivector_quantized_inverted_codebook_options[] = {
+	{"deterministic", PGTURBOHYBRID_MULTIVECTOR_QUANTIZED_INVERTED_CODEBOOK_DETERMINISTIC, false},
+	{"external", PGTURBOHYBRID_MULTIVECTOR_QUANTIZED_INVERTED_CODEBOOK_EXTERNAL, false},
+	{NULL, 0, false}
+};
+
+static const struct config_enum_entry pgturbohybrid_multivector_quantized_inverted_compact_scoring_options[] = {
+	{"off", PGTURBOHYBRID_MULTIVECTOR_QUANTIZED_INVERTED_COMPACT_SCORING_OFF, false},
+	{"experimental", PGTURBOHYBRID_MULTIVECTOR_QUANTIZED_INVERTED_COMPACT_SCORING_EXPERIMENTAL, false},
+	{NULL, 0, false}
+};
+
+static const struct config_enum_entry pgturbohybrid_multivector_quantized_inverted_compact_doc_order_options[] = {
+	{"original", PGTURBOHYBRID_MULTIVECTOR_QUANTIZED_INVERTED_COMPACT_DOC_ORDER_ORIGINAL, false},
+	{"docid", PGTURBOHYBRID_MULTIVECTOR_QUANTIZED_INVERTED_COMPACT_DOC_ORDER_DOCID, false},
+	{NULL, 0, false}
+};
+
+static const struct config_enum_entry pgturbohybrid_multivector_quantized_inverted_query_codeword_kernel_options[] = {
+	{"auto", PGTURBOHYBRID_MULTIVECTOR_QUANTIZED_INVERTED_QUERY_CODEWORD_KERNEL_AUTO, false},
+	{"scalar", PGTURBOHYBRID_MULTIVECTOR_QUANTIZED_INVERTED_QUERY_CODEWORD_KERNEL_SCALAR, false},
+	{"blocked", PGTURBOHYBRID_MULTIVECTOR_QUANTIZED_INVERTED_QUERY_CODEWORD_KERNEL_BLOCKED, false},
+	{NULL, 0, false}
+};
+
+static const struct config_enum_entry pgturbohybrid_multivector_quantized_inverted_precompact_options[] = {
+	{"off", PGTURBOHYBRID_MULTIVECTOR_QUANTIZED_INVERTED_PRECOMPACT_OFF, false},
+	{"centroid_maxsim_topk", PGTURBOHYBRID_MULTIVECTOR_QUANTIZED_INVERTED_PRECOMPACT_CENTROID_MAXSIM_TOPK, false},
+	{"centroid_maxsim_reservoir", PGTURBOHYBRID_MULTIVECTOR_QUANTIZED_INVERTED_PRECOMPACT_CENTROID_MAXSIM_RESERVOIR, false},
+	{NULL, 0, false}
+};
+
+static const struct config_enum_entry pgturbohybrid_multivector_quantized_inverted_token_coverage_options[] = {
+	{"off", PGTURBOHYBRID_MULTIVECTOR_QUANTIZED_INVERTED_TOKEN_COVERAGE_OFF, false},
+	{"linear", PGTURBOHYBRID_MULTIVECTOR_QUANTIZED_INVERTED_TOKEN_COVERAGE_LINEAR, false},
+	{NULL, 0, false}
+};
+
+static const struct config_enum_entry pgturbohybrid_multivector_centroid_lite_bitset_prefilter_options[] = {
+	{"off", PGTURBOHYBRID_MULTIVECTOR_CENTROID_LITE_BITSET_PREFILTER_OFF, false},
+	{"experimental", PGTURBOHYBRID_MULTIVECTOR_CENTROID_LITE_BITSET_PREFILTER_EXPERIMENTAL, false},
+	{NULL, 0, false}
+};
+
+static const struct config_enum_entry pgturbohybrid_multivector_centroid_lite_pruning_options[] = {
+	{"off", PGTURBOHYBRID_MULTIVECTOR_CENTROID_LITE_PRUNING_OFF, false},
+	{"safe_upper_bound", PGTURBOHYBRID_MULTIVECTOR_CENTROID_LITE_PRUNING_SAFE_UPPER_BOUND, false},
+	{"score_bound_experimental", PGTURBOHYBRID_MULTIVECTOR_CENTROID_LITE_PRUNING_SCORE_BOUND_EXPERIMENTAL, false},
+	{NULL, 0, false}
+};
+
+static const struct config_enum_entry pgturbohybrid_multivector_quantized_inverted_pruning_options[] = {
+	{"off", PGTURBOHYBRID_MULTIVECTOR_QUANTIZED_INVERTED_PRUNING_OFF, false},
+	{"score_bound_experimental", PGTURBOHYBRID_MULTIVECTOR_QUANTIZED_INVERTED_PRUNING_SCORE_BOUND_EXPERIMENTAL, false},
+	{NULL, 0, false}
+};
+
+static const struct config_enum_entry pgturbohybrid_multivector_posting_selection_options[] = {
+	{"uniform_stride", PGTURBOHYBRID_MULTIVECTOR_POSTING_SELECTION_UNIFORM_STRIDE, false},
+	{"score_topk", PGTURBOHYBRID_MULTIVECTOR_POSTING_SELECTION_SCORE_TOPK, false},
+	{"union_score", PGTURBOHYBRID_MULTIVECTOR_POSTING_SELECTION_UNION_SCORE, false},
+	{NULL, 0, false}
+};
+
+static const struct config_enum_entry pgturbohybrid_multivector_centroid_lite_candidate_scoring_options[] = {
+	{"posting_payload", PGTURBOHYBRID_MULTIVECTOR_CENTROID_LITE_CANDIDATE_SCORING_POSTING_PAYLOAD, false},
+	{"codeword_maxsim", PGTURBOHYBRID_MULTIVECTOR_CENTROID_LITE_CANDIDATE_SCORING_CODEWORD_MAXSIM, false},
+	{"doc_centroid_maxsim", PGTURBOHYBRID_MULTIVECTOR_CENTROID_LITE_CANDIDATE_SCORING_DOC_CENTROID_MAXSIM, false},
 	{NULL, 0, false}
 };
 
@@ -534,6 +657,15 @@ static relopt_enum_elt_def pgturbohybrid_multivector_doc_build_scorer_relopt_opt
 	{NULL, 0}
 };
 
+static relopt_enum_elt_def pgturbohybrid_multivector_doc_storage_relopt_options[] = {
+	{"f32", PGTURBOHYBRID_MULTIVECTOR_DOC_STORAGE_F32},
+	{"f16", PGTURBOHYBRID_MULTIVECTOR_DOC_STORAGE_F16},
+	{"sq8", PGTURBOHYBRID_MULTIVECTOR_DOC_STORAGE_SQ8},
+	{"centroid_only", PGTURBOHYBRID_MULTIVECTOR_DOC_STORAGE_CENTROID_ONLY},
+	{"proxy_only", PGTURBOHYBRID_MULTIVECTOR_DOC_STORAGE_PROXY_ONLY},
+	{NULL, 0}
+};
+
 static relopt_enum_elt_def pgturbohybrid_multivector_token_pooling_relopt_options[] = {
 	{"off", PGTURBOHYBRID_MULTIVECTOR_TOKEN_POOLING_OFF},
 	{"kmeans", PGTURBOHYBRID_MULTIVECTOR_TOKEN_POOLING_KMEANS},
@@ -557,6 +689,7 @@ static relopt_enum_elt_def pgturbohybrid_multivector_proxy_encoder_relopt_option
 	{"max_pool", PGTURBOHYBRID_MULTIVECTOR_PROXY_ENCODER_MAX_POOL},
 	{"random_projection_fde", PGTURBOHYBRID_MULTIVECTOR_PROXY_ENCODER_RANDOM_PROJECTION_FDE},
 	{"learned_projection_placeholder", PGTURBOHYBRID_MULTIVECTOR_PROXY_ENCODER_LEARNED_PROJECTION_PLACEHOLDER},
+	{"learned_projection_v1", PGTURBOHYBRID_MULTIVECTOR_PROXY_ENCODER_LEARNED_PROJECTION_V1},
 	{NULL, 0}
 };
 
@@ -1208,11 +1341,15 @@ typedef struct PgturbohybridResult
 	ItemPointerData heaptid;
 	double		denseDistance;
 	double		denseSimilarity;
+	double		multivectorDistance;
+	double		multivectorSimilarity;
 	double		bm25Score;
 	double		fusedScore;
 	int32		denseRank;
+	int32		multivectorRank;
 	int32		bm25Rank;
 	bool		hasDense;
+	bool		hasMultivector;
 	bool		hasBm25;
 	bool		exactScored;
 } PgturbohybridResult;
@@ -1251,6 +1388,7 @@ typedef struct PgturbohybridLastScanStats
 	char		indexShape[16];
 	bool		bm25BranchAvailable;
 	bool		denseBranchUsed;
+	bool		multivectorBranchUsed;
 	bool		bm25BranchUsed;
 	PgturbohybridBranchPlan branchPlan;
 	char		profile[16];
@@ -1259,6 +1397,9 @@ typedef struct PgturbohybridLastScanStats
 	uint32		denseCandidatesEffective;
 	bool		denseKDefaulted;
 	uint32		denseCandidates;
+	uint32		multivectorCandidatesRequested;
+	uint32		multivectorCandidatesEffective;
+	uint32		multivectorCandidates;
 	uint32		denseEffectiveResultTarget;
 	uint32		denseEffectiveSearchEf;
 	uint32		denseEffectiveRescoreBand;
@@ -1306,6 +1447,12 @@ typedef struct PgturbohybridLastScanStats
 	char		multivectorCandidateSource[48];
 	char		multivectorCandidatePath[48];
 	char		multivectorProxyEncoderKind[32];
+	bool		learnedProjectionLoaded;
+	uint32		learnedProjectionDim;
+	uint64		learnedProjectionWeightBytes;
+	char		learnedProjectionModel[128];
+	char		learnedProjectionChecksum[128];
+	uint64		learnedProjectionQueryEncodeUs;
 	char		multivectorGraphMode[24];
 	uint64		multivectorProxyGraphSearches;
 	bool		multivectorExactTokenScanEnabled;
@@ -1322,8 +1469,24 @@ typedef struct PgturbohybridLastScanStats
 	uint32		multivectorDocGraphSearchEf;
 	uint32		multivectorDocGraphOversampling;
 	uint32		multivectorDocGraphRescoreK;
+	uint32		multivectorDocGraphEntrySampleConfigured;
+	uint32		multivectorDocGraphEntrySampleEffective;
+	uint32		multivectorDocGraphEntrySampleScored;
 	uint64		multivectorDocGraphQuantizedScores;
+	uint64		compactMaxsimScoreUs;
+	uint64		compactMaxsimPairs;
+	uint64		compactMaxsimCacheHits;
+	uint64		compactMaxsimCacheMisses;
+	uint64		compactMaxsimBoundChecks;
+	uint64		compactMaxsimDocsPruned;
+	uint64		compactMaxsimTokensSkipped;
 	char		multivectorDocGraphStorageKind[16];
+	bool		proxyOnlyIndex;
+	bool		centroidOnlyIndex;
+		bool		fullMultivectorSidecarAvailable;
+		bool		centroidSidecarAvailable;
+		bool		centroidDocCodesAvailable;
+		bool		quantizedInvertedSidecarAvailable;
 	char		multivectorDocGraphRescoreSource[16];
 	uint32		multivectorDocGraphExactRerankDocs;
 	uint64		multivectorDocGraphHeapFetches;
@@ -1331,28 +1494,162 @@ typedef struct PgturbohybridLastScanStats
 	uint32		multivectorProxyCandidateTarget;
 	uint32		multivectorProxyCandidatesReturned;
 	uint32		multivectorExactRerankKEffective;
+	uint32		proxyCandidateLimitEffective;
+	char		proxyCandidateLimitSource[32];
+	uint64		proxyGraphNodesVisited;
+	uint64		proxyGraphEdgesVisited;
+	uint32		proxyGraphCandidatesSeen;
+	uint32		proxyCandidatesReturned;
+	uint64		proxyVectorScoresComputed;
+	uint64		proxyVectorScoreUs;
 	uint32		proxyCandidates;
+	bool		proxyLazySidecarVectors;
+	char		multivectorDocStorageCacheRequested[16];
+	char		multivectorDocStorageCacheEffective[16];
 	bool		proxyTop1Admission;
 	uint32		proxyExactRerankDocs;
+	uint64		proxyFullSidecarVectorsLoaded;
+	uint64		proxyFullSidecarBytesTouched;
+	uint64		proxyFullSidecarPagesRead;
+	uint64		proxyFullSidecarLoadUs;
+	uint64		proxyFullSidecarReconstructUs;
+	uint64		proxyExactRerankHeapFetches;
+	uint64		proxyExactRerankSidecarFetches;
+	uint64		proxyExactRerankBytesTouched;
+	uint64		proxyExactRerankUs;
+	bool		sidecarCacheBuildThisQuery;
+	uint64		sidecarCacheBuildBytes;
+	uint64		sidecarCacheBuildPagesRead;
+	uint64		sidecarCacheBuildUs;
+	uint64		sidecarQueryBytesTouched;
+	uint64		sidecarQueryPagesRead;
+	uint64		sidecarQueryVectorsLoaded;
+	uint64		sidecarQueryLoadUs;
+	uint64		sidecarQueryUs;
+	bool		proxyVectorUsesFullSidecarForGraph;
+	bool		proxyVectorNearExhaustiveSidecarTouch;
+	char		proxyVectorSidecarTouchReason[64];
 	uint64		centroidListsVisited;
 	uint64		centroidDocsTouched;
 	uint64		centroidPrunedDocs;
+	uint64		centroidPostingsTouched;
+	uint64		centroidPostingsSelected;
+	uint64		centroidPostingsSkipped;
+	uint64		centroidProbeUs;
+	uint64		centroidPostingScanUs;
+	uint64		centroidAccumulateUs;
+	uint64		centroidCandidateHeapUs;
+	uint32		centroidPostingLimitPerToken;
+	uint32		centroidProbeCentroidsPerToken;
+	uint32		centroidCodewordTopM;
+	double		centroidScoreThreshold;
+	double		centroidScoreDropFromBest;
+	uint64		centroidListsSkippedByThreshold;
+	char		centroidPostingCapStrategy[32];
+	char		centroidCandidateScoring[32];
 	uint32		centroidCandidates;
+	bool		centroidBitsetPrefilterEnabled;
+	uint32		centroidBitsetMinTokenMatches;
+	uint32		centroidBitsetListsUsed;
+	uint32		centroidBitsetDocsSet;
+	uint32		centroidBitsetDocsAfterThreshold;
+	uint64		centroidBitsetPrefilterUs;
+	uint64		centroidBitsetMemoryBytes;
+	bool		centroidUpperBoundEnabled;
+	uint64		centroidUpperBoundDocsChecked;
+	uint64		centroidUpperBoundDocsPruned;
+	uint64		centroidUpperBoundPruneUs;
+	uint64		centroidUpperBoundUnsafeFallbacks;
+	uint32		centroidCandidatesBeforeBound;
+	uint32		centroidCandidatesAfterBound;
 	uint32		multivectorCentroidCount;
 	uint32		multivectorCentroidPrerankDocs;
 	uint32		multivectorFullMaxsimRerankDocs;
 	uint64		quantizedInvertedListsVisited;
 	uint64		quantizedInvertedPostingsTouched;
+	uint64		quantizedInvertedPostingsSelected;
+	uint64		quantizedInvertedPostingsSkipped;
+	uint32		quantizedInvertedPostingLimitPerToken;
+	uint32		quantizedInvertedProbeCodewordsPerToken;
+	char		quantizedInvertedPostingCapStrategy[32];
 	uint64		quantizedInvertedDocsScored;
 	uint32		quantizedInvertedCandidates;
 	uint32		quantizedInvertedExactRerankDocs;
+	char		quantizedInvertedCodebookSource[16];
 	uint32		quantizedInvertedCodebookSize;
+	uint32		quantizedInvertedCodebookDim;
+	char		quantizedInvertedCodebookChecksum[128];
+	uint32		quantizedInvertedCodebookTopM;
+	uint64		quantizedInvertedAssignmentUs;
+	uint64		quantizedInvertedQueryCodewordScoreUs;
+	char		quantizedInvertedQueryCodewordKernel[16];
+	uint64		quantizedInvertedQueryCodewordScoresComputed;
+	uint64		quantizedInvertedQueryCodewordBlocks;
+	uint64		quantizedInvertedQueryCodewordTopkUs;
+	bool		quantizedInvertedQueryCodewordFullMatrixMaterialized;
+	uint32		quantizedInvertedQueryCodewordActiveQueryTokens;
+	uint32		quantizedInvertedQueryCodewordSkippedQueryTokens;
+	uint64		quantizedInvertedListOffsetBytes;
+	uint64		quantizedInvertedPostingBytes;
+	uint64		quantizedInvertedSidecarBytes;
+	char		quantizedInvertedCompactKernel[24];
+	char		quantizedInvertedCompactScoreSource[32];
+	uint64		quantizedInvertedCompactScoreUs;
+	uint64		quantizedInvertedCompactDocsScored;
+	uint64		quantizedInvertedCompactPayloadBytes;
+	char		quantizedInvertedCompactDocOrder[16];
+	uint64		quantizedInvertedCompactInnerAllocations;
+	uint32		quantizedInvertedCompactActiveQueryTokens;
+	uint64		quantizedInvertedCompactPairsEvaluated;
+	uint64		quantizedInvertedCompactPairsSkipped;
+	uint64		quantizedInvertedCompactPrefetches;
+	double		quantizedInvertedCompactAvgDocTokens;
+	double		quantizedInvertedCompactUsPerDoc;
+	double		quantizedInvertedCompactPayloadBytesPerDoc;
+	bool		quantizedInvertedCompactTopKChangedVsScalar;
+	bool		quantizedInvertedPrecompactEnabled;
+	char		quantizedInvertedPrecompactMode[32];
+	uint32		quantizedInvertedDocsTouchedBeforePrecompact;
+	uint32		quantizedInvertedPrecompactScoreK;
+	uint32		quantizedInvertedPrecompactCoverageK;
+	uint32		quantizedInvertedPrecompactPerTokenK;
+	uint32		quantizedInvertedCompactMaxDocs;
+	uint32		quantizedInvertedPrecompactScoreDocs;
+	uint32		quantizedInvertedPrecompactCoverageDocs;
+	uint32		quantizedInvertedPrecompactPerTokenDocs;
+	uint32		quantizedInvertedPrecompactUnionDocs;
+	uint32		quantizedInvertedPrecompactDuplicates;
+	uint32		quantizedInvertedPrecompactPrunedDocs;
+	uint64		quantizedInvertedPrecompactUs;
+	uint32		quantizedInvertedCompactDocsSkippedByPrecompact;
+	char		quantizedInvertedTokenCoverageMode[24];
+	uint32		quantizedInvertedActiveQueryTokens;
+	uint64		quantizedInvertedTokenMatchesTotal;
+	uint32		quantizedInvertedTokenMatchesMax;
+	uint32		quantizedInvertedMinTokenMatches;
+	uint64		quantizedInvertedTokenMatchFilteredDocs;
+	bool		quantizedInvertedScoreBoundPruningEnabled;
+	uint64		quantizedInvertedScoreBoundDocsChecked;
+	uint64		quantizedInvertedScoreBoundDocsPruned;
+	uint64		quantizedInvertedScoreBoundPruneUs;
+	uint64		quantizedInvertedScoreBoundUnsafeFallbacks;
+	uint32		quantizedInvertedCandidatesBeforeBound;
+	uint32		quantizedInvertedCandidatesAfterBound;
 	char		multivectorDocSidecarCacheMode[16];
 	uint64		multivectorDocSidecarPagesRead;
 	uint64		multivectorDocSidecarCacheHits;
 	uint64		multivectorDocSidecarCacheMisses;
 	uint64		multivectorDocSidecarBytesTouched;
 	uint64		multivectorDocSidecarVectorsLoaded;
+	uint64		multivectorDocSidecarDocMapPagesRead;
+	uint64		multivectorDocSidecarDocMapBytesTouched;
+	uint64		multivectorDocSidecarResidentVectorsLoaded;
+	uint64		multivectorDocSidecarResidentBytesLoaded;
+	uint64		multivectorDocSidecarVectorChunkRefBytesTouched;
+	uint64		multivectorDocSidecarPagedVectorPagesRead;
+	uint64		multivectorDocSidecarPagedVectorBytesTouched;
+	uint64		multivectorSidecarPageReadUs;
+	uint64		multivectorSidecarVectorReconstructUs;
 	uint64		multivectorTokensOriginal;
 	uint64		multivectorTokensPooled;
 	bool		multivectorReservoirsEnabled;
@@ -1365,6 +1662,9 @@ typedef struct PgturbohybridLastScanStats
 	uint32		multivectorReservoirDuplicates;
 	bool		multivectorBm25InjectionEnabled;
 	uint32		multivectorBm25InjectionCandidates;
+	uint32		multivectorBm25InjectionCandidateLimit;
+	uint32		multivectorBm25InjectionPoolSize;
+	char		multivectorBm25InjectionLimitReason[32];
 	uint32		multivectorBm25InjectionRetained;
 	uint32		multivectorBm25InjectionExactReranked;
 	uint32		learnedSparseCandidates;
@@ -1382,6 +1682,18 @@ typedef struct PgturbohybridLastScanStats
 	uint64		multivectorExactRerankHeapFetches;
 	uint64		multivectorExactRerankSidecarReads;
 	uint64		multivectorExactRerankSidecarBytes;
+	uint64		multivectorCandidateSourceUs;
+	uint64		multivectorDocGraphTraversalUs;
+	uint64		multivectorProxyCandidateUs;
+	uint64		multivectorProxyGraphTraversalUs;
+	uint64		multivectorProxyScoringUs;
+	uint64		multivectorCentroidLitePostingUs;
+	uint64		multivectorQuantizedInvertedPostingUs;
+	uint64		multivectorSidecarLoadUs;
+	uint64		multivectorHeapVisibilityUs;
+	uint64		multivectorExactHeapFetchUs;
+	uint64		multivectorExactRerankUs;
+	uint64		multivectorFinalSortUs;
 	uint32		exactRerankCandidates;
 	uint64		exactRerankTokensEvaluated;
 	uint64		exactRerankTokensSkipped;
@@ -1553,11 +1865,15 @@ PgturbohybridGetLastScanStatsSnapshot(PgturbohybridScanStatsSnapshot *stats)
 		pgturbohybrid_last_scan_state.bm25BranchAvailable;
 	stats->denseBranchUsed =
 		pgturbohybrid_last_scan_state.denseBranchUsed;
+	stats->multivectorBranchUsed =
+		pgturbohybrid_last_scan_state.multivectorBranchUsed;
 	stats->bm25BranchUsed =
 		pgturbohybrid_last_scan_state.bm25BranchUsed;
 	stats->branchPlan = pgturbohybrid_last_scan_state.branchPlan;
 	stats->denseCandidatesEffective =
 		pgturbohybrid_last_scan_state.denseCandidatesEffective;
+	stats->multivectorCandidatesEffective =
+		pgturbohybrid_last_scan_state.multivectorCandidatesEffective;
 	stats->denseKDefaulted = pgturbohybrid_last_scan_state.denseKDefaulted;
 	stats->bm25CandidatesEffective =
 		pgturbohybrid_last_scan_state.bm25CandidatesEffective;
@@ -1695,6 +2011,20 @@ PgturbohybridGetLastScanStatsSnapshot(PgturbohybridScanStatsSnapshot *stats)
 	strlcpy(stats->multivectorProxyEncoderKind,
 			pgturbohybrid_last_scan_state.multivectorProxyEncoderKind,
 			sizeof(stats->multivectorProxyEncoderKind));
+	stats->learnedProjectionLoaded =
+		pgturbohybrid_last_scan_state.learnedProjectionLoaded;
+	stats->learnedProjectionDim =
+		pgturbohybrid_last_scan_state.learnedProjectionDim;
+	stats->learnedProjectionWeightBytes =
+		pgturbohybrid_last_scan_state.learnedProjectionWeightBytes;
+	strlcpy(stats->learnedProjectionModel,
+			pgturbohybrid_last_scan_state.learnedProjectionModel,
+			sizeof(stats->learnedProjectionModel));
+	strlcpy(stats->learnedProjectionChecksum,
+			pgturbohybrid_last_scan_state.learnedProjectionChecksum,
+			sizeof(stats->learnedProjectionChecksum));
+	stats->learnedProjectionQueryEncodeUs =
+		pgturbohybrid_last_scan_state.learnedProjectionQueryEncodeUs;
 	strlcpy(stats->multivectorGraphMode,
 			pgturbohybrid_last_scan_state.multivectorGraphMode,
 			sizeof(stats->multivectorGraphMode));
@@ -1729,11 +2059,43 @@ PgturbohybridGetLastScanStatsSnapshot(PgturbohybridScanStatsSnapshot *stats)
 		pgturbohybrid_last_scan_state.multivectorDocGraphOversampling;
 	stats->multivectorDocGraphRescoreK =
 		pgturbohybrid_last_scan_state.multivectorDocGraphRescoreK;
+	stats->multivectorDocGraphEntrySampleConfigured =
+		pgturbohybrid_last_scan_state.multivectorDocGraphEntrySampleConfigured;
+	stats->multivectorDocGraphEntrySampleEffective =
+		pgturbohybrid_last_scan_state.multivectorDocGraphEntrySampleEffective;
+	stats->multivectorDocGraphEntrySampleScored =
+		pgturbohybrid_last_scan_state.multivectorDocGraphEntrySampleScored;
 	stats->multivectorDocGraphQuantizedScores =
 		pgturbohybrid_last_scan_state.multivectorDocGraphQuantizedScores;
+	stats->compactMaxsimScoreUs =
+		pgturbohybrid_last_scan_state.compactMaxsimScoreUs;
+	stats->compactMaxsimPairs =
+		pgturbohybrid_last_scan_state.compactMaxsimPairs;
+	stats->compactMaxsimCacheHits =
+		pgturbohybrid_last_scan_state.compactMaxsimCacheHits;
+	stats->compactMaxsimCacheMisses =
+		pgturbohybrid_last_scan_state.compactMaxsimCacheMisses;
+	stats->compactMaxsimBoundChecks =
+		pgturbohybrid_last_scan_state.compactMaxsimBoundChecks;
+	stats->compactMaxsimDocsPruned =
+		pgturbohybrid_last_scan_state.compactMaxsimDocsPruned;
+	stats->compactMaxsimTokensSkipped =
+		pgturbohybrid_last_scan_state.compactMaxsimTokensSkipped;
 	strlcpy(stats->multivectorDocGraphStorageKind,
 			pgturbohybrid_last_scan_state.multivectorDocGraphStorageKind,
 			sizeof(stats->multivectorDocGraphStorageKind));
+	stats->proxyOnlyIndex =
+		pgturbohybrid_last_scan_state.proxyOnlyIndex;
+	stats->centroidOnlyIndex =
+		pgturbohybrid_last_scan_state.centroidOnlyIndex;
+	stats->fullMultivectorSidecarAvailable =
+		pgturbohybrid_last_scan_state.fullMultivectorSidecarAvailable;
+	stats->centroidSidecarAvailable =
+		pgturbohybrid_last_scan_state.centroidSidecarAvailable;
+	stats->centroidDocCodesAvailable =
+		pgturbohybrid_last_scan_state.centroidDocCodesAvailable;
+	stats->quantizedInvertedSidecarAvailable =
+		pgturbohybrid_last_scan_state.quantizedInvertedSidecarAvailable;
 	strlcpy(stats->multivectorDocGraphRescoreSource,
 			pgturbohybrid_last_scan_state.multivectorDocGraphRescoreSource,
 			sizeof(stats->multivectorDocGraphRescoreSource));
@@ -1750,20 +2112,148 @@ PgturbohybridGetLastScanStatsSnapshot(PgturbohybridScanStatsSnapshot *stats)
 		pgturbohybrid_last_scan_state.multivectorProxyCandidatesReturned;
 	stats->multivectorExactRerankKEffective =
 		pgturbohybrid_last_scan_state.multivectorExactRerankKEffective;
+	stats->proxyCandidateLimitEffective =
+		pgturbohybrid_last_scan_state.proxyCandidateLimitEffective;
+	strlcpy(stats->proxyCandidateLimitSource,
+			pgturbohybrid_last_scan_state.proxyCandidateLimitSource,
+			sizeof(stats->proxyCandidateLimitSource));
+	stats->proxyGraphNodesVisited =
+		pgturbohybrid_last_scan_state.proxyGraphNodesVisited;
+	stats->proxyGraphEdgesVisited =
+		pgturbohybrid_last_scan_state.proxyGraphEdgesVisited;
+	stats->proxyGraphCandidatesSeen =
+		pgturbohybrid_last_scan_state.proxyGraphCandidatesSeen;
+	stats->proxyCandidatesReturned =
+		pgturbohybrid_last_scan_state.proxyCandidatesReturned;
+	stats->proxyVectorScoresComputed =
+		pgturbohybrid_last_scan_state.proxyVectorScoresComputed;
+	stats->proxyVectorScoreUs =
+		pgturbohybrid_last_scan_state.proxyVectorScoreUs;
 	stats->proxyCandidates =
 		pgturbohybrid_last_scan_state.proxyCandidates;
+	stats->proxyLazySidecarVectors =
+		pgturbohybrid_last_scan_state.proxyLazySidecarVectors;
+	strlcpy(stats->multivectorDocStorageCacheRequested,
+			pgturbohybrid_last_scan_state.multivectorDocStorageCacheRequested,
+			sizeof(stats->multivectorDocStorageCacheRequested));
+	strlcpy(stats->multivectorDocStorageCacheEffective,
+			pgturbohybrid_last_scan_state.multivectorDocStorageCacheEffective,
+			sizeof(stats->multivectorDocStorageCacheEffective));
 	stats->proxyTop1Admission =
 		pgturbohybrid_last_scan_state.proxyTop1Admission;
 	stats->proxyExactRerankDocs =
 		pgturbohybrid_last_scan_state.proxyExactRerankDocs;
+	stats->proxyFullSidecarVectorsLoaded =
+		pgturbohybrid_last_scan_state.proxyFullSidecarVectorsLoaded;
+	stats->proxyFullSidecarBytesTouched =
+		pgturbohybrid_last_scan_state.proxyFullSidecarBytesTouched;
+	stats->proxyFullSidecarPagesRead =
+		pgturbohybrid_last_scan_state.proxyFullSidecarPagesRead;
+	stats->proxyFullSidecarLoadUs =
+		pgturbohybrid_last_scan_state.proxyFullSidecarLoadUs;
+	stats->proxyFullSidecarReconstructUs =
+		pgturbohybrid_last_scan_state.proxyFullSidecarReconstructUs;
+	stats->proxyExactRerankHeapFetches =
+		pgturbohybrid_last_scan_state.proxyExactRerankHeapFetches;
+	stats->proxyExactRerankSidecarFetches =
+		pgturbohybrid_last_scan_state.proxyExactRerankSidecarFetches;
+	stats->proxyExactRerankBytesTouched =
+		pgturbohybrid_last_scan_state.proxyExactRerankBytesTouched;
+	stats->proxyExactRerankUs =
+		pgturbohybrid_last_scan_state.proxyExactRerankUs;
+	stats->sidecarCacheBuildThisQuery =
+		pgturbohybrid_last_scan_state.sidecarCacheBuildThisQuery;
+	stats->sidecarCacheBuildBytes =
+		pgturbohybrid_last_scan_state.sidecarCacheBuildBytes;
+	stats->sidecarCacheBuildPagesRead =
+		pgturbohybrid_last_scan_state.sidecarCacheBuildPagesRead;
+	stats->sidecarCacheBuildUs =
+		pgturbohybrid_last_scan_state.sidecarCacheBuildUs;
+	stats->sidecarQueryBytesTouched =
+		pgturbohybrid_last_scan_state.sidecarQueryBytesTouched;
+	stats->sidecarQueryPagesRead =
+		pgturbohybrid_last_scan_state.sidecarQueryPagesRead;
+	stats->sidecarQueryVectorsLoaded =
+		pgturbohybrid_last_scan_state.sidecarQueryVectorsLoaded;
+	stats->sidecarQueryLoadUs =
+		pgturbohybrid_last_scan_state.sidecarQueryLoadUs;
+	stats->sidecarQueryUs =
+		pgturbohybrid_last_scan_state.sidecarQueryUs;
+	stats->proxyVectorUsesFullSidecarForGraph =
+		pgturbohybrid_last_scan_state.proxyVectorUsesFullSidecarForGraph;
+	stats->proxyVectorNearExhaustiveSidecarTouch =
+		pgturbohybrid_last_scan_state.proxyVectorNearExhaustiveSidecarTouch;
+	strlcpy(stats->proxyVectorSidecarTouchReason,
+			pgturbohybrid_last_scan_state.proxyVectorSidecarTouchReason,
+			sizeof(stats->proxyVectorSidecarTouchReason));
 	stats->centroidListsVisited =
 		pgturbohybrid_last_scan_state.centroidListsVisited;
 	stats->centroidDocsTouched =
 		pgturbohybrid_last_scan_state.centroidDocsTouched;
 	stats->centroidPrunedDocs =
 		pgturbohybrid_last_scan_state.centroidPrunedDocs;
+	stats->centroidPostingsTouched =
+		pgturbohybrid_last_scan_state.centroidPostingsTouched;
+	stats->centroidPostingsSelected =
+		pgturbohybrid_last_scan_state.centroidPostingsSelected;
+	stats->centroidPostingsSkipped =
+		pgturbohybrid_last_scan_state.centroidPostingsSkipped;
+	stats->centroidProbeUs =
+		pgturbohybrid_last_scan_state.centroidProbeUs;
+	stats->centroidPostingScanUs =
+		pgturbohybrid_last_scan_state.centroidPostingScanUs;
+	stats->centroidAccumulateUs =
+		pgturbohybrid_last_scan_state.centroidAccumulateUs;
+	stats->centroidCandidateHeapUs =
+		pgturbohybrid_last_scan_state.centroidCandidateHeapUs;
+	stats->centroidPostingLimitPerToken =
+		pgturbohybrid_last_scan_state.centroidPostingLimitPerToken;
+	stats->centroidProbeCentroidsPerToken =
+		pgturbohybrid_last_scan_state.centroidProbeCentroidsPerToken;
+	stats->centroidCodewordTopM =
+		pgturbohybrid_last_scan_state.centroidCodewordTopM;
+	stats->centroidScoreThreshold =
+		pgturbohybrid_last_scan_state.centroidScoreThreshold;
+	stats->centroidScoreDropFromBest =
+		pgturbohybrid_last_scan_state.centroidScoreDropFromBest;
+	stats->centroidListsSkippedByThreshold =
+		pgturbohybrid_last_scan_state.centroidListsSkippedByThreshold;
+	strlcpy(stats->centroidPostingCapStrategy,
+			pgturbohybrid_last_scan_state.centroidPostingCapStrategy,
+			sizeof(stats->centroidPostingCapStrategy));
+	strlcpy(stats->centroidCandidateScoring,
+			pgturbohybrid_last_scan_state.centroidCandidateScoring,
+			sizeof(stats->centroidCandidateScoring));
 	stats->centroidCandidates =
 		pgturbohybrid_last_scan_state.centroidCandidates;
+	stats->centroidBitsetPrefilterEnabled =
+		pgturbohybrid_last_scan_state.centroidBitsetPrefilterEnabled;
+	stats->centroidBitsetMinTokenMatches =
+		pgturbohybrid_last_scan_state.centroidBitsetMinTokenMatches;
+	stats->centroidBitsetListsUsed =
+		pgturbohybrid_last_scan_state.centroidBitsetListsUsed;
+	stats->centroidBitsetDocsSet =
+		pgturbohybrid_last_scan_state.centroidBitsetDocsSet;
+	stats->centroidBitsetDocsAfterThreshold =
+		pgturbohybrid_last_scan_state.centroidBitsetDocsAfterThreshold;
+	stats->centroidBitsetPrefilterUs =
+		pgturbohybrid_last_scan_state.centroidBitsetPrefilterUs;
+	stats->centroidBitsetMemoryBytes =
+		pgturbohybrid_last_scan_state.centroidBitsetMemoryBytes;
+	stats->centroidUpperBoundEnabled =
+		pgturbohybrid_last_scan_state.centroidUpperBoundEnabled;
+	stats->centroidUpperBoundDocsChecked =
+		pgturbohybrid_last_scan_state.centroidUpperBoundDocsChecked;
+	stats->centroidUpperBoundDocsPruned =
+		pgturbohybrid_last_scan_state.centroidUpperBoundDocsPruned;
+	stats->centroidUpperBoundPruneUs =
+		pgturbohybrid_last_scan_state.centroidUpperBoundPruneUs;
+	stats->centroidUpperBoundUnsafeFallbacks =
+		pgturbohybrid_last_scan_state.centroidUpperBoundUnsafeFallbacks;
+	stats->centroidCandidatesBeforeBound =
+		pgturbohybrid_last_scan_state.centroidCandidatesBeforeBound;
+	stats->centroidCandidatesAfterBound =
+		pgturbohybrid_last_scan_state.centroidCandidatesAfterBound;
 	stats->multivectorCentroidCount =
 		pgturbohybrid_last_scan_state.multivectorCentroidCount;
 	stats->multivectorCentroidPrerankDocs =
@@ -1774,14 +2264,151 @@ PgturbohybridGetLastScanStatsSnapshot(PgturbohybridScanStatsSnapshot *stats)
 		pgturbohybrid_last_scan_state.quantizedInvertedListsVisited;
 	stats->quantizedInvertedPostingsTouched =
 		pgturbohybrid_last_scan_state.quantizedInvertedPostingsTouched;
+	stats->quantizedInvertedPostingsSelected =
+		pgturbohybrid_last_scan_state.quantizedInvertedPostingsSelected;
+	stats->quantizedInvertedPostingsSkipped =
+		pgturbohybrid_last_scan_state.quantizedInvertedPostingsSkipped;
+	stats->quantizedInvertedPostingLimitPerToken =
+		pgturbohybrid_last_scan_state.quantizedInvertedPostingLimitPerToken;
+	stats->quantizedInvertedProbeCodewordsPerToken =
+		pgturbohybrid_last_scan_state.quantizedInvertedProbeCodewordsPerToken;
+	strlcpy(stats->quantizedInvertedPostingCapStrategy,
+			pgturbohybrid_last_scan_state.quantizedInvertedPostingCapStrategy,
+			sizeof(stats->quantizedInvertedPostingCapStrategy));
 	stats->quantizedInvertedDocsScored =
 		pgturbohybrid_last_scan_state.quantizedInvertedDocsScored;
 	stats->quantizedInvertedCandidates =
 		pgturbohybrid_last_scan_state.quantizedInvertedCandidates;
 	stats->quantizedInvertedExactRerankDocs =
 		pgturbohybrid_last_scan_state.quantizedInvertedExactRerankDocs;
+	strlcpy(stats->quantizedInvertedCodebookSource,
+			pgturbohybrid_last_scan_state.quantizedInvertedCodebookSource,
+			sizeof(stats->quantizedInvertedCodebookSource));
 	stats->quantizedInvertedCodebookSize =
 		pgturbohybrid_last_scan_state.quantizedInvertedCodebookSize;
+	stats->quantizedInvertedCodebookDim =
+		pgturbohybrid_last_scan_state.quantizedInvertedCodebookDim;
+	strlcpy(stats->quantizedInvertedCodebookChecksum,
+			pgturbohybrid_last_scan_state.quantizedInvertedCodebookChecksum,
+			sizeof(stats->quantizedInvertedCodebookChecksum));
+	stats->quantizedInvertedCodebookTopM =
+		pgturbohybrid_last_scan_state.quantizedInvertedCodebookTopM;
+	stats->quantizedInvertedAssignmentUs =
+		pgturbohybrid_last_scan_state.quantizedInvertedAssignmentUs;
+	stats->quantizedInvertedQueryCodewordScoreUs =
+		pgturbohybrid_last_scan_state.quantizedInvertedQueryCodewordScoreUs;
+	strlcpy(stats->quantizedInvertedQueryCodewordKernel,
+			pgturbohybrid_last_scan_state.quantizedInvertedQueryCodewordKernel,
+			sizeof(stats->quantizedInvertedQueryCodewordKernel));
+	stats->quantizedInvertedQueryCodewordScoresComputed =
+		pgturbohybrid_last_scan_state.quantizedInvertedQueryCodewordScoresComputed;
+	stats->quantizedInvertedQueryCodewordBlocks =
+		pgturbohybrid_last_scan_state.quantizedInvertedQueryCodewordBlocks;
+	stats->quantizedInvertedQueryCodewordTopkUs =
+		pgturbohybrid_last_scan_state.quantizedInvertedQueryCodewordTopkUs;
+	stats->quantizedInvertedQueryCodewordFullMatrixMaterialized =
+		pgturbohybrid_last_scan_state.quantizedInvertedQueryCodewordFullMatrixMaterialized;
+	stats->quantizedInvertedQueryCodewordActiveQueryTokens =
+		pgturbohybrid_last_scan_state.quantizedInvertedQueryCodewordActiveQueryTokens;
+	stats->quantizedInvertedQueryCodewordSkippedQueryTokens =
+		pgturbohybrid_last_scan_state.quantizedInvertedQueryCodewordSkippedQueryTokens;
+	stats->quantizedInvertedListOffsetBytes =
+		pgturbohybrid_last_scan_state.quantizedInvertedListOffsetBytes;
+	stats->quantizedInvertedPostingBytes =
+		pgturbohybrid_last_scan_state.quantizedInvertedPostingBytes;
+	stats->quantizedInvertedSidecarBytes =
+		pgturbohybrid_last_scan_state.quantizedInvertedSidecarBytes;
+	strlcpy(stats->quantizedInvertedCompactKernel,
+			pgturbohybrid_last_scan_state.quantizedInvertedCompactKernel,
+			sizeof(stats->quantizedInvertedCompactKernel));
+	strlcpy(stats->quantizedInvertedCompactScoreSource,
+			pgturbohybrid_last_scan_state.quantizedInvertedCompactScoreSource,
+			sizeof(stats->quantizedInvertedCompactScoreSource));
+	stats->quantizedInvertedCompactScoreUs =
+		pgturbohybrid_last_scan_state.quantizedInvertedCompactScoreUs;
+	stats->quantizedInvertedCompactDocsScored =
+		pgturbohybrid_last_scan_state.quantizedInvertedCompactDocsScored;
+	stats->quantizedInvertedCompactPayloadBytes =
+		pgturbohybrid_last_scan_state.quantizedInvertedCompactPayloadBytes;
+	strlcpy(stats->quantizedInvertedCompactDocOrder,
+			pgturbohybrid_last_scan_state.quantizedInvertedCompactDocOrder,
+			sizeof(stats->quantizedInvertedCompactDocOrder));
+	stats->quantizedInvertedCompactInnerAllocations =
+		pgturbohybrid_last_scan_state.quantizedInvertedCompactInnerAllocations;
+	stats->quantizedInvertedCompactActiveQueryTokens =
+		pgturbohybrid_last_scan_state.quantizedInvertedCompactActiveQueryTokens;
+	stats->quantizedInvertedCompactPairsEvaluated =
+		pgturbohybrid_last_scan_state.quantizedInvertedCompactPairsEvaluated;
+	stats->quantizedInvertedCompactPairsSkipped =
+		pgturbohybrid_last_scan_state.quantizedInvertedCompactPairsSkipped;
+	stats->quantizedInvertedCompactPrefetches =
+		pgturbohybrid_last_scan_state.quantizedInvertedCompactPrefetches;
+	stats->quantizedInvertedCompactAvgDocTokens =
+		pgturbohybrid_last_scan_state.quantizedInvertedCompactAvgDocTokens;
+	stats->quantizedInvertedCompactUsPerDoc =
+		pgturbohybrid_last_scan_state.quantizedInvertedCompactUsPerDoc;
+	stats->quantizedInvertedCompactPayloadBytesPerDoc =
+		pgturbohybrid_last_scan_state.quantizedInvertedCompactPayloadBytesPerDoc;
+	stats->quantizedInvertedCompactTopKChangedVsScalar =
+		pgturbohybrid_last_scan_state.quantizedInvertedCompactTopKChangedVsScalar;
+	stats->quantizedInvertedPrecompactEnabled =
+		pgturbohybrid_last_scan_state.quantizedInvertedPrecompactEnabled;
+	strlcpy(stats->quantizedInvertedPrecompactMode,
+			pgturbohybrid_last_scan_state.quantizedInvertedPrecompactMode,
+			sizeof(stats->quantizedInvertedPrecompactMode));
+	stats->quantizedInvertedDocsTouchedBeforePrecompact =
+		pgturbohybrid_last_scan_state.quantizedInvertedDocsTouchedBeforePrecompact;
+	stats->quantizedInvertedPrecompactScoreK =
+		pgturbohybrid_last_scan_state.quantizedInvertedPrecompactScoreK;
+	stats->quantizedInvertedPrecompactCoverageK =
+		pgturbohybrid_last_scan_state.quantizedInvertedPrecompactCoverageK;
+	stats->quantizedInvertedPrecompactPerTokenK =
+		pgturbohybrid_last_scan_state.quantizedInvertedPrecompactPerTokenK;
+	stats->quantizedInvertedCompactMaxDocs =
+		pgturbohybrid_last_scan_state.quantizedInvertedCompactMaxDocs;
+	stats->quantizedInvertedPrecompactScoreDocs =
+		pgturbohybrid_last_scan_state.quantizedInvertedPrecompactScoreDocs;
+	stats->quantizedInvertedPrecompactCoverageDocs =
+		pgturbohybrid_last_scan_state.quantizedInvertedPrecompactCoverageDocs;
+	stats->quantizedInvertedPrecompactPerTokenDocs =
+		pgturbohybrid_last_scan_state.quantizedInvertedPrecompactPerTokenDocs;
+	stats->quantizedInvertedPrecompactUnionDocs =
+		pgturbohybrid_last_scan_state.quantizedInvertedPrecompactUnionDocs;
+	stats->quantizedInvertedPrecompactDuplicates =
+		pgturbohybrid_last_scan_state.quantizedInvertedPrecompactDuplicates;
+	stats->quantizedInvertedPrecompactPrunedDocs =
+		pgturbohybrid_last_scan_state.quantizedInvertedPrecompactPrunedDocs;
+	stats->quantizedInvertedPrecompactUs =
+		pgturbohybrid_last_scan_state.quantizedInvertedPrecompactUs;
+	stats->quantizedInvertedCompactDocsSkippedByPrecompact =
+		pgturbohybrid_last_scan_state.quantizedInvertedCompactDocsSkippedByPrecompact;
+	strlcpy(stats->quantizedInvertedTokenCoverageMode,
+			pgturbohybrid_last_scan_state.quantizedInvertedTokenCoverageMode,
+			sizeof(stats->quantizedInvertedTokenCoverageMode));
+	stats->quantizedInvertedActiveQueryTokens =
+		pgturbohybrid_last_scan_state.quantizedInvertedActiveQueryTokens;
+	stats->quantizedInvertedTokenMatchesTotal =
+		pgturbohybrid_last_scan_state.quantizedInvertedTokenMatchesTotal;
+	stats->quantizedInvertedTokenMatchesMax =
+		pgturbohybrid_last_scan_state.quantizedInvertedTokenMatchesMax;
+	stats->quantizedInvertedMinTokenMatches =
+		pgturbohybrid_last_scan_state.quantizedInvertedMinTokenMatches;
+	stats->quantizedInvertedTokenMatchFilteredDocs =
+		pgturbohybrid_last_scan_state.quantizedInvertedTokenMatchFilteredDocs;
+	stats->quantizedInvertedScoreBoundPruningEnabled =
+		pgturbohybrid_last_scan_state.quantizedInvertedScoreBoundPruningEnabled;
+	stats->quantizedInvertedScoreBoundDocsChecked =
+		pgturbohybrid_last_scan_state.quantizedInvertedScoreBoundDocsChecked;
+	stats->quantizedInvertedScoreBoundDocsPruned =
+		pgturbohybrid_last_scan_state.quantizedInvertedScoreBoundDocsPruned;
+	stats->quantizedInvertedScoreBoundPruneUs =
+		pgturbohybrid_last_scan_state.quantizedInvertedScoreBoundPruneUs;
+	stats->quantizedInvertedScoreBoundUnsafeFallbacks =
+		pgturbohybrid_last_scan_state.quantizedInvertedScoreBoundUnsafeFallbacks;
+	stats->quantizedInvertedCandidatesBeforeBound =
+		pgturbohybrid_last_scan_state.quantizedInvertedCandidatesBeforeBound;
+	stats->quantizedInvertedCandidatesAfterBound =
+		pgturbohybrid_last_scan_state.quantizedInvertedCandidatesAfterBound;
 	strlcpy(stats->multivectorDocSidecarCacheMode,
 			pgturbohybrid_last_scan_state.multivectorDocSidecarCacheMode,
 			sizeof(stats->multivectorDocSidecarCacheMode));
@@ -1795,6 +2422,24 @@ PgturbohybridGetLastScanStatsSnapshot(PgturbohybridScanStatsSnapshot *stats)
 		pgturbohybrid_last_scan_state.multivectorDocSidecarBytesTouched;
 	stats->multivectorDocSidecarVectorsLoaded =
 		pgturbohybrid_last_scan_state.multivectorDocSidecarVectorsLoaded;
+	stats->multivectorDocSidecarDocMapPagesRead =
+		pgturbohybrid_last_scan_state.multivectorDocSidecarDocMapPagesRead;
+	stats->multivectorDocSidecarDocMapBytesTouched =
+		pgturbohybrid_last_scan_state.multivectorDocSidecarDocMapBytesTouched;
+	stats->multivectorDocSidecarResidentVectorsLoaded =
+		pgturbohybrid_last_scan_state.multivectorDocSidecarResidentVectorsLoaded;
+	stats->multivectorDocSidecarResidentBytesLoaded =
+		pgturbohybrid_last_scan_state.multivectorDocSidecarResidentBytesLoaded;
+	stats->multivectorDocSidecarVectorChunkRefBytesTouched =
+		pgturbohybrid_last_scan_state.multivectorDocSidecarVectorChunkRefBytesTouched;
+	stats->multivectorDocSidecarPagedVectorPagesRead =
+		pgturbohybrid_last_scan_state.multivectorDocSidecarPagedVectorPagesRead;
+	stats->multivectorDocSidecarPagedVectorBytesTouched =
+		pgturbohybrid_last_scan_state.multivectorDocSidecarPagedVectorBytesTouched;
+	stats->multivectorSidecarPageReadUs =
+		pgturbohybrid_last_scan_state.multivectorSidecarPageReadUs;
+	stats->multivectorSidecarVectorReconstructUs =
+		pgturbohybrid_last_scan_state.multivectorSidecarVectorReconstructUs;
 	stats->multivectorTokensOriginal =
 		pgturbohybrid_last_scan_state.multivectorTokensOriginal;
 	stats->multivectorTokensPooled =
@@ -1819,6 +2464,13 @@ PgturbohybridGetLastScanStatsSnapshot(PgturbohybridScanStatsSnapshot *stats)
 		pgturbohybrid_last_scan_state.multivectorBm25InjectionEnabled;
 	stats->multivectorBm25InjectionCandidates =
 		pgturbohybrid_last_scan_state.multivectorBm25InjectionCandidates;
+	stats->multivectorBm25InjectionCandidateLimit =
+		pgturbohybrid_last_scan_state.multivectorBm25InjectionCandidateLimit;
+	stats->multivectorBm25InjectionPoolSize =
+		pgturbohybrid_last_scan_state.multivectorBm25InjectionPoolSize;
+	strlcpy(stats->multivectorBm25InjectionLimitReason,
+			pgturbohybrid_last_scan_state.multivectorBm25InjectionLimitReason,
+			sizeof(stats->multivectorBm25InjectionLimitReason));
 	stats->multivectorBm25InjectionRetained =
 		pgturbohybrid_last_scan_state.multivectorBm25InjectionRetained;
 	stats->multivectorBm25InjectionExactReranked =
@@ -1854,6 +2506,30 @@ PgturbohybridGetLastScanStatsSnapshot(PgturbohybridScanStatsSnapshot *stats)
 		pgturbohybrid_last_scan_state.multivectorExactRerankSidecarReads;
 	stats->multivectorExactRerankSidecarBytes =
 		pgturbohybrid_last_scan_state.multivectorExactRerankSidecarBytes;
+	stats->multivectorCandidateSourceUs =
+		pgturbohybrid_last_scan_state.multivectorCandidateSourceUs;
+	stats->multivectorDocGraphTraversalUs =
+		pgturbohybrid_last_scan_state.multivectorDocGraphTraversalUs;
+	stats->multivectorProxyCandidateUs =
+		pgturbohybrid_last_scan_state.multivectorProxyCandidateUs;
+	stats->multivectorProxyGraphTraversalUs =
+		pgturbohybrid_last_scan_state.multivectorProxyGraphTraversalUs;
+	stats->multivectorProxyScoringUs =
+		pgturbohybrid_last_scan_state.multivectorProxyScoringUs;
+	stats->multivectorCentroidLitePostingUs =
+		pgturbohybrid_last_scan_state.multivectorCentroidLitePostingUs;
+	stats->multivectorQuantizedInvertedPostingUs =
+		pgturbohybrid_last_scan_state.multivectorQuantizedInvertedPostingUs;
+	stats->multivectorSidecarLoadUs =
+		pgturbohybrid_last_scan_state.multivectorSidecarLoadUs;
+	stats->multivectorHeapVisibilityUs =
+		pgturbohybrid_last_scan_state.multivectorHeapVisibilityUs;
+	stats->multivectorExactHeapFetchUs =
+		pgturbohybrid_last_scan_state.multivectorExactHeapFetchUs;
+	stats->multivectorExactRerankUs =
+		pgturbohybrid_last_scan_state.multivectorExactRerankUs;
+	stats->multivectorFinalSortUs =
+		pgturbohybrid_last_scan_state.multivectorFinalSortUs;
 	stats->exactRerankCandidates =
 		pgturbohybrid_last_scan_state.exactRerankCandidates;
 	stats->exactRerankTokensEvaluated =
@@ -2065,7 +2741,6 @@ PgturbohybridValidateIndex(Relation index, IndexInfo *indexInfo)
 {
 	TupleDesc	desc = RelationGetDescr(index);
 	Oid			vectorOid;
-	Oid			multivectorOid;
 	Oid			denseType;
 	Oid			lexicalType = InvalidOid;
 	int			keyAttrs;
@@ -2104,17 +2779,16 @@ PgturbohybridValidateIndex(Relation index, IndexInfo *indexInfo)
 
 	denseType = TupleDescAttr(desc, PGTURBOHYBRID_DENSE_KEY_INDEX)->atttypid;
 	vectorOid = PgturbohybridVectorTypeOid();
-	multivectorOid = PgturbohybridMultiVectorTypeOid();
 	hasLexical = keyAttrs > PGTURBOHYBRID_LEXICAL_KEY_INDEX;
 	if (hasLexical)
 		lexicalType =
 			TupleDescAttr(desc, PGTURBOHYBRID_LEXICAL_KEY_INDEX)->atttypid;
 
 	if ((!OidIsValid(vectorOid) || denseType != vectorOid) &&
-		(!OidIsValid(multivectorOid) || denseType != multivectorOid))
+		!PgturbohybridTypeIsMultiVector(denseType))
 		ereport(ERROR,
 				(errcode(ERRCODE_DATATYPE_MISMATCH),
-				 errmsg("pgturbohybrid first key must be type vector or turbohybrid_multivector"),
+				 errmsg("pgturbohybrid first key must be type vector or multivector"),
 				 errdetail("Found %s.", format_type_be(denseType))));
 
 	if (hasLexical && lexicalType != TSVECTOROID)
@@ -2127,11 +2801,10 @@ PgturbohybridValidateIndex(Relation index, IndexInfo *indexInfo)
 static bool
 PgturbohybridIndexIsMultiVector(Relation index)
 {
-	Oid			multivectorOid = PgturbohybridMultiVectorTypeOid();
 	TupleDesc	desc = RelationGetDescr(index);
 
-	return OidIsValid(multivectorOid) &&
-		TupleDescAttr(desc, PGTURBOHYBRID_DENSE_KEY_INDEX)->atttypid == multivectorOid;
+	return PgturbohybridTypeIsMultiVector(
+		TupleDescAttr(desc, PGTURBOHYBRID_DENSE_KEY_INDEX)->atttypid);
 }
 
 static ScanKey
@@ -2233,10 +2906,16 @@ PgturbohybridScoreCompare(const void *a, const void *b)
 {
 	const PgturbohybridResult *ra = (const PgturbohybridResult *) a;
 	const PgturbohybridResult *rb = (const PgturbohybridResult *) b;
-	int			raBoth = (ra->hasDense && ra->hasBm25) ? 1 : 0;
-	int			rbBoth = (rb->hasDense && rb->hasBm25) ? 1 : 0;
+	bool		raDenseLike = ra->hasDense || ra->hasMultivector;
+	bool		rbDenseLike = rb->hasDense || rb->hasMultivector;
+	int			raBoth = (raDenseLike && ra->hasBm25) ? 1 : 0;
+	int			rbBoth = (rbDenseLike && rb->hasBm25) ? 1 : 0;
 	int32		raDenseRank = ra->hasDense ? ra->denseRank : INT_MAX;
 	int32		rbDenseRank = rb->hasDense ? rb->denseRank : INT_MAX;
+	int32		raMultiVectorRank =
+		ra->hasMultivector ? ra->multivectorRank : INT_MAX;
+	int32		rbMultiVectorRank =
+		rb->hasMultivector ? rb->multivectorRank : INT_MAX;
 	int32		raBm25Rank = ra->hasBm25 ? ra->bm25Rank : INT_MAX;
 	int32		rbBm25Rank = rb->hasBm25 ? rb->bm25Rank : INT_MAX;
 
@@ -2248,6 +2927,9 @@ PgturbohybridScoreCompare(const void *a, const void *b)
 		return rbBoth - raBoth;
 	if (raDenseRank != rbDenseRank)
 		return (raDenseRank > rbDenseRank) - (raDenseRank < rbDenseRank);
+	if (raMultiVectorRank != rbMultiVectorRank)
+		return (raMultiVectorRank > rbMultiVectorRank) -
+			(raMultiVectorRank < rbMultiVectorRank);
 	if (raBm25Rank != rbBm25Rank)
 		return (raBm25Rank > rbBm25Rank) - (raBm25Rank < rbBm25Rank);
 	return (ra->nodeId > rb->nodeId) - (ra->nodeId < rb->nodeId);
@@ -2508,6 +3190,18 @@ PgturbohybridQueryValidateMultiVectorFusionSupport(Relation index,
 	uint16		requestedFusion;
 
 	(void) index;
+	if (query == NULL || !PgturbohybridQueryHasMultiVector(query))
+		return;
+
+	requestedFusion = pgturbohybrid_force_fusion != 0 ?
+		pgturbohybrid_force_fusion : query->fusion;
+	if (PgturbohybridQueryHasVector(query) &&
+		requestedFusion != PGTURBOHYBRID_FUSION_RRF)
+		ereport(ERROR,
+				(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
+				 errmsg("vector_query plus multivector_query hybrid fusion supports rrf only"),
+				 errdetail("Three-branch vector, multivector, and BM25 fusion keeps independent score spaces and currently uses rank-only reciprocal rank fusion.")));
+
 	if (query == NULL ||
 		!PgturbohybridQueryHasMultiVector(query) ||
 		!PgturbohybridQueryHasText(query))
@@ -2519,8 +3213,6 @@ PgturbohybridQueryValidateMultiVectorFusionSupport(Relation index,
 		return;
 	}
 
-	requestedFusion = pgturbohybrid_force_fusion != 0 ?
-		pgturbohybrid_force_fusion : query->fusion;
 	if (requestedFusion != PGTURBOHYBRID_FUSION_RRF &&
 		requestedFusion != PGTURBOHYBRID_FUSION_WEIGHTED &&
 		requestedFusion != PGTURBOHYBRID_FUSION_FAST_WEIGHTED &&
@@ -2558,20 +3250,20 @@ PgturbohybridEffectiveQuery(PgturbohybridQueryHeader *query, int limit,
 {
 	PgturbohybridQueryHeader *effective;
 	Size		querySize = VARSIZE_ANY(query);
-	bool		hasDense = PgturbohybridQueryHasDense(query);
 	bool		hasTsQuery =
 		(query->flags & PGTURBOHYBRID_QUERY_FLAG_HAS_TSQUERY) != 0;
 
 	effective = MemoryContextAlloc(memoryContext, querySize);
 	memcpy(effective, query, querySize);
 
-	/*
-	 * Default dense budget applies to both vector_query and multivector_query.
-	 */
 	effective->denseK = PgturbohybridApplyAutoBudget(query->denseK, limit,
 												pgturbohybrid_auto_budget_min_dense_k,
 												(query->flags & PGTURBOHYBRID_QUERY_FLAG_DENSE_K_DEFAULTED) != 0,
-												hasDense);
+												PgturbohybridQueryHasVector(query));
+	effective->multivectorK = PgturbohybridApplyAutoBudget(query->multivectorK, limit,
+														   pgturbohybrid_auto_budget_min_dense_k,
+														   (query->flags & PGTURBOHYBRID_QUERY_FLAG_DENSE_K_DEFAULTED) != 0,
+														   PgturbohybridQueryHasMultiVector(query));
 	effective->bm25K = PgturbohybridApplyAutoBudget(query->bm25K, limit,
 											   pgturbohybrid_auto_budget_min_bm25_k,
 											   (query->flags & PGTURBOHYBRID_QUERY_FLAG_BM25_K_DEFAULTED) != 0,
@@ -3174,6 +3866,7 @@ PgturbohybridBuildBranchPlan(PgturbohybridBranchPlan *plan,
 							 uint16 effectiveFusion,
 							 const TqDenseCandidate *dense,
 							 int denseCount,
+							 bool denseInputIsMultiVector,
 							 const PgturbohybridBm25Result *bm25,
 							 int bm25Count,
 							 const TqDenseCandidateStats *denseStats,
@@ -3182,6 +3875,7 @@ PgturbohybridBuildBranchPlan(PgturbohybridBranchPlan *plan,
 {
 	bool		hasVector;
 	bool		hasMultivector;
+	bool		planDenseAsMultiVector;
 	bool		denseTruncated;
 	bool		bm25Injected;
 	bool		emitBm25Branch;
@@ -3200,6 +3894,7 @@ PgturbohybridBuildBranchPlan(PgturbohybridBranchPlan *plan,
 		(query->flags & PGTURBOHYBRID_QUERY_FLAG_HAS_VECTOR) != 0;
 	hasMultivector =
 		(query->flags & PGTURBOHYBRID_QUERY_FLAG_HAS_MULTIVECTOR) != 0;
+	planDenseAsMultiVector = hasMultivector && denseInputIsMultiVector;
 	bm25Injected = denseStats != NULL &&
 		denseStats->multivectorBm25InjectionEnabled;
 	emitBm25Branch =
@@ -3212,16 +3907,20 @@ PgturbohybridBuildBranchPlan(PgturbohybridBranchPlan *plan,
 	if (bm25 != NULL && bm25Count > 0)
 		bm25Score = bm25[0].bm25Score;
 
-	if ((hasVector || hasMultivector) && query->denseK > 0)
+	if ((hasVector || hasMultivector) &&
+		(planDenseAsMultiVector ? query->multivectorK : query->denseK) > 0)
 	{
-		denseLimit = (uint32) Max(query->denseK, 0);
+		int32		requestedK = planDenseAsMultiVector ?
+			query->multivectorK : query->denseK;
+
+		denseLimit = (uint32) Max(requestedK, 0);
 		denseRescoreLimit = denseLimit;
-		denseTruncated = denseCount >= query->denseK && query->denseK > 0;
-		denseKind = hasMultivector ?
+		denseTruncated = denseCount >= requestedK && requestedK > 0;
+		denseKind = planDenseAsMultiVector ?
 			PgturbohybridMultiVectorBranchKind(denseStats) :
 			PGTURBOHYBRID_BRANCH_KIND_DENSE_SINGLE;
 
-		if (denseStats != NULL && hasMultivector)
+		if (denseStats != NULL && planDenseAsMultiVector)
 		{
 			if (denseStats->effectiveResultTarget > 0)
 				denseLimit = denseStats->effectiveResultTarget;
@@ -3236,7 +3935,7 @@ PgturbohybridBuildBranchPlan(PgturbohybridBranchPlan *plan,
 		}
 
 		denseSourceFlags = PGTURBOHYBRID_BRANCH_SOURCE_DENSE |
-			(hasMultivector ?
+			(planDenseAsMultiVector ?
 			 PGTURBOHYBRID_BRANCH_SOURCE_MULTIVECTOR : 0) |
 			(bm25Injected ? PGTURBOHYBRID_BRANCH_SOURCE_BM25 : 0);
 
@@ -3246,7 +3945,7 @@ PgturbohybridBuildBranchPlan(PgturbohybridBranchPlan *plan,
 								   (uint32) Max(denseCount, 0),
 								   denseTruncated, denseElapsedUs);
 
-		if (hasMultivector &&
+		if (planDenseAsMultiVector &&
 			pgturbohybrid_multivector_branch_plan ==
 			PGTURBOHYBRID_BRANCH_PLAN_QDRANT_LIKE &&
 			denseKind == PGTURBOHYBRID_BRANCH_KIND_PROXY_VECTOR &&
@@ -3464,7 +4163,7 @@ PgturbohybridApplyFinalDiversity(IndexScanDesc scan,
 	int			payloadSlot = pgturbohybrid_final_diversity_payload_slot;
 	int			poolMultiplier = Max(pgturbohybrid_final_diversity_pool_multiplier, 1);
 	int			poolCount;
-	int			selectedCount = 0;
+	volatile int selectedCount = 0;
 	double		bestScore;
 	double		worstScore;
 	double		scoreRange;
@@ -3473,7 +4172,7 @@ PgturbohybridApplyFinalDiversity(IndexScanDesc scan,
 	int			afterDuplicates;
 	instr_time	start;
 	instr_time	lockStart;
-	bool		applied = false;
+	volatile bool applied = false;
 
 	stats->finalDiversityMode = pgturbohybrid_final_diversity;
 	stats->finalDiversityPayloadSlot = payloadSlot;
@@ -3670,6 +4369,19 @@ PgturbohybridAddDenseCandidate(PgturbohybridResult *item,
 }
 
 static void
+PgturbohybridAddMultiVectorCandidate(PgturbohybridResult *item,
+									 const TqDenseCandidate *candidate)
+{
+	item->nodeId = candidate->nodeId;
+	item->heaptid = candidate->heaptid;
+	item->multivectorDistance = candidate->distance;
+	item->multivectorSimilarity = candidate->similarity;
+	item->multivectorRank = candidate->rank;
+	item->hasMultivector = true;
+	item->exactScored = candidate->exactScored;
+}
+
+static void
 PgturbohybridAddBm25Candidate(PgturbohybridResult *item,
 							  const PgturbohybridBm25Result *candidate)
 {
@@ -3684,7 +4396,7 @@ static void
 PgturbohybridMergeBm25Candidate(PgturbohybridResult *item,
 								const PgturbohybridBm25Result *candidate)
 {
-	if (!item->hasDense)
+	if (!item->hasDense && !item->hasMultivector)
 		item->heaptid = candidate->heaptid;
 	item->nodeId = candidate->nodeId;
 	item->bm25Score = candidate->bm25Score;
@@ -3696,7 +4408,7 @@ static void
 PgturbohybridMergeBm25ResultItem(PgturbohybridResult *item,
 								 const PgturbohybridResult *bm25Item)
 {
-	if (!item->hasDense)
+	if (!item->hasDense && !item->hasMultivector)
 		item->heaptid = bm25Item->heaptid;
 	item->hasBm25 = true;
 	item->bm25Score = bm25Item->bm25Score;
@@ -3707,9 +4419,11 @@ static void
 PgturbohybridRecordFusionClass(PgturbohybridLastScanStats *stats,
 							   const PgturbohybridResult *item)
 {
-	if (item->hasDense && item->hasBm25)
+	bool		hasDenseLike = item->hasDense || item->hasMultivector;
+
+	if (hasDenseLike && item->hasBm25)
 		stats->bothMatch++;
-	else if (item->hasDense)
+	else if (hasDenseLike)
 		stats->denseOnly++;
 	else if (item->hasBm25)
 		stats->bm25Only++;
@@ -3721,6 +4435,8 @@ PgturbohybridRrfScore(PgturbohybridQueryHeader *query,
 {
 	return query->denseWeight *
 		(item->hasDense ? 1.0 / ((double) query->rrfK + item->denseRank) : 0.0) +
+		query->multivectorWeight *
+		(item->hasMultivector ? 1.0 / ((double) query->rrfK + item->multivectorRank) : 0.0) +
 		query->bm25Weight *
 		(item->hasBm25 ? 1.0 / ((double) query->rrfK + item->bm25Rank) : 0.0);
 }
@@ -3731,6 +4447,27 @@ PgturbohybridNormalize(double value, double minValue, double maxValue)
 	if (maxValue <= minValue)
 		return value > 0 ? 1.0 : 0.0;
 	return (value - minValue) / (maxValue - minValue);
+}
+
+static bool
+PgturbohybridResultHasDenseLike(const PgturbohybridResult *item)
+{
+	return item->hasDense || item->hasMultivector;
+}
+
+static double
+PgturbohybridResultDenseLikeSimilarity(const PgturbohybridResult *item)
+{
+	return item->hasDense ? item->denseSimilarity :
+		item->multivectorSimilarity;
+}
+
+static double
+PgturbohybridResultDenseLikeWeight(PgturbohybridQueryHeader *query,
+								   const PgturbohybridResult *item)
+{
+	return item->hasMultivector && !item->hasDense ?
+		query->multivectorWeight : query->denseWeight;
 }
 
 static double
@@ -3826,9 +4563,9 @@ PgturbohybridDbsfCollectBranch(const PgturbohybridResult *results, int count,
 
 		if (dense)
 		{
-			if (!results[i].hasDense)
+			if (!PgturbohybridResultHasDenseLike(&results[i]))
 				continue;
-			score = results[i].denseSimilarity;
+			score = PgturbohybridResultDenseLikeSimilarity(&results[i]);
 		}
 		else
 		{
@@ -4067,7 +4804,8 @@ PgturbohybridApplyBm25OnlyExactRescore(IndexScanDesc scan,
 
 	for (int i = 0; i < count; i++)
 	{
-		if (results[i].hasBm25 && !results[i].hasDense)
+		if (results[i].hasBm25 && !results[i].hasDense &&
+			!results[i].hasMultivector)
 		{
 			haveBm25Only = true;
 			break;
@@ -4085,8 +4823,10 @@ PgturbohybridApplyBm25OnlyExactRescore(IndexScanDesc scan,
 	denseDistances = palloc(sizeof(double) * Max(count, 1));
 	for (int i = 0; i < count; i++)
 	{
-		if (results[i].hasDense)
-			denseDistances[denseDistanceCount++] = results[i].denseDistance;
+		if (PgturbohybridResultHasDenseLike(&results[i]))
+			denseDistances[denseDistanceCount++] =
+				results[i].hasDense ? results[i].denseDistance :
+				results[i].multivectorDistance;
 	}
 
 	INSTR_TIME_SET_CURRENT(lockStart);
@@ -4102,7 +4842,8 @@ PgturbohybridApplyBm25OnlyExactRescore(IndexScanDesc scan,
 			double		distance;
 			int32		denseRank = 1;
 
-			if (!(results[i].hasBm25 && !results[i].hasDense))
+			if (!(results[i].hasBm25 && !results[i].hasDense &&
+				  !results[i].hasMultivector))
 				continue;
 			if (results[i].nodeId >= meta.tqNodeCount)
 				continue;
@@ -4177,7 +4918,8 @@ PgturbohybridApplyBm25OnlyMultiVectorExactRescore(IndexScanDesc scan,
 
 	for (int i = 0; i < count; i++)
 	{
-		if (results[i].hasBm25 && !results[i].hasDense)
+		if (results[i].hasBm25 && !results[i].hasDense &&
+			!results[i].hasMultivector)
 		{
 			haveBm25Only = true;
 			break;
@@ -4220,7 +4962,8 @@ PgturbohybridApplyBm25OnlyMultiVectorExactRescore(IndexScanDesc scan,
 		int32		denseRank = 1;
 
 		CHECK_FOR_INTERRUPTS();
-		if (!(results[i].hasBm25 && !results[i].hasDense))
+		if (!(results[i].hasBm25 && !results[i].hasDense &&
+			  !results[i].hasMultivector))
 			continue;
 
 		visible = table_tuple_fetch_row_version(heap, &results[i].heaptid,
@@ -4250,11 +4993,11 @@ PgturbohybridApplyBm25OnlyMultiVectorExactRescore(IndexScanDesc scan,
 				denseRank++;
 		}
 
-		results[i].denseDistance = distance;
-		results[i].denseSimilarity =
+		results[i].multivectorDistance = distance;
+		results[i].multivectorSimilarity =
 			queryWeightSum > 0.0 ? maxsim / queryWeightSum : 0.0;
-		results[i].denseRank = denseRank;
-		results[i].hasDense = true;
+		results[i].multivectorRank = denseRank;
+		results[i].hasMultivector = true;
 		results[i].exactScored = true;
 
 		if ((char *) docMv != valuePtr)
@@ -4413,6 +5156,10 @@ PgturbohybridInjectMultiVectorBm25Candidates(IndexScanDesc scan,
 		return;
 	denseStats->multivectorBm25InjectionEnabled = false;
 	denseStats->multivectorBm25InjectionCandidates = 0;
+	denseStats->multivectorBm25InjectionCandidateLimit = 0;
+	denseStats->multivectorBm25InjectionPoolSize = 0;
+	strlcpy(denseStats->multivectorBm25InjectionLimitReason, "not_applicable",
+			sizeof(denseStats->multivectorBm25InjectionLimitReason));
 	denseStats->multivectorBm25InjectionRetained = 0;
 	denseStats->multivectorBm25InjectionExactReranked = 0;
 	denseStats->learnedSparseCandidates = 0;
@@ -4448,18 +5195,45 @@ PgturbohybridInjectMultiVectorBm25Candidates(IndexScanDesc scan,
 	if (learnedSparse)
 		denseStats->learnedSparseCandidates = (uint32) bm25Count;
 
-	candidateLimit = Max(*denseCount,
-						 PgturbohybridBudgetFinalTarget(query,
-														autoBudgetLimit));
+	candidateLimit = PgturbohybridBudgetFinalTarget(query, autoBudgetLimit);
+	if (*denseCount >= candidateLimit)
+	{
+		candidateLimit = *denseCount;
+		strlcpy(denseStats->multivectorBm25InjectionLimitReason, "dense_count",
+				sizeof(denseStats->multivectorBm25InjectionLimitReason));
+	}
+	else
+		strlcpy(denseStats->multivectorBm25InjectionLimitReason,
+				"final_target",
+				sizeof(denseStats->multivectorBm25InjectionLimitReason));
 	if (candidateLimit <= 0)
+	{
 		candidateLimit = bm25Count;
+		strlcpy(denseStats->multivectorBm25InjectionLimitReason, "bm25_count",
+				sizeof(denseStats->multivectorBm25InjectionLimitReason));
+	}
 	if (pgturbohybrid_multivector_doc_candidate_k > 0)
-		candidateLimit = Min(candidateLimit,
-							 pgturbohybrid_multivector_doc_candidate_k);
+	{
+		if (candidateLimit > pgturbohybrid_multivector_doc_candidate_k)
+		{
+			candidateLimit = pgturbohybrid_multivector_doc_candidate_k;
+			strlcpy(denseStats->multivectorBm25InjectionLimitReason,
+					"doc_candidate_k",
+					sizeof(denseStats->multivectorBm25InjectionLimitReason));
+		}
+	}
 	if (pgturbohybrid_multivector_exact_rerank_k > 0)
-		candidateLimit = Min(candidateLimit,
-							 pgturbohybrid_multivector_exact_rerank_k);
+	{
+		if (candidateLimit > pgturbohybrid_multivector_exact_rerank_k)
+		{
+			candidateLimit = pgturbohybrid_multivector_exact_rerank_k;
+			strlcpy(denseStats->multivectorBm25InjectionLimitReason,
+					"exact_rerank_k",
+					sizeof(denseStats->multivectorBm25InjectionLimitReason));
+		}
+	}
 	candidateLimit = Max(candidateLimit, 1);
+	denseStats->multivectorBm25InjectionCandidateLimit = (uint32) candidateLimit;
 
 	pool = MemoryContextAllocZero(memoryContext,
 								  sizeof(*pool) *
@@ -4531,6 +5305,7 @@ PgturbohybridInjectMultiVectorBm25Candidates(IndexScanDesc scan,
 	if (poolCount > 1)
 		qsort(pool, poolCount, sizeof(*pool),
 			  PgturbohybridMultiVectorBm25InjectionCompare);
+	denseStats->multivectorBm25InjectionPoolSize = (uint32) poolCount;
 
 	newDenseCount = Min(poolCount, candidateLimit);
 	newDense = MemoryContextAllocZero(memoryContext,
@@ -4797,10 +5572,13 @@ PgturbohybridScoreResults(PgturbohybridScanState *state, PgturbohybridResult *re
 	{
 		for (int i = 0; i < count; i++)
 		{
-			if (results[i].hasDense)
+			if (PgturbohybridResultHasDenseLike(&results[i]))
 			{
-				minDense = Min(minDense, results[i].denseSimilarity);
-				maxDense = Max(maxDense, results[i].denseSimilarity);
+				double		similarity =
+					PgturbohybridResultDenseLikeSimilarity(&results[i]);
+
+				minDense = Min(minDense, similarity);
+				maxDense = Max(maxDense, similarity);
 			}
 			if (results[i].hasBm25)
 			{
@@ -4833,8 +5611,10 @@ PgturbohybridScoreResults(PgturbohybridScanState *state, PgturbohybridResult *re
 	{
 		if (fusion == PGTURBOHYBRID_FUSION_WEIGHTED)
 		{
-			double		denseNorm = results[i].hasDense ?
-				PgturbohybridNormalize(results[i].denseSimilarity, minDense, maxDense) : 0.0;
+			double		denseNorm =
+				PgturbohybridResultHasDenseLike(&results[i]) ?
+				PgturbohybridNormalize(PgturbohybridResultDenseLikeSimilarity(&results[i]),
+									   minDense, maxDense) : 0.0;
 			double		bm25Norm = results[i].hasBm25 ?
 				PgturbohybridNormalize(results[i].bm25Score, minBm25, maxBm25) : 0.0;
 
@@ -4842,8 +5622,10 @@ PgturbohybridScoreResults(PgturbohybridScanState *state, PgturbohybridResult *re
 		}
 		else if (fusion == PGTURBOHYBRID_FUSION_FAST_WEIGHTED)
 		{
-			double		denseNorm = results[i].hasDense ?
-				PgturbohybridFastWeightedDenseNormalize(results[i].denseSimilarity) : 0.0;
+			double		denseNorm =
+				PgturbohybridResultHasDenseLike(&results[i]) ?
+				PgturbohybridFastWeightedDenseNormalize(
+					PgturbohybridResultDenseLikeSimilarity(&results[i])) : 0.0;
 			double		bm25Norm = results[i].hasBm25 ?
 				PgturbohybridBm25NormalizeSaturating(results[i].bm25Score) : 0.0;
 
@@ -4851,12 +5633,14 @@ PgturbohybridScoreResults(PgturbohybridScanState *state, PgturbohybridResult *re
 		}
 		else if (fusion == PGTURBOHYBRID_FUSION_CALIBRATED)
 		{
-			double		denseNorm = results[i].hasDense ?
-				PgturbohybridFastWeightedDenseNormalize(results[i].denseSimilarity) : 0.0;
+			double		denseNorm =
+				PgturbohybridResultHasDenseLike(&results[i]) ?
+				PgturbohybridFastWeightedDenseNormalize(
+					PgturbohybridResultDenseLikeSimilarity(&results[i])) : 0.0;
 			double		bm25Norm = results[i].hasBm25 ?
 				PgturbohybridBm25NormalizeSaturating(results[i].bm25Score) : 0.0;
 			double		bonus =
-				(results[i].hasDense && results[i].hasBm25) ?
+				(PgturbohybridResultHasDenseLike(&results[i]) && results[i].hasBm25) ?
 				PgturbohybridClampUnit(
 					pgturbohybrid_calibrated_fusion_both_match_bonus) : 0.0;
 
@@ -4865,15 +5649,18 @@ PgturbohybridScoreResults(PgturbohybridScanState *state, PgturbohybridResult *re
 		}
 		else if (fusion == PGTURBOHYBRID_FUSION_DBSF)
 		{
-			double		denseNorm = results[i].hasDense ?
-				PgturbohybridDbsfNormalize(results[i].denseSimilarity,
-										   &dbsfDense) : 0.0;
+			double		denseNorm =
+				PgturbohybridResultHasDenseLike(&results[i]) ?
+				PgturbohybridDbsfNormalize(
+					PgturbohybridResultDenseLikeSimilarity(&results[i]),
+					&dbsfDense) : 0.0;
 			double		bm25Norm = results[i].hasBm25 ?
 				PgturbohybridDbsfNormalize(results[i].bm25Score,
 										   &dbsfBm25) : 0.0;
 
 			results[i].fusedScore =
-				query->denseWeight * denseNorm +
+				PgturbohybridResultDenseLikeWeight(query, &results[i]) *
+				denseNorm +
 				query->bm25Weight * bm25Norm;
 		}
 		else
@@ -5133,12 +5920,15 @@ PgturbohybridCollectScanResults(IndexScanDesc scan, PgturbohybridScanState *stat
 {
 	PgturbohybridGraphScanOpaque so = (PgturbohybridGraphScanOpaque) scan->opaque;
 	TqDenseCandidate *dense = NULL;
+	TqDenseCandidate *multivector = NULL;
 	PgturbohybridBm25Result *bm25 = NULL;
 	PgturbohybridResult *items = NULL;
 	PgturbohybridResult *merged = NULL;
 	TqDenseCandidateStats denseStats;
+	TqDenseCandidateStats multivectorStats;
 	PgturbohybridBm25QueryStats bm25Stats;
 	int			denseCount = 0;
+	int			multivectorCount = 0;
 	int			bm25Count = 0;
 	int			itemCount = 0;
 	int			mergedCount = 0;
@@ -5179,14 +5969,21 @@ PgturbohybridCollectScanResults(IndexScanDesc scan, PgturbohybridScanState *stat
 	uint16		requestedFusion;
 	int			hybridQueryShapeForStats;
 	bool		hasMultivectorQuery;
+	bool		hasVectorQuery;
 	bool		hasTextQuery;
+	bool		indexIsMultiVector;
+	bool		canRunVectorBranch;
 	bool		useDocumentFusionKey;
+	bool		multivectorBranchUsed = false;
+	bool		multivectorMergedAsDense = false;
+	uint64		multivectorElapsedUs = 0;
 
 	if (state->collectDone)
 		return;
 
 	INSTR_TIME_SET_CURRENT(totalStart);
 	memset(&denseStats, 0, sizeof(denseStats));
+	memset(&multivectorStats, 0, sizeof(multivectorStats));
 	memset(&bm25Stats, 0, sizeof(bm25Stats));
 	memset(&lastStats, 0, sizeof(lastStats));
 	lastStats.finalDiversityMode = PGTURBOHYBRID_FINAL_DIVERSITY_OFF;
@@ -5206,8 +6003,12 @@ PgturbohybridCollectScanResults(IndexScanDesc scan, PgturbohybridScanState *stat
 	hybridEffectiveBm25Ceiling = scanQuery->bm25K;
 	hasMultivectorQuery =
 		(scanQuery->flags & PGTURBOHYBRID_QUERY_FLAG_HAS_MULTIVECTOR) != 0;
+	hasVectorQuery =
+		(scanQuery->flags & PGTURBOHYBRID_QUERY_FLAG_HAS_VECTOR) != 0;
 	hasTextQuery =
 		(scanQuery->flags & PGTURBOHYBRID_QUERY_FLAG_HAS_TSQUERY) != 0;
+	indexIsMultiVector = PgturbohybridIndexIsMultiVector(scan->indexRelation);
+	canRunVectorBranch = hasVectorQuery && !indexIsMultiVector;
 	useDocumentFusionKey = hasMultivectorQuery;
 
 	PgturbohybridQueryValidateMultiVectorFusionSupport(scan->indexRelation,
@@ -5229,7 +6030,7 @@ PgturbohybridCollectScanResults(IndexScanDesc scan, PgturbohybridScanState *stat
 	if (pgturbohybrid_hybrid_budget_policy == PGTURBOHYBRID_HYBRID_BUDGET_ADAPTIVE &&
 		hasLexicalKey &&
 		/* Adaptive hybrid dense probing remains vector-only for now. */
-		(scanQuery->flags & PGTURBOHYBRID_QUERY_FLAG_HAS_VECTOR) != 0 &&
+		canRunVectorBranch &&
 		(scanQuery->flags & PGTURBOHYBRID_QUERY_FLAG_HAS_TSQUERY) != 0 &&
 		(originalQuery->flags & PGTURBOHYBRID_QUERY_FLAG_DENSE_K_DEFAULTED) != 0 &&
 		scanQuery->denseK > PgturbohybridAdaptiveMinBudget(PgturbohybridBudgetFinalTarget(scanQuery,
@@ -5279,7 +6080,7 @@ PgturbohybridCollectScanResults(IndexScanDesc scan, PgturbohybridScanState *stat
 		denseProbeReusable = true;
 	}
 
-	if ((scanQuery->flags & PGTURBOHYBRID_QUERY_FLAG_HAS_VECTOR) != 0 &&
+	if (canRunVectorBranch &&
 		scanQuery->denseK > 0 && !denseProbeReusable)
 	{
 		denseBranchUsed = true;
@@ -5290,32 +6091,43 @@ PgturbohybridCollectScanResults(IndexScanDesc scan, PgturbohybridScanState *stat
 		lastStats.denseElapsedUs = denseProbeElapsedUs +
 			PgturbohybridElapsedUs(phaseStart);
 	}
-	else if ((scanQuery->flags & PGTURBOHYBRID_QUERY_FLAG_HAS_MULTIVECTOR) != 0 &&
-			 scanQuery->denseK > 0)
-	{
-		denseBranchUsed = true;
-		INSTR_TIME_SET_CURRENT(phaseStart);
-		denseCount =
-			PgturbohybridGraphCollectMultiVectorDenseCandidates(scan,
-																scanQuery,
-																scanQuery->denseK,
-																&dense,
-																so->tmpCtx,
-																&denseStats);
-		lastStats.denseElapsedUs = PgturbohybridElapsedUs(phaseStart);
-	}
 	else if (denseProbeReusable)
 		denseBranchUsed = true;
+
+	if (hasMultivectorQuery && scanQuery->multivectorK > 0)
+	{
+		multivectorBranchUsed = true;
+		INSTR_TIME_SET_CURRENT(phaseStart);
+		multivectorCount =
+			PgturbohybridGraphCollectMultiVectorDenseCandidates(scan,
+																scanQuery,
+																scanQuery->multivectorK,
+																&multivector,
+																so->tmpCtx,
+																&multivectorStats);
+		multivectorElapsedUs = PgturbohybridElapsedUs(phaseStart);
+		if (!canRunVectorBranch)
+		{
+			dense = multivector;
+			denseCount = multivectorCount;
+			denseStats = multivectorStats;
+			multivector = NULL;
+			multivectorCount = 0;
+			multivectorMergedAsDense = true;
+		}
+	}
 
 	PgturbohybridMaybeApplyDenseBm25Budget(scanQuery, dense, denseCount,
 									  autoBudgetLimit, bm25BudgetReason,
 									  sizeof(bm25BudgetReason),
 									  &bm25DenseConfidence);
-	PgturbohybridMaybeApplyMultiVectorAdmissionBudget(scanQuery, originalQuery,
-													  &denseStats, denseCount,
-													  autoBudgetLimit,
-													  hybridEffectiveBm25Ceiling,
-													  &hybridBudgetChoice);
+	if (hasMultivectorQuery)
+		PgturbohybridMaybeApplyMultiVectorAdmissionBudget(scanQuery, originalQuery,
+														  multivectorMergedAsDense ? &denseStats : &multivectorStats,
+														  multivectorMergedAsDense ? denseCount : multivectorCount,
+														  autoBudgetLimit,
+														  hybridEffectiveBm25Ceiling,
+														  &hybridBudgetChoice);
 	bm25BudgetEffectiveK = scanQuery->bm25K;
 	PgturbohybridMaybeApplyBm25HybridBound(scanQuery, denseCount,
 									  autoBudgetLimit,
@@ -5347,16 +6159,28 @@ PgturbohybridCollectScanResults(IndexScanDesc scan, PgturbohybridScanState *stat
 		lastStats.bm25ElapsedUs = PgturbohybridElapsedUs(phaseStart);
 	}
 
-	PgturbohybridInjectMultiVectorBm25Candidates(scan, scanQuery, bm25,
-												 bm25Count, &dense,
-												 &denseCount,
-												 autoBudgetLimit,
-												 so->tmpCtx, &denseStats);
+	if (multivectorMergedAsDense)
+		PgturbohybridInjectMultiVectorBm25Candidates(scan, scanQuery, bm25,
+													 bm25Count, &dense,
+													 &denseCount,
+													 autoBudgetLimit,
+													 so->tmpCtx, &denseStats);
+	else
+		PgturbohybridInjectMultiVectorBm25Candidates(scan, scanQuery, bm25,
+													 bm25Count, &multivector,
+													 &multivectorCount,
+													 autoBudgetLimit,
+													 so->tmpCtx, &multivectorStats);
 	if (PgturbohybridUsingLearnedSparseCandidateInjection())
-		denseStats.learnedSparseBranchLatencyUs = lastStats.bm25ElapsedUs;
+	{
+		if (multivectorMergedAsDense)
+			denseStats.learnedSparseBranchLatencyUs = lastStats.bm25ElapsedUs;
+		else
+			multivectorStats.learnedSparseBranchLatencyUs = lastStats.bm25ElapsedUs;
+	}
 
 	INSTR_TIME_SET_CURRENT(phaseStart);
-	fusionCandidatesSeen = denseCount + bm25Count;
+	fusionCandidatesSeen = denseCount + multivectorCount + bm25Count;
 	lastStats.fusionCandidatesSeen = fusionCandidatesSeen;
 	effectiveFusion = pgturbohybrid_force_fusion != 0 ?
 		pgturbohybrid_force_fusion : scanQuery->fusion;
@@ -5394,9 +6218,25 @@ PgturbohybridCollectScanResults(IndexScanDesc scan, PgturbohybridScanState *stat
 													&dense[i].heaptid) :
 				PgturbohybridFindMergeSlot(slots, slotMask, dense[i].nodeId);
 
-			if (item->hasDense || item->hasBm25)
+			if (item->hasDense || item->hasMultivector || item->hasBm25)
 				lastStats.fusionDuplicates++;
-			PgturbohybridAddDenseCandidate(item, &dense[i]);
+			if (multivectorMergedAsDense)
+				PgturbohybridAddMultiVectorCandidate(item, &dense[i]);
+			else
+				PgturbohybridAddDenseCandidate(item, &dense[i]);
+		}
+		for (int i = 0; i < multivectorCount; i++)
+		{
+			PgturbohybridResult *item =
+				useDocumentFusionKey ?
+				PgturbohybridFindMergeSlotByHeapTid(slots, slotMask,
+													&multivector[i].heaptid) :
+				PgturbohybridFindMergeSlot(slots, slotMask,
+										   multivector[i].nodeId);
+
+			if (item->hasDense || item->hasMultivector || item->hasBm25)
+				lastStats.fusionDuplicates++;
+			PgturbohybridAddMultiVectorCandidate(item, &multivector[i]);
 		}
 		for (int i = 0; i < bm25Count; i++)
 		{
@@ -5406,7 +6246,7 @@ PgturbohybridCollectScanResults(IndexScanDesc scan, PgturbohybridScanState *stat
 													&bm25[i].heaptid) :
 				PgturbohybridFindMergeSlot(slots, slotMask, bm25[i].nodeId);
 
-			if (item->hasDense || item->hasBm25)
+			if (item->hasDense || item->hasMultivector || item->hasBm25)
 				lastStats.fusionDuplicates++;
 			PgturbohybridMergeBm25Candidate(item, &bm25[i]);
 		}
@@ -5443,7 +6283,16 @@ PgturbohybridCollectScanResults(IndexScanDesc scan, PgturbohybridScanState *stat
 		items = palloc0(sizeof(PgturbohybridResult) *
 						Max((int) fusionCandidatesSeen, 1));
 		for (int i = 0; i < denseCount; i++)
-			PgturbohybridAddDenseCandidate(&items[itemCount++], &dense[i]);
+		{
+			if (multivectorMergedAsDense)
+				PgturbohybridAddMultiVectorCandidate(&items[itemCount++],
+													 &dense[i]);
+			else
+				PgturbohybridAddDenseCandidate(&items[itemCount++], &dense[i]);
+		}
+		for (int i = 0; i < multivectorCount; i++)
+			PgturbohybridAddMultiVectorCandidate(&items[itemCount++],
+												 &multivector[i]);
 		for (int i = 0; i < bm25Count; i++)
 			PgturbohybridAddBm25Candidate(&items[itemCount++], &bm25[i]);
 
@@ -5470,6 +6319,15 @@ PgturbohybridCollectScanResults(IndexScanDesc scan, PgturbohybridScanState *stat
 					item.denseDistance = items[i].denseDistance;
 					item.denseSimilarity = items[i].denseSimilarity;
 					item.denseRank = items[i].denseRank;
+					item.exactScored = items[i].exactScored;
+					item.heaptid = items[i].heaptid;
+				}
+				if (items[i].hasMultivector)
+				{
+					item.hasMultivector = true;
+					item.multivectorDistance = items[i].multivectorDistance;
+					item.multivectorSimilarity = items[i].multivectorSimilarity;
+					item.multivectorRank = items[i].multivectorRank;
 					item.exactScored = items[i].exactScored;
 					item.heaptid = items[i].heaptid;
 				}
@@ -5507,6 +6365,7 @@ PgturbohybridCollectScanResults(IndexScanDesc scan, PgturbohybridScanState *stat
 			sizeof(lastStats.indexShape));
 	lastStats.bm25BranchAvailable = hasLexicalKey;
 	lastStats.denseBranchUsed = denseBranchUsed;
+	lastStats.multivectorBranchUsed = multivectorBranchUsed;
 	lastStats.bm25BranchUsed = bm25BranchUsed;
 	strlcpy(lastStats.profile, PgturbohybridProfileName(pgturbohybrid_profile),
 			sizeof(lastStats.profile));
@@ -5514,19 +6373,28 @@ PgturbohybridCollectScanResults(IndexScanDesc scan, PgturbohybridScanState *stat
 			PgturbohybridQueryFusionName(pgturbohybrid_force_fusion != 0 ?
 								  pgturbohybrid_force_fusion : scanQuery->fusion),
 			sizeof(lastStats.fusion));
-	lastStats.denseCandidatesRequested = originalQuery->denseK;
-	lastStats.denseCandidatesEffective = scanQuery->denseK;
-	lastStats.denseKDefaulted =
-		(originalQuery->flags & PGTURBOHYBRID_QUERY_FLAG_DENSE_K_DEFAULTED) != 0;
-	lastStats.denseCandidates = denseCount;
-	lastStats.denseEffectiveResultTarget = denseStats.effectiveResultTarget;
-	lastStats.denseEffectiveSearchEf = denseStats.effectiveSearchEf;
-	lastStats.denseEffectiveRescoreBand = denseStats.effectiveRescoreBand;
-	lastStats.denseHighdimWideningMultiplier =
-		denseStats.highdimWideningMultiplier;
-	lastStats.denseWideningReason = denseStats.wideningReason;
-	lastStats.denseBudgetPolicy = denseStats.denseBudgetPolicy;
-	lastStats.denseRescoreBandPolicy = denseStats.rescoreBandPolicy;
+	if (denseBranchUsed)
+	{
+		lastStats.denseCandidatesRequested = originalQuery->denseK;
+		lastStats.denseCandidatesEffective = scanQuery->denseK;
+		lastStats.denseKDefaulted =
+			(originalQuery->flags & PGTURBOHYBRID_QUERY_FLAG_DENSE_K_DEFAULTED) != 0;
+		lastStats.denseCandidates = denseCount;
+		lastStats.denseEffectiveResultTarget = denseStats.effectiveResultTarget;
+		lastStats.denseEffectiveSearchEf = denseStats.effectiveSearchEf;
+		lastStats.denseEffectiveRescoreBand = denseStats.effectiveRescoreBand;
+		lastStats.denseHighdimWideningMultiplier =
+			denseStats.highdimWideningMultiplier;
+		lastStats.denseWideningReason = denseStats.wideningReason;
+		lastStats.denseBudgetPolicy = denseStats.denseBudgetPolicy;
+		lastStats.denseRescoreBandPolicy = denseStats.rescoreBandPolicy;
+	}
+	lastStats.multivectorCandidatesRequested = originalQuery->multivectorK;
+	lastStats.multivectorCandidatesEffective = scanQuery->multivectorK;
+	lastStats.multivectorCandidates =
+		multivectorMergedAsDense ? denseCount : multivectorCount;
+	if (hasMultivectorQuery && !multivectorMergedAsDense)
+		denseStats = multivectorStats;
 	lastStats.bm25CandidatesRequested = originalQuery->bm25K;
 	lastStats.bm25CandidatesEffective = bm25BudgetEffectiveK;
 	lastStats.bm25KDefaulted =
@@ -5614,6 +6482,18 @@ PgturbohybridCollectScanResults(IndexScanDesc scan, PgturbohybridScanState *stat
 	strlcpy(lastStats.multivectorProxyEncoderKind,
 			denseStats.multivectorProxyEncoderKind,
 			sizeof(lastStats.multivectorProxyEncoderKind));
+	lastStats.learnedProjectionLoaded = denseStats.learnedProjectionLoaded;
+	lastStats.learnedProjectionDim = denseStats.learnedProjectionDim;
+	lastStats.learnedProjectionWeightBytes =
+		denseStats.learnedProjectionWeightBytes;
+	strlcpy(lastStats.learnedProjectionModel,
+			denseStats.learnedProjectionModel,
+			sizeof(lastStats.learnedProjectionModel));
+	strlcpy(lastStats.learnedProjectionChecksum,
+			denseStats.learnedProjectionChecksum,
+			sizeof(lastStats.learnedProjectionChecksum));
+	lastStats.learnedProjectionQueryEncodeUs =
+		denseStats.learnedProjectionQueryEncodeUs;
 	strlcpy(lastStats.multivectorGraphMode,
 			denseStats.multivectorGraphMode,
 			sizeof(lastStats.multivectorGraphMode));
@@ -5648,11 +6528,41 @@ PgturbohybridCollectScanResults(IndexScanDesc scan, PgturbohybridScanState *stat
 		denseStats.multivectorDocGraphOversampling;
 	lastStats.multivectorDocGraphRescoreK =
 		denseStats.multivectorDocGraphRescoreK;
+	lastStats.multivectorDocGraphEntrySampleConfigured =
+		denseStats.multivectorDocGraphEntrySampleConfigured;
+	lastStats.multivectorDocGraphEntrySampleEffective =
+		denseStats.multivectorDocGraphEntrySampleEffective;
+	lastStats.multivectorDocGraphEntrySampleScored =
+		denseStats.multivectorDocGraphEntrySampleScored;
 	lastStats.multivectorDocGraphQuantizedScores =
 		denseStats.multivectorDocGraphQuantizedScores;
+	lastStats.compactMaxsimScoreUs =
+		denseStats.compactMaxsimScoreUs;
+	lastStats.compactMaxsimPairs =
+		denseStats.compactMaxsimPairs;
+	lastStats.compactMaxsimCacheHits =
+		denseStats.compactMaxsimCacheHits;
+	lastStats.compactMaxsimCacheMisses =
+		denseStats.compactMaxsimCacheMisses;
+	lastStats.compactMaxsimBoundChecks =
+		denseStats.compactMaxsimBoundChecks;
+	lastStats.compactMaxsimDocsPruned =
+		denseStats.compactMaxsimDocsPruned;
+	lastStats.compactMaxsimTokensSkipped =
+		denseStats.compactMaxsimTokensSkipped;
 	strlcpy(lastStats.multivectorDocGraphStorageKind,
 			denseStats.multivectorDocGraphStorageKind,
 			sizeof(lastStats.multivectorDocGraphStorageKind));
+	lastStats.proxyOnlyIndex = denseStats.proxyOnlyIndex;
+	lastStats.centroidOnlyIndex = denseStats.centroidOnlyIndex;
+	lastStats.fullMultivectorSidecarAvailable =
+		denseStats.fullMultivectorSidecarAvailable;
+	lastStats.centroidSidecarAvailable =
+		denseStats.centroidSidecarAvailable;
+	lastStats.centroidDocCodesAvailable =
+		denseStats.centroidDocCodesAvailable;
+	lastStats.quantizedInvertedSidecarAvailable =
+		denseStats.quantizedInvertedSidecarAvailable;
 	strlcpy(lastStats.multivectorDocGraphRescoreSource,
 			denseStats.multivectorDocGraphRescoreSource,
 			sizeof(lastStats.multivectorDocGraphRescoreSource));
@@ -5669,13 +6579,117 @@ PgturbohybridCollectScanResults(IndexScanDesc scan, PgturbohybridScanState *stat
 		denseStats.multivectorProxyCandidatesReturned;
 	lastStats.multivectorExactRerankKEffective =
 		denseStats.multivectorExactRerankKEffective;
+	lastStats.proxyCandidateLimitEffective =
+		denseStats.proxyCandidateLimitEffective;
+	strlcpy(lastStats.proxyCandidateLimitSource,
+			denseStats.proxyCandidateLimitSource,
+			sizeof(lastStats.proxyCandidateLimitSource));
+	lastStats.proxyGraphNodesVisited = denseStats.proxyGraphNodesVisited;
+	lastStats.proxyGraphEdgesVisited = denseStats.proxyGraphEdgesVisited;
+	lastStats.proxyGraphCandidatesSeen = denseStats.proxyGraphCandidatesSeen;
+	lastStats.proxyCandidatesReturned = denseStats.proxyCandidatesReturned;
+	lastStats.proxyVectorScoresComputed = denseStats.proxyVectorScoresComputed;
+	lastStats.proxyVectorScoreUs = denseStats.proxyVectorScoreUs;
 	lastStats.proxyCandidates = denseStats.proxyCandidates;
+	lastStats.proxyLazySidecarVectors = denseStats.proxyLazySidecarVectors;
+	strlcpy(lastStats.multivectorDocStorageCacheRequested,
+			denseStats.multivectorDocStorageCacheRequested,
+			sizeof(lastStats.multivectorDocStorageCacheRequested));
+	strlcpy(lastStats.multivectorDocStorageCacheEffective,
+			denseStats.multivectorDocStorageCacheEffective,
+			sizeof(lastStats.multivectorDocStorageCacheEffective));
 	lastStats.proxyTop1Admission = denseStats.proxyTop1Admission;
 	lastStats.proxyExactRerankDocs = denseStats.proxyExactRerankDocs;
+	lastStats.proxyFullSidecarVectorsLoaded =
+		denseStats.proxyFullSidecarVectorsLoaded;
+	lastStats.proxyFullSidecarBytesTouched =
+		denseStats.proxyFullSidecarBytesTouched;
+	lastStats.proxyFullSidecarPagesRead =
+		denseStats.proxyFullSidecarPagesRead;
+	lastStats.proxyFullSidecarLoadUs =
+		denseStats.proxyFullSidecarLoadUs;
+	lastStats.proxyFullSidecarReconstructUs =
+		denseStats.proxyFullSidecarReconstructUs;
+	lastStats.proxyExactRerankHeapFetches =
+		denseStats.proxyExactRerankHeapFetches;
+	lastStats.proxyExactRerankSidecarFetches =
+		denseStats.proxyExactRerankSidecarFetches;
+	lastStats.proxyExactRerankBytesTouched =
+		denseStats.proxyExactRerankBytesTouched;
+	lastStats.proxyExactRerankUs = denseStats.proxyExactRerankUs;
+	lastStats.sidecarCacheBuildThisQuery =
+		denseStats.sidecarCacheBuildThisQuery;
+	lastStats.sidecarCacheBuildBytes = denseStats.sidecarCacheBuildBytes;
+	lastStats.sidecarCacheBuildPagesRead =
+		denseStats.sidecarCacheBuildPagesRead;
+	lastStats.sidecarCacheBuildUs = denseStats.sidecarCacheBuildUs;
+	lastStats.sidecarQueryBytesTouched =
+		denseStats.sidecarQueryBytesTouched;
+	lastStats.sidecarQueryPagesRead = denseStats.sidecarQueryPagesRead;
+	lastStats.sidecarQueryVectorsLoaded =
+		denseStats.sidecarQueryVectorsLoaded;
+	lastStats.sidecarQueryLoadUs = denseStats.sidecarQueryLoadUs;
+	lastStats.sidecarQueryUs = denseStats.sidecarQueryUs;
+	lastStats.proxyVectorUsesFullSidecarForGraph =
+		denseStats.proxyVectorUsesFullSidecarForGraph;
+	lastStats.proxyVectorNearExhaustiveSidecarTouch =
+		denseStats.proxyVectorNearExhaustiveSidecarTouch;
+	strlcpy(lastStats.proxyVectorSidecarTouchReason,
+			denseStats.proxyVectorSidecarTouchReason,
+			sizeof(lastStats.proxyVectorSidecarTouchReason));
 	lastStats.centroidListsVisited = denseStats.centroidListsVisited;
 	lastStats.centroidDocsTouched = denseStats.centroidDocsTouched;
 	lastStats.centroidPrunedDocs = denseStats.centroidPrunedDocs;
+	lastStats.centroidPostingsTouched = denseStats.centroidPostingsTouched;
+	lastStats.centroidPostingsSelected = denseStats.centroidPostingsSelected;
+	lastStats.centroidPostingsSkipped = denseStats.centroidPostingsSkipped;
+	lastStats.centroidProbeUs = denseStats.centroidProbeUs;
+	lastStats.centroidPostingScanUs = denseStats.centroidPostingScanUs;
+	lastStats.centroidAccumulateUs = denseStats.centroidAccumulateUs;
+	lastStats.centroidCandidateHeapUs = denseStats.centroidCandidateHeapUs;
+	lastStats.centroidPostingLimitPerToken =
+		denseStats.centroidPostingLimitPerToken;
+	lastStats.centroidProbeCentroidsPerToken =
+		denseStats.centroidProbeCentroidsPerToken;
+	lastStats.centroidCodewordTopM = denseStats.centroidCodewordTopM;
+	lastStats.centroidScoreThreshold = denseStats.centroidScoreThreshold;
+	lastStats.centroidScoreDropFromBest = denseStats.centroidScoreDropFromBest;
+	lastStats.centroidListsSkippedByThreshold =
+		denseStats.centroidListsSkippedByThreshold;
+	strlcpy(lastStats.centroidPostingCapStrategy,
+			denseStats.centroidPostingCapStrategy,
+			sizeof(lastStats.centroidPostingCapStrategy));
+	strlcpy(lastStats.centroidCandidateScoring,
+			denseStats.centroidCandidateScoring,
+			sizeof(lastStats.centroidCandidateScoring));
 	lastStats.centroidCandidates = denseStats.centroidCandidates;
+	lastStats.centroidBitsetPrefilterEnabled =
+		denseStats.centroidBitsetPrefilterEnabled;
+	lastStats.centroidBitsetMinTokenMatches =
+		denseStats.centroidBitsetMinTokenMatches;
+	lastStats.centroidBitsetListsUsed =
+		denseStats.centroidBitsetListsUsed;
+	lastStats.centroidBitsetDocsSet = denseStats.centroidBitsetDocsSet;
+	lastStats.centroidBitsetDocsAfterThreshold =
+		denseStats.centroidBitsetDocsAfterThreshold;
+	lastStats.centroidBitsetPrefilterUs =
+		denseStats.centroidBitsetPrefilterUs;
+	lastStats.centroidBitsetMemoryBytes =
+		denseStats.centroidBitsetMemoryBytes;
+	lastStats.centroidUpperBoundEnabled =
+		denseStats.centroidUpperBoundEnabled;
+	lastStats.centroidUpperBoundDocsChecked =
+		denseStats.centroidUpperBoundDocsChecked;
+	lastStats.centroidUpperBoundDocsPruned =
+		denseStats.centroidUpperBoundDocsPruned;
+	lastStats.centroidUpperBoundPruneUs =
+		denseStats.centroidUpperBoundPruneUs;
+	lastStats.centroidUpperBoundUnsafeFallbacks =
+		denseStats.centroidUpperBoundUnsafeFallbacks;
+	lastStats.centroidCandidatesBeforeBound =
+		denseStats.centroidCandidatesBeforeBound;
+	lastStats.centroidCandidatesAfterBound =
+		denseStats.centroidCandidatesAfterBound;
 	lastStats.multivectorCentroidCount =
 		denseStats.multivectorCentroidCount;
 	lastStats.multivectorCentroidPrerankDocs =
@@ -5686,14 +6700,151 @@ PgturbohybridCollectScanResults(IndexScanDesc scan, PgturbohybridScanState *stat
 		denseStats.quantizedInvertedListsVisited;
 	lastStats.quantizedInvertedPostingsTouched =
 		denseStats.quantizedInvertedPostingsTouched;
+	lastStats.quantizedInvertedPostingsSelected =
+		denseStats.quantizedInvertedPostingsSelected;
+	lastStats.quantizedInvertedPostingsSkipped =
+		denseStats.quantizedInvertedPostingsSkipped;
+	lastStats.quantizedInvertedPostingLimitPerToken =
+		denseStats.quantizedInvertedPostingLimitPerToken;
+	lastStats.quantizedInvertedProbeCodewordsPerToken =
+		denseStats.quantizedInvertedProbeCodewordsPerToken;
+	strlcpy(lastStats.quantizedInvertedPostingCapStrategy,
+			denseStats.quantizedInvertedPostingCapStrategy,
+			sizeof(lastStats.quantizedInvertedPostingCapStrategy));
 	lastStats.quantizedInvertedDocsScored =
 		denseStats.quantizedInvertedDocsScored;
 	lastStats.quantizedInvertedCandidates =
 		denseStats.quantizedInvertedCandidates;
 	lastStats.quantizedInvertedExactRerankDocs =
 		denseStats.quantizedInvertedExactRerankDocs;
+	strlcpy(lastStats.quantizedInvertedCodebookSource,
+			denseStats.quantizedInvertedCodebookSource,
+			sizeof(lastStats.quantizedInvertedCodebookSource));
 	lastStats.quantizedInvertedCodebookSize =
 		denseStats.quantizedInvertedCodebookSize;
+	lastStats.quantizedInvertedCodebookDim =
+		denseStats.quantizedInvertedCodebookDim;
+	strlcpy(lastStats.quantizedInvertedCodebookChecksum,
+			denseStats.quantizedInvertedCodebookChecksum,
+			sizeof(lastStats.quantizedInvertedCodebookChecksum));
+	lastStats.quantizedInvertedCodebookTopM =
+		denseStats.quantizedInvertedCodebookTopM;
+	lastStats.quantizedInvertedAssignmentUs =
+		denseStats.quantizedInvertedAssignmentUs;
+	lastStats.quantizedInvertedQueryCodewordScoreUs =
+		denseStats.quantizedInvertedQueryCodewordScoreUs;
+	strlcpy(lastStats.quantizedInvertedQueryCodewordKernel,
+			denseStats.quantizedInvertedQueryCodewordKernel,
+			sizeof(lastStats.quantizedInvertedQueryCodewordKernel));
+	lastStats.quantizedInvertedQueryCodewordScoresComputed =
+		denseStats.quantizedInvertedQueryCodewordScoresComputed;
+	lastStats.quantizedInvertedQueryCodewordBlocks =
+		denseStats.quantizedInvertedQueryCodewordBlocks;
+	lastStats.quantizedInvertedQueryCodewordTopkUs =
+		denseStats.quantizedInvertedQueryCodewordTopkUs;
+	lastStats.quantizedInvertedQueryCodewordFullMatrixMaterialized =
+		denseStats.quantizedInvertedQueryCodewordFullMatrixMaterialized;
+	lastStats.quantizedInvertedQueryCodewordActiveQueryTokens =
+		denseStats.quantizedInvertedQueryCodewordActiveQueryTokens;
+	lastStats.quantizedInvertedQueryCodewordSkippedQueryTokens =
+		denseStats.quantizedInvertedQueryCodewordSkippedQueryTokens;
+	lastStats.quantizedInvertedListOffsetBytes =
+		denseStats.quantizedInvertedListOffsetBytes;
+	lastStats.quantizedInvertedPostingBytes =
+		denseStats.quantizedInvertedPostingBytes;
+	lastStats.quantizedInvertedSidecarBytes =
+		denseStats.quantizedInvertedSidecarBytes;
+	strlcpy(lastStats.quantizedInvertedCompactKernel,
+			denseStats.quantizedInvertedCompactKernel,
+			sizeof(lastStats.quantizedInvertedCompactKernel));
+	strlcpy(lastStats.quantizedInvertedCompactScoreSource,
+			denseStats.quantizedInvertedCompactScoreSource,
+			sizeof(lastStats.quantizedInvertedCompactScoreSource));
+	lastStats.quantizedInvertedCompactScoreUs =
+		denseStats.quantizedInvertedCompactScoreUs;
+	lastStats.quantizedInvertedCompactDocsScored =
+		denseStats.quantizedInvertedCompactDocsScored;
+	lastStats.quantizedInvertedCompactPayloadBytes =
+		denseStats.quantizedInvertedCompactPayloadBytes;
+	strlcpy(lastStats.quantizedInvertedCompactDocOrder,
+			denseStats.quantizedInvertedCompactDocOrder,
+			sizeof(lastStats.quantizedInvertedCompactDocOrder));
+	lastStats.quantizedInvertedCompactInnerAllocations =
+		denseStats.quantizedInvertedCompactInnerAllocations;
+	lastStats.quantizedInvertedCompactActiveQueryTokens =
+		denseStats.quantizedInvertedCompactActiveQueryTokens;
+	lastStats.quantizedInvertedCompactPairsEvaluated =
+		denseStats.quantizedInvertedCompactPairsEvaluated;
+	lastStats.quantizedInvertedCompactPairsSkipped =
+		denseStats.quantizedInvertedCompactPairsSkipped;
+	lastStats.quantizedInvertedCompactPrefetches =
+		denseStats.quantizedInvertedCompactPrefetches;
+	lastStats.quantizedInvertedCompactAvgDocTokens =
+		denseStats.quantizedInvertedCompactAvgDocTokens;
+	lastStats.quantizedInvertedCompactUsPerDoc =
+		denseStats.quantizedInvertedCompactUsPerDoc;
+	lastStats.quantizedInvertedCompactPayloadBytesPerDoc =
+		denseStats.quantizedInvertedCompactPayloadBytesPerDoc;
+	lastStats.quantizedInvertedCompactTopKChangedVsScalar =
+		denseStats.quantizedInvertedCompactTopKChangedVsScalar;
+	lastStats.quantizedInvertedPrecompactEnabled =
+		denseStats.quantizedInvertedPrecompactEnabled;
+	strlcpy(lastStats.quantizedInvertedPrecompactMode,
+			denseStats.quantizedInvertedPrecompactMode,
+			sizeof(lastStats.quantizedInvertedPrecompactMode));
+	lastStats.quantizedInvertedDocsTouchedBeforePrecompact =
+		denseStats.quantizedInvertedDocsTouchedBeforePrecompact;
+	lastStats.quantizedInvertedPrecompactScoreK =
+		denseStats.quantizedInvertedPrecompactScoreK;
+	lastStats.quantizedInvertedPrecompactCoverageK =
+		denseStats.quantizedInvertedPrecompactCoverageK;
+	lastStats.quantizedInvertedPrecompactPerTokenK =
+		denseStats.quantizedInvertedPrecompactPerTokenK;
+	lastStats.quantizedInvertedCompactMaxDocs =
+		denseStats.quantizedInvertedCompactMaxDocs;
+	lastStats.quantizedInvertedPrecompactScoreDocs =
+		denseStats.quantizedInvertedPrecompactScoreDocs;
+	lastStats.quantizedInvertedPrecompactCoverageDocs =
+		denseStats.quantizedInvertedPrecompactCoverageDocs;
+	lastStats.quantizedInvertedPrecompactPerTokenDocs =
+		denseStats.quantizedInvertedPrecompactPerTokenDocs;
+	lastStats.quantizedInvertedPrecompactUnionDocs =
+		denseStats.quantizedInvertedPrecompactUnionDocs;
+	lastStats.quantizedInvertedPrecompactDuplicates =
+		denseStats.quantizedInvertedPrecompactDuplicates;
+	lastStats.quantizedInvertedPrecompactPrunedDocs =
+		denseStats.quantizedInvertedPrecompactPrunedDocs;
+	lastStats.quantizedInvertedPrecompactUs =
+		denseStats.quantizedInvertedPrecompactUs;
+	lastStats.quantizedInvertedCompactDocsSkippedByPrecompact =
+		denseStats.quantizedInvertedCompactDocsSkippedByPrecompact;
+	strlcpy(lastStats.quantizedInvertedTokenCoverageMode,
+			denseStats.quantizedInvertedTokenCoverageMode,
+			sizeof(lastStats.quantizedInvertedTokenCoverageMode));
+	lastStats.quantizedInvertedActiveQueryTokens =
+		denseStats.quantizedInvertedActiveQueryTokens;
+	lastStats.quantizedInvertedTokenMatchesTotal =
+		denseStats.quantizedInvertedTokenMatchesTotal;
+	lastStats.quantizedInvertedTokenMatchesMax =
+		denseStats.quantizedInvertedTokenMatchesMax;
+	lastStats.quantizedInvertedMinTokenMatches =
+		denseStats.quantizedInvertedMinTokenMatches;
+	lastStats.quantizedInvertedTokenMatchFilteredDocs =
+		denseStats.quantizedInvertedTokenMatchFilteredDocs;
+	lastStats.quantizedInvertedScoreBoundPruningEnabled =
+		denseStats.quantizedInvertedScoreBoundPruningEnabled;
+	lastStats.quantizedInvertedScoreBoundDocsChecked =
+		denseStats.quantizedInvertedScoreBoundDocsChecked;
+	lastStats.quantizedInvertedScoreBoundDocsPruned =
+		denseStats.quantizedInvertedScoreBoundDocsPruned;
+	lastStats.quantizedInvertedScoreBoundPruneUs =
+		denseStats.quantizedInvertedScoreBoundPruneUs;
+	lastStats.quantizedInvertedScoreBoundUnsafeFallbacks =
+		denseStats.quantizedInvertedScoreBoundUnsafeFallbacks;
+	lastStats.quantizedInvertedCandidatesBeforeBound =
+		denseStats.quantizedInvertedCandidatesBeforeBound;
+	lastStats.quantizedInvertedCandidatesAfterBound =
+		denseStats.quantizedInvertedCandidatesAfterBound;
 	strlcpy(lastStats.multivectorDocSidecarCacheMode,
 			denseStats.multivectorDocSidecarCacheMode,
 			sizeof(lastStats.multivectorDocSidecarCacheMode));
@@ -5707,6 +6858,24 @@ PgturbohybridCollectScanResults(IndexScanDesc scan, PgturbohybridScanState *stat
 		denseStats.multivectorDocSidecarBytesTouched;
 	lastStats.multivectorDocSidecarVectorsLoaded =
 		denseStats.multivectorDocSidecarVectorsLoaded;
+	lastStats.multivectorDocSidecarDocMapPagesRead =
+		denseStats.multivectorDocSidecarDocMapPagesRead;
+	lastStats.multivectorDocSidecarDocMapBytesTouched =
+		denseStats.multivectorDocSidecarDocMapBytesTouched;
+	lastStats.multivectorDocSidecarResidentVectorsLoaded =
+		denseStats.multivectorDocSidecarResidentVectorsLoaded;
+	lastStats.multivectorDocSidecarResidentBytesLoaded =
+		denseStats.multivectorDocSidecarResidentBytesLoaded;
+	lastStats.multivectorDocSidecarVectorChunkRefBytesTouched =
+		denseStats.multivectorDocSidecarVectorChunkRefBytesTouched;
+	lastStats.multivectorDocSidecarPagedVectorPagesRead =
+		denseStats.multivectorDocSidecarPagedVectorPagesRead;
+	lastStats.multivectorDocSidecarPagedVectorBytesTouched =
+		denseStats.multivectorDocSidecarPagedVectorBytesTouched;
+	lastStats.multivectorSidecarPageReadUs =
+		denseStats.multivectorSidecarPageReadUs;
+	lastStats.multivectorSidecarVectorReconstructUs =
+		denseStats.multivectorSidecarVectorReconstructUs;
 	lastStats.multivectorTokensOriginal =
 		denseStats.multivectorTokensOriginal;
 	lastStats.multivectorTokensPooled =
@@ -5731,6 +6900,13 @@ PgturbohybridCollectScanResults(IndexScanDesc scan, PgturbohybridScanState *stat
 		denseStats.multivectorBm25InjectionEnabled;
 	lastStats.multivectorBm25InjectionCandidates =
 		denseStats.multivectorBm25InjectionCandidates;
+	lastStats.multivectorBm25InjectionCandidateLimit =
+		denseStats.multivectorBm25InjectionCandidateLimit;
+	lastStats.multivectorBm25InjectionPoolSize =
+		denseStats.multivectorBm25InjectionPoolSize;
+	strlcpy(lastStats.multivectorBm25InjectionLimitReason,
+			denseStats.multivectorBm25InjectionLimitReason,
+			sizeof(lastStats.multivectorBm25InjectionLimitReason));
 	lastStats.multivectorBm25InjectionRetained =
 		denseStats.multivectorBm25InjectionRetained;
 	lastStats.multivectorBm25InjectionExactReranked =
@@ -5780,6 +6956,30 @@ PgturbohybridCollectScanResults(IndexScanDesc scan, PgturbohybridScanState *stat
 		denseStats.multivectorExactRerankSidecarReads;
 	lastStats.multivectorExactRerankSidecarBytes =
 		denseStats.multivectorExactRerankSidecarBytes;
+	lastStats.multivectorCandidateSourceUs =
+		denseStats.multivectorCandidateSourceUs;
+	lastStats.multivectorDocGraphTraversalUs =
+		denseStats.multivectorDocGraphTraversalUs;
+	lastStats.multivectorProxyCandidateUs =
+		denseStats.multivectorProxyCandidateUs;
+	lastStats.multivectorProxyGraphTraversalUs =
+		denseStats.multivectorProxyGraphTraversalUs;
+	lastStats.multivectorProxyScoringUs =
+		denseStats.multivectorProxyScoringUs;
+	lastStats.multivectorCentroidLitePostingUs =
+		denseStats.multivectorCentroidLitePostingUs;
+	lastStats.multivectorQuantizedInvertedPostingUs =
+		denseStats.multivectorQuantizedInvertedPostingUs;
+	lastStats.multivectorSidecarLoadUs =
+		denseStats.multivectorSidecarLoadUs;
+	lastStats.multivectorHeapVisibilityUs =
+		denseStats.multivectorHeapVisibilityUs;
+	lastStats.multivectorExactHeapFetchUs =
+		denseStats.multivectorExactHeapFetchUs;
+	lastStats.multivectorExactRerankUs =
+		denseStats.multivectorExactRerankUs;
+	lastStats.multivectorFinalSortUs =
+		denseStats.multivectorFinalSortUs;
 	lastStats.exactRerankCandidates = denseStats.exactRerankCandidates;
 	lastStats.exactRerankTokensEvaluated =
 		denseStats.exactRerankTokensEvaluated;
@@ -5949,13 +7149,19 @@ PgturbohybridCollectScanResults(IndexScanDesc scan, PgturbohybridScanState *stat
 	strlcpy(lastStats.calibratedFusionQueryShape,
 			PgturbohybridHybridQueryShapeName(hybridQueryShapeForStats),
 			sizeof(lastStats.calibratedFusionQueryShape));
-	lastStats.hybridDenseKChosen = scanQuery->denseK;
+	lastStats.hybridDenseKChosen = denseBranchUsed ? scanQuery->denseK : 0;
 	lastStats.hybridBm25KChosen = scanQuery->bm25K;
 	strlcpy(lastStats.hybridBudgetReason, hybridBudgetChoice.reason,
 			sizeof(lastStats.hybridBudgetReason));
 	PgturbohybridBuildBranchPlan(&lastStats.branchPlan, scanQuery,
-								 effectiveFusion, dense, denseCount,
+								 effectiveFusion,
+								 (hasMultivectorQuery && !multivectorMergedAsDense) ?
+								 multivector : dense,
+								 (hasMultivectorQuery && !multivectorMergedAsDense) ?
+								 multivectorCount : denseCount,
+								 hasMultivectorQuery,
 								 bm25, bm25Count, &denseStats,
+								 hasMultivectorQuery ? multivectorElapsedUs :
 								 lastStats.denseElapsedUs,
 								 lastStats.bm25ElapsedUs);
 	lastStats.elapsedUs = PgturbohybridElapsedUs(totalStart);
@@ -6115,6 +7321,7 @@ pgturbohybridamrescan(IndexScanDesc scan, ScanKey keys, int nkeys, ScanKey order
 	bool		hasTextQuery = false;
 	bool		hasVectorQuery = false;
 	bool		hasMultiVectorQuery = false;
+	bool		useScalarVectorOrderby = false;
 
 	if (orderbys != NULL && norderbys > 0 &&
 		(orderbys[0].sk_flags & SK_ISNULL) == 0)
@@ -6132,12 +7339,16 @@ pgturbohybridamrescan(IndexScanDesc scan, ScanKey keys, int nkeys, ScanKey order
 		if (hasVectorQuery)
 			ereport(ERROR,
 					(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
-					 errmsg("vector_query requires a turbohybrid index with a vector key")));
+					 errmsg("vector_query requires a turbohybrid index with a vector key"),
+					 errdetail("Document-node multivector indexes can execute multivector_query and text_query in one scan, but cannot run an independent scalar vector branch."),
+					 errhint("Use multivector_query for ColBERT retrieval on this index, or run scalar dense retrieval against a vector-key index and fuse results outside this scan.")));
 	}
 	else if (hasMultiVectorQuery)
 		ereport(ERROR,
 				(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
 				 errmsg("multivector_query requires a turbohybrid index with a multivector key")));
+	else
+		useScalarVectorOrderby = hasVectorQuery;
 
 	PgturbohybridQueryValidateMultiVectorFusionSupport(scan->indexRelation,
 													   hybridQuery);
@@ -6148,8 +7359,8 @@ pgturbohybridamrescan(IndexScanDesc scan, ScanKey keys, int nkeys, ScanKey order
 				 errmsg("text_query requires a turbohybrid index with a tsvector key")));
 
 	pgturbohybridrescan(scan, keys, nkeys,
-					 hasVectorQuery ? denseOrderbys : NULL,
-					 hasVectorQuery ? norderbys : 0);
+					 useScalarVectorOrderby ? denseOrderbys : NULL,
+					 useScalarVectorOrderby ? norderbys : 0);
 
 	if (hasTextQuery || hasVectorQuery || hasMultiVectorQuery)
 	{
@@ -6544,7 +7755,8 @@ pgturbohybridamcostestimate(PlannerInfo *root, IndexPath *path, double loop_coun
 
 	if (query != NULL)
 	{
-		denseK = PgturbohybridQueryGetVector(query) != NULL ? query->denseK : 0;
+		denseK = (PgturbohybridQueryGetVector(query) != NULL ? query->denseK : 0) +
+			(PgturbohybridQueryGetMultiVector(query) != NULL ? query->multivectorK : 0);
 		bm25K = hasLexicalKey && PgturbohybridQueryGetTsQuery(query) != NULL ?
 			query->bm25K : 0;
 		finalK = (query->flags & PGTURBOHYBRID_QUERY_FLAG_FINAL_K_IS_SET) != 0 ?
@@ -6760,6 +7972,7 @@ pgturbohybridamoptions(Datum reloptions, bool validate)
 		PGTURBOHYBRID_RELOPT_PARSE("residual_rerank_bytes", RELOPT_TYPE_INT, residualRerankBytes),
 		PGTURBOHYBRID_RELOPT_PARSE("multivector_graph", RELOPT_TYPE_ENUM, multivectorGraphMode),
 		PGTURBOHYBRID_RELOPT_PARSE("multivector_doc_build_scorer", RELOPT_TYPE_ENUM, multivectorDocBuildScorer),
+		PGTURBOHYBRID_RELOPT_PARSE("multivector_doc_storage", RELOPT_TYPE_ENUM, multivectorDocStorage),
 		PGTURBOHYBRID_RELOPT_PARSE("multivector_token_pooling", RELOPT_TYPE_ENUM, multivectorTokenPooling),
 		PGTURBOHYBRID_RELOPT_PARSE("multivector_token_pooling_target_ratio", RELOPT_TYPE_REAL, multivectorTokenPoolingTargetRatio),
 		PGTURBOHYBRID_RELOPT_PARSE("multivector_token_pooling_min_tokens", RELOPT_TYPE_INT, multivectorTokenPoolingMinTokens),
@@ -6839,9 +8052,38 @@ pgturbohybridamvalidate(Oid opclassoid)
 	return valid;
 }
 
+static void
+PgturbohybridDefineDefaultBudgetGUCs(void)
+{
+	DefineCustomIntVariable("turbohybrid.default_dense_k", "Default dense candidate budget for turbohybrid_query callers",
+							NULL, &pgturbohybrid_default_dense_k,
+							PGTURBOHYBRID_DEFAULT_DENSE_K, 0,
+							PGTURBOHYBRID_MAX_DEFAULT_DENSE_K,
+							PGC_USERSET, 0, PgturbohybridCheckDefaultDenseK,
+							PgturbohybridAssignQueryDefaultInt, NULL);
+	DefineCustomIntVariable("turbohybrid.default_bm25_k", "Default BM25 candidate budget for turbohybrid_query callers",
+							NULL, &pgturbohybrid_default_bm25_k,
+							PGTURBOHYBRID_DEFAULT_BM25_K, 0,
+							PGTURBOHYBRID_MAX_DEFAULT_BM25_K,
+							PGC_USERSET, 0, PgturbohybridCheckDefaultBm25K,
+							PgturbohybridAssignQueryDefaultInt, NULL);
+	DefineCustomIntVariable("turbohybrid.default_rrf_k", "Default RRF constant for turbohybrid_query callers",
+							NULL, &pgturbohybrid_default_rrf_k,
+							PGTURBOHYBRID_DEFAULT_RRF_K, 1,
+							PGTURBOHYBRID_MAX_RRF_K,
+							PGC_USERSET, 0, PgturbohybridCheckDefaultRrfK,
+							PgturbohybridAssignQueryDefaultInt, NULL);
+}
+
 void
 PgturbohybridInit(void)
 {
+	bool		gucsAlreadyDefined;
+
+	if (pgturbohybrid_am_init_done)
+		return;
+	pgturbohybrid_am_init_done = true;
+
 	pgturbohybrid_relopt_kind = add_reloption_kind();
 	RegisterXactCallback(PgturbohybridXactCallback, NULL);
 	RegisterSubXactCallback(PgturbohybridSubXactCallback, NULL);
@@ -6905,6 +8147,12 @@ PgturbohybridInit(void)
 					   PGTURBOHYBRID_DEFAULT_MULTIVECTOR_DOC_BUILD_SCORER,
 					   "Valid values are \"proxy\" and \"exact_symmetric\". Only meaningful with multivector_graph = document_nodes.",
 					   AccessExclusiveLock);
+	add_enum_reloption(pgturbohybrid_relopt_kind, "multivector_doc_storage",
+					   "Document-node multivector sidecar storage mode.",
+					   pgturbohybrid_multivector_doc_storage_relopt_options,
+					   PGTURBOHYBRID_MULTIVECTOR_DOC_STORAGE_F32,
+		"Valid values are \"f32\", \"f16\", \"sq8\", experimental \"centroid_only\", and experimental \"proxy_only\". \"centroid_only\" stores centroid sidecars for centroid_lite with heap exact rerank; \"proxy_only\" stores graph proxy vectors and doc mapping only.",
+					   AccessExclusiveLock);
 	add_enum_reloption(pgturbohybrid_relopt_kind, "multivector_token_pooling",
 					   "Index-time document-token pooling mode for multivector document_nodes indexes.",
 					   pgturbohybrid_multivector_token_pooling_relopt_options,
@@ -6935,7 +8183,7 @@ PgturbohybridInit(void)
 					   "Fixed-dimensional proxy encoder for document-node proxy_vector admission.",
 					   pgturbohybrid_multivector_proxy_encoder_relopt_options,
 					   PGTURBOHYBRID_DEFAULT_MULTIVECTOR_PROXY_ENCODER,
-					   "Valid values are \"normalized_mean\", \"mean\", \"first_token\", \"max_abs_mean\", \"centroid_mean\", \"max_pool\", \"random_projection_fde\", and \"learned_projection_placeholder\".",
+					   "Valid values are \"normalized_mean\", \"mean\", \"first_token\", \"max_abs_mean\", \"centroid_mean\", \"max_pool\", \"random_projection_fde\", \"learned_projection_placeholder\", and \"learned_projection_v1\".",
 					   AccessExclusiveLock);
 	add_enum_reloption(pgturbohybrid_relopt_kind, "multivector_context_mode",
 					   "Long-context multivector scoring mode.",
@@ -6954,24 +8202,15 @@ PgturbohybridInit(void)
 				  "Percentage of dead graph nodes that triggers automatic page chain compaction during VACUUM (0 = disabled)",
 				  25, 0, 100, AccessExclusiveLock);
 
-	DefineCustomIntVariable("turbohybrid.default_dense_k", "Default dense candidate budget for turbohybrid_query callers",
-							NULL, &pgturbohybrid_default_dense_k,
-							PGTURBOHYBRID_DEFAULT_DENSE_K, 0,
-							PGTURBOHYBRID_MAX_DEFAULT_DENSE_K,
-							PGC_USERSET, 0, PgturbohybridCheckDefaultDenseK,
-							PgturbohybridAssignQueryDefaultInt, NULL);
-	DefineCustomIntVariable("turbohybrid.default_bm25_k", "Default BM25 candidate budget for turbohybrid_query callers",
-							NULL, &pgturbohybrid_default_bm25_k,
-							PGTURBOHYBRID_DEFAULT_BM25_K, 0,
-							PGTURBOHYBRID_MAX_DEFAULT_BM25_K,
-							PGC_USERSET, 0, PgturbohybridCheckDefaultBm25K,
-							PgturbohybridAssignQueryDefaultInt, NULL);
-	DefineCustomIntVariable("turbohybrid.default_rrf_k", "Default RRF constant for turbohybrid_query callers",
-							NULL, &pgturbohybrid_default_rrf_k,
-							PGTURBOHYBRID_DEFAULT_RRF_K, 1,
-							PGTURBOHYBRID_MAX_RRF_K,
-							PGC_USERSET, 0, PgturbohybridCheckDefaultRrfK,
-							PgturbohybridAssignQueryDefaultInt, NULL);
+	if (IsParallelWorker())
+		return;
+
+	gucsAlreadyDefined =
+		GetConfigOption("turbohybrid.default_dense_k", true, false) != NULL;
+	if (gucsAlreadyDefined)
+		return;
+
+	PgturbohybridDefineDefaultBudgetGUCs();
 	DefineCustomBoolVariable("turbohybrid.enable_wand", "Enable WAND pruning for BM25 candidate generation",
 							 NULL, &pgturbohybrid_enable_wand,
 							 true, PGC_USERSET, 0, NULL, NULL, NULL);
@@ -7100,14 +8339,14 @@ PgturbohybridInit(void)
 							PGC_USERSET, 0, NULL, NULL, NULL);
 	DefineCustomEnumVariable("turbohybrid.multivector_doc_storage",
 							 "Document-node multivector sidecar scoring storage",
-							 "f32 uses the exact float32 sidecar for traversal; f16 and sq8 build compact in-memory scoring sidecars and keep exact heap rerank for final ordering.",
+							 "f32 uses the exact float32 sidecar for traversal; f16 and sq8 build compact in-memory scoring sidecars and keep exact heap rerank for final ordering; proxy_only is an experimental index reloption for proxy graph admission with heap exact rerank.",
 							 &pgturbohybrid_multivector_doc_storage,
 							 PGTURBOHYBRID_MULTIVECTOR_DOC_STORAGE_F32,
 							 pgturbohybrid_multivector_doc_storage_options,
 							 PGC_USERSET, 0, NULL, NULL, NULL);
 	DefineCustomEnumVariable("turbohybrid.multivector_doc_storage_cache",
 							 "Document-node multivector sidecar cache mode",
-							 "auto keeps the document sidecar resident for low-latency scans when it fits native_cache_max_mb and otherwise page-loads the sidecar through shared buffers; resident prefers the already loaded sidecar; paged reports per-scan sidecar page reads and bytes touched.",
+							 "auto keeps plain proxy_vector scans on the lazy paged sidecar path and may keep other low-latency document-node scans resident when the sidecar fits native_cache_max_mb; resident explicitly loads the sidecar; paged reports per-scan sidecar page reads and bytes touched.",
 							 &pgturbohybrid_multivector_doc_storage_cache,
 							 PGTURBOHYBRID_MULTIVECTOR_DOC_STORAGE_CACHE_AUTO,
 							 pgturbohybrid_multivector_doc_storage_cache_options,
@@ -7132,6 +8371,24 @@ PgturbohybridInit(void)
 							 PGTURBOHYBRID_DEFAULT_MULTIVECTOR_PROXY_ENCODER,
 							 pgturbohybrid_multivector_proxy_encoder_options,
 							 PGC_USERSET, 0, NULL, NULL, NULL);
+	DefineCustomStringVariable("turbohybrid.multivector_learned_projection_path",
+							   "Path to learned_projection_v1 proxy weights",
+							   "Empty disables learned_projection_v1. The first safe slice accepts an administrator-provided text weight file and keeps final exact MaxSim rerank unchanged.",
+							   &pgturbohybrid_multivector_learned_projection_path,
+							   "",
+							   PGC_USERSET, 0, NULL, NULL, NULL);
+	DefineCustomStringVariable("turbohybrid.multivector_learned_projection_model",
+							   "Expected learned_projection_v1 model profile name",
+							   "When non-empty, the loaded learned projection file must declare the same model name.",
+							   &pgturbohybrid_multivector_learned_projection_model,
+							   "",
+							   PGC_USERSET, 0, NULL, NULL, NULL);
+	DefineCustomStringVariable("turbohybrid.multivector_learned_projection_checksum",
+							   "Expected learned_projection_v1 projection checksum",
+							   "When non-empty, the loaded learned projection file must declare the same checksum string.",
+							   &pgturbohybrid_multivector_learned_projection_checksum,
+							   "",
+							   PGC_USERSET, 0, NULL, NULL, NULL);
 	DefineCustomBoolVariable("turbohybrid.multivector_allow_exact_symmetric_build",
 							 "Allow exact symmetric document MaxSim graph topology builds above the diagnostic size guard",
 							 "Off blocks multivector document-node exact_symmetric graph builds above turbohybrid.multivector_exact_symmetric_build_max_docs. This protects production builds and benchmarks from accidentally selecting O(doc_tokens^2 * dim) document-document MaxSim topology.",
@@ -7175,6 +8432,97 @@ PgturbohybridInit(void)
 							 PGTURBOHYBRID_MULTIVECTOR_CANDIDATE_SOURCE_GRAPH,
 							 pgturbohybrid_multivector_candidate_source_options,
 							 PGC_USERSET, 0, NULL, NULL, NULL);
+	DefineCustomEnumVariable("turbohybrid.multivector_quantized_inverted_codebook",
+							 "Experimental quantized-inverted codebook source",
+							 "deterministic preserves the temporary largest-magnitude codeword assignment; external loads an administrator-provided experimental text codebook and requires matching sidecar metadata.",
+							 &pgturbohybrid_multivector_quantized_inverted_codebook,
+							 PGTURBOHYBRID_MULTIVECTOR_QUANTIZED_INVERTED_CODEBOOK_DETERMINISTIC,
+							 pgturbohybrid_multivector_quantized_inverted_codebook_options,
+							 PGC_USERSET, 0, NULL, NULL, NULL);
+	DefineCustomStringVariable("turbohybrid.multivector_quantized_inverted_codebook_path",
+							   "Path to an experimental quantized-inverted external codebook",
+							   "Only used when turbohybrid.multivector_quantized_inverted_codebook = external. The file header is pgturbohybrid_quantized_inverted_codebook_v1 <dim> <codebook_size> <checksum>.",
+							   &pgturbohybrid_multivector_quantized_inverted_codebook_path,
+							   "",
+							   PGC_USERSET, 0, NULL, NULL, NULL);
+	DefineCustomIntVariable("turbohybrid.multivector_quantized_inverted_codebook_top_m",
+							"Number of codewords assigned per token for the experimental quantized-inverted branch",
+							"External experimental codebooks support top_m 1-16 multi-posting assignment; deterministic codebooks remain top_m = 1.",
+							&pgturbohybrid_multivector_quantized_inverted_codebook_top_m,
+							1, 1, 16,
+							PGC_USERSET, 0, NULL, NULL, NULL);
+	DefineCustomEnumVariable("turbohybrid.multivector_quantized_inverted_compact_scoring",
+							 "Experimental compact-code scoring mode for quantized_inverted_experimental",
+							 "off preserves the existing float-token admission scorer. experimental uses compact score payloads for admission diagnostics only; final SQL ranking remains exact heap MaxSim.",
+							 &pgturbohybrid_multivector_quantized_inverted_compact_scoring,
+							 PGTURBOHYBRID_MULTIVECTOR_QUANTIZED_INVERTED_COMPACT_SCORING_OFF,
+							 pgturbohybrid_multivector_quantized_inverted_compact_scoring_options,
+							 PGC_USERSET, 0, NULL, NULL, NULL);
+	DefineCustomEnumVariable("turbohybrid.multivector_quantized_inverted_compact_doc_order",
+							 "Experimental document order for quantized-inverted compact scoring",
+							 "docid scores the scan-local retained document set in ascending docId order to improve compact sidecar locality; original preserves posting-discovery order. Final SQL ranking remains exact heap MaxSim.",
+							 &pgturbohybrid_multivector_quantized_inverted_compact_doc_order,
+							 PGTURBOHYBRID_MULTIVECTOR_QUANTIZED_INVERTED_COMPACT_DOC_ORDER_DOCID,
+							 pgturbohybrid_multivector_quantized_inverted_compact_doc_order_options,
+							 PGC_USERSET, 0, NULL, NULL, NULL);
+	DefineCustomEnumVariable("turbohybrid.multivector_quantized_inverted_query_codeword_kernel",
+							 "Experimental query-codeword scoring kernel for quantized_inverted_experimental",
+							 "auto uses the blocked scalar codebook path where available; scalar is a reference path; blocked batches query-token/codeword dot products while maintaining the top probe codewords. Final SQL ranking remains exact heap MaxSim.",
+							 &pgturbohybrid_multivector_quantized_inverted_query_codeword_kernel,
+							 PGTURBOHYBRID_MULTIVECTOR_QUANTIZED_INVERTED_QUERY_CODEWORD_KERNEL_AUTO,
+							 pgturbohybrid_multivector_quantized_inverted_query_codeword_kernel_options,
+							 PGC_USERSET, 0, NULL, NULL, NULL);
+	DefineCustomEnumVariable("turbohybrid.multivector_quantized_inverted_precompact",
+							 "Experimental precompact document gate for quantized_inverted_experimental",
+							 "off preserves current compact scoring. centroid_maxsim_topk and centroid_maxsim_reservoir retain a bounded touched-document set using cheap query-codeword scores before full compact-code MaxSim admission; final SQL ranking remains exact heap MaxSim over retained candidates.",
+							 &pgturbohybrid_multivector_quantized_inverted_precompact,
+							 PGTURBOHYBRID_MULTIVECTOR_QUANTIZED_INVERTED_PRECOMPACT_OFF,
+							 pgturbohybrid_multivector_quantized_inverted_precompact_options,
+							 PGC_USERSET, 0, NULL, NULL, NULL);
+	DefineCustomIntVariable("turbohybrid.multivector_quantized_inverted_precompact_score_k",
+							"Top cheap-score document count retained by quantized-inverted precompact",
+							"Zero disables the score-count limit for centroid_maxsim_topk. The reservoir mode treats zero as no score-ranked contribution.",
+							&pgturbohybrid_multivector_quantized_inverted_precompact_score_k,
+							4096, 0, 10000000,
+							PGC_USERSET, 0, NULL, NULL, NULL);
+	DefineCustomIntVariable("turbohybrid.multivector_quantized_inverted_precompact_coverage_k",
+							"Top query-token coverage document count retained by quantized-inverted reservoir precompact",
+							"Only used by centroid_maxsim_reservoir.",
+							&pgturbohybrid_multivector_quantized_inverted_precompact_coverage_k,
+							512, 0, 10000000,
+							PGC_USERSET, 0, NULL, NULL, NULL);
+	DefineCustomIntVariable("turbohybrid.multivector_quantized_inverted_precompact_per_token_k",
+							"Per-query-token reservoir width retained by quantized-inverted reservoir precompact",
+							"Only used by centroid_maxsim_reservoir.",
+							&pgturbohybrid_multivector_quantized_inverted_precompact_per_token_k,
+							16, 0, 100000,
+							PGC_USERSET, 0, NULL, NULL, NULL);
+	DefineCustomIntVariable("turbohybrid.multivector_quantized_inverted_compact_max_docs",
+							"Maximum document count compact-scored after quantized-inverted reservoir precompact",
+							"Zero disables the final reservoir union clamp.",
+							&pgturbohybrid_multivector_quantized_inverted_compact_max_docs,
+							6144, 0, 10000000,
+							PGC_USERSET, 0, NULL, NULL, NULL);
+	DefineCustomEnumVariable("turbohybrid.multivector_quantized_inverted_token_coverage",
+							 "Experimental query-token coverage adjustment for quantized_inverted_experimental",
+							 "off preserves the existing summed compact-code admission score. linear multiplies the approximate document score by matched query-token coverage before exact heap MaxSim rerank.",
+							 &pgturbohybrid_multivector_quantized_inverted_token_coverage,
+							 PGTURBOHYBRID_MULTIVECTOR_QUANTIZED_INVERTED_TOKEN_COVERAGE_OFF,
+							 pgturbohybrid_multivector_quantized_inverted_token_coverage_options,
+							 PGC_USERSET, 0, NULL, NULL, NULL);
+	DefineCustomIntVariable("turbohybrid.multivector_quantized_inverted_min_token_matches",
+							"Minimum matched query tokens for quantized_inverted_experimental candidates",
+							"Zero preserves existing behavior. Positive values drop approximate quantized-inverted candidates that matched fewer query tokens before bounded exact heap MaxSim rerank.",
+							&pgturbohybrid_multivector_quantized_inverted_min_token_matches,
+							0, 0, 1024,
+							PGC_USERSET, 0, NULL, NULL, NULL);
+	DefineCustomEnumVariable("turbohybrid.multivector_quantized_inverted_pruning",
+							 "Experimental score-bound pruning for quantized_inverted_experimental",
+							 "off preserves current behavior. score_bound_experimental skips compact full-doc codeword scoring when an approximate posting-score bound cannot enter the retained candidate heap; final SQL ranking remains exact heap MaxSim over retained candidates.",
+							 &pgturbohybrid_multivector_quantized_inverted_pruning,
+							 PGTURBOHYBRID_MULTIVECTOR_QUANTIZED_INVERTED_PRUNING_OFF,
+							 pgturbohybrid_multivector_quantized_inverted_pruning_options,
+							 PGC_USERSET, 0, NULL, NULL, NULL);
 	DefineCustomEnumVariable("turbohybrid.multivector_branch_plan",
 							 "Multivector branch planner mode",
 							 "auto preserves existing branch execution, dense_only exposes a dense-only branch plan, and qdrant_like emits nested prefetch-style branch diagnostics for multivector/hybrid scans.",
@@ -7182,6 +8530,95 @@ PgturbohybridInit(void)
 							 PGTURBOHYBRID_BRANCH_PLAN_AUTO,
 							 pgturbohybrid_multivector_branch_plan_options,
 							 PGC_USERSET, 0, NULL, NULL, NULL);
+	DefineCustomIntVariable("turbohybrid.multivector_centroid_lite_max_postings_per_token",
+							"Maximum centroid_lite postings read per query token",
+							"Zero preserves the full experimental centroid_lite posting-list union; positive values cap each query-token posting list before exact MaxSim rerank so benchmarks can measure bounded admission tradeoffs.",
+							&pgturbohybrid_multivector_centroid_lite_max_postings_per_token,
+							0, 0, 10000000,
+							PGC_USERSET, 0, NULL, NULL, NULL);
+	DefineCustomIntVariable("turbohybrid.multivector_centroid_lite_probe_centroids_per_token",
+							"Maximum centroid_lite posting lists probed per query token",
+							"One preserves existing deterministic centroid_lite behavior; larger values probe the best deterministic centroid lists for each query token before exact heap MaxSim rerank.",
+							&pgturbohybrid_multivector_centroid_lite_probe_centroids_per_token,
+							1, 1, 1024,
+							PGC_USERSET, 0, NULL, NULL, NULL);
+	DefineCustomIntVariable("turbohybrid.multivector_centroid_lite_codeword_top_m",
+							"Number of centroid_lite codeword posting lists assigned per document centroid",
+							"One preserves existing persisted centroid_lite postings. Larger values are experimental and build denser deterministic posting lists before exact heap MaxSim rerank.",
+							&pgturbohybrid_multivector_centroid_lite_codeword_top_m,
+							1, 1, 16,
+							PGC_USERSET, 0, NULL, NULL, NULL);
+	DefineCustomEnumVariable("turbohybrid.multivector_centroid_lite_posting_selection",
+							 "Experimental centroid_lite posting selection strategy",
+							 "uniform_stride preserves diagnostic capped posting-list sampling; score_topk keeps the best payload-sorted postings per list; union_score unions probed centroid posting lists, scores documents by compact query-centroid MaxSim, and keeps the best document pool before exact heap MaxSim rerank.",
+							 &pgturbohybrid_multivector_centroid_lite_posting_selection,
+							 PGTURBOHYBRID_MULTIVECTOR_POSTING_SELECTION_UNIFORM_STRIDE,
+							 pgturbohybrid_multivector_posting_selection_options,
+							 PGC_USERSET, 0, NULL, NULL, NULL);
+	DefineCustomEnumVariable("turbohybrid.multivector_centroid_lite_candidate_scoring",
+							 "Experimental centroid_lite candidate scoring strategy",
+							 "posting_payload ranks touched documents by bounded posting payload scores; codeword_maxsim accumulates a PLAID-style approximate MaxSim over selected centroid codewords; doc_centroid_maxsim re-ranks touched documents by approximate MaxSim over persisted document centroids before exact heap MaxSim rerank.",
+							 &pgturbohybrid_multivector_centroid_lite_candidate_scoring,
+							 PGTURBOHYBRID_MULTIVECTOR_CENTROID_LITE_CANDIDATE_SCORING_POSTING_PAYLOAD,
+							 pgturbohybrid_multivector_centroid_lite_candidate_scoring_options,
+							 PGC_USERSET, 0, NULL, NULL, NULL);
+	DefineCustomEnumVariable("turbohybrid.multivector_centroid_lite_bitset_prefilter",
+							 "Experimental centroid_lite scan-local bitset prefilter",
+							 "off preserves current centroid_lite behavior; experimental builds a scan-local posting-union bitset for measurement only before exact MaxSim rerank.",
+							 &pgturbohybrid_multivector_centroid_lite_bitset_prefilter,
+							 PGTURBOHYBRID_MULTIVECTOR_CENTROID_LITE_BITSET_PREFILTER_OFF,
+							 pgturbohybrid_multivector_centroid_lite_bitset_prefilter_options,
+							 PGC_USERSET, 0, NULL, NULL, NULL);
+	DefineCustomIntVariable("turbohybrid.multivector_centroid_lite_bitset_min_token_matches",
+							"Minimum query-token posting-list matches for centroid_lite bitset prefilter",
+							"One preserves the posting-union behavior. Larger values are experimental EMVB-style scan-local filtering before exact heap MaxSim rerank.",
+							&pgturbohybrid_multivector_centroid_lite_bitset_min_token_matches,
+							1, 1, 64,
+							PGC_USERSET, 0, NULL, NULL, NULL);
+	DefineCustomRealVariable("turbohybrid.multivector_centroid_lite_score_threshold",
+							 "Minimum query-centroid score for centroid_lite posting-list expansion",
+							 "-1.0 preserves existing behavior for normalized ColBERT vectors. Higher values skip weak centroid posting lists before exact heap MaxSim rerank.",
+							 &pgturbohybrid_multivector_centroid_lite_score_threshold,
+							 -1.0, -1.0, 1.0,
+							 PGC_USERSET, 0, NULL, NULL, NULL);
+	DefineCustomRealVariable("turbohybrid.multivector_centroid_lite_score_drop_from_best",
+							 "Maximum centroid_lite score drop from the best probed centroid per query token",
+							 "-1.0 disables relative pruning. Non-negative values keep only probed centroid posting lists whose query-centroid score is at least best_score - drop before exact heap MaxSim rerank.",
+							 &pgturbohybrid_multivector_centroid_lite_score_drop_from_best,
+							 -1.0, -1.0, 2.0,
+							 PGC_USERSET, 0, NULL, NULL, NULL);
+	DefineCustomEnumVariable("turbohybrid.multivector_centroid_lite_pruning",
+							 "Experimental centroid_lite upper-bound pruning",
+							 "off preserves current centroid_lite behavior; safe_upper_bound prunes only candidates with a proven safe query-centroid upper bound before exact MaxSim rerank.",
+							 &pgturbohybrid_multivector_centroid_lite_pruning,
+							 PGTURBOHYBRID_MULTIVECTOR_CENTROID_LITE_PRUNING_OFF,
+							 pgturbohybrid_multivector_centroid_lite_pruning_options,
+							 PGC_USERSET, 0, NULL, NULL, NULL);
+	DefineCustomIntVariable("turbohybrid.multivector_quantized_inverted_max_postings_per_token",
+							"Maximum quantized_inverted_experimental postings retained per query token",
+							"Zero preserves the full experimental quantized-inverted posting-list union; positive values keep a bounded set of postings selected by the configured posting-selection strategy before exact heap MaxSim rerank.",
+							&pgturbohybrid_multivector_quantized_inverted_max_postings_per_token,
+							0, 0, 10000000,
+							PGC_USERSET, 0, NULL, NULL, NULL);
+	DefineCustomIntVariable("turbohybrid.multivector_quantized_inverted_probe_codewords_per_token",
+							"Maximum quantized_inverted_experimental posting lists probed per query token",
+							"One preserves existing codeword assignment behavior; larger values probe the best codeword lists for each query token before exact heap MaxSim rerank.",
+							&pgturbohybrid_multivector_quantized_inverted_probe_codewords_per_token,
+							1, 1, 1024,
+							PGC_USERSET, 0, NULL, NULL, NULL);
+	DefineCustomEnumVariable("turbohybrid.multivector_quantized_inverted_posting_selection",
+							 "Experimental quantized_inverted_experimental posting selection strategy",
+							 "score_topk keeps the best capped postings by compact/code or exact token score before exact heap MaxSim rerank; uniform_stride is diagnostic compatibility sampling.",
+							 &pgturbohybrid_multivector_quantized_inverted_posting_selection,
+							 PGTURBOHYBRID_MULTIVECTOR_POSTING_SELECTION_SCORE_TOPK,
+							 pgturbohybrid_multivector_posting_selection_options,
+							 PGC_USERSET, 0, NULL, NULL, NULL);
+	DefineCustomIntVariable("turbohybrid.multivector_doc_graph_entry_sample_count",
+							"Document-node graph entry samples scored before traversal",
+							"Zero preserves the compiled default entry-sample cap. Positive values widen the deterministic proxy-entry sample used before document-node graph traversal without changing index storage.",
+							&pgturbohybrid_multivector_doc_graph_entry_sample_count,
+							0, 0, 1000000,
+							PGC_USERSET, 0, NULL, NULL, NULL);
 	DefineCustomEnumVariable("turbohybrid.multivector_plain_fallback",
 							 "Exact/plain heap fallback mode for multivector MaxSim scans",
 							 "auto uses exact heap MaxSim for small or near-exhaustive scans; off keeps the token candidate path; force always uses exact heap MaxSim.",
