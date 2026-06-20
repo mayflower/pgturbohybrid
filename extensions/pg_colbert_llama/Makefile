@@ -31,6 +31,20 @@ else
 $(error unsupported PG_COLBERT_LLAMA_ENGINE=$(PG_COLBERT_LLAMA_ENGINE); expected stub or llama)
 endif
 
+# Sparse (SPLADE) model backend seam, selected independently of the dense/token
+# engine above so sparse output is available in every build.  The default stub
+# is dependency-light; a real backend (e.g. onnx) requires external runtimes and
+# is not bundled.
+PG_COLBERT_LLAMA_SPARSE_ENGINE ?= stub
+ifeq ($(PG_COLBERT_LLAMA_SPARSE_ENGINE),stub)
+	OBJS += src/colbert_sparse_engine_stub.o
+	PG_CPPFLAGS += -DPG_COLBERT_LLAMA_SPARSE_ENGINE_STUB=1
+else ifeq ($(PG_COLBERT_LLAMA_SPARSE_ENGINE),onnx)
+$(error the onnx sparse backend requires ONNX Runtime and is not bundled; build with PG_COLBERT_LLAMA_SPARSE_ENGINE=stub or provide an ONNX-backed engine object)
+else
+$(error unsupported PG_COLBERT_LLAMA_SPARSE_ENGINE=$(PG_COLBERT_LLAMA_SPARSE_ENGINE); expected stub or onnx)
+endif
+
 $(OBJS): src/*.h
 
 REGRESS = llama_embed pg_colbert_llama

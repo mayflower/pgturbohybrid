@@ -49,6 +49,7 @@ PG_FUNCTION_INFO_V1(pg_colbert_llama_llama_embed_mv);
 PG_FUNCTION_INFO_V1(pg_colbert_llama_llama_embed_mv_batch);
 PG_FUNCTION_INFO_V1(pg_colbert_llama_llama_embed_sparse);
 PG_FUNCTION_INFO_V1(pg_colbert_llama_llama_embed_sparse_batch);
+PG_FUNCTION_INFO_V1(pg_colbert_llama_llama_embed_sparse_model_info);
 PG_FUNCTION_INFO_V1(pg_colbert_llama_llama_embed_model_info);
 
 #define PG_COLBERT_LLAMA_VECTOR_SIZE(_dim) \
@@ -1812,7 +1813,14 @@ PgLlamaEmbedEncodeOrError(text *modelText, text *inputText, Jsonb *options,
 	char	   *errorMessage = NULL;
 
 	PgLlamaEmbedParseModel(modelText, options, defaultMode, spec);
-	if (!PgColbertEngineEncode(spec, input, ctx, output, &errorMessage))
+	if (spec->outputMode == PG_LLAMA_EMBED_OUTPUT_SPARSE)
+	{
+		if (!PgSparseEngineEncode(spec, input, ctx, output, &errorMessage))
+			ereport(ERROR,
+					(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
+					 errmsg("%s", errorMessage != NULL ? errorMessage : "llama_embed sparse engine failed")));
+	}
+	else if (!PgColbertEngineEncode(spec, input, ctx, output, &errorMessage))
 		ereport(ERROR,
 				(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
 				 errmsg("%s", errorMessage != NULL ? errorMessage : "llama_embed engine failed")));
@@ -1908,8 +1916,16 @@ PgLlamaEmbedEncodeBatchOrError(text *modelText, ArrayType *inputsArray,
 		inputs[i] = TextDatumGetCString(inputDatums[i]);
 	}
 
-	if (!PgColbertEngineEncodeBatch(spec, inputs, inputCount, ctx, *outputs,
-									&errorMessage))
+	if (spec->outputMode == PG_LLAMA_EMBED_OUTPUT_SPARSE)
+	{
+		if (!PgSparseEngineEncodeBatch(spec, inputs, inputCount, ctx, *outputs,
+									   &errorMessage))
+			ereport(ERROR,
+					(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
+					 errmsg("%s", errorMessage != NULL ? errorMessage : "llama_embed sparse engine failed")));
+	}
+	else if (!PgColbertEngineEncodeBatch(spec, inputs, inputCount, ctx, *outputs,
+										 &errorMessage))
 		ereport(ERROR,
 				(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
 				 errmsg("%s", errorMessage != NULL ? errorMessage : "llama_embed engine failed")));
@@ -2510,6 +2526,33 @@ PgColbertAppendModelInfoJson(StringInfo buf,
 	appendStringInfoChar(buf, '}');
 }
 
+static void
+PgSparseEngineAppendModelInfoJson(StringInfo buf,
+								  const PgColbertModelSpec *spec,
+								  const PgSparseEngineModelInfo *info)
+{
+	appendStringInfoChar(buf, '{');
+	appendStringInfoString(buf, "\"engine\":");
+	PgColbertAppendJsonString(buf, info->engine);
+	appendStringInfo(buf, ",\"implemented\":%s,\"supports_sparse\":%s",
+					 info->implemented ? "true" : "false",
+					 info->supportsSparse ? "true" : "false");
+	appendStringInfoString(buf, ",\"backend\":");
+	PgColbertAppendJsonString(buf, info->engine);
+	appendStringInfoString(buf, ",\"alias\":");
+	PgColbertAppendJsonString(buf, spec->alias);
+	appendStringInfoString(buf, ",\"mode\":\"sparse\",\"vocab_size\":");
+	if (info->vocabSize >= 0)
+		appendStringInfo(buf, "%d", info->vocabSize);
+	else
+		appendStringInfoString(buf, "null");
+	appendStringInfoString(buf, ",\"model\":");
+	PgColbertAppendJsonString(buf, info->path);
+	appendStringInfoString(buf, ",\"limitations\":");
+	PgColbertAppendJsonString(buf, info->limitations);
+	appendStringInfoChar(buf, '}');
+}
+
 static Datum
 PgColbertJsonbFromCString(const char *json)
 {
@@ -2825,6 +2868,30 @@ pg_colbert_llama_llama_embed_model_info(PG_FUNCTION_ARGS)
 
 	initStringInfo(&buf);
 	PgColbertAppendModelInfoJson(&buf, &spec, &info);
+
+	PG_RETURN_DATUM(PgColbertJsonbFromCString(buf.data));
+}
+
+Datum
+pg_colbert_llama_llama_embed_sparse_model_info(PG_FUNCTION_ARGS)
+{
+	PgColbertModelSpec spec;
+	PgSparseEngineModelInfo info;
+	StringInfoData buf;
+	char	   *errorMessage = NULL;
+
+	PgLlamaEmbedParseModel(PG_GETARG_TEXT_PP(0),
+						   PG_NARGS() > 1 ? PG_GETARG_JSONB_P(1) : NULL,
+						   PG_LLAMA_EMBED_OUTPUT_SPARSE,
+						   &spec);
+	if (!PgSparseEngineGetModelInfo(&spec, CurrentMemoryContext, &info,
+									&errorMessage))
+		ereport(ERROR,
+				(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
+				 errmsg("%s", errorMessage != NULL ? errorMessage : "llama_embed sparse engine failed")));
+
+	initStringInfo(&buf);
+	PgSparseEngineAppendModelInfoJson(&buf, &spec, &info);
 
 	PG_RETURN_DATUM(PgColbertJsonbFromCString(buf.data));
 }

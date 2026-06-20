@@ -1,89 +1,13 @@
 #include "postgres.h"
 
-#include <ctype.h>
-
 #include "lib/stringinfo.h"
 
 #include "colbert_engine.h"
-
-/* Deterministic stub vocabulary size (mirrors a BERT-family WordPiece vocab). */
-#define PG_COLBERT_STUB_SPARSE_VOCAB 30522
 
 const char *
 PgColbertEngineName(void)
 {
 	return "stub";
-}
-
-/*
- * Deterministically derive a sparse (term_id, weight) bag from the input text:
- * one entry per whitespace/punctuation-delimited token, term_id = FNV-1a hash of
- * the lowercased token modulo the vocab size, weight = token length.  Repeated
- * tokens emit repeated entries so the SQL layer's deduplicate option is
- * exercised.  No model download is required.
- */
-static void
-PgColbertStubSparseEncode(const PgColbertModelSpec *spec, const char *input,
-						  MemoryContext ctx, PgColbertEngineOutput *output)
-{
-	MemoryContext oldCtx = MemoryContextSwitchTo(ctx);
-	Size		len = strlen(input);
-	int32		capacity = 16;
-	int32		count = 0;
-	int32	   *termIds = (int32 *) palloc(sizeof(int32) * (Size) capacity);
-	float4	   *weights = (float4 *) palloc(sizeof(float4) * (Size) capacity);
-	Size		i = 0;
-
-	memset(output, 0, sizeof(*output));
-	output->engine = PgColbertEngineName();
-	output->input = pstrdup(input);
-	output->prefix = pstrdup(spec->prefix);
-	output->profileSource = pstrdup(spec->profile.sourceName);
-	output->attentionMaskStatus = pstrdup("ok");
-	output->knownLimitations = pstrdup(spec->profile.knownLimitations);
-	output->sparseVocabSize = PG_COLBERT_STUB_SPARSE_VOCAB;
-
-	while (i < len)
-	{
-		Size		start;
-		uint32		hash = 2166136261u;	/* FNV-1a offset basis */
-		int32		tokenLen;
-
-		if (!isalnum((unsigned char) input[i]))
-		{
-			i++;
-			continue;
-		}
-		start = i;
-		while (i < len && isalnum((unsigned char) input[i]))
-		{
-			unsigned char c = (unsigned char) tolower((unsigned char) input[i]);
-
-			hash ^= c;
-			hash *= 16777619u;		/* FNV-1a prime */
-			i++;
-		}
-		tokenLen = (int32) (i - start);
-
-		if (count == capacity)
-		{
-			capacity *= 2;
-			termIds = (int32 *) repalloc(termIds, sizeof(int32) * (Size) capacity);
-			weights = (float4 *) repalloc(weights, sizeof(float4) * (Size) capacity);
-		}
-		termIds[count] = (int32) (hash % (uint32) PG_COLBERT_STUB_SPARSE_VOCAB);
-		weights[count] = (float4) tokenLen;
-		count++;
-	}
-
-	output->sparseCount = count;
-	output->sparseTermIds = termIds;
-	output->sparseWeights = weights;
-	output->timing.inputs = 1;
-	output->timing.tokens = count;
-	output->timing.outputVectors = count;
-
-	MemoryContextSwitchTo(oldCtx);
 }
 
 bool
@@ -103,13 +27,8 @@ PgColbertEngineEncode(const PgColbertModelSpec *spec,
 	int32		count;
 	int32		dim = 4;
 
+	(void) input;
 	(void) errorMessage;
-
-	if (spec->outputMode == PG_LLAMA_EMBED_OUTPUT_SPARSE)
-	{
-		PgColbertStubSparseEncode(spec, input, ctx, output);
-		return true;
-	}
 
 	count = spec->outputMode == PG_LLAMA_EMBED_OUTPUT_DENSE ? 1 :
 		(spec->role == PG_COLBERT_ROLE_QUERY ? 2 : 3);

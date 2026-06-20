@@ -160,6 +160,14 @@ SELECT array_length(llama_embed_sparse_batch('sauerkraut-modern', ARRAY['hello w
 SELECT turbohybrid_sparse_vector_terms(llama_embed_sparse('sauerkraut-modern', 'quick brown fox')) =
        turbohybrid_sparse_vector_terms(llama_embed_sparse('sauerkraut-modern', 'quick brown fox')) AS deterministic;
 
+-- sparse backend seam (Prompt 14): the default build links the deterministic
+-- stub, which supports sparse output but reports implemented=false.
+SELECT llama_embed_sparse_model_info('sauerkraut-modern')->>'engine' AS sparse_engine,
+       (llama_embed_sparse_model_info('sauerkraut-modern')->>'implemented')::bool AS implemented,
+       (llama_embed_sparse_model_info('sauerkraut-modern')->>'supports_sparse')::bool AS supports_sparse,
+       (llama_embed_sparse_model_info('sauerkraut-modern')->>'vocab_size')::int AS vocab_size,
+       llama_embed_sparse_model_info('sauerkraut-modern')->>'mode' AS mode;
+
 -- invalid options are rejected.
 DO $sparse_invalid$
 DECLARE spec record;

@@ -191,6 +191,16 @@ SELECT turbohybrid_sparse_vector_terms(llama_embed_sparse('sauerkraut-modern', '
 deterministic
 t
 (1 row)
+-- sparse backend seam (Prompt 14): the default build links the deterministic
+-- stub, which supports sparse output but reports implemented=false.
+SELECT llama_embed_sparse_model_info('sauerkraut-modern')->>'engine' AS sparse_engine,
+       (llama_embed_sparse_model_info('sauerkraut-modern')->>'implemented')::bool AS implemented,
+       (llama_embed_sparse_model_info('sauerkraut-modern')->>'supports_sparse')::bool AS supports_sparse,
+       (llama_embed_sparse_model_info('sauerkraut-modern')->>'vocab_size')::int AS vocab_size,
+       llama_embed_sparse_model_info('sauerkraut-modern')->>'mode' AS mode;
+sparse_engine|implemented|supports_sparse|vocab_size|mode
+stub|f|t|30522|sparse
+(1 row)
 -- invalid options are rejected.
 DO $sparse_invalid$
 DECLARE spec record;
