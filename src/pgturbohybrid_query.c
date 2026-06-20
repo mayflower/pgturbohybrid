@@ -28,6 +28,10 @@ FUNCTION_PREFIX PG_FUNCTION_INFO_V1(pgturbohybrid_sparse_vector_out);
 FUNCTION_PREFIX PG_FUNCTION_INFO_V1(pgturbohybrid_sparse_vector_from_arrays);
 FUNCTION_PREFIX PG_FUNCTION_INFO_V1(pgturbohybrid_sparse_vector_terms);
 FUNCTION_PREFIX PG_FUNCTION_INFO_V1(pgturbohybrid_sparse_vector_query_terms);
+FUNCTION_PREFIX PG_FUNCTION_INFO_V1(pgturbohybrid_sparse_vector_build);
+FUNCTION_PREFIX PG_FUNCTION_INFO_V1(pgturbohybrid_sparse_vector_term_ids);
+FUNCTION_PREFIX PG_FUNCTION_INFO_V1(pgturbohybrid_sparse_vector_weights);
+FUNCTION_PREFIX PG_FUNCTION_INFO_V1(pgturbohybrid_sparse_vector_count);
 FUNCTION_PREFIX PG_FUNCTION_INFO_V1(pgturbohybrid_query_constructor);
 FUNCTION_PREFIX PG_FUNCTION_INFO_V1(pgturbohybrid_distance);
 FUNCTION_PREFIX PG_FUNCTION_INFO_V1(pgturbohybrid_l2_distance);
@@ -748,6 +752,317 @@ pgturbohybrid_sparse_vector_query_terms(PG_FUNCTION_ARGS)
 				 errmsg("sparse vector query must contain at least one positive-weight term")));
 
 	PG_RETURN_TEXT_P(cstring_to_text(buf.data));
+}
+
+/* ---- Canonical sparse-vector builder + inspection helpers (Prompt 1) ---- */
+
+typedef enum PgturbohybridSparseDedup
+{
+	PGTURBOHYBRID_SPARSE_DEDUP_SUM,
+	PGTURBOHYBRID_SPARSE_DEDUP_MAX,
+	PGTURBOHYBRID_SPARSE_DEDUP_ERROR
+} PgturbohybridSparseDedup;
+
+typedef struct PgturbohybridSparseBuildEntry
+{
+	int32		termId;
+	float4		weight;
+	int32		ord;			/* first-seen position, for stable ordering */
+} PgturbohybridSparseBuildEntry;
+
+static int
+PgturbohybridSparseCmpTermIdOrd(const void *a, const void *b)
+{
+	const PgturbohybridSparseBuildEntry *ea = a;
+	const PgturbohybridSparseBuildEntry *eb = b;
+
+	if (ea->termId != eb->termId)
+		return ea->termId < eb->termId ? -1 : 1;
+	if (ea->ord != eb->ord)
+		return ea->ord < eb->ord ? -1 : 1;
+	return 0;
+}
+
+static int
+PgturbohybridSparseCmpTermId(const void *a, const void *b)
+{
+	const PgturbohybridSparseBuildEntry *ea = a;
+	const PgturbohybridSparseBuildEntry *eb = b;
+
+	if (ea->termId != eb->termId)
+		return ea->termId < eb->termId ? -1 : 1;
+	return 0;
+}
+
+static int
+PgturbohybridSparseCmpOrd(const void *a, const void *b)
+{
+	const PgturbohybridSparseBuildEntry *ea = a;
+	const PgturbohybridSparseBuildEntry *eb = b;
+
+	if (ea->ord != eb->ord)
+		return ea->ord < eb->ord ? -1 : 1;
+	return 0;
+}
+
+static int
+PgturbohybridSparseCmpWeightDesc(const void *a, const void *b)
+{
+	const PgturbohybridSparseBuildEntry *ea = a;
+	const PgturbohybridSparseBuildEntry *eb = b;
+
+	if (ea->weight != eb->weight)
+		return ea->weight > eb->weight ? -1 : 1;
+	/* deterministic tiebreak: smaller termId wins the top-k slot */
+	if (ea->termId != eb->termId)
+		return ea->termId < eb->termId ? -1 : 1;
+	return 0;
+}
+
+static PgturbohybridSparseVector *
+PgturbohybridSparseVectorFromBuildEntries(PgturbohybridSparseBuildEntry *entries,
+										  uint32 count)
+{
+	Size		headerSize = MAXALIGN(sizeof(PgturbohybridSparseVector));
+	Size		totalSize;
+	PgturbohybridSparseVector *result;
+	PgturbohybridSparseVectorEntry *out;
+
+	if ((Size) count >
+		(MaxAllocSize - headerSize) / sizeof(PgturbohybridSparseVectorEntry))
+		ereport(ERROR,
+				(errcode(ERRCODE_PROGRAM_LIMIT_EXCEEDED),
+				 errmsg("turbohybrid_sparse_vector payload is too large")));
+
+	totalSize = headerSize + (Size) count * sizeof(PgturbohybridSparseVectorEntry);
+	result = palloc0(totalSize);
+	SET_VARSIZE(result, totalSize);
+	result->version = PGTURBOHYBRID_SPARSE_VECTOR_VERSION;
+	result->count = count;
+	out = (PgturbohybridSparseVectorEntry *) ((char *) result + headerSize);
+	for (uint32 i = 0; i < count; i++)
+	{
+		out[i].termId = entries[i].termId;
+		out[i].weight = entries[i].weight;
+		out[i].fieldId = PGTURBOHYBRID_SPARSE_VECTOR_FIELD_NONE;
+	}
+	return result;
+}
+
+/*
+ * Canonical builder.  Typed-args worker (the public 3-arg jsonb form is a SQL
+ * wrapper that extracts options and calls this).  Not STRICT: top_k may be NULL
+ * (meaning "no cap"); NULL term_ids/weights are rejected explicitly.
+ */
+Datum
+pgturbohybrid_sparse_vector_build(PG_FUNCTION_ARGS)
+{
+	ArrayType  *termArray;
+	ArrayType  *weightArray;
+	bool		dropNonPositive;
+	char	   *dedupStr;
+	bool		sortOutput;
+	bool		hasTopK;
+	int32		topK = 0;
+	double		minWeight;
+	char	   *normalizeStr;
+	PgturbohybridSparseDedup dedupMode;
+	Datum	   *termDatums;
+	Datum	   *weightDatums;
+	bool	   *termNulls;
+	bool	   *weightNulls;
+	int			termCount;
+	int			weightCount;
+	PgturbohybridSparseBuildEntry *work;
+	uint32		nKept = 0;
+	uint32		nDedup = 0;
+	PgturbohybridSparseVector *result;
+
+	if (PG_ARGISNULL(0) || PG_ARGISNULL(1))
+		ereport(ERROR,
+				(errcode(ERRCODE_NULL_VALUE_NOT_ALLOWED),
+				 errmsg("term_ids and weights must not be null")));
+
+	termArray = PG_GETARG_ARRAYTYPE_P(0);
+	weightArray = PG_GETARG_ARRAYTYPE_P(1);
+	dropNonPositive = PG_ARGISNULL(2) ? true : PG_GETARG_BOOL(2);
+	dedupStr = PG_ARGISNULL(3) ? "sum" : text_to_cstring(PG_GETARG_TEXT_PP(3));
+	sortOutput = PG_ARGISNULL(4) ? true : PG_GETARG_BOOL(4);
+	hasTopK = !PG_ARGISNULL(5);
+	if (hasTopK)
+		topK = PG_GETARG_INT32(5);
+	minWeight = PG_ARGISNULL(6) ? 0.0 : PG_GETARG_FLOAT8(6);
+	normalizeStr = PG_ARGISNULL(7) ? "none" : text_to_cstring(PG_GETARG_TEXT_PP(7));
+
+	if (strcmp(normalizeStr, "none") != 0)
+		ereport(ERROR,
+				(errcode(ERRCODE_INVALID_PARAMETER_VALUE),
+				 errmsg("unsupported sparse vector normalize mode \"%s\"", normalizeStr),
+				 errhint("Only \"none\" is currently supported.")));
+
+	if (strcmp(dedupStr, "sum") == 0)
+		dedupMode = PGTURBOHYBRID_SPARSE_DEDUP_SUM;
+	else if (strcmp(dedupStr, "max") == 0)
+		dedupMode = PGTURBOHYBRID_SPARSE_DEDUP_MAX;
+	else if (strcmp(dedupStr, "error") == 0)
+		dedupMode = PGTURBOHYBRID_SPARSE_DEDUP_ERROR;
+	else
+		ereport(ERROR,
+				(errcode(ERRCODE_INVALID_PARAMETER_VALUE),
+				 errmsg("unsupported sparse vector deduplicate mode \"%s\"", dedupStr),
+				 errhint("Valid modes are \"sum\", \"max\", \"error\".")));
+
+	if (hasTopK && topK < 0)
+		ereport(ERROR,
+				(errcode(ERRCODE_INVALID_PARAMETER_VALUE),
+				 errmsg("sparse vector top_k must be non-negative")));
+
+	if (ARR_NDIM(termArray) > 1 || ARR_NDIM(weightArray) > 1)
+		ereport(ERROR,
+				(errcode(ERRCODE_INVALID_PARAMETER_VALUE),
+				 errmsg("sparse vector arrays must be one-dimensional")));
+
+	deconstruct_array(termArray, INT4OID, sizeof(int32), true, TYPALIGN_INT,
+					  &termDatums, &termNulls, &termCount);
+	deconstruct_array(weightArray, FLOAT4OID, sizeof(float4), true, TYPALIGN_INT,
+					  &weightDatums, &weightNulls, &weightCount);
+
+	if (termCount != weightCount)
+		ereport(ERROR,
+				(errcode(ERRCODE_INVALID_PARAMETER_VALUE),
+				 errmsg("term_ids and weights must have the same length")));
+
+	work = (termCount > 0)
+		? (PgturbohybridSparseBuildEntry *)
+		palloc(sizeof(PgturbohybridSparseBuildEntry) * termCount)
+		: NULL;
+
+	for (int i = 0; i < termCount; i++)
+	{
+		int32		termId;
+		float4		weight;
+
+		if (termNulls[i] || weightNulls[i])
+			ereport(ERROR,
+					(errcode(ERRCODE_NULL_VALUE_NOT_ALLOWED),
+					 errmsg("sparse vector arrays cannot contain nulls")));
+		termId = DatumGetInt32(termDatums[i]);
+		weight = DatumGetFloat4(weightDatums[i]);
+		if (termId < 0)
+			ereport(ERROR,
+					(errcode(ERRCODE_INVALID_PARAMETER_VALUE),
+					 errmsg("sparse vector term ids must be non-negative")));
+		if (!isfinite((double) weight))
+			ereport(ERROR,
+					(errcode(ERRCODE_INVALID_PARAMETER_VALUE),
+					 errmsg("sparse vector weights must be finite")));
+		if (dropNonPositive && (double) weight <= minWeight)
+			continue;
+		work[nKept].termId = termId;
+		work[nKept].weight = weight;
+		work[nKept].ord = (int32) nKept;
+		nKept++;
+	}
+
+	/* deduplicate by termId */
+	if (nKept > 0)
+	{
+		uint32		i = 0;
+
+		qsort(work, nKept, sizeof(PgturbohybridSparseBuildEntry),
+			  PgturbohybridSparseCmpTermIdOrd);
+		while (i < nKept)
+		{
+			int32		termId = work[i].termId;
+			float4		combined = work[i].weight;
+			int32		firstOrd = work[i].ord;
+			uint32		k = i + 1;
+
+			while (k < nKept && work[k].termId == termId)
+			{
+				if (dedupMode == PGTURBOHYBRID_SPARSE_DEDUP_ERROR)
+					ereport(ERROR,
+							(errcode(ERRCODE_INVALID_PARAMETER_VALUE),
+							 errmsg("duplicate sparse vector term id %d", termId)));
+				else if (dedupMode == PGTURBOHYBRID_SPARSE_DEDUP_SUM)
+					combined += work[k].weight;
+				else			/* MAX */
+					combined = Max(combined, work[k].weight);
+				if (work[k].ord < firstOrd)
+					firstOrd = work[k].ord;
+				k++;
+			}
+			work[nDedup].termId = termId;
+			work[nDedup].weight = combined;
+			work[nDedup].ord = firstOrd;
+			nDedup++;
+			i = k;
+		}
+	}
+
+	/* top_k: keep the highest-weight terms */
+	if (hasTopK && (uint32) topK < nDedup)
+	{
+		qsort(work, nDedup, sizeof(PgturbohybridSparseBuildEntry),
+			  PgturbohybridSparseCmpWeightDesc);
+		nDedup = (uint32) topK;
+	}
+
+	/* final ordering: canonical (by termId) unless sort=false (first-seen) */
+	if (nDedup > 0)
+		qsort(work, nDedup, sizeof(PgturbohybridSparseBuildEntry),
+			  sortOutput ? PgturbohybridSparseCmpTermId : PgturbohybridSparseCmpOrd);
+
+	result = PgturbohybridSparseVectorFromBuildEntries(work, nDedup);
+	PG_RETURN_POINTER(result);
+}
+
+Datum
+pgturbohybrid_sparse_vector_term_ids(PG_FUNCTION_ARGS)
+{
+	PgturbohybridSparseVector *sparse =
+		(PgturbohybridSparseVector *) PG_DETOAST_DATUM(PG_GETARG_DATUM(0));
+	PgturbohybridSparseVectorEntry *entries;
+	Datum	   *datums;
+	ArrayType  *result;
+
+	PgturbohybridSparseVectorValidate(sparse);
+	entries = PgturbohybridSparseVectorEntries(sparse);
+	datums = palloc(sizeof(Datum) * (sparse->count + 1));
+	for (uint32 i = 0; i < sparse->count; i++)
+		datums[i] = Int32GetDatum(entries[i].termId);
+	result = construct_array(datums, (int) sparse->count, INT4OID,
+							 sizeof(int32), true, TYPALIGN_INT);
+	PG_RETURN_ARRAYTYPE_P(result);
+}
+
+Datum
+pgturbohybrid_sparse_vector_weights(PG_FUNCTION_ARGS)
+{
+	PgturbohybridSparseVector *sparse =
+		(PgturbohybridSparseVector *) PG_DETOAST_DATUM(PG_GETARG_DATUM(0));
+	PgturbohybridSparseVectorEntry *entries;
+	Datum	   *datums;
+	ArrayType  *result;
+
+	PgturbohybridSparseVectorValidate(sparse);
+	entries = PgturbohybridSparseVectorEntries(sparse);
+	datums = palloc(sizeof(Datum) * (sparse->count + 1));
+	for (uint32 i = 0; i < sparse->count; i++)
+		datums[i] = Float4GetDatum(entries[i].weight);
+	result = construct_array(datums, (int) sparse->count, FLOAT4OID,
+							 sizeof(float4), true, TYPALIGN_INT);
+	PG_RETURN_ARRAYTYPE_P(result);
+}
+
+Datum
+pgturbohybrid_sparse_vector_count(PG_FUNCTION_ARGS)
+{
+	PgturbohybridSparseVector *sparse =
+		(PgturbohybridSparseVector *) PG_DETOAST_DATUM(PG_GETARG_DATUM(0));
+
+	PgturbohybridSparseVectorValidate(sparse);
+	PG_RETURN_INT32((int32) sparse->count);
 }
 
 static uint16

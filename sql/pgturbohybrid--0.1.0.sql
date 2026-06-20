@@ -111,6 +111,55 @@ CREATE FUNCTION turbohybrid_sparse_vector_to_tsquery(
 	RETURN pg_catalog.to_tsquery('pg_catalog.simple'::pg_catalog.regconfig,
 								 turbohybrid_sparse_vector_query_terms(sparse));
 
+-- Canonical builder: typed-args C worker (not STRICT; top_k may be NULL).
+CREATE FUNCTION turbohybrid_sparse_vector_build(
+	term_ids pg_catalog.int4[],
+	weights pg_catalog.float4[],
+	drop_non_positive pg_catalog.bool,
+	deduplicate pg_catalog.text,
+	sort pg_catalog.bool,
+	top_k pg_catalog.int4,
+	min_weight pg_catalog.float8,
+	normalize_mode pg_catalog.text
+) RETURNS turbohybrid_sparse_vector
+	AS 'MODULE_PATHNAME', 'pgturbohybrid_sparse_vector_build'
+	LANGUAGE C IMMUTABLE PARALLEL SAFE;
+
+-- Public jsonb-options form: extracts options (with defaults) and calls the worker.
+CREATE FUNCTION turbohybrid_sparse_vector_build(
+	term_ids pg_catalog.int4[],
+	weights pg_catalog.float4[],
+	options pg_catalog.jsonb DEFAULT '{}'::pg_catalog.jsonb
+) RETURNS turbohybrid_sparse_vector
+	LANGUAGE SQL IMMUTABLE PARALLEL SAFE
+	RETURN turbohybrid_sparse_vector_build(
+		term_ids,
+		weights,
+		COALESCE((options ->> 'drop_non_positive')::pg_catalog.bool, true),
+		COALESCE(options ->> 'deduplicate', 'sum'),
+		COALESCE((options ->> 'sort')::pg_catalog.bool, true),
+		(options ->> 'top_k')::pg_catalog.int4,
+		COALESCE((options ->> 'min_weight')::pg_catalog.float8, 0.0),
+		COALESCE(options ->> 'normalize', 'none'));
+
+CREATE FUNCTION turbohybrid_sparse_vector_term_ids(
+	sparse turbohybrid_sparse_vector
+) RETURNS pg_catalog.int4[]
+	AS 'MODULE_PATHNAME', 'pgturbohybrid_sparse_vector_term_ids'
+	LANGUAGE C IMMUTABLE STRICT PARALLEL SAFE;
+
+CREATE FUNCTION turbohybrid_sparse_vector_weights(
+	sparse turbohybrid_sparse_vector
+) RETURNS pg_catalog.float4[]
+	AS 'MODULE_PATHNAME', 'pgturbohybrid_sparse_vector_weights'
+	LANGUAGE C IMMUTABLE STRICT PARALLEL SAFE;
+
+CREATE FUNCTION turbohybrid_sparse_vector_count(
+	sparse turbohybrid_sparse_vector
+) RETURNS pg_catalog.int4
+	AS 'MODULE_PATHNAME', 'pgturbohybrid_sparse_vector_count'
+	LANGUAGE C IMMUTABLE STRICT PARALLEL SAFE;
+
 CREATE TYPE turbohybrid_multivector;
 
 CREATE FUNCTION turbohybrid_multivector_in(pg_catalog.cstring) RETURNS turbohybrid_multivector

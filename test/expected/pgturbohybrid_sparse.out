@@ -1,0 +1,146 @@
+-- Canonical sparse-vector builder + inspection helpers (Prompt 1).
+SET client_min_messages = warning;
+CREATE EXTENSION IF NOT EXISTS vector;
+CREATE EXTENSION IF NOT EXISTS pgturbohybrid;
+RESET client_min_messages;
+-- Build with default options: dedup=sum, sort=true, drop_non_positive=true.
+-- term 5 appears twice (1.0 + 3.0 = 4.0); output sorted by term_id.
+SELECT turbohybrid_sparse_vector_count(
+  turbohybrid_sparse_vector_build(ARRAY[5,1,5,3]::int4[], ARRAY[1.0,2.0,3.0,4.0]::float4[])) AS cnt;
+ cnt 
+-----
+   3
+(1 row)
+
+SELECT turbohybrid_sparse_vector_term_ids(
+  turbohybrid_sparse_vector_build(ARRAY[5,1,5,3]::int4[], ARRAY[1.0,2.0,3.0,4.0]::float4[])) AS term_ids;
+ term_ids 
+----------
+ {1,3,5}
+(1 row)
+
+SELECT turbohybrid_sparse_vector_weights(
+  turbohybrid_sparse_vector_build(ARRAY[5,1,5,3]::int4[], ARRAY[1.0,2.0,3.0,4.0]::float4[])) AS weights;
+ weights 
+---------
+ {2,4,4}
+(1 row)
+
+-- dedup = max
+SELECT turbohybrid_sparse_vector_weights(
+  turbohybrid_sparse_vector_build(ARRAY[5,5]::int4[], ARRAY[1.0,3.0]::float4[],
+                                  '{"deduplicate":"max"}')) AS dedup_max;
+ dedup_max 
+-----------
+ {3}
+(1 row)
+
+-- dedup = error (duplicate term -> error)
+SELECT turbohybrid_sparse_vector_build(ARRAY[5,5]::int4[], ARRAY[1.0,3.0]::float4[],
+                                       '{"deduplicate":"error"}');
+ERROR:  duplicate sparse vector term id 5
+CONTEXT:  SQL function "turbohybrid_sparse_vector_build" statement 1
+-- top_k keeps the highest-weight terms, output re-sorted by term_id
+SELECT turbohybrid_sparse_vector_term_ids(
+  turbohybrid_sparse_vector_build(ARRAY[1,2,3]::int4[], ARRAY[0.5,2.0,1.0]::float4[],
+                                  '{"top_k":2}')) AS top_k_ids;
+ top_k_ids 
+-----------
+ {2,3}
+(1 row)
+
+-- drop_non_positive (default): weight <= 0 dropped
+SELECT turbohybrid_sparse_vector_term_ids(
+  turbohybrid_sparse_vector_build(ARRAY[1,2,3]::int4[], ARRAY[-1.0,0.0,2.0]::float4[])) AS dropped_ids;
+ dropped_ids 
+-------------
+ {3}
+(1 row)
+
+-- min_weight raises the drop threshold
+SELECT turbohybrid_sparse_vector_term_ids(
+  turbohybrid_sparse_vector_build(ARRAY[1,2,3]::int4[], ARRAY[0.5,1.5,2.0]::float4[],
+                                  '{"min_weight":1.0}')) AS min_weight_ids;
+ min_weight_ids 
+----------------
+ {2,3}
+(1 row)
+
+-- drop_non_positive=false keeps negative/zero weights
+SELECT turbohybrid_sparse_vector_weights(
+  turbohybrid_sparse_vector_build(ARRAY[1,2]::int4[], ARRAY[-1.0,2.0]::float4[],
+                                  '{"drop_non_positive":false}')) AS keep_negative;
+ keep_negative 
+---------------
+ {-1,2}
+(1 row)
+
+-- sort=false preserves first-seen order
+SELECT turbohybrid_sparse_vector_term_ids(
+  turbohybrid_sparse_vector_build(ARRAY[5,1,3]::int4[], ARRAY[1.0,1.0,1.0]::float4[],
+                                  '{"sort":false}')) AS unsorted_ids;
+ unsorted_ids 
+--------------
+ {5,1,3}
+(1 row)
+
+-- empty inputs / all-dropped -> count 0
+SELECT turbohybrid_sparse_vector_count(
+  turbohybrid_sparse_vector_build(ARRAY[]::int4[], ARRAY[]::float4[])) AS empty_cnt;
+ empty_cnt 
+-----------
+         0
+(1 row)
+
+SELECT turbohybrid_sparse_vector_count(
+  turbohybrid_sparse_vector_build(ARRAY[1]::int4[], ARRAY[-1.0]::float4[])) AS all_dropped_cnt;
+ all_dropped_cnt 
+-----------------
+               0
+(1 row)
+
+-- invalid inputs
+SELECT turbohybrid_sparse_vector_build(ARRAY[1,2]::int4[], ARRAY[1.0]::float4[]);          -- length mismatch
+ERROR:  term_ids and weights must have the same length
+CONTEXT:  SQL function "turbohybrid_sparse_vector_build" statement 1
+SELECT turbohybrid_sparse_vector_build(ARRAY[-1]::int4[], ARRAY[1.0]::float4[]);           -- negative term id
+ERROR:  sparse vector term ids must be non-negative
+CONTEXT:  SQL function "turbohybrid_sparse_vector_build" statement 1
+SELECT turbohybrid_sparse_vector_build(ARRAY[1]::int4[], ARRAY['NaN'::float4]);            -- non-finite weight
+ERROR:  sparse vector weights must be finite
+CONTEXT:  SQL function "turbohybrid_sparse_vector_build" statement 1
+SELECT turbohybrid_sparse_vector_build(ARRAY[1]::int4[], ARRAY[1.0]::float4[],
+                                       '{"normalize":"l2"}');                              -- unsupported normalize
+ERROR:  unsupported sparse vector normalize mode "l2"
+HINT:  Only "none" is currently supported.
+CONTEXT:  SQL function "turbohybrid_sparse_vector_build" statement 1
+SELECT turbohybrid_sparse_vector_build(ARRAY[1]::int4[], ARRAY[1.0]::float4[],
+                                       '{"deduplicate":"avg"}');                           -- unsupported dedup
+ERROR:  unsupported sparse vector deduplicate mode "avg"
+HINT:  Valid modes are "sum", "max", "error".
+CONTEXT:  SQL function "turbohybrid_sparse_vector_build" statement 1
+SELECT turbohybrid_sparse_vector_build(ARRAY[1]::int4[], ARRAY[1.0]::float4[],
+                                       '{"top_k":-1}');                                    -- negative top_k
+ERROR:  sparse vector top_k must be non-negative
+CONTEXT:  SQL function "turbohybrid_sparse_vector_build" statement 1
+-- existing constructor is unchanged
+SELECT turbohybrid_sparse_vector_count(
+  turbohybrid_sparse_vector_from_arrays(ARRAY[1,2]::int4[], ARRAY[1.0,2.0]::float4[])) AS from_arrays_cnt;
+ from_arrays_cnt 
+-----------------
+               2
+(1 row)
+
+-- inspectors round-trip a built vector
+WITH v AS (
+  SELECT turbohybrid_sparse_vector_build(ARRAY[9,2,9]::int4[], ARRAY[1.0,2.0,2.0]::float4[]) AS s
+)
+SELECT turbohybrid_sparse_vector_term_ids(s) AS ids,
+       turbohybrid_sparse_vector_weights(s) AS w,
+       turbohybrid_sparse_vector_count(s)   AS c
+FROM v;
+  ids  |   w   | c 
+-------+-------+---
+ {2,9} | {2,3} | 2
+(1 row)
+
