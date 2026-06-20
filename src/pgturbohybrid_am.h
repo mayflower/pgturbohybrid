@@ -200,6 +200,13 @@ typedef struct PgturbohybridScanStatsSnapshot
 	uint64		sparseWandIterations;
 	uint64		sparseWandThresholdUpdates;
 	uint64		sparseWandHeapUpdates;
+	bool		sparseCacheHit;
+	uint64		sparseCacheBuildUs;
+	uint64		sparseCacheBytes;
+	uint64		sparseHotCacheHits;
+	uint64		sparseHotCacheMisses;
+	uint64		sparseHotCacheBytes;
+	uint64		sparseHotCacheEvictions;
 	PgturbohybridBranchPlan branchPlan;
 	uint32		denseCandidatesEffective;
 	bool		denseKDefaulted;
@@ -548,6 +555,8 @@ typedef struct PgturbohybridScanStatsSnapshot
 
 extern bool pgturbohybrid_enable_wand;
 extern bool pgturbohybrid_enable_sparse_wand;
+extern int	pgturbohybrid_sparse_hot_postings_cache_mb;
+extern int	pgturbohybrid_sparse_hot_postings_cache_min_df;
 extern int	pgturbohybrid_max_union_candidates;
 extern int	pgturbohybrid_default_dense_k;
 extern int	pgturbohybrid_default_bm25_k;

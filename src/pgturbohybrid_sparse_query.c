@@ -101,6 +101,36 @@ PgturbohybridSparseReadMeta(Relation index, BlockNumber metaBlkno,
 	return true;
 }
 
+bool
+PgturbohybridSparseEstimateMemory(Relation index,
+								  struct PgturbohybridGraphMetaPageData *graphMeta,
+								  PgturbohybridSparseMemoryEstimate *out)
+{
+	PgturbohybridSparseMetaTupleData meta;
+
+	memset(out, 0, sizeof(*out));
+	if (graphMeta == NULL ||
+		graphMeta->tqSparseMetaStartBlkno == InvalidBlockNumber ||
+		graphMeta->tqSparseMetaStartBlkno == 0)
+		return false;
+	if (!PgturbohybridSparseReadMeta(index, graphMeta->tqSparseMetaStartBlkno, &meta))
+		return false;
+
+	out->available = true;
+	out->termCount = meta.termCount;
+	out->docCount = meta.docCount;
+	out->nodeCount = graphMeta->tqNodeCount;
+	out->quantBits = (int) meta.quantBits;
+	out->lexiconBytes = (uint64) meta.termCount * sizeof(PgturbohybridSparseLexiconEntry);
+	out->heapTidsBytes = (uint64) graphMeta->tqNodeCount * sizeof(ItemPointerData);
+	out->livenessBytes = (uint64) graphMeta->tqNodeCount * sizeof(bool);
+	out->hotPostingsCacheMaxBytes =
+		(uint64) pgturbohybrid_sparse_hot_postings_cache_mb * 1024 * 1024;
+	out->totalBytesPerBackend = out->lexiconBytes + out->heapTidsBytes +
+		out->livenessBytes + out->hotPostingsCacheMaxBytes;
+	return true;
+}
+
 /* Load all lexicon entries into a palloc'd, term-id-sorted array. */
 static PgturbohybridSparseLexEntry *
 PgturbohybridSparseLoadLexicon(Relation index, BlockNumber start, uint32 termCount,
@@ -152,6 +182,236 @@ PgturbohybridSparseLoadLexicon(Relation index, BlockNumber start, uint32 termCou
 			  PgturbohybridSparseLexCompare);
 	*outCount = count;
 	return entries;
+}
+
+/* ---- Backend-local sparse cache (prompt 10) ---------------------------- */
+
+#define PGTURBOHYBRID_SPARSE_HOT_BUCKETS 1024
+
+typedef struct PgturbohybridSparseHotChunk
+{
+	BlockNumber blkno;			/* chunk key */
+	OffsetNumber offno;
+	uint32		count;
+	uint32	   *nodes;			/* decoded node_ids */
+	float4	   *weights;		/* decoded raw weight values (q code or f32) */
+	Size		bytes;
+	struct PgturbohybridSparseHotChunk *hashNext;
+	struct PgturbohybridSparseHotChunk *lruPrev;
+	struct PgturbohybridSparseHotChunk *lruNext;
+} PgturbohybridSparseHotChunk;
+
+typedef struct PgturbohybridSparseCacheRel
+{
+	Oid			relid;
+	Oid			relfilenumber;
+	/* reader cache: lexicon + node states (heap TIDs + liveness) */
+	PgturbohybridSparseLexEntry *lexicon;
+	uint32		lexiconCount;
+	bool		lexiconLoaded;
+	PgturbohybridNodeState *states;
+	uint32		stateCount;
+	bool		statesLoaded;
+	Size		readerBytes;
+	/* hot decoded-postings cache (LRU, MB-capped) */
+	PgturbohybridSparseHotChunk *buckets[PGTURBOHYBRID_SPARSE_HOT_BUCKETS];
+	PgturbohybridSparseHotChunk *lruHead;	/* most recently used */
+	PgturbohybridSparseHotChunk *lruTail;	/* least recently used */
+	Size		hotBytes;
+	uint64		hotEvictions;
+	MemoryContext ctx;
+	struct PgturbohybridSparseCacheRel *next;
+} PgturbohybridSparseCacheRel;
+
+static PgturbohybridSparseCacheRel *pgturbohybrid_sparse_cache_list = NULL;
+
+static void
+PgturbohybridSparseCacheFree(PgturbohybridSparseCacheRel *cache)
+{
+	PgturbohybridSparseCacheRel **link = &pgturbohybrid_sparse_cache_list;
+
+	while (*link != NULL && *link != cache)
+		link = &(*link)->next;
+	if (*link == cache)
+		*link = cache->next;
+	MemoryContextDelete(cache->ctx);	/* frees lexicon/states/hot chunks */
+}
+
+void
+PgturbohybridSparseCacheInvalidate(Oid relid)
+{
+	PgturbohybridSparseCacheRel *cache = pgturbohybrid_sparse_cache_list;
+
+	while (cache != NULL)
+	{
+		PgturbohybridSparseCacheRel *next = cache->next;
+
+		if (cache->relid == relid)
+			PgturbohybridSparseCacheFree(cache);
+		cache = next;
+	}
+}
+
+/* Find (or create, invalidating on relfilenumber change) the per-relation cache. */
+static PgturbohybridSparseCacheRel *
+PgturbohybridSparseCacheAcquire(Relation index)
+{
+	Oid			relid = RelationGetRelid(index);
+	Oid			relfile = PgturbohybridGraphRelFileNumber(index);
+	PgturbohybridSparseCacheRel *cache = pgturbohybrid_sparse_cache_list;
+	MemoryContext ctx;
+	MemoryContext oldCtx;
+
+	for (; cache != NULL; cache = cache->next)
+	{
+		if (cache->relid != relid)
+			continue;
+		if (cache->relfilenumber == relfile)
+			return cache;
+		PgturbohybridSparseCacheFree(cache); /* REINDEX: stale relfilenumber */
+		break;
+	}
+
+	ctx = AllocSetContextCreate(CacheMemoryContext, "pgturbohybrid sparse cache",
+								ALLOCSET_DEFAULT_SIZES);
+	oldCtx = MemoryContextSwitchTo(ctx);
+	cache = (PgturbohybridSparseCacheRel *) palloc0(sizeof(PgturbohybridSparseCacheRel));
+	cache->relid = relid;
+	cache->relfilenumber = relfile;
+	cache->ctx = ctx;
+	cache->next = pgturbohybrid_sparse_cache_list;
+	pgturbohybrid_sparse_cache_list = cache;
+	MemoryContextSwitchTo(oldCtx);
+	return cache;
+}
+
+/* LRU helpers for the hot-postings cache. */
+static void
+PgturbohybridSparseHotUnlink(PgturbohybridSparseCacheRel *cache,
+							 PgturbohybridSparseHotChunk *c)
+{
+	if (c->lruPrev != NULL)
+		c->lruPrev->lruNext = c->lruNext;
+	else
+		cache->lruHead = c->lruNext;
+	if (c->lruNext != NULL)
+		c->lruNext->lruPrev = c->lruPrev;
+	else
+		cache->lruTail = c->lruPrev;
+	c->lruPrev = c->lruNext = NULL;
+}
+
+static void
+PgturbohybridSparseHotPushFront(PgturbohybridSparseCacheRel *cache,
+								PgturbohybridSparseHotChunk *c)
+{
+	c->lruPrev = NULL;
+	c->lruNext = cache->lruHead;
+	if (cache->lruHead != NULL)
+		cache->lruHead->lruPrev = c;
+	cache->lruHead = c;
+	if (cache->lruTail == NULL)
+		cache->lruTail = c;
+}
+
+static inline uint32
+PgturbohybridSparseHotBucket(BlockNumber blkno, OffsetNumber offno)
+{
+	uint32		h = ((uint32) blkno * 2654435761u) ^ ((uint32) offno * 40503u);
+
+	return h & (PGTURBOHYBRID_SPARSE_HOT_BUCKETS - 1);
+}
+
+static PgturbohybridSparseHotChunk *
+PgturbohybridSparseHotFind(PgturbohybridSparseCacheRel *cache, BlockNumber blkno,
+						   OffsetNumber offno)
+{
+	PgturbohybridSparseHotChunk *c =
+		cache->buckets[PgturbohybridSparseHotBucket(blkno, offno)];
+
+	for (; c != NULL; c = c->hashNext)
+		if (c->blkno == blkno && c->offno == offno)
+			return c;
+	return NULL;
+}
+
+/* Evict least-recently-used hot chunks until under the budget. */
+static void
+PgturbohybridSparseHotEvictTo(PgturbohybridSparseCacheRel *cache, Size budget)
+{
+	while (cache->hotBytes > budget && cache->lruTail != NULL)
+	{
+		PgturbohybridSparseHotChunk *victim = cache->lruTail;
+		uint32		b = PgturbohybridSparseHotBucket(victim->blkno, victim->offno);
+		PgturbohybridSparseHotChunk **link = &cache->buckets[b];
+
+		while (*link != NULL && *link != victim)
+			link = &(*link)->hashNext;
+		if (*link == victim)
+			*link = victim->hashNext;
+		PgturbohybridSparseHotUnlink(cache, victim);
+		cache->hotBytes -= victim->bytes;
+		cache->hotEvictions++;
+		pfree(victim->nodes);
+		pfree(victim->weights);
+		pfree(victim);
+	}
+}
+
+/* Reader cache: cached lexicon (loaded once per relfilenumber). */
+static PgturbohybridSparseLexEntry *
+PgturbohybridSparseCacheGetLexicon(PgturbohybridSparseCacheRel *cache, Relation index,
+								   PgturbohybridSparseMetaTuple meta, uint32 *count,
+								   bool *built, uint64 *buildUs)
+{
+	if (!cache->lexiconLoaded)
+	{
+		MemoryContext oldCtx = MemoryContextSwitchTo(cache->ctx);
+		instr_time	t0,
+					t1;
+
+		INSTR_TIME_SET_CURRENT(t0);
+		cache->lexicon = PgturbohybridSparseLoadLexicon(index, meta->lexiconStartBlkno,
+														meta->termCount,
+														&cache->lexiconCount);
+		cache->lexiconLoaded = true;
+		cache->readerBytes += (Size) cache->lexiconCount *
+			sizeof(PgturbohybridSparseLexEntry);
+		INSTR_TIME_SET_CURRENT(t1);
+		INSTR_TIME_SUBTRACT(t1, t0);
+		*buildUs += (uint64) INSTR_TIME_GET_MICROSEC(t1);
+		*built = true;
+		MemoryContextSwitchTo(oldCtx);
+	}
+	*count = cache->lexiconCount;
+	return cache->lexicon;
+}
+
+/* Reader cache: cached node states (heap TIDs + liveness). */
+static PgturbohybridNodeState *
+PgturbohybridSparseCacheGetStates(PgturbohybridSparseCacheRel *cache, Relation index,
+								  PgturbohybridGraphMetaPageData *graphMeta,
+								  uint32 *count, bool *built, uint64 *buildUs)
+{
+	if (!cache->statesLoaded)
+	{
+		MemoryContext oldCtx = MemoryContextSwitchTo(cache->ctx);
+		instr_time	t0,
+					t1;
+
+		INSTR_TIME_SET_CURRENT(t0);
+		cache->states = PgturbohybridReadNodeStates(index, graphMeta,
+													&cache->stateCount);
+		cache->statesLoaded = true;
+		cache->readerBytes += (Size) cache->stateCount * sizeof(PgturbohybridNodeState);
+		INSTR_TIME_SET_CURRENT(t1);
+		INSTR_TIME_SUBTRACT(t1, t0);
+		*buildUs += (uint64) INSTR_TIME_GET_MICROSEC(t1);
+		*built = true;
+		MemoryContextSwitchTo(oldCtx);
+	}
+	*count = cache->stateCount;
+	return cache->states;
 }
 
 /* Dequantize+accumulate one decoded posting into scores[]. */
@@ -282,11 +542,14 @@ typedef struct PgturbohybridWandTerm
 	double		effMul;			/* qWeight (f32) or qWeight*scale (quantized) */
 	double		termMaxUB;		/* qWeight * lexicon maxWeight */
 	int			bits;
+	uint32		df;				/* term document frequency (for hot-cache gating) */
+	PgturbohybridSparseCacheRel *cache; /* backend-local cache (or NULL) */
 	PgturbohybridSparseBlockMax *blocks;
 	uint32		nBlocks;
 	uint32		curBlock;
 	uint32	   *nodes;			/* decoded node_ids of the loaded block */
-	double	   *contribs;		/* decoded contributions of the loaded block */
+	float4	   *weights;		/* decoded raw weight values of the loaded block */
+	double	   *contribs;		/* effMul * weights of the loaded block */
 	uint32		chunkCount;
 	uint32		chunkPos;
 	bool		loaded;
@@ -320,11 +583,11 @@ PgturbohybridWandWeight(const char *wptr, int bits)
 	return (double) (*(const uint8 *) wptr);
 }
 
-/* Decode a postings chunk at (blk,off) into nodes[]/contribs[] (contrib = effMul*weight). */
+/* Decode a postings chunk at (blk,off) into nodes[]/weights[] (raw weight values). */
 static void
 PgturbohybridWandDecodeChunk(Relation index, BlockNumber blk, OffsetNumber off,
-							 int bits, double effMul, uint32 *nodes,
-							 double *contribs, uint32 *outCount)
+							 int bits, uint32 *nodes, float4 *weights,
+							 uint32 *outCount)
 {
 	Buffer		buf = ReadBuffer(index, blk);
 	Page		page;
@@ -359,7 +622,7 @@ PgturbohybridWandDecodeChunk(Relation index, BlockNumber blk, OffsetNumber off,
 			node += PgturbohybridSparseVarintDecode(deltas + pos, &consumed);
 			pos += consumed;
 			nodes[k] = node;
-			contribs[k] = effMul *
+			weights[k] = (float4)
 				PgturbohybridWandWeight(payload + weightsStart + (Size) k * wwidth, bits);
 		}
 	}
@@ -373,12 +636,68 @@ PgturbohybridWandDecodeChunk(Relation index, BlockNumber blk, OffsetNumber off,
 
 			memcpy(&o, payload + offsetsStart + (Size) k * sizeof(uint16), sizeof(uint16));
 			nodes[k] = base + o;
-			contribs[k] = effMul *
+			weights[k] = (float4)
 				PgturbohybridWandWeight(payload + (Size) k * wwidth, bits);
 		}
 	}
 	*outCount = n;
 	UnlockReleaseBuffer(buf);
+}
+
+/*
+ * Fill nodes[]/weights[] for the chunk at (blk,off), serving from the hot-postings
+ * cache when present.  On a miss the chunk is decoded from disk and, for terms with
+ * df >= min_df and a non-zero cache budget, inserted into the LRU (evicting to the
+ * MB cap).  Returns true if served from cache.
+ */
+static bool
+PgturbohybridSparseHotLoadChunk(PgturbohybridSparseCacheRel *cache, Relation index,
+								BlockNumber blk, OffsetNumber off, uint32 df, int bits,
+								uint32 *nodes, float4 *weights, uint32 *count)
+{
+	Size		budget = (Size) pgturbohybrid_sparse_hot_postings_cache_mb * 1024 * 1024;
+	PgturbohybridSparseHotChunk *c;
+
+	if (cache != NULL && budget > 0)
+	{
+		c = PgturbohybridSparseHotFind(cache, blk, off);
+		if (c != NULL)
+		{
+			memcpy(nodes, c->nodes, sizeof(uint32) * c->count);
+			memcpy(weights, c->weights, sizeof(float4) * c->count);
+			*count = c->count;
+			PgturbohybridSparseHotUnlink(cache, c);
+			PgturbohybridSparseHotPushFront(cache, c);
+			return true;
+		}
+	}
+
+	PgturbohybridWandDecodeChunk(index, blk, off, bits, nodes, weights, count);
+
+	if (cache != NULL && budget > 0 &&
+		df >= (uint32) pgturbohybrid_sparse_hot_postings_cache_min_df && *count > 0)
+	{
+		MemoryContext oldCtx = MemoryContextSwitchTo(cache->ctx);
+		uint32		b = PgturbohybridSparseHotBucket(blk, off);
+
+		c = (PgturbohybridSparseHotChunk *) palloc0(sizeof(PgturbohybridSparseHotChunk));
+		c->blkno = blk;
+		c->offno = off;
+		c->count = *count;
+		c->nodes = (uint32 *) palloc(sizeof(uint32) * *count);
+		c->weights = (float4 *) palloc(sizeof(float4) * *count);
+		memcpy(c->nodes, nodes, sizeof(uint32) * *count);
+		memcpy(c->weights, weights, sizeof(float4) * *count);
+		c->bytes = sizeof(PgturbohybridSparseHotChunk) +
+			(Size) *count * (sizeof(uint32) + sizeof(float4));
+		c->hashNext = cache->buckets[b];
+		cache->buckets[b] = c;
+		PgturbohybridSparseHotPushFront(cache, c);
+		cache->hotBytes += c->bytes;
+		PgturbohybridSparseHotEvictTo(cache, budget);
+		MemoryContextSwitchTo(oldCtx);
+	}
+	return false;
 }
 
 /* Load a term's block-max directory (blockCount entries) by physical walk. */
@@ -428,7 +747,8 @@ PgturbohybridWandLoadBlockMax(Relation index, BlockNumber blk, OffsetNumber off,
  */
 static void
 PgturbohybridWandAdvance(Relation index, PgturbohybridWandTerm *t, uint32 target,
-						 int bits, uint64 *visited, uint64 *skipped)
+						 int bits, uint64 *visited, uint64 *skipped,
+						 uint64 *hotHits, uint64 *hotMisses)
 {
 	while (t->curBlock < t->nBlocks &&
 		   t->blocks[t->curBlock].lastNodeId < target)
@@ -445,12 +765,21 @@ PgturbohybridWandAdvance(Relation index, PgturbohybridWandTerm *t, uint32 target
 	}
 	if (!t->loaded)
 	{
-		PgturbohybridWandDecodeChunk(index, t->blocks[t->curBlock].postingsBlkno,
-									 t->blocks[t->curBlock].postingsOffno, bits,
-									 t->effMul, t->nodes, t->contribs, &t->chunkCount);
+		bool		hit = PgturbohybridSparseHotLoadChunk(t->cache, index,
+														  t->blocks[t->curBlock].postingsBlkno,
+														  t->blocks[t->curBlock].postingsOffno,
+														  t->df, bits, t->nodes,
+														  t->weights, &t->chunkCount);
+
+		for (uint32 k = 0; k < t->chunkCount; k++)
+			t->contribs[k] = t->effMul * (double) t->weights[k];
 		t->chunkPos = 0;
 		t->loaded = true;
 		(*visited)++;
+		if (hit)
+			(*hotHits)++;
+		else
+			(*hotMisses)++;
 	}
 	while (t->chunkPos < t->chunkCount && t->nodes[t->chunkPos] < target)
 		t->chunkPos++;
@@ -459,7 +788,8 @@ PgturbohybridWandAdvance(Relation index, PgturbohybridWandTerm *t, uint32 target
 		/* Past this chunk: move to the next block and retry. */
 		t->curBlock++;
 		t->loaded = false;
-		PgturbohybridWandAdvance(index, t, target, bits, visited, skipped);
+		PgturbohybridWandAdvance(index, t, target, bits, visited, skipped,
+								 hotHits, hotMisses);
 		return;
 	}
 	t->curNode = t->nodes[t->chunkPos];
@@ -517,6 +847,7 @@ PgturbohybridWandHeapSiftDown(PgturbohybridWandHeapEntry *heap, int size, int i)
  */
 static int
 PgturbohybridSparseCollectWand(Relation index, PgturbohybridSparseMetaTuple meta,
+							   PgturbohybridSparseCacheRel *cache,
 							   PgturbohybridSparseLexEntry *lexicon, uint32 lexCount,
 							   const PgturbohybridSparseVectorEntry *qEntries,
 							   uint32 qCount, PgturbohybridNodeState *states,
@@ -539,7 +870,9 @@ PgturbohybridSparseCollectWand(Relation index, PgturbohybridSparseMetaTuple meta
 				iterations = 0,
 				thresholdUpdates = 0,
 				heapUpdates = 0,
-				docsScored = 0;
+				docsScored = 0,
+				hotHits = 0,
+				hotMisses = 0;
 	uint32		resolved = 0;
 	PgturbohybridSparseCandidate *result;
 	int			resultCount;
@@ -575,6 +908,8 @@ PgturbohybridSparseCollectWand(Relation index, PgturbohybridSparseMetaTuple meta
 									(double) PgturbohybridSparseQuantize(found->maxWeight,
 																		 found->scale, bits));
 		t->bits = bits;
+		t->df = found->df;
+		t->cache = cache;
 		t->nBlocks = found->blockCount;
 		t->blocks = PgturbohybridWandLoadBlockMax(index, found->blockMaxBlkno,
 												  found->blockMaxOffno,
@@ -582,8 +917,10 @@ PgturbohybridSparseCollectWand(Relation index, PgturbohybridSparseMetaTuple meta
 		t->curBlock = 0;
 		t->loaded = false;
 		t->nodes = (uint32 *) palloc(sizeof(uint32) * blockSize);
+		t->weights = (float4 *) palloc(sizeof(float4) * blockSize);
 		t->contribs = (double *) palloc(sizeof(double) * blockSize);
-		PgturbohybridWandAdvance(index, t, 0, bits, &visited, &skipped);
+		PgturbohybridWandAdvance(index, t, 0, bits, &visited, &skipped,
+								 &hotHits, &hotMisses);
 	}
 
 	heap = (PgturbohybridWandHeapEntry *)
@@ -645,7 +982,7 @@ PgturbohybridSparseCollectWand(Relation index, PgturbohybridSparseMetaTuple meta
 			for (int i = 0; i < numTerms; i++)
 				if (order[i]->curNode == pivotNode)
 					PgturbohybridWandAdvance(index, order[i], pivotNode + 1, bits,
-											 &visited, &skipped);
+											 &visited, &skipped, &hotHits, &hotMisses);
 			docsScored++;
 
 			if (pivotNode < nodeCount && states[pivotNode].live)
@@ -686,7 +1023,7 @@ PgturbohybridSparseCollectWand(Relation index, PgturbohybridSparseMetaTuple meta
 				if (order[i]->curNode < pivotNode)
 				{
 					PgturbohybridWandAdvance(index, order[i], pivotNode, bits,
-											 &visited, &skipped);
+											 &visited, &skipped, &hotHits, &hotMisses);
 					break;
 				}
 			pruned++;
@@ -742,6 +1079,10 @@ PgturbohybridSparseCollectWand(Relation index, PgturbohybridSparseMetaTuple meta
 		stats->quantMode = (int) meta->quantMode;
 		stats->encoding = (int) meta->postingsEncoding;
 		stats->scoreKernel = PGTURBOHYBRID_SPARSE_SCORE_SCALAR;
+		stats->hotCacheHits = hotHits;
+		stats->hotCacheMisses = hotMisses;
+		if (cache != NULL)
+			stats->hotCacheBytes = cache->hotBytes;
 	}
 
 	if (out != NULL)
@@ -775,6 +1116,9 @@ PgturbohybridSparseCollectCandidates(Relation index, PgturbohybridQueryHeader *q
 	MemoryContext oldCtx;
 	int			resultCount;
 	PgturbohybridSparseCandidate *result;
+	PgturbohybridSparseCacheRel *cache;
+	bool		cacheBuilt = false;
+	uint64		cacheBuildUs = 0;
 	instr_time	t0,
 				t1;
 
@@ -803,11 +1147,21 @@ PgturbohybridSparseCollectCandidates(Relation index, PgturbohybridQueryHeader *q
 	if (qCount == 0)
 		return 0;
 
+	/* Reader cache: cached lexicon + node states keyed by relfilenumber. */
+	cache = PgturbohybridSparseCacheAcquire(index);
+
 	oldCtx = MemoryContextSwitchTo(ctx);
 
-	lexicon = PgturbohybridSparseLoadLexicon(index, meta.lexiconStartBlkno,
-											 meta.termCount, &lexCount);
-	states = PgturbohybridReadNodeStates(index, &graphMeta, &nodeCount);
+	lexicon = PgturbohybridSparseCacheGetLexicon(cache, index, &meta, &lexCount,
+												 &cacheBuilt, &cacheBuildUs);
+	states = PgturbohybridSparseCacheGetStates(cache, index, &graphMeta, &nodeCount,
+											   &cacheBuilt, &cacheBuildUs);
+	if (stats != NULL)
+	{
+		stats->cacheHit = !cacheBuilt;
+		stats->cacheBuildUs = cacheBuildUs;
+		stats->cacheBytes = cache->readerBytes;
+	}
 
 	/*
 	 * Block-max WAND path (prompt 9): exact top-k with safe pruning, when the
@@ -816,9 +1170,16 @@ PgturbohybridSparseCollectCandidates(Relation index, PgturbohybridQueryHeader *q
 	 */
 	if (wandEnabled && meta.hasBlockMax)
 	{
-		resultCount = PgturbohybridSparseCollectWand(index, &meta, lexicon, lexCount,
-													 qEntries, qCount, states,
+		resultCount = PgturbohybridSparseCollectWand(index, &meta, cache, lexicon,
+													 lexCount, qEntries, qCount, states,
 													 nodeCount, k, &result, stats);
+		if (stats != NULL)
+		{
+			stats->cacheHit = !cacheBuilt;
+			stats->cacheBuildUs = cacheBuildUs;
+			stats->cacheBytes = cache->readerBytes;
+			stats->hotCacheEvictions = cache->hotEvictions;
+		}
 		MemoryContextSwitchTo(oldCtx);
 		INSTR_TIME_SET_CURRENT(t1);
 		INSTR_TIME_SUBTRACT(t1, t0);

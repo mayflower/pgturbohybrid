@@ -29,6 +29,8 @@
 
 #include "pgturbohybrid_query.h"
 
+struct PgturbohybridGraphMetaPageData;
+
 /*
  * Format v2 (prompt 6): postings carry per-term linearly-quantized weights
  * (q8/q16) or exact f32, in one of two physical encodings.  v1 was the
@@ -279,6 +281,13 @@ typedef struct PgturbohybridSparseScanStats
 	uint64		wandIterations;		/* WAND main-loop iterations */
 	uint64		wandThresholdUpdates;	/* top-k threshold (theta) raises */
 	uint64		wandHeapUpdates;	/* heap insert/replace operations */
+	bool		cacheHit;			/* reader cache (lexicon+states) already built */
+	uint64		cacheBuildUs;		/* time to build the reader cache this scan */
+	uint64		cacheBytes;			/* reader cache bytes (lexicon + node states) */
+	uint64		hotCacheHits;		/* hot-postings chunk cache hits */
+	uint64		hotCacheMisses;		/* hot-postings chunk cache misses */
+	uint64		hotCacheBytes;		/* hot-postings cache resident bytes */
+	uint64		hotCacheEvictions;	/* hot-postings cache evictions */
 } PgturbohybridSparseScanStats;
 
 /* SoA score-kernel ISA family (combined with bit width for the stat name). */
@@ -349,5 +358,27 @@ int			PgturbohybridSparseCollectCandidates(Relation index,
 
 /* True iff the index has a sparse key with built sparse meta. */
 bool		PgturbohybridSparseIndexAvailable(Relation index);
+
+/* Per-backend memory estimate for the sparse branch (prompt 10). */
+typedef struct PgturbohybridSparseMemoryEstimate
+{
+	bool		available;
+	uint32		termCount;
+	uint32		docCount;
+	uint32		nodeCount;
+	int			quantBits;
+	uint64		lexiconBytes;
+	uint64		heapTidsBytes;
+	uint64		livenessBytes;
+	uint64		hotPostingsCacheMaxBytes;
+	uint64		totalBytesPerBackend;
+} PgturbohybridSparseMemoryEstimate;
+
+bool		PgturbohybridSparseEstimateMemory(Relation index,
+											  struct PgturbohybridGraphMetaPageData *graphMeta,
+											  PgturbohybridSparseMemoryEstimate *out);
+
+/* Drop the backend-local sparse cache for a relation (relfilenumber change). */
+void		PgturbohybridSparseCacheInvalidate(Oid relid);
 
 #endif							/* PGTURBOHYBRID_SPARSE_H */

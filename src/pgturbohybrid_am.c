@@ -93,6 +93,8 @@ static bool pgturbohybrid_am_init_done = false;
 int			pgturbohybrid_profile = PGTURBOHYBRID_PROFILE_LATENCY;
 bool		pgturbohybrid_enable_wand = true;
 bool		pgturbohybrid_enable_sparse_wand = true;
+int			pgturbohybrid_sparse_hot_postings_cache_mb = 16;
+int			pgturbohybrid_sparse_hot_postings_cache_min_df = 256;
 int			pgturbohybrid_max_union_candidates = 100000;
 int			pgturbohybrid_default_dense_k = PGTURBOHYBRID_DEFAULT_DENSE_K;
 int			pgturbohybrid_default_bm25_k = PGTURBOHYBRID_DEFAULT_BM25_K;
@@ -1482,6 +1484,13 @@ typedef struct PgturbohybridLastScanStats
 	uint64		sparseWandIterations;
 	uint64		sparseWandThresholdUpdates;
 	uint64		sparseWandHeapUpdates;
+	bool		sparseCacheHit;
+	uint64		sparseCacheBuildUs;
+	uint64		sparseCacheBytes;
+	uint64		sparseHotCacheHits;
+	uint64		sparseHotCacheMisses;
+	uint64		sparseHotCacheBytes;
+	uint64		sparseHotCacheEvictions;
 	PgturbohybridBranchPlan branchPlan;
 	char		profile[16];
 	char		fusion[16];
@@ -2005,6 +2014,14 @@ PgturbohybridGetLastScanStatsSnapshot(PgturbohybridScanStatsSnapshot *stats)
 		pgturbohybrid_last_scan_state.sparseWandThresholdUpdates;
 	stats->sparseWandHeapUpdates =
 		pgturbohybrid_last_scan_state.sparseWandHeapUpdates;
+	stats->sparseCacheHit = pgturbohybrid_last_scan_state.sparseCacheHit;
+	stats->sparseCacheBuildUs = pgturbohybrid_last_scan_state.sparseCacheBuildUs;
+	stats->sparseCacheBytes = pgturbohybrid_last_scan_state.sparseCacheBytes;
+	stats->sparseHotCacheHits = pgturbohybrid_last_scan_state.sparseHotCacheHits;
+	stats->sparseHotCacheMisses = pgturbohybrid_last_scan_state.sparseHotCacheMisses;
+	stats->sparseHotCacheBytes = pgturbohybrid_last_scan_state.sparseHotCacheBytes;
+	stats->sparseHotCacheEvictions =
+		pgturbohybrid_last_scan_state.sparseHotCacheEvictions;
 	stats->branchPlan = pgturbohybrid_last_scan_state.branchPlan;
 	stats->denseCandidatesEffective =
 		pgturbohybrid_last_scan_state.denseCandidatesEffective;
@@ -6479,6 +6496,13 @@ PgturbohybridCollectSparseOnlyResults(IndexScanDesc scan,
 	lastStats->sparseWandIterations = sstats.wandIterations;
 	lastStats->sparseWandThresholdUpdates = sstats.wandThresholdUpdates;
 	lastStats->sparseWandHeapUpdates = sstats.wandHeapUpdates;
+	lastStats->sparseCacheHit = sstats.cacheHit;
+	lastStats->sparseCacheBuildUs = sstats.cacheBuildUs;
+	lastStats->sparseCacheBytes = sstats.cacheBytes;
+	lastStats->sparseHotCacheHits = sstats.hotCacheHits;
+	lastStats->sparseHotCacheMisses = sstats.hotCacheMisses;
+	lastStats->sparseHotCacheBytes = sstats.hotCacheBytes;
+	lastStats->sparseHotCacheEvictions = sstats.hotCacheEvictions;
 	lastStats->sparseCandidatesRequested = originalQuery->sparseK;
 	lastStats->sparseCandidatesEffective = scanQuery->sparseK;
 	lastStats->sparseKDefaulted =
@@ -7039,6 +7063,13 @@ PgturbohybridCollectScanResults(IndexScanDesc scan, PgturbohybridScanState *stat
 	lastStats.sparseWandIterations = sparseStats.wandIterations;
 	lastStats.sparseWandThresholdUpdates = sparseStats.wandThresholdUpdates;
 	lastStats.sparseWandHeapUpdates = sparseStats.wandHeapUpdates;
+	lastStats.sparseCacheHit = sparseStats.cacheHit;
+	lastStats.sparseCacheBuildUs = sparseStats.cacheBuildUs;
+	lastStats.sparseCacheBytes = sparseStats.cacheBytes;
+	lastStats.sparseHotCacheHits = sparseStats.hotCacheHits;
+	lastStats.sparseHotCacheMisses = sparseStats.hotCacheMisses;
+	lastStats.sparseHotCacheBytes = sparseStats.hotCacheBytes;
+	lastStats.sparseHotCacheEvictions = sparseStats.hotCacheEvictions;
 	if (hasSparseQuery)
 	{
 		lastStats.sparseCandidatesRequested = originalQuery->sparseK;
@@ -8948,6 +8979,12 @@ PgturbohybridInit(void)
 	DefineCustomBoolVariable("turbohybrid.enable_sparse_wand", "Enable block-max WAND pruning for sparse candidate generation",
 							 NULL, &pgturbohybrid_enable_sparse_wand,
 							 true, PGC_USERSET, 0, NULL, NULL, NULL);
+	DefineCustomIntVariable("turbohybrid.sparse_hot_postings_cache_mb", "Backend-local sparse hot-postings cache size in MB (0 disables)",
+							NULL, &pgturbohybrid_sparse_hot_postings_cache_mb,
+							16, 0, 65536, PGC_USERSET, 0, NULL, NULL, NULL);
+	DefineCustomIntVariable("turbohybrid.sparse_hot_postings_cache_min_df", "Minimum term document frequency to cache decoded sparse postings",
+							NULL, &pgturbohybrid_sparse_hot_postings_cache_min_df,
+							256, 1, 1000000000, PGC_USERSET, 0, NULL, NULL, NULL);
 	DefineCustomBoolVariable("turbohybrid.fast_weighted_score_bound_pruning",
 							 "Enable exact fused-score bound pruning for fast_weighted BM25 traversal",
 							 "Only applies to turbohybrid_query(fusion => 'fast_weighted'); RRF and distribution-normalized weighted fusion do not use this pruning path.",

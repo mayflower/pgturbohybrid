@@ -37,6 +37,7 @@
 #include "pgturbohybrid_vector_compat.h"
 #include "pgturbohybrid_quant.h"
 #include "pgturbohybrid_bm25.h"
+#include "pgturbohybrid_sparse.h"
 #include "pgturbohybrid_jsonb_compat.h"
 
 #if PG_VERSION_NUM < 150000
@@ -703,8 +704,10 @@ pgturbohybrid_estimate_memory(PG_FUNCTION_ARGS)
 	PgturbohybridGraphMetaPageData meta;
 	PgturbohybridGraphMemoryEstimate nativeEstimate;
 	PgturbohybridBm25MemoryEstimate bm25Estimate;
+	PgturbohybridSparseMemoryEstimate sparseEstimate;
 	bool		hasNative = false;
 	bool		hasBm25 = false;
+	bool		hasSparse = false;
 	BlockNumber nblocks;
 	uint64		nativeBytesPerBackend = 0;
 	uint64		sharedCacheTotalBytes = 0;
@@ -724,6 +727,10 @@ pgturbohybrid_estimate_memory(PG_FUNCTION_ARGS)
 		hasBm25 = PgturbohybridBm25EstimateMemory(index, &meta, &bm25Estimate);
 	else
 		memset(&bm25Estimate, 0, sizeof(bm25Estimate));
+	if (hasNative)
+		hasSparse = PgturbohybridSparseEstimateMemory(index, &meta, &sparseEstimate);
+	else
+		memset(&sparseEstimate, 0, sizeof(sparseEstimate));
 	if (hasNative)
 	{
 		if (nativeEstimate.effectiveCachePolicy == PGTURBOHYBRID_NATIVE_CACHE_POLICY_SHARED)
@@ -828,6 +835,32 @@ pgturbohybrid_estimate_memory(PG_FUNCTION_ARGS)
 	}
 	PgturbohybridJsonbCloseObject(&jsonState);
 
+	PgturbohybridIndexStatsJsonbAddKey(&jsonState, "sparse");
+	PgturbohybridJsonbBeginObject(&jsonState);
+	PgturbohybridIndexStatsJsonbAddBool(&jsonState, "available", hasSparse);
+	if (hasSparse)
+	{
+		PgturbohybridIndexStatsJsonbAddUInt32(&jsonState, "lexicon_entries",
+											  sparseEstimate.termCount);
+		PgturbohybridIndexStatsJsonbAddUInt32(&jsonState, "document_count",
+											  sparseEstimate.docCount);
+		PgturbohybridIndexStatsJsonbAddUInt32(&jsonState, "quantization_bits",
+											  (uint32) sparseEstimate.quantBits);
+		PgturbohybridIndexStatsJsonbAddUInt64(&jsonState, "sparse_lexicon_bytes",
+											  sparseEstimate.lexiconBytes);
+		PgturbohybridIndexStatsJsonbAddUInt64(&jsonState, "sparse_heap_tids_bytes",
+											  sparseEstimate.heapTidsBytes);
+		PgturbohybridIndexStatsJsonbAddUInt64(&jsonState, "sparse_liveness_bytes",
+											  sparseEstimate.livenessBytes);
+		PgturbohybridIndexStatsJsonbAddUInt64(&jsonState, "sparse_hot_postings_cache_max_bytes",
+											  sparseEstimate.hotPostingsCacheMaxBytes);
+		PgturbohybridIndexStatsJsonbAddUInt64(&jsonState, "sparse_total_bytes_per_backend",
+											  sparseEstimate.totalBytesPerBackend);
+		PgturbohybridIndexStatsJsonbAddFloat8(&jsonState, "sparse_total_mb_per_backend",
+											  PgturbohybridBytesToMb(sparseEstimate.totalBytesPerBackend));
+	}
+	PgturbohybridJsonbCloseObject(&jsonState);
+
 	PgturbohybridIndexStatsJsonbAddKey(&jsonState, "concurrency");
 	PgturbohybridJsonbBeginObject(&jsonState);
 	if (!hasNative)
@@ -866,6 +899,8 @@ pgturbohybrid_estimate_memory(PG_FUNCTION_ARGS)
 										  sharedCacheTotalBytes);
 	PgturbohybridIndexStatsJsonbAddUInt64(&jsonState, "bm25_total_bytes_per_backend",
 										  hasBm25 ? bm25Estimate.estimatedBaseCacheBytes : 0);
+	PgturbohybridIndexStatsJsonbAddUInt64(&jsonState, "sparse_total_bytes_per_backend",
+										  hasSparse ? sparseEstimate.totalBytesPerBackend : 0);
 	PgturbohybridJsonbCloseObject(&jsonState);
 
 	relation_close(index, AccessShareLock);

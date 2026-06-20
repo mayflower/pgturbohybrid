@@ -3406,6 +3406,20 @@ pgturbohybrid_last_scan_stats(PG_FUNCTION_ARGS)
 							   scanStats.sparseWandThresholdUpdates);
 	PgturbohybridJsonbAddInt64(&state, "sparse_wand_heap_updates",
 							   scanStats.sparseWandHeapUpdates);
+	PgturbohybridJsonbAddBool(&state, "sparse_cache_hit",
+							  scanStats.sparseCacheHit);
+	PgturbohybridJsonbAddInt64(&state, "sparse_cache_build_us",
+							   scanStats.sparseCacheBuildUs);
+	PgturbohybridJsonbAddInt64(&state, "sparse_cache_bytes",
+							   scanStats.sparseCacheBytes);
+	PgturbohybridJsonbAddInt64(&state, "sparse_hot_postings_cache_hits",
+							   scanStats.sparseHotCacheHits);
+	PgturbohybridJsonbAddInt64(&state, "sparse_hot_postings_cache_misses",
+							   scanStats.sparseHotCacheMisses);
+	PgturbohybridJsonbAddInt64(&state, "sparse_hot_postings_cache_bytes",
+							   scanStats.sparseHotCacheBytes);
+	PgturbohybridJsonbAddInt64(&state, "sparse_hot_postings_cache_evictions",
+							   scanStats.sparseHotCacheEvictions);
 	PgturbohybridJsonbAddBranchPlan(&state, &scanStats.branchPlan);
 	PgturbohybridJsonbAddInt64(&state, "quantization_bits",
 							   pgturbohybrid_last_graph_quantization_bits);
