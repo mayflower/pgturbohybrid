@@ -54,6 +54,7 @@
 #define PGTURBOHYBRID_DEFAULT_BM25_B 0.75
 #define PGTURBOHYBRID_DEFAULT_DENSE_K 100
 #define PGTURBOHYBRID_DEFAULT_BM25_K 100
+#define PGTURBOHYBRID_DEFAULT_SPARSE_K 100
 #define PGTURBOHYBRID_DEFAULT_RRF_K 60
 #define PGTURBOHYBRID_FUSION_GENERATION_ARRAY_MAX_BYTES (16 * 1024 * 1024)
 
@@ -86,6 +87,7 @@ bool		pgturbohybrid_enable_wand = true;
 int			pgturbohybrid_max_union_candidates = 100000;
 int			pgturbohybrid_default_dense_k = PGTURBOHYBRID_DEFAULT_DENSE_K;
 int			pgturbohybrid_default_bm25_k = PGTURBOHYBRID_DEFAULT_BM25_K;
+int			pgturbohybrid_default_sparse_k = PGTURBOHYBRID_DEFAULT_SPARSE_K;
 int			pgturbohybrid_default_rrf_k = PGTURBOHYBRID_DEFAULT_RRF_K;
 uint64		pgturbohybrid_guc_generation = 1;
 int			pgturbohybrid_last_final_k_requested = 0;
@@ -959,6 +961,13 @@ PgturbohybridCheckDefaultBm25K(int *newval, void **extra, GucSource source)
 }
 
 static bool
+PgturbohybridCheckDefaultSparseK(int *newval, void **extra, GucSource source)
+{
+	return PgturbohybridCheckMaxIntGuc("turbohybrid.default_sparse_k", *newval,
+									  PGTURBOHYBRID_MAX_DEFAULT_SPARSE_K);
+}
+
+static bool
 PgturbohybridCheckDefaultRrfK(int *newval, void **extra, GucSource source)
 {
 	return PgturbohybridCheckMaxIntGuc("turbohybrid.default_rrf_k", *newval,
@@ -1208,6 +1217,8 @@ PgturbohybridApplyProfileDefaults(void)
 									  defaults.denseK);
 	PgturbohybridSetDynamicDefaultInt("turbohybrid.default_bm25_k",
 									  defaults.bm25K);
+	PgturbohybridSetDynamicDefaultInt("turbohybrid.default_sparse_k",
+									  defaults.bm25K);
 	PgturbohybridSetDynamicDefaultInt("turbohybrid.default_rrf_k",
 									  defaults.rrfK);
 	PgturbohybridSetDynamicDefaultBool("turbohybrid.enable_wand",
@@ -1401,6 +1412,10 @@ typedef struct PgturbohybridLastScanStats
 	uint64		sparsePostingsTouched;
 	uint64		sparseCandidatesScored;
 	uint64		sparseElapsedUs;
+	uint32		sparseCandidatesRequested;
+	uint32		sparseCandidatesEffective;
+	bool		sparseKDefaulted;
+	uint32		sparseCandidates;
 	PgturbohybridBranchPlan branchPlan;
 	char		profile[16];
 	char		fusion[16];
@@ -1892,6 +1907,12 @@ PgturbohybridGetLastScanStatsSnapshot(PgturbohybridScanStatsSnapshot *stats)
 	stats->sparseCandidatesScored =
 		pgturbohybrid_last_scan_state.sparseCandidatesScored;
 	stats->sparseElapsedUs = pgturbohybrid_last_scan_state.sparseElapsedUs;
+	stats->sparseCandidatesRequested =
+		pgturbohybrid_last_scan_state.sparseCandidatesRequested;
+	stats->sparseCandidatesEffective =
+		pgturbohybrid_last_scan_state.sparseCandidatesEffective;
+	stats->sparseKDefaulted = pgturbohybrid_last_scan_state.sparseKDefaulted;
+	stats->sparseCandidates = pgturbohybrid_last_scan_state.sparseCandidates;
 	stats->branchPlan = pgturbohybrid_last_scan_state.branchPlan;
 	stats->denseCandidatesEffective =
 		pgturbohybrid_last_scan_state.denseCandidatesEffective;
@@ -3420,6 +3441,10 @@ PgturbohybridEffectiveQuery(PgturbohybridQueryHeader *query, int limit,
 											   pgturbohybrid_auto_budget_min_bm25_k,
 											   (query->flags & PGTURBOHYBRID_QUERY_FLAG_BM25_K_DEFAULTED) != 0,
 											   hasTsQuery);
+	effective->sparseK = PgturbohybridApplyAutoBudget(query->sparseK, limit,
+													  pgturbohybrid_auto_budget_min_bm25_k,
+													  (query->flags & PGTURBOHYBRID_QUERY_FLAG_SPARSE_K_DEFAULTED) != 0,
+													  PgturbohybridQueryHasSparse(query));
 	PgturbohybridCanonicalizeLatencyQuery(effective, limit);
 
 	return effective;
@@ -4568,6 +4593,29 @@ PgturbohybridMergeBm25ResultItem(PgturbohybridResult *item,
 }
 
 static void
+PgturbohybridAddSparseCandidate(PgturbohybridResult *item,
+								const PgturbohybridSparseCandidate *candidate,
+								int rank)
+{
+	item->nodeId = candidate->nodeId;
+	item->heaptid = candidate->heaptid;
+	item->sparseSimilarity = candidate->score;
+	item->sparseRank = rank;
+	item->hasSparse = true;
+}
+
+static void
+PgturbohybridMergeSparseResultItem(PgturbohybridResult *item,
+								   const PgturbohybridResult *sparseItem)
+{
+	if (!item->hasDense && !item->hasMultivector && !item->hasBm25)
+		item->heaptid = sparseItem->heaptid;
+	item->hasSparse = true;
+	item->sparseSimilarity = sparseItem->sparseSimilarity;
+	item->sparseRank = sparseItem->sparseRank;
+}
+
+static void
 PgturbohybridRecordFusionClass(PgturbohybridLastScanStats *stats,
 							   const PgturbohybridResult *item)
 {
@@ -4590,7 +4638,9 @@ PgturbohybridRrfScore(PgturbohybridQueryHeader *query,
 		query->multivectorWeight *
 		(item->hasMultivector ? 1.0 / ((double) query->rrfK + item->multivectorRank) : 0.0) +
 		query->bm25Weight *
-		(item->hasBm25 ? 1.0 / ((double) query->rrfK + item->bm25Rank) : 0.0);
+		(item->hasBm25 ? 1.0 / ((double) query->rrfK + item->bm25Rank) : 0.0) +
+		query->sparseWeight *
+		(item->hasSparse ? 1.0 / ((double) query->rrfK + item->sparseRank) : 0.0);
 }
 
 static double
@@ -6134,6 +6184,11 @@ PgturbohybridCollectSparseOnlyResults(IndexScanDesc scan,
 	lastStats->sparsePostingsTouched = sstats.postingsTouched;
 	lastStats->sparseCandidatesScored = sstats.candidatesScored;
 	lastStats->sparseElapsedUs = sstats.elapsedUs;
+	lastStats->sparseCandidatesRequested = originalQuery->sparseK;
+	lastStats->sparseCandidatesEffective = scanQuery->sparseK;
+	lastStats->sparseKDefaulted =
+		(originalQuery->flags & PGTURBOHYBRID_QUERY_FLAG_SPARSE_K_DEFAULTED) != 0;
+	lastStats->sparseCandidates = n;
 	lastStats->finalResults = n;
 	lastStats->unionCandidates = n;
 	lastStats->finalKRequested = PgturbohybridRequestedFinalK(originalQuery);
@@ -6204,6 +6259,11 @@ PgturbohybridCollectScanResults(IndexScanDesc scan, PgturbohybridScanState *stat
 	bool		multivectorBranchUsed = false;
 	bool		multivectorMergedAsDense = false;
 	uint64		multivectorElapsedUs = 0;
+	PgturbohybridSparseCandidate *sparse = NULL;
+	int			sparseCount = 0;
+	PgturbohybridSparseScanStats sparseStats;
+	bool		sparseBranchUsed = false;
+	bool		hasSparseQuery;
 
 	if (state->collectDone)
 		return;
@@ -6212,6 +6272,7 @@ PgturbohybridCollectScanResults(IndexScanDesc scan, PgturbohybridScanState *stat
 	memset(&denseStats, 0, sizeof(denseStats));
 	memset(&multivectorStats, 0, sizeof(multivectorStats));
 	memset(&bm25Stats, 0, sizeof(bm25Stats));
+	memset(&sparseStats, 0, sizeof(sparseStats));
 	memset(&lastStats, 0, sizeof(lastStats));
 	lastStats.finalDiversityMode = PGTURBOHYBRID_FINAL_DIVERSITY_OFF;
 	lastStats.finalDiversityPayloadSlot = -1;
@@ -6256,6 +6317,17 @@ PgturbohybridCollectScanResults(IndexScanDesc scan, PgturbohybridScanState *stat
 		MemoryContextSwitchTo(oldCtx);
 		return;
 	}
+
+	/*
+	 * Sparse-with-dense/bm25 fusion (prompt 5) only supports RRF; the
+	 * weighted/fast_weighted/calibrated/dbsf modes are dense+bm25/maxsim only.
+	 */
+	hasSparseQuery = PgturbohybridQueryHasSparse(scanQuery);
+	if (hasSparseQuery && requestedFusion != PGTURBOHYBRID_FUSION_RRF)
+		ereport(ERROR,
+				(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
+				 errmsg("sparse_query fusion currently supports only the rrf fusion mode"),
+				 errhint("Use fusion => 'rrf' when combining sparse_query with dense or text retrieval.")));
 
 	PgturbohybridQueryValidateMultiVectorFusionSupport(scan->indexRelation,
 													   scanQuery);
@@ -6425,14 +6497,35 @@ PgturbohybridCollectScanResults(IndexScanDesc scan, PgturbohybridScanState *stat
 			multivectorStats.learnedSparseBranchLatencyUs = lastStats.bm25ElapsedUs;
 	}
 
+	/* Sparse branch (prompt 5): exact f32 candidates fused via RRF below. */
+	if (hasSparseQuery && scanQuery->sparseK > 0)
+	{
+		INSTR_TIME_SET_CURRENT(phaseStart);
+		sparseBranchUsed = true;
+		sparseCount = PgturbohybridSparseCollectCandidates(scan->indexRelation,
+														   scanQuery,
+														   scanQuery->sparseK,
+														   &sparse, so->tmpCtx,
+														   &sparseStats);
+		lastStats.sparseElapsedUs = PgturbohybridElapsedUs(phaseStart);
+	}
+
 	INSTR_TIME_SET_CURRENT(phaseStart);
-	fusionCandidatesSeen = denseCount + multivectorCount + bm25Count;
+	fusionCandidatesSeen = denseCount + multivectorCount + bm25Count + sparseCount;
 	lastStats.fusionCandidatesSeen = fusionCandidatesSeen;
 	effectiveFusion = pgturbohybrid_force_fusion != 0 ?
 		pgturbohybrid_force_fusion : scanQuery->fusion;
 	useHashTopN = pgturbohybrid_fusion_hash_threshold >= 0 &&
 		fusionCandidatesSeen >= (uint32) pgturbohybrid_fusion_hash_threshold;
-	if (!useDocumentFusionKey &&
+	/*
+	 * The generation-array and hash fusion fast paths do not yet thread the
+	 * sparse branch; route sparse-present fusion through the general
+	 * sorted-merge path (correct, just unoptimized -- later prompts extend the
+	 * fast paths).
+	 */
+	if (hasSparseQuery)
+		useHashTopN = false;
+	if (!hasSparseQuery && !useDocumentFusionKey &&
 		PgturbohybridShouldUseGenerationArray(scan, effectiveFusion,
 											  fusionCandidatesSeen, dense,
 											  denseCount, bm25, bm25Count,
@@ -6541,6 +6634,9 @@ PgturbohybridCollectScanResults(IndexScanDesc scan, PgturbohybridScanState *stat
 												 &multivector[i]);
 		for (int i = 0; i < bm25Count; i++)
 			PgturbohybridAddBm25Candidate(&items[itemCount++], &bm25[i]);
+		for (int i = 0; i < sparseCount; i++)
+			PgturbohybridAddSparseCandidate(&items[itemCount++], &sparse[i],
+											i + 1);
 
 		if (itemCount > 1)
 			qsort(items, itemCount, sizeof(PgturbohybridResult),
@@ -6579,11 +6675,16 @@ PgturbohybridCollectScanResults(IndexScanDesc scan, PgturbohybridScanState *stat
 				}
 				if (items[i].hasBm25)
 					PgturbohybridMergeBm25ResultItem(&item, &items[i]);
+				if (items[i].hasSparse)
+					PgturbohybridMergeSparseResultItem(&item, &items[i]);
 				i++;
 			}
 
 			if ((scanQuery->flags & PGTURBOHYBRID_QUERY_FLAG_REQUIRE_BM25_MATCH) != 0 &&
 				!item.hasBm25)
+				continue;
+			if ((scanQuery->flags & PGTURBOHYBRID_QUERY_FLAG_REQUIRE_SPARSE_MATCH) != 0 &&
+				!item.hasSparse)
 				continue;
 			PgturbohybridRecordFusionClass(&lastStats, &item);
 			merged[mergedCount++] = item;
@@ -6613,6 +6714,20 @@ PgturbohybridCollectScanResults(IndexScanDesc scan, PgturbohybridScanState *stat
 	lastStats.denseBranchUsed = denseBranchUsed;
 	lastStats.multivectorBranchUsed = multivectorBranchUsed;
 	lastStats.bm25BranchUsed = bm25BranchUsed;
+	lastStats.sparseBranchAvailable = sparseStats.branchAvailable;
+	lastStats.sparseBranchUsed = sparseBranchUsed;
+	lastStats.sparseTerms = sparseStats.terms;
+	lastStats.sparseResolvedTerms = sparseStats.resolvedTerms;
+	lastStats.sparsePostingsTouched = sparseStats.postingsTouched;
+	lastStats.sparseCandidatesScored = sparseStats.candidatesScored;
+	if (hasSparseQuery)
+	{
+		lastStats.sparseCandidatesRequested = originalQuery->sparseK;
+		lastStats.sparseCandidatesEffective = scanQuery->sparseK;
+		lastStats.sparseKDefaulted =
+			(originalQuery->flags & PGTURBOHYBRID_QUERY_FLAG_SPARSE_K_DEFAULTED) != 0;
+		lastStats.sparseCandidates = sparseCount;
+	}
 	strlcpy(lastStats.profile, PgturbohybridProfileName(pgturbohybrid_profile),
 			sizeof(lastStats.profile));
 	strlcpy(lastStats.fusion,
@@ -8312,6 +8427,12 @@ PgturbohybridDefineDefaultBudgetGUCs(void)
 							PGTURBOHYBRID_DEFAULT_BM25_K, 0,
 							PGTURBOHYBRID_MAX_DEFAULT_BM25_K,
 							PGC_USERSET, 0, PgturbohybridCheckDefaultBm25K,
+							PgturbohybridAssignQueryDefaultInt, NULL);
+	DefineCustomIntVariable("turbohybrid.default_sparse_k", "Default sparse-vector candidate budget for turbohybrid_query callers",
+							NULL, &pgturbohybrid_default_sparse_k,
+							PGTURBOHYBRID_DEFAULT_SPARSE_K, 0,
+							PGTURBOHYBRID_MAX_DEFAULT_SPARSE_K,
+							PGC_USERSET, 0, PgturbohybridCheckDefaultSparseK,
 							PgturbohybridAssignQueryDefaultInt, NULL);
 	DefineCustomIntVariable("turbohybrid.default_rrf_k", "Default RRF constant for turbohybrid_query callers",
 							NULL, &pgturbohybrid_default_rrf_k,

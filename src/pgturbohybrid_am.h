@@ -14,6 +14,7 @@
 #define PGTURBOHYBRID_DEFAULT_FINAL_K 10
 #define PGTURBOHYBRID_MAX_DEFAULT_DENSE_K 10000
 #define PGTURBOHYBRID_MAX_DEFAULT_BM25_K 10000
+#define PGTURBOHYBRID_MAX_DEFAULT_SPARSE_K 10000
 #define PGTURBOHYBRID_MAX_RRF_K 100000
 #define PGTURBOHYBRID_MAX_UNION_CANDIDATES 1000000
 #define PGTURBOHYBRID_MAX_HOT_POSTINGS_CACHE_MB 1024
@@ -171,6 +172,10 @@ typedef struct PgturbohybridScanStatsSnapshot
 	uint64		sparsePostingsTouched;
 	uint64		sparseCandidatesScored;
 	uint64		sparseElapsedUs;
+	uint32		sparseCandidatesRequested;
+	uint32		sparseCandidatesEffective;
+	bool		sparseKDefaulted;
+	uint32		sparseCandidates;
 	PgturbohybridBranchPlan branchPlan;
 	uint32		denseCandidatesEffective;
 	bool		denseKDefaulted;
@@ -521,6 +526,7 @@ extern bool pgturbohybrid_enable_wand;
 extern int	pgturbohybrid_max_union_candidates;
 extern int	pgturbohybrid_default_dense_k;
 extern int	pgturbohybrid_default_bm25_k;
+extern int	pgturbohybrid_default_sparse_k;
 extern int	pgturbohybrid_default_rrf_k;
 extern uint64 pgturbohybrid_guc_generation;
 extern int	pgturbohybrid_last_final_k_requested;

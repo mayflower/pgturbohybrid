@@ -1,0 +1,122 @@
+-- Sparse branch RRF fusion with dense (and BM25) retrieval (Prompt 5).
+SET client_min_messages = warning;
+CREATE EXTENSION IF NOT EXISTS vector;
+CREATE EXTENSION IF NOT EXISTS pgturbohybrid;
+RESET client_min_messages;
+
+-- Dense ranks (query [1,0,0,0], cosine): doc1>doc2>doc3>doc4 = ranks 1,2,3,4.
+-- Sparse (query {2:1.0}): doc3 dot=9 (rank1), doc4 dot=5 (rank2), doc2 dot=1
+-- (rank3); doc1 has no term 2 (no sparse match).
+CREATE TABLE sf (id int, embedding vector(4), tsv tsvector, s turbohybrid_sparse_vector);
+INSERT INTO sf VALUES
+  (1, '[1,0,0,0]',      to_tsvector('simple','alpha'),
+      turbohybrid_sparse_vector_build(ARRAY[1]::int4[],   ARRAY[1.0]::float4[])),
+  (2, '[0.8,0.6,0,0]',  to_tsvector('simple','alpha beta'),
+      turbohybrid_sparse_vector_build(ARRAY[2]::int4[],   ARRAY[1.0]::float4[])),
+  (3, '[0.6,0.8,0,0]',  to_tsvector('simple','beta'),
+      turbohybrid_sparse_vector_build(ARRAY[2]::int4[],   ARRAY[9.0]::float4[])),
+  (4, '[0.4,0.9165,0,0]', to_tsvector('simple','gamma'),
+      turbohybrid_sparse_vector_build(ARRAY[2]::int4[],   ARRAY[5.0]::float4[]));
+
+CREATE INDEX sf_ds ON sf USING turbohybrid (
+  embedding vector_cosine_turbohybrid_ops, s sparse_ip_turbohybrid_ops);
+SET enable_seqscan = off;
+
+-- sparse_weight => 0: pure dense ranking (sparse contributes nothing).
+SELECT id FROM sf
+ORDER BY embedding <~> turbohybrid_query(
+  vector_query => '[1,0,0,0]'::vector,
+  sparse_query => turbohybrid_sparse_vector_build(ARRAY[2]::int4[], ARRAY[1.0]::float4[]),
+  sparse_weight => 0, dense_k => 10, final_k => 4)
+LIMIT 4;
+
+-- sparse_weight => 10: sparse-strong docs (3,4) rise above the dense-only doc1.
+-- RRF(rrfK=60): doc3 .1798 > doc4 .1769 > doc2 .1748 > doc1 .0164.
+SELECT id FROM sf
+ORDER BY embedding <~> turbohybrid_query(
+  vector_query => '[1,0,0,0]'::vector,
+  sparse_query => turbohybrid_sparse_vector_build(ARRAY[2]::int4[], ARRAY[1.0]::float4[]),
+  sparse_weight => 10, dense_k => 10, final_k => 4)
+LIMIT 4;
+
+-- require_sparse_match => true filters the dense-only doc1.
+SELECT id FROM sf
+ORDER BY embedding <~> turbohybrid_query(
+  vector_query => '[1,0,0,0]'::vector,
+  sparse_query => turbohybrid_sparse_vector_build(ARRAY[2]::int4[], ARRAY[1.0]::float4[]),
+  sparse_weight => 10, require_sparse_match => true, dense_k => 10, final_k => 4)
+LIMIT 4;
+
+-- Stats: the sparse branch participated in fusion.
+DO $$
+DECLARE
+  st jsonb;
+BEGIN
+  SET LOCAL enable_seqscan = off;
+  PERFORM id FROM sf
+    ORDER BY embedding <~> turbohybrid_query(
+      vector_query => '[1,0,0,0]'::vector,
+      sparse_query => turbohybrid_sparse_vector_build(ARRAY[2]::int4[], ARRAY[1.0]::float4[]),
+      sparse_weight => 1, dense_k => 10, final_k => 4)
+    LIMIT 4;
+  st := turbohybrid_last_scan_stats();
+  IF st->>'dense_branch_used' != 'true' THEN
+    RAISE EXCEPTION 'dense branch not used in fusion: %', st;
+  END IF;
+  IF st->>'sparse_branch_used' != 'true' THEN
+    RAISE EXCEPTION 'sparse branch not used in fusion: %', st;
+  END IF;
+  IF st->>'branch_fusion_mode' != 'rrf' THEN
+    RAISE EXCEPTION 'unexpected fusion mode: %', st->>'branch_fusion_mode';
+  END IF;
+  IF (st->>'sparse_candidates')::int != 3 THEN
+    RAISE EXCEPTION 'expected 3 sparse candidates (doc1 unmatched): %', st;
+  END IF;
+  IF st->>'sparse_k_defaulted' != 'true' THEN
+    RAISE EXCEPTION 'sparse_k should be defaulted here: %', st;
+  END IF;
+END $$;
+
+-- Non-RRF fusion modes reject sparse_query with a clear error.
+SELECT id FROM sf
+ORDER BY embedding <~> turbohybrid_query(
+  vector_query => '[1,0,0,0]'::vector,
+  sparse_query => turbohybrid_sparse_vector_build(ARRAY[2]::int4[], ARRAY[1.0]::float4[]),
+  fusion => 'weighted', dense_k => 10, final_k => 4)
+LIMIT 4;
+
+DROP INDEX sf_ds;
+
+-- 3-way dense+sparse+BM25 RRF: all three branches build and fuse.
+CREATE INDEX sf_dsb ON sf USING turbohybrid (
+  embedding vector_cosine_turbohybrid_ops,
+  s sparse_ip_turbohybrid_ops,
+  tsv bm25_tsvector_turbohybrid_ops);
+SET enable_seqscan = off;
+
+DO $$
+DECLARE
+  st jsonb;
+  ids int[];
+BEGIN
+  SET LOCAL enable_seqscan = off;
+  SELECT array_agg(id) INTO ids FROM (
+    SELECT id FROM sf
+    ORDER BY embedding <~> turbohybrid_query(
+      vector_query => '[1,0,0,0]'::vector,
+      text_query => websearch_to_tsquery('simple','beta'),
+      sparse_query => turbohybrid_sparse_vector_build(ARRAY[2]::int4[], ARRAY[1.0]::float4[]),
+      fusion => 'rrf', dense_k => 10, bm25_k => 10, sparse_weight => 5, final_k => 4)
+    LIMIT 4) q;
+  st := turbohybrid_last_scan_stats();
+  IF st->>'dense_branch_used' != 'true' OR st->>'bm25_branch_used' != 'true'
+     OR st->>'sparse_branch_used' != 'true' THEN
+    RAISE EXCEPTION 'expected all three branches used: %', st;
+  END IF;
+  IF array_length(ids, 1) IS NULL OR array_length(ids, 1) = 0 THEN
+    RAISE EXCEPTION 'three-way fusion returned no rows';
+  END IF;
+END $$;
+
+RESET enable_seqscan;
+DROP TABLE sf;

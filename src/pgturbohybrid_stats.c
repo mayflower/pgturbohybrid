@@ -3355,6 +3355,14 @@ pgturbohybrid_last_scan_stats(PG_FUNCTION_ARGS)
 							   scanStats.sparseCandidatesScored);
 	PgturbohybridJsonbAddInt64(&state, "sparse_elapsed_us",
 							   scanStats.sparseElapsedUs);
+	PgturbohybridJsonbAddInt64(&state, "sparse_candidates_requested",
+							   scanStats.sparseCandidatesRequested);
+	PgturbohybridJsonbAddInt64(&state, "sparse_candidates_effective",
+							   scanStats.sparseCandidatesEffective);
+	PgturbohybridJsonbAddInt64(&state, "sparse_candidates",
+							   scanStats.sparseCandidates);
+	PgturbohybridJsonbAddBool(&state, "sparse_k_defaulted",
+							  scanStats.sparseKDefaulted);
 	PgturbohybridJsonbAddBranchPlan(&state, &scanStats.branchPlan);
 	PgturbohybridJsonbAddInt64(&state, "quantization_bits",
 							   pgturbohybrid_last_graph_quantization_bits);

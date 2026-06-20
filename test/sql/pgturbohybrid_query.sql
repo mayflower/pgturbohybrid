@@ -41,6 +41,7 @@ BEGIN
 		'turbohybrid.default_bm25_k',
 		'turbohybrid.default_dense_k',
 		'turbohybrid.default_rrf_k',
+		'turbohybrid.default_sparse_k',
 		'turbohybrid.dense_adaptive_min_gap',
 		'turbohybrid.dense_adaptive_widening',
 		'turbohybrid.dense_adaptive_widening_max_multiplier',

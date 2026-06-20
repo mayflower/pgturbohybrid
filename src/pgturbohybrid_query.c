@@ -1776,7 +1776,7 @@ pgturbohybrid_query_constructor(PG_FUNCTION_ARGS)
 		sparseK = PG_GETARG_INT32(18);
 	else
 	{
-		sparseK = denseK;
+		sparseK = pgturbohybrid_default_sparse_k;
 		flags |= PGTURBOHYBRID_QUERY_FLAG_SPARSE_K_DEFAULTED;
 	}
 	PgturbohybridQueryCheckNonNegativeInt("sparse_k", sparseK);
