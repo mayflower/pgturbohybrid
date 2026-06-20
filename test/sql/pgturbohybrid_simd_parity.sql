@@ -283,6 +283,17 @@ BEGIN
             st;
     END IF;
 
+    -- Capability-guarded x86 expectation: on an AVX2/AVX-512 host the fast
+    -- ColBERT MaxSim path must engage a SIMD kernel, not silently fall back to
+    -- the portable blocked_scalar.  Mirrors the dense dense_scorer guard above
+    -- so an amd64 dispatch regression in the multivector hot path is caught.
+    -- Skipped cleanly where SIMD is unavailable (runtime_avx2 false).
+    IF COALESCE((turbohybrid_simd_capabilities()->>'runtime_avx2')::bool, false)
+        AND kernel = 'blocked_scalar' THEN
+        RAISE EXCEPTION 'simd_parity: runtime_avx2 and simd=on but multivector_exact_kernel=blocked_scalar: %',
+            st;
+    END IF;
+
     RESET turbohybrid.simd;
     RESET turbohybrid.multivector_plain_fallback;
     RESET turbohybrid.multivector_exact_rerank;
