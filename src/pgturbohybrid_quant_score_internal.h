@@ -18,6 +18,22 @@
 #include <string.h>
 
 /*
+ * Minimum vector dimension at which the integer query-split SIMD scorers
+ * (AVX2 maddubs / AVX-512 VNNI vpdpbusd, ARM sdot) are used in place of the
+ * per-dim float LUT-gather fallback.  Below this the LUT path runs.
+ *
+ * Measured with turbohybrid_scorer_bench (4-bit, AVX-512 VNNI): the u8 x4 split
+ * kernel is ~8.8x faster than scalar_lut at 96 dims, ~10x at 128, and the gap
+ * only widens with dimension -- so query-split wins well below the legacy 1024
+ * threshold, which excluded every ColBERT/multivector token dim (64/96/128) and
+ * forced their quantized candidate scoring onto the slow LUT path.  The 64 floor
+ * keeps the fast path for those dims while still avoiding the fixed per-code
+ * kernel setup dominating at pathologically tiny dims.  4-bit codes pack two
+ * dims per byte, so 64 is a whole number of code bytes.
+ */
+#define PGTURBOHYBRID_QUERY_SPLIT_MIN_DIM 64
+
+/*
  * Valgrind detection (relocated from pgturbohybrid_quant_score.c so the x86 SIMD
  * module's CPU probes can share it).  Valgrind cannot execute AVX-512 / AVX-VNNI
  * instructions, so the availability probes treat it as "not available".  static

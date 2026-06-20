@@ -89,6 +89,65 @@ BEGIN
     RESET turbohybrid.simd;
     RESET turbohybrid.dense_u8_batch_x4;
 END $$;
+-- Low-dim (ColBERT-scale) query-split coverage.  A 128-d 4-bit scan must engage
+-- the integer query-split SIMD kernel (AVX2 maddubs / AVX-512 VNNI), NOT the
+-- LUT-gather fallback, on a runtime_avx2 host -- guarding the
+-- PGTURBOHYBRID_QUERY_SPLIT_MIN_DIM gate so a regression that re-raised it above
+-- ColBERT token dims (96/128) is caught.  The query-split result must also stay
+-- within a near-tie tolerance of the scalar/LUT path: SIMD vs scalar may swap a
+-- candidate or two at the top-k boundary (the ~0.04% codebook-vs-LUT score
+-- difference) but must not diverge -- i.e. the gate change is recall-neutral.
+CREATE TABLE simd_parity_lowdim (id int PRIMARY KEY, embedding vector(128));
+INSERT INTO simd_parity_lowdim
+SELECT g,
+  (SELECT array_agg((sin((g % 32 + 1) * 0.30 + d * 0.05)
+                   + cos((g % 32 + 1) * 0.17 + d * 0.03)
+                   + 0.5 * sin(g * 0.05 + d * 0.013))::real ORDER BY d)
+   FROM generate_series(1, 128) d)::real[]::vector
+FROM generate_series(1, 800) g;
+CREATE INDEX simd_parity_lowdim_idx ON simd_parity_lowdim
+  USING turbohybrid (embedding vector_cosine_turbohybrid_ops)
+  WITH (quantization_bits = 4, exact_storage = off);
+ANALYZE simd_parity_lowdim;
+DO $$
+DECLARE
+    qv vector;
+    vnni bigint[];
+    lut bigint[];
+    overlap int;
+    st jsonb;
+BEGIN
+    SELECT embedding INTO qv FROM simd_parity_lowdim WHERE id = 100;
+
+    -- SIMD on: capture the kernel that scored the 128-d 4-bit codes.
+    PERFORM set_config('turbohybrid.simd', 'on', false);
+    SELECT array_agg(id) INTO vnni FROM (
+        SELECT id FROM simd_parity_lowdim
+        ORDER BY embedding <~> turbohybrid_query(vector_query => qv, dense_k => 100, final_k => 10)
+        LIMIT 10) t;
+    st := turbohybrid_last_scan_stats();
+
+    IF COALESCE((turbohybrid_simd_capabilities()->>'runtime_avx2')::bool, false)
+        AND st->>'dense_scorer' IN ('scalar_lut', 'avx2_lut_gather') THEN
+        RAISE EXCEPTION 'simd_parity: 128-d 4-bit scan used % on a runtime_avx2 host -- query-split min-dim gate too high?',
+            st->>'dense_scorer';
+    END IF;
+
+    -- SIMD off: the scalar/LUT path; result set must stay within near-tie tolerance.
+    PERFORM set_config('turbohybrid.simd', 'off', false);
+    SELECT array_agg(id) INTO lut FROM (
+        SELECT id FROM simd_parity_lowdim
+        ORDER BY embedding <~> turbohybrid_query(vector_query => qv, dense_k => 100, final_k => 10)
+        LIMIT 10) t;
+    RESET turbohybrid.simd;
+
+    SELECT count(*) INTO overlap FROM unnest(vnni) x WHERE x = ANY(lut);
+    IF overlap < 8 THEN
+        RAISE EXCEPTION 'simd_parity: low-dim query-split diverged from scalar/LUT (overlap %/10): vnni=%, lut=%',
+            overlap, vnni, lut;
+    END IF;
+END $$;
+DROP TABLE simd_parity_lowdim;
 CREATE FUNCTION simd_parity_multivector(token_count int, dims int, salt float8)
 RETURNS turbohybrid_multivector
 LANGUAGE plpgsql AS $$

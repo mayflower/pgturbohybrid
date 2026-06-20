@@ -620,7 +620,8 @@ PgturbohybridGraphPackedDistanceU8Split(const PgturbohybridGraphTqQuery *tq, con
 	/*
 	 * Single-code kernel was resolved once in TqPrepareQueryU8Split
 	 * (PgturbohybridGraphTqResolveU8Kernels); no per-call feature probe.  The
-	 * gate (4-bit, dim>=1024, mode!=L1, u8 enabled, SIMD available) is folded
+	 * gate (4-bit, dim>=QUERY_SPLIT_MIN_DIM, mode!=L1, u8 enabled, SIMD available)
+	 * is folded
 	 * into u8.kernelSingle == NONE, so the default branch handles every fallback.
 	 */
 	switch (tq->u8.kernelSingle)
@@ -700,7 +701,7 @@ PgturbohybridGraphTqResolveU8Kernels(PgturbohybridGraphTqQuery *tq)
 	int			single = PGTURBOHYBRID_U8_KERNEL_NONE;
 	int			x4 = PGTURBOHYBRID_U8_KERNEL_NONE;
 
-	if (tq->u8.enabled && tq->dimensions >= 1024 &&
+	if (tq->u8.enabled && tq->dimensions >= PGTURBOHYBRID_QUERY_SPLIT_MIN_DIM &&
 		tq->bits == PGTURBOHYBRID_DEFAULT_BITS && mode != PGTURBOHYBRID_SCORE_L1)
 	{
 #if PGTURBOHYBRID_GRAPH_COMPILE_AVX512VNNI

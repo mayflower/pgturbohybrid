@@ -409,7 +409,7 @@ PgturbohybridGraphPackedDistanceQuerySplit4(const PgturbohybridGraphTqQuery *tq,
 	int64		rawDot;
 	TqScoreMode mode = (TqScoreMode) tq->scoreMode;
 
-	if (!tq->signedSplit.enabled || tq->dimensions < 1024 ||
+	if (!tq->signedSplit.enabled || tq->dimensions < PGTURBOHYBRID_QUERY_SPLIT_MIN_DIM ||
 		tq->bits != PGTURBOHYBRID_DEFAULT_BITS || mode == PGTURBOHYBRID_SCORE_L1)
 		return false;
 
@@ -463,7 +463,7 @@ PgturbohybridGraphPackedDistanceQuerySplit4(const PgturbohybridGraphTqQuery *tq,
 #if PGTURBOHYBRID_GRAPH_COMPILE_AVX2
 /*
  * Whether the unsigned-codebook (u8) split should be used for this query.
- * 4-bit only, dim >= 1024, not L1, not SIMD-forced-scalar, impl != signed, and
+ * 4-bit only, dim >= QUERY_SPLIT_MIN_DIM, not L1, not SIMD-forced-scalar, impl != signed, and
  * AVX2 (maddubs) available.  Pure function of GUCs + query shape; used by the
  * query prep (which representation to build), the scorer, and the LUT-skip
  * predicate.
@@ -479,7 +479,7 @@ PgturbohybridGraphTqUseU8Split(const PgturbohybridGraphTqQuery *tq)
 	if (tq == NULL ||
 		pgturbohybrid_dense_simd_force == PGTURBOHYBRID_SIMD_FORCE_SCALAR ||
 		tq->bits != PGTURBOHYBRID_DEFAULT_BITS ||
-		tq->dimensions < 1024 ||
+		tq->dimensions < PGTURBOHYBRID_QUERY_SPLIT_MIN_DIM ||
 		(TqScoreMode) tq->scoreMode == PGTURBOHYBRID_SCORE_L1 ||
 		!PgturbohybridGraphAvx2Available())
 		return false;
@@ -511,7 +511,7 @@ PgturbohybridGraphPackedDistanceQuerySplit2(const PgturbohybridGraphTqQuery *tq,
 	int64		rawDot;
 	TqScoreMode mode = (TqScoreMode) tq->scoreMode;
 
-	if (!tq->signedSplit.enabled || tq->dimensions < 1024 ||
+	if (!tq->signedSplit.enabled || tq->dimensions < PGTURBOHYBRID_QUERY_SPLIT_MIN_DIM ||
 		tq->bits != 2 || mode == PGTURBOHYBRID_SCORE_L1)
 		return false;
 
@@ -823,7 +823,7 @@ PgturbohybridGraphTqCodeU8ScalarDistance(const PgturbohybridGraphTqQuery *tq,
 {
 	TqScoreMode mode = (TqScoreMode) tq->scoreMode;
 
-	if (!tq->u8.enabled || tq->dimensions < 1024 ||
+	if (!tq->u8.enabled || tq->dimensions < PGTURBOHYBRID_QUERY_SPLIT_MIN_DIM ||
 		tq->bits != PGTURBOHYBRID_DEFAULT_BITS || mode == PGTURBOHYBRID_SCORE_L1)
 		return false;
 	*distance = PgturbohybridGraphU8DistanceFromRaw(tq, valueScale,
@@ -894,7 +894,7 @@ PgturbohybridGraphTqQuerySplitActive(const PgturbohybridGraphTqQuery *tq)
 	if (tq != NULL && tq->u8.enabled)
 		return true;
 #endif
-	if (tq == NULL || !tq->signedSplit.enabled || tq->dimensions < 1024 ||
+	if (tq == NULL || !tq->signedSplit.enabled || tq->dimensions < PGTURBOHYBRID_QUERY_SPLIT_MIN_DIM ||
 		(tq->bits != PGTURBOHYBRID_DEFAULT_BITS && tq->bits != 2) ||
 		(TqScoreMode) tq->scoreMode == PGTURBOHYBRID_SCORE_L1)
 		return false;
@@ -2735,7 +2735,7 @@ PgturbohybridGraphScoreNodeBatchQuerySplit4(PgturbohybridGraphScanOpaque so,
 	double		dimSqrt;
 	double		queryNormSqrt = 0;
 
-	if (!so->tq.signedSplit.enabled || so->tq.dimensions < 1024 ||
+	if (!so->tq.signedSplit.enabled || so->tq.dimensions < PGTURBOHYBRID_QUERY_SPLIT_MIN_DIM ||
 		so->tq.bits != PGTURBOHYBRID_DEFAULT_BITS || mode == PGTURBOHYBRID_SCORE_L1)
 		return false;
 
@@ -2814,7 +2814,7 @@ PgturbohybridGraphScoreNodeBatchQuerySplit2(PgturbohybridGraphScanOpaque so,
 	double		dimSqrt;
 	double		queryNormSqrt = 0;
 
-	if (!so->tq.signedSplit.enabled || so->tq.dimensions < 1024 ||
+	if (!so->tq.signedSplit.enabled || so->tq.dimensions < PGTURBOHYBRID_QUERY_SPLIT_MIN_DIM ||
 		so->tq.bits != 2 || mode == PGTURBOHYBRID_SCORE_L1)
 		return false;
 
