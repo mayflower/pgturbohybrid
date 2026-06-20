@@ -330,7 +330,7 @@ $node->safe_psql('pg_colbert_llama_live', sprintf(q(
 
 		stats := turbohybrid_last_scan_stats();
 		IF stats->>'multivector_enabled' <> 'true' OR
-		   stats->>'dense_branch_used' <> 'true' OR
+		   stats->>'multivector_branch_used' <> 'true' OR
 		   stats->>'index_used' <> 'true' THEN
 			RAISE EXCEPTION 'expected live dense search to use multivector index, stats=%%',
 				stats;
@@ -366,7 +366,7 @@ $node->safe_psql('pg_colbert_llama_live', sprintf(q(
 
 		stats := turbohybrid_last_scan_stats();
 		IF stats->>'multivector_enabled' <> 'true' OR
-		   stats->>'dense_branch_used' <> 'true' OR
+		   stats->>'multivector_branch_used' <> 'true' OR
 		   stats->>'index_used' <> 'true' THEN
 			RAISE EXCEPTION 'expected live hybrid search to use multivector dense index, stats=%%',
 				stats;
