@@ -59,9 +59,19 @@ check_no_generated_benchmark_artifacts() {
 }
 
 check_no_root_scratch_files() {
-	local root_files tracked_files
+	local found tracked_files visible=()
 
-	root_files="$(find . -maxdepth 1 -type f \( \
+	# A local, git-ignored working file (for example an ignored prompts.md kept
+	# as a personal scratchpad) never ships: `make dist` archives only tracked
+	# files via `git archive HEAD^{tree}`.  So only flag root scratch/planning
+	# files that are present AND not git-ignored.
+	while IFS= read -r found; do
+		[[ -z "$found" ]] && continue
+		if git check-ignore -q "$found"; then
+			continue
+		fi
+		visible+=("$found")
+	done < <(find . -maxdepth 1 -type f \( \
 		-iname 'fixes*.md' -o \
 		-iname 'prompts*.md' -o \
 		-iname 'scratch*.md' -o \
@@ -69,12 +79,14 @@ check_no_root_scratch_files() {
 		-name 'FAST_DEFAULTS_RELEASE_SUMMARY.md' -o \
 		-name 'PERF_RECOVERY_SUMMARY.md' -o \
 		-name 'PERF_REGRESSION_REPORT.md' \
-	\) -print)"
-	if [[ -n "$root_files" ]]; then
-		printf '%s\n' "$root_files" >&2
-		fail "root scratch or planning files found"
+	\) -print)
+	if [[ ${#visible[@]} -gt 0 ]]; then
+		printf '%s\n' "${visible[@]}" >&2
+		fail "root scratch or planning files found (git-ignore them or remove them)"
 	fi
 
+	# Belt and braces: a scratch/planning file must never be tracked (those would
+	# ship in the dist regardless of .gitignore).
 	tracked_files="$(git ls-files | grep -E '^(fixes|prompts|scratch).*\.md$|^(FAST_DEFAULTS_PLAN|FAST_DEFAULTS_RELEASE_SUMMARY|PERF_RECOVERY_SUMMARY|PERF_REGRESSION_REPORT)\.md$' || true)"
 	if [[ -n "$tracked_files" ]]; then
 		printf '%s\n' "$tracked_files" >&2
@@ -121,6 +133,7 @@ check_no_local_paths
 check_no_generated_benchmark_artifacts
 check_no_root_scratch_files
 check_readme_links
+run "$ROOT_DIR/scripts/check-version-consistency.sh"
 
 run make PG_CONFIG="$PG_CONFIG" clean
 run make PG_CONFIG="$PG_CONFIG"

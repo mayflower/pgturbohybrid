@@ -6,6 +6,17 @@ Thumbs.db
 *~
 .#*
 
+# Local working / scratch / planning files. These are never shipped (make dist
+# archives only tracked files) and release-check tolerates git-ignored copies.
+/prompts.md
+/prompts*.md
+/fixes*.md
+/scratch*.md
+/FAST_DEFAULTS_PLAN.md
+/FAST_DEFAULTS_RELEASE_SUMMARY.md
+/PERF_RECOVERY_SUMMARY.md
+/PERF_REGRESSION_REPORT.md
+
 # Local dependency checkouts and release archives
 /.nix-dev/
 /result

@@ -61,18 +61,25 @@ jobs:
         env:
           GH_TOKEN: ${{ secrets.RELEASE_PAT || github.token }}
         run: |
+          # Release notes are derived from the tag name (GITHUB_REF_NAME), not
+          # hardcoded.  The SQL/package version (EXTVERSION) may stay 0.1.0 even
+          # when the tag is v0.1.0-alpha.N, so the artifact names come from the
+          # Makefile while the notes file comes from the tag.
+          EXTVERSION="$(sed -n 's/^EXTVERSION[[:space:]]*=[[:space:]]*//p' Makefile | head -n1)"
+          NOTES_FILE="docs/release-notes/github-${GITHUB_REF_NAME}.md"
+          if [ ! -f "$NOTES_FILE" ]; then
+            echo "::error::release notes file not found: $NOTES_FILE" >&2
+            echo "Create docs/release-notes/github-${GITHUB_REF_NAME}.md for this tag." >&2
+            exit 1
+          fi
+          TARBALL="dist/pgturbohybrid-${EXTVERSION}.tar.gz"
+          ZIP="dist/pgturbohybrid-${EXTVERSION}.zip"
           if gh release view "$GITHUB_REF_NAME" >/dev/null 2>&1; then
-            gh release edit "$GITHUB_REF_NAME" \
-              --notes-file docs/release-notes/github-v0.1.0-alpha.2.md
-            gh release upload "$GITHUB_REF_NAME" \
-              dist/pgturbohybrid-0.1.0.tar.gz \
-              dist/pgturbohybrid-0.1.0.zip \
-              --clobber
+            gh release edit "$GITHUB_REF_NAME" --notes-file "$NOTES_FILE"
+            gh release upload "$GITHUB_REF_NAME" "$TARBALL" "$ZIP" --clobber
           else
-            gh release create "$GITHUB_REF_NAME" \
-              dist/pgturbohybrid-0.1.0.tar.gz \
-              dist/pgturbohybrid-0.1.0.zip \
+            gh release create "$GITHUB_REF_NAME" "$TARBALL" "$ZIP" \
               --title "$GITHUB_REF_NAME" \
-              --notes-file docs/release-notes/github-v0.1.0-alpha.2.md \
+              --notes-file "$NOTES_FILE" \
               --verify-tag
           fi
