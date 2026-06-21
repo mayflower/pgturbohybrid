@@ -26,6 +26,7 @@ evidence.
 | Insert/delta node-ID and crash behavior needs stronger evidence | Medium priority | Fixed for alpha |
 | BM25 large-tsquery bitmask handling needs a defined limit or dynamic bitmap | Medium priority | Fixed with 64-term cap |
 | Diagnostics JSON construction should move away from manual string assembly | Alpha accepted risk | Fixed |
+| On-disk metadata/page readers (graph metapage, sparse node-map, sparse postings) need defensive corruption guards and crash-resistance evidence | High priority | Fixed |
 
 ## Severity
 
@@ -59,6 +60,10 @@ This section is updated as fixes land.
 - `src/pgturbohybrid_quant_insert.c`
 - `src/pgturbohybrid_query.c`
 - `src/pgturbohybrid_scan.c`
+- `src/pgturbohybrid_quant.c`
+- `src/pgturbohybrid_bm25_build.c`
+- `src/pgturbohybrid_sparse_query.c`
+- `test/t/004_metadata_corruption.pl`
 - `test/sql/pgturbohybrid_query.sql`
 - `test/expected/pgturbohybrid_query.out`
 - `test/sql/security.sql`
@@ -83,6 +88,15 @@ This section is updated as tests land.
 - TAP restart tests cover build, concurrent build, insert, delete, vacuum,
   reindex, unlogged tables, immediate stop, and restart when PostgreSQL TAP
   modules are available.
+- TAP metadata-corruption test (`test/t/004_metadata_corruption.pl`) builds a
+  dense (graph metapage), a hybrid dense+tsvector (BM25 metadata), and a
+  sparse-only (`sparse_ip_turbohybrid_ops`, node-map/postings) index, scribbles
+  raw bytes over the relevant on-disk page(s), restarts, and asserts that a
+  subsequent query and `turbohybrid_index_stats(...)` either raise a clean error
+  or complete without crashing -- and that a fresh `SELECT 1` still succeeds
+  after every case, proving no backend crash/PANIC. It exercises both the
+  deterministic metapage-version error path and the dispatch-returns-false path
+  (clobbered magic), available when PostgreSQL TAP modules are present.
 - Manual/nightly `hardening` workflow covers strict math with SIMD disabled,
   gcc, and clang static analysis.
 
@@ -92,9 +106,38 @@ This section is updated as tests land.
   planned statements and wraps graph scans after the previous executor-start hook
   has run, then clears wrapper state and planned-statement stack entries on
   executor end and abort paths.
-- Full corruption fuzzing for every on-disk BM25 and graph page type remains a
-  follow-up. This branch adds cache metadata caps and overflow checks on the
-  release-facing BM25 cache/query paths.
+- On-disk corruption hardening now covers the main metadata/page readers:
+  - The graph metapage reader (`PgturbohybridGraphReadMeta`) validates the
+    metapage format `version` after the magic + storage-kind dispatch check and
+    raises `ERRCODE_DATA_CORRUPTED` with a REINDEX hint on an unknown version,
+    instead of silently misreading an incompatible layout. Sub-field counts and
+    bounds were already clamped.
+  - The BM25 metadata readers in `pgturbohybrid_bm25_build.c` /
+    `pgturbohybrid_bm25_query.c` retain their existing dense set of
+    `ERRCODE_DATA_CORRUPTED` checks (metapage pointer in range, page-kind, tuple
+    presence, chain bounds).
+  - The sparse node-map readers (`PgturbohybridReadNodeMap` /
+    `PgturbohybridReadNodeStates`) now validate each chain pointer (in range,
+    never the metapage, never self-referential) before dereferencing it, and
+    refuse to read a node-map tuple's TID run that exceeds the bytes the item
+    line pointer actually covers -- closing wild-read / infinite-loop / OOB-read
+    risks under corruption.
+  - The sparse postings decoders (`PgturbohybridSparseScoreChunk`,
+    `PgturbohybridWandDecodeChunk`) reject a chunk whose posting count exceeds
+    the physical block-size ceiling (`PGTURBOHYBRID_SPARSE_MAX_BLOCK_SIZE`), and
+    WAND decode scratch buffers are sized to that ceiling rather than the
+    on-disk `meta->blockSize`, so a corrupt count can no longer overrun the
+    decode buffers or the fixed-size bit-unpack stack array.
+  These checks are conservative: none can fire for a validly-built current-format
+  index. The crash-resistance property is proven by
+  `test/t/004_metadata_corruption.pl` (see Tests Added).
+- Full corruption fuzzing for *every* on-disk page type (e.g. exhaustive
+  byte-level fuzzing of adjacency, correction, codebook, multivector doc-map,
+  block-max, and lexicon pages, and randomized field mutation across all tuple
+  types) remains a follow-up. The current coverage targets the metadata/anchor
+  readers (graph metapage, BM25 metadata, sparse node-map and postings) that
+  gate every scan. This branch also adds cache metadata caps and overflow checks
+  on the release-facing BM25 cache/query paths.
 - Public diagnostics now use PostgreSQL JSONB builder APIs instead of
   hand-assembled JSON text. Developer-only diagnostics remain behind
   `PGTURBOHYBRID_DEV_DIAGNOSTICS`.

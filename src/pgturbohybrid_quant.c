@@ -8810,6 +8810,29 @@ PgturbohybridGraphReadMeta(Relation index, PgturbohybridGraphMetaPageData *meta)
 		return false;
 	}
 
+	/*
+	 * The magic + storageKind matched, so this metapage was written by this
+	 * extension's native graph writer.  That writer always stamps the current
+	 * format version (PGTURBOHYBRID_GRAPH_VERSION), so any other value here is
+	 * either disk corruption or an index built by an incompatible (future)
+	 * format -- both of which would otherwise be misread silently.  Reject it
+	 * with a clear error and a REINDEX hint rather than proceeding to clamp
+	 * fields under an unknown layout.  This cannot fire for a validly-built
+	 * current-version index.
+	 */
+	if (metap->version != PGTURBOHYBRID_GRAPH_VERSION)
+	{
+		uint32		foundVersion = metap->version;
+
+		UnlockReleaseBuffer(buf);
+		ereport(ERROR,
+				(errcode(ERRCODE_DATA_CORRUPTED),
+				 errmsg("pgturbohybrid index \"%s\" uses unsupported on-disk metapage format version %u (expected %u)",
+						RelationGetRelationName(index), foundVersion,
+						(uint32) PGTURBOHYBRID_GRAPH_VERSION),
+				 errhint("REINDEX the index to rebuild it in the current format.")));
+	}
+
 	memset(meta, 0, sizeof(PgturbohybridGraphMetaPageData));
 	metaStart = (Size) ((char *) metap - (char *) page);
 	metaBytes = pageHeader->pd_lower > metaStart ? pageHeader->pd_lower - metaStart : 0;

@@ -560,6 +560,21 @@ PgturbohybridSparseScoreChunk(PgturbohybridSparsePostingsTuple ct, int bits,
 	uint32		wwidth = PgturbohybridSparseWeightWidth(bits);
 	const char *payload = ct->payload;
 
+	/*
+	 * A chunk physically holds at most PGTURBOHYBRID_SPARSE_MAX_BLOCK_SIZE
+	 * postings (the writer caps every chunk at the index block size, which is
+	 * itself <= this ceiling).  A larger count can only be corruption, and the
+	 * bit-packed branch below indexes a fixed stack array of exactly this size,
+	 * so reject an over-large count rather than overrunning it.  Cannot fire for
+	 * a validly-built index.
+	 */
+	if (n > PGTURBOHYBRID_SPARSE_MAX_BLOCK_SIZE)
+		ereport(ERROR,
+				(errcode(ERRCODE_DATA_CORRUPTED),
+				 errmsg("pgturbohybrid sparse postings chunk has invalid posting count %u (max %u)",
+						n, (uint32) PGTURBOHYBRID_SPARSE_MAX_BLOCK_SIZE),
+				 errhint("REINDEX the index to rebuild the sparse inverted index.")));
+
 	if (ct->encoding == PGTURBOHYBRID_SPARSE_ENCODING_VARINT)
 	{
 		uint16		deltaBytes;
@@ -745,6 +760,23 @@ PgturbohybridWandDecodeChunk(Relation index, BlockNumber blk, OffsetNumber off,
 	n = ct->count;
 	base = ct->baseNodeId;
 	payload = ct->payload;
+
+	/*
+	 * The caller's nodes[]/weights[] buffers are sized to hold at most
+	 * PGTURBOHYBRID_SPARSE_MAX_BLOCK_SIZE postings (the physical chunk ceiling),
+	 * and the bit-packed branch indexes a stack array of exactly that size.  A
+	 * larger count is corruption -- reject it instead of writing out of bounds.
+	 * Cannot fire for a validly-built index.
+	 */
+	if (n > PGTURBOHYBRID_SPARSE_MAX_BLOCK_SIZE)
+	{
+		UnlockReleaseBuffer(buf);
+		ereport(ERROR,
+				(errcode(ERRCODE_DATA_CORRUPTED),
+				 errmsg("pgturbohybrid sparse postings chunk has invalid posting count %u (max %u)",
+						n, (uint32) PGTURBOHYBRID_SPARSE_MAX_BLOCK_SIZE),
+				 errhint("REINDEX the index to rebuild the sparse inverted index.")));
+	}
 
 	if (ct->encoding == PGTURBOHYBRID_SPARSE_ENCODING_VARINT)
 	{
@@ -1019,6 +1051,7 @@ PgturbohybridSparseCollectWand(Relation index, PgturbohybridSparseMetaTuple meta
 	int			bits = (int) meta->quantBits;
 	uint32		blockSize = meta->blockSize > 0 ? meta->blockSize :
 		PGTURBOHYBRID_SPARSE_DEFAULT_BLOCK_SIZE;
+	uint32		bufCap = Max(blockSize, (uint32) PGTURBOHYBRID_SPARSE_MAX_BLOCK_SIZE);
 	PgturbohybridWandHeapEntry *heap;
 	int			heapSize = 0;
 	double		theta = -get_float8_infinity();
@@ -1074,9 +1107,17 @@ PgturbohybridSparseCollectWand(Relation index, PgturbohybridSparseMetaTuple meta
 												  found->blockCount);
 		t->curBlock = 0;
 		t->loaded = false;
-		t->nodes = (uint32 *) palloc(sizeof(uint32) * blockSize);
-		t->weights = (float4 *) palloc(sizeof(float4) * blockSize);
-		t->contribs = (double *) palloc(sizeof(double) * blockSize);
+		/*
+		 * Size the decode scratch to the physical chunk ceiling, not the
+		 * (on-disk, attacker-influenced) meta blockSize: PgturbohybridWandDecodeChunk
+		 * only admits chunks of up to PGTURBOHYBRID_SPARSE_MAX_BLOCK_SIZE postings,
+		 * so this guarantees the buffers can hold any chunk it accepts.  For a
+		 * validly-built index blockSize <= this ceiling, so this never shrinks
+		 * the buffers and changes no behavior.
+		 */
+		t->nodes = (uint32 *) palloc(sizeof(uint32) * bufCap);
+		t->weights = (float4 *) palloc(sizeof(float4) * bufCap);
+		t->contribs = (double *) palloc(sizeof(double) * bufCap);
 		PgturbohybridWandAdvance(index, t, 0, bits, &visited, &skipped,
 								 &hotHits, &hotMisses);
 	}
