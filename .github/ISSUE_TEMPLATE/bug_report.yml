@@ -46,10 +46,18 @@ body:
     validations:
       required: false
   - type: textarea
-    id: exact-sql
+    id: create-index
     attributes:
-      label: Exact SQL
-      description: Minimal SQL needed to reproduce the issue.
+      label: CREATE INDEX statement
+      description: The exact `CREATE INDEX ... USING turbohybrid (...)` statement (and any reloptions). Put `n/a` if the bug is not index-related.
+      render: sql
+    validations:
+      required: true
+  - type: textarea
+    id: query
+    attributes:
+      label: Query
+      description: The exact query (with the `turbohybrid_query(...)` call) that triggers the bug. Put `n/a` if not applicable.
       render: sql
     validations:
       required: true

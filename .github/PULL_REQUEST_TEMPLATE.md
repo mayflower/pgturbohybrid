@@ -8,6 +8,7 @@ Describe the change and why it belongs in `pgturbohybrid`.
 - [ ] `make prove_installcheck`
 - [ ] No generated benchmark artifacts are committed
 - [ ] Documentation updated where needed
+- [ ] Release notes added/updated if this is user-visible (`docs/release-notes/`)
 - [ ] Benchmark claims include dataset, dimensions, query count, profile, index settings, query budgets, baseline, and quality metric
 - [ ] PostgreSQL and pgvector compatibility impact considered
 - [ ] On-disk format impact considered

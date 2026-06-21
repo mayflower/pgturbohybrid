@@ -6,6 +6,19 @@ checks, and send useful changes to `pgturbohybrid`.
 `pgturbohybrid` is developed as a standalone PostgreSQL extension that depends
 on an unmodified pgvector installation.
 
+## Reporting Issues And Opening PRs
+
+Use the GitHub templates so reports carry enough context to reproduce:
+
+- [Bug report](.github/ISSUE_TEMPLATE/bug_report.yml) — PostgreSQL/pgvector/pgturbohybrid versions, OS/arch, `CREATE INDEX`, query, `EXPLAIN`, and `turbohybrid_last_scan_stats()`.
+- [Performance report](.github/ISSUE_TEMPLATE/performance_report.yml) — a suspected slowdown or regression.
+- [Benchmark report](.github/ISSUE_TEMPLATE/benchmark_report.yml) — contributing reproducible numbers (dataset, rows, dimensions, query count, hardware, cache state, warm-up policy, settings, baseline).
+- [Feature request](.github/ISSUE_TEMPLATE/feature_request.yml).
+
+Pull requests use [the PR template](.github/PULL_REQUEST_TEMPLATE.md) checklist
+(tests, docs, release notes, benchmark claims, and compatibility/`REINDEX`
+impact).
+
 ## Local Setup
 
 Install PostgreSQL development tools first, then run:
