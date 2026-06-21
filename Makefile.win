@@ -13,6 +13,7 @@ OBJS = \
 	src\pgturbohybrid_build.obj \
 	src\pgturbohybrid_graph.obj \
 	src\pgturbohybrid_graph_utils.obj \
+	src\pgturbohybrid_guc.obj \
 	src\pgturbohybrid_insert.obj \
 	src\pgturbohybrid_multivector.obj \
 	src\pgturbohybrid_quant.obj \
