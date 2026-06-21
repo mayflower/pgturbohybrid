@@ -56,11 +56,13 @@ PgturbohybridSparseResolveScoreKernel(int bits, bool simdEnabled)
 {
 	if (!simdEnabled || bits == 0)
 		return PGTURBOHYBRID_SPARSE_SCORE_SCALAR;	/* f32 has no SIMD kernel */
-#if PGTURBOHYBRID_SPARSE_X86 && !defined(PGTURBOHYBRID_DISABLE_SIMD)
+#if PGTURBOHYBRID_SPARSE_X86 && !defined(PGTURBOHYBRID_DISABLE_SIMD) && \
+	(defined(__GNUC__) || defined(__clang__))
 	if (__builtin_cpu_supports("avx2"))
 		return PGTURBOHYBRID_SPARSE_SCORE_AVX2;
 #endif
-#if PGTURBOHYBRID_SPARSE_ARM && !defined(PGTURBOHYBRID_DISABLE_SIMD)
+#if PGTURBOHYBRID_SPARSE_ARM && !defined(PGTURBOHYBRID_DISABLE_SIMD) && \
+	(defined(__GNUC__) || defined(__clang__))
 	return PGTURBOHYBRID_SPARSE_SCORE_NEON;
 #endif
 	return PGTURBOHYBRID_SPARSE_SCORE_SCALAR;
@@ -82,7 +84,8 @@ PgturbohybridSparseScoreSoa(int kernel, const void *weights, const uint16 *offse
 							double *scores, uint32 nodeCount, uint64 *simdBlocks,
 							uint64 *scalarTail)
 {
-#if PGTURBOHYBRID_SPARSE_X86 && !defined(PGTURBOHYBRID_DISABLE_SIMD)
+#if PGTURBOHYBRID_SPARSE_X86 && !defined(PGTURBOHYBRID_DISABLE_SIMD) && \
+	(defined(__GNUC__) || defined(__clang__))
 	if (kernel == PGTURBOHYBRID_SPARSE_SCORE_AVX2 && bits == 8)
 	{
 		PgturbohybridSparseScoreSoaAvx2Q8((const uint8 *) weights, offsets, count,
@@ -98,7 +101,8 @@ PgturbohybridSparseScoreSoa(int kernel, const void *weights, const uint16 *offse
 		return;
 	}
 #endif
-#if PGTURBOHYBRID_SPARSE_ARM && !defined(PGTURBOHYBRID_DISABLE_SIMD)
+#if PGTURBOHYBRID_SPARSE_ARM && !defined(PGTURBOHYBRID_DISABLE_SIMD) && \
+	(defined(__GNUC__) || defined(__clang__))
 	if (kernel == PGTURBOHYBRID_SPARSE_SCORE_NEON && bits == 8)
 	{
 		PgturbohybridSparseScoreSoaNeonQ8((const uint8 *) weights, offsets, count,
