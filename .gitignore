@@ -26,6 +26,7 @@ Thumbs.db
 
 # Benchmark and generated result output
 /results/
+/extensions/pg_colbert_llama/results/
 /benchmarks/results/
 /benchmarks/output/
 /benchmarks/**/*.json
