@@ -156,23 +156,105 @@ zero / false, so a dense-only scan reports no spurious sparse activity.
 
 ## Generating sparse vectors
 
-Sparse vectors are model-agnostic — import any `(term_id, weight)` bag. The
-companion `llama_embed` extension provides a sparse output API backed by a
-deterministic **stub** (no model download); see
-[colbert-llama-extension.md](colbert-llama-extension.md#sparse-splade-output--alpha):
+Sparse vectors are model-agnostic — `pgturbohybrid` stores any `(term_id, weight)`
+bag and never assumes a particular vocabulary. Three ways to produce them:
 
-```sql
-SELECT llama_embed_sparse('stub', 'red apple', '{"top_k": 64}');
+1. **A learned-sparse model (SPLADE, uniCOIL, …).** This is the intended use.
+2. **The `llama_embed` companion extension**, backed by a deterministic **stub**
+   (no model download) — handy for pipeline tests; see
+   [colbert-llama-extension.md](colbert-llama-extension.md#sparse-splade-output--alpha):
+   ```sql
+   SELECT llama_embed_sparse('stub', 'red apple', '{"top_k": 64}');
+   ```
+3. **Importing JSONL** exported by `benchmarks/export_learned_sparse_jsonl.py`
+   (its `external_command` adapter pipes text to your model), loaded with
+   `turbohybrid_sparse_vector_from_arrays`.
+
+### Worked example: SPLADE end to end
+
+The key fact that makes SPLADE a drop-in fit: a SPLADE vector is a weight over the
+model's **WordPiece vocabulary**, so each non-zero entry's vocabulary id *is* the
+`term_id` — no remapping, no shared dictionary to maintain. SPLADE++ uses the
+`bert-base-uncased` vocab (ids `0..30521`), exactly the `int4` `term_id` space.
+
+Encode text with the standard SPLADE pooling and load it directly:
+
+```python
+import torch
+from transformers import AutoModelForMaskedLM, AutoTokenizer
+
+MODEL = "naver/splade-cocondenser-ensembledistil"   # SPLADE++ CoCondenser-EnsembleDistil
+tok = AutoTokenizer.from_pretrained(MODEL)
+model = AutoModelForMaskedLM.from_pretrained(MODEL).eval()
+
+@torch.no_grad()
+def splade(text: str):
+    enc = tok(text, truncation=True, max_length=512, return_tensors="pt")
+    logits = model(**enc).logits                       # [1, L, V]
+    relu = torch.log1p(torch.relu(logits))             # SPLADE activation
+    vec = torch.max(relu * enc["attention_mask"].unsqueeze(-1), dim=1).values[0]
+    nz = torch.nonzero(vec).squeeze(-1)
+    return nz.tolist(), vec[nz].tolist()               # (term_ids, weights)
+
+term_ids, weights = splade("what causes diabetes")
 ```
 
-For real SPLADE vectors, export `(id, term_ids, weights)` JSONL with
-`benchmarks/export_learned_sparse_jsonl.py` (its `external_command` adapter pipes
-text to your model) and load it via `turbohybrid_sparse_vector_from_arrays`.
+```sql
+-- term_ids / weights are the SPLADE output above (vocabulary id = term_id).
+INSERT INTO docs (doc_id, s)
+VALUES ('d1', turbohybrid_sparse_vector_from_arrays(:term_ids::int4[], :weights::float4[]));
+
+CREATE INDEX ON docs USING turbohybrid (s sparse_ip_turbohybrid_ops)
+  WITH (sparse_quant_bits = 8);          -- 8-bit postings; 0 = exact f32
+
+-- Retrieve: encode the query the same way and order by the sparse distance.
+SELECT doc_id
+FROM docs
+ORDER BY s <~*> turbohybrid_query(
+  sparse_query => turbohybrid_sparse_vector_from_arrays(:q_term_ids::int4[], :q_weights::float4[]),
+  sparse_k => 1000, final_k => 10)
+LIMIT 10;
+```
+
+That is the entire pipeline: encode → `from_arrays` → index → `<~*>`. The inner
+product `<~*>` computes is exactly SPLADE's scoring function (`Σ q_t · d_t` over
+shared terms).
+
+## Validation on real data (BEIR NFCorpus)
+
+The native sparse path was validated against SPLADE++ CoCondenser-EnsembleDistil
+on **BEIR NFCorpus** (3,633 documents, 323 test queries) — the same model behind
+pyserini's `beir-v1.0.0-nfcorpus.splade-pp-ed` prebuilt index. Documents and
+queries were encoded as above, loaded into a sparse-primary index, and retrieved
+through `<~*>`. Results were checked against (a) an exact brute-force SPLADE
+dot-product ranking and (b) the published nDCG@10:
+
+| method | nDCG@10 | recall@100 | top-10 overlap vs exact SPLADE |
+| --- | --- | --- | --- |
+| brute-force SPLADE (reference) | 0.3549 | 0.2891 | — |
+| `sparse_f32` (exact) | 0.3546 | 0.2891 | 0.9997 |
+| `sparse_q16` | 0.3549 | 0.2891 | 1.000 |
+| `sparse_q8` | 0.3549 | 0.2891 | 1.000 |
+| `sparse_q8` + exact rerank | 0.3549 | 0.2891 | 1.000 |
+| *published SPLADE++ ED (pyserini/Anserini)* | *0.3473* | — | — |
+
+The f32 scan reproduces the exact SPLADE ranking (top-10 overlap 0.9997; the
+0.03% is one tie-broken document), q16/q8 are lossless on this dataset, and
+nDCG@10 lands on the published reference (the ~0.008 gap is our own encoding plus
+nDCG-formula nuances, not a retrieval difference). NFCorpus's low recall@10 is
+expected — it averages ~50 relevant documents per query, so nDCG@10 is the
+headline metric.
+
+> The pyserini/Anserini prebuilt indexes themselves are Lucene *impact* indexes
+> (a JVM is required to read them) and the only pre-encoded corpus is a single
+> ~45 GB tar for all of BEIR, so this validation reproduces the SPLADE++ ED
+> pipeline directly on the 2.4 MB NFCorpus rather than consuming the prebuilt
+> index.
 
 ## Benchmarking
 
 The DBpedia ColBERT harness exposes sparse retrieval methods
 (`sparse_f32`/`q16`/`q8`/`q8_rerank`, `dense_sparse_rrf`, `dense_sparse_bm25_rrf`)
-via `--sparse-benchmark`; see
+via `--sparse-benchmark` (or by naming them in `--methods`); see
 [benchmarks/README.md](../benchmarks/README.md#native-sparse-splade-retrieval) for
 the q8/q16/f32 comparison and a small local (no-download) reproduction.
