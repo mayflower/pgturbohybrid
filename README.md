@@ -908,6 +908,10 @@ it does not add a SQL-visible autotuner or change production defaults.
 
 ## Diagnostics
 
+The stable vs experimental vs diagnostic-only keys of
+`turbohybrid_last_scan_stats()` are documented in
+[docs/diagnostics-schema.md](docs/diagnostics-schema.md).
+
 After a query, check whether PostgreSQL used the expected TurboHybrid path:
 
 ```sql
@@ -1094,6 +1098,7 @@ see [NOTICE](NOTICE) and [docs/architecture.md](docs/architecture.md).
 - [Feature & maturity matrix](docs/feature-matrix.md)
 - [How TurboHybrid works](docs/how-it-works.md)
 - [Easy fast setup](docs/fast_setup.md)
+- [Diagnostics schema](docs/diagnostics-schema.md)
 - [Sparse (SPLADE) embeddings](docs/sparse-embeddings.md)
 - [Multivector late interaction](docs/multivector-late-interaction.md)
 - [FIQA/OpenAI benchmark snapshot](docs/benchmarks/fiqa-openai.md)

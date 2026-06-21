@@ -9,6 +9,7 @@
 #include "catalog/pg_class.h"
 #include "fmgr.h"
 #include "pgturbohybrid.h"
+#include "pgturbohybrid_diagnostics.h"
 #include "lib/stringinfo.h"
 #include "pgturbohybrid_multivector.h"
 #include "pgturbohybrid_quant.h"
@@ -2228,11 +2229,11 @@ PgturbohybridEmitNestedScanStats(PgturbohybridJsonbState *state,
 	PgturbohybridJsonbAddBool(state, "branch_used", d->branchUsed);
 	PgturbohybridJsonbAddString(state, "storage_kind",
 								PgturbohybridGraphStorageKindName(d->storageKind));
-	PgturbohybridJsonbAddString(state, "score_mode",
+	PgturbohybridJsonbAddString(state, PGTURBOHYBRID_DIAG_KEY_SCORE_MODE,
 								PgturbohybridGraphTqScoreModeName(d->scoreMode));
 	PgturbohybridJsonbAddString(state, "simd_force",
 								PgturbohybridGraphTqSimdForceName(d->simdForce));
-	PgturbohybridJsonbAddString(state, "dense_scorer",
+	PgturbohybridJsonbAddString(state, PGTURBOHYBRID_DIAG_KEY_DENSE_SCORER,
 								k->u8SplitUsed ?
 								PgturbohybridGraphU8SplitKernelName() :
 								PgturbohybridDenseScorerUsedName(k->querySplitUsed,
@@ -2679,8 +2680,8 @@ PgturbohybridEmitNestedScanStats(PgturbohybridJsonbState *state,
 	PgturbohybridJsonbAddString(state, "index_shape",
 								s->query.indexShape[0] != '\0' ?
 								s->query.indexShape : "unknown");
-	PgturbohybridJsonbAddInt64(state, "dimensions", s->query.dimensions);
-	PgturbohybridJsonbAddInt64(state, "quantization_bits", s->query.quantizationBits);
+	PgturbohybridJsonbAddInt64(state, PGTURBOHYBRID_DIAG_KEY_DIMENSIONS, s->query.dimensions);
+	PgturbohybridJsonbAddInt64(state, PGTURBOHYBRID_DIAG_KEY_QUANTIZATION_BITS, s->query.quantizationBits);
 	if (s->query.exactStorageKnown)
 	{
 		PgturbohybridJsonbAddBool(state, "exact_storage", s->query.exactStorage);
@@ -2699,11 +2700,11 @@ PgturbohybridEmitNestedScanStats(PgturbohybridJsonbState *state,
 							   s->query.effectiveSearchEf);
 	PgturbohybridJsonbAddInt64(state, "dense_candidates_effective",
 							   s->query.denseCandidatesEffective);
-	PgturbohybridJsonbAddInt64(state, "dense_k_effective",
+	PgturbohybridJsonbAddInt64(state, PGTURBOHYBRID_DIAG_KEY_DENSE_K_EFFECTIVE,
 							   s->query.denseCandidatesEffective);
 	PgturbohybridJsonbAddBool(state, "dense_k_defaulted", s->query.denseKDefaulted);
 	PgturbohybridJsonbAddInt64(state, "final_k_requested", s->query.finalKRequested);
-	PgturbohybridJsonbAddInt64(state, "final_k_effective", s->query.finalKEffective);
+	PgturbohybridJsonbAddInt64(state, PGTURBOHYBRID_DIAG_KEY_FINAL_K_EFFECTIVE, s->query.finalKEffective);
 	PgturbohybridJsonbAddInt64(state, "detected_sql_limit", s->query.detectedSqlLimit);
 	PgturbohybridJsonbAddBool(state, "final_k_inferred", s->query.finalKInferred);
 	PgturbohybridJsonbAddString(state, "final_k_source",
@@ -2732,8 +2733,8 @@ pgturbohybrid_last_build_stats(PG_FUNCTION_ARGS)
 	PgturbohybridJsonbAddInt64(&state, "relid", (int64) s->relid);
 	PgturbohybridJsonbAddString(&state, "index_shape", s->indexShape);
 	PgturbohybridJsonbAddUint64(&state, "node_count", s->nodeCount);
-	PgturbohybridJsonbAddInt64(&state, "dimensions", s->dimensions);
-	PgturbohybridJsonbAddInt64(&state, "quantization_bits",
+	PgturbohybridJsonbAddInt64(&state, PGTURBOHYBRID_DIAG_KEY_DIMENSIONS, s->dimensions);
+	PgturbohybridJsonbAddInt64(&state, PGTURBOHYBRID_DIAG_KEY_QUANTIZATION_BITS,
 							   s->quantizationBits);
 	PgturbohybridJsonbAddInt64(&state, "m", s->m);
 	PgturbohybridJsonbAddInt64(&state, "ef_construction",
@@ -2974,7 +2975,7 @@ pgturbohybrid_graph_repair_dry_run(PG_FUNCTION_ARGS)
 	PgturbohybridJsonbAddBool(&state, "writes_index_pages", false);
 	PgturbohybridJsonbAddBool(&state, "requires_access_exclusive_lock", false);
 	PgturbohybridJsonbAddInt64(&state, "node_count", stats.nodeCount);
-	PgturbohybridJsonbAddInt64(&state, "dimensions", stats.dimensions);
+	PgturbohybridJsonbAddInt64(&state, PGTURBOHYBRID_DIAG_KEY_DIMENSIONS, stats.dimensions);
 	PgturbohybridJsonbAddInt64(&state, "sampled_nodes", stats.sampledNodes);
 	PgturbohybridJsonbAddFloat8(&state, "avg_overlap", stats.avgOverlap);
 	PgturbohybridJsonbAddInt64(&state, "weak_nodes", stats.weakNodes);
@@ -3275,7 +3276,7 @@ pgturbohybrid_multivector_proxy_diagnostics(PG_FUNCTION_ARGS)
 							   result.queryCountRequested);
 	PgturbohybridJsonbAddInt64(&state, "sample_docs", result.sampleDocs);
 	PgturbohybridJsonbAddInt64(&state, "query_count", result.queryCount);
-	PgturbohybridJsonbAddInt64(&state, "dimensions", result.dimensions);
+	PgturbohybridJsonbAddInt64(&state, PGTURBOHYBRID_DIAG_KEY_DIMENSIONS, result.dimensions);
 	PgturbohybridJsonbAddFloat8(&state, "avg_doc_tokens",
 								result.avgDocTokens);
 	PgturbohybridJsonbAddString(&state, "proxy_encoder",
@@ -3327,9 +3328,9 @@ pgturbohybrid_last_scan_stats(PG_FUNCTION_ARGS)
 	PgturbohybridJsonbAddString(&state, "profile",
 								PgturbohybridProfileName(pgturbohybrid_profile));
 	PgturbohybridJsonbAddBool(&state, "index_used", indexUsed);
-	PgturbohybridJsonbAddString(&state, "scan_orchestration",
+	PgturbohybridJsonbAddString(&state, PGTURBOHYBRID_DIAG_KEY_SCAN_ORCHESTRATION,
 								TqScanOrchestrationName());
-	PgturbohybridJsonbAddString(&state, "graph_storage_kind",
+	PgturbohybridJsonbAddString(&state, PGTURBOHYBRID_DIAG_KEY_GRAPH_STORAGE_KIND,
 								PgturbohybridGraphStorageKindName(pgturbohybrid_last_graph_storage_kind));
 	PgturbohybridJsonbAddString(&state, "index_shape",
 								scanStats.indexShape[0] != '\0' ?
@@ -3433,7 +3434,7 @@ pgturbohybrid_last_scan_stats(PG_FUNCTION_ARGS)
 	PgturbohybridJsonbAddInt64(&state, "sparse_delta_generation",
 							   scanStats.sparseDeltaGeneration);
 	PgturbohybridJsonbAddBranchPlan(&state, &scanStats.branchPlan);
-	PgturbohybridJsonbAddInt64(&state, "quantization_bits",
+	PgturbohybridJsonbAddInt64(&state, PGTURBOHYBRID_DIAG_KEY_QUANTIZATION_BITS,
 							   pgturbohybrid_last_graph_quantization_bits);
 	if (pgturbohybrid_last_graph_exact_storage_known)
 	{
@@ -3467,14 +3468,14 @@ pgturbohybrid_last_scan_stats(PG_FUNCTION_ARGS)
 	 * cost (dense_scoring_kernel + graph_batch_us) from page/tuple/heap
 	 * overhead (graph_*_pages_read + heap_tuples_returned + graph_heap_us).
 	 */
-	PgturbohybridJsonbAddInt64(&state, "dimensions",
+	PgturbohybridJsonbAddInt64(&state, PGTURBOHYBRID_DIAG_KEY_DIMENSIONS,
 							   pgturbohybrid_last_graph_dimensions);
 	PgturbohybridJsonbAddBool(&state, "query_split_enabled",
 							  pgturbohybrid_last_graph_query_split_active);
 	/* Exact approximate scorer actually used (scalar_lut / avx2_lut_gather /
 	 * signed_split_*); the authoritative answer to "did this scan use the LUT
 	 * gather or the integer query split?". */
-	PgturbohybridJsonbAddString(&state, "dense_scorer",
+	PgturbohybridJsonbAddString(&state, PGTURBOHYBRID_DIAG_KEY_DENSE_SCORER,
 								pgturbohybrid_last_graph_u8_split_used ?
 								PgturbohybridGraphU8SplitKernelName() :
 								PgturbohybridDenseScorerUsedName(
@@ -3541,9 +3542,9 @@ pgturbohybrid_last_scan_stats(PG_FUNCTION_ARGS)
 
 	PgturbohybridJsonbAddInt64(&state, "graph_candidate_count",
 							   pgturbohybrid_last_graph_candidate_count);
-	PgturbohybridJsonbAddInt64(&state, "graph_visited_nodes",
+	PgturbohybridJsonbAddInt64(&state, PGTURBOHYBRID_DIAG_KEY_GRAPH_VISITED_NODES,
 							   pgturbohybrid_last_graph_visited_nodes);
-	PgturbohybridJsonbAddInt64(&state, "graph_scored_codes",
+	PgturbohybridJsonbAddInt64(&state, PGTURBOHYBRID_DIAG_KEY_GRAPH_SCORED_CODES,
 							   pgturbohybrid_last_graph_scored_codes);
 	PgturbohybridJsonbAddInt64(&state, "graph_fill_candidate_band_calls",
 							   pgturbohybrid_last_graph_fill_candidate_band_calls);
@@ -3740,7 +3741,7 @@ pgturbohybrid_last_scan_stats(PG_FUNCTION_ARGS)
 	PgturbohybridJsonbAddInt64(&state, "max_frontier_size",
 							   pgturbohybrid_last_graph_base_max_frontier);
 	PgturbohybridJsonbCloseObject(&state);
-	PgturbohybridJsonbAddString(&state, "score_mode",
+	PgturbohybridJsonbAddString(&state, PGTURBOHYBRID_DIAG_KEY_SCORE_MODE,
 								PgturbohybridGraphTqScoreModeName(pgturbohybrid_last_graph_score_mode));
 	PgturbohybridJsonbAddString(&state, "dense_simd_force",
 								PgturbohybridGraphTqSimdForceName(pgturbohybrid_last_graph_simd_force));
@@ -3830,7 +3831,7 @@ pgturbohybrid_last_scan_stats(PG_FUNCTION_ARGS)
 							   pgturbohybrid_last_graph_effective_rescore_band);
 	PgturbohybridJsonbAddInt64(&state, "final_k_requested",
 							   pgturbohybrid_last_final_k_requested);
-	PgturbohybridJsonbAddInt64(&state, "final_k_effective",
+	PgturbohybridJsonbAddInt64(&state, PGTURBOHYBRID_DIAG_KEY_FINAL_K_EFFECTIVE,
 							   pgturbohybrid_last_final_k_effective);
 	PgturbohybridJsonbAddInt64(&state, "detected_sql_limit",
 							   pgturbohybrid_last_sql_limit);
@@ -4559,7 +4560,7 @@ pgturbohybrid_last_scan_stats(PG_FUNCTION_ARGS)
 								scanStats.finalDiversityUs);
 	PgturbohybridJsonbAddInt64(&state, "dense_candidates_effective",
 							   scanStats.denseCandidatesEffective);
-	PgturbohybridJsonbAddInt64(&state, "dense_k_effective",
+	PgturbohybridJsonbAddInt64(&state, PGTURBOHYBRID_DIAG_KEY_DENSE_K_EFFECTIVE,
 							   scanStats.denseCandidatesEffective);
 	PgturbohybridJsonbAddInt64(&state, "multivector_candidates_effective",
 							   scanStats.multivectorCandidatesEffective);

@@ -30,7 +30,7 @@ OBJS = \
 	src\pgturbohybrid_sparse_primary.obj \
 	src\pgturbohybrid_sparse_query.obj \
 	src\pgturbohybrid_sparse_score.obj \
-	src\pgturbohybrid_stats.obj \
+	src\pgturbohybrid_diagnostics.obj \
 	src\pgturbohybrid_vacuum.obj \
 	src\pgturbohybrid_vector_compat.obj
 
