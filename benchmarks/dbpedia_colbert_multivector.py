@@ -5623,6 +5623,7 @@ def run_sparse_retrieval_benchmark(
     args: argparse.Namespace,
     queries: list[QueryItem],
     qrels: dict[str, dict[str, int]],
+    methods: list[str] | None = None,
 ) -> dict[str, Any]:
     """Self-contained sparse retrieval phase (Prompt 15).
 
@@ -5631,7 +5632,9 @@ def run_sparse_retrieval_benchmark(
     stats.  Methods whose required columns are not populated are skipped (so a
     sparse-only corpus still produces the sparse_* results).
     """
-    raw_methods = getattr(args, "sparse_methods", None)
+    # Explicit method list (e.g. routed from --methods) wins; otherwise fall back
+    # to the --sparse-methods flag (default: all sparse methods).
+    raw_methods = methods if methods is not None else getattr(args, "sparse_methods", None)
     if isinstance(raw_methods, str):
         requested = [m.strip() for m in raw_methods.split(",") if m.strip()]
     elif raw_methods:
@@ -36830,7 +36833,8 @@ def validate_args(args: argparse.Namespace) -> argparse.Namespace:
         args.colbert_model_name,
     )
     methods = [method.strip() for method in args.methods.split(",") if method.strip()]
-    unknown = sorted(set(methods) - {QUERY_ONLY_METHOD, RRF_METHOD, EXACT_SCAN_METHOD})
+    known_methods = {QUERY_ONLY_METHOD, RRF_METHOD, EXACT_SCAN_METHOD} | set(SPARSE_METHODS)
+    unknown = sorted(set(methods) - known_methods)
     if unknown:
         raise SystemExit(f"unknown method(s): {', '.join(unknown)}")
     args.methods = methods
@@ -40324,8 +40328,13 @@ def main() -> None:
             index_phase = build_index(conn, args)
             set_retrieval_gucs(conn, args, "dbpedia_colbert_serial")
 
+            # Sparse methods run in a dedicated phase (they need their own
+            # per-quantization sparse / fused indexes, incompatible with the
+            # single ColBERT index this loop scans); the dense methods use the
+            # ColBERT index built above.
+            dense_loop_methods = [m for m in args.methods if m not in SPARSE_METHODS]
             result_methods = []
-            for method in args.methods:
+            for method in dense_loop_methods:
                 run, serial_latencies, serial_stats = run_serial_retrieval(conn, method, encoded_queries, args, args.final_k)
                 parallel = run_parallel_retrieval_report(
                     args,
@@ -40415,9 +40424,22 @@ def main() -> None:
                 else None
             )
             token_ablation = run_token_ablation(conn, args, encoded_queries, qrels)
+            # The sparse phase runs when --sparse-benchmark is set and/or any
+            # sparse method was requested via --methods.  Its method set is the
+            # union of the --sparse-methods list (when --sparse-benchmark) and any
+            # sparse names passed through --methods.
+            sparse_methods_from_methods = [m for m in args.methods if m in SPARSE_METHODS]
+            sparse_methods_to_run = list(sparse_methods_from_methods)
+            if args.sparse_benchmark:
+                for m in str(args.sparse_methods).split(","):
+                    m = m.strip()
+                    if m in SPARSE_METHODS and m not in sparse_methods_to_run:
+                        sparse_methods_to_run.append(m)
             sparse_benchmark = (
-                run_sparse_retrieval_benchmark(conn, args, encoded_queries, qrels)
-                if args.sparse_benchmark
+                run_sparse_retrieval_benchmark(
+                    conn, args, encoded_queries, qrels, methods=sparse_methods_to_run
+                )
+                if sparse_methods_to_run
                 else None
             )
 

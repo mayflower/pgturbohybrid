@@ -1675,6 +1675,13 @@ Each method records, in the open result schema:
   `sparse_postings_touched`, `sparse_candidates_scored`, `sparse_wand_pruned`,
   `sparse_exact_rerank_count` (from `turbohybrid_last_scan_stats()`).
 
+The six methods are also accepted directly in `--methods` (e.g.
+`--methods sparse_q8,dense_sparse_rrf`): sparse method names are routed to this
+phase automatically (they need their own per-quantization indexes, so they run
+here rather than in the single-ColBERT-index `--methods` loop), and their results
+appear under `sparse_benchmark`. `--sparse-benchmark` is shorthand for "run all
+six".
+
 Flags: `--sparse-methods a,b,c` selects a subset (default: all six);
 `--sparse-k N` sets the sparse candidate budget (`sparse_k`; `0` ⇒ `final_k`).
 

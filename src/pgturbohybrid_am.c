@@ -8083,6 +8083,7 @@ pgturbohybridambulkdelete(IndexVacuumInfo *info, IndexBulkDeleteResult *stats, I
 		if (stats == NULL)
 			stats = (IndexBulkDeleteResult *) palloc0(sizeof(IndexBulkDeleteResult));
 		PgturbohybridBm25InvalidateCache(info->index);
+		PgturbohybridSparseCacheInvalidate(RelationGetRelid(info->index));
 		return stats;
 	}
 
@@ -8090,6 +8091,7 @@ pgturbohybridambulkdelete(IndexVacuumInfo *info, IndexBulkDeleteResult *stats, I
 	{
 		result = tqgraphbulkdelete(info, stats, callback, callback_state);
 		PgturbohybridBm25InvalidateCache(info->index);
+		PgturbohybridSparseCacheInvalidate(RelationGetRelid(info->index));
 	}
 	else
 		result = pgturbohybrid_graph_bulkdelete(info, stats, callback, callback_state);
@@ -8110,6 +8112,7 @@ pgturbohybridamvacuumcleanup(IndexVacuumInfo *info, IndexBulkDeleteResult *stats
 			stats->num_pages = RelationGetNumberOfBlocks(info->index);
 		(void) PgturbohybridBm25MaybeCompact(info->index);
 		PgturbohybridBm25InvalidateCache(info->index);
+		PgturbohybridSparseCacheInvalidate(RelationGetRelid(info->index));
 		return stats;
 	}
 
@@ -8118,6 +8121,7 @@ pgturbohybridamvacuumcleanup(IndexVacuumInfo *info, IndexBulkDeleteResult *stats
 		result = tqgraphvacuumcleanup(info, stats);
 		(void) PgturbohybridBm25MaybeCompact(info->index);
 		PgturbohybridBm25InvalidateCache(info->index);
+		PgturbohybridSparseCacheInvalidate(RelationGetRelid(info->index));
 	}
 	else
 		result = pgturbohybrid_graph_vacuum_cleanup(info, stats);
