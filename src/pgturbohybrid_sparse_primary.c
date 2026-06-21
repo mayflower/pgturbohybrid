@@ -1,7 +1,7 @@
 /*
  * pgturbohybrid_sparse_primary.c
  *
- * Sparse-primary node space (prompt 12): own node_id<->heap-TID identity for
+ * Sparse-primary node space: own node_id<->heap-TID identity for
  * indexes with no dense/multivector graph (sparse-only, sparse+BM25).  Builds a
  * minimal native metapage plus a dedicated node-map chain (one heap TID per
  * node_id) over the heap, then runs the sparse (and BM25) collectors, which key

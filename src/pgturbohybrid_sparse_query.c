@@ -1,7 +1,7 @@
 /*
  * pgturbohybrid_sparse_query.c
  *
- * Scan path for the native sparse-vector inverted index (prompt 4).  Resolves
+ * Scan path for the native sparse-vector inverted index.  Resolves
  * the query's sparse_query terms against the lexicon, exact-OR-accumulates
  * score[node] += query_weight * doc_weight over the per-term postings, applies
  * MVCC node liveness, and returns the top-k candidates by descending score.
@@ -210,7 +210,7 @@ PgturbohybridSparseLoadLexicon(Relation index, BlockNumber start, uint32 termCou
 	return entries;
 }
 
-/* ---- Backend-local sparse cache (prompt 10) ---------------------------- */
+/* ---- Backend-local sparse cache ---------------------------- */
 
 #define PGTURBOHYBRID_SPARSE_HOT_BUCKETS 1024
 
@@ -690,7 +690,7 @@ PgturbohybridSparseAccumulateTerm(Relation index, BlockNumber blkno,
 	return touched;
 }
 
-/* ---- Block-max WAND (prompt 9) ----------------------------------------- */
+/* ---- Block-max WAND ----------------------------------------- */
 
 #define PGTURBOHYBRID_WAND_INF PG_UINT32_MAX
 
@@ -1376,7 +1376,7 @@ PgturbohybridSparseCollectCandidates(Relation index, PgturbohybridQueryHeader *q
 	}
 
 	/*
-	 * Block-max WAND path (prompt 9): exact top-k with safe pruning, when the
+	 * Block-max WAND path: exact top-k with safe pruning, when the
 	 * index has a block-max directory, WAND is enabled, and there are no pending
 	 * deltas (deltas are not in the block-max structure, so they force exact
 	 * accumulation).  Otherwise fall back to the exact OR-accumulation.
@@ -1432,7 +1432,7 @@ PgturbohybridSparseCollectCandidates(Relation index, PgturbohybridQueryHeader *q
 	}
 
 	/*
-	 * Merge delta postings (prompt 11): inserted/updated rows score exact f32
+	 * Merge delta postings: inserted/updated rows score exact f32
 	 * into the same accumulator; their node_ids are disjoint from the base
 	 * (updates create new nodes; the old node is filtered by liveness).
 	 */

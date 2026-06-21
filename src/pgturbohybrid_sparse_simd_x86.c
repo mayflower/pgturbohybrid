@@ -1,7 +1,7 @@
 /*
  * pgturbohybrid_sparse_simd_x86.c
  *
- * AVX2 SoA sparse postings scorers for q8/q16 (prompt 8).  Each block widens 8
+ * AVX2 SoA sparse postings scorers for q8/q16.  Each block widens 8
  * quantized weights to float, multiplies by the broadcast term multiplier, and
  * stores the contributions to a small stack array; a scalar loop then scatters
  * scores[base + offset] += contribution (AVX2 has no cheap general scatter).

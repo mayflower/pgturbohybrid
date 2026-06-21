@@ -491,7 +491,7 @@ pgturbohybridbeginscan(Relation index, int nkeys, int norderbys)
 	PgturbohybridGraphScanOpaque so;
 
 	/*
-	 * Sparse-primary (prompt 12): no dense graph, so allocate a minimal scan
+	 * Sparse-primary: no dense graph, so allocate a minimal scan
 	 * opaque (scan context + defaults) without the vector type info/support the
 	 * native and flat paths require.  The sparse scan runs through
 	 * PgturbohybridCollectScanResults' sole-sparse path, which only needs

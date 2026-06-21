@@ -1771,7 +1771,7 @@ PgturbohybridPathLexicalAttno(IndexPath *path)
 
 	/*
 	 * Discover the bm25 (tsvector) key position by type rather than assuming the
-	 * second column: with dense+sparse+bm25 indexes (enabled in prompt 4) the
+	 * second column: with dense+sparse+bm25 indexes the
 	 * bm25 key can be the third column, while the second is the sparse key.
 	 */
 	if (path == NULL || path->indexinfo == NULL)
@@ -1913,7 +1913,7 @@ PgturbohybridValidateIndex(Relation index, IndexInfo *indexInfo)
 	PgturbohybridBuildIndexKeyMap(index, indexInfo, &map);
 
 	/*
-	 * Sparse-primary (prompt 12): a sparse-vector key with no dense/multivector
+	 * Sparse-primary: a sparse-vector key with no dense/multivector
 	 * graph (sparse-only or sparse+BM25).  Node identity then comes from the
 	 * sparse-primary node-map chain instead of the dense graph, so there is no
 	 * graph key to require or position.  BM25-only (tsvector without a sparse or
@@ -5117,7 +5117,7 @@ PgturbohybridSparseEntryTermCompare(const void *a, const void *b)
 }
 
 /*
- * Exact f32 sparse rerank (prompt 7): for the top candidate band of a quantized
+ * Exact f32 sparse rerank: for the top candidate band of a quantized
  * sparse scan, fetch the heap sparse column (MVCC-safe), recompute the exact
  * float32 sparse inner product against the query, then re-sort the candidates.
  * A no-op for f32 indexes under "auto"; mirrors PgturbohybridBm25HeapTSVectorRerank.
@@ -5272,7 +5272,7 @@ PgturbohybridSparseRerankCandidates(IndexScanDesc scan,
 }
 
 /*
- * Sparse-as-sole-ORDER-BY scan (prompt 4): resolve the query's sparse_query
+ * Sparse-as-sole-ORDER-BY scan: resolve the query's sparse_query
  * against the native sparse inverted index, exact-OR-accumulate over live nodes,
  * and fill state->results sorted by descending inner product.  fusedScore is set
  * to the sparse score so amgettuple returns -score as the ORDER BY distance,
@@ -5306,7 +5306,7 @@ PgturbohybridCollectSparseOnlyResults(IndexScanDesc scan,
 											 pgturbohybrid_enable_sparse_wand, &cands,
 											 tmpCtx, &sstats);
 
-	/* Exact f32 rerank of the top band (prompt 7); no-op for f32 indexes. */
+	/* Exact f32 rerank of the top band; no-op for f32 indexes. */
 	PgturbohybridSparseRerankCandidates(scan, scanQuery, cands, n, autoBudgetLimit,
 										sstats.quantBits, &sstats);
 
@@ -5485,10 +5485,10 @@ PgturbohybridCollectScanResults(IndexScanDesc scan, PgturbohybridScanState *stat
 	useDocumentFusionKey = hasMultivectorQuery;
 
 	/*
-	 * Sparse-as-sole-ORDER-BY (prompt 4): the query targets only the sparse
+	 * Sparse-as-sole-ORDER-BY: the query targets only the sparse
 	 * column.  Resolve it against the native sparse inverted index and return
 	 * candidates ranked by exact inner product, bypassing the dense/bm25 fusion
-	 * machinery.  Fusing sparse with dense/bm25 is prompt 5.
+	 * machinery.  Fusing sparse with dense/bm25 is handled by the RRF path.
 	 */
 	if (PgturbohybridQueryHasSparse(scanQuery) &&
 		!hasVectorQuery && !hasMultivectorQuery && !hasTextQuery)
@@ -5504,7 +5504,7 @@ PgturbohybridCollectScanResults(IndexScanDesc scan, PgturbohybridScanState *stat
 	}
 
 	/*
-	 * Sparse-with-dense/bm25 fusion (prompt 5) only supports RRF; the
+	 * Sparse-with-dense/bm25 fusion only supports RRF; the
 	 * weighted/fast_weighted/calibrated/dbsf modes are dense+bm25/maxsim only.
 	 */
 	hasSparseQuery = PgturbohybridQueryHasSparse(scanQuery);
@@ -5682,7 +5682,7 @@ PgturbohybridCollectScanResults(IndexScanDesc scan, PgturbohybridScanState *stat
 			multivectorStats.learnedSparseBranchLatencyUs = lastStats.bm25ElapsedUs;
 	}
 
-	/* Sparse branch (prompt 5): exact f32 candidates fused via RRF below. */
+	/* Sparse branch: exact f32 candidates fused via RRF below. */
 	if (hasSparseQuery && scanQuery->sparseK > 0)
 	{
 		INSTR_TIME_SET_CURRENT(phaseStart);
@@ -6800,7 +6800,7 @@ pgturbohybridaminsert(Relation index, Datum *values, bool *isnull, ItemPointer h
 	PgturbohybridValidateIndex(index, indexInfo);
 
 	/*
-	 * Sparse-primary (prompt 12): no dense graph.  Allocate a node_id from the
+	 * Sparse-primary: no dense graph.  Allocate a node_id from the
 	 * node-map chain (the heap TID is recorded there) and append the sparse /
 	 * BM25 deltas keyed on it.  Liveness comes from heap MVCC visibility.
 	 */

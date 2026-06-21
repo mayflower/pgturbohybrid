@@ -4360,7 +4360,7 @@ turbohybrid_scorer_x4_batch_parity(PG_FUNCTION_ARGS)
  *   signed_split     : signed-codebook query-split SIMD (the fallback kernel)
  *   u8_single        : unsigned-codebook split, one code per kernel call
  *   u8_x4            : unsigned-codebook split, true 4-candidate batch (shared
- *                      query loads) -- the kernel Prompt 2 adds
+ *                      query loads) -- the kernel adds
  *
  * The current SIMD tier (AVX2 vs AVX-512 VNNI) follows the dense_graph_avx*
  * GUCs, so callers can compare tiers.  ns/code is content-independent for these

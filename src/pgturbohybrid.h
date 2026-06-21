@@ -1081,7 +1081,7 @@ typedef struct PgturbohybridGraphMetaPageData
 	 * no sparse branch).  Reuses the former buildReserved padding word, so the
 	 * metapage layout is unchanged. */
 	BlockNumber tqSparseMetaStartBlkno;
-	/* Sparse-primary node space (prompt 12): when valid, node_id<->TID + liveness
+	/* Sparse-primary node space: when valid, node_id<->TID + liveness
 	 * come from this dedicated node-map chain instead of dense code tuples.  Zero
 	 * for dense-present indexes (added at struct end; memset-zeroed on build). */
 	BlockNumber tqNodeMapStartBlkno;

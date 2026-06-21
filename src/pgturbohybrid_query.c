@@ -827,7 +827,7 @@ pgturbohybrid_sparse_vector_query_terms(PG_FUNCTION_ARGS)
 	PG_RETURN_TEXT_P(cstring_to_text(buf.data));
 }
 
-/* ---- Canonical sparse-vector builder + inspection helpers (Prompt 1) ---- */
+/* ---- Canonical sparse-vector builder + inspection helpers ---- */
 
 typedef enum PgturbohybridSparseDedup
 {

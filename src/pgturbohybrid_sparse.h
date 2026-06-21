@@ -14,7 +14,7 @@
  *   - postings: per-term chunks of {node_id, float4 weight}, sorted by
  *     (term_id, node_id), chained via nextBlkno/nextOffno.
  *
- * Exact f32 only here (prompt 4): no quantization, SIMD, WAND, or cache.
+ * Exact f32 only here: no quantization, SIMD, WAND, or cache.
  */
 #ifndef PGTURBOHYBRID_SPARSE_H
 #define PGTURBOHYBRID_SPARSE_H
@@ -33,9 +33,9 @@
 struct PgturbohybridGraphMetaPageData;
 
 /*
- * Format v2 (prompt 6): postings carry per-term linearly-quantized weights
+ * Format v2: postings carry per-term linearly-quantized weights
  * (q8/q16) or exact f32, in one of two physical encodings.  v1 was the
- * exact-f32 AoS layout from prompt 4; the on-disk format is unreleased, so the
+ * exact-f32 AoS layout; the on-disk format is unreleased, so the
  * build always writes v2 and the scan reads the bits/encoding from the meta
  * tuple and the per-term scale from the lexicon.
  */
@@ -49,7 +49,7 @@ struct PgturbohybridGraphMetaPageData;
 #define PGTURBOHYBRID_SPARSE_NODEMAP_TUPLE_TYPE 0x76
 
 /*
- * Sparse-primary node-map tuple (prompt 12): a run of heap TIDs, node_id =
+ * Sparse-primary node-map tuple: a run of heap TIDs, node_id =
  * firstNodeId + index, so a sparse-only/sparse+BM25 index owns node identity
  * without a dense graph.  Liveness is delegated to heap-tuple MVCC visibility
  * (the executor filters dead TIDs), so all mapped nodes are treated as live.
@@ -290,7 +290,7 @@ typedef struct PgturbohybridSparseLexiconEntry
 	uint32		blockCount;		/* # block-max entries (postings chunks) for this term */
 } PgturbohybridSparseLexiconEntry;
 
-/* One block-max directory entry per postings chunk (block-max WAND, prompt 9). */
+/* One block-max directory entry per postings chunk (block-max WAND). */
 typedef struct PgturbohybridSparseBlockMax
 {
 	uint32		firstNodeId;	/* first node_id in the chunk (= chunk baseNodeId) */
@@ -443,7 +443,7 @@ typedef struct PgturbohybridSparseScanStats
 #define PGTURBOHYBRID_SPARSE_SCORE_NEON 2
 
 /*
- * SoA postings scorer (prompt 8): scores[base + offsets[k]] += termMul *
+ * SoA postings scorer: scores[base + offsets[k]] += termMul *
  * dequant(weights[k]) over a chunk, where weights is uint8 (q8) / uint16 (q16)
  * / float4 (f32).  SIMD kernels widen+multiply a block then scatter-add with a
  * scalar loop; the scalar kernel is the correctness reference.
@@ -510,7 +510,7 @@ bool		PgturbohybridSparseIndexAvailable(Relation index);
 bool		PgturbohybridSparseReadMeta(Relation index, BlockNumber metaBlkno,
 										PgturbohybridSparseMetaTupleData *out);
 
-/* Per-backend memory estimate for the sparse branch (prompt 10). */
+/* Per-backend memory estimate for the sparse branch. */
 typedef struct PgturbohybridSparseMemoryEstimate
 {
 	bool		available;
@@ -533,7 +533,7 @@ bool		PgturbohybridSparseEstimateMemory(Relation index,
 void		PgturbohybridSparseCacheInvalidate(Oid relid);
 
 /*
- * Append an inserted row's sparse vector to the delta chain (prompt 11), keyed
+ * Append an inserted row's sparse vector to the delta chain, keyed
  * on its dense graph node_id.  No-op if the index has no sparse data or the
  * datum is NULL/empty.  Returns true if a delta tuple was written.
  */
@@ -547,7 +547,7 @@ bool		PgturbohybridSparseAppendDelta(Relation index, uint32 nodeId,
  */
 void		PgturbohybridSparseMaybeCompact(Relation index, bool force);
 
-/* ---- Sparse-primary node space (prompt 12) ---------------------------- */
+/* ---- Sparse-primary node space ---------------------------- */
 
 /* True iff the index's primary key is sparse/bm25 (no dense/multivector graph). */
 bool		PgturbohybridSparseIsPrimary(Relation index);

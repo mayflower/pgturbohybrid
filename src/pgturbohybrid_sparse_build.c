@@ -1,7 +1,7 @@
 /*
  * pgturbohybrid_sparse_build.c
  *
- * Build path for the native sparse-vector inverted index (prompt 4).  After the
+ * Build path for the native sparse-vector inverted index.  After the
  * dense graph build has assigned node_ids, scan the heap, collect (term_id,
  * node_id, weight) postings from the sparse index key, sort by (term_id,
  * node_id), and write the lexicon + postings + meta tuples (WAL'd via
@@ -760,8 +760,8 @@ PgturbohybridSparseBuildCollect(Relation heap, Relation index, IndexInfo *indexI
 	if (!map.hasSparse)
 		return;
 	/*
-	 * Node identity comes from the dense graph's code tuples (dense-present,
-	 * prompt 4) or from the sparse-primary node-map chain (prompt 12); both are
+	 * Node identity comes from the dense graph's code tuples (when a dense
+	 * graph is present) or from the sparse-primary node-map chain; both are
 	 * read by PgturbohybridReadNodeMap below.  Either owner is fine here.
 	 */
 

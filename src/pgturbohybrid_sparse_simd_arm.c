@@ -1,7 +1,7 @@
 /*
  * pgturbohybrid_sparse_simd_arm.c
  *
- * ARM NEON SoA sparse postings scorers for q8/q16 (prompt 8).  Mirrors the AVX2
+ * ARM NEON SoA sparse postings scorers for q8/q16.  Mirrors the AVX2
  * kernels: widen a block of 8 quantized weights to float, multiply by the
  * broadcast term multiplier, then scatter-add scores[base + offset] += contrib
  * with a scalar loop.  The scalar kernel in pgturbohybrid_sparse_score.c is the

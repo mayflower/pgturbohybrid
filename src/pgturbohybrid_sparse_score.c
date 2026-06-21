@@ -2,7 +2,7 @@
  * pgturbohybrid_sparse_score.c
  *
  * SoA sparse postings scorer: scalar reference + runtime dispatch to the AVX2
- * (x86) / NEON (ARM) block kernels (prompt 8).  The kernels widen a block of
+ * (x86) / NEON (ARM) block kernels.  The kernels widen a block of
  * quantized weights, multiply by a broadcast term multiplier, and scatter-add
  * into scores[] with a scalar loop (no cheap general SIMD scatter); the scalar
  * kernel here is the correctness reference the SIMD kernels must match.
