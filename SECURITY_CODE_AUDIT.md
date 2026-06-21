@@ -27,6 +27,7 @@ evidence.
 | BM25 large-tsquery bitmask handling needs a defined limit or dynamic bitmap | Medium priority | Fixed with 64-term cap |
 | Diagnostics JSON construction should move away from manual string assembly | Alpha accepted risk | Fixed |
 | On-disk metadata/page readers (graph metapage, sparse node-map, sparse postings) need defensive corruption guards and crash-resistance evidence | High priority | Fixed |
+| User-controlled varlena/array/query inputs (type text input, sparse/multivector constructors, query-vector payloads) need negative-test coverage proving clean errors and continued session usability | High priority | Fixed |
 
 ## Severity
 
@@ -64,6 +65,8 @@ This section is updated as fixes land.
 - `src/pgturbohybrid_bm25_build.c`
 - `src/pgturbohybrid_sparse_query.c`
 - `test/t/004_metadata_corruption.pl`
+- `test/sql/pgturbohybrid_fuzz.sql`
+- `test/expected/pgturbohybrid_fuzz.out`
 - `test/sql/pgturbohybrid_query.sql`
 - `test/expected/pgturbohybrid_query.out`
 - `test/sql/security.sql`
@@ -97,6 +100,15 @@ This section is updated as tests land.
   after every case, proving no backend crash/PANIC. It exercises both the
   deterministic metapage-version error path and the dispatch-returns-false path
   (clobbered magic), available when PostgreSQL TAP modules are present.
+- SQL fuzz/negative-input regression (`test/sql/pgturbohybrid_fuzz.sql`) feeds
+  malformed input to every user-reachable parser/constructor -- text input to
+  the opaque types (`turbohybrid_query`, `turbohybrid_sparse_vector`,
+  `turbohybrid_multivector`), length-mismatched and non-finite (NaN/Inf) sparse
+  arrays, bad jsonb build options, empty / non-divisible / zero / negative
+  multivector dimensions, out-of-range multivector context offsets, and
+  NaN/Inf/wrong-dimension query vectors driven through an index scan -- and
+  asserts each raises a clean PostgreSQL ERROR (no crash) and that the session
+  remains usable afterwards.
 - Manual/nightly `hardening` workflow covers strict math with SIMD disabled,
   gcc, and clang static analysis.
 
@@ -138,6 +150,12 @@ This section is updated as tests land.
   readers (graph metapage, BM25 metadata, sparse node-map and postings) that
   gate every scan. This branch also adds cache metadata caps and overflow checks
   on the release-facing BM25 cache/query paths.
+- User-input fuzzing now covers every SQL-reachable parser/constructor (see the
+  fuzz regression in Tests Added). Two input surfaces remain follow-ups: the
+  binary `RECEIVE` path of `turbohybrid_multivector` with adversarial `bytea`
+  (not directly constructible from plain SQL), and large-array stress at the
+  documented `multivector_max_*` / sparse caps under memory pressure. Both are
+  bounded by existing size validation; exhaustive fuzzing is scheduled.
 - Public diagnostics now use PostgreSQL JSONB builder APIs instead of
   hand-assembled JSON text. Developer-only diagnostics remain behind
   `PGTURBOHYBRID_DEV_DIAGNOSTICS`.
