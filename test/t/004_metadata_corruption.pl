@@ -100,9 +100,14 @@ sub assert_clean
 		ok(1, "$label: completed without crashing (rc=$rc)");
 		if ($rc != 0)
 		{
-			like($stderr,
-				qr/corrupt|invalid|unexpected|magic|version|REINDEX|not.*native|index/i,
-				"$label: any error is a clean PG error");
+			# "Clean" means a normal SQL-level ERROR from the backend.  The exact
+			# wording varies by which guard fires and by platform page layout
+			# (e.g. i386 alignment lands a byte-scribble on a different field, so
+			# a BM25 clobber may surface as "metadata tuple is missing" rather
+			# than "corrupt"), so match the PG error prefix rather than specific
+			# keywords.  A crash is already ruled out by the alive check above.
+			like($stderr, qr/ERROR:/,
+				"$label: any error is a clean PG error, not a crash");
 		}
 	}
 	return;
