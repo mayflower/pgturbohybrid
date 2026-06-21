@@ -21,6 +21,7 @@
 
 #include "postgres.h"
 
+#include "access/genam.h"		/* IndexBuildResult */
 #include "access/itup.h"
 #include "nodes/execnodes.h"
 #include "storage/block.h"
