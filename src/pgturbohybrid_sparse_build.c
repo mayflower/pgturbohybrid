@@ -77,9 +77,16 @@ PgturbohybridSparseResolveOptions(Relation index, int *bits, int *mode,
 		PGTURBOHYBRID_SPARSE_QUANT_PER_TERM_LINEAR;
 	*bits = optBits;
 
-	/* Reloption encoding: auto(0)->SoA, offset16_soa(1)->SoA, varint(2)->varint. */
-	*encoding = (optEnc == 2) ? PGTURBOHYBRID_SPARSE_ENCODING_VARINT :
-		PGTURBOHYBRID_SPARSE_ENCODING_SOA;
+	/*
+	 * Reloption encoding: auto(0)->SoA, offset16_soa(1)->SoA, varint(2)->varint,
+	 * bitpacked(3)->bitpacked.
+	 */
+	if (optEnc == 2)
+		*encoding = PGTURBOHYBRID_SPARSE_ENCODING_VARINT;
+	else if (optEnc == 3)
+		*encoding = PGTURBOHYBRID_SPARSE_ENCODING_BITPACKED;
+	else
+		*encoding = PGTURBOHYBRID_SPARSE_ENCODING_SOA;
 
 	if (optBlock < 1)
 		optBlock = PGTURBOHYBRID_SPARSE_DEFAULT_BLOCK_SIZE;
@@ -339,7 +346,8 @@ PgturbohybridSparsePerPostingBytes(int encoding, int bits)
 
 	if (encoding == PGTURBOHYBRID_SPARSE_ENCODING_VARINT)
 		return w + 5;			/* up to 5 varint bytes + weight */
-	return w + 2;				/* uint16 offset + weight (SoA) */
+	/* SoA: uint16 offset; BITPACKED: <=16-bit delta -> also <= 2 bytes/posting. */
+	return w + 2;
 }
 
 /* Max postings per chunk so the encoded tuple fits on a fresh page. */
@@ -415,6 +423,38 @@ PgturbohybridSparseEncodeChunk(PgturbohybridSparsePostingsTupleData *chunk,
 			memcpy(payload, &deltaBytes, sizeof(uint16));
 		}
 		weightsStart = PgturbohybridSparseAlignUp(sizeof(uint16) + (Size) pos, wwidth);
+		for (uint32 k = 0; k < n; k++)
+			PgturbohybridSparseWriteWeight(payload + weightsStart + (Size) k * wwidth,
+										   triples[start + k].weight, scale, bits);
+		payloadBytes = weightsStart + (Size) n * wwidth;
+	}
+	else if (encoding == PGTURBOHYBRID_SPARSE_ENCODING_BITPACKED)
+	{
+		/* payload = [uint8 numBits][packed node-delta bitstream][weights[n]]. */
+		uint32		deltas[PGTURBOHYBRID_SPARSE_MAX_BLOCK_SIZE];
+		uint32		maxDelta = 0;
+		uint32		prevOff = 0;
+		int			numBits;
+		Size		deltaBytes;
+		Size		weightsStart;
+
+		Assert(n <= PGTURBOHYBRID_SPARSE_MAX_BLOCK_SIZE);
+		for (uint32 k = 0; k < n; k++)
+		{
+			uint32		off = triples[start + k].nodeId - base;	/* strictly increasing */
+
+			deltas[k] = off - prevOff;
+			if (deltas[k] > maxDelta)
+				maxDelta = deltas[k];
+			prevOff = off;
+		}
+		numBits = PgturbohybridSparseBitWidth(maxDelta);	/* 0 when n == 1 */
+		deltaBytes = PgturbohybridSparseBitPackedBytes(n, numBits);
+		weightsStart = PgturbohybridSparseAlignUp(1 + deltaBytes, wwidth);
+		/* Zero the packed region (the RMW packer ORs into it) incl tail slack. */
+		memset(payload, 0, weightsStart + 4);
+		payload[0] = (uint8) numBits;
+		PgturbohybridSparseBitPack((uint8 *) payload + 1, deltas, n, numBits);
 		for (uint32 k = 0; k < n; k++)
 			PgturbohybridSparseWriteWeight(payload + weightsStart + (Size) k * wwidth,
 										   triples[start + k].weight, scale, bits);
@@ -525,7 +565,8 @@ PgturbohybridSparseWriteStorage(PgturbohybridSparseCollector *collector)
 
 			while (p + n < i && n < chunkCap)
 			{
-				if (encoding == PGTURBOHYBRID_SPARSE_ENCODING_SOA &&
+				/* SoA and BITPACKED both address node_ids with uint16 offsets. */
+				if (encoding != PGTURBOHYBRID_SPARSE_ENCODING_VARINT &&
 					collector->triples[p + n].nodeId - base >= PGTURBOHYBRID_SPARSE_SOA_RANGE)
 					break;
 				if (collector->triples[p + n].weight > chunkMax)

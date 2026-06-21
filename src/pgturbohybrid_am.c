@@ -675,10 +675,12 @@ static relopt_enum_elt_def pgturbohybrid_sparse_quant_mode_relopt_options[] = {
 #define PGTURBOHYBRID_SPARSE_ENCODING_OPT_AUTO 0
 #define PGTURBOHYBRID_SPARSE_ENCODING_OPT_OFFSET16_SOA 1
 #define PGTURBOHYBRID_SPARSE_ENCODING_OPT_VARINT 2
+#define PGTURBOHYBRID_SPARSE_ENCODING_OPT_BITPACKED 3
 static relopt_enum_elt_def pgturbohybrid_sparse_encoding_relopt_options[] = {
 	{"auto", PGTURBOHYBRID_SPARSE_ENCODING_OPT_AUTO},
 	{"offset16_soa", PGTURBOHYBRID_SPARSE_ENCODING_OPT_OFFSET16_SOA},
 	{"varint", PGTURBOHYBRID_SPARSE_ENCODING_OPT_VARINT},
+	{"bitpacked", PGTURBOHYBRID_SPARSE_ENCODING_OPT_BITPACKED},
 	{NULL, 0}
 };
 

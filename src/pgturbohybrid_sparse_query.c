@@ -600,6 +600,20 @@ PgturbohybridSparseScoreChunk(PgturbohybridSparsePostingsTuple ct, int bits,
 		}
 		*scalarTail += n;		/* varint node decode is inherently scalar */
 	}
+	else if (ct->encoding == PGTURBOHYBRID_SPARSE_ENCODING_BITPACKED)
+	{
+		/* Bit-unpack node-delta offsets, then reuse the SIMD scatter scorer. */
+		uint16		offsets[PGTURBOHYBRID_SPARSE_MAX_BLOCK_SIZE];
+		int			numBits = (int) (uint8) payload[0];
+		Size		deltaBytes = PgturbohybridSparseBitPackedBytes(n, numBits);
+		Size		weightsStart = PgturbohybridSparseAlignUp(1 + deltaBytes, wwidth);
+
+		Assert(n <= PGTURBOHYBRID_SPARSE_MAX_BLOCK_SIZE);
+		PgturbohybridSparseBitUnpack((const uint8 *) payload + 1, n, numBits, offsets);
+		PgturbohybridSparseScoreSoa(scoreKernel, payload + weightsStart, offsets, n,
+									base, bits, effMul, scores, nodeCount, simdBlocks,
+									scalarTail);
+	}
 	else						/* SoA */
 	{
 		Size		offsetsStart = PgturbohybridSparseAlignUp((Size) n * wwidth, 2);
@@ -750,6 +764,22 @@ PgturbohybridWandDecodeChunk(Relation index, BlockNumber blk, OffsetNumber off,
 			node += PgturbohybridSparseVarintDecode(deltas + pos, &consumed);
 			pos += consumed;
 			nodes[k] = node;
+			weights[k] = (float4)
+				PgturbohybridWandWeight(payload + weightsStart + (Size) k * wwidth, bits);
+		}
+	}
+	else if (ct->encoding == PGTURBOHYBRID_SPARSE_ENCODING_BITPACKED)
+	{
+		uint16		offsets[PGTURBOHYBRID_SPARSE_MAX_BLOCK_SIZE];
+		int			numBits = (int) (uint8) payload[0];
+		Size		deltaBytes = PgturbohybridSparseBitPackedBytes(n, numBits);
+		Size		weightsStart = PgturbohybridSparseAlignUp(1 + deltaBytes, wwidth);
+
+		Assert(n <= PGTURBOHYBRID_SPARSE_MAX_BLOCK_SIZE);
+		PgturbohybridSparseBitUnpack((const uint8 *) payload + 1, n, numBits, offsets);
+		for (uint32 k = 0; k < n; k++)
+		{
+			nodes[k] = base + offsets[k];
 			weights[k] = (float4)
 				PgturbohybridWandWeight(payload + weightsStart + (Size) k * wwidth, bits);
 		}

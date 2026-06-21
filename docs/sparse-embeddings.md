@@ -98,8 +98,26 @@ re-scores the top band from the heap to recover quality:
 | --- | --- | --- |
 | `sparse_quant_bits` | `0` (f32), `16`, `8` | postings quantization |
 | `sparse_quant_mode` | `per_term_linear` | per-term scalar quantization |
-| `sparse_postings_encoding` | SoA / varint variants | on-disk posting layout |
+| `sparse_postings_encoding` | `auto`, `offset16_soa`, `varint`, `bitpacked` | on-disk posting layout |
 | `sparse_block_size` | int | WAND block-max block size |
+
+### Postings encoding
+
+`sparse_postings_encoding` controls how node-ids are stored within a per-term
+chunk; it changes only the physical layout, never the scores (all encodings
+return bit-identical rankings and distances):
+
+- **`offset16_soa`** (default via `auto`) — fixed 16-bit offsets in a
+  structure-of-arrays layout; the weights array feeds the AVX2/NEON scatter
+  scorer directly.
+- **`varint`** — LEB128 node deltas; compact, but the node decode and scoring are
+  scalar.
+- **`bitpacked`** — fixed-width bit-packed node deltas (width = the chunk's
+  largest delta, ≤16 bits). The most compact layout, and it still feeds the SIMD
+  scatter scorer (the deltas unpack into 16-bit offsets first). On a real
+  SPLADE++ NFCorpus q8 index, `bitpacked` was ~21% smaller than `offset16_soa`
+  and slightly smaller than `varint`, while retaining SIMD scoring — a good
+  default for large, memory-bound indexes.
 
 ```sql
 CREATE INDEX ON docs USING turbohybrid (s sparse_ip_turbohybrid_ops)

@@ -3371,7 +3371,9 @@ pgturbohybrid_last_scan_stats(PG_FUNCTION_ARGS)
 								"per_term_linear" : "f32");
 	PgturbohybridJsonbAddString(&state, "sparse_postings_encoding",
 								scanStats.sparseEncoding == PGTURBOHYBRID_SPARSE_ENCODING_VARINT ?
-								"varint" : "offset16_soa");
+								"varint" :
+								scanStats.sparseEncoding == PGTURBOHYBRID_SPARSE_ENCODING_BITPACKED ?
+								"bitpacked" : "offset16_soa");
 	PgturbohybridJsonbAddString(&state, "sparse_decode_kernel", "scalar");
 	PgturbohybridJsonbAddString(&state, "sparse_score_kernel",
 								PgturbohybridSparseScoreKernelName(scanStats.sparseScoreKernel,

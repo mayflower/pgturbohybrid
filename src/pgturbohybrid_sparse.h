@@ -75,6 +75,7 @@ typedef PgturbohybridSparseNodeMapTupleData *PgturbohybridSparseNodeMapTuple;
 /* Physical postings encoding. */
 #define PGTURBOHYBRID_SPARSE_ENCODING_SOA 0		/* base + uint16 offsets, SoA */
 #define PGTURBOHYBRID_SPARSE_ENCODING_VARINT 1	/* LEB128 node deltas + weights */
+#define PGTURBOHYBRID_SPARSE_ENCODING_BITPACKED 2	/* fixed-width bit-packed node deltas + weights */
 
 #define PGTURBOHYBRID_SPARSE_DEFAULT_QUANT_BITS 8
 #define PGTURBOHYBRID_SPARSE_DEFAULT_BLOCK_SIZE 512
@@ -154,6 +155,96 @@ PgturbohybridSparseVarintDecode(const uint8 *buf, int *consumed)
 	} while ((b & 0x80) != 0 && shift < 35);
 	*consumed = n;
 	return value;
+}
+
+/*
+ * Fixed-width bit-packed node deltas (the BITPACKED postings encoding).  Within a
+ * chunk node_ids are strictly increasing, so we store per-posting deltas
+ * d[k] = off[k] - off[k-1] (d[0] = 0, off[] relative to baseNodeId) packed at a
+ * uniform numBits width chosen as the bit-width of the largest delta.  BITPACKED
+ * chunks share the SoA <2^16 span split, so offsets and the chunk's max delta fit
+ * in 16 bits and decode reuses the SIMD scatter scorer.  Little-endian bitstream
+ * (the codebase already assumes LE for the SoA uint16 offsets).
+ */
+static inline int
+PgturbohybridSparseBitWidth(uint32 v)
+{
+	int			b = 0;
+
+	while (v != 0)
+	{
+		b++;
+		v >>= 1;
+	}
+	return b;
+}
+
+/* Packed byte count for n fields of numBits each (numBits 0 -> 0 bytes). */
+static inline Size
+PgturbohybridSparseBitPackedBytes(uint32 n, int numBits)
+{
+	if (numBits <= 0)
+		return 0;
+	return (((Size) n * (uint32) numBits) + 7) >> 3;
+}
+
+/*
+ * Pack n deltas (each < 2^numBits, numBits in 0..16) into out as an LE bitstream.
+ * out must be pre-zeroed for at least PgturbohybridSparseBitPackedBytes(n,numBits)
+ * + 4 bytes (the read-modify-write of the last field can touch 3 trailing bytes).
+ */
+static inline void
+PgturbohybridSparseBitPack(uint8 *out, const uint32 *deltas, uint32 n, int numBits)
+{
+	uint32		mask;
+
+	if (numBits <= 0)
+		return;
+	mask = (numBits >= 32) ? 0xFFFFFFFFu : ((1u << numBits) - 1u);
+	for (uint32 k = 0; k < n; k++)
+	{
+		Size		bitpos = (Size) k * (uint32) numBits;
+		Size		bytepos = bitpos >> 3;
+		int			bitoff = (int) (bitpos & 7);
+		uint32		word;
+
+		memcpy(&word, out + bytepos, sizeof(uint32));
+		word |= (deltas[k] & mask) << bitoff;
+		memcpy(out + bytepos, &word, sizeof(uint32));
+	}
+}
+
+/*
+ * Unpack n numBits-wide fields from packed (LE), prefix-summing the deltas into
+ * offsets[] (relative to baseNodeId).  numBits is in 0..16, so any field spans at
+ * most 3 bytes; reading exactly 3 bytes per field keeps the decoder within the
+ * stored chunk payload (its weights region follows the packed deltas).
+ */
+static inline void
+PgturbohybridSparseBitUnpack(const uint8 *packed, uint32 n, int numBits,
+							 uint16 *offsets)
+{
+	uint32		acc = 0;
+	uint32		mask;
+
+	if (numBits <= 0)
+	{
+		for (uint32 k = 0; k < n; k++)
+			offsets[k] = 0;
+		return;
+	}
+	mask = (numBits >= 32) ? 0xFFFFFFFFu : ((1u << numBits) - 1u);
+	for (uint32 k = 0; k < n; k++)
+	{
+		Size		bitpos = (Size) k * (uint32) numBits;
+		Size		bytepos = bitpos >> 3;
+		int			bitoff = (int) (bitpos & 7);
+		uint32		word = 0;
+
+		memcpy(&word, packed + bytepos, 3);	/* 3 bytes cover bitoff(<=7) + numBits(<=16) */
+		acc += (word >> bitoff) & mask;
+		offsets[k] = (uint16) acc;
+	}
 }
 
 /* Meta tuple: written once per build, anchored by tqSparseMetaStartBlkno. */
