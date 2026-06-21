@@ -259,6 +259,30 @@ The standalone examples in
 show dense `llama_embed_vector()` output stored in pgvector and multivector
 `llama_embed_mv()` output stored in `pgturbohybrid`.
 
+## Native Sparse Retrieval (alpha)
+
+> **Alpha / experimental.** The on-disk sparse format and SQL surface may change;
+> version mismatches fail clearly and recommend `REINDEX`.
+
+`pgturbohybrid` stores and searches learned-sparse (SPLADE-style) vectors
+natively via the `turbohybrid_sparse_vector` type, the `<~*>` distance operator,
+and the `sparse_ip_turbohybrid_ops` opclass. Sparse keys work alongside a dense
+or multivector graph, or stand alone (sparse-only / sparse+BM25), and fuse with
+dense/BM25 via RRF. Postings can be exact (f32) or quantized (q16/q8) with an
+exact top-band rerank.
+
+```sql
+CREATE INDEX ON docs USING turbohybrid (s sparse_ip_turbohybrid_ops);
+SELECT id FROM docs
+ORDER BY s <~*> turbohybrid_query(sparse_query => q.s, final_k => 10)
+LIMIT 10;
+```
+
+See [docs/sparse-embeddings.md](docs/sparse-embeddings.md) for the full type,
+index shapes, quantization, fusion, GUCs, and stats, and
+[the `llama_embed` sparse API](docs/colbert-llama-extension.md#sparse-splade-output--alpha)
+for generating sparse vectors.
+
 ## When It Is Useful
 
 Try `pgturbohybrid` when you are evaluating:

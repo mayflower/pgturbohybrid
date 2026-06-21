@@ -99,13 +99,28 @@ PgturbohybridSparseReadMeta(Relation index, BlockNumber metaBlkno,
 	}
 	tuple = (PgturbohybridSparseMetaTuple)
 		PageGetItem(page, PageGetItemId(page, FirstOffsetNumber));
-	if (tuple->type != PGTURBOHYBRID_SPARSE_META_TUPLE_TYPE ||
-		tuple->sparseVersion != PGTURBOHYBRID_SPARSE_VERSION)
+	if (tuple->type != PGTURBOHYBRID_SPARSE_META_TUPLE_TYPE)
 	{
+		uint8		foundType = tuple->type;
+
 		UnlockReleaseBuffer(buf);
 		ereport(ERROR,
 				(errcode(ERRCODE_DATA_CORRUPTED),
-				 errmsg("pgturbohybrid sparse meta tuple is malformed or has an unsupported version")));
+				 errmsg("pgturbohybrid sparse meta tuple is malformed"),
+				 errdetail("Expected sparse meta tuple type 0x%02X but found 0x%02X.",
+						   PGTURBOHYBRID_SPARSE_META_TUPLE_TYPE, foundType),
+				 errhint("REINDEX the index to rebuild the sparse inverted index.")));
+	}
+	if (tuple->sparseVersion != PGTURBOHYBRID_SPARSE_VERSION)
+	{
+		uint32		foundVersion = tuple->sparseVersion;
+
+		UnlockReleaseBuffer(buf);
+		ereport(ERROR,
+				(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
+				 errmsg("pgturbohybrid sparse index uses unsupported on-disk format version %u (expected %u)",
+						foundVersion, PGTURBOHYBRID_SPARSE_VERSION),
+				 errhint("REINDEX the index to rebuild it in the current sparse format.")));
 	}
 	memcpy(out, tuple, sizeof(*out));
 	UnlockReleaseBuffer(buf);

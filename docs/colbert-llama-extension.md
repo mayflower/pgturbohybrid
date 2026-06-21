@@ -50,8 +50,42 @@ llama_embed_vector_batch(model text, inputs text[], options jsonb DEFAULT '{}') 
 llama_embed_tokens(model text, input text, options jsonb DEFAULT '{}')       RETURNS vector[]
 llama_embed_mv(model text, input text, options jsonb DEFAULT '{}')           RETURNS multivector
 llama_embed_mv_batch(model text, inputs text[], options jsonb DEFAULT '{}')  RETURNS multivector[]
+llama_embed_sparse(model text, input text, options jsonb DEFAULT '{}')       RETURNS turbohybrid_sparse_vector
+llama_embed_sparse_batch(model text, inputs text[], options jsonb DEFAULT '{}') RETURNS turbohybrid_sparse_vector[]
+llama_embed_sparse_model_info(model text, options jsonb DEFAULT '{}')        RETURNS jsonb
 llama_embed_model_info(model text)                                          RETURNS jsonb
 ```
+
+### Sparse (SPLADE) output — alpha
+
+> **Status: alpha / experimental.** The native sparse path is new and its
+> on-disk format and APIs may change. The default build ships only a
+> deterministic **stub** sparse engine (no trained model); see
+> [sparse-embeddings.md](sparse-embeddings.md).
+
+`llama_embed_sparse` / `llama_embed_sparse_batch` return a
+`turbohybrid_sparse_vector` (a term-id/weight bag). `llama_embed(..., '{"mode":
+"sparse"}')` returns the same post-processed terms as a JSON object for
+introspection. All three accept these options (the post-processing is delegated
+to `turbohybrid_sparse_vector_build`):
+
+| option | default | meaning |
+| --- | --- | --- |
+| `top_k` | (none) | keep only the `k` highest-weight terms |
+| `min_weight` | `0.0` | drop terms with weight below this |
+| `drop_non_positive` | `true` | drop terms with weight ≤ 0 |
+| `deduplicate` | `"sum"` | combine duplicate term ids (`sum`/`max`/`error`) |
+| `normalize` | `"none"` | sparse normalize mode (a **string**, not the dense boolean) |
+
+```sql
+SELECT llama_embed_sparse('stub', 'red apple', '{"top_k": 64, "min_weight": 0.1}');
+SELECT llama_embed_sparse_model_info('stub');
+-- {"engine":"stub","implemented":false,"supports_sparse":true,"vocab_size":30522,...}
+```
+
+The sparse model backend is selected at compile time via
+`PG_COLBERT_LLAMA_SPARSE_ENGINE` (default `stub`); `llama_embed_sparse_model_info`
+reports `implemented=false` and `backend="stub"` when no real model is compiled.
 
 The legacy `pg_colbert_llama` extension exposes compatibility functions:
 

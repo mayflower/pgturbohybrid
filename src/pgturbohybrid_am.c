@@ -8184,6 +8184,18 @@ pgturbohybridamrescan(IndexScanDesc scan, ScanKey keys, int nkeys, ScanKey order
 				(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
 				 errmsg("text_query requires a turbohybrid index with a tsvector key")));
 
+	if (hasSparseQuery)
+	{
+		PgturbohybridIndexKeyMap sparseKeyMap;
+
+		PgturbohybridBuildIndexKeyMap(scan->indexRelation, NULL, &sparseKeyMap);
+		if (!sparseKeyMap.hasSparse)
+			ereport(ERROR,
+					(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
+					 errmsg("sparse_query requires a turbohybrid index with a turbohybrid_sparse_vector key"),
+					 errhint("Add a turbohybrid_sparse_vector key to the index, or evaluate sparse_query with turbohybrid_query(...) for exact scoring without an index.")));
+	}
+
 	pgturbohybridrescan(scan, keys, nkeys,
 					 useScalarVectorOrderby ? denseOrderbys : NULL,
 					 useScalarVectorOrderby ? norderbys : 0);
