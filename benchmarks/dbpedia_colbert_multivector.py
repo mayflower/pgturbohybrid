@@ -110,6 +110,34 @@ DEFAULT_METHODS = "pgturbohybrid_colbert_multivector_query_only"
 QUERY_ONLY_METHOD = "pgturbohybrid_colbert_multivector_query_only"
 RRF_METHOD = "pgturbohybrid_colbert_multivector_rrf"
 EXACT_SCAN_METHOD = "pgturbohybrid_colbert_multivector_exact_scan"
+
+# Native sparse (SPLADE) retrieval methods (Prompt 15).  The four sparse_* methods
+# are sparse-only (a turbohybrid sparse-primary index over learned_sparse); the
+# two *_rrf methods fuse the ColBERT multivector branch with sparse (and BM25)
+# via reciprocal-rank fusion.  sparse_f32/q16/q8 differ by index quantization
+# bits; sparse_q8_rerank adds the exact f32 rerank on top of the q8 index.
+SPARSE_F32_METHOD = "sparse_f32"
+SPARSE_Q16_METHOD = "sparse_q16"
+SPARSE_Q8_METHOD = "sparse_q8"
+SPARSE_Q8_RERANK_METHOD = "sparse_q8_rerank"
+DENSE_SPARSE_RRF_METHOD = "dense_sparse_rrf"
+DENSE_SPARSE_BM25_RRF_METHOD = "dense_sparse_bm25_rrf"
+SPARSE_ONLY_METHODS = (
+    SPARSE_F32_METHOD,
+    SPARSE_Q16_METHOD,
+    SPARSE_Q8_METHOD,
+    SPARSE_Q8_RERANK_METHOD,
+)
+SPARSE_HYBRID_METHODS = (DENSE_SPARSE_RRF_METHOD, DENSE_SPARSE_BM25_RRF_METHOD)
+SPARSE_METHODS = SPARSE_ONLY_METHODS + SPARSE_HYBRID_METHODS
+# Index quantization bits for each sparse-only method (q8_rerank shares the q8
+# index and enables the exact rerank GUC at query time).
+SPARSE_METHOD_QUANT_BITS = {
+    SPARSE_F32_METHOD: 0,
+    SPARSE_Q16_METHOD: 16,
+    SPARSE_Q8_METHOD: 8,
+    SPARSE_Q8_RERANK_METHOD: 8,
+}
 DEFAULT_MODEL_PATH = ".nix-dev/models/colbert-15m/sauerkraut-modern.gguf"
 DEFAULT_COLBERT_MODEL_NAME = "VAGOsolutions/SauerkrautLM-Multi-ColBERT-15m"
 COLBERT_MODEL_DIMENSIONS = {
@@ -5361,9 +5389,328 @@ def run_retrieval_query(
             """,
             (dense_k or args.dense_k, args.bm25_k, args.rrf_k, final_k, query.query_id, final_k),
         )
+    elif method in SPARSE_ONLY_METHODS:
+        # Sparse-only retrieval over the learned_sparse column.  The four
+        # sparse_* methods share this SQL; they differ only by the index they run
+        # against (quantization bits) and, for q8_rerank, the sparse_rerank GUC
+        # set by the benchmark phase.
+        sparse_k = int(getattr(args, "sparse_k", 0) or 0) or final_k
+        rows = fetch_all(
+            conn,
+            """
+            SELECT d.doc_id
+            FROM dbpedia_colbert_docs d
+            WHERE d.learned_sparse IS NOT NULL
+            ORDER BY d.learned_sparse <~*> (
+              SELECT turbohybrid_query(
+                sparse_query => q.learned_sparse,
+                sparse_k => %s,
+                final_k => %s
+              )
+              FROM dbpedia_colbert_queries q
+              WHERE q.query_id = %s
+            )
+            LIMIT %s
+            """,
+            (sparse_k, final_k, query.query_id, final_k),
+        )
+    elif method == DENSE_SPARSE_RRF_METHOD:
+        sparse_k = int(getattr(args, "sparse_k", 0) or 0) or final_k
+        rows = fetch_all(
+            conn,
+            """
+            SELECT d.doc_id
+            FROM dbpedia_colbert_docs d
+            WHERE d.colbert IS NOT NULL
+            ORDER BY d.colbert <~> (
+              SELECT turbohybrid_query(
+                multivector_query => q.colbert,
+                sparse_query => q.learned_sparse,
+                fusion => 'rrf',
+                dense_k => %s,
+                sparse_k => %s,
+                rrf_k => %s,
+                final_k => %s
+              )
+              FROM dbpedia_colbert_queries q
+              WHERE q.query_id = %s
+            )
+            LIMIT %s
+            """,
+            (dense_k or args.dense_k, sparse_k, args.rrf_k, final_k, query.query_id, final_k),
+        )
+    elif method == DENSE_SPARSE_BM25_RRF_METHOD:
+        sparse_k = int(getattr(args, "sparse_k", 0) or 0) or final_k
+        rows = fetch_all(
+            conn,
+            """
+            SELECT d.doc_id
+            FROM dbpedia_colbert_docs d
+            WHERE d.colbert IS NOT NULL
+            ORDER BY d.colbert <~> (
+              SELECT turbohybrid_query(
+                multivector_query => q.colbert,
+                sparse_query => q.learned_sparse,
+                text_query => websearch_to_tsquery('simple', q.query_text),
+                fusion => 'rrf',
+                dense_k => %s,
+                sparse_k => %s,
+                bm25_k => %s,
+                rrf_k => %s,
+                final_k => %s
+              )
+              FROM dbpedia_colbert_queries q
+              WHERE q.query_id = %s
+            )
+            LIMIT %s
+            """,
+            (dense_k or args.dense_k, sparse_k, args.bm25_k, args.rrf_k, final_k, query.query_id, final_k),
+        )
     else:
         raise ValueError(f"unknown method: {method}")
     return [str(row[0]) for row in rows]
+
+
+def sparse_scan_stats_summary(scan_stats: list[dict[str, Any]]) -> dict[str, Any]:
+    """Pull the sparse-relevant fields out of collected turbohybrid_last_scan_stats."""
+    samples = [s for s in scan_stats if isinstance(s, dict) and s]
+    if not samples:
+        return {}
+    last = samples[-1]
+
+    def _ints(key: str) -> dict[str, float] | None:
+        vals = [
+            int(s[key])
+            for s in samples
+            if isinstance(s.get(key), (int, float)) and not isinstance(s.get(key), bool)
+        ]
+        return summarize_ints(vals) if vals else None
+
+    return {
+        "sparse_quant_bits": last.get("sparse_quant_bits"),
+        "sparse_quant_mode": last.get("sparse_quant_mode"),
+        "sparse_score_kernel": last.get("sparse_score_kernel"),
+        "sparse_used_wand": last.get("sparse_used_wand"),
+        "sparse_branch_used": last.get("sparse_branch_used"),
+        "sparse_postings_touched": _ints("sparse_postings_touched"),
+        "sparse_candidates_scored": _ints("sparse_candidates_scored"),
+        "sparse_wand_pruned": _ints("sparse_wand_pruned"),
+        "sparse_exact_rerank_count": _ints("sparse_exact_rerank_count"),
+        "sample": last,
+    }
+
+
+def _index_bytes(conn: psycopg.Connection[Any], index_name: str) -> int:
+    row = fetch_one(conn, f"SELECT pg_relation_size('{index_name}'::regclass)")
+    return int(row[0]) if row and row[0] is not None else 0
+
+
+def build_sparse_primary_index(
+    conn: psycopg.Connection[Any],
+    quant_bits: int,
+) -> dict[str, Any]:
+    """(Re)build a sparse-primary turbohybrid index over learned_sparse (Prompt 12)."""
+    index_name = "dbpedia_colbert_docs_sparse_idx"
+    exec_sql(conn, "DROP INDEX IF EXISTS dbpedia_colbert_docs_colbert_idx")
+    exec_sql(conn, f"DROP INDEX IF EXISTS {index_name}")
+    started = time.perf_counter()
+    exec_sql(
+        conn,
+        f"""
+        CREATE INDEX {index_name}
+        ON dbpedia_colbert_docs USING turbohybrid (
+          learned_sparse sparse_ip_turbohybrid_ops
+        )
+        WITH (sparse_quant_bits = {int(quant_bits)})
+        """,
+    )
+    elapsed_ms = (time.perf_counter() - started) * 1000.0
+    return {
+        "index_name": index_name,
+        "sparse_quant_bits": int(quant_bits),
+        "elapsed_ms": round(elapsed_ms, 3),
+        "index_bytes": _index_bytes(conn, index_name),
+    }
+
+
+def build_dense_sparse_index(
+    conn: psycopg.Connection[Any],
+    with_bm25: bool,
+) -> dict[str, Any]:
+    """(Re)build a ColBERT-multivector + sparse (+ BM25) fused index for RRF methods."""
+    index_name = "dbpedia_colbert_docs_colbert_idx"
+    exec_sql(conn, "DROP INDEX IF EXISTS dbpedia_colbert_docs_sparse_idx")
+    exec_sql(conn, f"DROP INDEX IF EXISTS {index_name}")
+    started = time.perf_counter()
+    if with_bm25:
+        exec_sql(
+            conn,
+            f"""
+            CREATE INDEX {index_name}
+            ON dbpedia_colbert_docs USING turbohybrid (
+              colbert multivector_maxsim_ip_turbohybrid_ops,
+              learned_sparse sparse_ip_turbohybrid_ops,
+              body_tsv bm25_tsvector_turbohybrid_ops
+            )
+            """,
+        )
+    else:
+        exec_sql(
+            conn,
+            f"""
+            CREATE INDEX {index_name}
+            ON dbpedia_colbert_docs USING turbohybrid (
+              colbert multivector_maxsim_ip_turbohybrid_ops,
+              learned_sparse sparse_ip_turbohybrid_ops
+            )
+            """,
+        )
+    elapsed_ms = (time.perf_counter() - started) * 1000.0
+    return {
+        "index_name": index_name,
+        "with_bm25": with_bm25,
+        "elapsed_ms": round(elapsed_ms, 3),
+        "index_bytes": _index_bytes(conn, index_name),
+    }
+
+
+def run_sparse_method(
+    conn: psycopg.Connection[Any],
+    method: str,
+    queries: list[QueryItem],
+    qrels: dict[str, dict[str, int]],
+    args: argparse.Namespace,
+    index_phase: dict[str, Any],
+) -> dict[str, Any]:
+    """Run one sparse retrieval method and assemble its open-schema result dict."""
+    rerank_method = method == SPARSE_Q8_RERANK_METHOD
+    exec_sql(conn, "SET enable_seqscan = off")
+    if rerank_method:
+        # sparse_rerank is an enum (off/topk/band/auto); "auto" enables the exact
+        # f32 rerank of the top band on top of the q8 index.
+        exec_sql(conn, "SET turbohybrid.sparse_rerank = auto")
+    try:
+        run, latencies, scan_stats = run_serial_retrieval(
+            conn, method, queries, args, int(args.final_k)
+        )
+    finally:
+        if rerank_method:
+            exec_sql(conn, "RESET turbohybrid.sparse_rerank")
+        exec_sql(conn, "RESET enable_seqscan")
+    return {
+        "method": method,
+        "retrieval_mode": (
+            "sparse_only" if method in SPARSE_ONLY_METHODS else "dense_sparse_rrf"
+        ),
+        "metrics": (
+            method_metrics(run, qrels, int(args.final_k), int(args.quality_k))
+            if qrels
+            else {}
+        ),
+        "latency": summarize_ms(latencies),
+        "queries_evaluated": len(queries),
+        "index_bytes": int(index_phase.get("index_bytes", 0)),
+        "index_name": index_phase.get("index_name"),
+        "sparse_quant_bits": index_phase.get("sparse_quant_bits"),
+        "scan_summary": scan_summary(scan_stats),
+        "sparse_stats": sparse_scan_stats_summary(scan_stats),
+        "top10_by_query": {qid: docs[:10] for qid, docs in run.items()},
+    }
+
+
+def run_sparse_retrieval_benchmark(
+    conn: psycopg.Connection[Any],
+    args: argparse.Namespace,
+    queries: list[QueryItem],
+    qrels: dict[str, dict[str, int]],
+) -> dict[str, Any]:
+    """Self-contained sparse retrieval phase (Prompt 15).
+
+    Builds the sparse-primary and fused indexes it needs and runs each requested
+    sparse method, recording IR quality, latency/QPS, index size, and sparse scan
+    stats.  Methods whose required columns are not populated are skipped (so a
+    sparse-only corpus still produces the sparse_* results).
+    """
+    raw_methods = getattr(args, "sparse_methods", None)
+    if isinstance(raw_methods, str):
+        requested = [m.strip() for m in raw_methods.split(",") if m.strip()]
+    elif raw_methods:
+        requested = list(raw_methods)
+    else:
+        requested = list(SPARSE_METHODS)
+    unknown = [m for m in requested if m not in SPARSE_METHODS]
+    if unknown:
+        raise SystemExit(f"unknown sparse method(s): {', '.join(unknown)}")
+    requested = [m for m in requested if m in SPARSE_METHODS]
+    if not requested:
+        requested = list(SPARSE_METHODS)
+
+    coverage = learned_sparse_coverage_summary(conn)
+    # Count learned_sparse independently of colbert so a sparse-only corpus
+    # (no multivector column populated) still runs the sparse_* methods.
+    sparse_doc_row = fetch_one(
+        conn, "SELECT count(*) FROM dbpedia_colbert_docs WHERE learned_sparse IS NOT NULL"
+    )
+    sparse_query_row = fetch_one(
+        conn, "SELECT count(*) FROM dbpedia_colbert_queries WHERE learned_sparse IS NOT NULL"
+    )
+    have_sparse = (
+        bool(sparse_doc_row[0] if sparse_doc_row else 0)
+        and bool(sparse_query_row[0] if sparse_query_row else 0)
+    )
+    colbert_row = fetch_one(
+        conn,
+        "SELECT count(*) FROM dbpedia_colbert_docs WHERE colbert IS NOT NULL",
+    )
+    have_colbert = bool(colbert_row[0]) if colbert_row else False
+    bm25_row = fetch_one(
+        conn,
+        "SELECT count(*) FROM dbpedia_colbert_docs WHERE body_tsv IS NOT NULL",
+    )
+    have_bm25 = bool(bm25_row[0]) if bm25_row else False
+
+    method_results: list[dict[str, Any]] = []
+    skipped: list[dict[str, str]] = []
+
+    # Sparse-only methods, grouped by quantization bits so we rebuild the
+    # sparse-primary index once per distinct quantization.
+    sparse_only_requested = [m for m in requested if m in SPARSE_ONLY_METHODS]
+    if sparse_only_requested and not have_sparse:
+        for method in sparse_only_requested:
+            skipped.append({"method": method, "reason": "no_learned_sparse_data"})
+    elif sparse_only_requested:
+        by_bits: dict[int, list[str]] = {}
+        for method in sparse_only_requested:
+            by_bits.setdefault(SPARSE_METHOD_QUANT_BITS[method], []).append(method)
+        for bits in sorted(by_bits):
+            index_phase = build_sparse_primary_index(conn, bits)
+            for method in by_bits[bits]:
+                method_results.append(
+                    run_sparse_method(conn, method, queries, qrels, args, index_phase)
+                )
+
+    # Hybrid (dense + sparse [+ BM25]) RRF methods.
+    for method in [m for m in requested if m in SPARSE_HYBRID_METHODS]:
+        if not have_sparse or not have_colbert:
+            skipped.append({"method": method, "reason": "requires_colbert_and_learned_sparse"})
+            continue
+        if method == DENSE_SPARSE_BM25_RRF_METHOD and not have_bm25:
+            skipped.append({"method": method, "reason": "no_body_tsv_for_bm25"})
+            continue
+        index_phase = build_dense_sparse_index(
+            conn, with_bm25=method == DENSE_SPARSE_BM25_RRF_METHOD
+        )
+        method_results.append(
+            run_sparse_method(conn, method, queries, qrels, args, index_phase)
+        )
+
+    return {
+        "enabled": True,
+        "learned_sparse_coverage": coverage,
+        "requested_methods": requested,
+        "methods": method_results,
+        "skipped": skipped,
+    }
 
 
 def build_colbert_hybrid_rerank_index(
@@ -5628,7 +5975,7 @@ def run_colbert_hybrid_rerank_benchmark(
 
 
 def uses_turbohybrid_index(method: str) -> bool:
-    return method in {QUERY_ONLY_METHOD, RRF_METHOD}
+    return method in {QUERY_ONLY_METHOD, RRF_METHOD} or method in SPARSE_METHODS
 
 
 def last_scan_stats(conn: psycopg.Connection[Any]) -> dict[str, Any]:
@@ -37317,6 +37664,30 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--bm25-k", type=int, default=100)
     parser.add_argument("--rrf-k", type=int, default=60)
     parser.add_argument(
+        "--sparse-benchmark",
+        action="store_true",
+        help=(
+            "Run the native sparse (SPLADE) retrieval phase: sparse_f32/q16/q8/"
+            "q8_rerank (sparse-only) and dense_sparse_rrf/dense_sparse_bm25_rrf "
+            "(fused), reporting IR quality, latency/QPS, index size, and sparse "
+            "scan stats over the learned_sparse column."
+        ),
+    )
+    parser.add_argument(
+        "--sparse-methods",
+        default=",".join(SPARSE_METHODS),
+        help=(
+            "Comma-separated sparse methods to run when --sparse-benchmark is set "
+            f"(default: all of {','.join(SPARSE_METHODS)})."
+        ),
+    )
+    parser.add_argument(
+        "--sparse-k",
+        type=int,
+        default=0,
+        help="Sparse candidate budget (sparse_k); 0 defaults to final_k.",
+    )
+    parser.add_argument(
         "--colbert-hybrid-rerank",
         action="store_true",
         help=(
@@ -39733,6 +40104,7 @@ def main() -> None:
             document_node_token_pooling_recommendation = None
             hybrid_evaluation = None
             token_ablation = None
+            sparse_benchmark = None
         elif args.document_node_colbert_1m_evaluate_only:
             document_node_serving_grid = run_document_node_colbert_1m_evaluate_only(
                 conn,
@@ -39748,6 +40120,7 @@ def main() -> None:
             document_node_token_pooling_recommendation = None
             hybrid_evaluation = None
             token_ablation = None
+            sparse_benchmark = None
         elif args.document_node_serving_build_only:
             document_node_serving_build_only = run_document_node_serving_build_only(
                 conn,
@@ -39762,6 +40135,7 @@ def main() -> None:
             document_node_token_pooling_recommendation = None
             hybrid_evaluation = None
             token_ablation = None
+            sparse_benchmark = None
         elif args.document_node_serving_latency_only:
             document_node_serving_latency_only = run_document_node_serving_latency_only(
                 conn,
@@ -39777,6 +40151,7 @@ def main() -> None:
             document_node_token_pooling_recommendation = None
             hybrid_evaluation = None
             token_ablation = None
+            sparse_benchmark = None
         elif args.document_node_colbert_1m_beir_quality_only:
             document_node_colbert_1m_beir_quality = (
                 run_document_node_colbert_1m_beir_quality_only(
@@ -39795,6 +40170,7 @@ def main() -> None:
             document_node_token_pooling_recommendation = None
             hybrid_evaluation = None
             token_ablation = None
+            sparse_benchmark = None
         elif args.next_plaid_beir_quality_only:
             next_plaid_beir_quality = run_next_plaid_beir_quality_only(conn, args)
             index_phase = {
@@ -39814,6 +40190,7 @@ def main() -> None:
             document_node_token_pooling_recommendation = None
             hybrid_evaluation = None
             token_ablation = None
+            sparse_benchmark = None
         elif args.colbert_hybrid_rerank:
             colbert_hybrid_rerank = run_colbert_hybrid_rerank_benchmark(
                 conn,
@@ -39830,6 +40207,7 @@ def main() -> None:
             document_node_token_pooling_recommendation = None
             hybrid_evaluation = None
             token_ablation = None
+            sparse_benchmark = None
         elif args.document_node_colbert_sampled_admission:
             document_node_colbert_sampled_admission = (
                 run_document_node_colbert_sampled_admission(
@@ -39848,6 +40226,7 @@ def main() -> None:
             document_node_token_pooling_recommendation = None
             hybrid_evaluation = None
             token_ablation = None
+            sparse_benchmark = None
         elif (
             args.document_node_colbert_candidate_source_focus
             or args.document_node_colbert_quantized_inverted_precompact_focus
@@ -39875,6 +40254,7 @@ def main() -> None:
             document_node_token_pooling_recommendation = None
             hybrid_evaluation = None
             token_ablation = None
+            sparse_benchmark = None
         elif args.document_node_serving_grid_oracle_quality_check:
             document_node_serving_grid_oracle_quality_check = (
                 run_document_node_serving_grid_oracle_quality_check(
@@ -39896,6 +40276,7 @@ def main() -> None:
             document_node_token_pooling_recommendation = None
             hybrid_evaluation = None
             token_ablation = None
+            sparse_benchmark = None
         elif (
             args.document_node_colbert_1m_grid
             and str(args.document_node_colbert_1m_profile or "").strip()
@@ -39938,6 +40319,7 @@ def main() -> None:
             document_node_token_pooling_recommendation = None
             hybrid_evaluation = None
             token_ablation = None
+            sparse_benchmark = None
         else:
             index_phase = build_index(conn, args)
             set_retrieval_gucs(conn, args, "dbpedia_colbert_serial")
@@ -40033,6 +40415,11 @@ def main() -> None:
                 else None
             )
             token_ablation = run_token_ablation(conn, args, encoded_queries, qrels)
+            sparse_benchmark = (
+                run_sparse_retrieval_benchmark(conn, args, encoded_queries, qrels)
+                if args.sparse_benchmark
+                else None
+            )
 
         output = {
             "suite": "dbpedia_colbert_multivector",
@@ -40415,6 +40802,8 @@ def main() -> None:
             output["hybrid_evaluation"] = hybrid_evaluation
         if token_ablation is not None:
             output["token_ablation"] = token_ablation
+        if sparse_benchmark is not None:
+            output["sparse_benchmark"] = sparse_benchmark
         output["markdown_summary"] = markdown_benchmark_summary(output)
         args.output.parent.mkdir(parents=True, exist_ok=True)
         args.output.write_text(json.dumps(output, indent=2, sort_keys=True) + "\n", encoding="utf-8")

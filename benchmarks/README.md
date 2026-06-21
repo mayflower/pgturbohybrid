@@ -1643,6 +1643,79 @@ and a dense-only default comparison between pgvector HNSW and TurboHybrid.
 Internal dense-only experiment decisions from the prompt-pack work live in
 [`docs/internal/dbpedia-dense-quality-decision.md`](../docs/internal/dbpedia-dense-quality-decision.md).
 
+## Native sparse (SPLADE) retrieval
+
+The DBpedia ColBERT harness (`dbpedia_colbert_multivector.py`) can benchmark the
+native sparse (SPLADE-style) retrieval path over the `learned_sparse`
+(`turbohybrid_sparse_vector`) column. Pass `--sparse-benchmark` to add a
+`sparse_benchmark` section to the JSON output with six methods:
+
+| method | index | description |
+| --- | --- | --- |
+| `sparse_f32` | sparse-primary, `sparse_quant_bits = 0` | exact f32 sparse inner product |
+| `sparse_q16` | sparse-primary, `sparse_quant_bits = 16` | q16 quantized postings |
+| `sparse_q8` | sparse-primary, `sparse_quant_bits = 8` | q8 quantized postings |
+| `sparse_q8_rerank` | sparse-primary, `sparse_quant_bits = 8` | q8 postings + exact f32 top-band rerank (`turbohybrid.sparse_rerank = auto`) |
+| `dense_sparse_rrf` | ColBERT multivector + sparse | RRF fusion of MaxSim + sparse |
+| `dense_sparse_bm25_rrf` | ColBERT multivector + sparse + BM25 | RRF fusion of MaxSim + sparse + BM25 |
+
+The `sparse_f32/q16/q8` methods are sparse-only and run against a turbohybrid
+**sparse-primary** index (no dense graph key); the `dense_sparse_*` methods fuse
+the ColBERT branch with sparse (and BM25) and require the `colbert` column.
+Methods whose required columns are unpopulated are reported under `skipped`, so a
+sparse-only corpus still produces the four `sparse_*` results.
+
+Each method records, in the open result schema:
+
+- IR quality: `recall@10`, `ndcg@10`, `mrr@10`, `map@10` (when qrels are present),
+- `latency`: `mean_ms`, `p50_ms`, `p95_ms`, `p99_ms`, `qps`,
+- `index_bytes`, `index_name`, `sparse_quant_bits`,
+- `sparse_stats`: `sparse_quant_bits`, `sparse_quant_mode`, `sparse_score_kernel`,
+  `sparse_used_wand`, `sparse_branch_used`, and summarized counters
+  `sparse_postings_touched`, `sparse_candidates_scored`, `sparse_wand_pruned`,
+  `sparse_exact_rerank_count` (from `turbohybrid_last_scan_stats()`).
+
+Flags: `--sparse-methods a,b,c` selects a subset (default: all six);
+`--sparse-k N` sets the sparse candidate budget (`sparse_k`; `0` ⇒ `final_k`).
+
+### q8 / q16 / f32 comparison
+
+Running all four sparse-only methods on one corpus compares the
+quality/latency/size trade-off of exact f32 postings vs q16/q8 quantization, and
+whether the q8 + exact-rerank method (`sparse_q8_rerank`) recovers the recall lost
+to q8 quantization. Compare `recall@10`/`ndcg@10` against the `index_bytes` and
+`latency.p95_ms` of each method; `sparse_q8_rerank`'s `sparse_stats.sparse_exact_rerank_count`
+shows how many candidates were re-scored exactly.
+
+### Importing external SPLADE vectors (no model downloads)
+
+`learned_sparse` data is model-agnostic: import any `(id, term_ids, weights)`
+JSONL produced by [`export_learned_sparse_jsonl.py`](export_learned_sparse_jsonl.py),
+which has two adapters and downloads no model:
+
+- `hash_plumbing` — deterministic stdlib-only toy features for pipeline tests
+  (marked `plumbing_only=true`; never serving evidence),
+- `external_command` — pipes `{"kind","id","text"}` rows to a user-supplied SPLADE
+  command that returns `{"id","term_ids","weights"}` rows.
+
+The JSONL is loaded into `dbpedia_colbert_docs.learned_sparse` /
+`dbpedia_colbert_queries.learned_sparse` via
+`turbohybrid_sparse_vector_from_arrays(term_ids, weights)`.
+
+### Reproducing a small local sparse benchmark
+
+You do not need the full DBpedia corpus to exercise the sparse methods. Populate
+`dbpedia_colbert_docs`/`dbpedia_colbert_queries` with a handful of rows whose
+`learned_sparse` column is built with `turbohybrid_sparse_vector_build(term_ids,
+weights)` (and, for the `dense_sparse_*` methods, a small `colbert` multivector
+via `turbohybrid_multivector_from_float4(values, dim)` plus a `body_tsv`), then
+call `run_sparse_retrieval_benchmark(conn, args, queries, qrels)` directly. With
+`learned_sparse` present on a few docs and queries, the four `sparse_*` methods
+build their sparse-primary indexes and return non-empty `sparse_stats`; with
+`colbert` present too, the two `dense_sparse_*` fused methods also run. This path
+runs against the stub `llama_embed_sparse` output or any imported JSONL, so it
+needs no model download.
+
 ## Baselines
 
 Every publishable run should include at least:
