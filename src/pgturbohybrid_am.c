@@ -28,6 +28,7 @@
 #include "optimizer/cost.h"
 #include "optimizer/optimizer.h"
 #include "portability/instr_time.h"
+#include "storage/bufmgr.h"
 #include "storage/lmgr.h"
 #include "utils/builtins.h"
 #include "utils/float.h"
