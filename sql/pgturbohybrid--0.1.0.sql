@@ -333,6 +333,59 @@ CREATE FUNCTION turbohybrid_query(
 	AS 'MODULE_PATHNAME', 'pgturbohybrid_query_constructor'
 	LANGUAGE C STABLE PARALLEL SAFE;
 
+-- Convenience wrappers over the full turbohybrid_query(...) constructor for the
+-- common single-modality and dense+text shapes.  They forward to
+-- turbohybrid_query and therefore inherit identical semantics and defaults
+-- (RRF fusion, profile-driven candidate budgets); the full constructor remains
+-- the expert entry point for weighting, alpha, and cross-modal fusion.
+CREATE FUNCTION turbohybrid_dense_query(
+	vector_query vector,
+	final_k pg_catalog.int4 DEFAULT NULL,
+	dense_k pg_catalog.int4 DEFAULT NULL
+) RETURNS turbohybrid_query
+	LANGUAGE SQL STABLE PARALLEL SAFE
+	RETURN turbohybrid_query(
+		vector_query => vector_query,
+		final_k => final_k,
+		dense_k => dense_k);
+
+CREATE FUNCTION turbohybrid_hybrid_query(
+	vector_query vector,
+	text_query pg_catalog.tsquery,
+	final_k pg_catalog.int4 DEFAULT NULL,
+	dense_k pg_catalog.int4 DEFAULT NULL,
+	bm25_k pg_catalog.int4 DEFAULT NULL
+) RETURNS turbohybrid_query
+	LANGUAGE SQL STABLE PARALLEL SAFE
+	RETURN turbohybrid_query(
+		vector_query => vector_query,
+		text_query => text_query,
+		final_k => final_k,
+		dense_k => dense_k,
+		bm25_k => bm25_k);
+
+CREATE FUNCTION turbohybrid_sparse_query(
+	sparse_query turbohybrid_sparse_vector,
+	final_k pg_catalog.int4 DEFAULT NULL,
+	sparse_k pg_catalog.int4 DEFAULT NULL
+) RETURNS turbohybrid_query
+	LANGUAGE SQL STABLE PARALLEL SAFE
+	RETURN turbohybrid_query(
+		sparse_query => sparse_query,
+		final_k => final_k,
+		sparse_k => sparse_k);
+
+CREATE FUNCTION turbohybrid_multivector_query(
+	multivector_query turbohybrid_multivector,
+	final_k pg_catalog.int4 DEFAULT NULL,
+	multivector_k pg_catalog.int4 DEFAULT NULL
+) RETURNS turbohybrid_query
+	LANGUAGE SQL STABLE PARALLEL SAFE
+	RETURN turbohybrid_query(
+		multivector_query => multivector_query,
+		final_k => final_k,
+		multivector_k => multivector_k);
+
 CREATE FUNCTION turbohybrid_sparse_inner_product_distance(
 	turbohybrid_sparse_vector, turbohybrid_query
 ) RETURNS pg_catalog.float8
@@ -443,10 +496,13 @@ CREATE OPERATOR CLASS bm25_tsvector_turbohybrid_ops
 	FOR TYPE pg_catalog.tsvector USING turbohybrid AS
 	STORAGE pg_catalog.tsvector;
 
--- Sparse opclass skeleton: registers the <~*> ORDER BY operator so a future
--- native sparse retrieval branch can use it.  Native sparse index scan is not
--- implemented yet; CREATE INDEX with this opclass is rejected by the AM with a
--- clear message (see PgturbohybridValidateIndex).
+-- Sparse opclass: registers the <~*> ORDER BY operator and stores
+-- turbohybrid_sparse_vector.  Native sparse index scan is implemented (see
+-- src/pgturbohybrid_sparse_*.c): a turbohybrid index keyed on this opclass
+-- builds a native sparse postings store and serves ORDER BY ... <~*> scans,
+-- standalone (sparse-only / sparse+BM25) or alongside a dense/multivector graph.
+-- Maturity: experimental public (see docs/feature-matrix.md and
+-- docs/sparse-embeddings.md).
 CREATE OPERATOR CLASS sparse_ip_turbohybrid_ops
 	FOR TYPE turbohybrid_sparse_vector USING turbohybrid AS
 	OPERATOR 1 <~*> (turbohybrid_sparse_vector, turbohybrid_query) FOR ORDER BY pg_catalog.float_ops,
@@ -652,59 +708,118 @@ CREATE FUNCTION turbohybrid_scorer_bench(vector, vector, integer, integer, integ
 	AS 'MODULE_PATHNAME', 'turbohybrid_scorer_bench'
 	LANGUAGE C VOLATILE CALLED ON NULL INPUT PARALLEL SAFE;
 
-COMMENT ON EXTENSION pgturbohybrid IS 'TurboHybrid dense vector and BM25 search extension for pgvector';
-COMMENT ON ACCESS METHOD turbohybrid IS 'TurboHybrid dense vector and BM25 hybrid index access method';
-COMMENT ON TYPE turbohybrid_query IS 'TurboHybrid query payload for dense vector and BM25 hybrid search';
+-- Object comments double as the in-database maturity labels.  Each public
+-- object carries one of: [stable public], [experimental public], [research-only],
+-- [diagnostic], or [internal helper].  These labels mirror docs/feature-matrix.md;
+-- the pgturbohybrid_comments regression test asserts the key objects are labelled.
 
-COMMENT ON FUNCTION turbohybrid_query_in(pg_catalog.cstring) IS 'Input function for turbohybrid_query';
-COMMENT ON FUNCTION turbohybrid_query_out(turbohybrid_query) IS 'Output function for turbohybrid_query';
-COMMENT ON FUNCTION turbohybrid_query(vector, pg_catalog.tsquery, pg_catalog.text, pg_catalog.float8, pg_catalog.float8, pg_catalog.float8, pg_catalog.int4, pg_catalog.int4, pg_catalog.int4, pg_catalog.int4, pg_catalog.bool, turbohybrid_multivector, pg_catalog.float4[], pg_catalog.bool[], pg_catalog.float8, pg_catalog.int4, turbohybrid_sparse_vector, pg_catalog.float8, pg_catalog.int4, pg_catalog.bool) IS 'Constructs a TurboHybrid query payload';
-COMMENT ON DOMAIN multivector IS 'Public SQL column type for late-interaction multivector embeddings. It is binary-compatible with turbohybrid_multivector.';
-COMMENT ON FUNCTION turbohybrid_distance(vector, turbohybrid_query) IS 'Default TurboHybrid distance between a vector and a query';
-COMMENT ON FUNCTION turbohybrid_l2_distance(vector, turbohybrid_query) IS 'L2 TurboHybrid distance between a vector and a query';
-COMMENT ON FUNCTION turbohybrid_negative_inner_product(vector, turbohybrid_query) IS 'Negative inner product TurboHybrid distance between a vector and a query';
-COMMENT ON FUNCTION turbohybrid_cosine_distance(vector, turbohybrid_query) IS 'Cosine TurboHybrid distance between a vector and a query';
-COMMENT ON FUNCTION turbohybrid_multivector_distance(turbohybrid_multivector, turbohybrid_query) IS 'Exact MaxSim distance between a multivector and a TurboHybrid query';
-COMMENT ON FUNCTION turbohybrid_multivector_from_contexts(pg_catalog.float4[], pg_catalog.int4, pg_catalog.int4[]) IS 'Construct a context-aware turbohybrid_multivector from flat float values and zero-based context start token offsets';
-COMMENT ON FUNCTION turbohybrid_multivector_from_contexts_and_fields(pg_catalog.float4[], pg_catalog.int4, pg_catalog.int4[], pg_catalog.int4[]) IS 'Construct a context-aware turbohybrid_multivector with one non-negative field id per context';
-COMMENT ON FUNCTION turbohybrid_multivector_model_info(pg_catalog.text) IS 'Return registered late-interaction model metadata for multivector validation and benchmark provenance';
-COMMENT ON FUNCTION turbohybrid_multivector_context_count(turbohybrid_multivector) IS 'Return the number of context windows stored in a turbohybrid_multivector';
-COMMENT ON FUNCTION turbohybrid_multivector_context_offsets(turbohybrid_multivector) IS 'Return zero-based context start token offsets from a turbohybrid_multivector';
-COMMENT ON FUNCTION turbohybrid_multivector_field_ids(turbohybrid_multivector) IS 'Return one field id per context window from a turbohybrid_multivector, defaulting to 0 for flat values';
-COMMENT ON FUNCTION turbohybrid_multivector_context_maxsim(turbohybrid_multivector, turbohybrid_multivector) IS 'Exact context-level MaxSim: score each document context independently and return the best context score';
-COMMENT ON FUNCTION turbohybrid_multivector_field_weighted_maxsim(turbohybrid_multivector, turbohybrid_multivector, pg_catalog.int4[], pg_catalog.float4[]) IS 'Exact field-weighted MaxSim over context field ids, using one weight per requested field';
-COMMENT ON FUNCTION turbohybrid_multivector_subvector(turbohybrid_multivector, pg_catalog.int4) IS 'Return one 1-based subvector from a turbohybrid_multivector as vector';
-COMMENT ON FUNCTION turbohybrid_multivector_to_vector_array(turbohybrid_multivector) IS 'Return all subvectors from a turbohybrid_multivector as vector[]';
-COMMENT ON FUNCTION turbohybrid_vector_l2_squared_distance(vector, vector) IS 'Squared L2 support function used by TurboHybrid vector opclasses';
-COMMENT ON FUNCTION turbohybrid_vector_l2_distance(vector, vector) IS 'L2 support function used by TurboHybrid vector opclasses';
-COMMENT ON FUNCTION turbohybrid_vector_negative_inner_product(vector, vector) IS 'Negative inner product support function used by TurboHybrid vector opclasses';
-COMMENT ON FUNCTION turbohybrid_vector_cosine_distance(vector, vector) IS 'Cosine support function used by TurboHybrid vector opclasses';
-COMMENT ON FUNCTION turbohybrid_vector_norm(vector) IS 'Vector norm support function used by TurboHybrid vector opclasses';
-COMMENT ON FUNCTION turbohybrid_handler(pg_catalog.internal) IS 'Index access method handler for TurboHybrid';
-COMMENT ON FUNCTION turbohybrid_index_stats(pg_catalog.regclass) IS 'Return stable TurboHybrid index metadata as jsonb';
-COMMENT ON FUNCTION turbohybrid_estimate_memory(pg_catalog.regclass) IS 'Estimate native graph cache and BM25 reader-cache memory for a TurboHybrid index without building or loading those caches';
-COMMENT ON FUNCTION turbohybrid_prewarm(pg_catalog.regclass) IS 'Build or attach the shared native graph cache for a TurboHybrid native graph index and return cache diagnostics as jsonb';
-COMMENT ON FUNCTION turbohybrid_multivector_proxy_diagnostics(pg_catalog.regclass, pg_catalog.int4, pg_catalog.int4) IS 'Read-only bounded diagnostic comparing document proxy nearest-neighbor order with exact multivector MaxSim order for sampled document-node multivector indexes';
-COMMENT ON FUNCTION turbohybrid_last_scan_stats() IS 'Return backend-local summary information for the last TurboHybrid scan as jsonb; parallel restricted because it reads mutable scan state';
-COMMENT ON FUNCTION turbohybrid_last_build_stats() IS 'Return backend-local summary information for the last native TurboHybrid graph build as jsonb; parallel restricted because it reads mutable build state';
-COMMENT ON FUNCTION turbohybrid_graph_repair_dry_run(pg_catalog.regclass, pg_catalog.int4, pg_catalog.int4, pg_catalog.int4) IS 'Read-only native graph repair diagnostic; samples graph neighborhoods and reports weak-neighborhood and suggested-edge counts without modifying the index';
-COMMENT ON FUNCTION turbohybrid_last_scan_diagnosis() IS 'Return a compact bottleneck diagnosis of the last TurboHybrid scan as jsonb: key dense hot-path fields, derived ratios, and a single diagnosis label; read-only over turbohybrid_last_scan_stats()';
-COMMENT ON FUNCTION turbohybrid_simd_capabilities() IS 'Return pgturbohybrid build and architecture SIMD capability information as jsonb';
+COMMENT ON EXTENSION pgturbohybrid IS 'TurboHybrid hybrid retrieval index access method for pgvector: dense vector, BM25, learned-sparse (SPLADE), and multivector (ColBERT-style) search. Alpha software; per-feature maturity in docs/feature-matrix.md. [experimental public]';
+COMMENT ON ACCESS METHOD turbohybrid IS 'TurboHybrid hybrid index access method (dense vector + BM25 + sparse + multivector). [stable public]';
 
-COMMENT ON OPERATOR <~-> (vector, turbohybrid_query) IS 'L2 distance operator for TurboHybrid vector queries';
-COMMENT ON OPERATOR <~#> (vector, turbohybrid_query) IS 'Negative inner product distance operator for TurboHybrid vector queries';
-COMMENT ON OPERATOR <~> (vector, turbohybrid_query) IS 'Cosine distance operator for TurboHybrid vector queries';
+COMMENT ON TYPE turbohybrid_query IS 'TurboHybrid query payload built by turbohybrid_query(...) and consumed by the ORDER BY distance operators. [stable public]';
+COMMENT ON TYPE turbohybrid_sparse_vector IS 'Learned-sparse (SPLADE-style) vector value: sorted (term_id, weight) pairs. [experimental public]';
+COMMENT ON TYPE turbohybrid_multivector IS 'Late-interaction multivector: several same-dimensional token vectors for one row (ColBERT-style MaxSim). [experimental public]';
+COMMENT ON DOMAIN multivector IS 'Public SQL column type for late-interaction multivector embeddings; binary-compatible with turbohybrid_multivector. [experimental public]';
 
-COMMENT ON OPERATOR CLASS vector_l2_turbohybrid_ops USING turbohybrid IS 'TurboHybrid L2 vector operator class';
-COMMENT ON OPERATOR CLASS vector_ip_turbohybrid_ops USING turbohybrid IS 'TurboHybrid inner product vector operator class';
-COMMENT ON OPERATOR CLASS vector_cosine_turbohybrid_ops USING turbohybrid IS 'TurboHybrid cosine vector operator class';
-COMMENT ON OPERATOR CLASS multivector_cosine_turbohybrid_ops USING turbohybrid IS 'Compatibility multivector operator class for normalized token vectors; uses dot-product MaxSim internally';
-COMMENT ON OPERATOR CLASS multivector_maxsim_ip_turbohybrid_ops USING turbohybrid IS 'TurboHybrid multivector operator class exposing raw dot-product MaxSim semantics';
-COMMENT ON OPERATOR CLASS bm25_tsvector_turbohybrid_ops USING turbohybrid IS 'TurboHybrid BM25 tsvector operator class';
+COMMENT ON FUNCTION turbohybrid_query_in(pg_catalog.cstring) IS 'Input function for turbohybrid_query. [internal helper]';
+COMMENT ON FUNCTION turbohybrid_query_out(turbohybrid_query) IS 'Output function for turbohybrid_query. [internal helper]';
+COMMENT ON FUNCTION turbohybrid_sparse_vector_in(pg_catalog.cstring) IS 'Input function for turbohybrid_sparse_vector. [internal helper]';
+COMMENT ON FUNCTION turbohybrid_sparse_vector_out(turbohybrid_sparse_vector) IS 'Output function for turbohybrid_sparse_vector. [internal helper]';
+COMMENT ON FUNCTION turbohybrid_multivector_in(pg_catalog.cstring) IS 'Input function for turbohybrid_multivector. [internal helper]';
+COMMENT ON FUNCTION turbohybrid_multivector_out(turbohybrid_multivector) IS 'Output function for turbohybrid_multivector. [internal helper]';
+COMMENT ON FUNCTION turbohybrid_multivector_recv(pg_catalog.internal) IS 'Binary receive function for turbohybrid_multivector. [internal helper]';
+COMMENT ON FUNCTION turbohybrid_multivector_send(turbohybrid_multivector) IS 'Binary send function for turbohybrid_multivector. [internal helper]';
 
-COMMENT ON OPERATOR FAMILY vector_l2_turbohybrid_ops USING turbohybrid IS 'TurboHybrid L2 vector operator family';
-COMMENT ON OPERATOR FAMILY vector_ip_turbohybrid_ops USING turbohybrid IS 'TurboHybrid inner product vector operator family';
-COMMENT ON OPERATOR FAMILY vector_cosine_turbohybrid_ops USING turbohybrid IS 'TurboHybrid cosine vector operator family';
-COMMENT ON OPERATOR FAMILY multivector_cosine_turbohybrid_ops USING turbohybrid IS 'Compatibility multivector operator family for normalized token vectors; uses dot-product MaxSim internally';
-COMMENT ON OPERATOR FAMILY multivector_maxsim_ip_turbohybrid_ops USING turbohybrid IS 'TurboHybrid multivector raw dot-product MaxSim operator family';
-COMMENT ON OPERATOR FAMILY bm25_tsvector_turbohybrid_ops USING turbohybrid IS 'TurboHybrid BM25 tsvector operator family';
+COMMENT ON FUNCTION turbohybrid_query(vector, pg_catalog.tsquery, pg_catalog.text, pg_catalog.float8, pg_catalog.float8, pg_catalog.float8, pg_catalog.int4, pg_catalog.int4, pg_catalog.int4, pg_catalog.int4, pg_catalog.bool, turbohybrid_multivector, pg_catalog.float4[], pg_catalog.bool[], pg_catalog.float8, pg_catalog.int4, turbohybrid_sparse_vector, pg_catalog.float8, pg_catalog.int4, pg_catalog.bool) IS 'Construct a TurboHybrid query payload for dense, BM25, sparse, and/or multivector retrieval with fusion. [stable public]';
+COMMENT ON FUNCTION turbohybrid_dense_query(vector, pg_catalog.int4, pg_catalog.int4) IS 'Convenience wrapper: dense-only TurboHybrid query payload (forwards to turbohybrid_query). [stable public]';
+COMMENT ON FUNCTION turbohybrid_hybrid_query(vector, pg_catalog.tsquery, pg_catalog.int4, pg_catalog.int4, pg_catalog.int4) IS 'Convenience wrapper: dense + BM25 TurboHybrid query payload (forwards to turbohybrid_query). [stable public]';
+COMMENT ON FUNCTION turbohybrid_sparse_query(turbohybrid_sparse_vector, pg_catalog.int4, pg_catalog.int4) IS 'Convenience wrapper: sparse-only TurboHybrid query payload (forwards to turbohybrid_query). [experimental public]';
+COMMENT ON FUNCTION turbohybrid_multivector_query(turbohybrid_multivector, pg_catalog.int4, pg_catalog.int4) IS 'Convenience wrapper: multivector-only TurboHybrid query payload (forwards to turbohybrid_query). [experimental public]';
+
+-- Sparse vector constructors and accessors.
+COMMENT ON FUNCTION turbohybrid_sparse_vector_from_arrays(pg_catalog.int4[], pg_catalog.float4[]) IS 'Build a turbohybrid_sparse_vector from parallel term_id/weight arrays. [experimental public]';
+COMMENT ON FUNCTION turbohybrid_sparse_vector_build(pg_catalog.int4[], pg_catalog.float4[], pg_catalog.bool, pg_catalog.text, pg_catalog.bool, pg_catalog.int4, pg_catalog.float8, pg_catalog.text) IS 'Typed-args sparse-vector builder worker (deduplicate/sort/top_k/min_weight/normalize). [internal helper]';
+COMMENT ON FUNCTION turbohybrid_sparse_vector_build(pg_catalog.int4[], pg_catalog.float4[], pg_catalog.jsonb) IS 'Build a turbohybrid_sparse_vector with jsonb options (drop_non_positive, deduplicate, sort, top_k, min_weight, normalize). [experimental public]';
+COMMENT ON FUNCTION turbohybrid_sparse_vector_terms(turbohybrid_sparse_vector) IS 'Render sparse terms as a weighted simple-text string. [experimental public]';
+COMMENT ON FUNCTION turbohybrid_sparse_vector_query_terms(turbohybrid_sparse_vector) IS 'Render sparse terms as an OR-joined query string. [experimental public]';
+COMMENT ON FUNCTION turbohybrid_sparse_vector_to_tsvector(turbohybrid_sparse_vector) IS 'Convert a sparse vector to tsvector via the simple text configuration. [experimental public]';
+COMMENT ON FUNCTION turbohybrid_sparse_vector_to_tsquery(turbohybrid_sparse_vector) IS 'Convert a sparse vector to an OR tsquery via the simple text configuration. [experimental public]';
+COMMENT ON FUNCTION turbohybrid_sparse_vector_term_ids(turbohybrid_sparse_vector) IS 'Return the term ids of a sparse vector. [experimental public]';
+COMMENT ON FUNCTION turbohybrid_sparse_vector_weights(turbohybrid_sparse_vector) IS 'Return the weights of a sparse vector. [experimental public]';
+COMMENT ON FUNCTION turbohybrid_sparse_vector_count(turbohybrid_sparse_vector) IS 'Return the nonzero term count of a sparse vector. [experimental public]';
+
+-- Multivector constructors, accessors, and exact MaxSim scorers.
+COMMENT ON FUNCTION turbohybrid_multivector(vector[]) IS 'Construct a turbohybrid_multivector from an array of same-dimensional vectors. [experimental public]';
+COMMENT ON FUNCTION turbohybrid_multivector_from_float4(pg_catalog.float4[], pg_catalog.int4) IS 'Construct a turbohybrid_multivector from flat float values and a token dimension. [experimental public]';
+COMMENT ON FUNCTION turbohybrid_multivector_from_contexts(pg_catalog.float4[], pg_catalog.int4, pg_catalog.int4[]) IS 'Construct a context-aware turbohybrid_multivector from flat float values and zero-based context start token offsets. [experimental public]';
+COMMENT ON FUNCTION turbohybrid_multivector_from_contexts_and_fields(pg_catalog.float4[], pg_catalog.int4, pg_catalog.int4[], pg_catalog.int4[]) IS 'Construct a context-aware turbohybrid_multivector with one non-negative field id per context. [experimental public]';
+COMMENT ON FUNCTION turbohybrid_multivector_dims(turbohybrid_multivector) IS 'Return the per-token dimension of a turbohybrid_multivector. [experimental public]';
+COMMENT ON FUNCTION turbohybrid_multivector_count(turbohybrid_multivector) IS 'Return the number of token vectors in a turbohybrid_multivector. [experimental public]';
+COMMENT ON FUNCTION turbohybrid_multivector_model_info(pg_catalog.text) IS 'Return registered late-interaction model metadata for multivector validation and benchmark provenance. [diagnostic]';
+COMMENT ON FUNCTION turbohybrid_multivector_context_count(turbohybrid_multivector) IS 'Return the number of context windows stored in a turbohybrid_multivector. [experimental public]';
+COMMENT ON FUNCTION turbohybrid_multivector_context_offsets(turbohybrid_multivector) IS 'Return zero-based context start token offsets from a turbohybrid_multivector. [experimental public]';
+COMMENT ON FUNCTION turbohybrid_multivector_field_ids(turbohybrid_multivector) IS 'Return one field id per context window from a turbohybrid_multivector, defaulting to 0 for flat values. [experimental public]';
+COMMENT ON FUNCTION turbohybrid_multivector_subvector(turbohybrid_multivector, pg_catalog.int4) IS 'Return one 1-based subvector from a turbohybrid_multivector as vector. [experimental public]';
+COMMENT ON FUNCTION turbohybrid_multivector_to_vector_array(turbohybrid_multivector) IS 'Return all subvectors from a turbohybrid_multivector as vector[]. [experimental public]';
+COMMENT ON FUNCTION turbohybrid_multivector_maxsim(turbohybrid_multivector, turbohybrid_multivector) IS 'Exact MaxSim score between a query and document multivector. [experimental public]';
+COMMENT ON FUNCTION turbohybrid_multivector_context_maxsim(turbohybrid_multivector, turbohybrid_multivector) IS 'Exact context-level MaxSim: score each document context independently and return the best context score. [experimental public]';
+COMMENT ON FUNCTION turbohybrid_multivector_field_weighted_maxsim(turbohybrid_multivector, turbohybrid_multivector, pg_catalog.int4[], pg_catalog.float4[]) IS 'Exact field-weighted MaxSim over context field ids, using one weight per requested field. [experimental public]';
+COMMENT ON FUNCTION turbohybrid_multivector_maxsim_scalar(turbohybrid_multivector, turbohybrid_multivector) IS 'Scalar reference MaxSim used to verify SIMD parity. [diagnostic]';
+COMMENT ON FUNCTION turbohybrid_multivector_maxsim_blocked_scalar(turbohybrid_multivector, turbohybrid_multivector) IS 'Blocked scalar reference MaxSim used to verify SIMD parity. [diagnostic]';
+COMMENT ON FUNCTION turbohybrid_multivector_maxsim_distance(turbohybrid_multivector, turbohybrid_multivector) IS 'Exact MaxSim as a smaller-is-better distance (-MaxSim). [experimental public]';
+COMMENT ON FUNCTION turbohybrid_experimental_compact_code_score(pg_catalog.int2[], pg_catalog.int2[], pg_catalog.bool, pg_catalog.text) IS 'Compact-code scoring probe for kernel experiments; not a serving path. [research-only]';
+
+-- Distance functions backing the ORDER BY operators.
+COMMENT ON FUNCTION turbohybrid_distance(vector, turbohybrid_query) IS 'Default TurboHybrid distance between a vector and a query (operator support). [internal helper]';
+COMMENT ON FUNCTION turbohybrid_l2_distance(vector, turbohybrid_query) IS 'L2 TurboHybrid distance backing the <~-> operator. [internal helper]';
+COMMENT ON FUNCTION turbohybrid_negative_inner_product(vector, turbohybrid_query) IS 'Negative inner product TurboHybrid distance backing the <~#> operator. [internal helper]';
+COMMENT ON FUNCTION turbohybrid_cosine_distance(vector, turbohybrid_query) IS 'Cosine TurboHybrid distance backing the <~> operator. [internal helper]';
+COMMENT ON FUNCTION turbohybrid_multivector_distance(turbohybrid_multivector, turbohybrid_query) IS 'Exact MaxSim distance backing the multivector <~> operator. [internal helper]';
+COMMENT ON FUNCTION turbohybrid_sparse_inner_product_distance(turbohybrid_sparse_vector, turbohybrid_query) IS 'Sparse inner-product distance backing the <~*> operator. [internal helper]';
+COMMENT ON FUNCTION turbohybrid_vector_l2_squared_distance(vector, vector) IS 'Squared L2 support function used by TurboHybrid vector opclasses. [internal helper]';
+COMMENT ON FUNCTION turbohybrid_vector_l2_distance(vector, vector) IS 'L2 support function used by TurboHybrid vector opclasses. [internal helper]';
+COMMENT ON FUNCTION turbohybrid_vector_negative_inner_product(vector, vector) IS 'Negative inner product support function used by TurboHybrid vector opclasses. [internal helper]';
+COMMENT ON FUNCTION turbohybrid_vector_cosine_distance(vector, vector) IS 'Cosine support function used by TurboHybrid vector opclasses. [internal helper]';
+COMMENT ON FUNCTION turbohybrid_vector_norm(vector) IS 'Vector norm support function used by TurboHybrid vector opclasses. [internal helper]';
+COMMENT ON FUNCTION turbohybrid_handler(pg_catalog.internal) IS 'Index access method handler for TurboHybrid. [internal helper]';
+
+-- Diagnostics, estimators, and maintenance.
+COMMENT ON FUNCTION turbohybrid_index_stats(pg_catalog.regclass) IS 'Return stable TurboHybrid index metadata as jsonb. [diagnostic]';
+COMMENT ON FUNCTION turbohybrid_estimate_memory(pg_catalog.regclass) IS 'Estimate native graph cache and BM25 reader-cache memory for a TurboHybrid index without building or loading those caches. [diagnostic]';
+COMMENT ON FUNCTION turbohybrid_sparse_compact(pg_catalog.regclass) IS 'Compact a sparse TurboHybrid index in place, reclaiming dead postings. [experimental public]';
+COMMENT ON FUNCTION turbohybrid_prewarm(pg_catalog.regclass) IS 'Build or attach the shared native graph cache for a TurboHybrid native graph index and return cache diagnostics as jsonb. [experimental public]';
+COMMENT ON FUNCTION turbohybrid_multivector_proxy_diagnostics(pg_catalog.regclass, pg_catalog.int4, pg_catalog.int4) IS 'Read-only bounded diagnostic comparing document proxy nearest-neighbor order with exact multivector MaxSim order for sampled document-node multivector indexes. [diagnostic]';
+COMMENT ON FUNCTION turbohybrid_last_scan_stats() IS 'Return backend-local summary information for the last TurboHybrid scan as jsonb; parallel restricted because it reads mutable scan state. [diagnostic]';
+COMMENT ON FUNCTION turbohybrid_last_build_stats() IS 'Return backend-local summary information for the last native TurboHybrid graph build as jsonb; parallel restricted because it reads mutable build state. [diagnostic]';
+COMMENT ON FUNCTION turbohybrid_graph_repair_dry_run(pg_catalog.regclass, pg_catalog.int4, pg_catalog.int4, pg_catalog.int4) IS 'Read-only native graph repair diagnostic; samples graph neighborhoods and reports weak-neighborhood and suggested-edge counts without modifying the index. [diagnostic]';
+COMMENT ON FUNCTION turbohybrid_last_scan_diagnosis() IS 'Return a compact bottleneck diagnosis of the last TurboHybrid scan as jsonb: key dense hot-path fields, derived ratios, and a single diagnosis label; read-only over turbohybrid_last_scan_stats(). [diagnostic]';
+COMMENT ON FUNCTION turbohybrid_simd_capabilities() IS 'Return pgturbohybrid build and architecture SIMD capability information as jsonb. [diagnostic]';
+COMMENT ON FUNCTION turbohybrid_scorer_distances(vector, vector) IS 'Score one (query, doc) pair under each dense approximate scorer plus a uniform-quantizer reference; quantization-error introspection. [diagnostic]';
+COMMENT ON FUNCTION turbohybrid_scorer_distances(vector, vector, integer) IS 'turbohybrid_scorer_distances at a chosen quantization bit width (2 or 4). [diagnostic]';
+COMMENT ON FUNCTION turbohybrid_query_split_probe(float8, float8, integer) IS 'Expose the low/high query-split quantization boundaries for regression pinning. [diagnostic]';
+COMMENT ON FUNCTION turbohybrid_scorer_x4_batch_parity(vector, vector, vector, vector, vector, integer) IS 'Score four distinct docs through the x4 u8 batch kernel and four single-node calls, returning both results and a bit-exact match flag. [diagnostic]';
+COMMENT ON FUNCTION turbohybrid_scorer_bench(vector, vector, integer, integer, integer) IS 'Tight-loop ns/code microbenchmark of the dense 4-bit scoring kernels. [diagnostic]';
+
+-- ORDER BY operators.
+COMMENT ON OPERATOR <~-> (vector, turbohybrid_query) IS 'L2 distance operator for TurboHybrid vector queries. [stable public]';
+COMMENT ON OPERATOR <~#> (vector, turbohybrid_query) IS 'Negative inner product distance operator for TurboHybrid vector queries. [stable public]';
+COMMENT ON OPERATOR <~> (vector, turbohybrid_query) IS 'Cosine distance operator for TurboHybrid vector queries. [stable public]';
+COMMENT ON OPERATOR <~> (turbohybrid_multivector, turbohybrid_query) IS 'MaxSim distance operator for TurboHybrid multivector queries. [experimental public]';
+COMMENT ON OPERATOR <~*> (turbohybrid_sparse_vector, turbohybrid_query) IS 'Inner-product distance operator for TurboHybrid sparse queries. [experimental public]';
+
+-- Operator classes and families.
+COMMENT ON OPERATOR CLASS vector_l2_turbohybrid_ops USING turbohybrid IS 'TurboHybrid L2 vector operator class. [stable public]';
+COMMENT ON OPERATOR CLASS vector_ip_turbohybrid_ops USING turbohybrid IS 'TurboHybrid inner product vector operator class. [stable public]';
+COMMENT ON OPERATOR CLASS vector_cosine_turbohybrid_ops USING turbohybrid IS 'TurboHybrid cosine vector operator class. [stable public]';
+COMMENT ON OPERATOR CLASS multivector_cosine_turbohybrid_ops USING turbohybrid IS 'Compatibility multivector operator class for normalized token vectors; uses dot-product MaxSim internally. [experimental public]';
+COMMENT ON OPERATOR CLASS multivector_maxsim_ip_turbohybrid_ops USING turbohybrid IS 'TurboHybrid multivector operator class exposing raw dot-product MaxSim semantics. [experimental public]';
+COMMENT ON OPERATOR CLASS bm25_tsvector_turbohybrid_ops USING turbohybrid IS 'TurboHybrid BM25 tsvector operator class. [stable public]';
+COMMENT ON OPERATOR CLASS sparse_ip_turbohybrid_ops USING turbohybrid IS 'TurboHybrid learned-sparse inner-product operator class. [experimental public]';
+
+COMMENT ON OPERATOR FAMILY vector_l2_turbohybrid_ops USING turbohybrid IS 'TurboHybrid L2 vector operator family. [stable public]';
+COMMENT ON OPERATOR FAMILY vector_ip_turbohybrid_ops USING turbohybrid IS 'TurboHybrid inner product vector operator family. [stable public]';
+COMMENT ON OPERATOR FAMILY vector_cosine_turbohybrid_ops USING turbohybrid IS 'TurboHybrid cosine vector operator family. [stable public]';
+COMMENT ON OPERATOR FAMILY multivector_cosine_turbohybrid_ops USING turbohybrid IS 'Compatibility multivector operator family for normalized token vectors; uses dot-product MaxSim internally. [experimental public]';
+COMMENT ON OPERATOR FAMILY multivector_maxsim_ip_turbohybrid_ops USING turbohybrid IS 'TurboHybrid multivector raw dot-product MaxSim operator family. [experimental public]';
+COMMENT ON OPERATOR FAMILY bm25_tsvector_turbohybrid_ops USING turbohybrid IS 'TurboHybrid BM25 tsvector operator family. [stable public]';
+COMMENT ON OPERATOR FAMILY sparse_ip_turbohybrid_ops USING turbohybrid IS 'TurboHybrid learned-sparse inner-product operator family. [experimental public]';

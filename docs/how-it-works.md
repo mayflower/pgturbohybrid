@@ -98,11 +98,22 @@ It adds the TurboHybrid feature surface:
   - `vector_cosine_turbohybrid_ops`
 - BM25/text operator class:
   - `bm25_tsvector_turbohybrid_ops`
+- learned-sparse (SPLADE-style) retrieval (experimental):
+  - type `turbohybrid_sparse_vector`, operator `<~*>`, opclass
+    `sparse_ip_turbohybrid_ops`
+- multivector late-interaction retrieval (experimental):
+  - type `multivector`, `multivector_cosine_turbohybrid_ops`
 - diagnostics:
   - `turbohybrid_last_scan_stats()`
   - `turbohybrid_last_scan_diagnosis()`
   - `turbohybrid_index_stats(regclass)`
   - `turbohybrid_simd_capabilities()`
+
+Sparse and multivector indexes can stand alone or sit beside the dense/BM25
+keys and fuse through RRF. See
+[`feature-matrix.md`](feature-matrix.md) for the full feature/maturity list,
+[`sparse-embeddings.md`](sparse-embeddings.md), and
+[`multivector-late-interaction.md`](multivector-late-interaction.md).
 
 A dense-only index uses just the vector column:
 

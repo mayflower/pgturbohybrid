@@ -44,9 +44,10 @@ Use semantic versioning after `0.1.0`:
 
 ## PostgreSQL And pgvector Support
 
-The release target is PostgreSQL 14 through 18, with PostgreSQL 19 added when
-the CI setup image supports it. The pgvector compatibility target is pgvector
-0.8.2 through current pgvector `master`.
+The release target is PostgreSQL 14 through 19 (CI builds and runs the
+regression tests on every version; PostgreSQL 19 is tested against pgvector
+`master`, which has no tagged 0.8.2 build). The pgvector compatibility target is
+pgvector 0.8.2 through current pgvector `master`.
 
 The build and CI matrix must install unmodified pgvector before building
 `pgturbohybrid`.

@@ -100,6 +100,21 @@ USING turbohybrid (
 `text_query` requires the hybrid shape with a `tsvector` key. A one-key dense
 index must not build or scan BM25 metadata.
 
+The access method also supports two further key types, each usable standalone or
+combined with a `tsvector` BM25 key:
+
+```sql
+-- Learned-sparse (SPLADE-style) retrieval, native sparse postings store.
+CREATE INDEX documents_sparse_idx ON documents
+USING turbohybrid (sparse_embedding sparse_ip_turbohybrid_ops);
+
+-- Multivector (ColBERT-style late interaction).
+CREATE INDEX documents_mv_idx ON documents
+USING turbohybrid (colbert multivector_cosine_turbohybrid_ops);
+```
+
+See [feature-matrix.md](feature-matrix.md) for the maturity of each shape.
+
 The extension must not create generic names such as `hybrid_query` or opclasses
 whose names could reasonably be mistaken for pgvector-owned objects.
 
@@ -499,6 +514,10 @@ Current page kinds are:
 - optional residual-rerank bytes embedded in quantized code tuples
 - BM25 metadata, document statistics, lexicon, postings, block-max, delta,
   impact, and delta-term pages
+- sparse retrieval pages: sparse metapage, per-term lexicon, postings chunks,
+  block-max (WAND) directory, delta-chain, and node-map pages. A sparse-only
+  index (no dense graph) maps node IDs to heap TIDs through the node-map chain
+  and delegates liveness to heap MVCC visibility
 
 Index page changes are WAL-logged with PostgreSQL generic WAL. pgturbohybrid
 does not register a custom resource manager and does not require
@@ -552,6 +571,11 @@ Source ownership is kept explicit with `pgturbohybrid_*` file names, including:
 - `src/pgturbohybrid_bm25.c`
 - `src/pgturbohybrid_bm25_build.c`
 - `src/pgturbohybrid_bm25_query.c`
+- `src/pgturbohybrid_multivector.c`
+- `src/pgturbohybrid_sparse_build.c`
+- `src/pgturbohybrid_sparse_primary.c`
+- `src/pgturbohybrid_sparse_query.c`
+- `src/pgturbohybrid_sparse_score.c`
 - `src/pgturbohybrid_query.c`
 - `src/pgturbohybrid_stats.c`
 - `src/pgturbohybrid_vector_compat.c`

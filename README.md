@@ -36,6 +36,9 @@ hypercar, but still has room for groceries.
 - It is a good fit for evaluation, prototypes, and controlled experiments.
 - Treat production use as something to validate carefully, not assume.
 
+Per-feature maturity (stable public, experimental, research-only, diagnostic) is
+tracked in the [feature & maturity matrix](docs/feature-matrix.md).
+
 ## Benchmarks
 
 Dense (vector-only) retrieval on **dbpedia-openai-1M** (1,000,000 × 1536-d,
@@ -1088,8 +1091,11 @@ see [NOTICE](NOTICE) and [docs/architecture.md](docs/architecture.md).
 
 ## Documentation
 
+- [Feature & maturity matrix](docs/feature-matrix.md)
 - [How TurboHybrid works](docs/how-it-works.md)
 - [Easy fast setup](docs/fast_setup.md)
+- [Sparse (SPLADE) embeddings](docs/sparse-embeddings.md)
+- [Multivector late interaction](docs/multivector-late-interaction.md)
 - [FIQA/OpenAI benchmark snapshot](docs/benchmarks/fiqa-openai.md)
 - [Bring-your-own RAG benchmark](docs/benchmarks/bring-your-own-rag.md)
 - [DBPedia OpenAI3-large benchmark spec](benchmarks/dbpedia_openai3_large.md)
