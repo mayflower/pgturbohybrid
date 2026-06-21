@@ -17,6 +17,9 @@ import time
 from pathlib import Path
 from typing import Any
 
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+import bench_metadata  # noqa: E402  (sibling module in benchmarks/)
+
 
 DIMENSIONS = 1536
 FINAL_K = 10
@@ -978,6 +981,20 @@ def run_benchmark(args: argparse.Namespace) -> dict[str, Any]:
             "pg_config": os.environ.get("PG_CONFIG", "pg_config"),
             "pgvector_ref": os.environ.get("PGVECTOR_REF", ""),
         },
+        # Standard reproducibility provenance (prompt 11): git dirty-tree status,
+        # CPU model, and non-default turbohybrid.* GUCs that the older
+        # "environment" block above does not capture.
+        "provenance": bench_metadata.collect(
+            query=lambda sql: run_psql(args.database, sql),
+            suite="fiqa-openai",
+            dataset=args.dataset or "fiqa",
+            dimensions=DIMENSIONS,
+            rows=args.max_docs or None,
+            query_count=args.max_queries or None,
+            warmup_passes=args.warmup,
+            measured_passes=1,
+            cache_state="warm (untimed warm-up pass)" if args.warmup else "cold",
+        ),
     }
 
     if args.explain:

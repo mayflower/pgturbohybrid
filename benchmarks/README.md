@@ -1938,7 +1938,31 @@ index or profile setting.
 Do not commit generated benchmark outputs. Store JSON/Markdown in an external
 artifact store or ignored directories such as `benchmarks/results/`.
 
-Record the following with any published result:
+### Required provenance helper
+
+Every new benchmark claim **must** carry a machine-readable provenance block so
+a reader can reproduce it. Use the shared helper `benchmarks/bench_metadata.py`
+rather than hand-rolling the fields:
+
+- **Python drivers** call `bench_metadata.collect(query=..., dataset=...,
+  rows=..., dimensions=..., query_count=..., warmup_passes=...,
+  measured_passes=..., cache_state=..., index_reloptions=...)` and embed the
+  returned dict in the result JSON (see `fiqa_openai.py`, which emits it under
+  `provenance`).
+- **SQL / shell benchmarks** capture it as a sidecar JSON:
+
+  ```sh
+  python3 benchmarks/bench_metadata.py --database "$PGDATABASE" \
+    --suite my-bench --dataset glove-100-angular --rows 1183514 \
+    --dimensions 100 --query-count 10000 --warmup-passes 1 \
+    --measured-passes 3 --cache-state warm > my-bench.provenance.json
+  ```
+
+The helper fills git commit + dirty-tree status, host OS / arch / CPU model,
+PostgreSQL / pgvector / pgturbohybrid versions, and any non-default
+`turbohybrid.*` GUCs automatically; you supply the dataset and run fields.
+
+Record the following with any published result (the helper covers most of it):
 
 - hardware and CPU governor
 - operating system
