@@ -54,6 +54,27 @@ LIMIT 10;
 `text_query` requires an index whose second key uses
 `bm25_tsvector_turbohybrid_ops`.
 
+### Convenience query constructors
+
+For the common single-modality and dense+text shapes there are shorter wrappers
+that forward to `turbohybrid_query(...)` with identical behavior:
+
+```sql
+-- dense-only (same as turbohybrid_query(vector_query => $1))
+ORDER BY embedding <~> turbohybrid_dense_query($1::vector)
+
+-- dense + text
+ORDER BY embedding <~> turbohybrid_hybrid_query($1::vector, websearch_to_tsquery('english', $2))
+
+-- sparse-only / multivector-only
+ORDER BY s       <~*> turbohybrid_sparse_query($1::turbohybrid_sparse_vector)
+ORDER BY colbert <~>  turbohybrid_multivector_query($1::turbohybrid_multivector)
+```
+
+Each takes optional `final_k` and per-branch budget arguments. The full
+`turbohybrid_query(...)` constructor remains the expert entry point for
+weighting, `alpha`, and cross-modal fusion.
+
 For ColBERT-style late interaction, `turbohybrid_multivector` stores multiple
 token vectors in one row. The graph indexes token subvectors, but the SQL result
 is still the document heap tuple and the exposed distance is `-MaxSim`. See

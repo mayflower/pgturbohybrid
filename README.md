@@ -419,6 +419,12 @@ ORDER BY embedding <~> turbohybrid_query(vector_query => $1::vector)
 LIMIT 10;
 ```
 
+For the common shapes there are shorter convenience wrappers that forward to
+`turbohybrid_query(...)`: `turbohybrid_dense_query($1)`,
+`turbohybrid_hybrid_query($1, $2)`, `turbohybrid_sparse_query($1)`, and
+`turbohybrid_multivector_query($1)` (each takes optional `final_k` / per-branch
+budgets). See [docs/how-it-works.md](docs/how-it-works.md#convenience-query-constructors).
+
 ### Hybrid Vector + Text Search
 
 Add a `tsvector` key when queries use `text_query`:
