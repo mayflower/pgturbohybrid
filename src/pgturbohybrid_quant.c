@@ -798,6 +798,7 @@ PgturbohybridGraphRepairDryRun(Relation index, int sampleNodes, int searchEf,
 	candidates = palloc0(sizeof(*candidates) * effectiveCandidateLimit);
 	step = Max(1U, meta.tqNodeCount / (uint32) targetSamples);
 	start = step > 1 ? step / 2 : 0;
+	Assert(meta.tqNodeCount > 0);
 
 	LockPage(index, PGTURBOHYBRID_GRAPH_SCAN_LOCK, ShareLock);
 	PG_TRY();
@@ -4481,6 +4482,7 @@ PgturbohybridGraphBuildEntrySidecarHash(PgturbohybridQuantBuildState *state,
 	uint32	   *bucketNodeIds;
 	uint64	   *bucketKeys;
 
+	Assert(target > 0);
 	bucketNodeIds = palloc(sizeof(uint32) * target);
 	bucketKeys = palloc(sizeof(uint64) * target);
 	for (uint32 i = 0; i < target; i++)
@@ -4603,6 +4605,7 @@ PgturbohybridGraphBuildEntrySidecarLevelCovering(PgturbohybridQuantBuildState *s
 	uint32		candidateCount = 0;
 	int			maxLevel = 0;
 
+	Assert(target > 0);
 	buckets = palloc(sizeof(PgturbohybridGraphEntrySidecarCandidate) * target);
 	candidates = palloc(sizeof(PgturbohybridGraphEntrySidecarCandidate) * target);
 	for (uint32 i = 0; i < target; i++)
@@ -6301,6 +6304,7 @@ PgturbohybridGraphWriteMultiVectorQuantizedInvertedPostingTuples(PgturbohybridQu
 						ereport(ERROR,
 								(errcode(ERRCODE_INDEX_CORRUPTED),
 								 errmsg("quantized_inverted_experimental build assigned an out-of-range codeword")));
+					Assert(listWrite != NULL);
 					offset = listWrite[codeword]++;
 					postings[offset].docId = docId;
 					postings[offset].tokenOrdinal = (uint16) token;
@@ -7730,7 +7734,6 @@ tqgraphbuild(Relation heap, Relation index, IndexInfo *indexInfo)
 
 				PgturbohybridNativeParallelCombineFit(&state, fitShared);
 				state.reltuples = fitShared->reltuples;
-				workerCount = Max(fitShared->nparticipants - 1, 0);
 				fitCorrectionScanUs = fitUs;
 				parallelFitEnabled = true;
 				PgturbohybridNativeFinishParallelPhase(fitPcxt, fitSnapshot);
@@ -10718,7 +10721,7 @@ PgturbohybridGraphApplyResidualRerank(PgturbohybridGraphScanOpaque so,
 						   PgturbohybridGraphScanStorage *storage,
 						   PgturbohybridGraphResult *results, int count)
 {
-	uint8		querySketch[PGTURBOHYBRID_GRAPH_MAX_RESIDUAL_RERANK_BYTES];
+	uint8		querySketch[PGTURBOHYBRID_GRAPH_MAX_RESIDUAL_RERANK_BYTES] = {0};
 	int			bytes = meta->tqResidualRerankBytes;
 	int			band;
 	int			topK;

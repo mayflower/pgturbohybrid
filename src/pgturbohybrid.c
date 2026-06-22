@@ -146,7 +146,7 @@ PgturbohybridExecutorHooksInit(void)
 static void
 PgturbohybridExecutorStartHook(QueryDesc *queryDesc, int eflags)
 {
-	bool		am_started = false;
+	volatile bool am_started = false;
 
 	PG_TRY();
 	{

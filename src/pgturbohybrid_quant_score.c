@@ -1072,7 +1072,6 @@ PgturbohybridGraphBuildCodeCodeWeighted(PgturbohybridQuantBuildState *state, uin
 	if (aNode->code == NULL || bNode->code == NULL)
 		return false;
 
-	raw = 0.0;
 	if (state->dPrimeSqI16 != NULL && state->weightScale > FLT_EPSILON)
 	{
 		int64		rawI64 = 0;

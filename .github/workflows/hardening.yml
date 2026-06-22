@@ -122,6 +122,14 @@ jobs:
           sudo --preserve-env=PG_CONFIG make -C "$PGVECTOR_DIR" install
 
       - name: Run scan-build
+        # Build with assertions enabled so the analyzer can follow the
+        # Assert()-documented invariants (non-zero divisors, non-NULL
+        # pointers) the same way the sibling hardening jobs do. Without
+        # -DUSE_ASSERT_CHECKING every Assert() expands to a no-op, so the
+        # analyzer cannot see those invariants and reports false-positive
+        # divide-by-zero / null-dereference paths.
+        env:
+          PG_CFLAGS: -DUSE_ASSERT_CHECKING
         run: |
           make clean
           scan-build --status-bugs --keep-going make MATH_MODE=strict

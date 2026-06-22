@@ -643,7 +643,10 @@ bool
 pgturbohybrid_graph_get_tuple(IndexScanDesc scan, ScanDirection dir)
 {
 	PgturbohybridGraphScanOpaque so = (PgturbohybridGraphScanOpaque) scan->opaque;
-	MemoryContext oldCtx = MemoryContextSwitchTo(so->tmpCtx);
+	MemoryContext oldCtx;
+
+	Assert(so != NULL);
+	oldCtx = MemoryContextSwitchTo(so->tmpCtx);
 
 	/*
 	 * Index can be used to scan backward, but Postgres doesn't support
