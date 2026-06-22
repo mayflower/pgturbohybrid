@@ -1,0 +1,125 @@
+-- pgturbohybrid_api_ledger: a snapshot of the public SQL API surface (each
+-- object plus the maturity label parsed from its COMMENT ON). A diff here means
+-- the public API changed -- intentional or not. If intentional, regenerate this
+-- expected file AND update docs/api-ledger.json to match
+-- (scripts/check-api-ledger.py enforces that the ledger and this snapshot agree,
+-- so accidental additions/removals/relabels are caught). See
+-- docs/feature-matrix.md and docs/beta-scope.md for what the labels mean.
+SET client_min_messages = warning;
+CREATE EXTENSION IF NOT EXISTS vector;
+CREATE EXTENSION IF NOT EXISTS pgturbohybrid;
+RESET client_min_messages;
+SELECT DISTINCT kind || '|' || name || '|' || COALESCE(maturity, '(none)') AS api_object
+FROM (
+  SELECT 'type'::text AS kind, t.typname AS name,
+         substring(obj_description(t.oid, 'pg_type') from '\[([^]]+)\]') AS maturity,
+         1 AS ord
+    FROM pg_type t
+    WHERE t.typname IN ('turbohybrid_query', 'turbohybrid_sparse_vector',
+                        'turbohybrid_multivector', 'multivector')
+  UNION ALL
+  SELECT 'opclass', oc.opcname,
+         substring(obj_description(oc.oid, 'pg_opclass') from '\[([^]]+)\]'), 2
+    FROM pg_opclass oc JOIN pg_am a ON a.oid = oc.opcmethod
+    WHERE a.amname = 'turbohybrid'
+  UNION ALL
+  SELECT 'operator', o.oprname || '(' || format_type(o.oprleft, NULL) || ')',
+         substring(obj_description(o.oid, 'pg_operator') from '\[([^]]+)\]'), 3
+    FROM pg_operator o
+    WHERE o.oprname IN ('<~>', '<~->', '<~#>', '<~*>')
+      AND o.oprright = 'turbohybrid_query'::regtype
+  UNION ALL
+  SELECT 'function', p.proname,
+         substring(obj_description(p.oid, 'pg_proc') from '\[([^]]+)\]'), 4
+    FROM pg_proc p
+    WHERE p.proname LIKE 'turbohybrid\_%'
+) s
+ORDER BY 1;
+                                  api_object                                   
+-------------------------------------------------------------------------------
+ function|turbohybrid_cosine_distance|internal helper
+ function|turbohybrid_dense_query|stable public
+ function|turbohybrid_distance|internal helper
+ function|turbohybrid_estimate_memory|diagnostic
+ function|turbohybrid_experimental_compact_code_score|research-only
+ function|turbohybrid_graph_repair_dry_run|diagnostic
+ function|turbohybrid_handler|internal helper
+ function|turbohybrid_hybrid_query|stable public
+ function|turbohybrid_index_stats|diagnostic
+ function|turbohybrid_l2_distance|internal helper
+ function|turbohybrid_last_build_stats|diagnostic
+ function|turbohybrid_last_scan_diagnosis|diagnostic
+ function|turbohybrid_last_scan_stats|diagnostic
+ function|turbohybrid_multivector_context_count|experimental public
+ function|turbohybrid_multivector_context_maxsim|experimental public
+ function|turbohybrid_multivector_context_offsets|experimental public
+ function|turbohybrid_multivector_count|experimental public
+ function|turbohybrid_multivector_dims|experimental public
+ function|turbohybrid_multivector_distance|internal helper
+ function|turbohybrid_multivector_field_ids|experimental public
+ function|turbohybrid_multivector_field_weighted_maxsim|experimental public
+ function|turbohybrid_multivector_from_contexts_and_fields|experimental public
+ function|turbohybrid_multivector_from_contexts|experimental public
+ function|turbohybrid_multivector_from_float4|experimental public
+ function|turbohybrid_multivector_in|internal helper
+ function|turbohybrid_multivector_maxsim_blocked_scalar|diagnostic
+ function|turbohybrid_multivector_maxsim_distance|experimental public
+ function|turbohybrid_multivector_maxsim_scalar|diagnostic
+ function|turbohybrid_multivector_maxsim|experimental public
+ function|turbohybrid_multivector_model_info|diagnostic
+ function|turbohybrid_multivector_out|internal helper
+ function|turbohybrid_multivector_proxy_diagnostics|diagnostic
+ function|turbohybrid_multivector_query|experimental public
+ function|turbohybrid_multivector_recv|internal helper
+ function|turbohybrid_multivector_send|internal helper
+ function|turbohybrid_multivector_subvector|experimental public
+ function|turbohybrid_multivector_to_vector_array|experimental public
+ function|turbohybrid_multivector|experimental public
+ function|turbohybrid_negative_inner_product|internal helper
+ function|turbohybrid_prewarm|experimental public
+ function|turbohybrid_query_in|internal helper
+ function|turbohybrid_query_out|internal helper
+ function|turbohybrid_query_split_probe|diagnostic
+ function|turbohybrid_query|stable public
+ function|turbohybrid_scorer_bench|diagnostic
+ function|turbohybrid_scorer_distances|diagnostic
+ function|turbohybrid_scorer_x4_batch_parity|diagnostic
+ function|turbohybrid_simd_capabilities|diagnostic
+ function|turbohybrid_sparse_compact|experimental public
+ function|turbohybrid_sparse_inner_product_distance|internal helper
+ function|turbohybrid_sparse_query|experimental public
+ function|turbohybrid_sparse_vector_build|experimental public
+ function|turbohybrid_sparse_vector_build|internal helper
+ function|turbohybrid_sparse_vector_count|experimental public
+ function|turbohybrid_sparse_vector_from_arrays|experimental public
+ function|turbohybrid_sparse_vector_in|internal helper
+ function|turbohybrid_sparse_vector_out|internal helper
+ function|turbohybrid_sparse_vector_query_terms|experimental public
+ function|turbohybrid_sparse_vector_term_ids|experimental public
+ function|turbohybrid_sparse_vector_terms|experimental public
+ function|turbohybrid_sparse_vector_to_tsquery|experimental public
+ function|turbohybrid_sparse_vector_to_tsvector|experimental public
+ function|turbohybrid_sparse_vector_weights|experimental public
+ function|turbohybrid_vector_cosine_distance|internal helper
+ function|turbohybrid_vector_l2_distance|internal helper
+ function|turbohybrid_vector_l2_squared_distance|internal helper
+ function|turbohybrid_vector_negative_inner_product|internal helper
+ function|turbohybrid_vector_norm|internal helper
+ opclass|bm25_tsvector_turbohybrid_ops|stable public
+ opclass|multivector_cosine_turbohybrid_ops|experimental public
+ opclass|multivector_maxsim_ip_turbohybrid_ops|experimental public
+ opclass|sparse_ip_turbohybrid_ops|experimental public
+ opclass|vector_cosine_turbohybrid_ops|stable public
+ opclass|vector_ip_turbohybrid_ops|stable public
+ opclass|vector_l2_turbohybrid_ops|stable public
+ operator|<~#>(vector)|stable public
+ operator|<~*>(turbohybrid_sparse_vector)|experimental public
+ operator|<~->(vector)|stable public
+ operator|<~>(turbohybrid_multivector)|experimental public
+ operator|<~>(vector)|stable public
+ type|multivector|experimental public
+ type|turbohybrid_multivector|experimental public
+ type|turbohybrid_query|stable public
+ type|turbohybrid_sparse_vector|experimental public
+(84 rows)
+

@@ -9,6 +9,9 @@ name) is independent from the **Git release tag**. The SQL version may stay
 `0.1.0` across several `v0.1.0-alpha.N` tags: an alpha tag can document changed
 defaults and diagnostics without adding an extension upgrade path.
 
+The planned beta freezes only the stable public core; see
+[docs/beta-scope.md](docs/beta-scope.md) and [ROADMAP.md](ROADMAP.md).
+
 Use semantic versioning for the SQL version after `0.1.0`:
 
 - Patch releases fix bugs without changing the SQL API or on-disk index format.

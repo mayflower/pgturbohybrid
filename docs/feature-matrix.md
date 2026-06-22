@@ -11,6 +11,10 @@ The maturity labels below are *relative within the alpha*: they say how stable a
 feature's behavior and on-disk/SQL surface are expected to be, not that any of it
 is finished production software.
 
+The planned **narrow beta** freezes only the stable public core (dense, dense+BM25,
+RRF, support diagnostics); see [beta-scope.md](beta-scope.md) and the
+[roadmap](../ROADMAP.md) for what is and is not part of the beta contract.
+
 ## Maturity labels
 
 | Label | Meaning |

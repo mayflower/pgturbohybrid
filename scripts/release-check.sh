@@ -75,6 +75,10 @@ check_no_root_scratch_files() {
 		-iname 'fixes*.md' -o \
 		-iname 'prompts*.md' -o \
 		-iname 'scratch*.md' -o \
+		-iname 'plan*.md' -o \
+		-iname '*plan.md' -o \
+		-iname 'notes*.md' -o \
+		-iname 'problem*.md' -o \
 		-name 'FAST_DEFAULTS_PLAN.md' -o \
 		-name 'FAST_DEFAULTS_RELEASE_SUMMARY.md' -o \
 		-name 'PERF_RECOVERY_SUMMARY.md' -o \
@@ -82,12 +86,13 @@ check_no_root_scratch_files() {
 	\) -print)
 	if [[ ${#visible[@]} -gt 0 ]]; then
 		printf '%s\n' "${visible[@]}" >&2
-		fail "root scratch or planning files found (git-ignore them or remove them)"
+		fail "root scratch or planning files found (move them under docs/, git-ignore them, or remove them)"
 	fi
 
 	# Belt and braces: a scratch/planning file must never be tracked (those would
-	# ship in the dist regardless of .gitignore).
-	tracked_files="$(git ls-files | grep -E '^(fixes|prompts|scratch).*\.md$|^(FAST_DEFAULTS_PLAN|FAST_DEFAULTS_RELEASE_SUMMARY|PERF_RECOVERY_SUMMARY|PERF_REGRESSION_REPORT)\.md$' || true)"
+	# ship in the dist regardless of .gitignore). Roadmap/planning content belongs
+	# under docs/ (e.g. docs/roadmap/, docs/dev/) or in ROADMAP.md, not at the root.
+	tracked_files="$(git ls-files | grep -E '^(fixes|prompts|scratch|notes|problem).*\.md$|^[^/]*plan\.md$|^(FAST_DEFAULTS_PLAN|FAST_DEFAULTS_RELEASE_SUMMARY|PERF_RECOVERY_SUMMARY|PERF_REGRESSION_REPORT)\.md$' || true)"
 	if [[ -n "$tracked_files" ]]; then
 		printf '%s\n' "$tracked_files" >&2
 		fail "root scratch or planning files are tracked"
@@ -135,6 +140,7 @@ check_no_root_scratch_files
 check_readme_links
 run "$ROOT_DIR/scripts/check-version-consistency.sh"
 run "$ROOT_DIR/scripts/check-build-file-parity.py"
+run "$ROOT_DIR/scripts/check-api-ledger.py"
 
 run make PG_CONFIG="$PG_CONFIG" clean
 run make PG_CONFIG="$PG_CONFIG"

@@ -543,6 +543,8 @@ see [NOTICE](NOTICE) and [docs/architecture.md](docs/architecture.md).
 ## Documentation
 
 - [Feature & maturity matrix](docs/feature-matrix.md)
+- [Beta scope](docs/beta-scope.md)
+- [Roadmap](ROADMAP.md)
 - [How TurboHybrid works](docs/how-it-works.md)
 - [Easy fast setup](docs/fast_setup.md)
 - [Diagnostics schema](docs/diagnostics-schema.md)

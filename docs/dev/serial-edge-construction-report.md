@@ -5,7 +5,7 @@
 > `turbohybrid.native_parallel_edge_build` GUC (`auto` by default), using
 > batch-parallel insertion into one shared graph. The rejected
 > segment-and-entry-repair prototype was fast but collapsed measured recall from
-> about 0.9924 to 0.32; see `pedgeplan.md` for the current implementation plan
+> about 0.9924 to 0.32; see `docs/roadmap/parallel-edge-construction.md` for the current implementation plan
 > and Qdrant comparison notes.
 
 ## Summary

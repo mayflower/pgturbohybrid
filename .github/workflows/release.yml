@@ -74,11 +74,17 @@ jobs:
           fi
           TARBALL="dist/pgturbohybrid-${EXTVERSION}.tar.gz"
           ZIP="dist/pgturbohybrid-${EXTVERSION}.zip"
+          # SHA256 checksums for the source archives so downloads can be verified
+          # (sha256sum -c dist/SHA256SUMS). Cryptographic signing of this file
+          # (cosign/GPG) is a tracked beta item; see ROADMAP.md.
+          ( cd dist && sha256sum "pgturbohybrid-${EXTVERSION}.tar.gz" \
+              "pgturbohybrid-${EXTVERSION}.zip" > SHA256SUMS )
+          SUMS="dist/SHA256SUMS"
           if gh release view "$GITHUB_REF_NAME" >/dev/null 2>&1; then
             gh release edit "$GITHUB_REF_NAME" --notes-file "$NOTES_FILE"
-            gh release upload "$GITHUB_REF_NAME" "$TARBALL" "$ZIP" --clobber
+            gh release upload "$GITHUB_REF_NAME" "$TARBALL" "$ZIP" "$SUMS" --clobber
           else
-            gh release create "$GITHUB_REF_NAME" "$TARBALL" "$ZIP" \
+            gh release create "$GITHUB_REF_NAME" "$TARBALL" "$ZIP" "$SUMS" \
               --title "$GITHUB_REF_NAME" \
               --notes-file "$NOTES_FILE" \
               --verify-tag

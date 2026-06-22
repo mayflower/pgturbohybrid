@@ -7,6 +7,9 @@ reports.
 `pgturbohybrid` is alpha software. APIs, defaults, benchmark behavior, and the
 on-disk index format may change before a stable release. It is suitable for
 evaluation and controlled experiments; production use needs your own testing.
+The planned beta freezes only a stable core (dense, dense+BM25, RRF, support
+diagnostics); sparse, multivector/ColBERT, and the companion extension stay
+experimental — see [docs/beta-scope.md](docs/beta-scope.md).
 
 ## Where To Ask For Help
 
