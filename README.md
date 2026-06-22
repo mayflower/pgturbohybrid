@@ -154,83 +154,21 @@ ORDER BY colbert <~> turbohybrid_query(
 LIMIT 10;
 ```
 
-Current multivector contract:
+Contract, in brief: `vector_query` and `multivector_query` are mutually
+exclusive; hybrid multivector + `text_query` fuses document-keyed (RRF /
+`weighted` / `fast_weighted` / `calibrated` / `dbsf`); scans exact-rerank a
+bounded top-document prefix from the heap by default (no full f32 vectors stored
+in the index); and textual literal input is intentionally unsupported (construct
+from `vector[]` or `turbohybrid_multivector_from_float4(...)`).
 
-- dense-only multivector scans are supported with `multivector_query`;
-- `vector_query` and `multivector_query` are mutually exclusive in one
-  `turbohybrid_query`;
-- hybrid multivector + `text_query` search is supported on two-key indexes with
-  a `tsvector` key. RRF and the normalized score-fusion modes `weighted`,
-  `fast_weighted`, `calibrated`, and `dbsf` are document-keyed; raw BM25 plus
-  raw MaxSim alpha fusion is rejected;
-- token-node indexes expand each row into one graph subnode per stored token
-  vector. Document-node indexes store one graph node per document and attach the
-  selected proxy, centroid, or sidecar payloads. Incremental insert/update
-  follows the same storage mode and appends BM25 delta data when a lexical key
-  is present;
-- textual literal input for the underlying multivector value remains
-  intentionally unsupported. Construct values from `vector[]`,
-  `turbohybrid_multivector_from_float4(...)`, or the context/field
-  constructors.
-
-Candidate collection is approximate: each query token searches the TurboQuant
-graph, then results are accumulated with document-level MaxSim. Tune the bounded
-candidate budgets with:
-
-```sql
-SET turbohybrid.multivector_subvector_k = 100;
-SET turbohybrid.multivector_unique_docs_per_token = 100;
-SET turbohybrid.multivector_max_raw_hits_per_token = 400;
-SET turbohybrid.multivector_doc_candidate_k = 100;
-SET turbohybrid.multivector_exact_rerank = 'topk'; -- or 'off'
-SET turbohybrid.multivector_exact_rerank_k = 100;
-SET turbohybrid.multivector_max_accumulator_mb = 64;
-```
-
-By default, multivector scans exact-rerank a bounded top document prefix from
-the heap. The index still stores compact TurboQuant subvector nodes; exact
-rerank fetches the original `turbohybrid_multivector` heap value and computes
-portable f32 MaxSim for at most `multivector_exact_rerank_k` retained document
-candidates. Set `turbohybrid.multivector_exact_rerank = 'off'` to inspect the
-raw approximate ordering.
-
-Exact MaxSim always has a scalar fallback. When the extension is built with
-SIMD support and `turbohybrid.simd` is enabled, the exact dot-product kernel may
-dispatch to AVX2 on x86 or NEON on ARM for the bounded rerank work; portable and
-`SIMD_BUILD=none` builds continue to use the scalar path.
-
-### Native ColBERT candidate generation
-
-For ColBERT-style models, `pgturbohybrid` can build document-node indexes that
-separate candidate generation from final ranking: an approximate candidate
-source (`proxy_vector`, `document_nodes`, experimental `centroid_lite`, or
-research-only `quantized_inverted_experimental`; `exact_doc_scan` /
-`exact_token_scan` are diagnostic oracles) chooses a bounded document set via the
-`multivector_doc_storage` tier (`f32` / `f16` / `sq8` / `proxy_only` /
-`centroid_only`), and the returned SQL order stays exact heap MaxSim over that
-set. Inspect candidate-source health and admission via
-`turbohybrid_last_scan_stats()`, and bound work with the
-`turbohybrid.multivector_max_*` caps. Full storage-tier, candidate-source,
-diagnostic-field, and tuning detail is in the doc below.
-
-See [`docs/multivector-late-interaction.md`](docs/multivector-late-interaction.md)
-for dense-only and hybrid examples, tuning guidance, diagnostics, and current
-limitations.
-
-For local ColBERT embedding inside PostgreSQL, see
-[`docs/colbert-llama-extension.md`](docs/colbert-llama-extension.md). It
-describes the companion `llama_embed` extension, which keeps llama.cpp model
-loading separate from the `pgturbohybrid` index AM and returns dense `vector`,
-token-level `vector[]`, and multivector-compatible values through the public
-SQL API. Store late-interaction outputs in `multivector` columns. The
-implementation still ships from the `pg_colbert_llama` source
-directory for compatibility, and the legacy `CREATE EXTENSION
-pg_colbert_llama` / `colbert_*` API remains available for existing ColBERT
-callers.
-The standalone examples in
-[`extensions/pg_colbert_llama/examples/README.md`](extensions/pg_colbert_llama/examples/README.md)
-show dense `llama_embed_vector()` output stored in pgvector and multivector
-`llama_embed_mv()` output stored in `pgturbohybrid`.
+Candidate budgets, exact-rerank policy, document-node storage tiers
+(`f32`/`f16`/`sq8`/`proxy_only`/`centroid_only`), the native ColBERT candidate
+sources (`proxy_vector`, `document_nodes`, experimental `centroid_lite`,
+research-only `quantized_inverted_experimental`), and tuning live in
+**[docs/multivector-late-interaction.md](docs/multivector-late-interaction.md)**.
+For generating embeddings locally, the companion `llama_embed` extension is
+documented in
+[docs/colbert-llama-extension.md](docs/colbert-llama-extension.md).
 
 ## Native Sparse Retrieval (alpha)
 
@@ -282,88 +220,10 @@ wash.
 
 ## Install
 
-### Nix development shell
-
-For a reproducible local development environment with PostgreSQL, pgvector, and
-`pgturbohybrid` packaged together:
-
-```sh
-nix develop
-th-pg-init
-th-smoke
-th-psql
-```
-
-The default shell uses PostgreSQL 17 and pgvector v0.8.2. It keeps the local
-database cluster under `.nix-dev/pg17-pgvector-v0.8.2/`, so it does not install
-extensions into Homebrew, apt, or another system PostgreSQL prefix. If your Nix
-install does not enable flakes globally, run commands with:
-
-```sh
-nix --extra-experimental-features 'nix-command flakes' develop
-```
-
-Useful commands inside the shell:
-
-```sh
-th-pg-start             # start the local PostgreSQL cluster
-th-pg-stop              # stop it
-th-pg-reset             # recreate it from scratch
-th-installcheck         # run SQL regression tests
-th-prove-installcheck   # run TAP tests when local TAP dependencies are available
-th-test                 # run smoke + SQL regression tests
-```
-
-To test against the pinned pgvector `master` input instead of v0.8.2:
-
-```sh
-nix develop .#pgvector-master
-th-pg-reset
-th-smoke
-```
-
-After changing extension C or SQL files, re-enter the shell or run the relevant
-`nix develop ... -c ...` command again so PostgreSQL sees the rebuilt extension
-package. The Nix workflow intentionally uses an isolated wrapped PostgreSQL
-rather than `make install` into a mutable system prefix.
-
-For deterministic local quality checks, use the benchmark commands from the
-default shell. They create synthetic data in the local Nix-managed database and
-print result tables; do not commit captured output.
-
-```sh
-th-bench-retrieval-quality
-th-bench-profile-grid
-th-bench-tune-profile
-```
-
-For Python and real-data benchmark work, use the benchmark shell. It includes
-`uv` and common Python data packages while keeping the default development shell
-small.
-
-```sh
-nix develop .#bench
-th-bench-concurrent-dense --help
-FIQA_DATASET=/path/to/fiqa th-bench-fiqa-quick
-```
-
-`th-bench-fiqa-quick` defaults to the separate
-`pgturbohybrid_fiqa_quick` database so it does not recreate the normal
-`pgturbohybrid_dev` database. Set `FIQA_PGDATABASE=...` for a different
-benchmark database, or set `PGDATABASE=...` explicitly when you want full
-control.
-
-The flake keeps `nix flake check` intentionally cheap: it builds the extension,
-the wrapped PostgreSQL package, the pgvector-master variant, and a scalar
-`SIMD_BUILD=none` variant. Long-running benchmarks, external datasets, and
-host-specific result files stay outside `flake check`.
-
-The flake inputs pin both nixpkgs and pgvector. Update them explicitly when
-testing newer dependencies:
-
-```sh
-nix flake lock --update-input pgvector-master
-```
+A reproducible **Nix development shell** (PostgreSQL 17 + pgvector + the
+extension, with `th-*` helper commands and benchmark shells) is documented in
+[CONTRIBUTING.md](CONTRIBUTING.md#nix-development-shell). For a system install,
+use the manual steps below.
 
 ### Manual install
 
@@ -628,102 +488,29 @@ No profile's compiled defaults should be retuned from synthetic benchmarks alone
 
 ## Diagnostics
 
-The stable vs experimental vs diagnostic-only keys of
-`turbohybrid_last_scan_stats()` are documented in
-[docs/diagnostics-schema.md](docs/diagnostics-schema.md).
-
 After a query, check whether PostgreSQL used the expected TurboHybrid path:
 
 ```sql
 SELECT turbohybrid_last_scan_stats();
+SELECT turbohybrid_last_scan_diagnosis();   -- single bottleneck label + key fields
 SELECT turbohybrid_index_stats('documents_turbohybrid_idx'::regclass);
-SELECT turbohybrid_estimate_memory('documents_turbohybrid_idx'::regclass);
-SELECT turbohybrid_graph_repair_dry_run('documents_turbohybrid_idx'::regclass);
 SELECT turbohybrid_simd_capabilities();
 ```
 
-`turbohybrid_graph_repair_dry_run(index, sample_nodes, search_ef,
-candidate_limit)` is an opt-in read-only graph neighborhood diagnostic for
-native graph indexes. It samples node IDs deterministically, compares each
-sample's existing level-0 neighborhood with a stronger bounded local candidate
-pool, and reports `avg_overlap`, `weak_nodes`, `missed_neighbor_count`, and
-`suggested_edges`. The function never writes index pages, never emits WAL, and
-uses `AccessShareLock`; it is meant to decide whether a future write-capable
-repair pass is worth building.
-
-Use `turbohybrid_estimate_memory(index)` before a query or prewarm step when
-sizing native graph cache memory. It reports native code/adjacency/exact-vector
-cache estimates, the current native cache policy, shared-cache per-backend view
-bytes, and BM25 reader-cache arrays without building the native graph cache or
-loading BM25 doc/liveness caches.
-
-Native cache scope matters under concurrency:
-
-- `per_backend` stores the resident native graph cache in each active PostgreSQL
-  backend. A 400 MB native cache is roughly 400 MB at 1 backend, 4 GB at 10
-  backends, and 40 GB at 100 backends before BM25 reader caches and other
-  backend memory.
-- `shared` stores the large immutable native graph arenas once in the mmap-backed
-  shared cache, but each backend still allocates view/scratch metadata and BM25
-  reader caches.
-- `off` avoids resident native graph cache memory, but scans load graph pages
-  through PostgreSQL shared buffers and can do more per-scan I/O/CPU work.
-
-Use the estimator to compute concrete 1/10/100-backend projections for an index:
+`turbohybrid_last_scan_diagnosis()` reduces the full stats JSON to the key dense
+hot-path fields and a single `diagnosis` label (for example `healthy_u8_x4`,
+`traversal_dominated`, `rescore_dominated`, or `scalar_lut_fallback`):
 
 ```sql
-WITH estimate AS (
-  SELECT turbohybrid_estimate_memory('documents_turbohybrid_idx'::regclass) AS m
-),
-backends(n) AS (VALUES (1), (10), (100))
-SELECT
-  n AS active_backends,
-  pg_size_pretty(
-    n * (
-      (m->'concurrency'->>'per_backend_total_bytes_per_backend')::bigint +
-      (m->'concurrency'->>'bm25_total_bytes_per_backend')::bigint
-    )
-  ) AS per_backend_scope_total,
-  pg_size_pretty(
-    (m->'concurrency'->>'shared_cache_total_bytes')::bigint +
-    n * (
-      (m->'concurrency'->>'shared_backend_view_bytes_per_backend')::bigint +
-      (m->'concurrency'->>'bm25_total_bytes_per_backend')::bigint
-    )
-  ) AS shared_scope_total
-FROM estimate, backends
-ORDER BY n;
-```
-
-`turbohybrid.native_cache_warn_mb` emits a non-fatal DEBUG1 message when a
-per-backend native cache build crosses the configured resident-size threshold.
-Set it to `0` to disable the warning.
-
-For a slow query, `turbohybrid_last_scan_diagnosis()` reduces the full stats
-JSON to the key dense hot-path fields, a few derived ratios, and a single
-`diagnosis` label (for example `healthy_u8_x4`, `traversal_dominated`,
-`rescore_dominated`, or `scalar_lut_fallback`):
-
-```sql
-SELECT turbohybrid_last_scan_diagnosis();
 SELECT turbohybrid_last_scan_diagnosis() ->> 'diagnosis';
 ```
 
-Useful fields include:
-
-- `profile`
-- `index_used`
-- `scan_orchestration`
-- `quantization_bits`
-- `exact_storage`
-- SIMD fields such as `runtime_avx2`, `enabled_avx512vnni`, and
-  `simd_force`
-- `dense_candidates_effective`
-- `bm25_candidates_effective`
-- `final_k_source`
-- `elapsed_us`
-
-For troubleshooting examples, see [docs/fast_setup.md](docs/fast_setup.md).
+The stable vs experimental vs diagnostic-only keys of
+`turbohybrid_last_scan_stats()` are documented in
+[docs/diagnostics-schema.md](docs/diagnostics-schema.md). For cache-scope
+sizing, per-backend memory multiplication, `turbohybrid_estimate_memory()`
+projections, the read-only `turbohybrid_graph_repair_dry_run()` diagnostic, and
+VACUUM/REINDEX/upgrade guidance, see [docs/operations.md](docs/operations.md).
 
 ## More Benchmark Snapshots
 
@@ -759,6 +546,8 @@ see [NOTICE](NOTICE) and [docs/architecture.md](docs/architecture.md).
 - [How TurboHybrid works](docs/how-it-works.md)
 - [Easy fast setup](docs/fast_setup.md)
 - [Diagnostics schema](docs/diagnostics-schema.md)
+- [Operations guide](docs/operations.md)
+- [Profile tuning](docs/profile-tuning.md)
 - [Sparse (SPLADE) embeddings](docs/sparse-embeddings.md)
 - [Multivector late interaction](docs/multivector-late-interaction.md)
 - [FIQA/OpenAI benchmark snapshot](docs/benchmarks/fiqa-openai.md)

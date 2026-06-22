@@ -40,6 +40,44 @@ Use `PGVECTOR_REF=master` to test against pgvector development head. Use
 `PGVECTOR_REPO` only when intentionally testing another pgvector remote; do not
 edit the pgvector checkout as part of pgturbohybrid development.
 
+## Nix Development Shell
+
+For a reproducible local environment with PostgreSQL, pgvector, and
+`pgturbohybrid` packaged together:
+
+```sh
+nix develop          # add --extra-experimental-features 'nix-command flakes' if needed
+th-pg-init           # init + start the local PG17 cluster, install all extensions
+th-smoke             # minimal vector + pgturbohybrid query
+th-psql              # connect to pgturbohybrid_dev
+```
+
+The default shell uses PostgreSQL 17 and pgvector v0.8.2 and keeps its cluster
+under `.nix-dev/pg17-pgvector-v0.8.2/`, so it never touches a system PostgreSQL.
+Useful in-shell commands:
+
+```sh
+th-pg-start / th-pg-stop / th-pg-reset   # manage the local cluster
+th-installcheck                          # SQL regression tests
+th-prove-installcheck                    # TAP tests (needs IPC::Run)
+th-test                                  # smoke + regression
+```
+
+Test against pinned pgvector `master` with `nix develop .#pgvector-master`
+(then `th-pg-reset`). After changing extension C/SQL, re-enter the shell (or
+re-run `nix develop ... -c ...`) so PostgreSQL sees the rebuilt package.
+
+Deterministic local quality checks (synthetic data; do not commit output):
+`th-bench-retrieval-quality`, `th-bench-profile-grid`, `th-bench-tune-profile`.
+For Python / real-data benchmarks use the heavier shell `nix develop .#bench`
+(includes `uv`), e.g. `th-bench-concurrent-dense --help` or
+`FIQA_DATASET=/path/to/fiqa th-bench-fiqa-quick` (which defaults to the separate
+`pgturbohybrid_fiqa_quick` database).
+
+`nix flake check` is intentionally cheap: it builds the extension, the wrapped
+PostgreSQL, the pgvector-master variant, and a scalar `SIMD_BUILD=none` variant.
+Update pins explicitly with `nix flake lock --update-input pgvector-master`.
+
 ## Useful Commands
 
 ```sh

@@ -76,13 +76,13 @@ if ! grep -qF '14, 15, 16, 17, 18, 19' docs/compatibility.md; then
 	fail "docs/compatibility.md is missing the canonical range '14, 15, 16, 17, 18, 19'"
 fi
 
-for f in README.md RELEASE.md; do
+for f in README.md RELEASE.md SUPPORT.md; do
 	if ! grep -qF '14 through 19' "$f"; then
 		fail "$f is missing the supported-PostgreSQL wording '14 through 19'"
 	fi
 done
 
-if stale="$(grep -rnF '14 through 18' README.md RELEASE.md docs/compatibility.md 2>/dev/null)"; then
+if stale="$(grep -rnF '14 through 18' README.md RELEASE.md SUPPORT.md docs/compatibility.md 2>/dev/null)"; then
 	printf '%s\n' "$stale" >&2
 	fail "stale 'PostgreSQL 14 through 18' wording found (supported range is 14 through 19)"
 fi

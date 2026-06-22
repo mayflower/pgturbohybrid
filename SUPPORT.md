@@ -19,7 +19,8 @@ Open a GitHub issue for:
 - feature requests that fit the `pgturbohybrid` scope
 
 Before opening an issue, please check the README, [docs/fast_setup.md](docs/fast_setup.md),
-[docs/how-it-works.md](docs/how-it-works.md), and
+[docs/how-it-works.md](docs/how-it-works.md), [docs/operations.md](docs/operations.md)
+(cache/memory sizing, VACUUM/REINDEX, production evaluation), and
 [docs/compatibility.md](docs/compatibility.md).
 
 ## Security Issues
@@ -73,8 +74,8 @@ settings, `work_mem`, dataset size, and benchmark command in the report.
 
 The current public compatibility target is:
 
-- PostgreSQL 14, 15, 16, 17, and 18
-- PostgreSQL 19 when available in CI setup images
+- PostgreSQL 14 through 19 (CI builds and tests every version; PostgreSQL 19 is
+  tested against pgvector `master`)
 - pgvector 0.8.2 and newer compatible 0.8.x releases
 - pgvector `master` as a forward-compatibility signal
 

@@ -62,6 +62,10 @@ is finished production software.
   You do not need it to use any `pgturbohybrid` index feature; it only helps you
   generate dense, token-level, sparse, or multivector embeddings locally.
 
+For running and sizing an index in practice (cache scope, per-backend memory,
+`turbohybrid_estimate_memory()`, VACUUM/REINDEX, upgrades, production
+evaluation), see the [operations guide](operations.md).
+
 ## Supported versions
 
 PostgreSQL **14 through 19** and pgvector **0.8.2+** (PostgreSQL 19 is tested
