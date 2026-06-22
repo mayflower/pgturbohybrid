@@ -1,6 +1,6 @@
 # Multivector Document Graph Design
 
-Prompt 9 design for a Qdrant-style multivector graph where graph nodes are
+Design for a Qdrant-style multivector graph where graph nodes are
 documents/heap tuples and every candidate is scored by full MaxSim before the
 final exact rerank.
 
@@ -210,7 +210,7 @@ on-disk format.
 Pros:
 
 - no immediate on-disk change;
-- useful for Prompt 10 `doc_graph_prototype`;
+- useful for `doc_graph_prototype`;
 - direct benchmark comparison against exact scan and token-node modes.
 
 Cons:
@@ -342,7 +342,7 @@ retrieval but does not yet close the gap to exact MaxSim. Exact scan reached
 document nodes reached `recall@10 = 0.166667`, `ndcg@10 = 0.207257`, and
 top-10 admission `0.133333` at p50 `74.467 ms`; BM25 admission/RRF/DBSF reached
 `recall@10 = 0.400000` with p50 around `69..75 ms` but still had admission
-failures for all three queries. Treat this as Prompt 15 harness evidence and a
+failures for all three queries. Treat this as harness evidence and a
 candidate-generation gap, not as a default-profile quality pass.
 
 ## MVCC And Dead Tuple Handling
@@ -698,7 +698,7 @@ document-node traversal rather than the small-doc fallback: budget `50` scored
 333 documents and visited 604 graph edges; budget `800` scored 1654 documents,
 visited 6428 graph edges, and admitted 4/10 exact top documents for that query.
 The exact top-1 still missed at both budgets, so this is a setup/performance
-improvement and not yet a Prompt 2 quality pass.
+improvement and not yet a quality pass.
 
 After qrel-prioritized precomputed loading was added, the same 10k document-node
 smoke with three DBpedia queries retained `126` qrels instead of the invalid
@@ -709,7 +709,7 @@ zero-qrel slice. With `graph_m = 4`, `graph_ef_construction = 8`,
 Index build took `145646.847 ms` and remained edge-build dominated
 (`build_edge_us = 133304010`). This is the first qrel-backed evidence from the
 precomputed dataset path; it proves the benchmark gate now measures real
-retrieval quality, but it still does not satisfy the full Prompt 2 comparison
+retrieval quality, but it still does not satisfy the full comparison
 matrix across token baselines, exact scans, storage modes, and proxy branches.
 
 A follow-up narrow admission-grid smoke on the same qrel-backed 10k slice used
@@ -719,12 +719,12 @@ exact top-1 admission `0.666667`, and exact top-10 admission `0.466667`; the
 tested document-node profile reached `recall@10 = 0.300000`,
 `ndcg@10 = 0.375685`, exact top-1 admission `0.333333`, and exact top-10
 admission `0.300000`. Exact document scan and plain fallback reached
-`recall@10 = 0.800000` with full admission. This proves the Prompt 2 comparison
+`recall@10 = 0.800000` with full admission. This proves the comparison
 report can now expose document-node losses against token and exact baselines,
 but the full gate still needs the storage, EF, oversampling, proxy, and larger
 query matrix.
 
-A wider 10k qrel-backed Prompt 2 matrix now covers the requested storage and
+A wider 10k qrel-backed matrix now covers the requested storage and
 search grids for a bounded local gate: `10` DBpedia queries, `382` qrels,
 storage `f32,f16,sq8`, EF `50,100,200,400,800`, oversampling `1,2,4,8`, no
 pooling, `auto` cache, and budgets `50,800,1600`. At budget `1600`, exact
@@ -741,7 +741,7 @@ interpretation is that the document-node candidate path is semantically
 recoverable with enough oversampling, but the useful-quality point still
 collapses toward exhaustive scoring on this 10k slice.
 
-The Prompt 15 hybrid harness was also rerun on the same 10-query qrel-backed
+The hybrid harness was also rerun on the same 10-query qrel-backed
 slice. Exact scan remained the quality, balanced, and high-recall recommendation
 with `recall@10 = 0.667143`, `ndcg@10 = 0.591325`, full admission, and
 `358.157 ms` p50. Raw document nodes reached only `recall@10 = 0.300000` and
@@ -753,7 +753,7 @@ latency recommendation at `61.388 ms` p50 with `recall@10 = 0.227143`. This
 keeps exact document scan as the only defensible quality default until
 document-node admission improves without near-exhaustive oversampling.
 
-The learned-sparse Prompt 15 path now has a separate qrel-backed code-path
+The learned-sparse path now has a separate qrel-backed code-path
 validation. A deterministic text-hash sparse JSONL fixture updated `1000`
 loaded documents and all `10` selected queries on a 1k DBpedia slice with `382`
 loaded qrels. `learned_sparse_exact_maxsim` emitted nonzero learned-sparse

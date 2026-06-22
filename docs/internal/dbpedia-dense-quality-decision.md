@@ -67,7 +67,7 @@ Do not publish:
 | bounded routing full, adaptive off before scan rerun | 1,000,000 | 1,000 | 0.947 | 0.947 | 7.979 | 21.972 | 28.564 | 2,377,760,768 | 764,249 | stale tail-latency artifact |
 | current default compact path, before bounded routing entries | 1,000,000 | 1,000 | 1.000 | 1.000 | 15.471 | 567.737 | 1751.226 | 2,368,987,136 | reused | stale tail-latency artifact |
 | current default compact path, bounded routing smoke | 2,000 | 20 | 1.000 | 1.000 | 0.985 | 2.234 | 4.528 | 6,455,296 | 839 | kept as routing smoke |
-| broad prompt-pack smoke, default compact path | 2,000 | 20 | 1.000 | 1.000 | 1.054 | 3.019 | 3.627 | 6,455,296 | 597 | kept as prompt-pack smoke |
+| broad smoke, default compact path | 2,000 | 20 | 1.000 | 1.000 | 1.054 | 3.019 | 3.627 | 6,455,296 | 597 | kept as smoke |
 | adaptive widening auto 1.5x | 1,000,000 | 1,000 | 1.000 | 1.000 | 13.533 | 499.052 | 1604.556 | 2,368,987,136 | reused | no default change |
 | adaptive widening auto 2.0x | 1,000,000 | 1,000 | 1.000 | 1.000 | 12.916 | 293.934 | 977.213 | 2,368,987,136 | reused | no default change |
 | adaptive widening forced 2.0x | 1,000,000 | 1,000 | 1.000 | 1.000 | 17.253 | 578.712 | 2011.251 | 2,368,987,136 | reused | reject as default |
@@ -158,7 +158,7 @@ That smoke uses 2,000 rows / 20 queries and records
 bounded routing path is active and avoids the previous O(N) start-node scan,
 but it is not a substitute for a fresh full 1M rerun.
 
-Latest broad prompt-pack smoke after the bounded routing fix:
+Latest broad smoke after the bounded routing fix:
 
 - `benchmarks/results/dbpedia-pack-smoke2.json`
 - `benchmarks/results/dbpedia-pack-smoke2.jsonl`
@@ -286,7 +286,7 @@ public format; the sidecar options remain experimental and off by default.
 
 ## Adaptive Widening And Local Expansion
 
-Adaptive widening is the best default candidate from this prompt pack. Bounded
+Adaptive widening is the best default candidate from this work. Bounded
 local expansion remains a diagnostic but not a default candidate yet.
 
 On the fresh bounded-routing full run, adaptive auto widened 37 of 1,000
@@ -383,7 +383,7 @@ payloads, but default compact indexes keep both entry sidecar and residual
 rerank disabled. Current metadata readers zero-fill missing metapage tails and
 sanitize absent sidecar settings before reporting stats or sizing tuples.
 
-Decision for this prompt-pack branch:
+Decision for this work branch:
 
 - keep the experimental sidecar implementations because they are explicit,
   measurable, and off by default
@@ -497,11 +497,11 @@ Relevant generated artifacts from this investigation:
 | Prompt | Current status | Evidence | Remaining proof gap |
 |---|---|---|---|
 | 01 baseline failure attribution | implemented | per-query JSONL includes query/source IDs, source rank, top-10 IDs, probe rank, latency, and scan stats | the probe is SQL-visible top-k based, not a full internal reached/dropped trace |
-| 02 exact build distances | implemented as explicit GUC | `turbohybrid.dense_build_exact_distances`, metapage provenance, regression test, broad prompt-pack smoke, earlier full DBPedia artifact, 2h31m full provenance timeout evidence | repeat full 1M provenance run only after build-time improvement or on a quieter host |
-| 03 adaptive widening | implemented as explicit GUCs, default off | scan stats, harness variants, regression GUC checks, broad prompt-pack smoke, full 1M same-index default-vs-auto run | broader workload evidence before enabling by default |
-| 04 local expansion | implemented as explicit GUCs, default off | scan stats, harness variants, regression stats checks, broad prompt-pack smoke, full 1M current-code sweep | broader workload evidence before enabling by default |
-| 05 entry sidecar | implemented as explicit reloptions, default off | metapage stats, insert preservation, regression test, broad prompt-pack smoke, sidecar storage-format decision | broader workload evidence before documenting as a supported public format |
-| 06 residual rerank sidecar | implemented as explicit reloptions, default off | sketch storage stats, scan stats, regression test, broad prompt-pack smoke, full residual artifacts, sidecar storage-format decision | broader workload evidence before documenting as a supported public format |
+| 02 exact build distances | implemented as explicit GUC | `turbohybrid.dense_build_exact_distances`, metapage provenance, regression test, broad smoke, earlier full DBPedia artifact, 2h31m full provenance timeout evidence | repeat full 1M provenance run only after build-time improvement or on a quieter host |
+| 03 adaptive widening | implemented as explicit GUCs, default off | scan stats, harness variants, regression GUC checks, broad smoke, full 1M same-index default-vs-auto run | broader workload evidence before enabling by default |
+| 04 local expansion | implemented as explicit GUCs, default off | scan stats, harness variants, regression stats checks, broad smoke, full 1M current-code sweep | broader workload evidence before enabling by default |
+| 05 entry sidecar | implemented as explicit reloptions, default off | metapage stats, insert preservation, regression test, broad smoke, sidecar storage-format decision | broader workload evidence before documenting as a supported public format |
+| 06 residual rerank sidecar | implemented as explicit reloptions, default off | sketch storage stats, scan stats, regression test, broad smoke, full residual artifacts, sidecar storage-format decision | broader workload evidence before documenting as a supported public format |
 | 07 benchmark harness | implemented | aggregate JSON, Markdown, JSONL, index report, failed-row recording, command metadata, environment info, build provenance | schema validation is structural only; full statistical confidence depends on full runs |
 | 08 ablation decision report | implemented | this internal report and ignored generated decision report | full exact-storage upper bound did not complete on this host |
 | 09 release guardrails | implemented for touched docs | README keeps DBPedia out of public claims; path/claim grep is clean | repeat guardrail check before commit/release |

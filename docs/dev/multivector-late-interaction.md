@@ -234,7 +234,7 @@ multivectors with exact float32 MaxSim. Its stats use
 `multivector_plain_fallback_reason = exact_doc_scan`.
 
 `turbohybrid.multivector_candidate_source = 'doc_graph_prototype'` is the
-Prompt 10 validation hook for the document-level graph design. It is
+validation hook for the document-level graph design. It is
 non-default and does not change the on-disk index format. In the current slice
 there is no index-resident document graph storage, so the prototype explicitly
 uses the same heap-backed exact document MaxSim path and reports:
@@ -330,7 +330,7 @@ REINDEX guidance instead of silently falling back to token-node storage.
 ### Synthetic Recall Gate
 
 `benchmarks/dbpedia_colbert_multivector.py --multivector-recall-gate` is the
-deterministic Prompt 12 gate for this failure class. It creates a tiny
+deterministic gate for this failure class. It creates a tiny
 many-moderate corpus in a temporary table:
 
 - exact MaxSim top-1 is `good`, because it matches several query tokens

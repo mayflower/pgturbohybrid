@@ -1640,7 +1640,7 @@ The DBPedia OpenAI3-large benchmark spec lives in
 1M-row Qdrant DBPedia corpus, BEIR DBPedia queries/qrels, the native pgvector
 `halfvec` + PostgreSQL full-text SQL RRF baseline, the TurboHybrid hybrid runs,
 and a dense-only default comparison between pgvector HNSW and TurboHybrid.
-Internal dense-only experiment decisions from the prompt-pack work live in
+Internal dense-only experiment decisions from the dense-only experiment work live in
 [`docs/internal/dbpedia-dense-quality-decision.md`](../docs/internal/dbpedia-dense-quality-decision.md).
 
 ## Native sparse (SPLADE) retrieval

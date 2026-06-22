@@ -44,7 +44,7 @@ So the dense/multivector graph **owns** the node-identity space; BM25 is a
 | Case | Index shapes | Approach | Milestone |
 | --- | --- | --- | --- |
 | **(a) dense-present** | `dense+sparse`, `dense+sparse+bm25` | sparse is a secondary branch off the dense node space — mirrors BM25 | ships first (Prompts 4–11) |
-| **(b) sparse-primary** | `sparse-only`, `sparse+bm25` (no dense) | needs a *new* dense-independent primary node space (node_id alloc, liveness, NULL-gating) | deferred architectural milestone (Prompt 12) |
+| **(b) sparse-primary** | `sparse-only`, `sparse+bm25` (no dense) | needs a *new* dense-independent primary node space (node_id alloc, liveness, NULL-gating) | deferred architectural milestone |
 
 ## 4. SQL surface
 
@@ -91,7 +91,7 @@ struct PgturbohybridSparseVectorEntry { int32 termId; float4 weight; int16 field
 - optional delta tuples (incremental insert/update).
 
 Postings key on the same `node_id` as the dense graph in case (a); case (b) gets
-its own node space (Prompt 12).
+its own node space.
 
 ## 7. Quantization
 
