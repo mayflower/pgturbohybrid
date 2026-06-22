@@ -981,7 +981,7 @@ def run_benchmark(args: argparse.Namespace) -> dict[str, Any]:
             "pg_config": os.environ.get("PG_CONFIG", "pg_config"),
             "pgvector_ref": os.environ.get("PGVECTOR_REF", ""),
         },
-        # Standard reproducibility provenance (prompt 11): git dirty-tree status,
+        # Standard reproducibility provenance: git dirty-tree status,
         # CPU model, and non-default turbohybrid.* GUCs that the older
         # "environment" block above does not capture.
         "provenance": bench_metadata.collect(

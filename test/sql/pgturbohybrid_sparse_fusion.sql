@@ -1,4 +1,4 @@
--- Sparse branch RRF fusion with dense (and BM25) retrieval (Prompt 5).
+-- Sparse branch RRF fusion with dense (and BM25) retrieval.
 SET client_min_messages = warning;
 CREATE EXTENSION IF NOT EXISTS vector;
 CREATE EXTENSION IF NOT EXISTS pgturbohybrid;

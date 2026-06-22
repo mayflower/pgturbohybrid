@@ -1,4 +1,4 @@
--- Sparse-primary node space (Prompt 12): sparse-only and sparse+BM25 indexes
+-- Sparse-primary node space: sparse-only and sparse+BM25 indexes
 -- with no dense/multivector graph.  Node identity comes from a dedicated
 -- node-map chain; liveness is delegated to heap-tuple MVCC visibility.
 SET client_min_messages = warning;

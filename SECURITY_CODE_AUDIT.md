@@ -18,7 +18,7 @@ evidence.
 | Graph scan page locks need local error cleanup | Release blocker | Fixed |
 | `turbohybrid_query(...)` constructor caching can hide changed GUC defaults | Release blocker | Fixed |
 | BM25 dynamic allocation and metadata-derived allocation paths need overflow/corruption guards | Release blocker | Fixed |
-| Release check, source archive verification, and CI gates need final evidence | Release blocker | Fixed for branch |
+| Release check, source archive verification, and CI gates need final evidence | Release blocker | Fixed |
 | Executor hook ownership and cleanup need a deliberate audit pass | High priority | Fixed for alpha |
 | `turbohybrid_query` varlena validation should reject trailing bytes and overflowed sizes | High priority | Fixed |
 | Global fast-math compiler flags should become opt-in | Medium priority | Fixed |
@@ -148,7 +148,7 @@ This section is updated as tests land.
   block-max, and lexicon pages, and randomized field mutation across all tuple
   types) remains a follow-up. The current coverage targets the metadata/anchor
   readers (graph metapage, BM25 metadata, sparse node-map and postings) that
-  gate every scan. This branch also adds cache metadata caps and overflow checks
+  gate every scan. The hardening pass also adds cache metadata caps and overflow checks
   on the release-facing BM25 cache/query paths.
 - User-input fuzzing now covers every SQL-reachable parser/constructor (see the
   fuzz regression in Tests Added). Two input surfaces remain follow-ups: the
@@ -159,9 +159,11 @@ This section is updated as tests land.
 - Public diagnostics now use PostgreSQL JSONB builder APIs instead of
   hand-assembled JSON text. Developer-only diagnostics remain behind
   `PGTURBOHYBRID_DEV_DIAGNOSTICS`.
-- TAP restart tests are present but skipped on this local machine because the
-  PostgreSQL TAP modules are unavailable in the installed PGXS tree.
-- The new manual/nightly `hardening` workflow is present on this branch, but
-  GitHub cannot manually dispatch workflows that are not yet known on the
-  default branch. The release build matrix is green on this branch; run the
-  hardening workflow after the workflow file lands on the default branch.
+- TAP tests (restart/recovery and metadata corruption) run in CI on every
+  supported PostgreSQL version. They `SKIP` only where the PostgreSQL TAP perl
+  modules (`PostgreSQL::Test::Cluster`, which needs `IPC::Run`) are not installed
+  in the local PGXS tree; install `libipc-run-perl` to run them locally.
+- The manual/nightly `hardening` workflow (strict math with SIMD disabled, gcc,
+  and clang static analysis) is on the default branch and can be dispatched from
+  the Actions tab. The release build matrix is green on `main` across the
+  supported PostgreSQL/pgvector versions, i386, Windows, macOS, and valgrind.

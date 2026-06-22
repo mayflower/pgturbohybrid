@@ -1,5 +1,5 @@
 -- Quantized sparse postings: q8/q16 per-term-linear, f32, and the offset16_soa /
--- varint encodings with a scalar dequantizing scorer (Prompt 6).
+-- varint encodings with a scalar dequantizing scorer.
 SET client_min_messages = warning;
 CREATE EXTENSION IF NOT EXISTS vector;
 CREATE EXTENSION IF NOT EXISTS pgturbohybrid;

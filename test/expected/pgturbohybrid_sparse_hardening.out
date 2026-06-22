@@ -1,4 +1,4 @@
--- Sparse hardening pass (Prompt 16): edge cases + error guards across the
+-- Sparse hardening pass: edge cases + error guards across the
 -- supported key-map shapes.
 SET client_min_messages = warning;
 CREATE EXTENSION IF NOT EXISTS vector;

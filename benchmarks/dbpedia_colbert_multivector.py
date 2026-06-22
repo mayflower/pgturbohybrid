@@ -111,7 +111,7 @@ QUERY_ONLY_METHOD = "pgturbohybrid_colbert_multivector_query_only"
 RRF_METHOD = "pgturbohybrid_colbert_multivector_rrf"
 EXACT_SCAN_METHOD = "pgturbohybrid_colbert_multivector_exact_scan"
 
-# Native sparse (SPLADE) retrieval methods (Prompt 15).  The four sparse_* methods
+# Native sparse (SPLADE) retrieval methods.  The four sparse_* methods
 # are sparse-only (a turbohybrid sparse-primary index over learned_sparse); the
 # two *_rrf methods fuse the ColBERT multivector branch with sparse (and BM25)
 # via reciprocal-rank fusion.  sparse_f32/q16/q8 differ by index quantization
@@ -5509,7 +5509,7 @@ def build_sparse_primary_index(
     conn: psycopg.Connection[Any],
     quant_bits: int,
 ) -> dict[str, Any]:
-    """(Re)build a sparse-primary turbohybrid index over learned_sparse (Prompt 12)."""
+    """(Re)build a sparse-primary turbohybrid index over learned_sparse."""
     index_name = "dbpedia_colbert_docs_sparse_idx"
     exec_sql(conn, "DROP INDEX IF EXISTS dbpedia_colbert_docs_colbert_idx")
     exec_sql(conn, f"DROP INDEX IF EXISTS {index_name}")
@@ -5625,7 +5625,7 @@ def run_sparse_retrieval_benchmark(
     qrels: dict[str, dict[str, int]],
     methods: list[str] | None = None,
 ) -> dict[str, Any]:
-    """Self-contained sparse retrieval phase (Prompt 15).
+    """Self-contained sparse retrieval phase.
 
     Builds the sparse-primary and fused indexes it needs and runs each requested
     sparse method, recording IR quality, latency/QPS, index size, and sparse scan
@@ -39388,13 +39388,13 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--hybrid-evaluation-harness",
         action="store_true",
-        help="run Prompt 15 end-to-end hybrid comparison modes over a document-node index",
+        help="run end-to-end hybrid comparison modes over a document-node index",
     )
     parser.add_argument(
         "--hybrid-evaluation-modes",
         default=",".join(HYBRID_EVALUATION_MODES),
         help=(
-            "comma-separated Prompt 15 hybrid modes to run; "
+            "comma-separated hybrid modes to run; "
             "quantized_inverted_experimental is also supported when named explicitly"
         ),
     )
@@ -39408,7 +39408,7 @@ def parse_args() -> argparse.Namespace:
         "--hybrid-evaluation-dbsf-min-branch-candidates",
         type=int,
         default=1,
-        help="DBSF minimum branch candidates for the Prompt 15 harness",
+        help="DBSF minimum branch candidates for the hybrid harness",
     )
     parser.add_argument(
         "--multivector-recall-gate",

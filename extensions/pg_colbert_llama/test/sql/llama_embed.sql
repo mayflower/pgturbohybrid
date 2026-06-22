@@ -117,7 +117,7 @@ END
 $allowed_models$;
 RESET pg_colbert_llama.allowed_models;
 
--- ============================================================ sparse (Prompt 13)
+-- ============================================================ sparse
 -- Deterministic stub sparse output: one term per token, weight = token length,
 -- duplicate tokens summed by default.  'red apple red fruit' has red twice.
 SELECT array_length(turbohybrid_sparse_vector_term_ids(
@@ -160,7 +160,7 @@ SELECT array_length(llama_embed_sparse_batch('sauerkraut-modern', ARRAY['hello w
 SELECT turbohybrid_sparse_vector_terms(llama_embed_sparse('sauerkraut-modern', 'quick brown fox')) =
        turbohybrid_sparse_vector_terms(llama_embed_sparse('sauerkraut-modern', 'quick brown fox')) AS deterministic;
 
--- sparse backend seam (Prompt 14): the default build links the deterministic
+-- sparse backend seam: the default build links the deterministic
 -- stub, which supports sparse output but reports implemented=false.
 SELECT llama_embed_sparse_model_info('sauerkraut-modern')->>'engine' AS sparse_engine,
        (llama_embed_sparse_model_info('sauerkraut-modern')->>'implemented')::bool AS implemented,

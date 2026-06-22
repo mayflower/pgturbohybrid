@@ -1,4 +1,4 @@
--- Exact f32 rerank of quantized sparse candidate bands (Prompt 7).
+-- Exact f32 rerank of quantized sparse candidate bands.
 SET client_min_messages = warning;
 CREATE EXTENSION IF NOT EXISTS vector;
 CREATE EXTENSION IF NOT EXISTS pgturbohybrid;

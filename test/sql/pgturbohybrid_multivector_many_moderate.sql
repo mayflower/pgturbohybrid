@@ -210,7 +210,7 @@ CREATE TABLE mv_reservoir_docs (
   colbert turbohybrid_multivector
 );
 
--- This isolates Prompt 6's reservoir mitigation from graph ANN recall: the
+-- This isolates the reservoir mitigation from graph ANN recall: the
 -- exact-token source admits the globally good document through one query token,
 -- but score-only doc_candidate_k truncation drops it before exact rerank.
 INSERT INTO mv_reservoir_docs VALUES

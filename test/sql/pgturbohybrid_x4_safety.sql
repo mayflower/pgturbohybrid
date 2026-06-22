@@ -508,7 +508,7 @@ BEGIN
     k := d -> 'kernels';
     c := d -> 'cache';
 
-    -- The Prompt-1 / resolve-once hot-path flags live inside the nested view and
+    -- The resolve-once hot-path flags live inside the nested view and
     -- must equal their flat counterparts (single source of truth).
     IF (k ->> 'u8_batch_x4_enabled') IS DISTINCT FROM (s ->> 'dense_u8_batch_x4_enabled') THEN
         RAISE EXCEPTION 'nested u8_batch_x4_enabled=% != flat=%',

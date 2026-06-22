@@ -102,7 +102,7 @@ separate graph/token ANN miss from structural token-top-K admission loss. The
 admission budget records include `candidate_source` and
 `exact_token_scan_nodes_scored` when the oracle is active.
 
-Prompt 10 adds two document-level validation modes:
+Two document-level validation modes are available:
 `--multivector-candidate-source exact_doc_scan` and
 `--multivector-candidate-source doc_graph_prototype`. `exact_doc_scan` is the
 exact document MaxSim oracle. `doc_graph_prototype` is intentionally
@@ -130,7 +130,7 @@ heap-reranking a large prefix. Explicit `proxy_vector`, `centroid_lite`, and
 `quantized_inverted_experimental` sources keep their own candidate paths so the
 grid can still measure those branches directly.
 
-Prompt 11 has started the production document-node path by adding the persisted
+The production document-node path adds the persisted
 index option `multivector_graph = token_nodes | document_nodes` and the
 `turbohybrid_index_stats()` field `multivector_graph_mode`. Explicit
 `document_nodes` indexes store one graph node per heap document plus an explicit
@@ -1032,8 +1032,8 @@ Query-only and admission-only runs build a single-column multivector
 TurboHybrid index. The benchmark adds the lexical `body_tsv` or
 `learned_sparse_tsv` index column only when the selected methods, sparse
 candidate source, BM25 injection, learned-sparse input, or
-`--hybrid-evaluation-harness` need it. This keeps Prompt 2 admission sweeps from
-paying Prompt 15 hybrid index-build cost unless the run is explicitly measuring
+`--hybrid-evaluation-harness` need it. This keeps admission sweeps from
+paying hybrid index-build cost unless the run is explicitly measuring
 hybrid behavior.
 
 When the document-node grid includes the default physical layout
@@ -1084,7 +1084,7 @@ Latest qrel-backed 10k smoke evidence for one document-node configuration
 qrels from the precomputed dataset. It produced `recall@10 = 0.166667`,
 `ndcg@10 = 0.207257`, exact top-1 admission `0.333333`, and exact top-10
 admission recall `0.400000` at budget `1600`. Treat this as a qrel-loader and
-single-profile admission smoke; the Prompt 2 acceptance gate is satisfied by
+single-profile admission smoke; the admission acceptance gate is satisfied by
 10k evidence only once the grid comparison covers token baselines, exact scans,
 storage modes, and proxy branches.
 
@@ -1096,11 +1096,11 @@ scored `recall@10 = 0.666667`, `ndcg@10 = 0.600137`, exact top-1 admission
 scored `recall@10 = 0.300000`, `ndcg@10 = 0.375685`, exact top-1 admission
 `0.333333`, and top-10 admission `0.300000`; exact document scan and plain
 fallback both reached `recall@10 = 0.800000` and full admission. This is a
-comparison-smoke result, not Prompt 2 acceptance evidence, because `f16`, `sq8`,
+comparison-smoke result, not full acceptance evidence, because `f16`, `sq8`,
 wider EF/oversampling settings, and the normal 10k query set were intentionally
 omitted.
 
-A wider 10k qrel-backed Prompt 2 run used `10` selected DBpedia queries, `382`
+A wider 10k qrel-backed run used `10` selected DBpedia queries, `382`
 loaded qrels, no pooling, `auto` cache, storage `f32,f16,sq8`, EF
 `50,100,200,400,800`, oversampling `1,2,4,8`, and budgets `50,800,1600`.
 The report emitted `69` comparison rows. At budget `1600`, exact document scan
@@ -1243,7 +1243,7 @@ measuring first-row corpus slices. If a precomputed slice still has no loaded
 qrels, the benchmark leaves BEIR metric objects empty; treat that as a broken or
 non-quality slice, not retrieval-quality evidence.
 
-For the end-to-end hybrid comparison from Prompt 15, add
+For the end-to-end hybrid comparison, add
 `--hybrid-evaluation-harness`. The harness rebuilds a document-node index and
 runs these modes over the same loaded DBpedia queries:
 
@@ -1255,7 +1255,7 @@ runs these modes over the same loaded DBpedia queries:
 - `proxy_vector_document_nodes`
 - `learned_sparse_exact_maxsim`
 
-For Prompt 14 research comparisons, add
+For research comparisons, add
 `--hybrid-evaluation-modes exact_scan,document_nodes,learned_sparse_exact_maxsim,quantized_inverted_experimental`
 to compare the persisted quantized-inverted branch against the learned-sparse
 and exact/document-node baselines in the same harness. This mode is supported
@@ -1270,7 +1270,7 @@ default profile. JSON and Markdown output also include profile-specific
 recommendations for `latency`, `balanced`, `quality`, and `high_recall`, each
 with the selected mode and the concrete GUCs needed to reproduce that profile.
 
-A 10k qrel-backed Prompt 15 run on the same `10` queries and `382` qrels
+A 10k qrel-backed hybrid run on the same `10` queries and `382` qrels
 compared `exact_scan`, `document_nodes`, BM25 admission, BM25 RRF, BM25 DBSF,
 and `proxy_vector_document_nodes`. `exact_scan` remained the quality, balanced,
 and high-recall recommendation with `recall@10 = 0.667143`, `ndcg@10 =
@@ -1288,7 +1288,7 @@ remains a conditional harness path until exported sparse vectors are supplied.
 The learned-sparse branch was validated separately on a 1k qrel-backed slice
 using deterministic text-hash sparse JSONL fixtures under `.nix-dev/tmp`
 (`1867` document rows read, `1000` loaded documents updated, and `10` query
-rows updated). This is a code-path validation for the Prompt 15 harness, not a
+rows updated). This is a code-path validation for the hybrid harness, not a
 SPLADE/SPLATE quality claim. On `1000` docs, `10` queries, and `382` loaded
 qrels, `learned_sparse_exact_maxsim` produced nonzero sparse candidates
 (`p50 = 68`, mean `55.4`), reached `recall@10 = 0.681429`,
@@ -1459,7 +1459,7 @@ defaulted BM25 budgets when dense admission is not truncated. If admission is
 underfilled or truncated by `doc_candidate_k`/accumulator limits, the scheduler
 keeps the BM25 branch wide and reports the reason in `hybrid_budget_reason`.
 
-Use `--multivector-recall-gate` for the deterministic Prompt 12 gate that does
+Use `--multivector-recall-gate` for the deterministic recall gate that does
 not require DBpedia, BEIR qrels, or a GGUF model. It builds a tiny synthetic
 many-moderate corpus where exact MaxSim top-1 is `good`, while low-budget
 token-node candidate generation admits only single-token spike documents. The

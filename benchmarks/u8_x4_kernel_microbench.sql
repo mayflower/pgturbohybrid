@@ -1,4 +1,4 @@
--- ns/code microbenchmark of the dense 4-bit scoring kernels (Prompt 2).
+-- ns/code microbenchmark of the dense 4-bit scoring kernels.
 --
 -- turbohybrid_scorer_bench(query, doc, bits, ncodes, iters) times a tight loop
 -- that scores `ncodes` cache/RAM-resident 4-bit codes under each kernel and

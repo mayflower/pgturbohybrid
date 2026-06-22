@@ -1,4 +1,4 @@
-# On-disk metadata corruption hardening (prompt 7).
+# On-disk metadata corruption hardening.
 #
 # For three index shapes -- a dense turbohybrid index (graph metapage path), a
 # hybrid dense+tsvector index (BM25 metadata path), and a sparse-only index

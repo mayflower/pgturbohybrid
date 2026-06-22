@@ -1,4 +1,4 @@
--- Sparse delta insert/update/delete + compaction (Prompt 11).
+-- Sparse delta insert/update/delete + compaction.
 SET client_min_messages = warning;
 CREATE EXTENSION IF NOT EXISTS vector;
 CREATE EXTENSION IF NOT EXISTS pgturbohybrid;

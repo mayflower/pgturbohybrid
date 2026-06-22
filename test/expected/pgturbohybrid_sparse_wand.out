@@ -1,4 +1,4 @@
--- Block-max WAND pruning for sparse postings (Prompt 9): WAND-on must return
+-- Block-max WAND pruning for sparse postings: WAND-on must return
 -- the same top-k as WAND-off (exact), pruning must reduce scored documents, and
 -- indexes built without a block-max directory fall back to exact accumulation.
 SET client_min_messages = warning;

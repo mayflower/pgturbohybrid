@@ -1,4 +1,4 @@
-"""Shared benchmark provenance metadata (prompt 11).
+"""Shared benchmark provenance metadata.
 
 A benchmark number is only trustworthy if a reader can tell *what* produced it.
 This module collects the provenance every pgturbohybrid benchmark claim should

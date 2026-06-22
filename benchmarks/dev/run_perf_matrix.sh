@@ -113,7 +113,7 @@ run_category_matrix() {
 
 if [[ -n "${OLD_PGVECTOR_REF:-}" ]]; then
 	echo "OLD_PGVECTOR_REF=$OLD_PGVECTOR_REF was provided." | tee -a "$CATEGORY_TXT"
-	echo "Old patched-branch comparison is handled by Prompt 13 compare_old_branch.sh and is not run by this local matrix yet." | tee -a "$CATEGORY_TXT"
+	echo "Old patched-branch comparison is handled by compare_old_branch.sh and is not run by this local matrix yet." | tee -a "$CATEGORY_TXT"
 fi
 
 echo "$SUMMARY_JSON"

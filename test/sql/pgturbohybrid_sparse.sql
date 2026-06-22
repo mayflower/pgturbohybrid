@@ -1,4 +1,4 @@
--- Canonical sparse-vector builder + inspection helpers (Prompt 1).
+-- Canonical sparse-vector builder + inspection helpers.
 SET client_min_messages = warning;
 CREATE EXTENSION IF NOT EXISTS vector;
 CREATE EXTENSION IF NOT EXISTS pgturbohybrid;

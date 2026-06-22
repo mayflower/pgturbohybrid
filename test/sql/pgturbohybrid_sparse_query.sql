@@ -1,4 +1,4 @@
--- sparse_query payload + <~*> exact scalar distance (Prompt 2).
+-- sparse_query payload + <~*> exact scalar distance.
 SET client_min_messages = warning;
 CREATE EXTENSION IF NOT EXISTS vector;
 CREATE EXTENSION IF NOT EXISTS pgturbohybrid;
@@ -57,7 +57,7 @@ SELECT turbohybrid_sparse_vector_build(ARRAY[1]::int4[], ARRAY[1.0]::float4[])
 DROP TABLE sp_docs;
 
 -- A sparse-only index (no dense/multivector graph key) builds via the
--- sparse-primary node space (prompt 12): node identity comes from a dedicated
+-- sparse-primary node space: node identity comes from a dedicated
 -- node-map chain.  Build/scan/DML are exercised in pgturbohybrid_sparse_primary;
 -- here we only confirm the create path is accepted.
 CREATE TABLE sp_idx (id int, s turbohybrid_sparse_vector);

@@ -1,4 +1,4 @@
--- SIMD/scalar result parity for the sparse SoA scoring kernels (Prompt 8).
+-- SIMD/scalar result parity for the sparse SoA scoring kernels.
 -- Asserts that the AVX2/NEON q8/q16 kernels return the same ranking as the
 -- scalar reference across block/tail boundaries; rerank is disabled so the raw
 -- quantized kernel output is what is compared. Not a latency benchmark.

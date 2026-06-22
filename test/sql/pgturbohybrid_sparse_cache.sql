@@ -1,4 +1,4 @@
--- Backend-local sparse cache + memory estimator (Prompt 10).
+-- Backend-local sparse cache + memory estimator.
 SET client_min_messages = warning;
 CREATE EXTENSION IF NOT EXISTS vector;
 CREATE EXTENSION IF NOT EXISTS pgturbohybrid;

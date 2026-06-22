@@ -1,4 +1,4 @@
--- Native dense+sparse index build and sparse-as-sole-ORDER-BY scan (Prompt 4):
+-- Native dense+sparse index build and sparse-as-sole-ORDER-BY scan:
 -- exact float32 OR-accumulation over the inverted index, ranked by inner
 -- product, with MVCC node liveness.
 SET client_min_messages = warning;
@@ -13,7 +13,7 @@ INSERT INTO sp_scan VALUES
   (3, '[0,0,1,0]', turbohybrid_sparse_vector_build(ARRAY[4]::int4[],   ARRAY[9.0]::float4[])),
   (4, '[0,0,0,1]', turbohybrid_sparse_vector_build(ARRAY[2,5]::int4[], ARRAY[2.0,3.0]::float4[]));
 
--- Dense+sparse index now builds (Prompt 4 lifts the dense-present gate).
+-- Dense+sparse index now builds (the dense-present gate is lifted).
 -- Pin exact f32 postings (sparse_quant_bits=0) so the distances below are exact;
 -- quantized (q8/q16) postings are exercised in pgturbohybrid_sparse_quant.
 CREATE INDEX sp_scan_idx ON sp_scan
