@@ -92,8 +92,11 @@ if ! grep -qE '"PostgreSQL"[[:space:]]*:[[:space:]]*"14\.' META.json; then
 	fail "META.json runtime prereq PostgreSQL is not 14.x"
 fi
 
-# --- release notes for the current tag (CI only) ----------------------------
-if [[ -n "${GITHUB_REF_NAME:-}" ]]; then
+# --- release notes for the current tag (tag builds only) --------------------
+# Only require a release-notes file on an actual tag build. On a branch push
+# (e.g. the lint workflow on main) GITHUB_REF_TYPE is "branch" and
+# GITHUB_REF_NAME is the branch name, which must not trigger this check.
+if [[ "${GITHUB_REF_TYPE:-}" == "tag" && -n "${GITHUB_REF_NAME:-}" ]]; then
 	notes="docs/release-notes/github-${GITHUB_REF_NAME}.md"
 	if [[ ! -f "$notes" ]]; then
 		fail "release notes file missing for tag ${GITHUB_REF_NAME}: create $notes"
