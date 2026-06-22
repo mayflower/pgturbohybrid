@@ -339,7 +339,7 @@
               '';
 
               colbertLlamaEnv = ''
-                export PATH="${postgresWithLlamaExtensions}/bin:$PATH"
+                export PATH="${postgresWithExtensions}/bin:$PATH"
                 export TH_ENV_NAME="''${TH_COLBERT_LLAMA_ENV_NAME:-${commonEnv.TH_ENV_NAME}-colbert-llama}"
                 export TH_PGPORT="''${TH_COLBERT_LLAMA_PGPORT:-55433}"
                 export PGPORT="$TH_PGPORT"
@@ -688,10 +688,8 @@
                 pgvector
                 pgturbohybrid
                 pgColbertLlamaStub
-                pgColbertLlamaLlama
                 colbertStubInstallcheck
                 postgresWithExtensions
-                postgresWithLlamaExtensions
                 scripts
                 commonEnv
                 ;

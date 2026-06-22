@@ -16,6 +16,7 @@
 #include "pgturbohybrid.h"
 #include "pgturbohybrid_am.h"
 #include "pgturbohybrid_multivector.h"
+#include "pgturbohybrid_sparse.h"
 #include "lib/stringinfo.h"
 #include "miscadmin.h"
 #include "nodes/bitmapset.h"
@@ -871,6 +872,18 @@ pgturbohybrid_estimate_memory(PG_FUNCTION_ARGS)
 
 	relation_close(index, AccessShareLock);
 	PG_RETURN_JSONB_P(PgturbohybridJsonbEndObject(&jsonState));
+}
+
+FUNCTION_PREFIX PG_FUNCTION_INFO_V1(pgturbohybrid_sparse_compact);
+FUNCTION_PREFIX Datum
+pgturbohybrid_sparse_compact(PG_FUNCTION_ARGS)
+{
+	Oid			indexOid = PG_GETARG_OID(0);
+	Relation	index = relation_open(indexOid, AccessShareLock);
+
+	PgturbohybridSparseMaybeCompact(index, true);
+	relation_close(index, AccessShareLock);
+	PG_RETURN_BOOL(true);
 }
 
 FUNCTION_PREFIX PG_FUNCTION_INFO_V1(pgturbohybrid_index_stats);
