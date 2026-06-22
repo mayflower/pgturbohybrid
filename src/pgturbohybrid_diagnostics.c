@@ -499,7 +499,7 @@ PgturbohybridJsonbAddBranchPlan(PgturbohybridJsonbState *state,
 
 	PgturbohybridJsonbAddString(state, "multivector_branch_plan",
 								PgturbohybridBranchPlanModeName(plan->mode));
-	PgturbohybridJsonbAddInt64(state, "branch_count", count);
+	PgturbohybridJsonbAddInt64(state, PGTURBOHYBRID_DIAG_KEY_BRANCH_COUNT, count);
 	PgturbohybridJsonbAddStringArray(state, "branch_kinds", kinds, count);
 	PgturbohybridJsonbAddUint32Array(state, "branch_candidate_counts",
 									 candidateCounts, count);
@@ -507,7 +507,7 @@ PgturbohybridJsonbAddBranchPlan(PgturbohybridJsonbState *state,
 								   truncated, count);
 	PgturbohybridJsonbAddUint64Array(state, "branch_latency_us",
 									 latencyUs, count);
-	PgturbohybridJsonbAddString(state, "branch_fusion_mode",
+	PgturbohybridJsonbAddString(state, PGTURBOHYBRID_DIAG_KEY_BRANCH_FUSION_MODE,
 								plan->fusionMode[0] != '\0' ?
 								plan->fusionMode : "none");
 	PgturbohybridJsonbAddUint32Array(state, "branch_candidate_limits",
@@ -2326,11 +2326,11 @@ PgturbohybridEmitNestedScanStats(PgturbohybridJsonbState *state,
 	 * resident footprint duplicated across concurrent clients. */
 	PgturbohybridJsonbAddString(state, "native_cache_mode",
 								PgturbohybridGraphNativeCacheModeName(c->nativeCacheMode));
-	PgturbohybridJsonbAddString(state, "native_cache_policy",
+	PgturbohybridJsonbAddString(state, PGTURBOHYBRID_DIAG_KEY_NATIVE_CACHE_POLICY,
 								PgturbohybridNativeCachePolicyName(c->nativeCachePolicy));
-	PgturbohybridJsonbAddString(state, "native_cache_scope",
+	PgturbohybridJsonbAddString(state, PGTURBOHYBRID_DIAG_KEY_NATIVE_CACHE_SCOPE,
 								PgturbohybridGraphNativeCacheScopeName(c->nativeCacheMode));
-	PgturbohybridJsonbAddBool(state, "native_cache_used",
+	PgturbohybridJsonbAddBool(state, PGTURBOHYBRID_DIAG_KEY_NATIVE_CACHE_USED,
 							  c->nativeCacheUsed);
 	PgturbohybridJsonbAddString(state, "native_cache_reason",
 								PgturbohybridGraphNativeCacheReasonName(c->nativeCacheReason));
@@ -2702,7 +2702,7 @@ PgturbohybridEmitNestedScanStats(PgturbohybridJsonbState *state,
 							   s->query.denseCandidatesEffective);
 	PgturbohybridJsonbAddInt64(state, PGTURBOHYBRID_DIAG_KEY_DENSE_K_EFFECTIVE,
 							   s->query.denseCandidatesEffective);
-	PgturbohybridJsonbAddBool(state, "dense_k_defaulted", s->query.denseKDefaulted);
+	PgturbohybridJsonbAddBool(state, PGTURBOHYBRID_DIAG_KEY_DENSE_K_DEFAULTED, s->query.denseKDefaulted);
 	PgturbohybridJsonbAddInt64(state, "final_k_requested", s->query.finalKRequested);
 	PgturbohybridJsonbAddInt64(state, PGTURBOHYBRID_DIAG_KEY_FINAL_K_EFFECTIVE, s->query.finalKEffective);
 	PgturbohybridJsonbAddInt64(state, "detected_sql_limit", s->query.detectedSqlLimit);
@@ -3335,17 +3335,17 @@ pgturbohybrid_last_scan_stats(PG_FUNCTION_ARGS)
 	PgturbohybridJsonbAddString(&state, "index_shape",
 								scanStats.indexShape[0] != '\0' ?
 								scanStats.indexShape : "unknown");
-	PgturbohybridJsonbAddBool(&state, "bm25_branch_available",
+	PgturbohybridJsonbAddBool(&state, PGTURBOHYBRID_DIAG_KEY_BM25_BRANCH_AVAILABLE,
 							  scanStats.bm25BranchAvailable);
-	PgturbohybridJsonbAddBool(&state, "dense_branch_used",
+	PgturbohybridJsonbAddBool(&state, PGTURBOHYBRID_DIAG_KEY_DENSE_BRANCH_USED,
 							  scanStats.denseBranchUsed);
-	PgturbohybridJsonbAddBool(&state, "multivector_branch_used",
+	PgturbohybridJsonbAddBool(&state, PGTURBOHYBRID_DIAG_KEY_MULTIVECTOR_BRANCH_USED,
 							  scanStats.multivectorBranchUsed);
-	PgturbohybridJsonbAddBool(&state, "bm25_branch_used",
+	PgturbohybridJsonbAddBool(&state, PGTURBOHYBRID_DIAG_KEY_BM25_BRANCH_USED,
 							  scanStats.bm25BranchUsed);
-	PgturbohybridJsonbAddBool(&state, "sparse_branch_available",
+	PgturbohybridJsonbAddBool(&state, PGTURBOHYBRID_DIAG_KEY_SPARSE_BRANCH_AVAILABLE,
 							  scanStats.sparseBranchAvailable);
-	PgturbohybridJsonbAddBool(&state, "sparse_branch_used",
+	PgturbohybridJsonbAddBool(&state, PGTURBOHYBRID_DIAG_KEY_SPARSE_BRANCH_USED,
 							  scanStats.sparseBranchUsed);
 	PgturbohybridJsonbAddInt64(&state, "sparse_terms",
 							   scanStats.sparseTerms);
@@ -3780,11 +3780,11 @@ pgturbohybrid_last_scan_stats(PG_FUNCTION_ARGS)
 	 */
 	PgturbohybridJsonbAddString(&state, "native_cache_mode",
 								PgturbohybridGraphNativeCacheModeName(pgturbohybrid_last_graph_native_cache_mode));
-	PgturbohybridJsonbAddString(&state, "native_cache_policy",
+	PgturbohybridJsonbAddString(&state, PGTURBOHYBRID_DIAG_KEY_NATIVE_CACHE_POLICY,
 								PgturbohybridNativeCachePolicyName(pgturbohybrid_last_graph_native_cache_policy));
-	PgturbohybridJsonbAddString(&state, "native_cache_scope",
+	PgturbohybridJsonbAddString(&state, PGTURBOHYBRID_DIAG_KEY_NATIVE_CACHE_SCOPE,
 								PgturbohybridGraphNativeCacheScopeName(pgturbohybrid_last_graph_native_cache_mode));
-	PgturbohybridJsonbAddBool(&state, "native_cache_used",
+	PgturbohybridJsonbAddBool(&state, PGTURBOHYBRID_DIAG_KEY_NATIVE_CACHE_USED,
 							  pgturbohybrid_last_graph_native_cache_used);
 	PgturbohybridJsonbAddString(&state, "native_cache_reason",
 								PgturbohybridGraphNativeCacheReasonName(pgturbohybrid_last_graph_native_cache_reason));
@@ -4566,13 +4566,13 @@ pgturbohybrid_last_scan_stats(PG_FUNCTION_ARGS)
 							   scanStats.multivectorCandidatesEffective);
 	PgturbohybridJsonbAddInt64(&state, "multivector_k_effective",
 							   scanStats.multivectorCandidatesEffective);
-	PgturbohybridJsonbAddBool(&state, "dense_k_defaulted",
+	PgturbohybridJsonbAddBool(&state, PGTURBOHYBRID_DIAG_KEY_DENSE_K_DEFAULTED,
 							  scanStats.denseKDefaulted);
 	PgturbohybridJsonbAddInt64(&state, "bm25_candidates_effective",
 							   scanStats.bm25CandidatesEffective);
-	PgturbohybridJsonbAddInt64(&state, "bm25_k_effective",
+	PgturbohybridJsonbAddInt64(&state, PGTURBOHYBRID_DIAG_KEY_BM25_K_EFFECTIVE,
 							   scanStats.bm25CandidatesEffective);
-	PgturbohybridJsonbAddBool(&state, "bm25_k_defaulted",
+	PgturbohybridJsonbAddBool(&state, PGTURBOHYBRID_DIAG_KEY_BM25_K_DEFAULTED,
 							  scanStats.bm25KDefaulted);
 	PgturbohybridJsonbAddBool(&state, "bm25_cache_hit",
 							  scanStats.bm25CacheHit);

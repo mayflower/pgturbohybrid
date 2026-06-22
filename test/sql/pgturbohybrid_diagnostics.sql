@@ -25,11 +25,26 @@ WITH s AS (SELECT turbohybrid_last_scan_stats() AS j)
 SELECT k AS stable_key,
        (j ? k) AS present,
        jsonb_typeof(j -> k) AS jsonb_type
+-- This list MUST be the complete set of keys marked **stable** in
+-- docs/diagnostics-schema.md, which is also the set of PGTURBOHYBRID_DIAG_KEY_*
+-- constants in src/pgturbohybrid_diagnostics.h. Keep all three in sync.
 FROM s, unnest(ARRAY[
+  -- query / scan shape
   'scan_orchestration', 'score_mode', 'dimensions', 'quantization_bits',
-  'final_k_effective', 'dense_branch_used', 'dense_scorer', 'graph_storage_kind',
-  'dense_k_effective', 'graph_visited_nodes', 'graph_scored_codes',
-  'branch_count', 'branch_fusion_mode', 'native_cache_scope'
+  'final_k_effective',
+  -- dense branch
+  'dense_branch_used', 'dense_scorer', 'graph_storage_kind', 'dense_k_effective',
+  'dense_k_defaulted', 'graph_visited_nodes', 'graph_scored_codes',
+  -- bm25 branch
+  'bm25_branch_available', 'bm25_branch_used', 'bm25_k_effective', 'bm25_k_defaulted',
+  -- sparse branch
+  'sparse_branch_available', 'sparse_branch_used',
+  -- multivector branch
+  'multivector_branch_used',
+  -- fusion
+  'branch_count', 'branch_fusion_mode',
+  -- native cache
+  'native_cache_policy', 'native_cache_scope', 'native_cache_used'
 ]) AS k
 ORDER BY k;
 
