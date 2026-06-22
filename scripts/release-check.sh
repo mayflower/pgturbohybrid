@@ -134,6 +134,7 @@ check_no_generated_benchmark_artifacts
 check_no_root_scratch_files
 check_readme_links
 run "$ROOT_DIR/scripts/check-version-consistency.sh"
+run "$ROOT_DIR/scripts/check-build-file-parity.py"
 
 run make PG_CONFIG="$PG_CONFIG" clean
 run make PG_CONFIG="$PG_CONFIG"

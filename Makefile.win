@@ -4,6 +4,16 @@ EXTVERSION = 0.1.0
 SHLIB = pgturbohybrid.dll
 DATA = sql\pgturbohybrid--0.1.0.sql
 
+# Windows build profile (see docs/compatibility.md): MSVC compiles the portable
+# scalar code paths only. The hand-vectorized SIMD kernels the Unix build
+# compiles -- pgturbohybrid_quant_score_u8_x86, pgturbohybrid_quant_score_signed_x86,
+# pgturbohybrid_quant_score_arm, pgturbohybrid_sparse_simd_x86, and
+# pgturbohybrid_sparse_simd_arm -- are intentionally omitted from OBJS below:
+# they use GCC/clang __attribute__((target(...))) + __builtin_cpu_supports, which
+# MSVC does not support. Their callers fall back to the scalar implementations in
+# pgturbohybrid_quant_score / pgturbohybrid_sparse_score. This OBJS list must
+# otherwise match the Unix Makefile; scripts/check-build-file-parity.py enforces
+# that the only differences are those five intentionally-omitted SIMD objects.
 OBJS = \
 	src\pgturbohybrid.obj \
 	src\pgturbohybrid_am.obj \
@@ -36,7 +46,14 @@ OBJS = \
 
 HEADERS =
 
-REGRESS = extension pgturbohybrid pgturbohybrid_query security
+# Windows runs a reduced regression subset: the SIMD-independent,
+# output-deterministic tests (catalog comments, GUC defaults, diagnostic key
+# types, query-wrapper equivalence, and input fuzzing). Score/ranking-sensitive
+# suites (sparse, multivector, SIMD parity, rescore, querysplit, codebook,
+# u8split, nibble_guard, x4_safety) stay Unix-only because the MSVC scalar build
+# can differ in the last ULP of scored output. scripts/check-build-file-parity.py
+# enforces that this difference stays intentional. See docs/compatibility.md.
+REGRESS = extension pgturbohybrid pgturbohybrid_comments pgturbohybrid_gucs pgturbohybrid_diagnostics pgturbohybrid_query pgturbohybrid_wrappers pgturbohybrid_fuzz security
 REGRESS_OPTS = --inputdir=test
 
 SIMD_BUILD = portable

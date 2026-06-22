@@ -32,6 +32,35 @@ make PGTURBOHYBRID_REQUIRE_VECTOR_HEADER=1
 
 to force the build to fail if pgvector headers are not installed.
 
+## Platform Build Profiles
+
+On Linux and macOS (GCC/clang) the full `Makefile` compiles the hand-vectorized
+SIMD kernels and runs the complete regression suite.
+
+The Windows build (`Makefile.win`, MSVC/`nmake`) is a **reduced-coverage
+profile**, and this is intentional, not drift:
+
+- **Sources.** MSVC cannot compile the architecture-specific SIMD kernels
+  (`pgturbohybrid_quant_score_u8_x86`, `pgturbohybrid_quant_score_signed_x86`,
+  `pgturbohybrid_quant_score_arm`, `pgturbohybrid_sparse_simd_x86`,
+  `pgturbohybrid_sparse_simd_arm`) because they rely on GCC/clang
+  `__attribute__((target(...)))` and `__builtin_cpu_supports`. The Windows build
+  omits those objects and uses the portable scalar fallbacks in
+  `pgturbohybrid_quant_score` / `pgturbohybrid_sparse_score`. Results are
+  identical; only the kernel that computes them differs.
+- **Tests.** Windows runs the SIMD-independent, output-deterministic regression
+  tests (extension install, catalog comments, GUC defaults, diagnostic key
+  types, query-wrapper equivalence, input fuzzing, security). Score- and
+  ranking-sensitive suites (sparse, multivector, SIMD parity, rescore, and the
+  dense kernel tests) stay Unix-only because the MSVC scalar build can differ in
+  the last ULP of scored output, which would produce spurious regression diffs
+  rather than real failures.
+
+`scripts/check-build-file-parity.py` (run by `scripts/release-check.sh`)
+enforces that the only source-object difference between the two Makefiles is the
+documented SIMD allowlist above, so accidental drift is caught when a new `.c`
+file is added.
+
 ## Runtime Checks
 
 At install time, `sql/pgturbohybrid--0.1.0.sql` checks:
