@@ -77,4 +77,5 @@ jobs:
             gh release view "$GITHUB_REF_NAME" >/dev/null 2>&1 && break
             echo "waiting for release $GITHUB_REF_NAME ..."; sleep 10
           done
-          gh release upload "$GITHUB_REF_NAME" "$ZIP" --clobber
+          sha256sum "$ZIP" > "$ZIP.sha256"
+          gh release upload "$GITHUB_REF_NAME" "$ZIP" "$ZIP.sha256" --clobber

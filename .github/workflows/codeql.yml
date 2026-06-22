@@ -1,0 +1,58 @@
+name: codeql
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  schedule:
+    - cron: '37 4 * * 1'
+  workflow_dispatch:
+
+jobs:
+  analyze:
+    name: analyze ${{ matrix.language }}
+    runs-on: ubuntu-24.04
+    permissions:
+      actions: read
+      contents: read
+      security-events: write
+    strategy:
+      fail-fast: false
+      matrix:
+        language: [cpp, python]
+    env:
+      PG_CONFIG: /usr/lib/postgresql/17/bin/pg_config
+    steps:
+      - uses: actions/checkout@v6
+
+      - uses: ankane/setup-postgres@v1
+        if: matrix.language == 'cpp'
+        with:
+          postgres-version: 17
+          dev-files: true
+
+      - name: Build and install upstream pgvector
+        if: matrix.language == 'cpp'
+        run: |
+          PGVECTOR_DIR="${RUNNER_TEMP:-$PWD/.deps}/pgvector-v0.8.2"
+          rm -rf "$PGVECTOR_DIR"
+          git clone --depth 1 --branch v0.8.2 https://github.com/pgvector/pgvector.git "$PGVECTOR_DIR"
+          make -C "$PGVECTOR_DIR"
+          sudo --preserve-env=PG_CONFIG make -C "$PGVECTOR_DIR" install
+
+      - uses: github/codeql-action/init@v3
+        with:
+          languages: ${{ matrix.language }}
+
+      # C/C++ must be built after CodeQL init so the compiler invocations are traced.
+      - name: Build pgturbohybrid (cpp)
+        if: matrix.language == 'cpp'
+        run: make clean && make
+
+      - uses: github/codeql-action/autobuild@v3
+        if: matrix.language == 'python'
+
+      - uses: github/codeql-action/analyze@v3
+        with:
+          category: "/language:${{ matrix.language }}"

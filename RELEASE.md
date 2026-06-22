@@ -113,4 +113,6 @@ misreading it.
 
 `REINDEX` is not required for SQL-only diagnostic changes that do not affect
 stored index pages. While the extension is alpha, expect a `REINDEX` across
-alpha tags; see [docs/operations.md](docs/operations.md).
+alpha tags; see [docs/operations.md](docs/operations.md). The full format
+contract (constants, page kinds, rejection rules) is in
+[docs/storage-format.md](docs/storage-format.md).

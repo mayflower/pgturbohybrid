@@ -1,0 +1,39 @@
+name: lint
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  scripts-and-docs:
+    name: shellcheck + consistency checks
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: ShellCheck shell scripts
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y shellcheck
+          git ls-files '*.sh' | xargs --no-run-if-empty shellcheck -S warning
+
+      - name: Docs link check (all markdown, not just README)
+        run: python3 scripts/check-doc-links.py
+
+      - name: Version consistency
+        run: scripts/check-version-consistency.sh
+
+      - name: Build-file parity (Makefile vs Makefile.win)
+        run: python3 scripts/check-build-file-parity.py
+
+      - name: Public API ledger consistency
+        run: python3 scripts/check-api-ledger.py
+
+  dependency-review:
+    name: dependency review
+    if: github.event_name == 'pull_request'
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/dependency-review-action@v4

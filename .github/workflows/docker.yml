@@ -80,6 +80,7 @@ jobs:
           build-args: |
             PG_MAJOR=${{ matrix.pg_major }}
             PGVECTOR_REF=${{ env.PGVECTOR_REF }}
-          provenance: false
+          provenance: mode=max
+          sbom: true
           cache-from: type=gha,scope=pg${{ matrix.pg_major }}
           cache-to: type=gha,mode=max,scope=pg${{ matrix.pg_major }}

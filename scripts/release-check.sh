@@ -99,37 +99,6 @@ check_no_root_scratch_files() {
 	fi
 }
 
-check_readme_links() {
-	python3 - <<'PY'
-from pathlib import Path
-import re
-import sys
-
-readme = Path("README.md")
-text = readme.read_text(encoding="utf-8")
-targets = []
-
-targets.extend(match.group(1) for match in re.finditer(r"\[[^\]]+\]\(([^)]+)\)", text))
-targets.extend(match.group(1) for match in re.finditer(r'<img[^>]+src="([^"]+)"', text))
-
-missing = []
-for target in targets:
-    if target.startswith(("http://", "https://", "mailto:")):
-        continue
-    path = target.split("#", 1)[0]
-    if not path:
-        continue
-    if not Path(path).exists():
-        missing.append(target)
-
-if missing:
-    print("README links point at missing local files:", file=sys.stderr)
-    for target in missing:
-        print(f"  {target}", file=sys.stderr)
-    sys.exit(1)
-PY
-}
-
 printf '==> checking clean tree\n'
 require_clean_tree
 
@@ -137,7 +106,7 @@ printf '\n==> checking release hygiene\n'
 check_no_local_paths
 check_no_generated_benchmark_artifacts
 check_no_root_scratch_files
-check_readme_links
+run "$ROOT_DIR/scripts/check-doc-links.py"
 run "$ROOT_DIR/scripts/check-version-consistency.sh"
 run "$ROOT_DIR/scripts/check-build-file-parity.py"
 run "$ROOT_DIR/scripts/check-api-ledger.py"

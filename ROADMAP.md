@@ -23,9 +23,10 @@ experimental (see [docs/beta-scope.md](docs/beta-scope.md)).
 - [ ] Declared beta scope: dense-only, dense+BM25, RRF, support diagnostics — stable
 - [ ] Sparse / multivector / ColBERT / `quantized_inverted_experimental` / `pg_colbert_llama` explicitly outside the beta support promise
 - [ ] Upgrade-script policy exercised by a test (`ALTER EXTENSION pgturbohybrid UPDATE`) once a 0.1.x version exists
-- [ ] Release artifacts carry SHA256 checksums; a Docker/package signing + provenance/SBOM plan is documented
+- [x] Release artifacts carry SHA256 checksums (source archives in release.yml; .deb/.rpm/Windows zip in the package workflows); Docker images build with `provenance: mode=max` + SBOM
+- [ ] Cryptographic signing of release artifacts (cosign/GPG) — needs maintainer keys
 - [ ] Public API ledger exists and is drift-tested ([docs/api-ledger.json](docs/api-ledger.json))
-- [ ] Storage-format compatibility document
+- [x] Storage-format compatibility document ([docs/storage-format.md](docs/storage-format.md))
 - [ ] Long-running concurrency/recovery tests run in scheduled CI (not only locally)
 - [ ] Multivector beta blocker resolved or fenced (see below)
 

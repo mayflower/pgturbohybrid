@@ -489,6 +489,11 @@ Prototype names such as `tq_*` should not appear in user-facing reloptions.
 
 ## Access Method Storage
 
+The full on-disk format contract (identity/version constants, page kinds,
+metapage layout, corruption-rejection rules, and which changes require
+`REINDEX`) lives in [storage-format.md](storage-format.md); this section is the
+overview.
+
 The standalone index access method is named `turbohybrid` and is installed by
 the SQL handler `turbohybrid_handler(internal)`, which maps to the C symbol
 `pgturbohybrid_handler`. Its on-disk identity is owned by this extension and

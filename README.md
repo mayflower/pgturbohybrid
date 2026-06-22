@@ -549,6 +549,7 @@ see [NOTICE](NOTICE) and [docs/architecture.md](docs/architecture.md).
 - [Easy fast setup](docs/fast_setup.md)
 - [Diagnostics schema](docs/diagnostics-schema.md)
 - [Operations guide](docs/operations.md)
+- [Storage format](docs/storage-format.md)
 - [Profile tuning](docs/profile-tuning.md)
 - [Sparse (SPLADE) embeddings](docs/sparse-embeddings.md)
 - [Multivector late interaction](docs/multivector-late-interaction.md)

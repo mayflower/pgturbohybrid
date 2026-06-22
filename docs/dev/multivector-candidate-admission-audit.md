@@ -9,77 +9,77 @@ reconstructed into document candidates after per-query-token graph searches.
 
 ### Build-Time Token-Node Layout
 
-- [src/pgturbohybrid_multivector.h](/Volumes/CrucialMusic/src/pgturbohybrid/src/pgturbohybrid_multivector.h:24)
+- [src/pgturbohybrid_multivector.h](../../src/pgturbohybrid_multivector.h#L24)
   defines the multivector identity contract:
   - `nodeId` is one document token/subvector.
   - `docId` is the document-level identity used for result aggregation.
   - `heaptid` is the heap tuple resolved from the document map.
   - `tokenOrdinal` is the subvector position inside the document.
-- [src/pgturbohybrid_quant.c](/Volumes/CrucialMusic/src/pgturbohybrid/src/pgturbohybrid_quant.c:1281)
+- [src/pgturbohybrid_quant.c](../../src/pgturbohybrid_quant.c#L1281)
   `PgturbohybridGraphIndexIsMultiVector()` detects multivector indexes from the
   dense key type.
-- [src/pgturbohybrid_quant.c](/Volumes/CrucialMusic/src/pgturbohybrid/src/pgturbohybrid_quant.c:1311)
+- [src/pgturbohybrid_quant.c](../../src/pgturbohybrid_quant.c#L1311)
   `PgturbohybridGraphAppendBuildMultiVector()` expands each heap tuple into one
   graph node per document subvector. It assigns one `docId`, stores the heap TID
   in `TqMultiVectorDocMapEntry`, and writes `nodeId -> (docId, tokenOrdinal)` in
   `TqMultiVectorNodeMapEntry`.
-- [src/pgturbohybrid_quant.h](/Volumes/CrucialMusic/src/pgturbohybrid/src/pgturbohybrid_quant.h:213)
+- [src/pgturbohybrid_quant.h](../../src/pgturbohybrid_quant.h#L213)
   records build-state sidecar arrays for the node map and document map.
-- [src/pgturbohybrid_quant.h](/Volumes/CrucialMusic/src/pgturbohybrid/src/pgturbohybrid_quant.h:460)
+- [src/pgturbohybrid_quant.h](../../src/pgturbohybrid_quant.h#L460)
   records scan-time loaded docmap state.
 
 ### Query-Time Candidate Path
 
-- [src/pgturbohybrid_quant.c](/Volumes/CrucialMusic/src/pgturbohybrid/src/pgturbohybrid_quant.c:9290)
+- [src/pgturbohybrid_quant.c](../../src/pgturbohybrid_quant.c#L9290)
   `PgturbohybridGraphCollectMultiVectorDenseCandidates()` is the main
   multivector dense candidate collection function.
-- [src/pgturbohybrid_quant.c](/Volumes/CrucialMusic/src/pgturbohybrid/src/pgturbohybrid_quant.c:9396)
+- [src/pgturbohybrid_quant.c](../../src/pgturbohybrid_quant.c#L9396)
   computes the per-token raw-hit target and adaptive widening bounds from the
   multivector GUCs, `targetK`, and index node count.
-- [src/pgturbohybrid_quant.c](/Volumes/CrucialMusic/src/pgturbohybrid/src/pgturbohybrid_quant.c:9433)
+- [src/pgturbohybrid_quant.c](../../src/pgturbohybrid_quant.c#L9433)
   estimates and checks accumulator capacity before allocating the document hash
   and slab arrays.
-- [src/pgturbohybrid_quant.c](/Volumes/CrucialMusic/src/pgturbohybrid/src/pgturbohybrid_quant.c:9474)
+- [src/pgturbohybrid_quant.c](../../src/pgturbohybrid_quant.c#L9474)
   chooses the persistent docmap sidecar or a heap-TID hash fallback for resolving
   token-node hits into document IDs.
-- [src/pgturbohybrid_quant.c](/Volumes/CrucialMusic/src/pgturbohybrid/src/pgturbohybrid_quant.c:9509)
+- [src/pgturbohybrid_quant.c](../../src/pgturbohybrid_quant.c#L9509)
   iterates query subvectors.
-- [src/pgturbohybrid_quant.c](/Volumes/CrucialMusic/src/pgturbohybrid/src/pgturbohybrid_quant.c:9546)
+- [src/pgturbohybrid_quant.c](../../src/pgturbohybrid_quant.c#L9546)
   calls `PgturbohybridGraphRunTraversalPass()` once for the current query
   subvector/token.
-- [src/pgturbohybrid_quant.c](/Volumes/CrucialMusic/src/pgturbohybrid/src/pgturbohybrid_quant.c:9434)
+- [src/pgturbohybrid_quant.c](../../src/pgturbohybrid_quant.c#L9434)
   `PgturbohybridMultiVectorExactTokenScan()` is the developer oracle for
   `turbohybrid.multivector_candidate_source = 'exact_token_scan'`. It scans all
   stored graph token nodes for each query token, batch-scores them through the
   existing quantized/exact graph scorer, retains the same bounded top raw hits,
   and then feeds the normal document accumulator.
-- [src/pgturbohybrid_quant.c](/Volumes/CrucialMusic/src/pgturbohybrid/src/pgturbohybrid_quant.c:9561)
+- [src/pgturbohybrid_quant.c](../../src/pgturbohybrid_quant.c#L9561)
   resolves `hits[i].nodeId` through the sidecar node map when available; the
   heap-TID hash fallback assigns a scan-local `docId` for older indexes.
-- [src/pgturbohybrid_quant.c](/Volumes/CrucialMusic/src/pgturbohybrid/src/pgturbohybrid_quant.c:9594)
+- [src/pgturbohybrid_quant.c](../../src/pgturbohybrid_quant.c#L9594)
   scans token hits, counts raw subvector hits, resolves doc IDs and heap TIDs,
   deduplicates per query token, and stops the token after
   `multivector_unique_docs_per_token` unique documents.
-- [src/pgturbohybrid_quant.c](/Volumes/CrucialMusic/src/pgturbohybrid/src/pgturbohybrid_quant.c:9233)
+- [src/pgturbohybrid_quant.c](../../src/pgturbohybrid_quant.c#L9233)
   `PgturbohybridMultiVectorAccumulateDoc()` updates the document-level
   approximate MaxSim accumulator.
-- [src/pgturbohybrid_quant.c](/Volumes/CrucialMusic/src/pgturbohybrid/src/pgturbohybrid_quant.c:9658)
+- [src/pgturbohybrid_quant.c](../../src/pgturbohybrid_quant.c#L9658)
   applies the final document candidate cap before exact rerank.
-- [src/pgturbohybrid_quant.c](/Volumes/CrucialMusic/src/pgturbohybrid/src/pgturbohybrid_quant.c:9680)
+- [src/pgturbohybrid_quant.c](../../src/pgturbohybrid_quant.c#L9680)
   exact-reranks the retained prefix with heap float32 MaxSim.
-- [src/pgturbohybrid_quant.c](/Volumes/CrucialMusic/src/pgturbohybrid/src/pgturbohybrid_quant.c:8741)
+- [src/pgturbohybrid_quant.c](../../src/pgturbohybrid_quant.c#L8741)
   `PgturbohybridMultiVectorExactHeapRerank()` fetches visible heap tuples and
   computes `distance = -TqMultiVectorMaxSim(query, doc)`.
 
 ### GUC And Stats Plumbing
 
-- [src/pgturbohybrid_am.c](/Volumes/CrucialMusic/src/pgturbohybrid/src/pgturbohybrid_am.c:135)
+- [src/pgturbohybrid_am.c](../../src/pgturbohybrid_am.c#L135)
   defines current multivector GUC defaults.
-- [src/pgturbohybrid_am.c](/Volumes/CrucialMusic/src/pgturbohybrid/src/pgturbohybrid_am.c:5419)
+- [src/pgturbohybrid_am.c](../../src/pgturbohybrid_am.c#L5419)
   registers the SQL-visible GUCs.
-- [src/pgturbohybrid_quant.h](/Volumes/CrucialMusic/src/pgturbohybrid/src/pgturbohybrid_quant.h:334)
+- [src/pgturbohybrid_quant.h](../../src/pgturbohybrid_quant.h#L334)
   defines `TqDenseCandidateStats`, including multivector fields.
-- [src/pgturbohybrid_stats.c](/Volumes/CrucialMusic/src/pgturbohybrid/src/pgturbohybrid_stats.c:2834)
+- [src/pgturbohybrid_diagnostics.c](../../src/pgturbohybrid_diagnostics.c#L2834)
   serializes multivector scan stats into `turbohybrid_last_scan_stats()`.
 
 ## Current Control Flow

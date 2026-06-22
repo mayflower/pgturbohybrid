@@ -76,7 +76,8 @@ jobs:
             gh release view "$GITHUB_REF_NAME" >/dev/null 2>&1 && break
             echo "waiting for release $GITHUB_REF_NAME ..."; sleep 10
           done
-          gh release upload "$GITHUB_REF_NAME" ./*.deb --clobber
+          for f in ./*.deb; do sha256sum "$f" > "$f.sha256"; done
+          gh release upload "$GITHUB_REF_NAME" ./*.deb ./*.deb.sha256 --clobber
 
   rpm:
     name: rpm pg${{ matrix.pg_major }}
@@ -142,4 +143,5 @@ jobs:
             gh release view "$GITHUB_REF_NAME" >/dev/null 2>&1 && break
             echo "waiting for release $GITHUB_REF_NAME ..."; sleep 10
           done
-          gh release upload "$GITHUB_REF_NAME" ./*.rpm --clobber
+          for f in ./*.rpm; do sha256sum "$f" > "$f.sha256"; done
+          gh release upload "$GITHUB_REF_NAME" ./*.rpm ./*.rpm.sha256 --clobber
