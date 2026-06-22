@@ -34,26 +34,6 @@ FUNCTION_PREFIX PG_FUNCTION_INFO_V1(pgturbohybrid_l2_distance);
 FUNCTION_PREFIX PG_FUNCTION_INFO_V1(pgturbohybrid_negative_inner_product);
 FUNCTION_PREFIX PG_FUNCTION_INFO_V1(pgturbohybrid_cosine_distance);
 
-#define PGTURBOHYBRID_SPARSE_VECTOR_VERSION 1
-#define PGTURBOHYBRID_SPARSE_VECTOR_FIELD_NONE (-1)
-
-typedef struct PgturbohybridSparseVectorEntry
-{
-	int32		termId;
-	float4		weight;
-	int16		fieldId;
-	uint16		reserved;
-} PgturbohybridSparseVectorEntry;
-
-typedef struct PgturbohybridSparseVector
-{
-	int32		vl_len_;
-	uint16		version;
-	uint16		flags;
-	uint32		count;
-	/* entries follow */
-} PgturbohybridSparseVector;
-
 static PgturbohybridSparseVectorEntry *PgturbohybridSparseVectorEntries(PgturbohybridSparseVector *sparse);
 static void PgturbohybridSparseVectorValidate(PgturbohybridSparseVector *sparse);
 static void PgturbohybridSparseVectorAppendTerm(StringInfo buf,
@@ -63,6 +43,7 @@ static Size PgturbohybridQueryMultiVectorOffset(PgturbohybridQueryHeader *query)
 static Size PgturbohybridQueryTsQueryOffset(PgturbohybridQueryHeader *query);
 static Size PgturbohybridQueryTokenWeightsOffset(PgturbohybridQueryHeader *query);
 static Size PgturbohybridQueryTokenMaskOffset(PgturbohybridQueryHeader *query);
+static Size PgturbohybridQuerySparseOffset(PgturbohybridQueryHeader *query);
 static Size PgturbohybridQueryAlignedSize(Size value);
 static Size PgturbohybridQuerySizeAdd(Size a, Size b);
 static Size PgturbohybridQueryTokenWeightsBytes(PgturbohybridQueryHeader *query);
@@ -96,6 +77,18 @@ PgturbohybridSparseVectorValidate(PgturbohybridSparseVector *sparse)
 		ereport(ERROR,
 				(errcode(ERRCODE_DATA_EXCEPTION),
 				 errmsg("malformed turbohybrid_sparse_vector payload")));
+}
+
+/* Public accessor: validate a detoasted sparse-vector datum, return entries. */
+const PgturbohybridSparseVectorEntry *
+PgturbohybridSparseVectorData(struct varlena *sv, uint32 *count)
+{
+	PgturbohybridSparseVector *sparse = (PgturbohybridSparseVector *) sv;
+
+	PgturbohybridSparseVectorValidate(sparse);
+	if (count != NULL)
+		*count = sparse->count;
+	return PgturbohybridSparseVectorEntries(sparse);
 }
 
 static void
@@ -147,7 +140,15 @@ static Size
 PgturbohybridQueryTokenMaskOffset(PgturbohybridQueryHeader *query)
 {
 	return PgturbohybridQuerySizeAdd(PgturbohybridQueryTokenWeightsOffset(query),
-									 PgturbohybridQueryAlignedSize(PgturbohybridQueryTokenWeightsBytes(query)));
+									   PgturbohybridQueryAlignedSize(PgturbohybridQueryTokenWeightsBytes(query)));
+}
+
+/* Sparse payload is the last segment, after the token mask. */
+static Size
+PgturbohybridQuerySparseOffset(PgturbohybridQueryHeader *query)
+{
+	return PgturbohybridQuerySizeAdd(PgturbohybridQueryTokenMaskOffset(query),
+									 PgturbohybridQueryAlignedSize(PgturbohybridQueryTokenMaskBytes(query)));
 }
 
 static Size
@@ -271,6 +272,18 @@ PgturbohybridQueryGetTsQuery(PgturbohybridQueryHeader *query)
 		return NULL;
 
 	return (TSQuery) ((char *) query + PgturbohybridQueryTsQueryOffset(query));
+}
+
+struct varlena *
+PgturbohybridQueryGetSparseVector(PgturbohybridQueryHeader *query)
+{
+	PgturbohybridQueryValidateFast(query);
+
+	if (!PgturbohybridQueryHasSparse(query))
+		return NULL;
+
+	return (struct varlena *) ((char *) query +
+							   PgturbohybridQuerySparseOffset(query));
 }
 
 const char *

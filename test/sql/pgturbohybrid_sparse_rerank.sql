@@ -1,0 +1,91 @@
+-- Exact f32 rerank of quantized sparse candidate bands.
+SET client_min_messages = warning;
+CREATE EXTENSION IF NOT EXISTS vector;
+CREATE EXTENSION IF NOT EXISTS pgturbohybrid;
+RESET client_min_messages;
+
+-- Construct a q8 order inversion for query {10:1, 20:1}:
+--   doc C term 10 weight 25500 sets term 10's scale to 100, so docs A (549) and
+--   B (451) both quantize to the 500 bucket -- erasing A's exact term-10 edge --
+--   while term 20 (small, lossless) lets B overtake A under q8.
+--   exact:  A = 549+1 = 550  >  B = 451+51 = 502   -> order [C, A, B]
+--   q8:     A ~ 500+1 = 501  <  B ~ 500+51 = 551   -> order [C, B, A]
+CREATE TABLE sr (id int, embedding vector(3), s turbohybrid_sparse_vector);
+INSERT INTO sr VALUES
+  (1, '[1,0,0]', turbohybrid_sparse_vector_build(ARRAY[10,20]::int4[], ARRAY[549.0,1.0]::float4[])),
+  (2, '[0,1,0]', turbohybrid_sparse_vector_build(ARRAY[10,20]::int4[], ARRAY[451.0,51.0]::float4[])),
+  (3, '[0,0,1]', turbohybrid_sparse_vector_build(ARRAY[10]::int4[],    ARRAY[25500.0]::float4[]));
+
+CREATE INDEX sr_q8 ON sr USING turbohybrid (embedding vector_cosine_turbohybrid_ops, s sparse_ip_turbohybrid_ops)
+  WITH (sparse_quant_bits = 8);
+SET enable_seqscan = off;
+
+-- rerank = off: approximate (q8) order, with A and B inverted (C, B, A).
+SET turbohybrid.sparse_rerank = off;
+SELECT id FROM sr
+ORDER BY s <~*> turbohybrid_query(
+  sparse_query => turbohybrid_sparse_vector_build(ARRAY[10,20]::int4[], ARRAY[1.0,1.0]::float4[]))
+LIMIT 10;
+DO $$
+DECLARE st jsonb;
+BEGIN
+  SET LOCAL enable_seqscan = off;
+  SET LOCAL turbohybrid.sparse_rerank = off;
+  PERFORM id FROM sr ORDER BY s <~*> turbohybrid_query(
+    sparse_query => turbohybrid_sparse_vector_build(ARRAY[10,20]::int4[], ARRAY[1.0,1.0]::float4[])) LIMIT 10;
+  st := turbohybrid_last_scan_stats();
+  IF st->>'sparse_rerank_mode' != 'off' OR (st->>'sparse_exact_rerank_count')::int != 0 THEN
+    RAISE EXCEPTION 'rerank=off should not rerank: %', st;
+  END IF;
+END $$;
+
+-- rerank = auto (default for q8): exact rerank fixes the order (C, A, B).
+SET turbohybrid.sparse_rerank = auto;
+SELECT id FROM sr
+ORDER BY s <~*> turbohybrid_query(
+  sparse_query => turbohybrid_sparse_vector_build(ARRAY[10,20]::int4[], ARRAY[1.0,1.0]::float4[]))
+LIMIT 10;
+DO $$
+DECLARE st jsonb;
+BEGIN
+  SET LOCAL enable_seqscan = off;
+  SET LOCAL turbohybrid.sparse_rerank = auto;
+  PERFORM id FROM sr ORDER BY s <~*> turbohybrid_query(
+    sparse_query => turbohybrid_sparse_vector_build(ARRAY[10,20]::int4[], ARRAY[1.0,1.0]::float4[])) LIMIT 10;
+  st := turbohybrid_last_scan_stats();
+  IF st->>'sparse_rerank_mode' != 'auto' OR (st->>'sparse_exact_rerank_count')::int < 1 THEN
+    RAISE EXCEPTION 'rerank=auto should rerank quantized scans: %', st;
+  END IF;
+  IF st->>'sparse_exact_rerank_topk_changed' != 'true' THEN
+    RAISE EXCEPTION 'rerank should report the top-k order changed: %', st;
+  END IF;
+END $$;
+RESET turbohybrid.sparse_rerank;
+DROP INDEX sr_q8;
+
+-- f32 index: auto rerank is a no-op (already exact); order is the exact order.
+CREATE INDEX sr_f32 ON sr USING turbohybrid (embedding vector_cosine_turbohybrid_ops, s sparse_ip_turbohybrid_ops)
+  WITH (sparse_quant_bits = 0);
+SELECT id FROM sr
+ORDER BY s <~*> turbohybrid_query(
+  sparse_query => turbohybrid_sparse_vector_build(ARRAY[10,20]::int4[], ARRAY[1.0,1.0]::float4[]))
+LIMIT 10;
+DO $$
+DECLARE st jsonb;
+BEGIN
+  SET LOCAL enable_seqscan = off;
+  PERFORM id FROM sr ORDER BY s <~*> turbohybrid_query(
+    sparse_query => turbohybrid_sparse_vector_build(ARRAY[10,20]::int4[], ARRAY[1.0,1.0]::float4[])) LIMIT 10;
+  st := turbohybrid_last_scan_stats();
+  IF (st->>'sparse_exact_rerank_count')::int != 0 THEN
+    RAISE EXCEPTION 'f32 index should skip auto rerank: %', st;
+  END IF;
+END $$;
+DROP INDEX sr_f32;
+
+-- sparse_exact_storage = sidecar is rejected.
+CREATE INDEX ON sr USING turbohybrid (embedding vector_cosine_turbohybrid_ops, s sparse_ip_turbohybrid_ops)
+  WITH (sparse_exact_storage = 'sidecar');
+
+RESET enable_seqscan;
+DROP TABLE sr;

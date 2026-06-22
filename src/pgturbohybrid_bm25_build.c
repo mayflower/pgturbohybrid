@@ -21,17 +21,7 @@
 #include "pgturbohybrid_am.h"
 #include "pgturbohybrid_bm25.h"
 
-typedef struct PgturbohybridTidNode
-{
-	ItemPointerData tid;
-	uint32		nodeId;
-} PgturbohybridTidNode;
 
-typedef struct PgturbohybridNodeState
-{
-	ItemPointerData tid;
-	bool		live;
-} PgturbohybridNodeState;
 
 typedef struct PgturbohybridBm25Collector
 {
@@ -1186,7 +1176,7 @@ PgturbohybridBm25BuildCallback(Relation index, ItemPointer tid, Datum *values,
 		pfree(vector);
 }
 
-static PgturbohybridTidNode *
+PgturbohybridTidNode *
 PgturbohybridReadNodeMap(Relation index, uint32 *count)
 {
 	PgturbohybridGraphMetaPageData meta;
@@ -1275,7 +1265,7 @@ PgturbohybridReadNodeMap(Relation index, uint32 *count)
 	return map;
 }
 
-static PgturbohybridNodeState *
+PgturbohybridNodeState *
 PgturbohybridReadNodeStates(Relation index, PgturbohybridGraphMetaPageData *meta, uint32 *count)
 {
 	PgturbohybridNodeState *states;

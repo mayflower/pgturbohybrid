@@ -111,6 +111,7 @@ FUNCTION_PREFIX PG_FUNCTION_INFO_V1(pgturbohybrid_multivector_model_info);
 FUNCTION_PREFIX PG_FUNCTION_INFO_V1(pgturbohybrid_experimental_compact_code_score);
 
 static Oid	pgturbohybrid_multivector_type_oid = InvalidOid;
+static Oid	pgturbohybrid_sparse_vector_type_oid = InvalidOid;
 extern char *pgturbohybrid_multivector_model_name;
 extern int	pgturbohybrid_multivector_max_doc_vectors;
 extern int	pgturbohybrid_multivector_max_query_vectors;
@@ -443,6 +444,38 @@ PgturbohybridMultiVectorTypeOid(void)
 						CStringGetDatum("turbohybrid_multivector"),
 						ObjectIdGetDatum(schemaOid));
 	return pgturbohybrid_multivector_type_oid;
+}
+
+Oid
+PgturbohybridSparseVectorTypeOid(void)
+{
+	Oid			extensionOid;
+	Oid			schemaOid;
+
+	if (OidIsValid(pgturbohybrid_sparse_vector_type_oid))
+		return pgturbohybrid_sparse_vector_type_oid;
+
+	extensionOid = get_extension_oid("pgturbohybrid", true);
+	if (!OidIsValid(extensionOid))
+		return InvalidOid;
+
+	schemaOid = PgturbohybridExtensionSchema(extensionOid);
+	if (!OidIsValid(schemaOid))
+		return InvalidOid;
+
+	pgturbohybrid_sparse_vector_type_oid =
+		GetSysCacheOid2(TYPENAMENSP, Anum_pg_type_oid,
+						CStringGetDatum("turbohybrid_sparse_vector"),
+						ObjectIdGetDatum(schemaOid));
+	return pgturbohybrid_sparse_vector_type_oid;
+}
+
+bool
+PgturbohybridTypeIsSparseVector(Oid typeOid)
+{
+	Oid			sparseOid = PgturbohybridSparseVectorTypeOid();
+
+	return OidIsValid(sparseOid) && typeOid == sparseOid;
 }
 
 bool

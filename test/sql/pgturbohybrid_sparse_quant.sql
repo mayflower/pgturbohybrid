@@ -1,0 +1,134 @@
+-- Quantized sparse postings: q8/q16 per-term-linear, f32, and the offset16_soa /
+-- varint encodings with a scalar dequantizing scorer.
+SET client_min_messages = warning;
+CREATE EXTENSION IF NOT EXISTS vector;
+CREATE EXTENSION IF NOT EXISTS pgturbohybrid;
+RESET client_min_messages;
+
+CREATE TABLE sq (id int, embedding vector(3), s turbohybrid_sparse_vector);
+-- term 2 max weight = 255, so q8 scale = 1.0 and q16 scale = 1/257 (65535=255*257):
+-- integer weights <= 255 dequantize exactly for both bit widths.
+INSERT INTO sq VALUES
+  (1, '[1,0,0]', turbohybrid_sparse_vector_build(ARRAY[2]::int4[],   ARRAY[51.0]::float4[])),
+  (2, '[0,1,0]', turbohybrid_sparse_vector_build(ARRAY[2]::int4[],   ARRAY[255.0]::float4[])),
+  (3, '[0,0,1]', turbohybrid_sparse_vector_build(ARRAY[2]::int4[],   ARRAY[153.0]::float4[])),
+  (4, '[1,1,0]', turbohybrid_sparse_vector_build(ARRAY[5,7]::int4[], ARRAY[10.0,2.5]::float4[]));
+
+-- invalid bit width rejected.
+CREATE INDEX ON sq USING turbohybrid (embedding vector_cosine_turbohybrid_ops, s sparse_ip_turbohybrid_ops)
+  WITH (sparse_quant_bits = 4);
+
+SET enable_seqscan = off;
+
+-- q8 (default mode), offset16_soa (default encoding): lossless here.
+-- Query {2:1.0} -> scores 255,153,51 (doc4 has no term 2).
+CREATE INDEX sq_q8 ON sq USING turbohybrid (embedding vector_cosine_turbohybrid_ops, s sparse_ip_turbohybrid_ops)
+  WITH (sparse_quant_bits = 8);
+SELECT id, round((s <~*> turbohybrid_query(
+  sparse_query => turbohybrid_sparse_vector_build(ARRAY[2]::int4[], ARRAY[1.0]::float4[])))::numeric, 4) AS dist
+FROM sq
+ORDER BY s <~*> turbohybrid_query(
+  sparse_query => turbohybrid_sparse_vector_build(ARRAY[2]::int4[], ARRAY[1.0]::float4[]))
+LIMIT 10;
+DO $$
+DECLARE st jsonb;
+BEGIN
+  SET LOCAL enable_seqscan = off;
+  PERFORM id FROM sq ORDER BY s <~*> turbohybrid_query(
+    sparse_query => turbohybrid_sparse_vector_build(ARRAY[2]::int4[], ARRAY[1.0]::float4[])) LIMIT 10;
+  st := turbohybrid_last_scan_stats();
+  -- sparse_score_kernel is SIMD-host-dependent (see pgturbohybrid_sparse_simd_parity);
+  -- the decode kernel is always scalar.
+  IF st->>'sparse_quant_bits' != '8' OR st->>'sparse_quant_mode' != 'per_term_linear'
+     OR st->>'sparse_postings_encoding' != 'offset16_soa'
+     OR st->>'sparse_decode_kernel' != 'scalar' THEN
+    RAISE EXCEPTION 'unexpected q8 stats: %', st;
+  END IF;
+END $$;
+DROP INDEX sq_q8;
+
+-- varint encoding, q8: identical exact scores and order.
+CREATE INDEX sq_vi ON sq USING turbohybrid (embedding vector_cosine_turbohybrid_ops, s sparse_ip_turbohybrid_ops)
+  WITH (sparse_quant_bits = 8, sparse_postings_encoding = 'varint');
+SELECT id, round((s <~*> turbohybrid_query(
+  sparse_query => turbohybrid_sparse_vector_build(ARRAY[2]::int4[], ARRAY[1.0]::float4[])))::numeric, 4) AS dist
+FROM sq
+ORDER BY s <~*> turbohybrid_query(
+  sparse_query => turbohybrid_sparse_vector_build(ARRAY[2]::int4[], ARRAY[1.0]::float4[]))
+LIMIT 10;
+DO $$
+DECLARE st jsonb;
+BEGIN
+  SET LOCAL enable_seqscan = off;
+  PERFORM id FROM sq ORDER BY s <~*> turbohybrid_query(
+    sparse_query => turbohybrid_sparse_vector_build(ARRAY[2]::int4[], ARRAY[1.0]::float4[])) LIMIT 10;
+  st := turbohybrid_last_scan_stats();
+  IF st->>'sparse_postings_encoding' != 'varint' THEN
+    RAISE EXCEPTION 'expected varint encoding: %', st;
+  END IF;
+END $$;
+DROP INDEX sq_vi;
+
+-- q16: also lossless on this data (same exact scores).
+CREATE INDEX sq_q16 ON sq USING turbohybrid (embedding vector_cosine_turbohybrid_ops, s sparse_ip_turbohybrid_ops)
+  WITH (sparse_quant_bits = 16);
+SELECT id, round((s <~*> turbohybrid_query(
+  sparse_query => turbohybrid_sparse_vector_build(ARRAY[2]::int4[], ARRAY[1.0]::float4[])))::numeric, 4) AS dist
+FROM sq
+ORDER BY s <~*> turbohybrid_query(
+  sparse_query => turbohybrid_sparse_vector_build(ARRAY[2]::int4[], ARRAY[1.0]::float4[]))
+LIMIT 10;
+DROP INDEX sq_q16;
+
+-- exact f32 (bits=0): same exact scores; quant_mode reported as f32.
+CREATE INDEX sq_f32 ON sq USING turbohybrid (embedding vector_cosine_turbohybrid_ops, s sparse_ip_turbohybrid_ops)
+  WITH (sparse_quant_bits = 0);
+SELECT id, round((s <~*> turbohybrid_query(
+  sparse_query => turbohybrid_sparse_vector_build(ARRAY[2]::int4[], ARRAY[1.0]::float4[])))::numeric, 4) AS dist
+FROM sq
+ORDER BY s <~*> turbohybrid_query(
+  sparse_query => turbohybrid_sparse_vector_build(ARRAY[2]::int4[], ARRAY[1.0]::float4[]))
+LIMIT 10;
+DO $$
+DECLARE st jsonb;
+BEGIN
+  SET LOCAL enable_seqscan = off;
+  PERFORM id FROM sq ORDER BY s <~*> turbohybrid_query(
+    sparse_query => turbohybrid_sparse_vector_build(ARRAY[2]::int4[], ARRAY[1.0]::float4[])) LIMIT 10;
+  st := turbohybrid_last_scan_stats();
+  IF st->>'sparse_quant_bits' != '0' OR st->>'sparse_quant_mode' != 'f32' THEN
+    RAISE EXCEPTION 'unexpected f32 stats: %', st;
+  END IF;
+END $$;
+DROP INDEX sq_f32;
+
+-- Unknown query term and a zero-weight term contribute nothing.
+CREATE INDEX sq_u ON sq USING turbohybrid (embedding vector_cosine_turbohybrid_ops, s sparse_ip_turbohybrid_ops)
+  WITH (sparse_quant_bits = 8);
+SELECT id FROM sq
+ORDER BY s <~*> turbohybrid_query(
+  sparse_query => turbohybrid_sparse_vector_build(ARRAY[999]::int4[], ARRAY[1.0]::float4[]))
+LIMIT 10;
+
+-- q8 with a non-lossless term (7: max 2.5): order preserved, scores within tolerance
+-- of exact.  doc4 weight 2.5; query {7:1.0} -> exact 2.5, q8 ~ 2.5 (1 candidate).
+DO $$
+DECLARE
+  q8 numeric;
+BEGIN
+  SET LOCAL enable_seqscan = off;
+  SELECT round((-(s <~*> turbohybrid_query(
+    sparse_query => turbohybrid_sparse_vector_build(ARRAY[7]::int4[], ARRAY[1.0]::float4[]))))::numeric, 3)
+  INTO q8
+  FROM sq
+  ORDER BY s <~*> turbohybrid_query(
+    sparse_query => turbohybrid_sparse_vector_build(ARRAY[7]::int4[], ARRAY[1.0]::float4[]))
+  LIMIT 1;
+  IF q8 IS NULL OR abs(q8 - 2.5) > 0.05 THEN
+    RAISE EXCEPTION 'q8 score % deviates from exact 2.5 beyond tolerance', q8;
+  END IF;
+END $$;
+DROP INDEX sq_u;
+
+RESET enable_seqscan;
+DROP TABLE sq;

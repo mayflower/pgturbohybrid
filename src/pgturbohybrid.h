@@ -146,6 +146,12 @@ typedef enum PgturbohybridMultiVectorRerankSource
 #define PGTURBOHYBRID_GRAPH_PAGE_KIND_BM25_IMPACT	13
 #define PGTURBOHYBRID_GRAPH_PAGE_KIND_BM25_DELTA_TERM 14
 #define PGTURBOHYBRID_GRAPH_PAGE_KIND_MULTIVECTOR_DOCMAP 15
+#define PGTURBOHYBRID_GRAPH_PAGE_KIND_SPARSE_META		16
+#define PGTURBOHYBRID_GRAPH_PAGE_KIND_SPARSE_LEXICON	17
+#define PGTURBOHYBRID_GRAPH_PAGE_KIND_SPARSE_POSTINGS	18
+#define PGTURBOHYBRID_GRAPH_PAGE_KIND_SPARSE_BLOCKMAX	19
+#define PGTURBOHYBRID_GRAPH_PAGE_KIND_SPARSE_DELTA		20
+#define PGTURBOHYBRID_GRAPH_PAGE_KIND_NODEMAP			21
 #define PGTURBOHYBRID_GRAPH_PAGE_KIND_MASK				0x00ff
 #define PGTURBOHYBRID_GRAPH_PAGE_GRAPH_OP_SHIFT		8
 
@@ -1081,7 +1087,14 @@ typedef struct PgturbohybridGraphMetaPageData
 	uint64		buildEdgeUs;
 	uint64		buildWriteUs;
 	uint32		buildWorkerCount;
-	uint32		buildReserved;
+	/* Anchor for the sparse inverted-index meta tuple (0 / InvalidBlockNumber =
+	 * no sparse branch).  Reuses the former buildReserved padding word, so the
+	 * metapage layout is unchanged. */
+	BlockNumber	tqSparseMetaStartBlkno;
+	/* Sparse-primary node space: when valid, node_id<->TID + liveness
+	 * come from this dedicated node-map chain instead of dense code tuples.  Zero
+	 * for dense-present indexes (added at struct end; memset-zeroed on build). */
+	BlockNumber	tqNodeMapStartBlkno;
 }			PgturbohybridGraphMetaPageData;
 
 typedef PgturbohybridGraphMetaPageData * PgturbohybridGraphMetaPage;

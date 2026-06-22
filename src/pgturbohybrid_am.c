@@ -86,6 +86,9 @@ int			pgturbohybrid_max_union_candidates = 100000;
 int			pgturbohybrid_default_dense_k = PGTURBOHYBRID_DEFAULT_DENSE_K;
 int			pgturbohybrid_default_bm25_k = PGTURBOHYBRID_DEFAULT_BM25_K;
 int			pgturbohybrid_default_rrf_k = PGTURBOHYBRID_DEFAULT_RRF_K;
+int			pgturbohybrid_sparse_delta_compaction_threshold = 1000;
+int			pgturbohybrid_sparse_hot_postings_cache_mb = 16;
+int			pgturbohybrid_sparse_hot_postings_cache_min_df = 256;
 uint64		pgturbohybrid_guc_generation = 1;
 int			pgturbohybrid_last_final_k_requested = 0;
 int			pgturbohybrid_last_final_k_effective = 0;
@@ -8073,6 +8076,122 @@ PgturbohybridDefineDefaultBudgetGUCs(void)
 							PGTURBOHYBRID_MAX_RRF_K,
 							PGC_USERSET, 0, PgturbohybridCheckDefaultRrfK,
 							PgturbohybridAssignQueryDefaultInt, NULL);
+}
+
+/*
+ * Discover which index key carries each retrieval signal, by type (not fixed
+ * position).  Validates structure: at most one of each kind, no unknown key
+ * types, 1..MAX key columns, at least one retrieval key.
+ */
+void
+PgturbohybridBuildIndexKeyMap(Relation index, IndexInfo *indexInfo,
+							  PgturbohybridIndexKeyMap *map)
+{
+	TupleDesc	desc = RelationGetDescr(index);
+	Oid			vectorOid = PgturbohybridVectorTypeOid();
+	int			keyCount;
+
+	map->denseKey = map->multivectorKey = map->sparseKey = map->bm25Key = -1;
+	map->graphKey = map->primaryKey = -1;
+	map->hasDense = map->hasMultivector = map->hasSparse = map->hasBm25 = false;
+
+	if (indexInfo != NULL)
+	{
+		keyCount = indexInfo->ii_NumIndexKeyAttrs;
+		if (indexInfo->ii_Expressions != NIL)
+			ereport(ERROR,
+					(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
+					 errmsg("pgturbohybrid expression indexes are not supported yet")));
+	}
+	else if (index->rd_index != NULL)
+		keyCount = index->rd_index->indnkeyatts;
+	else
+		keyCount = desc->natts;
+	map->keyCount = keyCount;
+
+	if (keyCount < 1 || keyCount > PGTURBOHYBRID_MAX_INDEX_KEYS)
+		ereport(ERROR,
+				(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
+				 errmsg("pgturbohybrid indexes support 1 to %d key columns",
+						PGTURBOHYBRID_MAX_INDEX_KEYS)));
+
+	if (desc->natts < keyCount)
+		ereport(ERROR,
+				(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
+				 errmsg("pgturbohybrid index tuple descriptor is missing key columns")));
+
+	for (int i = 0; i < keyCount; i++)
+	{
+		Oid			t = TupleDescAttr(desc, i)->atttypid;
+
+		if (OidIsValid(vectorOid) && t == vectorOid)
+		{
+			if (map->hasDense)
+				ereport(ERROR,
+						(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
+						 errmsg("pgturbohybrid index supports at most one vector key")));
+			map->denseKey = i;
+			map->hasDense = true;
+		}
+		else if (PgturbohybridTypeIsMultiVector(t))
+		{
+			if (map->hasMultivector)
+				ereport(ERROR,
+						(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
+						 errmsg("pgturbohybrid index supports at most one multivector key")));
+			map->multivectorKey = i;
+			map->hasMultivector = true;
+		}
+		else if (PgturbohybridTypeIsSparseVector(t))
+		{
+			if (map->hasSparse)
+				ereport(ERROR,
+						(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
+						 errmsg("pgturbohybrid index supports at most one sparse-vector key")));
+			map->sparseKey = i;
+			map->hasSparse = true;
+		}
+		else if (t == TSVECTOROID)
+		{
+			if (map->hasBm25)
+				ereport(ERROR,
+						(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
+						 errmsg("pgturbohybrid index supports at most one tsvector key")));
+			map->bm25Key = i;
+			map->hasBm25 = true;
+		}
+		else
+			ereport(ERROR,
+					(errcode(ERRCODE_DATATYPE_MISMATCH),
+					 errmsg("pgturbohybrid index key %d has unsupported type %s",
+							i + 1, format_type_be(t)),
+					 errdetail("Supported key types: vector, multivector, turbohybrid_sparse_vector, tsvector.")));
+	}
+
+	if (map->hasDense && map->hasMultivector)
+		ereport(ERROR,
+				(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
+				 errmsg("pgturbohybrid index supports at most one vector or multivector key")));
+
+	map->graphKey = map->hasDense ? map->denseKey :
+		(map->hasMultivector ? map->multivectorKey : -1);
+	map->primaryKey = map->graphKey >= 0 ? map->graphKey :
+		(map->hasSparse ? map->sparseKey :
+		 (map->hasBm25 ? map->bm25Key : -1));
+
+	if (map->primaryKey < 0)
+		ereport(ERROR,
+				(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
+				 errmsg("pgturbohybrid index requires a vector, multivector, sparse-vector, or tsvector key")));
+}
+
+int
+PgturbohybridIndexGraphKeyAttno(Relation index)
+{
+	PgturbohybridIndexKeyMap map;
+
+	PgturbohybridBuildIndexKeyMap(index, NULL, &map);
+	return map.graphKey;
 }
 
 void

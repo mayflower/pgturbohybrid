@@ -12,6 +12,7 @@
 #include "pgturbohybrid_multivector.h"
 
 #define PGTURBOHYBRID_DEFAULT_FINAL_K 10
+#define PGTURBOHYBRID_MAX_INDEX_KEYS 4
 #define PGTURBOHYBRID_MAX_DEFAULT_DENSE_K 10000
 #define PGTURBOHYBRID_MAX_DEFAULT_BM25_K 10000
 #define PGTURBOHYBRID_MAX_RRF_K 100000
@@ -35,6 +36,25 @@ typedef enum PgturbohybridMultiVectorDocMapSource
 	PGTURBOHYBRID_MULTIVECTOR_DOCMAP_SOURCE_HEAP_TID_HASH,
 	PGTURBOHYBRID_MULTIVECTOR_DOCMAP_SOURCE_SIDECAR
 }			PgturbohybridMultiVectorDocMapSource;
+
+/*
+ * Maps each index key attno to its branch role (dense, multivector, sparse,
+ * bm25).  Built by PgturbohybridBuildIndexKeyMap().
+ */
+typedef struct PgturbohybridIndexKeyMap
+{
+	int			denseKey;		/* plain vector key, or -1 */
+	int			multivectorKey; /* multivector key, or -1 */
+	int			sparseKey;		/* sparse-vector key, or -1 */
+	int			bm25Key;		/* tsvector/BM25 key, or -1 */
+	int			graphKey;		/* dense or multivector key, or -1 */
+	int			primaryKey;		/* node-space owner key, or -1 */
+	int			keyCount;
+	bool		hasDense;
+	bool		hasMultivector;
+	bool		hasSparse;
+	bool		hasBm25;
+} PgturbohybridIndexKeyMap;
 
 typedef struct PgturbohybridOptions
 {
@@ -83,6 +103,12 @@ typedef struct PgturbohybridOptions
 	int			hybridDefaultDenseK;
 	int			hybridDefaultBm25K;
 	int			hybridDefaultRrfK;
+	int			sparseQuantBits;
+	int			sparseQuantMode;
+	int			sparsePostingsEncoding;
+	int			sparseBlockSize;
+	int			sparseExactStorage;
+	bool		sparseBlockMax;
 }			PgturbohybridOptions;
 
 #define PGTURBOHYBRID_BRANCH_PLAN_MAX_BRANCHES 8
@@ -490,6 +516,9 @@ extern int	pgturbohybrid_max_union_candidates;
 extern int	pgturbohybrid_default_dense_k;
 extern int	pgturbohybrid_default_bm25_k;
 extern int	pgturbohybrid_default_rrf_k;
+extern int	pgturbohybrid_sparse_delta_compaction_threshold;
+extern int	pgturbohybrid_sparse_hot_postings_cache_mb;
+extern int	pgturbohybrid_sparse_hot_postings_cache_min_df;
 extern uint64 pgturbohybrid_guc_generation;
 extern int	pgturbohybrid_last_final_k_requested;
 extern int	pgturbohybrid_last_final_k_effective;
@@ -827,6 +856,9 @@ int			PgturbohybridCurrentLimit(void);
 void		PgturbohybridGetLastScanStatsSnapshot(PgturbohybridScanStatsSnapshot *stats);
 bool		PgturbohybridIndexHasLexical(Relation index);
 bool		PgturbohybridIndexGetLexicalDatum(Relation index, Datum *values,
-										bool *isnull, Datum *lexicalValue);
+											bool *isnull, Datum *lexicalValue);
+void		PgturbohybridBuildIndexKeyMap(Relation index, IndexInfo *indexInfo,
+										  PgturbohybridIndexKeyMap *map);
+int			PgturbohybridIndexGraphKeyAttno(Relation index);
 
 #endif
