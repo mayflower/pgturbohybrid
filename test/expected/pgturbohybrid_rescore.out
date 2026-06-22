@@ -20,6 +20,7 @@ SET enable_seqscan = off;
 SET jit = off;
 -- Exact-free (default) and exact_storage 4-bit native indexes over the same data.
 DROP TABLE IF EXISTS rb_free;
+NOTICE:  table "rb_free" does not exist, skipping
 CREATE TABLE rb_free (id int PRIMARY KEY, embedding vector(64), body_tsv tsvector);
 INSERT INTO rb_free(id, embedding, body_tsv)
 SELECT i,

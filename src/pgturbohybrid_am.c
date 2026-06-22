@@ -44,6 +44,7 @@
 #include "pgturbohybrid.h"
 #include "pgturbohybrid_multivector.h"
 #include "pgturbohybrid_query.h"
+#include "pgturbohybrid_sparse.h"
 #include "pgturbohybrid_quant.h"
 #include "pgturbohybrid_quant_score.h"
 #include "pgturbohybrid_am.h"
@@ -705,6 +706,35 @@ static relopt_enum_elt_def pgturbohybrid_multivector_context_mode_relopt_options
 static relopt_enum_elt_def pgturbohybrid_multivector_field_mode_relopt_options[] = {
 	{"off", PGTURBOHYBRID_MULTIVECTOR_FIELD_MODE_OFF},
 	{"weighted", PGTURBOHYBRID_MULTIVECTOR_FIELD_MODE_WEIGHTED},
+	{NULL, 0}
+};
+
+/* Sparse-vector reloptions */
+#define PGTURBOHYBRID_SPARSE_QUANT_MODE_F32 0
+#define PGTURBOHYBRID_SPARSE_QUANT_MODE_PER_TERM_LINEAR 1
+static relopt_enum_elt_def pgturbohybrid_sparse_quant_mode_relopt_options[] = {
+	{"f32", PGTURBOHYBRID_SPARSE_QUANT_MODE_F32},
+	{"per_term_linear", PGTURBOHYBRID_SPARSE_QUANT_MODE_PER_TERM_LINEAR},
+	{NULL, 0}
+};
+
+#define PGTURBOHYBRID_SPARSE_ENCODING_OPT_AUTO 0
+#define PGTURBOHYBRID_SPARSE_ENCODING_OPT_OFFSET16_SOA 1
+#define PGTURBOHYBRID_SPARSE_ENCODING_OPT_VARINT 2
+#define PGTURBOHYBRID_SPARSE_ENCODING_OPT_BITPACKED 3
+static relopt_enum_elt_def pgturbohybrid_sparse_encoding_relopt_options[] = {
+	{"auto", PGTURBOHYBRID_SPARSE_ENCODING_OPT_AUTO},
+	{"offset16_soa", PGTURBOHYBRID_SPARSE_ENCODING_OPT_OFFSET16_SOA},
+	{"varint", PGTURBOHYBRID_SPARSE_ENCODING_OPT_VARINT},
+	{"bitpacked", PGTURBOHYBRID_SPARSE_ENCODING_OPT_BITPACKED},
+	{NULL, 0}
+};
+
+#define PGTURBOHYBRID_SPARSE_EXACT_STORAGE_OFF 0
+#define PGTURBOHYBRID_SPARSE_EXACT_STORAGE_SIDECAR 1
+static relopt_enum_elt_def pgturbohybrid_sparse_exact_storage_relopt_options[] = {
+	{"off", PGTURBOHYBRID_SPARSE_EXACT_STORAGE_OFF},
+	{"sidecar", PGTURBOHYBRID_SPARSE_EXACT_STORAGE_SIDECAR},
 	{NULL, 0}
 };
 
@@ -2742,63 +2772,36 @@ PgturbohybridPathLexicalAttno(IndexPath *path)
 static void
 PgturbohybridValidateIndex(Relation index, IndexInfo *indexInfo)
 {
-	TupleDesc	desc = RelationGetDescr(index);
-	Oid			vectorOid;
-	Oid			denseType;
-	Oid			lexicalType = InvalidOid;
-	int			keyAttrs;
-	bool		hasLexical;
+	PgturbohybridIndexKeyMap map;
 
-	if (indexInfo != NULL)
+	PgturbohybridBuildIndexKeyMap(index, indexInfo, &map);
+
+	/*
+	 * Sparse-primary: a sparse-vector key with no dense/multivector
+	 * graph (sparse-only or sparse+BM25).  Node identity then comes from the
+	 * sparse-primary node-map chain instead of the dense graph, so there is no
+	 * graph key to require or position.  BM25-only (tsvector without a sparse or
+	 * graph key) remains unsupported and falls through to the error below.
+	 */
+	if (map.graphKey < 0)
 	{
-		keyAttrs = indexInfo->ii_NumIndexKeyAttrs;
-		if (keyAttrs != 1 && keyAttrs != 2)
-			ereport(ERROR,
-					(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
-					 errmsg("pgturbohybrid indexes require one or two key columns"),
-					 errdetail("Use one vector column, optionally followed by one tsvector column.")));
-
-		if (indexInfo->ii_Expressions != NIL)
-			ereport(ERROR,
-					(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
-					 errmsg("pgturbohybrid expression indexes are not supported yet")));
+		if (map.hasSparse)
+			return;
+		ereport(ERROR,
+				(errcode(ERRCODE_DATATYPE_MISMATCH),
+				 errmsg("pgturbohybrid index requires a vector, multivector, or sparse-vector key"),
+				 errhint("Add a vector or multivector key, or a turbohybrid_sparse_vector key, as an index column.")));
 	}
-	else if (index->rd_index != NULL)
-	{
-		keyAttrs = index->rd_index->indnkeyatts;
-		if (keyAttrs != 1 && keyAttrs != 2)
-			ereport(ERROR,
-					(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
-					 errmsg("pgturbohybrid indexes require one or two key columns"),
-					 errdetail("Use one vector column, optionally followed by one tsvector column.")));
-	}
-	else
-		keyAttrs = desc->natts;
 
-	if (desc->natts < keyAttrs)
+	/*
+	 * The graph key must be the first index column.  The dense/multivector
+	 * build and scan paths read it from key position 0; secondary keys (sparse,
+	 * bm25) are discovered by type and may follow in any order.
+	 */
+	if (map.graphKey != 0)
 		ereport(ERROR,
 				(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
-				 errmsg("pgturbohybrid index tuple descriptor is missing key columns")));
-
-	denseType = TupleDescAttr(desc, PGTURBOHYBRID_DENSE_KEY_INDEX)->atttypid;
-	vectorOid = PgturbohybridVectorTypeOid();
-	hasLexical = keyAttrs > PGTURBOHYBRID_LEXICAL_KEY_INDEX;
-	if (hasLexical)
-		lexicalType =
-			TupleDescAttr(desc, PGTURBOHYBRID_LEXICAL_KEY_INDEX)->atttypid;
-
-	if ((!OidIsValid(vectorOid) || denseType != vectorOid) &&
-		!PgturbohybridTypeIsMultiVector(denseType))
-		ereport(ERROR,
-				(errcode(ERRCODE_DATATYPE_MISMATCH),
-				 errmsg("pgturbohybrid first key must be type vector or multivector"),
-				 errdetail("Found %s.", format_type_be(denseType))));
-
-	if (hasLexical && lexicalType != TSVECTOROID)
-		ereport(ERROR,
-				(errcode(ERRCODE_DATATYPE_MISMATCH),
-				 errmsg("pgturbohybrid second key must be type tsvector"),
-				 errdetail("Found %s.", format_type_be(lexicalType))));
+				 errmsg("pgturbohybrid requires the vector or multivector key to be the first index column")));
 }
 
 static bool
@@ -7177,6 +7180,7 @@ static IndexBuildResult *
 pgturbohybridambuild(Relation heap, Relation index, IndexInfo *indexInfo)
 {
 	IndexBuildResult *result;
+	PgturbohybridIndexKeyMap map;
 
 	PgturbohybridValidateIndex(index, indexInfo);
 	result = pgturbohybridbuild(heap, index, indexInfo);
@@ -7184,16 +7188,26 @@ pgturbohybridambuild(Relation heap, Relation index, IndexInfo *indexInfo)
 	if (PgturbohybridIndexInfoHasLexical(index, indexInfo))
 		PgturbohybridBm25BuildCollect(heap, index, indexInfo);
 
+	PgturbohybridBuildIndexKeyMap(index, indexInfo, &map);
+	if (map.hasSparse)
+		PgturbohybridSparseBuildCollect(heap, index, indexInfo);
+
 	return result;
 }
 
 static void
 pgturbohybridambuildempty(Relation index)
 {
+	PgturbohybridIndexKeyMap map;
+
 	PgturbohybridValidateIndex(index, NULL);
 	pgturbohybridbuildempty(index);
 	if (PgturbohybridIndexHasLexical(index))
 		PgturbohybridBm25BuildEmpty(index);
+
+	PgturbohybridBuildIndexKeyMap(index, NULL, &map);
+	if (map.hasSparse && PgturbohybridSparseIsPrimary(index))
+		PgturbohybridSparsePrimaryBuildEmpty(index);
 }
 
 static bool
@@ -7985,6 +7999,12 @@ pgturbohybridamoptions(Datum reloptions, bool validate)
 		PGTURBOHYBRID_RELOPT_PARSE("multivector_context_mode", RELOPT_TYPE_ENUM, multivectorContextMode),
 		PGTURBOHYBRID_RELOPT_PARSE("multivector_field_mode", RELOPT_TYPE_ENUM, multivectorFieldMode),
 		PGTURBOHYBRID_RELOPT_PARSE("page_compaction_threshold", RELOPT_TYPE_INT, pageCompactionThreshold),
+		PGTURBOHYBRID_RELOPT_PARSE("sparse_quant_bits", RELOPT_TYPE_INT, sparseQuantBits),
+		PGTURBOHYBRID_RELOPT_PARSE("sparse_quant_mode", RELOPT_TYPE_ENUM, sparseQuantMode),
+		PGTURBOHYBRID_RELOPT_PARSE("sparse_postings_encoding", RELOPT_TYPE_ENUM, sparsePostingsEncoding),
+		PGTURBOHYBRID_RELOPT_PARSE("sparse_block_size", RELOPT_TYPE_INT, sparseBlockSize),
+		PGTURBOHYBRID_RELOPT_PARSE("sparse_exact_storage", RELOPT_TYPE_ENUM, sparseExactStorage),
+		PGTURBOHYBRID_RELOPT_PARSE("sparse_block_max", RELOPT_TYPE_BOOL, sparseBlockMax),
 	};
 	PgturbohybridOptions *opts = (PgturbohybridOptions *) build_reloptions(reloptions, validate,
 																 pgturbohybrid_relopt_kind,
@@ -8320,6 +8340,31 @@ PgturbohybridInit(void)
 	add_int_reloption(pgturbohybrid_relopt_kind, "page_compaction_threshold",
 				  "Percentage of dead graph nodes that triggers automatic page chain compaction during VACUUM (0 = disabled)",
 				  25, 0, 100, AccessExclusiveLock);
+
+	add_int_reloption(pgturbohybrid_relopt_kind, "sparse_quant_bits",
+			  "Sparse postings weight quantization bits (0=f32, 8=q8, 16=q16)",
+			  0, 0, 16, AccessExclusiveLock);
+	add_enum_reloption(pgturbohybrid_relopt_kind, "sparse_quant_mode",
+			  "Sparse weight quantization mode",
+			  pgturbohybrid_sparse_quant_mode_relopt_options,
+			  PGTURBOHYBRID_SPARSE_QUANT_MODE_PER_TERM_LINEAR,
+			  "f32", AccessExclusiveLock);
+	add_enum_reloption(pgturbohybrid_relopt_kind, "sparse_postings_encoding",
+			  "Sparse postings physical encoding",
+			  pgturbohybrid_sparse_encoding_relopt_options,
+			  PGTURBOHYBRID_SPARSE_ENCODING_OPT_AUTO,
+			  "auto", AccessExclusiveLock);
+	add_int_reloption(pgturbohybrid_relopt_kind, "sparse_block_size",
+			  "Sparse postings block size (terms per chunk)",
+			  256, 16, 65536, AccessExclusiveLock);
+	add_enum_reloption(pgturbohybrid_relopt_kind, "sparse_exact_storage",
+			  "Sparse exact-storage mode (off = quantized only)",
+			  pgturbohybrid_sparse_exact_storage_relopt_options,
+			  PGTURBOHYBRID_SPARSE_EXACT_STORAGE_OFF,
+			  "off", AccessExclusiveLock);
+	add_bool_reloption(pgturbohybrid_relopt_kind, "sparse_block_max",
+			   "Enable block-max WAND pruning for sparse top-k",
+			   true, AccessExclusiveLock);
 
 	if (IsParallelWorker())
 		return;
