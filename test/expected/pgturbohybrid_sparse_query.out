@@ -31,7 +31,7 @@ SELECT turbohybrid_query(
 
 -- no sparse_query -> sparse=false
 SELECT turbohybrid_query(vector_query => '[1,2,3]'::vector)::text AS no_sparse;
-                                                                                                                no_sparse                                                                                                                
+                                                                                                                no_sparse                                                                                                                 
 ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
  turbohybrid_query(fusion=rrf,vector=true,tsquery=false,dense_weight=1,bm25_weight=1,alpha=null,rrf_k=60,dense_k=100,bm25_k=100,final_k=null,require_bm25_match=false,sparse=false,sparse_weight=1,sparse_k=0,require_sparse_match=false)
 (1 row)
