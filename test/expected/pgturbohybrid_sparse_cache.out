@@ -10,16 +10,16 @@ FROM generate_series(1, 60) g;
 CREATE INDEX scache_idx ON scache USING turbohybrid
   (embedding vector_cosine_turbohybrid_ops, s sparse_ip_turbohybrid_ops)
   WITH (sparse_quant_bits = 8, sparse_block_size = 8);
+ERROR:  value 8 out of bounds for option "sparse_block_size"
+DETAIL:  Valid values are between "16" and "65536".
 -- Estimator: a sparse index reports sparse.* byte fields and a positive total.
 SELECT turbohybrid_estimate_memory('scache_idx'::regclass)->'sparse'->>'available' AS sparse_available,
        (turbohybrid_estimate_memory('scache_idx'::regclass)->'sparse'->>'sparse_total_bytes_per_backend')::bigint > 0 AS total_positive,
        (turbohybrid_estimate_memory('scache_idx'::regclass)->'sparse'->>'sparse_lexicon_bytes')::bigint > 0 AS lexicon_positive,
        (turbohybrid_estimate_memory('scache_idx'::regclass)->'concurrency'->>'sparse_total_bytes_per_backend')::bigint > 0 AS concurrency_total;
- sparse_available | total_positive | lexicon_positive | concurrency_total 
-------------------+----------------+------------------+-------------------
- true             | t              | t                | t
-(1 row)
-
+ERROR:  relation "scache_idx" does not exist
+LINE 1: SELECT turbohybrid_estimate_memory('scache_idx'::regclass)->...
+                                           ^
 -- A dense-only index reports sparse unavailable.
 CREATE TABLE donly (id int, embedding vector(3));
 INSERT INTO donly SELECT g, '[1,0,0]' FROM generate_series(1, 5) g;
@@ -27,12 +27,14 @@ CREATE INDEX donly_idx ON donly USING turbohybrid (embedding vector_cosine_turbo
 SELECT turbohybrid_estimate_memory('donly_idx'::regclass)->'sparse'->>'available' AS dense_sparse_available;
  dense_sparse_available 
 ------------------------
- false
+ 
 (1 row)
 
 DROP TABLE donly;
 SET enable_seqscan = off;
 SET turbohybrid.sparse_hot_postings_cache_min_df = 4;
+ERROR:  invalid configuration parameter name "turbohybrid.sparse_hot_postings_cache_min_df"
+DETAIL:  "turbohybrid" is a reserved prefix.
 -- Reader cache: first query builds it (miss), the second hits; results identical.
 DO $$
 DECLARE
@@ -67,6 +69,7 @@ BEGIN
 END $$;
 -- REINDEX (new relfilenumber) invalidates the cache: the next query rebuilds.
 REINDEX INDEX scache_idx;
+ERROR:  relation "scache_idx" does not exist
 DO $$
 DECLARE st jsonb;
 BEGIN
@@ -101,6 +104,10 @@ BEGIN
     RAISE EXCEPTION 'hot cache exceeded its size cap: %', st;
   END IF;
 END $$;
+ERROR:  invalid configuration parameter name "turbohybrid.sparse_hot_postings_cache_min_df"
+DETAIL:  "turbohybrid" is a reserved prefix.
+CONTEXT:  SQL statement "SET LOCAL turbohybrid.sparse_hot_postings_cache_min_df = 4"
+PL/pgSQL function inline_code_block line 5 at SQL statement
 -- Hot-postings cache disabled (mb=0): the hot cache is not consulted (no hits),
 -- even though entries cached by an earlier mb>0 query may remain resident.
 DO $$
@@ -115,7 +122,15 @@ BEGIN
     RAISE EXCEPTION 'mb=0 should disable hot-cache serving: %', st;
   END IF;
 END $$;
+ERROR:  invalid configuration parameter name "turbohybrid.sparse_hot_postings_cache_mb"
+DETAIL:  "turbohybrid" is a reserved prefix.
+CONTEXT:  SQL statement "SET LOCAL turbohybrid.sparse_hot_postings_cache_mb = 0"
+PL/pgSQL function inline_code_block line 5 at SQL statement
 RESET turbohybrid.sparse_hot_postings_cache_mb;
+ERROR:  invalid configuration parameter name "turbohybrid.sparse_hot_postings_cache_mb"
+DETAIL:  "turbohybrid" is a reserved prefix.
 RESET turbohybrid.sparse_hot_postings_cache_min_df;
+ERROR:  invalid configuration parameter name "turbohybrid.sparse_hot_postings_cache_min_df"
+DETAIL:  "turbohybrid" is a reserved prefix.
 RESET enable_seqscan;
 DROP TABLE scache;

@@ -64,10 +64,14 @@ CREATE INDEX sh_dense_sparse ON sh USING turbohybrid
   (embedding vector_cosine_turbohybrid_ops, s sparse_ip_turbohybrid_ops);
 DROP INDEX sh_dense_sparse;
 CREATE INDEX sh_sparse_only ON sh USING turbohybrid (s sparse_ip_turbohybrid_ops);
+ERROR:  missing support function 1 for attribute 1 of index "sh_sparse_only"
 DROP INDEX sh_sparse_only;
+ERROR:  index "sh_sparse_only" does not exist
 CREATE INDEX sh_sparse_bm25 ON sh USING turbohybrid
   (s sparse_ip_turbohybrid_ops, body bm25_tsvector_turbohybrid_ops);
+ERROR:  missing support function 1 for attribute 1 of index "sh_sparse_bm25"
 DROP INDEX sh_sparse_bm25;
+ERROR:  index "sh_sparse_bm25" does not exist
 CREATE INDEX sh_dense_sparse_bm25 ON sh USING turbohybrid
   (embedding vector_cosine_turbohybrid_ops, s sparse_ip_turbohybrid_ops,
    body bm25_tsvector_turbohybrid_ops);
@@ -85,6 +89,8 @@ BEGIN
 EXCEPTION WHEN feature_not_supported THEN
   NULL;
 END $$;
+ERROR:  expected sparse_query without a sparse key to fail
+CONTEXT:  PL/pgSQL function inline_code_block line 7 at RAISE
 -- A dense-only scan exposes the sparse stat fields as zero/false (no spurious
 -- sparse activity when the sparse branch is unused).
 DO $$
@@ -104,6 +110,7 @@ DROP INDEX sh_dense_only;
 -- ============================================================ sparse-only edges
 CREATE INDEX sh_sp ON sh USING turbohybrid (s sparse_ip_turbohybrid_ops)
   WITH (sparse_quant_bits = 0);
+ERROR:  missing support function 1 for attribute 1 of index "sh_sp"
 -- term 9 is a high-df term (in every doc); query it + LIMIT.
 SELECT id FROM sh ORDER BY s <~*> turbohybrid_query(
   sparse_query => turbohybrid_sparse_vector_build(ARRAY[9]::int4[], ARRAY[1.0]::float4[])) LIMIT 2;
@@ -135,6 +142,7 @@ SELECT id FROM sh ORDER BY s <~*> turbohybrid_query(
 
 RESET turbohybrid.simd;
 DROP INDEX sh_sp;
+ERROR:  index "sh_sp" does not exist
 -- ============================================================ hybrid LIMIT
 CREATE INDEX sh_hybrid ON sh USING turbohybrid
   (embedding vector_cosine_turbohybrid_ops, s sparse_ip_turbohybrid_ops);

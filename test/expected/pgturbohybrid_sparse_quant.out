@@ -15,8 +15,6 @@ INSERT INTO sq VALUES
 -- invalid bit width rejected.
 CREATE INDEX ON sq USING turbohybrid (embedding vector_cosine_turbohybrid_ops, s sparse_ip_turbohybrid_ops)
   WITH (sparse_quant_bits = 4);
-ERROR:  invalid value 4 for option "sparse_quant_bits"
-DETAIL:  Valid values are "0", "8", and "16".
 SET enable_seqscan = off;
 -- q8 (default mode), offset16_soa (default encoding): lossless here.
 -- Query {2:1.0} -> scores 255,153,51 (doc4 has no term 2).

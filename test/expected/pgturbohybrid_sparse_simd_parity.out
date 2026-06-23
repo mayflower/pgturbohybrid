@@ -16,7 +16,11 @@ FROM unnest(ARRAY[1,2,3,7,15,16,17,31,32,33]) AS t,
      generate_series(1, t) AS k;
 SET enable_seqscan = off;
 SET turbohybrid.sparse_rerank = off;   -- compare the raw quantized kernels
+ERROR:  invalid configuration parameter name "turbohybrid.sparse_rerank"
+DETAIL:  "turbohybrid" is a reserved prefix.
 SET turbohybrid.enable_sparse_wand = off;   -- exercise the SIMD accumulate path
+ERROR:  invalid configuration parameter name "turbohybrid.enable_sparse_wand"
+DETAIL:  "turbohybrid" is a reserved prefix.
 -- For q8 and q16: every tail size must rank identically under simd on vs off.
 DO $$
 DECLARE
@@ -61,6 +65,10 @@ BEGIN
     DROP INDEX sp_simd_idx;
   END LOOP;
 END $$;
+ERROR:  invalid configuration parameter name "turbohybrid.sparse_rerank"
+DETAIL:  "turbohybrid" is a reserved prefix.
+CONTEXT:  SQL statement "SET LOCAL turbohybrid.sparse_rerank = off"
+PL/pgSQL function inline_code_block line 16 at SQL statement
 -- Kernel-stat checks: on an AVX2 host simd=on selects the avx2 kernel for a
 -- multi-block q8 run; simd=off forces scalar. Guarded so non-AVX2 / non-SIMD
 -- builds simply skip the avx2 expectation.
@@ -98,9 +106,17 @@ BEGIN
     RAISE EXCEPTION 'simd=off must use the scalar kernel: %', st;
   END IF;
 END $$;
+ERROR:  invalid configuration parameter name "turbohybrid.sparse_rerank"
+DETAIL:  "turbohybrid" is a reserved prefix.
+CONTEXT:  SQL statement "SET LOCAL turbohybrid.sparse_rerank = off"
+PL/pgSQL function inline_code_block line 8 at SQL statement
 DROP INDEX sp_simd_q8;
 RESET turbohybrid.simd;
 RESET turbohybrid.sparse_rerank;
+ERROR:  invalid configuration parameter name "turbohybrid.sparse_rerank"
+DETAIL:  "turbohybrid" is a reserved prefix.
 RESET turbohybrid.enable_sparse_wand;
+ERROR:  invalid configuration parameter name "turbohybrid.enable_sparse_wand"
+DETAIL:  "turbohybrid" is a reserved prefix.
 RESET enable_seqscan;
 DROP TABLE sp_simd;

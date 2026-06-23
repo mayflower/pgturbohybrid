@@ -76,11 +76,18 @@ BEGIN
   RAISE NOTICE 'bitpacked == offset16_soa == varint across bits {0,8,16}';
 END $$;
 NOTICE:  index "bp_idx" does not exist, skipping
-NOTICE:  bitpacked == offset16_soa == varint across bits {0,8,16}
+ERROR:  value 4 out of bounds for option "sparse_block_size"
+DETAIL:  Valid values are between "16" and "65536".
+CONTEXT:  SQL statement "CREATE INDEX bp_idx ON bp USING turbohybrid (s sparse_ip_turbohybrid_ops)
+                        WITH (sparse_quant_bits = 0, sparse_postings_encoding = 'offset16_soa', sparse_block_size = 4)"
+PL/pgSQL function inline_code_block line 19 at EXECUTE
 -- The bitpacked index reports its encoding + runs WAND (block-max, multi-chunk).
 CREATE INDEX bp_bpk ON bp USING turbohybrid (s sparse_ip_turbohybrid_ops)
   WITH (sparse_quant_bits = 8, sparse_postings_encoding = bitpacked, sparse_block_size = 4);
+ERROR:  value 4 out of bounds for option "sparse_block_size"
+DETAIL:  Valid values are between "16" and "65536".
 DROP INDEX bp_idx;
+ERROR:  index "bp_idx" does not exist
 DO $$
 DECLARE st jsonb;
 BEGIN

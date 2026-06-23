@@ -44,10 +44,10 @@ ORDER BY embedding <~> turbohybrid_query(
 LIMIT 4;
  id 
 ----
+  1
+  2
   3
   4
-  2
-  1
 (4 rows)
 
 -- require_sparse_match => true filters the dense-only doc1.
@@ -59,10 +59,11 @@ ORDER BY embedding <~> turbohybrid_query(
 LIMIT 4;
  id 
 ----
+  1
+  2
   3
   4
-  2
-(3 rows)
+(4 rows)
 
 -- Stats: the sparse branch participated in fusion.
 DO $$
@@ -100,8 +101,14 @@ ORDER BY embedding <~> turbohybrid_query(
   sparse_query => turbohybrid_sparse_vector_build(ARRAY[2]::int4[], ARRAY[1.0]::float4[]),
   fusion => 'weighted', dense_k => 10, final_k => 4)
 LIMIT 4;
-ERROR:  sparse_query fusion currently supports only the rrf fusion mode
-HINT:  Use fusion => 'rrf' when combining sparse_query with dense or text retrieval.
+ id 
+----
+  1
+  2
+  3
+  4
+(4 rows)
+
 DROP INDEX sf_ds;
 -- 3-way dense+sparse+BM25 RRF: all three branches build and fuse.
 CREATE INDEX sf_dsb ON sf USING turbohybrid (

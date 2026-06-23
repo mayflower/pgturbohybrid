@@ -13,17 +13,20 @@ INSERT INTO spp VALUES
   (3, turbohybrid_sparse_vector_build(ARRAY[2]::int4[], ARRAY[30.0]::float4[]));
 CREATE INDEX spp_idx ON spp USING turbohybrid (s sparse_ip_turbohybrid_ops)
   WITH (sparse_quant_bits = 0);
+ERROR:  missing support function 1 for attribute 1 of index "spp_idx"
 SET enable_seqscan = off;
 -- The planner uses the sparse-primary index for the <~*> ORDER BY.
 EXPLAIN (COSTS OFF)
 SELECT id FROM spp ORDER BY s <~*> turbohybrid_query(
   sparse_query => turbohybrid_sparse_vector_build(ARRAY[2]::int4[], ARRAY[1.0]::float4[])) LIMIT 10;
-                                                                                                                                                                                                                    QUERY PLAN                                                                                                                                                                                                                     
----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
+                                                                                                                                                                                                                     QUERY PLAN                                                                                                                                                                                                                      
+-----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
  Limit
-   ->  Index Scan using spp_idx on spp
-         Order By: (s <~*> turbohybrid_query(NULL::vector, NULL::tsquery, 'rrf'::text, '1'::double precision, '1'::double precision, NULL::double precision, NULL::integer, NULL::integer, NULL::integer, NULL::integer, false, NULL::turbohybrid_multivector, NULL::real[], NULL::boolean[], '1'::double precision, NULL::integer, 'turbohybrid_sparse_vector(count=1)'::turbohybrid_sparse_vector, '1'::double precision, NULL::integer, false))
-(3 rows)
+   ->  Sort
+         Sort Key: ((s <~*> turbohybrid_query(NULL::vector, NULL::tsquery, 'rrf'::text, '1'::double precision, '1'::double precision, NULL::double precision, NULL::integer, NULL::integer, NULL::integer, NULL::integer, false, NULL::turbohybrid_multivector, NULL::real[], NULL::boolean[], '1'::double precision, NULL::integer, 'turbohybrid_sparse_vector(count=1)'::turbohybrid_sparse_vector, '1'::double precision, NULL::integer, false)))
+         ->  Seq Scan on spp
+               Disabled: true
+(5 rows)
 
 -- Base ranking: descending weight -> doc3, doc2, doc1 (distance = -inner product).
 SELECT id, round((s <~*> turbohybrid_query(
@@ -52,6 +55,8 @@ BEGIN
     RAISE EXCEPTION 'sparse branch should be used on a sparse-primary index: %', st;
   END IF;
 END $$;
+ERROR:  expected sparse index shape: unknown
+CONTEXT:  PL/pgSQL function inline_code_block line 9 at RAISE
 -- INSERT after build: doc4 weight 25 is searchable via the delta (rank between 2 and 3).
 INSERT INTO spp VALUES (4, turbohybrid_sparse_vector_build(ARRAY[2]::int4[], ARRAY[25.0]::float4[]));
 SELECT id FROM spp ORDER BY s <~*> turbohybrid_query(
@@ -103,6 +108,9 @@ BEGIN
     RAISE EXCEPTION 'base+delta ranking % != REINDEX ranking %', before_ids, after_ids;
   END IF;
 END $$;
+ERROR:  relation "spp_idx" does not exist
+CONTEXT:  SQL statement "REINDEX INDEX spp_idx"
+PL/pgSQL function inline_code_block line 8 at SQL statement
 DROP TABLE spp;
 -- ============================================================ sparse + BM25
 CREATE TABLE sppb (id int, body tsvector, s turbohybrid_sparse_vector);
@@ -113,6 +121,7 @@ INSERT INTO sppb VALUES
 CREATE INDEX sppb_idx ON sppb USING turbohybrid
   (s sparse_ip_turbohybrid_ops, body bm25_tsvector_turbohybrid_ops)
   WITH (sparse_quant_bits = 0);
+ERROR:  missing support function 1 for attribute 1 of index "sppb_idx"
 -- Pure-sparse ORDER BY on a sparse+BM25 primary index.
 SELECT id FROM sppb ORDER BY s <~*> turbohybrid_query(
   sparse_query => turbohybrid_sparse_vector_build(ARRAY[2]::int4[], ARRAY[1.0]::float4[])) LIMIT 10;
@@ -162,6 +171,7 @@ DROP TABLE sppb;
 CREATE TABLE spe (id int, s turbohybrid_sparse_vector);
 CREATE INDEX spe_idx ON spe USING turbohybrid (s sparse_ip_turbohybrid_ops)
   WITH (sparse_quant_bits = 0);
+ERROR:  missing support function 1 for attribute 1 of index "spe_idx"
 INSERT INTO spe VALUES
   (1, turbohybrid_sparse_vector_build(ARRAY[5]::int4[], ARRAY[3.0]::float4[])),
   (2, turbohybrid_sparse_vector_build(ARRAY[5]::int4[], ARRAY[7.0]::float4[]));

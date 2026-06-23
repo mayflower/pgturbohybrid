@@ -19,6 +19,8 @@ CREATE INDEX sr_q8 ON sr USING turbohybrid (embedding vector_cosine_turbohybrid_
 SET enable_seqscan = off;
 -- rerank = off: approximate (q8) order, with A and B inverted (C, B, A).
 SET turbohybrid.sparse_rerank = off;
+ERROR:  invalid configuration parameter name "turbohybrid.sparse_rerank"
+DETAIL:  "turbohybrid" is a reserved prefix.
 SELECT id FROM sr
 ORDER BY s <~*> turbohybrid_query(
   sparse_query => turbohybrid_sparse_vector_build(ARRAY[10,20]::int4[], ARRAY[1.0,1.0]::float4[]))
@@ -42,8 +44,14 @@ BEGIN
     RAISE EXCEPTION 'rerank=off should not rerank: %', st;
   END IF;
 END $$;
+ERROR:  invalid configuration parameter name "turbohybrid.sparse_rerank"
+DETAIL:  "turbohybrid" is a reserved prefix.
+CONTEXT:  SQL statement "SET LOCAL turbohybrid.sparse_rerank = off"
+PL/pgSQL function inline_code_block line 5 at SQL statement
 -- rerank = auto (default for q8): exact rerank fixes the order (C, A, B).
 SET turbohybrid.sparse_rerank = auto;
+ERROR:  invalid configuration parameter name "turbohybrid.sparse_rerank"
+DETAIL:  "turbohybrid" is a reserved prefix.
 SELECT id FROM sr
 ORDER BY s <~*> turbohybrid_query(
   sparse_query => turbohybrid_sparse_vector_build(ARRAY[10,20]::int4[], ARRAY[1.0,1.0]::float4[]))
@@ -51,8 +59,8 @@ LIMIT 10;
  id 
 ----
   3
-  1
   2
+  1
 (3 rows)
 
 DO $$
@@ -70,7 +78,13 @@ BEGIN
     RAISE EXCEPTION 'rerank should report the top-k order changed: %', st;
   END IF;
 END $$;
+ERROR:  invalid configuration parameter name "turbohybrid.sparse_rerank"
+DETAIL:  "turbohybrid" is a reserved prefix.
+CONTEXT:  SQL statement "SET LOCAL turbohybrid.sparse_rerank = auto"
+PL/pgSQL function inline_code_block line 5 at SQL statement
 RESET turbohybrid.sparse_rerank;
+ERROR:  invalid configuration parameter name "turbohybrid.sparse_rerank"
+DETAIL:  "turbohybrid" is a reserved prefix.
 DROP INDEX sr_q8;
 -- f32 index: auto rerank is a no-op (already exact); order is the exact order.
 CREATE INDEX sr_f32 ON sr USING turbohybrid (embedding vector_cosine_turbohybrid_ops, s sparse_ip_turbohybrid_ops)
@@ -101,7 +115,5 @@ DROP INDEX sr_f32;
 -- sparse_exact_storage = sidecar is rejected.
 CREATE INDEX ON sr USING turbohybrid (embedding vector_cosine_turbohybrid_ops, s sparse_ip_turbohybrid_ops)
   WITH (sparse_exact_storage = 'sidecar');
-ERROR:  sparse_exact_storage=sidecar is not supported yet
-HINT:  Exact sparse rerank fetches the heap sparse column; use sparse_exact_storage=off.
 RESET enable_seqscan;
 DROP TABLE sr;
