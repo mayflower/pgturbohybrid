@@ -1328,6 +1328,7 @@ PgturbohybridSparseCollectCandidates(Relation index, PgturbohybridQueryHeader *q
 	if (k <= 0 || query == NULL || !PgturbohybridQueryHasSparse(query))
 		return 0;
 
+
 	INSTR_TIME_SET_CURRENT(t0);
 
 	if (!PgturbohybridGraphReadMeta(index, &graphMeta))

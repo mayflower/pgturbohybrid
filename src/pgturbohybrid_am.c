@@ -1377,13 +1377,16 @@ typedef struct PgturbohybridResult
 	double		multivectorDistance;
 	double		multivectorSimilarity;
 	double		bm25Score;
+	double		sparseSimilarity;
 	double		fusedScore;
 	int32		denseRank;
 	int32		multivectorRank;
 	int32		bm25Rank;
+	int32		sparseRank;
 	bool		hasDense;
 	bool		hasMultivector;
 	bool		hasBm25;
+	bool		hasSparse;
 	bool		exactScored;
 } PgturbohybridResult;
 
@@ -1882,6 +1885,14 @@ typedef struct PgturbohybridLastScanStats
 	uint64		bm25ElapsedUs;
 	uint64		fusionElapsedUs;
 	uint64		elapsedUs;
+	/* Sparse branch stats */
+	bool		sparseBranchAvailable;
+	bool		sparseBranchUsed;
+	uint32		sparseTerms;
+	uint32		sparseResolvedTerms;
+	uint64		sparsePostingsTouched;
+	uint64		sparseCandidatesScored;
+	uint32		sparseCandidates;
 } PgturbohybridLastScanStats;
 
 static PgturbohybridLastScanStats pgturbohybrid_last_scan_state;
@@ -6017,6 +6028,67 @@ PgturbohybridCollectScanResults(IndexScanDesc scan, PgturbohybridScanState *stat
 	canRunVectorBranch = hasVectorQuery && !indexIsMultiVector;
 	useDocumentFusionKey = hasMultivectorQuery;
 
+	/*
+	 * Sparse-as-sole-ORDER-BY: the query targets only the sparse column.
+	 * Resolve it against the native sparse inverted index and return
+	 * candidates ranked by exact inner product, bypassing the dense/bm25
+	 * fusion machinery.
+	 */
+	if (PgturbohybridQueryHasSparse(scanQuery) &&
+		!hasVectorQuery && !hasMultivectorQuery && !hasTextQuery)
+	{
+		PgturbohybridSparseCandidate *cands = NULL;
+		PgturbohybridSparseScanStats sstats;
+		PgturbohybridResult *results;
+		int			finalTarget;
+		int			candidateK;
+		int			n;
+
+		memset(&sstats, 0, sizeof(sstats));
+		finalTarget = (int) PgturbohybridEffectiveFinalK(originalQuery, autoBudgetLimit);
+		if (finalTarget < 1)
+			finalTarget = 1;
+		candidateK = scanQuery->sparseK > 0 ? scanQuery->sparseK : finalTarget;
+		if (candidateK < finalTarget)
+			candidateK = finalTarget;
+
+		n = PgturbohybridSparseCollectCandidates(scan->indexRelation, scanQuery,
+												 candidateK, pgturbohybrid_simd,
+												 true, &cands,
+												 so->tmpCtx, &sstats);
+
+		results = (PgturbohybridResult *) palloc0(sizeof(PgturbohybridResult) *
+												  Max(n, 1));
+		for (int i = 0; i < n; i++)
+		{
+			results[i].nodeId = cands[i].nodeId;
+			results[i].heaptid = cands[i].heaptid;
+			results[i].hasSparse = true;
+			results[i].sparseSimilarity = cands[i].score;
+			results[i].sparseRank = i + 1;
+			results[i].fusedScore = cands[i].score;
+		}
+
+		state->results = results;
+		state->resultCount = n;
+		state->resultIndex = 0;
+		state->collectDone = true;
+
+		strlcpy(lastStats.indexShape, "sparse", sizeof(lastStats.indexShape));
+		lastStats.sparseBranchAvailable = sstats.branchAvailable;
+		lastStats.sparseBranchUsed = sstats.branchUsed;
+		lastStats.sparseTerms = sstats.terms;
+		lastStats.sparseResolvedTerms = sstats.resolvedTerms;
+		lastStats.sparsePostingsTouched = sstats.postingsTouched;
+		lastStats.sparseCandidatesScored = sstats.candidatesScored;
+		lastStats.sparseCandidates = n;
+		lastStats.elapsedUs = PgturbohybridElapsedUs(totalStart);
+		pgturbohybrid_last_scan_state = lastStats;
+		state->query = originalQuery;
+		MemoryContextSwitchTo(oldCtx);
+		return;
+	}
+
 	PgturbohybridQueryValidateMultiVectorFusionSupport(scan->indexRelation,
 													   scanQuery);
 
@@ -7192,7 +7264,7 @@ pgturbohybridambuild(Relation heap, Relation index, IndexInfo *indexInfo)
 	/* TODO: sparse build path needs graph meta tqSparseMetaStartBlkno initialization
 	 * before PgturbohybridSparseBuildCollect can run safely. Disabled until
 	 * the build infrastructure is fully wired. */
-	if (map.hasSparse && false)
+	if (map.hasSparse)
 	{
 		PG_TRY();
 		{
@@ -7351,6 +7423,7 @@ pgturbohybridamrescan(IndexScanDesc scan, ScanKey keys, int nkeys, ScanKey order
 	bool		hasTextQuery = false;
 	bool		hasVectorQuery = false;
 	bool		hasMultiVectorQuery = false;
+	bool		hasSparseQuery = false;
 	bool		useScalarVectorOrderby = false;
 
 	if (orderbys != NULL && norderbys > 0 &&
@@ -7362,6 +7435,7 @@ pgturbohybridamrescan(IndexScanDesc scan, ScanKey keys, int nkeys, ScanKey order
 		hasVectorQuery = (hybridQuery->flags & PGTURBOHYBRID_QUERY_FLAG_HAS_VECTOR) != 0;
 		hasMultiVectorQuery =
 			(hybridQuery->flags & PGTURBOHYBRID_QUERY_FLAG_HAS_MULTIVECTOR) != 0;
+		hasSparseQuery = PgturbohybridQueryHasSparse(hybridQuery);
 	}
 
 	if (PgturbohybridIndexIsMultiVector(scan->indexRelation))
@@ -7392,7 +7466,7 @@ pgturbohybridamrescan(IndexScanDesc scan, ScanKey keys, int nkeys, ScanKey order
 					 useScalarVectorOrderby ? denseOrderbys : NULL,
 					 useScalarVectorOrderby ? norderbys : 0);
 
-	if (hasTextQuery || hasVectorQuery || hasMultiVectorQuery)
+	if (hasTextQuery || hasVectorQuery || hasMultiVectorQuery || hasSparseQuery)
 	{
 		PgturbohybridGraphScanOpaque so = (PgturbohybridGraphScanOpaque) scan->opaque;
 		MemoryContext oldCtx = MemoryContextSwitchTo(so->tmpCtx);
