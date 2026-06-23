@@ -1707,7 +1707,7 @@ PgturbohybridRegisterGUCs(void)
 							 PGC_USERSET, 0, NULL, NULL, NULL);
 	DefineCustomEnumVariable("turbohybrid.dense_u8_split",
 							 "(developer/benchmark) Use the unsigned-codebook (u8) 4-bit split dense scorer",
-							 "on forces the u8 maddubs/VPDPBUSD split whenever its hard requirements hold (4-bit, dim>=1024, mode!=L1, AVX2+); off disables it (signed split or scalar/LUT); auto defers to dense_query_split_impl. For controlled benchmarking.",
+							 "on forces the u8 maddubs/VPDPBUSD split whenever its hard requirements hold (4-bit, dim>=64, mode!=L1, AVX2+); off disables it (signed split or scalar/LUT); auto defers to dense_query_split_impl. For controlled benchmarking.",
 							 &pgturbohybrid_dense_u8_split,
 							 PGTURBOHYBRID_U8_SPLIT_AUTO,
 							 pgturbohybrid_dense_u8_split_options,

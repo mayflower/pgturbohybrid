@@ -573,7 +573,6 @@ Source ownership is kept explicit with `pgturbohybrid_*` file names, including:
 - `src/pgturbohybrid_vacuum.c`
 - `src/pgturbohybrid_graph.c`
 - `src/pgturbohybrid_quant.c`
-- `src/pgturbohybrid_bm25.c`
 - `src/pgturbohybrid_bm25_build.c`
 - `src/pgturbohybrid_bm25_query.c`
 - `src/pgturbohybrid_multivector.c`
@@ -582,7 +581,7 @@ Source ownership is kept explicit with `pgturbohybrid_*` file names, including:
 - `src/pgturbohybrid_sparse_query.c`
 - `src/pgturbohybrid_sparse_score.c`
 - `src/pgturbohybrid_query.c`
-- `src/pgturbohybrid_stats.c`
+- `src/pgturbohybrid_diagnostics.c`
 - `src/pgturbohybrid_vector_compat.c`
 
 Windows and Unix builds must compile the same required source objects and expose

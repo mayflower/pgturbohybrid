@@ -14,6 +14,8 @@ on:
 permissions:
   contents: read
   packages: write
+  # Keyless (OIDC) cosign signing of pushed images -- no maintainer keys.
+  id-token: write
 
 env:
   # PG major that also receives the unsuffixed :<version> and :latest tags.
@@ -51,6 +53,7 @@ jobs:
           {
             echo "version=${version}"
             echo "tags=${tags}"
+            echo "image=${image}"
           } >> "$GITHUB_OUTPUT"
 
       - name: Decide whether to push
@@ -71,6 +74,7 @@ jobs:
           password: ${{ secrets.GITHUB_TOKEN }}
 
       - name: Build and push
+        id: build
         uses: docker/build-push-action@v7
         with:
           context: .
@@ -84,3 +88,19 @@ jobs:
           sbom: true
           cache-from: type=gha,scope=pg${{ matrix.pg_major }}
           cache-to: type=gha,mode=max,scope=pg${{ matrix.pg_major }}
+
+      - name: Install cosign
+        if: steps.push.outputs.enabled == 'true'
+        uses: sigstore/cosign-installer@v3
+
+      - name: Sign image (keyless)
+        # Signs by digest, which covers every tag pushed to that digest.
+        # Verify with:
+        #   cosign verify <image>@<digest> \
+        #     --certificate-identity-regexp '^https://github.com/.*/pgturbohybrid/' \
+        #     --certificate-oidc-issuer https://token.actions.githubusercontent.com
+        if: steps.push.outputs.enabled == 'true'
+        env:
+          IMAGE: ${{ steps.meta.outputs.image }}
+          DIGEST: ${{ steps.build.outputs.digest }}
+        run: cosign sign --yes "${IMAGE}@${DIGEST}"

@@ -2221,21 +2221,34 @@ TqDotProductF32BlockScalar(const float *queryValues, const float *docValues,
 TqDotProductF32BlockFunc
 TqResolveDotProductF32BlockKernel(void)
 {
+	/*
+	 * CPU feature detection is process-stable, so resolve the SIMD kernel once
+	 * and cache it. The previous code re-ran the __builtin_cpu_supports ladder
+	 * on every call, which is pure overhead in the per-token-block exact-MaxSim
+	 * hot loop reached via TqDotProductF32BlockAuto. The force-scalar GUC is
+	 * still honored on every call (checked ahead of the cache) so runtime
+	 * overrides keep working; the cache only memoizes the hardware probe.
+	 */
+	static TqDotProductF32BlockFunc cached = NULL;
+
 	if (pgturbohybrid_dense_exact_simd_force == PGTURBOHYBRID_EXACT_SIMD_FORCE_SCALAR)
 		return TqDotProductF32BlockScalar;
 
+	if (cached != NULL)
+		return cached;
+
 #if PGTURBOHYBRID_MULTIVECTOR_COMPILE_AVX512F
 	if (TqMultiVectorAvx512fAvailable())
-		return TqDotProductF32BlockAvx512f;
+		return (cached = TqDotProductF32BlockAvx512f);
 #endif
 #if PGTURBOHYBRID_MULTIVECTOR_COMPILE_AVX2
 	if (TqMultiVectorAvx2Available())
-		return TqDotProductF32BlockAvx2;
+		return (cached = TqDotProductF32BlockAvx2);
 #endif
 #if PGTURBOHYBRID_MULTIVECTOR_COMPILE_NEON
-	return TqDotProductF32BlockNeon;
+	return (cached = TqDotProductF32BlockNeon);
 #endif
-	return TqDotProductF32BlockScalar;
+	return (cached = TqDotProductF32BlockScalar);
 }
 
 void

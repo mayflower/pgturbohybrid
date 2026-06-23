@@ -17,7 +17,6 @@ DATA = sql\pgturbohybrid--0.1.0.sql
 OBJS = \
 	src\pgturbohybrid.obj \
 	src\pgturbohybrid_am.obj \
-	src\pgturbohybrid_bm25.obj \
 	src\pgturbohybrid_bm25_build.obj \
 	src\pgturbohybrid_bm25_query.obj \
 	src\pgturbohybrid_build.obj \

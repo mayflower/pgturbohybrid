@@ -58,7 +58,7 @@ the `pgturbohybrid` namespace:
 - `src/tqhybrid_bm25.h` -> `src/pgturbohybrid_bm25.h`
 - `src/tqhybrid_bm25_build.c` -> `src/pgturbohybrid_bm25_build.c`
 - `src/tqhybrid_bm25_query.c` -> `src/pgturbohybrid_bm25_query.c`
-- `src/tqstats.c` -> `src/pgturbohybrid_stats.c`
+- `src/tqstats.c` -> `src/pgturbohybrid_stats.c` -> `src/pgturbohybrid_diagnostics.c`
 - `src/vector.h` -> `src/pgturbohybrid_vector_compat.h`
 
 Test files were also renamed from prototype names to `pgturbohybrid*` names.

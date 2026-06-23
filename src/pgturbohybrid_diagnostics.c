@@ -3015,7 +3015,12 @@ pgturbohybrid_multivector_proxy_diagnostics(PG_FUNCTION_ARGS)
 	PgturbohybridMultiVectorDocSidecarAccessStats sidecarStats;
 	PgturbohybridOptions *opts;
 	MemoryContext workCtx = NULL;
-	MemoryContext oldCtx = NULL;
+	/*
+	 * volatile: oldCtx is set inside the PG_TRY below and read in the PG_CATCH
+	 * cleanup, so it must survive the sigsetjmp/longjmp per PostgreSQL's error
+	 * handling rules.
+	 */
+	volatile MemoryContext oldCtx = NULL;
 	PgturbohybridMultiVectorProxyDiagnosticResult result;
 	PgturbohybridJsonbState state;
 

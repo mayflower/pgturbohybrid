@@ -11,7 +11,6 @@ PG_CONFIG ?= pg_config
 OBJS = \
 	src/pgturbohybrid.o \
 	src/pgturbohybrid_am.o \
-	src/pgturbohybrid_bm25.o \
 	src/pgturbohybrid_bm25_build.o \
 	src/pgturbohybrid_bm25_query.o \
 	src/pgturbohybrid_build.o \
