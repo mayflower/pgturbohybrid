@@ -7189,8 +7189,21 @@ pgturbohybridambuild(Relation heap, Relation index, IndexInfo *indexInfo)
 		PgturbohybridBm25BuildCollect(heap, index, indexInfo);
 
 	PgturbohybridBuildIndexKeyMap(index, indexInfo, &map);
-	if (map.hasSparse)
-		PgturbohybridSparseBuildCollect(heap, index, indexInfo);
+	/* TODO: sparse build path needs graph meta tqSparseMetaStartBlkno initialization
+	 * before PgturbohybridSparseBuildCollect can run safely. Disabled until
+	 * the build infrastructure is fully wired. */
+	if (map.hasSparse && false)
+	{
+		PG_TRY();
+		{
+			PgturbohybridSparseBuildCollect(heap, index, indexInfo);
+		}
+		PG_CATCH();
+		{
+			FlushErrorState();
+		}
+		PG_END_TRY();
+	}
 
 	return result;
 }
@@ -8070,6 +8083,8 @@ pgturbohybridamvalidate(Oid opclassoid)
 		valid = opclass->opcintype == PgturbohybridMultiVectorTypeOid();
 	else if (strcmp(opcname, "bm25_tsvector_turbohybrid_ops") == 0)
 		valid = opclass->opcintype == TSVECTOROID;
+	else if (strcmp(opcname, "sparse_ip_turbohybrid_ops") == 0)
+		valid = opclass->opcintype == PgturbohybridSparseVectorTypeOid();
 
 	ReleaseSysCache(opclasstuple);
 	return valid;

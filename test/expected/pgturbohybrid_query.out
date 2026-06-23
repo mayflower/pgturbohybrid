@@ -590,7 +590,7 @@ BEGIN
 		fusion => 'calibrated',
 		alpha => 0.65,
 		final_k => 5
-	))::text != 'turbohybrid_query(fusion=calibrated,vector=true,tsquery=true,dense_weight=1,bm25_weight=1,alpha=0.65,rrf_k=60,dense_k=100,bm25_k=100,final_k=5,require_bm25_match=false)' THEN
+	))::text != 'turbohybrid_query(fusion=calibrated,vector=true,tsquery=true,dense_weight=1,bm25_weight=1,alpha=0.65,rrf_k=60,dense_k=100,bm25_k=100,final_k=5,require_bm25_match=false,sparse=false,sparse_weight=1,sparse_k=0,require_sparse_match=false)' THEN
 		RAISE EXCEPTION 'unexpected calibrated turbohybrid_query output';
 	END IF;
 END
@@ -603,7 +603,7 @@ BEGIN
 		fusion => 'fast_weighted',
 		alpha => 0.75,
 		final_k => 5
-	))::text != 'turbohybrid_query(fusion=fast_weighted,vector=true,tsquery=true,dense_weight=1,bm25_weight=1,alpha=0.75,rrf_k=60,dense_k=100,bm25_k=100,final_k=5,require_bm25_match=false)' THEN
+	))::text != 'turbohybrid_query(fusion=fast_weighted,vector=true,tsquery=true,dense_weight=1,bm25_weight=1,alpha=0.75,rrf_k=60,dense_k=100,bm25_k=100,final_k=5,require_bm25_match=false,sparse=false,sparse_weight=1,sparse_k=0,require_sparse_match=false)' THEN
 		RAISE EXCEPTION 'unexpected fast_weighted turbohybrid_query output';
 	END IF;
 END
@@ -617,7 +617,7 @@ BEGIN
 		dense_k => 12,
 		bm25_k => 34,
 		rrf_k => 60
-	))::text != 'turbohybrid_query(fusion=rrf,vector=true,tsquery=true,dense_weight=1,bm25_weight=1,alpha=null,rrf_k=60,dense_k=12,bm25_k=34,final_k=null,require_bm25_match=false)' THEN
+	))::text != 'turbohybrid_query(fusion=rrf,vector=true,tsquery=true,dense_weight=1,bm25_weight=1,alpha=null,rrf_k=60,dense_k=12,bm25_k=34,final_k=null,require_bm25_match=false,sparse=false,sparse_weight=1,sparse_k=0,require_sparse_match=false)' THEN
 		RAISE EXCEPTION 'unexpected turbohybrid_query output';
 	END IF;
 END
@@ -630,7 +630,7 @@ BEGIN
 		alpha => 0.25,
 		final_k => 10,
 		require_bm25_match => true
-	))::text != 'turbohybrid_query(fusion=weighted,vector=false,tsquery=true,dense_weight=1,bm25_weight=1,alpha=0.25,rrf_k=60,dense_k=100,bm25_k=100,final_k=10,require_bm25_match=true)' THEN
+	))::text != 'turbohybrid_query(fusion=weighted,vector=false,tsquery=true,dense_weight=1,bm25_weight=1,alpha=0.25,rrf_k=60,dense_k=100,bm25_k=100,final_k=10,require_bm25_match=true,sparse=false,sparse_weight=1,sparse_k=0,require_sparse_match=false)' THEN
 		RAISE EXCEPTION 'unexpected weighted turbohybrid_query output';
 	END IF;
 END
@@ -640,7 +640,7 @@ BEGIN
 	IF turbohybrid_query_out(turbohybrid_query(
 		vector_query => '[1,0,0]'::vector,
 		final_k => NULL
-	))::text != 'turbohybrid_query(fusion=rrf,vector=true,tsquery=false,dense_weight=1,bm25_weight=1,alpha=null,rrf_k=60,dense_k=100,bm25_k=100,final_k=null,require_bm25_match=false)' THEN
+	))::text != 'turbohybrid_query(fusion=rrf,vector=true,tsquery=false,dense_weight=1,bm25_weight=1,alpha=null,rrf_k=60,dense_k=100,bm25_k=100,final_k=null,require_bm25_match=false,sparse=false,sparse_weight=1,sparse_k=0,require_sparse_match=false)' THEN
 		RAISE EXCEPTION 'unexpected explicit NULL final_k output';
 	END IF;
 END
@@ -650,7 +650,7 @@ BEGIN
 	IF turbohybrid_query_out(turbohybrid_query(
 		vector_query => '[1,0,0]'::vector,
 		text_query => websearch_to_tsquery('english', 'postgres')
-	))::text != 'turbohybrid_query(fusion=rrf,vector=true,tsquery=true,dense_weight=1,bm25_weight=1,alpha=null,rrf_k=60,dense_k=100,bm25_k=100,final_k=null,require_bm25_match=false)' THEN
+	))::text != 'turbohybrid_query(fusion=rrf,vector=true,tsquery=true,dense_weight=1,bm25_weight=1,alpha=null,rrf_k=60,dense_k=100,bm25_k=100,final_k=null,require_bm25_match=false,sparse=false,sparse_weight=1,sparse_k=0,require_sparse_match=false)' THEN
 		RAISE EXCEPTION 'unexpected default hybrid query output';
 	END IF;
 END
@@ -659,7 +659,7 @@ DO $$
 BEGIN
 	IF turbohybrid_query_out(turbohybrid_query(
 		multivector_query => turbohybrid_multivector(ARRAY['[1,0,0]'::vector, '[0,1,0]'::vector])
-	))::text != 'turbohybrid_query(fusion=rrf,vector=false,multivector=true,tsquery=false,dense_weight=1,multivector_weight=1,bm25_weight=1,alpha=null,rrf_k=60,dense_k=100,multivector_k=100,bm25_k=100,final_k=null,require_bm25_match=false)' THEN
+	))::text != 'turbohybrid_query(fusion=rrf,vector=false,multivector=true,tsquery=false,dense_weight=1,multivector_weight=1,bm25_weight=1,alpha=null,rrf_k=60,dense_k=100,multivector_k=100,bm25_k=100,final_k=null,require_bm25_match=false,sparse=false,sparse_weight=1,sparse_k=0,require_sparse_match=false)' THEN
 		RAISE EXCEPTION 'unexpected multivector query output';
 	END IF;
 END
@@ -669,7 +669,7 @@ BEGIN
 	IF turbohybrid_query_out(turbohybrid_query(
 		text_query => websearch_to_tsquery('english', 'postgres'),
 		multivector_query => turbohybrid_multivector(ARRAY['[1,0,0]'::vector, '[0,1,0]'::vector])
-	))::text != 'turbohybrid_query(fusion=rrf,vector=false,multivector=true,tsquery=true,dense_weight=1,multivector_weight=1,bm25_weight=1,alpha=null,rrf_k=60,dense_k=100,multivector_k=100,bm25_k=100,final_k=null,require_bm25_match=false)' THEN
+	))::text != 'turbohybrid_query(fusion=rrf,vector=false,multivector=true,tsquery=true,dense_weight=1,multivector_weight=1,bm25_weight=1,alpha=null,rrf_k=60,dense_k=100,multivector_k=100,bm25_k=100,final_k=null,require_bm25_match=false,sparse=false,sparse_weight=1,sparse_k=0,require_sparse_match=false)' THEN
 		RAISE EXCEPTION 'unexpected hybrid multivector query output';
 	END IF;
 END
@@ -681,7 +681,7 @@ BEGIN
 		multivector_query => turbohybrid_multivector(ARRAY['[1,0,0]'::vector]),
 		multivector_weight => 2.5,
 		multivector_k => 17
-	))::text != 'turbohybrid_query(fusion=rrf,vector=true,multivector=true,tsquery=false,dense_weight=1,multivector_weight=2.5,bm25_weight=1,alpha=null,rrf_k=60,dense_k=100,multivector_k=17,bm25_k=100,final_k=null,require_bm25_match=false)' THEN
+	))::text != 'turbohybrid_query(fusion=rrf,vector=true,multivector=true,tsquery=false,dense_weight=1,multivector_weight=2.5,bm25_weight=1,alpha=null,rrf_k=60,dense_k=100,multivector_k=17,bm25_k=100,final_k=null,require_bm25_match=false,sparse=false,sparse_weight=1,sparse_k=0,require_sparse_match=false)' THEN
 		RAISE EXCEPTION 'unexpected mixed vector/multivector query output';
 	END IF;
 END
@@ -691,7 +691,7 @@ DO $$
 BEGIN
 	IF turbohybrid_query_out(turbohybrid_query(
 		vector_query => '[1,0,0]'::vector
-	))::text != 'turbohybrid_query(fusion=rrf,vector=true,tsquery=false,dense_weight=1,bm25_weight=1,alpha=null,rrf_k=60,dense_k=200,bm25_k=200,final_k=null,require_bm25_match=false)' THEN
+	))::text != 'turbohybrid_query(fusion=rrf,vector=true,tsquery=false,dense_weight=1,bm25_weight=1,alpha=null,rrf_k=60,dense_k=200,bm25_k=200,final_k=null,require_bm25_match=false,sparse=false,sparse_weight=1,sparse_k=0,require_sparse_match=false)' THEN
 		RAISE EXCEPTION 'unexpected balanced profile defaults';
 	END IF;
 
@@ -710,7 +710,7 @@ DO $$
 BEGIN
 	IF turbohybrid_query_out(turbohybrid_query(
 		vector_query => '[1,0,0]'::vector
-	))::text != 'turbohybrid_query(fusion=rrf,vector=true,tsquery=false,dense_weight=1,bm25_weight=1,alpha=null,rrf_k=60,dense_k=400,bm25_k=400,final_k=null,require_bm25_match=false)' THEN
+	))::text != 'turbohybrid_query(fusion=rrf,vector=true,tsquery=false,dense_weight=1,bm25_weight=1,alpha=null,rrf_k=60,dense_k=400,bm25_k=400,final_k=null,require_bm25_match=false,sparse=false,sparse_weight=1,sparse_k=0,require_sparse_match=false)' THEN
 		RAISE EXCEPTION 'unexpected quality profile defaults';
 	END IF;
 
@@ -738,7 +738,7 @@ DO $$
 BEGIN
 	IF turbohybrid_query_out(turbohybrid_query(
 		vector_query => '[1,0,0]'::vector
-	))::text != 'turbohybrid_query(fusion=rrf,vector=true,tsquery=false,dense_weight=1,bm25_weight=1,alpha=null,rrf_k=60,dense_k=200,bm25_k=200,final_k=null,require_bm25_match=false)' THEN
+	))::text != 'turbohybrid_query(fusion=rrf,vector=true,tsquery=false,dense_weight=1,bm25_weight=1,alpha=null,rrf_k=60,dense_k=200,bm25_k=200,final_k=null,require_bm25_match=false,sparse=false,sparse_weight=1,sparse_k=0,require_sparse_match=false)' THEN
 		RAISE EXCEPTION 'unexpected matched_recall profile defaults';
 	END IF;
 
@@ -759,7 +759,7 @@ DO $$
 BEGIN
 	IF turbohybrid_query_out(turbohybrid_query(
 		vector_query => '[1,0,0]'::vector
-	))::text != 'turbohybrid_query(fusion=rrf,vector=true,tsquery=false,dense_weight=1,bm25_weight=1,alpha=null,rrf_k=60,dense_k=200,bm25_k=200,final_k=null,require_bm25_match=false)' THEN
+	))::text != 'turbohybrid_query(fusion=rrf,vector=true,tsquery=false,dense_weight=1,bm25_weight=1,alpha=null,rrf_k=60,dense_k=200,bm25_k=200,final_k=null,require_bm25_match=false,sparse=false,sparse_weight=1,sparse_k=0,require_sparse_match=false)' THEN
 		RAISE EXCEPTION 'unexpected high_recall profile defaults';
 	END IF;
 
@@ -788,7 +788,7 @@ DO $$
 BEGIN
 	IF turbohybrid_query_out(turbohybrid_query(
 		vector_query => '[1,0,0]'::vector
-	))::text != 'turbohybrid_query(fusion=rrf,vector=true,tsquery=false,dense_weight=1,bm25_weight=1,alpha=null,rrf_k=9,dense_k=7,bm25_k=8,final_k=null,require_bm25_match=false)' THEN
+	))::text != 'turbohybrid_query(fusion=rrf,vector=true,tsquery=false,dense_weight=1,bm25_weight=1,alpha=null,rrf_k=9,dense_k=7,bm25_k=8,final_k=null,require_bm25_match=false,sparse=false,sparse_weight=1,sparse_k=0,require_sparse_match=false)' THEN
 		RAISE EXCEPTION 'explicit budget GUCs did not override profile default';
 	END IF;
 
@@ -822,7 +822,7 @@ BEGIN
 		rrf_k => NULL,
 		dense_k => NULL,
 		bm25_k => NULL
-	))::text != 'turbohybrid_query(fusion=rrf,vector=true,tsquery=false,dense_weight=1,bm25_weight=1,alpha=null,rrf_k=9,dense_k=7,bm25_k=8,final_k=null,require_bm25_match=false)' THEN
+	))::text != 'turbohybrid_query(fusion=rrf,vector=true,tsquery=false,dense_weight=1,bm25_weight=1,alpha=null,rrf_k=9,dense_k=7,bm25_k=8,final_k=null,require_bm25_match=false,sparse=false,sparse_weight=1,sparse_k=0,require_sparse_match=false)' THEN
 		RAISE EXCEPTION 'unexpected explicit NULL GUC default output';
 	END IF;
 END
@@ -831,7 +831,7 @@ DO $$
 BEGIN
 	IF turbohybrid_query_out(turbohybrid_query(
 		vector_query => '[1,0,0]'::vector
-	))::text != 'turbohybrid_query(fusion=rrf,vector=true,tsquery=false,dense_weight=1,bm25_weight=1,alpha=null,rrf_k=9,dense_k=7,bm25_k=8,final_k=null,require_bm25_match=false)' THEN
+	))::text != 'turbohybrid_query(fusion=rrf,vector=true,tsquery=false,dense_weight=1,bm25_weight=1,alpha=null,rrf_k=9,dense_k=7,bm25_k=8,final_k=null,require_bm25_match=false,sparse=false,sparse_weight=1,sparse_k=0,require_sparse_match=false)' THEN
 		RAISE EXCEPTION 'unexpected omitted GUC default output';
 	END IF;
 END

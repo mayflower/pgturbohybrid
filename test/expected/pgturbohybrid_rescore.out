@@ -31,6 +31,7 @@ CREATE INDEX rb_free_idx ON rb_free
     USING turbohybrid (embedding vector_cosine_turbohybrid_ops, body_tsv bm25_tsvector_turbohybrid_ops)
     WITH (quantization_bits = 4);
 DROP TABLE IF EXISTS rb_exact;
+NOTICE:  table "rb_exact" does not exist, skipping
 CREATE TABLE rb_exact (id int PRIMARY KEY, embedding vector(64), body_tsv tsvector);
 INSERT INTO rb_exact(id, embedding, body_tsv)
 SELECT i,
@@ -41,6 +42,7 @@ CREATE INDEX rb_exact_idx ON rb_exact
     USING turbohybrid (embedding vector_cosine_turbohybrid_ops, body_tsv bm25_tsvector_turbohybrid_ops)
     WITH (quantization_bits = 4, exact_storage = on);
 DROP TABLE IF EXISTS rb_residual;
+NOTICE:  table "rb_residual" does not exist, skipping
 CREATE TABLE rb_residual (id int PRIMARY KEY, embedding vector(64), body_tsv tsvector);
 INSERT INTO rb_residual(id, embedding, body_tsv)
 SELECT id, embedding, body_tsv FROM rb_free;
