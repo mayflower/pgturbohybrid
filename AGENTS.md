@@ -15,9 +15,10 @@ We ship. Prefer **smallest change that moves production metrics** over perfect a
 
 ```
 Agents → ValorBrain engine (Bun, :7438)
-           ├── Retrieval: pgturbohybrid + pgvector + BM25/RRF
+           ├── Retrieval: pgturbohybrid + pgvector + BM25/RRF + PPR graph
            ├── KG: entity_triples → pg_ripple (shadow → hybrid read → SoT)
-           ├── Embeddings: vLLM jina-embeddings-v5 (:7997)
+           ├── Embeddings: LFM2.5-Embedding-350M (:7997)
+           ├── Reranker: BGE-Reranker-v2-m3 (multilingual, PT-BR strong)
            └── LLM: OpenRouter (hooks/HyDE); legacy Ollama optional
 PostgreSQL :5433 — extensions: vector, pgturbohybrid, pg_ripple, pg_trgm
 ```
