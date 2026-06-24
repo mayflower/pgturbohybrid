@@ -3,7 +3,7 @@
 This is the single source of truth for which `pgturbohybrid` capabilities exist
 and how much you should trust each one. README, `docs/architecture.md`,
 `docs/how-it-works.md`, `docs/compatibility.md`, and the SQL comments in
-`sql/pgturbohybrid--0.1.0.sql` are kept consistent with this table; if any of
+`sql/pgturbohybrid--0.1.1.sql` are kept consistent with this table; if any of
 them disagree, this file wins and the other should be fixed.
 
 The whole extension is still **alpha software** (see the README Status section).

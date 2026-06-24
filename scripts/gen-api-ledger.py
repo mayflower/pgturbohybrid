@@ -33,7 +33,7 @@ gucs_stable = ["turbohybrid.profile", "turbohybrid.default_dense_k", "turbohybri
   "turbohybrid.native_cache_max_mb", "turbohybrid.native_cache_warn_mb"]
 ledger = {
  "_comment": "Machine-readable public-API ledger for pgturbohybrid. The type/function/operator/opclass sets are the source of truth checked against the pgturbohybrid_api_ledger regression snapshot by scripts/check-api-ledger.py; maturity labels mirror the COMMENT ON tags and docs/feature-matrix.md. Alpha: even 'stable public' does not promise on-disk compatibility across pre-1.0 tags.",
- "extension": "pgturbohybrid", "sql_version": "0.1.0",
+ "extension": "pgturbohybrid", "sql_version": "0.1.1",
  "types": fmt(objs["type"]), "operators": fmt(objs["operator"]),
  "opclasses": fmt(objs["opclass"]), "functions": fmt(objs["function"]),
  "reloptions": reloptions, "gucs_stable_public": gucs_stable,

@@ -63,7 +63,7 @@ file is added.
 
 ## Runtime Checks
 
-At install time, `sql/pgturbohybrid--0.1.0.sql` checks:
+At install time, `sql/pgturbohybrid--0.1.1.sql` checks:
 
 - PostgreSQL server version is 14 or newer.
 - `vector` is installed.

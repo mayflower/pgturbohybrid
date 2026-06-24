@@ -10,7 +10,8 @@ This internal checklist records release-readiness criteria for the standalone
 - [x] extension name is `pgturbohybrid`
 - [x] shared library is `pgturbohybrid`
 - [x] control file is `pgturbohybrid.control`
-- [x] SQL install script is `sql/pgturbohybrid--0.1.0.sql`
+- [x] SQL install scripts are `sql/pgturbohybrid--0.1.1.sql` (current),
+  `sql/pgturbohybrid--0.1.0.sql`, and `sql/pgturbohybrid--0.1.0--0.1.1.sql`
 - [x] control file has `requires = 'vector'`
 - [x] no pgvector control or SQL files are modified
 - [x] no pgvector types are created

@@ -34,7 +34,7 @@ FROM pg_extension
 WHERE extname = 'pgturbohybrid';
  extversion 
 ------------
- 0.1.0
+ 0.1.1
 (1 row)
 
 DROP EXTENSION pgturbohybrid;

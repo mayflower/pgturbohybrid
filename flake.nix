@@ -125,7 +125,7 @@
               }:
               postgresqlBuildExtension {
                 pname = "pgturbohybrid";
-                version = "0.1.0";
+                version = "0.1.1";
                 src = cleanSource;
                 enableUpdateScript = false;
 
@@ -160,7 +160,7 @@
               }:
               postgresqlBuildExtension {
                 pname = "pg_colbert_llama";
-                version = "0.1.0";
+                version = "0.1.1";
                 src = cleanSource;
                 sourceRoot = "source/extensions/pg_colbert_llama";
                 enableUpdateScript = false;

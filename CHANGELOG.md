@@ -1,9 +1,14 @@
 # Changelog
 
-All notable changes for `pgturbohybrid` are documented here. Release tags may
-use alpha suffixes while the PostgreSQL extension SQL version remains `0.1.0`.
+All notable changes for `pgturbohybrid` are documented here. Git release tags
+may use alpha suffixes (`v0.1.0-alpha.N`) independently of the PostgreSQL
+extension SQL version.
 
-## Unreleased
+## 0.1.1
+
+Maintenance release. The exported SQL catalog is unchanged from `0.1.0` (the
+`0.1.0--0.1.1` upgrade applies no DDL); the substance is in the C library,
+tests, and release tooling. This is the first version with an upgrade script.
 
 ### Added
 
@@ -15,6 +20,25 @@ use alpha suffixes while the PostgreSQL extension SQL version remains `0.1.0`.
   `exact_storage = off`. On DBPedia/OpenAI (1536-d) it reaches ~0.99 recall
   while staying faster than pgvector and Qdrant. Explicit GUCs still override
   the profile defaults.
+- Binary `RECEIVE` negative/fuzz test coverage for `turbohybrid_multivector`
+  (`test/t/005_multivector_recv_binary.pl`).
+- First extension upgrade script, `sql/pgturbohybrid--0.1.0--0.1.1.sql`, with an
+  `ALTER EXTENSION ... UPDATE` regression test
+  (`test/t/006_extension_upgrade.pl`).
+- Keyless (Sigstore/OIDC) cosign signatures for release source archives and
+  published Docker images.
+
+### Changed
+
+- The exact-MaxSim block dot-product kernel is resolved once and cached instead
+  of re-probing CPU features on every call.
+
+### Fixed
+
+- A diagnostics memory-context variable modified in `PG_TRY` and read in
+  `PG_CATCH` is now `volatile`, as required across the error-handling longjmp.
+- Removed a dead, empty translation unit (`pgturbohybrid_bm25.c`) and corrected
+  stale `dim>=1024` GUC help text and `pgturbohybrid_stats.c` doc references.
 
 ## v0.1.0-alpha.2
 

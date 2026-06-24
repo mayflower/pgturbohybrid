@@ -20,14 +20,18 @@ Use semantic versioning for the SQL version after `0.1.0`:
 
 ## Current Release
 
-- Extension SQL version: **`0.1.0`**
+- Extension SQL version: **`0.1.1`**
   - Control file: `pgturbohybrid.control`
-  - Install script: `sql/pgturbohybrid--0.1.0.sql`
+  - Install script: `sql/pgturbohybrid--0.1.1.sql`
+  - Upgrade script: `sql/pgturbohybrid--0.1.0--0.1.1.sql`
   - Shared library: `pgturbohybrid`
 - Latest published Git tag: **none yet** — the first planned tag is
-  `v0.1.0-alpha.2`, which keeps the SQL version at `0.1.0`.
+  `v0.1.0-alpha.2`. The Git tag is independent of the SQL version.
 
-There is no upgrade script for `0.1.0`; it is the first installable version.
+`0.1.0` is the first installable version; `0.1.1` is a library/tooling
+maintenance release (no SQL catalog changes) that adds the first upgrade
+script, `sql/pgturbohybrid--0.1.0--0.1.1.sql`, exercised by
+`test/t/006_extension_upgrade.pl`.
 
 > Keep this section current: after publishing a tag, the
 > [post-release checklist](#post-release-checklist) updates "Latest published
@@ -83,8 +87,8 @@ The build and CI matrix must install unmodified pgvector before building
 
 ## Upgrade Script Policy
 
-Future upgrade scripts must be owned by this extension and named with the
-PostgreSQL extension upgrade pattern:
+Upgrade scripts must be owned by this extension and named with the PostgreSQL
+extension upgrade pattern. The first such script ships in this release:
 
 ```text
 sql/pgturbohybrid--0.1.0--0.1.1.sql

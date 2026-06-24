@@ -27,7 +27,7 @@
 #include "utils/rel.h"
 
 #if PG_VERSION_NUM >= 180000
-PG_MODULE_MAGIC_EXT(.name = "pgturbohybrid",.version = "0.1.0");
+PG_MODULE_MAGIC_EXT(.name = "pgturbohybrid",.version = "0.1.1");
 #else
 PG_MODULE_MAGIC;
 #endif

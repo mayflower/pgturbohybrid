@@ -9,7 +9,9 @@ claiming pgvector-owned release metadata.
 - Extension name: `pgturbohybrid`
 - Shared library name: `pgturbohybrid`
 - Control file: `pgturbohybrid.control`
-- Initial SQL install script: `sql/pgturbohybrid--0.1.0.sql`
+- SQL install scripts: `sql/pgturbohybrid--0.1.1.sql` (current default),
+  `sql/pgturbohybrid--0.1.0.sql` (initial), and upgrade
+  `sql/pgturbohybrid--0.1.0--0.1.1.sql`
 - Extension dependency: `requires = 'vector'`
 - Build model: PGXS build against an already-installed PostgreSQL and pgvector
 
@@ -555,7 +557,7 @@ The PGXS build uses:
 ```make
 EXTENSION = pgturbohybrid
 MODULE_big = pgturbohybrid
-DATA = sql/pgturbohybrid--0.1.0.sql
+DATA = sql/pgturbohybrid--0.1.0.sql sql/pgturbohybrid--0.1.1.sql sql/pgturbohybrid--0.1.0--0.1.1.sql
 PG_CONFIG ?= pg_config
 ```
 
