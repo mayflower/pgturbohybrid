@@ -211,6 +211,13 @@ static float PgturbohybridMultiVectorDocCompactSq8Scale(const PgturbohybridMulti
 #define PGTURBOHYBRID_GRAPH_AUTO_HEURISTIC_MAX_DIMENSIONS 256
 #define PGTURBOHYBRID_GRAPH_AUTO_EXACT_BUILD_MAX_DIMENSIONS 256
 #define PGTURBOHYBRID_GRAPH_AUTO_HEAP_RESCORE_MAX_DIMENSIONS 256
+/*
+ * Aggressive low-bit codes (1- and 2-bit) are too lossy to rank on directly, so
+ * the auto profiles default to a heap rescore for them at any dimension, the way
+ * Qdrant's tq_bits_default_rescoring() rescores 1/1.5/2-bit but leaves 4-bit
+ * off.  The default 4-bit index is therefore unaffected.
+ */
+#define PGTURBOHYBRID_GRAPH_LOWBIT_HEAP_RESCORE_MAX_BITS 2
 #define PGTURBOHYBRID_GRAPH_PARALLEL_EDGE_WARMUP 256
 #define PGTURBOHYBRID_GRAPH_PARALLEL_EDGE_BATCH_PER_PARTICIPANT 32
 #define PGTURBOHYBRID_MULTIVECTOR_COMPACT_DOT_BLOCK 8
@@ -3055,6 +3062,7 @@ PgturbohybridGraphCheckExactSymmetricBuildAllowed(PgturbohybridQuantBuildState *
 {
 	uint32		docCount;
 	int			maxDocs;
+	int			maxTokens;
 
 	if (state == NULL ||
 		!state->multivectorBuild ||
@@ -3067,6 +3075,31 @@ PgturbohybridGraphCheckExactSymmetricBuildAllowed(PgturbohybridQuantBuildState *
 
 	docCount = state->multivectorDocCount;
 	maxDocs = pgturbohybrid_multivector_exact_symmetric_build_max_docs;
+	maxTokens = pgturbohybrid_multivector_exact_symmetric_build_max_tokens;
+
+	/*
+	 * Per-document token cap.  Exact symmetric MaxSim build cost is
+	 * O(tokens_a * tokens_b * dim) per document pair, so a single token-heavy
+	 * document is expensive regardless of the document count.  Mirrors Qdrant's
+	 * StrictModeMultivectorConfig.max_vectors.  0 = unlimited (the default), so
+	 * historical behavior is unchanged unless an operator opts in.
+	 */
+	if (maxTokens > 0 && state->multivectorDocVectors != NULL)
+	{
+		for (uint32 i = 0; i < docCount; i++)
+		{
+			PgturbohybridMultiVector *doc = state->multivectorDocVectors[i];
+
+			if (doc != NULL && doc->count > maxTokens)
+				ereport(ERROR,
+						(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
+						 errmsg("exact symmetric multivector document graph build is not allowed at this token count"),
+						 errdetail("Document %u has %d tokens, above turbohybrid.multivector_exact_symmetric_build_max_tokens = %d.",
+								   i, doc->count, maxTokens),
+						 errhint("Use multivector_doc_build_scorer = proxy for production builds, or raise/disable turbohybrid.multivector_exact_symmetric_build_max_tokens for diagnostic experiments.")));
+		}
+	}
+
 	if (maxDocs < 0 || docCount <= (uint32) maxDocs)
 		return;
 
@@ -10860,6 +10893,15 @@ PgturbohybridGraphEffectiveHeapRescoreMode(PgturbohybridGraphScanOpaque so,
 	bool		lowDim = meta != NULL &&
 		meta->dimensions > 0 &&
 		meta->dimensions <= PGTURBOHYBRID_GRAPH_AUTO_HEAP_RESCORE_MAX_DIMENSIONS;
+	/*
+	 * Low-bit (1/2-bit) codes are too lossy to rank on directly, so the auto
+	 * profiles rescore them at any dimension (Qdrant's bit-width-keyed default).
+	 * 4-bit -- the default -- stays code-only unless lowDim or an explicit GUC.
+	 */
+	bool		lowBit = meta != NULL &&
+		meta->tqBits > 0 &&
+		meta->tqBits <= PGTURBOHYBRID_GRAPH_LOWBIT_HEAP_RESCORE_MAX_BITS;
+	bool		rescoreAuto = lowDim || lowBit;
 
 	if (!exactFree)
 	{
@@ -10896,16 +10938,18 @@ PgturbohybridGraphEffectiveHeapRescoreMode(PgturbohybridGraphScanOpaque so,
 		case PGTURBOHYBRID_PROFILE_BALANCED:
 			so->graphHeapRescoreReason = lowDim ?
 				PGTURBOHYBRID_DENSE_HEAP_RESCORE_REASON_PROFILE_BALANCED_LOWDIM :
-				PGTURBOHYBRID_DENSE_HEAP_RESCORE_REASON_PROFILE_BALANCED_HIGHDIM;
-			so->graphHeapRescoreAutoEnabled = lowDim;
-			return lowDim ? PGTURBOHYBRID_DENSE_HEAP_RESCORE_TOPK :
+				(lowBit ? PGTURBOHYBRID_DENSE_HEAP_RESCORE_REASON_PROFILE_LOWBIT :
+				 PGTURBOHYBRID_DENSE_HEAP_RESCORE_REASON_PROFILE_BALANCED_HIGHDIM);
+			so->graphHeapRescoreAutoEnabled = rescoreAuto;
+			return rescoreAuto ? PGTURBOHYBRID_DENSE_HEAP_RESCORE_TOPK :
 				PGTURBOHYBRID_DENSE_HEAP_RESCORE_OFF;
 		case PGTURBOHYBRID_PROFILE_MATCHED_RECALL:
 			so->graphHeapRescoreReason = lowDim ?
 				PGTURBOHYBRID_DENSE_HEAP_RESCORE_REASON_PROFILE_MATCHED_RECALL_LOWDIM :
-				PGTURBOHYBRID_DENSE_HEAP_RESCORE_REASON_PROFILE_MATCHED_RECALL_HIGHDIM;
-			so->graphHeapRescoreAutoEnabled = lowDim;
-			return lowDim ? PGTURBOHYBRID_DENSE_HEAP_RESCORE_TOPK :
+				(lowBit ? PGTURBOHYBRID_DENSE_HEAP_RESCORE_REASON_PROFILE_LOWBIT :
+				 PGTURBOHYBRID_DENSE_HEAP_RESCORE_REASON_PROFILE_MATCHED_RECALL_HIGHDIM);
+			so->graphHeapRescoreAutoEnabled = rescoreAuto;
+			return rescoreAuto ? PGTURBOHYBRID_DENSE_HEAP_RESCORE_TOPK :
 				PGTURBOHYBRID_DENSE_HEAP_RESCORE_OFF;
 		case PGTURBOHYBRID_PROFILE_HIGH_RECALL:
 			/*
@@ -10923,9 +10967,10 @@ PgturbohybridGraphEffectiveHeapRescoreMode(PgturbohybridGraphScanOpaque so,
 		case PGTURBOHYBRID_PROFILE_DEBUG:
 			so->graphHeapRescoreReason = lowDim ?
 				PGTURBOHYBRID_DENSE_HEAP_RESCORE_REASON_PROFILE_QUALITY_LOWDIM :
-				PGTURBOHYBRID_DENSE_HEAP_RESCORE_REASON_PROFILE_QUALITY_HIGHDIM;
-			so->graphHeapRescoreAutoEnabled = lowDim;
-			return lowDim ? PGTURBOHYBRID_DENSE_HEAP_RESCORE_TOPK :
+				(lowBit ? PGTURBOHYBRID_DENSE_HEAP_RESCORE_REASON_PROFILE_LOWBIT :
+				 PGTURBOHYBRID_DENSE_HEAP_RESCORE_REASON_PROFILE_QUALITY_HIGHDIM);
+			so->graphHeapRescoreAutoEnabled = rescoreAuto;
+			return rescoreAuto ? PGTURBOHYBRID_DENSE_HEAP_RESCORE_TOPK :
 				PGTURBOHYBRID_DENSE_HEAP_RESCORE_OFF;
 		case PGTURBOHYBRID_PROFILE_LATENCY:
 		default:

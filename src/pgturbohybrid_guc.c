@@ -132,6 +132,7 @@ char	   *pgturbohybrid_multivector_learned_projection_model = "";
 char	   *pgturbohybrid_multivector_learned_projection_checksum = "";
 bool		pgturbohybrid_multivector_allow_exact_symmetric_build = false;
 int			pgturbohybrid_multivector_exact_symmetric_build_max_docs = 1000;
+int			pgturbohybrid_multivector_exact_symmetric_build_max_tokens = 0;
 int			pgturbohybrid_multivector_max_accumulator_mb = 64;
 int			pgturbohybrid_multivector_debug_admission =
 	PGTURBOHYBRID_MULTIVECTOR_DEBUG_ADMISSION_OFF;
@@ -1407,6 +1408,12 @@ PgturbohybridRegisterGUCs(void)
 							"CREATE INDEX errors above this observed document count when multivector_doc_build_scorer = exact_symmetric and turbohybrid.multivector_allow_exact_symmetric_build is off.",
 							&pgturbohybrid_multivector_exact_symmetric_build_max_docs,
 							1000, 0, INT_MAX,
+							PGC_USERSET, 0, NULL, NULL, NULL);
+	DefineCustomIntVariable("turbohybrid.multivector_exact_symmetric_build_max_tokens",
+							"Maximum per-document token count for exact symmetric multivector document graph builds (0 = unlimited)",
+							"When > 0, CREATE INDEX errors if any document exceeds this token (sub-vector) count while multivector_doc_build_scorer = exact_symmetric and turbohybrid.multivector_allow_exact_symmetric_build is off. Exact symmetric MaxSim build cost grows as tokens_a * tokens_b * dim per document pair, so this bounds the per-pair cost the way multivector_exact_symmetric_build_max_docs bounds the pair count.",
+							&pgturbohybrid_multivector_exact_symmetric_build_max_tokens,
+							0, 0, INT_MAX,
 							PGC_USERSET, 0, NULL, NULL, NULL);
 	DefineCustomIntVariable("turbohybrid.multivector_max_accumulator_mb",
 							"Maximum memory allowed for one multivector document accumulator",

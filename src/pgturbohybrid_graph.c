@@ -498,6 +498,8 @@ PgturbohybridGraphDenseHeapRescoreReasonName(int reason)
 			return "profile_high_recall";
 		case PGTURBOHYBRID_DENSE_HEAP_RESCORE_REASON_EXACT_STORAGE:
 			return "exact_storage";
+		case PGTURBOHYBRID_DENSE_HEAP_RESCORE_REASON_PROFILE_LOWBIT:
+			return "profile_lowbit";
 		case PGTURBOHYBRID_DENSE_HEAP_RESCORE_REASON_UNKNOWN:
 		default:
 			return "unknown";

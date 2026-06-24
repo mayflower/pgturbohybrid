@@ -106,6 +106,7 @@ BEGIN
 		'turbohybrid.multivector_exact_rerank',
 		'turbohybrid.multivector_exact_rerank_k',
 		'turbohybrid.multivector_exact_symmetric_build_max_docs',
+		'turbohybrid.multivector_exact_symmetric_build_max_tokens',
 		'turbohybrid.multivector_learned_projection_checksum',
 		'turbohybrid.multivector_learned_projection_model',
 		'turbohybrid.multivector_learned_projection_path',
@@ -210,6 +211,7 @@ BEGIN
 		current_setting('turbohybrid.multivector_exact_rerank_k') != '100' OR
 		current_setting('turbohybrid.multivector_allow_exact_symmetric_build') != 'off' OR
 		current_setting('turbohybrid.multivector_exact_symmetric_build_max_docs') != '1000' OR
+		current_setting('turbohybrid.multivector_exact_symmetric_build_max_tokens') != '0' OR
 		current_setting('turbohybrid.multivector_learned_projection_checksum') != '' OR
 		current_setting('turbohybrid.multivector_learned_projection_model') != '' OR
 		current_setting('turbohybrid.multivector_learned_projection_path') != '' OR
@@ -236,7 +238,7 @@ BEGIN
 			current_setting('turbohybrid.multivector_debug_admission') != 'off' OR
 			current_setting('turbohybrid.multivector_debug_skip_query_tokens') != '' OR
 			current_setting('turbohybrid.multivector_debug_trace_limit') != '1000' THEN
-						RAISE EXCEPTION 'unexpected multivector defaults: doc %, query %, subvector %, unique %, raw %, adaptive %, branch_plan %, source %, centroid_lite_bitset_prefilter %, centroid_lite_bitset_min_token_matches %, centroid_lite_candidate_scoring %, centroid_lite_codeword_top_m %, centroid_lite_probe_centroids %, centroid_lite_posting_selection %, centroid_lite_score_drop_from_best %, centroid_lite_score_threshold %, centroid_lite_pruning %, bm25_injection %, sparse_source %, reservoirs %, coverage_reservoir_k %, fallback %, fallback_fraction %, fallback_max_docs %, per_token_reservoir_k %, docmap %, docs %, doc_graph_entry_sample_count %, doc_graph_search_ef %, doc_graph_oversampling %, doc_graph_rescore_k %, doc_storage %, doc_storage_cache %, rerank %, rerank_k %, allow_exact_symmetric_build %, exact_symmetric_build_max_docs %, learned_projection_checksum %, learned_projection_model %, learned_projection_path %, model %, proxy_encoder %, quantized_codebook %, quantized_codebook_path %, quantized_codebook_top_m %, quantized_compact_doc_order %, quantized_compact_scoring %, quantized_token_coverage %, quantized_posting_limit %, quantized_min_token_matches %, quantized_pruning %, quantized_probe_codewords %, quantized_posting_selection %, accumulator_mb %, debug %, skip_tokens %, trace_limit %',
+						RAISE EXCEPTION 'unexpected multivector defaults: doc %, query %, subvector %, unique %, raw %, adaptive %, branch_plan %, source %, centroid_lite_bitset_prefilter %, centroid_lite_bitset_min_token_matches %, centroid_lite_candidate_scoring %, centroid_lite_codeword_top_m %, centroid_lite_probe_centroids %, centroid_lite_posting_selection %, centroid_lite_score_drop_from_best %, centroid_lite_score_threshold %, centroid_lite_pruning %, bm25_injection %, sparse_source %, reservoirs %, coverage_reservoir_k %, fallback %, fallback_fraction %, fallback_max_docs %, per_token_reservoir_k %, docmap %, docs %, doc_graph_entry_sample_count %, doc_graph_search_ef %, doc_graph_oversampling %, doc_graph_rescore_k %, doc_storage %, doc_storage_cache %, rerank %, rerank_k %, allow_exact_symmetric_build %, exact_symmetric_build_max_docs %, exact_symmetric_build_max_tokens %, learned_projection_checksum %, learned_projection_model %, learned_projection_path %, model %, proxy_encoder %, quantized_codebook %, quantized_codebook_path %, quantized_codebook_top_m %, quantized_compact_doc_order %, quantized_compact_scoring %, quantized_token_coverage %, quantized_posting_limit %, quantized_min_token_matches %, quantized_pruning %, quantized_probe_codewords %, quantized_posting_selection %, accumulator_mb %, debug %, skip_tokens %, trace_limit %',
 				current_setting('turbohybrid.multivector_max_doc_vectors'),
 			current_setting('turbohybrid.multivector_max_query_vectors'),
 			current_setting('turbohybrid.multivector_subvector_k'),
@@ -274,6 +276,7 @@ BEGIN
 			current_setting('turbohybrid.multivector_exact_rerank_k'),
 			current_setting('turbohybrid.multivector_allow_exact_symmetric_build'),
 			current_setting('turbohybrid.multivector_exact_symmetric_build_max_docs'),
+			current_setting('turbohybrid.multivector_exact_symmetric_build_max_tokens'),
 			current_setting('turbohybrid.multivector_learned_projection_checksum'),
 			current_setting('turbohybrid.multivector_learned_projection_model'),
 			current_setting('turbohybrid.multivector_learned_projection_path'),
