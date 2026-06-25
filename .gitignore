@@ -38,6 +38,8 @@ Thumbs.db
 # Benchmark and generated result output
 /results/
 /extensions/pg_colbert_llama/results/
+/extensions/pg_colbert_llama/log/
+/extensions/pg_colbert_llama/tmp_check/
 /benchmarks/results/
 /benchmarks/output/
 /benchmarks/**/*.json
