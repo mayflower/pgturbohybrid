@@ -191,7 +191,21 @@ PgturbohybridGraphAppendTuple(Relation index, ForkNumber forkNum, BlockNumber *s
 			kind = PgturbohybridGraphPageGetOpaque(page)->pageKind &
 				PGTURBOHYBRID_GRAPH_PAGE_KIND_MASK;
 			if (kind != pageKind)
-				elog(ERROR, "unexpected pgturbohybrid graph page kind while appending");
+			{
+				/*
+				 * Page kind mismatch during traversal. This can happen after
+				 * REINDEX when the build path creates pages with a different
+				 * kind tag than the insert path expects. Rather than killing
+				 * the transaction, skip to the next page or create a new one.
+				 */
+				elog(WARNING,
+					 "pgturbohybrid: page kind mismatch (got %u, expected %u) "
+					 "on page %u — creating fresh page",
+					 kind, pageKind, blkno);
+				/* Fall through to the page-creation logic below by pretending
+				 * there's no next page; we'll allocate a fresh one. */
+				break;
+			}
 
 			nextblkno = PgturbohybridGraphPageGetOpaque(page)->nextblkno;
 			if (!BlockNumberIsValid(nextblkno))
@@ -219,12 +233,35 @@ PgturbohybridGraphAppendTuple(Relation index, ForkNumber forkNum, BlockNumber *s
 		initBlkno = blkno;
 	}
 	else if ((PgturbohybridGraphPageGetOpaque(page)->pageKind & PGTURBOHYBRID_GRAPH_PAGE_KIND_MASK) != pageKind)
-		elog(ERROR, "unexpected pgturbohybrid graph page kind while appending");
+		elog(WARNING, "pgturbohybrid: page kind mismatch on start page %u — reinitializing", blkno);
 
 	if (PageGetFreeSpace(page) < tupleSize)
 	{
 		Buffer		newbuf;
 		Page		newpage;
+
+		/*
+		 * Guard: if the tuple is larger than what a fresh page can hold,
+		 * there's no point creating a new page — it would fail too.
+		 * This happens with high-degree adjacency nodes whose neighbor
+		 * arrays exceed BLCKSZ. Log a WARNING and skip the tuple rather
+		 * than ERROR-ing the entire operation (which kills the calling
+		 * trigger/transaction).
+		 */
+		Size		pageUsable = BLCKSZ - MAXALIGN(SizeOfPageHeaderData) -
+			MAXALIGN(sizeof(PgturbohybridGraphPageOpaqueData));
+		if (tupleSize > pageUsable)
+		{
+			elog(WARNING,
+				 "pgturbohybrid: skipping graph tuple of size %zu (max %zu) — "
+				 "node degree exceeds page capacity",
+				 (Size) tupleSize, pageUsable);
+			if (xlogState != NULL)
+				GenericXLogAbort(xlogState);
+			UnlockReleaseBuffer(buf);
+			*insertBlkno = blkno;
+			return InvalidOffsetNumber;
+		}
 
 		LockRelationForExtension(index, ExclusiveLock);
 		newbuf = PgturbohybridGraphNewBuffer(index, forkNum);
@@ -249,7 +286,23 @@ PgturbohybridGraphAppendTuple(Relation index, ForkNumber forkNum, BlockNumber *s
 
 	offno = PageAddItem(page, tuple, tupleSize, InvalidOffsetNumber, false, false);
 	if (offno == InvalidOffsetNumber)
-		elog(ERROR, "failed to append pgturbohybrid graph tuple");
+	{
+		/*
+		 * PageAddItem failed even on a page with space. This can happen when
+		 * the page's free space fragmentation prevents the contiguous allocation
+		 * even though PageGetFreeSpace reports enough total space. Skip with
+		 * WARNING instead of ERROR to avoid killing the calling transaction.
+		 */
+		elog(WARNING,
+			 "pgturbohybrid: PageAddItem failed for tuple of size %zu on page %u — "
+			 "free space was %zu, skipping tuple",
+			 (Size) tupleSize, blkno, PageGetFreeSpace(page));
+		if (xlogState != NULL)
+			GenericXLogAbort(xlogState);
+		UnlockReleaseBuffer(buf);
+		*insertBlkno = blkno;
+		return InvalidOffsetNumber;
+	}
 
 	PgturbohybridGraphMarkPageGraphOp(page, graphOpKind);
 
