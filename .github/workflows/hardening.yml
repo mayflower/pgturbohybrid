@@ -12,7 +12,7 @@ jobs:
     env:
       PG_CONFIG: /usr/lib/postgresql/18/bin/pg_config
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v7
 
       - uses: ankane/setup-postgres@v1
         with:
@@ -61,7 +61,7 @@ jobs:
       PG_CONFIG: /usr/lib/postgresql/18/bin/pg_config
       CC: gcc
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v7
 
       - uses: ankane/setup-postgres@v1
         with:
@@ -101,7 +101,7 @@ jobs:
     env:
       PG_CONFIG: /usr/lib/postgresql/18/bin/pg_config
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v7
 
       - uses: ankane/setup-postgres@v1
         with:

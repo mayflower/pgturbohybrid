@@ -20,7 +20,7 @@ jobs:
           - postgres: 19
             pgvector_ref: v0.8.2
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v7
 
       - uses: ankane/setup-postgres@v1
         with:
@@ -79,7 +79,7 @@ jobs:
     env:
       PG_CONFIG: /usr/lib/postgresql/18/bin/pg_config
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v7
 
       - uses: ankane/setup-postgres@v1
         with:
@@ -125,7 +125,7 @@ jobs:
       PG_CONFIG: /usr/lib/postgresql/17/bin/pg_config
       PG_COLBERT_LLAMA_ENGINE: stub
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v7
 
       - uses: ankane/setup-postgres@v1
         with:
@@ -192,7 +192,7 @@ jobs:
             postgres: 17
             pgvector_ref: master
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v7
 
       - uses: ankane/setup-postgres@v1
         with:
@@ -292,7 +292,7 @@ jobs:
     name: valgrind pg18 pgvector-v0.8.2
     runs-on: ubuntu-24.04
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v7
 
       - uses: ankane/setup-postgres-valgrind@v1
         with:
@@ -338,7 +338,7 @@ jobs:
         postgres: [17]
         pgvector_ref: [v0.8.2, master]
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v7
 
       - uses: ankane/setup-postgres@v1
         with:
