@@ -63,7 +63,7 @@ jobs:
       - name: Run TAP tests
         run: make prove_installcheck
 
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         if: failure()
         with:
           name: linux-pg${{ matrix.postgres }}-${{ matrix.pgvector_ref }}-regression
@@ -111,7 +111,7 @@ jobs:
             > perf-smoke-results.json
           python3 -m json.tool perf-smoke-results.json >/dev/null
 
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         if: always()
         with:
           name: perf-smoke-results
@@ -162,7 +162,7 @@ jobs:
       - name: Run pg_colbert_llama stub regression tests
         run: make -C extensions/pg_colbert_llama installcheck
 
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         if: failure()
         with:
           name: pg-colbert-llama-stub-regression
@@ -223,7 +223,7 @@ jobs:
           make installcheck
           make prove_installcheck
 
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         if: failure()
         with:
           name: ${{ matrix.os }}-pg${{ matrix.postgres }}-${{ matrix.pgvector_ref }}-regression
@@ -278,7 +278,7 @@ jobs:
           sudo -u postgres make installcheck
           sudo -u postgres make prove_installcheck
 
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         if: failure()
         with:
           name: linux-i386-regression
@@ -319,7 +319,7 @@ jobs:
       - name: Run regression tests under valgrind
         run: make installcheck
 
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         if: failure()
         with:
           name: valgrind-regression
@@ -368,7 +368,7 @@ jobs:
           if errorlevel 1 exit /b 1
           "%NMAKE%" /NOLOGO /F Makefile.win installcheck
 
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         if: failure()
         with:
           name: windows-pg${{ matrix.postgres }}-${{ matrix.pgvector_ref }}-regression
