@@ -655,6 +655,12 @@ pgturbohybrid_graph_get_tuple(IndexScanDesc scan, ScanDirection dir)
 		PgturbohybridGraphElement element;
 		ItemPointer heaptid;
 
+		/* Allow cancel/terminate during graph traversal. A search over a large
+		 * index touches many buffers via ResumeScanItemsLocked; without this
+		 * check a runaway scan ignores pending signals. Safe: no buffer pinned
+		 * at the top of the loop. */
+		CHECK_FOR_INTERRUPTS();
+
 		if (list_length(so->w) == 0)
 		{
 			if (so->pgturbohybridFlatScan)

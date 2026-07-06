@@ -785,6 +785,10 @@ ParallelHeapScan(PgturbohybridGraphBuildState * buildstate)
 	nparticipanttuplesorts = buildstate->graphLeader->nparticipanttuplesorts;
 	for (;;)
 	{
+		/* Allow cancel/terminate while waiting for parallel workers. Without
+		 * this, a dead/stuck worker makes the leader wait forever, ignoring
+		 * pg_cancel/terminate. Safe: spinlock not yet acquired here. */
+		CHECK_FOR_INTERRUPTS();
 		SpinLockAcquire(&graphShared->mutex);
 		if (graphShared->nparticipantsdone == nparticipanttuplesorts)
 		{

@@ -1,4 +1,5 @@
 #include "postgres.h"
+#include "miscadmin.h"
 
 #include "access/genam.h"
 #include "access/generic_xlog.h"
@@ -187,6 +188,13 @@ AddElementOnDisk(Relation index, PgturbohybridGraphElement e, int m, BlockNumber
 	/* Find a page (or two if needed) to insert the tuples */
 	for (;;)
 	{
+		/* Allow query cancel / termination during long page walks. Without this,
+		 * a bulk UPDATE that touches many index pages holds buffer locks without
+		 * ever processing pending signals, so pg_cancel_backend /
+		 * pg_terminate_backend are ignored until the walk finishes — forcing
+		 * SIGKILL and crash recovery. Safe here: no buffer is pinned at the top
+		 * of the loop (the previous iteration released it before advancing). */
+		CHECK_FOR_INTERRUPTS();
 		buf = ReadBuffer(index, currentPage);
 		LockBuffer(buf, BUFFER_LOCK_EXCLUSIVE);
 
@@ -608,6 +616,13 @@ PgturbohybridGraphUpdateNeighborsOnDisk(Relation index, PgturbohybridGraphSuppor
 			PgturbohybridGraphCandidate *hc = &neighbors->items[i];
 			PgturbohybridGraphElement neighborElement = PgturbohybridGraphPtrAccess(base, hc->element);
 			int			idx;
+
+			/* Allow cancel/terminate between neighbor updates. Each iteration
+			 * does ReadBuffer + LockBuffer via UpdateNeighborOnDisk; without an
+			 * interrupt check here a single insert of an element with many
+			 * neighbors across levels ignores pending signals for the whole
+			 * pass. Safe: no buffer is pinned at the top of this loop. */
+			CHECK_FOR_INTERRUPTS();
 
 			idx = GetUpdateIndex(neighborElement, e, hc->distance, m, lm, lc, index, support, updateCtx);
 
