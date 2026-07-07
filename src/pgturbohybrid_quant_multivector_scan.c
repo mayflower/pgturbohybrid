@@ -8454,7 +8454,7 @@ PgturbohybridMultiVectorDocumentNodeScan(IndexScanDesc scan,
 			stats->centroidDocCodesAvailable =
 				(meta->tqMultivectorDocMapFlags &
 				 PGTURBOHYBRID_GRAPH_MULTIVECTOR_DOCMAP_FLAG_CENTROID_DOC_CODES) != 0;
-			stats->quantizedInvertedSidecarAvailable =
+			stats->quantizedInverted.sidecarAvailable =
 				(meta->tqMultivectorDocMapFlags &
 				 PGTURBOHYBRID_GRAPH_MULTIVECTOR_DOCMAP_FLAG_QUANTIZED_POSTINGS) != 0 &&
 			(meta->tqMultivectorDocMapFlags &
@@ -8639,240 +8639,240 @@ PgturbohybridMultiVectorDocumentNodeScan(IndexScanDesc scan,
 			(uint32) exactRerankCount;
 		quantizedInvertedCandidates =
 			quantizedInvertedExperimental ? (uint32) docCount : 0;
-		stats->quantizedInvertedListsVisited =
+		stats->quantizedInverted.listsVisited =
 			quantizedInvertedListsVisited;
-		stats->quantizedInvertedPostingsTouched =
+		stats->quantizedInverted.postingsTouched =
 			quantizedInvertedPostingsTouched;
-		stats->quantizedInvertedPostingsSelected =
+		stats->quantizedInverted.postingsSelected =
 			quantizedInvertedExperimental ? quantizedInvertedPostingsSelected : 0;
-		stats->quantizedInvertedPostingsSkipped =
+		stats->quantizedInverted.postingsSkipped =
 			quantizedInvertedExperimental ? quantizedInvertedPostingsSkipped : 0;
-		stats->quantizedInvertedPostingLimitPerToken =
+		stats->quantizedInverted.postingLimitPerToken =
 			quantizedInvertedExperimental ? quantizedInvertedPostingLimitPerToken : 0;
-		stats->quantizedInvertedProbeCodewordsPerToken =
+		stats->quantizedInverted.probeCodewordsPerToken =
 			quantizedInvertedExperimental ?
 			(uint32) Max(pgturbohybrid_multivector_quantized_inverted_probe_codewords_per_token,
 						 1) : 0;
-		strlcpy(stats->quantizedInvertedPostingCapStrategy,
+		strlcpy(stats->quantizedInverted.postingCapStrategy,
 				quantizedInvertedExperimental ? quantizedInvertedPostingCapStrategy : "none",
-				sizeof(stats->quantizedInvertedPostingCapStrategy));
-		stats->quantizedInvertedDocsScored =
+				sizeof(stats->quantizedInverted.postingCapStrategy));
+		stats->quantizedInverted.docsScored =
 			quantizedInvertedDocsScored;
-		stats->quantizedInvertedCandidates =
+		stats->quantizedInverted.candidates =
 			quantizedInvertedCandidates;
-		stats->quantizedInvertedExactRerankDocs =
+		stats->quantizedInverted.exactRerankDocs =
 			quantizedInvertedExperimental ? (uint32) exactRerankCount : 0;
-		strlcpy(stats->quantizedInvertedCodebookSource,
+		strlcpy(stats->quantizedInverted.codebookSource,
 				quantizedInvertedExperimental ?
 				PgturbohybridQuantizedInvertedCodebookSourceName(storage.multivectorQuantizedInvertedCodebookSource) :
 				"",
-				sizeof(stats->quantizedInvertedCodebookSource));
-		stats->quantizedInvertedCodebookSize =
+				sizeof(stats->quantizedInverted.codebookSource));
+		stats->quantizedInverted.codebookSize =
 			quantizedInvertedExperimental ?
 			storage.multivectorQuantizedInvertedCodebookSize : 0;
-		stats->quantizedInvertedCodebookDim =
+		stats->quantizedInverted.codebookDim =
 			quantizedInvertedExperimental ?
 			storage.multivectorQuantizedInvertedCodebookDim : 0;
-		strlcpy(stats->quantizedInvertedCodebookChecksum,
+		strlcpy(stats->quantizedInverted.codebookChecksum,
 				quantizedInvertedExperimental ?
 				storage.multivectorQuantizedInvertedCodebookChecksum : "",
-				sizeof(stats->quantizedInvertedCodebookChecksum));
-		stats->quantizedInvertedCodebookTopM =
+				sizeof(stats->quantizedInverted.codebookChecksum));
+		stats->quantizedInverted.codebookTopM =
 			quantizedInvertedExperimental ?
 			storage.multivectorQuantizedInvertedCodebookTopM : 0;
-		stats->quantizedInvertedAssignmentUs =
+		stats->quantizedInverted.assignmentUs =
 			quantizedInvertedExperimental ?
 			quantizedInvertedAssignmentUs : 0;
-		stats->quantizedInvertedQueryCodewordScoreUs =
+		stats->quantizedInverted.queryCodewordScoreUs =
 			quantizedInvertedExperimental ?
 			quantizedInvertedQueryCodewordScoreUs : 0;
-		strlcpy(stats->quantizedInvertedQueryCodewordKernel,
+		strlcpy(stats->quantizedInverted.queryCodewordKernel,
 				quantizedInvertedExperimental ?
 				quantizedInvertedQueryCodewordKernel : "off",
-				sizeof(stats->quantizedInvertedQueryCodewordKernel));
-		stats->quantizedInvertedQueryCodewordScoresComputed =
+				sizeof(stats->quantizedInverted.queryCodewordKernel));
+		stats->quantizedInverted.queryCodewordScoresComputed =
 			quantizedInvertedExperimental ?
 			quantizedInvertedQueryCodewordScoresComputed : 0;
-		stats->quantizedInvertedQueryCodewordBlocks =
+		stats->quantizedInverted.queryCodewordBlocks =
 			quantizedInvertedExperimental ?
 			quantizedInvertedQueryCodewordBlocks : 0;
-		stats->quantizedInvertedQueryCodewordTopkUs =
+		stats->quantizedInverted.queryCodewordTopkUs =
 			quantizedInvertedExperimental ?
 			quantizedInvertedQueryCodewordTopkUs : 0;
-		stats->quantizedInvertedQueryCodewordFullMatrixMaterialized =
+		stats->quantizedInverted.queryCodewordFullMatrixMaterialized =
 			quantizedInvertedExperimental ?
 			quantizedInvertedQueryCodewordFullMatrixMaterialized : false;
-		stats->quantizedInvertedQueryCodewordActiveQueryTokens =
+		stats->quantizedInverted.queryCodewordActiveQueryTokens =
 			quantizedInvertedExperimental ?
 			quantizedInvertedQueryCodewordActiveQueryTokens : 0;
-		stats->quantizedInvertedQueryCodewordSkippedQueryTokens =
+		stats->quantizedInverted.queryCodewordSkippedQueryTokens =
 			quantizedInvertedExperimental ?
 			quantizedInvertedQueryCodewordSkippedQueryTokens : 0;
-		stats->quantizedInvertedListOffsetBytes =
+		stats->quantizedInverted.listOffsetBytes =
 			quantizedInvertedExperimental ?
 			((uint64) storage.multivectorQuantizedInvertedCodebookSize + 1) *
 			(uint64) sizeof(uint32) : 0;
-		stats->quantizedInvertedPostingBytes =
+		stats->quantizedInverted.postingBytes =
 			quantizedInvertedExperimental ?
 			(uint64) storage.multivectorQuantizedInvertedPostingCount *
 			(uint64) sizeof(PgturbohybridGraphMultiVectorQuantizedPostingEntry) : 0;
-		stats->quantizedInvertedSidecarBytes =
-			stats->quantizedInvertedListOffsetBytes +
-			stats->quantizedInvertedPostingBytes;
-		strlcpy(stats->quantizedInvertedCompactKernel,
+		stats->quantizedInverted.sidecarBytes =
+			stats->quantizedInverted.listOffsetBytes +
+			stats->quantizedInverted.postingBytes;
+		strlcpy(stats->quantizedInverted.compactKernel,
 				quantizedInvertedExperimental ?
 				quantizedInvertedCompactKernel : "off",
-				sizeof(stats->quantizedInvertedCompactKernel));
-		strlcpy(stats->quantizedInvertedCompactScoreSource,
+				sizeof(stats->quantizedInverted.compactKernel));
+		strlcpy(stats->quantizedInverted.compactScoreSource,
 				quantizedInvertedExperimental && quantizedInvertedCompactScoring ?
 				"full_doc_codeword_maxsim" : "none",
-				sizeof(stats->quantizedInvertedCompactScoreSource));
-		stats->quantizedInvertedCompactScoreUs =
+				sizeof(stats->quantizedInverted.compactScoreSource));
+		stats->quantizedInverted.compactScoreUs =
 			quantizedInvertedExperimental ? quantizedInvertedCompactScoreUs : 0;
-		stats->quantizedInvertedCompactDocsScored =
+		stats->quantizedInverted.compactDocsScored =
 			quantizedInvertedExperimental ?
 			quantizedInvertedCompactDocsScored : 0;
-		stats->quantizedInvertedCompactPayloadBytes =
+		stats->quantizedInverted.compactPayloadBytes =
 				quantizedInvertedExperimental ?
 				quantizedInvertedCompactPayloadBytes : 0;
-			strlcpy(stats->quantizedInvertedCompactDocOrder,
+			strlcpy(stats->quantizedInverted.compactDocOrder,
 					quantizedInvertedExperimental &&
 					quantizedInvertedCompactScoring ?
 					quantizedInvertedCompactDocOrder : "original",
-					sizeof(stats->quantizedInvertedCompactDocOrder));
-			stats->quantizedInvertedCompactInnerAllocations =
+					sizeof(stats->quantizedInverted.compactDocOrder));
+			stats->quantizedInverted.compactInnerAllocations =
 				quantizedInvertedExperimental ?
 				quantizedInvertedCompactInnerAllocations : 0;
-			stats->quantizedInvertedCompactActiveQueryTokens =
+			stats->quantizedInverted.compactActiveQueryTokens =
 				quantizedInvertedExperimental ?
 				quantizedInvertedCompactActiveQueryTokens : 0;
-			stats->quantizedInvertedCompactPairsEvaluated =
+			stats->quantizedInverted.compactPairsEvaluated =
 				quantizedInvertedExperimental ?
 				quantizedInvertedCompactPairsEvaluated : 0;
-			stats->quantizedInvertedCompactPairsSkipped =
+			stats->quantizedInverted.compactPairsSkipped =
 				quantizedInvertedExperimental ?
 				quantizedInvertedCompactPairsSkipped : 0;
-			stats->quantizedInvertedCompactPrefetches =
+			stats->quantizedInverted.compactPrefetches =
 				quantizedInvertedExperimental ?
 				quantizedInvertedCompactPrefetches : 0;
-			stats->quantizedInvertedCompactAvgDocTokens =
+			stats->quantizedInverted.compactAvgDocTokens =
 				quantizedInvertedExperimental &&
 				quantizedInvertedCompactDocsScored > 0 ?
 				(double) (quantizedInvertedCompactPayloadBytes / sizeof(uint32)) /
 				(double) quantizedInvertedCompactDocsScored : 0.0;
-			stats->quantizedInvertedCompactUsPerDoc =
+			stats->quantizedInverted.compactUsPerDoc =
 				quantizedInvertedExperimental &&
 				quantizedInvertedCompactDocsScored > 0 ?
 				(double) quantizedInvertedCompactScoreUs /
 				(double) quantizedInvertedCompactDocsScored : 0.0;
-			stats->quantizedInvertedCompactPayloadBytesPerDoc =
+			stats->quantizedInverted.compactPayloadBytesPerDoc =
 				quantizedInvertedExperimental &&
 				quantizedInvertedCompactDocsScored > 0 ?
 				(double) quantizedInvertedCompactPayloadBytes /
 				(double) quantizedInvertedCompactDocsScored : 0.0;
-			stats->quantizedInvertedCompactTopKChangedVsScalar =
+			stats->quantizedInverted.compactTopKChangedVsScalar =
 				quantizedInvertedExperimental ?
 				quantizedInvertedCompactTopKChangedVsScalar : false;
-			stats->quantizedInvertedPrecompactEnabled =
+			stats->quantizedInverted.precompactEnabled =
 				quantizedInvertedExperimental &&
 				quantizedInvertedPrecompactEnabled;
-			strlcpy(stats->quantizedInvertedPrecompactMode,
+			strlcpy(stats->quantizedInverted.precompactMode,
 					quantizedInvertedExperimental &&
 					quantizedInvertedPrecompactEnabled ?
 					quantizedInvertedPrecompactMode ==
 					PGTURBOHYBRID_MULTIVECTOR_QUANTIZED_INVERTED_PRECOMPACT_CENTROID_MAXSIM_TOPK ?
 					"centroid_maxsim_topk" : "centroid_maxsim_reservoir" :
 					"off",
-					sizeof(stats->quantizedInvertedPrecompactMode));
-			stats->quantizedInvertedDocsTouchedBeforePrecompact =
+					sizeof(stats->quantizedInverted.precompactMode));
+			stats->quantizedInverted.docsTouchedBeforePrecompact =
 				quantizedInvertedExperimental &&
 				quantizedInvertedPrecompactEnabled ?
 				quantizedInvertedDocsTouchedBeforePrecompact : 0;
-			stats->quantizedInvertedPrecompactScoreK =
+			stats->quantizedInverted.precompactScoreK =
 				quantizedInvertedExperimental &&
 				quantizedInvertedPrecompactEnabled ?
 				quantizedInvertedPrecompactScoreK : 0;
-			stats->quantizedInvertedPrecompactCoverageK =
+			stats->quantizedInverted.precompactCoverageK =
 				quantizedInvertedExperimental &&
 				quantizedInvertedPrecompactEnabled ?
 				quantizedInvertedPrecompactCoverageK : 0;
-			stats->quantizedInvertedPrecompactPerTokenK =
+			stats->quantizedInverted.precompactPerTokenK =
 				quantizedInvertedExperimental &&
 				quantizedInvertedPrecompactEnabled ?
 				quantizedInvertedPrecompactPerTokenK : 0;
-			stats->quantizedInvertedCompactMaxDocs =
+			stats->quantizedInverted.compactMaxDocs =
 				quantizedInvertedExperimental &&
 				quantizedInvertedPrecompactEnabled ?
 				quantizedInvertedCompactMaxDocs : 0;
-			stats->quantizedInvertedPrecompactScoreDocs =
+			stats->quantizedInverted.precompactScoreDocs =
 				quantizedInvertedExperimental &&
 				quantizedInvertedPrecompactEnabled ?
 				quantizedInvertedPrecompactScoreDocs : 0;
-			stats->quantizedInvertedPrecompactCoverageDocs =
+			stats->quantizedInverted.precompactCoverageDocs =
 				quantizedInvertedExperimental &&
 				quantizedInvertedPrecompactEnabled ?
 				quantizedInvertedPrecompactCoverageDocs : 0;
-			stats->quantizedInvertedPrecompactPerTokenDocs =
+			stats->quantizedInverted.precompactPerTokenDocs =
 				quantizedInvertedExperimental &&
 				quantizedInvertedPrecompactEnabled ?
 				quantizedInvertedPrecompactPerTokenDocs : 0;
-			stats->quantizedInvertedPrecompactUnionDocs =
+			stats->quantizedInverted.precompactUnionDocs =
 				quantizedInvertedExperimental &&
 				quantizedInvertedPrecompactEnabled ?
 				quantizedInvertedPrecompactUnionDocs : 0;
-			stats->quantizedInvertedPrecompactDuplicates =
+			stats->quantizedInverted.precompactDuplicates =
 				quantizedInvertedExperimental &&
 				quantizedInvertedPrecompactEnabled ?
 				quantizedInvertedPrecompactDuplicates : 0;
-			stats->quantizedInvertedPrecompactPrunedDocs =
+			stats->quantizedInverted.precompactPrunedDocs =
 				quantizedInvertedExperimental &&
 				quantizedInvertedPrecompactEnabled ?
 				quantizedInvertedPrecompactPrunedDocs : 0;
-			stats->quantizedInvertedPrecompactUs =
+			stats->quantizedInverted.precompactUs =
 				quantizedInvertedExperimental &&
 				quantizedInvertedPrecompactEnabled ?
 				quantizedInvertedPrecompactUs : 0;
-			stats->quantizedInvertedCompactDocsSkippedByPrecompact =
+			stats->quantizedInverted.compactDocsSkippedByPrecompact =
 				quantizedInvertedExperimental &&
 				quantizedInvertedPrecompactEnabled ?
 				quantizedInvertedCompactDocsSkippedByPrecompact : 0;
-			strlcpy(stats->quantizedInvertedTokenCoverageMode,
+			strlcpy(stats->quantizedInverted.tokenCoverageMode,
 					quantizedInvertedExperimental && quantizedInvertedTokenCoverageLinear ?
 					"linear" : "off",
-					sizeof(stats->quantizedInvertedTokenCoverageMode));
-			stats->quantizedInvertedActiveQueryTokens =
+					sizeof(stats->quantizedInverted.tokenCoverageMode));
+			stats->quantizedInverted.activeQueryTokens =
 				quantizedInvertedExperimental ?
 				quantizedInvertedActiveQueryTokens : 0;
-			stats->quantizedInvertedTokenMatchesTotal =
+			stats->quantizedInverted.tokenMatchesTotal =
 				quantizedInvertedExperimental ?
 				quantizedInvertedTokenMatchesTotal : 0;
-			stats->quantizedInvertedTokenMatchesMax =
+			stats->quantizedInverted.tokenMatchesMax =
 				quantizedInvertedExperimental ?
 				quantizedInvertedTokenMatchesMax : 0;
-			stats->quantizedInvertedMinTokenMatches =
+			stats->quantizedInverted.minTokenMatches =
 				quantizedInvertedExperimental ?
 				quantizedInvertedMinTokenMatches : 0;
-			stats->quantizedInvertedTokenMatchFilteredDocs =
+			stats->quantizedInverted.tokenMatchFilteredDocs =
 				quantizedInvertedExperimental ?
 				quantizedInvertedTokenMatchFilteredDocs : 0;
-			stats->quantizedInvertedScoreBoundPruningEnabled =
+			stats->quantizedInverted.scoreBoundPruningEnabled =
 				quantizedInvertedScoreBoundPruning;
-			stats->quantizedInvertedScoreBoundDocsChecked =
+			stats->quantizedInverted.scoreBoundDocsChecked =
 				quantizedInvertedScoreBoundPruning ?
 				quantizedInvertedScoreBoundDocsChecked : 0;
-			stats->quantizedInvertedScoreBoundDocsPruned =
+			stats->quantizedInverted.scoreBoundDocsPruned =
 				quantizedInvertedScoreBoundPruning ?
 				quantizedInvertedScoreBoundDocsPruned : 0;
-			stats->quantizedInvertedScoreBoundPruneUs =
+			stats->quantizedInverted.scoreBoundPruneUs =
 				quantizedInvertedScoreBoundPruning ?
 				quantizedInvertedScoreBoundPruneUs : 0;
-			stats->quantizedInvertedScoreBoundUnsafeFallbacks =
+			stats->quantizedInverted.scoreBoundUnsafeFallbacks =
 				quantizedInvertedScoreBoundPruning ?
 				quantizedInvertedScoreBoundUnsafeFallbacks : 0;
-			stats->quantizedInvertedCandidatesBeforeBound =
+			stats->quantizedInverted.candidatesBeforeBound =
 				quantizedInvertedScoreBoundPruning ?
 				quantizedInvertedCandidatesBeforeBound : 0;
-			stats->quantizedInvertedCandidatesAfterBound =
+			stats->quantizedInverted.candidatesAfterBound =
 				quantizedInvertedScoreBoundPruning ?
 				quantizedInvertedCandidatesAfterBound : 0;
 			strlcpy(stats->multivectorDocSidecarCacheMode,

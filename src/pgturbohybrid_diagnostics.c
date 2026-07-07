@@ -739,7 +739,7 @@ PgturbohybridJsonbAddMultiVectorDocStorageStats(PgturbohybridJsonbState *state,
 							  scanStats->centroidDocCodesAvailable);
 	PgturbohybridJsonbAddBool(state,
 							  "quantized_inverted_sidecar_available",
-							  scanStats->quantizedInvertedSidecarAvailable);
+							  scanStats->quantizedInverted.sidecarAvailable);
 	PgturbohybridJsonbAddString(state, "exact_rerank_source_supported",
 								scanStats->proxyOnlyIndex ||
 								scanStats->centroidOnlyIndex ? "heap" :
@@ -4063,170 +4063,170 @@ pgturbohybrid_last_scan_stats(PG_FUNCTION_ARGS)
 								scanStats.proxyVectorSidecarTouchReason : "none");
 	PgturbohybridJsonbAddMultiVectorCentroidLiteStats(&state, &scanStats);
 	PgturbohybridJsonbAddUint64(&state, "quantized_inverted_lists_visited",
-								scanStats.quantizedInvertedListsVisited);
+								scanStats.quantizedInverted.listsVisited);
 	PgturbohybridJsonbAddUint64(&state, "quantized_inverted_postings_touched",
-								scanStats.quantizedInvertedPostingsTouched);
+								scanStats.quantizedInverted.postingsTouched);
 	PgturbohybridJsonbAddUint64(&state, "quantized_inverted_postings_selected",
-								scanStats.quantizedInvertedPostingsSelected);
+								scanStats.quantizedInverted.postingsSelected);
 	PgturbohybridJsonbAddUint64(&state, "quantized_inverted_postings_skipped",
-								scanStats.quantizedInvertedPostingsSkipped);
+								scanStats.quantizedInverted.postingsSkipped);
 		PgturbohybridJsonbAddInt64(&state, "quantized_inverted_posting_limit_per_token",
-								   scanStats.quantizedInvertedPostingLimitPerToken);
+								   scanStats.quantizedInverted.postingLimitPerToken);
 		PgturbohybridJsonbAddInt64(&state, "quantized_inverted_probe_codewords_per_token",
-								   scanStats.quantizedInvertedProbeCodewordsPerToken);
+								   scanStats.quantizedInverted.probeCodewordsPerToken);
 		PgturbohybridJsonbAddString(&state, "quantized_inverted_posting_cap_strategy",
-								scanStats.quantizedInvertedPostingCapStrategy[0] != '\0' ?
-								scanStats.quantizedInvertedPostingCapStrategy : "none");
+								scanStats.quantizedInverted.postingCapStrategy[0] != '\0' ?
+								scanStats.quantizedInverted.postingCapStrategy : "none");
 	PgturbohybridJsonbAddUint64(&state, "quantized_inverted_docs_scored",
-								scanStats.quantizedInvertedDocsScored);
+								scanStats.quantizedInverted.docsScored);
 	PgturbohybridJsonbAddInt64(&state, "quantized_inverted_candidates",
-							   scanStats.quantizedInvertedCandidates);
+							   scanStats.quantizedInverted.candidates);
 	PgturbohybridJsonbAddInt64(&state, "quantized_inverted_exact_rerank_docs",
-							   scanStats.quantizedInvertedExactRerankDocs);
+							   scanStats.quantizedInverted.exactRerankDocs);
 	PgturbohybridJsonbAddString(&state, "quantized_inverted_codebook_source",
-								scanStats.quantizedInvertedCodebookSource[0] != '\0' ?
-								scanStats.quantizedInvertedCodebookSource :
+								scanStats.quantizedInverted.codebookSource[0] != '\0' ?
+								scanStats.quantizedInverted.codebookSource :
 								"deterministic");
 	PgturbohybridJsonbAddInt64(&state, "quantized_inverted_codebook_size",
-							   scanStats.quantizedInvertedCodebookSize);
+							   scanStats.quantizedInverted.codebookSize);
 	PgturbohybridJsonbAddInt64(&state, "quantized_inverted_codebook_dim",
-							   scanStats.quantizedInvertedCodebookDim);
+							   scanStats.quantizedInverted.codebookDim);
 	PgturbohybridJsonbAddString(&state, "quantized_inverted_codebook_checksum",
-								scanStats.quantizedInvertedCodebookChecksum);
+								scanStats.quantizedInverted.codebookChecksum);
 	PgturbohybridJsonbAddInt64(&state, "quantized_inverted_codebook_top_m",
-							   scanStats.quantizedInvertedCodebookTopM);
+							   scanStats.quantizedInverted.codebookTopM);
 	PgturbohybridJsonbAddInt64(&state, "quantized_inverted_codebook_version",
 							   PGTURBOHYBRID_GRAPH_MULTIVECTOR_DOCMAP_VERSION);
 	PgturbohybridJsonbAddUint64(&state, "quantized_inverted_assignment_us",
-								scanStats.quantizedInvertedAssignmentUs);
+								scanStats.quantizedInverted.assignmentUs);
 	PgturbohybridJsonbAddUint64(&state, "quantized_inverted_assignment_time_us",
-								scanStats.quantizedInvertedAssignmentUs);
+								scanStats.quantizedInverted.assignmentUs);
 	PgturbohybridJsonbAddUint64(&state, "quantized_inverted_query_codeword_score_us",
-								scanStats.quantizedInvertedQueryCodewordScoreUs);
+								scanStats.quantizedInverted.queryCodewordScoreUs);
 	PgturbohybridJsonbAddUint64(&state, "quantized_inverted_query_codeword_score_time_us",
-								scanStats.quantizedInvertedQueryCodewordScoreUs);
+								scanStats.quantizedInverted.queryCodewordScoreUs);
 	PgturbohybridJsonbAddString(&state, "quantized_inverted_query_codeword_kernel",
-								scanStats.quantizedInvertedQueryCodewordKernel[0] != '\0' ?
-								scanStats.quantizedInvertedQueryCodewordKernel : "off");
+								scanStats.quantizedInverted.queryCodewordKernel[0] != '\0' ?
+								scanStats.quantizedInverted.queryCodewordKernel : "off");
 	PgturbohybridJsonbAddUint64(&state, "quantized_inverted_query_codeword_scores_computed",
-								scanStats.quantizedInvertedQueryCodewordScoresComputed);
+								scanStats.quantizedInverted.queryCodewordScoresComputed);
 	PgturbohybridJsonbAddUint64(&state, "quantized_inverted_query_codeword_blocks",
-								scanStats.quantizedInvertedQueryCodewordBlocks);
+								scanStats.quantizedInverted.queryCodewordBlocks);
 	PgturbohybridJsonbAddUint64(&state, "quantized_inverted_query_codeword_topk_us",
-								scanStats.quantizedInvertedQueryCodewordTopkUs);
+								scanStats.quantizedInverted.queryCodewordTopkUs);
 	PgturbohybridJsonbAddBool(&state, "quantized_inverted_query_codeword_full_matrix_materialized",
-							  scanStats.quantizedInvertedQueryCodewordFullMatrixMaterialized);
+							  scanStats.quantizedInverted.queryCodewordFullMatrixMaterialized);
 	PgturbohybridJsonbAddInt64(&state, "quantized_inverted_query_codeword_active_query_tokens",
-							   scanStats.quantizedInvertedQueryCodewordActiveQueryTokens);
+							   scanStats.quantizedInverted.queryCodewordActiveQueryTokens);
 	PgturbohybridJsonbAddInt64(&state, "quantized_inverted_query_codeword_skipped_query_tokens",
-							   scanStats.quantizedInvertedQueryCodewordSkippedQueryTokens);
+							   scanStats.quantizedInverted.queryCodewordSkippedQueryTokens);
 	PgturbohybridJsonbAddUint64(&state, "quantized_inverted_list_offset_bytes",
-								scanStats.quantizedInvertedListOffsetBytes);
+								scanStats.quantizedInverted.listOffsetBytes);
 	PgturbohybridJsonbAddUint64(&state, "quantized_inverted_posting_bytes",
-								scanStats.quantizedInvertedPostingBytes);
+								scanStats.quantizedInverted.postingBytes);
 	PgturbohybridJsonbAddUint64(&state, "quantized_inverted_sidecar_bytes",
-								scanStats.quantizedInvertedSidecarBytes);
+								scanStats.quantizedInverted.sidecarBytes);
 	PgturbohybridJsonbAddString(&state, "quantized_inverted_compact_kernel",
-								scanStats.quantizedInvertedCompactKernel[0] != '\0' ?
-								scanStats.quantizedInvertedCompactKernel :
+								scanStats.quantizedInverted.compactKernel[0] != '\0' ?
+								scanStats.quantizedInverted.compactKernel :
 								"off");
 	PgturbohybridJsonbAddString(&state, "quantized_inverted_compact_score_source",
-								scanStats.quantizedInvertedCompactScoreSource[0] != '\0' ?
-								scanStats.quantizedInvertedCompactScoreSource :
+								scanStats.quantizedInverted.compactScoreSource[0] != '\0' ?
+								scanStats.quantizedInverted.compactScoreSource :
 								"none");
 	PgturbohybridJsonbAddUint64(&state, "quantized_inverted_compact_score_us",
-								scanStats.quantizedInvertedCompactScoreUs);
+								scanStats.quantizedInverted.compactScoreUs);
 	PgturbohybridJsonbAddUint64(&state, "quantized_inverted_compact_docs_scored",
-								scanStats.quantizedInvertedCompactDocsScored);
+								scanStats.quantizedInverted.compactDocsScored);
 	PgturbohybridJsonbAddUint64(&state, "quantized_inverted_compact_payload_bytes",
-								scanStats.quantizedInvertedCompactPayloadBytes);
+								scanStats.quantizedInverted.compactPayloadBytes);
 	PgturbohybridJsonbAddString(&state, "quantized_inverted_compact_doc_order",
-								scanStats.quantizedInvertedCompactDocOrder[0] != '\0' ?
-								scanStats.quantizedInvertedCompactDocOrder :
+								scanStats.quantizedInverted.compactDocOrder[0] != '\0' ?
+								scanStats.quantizedInverted.compactDocOrder :
 								"original");
 	PgturbohybridJsonbAddUint64(&state, "quantized_inverted_compact_inner_allocations",
-								scanStats.quantizedInvertedCompactInnerAllocations);
+								scanStats.quantizedInverted.compactInnerAllocations);
 	PgturbohybridJsonbAddInt64(&state, "quantized_inverted_compact_active_query_tokens",
-							   scanStats.quantizedInvertedCompactActiveQueryTokens);
+							   scanStats.quantizedInverted.compactActiveQueryTokens);
 	PgturbohybridJsonbAddUint64(&state, "quantized_inverted_compact_pairs_evaluated",
-								scanStats.quantizedInvertedCompactPairsEvaluated);
+								scanStats.quantizedInverted.compactPairsEvaluated);
 	PgturbohybridJsonbAddUint64(&state, "quantized_inverted_compact_pairs_skipped",
-								scanStats.quantizedInvertedCompactPairsSkipped);
+								scanStats.quantizedInverted.compactPairsSkipped);
 	PgturbohybridJsonbAddUint64(&state, "quantized_inverted_compact_prefetches",
-								scanStats.quantizedInvertedCompactPrefetches);
+								scanStats.quantizedInverted.compactPrefetches);
 	PgturbohybridJsonbAddFloat8(&state, "quantized_inverted_compact_avg_doc_tokens",
-								scanStats.quantizedInvertedCompactAvgDocTokens);
+								scanStats.quantizedInverted.compactAvgDocTokens);
 	PgturbohybridJsonbAddFloat8(&state, "quantized_inverted_compact_us_per_doc",
-								scanStats.quantizedInvertedCompactUsPerDoc);
+								scanStats.quantizedInverted.compactUsPerDoc);
 	PgturbohybridJsonbAddFloat8(&state, "quantized_inverted_compact_payload_bytes_per_doc",
-								scanStats.quantizedInvertedCompactPayloadBytesPerDoc);
+								scanStats.quantizedInverted.compactPayloadBytesPerDoc);
 	PgturbohybridJsonbAddBool(&state, "quantized_inverted_compact_topk_changed_vs_scalar",
-							  scanStats.quantizedInvertedCompactTopKChangedVsScalar);
+							  scanStats.quantizedInverted.compactTopKChangedVsScalar);
 	PgturbohybridJsonbAddBool(&state, "quantized_inverted_precompact_enabled",
-							  scanStats.quantizedInvertedPrecompactEnabled);
+							  scanStats.quantizedInverted.precompactEnabled);
 	PgturbohybridJsonbAddString(&state, "quantized_inverted_precompact_mode",
-								scanStats.quantizedInvertedPrecompactMode[0] != '\0' ?
-								scanStats.quantizedInvertedPrecompactMode : "off");
+								scanStats.quantizedInverted.precompactMode[0] != '\0' ?
+								scanStats.quantizedInverted.precompactMode : "off");
 	PgturbohybridJsonbAddInt64(&state, "quantized_inverted_docs_touched_before_precompact",
-							   scanStats.quantizedInvertedDocsTouchedBeforePrecompact);
+							   scanStats.quantizedInverted.docsTouchedBeforePrecompact);
 	PgturbohybridJsonbAddInt64(&state, "quantized_inverted_precompact_score_k",
-							   scanStats.quantizedInvertedPrecompactScoreK);
+							   scanStats.quantizedInverted.precompactScoreK);
 	PgturbohybridJsonbAddInt64(&state, "quantized_inverted_precompact_coverage_k",
-							   scanStats.quantizedInvertedPrecompactCoverageK);
+							   scanStats.quantizedInverted.precompactCoverageK);
 	PgturbohybridJsonbAddInt64(&state, "quantized_inverted_precompact_per_token_k",
-							   scanStats.quantizedInvertedPrecompactPerTokenK);
+							   scanStats.quantizedInverted.precompactPerTokenK);
 	PgturbohybridJsonbAddInt64(&state, "quantized_inverted_compact_max_docs",
-							   scanStats.quantizedInvertedCompactMaxDocs);
+							   scanStats.quantizedInverted.compactMaxDocs);
 	PgturbohybridJsonbAddInt64(&state, "quantized_inverted_precompact_score_docs",
-							   scanStats.quantizedInvertedPrecompactScoreDocs);
+							   scanStats.quantizedInverted.precompactScoreDocs);
 	PgturbohybridJsonbAddInt64(&state, "quantized_inverted_precompact_coverage_docs",
-							   scanStats.quantizedInvertedPrecompactCoverageDocs);
+							   scanStats.quantizedInverted.precompactCoverageDocs);
 	PgturbohybridJsonbAddInt64(&state, "quantized_inverted_precompact_per_token_docs",
-							   scanStats.quantizedInvertedPrecompactPerTokenDocs);
+							   scanStats.quantizedInverted.precompactPerTokenDocs);
 	PgturbohybridJsonbAddInt64(&state, "quantized_inverted_precompact_union_docs",
-							   scanStats.quantizedInvertedPrecompactUnionDocs);
+							   scanStats.quantizedInverted.precompactUnionDocs);
 	PgturbohybridJsonbAddInt64(&state, "quantized_inverted_precompact_duplicates",
-							   scanStats.quantizedInvertedPrecompactDuplicates);
+							   scanStats.quantizedInverted.precompactDuplicates);
 	PgturbohybridJsonbAddInt64(&state, "quantized_inverted_precompact_pruned_docs",
-							   scanStats.quantizedInvertedPrecompactPrunedDocs);
+							   scanStats.quantizedInverted.precompactPrunedDocs);
 	PgturbohybridJsonbAddUint64(&state, "quantized_inverted_precompact_us",
-								scanStats.quantizedInvertedPrecompactUs);
+								scanStats.quantizedInverted.precompactUs);
 	PgturbohybridJsonbAddInt64(&state, "quantized_inverted_compact_docs_skipped_by_precompact",
-							   scanStats.quantizedInvertedCompactDocsSkippedByPrecompact);
+							   scanStats.quantizedInverted.compactDocsSkippedByPrecompact);
 	PgturbohybridJsonbAddString(&state, "quantized_inverted_token_coverage_mode",
-								scanStats.quantizedInvertedTokenCoverageMode[0] != '\0' ?
-								scanStats.quantizedInvertedTokenCoverageMode :
+								scanStats.quantizedInverted.tokenCoverageMode[0] != '\0' ?
+								scanStats.quantizedInverted.tokenCoverageMode :
 								"off");
 	PgturbohybridJsonbAddInt64(&state, "quantized_inverted_active_query_tokens",
-							   scanStats.quantizedInvertedActiveQueryTokens);
+							   scanStats.quantizedInverted.activeQueryTokens);
 	PgturbohybridJsonbAddUint64(&state, "quantized_inverted_token_matches_total",
-								scanStats.quantizedInvertedTokenMatchesTotal);
+								scanStats.quantizedInverted.tokenMatchesTotal);
 	PgturbohybridJsonbAddInt64(&state, "quantized_inverted_token_matches_max",
-							   scanStats.quantizedInvertedTokenMatchesMax);
+							   scanStats.quantizedInverted.tokenMatchesMax);
 	PgturbohybridJsonbAddInt64(&state, "quantized_inverted_min_token_matches",
-							   scanStats.quantizedInvertedMinTokenMatches);
+							   scanStats.quantizedInverted.minTokenMatches);
 	PgturbohybridJsonbAddUint64(&state, "quantized_inverted_token_match_filtered_docs",
-								scanStats.quantizedInvertedTokenMatchFilteredDocs);
+								scanStats.quantizedInverted.tokenMatchFilteredDocs);
 	PgturbohybridJsonbAddBool(&state, "quantized_inverted_score_bound_pruning_enabled",
-							  scanStats.quantizedInvertedScoreBoundPruningEnabled);
+							  scanStats.quantizedInverted.scoreBoundPruningEnabled);
 	PgturbohybridJsonbAddUint64(&state, "quantized_inverted_score_bound_docs_checked",
-								scanStats.quantizedInvertedScoreBoundDocsChecked);
+								scanStats.quantizedInverted.scoreBoundDocsChecked);
 	PgturbohybridJsonbAddUint64(&state, "quantized_inverted_score_bound_docs_pruned",
-								scanStats.quantizedInvertedScoreBoundDocsPruned);
+								scanStats.quantizedInverted.scoreBoundDocsPruned);
 	PgturbohybridJsonbAddUint64(&state, "quantized_inverted_score_bound_prune_time_us",
-								scanStats.quantizedInvertedScoreBoundPruneUs);
+								scanStats.quantizedInverted.scoreBoundPruneUs);
 	PgturbohybridJsonbAddUint64(&state, "quantized_inverted_score_bound_time_us",
-								scanStats.quantizedInvertedScoreBoundPruneUs);
+								scanStats.quantizedInverted.scoreBoundPruneUs);
 	PgturbohybridJsonbAddUint64(&state, "quantized_inverted_score_bound_unsafe_fallbacks",
-								scanStats.quantizedInvertedScoreBoundUnsafeFallbacks);
+								scanStats.quantizedInverted.scoreBoundUnsafeFallbacks);
 	PgturbohybridJsonbAddFloat8(&state, "quantized_inverted_score_bound_prune_ratio",
-								scanStats.quantizedInvertedScoreBoundDocsChecked > 0 ?
-								(double) scanStats.quantizedInvertedScoreBoundDocsPruned /
-								(double) scanStats.quantizedInvertedScoreBoundDocsChecked : 0.0);
+								scanStats.quantizedInverted.scoreBoundDocsChecked > 0 ?
+								(double) scanStats.quantizedInverted.scoreBoundDocsPruned /
+								(double) scanStats.quantizedInverted.scoreBoundDocsChecked : 0.0);
 	PgturbohybridJsonbAddInt64(&state, "quantized_inverted_candidates_before_bound",
-							   scanStats.quantizedInvertedCandidatesBeforeBound);
+							   scanStats.quantizedInverted.candidatesBeforeBound);
 	PgturbohybridJsonbAddInt64(&state, "quantized_inverted_candidates_after_bound",
-							   scanStats.quantizedInvertedCandidatesAfterBound);
+							   scanStats.quantizedInverted.candidatesAfterBound);
 	if (scanStats.multivectorGraphMode[0] != '\0')
 		PgturbohybridJsonbAddString(&state, "multivector_graph_mode",
 									scanStats.multivectorGraphMode);

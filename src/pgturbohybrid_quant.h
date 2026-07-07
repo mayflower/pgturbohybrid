@@ -7,6 +7,7 @@
 #include "pgturbohybrid_multivector.h"
 #include "pgturbohybrid_query.h"
 #include "pgturbohybrid_quant_psquare.h"
+#include "pgturbohybrid_scan_stats.h"
 
 /* Shared multivector/codebook types + tunables (straddle the quant.c split). */
 typedef struct PgturbohybridQuantizedInvertedCodebook PgturbohybridQuantizedInvertedCodebook;
@@ -705,7 +706,7 @@ typedef struct TqDenseCandidateStats
 	bool		fullMultivectorSidecarAvailable;
 	bool		centroidSidecarAvailable;
 	bool		centroidDocCodesAvailable;
-	bool		quantizedInvertedSidecarAvailable;
+	PgturbohybridQuantizedInvertedStats quantizedInverted;
 	char		multivectorDocGraphRescoreSource[16];
 	uint32		multivectorDocGraphExactRerankDocs;
 	uint64		multivectorDocGraphHeapFetches;
@@ -784,76 +785,6 @@ typedef struct TqDenseCandidateStats
 	uint32		multivectorCentroidCount;
 	uint32		multivectorCentroidPrerankDocs;
 	uint32		multivectorFullMaxsimRerankDocs;
-	uint64		quantizedInvertedListsVisited;
-	uint64		quantizedInvertedPostingsTouched;
-	uint64		quantizedInvertedPostingsSelected;
-	uint64		quantizedInvertedPostingsSkipped;
-	uint32		quantizedInvertedPostingLimitPerToken;
-	uint32		quantizedInvertedProbeCodewordsPerToken;
-	char		quantizedInvertedPostingCapStrategy[32];
-	uint64		quantizedInvertedDocsScored;
-	uint32		quantizedInvertedCandidates;
-	uint32		quantizedInvertedExactRerankDocs;
-	char		quantizedInvertedCodebookSource[16];
-	uint32		quantizedInvertedCodebookSize;
-	uint32		quantizedInvertedCodebookDim;
-	char		quantizedInvertedCodebookChecksum[128];
-	uint32		quantizedInvertedCodebookTopM;
-	uint64		quantizedInvertedAssignmentUs;
-	uint64		quantizedInvertedQueryCodewordScoreUs;
-	char		quantizedInvertedQueryCodewordKernel[16];
-	uint64		quantizedInvertedQueryCodewordScoresComputed;
-	uint64		quantizedInvertedQueryCodewordBlocks;
-	uint64		quantizedInvertedQueryCodewordTopkUs;
-	bool		quantizedInvertedQueryCodewordFullMatrixMaterialized;
-	uint32		quantizedInvertedQueryCodewordActiveQueryTokens;
-	uint32		quantizedInvertedQueryCodewordSkippedQueryTokens;
-	uint64		quantizedInvertedListOffsetBytes;
-	uint64		quantizedInvertedPostingBytes;
-	uint64		quantizedInvertedSidecarBytes;
-	char		quantizedInvertedCompactKernel[24];
-	char		quantizedInvertedCompactScoreSource[32];
-	uint64		quantizedInvertedCompactScoreUs;
-	uint64		quantizedInvertedCompactDocsScored;
-	uint64		quantizedInvertedCompactPayloadBytes;
-	char		quantizedInvertedCompactDocOrder[16];
-	uint64		quantizedInvertedCompactInnerAllocations;
-	uint32		quantizedInvertedCompactActiveQueryTokens;
-	uint64		quantizedInvertedCompactPairsEvaluated;
-	uint64		quantizedInvertedCompactPairsSkipped;
-	uint64		quantizedInvertedCompactPrefetches;
-	double		quantizedInvertedCompactAvgDocTokens;
-	double		quantizedInvertedCompactUsPerDoc;
-	double		quantizedInvertedCompactPayloadBytesPerDoc;
-	bool		quantizedInvertedCompactTopKChangedVsScalar;
-	bool		quantizedInvertedPrecompactEnabled;
-	char		quantizedInvertedPrecompactMode[32];
-	uint32		quantizedInvertedDocsTouchedBeforePrecompact;
-	uint32		quantizedInvertedPrecompactScoreK;
-	uint32		quantizedInvertedPrecompactCoverageK;
-	uint32		quantizedInvertedPrecompactPerTokenK;
-	uint32		quantizedInvertedCompactMaxDocs;
-	uint32		quantizedInvertedPrecompactScoreDocs;
-	uint32		quantizedInvertedPrecompactCoverageDocs;
-	uint32		quantizedInvertedPrecompactPerTokenDocs;
-	uint32		quantizedInvertedPrecompactUnionDocs;
-	uint32		quantizedInvertedPrecompactDuplicates;
-	uint32		quantizedInvertedPrecompactPrunedDocs;
-	uint64		quantizedInvertedPrecompactUs;
-	uint32		quantizedInvertedCompactDocsSkippedByPrecompact;
-	char		quantizedInvertedTokenCoverageMode[24];
-	uint32		quantizedInvertedActiveQueryTokens;
-	uint64		quantizedInvertedTokenMatchesTotal;
-	uint32		quantizedInvertedTokenMatchesMax;
-	uint32		quantizedInvertedMinTokenMatches;
-	uint64		quantizedInvertedTokenMatchFilteredDocs;
-	bool		quantizedInvertedScoreBoundPruningEnabled;
-	uint64		quantizedInvertedScoreBoundDocsChecked;
-	uint64		quantizedInvertedScoreBoundDocsPruned;
-	uint64		quantizedInvertedScoreBoundPruneUs;
-	uint64		quantizedInvertedScoreBoundUnsafeFallbacks;
-	uint32		quantizedInvertedCandidatesBeforeBound;
-	uint32		quantizedInvertedCandidatesAfterBound;
 	char		multivectorDocSidecarCacheMode[16];
 	uint64		multivectorDocSidecarPagesRead;
 	uint64		multivectorDocSidecarCacheHits;

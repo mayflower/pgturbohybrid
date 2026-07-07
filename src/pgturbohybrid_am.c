@@ -427,7 +427,7 @@ typedef struct PgturbohybridLastScanStats
 		bool		fullMultivectorSidecarAvailable;
 		bool		centroidSidecarAvailable;
 		bool		centroidDocCodesAvailable;
-		bool		quantizedInvertedSidecarAvailable;
+	PgturbohybridQuantizedInvertedStats quantizedInverted;
 	char		multivectorDocGraphRescoreSource[16];
 	uint32		multivectorDocGraphExactRerankDocs;
 	uint64		multivectorDocGraphHeapFetches;
@@ -506,76 +506,6 @@ typedef struct PgturbohybridLastScanStats
 	uint32		multivectorCentroidCount;
 	uint32		multivectorCentroidPrerankDocs;
 	uint32		multivectorFullMaxsimRerankDocs;
-	uint64		quantizedInvertedListsVisited;
-	uint64		quantizedInvertedPostingsTouched;
-	uint64		quantizedInvertedPostingsSelected;
-	uint64		quantizedInvertedPostingsSkipped;
-	uint32		quantizedInvertedPostingLimitPerToken;
-	uint32		quantizedInvertedProbeCodewordsPerToken;
-	char		quantizedInvertedPostingCapStrategy[32];
-	uint64		quantizedInvertedDocsScored;
-	uint32		quantizedInvertedCandidates;
-	uint32		quantizedInvertedExactRerankDocs;
-	char		quantizedInvertedCodebookSource[16];
-	uint32		quantizedInvertedCodebookSize;
-	uint32		quantizedInvertedCodebookDim;
-	char		quantizedInvertedCodebookChecksum[128];
-	uint32		quantizedInvertedCodebookTopM;
-	uint64		quantizedInvertedAssignmentUs;
-	uint64		quantizedInvertedQueryCodewordScoreUs;
-	char		quantizedInvertedQueryCodewordKernel[16];
-	uint64		quantizedInvertedQueryCodewordScoresComputed;
-	uint64		quantizedInvertedQueryCodewordBlocks;
-	uint64		quantizedInvertedQueryCodewordTopkUs;
-	bool		quantizedInvertedQueryCodewordFullMatrixMaterialized;
-	uint32		quantizedInvertedQueryCodewordActiveQueryTokens;
-	uint32		quantizedInvertedQueryCodewordSkippedQueryTokens;
-	uint64		quantizedInvertedListOffsetBytes;
-	uint64		quantizedInvertedPostingBytes;
-	uint64		quantizedInvertedSidecarBytes;
-	char		quantizedInvertedCompactKernel[24];
-	char		quantizedInvertedCompactScoreSource[32];
-	uint64		quantizedInvertedCompactScoreUs;
-	uint64		quantizedInvertedCompactDocsScored;
-	uint64		quantizedInvertedCompactPayloadBytes;
-	char		quantizedInvertedCompactDocOrder[16];
-	uint64		quantizedInvertedCompactInnerAllocations;
-	uint32		quantizedInvertedCompactActiveQueryTokens;
-	uint64		quantizedInvertedCompactPairsEvaluated;
-	uint64		quantizedInvertedCompactPairsSkipped;
-	uint64		quantizedInvertedCompactPrefetches;
-	double		quantizedInvertedCompactAvgDocTokens;
-	double		quantizedInvertedCompactUsPerDoc;
-	double		quantizedInvertedCompactPayloadBytesPerDoc;
-	bool		quantizedInvertedCompactTopKChangedVsScalar;
-	bool		quantizedInvertedPrecompactEnabled;
-	char		quantizedInvertedPrecompactMode[32];
-	uint32		quantizedInvertedDocsTouchedBeforePrecompact;
-	uint32		quantizedInvertedPrecompactScoreK;
-	uint32		quantizedInvertedPrecompactCoverageK;
-	uint32		quantizedInvertedPrecompactPerTokenK;
-	uint32		quantizedInvertedCompactMaxDocs;
-	uint32		quantizedInvertedPrecompactScoreDocs;
-	uint32		quantizedInvertedPrecompactCoverageDocs;
-	uint32		quantizedInvertedPrecompactPerTokenDocs;
-	uint32		quantizedInvertedPrecompactUnionDocs;
-	uint32		quantizedInvertedPrecompactDuplicates;
-	uint32		quantizedInvertedPrecompactPrunedDocs;
-	uint64		quantizedInvertedPrecompactUs;
-	uint32		quantizedInvertedCompactDocsSkippedByPrecompact;
-	char		quantizedInvertedTokenCoverageMode[24];
-	uint32		quantizedInvertedActiveQueryTokens;
-	uint64		quantizedInvertedTokenMatchesTotal;
-	uint32		quantizedInvertedTokenMatchesMax;
-	uint32		quantizedInvertedMinTokenMatches;
-	uint64		quantizedInvertedTokenMatchFilteredDocs;
-	bool		quantizedInvertedScoreBoundPruningEnabled;
-	uint64		quantizedInvertedScoreBoundDocsChecked;
-	uint64		quantizedInvertedScoreBoundDocsPruned;
-	uint64		quantizedInvertedScoreBoundPruneUs;
-	uint64		quantizedInvertedScoreBoundUnsafeFallbacks;
-	uint32		quantizedInvertedCandidatesBeforeBound;
-	uint32		quantizedInvertedCandidatesAfterBound;
 	char		multivectorDocSidecarCacheMode[16];
 	uint64		multivectorDocSidecarPagesRead;
 	uint64		multivectorDocSidecarCacheHits;
@@ -1094,8 +1024,7 @@ PgturbohybridGetLastScanStatsSnapshot(PgturbohybridScanStatsSnapshot *stats)
 		pgturbohybrid_last_scan_state.centroidSidecarAvailable;
 	stats->centroidDocCodesAvailable =
 		pgturbohybrid_last_scan_state.centroidDocCodesAvailable;
-	stats->quantizedInvertedSidecarAvailable =
-		pgturbohybrid_last_scan_state.quantizedInvertedSidecarAvailable;
+	stats->quantizedInverted = pgturbohybrid_last_scan_state.quantizedInverted;
 	strlcpy(stats->multivectorDocGraphRescoreSource,
 			pgturbohybrid_last_scan_state.multivectorDocGraphRescoreSource,
 			sizeof(stats->multivectorDocGraphRescoreSource));
@@ -1260,155 +1189,6 @@ PgturbohybridGetLastScanStatsSnapshot(PgturbohybridScanStatsSnapshot *stats)
 		pgturbohybrid_last_scan_state.multivectorCentroidPrerankDocs;
 	stats->multivectorFullMaxsimRerankDocs =
 		pgturbohybrid_last_scan_state.multivectorFullMaxsimRerankDocs;
-	stats->quantizedInvertedListsVisited =
-		pgturbohybrid_last_scan_state.quantizedInvertedListsVisited;
-	stats->quantizedInvertedPostingsTouched =
-		pgturbohybrid_last_scan_state.quantizedInvertedPostingsTouched;
-	stats->quantizedInvertedPostingsSelected =
-		pgturbohybrid_last_scan_state.quantizedInvertedPostingsSelected;
-	stats->quantizedInvertedPostingsSkipped =
-		pgturbohybrid_last_scan_state.quantizedInvertedPostingsSkipped;
-	stats->quantizedInvertedPostingLimitPerToken =
-		pgturbohybrid_last_scan_state.quantizedInvertedPostingLimitPerToken;
-	stats->quantizedInvertedProbeCodewordsPerToken =
-		pgturbohybrid_last_scan_state.quantizedInvertedProbeCodewordsPerToken;
-	strlcpy(stats->quantizedInvertedPostingCapStrategy,
-			pgturbohybrid_last_scan_state.quantizedInvertedPostingCapStrategy,
-			sizeof(stats->quantizedInvertedPostingCapStrategy));
-	stats->quantizedInvertedDocsScored =
-		pgturbohybrid_last_scan_state.quantizedInvertedDocsScored;
-	stats->quantizedInvertedCandidates =
-		pgturbohybrid_last_scan_state.quantizedInvertedCandidates;
-	stats->quantizedInvertedExactRerankDocs =
-		pgturbohybrid_last_scan_state.quantizedInvertedExactRerankDocs;
-	strlcpy(stats->quantizedInvertedCodebookSource,
-			pgturbohybrid_last_scan_state.quantizedInvertedCodebookSource,
-			sizeof(stats->quantizedInvertedCodebookSource));
-	stats->quantizedInvertedCodebookSize =
-		pgturbohybrid_last_scan_state.quantizedInvertedCodebookSize;
-	stats->quantizedInvertedCodebookDim =
-		pgturbohybrid_last_scan_state.quantizedInvertedCodebookDim;
-	strlcpy(stats->quantizedInvertedCodebookChecksum,
-			pgturbohybrid_last_scan_state.quantizedInvertedCodebookChecksum,
-			sizeof(stats->quantizedInvertedCodebookChecksum));
-	stats->quantizedInvertedCodebookTopM =
-		pgturbohybrid_last_scan_state.quantizedInvertedCodebookTopM;
-	stats->quantizedInvertedAssignmentUs =
-		pgturbohybrid_last_scan_state.quantizedInvertedAssignmentUs;
-	stats->quantizedInvertedQueryCodewordScoreUs =
-		pgturbohybrid_last_scan_state.quantizedInvertedQueryCodewordScoreUs;
-	strlcpy(stats->quantizedInvertedQueryCodewordKernel,
-			pgturbohybrid_last_scan_state.quantizedInvertedQueryCodewordKernel,
-			sizeof(stats->quantizedInvertedQueryCodewordKernel));
-	stats->quantizedInvertedQueryCodewordScoresComputed =
-		pgturbohybrid_last_scan_state.quantizedInvertedQueryCodewordScoresComputed;
-	stats->quantizedInvertedQueryCodewordBlocks =
-		pgturbohybrid_last_scan_state.quantizedInvertedQueryCodewordBlocks;
-	stats->quantizedInvertedQueryCodewordTopkUs =
-		pgturbohybrid_last_scan_state.quantizedInvertedQueryCodewordTopkUs;
-	stats->quantizedInvertedQueryCodewordFullMatrixMaterialized =
-		pgturbohybrid_last_scan_state.quantizedInvertedQueryCodewordFullMatrixMaterialized;
-	stats->quantizedInvertedQueryCodewordActiveQueryTokens =
-		pgturbohybrid_last_scan_state.quantizedInvertedQueryCodewordActiveQueryTokens;
-	stats->quantizedInvertedQueryCodewordSkippedQueryTokens =
-		pgturbohybrid_last_scan_state.quantizedInvertedQueryCodewordSkippedQueryTokens;
-	stats->quantizedInvertedListOffsetBytes =
-		pgturbohybrid_last_scan_state.quantizedInvertedListOffsetBytes;
-	stats->quantizedInvertedPostingBytes =
-		pgturbohybrid_last_scan_state.quantizedInvertedPostingBytes;
-	stats->quantizedInvertedSidecarBytes =
-		pgturbohybrid_last_scan_state.quantizedInvertedSidecarBytes;
-	strlcpy(stats->quantizedInvertedCompactKernel,
-			pgturbohybrid_last_scan_state.quantizedInvertedCompactKernel,
-			sizeof(stats->quantizedInvertedCompactKernel));
-	strlcpy(stats->quantizedInvertedCompactScoreSource,
-			pgturbohybrid_last_scan_state.quantizedInvertedCompactScoreSource,
-			sizeof(stats->quantizedInvertedCompactScoreSource));
-	stats->quantizedInvertedCompactScoreUs =
-		pgturbohybrid_last_scan_state.quantizedInvertedCompactScoreUs;
-	stats->quantizedInvertedCompactDocsScored =
-		pgturbohybrid_last_scan_state.quantizedInvertedCompactDocsScored;
-	stats->quantizedInvertedCompactPayloadBytes =
-		pgturbohybrid_last_scan_state.quantizedInvertedCompactPayloadBytes;
-	strlcpy(stats->quantizedInvertedCompactDocOrder,
-			pgturbohybrid_last_scan_state.quantizedInvertedCompactDocOrder,
-			sizeof(stats->quantizedInvertedCompactDocOrder));
-	stats->quantizedInvertedCompactInnerAllocations =
-		pgturbohybrid_last_scan_state.quantizedInvertedCompactInnerAllocations;
-	stats->quantizedInvertedCompactActiveQueryTokens =
-		pgturbohybrid_last_scan_state.quantizedInvertedCompactActiveQueryTokens;
-	stats->quantizedInvertedCompactPairsEvaluated =
-		pgturbohybrid_last_scan_state.quantizedInvertedCompactPairsEvaluated;
-	stats->quantizedInvertedCompactPairsSkipped =
-		pgturbohybrid_last_scan_state.quantizedInvertedCompactPairsSkipped;
-	stats->quantizedInvertedCompactPrefetches =
-		pgturbohybrid_last_scan_state.quantizedInvertedCompactPrefetches;
-	stats->quantizedInvertedCompactAvgDocTokens =
-		pgturbohybrid_last_scan_state.quantizedInvertedCompactAvgDocTokens;
-	stats->quantizedInvertedCompactUsPerDoc =
-		pgturbohybrid_last_scan_state.quantizedInvertedCompactUsPerDoc;
-	stats->quantizedInvertedCompactPayloadBytesPerDoc =
-		pgturbohybrid_last_scan_state.quantizedInvertedCompactPayloadBytesPerDoc;
-	stats->quantizedInvertedCompactTopKChangedVsScalar =
-		pgturbohybrid_last_scan_state.quantizedInvertedCompactTopKChangedVsScalar;
-	stats->quantizedInvertedPrecompactEnabled =
-		pgturbohybrid_last_scan_state.quantizedInvertedPrecompactEnabled;
-	strlcpy(stats->quantizedInvertedPrecompactMode,
-			pgturbohybrid_last_scan_state.quantizedInvertedPrecompactMode,
-			sizeof(stats->quantizedInvertedPrecompactMode));
-	stats->quantizedInvertedDocsTouchedBeforePrecompact =
-		pgturbohybrid_last_scan_state.quantizedInvertedDocsTouchedBeforePrecompact;
-	stats->quantizedInvertedPrecompactScoreK =
-		pgturbohybrid_last_scan_state.quantizedInvertedPrecompactScoreK;
-	stats->quantizedInvertedPrecompactCoverageK =
-		pgturbohybrid_last_scan_state.quantizedInvertedPrecompactCoverageK;
-	stats->quantizedInvertedPrecompactPerTokenK =
-		pgturbohybrid_last_scan_state.quantizedInvertedPrecompactPerTokenK;
-	stats->quantizedInvertedCompactMaxDocs =
-		pgturbohybrid_last_scan_state.quantizedInvertedCompactMaxDocs;
-	stats->quantizedInvertedPrecompactScoreDocs =
-		pgturbohybrid_last_scan_state.quantizedInvertedPrecompactScoreDocs;
-	stats->quantizedInvertedPrecompactCoverageDocs =
-		pgturbohybrid_last_scan_state.quantizedInvertedPrecompactCoverageDocs;
-	stats->quantizedInvertedPrecompactPerTokenDocs =
-		pgturbohybrid_last_scan_state.quantizedInvertedPrecompactPerTokenDocs;
-	stats->quantizedInvertedPrecompactUnionDocs =
-		pgturbohybrid_last_scan_state.quantizedInvertedPrecompactUnionDocs;
-	stats->quantizedInvertedPrecompactDuplicates =
-		pgturbohybrid_last_scan_state.quantizedInvertedPrecompactDuplicates;
-	stats->quantizedInvertedPrecompactPrunedDocs =
-		pgturbohybrid_last_scan_state.quantizedInvertedPrecompactPrunedDocs;
-	stats->quantizedInvertedPrecompactUs =
-		pgturbohybrid_last_scan_state.quantizedInvertedPrecompactUs;
-	stats->quantizedInvertedCompactDocsSkippedByPrecompact =
-		pgturbohybrid_last_scan_state.quantizedInvertedCompactDocsSkippedByPrecompact;
-	strlcpy(stats->quantizedInvertedTokenCoverageMode,
-			pgturbohybrid_last_scan_state.quantizedInvertedTokenCoverageMode,
-			sizeof(stats->quantizedInvertedTokenCoverageMode));
-	stats->quantizedInvertedActiveQueryTokens =
-		pgturbohybrid_last_scan_state.quantizedInvertedActiveQueryTokens;
-	stats->quantizedInvertedTokenMatchesTotal =
-		pgturbohybrid_last_scan_state.quantizedInvertedTokenMatchesTotal;
-	stats->quantizedInvertedTokenMatchesMax =
-		pgturbohybrid_last_scan_state.quantizedInvertedTokenMatchesMax;
-	stats->quantizedInvertedMinTokenMatches =
-		pgturbohybrid_last_scan_state.quantizedInvertedMinTokenMatches;
-	stats->quantizedInvertedTokenMatchFilteredDocs =
-		pgturbohybrid_last_scan_state.quantizedInvertedTokenMatchFilteredDocs;
-	stats->quantizedInvertedScoreBoundPruningEnabled =
-		pgturbohybrid_last_scan_state.quantizedInvertedScoreBoundPruningEnabled;
-	stats->quantizedInvertedScoreBoundDocsChecked =
-		pgturbohybrid_last_scan_state.quantizedInvertedScoreBoundDocsChecked;
-	stats->quantizedInvertedScoreBoundDocsPruned =
-		pgturbohybrid_last_scan_state.quantizedInvertedScoreBoundDocsPruned;
-	stats->quantizedInvertedScoreBoundPruneUs =
-		pgturbohybrid_last_scan_state.quantizedInvertedScoreBoundPruneUs;
-	stats->quantizedInvertedScoreBoundUnsafeFallbacks =
-		pgturbohybrid_last_scan_state.quantizedInvertedScoreBoundUnsafeFallbacks;
-	stats->quantizedInvertedCandidatesBeforeBound =
-		pgturbohybrid_last_scan_state.quantizedInvertedCandidatesBeforeBound;
-	stats->quantizedInvertedCandidatesAfterBound =
-		pgturbohybrid_last_scan_state.quantizedInvertedCandidatesAfterBound;
 	strlcpy(stats->multivectorDocSidecarCacheMode,
 			pgturbohybrid_last_scan_state.multivectorDocSidecarCacheMode,
 			sizeof(stats->multivectorDocSidecarCacheMode));
@@ -6143,8 +5923,7 @@ PgturbohybridCollectScanResults(IndexScanDesc scan, PgturbohybridScanState *stat
 		denseStats.centroidSidecarAvailable;
 	lastStats.centroidDocCodesAvailable =
 		denseStats.centroidDocCodesAvailable;
-	lastStats.quantizedInvertedSidecarAvailable =
-		denseStats.quantizedInvertedSidecarAvailable;
+	lastStats.quantizedInverted = denseStats.quantizedInverted;
 	strlcpy(lastStats.multivectorDocGraphRescoreSource,
 			denseStats.multivectorDocGraphRescoreSource,
 			sizeof(lastStats.multivectorDocGraphRescoreSource));
@@ -6278,155 +6057,6 @@ PgturbohybridCollectScanResults(IndexScanDesc scan, PgturbohybridScanState *stat
 		denseStats.multivectorCentroidPrerankDocs;
 	lastStats.multivectorFullMaxsimRerankDocs =
 		denseStats.multivectorFullMaxsimRerankDocs;
-	lastStats.quantizedInvertedListsVisited =
-		denseStats.quantizedInvertedListsVisited;
-	lastStats.quantizedInvertedPostingsTouched =
-		denseStats.quantizedInvertedPostingsTouched;
-	lastStats.quantizedInvertedPostingsSelected =
-		denseStats.quantizedInvertedPostingsSelected;
-	lastStats.quantizedInvertedPostingsSkipped =
-		denseStats.quantizedInvertedPostingsSkipped;
-	lastStats.quantizedInvertedPostingLimitPerToken =
-		denseStats.quantizedInvertedPostingLimitPerToken;
-	lastStats.quantizedInvertedProbeCodewordsPerToken =
-		denseStats.quantizedInvertedProbeCodewordsPerToken;
-	strlcpy(lastStats.quantizedInvertedPostingCapStrategy,
-			denseStats.quantizedInvertedPostingCapStrategy,
-			sizeof(lastStats.quantizedInvertedPostingCapStrategy));
-	lastStats.quantizedInvertedDocsScored =
-		denseStats.quantizedInvertedDocsScored;
-	lastStats.quantizedInvertedCandidates =
-		denseStats.quantizedInvertedCandidates;
-	lastStats.quantizedInvertedExactRerankDocs =
-		denseStats.quantizedInvertedExactRerankDocs;
-	strlcpy(lastStats.quantizedInvertedCodebookSource,
-			denseStats.quantizedInvertedCodebookSource,
-			sizeof(lastStats.quantizedInvertedCodebookSource));
-	lastStats.quantizedInvertedCodebookSize =
-		denseStats.quantizedInvertedCodebookSize;
-	lastStats.quantizedInvertedCodebookDim =
-		denseStats.quantizedInvertedCodebookDim;
-	strlcpy(lastStats.quantizedInvertedCodebookChecksum,
-			denseStats.quantizedInvertedCodebookChecksum,
-			sizeof(lastStats.quantizedInvertedCodebookChecksum));
-	lastStats.quantizedInvertedCodebookTopM =
-		denseStats.quantizedInvertedCodebookTopM;
-	lastStats.quantizedInvertedAssignmentUs =
-		denseStats.quantizedInvertedAssignmentUs;
-	lastStats.quantizedInvertedQueryCodewordScoreUs =
-		denseStats.quantizedInvertedQueryCodewordScoreUs;
-	strlcpy(lastStats.quantizedInvertedQueryCodewordKernel,
-			denseStats.quantizedInvertedQueryCodewordKernel,
-			sizeof(lastStats.quantizedInvertedQueryCodewordKernel));
-	lastStats.quantizedInvertedQueryCodewordScoresComputed =
-		denseStats.quantizedInvertedQueryCodewordScoresComputed;
-	lastStats.quantizedInvertedQueryCodewordBlocks =
-		denseStats.quantizedInvertedQueryCodewordBlocks;
-	lastStats.quantizedInvertedQueryCodewordTopkUs =
-		denseStats.quantizedInvertedQueryCodewordTopkUs;
-	lastStats.quantizedInvertedQueryCodewordFullMatrixMaterialized =
-		denseStats.quantizedInvertedQueryCodewordFullMatrixMaterialized;
-	lastStats.quantizedInvertedQueryCodewordActiveQueryTokens =
-		denseStats.quantizedInvertedQueryCodewordActiveQueryTokens;
-	lastStats.quantizedInvertedQueryCodewordSkippedQueryTokens =
-		denseStats.quantizedInvertedQueryCodewordSkippedQueryTokens;
-	lastStats.quantizedInvertedListOffsetBytes =
-		denseStats.quantizedInvertedListOffsetBytes;
-	lastStats.quantizedInvertedPostingBytes =
-		denseStats.quantizedInvertedPostingBytes;
-	lastStats.quantizedInvertedSidecarBytes =
-		denseStats.quantizedInvertedSidecarBytes;
-	strlcpy(lastStats.quantizedInvertedCompactKernel,
-			denseStats.quantizedInvertedCompactKernel,
-			sizeof(lastStats.quantizedInvertedCompactKernel));
-	strlcpy(lastStats.quantizedInvertedCompactScoreSource,
-			denseStats.quantizedInvertedCompactScoreSource,
-			sizeof(lastStats.quantizedInvertedCompactScoreSource));
-	lastStats.quantizedInvertedCompactScoreUs =
-		denseStats.quantizedInvertedCompactScoreUs;
-	lastStats.quantizedInvertedCompactDocsScored =
-		denseStats.quantizedInvertedCompactDocsScored;
-	lastStats.quantizedInvertedCompactPayloadBytes =
-		denseStats.quantizedInvertedCompactPayloadBytes;
-	strlcpy(lastStats.quantizedInvertedCompactDocOrder,
-			denseStats.quantizedInvertedCompactDocOrder,
-			sizeof(lastStats.quantizedInvertedCompactDocOrder));
-	lastStats.quantizedInvertedCompactInnerAllocations =
-		denseStats.quantizedInvertedCompactInnerAllocations;
-	lastStats.quantizedInvertedCompactActiveQueryTokens =
-		denseStats.quantizedInvertedCompactActiveQueryTokens;
-	lastStats.quantizedInvertedCompactPairsEvaluated =
-		denseStats.quantizedInvertedCompactPairsEvaluated;
-	lastStats.quantizedInvertedCompactPairsSkipped =
-		denseStats.quantizedInvertedCompactPairsSkipped;
-	lastStats.quantizedInvertedCompactPrefetches =
-		denseStats.quantizedInvertedCompactPrefetches;
-	lastStats.quantizedInvertedCompactAvgDocTokens =
-		denseStats.quantizedInvertedCompactAvgDocTokens;
-	lastStats.quantizedInvertedCompactUsPerDoc =
-		denseStats.quantizedInvertedCompactUsPerDoc;
-	lastStats.quantizedInvertedCompactPayloadBytesPerDoc =
-		denseStats.quantizedInvertedCompactPayloadBytesPerDoc;
-	lastStats.quantizedInvertedCompactTopKChangedVsScalar =
-		denseStats.quantizedInvertedCompactTopKChangedVsScalar;
-	lastStats.quantizedInvertedPrecompactEnabled =
-		denseStats.quantizedInvertedPrecompactEnabled;
-	strlcpy(lastStats.quantizedInvertedPrecompactMode,
-			denseStats.quantizedInvertedPrecompactMode,
-			sizeof(lastStats.quantizedInvertedPrecompactMode));
-	lastStats.quantizedInvertedDocsTouchedBeforePrecompact =
-		denseStats.quantizedInvertedDocsTouchedBeforePrecompact;
-	lastStats.quantizedInvertedPrecompactScoreK =
-		denseStats.quantizedInvertedPrecompactScoreK;
-	lastStats.quantizedInvertedPrecompactCoverageK =
-		denseStats.quantizedInvertedPrecompactCoverageK;
-	lastStats.quantizedInvertedPrecompactPerTokenK =
-		denseStats.quantizedInvertedPrecompactPerTokenK;
-	lastStats.quantizedInvertedCompactMaxDocs =
-		denseStats.quantizedInvertedCompactMaxDocs;
-	lastStats.quantizedInvertedPrecompactScoreDocs =
-		denseStats.quantizedInvertedPrecompactScoreDocs;
-	lastStats.quantizedInvertedPrecompactCoverageDocs =
-		denseStats.quantizedInvertedPrecompactCoverageDocs;
-	lastStats.quantizedInvertedPrecompactPerTokenDocs =
-		denseStats.quantizedInvertedPrecompactPerTokenDocs;
-	lastStats.quantizedInvertedPrecompactUnionDocs =
-		denseStats.quantizedInvertedPrecompactUnionDocs;
-	lastStats.quantizedInvertedPrecompactDuplicates =
-		denseStats.quantizedInvertedPrecompactDuplicates;
-	lastStats.quantizedInvertedPrecompactPrunedDocs =
-		denseStats.quantizedInvertedPrecompactPrunedDocs;
-	lastStats.quantizedInvertedPrecompactUs =
-		denseStats.quantizedInvertedPrecompactUs;
-	lastStats.quantizedInvertedCompactDocsSkippedByPrecompact =
-		denseStats.quantizedInvertedCompactDocsSkippedByPrecompact;
-	strlcpy(lastStats.quantizedInvertedTokenCoverageMode,
-			denseStats.quantizedInvertedTokenCoverageMode,
-			sizeof(lastStats.quantizedInvertedTokenCoverageMode));
-	lastStats.quantizedInvertedActiveQueryTokens =
-		denseStats.quantizedInvertedActiveQueryTokens;
-	lastStats.quantizedInvertedTokenMatchesTotal =
-		denseStats.quantizedInvertedTokenMatchesTotal;
-	lastStats.quantizedInvertedTokenMatchesMax =
-		denseStats.quantizedInvertedTokenMatchesMax;
-	lastStats.quantizedInvertedMinTokenMatches =
-		denseStats.quantizedInvertedMinTokenMatches;
-	lastStats.quantizedInvertedTokenMatchFilteredDocs =
-		denseStats.quantizedInvertedTokenMatchFilteredDocs;
-	lastStats.quantizedInvertedScoreBoundPruningEnabled =
-		denseStats.quantizedInvertedScoreBoundPruningEnabled;
-	lastStats.quantizedInvertedScoreBoundDocsChecked =
-		denseStats.quantizedInvertedScoreBoundDocsChecked;
-	lastStats.quantizedInvertedScoreBoundDocsPruned =
-		denseStats.quantizedInvertedScoreBoundDocsPruned;
-	lastStats.quantizedInvertedScoreBoundPruneUs =
-		denseStats.quantizedInvertedScoreBoundPruneUs;
-	lastStats.quantizedInvertedScoreBoundUnsafeFallbacks =
-		denseStats.quantizedInvertedScoreBoundUnsafeFallbacks;
-	lastStats.quantizedInvertedCandidatesBeforeBound =
-		denseStats.quantizedInvertedCandidatesBeforeBound;
-	lastStats.quantizedInvertedCandidatesAfterBound =
-		denseStats.quantizedInvertedCandidatesAfterBound;
 	strlcpy(lastStats.multivectorDocSidecarCacheMode,
 			denseStats.multivectorDocSidecarCacheMode,
 			sizeof(lastStats.multivectorDocSidecarCacheMode));
