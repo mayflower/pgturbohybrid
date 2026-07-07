@@ -1471,9 +1471,9 @@ PgturbohybridReduceUniqueTerms(PgturbohybridBm25Collector *collector)
 		PgturbohybridBm25TermTuple *first = &collector->terms[i];
 		uint32		df = 0;
 		uint64		cf = 0;
+		uint32		prevNode = PG_UINT32_MAX;
 
 		CHECK_FOR_INTERRUPTS();
-		uint32		prevNode = PG_UINT32_MAX;
 
 		uniqueTerms++;
 		while (i < collector->termCount &&
@@ -1729,9 +1729,9 @@ PgturbohybridWriteDocStats(PgturbohybridBm25Collector *collector)
 		uint16		count = Min((uint32) maxDocsPerTuple,
 								collector->tidNodeCount - nodeId);
 		Size		size = PgturbohybridBm25DocStatsTupleSize(count);
+		PgturbohybridBm25DocStatsTuple tuple = palloc0(size);
 
 		CHECK_FOR_INTERRUPTS();
-		PgturbohybridBm25DocStatsTuple tuple = palloc0(size);
 
 		tuple->type = PGTURBOHYBRID_BM25_DOCSTATS_TUPLE_TYPE;
 		tuple->count = count;
@@ -2786,8 +2786,6 @@ PgturbohybridWriteLexiconAndPostings(PgturbohybridBm25Collector *collector)
 		PgturbohybridBm25TermTuple *first = &collector->terms[i];
 		uint32		startIndex = i;
 		uint32		df = 0;
-
-		CHECK_FOR_INTERRUPTS();
 		uint32		cf = 0;
 		uint32		prevNode = PG_UINT32_MAX;
 		BlockNumber postingsBlkno;
@@ -2801,6 +2799,8 @@ PgturbohybridWriteLexiconAndPostings(PgturbohybridBm25Collector *collector)
 		uint16		impactCount;
 		PgturbohybridBm25ImpactTupleEntry *impactEntries;
 		uint32		impactEntryCount;
+
+		CHECK_FOR_INTERRUPTS();
 
 		while (i < collector->termCount &&
 			   PgturbohybridTermEqualIgnoringNode(first, &collector->terms[i],
