@@ -8,6 +8,33 @@
 #include "pgturbohybrid_query.h"
 #include "pgturbohybrid_quant_psquare.h"
 
+/* Shared multivector/codebook types + tunables (straddle the quant.c split). */
+typedef struct PgturbohybridQuantizedInvertedCodebook PgturbohybridQuantizedInvertedCodebook;
+typedef struct PgturbohybridMultiVectorPostingScoreCandidate
+{
+	uint32		docId;
+	uint32		ordinal;
+	double		score;
+} PgturbohybridMultiVectorPostingScoreCandidate;
+typedef struct PgturbohybridMultiVectorQuantizedInvertedAssignment
+{
+	uint32		codeword;
+	double		score;
+} PgturbohybridMultiVectorQuantizedInvertedAssignment;
+typedef struct PgturbohybridQuantizedInvertedCodebook
+{
+	char	   *path;
+	char	   *checksum;
+	int32		dim;
+	uint32		codebookSize;
+	uint32		topM;
+	Size		valueBytes;
+	float	   *values;
+} PgturbohybridQuantizedInvertedCodebook;
+#define PGTURBOHYBRID_QUANTIZED_INVERTED_COMPACT_BATCH 1024
+#define PGTURBOHYBRID_MULTIVECTOR_COMPACT_DOT_BLOCK 8
+
+
 #define PGTURBOHYBRID_GRAPH_CODE_TUPLE_TYPE		0x51
 #define PGTURBOHYBRID_GRAPH_ADJ_TUPLE_TYPE			0x52
 #define PGTURBOHYBRID_GRAPH_EXACT_TUPLE_TYPE		0x53
@@ -1736,6 +1763,67 @@ int			PgturbohybridGraphCollectMultiVectorDenseCandidates(IndexScanDesc scan,
 																TqDenseCandidate **outCandidates,
 																MemoryContext resultCtx,
 																TqDenseCandidateStats *stats);
+
+/* Symbols shared across the quant.c / multivector-scan split. */
+int	PgturbohybridGraphResultCompare(const void *a, const void *b);
+int
+PgturbohybridGraphRunTraversalPass(IndexScanDesc scan,
+						PgturbohybridGraphScanOpaque so,
+						PgturbohybridGraphMetaPageData *meta,
+						PgturbohybridGraphScanStorage *storage,
+						PgturbohybridGraphResult *results,
+						int resultTarget, int searchEf, Datum query,
+						int payloadSlot, int32 payloadValue,
+						bool hasPayloadFilter, bool payloadExactBandMissed,
+						double estimatedSelectivity, int fillReason);
+int
+PgturbohybridGraphScaleSearchEfForSegments(PgturbohybridGraphScanOpaque so,
+								PgturbohybridGraphMetaPageData *meta,
+								int searchEf);
+void
+PgturbohybridGraphScoreNodeBatchTimed(PgturbohybridGraphScanOpaque so, PgturbohybridGraphScanStorage *storage,
+						   uint32 *nodeIds, int count, double *distances,
+						   Datum query);
+PgturbohybridQuantizedInvertedCodebook *PgturbohybridLoadQuantizedInvertedCodebook(int32 dim);
+uint16 PgturbohybridMultiVectorCentroidPostingCodewordScorePayload(const PgturbohybridMultiVector *mv,
+														 int32 token,
+														 uint32 codeword);
+int PgturbohybridMultiVectorCentroidPostingPayloadCompare(const void *a,
+																 const void *b);
+double PgturbohybridMultiVectorDeterministicCodewordScore(const PgturbohybridMultiVector *mv,
+												   int32 token,
+												   uint32 codeword);
+uint32 PgturbohybridMultiVectorDeterministicCodewordsWithScratch(const PgturbohybridMultiVector *mv,
+																	   int32 token,
+																	   uint32 limit,
+																	   uint32 *codewords,
+																	   PgturbohybridMultiVectorPostingScoreCandidate *selected);
+float PgturbohybridMultiVectorDocCompactSq8Scale(const PgturbohybridMultiVector *doc);
+uint16 PgturbohybridMultiVectorFloatToHalf(float value);
+PgturbohybridMultiVectorQuantizedInvertedAssignment
+PgturbohybridMultiVectorQuantizedInvertedBestCodewordAndScore(const PgturbohybridMultiVector *mv,
+															 int32 token,
+															 uint64 *assignmentUs);
+PgturbohybridMultiVectorQuantizedInvertedAssignment
+PgturbohybridMultiVectorQuantizedInvertedBestExternalCodewordAndScore(const PgturbohybridMultiVector *mv,
+															 int32 token,
+															 const PgturbohybridQuantizedInvertedCodebook *codebook,
+															 TqDotProductF32BlockFunc blockDotProduct);
+double PgturbohybridMultiVectorQuantizedInvertedCodewordScore(const PgturbohybridMultiVector *mv,
+													   int32 token,
+													   uint32 codeword);
+int16 PgturbohybridMultiVectorQuantizedInvertedCompactScorePayload(double score);
+uint32 PgturbohybridMultiVectorQuantizedInvertedConfigurableCodewords(const PgturbohybridMultiVector *mv,
+															  int32 token,
+															  uint32 limit,
+															  uint32 *codewords,
+															  uint64 *assignmentUs);
+uint16 PgturbohybridMultiVectorQuantizedInvertedScorePayload(const PgturbohybridMultiVector *mv,
+												  int32 token);
+int PgturbohybridMultiVectorQuantizedPostingPayloadCompare(const void *a,
+																  const void *b);
+int PgturbohybridMultiVectorQuantizedPostingSignedPayloadCompare(const void *a,
+																		const void *b);
 const char *PgturbohybridGraphDenseWideningReasonName(int reason);
 const char *PgturbohybridGraphDenseAdaptiveWideningModeName(int mode);
 const char *PgturbohybridGraphDenseAdaptiveWideningReasonName(int reason);

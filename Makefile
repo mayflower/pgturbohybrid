@@ -20,6 +20,7 @@ OBJS = \
 	src/pgturbohybrid_insert.o \
 	src/pgturbohybrid_multivector.o \
 	src/pgturbohybrid_quant.o \
+	src/pgturbohybrid_quant_multivector_scan.o \
 	src/pgturbohybrid_quant_vacuum.o \
 	src/pgturbohybrid_quant_cache.o \
 	src/pgturbohybrid_quant_exact.o \
