@@ -290,47 +290,7 @@ typedef struct PgturbohybridLastScanStats
 	bool		denseBranchUsed;
 	bool		multivectorBranchUsed;
 	bool		bm25BranchUsed;
-	bool		sparseBranchAvailable;
-	bool		sparseBranchUsed;
-	uint32		sparseTerms;
-	uint32		sparseResolvedTerms;
-	uint64		sparsePostingsTouched;
-	uint64		sparseCandidatesScored;
-	uint64		sparseElapsedUs;
-	uint32		sparseCandidatesRequested;
-	uint32		sparseCandidatesEffective;
-	bool		sparseKDefaulted;
-	uint32		sparseCandidates;
-	int			sparseQuantBits;
-	int			sparseQuantMode;
-	int			sparseEncoding;
-	uint64		sparseScalarTailPostings;
-	int			sparseRerankMode;
-	uint64		sparseExactRerankCount;
-	uint64		sparseExactRerankFetchUs;
-	uint64		sparseExactRerankScoreUs;
-	bool		sparseExactRerankTopkChanged;
-	int			sparseScoreKernel;
-	uint64		sparseSimdBlocks;
-	bool		sparseUsedWand;
-	uint64		sparseBlocksVisited;
-	uint64		sparseBlocksSkipped;
-	uint64		sparseWandPruned;
-	uint64		sparseWandIterations;
-	uint64		sparseWandThresholdUpdates;
-	uint64		sparseWandHeapUpdates;
-	bool		sparseCacheHit;
-	uint64		sparseCacheBuildUs;
-	uint64		sparseCacheBytes;
-	uint64		sparseHotCacheHits;
-	uint64		sparseHotCacheMisses;
-	uint64		sparseHotCacheBytes;
-	uint64		sparseHotCacheEvictions;
-	uint32		sparseDeltaPages;
-	uint32		sparseDeltaTerms;
-	uint64		sparseDeltaPostingsDecoded;
-	bool		sparseDeltaCacheHit;
-	uint32		sparseDeltaGeneration;
+	PgturbohybridSparseSnapshotStats sparse;
 	PgturbohybridBranchPlan branchPlan;
 	char		profile[16];
 	char		fusion[16];
@@ -388,12 +348,7 @@ typedef struct PgturbohybridLastScanStats
 	char		multivectorCandidateSource[48];
 	char		multivectorCandidatePath[48];
 	char		multivectorProxyEncoderKind[32];
-	bool		learnedProjectionLoaded;
-	uint32		learnedProjectionDim;
-	uint64		learnedProjectionWeightBytes;
-	char		learnedProjectionModel[128];
-	char		learnedProjectionChecksum[128];
-	uint64		learnedProjectionQueryEncodeUs;
+	PgturbohybridLearnedProjectionStats learnedProjection;
 	char		multivectorGraphMode[24];
 	uint64		multivectorProxyGraphSearches;
 	bool		multivectorExactTokenScanEnabled;
@@ -422,11 +377,9 @@ typedef struct PgturbohybridLastScanStats
 	uint64		compactMaxsimDocsPruned;
 	uint64		compactMaxsimTokensSkipped;
 	char		multivectorDocGraphStorageKind[16];
-	bool		proxyOnlyIndex;
-	bool		centroidOnlyIndex;
+	PgturbohybridProxyStats proxy;
+	PgturbohybridCentroidStats centroid;
 		bool		fullMultivectorSidecarAvailable;
-		bool		centroidSidecarAvailable;
-		bool		centroidDocCodesAvailable;
 	PgturbohybridQuantizedInvertedStats quantizedInverted;
 	char		multivectorDocGraphRescoreSource[16];
 	uint32		multivectorDocGraphExactRerankDocs;
@@ -435,74 +388,9 @@ typedef struct PgturbohybridLastScanStats
 	uint32		multivectorProxyCandidateTarget;
 	uint32		multivectorProxyCandidatesReturned;
 	uint32		multivectorExactRerankKEffective;
-	uint32		proxyCandidateLimitEffective;
-	char		proxyCandidateLimitSource[32];
-	uint64		proxyGraphNodesVisited;
-	uint64		proxyGraphEdgesVisited;
-	uint32		proxyGraphCandidatesSeen;
-	uint32		proxyCandidatesReturned;
-	uint64		proxyVectorScoresComputed;
-	uint64		proxyVectorScoreUs;
-	uint32		proxyCandidates;
-	bool		proxyLazySidecarVectors;
 	char		multivectorDocStorageCacheRequested[16];
 	char		multivectorDocStorageCacheEffective[16];
-	bool		proxyTop1Admission;
-	uint32		proxyExactRerankDocs;
-	uint64		proxyFullSidecarVectorsLoaded;
-	uint64		proxyFullSidecarBytesTouched;
-	uint64		proxyFullSidecarPagesRead;
-	uint64		proxyFullSidecarLoadUs;
-	uint64		proxyFullSidecarReconstructUs;
-	uint64		proxyExactRerankHeapFetches;
-	uint64		proxyExactRerankSidecarFetches;
-	uint64		proxyExactRerankBytesTouched;
-	uint64		proxyExactRerankUs;
-	bool		sidecarCacheBuildThisQuery;
-	uint64		sidecarCacheBuildBytes;
-	uint64		sidecarCacheBuildPagesRead;
-	uint64		sidecarCacheBuildUs;
-	uint64		sidecarQueryBytesTouched;
-	uint64		sidecarQueryPagesRead;
-	uint64		sidecarQueryVectorsLoaded;
-	uint64		sidecarQueryLoadUs;
-	uint64		sidecarQueryUs;
-	bool		proxyVectorUsesFullSidecarForGraph;
-	bool		proxyVectorNearExhaustiveSidecarTouch;
-	char		proxyVectorSidecarTouchReason[64];
-	uint64		centroidListsVisited;
-	uint64		centroidDocsTouched;
-	uint64		centroidPrunedDocs;
-	uint64		centroidPostingsTouched;
-	uint64		centroidPostingsSelected;
-	uint64		centroidPostingsSkipped;
-	uint64		centroidProbeUs;
-	uint64		centroidPostingScanUs;
-	uint64		centroidAccumulateUs;
-	uint64		centroidCandidateHeapUs;
-	uint32		centroidPostingLimitPerToken;
-	uint32		centroidProbeCentroidsPerToken;
-	uint32		centroidCodewordTopM;
-	double		centroidScoreThreshold;
-	double		centroidScoreDropFromBest;
-	uint64		centroidListsSkippedByThreshold;
-	char		centroidPostingCapStrategy[32];
-	char		centroidCandidateScoring[32];
-	uint32		centroidCandidates;
-	bool		centroidBitsetPrefilterEnabled;
-	uint32		centroidBitsetMinTokenMatches;
-	uint32		centroidBitsetListsUsed;
-	uint32		centroidBitsetDocsSet;
-	uint32		centroidBitsetDocsAfterThreshold;
-	uint64		centroidBitsetPrefilterUs;
-	uint64		centroidBitsetMemoryBytes;
-	bool		centroidUpperBoundEnabled;
-	uint64		centroidUpperBoundDocsChecked;
-	uint64		centroidUpperBoundDocsPruned;
-	uint64		centroidUpperBoundPruneUs;
-	uint64		centroidUpperBoundUnsafeFallbacks;
-	uint32		centroidCandidatesBeforeBound;
-	uint32		centroidCandidatesAfterBound;
+	PgturbohybridSidecarStats sidecar;
 	uint32		multivectorCentroidCount;
 	uint32		multivectorCentroidPrerankDocs;
 	uint32		multivectorFullMaxsimRerankDocs;
@@ -538,9 +426,7 @@ typedef struct PgturbohybridLastScanStats
 	char		multivectorBm25InjectionLimitReason[32];
 	uint32		multivectorBm25InjectionRetained;
 	uint32		multivectorBm25InjectionExactReranked;
-	uint32		learnedSparseCandidates;
-	uint32		learnedSparseRetainedForMaxsim;
-	uint64		learnedSparseBranchLatencyUs;
+	PgturbohybridLearnedSparseStats learnedSparse;
 	uint64		multivectorDocMapBytes;
 	uint64		multivectorUniqueDocs;
 	uint64		multivectorDuplicateDocHits;
@@ -695,27 +581,12 @@ typedef struct PgturbohybridLastScanStats
 	uint64		bm25SimdBlocks;
 	uint64		bm25ScalarTailPostings;
 	uint64		bm25Prefetches;
-	bool		fastWeightedEnabled;
-	double		fastWeightedAlpha;
-	bool		calibratedFusionEnabled;
-	char		calibratedFusionQueryShape[32];
-	double		calibratedFusionAlphaEffective;
-	double		calibratedFusionBothMatchBonus;
-	char		calibratedFusionDenseNormMode[16];
-	char		calibratedFusionBm25NormMode[16];
-	bool		dbsfEnabled;
-	double		dbsfBranchMean[2];
-	double		dbsfBranchStddev[2];
-	double		dbsfBranchMin[2];
-	double		dbsfBranchMax[2];
-	uint32		dbsfDegenerateBranches;
+	PgturbohybridFastWeightedStats fastWeighted;
+	PgturbohybridCalibratedFusionStats calibratedFusion;
+	PgturbohybridDbsfStats dbsf;
 	char		bm25NormMode[16];
 	char		denseNormMode[16];
-	char		hybridBudgetPolicy[16];
-	char		hybridQueryShape[32];
-	uint32		hybridDenseKChosen;
-	uint32		hybridBm25KChosen;
-	char		hybridBudgetReason[96];
+	PgturbohybridHybridBudgetStats hybrid;
 	uint64		denseElapsedUs;
 	uint64		bm25ElapsedUs;
 	uint64		fusionElapsedUs;
@@ -740,65 +611,7 @@ PgturbohybridGetLastScanStatsSnapshot(PgturbohybridScanStatsSnapshot *stats)
 		pgturbohybrid_last_scan_state.multivectorBranchUsed;
 	stats->bm25BranchUsed =
 		pgturbohybrid_last_scan_state.bm25BranchUsed;
-	stats->sparseBranchAvailable =
-		pgturbohybrid_last_scan_state.sparseBranchAvailable;
-	stats->sparseBranchUsed =
-		pgturbohybrid_last_scan_state.sparseBranchUsed;
-	stats->sparseTerms = pgturbohybrid_last_scan_state.sparseTerms;
-	stats->sparseResolvedTerms =
-		pgturbohybrid_last_scan_state.sparseResolvedTerms;
-	stats->sparsePostingsTouched =
-		pgturbohybrid_last_scan_state.sparsePostingsTouched;
-	stats->sparseCandidatesScored =
-		pgturbohybrid_last_scan_state.sparseCandidatesScored;
-	stats->sparseElapsedUs = pgturbohybrid_last_scan_state.sparseElapsedUs;
-	stats->sparseCandidatesRequested =
-		pgturbohybrid_last_scan_state.sparseCandidatesRequested;
-	stats->sparseCandidatesEffective =
-		pgturbohybrid_last_scan_state.sparseCandidatesEffective;
-	stats->sparseKDefaulted = pgturbohybrid_last_scan_state.sparseKDefaulted;
-	stats->sparseCandidates = pgturbohybrid_last_scan_state.sparseCandidates;
-	stats->sparseQuantBits = pgturbohybrid_last_scan_state.sparseQuantBits;
-	stats->sparseQuantMode = pgturbohybrid_last_scan_state.sparseQuantMode;
-	stats->sparseEncoding = pgturbohybrid_last_scan_state.sparseEncoding;
-	stats->sparseScalarTailPostings =
-		pgturbohybrid_last_scan_state.sparseScalarTailPostings;
-	stats->sparseRerankMode = pgturbohybrid_last_scan_state.sparseRerankMode;
-	stats->sparseExactRerankCount =
-		pgturbohybrid_last_scan_state.sparseExactRerankCount;
-	stats->sparseExactRerankFetchUs =
-		pgturbohybrid_last_scan_state.sparseExactRerankFetchUs;
-	stats->sparseExactRerankScoreUs =
-		pgturbohybrid_last_scan_state.sparseExactRerankScoreUs;
-	stats->sparseExactRerankTopkChanged =
-		pgturbohybrid_last_scan_state.sparseExactRerankTopkChanged;
-	stats->sparseScoreKernel = pgturbohybrid_last_scan_state.sparseScoreKernel;
-	stats->sparseSimdBlocks = pgturbohybrid_last_scan_state.sparseSimdBlocks;
-	stats->sparseUsedWand = pgturbohybrid_last_scan_state.sparseUsedWand;
-	stats->sparseBlocksVisited = pgturbohybrid_last_scan_state.sparseBlocksVisited;
-	stats->sparseBlocksSkipped = pgturbohybrid_last_scan_state.sparseBlocksSkipped;
-	stats->sparseWandPruned = pgturbohybrid_last_scan_state.sparseWandPruned;
-	stats->sparseWandIterations =
-		pgturbohybrid_last_scan_state.sparseWandIterations;
-	stats->sparseWandThresholdUpdates =
-		pgturbohybrid_last_scan_state.sparseWandThresholdUpdates;
-	stats->sparseWandHeapUpdates =
-		pgturbohybrid_last_scan_state.sparseWandHeapUpdates;
-	stats->sparseCacheHit = pgturbohybrid_last_scan_state.sparseCacheHit;
-	stats->sparseCacheBuildUs = pgturbohybrid_last_scan_state.sparseCacheBuildUs;
-	stats->sparseCacheBytes = pgturbohybrid_last_scan_state.sparseCacheBytes;
-	stats->sparseHotCacheHits = pgturbohybrid_last_scan_state.sparseHotCacheHits;
-	stats->sparseHotCacheMisses = pgturbohybrid_last_scan_state.sparseHotCacheMisses;
-	stats->sparseHotCacheBytes = pgturbohybrid_last_scan_state.sparseHotCacheBytes;
-	stats->sparseHotCacheEvictions =
-		pgturbohybrid_last_scan_state.sparseHotCacheEvictions;
-	stats->sparseDeltaPages = pgturbohybrid_last_scan_state.sparseDeltaPages;
-	stats->sparseDeltaTerms = pgturbohybrid_last_scan_state.sparseDeltaTerms;
-	stats->sparseDeltaPostingsDecoded =
-		pgturbohybrid_last_scan_state.sparseDeltaPostingsDecoded;
-	stats->sparseDeltaCacheHit = pgturbohybrid_last_scan_state.sparseDeltaCacheHit;
-	stats->sparseDeltaGeneration =
-		pgturbohybrid_last_scan_state.sparseDeltaGeneration;
+	stats->sparse = pgturbohybrid_last_scan_state.sparse;
 	stats->branchPlan = pgturbohybrid_last_scan_state.branchPlan;
 	stats->denseCandidatesEffective =
 		pgturbohybrid_last_scan_state.denseCandidatesEffective;
@@ -847,59 +660,30 @@ PgturbohybridGetLastScanStatsSnapshot(PgturbohybridScanStatsSnapshot *stats)
 		pgturbohybrid_last_scan_state.bm25HeapTSVectorRerankScoreUs;
 	stats->bm25HeapTSVectorRerankTopKChanged =
 		pgturbohybrid_last_scan_state.bm25HeapTSVectorRerankTopKChanged;
-	stats->fastWeightedEnabled =
-		pgturbohybrid_last_scan_state.fastWeightedEnabled;
-	stats->fastWeightedAlpha =
-		pgturbohybrid_last_scan_state.fastWeightedAlpha;
-	stats->calibratedFusionEnabled =
-		pgturbohybrid_last_scan_state.calibratedFusionEnabled;
-	strlcpy(stats->calibratedFusionQueryShape,
-			pgturbohybrid_last_scan_state.calibratedFusionQueryShape,
-			sizeof(stats->calibratedFusionQueryShape));
-	stats->calibratedFusionAlphaEffective =
-		pgturbohybrid_last_scan_state.calibratedFusionAlphaEffective;
-	stats->calibratedFusionBothMatchBonus =
-		pgturbohybrid_last_scan_state.calibratedFusionBothMatchBonus;
-	strlcpy(stats->calibratedFusionDenseNormMode,
-			pgturbohybrid_last_scan_state.calibratedFusionDenseNormMode,
-			sizeof(stats->calibratedFusionDenseNormMode));
-	strlcpy(stats->calibratedFusionBm25NormMode,
-			pgturbohybrid_last_scan_state.calibratedFusionBm25NormMode,
-			sizeof(stats->calibratedFusionBm25NormMode));
-	stats->dbsfEnabled = pgturbohybrid_last_scan_state.dbsfEnabled;
-	memcpy(stats->dbsfBranchMean,
-		   pgturbohybrid_last_scan_state.dbsfBranchMean,
-		   sizeof(stats->dbsfBranchMean));
-	memcpy(stats->dbsfBranchStddev,
-		   pgturbohybrid_last_scan_state.dbsfBranchStddev,
-		   sizeof(stats->dbsfBranchStddev));
-	memcpy(stats->dbsfBranchMin,
-		   pgturbohybrid_last_scan_state.dbsfBranchMin,
-		   sizeof(stats->dbsfBranchMin));
-	memcpy(stats->dbsfBranchMax,
-		   pgturbohybrid_last_scan_state.dbsfBranchMax,
-		   sizeof(stats->dbsfBranchMax));
-	stats->dbsfDegenerateBranches =
-		pgturbohybrid_last_scan_state.dbsfDegenerateBranches;
+	stats->fastWeighted = pgturbohybrid_last_scan_state.fastWeighted;
+	stats->calibratedFusion = pgturbohybrid_last_scan_state.calibratedFusion;
+	stats->dbsf.enabled = pgturbohybrid_last_scan_state.dbsf.enabled;
+	memcpy(stats->dbsf.branchMean,
+		   pgturbohybrid_last_scan_state.dbsf.branchMean,
+		   sizeof(stats->dbsf.branchMean));
+	memcpy(stats->dbsf.branchStddev,
+		   pgturbohybrid_last_scan_state.dbsf.branchStddev,
+		   sizeof(stats->dbsf.branchStddev));
+	memcpy(stats->dbsf.branchMin,
+		   pgturbohybrid_last_scan_state.dbsf.branchMin,
+		   sizeof(stats->dbsf.branchMin));
+	memcpy(stats->dbsf.branchMax,
+		   pgturbohybrid_last_scan_state.dbsf.branchMax,
+		   sizeof(stats->dbsf.branchMax));
+	stats->dbsf.degenerateBranches =
+		pgturbohybrid_last_scan_state.dbsf.degenerateBranches;
 	strlcpy(stats->bm25NormMode,
 			pgturbohybrid_last_scan_state.bm25NormMode,
 			sizeof(stats->bm25NormMode));
 	strlcpy(stats->denseNormMode,
 			pgturbohybrid_last_scan_state.denseNormMode,
 			sizeof(stats->denseNormMode));
-	strlcpy(stats->hybridBudgetPolicy,
-			pgturbohybrid_last_scan_state.hybridBudgetPolicy,
-			sizeof(stats->hybridBudgetPolicy));
-	strlcpy(stats->hybridQueryShape,
-			pgturbohybrid_last_scan_state.hybridQueryShape,
-			sizeof(stats->hybridQueryShape));
-	stats->hybridDenseKChosen =
-		pgturbohybrid_last_scan_state.hybridDenseKChosen;
-	stats->hybridBm25KChosen =
-		pgturbohybrid_last_scan_state.hybridBm25KChosen;
-	strlcpy(stats->hybridBudgetReason,
-			pgturbohybrid_last_scan_state.hybridBudgetReason,
-			sizeof(stats->hybridBudgetReason));
+	stats->hybrid = pgturbohybrid_last_scan_state.hybrid;
 	strlcpy(stats->fusionStrategy,
 			pgturbohybrid_last_scan_state.fusionStrategy,
 			sizeof(stats->fusionStrategy));
@@ -941,20 +725,7 @@ PgturbohybridGetLastScanStatsSnapshot(PgturbohybridScanStatsSnapshot *stats)
 	strlcpy(stats->multivectorProxyEncoderKind,
 			pgturbohybrid_last_scan_state.multivectorProxyEncoderKind,
 			sizeof(stats->multivectorProxyEncoderKind));
-	stats->learnedProjectionLoaded =
-		pgturbohybrid_last_scan_state.learnedProjectionLoaded;
-	stats->learnedProjectionDim =
-		pgturbohybrid_last_scan_state.learnedProjectionDim;
-	stats->learnedProjectionWeightBytes =
-		pgturbohybrid_last_scan_state.learnedProjectionWeightBytes;
-	strlcpy(stats->learnedProjectionModel,
-			pgturbohybrid_last_scan_state.learnedProjectionModel,
-			sizeof(stats->learnedProjectionModel));
-	strlcpy(stats->learnedProjectionChecksum,
-			pgturbohybrid_last_scan_state.learnedProjectionChecksum,
-			sizeof(stats->learnedProjectionChecksum));
-	stats->learnedProjectionQueryEncodeUs =
-		pgturbohybrid_last_scan_state.learnedProjectionQueryEncodeUs;
+	stats->learnedProjection = pgturbohybrid_last_scan_state.learnedProjection;
 	strlcpy(stats->multivectorGraphMode,
 			pgturbohybrid_last_scan_state.multivectorGraphMode,
 			sizeof(stats->multivectorGraphMode));
@@ -1014,16 +785,10 @@ PgturbohybridGetLastScanStatsSnapshot(PgturbohybridScanStatsSnapshot *stats)
 	strlcpy(stats->multivectorDocGraphStorageKind,
 			pgturbohybrid_last_scan_state.multivectorDocGraphStorageKind,
 			sizeof(stats->multivectorDocGraphStorageKind));
-	stats->proxyOnlyIndex =
-		pgturbohybrid_last_scan_state.proxyOnlyIndex;
-	stats->centroidOnlyIndex =
-		pgturbohybrid_last_scan_state.centroidOnlyIndex;
+	stats->proxy = pgturbohybrid_last_scan_state.proxy;
+	stats->centroid = pgturbohybrid_last_scan_state.centroid;
 	stats->fullMultivectorSidecarAvailable =
 		pgturbohybrid_last_scan_state.fullMultivectorSidecarAvailable;
-	stats->centroidSidecarAvailable =
-		pgturbohybrid_last_scan_state.centroidSidecarAvailable;
-	stats->centroidDocCodesAvailable =
-		pgturbohybrid_last_scan_state.centroidDocCodesAvailable;
 	stats->quantizedInverted = pgturbohybrid_last_scan_state.quantizedInverted;
 	strlcpy(stats->multivectorDocGraphRescoreSource,
 			pgturbohybrid_last_scan_state.multivectorDocGraphRescoreSource,
@@ -1041,148 +806,13 @@ PgturbohybridGetLastScanStatsSnapshot(PgturbohybridScanStatsSnapshot *stats)
 		pgturbohybrid_last_scan_state.multivectorProxyCandidatesReturned;
 	stats->multivectorExactRerankKEffective =
 		pgturbohybrid_last_scan_state.multivectorExactRerankKEffective;
-	stats->proxyCandidateLimitEffective =
-		pgturbohybrid_last_scan_state.proxyCandidateLimitEffective;
-	strlcpy(stats->proxyCandidateLimitSource,
-			pgturbohybrid_last_scan_state.proxyCandidateLimitSource,
-			sizeof(stats->proxyCandidateLimitSource));
-	stats->proxyGraphNodesVisited =
-		pgturbohybrid_last_scan_state.proxyGraphNodesVisited;
-	stats->proxyGraphEdgesVisited =
-		pgturbohybrid_last_scan_state.proxyGraphEdgesVisited;
-	stats->proxyGraphCandidatesSeen =
-		pgturbohybrid_last_scan_state.proxyGraphCandidatesSeen;
-	stats->proxyCandidatesReturned =
-		pgturbohybrid_last_scan_state.proxyCandidatesReturned;
-	stats->proxyVectorScoresComputed =
-		pgturbohybrid_last_scan_state.proxyVectorScoresComputed;
-	stats->proxyVectorScoreUs =
-		pgturbohybrid_last_scan_state.proxyVectorScoreUs;
-	stats->proxyCandidates =
-		pgturbohybrid_last_scan_state.proxyCandidates;
-	stats->proxyLazySidecarVectors =
-		pgturbohybrid_last_scan_state.proxyLazySidecarVectors;
 	strlcpy(stats->multivectorDocStorageCacheRequested,
 			pgturbohybrid_last_scan_state.multivectorDocStorageCacheRequested,
 			sizeof(stats->multivectorDocStorageCacheRequested));
 	strlcpy(stats->multivectorDocStorageCacheEffective,
 			pgturbohybrid_last_scan_state.multivectorDocStorageCacheEffective,
 			sizeof(stats->multivectorDocStorageCacheEffective));
-	stats->proxyTop1Admission =
-		pgturbohybrid_last_scan_state.proxyTop1Admission;
-	stats->proxyExactRerankDocs =
-		pgturbohybrid_last_scan_state.proxyExactRerankDocs;
-	stats->proxyFullSidecarVectorsLoaded =
-		pgturbohybrid_last_scan_state.proxyFullSidecarVectorsLoaded;
-	stats->proxyFullSidecarBytesTouched =
-		pgturbohybrid_last_scan_state.proxyFullSidecarBytesTouched;
-	stats->proxyFullSidecarPagesRead =
-		pgturbohybrid_last_scan_state.proxyFullSidecarPagesRead;
-	stats->proxyFullSidecarLoadUs =
-		pgturbohybrid_last_scan_state.proxyFullSidecarLoadUs;
-	stats->proxyFullSidecarReconstructUs =
-		pgturbohybrid_last_scan_state.proxyFullSidecarReconstructUs;
-	stats->proxyExactRerankHeapFetches =
-		pgturbohybrid_last_scan_state.proxyExactRerankHeapFetches;
-	stats->proxyExactRerankSidecarFetches =
-		pgturbohybrid_last_scan_state.proxyExactRerankSidecarFetches;
-	stats->proxyExactRerankBytesTouched =
-		pgturbohybrid_last_scan_state.proxyExactRerankBytesTouched;
-	stats->proxyExactRerankUs =
-		pgturbohybrid_last_scan_state.proxyExactRerankUs;
-	stats->sidecarCacheBuildThisQuery =
-		pgturbohybrid_last_scan_state.sidecarCacheBuildThisQuery;
-	stats->sidecarCacheBuildBytes =
-		pgturbohybrid_last_scan_state.sidecarCacheBuildBytes;
-	stats->sidecarCacheBuildPagesRead =
-		pgturbohybrid_last_scan_state.sidecarCacheBuildPagesRead;
-	stats->sidecarCacheBuildUs =
-		pgturbohybrid_last_scan_state.sidecarCacheBuildUs;
-	stats->sidecarQueryBytesTouched =
-		pgturbohybrid_last_scan_state.sidecarQueryBytesTouched;
-	stats->sidecarQueryPagesRead =
-		pgturbohybrid_last_scan_state.sidecarQueryPagesRead;
-	stats->sidecarQueryVectorsLoaded =
-		pgturbohybrid_last_scan_state.sidecarQueryVectorsLoaded;
-	stats->sidecarQueryLoadUs =
-		pgturbohybrid_last_scan_state.sidecarQueryLoadUs;
-	stats->sidecarQueryUs =
-		pgturbohybrid_last_scan_state.sidecarQueryUs;
-	stats->proxyVectorUsesFullSidecarForGraph =
-		pgturbohybrid_last_scan_state.proxyVectorUsesFullSidecarForGraph;
-	stats->proxyVectorNearExhaustiveSidecarTouch =
-		pgturbohybrid_last_scan_state.proxyVectorNearExhaustiveSidecarTouch;
-	strlcpy(stats->proxyVectorSidecarTouchReason,
-			pgturbohybrid_last_scan_state.proxyVectorSidecarTouchReason,
-			sizeof(stats->proxyVectorSidecarTouchReason));
-	stats->centroidListsVisited =
-		pgturbohybrid_last_scan_state.centroidListsVisited;
-	stats->centroidDocsTouched =
-		pgturbohybrid_last_scan_state.centroidDocsTouched;
-	stats->centroidPrunedDocs =
-		pgturbohybrid_last_scan_state.centroidPrunedDocs;
-	stats->centroidPostingsTouched =
-		pgturbohybrid_last_scan_state.centroidPostingsTouched;
-	stats->centroidPostingsSelected =
-		pgturbohybrid_last_scan_state.centroidPostingsSelected;
-	stats->centroidPostingsSkipped =
-		pgturbohybrid_last_scan_state.centroidPostingsSkipped;
-	stats->centroidProbeUs =
-		pgturbohybrid_last_scan_state.centroidProbeUs;
-	stats->centroidPostingScanUs =
-		pgturbohybrid_last_scan_state.centroidPostingScanUs;
-	stats->centroidAccumulateUs =
-		pgturbohybrid_last_scan_state.centroidAccumulateUs;
-	stats->centroidCandidateHeapUs =
-		pgturbohybrid_last_scan_state.centroidCandidateHeapUs;
-	stats->centroidPostingLimitPerToken =
-		pgturbohybrid_last_scan_state.centroidPostingLimitPerToken;
-	stats->centroidProbeCentroidsPerToken =
-		pgturbohybrid_last_scan_state.centroidProbeCentroidsPerToken;
-	stats->centroidCodewordTopM =
-		pgturbohybrid_last_scan_state.centroidCodewordTopM;
-	stats->centroidScoreThreshold =
-		pgturbohybrid_last_scan_state.centroidScoreThreshold;
-	stats->centroidScoreDropFromBest =
-		pgturbohybrid_last_scan_state.centroidScoreDropFromBest;
-	stats->centroidListsSkippedByThreshold =
-		pgturbohybrid_last_scan_state.centroidListsSkippedByThreshold;
-	strlcpy(stats->centroidPostingCapStrategy,
-			pgturbohybrid_last_scan_state.centroidPostingCapStrategy,
-			sizeof(stats->centroidPostingCapStrategy));
-	strlcpy(stats->centroidCandidateScoring,
-			pgturbohybrid_last_scan_state.centroidCandidateScoring,
-			sizeof(stats->centroidCandidateScoring));
-	stats->centroidCandidates =
-		pgturbohybrid_last_scan_state.centroidCandidates;
-	stats->centroidBitsetPrefilterEnabled =
-		pgturbohybrid_last_scan_state.centroidBitsetPrefilterEnabled;
-	stats->centroidBitsetMinTokenMatches =
-		pgturbohybrid_last_scan_state.centroidBitsetMinTokenMatches;
-	stats->centroidBitsetListsUsed =
-		pgturbohybrid_last_scan_state.centroidBitsetListsUsed;
-	stats->centroidBitsetDocsSet =
-		pgturbohybrid_last_scan_state.centroidBitsetDocsSet;
-	stats->centroidBitsetDocsAfterThreshold =
-		pgturbohybrid_last_scan_state.centroidBitsetDocsAfterThreshold;
-	stats->centroidBitsetPrefilterUs =
-		pgturbohybrid_last_scan_state.centroidBitsetPrefilterUs;
-	stats->centroidBitsetMemoryBytes =
-		pgturbohybrid_last_scan_state.centroidBitsetMemoryBytes;
-	stats->centroidUpperBoundEnabled =
-		pgturbohybrid_last_scan_state.centroidUpperBoundEnabled;
-	stats->centroidUpperBoundDocsChecked =
-		pgturbohybrid_last_scan_state.centroidUpperBoundDocsChecked;
-	stats->centroidUpperBoundDocsPruned =
-		pgturbohybrid_last_scan_state.centroidUpperBoundDocsPruned;
-	stats->centroidUpperBoundPruneUs =
-		pgturbohybrid_last_scan_state.centroidUpperBoundPruneUs;
-	stats->centroidUpperBoundUnsafeFallbacks =
-		pgturbohybrid_last_scan_state.centroidUpperBoundUnsafeFallbacks;
-	stats->centroidCandidatesBeforeBound =
-		pgturbohybrid_last_scan_state.centroidCandidatesBeforeBound;
-	stats->centroidCandidatesAfterBound =
-		pgturbohybrid_last_scan_state.centroidCandidatesAfterBound;
+	stats->sidecar = pgturbohybrid_last_scan_state.sidecar;
 	stats->multivectorCentroidCount =
 		pgturbohybrid_last_scan_state.multivectorCentroidCount;
 	stats->multivectorCentroidPrerankDocs =
@@ -1255,12 +885,7 @@ PgturbohybridGetLastScanStatsSnapshot(PgturbohybridScanStatsSnapshot *stats)
 		pgturbohybrid_last_scan_state.multivectorBm25InjectionRetained;
 	stats->multivectorBm25InjectionExactReranked =
 		pgturbohybrid_last_scan_state.multivectorBm25InjectionExactReranked;
-	stats->learnedSparseCandidates =
-		pgturbohybrid_last_scan_state.learnedSparseCandidates;
-	stats->learnedSparseRetainedForMaxsim =
-		pgturbohybrid_last_scan_state.learnedSparseRetainedForMaxsim;
-	stats->learnedSparseBranchLatencyUs =
-		pgturbohybrid_last_scan_state.learnedSparseBranchLatencyUs;
+	stats->learnedSparse = pgturbohybrid_last_scan_state.learnedSparse;
 	stats->multivectorDocMapBytes =
 		pgturbohybrid_last_scan_state.multivectorDocMapBytes;
 	stats->multivectorUniqueDocs =
@@ -4114,9 +3739,9 @@ PgturbohybridInjectMultiVectorBm25Candidates(IndexScanDesc scan,
 			sizeof(denseStats->multivectorBm25InjectionLimitReason));
 	denseStats->multivectorBm25InjectionRetained = 0;
 	denseStats->multivectorBm25InjectionExactReranked = 0;
-	denseStats->learnedSparseCandidates = 0;
-	denseStats->learnedSparseRetainedForMaxsim = 0;
-	denseStats->learnedSparseBranchLatencyUs = 0;
+	denseStats->learnedSparse.candidates = 0;
+	denseStats->learnedSparse.retainedForMaxsim = 0;
+	denseStats->learnedSparse.branchLatencyUs = 0;
 
 	if (scan == NULL || scan->heapRelation == NULL ||
 		scan->indexRelation == NULL || scan->indexRelation->rd_index == NULL ||
@@ -4145,7 +3770,7 @@ PgturbohybridInjectMultiVectorBm25Candidates(IndexScanDesc scan,
 	denseStats->multivectorBm25InjectionEnabled = true;
 	denseStats->multivectorBm25InjectionCandidates = (uint32) bm25Count;
 	if (learnedSparse)
-		denseStats->learnedSparseCandidates = (uint32) bm25Count;
+		denseStats->learnedSparse.candidates = (uint32) bm25Count;
 
 	candidateLimit = PgturbohybridBudgetFinalTarget(query, autoBudgetLimit);
 	if (*denseCount >= candidateLimit)
@@ -4293,7 +3918,7 @@ PgturbohybridInjectMultiVectorBm25Candidates(IndexScanDesc scan,
 	denseStats->multivectorBm25InjectionRetained = retained;
 	denseStats->multivectorBm25InjectionExactReranked = exactReranked;
 	if (learnedSparse)
-		denseStats->learnedSparseRetainedForMaxsim = learnedSparseRetained;
+		denseStats->learnedSparse.retainedForMaxsim = learnedSparseRetained;
 }
 
 static int
@@ -4492,37 +4117,37 @@ PgturbohybridScoreResults(PgturbohybridScanState *state, PgturbohybridResult *re
 
 	if (stats != NULL)
 	{
-		stats->calibratedFusionEnabled =
+		stats->calibratedFusion.enabled =
 			fusion == PGTURBOHYBRID_FUSION_CALIBRATED;
-		stats->dbsfEnabled = fusion == PGTURBOHYBRID_FUSION_DBSF;
-		stats->dbsfDegenerateBranches = 0;
-		memset(stats->dbsfBranchMean, 0, sizeof(stats->dbsfBranchMean));
-		memset(stats->dbsfBranchStddev, 0, sizeof(stats->dbsfBranchStddev));
-		memset(stats->dbsfBranchMin, 0, sizeof(stats->dbsfBranchMin));
-		memset(stats->dbsfBranchMax, 0, sizeof(stats->dbsfBranchMax));
-		stats->calibratedFusionBothMatchBonus =
-			stats->calibratedFusionEnabled ?
+		stats->dbsf.enabled = fusion == PGTURBOHYBRID_FUSION_DBSF;
+		stats->dbsf.degenerateBranches = 0;
+		memset(stats->dbsf.branchMean, 0, sizeof(stats->dbsf.branchMean));
+		memset(stats->dbsf.branchStddev, 0, sizeof(stats->dbsf.branchStddev));
+		memset(stats->dbsf.branchMin, 0, sizeof(stats->dbsf.branchMin));
+		memset(stats->dbsf.branchMax, 0, sizeof(stats->dbsf.branchMax));
+		stats->calibratedFusion.bothMatchBonus =
+			stats->calibratedFusion.enabled ?
 			PgturbohybridClampUnit(
 				pgturbohybrid_calibrated_fusion_both_match_bonus) : 0.0;
-		strlcpy(stats->calibratedFusionDenseNormMode,
-				stats->calibratedFusionEnabled ? "logistic" : "none",
-				sizeof(stats->calibratedFusionDenseNormMode));
-		strlcpy(stats->calibratedFusionBm25NormMode,
-				stats->calibratedFusionEnabled ? "saturating" : "none",
-				sizeof(stats->calibratedFusionBm25NormMode));
-		if (stats->calibratedFusionEnabled)
+		strlcpy(stats->calibratedFusion.denseNormMode,
+				stats->calibratedFusion.enabled ? "logistic" : "none",
+				sizeof(stats->calibratedFusion.denseNormMode));
+		strlcpy(stats->calibratedFusion.bm25NormMode,
+				stats->calibratedFusion.enabled ? "saturating" : "none",
+				sizeof(stats->calibratedFusion.bm25NormMode));
+		if (stats->calibratedFusion.enabled)
 		{
 			int			queryShape;
 
-			if (stats->calibratedFusionQueryShape[0] == '\0')
-				strlcpy(stats->calibratedFusionQueryShape, "mixed",
-						sizeof(stats->calibratedFusionQueryShape));
+			if (stats->calibratedFusion.queryShape[0] == '\0')
+				strlcpy(stats->calibratedFusion.queryShape, "mixed",
+						sizeof(stats->calibratedFusion.queryShape));
 			queryShape = PgturbohybridHybridShapeFromName(
-				stats->calibratedFusionQueryShape);
+				stats->calibratedFusion.queryShape);
 			alpha = PgturbohybridCalibratedFusionAlpha(query, queryShape);
 		}
-		stats->calibratedFusionAlphaEffective =
-			stats->calibratedFusionEnabled ? alpha : 0.0;
+		stats->calibratedFusion.alphaEffective =
+			stats->calibratedFusion.enabled ? alpha : 0.0;
 	}
 
 	if (fusion == PGTURBOHYBRID_FUSION_WEIGHTED)
@@ -4550,15 +4175,15 @@ PgturbohybridScoreResults(PgturbohybridScanState *state, PgturbohybridResult *re
 		PgturbohybridDbsfCollectBranch(results, count, false, &dbsfBm25);
 		if (stats != NULL)
 		{
-			stats->dbsfBranchMean[0] = dbsfDense.mean;
-			stats->dbsfBranchMean[1] = dbsfBm25.mean;
-			stats->dbsfBranchStddev[0] = dbsfDense.stddev;
-			stats->dbsfBranchStddev[1] = dbsfBm25.stddev;
-			stats->dbsfBranchMin[0] = dbsfDense.min;
-			stats->dbsfBranchMin[1] = dbsfBm25.min;
-			stats->dbsfBranchMax[0] = dbsfDense.max;
-			stats->dbsfBranchMax[1] = dbsfBm25.max;
-			stats->dbsfDegenerateBranches =
+			stats->dbsf.branchMean[0] = dbsfDense.mean;
+			stats->dbsf.branchMean[1] = dbsfBm25.mean;
+			stats->dbsf.branchStddev[0] = dbsfDense.stddev;
+			stats->dbsf.branchStddev[1] = dbsfBm25.stddev;
+			stats->dbsf.branchMin[0] = dbsfDense.min;
+			stats->dbsf.branchMin[1] = dbsfBm25.min;
+			stats->dbsf.branchMax[0] = dbsfDense.max;
+			stats->dbsf.branchMax[1] = dbsfBm25.max;
+			stats->dbsf.degenerateBranches =
 				(dbsfDense.degenerate ? 1 : 0) +
 				(dbsfBm25.degenerate ? 1 : 0);
 		}
@@ -5112,48 +4737,48 @@ PgturbohybridCollectSparseOnlyResults(IndexScanDesc scan,
 			sizeof(lastStats->profile));
 	strlcpy(lastStats->fusion, PgturbohybridQueryFusionName(scanQuery->fusion),
 			sizeof(lastStats->fusion));
-	lastStats->sparseBranchAvailable = sstats.branchAvailable;
-	lastStats->sparseBranchUsed = sstats.branchUsed;
-	lastStats->sparseTerms = sstats.terms;
-	lastStats->sparseResolvedTerms = sstats.resolvedTerms;
-	lastStats->sparsePostingsTouched = sstats.postingsTouched;
-	lastStats->sparseCandidatesScored = sstats.candidatesScored;
-	lastStats->sparseElapsedUs = sstats.elapsedUs;
-	lastStats->sparseQuantBits = sstats.quantBits;
-	lastStats->sparseQuantMode = sstats.quantMode;
-	lastStats->sparseEncoding = sstats.encoding;
-	lastStats->sparseScalarTailPostings = sstats.scalarTailPostings;
-	lastStats->sparseRerankMode = sstats.rerankMode;
-	lastStats->sparseExactRerankCount = sstats.exactRerankCount;
-	lastStats->sparseExactRerankFetchUs = sstats.exactRerankFetchUs;
-	lastStats->sparseExactRerankScoreUs = sstats.exactRerankScoreUs;
-	lastStats->sparseExactRerankTopkChanged = sstats.exactRerankTopkChanged;
-	lastStats->sparseScoreKernel = sstats.scoreKernel;
-	lastStats->sparseSimdBlocks = sstats.simdBlocks;
-	lastStats->sparseUsedWand = sstats.usedWand;
-	lastStats->sparseBlocksVisited = sstats.blocksVisited;
-	lastStats->sparseBlocksSkipped = sstats.blocksSkipped;
-	lastStats->sparseWandPruned = sstats.wandPruned;
-	lastStats->sparseWandIterations = sstats.wandIterations;
-	lastStats->sparseWandThresholdUpdates = sstats.wandThresholdUpdates;
-	lastStats->sparseWandHeapUpdates = sstats.wandHeapUpdates;
-	lastStats->sparseCacheHit = sstats.cacheHit;
-	lastStats->sparseCacheBuildUs = sstats.cacheBuildUs;
-	lastStats->sparseCacheBytes = sstats.cacheBytes;
-	lastStats->sparseHotCacheHits = sstats.hotCacheHits;
-	lastStats->sparseHotCacheMisses = sstats.hotCacheMisses;
-	lastStats->sparseHotCacheBytes = sstats.hotCacheBytes;
-	lastStats->sparseHotCacheEvictions = sstats.hotCacheEvictions;
-	lastStats->sparseDeltaPages = sstats.deltaPages;
-	lastStats->sparseDeltaTerms = sstats.deltaTerms;
-	lastStats->sparseDeltaPostingsDecoded = sstats.deltaPostingsDecoded;
-	lastStats->sparseDeltaCacheHit = sstats.deltaCacheHit;
-	lastStats->sparseDeltaGeneration = sstats.deltaGeneration;
-	lastStats->sparseCandidatesRequested = originalQuery->sparseK;
-	lastStats->sparseCandidatesEffective = scanQuery->sparseK;
-	lastStats->sparseKDefaulted =
+	lastStats->sparse.branchAvailable = sstats.branchAvailable;
+	lastStats->sparse.branchUsed = sstats.branchUsed;
+	lastStats->sparse.terms = sstats.terms;
+	lastStats->sparse.resolvedTerms = sstats.resolvedTerms;
+	lastStats->sparse.postingsTouched = sstats.postingsTouched;
+	lastStats->sparse.candidatesScored = sstats.candidatesScored;
+	lastStats->sparse.elapsedUs = sstats.elapsedUs;
+	lastStats->sparse.quantBits = sstats.quantBits;
+	lastStats->sparse.quantMode = sstats.quantMode;
+	lastStats->sparse.encoding = sstats.encoding;
+	lastStats->sparse.scalarTailPostings = sstats.scalarTailPostings;
+	lastStats->sparse.rerankMode = sstats.rerankMode;
+	lastStats->sparse.exactRerankCount = sstats.exactRerankCount;
+	lastStats->sparse.exactRerankFetchUs = sstats.exactRerankFetchUs;
+	lastStats->sparse.exactRerankScoreUs = sstats.exactRerankScoreUs;
+	lastStats->sparse.exactRerankTopkChanged = sstats.exactRerankTopkChanged;
+	lastStats->sparse.scoreKernel = sstats.scoreKernel;
+	lastStats->sparse.simdBlocks = sstats.simdBlocks;
+	lastStats->sparse.usedWand = sstats.usedWand;
+	lastStats->sparse.blocksVisited = sstats.blocksVisited;
+	lastStats->sparse.blocksSkipped = sstats.blocksSkipped;
+	lastStats->sparse.wandPruned = sstats.wandPruned;
+	lastStats->sparse.wandIterations = sstats.wandIterations;
+	lastStats->sparse.wandThresholdUpdates = sstats.wandThresholdUpdates;
+	lastStats->sparse.wandHeapUpdates = sstats.wandHeapUpdates;
+	lastStats->sparse.cacheHit = sstats.cacheHit;
+	lastStats->sparse.cacheBuildUs = sstats.cacheBuildUs;
+	lastStats->sparse.cacheBytes = sstats.cacheBytes;
+	lastStats->sparse.hotCacheHits = sstats.hotCacheHits;
+	lastStats->sparse.hotCacheMisses = sstats.hotCacheMisses;
+	lastStats->sparse.hotCacheBytes = sstats.hotCacheBytes;
+	lastStats->sparse.hotCacheEvictions = sstats.hotCacheEvictions;
+	lastStats->sparse.deltaPages = sstats.deltaPages;
+	lastStats->sparse.deltaTerms = sstats.deltaTerms;
+	lastStats->sparse.deltaPostingsDecoded = sstats.deltaPostingsDecoded;
+	lastStats->sparse.deltaCacheHit = sstats.deltaCacheHit;
+	lastStats->sparse.deltaGeneration = sstats.deltaGeneration;
+	lastStats->sparse.candidatesRequested = originalQuery->sparseK;
+	lastStats->sparse.candidatesEffective = scanQuery->sparseK;
+	lastStats->sparse.kDefaulted =
 		(originalQuery->flags & PGTURBOHYBRID_QUERY_FLAG_SPARSE_K_DEFAULTED) != 0;
-	lastStats->sparseCandidates = n;
+	lastStats->sparse.candidates = n;
 	lastStats->finalResults = n;
 	lastStats->unionCandidates = n;
 	lastStats->finalKRequested = PgturbohybridRequestedFinalK(originalQuery);
@@ -5347,12 +4972,12 @@ PgturbohybridCollectScanResults(IndexScanDesc scan, PgturbohybridScanState *stat
 			PgturbohybridHybridShapeFromSignals(scanQuery, &hybridSignals,
 											denseProbeGap,
 											denseProbeAvailable);
-	strlcpy(lastStats.hybridQueryShape,
+	strlcpy(lastStats.hybrid.queryShape,
 			PgturbohybridHybridQueryShapeName(hybridQueryShapeForStats),
-			sizeof(lastStats.hybridQueryShape));
-	strlcpy(lastStats.calibratedFusionQueryShape,
+			sizeof(lastStats.hybrid.queryShape));
+	strlcpy(lastStats.calibratedFusion.queryShape,
 			PgturbohybridHybridQueryShapeName(hybridQueryShapeForStats),
-			sizeof(lastStats.calibratedFusionQueryShape));
+			sizeof(lastStats.calibratedFusion.queryShape));
 	if (denseProbe != NULL && denseProbeCount > 0 &&
 		denseProbeK >= scanQuery->denseK)
 	{
@@ -5457,9 +5082,9 @@ PgturbohybridCollectScanResults(IndexScanDesc scan, PgturbohybridScanState *stat
 	if (PgturbohybridUsingLearnedSparseCandidateInjection())
 	{
 		if (multivectorMergedAsDense)
-			denseStats.learnedSparseBranchLatencyUs = lastStats.bm25ElapsedUs;
+			denseStats.learnedSparse.branchLatencyUs = lastStats.bm25ElapsedUs;
 		else
-			multivectorStats.learnedSparseBranchLatencyUs = lastStats.bm25ElapsedUs;
+			multivectorStats.learnedSparse.branchLatencyUs = lastStats.bm25ElapsedUs;
 	}
 
 	/* Sparse branch: exact f32 candidates fused via RRF below. */
@@ -5478,7 +5103,7 @@ PgturbohybridCollectScanResults(IndexScanDesc scan, PgturbohybridScanState *stat
 		PgturbohybridSparseRerankCandidates(scan, scanQuery, sparse, sparseCount,
 											autoBudgetLimit, sparseStats.quantBits,
 											&sparseStats);
-		lastStats.sparseElapsedUs = PgturbohybridElapsedUs(phaseStart);
+		lastStats.sparse.elapsedUs = PgturbohybridElapsedUs(phaseStart);
 	}
 
 	INSTR_TIME_SET_CURRENT(phaseStart);
@@ -5685,49 +5310,49 @@ PgturbohybridCollectScanResults(IndexScanDesc scan, PgturbohybridScanState *stat
 	lastStats.denseBranchUsed = denseBranchUsed;
 	lastStats.multivectorBranchUsed = multivectorBranchUsed;
 	lastStats.bm25BranchUsed = bm25BranchUsed;
-	lastStats.sparseBranchAvailable = sparseStats.branchAvailable;
-	lastStats.sparseBranchUsed = sparseBranchUsed;
-	lastStats.sparseTerms = sparseStats.terms;
-	lastStats.sparseResolvedTerms = sparseStats.resolvedTerms;
-	lastStats.sparsePostingsTouched = sparseStats.postingsTouched;
-	lastStats.sparseCandidatesScored = sparseStats.candidatesScored;
-	lastStats.sparseQuantBits = sparseStats.quantBits;
-	lastStats.sparseQuantMode = sparseStats.quantMode;
-	lastStats.sparseEncoding = sparseStats.encoding;
-	lastStats.sparseScalarTailPostings = sparseStats.scalarTailPostings;
-	lastStats.sparseRerankMode = sparseStats.rerankMode;
-	lastStats.sparseExactRerankCount = sparseStats.exactRerankCount;
-	lastStats.sparseExactRerankFetchUs = sparseStats.exactRerankFetchUs;
-	lastStats.sparseExactRerankScoreUs = sparseStats.exactRerankScoreUs;
-	lastStats.sparseExactRerankTopkChanged = sparseStats.exactRerankTopkChanged;
-	lastStats.sparseScoreKernel = sparseStats.scoreKernel;
-	lastStats.sparseSimdBlocks = sparseStats.simdBlocks;
-	lastStats.sparseUsedWand = sparseStats.usedWand;
-	lastStats.sparseBlocksVisited = sparseStats.blocksVisited;
-	lastStats.sparseBlocksSkipped = sparseStats.blocksSkipped;
-	lastStats.sparseWandPruned = sparseStats.wandPruned;
-	lastStats.sparseWandIterations = sparseStats.wandIterations;
-	lastStats.sparseWandThresholdUpdates = sparseStats.wandThresholdUpdates;
-	lastStats.sparseWandHeapUpdates = sparseStats.wandHeapUpdates;
-	lastStats.sparseCacheHit = sparseStats.cacheHit;
-	lastStats.sparseCacheBuildUs = sparseStats.cacheBuildUs;
-	lastStats.sparseCacheBytes = sparseStats.cacheBytes;
-	lastStats.sparseHotCacheHits = sparseStats.hotCacheHits;
-	lastStats.sparseHotCacheMisses = sparseStats.hotCacheMisses;
-	lastStats.sparseHotCacheBytes = sparseStats.hotCacheBytes;
-	lastStats.sparseHotCacheEvictions = sparseStats.hotCacheEvictions;
-	lastStats.sparseDeltaPages = sparseStats.deltaPages;
-	lastStats.sparseDeltaTerms = sparseStats.deltaTerms;
-	lastStats.sparseDeltaPostingsDecoded = sparseStats.deltaPostingsDecoded;
-	lastStats.sparseDeltaCacheHit = sparseStats.deltaCacheHit;
-	lastStats.sparseDeltaGeneration = sparseStats.deltaGeneration;
+	lastStats.sparse.branchAvailable = sparseStats.branchAvailable;
+	lastStats.sparse.branchUsed = sparseBranchUsed;
+	lastStats.sparse.terms = sparseStats.terms;
+	lastStats.sparse.resolvedTerms = sparseStats.resolvedTerms;
+	lastStats.sparse.postingsTouched = sparseStats.postingsTouched;
+	lastStats.sparse.candidatesScored = sparseStats.candidatesScored;
+	lastStats.sparse.quantBits = sparseStats.quantBits;
+	lastStats.sparse.quantMode = sparseStats.quantMode;
+	lastStats.sparse.encoding = sparseStats.encoding;
+	lastStats.sparse.scalarTailPostings = sparseStats.scalarTailPostings;
+	lastStats.sparse.rerankMode = sparseStats.rerankMode;
+	lastStats.sparse.exactRerankCount = sparseStats.exactRerankCount;
+	lastStats.sparse.exactRerankFetchUs = sparseStats.exactRerankFetchUs;
+	lastStats.sparse.exactRerankScoreUs = sparseStats.exactRerankScoreUs;
+	lastStats.sparse.exactRerankTopkChanged = sparseStats.exactRerankTopkChanged;
+	lastStats.sparse.scoreKernel = sparseStats.scoreKernel;
+	lastStats.sparse.simdBlocks = sparseStats.simdBlocks;
+	lastStats.sparse.usedWand = sparseStats.usedWand;
+	lastStats.sparse.blocksVisited = sparseStats.blocksVisited;
+	lastStats.sparse.blocksSkipped = sparseStats.blocksSkipped;
+	lastStats.sparse.wandPruned = sparseStats.wandPruned;
+	lastStats.sparse.wandIterations = sparseStats.wandIterations;
+	lastStats.sparse.wandThresholdUpdates = sparseStats.wandThresholdUpdates;
+	lastStats.sparse.wandHeapUpdates = sparseStats.wandHeapUpdates;
+	lastStats.sparse.cacheHit = sparseStats.cacheHit;
+	lastStats.sparse.cacheBuildUs = sparseStats.cacheBuildUs;
+	lastStats.sparse.cacheBytes = sparseStats.cacheBytes;
+	lastStats.sparse.hotCacheHits = sparseStats.hotCacheHits;
+	lastStats.sparse.hotCacheMisses = sparseStats.hotCacheMisses;
+	lastStats.sparse.hotCacheBytes = sparseStats.hotCacheBytes;
+	lastStats.sparse.hotCacheEvictions = sparseStats.hotCacheEvictions;
+	lastStats.sparse.deltaPages = sparseStats.deltaPages;
+	lastStats.sparse.deltaTerms = sparseStats.deltaTerms;
+	lastStats.sparse.deltaPostingsDecoded = sparseStats.deltaPostingsDecoded;
+	lastStats.sparse.deltaCacheHit = sparseStats.deltaCacheHit;
+	lastStats.sparse.deltaGeneration = sparseStats.deltaGeneration;
 	if (hasSparseQuery)
 	{
-		lastStats.sparseCandidatesRequested = originalQuery->sparseK;
-		lastStats.sparseCandidatesEffective = scanQuery->sparseK;
-		lastStats.sparseKDefaulted =
+		lastStats.sparse.candidatesRequested = originalQuery->sparseK;
+		lastStats.sparse.candidatesEffective = scanQuery->sparseK;
+		lastStats.sparse.kDefaulted =
 			(originalQuery->flags & PGTURBOHYBRID_QUERY_FLAG_SPARSE_K_DEFAULTED) != 0;
-		lastStats.sparseCandidates = sparseCount;
+		lastStats.sparse.candidates = sparseCount;
 	}
 	strlcpy(lastStats.profile, PgturbohybridProfileName(pgturbohybrid_profile),
 			sizeof(lastStats.profile));
@@ -5844,18 +5469,7 @@ PgturbohybridCollectScanResults(IndexScanDesc scan, PgturbohybridScanState *stat
 	strlcpy(lastStats.multivectorProxyEncoderKind,
 			denseStats.multivectorProxyEncoderKind,
 			sizeof(lastStats.multivectorProxyEncoderKind));
-	lastStats.learnedProjectionLoaded = denseStats.learnedProjectionLoaded;
-	lastStats.learnedProjectionDim = denseStats.learnedProjectionDim;
-	lastStats.learnedProjectionWeightBytes =
-		denseStats.learnedProjectionWeightBytes;
-	strlcpy(lastStats.learnedProjectionModel,
-			denseStats.learnedProjectionModel,
-			sizeof(lastStats.learnedProjectionModel));
-	strlcpy(lastStats.learnedProjectionChecksum,
-			denseStats.learnedProjectionChecksum,
-			sizeof(lastStats.learnedProjectionChecksum));
-	lastStats.learnedProjectionQueryEncodeUs =
-		denseStats.learnedProjectionQueryEncodeUs;
+	lastStats.learnedProjection = denseStats.learnedProjection;
 	strlcpy(lastStats.multivectorGraphMode,
 			denseStats.multivectorGraphMode,
 			sizeof(lastStats.multivectorGraphMode));
@@ -5915,14 +5529,10 @@ PgturbohybridCollectScanResults(IndexScanDesc scan, PgturbohybridScanState *stat
 	strlcpy(lastStats.multivectorDocGraphStorageKind,
 			denseStats.multivectorDocGraphStorageKind,
 			sizeof(lastStats.multivectorDocGraphStorageKind));
-	lastStats.proxyOnlyIndex = denseStats.proxyOnlyIndex;
-	lastStats.centroidOnlyIndex = denseStats.centroidOnlyIndex;
+	lastStats.proxy = denseStats.proxy;
+	lastStats.centroid = denseStats.centroid;
 	lastStats.fullMultivectorSidecarAvailable =
 		denseStats.fullMultivectorSidecarAvailable;
-	lastStats.centroidSidecarAvailable =
-		denseStats.centroidSidecarAvailable;
-	lastStats.centroidDocCodesAvailable =
-		denseStats.centroidDocCodesAvailable;
 	lastStats.quantizedInverted = denseStats.quantizedInverted;
 	strlcpy(lastStats.multivectorDocGraphRescoreSource,
 			denseStats.multivectorDocGraphRescoreSource,
@@ -5940,117 +5550,13 @@ PgturbohybridCollectScanResults(IndexScanDesc scan, PgturbohybridScanState *stat
 		denseStats.multivectorProxyCandidatesReturned;
 	lastStats.multivectorExactRerankKEffective =
 		denseStats.multivectorExactRerankKEffective;
-	lastStats.proxyCandidateLimitEffective =
-		denseStats.proxyCandidateLimitEffective;
-	strlcpy(lastStats.proxyCandidateLimitSource,
-			denseStats.proxyCandidateLimitSource,
-			sizeof(lastStats.proxyCandidateLimitSource));
-	lastStats.proxyGraphNodesVisited = denseStats.proxyGraphNodesVisited;
-	lastStats.proxyGraphEdgesVisited = denseStats.proxyGraphEdgesVisited;
-	lastStats.proxyGraphCandidatesSeen = denseStats.proxyGraphCandidatesSeen;
-	lastStats.proxyCandidatesReturned = denseStats.proxyCandidatesReturned;
-	lastStats.proxyVectorScoresComputed = denseStats.proxyVectorScoresComputed;
-	lastStats.proxyVectorScoreUs = denseStats.proxyVectorScoreUs;
-	lastStats.proxyCandidates = denseStats.proxyCandidates;
-	lastStats.proxyLazySidecarVectors = denseStats.proxyLazySidecarVectors;
 	strlcpy(lastStats.multivectorDocStorageCacheRequested,
 			denseStats.multivectorDocStorageCacheRequested,
 			sizeof(lastStats.multivectorDocStorageCacheRequested));
 	strlcpy(lastStats.multivectorDocStorageCacheEffective,
 			denseStats.multivectorDocStorageCacheEffective,
 			sizeof(lastStats.multivectorDocStorageCacheEffective));
-	lastStats.proxyTop1Admission = denseStats.proxyTop1Admission;
-	lastStats.proxyExactRerankDocs = denseStats.proxyExactRerankDocs;
-	lastStats.proxyFullSidecarVectorsLoaded =
-		denseStats.proxyFullSidecarVectorsLoaded;
-	lastStats.proxyFullSidecarBytesTouched =
-		denseStats.proxyFullSidecarBytesTouched;
-	lastStats.proxyFullSidecarPagesRead =
-		denseStats.proxyFullSidecarPagesRead;
-	lastStats.proxyFullSidecarLoadUs =
-		denseStats.proxyFullSidecarLoadUs;
-	lastStats.proxyFullSidecarReconstructUs =
-		denseStats.proxyFullSidecarReconstructUs;
-	lastStats.proxyExactRerankHeapFetches =
-		denseStats.proxyExactRerankHeapFetches;
-	lastStats.proxyExactRerankSidecarFetches =
-		denseStats.proxyExactRerankSidecarFetches;
-	lastStats.proxyExactRerankBytesTouched =
-		denseStats.proxyExactRerankBytesTouched;
-	lastStats.proxyExactRerankUs = denseStats.proxyExactRerankUs;
-	lastStats.sidecarCacheBuildThisQuery =
-		denseStats.sidecarCacheBuildThisQuery;
-	lastStats.sidecarCacheBuildBytes = denseStats.sidecarCacheBuildBytes;
-	lastStats.sidecarCacheBuildPagesRead =
-		denseStats.sidecarCacheBuildPagesRead;
-	lastStats.sidecarCacheBuildUs = denseStats.sidecarCacheBuildUs;
-	lastStats.sidecarQueryBytesTouched =
-		denseStats.sidecarQueryBytesTouched;
-	lastStats.sidecarQueryPagesRead = denseStats.sidecarQueryPagesRead;
-	lastStats.sidecarQueryVectorsLoaded =
-		denseStats.sidecarQueryVectorsLoaded;
-	lastStats.sidecarQueryLoadUs = denseStats.sidecarQueryLoadUs;
-	lastStats.sidecarQueryUs = denseStats.sidecarQueryUs;
-	lastStats.proxyVectorUsesFullSidecarForGraph =
-		denseStats.proxyVectorUsesFullSidecarForGraph;
-	lastStats.proxyVectorNearExhaustiveSidecarTouch =
-		denseStats.proxyVectorNearExhaustiveSidecarTouch;
-	strlcpy(lastStats.proxyVectorSidecarTouchReason,
-			denseStats.proxyVectorSidecarTouchReason,
-			sizeof(lastStats.proxyVectorSidecarTouchReason));
-	lastStats.centroidListsVisited = denseStats.centroidListsVisited;
-	lastStats.centroidDocsTouched = denseStats.centroidDocsTouched;
-	lastStats.centroidPrunedDocs = denseStats.centroidPrunedDocs;
-	lastStats.centroidPostingsTouched = denseStats.centroidPostingsTouched;
-	lastStats.centroidPostingsSelected = denseStats.centroidPostingsSelected;
-	lastStats.centroidPostingsSkipped = denseStats.centroidPostingsSkipped;
-	lastStats.centroidProbeUs = denseStats.centroidProbeUs;
-	lastStats.centroidPostingScanUs = denseStats.centroidPostingScanUs;
-	lastStats.centroidAccumulateUs = denseStats.centroidAccumulateUs;
-	lastStats.centroidCandidateHeapUs = denseStats.centroidCandidateHeapUs;
-	lastStats.centroidPostingLimitPerToken =
-		denseStats.centroidPostingLimitPerToken;
-	lastStats.centroidProbeCentroidsPerToken =
-		denseStats.centroidProbeCentroidsPerToken;
-	lastStats.centroidCodewordTopM = denseStats.centroidCodewordTopM;
-	lastStats.centroidScoreThreshold = denseStats.centroidScoreThreshold;
-	lastStats.centroidScoreDropFromBest = denseStats.centroidScoreDropFromBest;
-	lastStats.centroidListsSkippedByThreshold =
-		denseStats.centroidListsSkippedByThreshold;
-	strlcpy(lastStats.centroidPostingCapStrategy,
-			denseStats.centroidPostingCapStrategy,
-			sizeof(lastStats.centroidPostingCapStrategy));
-	strlcpy(lastStats.centroidCandidateScoring,
-			denseStats.centroidCandidateScoring,
-			sizeof(lastStats.centroidCandidateScoring));
-	lastStats.centroidCandidates = denseStats.centroidCandidates;
-	lastStats.centroidBitsetPrefilterEnabled =
-		denseStats.centroidBitsetPrefilterEnabled;
-	lastStats.centroidBitsetMinTokenMatches =
-		denseStats.centroidBitsetMinTokenMatches;
-	lastStats.centroidBitsetListsUsed =
-		denseStats.centroidBitsetListsUsed;
-	lastStats.centroidBitsetDocsSet = denseStats.centroidBitsetDocsSet;
-	lastStats.centroidBitsetDocsAfterThreshold =
-		denseStats.centroidBitsetDocsAfterThreshold;
-	lastStats.centroidBitsetPrefilterUs =
-		denseStats.centroidBitsetPrefilterUs;
-	lastStats.centroidBitsetMemoryBytes =
-		denseStats.centroidBitsetMemoryBytes;
-	lastStats.centroidUpperBoundEnabled =
-		denseStats.centroidUpperBoundEnabled;
-	lastStats.centroidUpperBoundDocsChecked =
-		denseStats.centroidUpperBoundDocsChecked;
-	lastStats.centroidUpperBoundDocsPruned =
-		denseStats.centroidUpperBoundDocsPruned;
-	lastStats.centroidUpperBoundPruneUs =
-		denseStats.centroidUpperBoundPruneUs;
-	lastStats.centroidUpperBoundUnsafeFallbacks =
-		denseStats.centroidUpperBoundUnsafeFallbacks;
-	lastStats.centroidCandidatesBeforeBound =
-		denseStats.centroidCandidatesBeforeBound;
-	lastStats.centroidCandidatesAfterBound =
-		denseStats.centroidCandidatesAfterBound;
+	lastStats.sidecar = denseStats.sidecar;
 	lastStats.multivectorCentroidCount =
 		denseStats.multivectorCentroidCount;
 	lastStats.multivectorCentroidPrerankDocs =
@@ -6123,11 +5629,7 @@ PgturbohybridCollectScanResults(IndexScanDesc scan, PgturbohybridScanState *stat
 		denseStats.multivectorBm25InjectionRetained;
 	lastStats.multivectorBm25InjectionExactReranked =
 		denseStats.multivectorBm25InjectionExactReranked;
-	lastStats.learnedSparseCandidates = denseStats.learnedSparseCandidates;
-	lastStats.learnedSparseRetainedForMaxsim =
-		denseStats.learnedSparseRetainedForMaxsim;
-	lastStats.learnedSparseBranchLatencyUs =
-		denseStats.learnedSparseBranchLatencyUs;
+	lastStats.learnedSparse = denseStats.learnedSparse;
 	switch ((PgturbohybridMultiVectorDocMapSource) denseStats.multivectorDocMapSource)
 	{
 		case PGTURBOHYBRID_MULTIVECTOR_DOCMAP_SOURCE_SIDECAR:
@@ -6333,38 +5835,38 @@ PgturbohybridCollectScanResults(IndexScanDesc scan, PgturbohybridScanState *stat
 	lastStats.bm25SimdBlocks = bm25Stats.simdBlocks;
 	lastStats.bm25ScalarTailPostings = bm25Stats.scalarTailPostings;
 	lastStats.bm25Prefetches = bm25Stats.prefetches;
-	lastStats.fastWeightedEnabled =
+	lastStats.fastWeighted.enabled =
 		effectiveFusion == PGTURBOHYBRID_FUSION_FAST_WEIGHTED;
-	lastStats.fastWeightedAlpha =
+	lastStats.fastWeighted.alpha =
 		(scanQuery->flags & PGTURBOHYBRID_QUERY_FLAG_ALPHA_IS_SET) != 0 ?
 		scanQuery->alpha : 0.5;
-	lastStats.calibratedFusionEnabled =
+	lastStats.calibratedFusion.enabled =
 		effectiveFusion == PGTURBOHYBRID_FUSION_CALIBRATED;
-	lastStats.dbsfEnabled =
+	lastStats.dbsf.enabled =
 		effectiveFusion == PGTURBOHYBRID_FUSION_DBSF;
 	strlcpy(lastStats.bm25NormMode,
-			lastStats.dbsfEnabled ? "dbsf" :
-			((lastStats.fastWeightedEnabled || lastStats.calibratedFusionEnabled) ?
+			lastStats.dbsf.enabled ? "dbsf" :
+			((lastStats.fastWeighted.enabled || lastStats.calibratedFusion.enabled) ?
 			 "saturating" : "none"),
 			sizeof(lastStats.bm25NormMode));
 	strlcpy(lastStats.denseNormMode,
-			lastStats.dbsfEnabled ? "dbsf" :
-			((lastStats.fastWeightedEnabled || lastStats.calibratedFusionEnabled) ?
+			lastStats.dbsf.enabled ? "dbsf" :
+			((lastStats.fastWeighted.enabled || lastStats.calibratedFusion.enabled) ?
 			 "logistic" : "none"),
 			sizeof(lastStats.denseNormMode));
-	strlcpy(lastStats.hybridBudgetPolicy,
+	strlcpy(lastStats.hybrid.budgetPolicy,
 			PgturbohybridHybridBudgetPolicyName(pgturbohybrid_hybrid_budget_policy),
-			sizeof(lastStats.hybridBudgetPolicy));
-	strlcpy(lastStats.hybridQueryShape,
+			sizeof(lastStats.hybrid.budgetPolicy));
+	strlcpy(lastStats.hybrid.queryShape,
 			PgturbohybridHybridQueryShapeName(hybridQueryShapeForStats),
-			sizeof(lastStats.hybridQueryShape));
-	strlcpy(lastStats.calibratedFusionQueryShape,
+			sizeof(lastStats.hybrid.queryShape));
+	strlcpy(lastStats.calibratedFusion.queryShape,
 			PgturbohybridHybridQueryShapeName(hybridQueryShapeForStats),
-			sizeof(lastStats.calibratedFusionQueryShape));
-	lastStats.hybridDenseKChosen = denseBranchUsed ? scanQuery->denseK : 0;
-	lastStats.hybridBm25KChosen = scanQuery->bm25K;
-	strlcpy(lastStats.hybridBudgetReason, hybridBudgetChoice.reason,
-			sizeof(lastStats.hybridBudgetReason));
+			sizeof(lastStats.calibratedFusion.queryShape));
+	lastStats.hybrid.denseKChosen = denseBranchUsed ? scanQuery->denseK : 0;
+	lastStats.hybrid.bm25KChosen = scanQuery->bm25K;
+	strlcpy(lastStats.hybrid.budgetReason, hybridBudgetChoice.reason,
+			sizeof(lastStats.hybrid.budgetReason));
 	PgturbohybridBuildBranchPlan(&lastStats.branchPlan, scanQuery,
 								 effectiveFusion,
 								 (hasMultivectorQuery && !multivectorMergedAsDense) ?
@@ -7748,20 +7250,20 @@ PgturbohybridHybridLastScanStats(PG_FUNCTION_ARGS)
 					 pgturbohybrid_last_scan_state.fusionHeapReplacements,
 					 pgturbohybrid_last_scan_state.fusionGenerationArrayReused ? "true" : "false",
 					 pgturbohybrid_last_scan_state.fusionGenerationArrayReset ? "true" : "false",
-					 pgturbohybrid_last_scan_state.fastWeightedEnabled ? "true" : "false",
-					 pgturbohybrid_last_scan_state.fastWeightedAlpha,
+					 pgturbohybrid_last_scan_state.fastWeighted.enabled ? "true" : "false",
+					 pgturbohybrid_last_scan_state.fastWeighted.alpha,
 					 pgturbohybrid_last_scan_state.bm25NormMode[0] != '\0' ?
 					 pgturbohybrid_last_scan_state.bm25NormMode : "none",
 					 pgturbohybrid_last_scan_state.denseNormMode[0] != '\0' ?
 					 pgturbohybrid_last_scan_state.denseNormMode : "none",
-					 pgturbohybrid_last_scan_state.hybridBudgetPolicy[0] != '\0' ?
-					 pgturbohybrid_last_scan_state.hybridBudgetPolicy : "fixed",
-					 pgturbohybrid_last_scan_state.hybridQueryShape[0] != '\0' ?
-					 pgturbohybrid_last_scan_state.hybridQueryShape : "fixed",
-					 pgturbohybrid_last_scan_state.hybridDenseKChosen,
-					 pgturbohybrid_last_scan_state.hybridBm25KChosen,
-					 pgturbohybrid_last_scan_state.hybridBudgetReason[0] != '\0' ?
-					 pgturbohybrid_last_scan_state.hybridBudgetReason : "fixed_policy",
+					 pgturbohybrid_last_scan_state.hybrid.budgetPolicy[0] != '\0' ?
+					 pgturbohybrid_last_scan_state.hybrid.budgetPolicy : "fixed",
+					 pgturbohybrid_last_scan_state.hybrid.queryShape[0] != '\0' ?
+					 pgturbohybrid_last_scan_state.hybrid.queryShape : "fixed",
+					 pgturbohybrid_last_scan_state.hybrid.denseKChosen,
+					 pgturbohybrid_last_scan_state.hybrid.bm25KChosen,
+					 pgturbohybrid_last_scan_state.hybrid.budgetReason[0] != '\0' ?
+					 pgturbohybrid_last_scan_state.hybrid.budgetReason : "fixed_policy",
 					 pgturbohybrid_last_scan_state.bothMatch,
 					 pgturbohybrid_last_scan_state.denseOnly,
 					 pgturbohybrid_last_scan_state.bm25Only,

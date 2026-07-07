@@ -628,83 +628,83 @@ PgturbohybridJsonbAddMultiVectorCentroidLiteStats(PgturbohybridJsonbState *state
 												 const PgturbohybridScanStatsSnapshot *scanStats)
 {
 	PgturbohybridJsonbAddUint64(state, "centroid_lists_visited",
-								scanStats->centroidListsVisited);
+								scanStats->centroid.listsVisited);
 	PgturbohybridJsonbAddUint64(state, "centroid_docs_touched",
-								scanStats->centroidDocsTouched);
+								scanStats->centroid.docsTouched);
 	PgturbohybridJsonbAddUint64(state, "centroid_pruned_docs",
-								scanStats->centroidPrunedDocs);
+								scanStats->centroid.prunedDocs);
 	PgturbohybridJsonbAddUint64(state, "centroid_postings_touched",
-								scanStats->centroidPostingsTouched);
+								scanStats->centroid.postingsTouched);
 	PgturbohybridJsonbAddUint64(state, "centroid_postings_selected",
-								scanStats->centroidPostingsSelected);
+								scanStats->centroid.postingsSelected);
 	PgturbohybridJsonbAddUint64(state, "centroid_postings_skipped",
-								scanStats->centroidPostingsSkipped);
+								scanStats->centroid.postingsSkipped);
 	PgturbohybridJsonbAddUint64(state, "centroid_probe_time_us",
-								scanStats->centroidProbeUs);
+								scanStats->centroid.probeUs);
 	PgturbohybridJsonbAddUint64(state, "centroid_posting_scan_time_us",
-								scanStats->centroidPostingScanUs);
+								scanStats->centroid.postingScanUs);
 	PgturbohybridJsonbAddUint64(state, "centroid_accumulate_time_us",
-								scanStats->centroidAccumulateUs);
+								scanStats->centroid.accumulateUs);
 	PgturbohybridJsonbAddUint64(state, "centroid_candidate_heap_time_us",
-								scanStats->centroidCandidateHeapUs);
+								scanStats->centroid.candidateHeapUs);
 	PgturbohybridJsonbAddInt64(state, "centroid_posting_limit_per_token",
-							   scanStats->centroidPostingLimitPerToken);
+							   scanStats->centroid.postingLimitPerToken);
 	PgturbohybridJsonbAddInt64(state, "centroid_probe_centroids_per_token",
-							   scanStats->centroidProbeCentroidsPerToken);
+							   scanStats->centroid.probeCentroidsPerToken);
 	PgturbohybridJsonbAddInt64(state, "centroid_codeword_top_m",
-							   scanStats->centroidCodewordTopM);
+							   scanStats->centroid.codewordTopM);
 	PgturbohybridJsonbAddFloat8(state, "centroid_score_threshold",
-								scanStats->centroidScoreThreshold);
+								scanStats->centroid.scoreThreshold);
 	PgturbohybridJsonbAddFloat8(state, "centroid_score_drop_from_best",
-								scanStats->centroidScoreDropFromBest);
+								scanStats->centroid.scoreDropFromBest);
 	PgturbohybridJsonbAddUint64(state, "centroid_lists_skipped_by_threshold",
-								scanStats->centroidListsSkippedByThreshold);
+								scanStats->centroid.listsSkippedByThreshold);
 	PgturbohybridJsonbAddString(state, "centroid_posting_cap_strategy",
-								scanStats->centroidPostingCapStrategy[0] != '\0' ?
-								scanStats->centroidPostingCapStrategy : "none");
+								scanStats->centroid.postingCapStrategy[0] != '\0' ?
+								scanStats->centroid.postingCapStrategy : "none");
 	PgturbohybridJsonbAddString(state, "centroid_candidate_scoring",
-								scanStats->centroidCandidateScoring[0] != '\0' ?
-								scanStats->centroidCandidateScoring : "none");
+								scanStats->centroid.candidateScoring[0] != '\0' ?
+								scanStats->centroid.candidateScoring : "none");
 	PgturbohybridJsonbAddInt64(state, "centroid_candidates",
-							   scanStats->centroidCandidates);
+							   scanStats->centroid.candidates);
 	PgturbohybridJsonbAddBool(state, "centroid_bitset_prefilter_enabled",
-							  scanStats->centroidBitsetPrefilterEnabled);
+							  scanStats->centroid.bitsetPrefilterEnabled);
 	PgturbohybridJsonbAddInt64(state, "centroid_bitset_min_token_matches",
-							   scanStats->centroidBitsetMinTokenMatches);
+							   scanStats->centroid.bitsetMinTokenMatches);
 	PgturbohybridJsonbAddInt64(state, "centroid_bitset_lists_used",
-							   scanStats->centroidBitsetListsUsed);
+							   scanStats->centroid.bitsetListsUsed);
 	PgturbohybridJsonbAddInt64(state, "centroid_bitset_docs_set",
-							   scanStats->centroidBitsetDocsSet);
+							   scanStats->centroid.bitsetDocsSet);
 	PgturbohybridJsonbAddInt64(state, "centroid_bitset_docs_after_threshold",
-							   scanStats->centroidBitsetDocsAfterThreshold);
+							   scanStats->centroid.bitsetDocsAfterThreshold);
 	PgturbohybridJsonbAddUint64(state, "centroid_bitset_prefilter_time_us",
-								scanStats->centroidBitsetPrefilterUs);
+								scanStats->centroid.bitsetPrefilterUs);
 	PgturbohybridJsonbAddUint64(state, "centroid_bitset_time_us",
-								scanStats->centroidBitsetPrefilterUs);
+								scanStats->centroid.bitsetPrefilterUs);
 	PgturbohybridJsonbAddInt64(state, "centroid_bitset_candidates",
-							   scanStats->centroidBitsetDocsAfterThreshold);
+							   scanStats->centroid.bitsetDocsAfterThreshold);
 	PgturbohybridJsonbAddUint64(state, "centroid_bitset_memory_bytes",
-								scanStats->centroidBitsetMemoryBytes);
+								scanStats->centroid.bitsetMemoryBytes);
 	PgturbohybridJsonbAddBool(state, "centroid_upper_bound_enabled",
-							  scanStats->centroidUpperBoundEnabled);
+							  scanStats->centroid.upperBoundEnabled);
 	PgturbohybridJsonbAddUint64(state, "centroid_upper_bound_docs_checked",
-								scanStats->centroidUpperBoundDocsChecked);
+								scanStats->centroid.upperBoundDocsChecked);
 	PgturbohybridJsonbAddUint64(state, "centroid_upper_bound_docs_pruned",
-								scanStats->centroidUpperBoundDocsPruned);
+								scanStats->centroid.upperBoundDocsPruned);
 	PgturbohybridJsonbAddUint64(state, "centroid_upper_bound_prune_time_us",
-								scanStats->centroidUpperBoundPruneUs);
+								scanStats->centroid.upperBoundPruneUs);
 	PgturbohybridJsonbAddUint64(state, "centroid_upper_bound_time_us",
-								scanStats->centroidUpperBoundPruneUs);
+								scanStats->centroid.upperBoundPruneUs);
 	PgturbohybridJsonbAddUint64(state, "centroid_upper_bound_unsafe_fallbacks",
-								scanStats->centroidUpperBoundUnsafeFallbacks);
+								scanStats->centroid.upperBoundUnsafeFallbacks);
 	PgturbohybridJsonbAddFloat8(state, "centroid_upper_bound_prune_ratio",
-								scanStats->centroidUpperBoundDocsChecked > 0 ?
-								(double) scanStats->centroidUpperBoundDocsPruned /
-								(double) scanStats->centroidUpperBoundDocsChecked : 0.0);
+								scanStats->centroid.upperBoundDocsChecked > 0 ?
+								(double) scanStats->centroid.upperBoundDocsPruned /
+								(double) scanStats->centroid.upperBoundDocsChecked : 0.0);
 	PgturbohybridJsonbAddInt64(state, "centroid_candidates_before_bound",
-							   scanStats->centroidCandidatesBeforeBound);
+							   scanStats->centroid.candidatesBeforeBound);
 	PgturbohybridJsonbAddInt64(state, "centroid_candidates_after_bound",
-							   scanStats->centroidCandidatesAfterBound);
+							   scanStats->centroid.candidatesAfterBound);
 	PgturbohybridJsonbAddInt64(state, "multivector_centroid_count",
 							   scanStats->multivectorCentroidCount);
 	PgturbohybridJsonbAddInt64(state, "multivector_centroid_prerank_docs",
@@ -728,21 +728,21 @@ PgturbohybridJsonbAddMultiVectorDocStorageStats(PgturbohybridJsonbState *state,
 	PgturbohybridJsonbAddString(state, "multivector_doc_storage_kind",
 								storageKind);
 	PgturbohybridJsonbAddBool(state, "proxy_only_index",
-							  scanStats->proxyOnlyIndex);
+							  scanStats->proxy.onlyIndex);
 	PgturbohybridJsonbAddBool(state, "centroid_only_index",
-							  scanStats->centroidOnlyIndex);
+							  scanStats->centroid.onlyIndex);
 	PgturbohybridJsonbAddBool(state, "full_multivector_sidecar_available",
 							  scanStats->fullMultivectorSidecarAvailable);
 	PgturbohybridJsonbAddBool(state, "centroid_sidecar_available",
-							  scanStats->centroidSidecarAvailable);
+							  scanStats->centroid.sidecarAvailable);
 	PgturbohybridJsonbAddBool(state, "centroid_doc_codes_available",
-							  scanStats->centroidDocCodesAvailable);
+							  scanStats->centroid.docCodesAvailable);
 	PgturbohybridJsonbAddBool(state,
 							  "quantized_inverted_sidecar_available",
 							  scanStats->quantizedInverted.sidecarAvailable);
 	PgturbohybridJsonbAddString(state, "exact_rerank_source_supported",
-								scanStats->proxyOnlyIndex ||
-								scanStats->centroidOnlyIndex ? "heap" :
+								scanStats->proxy.onlyIndex ||
+								scanStats->centroid.onlyIndex ? "heap" :
 								(scanStats->fullMultivectorSidecarAvailable ?
 								 "sidecar" : "none"));
 }
@@ -2133,45 +2133,45 @@ PgturbohybridCollectLastScanStats(TqLastScanStats *s,
 
 	s->fusion.elapsedUs = fusionElapsedUs;
 	s->fusion.autoBudget = pgturbohybrid_auto_budget;
-	s->fusion.fastWeightedEnabled = scanStats->fastWeightedEnabled;
-	s->fusion.fastWeightedAlpha = scanStats->fastWeightedAlpha;
+	s->fusion.fastWeightedEnabled = scanStats->fastWeighted.enabled;
+	s->fusion.fastWeightedAlpha = scanStats->fastWeighted.alpha;
 	s->fusion.calibratedFusionEnabled =
-		scanStats->calibratedFusionEnabled;
+		scanStats->calibratedFusion.enabled;
 	strlcpy(s->fusion.calibratedFusionQueryShape,
-			scanStats->calibratedFusionQueryShape,
+			scanStats->calibratedFusion.queryShape,
 			sizeof(s->fusion.calibratedFusionQueryShape));
 	s->fusion.calibratedFusionAlphaEffective =
-		scanStats->calibratedFusionAlphaEffective;
+		scanStats->calibratedFusion.alphaEffective;
 	s->fusion.calibratedFusionBothMatchBonus =
-		scanStats->calibratedFusionBothMatchBonus;
+		scanStats->calibratedFusion.bothMatchBonus;
 	strlcpy(s->fusion.calibratedFusionDenseNormMode,
-			scanStats->calibratedFusionDenseNormMode,
+			scanStats->calibratedFusion.denseNormMode,
 			sizeof(s->fusion.calibratedFusionDenseNormMode));
 	strlcpy(s->fusion.calibratedFusionBm25NormMode,
-			scanStats->calibratedFusionBm25NormMode,
+			scanStats->calibratedFusion.bm25NormMode,
 			sizeof(s->fusion.calibratedFusionBm25NormMode));
-	s->fusion.dbsfEnabled = scanStats->dbsfEnabled;
-	memcpy(s->fusion.dbsfBranchMean, scanStats->dbsfBranchMean,
+	s->fusion.dbsfEnabled = scanStats->dbsf.enabled;
+	memcpy(s->fusion.dbsfBranchMean, scanStats->dbsf.branchMean,
 		   sizeof(s->fusion.dbsfBranchMean));
-	memcpy(s->fusion.dbsfBranchStddev, scanStats->dbsfBranchStddev,
+	memcpy(s->fusion.dbsfBranchStddev, scanStats->dbsf.branchStddev,
 		   sizeof(s->fusion.dbsfBranchStddev));
-	memcpy(s->fusion.dbsfBranchMin, scanStats->dbsfBranchMin,
+	memcpy(s->fusion.dbsfBranchMin, scanStats->dbsf.branchMin,
 		   sizeof(s->fusion.dbsfBranchMin));
-	memcpy(s->fusion.dbsfBranchMax, scanStats->dbsfBranchMax,
+	memcpy(s->fusion.dbsfBranchMax, scanStats->dbsf.branchMax,
 		   sizeof(s->fusion.dbsfBranchMax));
 	s->fusion.dbsfDegenerateBranches =
-		scanStats->dbsfDegenerateBranches;
+		scanStats->dbsf.degenerateBranches;
 	strlcpy(s->fusion.bm25NormMode, scanStats->bm25NormMode,
 			sizeof(s->fusion.bm25NormMode));
 	strlcpy(s->fusion.denseNormMode, scanStats->denseNormMode,
 			sizeof(s->fusion.denseNormMode));
-	strlcpy(s->fusion.hybridBudgetPolicy, scanStats->hybridBudgetPolicy,
+	strlcpy(s->fusion.hybridBudgetPolicy, scanStats->hybrid.budgetPolicy,
 			sizeof(s->fusion.hybridBudgetPolicy));
-	strlcpy(s->fusion.hybridQueryShape, scanStats->hybridQueryShape,
+	strlcpy(s->fusion.hybridQueryShape, scanStats->hybrid.queryShape,
 			sizeof(s->fusion.hybridQueryShape));
-	s->fusion.hybridDenseKChosen = scanStats->hybridDenseKChosen;
-	s->fusion.hybridBm25KChosen = scanStats->hybridBm25KChosen;
-	strlcpy(s->fusion.hybridBudgetReason, scanStats->hybridBudgetReason,
+	s->fusion.hybridDenseKChosen = scanStats->hybrid.denseKChosen;
+	s->fusion.hybridBm25KChosen = scanStats->hybrid.bm25KChosen;
+	strlcpy(s->fusion.hybridBudgetReason, scanStats->hybrid.budgetReason,
 			sizeof(s->fusion.hybridBudgetReason));
 	strlcpy(s->fusion.strategy, scanStats->fusionStrategy,
 			sizeof(s->fusion.strategy));
@@ -3349,95 +3349,95 @@ pgturbohybrid_last_scan_stats(PG_FUNCTION_ARGS)
 	PgturbohybridJsonbAddBool(&state, PGTURBOHYBRID_DIAG_KEY_BM25_BRANCH_USED,
 							  scanStats.bm25BranchUsed);
 	PgturbohybridJsonbAddBool(&state, PGTURBOHYBRID_DIAG_KEY_SPARSE_BRANCH_AVAILABLE,
-							  scanStats.sparseBranchAvailable);
+							  scanStats.sparse.branchAvailable);
 	PgturbohybridJsonbAddBool(&state, PGTURBOHYBRID_DIAG_KEY_SPARSE_BRANCH_USED,
-							  scanStats.sparseBranchUsed);
+							  scanStats.sparse.branchUsed);
 	PgturbohybridJsonbAddInt64(&state, "sparse_terms",
-							   scanStats.sparseTerms);
+							   scanStats.sparse.terms);
 	PgturbohybridJsonbAddInt64(&state, "sparse_resolved_terms",
-							   scanStats.sparseResolvedTerms);
+							   scanStats.sparse.resolvedTerms);
 	PgturbohybridJsonbAddInt64(&state, "sparse_postings_touched",
-							   scanStats.sparsePostingsTouched);
+							   scanStats.sparse.postingsTouched);
 	PgturbohybridJsonbAddInt64(&state, "sparse_candidates_scored",
-							   scanStats.sparseCandidatesScored);
+							   scanStats.sparse.candidatesScored);
 	PgturbohybridJsonbAddInt64(&state, "sparse_elapsed_us",
-							   scanStats.sparseElapsedUs);
+							   scanStats.sparse.elapsedUs);
 	PgturbohybridJsonbAddInt64(&state, "sparse_candidates_requested",
-							   scanStats.sparseCandidatesRequested);
+							   scanStats.sparse.candidatesRequested);
 	PgturbohybridJsonbAddInt64(&state, "sparse_candidates_effective",
-							   scanStats.sparseCandidatesEffective);
+							   scanStats.sparse.candidatesEffective);
 	PgturbohybridJsonbAddInt64(&state, "sparse_candidates",
-							   scanStats.sparseCandidates);
+							   scanStats.sparse.candidates);
 	PgturbohybridJsonbAddBool(&state, "sparse_k_defaulted",
-							  scanStats.sparseKDefaulted);
+							  scanStats.sparse.kDefaulted);
 	PgturbohybridJsonbAddInt64(&state, "sparse_quant_bits",
-							   scanStats.sparseQuantBits);
+							   scanStats.sparse.quantBits);
 	PgturbohybridJsonbAddString(&state, "sparse_quant_mode",
-								scanStats.sparseQuantMode == PGTURBOHYBRID_SPARSE_QUANT_PER_TERM_LINEAR ?
+								scanStats.sparse.quantMode == PGTURBOHYBRID_SPARSE_QUANT_PER_TERM_LINEAR ?
 								"per_term_linear" : "f32");
 	PgturbohybridJsonbAddString(&state, "sparse_postings_encoding",
-								scanStats.sparseEncoding == PGTURBOHYBRID_SPARSE_ENCODING_VARINT ?
+								scanStats.sparse.encoding == PGTURBOHYBRID_SPARSE_ENCODING_VARINT ?
 								"varint" :
-								scanStats.sparseEncoding == PGTURBOHYBRID_SPARSE_ENCODING_BITPACKED ?
+								scanStats.sparse.encoding == PGTURBOHYBRID_SPARSE_ENCODING_BITPACKED ?
 								"bitpacked" : "offset16_soa");
 	PgturbohybridJsonbAddString(&state, "sparse_decode_kernel", "scalar");
 	PgturbohybridJsonbAddString(&state, "sparse_score_kernel",
-								PgturbohybridSparseScoreKernelName(scanStats.sparseScoreKernel,
-																   scanStats.sparseQuantBits));
+								PgturbohybridSparseScoreKernelName(scanStats.sparse.scoreKernel,
+																   scanStats.sparse.quantBits));
 	PgturbohybridJsonbAddInt64(&state, "sparse_simd_blocks",
-							   scanStats.sparseSimdBlocks);
+							   scanStats.sparse.simdBlocks);
 	PgturbohybridJsonbAddInt64(&state, "sparse_scalar_tail_postings",
-							   scanStats.sparseScalarTailPostings);
+							   scanStats.sparse.scalarTailPostings);
 	PgturbohybridJsonbAddString(&state, "sparse_rerank_mode",
-								scanStats.sparseRerankMode == 1 ? "topk" :
-								scanStats.sparseRerankMode == 2 ? "band" :
-								scanStats.sparseRerankMode == 3 ? "auto" : "off");
+								scanStats.sparse.rerankMode == 1 ? "topk" :
+								scanStats.sparse.rerankMode == 2 ? "band" :
+								scanStats.sparse.rerankMode == 3 ? "auto" : "off");
 	PgturbohybridJsonbAddInt64(&state, "sparse_exact_rerank_count",
-							   scanStats.sparseExactRerankCount);
+							   scanStats.sparse.exactRerankCount);
 	PgturbohybridJsonbAddInt64(&state, "sparse_exact_rerank_fetch_us",
-							   scanStats.sparseExactRerankFetchUs);
+							   scanStats.sparse.exactRerankFetchUs);
 	PgturbohybridJsonbAddInt64(&state, "sparse_exact_rerank_score_us",
-							   scanStats.sparseExactRerankScoreUs);
+							   scanStats.sparse.exactRerankScoreUs);
 	PgturbohybridJsonbAddBool(&state, "sparse_exact_rerank_topk_changed",
-							  scanStats.sparseExactRerankTopkChanged);
+							  scanStats.sparse.exactRerankTopkChanged);
 	PgturbohybridJsonbAddBool(&state, "sparse_used_wand",
-							  scanStats.sparseUsedWand);
+							  scanStats.sparse.usedWand);
 	PgturbohybridJsonbAddInt64(&state, "sparse_blocks_visited",
-							   scanStats.sparseBlocksVisited);
+							   scanStats.sparse.blocksVisited);
 	PgturbohybridJsonbAddInt64(&state, "sparse_blocks_skipped",
-							   scanStats.sparseBlocksSkipped);
+							   scanStats.sparse.blocksSkipped);
 	PgturbohybridJsonbAddInt64(&state, "sparse_wand_pruned",
-							   scanStats.sparseWandPruned);
+							   scanStats.sparse.wandPruned);
 	PgturbohybridJsonbAddInt64(&state, "sparse_wand_iterations",
-							   scanStats.sparseWandIterations);
+							   scanStats.sparse.wandIterations);
 	PgturbohybridJsonbAddInt64(&state, "sparse_wand_threshold_updates",
-							   scanStats.sparseWandThresholdUpdates);
+							   scanStats.sparse.wandThresholdUpdates);
 	PgturbohybridJsonbAddInt64(&state, "sparse_wand_heap_updates",
-							   scanStats.sparseWandHeapUpdates);
+							   scanStats.sparse.wandHeapUpdates);
 	PgturbohybridJsonbAddBool(&state, "sparse_cache_hit",
-							  scanStats.sparseCacheHit);
+							  scanStats.sparse.cacheHit);
 	PgturbohybridJsonbAddInt64(&state, "sparse_cache_build_us",
-							   scanStats.sparseCacheBuildUs);
+							   scanStats.sparse.cacheBuildUs);
 	PgturbohybridJsonbAddInt64(&state, "sparse_cache_bytes",
-							   scanStats.sparseCacheBytes);
+							   scanStats.sparse.cacheBytes);
 	PgturbohybridJsonbAddInt64(&state, "sparse_hot_postings_cache_hits",
-							   scanStats.sparseHotCacheHits);
+							   scanStats.sparse.hotCacheHits);
 	PgturbohybridJsonbAddInt64(&state, "sparse_hot_postings_cache_misses",
-							   scanStats.sparseHotCacheMisses);
+							   scanStats.sparse.hotCacheMisses);
 	PgturbohybridJsonbAddInt64(&state, "sparse_hot_postings_cache_bytes",
-							   scanStats.sparseHotCacheBytes);
+							   scanStats.sparse.hotCacheBytes);
 	PgturbohybridJsonbAddInt64(&state, "sparse_hot_postings_cache_evictions",
-							   scanStats.sparseHotCacheEvictions);
+							   scanStats.sparse.hotCacheEvictions);
 	PgturbohybridJsonbAddInt64(&state, "sparse_delta_pages",
-							   scanStats.sparseDeltaPages);
+							   scanStats.sparse.deltaPages);
 	PgturbohybridJsonbAddInt64(&state, "sparse_delta_terms",
-							   scanStats.sparseDeltaTerms);
+							   scanStats.sparse.deltaTerms);
 	PgturbohybridJsonbAddInt64(&state, "sparse_delta_postings_decoded",
-							   scanStats.sparseDeltaPostingsDecoded);
+							   scanStats.sparse.deltaPostingsDecoded);
 	PgturbohybridJsonbAddBool(&state, "sparse_delta_cache_hit",
-							  scanStats.sparseDeltaCacheHit);
+							  scanStats.sparse.deltaCacheHit);
 	PgturbohybridJsonbAddInt64(&state, "sparse_delta_generation",
-							   scanStats.sparseDeltaGeneration);
+							   scanStats.sparse.deltaGeneration);
 	PgturbohybridJsonbAddBranchPlan(&state, &scanStats.branchPlan);
 	PgturbohybridJsonbAddInt64(&state, PGTURBOHYBRID_DIAG_KEY_QUANTIZATION_BITS,
 							   pgturbohybrid_last_graph_quantization_bits);
@@ -3872,36 +3872,36 @@ pgturbohybrid_last_scan_stats(PG_FUNCTION_ARGS)
 							   pgturbohybrid_final_diversity_pool_multiplier);
 	PgturbohybridJsonbAddBool(&state, "auto_budget", pgturbohybrid_auto_budget);
 	PgturbohybridJsonbAddBool(&state, "fast_weighted_enabled",
-							  scanStats.fastWeightedEnabled);
+							  scanStats.fastWeighted.enabled);
 	PgturbohybridJsonbAddFloat8(&state, "fast_weighted_alpha",
-								scanStats.fastWeightedAlpha);
+								scanStats.fastWeighted.alpha);
 	PgturbohybridJsonbAddBool(&state, "calibrated_fusion_enabled",
-							  scanStats.calibratedFusionEnabled);
+							  scanStats.calibratedFusion.enabled);
 	PgturbohybridJsonbAddString(&state, "calibrated_fusion_query_shape",
-								scanStats.calibratedFusionQueryShape[0] != '\0' ?
-								scanStats.calibratedFusionQueryShape : "none");
+								scanStats.calibratedFusion.queryShape[0] != '\0' ?
+								scanStats.calibratedFusion.queryShape : "none");
 	PgturbohybridJsonbAddFloat8(&state, "calibrated_fusion_alpha_effective",
-								scanStats.calibratedFusionAlphaEffective);
+								scanStats.calibratedFusion.alphaEffective);
 	PgturbohybridJsonbAddFloat8(&state, "calibrated_fusion_both_match_bonus",
-								scanStats.calibratedFusionBothMatchBonus);
+								scanStats.calibratedFusion.bothMatchBonus);
 	PgturbohybridJsonbAddString(&state, "calibrated_fusion_dense_norm_mode",
-								scanStats.calibratedFusionDenseNormMode[0] != '\0' ?
-								scanStats.calibratedFusionDenseNormMode : "none");
+								scanStats.calibratedFusion.denseNormMode[0] != '\0' ?
+								scanStats.calibratedFusion.denseNormMode : "none");
 	PgturbohybridJsonbAddString(&state, "calibrated_fusion_bm25_norm_mode",
-								scanStats.calibratedFusionBm25NormMode[0] != '\0' ?
-								scanStats.calibratedFusionBm25NormMode : "none");
+								scanStats.calibratedFusion.bm25NormMode[0] != '\0' ?
+								scanStats.calibratedFusion.bm25NormMode : "none");
 	PgturbohybridJsonbAddBool(&state, "dbsf_enabled",
-							  scanStats.dbsfEnabled);
+							  scanStats.dbsf.enabled);
 	PgturbohybridJsonbAddFloat8Array(&state, "dbsf_branch_mean",
-									 scanStats.dbsfBranchMean, 2);
+									 scanStats.dbsf.branchMean, 2);
 	PgturbohybridJsonbAddFloat8Array(&state, "dbsf_branch_stddev",
-									 scanStats.dbsfBranchStddev, 2);
+									 scanStats.dbsf.branchStddev, 2);
 	PgturbohybridJsonbAddFloat8Array(&state, "dbsf_branch_min",
-									 scanStats.dbsfBranchMin, 2);
+									 scanStats.dbsf.branchMin, 2);
 	PgturbohybridJsonbAddFloat8Array(&state, "dbsf_branch_max",
-									 scanStats.dbsfBranchMax, 2);
+									 scanStats.dbsf.branchMax, 2);
 	PgturbohybridJsonbAddInt64(&state, "dbsf_degenerate_branches",
-							   scanStats.dbsfDegenerateBranches);
+							   scanStats.dbsf.degenerateBranches);
 	PgturbohybridJsonbAddString(&state, "bm25_norm_mode",
 								scanStats.bm25NormMode[0] != '\0' ?
 								scanStats.bm25NormMode : "none");
@@ -3909,18 +3909,18 @@ pgturbohybrid_last_scan_stats(PG_FUNCTION_ARGS)
 								scanStats.denseNormMode[0] != '\0' ?
 								scanStats.denseNormMode : "none");
 	PgturbohybridJsonbAddString(&state, "hybrid_budget_policy",
-								scanStats.hybridBudgetPolicy[0] != '\0' ?
-								scanStats.hybridBudgetPolicy : "fixed");
+								scanStats.hybrid.budgetPolicy[0] != '\0' ?
+								scanStats.hybrid.budgetPolicy : "fixed");
 	PgturbohybridJsonbAddString(&state, "hybrid_query_shape",
-								scanStats.hybridQueryShape[0] != '\0' ?
-								scanStats.hybridQueryShape : "fixed");
+								scanStats.hybrid.queryShape[0] != '\0' ?
+								scanStats.hybrid.queryShape : "fixed");
 	PgturbohybridJsonbAddInt64(&state, "hybrid_dense_k_chosen",
-							   scanStats.hybridDenseKChosen);
+							   scanStats.hybrid.denseKChosen);
 	PgturbohybridJsonbAddInt64(&state, "hybrid_bm25_k_chosen",
-							   scanStats.hybridBm25KChosen);
+							   scanStats.hybrid.bm25KChosen);
 	PgturbohybridJsonbAddString(&state, "hybrid_budget_reason",
-								scanStats.hybridBudgetReason[0] != '\0' ?
-								scanStats.hybridBudgetReason : "fixed_policy");
+								scanStats.hybrid.budgetReason[0] != '\0' ?
+								scanStats.hybrid.budgetReason : "fixed_policy");
 	PgturbohybridJsonbAddString(&state, "fusion_strategy",
 								scanStats.fusionStrategy[0] != '\0' ?
 								scanStats.fusionStrategy : "none");
@@ -3974,40 +3974,40 @@ pgturbohybrid_last_scan_stats(PG_FUNCTION_ARGS)
 										scanStats.multivectorProxyEncoderKind[0] != '\0' ?
 										scanStats.multivectorProxyEncoderKind : "none");
 			PgturbohybridJsonbAddBool(&state, "learned_projection_loaded",
-									  scanStats.learnedProjectionLoaded);
+									  scanStats.learnedProjection.loaded);
 			PgturbohybridJsonbAddInt64(&state, "learned_projection_dim",
-									   scanStats.learnedProjectionDim);
+									   scanStats.learnedProjection.dim);
 			PgturbohybridJsonbAddUint64(&state, "learned_projection_weight_bytes",
-										scanStats.learnedProjectionWeightBytes);
+										scanStats.learnedProjection.weightBytes);
 			PgturbohybridJsonbAddString(&state, "learned_projection_model",
-										scanStats.learnedProjectionModel[0] != '\0' ?
-										scanStats.learnedProjectionModel : "");
+										scanStats.learnedProjection.model[0] != '\0' ?
+										scanStats.learnedProjection.model : "");
 			PgturbohybridJsonbAddString(&state, "learned_projection_checksum",
-										scanStats.learnedProjectionChecksum[0] != '\0' ?
-										scanStats.learnedProjectionChecksum : "");
+										scanStats.learnedProjection.checksum[0] != '\0' ?
+										scanStats.learnedProjection.checksum : "");
 			PgturbohybridJsonbAddUint64(&state, "learned_projection_query_encode_us",
-										scanStats.learnedProjectionQueryEncodeUs);
+										scanStats.learnedProjection.queryEncodeUs);
 		PgturbohybridJsonbAddInt64(&state, "proxy_candidate_limit_effective",
-								   scanStats.proxyCandidateLimitEffective);
+								   scanStats.proxy.candidateLimitEffective);
 		PgturbohybridJsonbAddString(&state, "proxy_candidate_limit_source",
-									scanStats.proxyCandidateLimitSource[0] != '\0' ?
-									scanStats.proxyCandidateLimitSource : "none");
+									scanStats.proxy.candidateLimitSource[0] != '\0' ?
+									scanStats.proxy.candidateLimitSource : "none");
 		PgturbohybridJsonbAddInt64(&state, "proxy_candidates",
-								   scanStats.proxyCandidates);
+								   scanStats.proxy.candidates);
 	PgturbohybridJsonbAddUint64(&state, "proxy_graph_nodes_visited",
-								scanStats.proxyGraphNodesVisited);
+								scanStats.proxy.graphNodesVisited);
 	PgturbohybridJsonbAddUint64(&state, "proxy_graph_edges_visited",
-								scanStats.proxyGraphEdgesVisited);
+								scanStats.proxy.graphEdgesVisited);
 	PgturbohybridJsonbAddInt64(&state, "proxy_graph_candidates_seen",
-							   scanStats.proxyGraphCandidatesSeen);
+							   scanStats.proxy.graphCandidatesSeen);
 	PgturbohybridJsonbAddInt64(&state, "proxy_candidates_returned",
-							   scanStats.proxyCandidatesReturned);
+							   scanStats.proxy.candidatesReturned);
 	PgturbohybridJsonbAddUint64(&state, "proxy_vector_scores_computed",
-								scanStats.proxyVectorScoresComputed);
+								scanStats.proxy.vectorScoresComputed);
 	PgturbohybridJsonbAddUint64(&state, "proxy_vector_score_time_us",
-								scanStats.proxyVectorScoreUs);
+								scanStats.proxy.vectorScoreUs);
 	PgturbohybridJsonbAddBool(&state, "proxy_lazy_sidecar_vectors",
-							  scanStats.proxyLazySidecarVectors);
+							  scanStats.proxy.lazySidecarVectors);
 	PgturbohybridJsonbAddString(&state, "multivector_doc_storage_cache_requested",
 								scanStats.multivectorDocStorageCacheRequested[0] != '\0' ?
 								scanStats.multivectorDocStorageCacheRequested : "auto");
@@ -4015,52 +4015,52 @@ pgturbohybrid_last_scan_stats(PG_FUNCTION_ARGS)
 								scanStats.multivectorDocStorageCacheEffective[0] != '\0' ?
 								scanStats.multivectorDocStorageCacheEffective : "auto");
 	PgturbohybridJsonbAddBool(&state, "proxy_top1_admission",
-							  scanStats.proxyTop1Admission);
+							  scanStats.proxy.top1Admission);
 	PgturbohybridJsonbAddInt64(&state, "proxy_exact_rerank_docs",
-							   scanStats.proxyExactRerankDocs);
+							   scanStats.proxy.exactRerankDocs);
 	PgturbohybridJsonbAddUint64(&state, "proxy_full_sidecar_vectors_loaded",
-								scanStats.proxyFullSidecarVectorsLoaded);
+								scanStats.proxy.fullSidecarVectorsLoaded);
 	PgturbohybridJsonbAddUint64(&state, "proxy_full_sidecar_bytes_touched",
-								scanStats.proxyFullSidecarBytesTouched);
+								scanStats.proxy.fullSidecarBytesTouched);
 	PgturbohybridJsonbAddUint64(&state, "proxy_full_sidecar_pages_read",
-								scanStats.proxyFullSidecarPagesRead);
+								scanStats.proxy.fullSidecarPagesRead);
 	PgturbohybridJsonbAddUint64(&state, "proxy_full_sidecar_load_time_us",
-								scanStats.proxyFullSidecarLoadUs);
+								scanStats.proxy.fullSidecarLoadUs);
 	PgturbohybridJsonbAddUint64(&state, "proxy_full_sidecar_reconstruct_time_us",
-								scanStats.proxyFullSidecarReconstructUs);
+								scanStats.proxy.fullSidecarReconstructUs);
 	PgturbohybridJsonbAddUint64(&state, "proxy_exact_rerank_heap_fetches",
-								scanStats.proxyExactRerankHeapFetches);
+								scanStats.proxy.exactRerankHeapFetches);
 	PgturbohybridJsonbAddUint64(&state, "proxy_exact_rerank_sidecar_fetches",
-								scanStats.proxyExactRerankSidecarFetches);
+								scanStats.proxy.exactRerankSidecarFetches);
 	PgturbohybridJsonbAddUint64(&state, "proxy_exact_rerank_bytes_touched",
-								scanStats.proxyExactRerankBytesTouched);
+								scanStats.proxy.exactRerankBytesTouched);
 	PgturbohybridJsonbAddUint64(&state, "proxy_exact_rerank_time_us",
-								scanStats.proxyExactRerankUs);
+								scanStats.proxy.exactRerankUs);
 	PgturbohybridJsonbAddBool(&state, "sidecar_cache_build_this_query",
-							  scanStats.sidecarCacheBuildThisQuery);
+							  scanStats.sidecar.cacheBuildThisQuery);
 		PgturbohybridJsonbAddUint64(&state, "sidecar_cache_build_bytes",
-									scanStats.sidecarCacheBuildBytes);
+									scanStats.sidecar.cacheBuildBytes);
 		PgturbohybridJsonbAddUint64(&state, "sidecar_cache_build_pages_read",
-									scanStats.sidecarCacheBuildPagesRead);
+									scanStats.sidecar.cacheBuildPagesRead);
 		PgturbohybridJsonbAddUint64(&state, "sidecar_cache_build_time_us",
-									scanStats.sidecarCacheBuildUs);
+									scanStats.sidecar.cacheBuildUs);
 	PgturbohybridJsonbAddUint64(&state, "sidecar_query_bytes_touched",
-								scanStats.sidecarQueryBytesTouched);
+								scanStats.sidecar.queryBytesTouched);
 	PgturbohybridJsonbAddUint64(&state, "sidecar_query_pages_read",
-								scanStats.sidecarQueryPagesRead);
+								scanStats.sidecar.queryPagesRead);
 	PgturbohybridJsonbAddUint64(&state, "sidecar_query_vectors_loaded",
-								scanStats.sidecarQueryVectorsLoaded);
+								scanStats.sidecar.queryVectorsLoaded);
 		PgturbohybridJsonbAddUint64(&state, "sidecar_query_load_time_us",
-									scanStats.sidecarQueryLoadUs);
+									scanStats.sidecar.queryLoadUs);
 		PgturbohybridJsonbAddUint64(&state, "sidecar_query_time_us",
-									scanStats.sidecarQueryUs);
+									scanStats.sidecar.queryUs);
 	PgturbohybridJsonbAddBool(&state, "proxy_vector_uses_full_sidecar_for_graph",
-							  scanStats.proxyVectorUsesFullSidecarForGraph);
+							  scanStats.proxy.vectorUsesFullSidecarForGraph);
 	PgturbohybridJsonbAddBool(&state, "proxy_vector_near_exhaustive_sidecar_touch",
-							  scanStats.proxyVectorNearExhaustiveSidecarTouch);
+							  scanStats.proxy.vectorNearExhaustiveSidecarTouch);
 	PgturbohybridJsonbAddString(&state, "proxy_vector_sidecar_touch_reason",
-								scanStats.proxyVectorSidecarTouchReason[0] != '\0' ?
-								scanStats.proxyVectorSidecarTouchReason : "none");
+								scanStats.proxy.vectorSidecarTouchReason[0] != '\0' ?
+								scanStats.proxy.vectorSidecarTouchReason : "none");
 	PgturbohybridJsonbAddMultiVectorCentroidLiteStats(&state, &scanStats);
 	PgturbohybridJsonbAddUint64(&state, "quantized_inverted_lists_visited",
 								scanStats.quantizedInverted.listsVisited);
@@ -4395,11 +4395,11 @@ pgturbohybrid_last_scan_stats(PG_FUNCTION_ARGS)
 	PgturbohybridJsonbAddInt64(&state, "multivector_bm25_injection_exact_reranked",
 							   scanStats.multivectorBm25InjectionExactReranked);
 	PgturbohybridJsonbAddInt64(&state, "learned_sparse_candidates",
-							   scanStats.learnedSparseCandidates);
+							   scanStats.learnedSparse.candidates);
 	PgturbohybridJsonbAddInt64(&state, "learned_sparse_retained_for_maxsim",
-							   scanStats.learnedSparseRetainedForMaxsim);
+							   scanStats.learnedSparse.retainedForMaxsim);
 	PgturbohybridJsonbAddUint64(&state, "learned_sparse_branch_latency_us",
-								scanStats.learnedSparseBranchLatencyUs);
+								scanStats.learnedSparse.branchLatencyUs);
 	if (scanStats.multivectorDocMapSource[0] != '\0')
 		PgturbohybridJsonbAddString(&state, "multivector_docmap_source",
 									scanStats.multivectorDocMapSource);

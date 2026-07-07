@@ -8381,16 +8381,16 @@ PgturbohybridMultiVectorDocumentNodeScan(IndexScanDesc scan,
 														  &projectionWeightBytes,
 														  &projectionModel,
 														  &projectionChecksum);
-			stats->learnedProjectionLoaded = projectionLoaded;
-			stats->learnedProjectionDim = (uint32) Max(projectionDim, 0);
-			stats->learnedProjectionWeightBytes = projectionWeightBytes;
-			strlcpy(stats->learnedProjectionModel,
+			stats->learnedProjection.loaded = projectionLoaded;
+			stats->learnedProjection.dim = (uint32) Max(projectionDim, 0);
+			stats->learnedProjection.weightBytes = projectionWeightBytes;
+			strlcpy(stats->learnedProjection.model,
 					projectionModel,
-					sizeof(stats->learnedProjectionModel));
-			strlcpy(stats->learnedProjectionChecksum,
+					sizeof(stats->learnedProjection.model));
+			strlcpy(stats->learnedProjection.checksum,
 					projectionChecksum,
-					sizeof(stats->learnedProjectionChecksum));
-			stats->learnedProjectionQueryEncodeUs =
+					sizeof(stats->learnedProjection.checksum));
+			stats->learnedProjection.queryEncodeUs =
 				learnedProjectionQueryEncodeUs;
 		}
 		strlcpy(stats->multivectorGraphMode,
@@ -8445,13 +8445,13 @@ PgturbohybridMultiVectorDocumentNodeScan(IndexScanDesc scan,
 		strlcpy(stats->multivectorDocGraphStorageKind,
 				docStorageKindName,
 				sizeof(stats->multivectorDocGraphStorageKind));
-		stats->proxyOnlyIndex = proxyOnlyIndex;
-		stats->centroidOnlyIndex = centroidOnlyIndex;
+		stats->proxy.onlyIndex = proxyOnlyIndex;
+		stats->centroid.onlyIndex = centroidOnlyIndex;
 		stats->fullMultivectorSidecarAvailable = fullSidecarAvailable;
-			stats->centroidSidecarAvailable =
+			stats->centroid.sidecarAvailable =
 				(meta->tqMultivectorDocMapFlags &
 				 PGTURBOHYBRID_GRAPH_MULTIVECTOR_DOCMAP_FLAG_CENTROIDS) != 0;
-			stats->centroidDocCodesAvailable =
+			stats->centroid.docCodesAvailable =
 				(meta->tqMultivectorDocMapFlags &
 				 PGTURBOHYBRID_GRAPH_MULTIVECTOR_DOCMAP_FLAG_CENTROID_DOC_CODES) != 0;
 			stats->quantizedInverted.sidecarAvailable =
@@ -8473,25 +8473,25 @@ PgturbohybridMultiVectorDocumentNodeScan(IndexScanDesc scan,
 			proxyGraph ? (uint32) docCount : 0;
 		stats->multivectorExactRerankKEffective =
 			(uint32) exactRerankKEffective;
-		stats->proxyCandidateLimitEffective =
+		stats->proxy.candidateLimitEffective =
 			proxyGraph ? (uint32) proxyCandidateLimitEffective : 0;
-		strlcpy(stats->proxyCandidateLimitSource,
+		strlcpy(stats->proxy.candidateLimitSource,
 				proxyGraph ? proxyCandidateLimitSource : "none",
-				sizeof(stats->proxyCandidateLimitSource));
-		stats->proxyGraphNodesVisited =
+				sizeof(stats->proxy.candidateLimitSource));
+		stats->proxy.graphNodesVisited =
 			proxyGraph ? so->graphVisitedNodes : 0;
-		stats->proxyGraphEdgesVisited =
+		stats->proxy.graphEdgesVisited =
 			proxyGraph ? so->graphBaseVisitedChecks : 0;
-		stats->proxyGraphCandidatesSeen =
+		stats->proxy.graphCandidatesSeen =
 			proxyGraph ? (uint32) Max(proxyGraphHitCount, 0) : 0;
-		stats->proxyCandidatesReturned =
+		stats->proxy.candidatesReturned =
 			proxyGraph ? (uint32) docCount : 0;
-		stats->proxyVectorScoresComputed =
+		stats->proxy.vectorScoresComputed =
 			proxyGraph ? so->graphBaseBatchNodes : 0;
-		stats->proxyVectorScoreUs =
+		stats->proxy.vectorScoreUs =
 			proxyGraph ? proxyScoringUs : 0;
-		stats->proxyCandidates = proxyGraph ? (uint32) docCount : 0;
-		stats->proxyLazySidecarVectors =
+		stats->proxy.candidates = proxyGraph ? (uint32) docCount : 0;
+		stats->proxy.lazySidecarVectors =
 			proxyGraph && proxyLazySidecarVectors;
 		strlcpy(stats->multivectorDocStorageCacheRequested,
 				docStorageCacheRequestedName,
@@ -8499,138 +8499,138 @@ PgturbohybridMultiVectorDocumentNodeScan(IndexScanDesc scan,
 		strlcpy(stats->multivectorDocStorageCacheEffective,
 				docStorageCacheModeName,
 				sizeof(stats->multivectorDocStorageCacheEffective));
-		stats->proxyTop1Admission = proxyGraph && proxyTop1Admission;
-		stats->proxyExactRerankDocs =
+		stats->proxy.top1Admission = proxyGraph && proxyTop1Admission;
+		stats->proxy.exactRerankDocs =
 			proxyGraph ? (uint32) exactRerankCount : 0;
-		stats->proxyFullSidecarVectorsLoaded =
+		stats->proxy.fullSidecarVectorsLoaded =
 			proxyGraph ? proxyFullSidecarVectorsLoaded : 0;
-		stats->proxyFullSidecarBytesTouched =
+		stats->proxy.fullSidecarBytesTouched =
 			proxyGraph ? proxyFullSidecarBytesTouched : 0;
-		stats->proxyFullSidecarPagesRead =
+		stats->proxy.fullSidecarPagesRead =
 			proxyGraph ? proxyFullSidecarPagesRead : 0;
-		stats->proxyFullSidecarLoadUs =
+		stats->proxy.fullSidecarLoadUs =
 			proxyGraph ? proxyFullSidecarLoadUs : 0;
-		stats->proxyFullSidecarReconstructUs =
+		stats->proxy.fullSidecarReconstructUs =
 			proxyGraph ? proxyFullSidecarReconstructUs : 0;
-		stats->proxyExactRerankHeapFetches =
+		stats->proxy.exactRerankHeapFetches =
 			proxyGraph ? exactStats.heapFetches : 0;
-		stats->proxyExactRerankSidecarFetches =
+		stats->proxy.exactRerankSidecarFetches =
 			proxyGraph ? exactStats.sidecarReads : 0;
-		stats->proxyExactRerankBytesTouched =
+		stats->proxy.exactRerankBytesTouched =
 			proxyGraph ? exactStats.sidecarBytes : 0;
-		stats->proxyExactRerankUs =
+		stats->proxy.exactRerankUs =
 			proxyGraph ? exactStats.exactMaxsimUs : 0;
-		stats->sidecarCacheBuildThisQuery =
+		stats->sidecar.cacheBuildThisQuery =
 			(proxyGraph || centroidLite || quantizedInvertedExperimental) &&
 			sidecarCacheBuildThisQuery;
-		stats->sidecarCacheBuildBytes =
+		stats->sidecar.cacheBuildBytes =
 			(proxyGraph || centroidLite || quantizedInvertedExperimental) ?
 			sidecarCacheBuildBytes : 0;
-		stats->sidecarCacheBuildPagesRead =
+		stats->sidecar.cacheBuildPagesRead =
 			(proxyGraph || centroidLite || quantizedInvertedExperimental) ?
 			sidecarCacheBuildPagesRead : 0;
-		stats->sidecarCacheBuildUs =
+		stats->sidecar.cacheBuildUs =
 			(proxyGraph || centroidLite || quantizedInvertedExperimental) ?
 			sidecarCacheBuildUs : 0;
-		stats->sidecarQueryBytesTouched =
+		stats->sidecar.queryBytesTouched =
 			(proxyGraph || centroidLite || quantizedInvertedExperimental) ?
 			sidecarQueryBytesTouched : 0;
-		stats->sidecarQueryPagesRead =
+		stats->sidecar.queryPagesRead =
 			(proxyGraph || centroidLite || quantizedInvertedExperimental) ?
 			sidecarQueryPagesRead : 0;
-		stats->sidecarQueryVectorsLoaded =
+		stats->sidecar.queryVectorsLoaded =
 			(proxyGraph || centroidLite || quantizedInvertedExperimental) ?
 			sidecarQueryVectorsLoaded : 0;
-		stats->sidecarQueryLoadUs =
+		stats->sidecar.queryLoadUs =
 			(proxyGraph || centroidLite || quantizedInvertedExperimental) ?
 			sidecarQueryLoadUs : 0;
-		stats->sidecarQueryUs = stats->sidecarQueryLoadUs;
-		stats->proxyVectorUsesFullSidecarForGraph =
+		stats->sidecar.queryUs = stats->sidecar.queryLoadUs;
+		stats->proxy.vectorUsesFullSidecarForGraph =
 			proxyGraph && proxyVectorUsesFullSidecarForGraph;
-		stats->proxyVectorNearExhaustiveSidecarTouch =
+		stats->proxy.vectorNearExhaustiveSidecarTouch =
 			proxyGraph && proxyVectorNearExhaustiveSidecarTouch;
-		strlcpy(stats->proxyVectorSidecarTouchReason,
+		strlcpy(stats->proxy.vectorSidecarTouchReason,
 				proxyGraph ? proxyVectorSidecarTouchReason : "none",
-				sizeof(stats->proxyVectorSidecarTouchReason));
+				sizeof(stats->proxy.vectorSidecarTouchReason));
 		centroidCandidates = centroidLite ? (uint32) docCount : 0;
 		centroidPrunedDocs =
 			centroidDocsTouched > (uint64) docCount ?
 			centroidDocsTouched - (uint64) docCount : 0;
-		stats->centroidListsVisited = centroidListsVisited;
-		stats->centroidDocsTouched = centroidDocsTouched;
-		stats->centroidPrunedDocs = centroidPrunedDocs;
-		stats->centroidPostingsTouched =
+		stats->centroid.listsVisited = centroidListsVisited;
+		stats->centroid.docsTouched = centroidDocsTouched;
+		stats->centroid.prunedDocs = centroidPrunedDocs;
+		stats->centroid.postingsTouched =
 			centroidLite ? edgesVisited : 0;
-		stats->centroidPostingsSelected =
+		stats->centroid.postingsSelected =
 			centroidLite ? centroidPostingsSelected : 0;
-		stats->centroidPostingsSkipped =
+		stats->centroid.postingsSkipped =
 			centroidLite ? centroidPostingsSkipped : 0;
-		stats->centroidProbeUs =
+		stats->centroid.probeUs =
 			centroidLite ? centroidProbeUs : 0;
-		stats->centroidPostingScanUs =
+		stats->centroid.postingScanUs =
 			centroidLite ? centroidPostingScanUs : 0;
-		stats->centroidAccumulateUs =
+		stats->centroid.accumulateUs =
 			centroidLite ? centroidAccumulateUs : 0;
-		stats->centroidCandidateHeapUs =
+		stats->centroid.candidateHeapUs =
 			centroidLite ? centroidCandidateHeapUs : 0;
-		stats->centroidPostingLimitPerToken =
+		stats->centroid.postingLimitPerToken =
 			centroidLite ? centroidPostingLimitPerToken : 0;
-		stats->centroidProbeCentroidsPerToken =
+		stats->centroid.probeCentroidsPerToken =
 			centroidLite ?
 			(uint32) Max(pgturbohybrid_multivector_centroid_lite_probe_centroids_per_token,
 						 1) : 0;
-		stats->centroidCodewordTopM =
+		stats->centroid.codewordTopM =
 			centroidLite ?
 			(uint32) Max(pgturbohybrid_multivector_centroid_lite_codeword_top_m,
 						 1) : 0;
-		stats->centroidScoreThreshold =
+		stats->centroid.scoreThreshold =
 			centroidLite ? centroidScoreThreshold : -1.0;
-		stats->centroidScoreDropFromBest =
+		stats->centroid.scoreDropFromBest =
 			centroidLite ? centroidScoreDropFromBest : -1.0;
-		stats->centroidListsSkippedByThreshold =
+		stats->centroid.listsSkippedByThreshold =
 			centroidLite ? centroidListsSkippedByThreshold : 0;
 		if (centroidLite &&
-			stats->centroidPostingLimitPerToken == 0 &&
-			stats->centroidPostingsTouched > 0)
+			stats->centroid.postingLimitPerToken == 0 &&
+			stats->centroid.postingsTouched > 0)
 			centroidPostingCapStrategy = "uncapped_full_list";
-		strlcpy(stats->centroidPostingCapStrategy,
+		strlcpy(stats->centroid.postingCapStrategy,
 				centroidLite ? centroidPostingCapStrategy : "none",
-				sizeof(stats->centroidPostingCapStrategy));
-		strlcpy(stats->centroidCandidateScoring,
+				sizeof(stats->centroid.postingCapStrategy));
+		strlcpy(stats->centroid.candidateScoring,
 				centroidLite ? centroidCandidateScoring : "none",
-				sizeof(stats->centroidCandidateScoring));
-		stats->centroidCandidates = centroidCandidates;
-		stats->centroidBitsetPrefilterEnabled = centroidBitsetPrefilter;
-		stats->centroidBitsetMinTokenMatches =
+				sizeof(stats->centroid.candidateScoring));
+		stats->centroid.candidates = centroidCandidates;
+		stats->centroid.bitsetPrefilterEnabled = centroidBitsetPrefilter;
+		stats->centroid.bitsetMinTokenMatches =
 			centroidBitsetPrefilter ? centroidBitsetMinTokenMatches : 0;
-		stats->centroidBitsetListsUsed =
+		stats->centroid.bitsetListsUsed =
 				centroidBitsetPrefilter ? centroidBitsetListsUsed : 0;
-			stats->centroidBitsetDocsSet =
+			stats->centroid.bitsetDocsSet =
 				centroidBitsetPrefilter ? centroidBitsetDocsSet : 0;
-			stats->centroidBitsetDocsAfterThreshold =
+			stats->centroid.bitsetDocsAfterThreshold =
 				centroidBitsetPrefilter ? centroidBitsetDocsAfterThreshold : 0;
-			stats->centroidBitsetPrefilterUs =
+			stats->centroid.bitsetPrefilterUs =
 				centroidBitsetPrefilter ? centroidBitsetPrefilterUs : 0;
-			stats->centroidBitsetMemoryBytes =
+			stats->centroid.bitsetMemoryBytes =
 				centroidBitsetPrefilter ? centroidBitsetMemoryBytes : 0;
-			stats->centroidUpperBoundEnabled =
+			stats->centroid.upperBoundEnabled =
 				centroidUpperBoundPruning || centroidScoreBoundPruning;
-			stats->centroidUpperBoundDocsChecked =
+			stats->centroid.upperBoundDocsChecked =
 				(centroidUpperBoundPruning || centroidScoreBoundPruning) ?
 				centroidUpperBoundDocsChecked : 0;
-			stats->centroidUpperBoundDocsPruned =
+			stats->centroid.upperBoundDocsPruned =
 				(centroidUpperBoundPruning || centroidScoreBoundPruning) ?
 				centroidUpperBoundDocsPruned : 0;
-			stats->centroidUpperBoundPruneUs =
+			stats->centroid.upperBoundPruneUs =
 				(centroidUpperBoundPruning || centroidScoreBoundPruning) ?
 				centroidUpperBoundPruneUs : 0;
-			stats->centroidUpperBoundUnsafeFallbacks =
+			stats->centroid.upperBoundUnsafeFallbacks =
 				(centroidUpperBoundPruning || centroidScoreBoundPruning) ?
 				centroidUpperBoundUnsafeFallbacks : 0;
-			stats->centroidCandidatesBeforeBound =
+			stats->centroid.candidatesBeforeBound =
 				(centroidUpperBoundPruning || centroidScoreBoundPruning) ?
 				centroidCandidatesBeforeBound : 0;
-			stats->centroidCandidatesAfterBound =
+			stats->centroid.candidatesAfterBound =
 				(centroidUpperBoundPruning || centroidScoreBoundPruning) ?
 				centroidCandidatesAfterBound : 0;
 		stats->multivectorCentroidCount = centroidCountEffective;
@@ -9816,13 +9816,13 @@ PgturbohybridGraphCollectMultiVectorDenseCandidates(IndexScanDesc scan,
 				sizeof(stats->multivectorDocGraphWarning));
 		if (centroidLite)
 		{
-			stats->centroidListsVisited =
+			stats->centroid.listsVisited =
 				(uint64) ((uint32) mv->count - skippedQueryTokens);
-			stats->centroidDocsTouched = admissionCandidatesBeforeRerank;
-			stats->centroidCandidates = (uint32) docCount;
-			strlcpy(stats->centroidCandidateScoring, "token_node_exact",
-					sizeof(stats->centroidCandidateScoring));
-			stats->centroidPrunedDocs =
+			stats->centroid.docsTouched = admissionCandidatesBeforeRerank;
+			stats->centroid.candidates = (uint32) docCount;
+			strlcpy(stats->centroid.candidateScoring, "token_node_exact",
+					sizeof(stats->centroid.candidateScoring));
+			stats->centroid.prunedDocs =
 				admissionCandidatesBeforeRerank > (uint32) docCount ?
 				(uint64) (admissionCandidatesBeforeRerank - (uint32) docCount) :
 				0;
