@@ -1,5 +1,5 @@
-#ifndef TQGRAPH_SCORE_H
-#define TQGRAPH_SCORE_H
+#ifndef PGTURBOHYBRID_QUANT_SCORE_H
+#define PGTURBOHYBRID_QUANT_SCORE_H
 
 #include "pgturbohybrid_quant.h"
 

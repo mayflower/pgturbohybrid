@@ -71,9 +71,9 @@
  * maddubs pair sum <= 2*255*64 = 32640 < 32767.  The +OFFSET shift contributes
  * a per-query bias OFFSET*Sum(q_signed) that the scorer subtracts once.
  */
-#define PGTURBOHYBRID_U8_SPLIT_HIGH_COEF 128
+/* U8_SPLIT_HIGH_COEF / U8_CODEBOOK_OFFSET come from the shared codebook header. */
+#include "pgturbohybrid_quant_codebook.h"
 #define PGTURBOHYBRID_U8_SPLIT_ABS_MAX 8127.0
-#define PGTURBOHYBRID_U8_CODEBOOK_OFFSET 128
 #if PGTURBOHYBRID_GRAPH_COMPILE_AVX2
 static const uint8 PgturbohybridGraphCodebookU8[PGTURBOHYBRID_LUT_WIDTH] = {
 	1, 32, 53, 70, 84, 97, 110, 122,

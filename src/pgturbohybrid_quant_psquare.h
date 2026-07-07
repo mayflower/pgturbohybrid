@@ -1,5 +1,5 @@
-#ifndef TQGRAPH_PSQUARE_H
-#define TQGRAPH_PSQUARE_H
+#ifndef PGTURBOHYBRID_QUANT_PSQUARE_H
+#define PGTURBOHYBRID_QUANT_PSQUARE_H
 
 #include "postgres.h"
 

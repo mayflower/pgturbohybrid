@@ -1125,9 +1125,9 @@ typedef PgturbohybridGraphNeighborTupleData * PgturbohybridGraphNeighborTuple;
 
 typedef union
 {
-	struct pointerhash_hash *pointers;
-	struct offsethash_hash *offsets;
-	struct tidhash_hash *tids;
+	struct pgturbohybrid_pointerhash_hash *pointers;
+	struct pgturbohybrid_offsethash_hash *offsets;
+	struct pgturbohybrid_tidhash_hash *tids;
 }			visited_hash;
 
 typedef union
@@ -1421,7 +1421,7 @@ typedef struct PgturbohybridGraphVacuumState
 	PgturbohybridGraphSupport support;
 
 	/* Variables */
-	struct tidhash_hash *deleted;
+	struct pgturbohybrid_tidhash_hash *deleted;
 	BufferAccessStrategy bas;
 	PgturbohybridGraphNeighborTuple ntup;
 	PgturbohybridGraphElementData highestPoint;
@@ -1761,7 +1761,7 @@ typedef struct TidHashEntry
 	char		status;
 }			TidHashEntry;
 
-#define SH_PREFIX tidhash
+#define SH_PREFIX pgturbohybrid_tidhash
 #define SH_ELEMENT_TYPE TidHashEntry
 #define SH_KEY_TYPE ItemPointerData
 #define SH_SCOPE extern
@@ -1774,7 +1774,7 @@ typedef struct PointerHashEntry
 	char		status;
 }			PointerHashEntry;
 
-#define SH_PREFIX pointerhash
+#define SH_PREFIX pgturbohybrid_pointerhash
 #define SH_ELEMENT_TYPE PointerHashEntry
 #define SH_KEY_TYPE uintptr_t
 #define SH_SCOPE extern
@@ -1787,7 +1787,7 @@ typedef struct OffsetHashEntry
 	char		status;
 }			OffsetHashEntry;
 
-#define SH_PREFIX offsethash
+#define SH_PREFIX pgturbohybrid_offsethash
 #define SH_ELEMENT_TYPE OffsetHashEntry
 #define SH_KEY_TYPE Size
 #define SH_SCOPE extern

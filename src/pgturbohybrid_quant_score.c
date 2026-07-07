@@ -24,9 +24,8 @@
 #endif
 
 
-#define PGTURBOHYBRID_QUERY_SPLIT_HIGH_COEF 256
-#define PGTURBOHYBRID_GRAPH_CODEBOOK_SCALE (127.0 / 2.733)
-#define PGTURBOHYBRID_GRAPH_CODEBOOK2_SCALE (127.0 / 1.510)
+/* Codebook scale/coef anchors (shared single source of truth). */
+#include "pgturbohybrid_quant_codebook.h"
 
 #if !defined(PGTURBOHYBRID_DISABLE_SIMD) && \
 	(defined(__AVX2__) || (PGTURBOHYBRID_GRAPH_X86 && (defined(__GNUC__) || defined(__clang__))))
@@ -834,8 +833,8 @@ PgturbohybridGraphTqCodeU8ScalarDistance(const PgturbohybridGraphTqQuery *tq,
 #endif
 
 /* Name of the unsigned-codebook SIMD kernel that would run (for scan stats).
- * Always compiled so stats.c can name it; internal guards skip unavailable
- * checks on non-x86. */
+ * Always compiled so pgturbohybrid_diagnostics.c can name it; internal guards
+ * skip unavailable checks on non-x86. */
 const char *
 PgturbohybridGraphU8SplitKernelName(void)
 {

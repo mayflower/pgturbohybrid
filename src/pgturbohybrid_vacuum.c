@@ -22,9 +22,9 @@
  * Check if deleted list contains an index TID
  */
 static bool
-DeletedContains(tidhash_hash * deleted, ItemPointer indextid)
+DeletedContains(pgturbohybrid_tidhash_hash * deleted, ItemPointer indextid)
 {
-	return tidhash_lookup(deleted, *indextid) != NULL;
+	return pgturbohybrid_tidhash_lookup(deleted, *indextid) != NULL;
 }
 
 /*
@@ -118,7 +118,7 @@ RemoveHeapTids(PgturbohybridGraphVacuumState * vacuumstate)
 				/* Add to deleted list */
 				ItemPointerSet(&ip, blkno, offno);
 
-				tidhash_insert(vacuumstate->deleted, ip, &found);
+				pgturbohybrid_tidhash_insert(vacuumstate->deleted, ip, &found);
 				Assert(!found);
 			}
 			else if (etup->level > highestLevel && !(entryPoint != NULL && blkno == entryPoint->blkno && offno == entryPoint->offno))
@@ -184,10 +184,14 @@ NeedsUpdated(PgturbohybridGraphVacuumState * vacuumstate, PgturbohybridGraphElem
 	/* This could indicate too many candidates being deleted during insert */
 	if (!needsUpdated)
 	{
-		/* Keep clang-tidy happy */
-		Assert(ntup->count > 0);
-
-		needsUpdated = !ItemPointerIsValid(&ntup->indextids[ntup->count - 1]);
+		/*
+		 * count is read from the page, so guard at runtime before indexing
+		 * indextids[count - 1] -- an Assert compiles out under -DNDEBUG and
+		 * would leave an indextids[-1] read.  A zero-count neighbor tuple is
+		 * itself degenerate and worth repairing.
+		 */
+		needsUpdated = ntup->count == 0 ||
+			!ItemPointerIsValid(&ntup->indextids[ntup->count - 1]);
 	}
 
 	UnlockReleaseBuffer(buf);
@@ -620,7 +624,7 @@ InitVacuumState(PgturbohybridGraphVacuumState * vacuumstate, IndexVacuumInfo *in
 	PgturbohybridGraphGetMetaPageInfo(index, &vacuumstate->m, NULL);
 
 	/* Create hash table */
-	vacuumstate->deleted = tidhash_create(CurrentMemoryContext, 256, NULL);
+	vacuumstate->deleted = pgturbohybrid_tidhash_create(CurrentMemoryContext, 256, NULL);
 }
 
 /*
@@ -629,7 +633,7 @@ InitVacuumState(PgturbohybridGraphVacuumState * vacuumstate, IndexVacuumInfo *in
 static void
 FreeVacuumState(PgturbohybridGraphVacuumState * vacuumstate)
 {
-	tidhash_destroy(vacuumstate->deleted);
+	pgturbohybrid_tidhash_destroy(vacuumstate->deleted);
 	FreeAccessStrategy(vacuumstate->bas);
 	pfree(vacuumstate->ntup);
 	MemoryContextDelete(vacuumstate->tmpCtx);

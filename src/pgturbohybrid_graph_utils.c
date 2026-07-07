@@ -70,7 +70,8 @@
 
 /*
  * AVX-VNNI runtime detection requires __builtin_cpu_supports("avxvnni"), which
- * GCC has since 11.x and Clang since 18. See tqgraph.c for the parallel guard.
+ * GCC has since 11.x and Clang since 18. See
+ * pgturbohybrid_quant_score_signed_x86.c for the parallel guard.
  */
 #if !defined(PGTURBOHYBRID_DISABLE_SIMD) && \
 	(defined(__AVXVNNI__) || \
@@ -143,19 +144,18 @@ static const float TqCodeCenters[PGTURBOHYBRID_LUT_WIDTH] = {
 	1.256f, 1.618f, 2.069f, 2.733f
 };
 
-#define PGTURBOHYBRID_CODEBOOK_ABS_MAX 2.733f
+/* Codebook scale/coef anchors (shared single source of truth). */
+#include "pgturbohybrid_quant_codebook.h"
 
+/*
+ * Query-split / u8 saturation bounds, kept local rather than in the shared
+ * header: this U8_SPLIT_ABS_MAX is the float spelling (8127.0f) of the value the
+ * x86 u8 scorer uses as a double (8127.0), and QUERY_SPLIT_ABS_MAX is used only
+ * here.
+ */
 #if defined(__aarch64__) || defined(_M_ARM64) || PGTURBOHYBRID_COMPILE_AVX2
-#define PGTURBOHYBRID_QUERY_SPLIT_HIGH_COEF 256
 #define PGTURBOHYBRID_QUERY_SPLIT_ABS_MAX 32639.0f
-#define PGTURBOHYBRID_CODEBOOK_SCALE (127.0f / PGTURBOHYBRID_CODEBOOK_ABS_MAX)
-/* x86 unsigned-codebook query split: 7-bit signed halves, HIGH_COEF 128,
- * codebook shifted by +128 (bias = 128 * Sum(q_signed)). */
-#define PGTURBOHYBRID_U8_SPLIT_HIGH_COEF 128
 #define PGTURBOHYBRID_U8_SPLIT_ABS_MAX 8127.0f
-#define PGTURBOHYBRID_U8_CODEBOOK_OFFSET 128
-#define PGTURBOHYBRID_CODEBOOK2_ABS_MAX 1.510f
-#define PGTURBOHYBRID_CODEBOOK2_SCALE (127.0f / PGTURBOHYBRID_CODEBOOK2_ABS_MAX)
 #endif
 
 static const float TqCodeCenters1[2] = {
@@ -454,7 +454,7 @@ hash_tid(ItemPointerData tid)
 	return murmurhash64(x.i);
 }
 
-#define SH_PREFIX		tidhash
+#define SH_PREFIX		pgturbohybrid_tidhash
 #define SH_ELEMENT_TYPE	TidHashEntry
 #define SH_KEY_TYPE		ItemPointerData
 #define	SH_KEY			tid
@@ -481,7 +481,7 @@ hash_pointer(uintptr_t ptr)
 #endif
 }
 
-#define SH_PREFIX		pointerhash
+#define SH_PREFIX		pgturbohybrid_pointerhash
 #define SH_ELEMENT_TYPE	PointerHashEntry
 #define SH_KEY_TYPE		uintptr_t
 #define	SH_KEY			ptr
@@ -502,7 +502,7 @@ hash_offset(Size offset)
 #endif
 }
 
-#define SH_PREFIX		offsethash
+#define SH_PREFIX		pgturbohybrid_offsethash
 #define SH_ELEMENT_TYPE	OffsetHashEntry
 #define SH_KEY_TYPE		Size
 #define	SH_KEY			offset
@@ -3260,11 +3260,11 @@ static inline void
 InitVisited(char *base, visited_hash * v, bool inMemory, int ef, int m)
 {
 	if (!inMemory)
-		v->tids = tidhash_create(CurrentMemoryContext, ef * m * 2, NULL);
+		v->tids = pgturbohybrid_tidhash_create(CurrentMemoryContext, ef * m * 2, NULL);
 	else if (base != NULL)
-		v->offsets = offsethash_create(CurrentMemoryContext, ef * m * 2, NULL);
+		v->offsets = pgturbohybrid_offsethash_create(CurrentMemoryContext, ef * m * 2, NULL);
 	else
-		v->pointers = pointerhash_create(CurrentMemoryContext, ef * m * 2, NULL);
+		v->pointers = pgturbohybrid_pointerhash_create(CurrentMemoryContext, ef * m * 2, NULL);
 }
 
 /*
@@ -3279,19 +3279,19 @@ AddToVisited(char *base, visited_hash * v, PgturbohybridGraphElementPtr elementP
 		ItemPointerData indextid;
 
 		ItemPointerSet(&indextid, element->blkno, element->offno);
-		tidhash_insert(v->tids, indextid, found);
+		pgturbohybrid_tidhash_insert(v->tids, indextid, found);
 	}
 	else if (base != NULL)
 	{
 		PgturbohybridGraphElement element = PgturbohybridGraphPtrAccess(base, elementPtr);
 
-		offsethash_insert_hash(v->offsets, PgturbohybridGraphPtrOffset(elementPtr), element->hash, found);
+		pgturbohybrid_offsethash_insert_hash(v->offsets, PgturbohybridGraphPtrOffset(elementPtr), element->hash, found);
 	}
 	else
 	{
 		PgturbohybridGraphElement element = PgturbohybridGraphPtrAccess(base, elementPtr);
 
-		pointerhash_insert_hash(v->pointers, (uintptr_t) PgturbohybridGraphPtrPointer(elementPtr), element->hash, found);
+		pgturbohybrid_pointerhash_insert_hash(v->pointers, (uintptr_t) PgturbohybridGraphPtrPointer(elementPtr), element->hash, found);
 	}
 }
 
@@ -3397,7 +3397,7 @@ PgturbohybridGraphLoadUnvisitedFromDisk(PgturbohybridGraphElement element, Pgtur
 		if (!ItemPointerIsValid(indextid))
 			break;
 
-		tidhash_insert(v->tids, *indextid, &found);
+		pgturbohybrid_tidhash_insert(v->tids, *indextid, &found);
 
 		if (!found)
 			unvisited[(*unvisitedLength)++].indextid = *indextid;
