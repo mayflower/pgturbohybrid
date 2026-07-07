@@ -26,6 +26,7 @@ OBJS = \
 	src\pgturbohybrid_insert.obj \
 	src\pgturbohybrid_multivector.obj \
 	src\pgturbohybrid_quant.obj \
+	src\pgturbohybrid_quant_vacuum.obj \
 	src\pgturbohybrid_quant_cache.obj \
 	src\pgturbohybrid_quant_exact.obj \
 	src\pgturbohybrid_quant_insert.obj \

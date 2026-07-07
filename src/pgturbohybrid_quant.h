@@ -1535,6 +1535,7 @@ bool		PgturbohybridGraphResolveChainBlockNumber(Relation index, BlockNumber star
 										   int pageNo, int pageCount, uint16 pageKind,
 										   BlockNumber *blknos, BlockNumber *blkno);
 bool		PgturbohybridGraphReadMeta(Relation index, PgturbohybridGraphMetaPageData *meta);
+void		PgturbohybridGraphBumpMetaGeneration(Relation index);
 
 /*
  * node_id <-> heap TID identity + liveness, recovered from the dense graph code
