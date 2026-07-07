@@ -11169,15 +11169,15 @@ PgturbohybridGraphCollectDenseCandidates(IndexScanDesc scan, int targetK,
 		memset(stats, 0, sizeof(*stats));
 		stats->visitedGraphNodes = so->graphVisitedNodes;
 		stats->scoredCodes = so->graphScoredCodes;
-		stats->denseCandidatesRequested = targetK > 0 ? targetK : limit;
+		stats->dense.candidatesRequested = targetK > 0 ? targetK : limit;
 		stats->effectiveResultTarget = (uint32) Max(so->graphEffectiveResultTarget, 0);
 		stats->effectiveSearchEf = (uint32) Max(so->graphEffectiveSearchEf, 0);
 		stats->effectiveRescoreBand = (uint32) Max(so->graphEffectiveRescoreBand, 0);
 		stats->highdimWideningMultiplier = so->graphHighdimWideningMultiplier;
 		stats->wideningReason = so->graphWideningReason;
-		stats->denseBudgetPolicy = so->graphDenseBudgetPolicy;
+		stats->dense.budgetPolicy = so->graphDenseBudgetPolicy;
 			stats->rescoreBandPolicy = so->graphRescoreBandPolicy;
-			stats->denseCandidatesReturned = limit;
+			stats->dense.candidatesReturned = limit;
 			stats->exactRescoreCount = so->graphRescoreCount;
 			stats->heapRescoreCount = so->graphHeapRescoreCount;
 			stats->heapRescoreAutoEnabled =
