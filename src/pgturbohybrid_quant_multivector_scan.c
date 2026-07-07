@@ -1092,72 +1092,72 @@ PgturbohybridMultiVectorExactPlainFallback(IndexScanDesc scan,
 
 	if (stats != NULL)
 	{
-		stats->denseCandidatesRequested = targetK > 0 ? targetK : docLimit;
+		stats->dense.candidatesRequested = targetK > 0 ? targetK : docLimit;
 		stats->effectiveResultTarget = (uint32) docLimit;
 		stats->effectiveSearchEf = 0;
 		stats->effectiveRescoreBand =
 			(uint32) Min(docsScored, (uint64) PG_UINT32_MAX);
-		stats->denseCandidatesReturned = docCount;
+		stats->dense.candidatesReturned = docCount;
 		stats->heapRescoreCount = docsScored;
 		stats->heapRescoreUs = so != NULL ? so->graphHeapRescoreUs : 0;
 		stats->exactRescoreSource = PGTURBOHYBRID_EXACT_RESCORE_SOURCE_HEAP;
-		stats->multivectorEnabled = true;
-		stats->multivectorQueryVectors = (uint32) query->count;
-		stats->multivectorDocVectorsLimit =
+		stats->multivector.enabled = true;
+		stats->multivector.queryVectors = (uint32) query->count;
+		stats->multivector.docVectorsLimit =
 			(uint32) pgturbohybrid_multivector_max_doc_vectors;
-		stats->multivectorSubvectorSearches = 0;
-		stats->multivectorRawSubvectorHits = 0;
-		stats->multivectorDocMapSource =
+		stats->multivector.subvectorSearches = 0;
+		stats->multivector.rawSubvectorHits = 0;
+		stats->multivector.docMapSource =
 			PGTURBOHYBRID_MULTIVECTOR_DOCMAP_SOURCE_NONE;
-		strlcpy(stats->multivectorCandidateSource,
+		strlcpy(stats->multivector.candidateSource,
 				candidateSource != NULL ? candidateSource : "plain_fallback",
-				sizeof(stats->multivectorCandidateSource));
-		strlcpy(stats->multivectorGraphMode,
+				sizeof(stats->multivector.candidateSource));
+		strlcpy(stats->multivector.graphMode,
 				PgturbohybridMultiVectorGraphModeName(PGTURBOHYBRID_DEFAULT_MULTIVECTOR_GRAPH_MODE),
-				sizeof(stats->multivectorGraphMode));
-		stats->multivectorExactTokenScanEnabled = false;
-		stats->multivectorExactTokenScanNodesScored = 0;
-		stats->multivectorPlainFallbackUsed = true;
-		strlcpy(stats->multivectorPlainFallbackReason,
+				sizeof(stats->multivector.graphMode));
+		stats->multivector.exactTokenScanEnabled = false;
+		stats->multivector.exactTokenScanNodesScored = 0;
+		stats->multivector.plainFallbackUsed = true;
+		strlcpy(stats->multivector.plainFallbackReason,
 				reason != NULL ? reason : "not_applicable",
-				sizeof(stats->multivectorPlainFallbackReason));
-		stats->multivectorPlainFallbackDocsScored = docsScored;
-		stats->multivectorPlainFallbackPairs = exactPairs;
-		stats->multivectorDocGraphPrototypeEnabled = docGraphPrototype;
-		stats->multivectorDocGraphNodes =
+				sizeof(stats->multivector.plainFallbackReason));
+		stats->multivector.plainFallbackDocsScored = docsScored;
+		stats->multivector.plainFallbackPairs = exactPairs;
+		stats->multivector.docGraphPrototypeEnabled = docGraphPrototype;
+		stats->multivector.docGraphNodes =
 			docGraphPrototype ? docsScored : 0;
-		stats->multivectorDocGraphDocsScored =
+		stats->multivector.docGraphDocsScored =
 			docGraphPrototype ? docsScored : 0;
-		stats->multivectorDocGraphEdgesVisited = 0;
-		stats->multivectorDocGraphCandidates =
+		stats->multivector.docGraphEdgesVisited = 0;
+		stats->multivector.docGraphCandidates =
 			docGraphPrototype ? (uint32) docCount : 0;
-		stats->multivectorDocGraphSearchEf = 0;
-		stats->multivectorDocGraphOversampling = 0;
-		stats->multivectorDocGraphRescoreK = 0;
-		stats->multivectorDocGraphQuantizedScores = 0;
-		stats->multivectorDocGraphExactRerankDocs =
+		stats->multivector.docGraphSearchEf = 0;
+		stats->multivector.docGraphOversampling = 0;
+		stats->multivector.docGraphRescoreK = 0;
+		stats->multivector.docGraphQuantizedScores = 0;
+		stats->multivector.docGraphExactRerankDocs =
 			docGraphPrototype ? (uint32) Min(docsScored, (uint64) PG_UINT32_MAX) : 0;
-		stats->multivectorDocGraphHeapFetches =
+		stats->multivector.docGraphHeapFetches =
 			docGraphPrototype ? docsScored : 0;
-		strlcpy(stats->multivectorDocGraphWarning,
+		strlcpy(stats->multivector.docGraphWarning,
 				docGraphWarning != NULL ? docGraphWarning : "not_applicable",
-				sizeof(stats->multivectorDocGraphWarning));
-		stats->multivectorDocMapBytes = 0;
-		stats->multivectorUniqueDocs = docsScored;
-		stats->multivectorDuplicateDocHits = 0;
-		stats->multivectorMaxsimUpdates = exactPairs;
-		stats->multivectorDocCandidates = (uint32) docCount;
-		stats->multivectorExactRerankEnabled = true;
-		stats->multivectorExactRerankDocs =
+				sizeof(stats->multivector.docGraphWarning));
+		stats->multivector.docMapBytes = 0;
+		stats->multivector.uniqueDocs = docsScored;
+		stats->multivector.duplicateDocHits = 0;
+		stats->multivector.maxsimUpdates = exactPairs;
+		stats->multivector.docCandidates = (uint32) docCount;
+		stats->multivector.exactRerankEnabled = true;
+		stats->multivector.exactRerankDocs =
 			(uint32) Min(docsScored, (uint64) PG_UINT32_MAX);
-		stats->multivectorExactRerankPairs = exactPairs;
-		stats->multivectorExactRerankSource =
+		stats->multivector.exactRerankPairs = exactPairs;
+		stats->multivector.exactRerankSource =
 			docsScored > 0 ?
 			PGTURBOHYBRID_MULTIVECTOR_RERANK_SOURCE_HEAP :
 			PGTURBOHYBRID_MULTIVECTOR_RERANK_SOURCE_OFF;
-		stats->multivectorExactRerankHeapFetches = docsScored;
-		stats->multivectorExactRerankSidecarReads = 0;
-		stats->multivectorExactRerankSidecarBytes = 0;
+		stats->multivector.exactRerankHeapFetches = docsScored;
+		stats->multivector.exactRerankSidecarReads = 0;
+		stats->multivector.exactRerankSidecarBytes = 0;
 		stats->exactRerankCandidates =
 			(uint32) Min(docsScored, (uint64) PG_UINT32_MAX);
 		stats->exactRerankTokensEvaluated =
@@ -1165,27 +1165,27 @@ PgturbohybridMultiVectorExactPlainFallback(IndexScanDesc scan,
 		stats->exactRerankTokensSkipped = 0;
 		stats->exactRerankPairsSaved = 0;
 		stats->adaptiveRerankTopKChangedVsFull = false;
-		strlcpy(stats->multivectorExactKernel,
+		strlcpy(stats->multivector.exactKernel,
 				docsScored > 0 ? TqMultiVectorMaxSimKernelName() : "",
-				sizeof(stats->multivectorExactKernel));
-		strlcpy(stats->multivectorAccumulatorKind, "plain_heap_scan",
-				sizeof(stats->multivectorAccumulatorKind));
-		stats->multivectorMemoryBytesEstimate =
+				sizeof(stats->multivector.exactKernel));
+		strlcpy(stats->multivector.accumulatorKind, "plain_heap_scan",
+				sizeof(stats->multivector.accumulatorKind));
+		stats->multivector.memoryBytesEstimate =
 			(uint64) sizeof(TqDenseCandidate) * (uint64) docLimit;
-		stats->multivectorAdmissionDebugEnabled =
+		stats->multivector.admissionDebugEnabled =
 			pgturbohybrid_multivector_debug_admission !=
 			PGTURBOHYBRID_MULTIVECTOR_DEBUG_ADMISSION_OFF;
-		stats->multivectorAdmissionCandidatesBeforeRerank =
+		stats->multivector.admissionCandidatesBeforeRerank =
 			(uint32) Min(docsScored, (uint64) PG_UINT32_MAX);
-		stats->multivectorAdmissionCandidatesAfterTruncation =
+		stats->multivector.admissionCandidatesAfterTruncation =
 			(uint32) docCount;
-		stats->multivectorAdmissionExactRerankDocs =
+		stats->multivector.admissionExactRerankDocs =
 			(uint32) Min(docsScored, (uint64) PG_UINT32_MAX);
-		stats->multivectorAdmissionTruncatedByDocCandidateK =
+		stats->multivector.admissionTruncatedByDocCandidateK =
 			docsScored > (uint64) docCount;
-		stats->multivectorAdmissionTruncatedByAccumulatorMemory = false;
-		stats->multivectorAdmissionTraceAvailable = false;
-		stats->multivectorAdmissionTraceCount = 0;
+		stats->multivector.admissionTruncatedByAccumulatorMemory = false;
+		stats->multivector.admissionTraceAvailable = false;
+		stats->multivector.admissionTraceCount = 0;
 	}
 
 	*outCandidates = candidates;
@@ -8324,12 +8324,12 @@ PgturbohybridMultiVectorDocumentNodeScan(IndexScanDesc scan,
 
 		stats->visitedGraphNodes = docsScored;
 		stats->scoredCodes = 0;
-		stats->denseCandidatesRequested = targetK > 0 ? targetK : docLimit;
+		stats->dense.candidatesRequested = targetK > 0 ? targetK : docLimit;
 		stats->effectiveResultTarget = (uint32) candidateLimit;
 		stats->effectiveSearchEf = (uint32) searchEf;
 		stats->effectiveRescoreBand =
 			(uint32) Max(so->graphEffectiveRescoreBand, 0);
-		stats->denseCandidatesReturned = docCount;
+		stats->dense.candidatesReturned = docCount;
 		stats->heapRescoreCount = so->graphHeapRescoreCount;
 		stats->codePagesRead = so->graphCodePagesRead;
 		stats->adjPagesRead = so->graphAdjPagesRead;
@@ -8342,33 +8342,33 @@ PgturbohybridMultiVectorDocumentNodeScan(IndexScanDesc scan,
 		stats->heapRescoreUs = so->graphHeapRescoreUs;
 		stats->sortUs = so->graphSortUs;
 		stats->exactRescoreSource = so->graphExactRescoreSource;
-		stats->multivectorEnabled = true;
-		stats->multivectorQueryVectors = (uint32) query->count;
-		stats->multivectorDocVectorsLimit =
+		stats->multivector.enabled = true;
+		stats->multivector.queryVectors = (uint32) query->count;
+		stats->multivector.docVectorsLimit =
 			(uint32) pgturbohybrid_multivector_max_doc_vectors;
-		stats->multivectorSubvectorSearches = 0;
-		stats->multivectorRawSubvectorHits = docsScored;
-		stats->multivectorDocMapSource =
+		stats->multivector.subvectorSearches = 0;
+		stats->multivector.rawSubvectorHits = docsScored;
+		stats->multivector.docMapSource =
 			PGTURBOHYBRID_MULTIVECTOR_DOCMAP_SOURCE_SIDECAR;
-		strlcpy(stats->multivectorCandidateSource,
+		strlcpy(stats->multivector.candidateSource,
 				explicitProxyVector ? "proxy_vector" :
 				centroidLite ? "centroid_lite" :
 				quantizedInvertedExperimental ? "quantized_inverted_experimental" :
 				documentNodesSource ? "document_nodes" : "graph",
-				sizeof(stats->multivectorCandidateSource));
-		strlcpy(stats->multivectorCandidatePath,
+				sizeof(stats->multivector.candidateSource));
+		strlcpy(stats->multivector.candidatePath,
 				proxyGraph && proxyOnlyIndex ? "proxy_graph" :
 				exhaustiveScan ? "exact_doc_scan" :
 				proxyGraph ? "proxy_graph" :
 				centroidLite ? "centroid_lite" :
 				quantizedInvertedExperimental ? "quantized_inverted_experimental" :
 				"document_graph",
-				sizeof(stats->multivectorCandidatePath));
-		strlcpy(stats->multivectorProxyEncoderKind,
+				sizeof(stats->multivector.candidatePath));
+		strlcpy(stats->multivector.proxyEncoderKind,
 				proxyGraph ?
 				PgturbohybridMultiVectorProxyEncoderName(proxyEncoder) :
 				"none",
-				sizeof(stats->multivectorProxyEncoderKind));
+				sizeof(stats->multivector.proxyEncoderKind));
 		{
 			bool		projectionLoaded = false;
 			int32		projectionDim = 0;
@@ -8393,37 +8393,37 @@ PgturbohybridMultiVectorDocumentNodeScan(IndexScanDesc scan,
 			stats->learnedProjection.queryEncodeUs =
 				learnedProjectionQueryEncodeUs;
 		}
-		strlcpy(stats->multivectorGraphMode,
+		strlcpy(stats->multivector.graphMode,
 				PgturbohybridMultiVectorGraphModeName(meta->tqMultivectorGraphMode),
-				sizeof(stats->multivectorGraphMode));
-		stats->multivectorProxyGraphSearches =
+				sizeof(stats->multivector.graphMode));
+		stats->multivector.proxyGraphSearches =
 			(proxyGraph && !exhaustiveScan) ? 1 : 0;
-		stats->multivectorExactTokenScanEnabled = false;
-		stats->multivectorExactTokenScanNodesScored = 0;
-		stats->multivectorPlainFallbackUsed = false;
-		strlcpy(stats->multivectorPlainFallbackReason, "not_applicable",
-				sizeof(stats->multivectorPlainFallbackReason));
-		stats->multivectorPlainFallbackDocsScored = 0;
-		stats->multivectorPlainFallbackPairs = 0;
-		stats->multivectorDocGraphPrototypeEnabled = false;
-		stats->multivectorDocGraphNodes =
+		stats->multivector.exactTokenScanEnabled = false;
+		stats->multivector.exactTokenScanNodesScored = 0;
+		stats->multivector.plainFallbackUsed = false;
+		strlcpy(stats->multivector.plainFallbackReason, "not_applicable",
+				sizeof(stats->multivector.plainFallbackReason));
+		stats->multivector.plainFallbackDocsScored = 0;
+		stats->multivector.plainFallbackPairs = 0;
+		stats->multivector.docGraphPrototypeEnabled = false;
+		stats->multivector.docGraphNodes =
 			(uint64) meta->tqMultivectorDocCount;
-		stats->multivectorDocGraphDocsScored = docsScored;
-		stats->multivectorDocGraphEdgesVisited =
+		stats->multivector.docGraphDocsScored = docsScored;
+		stats->multivector.docGraphEdgesVisited =
 			exhaustiveScan ? docsScored : edgesVisited;
-		stats->multivectorDocGraphCandidates = (uint32) docCount;
-		stats->multivectorDocGraphSearchEf = (uint32) searchEf;
-		stats->multivectorDocGraphOversampling =
+		stats->multivector.docGraphCandidates = (uint32) docCount;
+		stats->multivector.docGraphSearchEf = (uint32) searchEf;
+		stats->multivector.docGraphOversampling =
 			(uint32) pgturbohybrid_multivector_doc_graph_oversampling;
-		stats->multivectorDocGraphRescoreK =
+		stats->multivector.docGraphRescoreK =
 			(uint32) exactRerankKEffective;
-		stats->multivectorDocGraphEntrySampleConfigured =
+		stats->multivector.docGraphEntrySampleConfigured =
 			(uint32) Max(so->graphEntrySampleConfigured, 0);
-		stats->multivectorDocGraphEntrySampleEffective =
+		stats->multivector.docGraphEntrySampleEffective =
 			(uint32) Max(so->graphEntrySampleEffective, 0);
-		stats->multivectorDocGraphEntrySampleScored =
+		stats->multivector.docGraphEntrySampleScored =
 			(uint32) Max(so->graphEntrySampleScored, 0);
-		stats->multivectorDocGraphQuantizedScores =
+		stats->multivector.docGraphQuantizedScores =
 			proxyDocumentCompactRescore ? proxyDocumentRescoreDocs :
 			quantizedScores;
 		stats->compactMaxsimScoreUs =
@@ -8442,9 +8442,9 @@ PgturbohybridMultiVectorDocumentNodeScan(IndexScanDesc scan,
 			compactTraversal ? compactMaxsimDocsPruned : 0;
 		stats->compactMaxsimTokensSkipped =
 			compactTraversal ? compactMaxsimTokensSkipped : 0;
-		strlcpy(stats->multivectorDocGraphStorageKind,
+		strlcpy(stats->multivector.docGraphStorageKind,
 				docStorageKindName,
-				sizeof(stats->multivectorDocGraphStorageKind));
+				sizeof(stats->multivector.docGraphStorageKind));
 		stats->proxy.onlyIndex = proxyOnlyIndex;
 		stats->centroid.onlyIndex = centroidOnlyIndex;
 		stats->fullMultivectorSidecarAvailable = fullSidecarAvailable;
@@ -8459,19 +8459,19 @@ PgturbohybridMultiVectorDocumentNodeScan(IndexScanDesc scan,
 				 PGTURBOHYBRID_GRAPH_MULTIVECTOR_DOCMAP_FLAG_QUANTIZED_POSTINGS) != 0 &&
 			(meta->tqMultivectorDocMapFlags &
 			 PGTURBOHYBRID_GRAPH_MULTIVECTOR_DOCMAP_FLAG_QUANTIZED_CODEBOOK) != 0;
-		strlcpy(stats->multivectorDocGraphRescoreSource,
+		strlcpy(stats->multivector.docGraphRescoreSource,
 				PgturbohybridMultiVectorRerankSourceName(exactStats.source),
-				sizeof(stats->multivectorDocGraphRescoreSource));
-		stats->multivectorDocGraphExactRerankDocs =
+				sizeof(stats->multivector.docGraphRescoreSource));
+		stats->multivector.docGraphExactRerankDocs =
 			(uint32) exactRerankCount;
-		stats->multivectorDocGraphHeapFetches = exactStats.heapFetches;
-		strlcpy(stats->multivectorDocGraphWarning, docGraphWarning,
-				sizeof(stats->multivectorDocGraphWarning));
-		stats->multivectorProxyCandidateTarget =
+		stats->multivector.docGraphHeapFetches = exactStats.heapFetches;
+		strlcpy(stats->multivector.docGraphWarning, docGraphWarning,
+				sizeof(stats->multivector.docGraphWarning));
+		stats->multivector.proxyCandidateTarget =
 			proxyGraph ? (uint32) proxyCandidateTarget : 0;
-		stats->multivectorProxyCandidatesReturned =
+		stats->multivector.proxyCandidatesReturned =
 			proxyGraph ? (uint32) docCount : 0;
-		stats->multivectorExactRerankKEffective =
+		stats->multivector.exactRerankKEffective =
 			(uint32) exactRerankKEffective;
 		stats->proxy.candidateLimitEffective =
 			proxyGraph ? (uint32) proxyCandidateLimitEffective : 0;
@@ -8493,12 +8493,12 @@ PgturbohybridMultiVectorDocumentNodeScan(IndexScanDesc scan,
 		stats->proxy.candidates = proxyGraph ? (uint32) docCount : 0;
 		stats->proxy.lazySidecarVectors =
 			proxyGraph && proxyLazySidecarVectors;
-		strlcpy(stats->multivectorDocStorageCacheRequested,
+		strlcpy(stats->multivector.docStorageCacheRequested,
 				docStorageCacheRequestedName,
-				sizeof(stats->multivectorDocStorageCacheRequested));
-		strlcpy(stats->multivectorDocStorageCacheEffective,
+				sizeof(stats->multivector.docStorageCacheRequested));
+		strlcpy(stats->multivector.docStorageCacheEffective,
 				docStorageCacheModeName,
-				sizeof(stats->multivectorDocStorageCacheEffective));
+				sizeof(stats->multivector.docStorageCacheEffective));
 		stats->proxy.top1Admission = proxyGraph && proxyTop1Admission;
 		stats->proxy.exactRerankDocs =
 			proxyGraph ? (uint32) exactRerankCount : 0;
@@ -8633,9 +8633,9 @@ PgturbohybridMultiVectorDocumentNodeScan(IndexScanDesc scan,
 			stats->centroid.candidatesAfterBound =
 				(centroidUpperBoundPruning || centroidScoreBoundPruning) ?
 				centroidCandidatesAfterBound : 0;
-		stats->multivectorCentroidCount = centroidCountEffective;
-		stats->multivectorCentroidPrerankDocs = centroidPrerankDocs;
-		stats->multivectorFullMaxsimRerankDocs =
+		stats->multivector.centroidCount = centroidCountEffective;
+		stats->multivector.centroidPrerankDocs = centroidPrerankDocs;
+		stats->multivector.fullMaxsimRerankDocs =
 			(uint32) exactRerankCount;
 		quantizedInvertedCandidates =
 			quantizedInvertedExperimental ? (uint32) docCount : 0;
@@ -8875,111 +8875,111 @@ PgturbohybridMultiVectorDocumentNodeScan(IndexScanDesc scan,
 			stats->quantizedInverted.candidatesAfterBound =
 				quantizedInvertedScoreBoundPruning ?
 				quantizedInvertedCandidatesAfterBound : 0;
-			strlcpy(stats->multivectorDocSidecarCacheMode,
+			strlcpy(stats->multivector.docSidecarCacheMode,
 					sidecarStats.cacheMode,
-				sizeof(stats->multivectorDocSidecarCacheMode));
-		stats->multivectorDocSidecarPagesRead = sidecarStats.pagesRead;
-		stats->multivectorDocSidecarCacheHits = sidecarStats.cacheHits;
-		stats->multivectorDocSidecarCacheMisses = sidecarStats.cacheMisses;
-		stats->multivectorDocSidecarBytesTouched = sidecarStats.bytesTouched;
-		stats->multivectorDocSidecarVectorsLoaded =
+				sizeof(stats->multivector.docSidecarCacheMode));
+		stats->multivector.docSidecarPagesRead = sidecarStats.pagesRead;
+		stats->multivector.docSidecarCacheHits = sidecarStats.cacheHits;
+		stats->multivector.docSidecarCacheMisses = sidecarStats.cacheMisses;
+		stats->multivector.docSidecarBytesTouched = sidecarStats.bytesTouched;
+		stats->multivector.docSidecarVectorsLoaded =
 			sidecarStats.vectorsLoaded;
-		stats->multivectorDocSidecarDocMapPagesRead =
+		stats->multivector.docSidecarDocMapPagesRead =
 			sidecarStats.docMapPagesRead;
-		stats->multivectorDocSidecarDocMapBytesTouched =
+		stats->multivector.docSidecarDocMapBytesTouched =
 			sidecarStats.docMapBytesTouched;
-		stats->multivectorDocSidecarResidentVectorsLoaded =
+		stats->multivector.docSidecarResidentVectorsLoaded =
 			sidecarStats.residentVectorsLoaded;
-		stats->multivectorDocSidecarResidentBytesLoaded =
+		stats->multivector.docSidecarResidentBytesLoaded =
 			sidecarStats.residentVectorBytesLoaded;
-		stats->multivectorDocSidecarVectorChunkRefBytesTouched =
+		stats->multivector.docSidecarVectorChunkRefBytesTouched =
 			sidecarStats.vectorChunkRefBytesTouched;
-		stats->multivectorDocSidecarPagedVectorPagesRead =
+		stats->multivector.docSidecarPagedVectorPagesRead =
 			sidecarStats.pagedVectorPagesRead;
-		stats->multivectorDocSidecarPagedVectorBytesTouched =
+		stats->multivector.docSidecarPagedVectorBytesTouched =
 			sidecarStats.pagedVectorBytesTouched;
-		stats->multivectorSidecarPageReadUs = sidecarStats.pageReadUs;
-		stats->multivectorSidecarVectorReconstructUs =
+		stats->multivector.sidecarPageReadUs = sidecarStats.pageReadUs;
+		stats->multivector.sidecarVectorReconstructUs =
 			sidecarStats.vectorReconstructUs;
-		stats->multivectorTokensOriginal = originalTokens;
-		stats->multivectorTokensPooled = pooledTokens;
-		stats->multivectorReservoirsEnabled =
+		stats->multivector.tokensOriginal = originalTokens;
+		stats->multivector.tokensPooled = pooledTokens;
+		stats->multivector.reservoirsEnabled =
 			proxyReservoirsEnabled && multivectorReservoirUnionDocs > 0;
-		stats->multivectorReservoirScoreDocs =
+		stats->multivector.reservoirScoreDocs =
 			multivectorReservoirScoreDocs;
-		stats->multivectorReservoirCoverageDocs =
+		stats->multivector.reservoirCoverageDocs =
 			multivectorReservoirCoverageDocs;
-		stats->multivectorReservoirMeanDocs =
+		stats->multivector.reservoirMeanDocs =
 			multivectorReservoirMeanDocs;
-		stats->multivectorReservoirPerTokenDocs =
+		stats->multivector.reservoirPerTokenDocs =
 			multivectorReservoirPerTokenDocs;
-		stats->multivectorReservoirBm25Docs = 0;
-		stats->multivectorReservoirUnionDocs =
+		stats->multivector.reservoirBm25Docs = 0;
+		stats->multivector.reservoirUnionDocs =
 			multivectorReservoirUnionDocs;
-		stats->multivectorReservoirDuplicates =
+		stats->multivector.reservoirDuplicates =
 			multivectorReservoirDuplicates;
-		stats->multivectorDocMapBytes = storage.multivectorDocMapBytes;
-		stats->multivectorUniqueDocs = docsScored;
-		stats->multivectorDuplicateDocHits = 0;
-		stats->multivectorMaxsimUpdates = maxsimPairs;
-		stats->multivectorDocCandidates = (uint32) docCount;
-		stats->multivectorExactRerankEnabled =
+		stats->multivector.docMapBytes = storage.multivectorDocMapBytes;
+		stats->multivector.uniqueDocs = docsScored;
+		stats->multivector.duplicateDocHits = 0;
+		stats->multivector.maxsimUpdates = maxsimPairs;
+		stats->multivector.docCandidates = (uint32) docCount;
+		stats->multivector.exactRerankEnabled =
 			pgturbohybrid_multivector_exact_rerank !=
 			PGTURBOHYBRID_MULTIVECTOR_EXACT_RERANK_OFF;
-		stats->multivectorExactRerankDocs = (uint32) exactRerankCount;
-		stats->multivectorExactRerankPairs = exactPairs;
-		stats->multivectorExactRerankSource = exactStats.source;
-		stats->multivectorExactRerankHeapFetches = exactStats.heapFetches;
-		stats->multivectorExactRerankSidecarReads = exactStats.sidecarReads;
-		stats->multivectorExactRerankSidecarBytes = exactStats.sidecarBytes;
-		stats->multivectorCandidateSourceUs = candidateSourceUs;
-		stats->multivectorDocGraphTraversalUs = docGraphTraversalUs;
-		stats->multivectorProxyCandidateUs = proxyCandidateUs;
-		stats->multivectorProxyGraphTraversalUs = proxyGraphTraversalUs;
-		stats->multivectorProxyScoringUs = proxyScoringUs;
-		stats->multivectorCentroidLitePostingUs = centroidLitePostingUs;
-		stats->multivectorQuantizedInvertedPostingUs =
+		stats->multivector.exactRerankDocs = (uint32) exactRerankCount;
+		stats->multivector.exactRerankPairs = exactPairs;
+		stats->multivector.exactRerankSource = exactStats.source;
+		stats->multivector.exactRerankHeapFetches = exactStats.heapFetches;
+		stats->multivector.exactRerankSidecarReads = exactStats.sidecarReads;
+		stats->multivector.exactRerankSidecarBytes = exactStats.sidecarBytes;
+		stats->multivector.candidateSourceUs = candidateSourceUs;
+		stats->multivector.docGraphTraversalUs = docGraphTraversalUs;
+		stats->multivector.proxyCandidateUs = proxyCandidateUs;
+		stats->multivector.proxyGraphTraversalUs = proxyGraphTraversalUs;
+		stats->multivector.proxyScoringUs = proxyScoringUs;
+		stats->multivector.centroidLitePostingUs = centroidLitePostingUs;
+		stats->multivector.quantizedInvertedPostingUs =
 			quantizedInvertedPostingUs;
-		stats->multivectorSidecarLoadUs =
+		stats->multivector.sidecarLoadUs =
 			sidecarLoadUs + exactStats.sidecarLoadUs;
-		stats->multivectorHeapVisibilityUs = exactStats.heapVisibilityUs;
-		stats->multivectorExactHeapFetchUs = exactStats.exactHeapFetchUs;
-		stats->multivectorExactRerankUs = exactStats.exactMaxsimUs;
-		stats->multivectorFinalSortUs = finalSortUs;
+		stats->multivector.heapVisibilityUs = exactStats.heapVisibilityUs;
+		stats->multivector.exactHeapFetchUs = exactStats.exactHeapFetchUs;
+		stats->multivector.exactRerankUs = exactStats.exactMaxsimUs;
+		stats->multivector.finalSortUs = finalSortUs;
 		stats->exactRerankCandidates = exactStats.candidates;
 		stats->exactRerankTokensEvaluated = exactStats.tokensEvaluated;
 		stats->exactRerankTokensSkipped = exactStats.tokensSkipped;
 		stats->exactRerankPairsSaved = exactStats.pairsSaved;
 		stats->adaptiveRerankTopKChangedVsFull =
 			exactStats.adaptiveTopKChangedVsFull;
-		strlcpy(stats->multivectorExactKernel,
+		strlcpy(stats->multivector.exactKernel,
 				(maxsimPairs > 0 || exactRerankCount > 0) ?
 				TqMultiVectorMaxSimKernelName() : "",
-				sizeof(stats->multivectorExactKernel));
-		strlcpy(stats->multivectorAccumulatorKind, docAccumulatorKind,
-				sizeof(stats->multivectorAccumulatorKind));
-		stats->multivectorMemoryBytesEstimate =
+				sizeof(stats->multivector.exactKernel));
+		strlcpy(stats->multivector.accumulatorKind, docAccumulatorKind,
+				sizeof(stats->multivector.accumulatorKind));
+		stats->multivector.memoryBytesEstimate =
 			(uint64) sizeof(TqDenseCandidate) * (uint64) candidateLimit +
 			compactBytes +
 			(docStorageCacheMode ==
 			 PGTURBOHYBRID_MULTIVECTOR_DOC_STORAGE_CACHE_RESIDENT ?
 			 (uint64) storage.multivectorDocMapBytes : 0);
-		stats->multivectorAdmissionDebugEnabled =
+		stats->multivector.admissionDebugEnabled =
 			pgturbohybrid_multivector_debug_admission !=
 			PGTURBOHYBRID_MULTIVECTOR_DEBUG_ADMISSION_OFF;
-		stats->multivectorAdmissionCandidatesBeforeRerank =
+		stats->multivector.admissionCandidatesBeforeRerank =
 			(uint32) Min(docsScored, (uint64) PG_UINT32_MAX);
-		stats->multivectorAdmissionCandidatesAfterTruncation =
+		stats->multivector.admissionCandidatesAfterTruncation =
 			(uint32) docCount;
-		stats->multivectorAdmissionExactRerankDocs =
+		stats->multivector.admissionExactRerankDocs =
 			(uint32) exactRerankCount;
-		stats->multivectorAdmissionTruncatedByDocCandidateK =
+		stats->multivector.admissionTruncatedByDocCandidateK =
 			docsScored > (uint64) docCount;
-		stats->multivectorAdmissionTruncatedByAccumulatorMemory = false;
-		stats->multivectorAdmissionTraceAvailable = false;
-		stats->multivectorAdmissionTraceCount = 0;
-		stats->multivectorTokenStatsAvailable = false;
-		stats->multivectorTokenStatsCount = 0;
+		stats->multivector.admissionTruncatedByAccumulatorMemory = false;
+		stats->multivector.admissionTraceAvailable = false;
+		stats->multivector.admissionTraceCount = 0;
+		stats->multivector.tokenStatsAvailable = false;
+		stats->multivector.tokenStatsCount = 0;
 	}
 
 	so->tqGraphResults = NULL;
@@ -9740,7 +9740,7 @@ PgturbohybridGraphCollectMultiVectorDenseCandidates(IndexScanDesc scan,
 														docCount,
 														exactRerankLimit,
 														stats != NULL ?
-														stats->multivectorAdmissionTrace :
+														stats->multivector.admissionTrace :
 														NULL,
 														(uint32)
 														pgturbohybrid_multivector_debug_trace_limit);
@@ -9753,11 +9753,11 @@ PgturbohybridGraphCollectMultiVectorDenseCandidates(IndexScanDesc scan,
 	{
 		stats->visitedGraphNodes = so->graphVisitedNodes;
 		stats->scoredCodes = so->graphScoredCodes;
-		stats->denseCandidatesRequested = targetK > 0 ? targetK : docLimit;
+		stats->dense.candidatesRequested = targetK > 0 ? targetK : docLimit;
 		stats->effectiveResultTarget = (uint32) Max(so->graphEffectiveResultTarget, 0);
 		stats->effectiveSearchEf = (uint32) Max(so->graphEffectiveSearchEf, 0);
 		stats->effectiveRescoreBand = (uint32) Max(so->graphEffectiveRescoreBand, 0);
-		stats->denseCandidatesReturned = docCount;
+		stats->dense.candidatesReturned = docCount;
 		stats->heapRescoreCount = so->graphHeapRescoreCount;
 		stats->codePagesRead = so->graphCodePagesRead;
 		stats->adjPagesRead = so->graphAdjPagesRead;
@@ -9770,50 +9770,50 @@ PgturbohybridGraphCollectMultiVectorDenseCandidates(IndexScanDesc scan,
 		stats->heapRescoreUs = so->graphHeapRescoreUs;
 		stats->sortUs = so->graphSortUs;
 		stats->exactRescoreSource = so->graphExactRescoreSource;
-		stats->multivectorEnabled = true;
-		stats->multivectorQueryVectors = (uint32) mv->count;
-		stats->multivectorDocVectorsLimit =
+		stats->multivector.enabled = true;
+		stats->multivector.queryVectors = (uint32) mv->count;
+		stats->multivector.docVectorsLimit =
 			(uint32) pgturbohybrid_multivector_max_doc_vectors;
-		stats->multivectorSubvectorSearches =
+		stats->multivector.subvectorSearches =
 			(uint64) ((uint32) mv->count - skippedQueryTokens);
-		stats->multivectorRawSubvectorHits = multivectorRawSubvectorHits;
-		stats->multivectorAdaptiveWideningTriggered =
+		stats->multivector.rawSubvectorHits = multivectorRawSubvectorHits;
+		stats->multivector.adaptiveWideningTriggered =
 			adaptiveWideningTriggered;
-		stats->multivectorAdaptiveInitialRawTarget =
+		stats->multivector.adaptiveInitialRawTarget =
 			(uint32) initialRawTarget;
-		stats->multivectorAdaptiveFinalRawTarget = adaptiveFinalRawTarget;
-		stats->multivectorDocMapSource = docMapSource;
-		strlcpy(stats->multivectorCandidateSource,
+		stats->multivector.adaptiveFinalRawTarget = adaptiveFinalRawTarget;
+		stats->multivector.docMapSource = docMapSource;
+		strlcpy(stats->multivector.candidateSource,
 				centroidLite ? "centroid_lite" :
 				exactTokenScan ? "exact_token_scan" : "graph",
-				sizeof(stats->multivectorCandidateSource));
-		strlcpy(stats->multivectorGraphMode,
+				sizeof(stats->multivector.candidateSource));
+		strlcpy(stats->multivector.graphMode,
 				PgturbohybridMultiVectorGraphModeName(meta.tqMultivectorGraphMode),
-				sizeof(stats->multivectorGraphMode));
-		stats->multivectorExactTokenScanEnabled = exactTokenScan;
-		stats->multivectorExactTokenScanNodesScored =
+				sizeof(stats->multivector.graphMode));
+		stats->multivector.exactTokenScanEnabled = exactTokenScan;
+		stats->multivector.exactTokenScanNodesScored =
 			multivectorExactTokenScanNodesScored;
-		stats->multivectorPlainFallbackUsed = false;
-		strlcpy(stats->multivectorPlainFallbackReason, "not_applicable",
-				sizeof(stats->multivectorPlainFallbackReason));
-		stats->multivectorPlainFallbackDocsScored = 0;
-		stats->multivectorPlainFallbackPairs = 0;
-		stats->multivectorDocGraphPrototypeEnabled = false;
-		stats->multivectorDocGraphDocsScored = 0;
-		stats->multivectorDocGraphEdgesVisited = 0;
-		stats->multivectorDocGraphCandidates = 0;
-		stats->multivectorDocGraphNodes = 0;
-		stats->multivectorDocGraphSearchEf = 0;
-		stats->multivectorDocGraphOversampling = 0;
-		stats->multivectorDocGraphRescoreK = 0;
-		stats->multivectorDocGraphQuantizedScores = 0;
-		stats->multivectorDocGraphExactRerankDocs = 0;
-		stats->multivectorDocGraphHeapFetches = 0;
-		strlcpy(stats->multivectorDocGraphWarning,
+		stats->multivector.plainFallbackUsed = false;
+		strlcpy(stats->multivector.plainFallbackReason, "not_applicable",
+				sizeof(stats->multivector.plainFallbackReason));
+		stats->multivector.plainFallbackDocsScored = 0;
+		stats->multivector.plainFallbackPairs = 0;
+		stats->multivector.docGraphPrototypeEnabled = false;
+		stats->multivector.docGraphDocsScored = 0;
+		stats->multivector.docGraphEdgesVisited = 0;
+		stats->multivector.docGraphCandidates = 0;
+		stats->multivector.docGraphNodes = 0;
+		stats->multivector.docGraphSearchEf = 0;
+		stats->multivector.docGraphOversampling = 0;
+		stats->multivector.docGraphRescoreK = 0;
+		stats->multivector.docGraphQuantizedScores = 0;
+		stats->multivector.docGraphExactRerankDocs = 0;
+		stats->multivector.docGraphHeapFetches = 0;
+		strlcpy(stats->multivector.docGraphWarning,
 				centroidLite ?
 				"token_node_centroid_lite_exact_token_prefilter" :
 				"not_applicable",
-				sizeof(stats->multivectorDocGraphWarning));
+				sizeof(stats->multivector.docGraphWarning));
 		if (centroidLite)
 		{
 			stats->centroid.listsVisited =
@@ -9827,67 +9827,67 @@ PgturbohybridGraphCollectMultiVectorDenseCandidates(IndexScanDesc scan,
 				(uint64) (admissionCandidatesBeforeRerank - (uint32) docCount) :
 				0;
 		}
-		stats->multivectorReservoirsEnabled = reservoirsEnabled;
-		stats->multivectorReservoirScoreDocs =
+		stats->multivector.reservoirsEnabled = reservoirsEnabled;
+		stats->multivector.reservoirScoreDocs =
 			multivectorReservoirScoreDocs;
-		stats->multivectorReservoirCoverageDocs =
+		stats->multivector.reservoirCoverageDocs =
 			multivectorReservoirCoverageDocs;
-		stats->multivectorReservoirMeanDocs = multivectorReservoirMeanDocs;
-		stats->multivectorReservoirPerTokenDocs =
+		stats->multivector.reservoirMeanDocs = multivectorReservoirMeanDocs;
+		stats->multivector.reservoirPerTokenDocs =
 			multivectorReservoirPerTokenDocs;
-		stats->multivectorReservoirBm25Docs = multivectorReservoirBm25Docs;
-		stats->multivectorReservoirUnionDocs = multivectorReservoirUnionDocs;
-		stats->multivectorReservoirDuplicates =
+		stats->multivector.reservoirBm25Docs = multivectorReservoirBm25Docs;
+		stats->multivector.reservoirUnionDocs = multivectorReservoirUnionDocs;
+		stats->multivector.reservoirDuplicates =
 			multivectorReservoirDuplicates;
-		stats->multivectorDocMapBytes = docMapBytes;
-		stats->multivectorUniqueDocs = multivectorUniqueDocs;
-		stats->multivectorDuplicateDocHits = multivectorDuplicateDocHits;
-		stats->multivectorMaxsimUpdates = multivectorMaxsimUpdates;
-		stats->multivectorDocCandidates = (uint32) docCount;
-		stats->multivectorExactRerankEnabled =
+		stats->multivector.docMapBytes = docMapBytes;
+		stats->multivector.uniqueDocs = multivectorUniqueDocs;
+		stats->multivector.duplicateDocHits = multivectorDuplicateDocHits;
+		stats->multivector.maxsimUpdates = multivectorMaxsimUpdates;
+		stats->multivector.docCandidates = (uint32) docCount;
+		stats->multivector.exactRerankEnabled =
 			pgturbohybrid_multivector_exact_rerank !=
 			PGTURBOHYBRID_MULTIVECTOR_EXACT_RERANK_OFF;
-		stats->multivectorExactRerankDocs = (uint32) exactRerankCount;
-		stats->multivectorExactRerankPairs = multivectorExactPairs;
-		stats->multivectorExactRerankSource = exactStats.source;
-		stats->multivectorExactRerankHeapFetches = exactStats.heapFetches;
-		stats->multivectorExactRerankSidecarReads = exactStats.sidecarReads;
-		stats->multivectorExactRerankSidecarBytes = exactStats.sidecarBytes;
+		stats->multivector.exactRerankDocs = (uint32) exactRerankCount;
+		stats->multivector.exactRerankPairs = multivectorExactPairs;
+		stats->multivector.exactRerankSource = exactStats.source;
+		stats->multivector.exactRerankHeapFetches = exactStats.heapFetches;
+		stats->multivector.exactRerankSidecarReads = exactStats.sidecarReads;
+		stats->multivector.exactRerankSidecarBytes = exactStats.sidecarBytes;
 		stats->exactRerankCandidates = exactStats.candidates;
 		stats->exactRerankTokensEvaluated = exactStats.tokensEvaluated;
 		stats->exactRerankTokensSkipped = exactStats.tokensSkipped;
 		stats->exactRerankPairsSaved = exactStats.pairsSaved;
 		stats->adaptiveRerankTopKChangedVsFull =
 			exactStats.adaptiveTopKChangedVsFull;
-		strlcpy(stats->multivectorExactKernel,
+		strlcpy(stats->multivector.exactKernel,
 				exactRerankCount > 0 ? TqMultiVectorMaxSimKernelName() : "",
-				sizeof(stats->multivectorExactKernel));
-		strlcpy(stats->multivectorAccumulatorKind,
+				sizeof(stats->multivector.exactKernel));
+		strlcpy(stats->multivector.accumulatorKind,
 				centroidLite ? "centroid_lite_token_scan" : "docid_hash_slab",
-				sizeof(stats->multivectorAccumulatorKind));
-		stats->multivectorMemoryBytesEstimate =
+				sizeof(stats->multivector.accumulatorKind));
+		stats->multivector.memoryBytesEstimate =
 			(uint64) multivectorMemoryEstimate;
-		stats->multivectorAdmissionDebugEnabled = admissionDebugEnabled;
-		stats->multivectorAdmissionCandidatesBeforeRerank =
+		stats->multivector.admissionDebugEnabled = admissionDebugEnabled;
+		stats->multivector.admissionCandidatesBeforeRerank =
 			admissionCandidatesBeforeRerank;
-		stats->multivectorAdmissionCandidatesAfterTruncation =
+		stats->multivector.admissionCandidatesAfterTruncation =
 			(uint32) docCount;
-		stats->multivectorAdmissionExactRerankDocs =
+		stats->multivector.admissionExactRerankDocs =
 			(uint32) exactRerankCount;
-		stats->multivectorAdmissionTruncatedByDocCandidateK =
+		stats->multivector.admissionTruncatedByDocCandidateK =
 			admissionCandidatesBeforeRerank > (uint32) docCount;
-		stats->multivectorAdmissionTruncatedByAccumulatorMemory = false;
-		stats->multivectorAdmissionTraceAvailable =
+		stats->multivector.admissionTruncatedByAccumulatorMemory = false;
+		stats->multivector.admissionTraceAvailable =
 			admissionTraceEnabled && admissionTraceCount > 0;
-		stats->multivectorAdmissionTraceCount = admissionTraceCount;
-		stats->multivectorTokenStatsAvailable = tokenStats != NULL;
-		stats->multivectorTokenStatsCount =
+		stats->multivector.admissionTraceCount = admissionTraceCount;
+		stats->multivector.tokenStatsAvailable = tokenStats != NULL;
+		stats->multivector.tokenStatsCount =
 			tokenStats != NULL ? tokenStatsCount : 0;
-		if (stats->multivectorTokenStatsCount > 0)
-			memcpy(stats->multivectorTokenStats,
+		if (stats->multivector.tokenStatsCount > 0)
+			memcpy(stats->multivector.tokenStats,
 				   tokenStats,
 				   sizeof(PgturbohybridMultiVectorTokenStatsEntry) *
-				   stats->multivectorTokenStatsCount);
+				   stats->multivector.tokenStatsCount);
 	}
 	so->tqGraphResults = NULL;
 	so->tqGraphResultCount = docCount;
