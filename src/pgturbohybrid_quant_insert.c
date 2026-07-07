@@ -460,7 +460,20 @@ PgturbohybridGraphLoadAdjTuple(Relation index, PgturbohybridGraphMetaPageData *m
 				tuple->nodeId == nodeId &&
 				tuple->level == level)
 			{
-				*count = Min(tuple->count, maxNeighbors);
+				Size		tupleSize = ItemIdGetLength(iid);
+				int			tupleCapacity;
+
+				if (tupleSize < offsetof(PgturbohybridGraphAdjTupleData, neighbors))
+					elog(ERROR, "corrupt pgturbohybrid graph adjacency tuple");
+				tupleCapacity = (tupleSize - offsetof(PgturbohybridGraphAdjTupleData, neighbors)) /
+					sizeof(uint32);
+
+				/*
+				 * Clamp to both the output buffer bound (maxNeighbors) and the
+				 * tuple's actual stored capacity so a corrupt tuple->count cannot
+				 * read past the neighbor array -- mirrors the write path above.
+				 */
+				*count = Min(tuple->count, Min(maxNeighbors, tupleCapacity));
 				memcpy(neighbors, tuple->neighbors, sizeof(uint32) * *count);
 				found = true;
 				break;

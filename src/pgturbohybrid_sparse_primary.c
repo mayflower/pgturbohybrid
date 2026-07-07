@@ -222,6 +222,18 @@ PgturbohybridSparsePrimaryBuild(Relation heap, Relation index, IndexInfo *indexI
 	(void) table_index_build_scan(heap, index, indexInfo, true, true,
 								  PgturbohybridSparsePrimaryCallback, &collector, NULL);
 
+	/*
+	 * Node ids are uint32, so a table with more rows than uint32 can address
+	 * would silently wrap the node-id space (the narrowing casts in
+	 * PgturbohybridSparsePrimaryWriteNodeMap and SetNodeMap below).  Reject it
+	 * explicitly rather than corrupting the index.
+	 */
+	if (collector.count > PG_UINT32_MAX)
+		ereport(ERROR,
+				(errcode(ERRCODE_PROGRAM_LIMIT_EXCEEDED),
+				 errmsg("pgturbohybrid sparse index supports at most %u rows, but the table has " UINT64_FORMAT " rows",
+						PG_UINT32_MAX, collector.count)));
+
 	nodeMapStart = PgturbohybridSparsePrimaryWriteNodeMap(index, collector.tids,
 														  collector.count);
 	PgturbohybridSparsePrimarySetNodeMap(index, (uint32) collector.count, nodeMapStart);

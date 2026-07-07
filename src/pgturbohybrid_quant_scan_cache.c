@@ -4232,6 +4232,37 @@ PgturbohybridGraphDropStaleCaches(Relation index, PgturbohybridGraphMetaPageData
 	}
 }
 
+/*
+ * Detach every session-shared mmap'd node map for this relation.  Only this
+ * backend's mapping is released (munmap is per-process), so it is safe while
+ * other backends hold their own mappings.  Called from InvalidateCaches so a
+ * REINDEX/insert cannot leave a stale mapping (plus its palloc'd view context)
+ * alive for the backend's lifetime -- the list was previously never swept.
+ */
+static void
+PgturbohybridGraphInvalidateSharedMaps(Relation index)
+{
+	PgturbohybridGraphSharedMap **link = &pgturbohybridGraphSharedMapList;
+	Oid			relid = RelationGetRelid(index);
+
+	while (*link != NULL)
+	{
+		PgturbohybridGraphSharedMap *map = *link;
+
+		if (map->relid == relid)
+		{
+			*link = map->next;
+#ifndef WIN32
+			munmap(map->base, map->size);
+#endif
+			MemoryContextDelete(map->ctx);
+			continue;
+		}
+
+		link = &map->next;
+	}
+}
+
 void
 PgturbohybridGraphInvalidateCaches(Relation index)
 {
@@ -4267,6 +4298,12 @@ PgturbohybridGraphInvalidateCaches(Relation index)
 
 		docLink = &cache->next;
 	}
+
+	/* Correction-sidecar cache lives in pgturbohybrid_quant_cache.c. */
+	PgturbohybridGraphInvalidateCorrectionCache(index);
+
+	/* Session-shared mmap'd node maps. */
+	PgturbohybridGraphInvalidateSharedMaps(index);
 }
 
 static PgturbohybridGraphNativeCache *
@@ -4711,16 +4748,35 @@ PgturbohybridGraphFindSharedMap(Relation index, PgturbohybridGraphMetaPageData *
 {
 	Oid			relid = RelationGetRelid(index);
 	Oid			relfilenumber = PgturbohybridGraphRelFileNumber(index);
+	PgturbohybridGraphSharedMap **link = &pgturbohybridGraphSharedMapList;
 
-	for (PgturbohybridGraphSharedMap *map = pgturbohybridGraphSharedMapList;
-		 map != NULL;
-		 map = map->next)
+	while (*link != NULL)
 	{
+		PgturbohybridGraphSharedMap *map = *link;
+
 		if (map->key == key &&
 			map->relid == relid &&
 			map->relfilenumber == relfilenumber &&
 			map->graphFlags == meta->graphFlags)
 			return map;
+
+		/*
+		 * Same relation, superseded generation (another backend REINDEXed or
+		 * rewrote the shared file): this mapping can never match again, so
+		 * detach it here rather than leaking it -- a read-only backend never
+		 * reaches InvalidateCaches().
+		 */
+		if (map->relid == relid && map->relfilenumber != relfilenumber)
+		{
+			*link = map->next;
+#ifndef WIN32
+			munmap(map->base, map->size);
+#endif
+			MemoryContextDelete(map->ctx);
+			continue;
+		}
+
+		link = &map->next;
 	}
 	return NULL;
 }

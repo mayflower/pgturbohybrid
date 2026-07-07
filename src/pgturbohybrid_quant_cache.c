@@ -33,19 +33,40 @@ PgturbohybridGraphLoadCorrection(Relation index, int dimensions, float **ecShift
 		!BlockNumberIsValid(meta.tqCorrectionStartBlkno))
 		return false;
 
-	for (cache = tqGraphCorrectionCacheList; cache != NULL; cache = cache->next)
 	{
-		if (cache->relid == RelationGetRelid(index) &&
-			cache->relfilenumber == PgturbohybridGraphRelFileNumber(index) &&
-			cache->dimensions == meta.dimensions &&
-			cache->tqFlags == meta.tqFlags &&
-			cache->tqCorrectionStartBlkno == meta.tqCorrectionStartBlkno)
+		PgturbohybridGraphCorrectionCache **link = &tqGraphCorrectionCacheList;
+
+		while (*link != NULL)
 		{
-			*ecShift = palloc(sizeof(float) * dimensions);
-			*ecScale = palloc(sizeof(float) * dimensions);
-			memcpy(*ecShift, cache->ecShift, sizeof(float) * dimensions);
-			memcpy(*ecScale, cache->ecScale, sizeof(float) * dimensions);
-			return true;
+			cache = *link;
+
+			if (cache->relid != RelationGetRelid(index))
+			{
+				link = &cache->next;
+				continue;
+			}
+
+			if (cache->relfilenumber == PgturbohybridGraphRelFileNumber(index) &&
+				cache->dimensions == meta.dimensions &&
+				cache->tqFlags == meta.tqFlags &&
+				cache->tqCorrectionStartBlkno == meta.tqCorrectionStartBlkno)
+			{
+				*ecShift = palloc(sizeof(float) * dimensions);
+				*ecScale = palloc(sizeof(float) * dimensions);
+				memcpy(*ecShift, cache->ecShift, sizeof(float) * dimensions);
+				memcpy(*ecScale, cache->ecScale, sizeof(float) * dimensions);
+				return true;
+			}
+
+			/*
+			 * Same relation but a different generation: REINDEX / VACUUM FULL /
+			 * TRUNCATE changed the relfilenumber or correction layout, so this
+			 * entry can never match again.  Drop it instead of leaking it (and
+			 * its context) for the backend's lifetime.
+			 */
+			*link = cache->next;
+			MemoryContextDelete(cache->ctx);
+			pfree(cache);
 		}
 	}
 
@@ -163,4 +184,32 @@ PgturbohybridGraphLoadCorrection(Relation index, int dimensions, float **ecShift
 	*ecShift = NULL;
 	*ecScale = NULL;
 	return false;
+}
+
+/*
+ * Drop every cached correction entry for this relation.  Called from
+ * PgturbohybridGraphInvalidateCaches() so a REINDEX/insert that rewrites the
+ * correction sidecar cannot leave a stale, never-matched entry (plus its
+ * context) alive for the backend's lifetime.
+ */
+void
+PgturbohybridGraphInvalidateCorrectionCache(Relation index)
+{
+	PgturbohybridGraphCorrectionCache **link = &tqGraphCorrectionCacheList;
+	Oid			relid = RelationGetRelid(index);
+
+	while (*link != NULL)
+	{
+		PgturbohybridGraphCorrectionCache *cache = *link;
+
+		if (cache->relid == relid)
+		{
+			*link = cache->next;
+			MemoryContextDelete(cache->ctx);
+			pfree(cache);
+			continue;
+		}
+
+		link = &cache->next;
+	}
 }

@@ -1290,8 +1290,12 @@ PgColbertLoadRuntimeProfile(PgColbertModelSpec *spec)
 	char	   *json = NULL;
 	char	   *errorMessage = NULL;
 
-	snprintf(modelPath, sizeof(modelPath), "%s/%s.gguf", spec->modelDir,
-			 spec->alias);
+	if (snprintf(modelPath, sizeof(modelPath), "%s/%s.gguf", spec->modelDir,
+				 spec->alias) >= (int) sizeof(modelPath))
+		ereport(ERROR,
+				(errcode(ERRCODE_INVALID_PARAMETER_VALUE),
+				 errmsg("ColBERT model path for alias \"%s\" exceeds %d bytes",
+						spec->alias, MAXPGPATH)));
 	json = PgColbertReadGgufProfileJson(modelPath);
 	if (json != NULL &&
 		PgColbertParseProfileJson(&spec->profile, json,
@@ -1303,8 +1307,12 @@ PgColbertLoadRuntimeProfile(PgColbertModelSpec *spec)
 				(errcode(ERRCODE_DATA_EXCEPTION),
 				 errmsg("%s", errorMessage)));
 
-	snprintf(sidecarPath, sizeof(sidecarPath), "%s.colbert_profile.json",
-			 modelPath);
+	if (snprintf(sidecarPath, sizeof(sidecarPath), "%s.colbert_profile.json",
+				 modelPath) >= (int) sizeof(sidecarPath))
+		ereport(ERROR,
+				(errcode(ERRCODE_INVALID_PARAMETER_VALUE),
+				 errmsg("ColBERT profile sidecar path exceeds %d bytes",
+						MAXPGPATH)));
 	json = PgColbertReadTextFile(sidecarPath);
 	if (json != NULL)
 	{

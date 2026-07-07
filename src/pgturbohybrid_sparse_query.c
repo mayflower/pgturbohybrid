@@ -359,14 +359,25 @@ PgturbohybridSparseCacheGetDelta(PgturbohybridSparseCacheRel *cache, Relation in
 		MemoryContext oldCtx = MemoryContextSwitchTo(cache->ctx);
 		instr_time	t0,
 					t1;
-		uint32		capacity = Max(deltaDocCount, 1u) * 4;
+		uint32		capacity = Max(deltaDocCount, 1u);
 		uint32		count = 0;
 		BlockNumber blk = deltaStart;
 		PgturbohybridSparseDeltaPosting *arr;
 
+		/*
+		 * deltaDocCount comes from on-disk metadata; clamp before the x4 so a
+		 * corrupt value cannot wrap uint32 to 0 (which would palloc(0) and then
+		 * write out of bounds).  PgturbohybridCheckedArrayBytes bounds the byte
+		 * size on every (re)allocation below.
+		 */
+		if (capacity > PG_UINT32_MAX / 4)
+			capacity = PG_UINT32_MAX / 4;
+		capacity *= 4;
+
 		INSTR_TIME_SET_CURRENT(t0);
 		arr = (PgturbohybridSparseDeltaPosting *)
-			palloc(sizeof(PgturbohybridSparseDeltaPosting) * capacity);
+			palloc(PgturbohybridCheckedArrayBytes(sizeof(PgturbohybridSparseDeltaPosting),
+												  capacity, "sparse delta postings"));
 		while (blk != InvalidBlockNumber)
 		{
 			Buffer		buf = ReadBuffer(index, blk);
@@ -388,9 +399,14 @@ PgturbohybridSparseCacheGetDelta(PgturbohybridSparseCacheRel *cache, Relation in
 				{
 					if (count == capacity)
 					{
+						if (capacity > PG_UINT32_MAX / 2)
+							ereport(ERROR,
+									(errcode(ERRCODE_PROGRAM_LIMIT_EXCEEDED),
+									 errmsg("too many sparse delta postings")));
 						capacity *= 2;
 						arr = (PgturbohybridSparseDeltaPosting *)
-							repalloc(arr, sizeof(PgturbohybridSparseDeltaPosting) * capacity);
+							repalloc(arr, PgturbohybridCheckedArrayBytes(sizeof(PgturbohybridSparseDeltaPosting),
+																		 capacity, "sparse delta postings"));
 					}
 					arr[count].nodeId = dt->nodeId;
 					arr[count].termId = dt->entries[e].termId;
@@ -620,8 +636,23 @@ PgturbohybridSparseScoreChunk(PgturbohybridSparsePostingsTuple ct, int bits,
 		/* Bit-unpack node-delta offsets, then reuse the SIMD scatter scorer. */
 		uint16		offsets[PGTURBOHYBRID_SPARSE_MAX_BLOCK_SIZE];
 		int			numBits = (int) (uint8) payload[0];
-		Size		deltaBytes = PgturbohybridSparseBitPackedBytes(n, numBits);
-		Size		weightsStart = PgturbohybridSparseAlignUp(1 + deltaBytes, wwidth);
+		Size		deltaBytes;
+		Size		weightsStart;
+
+		/*
+		 * See the count guard above: block-local offsets are 16-bit, so a valid
+		 * packed bit width is 0..16.  numBits is read from the page, so reject a
+		 * larger value before BitUnpack reads past the page.  Cannot fire for a
+		 * validly-built index.
+		 */
+		if (numBits > 16)
+			ereport(ERROR,
+					(errcode(ERRCODE_DATA_CORRUPTED),
+					 errmsg("pgturbohybrid sparse bitpacked block has invalid bit width %d (max 16)",
+							numBits),
+					 errhint("REINDEX the index to rebuild the sparse inverted index.")));
+		deltaBytes = PgturbohybridSparseBitPackedBytes(n, numBits);
+		weightsStart = PgturbohybridSparseAlignUp(1 + deltaBytes, wwidth);
 
 		Assert(n <= PGTURBOHYBRID_SPARSE_MAX_BLOCK_SIZE);
 		PgturbohybridSparseBitUnpack((const uint8 *) payload + 1, n, numBits, offsets);
@@ -804,8 +835,26 @@ PgturbohybridWandDecodeChunk(Relation index, BlockNumber blk, OffsetNumber off,
 	{
 		uint16		offsets[PGTURBOHYBRID_SPARSE_MAX_BLOCK_SIZE];
 		int			numBits = (int) (uint8) payload[0];
-		Size		deltaBytes = PgturbohybridSparseBitPackedBytes(n, numBits);
-		Size		weightsStart = PgturbohybridSparseAlignUp(1 + deltaBytes, wwidth);
+		Size		deltaBytes;
+		Size		weightsStart;
+
+		/*
+		 * numBits is read from the page and drives how far BitUnpack reads and
+		 * where the weights start; block-local offsets are 16-bit, so a valid
+		 * width is 0..16.  A larger value is corruption -- reject it before it
+		 * reads past the page.  Cannot fire for a validly-built index.
+		 */
+		if (numBits > 16)
+		{
+			UnlockReleaseBuffer(buf);
+			ereport(ERROR,
+					(errcode(ERRCODE_DATA_CORRUPTED),
+					 errmsg("pgturbohybrid sparse bitpacked block has invalid bit width %d (max 16)",
+							numBits),
+					 errhint("REINDEX the index to rebuild the sparse inverted index.")));
+		}
+		deltaBytes = PgturbohybridSparseBitPackedBytes(n, numBits);
+		weightsStart = PgturbohybridSparseAlignUp(1 + deltaBytes, wwidth);
 
 		Assert(n <= PGTURBOHYBRID_SPARSE_MAX_BLOCK_SIZE);
 		PgturbohybridSparseBitUnpack((const uint8 *) payload + 1, n, numBits, offsets);

@@ -2942,6 +2942,7 @@ PgturbohybridBm25EnsureImpactHead(Relation index,
 	PgturbohybridBm25Posting *scratch = NULL;
 	uint16		scratchCapacity = 0;
 	uint32		impactCount = 0;
+	uint32		impactCapacity;
 	BlockNumber postingsBlkno;
 	OffsetNumber postingsOffno;
 	MemoryContext oldCtx;
@@ -3053,10 +3054,11 @@ PgturbohybridBm25EnsureImpactHead(Relation index,
 	}
 
 	oldCtx = MemoryContextSwitchTo(cache->ctx);
+	impactCapacity = Max(term->baseDf, 1);
 	impact =
 		PgturbohybridBm25MemoryContextAllocArray(cache->ctx,
 												 sizeof(PgturbohybridBm25ImpactEntry),
-												 Max(term->baseDf, 1));
+												 impactCapacity);
 	scratch =
 		PgturbohybridBm25MemoryContextAllocArray(cache->ctx,
 												 sizeof(PgturbohybridBm25Posting),
@@ -3147,6 +3149,22 @@ PgturbohybridBm25EnsureImpactHead(Relation index,
 			if (nodeId >= graphMeta->tqNodeCount || docLens[nodeId] == 0 ||
 				!liveNodes[nodeId])
 				continue;
+			if (impactCount == impactCapacity)
+			{
+				/*
+				 * impact[] is presized to the term's stored df; grow it if the
+				 * scanned postings exceed that (a df that understates the real
+				 * posting count) rather than writing out of bounds.
+				 * PgturbohybridBm25RepallocArray bounds the byte size.
+				 */
+				oldCtx = MemoryContextSwitchTo(cache->ctx);
+				impactCapacity = impactCapacity < PG_UINT32_MAX / 2 ?
+					impactCapacity * 2 : PG_UINT32_MAX;
+				impact = PgturbohybridBm25RepallocArray(impact,
+														sizeof(PgturbohybridBm25ImpactEntry),
+														impactCapacity);
+				MemoryContextSwitchTo(oldCtx);
+			}
 			impact[impactCount].nodeId = nodeId;
 			impact[impactCount].tfNormQ16 = scratch[i].reserved;
 			impact[impactCount].reserved = 0;
@@ -3166,6 +3184,15 @@ PgturbohybridBm25EnsureImpactHead(Relation index,
 	if (impactCount > 1)
 		qsort(impact, impactCount, sizeof(PgturbohybridBm25ImpactEntry),
 			  PgturbohybridBm25ImpactCompare);
+
+	/*
+	 * scratch is a transient decode buffer allocated in the long-lived cache
+	 * context; only impact is retained (as entry->impactHead), so release
+	 * scratch here rather than leaking it for the cache's lifetime.
+	 */
+	if (scratch != NULL)
+		pfree(scratch);
+
 	entry->impactHead = impact;
 	entry->impactCount = Min(impactCount, headK);
 	entry->impactEligible = entry->impactCount > 0;
@@ -4964,7 +4991,9 @@ PgturbohybridBm25TopK(Relation index, TSQuery query, int32 k, bool useWand,
 														termCount);
 	if (pgturbohybrid_bm25_strategy == PGTURBOHYBRID_BM25_STRATEGY_DAAT_HASH)
 		accumulatorMode = PGTURBOHYBRID_BM25_ACCUMULATOR_HASH;
-	PgturbohybridBm25AccumulatorInit(&acc, memoryContext, (uint32) (k * termCount),
+	PgturbohybridBm25AccumulatorInit(&acc, memoryContext,
+								(uint32) Min((uint64) k * (uint64) termCount,
+											 (uint64) PG_UINT32_MAX),
 								(uint32) k, accumulatorMode,
 								graphMeta.tqNodeCount, stats);
 

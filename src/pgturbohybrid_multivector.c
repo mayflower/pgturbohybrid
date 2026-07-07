@@ -2889,6 +2889,15 @@ TqMultiVectorSymmetricMaxSimAverageWithDotUnchecked(const PgturbohybridMultiVect
 	double		sumA = 0.0;
 	double		sumB = 0.0;
 
+	/*
+	 * "Unchecked" contract: callers pass multivectors already validated at
+	 * ingest (the count bound in TqParseMultiVector), so count fits the fixed
+	 * bestA[]/bestB[] stack arrays.  Assert it so a future caller that skips
+	 * validation trips in assert-enabled builds instead of smashing the stack.
+	 */
+	Assert(a->count <= PGTURBOHYBRID_MULTIVECTOR_MAX_COUNT &&
+		   b->count <= PGTURBOHYBRID_MULTIVECTOR_MAX_COUNT);
+
 	for (int32 ai = 0; ai < a->count; ai++)
 		bestA[ai] = -INFINITY;
 	for (int32 bi = 0; bi < b->count; bi++)

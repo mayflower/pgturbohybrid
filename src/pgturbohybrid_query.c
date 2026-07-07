@@ -1472,6 +1472,22 @@ PgturbohybridQueryConstructorStoreCache(FunctionCallInfo fcinfo,
 		fcinfo->flinfo->fn_mcxt : TopMemoryContext;
 	oldCtx = MemoryContextSwitchTo(cacheCtx);
 
+	/*
+	 * Free any prior cache before overwriting fn_extra.  On a prepared
+	 * statement this function re-caches whenever the GUC generation changes,
+	 * and fn_mcxt is long-lived, so overwriting without freeing would leak the
+	 * old cache and its query for the lifetime of the FmgrInfo.
+	 */
+	if (fcinfo->flinfo->fn_extra != NULL)
+	{
+		PgturbohybridQueryConstructorCache *old = fcinfo->flinfo->fn_extra;
+
+		fcinfo->flinfo->fn_extra = NULL;
+		if (old->query != NULL)
+			pfree(old->query);
+		pfree(old);
+	}
+
 	cache = palloc0(sizeof(PgturbohybridQueryConstructorCache));
 	size = VARSIZE_ANY(query);
 	cache->query = palloc(size);

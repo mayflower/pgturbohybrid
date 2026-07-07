@@ -846,6 +846,37 @@ PgColbertHalfToFloat(uint16_t value)
 	return result;
 }
 
+/*
+ * Element counts for projection tensors come from admin-provided GGUF/sidecar
+ * model files.  Bound them before they feed malloc(sizeof(float) * elements)
+ * so a corrupt or crafted file cannot overflow size_t (an undersized buffer
+ * followed by an out-of-bounds write) or request an absurd allocation.  256M
+ * floats (1 GiB) is far beyond any real embedding-projection matrix and fits
+ * comfortably in int32, which also keeps the outputDim narrowing casts safe.
+ */
+#define PG_COLBERT_MAX_PROJECTION_ELEMENTS (256ULL * 1024 * 1024)
+
+static bool
+PgColbertBoundedElementCount(const uint64_t *dims, uint32_t nDims,
+							 uint64_t *elementsOut, MemoryContext ctx,
+							 char **errorMessage)
+{
+	uint64_t	elements = 1;
+
+	for (uint32_t i = 0; i < nDims; i++)
+	{
+		uint64_t	d = dims[i];
+
+		if (d == 0 || d > PG_COLBERT_MAX_PROJECTION_ELEMENTS ||
+			elements > PG_COLBERT_MAX_PROJECTION_ELEMENTS / d)
+			return PgColbertSetError(ctx, errorMessage,
+									 "ColBERT projection tensor dimensions are out of range");
+		elements *= d;
+	}
+	*elementsOut = elements;
+	return true;
+}
+
 static bool
 PgColbertReadFloatTensor(FILE *file, uint64_t dataStart,
 						 const PgColbertTensorInfo *tensor,
@@ -862,8 +893,9 @@ PgColbertReadFloatTensor(FILE *file, uint64_t dataStart,
 		return PgColbertSetError(ctx, errorMessage,
 								 "GGUF ColBERT projection tensor uses unsupported type %u",
 								 tensor->type);
-	for (uint32_t i = 0; i < tensor->nDims; i++)
-		elements *= tensor->dims[i];
+	if (!PgColbertBoundedElementCount(tensor->dims, tensor->nDims, &elements,
+									  ctx, errorMessage))
+		return false;
 
 	out = (float *) malloc(sizeof(float) * (size_t) elements);
 	if (out == NULL)
@@ -925,12 +957,20 @@ PgColbertConfigureDenseProjection(PgColbertProjectionModule *module,
 
 	if (dim0 == (uint64_t) currentDim)
 	{
+		if (dim1 == 0 || dim1 > PG_COLBERT_MAX_PROJECTION_ELEMENTS)
+			return PgColbertSetError(ctx, errorMessage,
+									 "GGUF ColBERT dense projection output dimension %llu is out of range",
+									 (unsigned long long) dim1);
 		module->inputDim = currentDim;
 		module->outputDim = (int32) dim1;
 		module->transposed = false;
 	}
 	else if (dim1 == (uint64_t) currentDim)
 	{
+		if (dim0 == 0 || dim0 > PG_COLBERT_MAX_PROJECTION_ELEMENTS)
+			return PgColbertSetError(ctx, errorMessage,
+									 "GGUF ColBERT dense projection output dimension %llu is out of range",
+									 (unsigned long long) dim0);
 		module->inputDim = currentDim;
 		module->outputDim = (int32) dim0;
 		module->transposed = true;
@@ -1049,10 +1089,15 @@ PgColbertLoadProjectionSidecar(const PgColbertModelSpec *spec,
 											   errorMessage);
 	if (ok)
 	{
-		uint64_t	elements = dim0 * dim1;
+		uint64_t	dims[2];
+		uint64_t	elements = 0;
 
-		module.weight = (float *) malloc(sizeof(float) * (size_t) elements);
-		if (module.weight == NULL)
+		dims[0] = dim0;
+		dims[1] = dim1;
+		if (!PgColbertBoundedElementCount(dims, 2, &elements, ctx, errorMessage))
+			ok = false;
+		else if ((module.weight =
+				  (float *) malloc(sizeof(float) * (size_t) elements)) == NULL)
 			ok = PgColbertSetError(ctx, errorMessage,
 								   "out of memory while loading ColBERT projection sidecar");
 		else if (projType == 0)
@@ -1082,6 +1127,16 @@ PgColbertLoadProjectionSidecar(const PgColbertModelSpec *spec,
 		entry->hasProjection = true;
 		entry->nEmbdOut = module.outputDim;
 		entry->maxProjectionDim = Max(entry->maxProjectionDim, module.outputDim);
+
+		/*
+		 * Ownership of module.weight/bias has passed to entry->projectionModules
+		 * and will be released once by PgColbertFreeCachedModel().  Clear the
+		 * local aliases so the "if (!ok) free(module.weight)" cleanup below (or
+		 * any later error break in this block) cannot double-free them.
+		 */
+		module.weight = NULL;
+		module.bias = NULL;
+
 		if (spec->profile.loaded && spec->profile.projectionModuleCount > 1)
 		{
 			for (int32 i = 1; i < spec->profile.projectionModuleCount; i++)

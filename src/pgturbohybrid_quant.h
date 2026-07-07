@@ -1569,6 +1569,7 @@ OffsetNumber PgturbohybridGraphAppendTuple(Relation index, ForkNumber forkNum,
 
 bool		PgturbohybridGraphLoadCorrection(Relation index, int dimensions,
 							  float **ecShift, float **ecScale);
+void		PgturbohybridGraphInvalidateCorrectionCache(Relation index);
 void		PgturbohybridGraphCopyPayloadValues(PgturbohybridQuantBuildState *state, int32 *payloads,
 									 uint16 *payloadMask, Datum *values,
 									 bool *isnull);
