@@ -39,3 +39,10 @@ TQ_CC_NAME(const PgturbohybridGraphTqQuery *tq, const uint8 *code)
 	return PgturbohybridGraphHorizontalSumI32Avx2(accLow) +
 		(int64) PGTURBOHYBRID_QUERY_SPLIT_HIGH_COEF * PgturbohybridGraphHorizontalSumI32Avx2(accHigh);
 }
+
+/* Undefine our parameters so the includer needs only the #defines. */
+#undef TQ_CC_EXPAND
+#undef TQ_CC_NAME
+#undef TQ_CC_STRIDE
+#undef TQ_CC_TAILADD
+#undef TQ_CC_TAILDIV

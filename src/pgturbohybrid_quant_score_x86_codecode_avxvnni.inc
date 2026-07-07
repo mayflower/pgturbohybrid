@@ -82,3 +82,10 @@ TQ_CC_NAME(const uint8 *a, const uint8 *b, int dim,
 
 	return dot - 128 * cSum;
 }
+
+/* Undefine our parameters so the includer needs only the #defines. */
+#undef TQ_CC_EXPAND
+#undef TQ_CC_NAME
+#undef TQ_CC_STRIDE
+#undef TQ_CC_TAILADD
+#undef TQ_CC_TAILDIV

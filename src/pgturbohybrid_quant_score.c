@@ -24,9 +24,6 @@
 #endif
 
 
-/* Codebook scale/coef anchors (shared single source of truth). */
-#include "pgturbohybrid_quant_codebook.h"
-
 #if !defined(PGTURBOHYBRID_DISABLE_SIMD) && \
 	(defined(__AVX2__) || (PGTURBOHYBRID_GRAPH_X86 && (defined(__GNUC__) || defined(__clang__))))
 #define PGTURBOHYBRID_GRAPH_COMPILE_AVX2 1
@@ -160,6 +157,13 @@
 #define PGTURBOHYBRID_GRAPH_COMPILE_QUERY_SPLIT 0
 #endif
 
+
+/*
+ * Codebook tables + scale/coef anchors (shared single source of truth).
+ * Included after the PGTURBOHYBRID_GRAPH_COMPILE_* gates above so the header's
+ * arch-gated codebook tables resolve per its documented include contract.
+ */
+#include "pgturbohybrid_quant_codebook.h"
 
 
 static inline float

@@ -235,11 +235,6 @@ PgturbohybridGraphDotI8x16Avx2(__m128i a, __m128i b)
 #define TQ_CC_TAILADD 1
 #define TQ_CC_TAILDIV 2
 #include "pgturbohybrid_quant_score_x86_querysplit_avx2.inc"
-#undef TQ_CC_NAME
-#undef TQ_CC_EXPAND
-#undef TQ_CC_STRIDE
-#undef TQ_CC_TAILADD
-#undef TQ_CC_TAILDIV
 
 #define TQ_CC_NAME PgturbohybridGraphQuerySplit2RawAvx2
 #define TQ_CC_EXPAND PgturbohybridGraphExpandPacked2Avx2
@@ -247,11 +242,6 @@ PgturbohybridGraphDotI8x16Avx2(__m128i a, __m128i b)
 #define TQ_CC_TAILADD 3
 #define TQ_CC_TAILDIV 4
 #include "pgturbohybrid_quant_score_x86_querysplit_avx2.inc"
-#undef TQ_CC_NAME
-#undef TQ_CC_EXPAND
-#undef TQ_CC_STRIDE
-#undef TQ_CC_TAILADD
-#undef TQ_CC_TAILDIV
 
 /*
  * AVX2 SIMD weighted symmetric (code-code) kernels for TQ+.
@@ -303,11 +293,6 @@ PgturbohybridGraphWeightedDotI8x16Avx2(__m128i ca, __m128i cb,
 #define TQ_CC_TAILADD 1
 #define TQ_CC_TAILDIV 2
 #include "pgturbohybrid_quant_score_x86_ccweighted_avx2.inc"
-#undef TQ_CC_NAME
-#undef TQ_CC_EXPAND
-#undef TQ_CC_STRIDE
-#undef TQ_CC_TAILADD
-#undef TQ_CC_TAILDIV
 
 #define TQ_CC_NAME PgturbohybridGraphCodeCode2WeightedRawAvx2
 #define TQ_CC_EXPAND PgturbohybridGraphExpandPacked2Avx2
@@ -315,11 +300,6 @@ PgturbohybridGraphWeightedDotI8x16Avx2(__m128i ca, __m128i cb,
 #define TQ_CC_TAILADD 3
 #define TQ_CC_TAILDIV 4
 #include "pgturbohybrid_quant_score_x86_ccweighted_avx2.inc"
-#undef TQ_CC_NAME
-#undef TQ_CC_EXPAND
-#undef TQ_CC_STRIDE
-#undef TQ_CC_TAILADD
-#undef TQ_CC_TAILDIV
 
 #if PGTURBOHYBRID_GRAPH_COMPILE_AVX512_WEIGHTED
 bool
@@ -405,11 +385,6 @@ PgturbohybridGraphWeightedDotI8x32Avx512(__m256i ca, __m256i cb,
 #define TQ_CC_TAILADD 1
 #define TQ_CC_TAILDIV 2
 #include "pgturbohybrid_quant_score_x86_ccweighted_avx512.inc"
-#undef TQ_CC_NAME
-#undef TQ_CC_EXPAND
-#undef TQ_CC_STRIDE
-#undef TQ_CC_TAILADD
-#undef TQ_CC_TAILDIV
 
 #define TQ_CC_NAME PgturbohybridGraphCodeCode2WeightedRawAvx512
 #define TQ_CC_EXPAND PgturbohybridGraphExpandPacked2x32Avx512
@@ -417,11 +392,6 @@ PgturbohybridGraphWeightedDotI8x32Avx512(__m256i ca, __m256i cb,
 #define TQ_CC_TAILADD 3
 #define TQ_CC_TAILDIV 4
 #include "pgturbohybrid_quant_score_x86_ccweighted_avx512.inc"
-#undef TQ_CC_NAME
-#undef TQ_CC_EXPAND
-#undef TQ_CC_STRIDE
-#undef TQ_CC_TAILADD
-#undef TQ_CC_TAILDIV
 #endif
 
 #define TQ_CC_NAME PgturbohybridGraphCodeCodeRawAvx2
@@ -430,11 +400,6 @@ PgturbohybridGraphWeightedDotI8x32Avx512(__m256i ca, __m256i cb,
 #define TQ_CC_TAILADD 1
 #define TQ_CC_TAILDIV 2
 #include "pgturbohybrid_quant_score_x86_codecode_avx2.inc"
-#undef TQ_CC_NAME
-#undef TQ_CC_EXPAND
-#undef TQ_CC_STRIDE
-#undef TQ_CC_TAILADD
-#undef TQ_CC_TAILDIV
 
 #define TQ_CC_NAME PgturbohybridGraphCodeCode2RawAvx2
 #define TQ_CC_EXPAND PgturbohybridGraphExpandPacked2Avx2
@@ -442,11 +407,6 @@ PgturbohybridGraphWeightedDotI8x32Avx512(__m256i ca, __m256i cb,
 #define TQ_CC_TAILADD 3
 #define TQ_CC_TAILDIV 4
 #include "pgturbohybrid_quant_score_x86_codecode_avx2.inc"
-#undef TQ_CC_NAME
-#undef TQ_CC_EXPAND
-#undef TQ_CC_STRIDE
-#undef TQ_CC_TAILADD
-#undef TQ_CC_TAILDIV
 
 #if PGTURBOHYBRID_GRAPH_COMPILE_AVX512VNNI
 bool
@@ -539,12 +499,6 @@ PgturbohybridGraphHorizontalSumI32x4Avx512Vnni(__m128i v)
 #define TQ_CC_TAILADD 1
 #define TQ_CC_TAILDIV 2
 #include "pgturbohybrid_quant_score_x86_querysplit_avx512vnni.inc"
-#undef TQ_CC_NAME
-#undef TQ_CC_EXPAND512
-#undef TQ_CC_EXPAND
-#undef TQ_CC_STRIDE
-#undef TQ_CC_TAILADD
-#undef TQ_CC_TAILDIV
 
 #define TQ_CC_NAME PgturbohybridGraphQuerySplit2RawAvx512Vnni
 #define TQ_CC_EXPAND512 PgturbohybridGraphExpandPacked2Avx512
@@ -553,12 +507,6 @@ PgturbohybridGraphHorizontalSumI32x4Avx512Vnni(__m128i v)
 #define TQ_CC_TAILADD 3
 #define TQ_CC_TAILDIV 4
 #include "pgturbohybrid_quant_score_x86_querysplit_avx512vnni.inc"
-#undef TQ_CC_NAME
-#undef TQ_CC_EXPAND512
-#undef TQ_CC_EXPAND
-#undef TQ_CC_STRIDE
-#undef TQ_CC_TAILADD
-#undef TQ_CC_TAILDIV
 
 #define TQ_CC_NAME PgturbohybridGraphCodeCodeRawAvx512Vnni
 #define TQ_CC_EXPAND512 PgturbohybridGraphExpandPacked4Avx512
@@ -567,12 +515,6 @@ PgturbohybridGraphHorizontalSumI32x4Avx512Vnni(__m128i v)
 #define TQ_CC_TAILADD 1
 #define TQ_CC_TAILDIV 2
 #include "pgturbohybrid_quant_score_x86_codecode_avx512vnni.inc"
-#undef TQ_CC_NAME
-#undef TQ_CC_EXPAND512
-#undef TQ_CC_EXPAND
-#undef TQ_CC_STRIDE
-#undef TQ_CC_TAILADD
-#undef TQ_CC_TAILDIV
 
 #define TQ_CC_NAME PgturbohybridGraphCodeCode2RawAvx512Vnni
 #define TQ_CC_EXPAND512 PgturbohybridGraphExpandPacked2Avx512
@@ -581,12 +523,6 @@ PgturbohybridGraphHorizontalSumI32x4Avx512Vnni(__m128i v)
 #define TQ_CC_TAILADD 3
 #define TQ_CC_TAILDIV 4
 #include "pgturbohybrid_quant_score_x86_codecode_avx512vnni.inc"
-#undef TQ_CC_NAME
-#undef TQ_CC_EXPAND512
-#undef TQ_CC_EXPAND
-#undef TQ_CC_STRIDE
-#undef TQ_CC_TAILADD
-#undef TQ_CC_TAILDIV
 #endif
 
 #if PGTURBOHYBRID_GRAPH_COMPILE_AVXVNNI
@@ -654,11 +590,6 @@ PgturbohybridGraphHorizontalSumI32x4AvxVnni(__m128i v)
 #define TQ_CC_TAILADD 1
 #define TQ_CC_TAILDIV 2
 #include "pgturbohybrid_quant_score_x86_querysplit_avxvnni.inc"
-#undef TQ_CC_NAME
-#undef TQ_CC_EXPAND
-#undef TQ_CC_STRIDE
-#undef TQ_CC_TAILADD
-#undef TQ_CC_TAILDIV
 
 #define TQ_CC_NAME PgturbohybridGraphQuerySplit2RawAvxVnni
 #define TQ_CC_EXPAND PgturbohybridGraphExpandPacked2Avx2
@@ -666,11 +597,6 @@ PgturbohybridGraphHorizontalSumI32x4AvxVnni(__m128i v)
 #define TQ_CC_TAILADD 3
 #define TQ_CC_TAILDIV 4
 #include "pgturbohybrid_quant_score_x86_querysplit_avxvnni.inc"
-#undef TQ_CC_NAME
-#undef TQ_CC_EXPAND
-#undef TQ_CC_STRIDE
-#undef TQ_CC_TAILADD
-#undef TQ_CC_TAILDIV
 
 #define TQ_CC_NAME PgturbohybridGraphCodeCodeRawAvxVnni
 #define TQ_CC_EXPAND PgturbohybridGraphExpandPacked4Avx2
@@ -678,11 +604,6 @@ PgturbohybridGraphHorizontalSumI32x4AvxVnni(__m128i v)
 #define TQ_CC_TAILADD 1
 #define TQ_CC_TAILDIV 2
 #include "pgturbohybrid_quant_score_x86_codecode_avxvnni.inc"
-#undef TQ_CC_NAME
-#undef TQ_CC_EXPAND
-#undef TQ_CC_STRIDE
-#undef TQ_CC_TAILADD
-#undef TQ_CC_TAILDIV
 
 #define TQ_CC_NAME PgturbohybridGraphCodeCode2RawAvxVnni
 #define TQ_CC_EXPAND PgturbohybridGraphExpandPacked2Avx2
@@ -690,11 +611,6 @@ PgturbohybridGraphHorizontalSumI32x4AvxVnni(__m128i v)
 #define TQ_CC_TAILADD 3
 #define TQ_CC_TAILDIV 4
 #include "pgturbohybrid_quant_score_x86_codecode_avxvnni.inc"
-#undef TQ_CC_NAME
-#undef TQ_CC_EXPAND
-#undef TQ_CC_STRIDE
-#undef TQ_CC_TAILADD
-#undef TQ_CC_TAILDIV
 #endif
 
 bool PGTURBOHYBRID_GRAPH_AVX2_TARGET
