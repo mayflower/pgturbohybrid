@@ -52,7 +52,7 @@ HEADERS =
 # u8split, nibble_guard, x4_safety) stay Unix-only because the MSVC scalar build
 # can differ in the last ULP of scored output. scripts/check-build-file-parity.py
 # enforces that this difference stays intentional. See docs/compatibility.md.
-REGRESS = extension pgturbohybrid pgturbohybrid_comments pgturbohybrid_gucs pgturbohybrid_diagnostics pgturbohybrid_query pgturbohybrid_wrappers pgturbohybrid_fuzz security
+REGRESS = extension pgturbohybrid pgturbohybrid_comments pgturbohybrid_gucs pgturbohybrid_guc_defaults pgturbohybrid_diagnostics pgturbohybrid_query pgturbohybrid_wrappers pgturbohybrid_fuzz security
 REGRESS_OPTS = --inputdir=test
 
 SIMD_BUILD = portable
