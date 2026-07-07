@@ -464,7 +464,13 @@ PgturbohybridGraphLoadAdjTuple(Relation index, PgturbohybridGraphMetaPageData *m
 				int			tupleCapacity;
 
 				if (tupleSize < offsetof(PgturbohybridGraphAdjTupleData, neighbors))
-					elog(ERROR, "corrupt pgturbohybrid graph adjacency tuple");
+				{
+					UnlockReleaseBuffer(buf);
+					ereport(ERROR,
+							(errcode(ERRCODE_INDEX_CORRUPTED),
+							 errmsg("corrupt pgturbohybrid graph adjacency tuple"),
+							 errhint("REINDEX the index to rebuild it.")));
+				}
 				tupleCapacity = (tupleSize - offsetof(PgturbohybridGraphAdjTupleData, neighbors)) /
 					sizeof(uint32);
 
@@ -505,7 +511,10 @@ PgturbohybridGraphUpdateAdjTuple(Relation index, PgturbohybridGraphMetaPageData 
 		elog(ERROR, "invalid pgturbohybrid graph adjacency update");
 
 	if (!BlockNumberIsValid(blkno))
-		elog(ERROR, "missing pgturbohybrid graph adjacency page");
+		ereport(ERROR,
+				(errcode(ERRCODE_INDEX_CORRUPTED),
+				 errmsg("missing pgturbohybrid graph adjacency page"),
+				 errhint("REINDEX the index to rebuild it.")));
 
 	if (storage != NULL && storage->cached)
 	{
@@ -641,11 +650,27 @@ PgturbohybridGraphUpdateAdjTuple(Relation index, PgturbohybridGraphMetaPageData 
 
 			tupleSize = ItemIdGetLength(iid);
 			if (tupleSize < offsetof(PgturbohybridGraphAdjTupleData, neighbors))
-				elog(ERROR, "corrupt pgturbohybrid graph adjacency tuple");
+			{
+				if (xlogState != NULL)
+					GenericXLogAbort(xlogState);
+				UnlockReleaseBuffer(buf);
+				ereport(ERROR,
+						(errcode(ERRCODE_INDEX_CORRUPTED),
+						 errmsg("corrupt pgturbohybrid graph adjacency tuple"),
+						 errhint("REINDEX the index to rebuild it.")));
+			}
 			tupleCapacity = (tupleSize - offsetof(PgturbohybridGraphAdjTupleData, neighbors)) /
 				sizeof(uint32);
 			if (count > tupleCapacity)
-				elog(ERROR, "pgturbohybrid graph adjacency tuple lacks update capacity");
+			{
+				if (xlogState != NULL)
+					GenericXLogAbort(xlogState);
+				UnlockReleaseBuffer(buf);
+				ereport(ERROR,
+						(errcode(ERRCODE_INDEX_CORRUPTED),
+						 errmsg("pgturbohybrid graph adjacency tuple lacks update capacity"),
+						 errhint("REINDEX the index to rebuild it.")));
+			}
 
 			tuple->count = count;
 			memcpy(tuple->neighbors, neighbors, sizeof(uint32) * count);
@@ -685,7 +710,10 @@ PgturbohybridGraphUpdateAdjTuple(Relation index, PgturbohybridGraphMetaPageData 
 	}
 
 	if (!found)
-		elog(ERROR, "missing pgturbohybrid graph adjacency tuple");
+		ereport(ERROR,
+				(errcode(ERRCODE_INDEX_CORRUPTED),
+				 errmsg("missing pgturbohybrid graph adjacency tuple"),
+				 errhint("REINDEX the index to rebuild it.")));
 
 update_cache:
 	if (storage != NULL && storage->cached)
@@ -1803,7 +1831,10 @@ PgturbohybridGraphInsertValueInPlaceInternal(Relation index, IndexInfo *indexInf
 	bool		documentInsertNodes = false;
 
 	if (!PgturbohybridGraphReadMeta(index, &meta))
-		elog(ERROR, "pgturbohybrid native graph metapage is missing or invalid");
+		ereport(ERROR,
+				(errcode(ERRCODE_INDEX_CORRUPTED),
+				 errmsg("pgturbohybrid native graph metapage is missing or invalid"),
+				 errhint("REINDEX the index to rebuild it.")));
 	memset(&insertStats, 0, sizeof(insertStats));
 	documentInsertNodes =
 		documentInsert != NULL &&

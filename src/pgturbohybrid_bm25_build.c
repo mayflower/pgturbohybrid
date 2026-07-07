@@ -1471,6 +1471,8 @@ PgturbohybridReduceUniqueTerms(PgturbohybridBm25Collector *collector)
 		PgturbohybridBm25TermTuple *first = &collector->terms[i];
 		uint32		df = 0;
 		uint64		cf = 0;
+
+		CHECK_FOR_INTERRUPTS();
 		uint32		prevNode = PG_UINT32_MAX;
 
 		uniqueTerms++;
@@ -1727,6 +1729,8 @@ PgturbohybridWriteDocStats(PgturbohybridBm25Collector *collector)
 		uint16		count = Min((uint32) maxDocsPerTuple,
 								collector->tidNodeCount - nodeId);
 		Size		size = PgturbohybridBm25DocStatsTupleSize(count);
+
+		CHECK_FOR_INTERRUPTS();
 		PgturbohybridBm25DocStatsTuple tuple = palloc0(size);
 
 		tuple->type = PGTURBOHYBRID_BM25_DOCSTATS_TUPLE_TYPE;
@@ -2782,6 +2786,8 @@ PgturbohybridWriteLexiconAndPostings(PgturbohybridBm25Collector *collector)
 		PgturbohybridBm25TermTuple *first = &collector->terms[i];
 		uint32		startIndex = i;
 		uint32		df = 0;
+
+		CHECK_FOR_INTERRUPTS();
 		uint32		cf = 0;
 		uint32		prevNode = PG_UINT32_MAX;
 		BlockNumber postingsBlkno;

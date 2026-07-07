@@ -2300,7 +2300,13 @@ PgturbohybridGraphGetMetaPageInfo(Relation index, int *m, PgturbohybridGraphElem
 	metap = PgturbohybridGraphPageGetMeta(page);
 
 	if (unlikely(metap->magicNumber != PGTURBOHYBRID_GRAPH_MAGIC_NUMBER))
-		elog(ERROR, "pgturbohybrid index is not valid");
+	{
+		UnlockReleaseBuffer(buf);
+		ereport(ERROR,
+				(errcode(ERRCODE_INDEX_CORRUPTED),
+				 errmsg("pgturbohybrid index is not valid"),
+				 errhint("REINDEX the index to rebuild it.")));
+	}
 
 	if (m != NULL)
 		*m = metap->m;
@@ -2333,7 +2339,13 @@ PgturbohybridGraphGetMetaPageStorageKind(Relation index)
 	metap = PgturbohybridGraphPageGetMeta(page);
 
 	if (unlikely(metap->magicNumber != PGTURBOHYBRID_GRAPH_MAGIC_NUMBER))
-		elog(ERROR, "pgturbohybrid index is not valid");
+	{
+		UnlockReleaseBuffer(buf);
+		ereport(ERROR,
+				(errcode(ERRCODE_INDEX_CORRUPTED),
+				 errmsg("pgturbohybrid index is not valid"),
+				 errhint("REINDEX the index to rebuild it.")));
+	}
 
 	storageKind = metap->storageKind;
 
@@ -3502,6 +3514,8 @@ PgturbohybridGraphSearchLayer(char *base, PgturbohybridGraphQuery * q, List *ep,
 		PgturbohybridGraphSearchCandidate *c = PgturbohybridGraphGetSearchCandidate(c_node, pairingheap_remove_first(C));
 		PgturbohybridGraphSearchCandidate *f = PgturbohybridGraphGetSearchCandidate(w_node, pairingheap_first(W));
 		PgturbohybridGraphElement cElement;
+
+		CHECK_FOR_INTERRUPTS();
 
 		if (tupleLimitReached)
 			break;

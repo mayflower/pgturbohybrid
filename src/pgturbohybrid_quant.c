@@ -7596,6 +7596,16 @@ PgturbohybridNativeRunParallelEdgePhase(PgturbohybridQuantBuildState *state,
 		return false;
 	}
 
+	/*
+	 * Confirm every launched worker actually attached BEFORE the leader enters
+	 * the static-party edge barrier below.  If a counted worker fails to attach
+	 * (e.g. postmaster resource pressure) it never arrives at the barrier;
+	 * detecting that here lets the build error out cleanly instead of the leader
+	 * blocking on BarrierArriveAndWait forever -- the attach check cannot run
+	 * once the leader is parked in the barrier.  Mirrors the fit/encode phase.
+	 */
+	WaitForParallelWorkersToAttach(pcxt);
+
 	shared->nparticipants = pcxt->nworkers_launched + 1;
 	BarrierInit(&shared->edgeBarrier, shared->nparticipants);
 	SpinLockAcquire(&shared->mutex);
@@ -7607,7 +7617,6 @@ PgturbohybridNativeRunParallelEdgePhase(PgturbohybridQuantBuildState *state,
 
 	INSTR_TIME_SET_CURRENT(start);
 	PgturbohybridNativeParallelEdgeWorker(state->index, shared, true);
-	WaitForParallelWorkersToAttach(pcxt);
 	PgturbohybridNativeParallelWait(shared);
 	if (elapsedUs != NULL)
 		*elapsedUs = PgturbohybridGraphElapsedUs(start);

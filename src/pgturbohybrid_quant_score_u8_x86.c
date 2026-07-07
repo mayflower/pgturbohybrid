@@ -617,6 +617,28 @@ PgturbohybridGraphPackedDistanceU8Split(const PgturbohybridGraphTqQuery *tq, con
 {
 	int64		rawDot;
 
+#if defined(USE_ASSERT_CHECKING) && PGTURBOHYBRID_GRAPH_COMPILE_AVX2
+	/*
+	 * The u8 codebook is the shared signed codebook shifted by +OFFSET.  That
+	 * table is hand-written (a static initializer can't reference another array
+	 * element-wise), so verify the invariant once per backend to catch a
+	 * retrained int8 codebook silently desyncing it.  Compiled out in release
+	 * builds; effectively free in assert builds.
+	 */
+	{
+		static bool u8CodebookVerified = false;
+
+		if (!u8CodebookVerified)
+		{
+			for (int k = 0; k < PGTURBOHYBRID_LUT_WIDTH; k++)
+				Assert(PgturbohybridGraphCodebookU8[k] ==
+					   (uint8) (PgturbohybridGraphCodebookI8[k] +
+								PGTURBOHYBRID_U8_CODEBOOK_OFFSET));
+			u8CodebookVerified = true;
+		}
+	}
+#endif
+
 	/*
 	 * Single-code kernel was resolved once in TqPrepareQueryU8Split
 	 * (PgturbohybridGraphTqResolveU8Kernels); no per-call feature probe.  The

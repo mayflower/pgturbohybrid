@@ -171,9 +171,12 @@ PgturbohybridSparseLoadLexicon(Relation index, BlockNumber start, uint32 termCou
 
 	while (blkno != InvalidBlockNumber)
 	{
-		Buffer		buf = ReadBuffer(index, blkno);
+		Buffer		buf;
 		Page		page;
 		OffsetNumber maxoff;
+
+		CHECK_FOR_INTERRUPTS();
+		buf = ReadBuffer(index, blkno);
 
 		LockBuffer(buf, BUFFER_LOCK_SHARE);
 		page = BufferGetPage(buf);
@@ -380,9 +383,12 @@ PgturbohybridSparseCacheGetDelta(PgturbohybridSparseCacheRel *cache, Relation in
 												  capacity, "sparse delta postings"));
 		while (blk != InvalidBlockNumber)
 		{
-			Buffer		buf = ReadBuffer(index, blk);
+			Buffer		buf;
 			Page		page;
 			OffsetNumber maxoff;
+
+			CHECK_FOR_INTERRUPTS();
+			buf = ReadBuffer(index, blk);
 
 			LockBuffer(buf, BUFFER_LOCK_SHARE);
 			page = BufferGetPage(buf);
@@ -690,10 +696,12 @@ PgturbohybridSparseAccumulateTerm(Relation index, BlockNumber blkno,
 
 	while (remaining > 0 && blkno != InvalidBlockNumber)
 	{
-		Buffer		buf = ReadBuffer(index, blkno);
+		Buffer		buf;
 		Page		page;
 		OffsetNumber maxoff;
 
+		CHECK_FOR_INTERRUPTS();
+		buf = ReadBuffer(index, blkno);
 		LockBuffer(buf, BUFFER_LOCK_SHARE);
 		page = BufferGetPage(buf);
 		maxoff = PageGetMaxOffsetNumber(page);

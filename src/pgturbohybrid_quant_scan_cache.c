@@ -5000,12 +5000,21 @@ PgturbohybridGraphWriteSharedCacheFile(Relation index,
 		}
 	}
 
-	if (msync(base, (Size) hdr.fileSize, MS_SYNC) != 0 ||
-		munmap(base, (Size) hdr.fileSize) != 0)
 	{
-		close(fd);
-		unlink(tmpPath);
-		return false;
+		/*
+		 * Always munmap even if msync failed -- a short-circuiting || would
+		 * skip the munmap on msync error and leak the writable mapping for the
+		 * backend's lifetime (raw mmap is outside PG's resource owner).
+		 */
+		int			syncRc = msync(base, (Size) hdr.fileSize, MS_SYNC);
+		int			unmapRc = munmap(base, (Size) hdr.fileSize);
+
+		if (syncRc != 0 || unmapRc != 0)
+		{
+			close(fd);
+			unlink(tmpPath);
+			return false;
+		}
 	}
 	if (fsync(fd) != 0)
 	{

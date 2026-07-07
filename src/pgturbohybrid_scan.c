@@ -161,6 +161,8 @@ GetFlatScanItems(IndexScanDesc scan, Datum value)
 		OffsetNumber offno;
 		OffsetNumber maxoffno;
 
+		CHECK_FOR_INTERRUPTS();
+
 		buf = ReadBuffer(index, blkno);
 		LockBuffer(buf, BUFFER_LOCK_SHARE);
 		page = BufferGetPage(buf);

@@ -971,7 +971,10 @@ pgturbohybrid_index_stats(PG_FUNCTION_ARGS)
 
 	nblocks = RelationGetNumberOfBlocks(index);
 	if (!PgturbohybridGraphReadMeta(index, &meta))
-		elog(ERROR, "pgturbohybrid index is not valid");
+		ereport(ERROR,
+				(errcode(ERRCODE_INDEX_CORRUPTED),
+				 errmsg("pgturbohybrid index is not valid"),
+				 errhint("REINDEX the index to rebuild it.")));
 
 	storageKind = meta.storageKind;
 	graphM = meta.m;
