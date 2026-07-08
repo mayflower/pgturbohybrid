@@ -658,7 +658,7 @@ PgturbohybridGraphUpdateAdjTuple(Relation index, PgturbohybridGraphMetaPageData 
 				UnlockReleaseBuffer(buf);
 
 				{
-					Size		newSize = PgturbohybridGraphAdjTupleSize(count);
+					Size		newSize = PgturbohybridGraphAdjTupleSize(PgturbohybridGraphLevelM(meta->m, level));
 					PgturbohybridGraphAdjTuple newTup = palloc0(newSize);
 					BlockNumber	newBlkno;
 					OffsetNumber	newOff;

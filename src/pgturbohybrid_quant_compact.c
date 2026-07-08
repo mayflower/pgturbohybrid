@@ -360,7 +360,7 @@ PgturbohybridGraphCompactPhase3RewriteAdj(Relation index,
 			}
 
 			newTuple->count = newCount;
-			tupleSize = PgturbohybridGraphAdjTupleSize(newCount);
+			tupleSize = PgturbohybridGraphAdjTupleSize(PgturbohybridGraphLevelM(meta->m, level));
 
 			if (!BufferIsValid(buf) || PageGetFreeSpace(page) < tupleSize)
 			{

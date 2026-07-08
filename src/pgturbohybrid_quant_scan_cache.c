@@ -1137,7 +1137,7 @@ PgturbohybridGraphEstimateMemory(Relation index,
 
 static void
 PgturbohybridGraphInitScanStorageUncached(PgturbohybridGraphMetaPageData *meta, PgturbohybridGraphScanStorage *storage,
-							   bool cacheExactVectors)
+							   bool cacheExactVectors, bool allocateArenas)
 {
 	Size		arenaBytes;
 	int			adjRecordCount;
@@ -1148,22 +1148,22 @@ PgturbohybridGraphInitScanStorageUncached(PgturbohybridGraphMetaPageData *meta, 
 		palloc0(PgturbohybridCheckedArrayBytes(sizeof(PgturbohybridGraphScanNode),
 											   meta->tqNodeCount,
 											   "pgturbohybrid graph scan node cache"));
-	if (meta->tqNodeCount > 0 && meta->tqCodeBytes > 0 &&
+	if (allocateArenas && meta->tqNodeCount > 0 && meta->tqCodeBytes > 0 &&
 		PgturbohybridGraphArenaBytesHuge(meta->tqNodeCount, meta->tqCodeBytes,
 										 &arenaBytes) &&
 		arenaBytes <= PgturbohybridGraphNativeCacheMaxBytes())
 		storage->codeArena = palloc_extended(arenaBytes, MCXT_ALLOC_HUGE | MCXT_ALLOC_ZERO);
-	if (meta->tqNodeCount > 0 && meta->tqResidualRerankBytes > 0 &&
+	if (allocateArenas && meta->tqNodeCount > 0 && meta->tqResidualRerankBytes > 0 &&
 		PgturbohybridGraphArenaBytesHuge(meta->tqNodeCount, meta->tqResidualRerankBytes,
 										 &arenaBytes) &&
 		arenaBytes <= PgturbohybridGraphNativeCacheMaxBytes())
 		storage->residualArena = palloc_extended(arenaBytes, MCXT_ALLOC_HUGE | MCXT_ALLOC_ZERO);
-	if (meta->tqNodeCount > 0 && meta->tqPayloadBytes > 0 &&
+	if (allocateArenas && meta->tqNodeCount > 0 && meta->tqPayloadBytes > 0 &&
 		PgturbohybridGraphArenaBytesHuge(meta->tqNodeCount, meta->tqPayloadBytes,
 										 &arenaBytes) &&
 		arenaBytes <= PgturbohybridGraphNativeCacheMaxBytes())
 		storage->payloadArena = palloc_extended(arenaBytes, MCXT_ALLOC_HUGE | MCXT_ALLOC_ZERO);
-	if (cacheExactVectors && meta->tqNodeCount > 0 && meta->dimensions > 0)
+	if (allocateArenas && cacheExactVectors && meta->tqNodeCount > 0 && meta->dimensions > 0)
 	{
 		storage->exactBytes = PGTURBOHYBRID_VECTOR_SIZE(meta->dimensions);
 		if (PgturbohybridGraphArenaBytes(meta->tqNodeCount, storage->exactBytes,
@@ -4945,7 +4945,7 @@ PgturbohybridGraphBuildCache(Relation index, PgturbohybridGraphMetaPageData *met
 	cache->ctx = cacheCtx;
 
 	PgturbohybridGraphInitScanStorageUncached(meta, &cache->storage,
-								   PgturbohybridGraphShouldCacheExactVectors(index, meta));
+								   PgturbohybridGraphShouldCacheExactVectors(index, meta), true);
 	cache->storage.ctx = cacheCtx;
 	if (meta->tqNodeCount > 0)
 	{
@@ -4999,6 +4999,109 @@ PgturbohybridGraphBuildCache(Relation index, PgturbohybridGraphMetaPageData *met
 	INSTR_TIME_SET_CURRENT(buildElapsed);
 	INSTR_TIME_SUBTRACT(buildElapsed, buildStart);
 	cache->buildUs = (int64) INSTR_TIME_GET_MICROSEC(buildElapsed);
+
+	return cache;
+}
+
+/*
+ * Build a lean per-backend insert cache for the shared (mmap-backed) cache
+ * policy.  Unlike PgturbohybridGraphBuildCache(), this allocates ONLY the
+ * adjacency-location arrays (adjBlknos/adjOffnos/neighborCounts/neighbors)
+ * and the scan-node table; the bulky code/exact/residual/payload arenas are
+ * left NULL and read on demand through PgturbohybridGraphLoadCodePage() (the
+ * same path the uncached scanner uses).  The cache is registered in the
+ * per-backend cache list so subsequent inserts in the same backend find it via
+ * PgturbohybridGraphFindCache() and grow it incrementally through
+ * PgturbohybridGraphAppendInsertCacheNode(), keeping each reciprocal adjacency
+ * update an O(1) slot lookup instead of an O(P) adjacency page-chain scan.
+ */
+static PgturbohybridGraphNativeCache *
+PgturbohybridGraphBuildInsertCache(Relation index, PgturbohybridGraphMetaPageData *meta)
+{
+	MemoryContext cacheCtx;
+	MemoryContext oldCtx;
+	PgturbohybridGraphNativeCache *cache;
+	PgturbohybridGraphScanOpaqueData loadStats;
+	instr_time	buildStart;
+	instr_time	buildElapsed;
+
+	INSTR_TIME_SET_CURRENT(buildStart);
+	memset(&loadStats, 0, sizeof(loadStats));
+	loadStats.pgturbohybridGraphScan = true;
+
+	cacheCtx = AllocSetContextCreate(CacheMemoryContext,
+									 "pgturbohybrid native graph insert cache",
+									 ALLOCSET_DEFAULT_SIZES);
+	oldCtx = MemoryContextSwitchTo(cacheCtx);
+
+	cache = palloc0(sizeof(PgturbohybridGraphNativeCache));
+	cache->relid = RelationGetRelid(index);
+	cache->relfilenumber = PgturbohybridGraphRelFileNumber(index);
+	cache->dimensions = meta->dimensions;
+	cache->m = meta->m;
+	cache->graphMaxLevel = meta->graphMaxLevel;
+	cache->graphFlags = meta->graphFlags;
+	cache->tqNodeCount = meta->tqNodeCount;
+	cache->tqEntryNodeId = meta->tqEntryNodeId;
+	cache->tqSegmentCount = meta->tqSegmentCount;
+	cache->tqCodeBytes = meta->tqCodeBytes;
+	cache->tqBits = meta->tqBits;
+	cache->tqPayloadCount = meta->tqPayloadCount;
+	cache->tqPayloadBytes = meta->tqPayloadBytes;
+	cache->tqResidualRerankBytes = meta->tqResidualRerankBytes;
+	cache->tqCodeStartBlkno = meta->tqCodeStartBlkno;
+	cache->tqAdjStartBlkno = meta->tqAdjStartBlkno;
+	cache->tqExactStartBlkno = meta->tqExactStartBlkno;
+	cache->tqCorrectionStartBlkno = meta->tqCorrectionStartBlkno;
+	cache->tqMultivectorDocMapStartBlkno =
+		meta->tqMultivectorDocMapStartBlkno;
+	cache->tqMultivectorDocMapPageCount =
+		meta->tqMultivectorDocMapPageCount;
+	cache->tqMultivectorDocCount = meta->tqMultivectorDocCount;
+	cache->tqMultivectorDocMapBytes =
+		meta->tqMultivectorDocMapBytes;
+	cache->tqMultivectorDocMapVersion =
+		meta->tqMultivectorDocMapVersion;
+	cache->tqMultivectorDocMapFlags =
+		meta->tqMultivectorDocMapFlags;
+	cache->tqMultivectorGraphMode = meta->tqMultivectorGraphMode;
+	cache->multivectorDocSidecarResident =
+		PgturbohybridGraphShouldCacheMultiVectorDocSidecar(meta);
+	memcpy(cache->tqSegments, meta->tqSegments,
+		   sizeof(PgturbohybridGraphSegmentMetaData) * meta->tqSegmentCount);
+	cache->ctx = cacheCtx;
+
+	/*
+	 * allocateArenas = false: skip the bulky code/exact/residual/payload
+	 * arenas.  Code vectors are read on demand (codeArena == NULL) exactly
+	 * like the uncached scan path; only the adjacency-location arrays and the
+	 * scan-node table -- needed for O(1) reciprocal updates and for
+	 * incremental growth via PgturbohybridGraphAppendInsertCacheNode() -- are
+	 * allocated here.
+	 */
+	PgturbohybridGraphInitScanStorageUncached(meta, &cache->storage,
+								   PgturbohybridGraphShouldCacheExactVectors(index, meta),
+								   false);
+	cache->storage.ctx = cacheCtx;
+
+	if (meta->tqNodeCount > 0)
+		PgturbohybridGraphLoadAllAdjPages(index, &loadStats, meta,
+										  &cache->storage);
+
+	cache->storage.cached = true;
+
+	PgturbohybridGraphCacheComputeResidentBytes(cache, meta);
+
+	cache->next = pgturbohybridGraphCacheList;
+	pgturbohybridGraphCacheList = cache;
+
+	MemoryContextSwitchTo(oldCtx);
+
+	INSTR_TIME_SET_CURRENT(buildElapsed);
+	INSTR_TIME_SUBTRACT(buildElapsed, buildStart);
+	cache->buildUs = (int64) INSTR_TIME_GET_MICROSEC(buildElapsed);
+	cache->buildCodeBufferLockWaitUs = loadStats.graphCodeBufferLockWaitUs;
+	cache->buildAdjBufferLockWaitUs = loadStats.graphAdjBufferLockWaitUs;
 
 	return cache;
 }
@@ -5263,7 +5366,7 @@ PgturbohybridGraphWriteSharedCacheFile(Relation index,
 	memset(&loadStats, 0, sizeof(loadStats));
 	loadStats.pgturbohybridGraphScan = true;
 	PgturbohybridGraphInitScanStorageUncached(meta, &storage,
-								   PgturbohybridGraphShouldCacheExactVectors(index, meta));
+								   PgturbohybridGraphShouldCacheExactVectors(index, meta), true);
 	if (meta->tqNodeCount > 0)
 	{
 		for (uint32 nodeId = 0; nodeId < meta->tqNodeCount;
@@ -5819,7 +5922,7 @@ PgturbohybridGraphInitScanStorage(Relation index, PgturbohybridGraphMetaPageData
 	if (!PgturbohybridGraphShouldUseNativeCache(meta, cacheExactVectors,
 											   &reason))
 	{
-		PgturbohybridGraphInitScanStorageUncached(meta, storage, cacheExactVectors);
+		PgturbohybridGraphInitScanStorageUncached(meta, storage, cacheExactVectors, true);
 		if (info != NULL)
 		{
 			info->mode = PGTURBOHYBRID_GRAPH_NATIVE_CACHE_UNCACHED;
@@ -5870,7 +5973,7 @@ PgturbohybridGraphInitScanStorage(Relation index, PgturbohybridGraphMetaPageData
 			return;
 		}
 
-		PgturbohybridGraphInitScanStorageUncached(meta, storage, cacheExactVectors);
+		PgturbohybridGraphInitScanStorageUncached(meta, storage, cacheExactVectors, true);
 		if (info != NULL)
 		{
 			info->mode = PGTURBOHYBRID_GRAPH_NATIVE_CACHE_UNCACHED;
@@ -5926,9 +6029,26 @@ PgturbohybridGraphInitInsertStorage(Relation index, PgturbohybridGraphMetaPageDa
 
 	if (pgturbohybrid_native_cache_policy == PGTURBOHYBRID_NATIVE_CACHE_POLICY_SHARED)
 	{
-		/* Inserts need mutable cache state; shared-cache views are scan-only. */
-		PgturbohybridGraphInitScanStorageUncached(meta, storage, cacheExactVectors);
-		return NULL;
+		/*
+		 * Under the shared (mmap-backed) cache policy, scans attach the
+		 * read-only cross-backend shared cache.  Inserts, however, must
+		 * mutate per-node adjacency locations (reciprocal neighbor updates
+		 * relocate and append adjacency tuples), so they cannot use that
+		 * read-only shared view.  Build a lean per-backend mutable cache
+		 * holding ONLY the adjacency-location arrays and the scan-node
+		 * table; the bulky code/exact arenas stay in the shared cache and
+		 * are read here on demand (codeArena == NULL -> per-node on-demand
+		 * load, exactly like the uncached path).  This turns each
+		 * reciprocal adjacency page-chain scan O(P) into an O(1) slot
+		 * lookup, killing the quadratic bulk-insert degradation, without
+		 * duplicating the bulky arenas per backend.
+		 */
+		cache = PgturbohybridGraphFindCache(index, meta);
+		if (cache == NULL)
+			cache = PgturbohybridGraphBuildInsertCache(index, meta);
+		memcpy(storage, &cache->storage, sizeof(PgturbohybridGraphScanStorage));
+		storage->cached = true;
+		return cache;
 	}
 
 	if (BlockNumberIsValid(meta->tqMultivectorDocMapStartBlkno))
@@ -5939,13 +6059,13 @@ PgturbohybridGraphInitInsertStorage(Relation index, PgturbohybridGraphMetaPageDa
 		 * validating a transiently incomplete sidecar while building insert
 		 * storage for the later subvectors.
 		 */
-		PgturbohybridGraphInitScanStorageUncached(meta, storage, cacheExactVectors);
+		PgturbohybridGraphInitScanStorageUncached(meta, storage, cacheExactVectors, true);
 		return NULL;
 	}
 
 	if (!PgturbohybridGraphShouldUseNativeCache(meta, cacheExactVectors, NULL))
 	{
-		PgturbohybridGraphInitScanStorageUncached(meta, storage, cacheExactVectors);
+		PgturbohybridGraphInitScanStorageUncached(meta, storage, cacheExactVectors, true);
 		return NULL;
 	}
 
@@ -6026,7 +6146,7 @@ PgturbohybridGraphAppendInsertCacheNode(PgturbohybridGraphNativeCache *cache, Pg
 															 newNodeCount,
 															 "pgturbohybrid graph scan node cache"));
 	memset(&storage->nodes[nodeId], 0, sizeof(PgturbohybridGraphScanNode));
-	if (codeBytes > 0)
+	if (codeBytes > 0 && storage->codeArena != NULL)
 	{
 		/* repalloc_huge: the code arena may exceed 1 GB (see ArenaBytesHuge). */
 		storage->codeArena = repalloc_huge(storage->codeArena,
@@ -6034,7 +6154,7 @@ PgturbohybridGraphAppendInsertCacheNode(PgturbohybridGraphNativeCache *cache, Pg
 		memcpy(storage->codeArena + ((Size) nodeId * codeBytes),
 			   code, codeBytes);
 	}
-	if (payloadBytes > 0)
+	if (payloadBytes > 0 && storage->payloadArena != NULL)
 	{
 		storage->payloadArena = repalloc_huge(storage->payloadArena,
 											  (Size) payloadBytes * (Size) newNodeCount);
@@ -6045,7 +6165,7 @@ PgturbohybridGraphAppendInsertCacheNode(PgturbohybridGraphNativeCache *cache, Pg
 			memset(storage->payloadArena + ((Size) nodeId * payloadBytes),
 				   0, payloadBytes);
 	}
-	if (residualBytes > 0)
+	if (residualBytes > 0 && storage->residualArena != NULL)
 	{
 		storage->residualArena = repalloc_huge(storage->residualArena,
 											   (Size) residualBytes * (Size) newNodeCount);
@@ -6085,7 +6205,7 @@ PgturbohybridGraphAppendInsertCacheNode(PgturbohybridGraphNativeCache *cache, Pg
 																	  "pgturbohybrid graph code block map"));
 		for (int i = oldCodePageCount; i < newCodePageCount; i++)
 		{
-			storage->codePagesLoaded[i] = true;
+			storage->codePagesLoaded[i] = storage->codeArena != NULL;
 			storage->codeBlknos[i] = InvalidBlockNumber;
 		}
 		storage->codePageCount = newCodePageCount;
@@ -6144,18 +6264,54 @@ PgturbohybridGraphAppendInsertCacheNode(PgturbohybridGraphNativeCache *cache, Pg
 	storage->nodes[nodeId].codeNorm = codeNorm;
 	storage->nodes[nodeId].ecCorrection = ecCorrection;
 	storage->nodes[nodeId].flags = 0;
-	storage->nodes[nodeId].loaded = true;
+	/*
+	 * Wire up the bulky fields.  In the lean insert cache (arenas == NULL,
+	 * used under the shared cache policy) -- or whenever an arena was not
+	 * allocated because it would exceed the cache cap -- keep each field in a
+	 * per-node alloc, the same representation LoadCodePage() builds when it
+	 * loads a node on demand, so the search path treats the freshly inserted
+	 * node as resident.  exactVector stays NULL: exact rescoring falls back to
+	 * the on-disk exactBlkno/exactOffno, as for any node whose exact vector is
+	 * not cached.
+	 */
 	if (codeBytes > 0)
-		storage->nodes[nodeId].code = storage->codeArena + ((Size) nodeId * codeBytes);
+	{
+		if (storage->codeArena != NULL)
+			storage->nodes[nodeId].code = storage->codeArena + ((Size) nodeId * codeBytes);
+		else
+		{
+			storage->nodes[nodeId].code = (uint8 *) MemoryContextAlloc(storage->ctx, codeBytes);
+			memcpy(storage->nodes[nodeId].code, code, codeBytes);
+		}
+	}
 	if (payloadBytes > 0)
-		storage->nodes[nodeId].payloads =
-			(int32 *) (storage->payloadArena + ((Size) nodeId * payloadBytes));
+	{
+		if (storage->payloadArena != NULL)
+			storage->nodes[nodeId].payloads =
+				(int32 *) (storage->payloadArena + ((Size) nodeId * payloadBytes));
+		else if (payloads != NULL)
+		{
+			storage->nodes[nodeId].payloads =
+				(int32 *) MemoryContextAlloc(storage->ctx, payloadBytes);
+			memcpy(storage->nodes[nodeId].payloads, payloads, payloadBytes);
+		}
+	}
 	if (residualBytes > 0)
-		storage->nodes[nodeId].residualSketch =
-			storage->residualArena + ((Size) nodeId * residualBytes);
+	{
+		if (storage->residualArena != NULL)
+			storage->nodes[nodeId].residualSketch =
+				storage->residualArena + ((Size) nodeId * residualBytes);
+		else if (residualSketch != NULL)
+		{
+			storage->nodes[nodeId].residualSketch =
+				(uint8 *) MemoryContextAlloc(storage->ctx, residualBytes);
+			memcpy(storage->nodes[nodeId].residualSketch, residualSketch, residualBytes);
+		}
+	}
 	if (storage->exactArena != NULL)
 		storage->nodes[nodeId].exactVector =
 			storage->exactArena + ((Size) nodeId * storage->exactBytes);
+	storage->nodes[nodeId].loaded = true;
 
 	if (payloadBytes > 0 && payloads != NULL && payloadMask != 0)
 	{
