@@ -21524,7 +21524,8 @@ tqgraphinsert(Relation index, Datum *values, bool *isnull, ItemPointer heap_tid,
 	if (!PgturbohybridGraphFormIndexValue(&value, values, isnull, typeInfo, &support))
 		return false;
 
-	LockPage(index, PGTURBOHYBRID_GRAPH_UPDATE_LOCK, ExclusiveLock);
+	/* ValorBrain scalability patch: ShareLock for concurrent inserts */
+	LockPage(index, PGTURBOHYBRID_GRAPH_UPDATE_LOCK, ShareLock);
 	PG_TRY();
 	{
 		PgturbohybridGraphInsertValueInPlace(index, indexInfo, heap_tid, value,
@@ -21532,11 +21533,11 @@ tqgraphinsert(Relation index, Datum *values, bool *isnull, ItemPointer heap_tid,
 	}
 	PG_CATCH();
 	{
-		UnlockPage(index, PGTURBOHYBRID_GRAPH_UPDATE_LOCK, ExclusiveLock);
+		UnlockPage(index, PGTURBOHYBRID_GRAPH_UPDATE_LOCK, ShareLock);
 		PG_RE_THROW();
 	}
 	PG_END_TRY();
-	UnlockPage(index, PGTURBOHYBRID_GRAPH_UPDATE_LOCK, ExclusiveLock);
+	UnlockPage(index, PGTURBOHYBRID_GRAPH_UPDATE_LOCK, ShareLock);
 
 	return true;
 }

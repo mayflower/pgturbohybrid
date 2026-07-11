@@ -7350,7 +7350,25 @@ pgturbohybridaminsert(Relation index, Datum *values, bool *isnull, ItemPointer h
 	if (!PgturbohybridGraphFormIndexValue(&value, values, isnull, typeInfo, &support))
 		return false;
 
-	LockPage(index, PGTURBOHYBRID_GRAPH_UPDATE_LOCK, ExclusiveLock);
+	/*
+	 * ValorBrain scalability patch (2026-07-11):
+	 *
+	 * Use ShareLock instead of ExclusiveLock for single-vector inserts.
+	 * This allows concurrent inserts to proceed in parallel.
+	 *
+	 * The HNSW graph mutation inside PgturbohybridGraphInsertValueInPlace
+	 * is protected by per-buffer LockBuffer(BUFFER_LOCK_EXCLUSIVE) calls,
+	 * so the global lock here only needs to coordinate with vacuum (which
+	 * takes ExclusiveLock to ensure no in-flight inserts before repairing).
+	 *
+	 * ExclusiveLock is still used for the multivector path (batch inserts
+	 * that need atomicity across multiple nodes).
+	 *
+	 * Before this patch, every aminsert held ExclusiveLock globally for
+	 * hundreds of milliseconds (HNSW traversal + link write + BM25 delta),
+	 * causing lock contention zombies of 25+ minutes in production.
+	 */
+	LockPage(index, PGTURBOHYBRID_GRAPH_UPDATE_LOCK, ShareLock);
 	PG_TRY();
 	{
 		nodeId = PgturbohybridGraphInsertValueInPlace(index, indexInfo, heap_tid,
@@ -7360,11 +7378,11 @@ pgturbohybridaminsert(Relation index, Datum *values, bool *isnull, ItemPointer h
 	}
 	PG_CATCH();
 	{
-		UnlockPage(index, PGTURBOHYBRID_GRAPH_UPDATE_LOCK, ExclusiveLock);
+		UnlockPage(index, PGTURBOHYBRID_GRAPH_UPDATE_LOCK, ShareLock);
 		PG_RE_THROW();
 	}
 	PG_END_TRY();
-	UnlockPage(index, PGTURBOHYBRID_GRAPH_UPDATE_LOCK, ExclusiveLock);
+	UnlockPage(index, PGTURBOHYBRID_GRAPH_UPDATE_LOCK, ShareLock);
 
 	return true;
 }
