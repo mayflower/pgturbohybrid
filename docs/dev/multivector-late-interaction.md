@@ -253,7 +253,6 @@ admission and then exact-reranks admitted heap documents with full MaxSim.
 models. `first_token`, `max_pool`, `random_projection_fde`, and
 `learned_projection_v1` are benchmarkable alternatives; `centroid_mean`
 requires `multivector_centroids = kmeans`. The
-`learned_projection_placeholder` value fails explicitly, while
 `learned_projection_v1` requires configured projection weights. Its stats report
 `multivector_candidate_source = proxy_vector`, `proxy_encoder_kind`,
 `proxy_candidates`, `proxy_top1_admission`, `proxy_exact_rerank_docs`, and
@@ -306,7 +305,7 @@ WITH (
   multivector_graph = token_nodes,      -- default
   multivector_centroids = off,          -- off | kmeans
   multivector_centroid_count = 0,       -- 0 means auto
-  multivector_proxy_encoder = normalized_mean -- normalized_mean | mean | mean_pool | first_token | max_abs_mean | centroid_mean | max_pool | random_projection_fde | learned_projection_placeholder | learned_projection_v1
+  multivector_proxy_encoder = normalized_mean -- normalized_mean | mean | mean_pool | first_token | max_abs_mean | centroid_mean | max_pool | random_projection_fde | learned_projection_v1
 )
 ```
 

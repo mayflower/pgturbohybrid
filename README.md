@@ -90,7 +90,8 @@ feel like a normal PostgreSQL index:
 The basic idea: dense search helps with meaning, lexical search helps with exact
 words, product names, IDs, and the weird little terms users actually type.
 RRF is the fusion method that combines the two ranked candidate lists.
-For score-level experiments, `turbohybrid_query(fusion => 'calibrated')` uses
+After installing `pgturbohybrid_experimental`, score-level experiments use
+`turbohybrid_experimental_query(fusion => 'calibrated')` and
 monotonic dense/BM25 score normalization, chooses a dense alpha from query shape
 when `alpha` is omitted, and can add a small bonus for candidates that appear in
 both branches. This is a separate score-fusion mode; it does not preserve RRF
@@ -104,7 +105,7 @@ SET turbohybrid.calibrated_fusion_default_alpha = 0.50;
 
 SELECT id
 FROM documents
-ORDER BY embedding <~> turbohybrid_query(
+ORDER BY embedding <~> turbohybrid_experimental_query(
   vector_query => $1,
   text_query => $2,
   fusion => 'calibrated'
@@ -120,7 +121,14 @@ Inspect `calibrated_fusion_enabled`,
 
 ## Multivector Late Interaction
 
-`pgturbohybrid` includes a public `multivector` column type for
+Install the experimental SQL surface explicitly before using this section:
+
+```sql
+CREATE EXTENSION pgturbohybrid_experimental;
+```
+
+The separately installed `pgturbohybrid_experimental` extension includes the
+`turbohybrid_multivector` column type for
 late-interaction retrieval models such as ColBERT-style MaxSim. A multivector
 stores several same-dimensional token vectors for one document row. The native
 graph build expands those token vectors into graph subnodes, while query output
@@ -130,7 +138,7 @@ times.
 ```sql
 CREATE TABLE passages (
   id bigint PRIMARY KEY,
-  colbert multivector
+  colbert turbohybrid_multivector
 );
 
 INSERT INTO passages VALUES
@@ -146,7 +154,7 @@ ON passages USING turbohybrid (
 
 SELECT id
 FROM passages
-ORDER BY colbert <~> turbohybrid_query(
+ORDER BY colbert <~> turbohybrid_experimental_query(
   multivector_query => turbohybrid_multivector(ARRAY[
     '[1,0,0]'::vector
   ])
@@ -185,7 +193,7 @@ exact top-band rerank.
 ```sql
 CREATE INDEX ON docs USING turbohybrid (s sparse_ip_turbohybrid_ops);
 SELECT id FROM docs
-ORDER BY s <~*> turbohybrid_query(sparse_query => q.s, final_k => 10)
+ORDER BY s <~*> turbohybrid_experimental_query(sparse_query => q.s, final_k => 10)
 LIMIT 10;
 ```
 

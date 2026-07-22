@@ -114,7 +114,6 @@ typedef struct PgturbohybridOptions
 	int			sparseQuantMode;
 	int			sparsePostingsEncoding;
 	int			sparseBlockSize;
-	int			sparseExactStorage;
 	bool		sparseBlockMax;
 }			PgturbohybridOptions;
 

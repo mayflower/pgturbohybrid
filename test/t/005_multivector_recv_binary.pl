@@ -77,7 +77,7 @@ $node->start;
 
 $node->safe_psql('postgres', q(
 	CREATE EXTENSION vector;
-	CREATE EXTENSION pgturbohybrid;
+	CREATE EXTENSION pgturbohybrid; CREATE EXTENSION pgturbohybrid_experimental;
 	CREATE TABLE recv_t (col turbohybrid_multivector);
 ));
 

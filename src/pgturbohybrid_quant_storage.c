@@ -18,6 +18,19 @@ PgturbohybridGraphRelFileNumber(Relation index)
 }
 
 void
+PgturbohybridGraphGetRelationLocator(Relation index, Oid *tablespaceOid,
+									 Oid *relNumber)
+{
+#if PG_VERSION_NUM >= 160000
+	*tablespaceOid = index->rd_locator.spcOid;
+	*relNumber = index->rd_locator.relNumber;
+#else
+	*tablespaceOid = index->rd_node.spcNode;
+	*relNumber = index->rd_node.relNode;
+#endif
+}
+
+void
 PgturbohybridGraphInitBlockMap(BlockNumber *blknos, int count)
 {
 	for (int i = 0; i < count; i++)

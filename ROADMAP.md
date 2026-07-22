@@ -7,7 +7,7 @@ production/1.0. It is a checklist of blockers, not a schedule. See the
 does not cover, and the [feature & maturity matrix](docs/feature-matrix.md) for
 per-feature status.
 
-## Alpha.2 (current)
+## Alpha.2 (completed hardening baseline)
 
 - [x] Standalone alpha packaging and CI matrix (PG 14–19 × pgvector v0.8.2/master, i386, Windows, macOS, valgrind)
 - [x] Feature & maturity matrix; COMMENT ON maturity labels on the SQL surface
@@ -20,14 +20,14 @@ per-feature status.
 Beta freezes only the **stable public core**; everything else stays visibly
 experimental (see [docs/beta-scope.md](docs/beta-scope.md)).
 
-- [ ] Declared beta scope: dense-only, dense+BM25, RRF, support diagnostics — stable
-- [ ] Sparse / multivector / ColBERT / `quantized_inverted_experimental` / `pg_colbert_llama` explicitly outside the beta support promise
-- [ ] Upgrade-script policy exercised by a test (`ALTER EXTENSION pgturbohybrid UPDATE`) once a 0.1.x version exists
+- [x] Declared beta scope: dense-only, dense+BM25, RRF, support diagnostics — stable
+- [x] Sparse / multivector / ColBERT / `quantized_inverted_experimental` / `pg_colbert_llama` isolated in `pgturbohybrid_experimental`
+- [x] Alpha upgrade policy exercised transactionally with explicit migration guidance
 - [x] Release artifacts carry SHA256 checksums (source archives in release.yml; .deb/.rpm/Windows zip in the package workflows); Docker images build with `provenance: mode=max` + SBOM
-- [ ] Cryptographic signing of release artifacts (cosign/GPG) — needs maintainer keys
-- [ ] Public API ledger exists and is drift-tested ([docs/api-ledger.json](docs/api-ledger.json))
+- [x] Cryptographic signing and verification of release archives and SPDX SBOM
+- [x] Core and experimental API ledgers exist and are drift-tested ([docs/api-ledger.json](docs/api-ledger.json))
 - [x] Storage-format compatibility document ([docs/storage-format.md](docs/storage-format.md))
-- [ ] Long-running concurrency/recovery tests run in scheduled CI (not only locally)
+- [x] Long-running concurrency/recovery tests run in scheduled CI
 - [ ] Multivector beta blocker resolved or fenced (see below)
 
 ## Production / 1.0

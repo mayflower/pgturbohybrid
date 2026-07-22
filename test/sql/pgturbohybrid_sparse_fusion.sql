@@ -24,7 +24,7 @@ SET enable_seqscan = off;
 
 -- sparse_weight => 0: pure dense ranking (sparse contributes nothing).
 SELECT id FROM sf
-ORDER BY embedding <~> turbohybrid_query(
+ORDER BY embedding <~> turbohybrid_experimental_query(
   vector_query => '[1,0,0,0]'::vector,
   sparse_query => turbohybrid_sparse_vector_build(ARRAY[2]::int4[], ARRAY[1.0]::float4[]),
   sparse_weight => 0, dense_k => 10, final_k => 4)
@@ -33,7 +33,7 @@ LIMIT 4;
 -- sparse_weight => 10: sparse-strong docs (3,4) rise above the dense-only doc1.
 -- RRF(rrfK=60): doc3 .1798 > doc4 .1769 > doc2 .1748 > doc1 .0164.
 SELECT id FROM sf
-ORDER BY embedding <~> turbohybrid_query(
+ORDER BY embedding <~> turbohybrid_experimental_query(
   vector_query => '[1,0,0,0]'::vector,
   sparse_query => turbohybrid_sparse_vector_build(ARRAY[2]::int4[], ARRAY[1.0]::float4[]),
   sparse_weight => 10, dense_k => 10, final_k => 4)
@@ -41,7 +41,7 @@ LIMIT 4;
 
 -- require_sparse_match => true filters the dense-only doc1.
 SELECT id FROM sf
-ORDER BY embedding <~> turbohybrid_query(
+ORDER BY embedding <~> turbohybrid_experimental_query(
   vector_query => '[1,0,0,0]'::vector,
   sparse_query => turbohybrid_sparse_vector_build(ARRAY[2]::int4[], ARRAY[1.0]::float4[]),
   sparse_weight => 10, require_sparse_match => true, dense_k => 10, final_k => 4)
@@ -54,7 +54,7 @@ DECLARE
 BEGIN
   SET LOCAL enable_seqscan = off;
   PERFORM id FROM sf
-    ORDER BY embedding <~> turbohybrid_query(
+    ORDER BY embedding <~> turbohybrid_experimental_query(
       vector_query => '[1,0,0,0]'::vector,
       sparse_query => turbohybrid_sparse_vector_build(ARRAY[2]::int4[], ARRAY[1.0]::float4[]),
       sparse_weight => 1, dense_k => 10, final_k => 4)
@@ -79,7 +79,7 @@ END $$;
 
 -- Non-RRF fusion modes reject sparse_query with a clear error.
 SELECT id FROM sf
-ORDER BY embedding <~> turbohybrid_query(
+ORDER BY embedding <~> turbohybrid_experimental_query(
   vector_query => '[1,0,0,0]'::vector,
   sparse_query => turbohybrid_sparse_vector_build(ARRAY[2]::int4[], ARRAY[1.0]::float4[]),
   fusion => 'weighted', dense_k => 10, final_k => 4)
@@ -102,7 +102,7 @@ BEGIN
   SET LOCAL enable_seqscan = off;
   SELECT array_agg(id) INTO ids FROM (
     SELECT id FROM sf
-    ORDER BY embedding <~> turbohybrid_query(
+    ORDER BY embedding <~> turbohybrid_experimental_query(
       vector_query => '[1,0,0,0]'::vector,
       text_query => websearch_to_tsquery('simple','beta'),
       sparse_query => turbohybrid_sparse_vector_build(ARRAY[2]::int4[], ARRAY[1.0]::float4[]),

@@ -4,6 +4,38 @@ All notable changes for `pgturbohybrid` are documented here. Git release tags
 may use alpha suffixes (`v0.1.0-alpha.N`) independently of the PostgreSQL
 extension SQL version.
 
+## 0.1.2
+
+Critical integrity and operations hardening release. The native graph on-disk
+format remains version 2; this release adds a SQL diagnostic and strengthens
+cache publication, graph maintenance, and recovery behavior.
+
+### Added
+
+- `turbohybrid_validate_index(index, deep := false)`, a read-only structured
+  validator for metapages, page chains, dense graph tuples, exact storage,
+  BM25, sparse, multivector sidecars, and optional graph reachability.
+- Deterministic validation coverage for repeated insert/delete/VACUUM churn,
+  restart and immediate-stop recovery, interrupted VACUUM, and targeted
+  adjacency-page corruption.
+- Shared native-cache identity, prewarm, publication, garbage-collection, and
+  crash-safety diagnostics and tests.
+
+### Changed
+
+- Native VACUUM preserves dead graph nodes as traversable bridges, repairs
+  entry/routing/segment metadata, and reports topology/churn statistics with a
+  fixed REINDEX recommendation policy.
+- Shared cache files use versioned identities and atomic locked publication so
+  readers cannot attach partial or stale cache generations.
+
+### Upgrade
+
+- Install with `sql/pgturbohybrid--0.1.2.sql` or upgrade from `0.1.1` with
+  `sql/pgturbohybrid--0.1.1--0.1.2.sql`.
+- No persisted index tuple layout changed. Existing alpha users should still
+  follow the project policy of validating and planning a REINDEX on upgrade.
+
 ## 0.1.1
 
 Maintenance release. The exported SQL catalog is unchanged from `0.1.0` (the

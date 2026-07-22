@@ -123,7 +123,7 @@ It adds the TurboHybrid feature surface:
   - type `turbohybrid_sparse_vector`, operator `<~*>`, opclass
     `sparse_ip_turbohybrid_ops`
 - multivector late-interaction retrieval (experimental):
-  - type `multivector`, `multivector_cosine_turbohybrid_ops`
+  - type `turbohybrid_multivector`, `multivector_cosine_turbohybrid_ops`
 - diagnostics:
   - `turbohybrid_last_scan_stats()`
   - `turbohybrid_last_scan_diagnosis()`

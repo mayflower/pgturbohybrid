@@ -46,8 +46,8 @@ sub nearest_id
 # --- a fresh install lands on the new default version ----------------------
 $node->safe_psql('postgres', 'CREATE DATABASE fresh;');
 $node->safe_psql('fresh', 'CREATE EXTENSION vector; CREATE EXTENSION pgturbohybrid;');
-is(ext_version('fresh'), '0.1.1',
-	'fresh CREATE EXTENSION installs the new default version 0.1.1');
+is(ext_version('fresh'), '0.2.0',
+	'fresh CREATE EXTENSION installs the new default version 0.2.0');
 
 # --- upgrade path: install the prior version, then ALTER ... UPDATE --------
 $node->safe_psql('postgres', 'CREATE DATABASE upgrade;');
@@ -68,10 +68,18 @@ $node->safe_psql('upgrade', "ALTER EXTENSION pgturbohybrid UPDATE TO '0.1.1';");
 is(ext_version('upgrade'), '0.1.1',
 	"ALTER EXTENSION ... UPDATE TO '0.1.1' bumps the recorded catalog version");
 
-# the default-target form resolves to 0.1.1 as well (no-op here, exercises path)
-$node->safe_psql('upgrade', 'ALTER EXTENSION pgturbohybrid UPDATE;');
-is(ext_version('upgrade'), '0.1.1',
-	'ALTER EXTENSION ... UPDATE (default target) stays at 0.1.1');
+# 0.1.2 is the last monolithic catalog version.
+$node->safe_psql('upgrade', "ALTER EXTENSION pgturbohybrid UPDATE TO '0.1.2';");
+is(ext_version('upgrade'), '0.1.2', 'upgrade reaches the final monolithic version');
+
+# The ownership split cannot create a second extension from inside ALTER
+# EXTENSION. It must abort transactionally before leaving unowned objects.
+my ($upgrade_rc, $upgrade_out, $upgrade_err) = $node->psql('upgrade',
+	'ALTER EXTENSION pgturbohybrid UPDATE;', extra_params => ['-v', 'ON_ERROR_STOP=1']);
+isnt($upgrade_rc, 0, 'monolithic-to-split update is refused');
+like($upgrade_out . $upgrade_err, qr/requires an explicit core\/experimental migration/,
+	'upgrade refusal names the required migration');
+is(ext_version('upgrade'), '0.1.2', 'failed split update leaves extension version intact');
 
 # the public catalog surface is intact and the index still scans after upgrade
 is($node->safe_psql('upgrade', q(
@@ -83,7 +91,7 @@ is($node->safe_psql('upgrade', q(
 	);
 )), 't,t,t,t', 'public catalog surface intact after upgrade');
 is(nearest_id('upgrade'), '1',
-	'turbohybrid index scan still works after UPDATE to 0.1.1');
+	'turbohybrid index scan still works after transactional split refusal');
 
 $node->stop;
 done_testing();

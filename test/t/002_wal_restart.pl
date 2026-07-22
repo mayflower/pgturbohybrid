@@ -37,6 +37,13 @@ sub top_ids
 	));
 }
 
+sub validation_ok
+{
+	my ($index) = @_;
+	return $node->safe_psql('pgturbohybrid_wal',
+		"SELECT (turbohybrid_validate_index('$index'::regclass, true)->>'ok')::boolean;");
+}
+
 $node->safe_psql('postgres', 'CREATE DATABASE pgturbohybrid_wal;');
 $node->safe_psql('pgturbohybrid_wal', q(
 	CREATE EXTENSION vector;
@@ -68,6 +75,7 @@ $node->safe_psql('pgturbohybrid_wal', q(
 
 $node->restart;
 is(top_ids(), '1,2,3', 'index remains correct after build and restart');
+is(validation_ok('wal_docs_idx'), 't', 'validator passes after build restart');
 
 $node->safe_psql('pgturbohybrid_wal', q(
 	CREATE INDEX CONCURRENTLY wal_docs_concurrent_idx ON wal_docs
@@ -85,6 +93,7 @@ $node->safe_psql('pgturbohybrid_wal',
 	"INSERT INTO wal_docs VALUES (5, '[0.5,0,0]', to_tsvector('english', 'half'));");
 $node->restart;
 is(top_ids(), '1,5,2', 'index remains correct after insert and restart');
+is(validation_ok('wal_docs_idx'), 't', 'validator passes after insert restart');
 
 $node->safe_psql('pgturbohybrid_wal', 'DELETE FROM wal_docs WHERE id = 1;');
 $node->restart;
@@ -93,10 +102,12 @@ is(top_ids(), '5,2,3', 'index remains correct after delete and restart');
 $node->safe_psql('pgturbohybrid_wal', 'VACUUM wal_docs;');
 $node->restart;
 is(top_ids(), '5,2,3', 'index remains correct after vacuum and restart');
+is(validation_ok('wal_docs_idx'), 't', 'validator passes after vacuum restart');
 
 $node->safe_psql('pgturbohybrid_wal', 'REINDEX INDEX wal_docs_idx;');
 $node->restart;
 is(top_ids(), '5,2,3', 'index remains correct after reindex and restart');
+is(validation_ok('wal_docs_idx'), 't', 'validator passes after reindex restart');
 
 $node->safe_psql('pgturbohybrid_wal', q(
 	CREATE UNLOGGED TABLE wal_unlogged_docs (
@@ -138,11 +149,14 @@ is($node->safe_psql('pgturbohybrid_wal', q(
 	)
 	LIMIT 1;
 )), '1', 'unlogged table index returns expected result after clean restart');
+is(validation_ok('wal_unlogged_docs_idx'), 't',
+	'validator passes for unlogged index after clean restart');
 
 $node->safe_psql('pgturbohybrid_wal',
 	"INSERT INTO wal_docs VALUES (6, '[0.25,0,0]', to_tsvector('english', 'quarter'));");
 $node->stop('immediate');
 $node->start;
 is(top_ids(), '6,5,2', 'index remains correct after immediate stop and recovery');
+is(validation_ok('wal_docs_idx'), 't', 'validator passes after crash recovery');
 
 done_testing();

@@ -20,7 +20,7 @@ SET enable_seqscan = off;
 -- rerank = off: approximate (q8) order, with A and B inverted (C, B, A).
 SET turbohybrid.sparse_rerank = off;
 SELECT id FROM sr
-ORDER BY s <~*> turbohybrid_query(
+ORDER BY s <~*> turbohybrid_experimental_query(
   sparse_query => turbohybrid_sparse_vector_build(ARRAY[10,20]::int4[], ARRAY[1.0,1.0]::float4[]))
 LIMIT 10;
  id 
@@ -35,7 +35,7 @@ DECLARE st jsonb;
 BEGIN
   SET LOCAL enable_seqscan = off;
   SET LOCAL turbohybrid.sparse_rerank = off;
-  PERFORM id FROM sr ORDER BY s <~*> turbohybrid_query(
+  PERFORM id FROM sr ORDER BY s <~*> turbohybrid_experimental_query(
     sparse_query => turbohybrid_sparse_vector_build(ARRAY[10,20]::int4[], ARRAY[1.0,1.0]::float4[])) LIMIT 10;
   st := turbohybrid_last_scan_stats();
   IF st->>'sparse_rerank_mode' != 'off' OR (st->>'sparse_exact_rerank_count')::int != 0 THEN
@@ -45,7 +45,7 @@ END $$;
 -- rerank = auto (default for q8): exact rerank fixes the order (C, A, B).
 SET turbohybrid.sparse_rerank = auto;
 SELECT id FROM sr
-ORDER BY s <~*> turbohybrid_query(
+ORDER BY s <~*> turbohybrid_experimental_query(
   sparse_query => turbohybrid_sparse_vector_build(ARRAY[10,20]::int4[], ARRAY[1.0,1.0]::float4[]))
 LIMIT 10;
  id 
@@ -60,7 +60,7 @@ DECLARE st jsonb;
 BEGIN
   SET LOCAL enable_seqscan = off;
   SET LOCAL turbohybrid.sparse_rerank = auto;
-  PERFORM id FROM sr ORDER BY s <~*> turbohybrid_query(
+  PERFORM id FROM sr ORDER BY s <~*> turbohybrid_experimental_query(
     sparse_query => turbohybrid_sparse_vector_build(ARRAY[10,20]::int4[], ARRAY[1.0,1.0]::float4[])) LIMIT 10;
   st := turbohybrid_last_scan_stats();
   IF st->>'sparse_rerank_mode' != 'auto' OR (st->>'sparse_exact_rerank_count')::int < 1 THEN
@@ -76,7 +76,7 @@ DROP INDEX sr_q8;
 CREATE INDEX sr_f32 ON sr USING turbohybrid (embedding vector_cosine_turbohybrid_ops, s sparse_ip_turbohybrid_ops)
   WITH (sparse_quant_bits = 0);
 SELECT id FROM sr
-ORDER BY s <~*> turbohybrid_query(
+ORDER BY s <~*> turbohybrid_experimental_query(
   sparse_query => turbohybrid_sparse_vector_build(ARRAY[10,20]::int4[], ARRAY[1.0,1.0]::float4[]))
 LIMIT 10;
  id 
@@ -90,7 +90,7 @@ DO $$
 DECLARE st jsonb;
 BEGIN
   SET LOCAL enable_seqscan = off;
-  PERFORM id FROM sr ORDER BY s <~*> turbohybrid_query(
+  PERFORM id FROM sr ORDER BY s <~*> turbohybrid_experimental_query(
     sparse_query => turbohybrid_sparse_vector_build(ARRAY[10,20]::int4[], ARRAY[1.0,1.0]::float4[])) LIMIT 10;
   st := turbohybrid_last_scan_stats();
   IF (st->>'sparse_exact_rerank_count')::int != 0 THEN
@@ -98,10 +98,5 @@ BEGIN
   END IF;
 END $$;
 DROP INDEX sr_f32;
--- sparse_exact_storage = sidecar is rejected.
-CREATE INDEX ON sr USING turbohybrid (embedding vector_cosine_turbohybrid_ops, s sparse_ip_turbohybrid_ops)
-  WITH (sparse_exact_storage = 'sidecar');
-ERROR:  sparse_exact_storage=sidecar is not supported yet
-HINT:  Exact sparse rerank fetches the heap sparse column; use sparse_exact_storage=off.
 RESET enable_seqscan;
 DROP TABLE sr;

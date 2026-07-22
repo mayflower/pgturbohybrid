@@ -11,6 +11,7 @@ $$;
 
 CREATE EXTENSION vector;
 CREATE EXTENSION pgturbohybrid;
+CREATE EXTENSION pgturbohybrid_experimental;
 SET turbohybrid.multivector_plain_fallback = off;
 
 DO $$

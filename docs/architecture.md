@@ -9,9 +9,10 @@ claiming pgvector-owned release metadata.
 - Extension name: `pgturbohybrid`
 - Shared library name: `pgturbohybrid`
 - Control file: `pgturbohybrid.control`
-- SQL install scripts: `sql/pgturbohybrid--0.1.1.sql` (current default),
-  `sql/pgturbohybrid--0.1.0.sql` (initial), and upgrade
-  `sql/pgturbohybrid--0.1.0--0.1.1.sql`
+- SQL install scripts: `sql/pgturbohybrid--0.2.0.sql` (current default),
+  `sql/pgturbohybrid--0.1.1.sql`, `sql/pgturbohybrid--0.1.0.sql`, and upgrades
+  `sql/pgturbohybrid--0.1.0--0.1.1.sql` and
+  `sql/pgturbohybrid--0.1.1--0.1.2.sql`
 - Extension dependency: `requires = 'vector'`
 - Build model: PGXS build against an already-installed PostgreSQL and pgvector
 
@@ -123,6 +124,23 @@ whose names could reasonably be mistaken for pgvector-owned objects.
 If a dedicated schema is introduced later, SQL objects may instead be scoped in
 that schema, but the extension should still keep externally visible names
 unambiguous.
+
+## Native graph deletion and topology repair
+
+Native graph node IDs are append-only between REINDEX operations. PostgreSQL
+heap visibility remains authoritative: deletion marks the node dead, and every
+result, payload, fusion, and rerank path excludes dead nodes. Traversal treats
+liveness differently from return eligibility. A dead node can still be scored
+and expanded so that deleting a hub does not disconnect live regions.
+
+VACUUM repairs topology under the graph scan lock, independently at every graph
+level. Its bounded candidate pool contains a dead node's live neighbors and
+their live neighbors. A dead incoming reference is removed only when the repair
+can install a same-level reciprocal live edge; otherwise the dead bridge is
+preserved. Adjacency and entry-point changes are WAL logged, and the graph
+generation advances once for the mutation phase. Global and segment entry
+points are repaired deterministically by highest level and then smallest node
+ID within the permitted range. REINDEX is the compaction operation.
 
 ## C Symbol Naming
 
@@ -557,7 +575,7 @@ The PGXS build uses:
 ```make
 EXTENSION = pgturbohybrid
 MODULE_big = pgturbohybrid
-DATA = sql/pgturbohybrid--0.1.0.sql sql/pgturbohybrid--0.1.1.sql sql/pgturbohybrid--0.1.0--0.1.1.sql
+DATA = sql/pgturbohybrid--0.1.0.sql sql/pgturbohybrid--0.1.1.sql sql/pgturbohybrid--0.1.2.sql sql/pgturbohybrid--0.2.0.sql sql/pgturbohybrid_experimental--0.2.0.sql sql/pgturbohybrid--0.1.0--0.1.1.sql sql/pgturbohybrid--0.1.1--0.1.2.sql sql/pgturbohybrid--0.1.2--0.2.0.sql
 PG_CONFIG ?= pg_config
 ```
 

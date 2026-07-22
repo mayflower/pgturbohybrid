@@ -36,7 +36,7 @@ sub feature_objects
 				SELECT 1
 				FROM pg_extension e
 				WHERE e.extname = 'pgturbohybrid'
-				  AND e.extversion <> '0.1.1'
+				  AND e.extversion <> '0.2.0'
 			)
 		);
 	));
@@ -47,6 +47,16 @@ $node->safe_psql('pgturbohybrid_create', 'CREATE EXTENSION vector;');
 my $vector_version = $node->safe_psql('pgturbohybrid_create',
 	"SELECT extversion FROM pg_extension WHERE extname = 'vector';");
 $node->safe_psql('pgturbohybrid_create', 'CREATE EXTENSION pgturbohybrid;');
+
+is($node->safe_psql('pgturbohybrid_create', q(
+	SELECT concat_ws(',',
+		to_regtype('turbohybrid_sparse_vector') IS NULL,
+		to_regtype('turbohybrid_multivector') IS NULL,
+		NOT EXISTS (SELECT 1 FROM pg_opclass WHERE opcname = 'sparse_ip_turbohybrid_ops'),
+		NOT EXISTS (SELECT 1 FROM pg_opclass WHERE opcname IN
+			('multivector_cosine_turbohybrid_ops',
+			 'multivector_maxsim_ip_turbohybrid_ops')));
+)), 't,t,t,t', 'core-only install excludes experimental catalog objects');
 
 is(feature_objects('pgturbohybrid_create'), 't,t,t,t,t,t,t,t,t,t,t,t',
 	'CREATE EXTENSION installs only pgturbohybrid objects on top of vector');
@@ -88,6 +98,17 @@ is($node->safe_psql('pgturbohybrid_create', q(
 is($node->safe_psql('pgturbohybrid_create',
 	"SELECT extversion FROM pg_extension WHERE extname = 'vector';"),
 	$vector_version, 'CREATE EXTENSION pgturbohybrid does not alter vector');
+
+$node->safe_psql('pgturbohybrid_create', 'CREATE EXTENSION pgturbohybrid_experimental;');
+is($node->safe_psql('pgturbohybrid_create', q(
+	SELECT concat_ws(',',
+		to_regtype('turbohybrid_sparse_vector') IS NOT NULL,
+		to_regtype('turbohybrid_multivector') IS NOT NULL,
+		EXISTS (SELECT 1 FROM pg_opclass WHERE opcname = 'sparse_ip_turbohybrid_ops'),
+		EXISTS (SELECT 1 FROM pg_opclass WHERE opcname = 'multivector_maxsim_ip_turbohybrid_ops'));
+)), 't,t,t,t', 'companion install adds sparse and multivector objects');
+
+$node->safe_psql('pgturbohybrid_create', 'DROP EXTENSION pgturbohybrid_experimental;');
 
 $node->safe_psql('pgturbohybrid_create', 'DROP EXTENSION pgturbohybrid;');
 

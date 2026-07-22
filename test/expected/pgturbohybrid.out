@@ -10,6 +10,7 @@ END
 $$;
 CREATE EXTENSION vector;
 CREATE EXTENSION pgturbohybrid;
+CREATE EXTENSION pgturbohybrid_experimental;
 SET enable_seqscan = off;
 DO $$
 BEGIN
@@ -618,7 +619,20 @@ VACUUM tqh_segment_docs;
 DO $$
 DECLARE
 	result_count int;
+	stats jsonb;
 BEGIN
+	stats := turbohybrid_index_stats('tqh_segment_docs_idx'::regclass);
+	IF (stats->>'live_nodes')::int <> 5 OR
+		(stats->>'dead_nodes')::int < 1 OR
+		(stats->>'live_entry_node')::bigint < 0 OR
+		NOT stats ? 'dead_bridge_nodes' OR
+		NOT stats ? 'avg_live_degree_level0' OR
+		NOT stats ? 'dead_neighbor_refs' OR
+		NOT stats ? 'reindex_recommended' OR
+		NOT stats ? 'reindex_reason' THEN
+		RAISE EXCEPTION 'unexpected native vacuum diagnostics: %', stats;
+	END IF;
+
 	SELECT count(*) INTO result_count
 	FROM (
 		SELECT id
@@ -638,6 +652,66 @@ BEGIN
 END
 $$;
 DROP INDEX tqh_segment_docs_idx;
+-- Native VACUUM must preserve routing across deleted entry/hub candidates and
+-- append-only churn.  Compare the graph result with an exact heap-vector oracle
+-- for fixed queries after two mutation cycles.
+CREATE TABLE tqh_vacuum_topology_docs (
+	id int PRIMARY KEY,
+	embedding vector(2) NOT NULL
+);
+INSERT INTO tqh_vacuum_topology_docs
+SELECT g, format('[%s,%s]', g, g % 7)::vector
+FROM generate_series(1, 64) AS g;
+CREATE INDEX tqh_vacuum_topology_idx ON tqh_vacuum_topology_docs
+USING turbohybrid (embedding vector_l2_turbohybrid_ops)
+WITH (graph_m = 4, graph_ef_construction = 64, graph_ef_search = 128,
+	  exact_storage = on);
+DELETE FROM tqh_vacuum_topology_docs
+WHERE id IN (1, 2, 3, 16, 17, 31, 32, 33, 48, 63, 64);
+VACUUM tqh_vacuum_topology_docs;
+INSERT INTO tqh_vacuum_topology_docs
+SELECT g, format('[%s,%s]', g, g % 7)::vector
+FROM generate_series(65, 80) AS g;
+DELETE FROM tqh_vacuum_topology_docs WHERE id % 11 = 0;
+SET client_min_messages = error;
+VACUUM tqh_vacuum_topology_docs;
+RESET client_min_messages;
+DO $$
+DECLARE
+	query vector;
+	exact_id int;
+	graph_id int;
+	stats jsonb;
+BEGIN
+	FOREACH query IN ARRAY ARRAY['[4,4]'::vector, '[29,1]'::vector,
+								 '[70,0]'::vector]
+	LOOP
+		SET LOCAL enable_indexscan = off;
+		SELECT id INTO exact_id
+		FROM tqh_vacuum_topology_docs
+		ORDER BY embedding <-> query, id
+		LIMIT 1;
+		SET LOCAL enable_indexscan = on;
+		SET LOCAL enable_seqscan = off;
+		SELECT id INTO graph_id
+		FROM tqh_vacuum_topology_docs
+		ORDER BY embedding <~-> turbohybrid_query(
+			vector_query => query, dense_k => 32, final_k => 1)
+		LIMIT 1;
+		IF graph_id IS DISTINCT FROM exact_id THEN
+			RAISE EXCEPTION 'post-vacuum graph/oracle mismatch for %: graph %, exact %',
+				query, graph_id, exact_id;
+		END IF;
+	END LOOP;
+	stats := turbohybrid_index_stats('tqh_vacuum_topology_idx'::regclass);
+	IF (stats->>'live_nodes')::int <> (SELECT count(*) FROM tqh_vacuum_topology_docs) OR
+		(stats->>'dead_nodes')::int = 0 OR
+		(stats->>'live_entry_node')::int < 0 THEN
+		RAISE EXCEPTION 'unexpected churn topology stats: %', stats;
+	END IF;
+END
+$$;
+DROP TABLE tqh_vacuum_topology_docs;
 CREATE INDEX tqh_segment_docs_idx ON tqh_segment_docs
 USING turbohybrid (embedding vector_cosine_turbohybrid_ops)
 WITH (native_segments = 4, quantization_bits = 4, exact_storage = off);
@@ -2938,7 +3012,6 @@ BEGIN
 			'turbohybrid_last_build_stats',
 			'turbohybrid_last_scan_diagnosis',
 			'turbohybrid_last_scan_stats',
-			'turbohybrid_multivector_proxy_diagnostics',
 			'turbohybrid_prewarm',
 			'turbohybrid_simd_capabilities'
 		);
@@ -2949,7 +3022,6 @@ BEGIN
 		'turbohybrid_last_build_stats',
 		'turbohybrid_last_scan_diagnosis',
 		'turbohybrid_last_scan_stats',
-		'turbohybrid_multivector_proxy_diagnostics',
 		'turbohybrid_prewarm',
 		'turbohybrid_simd_capabilities'
 	] THEN
@@ -2990,6 +3062,11 @@ BEGIN
 		'build_worker_count',
 		'build_write_us',
 		'correction_us',
+		'avg_live_degree_level0',
+		'dead_bridge_nodes',
+		'dead_neighbor_refs',
+		'dead_node_ratio',
+		'dead_nodes',
 		'dense_build_distance_mode',
 		'dense_build_exact_distances',
 		'dimensions',
@@ -3015,6 +3092,8 @@ BEGIN
 			'learned_projection_loaded',
 			'learned_projection_model',
 			'learned_projection_weight_bytes',
+			'live_entry_node',
+			'live_nodes',
 			'multivector_centroid_count',
 			'multivector_centroids',
 			'multivector_context_mode',
@@ -3036,6 +3115,8 @@ BEGIN
 			'proxy_only_index',
 			'quantized_inverted_sidecar_available',
 		'quantization_bits',
+		'reindex_reason',
+		'reindex_recommended',
 		'residual_rerank_bytes',
 		'residual_rerank_storage_bytes',
 		'routing',

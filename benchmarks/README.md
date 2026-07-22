@@ -9,6 +9,21 @@ Public benchmark explanations live under `docs/benchmarks/`. This directory is
 for reproducible tooling, acceptance thresholds, and developer benchmark
 helpers. Developer-only workflows are documented in `benchmarks/dev/README.md`.
 
+## Reporting contract
+
+Quality is the first release gate. Every comparative report publishes the fixed
+seed and dataset/query provenance, recall@k and nDCG@k, latency p50/p95/p99,
+QPS, cold and warm runs at 1/8/32 clients, build time, index size, peak memory,
+and WAL bytes. Raw per-query samples remain CI artifacts; summaries use the
+median of repeated runs. A named baseline identifies its version, commit,
+configuration, hardware, PostgreSQL version, and cache state. Do not publish a
+speed claim without the corresponding quality and provenance fields.
+
+`benchmarks/tools/check_recall_gate.py` is the deterministic PR gate. It checks
+dense and high-recall quality, native-index/kernel use, bounded candidates, and
+absence of dead results or linear fallback. It deliberately has no wall-clock
+threshold; scheduled performance jobs own repeated latency regression analysis.
+
 ## Nix integration
 
 The Nix flake separates deterministic development checks from benchmark
@@ -234,11 +249,10 @@ normal document-node graph path and requires `--multivector-graph document_nodes
 uses the persisted fixed-dimensional proxy encoder as the single-vector
 TurboQuant graph key for admission, then exact-reranks admitted documents with
 full MaxSim. Use it with `--multivector-graph document_nodes`.
-`--multivector-proxy-encoder normalized_mean|first_token|centroid_mean|mean_pool|max_pool|random_projection_fde|learned_projection_placeholder|learned_projection_v1`
+`--multivector-proxy-encoder normalized_mean|first_token|centroid_mean|mean_pool|max_pool|random_projection_fde|learned_projection_v1`
 selects the proxy encoder for the index build; `normalized_mean` is the default
 document proxy, `centroid_mean` requires `--multivector-centroids kmeans`,
-`mean_pool` remains a compatibility encoder, `learned_projection_placeholder`
-fails explicitly, and `learned_projection_v1` requires
+`mean_pool` remains a compatibility encoder, and `learned_projection_v1` requires
 `--multivector-learned-projection-path`. The admission grid can compare
 practical built-in encoders with
 `--document-node-proxy-encoder-grid normalized_mean,centroid_mean,max_pool,random_projection_fde`.

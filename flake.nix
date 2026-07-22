@@ -125,7 +125,7 @@
               }:
               postgresqlBuildExtension {
                 pname = "pgturbohybrid";
-                version = "0.1.1";
+                version = "0.2.0";
                 src = cleanSource;
                 enableUpdateScript = false;
 
@@ -160,7 +160,7 @@
               }:
               postgresqlBuildExtension {
                 pname = "pg_colbert_llama";
-                version = "0.1.1";
+                version = "0.2.0";
                 src = cleanSource;
                 sourceRoot = "source/extensions/pg_colbert_llama";
                 enableUpdateScript = false;
@@ -301,6 +301,7 @@
                 psql --host="$PGHOST" --port="$TH_PGPORT" --username="$PGUSER" --dbname="$PGDATABASE" -v ON_ERROR_STOP=1 <<'SQL'
                 CREATE EXTENSION IF NOT EXISTS vector;
                 CREATE EXTENSION IF NOT EXISTS pgturbohybrid;
+                CREATE EXTENSION IF NOT EXISTS pgturbohybrid_experimental;
                 CREATE EXTENSION IF NOT EXISTS llama_embed;
                 CREATE EXTENSION IF NOT EXISTS pg_colbert_llama;
                 SQL
@@ -383,6 +384,7 @@
                 psql --host="$PGHOST" --port="$TH_PGPORT" --username="$PGUSER" --dbname="$PGDATABASE" -v ON_ERROR_STOP=1 <<'SQL'
                 CREATE EXTENSION IF NOT EXISTS vector;
                 CREATE EXTENSION IF NOT EXISTS pgturbohybrid;
+                CREATE EXTENSION IF NOT EXISTS pgturbohybrid_experimental;
                 CREATE EXTENSION IF NOT EXISTS llama_embed;
                 CREATE EXTENSION IF NOT EXISTS pg_colbert_llama;
                 SQL

@@ -133,3 +133,55 @@ jobs:
         run: |
           make clean
           scan-build --status-bugs --keep-going make MATH_MODE=strict
+
+  sanitizers:
+    name: asan ubsan full suite
+    runs-on: ubuntu-24.04
+    env:
+      PG_CONFIG: /usr/lib/postgresql/18/bin/pg_config
+      CC: clang
+      CFLAGS: -O1 -g -fsanitize=address,undefined -fno-omit-frame-pointer
+      LDFLAGS: -fsanitize=address,undefined
+      ASAN_OPTIONS: detect_leaks=0:halt_on_error=1
+      UBSAN_OPTIONS: halt_on_error=1:print_stacktrace=1
+    steps:
+      - uses: actions/checkout@v6
+      - uses: ankane/setup-postgres@v1
+        with:
+          postgres-version: 18
+          dev-files: true
+      - name: Build and install pgvector headers
+        run: |
+          git clone --depth 1 --branch v0.8.2 https://github.com/pgvector/pgvector.git "$RUNNER_TEMP/pgvector"
+          make -C "$RUNNER_TEMP/pgvector"
+          sudo --preserve-env=PG_CONFIG make -C "$RUNNER_TEMP/pgvector" install
+      - name: Run regression and TAP with sanitizers
+        run: |
+          make clean all
+          sudo --preserve-env=PG_CONFIG,CFLAGS,LDFLAGS make install
+          make installcheck
+          make prove_installcheck
+
+  arm64-runtime:
+    name: linux arm64 runtime
+    runs-on: ubuntu-24.04-arm
+    env:
+      PG_CONFIG: /usr/lib/postgresql/17/bin/pg_config
+    steps:
+      - uses: actions/checkout@v6
+      - uses: ankane/setup-postgres@v1
+        with:
+          postgres-version: 17
+          dev-files: true
+      - name: Build upstream pgvector
+        run: |
+          git clone --depth 1 --branch v0.8.2 https://github.com/pgvector/pgvector.git "$RUNNER_TEMP/pgvector"
+          make -C "$RUNNER_TEMP/pgvector"
+          sudo --preserve-env=PG_CONFIG make -C "$RUNNER_TEMP/pgvector" install
+      - name: Build and execute on arm64
+        run: |
+          test "$(uname -m)" = aarch64
+          make clean all
+          sudo --preserve-env=PG_CONFIG make install
+          make installcheck
+          make prove_installcheck

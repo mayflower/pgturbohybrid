@@ -1336,6 +1336,8 @@ PgturbohybridGraphNativeCacheReasonName(int reason)
 			return "shared_build_timeout";
 		case PGTURBOHYBRID_GRAPH_NATIVE_CACHE_REASON_SHARED_ATTACH_FAILED:
 			return "shared_attach_failed";
+		case PGTURBOHYBRID_GRAPH_NATIVE_CACHE_REASON_SHARED_INVALIDATED:
+			return "shared_invalidated";
 		case PGTURBOHYBRID_GRAPH_NATIVE_CACHE_REASON_NONE:
 		default:
 			return "none";

@@ -73,7 +73,8 @@ PgturbohybridSparsePrimaryCreateMeta(Relation index, ForkNumber forkNum)
 
 	memset(metap, 0, sizeof(PgturbohybridGraphMetaPageData));
 	metap->magicNumber = PGTURBOHYBRID_GRAPH_MAGIC_NUMBER;
-	metap->version = PGTURBOHYBRID_GRAPH_VERSION;
+	metap->version = PGTURBOHYBRID_GRAPH_NATIVE_VERSION;
+	metap->graphGeneration = 1;
 	metap->storageKind = PGTURBOHYBRID_GRAPH_STORAGE_QUANT_GRAPH_NATIVE;
 	/*
 	 * No dense graph, but keep m/efConstruction at their sane reloption defaults

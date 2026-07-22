@@ -11,6 +11,7 @@ $$;
 
 CREATE EXTENSION vector;
 CREATE EXTENSION pgturbohybrid;
+CREATE EXTENSION pgturbohybrid_experimental;
 
 DO $$
 DECLARE
@@ -67,6 +68,7 @@ BEGIN
 		'turbohybrid.dense_uncertainty_retry',
 		'turbohybrid.dense_uncertainty_retry_max_passes',
 		'turbohybrid.dense_uncertainty_retry_multiplier',
+		'turbohybrid.dev.disable_executor_controller',
 		'turbohybrid.enable_sparse_wand',
 		'turbohybrid.enable_wand',
 		'turbohybrid.fast_weighted_score_bound_pruning',
@@ -598,7 +600,7 @@ $$;
 
 DO $$
 BEGIN
-	IF turbohybrid_query_out(turbohybrid_query(
+	IF turbohybrid_query_out(turbohybrid_experimental_query(
 		vector_query => '[1,0,0]'::vector,
 		text_query => websearch_to_tsquery('english', 'postgres'),
 		fusion => 'calibrated',
@@ -677,7 +679,7 @@ $$;
 
 DO $$
 BEGIN
-	IF turbohybrid_query_out(turbohybrid_query(
+	IF turbohybrid_query_out(turbohybrid_experimental_query(
 		multivector_query => turbohybrid_multivector(ARRAY['[1,0,0]'::vector, '[0,1,0]'::vector])
 	))::text != 'turbohybrid_query(fusion=rrf,vector=false,multivector=true,tsquery=false,dense_weight=1,multivector_weight=1,bm25_weight=1,alpha=null,rrf_k=60,dense_k=100,multivector_k=100,bm25_k=100,final_k=null,require_bm25_match=false)' THEN
 		RAISE EXCEPTION 'unexpected multivector query output';
@@ -687,7 +689,7 @@ $$;
 
 DO $$
 BEGIN
-	IF turbohybrid_query_out(turbohybrid_query(
+	IF turbohybrid_query_out(turbohybrid_experimental_query(
 		text_query => websearch_to_tsquery('english', 'postgres'),
 		multivector_query => turbohybrid_multivector(ARRAY['[1,0,0]'::vector, '[0,1,0]'::vector])
 	))::text != 'turbohybrid_query(fusion=rrf,vector=false,multivector=true,tsquery=true,dense_weight=1,multivector_weight=1,bm25_weight=1,alpha=null,rrf_k=60,dense_k=100,multivector_k=100,bm25_k=100,final_k=null,require_bm25_match=false)' THEN
@@ -698,7 +700,7 @@ $$;
 
 DO $$
 BEGIN
-	IF turbohybrid_query_out(turbohybrid_query(
+	IF turbohybrid_query_out(turbohybrid_experimental_query(
 		vector_query => '[1,0,0]'::vector,
 		multivector_query => turbohybrid_multivector(ARRAY['[1,0,0]'::vector]),
 		multivector_weight => 2.5,

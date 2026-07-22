@@ -18,13 +18,13 @@ SET enable_seqscan = off;
 
 -- The planner uses the sparse-primary index for the <~*> ORDER BY.
 EXPLAIN (COSTS OFF)
-SELECT id FROM spp ORDER BY s <~*> turbohybrid_query(
+SELECT id FROM spp ORDER BY s <~*> turbohybrid_experimental_query(
   sparse_query => turbohybrid_sparse_vector_build(ARRAY[2]::int4[], ARRAY[1.0]::float4[])) LIMIT 10;
 
 -- Base ranking: descending weight -> doc3, doc2, doc1 (distance = -inner product).
-SELECT id, round((s <~*> turbohybrid_query(
+SELECT id, round((s <~*> turbohybrid_experimental_query(
   sparse_query => turbohybrid_sparse_vector_build(ARRAY[2]::int4[], ARRAY[1.0]::float4[])))::numeric, 2) AS dist
-FROM spp ORDER BY s <~*> turbohybrid_query(
+FROM spp ORDER BY s <~*> turbohybrid_experimental_query(
   sparse_query => turbohybrid_sparse_vector_build(ARRAY[2]::int4[], ARRAY[1.0]::float4[])) LIMIT 10;
 
 -- The scan ran through the native sparse branch (not a heap rescan).
@@ -32,7 +32,7 @@ DO $$
 DECLARE st jsonb;
 BEGIN
   SET LOCAL enable_seqscan = off;
-  PERFORM id FROM spp ORDER BY s <~*> turbohybrid_query(
+  PERFORM id FROM spp ORDER BY s <~*> turbohybrid_experimental_query(
     sparse_query => turbohybrid_sparse_vector_build(ARRAY[2]::int4[], ARRAY[1.0]::float4[])) LIMIT 10;
   st := turbohybrid_last_scan_stats();
   IF st->>'index_shape' != 'sparse' THEN
@@ -45,17 +45,17 @@ END $$;
 
 -- INSERT after build: doc4 weight 25 is searchable via the delta (rank between 2 and 3).
 INSERT INTO spp VALUES (4, turbohybrid_sparse_vector_build(ARRAY[2]::int4[], ARRAY[25.0]::float4[]));
-SELECT id FROM spp ORDER BY s <~*> turbohybrid_query(
+SELECT id FROM spp ORDER BY s <~*> turbohybrid_experimental_query(
   sparse_query => turbohybrid_sparse_vector_build(ARRAY[2]::int4[], ARRAY[1.0]::float4[])) LIMIT 10;
 
 -- UPDATE doc1 -> weight 40 (now the top match); the old node is filtered by MVCC.
 UPDATE spp SET s = turbohybrid_sparse_vector_build(ARRAY[2]::int4[], ARRAY[40.0]::float4[]) WHERE id = 1;
-SELECT id FROM spp ORDER BY s <~*> turbohybrid_query(
+SELECT id FROM spp ORDER BY s <~*> turbohybrid_experimental_query(
   sparse_query => turbohybrid_sparse_vector_build(ARRAY[2]::int4[], ARRAY[1.0]::float4[])) LIMIT 10;
 
 -- DELETE doc3 (weight 30): it must not appear.
 DELETE FROM spp WHERE id = 3;
-SELECT id FROM spp ORDER BY s <~*> turbohybrid_query(
+SELECT id FROM spp ORDER BY s <~*> turbohybrid_experimental_query(
   sparse_query => turbohybrid_sparse_vector_build(ARRAY[2]::int4[], ARRAY[1.0]::float4[])) LIMIT 10;
 
 -- base+delta ranking == REINDEX ranking (REINDEX rebuilds the base from the heap).
@@ -64,11 +64,11 @@ DECLARE before_ids int[]; after_ids int[];
 BEGIN
   SET LOCAL enable_seqscan = off;
   SELECT array_agg(id) INTO before_ids FROM (
-    SELECT id FROM spp ORDER BY s <~*> turbohybrid_query(
+    SELECT id FROM spp ORDER BY s <~*> turbohybrid_experimental_query(
       sparse_query => turbohybrid_sparse_vector_build(ARRAY[2]::int4[], ARRAY[1.0]::float4[])) LIMIT 10) q;
   REINDEX INDEX spp_idx;
   SELECT array_agg(id) INTO after_ids FROM (
-    SELECT id FROM spp ORDER BY s <~*> turbohybrid_query(
+    SELECT id FROM spp ORDER BY s <~*> turbohybrid_experimental_query(
       sparse_query => turbohybrid_sparse_vector_build(ARRAY[2]::int4[], ARRAY[1.0]::float4[])) LIMIT 10) q;
   IF before_ids IS DISTINCT FROM after_ids THEN
     RAISE EXCEPTION 'base+delta ranking % != REINDEX ranking %', before_ids, after_ids;
@@ -88,21 +88,21 @@ CREATE INDEX sppb_idx ON sppb USING turbohybrid
   WITH (sparse_quant_bits = 0);
 
 -- Pure-sparse ORDER BY on a sparse+BM25 primary index.
-SELECT id FROM sppb ORDER BY s <~*> turbohybrid_query(
+SELECT id FROM sppb ORDER BY s <~*> turbohybrid_experimental_query(
   sparse_query => turbohybrid_sparse_vector_build(ARRAY[2]::int4[], ARRAY[1.0]::float4[])) LIMIT 10;
 
 -- Sparse + text RRF fusion on the same index (both branches key on the node map).
-SELECT id FROM sppb ORDER BY s <~*> turbohybrid_query(
+SELECT id FROM sppb ORDER BY s <~*> turbohybrid_experimental_query(
   sparse_query => turbohybrid_sparse_vector_build(ARRAY[2]::int4[], ARRAY[1.0]::float4[]),
   text_query => to_tsquery('english','fruit'), fusion => 'rrf') LIMIT 10;
 
 -- Insert + delete propagate to the pure-sparse ranking.
 INSERT INTO sppb VALUES (4, to_tsvector('english','fruit salad'),
   turbohybrid_sparse_vector_build(ARRAY[2]::int4[], ARRAY[25.0]::float4[]));
-SELECT id FROM sppb ORDER BY s <~*> turbohybrid_query(
+SELECT id FROM sppb ORDER BY s <~*> turbohybrid_experimental_query(
   sparse_query => turbohybrid_sparse_vector_build(ARRAY[2]::int4[], ARRAY[1.0]::float4[])) LIMIT 10;
 DELETE FROM sppb WHERE id = 3;
-SELECT id FROM sppb ORDER BY s <~*> turbohybrid_query(
+SELECT id FROM sppb ORDER BY s <~*> turbohybrid_experimental_query(
   sparse_query => turbohybrid_sparse_vector_build(ARRAY[2]::int4[], ARRAY[1.0]::float4[])) LIMIT 10;
 
 DROP TABLE sppb;
@@ -114,7 +114,7 @@ CREATE INDEX spe_idx ON spe USING turbohybrid (s sparse_ip_turbohybrid_ops)
 INSERT INTO spe VALUES
   (1, turbohybrid_sparse_vector_build(ARRAY[5]::int4[], ARRAY[3.0]::float4[])),
   (2, turbohybrid_sparse_vector_build(ARRAY[5]::int4[], ARRAY[7.0]::float4[]));
-SELECT id FROM spe ORDER BY s <~*> turbohybrid_query(
+SELECT id FROM spe ORDER BY s <~*> turbohybrid_experimental_query(
   sparse_query => turbohybrid_sparse_vector_build(ARRAY[5]::int4[], ARRAY[1.0]::float4[])) LIMIT 10;
 DROP TABLE spe;
 

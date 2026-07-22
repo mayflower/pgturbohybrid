@@ -8,31 +8,42 @@
 SET client_min_messages = warning;
 CREATE EXTENSION IF NOT EXISTS vector;
 CREATE EXTENSION IF NOT EXISTS pgturbohybrid;
+CREATE EXTENSION IF NOT EXISTS pgturbohybrid_experimental;
 RESET client_min_messages;
 
-SELECT DISTINCT kind || '|' || name || '|' || COALESCE(maturity, '(none)') AS api_object
-FROM (
+WITH objects AS (
   SELECT 'type'::text AS kind, t.typname AS name,
          substring(obj_description(t.oid, 'pg_type') from '\[([^]]+)\]') AS maturity,
-         1 AS ord
+         t.oid AS object_oid, 'pg_type'::regclass AS class_oid
     FROM pg_type t
     WHERE t.typname IN ('turbohybrid_query', 'turbohybrid_sparse_vector',
-                        'turbohybrid_multivector', 'multivector')
+                        'turbohybrid_multivector')
   UNION ALL
   SELECT 'opclass', oc.opcname,
-         substring(obj_description(oc.oid, 'pg_opclass') from '\[([^]]+)\]'), 2
+         substring(obj_description(oc.oid, 'pg_opclass') from '\[([^]]+)\]'),
+         oc.oid, 'pg_opclass'::regclass
     FROM pg_opclass oc JOIN pg_am a ON a.oid = oc.opcmethod
     WHERE a.amname = 'turbohybrid'
   UNION ALL
   SELECT 'operator', o.oprname || '(' || format_type(o.oprleft, NULL) || ')',
-         substring(obj_description(o.oid, 'pg_operator') from '\[([^]]+)\]'), 3
+         substring(obj_description(o.oid, 'pg_operator') from '\[([^]]+)\]'),
+         o.oid, 'pg_operator'::regclass
     FROM pg_operator o
     WHERE o.oprname IN ('<~>', '<~->', '<~#>', '<~*>')
       AND o.oprright = 'turbohybrid_query'::regtype
   UNION ALL
   SELECT 'function', p.proname,
-         substring(obj_description(p.oid, 'pg_proc') from '\[([^]]+)\]'), 4
+         substring(obj_description(p.oid, 'pg_proc') from '\[([^]]+)\]'),
+         p.oid, 'pg_proc'::regclass
     FROM pg_proc p
     WHERE p.proname LIKE 'turbohybrid\_%'
-) s
+)
+SELECT DISTINCT e.extname || '|' || kind || '|' || name || '|' ||
+       COALESCE(maturity, '(none)') AS api_object
+FROM objects o
+JOIN pg_depend d ON d.classid = o.class_oid
+                AND d.objid = o.object_oid
+                AND d.deptype = 'e'
+JOIN pg_extension e ON e.oid = d.refobjid
+WHERE e.extname IN ('pgturbohybrid', 'pgturbohybrid_experimental')
 ORDER BY 1;

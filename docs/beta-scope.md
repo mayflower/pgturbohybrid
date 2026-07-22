@@ -26,7 +26,8 @@ support.
   `turbohybrid_last_scan_stats()` (its **stable** keys, per
   [diagnostics-schema.md](diagnostics-schema.md)),
   `turbohybrid_last_scan_diagnosis()`, `turbohybrid_index_stats()`,
-  `turbohybrid_estimate_memory()`, and `turbohybrid_simd_capabilities()`.
+  `turbohybrid_estimate_memory()`, `turbohybrid_validate_index()`, and
+  `turbohybrid_simd_capabilities()`.
 - **Install / build / package surfaces** — `CREATE EXTENSION pgturbohybrid`
   over an unmodified pgvector, the PGXS build, and the documented version range.
 
@@ -42,7 +43,8 @@ not be read as production-ready:
 
 - **Sparse / learned-sparse (SPLADE)** retrieval — `turbohybrid_sparse_vector`,
   `sparse_ip_turbohybrid_ops`, `<~*>`.
-- **Multivector / ColBERT late interaction** — the `multivector` type, its
+- **Multivector / ColBERT late interaction** — the
+  `turbohybrid_multivector` type, its
   opclasses, and the native ColBERT candidate sources. The document-node build
   scaling limitation is a **beta blocker for the multivector feature**
   (tracked in
@@ -53,6 +55,10 @@ not be read as production-ready:
   not need it to use any in-scope feature.
 - **Score-level fusion modes** (`weighted`, `fast_weighted`, `calibrated`,
   `dbsf`), and **developer/benchmark GUCs and scoring probes**.
+
+All SQL objects in this section require the explicit companion install
+`CREATE EXTENSION pgturbohybrid_experimental`; the core extension never installs
+them implicitly.
 
 ## Why narrow
 

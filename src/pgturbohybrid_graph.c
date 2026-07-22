@@ -213,6 +213,8 @@ PgturbohybridMemoryCacheReasonName(PgturbohybridGraphNativeCacheReason reason)
 			return "shared_build_timeout";
 		case PGTURBOHYBRID_GRAPH_NATIVE_CACHE_REASON_SHARED_ATTACH_FAILED:
 			return "shared_attach_failed";
+		case PGTURBOHYBRID_GRAPH_NATIVE_CACHE_REASON_SHARED_INVALIDATED:
+			return "shared_invalidated";
 		case PGTURBOHYBRID_GRAPH_NATIVE_CACHE_REASON_NONE:
 		default:
 			return "none";
@@ -965,6 +967,16 @@ pgturbohybrid_index_stats(PG_FUNCTION_ARGS)
 	bool		quantizedInvertedSidecarAvailable;
 	int			effectiveMultivectorDocStorage;
 	const char *exactRerankSourceSupported;
+	int64		liveNodes = 0;
+	int64		deadNodes = 0;
+	int64		adjacencyRefs = 0;
+	int64		deadNeighborRefs = 0;
+	int64		deadBridgeNodes = 0;
+	double		avgLiveDegreeLevel0 = 0.0;
+	double		deadNodeRatio = 0.0;
+	uint32		liveEntryNode = UINT_MAX;
+	bool		reindexRecommended = false;
+	const char *reindexReason = "none";
 
 	index = index_open(indexOid, AccessShareLock);
 	opts = (PgturbohybridOptions *) index->rd_options;
@@ -1028,6 +1040,24 @@ pgturbohybrid_index_stats(PG_FUNCTION_ARGS)
 	hasLexicalKey = PgturbohybridIndexHasLexical(index);
 	modelInfo =
 		PgturbohybridMultiVectorLookupModel(pgturbohybrid_multivector_model_name);
+	PgturbohybridGraphCollectVacuumStats(index, &meta, &liveNodes, &deadNodes,
+										 &adjacencyRefs, &deadNeighborRefs,
+										 &deadBridgeNodes,
+										 &avgLiveDegreeLevel0,
+										 &liveEntryNode);
+	if (liveNodes + deadNodes > 0)
+		deadNodeRatio = (double) deadNodes / (double) (liveNodes + deadNodes);
+	if (deadNodeRatio >= 0.20)
+	{
+		reindexRecommended = true;
+		reindexReason = "dead_node_ratio_at_least_0.20";
+	}
+	else if (adjacencyRefs > 0 &&
+			 (double) deadNeighborRefs / (double) adjacencyRefs >= 0.25)
+	{
+		reindexRecommended = true;
+		reindexReason = "dead_neighbor_ref_ratio_at_least_0.25";
+	}
 
 	if (BlockNumberIsValid(tqBm25MetaStartBlkno))
 	{
@@ -1262,6 +1292,23 @@ pgturbohybrid_index_stats(PG_FUNCTION_ARGS)
 										  (uint64) nblocks * BLCKSZ);
 	PgturbohybridIndexStatsJsonbAddUInt32(&jsonState, "node_count",
 										  meta.tqNodeCount);
+	PgturbohybridIndexStatsJsonbAddUInt64(&jsonState, "live_nodes", liveNodes);
+	PgturbohybridIndexStatsJsonbAddUInt64(&jsonState, "dead_nodes", deadNodes);
+	PgturbohybridIndexStatsJsonbAddFloat8(&jsonState, "dead_node_ratio",
+										  deadNodeRatio);
+	PgturbohybridIndexStatsJsonbAddUInt32(&jsonState, "live_entry_node",
+										  liveEntryNode);
+	PgturbohybridIndexStatsJsonbAddUInt64(&jsonState, "dead_bridge_nodes",
+										  deadBridgeNodes);
+	PgturbohybridIndexStatsJsonbAddFloat8(&jsonState,
+										  "avg_live_degree_level0",
+										  avgLiveDegreeLevel0);
+	PgturbohybridIndexStatsJsonbAddUInt64(&jsonState, "dead_neighbor_refs",
+										  deadNeighborRefs);
+	PgturbohybridIndexStatsJsonbAddBool(&jsonState, "reindex_recommended",
+										 reindexRecommended);
+	PgturbohybridIndexStatsJsonbAddString(&jsonState, "reindex_reason",
+										   reindexReason);
 	PgturbohybridIndexStatsJsonbAddUInt32(&jsonState, "dimensions",
 										  meta.dimensions);
 	PgturbohybridIndexStatsJsonbAddUInt32(&jsonState, "graph_m", graphM);

@@ -21,7 +21,7 @@ my $node = PostgreSQL::Test::Cluster->new('multivector_token_cap');
 $node->init;
 $node->start;
 
-$node->safe_psql('postgres', 'CREATE EXTENSION vector; CREATE EXTENSION pgturbohybrid;');
+$node->safe_psql('postgres', 'CREATE EXTENSION vector; CREATE EXTENSION pgturbohybrid; CREATE EXTENSION pgturbohybrid_experimental;');
 
 # Two documents: one with 2 tokens, one with 4 tokens. Document count (2) stays
 # well under the default doc-count guard (1000), so only the token cap can

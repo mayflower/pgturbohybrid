@@ -32,7 +32,7 @@ BEGIN
   SET LOCAL enable_seqscan = off;
   FOR line IN
     EXECUTE 'EXPLAIN (COSTS OFF) SELECT id FROM sp_scan ORDER BY s <~*> '
-            'turbohybrid_query(sparse_query => '
+            'turbohybrid_experimental_query(sparse_query => '
             'turbohybrid_sparse_vector_build(ARRAY[2]::int4[], ARRAY[1.0]::float4[])) LIMIT 10'
   LOOP
     plan := plan || line || E'\n';
@@ -44,32 +44,32 @@ END $$;
 
 -- Query term {2:1.0}: doc2 dot=5, doc4 dot=2, doc1 dot=1; doc3 (no matching
 -- term) is not a candidate.  Index returns matching docs by descending IP.
-SELECT id, round((s <~*> turbohybrid_query(
+SELECT id, round((s <~*> turbohybrid_experimental_query(
   sparse_query => turbohybrid_sparse_vector_build(ARRAY[2]::int4[], ARRAY[1.0]::float4[])))::numeric, 2) AS dist
 FROM sp_scan
-ORDER BY s <~*> turbohybrid_query(
+ORDER BY s <~*> turbohybrid_experimental_query(
   sparse_query => turbohybrid_sparse_vector_build(ARRAY[2]::int4[], ARRAY[1.0]::float4[]))
 LIMIT 10;
 
 -- Two-term query {2:1.0, 5:2.0}: doc4 dot=2*1+3*2=8, doc2 dot=5, doc1 dot=1.
-SELECT id, round((s <~*> turbohybrid_query(
+SELECT id, round((s <~*> turbohybrid_experimental_query(
   sparse_query => turbohybrid_sparse_vector_build(ARRAY[2,5]::int4[], ARRAY[1.0,2.0]::float4[])))::numeric, 2) AS dist
 FROM sp_scan
-ORDER BY s <~*> turbohybrid_query(
+ORDER BY s <~*> turbohybrid_experimental_query(
   sparse_query => turbohybrid_sparse_vector_build(ARRAY[2,5]::int4[], ARRAY[1.0,2.0]::float4[]))
 LIMIT 10;
 
 -- Single rare term {3:2.0}: only doc2 matches (dot=2).
-SELECT id, round((s <~*> turbohybrid_query(
+SELECT id, round((s <~*> turbohybrid_experimental_query(
   sparse_query => turbohybrid_sparse_vector_build(ARRAY[3]::int4[], ARRAY[2.0]::float4[])))::numeric, 2) AS dist
 FROM sp_scan
-ORDER BY s <~*> turbohybrid_query(
+ORDER BY s <~*> turbohybrid_experimental_query(
   sparse_query => turbohybrid_sparse_vector_build(ARRAY[3]::int4[], ARRAY[2.0]::float4[]))
 LIMIT 10;
 
 -- Unknown query term {99:1.0}: no postings -> empty result.
 SELECT id FROM sp_scan
-ORDER BY s <~*> turbohybrid_query(
+ORDER BY s <~*> turbohybrid_experimental_query(
   sparse_query => turbohybrid_sparse_vector_build(ARRAY[99]::int4[], ARRAY[1.0]::float4[]))
 LIMIT 10;
 
@@ -82,16 +82,16 @@ BEGIN
   SET LOCAL enable_seqscan = off;
   SELECT array_agg(id) INTO idx_ids FROM (
     SELECT id FROM sp_scan
-    ORDER BY s <~*> turbohybrid_query(
+    ORDER BY s <~*> turbohybrid_experimental_query(
       sparse_query => turbohybrid_sparse_vector_build(ARRAY[2,5]::int4[], ARRAY[1.0,2.0]::float4[]))
     LIMIT 10) q;
 
   SET LOCAL enable_seqscan = on;
   SELECT array_agg(id) INTO seq_ids FROM (
     SELECT id FROM sp_scan
-    WHERE (s <~*> turbohybrid_query(
+    WHERE (s <~*> turbohybrid_experimental_query(
              sparse_query => turbohybrid_sparse_vector_build(ARRAY[2,5]::int4[], ARRAY[1.0,2.0]::float4[]))) < 0
-    ORDER BY s <~*> turbohybrid_query(
+    ORDER BY s <~*> turbohybrid_experimental_query(
       sparse_query => turbohybrid_sparse_vector_build(ARRAY[2,5]::int4[], ARRAY[1.0,2.0]::float4[]))) q;
 
   IF idx_ids IS DISTINCT FROM seq_ids THEN
@@ -106,7 +106,7 @@ DECLARE
 BEGIN
   SET LOCAL enable_seqscan = off;
   PERFORM id FROM sp_scan
-    ORDER BY s <~*> turbohybrid_query(
+    ORDER BY s <~*> turbohybrid_experimental_query(
       sparse_query => turbohybrid_sparse_vector_build(ARRAY[2,3]::int4[], ARRAY[1.0,1.0]::float4[]))
     LIMIT 10;
   st := turbohybrid_last_scan_stats();
@@ -137,7 +137,7 @@ DECLARE
 BEGIN
   SET LOCAL enable_seqscan = off;
   PERFORM id FROM sp_scan
-    ORDER BY s <~*> turbohybrid_query(
+    ORDER BY s <~*> turbohybrid_experimental_query(
       sparse_query => turbohybrid_sparse_vector_build(ARRAY[2,99]::int4[], ARRAY[1.0,1.0]::float4[]))
     LIMIT 10;
   st := turbohybrid_last_scan_stats();

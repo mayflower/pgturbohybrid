@@ -42,7 +42,7 @@ BEGIN
       EXECUTE format($q$
         SELECT array_agg(id) FROM (
           SELECT id FROM sp_simd
-          ORDER BY s <~*> turbohybrid_query(
+          ORDER BY s <~*> turbohybrid_experimental_query(
             sparse_query => turbohybrid_sparse_vector_build(ARRAY[%s]::int4[], ARRAY[1.0]::float4[]))
           LIMIT 100) q $q$, 1000 + t) INTO ids_on;
 
@@ -50,7 +50,7 @@ BEGIN
       EXECUTE format($q$
         SELECT array_agg(id) FROM (
           SELECT id FROM sp_simd
-          ORDER BY s <~*> turbohybrid_query(
+          ORDER BY s <~*> turbohybrid_experimental_query(
             sparse_query => turbohybrid_sparse_vector_build(ARRAY[%s]::int4[], ARRAY[1.0]::float4[]))
           LIMIT 100) q $q$, 1000 + t) INTO ids_off;
 
@@ -82,7 +82,7 @@ BEGIN
   SET LOCAL turbohybrid.enable_sparse_wand = off;
 
   SET LOCAL turbohybrid.simd = on;
-  PERFORM id FROM sp_simd ORDER BY s <~*> turbohybrid_query(
+  PERFORM id FROM sp_simd ORDER BY s <~*> turbohybrid_experimental_query(
     sparse_query => turbohybrid_sparse_vector_build(ARRAY[1033]::int4[], ARRAY[1.0]::float4[])) LIMIT 100;
   st := turbohybrid_last_scan_stats();
   IF avx2 THEN
@@ -95,7 +95,7 @@ BEGIN
   END IF;
 
   SET LOCAL turbohybrid.simd = off;
-  PERFORM id FROM sp_simd ORDER BY s <~*> turbohybrid_query(
+  PERFORM id FROM sp_simd ORDER BY s <~*> turbohybrid_experimental_query(
     sparse_query => turbohybrid_sparse_vector_build(ARRAY[1033]::int4[], ARRAY[1.0]::float4[])) LIMIT 100;
   st := turbohybrid_last_scan_stats();
   IF st->>'sparse_score_kernel' != 'scalar' OR (st->>'sparse_simd_blocks')::int != 0 THEN

@@ -73,7 +73,7 @@ CREATE INDEX sh_dense_only ON sh USING turbohybrid (embedding vector_cosine_turb
 SET enable_seqscan = off;
 DO $$
 BEGIN
-  PERFORM id FROM sh ORDER BY embedding <~> turbohybrid_query(
+  PERFORM id FROM sh ORDER BY embedding <~> turbohybrid_experimental_query(
     vector_query => '[1,0,0]'::vector,
     sparse_query => turbohybrid_sparse_vector_build(ARRAY[2]::int4[], ARRAY[1.0]::float4[]),
     fusion => 'rrf') LIMIT 5;
@@ -88,7 +88,7 @@ DO $$
 DECLARE st jsonb;
 BEGIN
   SET LOCAL enable_seqscan = off;
-  PERFORM id FROM sh ORDER BY embedding <~> turbohybrid_query(
+  PERFORM id FROM sh ORDER BY embedding <~> turbohybrid_experimental_query(
     vector_query => '[1,0,0]'::vector) LIMIT 3;
   st := turbohybrid_last_scan_stats();
   IF st->>'sparse_branch_used' != 'false'
@@ -104,16 +104,16 @@ CREATE INDEX sh_sp ON sh USING turbohybrid (s sparse_ip_turbohybrid_ops)
   WITH (sparse_quant_bits = 0);
 
 -- term 9 is a high-df term (in every doc); query it + LIMIT.
-SELECT id FROM sh ORDER BY s <~*> turbohybrid_query(
+SELECT id FROM sh ORDER BY s <~*> turbohybrid_experimental_query(
   sparse_query => turbohybrid_sparse_vector_build(ARRAY[9]::int4[], ARRAY[1.0]::float4[])) LIMIT 2;
 
 -- sparse-only ranking by the discriminating term, with LIMIT.
-SELECT id FROM sh ORDER BY s <~*> turbohybrid_query(
+SELECT id FROM sh ORDER BY s <~*> turbohybrid_experimental_query(
   sparse_query => turbohybrid_sparse_vector_build(ARRAY[2]::int4[], ARRAY[1.0]::float4[])) LIMIT 2;
 
 -- SIMD disabled still returns the same ranking.
 SET turbohybrid.simd = off;
-SELECT id FROM sh ORDER BY s <~*> turbohybrid_query(
+SELECT id FROM sh ORDER BY s <~*> turbohybrid_experimental_query(
   sparse_query => turbohybrid_sparse_vector_build(ARRAY[2]::int4[], ARRAY[1.0]::float4[])) LIMIT 3;
 RESET turbohybrid.simd;
 DROP INDEX sh_sp;
@@ -121,7 +121,7 @@ DROP INDEX sh_sp;
 -- ============================================================ hybrid LIMIT
 CREATE INDEX sh_hybrid ON sh USING turbohybrid
   (embedding vector_cosine_turbohybrid_ops, s sparse_ip_turbohybrid_ops);
-SELECT id FROM sh ORDER BY embedding <~> turbohybrid_query(
+SELECT id FROM sh ORDER BY embedding <~> turbohybrid_experimental_query(
   vector_query => '[0,0,1]'::vector,
   sparse_query => turbohybrid_sparse_vector_build(ARRAY[2]::int4[], ARRAY[1.0]::float4[]),
   fusion => 'rrf') LIMIT 3;

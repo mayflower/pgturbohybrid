@@ -20,18 +20,20 @@ Use semantic versioning for the SQL version after `0.1.0`:
 
 ## Current Release
 
-- Extension SQL version: **`0.1.1`**
+- Extension SQL version: **`0.2.0`**
   - Control file: `pgturbohybrid.control`
-  - Install script: `sql/pgturbohybrid--0.1.1.sql`
-  - Upgrade script: `sql/pgturbohybrid--0.1.0--0.1.1.sql`
+  - Core install script: `sql/pgturbohybrid--0.2.0.sql`
+  - Experimental install script: `sql/pgturbohybrid_experimental--0.2.0.sql`
+  - Alpha migration guard: `sql/pgturbohybrid--0.1.2--0.2.0.sql`
   - Shared library: `pgturbohybrid`
 - Latest published Git tag: **none yet** — the first planned tag is
   `v0.1.0-alpha.2`. The Git tag is independent of the SQL version.
 
-`0.1.0` is the first installable version; `0.1.1` is a library/tooling
-maintenance release (no SQL catalog changes) that adds the first upgrade
-script, `sql/pgturbohybrid--0.1.0--0.1.1.sql`, exercised by
-`test/t/006_extension_upgrade.pl`.
+`0.2.0` separates the stable core SQL surface from
+`pgturbohybrid_experimental`, adds the read-only validator, hardens shared
+cache publication and VACUUM/recovery behavior, and adds recovery, controller,
+and soak coverage. The pre-split alpha upgrade fails transactionally with exact
+reinstall guidance instead of leaving partly migrated extension ownership.
 
 > Keep this section current: after publishing a tag, the
 > [post-release checklist](#post-release-checklist) updates "Latest published
@@ -88,10 +90,11 @@ The build and CI matrix must install unmodified pgvector before building
 ## Upgrade Script Policy
 
 Upgrade scripts must be owned by this extension and named with the PostgreSQL
-extension upgrade pattern. The first such script ships in this release:
+extension upgrade pattern. The current upgrade chain is:
 
 ```text
 sql/pgturbohybrid--0.1.0--0.1.1.sql
+sql/pgturbohybrid--0.1.1--0.1.2.sql
 ```
 
 Each upgrade script should ship with a regression test that creates the older

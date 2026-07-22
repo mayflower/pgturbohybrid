@@ -46,12 +46,12 @@ BEGIN
     SET LOCAL turbohybrid.sparse_rerank = off;
     SET LOCAL turbohybrid.enable_sparse_wand = on;
     EXECUTE format($q$ SELECT array_agg(id) FROM (
-      SELECT id FROM sw ORDER BY s <~*> turbohybrid_query(sparse_query => %s, sparse_k => 5)
+      SELECT id FROM sw ORDER BY s <~*> turbohybrid_experimental_query(sparse_query => %s, sparse_k => 5)
       LIMIT 5) q $q$, spec) INTO ids_wand;
 
     SET LOCAL turbohybrid.enable_sparse_wand = off;
     EXECUTE format($q$ SELECT array_agg(id) FROM (
-      SELECT id FROM sw ORDER BY s <~*> turbohybrid_query(sparse_query => %s, sparse_k => 5)
+      SELECT id FROM sw ORDER BY s <~*> turbohybrid_experimental_query(sparse_query => %s, sparse_k => 5)
       LIMIT 5) q $q$, spec) INTO ids_exact;
 
     IF ids_wand IS DISTINCT FROM ids_exact THEN
@@ -62,7 +62,7 @@ END $$;
 
 -- Block-max WAND ran and the top-5 of the common term are the 5 highest weights.
 SELECT id FROM sw
-ORDER BY s <~*> turbohybrid_query(
+ORDER BY s <~*> turbohybrid_experimental_query(
   sparse_query => turbohybrid_sparse_vector_build(ARRAY[1]::int4[], ARRAY[1.0]::float4[]),
   sparse_k => 5)
 LIMIT 5;
@@ -71,7 +71,7 @@ DECLARE st jsonb;
 BEGIN
   SET LOCAL enable_seqscan = off;
   SET LOCAL turbohybrid.enable_sparse_wand = on;
-  PERFORM id FROM sw ORDER BY s <~*> turbohybrid_query(
+  PERFORM id FROM sw ORDER BY s <~*> turbohybrid_experimental_query(
     sparse_query => turbohybrid_sparse_vector_build(ARRAY[1]::int4[], ARRAY[1.0]::float4[]),
     sparse_k => 5) LIMIT 5;
   st := turbohybrid_last_scan_stats();
@@ -99,7 +99,7 @@ SET turbohybrid.sparse_rerank = off;
 
 -- Top-1 of {10:1, 20:1} is doc 1 (score ~100), not any of the 100 weight-1 docs.
 SELECT id FROM swd
-ORDER BY s <~*> turbohybrid_query(
+ORDER BY s <~*> turbohybrid_experimental_query(
   sparse_query => turbohybrid_sparse_vector_build(ARRAY[10,20]::int4[], ARRAY[1.0,1.0]::float4[]),
   sparse_k => 1)
 LIMIT 1;
@@ -108,7 +108,7 @@ DECLARE st jsonb;
 BEGIN
   SET LOCAL enable_seqscan = off;
   SET LOCAL turbohybrid.enable_sparse_wand = on;
-  PERFORM id FROM swd ORDER BY s <~*> turbohybrid_query(
+  PERFORM id FROM swd ORDER BY s <~*> turbohybrid_experimental_query(
     sparse_query => turbohybrid_sparse_vector_build(ARRAY[10,20]::int4[], ARRAY[1.0,1.0]::float4[]),
     sparse_k => 1) LIMIT 1;
   st := turbohybrid_last_scan_stats();
@@ -135,7 +135,7 @@ DECLARE st jsonb;
 BEGIN
   SET LOCAL enable_seqscan = off;
   SET LOCAL turbohybrid.enable_sparse_wand = on;
-  PERFORM id FROM sw ORDER BY s <~*> turbohybrid_query(
+  PERFORM id FROM sw ORDER BY s <~*> turbohybrid_experimental_query(
     sparse_query => turbohybrid_sparse_vector_build(ARRAY[1]::int4[], ARRAY[1.0]::float4[]),
     sparse_k => 5) LIMIT 5;
   st := turbohybrid_last_scan_stats();

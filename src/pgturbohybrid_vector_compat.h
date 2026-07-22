@@ -5,26 +5,26 @@
 
 #include "fmgr.h"
 
-/*
- * Private pgvector vector layout compatibility.
- *
- * pgturbohybrid depends on the SQL type provided by the vector extension, but
- * does not link against pgvector C symbols. The layout below matches pgvector's
- * vector varlena representation used by pgvector 0.5.x through 0.8.x. Recheck
- * this file before declaring support for a pgvector release with a different
- * on-disk/vector ABI.
- */
+#ifdef PGTURBOHYBRID_USE_PGVECTOR_HEADER
+#include "vector.h"
+#define PGTURBOHYBRID_VECTOR_MAX_DIM VECTOR_MAX_DIM
+#define PGTURBOHYBRID_VECTOR_SIZE(_dim) ((Size) VECTOR_SIZE(_dim))
+/* pgvector's header defines this for its own exports. */
+#undef FUNCTION_PREFIX
+#else
+/* Explicit developer escape hatch; release, CI, and package builds require the
+ * upstream header and never compile this private ABI mirror. */
 #define PGTURBOHYBRID_VECTOR_MAX_DIM 16000
 #define PGTURBOHYBRID_VECTOR_SIZE(_dim) \
 	(offsetof(Vector, x) + sizeof(float) * (Size) (_dim))
-
 typedef struct Vector
 {
-	int32		vl_len_;		/* varlena header */
-	int16		dim;			/* number of dimensions */
-	int16		unused;			/* reserved by pgvector, expected to be zero */
+	int32		vl_len_;
+	int16		dim;
+	int16		unused;
 	float		x[FLEXIBLE_ARRAY_MEMBER];
 }			Vector;
+#endif
 
 typedef struct PgturbohybridValidationStats
 {

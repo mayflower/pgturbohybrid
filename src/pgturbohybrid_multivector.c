@@ -1639,8 +1639,6 @@ PgturbohybridMultiVectorProxyEncoderName(int encoder)
 			return "max_pool";
 		case PGTURBOHYBRID_MULTIVECTOR_PROXY_ENCODER_RANDOM_PROJECTION_FDE:
 			return "random_projection_fde";
-		case PGTURBOHYBRID_MULTIVECTOR_PROXY_ENCODER_LEARNED_PROJECTION_PLACEHOLDER:
-			return "learned_projection_placeholder";
 		case PGTURBOHYBRID_MULTIVECTOR_PROXY_ENCODER_LEARNED_PROJECTION_V1:
 			return "learned_projection_v1";
 		case PGTURBOHYBRID_MULTIVECTOR_PROXY_ENCODER_MEAN:
@@ -1743,13 +1741,6 @@ PgturbohybridMultiVectorBuildProxyVectorWithCentroids(const PgturbohybridMultiVe
 	PgturbohybridMultiVector *localCentroids = NULL;
 
 	PgturbohybridCheckMultiVector(mv);
-	if (encoder ==
-		PGTURBOHYBRID_MULTIVECTOR_PROXY_ENCODER_LEARNED_PROJECTION_PLACEHOLDER)
-		ereport(ERROR,
-				(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
-				 errmsg("learned multivector proxy projection is not configured"),
-				 errhint("Use multivector_proxy_encoder = learned_projection_v1 with turbohybrid.multivector_learned_projection_path, or use normalized_mean, mean, first_token, max_abs_mean, centroid_mean, max_pool, or random_projection_fde.")));
-
 	vector = MemoryContextAllocZero(ctx, PGTURBOHYBRID_VECTOR_SIZE(mv->dim));
 	SET_VARSIZE(vector, PGTURBOHYBRID_VECTOR_SIZE(mv->dim));
 	vector->dim = mv->dim;

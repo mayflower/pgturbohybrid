@@ -480,13 +480,13 @@ Current production slice:
 - proxy-vector admission is controlled by the persisted index option
   `multivector_proxy_encoder = normalized_mean | mean | mean_pool |
   first_token | max_abs_mean | centroid_mean | max_pool | random_projection_fde |
-  learned_projection_placeholder | learned_projection_v1`.
+  learned_projection_v1`.
   `normalized_mean` is the production document proxy for cosine/IP MaxSim
   models. `centroid_mean` requires `multivector_centroids = kmeans` and uses
   the normalized mean of persisted document centroids as the single graph
   proxy. `max_pool` and `random_projection_fde` are pluggable
   fixed-dimensional encoders for admission benchmarks.
-  `learned_projection_placeholder` fails explicitly; `learned_projection_v1`
+  `learned_projection_v1`
   is an opt-in file-backed first slice that requires configured projection
   weights and keeps final SQL ranking exact MaxSim;
 - malformed metadata must not silently fall back to token-node search.
@@ -532,7 +532,7 @@ Current index option:
 - `multivector_graph = token_nodes | document_nodes`
 - `multivector_proxy_encoder = normalized_mean | mean | mean_pool |
   first_token | max_abs_mean | centroid_mean | max_pool | random_projection_fde |
-  learned_projection_placeholder | learned_projection_v1`
+  learned_projection_v1`
 - `multivector_context_mode = flat | context_level`
 - `multivector_field_mode = off | weighted`
 - `multivector_token_pooling = off | kmeans | greedy_cosine`

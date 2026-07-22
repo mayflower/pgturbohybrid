@@ -103,15 +103,6 @@ static relopt_enum_elt_def pgturbohybrid_sparse_encoding_relopt_options[] = {
 	{NULL, 0}
 };
 
-/* Sparse exact-storage mode (sidecar reserved for a later prompt; only off works). */
-#define PGTURBOHYBRID_SPARSE_EXACT_STORAGE_OFF 0
-#define PGTURBOHYBRID_SPARSE_EXACT_STORAGE_SIDECAR 1
-static relopt_enum_elt_def pgturbohybrid_sparse_exact_storage_relopt_options[] = {
-	{"off", PGTURBOHYBRID_SPARSE_EXACT_STORAGE_OFF},
-	{"sidecar", PGTURBOHYBRID_SPARSE_EXACT_STORAGE_SIDECAR},
-	{NULL, 0}
-};
-
 static relopt_enum_elt_def pgturbohybrid_entry_sidecar_strategy_relopt_options[] = {
 	{"hash", PGTURBOHYBRID_ENTRY_SIDECAR_HASH},
 	{"farthest_code", PGTURBOHYBRID_ENTRY_SIDECAR_FARTHEST_CODE},
@@ -163,7 +154,6 @@ static relopt_enum_elt_def pgturbohybrid_multivector_proxy_encoder_relopt_option
 	{"mean_pool", PGTURBOHYBRID_MULTIVECTOR_PROXY_ENCODER_MEAN},
 	{"max_pool", PGTURBOHYBRID_MULTIVECTOR_PROXY_ENCODER_MAX_POOL},
 	{"random_projection_fde", PGTURBOHYBRID_MULTIVECTOR_PROXY_ENCODER_RANDOM_PROJECTION_FDE},
-	{"learned_projection_placeholder", PGTURBOHYBRID_MULTIVECTOR_PROXY_ENCODER_LEARNED_PROJECTION_PLACEHOLDER},
 	{"learned_projection_v1", PGTURBOHYBRID_MULTIVECTOR_PROXY_ENCODER_LEARNED_PROJECTION_V1},
 	{NULL, 0}
 };
@@ -6562,7 +6552,6 @@ pgturbohybridamoptions(Datum reloptions, bool validate)
 		PGTURBOHYBRID_RELOPT_PARSE("sparse_quant_mode", RELOPT_TYPE_ENUM, sparseQuantMode),
 		PGTURBOHYBRID_RELOPT_PARSE("sparse_postings_encoding", RELOPT_TYPE_ENUM, sparsePostingsEncoding),
 		PGTURBOHYBRID_RELOPT_PARSE("sparse_block_size", RELOPT_TYPE_INT, sparseBlockSize),
-		PGTURBOHYBRID_RELOPT_PARSE("sparse_exact_storage", RELOPT_TYPE_ENUM, sparseExactStorage),
 		PGTURBOHYBRID_RELOPT_PARSE("sparse_block_max", RELOPT_TYPE_BOOL, sparseBlockMax),
 	};
 	PgturbohybridOptions *opts = (PgturbohybridOptions *) build_reloptions(reloptions, validate,
@@ -6609,13 +6598,6 @@ pgturbohybridamoptions(Datum reloptions, bool validate)
 				(errcode(ERRCODE_INVALID_PARAMETER_VALUE),
 				 errmsg("invalid value %d for option \"sparse_quant_bits\"", opts->sparseQuantBits),
 				 errdetail("Valid values are \"0\", \"8\", and \"16\".")));
-
-	if (validate && opts != NULL &&
-		opts->sparseExactStorage == PGTURBOHYBRID_SPARSE_EXACT_STORAGE_SIDECAR)
-		ereport(ERROR,
-				(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
-				 errmsg("sparse_exact_storage=sidecar is not supported yet"),
-				 errhint("Exact sparse rerank fetches the heap sparse column; use sparse_exact_storage=off.")));
 
 	return (bytea *) opts;
 }
@@ -6759,7 +6741,7 @@ PgturbohybridInit(void)
 					   "Fixed-dimensional proxy encoder for document-node proxy_vector admission.",
 					   pgturbohybrid_multivector_proxy_encoder_relopt_options,
 					   PGTURBOHYBRID_DEFAULT_MULTIVECTOR_PROXY_ENCODER,
-					   "Valid values are \"normalized_mean\", \"mean\", \"first_token\", \"max_abs_mean\", \"centroid_mean\", \"max_pool\", \"random_projection_fde\", \"learned_projection_placeholder\", and \"learned_projection_v1\".",
+					   "Valid values are \"normalized_mean\", \"mean\", \"first_token\", \"max_abs_mean\", \"centroid_mean\", \"max_pool\", \"random_projection_fde\", and \"learned_projection_v1\".",
 					   AccessExclusiveLock);
 	add_enum_reloption(pgturbohybrid_relopt_kind, "multivector_context_mode",
 					   "Long-context multivector scoring mode.",
@@ -6792,12 +6774,6 @@ PgturbohybridInit(void)
 					  "Sparse-vector postings per chunk.",
 					  PGTURBOHYBRID_SPARSE_DEFAULT_BLOCK_SIZE, 1,
 					  PGTURBOHYBRID_SPARSE_MAX_BLOCK_SIZE, AccessExclusiveLock);
-	add_enum_reloption(pgturbohybrid_relopt_kind, "sparse_exact_storage",
-					   "Exact f32 sparse storage for rerank (only \"off\" is supported).",
-					   pgturbohybrid_sparse_exact_storage_relopt_options,
-					   PGTURBOHYBRID_SPARSE_EXACT_STORAGE_OFF,
-					   "Valid value is \"off\"; \"sidecar\" is reserved for a future release.",
-					   AccessExclusiveLock);
 	add_bool_reloption(pgturbohybrid_relopt_kind, "sparse_block_max",
 					   "Write a per-chunk block-max directory enabling sparse WAND pruning.",
 					   true, AccessExclusiveLock);

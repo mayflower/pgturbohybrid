@@ -30,7 +30,6 @@ CREATE INDEX ... WITH (
 ```
 
 If no projection file is configured, `learned_projection_v1` fails explicitly.
-`learned_projection_placeholder` remains an explicit unsupported placeholder.
 
 ## Projection File Format
 

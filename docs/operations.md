@@ -35,6 +35,14 @@ Related GUCs:
   message when a per-backend build crosses this resident size; set `0` to
   disable. Diagnostic only — it does not change policy.
 
+Shared files are rebuildable acceleration data, not index storage. They are
+partitioned by database and tablespace and identified by physical relation,
+fork, native format, and a WAL-protected 64-bit graph generation. Their headers
+also bind PostgreSQL major version, block size, endianness, and serialized C
+layout. Attach validates the complete identity and every segment bound before
+using the mapping. A mismatch is discarded as `shared_invalidated`; queries do
+not score from a partial or foreign cache.
+
 ## Memory sizing with `turbohybrid_estimate_memory()`
 
 Estimate cache memory **before** running a workload or `turbohybrid_prewarm()`.
@@ -74,8 +82,10 @@ ORDER BY n;
 
 ## Maintenance: VACUUM, REINDEX, CREATE INDEX
 
-- **VACUUM / autovacuum** reclaim dead tuples normally; the access method
-  participates in `ambulkdelete`/`amvacuumcleanup`. Sparse-primary indexes
+- **VACUUM / autovacuum** mark native graph nodes dead and perform bounded,
+  WAL-logged local topology repair. Dead nodes are never SQL results, but their
+  adjacency remains available as a routing bridge until enough reciprocal live
+  replacement edges can be installed. Sparse-primary indexes
   delegate liveness to heap MVCC, so dead rows are filtered at scan time and
   reclaimed on vacuum.
 - **`turbohybrid_sparse_compact(index)`** compacts a sparse index in place,
@@ -97,6 +107,18 @@ This is alpha: the on-disk index format can change between alpha tags. **Plan to
 fail with a clear `ERRCODE_DATA_CORRUPTED` error and a REINDEX hint rather than
 misreading. Extension SQL upgrades, when introduced, follow the standard
 `pgturbohybrid--<from>--<to>.sql` pattern (see [RELEASE.md](../RELEASE.md)).
+Native graph format 2 introduced the 64-bit cache generation; native indexes
+from the previous format therefore require `REINDEX`. Legacy non-native
+storage is checked by its own format contract.
+
+Shared native-cache files are rebuildable serving artifacts. On POSIX systems,
+builders use advisory kernel locks and crash-safe atomic publication; a killed
+builder cannot leave permanent ownership behind. Lazy garbage collection runs
+during cache access and removes only recognized stale temporary files,
+superseded generations, and artifacts for dropped/reindexed objects. Unknown
+files are preserved. Explicit `shared` configuration fails visibly to
+uncached scans and does not silently allocate a per-backend copy; `auto` may
+fall back to a fitting per-backend cache after a transient shared failure.
 
 ## Benchmark before production
 
@@ -116,6 +138,7 @@ SELECT turbohybrid_last_scan_diagnosis();  -- single bottleneck label + key fiel
 SELECT turbohybrid_index_stats('idx'::regclass);
 SELECT turbohybrid_estimate_memory('idx'::regclass);
 SELECT turbohybrid_simd_capabilities();
+SELECT turbohybrid_validate_index('idx'::regclass, true);
 ```
 
 plus the `CREATE INDEX` statement, the query, `EXPLAIN (ANALYZE, BUFFERS)`, and
@@ -128,3 +151,26 @@ neighborhood diagnostic: it samples nodes, compares each one's level-0
 neighborhood with a stronger bounded local pool, and reports `avg_overlap`,
 `weak_nodes`, `missed_neighbor_count`, and `suggested_edges` — useful for
 deciding whether a graph rebuild is worthwhile.
+
+`turbohybrid_validate_index(index, deep := false)` is the read-only mechanical
+integrity check. It takes `AccessShareLock`, writes no WAL, and returns JSON
+instead of throwing for detected corruption. Sampled mode checks the metapage,
+page envelopes and chains, dense tuples, and enabled BM25, sparse, and
+multivector sidecars. Deep mode additionally checks every adjacency tuple and
+performs graph reachability from the entry, routing, segment, and sidecar roots;
+dead nodes remain traversable because they may be required bridges.
+
+Treat `ok = false` as an index-integrity incident. Preserve the returned issue
+codes, verify the heap separately, and `REINDEX` the affected index before
+returning it to service. `recommendation = reindex_recommended` is a churn
+signal rather than proof of corruption; schedule a REINDEX to compact the
+append-only node space. Run deep validation after crash recovery, a suspected
+storage fault, or a REINDEX. Sampled validation is appropriate for routine
+health polling.
+- Native graph storage is append-mostly: inserts allocate new node IDs and
+  VACUUM does not reuse them. `turbohybrid_index_stats()` reports `live_nodes`,
+  `dead_nodes`, `dead_node_ratio`, `live_entry_node`, `dead_bridge_nodes`,
+  `avg_live_degree_level0`, `dead_neighbor_refs`, `reindex_recommended`, and
+  `reindex_reason`. A dead-node ratio of 0.20 or dead-neighbor-reference ratio
+  of 0.25 is the fixed recommendation threshold. VACUUM emits at most one
+  recommendation warning; use REINDEX to compact the append-only node space.

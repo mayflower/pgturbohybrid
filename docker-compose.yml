@@ -7,7 +7,7 @@
 # out `image:` and uncomment the `build:` block.
 services:
   db:
-    image: ghcr.io/mayflower/pgturbohybrid:${PGTURBOHYBRID_TAG:-0.1.1-pg17}
+    image: ghcr.io/mayflower/pgturbohybrid:${PGTURBOHYBRID_TAG:-0.2.0-pg17}
     # build:
     #   context: .
     #   args:

@@ -4519,7 +4519,8 @@ PgturbohybridGraphCreateMetaPage(Relation index, ForkNumber forkNum)
 
 	memset(metap, 0, sizeof(PgturbohybridGraphMetaPageData));
 	metap->magicNumber = PGTURBOHYBRID_GRAPH_MAGIC_NUMBER;
-	metap->version = PGTURBOHYBRID_GRAPH_VERSION;
+	metap->version = PGTURBOHYBRID_GRAPH_NATIVE_VERSION;
+	metap->graphGeneration = 1;
 	metap->storageKind = PGTURBOHYBRID_GRAPH_STORAGE_QUANT_GRAPH_NATIVE;
 	metap->m = PgturbohybridGraphGetM(index);
 	metap->efConstruction = PgturbohybridGraphGetEfConstruction(index);
@@ -4711,6 +4712,7 @@ PgturbohybridQuantUpdateMetaPageFromUpdate(Relation index,
 
 	metap = PgturbohybridGraphPageGetMeta(page);
 
+	metap->version = PGTURBOHYBRID_GRAPH_NATIVE_VERSION;
 	metap->dimensions = update->dimensions;
 	metap->m = update->m;
 	metap->efConstruction = update->efConstruction;
@@ -4719,7 +4721,12 @@ PgturbohybridQuantUpdateMetaPageFromUpdate(Relation index,
 	metap->graphOversampling = PgturbohybridGraphGetGraphOversampling(index);
 	metap->graphRescoreBand = PgturbohybridGraphGetGraphRescoreBand(index);
 	metap->graphMaxLevel = update->graphMaxLevel;
-	metap->graphFlags = metap->graphFlags == 0 ? 1 : metap->graphFlags + 1;
+	if (metap->graphGeneration == UINT64_MAX)
+		ereport(ERROR,
+				(errcode(ERRCODE_PROGRAM_LIMIT_EXCEEDED),
+				 errmsg("pgturbohybrid graph generation exhausted"),
+				 errhint("REINDEX the index to rebuild it.")));
+	metap->graphGeneration = metap->graphGeneration == 0 ? 1 : metap->graphGeneration + 1;
 	metap->entryBlkno = codeStart;
 	metap->entryOffno = update->nodeCount > 0 ? FirstOffsetNumber : InvalidOffsetNumber;
 	metap->entryLevel = update->nodeCount > 0 ? update->entryLevel : -1;
@@ -4825,7 +4832,12 @@ PgturbohybridGraphUpdateMultiVectorDocMapMeta(Relation index,
 		page = BufferGetPage(buf);
 
 	metap = PgturbohybridGraphPageGetMeta(page);
-	metap->graphFlags = metap->graphFlags == 0 ? 1 : metap->graphFlags + 1;
+	if (metap->graphGeneration == UINT64_MAX)
+		ereport(ERROR,
+				(errcode(ERRCODE_PROGRAM_LIMIT_EXCEEDED),
+				 errmsg("pgturbohybrid graph generation exhausted"),
+				 errhint("REINDEX the index to rebuild it.")));
+	metap->graphGeneration = metap->graphGeneration == 0 ? 1 : metap->graphGeneration + 1;
 	metap->tqMultivectorDocMapStartBlkno = startBlkno;
 	metap->tqMultivectorDocMapPageCount = pageCount;
 	metap->tqMultivectorDocCount = docCount;
@@ -4869,7 +4881,12 @@ PgturbohybridGraphBumpMetaGeneration(Relation index)
 		page = BufferGetPage(buf);
 
 	metap = PgturbohybridGraphPageGetMeta(page);
-	metap->graphFlags = metap->graphFlags == 0 ? 1 : metap->graphFlags + 1;
+	if (metap->graphGeneration == UINT64_MAX)
+		ereport(ERROR,
+				(errcode(ERRCODE_PROGRAM_LIMIT_EXCEEDED),
+				 errmsg("pgturbohybrid graph generation exhausted"),
+				 errhint("REINDEX the index to rebuild it.")));
+	metap->graphGeneration = metap->graphGeneration == 0 ? 1 : metap->graphGeneration + 1;
 	PgturbohybridGraphMarkPageGraphOp(page, PGTURBOHYBRID_GRAPH_GRAPH_OP_META_UPDATE);
 
 	if (xlogState != NULL)
@@ -8426,14 +8443,15 @@ PgturbohybridGraphReadMeta(Relation index, PgturbohybridGraphMetaPageData *meta)
 	/*
 	 * The magic + storageKind matched, so this metapage was written by this
 	 * extension's native graph writer.  That writer always stamps the current
-	 * format version (PGTURBOHYBRID_GRAPH_VERSION), so any other value here is
+	 * native format version (PGTURBOHYBRID_GRAPH_NATIVE_VERSION), so any other
+	 * value here is
 	 * either disk corruption or an index built by an incompatible (future)
 	 * format -- both of which would otherwise be misread silently.  Reject it
 	 * with a clear error and a REINDEX hint rather than proceeding to clamp
 	 * fields under an unknown layout.  This cannot fire for a validly-built
 	 * current-version index.
 	 */
-	if (metap->version != PGTURBOHYBRID_GRAPH_VERSION)
+	if (metap->version != PGTURBOHYBRID_GRAPH_NATIVE_VERSION)
 	{
 		uint32		foundVersion = metap->version;
 
@@ -8442,7 +8460,7 @@ PgturbohybridGraphReadMeta(Relation index, PgturbohybridGraphMetaPageData *meta)
 				(errcode(ERRCODE_DATA_CORRUPTED),
 				 errmsg("pgturbohybrid index \"%s\" uses unsupported on-disk metapage format version %u (expected %u)",
 						RelationGetRelationName(index), foundVersion,
-						(uint32) PGTURBOHYBRID_GRAPH_VERSION),
+						(uint32) PGTURBOHYBRID_GRAPH_NATIVE_VERSION),
 				 errhint("REINDEX the index to rebuild it in the current format.")));
 	}
 
@@ -8533,9 +8551,10 @@ PgturbohybridGraphReadMeta(Relation index, PgturbohybridGraphMetaPageData *meta)
 		uint64		endNodeId = (uint64) segment->startNodeId + segment->nodeCount;
 
 		if (segment->nodeCount == 0 || endNodeId > meta->tqNodeCount ||
-			segment->entryNodeId >= meta->tqNodeCount ||
-			segment->entryNodeId < segment->startNodeId ||
-			segment->entryNodeId >= endNodeId)
+			(segment->entryNodeId == UINT_MAX ? segment->entryLevel != -1 :
+			 (segment->entryNodeId >= meta->tqNodeCount ||
+			  segment->entryNodeId < segment->startNodeId ||
+			  segment->entryNodeId >= endNodeId)))
 		{
 			meta->tqSegmentCount = 0;
 			meta->tqSegmentBytes = 0;

@@ -34,7 +34,7 @@ my $DB = 'pgturbohybrid_corrupt';
 $node->safe_psql('postgres', "CREATE DATABASE $DB;");
 $node->safe_psql($DB, q(
 	CREATE EXTENSION vector;
-	CREATE EXTENSION pgturbohybrid;
+	CREATE EXTENSION pgturbohybrid; CREATE EXTENSION pgturbohybrid_experimental;
 ));
 
 # BLCKSZ default and the offset at which the graph metapage struct begins
@@ -66,6 +66,27 @@ sub scribble
 	syswrite($fh, $buf) == $len or die "write $path: $!";
 	close($fh) or die "close $path: $!";
 	return;
+}
+
+sub find_page_kind
+{
+	my ($path, $blocks, $wanted_kind) = @_;
+	sysopen(my $fh, $path, 0) or die "open $path: $!";
+	binmode $fh;
+	for (my $block = 1; $block < $blocks; $block++)
+	{
+		sysseek($fh, ($block + 1) * $BLCKSZ - 4, 0)
+			or die "seek $path: $!";
+		my $raw = '';
+		sysread($fh, $raw, 2) == 2 or die "read page kind from $path: $!";
+		if ((unpack('S<', $raw) & 0x00ff) == $wanted_kind)
+		{
+			close($fh) or die "close $path: $!";
+			return $block;
+		}
+	}
+	close($fh) or die "close $path: $!";
+	die "page kind $wanted_kind not found in $path";
 }
 
 # Run a statement that touches the (possibly corrupt) index and assert the
@@ -146,9 +167,31 @@ $node->start;
 assert_clean('dense version-field', $dense_query, 1);
 assert_clean('dense version-field stats',
 	"SELECT turbohybrid_index_stats('dense_idx');", 1);
+is($node->safe_psql($DB, q(
+	SELECT turbohybrid_validate_index('dense_idx'::regclass, true)->'errors'
+	       @> '[{"code":"invalid_format_version"}]'::jsonb;
+)), 't', 'validator returns the concrete invalid_format_version code');
 
 # Repair by rebuilding, then prove a fresh query is correct again (no behaviour
 # change for a valid index).
+$node->safe_psql($DB, 'REINDEX INDEX dense_idx;');
+
+# (a3) Corrupt only the page-kind field of an adjacency page.  The validator
+# must name the adjacency-chain defect, and touching the damaged index must not
+# crash the server.  Page opaque is the final 8 bytes; pageKind starts at -4.
+$dense_path = index_file_path('dense_idx');
+my $dense_blocks = $node->safe_psql($DB,
+	"SELECT pg_relation_size('dense_idx') / $BLCKSZ;");
+chomp $dense_blocks;
+$node->stop;
+my $adj_block = find_page_kind($dense_path, $dense_blocks, 4);
+scribble($dense_path, $adj_block, $BLCKSZ - 4, 2, 0x7F);
+$node->start;
+is($node->safe_psql($DB, q(
+	SELECT turbohybrid_validate_index('dense_idx'::regclass, true)->'errors'
+	       @> '[{"code":"adj_chain_page_kind"}]'::jsonb;
+)), 't', 'validator returns the concrete adj_chain_page_kind code');
+assert_clean('dense adjacency-kind corruption', $dense_query, 0);
 $node->safe_psql($DB, 'REINDEX INDEX dense_idx;');
 is($node->safe_psql($DB, $dense_query), "0\n1\n2",
 	'dense index correct again after REINDEX');
@@ -238,7 +281,7 @@ my $sparse_query = q(
 	SET enable_seqscan = off;
 	SELECT count(*) FROM (
 		SELECT id FROM sparse_docs
-		ORDER BY s <~*> turbohybrid_query(
+		ORDER BY s <~*> turbohybrid_experimental_query(
 			sparse_query => turbohybrid_sparse_vector_build(
 				ARRAY[1]::int4[], ARRAY[1.0]::float4[]),
 			sparse_k => 5)

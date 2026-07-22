@@ -66,6 +66,7 @@ ORDER BY name;
  turbohybrid.dense_uncertainty_retry                                  | off
  turbohybrid.dense_uncertainty_retry_max_passes                       | 1
  turbohybrid.dense_uncertainty_retry_multiplier                       | 1.5
+ turbohybrid.dev.disable_executor_controller                          | off
  turbohybrid.enable_sparse_wand                                       | on
  turbohybrid.enable_wand                                              | on
  turbohybrid.fast_weighted_score_bound_pruning                        | on
@@ -159,5 +160,5 @@ ORDER BY name;
  turbohybrid.sparse_rerank                                            | auto
  turbohybrid.sparse_rerank_k                                          | 0
  turbohybrid.warn_linear_fallback                                     | on
-(139 rows)
+(140 rows)
 

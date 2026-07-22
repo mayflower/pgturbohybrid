@@ -13,6 +13,7 @@ END
 $$;
 CREATE EXTENSION vector;
 CREATE EXTENSION pgturbohybrid;
+CREATE EXTENSION pgturbohybrid_experimental;
 CREATE EXTENSION llama_embed;
 \pset format unaligned
 SELECT llama_embed_model_info('sauerkraut-modern')->>'engine' AS engine,
@@ -49,7 +50,7 @@ mv_dims|mv_count
 SELECT pg_typeof(llama_embed_mv('sauerkraut-modern', 'test'))::text AS llama_embed_mv_type,
        pg_typeof(llama_embed_mv_batch('sauerkraut-modern', ARRAY['alpha', 'beta']))::text AS llama_embed_mv_batch_type;
 llama_embed_mv_type|llama_embed_mv_batch_type
-multivector|multivector[]
+turbohybrid_multivector|turbohybrid_multivector[]
 (1 row)
 SELECT array_length(llama_embed_mv_batch('sauerkraut-modern', ARRAY['alpha', 'beta']), 1) AS mv_batch_count,
        turbohybrid_multivector_count((llama_embed_mv_batch('sauerkraut-modern', ARRAY['alpha', 'beta']))[2]) AS second_mv_count;
@@ -58,7 +59,7 @@ mv_batch_count|second_mv_count
 (1 row)
 CREATE TEMP TABLE llama_embed_multivector_docs (
   id int PRIMARY KEY,
-  colbert multivector NOT NULL
+  colbert turbohybrid_multivector NOT NULL
 );
 INSERT INTO llama_embed_multivector_docs (id, colbert)
 VALUES (1, llama_embed_mv('sauerkraut-modern', 'test'));
@@ -66,7 +67,7 @@ SELECT pg_typeof(colbert)::text AS stored_mv_type,
        turbohybrid_multivector_count(colbert) AS stored_mv_count
 FROM llama_embed_multivector_docs;
 stored_mv_type|stored_mv_count
-multivector|3
+turbohybrid_multivector|3
 (1 row)
 SELECT llama_embed_vector('sauerkraut-modern', 'test', '{"normalize": false}'::jsonb)::text AS dense_not_normalized;
 dense_not_normalized

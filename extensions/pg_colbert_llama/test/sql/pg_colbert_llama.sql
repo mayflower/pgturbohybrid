@@ -24,6 +24,7 @@ RESET client_min_messages;
 
 CREATE EXTENSION vector;
 CREATE EXTENSION pgturbohybrid;
+CREATE EXTENSION pgturbohybrid_experimental;
 CREATE EXTENSION pg_colbert_llama;
 \pset format unaligned
 
@@ -142,7 +143,7 @@ ON pg_colbert_llama_passages USING turbohybrid (
 SET enable_seqscan = off;
 SELECT id AS indexed_id
 FROM pg_colbert_llama_passages
-ORDER BY colbert <~> turbohybrid_query(
+ORDER BY colbert <~> turbohybrid_experimental_query(
   multivector_query => colbert_mv('sauerkraut-modern:query', 'alpha'),
   text_query => websearch_to_tsquery('simple', 'alpha'),
   fusion => 'rrf',

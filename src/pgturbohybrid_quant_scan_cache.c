@@ -4,22 +4,29 @@
 #include <math.h>
 #include <string.h>
 #include <sys/stat.h>
+#include <time.h>
 #ifndef WIN32
+#include <dirent.h>
 #include <fcntl.h>
 #include <sys/mman.h>
 #include <unistd.h>
 #endif
 
 #include "access/genam.h"
+#include "catalog/pg_class.h"
+#include "catalog/pg_database.h"
 #include "fmgr.h"
 #include "miscadmin.h"
 #include "portability/instr_time.h"
 #include "storage/bufmgr.h"
+#include "storage/fd.h"
 #include "utils/fmgrprotos.h"
 #include "utils/jsonb.h"
 #include "utils/memutils.h"
 #include "utils/numeric.h"
 #include "utils/rel.h"
+#include "utils/syscache.h"
+#include "utils/timestamp.h"
 
 #include "pgturbohybrid_jsonb_compat.h"
 #include "pgturbohybrid_am.h"
@@ -29,9 +36,12 @@ static PgturbohybridGraphNativeCache *pgturbohybridGraphCacheList = NULL;
 static PgturbohybridGraphDocSidecarCache *pgturbohybridGraphDocSidecarCacheList = NULL;
 
 #define PGTURBOHYBRID_GRAPH_SHARED_CACHE_MAGIC 0x54485343U
-#define PGTURBOHYBRID_GRAPH_SHARED_CACHE_VERSION 1U
+#define PGTURBOHYBRID_GRAPH_SHARED_CACHE_VERSION 2U
+#define PGTURBOHYBRID_GRAPH_SHARED_CACHE_ENDIAN 0x01020304U
 #define PGTURBOHYBRID_GRAPH_SHARED_CACHE_WAIT_US 5000000L
 #define PGTURBOHYBRID_GRAPH_SHARED_CACHE_POLL_US 10000L
+#define PGTURBOHYBRID_GRAPH_SHARED_CACHE_GC_INTERVAL_MS 60000L
+#define PGTURBOHYBRID_GRAPH_SHARED_CACHE_TEMP_STALE_SECONDS 600
 
 static float
 PgturbohybridGraphHalfToFloat(uint16 half)
@@ -67,14 +77,37 @@ PgturbohybridGraphHalfToFloat(uint16 half)
 	return value;
 }
 
+typedef struct PgturbohybridGraphCacheIdentity
+{
+	Oid			databaseOid;
+	Oid			tablespaceOid;
+	Oid			relNumber;
+	Oid			relationOid;	/* diagnostics only */
+	uint32		forkNumber;
+	uint32		graphFormatVersion;
+	uint64		graphGeneration;
+	uint32		postgresMajor;
+	uint32		blockSize;
+	uint32		endianness;
+	uint32		sharedNodeSize;
+	uint32		sharedNodeAlign;
+	uint32		payloadRefSize;
+	uint32		payloadRefAlign;
+} PgturbohybridGraphCacheIdentity;
+
+typedef struct PgturbohybridGraphSharedSegment
+{
+	uint64		offset;
+	uint64		length;
+} PgturbohybridGraphSharedSegment;
+
 typedef struct PgturbohybridGraphSharedCacheHeader
 {
 	uint32		magic;
 	uint32		version;
 	uint64		key;
 	uint64		fileSize;
-	Oid			relid;
-	Oid			relfilenumber;
+	PgturbohybridGraphCacheIdentity identity;
 	uint32		dimensions;
 	uint16		m;
 	uint16		graphMaxLevel;
@@ -94,15 +127,15 @@ typedef struct PgturbohybridGraphSharedCacheHeader
 	uint64		neighborValueCount;
 	uint32		payloadRefCount;
 	uint32		exactBytes;
-	uint64		nodesOffset;
-	uint64		codeArenaOffset;
-	uint64		payloadArenaOffset;
-	uint64		residualArenaOffset;
-	uint64		exactArenaOffset;
-	uint64		neighborCountsOffset;
-	uint64		neighborOffsetsOffset;
-	uint64		neighborDataOffset;
-	uint64		payloadRefsOffset;
+	PgturbohybridGraphSharedSegment nodes;
+	PgturbohybridGraphSharedSegment codeArena;
+	PgturbohybridGraphSharedSegment payloadArena;
+	PgturbohybridGraphSharedSegment residualArena;
+	PgturbohybridGraphSharedSegment exactArena;
+	PgturbohybridGraphSharedSegment neighborCounts;
+	PgturbohybridGraphSharedSegment neighborOffsets;
+	PgturbohybridGraphSharedSegment neighborData;
+	PgturbohybridGraphSharedSegment payloadRefs;
 	uint64		residentCodeBytes;
 	uint64		residentAdjBytes;
 	uint64		residentExactBytes;
@@ -129,7 +162,7 @@ typedef struct PgturbohybridGraphSharedMap
 	uint64		key;
 	Oid			relid;
 	Oid			relfilenumber;
-	uint16		graphFlags;
+	PgturbohybridGraphCacheIdentity identity;
 	void	   *base;
 	Size		size;
 	PgturbohybridGraphScanStorage view;
@@ -142,6 +175,41 @@ typedef struct PgturbohybridGraphSharedMap
 } PgturbohybridGraphSharedMap;
 
 static PgturbohybridGraphSharedMap *pgturbohybridGraphSharedMapList = NULL;
+static TimestampTz pgturbohybridGraphSharedLastGc = 0;
+
+typedef struct PgturbohybridGraphSharedWarning
+{
+	Oid			databaseOid;
+	Oid			relid;
+	int			reason;
+	struct PgturbohybridGraphSharedWarning *next;
+} PgturbohybridGraphSharedWarning;
+
+static PgturbohybridGraphSharedWarning *pgturbohybridGraphSharedWarningList = NULL;
+
+static void
+PgturbohybridGraphWarnSharedFailureOnce(Relation index,
+										PgturbohybridGraphNativeCacheReason reason)
+{
+	PgturbohybridGraphSharedWarning *warning;
+
+	for (warning = pgturbohybridGraphSharedWarningList;
+		 warning != NULL; warning = warning->next)
+		if (warning->databaseOid == MyDatabaseId &&
+			warning->relid == RelationGetRelid(index))
+			return;
+
+	warning = MemoryContextAlloc(TopMemoryContext, sizeof(*warning));
+	warning->databaseOid = MyDatabaseId;
+	warning->relid = RelationGetRelid(index);
+	warning->reason = (int) reason;
+	warning->next = pgturbohybridGraphSharedWarningList;
+	pgturbohybridGraphSharedWarningList = warning;
+	ereport(WARNING,
+			(errmsg("shared native cache unavailable for index %s; using uncached scans",
+					RelationGetRelationName(index)),
+			 errdetail("cache failure reason code: %d", (int) reason)));
+}
 
 static inline int64
 PgturbohybridGraphElapsedUsSince(instr_time start)
@@ -322,10 +390,53 @@ PgturbohybridGraphArenaBytesHuge(uint32 count, Size itemBytes, Size *totalBytes)
 	return AllocHugeSizeIsValid((Size) count * itemBytes);
 }
 
-static inline void *
-PgturbohybridGraphSharedPtr(void *base, uint64 offset)
+static bool
+PgturbohybridGraphCheckedMultiplyU64(uint64 count, uint64 width, uint64 *result)
 {
-	return offset == 0 ? NULL : (void *) ((char *) base + offset);
+	if (width != 0 && count > UINT64_MAX / width)
+		return false;
+	*result = count * width;
+	return true;
+}
+
+static void
+PgturbohybridGraphCacheIdentityInit(Relation index,
+									PgturbohybridGraphMetaPageData *meta,
+									PgturbohybridGraphCacheIdentity *identity)
+{
+	memset(identity, 0, sizeof(*identity));
+	identity->databaseOid = MyDatabaseId;
+	PgturbohybridGraphGetRelationLocator(index, &identity->tablespaceOid,
+										 &identity->relNumber);
+	identity->relationOid = RelationGetRelid(index);
+	identity->forkNumber = MAIN_FORKNUM;
+	identity->graphFormatVersion = meta->version;
+	identity->graphGeneration = meta->graphGeneration;
+	identity->postgresMajor = PG_VERSION_NUM / 10000;
+	identity->blockSize = BLCKSZ;
+	identity->endianness = PGTURBOHYBRID_GRAPH_SHARED_CACHE_ENDIAN;
+	identity->sharedNodeSize = sizeof(PgturbohybridGraphSharedNode);
+	identity->sharedNodeAlign = MAXIMUM_ALIGNOF;
+	identity->payloadRefSize = sizeof(PgturbohybridGraphPayloadRef);
+	identity->payloadRefAlign = MAXIMUM_ALIGNOF;
+}
+
+static bool
+PgturbohybridGraphCacheIdentityEqual(const PgturbohybridGraphCacheIdentity *a,
+									 const PgturbohybridGraphCacheIdentity *b)
+{
+	return memcmp(a, b, sizeof(*a)) == 0;
+}
+
+static void *
+PgturbohybridGraphSharedCheckedPtr(void *base, uint64 fileSize,
+								  uint64 offset, uint64 length)
+{
+	if (length == 0)
+		return NULL;
+	if (offset == 0 || offset > fileSize || length > fileSize - offset)
+		return NULL;
+	return (void *) ((char *) base + offset);
 }
 
 static uint64
@@ -340,9 +451,17 @@ static uint64
 PgturbohybridGraphSharedCacheKey(Relation index, PgturbohybridGraphMetaPageData *meta)
 {
 	uint64		hash = UINT64CONST(1469598103934665603);
+	PgturbohybridGraphCacheIdentity identity;
 
-	hash = PgturbohybridGraphHashU64(hash, RelationGetRelid(index));
-	hash = PgturbohybridGraphHashU64(hash, PgturbohybridGraphRelFileNumber(index));
+	PgturbohybridGraphCacheIdentityInit(index, meta, &identity);
+	for (Size offset = 0; offset < sizeof(identity); offset += sizeof(uint64))
+	{
+		uint64 word = 0;
+		Size remaining = Min(sizeof(uint64), sizeof(identity) - offset);
+
+		memcpy(&word, ((char *) &identity) + offset, remaining);
+		hash = PgturbohybridGraphHashU64(hash, word);
+	}
 	hash = PgturbohybridGraphHashU64(hash, meta->dimensions);
 	hash = PgturbohybridGraphHashU64(hash, meta->m);
 	hash = PgturbohybridGraphHashU64(hash, meta->graphMaxLevel);
@@ -368,12 +487,30 @@ PgturbohybridGraphSharedCacheDir(char *dir, Size dirSize)
 }
 
 static bool
-PgturbohybridGraphEnsureSharedCacheDir(char *dir, Size dirSize)
+PgturbohybridGraphEnsureSharedCacheDir(Relation index, char *dir, Size dirSize)
 {
-	PgturbohybridGraphSharedCacheDir(dir, dirSize);
+	char root[MAXPGPATH];
+	char databaseDir[MAXPGPATH];
+	Oid tablespaceOid;
+	Oid relNumber;
+	int written;
+
+	PgturbohybridGraphSharedCacheDir(root, sizeof(root));
+	if (mkdir(root, 0700) != 0 && errno != EEXIST)
+		goto fail;
+	written = snprintf(databaseDir, sizeof(databaseDir), "%s/%u", root, MyDatabaseId);
+	if (written < 0 || written >= (int) sizeof(databaseDir))
+		return false;
+	if (mkdir(databaseDir, 0700) != 0 && errno != EEXIST)
+		goto fail;
+	PgturbohybridGraphGetRelationLocator(index, &tablespaceOid, &relNumber);
+	written = snprintf(dir, dirSize, "%s/%u", databaseDir, tablespaceOid);
+	if (written < 0 || written >= (int) dirSize)
+		return false;
 	if (mkdir(dir, 0700) == 0 || errno == EEXIST)
 		return true;
-	elog(WARNING, "could not create pgturbohybrid shared cache directory \"%s\": %m", dir);
+fail:
+	elog(WARNING, "could not create pgturbohybrid shared cache directory: %m");
 	return false;
 }
 
@@ -382,25 +519,386 @@ PgturbohybridGraphSharedCachePath(Relation index, PgturbohybridGraphMetaPageData
 								  uint64 key, char *path, Size pathSize)
 {
 	char		dir[MAXPGPATH];
+	Oid		tablespaceOid;
+	Oid		relNumber;
+	int		written;
 
+	PgturbohybridGraphGetRelationLocator(index, &tablespaceOid, &relNumber);
 	PgturbohybridGraphSharedCacheDir(dir, sizeof(dir));
-	snprintf(path, pathSize, "%s/%u_%u_%u_%016llx.tqcache",
+	written = snprintf(path, pathSize, "%s/%u/%u/%u_%u_%llu_%u_%016llx.tqcache",
 			 dir,
-			 RelationGetRelid(index),
-			 PgturbohybridGraphRelFileNumber(index),
-			 meta->graphFlags,
+			 MyDatabaseId, tablespaceOid, relNumber, MAIN_FORKNUM,
+			 (unsigned long long) meta->graphGeneration,
+			 meta->version,
 			 (unsigned long long) key);
+	if (written < 0 || written >= (int) pathSize)
+		ereport(ERROR,
+				(errcode(ERRCODE_PROGRAM_LIMIT_EXCEEDED),
+				 errmsg("pgturbohybrid shared cache path exceeds MAXPGPATH")));
 }
 
 static void
 PgturbohybridGraphSharedCacheLockPath(Relation index, PgturbohybridGraphMetaPageData *meta,
 									  uint64 key, char *path, Size pathSize)
 {
-	char		cachePath[MAXPGPATH];
+	char		dir[MAXPGPATH];
+	Oid			tablespaceOid;
+	Oid			relNumber;
+	int			written;
 
-	PgturbohybridGraphSharedCachePath(index, meta, key, cachePath, sizeof(cachePath));
-	snprintf(path, pathSize, "%s.building", cachePath);
+	(void) meta;
+	(void) key;
+	PgturbohybridGraphGetRelationLocator(index, &tablespaceOid, &relNumber);
+	(void) relNumber;
+	PgturbohybridGraphSharedCacheDir(dir, sizeof(dir));
+	written = snprintf(path, pathSize, "%s/%u/%u/%u_%u.lock", dir,
+					   MyDatabaseId, tablespaceOid, RelationGetRelid(index),
+					   MAIN_FORKNUM);
+	if (written < 0 || written >= (int) pathSize)
+		ereport(ERROR,
+				(errcode(ERRCODE_PROGRAM_LIMIT_EXCEEDED),
+				 errmsg("pgturbohybrid shared cache lock path exceeds MAXPGPATH")));
 }
+
+#ifndef WIN32
+static bool
+PgturbohybridGraphSharedTryLock(int fd)
+{
+	struct flock lock;
+
+	memset(&lock, 0, sizeof(lock));
+	lock.l_type = F_WRLCK;
+	lock.l_whence = SEEK_SET;
+	lock.l_start = 0;
+	lock.l_len = 1;
+	return fcntl(fd, F_SETLK, &lock) == 0;
+}
+
+/*
+ * TAP-only synchronization for crash testing.  This deliberately has no GUC
+ * or SQL surface: normal servers do not set the environment variable and pay
+ * only one getenv().  Fixed stage names prevent an environment value from
+ * selecting arbitrary files outside the test-owned directory.
+ */
+static void
+PgturbohybridGraphSharedTestPause(const char *stage)
+{
+	const char *dir = getenv("PGTURBOHYBRID_TEST_SHARED_CACHE_STAGE_DIR");
+	char		requestPath[MAXPGPATH];
+	char		reachedPath[MAXPGPATH];
+	int			fd;
+
+	if (dir == NULL || dir[0] == '\0')
+		return;
+	if (strcmp(stage, "after_lock") != 0 &&
+		strcmp(stage, "after_ftruncate") != 0 &&
+		strcmp(stage, "after_mmap") != 0 &&
+		strcmp(stage, "before_fsync") != 0 &&
+		strcmp(stage, "before_rename") != 0)
+		elog(ERROR, "invalid shared-cache test stage");
+	if (snprintf(requestPath, sizeof(requestPath), "%s/%s.request", dir,
+				 stage) >= (int) sizeof(requestPath) ||
+		snprintf(reachedPath, sizeof(reachedPath), "%s/%s.reached", dir,
+				 stage) >= (int) sizeof(reachedPath))
+		elog(ERROR, "shared-cache test stage path exceeds MAXPGPATH");
+	if (access(requestPath, F_OK) != 0)
+		return;
+
+	fd = open(reachedPath, O_CREAT | O_EXCL | O_WRONLY, 0600);
+	if (fd >= 0)
+	{
+		char		pidText[32];
+		int			length = snprintf(pidText, sizeof(pidText), "%d\n", MyProcPid);
+
+		if (length > 0)
+			(void) write(fd, pidText, (size_t) length);
+		close(fd);
+	}
+	while (access(requestPath, F_OK) == 0)
+	{
+		CHECK_FOR_INTERRUPTS();
+		pg_usleep(PGTURBOHYBRID_GRAPH_SHARED_CACHE_POLL_US);
+	}
+}
+
+static void
+PgturbohybridGraphSharedUnlock(int fd)
+{
+	struct flock lock;
+
+	memset(&lock, 0, sizeof(lock));
+	lock.l_type = F_UNLCK;
+	lock.l_whence = SEEK_SET;
+	lock.l_start = 0;
+	lock.l_len = 1;
+	(void) fcntl(fd, F_SETLK, &lock);
+}
+
+static bool
+PgturbohybridGraphSharedHasSuffix(const char *name, const char *suffix)
+{
+	Size nameLen = strlen(name);
+	Size suffixLen = strlen(suffix);
+
+	return nameLen >= suffixLen &&
+		strcmp(name + nameLen - suffixLen, suffix) == 0;
+}
+
+static bool
+PgturbohybridGraphSharedParseOid(const char *name, Oid *oid)
+{
+	char	   *end = NULL;
+	unsigned long value;
+
+	if (*name == '\0')
+		return false;
+	errno = 0;
+	value = strtoul(name, &end, 10);
+	if (errno != 0 || end == name || *end != '\0' || value > UINT_MAX)
+		return false;
+	*oid = (Oid) value;
+	return true;
+}
+
+static bool
+PgturbohybridGraphSharedReadHeader(const char *path,
+									 PgturbohybridGraphSharedCacheHeader *hdr)
+{
+	int			fd;
+	ssize_t		readBytes;
+
+	fd = open(path, O_RDONLY);
+	if (fd < 0)
+		return false;
+	readBytes = read(fd, hdr, sizeof(*hdr));
+	close(fd);
+	return readBytes == (ssize_t) sizeof(*hdr) &&
+		hdr->magic == PGTURBOHYBRID_GRAPH_SHARED_CACHE_MAGIC &&
+		hdr->version == PGTURBOHYBRID_GRAPH_SHARED_CACHE_VERSION;
+}
+
+static bool
+PgturbohybridGraphSharedRelationIdentityExists(
+	const PgturbohybridGraphCacheIdentity *identity)
+{
+	HeapTuple	tuple;
+	Form_pg_class classForm;
+	Oid			tablespaceOid;
+	bool		matches;
+
+	if (identity->databaseOid != MyDatabaseId)
+		return false;
+	tuple = SearchSysCache1(RELOID, ObjectIdGetDatum(identity->relationOid));
+	if (!HeapTupleIsValid(tuple))
+		return false;
+	classForm = (Form_pg_class) GETSTRUCT(tuple);
+	tablespaceOid = classForm->reltablespace != InvalidOid ?
+		classForm->reltablespace : MyDatabaseTableSpace;
+	matches = tablespaceOid == identity->tablespaceOid &&
+		classForm->relfilenode == identity->relNumber;
+	ReleaseSysCache(tuple);
+	return matches;
+}
+
+static int64
+PgturbohybridGraphSharedCleanDirectory(const char *dir, bool databaseExists)
+{
+	DIR		   *directory;
+	struct dirent *entry;
+	int64		removed = 0;
+	time_t		now = time(NULL);
+
+	directory = opendir(dir);
+	if (directory == NULL)
+		return 0;
+	while ((entry = readdir(directory)) != NULL)
+	{
+		char		path[MAXPGPATH];
+		int			written;
+		bool		removeFile = false;
+
+		if (strcmp(entry->d_name, ".") == 0 || strcmp(entry->d_name, "..") == 0)
+			continue;
+		written = snprintf(path, sizeof(path), "%s/%s", dir, entry->d_name);
+		if (written < 0 || written >= (int) sizeof(path))
+			continue;
+		if (PgturbohybridGraphSharedHasSuffix(entry->d_name, ".tqcache"))
+		{
+			PgturbohybridGraphSharedCacheHeader hdr;
+
+			removeFile = !databaseExists ||
+				!PgturbohybridGraphSharedReadHeader(path, &hdr) ||
+				!PgturbohybridGraphSharedRelationIdentityExists(&hdr.identity);
+		}
+		else if (strstr(entry->d_name, ".tqcache.tmp.") != NULL)
+		{
+			struct stat st;
+
+			removeFile = !databaseExists ||
+				(stat(path, &st) == 0 && now - st.st_mtime >=
+				 PGTURBOHYBRID_GRAPH_SHARED_CACHE_TEMP_STALE_SECONDS);
+		}
+		else if (!databaseExists &&
+				 (PgturbohybridGraphSharedHasSuffix(entry->d_name, ".lock")))
+			removeFile = true;
+		else if (databaseExists &&
+				 PgturbohybridGraphSharedHasSuffix(entry->d_name, ".lock"))
+		{
+			unsigned int relationOid;
+			unsigned int forkNumber;
+			int consumed = 0;
+
+			if (sscanf(entry->d_name, "%u_%u.lock%n", &relationOid,
+					   &forkNumber, &consumed) == 2 &&
+				entry->d_name[consumed] == '\0' &&
+				forkNumber == MAIN_FORKNUM &&
+				!SearchSysCacheExists1(RELOID, ObjectIdGetDatum((Oid) relationOid)))
+				removeFile = true;
+		}
+
+		if (removeFile && unlink(path) == 0)
+			removed++;
+	}
+	closedir(directory);
+	return removed;
+}
+
+static int64
+PgturbohybridGraphSharedRunGc(void)
+{
+	char		root[MAXPGPATH];
+	char		gcPath[MAXPGPATH];
+	DIR		   *rootDir;
+	struct dirent *databaseEntry;
+	TimestampTz now = GetCurrentTimestamp();
+	int			gcFd;
+	int64		removed = 0;
+
+	if (pgturbohybridGraphSharedLastGc != 0 &&
+		!TimestampDifferenceExceeds(pgturbohybridGraphSharedLastGc, now,
+									PGTURBOHYBRID_GRAPH_SHARED_CACHE_GC_INTERVAL_MS))
+		return 0;
+	PgturbohybridGraphSharedCacheDir(root, sizeof(root));
+	if (snprintf(gcPath, sizeof(gcPath), "%s/.gc.lock", root) >=
+		(int) sizeof(gcPath))
+		return 0;
+	gcFd = open(gcPath, O_CREAT | O_RDWR, 0600);
+	if (gcFd < 0 || !PgturbohybridGraphSharedTryLock(gcFd))
+	{
+		if (gcFd >= 0)
+			close(gcFd);
+		return 0;
+	}
+	pgturbohybridGraphSharedLastGc = now;
+	rootDir = opendir(root);
+	if (rootDir != NULL)
+	{
+		while ((databaseEntry = readdir(rootDir)) != NULL)
+		{
+			Oid			databaseOid;
+			char		databaseDir[MAXPGPATH];
+			DIR		   *tablespaceDir;
+			struct dirent *tablespaceEntry;
+			bool		databaseExists;
+
+			if (!PgturbohybridGraphSharedParseOid(databaseEntry->d_name,
+												 &databaseOid))
+				continue;
+			if (snprintf(databaseDir, sizeof(databaseDir), "%s/%s", root,
+						 databaseEntry->d_name) >= (int) sizeof(databaseDir))
+				continue;
+			databaseExists = SearchSysCacheExists1(DATABASEOID,
+												ObjectIdGetDatum(databaseOid));
+			tablespaceDir = opendir(databaseDir);
+			if (tablespaceDir == NULL)
+				continue;
+			while ((tablespaceEntry = readdir(tablespaceDir)) != NULL)
+			{
+				Oid			tablespaceOid;
+				char		dir[MAXPGPATH];
+
+				if (!PgturbohybridGraphSharedParseOid(tablespaceEntry->d_name,
+													 &tablespaceOid))
+					continue;
+				if (snprintf(dir, sizeof(dir), "%s/%s", databaseDir,
+							 tablespaceEntry->d_name) >= (int) sizeof(dir))
+					continue;
+				if (databaseExists && databaseOid != MyDatabaseId)
+					continue;
+				removed += PgturbohybridGraphSharedCleanDirectory(dir,
+														 databaseExists);
+				if (!databaseExists)
+					(void) rmdir(dir);
+			}
+			closedir(tablespaceDir);
+			if (!databaseExists)
+				(void) rmdir(databaseDir);
+		}
+		closedir(rootDir);
+	}
+	PgturbohybridGraphSharedUnlock(gcFd);
+	close(gcFd);
+	return removed;
+}
+
+static int64
+PgturbohybridGraphSharedRemoveOldGenerations(Relation index,
+											 PgturbohybridGraphMetaPageData *meta,
+											 const char *keepPath)
+{
+	char		dir[MAXPGPATH];
+	DIR		   *directory;
+	struct dirent *entry;
+	Oid			tablespaceOid;
+	Oid			relNumber;
+	char		prefix[64];
+	int64		removed = 0;
+
+	(void) meta;
+	if (!PgturbohybridGraphEnsureSharedCacheDir(index, dir, sizeof(dir)))
+		return 0;
+	PgturbohybridGraphGetRelationLocator(index, &tablespaceOid, &relNumber);
+	(void) tablespaceOid;
+	if (snprintf(prefix, sizeof(prefix), "%u_%u_", relNumber, MAIN_FORKNUM) >=
+		(int) sizeof(prefix))
+		return 0;
+	directory = opendir(dir);
+	if (directory == NULL)
+		return 0;
+	while ((entry = readdir(directory)) != NULL)
+	{
+		unsigned int parsedRel;
+		unsigned int parsedFork;
+		unsigned int parsedFormat;
+		unsigned long long parsedGeneration;
+		unsigned long long parsedKey;
+		int consumed = 0;
+		char path[MAXPGPATH];
+
+		if (strncmp(entry->d_name, prefix, strlen(prefix)) == 0 &&
+			strstr(entry->d_name, ".tqcache.tmp.") != NULL)
+		{
+			if (snprintf(path, sizeof(path), "%s/%s", dir, entry->d_name) <
+				(int) sizeof(path) && unlink(path) == 0)
+				removed++;
+			continue;
+		}
+		if (sscanf(entry->d_name, "%u_%u_%llu_%u_%llx.tqcache%n",
+				   &parsedRel, &parsedFork, &parsedGeneration, &parsedFormat,
+				   &parsedKey, &consumed) != 5 ||
+			entry->d_name[consumed] != '\0' || parsedRel != relNumber ||
+			parsedFork != MAIN_FORKNUM)
+			continue;
+		if (snprintf(path, sizeof(path), "%s/%s", dir, entry->d_name) >=
+			(int) sizeof(path) || strcmp(path, keepPath) == 0)
+			continue;
+		if (unlink(path) == 0)
+			removed++;
+	}
+	closedir(directory);
+	return removed;
+}
+#endif
 
 static bool
 PgturbohybridGraphSharedHeaderMatches(PgturbohybridGraphSharedCacheHeader *hdr,
@@ -408,11 +906,13 @@ PgturbohybridGraphSharedHeaderMatches(PgturbohybridGraphSharedCacheHeader *hdr,
 									  PgturbohybridGraphMetaPageData *meta,
 									  uint64 key)
 {
+	PgturbohybridGraphCacheIdentity identity;
+
+	PgturbohybridGraphCacheIdentityInit(index, meta, &identity);
 	return hdr->magic == PGTURBOHYBRID_GRAPH_SHARED_CACHE_MAGIC &&
 		hdr->version == PGTURBOHYBRID_GRAPH_SHARED_CACHE_VERSION &&
 		hdr->key == key &&
-		hdr->relid == RelationGetRelid(index) &&
-		hdr->relfilenumber == PgturbohybridGraphRelFileNumber(index) &&
+		PgturbohybridGraphCacheIdentityEqual(&hdr->identity, &identity) &&
 		hdr->dimensions == meta->dimensions &&
 		hdr->m == meta->m &&
 		hdr->graphMaxLevel == meta->graphMaxLevel &&
@@ -430,21 +930,212 @@ PgturbohybridGraphSharedHeaderMatches(PgturbohybridGraphSharedCacheHeader *hdr,
 		hdr->tqCorrectionStartBlkno == meta->tqCorrectionStartBlkno;
 }
 
-static uint64
-PgturbohybridGraphSharedAlign(uint64 offset)
+static bool
+PgturbohybridGraphSharedAlign(uint64 offset, uint64 *aligned)
 {
-	return (uint64) MAXALIGN(offset);
+	if (offset > UINT64_MAX - (MAXIMUM_ALIGNOF - 1))
+		return false;
+	*aligned = (offset + (MAXIMUM_ALIGNOF - 1)) & ~((uint64) MAXIMUM_ALIGNOF - 1);
+	return true;
 }
 
 static bool
-PgturbohybridGraphSharedAddBytes(uint64 *offset, uint64 bytes, uint64 *start)
+PgturbohybridGraphSharedAddBytes(uint64 *offset, uint64 bytes,
+								PgturbohybridGraphSharedSegment *segment)
 {
-	*offset = PgturbohybridGraphSharedAlign(*offset);
-	if (start != NULL)
-		*start = *offset;
+	uint64 aligned;
+
+	if (bytes == 0)
+	{
+		segment->offset = 0;
+		segment->length = 0;
+		return true;
+	}
+	if (!PgturbohybridGraphSharedAlign(*offset, &aligned))
+		return false;
+	*offset = aligned;
+	segment->offset = *offset;
+	segment->length = bytes;
 	if (bytes > UINT64_MAX - *offset)
 		return false;
 	*offset += bytes;
+	return true;
+}
+
+static bool
+PgturbohybridGraphBuildSharedLayout(PgturbohybridGraphMetaPageData *meta,
+									uint64 neighborValueCount,
+									uint32 payloadRefCount,
+									uint32 exactBytes,
+									bool enforceCacheLimit,
+									PgturbohybridGraphSharedCacheHeader *hdr)
+{
+	uint64 offset = sizeof(*hdr);
+	uint64 bytes;
+	uint64 adjRecordCount = PgturbohybridGraphAdjRecordCount(meta);
+
+#define ADD_ARRAY(segment, count, width) \
+	do { \
+		if (!PgturbohybridGraphCheckedMultiplyU64((count), (width), &bytes) || \
+			!PgturbohybridGraphSharedAddBytes(&offset, bytes, &(segment))) \
+			return false; \
+	} while (0)
+
+	ADD_ARRAY(hdr->nodes, meta->tqNodeCount, sizeof(PgturbohybridGraphSharedNode));
+	ADD_ARRAY(hdr->codeArena, meta->tqNodeCount, meta->tqCodeBytes);
+	ADD_ARRAY(hdr->payloadArena, meta->tqNodeCount, meta->tqPayloadBytes);
+	ADD_ARRAY(hdr->residualArena, meta->tqNodeCount, meta->tqResidualRerankBytes);
+	ADD_ARRAY(hdr->exactArena, meta->tqNodeCount, exactBytes);
+	ADD_ARRAY(hdr->neighborCounts, adjRecordCount, sizeof(uint16));
+	ADD_ARRAY(hdr->neighborOffsets, adjRecordCount, sizeof(uint64));
+	ADD_ARRAY(hdr->neighborData, neighborValueCount, sizeof(uint32));
+	ADD_ARRAY(hdr->payloadRefs, payloadRefCount,
+			  sizeof(PgturbohybridGraphPayloadRef));
+#undef ADD_ARRAY
+	if (!PgturbohybridGraphSharedAlign(offset, &hdr->fileSize) ||
+		(enforceCacheLimit &&
+		 hdr->fileSize > PgturbohybridGraphNativeCacheMaxBytes()) ||
+		hdr->fileSize > (uint64) SIZE_MAX)
+		return false;
+	return true;
+}
+
+/*
+ * Produce the conservative layout used by admission and diagnostics.  The
+ * writer feeds the same calculator the exact counts it observed while loading
+ * the graph; admission must reserve for every legal edge and payload ref so it
+ * can never admit a graph that the writer later cannot represent.
+ */
+static bool
+PgturbohybridGraphBuildMaximumSharedLayout(PgturbohybridGraphMetaPageData *meta,
+										bool cacheExactVectors,
+										bool enforceCacheLimit,
+										PgturbohybridGraphSharedCacheHeader *hdr)
+{
+	uint64		neighborCapacityPerNode = 0;
+	uint64		neighborValueCount;
+	uint64		payloadRefCount;
+	uint64		exactTotal;
+	uint32		exactBytes = 0;
+	int			levelCapacity = PgturbohybridGraphLevelCapacity(meta->m);
+
+	for (int level = 0; level < levelCapacity; level++)
+	{
+		uint64 levelM = PgturbohybridGraphLevelM(meta->m, level);
+
+		if (levelM > UINT64_MAX - neighborCapacityPerNode)
+			return false;
+		neighborCapacityPerNode += levelM;
+	}
+	if (!PgturbohybridGraphCheckedMultiplyU64(meta->tqNodeCount,
+											 neighborCapacityPerNode,
+											 &neighborValueCount) ||
+		!PgturbohybridGraphCheckedMultiplyU64(meta->tqNodeCount,
+											 meta->tqPayloadCount,
+											 &payloadRefCount) ||
+		payloadRefCount > UINT32_MAX)
+		return false;
+	if (cacheExactVectors && meta->dimensions > 0)
+	{
+		Size perNode = PGTURBOHYBRID_VECTOR_SIZE(meta->dimensions);
+
+		if (perNode > UINT32_MAX ||
+			!PgturbohybridGraphCheckedMultiplyU64(meta->tqNodeCount,
+												 perNode, &exactTotal))
+			return false;
+		exactBytes = (uint32) perNode;
+	}
+
+	memset(hdr, 0, sizeof(*hdr));
+	return PgturbohybridGraphBuildSharedLayout(meta, neighborValueCount,
+										  (uint32) payloadRefCount,
+										  exactBytes, enforceCacheLimit, hdr);
+}
+
+static bool
+PgturbohybridGraphValidateSharedLayout(void *base,
+									  PgturbohybridGraphSharedCacheHeader *hdr,
+									  PgturbohybridGraphMetaPageData *meta,
+									  uint64 fileSize)
+{
+	PgturbohybridGraphSharedSegment *segments[] = {
+		&hdr->nodes, &hdr->codeArena, &hdr->payloadArena,
+		&hdr->residualArena, &hdr->exactArena, &hdr->neighborCounts,
+		&hdr->neighborOffsets, &hdr->neighborData, &hdr->payloadRefs
+	};
+	PgturbohybridGraphSharedCacheHeader expected;
+
+	if (hdr->fileSize != fileSize || fileSize < sizeof(*hdr) ||
+		hdr->adjRecordCount != PgturbohybridGraphAdjRecordCount(meta) ||
+		hdr->payloadRefCount > meta->tqNodeCount * (uint64) meta->tqPayloadCount ||
+		hdr->neighborValueCount >
+			(uint64) hdr->adjRecordCount * PgturbohybridGraphLevelM(meta->m, 0))
+		return false;
+	memset(&expected, 0, sizeof(expected));
+	if (!PgturbohybridGraphBuildSharedLayout(meta, hdr->neighborValueCount,
+										 hdr->payloadRefCount, hdr->exactBytes,
+										 true,
+										 &expected) ||
+		expected.fileSize != hdr->fileSize)
+		return false;
+	for (Size i = 0; i < lengthof(segments); i++)
+	{
+		PgturbohybridGraphSharedSegment *segment = segments[i];
+
+		if ((segment->length == 0) != (segment->offset == 0) ||
+			(segment->length > 0 &&
+			 (segment->offset % MAXIMUM_ALIGNOF != 0 ||
+			  segment->offset < sizeof(*hdr) ||
+			  segment->offset > fileSize ||
+			  segment->length > fileSize - segment->offset)))
+			return false;
+		for (Size j = 0; j < i; j++)
+		{
+			PgturbohybridGraphSharedSegment *other = segments[j];
+
+			if (segment->length > 0 && other->length > 0 &&
+				segment->offset < other->offset + other->length &&
+				other->offset < segment->offset + segment->length)
+				return false;
+		}
+	}
+	if (memcmp(&hdr->nodes, &expected.nodes,
+			   sizeof(PgturbohybridGraphSharedSegment) * lengthof(segments)) != 0)
+		return false;
+	if (hdr->adjRecordCount > 0)
+	{
+		uint16 *counts = (uint16 *) PgturbohybridGraphSharedCheckedPtr(
+			base, fileSize, hdr->neighborCounts.offset,
+			hdr->neighborCounts.length);
+		uint64 *offsets = (uint64 *) PgturbohybridGraphSharedCheckedPtr(
+			base, fileSize, hdr->neighborOffsets.offset,
+			hdr->neighborOffsets.length);
+
+		if (counts == NULL || offsets == NULL)
+			return false;
+
+		for (uint32 slot = 0; slot < hdr->adjRecordCount; slot++)
+		{
+			if (offsets[slot] > hdr->neighborValueCount ||
+				counts[slot] > hdr->neighborValueCount - offsets[slot])
+				return false;
+		}
+	}
+	if (hdr->payloadRefCount > 0)
+	{
+		PgturbohybridGraphPayloadRef *refs =
+			(PgturbohybridGraphPayloadRef *) PgturbohybridGraphSharedCheckedPtr(
+				base, fileSize, hdr->payloadRefs.offset,
+				hdr->payloadRefs.length);
+
+		if (refs == NULL)
+			return false;
+
+		for (uint32 i = 0; i < hdr->payloadRefCount; i++)
+			if (refs[i].nodeId >= meta->tqNodeCount ||
+				refs[i].payloadSlot >= meta->tqPayloadCount)
+				return false;
+	}
 	return true;
 }
 
@@ -454,9 +1145,9 @@ PgturbohybridGraphShouldUseNativeCacheWithPolicy(PgturbohybridGraphMetaPageData 
 									   int policy,
 									   PgturbohybridGraphNativeCacheReason *reason)
 {
-	Size		totalBytes = sizeof(PgturbohybridGraphNativeCache);
+	uint64		totalBytes;
 	Size		bytes;
-	Size		baseNeighborsPerNode;
+	PgturbohybridGraphSharedCacheHeader layout;
 
 	if (reason != NULL)
 		*reason = PGTURBOHYBRID_GRAPH_NATIVE_CACHE_REASON_NONE;
@@ -468,34 +1159,10 @@ PgturbohybridGraphShouldUseNativeCacheWithPolicy(PgturbohybridGraphMetaPageData 
 		return false;
 	}
 
-	if (!PgturbohybridGraphArenaBytes(meta->tqNodeCount,
-									  sizeof(PgturbohybridGraphScanNode), &bytes))
+	if (!PgturbohybridGraphBuildMaximumSharedLayout(meta, cacheExactVectors,
+												 true, &layout))
 		goto too_large;
-	totalBytes += bytes;
-	if (PgturbohybridGraphArenaBytesHuge(meta->tqNodeCount,
-										 meta->tqCodeBytes, &bytes) &&
-		bytes <= PgturbohybridGraphNativeCacheMaxBytes())
-		totalBytes += bytes;
-	if (PgturbohybridGraphArenaBytesHuge(meta->tqNodeCount,
-										 meta->tqPayloadBytes, &bytes) &&
-		bytes <= PgturbohybridGraphNativeCacheMaxBytes())
-		totalBytes += bytes;
-	if (meta->tqResidualRerankBytes > 0)
-	{
-		if (!PgturbohybridGraphArenaBytesHuge(meta->tqNodeCount,
-											  meta->tqResidualRerankBytes, &bytes) ||
-			bytes > PgturbohybridGraphNativeCacheMaxBytes())
-			goto too_large;
-		totalBytes += bytes;
-	}
-	if (cacheExactVectors && meta->dimensions > 0)
-	{
-		if (PgturbohybridGraphArenaBytes(meta->tqNodeCount,
-										 PGTURBOHYBRID_VECTOR_SIZE(meta->dimensions),
-										 &bytes) &&
-			bytes <= PGTURBOHYBRID_GRAPH_EXACT_CACHE_AUTO_MAX_BYTES)
-			totalBytes += bytes;
-	}
+	totalBytes = layout.fileSize;
 	if (BlockNumberIsValid(meta->tqMultivectorDocMapStartBlkno) &&
 		meta->tqMultivectorDocMapVersion ==
 		PGTURBOHYBRID_GRAPH_MULTIVECTOR_DOCMAP_VERSION)
@@ -504,26 +1171,17 @@ PgturbohybridGraphShouldUseNativeCacheWithPolicy(PgturbohybridGraphMetaPageData 
 										  sizeof(TqMultiVectorNodeMapEntry),
 										  &bytes))
 			goto too_large;
-		totalBytes += bytes;
+		if ((uint64) bytes > UINT64_MAX - totalBytes)
+			goto too_large;
+		totalBytes += (uint64) bytes;
 		if (!PgturbohybridGraphArenaBytes(meta->tqMultivectorDocCount,
 										  sizeof(TqMultiVectorDocMapEntry),
 										  &bytes))
 			goto too_large;
-		totalBytes += bytes;
+		if ((uint64) bytes > UINT64_MAX - totalBytes)
+			goto too_large;
+		totalBytes += (uint64) bytes;
 	}
-	if (!PgturbohybridGraphArenaBytes(PgturbohybridGraphAdjRecordCount(meta),
-									  sizeof(uint32 *), &bytes))
-		goto too_large;
-	totalBytes += bytes;
-	if (!PgturbohybridGraphArenaBytes(PgturbohybridGraphAdjRecordCount(meta),
-									  sizeof(uint16), &bytes))
-		goto too_large;
-	totalBytes += bytes;
-	baseNeighborsPerNode = (Size) PgturbohybridGraphLevelM(meta->m, 0) * sizeof(uint32);
-	if (!PgturbohybridGraphArenaBytes(meta->tqNodeCount,
-									  baseNeighborsPerNode, &bytes))
-		goto too_large;
-	totalBytes += bytes;
 
 	if (totalBytes <= PgturbohybridGraphNativeCacheMaxBytes())
 	{
@@ -566,6 +1224,7 @@ PgturbohybridGraphEstimateMemory(Relation index,
 	int			codeTuplesPerPage;
 	int			levelCapacity;
 	Size		exactBytesPerNode;
+	PgturbohybridGraphSharedCacheHeader sharedLayout;
 
 	memset(estimate, 0, sizeof(*estimate));
 	if (meta == NULL || !PgturbohybridGraphReadMeta(index, meta))
@@ -647,13 +1306,13 @@ PgturbohybridGraphEstimateMemory(Relation index,
 		estimate->visitedGenerationBytes +
 		(meta->tqNodeCount > 0 ? (uint64) sizeof(uint32) : 0);
 
-	totalBytes += estimate->codeBytes;
-	totalBytes += estimate->adjacencyBytes;
-	totalBytes += estimate->exactBytes;
-	totalBytes += estimate->nodeBytes;
+	/* Keep the persisted shared portion byte-for-byte aligned with admission. */
+	if (!PgturbohybridGraphBuildMaximumSharedLayout(meta,
+												 estimate->cacheExactVectors,
+												 false, &sharedLayout))
+		return false;
+	totalBytes = sharedLayout.fileSize;
 	totalBytes += estimate->visitedGenerationBytes;
-	totalBytes += estimate->payloadBytes;
-	totalBytes += estimate->residualBytes;
 	totalBytes += estimate->multivectorDocMapBytes;
 	totalBytes += estimate->pageMapBytes;
 	estimate->estimatedTotalBytes = totalBytes;
@@ -4186,6 +4845,7 @@ PgturbohybridGraphCacheMatches(PgturbohybridGraphNativeCache *cache, Relation in
 		cache->m == meta->m &&
 		cache->graphMaxLevel == meta->graphMaxLevel &&
 		cache->graphFlags == meta->graphFlags &&
+		cache->graphGeneration == meta->graphGeneration &&
 		cache->tqNodeCount == meta->tqNodeCount &&
 		cache->tqEntryNodeId == meta->tqEntryNodeId &&
 		cache->tqSegmentCount == meta->tqSegmentCount &&
@@ -4470,6 +5130,7 @@ PgturbohybridGraphBuildCache(Relation index, PgturbohybridGraphMetaPageData *met
 	cache->m = meta->m;
 	cache->graphMaxLevel = meta->graphMaxLevel;
 	cache->graphFlags = meta->graphFlags;
+	cache->graphGeneration = meta->graphGeneration;
 	cache->tqNodeCount = meta->tqNodeCount;
 	cache->tqEntryNodeId = meta->tqEntryNodeId;
 	cache->tqSegmentCount = meta->tqSegmentCount;
@@ -4578,11 +5239,16 @@ PgturbohybridGraphSharedBuildView(PgturbohybridGraphSharedMap *map,
 	PgturbohybridGraphSharedCacheHeader *hdr =
 		(PgturbohybridGraphSharedCacheHeader *) map->base;
 	PgturbohybridGraphSharedNode *sharedNodes =
-		(PgturbohybridGraphSharedNode *) PgturbohybridGraphSharedPtr(map->base, hdr->nodesOffset);
+		(PgturbohybridGraphSharedNode *) PgturbohybridGraphSharedCheckedPtr(map->base, map->size,
+														 hdr->nodes.offset, hdr->nodes.length);
 	uint64	   *neighborOffsets =
-		(uint64 *) PgturbohybridGraphSharedPtr(map->base, hdr->neighborOffsetsOffset);
+		(uint64 *) PgturbohybridGraphSharedCheckedPtr(map->base, map->size,
+											 hdr->neighborOffsets.offset,
+											 hdr->neighborOffsets.length);
 	uint32	   *neighborData =
-		(uint32 *) PgturbohybridGraphSharedPtr(map->base, hdr->neighborDataOffset);
+		(uint32 *) PgturbohybridGraphSharedCheckedPtr(map->base, map->size,
+											 hdr->neighborData.offset,
+											 hdr->neighborData.length);
 	PgturbohybridGraphScanStorage *storage = &map->view;
 	MemoryContext oldCtx;
 
@@ -4594,22 +5260,30 @@ PgturbohybridGraphSharedBuildView(PgturbohybridGraphSharedMap *map,
 											   meta->tqNodeCount,
 											   "pgturbohybrid shared graph node view"));
 	storage->codeArena =
-		(uint8 *) PgturbohybridGraphSharedPtr(map->base, hdr->codeArenaOffset);
+		(uint8 *) PgturbohybridGraphSharedCheckedPtr(map->base, map->size,
+											 hdr->codeArena.offset, hdr->codeArena.length);
 	storage->payloadArena =
-		(uint8 *) PgturbohybridGraphSharedPtr(map->base, hdr->payloadArenaOffset);
+		(uint8 *) PgturbohybridGraphSharedCheckedPtr(map->base, map->size,
+											 hdr->payloadArena.offset, hdr->payloadArena.length);
 	storage->residualArena =
-		(uint8 *) PgturbohybridGraphSharedPtr(map->base, hdr->residualArenaOffset);
+		(uint8 *) PgturbohybridGraphSharedCheckedPtr(map->base, map->size,
+											 hdr->residualArena.offset, hdr->residualArena.length);
 	storage->exactArena =
-		(char *) PgturbohybridGraphSharedPtr(map->base, hdr->exactArenaOffset);
+		(char *) PgturbohybridGraphSharedCheckedPtr(map->base, map->size,
+											 hdr->exactArena.offset, hdr->exactArena.length);
 	storage->exactBytes = hdr->exactBytes;
 	storage->neighborCounts =
-		(uint16 *) PgturbohybridGraphSharedPtr(map->base, hdr->neighborCountsOffset);
+		(uint16 *) PgturbohybridGraphSharedCheckedPtr(map->base, map->size,
+											  hdr->neighborCounts.offset,
+											  hdr->neighborCounts.length);
 	storage->neighbors =
 		palloc0(PgturbohybridCheckedArrayBytes(sizeof(uint32 *),
 											   hdr->adjRecordCount,
 											   "pgturbohybrid shared graph neighbor view"));
 	storage->payloadRefs =
-		(PgturbohybridGraphPayloadRef *) PgturbohybridGraphSharedPtr(map->base, hdr->payloadRefsOffset);
+		(PgturbohybridGraphPayloadRef *) PgturbohybridGraphSharedCheckedPtr(map->base, map->size,
+														 hdr->payloadRefs.offset,
+														 hdr->payloadRefs.length);
 	storage->payloadRefCount = hdr->payloadRefCount;
 	storage->levelCount = PgturbohybridGraphLevelCapacity(meta->m);
 	storage->codeTuplesPerPage =
@@ -4666,7 +5340,7 @@ PgturbohybridGraphMapSharedCacheFile(Relation index,
 									 PgturbohybridGraphMetaPageData *meta,
 									 const char *path, uint64 key,
 									 PgturbohybridGraphSharedMap **mapOut,
-									 int64 *attachUs)
+									 int64 *attachUs, bool *invalidOut)
 {
 #ifdef WIN32
 	(void) index;
@@ -4674,8 +5348,11 @@ PgturbohybridGraphMapSharedCacheFile(Relation index,
 	(void) path;
 	(void) key;
 	(void) mapOut;
+	(void) invalidOut;
 	if (attachUs != NULL)
 		*attachUs = 0;
+	if (invalidOut != NULL)
+		*invalidOut = false;
 	return false;
 #else
 	int			fd;
@@ -4695,6 +5372,8 @@ PgturbohybridGraphMapSharedCacheFile(Relation index,
 		return false;
 	if (fstat(fd, &st) != 0 || st.st_size < (off_t) sizeof(PgturbohybridGraphSharedCacheHeader))
 	{
+		if (invalidOut != NULL)
+			*invalidOut = true;
 		close(fd);
 		return false;
 	}
@@ -4705,8 +5384,11 @@ PgturbohybridGraphMapSharedCacheFile(Relation index,
 
 	hdr = (PgturbohybridGraphSharedCacheHeader *) base;
 	if (!PgturbohybridGraphSharedHeaderMatches(hdr, index, meta, key) ||
-		hdr->fileSize != (uint64) st.st_size)
+		!PgturbohybridGraphValidateSharedLayout(base, hdr, meta,
+											(uint64) st.st_size))
 	{
+		if (invalidOut != NULL)
+			*invalidOut = true;
 		munmap(base, st.st_size);
 		return false;
 	}
@@ -4719,7 +5401,7 @@ PgturbohybridGraphMapSharedCacheFile(Relation index,
 	map->key = key;
 	map->relid = RelationGetRelid(index);
 	map->relfilenumber = PgturbohybridGraphRelFileNumber(index);
-	map->graphFlags = meta->graphFlags;
+	PgturbohybridGraphCacheIdentityInit(index, meta, &map->identity);
 	map->base = base;
 	map->size = (Size) st.st_size;
 	map->ctx = ctx;
@@ -4756,9 +5438,14 @@ PgturbohybridGraphFindSharedMap(Relation index, PgturbohybridGraphMetaPageData *
 
 		if (map->key == key &&
 			map->relid == relid &&
-			map->relfilenumber == relfilenumber &&
-			map->graphFlags == meta->graphFlags)
+			map->relfilenumber == relfilenumber)
+		{
+			PgturbohybridGraphCacheIdentity identity;
+
+			PgturbohybridGraphCacheIdentityInit(index, meta, &identity);
+			if (PgturbohybridGraphCacheIdentityEqual(&map->identity, &identity))
 			return map;
+		}
 
 		/*
 		 * Same relation, superseded generation (another backend REINDEXed or
@@ -4766,7 +5453,7 @@ PgturbohybridGraphFindSharedMap(Relation index, PgturbohybridGraphMetaPageData *
 		 * detach it here rather than leaking it -- a read-only backend never
 		 * reaches InvalidateCaches().
 		 */
-		if (map->relid == relid && map->relfilenumber != relfilenumber)
+		if (map->relid == relid)
 		{
 			*link = map->next;
 #ifndef WIN32
@@ -4815,7 +5502,6 @@ PgturbohybridGraphWriteSharedCacheFile(Relation index,
 	uint8	   *residualArena;
 	char	   *exactArena;
 	PgturbohybridGraphPayloadRef *payloadRefs;
-	uint64		offset;
 	uint64		neighborValueCount = 0;
 	uint64		codeBytes = 0;
 	uint64		payloadBytes = 0;
@@ -4867,8 +5553,7 @@ PgturbohybridGraphWriteSharedCacheFile(Relation index,
 	hdr.magic = PGTURBOHYBRID_GRAPH_SHARED_CACHE_MAGIC;
 	hdr.version = PGTURBOHYBRID_GRAPH_SHARED_CACHE_VERSION;
 	hdr.key = key;
-	hdr.relid = RelationGetRelid(index);
-	hdr.relfilenumber = PgturbohybridGraphRelFileNumber(index);
+	PgturbohybridGraphCacheIdentityInit(index, meta, &hdr.identity);
 	hdr.dimensions = meta->dimensions;
 	hdr.m = meta->m;
 	hdr.graphMaxLevel = meta->graphMaxLevel;
@@ -4889,29 +5574,10 @@ PgturbohybridGraphWriteSharedCacheFile(Relation index,
 	hdr.payloadRefCount = storage.payloadRefCount;
 	hdr.exactBytes = (uint32) storage.exactBytes;
 
-	offset = sizeof(PgturbohybridGraphSharedCacheHeader);
-	if (!PgturbohybridGraphSharedAddBytes(&offset,
-										  (uint64) meta->tqNodeCount * sizeof(PgturbohybridGraphSharedNode),
-										  &hdr.nodesOffset) ||
-		!PgturbohybridGraphSharedAddBytes(&offset, codeBytes, &hdr.codeArenaOffset) ||
-		!PgturbohybridGraphSharedAddBytes(&offset, payloadBytes, &hdr.payloadArenaOffset) ||
-		!PgturbohybridGraphSharedAddBytes(&offset, residualBytes, &hdr.residualArenaOffset) ||
-		!PgturbohybridGraphSharedAddBytes(&offset, exactBytes, &hdr.exactArenaOffset) ||
-		!PgturbohybridGraphSharedAddBytes(&offset,
-										  adjRecordCount * sizeof(uint16),
-										  &hdr.neighborCountsOffset) ||
-		!PgturbohybridGraphSharedAddBytes(&offset,
-										  adjRecordCount * sizeof(uint64),
-										  &hdr.neighborOffsetsOffset) ||
-		!PgturbohybridGraphSharedAddBytes(&offset,
-										  neighborValueCount * sizeof(uint32),
-										  &hdr.neighborDataOffset) ||
-		!PgturbohybridGraphSharedAddBytes(&offset,
-										  (uint64) storage.payloadRefCount *
-										  sizeof(PgturbohybridGraphPayloadRef),
-										  &hdr.payloadRefsOffset))
+	if (!PgturbohybridGraphBuildSharedLayout(meta, neighborValueCount,
+										 storage.payloadRefCount,
+										 storage.exactBytes, true, &hdr))
 		return false;
-	hdr.fileSize = PgturbohybridGraphSharedAlign(offset);
 	hdr.residentCodeBytes = codeBytes;
 	hdr.residentAdjBytes =
 		adjRecordCount * (sizeof(uint16) + sizeof(uint64)) +
@@ -4919,7 +5585,7 @@ PgturbohybridGraphWriteSharedCacheFile(Relation index,
 	hdr.residentExactBytes = exactBytes;
 	hdr.residentTotalBytes = hdr.fileSize;
 
-	fd = open(tmpPath, O_CREAT | O_TRUNC | O_RDWR, 0600);
+	fd = open(tmpPath, O_CREAT | O_EXCL | O_RDWR, 0600);
 	if (fd < 0)
 		return false;
 	if (ftruncate(fd, (off_t) hdr.fileSize) != 0)
@@ -4928,6 +5594,7 @@ PgturbohybridGraphWriteSharedCacheFile(Relation index,
 		unlink(tmpPath);
 		return false;
 	}
+	PgturbohybridGraphSharedTestPause("after_ftruncate");
 	base = mmap(NULL, (Size) hdr.fileSize, PROT_READ | PROT_WRITE, MAP_SHARED, fd, 0);
 	if (base == MAP_FAILED)
 	{
@@ -4935,18 +5602,19 @@ PgturbohybridGraphWriteSharedCacheFile(Relation index,
 		unlink(tmpPath);
 		return false;
 	}
+	PgturbohybridGraphSharedTestPause("after_mmap");
 	memset(base, 0, (Size) hdr.fileSize);
 
 	memcpy(base, &hdr, sizeof(hdr));
-	sharedNodes = (PgturbohybridGraphSharedNode *) PgturbohybridGraphSharedPtr(base, hdr.nodesOffset);
-	codeArena = (uint8 *) PgturbohybridGraphSharedPtr(base, hdr.codeArenaOffset);
-	payloadArena = (uint8 *) PgturbohybridGraphSharedPtr(base, hdr.payloadArenaOffset);
-	residualArena = (uint8 *) PgturbohybridGraphSharedPtr(base, hdr.residualArenaOffset);
-	exactArena = (char *) PgturbohybridGraphSharedPtr(base, hdr.exactArenaOffset);
-	neighborCounts = (uint16 *) PgturbohybridGraphSharedPtr(base, hdr.neighborCountsOffset);
-	neighborOffsets = (uint64 *) PgturbohybridGraphSharedPtr(base, hdr.neighborOffsetsOffset);
-	neighborData = (uint32 *) PgturbohybridGraphSharedPtr(base, hdr.neighborDataOffset);
-	payloadRefs = (PgturbohybridGraphPayloadRef *) PgturbohybridGraphSharedPtr(base, hdr.payloadRefsOffset);
+	sharedNodes = (PgturbohybridGraphSharedNode *) PgturbohybridGraphSharedCheckedPtr(base, hdr.fileSize, hdr.nodes.offset, hdr.nodes.length);
+	codeArena = (uint8 *) PgturbohybridGraphSharedCheckedPtr(base, hdr.fileSize, hdr.codeArena.offset, hdr.codeArena.length);
+	payloadArena = (uint8 *) PgturbohybridGraphSharedCheckedPtr(base, hdr.fileSize, hdr.payloadArena.offset, hdr.payloadArena.length);
+	residualArena = (uint8 *) PgturbohybridGraphSharedCheckedPtr(base, hdr.fileSize, hdr.residualArena.offset, hdr.residualArena.length);
+	exactArena = (char *) PgturbohybridGraphSharedCheckedPtr(base, hdr.fileSize, hdr.exactArena.offset, hdr.exactArena.length);
+	neighborCounts = (uint16 *) PgturbohybridGraphSharedCheckedPtr(base, hdr.fileSize, hdr.neighborCounts.offset, hdr.neighborCounts.length);
+	neighborOffsets = (uint64 *) PgturbohybridGraphSharedCheckedPtr(base, hdr.fileSize, hdr.neighborOffsets.offset, hdr.neighborOffsets.length);
+	neighborData = (uint32 *) PgturbohybridGraphSharedCheckedPtr(base, hdr.fileSize, hdr.neighborData.offset, hdr.neighborData.length);
+	payloadRefs = (PgturbohybridGraphPayloadRef *) PgturbohybridGraphSharedCheckedPtr(base, hdr.fileSize, hdr.payloadRefs.offset, hdr.payloadRefs.length);
 
 	for (uint32 nodeId = 0; nodeId < meta->tqNodeCount; nodeId++)
 	{
@@ -4999,6 +5667,14 @@ PgturbohybridGraphWriteSharedCacheFile(Relation index,
 				storage.payloadRefs[refIndex].nodeId;
 		}
 	}
+	if (!PgturbohybridGraphValidateSharedLayout(base, &hdr, meta, hdr.fileSize))
+	{
+		munmap(base, (Size) hdr.fileSize);
+		close(fd);
+		unlink(tmpPath);
+		return false;
+	}
+	PgturbohybridGraphSharedTestPause("before_fsync");
 
 	{
 		/*
@@ -5023,10 +5699,31 @@ PgturbohybridGraphWriteSharedCacheFile(Relation index,
 		return false;
 	}
 	close(fd);
+	PgturbohybridGraphSharedTestPause("before_rename");
 	if (rename(tmpPath, path) != 0)
 	{
 		unlink(tmpPath);
 		return false;
+	}
+	{
+		char		parent[MAXPGPATH];
+		char	   *slash;
+		int			dirFd;
+
+		strlcpy(parent, path, sizeof(parent));
+		slash = strrchr(parent, '/');
+		if (slash == NULL)
+			return false;
+		*slash = '\0';
+		dirFd = open(parent, O_RDONLY);
+		if (dirFd < 0 || fsync(dirFd) != 0)
+		{
+			if (dirFd >= 0)
+				close(dirFd);
+			unlink(path);
+			return false;
+		}
+		close(dirFd);
 	}
 
 	if (buildUs != NULL)
@@ -5042,13 +5739,17 @@ PgturbohybridGraphWriteSharedCacheFile(Relation index,
 static PgturbohybridGraphSharedMap *
 PgturbohybridGraphGetSharedMap(Relation index, PgturbohybridGraphMetaPageData *meta,
 							   int64 *attachUs, int64 *buildUs, int64 *waitUs,
-							   int64 *codeLockWaitUs, int64 *adjLockWaitUs,
-							   bool *builtThisScan,
-							   PgturbohybridGraphNativeCacheReason *reason)
+								   int64 *codeLockWaitUs, int64 *adjLockWaitUs,
+								   bool *builtThisScan,
+								   bool *invalidated,
+								   int64 *gcRemovedFiles,
+								   PgturbohybridGraphNativeCacheReason *reason)
 {
 #ifdef WIN32
 	(void) index;
 	(void) meta;
+	(void) invalidated;
+	(void) gcRemovedFiles;
 	if (attachUs != NULL)
 		*attachUs = 0;
 	if (buildUs != NULL)
@@ -5061,6 +5762,8 @@ PgturbohybridGraphGetSharedMap(Relation index, PgturbohybridGraphMetaPageData *m
 		*adjLockWaitUs = 0;
 	if (builtThisScan != NULL)
 		*builtThisScan = false;
+	if (invalidated != NULL)
+		*invalidated = false;
 	if (reason != NULL)
 		*reason = PGTURBOHYBRID_GRAPH_NATIVE_CACHE_REASON_SHARED_ATTACH_FAILED;
 	return NULL;
@@ -5073,7 +5776,10 @@ PgturbohybridGraphGetSharedMap(Relation index, PgturbohybridGraphMetaPageData *m
 	char		tmpPath[MAXPGPATH];
 	int			lockFd;
 	bool		builder = false;
+	bool		invalidFile = false;
+	bool		writeOk = false;
 	instr_time	waitStart;
+	int64		removedFiles = 0;
 
 	if (attachUs != NULL)
 		*attachUs = 0;
@@ -5087,12 +5793,16 @@ PgturbohybridGraphGetSharedMap(Relation index, PgturbohybridGraphMetaPageData *m
 		*adjLockWaitUs = 0;
 	if (builtThisScan != NULL)
 		*builtThisScan = false;
+	if (invalidated != NULL)
+		*invalidated = false;
+	if (gcRemovedFiles != NULL)
+		*gcRemovedFiles = 0;
 
 	map = PgturbohybridGraphFindSharedMap(index, meta, key);
 	if (map != NULL)
 		return map;
 
-	if (!PgturbohybridGraphEnsureSharedCacheDir(dir, sizeof(dir)))
+	if (!PgturbohybridGraphEnsureSharedCacheDir(index, dir, sizeof(dir)))
 	{
 		if (reason != NULL)
 			*reason = PGTURBOHYBRID_GRAPH_NATIVE_CACHE_REASON_SHARED_ATTACH_FAILED;
@@ -5100,53 +5810,52 @@ PgturbohybridGraphGetSharedMap(Relation index, PgturbohybridGraphMetaPageData *m
 	}
 	PgturbohybridGraphSharedCachePath(index, meta, key, path, sizeof(path));
 	PgturbohybridGraphSharedCacheLockPath(index, meta, key, lockPath, sizeof(lockPath));
-	snprintf(tmpPath, sizeof(tmpPath), "%s.%d.tmp", path, MyProcPid);
-
-	if (PgturbohybridGraphMapSharedCacheFile(index, meta, path, key, &map, attachUs))
-		return map;
-
-	lockFd = open(lockPath, O_CREAT | O_EXCL | O_RDWR, 0600);
-	if (lockFd >= 0)
-		builder = true;
-
-	if (builder)
+	if (snprintf(tmpPath, sizeof(tmpPath), "%s.tmp.%d.%lld", path, MyProcPid,
+				  (long long) GetCurrentTimestamp()) >= (int) sizeof(tmpPath))
 	{
-		bool		ok;
-
-		ok = PgturbohybridGraphWriteSharedCacheFile(index, meta, path, tmpPath, key,
-													buildUs, codeLockWaitUs,
-													adjLockWaitUs);
-		close(lockFd);
-		unlink(lockPath);
-		if (!ok)
-		{
-			if (reason != NULL)
-				*reason = PGTURBOHYBRID_GRAPH_NATIVE_CACHE_REASON_SHARED_ATTACH_FAILED;
-			return NULL;
-		}
-		if (builtThisScan != NULL)
-			*builtThisScan = true;
-		if (PgturbohybridGraphMapSharedCacheFile(index, meta, path, key, &map, attachUs))
-		{
-			map->builtThisBackend = true;
-			map->buildUs = buildUs != NULL ? *buildUs : 0;
-			return map;
-		}
 		if (reason != NULL)
 			*reason = PGTURBOHYBRID_GRAPH_NATIVE_CACHE_REASON_SHARED_ATTACH_FAILED;
 		return NULL;
 	}
 
+	if (PgturbohybridGraphMapSharedCacheFile(index, meta, path, key, &map,
+										 attachUs, &invalidFile))
+	{
+		removedFiles += PgturbohybridGraphSharedRunGc();
+		if (gcRemovedFiles != NULL)
+			*gcRemovedFiles = removedFiles;
+		return map;
+	}
+	if (invalidFile && invalidated != NULL)
+		*invalidated = true;
+	removedFiles += PgturbohybridGraphSharedRunGc();
+
+	lockFd = OpenTransientFilePerm(lockPath, O_CREAT | O_RDWR, 0600);
+	if (lockFd < 0)
+	{
+		if (reason != NULL)
+			*reason = PGTURBOHYBRID_GRAPH_NATIVE_CACHE_REASON_SHARED_ATTACH_FAILED;
+		return NULL;
+	}
+	builder = PgturbohybridGraphSharedTryLock(lockFd);
+
 	INSTR_TIME_SET_CURRENT(waitStart);
-	for (;;)
+	while (!builder)
 	{
 		CHECK_FOR_INTERRUPTS();
-		if (PgturbohybridGraphMapSharedCacheFile(index, meta, path, key, &map, attachUs))
+		if (PgturbohybridGraphMapSharedCacheFile(index, meta, path, key, &map,
+											 attachUs, NULL))
 		{
 			if (waitUs != NULL)
 				*waitUs = PgturbohybridGraphElapsedUsSince(waitStart);
+			CloseTransientFile(lockFd);
+			if (gcRemovedFiles != NULL)
+				*gcRemovedFiles = removedFiles;
 			return map;
 		}
+		builder = PgturbohybridGraphSharedTryLock(lockFd);
+		if (builder)
+			break;
 		if (PgturbohybridGraphElapsedUsSince(waitStart) >= PGTURBOHYBRID_GRAPH_SHARED_CACHE_WAIT_US)
 			break;
 		pg_usleep(PGTURBOHYBRID_GRAPH_SHARED_CACHE_POLL_US);
@@ -5154,8 +5863,68 @@ PgturbohybridGraphGetSharedMap(Relation index, PgturbohybridGraphMetaPageData *m
 
 	if (waitUs != NULL)
 		*waitUs = PgturbohybridGraphElapsedUsSince(waitStart);
+	if (!builder)
+	{
+		CloseTransientFile(lockFd);
+		if (reason != NULL)
+			*reason = PGTURBOHYBRID_GRAPH_NATIVE_CACHE_REASON_SHARED_BUILD_TIMEOUT;
+		return NULL;
+	}
+	PgturbohybridGraphSharedTestPause("after_lock");
+
+	/* The previous owner may have published between our last map and lock. */
+	if (PgturbohybridGraphMapSharedCacheFile(index, meta, path, key, &map,
+										   attachUs, NULL))
+	{
+		removedFiles += PgturbohybridGraphSharedRemoveOldGenerations(index, meta, path);
+		PgturbohybridGraphSharedUnlock(lockFd);
+		CloseTransientFile(lockFd);
+		if (gcRemovedFiles != NULL)
+			*gcRemovedFiles = removedFiles;
+		return map;
+	}
+
+	PG_TRY();
+	{
+		writeOk = PgturbohybridGraphWriteSharedCacheFile(index, meta, path, tmpPath, key,
+												buildUs, codeLockWaitUs,
+												adjLockWaitUs);
+	}
+	PG_CATCH();
+	{
+		unlink(tmpPath);
+		PgturbohybridGraphSharedUnlock(lockFd);
+		CloseTransientFile(lockFd);
+		PG_RE_THROW();
+	}
+	PG_END_TRY();
+	if (!writeOk)
+	{
+		PgturbohybridGraphSharedUnlock(lockFd);
+		CloseTransientFile(lockFd);
+		if (reason != NULL)
+			*reason = PGTURBOHYBRID_GRAPH_NATIVE_CACHE_REASON_SHARED_ATTACH_FAILED;
+		return NULL;
+	}
+
+	if (builtThisScan != NULL)
+		*builtThisScan = true;
+	removedFiles += PgturbohybridGraphSharedRemoveOldGenerations(index, meta, path);
+	PgturbohybridGraphSharedUnlock(lockFd);
+	CloseTransientFile(lockFd);
+	if (gcRemovedFiles != NULL)
+		*gcRemovedFiles = removedFiles;
+	if (PgturbohybridGraphMapSharedCacheFile(index, meta, path, key, &map,
+										   attachUs, NULL))
+	{
+		if (invalidFile && reason != NULL)
+			*reason = PGTURBOHYBRID_GRAPH_NATIVE_CACHE_REASON_SHARED_INVALIDATED;
+		map->builtThisBackend = true;
+		map->buildUs = buildUs != NULL ? *buildUs : 0;
+		return map;
+	}
 	if (reason != NULL)
-		*reason = PGTURBOHYBRID_GRAPH_NATIVE_CACHE_REASON_SHARED_BUILD_TIMEOUT;
+		*reason = PGTURBOHYBRID_GRAPH_NATIVE_CACHE_REASON_SHARED_ATTACH_FAILED;
 	return NULL;
 #endif
 }
@@ -5179,10 +5948,23 @@ PgturbohybridGraphNativeCacheReasonNameForPrewarm(PgturbohybridGraphNativeCacheR
 			return "shared_build_timeout";
 		case PGTURBOHYBRID_GRAPH_NATIVE_CACHE_REASON_SHARED_ATTACH_FAILED:
 			return "shared_attach_failed";
+		case PGTURBOHYBRID_GRAPH_NATIVE_CACHE_REASON_SHARED_INVALIDATED:
+			return "shared_invalidated";
 		case PGTURBOHYBRID_GRAPH_NATIVE_CACHE_REASON_NONE:
 		default:
 			return "none";
 	}
+}
+
+static int64
+PgturbohybridGraphSharedBackendMapCount(void)
+{
+	PgturbohybridGraphSharedMap *map;
+	int64		count = 0;
+
+	for (map = pgturbohybridGraphSharedMapList; map != NULL; map = map->next)
+		count++;
+	return count;
 }
 
 static void
@@ -5248,11 +6030,13 @@ pgturbohybrid_prewarm(PG_FUNCTION_ARGS)
 	bool		cacheExactVectors;
 	bool		cacheable;
 	bool		builtThisScan = false;
+	bool		invalidated = false;
 	int64		attachUs = 0;
 	int64		buildUs = 0;
 	int64		waitUs = 0;
 	int64		codeLockWaitUs = 0;
 	int64		adjLockWaitUs = 0;
+	int64		gcRemovedFiles = 0;
 	PgturbohybridJsonbState jsonState;
 	Jsonb	   *jsonb;
 
@@ -5278,6 +6062,8 @@ pgturbohybrid_prewarm(PG_FUNCTION_ARGS)
 												   &codeLockWaitUs,
 												   &adjLockWaitUs,
 												   &builtThisScan,
+												   &invalidated,
+												   &gcRemovedFiles,
 												   &reason);
 		if (sharedMap != NULL)
 			hdr = (PgturbohybridGraphSharedCacheHeader *) sharedMap->base;
@@ -5301,6 +6087,21 @@ pgturbohybrid_prewarm(PG_FUNCTION_ARGS)
 									 sharedMap != NULL);
 	PgturbohybridPrewarmJsonbAddBool(&jsonState, "native_cache_reused",
 									 sharedMap != NULL && !builtThisScan);
+	PgturbohybridPrewarmJsonbAddBool(&jsonState, "native_cache_invalidated",
+										 invalidated);
+	PgturbohybridPrewarmJsonbAddBool(&jsonState, "built",
+										 sharedMap != NULL && builtThisScan);
+	PgturbohybridPrewarmJsonbAddBool(&jsonState, "attached", sharedMap != NULL);
+	PgturbohybridPrewarmJsonbAddBool(&jsonState, "reused",
+										 sharedMap != NULL && !builtThisScan);
+	PgturbohybridPrewarmJsonbAddBool(&jsonState, "invalidated", invalidated);
+	PgturbohybridPrewarmJsonbAddString(&jsonState, "failure_reason",
+									   sharedMap != NULL ? "none" :
+									   PgturbohybridGraphNativeCacheReasonNameForPrewarm(reason));
+	PgturbohybridPrewarmJsonbAddInt64(&jsonState, "gc_removed_files",
+									  gcRemovedFiles);
+	PgturbohybridPrewarmJsonbAddInt64(&jsonState, "backend_mappings",
+									  PgturbohybridGraphSharedBackendMapCount());
 	PgturbohybridPrewarmJsonbAddInt64(&jsonState, "native_cache_attach_us",
 									  attachUs);
 	PgturbohybridPrewarmJsonbAddInt64(&jsonState, "native_cache_build_us",
@@ -5308,6 +6109,8 @@ pgturbohybrid_prewarm(PG_FUNCTION_ARGS)
 	PgturbohybridPrewarmJsonbAddInt64(&jsonState, "native_cache_wait_us",
 									  waitUs);
 	PgturbohybridPrewarmJsonbAddInt64(&jsonState, "native_cache_bytes",
+									  hdr != NULL ? (int64) hdr->residentTotalBytes : 0);
+	PgturbohybridPrewarmJsonbAddInt64(&jsonState, "effective_bytes",
 									  hdr != NULL ? (int64) hdr->residentTotalBytes : 0);
 	PgturbohybridPrewarmJsonbAddInt64(&jsonState, "native_cache_code_bytes",
 									  hdr != NULL ? (int64) hdr->residentCodeBytes : 0);
@@ -5334,6 +6137,8 @@ PgturbohybridGraphInitScanStorage(Relation index, PgturbohybridGraphMetaPageData
 	bool		cacheExactVectors = PgturbohybridGraphShouldCacheExactVectors(index, meta);
 	PgturbohybridGraphNativeCacheReason reason;
 	int			effectivePolicy = PgturbohybridGraphEffectiveScanNativeCachePolicy();
+	bool		autoPolicy =
+		pgturbohybrid_native_cache_policy == PGTURBOHYBRID_NATIVE_CACHE_POLICY_AUTO;
 
 	if (info != NULL)
 	{
@@ -5342,8 +6147,8 @@ PgturbohybridGraphInitScanStorage(Relation index, PgturbohybridGraphMetaPageData
 		info->refcount = -1;
 	}
 
-	if (!PgturbohybridGraphShouldUseNativeCache(meta, cacheExactVectors,
-											   &reason))
+	if (!PgturbohybridGraphShouldUseNativeCacheWithPolicy(meta, cacheExactVectors,
+												  effectivePolicy, &reason))
 	{
 		PgturbohybridGraphInitScanStorageUncached(meta, storage, cacheExactVectors);
 		if (info != NULL)
@@ -5367,6 +6172,8 @@ PgturbohybridGraphInitScanStorage(Relation index, PgturbohybridGraphMetaPageData
 		sharedMap = PgturbohybridGraphGetSharedMap(index, meta, &attachUs, &buildUs,
 												   &waitUs, &codeLockWaitUs,
 												   &adjLockWaitUs, &builtThisScan,
+												   NULL,
+												   NULL,
 												   &reason);
 		if (sharedMap != NULL)
 		{
@@ -5396,15 +6203,21 @@ PgturbohybridGraphInitScanStorage(Relation index, PgturbohybridGraphMetaPageData
 			return;
 		}
 
-		PgturbohybridGraphInitScanStorageUncached(meta, storage, cacheExactVectors);
-		if (info != NULL)
+		if (!autoPolicy)
 		{
-			info->mode = PGTURBOHYBRID_GRAPH_NATIVE_CACHE_UNCACHED;
-			info->reason = reason;
-			info->attachUs = attachUs;
-			info->waitUs = waitUs;
+			PgturbohybridGraphWarnSharedFailureOnce(index, reason);
+			PgturbohybridGraphInitScanStorageUncached(meta, storage, cacheExactVectors);
+			if (info != NULL)
+			{
+				info->mode = PGTURBOHYBRID_GRAPH_NATIVE_CACHE_UNCACHED;
+				info->reason = reason;
+				info->attachUs = attachUs;
+				info->waitUs = waitUs;
+			}
+			return;
 		}
-		return;
+
+		/* auto: preserve the shared failure reason while using per-backend. */
 	}
 
 	cache = PgturbohybridGraphFindCache(index, meta);
@@ -5450,7 +6263,8 @@ PgturbohybridGraphInitInsertStorage(Relation index, PgturbohybridGraphMetaPageDa
 	PgturbohybridGraphNativeCache *cache;
 	bool		cacheExactVectors = PgturbohybridGraphShouldCacheExactVectors(index, meta);
 
-	if (pgturbohybrid_native_cache_policy == PGTURBOHYBRID_NATIVE_CACHE_POLICY_SHARED)
+	if (PgturbohybridGraphEffectiveScanNativeCachePolicy() ==
+		PGTURBOHYBRID_NATIVE_CACHE_POLICY_SHARED)
 	{
 		/* Inserts need mutable cache state; shared-cache views are scan-only. */
 		PgturbohybridGraphInitScanStorageUncached(meta, storage, cacheExactVectors);

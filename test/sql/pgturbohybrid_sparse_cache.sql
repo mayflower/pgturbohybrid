@@ -37,7 +37,7 @@ DECLARE
 BEGIN
   SET LOCAL enable_seqscan = off;
   SELECT array_agg(id) INTO ids1 FROM (
-    SELECT id FROM scache ORDER BY s <~*> turbohybrid_query(
+    SELECT id FROM scache ORDER BY s <~*> turbohybrid_experimental_query(
       sparse_query => turbohybrid_sparse_vector_build(ARRAY[1]::int4[], ARRAY[1.0]::float4[]),
       sparse_k => 5) LIMIT 5) q;
   st := turbohybrid_last_scan_stats();
@@ -46,7 +46,7 @@ BEGIN
   END IF;
 
   SELECT array_agg(id) INTO ids2 FROM (
-    SELECT id FROM scache ORDER BY s <~*> turbohybrid_query(
+    SELECT id FROM scache ORDER BY s <~*> turbohybrid_experimental_query(
       sparse_query => turbohybrid_sparse_vector_build(ARRAY[1]::int4[], ARRAY[1.0]::float4[]),
       sparse_k => 5) LIMIT 5) q;
   st := turbohybrid_last_scan_stats();
@@ -67,7 +67,7 @@ DO $$
 DECLARE st jsonb;
 BEGIN
   SET LOCAL enable_seqscan = off;
-  PERFORM id FROM scache ORDER BY s <~*> turbohybrid_query(
+  PERFORM id FROM scache ORDER BY s <~*> turbohybrid_experimental_query(
     sparse_query => turbohybrid_sparse_vector_build(ARRAY[1]::int4[], ARRAY[1.0]::float4[]),
     sparse_k => 5) LIMIT 5;
   st := turbohybrid_last_scan_stats();
@@ -85,10 +85,10 @@ BEGIN
   SET LOCAL turbohybrid.sparse_hot_postings_cache_min_df = 4;
   SET LOCAL turbohybrid.sparse_hot_postings_cache_mb = 16;
   -- prime
-  PERFORM id FROM scache ORDER BY s <~*> turbohybrid_query(
+  PERFORM id FROM scache ORDER BY s <~*> turbohybrid_experimental_query(
     sparse_query => turbohybrid_sparse_vector_build(ARRAY[1]::int4[], ARRAY[1.0]::float4[])) LIMIT 5;
   -- repeat: should hit the hot cache
-  PERFORM id FROM scache ORDER BY s <~*> turbohybrid_query(
+  PERFORM id FROM scache ORDER BY s <~*> turbohybrid_experimental_query(
     sparse_query => turbohybrid_sparse_vector_build(ARRAY[1]::int4[], ARRAY[1.0]::float4[])) LIMIT 5;
   st := turbohybrid_last_scan_stats();
   IF (st->>'sparse_hot_postings_cache_hits')::int < 1 THEN
@@ -106,7 +106,7 @@ DECLARE st jsonb;
 BEGIN
   SET LOCAL enable_seqscan = off;
   SET LOCAL turbohybrid.sparse_hot_postings_cache_mb = 0;
-  PERFORM id FROM scache ORDER BY s <~*> turbohybrid_query(
+  PERFORM id FROM scache ORDER BY s <~*> turbohybrid_experimental_query(
     sparse_query => turbohybrid_sparse_vector_build(ARRAY[1]::int4[], ARRAY[1.0]::float4[])) LIMIT 5;
   st := turbohybrid_last_scan_stats();
   IF (st->>'sparse_hot_postings_cache_hits')::int != 0 THEN

@@ -5,6 +5,7 @@
 SET client_min_messages = warning;
 CREATE EXTENSION IF NOT EXISTS vector;
 CREATE EXTENSION IF NOT EXISTS pgturbohybrid;
+CREATE EXTENSION IF NOT EXISTS pgturbohybrid_experimental;
 RESET client_min_messages;
 
 -- Per-object check: each key public object has a comment carrying a maturity tag.
@@ -20,7 +21,7 @@ FROM (
     SELECT 'type', t.typname, obj_description(t.oid, 'pg_type')
       FROM pg_type t
       WHERE t.typname IN ('turbohybrid_query', 'turbohybrid_sparse_vector',
-                          'turbohybrid_multivector', 'multivector')
+                          'turbohybrid_multivector')
     UNION ALL
     SELECT 'opclass', oc.opcname, obj_description(oc.oid, 'pg_opclass')
       FROM pg_opclass oc JOIN pg_am a ON a.oid = oc.opcmethod

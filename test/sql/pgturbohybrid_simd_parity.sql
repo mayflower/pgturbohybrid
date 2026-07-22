@@ -47,7 +47,7 @@ BEGIN
     SELECT embedding INTO qv FROM simd_parity_docs WHERE id = 100;
     SELECT array_agg(id ORDER BY id) INTO res FROM (
         SELECT id FROM simd_parity_docs
-        ORDER BY embedding <~> turbohybrid_query(vector_query => qv, dense_k => 100, final_k => 10)
+        ORDER BY embedding <~> turbohybrid_experimental_query(vector_query => qv, dense_k => 100, final_k => 10)
         LIMIT 10) t;
     RETURN res;
 END $$;
@@ -130,7 +130,7 @@ BEGIN
     PERFORM set_config('turbohybrid.simd', 'on', false);
     SELECT array_agg(id) INTO vnni FROM (
         SELECT id FROM simd_parity_lowdim
-        ORDER BY embedding <~> turbohybrid_query(vector_query => qv, dense_k => 100, final_k => 10)
+        ORDER BY embedding <~> turbohybrid_experimental_query(vector_query => qv, dense_k => 100, final_k => 10)
         LIMIT 10) t;
     st := turbohybrid_last_scan_stats();
 
@@ -144,7 +144,7 @@ BEGIN
     PERFORM set_config('turbohybrid.simd', 'off', false);
     SELECT array_agg(id) INTO lut FROM (
         SELECT id FROM simd_parity_lowdim
-        ORDER BY embedding <~> turbohybrid_query(vector_query => qv, dense_k => 100, final_k => 10)
+        ORDER BY embedding <~> turbohybrid_experimental_query(vector_query => qv, dense_k => 100, final_k => 10)
         LIMIT 10) t;
     RESET turbohybrid.simd;
 
@@ -312,7 +312,7 @@ BEGIN
     PERFORM set_config('turbohybrid.simd', 'off', false);
     PERFORM id
     FROM simd_parity_mv_docs
-    ORDER BY colbert <~> turbohybrid_query(
+    ORDER BY colbert <~> turbohybrid_experimental_query(
         multivector_query => q,
         dense_k => 16,
         final_k => 5
@@ -330,7 +330,7 @@ BEGIN
     PERFORM set_config('turbohybrid.simd', 'on', false);
     PERFORM id
     FROM simd_parity_mv_docs
-    ORDER BY colbert <~> turbohybrid_query(
+    ORDER BY colbert <~> turbohybrid_experimental_query(
         multivector_query => q,
         dense_k => 16,
         final_k => 5

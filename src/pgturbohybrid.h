@@ -40,6 +40,7 @@ typedef Pointer Item;
 #define PGTURBOHYBRID_MAGIC_NUMBER 0x54525944
 #define PGTURBOHYBRID_PAGE_ID	0x5459
 #define PGTURBOHYBRID_GRAPH_VERSION PGTURBOHYBRID_VERSION
+#define PGTURBOHYBRID_GRAPH_NATIVE_VERSION 2
 #define PGTURBOHYBRID_GRAPH_MAGIC_NUMBER PGTURBOHYBRID_MAGIC_NUMBER
 #define PGTURBOHYBRID_GRAPH_PAGE_ID PGTURBOHYBRID_PAGE_ID
 
@@ -1086,6 +1087,8 @@ typedef struct PgturbohybridGraphMetaPageData
 	 * come from this dedicated node-map chain instead of dense code tuples.  Zero
 	 * for dense-present indexes (added at struct end; memset-zeroed on build). */
 	BlockNumber tqNodeMapStartBlkno;
+	/* Monotonic identity for every native graph/cache-visible mutation. */
+	uint64		graphGeneration;
 }			PgturbohybridGraphMetaPageData;
 
 typedef PgturbohybridGraphMetaPageData * PgturbohybridGraphMetaPage;
@@ -1180,7 +1183,8 @@ typedef enum PgturbohybridGraphNativeCacheReason
 	PGTURBOHYBRID_GRAPH_NATIVE_CACHE_REASON_POLICY_OFF,
 	PGTURBOHYBRID_GRAPH_NATIVE_CACHE_REASON_EXCEEDS_MAX_MB,
 	PGTURBOHYBRID_GRAPH_NATIVE_CACHE_REASON_SHARED_BUILD_TIMEOUT,
-	PGTURBOHYBRID_GRAPH_NATIVE_CACHE_REASON_SHARED_ATTACH_FAILED
+	PGTURBOHYBRID_GRAPH_NATIVE_CACHE_REASON_SHARED_ATTACH_FAILED,
+	PGTURBOHYBRID_GRAPH_NATIVE_CACHE_REASON_SHARED_INVALIDATED
 }			PgturbohybridGraphNativeCacheReason;
 
 typedef enum PgturbohybridGraphFillCandidateBandReason

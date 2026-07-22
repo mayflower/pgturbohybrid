@@ -112,6 +112,25 @@ so they always agree. The flat keys remain for backward compatibility.
 
 ## Related functions
 
+### Index validator
+
+`turbohybrid_validate_index(index regclass, deep boolean DEFAULT false)` returns
+a structured, read-only integrity report. The top-level `ok`, `scope`,
+`format_version`, `relation`, `errors`, `warnings`, `recommendation`, node
+counts, entry/routing/segment status, reachability counts, level-0 degree
+summary, checked counts, and `branches` objects are stable diagnostic keys.
+Issue `code` values identify mechanical invariants such as invalid page or
+tuple envelopes, out-of-range node references, broken chains, invalid branch
+metadata, and unreachable live nodes. New issue codes may be added without a
+major version change; tooling should key primarily on `ok` and preserve unknown
+codes.
+
+Sampled mode bounds adjacency work while still walking every physical page
+envelope. Deep mode checks the complete adjacency surface and graph
+reachability. A warning describes a supported but noteworthy state; any
+unsupported validation scope must be represented as an error and cannot return
+`ok = true`.
+
 - `turbohybrid_last_build_stats()` — backend-local summary of the last native
   graph build (**diagnostic**).
 - `turbohybrid_last_scan_diagnosis()` — derives a single bottleneck `diagnosis`

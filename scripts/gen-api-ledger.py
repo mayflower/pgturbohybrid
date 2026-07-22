@@ -6,13 +6,16 @@ verifies the two stay consistent. No database required."""
 import json, re
 from pathlib import Path
 ROOT = Path(__file__).resolve().parent.parent
-objs = {"type": {}, "function": {}, "operator": {}, "opclass": {}}
+extension_objs = {
+    ext: {"type": {}, "function": {}, "operator": {}, "opclass": {}}
+    for ext in ("pgturbohybrid", "pgturbohybrid_experimental")
+}
 for line in (ROOT / "test/expected/pgturbohybrid_api_ledger.out").read_text().splitlines():
-    m = re.match(r"\s*(type|function|operator|opclass)\|(.+)\|([a-z][a-z -]*)\s*$", line)
+    m = re.match(r"\s*(pgturbohybrid(?:_experimental)?)\|(type|function|operator|opclass)\|(.+)\|([a-z][a-z -]*)\s*$", line)
     if not m:
         continue
-    kind, name, mat = m.group(1), m.group(2), m.group(3)
-    objs[kind].setdefault(name, set()).add(mat)
+    ext, kind, name, mat = m.groups()
+    extension_objs[ext][kind].setdefault(name, set()).add(mat)
 def fmt(d):
     return {n: (sorted(v) if len(v) > 1 else next(iter(v))) for n, v in sorted(d.items())}
 keys = sorted(re.findall(r'#define PGTURBOHYBRID_DIAG_KEY_\w+\s+"([a-z0-9_]+)"',
@@ -33,9 +36,14 @@ gucs_stable = ["turbohybrid.profile", "turbohybrid.default_dense_k", "turbohybri
   "turbohybrid.native_cache_max_mb", "turbohybrid.native_cache_warn_mb"]
 ledger = {
  "_comment": "Machine-readable public-API ledger for pgturbohybrid. The type/function/operator/opclass sets are the source of truth checked against the pgturbohybrid_api_ledger regression snapshot by scripts/check-api-ledger.py; maturity labels mirror the COMMENT ON tags and docs/feature-matrix.md. Alpha: even 'stable public' does not promise on-disk compatibility across pre-1.0 tags.",
- "extension": "pgturbohybrid", "sql_version": "0.1.1",
- "types": fmt(objs["type"]), "operators": fmt(objs["operator"]),
- "opclasses": fmt(objs["opclass"]), "functions": fmt(objs["function"]),
+ "sql_version": "0.2.0",
+ "extensions": {
+   ext: {
+     "types": fmt(objs["type"]), "operators": fmt(objs["operator"]),
+     "opclasses": fmt(objs["opclass"]), "functions": fmt(objs["function"]),
+   }
+   for ext, objs in extension_objs.items()
+ },
  "reloptions": reloptions, "gucs_stable_public": gucs_stable,
  "gucs_note": "139 turbohybrid.* GUCs exist; only the stable-public tuning surface is enumerated here. pg_settings (name LIKE 'turbohybrid.%') is authoritative and docs/architecture.md classifies the rest as experimental public or developer/benchmark.",
  "diagnostics_stable_keys": keys,

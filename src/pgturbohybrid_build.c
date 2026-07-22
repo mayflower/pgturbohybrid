@@ -118,6 +118,7 @@ CreateMetaPage(PgturbohybridGraphBuildState * buildstate)
 	metap->graphRescoreBand = PgturbohybridGraphUseTqGraph(index) ? PgturbohybridGraphGetGraphRescoreBand(index) : 0;
 	metap->graphMaxLevel = buildstate->maxLevel;
 	metap->graphFlags = PgturbohybridGraphUseTqCodes(index) ? 1 : 0;
+	metap->graphGeneration = 1;
 	metap->tqBits = PGTURBOHYBRID_DEFAULT_BITS;
 	metap->entryBlkno = InvalidBlockNumber;
 	metap->entryOffno = InvalidOffsetNumber;

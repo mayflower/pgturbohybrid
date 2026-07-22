@@ -12,9 +12,9 @@ CREATE INDEX sdl_idx ON sdl USING turbohybrid
   (embedding vector_cosine_turbohybrid_ops, s sparse_ip_turbohybrid_ops);
 SET enable_seqscan = off;
 -- Query term {2:1.0}: base order by descending weight = doc3, doc2, doc1.
-SELECT id, round((s <~*> turbohybrid_query(
+SELECT id, round((s <~*> turbohybrid_experimental_query(
   sparse_query => turbohybrid_sparse_vector_build(ARRAY[2]::int4[], ARRAY[1.0]::float4[])))::numeric, 2) AS dist
-FROM sdl ORDER BY s <~*> turbohybrid_query(
+FROM sdl ORDER BY s <~*> turbohybrid_experimental_query(
   sparse_query => turbohybrid_sparse_vector_build(ARRAY[2]::int4[], ARRAY[1.0]::float4[])) LIMIT 10;
  id |  dist  
 ----+--------
@@ -25,9 +25,9 @@ FROM sdl ORDER BY s <~*> turbohybrid_query(
 
 -- INSERT after build: doc4 weight 25 is searchable via the delta (between 2 and 3).
 INSERT INTO sdl VALUES (4, '[1,1,0]', turbohybrid_sparse_vector_build(ARRAY[2]::int4[], ARRAY[25.0]::float4[]));
-SELECT id, round((s <~*> turbohybrid_query(
+SELECT id, round((s <~*> turbohybrid_experimental_query(
   sparse_query => turbohybrid_sparse_vector_build(ARRAY[2]::int4[], ARRAY[1.0]::float4[])))::numeric, 2) AS dist
-FROM sdl ORDER BY s <~*> turbohybrid_query(
+FROM sdl ORDER BY s <~*> turbohybrid_experimental_query(
   sparse_query => turbohybrid_sparse_vector_build(ARRAY[2]::int4[], ARRAY[1.0]::float4[])) LIMIT 10;
  id |  dist  
 ----+--------
@@ -41,7 +41,7 @@ DO $$
 DECLARE st jsonb;
 BEGIN
   SET LOCAL enable_seqscan = off;
-  PERFORM id FROM sdl ORDER BY s <~*> turbohybrid_query(
+  PERFORM id FROM sdl ORDER BY s <~*> turbohybrid_experimental_query(
     sparse_query => turbohybrid_sparse_vector_build(ARRAY[2]::int4[], ARRAY[1.0]::float4[])) LIMIT 10;
   st := turbohybrid_last_scan_stats();
   IF st->>'sparse_used_wand' != 'false' THEN
@@ -53,7 +53,7 @@ BEGIN
 END $$;
 -- UPDATE: change doc1 from weight 10 to weight 40 (now the top match).
 UPDATE sdl SET s = turbohybrid_sparse_vector_build(ARRAY[2]::int4[], ARRAY[40.0]::float4[]) WHERE id = 1;
-SELECT id FROM sdl ORDER BY s <~*> turbohybrid_query(
+SELECT id FROM sdl ORDER BY s <~*> turbohybrid_experimental_query(
   sparse_query => turbohybrid_sparse_vector_build(ARRAY[2]::int4[], ARRAY[1.0]::float4[])) LIMIT 10;
  id 
 ----
@@ -65,7 +65,7 @@ SELECT id FROM sdl ORDER BY s <~*> turbohybrid_query(
 
 -- DELETE: remove doc3 (weight 30); it must not appear.
 DELETE FROM sdl WHERE id = 3;
-SELECT id FROM sdl ORDER BY s <~*> turbohybrid_query(
+SELECT id FROM sdl ORDER BY s <~*> turbohybrid_experimental_query(
   sparse_query => turbohybrid_sparse_vector_build(ARRAY[2]::int4[], ARRAY[1.0]::float4[])) LIMIT 10;
  id 
 ----
@@ -82,11 +82,11 @@ DECLARE
 BEGIN
   SET LOCAL enable_seqscan = off;
   SELECT array_agg(id) INTO before_ids FROM (
-    SELECT id FROM sdl ORDER BY s <~*> turbohybrid_query(
+    SELECT id FROM sdl ORDER BY s <~*> turbohybrid_experimental_query(
       sparse_query => turbohybrid_sparse_vector_build(ARRAY[2]::int4[], ARRAY[1.0]::float4[])) LIMIT 10) q;
   REINDEX INDEX sdl_idx;
   SELECT array_agg(id) INTO after_ids FROM (
-    SELECT id FROM sdl ORDER BY s <~*> turbohybrid_query(
+    SELECT id FROM sdl ORDER BY s <~*> turbohybrid_experimental_query(
       sparse_query => turbohybrid_sparse_vector_build(ARRAY[2]::int4[], ARRAY[1.0]::float4[])) LIMIT 10) q;
   IF before_ids IS DISTINCT FROM after_ids THEN
     RAISE EXCEPTION 'base+delta ranking % != REINDEX ranking %', before_ids, after_ids;
@@ -103,11 +103,11 @@ DECLARE
 BEGIN
   SET LOCAL enable_seqscan = off;
   SELECT array_agg(id) INTO before_ids FROM (
-    SELECT id FROM sdl ORDER BY s <~*> turbohybrid_query(
+    SELECT id FROM sdl ORDER BY s <~*> turbohybrid_experimental_query(
       sparse_query => turbohybrid_sparse_vector_build(ARRAY[2]::int4[], ARRAY[1.0]::float4[])) LIMIT 10) q;
   PERFORM turbohybrid_sparse_compact('sdl_idx'::regclass);
   SELECT array_agg(id) INTO after_ids FROM (
-    SELECT id FROM sdl ORDER BY s <~*> turbohybrid_query(
+    SELECT id FROM sdl ORDER BY s <~*> turbohybrid_experimental_query(
       sparse_query => turbohybrid_sparse_vector_build(ARRAY[2]::int4[], ARRAY[1.0]::float4[])) LIMIT 10) q;
   IF before_ids IS DISTINCT FROM after_ids THEN
     RAISE EXCEPTION 'compaction changed ranking: % -> %', before_ids, after_ids;

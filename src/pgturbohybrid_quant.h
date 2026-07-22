@@ -825,6 +825,7 @@ typedef struct PgturbohybridGraphNativeCache
 	uint16		m;
 	uint16		graphMaxLevel;
 	uint16		graphFlags;
+	uint64		graphGeneration;
 	uint32		tqNodeCount;
 	uint32		tqEntryNodeId;
 	uint16		tqSegmentCount;
@@ -1289,6 +1290,8 @@ PgturbohybridGraphPageCount(uint32 nodeCount, int tuplesPerPage)
 }
 
 Oid			PgturbohybridGraphRelFileNumber(Relation index);
+void		PgturbohybridGraphGetRelationLocator(Relation index,
+										 Oid *tablespaceOid, Oid *relNumber);
 void		PgturbohybridGraphInitBlockMap(BlockNumber *blknos, int count);
 bool		PgturbohybridGraphEnsureBlockMap(Relation index, BlockNumber startBlkno, int pageCount,
 							  uint16 pageKind, BlockNumber *blknos);
@@ -1301,6 +1304,14 @@ bool		PgturbohybridGraphResolveChainBlockNumber(Relation index, BlockNumber star
 										   BlockNumber *blknos, BlockNumber *blkno);
 bool		PgturbohybridGraphReadMeta(Relation index, PgturbohybridGraphMetaPageData *meta);
 void		PgturbohybridGraphBumpMetaGeneration(Relation index);
+bool		PgturbohybridGraphVacuumLoadAdjTuple(Relation index,
+								 PgturbohybridGraphMetaPageData *meta,
+								 uint32 nodeId, int level,
+								 uint32 *neighbors, int *count);
+void		PgturbohybridGraphVacuumUpdateAdjTuple(Relation index,
+								   PgturbohybridGraphMetaPageData *meta,
+								   uint32 nodeId, int level,
+								   uint32 *neighbors, int count);
 
 /*
  * node_id <-> heap TID identity + liveness, recovered from the dense graph code
@@ -1393,7 +1404,10 @@ bool		PgturbohybridGraphLoadAdjPage(Relation index, PgturbohybridGraphScanOpaque
 void		PgturbohybridGraphCollectVacuumStats(Relation index, PgturbohybridGraphMetaPageData *meta,
 									  int64 *liveNodes, int64 *deadNodes,
 									  int64 *adjacencyRefs,
-									  int64 *deadNeighborRefs);
+									  int64 *deadNeighborRefs,
+									  int64 *deadBridgeNodes,
+									  double *avgLiveDegreeLevel0,
+									  uint32 *liveEntryNode);
 bool		PgturbohybridGraphPayloadRefRange(PgturbohybridGraphScanStorage *storage, int payloadSlot,
 								   int32 payloadValue, uint32 *firstIndex,
 								   uint32 *refCount);

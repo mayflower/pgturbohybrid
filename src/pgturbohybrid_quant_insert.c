@@ -739,6 +739,26 @@ update_cache:
 	}
 }
 
+bool
+PgturbohybridGraphVacuumLoadAdjTuple(Relation index,
+									 PgturbohybridGraphMetaPageData *meta,
+									 uint32 nodeId, int level,
+									 uint32 *neighbors, int *count)
+{
+	return PgturbohybridGraphLoadAdjTuple(index, meta, nodeId, level,
+										 neighbors, count, NULL);
+}
+
+void
+PgturbohybridGraphVacuumUpdateAdjTuple(Relation index,
+									   PgturbohybridGraphMetaPageData *meta,
+									   uint32 nodeId, int level,
+									   uint32 *neighbors, int count)
+{
+	PgturbohybridGraphUpdateAdjTuple(index, meta, NULL, nodeId, level,
+										neighbors, count, NULL);
+}
+
 static bool
 PgturbohybridGraphSelectedContains(uint32 *selected, int selectedCount, uint32 nodeId)
 {

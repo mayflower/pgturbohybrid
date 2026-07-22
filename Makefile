@@ -1,10 +1,10 @@
-EXTENSION = pgturbohybrid
-EXTVERSION = 0.1.1
+EXTENSION = pgturbohybrid pgturbohybrid_experimental
+EXTVERSION = 0.2.0
 
 .DEFAULT_GOAL := all
 
 MODULE_big = pgturbohybrid
-DATA = sql/pgturbohybrid--0.1.0.sql sql/pgturbohybrid--0.1.1.sql sql/pgturbohybrid--0.1.0--0.1.1.sql
+DATA = sql/pgturbohybrid--0.1.0.sql sql/pgturbohybrid--0.1.1.sql sql/pgturbohybrid--0.1.2.sql sql/pgturbohybrid--0.2.0.sql sql/pgturbohybrid_experimental--0.2.0.sql sql/pgturbohybrid--0.1.0--0.1.1.sql sql/pgturbohybrid--0.1.1--0.1.2.sql sql/pgturbohybrid--0.1.2--0.2.0.sql
 
 PG_CONFIG ?= pg_config
 
@@ -41,6 +41,7 @@ OBJS = \
 	src/pgturbohybrid_sparse_simd_x86.o \
 	src/pgturbohybrid_sparse_simd_arm.o \
 	src/pgturbohybrid_diagnostics.o \
+	src/pgturbohybrid_validate.o \
 	src/pgturbohybrid_vacuum.o \
 	src/pgturbohybrid_vector_compat.o
 
@@ -50,10 +51,11 @@ $(OBJS): $(wildcard src/*.h src/*.inc)
 
 REGRESS = extension pgturbohybrid pgturbohybrid_comments pgturbohybrid_gucs pgturbohybrid_guc_defaults pgturbohybrid_diagnostics pgturbohybrid_api_ledger pgturbohybrid_query pgturbohybrid_sparse pgturbohybrid_sparse_query pgturbohybrid_sparse_scan pgturbohybrid_sparse_fusion pgturbohybrid_sparse_quant pgturbohybrid_sparse_rerank pgturbohybrid_sparse_simd_parity pgturbohybrid_sparse_wand pgturbohybrid_sparse_cache pgturbohybrid_sparse_delta pgturbohybrid_sparse_primary pgturbohybrid_sparse_hardening pgturbohybrid_sparse_bitpacked pgturbohybrid_keymap pgturbohybrid_querysplit pgturbohybrid_multivector pgturbohybrid_multivector_many_moderate pgturbohybrid_codebook pgturbohybrid_u8split pgturbohybrid_nibble_guard pgturbohybrid_x4_safety pgturbohybrid_simd_parity pgturbohybrid_rescore pgturbohybrid_wrappers pgturbohybrid_fuzz security
 REGRESS_OPTS = --inputdir=test
+REGRESS += pgturbohybrid_validate
 
 SIMD_BUILD ?= portable
 MATH_MODE ?= strict
-PGTURBOHYBRID_REQUIRE_VECTOR_HEADER ?= 0
+PGTURBOHYBRID_REQUIRE_VECTOR_HEADER ?= 1
 
 PGVECTOR_SERVER_INCLUDE := $(shell $(PG_CONFIG) --includedir-server)
 PGVECTOR_INSTALLED_INCLUDE := $(PGVECTOR_SERVER_INCLUDE)/extension/vector
@@ -112,6 +114,10 @@ PROVE_FLAGS += -I ./test/perl
 prove_installcheck:
 	rm -rf $(CURDIR)/tmp_check
 	cd $(srcdir) && TESTDIR='$(CURDIR)' PATH="$(bindir):$$PATH" PGPORT='6$(DEF_PGPORT)' PG_REGRESS='$(top_builddir)/src/test/regress/pg_regress' $(PROVE) $(PG_PROVE_FLAGS) $(PROVE_FLAGS) $(if $(PROVE_TESTS),$(PROVE_TESTS),test/t/*.pl)
+
+.PHONY: recovery-check
+recovery-check:
+	$(MAKE) prove_installcheck PROVE_TESTS='test/t/002_wal_restart.pl test/t/009_shared_cache_identity.pl test/t/010_native_vacuum_crash.pl test/t/012_recovery_replication.pl'
 
 .PHONY: dist
 

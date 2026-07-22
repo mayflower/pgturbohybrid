@@ -2,15 +2,15 @@
   "name": "pgturbohybrid",
   "abstract": "Hot-hatch hybrid vector + BM25 search for PostgreSQL on top of pgvector",
   "description": "Standalone PostgreSQL extension for experimental dense vector and BM25 hybrid retrieval on top of pgvector.",
-  "version": "0.1.1",
+  "version": "0.2.0",
   "maintainer": "Mayflower",
   "license": "postgresql",
   "release_status": "unstable",
   "provides": {
     "pgturbohybrid": {
-      "file": "sql/pgturbohybrid--0.1.1.sql",
+      "file": "sql/pgturbohybrid--0.2.0.sql",
       "docfile": "README.md",
-      "version": "0.1.1",
+      "version": "0.2.0",
       "abstract": "Hot-hatch hybrid vector + BM25 search for PostgreSQL on top of pgvector"
     }
   },

@@ -53,13 +53,13 @@ BEGIN
         INTO ids, dist
       FROM (
         SELECT id,
-               (s <~*> turbohybrid_query(sparse_query => turbohybrid_sparse_vector_build(q_terms, q_weights),
+               (s <~*> turbohybrid_experimental_query(sparse_query => turbohybrid_sparse_vector_build(q_terms, q_weights),
                                          sparse_k => 50, final_k => 50)) AS d,
-               row_number() OVER (ORDER BY s <~*> turbohybrid_query(
+               row_number() OVER (ORDER BY s <~*> turbohybrid_experimental_query(
                  sparse_query => turbohybrid_sparse_vector_build(q_terms, q_weights),
                  sparse_k => 50, final_k => 50)) AS rn
         FROM bp
-        ORDER BY s <~*> turbohybrid_query(sparse_query => turbohybrid_sparse_vector_build(q_terms, q_weights),
+        ORDER BY s <~*> turbohybrid_experimental_query(sparse_query => turbohybrid_sparse_vector_build(q_terms, q_weights),
                                           sparse_k => 50, final_k => 50)
         LIMIT 20) q;
       IF baseline_ids IS NULL THEN
@@ -87,7 +87,7 @@ DO $$
 DECLARE st jsonb;
 BEGIN
   SET LOCAL enable_seqscan = off;
-  PERFORM id FROM bp ORDER BY s <~*> turbohybrid_query(
+  PERFORM id FROM bp ORDER BY s <~*> turbohybrid_experimental_query(
     sparse_query => turbohybrid_sparse_vector_build(ARRAY[2]::int4[], ARRAY[1.0]::float4[]),
     sparse_k => 50) LIMIT 10;
   st := turbohybrid_last_scan_stats();
@@ -100,7 +100,7 @@ BEGIN
 END $$;
 
 -- Concrete ranking for the high-df descending-weight term (sanity).
-SELECT id FROM bp ORDER BY s <~*> turbohybrid_query(
+SELECT id FROM bp ORDER BY s <~*> turbohybrid_experimental_query(
   sparse_query => turbohybrid_sparse_vector_build(ARRAY[2]::int4[], ARRAY[1.0]::float4[])) LIMIT 5;
 
 RESET enable_seqscan;

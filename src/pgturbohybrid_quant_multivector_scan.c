@@ -3841,7 +3841,6 @@ PgturbohybridMultiVectorDocumentGraphNodeDistance(Relation index,
 													  bool scoreThresholdValid,
 													  double scoreThreshold)
 {
-	PgturbohybridGraphScanNode *node;
 	TqMultiVectorNodeMapEntry *nodeEntry;
 	TqDocId		docId;
 	PgturbohybridMultiVector *doc;
@@ -3851,9 +3850,8 @@ PgturbohybridMultiVectorDocumentGraphNodeDistance(Relation index,
 		!PgturbohybridGraphLoadCodePage(index, so, meta, storage, nodeId))
 		return DBL_MAX;
 
-	node = &storage->nodes[nodeId];
-	if ((node->flags & PGTURBOHYBRID_GRAPH_NODE_DEAD) != 0)
-		return DBL_MAX;
+	/* A dead graph node remains an expansion bridge.  Return eligibility is
+	 * enforced when document candidates are materialized, not while routing. */
 
 	nodeEntry = &storage->multivectorNodeMap[nodeId];
 	docId = nodeEntry->docId;

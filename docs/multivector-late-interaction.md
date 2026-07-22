@@ -301,7 +301,7 @@ SET turbohybrid.multivector_max_raw_hits_per_token = 400;
 SET turbohybrid.multivector_adaptive_widening = 'auto'; -- off | auto | on
 SET turbohybrid.multivector_doc_candidate_k = 100;
 SET turbohybrid.multivector_candidate_source = 'graph'; -- graph | document_nodes | exact_token_scan | exact_doc_scan | doc_graph_prototype | proxy_vector | centroid_lite | quantized_inverted_experimental
-SET turbohybrid.multivector_proxy_encoder = 'normalized_mean'; -- normalized_mean | mean | mean_pool | first_token | max_abs_mean | centroid_mean | max_pool | random_projection_fde | learned_projection_placeholder | learned_projection_v1
+SET turbohybrid.multivector_proxy_encoder = 'normalized_mean'; -- normalized_mean | mean | mean_pool | first_token | max_abs_mean | centroid_mean | max_pool | random_projection_fde | learned_projection_v1
 SET turbohybrid.multivector_plain_fallback = 'auto'; -- auto | off | force
 SET turbohybrid.multivector_plain_fallback_max_docs = 1000;
 SET turbohybrid.multivector_plain_fallback_candidate_fraction = 0.5;
@@ -335,7 +335,7 @@ fixed-dimensional proxy encoder as the single-vector graph key for admission
 and exact-reranks admitted documents with full MaxSim. `normalized_mean` is the
 default document proxy. `first_token`, `max_pool`, and
 `random_projection_fde` are additional pluggable encoders for DBpedia admission
-comparison. `learned_projection_placeholder` remains an explicit unsupported
+comparison. The learned v1 encoder remains explicitly configured through
 sentinel, while `learned_projection_v1` is an opt-in file-backed first slice
 that requires `turbohybrid.multivector_learned_projection_path` and keeps the
 projected proxy dimension equal to the multivector dimension to avoid an index

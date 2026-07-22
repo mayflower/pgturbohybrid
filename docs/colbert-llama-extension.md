@@ -48,8 +48,8 @@ llama_embed(model text, input text, options jsonb DEFAULT '{}')              RET
 llama_embed_vector(model text, input text, options jsonb DEFAULT '{}')       RETURNS vector
 llama_embed_vector_batch(model text, inputs text[], options jsonb DEFAULT '{}') RETURNS vector[]
 llama_embed_tokens(model text, input text, options jsonb DEFAULT '{}')       RETURNS vector[]
-llama_embed_mv(model text, input text, options jsonb DEFAULT '{}')           RETURNS multivector
-llama_embed_mv_batch(model text, inputs text[], options jsonb DEFAULT '{}')  RETURNS multivector[]
+llama_embed_mv(model text, input text, options jsonb DEFAULT '{}')           RETURNS turbohybrid_multivector
+llama_embed_mv_batch(model text, inputs text[], options jsonb DEFAULT '{}')  RETURNS turbohybrid_multivector[]
 llama_embed_sparse(model text, input text, options jsonb DEFAULT '{}')       RETURNS turbohybrid_sparse_vector
 llama_embed_sparse_batch(model text, inputs text[], options jsonb DEFAULT '{}') RETURNS turbohybrid_sparse_vector[]
 llama_embed_sparse_model_info(model text, options jsonb DEFAULT '{}')        RETURNS jsonb

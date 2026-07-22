@@ -11,6 +11,7 @@ $$;
 
 CREATE EXTENSION vector;
 CREATE EXTENSION pgturbohybrid;
+CREATE EXTENSION pgturbohybrid_experimental;
 \pset format unaligned
 SET turbohybrid.multivector_plain_fallback = off;
 
@@ -122,12 +123,12 @@ SELECT t.typname AS public_multivector_type,
        bt.typname AS public_multivector_base_type
 FROM pg_type t
 JOIN pg_type bt ON bt.oid = t.typbasetype
-WHERE t.typname = 'multivector';
+WHERE t.typname = 'turbohybrid_multivector';
 
 DROP TABLE IF EXISTS tqh_public_multivector_docs;
 CREATE TABLE tqh_public_multivector_docs (
   id int PRIMARY KEY,
-  colbert multivector NOT NULL
+  colbert turbohybrid_multivector NOT NULL
 );
 
 INSERT INTO tqh_public_multivector_docs (id, colbert)
@@ -142,7 +143,7 @@ ON tqh_public_multivector_docs USING turbohybrid (
 
 SELECT id
 FROM tqh_public_multivector_docs
-ORDER BY colbert <~> turbohybrid_query(
+ORDER BY colbert <~> turbohybrid_experimental_query(
   multivector_query => turbohybrid_multivector(ARRAY['[1,0]'::vector]),
   dense_k => 10,
   final_k => 2
@@ -248,7 +249,7 @@ BEGIN
 	SET LOCAL turbohybrid.multivector_candidate_source = 'exact_doc_scan';
 	SELECT id INTO top_id
 	FROM th_mv_context_docs
-	ORDER BY embedding <~> turbohybrid_query(
+	ORDER BY embedding <~> turbohybrid_experimental_query(
 		multivector_query => turbohybrid_multivector_from_float4(ARRAY[0,1]::real[], 2),
 		final_k => 1
 	)
@@ -299,7 +300,7 @@ DECLARE
 BEGIN
 	SELECT id INTO top_id
 	FROM th_mv_context_mvcc_docs
-	ORDER BY embedding <~> turbohybrid_query(
+	ORDER BY embedding <~> turbohybrid_experimental_query(
 		multivector_query => turbohybrid_multivector_from_float4(ARRAY[0,1]::real[], 2),
 		final_k => 1
 	)
@@ -320,7 +321,7 @@ DECLARE
 BEGIN
 	SELECT id INTO top_id
 	FROM th_mv_context_mvcc_docs
-	ORDER BY embedding <~> turbohybrid_query(
+	ORDER BY embedding <~> turbohybrid_experimental_query(
 		multivector_query => turbohybrid_multivector_from_float4(ARRAY[0,1]::real[], 2),
 		final_k => 1
 	)
@@ -351,7 +352,7 @@ SELECT turbohybrid_multivector_maxsim_distance(
 ) AS distance;
 
 SELECT turbohybrid_multivector(ARRAY['[1,0]'::vector, '[1,1]'::vector]) <~>
-  turbohybrid_query(multivector_query => turbohybrid_multivector(ARRAY['[1,0]'::vector, '[0,1]'::vector]))
+  turbohybrid_experimental_query(multivector_query => turbohybrid_multivector(ARRAY['[1,0]'::vector, '[0,1]'::vector]))
   AS operator_distance;
 
 DO $$
@@ -361,7 +362,7 @@ DECLARE
 BEGIN
 	BEGIN
 		PERFORM turbohybrid_multivector(ARRAY['[1,0]'::vector]) <~>
-			turbohybrid_query(
+			turbohybrid_experimental_query(
 				multivector_query => turbohybrid_multivector(ARRAY['[1,0]'::vector]),
 				text_query => to_tsquery('alpha')
 			);
@@ -397,7 +398,7 @@ CREATE INDEX sv_docs_embedding_idx ON sv_docs USING turbohybrid
 
 SET enable_seqscan = off;
 SELECT id FROM sv_docs
-  ORDER BY embedding <~> turbohybrid_query(vector_query => '[1,0]'::vector)
+  ORDER BY embedding <~> turbohybrid_experimental_query(vector_query => '[1,0]'::vector)
   LIMIT 1;
 
 DO $$
@@ -435,7 +436,7 @@ SELECT COUNT(*) AS result_count,
        COUNT(DISTINCT id) AS distinct_docs
 FROM (
   SELECT id FROM mv_token_limit_docs
-    ORDER BY colbert <~> turbohybrid_query(
+    ORDER BY colbert <~> turbohybrid_experimental_query(
       multivector_query => turbohybrid_multivector(ARRAY['[1,0]'::vector, '[0,1]'::vector]),
       dense_k => 4,
       final_k => 4
@@ -465,7 +466,7 @@ DECLARE
 BEGIN
 	PERFORM set_config('turbohybrid.multivector_debug_admission', 'summary', false);
 	PERFORM id FROM mv_token_limit_docs
-	  ORDER BY colbert <~> turbohybrid_query(
+	  ORDER BY colbert <~> turbohybrid_experimental_query(
 	    multivector_query => turbohybrid_multivector(ARRAY['[1,0]'::vector, '[0,1]'::vector]),
 	    dense_k => 4,
 	    final_k => 4
@@ -495,7 +496,7 @@ BEGIN
 	PERFORM set_config('turbohybrid.multivector_debug_admission', 'trace', false);
 	PERFORM set_config('turbohybrid.multivector_debug_trace_limit', '1', false);
 	PERFORM id FROM mv_token_limit_docs
-	  ORDER BY colbert <~> turbohybrid_query(
+	  ORDER BY colbert <~> turbohybrid_experimental_query(
 	    multivector_query => turbohybrid_multivector(ARRAY['[1,0]'::vector, '[0,1]'::vector]),
 	    dense_k => 4,
 	    final_k => 4
@@ -545,7 +546,7 @@ SET turbohybrid.multivector_adaptive_widening = on;
 SELECT COUNT(*) AS adaptive_result_count
 FROM (
   SELECT id FROM mv_adaptive_docs
-    ORDER BY colbert <~> turbohybrid_query(
+    ORDER BY colbert <~> turbohybrid_experimental_query(
       multivector_query => turbohybrid_multivector(ARRAY['[1,0]'::vector]),
       dense_k => 2,
       final_k => 2
@@ -571,7 +572,7 @@ SET turbohybrid.multivector_adaptive_widening = off;
 SELECT COUNT(*) AS fixed_result_count
 FROM (
   SELECT id FROM mv_adaptive_docs
-    ORDER BY colbert <~> turbohybrid_query(
+    ORDER BY colbert <~> turbohybrid_experimental_query(
       multivector_query => turbohybrid_multivector(ARRAY['[1,0]'::vector]),
       dense_k => 2,
       final_k => 2
@@ -627,14 +628,14 @@ END
 $$;
 
 SELECT id FROM mv_docs
-  ORDER BY colbert <~> turbohybrid_query(
+  ORDER BY colbert <~> turbohybrid_experimental_query(
     multivector_query => turbohybrid_multivector(ARRAY['[1,0]'::vector])
   )
   LIMIT 1;
 
 SET enable_seqscan = off;
 SELECT id FROM mv_docs
-  ORDER BY colbert <~> turbohybrid_query(
+  ORDER BY colbert <~> turbohybrid_experimental_query(
     multivector_query => turbohybrid_multivector(ARRAY['[1,0]'::vector])
   )
   LIMIT 1;
@@ -686,7 +687,7 @@ $$;
 
 SET turbohybrid.multivector_docmap = off;
 SELECT id FROM mv_docs
-  ORDER BY colbert <~> turbohybrid_query(
+  ORDER BY colbert <~> turbohybrid_experimental_query(
     multivector_query => turbohybrid_multivector(ARRAY['[1,0]'::vector])
   )
   LIMIT 1;
@@ -705,7 +706,7 @@ $$;
 
 SET turbohybrid.multivector_docmap = require;
 SELECT id FROM mv_docs
-  ORDER BY colbert <~> turbohybrid_query(
+  ORDER BY colbert <~> turbohybrid_experimental_query(
     multivector_query => turbohybrid_multivector(ARRAY['[1,0]'::vector])
   )
   LIMIT 1;
@@ -726,7 +727,7 @@ RESET turbohybrid.multivector_docmap;
 
 SET turbohybrid.default_dense_k = 7;
 SELECT id FROM mv_docs
-  ORDER BY colbert <~> turbohybrid_query(
+  ORDER BY colbert <~> turbohybrid_experimental_query(
     multivector_query => turbohybrid_multivector(ARRAY['[1,0]'::vector]),
     dense_k => NULL
   )
@@ -748,7 +749,7 @@ RESET turbohybrid.default_dense_k;
 
 SET turbohybrid.multivector_exact_rerank = off;
 SELECT id FROM mv_docs
-  ORDER BY colbert <~> turbohybrid_query(
+  ORDER BY colbert <~> turbohybrid_experimental_query(
     multivector_query => turbohybrid_multivector(ARRAY['[1,0]'::vector])
   )
   LIMIT 1;
@@ -775,7 +776,7 @@ SELECT COUNT(*) AS result_count,
        COUNT(DISTINCT id) AS distinct_docs
 FROM (
   SELECT id FROM mv_docs
-    ORDER BY colbert <~> turbohybrid_query(
+    ORDER BY colbert <~> turbohybrid_experimental_query(
       multivector_query => turbohybrid_multivector(ARRAY['[1,0]'::vector, '[0,1]'::vector]),
       dense_k => 6,
       final_k => 3
@@ -788,7 +789,7 @@ SELECT COUNT(*) AS result_count,
        COUNT(DISTINCT id) AS distinct_docs
 FROM (
   SELECT id FROM mv_docs
-    ORDER BY colbert <~> turbohybrid_query(
+    ORDER BY colbert <~> turbohybrid_experimental_query(
       multivector_query => turbohybrid_multivector(ARRAY['[1,0]'::vector, '[0,1]'::vector]),
       dense_k => 6,
       final_k => 3
@@ -838,7 +839,7 @@ WITH cosine_results AS (
   SELECT pg_catalog.array_agg(id) AS ids
   FROM (
     SELECT id FROM mv_alias_cosine_docs
-      ORDER BY colbert <~> turbohybrid_query(
+      ORDER BY colbert <~> turbohybrid_experimental_query(
         multivector_query => turbohybrid_multivector(ARRAY['[1,0]'::vector, '[0,1]'::vector]),
         dense_k => 6,
         final_k => 3
@@ -850,7 +851,7 @@ ip_results AS (
   SELECT pg_catalog.array_agg(id) AS ids
   FROM (
     SELECT id FROM mv_alias_ip_docs
-      ORDER BY colbert <~> turbohybrid_query(
+      ORDER BY colbert <~> turbohybrid_experimental_query(
         multivector_query => turbohybrid_multivector(ARRAY['[1,0]'::vector, '[0,1]'::vector]),
         dense_k => 6,
         final_k => 3
@@ -902,7 +903,7 @@ indexed AS (
   FROM (
     SELECT id, row_number() OVER () AS ord
     FROM mv_recall_docs, q
-    ORDER BY colbert <~> turbohybrid_query(
+    ORDER BY colbert <~> turbohybrid_experimental_query(
       multivector_query => q.mv,
       dense_k => 12,
       final_k => 5
@@ -951,7 +952,7 @@ $$;
 
 SET enable_seqscan = off;
 SELECT id FROM mv_insert_batch_dense_docs
-  ORDER BY colbert <~> turbohybrid_query(
+  ORDER BY colbert <~> turbohybrid_experimental_query(
     multivector_query => turbohybrid_multivector(ARRAY['[1,0]'::vector]),
     dense_k => 4,
     final_k => 1
@@ -994,7 +995,7 @@ $$;
 
 SET enable_seqscan = off;
 SELECT id FROM mv_insert_batch_hybrid_docs
-	ORDER BY colbert <~> turbohybrid_query(
+	ORDER BY colbert <~> turbohybrid_experimental_query(
 		multivector_query => turbohybrid_multivector(ARRAY['[1,0]'::vector]),
 		text_query => to_tsquery('batchterm'),
 		dense_k => 4,
@@ -1049,7 +1050,7 @@ BEGIN
 	SET LOCAL turbohybrid.multivector_bm25_candidate_injection = off;
 	SELECT id INTO top_id
 	FROM mv_bm25_injection_docs
-	ORDER BY colbert <~> turbohybrid_query(
+	ORDER BY colbert <~> turbohybrid_experimental_query(
 	  multivector_query => q,
 	  text_query => to_tsquery('simple', 'needle'),
 	  dense_k => 1,
@@ -1069,7 +1070,7 @@ BEGIN
 	SET LOCAL turbohybrid.multivector_branch_plan = dense_only;
 	SELECT id INTO top_id
 	FROM mv_bm25_injection_docs
-	ORDER BY colbert <~> turbohybrid_query(
+	ORDER BY colbert <~> turbohybrid_experimental_query(
 	  multivector_query => q,
 	  text_query => to_tsquery('simple', 'needle'),
 	  dense_k => 1,
@@ -1104,7 +1105,7 @@ BEGIN
 	SET LOCAL turbohybrid.multivector_branch_plan = qdrant_like;
 	SELECT id INTO top_id
 	FROM mv_bm25_injection_docs
-	ORDER BY colbert <~> turbohybrid_query(
+	ORDER BY colbert <~> turbohybrid_experimental_query(
 	  multivector_query => q,
 	  text_query => to_tsquery('simple', 'needle'),
 	  dense_k => 1,
@@ -1134,7 +1135,7 @@ BEGIN
 	SET LOCAL turbohybrid.multivector_branch_plan = dense_only;
 	SELECT id INTO top_id
 	FROM mv_bm25_injection_docs
-	ORDER BY colbert <~> turbohybrid_query(
+	ORDER BY colbert <~> turbohybrid_experimental_query(
 	  multivector_query => q,
 	  text_query => to_tsquery('simple', 'needle'),
 	  dense_k => 1,
@@ -1183,7 +1184,7 @@ BEGIN
 	FROM (
 		SELECT id
 		FROM mv_bm25_injection_docs
-		ORDER BY colbert <~> turbohybrid_query(
+		ORDER BY colbert <~> turbohybrid_experimental_query(
 		  multivector_query => q,
 		  dense_k => 4,
 		  final_k => 1
@@ -1196,7 +1197,7 @@ BEGIN
 	FROM (
 		SELECT id
 		FROM mv_bm25_injection_docs
-		ORDER BY colbert <~> turbohybrid_query(
+		ORDER BY colbert <~> turbohybrid_experimental_query(
 		  multivector_query => q,
 		  dense_k => 4,
 		  final_k => 1
@@ -1220,7 +1221,7 @@ BEGIN
 	FROM (
 		SELECT id
 		FROM mv_bm25_injection_docs
-		ORDER BY colbert <~> turbohybrid_query(
+		ORDER BY colbert <~> turbohybrid_experimental_query(
 		  multivector_query => q,
 		  dense_k => 1,
 		  final_k => 1
@@ -1250,7 +1251,7 @@ BEGIN
 	SET LOCAL turbohybrid.multivector_candidate_source = exact_doc_scan;
 	SELECT id INTO top_id
 	FROM mv_bm25_injection_docs
-	ORDER BY colbert <~> turbohybrid_query(
+	ORDER BY colbert <~> turbohybrid_experimental_query(
 	  multivector_query => q,
 	  dense_k => 1,
 	  final_k => 1
@@ -1268,7 +1269,7 @@ BEGIN
 	SET LOCAL turbohybrid.multivector_candidate_source = doc_graph_prototype;
 	SELECT id INTO top_id
 	FROM mv_bm25_injection_docs
-	ORDER BY colbert <~> turbohybrid_query(
+	ORDER BY colbert <~> turbohybrid_experimental_query(
 	  multivector_query => q,
 	  dense_k => 1,
 	  final_k => 1
@@ -1295,7 +1296,7 @@ BEGIN
 		SET LOCAL turbohybrid.multivector_candidate_source = document_nodes;
 		PERFORM id
 		FROM mv_bm25_injection_docs
-		ORDER BY colbert <~> turbohybrid_query(
+		ORDER BY colbert <~> turbohybrid_experimental_query(
 		  multivector_query => turbohybrid_multivector(ARRAY['[1,0]'::vector]),
 		  dense_k => 1,
 		  final_k => 1
@@ -1316,7 +1317,7 @@ BEGIN
 	BEGIN
 		PERFORM id
 		FROM mv_docs
-		ORDER BY colbert <~> turbohybrid_query(
+		ORDER BY colbert <~> turbohybrid_experimental_query(
 		  multivector_query => turbohybrid_multivector(ARRAY['[1,0]'::vector]),
 		  text_query => to_tsquery('simple', 'needle'),
 		  dense_k => 1,
@@ -1368,7 +1369,7 @@ END
 $$;
 
 SELECT id FROM mv_docs
-  ORDER BY colbert <~> turbohybrid_query(
+  ORDER BY colbert <~> turbohybrid_experimental_query(
     multivector_query => turbohybrid_multivector(ARRAY['[-1,-1]'::vector]),
     dense_k => 8,
     final_k => 1
@@ -1392,7 +1393,7 @@ END
 $$;
 
 SELECT id FROM mv_docs
-  ORDER BY colbert <~> turbohybrid_query(
+  ORDER BY colbert <~> turbohybrid_experimental_query(
     multivector_query => turbohybrid_multivector(ARRAY['[-1,-1]'::vector]),
     text_query => to_tsquery('epsilon'),
     dense_k => 8,
@@ -1405,7 +1406,7 @@ SELECT id FROM mv_docs
 SET turbohybrid.multivector_branch_plan = qdrant_like;
 
 SELECT id FROM mv_docs
-  ORDER BY colbert <~> turbohybrid_query(
+  ORDER BY colbert <~> turbohybrid_experimental_query(
     multivector_query => turbohybrid_multivector(ARRAY['[1,0]'::vector]),
     text_query => to_tsquery('gamma'),
     dense_k => 6,
@@ -1431,7 +1432,7 @@ END
 $$;
 
 SELECT id FROM mv_docs
-  ORDER BY colbert <~> turbohybrid_query(
+  ORDER BY colbert <~> turbohybrid_experimental_query(
     multivector_query => turbohybrid_multivector(ARRAY['[1,0]'::vector, '[0,1]'::vector]),
     text_query => to_tsquery('alpha | gamma'),
     dense_k => 6,
@@ -1442,7 +1443,7 @@ SELECT id FROM mv_docs
   LIMIT 3;
 
 SELECT id FROM mv_docs
-  ORDER BY colbert <~> turbohybrid_query(
+  ORDER BY colbert <~> turbohybrid_experimental_query(
     multivector_query => turbohybrid_multivector(ARRAY['[1,0]'::vector]),
     dense_k => 6,
     final_k => 1,
@@ -1451,7 +1452,7 @@ SELECT id FROM mv_docs
   LIMIT 1;
 
 SELECT id FROM mv_docs
-  ORDER BY colbert <~> turbohybrid_query(
+  ORDER BY colbert <~> turbohybrid_experimental_query(
     multivector_query => turbohybrid_multivector(ARRAY['[1,0]'::vector]),
     text_query => to_tsquery('gamma'),
     fusion => 'weighted'
@@ -1472,7 +1473,7 @@ END
 $$;
 
 SELECT id FROM mv_docs
-  ORDER BY colbert <~> turbohybrid_query(
+  ORDER BY colbert <~> turbohybrid_experimental_query(
     multivector_query => turbohybrid_multivector(ARRAY['[1,0]'::vector]),
     text_query => to_tsquery('gamma'),
     fusion => 'fast_weighted'
@@ -1500,7 +1501,7 @@ $$;
 RESET turbohybrid.multivector_branch_plan;
 
 SELECT id FROM mv_docs
-  ORDER BY colbert <~> turbohybrid_query(
+  ORDER BY colbert <~> turbohybrid_experimental_query(
     multivector_query => turbohybrid_multivector(ARRAY['[1,0]'::vector]),
     text_query => to_tsquery('gamma'),
     fusion => 'calibrated'
@@ -1526,7 +1527,7 @@ SET turbohybrid.multivector_branch_plan = qdrant_like;
 SET turbohybrid.dbsf_min_branch_candidates = 1;
 
 SELECT id FROM mv_docs
-  ORDER BY colbert <~> turbohybrid_query(
+  ORDER BY colbert <~> turbohybrid_experimental_query(
     multivector_query => turbohybrid_multivector(ARRAY['[1,0]'::vector]),
     text_query => to_tsquery('alpha | gamma'),
     dense_k => 6,
@@ -1591,7 +1592,7 @@ DECLARE
 BEGIN
 	SELECT id INTO top_id
 	FROM mv_dbsf_scale_docs
-	ORDER BY colbert <~> turbohybrid_query(
+	ORDER BY colbert <~> turbohybrid_experimental_query(
 	  multivector_query => turbohybrid_multivector(ARRAY['[1,0]'::vector]),
 	  text_query => to_tsquery('simple', 'needle'),
 	  dense_k => 8,
@@ -1638,7 +1639,7 @@ DECLARE
 BEGIN
 	PERFORM id
 	FROM mv_dbsf_degenerate_docs
-	ORDER BY colbert <~> turbohybrid_query(
+	ORDER BY colbert <~> turbohybrid_experimental_query(
 	  multivector_query => turbohybrid_multivector(ARRAY['[1,0]'::vector]),
 	  text_query => to_tsquery('simple', 'same'),
 	  dense_k => 3,
@@ -1706,7 +1707,7 @@ BEGIN
 
 	SELECT id INTO top_id
 	FROM mv_docnode_hybrid_scheduler_docs
-	ORDER BY colbert <~> turbohybrid_query(
+	ORDER BY colbert <~> turbohybrid_experimental_query(
 	  multivector_query => turbohybrid_multivector(ARRAY[
 	    '[1,0]'::vector,
 	    '[0,1]'::vector
@@ -1737,7 +1738,7 @@ BEGIN
 	BEGIN
 		PERFORM id
 		FROM mv_docnode_hybrid_scheduler_docs
-		ORDER BY colbert <~> turbohybrid_query(
+		ORDER BY colbert <~> turbohybrid_experimental_query(
 		  vector_query => '[1,0]'::vector,
 		  multivector_query => turbohybrid_multivector(ARRAY[
 		    '[1,0]'::vector,
@@ -1764,7 +1765,7 @@ BEGIN
 	BEGIN
 		PERFORM id
 		FROM mv_docnode_hybrid_scheduler_docs
-		ORDER BY colbert <~> turbohybrid_query(
+		ORDER BY colbert <~> turbohybrid_experimental_query(
 		  vector_query => '[1,0]'::vector,
 		  multivector_query => turbohybrid_multivector(ARRAY[
 		    '[1,0]'::vector,
@@ -1808,7 +1809,7 @@ DECLARE
 	top_id int;
 BEGIN
 	SELECT id INTO top_id FROM mv_weighted_docs
-		ORDER BY colbert <~> turbohybrid_query(
+		ORDER BY colbert <~> turbohybrid_experimental_query(
 			multivector_query => turbohybrid_multivector(ARRAY['[1,0]'::vector]),
 			text_query => to_tsquery('alpha'),
 			dense_k => 2,
@@ -1834,7 +1835,7 @@ BEGIN
 	result_count := 0;
 	FOR result_id IN
 		SELECT id FROM mv_weighted_docs
-			ORDER BY colbert <~> turbohybrid_query(
+			ORDER BY colbert <~> turbohybrid_experimental_query(
 				multivector_query => turbohybrid_multivector(ARRAY['[1,0]'::vector]),
 				text_query => to_tsquery('alpha'),
 				dense_k => 2,
@@ -1861,7 +1862,7 @@ $$;
 SELECT bool_and(id IN (1, 3)) AS weighted_require_bm25_match
 FROM (
   SELECT id FROM mv_weighted_docs
-    ORDER BY colbert <~> turbohybrid_query(
+    ORDER BY colbert <~> turbohybrid_experimental_query(
       multivector_query => turbohybrid_multivector(ARRAY['[1,0]'::vector]),
       text_query => to_tsquery('alpha'),
       dense_k => 2,
@@ -1878,7 +1879,7 @@ DROP TABLE mv_weighted_docs;
 
 SET turbohybrid.multivector_max_query_vectors = 1;
 SELECT id FROM mv_docs
-  ORDER BY colbert <~> turbohybrid_query(
+  ORDER BY colbert <~> turbohybrid_experimental_query(
     multivector_query => turbohybrid_multivector(ARRAY['[1,0]'::vector, '[0,1]'::vector]),
     dense_k => 6,
     final_k => 1
@@ -1888,7 +1889,7 @@ RESET turbohybrid.multivector_max_query_vectors;
 
 SET turbohybrid.multivector_max_dim = 1;
 SELECT id FROM mv_docs
-  ORDER BY colbert <~> turbohybrid_query(
+  ORDER BY colbert <~> turbohybrid_experimental_query(
     multivector_query => turbohybrid_multivector(ARRAY['[1,0]'::vector]),
     dense_k => 6,
     final_k => 1
@@ -1913,7 +1914,7 @@ SELECT turbohybrid_multivector_model_info('not/a-real-model')->>'known'
 
 SET turbohybrid.multivector_model_name = 'answerdotai/answerai-colbert-small-v1';
 SELECT id FROM mv_docs
-  ORDER BY colbert <~> turbohybrid_query(
+  ORDER BY colbert <~> turbohybrid_experimental_query(
     multivector_query => turbohybrid_multivector(ARRAY['[1,0]'::vector]),
     dense_k => 6,
     final_k => 1
@@ -1952,7 +1953,7 @@ USING turbohybrid (colbert multivector_maxsim_ip_turbohybrid_ops);
 SET enable_seqscan = off;
 SET turbohybrid.multivector_model_name = 'colbert-ir/colbertv2.0';
 SELECT id FROM mv_model_warning_docs
-  ORDER BY colbert <~> turbohybrid_query(
+  ORDER BY colbert <~> turbohybrid_experimental_query(
     multivector_query => turbohybrid_multivector_from_float4(
       ARRAY(
         SELECT CASE WHEN (gs - 1) % 128 = 0 THEN 1 ELSE 0 END::real
@@ -1970,7 +1971,7 @@ DROP TABLE mv_model_warning_docs;
 
 SET turbohybrid.multivector_max_raw_hits_per_token = 1;
 SELECT id FROM mv_docs
-  ORDER BY colbert <~> turbohybrid_query(
+  ORDER BY colbert <~> turbohybrid_experimental_query(
     multivector_query => turbohybrid_multivector(ARRAY['[1,0]'::vector]),
     dense_k => 6,
     final_k => 1
@@ -1994,7 +1995,7 @@ VACUUM mv_docs;
 SELECT COALESCE(bool_or(id = 4), false) AS deleted_doc_returned
 FROM (
   SELECT id FROM mv_docs
-    ORDER BY colbert <~> turbohybrid_query(
+    ORDER BY colbert <~> turbohybrid_experimental_query(
       multivector_query => turbohybrid_multivector(ARRAY['[-1,-1]'::vector]),
       dense_k => 8,
       final_k => 3
@@ -2034,7 +2035,7 @@ DELETE FROM mv_lifecycle_docs WHERE id = 1;
 SELECT COALESCE(bool_or(id = 1), false) AS lifecycle_deleted_before_vacuum
 FROM (
   SELECT id FROM mv_lifecycle_docs
-    ORDER BY colbert <~> turbohybrid_query(
+    ORDER BY colbert <~> turbohybrid_experimental_query(
       multivector_query => turbohybrid_multivector(ARRAY['[1,0]'::vector]),
       dense_k => 6,
       final_k => 3
@@ -2046,7 +2047,7 @@ VACUUM mv_lifecycle_docs;
 SELECT COALESCE(bool_or(id = 1), false) AS lifecycle_deleted_after_vacuum
 FROM (
   SELECT id FROM mv_lifecycle_docs
-    ORDER BY colbert <~> turbohybrid_query(
+    ORDER BY colbert <~> turbohybrid_experimental_query(
       multivector_query => turbohybrid_multivector(ARRAY['[1,0]'::vector]),
       dense_k => 6,
       final_k => 3
@@ -2060,7 +2061,7 @@ SET colbert = turbohybrid_multivector(ARRAY['[1,0]'::vector]),
 WHERE id = 2;
 
 SELECT id AS lifecycle_updated_dense_top FROM mv_lifecycle_docs
-  ORDER BY colbert <~> turbohybrid_query(
+  ORDER BY colbert <~> turbohybrid_experimental_query(
     multivector_query => turbohybrid_multivector(ARRAY['[1,0]'::vector]),
     dense_k => 6,
     final_k => 1
@@ -2068,7 +2069,7 @@ SELECT id AS lifecycle_updated_dense_top FROM mv_lifecycle_docs
   LIMIT 1;
 
 SELECT id AS lifecycle_old_update_top FROM mv_lifecycle_docs
-  ORDER BY colbert <~> turbohybrid_query(
+  ORDER BY colbert <~> turbohybrid_experimental_query(
     multivector_query => turbohybrid_multivector(ARRAY['[-1,0]'::vector]),
     dense_k => 6,
     final_k => 1
@@ -2081,7 +2082,7 @@ SET colbert = turbohybrid_multivector(ARRAY['[0,1]'::vector]),
 WHERE id = 3;
 
 SELECT id AS lifecycle_hybrid_update_top FROM mv_lifecycle_docs
-  ORDER BY colbert <~> turbohybrid_query(
+  ORDER BY colbert <~> turbohybrid_experimental_query(
     multivector_query => turbohybrid_multivector(ARRAY['[0,1]'::vector]),
     text_query => to_tsquery('hybrid_new'),
     dense_k => 6,
@@ -2116,7 +2117,7 @@ END
 $$;
 
 SELECT id AS lifecycle_insert_after_vacuum_top FROM mv_lifecycle_docs
-  ORDER BY colbert <~> turbohybrid_query(
+  ORDER BY colbert <~> turbohybrid_experimental_query(
     multivector_query => turbohybrid_multivector(ARRAY['[-0.2,-0.8]'::vector]),
     dense_k => 8,
     final_k => 1
@@ -2127,7 +2128,7 @@ DROP TABLE mv_lifecycle_docs;
 DROP TABLE mv_lifecycle_before_insert;
 
 SELECT id AS rrf_text_only_top FROM mv_docs
-  ORDER BY colbert <~> turbohybrid_query(
+  ORDER BY colbert <~> turbohybrid_experimental_query(
     text_query => to_tsquery('gamma'),
     bm25_k => 3,
     final_k => 1,
@@ -2138,7 +2139,7 @@ SELECT id AS rrf_text_only_top FROM mv_docs
 SELECT bool_and(id IN (2, 3)) AS rrf_require_bm25_match
 FROM (
   SELECT id FROM mv_docs
-    ORDER BY colbert <~> turbohybrid_query(
+    ORDER BY colbert <~> turbohybrid_experimental_query(
       multivector_query => turbohybrid_multivector(ARRAY['[1,0]'::vector]),
       text_query => to_tsquery('gamma'),
       dense_k => 6,
@@ -2152,7 +2153,7 @@ FROM (
 
 EXPLAIN (COSTS OFF)
 SELECT id FROM mv_docs
-  ORDER BY colbert <~> turbohybrid_query(
+  ORDER BY colbert <~> turbohybrid_experimental_query(
     multivector_query => turbohybrid_multivector(ARRAY['[1,0]'::vector]),
     dense_k => 6,
     final_k => 1
@@ -2173,7 +2174,7 @@ CREATE INDEX mv_usability_dense_only_idx ON mv_usability_dense_only_docs USING t
 
 SET enable_seqscan = off;
 SELECT id FROM mv_usability_dense_only_docs
-  ORDER BY colbert <~> turbohybrid_query(
+  ORDER BY colbert <~> turbohybrid_experimental_query(
     text_query => to_tsquery('alpha'),
     bm25_k => 1,
     final_k => 1,
@@ -2196,7 +2197,7 @@ CREATE INDEX mv_usability_vector_idx ON mv_usability_vector_docs USING turbohybr
 
 SET enable_seqscan = off;
 SELECT id FROM mv_usability_vector_docs
-  ORDER BY embedding <~> turbohybrid_query(
+  ORDER BY embedding <~> turbohybrid_experimental_query(
     multivector_query => turbohybrid_multivector(ARRAY['[1,0]'::vector]),
     dense_k => 1,
     final_k => 1
@@ -2509,13 +2510,13 @@ BEGIN
 	INTO index_ids
 	FROM (
 		SELECT id,
-		       colbert <~> turbohybrid_query(
+		       colbert <~> turbohybrid_experimental_query(
 		         multivector_query => q,
 		         dense_k => 200,
 		         final_k => 10
 		       ) AS distance
 		FROM mv_document_node_proxy_regression_docs
-		ORDER BY colbert <~> turbohybrid_query(
+		ORDER BY colbert <~> turbohybrid_experimental_query(
 		         multivector_query => q,
 		         dense_k => 200,
 		         final_k => 10
@@ -2606,7 +2607,7 @@ SET turbohybrid.multivector_plain_fallback = off;
 RESET turbohybrid.multivector_candidate_source;
 SELECT id AS document_node_top1
 FROM mv_document_node_docs
-ORDER BY colbert <~> turbohybrid_query(
+ORDER BY colbert <~> turbohybrid_experimental_query(
   multivector_query => turbohybrid_multivector(ARRAY['[1,0]'::vector]),
   dense_k => 3,
   final_k => 1
@@ -2662,7 +2663,7 @@ BEGIN
 					   '2', true);
 	PERFORM id
 	FROM mv_document_node_docs
-	ORDER BY colbert <~> turbohybrid_query(
+	ORDER BY colbert <~> turbohybrid_experimental_query(
 		multivector_query => turbohybrid_multivector(ARRAY['[1,0]'::vector]),
 		dense_k => 3,
 		final_k => 1
@@ -2694,7 +2695,7 @@ BEGIN
 	PERFORM set_config('turbohybrid.multivector_exact_rerank_k', '3', true);
 	PERFORM id
 	FROM mv_document_node_docs
-	ORDER BY colbert <~> turbohybrid_query(
+	ORDER BY colbert <~> turbohybrid_experimental_query(
 		multivector_query => turbohybrid_multivector(ARRAY['[1,0]'::vector]),
 		dense_k => 3,
 		final_k => 1
@@ -2725,7 +2726,7 @@ BEGIN
 	PERFORM set_config('turbohybrid.multivector_exact_rerank_k', '2', true);
 	PERFORM id
 	FROM mv_document_node_docs
-	ORDER BY colbert <~> turbohybrid_query(
+	ORDER BY colbert <~> turbohybrid_experimental_query(
 		multivector_query => turbohybrid_multivector(ARRAY['[1,0]'::vector]),
 		dense_k => 3,
 		final_k => 1
@@ -2766,7 +2767,7 @@ BEGIN
 	FROM (
 		SELECT id
 		FROM mv_document_node_docs
-		ORDER BY colbert <~> turbohybrid_query(
+		ORDER BY colbert <~> turbohybrid_experimental_query(
 			multivector_query => q,
 			dense_k => 3,
 			final_k => 3
@@ -2798,7 +2799,7 @@ $$;
 SET turbohybrid.multivector_doc_graph_rescore_k = 1;
 SELECT id AS document_node_graph_traversal_probe
 FROM mv_document_node_docs
-ORDER BY colbert <~> turbohybrid_query(
+ORDER BY colbert <~> turbohybrid_experimental_query(
   multivector_query => turbohybrid_multivector(ARRAY['[1,0]'::vector]),
   dense_k => 1,
   final_k => 1
@@ -2839,7 +2840,7 @@ SET turbohybrid.multivector_doc_graph_rescore_k = 2;
 SET turbohybrid.multivector_doc_graph_oversampling = 2;
 SELECT id AS document_node_auto_full_candidate_fallback
 FROM mv_document_node_docs
-ORDER BY colbert <~> turbohybrid_query(
+ORDER BY colbert <~> turbohybrid_experimental_query(
   multivector_query => turbohybrid_multivector(ARRAY['[1,0]'::vector]),
   dense_k => 1,
   final_k => 1
@@ -2892,7 +2893,7 @@ VACUUM mv_document_node_docs;
 SET enable_seqscan = off;
 SELECT id <> 2 AS document_node_post_vacuum_visible
 FROM mv_document_node_docs
-ORDER BY colbert <~> turbohybrid_query(
+ORDER BY colbert <~> turbohybrid_experimental_query(
   multivector_query => turbohybrid_multivector(ARRAY['[0,1]'::vector]),
   dense_k => 4,
   final_k => 1
@@ -2957,7 +2958,7 @@ SET enable_seqscan = off;
 SET turbohybrid.multivector_plain_fallback = off;
 SELECT id AS document_node_pooling_top1
 FROM mv_document_node_pool_docs
-ORDER BY colbert <~> turbohybrid_query(
+ORDER BY colbert <~> turbohybrid_experimental_query(
   multivector_query => turbohybrid_multivector(ARRAY[
     '[1,0,0,0]'::vector,
     '[0,1,0,0]'::vector,
@@ -3009,7 +3010,7 @@ SET enable_seqscan = off;
 SET turbohybrid.multivector_plain_fallback = off;
 SELECT id AS document_node_kmeans_pooling_top1
 FROM mv_document_node_pool_docs
-ORDER BY colbert <~> turbohybrid_query(
+ORDER BY colbert <~> turbohybrid_experimental_query(
   multivector_query => turbohybrid_multivector(ARRAY[
     '[1,0,0,0]'::vector,
     '[0,1,0,0]'::vector,
@@ -3067,11 +3068,11 @@ $$;
 DROP TABLE mv_document_node_pool_docs;
 
 SELECT turbohybrid_multivector(ARRAY['[1,0]'::vector]) <~>
-  turbohybrid_query(vector_query => '[1,0]'::vector);
+  turbohybrid_experimental_query(vector_query => '[1,0]'::vector);
 
 SET enable_seqscan = off;
 SELECT id FROM mv_docs
-  ORDER BY colbert <~> turbohybrid_query(
+  ORDER BY colbert <~> turbohybrid_experimental_query(
     vector_query => '[1,0]'::vector,
     dense_k => 1,
     final_k => 1
@@ -3098,20 +3099,20 @@ DECLARE
 BEGIN
 	unweighted := turbohybrid_multivector_distance(
 		doc,
-		turbohybrid_query(multivector_query => query_two));
+		turbohybrid_experimental_query(multivector_query => query_two));
 	weighted_ones := turbohybrid_multivector_distance(
 		doc,
-		turbohybrid_query(
+		turbohybrid_experimental_query(
 			multivector_query => query_two,
 			query_token_weights => ARRAY[1,1]::real[]));
 	masked := turbohybrid_multivector_distance(
 		doc,
-		turbohybrid_query(
+		turbohybrid_experimental_query(
 			multivector_query => query_two,
 			query_token_mask => ARRAY[false,true]));
 	one_token := turbohybrid_multivector_distance(
 		doc,
-		turbohybrid_query(multivector_query => query_one));
+		turbohybrid_experimental_query(multivector_query => query_one));
 
 	IF abs(unweighted - weighted_ones) > 0.000001 THEN
 		RAISE EXCEPTION 'all-one query token weights changed score: % vs %',
@@ -3129,7 +3130,7 @@ BEGIN
 	)
 	SELECT id INTO unweighted_top
 	FROM docs
-	ORDER BY mv <~> turbohybrid_query(multivector_query => query_two)
+	ORDER BY mv <~> turbohybrid_experimental_query(multivector_query => query_two)
 	LIMIT 1;
 
 	WITH docs(id, mv) AS (
@@ -3139,7 +3140,7 @@ BEGIN
 	)
 	SELECT id INTO weighted_top
 	FROM docs
-	ORDER BY mv <~> turbohybrid_query(
+	ORDER BY mv <~> turbohybrid_experimental_query(
 		multivector_query => query_two,
 		query_token_weights => ARRAY[1,3]::real[])
 	LIMIT 1;
@@ -3171,7 +3172,7 @@ DECLARE
 BEGIN
 	SELECT id INTO top_id
 	FROM mv_query_token_mask_docs
-	ORDER BY colbert <~> turbohybrid_query(
+	ORDER BY colbert <~> turbohybrid_experimental_query(
 		multivector_query => turbohybrid_multivector(ARRAY[
 			'[1,0]'::vector,
 			'[0,1]'::vector
@@ -3218,7 +3219,7 @@ DECLARE
 BEGIN
 	SELECT id INTO unweighted_top
 	FROM mv_query_token_weight_docnodes
-	ORDER BY colbert <~> turbohybrid_query(
+	ORDER BY colbert <~> turbohybrid_experimental_query(
 		multivector_query => query_two,
 		final_k => 1
 	)
@@ -3226,7 +3227,7 @@ BEGIN
 
 	SELECT id INTO weighted_top
 	FROM mv_query_token_weight_docnodes
-	ORDER BY colbert <~> turbohybrid_query(
+	ORDER BY colbert <~> turbohybrid_experimental_query(
 		multivector_query => query_two,
 		query_token_weights => ARRAY[1,3]::real[],
 		final_k => 1
@@ -3235,7 +3236,7 @@ BEGIN
 
 	SELECT id INTO masked_top
 	FROM mv_query_token_weight_docnodes
-	ORDER BY colbert <~> turbohybrid_query(
+	ORDER BY colbert <~> turbohybrid_experimental_query(
 		multivector_query => query_two,
 		query_token_mask => ARRAY[false,true],
 		final_k => 1
@@ -3274,7 +3275,7 @@ BEGIN
 					   'force', true);
 	PERFORM id
 	FROM mv_proxy_token_source_docs
-	ORDER BY colbert <~> turbohybrid_query(
+	ORDER BY colbert <~> turbohybrid_experimental_query(
 		multivector_query => turbohybrid_multivector(ARRAY['[1,0]'::vector]),
 		dense_k => 2,
 		final_k => 1
@@ -3319,7 +3320,7 @@ BEGIN
 	PERFORM set_config('turbohybrid.multivector_exact_rerank_k', '3', true);
 	SELECT id INTO top_id
 	FROM mv_centroid_lite_docs
-	ORDER BY colbert <~> turbohybrid_query(
+	ORDER BY colbert <~> turbohybrid_experimental_query(
 		multivector_query => turbohybrid_multivector(ARRAY[
 			'[1,0]'::vector,
 			'[0,1]'::vector
@@ -3371,7 +3372,7 @@ BEGIN
 	PERFORM set_config('turbohybrid.multivector_centroid_lite_max_postings_per_token', '1', true);
 	PERFORM id
 	FROM mv_centroid_lite_docs
-	ORDER BY colbert <~> turbohybrid_query(
+	ORDER BY colbert <~> turbohybrid_experimental_query(
 		multivector_query => turbohybrid_multivector(ARRAY[
 			'[1,0]'::vector,
 			'[0,1]'::vector
@@ -3415,7 +3416,7 @@ BEGIN
 	PERFORM set_config('turbohybrid.multivector_exact_rerank_k', '4', true);
 	SELECT id INTO top_id
 	FROM mv_centroid_lite_docs
-	ORDER BY colbert <~> turbohybrid_query(
+	ORDER BY colbert <~> turbohybrid_experimental_query(
 		multivector_query => turbohybrid_multivector(ARRAY[
 			'[0.6,0.8]'::vector,
 			'[0.6,0.8]'::vector
@@ -3450,7 +3451,7 @@ BEGIN
 	PERFORM set_config('turbohybrid.multivector_exact_rerank_k', '2', true);
 	PERFORM id
 	FROM mv_centroid_lite_docs
-	ORDER BY colbert <~> turbohybrid_query(
+	ORDER BY colbert <~> turbohybrid_experimental_query(
 		multivector_query => turbohybrid_multivector(ARRAY[
 			'[0.6,0.8]'::vector,
 			'[0.6,0.8]'::vector
@@ -3490,7 +3491,7 @@ BEGIN
 	PERFORM set_config('turbohybrid.multivector_plain_fallback', 'force', true);
 	PERFORM id
 	FROM mv_centroid_lite_bad_docs
-	ORDER BY colbert <~> turbohybrid_query(
+	ORDER BY colbert <~> turbohybrid_experimental_query(
 		multivector_query => turbohybrid_multivector(ARRAY['[1,0]'::vector]),
 		dense_k => 2,
 		final_k => 1
@@ -3527,7 +3528,7 @@ BEGIN
 	PERFORM set_config('turbohybrid.multivector_plain_fallback', 'off', true);
 	SELECT id INTO top_id
 	FROM mv_centroid_lite_token_docs
-	ORDER BY colbert <~> turbohybrid_query(
+	ORDER BY colbert <~> turbohybrid_experimental_query(
 		multivector_query => turbohybrid_multivector(ARRAY['[1,0]'::vector]),
 		dense_k => 2,
 		final_k => 1
@@ -3564,7 +3565,7 @@ BEGIN
 	PERFORM set_config('turbohybrid.multivector_quantized_inverted_compact_doc_order', 'docid', true);
 	SELECT id INTO top_id
 	FROM mv_centroid_lite_docs
-	ORDER BY colbert <~> turbohybrid_query(
+	ORDER BY colbert <~> turbohybrid_experimental_query(
 		multivector_query => turbohybrid_multivector(ARRAY['[1,0]'::vector]),
 		dense_k => 3,
 		final_k => 1
@@ -3634,7 +3635,7 @@ BEGIN
 	PERFORM set_config('turbohybrid.multivector_quantized_inverted_compact_doc_order', 'original', true);
 	SELECT id INTO original_top_id
 	FROM mv_centroid_lite_docs
-	ORDER BY colbert <~> turbohybrid_query(
+	ORDER BY colbert <~> turbohybrid_experimental_query(
 		multivector_query => turbohybrid_multivector(ARRAY['[1,0]'::vector]),
 		dense_k => 3,
 		final_k => 1
@@ -3653,7 +3654,7 @@ BEGIN
 	PERFORM set_config('turbohybrid.multivector_quantized_inverted_posting_selection', 'score_topk', true);
 	SELECT id INTO top_id
 	FROM mv_centroid_lite_docs
-	ORDER BY colbert <~> turbohybrid_query(
+	ORDER BY colbert <~> turbohybrid_experimental_query(
 		multivector_query => turbohybrid_multivector(ARRAY['[1,0]'::vector]),
 		dense_k => 3,
 		final_k => 1
@@ -3793,7 +3794,7 @@ BEGIN
 	PERFORM set_config('turbohybrid.multivector_plain_fallback', 'off', true);
 	PERFORM id
 	FROM mv_quantized_external_docs
-	ORDER BY colbert <~> turbohybrid_query(
+	ORDER BY colbert <~> turbohybrid_experimental_query(
 		multivector_query => turbohybrid_multivector(ARRAY['[1,0]'::vector]),
 		dense_k => 2,
 		final_k => 1
@@ -3812,7 +3813,7 @@ BEGIN
 	PERFORM set_config('turbohybrid.multivector_quantized_inverted_codebook_path', mismatch_path, false);
 	PERFORM id
 	FROM mv_quantized_external_docs
-	ORDER BY colbert <~> turbohybrid_query(
+	ORDER BY colbert <~> turbohybrid_experimental_query(
 		multivector_query => turbohybrid_multivector(ARRAY['[1,0]'::vector]),
 		dense_k => 2,
 		final_k => 1
@@ -3864,13 +3865,13 @@ DECLARE
 	SELECT array_agg(id ORDER BY distance, id) INTO exact_ids
 	FROM (
 		SELECT id,
-		       colbert <~> turbohybrid_query(
+		       colbert <~> turbohybrid_experimental_query(
 			       multivector_query => query_mv,
 			       dense_k => 4,
 			       final_k => 3
 	       ) AS distance
 		FROM mv_centroid_lite_docs
-		ORDER BY colbert <~> turbohybrid_query(
+		ORDER BY colbert <~> turbohybrid_experimental_query(
 		       multivector_query => query_mv,
 		       dense_k => 4,
 		       final_k => 3
@@ -3882,13 +3883,13 @@ DECLARE
 	SELECT array_agg(id ORDER BY distance, id) INTO proxy_ids
 	FROM (
 		SELECT id,
-		       colbert <~> turbohybrid_query(
+		       colbert <~> turbohybrid_experimental_query(
 			       multivector_query => query_mv,
 			       dense_k => 4,
 			       final_k => 3
 	       ) AS distance
 		FROM mv_centroid_lite_docs
-		ORDER BY colbert <~> turbohybrid_query(
+		ORDER BY colbert <~> turbohybrid_experimental_query(
 		       multivector_query => query_mv,
 		       dense_k => 4,
 		       final_k => 3
@@ -3945,13 +3946,13 @@ DECLARE
 	SELECT array_agg(id ORDER BY distance, id) INTO centroid_ids
 	FROM (
 		SELECT id,
-		       colbert <~> turbohybrid_query(
+		       colbert <~> turbohybrid_experimental_query(
 			       multivector_query => query_mv,
 			       dense_k => 4,
 			       final_k => 3
 	       ) AS distance
 		FROM mv_centroid_lite_docs
-		ORDER BY colbert <~> turbohybrid_query(
+		ORDER BY colbert <~> turbohybrid_experimental_query(
 		       multivector_query => query_mv,
 		       dense_k => 4,
 		       final_k => 3
@@ -3991,13 +3992,13 @@ DECLARE
 	SELECT array_agg(id ORDER BY distance, id) INTO centroid_ids
 	FROM (
 		SELECT id,
-		       colbert <~> turbohybrid_query(
+		       colbert <~> turbohybrid_experimental_query(
 			       multivector_query => query_mv,
 			       dense_k => 4,
 			       final_k => 3
 	       ) AS distance
 		FROM mv_centroid_lite_docs
-		ORDER BY colbert <~> turbohybrid_query(
+		ORDER BY colbert <~> turbohybrid_experimental_query(
 		       multivector_query => query_mv,
 		       dense_k => 4,
 		       final_k => 3
@@ -4029,13 +4030,13 @@ DECLARE
 	SELECT array_agg(id ORDER BY distance, id) INTO centroid_ids
 	FROM (
 		SELECT id,
-		       colbert <~> turbohybrid_query(
+		       colbert <~> turbohybrid_experimental_query(
 			       multivector_query => query_mv,
 			       dense_k => 4,
 			       final_k => 3
 	       ) AS distance
 		FROM mv_centroid_lite_docs
-		ORDER BY colbert <~> turbohybrid_query(
+		ORDER BY colbert <~> turbohybrid_experimental_query(
 		       multivector_query => query_mv,
 		       dense_k => 4,
 		       final_k => 3
@@ -4067,13 +4068,13 @@ DECLARE
 	SELECT array_agg(id ORDER BY distance, id) INTO centroid_ids
 	FROM (
 		SELECT id,
-		       colbert <~> turbohybrid_query(
+		       colbert <~> turbohybrid_experimental_query(
 			       multivector_query => query_mv,
 			       dense_k => 4,
 			       final_k => 3
 	       ) AS distance
 		FROM mv_centroid_lite_docs
-		ORDER BY colbert <~> turbohybrid_query(
+		ORDER BY colbert <~> turbohybrid_experimental_query(
 		       multivector_query => query_mv,
 		       dense_k => 4,
 		       final_k => 3
@@ -4109,13 +4110,13 @@ DECLARE
 	SELECT array_agg(id ORDER BY distance, id) INTO centroid_bitset_ids
 	FROM (
 		SELECT id,
-		       colbert <~> turbohybrid_query(
+		       colbert <~> turbohybrid_experimental_query(
 			       multivector_query => query_mv,
 			       dense_k => 4,
 			       final_k => 3
 	       ) AS distance
 		FROM mv_centroid_lite_docs
-		ORDER BY colbert <~> turbohybrid_query(
+		ORDER BY colbert <~> turbohybrid_experimental_query(
 		       multivector_query => query_mv,
 		       dense_k => 4,
 		       final_k => 3
@@ -4155,13 +4156,13 @@ DECLARE
 	SELECT array_agg(id ORDER BY distance, id) INTO centroid_pruned_ids
 	FROM (
 		SELECT id,
-		       colbert <~> turbohybrid_query(
+		       colbert <~> turbohybrid_experimental_query(
 			       multivector_query => query_mv,
 			       dense_k => 4,
 			       final_k => 3
 	       ) AS distance
 		FROM mv_centroid_lite_docs
-		ORDER BY colbert <~> turbohybrid_query(
+		ORDER BY colbert <~> turbohybrid_experimental_query(
 		       multivector_query => query_mv,
 		       dense_k => 4,
 		       final_k => 3
@@ -4191,13 +4192,13 @@ DECLARE
 	SELECT array_agg(id ORDER BY distance, id) INTO quantized_ids
 	FROM (
 		SELECT id,
-		       colbert <~> turbohybrid_query(
+		       colbert <~> turbohybrid_experimental_query(
 			       multivector_query => query_mv,
 			       dense_k => 4,
 			       final_k => 3
 	       ) AS distance
 		FROM mv_centroid_lite_docs
-		ORDER BY colbert <~> turbohybrid_query(
+		ORDER BY colbert <~> turbohybrid_experimental_query(
 		       multivector_query => query_mv,
 		       dense_k => 4,
 		       final_k => 3
@@ -4228,13 +4229,13 @@ DECLARE
 	SELECT array_agg(id ORDER BY distance, id) INTO quantized_compact_ids
 	FROM (
 		SELECT id,
-		       colbert <~> turbohybrid_query(
+		       colbert <~> turbohybrid_experimental_query(
 			       multivector_query => query_mv,
 			       dense_k => 4,
 			       final_k => 3
 	       ) AS distance
 		FROM mv_centroid_lite_docs
-		ORDER BY colbert <~> turbohybrid_query(
+		ORDER BY colbert <~> turbohybrid_experimental_query(
 		       multivector_query => query_mv,
 		       dense_k => 4,
 		       final_k => 3
@@ -4268,13 +4269,13 @@ DECLARE
 	SELECT array_agg(id ORDER BY distance, id) INTO quantized_compact_ids
 	FROM (
 		SELECT id,
-		       colbert <~> turbohybrid_query(
+		       colbert <~> turbohybrid_experimental_query(
 			       multivector_query => query_mv,
 			       dense_k => 4,
 			       final_k => 3
 	       ) AS distance
 		FROM mv_centroid_lite_docs
-		ORDER BY colbert <~> turbohybrid_query(
+		ORDER BY colbert <~> turbohybrid_experimental_query(
 		       multivector_query => query_mv,
 		       dense_k => 4,
 		       final_k => 3
@@ -4311,13 +4312,13 @@ DECLARE
 	SELECT array_agg(id ORDER BY distance, id) INTO quantized_compact_ids
 	FROM (
 		SELECT id,
-		       colbert <~> turbohybrid_query(
+		       colbert <~> turbohybrid_experimental_query(
 			       multivector_query => query_mv,
 			       dense_k => 4,
 			       final_k => 3
 	       ) AS distance
 		FROM mv_centroid_lite_docs
-		ORDER BY colbert <~> turbohybrid_query(
+		ORDER BY colbert <~> turbohybrid_experimental_query(
 		       multivector_query => query_mv,
 		       dense_k => 4,
 		       final_k => 3
@@ -4340,13 +4341,13 @@ DECLARE
 	SELECT array_agg(id ORDER BY distance, id) INTO quantized_compact_ids
 	FROM (
 		SELECT id,
-		       colbert <~> turbohybrid_query(
+		       colbert <~> turbohybrid_experimental_query(
 			       multivector_query => query_mv,
 			       dense_k => 4,
 			       final_k => 3
 	       ) AS distance
 		FROM mv_centroid_lite_docs
-		ORDER BY colbert <~> turbohybrid_query(
+		ORDER BY colbert <~> turbohybrid_experimental_query(
 		       multivector_query => query_mv,
 		       dense_k => 4,
 		       final_k => 3
@@ -4387,7 +4388,7 @@ BEGIN
 	PERFORM set_config('turbohybrid.multivector_plain_fallback', 'force', true);
 	PERFORM id
 	FROM mv_quantized_inverted_token_docs
-	ORDER BY colbert <~> turbohybrid_query(
+	ORDER BY colbert <~> turbohybrid_experimental_query(
 		multivector_query => turbohybrid_multivector(ARRAY['[1,0]'::vector]),
 		dense_k => 2,
 		final_k => 1
@@ -4436,13 +4437,13 @@ BEGIN
 	SELECT array_agg(id ORDER BY distance, id) INTO exact_ids
 	FROM (
 		SELECT id,
-		       colbert <~> turbohybrid_query(
+		       colbert <~> turbohybrid_experimental_query(
 			       multivector_query => turbohybrid_multivector(ARRAY['[1,0]'::vector]),
 			       dense_k => 2,
 			       final_k => 2
 		       ) AS distance
 		FROM mv_centroid_lite_bound_docs
-		ORDER BY colbert <~> turbohybrid_query(
+		ORDER BY colbert <~> turbohybrid_experimental_query(
 			multivector_query => turbohybrid_multivector(ARRAY['[1,0]'::vector]),
 			dense_k => 2,
 			final_k => 2
@@ -4455,13 +4456,13 @@ BEGIN
 	SELECT array_agg(id ORDER BY distance, id) INTO pruned_ids
 	FROM (
 		SELECT id,
-		       colbert <~> turbohybrid_query(
+		       colbert <~> turbohybrid_experimental_query(
 			       multivector_query => turbohybrid_multivector(ARRAY['[1,0]'::vector]),
 			       dense_k => 2,
 			       final_k => 2
 		       ) AS distance
 		FROM mv_centroid_lite_bound_docs
-		ORDER BY colbert <~> turbohybrid_query(
+		ORDER BY colbert <~> turbohybrid_experimental_query(
 			multivector_query => turbohybrid_multivector(ARRAY['[1,0]'::vector]),
 			dense_k => 2,
 			final_k => 2
@@ -4533,7 +4534,7 @@ BEGIN
 	PERFORM set_config('turbohybrid.profile', 'latency', true);
 	PERFORM id
 	FROM mv_doc_proxy_budget_docs
-	ORDER BY colbert <~> turbohybrid_query(
+	ORDER BY colbert <~> turbohybrid_experimental_query(
 		multivector_query => turbohybrid_multivector(ARRAY['[1,0]'::vector]),
 		final_k => 10
 	)
@@ -4551,7 +4552,7 @@ BEGIN
 	PERFORM set_config('turbohybrid.profile', 'quality', true);
 	PERFORM id
 	FROM mv_doc_proxy_budget_docs
-	ORDER BY colbert <~> turbohybrid_query(
+	ORDER BY colbert <~> turbohybrid_experimental_query(
 		multivector_query => turbohybrid_multivector(ARRAY['[1,0]'::vector]),
 		final_k => 10
 	)
@@ -4567,7 +4568,7 @@ BEGIN
 	PERFORM set_config('turbohybrid.multivector_doc_candidate_k', '100', true);
 	PERFORM id
 	FROM mv_doc_proxy_budget_docs
-	ORDER BY colbert <~> turbohybrid_query(
+	ORDER BY colbert <~> turbohybrid_experimental_query(
 		multivector_query => turbohybrid_multivector(ARRAY['[1,0]'::vector]),
 		dense_k => 20,
 		final_k => 15
@@ -4582,7 +4583,7 @@ BEGIN
 	PERFORM set_config('turbohybrid.multivector_doc_candidate_k', '12', true);
 	PERFORM id
 	FROM mv_doc_proxy_budget_docs
-	ORDER BY colbert <~> turbohybrid_query(
+	ORDER BY colbert <~> turbohybrid_experimental_query(
 		multivector_query => turbohybrid_multivector(ARRAY['[1,0]'::vector]),
 		dense_k => 40,
 		final_k => 10
@@ -4627,13 +4628,13 @@ BEGIN
 	SELECT array_agg(id ORDER BY distance, id) INTO low_ids
 	FROM (
 		SELECT id,
-			colbert <~> turbohybrid_query(
+			colbert <~> turbohybrid_experimental_query(
 				multivector_query => query_mv,
 				dense_k => 1,
 				final_k => 10
 			) AS distance
 		FROM mv_doc_proxy_budget_docs
-		ORDER BY colbert <~> turbohybrid_query(
+		ORDER BY colbert <~> turbohybrid_experimental_query(
 			multivector_query => query_mv,
 			dense_k => 1,
 			final_k => 10
@@ -4647,13 +4648,13 @@ BEGIN
 	SELECT array_agg(id ORDER BY distance, id) INTO high_ids
 	FROM (
 		SELECT id,
-			colbert <~> turbohybrid_query(
+			colbert <~> turbohybrid_experimental_query(
 				multivector_query => query_mv,
 				dense_k => 12,
 				final_k => 10
 			) AS distance
 		FROM mv_doc_proxy_budget_docs
-		ORDER BY colbert <~> turbohybrid_query(
+		ORDER BY colbert <~> turbohybrid_experimental_query(
 			multivector_query => query_mv,
 			dense_k => 12,
 			final_k => 10
@@ -4765,13 +4766,13 @@ BEGIN
 	SELECT array_agg(id ORDER BY distance, id) INTO proxy_ids
 	FROM (
 		SELECT id,
-		       colbert <~> turbohybrid_query(
+		       colbert <~> turbohybrid_experimental_query(
 			       multivector_query => query_mv,
 			       dense_k => 4,
 			       final_k => 4
 		       ) AS distance
 		FROM mv_doc_proxy_only_docs
-		ORDER BY colbert <~> turbohybrid_query(
+		ORDER BY colbert <~> turbohybrid_experimental_query(
 			multivector_query => query_mv,
 			dense_k => 4,
 			final_k => 4
@@ -4832,13 +4833,13 @@ BEGIN
 	SELECT array_agg(id ORDER BY distance, id) INTO exact_ids
 	FROM (
 		SELECT id,
-		       colbert <~> turbohybrid_query(
+		       colbert <~> turbohybrid_experimental_query(
 			       multivector_query => query_mv,
 			       dense_k => 4,
 			       final_k => 4
 		       ) AS distance
 		FROM mv_doc_proxy_only_full_docs
-		ORDER BY colbert <~> turbohybrid_query(
+		ORDER BY colbert <~> turbohybrid_experimental_query(
 			multivector_query => query_mv,
 			dense_k => 4,
 			final_k => 4
@@ -4850,13 +4851,13 @@ BEGIN
 	SELECT array_agg(id ORDER BY distance, id) INTO proxy_ids
 	FROM (
 		SELECT id,
-		       colbert <~> turbohybrid_query(
+		       colbert <~> turbohybrid_experimental_query(
 			       multivector_query => query_mv,
 			       dense_k => 4,
 			       final_k => 4
 		       ) AS distance
 		FROM mv_doc_proxy_only_docs
-		ORDER BY colbert <~> turbohybrid_query(
+		ORDER BY colbert <~> turbohybrid_experimental_query(
 			multivector_query => query_mv,
 			dense_k => 4,
 			final_k => 4
@@ -4883,7 +4884,7 @@ BEGIN
 	BEGIN
 		PERFORM id
 		FROM mv_doc_proxy_only_docs
-		ORDER BY colbert <~> turbohybrid_query(
+		ORDER BY colbert <~> turbohybrid_experimental_query(
 			multivector_query => turbohybrid_multivector(ARRAY['[1,0]'::vector]),
 			dense_k => 4,
 			final_k => 2
@@ -4902,7 +4903,7 @@ BEGIN
 	BEGIN
 		PERFORM id
 		FROM mv_doc_proxy_only_docs
-		ORDER BY colbert <~> turbohybrid_query(
+		ORDER BY colbert <~> turbohybrid_experimental_query(
 			multivector_query => turbohybrid_multivector(ARRAY['[1,0]'::vector]),
 			dense_k => 4,
 			final_k => 2
@@ -4921,7 +4922,7 @@ BEGIN
 	BEGIN
 		PERFORM id
 		FROM mv_doc_proxy_only_docs
-		ORDER BY colbert <~> turbohybrid_query(
+		ORDER BY colbert <~> turbohybrid_experimental_query(
 			multivector_query => turbohybrid_multivector(ARRAY['[1,0]'::vector]),
 			dense_k => 4,
 			final_k => 2
@@ -4985,13 +4986,13 @@ BEGIN
 	SELECT array_agg(id ORDER BY distance, id) INTO centroid_ids
 	FROM (
 		SELECT id,
-		       colbert <~> turbohybrid_query(
+		       colbert <~> turbohybrid_experimental_query(
 			       multivector_query => query_mv,
 			       dense_k => 4,
 			       final_k => 4
 		       ) AS distance
 		FROM mv_doc_centroid_only_docs
-		ORDER BY colbert <~> turbohybrid_query(
+		ORDER BY colbert <~> turbohybrid_experimental_query(
 			multivector_query => query_mv,
 			dense_k => 4,
 			final_k => 4
@@ -5023,7 +5024,7 @@ BEGIN
 	BEGIN
 		PERFORM id
 		FROM mv_doc_centroid_only_docs
-		ORDER BY colbert <~> turbohybrid_query(
+		ORDER BY colbert <~> turbohybrid_experimental_query(
 			multivector_query => query_mv,
 			dense_k => 4,
 			final_k => 2
@@ -5109,13 +5110,13 @@ BEGIN
 	SELECT array_agg(id ORDER BY distance, id) INTO quantized_ids
 	FROM (
 		SELECT id,
-		       colbert <~> turbohybrid_query(
+		       colbert <~> turbohybrid_experimental_query(
 			       multivector_query => query_mv,
 			       dense_k => 4,
 			       final_k => 4
 		       ) AS distance
 		FROM mv_doc_centroid_only_quantized_docs
-		ORDER BY colbert <~> turbohybrid_query(
+		ORDER BY colbert <~> turbohybrid_experimental_query(
 			multivector_query => query_mv,
 			dense_k => 4,
 			final_k => 4
@@ -5156,13 +5157,13 @@ BEGIN
 	SELECT array_agg(id ORDER BY distance, id) INTO scalar_ids
 	FROM (
 		SELECT id,
-		       colbert <~> turbohybrid_query(
+		       colbert <~> turbohybrid_experimental_query(
 			       multivector_query => query_mv,
 			       dense_k => 4,
 			       final_k => 4
 		       ) AS distance
 		FROM mv_doc_centroid_only_quantized_docs
-		ORDER BY colbert <~> turbohybrid_query(
+		ORDER BY colbert <~> turbohybrid_experimental_query(
 			multivector_query => query_mv,
 			dense_k => 4,
 			final_k => 4
@@ -5175,13 +5176,13 @@ BEGIN
 	SELECT array_agg(id ORDER BY distance, id) INTO blocked_ids
 	FROM (
 		SELECT id,
-		       colbert <~> turbohybrid_query(
+		       colbert <~> turbohybrid_experimental_query(
 			       multivector_query => query_mv,
 			       dense_k => 4,
 			       final_k => 4
 		       ) AS distance
 		FROM mv_doc_centroid_only_quantized_docs
-		ORDER BY colbert <~> turbohybrid_query(
+		ORDER BY colbert <~> turbohybrid_experimental_query(
 			multivector_query => query_mv,
 			dense_k => 4,
 			final_k => 4
@@ -5207,14 +5208,14 @@ BEGIN
 	SELECT array_agg(id ORDER BY distance, id) INTO blocked_ids
 	FROM (
 		SELECT id,
-		       colbert <~> turbohybrid_query(
+		       colbert <~> turbohybrid_experimental_query(
 			       multivector_query => query_mv,
 			       query_token_mask => ARRAY[false,true],
 			       dense_k => 4,
 			       final_k => 4
 		       ) AS distance
 		FROM mv_doc_centroid_only_quantized_docs
-		ORDER BY colbert <~> turbohybrid_query(
+		ORDER BY colbert <~> turbohybrid_experimental_query(
 			multivector_query => query_mv,
 			query_token_mask => ARRAY[false,true],
 			dense_k => 4,
@@ -5235,7 +5236,7 @@ BEGIN
 	BEGIN
 		PERFORM id
 		FROM mv_doc_centroid_only_quantized_docs
-		ORDER BY colbert <~> turbohybrid_query(
+		ORDER BY colbert <~> turbohybrid_experimental_query(
 			multivector_query => query_mv,
 			dense_k => 4,
 			final_k => 1
@@ -5306,13 +5307,13 @@ BEGIN
 	SELECT array_agg(id ORDER BY distance, id) INTO quantized_ids
 	FROM (
 		SELECT id,
-		       colbert <~> turbohybrid_query(
+		       colbert <~> turbohybrid_experimental_query(
 			       multivector_query => query_mv,
 			       dense_k => 4,
 			       final_k => 4
 		       ) AS distance
 		FROM mv_doc_centroid_only_quantized_only_docs
-		ORDER BY colbert <~> turbohybrid_query(
+		ORDER BY colbert <~> turbohybrid_experimental_query(
 			multivector_query => query_mv,
 			dense_k => 4,
 			final_k => 4

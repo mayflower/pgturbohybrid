@@ -56,6 +56,9 @@ jobs:
       - name: Install cosign
         uses: sigstore/cosign-installer@v3
 
+      - name: Install Syft
+        uses: anchore/sbom-action/download-syft@v0
+
       - name: Upload source archive to GitHub Release
         # Create the release with a PAT (RELEASE_PAT) so the resulting
         # "release: published" event triggers downstream workflows such as
@@ -84,23 +87,28 @@ jobs:
           ( cd dist && sha256sum "pgturbohybrid-${EXTVERSION}.tar.gz" \
               "pgturbohybrid-${EXTVERSION}.zip" > SHA256SUMS )
           SUMS="dist/SHA256SUMS"
+          syft dir:. -o spdx-json="dist/pgturbohybrid-${EXTVERSION}.spdx.json"
+          SBOM="dist/pgturbohybrid-${EXTVERSION}.spdx.json"
           # Keyless (Sigstore/OIDC) signatures so downloads can be verified for
           # authenticity, not just integrity, with no maintainer-held keys.
           # Verify, e.g.:
           #   cosign verify-blob --bundle <file>.cosign.bundle \
           #     --certificate-identity-regexp '^https://github.com/.*/pgturbohybrid/' \
           #     --certificate-oidc-issuer https://token.actions.githubusercontent.com <file>
-          for f in "$TARBALL" "$ZIP" "$SUMS"; do
+          for f in "$TARBALL" "$ZIP" "$SUMS" "$SBOM"; do
             cosign sign-blob --yes --bundle "${f}.cosign.bundle" "$f"
+            cosign verify-blob --bundle "${f}.cosign.bundle" \
+              --certificate-identity-regexp '^https://github.com/.*/pgturbohybrid/' \
+              --certificate-oidc-issuer https://token.actions.githubusercontent.com "$f"
           done
           if gh release view "$GITHUB_REF_NAME" >/dev/null 2>&1; then
             gh release edit "$GITHUB_REF_NAME" --notes-file "$NOTES_FILE"
-            gh release upload "$GITHUB_REF_NAME" "$TARBALL" "$ZIP" "$SUMS" \
-              "${TARBALL}.cosign.bundle" "${ZIP}.cosign.bundle" "${SUMS}.cosign.bundle" \
+            gh release upload "$GITHUB_REF_NAME" "$TARBALL" "$ZIP" "$SUMS" "$SBOM" \
+              "${TARBALL}.cosign.bundle" "${ZIP}.cosign.bundle" "${SUMS}.cosign.bundle" "${SBOM}.cosign.bundle" \
               --clobber
           else
-            gh release create "$GITHUB_REF_NAME" "$TARBALL" "$ZIP" "$SUMS" \
-              "${TARBALL}.cosign.bundle" "${ZIP}.cosign.bundle" "${SUMS}.cosign.bundle" \
+            gh release create "$GITHUB_REF_NAME" "$TARBALL" "$ZIP" "$SUMS" "$SBOM" \
+              "${TARBALL}.cosign.bundle" "${ZIP}.cosign.bundle" "${SUMS}.cosign.bundle" "${SBOM}.cosign.bundle" \
               --title "$GITHUB_REF_NAME" \
               --notes-file "$NOTES_FILE" \
               --verify-tag

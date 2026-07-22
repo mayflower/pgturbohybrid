@@ -20,6 +20,7 @@
 #include "pgstat.h"
 #include "storage/lmgr.h"
 #include "utils/fmgroids.h"
+#include "utils/guc.h"
 #include "tcop/tcopprot.h"
 #include "pgturbohybrid_quant.h"
 #include "utils/json.h"
@@ -27,7 +28,7 @@
 #include "utils/rel.h"
 
 #if PG_VERSION_NUM >= 180000
-PG_MODULE_MAGIC_EXT(.name = "pgturbohybrid",.version = "0.1.1");
+PG_MODULE_MAGIC_EXT(.name = "pgturbohybrid",.version = "0.2.0");
 #else
 PG_MODULE_MAGIC;
 #endif
@@ -54,6 +55,7 @@ static double tqgraph_active_estimated_filter_selectivity = -1.0;
 static bool tqgraph_active_payload_filter_valid = false;
 static AttrNumber tqgraph_active_payload_filter_attno = InvalidAttrNumber;
 static int32 tqgraph_active_payload_filter_value = 0;
+static bool tqgraph_disable_executor_controller = false;
 
 static void PgturbohybridExecutorHooksInit(void);
 static void PgturbohybridExecutorStartHook(QueryDesc *queryDesc, int eflags);
@@ -89,6 +91,11 @@ PGDLLEXPORT void _PG_init(void);
 void
 _PG_init(void)
 {
+	DefineCustomBoolVariable("turbohybrid.dev.disable_executor_controller",
+						 "Disable the LIMIT-aware executor controller for parity testing.",
+						 "Developer-only switch; query results and ordering must be identical.",
+						 &tqgraph_disable_executor_controller, false,
+						 PGC_USERSET, GUC_NOT_IN_SAMPLE, NULL, NULL, NULL);
 	PgturbohybridGraphInit();
 	PgturbohybridInit();
 	PgturbohybridExecutorHooksInit();
@@ -207,6 +214,8 @@ static void
 PgturbohybridGraphExecutorStart(QueryDesc *queryDesc, int eflags)
 {
 	(void) eflags;
+	if (tqgraph_disable_executor_controller)
+		return;
 
 	{
 		PgturbohybridGraphExecWrapperFrame *frame =

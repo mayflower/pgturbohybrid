@@ -4,7 +4,7 @@ CREATE EXTENSION IF NOT EXISTS vector;
 CREATE EXTENSION IF NOT EXISTS pgturbohybrid;
 RESET client_min_messages;
 -- round-trip: sparse_query through turbohybrid_query output
-SELECT turbohybrid_query(
+SELECT turbohybrid_experimental_query(
   sparse_query => turbohybrid_sparse_vector_build(ARRAY[1,2,3]::int4[], ARRAY[1.0,2.0,3.0]::float4[]),
   sparse_weight => 2.0, sparse_k => 50)::text AS with_sparse;
                                                                                                                 with_sparse                                                                                                                
@@ -13,7 +13,7 @@ SELECT turbohybrid_query(
 (1 row)
 
 -- defaults: sparse_k null -> "null", require_sparse_match false
-SELECT turbohybrid_query(
+SELECT turbohybrid_experimental_query(
   sparse_query => turbohybrid_sparse_vector_build(ARRAY[1]::int4[], ARRAY[1.0]::float4[]))::text AS sparse_defaults;
                                                                                                                sparse_defaults                                                                                                               
 ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
@@ -21,7 +21,7 @@ SELECT turbohybrid_query(
 (1 row)
 
 -- require_sparse_match round-trips
-SELECT turbohybrid_query(
+SELECT turbohybrid_experimental_query(
   sparse_query => turbohybrid_sparse_vector_build(ARRAY[1]::int4[], ARRAY[1.0]::float4[]),
   require_sparse_match => true)::text AS require_sparse;
                                                                                                                require_sparse                                                                                                               
@@ -30,7 +30,7 @@ SELECT turbohybrid_query(
 (1 row)
 
 -- no sparse_query -> sparse=false
-SELECT turbohybrid_query(vector_query => '[1,2,3]'::vector)::text AS no_sparse;
+SELECT turbohybrid_experimental_query(vector_query => '[1,2,3]'::vector)::text AS no_sparse;
                                                                                no_sparse                                                                               
 -----------------------------------------------------------------------------------------------------------------------------------------------------------------------
  turbohybrid_query(fusion=rrf,vector=true,tsquery=false,dense_weight=1,bm25_weight=1,alpha=null,rrf_k=60,dense_k=100,bm25_k=100,final_k=null,require_bm25_match=false)
@@ -43,10 +43,10 @@ INSERT INTO sp_docs VALUES
   (2, turbohybrid_sparse_vector_build(ARRAY[2,3]::int4[], ARRAY[5.0,1.0]::float4[])),
   (3, turbohybrid_sparse_vector_build(ARRAY[4]::int4[],   ARRAY[9.0]::float4[]));
 SELECT id,
-       round((s <~*> turbohybrid_query(
+       round((s <~*> turbohybrid_experimental_query(
          sparse_query => turbohybrid_sparse_vector_build(ARRAY[2]::int4[], ARRAY[1.0]::float4[])))::numeric, 2) AS dist
 FROM sp_docs
-ORDER BY s <~*> turbohybrid_query(
+ORDER BY s <~*> turbohybrid_experimental_query(
   sparse_query => turbohybrid_sparse_vector_build(ARRAY[2]::int4[], ARRAY[1.0]::float4[])), id;
  id | dist  
 ----+-------
@@ -57,7 +57,7 @@ ORDER BY s <~*> turbohybrid_query(
 
 -- unsorted (from_arrays) doc vector scores identically (order-independent dot)
 SELECT round((turbohybrid_sparse_vector_from_arrays(ARRAY[3,2,1]::int4[], ARRAY[1.0,5.0,1.0]::float4[])
-       <~*> turbohybrid_query(
+       <~*> turbohybrid_experimental_query(
          sparse_query => turbohybrid_sparse_vector_build(ARRAY[2]::int4[], ARRAY[1.0]::float4[])))::numeric, 2) AS unsorted_dist;
  unsorted_dist 
 ---------------
@@ -65,20 +65,20 @@ SELECT round((turbohybrid_sparse_vector_from_arrays(ARRAY[3,2,1]::int4[], ARRAY[
 (1 row)
 
 -- invalid sparse_weight / sparse_k
-SELECT turbohybrid_query(
+SELECT turbohybrid_experimental_query(
   sparse_query => turbohybrid_sparse_vector_build(ARRAY[1]::int4[], ARRAY[1.0]::float4[]),
   sparse_weight => -1.0);
 ERROR:  sparse_weight must be a finite non-negative value
-SELECT turbohybrid_query(
+SELECT turbohybrid_experimental_query(
   sparse_query => turbohybrid_sparse_vector_build(ARRAY[1]::int4[], ARRAY[1.0]::float4[]),
   sparse_k => -5);
 ERROR:  sparse_k must be greater than or equal to zero
 -- require_sparse_match without sparse_query is rejected
-SELECT turbohybrid_query(require_sparse_match => true);
+SELECT turbohybrid_experimental_query(require_sparse_match => true);
 ERROR:  require_sparse_match requires a sparse_query
 -- distance function on a query lacking sparse_query is rejected
 SELECT turbohybrid_sparse_vector_build(ARRAY[1]::int4[], ARRAY[1.0]::float4[])
-       <~*> turbohybrid_query(vector_query => '[1]'::vector);
+       <~*> turbohybrid_experimental_query(vector_query => '[1]'::vector);
 ERROR:  turbohybrid_query does not contain a sparse_query
 HINT:  Pass sparse_query => ... to turbohybrid_query(...).
 DROP TABLE sp_docs;

@@ -1,8 +1,8 @@
-EXTENSION = pgturbohybrid
-EXTVERSION = 0.1.1
+EXTENSION = pgturbohybrid pgturbohybrid_experimental
+EXTVERSION = 0.2.0
 
 SHLIB = pgturbohybrid.dll
-DATA = sql\pgturbohybrid--0.1.0.sql sql\pgturbohybrid--0.1.1.sql sql\pgturbohybrid--0.1.0--0.1.1.sql
+DATA = sql\pgturbohybrid--0.1.0.sql sql\pgturbohybrid--0.1.1.sql sql\pgturbohybrid--0.1.2.sql sql\pgturbohybrid--0.2.0.sql sql\pgturbohybrid_experimental--0.2.0.sql sql\pgturbohybrid--0.1.0--0.1.1.sql sql\pgturbohybrid--0.1.1--0.1.2.sql sql\pgturbohybrid--0.1.2--0.2.0.sql
 
 # Windows build profile (see docs/compatibility.md): MSVC compiles the portable
 # scalar code paths only. The hand-vectorized SIMD kernels the Unix build
@@ -42,6 +42,7 @@ OBJS = \
 	src\pgturbohybrid_sparse_query.obj \
 	src\pgturbohybrid_sparse_score.obj \
 	src\pgturbohybrid_diagnostics.obj \
+	src\pgturbohybrid_validate.obj \
 	src\pgturbohybrid_vacuum.obj \
 	src\pgturbohybrid_vector_compat.obj
 
@@ -56,10 +57,11 @@ HEADERS =
 # enforces that this difference stays intentional. See docs/compatibility.md.
 REGRESS = extension pgturbohybrid pgturbohybrid_comments pgturbohybrid_gucs pgturbohybrid_guc_defaults pgturbohybrid_diagnostics pgturbohybrid_query pgturbohybrid_wrappers pgturbohybrid_fuzz security
 REGRESS_OPTS = --inputdir=test
+REGRESS = $(REGRESS) pgturbohybrid_validate
 
 SIMD_BUILD = portable
 MATH_MODE = strict
-PGTURBOHYBRID_REQUIRE_VECTOR_HEADER = 0
+PGTURBOHYBRID_REQUIRE_VECTOR_HEADER = 1
 
 !ifndef PGROOT
 !error PGROOT is not set

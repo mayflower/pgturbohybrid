@@ -46,12 +46,12 @@ AS 'MODULE_PATHNAME', 'pg_colbert_llama_llama_embed_tokens'
 LANGUAGE C STABLE STRICT PARALLEL RESTRICTED;
 
 CREATE FUNCTION llama_embed_mv(model pg_catalog.text, input pg_catalog.text, options pg_catalog.jsonb DEFAULT '{}'::pg_catalog.jsonb)
-RETURNS multivector
+RETURNS turbohybrid_multivector
 AS 'MODULE_PATHNAME', 'pg_colbert_llama_llama_embed_mv'
 LANGUAGE C STABLE STRICT PARALLEL RESTRICTED;
 
 CREATE FUNCTION llama_embed_mv_batch(model pg_catalog.text, inputs pg_catalog.text[], options pg_catalog.jsonb DEFAULT '{}'::pg_catalog.jsonb)
-RETURNS multivector[]
+RETURNS turbohybrid_multivector[]
 AS 'MODULE_PATHNAME', 'pg_colbert_llama_llama_embed_mv_batch'
 LANGUAGE C STABLE STRICT PARALLEL RESTRICTED;
 

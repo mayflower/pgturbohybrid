@@ -32,22 +32,26 @@ KINDS = {"type": "types", "operator": "operators", "opclass": "opclasses", "func
 
 
 def parse_snapshot():
-    out = {v: {} for v in KINDS.values()}
+    out = {ext: {v: {} for v in KINDS.values()}
+           for ext in ("pgturbohybrid", "pgturbohybrid_experimental")}
     for line in SNAPSHOT.read_text(encoding="utf-8").splitlines():
-        m = re.match(r"\s*(type|operator|opclass|function)\|(.+)\|([a-z][a-z -]*)\s*$", line)
+        m = re.match(r"\s*(pgturbohybrid(?:_experimental)?)\|(type|operator|opclass|function)\|(.+)\|([a-z][a-z -]*)\s*$", line)
         if not m:
             continue
-        key = KINDS[m.group(1)]
-        name, mat = m.group(2), m.group(3)
-        out[key].setdefault(name, set()).add(mat)
+        ext, kind, name, mat = m.groups()
+        key = KINDS[kind]
+        out[ext][key].setdefault(name, set()).add(mat)
     # collapse single-element sets to a str, multi to a sorted list (matches ledger)
-    return {k: {n: (sorted(v) if len(v) > 1 else next(iter(v))) for n, v in d.items()}
-            for k, d in out.items()}
+    return {ext: {k: {n: (sorted(v) if len(v) > 1 else next(iter(v)))
+                      for n, v in d.items()} for k, d in kinds.items()}
+            for ext, kinds in out.items()}
 
 
 def parse_ledger():
     led = json.loads(LEDGER.read_text(encoding="utf-8"))
-    return {key: led.get(key, {}) for key in KINDS.values()}, led
+    extensions = led.get("extensions", {})
+    return {ext: {key: extensions.get(ext, {}).get(key, {}) for key in KINDS.values()}
+            for ext in ("pgturbohybrid", "pgturbohybrid_experimental")}, led
 
 
 def main():
@@ -55,17 +59,18 @@ def main():
     led, led_full = parse_ledger()
     errors = []
 
-    for key in KINDS.values():
-        s, l = snap[key], led[key]
+    for ext in snap:
+      for key in KINDS.values():
+        s, l = snap[ext][key], led[ext][key]
         for name in sorted(set(s) - set(l)):
-            errors.append(f"{key}: '{name}' is in the catalog snapshot but missing from docs/api-ledger.json")
+            errors.append(f"{ext}.{key}: '{name}' is in the catalog snapshot but missing from docs/api-ledger.json")
         for name in sorted(set(l) - set(s)):
-            errors.append(f"{key}: '{name}' is in docs/api-ledger.json but not in the catalog snapshot")
+            errors.append(f"{ext}.{key}: '{name}' is in docs/api-ledger.json but not in the catalog snapshot")
         for name in sorted(set(s) & set(l)):
             sv = s[name] if isinstance(s[name], str) else sorted(s[name])
             lv = l[name] if isinstance(l[name], str) else sorted(l[name])
             if sv != lv:
-                errors.append(f"{key}: '{name}' maturity differs (snapshot={sv!r}, ledger={lv!r})")
+                errors.append(f"{ext}.{key}: '{name}' maturity differs (snapshot={sv!r}, ledger={lv!r})")
 
     # diagnostics stable keys must match the C header constants.
     header_keys = sorted(re.findall(r'#define PGTURBOHYBRID_DIAG_KEY_\w+\s+"([a-z0-9_]+)"',
@@ -86,7 +91,7 @@ def main():
               "scripts/gen-api-ledger (or update docs/api-ledger.json) so they agree.", file=sys.stderr)
         sys.exit(1)
 
-    total = sum(len(snap[k]) for k in KINDS.values())
+    total = sum(len(snap[ext][k]) for ext in snap for k in KINDS.values())
     print(f"check-api-ledger: ok ({total} public SQL objects + {len(ledger_keys)} stable "
           f"diagnostic keys match docs/api-ledger.json)")
 

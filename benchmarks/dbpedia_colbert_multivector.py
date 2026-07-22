@@ -174,7 +174,6 @@ MULTIVECTOR_PROXY_ENCODER_CHOICES = (
     "mean_pool",
     "max_pool",
     "random_projection_fde",
-    "learned_projection_placeholder",
     "learned_projection_v1",
 )
 MULTIVECTOR_SPARSE_CANDIDATE_SOURCE_CHOICES = ("off", "bm25", "learned_sparse")
@@ -37445,7 +37444,7 @@ def validate_args(args: argparse.Namespace) -> argparse.Namespace:
         tuple(
             choice
             for choice in MULTIVECTOR_PROXY_ENCODER_CHOICES
-            if choice not in {"learned_projection_placeholder", "learned_projection_v1"}
+            if choice != "learned_projection_v1"
         ),
         "--document-node-proxy-encoder-grid",
     )

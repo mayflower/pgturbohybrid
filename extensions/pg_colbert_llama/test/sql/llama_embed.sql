@@ -14,6 +14,7 @@ $$;
 
 CREATE EXTENSION vector;
 CREATE EXTENSION pgturbohybrid;
+CREATE EXTENSION pgturbohybrid_experimental;
 CREATE EXTENSION llama_embed;
 \pset format unaligned
 
@@ -44,7 +45,7 @@ SELECT array_length(llama_embed_mv_batch('sauerkraut-modern', ARRAY['alpha', 'be
 
 CREATE TEMP TABLE llama_embed_multivector_docs (
   id int PRIMARY KEY,
-  colbert multivector NOT NULL
+  colbert turbohybrid_multivector NOT NULL
 );
 
 INSERT INTO llama_embed_multivector_docs (id, colbert)

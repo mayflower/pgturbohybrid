@@ -11,6 +11,7 @@ $$;
 
 CREATE EXTENSION vector;
 CREATE EXTENSION pgturbohybrid;
+CREATE EXTENSION pgturbohybrid_experimental;
 \pset format unaligned
 
 CREATE TABLE mv_many_moderate_docs (
@@ -71,7 +72,7 @@ WITH q AS (
 )
 SELECT id AS low_budget_index_top1
 FROM mv_many_moderate_docs, q
-ORDER BY colbert <~> turbohybrid_query(
+ORDER BY colbert <~> turbohybrid_experimental_query(
   multivector_query => q.mv,
   dense_k => 1,
   final_k => 1
@@ -106,7 +107,7 @@ BEGIN
 
 	SELECT id INTO index_top1
 	FROM mv_many_moderate_docs
-	ORDER BY colbert <~> turbohybrid_query(
+	ORDER BY colbert <~> turbohybrid_experimental_query(
 	  multivector_query => q,
 	  dense_k => 1,
 	  final_k => 1
@@ -171,7 +172,7 @@ DECLARE
 BEGIN
 	SELECT id INTO exact_source_top1
 	FROM mv_many_moderate_docs
-	ORDER BY colbert <~> turbohybrid_query(
+	ORDER BY colbert <~> turbohybrid_experimental_query(
 	  multivector_query => q,
 	  dense_k => 1,
 	  final_k => 1
@@ -262,7 +263,7 @@ BEGIN
 
 	SELECT id INTO score_only_top1
 	FROM mv_reservoir_docs
-	ORDER BY colbert <~> turbohybrid_query(
+	ORDER BY colbert <~> turbohybrid_experimental_query(
 	  multivector_query => q,
 	  dense_k => 3,
 	  final_k => 1
@@ -291,7 +292,7 @@ DECLARE
 BEGIN
 	SELECT id INTO reservoir_top1
 	FROM mv_reservoir_docs
-	ORDER BY colbert <~> turbohybrid_query(
+	ORDER BY colbert <~> turbohybrid_experimental_query(
 	  multivector_query => q,
 	  dense_k => 3,
 	  final_k => 1
@@ -343,7 +344,7 @@ BEGIN
 
 	SELECT id INTO fallback_top1
 	FROM mv_many_moderate_docs
-	ORDER BY colbert <~> turbohybrid_query(
+	ORDER BY colbert <~> turbohybrid_experimental_query(
 	  multivector_query => q,
 	  dense_k => 1,
 	  final_k => 1
@@ -387,7 +388,7 @@ DECLARE
 BEGIN
 	SELECT id INTO auto_top1
 	FROM mv_many_moderate_docs
-	ORDER BY colbert <~> turbohybrid_query(
+	ORDER BY colbert <~> turbohybrid_experimental_query(
 	  multivector_query => q,
 	  dense_k => 1,
 	  final_k => 1
@@ -431,7 +432,7 @@ DECLARE
 BEGIN
 	SELECT id INTO mvcc_top1
 	FROM mv_plain_fallback_mvcc
-	ORDER BY colbert <~> turbohybrid_query(
+	ORDER BY colbert <~> turbohybrid_experimental_query(
 	  multivector_query => turbohybrid_multivector(ARRAY['[1,0]'::vector]),
 	  dense_k => 1,
 	  final_k => 1
@@ -480,7 +481,7 @@ DECLARE
 BEGIN
 	SELECT id INTO debug_top1
 	FROM mv_many_moderate_docs
-	ORDER BY colbert <~> turbohybrid_query(
+	ORDER BY colbert <~> turbohybrid_experimental_query(
 	  multivector_query => q,
 	  dense_k => 4,
 	  final_k => 4
@@ -511,7 +512,7 @@ BEGIN
 					   '0, 2', false);
 	SELECT id INTO debug_top1
 	FROM mv_many_moderate_docs
-	ORDER BY colbert <~> turbohybrid_query(
+	ORDER BY colbert <~> turbohybrid_experimental_query(
 	  multivector_query => q,
 	  dense_k => 4,
 	  final_k => 4
@@ -547,7 +548,7 @@ BEGIN
 						   'bad', false);
 		PERFORM id
 		FROM mv_many_moderate_docs
-		ORDER BY colbert <~> turbohybrid_query(
+		ORDER BY colbert <~> turbohybrid_experimental_query(
 		  multivector_query => q,
 		  dense_k => 4,
 		  final_k => 4
@@ -597,7 +598,7 @@ DECLARE
 BEGIN
 	SELECT id INTO doc_node_top1
 	FROM mv_many_moderate_docs
-	ORDER BY colbert <~> turbohybrid_query(
+	ORDER BY colbert <~> turbohybrid_experimental_query(
 	  multivector_query => q,
 	  dense_k => 1,
 	  final_k => 1
@@ -648,7 +649,7 @@ DECLARE
 BEGIN
 	SELECT id INTO doc_node_top1
 	FROM mv_many_moderate_docs
-	ORDER BY colbert <~> turbohybrid_query(
+	ORDER BY colbert <~> turbohybrid_experimental_query(
 	  multivector_query => q,
 	  dense_k => 1,
 	  final_k => 1
@@ -700,7 +701,7 @@ DECLARE
 BEGIN
 	SELECT id INTO doc_node_top1
 	FROM mv_many_moderate_docs
-	ORDER BY colbert <~> turbohybrid_query(
+	ORDER BY colbert <~> turbohybrid_experimental_query(
 	  multivector_query => q,
 	  dense_k => 1,
 	  final_k => 1
@@ -770,7 +771,7 @@ DECLARE
 BEGIN
 	PERFORM id
 	FROM mv_many_moderate_docs
-	ORDER BY colbert <~> turbohybrid_query(
+	ORDER BY colbert <~> turbohybrid_experimental_query(
 	  multivector_query => q,
 	  dense_k => 1,
 	  final_k => 1
@@ -814,7 +815,7 @@ DECLARE
 BEGIN
 	PERFORM id
 	FROM mv_many_moderate_docs
-	ORDER BY colbert <~> turbohybrid_query(
+	ORDER BY colbert <~> turbohybrid_experimental_query(
 	  multivector_query => q,
 	  dense_k => 1,
 	  final_k => 1
@@ -857,7 +858,7 @@ DECLARE
 BEGIN
 	SELECT id INTO doc_node_top1
 	FROM mv_many_moderate_docs
-	ORDER BY colbert <~> turbohybrid_query(
+	ORDER BY colbert <~> turbohybrid_experimental_query(
 	  multivector_query => q,
 	  dense_k => 1,
 	  final_k => 1
@@ -927,7 +928,7 @@ DECLARE
 BEGIN
 	SELECT id INTO doc_node_top1
 	FROM mv_many_moderate_docs_sq8_paged
-	ORDER BY colbert <~> turbohybrid_query(
+	ORDER BY colbert <~> turbohybrid_experimental_query(
 	  multivector_query => q,
 	  dense_k => 1,
 	  final_k => 1
@@ -983,7 +984,7 @@ DECLARE
 BEGIN
 	SELECT id INTO doc_node_top1
 	FROM mv_many_moderate_docs
-	ORDER BY colbert <~> turbohybrid_query(
+	ORDER BY colbert <~> turbohybrid_experimental_query(
 	  multivector_query => q,
 	  dense_k => 1,
 	  final_k => 1
@@ -1024,7 +1025,7 @@ DECLARE
 BEGIN
 	SELECT id INTO doc_node_top1
 	FROM mv_many_moderate_docs
-	ORDER BY colbert <~> turbohybrid_query(
+	ORDER BY colbert <~> turbohybrid_experimental_query(
 	  multivector_query => q,
 	  dense_k => 1,
 	  final_k => 1
@@ -1151,7 +1152,7 @@ DECLARE
 BEGIN
 	PERFORM id
 	FROM mv_proxy_encoder_docs
-	ORDER BY colbert <~> turbohybrid_query(
+	ORDER BY colbert <~> turbohybrid_experimental_query(
 	  multivector_query => q,
 	  dense_k => 2,
 	  final_k => 1
@@ -1197,7 +1198,7 @@ DECLARE
 BEGIN
 	PERFORM id
 	FROM mv_proxy_encoder_docs
-	ORDER BY colbert <~> turbohybrid_query(
+	ORDER BY colbert <~> turbohybrid_experimental_query(
 	  multivector_query => q,
 	  dense_k => 2,
 	  final_k => 1
@@ -1251,7 +1252,7 @@ BEGIN
 
 	SELECT id INTO top_id
 	FROM mv_proxy_encoder_docs
-	ORDER BY colbert <~> turbohybrid_query(
+	ORDER BY colbert <~> turbohybrid_experimental_query(
 	  multivector_query => q,
 	  dense_k => 2,
 	  final_k => 1
@@ -1262,7 +1263,7 @@ BEGIN
 	PERFORM set_config('turbohybrid.multivector_candidate_source', 'exact_doc_scan', true);
 	SELECT id INTO brute_id
 	FROM mv_proxy_encoder_docs
-	ORDER BY colbert <~> turbohybrid_query(
+	ORDER BY colbert <~> turbohybrid_experimental_query(
 	  multivector_query => q,
 	  dense_k => 2,
 	  final_k => 1
@@ -1281,7 +1282,7 @@ BEGIN
 
 	PERFORM id
 	FROM mv_proxy_encoder_docs
-	ORDER BY colbert <~> turbohybrid_query(
+	ORDER BY colbert <~> turbohybrid_experimental_query(
 	  multivector_query => q,
 	  dense_k => 2,
 	  final_k => 1
@@ -1307,19 +1308,6 @@ BEGIN
 	RAISE EXCEPTION 'centroid_mean without centroid sidecar unexpectedly succeeded';
 EXCEPTION WHEN invalid_parameter_value THEN
 	IF SQLERRM NOT LIKE '%centroid_mean multivector proxy encoder requires multivector_centroids = kmeans%' THEN
-		RAISE;
-	END IF;
-END
-$$;
-
-DO $$
-BEGIN
-	EXECUTE 'CREATE INDEX mv_proxy_encoder_docs_learned_idx ON mv_proxy_encoder_docs USING turbohybrid ' ||
-		'(colbert multivector_cosine_turbohybrid_ops) WITH (multivector_graph = document_nodes, ' ||
-		'multivector_proxy_encoder = learned_projection_placeholder)';
-	RAISE EXCEPTION 'learned projection placeholder index build unexpectedly succeeded';
-EXCEPTION WHEN feature_not_supported THEN
-	IF SQLERRM NOT LIKE '%learned multivector proxy projection is not configured%' THEN
 		RAISE;
 	END IF;
 END
@@ -1412,7 +1400,7 @@ BEGIN
 	PERFORM set_config('turbohybrid.multivector_exact_rerank_k', '2', true);
 	SELECT id INTO proxy_top
 	FROM mv_proxy_encoder_docs
-	ORDER BY colbert <~> turbohybrid_query(
+	ORDER BY colbert <~> turbohybrid_experimental_query(
 	  multivector_query => q,
 	  dense_k => 2,
 	  final_k => 1
@@ -1423,7 +1411,7 @@ BEGIN
 	PERFORM set_config('turbohybrid.multivector_candidate_source', 'exact_doc_scan', true);
 	SELECT id INTO exact_top
 	FROM mv_proxy_encoder_docs
-	ORDER BY colbert <~> turbohybrid_query(
+	ORDER BY colbert <~> turbohybrid_experimental_query(
 	  multivector_query => q,
 	  dense_k => 2,
 	  final_k => 1
@@ -1447,7 +1435,7 @@ BEGIN
 	PERFORM set_config('turbohybrid.multivector_candidate_source', 'proxy_vector', true);
 	PERFORM id
 	FROM mv_proxy_encoder_docs
-	ORDER BY colbert <~> turbohybrid_query(
+	ORDER BY colbert <~> turbohybrid_experimental_query(
 	  multivector_query => q,
 	  dense_k => 2,
 	  final_k => 1
@@ -1487,7 +1475,7 @@ BEGIN
 	PERFORM set_config('turbohybrid.multivector_exact_rerank_k', '2', true);
 	PERFORM id
 	FROM mv_many_moderate_docs
-	ORDER BY colbert <~> turbohybrid_query(
+	ORDER BY colbert <~> turbohybrid_experimental_query(
 	  multivector_query => q,
 	  fusion => 'rrf',
 	  dense_k => 1,
@@ -1567,7 +1555,7 @@ DECLARE
 BEGIN
 	SELECT id INTO top1
 	FROM mv_learned_sparse_docs
-	ORDER BY colbert <~> turbohybrid_query(
+	ORDER BY colbert <~> turbohybrid_experimental_query(
 	  multivector_query => q,
 	  text_query => turbohybrid_sparse_vector_to_tsquery(sq),
 	  dense_k => 1,
@@ -1670,7 +1658,7 @@ DECLARE
 BEGIN
 	SELECT id INTO bulk_top1
 	FROM mv_doc_node_insert_many_moderate_bulk
-	ORDER BY colbert <~> turbohybrid_query(
+	ORDER BY colbert <~> turbohybrid_experimental_query(
 	  multivector_query => q,
 	  dense_k => 1,
 	  final_k => 1
@@ -1680,7 +1668,7 @@ BEGIN
 
 	SELECT id INTO inc_top1
 	FROM mv_doc_node_insert_many_moderate_inc
-	ORDER BY colbert <~> turbohybrid_query(
+	ORDER BY colbert <~> turbohybrid_experimental_query(
 	  multivector_query => q,
 	  dense_k => 1,
 	  final_k => 1
