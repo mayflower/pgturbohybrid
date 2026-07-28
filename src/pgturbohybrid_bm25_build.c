@@ -3461,6 +3461,17 @@ PgturbohybridBm25CountChainPagesAndTail(Relation index, BlockNumber startBlkno,
 {
 	uint32		count = 0;
 	BlockNumber blkno = startBlkno;
+	uint32		maxPages;
+
+	/*
+	 * A chain can never be longer than the relation. Concurrent appends have
+	 * forked and re-linked these chains in production, and a chain that loops
+	 * back on itself turns this walk into an infinite loop that no timeout and
+	 * no cancel can reach — the loop had neither a bound nor a
+	 * CHECK_FOR_INTERRUPTS. Bounding it by the relation size turns silent
+	 * unkillable hang into an error that names the corruption.
+	 */
+	maxPages = RelationGetNumberOfBlocks(index) + 1;
 
 	*tailBlkno = InvalidBlockNumber;
 	while (BlockNumberIsValid(blkno))
@@ -3469,6 +3480,16 @@ PgturbohybridBm25CountChainPagesAndTail(Relation index, BlockNumber startBlkno,
 		Page		page;
 		PgturbohybridGraphPageOpaque opaque;
 		BlockNumber nextblkno;
+
+		CHECK_FOR_INTERRUPTS();
+
+		if (count >= maxPages)
+			ereport(ERROR,
+					(errcode(ERRCODE_DATA_CORRUPTED),
+					 errmsg("pgturbohybrid BM25 page chain does not end"),
+					 errdetail("Chain starting at block %u already visited %u pages in an index of %u blocks; the chain links back on itself.",
+							   startBlkno, count, maxPages - 1),
+					 errhint("REINDEX the index to rebuild the BM25 chains.")));
 
 		buf = ReadBuffer(index, blkno);
 		LockBuffer(buf, BUFFER_LOCK_SHARE);
@@ -3653,8 +3674,12 @@ PgturbohybridBm25AppendDeltaTermSegments(Relation index,
 	}
 }
 
-void
-PgturbohybridBm25AppendDelta(Relation index, uint32 nodeId,
+/*
+ * Appends one document to the BM25 delta, with the delta metadata update
+ * serialized by the caller (PgturbohybridBm25AppendDelta).
+ */
+static void
+PgturbohybridBm25AppendDeltaInternal(Relation index, uint32 nodeId,
 						ItemPointer heapTid, Datum tsvectorDatum)
 {
 	MemoryContext ctx;
@@ -3674,6 +3699,7 @@ PgturbohybridBm25AppendDelta(Relation index, uint32 nodeId,
 	uint32		deltaTermPages;
 	bool		deltaCursorHit;
 	PgturbohybridBm25DeltaDirectoryTupleData deltaDirectory;
+	PgturbohybridBm25MetaTupleData metaSnapshot;
 	Buffer		metaBuf;
 	Page		metaPage;
 	PgturbohybridBm25MetaTuple metaTuple;
@@ -3704,14 +3730,32 @@ PgturbohybridBm25AppendDelta(Relation index, uint32 nodeId,
 		MAXALIGN(sizeof(PgturbohybridGraphPageOpaqueData));
 	docLen = PgturbohybridDocLen(vector);
 
-	if (!PgturbohybridBm25ReadMetaForUpdate(index, &metaBuf, &metaPage,
-									   &metaTuple, &xlogState))
+	/*
+	 * Read phase: take a snapshot of the delta metadata and let go of the meta
+	 * page before touching anything else.
+	 *
+	 * This used to hold the BM25 meta buffer in BUFFER_LOCK_EXCLUSIVE across the
+	 * delta directory read and the whole delta chain walk. Every hybrid search
+	 * begins by reading that same page in BUFFER_LOCK_SHARE, so one insert
+	 * blocked every search for as long as the walk took — and the walk grows with
+	 * the delta chain. Measured in production on 2026-07-28: one INSERT into
+	 * documents_fts held the meta page for 21 minutes while three searches queued
+	 * behind it, and buffer content locks have no deadlock detector and no
+	 * timeout, so nothing killed it. The cluster had to be restarted with
+	 * `-m immediate`.
+	 *
+	 * The write phase below re-reads the meta page under an exclusive buffer lock
+	 * and applies the counters there, so the snapshot is only used for chain
+	 * bookkeeping. The heavyweight lock taken by the caller is what makes that
+	 * bookkeeping safe against a concurrent appender.
+	 */
+	if (!PgturbohybridBm25ReadMeta(index, &metaSnapshot, NULL))
 		ereport(ERROR,
 				(errcode(ERRCODE_DATA_CORRUPTED),
 				 errmsg("pgturbohybrid BM25 metadata is missing")));
 
-	deltaStart = metaTuple->deltaStartBlkno;
-	deltaTermDirectoryBlkno = metaTuple->deltaTermDirectoryBlkno;
+	deltaStart = metaSnapshot.deltaStartBlkno;
+	deltaTermDirectoryBlkno = metaSnapshot.deltaTermDirectoryBlkno;
 	PgturbohybridBm25InitDeltaDirectory(&deltaDirectory);
 	if (BlockNumberIsValid(deltaTermDirectoryBlkno))
 		(void) PgturbohybridBm25ReadDeltaDirectory(index, deltaTermDirectoryBlkno,
@@ -3719,8 +3763,8 @@ PgturbohybridBm25AppendDelta(Relation index, uint32 nodeId,
 	deltaCursorHit =
 		pgturbohybrid_bm25_delta_cursor_index == RelationGetRelid(index) &&
 		pgturbohybrid_bm25_delta_cursor_relfilenumber == PgturbohybridGraphRelFileNumber(index) &&
-		pgturbohybrid_bm25_delta_cursor_generation == metaTuple->deltaGeneration &&
-		pgturbohybrid_bm25_delta_cursor_start == metaTuple->deltaStartBlkno;
+		pgturbohybrid_bm25_delta_cursor_generation == metaSnapshot.deltaGeneration &&
+		pgturbohybrid_bm25_delta_cursor_start == metaSnapshot.deltaStartBlkno;
 	if (deltaCursorHit)
 	{
 		deltaTail = pgturbohybrid_bm25_delta_cursor_tail;
@@ -3730,9 +3774,6 @@ PgturbohybridBm25AppendDelta(Relation index, uint32 nodeId,
 		deltaPages = PgturbohybridBm25CountChainPagesAndTail(index, deltaStart,
 														 PGTURBOHYBRID_GRAPH_PAGE_KIND_BM25_DELTA,
 														 &deltaTail);
-	if (xlogState != NULL)
-		GenericXLogAbort(xlogState);
-	UnlockReleaseBuffer(metaBuf);
 
 	for (startTerm = 0; startTerm < collector.termCount;)
 	{
@@ -3808,6 +3849,39 @@ PgturbohybridBm25AppendDelta(Relation index, uint32 nodeId,
 		pfree(vector);
 	MemoryContextSwitchTo(oldCtx);
 	MemoryContextDelete(ctx);
+}
+
+/*
+ * Public entry point: serialize the delta append per index.
+ *
+ * Since aminsert dropped to ShareLock on GRAPH_UPDATE_LOCK (2026-07-11) two
+ * backends can append to the same BM25 delta at once, and the metadata update is
+ * a read-modify-write of the chain start, tail and page counts. Racing appends
+ * lose postings: both allocate a fresh chain and the last writer's pointer wins,
+ * so one document's terms become unreachable to BM25 while the vector half of the
+ * same document is indexed. That is invisible in any error log.
+ *
+ * The lock is released before returning instead of at commit, so a transaction
+ * that inserts many rows does not hold every other backend for its whole
+ * duration.
+ */
+void
+PgturbohybridBm25AppendDelta(Relation index, uint32 nodeId,
+						ItemPointer heapTid, Datum tsvectorDatum)
+{
+	LockPage(index, PGTURBOHYBRID_GRAPH_BM25_DELTA_LOCK, ExclusiveLock);
+	PG_TRY();
+	{
+		PgturbohybridBm25AppendDeltaInternal(index, nodeId, heapTid,
+											 tsvectorDatum);
+	}
+	PG_CATCH();
+	{
+		UnlockPage(index, PGTURBOHYBRID_GRAPH_BM25_DELTA_LOCK, ExclusiveLock);
+		PG_RE_THROW();
+	}
+	PG_END_TRY();
+	UnlockPage(index, PGTURBOHYBRID_GRAPH_BM25_DELTA_LOCK, ExclusiveLock);
 }
 
 static bool

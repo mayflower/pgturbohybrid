@@ -5,6 +5,49 @@ use alpha suffixes while the PostgreSQL extension SQL version remains `0.1.0`.
 
 ## Unreleased
 
+### Fixed
+
+- **Concurrent insert no longer loses graph nodes and no longer crashes readers.**
+  `aminsert` and `tqgraphinsert` take `ExclusiveLock` on the index update lock
+  again, reverting the lock downgrade of 2026-07-11. Measured with
+  `stress-turbohybrid-concurrency.sh` (8 writers, 8 readers, same index): with
+  `ShareLock`, 480 concurrent inserts produced `node_count` 237 against
+  `bm25_document_count` 260 — documents reachable by the lexical half of the
+  index and unreachable by the vector half, with nothing in the log — and
+  readers hit `SIGSEGV` in `PgturbohybridGraphLoadCodePage`
+  (`storage->codePagesLoaded[pageNo]`) because the mmap-backed shared native
+  cache is grown by writers while readers keep the old mapping. Two cluster
+  crashes in two minutes of testing. After the change: `rows == node_count ==
+  bm25_document_count`, no crash. Concurrent insert can come back once the graph
+  metadata update is atomic and the native cache carries a generation the reader
+  revalidates.
+- **`PgturbohybridBm25AppendDelta` no longer holds the BM25 metadata page across
+  the delta chain walk.** It held `BUFFER_LOCK_EXCLUSIVE` on the meta page while
+  reading the delta directory and walking the whole delta chain. Every hybrid
+  search starts by reading that page in share mode, so a single insert stalled
+  every search for the length of the walk. Observed in production on 2026-07-28:
+  one `INSERT` held it for 21 minutes with three searches queued behind it;
+  buffer content locks are LWLocks, so there was no deadlock detector, no
+  timeout and no way to cancel — the cluster had to be stopped with
+  `-m immediate`. The metadata snapshot is now taken in share mode and released
+  before any other page is touched.
+- **The BM25 delta append is serialized by a heavyweight page lock**
+  (`PGTURBOHYBRID_GRAPH_BM25_DELTA_LOCK`) instead of relying on buffer locks.
+  Heavyweight locks have a deadlock detector, are interruptible, and are visible
+  in `pg_locks`. The lock is released before returning, so a transaction that
+  inserts many rows does not hold other backends for its whole duration.
+- **A corrupted BM25 page chain now errors instead of hanging.**
+  `PgturbohybridBm25CountChainPagesAndTail` had no iteration bound and no
+  `CHECK_FOR_INTERRUPTS`, so a chain that links back on itself looped forever
+  and could not be cancelled. It is now bounded by the relation size and reports
+  the corruption with a `REINDEX` hint.
+- **`ambuild` no longer leaks locks when the sparse build fails.** The sparse
+  collection step was wrapped in `PG_CATCH { FlushErrorState(); }`, which
+  swallows the error without unwinding, leaving behind whatever the failed call
+  held. A leaked exclusive buffer content lock is not released at commit and
+  makes every later reader of that page hang forever. The handler now releases
+  LWLocks and reports the skipped build as a `WARNING` with the original message.
+
 ### Added
 
 - `high_recall` retrieval profile: an exact-free, near-exact-recall operating

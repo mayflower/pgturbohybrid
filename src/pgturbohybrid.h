@@ -58,6 +58,21 @@ typedef Pointer Item;
 /* Must correspond to page numbers since page lock is used */
 #define PGTURBOHYBRID_GRAPH_UPDATE_LOCK 	0
 #define PGTURBOHYBRID_GRAPH_SCAN_LOCK		1
+/*
+ * ValorBrain 2026-07-28: serializes the BM25 delta append.
+ *
+ * aminsert takes GRAPH_UPDATE_LOCK in ShareLock since the 2026-07-11 patch, so
+ * two backends can be inside PgturbohybridBm25AppendDelta at the same time. The
+ * delta metadata update there is a read-modify-write over a copy of the meta
+ * tuple (chain start, tail, page counts), and two of those racing lose postings:
+ * both allocate a chain start and the last writer's pointer wins.
+ *
+ * A heavyweight page lock is the right tool for this, not a buffer content lock:
+ * it has a deadlock detector, it is interruptible, and it shows up in pg_locks.
+ * The BM25 delta append is a few page appends; the expensive part of an insert is
+ * the HNSW traversal, and that stays concurrent.
+ */
+#define PGTURBOHYBRID_GRAPH_BM25_DELTA_LOCK	2
 
 /* Graph parameters */
 #define PGTURBOHYBRID_GRAPH_DEFAULT_M	16

@@ -29,6 +29,7 @@
 #include "optimizer/optimizer.h"
 #include "portability/instr_time.h"
 #include "storage/lmgr.h"
+#include "storage/lwlock.h"
 #include "utils/builtins.h"
 #include "utils/float.h"
 #include "utils/fmgrprotos.h"
@@ -7266,13 +7267,41 @@ pgturbohybridambuild(Relation heap, Relation index, IndexInfo *indexInfo)
 	 * the build infrastructure is fully wired. */
 	if (map.hasSparse)
 	{
+		MemoryContext oldcontext = CurrentMemoryContext;
+
 		PG_TRY();
 		{
 			PgturbohybridSparseBuildCollect(heap, index, indexInfo);
 		}
 		PG_CATCH();
 		{
+			ErrorData  *edata;
+
+			/*
+			 * Swallowing an error without unwinding the transaction leaves
+			 * behind whatever the failed call was holding. Buffer content locks
+			 * are the dangerous part: they are LWLocks, so they have no deadlock
+			 * detector, no timeout, and they are not released at commit — a
+			 * single leaked exclusive lock on an index page makes every later
+			 * reader of that page hang forever, and the only way out is
+			 * restarting the cluster. That happened on 2026-07-28: hybrid search
+			 * stopped for 21 minutes with three backends parked in
+			 * LWLock/BufferContent and no lock holder visible in pg_locks.
+			 *
+			 * ambuild runs at statement level and holds no LWLock of its own, so
+			 * releasing everything here is safe and restores the invariant that
+			 * a statement ends with no LWLock held. Buffer pins are cleaned up
+			 * by the resource owner at end of transaction; those only produce a
+			 * refcount warning, they do not block other backends.
+			 */
+			MemoryContextSwitchTo(oldcontext);
+			edata = CopyErrorData();
 			FlushErrorState();
+			LWLockReleaseAll();
+			ereport(WARNING,
+					(errmsg("pgturbohybrid: sparse index build skipped"),
+					 errdetail("%s", edata->message)));
+			FreeErrorData(edata);
 		}
 		PG_END_TRY();
 	}
@@ -7351,24 +7380,37 @@ pgturbohybridaminsert(Relation index, Datum *values, bool *isnull, ItemPointer h
 		return false;
 
 	/*
-	 * ValorBrain scalability patch (2026-07-11):
+	 * O lock de escrita no índice volta a ser exclusivo (2026-07-28).
 	 *
-	 * Use ShareLock instead of ExclusiveLock for single-vector inserts.
-	 * This allows concurrent inserts to proceed in parallel.
+	 * O patch de 2026-07-11 baixou para ShareLock para deixar inserções
+	 * concorrerem, e o ganho de vazão era real. O custo não estava medido, e é
+	 * grave. Reproduzido em `scripts/db/stress-turbohybrid-concurrency.sh` com 4
+	 * escritores e 4 leitores sobre o mesmo índice:
 	 *
-	 * The HNSW graph mutation inside PgturbohybridGraphInsertValueInPlace
-	 * is protected by per-buffer LockBuffer(BUFFER_LOCK_EXCLUSIVE) calls,
-	 * so the global lock here only needs to coordinate with vacuum (which
-	 * takes ExclusiveLock to ensure no in-flight inserts before repairing).
+	 *   1. Nós de grafo desaparecem. 60 linhas inseridas, 47 nós no grafo
+	 *      (node_count 237 contra bm25_document_count 260). O documento fica
+	 *      visível para a busca lexical e invisível para a busca vetorial, sem
+	 *      erro em log nenhum. `PgturbohybridGraphInsertValueInPlace` faz
+	 *      leia-modifique-escreva no metadado do grafo (contagem de nós, ponto de
+	 *      entrada), e dois desses ao mesmo tempo perdem um.
+	 *   2. O leitor quebra o processo. SIGSEGV em
+	 *      `PgturbohybridGraphLoadCodePage`, em `storage->codePagesLoaded[15]`:
+	 *      o cache nativo compartilhado é um arquivo mapeado em memória que o
+	 *      escritor faz crescer, e o leitor segue o ponteiro velho. Duas quedas
+	 *      do cluster inteiro em dois minutos de teste.
 	 *
-	 * ExclusiveLock is still used for the multivector path (batch inserts
-	 * that need atomicity across multiple nodes).
+	 * O motivo original do patch — inserção segurando o índice por minutos —
+	 * tinha outra causa, consertada no mesmo dia: `PgturbohybridBm25AppendDelta`
+	 * segurava a página de metadados do BM25 em BUFFER_LOCK_EXCLUSIVE durante a
+	 * caminhada inteira da cadeia de delta, o que parava toda busca. Com aquela
+	 * janela fechada, serializar escrita por índice custa pouco: a escrita é
+	 * milissegundos, e a leitura continua concorrente sem restrição.
 	 *
-	 * Before this patch, every aminsert held ExclusiveLock globally for
-	 * hundreds of milliseconds (HNSW traversal + link write + BM25 delta),
-	 * causing lock contention zombies of 25+ minutes in production.
+	 * Voltar a concorrer aqui exige antes: metadado do grafo com atualização
+	 * atômica e cache nativo com geração revalidada no leitor. Enquanto isso não
+	 * existir, correção vem antes de vazão.
 	 */
-	LockPage(index, PGTURBOHYBRID_GRAPH_UPDATE_LOCK, ShareLock);
+	LockPage(index, PGTURBOHYBRID_GRAPH_UPDATE_LOCK, ExclusiveLock);
 	PG_TRY();
 	{
 		nodeId = PgturbohybridGraphInsertValueInPlace(index, indexInfo, heap_tid,
@@ -7378,11 +7420,11 @@ pgturbohybridaminsert(Relation index, Datum *values, bool *isnull, ItemPointer h
 	}
 	PG_CATCH();
 	{
-		UnlockPage(index, PGTURBOHYBRID_GRAPH_UPDATE_LOCK, ShareLock);
+		UnlockPage(index, PGTURBOHYBRID_GRAPH_UPDATE_LOCK, ExclusiveLock);
 		PG_RE_THROW();
 	}
 	PG_END_TRY();
-	UnlockPage(index, PGTURBOHYBRID_GRAPH_UPDATE_LOCK, ShareLock);
+	UnlockPage(index, PGTURBOHYBRID_GRAPH_UPDATE_LOCK, ExclusiveLock);
 
 	return true;
 }

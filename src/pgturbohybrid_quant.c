@@ -21524,8 +21524,13 @@ tqgraphinsert(Relation index, Datum *values, bool *isnull, ItemPointer heap_tid,
 	if (!PgturbohybridGraphFormIndexValue(&value, values, isnull, typeInfo, &support))
 		return false;
 
-	/* ValorBrain scalability patch: ShareLock for concurrent inserts */
-	LockPage(index, PGTURBOHYBRID_GRAPH_UPDATE_LOCK, ShareLock);
+	/*
+	 * Escrita serializada por índice — ver a justificativa longa em
+	 * pgturbohybridaminsert (pgturbohybrid_am.c). Em resumo: com ShareLock aqui,
+	 * inserções concorrentes perdiam nós do grafo e leitores caíam com SIGSEGV
+	 * sobre o cache nativo mapeado.
+	 */
+	LockPage(index, PGTURBOHYBRID_GRAPH_UPDATE_LOCK, ExclusiveLock);
 	PG_TRY();
 	{
 		PgturbohybridGraphInsertValueInPlace(index, indexInfo, heap_tid, value,
@@ -21533,11 +21538,11 @@ tqgraphinsert(Relation index, Datum *values, bool *isnull, ItemPointer heap_tid,
 	}
 	PG_CATCH();
 	{
-		UnlockPage(index, PGTURBOHYBRID_GRAPH_UPDATE_LOCK, ShareLock);
+		UnlockPage(index, PGTURBOHYBRID_GRAPH_UPDATE_LOCK, ExclusiveLock);
 		PG_RE_THROW();
 	}
 	PG_END_TRY();
-	UnlockPage(index, PGTURBOHYBRID_GRAPH_UPDATE_LOCK, ShareLock);
+	UnlockPage(index, PGTURBOHYBRID_GRAPH_UPDATE_LOCK, ExclusiveLock);
 
 	return true;
 }
