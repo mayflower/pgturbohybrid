@@ -7452,9 +7452,48 @@ pgturbohybridamvacuumcleanup(IndexVacuumInfo *info, IndexBulkDeleteResult *stats
 
 	if (PgturbohybridGraphUseTqNativeGraph(info->index))
 	{
+		PgturbohybridBm25PlanningStats bm25Stats;
+		bool		hasBm25;
+
 		result = tqgraphvacuumcleanup(info, stats);
 		(void) PgturbohybridBm25MaybeCompact(info->index);
-		PgturbohybridGraphMaybeCompactPageChains(info->index);
+
+		/*
+		 * Índice com ramo de BM25 não passa pela compactação de página
+		 * (2026-07-28).
+		 *
+		 * `PgturbohybridGraphMaybeCompactPageChains` reescreve as cadeias de
+		 * página atribuindo identificadores de nó novos e densos (o `nodeIdMap`
+		 * da fase 1). As estruturas do BM25 — listas de postagem, estatística de
+		 * documento, teto por bloco, camadas de impacto — são todas indexadas por
+		 * identificador de nó, e nenhuma delas é reescrita ali. Depois de uma
+		 * compactação, a perna lexical casaria documento por documento errado.
+		 *
+		 * Reproduzido: tabela de 2.000 linhas com índice híbrido, `DELETE` de
+		 * metade, `VACUUM`. O grafo ficou com 1.000 nós, o metadado do BM25
+		 * seguiu dizendo 2.000 documentos, e a verificação de invariante passou a
+		 * derrubar **toda** varredura híbrida com "BM25 metadata document count
+		 * is invalid". A busca vetorial seguia funcionando; a híbrida morria até
+		 * o REINDEX. Falhar alto é melhor que responder errado, mas nenhuma das
+		 * duas serve.
+		 *
+		 * Enquanto a renumeração não souber remapear o ramo lexical, quem tem
+		 * BM25 não compacta: o nó morto fica marcado, e
+		 * `PgturbohybridBm25MaybeCompact` — que reconstrói a base a partir dos
+		 * nós vivos mantendo o identificador de cada um — cuida da estatística.
+		 * Espaço se recupera com REINDEX.
+		 */
+		hasBm25 = PgturbohybridBm25GetPlanningStats(info->index, &bm25Stats) &&
+			bm25Stats.hasBm25;
+		if (hasBm25)
+			elog(DEBUG1,
+				 "pgturbohybrid: compactação de página ignorada em \"%s\" — "
+				 "o ramo de BM25 é indexado por identificador de nó e a "
+				 "compactação renumera; use REINDEX para recuperar espaço",
+				 RelationGetRelationName(info->index));
+		else
+			PgturbohybridGraphMaybeCompactPageChains(info->index);
+
 		PgturbohybridBm25ValidateMetaPointer(info->index);
 		PgturbohybridBm25InvalidateCache(info->index);
 	}

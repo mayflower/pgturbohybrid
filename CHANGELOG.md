@@ -41,6 +41,27 @@ use alpha suffixes while the PostgreSQL extension SQL version remains `0.1.0`.
   `CHECK_FOR_INTERRUPTS`, so a chain that links back on itself looped forever
   and could not be cancelled. It is now bounded by the relation size and reports
   the corruption with a `REINDEX` hint.
+- **Bulk delete on a hybrid index no longer breaks hybrid search, and the BM25
+  corpus statistics no longer go stale.** Two defects with one symptom.
+  `PgturbohybridGraphMaybeCompactPageChains` rewrites the page chains assigning
+  new dense node IDs, but every BM25 structure — postings, doc stats, block-max,
+  impact tiers — is keyed by node ID and none of them is rewritten. Reproduced
+  with a 2 000-row table, `DELETE` of half, `VACUUM`: the graph reported 1 000
+  nodes while the BM25 metapage still said 2 000 documents, and the invariant
+  check then failed **every** hybrid scan with
+  `BM25 metadata document count is invalid`. Vector search kept working; hybrid
+  search was dead until `REINDEX`. Page compaction is now skipped for indexes
+  that have a BM25 branch (dead nodes stay marked; `REINDEX` reclaims the space)
+  until the remap knows how to carry the lexical side.
+  Separately, `PgturbohybridBm25MaybeCompact` only fired on delta accumulation,
+  so a delete-only workload never rebuilt the base and the metapage kept counting
+  documents that no longer exist — an inflated `N` in the idf and an inflated
+  `avgdl` in the length normalization, which leaks across tenants because the
+  lexical index is shared. Measured in production after a bulk purge: the index
+  counted 12 480 documents against 9 489 in the table (`avgdl` 1 359 vs 1 040)
+  and a *different* tenant's scenario ablation dropped two of eight. It now also
+  fires when the recorded document count exceeds the live node count by the same
+  percentage threshold, so `VACUUM` alone keeps the statistics true.
 - **The maximum item size for a graph page now accounts for the line pointer.**
   `PgturbohybridGraphAppendTuple` computed the usable page space as
   `BLCKSZ - header - opaque`, which yields 8160, while `PageGetFreeSpace` on a

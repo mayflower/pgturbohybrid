@@ -1549,8 +1549,7 @@ PgturbohybridBm25AddItem(Relation index, ForkNumber forkNum, Buffer *buf, Page *
 					BlockNumber *insertBlkno)
 {
 	OffsetNumber offno;
-	Size		maxItemSize = BLCKSZ - SizeOfPageHeaderData -
-		MAXALIGN(sizeof(PgturbohybridGraphPageOpaqueData));
+	Size		maxItemSize = PgturbohybridGraphMaxItemSize();
 
 	if (itemSize > maxItemSize)
 		ereport(ERROR,
@@ -3191,14 +3190,66 @@ PgturbohybridBm25MaybeCompact(Relation index)
 	uint32		uniqueTerms;
 	bool		compacted = false;
 
-	if (!PgturbohybridBm25ReadMeta(index, &oldMeta, NULL) ||
-		oldMeta.deltaDocCount == 0 ||
-		!BlockNumberIsValid(oldMeta.deltaStartBlkno))
+	if (!PgturbohybridBm25ReadMeta(index, &oldMeta, NULL))
 		return false;
 
-	if ((uint64) oldMeta.deltaDocCount * 100 <
-		(uint64) Max(oldMeta.docCount, 1) * (uint64) threshold)
-		return false;
+	/*
+	 * Dois motivos para reconstruir a base, não um (2026-07-28).
+	 *
+	 * O gatilho era só o acúmulo de delta: `deltaDocCount` sobre `docCount` acima
+	 * do limiar. Uma carga de trabalho que só apaga nunca chegava aqui —
+	 * `deltaDocCount` é zero, a função voltava na primeira linha, e o metadado
+	 * seguia contando documento que não existe mais.
+	 *
+	 * O efeito é no ranqueamento, e vaza entre tenants porque o índice lexical é
+	 * um só: `N` inflado no idf e `avgdl` inflado na normalização por tamanho.
+	 * Medido em produção em 28/07 depois de um expurgo em volume: o índice contava
+	 * 12.480 documentos com a tabela em 9.489, avgdl 1.359 contra 1.040, e a
+	 * ablação de **outro** tenant caiu dois cenários de oito. A correção era
+	 * `REINDEX` manual — que ninguém lembra de rodar.
+	 *
+	 * Agora também dispara quando o metadado diz mais documento do que existe nó
+	 * vivo, com o mesmo limiar percentual. A reconstrução já lê `nodeStates` e só
+	 * reaproveita o que está vivo, mantendo o identificador de cada nó, então ela
+	 * é exatamente o que resolve os dois casos.
+	 */
+	{
+		PgturbohybridGraphMetaPageData graphMetaProbe;
+		uint32		registrados = oldMeta.docCount + oldMeta.deltaDocCount;
+		uint32		vivos = 0;
+		bool		deltaEstourou;
+		bool		mortoEstourou = false;
+
+		deltaEstourou =
+			oldMeta.deltaDocCount > 0 &&
+			BlockNumberIsValid(oldMeta.deltaStartBlkno) &&
+			(uint64) oldMeta.deltaDocCount * 100 >=
+			(uint64) Max(oldMeta.docCount, 1) * (uint64) threshold;
+
+		if (PgturbohybridGraphReadMeta(index, &graphMetaProbe))
+		{
+			int64		liveNodes = 0;
+			int64		deadNodes = 0;
+			int64		adjacencyRefs = 0;
+			int64		deadNeighborRefs = 0;
+
+			if (graphMetaProbe.tqNodeCount > 0)
+			{
+				PgturbohybridGraphCollectVacuumStats(index, &graphMetaProbe,
+													 &liveNodes, &deadNodes,
+													 &adjacencyRefs,
+													 &deadNeighborRefs);
+				vivos = (uint32) Max(liveNodes, 0);
+				if (registrados > vivos)
+					mortoEstourou =
+						(uint64) (registrados - vivos) * 100 >=
+						(uint64) Max(registrados, 1) * (uint64) threshold;
+			}
+		}
+
+		if (!deltaEstourou && !mortoEstourou)
+			return false;
+	}
 
 	/*
 	 * Delta compaction rewrites BM25 base pages and clears the delta chain.
@@ -3726,8 +3777,7 @@ PgturbohybridBm25AppendDeltaInternal(Relation index, uint32 nodeId,
 						   PG_UINT16_MAX, collector.termCount),
 				 errhint("Rebuild the index after loading very large text documents, or reduce the tsvector vocabulary for a single row.")));
 
-	maxItemSize = BLCKSZ - SizeOfPageHeaderData -
-		MAXALIGN(sizeof(PgturbohybridGraphPageOpaqueData));
+	maxItemSize = PgturbohybridGraphMaxItemSize();
 	docLen = PgturbohybridDocLen(vector);
 
 	/*
