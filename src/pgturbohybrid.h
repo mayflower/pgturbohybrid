@@ -1123,6 +1123,34 @@ typedef struct PgturbohybridGraphPageOpaqueData
 
 typedef PgturbohybridGraphPageOpaqueData * PgturbohybridGraphPageOpaque;
 
+/*
+ * Maior item que cabe numa página de grafo.
+ *
+ * Três termos além do óbvio, e o esquecido é o terceiro:
+ *   - cabeçalho da página, alinhado;
+ *   - o opaco no fim da página, alinhado;
+ *   - o ponteiro de linha (ItemIdData), que PageAddItem grava junto com o item.
+ *
+ * O BM25 calculava sem o ponteiro de linha, e chegava a 8160 quando
+ * `PageGetFreeSpace` de uma página nova devolve 8156. O resultado, reproduzido
+ * três vezes em 28/07: `PgturbohybridBm25AppendDelta` montava um pedaço de delta
+ * de 8160 bytes, `PgturbohybridGraphAppendTuple` via que não cabia, estendia a
+ * relação, tentava na página nova, falhava de novo, registrava WARNING e devolvia
+ * — deixando o item fora do índice (postings perdidos em silêncio) e a página
+ * anterior travada em modo exclusivo para o resto da sessão. Todo leitor daquela
+ * página travava para sempre depois disso, e a busca híbrida parava.
+ *
+ * `PgturbohybridGraphCorrectionTupleMaxCount` já fazia a conta certa; esta função
+ * é a mesma conta num só lugar.
+ */
+static inline Size
+PgturbohybridGraphMaxItemSize(void)
+{
+	return MAXALIGN_DOWN(BLCKSZ - MAXALIGN(SizeOfPageHeaderData)
+						 - MAXALIGN(sizeof(PgturbohybridGraphPageOpaqueData))
+						 - sizeof(ItemIdData));
+}
+
 typedef struct PgturbohybridGraphElementTupleData
 {
 	uint8		type;

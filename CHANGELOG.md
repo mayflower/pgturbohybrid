@@ -41,6 +41,23 @@ use alpha suffixes while the PostgreSQL extension SQL version remains `0.1.0`.
   `CHECK_FOR_INTERRUPTS`, so a chain that links back on itself looped forever
   and could not be cancelled. It is now bounded by the relation size and reports
   the corruption with a `REINDEX` hint.
+- **The maximum item size for a graph page now accounts for the line pointer.**
+  `PgturbohybridGraphAppendTuple` computed the usable page space as
+  `BLCKSZ - header - opaque`, which yields 8160, while `PageGetFreeSpace` on a
+  fresh page reports 8156 because `PageAddItem` also writes an `ItemIdData`. A
+  delta chunk sized 8160 therefore passed the capacity check and then failed to
+  be added — three times on 2026-07-28. The item was silently dropped from the
+  index (lost postings) and, worse, the failure path took the leak below. The
+  arithmetic now lives in one place, `PgturbohybridGraphMaxItemSize()`, and
+  matches what `PageGetFreeSpace` will allow.
+- **`PgturbohybridGraphAppendTuple` no longer leaks the previous page's lock on
+  the `PageAddItem` failure path.** `linkbuf` — the previous page of the chain —
+  is held in exclusive mode while the new page is linked. The failure path
+  released only `buf`, so the `linkbuf` content lock stayed held for the rest of
+  the session; buffer content locks are not released at commit. This is what
+  stopped hybrid search for 21 minutes in production on 2026-07-28: every reader
+  of page 9067 blocked forever, with no holder visible in `pg_locks` and no
+  response to cancellation.
 - **`ambuild` no longer leaks locks when the sparse build fails.** The sparse
   collection step was wrapped in `PG_CATCH { FlushErrorState(); }`, which
   swallows the error without unwinding, leaving behind whatever the failed call

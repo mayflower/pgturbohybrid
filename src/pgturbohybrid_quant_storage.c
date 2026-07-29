@@ -247,9 +247,14 @@ PgturbohybridGraphAppendTuple(Relation index, ForkNumber forkNum, BlockNumber *s
 		 * arrays exceed BLCKSZ. Log a WARNING and skip the tuple rather
 		 * than ERROR-ing the entire operation (which kills the calling
 		 * trigger/transaction).
+		 *
+		 * A conta precisa incluir o ponteiro de linha: sem ele o teto ficava em
+		 * 8160 e deixava passar tuplas de 8160 que `PageGetFreeSpace` de página
+		 * nova (8156) recusa. Era assim que se chegava ao caminho de baixo, que
+		 * vazava o lock da página anterior.
 		 */
-		Size		pageUsable = BLCKSZ - MAXALIGN(SizeOfPageHeaderData) -
-			MAXALIGN(sizeof(PgturbohybridGraphPageOpaqueData));
+		Size		pageUsable = PgturbohybridGraphMaxItemSize();
+
 		if (tupleSize > pageUsable)
 		{
 			elog(WARNING,
@@ -292,6 +297,13 @@ PgturbohybridGraphAppendTuple(Relation index, ForkNumber forkNum, BlockNumber *s
 		 * the page's free space fragmentation prevents the contiguous allocation
 		 * even though PageGetFreeSpace reports enough total space. Skip with
 		 * WARNING instead of ERROR to avoid killing the calling transaction.
+		 *
+		 * `linkbuf` é a página anterior da cadeia, e ela está travada em modo
+		 * exclusivo desde o bloco de cima. Esta saída liberava só `buf`, então o
+		 * lock de `linkbuf` ficava preso pelo resto da sessão — lock de buffer não
+		 * é liberado no commit. Foi essa fuga que parou a busca híbrida por 21
+		 * minutos em 28/07: todo leitor da página 9067 travava para sempre, sem
+		 * detentor visível em pg_locks e sem responder a cancelamento.
 		 */
 		elog(WARNING,
 			 "pgturbohybrid: PageAddItem failed for tuple of size %zu on page %u — "
@@ -300,6 +312,8 @@ PgturbohybridGraphAppendTuple(Relation index, ForkNumber forkNum, BlockNumber *s
 		if (xlogState != NULL)
 			GenericXLogAbort(xlogState);
 		UnlockReleaseBuffer(buf);
+		if (BufferIsValid(linkbuf))
+			UnlockReleaseBuffer(linkbuf);
 		*insertBlkno = blkno;
 		return InvalidOffsetNumber;
 	}
