@@ -1575,7 +1575,8 @@ int			PgturbohybridGraphTraverse(Relation index, PgturbohybridGraphScanOpaque so
 						 PgturbohybridGraphScanStorage *storage,
 						 PgturbohybridGraphResult *results, int resultTarget,
 						 int searchEf, Datum query, int payloadSlot,
-						 int32 payloadValue);
+						 int32 payloadValue, int temporalSlot,
+						 int32 temporalMin, int32 temporalMax);
 void		PgturbohybridQuantUpdateMetaPage(Relation index, PgturbohybridQuantBuildState *state,
 								  BlockNumber codeStart, BlockNumber adjStart,
 								  BlockNumber exactStart,
@@ -1704,6 +1705,8 @@ void		PgturbohybridGraphAppendInsertCacheNode(PgturbohybridGraphNativeCache *cac
 int64		PgturbohybridGraphGetActiveLimitTupleTarget(void);
 double		PgturbohybridGraphGetActiveEstimatedFilterSelectivity(void);
 bool		PgturbohybridGraphGetActivePayloadInt4Filter(AttrNumber *heap_attno, int32 *value);
+bool		PgturbohybridGraphGetActivePayloadInt4RangeFilter(AttrNumber *heap_attno,
+											   int32 *min_value, int32 *max_value);
 void		PgturbohybridGraphSeedScanContext(PgturbohybridGraphScanOpaque so, int64 tuple_target,
 							   double estimated_filter_selectivity);
 int			PgturbohybridGraphCollectDenseCandidates(IndexScanDesc scan, int targetK,

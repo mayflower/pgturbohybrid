@@ -56,6 +56,10 @@ static double tqgraph_active_estimated_filter_selectivity = -1.0;
 static bool tqgraph_active_payload_filter_valid = false;
 static AttrNumber tqgraph_active_payload_filter_attno = InvalidAttrNumber;
 static int32 tqgraph_active_payload_filter_value = 0;
+static bool tqgraph_active_payload_range_valid = false;
+static AttrNumber tqgraph_active_payload_range_attno = InvalidAttrNumber;
+static int32 tqgraph_active_payload_range_min = 0;
+static int32 tqgraph_active_payload_range_max = 0;
 
 static void PgturbohybridExecutorHooksInit(void);
 static void PgturbohybridExecutorStartHook(QueryDesc *queryDesc, int eflags);
@@ -86,6 +90,14 @@ static bool PgturbohybridGraphExtractPayloadInt4Filter(IndexScanState *indexstat
 static bool PgturbohybridGraphExtractPayloadInt4FilterExpr(Node *node,
 											 AttrNumber *heap_attno,
 											 int32 *value);
+static bool PgturbohybridGraphExtractPayloadInt4RangeFilter(IndexScanState *indexstate,
+										 AttrNumber *heap_attno,
+										 int32 *min_value,
+										 int32 *max_value);
+static bool PgturbohybridGraphExtractPayloadInt4RangeFilterExpr(Node *node,
+											 AttrNumber *heap_attno,
+											 int32 *value,
+											 bool *is_lower);
 
 PGDLLEXPORT void _PG_init(void);
 void
@@ -118,6 +130,23 @@ PgturbohybridGraphGetActivePayloadInt4Filter(AttrNumber *heap_attno, int32 *valu
 		*heap_attno = tqgraph_active_payload_filter_attno;
 	if (value != NULL)
 		*value = tqgraph_active_payload_filter_value;
+
+	return true;
+}
+
+bool
+PgturbohybridGraphGetActivePayloadInt4RangeFilter(AttrNumber *heap_attno, int32 *min_value,
+									   int32 *max_value)
+{
+	if (!tqgraph_active_payload_range_valid)
+		return false;
+
+	if (heap_attno != NULL)
+		*heap_attno = tqgraph_active_payload_range_attno;
+	if (min_value != NULL)
+		*min_value = tqgraph_active_payload_range_min;
+	if (max_value != NULL)
+		*max_value = tqgraph_active_payload_range_max;
 
 	return true;
 }
@@ -300,6 +329,10 @@ PgturbohybridGraphExecIndexScanWithController(PlanState *planstate)
 	bool		prev_payload_filter_valid = tqgraph_active_payload_filter_valid;
 	AttrNumber	prev_payload_filter_attno = tqgraph_active_payload_filter_attno;
 	int32		prev_payload_filter_value = tqgraph_active_payload_filter_value;
+	bool		prev_payload_range_valid = tqgraph_active_payload_range_valid;
+	AttrNumber	prev_payload_range_attno = tqgraph_active_payload_range_attno;
+	int32		prev_payload_range_min = tqgraph_active_payload_range_min;
+	int32		prev_payload_range_max = tqgraph_active_payload_range_max;
 	int64		tuple_target = PgturbohybridGraphGetLimitTupleTarget(wrapper_state->limitstate);
 	double		estimated_filter_selectivity = PgturbohybridGraphEstimateFilterSelectivity(indexstate);
 	AttrNumber	payload_filter_attno = InvalidAttrNumber;
@@ -307,12 +340,23 @@ PgturbohybridGraphExecIndexScanWithController(PlanState *planstate)
 	bool		payload_filter_valid =
 		PgturbohybridGraphExtractPayloadInt4Filter(indexstate, &payload_filter_attno,
 									 &payload_filter_value);
+	AttrNumber	payload_range_attno = InvalidAttrNumber;
+	int32		payload_range_min = 0;
+	int32		payload_range_max = 0;
+	bool		payload_range_valid =
+		PgturbohybridGraphExtractPayloadInt4RangeFilter(indexstate, &payload_range_attno,
+										 &payload_range_min,
+										 &payload_range_max);
 
 	tqgraph_active_limit_tuple_target = tuple_target;
 	tqgraph_active_estimated_filter_selectivity = estimated_filter_selectivity;
 	tqgraph_active_payload_filter_valid = payload_filter_valid;
 	tqgraph_active_payload_filter_attno = payload_filter_attno;
 	tqgraph_active_payload_filter_value = payload_filter_value;
+	tqgraph_active_payload_range_valid = payload_range_valid;
+	tqgraph_active_payload_range_attno = payload_range_attno;
+	tqgraph_active_payload_range_min = payload_range_min;
+	tqgraph_active_payload_range_max = payload_range_max;
 
 	PG_TRY();
 	{
@@ -325,6 +369,10 @@ PgturbohybridGraphExecIndexScanWithController(PlanState *planstate)
 		tqgraph_active_payload_filter_valid = prev_payload_filter_valid;
 		tqgraph_active_payload_filter_attno = prev_payload_filter_attno;
 		tqgraph_active_payload_filter_value = prev_payload_filter_value;
+		tqgraph_active_payload_range_valid = prev_payload_range_valid;
+		tqgraph_active_payload_range_attno = prev_payload_range_attno;
+		tqgraph_active_payload_range_min = prev_payload_range_min;
+		tqgraph_active_payload_range_max = prev_payload_range_max;
 		PG_RE_THROW();
 	}
 	PG_END_TRY();
@@ -333,6 +381,10 @@ PgturbohybridGraphExecIndexScanWithController(PlanState *planstate)
 	tqgraph_active_payload_filter_valid = prev_payload_filter_valid;
 	tqgraph_active_payload_filter_attno = prev_payload_filter_attno;
 	tqgraph_active_payload_filter_value = prev_payload_filter_value;
+	tqgraph_active_payload_range_valid = prev_payload_range_valid;
+	tqgraph_active_payload_range_attno = prev_payload_range_attno;
+	tqgraph_active_payload_range_min = prev_payload_range_min;
+	tqgraph_active_payload_range_max = prev_payload_range_max;
 
 	scan = indexstate->iss_ScanDesc;
 	if (scan == NULL || scan->opaque == NULL)
@@ -543,6 +595,131 @@ PgturbohybridGraphExtractPayloadInt4Filter(IndexScanState *indexstate, AttrNumbe
 	}
 
 	return false;
+}
+
+static bool
+PgturbohybridGraphExtractPayloadInt4RangeFilterExpr(Node *node, AttrNumber *heap_attno,
+									   int32 *value, bool *is_lower)
+{
+	OpExpr	   *op;
+	Node	   *left;
+	Node	   *right;
+	Var		   *var = NULL;
+	Const	   *constant = NULL;
+	Oid			opfuncid;
+	bool		var_on_left;
+
+	if (node == NULL || !IsA(node, OpExpr))
+		return false;
+
+	op = castNode(OpExpr, node);
+	if (list_length(op->args) != 2)
+		return false;
+
+	opfuncid = op->opfuncid;
+	if (!OidIsValid(opfuncid))
+		opfuncid = get_opcode(op->opno);
+	if (opfuncid != F_INT4GE && opfuncid != F_INT4LE)
+		return false;
+
+	left = linitial(op->args);
+	right = lsecond(op->args);
+
+	if (IsA(left, Var) && IsA(right, Const))
+	{
+		var = castNode(Var, left);
+		constant = castNode(Const, right);
+		var_on_left = true;
+	}
+	else if (IsA(left, Const) && IsA(right, Var))
+	{
+		var = castNode(Var, right);
+		constant = castNode(Const, left);
+		var_on_left = false;
+	}
+	else
+		return false;
+
+	if (var->varattno <= 0 || var->vartype != INT4OID ||
+		constant->consttype != INT4OID || constant->constisnull)
+		return false;
+
+	/*
+	 * Determine whether the constant is the lower (min) or upper (max) bound:
+	 * col >= X  (GE, var left)   -> X is min
+	 * X >= col  (GE, var right)  -> X is max  (equiv. col <= X)
+	 * col <= X  (LE, var left)   -> X is max
+	 * X <= col  (LE, var right)  -> X is min  (equiv. col >= X)
+	 */
+	*is_lower = (opfuncid == F_INT4GE) == var_on_left;
+	*heap_attno = var->varattno;
+	*value = DatumGetInt32(constant->constvalue);
+	return true;
+}
+
+static bool
+PgturbohybridGraphExtractPayloadInt4RangeFilter(IndexScanState *indexstate,
+								  AttrNumber *heap_attno,
+								  int32 *min_value, int32 *max_value)
+{
+	List	   *quals;
+	ListCell   *lc;
+	AttrNumber	lower_attno = InvalidAttrNumber;
+	AttrNumber	upper_attno = InvalidAttrNumber;
+	int32		lower_value = 0;
+	int32		upper_value = 0;
+	bool		have_lower = false;
+	bool		have_upper = false;
+
+	if (indexstate == NULL || indexstate->ss.ps.plan == NULL)
+		return false;
+
+	quals = indexstate->ss.ps.plan->qual;
+	foreach(lc, quals)
+	{
+		AttrNumber	q_attno;
+		int32		q_value;
+		bool		q_is_lower;
+
+		if (!PgturbohybridGraphExtractPayloadInt4RangeFilterExpr((Node *) lfirst(lc),
+											   &q_attno, &q_value, &q_is_lower))
+			continue;
+
+		if (q_is_lower)
+		{
+			if (!have_lower)
+			{
+				lower_attno = q_attno;
+				lower_value = q_value;
+				have_lower = true;
+			}
+		}
+		else
+		{
+			if (!have_upper)
+			{
+				upper_attno = q_attno;
+				upper_value = q_value;
+				have_upper = true;
+			}
+		}
+	}
+
+	if (!have_lower && !have_upper)
+		return false;
+
+	/* Both bounds must be on the same column. */
+	if (have_lower && have_upper && lower_attno != upper_attno)
+		return false;
+
+	if (heap_attno != NULL)
+		*heap_attno = have_lower ? lower_attno : upper_attno;
+	if (min_value != NULL)
+		*min_value = have_lower ? lower_value : INT32_MIN;
+	if (max_value != NULL)
+		*max_value = have_upper ? upper_value : INT32_MAX;
+
+	return true;
 }
 
 static double

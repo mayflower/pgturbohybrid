@@ -1978,7 +1978,7 @@ PgturbohybridGraphInsertValueInPlaceInternal(Relation index, IndexInfo *indexInf
 		{
 			candidateCount = PgturbohybridGraphTraverse(index, &insertSo, &meta, &storage,
 											  candidates, resultTarget, searchEf,
-											  query, -1, 0);
+											  query, -1, 0, -1, 0, 0);
 			if (insertExactStorage)
 				PgturbohybridGraphExactRescore(index, &insertSo, query, &meta, storage.nodes,
 									candidates, candidateCount);

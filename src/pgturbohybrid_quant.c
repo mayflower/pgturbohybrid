@@ -500,6 +500,23 @@ PgturbohybridGraphNodeMatchesPayload(PgturbohybridGraphScanNode *node, int paylo
 	return node->payloads[payloadSlot] == payloadValue;
 }
 
+static bool
+PgturbohybridGraphNodeMatchesPayloadRange(PgturbohybridGraphScanNode *node, int payloadSlot,
+							 int32 minValue, int32 maxValue)
+{
+	int32		val;
+
+	if (payloadSlot < 0)
+		return true;
+	if (payloadSlot >= PGTURBOHYBRID_GRAPH_MAX_PAYLOADS || node->payloads == NULL)
+		return true;			/* can't check, allow */
+	if ((node->payloadMask & (uint16) (1U << payloadSlot)) == 0)
+		return true;			/* no payload value stored, allow */
+
+	val = node->payloads[payloadSlot];
+	return val >= minValue && val <= maxValue;
+}
+
 bool
 PgturbohybridGraphLoadPayloadValue(Relation index, PgturbohybridGraphScanOpaque so,
 								   PgturbohybridGraphMetaPageData *meta,
@@ -9200,7 +9217,9 @@ PgturbohybridGraphSearchBaseLayer(Relation index, PgturbohybridGraphScanOpaque s
 					   PgturbohybridGraphScanStorage *storage,
 					   PgturbohybridGraphFrontierItem *entries, int entryCount,
 					   PgturbohybridGraphResult *results, int resultTarget, int searchEf,
-					   int payloadSlot, int32 payloadValue)
+					   int payloadSlot, int32 payloadValue,
+					   int temporalSlot, int32 temporalMin,
+					   int32 temporalMax)
 {
 	bool	   *visited = NULL;
 	uint32		visitGeneration = 0;
@@ -9431,6 +9450,9 @@ PgturbohybridGraphSearchBaseLayer(Relation index, PgturbohybridGraphScanOpaque s
 		if (node->flags & PGTURBOHYBRID_GRAPH_NODE_DEAD ||
 			!PgturbohybridGraphNodeMatchesPayload(node, payloadSlot, payloadValue))
 			continue;
+		if (!PgturbohybridGraphNodeMatchesPayloadRange(node, temporalSlot,
+										   temporalMin, temporalMax))
+			continue;
 
 		resultDistance = PgturbohybridGraphResultDistance(so, query, node,
 											  nearest[i].distance,
@@ -9464,7 +9486,9 @@ int
 PgturbohybridGraphTraverse(Relation index, PgturbohybridGraphScanOpaque so, PgturbohybridGraphMetaPageData *meta,
 				PgturbohybridGraphScanStorage *storage, PgturbohybridGraphResult *results,
 				int resultTarget, int searchEf, Datum query,
-				int payloadSlot, int32 payloadValue)
+				int payloadSlot, int32 payloadValue,
+				int temporalSlot, int32 temporalMin,
+				int32 temporalMax)
 {
 	uint32		entryNodeId = meta->tqEntryNodeId < meta->tqNodeCount ? meta->tqEntryNodeId : 0;
 	PgturbohybridGraphFrontierItem entry;
@@ -9702,7 +9726,9 @@ PgturbohybridGraphTraverse(Relation index, PgturbohybridGraphScanOpaque so, Pgtu
 	INSTR_TIME_SET_CURRENT(phaseStart);
 	entryCount = PgturbohybridGraphSearchBaseLayer(index, so, query, meta, storage, entries, entryCount,
 										results, resultTarget, searchEf,
-										payloadSlot, payloadValue);
+										payloadSlot, payloadValue,
+										temporalSlot, temporalMin,
+										temporalMax);
 	PgturbohybridGraphAddElapsedUs(&so->graphBaseUs, phaseStart);
 	return entryCount;
 }
@@ -9713,6 +9739,8 @@ PgturbohybridGraphFillCandidateBand(Relation index, PgturbohybridGraphScanOpaque
 						 PgturbohybridGraphScanStorage *storage,
 						 PgturbohybridGraphResult *results, int resultTarget, int count,
 						 int payloadSlot, int32 payloadValue, Datum query,
+						 int temporalSlot, int32 temporalMin,
+						 int32 temporalMax,
 						 PgturbohybridGraphFillCandidateBandReason reason)
 {
 	bool	   *selected;
@@ -9772,6 +9800,9 @@ PgturbohybridGraphFillCandidateBand(Relation index, PgturbohybridGraphScanOpaque
 			continue;
 		if (!PgturbohybridGraphNodeMatchesPayload(node, payloadSlot, payloadValue))
 			continue;
+		if (!PgturbohybridGraphNodeMatchesPayloadRange(node, temporalSlot,
+										   temporalMin, temporalMax))
+			continue;
 
 		batchNodeIds[batchCount++] = nodeId;
 		if (batchCount == PGTURBOHYBRID_GRAPH_MAX_NEIGHBORS)
@@ -9826,6 +9857,8 @@ static bool
 PgturbohybridGraphCollectPayloadExactBand(PgturbohybridGraphScanOpaque so, PgturbohybridGraphMetaPageData *meta,
 							   PgturbohybridGraphScanStorage *storage, Datum query,
 							   int payloadSlot, int32 payloadValue,
+							   int temporalSlot, int32 temporalMin,
+							   int32 temporalMax,
 							   PgturbohybridGraphResult *results, int resultTarget,
 							   int *count)
 {
@@ -9855,6 +9888,9 @@ PgturbohybridGraphCollectPayloadExactBand(PgturbohybridGraphScanOpaque so, Pgtur
 		node = &storage->nodes[nodeId];
 		if (node->flags & PGTURBOHYBRID_GRAPH_NODE_DEAD ||
 			!PgturbohybridGraphNodeMatchesPayload(node, payloadSlot, payloadValue))
+			continue;
+		if (!PgturbohybridGraphNodeMatchesPayloadRange(node, temporalSlot,
+										   temporalMin, temporalMax))
 			continue;
 
 		if (node->exactVector != NULL)
@@ -10320,7 +10356,8 @@ PgturbohybridGraphApplyLocalExpansion(Relation index, PgturbohybridGraphScanOpaq
 						   PgturbohybridGraphScanStorage *storage,
 						   PgturbohybridGraphResult *results, int resultTarget,
 						   int count, Datum query, int payloadSlot,
-						   int32 payloadValue)
+						   int32 payloadValue, int temporalSlot,
+						   int32 temporalMin, int32 temporalMax)
 {
 	uint32	   *candidateNodeIds;
 	uint32	   *batchNodeIds;
@@ -10368,6 +10405,9 @@ PgturbohybridGraphApplyLocalExpansion(Relation index, PgturbohybridGraphScanOpaq
 			node = &storage->nodes[neighbor];
 			if (node->flags & PGTURBOHYBRID_GRAPH_NODE_DEAD ||
 				!PgturbohybridGraphNodeMatchesPayload(node, payloadSlot, payloadValue))
+				continue;
+			if (!PgturbohybridGraphNodeMatchesPayloadRange(node, temporalSlot,
+											   temporalMin, temporalMax))
 				continue;
 			candidateNodeIds[candidateCount++] = neighbor;
 		}
@@ -10426,7 +10466,9 @@ PgturbohybridGraphRunTraversalPass(IndexScanDesc scan,
 						PgturbohybridGraphScanStorage *storage,
 						PgturbohybridGraphResult *results,
 						int resultTarget, int searchEf, Datum query,
-						int payloadSlot, int32 payloadValue,
+					int payloadSlot, int32 payloadValue,
+					int temporalSlot, int32 temporalMin,
+					int32 temporalMax,
 						bool hasPayloadFilter, bool payloadExactBandMissed,
 						double estimatedSelectivity, int fillReason)
 {
@@ -10436,7 +10478,8 @@ PgturbohybridGraphRunTraversalPass(IndexScanDesc scan,
 	INSTR_TIME_SET_CURRENT(phaseStart);
 	count = PgturbohybridGraphTraverse(scan->indexRelation, so, meta, storage, results,
 							resultTarget, searchEf, query, payloadSlot,
-							payloadValue);
+							payloadValue, temporalSlot, temporalMin,
+							temporalMax);
 	PgturbohybridGraphAddElapsedUs(&so->graphTraverseUs, phaseStart);
 	if (!hasPayloadFilter && count < resultTarget &&
 		resultTarget >= (int) meta->tqNodeCount)
@@ -10444,7 +10487,9 @@ PgturbohybridGraphRunTraversalPass(IndexScanDesc scan,
 		INSTR_TIME_SET_CURRENT(phaseStart);
 		count = PgturbohybridGraphFillCandidateBand(scan->indexRelation, so, meta,
 										 storage, results, resultTarget, count,
-										 payloadSlot, payloadValue, query,
+										 payloadSlot, payloadValue,
+										 temporalSlot, temporalMin,
+										 temporalMax, query,
 										 PGTURBOHYBRID_GRAPH_FILL_CANDIDATE_BAND_REASON_UNDERFILLED_FULL_TARGET);
 		PgturbohybridGraphAddElapsedUs(&so->graphFillUs, phaseStart);
 	}
@@ -10453,7 +10498,9 @@ PgturbohybridGraphRunTraversalPass(IndexScanDesc scan,
 		INSTR_TIME_SET_CURRENT(phaseStart);
 		count = PgturbohybridGraphFillCandidateBand(scan->indexRelation, so, meta,
 										 storage, results, resultTarget, count,
-										 payloadSlot, payloadValue, query,
+										 payloadSlot, payloadValue,
+										 temporalSlot, temporalMin,
+										 temporalMax, query,
 										 payloadExactBandMissed ?
 										 PGTURBOHYBRID_GRAPH_FILL_CANDIDATE_BAND_REASON_PAYLOAD_EXACT_BAND_MISS :
 										 fillReason);
@@ -10465,7 +10512,9 @@ PgturbohybridGraphRunTraversalPass(IndexScanDesc scan,
 
 	count = PgturbohybridGraphApplyLocalExpansion(scan->indexRelation, so, meta,
 									   storage, results, resultTarget, count,
-									   query, payloadSlot, payloadValue);
+									   query, payloadSlot, payloadValue,
+									   temporalSlot, temporalMin,
+									   temporalMax);
 	if (so->graphLocalExpansionTriggered)
 	{
 		INSTR_TIME_SET_CURRENT(phaseStart);
@@ -10583,6 +10632,8 @@ PgturbohybridGraphApplyUncertaintyRetry(IndexScanDesc scan,
 							 PgturbohybridGraphResult **results,
 							 int *resultTarget, int *searchEf, int *count,
 							 Datum query, int payloadSlot, int32 payloadValue,
+							 int temporalSlot, int32 temporalMin,
+							 int32 temporalMax,
 							 bool hasPayloadFilter, bool payloadExactBandMissed,
 							 double estimatedSelectivity, int64 requestedBaseTarget,
 							 bool residualReordered, bool heapReordered)
@@ -10640,6 +10691,7 @@ PgturbohybridGraphApplyUncertaintyRetry(IndexScanDesc scan,
 												 *results, *resultTarget,
 												 *searchEf, query,
 												 payloadSlot, payloadValue,
+												 temporalSlot, temporalMin, temporalMax,
 												 hasPayloadFilter,
 												 payloadExactBandMissed,
 												 estimatedSelectivity,
@@ -17150,7 +17202,7 @@ PgturbohybridMultiVectorDocumentNodeScan(IndexScanDesc scan,
 														  candidateLimit,
 														  searchEf,
 														  PointerGetDatum(proxyQuery),
-														  -1, 0, false,
+														  -1, 0, -1, 0, 0, false,
 														  false, 1.0,
 														  PGTURBOHYBRID_GRAPH_FILL_CANDIDATE_BAND_REASON_NONE);
 			proxyGraphHitCount = hitCount;
@@ -20395,7 +20447,7 @@ PgturbohybridGraphCollectMultiVectorDenseCandidates(IndexScanDesc scan,
 																	  tokenRawTarget,
 																	  currentSearchEf,
 																	  PointerGetDatum(token),
-																	  -1, 0, false,
+																	  -1, 0, -1, 0, 0, false,
 																	  false, 1.0,
 																	  PGTURBOHYBRID_GRAPH_FILL_CANDIDATE_BAND_REASON_NONE);
 						MemoryContextSwitchTo(resultCtx);
@@ -20830,6 +20882,10 @@ PgturbohybridGraphCollectResults(IndexScanDesc scan, PgturbohybridGraphScanOpaqu
 	AttrNumber	payloadHeapAttno = InvalidAttrNumber;
 	int32		payloadValue = 0;
 	int			payloadSlot = -1;
+	int			temporalSlot = -1;
+	int32		temporalMin = 0;
+	int32		temporalMax = 0;
+	AttrNumber	rangeHeapAttno = InvalidAttrNumber;
 	int			candidateOversampling;
 	bool		hasPayloadFilter = false;
 	bool		payloadExactBandMissed = false;
@@ -20895,6 +20951,14 @@ PgturbohybridGraphCollectResults(IndexScanDesc scan, PgturbohybridGraphScanOpaqu
 			payloadSlot < meta.tqPayloadCount;
 		if (!hasPayloadFilter)
 			payloadSlot = -1;
+	}
+	if (PgturbohybridGraphGetActivePayloadInt4RangeFilter(&rangeHeapAttno,
+											  &temporalMin, &temporalMax))
+	{
+		temporalSlot = PgturbohybridGraphPayloadSlotForHeapAttr(scan->indexRelation,
+													   rangeHeapAttno);
+		if (temporalSlot < 0 || temporalSlot >= meta.tqPayloadCount)
+			temporalSlot = -1;
 	}
 	if (!so->hasTupleTargetRows && activeTarget >= 0)
 	{
@@ -21068,7 +21132,9 @@ PgturbohybridGraphCollectResults(IndexScanDesc scan, PgturbohybridGraphScanOpaqu
 	if (hasPayloadFilter)
 	{
 		if (PgturbohybridGraphCollectPayloadExactBand(so, &meta, &storage, query,
-										   payloadSlot, payloadValue, results,
+										   payloadSlot, payloadValue,
+										   temporalSlot, temporalMin,
+										   temporalMax, results,
 										   resultTarget, &count))
 		{
 			INSTR_TIME_SET_CURRENT(phaseStart);
@@ -21089,6 +21155,8 @@ PgturbohybridGraphCollectResults(IndexScanDesc scan, PgturbohybridGraphScanOpaqu
 	count = PgturbohybridGraphRunTraversalPass(scan, so, &meta, &storage,
 											   results, resultTarget, searchEf,
 											   query, payloadSlot, payloadValue,
+											   temporalSlot, temporalMin,
+											   temporalMax,
 											   hasPayloadFilter,
 											   payloadExactBandMissed,
 											   estimatedSelectivity,
@@ -21138,14 +21206,17 @@ PgturbohybridGraphCollectResults(IndexScanDesc scan, PgturbohybridGraphScanOpaqu
 			INSTR_TIME_SET_CURRENT(phaseStart);
 			count = PgturbohybridGraphTraverse(scan->indexRelation, so, &meta, &storage,
 									results, resultTarget, searchEf, query,
-									payloadSlot, payloadValue);
+									payloadSlot, payloadValue,
+									temporalSlot, temporalMin, temporalMax);
 			PgturbohybridGraphAddElapsedUs(&so->graphTraverseUs, phaseStart);
 			if (estimatedSelectivity > 0 && estimatedSelectivity < 1 && count < resultTarget)
 			{
 				INSTR_TIME_SET_CURRENT(phaseStart);
 				count = PgturbohybridGraphFillCandidateBand(scan->indexRelation, so, &meta,
 											 &storage, results, resultTarget, count,
-											 payloadSlot, payloadValue, query,
+											 payloadSlot, payloadValue,
+											 temporalSlot, temporalMin,
+											 temporalMax, query,
 											 PGTURBOHYBRID_GRAPH_FILL_CANDIDATE_BAND_REASON_ADAPTIVE_WIDENING);
 				PgturbohybridGraphAddElapsedUs(&so->graphFillUs, phaseStart);
 			}
@@ -21182,7 +21253,8 @@ PgturbohybridGraphCollectResults(IndexScanDesc scan, PgturbohybridGraphScanOpaqu
 			INSTR_TIME_SET_CURRENT(phaseStart);
 			count = PgturbohybridGraphTraverse(scan->indexRelation, so, &meta, &storage,
 									results, resultTarget, searchEf, query,
-									payloadSlot, payloadValue);
+									payloadSlot, payloadValue,
+									temporalSlot, temporalMin, temporalMax);
 			PgturbohybridGraphAddElapsedUs(&so->graphTraverseUs, phaseStart);
 			if (count < resultTarget)
 			{
@@ -21191,6 +21263,8 @@ PgturbohybridGraphCollectResults(IndexScanDesc scan, PgturbohybridGraphScanOpaqu
 												 &storage, results,
 												 resultTarget, count,
 												 payloadSlot, payloadValue,
+												 temporalSlot, temporalMin,
+												 temporalMax,
 												 query,
 												 PGTURBOHYBRID_GRAPH_FILL_CANDIDATE_BAND_REASON_TIGHT_L2_EXACT_POLICY);
 				PgturbohybridGraphAddElapsedUs(&so->graphFillUs, phaseStart);
@@ -21243,6 +21317,7 @@ PgturbohybridGraphCollectResults(IndexScanDesc scan, PgturbohybridGraphScanOpaqu
 													&results, &resultTarget,
 													&searchEf, &count, query,
 													payloadSlot, payloadValue,
+													temporalSlot, temporalMin, temporalMax,
 													hasPayloadFilter,
 													payloadExactBandMissed,
 													estimatedSelectivity,
@@ -21276,6 +21351,7 @@ PgturbohybridGraphCollectResults(IndexScanDesc scan, PgturbohybridGraphScanOpaqu
 												   &results, &resultTarget,
 												   &searchEf, &count, query,
 												   payloadSlot, payloadValue,
+												   temporalSlot, temporalMin, temporalMax,
 												   hasPayloadFilter,
 												   payloadExactBandMissed,
 												   estimatedSelectivity,
