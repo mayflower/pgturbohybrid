@@ -1277,12 +1277,11 @@ PgturbohybridQueryPlanHasIndexOrderBy(Plan *plan)
 		((IndexScan *) plan)->indexorderbyorig != NIL)
 		return true;
 
-	/* IndexOnlyScan carries the same indexorderbyorig; a future INCLUDE(doc_id)
-	 * making this plan shape viable must not trip the guard as a false
-	 * positive (turbohybrid diagnosis, 2026-08-14). */
-	if (IsA(plan, IndexOnlyScan) &&
-		((IndexOnlyScan *) plan)->indexorderbyorig != NIL)
-		return true;
+	/* NOTE (turbohybrid diagnosis, 2026-08-14): IndexOnlyScan does NOT carry
+	 * indexorderbyorig (only the transformed indexorderby), so the resjunk
+	 * matching below cannot be reused as-is. If an INCLUDE(doc_id) ever makes
+	 * an index-only ORDER BY plan viable, this guard would false-positive —
+	 * extend the orig-expr handling then, not by matching indexorderby here. */
 
 	return PgturbohybridQueryPlanHasIndexOrderBy(plan->lefttree) ||
 		PgturbohybridQueryPlanHasIndexOrderBy(plan->righttree);
