@@ -1277,6 +1277,13 @@ PgturbohybridQueryPlanHasIndexOrderBy(Plan *plan)
 		((IndexScan *) plan)->indexorderbyorig != NIL)
 		return true;
 
+	/* IndexOnlyScan carries the same indexorderbyorig; a future INCLUDE(doc_id)
+	 * making this plan shape viable must not trip the guard as a false
+	 * positive (turbohybrid diagnosis, 2026-08-14). */
+	if (IsA(plan, IndexOnlyScan) &&
+		((IndexOnlyScan *) plan)->indexorderbyorig != NIL)
+		return true;
+
 	return PgturbohybridQueryPlanHasIndexOrderBy(plan->lefttree) ||
 		PgturbohybridQueryPlanHasIndexOrderBy(plan->righttree);
 }
@@ -1368,7 +1375,8 @@ PgturbohybridQueryRejectTextFallback(void)
 	ereport(ERROR,
 			(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
 			 errmsg("hybrid text queries require a turbohybrid index scan"),
-			 errdetail("The scalar hybrid distance function can only evaluate the vector payload.")));
+			 errdetail("The scalar hybrid distance function can only evaluate the vector payload."),
+			 errhint("The hybrid index may be temporarily absent (bulk rebuild window) or the planner chose a Sort path - check enable_sort and index existence.")));
 }
 
 static bool
