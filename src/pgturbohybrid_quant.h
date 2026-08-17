@@ -1018,6 +1018,15 @@ typedef struct PgturbohybridGraphScanStorage
 	int			codePageCount;
 	int			adjPageCount;
 	int			levelCount;
+	/*
+	 * Snapshot capacities this storage was sized for. Concurrent inserts can
+	 * grow the index (and the metapage) while a scan holds its storage, so
+	 * every node/slot bound check must use these, not the caller's (fresh)
+	 * meta counts. Nodes appended after the snapshot are simply invisible to
+	 * the scan.
+	 */
+	uint32		nodeCapacity;
+	uint32		adjRecordCapacity;
 	bool		cached;
 } PgturbohybridGraphScanStorage;
 

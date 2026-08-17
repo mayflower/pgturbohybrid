@@ -1173,6 +1173,8 @@ PgturbohybridGraphInitScanStorageUncached(PgturbohybridGraphMetaPageData *meta, 
 	}
 	storage->levelCount = PgturbohybridGraphLevelCapacity(meta->m);
 	adjRecordCount = PgturbohybridGraphAdjRecordCount(meta);
+	storage->nodeCapacity = meta->tqNodeCount;
+	storage->adjRecordCapacity = (uint32) adjRecordCount;
 	storage->neighbors =
 		palloc0(PgturbohybridCheckedArrayBytes(sizeof(uint32 *),
 											   adjRecordCount,
@@ -3781,7 +3783,8 @@ PgturbohybridGraphLoadCodePage(Relation index, PgturbohybridGraphScanOpaque so, 
 	int			pageNo;
 	BlockNumber blkno;
 
-	if (nodeId >= meta->tqNodeCount || !BlockNumberIsValid(meta->tqCodeStartBlkno))
+	if (nodeId >= meta->tqNodeCount || nodeId >= storage->nodeCapacity ||
+		!BlockNumberIsValid(meta->tqCodeStartBlkno))
 		return false;
 
 	if (so != NULL)
@@ -3866,7 +3869,7 @@ retry:
 				PgturbohybridGraphScanNode *node;
 
 				if (tuple->type != PGTURBOHYBRID_GRAPH_CODE_TUPLE_TYPE ||
-					tuple->nodeId >= meta->tqNodeCount)
+					tuple->nodeId >= storage->nodeCapacity)
 					continue;
 
 				node = &storage->nodes[tuple->nodeId];
@@ -3984,13 +3987,16 @@ PgturbohybridGraphLoadAllAdjPages(Relation index, PgturbohybridGraphScanOpaque s
 
 			tuple = (PgturbohybridGraphAdjTuple) PageGetItem(page, iid);
 			if (tuple->type != PGTURBOHYBRID_GRAPH_ADJ_TUPLE_TYPE ||
-				tuple->nodeId >= meta->tqNodeCount ||
+				tuple->nodeId >= storage->nodeCapacity ||
 				tuple->level > meta->graphMaxLevel ||
 				tuple->level >= storage->levelCount ||
 				tuple->count > PgturbohybridGraphLevelM(meta->m, tuple->level))
 				continue;
 
 			tupleSlot = PgturbohybridGraphAdjSlot(meta, tuple->nodeId, tuple->level);
+			if (tupleSlot < 0 || (uint32) tupleSlot >= storage->adjRecordCapacity)
+				continue;
+
 			storage->adjBlknos[tupleSlot] = blkno;
 			storage->adjOffnos[tupleSlot] = offno;
 			storage->neighborCounts[tupleSlot] = tuple->count;
@@ -4026,7 +4032,8 @@ bool
 PgturbohybridGraphLoadAdjPage(Relation index, PgturbohybridGraphScanOpaque so, PgturbohybridGraphMetaPageData *meta,
 				   PgturbohybridGraphScanStorage *storage, uint32 nodeId, int level)
 {
-	if (nodeId >= meta->tqNodeCount || level < 0 || level > meta->graphMaxLevel ||
+	if (nodeId >= meta->tqNodeCount || nodeId >= storage->nodeCapacity ||
+		level < 0 || level > meta->graphMaxLevel ||
 		!BlockNumberIsValid(meta->tqAdjStartBlkno))
 		return false;
 
@@ -4045,7 +4052,7 @@ PgturbohybridGraphLoadExactVectors(Relation index, PgturbohybridGraphMetaPageDat
 		!BlockNumberIsValid(meta->tqExactStartBlkno))
 		return false;
 
-	for (uint32 nodeId = 0; nodeId < meta->tqNodeCount; nodeId++)
+	for (uint32 nodeId = 0; nodeId < storage->nodeCapacity; nodeId++)
 	{
 		PgturbohybridGraphScanNode *node = &storage->nodes[nodeId];
 		char	   *exactVector;
@@ -4074,7 +4081,7 @@ PgturbohybridGraphBuildPayloadRefs(PgturbohybridGraphMetaPageData *meta, Pgturbo
 	if (meta->tqPayloadCount == 0 || meta->tqPayloadBytes == 0)
 		return;
 
-	for (uint32 nodeId = 0; nodeId < meta->tqNodeCount; nodeId++)
+	for (uint32 nodeId = 0; nodeId < storage->nodeCapacity; nodeId++)
 	{
 		PgturbohybridGraphScanNode *node = &storage->nodes[nodeId];
 
@@ -4095,7 +4102,7 @@ PgturbohybridGraphBuildPayloadRefs(PgturbohybridGraphMetaPageData *meta, Pgturbo
 	storage->payloadRefs = palloc0(sizeof(PgturbohybridGraphPayloadRef) * refCount);
 	storage->payloadRefCount = refCount;
 
-	for (uint32 nodeId = 0; nodeId < meta->tqNodeCount; nodeId++)
+	for (uint32 nodeId = 0; nodeId < storage->nodeCapacity; nodeId++)
 	{
 		PgturbohybridGraphScanNode *node = &storage->nodes[nodeId];
 
@@ -5111,9 +5118,10 @@ PgturbohybridGraphSharedInitStorageScratch(PgturbohybridGraphMetaPageData *meta,
 										   PgturbohybridGraphScanStorage *storage)
 {
 	storage->ctx = CurrentMemoryContext;
-	if (meta->tqNodeCount > 0)
+	if (storage->nodeCapacity > 0)
 	{
-		storage->visitedGeneration = palloc0(sizeof(uint32) * meta->tqNodeCount);
+		storage->visitedGeneration =
+			palloc0(sizeof(uint32) * storage->nodeCapacity);
 		storage->visitGeneration = palloc0(sizeof(uint32));
 	}
 }
@@ -5168,9 +5176,11 @@ PgturbohybridGraphSharedBuildView(PgturbohybridGraphSharedMap *map,
 	storage->codePageCount = PgturbohybridGraphPageCount(meta->tqNodeCount,
 														 storage->codeTuplesPerPage);
 	storage->adjPageCount = BlockNumberIsValid(meta->tqAdjStartBlkno) ? 1 : 0;
+	storage->nodeCapacity = meta->tqNodeCount;
+	storage->adjRecordCapacity = hdr->adjRecordCount;
 	storage->cached = true;
 
-	for (uint32 nodeId = 0; nodeId < meta->tqNodeCount; nodeId++)
+	for (uint32 nodeId = 0; nodeId < storage->nodeCapacity; nodeId++)
 	{
 		PgturbohybridGraphScanNode *node = &storage->nodes[nodeId];
 		PgturbohybridGraphSharedNode *sharedNode = &sharedNodes[nodeId];
@@ -6352,6 +6362,10 @@ PgturbohybridGraphAppendInsertCacheNode(PgturbohybridGraphNativeCache *cache, Pg
 				  sizeof(PgturbohybridGraphPayloadRef), PgturbohybridGraphPayloadRefCompare);
 		}
 	}
+
+	storage->nodeCapacity = newNodeCount;
+	storage->adjRecordCapacity = (uint32) newAdjRecordCount;
+
 
 	cache->tqNodeCount = newNodeCount;
 	cache->tqEntryNodeId = entryNodeId;

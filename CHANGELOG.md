@@ -24,7 +24,22 @@ use alpha suffixes while the PostgreSQL extension SQL version remains `0.1.0`.
   unscoped queries, plain-index fallback).
 
 ### Fixed
-
+- **Scan storage is now bounded by its metapage snapshot, not the live meta.**
+  Every code-page/adjacency loader validated tuple node ids against the
+  caller's freshly-read `meta->tqNodeCount` while indexing `storage->nodes[]`
+  and the arenas, which are sized from the metapage snapshot taken when the
+  scan storage (or native cache) was built. A concurrent insert appends new
+  code/adjacency tuples to pages an in-flight scan still loads, so the loader
+  could index nodes past the snapshot capacity -- an out-of-bounds heap write
+  and the reader SIGSEGV class observed under concurrent insert on 2026-07-28.
+  `PgturbohybridGraphScanStorage` now carries `nodeCapacity`/
+  `adjRecordCapacity` snapshot bounds set at every sizing site (uncached
+  scans, shared mmap view, per-backend cache, insert-cache growth), and all
+  loaders skip tuples newer than the snapshot: newly inserted nodes are
+  simply invisible to an in-flight scan, which matches its traversal state.
+  Verified: th-installcheck 32/32; stress run 3 writers x 80 inserts + 3
+  concurrent hybrid readers on one index: 740/740 rows, node_count 740
+  (no lost nodes), no reader crash.
 - **Concurrent insert no longer loses graph nodes and no longer crashes readers.**
   `aminsert` and `tqgraphinsert` take `ExclusiveLock` on the index update lock
   again, reverting the lock downgrade of 2026-07-11. Measured with
