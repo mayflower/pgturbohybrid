@@ -4,7 +4,7 @@ EXTVERSION = 0.1.0
 .DEFAULT_GOAL := all
 
 MODULE_big = pgturbohybrid
-DATA = sql/pgturbohybrid--0.1.0.sql
+DATA = sql/pgturbohybrid--0.1.0.sql sql/pgturbohybrid--0.1.0--0.1.1.sql
 
 PG_CONFIG ?= pg_config
 

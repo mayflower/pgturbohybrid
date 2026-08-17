@@ -173,6 +173,14 @@ use alpha suffixes while the PostgreSQL extension SQL version remains `0.1.0`.
   readers under the shared scope: 6 writers x 100 and 1 writer x 100, both
   lock regimes, all green with rows == node_count == bm25_document_count
   (the 2026-07-28 incident measured 237 vs 260).
+- **Extension version bumped to 0.1.1 with an upgrade script.**
+  `pgturbohybrid--0.1.0--0.1.1.sql` ships `turbohybrid_bm25_tenant_stats()`
+  so existing installations gain the reporting SRF via
+  `ALTER EXTENSION pgturbohybrid UPDATE` (the function had been added to the
+  0.1.0 base script in place, which new installs picked up but upgrades did
+  not). The per-tenant statistics themselves come from the shared library
+  (bm25Version 2 metadata); REINDEX hybrid indexes built with
+  `INCLUDE (tenant int4)` to activate tenant-scoped idf/avgdl.
 
 ## v0.1.0-alpha.2
 
