@@ -190,8 +190,8 @@ PgturbohybridBm25TenantLookup(Relation index, BlockNumber tenantStatsBlkno,
  * write phase, while the caller holds the heavyweight BM25 delta lock, so
  * concurrent appends cannot interleave here.
  */
-static void UpdateTenantEntry(Relation index, Page page, int32 tenant,
-						  uint32 docLen, bool useWal, Buffer buf);
+static void UpdateTenantEntry(Relation index, Buffer buf, int32 tenant,
+						  uint32 docLen, bool useWal);
 
 bool
 PgturbohybridBm25TenantIncrement(Relation index, BlockNumber tenantStatsBlkno,
@@ -261,10 +261,17 @@ PgturbohybridBm25TenantIncrement(Relation index, BlockNumber tenantStatsBlkno,
 
 		if (found)
 		{
-			/* Re-lock the page exclusively and update in place. */
-			LockBuffer(buf, BUFFER_LOCK_UNLOCK);
-			LockBuffer(buf, BUFFER_LOCK_EXCLUSIVE);
-			UpdateTenantEntry(index, BufferGetPage(buf), tenant, docLen, useWal, buf);
+			/*
+			 * Update in place.  The buffer was locked SHARE for the search;
+			 * re-locking exclusively without an exclusion window is impossible
+			 * with buffer locks alone, so the update helper re-searches under
+			 * the exclusive lock and only writes when it still finds the
+			 * tenant (share-mode inserts can race here; a lost re-find simply
+			 * falls through to the append phase below, and the append itself
+			 * re-checks nothing -- duplicate risk is closed by the heavyweight
+			 * delta lock the caller holds).
+			 */
+			UpdateTenantEntry(index, buf, tenant, docLen, useWal);
 			return true;
 		}
 
@@ -365,11 +372,16 @@ PgturbohybridBm25TenantIncrement(Relation index, BlockNumber tenantStatsBlkno,
  * the caller (phase 1 of PgturbohybridBm25TenantIncrement).
  */
 static void
-UpdateTenantEntry(Relation index, Page page, int32 tenant, uint32 docLen,
-				  bool useWal, Buffer buf)
+UpdateTenantEntry(Relation index, Buffer buf, int32 tenant, uint32 docLen,
+				  bool useWal)
 {
+	Page		page;
 	GenericXLogState *xlogState = NULL;
 	OffsetNumber maxoff;
+
+	LockBuffer(buf, BUFFER_LOCK_UNLOCK);
+	LockBuffer(buf, BUFFER_LOCK_EXCLUSIVE);
+	page = BufferGetPage(buf);
 
 	if (useWal)
 	{
@@ -408,6 +420,11 @@ UpdateTenantEntry(Relation index, Page page, int32 tenant, uint32 docLen,
 		}
 	}
 
+	/*
+	 * Not found under the exclusive lock (raced): release and return so the
+	 * caller's append phase creates the entry.  The caller holds the
+	 * heavyweight BM25 delta lock, so at most one appender runs at a time.
+	 */
 	if (xlogState != NULL)
 		GenericXLogAbort(xlogState);
 	UnlockReleaseBuffer(buf);

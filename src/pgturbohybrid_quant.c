@@ -5012,13 +5012,37 @@ PgturbohybridQuantUpdateMetaPageFromUpdate(Relation index,
 	metap->graphEfSearch = PgturbohybridGraphGetEfSearch(index);
 	metap->graphOversampling = PgturbohybridGraphGetGraphOversampling(index);
 	metap->graphRescoreBand = PgturbohybridGraphGetGraphRescoreBand(index);
-	metap->graphMaxLevel = update->graphMaxLevel;
+	/*
+	 * Share-mode insert safety: these fields are read-modify-write against
+	 * the LIVE metapage (locked above), not the caller's snapshot.  Concurrent
+	 * inserters reserve node ids by bumping tqNodeCount under this same
+	 * buffer lock, so the count must never move backwards; the entry point
+	 * only moves to this insert's node when its level strictly exceeds the
+	 * current maximum (first writer at a new level wins; later same-level
+	 * writers keep the existing entry).  Full overwrite remains correct for
+	 * the build path (update->building), which runs single-threaded.
+	 */
+	if (update->building)
+	{
+		metap->graphMaxLevel = update->graphMaxLevel;
+		metap->entryLevel = update->nodeCount > 0 ? update->entryLevel : -1;
+		metap->tqNodeCount = update->nodeCount;
+		metap->tqEntryNodeId = update->nodeCount > 0 ? update->entryNodeId : UINT_MAX;
+	}
+	else
+	{
+		if ((int) update->graphMaxLevel > (int) metap->graphMaxLevel)
+		{
+			metap->graphMaxLevel = update->graphMaxLevel;
+			metap->entryLevel = update->entryLevel;
+			metap->tqEntryNodeId = update->entryNodeId;
+		}
+		if (update->nodeCount > metap->tqNodeCount)
+			metap->tqNodeCount = update->nodeCount;
+	}
 	metap->graphFlags = metap->graphFlags == 0 ? 1 : metap->graphFlags + 1;
 	metap->entryBlkno = codeStart;
 	metap->entryOffno = update->nodeCount > 0 ? FirstOffsetNumber : InvalidOffsetNumber;
-	metap->entryLevel = update->nodeCount > 0 ? update->entryLevel : -1;
-	metap->tqNodeCount = update->nodeCount;
-	metap->tqEntryNodeId = update->nodeCount > 0 ? update->entryNodeId : UINT_MAX;
 	metap->tqCodeBytes = update->dimensions > 0 ? PgturbohybridGraphCodeBytesForBits(update->dimensions, update->tqBits) : 0;
 	metap->tqPayloadCount = update->tqPayloadCount;
 	metap->tqPayloadBytes = update->tqPayloadBytes;
@@ -21634,10 +21658,9 @@ tqgraphinsert(Relation index, Datum *values, bool *isnull, ItemPointer heap_tid,
 		return false;
 
 	/*
-	 * Escrita serializada por índice — ver a justificativa longa em
-	 * pgturbohybridaminsert (pgturbohybrid_am.c). Em resumo: com ShareLock aqui,
-	 * inserções concorrentes perdiam nós do grafo e leitores caíam com SIGSEGV
-	 * sobre o cache nativo mapeado.
+	 * Serialized inserts -- see pgturbohybridaminsert (pgturbohybrid_am.c)
+	 * for the current ShareLock status: prerequisites landed, downgrade
+	 * reverted on a shared-native-cache reader SIGSEGV.
 	 */
 	LockPage(index, PGTURBOHYBRID_GRAPH_UPDATE_LOCK, ExclusiveLock);
 	PG_TRY();

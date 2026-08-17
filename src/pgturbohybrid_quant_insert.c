@@ -1804,6 +1804,68 @@ PgturbohybridGraphAppendInsertedAdj(Relation index, BlockNumber *adjStart, int m
 	pfree(tuple);
 }
 
+
+/*
+ * Reserve the next node id atomically.  Bumping tqNodeCount under the
+ * metapage buffer lock -- before any expensive neighbor work -- is what lets
+ * inserts hold the graph update lock in SHARE mode: two concurrent inserters
+ * get distinct ids and the count cannot lose an increment.  The returned
+ * snapshot carries the post-reservation count, so callers must treat
+ * meta.tqNodeCount as "ids 0..tqNodeCount-1 exist, mine is tqNodeCount-1".
+ */
+static uint32
+PgturbohybridGraphReserveNodeId(Relation index,
+								PgturbohybridGraphMetaPageData *meta)
+{
+	Buffer		buf;
+	Page		page;
+	PgturbohybridGraphMetaPage metap;
+	GenericXLogState *xlogState = NULL;
+	uint32		newNodeId;
+	Size		metaBytes;
+	Size		metaStart;
+	PageHeader	pageHeader;
+
+	buf = ReadBuffer(index, PGTURBOHYBRID_GRAPH_METAPAGE_BLKNO);
+	LockBuffer(buf, BUFFER_LOCK_EXCLUSIVE);
+	page = BufferGetPage(buf);
+	metap = PgturbohybridGraphPageGetMeta(page);
+
+	if (RelationNeedsWAL(index))
+	{
+		xlogState = GenericXLogStart(index);
+		page = GenericXLogRegisterBuffer(xlogState, buf, 0);
+		metap = PgturbohybridGraphPageGetMeta(page);
+	}
+
+	newNodeId = metap->tqNodeCount;
+	metap->tqNodeCount = newNodeId + 1;
+	PgturbohybridGraphMarkPageGraphOp(page,
+									  PGTURBOHYBRID_GRAPH_GRAPH_OP_ELEMENT_INSERT);
+
+	if (xlogState != NULL)
+		GenericXLogFinish(xlogState);
+	else
+		MarkBufferDirty(buf);
+	UnlockReleaseBuffer(buf);
+
+	/* Snapshot with the reservation applied. */
+	memset(meta, 0, sizeof(PgturbohybridGraphMetaPageData));
+	buf = ReadBuffer(index, PGTURBOHYBRID_GRAPH_METAPAGE_BLKNO);
+	LockBuffer(buf, BUFFER_LOCK_SHARE);
+	page = BufferGetPage(buf);
+	metap = PgturbohybridGraphPageGetMeta(page);
+	pageHeader = (PageHeader) page;
+	metaStart = (Size) ((char *) metap - (char *) page);
+	metaBytes = pageHeader->pd_lower > metaStart ?
+		pageHeader->pd_lower - metaStart : 0;
+	if (metaBytes > sizeof(PgturbohybridGraphMetaPageData))
+		metaBytes = sizeof(PgturbohybridGraphMetaPageData);
+	memcpy(meta, metap, metaBytes);
+	UnlockReleaseBuffer(buf);
+	return newNodeId;
+}
+
 static uint32
 PgturbohybridGraphInsertValueInPlaceInternal(Relation index, IndexInfo *indexInfo,
 								  ItemPointer heap_tid, Datum value,
@@ -1862,7 +1924,17 @@ PgturbohybridGraphInsertValueInPlaceInternal(Relation index, IndexInfo *indexInf
 				(errcode(ERRCODE_DATA_EXCEPTION),
 				 errmsg("different vector dimensions are not supported in the same pgturbohybrid graph")));
 
-	newNodeId = meta.tqNodeCount;
+	/*
+	 * Reserve the node id under the metapage buffer lock.  This is the
+	 * liveness anchor for share-mode DENSE inserts: id assignment and the
+	 * node count can no longer race between concurrent inserters.  Multivector
+	 * batch inserts keep ExclusiveLock and their own node accounting (the
+	 * docmap sidecar writer counts nodes itself), so they must NOT reserve.
+	 */
+	if (documentInsert == NULL)
+		newNodeId = PgturbohybridGraphReserveNodeId(index, &meta);
+	else
+		newNodeId = meta.tqNodeCount;
 	nodeLevel = PgturbohybridGraphPickLevel(newNodeId, meta.m);
 	levelCapacity = PgturbohybridGraphLevelCapacity(meta.m);
 	payloadCount = meta.tqPayloadCount;
@@ -2043,7 +2115,9 @@ PgturbohybridGraphInsertValueInPlaceInternal(Relation index, IndexInfo *indexInf
 	metaUpdate.m = meta.m;
 	metaUpdate.efConstruction = meta.efConstruction;
 	metaUpdate.graphMaxLevel = Max(meta.graphMaxLevel, nodeLevel);
-	metaUpdate.nodeCount = meta.tqNodeCount + 1;
+	/* Dense inserts reserved (+1 already in the snapshot); batches add 1. */
+	metaUpdate.nodeCount = documentInsert == NULL ?
+		meta.tqNodeCount : meta.tqNodeCount + 1;
 	metaUpdate.entryNodeId = entryNodeId;
 	metaUpdate.entryLevel = entryLevel;
 	metaUpdate.tqBits = meta.tqBits;

@@ -7387,35 +7387,25 @@ pgturbohybridaminsert(Relation index, Datum *values, bool *isnull, ItemPointer h
 		return false;
 
 	/*
-	 * O lock de escrita no índice volta a ser exclusivo (2026-07-28).
+	 * Inserts stay serialized by ExclusiveLock (2026-08-17 status below).
 	 *
-	 * O patch de 2026-07-11 baixou para ShareLock para deixar inserções
-	 * concorrerem, e o ganho de vazão era real. O custo não estava medido, e é
-	 * grave. Reproduzido em `scripts/db/stress-turbohybrid-concurrency.sh` com 4
-	 * escritores e 4 leitores sobre o mesmo índice:
+	 * The two root causes of the 2026-07-11 ShareLock incident ARE closed at
+	 * the source now: node ids are reserved by bumping tqNodeCount under the
+	 * metapage buffer lock before any neighbor work
+	 * (PgturbohybridGraphReserveNodeId), the final meta write applies
+	 * entry/level/count as deltas against the LIVE metapage
+	 * (PgturbohybridQuantUpdateMetaPageFromUpdate, !building path), and scan
+	 * storage is bounded by its snapshot capacity (nodeCapacity) so loaders
+	 * skip tuples newer than the snapshot.
 	 *
-	 *   1. Nós de grafo desaparecem. 60 linhas inseridas, 47 nós no grafo
-	 *      (node_count 237 contra bm25_document_count 260). O documento fica
-	 *      visível para a busca lexical e invisível para a busca vetorial, sem
-	 *      erro em log nenhum. `PgturbohybridGraphInsertValueInPlace` faz
-	 *      leia-modifique-escreva no metadado do grafo (contagem de nós, ponto de
-	 *      entrada), e dois desses ao mesmo tempo perdem um.
-	 *   2. O leitor quebra o processo. SIGSEGV em
-	 *      `PgturbohybridGraphLoadCodePage`, em `storage->codePagesLoaded[15]`:
-	 *      o cache nativo compartilhado é um arquivo mapeado em memória que o
-	 *      escritor faz crescer, e o leitor segue o ponteiro velho. Duas quedas
-	 *      do cluster inteiro em dois minutos de teste.
-	 *
-	 * O motivo original do patch — inserção segurando o índice por minutos —
-	 * tinha outra causa, consertada no mesmo dia: `PgturbohybridBm25AppendDelta`
-	 * segurava a página de metadados do BM25 em BUFFER_LOCK_EXCLUSIVE durante a
-	 * caminhada inteira da cadeia de delta, o que parava toda busca. Com aquela
-	 * janela fechada, serializar escrita por índice custa pouco: a escrita é
-	 * milissegundos, e a leitura continua concorrente sem restrição.
-	 *
-	 * Voltar a concorrer aqui exige antes: metadado do grafo com atualização
-	 * atômica e cache nativo com geração revalidada no leitor. Enquanto isso não
-	 * existir, correção vem antes de vazão.
+	 * The lock downgrade was then re-tested and REVERTED: with ShareLock
+	 * inserts, a READER still SIGSEGVs, but only under the mmap-backed SHARED
+	 * native cache policy (native_cache_scope=shared/auto). per_backend and
+	 * off survive the same stress (1 writer x 100 + 4 readers); shared drops
+	 * the backend within ~60-100 rounds. Root cause in the shared-cache
+	 * attach/build path under concurrent growth is NOT yet diagnosed (gdb
+	 * reproduction blocked by flake env). Until it is, correctness before
+	 * throughput; everything else is ready for the downgrade.
 	 */
 	LockPage(index, PGTURBOHYBRID_GRAPH_UPDATE_LOCK, ExclusiveLock);
 	PG_TRY();
