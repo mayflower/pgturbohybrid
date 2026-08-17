@@ -154,19 +154,25 @@ use alpha suffixes while the PostgreSQL extension SQL version remains `0.1.0`.
   while staying faster than pgvector and Qdrant. Explicit GUCs still override
   the profile defaults.
 
-### Known issues
+### Fixed (resolved the same day)
 
-- **Shared native cache + concurrent inserts can crash readers (pre-existing,
-  reproduced 2026-08-17).** With `turbohybrid.native_cache_scope = shared` (the
-  `auto` default on Linux), a hybrid scan against an index receiving concurrent
-  inserts SIGSEGVs the backend within ~60-100 stress rounds (1 writer x 100 +
-  4 readers reproduces; 6 writers x 100 + 4 readers reproduces). The same load
-  is stable with `per_backend` and `off` scopes. This is the reader-crash class
-  from the 2026-07-28 incident: the snapshot-capacity hardening (above) closed
-  the per-backend/uncached paths, but the shared mmap attach/build path under
-  concurrent growth still has an undiagnosed fault. Operational mitigation:
-  `SET turbohybrid.native_cache_scope = per_backend` on write-heavy indexes
-  until fixed.
+- **Shared native cache + concurrent inserts no longer crashes readers, and
+  dense inserts now run under ShareLock.** `PgturbohybridGraphLoadCodePage`
+  fell through to its page-load path on a borrowed immutable cache storage
+  (mmap arenas are PROT_READ; the shared view never allocates
+  `codePagesLoaded`), so a scan-visible node missing from the cache file
+  (build raced an insert) wrote into a read-only mapping or dereferenced
+  NULL -- reader SIGSEGV within 60-100 stress rounds, pre-existing under
+  both lock regimes. Cached storages now report such misses as not-visible,
+  and the shared cache builder discards files whose metapage moved
+  mid-build (no torn snapshot is ever attached). With the crash closed,
+  dense inserts take the graph update lock in SHARE mode (node-id
+  reservation under the metapage buffer lock + live-meta delta writes;
+  multivector batches, vacuum and compaction keep ExclusiveLock).
+  Evidence: 32/32 regression suite; stress with 4 concurrent hybrid
+  readers under the shared scope: 6 writers x 100 and 1 writer x 100, both
+  lock regimes, all green with rows == node_count == bm25_document_count
+  (the 2026-07-28 incident measured 237 vs 260).
 
 ## v0.1.0-alpha.2
 
