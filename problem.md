@@ -1,5 +1,12 @@
 # Multivector Document-Node Index Build Performance Problem
 
+> **Status update (2026-08-17):** the recommended scorer from "Fix Direction"
+> item 1 is implemented — `multivector_doc_graph_build_scorer` supports
+> `proxy` (default at scale) and `exact_symmetric`, with exact MaxSim kept for
+> final query rerank. Items 2–3 (defaults + parallel edge build under proxy
+> scoring) and the acceptance-criteria benchmark re-run remain open. See
+> `CHANGELOG.md` for the shipped behavior.
+
 ## Summary
 
 The current `multivector_graph = document_nodes` index build path is not
