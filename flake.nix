@@ -284,7 +284,7 @@
                       echo "listen_addresses = 'localhost'"
                     fi
                     echo "log_min_messages = warning"
-                    echo "client_min_messages = warning"
+                    echo "client_min_messages = notice"
                   } >> "$PGDATA/postgresql.conf"
                 fi
 

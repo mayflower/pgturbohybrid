@@ -99,6 +99,7 @@ typedef struct PgturbohybridOptions
 	int			bm25ImpactMinDf;
 	int			bm25ImpactHeadK;
 	int			bm25DeltaCompactionThreshold;
+	int			bm25TenantPayloadSlot;	/* bm25_tenant_payload_slot: INCLUDE slot with the tenant key, -1 disables */
 	int			hybridDefaultFusion;
 	int			hybridDefaultDenseK;
 	int			hybridDefaultBm25K;

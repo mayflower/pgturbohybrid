@@ -4,6 +4,24 @@ All notable changes for `pgturbohybrid` are documented here. Release tags may
 use alpha suffixes while the PostgreSQL extension SQL version remains `0.1.0`.
 
 ## Unreleased
+### Added
+
+- **Per-tenant BM25 statistics (`bm25Version 2`).** The BM25 meta tuple now
+  stores `tenantStatsStartBlkno`/`tenantCount`, and new per-tenant aggregate
+  pages (page kind 22, tuple type `0x6a`) hold `(tenant, docCount,
+  totalDocLen)` entries. When an index is built with
+  `INCLUDE (tenant_col int4)` (reloption `bm25_tenant_payload_slot`, default
+  slot 0, `-1` disables) and `turbohybrid.bm25_tenant_stats = on` (default),
+  the scorer resolves the tenant from the scan qual and rewrites
+  `docCount`/`avgDocLen` in the metadata snapshot before scoring, so idf and
+  length normalization stop leaking across tenants. Delta inserts increment
+  the aggregates in place under the BM25 delta lock; compaction rebuilds
+  exact aggregates. New SRF `turbohybrid_bm25_tenant_stats(index regclass)`
+  reports the live per-tenant aggregates for operations and verification.
+  Older `bm25Version 1` indexes keep global statistics; `REINDEX` rebuilds
+  them at version 2. Regression coverage:
+  `test/sql/pgturbohybrid_bm25_tenant.sql` (build, delta insert, scoped and
+  unscoped queries, plain-index fallback).
 
 ### Fixed
 

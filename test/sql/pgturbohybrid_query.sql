@@ -31,6 +31,7 @@ BEGIN
 		'turbohybrid.bm25_hybrid_bound',
 		'turbohybrid.bm25_impact_or_mode',
 		'turbohybrid.bm25_strategy',
+		'turbohybrid.bm25_tenant_stats',
 		'turbohybrid.calibrated_fusion_both_match_bonus',
 		'turbohybrid.calibrated_fusion_broad_dense_alpha',
 		'turbohybrid.calibrated_fusion_default_alpha',

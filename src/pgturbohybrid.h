@@ -165,7 +165,8 @@ typedef enum PgturbohybridMultiVectorRerankSource
 #define PGTURBOHYBRID_GRAPH_PAGE_KIND_SPARSE_LEXICON	17
 #define PGTURBOHYBRID_GRAPH_PAGE_KIND_SPARSE_POSTINGS	18
 #define PGTURBOHYBRID_GRAPH_PAGE_KIND_SPARSE_BLOCKMAX	19
-#define PGTURBOHYBRID_GRAPH_PAGE_KIND_SPARSE_DELTA		20
+#define PGTURBOHYBRID_GRAPH_PAGE_KIND_SPARSE_DELTA	20
+#define PGTURBOHYBRID_GRAPH_PAGE_KIND_BM25_TENANT	22
 #define PGTURBOHYBRID_GRAPH_PAGE_KIND_NODEMAP			21
 #define PGTURBOHYBRID_GRAPH_PAGE_KIND_MASK				0x00ff
 #define PGTURBOHYBRID_GRAPH_PAGE_GRAPH_OP_SHIFT		8
@@ -315,8 +316,8 @@ extern int	pgturbohybrid_dense_local_expansion_topn;
 extern int	pgturbohybrid_dense_local_expansion_max_neighbors;
 extern int	pgturbohybrid_payload_entry_seeding;
 extern int	pgturbohybrid_payload_entry_seed_count;
+extern bool pgturbohybrid_bm25_tenant_stats;
 extern int	pgturbohybrid_final_diversity;
-extern int	pgturbohybrid_final_diversity_payload_slot;
 extern double pgturbohybrid_final_diversity_lambda;
 extern int	pgturbohybrid_final_diversity_pool_multiplier;
 extern int	pgturbohybrid_graph_lock_tranche_id;

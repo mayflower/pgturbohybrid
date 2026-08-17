@@ -84,6 +84,7 @@ static bool pgturbohybrid_am_init_done = false;
 
 int			pgturbohybrid_profile = PGTURBOHYBRID_PROFILE_LATENCY;
 bool		pgturbohybrid_enable_wand = true;
+bool		pgturbohybrid_bm25_tenant_stats = true;
 int			pgturbohybrid_max_union_candidates = 100000;
 int			pgturbohybrid_default_dense_k = PGTURBOHYBRID_DEFAULT_DENSE_K;
 int			pgturbohybrid_default_bm25_k = PGTURBOHYBRID_DEFAULT_BM25_K;
@@ -7359,9 +7360,10 @@ pgturbohybridaminsert(Relation index, Datum *values, bool *isnull, ItemPointer h
 																		 values,
 																		 isnull,
 																		 &insertedNodes);
-			if (insertedNodes > 0 &&
-				PgturbohybridIndexGetLexicalDatum(index, values, isnull, &lexicalValue))
-				PgturbohybridBm25AppendDelta(index, nodeId, heap_tid, lexicalValue);
+		if (insertedNodes > 0 &&
+			PgturbohybridIndexGetLexicalDatum(index, values, isnull, &lexicalValue))
+			PgturbohybridBm25AppendDelta(index, nodeId, heap_tid, lexicalValue,
+										 PgturbohybridBm25TenantFromValues(index, values, isnull));
 		}
 		PG_CATCH();
 		{
@@ -7416,7 +7418,8 @@ pgturbohybridaminsert(Relation index, Datum *values, bool *isnull, ItemPointer h
 		nodeId = PgturbohybridGraphInsertValueInPlace(index, indexInfo, heap_tid,
 													  value, values, isnull);
 		if (PgturbohybridIndexGetLexicalDatum(index, values, isnull, &lexicalValue))
-			PgturbohybridBm25AppendDelta(index, nodeId, heap_tid, lexicalValue);
+			PgturbohybridBm25AppendDelta(index, nodeId, heap_tid, lexicalValue,
+										 PgturbohybridBm25TenantFromValues(index, values, isnull));
 	}
 	PG_CATCH();
 	{
@@ -8185,6 +8188,7 @@ pgturbohybridamoptions(Datum reloptions, bool validate)
 		PGTURBOHYBRID_RELOPT_PARSE("multivector_context_mode", RELOPT_TYPE_ENUM, multivectorContextMode),
 		PGTURBOHYBRID_RELOPT_PARSE("multivector_field_mode", RELOPT_TYPE_ENUM, multivectorFieldMode),
 		PGTURBOHYBRID_RELOPT_PARSE("page_compaction_threshold", RELOPT_TYPE_INT, pageCompactionThreshold),
+		PGTURBOHYBRID_RELOPT_PARSE("bm25_tenant_payload_slot", RELOPT_TYPE_INT, bm25TenantPayloadSlot),
 		PGTURBOHYBRID_RELOPT_PARSE("sparse_quant_bits", RELOPT_TYPE_INT, sparseQuantBits),
 		PGTURBOHYBRID_RELOPT_PARSE("sparse_quant_mode", RELOPT_TYPE_ENUM, sparseQuantMode),
 		PGTURBOHYBRID_RELOPT_PARSE("sparse_postings_encoding", RELOPT_TYPE_ENUM, sparsePostingsEncoding),
@@ -8529,6 +8533,10 @@ PgturbohybridInit(void)
 				  "Percentage of dead graph nodes that triggers automatic page chain compaction during VACUUM (0 = disabled)",
 				  25, 0, 100, AccessExclusiveLock);
 
+	add_int_reloption(pgturbohybrid_relopt_kind, "bm25_tenant_payload_slot",
+				  "Zero-based INCLUDE payload slot carrying the int4 tenant key for per-tenant BM25 statistics (-1 disables tracking)",
+				  0, -1, PGTURBOHYBRID_GRAPH_MAX_PAYLOADS - 1, AccessExclusiveLock);
+
 	add_int_reloption(pgturbohybrid_relopt_kind, "sparse_quant_bits",
 			  "Sparse postings weight quantization bits (0=f32, 8=q8, 16=q16)",
 			  0, 0, 16, AccessExclusiveLock);
@@ -8561,8 +8569,13 @@ PgturbohybridInit(void)
 		GetConfigOption("turbohybrid.default_dense_k", true, false) != NULL;
 	if (gucsAlreadyDefined)
 		return;
-
 	PgturbohybridDefineDefaultBudgetGUCs();
+	DefineCustomBoolVariable("turbohybrid.bm25_tenant_stats",
+							 "Scope BM25 idf and length normalization to the tenant extracted from the query's int4 payload equality filter",
+							 "Requires an index built with bm25_tenant_payload_slot and a tenant stats chain (bm25Version >= 2). Queries without the filter, or tenants without recorded aggregates, keep global statistics.",
+							 &pgturbohybrid_bm25_tenant_stats,
+							 true,
+							 PGC_USERSET, 0, NULL, NULL, NULL);
 	DefineCustomBoolVariable("turbohybrid.enable_wand", "Enable WAND pruning for BM25 candidate generation",
 							 NULL, &pgturbohybrid_enable_wand,
 							 true, PGC_USERSET, 0, NULL, NULL, NULL);

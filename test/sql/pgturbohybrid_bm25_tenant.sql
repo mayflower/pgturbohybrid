@@ -1,0 +1,108 @@
+\set ON_ERROR_STOP on
+SET client_min_messages = warning;
+
+CREATE EXTENSION IF NOT EXISTS vector;
+CREATE EXTENSION IF NOT EXISTS pgturbohybrid;
+
+-- Per-tenant BM25 corpus statistics.
+--
+-- The lexical index is one shared corpus; before this feature idf and
+-- length normalization used one global N and avgdl for every tenant. This
+-- test pins the per-tenant aggregate maintenance (build, delta insert) and
+-- the scoped query path (turbohybrid.bm25_tenant_stats with an int4
+-- equality qual on the INCLUDE payload column).
+
+DROP TABLE IF EXISTS tqh_bm25_tenant_docs;
+CREATE TABLE tqh_bm25_tenant_docs (
+	id int PRIMARY KEY,
+	tenant int4 NOT NULL,
+	embedding vector(3),
+	body_tsv tsvector
+);
+
+-- Tenant 11: four short documents. Tenant 22: two much longer documents,
+-- so the per-tenant avgdl differs from the global one by construction.
+INSERT INTO tqh_bm25_tenant_docs (id, tenant, embedding, body_tsv) VALUES
+	(1, 11, '[1,0,0]', to_tsvector('simple', 'alpha beta')),
+	(2, 11, '[0,1,0]', to_tsvector('simple', 'alpha gamma')),
+	(3, 11, '[0,0,1]', to_tsvector('simple', 'beta delta')),
+	(4, 11, '[1,1,0]', to_tsvector('simple', 'gamma epsilon')),
+	(5, 22, '[0.5,0.5,0]', to_tsvector('simple',
+		'alpha shared shared shared shared shared shared shared shared shared tail')),
+	(6, 22, '[0.5,0,0.5]', to_tsvector('simple',
+		'alpha shared shared shared shared shared shared shared shared shared end'));
+
+CREATE INDEX tqh_bm25_tenant_docs_idx ON tqh_bm25_tenant_docs
+USING turbohybrid (
+	embedding vector_cosine_turbohybrid_ops,
+	body_tsv bm25_tsvector_turbohybrid_ops
+) INCLUDE (tenant);
+
+-- Build must record both tenants with their own document counts.
+SELECT tenant, doc_count, total_doc_len > 0 AS has_len,
+	avg_doc_len > 0 AS has_avg
+FROM turbohybrid_bm25_tenant_stats('tqh_bm25_tenant_docs_idx'::regclass)
+ORDER BY tenant;
+
+-- Delta insert path: the tenant aggregate must grow in place.
+INSERT INTO tqh_bm25_tenant_docs (id, tenant, embedding, body_tsv) VALUES
+	(7, 11, '[0,1,1]', to_tsvector('simple', 'alpha zeta'));
+
+SELECT tenant, doc_count
+FROM turbohybrid_bm25_tenant_stats('tqh_bm25_tenant_docs_idx'::regclass)
+ORDER BY tenant;
+
+-- Scoped hybrid queries: the tenant equality qual drives both the payload
+-- filter and the per-tenant statistics. Both GUC positions must work and
+-- return only tenant rows.
+SET turbohybrid.bm25_tenant_stats = on;
+SET enable_sort = off;
+SELECT count(*) AS scoped_rows FROM (
+	SELECT id FROM tqh_bm25_tenant_docs
+	WHERE tenant = 11
+	ORDER BY embedding <~> turbohybrid_query(
+		vector_query => '[0.9,0.1,0]'::vector,
+		text_query => websearch_to_tsquery('simple', 'alpha'))
+	LIMIT 5
+) scoped;
+
+SET turbohybrid.bm25_tenant_stats = off;
+SET enable_sort = off;
+SELECT count(*) AS unscoped_rows FROM (
+	SELECT id FROM tqh_bm25_tenant_docs
+	WHERE tenant = 22
+	ORDER BY embedding <~> turbohybrid_query(
+		vector_query => '[0.1,0.9,0]'::vector,
+		text_query => websearch_to_tsquery('simple', 'alpha'))
+	LIMIT 5
+) unscoped;
+RESET turbohybrid.bm25_tenant_stats;
+
+-- Indexes without an INCLUDE payload column keep global statistics and the
+-- reporting function returns no rows for them.
+DROP TABLE IF EXISTS tqh_bm25_tenant_plain;
+CREATE TABLE tqh_bm25_tenant_plain (
+	id int PRIMARY KEY,
+	embedding vector(3),
+	body_tsv tsvector
+);
+INSERT INTO tqh_bm25_tenant_plain VALUES
+	(1, '[1,0,0]', to_tsvector('simple', 'alpha beta'));
+
+CREATE INDEX tqh_bm25_tenant_plain_idx ON tqh_bm25_tenant_plain
+USING turbohybrid (
+	embedding vector_cosine_turbohybrid_ops,
+	body_tsv bm25_tsvector_turbohybrid_ops
+);
+
+SELECT count(*) AS plain_rows
+FROM turbohybrid_bm25_tenant_stats('tqh_bm25_tenant_plain_idx'::regclass);
+
+SELECT id FROM tqh_bm25_tenant_plain
+ORDER BY embedding <~> turbohybrid_query(
+	vector_query => '[1,0,0]'::vector,
+	text_query => websearch_to_tsquery('simple', 'alpha'))
+LIMIT 1;
+
+DROP TABLE tqh_bm25_tenant_plain;
+DROP TABLE tqh_bm25_tenant_docs;

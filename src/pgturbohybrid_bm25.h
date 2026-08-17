@@ -14,6 +14,7 @@ typedef struct PgturbohybridBm25BuildDoc
 	uint32		nodeId;
 	ItemPointerData heaptid;
 	uint32		docLen;
+	int32		tenant;			/* per-tenant stats key, 0 = untracked */
 } PgturbohybridBm25BuildDoc;
 
 typedef struct PgturbohybridBm25TermTuple
@@ -182,16 +183,17 @@ typedef struct PgturbohybridBm25QuerySignals
 	int			queryShape;
 } PgturbohybridBm25QuerySignals;
 
-#define PGTURBOHYBRID_BM25_VERSION 1
+#define PGTURBOHYBRID_BM25_VERSION 2
 #define PGTURBOHYBRID_BM25_META_TUPLE_TYPE		0x61
 #define PGTURBOHYBRID_BM25_DOCSTATS_TUPLE_TYPE	0x62
 #define PGTURBOHYBRID_BM25_LEXICON_TUPLE_TYPE	0x63
 #define PGTURBOHYBRID_BM25_POSTINGS_TUPLE_TYPE	0x64
 #define PGTURBOHYBRID_BM25_BLOCKMAX_TUPLE_TYPE	0x65
 #define PGTURBOHYBRID_BM25_DELTA_TUPLE_TYPE		0x66
-#define PGTURBOHYBRID_BM25_IMPACT_TUPLE_TYPE		0x67
+#define PGTURBOHYBRID_BM25_IMPACT_TUPLE_TYPE	0x67
 #define PGTURBOHYBRID_BM25_DELTA_TERM_TUPLE_TYPE	0x68
 #define PGTURBOHYBRID_BM25_DELTA_DIRECTORY_TUPLE_TYPE 0x69
+#define PGTURBOHYBRID_BM25_TENANT_TUPLE_TYPE	0x6a
 #define PGTURBOHYBRID_BM25_DELTA_TERM_BUCKETS	64
 #define PGTURBOHYBRID_BM25_META_FLAG_TFNORM_Q16 0x0001
 #define PGTURBOHYBRID_BM25_META_FLAG_IMPACT_HEAD 0x0002
@@ -234,6 +236,9 @@ typedef struct PgturbohybridBm25MetaTupleData
 	uint32		deltaTermPages;
 	uint64		lastCompactionGeneration;
 	uint32		compactionCount;
+	/* --- bm25Version >= 2 tail fields; absent (zero-filled) on old indexes --- */
+	BlockNumber tenantStatsStartBlkno;
+	uint32		tenantCount;
 } PgturbohybridBm25MetaTupleData;
 
 typedef PgturbohybridBm25MetaTupleData *PgturbohybridBm25MetaTuple;
@@ -241,8 +246,13 @@ typedef PgturbohybridBm25MetaTupleData *PgturbohybridBm25MetaTuple;
 typedef struct TqBm25DocStat
 {
 	uint32		docLen;
-	uint16		flags;
-	uint16		reserved;
+	/*
+	 * Tenant key for per-tenant corpus statistics (bm25Version >= 2).
+	 * Occupies the bytes that were `flags`/`reserved` in version 1, so the
+	 * tuple size is unchanged and version-1 pages read back as tenant 0
+	 * (those pages were palloc0'd, so the bytes were zero).
+	 */
+	int32		tenant;
 } TqBm25DocStat;
 
 typedef struct PgturbohybridBm25DocStatsTupleData
@@ -338,6 +348,9 @@ typedef struct PgturbohybridBm25DeltaTupleData
 	ItemPointerData heaptid;
 	uint32		docLen;
 	uint32		termBytesLen;
+	/* Tenant key (bm25Version >= 2 writers). Version-1 delta tuples end at
+	 * termBytesLen; readers distinguish layouts by item size. */
+	int32		tenant;
 	PgturbohybridBm25DeltaTerm terms[FLEXIBLE_ARRAY_MEMBER];
 	/* followed by term bytes */
 } PgturbohybridBm25DeltaTupleData;
@@ -421,7 +434,8 @@ typedef PgturbohybridBm25LexiconEntryData *PgturbohybridBm25LexiconEntry;
 void		PgturbohybridBm25BuildEmpty(Relation index);
 void		PgturbohybridBm25BuildCollect(Relation heap, Relation index, IndexInfo *indexInfo);
 void		PgturbohybridBm25AppendDelta(Relation index, uint32 nodeId,
-									ItemPointer heapTid, Datum tsvectorDatum);
+									ItemPointer heapTid, Datum tsvectorDatum,
+									int32 tenant);
 bool		PgturbohybridBm25MaybeCompact(Relation index);
 void		PgturbohybridBm25ResetDeltaAppendCursor(Relation index);
 void		PgturbohybridBm25InvalidateCache(Relation index);
@@ -439,6 +453,82 @@ int			PgturbohybridBm25TopK(Relation index, TSQuery query, int32 k,
 							  PgturbohybridBm25Result **results,
 							  PgturbohybridBm25QueryStats *stats,
 							  const PgturbohybridBm25FusedScoreBoundContext *fusedBound);
+
+/*
+ * Per-tenant BM25 corpus statistics.
+ *
+ * One index still stores one lexical corpus, but idf/avgdl inputs can now be
+ * scoped to the tenant of the scanning backend. The tenant key comes from an
+ * INCLUDE int4 payload column (slot chosen by the bm25_tenant_payload_slot
+ * reloption); documents without tenant tracking fall in bucket 0, which never
+ * matches a real scoped query and therefore always uses global statistics.
+ */
+#define PGTURBOHYBRID_BM25_TENANT_CAPACITY_PER_PAGE(cap) \
+	(((cap) - offsetof(PgturbohybridBm25TenantTupleData, entries)) / \
+	 sizeof(PgturbohybridBm25TenantEntryData))
+
+typedef struct PgturbohybridBm25TenantEntryData
+{
+	int32		tenant;			/* 0 = empty slot */
+	uint32		docCount;
+	uint64		totalDocLen;
+} PgturbohybridBm25TenantEntryData;
+
+typedef struct PgturbohybridBm25TenantTupleData
+{
+	uint8		type;
+	uint8		reserved1;
+	uint16		count;
+	uint16		capacity;
+	uint16		reserved2;
+	PgturbohybridBm25TenantEntryData entries[FLEXIBLE_ARRAY_MEMBER];
+} PgturbohybridBm25TenantTupleData;
+
+typedef PgturbohybridBm25TenantTupleData *PgturbohybridBm25TenantTuple;
+
+typedef struct PgturbohybridBm25TenantScope
+{
+	bool		active;
+	int32		tenant;
+	double		corpusDocCount;	/* tenant N + tenant delta docs */
+	double		avgDocLen;		/* tenant avgdl */
+	bool		q16FastPathDisabled; /* tenant avgdl differs from global */
+} PgturbohybridBm25TenantScope;
+
+/* In-memory accumulator used during build/compaction. */
+typedef struct PgturbohybridBm25TenantAccum
+{
+	PgturbohybridBm25TenantEntryData *entries;
+	uint32		capacity;
+	uint32		count;
+	bool		saturated;
+} PgturbohybridBm25TenantAccum;
+
+void		PgturbohybridBm25TenantAccumInit(PgturbohybridBm25TenantAccum *accum);
+void		PgturbohybridBm25TenantAccumAdd(PgturbohybridBm25TenantAccum *accum,
+										 int32 tenant, uint32 docLen);
+void		PgturbohybridBm25TenantAccumFree(PgturbohybridBm25TenantAccum *accum);
+BlockNumber PgturbohybridBm25TenantWritePages(Relation index,
+										   const PgturbohybridBm25TenantAccum *accum,
+										   bool walLogged, uint32 *tenantCountOut);
+bool		PgturbohybridBm25TenantLookup(Relation index, BlockNumber tenantStatsBlkno,
+									 int32 tenant,
+									 PgturbohybridBm25TenantEntryData *entry);
+bool		PgturbohybridBm25TenantIncrement(Relation index,
+										 BlockNumber tenantStatsBlkno,
+										 int32 tenant, uint32 docLen,
+										 uint64 deltaGeneration);
+bool		PgturbohybridBm25ResolveTenantScope(Relation index,
+										 const PgturbohybridBm25MetaTupleData *meta,
+										 PgturbohybridBm25TenantScope *scope);
+void		PgturbohybridBm25MetaApplyTenantScope(Relation index,
+										 PgturbohybridBm25MetaTupleData *meta);
+bool		PgturbohybridBm25DeltaTupleDecode(PgturbohybridBm25DeltaTuple tuple,
+										 Size itemSize, int32 *tenant,
+										 PgturbohybridBm25DeltaTerm **terms);
+int			PgturbohybridBm25TenantPayloadSlot(Relation index);
+int32		PgturbohybridBm25TenantFromValues(Relation index, Datum *values,
+										 const bool *isnull);
 
 typedef enum PgturbohybridBm25Kernel
 {

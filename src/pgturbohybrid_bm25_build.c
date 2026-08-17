@@ -11,6 +11,7 @@
 #include "storage/bufmgr.h"
 #include "storage/buffile.h"
 #include "storage/lmgr.h"
+#include "storage/bufpage.h"
 #include "tsearch/ts_type.h"
 #include "utils/guc.h"
 #include "utils/memutils.h"
@@ -42,6 +43,9 @@ typedef struct PgturbohybridBm25Collector
 	uint32		termBytesCapacity;
 	uint64		totalDocLen;
 	uint32		maxDocLen;
+	PgturbohybridBm25TenantAccum tenantAccum;
+	BlockNumber bm25TenantStatsStartBlkno;
+	uint32		bm25TenantCount;
 	uint32		uniqueTerms;
 	BlockNumber bm25MetaBlkno;
 	BlockNumber bm25DocStatsStartBlkno;
@@ -119,6 +123,7 @@ PgturbohybridBufFileReadExact(BufFile *file, void *ptr, size_t size)
 }
 
 static bool PgturbohybridBm25PageIsKind(Page page, uint16 pageKind);
+static void PgturbohybridWriteTenantPages(PgturbohybridBm25Collector *collector);
 static bool PgturbohybridBm25ReadMeta(Relation index, PgturbohybridBm25MetaTupleData *meta,
 								 BlockNumber *metaBlkno);
 static bool PgturbohybridBm25ReadMetaForUpdate(Relation index, Buffer *outBuf,
@@ -582,6 +587,7 @@ PgturbohybridBm25BuildDeltaChunk(PgturbohybridBm25Collector *collector,
 								 uint32 nodeId,
 								 ItemPointer heapTid,
 								 uint32 docLen,
+								 int32 tenant,
 								 uint32 startTerm,
 								 uint32 chunkTermCount,
 								 Size *outSize)
@@ -600,9 +606,10 @@ PgturbohybridBm25BuildDeltaChunk(PgturbohybridBm25Collector *collector,
 	delta->type = PGTURBOHYBRID_BM25_DELTA_TUPLE_TYPE;
 	delta->termCount = (uint16) chunkTermCount;
 	delta->nodeId = nodeId;
-	delta->heaptid = *heapTid;
 	delta->docLen = docLen;
+	delta->tenant = tenant;
 	delta->termBytesLen = termBytesUsed;
+	delta->heaptid = *heapTid;
 	deltaBytes = ((char *) delta) +
 		offsetof(PgturbohybridBm25DeltaTupleData, terms) +
 		sizeof(PgturbohybridBm25DeltaTerm) * chunkTermCount;
@@ -1108,7 +1115,7 @@ PgturbohybridCollectVectorTerms(PgturbohybridBm25Collector *collector, uint32 no
 
 static void
 PgturbohybridAppendBuildDoc(PgturbohybridBm25Collector *collector, uint32 nodeId,
-					   ItemPointer heapTid, uint32 docLen)
+					   ItemPointer heapTid, uint32 docLen, int32 tenant)
 {
 	PgturbohybridBm25BuildDoc *doc;
 
@@ -1117,8 +1124,10 @@ PgturbohybridAppendBuildDoc(PgturbohybridBm25Collector *collector, uint32 nodeId
 	doc->nodeId = nodeId;
 	doc->heaptid = *heapTid;
 	doc->docLen = docLen;
+	doc->tenant = tenant;
 	collector->totalDocLen += docLen;
 	collector->maxDocLen = Max(collector->maxDocLen, docLen);
+	PgturbohybridBm25TenantAccumAdd(&collector->tenantAccum, tenant, docLen);
 }
 
 static void
@@ -1170,7 +1179,8 @@ PgturbohybridBm25BuildCallback(Relation index, ItemPointer tid, Datum *values,
 
 	docLen = PgturbohybridDocLen(vector);
 
-	PgturbohybridAppendBuildDoc(collector, nodeId, tid, docLen);
+	PgturbohybridAppendBuildDoc(collector, nodeId, tid, docLen,
+								PgturbohybridBm25TenantFromValues(index, values, isnull));
 	PgturbohybridCollectVectorTerms(collector, nodeId, vector);
 	if (mustFree)
 		pfree(vector);
@@ -1608,6 +1618,7 @@ PgturbohybridWriteDocStats(PgturbohybridBm25Collector *collector)
 		if (collector->docs[i].nodeId >= collector->tidNodeCount)
 			elog(ERROR, "pgturbohybrid BM25 doc nodeId out of range");
 		dense[collector->docs[i].nodeId].docLen = collector->docs[i].docLen;
+		dense[collector->docs[i].nodeId].tenant = collector->docs[i].tenant;
 	}
 	collector->denseDocLens =
 		palloc0(PgturbohybridCheckedArrayBytes(sizeof(uint32),
@@ -2809,6 +2820,8 @@ PgturbohybridWriteMeta(PgturbohybridBm25Collector *collector)
 	tuple.deltaTermPages = 0;
 	tuple.lastCompactionGeneration = 0;
 	tuple.compactionCount = 0;
+	tuple.tenantStatsStartBlkno = collector->bm25TenantStatsStartBlkno;
+	tuple.tenantCount = collector->bm25TenantCount;
 
 	(void) PgturbohybridBm25AddItem(collector->index, MAIN_FORKNUM, &buf, &page,
 							   &start, PGTURBOHYBRID_GRAPH_PAGE_KIND_BM25_META,
@@ -2830,8 +2843,11 @@ PgturbohybridBm25WriteBasePages(PgturbohybridBm25Collector *collector)
 	collector->bm25PostingsPages = 0;
 	collector->bm25BlockMaxPages = 0;
 	collector->bm25ImpactPages = 0;
+	collector->bm25TenantStatsStartBlkno = InvalidBlockNumber;
+	collector->bm25TenantCount = 0;
 
 	PgturbohybridWriteDocStats(collector);
+	PgturbohybridWriteTenantPages(collector);
 	PgturbohybridWriteLexiconAndPostings(collector);
 }
 
@@ -2851,13 +2867,86 @@ PgturbohybridBm25DeltaTermBytes(PgturbohybridBm25DeltaTuple tuple)
 		sizeof(PgturbohybridBm25DeltaTerm) * tuple->termCount;
 }
 
+/*
+ * Write the per-tenant aggregate chain from the collector's accumulator.
+ * One tuple per page; pages chain via the standard graph opaque nextblkno.
+ * With no tracked tenants (no payload column, all bucket 0, or an empty
+ * build) nothing is written and the meta anchor stays invalid, which keeps
+ * every query on global statistics.
+ */
+static void
+PgturbohybridWriteTenantPages(PgturbohybridBm25Collector *collector)
+{
+	Buffer		buf = InvalidBuffer;
+	Page		page = NULL;
+	BlockNumber start = InvalidBlockNumber;
+	Size		maxItemSize = PgturbohybridGraphMaxItemSize();
+	uint16		capacity =
+		(maxItemSize - offsetof(PgturbohybridBm25TenantTupleData, entries)) /
+		sizeof(PgturbohybridBm25TenantEntryData);
+	const PgturbohybridBm25TenantAccum *accum = &collector->tenantAccum;
+
+	collector->bm25TenantStatsStartBlkno = InvalidBlockNumber;
+	collector->bm25TenantCount = 0;
+
+	if (accum->entries == NULL || accum->count == 0)
+		return;
+
+	for (uint32 base = 0; base < accum->capacity; )
+	{
+		uint16		count = 0;
+		Size		size;
+		PgturbohybridBm25TenantTuple tuple;
+
+		while (base + count < accum->capacity && count < capacity)
+		{
+			if (accum->entries[base + count].tenant != 0)
+				count++;
+			else if (count > 0)
+				break;
+			else
+				base++;
+		}
+		if (count == 0)
+			break;
+
+		/*
+		 * Always allocate the full page capacity so later in-place appends
+		 * by PgturbohybridBm25TenantIncrement stay inside the item bounds.
+		 */
+		size = MAXALIGN(offsetof(PgturbohybridBm25TenantTupleData, entries) +
+						(Size) capacity * sizeof(PgturbohybridBm25TenantEntryData));
+		tuple = palloc0(size);
+		tuple->type = PGTURBOHYBRID_BM25_TENANT_TUPLE_TYPE;
+		tuple->count = count;
+		tuple->capacity = capacity;
+		memcpy(tuple->entries, &accum->entries[base],
+			   (Size) count * sizeof(PgturbohybridBm25TenantEntryData));
+
+		(void) PgturbohybridBm25AddItem(collector->index, MAIN_FORKNUM, &buf, &page,
+								   &start, PGTURBOHYBRID_GRAPH_PAGE_KIND_BM25_TENANT,
+								   (Item) tuple, size, NULL,
+								   collector->walLoggedWrites, NULL);
+		pfree(tuple);
+		collector->bm25TenantCount += count;
+		base += count;
+	}
+
+	if (BufferIsValid(buf))
+		UnlockReleaseBuffer(buf);
+	collector->bm25TenantStatsStartBlkno = start;
+}
+
+
 static void
 PgturbohybridBm25ReadDocLens(Relation index, const PgturbohybridBm25MetaTupleData *meta,
-						uint32 nodeCount, uint32 *docLens)
+						uint32 nodeCount, uint32 *docLens, int32 *tenants)
 {
 	BlockNumber blkno = meta->docStatsStartBlkno;
 
 	memset(docLens, 0, sizeof(uint32) * nodeCount);
+	if (tenants != NULL)
+		memset(tenants, 0, sizeof(int32) * nodeCount);
 	while (BlockNumberIsValid(blkno))
 	{
 		Buffer		buf;
@@ -2896,7 +2985,11 @@ PgturbohybridBm25ReadDocLens(Relation index, const PgturbohybridBm25MetaTupleDat
 				uint32		nodeId = tuple->startNodeId + i;
 
 				if (nodeId < nodeCount)
+				{
 					docLens[nodeId] = tuple->docs[i].docLen;
+					if (tenants != NULL)
+						tenants[nodeId] = tuple->docs[i].tenant;
+				}
 			}
 		}
 
@@ -3076,6 +3169,9 @@ PgturbohybridBm25CollectDelta(Relation index,
 			ItemId		iid = PageGetItemId(page, off);
 			PgturbohybridBm25DeltaTuple tuple;
 			char	   *termBytes;
+			bool		deltaHasTenant;
+			PgturbohybridBm25DeltaTerm *deltaTerms;
+			int32		deltaTenant = 0;
 
 			if (!ItemIdIsUsed(iid))
 				continue;
@@ -3086,17 +3182,26 @@ PgturbohybridBm25CollectDelta(Relation index,
 				!nodeStates[tuple->nodeId].live)
 				continue;
 
+			{
+				(void) PgturbohybridBm25DeltaTupleDecode(tuple, ItemIdGetLength(iid),
+														 &deltaTenant, &deltaTerms);
+				deltaHasTenant = deltaTenant != 0;
+			}
+
 			if (!docSeen[tuple->nodeId])
 			{
 				PgturbohybridAppendBuildDoc(collector, tuple->nodeId,
-									   &tuple->heaptid, tuple->docLen);
+									   &tuple->heaptid, tuple->docLen,
+									   deltaHasTenant ? deltaTenant : 0);
 				docSeen[tuple->nodeId] = true;
+
 			}
 
-			termBytes = PgturbohybridBm25DeltaTermBytes(tuple);
+			termBytes = ((char *) deltaTerms) +
+				sizeof(PgturbohybridBm25DeltaTerm) * tuple->termCount;
 			for (uint16 i = 0; i < tuple->termCount; i++)
 			{
-				PgturbohybridBm25DeltaTerm *term = &tuple->terms[i];
+				PgturbohybridBm25DeltaTerm *term = &deltaTerms[i];
 
 				if (term->termOffset + term->termLen > tuple->termBytesLen)
 					ereport(ERROR,
@@ -3165,6 +3270,16 @@ PgturbohybridBm25UpdateCompactedMeta(Relation index,
 	metaTuple->deltaTermPages = 0;
 	metaTuple->lastCompactionGeneration = metaTuple->deltaGeneration;
 	metaTuple->compactionCount = oldMeta->compactionCount + 1;
+	/*
+	 * The v2 tail fields only exist when the stored meta tuple is version 2
+	 * (96 bytes). A version-1 tuple cannot grow in place; those indexes keep
+	 * global statistics until REINDEX.
+	 */
+	if (metaTuple->bm25Version >= 2)
+	{
+		metaTuple->tenantStatsStartBlkno = collector->bm25TenantStatsStartBlkno;
+		metaTuple->tenantCount = collector->bm25TenantCount;
+	}
 
 	if (xlogState != NULL)
 		GenericXLogFinish(xlogState);
@@ -3184,6 +3299,7 @@ PgturbohybridBm25MaybeCompact(Relation index)
 	PgturbohybridNodeState *nodeStates;
 	uint32		nodeCount;
 	uint32	   *docLens;
+	int32	   *tenants;
 	bool	   *docSeen;
 	PgturbohybridOptions *opts = (PgturbohybridOptions *) index->rd_options;
 	int			threshold = opts != NULL ? opts->bm25DeltaCompactionThreshold : 25;
@@ -3272,10 +3388,13 @@ PgturbohybridBm25MaybeCompact(Relation index)
 		docLens = palloc0(PgturbohybridCheckedArrayBytes(sizeof(uint32),
 														 nodeCount,
 														 "pgturbohybrid BM25 compacted doc lengths"));
+		tenants = palloc0(PgturbohybridCheckedArrayBytes(sizeof(int32),
+														 nodeCount,
+														 "pgturbohybrid BM25 compacted doc tenants"));
 		docSeen = palloc0(PgturbohybridCheckedArrayBytes(sizeof(bool),
 														 nodeCount,
 														 "pgturbohybrid BM25 compacted doc visibility"));
-		PgturbohybridBm25ReadDocLens(index, &oldMeta, nodeCount, docLens);
+		PgturbohybridBm25ReadDocLens(index, &oldMeta, nodeCount, docLens, tenants);
 
 		memset(&collector, 0, sizeof(collector));
 		collector.index = index;
@@ -3283,13 +3402,15 @@ PgturbohybridBm25MaybeCompact(Relation index)
 		collector.allowSpill = true;
 		collector.walLoggedWrites = RelationNeedsWAL(index);
 		collector.tidNodeCount = nodeCount;
+		PgturbohybridBm25TenantAccumInit(&collector.tenantAccum);
 
 		for (uint32 nodeId = 0; nodeId < nodeCount; nodeId++)
 		{
 			if (nodeStates[nodeId].live && docLens[nodeId] > 0)
 			{
 				PgturbohybridAppendBuildDoc(&collector, nodeId,
-									   &nodeStates[nodeId].tid, docLens[nodeId]);
+									   &nodeStates[nodeId].tid, docLens[nodeId],
+									   tenants != NULL ? tenants[nodeId] : 0);
 				docSeen[nodeId] = true;
 			}
 		}
@@ -3380,6 +3501,8 @@ PgturbohybridBm25BuildCollect(Relation heap, Relation index, IndexInfo *indexInf
 	collector.index = index;
 	collector.softBudget = PgturbohybridBm25MaintenanceWorkMemBytes();
 	collector.allowSpill = true;
+	PgturbohybridBm25TenantAccumInit(&collector.tenantAccum);
+	collector.walLoggedWrites = RelationNeedsWAL(index);
 
 	if (!PgturbohybridGraphReadMeta(index, &graphMeta))
 		ereport(ERROR,
@@ -3731,7 +3854,7 @@ PgturbohybridBm25AppendDeltaTermSegments(Relation index,
  */
 static void
 PgturbohybridBm25AppendDeltaInternal(Relation index, uint32 nodeId,
-						ItemPointer heapTid, Datum tsvectorDatum)
+						ItemPointer heapTid, Datum tsvectorDatum, int32 tenant)
 {
 	MemoryContext ctx;
 	MemoryContext oldCtx;
@@ -3834,7 +3957,7 @@ PgturbohybridBm25AppendDeltaInternal(Relation index, uint32 nodeId,
 												 maxItemSize);
 
 		delta = PgturbohybridBm25BuildDeltaChunk(&collector, nodeId, heapTid,
-												 docLen, startTerm,
+												 docLen, tenant, startTerm,
 												 chunkTermCount, &deltaSize);
 		appendStart = BlockNumberIsValid(deltaTail) ? deltaTail : deltaStart;
 		(void) PgturbohybridGraphAppendTuple(index, MAIN_FORKNUM, &appendStart,
@@ -3886,6 +4009,16 @@ PgturbohybridBm25AppendDeltaInternal(Relation index, uint32 nodeId,
 	pgturbohybrid_bm25_delta_cursor_generation = metaTuple->deltaGeneration;
 	pgturbohybrid_bm25_delta_cursor_pages = metaTuple->deltaPages;
 
+	if (tenant != 0 &&
+		metaTuple->bm25Version >= 2 &&
+		BlockNumberIsValid(metaSnapshot.tenantStatsStartBlkno))
+	{
+		(void) PgturbohybridBm25TenantIncrement(index,
+												metaSnapshot.tenantStatsStartBlkno,
+												tenant, docLen,
+												metaTuple->deltaGeneration);
+	}
+
 	if (xlogState != NULL)
 		GenericXLogFinish(xlogState);
 	else
@@ -3917,13 +4050,13 @@ PgturbohybridBm25AppendDeltaInternal(Relation index, uint32 nodeId,
  */
 void
 PgturbohybridBm25AppendDelta(Relation index, uint32 nodeId,
-						ItemPointer heapTid, Datum tsvectorDatum)
+						ItemPointer heapTid, Datum tsvectorDatum, int32 tenant)
 {
 	LockPage(index, PGTURBOHYBRID_GRAPH_BM25_DELTA_LOCK, ExclusiveLock);
 	PG_TRY();
 	{
 		PgturbohybridBm25AppendDeltaInternal(index, nodeId, heapTid,
-											 tsvectorDatum);
+											 tsvectorDatum, tenant);
 	}
 	PG_CATCH();
 	{
@@ -4132,7 +4265,8 @@ retry_after_repair:
 		if (tuple->type != PGTURBOHYBRID_BM25_META_TUPLE_TYPE)
 			continue;
 
-		*meta = *tuple;
+		memset(meta, 0, sizeof(*meta));
+		memcpy(meta, tuple, Min(ItemIdGetLength(iid), (Size) sizeof(*meta)));
 		if (metaBlkno != NULL)
 			*metaBlkno = blkno;
 		UnlockReleaseBuffer(buf);

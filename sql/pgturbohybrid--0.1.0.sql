@@ -462,6 +462,15 @@ CREATE FUNCTION turbohybrid_estimate_memory(pg_catalog.regclass) RETURNS pg_cata
 	AS 'MODULE_PATHNAME', 'pgturbohybrid_estimate_memory'
 	LANGUAGE C STABLE STRICT PARALLEL SAFE;
 
+-- Per-tenant BM25 corpus statistics. Rows exist only for indexes built with
+-- bm25Version >= 2 metadata and a tracked tenant payload column; see
+-- turbohybrid.bm25_tenant_stats and the bm25_tenant_payload_slot reloption.
+CREATE FUNCTION turbohybrid_bm25_tenant_stats(index pg_catalog.regclass)
+	RETURNS TABLE(tenant pg_catalog.int4, doc_count pg_catalog.int8,
+				  total_doc_len pg_catalog.int8, avg_doc_len pg_catalog.float8)
+	AS 'MODULE_PATHNAME', 'pgturbohybrid_bm25_tenant_stats_fn'
+	LANGUAGE C STABLE STRICT PARALLEL RESTRICTED;
+
 CREATE FUNCTION turbohybrid_prewarm(pg_catalog.regclass) RETURNS pg_catalog.jsonb
 	AS 'MODULE_PATHNAME', 'pgturbohybrid_prewarm'
 	LANGUAGE C STRICT PARALLEL RESTRICTED;

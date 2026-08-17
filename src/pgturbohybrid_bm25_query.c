@@ -22,6 +22,7 @@
 #include "miscadmin.h"
 #include "portability/instr_time.h"
 #include "storage/bufmgr.h"
+#include "storage/bufpage.h"
 #include "tsearch/ts_type.h"
 #include "utils/hsearch.h"
 #include "utils/memutils.h"
@@ -1165,7 +1166,8 @@ PgturbohybridBm25ReadMeta(Relation index, PgturbohybridBm25MetaTupleData *meta)
 		tuple = (PgturbohybridBm25MetaTuple) PageGetItem(page, iid);
 		if (tuple->type == PGTURBOHYBRID_BM25_META_TUPLE_TYPE)
 		{
-			*meta = *tuple;
+			memset(meta, 0, sizeof(*meta));
+			memcpy(meta, tuple, Min(ItemIdGetLength(iid), (Size) sizeof(*meta)));
 			UnlockReleaseBuffer(buf);
 			return true;
 		}
@@ -2111,6 +2113,7 @@ PgturbohybridBm25BuildDeltaCacheEntries(Relation index,
 			ItemId		iid = PageGetItemId(page, off);
 			PgturbohybridBm25DeltaTuple tuple;
 			char	   *termBytes;
+			PgturbohybridBm25DeltaTerm *deltaTerms;
 
 			if (!ItemIdIsUsed(iid))
 				continue;
@@ -2120,10 +2123,13 @@ PgturbohybridBm25BuildDeltaCacheEntries(Relation index,
 				!cache->liveNodes[tuple->nodeId])
 				continue;
 
-			termBytes = PgturbohybridBm25DeltaTermBytes(tuple);
+			(void) PgturbohybridBm25DeltaTupleDecode(tuple, ItemIdGetLength(iid),
+												   NULL, &deltaTerms);
+			termBytes = ((char *) deltaTerms) +
+				sizeof(PgturbohybridBm25DeltaTerm) * tuple->termCount;
 			for (uint16 i = 0; i < tuple->termCount; i++)
 			{
-				PgturbohybridBm25DeltaTerm *term = &tuple->terms[i];
+				PgturbohybridBm25DeltaTerm *term = &deltaTerms[i];
 				PgturbohybridBm25DeltaBuildEntry *entry;
 
 				if (term->termOffset + term->termLen > tuple->termBytesLen)
@@ -2637,6 +2643,9 @@ PgturbohybridBm25AnalyzeQuerySignals(Relation index, TSQuery query,
 		!PgturbohybridBm25ReadMeta(index, &bm25Meta) ||
 		!PgturbohybridGraphReadMeta(index, &graphMeta))
 		return false;
+
+	/* Tenant-scoped rare/broad routing: see PgturbohybridBm25MetaApplyTenantScope. */
+	PgturbohybridBm25MetaApplyTenantScope(index, &bm25Meta);
 
 	oldCtx = MemoryContextSwitchTo(memoryContext);
 	termCount = PgturbohybridBm25ExtractTerms(query, &terms, memoryContext);
@@ -4978,6 +4987,16 @@ PgturbohybridBm25TopK(Relation index, TSQuery query, int32 k, bool useWand,
 		stats->cacheLivenessLoaded = cache->livenessLoaded;
 	}
 	(void) deltaPostingCount;
+
+	/*
+	 * Per-tenant corpus statistics: rewrite the scoring metadata now that
+	 * every structural cache (docstats, liveness, delta entries) is loaded.
+	 * Downstream idf, length normalization, WAND bounds, accumulator choice
+	 * and the TFNORM_Q16 fast path all follow the tenant corpus. No-op
+	 * without a tenant payload column, tenant stats, or an int4 equality
+	 * qual on that column.
+	 */
+	PgturbohybridBm25MetaApplyTenantScope(index, &bm25Meta);
 	for (int termNo = 0; termNo < termCount; termNo++)
 	{
 		if (!terms[termNo].hasLexicon && terms[termNo].deltaDf > 0)
