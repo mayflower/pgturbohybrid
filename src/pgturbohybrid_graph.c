@@ -886,6 +886,185 @@ pgturbohybrid_sparse_compact(PG_FUNCTION_ARGS)
 	PG_RETURN_BOOL(true);
 }
 
+
+/*
+ * Page accounting for turbohybrid_index_stats(): walk every chain anchored in
+ * the metapage (and the BM25/sparse sub-metas) counting reachable pages per
+ * page kind, then compare with a one-pass kind histogram over the whole
+ * relation.  The difference per chain-anchored kind is pages abandoned by past
+ * compactions (which repoint chains and leave the old pages behind).
+ */
+#define PGTURBOHYBRID_STATS_KIND_BUCKETS 256
+#define PGTURBOHYBRID_STATS_CHAIN_CAP (1 << 20)
+
+static void
+PgturbohybridStatsWalkChain(Relation index, BlockNumber startBlkno,
+							uint32 *reachable, BlockNumber nblocks)
+{
+	BlockNumber blkno = startBlkno;
+	uint32		visited = 0;
+
+	while (BlockNumberIsValid(blkno) && blkno < nblocks)
+	{
+		Buffer		buf;
+		Page		page;
+		PgturbohybridGraphPageOpaque opaque;
+
+		if (++visited > PGTURBOHYBRID_STATS_CHAIN_CAP)
+			break;				/* corrupt chain: bounded */
+		buf = ReadBuffer(index, blkno);
+		LockBuffer(buf, BUFFER_LOCK_SHARE);
+		page = BufferGetPage(buf);
+		opaque = PgturbohybridGraphPageGetOpaque(page);
+		if (opaque->page_id == PGTURBOHYBRID_GRAPH_PAGE_ID)
+			reachable[opaque->pageKind & PGTURBOHYBRID_GRAPH_PAGE_KIND_MASK]++;
+		blkno = opaque->nextblkno;
+		UnlockReleaseBuffer(buf);
+		if (blkno == startBlkno)
+			break;				/* self loop */
+	}
+}
+
+static void
+PgturbohybridStatsCountReachable(Relation index,
+								 const PgturbohybridGraphMetaPageData *meta,
+								 const PgturbohybridBm25MetaTupleData *bm25Meta,
+								 bool hasBm25Meta,
+								 uint32 *reachable, BlockNumber nblocks)
+{
+	PgturbohybridSparseMetaTupleData sparseMeta;
+
+	memset(reachable, 0, sizeof(uint32) * PGTURBOHYBRID_STATS_KIND_BUCKETS);
+
+	/* Metapage itself. */
+	reachable[PGTURBOHYBRID_GRAPH_PAGE_KIND_META] = 1;
+
+	/* Dense graph chains. */
+	PgturbohybridStatsWalkChain(index, meta->tqCodeStartBlkno, reachable, nblocks);
+	PgturbohybridStatsWalkChain(index, meta->tqAdjStartBlkno, reachable, nblocks);
+	PgturbohybridStatsWalkChain(index, meta->tqExactStartBlkno, reachable, nblocks);
+	PgturbohybridStatsWalkChain(index, meta->tqCorrectionStartBlkno, reachable, nblocks);
+	PgturbohybridStatsWalkChain(index, meta->tqNodeMapStartBlkno, reachable, nblocks);
+
+	/* Multivector docmap: contiguous range, not a chain. */
+	if (BlockNumberIsValid(meta->tqMultivectorDocMapStartBlkno))
+		reachable[PGTURBOHYBRID_GRAPH_PAGE_KIND_MULTIVECTOR_DOCMAP] +=
+			meta->tqMultivectorDocMapPageCount;
+
+	/* BM25 chains. */
+	if (hasBm25Meta)
+	{
+		PgturbohybridStatsWalkChain(index, bm25Meta->docStatsStartBlkno,
+									reachable, nblocks);
+		PgturbohybridStatsWalkChain(index, bm25Meta->lexiconStartBlkno,
+									reachable, nblocks);
+		PgturbohybridStatsWalkChain(index, bm25Meta->postingsStartBlkno,
+									reachable, nblocks);
+		PgturbohybridStatsWalkChain(index, bm25Meta->blockMaxStartBlkno,
+									reachable, nblocks);
+		PgturbohybridStatsWalkChain(index, bm25Meta->impactStartBlkno,
+									reachable, nblocks);
+		PgturbohybridStatsWalkChain(index, bm25Meta->deltaStartBlkno,
+									reachable, nblocks);
+		PgturbohybridStatsWalkChain(index, bm25Meta->deltaTermDirectoryBlkno,
+									reachable, nblocks);
+		PgturbohybridStatsWalkChain(index, bm25Meta->tenantStatsStartBlkno,
+									reachable, nblocks);
+
+		/*
+		 * The delta term directory is a single tuple on its head page; the
+		 * per-term bucket chains it anchors are live storage and must count
+		 * as in-use, or the accounting reports them as abandoned.
+		 */
+		if (BlockNumberIsValid(bm25Meta->deltaTermDirectoryBlkno))
+		{
+			Buffer		dbuf = ReadBuffer(index, bm25Meta->deltaTermDirectoryBlkno);
+			Page		dpage;
+			bool		dfound = false;
+
+			LockBuffer(dbuf, BUFFER_LOCK_SHARE);
+			dpage = BufferGetPage(dbuf);
+			if (PgturbohybridGraphPageGetOpaque(dpage)->page_id ==
+				PGTURBOHYBRID_GRAPH_PAGE_ID &&
+				(PgturbohybridGraphPageGetOpaque(dpage)->pageKind &
+				 PGTURBOHYBRID_GRAPH_PAGE_KIND_MASK) ==
+				PGTURBOHYBRID_GRAPH_PAGE_KIND_BM25_DELTA_TERM)
+			{
+				OffsetNumber dmax = PageGetMaxOffsetNumber(dpage);
+				PgturbohybridBm25DeltaDirectoryTupleData dirCopy;
+				bool		haveDir = false;
+
+				for (OffsetNumber doff = FirstOffsetNumber; doff <= dmax; doff++)
+				{
+					ItemId		diid = PageGetItemId(dpage, doff);
+					PgturbohybridBm25DeltaDirectoryTuple dtuple;
+
+					if (!ItemIdIsUsed(diid))
+						continue;
+					dtuple = (PgturbohybridBm25DeltaDirectoryTuple) PageGetItem(dpage, diid);
+					if (dtuple->type != PGTURBOHYBRID_BM25_DELTA_DIRECTORY_TUPLE_TYPE)
+						continue;
+					memcpy(&dirCopy, dtuple,
+						   Min(ItemIdGetLength(diid),
+							   sizeof(PgturbohybridBm25DeltaDirectoryTupleData)));
+					haveDir = true;
+					break;
+				}
+				UnlockReleaseBuffer(dbuf);
+				if (haveDir)
+				{
+					for (uint32 b = 0; b < dirCopy.bucketCount; b++)
+						PgturbohybridStatsWalkChain(index,
+													dirCopy.buckets[b].startBlkno,
+													reachable, nblocks);
+					dfound = true;
+				}
+			}
+			if (!dfound)
+				UnlockReleaseBuffer(dbuf);
+		}
+	}
+
+	/* Sparse inverted-index chains. */
+	if (BlockNumberIsValid(meta->tqSparseMetaStartBlkno) &&
+		PgturbohybridSparseReadMeta(index, meta->tqSparseMetaStartBlkno,
+									&sparseMeta))
+	{
+		reachable[PGTURBOHYBRID_GRAPH_PAGE_KIND_SPARSE_META] = 1;
+		PgturbohybridStatsWalkChain(index, sparseMeta.lexiconStartBlkno,
+									reachable, nblocks);
+		PgturbohybridStatsWalkChain(index, sparseMeta.blockMaxStartBlkno,
+									reachable, nblocks);
+		PgturbohybridStatsWalkChain(index, sparseMeta.deltaStartBlkno,
+									reachable, nblocks);
+	}
+}
+
+static void
+PgturbohybridStatsHistogram(Relation index, uint32 *kindTotals,
+							BlockNumber nblocks)
+{
+	memset(kindTotals, 0, sizeof(uint32) * PGTURBOHYBRID_STATS_KIND_BUCKETS);
+
+	for (BlockNumber blkno = 0; blkno < nblocks; blkno++)
+	{
+		Buffer		buf;
+		Page		page;
+		PgturbohybridGraphPageOpaque opaque;
+
+		CHECK_FOR_INTERRUPTS();
+		buf = ReadBuffer(index, blkno);
+		LockBuffer(buf, BUFFER_LOCK_SHARE);
+		page = BufferGetPage(buf);
+		opaque = PgturbohybridGraphPageGetOpaque(page);
+		if (opaque->page_id == PGTURBOHYBRID_GRAPH_PAGE_ID)
+			kindTotals[opaque->pageKind & PGTURBOHYBRID_GRAPH_PAGE_KIND_MASK]++;
+		else
+			kindTotals[0]++;	/* unreadable / not a graph page */
+		UnlockReleaseBuffer(buf);
+	}
+}
+
 FUNCTION_PREFIX PG_FUNCTION_INFO_V1(pgturbohybrid_index_stats);
 FUNCTION_PREFIX Datum
 pgturbohybrid_index_stats(PG_FUNCTION_ARGS)
@@ -922,6 +1101,10 @@ pgturbohybrid_index_stats(PG_FUNCTION_ARGS)
 	PgturbohybridJsonbState jsonState;
 	Jsonb	   *result;
 	int			multivectorDocStorage;
+	uint32		reachable[PGTURBOHYBRID_STATS_KIND_BUCKETS];
+	uint32		kindTotals[PGTURBOHYBRID_STATS_KIND_BUCKETS];
+	uint64		pagesReachable = 0;
+	uint64		pagesAbandoned = 0;
 	bool		proxyOnlyIndex;
 	bool		centroidOnlyIndex;
 	bool		fullMultivectorSidecarAvailable;
@@ -1326,6 +1509,76 @@ pgturbohybrid_index_stats(PG_FUNCTION_ARGS)
 										  hasBm25Meta ?
 										  (double) (bm25Meta.totalDocLen + bm25Meta.deltaTotalDocLen) /
 										  Max((double) (bm25Meta.docCount + bm25Meta.deltaDocCount), 1.0) : 0.0);
+	/*
+	 * Page accounting: reachability walk vs whole-relation kind histogram.
+	 * Abandoned pages are chain pages left behind by BM25/sparse compaction,
+	 * which repoints chains and never reclaims the old pages.  Only
+	 * chain-anchored kinds claim an abandoned delta; kind 0 counts pages
+	 * without a valid graph page id.
+	 */
+	PgturbohybridStatsCountReachable(index, &meta, &bm25Meta, hasBm25Meta,
+									 reachable, nblocks);
+	PgturbohybridStatsHistogram(index, kindTotals, nblocks);
+	for (int k = 1; k < PGTURBOHYBRID_STATS_KIND_BUCKETS; k++)
+	{
+		pagesReachable += reachable[k];
+		switch (k)
+		{
+			case PGTURBOHYBRID_GRAPH_PAGE_KIND_QUANT_CODE:
+			case PGTURBOHYBRID_GRAPH_PAGE_KIND_QUANT_ADJ:
+			case PGTURBOHYBRID_GRAPH_PAGE_KIND_QUANT_EXACT:
+			case PGTURBOHYBRID_GRAPH_PAGE_KIND_QUANT_CORRECTION:
+			case PGTURBOHYBRID_GRAPH_PAGE_KIND_BM25_DOCSTATS:
+			case PGTURBOHYBRID_GRAPH_PAGE_KIND_BM25_LEXICON:
+			case PGTURBOHYBRID_GRAPH_PAGE_KIND_BM25_POSTINGS:
+			case PGTURBOHYBRID_GRAPH_PAGE_KIND_BM25_BLOCKMAX:
+			case PGTURBOHYBRID_GRAPH_PAGE_KIND_BM25_DELTA:
+			case PGTURBOHYBRID_GRAPH_PAGE_KIND_BM25_IMPACT:
+			case PGTURBOHYBRID_GRAPH_PAGE_KIND_BM25_DELTA_TERM:
+			case PGTURBOHYBRID_GRAPH_PAGE_KIND_BM25_TENANT:
+			case PGTURBOHYBRID_GRAPH_PAGE_KIND_SPARSE_LEXICON:
+			case PGTURBOHYBRID_GRAPH_PAGE_KIND_SPARSE_BLOCKMAX:
+			case PGTURBOHYBRID_GRAPH_PAGE_KIND_SPARSE_DELTA:
+			case PGTURBOHYBRID_GRAPH_PAGE_KIND_NODEMAP:
+				if ((uint64) kindTotals[k] > (uint64) reachable[k])
+					pagesAbandoned += (uint64) kindTotals[k] - reachable[k];
+				break;
+			default:
+				break;
+		}
+	}
+	PgturbohybridIndexStatsJsonbAddUInt32(&jsonState, "pages_total",
+										  (uint32) nblocks);
+	PgturbohybridIndexStatsJsonbAddUInt32(&jsonState, "pages_in_use",
+										  (uint32) Min(pagesReachable, (uint64) PG_UINT32_MAX));
+	PgturbohybridIndexStatsJsonbAddUInt32(&jsonState, "pages_abandoned",
+										  (uint32) Min(pagesAbandoned, (uint64) PG_UINT32_MAX));
+	PgturbohybridIndexStatsJsonbAddUInt32(&jsonState, "bm25_postings_pages",
+										  kindTotals[PGTURBOHYBRID_GRAPH_PAGE_KIND_BM25_POSTINGS]);
+	PgturbohybridIndexStatsJsonbAddUInt32(&jsonState, "bm25_delta_pages",
+										  kindTotals[PGTURBOHYBRID_GRAPH_PAGE_KIND_BM25_DELTA]);
+	PgturbohybridIndexStatsJsonbAddUInt32(&jsonState, "pages_unknown",
+										  kindTotals[0]);
+	PgturbohybridIndexStatsJsonbAddUInt32(&jsonState, "pages_graph_element",
+										  kindTotals[PGTURBOHYBRID_GRAPH_PAGE_KIND_GRAPH]);
+	PgturbohybridIndexStatsJsonbAddUInt32(&jsonState, "pages_quant_code",
+										  kindTotals[PGTURBOHYBRID_GRAPH_PAGE_KIND_QUANT_CODE]);
+	PgturbohybridIndexStatsJsonbAddUInt32(&jsonState, "pages_quant_adj",
+										  kindTotals[PGTURBOHYBRID_GRAPH_PAGE_KIND_QUANT_ADJ]);
+	PgturbohybridIndexStatsJsonbAddUInt32(&jsonState, "pages_quant_exact",
+										  kindTotals[PGTURBOHYBRID_GRAPH_PAGE_KIND_QUANT_EXACT]);
+	PgturbohybridIndexStatsJsonbAddUInt32(&jsonState, "pages_bm25_docstats",
+										  kindTotals[PGTURBOHYBRID_GRAPH_PAGE_KIND_BM25_DOCSTATS]);
+	PgturbohybridIndexStatsJsonbAddUInt32(&jsonState, "pages_bm25_lexicon",
+										  kindTotals[PGTURBOHYBRID_GRAPH_PAGE_KIND_BM25_LEXICON]);
+	PgturbohybridIndexStatsJsonbAddUInt32(&jsonState, "pages_bm25_blockmax",
+										  kindTotals[PGTURBOHYBRID_GRAPH_PAGE_KIND_BM25_BLOCKMAX]);
+	PgturbohybridIndexStatsJsonbAddUInt32(&jsonState, "pages_bm25_impact",
+										  kindTotals[PGTURBOHYBRID_GRAPH_PAGE_KIND_BM25_IMPACT]);
+	PgturbohybridIndexStatsJsonbAddUInt32(&jsonState, "pages_bm25_delta_term",
+										  kindTotals[PGTURBOHYBRID_GRAPH_PAGE_KIND_BM25_DELTA_TERM]);
+	PgturbohybridIndexStatsJsonbAddUInt32(&jsonState, "pages_bm25_tenant",
+										  kindTotals[PGTURBOHYBRID_GRAPH_PAGE_KIND_BM25_TENANT]);
 	PgturbohybridIndexStatsJsonbAddUInt32(&jsonState, "build_worker_count",
 										  meta.buildWorkerCount);
 	PgturbohybridIndexStatsJsonbAddUInt32(&jsonState, "build_scan_us",

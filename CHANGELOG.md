@@ -5,6 +5,27 @@ use alpha suffixes while the PostgreSQL extension SQL version remains `0.1.0`.
 
 ## Unreleased
 ### Added
+### Fixed
+
+- **BM25 delta term directory no longer leaks one or more pages per INSERT.**
+  `PgturbohybridBm25WriteDeltaTermDirectory` always allocated a fresh page
+  for the (fixed-size, 776-byte) directory snapshot and repointed the meta,
+  abandoning the previous page -- measured on a 300-doc hybrid index:
+  50 delta inserts leaked 84 `BM25_DELTA_TERM` pages (~1.7 pages/insert,
+  quadratic bytes since each rewrite carried the whole accumulated
+  directory). The directory tuple is now updated in place on its head page
+  (buffer-exclusive + WAL); readers, which read the first directory tuple of
+  the head page, are unchanged. After the fix: 150 inserts, 0 abandoned
+  pages (was on track for ~250). Compaction still rebuilds the directory
+  from scratch (unchanged).
+- **`turbohybrid_index_stats()` now reports page accounting.** New keys:
+  `pages_total`, `pages_in_use`, `pages_abandoned` plus a per-kind histogram
+  (`pages_quant_code`, `bm25_postings_pages`, `bm25_delta_pages`,
+  `pages_bm25_delta_term`, ...). In-use pages are computed by walking every
+  chain anchored in the graph meta, the BM25 meta (including the delta term
+  directory's per-bucket chains) and the sparse meta, then compared with a
+  one-pass whole-relation kind histogram. This makes compaction bloat and
+  any future leak measurable from SQL. Regression whitelist updated.
 
 - **Per-tenant BM25 statistics (`bm25Version 2`).** The BM25 meta tuple now
   stores `tenantStatsStartBlkno`/`tenantCount`, and new per-tenant aggregate

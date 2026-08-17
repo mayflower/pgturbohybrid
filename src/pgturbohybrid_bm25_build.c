@@ -3783,6 +3783,85 @@ PgturbohybridBm25WriteDeltaTermDirectory(Relation index,
 	return start;
 }
 
+/*
+ * Update the delta term directory in place.  The directory tuple is a fixed
+ * size (header + 64 buckets), so a changed directory is written back over the
+ * existing item on the head page instead of appending a fresh full snapshot
+ * per insert -- which leaked one or more pages per INSERT (measured: 50
+ * inserts leaked 84 BM25_DELTA_TERM pages).  Readers are unchanged: they read
+ * the first directory tuple of the head page.  Callers hold the BM25 delta
+ * heavyweight lock, same as the append path.
+ */
+static BlockNumber
+PgturbohybridBm25UpdateDeltaTermDirectory(Relation index, BlockNumber blkno,
+										  PgturbohybridBm25DeltaDirectoryTuple directory)
+{
+	Buffer		buf;
+	Page		page;
+	OffsetNumber maxoff;
+	GenericXLogState *xlogState = NULL;
+	bool		updated = false;
+
+	if (!BlockNumberIsValid(blkno))
+		return PgturbohybridBm25WriteDeltaTermDirectory(index, directory);
+
+	buf = ReadBuffer(index, blkno);
+	LockBuffer(buf, BUFFER_LOCK_EXCLUSIVE);
+	page = BufferGetPage(buf);
+	if (!PgturbohybridBm25PageIsKind(page, PGTURBOHYBRID_GRAPH_PAGE_KIND_BM25_DELTA_TERM))
+	{
+		UnlockReleaseBuffer(buf);
+		ereport(ERROR,
+				(errcode(ERRCODE_DATA_CORRUPTED),
+				 errmsg("pgturbohybrid BM25 delta term directory has unexpected page kind")));
+	}
+
+	if (RelationNeedsWAL(index))
+	{
+		xlogState = GenericXLogStart(index);
+		page = GenericXLogRegisterBuffer(xlogState, buf, 0);
+	}
+
+	maxoff = PageGetMaxOffsetNumber(page);
+	for (OffsetNumber off = FirstOffsetNumber; off <= maxoff; off++)
+	{
+		ItemId		iid = PageGetItemId(page, off);
+		PgturbohybridBm25DeltaDirectoryTuple tuple;
+
+		if (!ItemIdIsUsed(iid))
+			continue;
+		tuple = (PgturbohybridBm25DeltaDirectoryTuple) PageGetItem(page, iid);
+		if (tuple->type != PGTURBOHYBRID_BM25_DELTA_DIRECTORY_TUPLE_TYPE)
+			continue;
+		if (ItemIdGetLength(iid) >= sizeof(PgturbohybridBm25DeltaDirectoryTupleData))
+		{
+			memcpy(tuple, directory, sizeof(PgturbohybridBm25DeltaDirectoryTupleData));
+			PgturbohybridGraphMarkPageGraphOp(page,
+											  PGTURBOHYBRID_GRAPH_GRAPH_OP_ELEMENT_INSERT);
+			updated = true;
+		}
+		break;					/* only the first directory tuple is live */
+	}
+
+	if (updated)
+	{
+		if (xlogState != NULL)
+			GenericXLogFinish(xlogState);
+		else
+			MarkBufferDirty(buf);
+	}
+	else if (xlogState != NULL)
+		GenericXLogAbort(xlogState);
+	UnlockReleaseBuffer(buf);
+
+	if (!updated)
+	{
+		/* Head page holds no usable directory tuple: fall back to append. */
+		return PgturbohybridBm25WriteDeltaTermDirectory(index, directory);
+	}
+	return blkno;
+}
+
 static void
 PgturbohybridBm25AppendDeltaTermSegments(Relation index,
 									PgturbohybridBm25DeltaTuple delta,
@@ -3985,7 +4064,8 @@ PgturbohybridBm25AppendDeltaInternal(Relation index, uint32 nodeId,
 	}
 
 	deltaTermDirectoryBlkno =
-		PgturbohybridBm25WriteDeltaTermDirectory(index, &deltaDirectory);
+		PgturbohybridBm25UpdateDeltaTermDirectory(index, deltaTermDirectoryBlkno,
+												  &deltaDirectory);
 	deltaTermPages = PgturbohybridBm25DeltaDirectoryTermPages(&deltaDirectory);
 
 	if (!PgturbohybridBm25ReadMetaForUpdate(index, &metaBuf, &metaPage,
