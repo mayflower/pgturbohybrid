@@ -27,7 +27,10 @@ use alpha suffixes while the PostgreSQL extension SQL version remains `0.1.0`.
   one-pass whole-relation kind histogram. This makes compaction bloat and
   any future leak measurable from SQL. Regression whitelist updated.
 
-- **Per-tenant BM25 statistics (`bm25Version 2`).** The BM25 meta tuple now
+
+### Added
+
+- **Per-tenant BM25 statistics (`bm25Version 2`).** The BM25 meta tuple
   stores `tenantStatsStartBlkno`/`tenantCount`, and new per-tenant aggregate
   pages (page kind 22, tuple type `0x6a`) hold `(tenant, docCount,
   totalDocLen)` entries. When an index is built with
@@ -150,6 +153,20 @@ use alpha suffixes while the PostgreSQL extension SQL version remains `0.1.0`.
   `exact_storage = off`. On DBPedia/OpenAI (1536-d) it reaches ~0.99 recall
   while staying faster than pgvector and Qdrant. Explicit GUCs still override
   the profile defaults.
+
+### Known issues
+
+- **Shared native cache + concurrent inserts can crash readers (pre-existing,
+  reproduced 2026-08-17).** With `turbohybrid.native_cache_scope = shared` (the
+  `auto` default on Linux), a hybrid scan against an index receiving concurrent
+  inserts SIGSEGVs the backend within ~60-100 stress rounds (1 writer x 100 +
+  4 readers reproduces; 6 writers x 100 + 4 readers reproduces). The same load
+  is stable with `per_backend` and `off` scopes. This is the reader-crash class
+  from the 2026-07-28 incident: the snapshot-capacity hardening (above) closed
+  the per-backend/uncached paths, but the shared mmap attach/build path under
+  concurrent growth still has an undiagnosed fault. Operational mitigation:
+  `SET turbohybrid.native_cache_scope = per_backend` on write-heavy indexes
+  until fixed.
 
 ## v0.1.0-alpha.2
 
