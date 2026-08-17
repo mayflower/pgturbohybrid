@@ -36,7 +36,7 @@ sub feature_objects
 				SELECT 1
 				FROM pg_extension e
 				WHERE e.extname = 'pgturbohybrid'
-				  AND e.extversion <> '0.1.0'
+				  AND e.extversion <> '0.1.1'
 			)
 		);
 	));
