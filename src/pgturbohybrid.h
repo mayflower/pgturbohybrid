@@ -191,6 +191,7 @@ typedef enum PgturbohybridMultiVectorRerankSource
 /* Build phases */
 /* PROGRESS_CREATEIDX_SUBPHASE_INITIALIZE is 1 */
 #define PGTURBOHYBRID_PROGRESS_PHASE_LOAD		2
+#define PGTURBOHYBRID_PROGRESS_PHASE_EDGES		3
 
 #define PGTURBOHYBRID_GRAPH_MAX_SIZE (BLCKSZ - MAXALIGN(SizeOfPageHeaderData) - MAXALIGN(sizeof(PgturbohybridGraphPageOpaqueData)) - sizeof(ItemIdData))
 #define PGTURBOHYBRID_GRAPH_TUPLE_ALLOC_SIZE BLCKSZ

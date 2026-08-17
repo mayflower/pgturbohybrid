@@ -7263,9 +7263,14 @@ pgturbohybridambuild(Relation heap, Relation index, IndexInfo *indexInfo)
 		PgturbohybridBm25BuildCollect(heap, index, indexInfo);
 
 	PgturbohybridBuildIndexKeyMap(index, indexInfo, &map);
-	/* TODO: sparse build path needs graph meta tqSparseMetaStartBlkno initialization
-	 * before PgturbohybridSparseBuildCollect can run safely. Disabled until
-	 * the build infrastructure is fully wired. */
+	/*
+	 * The sparse inverted index builds here.  PgturbohybridSparseBuildCollect
+	 * anchors its meta chain in the graph metapage itself
+	 * (tqSparseMetaStartBlkno), so no pre-initialization is needed.  Build
+	 * failures degrade to a warning: the dense/bm25 halves stay usable and the
+	 * sparse scan reports branch-unavailable.  Regression coverage:
+	 * pgturbohybrid_sparse_scan (build + sole-ORDER-BY scan + planner).
+	 */
 	if (map.hasSparse)
 	{
 		MemoryContext oldcontext = CurrentMemoryContext;

@@ -3568,6 +3568,9 @@ PgturbohybridGraphBuildEdgesRange(PgturbohybridQuantBuildState *state,
 		int			linkingLevel = Min(nodeLevel, entryLevel);
 
 		CHECK_FOR_INTERRUPTS();
+		if ((orderIdx & 0x3FF) == 0)
+			pgstat_progress_update_param(PROGRESS_CREATEIDX_TUPLES_DONE,
+										 startNodeId + orderIdx);
 		if (preserveScanOrder && i > startNodeId && inserted[i - 1])
 		{
 			instr_time	addStart;
@@ -3711,6 +3714,10 @@ PgturbohybridGraphBuildEdges(PgturbohybridQuantBuildState *state)
 
 	baseSegmentSize = state->nodeCount / segmentCount;
 	remainder = state->nodeCount % segmentCount;
+	pgstat_progress_update_param(PROGRESS_CREATEIDX_SUBPHASE,
+								 PGTURBOHYBRID_PROGRESS_PHASE_EDGES);
+	pgstat_progress_update_param(PROGRESS_CREATEIDX_TUPLES_TOTAL,
+								 state->nodeCount);
 	for (uint16 segmentIdx = 0; segmentIdx < segmentCount; segmentIdx++)
 	{
 		uint32		segmentSize = baseSegmentSize + (segmentIdx < remainder ? 1 : 0);
@@ -3720,6 +3727,8 @@ PgturbohybridGraphBuildEdges(PgturbohybridQuantBuildState *state)
 		PgturbohybridGraphBuildEdgesRange(state, startNodeId, endNodeId,
 										  &state->segments[segmentIdx]);
 		startNodeId = endNodeId;
+		pgstat_progress_update_param(PROGRESS_CREATEIDX_TUPLES_DONE,
+									 startNodeId);
 	}
 }
 
@@ -7893,6 +7902,10 @@ tqgraphbuild(Relation heap, Relation index, IndexInfo *indexInfo)
 	}
 	state.buildFastEdges = PgturbohybridGraphUseFastBuildEdges(&state);
 	PgturbohybridGraphDebugBuildPhaseStart(&state, "build_edges");
+	pgstat_progress_update_param(PROGRESS_CREATEIDX_SUBPHASE,
+								 PGTURBOHYBRID_PROGRESS_PHASE_EDGES);
+	pgstat_progress_update_param(PROGRESS_CREATEIDX_TUPLES_TOTAL,
+								 state.nodeCount);
 	INSTR_TIME_SET_CURRENT(phaseStart);
 	edgeDistanceStart = state.buildDistanceCalls;
 	if (workerRequest <= 0)
@@ -8835,6 +8848,26 @@ PgturbohybridGraphReadMeta(Relation index, PgturbohybridGraphMetaPageData *meta)
 	{
 		UnlockReleaseBuffer(buf);
 		return false;
+	}
+
+	/*
+	 * On-disk format guard: indexes written by a future format version cannot
+	 * be interpreted safely (tail fields may have changed meaning).  Older
+	 * versions stay readable through the size-guarded copy below; every
+	 * released binary has written version 1 since the first standalone
+	 * commit, so this only fires on downgrade scenarios.
+	 */
+	if (metap->version > PGTURBOHYBRID_GRAPH_VERSION)
+	{
+		uint32		diskVersion = metap->version;
+
+		UnlockReleaseBuffer(buf);
+		ereport(ERROR,
+				(errcode(ERRCODE_DATA_CORRUPTED),
+				 errmsg("pgturbohybrid index \"%s\" has on-disk format version %u, newer than this extension's version %u",
+						RelationGetRelationName(index), diskVersion,
+						(uint32) PGTURBOHYBRID_GRAPH_VERSION),
+				 errhint("Upgrade the pgturbohybrid extension to read this index.")));
 	}
 
 	memset(meta, 0, sizeof(PgturbohybridGraphMetaPageData));
