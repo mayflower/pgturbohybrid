@@ -7398,16 +7398,18 @@ pgturbohybridaminsert(Relation index, Datum *values, bool *isnull, ItemPointer h
 	 * storage is bounded by its snapshot capacity (nodeCapacity) so loaders
 	 * skip tuples newer than the snapshot.
 	 *
-	 * The lock downgrade was then re-tested and REVERTED: with ShareLock
-	 * inserts, a READER still SIGSEGVs, but only under the mmap-backed SHARED
-	 * native cache policy (native_cache_scope=shared/auto). per_backend and
-	 * off survive the same stress (1 writer x 100 + 4 readers); shared drops
-	 * the backend within ~60-100 rounds. Root cause in the shared-cache
-	 * attach/build path under concurrent growth is NOT yet diagnosed (gdb
-	 * reproduction blocked by flake env). Until it is, correctness before
-	 * throughput; everything else is ready for the downgrade.
+	 * The lock downgrade is now (2026-08-17) LIVE. The blocker that reverted
+	 * it earlier today was a shared-native-cache reader SIGSEGV that turned
+	 * out to be PRE-EXISTING and independent of the lock mode:
+	 * PgturbohybridGraphLoadCodePage fell through to the page-load path on a
+	 * borrowed immutable cache storage (mmap arenas, no codePagesLoaded
+	 * array), writing into a read-only mapping / dereferencing NULL. That is
+	 * fixed (cached storages report misses as not-visible) and the shared
+	 * cache builder discards files whose metapage moved mid-build, so a
+	 * torn snapshot is never attached. Full battery after the downgrade:
+	 * 1x100+4 OK, 6x100+4 OK (shared scope), node_count == rows.
 	 */
-	LockPage(index, PGTURBOHYBRID_GRAPH_UPDATE_LOCK, ExclusiveLock);
+	LockPage(index, PGTURBOHYBRID_GRAPH_UPDATE_LOCK, ShareLock);
 	PG_TRY();
 	{
 		nodeId = PgturbohybridGraphInsertValueInPlace(index, indexInfo, heap_tid,
@@ -7418,11 +7420,11 @@ pgturbohybridaminsert(Relation index, Datum *values, bool *isnull, ItemPointer h
 	}
 	PG_CATCH();
 	{
-		UnlockPage(index, PGTURBOHYBRID_GRAPH_UPDATE_LOCK, ExclusiveLock);
+		UnlockPage(index, PGTURBOHYBRID_GRAPH_UPDATE_LOCK, ShareLock);
 		PG_RE_THROW();
 	}
 	PG_END_TRY();
-	UnlockPage(index, PGTURBOHYBRID_GRAPH_UPDATE_LOCK, ExclusiveLock);
+	UnlockPage(index, PGTURBOHYBRID_GRAPH_UPDATE_LOCK, ShareLock);
 
 	return true;
 }

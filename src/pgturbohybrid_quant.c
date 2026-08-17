@@ -21658,11 +21658,10 @@ tqgraphinsert(Relation index, Datum *values, bool *isnull, ItemPointer heap_tid,
 		return false;
 
 	/*
-	 * Serialized inserts -- see pgturbohybridaminsert (pgturbohybrid_am.c)
-	 * for the current ShareLock status: prerequisites landed, downgrade
-	 * reverted on a shared-native-cache reader SIGSEGV.
+	 * Share-mode inserts -- see pgturbohybridaminsert (pgturbohybrid_am.c)
+	 * for the full rationale and the shared-cache fix that unblocked this.
 	 */
-	LockPage(index, PGTURBOHYBRID_GRAPH_UPDATE_LOCK, ExclusiveLock);
+	LockPage(index, PGTURBOHYBRID_GRAPH_UPDATE_LOCK, ShareLock);
 	PG_TRY();
 	{
 		PgturbohybridGraphInsertValueInPlace(index, indexInfo, heap_tid, value,
@@ -21670,11 +21669,11 @@ tqgraphinsert(Relation index, Datum *values, bool *isnull, ItemPointer heap_tid,
 	}
 	PG_CATCH();
 	{
-		UnlockPage(index, PGTURBOHYBRID_GRAPH_UPDATE_LOCK, ExclusiveLock);
+		UnlockPage(index, PGTURBOHYBRID_GRAPH_UPDATE_LOCK, ShareLock);
 		PG_RE_THROW();
 	}
 	PG_END_TRY();
-	UnlockPage(index, PGTURBOHYBRID_GRAPH_UPDATE_LOCK, ExclusiveLock);
+	UnlockPage(index, PGTURBOHYBRID_GRAPH_UPDATE_LOCK, ShareLock);
 
 	return true;
 }

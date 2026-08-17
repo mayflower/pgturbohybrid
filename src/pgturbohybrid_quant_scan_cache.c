@@ -3802,6 +3802,20 @@ PgturbohybridGraphLoadCodePage(Relation index, PgturbohybridGraphScanOpaque so, 
 		return storage->nodes[nodeId].loaded;
 	}
 
+	/*
+	 * An immutable snapshot cache (shared mmap view, or any cache whose
+	 * storage we only borrowed via memcpy) cannot page-load on miss: its
+	 * arenas are read-only mappings and codePagesLoaded was never allocated.
+	 * A miss here means the node is simply not visible to this scan (e.g.
+	 * the cache was built while the node was mid-insert) -- report that
+	 * instead of writing into a read-only mapping or dereferencing a NULL
+	 * page map. This was the reader SIGSEGV under shared-cache + concurrent
+	 * inserts.
+	 */
+	if (storage->cached)
+		return false;
+
+
 	pageNo = nodeId / storage->codeTuplesPerPage;
 	if (pageNo < 0 || pageNo >= storage->codePageCount)
 		return false;
@@ -5553,6 +5567,25 @@ PgturbohybridGraphWriteSharedCacheFile(Relation index,
 		return false;
 	}
 	close(fd);
+	/*
+	 * The file must be a complete snapshot of ONE index state.  A concurrent
+	 * insert during the walk leaves holes for nodes that the metapage already
+	 * counts (reserved ids, or tuples appended after their page was read);
+	 * every backend hashing the same key would then attach a cache whose
+	 * traversal set is torn.  If the metapage moved at all while we built,
+	 * discard: the next scan rebuilds against the newer state.
+	 */
+	{
+		PgturbohybridGraphMetaPageData current;
+
+		if (PgturbohybridGraphReadMeta(index, &current) &&
+			(current.graphFlags != meta->graphFlags ||
+			 current.tqNodeCount != meta->tqNodeCount))
+		{
+			unlink(tmpPath);
+			return false;
+		}
+	}
 	if (rename(tmpPath, path) != 0)
 	{
 		unlink(tmpPath);
