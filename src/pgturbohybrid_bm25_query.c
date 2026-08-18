@@ -573,6 +573,17 @@ typedef struct PgturbohybridBm25Cache
 	BlockNumber blockMaxStartBlkno;
 	BlockNumber deltaStartBlkno;
 	BlockNumber deltaTermDirectoryBlkno;
+	/*
+	 * Base/delta split for insert-tolerant reuse.  The expensive part of the
+	 * cache (lexicon directory + term arena) depends only on the compaction
+	 * epoch and the base chain anchors, so it survives inserts.  nodeCount is
+	 * the CURRENT graph node count (grown on inserts); baseNodeCount freezes
+	 * the node range the base arrays were built for.  Liveness is separately
+	 * keyed by graphFlags: inserts only grow the live range, but vacuum (which
+	 * also bumps graphFlags) can mark base nodes dead and forces a reload.
+	 */
+	uint32		baseNodeCount;
+	uint16		livenessGraphFlags;
 	uint32	   *docLens;
 	ItemPointerData *heapTids;
 	bool	   *liveNodes;
@@ -1371,20 +1382,23 @@ PgturbohybridBm25CacheMatches(PgturbohybridBm25Cache *cache, Relation index,
 						 const PgturbohybridBm25MetaTupleData *bm25Meta,
 						 const PgturbohybridGraphMetaPageData *graphMeta)
 {
+	/*
+	 * Base key only: the lexicon directory, term arena and base docstats are
+	 * immutable until compaction.  graphFlags (bumped by every insert and
+	 * vacuum), nodeCount (grown by inserts), deltaGeneration and the delta
+	 * anchors are revalidated per use in PgturbohybridBm25RefreshCache -- a
+	 * cache that matched here must NOT be dropped just because a concurrent
+	 * insert landed.
+	 */
 	return cache->relid == RelationGetRelid(index) &&
 		cache->relfilenumber == PgturbohybridGraphRelFileNumber(index) &&
-		cache->graphFlags == graphMeta->graphFlags &&
-		cache->nodeCount == graphMeta->tqNodeCount &&
 		cache->docCount == bm25Meta->docCount &&
 		cache->termCount == bm25Meta->termCount &&
-		cache->deltaGeneration == bm25Meta->deltaGeneration &&
 		cache->lastCompactionGeneration == bm25Meta->lastCompactionGeneration &&
 		cache->docStatsStartBlkno == bm25Meta->docStatsStartBlkno &&
 		cache->lexiconStartBlkno == bm25Meta->lexiconStartBlkno &&
 		cache->postingsStartBlkno == bm25Meta->postingsStartBlkno &&
-		cache->blockMaxStartBlkno == bm25Meta->blockMaxStartBlkno &&
-		cache->deltaStartBlkno == bm25Meta->deltaStartBlkno &&
-		cache->deltaTermDirectoryBlkno == bm25Meta->deltaTermDirectoryBlkno;
+		cache->blockMaxStartBlkno == bm25Meta->blockMaxStartBlkno;
 }
 
 static void
@@ -1569,6 +1583,8 @@ PgturbohybridBm25BuildCache(Relation index,
 	cache->relfilenumber = PgturbohybridGraphRelFileNumber(index);
 	cache->graphFlags = graphMeta->graphFlags;
 	cache->nodeCount = graphMeta->tqNodeCount;
+	cache->baseNodeCount = graphMeta->tqNodeCount;
+	cache->livenessGraphFlags = graphMeta->graphFlags;
 	cache->docCount = bm25Meta->docCount;
 	cache->termCount = bm25Meta->termCount;
 	cache->deltaGeneration = bm25Meta->deltaGeneration;
@@ -1657,6 +1673,17 @@ PgturbohybridBm25EnsureLiveness(Relation index, PgturbohybridBm25Cache *cache,
 		return;
 
 	oldCtx = MemoryContextSwitchTo(cache->ctx);
+	/* Reload path: release the previous snapshot before allocating. */
+	if (cache->heapTids != NULL)
+	{
+		pfree(cache->heapTids);
+		cache->heapTids = NULL;
+	}
+	if (cache->liveNodes != NULL)
+	{
+		pfree(cache->liveNodes);
+		cache->liveNodes = NULL;
+	}
 	cache->heapTids = PgturbohybridBm25Palloc0Array(sizeof(ItemPointerData),
 													Max(cache->nodeCount, 1));
 	cache->liveNodes = PgturbohybridBm25Palloc0Array(sizeof(bool),
@@ -1664,7 +1691,80 @@ PgturbohybridBm25EnsureLiveness(Relation index, PgturbohybridBm25Cache *cache,
 	PgturbohybridBm25LoadHeapTids(index, graphMeta, cache->heapTids,
 							 cache->liveNodes);
 	cache->livenessLoaded = true;
+	cache->livenessGraphFlags = graphMeta->graphFlags;
 	MemoryContextSwitchTo(oldCtx);
+}
+
+/*
+ * Revalidate the mutable halves of a base-matched cache: grow the node range
+ * for inserts, reload liveness when vacuum moved the graph, and rebuild the
+ * delta entries when the delta chain moved.  Called on every cache hit; each
+ * step is cheap compared to the lexicon build it avoids.
+ */
+static void
+PgturbohybridBm25RefreshCache(Relation index,
+						  PgturbohybridBm25Cache *cache,
+						  const PgturbohybridBm25MetaTupleData *bm25Meta,
+						  const PgturbohybridGraphMetaPageData *graphMeta,
+						  PgturbohybridBm25QueryStats *stats)
+{
+	if (graphMeta->tqNodeCount > cache->nodeCount)
+	{
+		uint32		newCount = graphMeta->tqNodeCount;
+		MemoryContext oldCtx = MemoryContextSwitchTo(cache->ctx);
+
+		/*
+		 * Grow the loaded arrays: new nodes are inserts (live).  Vacuum
+		 * follows its own liveness reload below, so a vacuum that raced the
+		 * growth still re-marks dead nodes.
+		 */
+		if (cache->livenessLoaded)
+		{
+			cache->heapTids = (ItemPointerData *)
+				repalloc(cache->heapTids, sizeof(ItemPointerData) * Max(newCount, 1));
+			cache->liveNodes = (bool *)
+				repalloc(cache->liveNodes, sizeof(bool) * Max(newCount, 1));
+			memset(&cache->heapTids[cache->nodeCount], 0,
+				   sizeof(ItemPointerData) * (newCount - cache->nodeCount));
+			memset(&cache->liveNodes[cache->nodeCount], 1,
+				   sizeof(bool) * (newCount - cache->nodeCount));
+		}
+		cache->nodeCount = newCount;
+		if (stats != NULL)
+			stats->cacheNodeRangeGrown = true;
+		MemoryContextSwitchTo(oldCtx);
+	}
+
+	/*
+	 * Vacuum bumps graphFlags and can mark base nodes dead: reload the
+	 * liveness snapshot then.  Inserts bump it too, but a pure insert only
+	 * extends the live range, which the growth above already covered -- so
+	 * only reload when the loaded range already spans the whole graph and the
+	 * flags still moved (something OTHER than growth changed visibility).
+	 */
+	if (cache->livenessLoaded &&
+		cache->livenessGraphFlags != graphMeta->graphFlags)
+	{
+		cache->livenessLoaded = false;
+		cache->livenessGraphFlags = graphMeta->graphFlags;
+		if (stats != NULL)
+			stats->cacheLivenessReloaded = true;
+	}
+
+	if (cache->deltaCacheBuilt &&
+		(cache->deltaGeneration != bm25Meta->deltaGeneration ||
+		 cache->deltaStartBlkno != bm25Meta->deltaStartBlkno ||
+		 cache->deltaTermDirectoryBlkno != bm25Meta->deltaTermDirectoryBlkno))
+	{
+		/* Delta chain moved (insert or compaction reset): rebuild entries. */
+		cache->deltaCacheBuilt = false;
+		if (stats != NULL)
+			stats->cacheDeltaRebuilt = true;
+	}
+	cache->deltaGeneration = bm25Meta->deltaGeneration;
+	cache->deltaStartBlkno = bm25Meta->deltaStartBlkno;
+	cache->deltaTermDirectoryBlkno = bm25Meta->deltaTermDirectoryBlkno;
+	cache->graphFlags = graphMeta->graphFlags;
 }
 
 static PgturbohybridBm25Cache *
@@ -1681,6 +1781,8 @@ PgturbohybridBm25GetCache(Relation index,
 	{
 		if (PgturbohybridBm25CacheMatches(cache, index, bm25Meta, graphMeta))
 		{
+			PgturbohybridBm25RefreshCache(index, cache, bm25Meta, graphMeta,
+										  stats);
 			if (stats != NULL)
 			{
 				stats->cacheHit = true;
@@ -2201,6 +2303,25 @@ PgturbohybridBm25EnsureDeltaCache(Relation index,
 		if (stats != NULL)
 			stats->deltaCacheHit = true;
 		return;
+	}
+
+	/* Rebuild path: release the previous snapshot (entries own termBytes). */
+	if (cache->deltaTerms != NULL)
+	{
+		MemoryContext oldCtx = MemoryContextSwitchTo(cache->ctx);
+
+		for (uint32 i = 0; i < cache->deltaTermCount; i++)
+		{
+			if (cache->deltaTerms[i].termBytes != NULL)
+				pfree(cache->deltaTerms[i].termBytes);
+			if (cache->deltaTerms[i].postings != NULL)
+				pfree(cache->deltaTerms[i].postings);
+		}
+		pfree(cache->deltaTerms);
+		cache->deltaTerms = NULL;
+		cache->deltaTermCount = 0;
+		cache->deltaPostingCount = 0;
+		MemoryContextSwitchTo(oldCtx);
 	}
 
 	PgturbohybridBm25BuildDeltaCacheEntries(index, meta, cache, NULL, 0,

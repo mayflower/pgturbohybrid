@@ -74,6 +74,9 @@ typedef struct PgturbohybridBm25QueryStats
 	uint64		cacheBuildUs;
 	bool		cacheDocstatsLoaded;
 	bool		cacheLivenessLoaded;
+	bool		cacheNodeRangeGrown;
+	bool		cacheLivenessReloaded;
+	bool		cacheDeltaRebuilt;
 	bool		docstatsLoadedThisQuery;
 	bool		livenessLoadedThisQuery;
 	uint64		docstatsBytes;
