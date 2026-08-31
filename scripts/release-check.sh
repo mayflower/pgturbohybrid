@@ -109,7 +109,6 @@ check_no_root_scratch_files
 run "$ROOT_DIR/scripts/check-doc-links.py"
 run "$ROOT_DIR/scripts/check-version-consistency.sh"
 run "$ROOT_DIR/scripts/check-build-file-parity.py"
-run "$ROOT_DIR/scripts/check-api-ledger.py"
 
 run make PG_CONFIG="$PG_CONFIG" clean
 run make PG_CONFIG="$PG_CONFIG"

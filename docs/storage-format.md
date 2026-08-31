@@ -89,6 +89,4 @@ Extension SQL upgrade scripts (`sql/pgturbohybrid--<from>--<to>.sql`) may add,
 change, or drop SQL objects (functions, operators, opclasses, comments). They
 **may not** rewrite existing index pages or change the on-disk format in place:
 an incompatible format change requires a version-constant bump and a documented
-`REINDEX`, not an `ALTER EXTENSION UPDATE`. See the
-[public API ledger](api-ledger.json) for the upgrade impact of each object
-category.
+`REINDEX`, not an `ALTER EXTENSION UPDATE`.

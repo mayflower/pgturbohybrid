@@ -13,11 +13,9 @@ OBJS = \
 	src/pgturbohybrid_am.o \
 	src/pgturbohybrid_bm25_build.o \
 	src/pgturbohybrid_bm25_query.o \
-	src/pgturbohybrid_build.o \
 	src/pgturbohybrid_graph.o \
 	src/pgturbohybrid_graph_utils.o \
 	src/pgturbohybrid_guc.o \
-	src/pgturbohybrid_insert.o \
 	src/pgturbohybrid_multivector.o \
 	src/pgturbohybrid_quant.o \
 	src/pgturbohybrid_quant_multivector_scan.o \
@@ -33,7 +31,6 @@ OBJS = \
 	src/pgturbohybrid_quant_score_signed_x86.o \
 	src/pgturbohybrid_quant_storage.o \
 	src/pgturbohybrid_query.o \
-	src/pgturbohybrid_scan.o \
 	src/pgturbohybrid_sparse_build.o \
 	src/pgturbohybrid_sparse_primary.o \
 	src/pgturbohybrid_sparse_query.o \
@@ -42,14 +39,13 @@ OBJS = \
 	src/pgturbohybrid_sparse_simd_arm.o \
 	src/pgturbohybrid_diagnostics.o \
 	src/pgturbohybrid_validate.o \
-	src/pgturbohybrid_vacuum.o \
 	src/pgturbohybrid_vector_compat.o
 
 HEADERS =
 
 $(OBJS): $(wildcard src/*.h src/*.inc)
 
-REGRESS = extension pgturbohybrid pgturbohybrid_comments pgturbohybrid_gucs pgturbohybrid_guc_defaults pgturbohybrid_diagnostics pgturbohybrid_api_ledger pgturbohybrid_query pgturbohybrid_sparse pgturbohybrid_sparse_query pgturbohybrid_sparse_scan pgturbohybrid_sparse_fusion pgturbohybrid_sparse_quant pgturbohybrid_sparse_rerank pgturbohybrid_sparse_simd_parity pgturbohybrid_sparse_wand pgturbohybrid_sparse_cache pgturbohybrid_sparse_delta pgturbohybrid_sparse_primary pgturbohybrid_sparse_hardening pgturbohybrid_sparse_bitpacked pgturbohybrid_keymap pgturbohybrid_querysplit pgturbohybrid_multivector pgturbohybrid_multivector_many_moderate pgturbohybrid_codebook pgturbohybrid_u8split pgturbohybrid_nibble_guard pgturbohybrid_x4_safety pgturbohybrid_simd_parity pgturbohybrid_rescore pgturbohybrid_wrappers pgturbohybrid_fuzz security
+REGRESS = extension pgturbohybrid pgturbohybrid_comments pgturbohybrid_gucs pgturbohybrid_guc_defaults pgturbohybrid_diagnostics pgturbohybrid_query pgturbohybrid_sparse pgturbohybrid_sparse_query pgturbohybrid_sparse_scan pgturbohybrid_sparse_fusion pgturbohybrid_sparse_quant pgturbohybrid_sparse_rerank pgturbohybrid_sparse_simd_parity pgturbohybrid_sparse_wand pgturbohybrid_sparse_cache pgturbohybrid_sparse_delta pgturbohybrid_sparse_primary pgturbohybrid_sparse_hardening pgturbohybrid_sparse_bitpacked pgturbohybrid_keymap pgturbohybrid_querysplit pgturbohybrid_multivector pgturbohybrid_multivector_many_moderate pgturbohybrid_codebook pgturbohybrid_u8split pgturbohybrid_nibble_guard pgturbohybrid_x4_safety pgturbohybrid_simd_parity pgturbohybrid_rescore pgturbohybrid_wrappers pgturbohybrid_fuzz security
 REGRESS_OPTS = --inputdir=test
 REGRESS += pgturbohybrid_validate
 

@@ -112,7 +112,6 @@ BEGIN
 		(stats->>'graph_ef_construction')::int <> 128 OR
 		(stats->>'graph_ef_search')::int <> 64 OR
 		(stats->>'graph_oversampling')::int <> 4 OR
-		stats->>'routing' <> 'auto' OR
 		stats->>'storage_kind' <> 'pgturbohybrid_graph_native' OR
 		stats->>'index_shape' <> 'hybrid' OR
 		(stats->>'bm25_branch_available')::boolean IS DISTINCT FROM true OR
@@ -2094,13 +2093,8 @@ DROP TABLE tqh_segment_docs;
 DROP TABLE tqh_dense_only_docs;
 DROP TABLE tqh_delta_docs;
 
--- A normal vector-order SQL scan on a (vector + tsvector) turbohybrid index must
--- run the NATIVE quantized graph path (tqgraphgettuple ->
--- PgturbohybridGraphCollectResults), never the legacy graph_hnsw
--- PgturbohybridGraphSearchLayer scan path.  scan_orchestration = 'graph_native'
--- is emitted only when the native storage path records the scan; the legacy
--- full-vector element-tuple path would report 'graph_hnsw' and a flat index
--- 'flat'.  This guards against treating SearchLayer as the native hot path.
+-- A normal vector-order SQL scan on a (vector + tsvector) turbohybrid index
+-- runs the native quantized graph path.
 DO $$
 DECLARE
 	stats jsonb;
@@ -3309,7 +3303,6 @@ BEGIN
 		'reindex_recommended',
 		'residual_rerank_bytes',
 		'residual_rerank_storage_bytes',
-		'routing',
 		'routing_entry_bytes',
 		'routing_entry_count',
 		'scan_us',

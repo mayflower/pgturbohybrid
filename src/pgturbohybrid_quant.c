@@ -8433,8 +8433,21 @@ PgturbohybridGraphReadMeta(Relation index, PgturbohybridGraphMetaPageData *meta)
 	pageHeader = (PageHeader) page;
 	metap = PgturbohybridGraphPageGetMeta(page);
 
-	if (metap->magicNumber != PGTURBOHYBRID_GRAPH_MAGIC_NUMBER ||
+	if (metap->magicNumber == PGTURBOHYBRID_GRAPH_MAGIC_NUMBER &&
 		metap->storageKind != PGTURBOHYBRID_GRAPH_STORAGE_QUANT_GRAPH_NATIVE)
+	{
+		uint32		foundVersion = metap->version;
+		uint32		foundStorageKind = metap->storageKind;
+
+		UnlockReleaseBuffer(buf);
+		ereport(ERROR,
+				(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
+				 errmsg("pgturbohybrid index \"%s\" uses removed legacy storage format %u (version %u)",
+						RelationGetRelationName(index), foundStorageKind,
+						foundVersion),
+				 errhint("REINDEX the index to rebuild it with the native TurboQuant graph.")));
+	}
+	if (metap->magicNumber != PGTURBOHYBRID_GRAPH_MAGIC_NUMBER)
 	{
 		UnlockReleaseBuffer(buf);
 		return false;

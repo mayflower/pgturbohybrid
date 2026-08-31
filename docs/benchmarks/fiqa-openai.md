@@ -124,8 +124,9 @@ fast-default acceptance pass.
 
 ## Quality Guard
 
-The release acceptance gate is defined in
-[`benchmarks/config/acceptance_thresholds.json`](../../benchmarks/config/acceptance_thresholds.json).
+Record the compared configurations and evaluate latency only at equivalent
+quality. Benchmark results are evidence for a release decision rather than a
+committed threshold file.
 For the FIQA/OpenAI fast-default suite (`fiqa_openai_fast_defaults`), the
 generated artifact must include the configured `pgturbohybrid_recovered_explicit`
 method row and the `postgres_sql_rrf` baseline row (the run above includes both

@@ -20,7 +20,7 @@ IMG_RE = re.compile(r'<img[^>]+src="([^"]+)"')
 def tracked_markdown():
     out = subprocess.run(["git", "ls-files", "*.md"], cwd=ROOT, text=True,
                          capture_output=True, check=True).stdout.split()
-    return [ROOT / p for p in out]
+    return [ROOT / p for p in out if (ROOT / p).is_file()]
 
 
 def main():

@@ -25,7 +25,6 @@
 
 #define PGTURBOHYBRID_SCAN_ORCHESTRATION_NONE		0
 #define PGTURBOHYBRID_SCAN_ORCHESTRATION_GRAPH		1
-#define PGTURBOHYBRID_SCAN_ORCHESTRATION_FLAT		2
 
 static int64 pgturbohybrid_last_graph_visited_nodes = 0;
 static int64 pgturbohybrid_last_graph_scored_codes = 0;
@@ -144,7 +143,7 @@ static int pgturbohybrid_last_graph_exact_rescore_source = PGTURBOHYBRID_EXACT_R
 static int pgturbohybrid_last_graph_scoring_kernel = PGTURBOHYBRID_SCORING_SCALAR;
 static int pgturbohybrid_last_exact_vector_kernel = PGTURBOHYBRID_EXACT_KERNEL_SCALAR;
 static bool pgturbohybrid_last_exact_vector_kernel_recorded = false;
-static int pgturbohybrid_last_graph_storage_kind = PGTURBOHYBRID_GRAPH_STORAGE_GRAPH;
+static int pgturbohybrid_last_graph_storage_kind = PGTURBOHYBRID_GRAPH_STORAGE_QUANT_GRAPH_NATIVE;
 static int pgturbohybrid_last_scan_orchestration = PGTURBOHYBRID_SCAN_ORCHESTRATION_NONE;
 static int pgturbohybrid_last_graph_quantization_bits = 0;
 static bool pgturbohybrid_last_graph_exact_storage = false;
@@ -1069,203 +1068,6 @@ PgturbohybridGraphRecordGraphScanStats(PgturbohybridGraphScanOpaque so)
 	pgturbohybrid_last_exact_vector_kernel_recorded = false;
 }
 
-void
-PgturbohybridGraphRecordNonGraphScanStats(void)
-{
-	pgturbohybrid_last_scan_orchestration = PGTURBOHYBRID_SCAN_ORCHESTRATION_NONE;
-	pgturbohybrid_last_graph_visited_nodes = 0;
-	pgturbohybrid_last_graph_scored_codes = 0;
-	pgturbohybrid_last_graph_batch_scored_codes = 0;
-	pgturbohybrid_last_graph_scalar_scored_codes = 0;
-	pgturbohybrid_last_graph_batch_kernel = PGTURBOHYBRID_SCORING_SCALAR;
-	pgturbohybrid_last_weighted_code_code_kernel = PGTURBOHYBRID_SCORING_SCALAR;
-	memset(pgturbohybrid_last_graph_score_kernel_nodes, 0,
-		   sizeof(pgturbohybrid_last_graph_score_kernel_nodes));
-	memset(pgturbohybrid_last_graph_score_kernel_calls, 0,
-		   sizeof(pgturbohybrid_last_graph_score_kernel_calls));
-	pgturbohybrid_last_graph_batch_calls = 0;
-	pgturbohybrid_last_graph_batch_nodes = 0;
-	pgturbohybrid_last_graph_base_frontier_pushes = 0;
-	pgturbohybrid_last_graph_base_frontier_pops = 0;
-	pgturbohybrid_last_graph_base_nearest_offers = 0;
-	pgturbohybrid_last_graph_base_visited_checks = 0;
-	pgturbohybrid_last_graph_base_duplicate_skips = 0;
-	pgturbohybrid_last_graph_base_batch_calls = 0;
-	pgturbohybrid_last_graph_base_batch_nodes = 0;
-	pgturbohybrid_last_graph_base_max_frontier = 0;
-	pgturbohybrid_last_graph_score_mode = PGTURBOHYBRID_SCORE_L2;
-	pgturbohybrid_last_graph_simd_force = pgturbohybrid_dense_simd_force;
-	pgturbohybrid_last_graph_candidate_count = 0;
-	pgturbohybrid_last_graph_rescore_band = PGTURBOHYBRID_GRAPH_RESCORE_BAND_AUTO;
-	pgturbohybrid_last_graph_rescore_count = 0;
-	pgturbohybrid_last_graph_rescore_pages = 0;
-	pgturbohybrid_last_graph_code_pages_read = 0;
-	pgturbohybrid_last_graph_adj_pages_read = 0;
-	pgturbohybrid_last_graph_segment_count = 0;
-	pgturbohybrid_last_graph_segments_searched = 0;
-	pgturbohybrid_last_graph_per_segment_budget_mode =
-		PGTURBOHYBRID_NATIVE_SEGMENT_BUDGET_OFF;
-	pgturbohybrid_last_graph_search_ef_before_segment_scaling = 0;
-	pgturbohybrid_last_graph_search_ef_after_segment_scaling = 0;
-	pgturbohybrid_last_graph_code_page_attempts = 0;
-	pgturbohybrid_last_graph_code_page_hits = 0;
-	pgturbohybrid_last_graph_code_page_misses = 0;
-	pgturbohybrid_last_graph_code_tuples_copied = 0;
-	pgturbohybrid_last_graph_code_arena_allocated_bytes = 0;
-	pgturbohybrid_last_graph_code_arena_used_bytes = 0;
-	pgturbohybrid_last_graph_entry_point_count = 0;
-	pgturbohybrid_last_graph_entry_sample_configured = 0;
-	pgturbohybrid_last_graph_entry_sample_effective = 0;
-	pgturbohybrid_last_graph_entry_sample_scored = 0;
-	pgturbohybrid_last_graph_entry_sidecar_count = 0;
-	pgturbohybrid_last_graph_entry_sidecar_scored = 0;
-	pgturbohybrid_last_graph_entry_sidecar_selected = 0;
-	pgturbohybrid_last_graph_entry_sidecar_representatives_configured = 0;
-	pgturbohybrid_last_graph_entry_sidecar_strategy =
-		PGTURBOHYBRID_DEFAULT_ENTRY_SIDECAR_STRATEGY;
-	pgturbohybrid_last_graph_entry_sidecar_us = 0;
-	pgturbohybrid_last_payload_entry_seeding_mode =
-		pgturbohybrid_payload_entry_seeding;
-	pgturbohybrid_last_payload_entry_seeding_hit = false;
-	pgturbohybrid_last_payload_entry_seed_count = 0;
-	pgturbohybrid_last_payload_entry_seed_payload_slot = -1;
-	pgturbohybrid_last_payload_entry_seed_range_count = 0;
-	pgturbohybrid_last_payload_entry_seed_us = 0;
-		pgturbohybrid_last_graph_residual_rerank_count = 0;
-		pgturbohybrid_last_graph_residual_rerank_bytes = 0;
-		pgturbohybrid_last_graph_residual_rerank_us = 0;
-		pgturbohybrid_last_graph_residual_rerank_mode =
-			pgturbohybrid_dense_residual_rerank_mode;
-		pgturbohybrid_last_graph_residual_rerank_weight_effective = 0.0;
-		pgturbohybrid_last_graph_residual_rerank_band = 0;
-		pgturbohybrid_last_graph_residual_rerank_band_multiplier = 0;
-		pgturbohybrid_last_graph_residual_rerank_max_adjustment = 0.0;
-		pgturbohybrid_last_graph_residual_rerank_reordered_count = 0;
-		pgturbohybrid_last_graph_residual_rerank_topk_changed = false;
-		pgturbohybrid_last_graph_heap_rescore_count = 0;
-		pgturbohybrid_last_graph_heap_fetch_us = 0;
-		pgturbohybrid_last_graph_heap_rescore_us = 0;
-		pgturbohybrid_last_graph_heap_rescore_mode = PGTURBOHYBRID_DENSE_HEAP_RESCORE_OFF;
-		pgturbohybrid_last_graph_heap_rescore_auto_enabled = false;
-		pgturbohybrid_last_graph_heap_rescore_reason = PGTURBOHYBRID_DENSE_HEAP_RESCORE_REASON_UNKNOWN;
-		pgturbohybrid_last_graph_prepare_us = 0;
-	pgturbohybrid_last_graph_traverse_us = 0;
-	pgturbohybrid_last_graph_entry_us = 0;
-	pgturbohybrid_last_graph_base_us = 0;
-	pgturbohybrid_last_graph_batch_us = 0;
-	pgturbohybrid_last_graph_heap_us = 0;
-	pgturbohybrid_last_graph_fill_us = 0;
-	pgturbohybrid_last_graph_fill_candidate_band_calls = 0;
-	pgturbohybrid_last_graph_fill_candidate_band_reason =
-		PGTURBOHYBRID_GRAPH_FILL_CANDIDATE_BAND_REASON_NONE;
-	pgturbohybrid_last_graph_fill_candidate_band_visited = 0;
-	pgturbohybrid_last_graph_fill_candidate_band_scored = 0;
-	pgturbohybrid_last_graph_fill_candidate_band_selected_before = 0;
-	pgturbohybrid_last_graph_fill_candidate_band_selected_after = 0;
-	pgturbohybrid_last_graph_fill_candidate_band_target = 0;
-	pgturbohybrid_last_graph_fill_candidate_band_used_payload_refs = false;
-	pgturbohybrid_last_graph_fill_candidate_band_payload_ref_count = 0;
-	pgturbohybrid_last_graph_rescore_us = 0;
-	pgturbohybrid_last_graph_sort_us = 0;
-	pgturbohybrid_last_graph_total_us = 0;
-	pgturbohybrid_last_graph_dense_requested_k = 0;
-	pgturbohybrid_last_graph_effective_result_target = 0;
-	pgturbohybrid_last_graph_effective_search_ef = 0;
-	pgturbohybrid_last_graph_effective_rescore_band = 0;
-	pgturbohybrid_last_graph_highdim_widening_multiplier = 1.0;
-	pgturbohybrid_last_graph_widening_reason = PGTURBOHYBRID_DENSE_WIDENING_NONE;
-	pgturbohybrid_last_dense_filter_unmapped = false;
-	pgturbohybrid_last_dense_linear_fallback_warning = false;
-	pgturbohybrid_last_dense_linear_fallback_ratio = 0.0;
-	pgturbohybrid_last_graph_adaptive_widening_mode = PGTURBOHYBRID_DENSE_ADAPTIVE_WIDENING_OFF;
-	pgturbohybrid_last_graph_adaptive_triggered = false;
-	pgturbohybrid_last_graph_adaptive_trigger_reason = PGTURBOHYBRID_DENSE_ADAPTIVE_REASON_NONE;
-	pgturbohybrid_last_graph_adaptive_initial_result_target = 0;
-	pgturbohybrid_last_graph_adaptive_final_result_target = 0;
-	pgturbohybrid_last_graph_adaptive_initial_search_ef = 0;
-	pgturbohybrid_last_graph_adaptive_final_search_ef = 0;
-	pgturbohybrid_last_graph_adaptive_gap_top10 = 0.0;
-	pgturbohybrid_last_graph_adaptive_gap_boundary = 0.0;
-	pgturbohybrid_last_graph_uncertainty_retry_mode =
-		pgturbohybrid_dense_uncertainty_retry;
-	pgturbohybrid_last_graph_uncertainty_retry_triggered = false;
-	pgturbohybrid_last_graph_uncertainty_retry_reason =
-		PGTURBOHYBRID_DENSE_UNCERTAINTY_REASON_NONE;
-	pgturbohybrid_last_graph_uncertainty_retry_passes = 0;
-	pgturbohybrid_last_graph_uncertainty_initial_result_target = 0;
-	pgturbohybrid_last_graph_uncertainty_final_result_target = 0;
-	pgturbohybrid_last_graph_uncertainty_initial_search_ef = 0;
-	pgturbohybrid_last_graph_uncertainty_final_search_ef = 0;
-	pgturbohybrid_last_graph_uncertainty_gap_top10 = 0.0;
-	pgturbohybrid_last_graph_uncertainty_gap_boundary = 0.0;
-	pgturbohybrid_last_graph_local_expansion_mode = PGTURBOHYBRID_DENSE_LOCAL_EXPANSION_OFF;
-	pgturbohybrid_last_graph_local_expansion_triggered = false;
-	pgturbohybrid_last_graph_local_expansion_seed_count = 0;
-	pgturbohybrid_last_graph_local_expansion_neighbors_scored = 0;
-	pgturbohybrid_last_graph_local_expansion_candidates_added = 0;
-	pgturbohybrid_last_graph_local_expansion_us = 0;
-		pgturbohybrid_last_graph_dense_budget_policy = PGTURBOHYBRID_DENSE_BUDGET_AUTO;
-		pgturbohybrid_last_graph_rescore_band_policy = PGTURBOHYBRID_RESCORE_BAND_POLICY_AUTO;
-		pgturbohybrid_last_graph_exact_rescore_source = PGTURBOHYBRID_EXACT_RESCORE_SOURCE_NONE;
-		pgturbohybrid_last_graph_scoring_kernel = PGTURBOHYBRID_SCORING_SCALAR;
-	pgturbohybrid_last_exact_vector_kernel = PGTURBOHYBRID_EXACT_KERNEL_SCALAR;
-	pgturbohybrid_last_exact_vector_kernel_recorded = false;
-	pgturbohybrid_last_graph_storage_kind = PGTURBOHYBRID_GRAPH_STORAGE_GRAPH;
-	pgturbohybrid_last_graph_quantization_bits = 0;
-	pgturbohybrid_last_graph_exact_storage = false;
-	pgturbohybrid_last_graph_exact_storage_known = false;
-	pgturbohybrid_last_graph_build_exact_distances = false;
-	pgturbohybrid_last_graph_build_distance_mode = PGTURBOHYBRID_DENSE_BUILD_DISTANCE_CODE;
-	pgturbohybrid_last_graph_build_fast_edges = false;
-	pgturbohybrid_last_graph_build_neighbor_select_reason =
-		PGTURBOHYBRID_BUILD_NEIGHBOR_SELECT_REASON_UNKNOWN;
-	pgturbohybrid_last_graph_query_split_active = false;
-	pgturbohybrid_last_graph_querysplit_used = false;
-	pgturbohybrid_last_graph_u8_split_used = false;
-	pgturbohybrid_last_dense_u8_batch_x4_enabled = pgturbohybrid_dense_u8_batch_x4;
-	pgturbohybrid_last_graph_u8_batch_mode = PGTURBOHYBRID_U8_BATCH_NONE;
-	pgturbohybrid_last_graph_u8_kernel_single = PGTURBOHYBRID_U8_KERNEL_NONE;
-	pgturbohybrid_last_graph_u8_kernel_batch = PGTURBOHYBRID_U8_KERNEL_NONE;
-	pgturbohybrid_last_graph_large_code_arena = false;
-	pgturbohybrid_last_graph_whole_code_prefetch_active = false;
-	pgturbohybrid_last_graph_code_bytes = 0;
-	pgturbohybrid_last_graph_code_arena_estimated_bytes = 0;
-	pgturbohybrid_last_graph_native_cache_mode = PGTURBOHYBRID_GRAPH_NATIVE_CACHE_NONE;
-	pgturbohybrid_last_graph_native_cache_policy = pgturbohybrid_native_cache_policy;
-	pgturbohybrid_last_graph_native_cache_reason = PGTURBOHYBRID_GRAPH_NATIVE_CACHE_REASON_NONE;
-	pgturbohybrid_last_graph_native_cache_used = false;
-	pgturbohybrid_last_graph_native_cache_reused = false;
-	pgturbohybrid_last_graph_native_cache_built_this_scan = false;
-	pgturbohybrid_last_graph_native_cache_attach_us = 0;
-	pgturbohybrid_last_graph_native_cache_build_us = 0;
-	pgturbohybrid_last_graph_native_cache_wait_us = 0;
-	pgturbohybrid_last_graph_native_cache_refcount = -1;
-	pgturbohybrid_last_graph_native_cache_bytes = 0;
-	pgturbohybrid_last_graph_native_cache_code_bytes = 0;
-	pgturbohybrid_last_graph_native_cache_adj_bytes = 0;
-	pgturbohybrid_last_graph_native_cache_exact_bytes = 0;
-	pgturbohybrid_last_graph_native_cache_warning = false;
-	pgturbohybrid_last_graph_native_cache_warning_reason = "none";
-	pgturbohybrid_last_graph_scan_lock_wait_us = 0;
-	pgturbohybrid_last_graph_code_buffer_lock_wait_us = 0;
-	pgturbohybrid_last_graph_adj_buffer_lock_wait_us = 0;
-	pgturbohybrid_last_graph_dimensions = 0;
-	pgturbohybrid_last_graph_returned_rows = 0;
-	pgturbohybrid_last_graph_m = 0;
-	pgturbohybrid_last_graph_ef_construction = 0;
-	pgturbohybrid_last_graph_ef_search = 0;
-	pgturbohybrid_last_graph_oversampling = 0;
-	pgturbohybrid_last_graph_exact_cache = PGTURBOHYBRID_GRAPH_EXACT_CACHE_AUTO;
-}
-
-void
-PgturbohybridGraphRecordFlatScanStats(void)
-{
-	PgturbohybridGraphRecordNonGraphScanStats();
-	pgturbohybrid_last_scan_orchestration = PGTURBOHYBRID_SCAN_ORCHESTRATION_FLAT;
-	pgturbohybrid_last_graph_storage_kind = PGTURBOHYBRID_GRAPH_STORAGE_QUANT_FLAT;
-}
-
 static const char *
 PgturbohybridGraphNativeCacheModeName(int mode)
 {
@@ -1408,9 +1210,7 @@ TqScanOrchestrationName(void)
 	switch (pgturbohybrid_last_scan_orchestration)
 	{
 		case PGTURBOHYBRID_SCAN_ORCHESTRATION_GRAPH:
-			return pgturbohybrid_last_graph_storage_kind == PGTURBOHYBRID_GRAPH_STORAGE_QUANT_GRAPH_NATIVE ? "graph_native" : "graph_hnsw";
-		case PGTURBOHYBRID_SCAN_ORCHESTRATION_FLAT:
-			return "flat";
+			return "graph_native";
 		case PGTURBOHYBRID_SCAN_ORCHESTRATION_NONE:
 		default:
 			return "none";

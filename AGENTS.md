@@ -12,6 +12,10 @@
   dependency for later features.
 - Do not commit generated benchmark output, regression output, local logs, or
   host-specific artifacts.
+- Keep SQL-visible names in the existing namespaces: `turbohybrid.*` for GUCs,
+  `turbohybrid_*` for functions, and `pgturbohybrid_*` for C symbols. Names
+  beginning with `vector_*`, `hnsw_*`, or `tq_*` belong to dependencies or
+  access-method internals.
 
 ## Nix Development Environment
 

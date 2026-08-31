@@ -65,13 +65,6 @@ static List *pgturbohybrid_plannedstmt_stack = NIL;
 static PlannedStmt *pgturbohybrid_current_plannedstmt = NULL;
 static bool pgturbohybrid_am_init_done = false;
 
-static relopt_enum_elt_def pgturbohybrid_routing_relopt_options[] = {
-	{"auto", PGTURBOHYBRID_ROUTING_AUTO},
-	{"graph", PGTURBOHYBRID_ROUTING_GRAPH},
-	{"flat", PGTURBOHYBRID_ROUTING_FLAT},
-	{NULL, 0}
-};
-
 static relopt_enum_elt_def pgturbohybrid_native_segments_relopt_options[] = {
 	{"auto", 0},
 	{"1", 1},
@@ -5646,7 +5639,10 @@ pgturbohybridambuild(Relation heap, Relation index, IndexInfo *indexInfo)
 	IndexBuildResult *result;
 
 	PgturbohybridValidateIndex(index, indexInfo);
-	result = pgturbohybridbuild(heap, index, indexInfo);
+	if (PgturbohybridSparseIsPrimary(index))
+		result = PgturbohybridSparsePrimaryBuild(heap, index, indexInfo);
+	else
+		result = tqgraphbuild(heap, index, indexInfo);
 
 	if (PgturbohybridIndexInfoHasLexical(index, indexInfo))
 		PgturbohybridBm25BuildCollect(heap, index, indexInfo);
@@ -5661,7 +5657,10 @@ static void
 pgturbohybridambuildempty(Relation index)
 {
 	PgturbohybridValidateIndex(index, NULL);
-	pgturbohybridbuildempty(index);
+	if (PgturbohybridSparseIsPrimary(index))
+		PgturbohybridSparsePrimaryBuildEmpty(index);
+	else
+		tqgraphbuildempty(index);
 	if (PgturbohybridIndexHasLexical(index))
 		PgturbohybridBm25BuildEmpty(index);
 }
@@ -5809,14 +5808,9 @@ pgturbohybridambulkdelete(IndexVacuumInfo *info, IndexBulkDeleteResult *stats, I
 		return stats;
 	}
 
-	if (PgturbohybridGraphUseTqNativeGraph(info->index))
-	{
-		result = tqgraphbulkdelete(info, stats, callback, callback_state);
-		PgturbohybridBm25InvalidateCache(info->index);
-		PgturbohybridSparseCacheInvalidate(RelationGetRelid(info->index));
-	}
-	else
-		result = pgturbohybrid_graph_bulkdelete(info, stats, callback, callback_state);
+	result = tqgraphbulkdelete(info, stats, callback, callback_state);
+	PgturbohybridBm25InvalidateCache(info->index);
+	PgturbohybridSparseCacheInvalidate(RelationGetRelid(info->index));
 
 	return result;
 }
@@ -5838,15 +5832,10 @@ pgturbohybridamvacuumcleanup(IndexVacuumInfo *info, IndexBulkDeleteResult *stats
 		return stats;
 	}
 
-	if (PgturbohybridGraphUseTqNativeGraph(info->index))
-	{
-		result = tqgraphvacuumcleanup(info, stats);
-		(void) PgturbohybridBm25MaybeCompact(info->index);
-		PgturbohybridBm25InvalidateCache(info->index);
-		PgturbohybridSparseCacheInvalidate(RelationGetRelid(info->index));
-	}
-	else
-		result = pgturbohybrid_graph_vacuum_cleanup(info, stats);
+	result = tqgraphvacuumcleanup(info, stats);
+	(void) PgturbohybridBm25MaybeCompact(info->index);
+	PgturbohybridBm25InvalidateCache(info->index);
+	PgturbohybridSparseCacheInvalidate(RelationGetRelid(info->index));
 
 	return result;
 }
@@ -5857,7 +5846,23 @@ pgturbohybridambeginscan(Relation index, int nkeys, int norderbys)
 	IndexScanDesc scan;
 
 	PgturbohybridValidateIndex(index, NULL);
-	scan = pgturbohybridbeginscan(index, nkeys, norderbys);
+	if (PgturbohybridSparseIsPrimary(index))
+	{
+		PgturbohybridGraphScanOpaque so;
+
+		scan = RelationGetIndexScan(index, nkeys, norderbys);
+		so = palloc0(sizeof(PgturbohybridGraphScanOpaqueData));
+		so->tmpCtx = AllocSetContextCreate(CurrentMemoryContext,
+										   "pgturbohybrid sparse-primary scan context",
+										   0, 8 * 1024, 256 * 1024);
+		so->efSearch = PgturbohybridGraphGetEfSearch(index);
+		so->graphStorageKind = PGTURBOHYBRID_GRAPH_STORAGE_QUANT_GRAPH_NATIVE;
+		so->first = true;
+		so->previousDistance = -get_float8_infinity();
+		scan->opaque = so;
+	}
+	else
+		scan = tqgraphbeginscan(index, nkeys, norderbys);
 
 	return scan;
 }
@@ -5922,9 +5927,26 @@ pgturbohybridamrescan(IndexScanDesc scan, ScanKey keys, int nkeys, ScanKey order
 					 errhint("Add a turbohybrid_sparse_vector key to the index, or evaluate sparse_query with turbohybrid_query(...) for exact scoring without an index.")));
 	}
 
-	pgturbohybridrescan(scan, keys, nkeys,
-					 useScalarVectorOrderby ? denseOrderbys : NULL,
-					 useScalarVectorOrderby ? norderbys : 0);
+	if (PgturbohybridSparseIsPrimary(scan->indexRelation))
+	{
+		PgturbohybridGraphScanOpaque so =
+			(PgturbohybridGraphScanOpaque) scan->opaque;
+
+		so->first = true;
+		so->returnedRows = 0;
+		so->previousDistance = -get_float8_infinity();
+		MemoryContextReset(so->tmpCtx);
+		if (keys && scan->numberOfKeys > 0)
+			memmove(scan->keyData, keys,
+					scan->numberOfKeys * sizeof(ScanKeyData));
+		if (orderbys && scan->numberOfOrderBys > 0)
+			memmove(scan->orderByData, orderbys,
+					scan->numberOfOrderBys * sizeof(ScanKeyData));
+	}
+	else
+		tqgraphrescan(scan, keys, nkeys,
+					  useScalarVectorOrderby ? denseOrderbys : NULL,
+					  useScalarVectorOrderby ? norderbys : 0);
 
 	if (hasTextQuery || hasVectorQuery || hasMultiVectorQuery || hasSparseQuery)
 	{
@@ -5980,7 +6002,8 @@ pgturbohybridamgettuple(IndexScanDesc scan, ScanDirection dir)
 		return true;
 	}
 
-	result = pgturbohybridgettuple(scan, dir);
+	result = PgturbohybridSparseIsPrimary(scan->indexRelation) ?
+		false : tqgraphgettuple(scan, dir);
 
 	return result;
 }
@@ -5988,7 +6011,20 @@ pgturbohybridamgettuple(IndexScanDesc scan, ScanDirection dir)
 static void
 pgturbohybridamendscan(IndexScanDesc scan)
 {
-	pgturbohybridendscan(scan);
+	if (PgturbohybridSparseIsPrimary(scan->indexRelation))
+	{
+		PgturbohybridGraphScanOpaque so =
+			(PgturbohybridGraphScanOpaque) scan->opaque;
+
+		if (so != NULL)
+		{
+			MemoryContextDelete(so->tmpCtx);
+			pfree(so);
+		}
+		scan->opaque = NULL;
+	}
+	else
+		tqgraphendscan(scan);
 }
 
 static bool
@@ -6525,7 +6561,6 @@ pgturbohybridamoptions(Datum reloptions, bool validate)
 	static const relopt_parse_elt tab[] = {
 		PGTURBOHYBRID_RELOPT_PARSE("graph_m", RELOPT_TYPE_INT, m),
 		PGTURBOHYBRID_RELOPT_PARSE("graph_ef_construction", RELOPT_TYPE_INT, efConstruction),
-		PGTURBOHYBRID_RELOPT_PARSE("routing", RELOPT_TYPE_ENUM, routing),
 		PGTURBOHYBRID_RELOPT_PARSE("graph_ef_search", RELOPT_TYPE_INT, graphEfSearch),
 		PGTURBOHYBRID_RELOPT_PARSE("graph_oversampling", RELOPT_TYPE_INT, graphOversampling),
 		PGTURBOHYBRID_RELOPT_PARSE("native_segments", RELOPT_TYPE_ENUM, nativeSegments),
@@ -6646,10 +6681,6 @@ PgturbohybridInit(void)
 	RegisterXactCallback(PgturbohybridXactCallback, NULL);
 	RegisterSubXactCallback(PgturbohybridSubXactCallback, NULL);
 
-	add_enum_reloption(pgturbohybrid_relopt_kind, "routing", "pgturbohybrid dense routing mode",
-					   pgturbohybrid_routing_relopt_options, PGTURBOHYBRID_ROUTING_AUTO,
-					   "Valid values are \"auto\", \"graph\", and \"flat\".",
-					   AccessExclusiveLock);
 	add_int_reloption(pgturbohybrid_relopt_kind, "graph_m", "Max number of graph connections",
 					  PGTURBOHYBRID_DEFAULT_GRAPH_M, PGTURBOHYBRID_GRAPH_MIN_M, PGTURBOHYBRID_GRAPH_MAX_M, AccessExclusiveLock);
 	add_int_reloption(pgturbohybrid_relopt_kind, "graph_ef_construction", "Size of the dynamic graph candidate list for construction",

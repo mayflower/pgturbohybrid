@@ -69,7 +69,6 @@ typedef struct PgturbohybridOptions
 	int32		vl_len_;
 	int			m;
 	int			efConstruction;
-	int			routing;
 	int			graphEfSearch;
 	int			graphOversampling;
 	int			graphRescoreBand;

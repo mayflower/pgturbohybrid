@@ -127,16 +127,6 @@ PgturbohybridGraphGetActivePayloadInt4Filter(AttrNumber *heap_attno, int32 *valu
 	return true;
 }
 
-void
-PgturbohybridGraphControlInit(void)
-{
-	/*
-	 * Executor hooks are installed once by PgturbohybridExecutorHooksInit()
-	 * after graph and AM initialization. This entry point remains because the
-	 * graph initializer owns other graph setup and older code paths call it.
-	 */
-}
-
 static void
 PgturbohybridExecutorHooksInit(void)
 {

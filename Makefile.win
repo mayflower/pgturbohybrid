@@ -19,11 +19,9 @@ OBJS = \
 	src\pgturbohybrid_am.obj \
 	src\pgturbohybrid_bm25_build.obj \
 	src\pgturbohybrid_bm25_query.obj \
-	src\pgturbohybrid_build.obj \
 	src\pgturbohybrid_graph.obj \
 	src\pgturbohybrid_graph_utils.obj \
 	src\pgturbohybrid_guc.obj \
-	src\pgturbohybrid_insert.obj \
 	src\pgturbohybrid_multivector.obj \
 	src\pgturbohybrid_quant.obj \
 	src\pgturbohybrid_quant_multivector_scan.obj \
@@ -36,14 +34,12 @@ OBJS = \
 	src\pgturbohybrid_quant_score.obj \
 	src\pgturbohybrid_quant_storage.obj \
 	src\pgturbohybrid_query.obj \
-	src\pgturbohybrid_scan.obj \
 	src\pgturbohybrid_sparse_build.obj \
 	src\pgturbohybrid_sparse_primary.obj \
 	src\pgturbohybrid_sparse_query.obj \
 	src\pgturbohybrid_sparse_score.obj \
 	src\pgturbohybrid_diagnostics.obj \
 	src\pgturbohybrid_validate.obj \
-	src\pgturbohybrid_vacuum.obj \
 	src\pgturbohybrid_vector_compat.obj
 
 HEADERS =

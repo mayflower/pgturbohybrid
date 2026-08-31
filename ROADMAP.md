@@ -25,7 +25,6 @@ experimental (see [docs/beta-scope.md](docs/beta-scope.md)).
 - [x] Alpha upgrade policy exercised transactionally with explicit migration guidance
 - [x] Release artifacts carry SHA256 checksums (source archives in release.yml; .deb/.rpm/Windows zip in the package workflows); Docker images build with `provenance: mode=max` + SBOM
 - [x] Cryptographic signing and verification of release archives and SPDX SBOM
-- [x] Core and experimental API ledgers exist and are drift-tested ([docs/api-ledger.json](docs/api-ledger.json))
 - [x] Storage-format compatibility document ([docs/storage-format.md](docs/storage-format.md))
 - [x] Long-running concurrency/recovery tests run in scheduled CI
 - [ ] Multivector beta blocker resolved or fenced (see below)

@@ -8,14 +8,11 @@
 #include "access/genam.h"
 #include "access/parallel.h"
 #include "common/relpath.h"
-#include "lib/pairingheap.h"
 #include "nodes/execnodes.h"
-#include "port.h"				/* for random() */
 #include "storage/bufpage.h"
 #include "storage/condition_variable.h"
 #include "storage/lwlock.h"
 #include "storage/s_lock.h"
-#include "utils/relptr.h"
 #include "utils/memutils.h"
 #include "utils/sampling.h"
 #include "pgturbohybrid_vector_compat.h"
@@ -96,15 +93,8 @@ typedef Pointer Item;
 #define PGTURBOHYBRID_GRAPH_ENABLE_SYMMETRIC_I8_DOT 0
 #endif
 
-/* Tuple types */
-#define PGTURBOHYBRID_GRAPH_ELEMENT_TUPLE_TYPE  1
-#define PGTURBOHYBRID_GRAPH_NEIGHBOR_TUPLE_TYPE 2
-
 /* Page and storage identities */
-#define PGTURBOHYBRID_GRAPH_STORAGE_GRAPH				0
-#define PGTURBOHYBRID_GRAPH_STORAGE_QUANT_GRAPH	1
-#define PGTURBOHYBRID_GRAPH_STORAGE_QUANT_FLAT	2
-#define PGTURBOHYBRID_GRAPH_STORAGE_QUANT_IVF		3
+/* Values 0-3 were removed pre-1.0 legacy storage formats. */
 #define PGTURBOHYBRID_GRAPH_STORAGE_QUANT_GRAPH_NATIVE	4
 
 #define PGTURBOHYBRID_MULTIVECTOR_GRAPH_TOKEN_NODES		0
@@ -159,23 +149,7 @@ typedef enum PgturbohybridMultiVectorRerankSource
 #define PGTURBOHYBRID_GRAPH_GRAPH_OP_VACUUM_DELETE		8
 #define PGTURBOHYBRID_GRAPH_GRAPH_OP_VACUUM_REPAIR		9
 
-/* Make graph robust against non-HOT updates */
-#define PGTURBOHYBRID_GRAPH_HEAPTIDS 10
-
-#define PGTURBOHYBRID_GRAPH_UPDATE_ENTRY_GREATER 1
-#define PGTURBOHYBRID_GRAPH_UPDATE_ENTRY_ALWAYS 2
-
-/* Build phases */
-/* PROGRESS_CREATEIDX_SUBPHASE_INITIALIZE is 1 */
-#define PGTURBOHYBRID_PROGRESS_PHASE_LOAD		2
-
 #define PGTURBOHYBRID_GRAPH_MAX_SIZE (BLCKSZ - MAXALIGN(SizeOfPageHeaderData) - MAXALIGN(sizeof(PgturbohybridGraphPageOpaqueData)) - sizeof(ItemIdData))
-#define PGTURBOHYBRID_GRAPH_TUPLE_ALLOC_SIZE BLCKSZ
-
-#define PGTURBOHYBRID_GRAPH_ELEMENT_TUPLE_SIZE(size)	MAXALIGN(offsetof(PgturbohybridGraphElementTupleData, data) + (size))
-#define PGTURBOHYBRID_GRAPH_NEIGHBOR_TUPLE_SIZE(level, m)	MAXALIGN(offsetof(PgturbohybridGraphNeighborTupleData, indextids) + ((level) + 2) * (m) * sizeof(ItemPointerData))
-
-#define PGTURBOHYBRID_GRAPH_NEIGHBOR_ARRAY_SIZE(lm)	(offsetof(PgturbohybridGraphNeighborArray, items) + sizeof(PgturbohybridGraphCandidate) * (lm))
 
 #define PgturbohybridGraphPageGetOpaque(page)	((PgturbohybridGraphPageOpaque) PageGetSpecialPointer(page))
 
@@ -190,17 +164,6 @@ PgturbohybridCheckedArrayBytes(Size elemSize, Size count, const char *what)
 }
 #define PgturbohybridGraphPageGetMeta(page)	((PgturbohybridGraphMetaPageData *) PageGetContents(page))
 
-#if PG_VERSION_NUM >= 150000
-#define RandomDouble() pg_prng_double(&pg_global_prng_state)
-#define SeedRandom(seed) pg_prng_seed(&pg_global_prng_state, seed)
-#else
-#define RandomDouble() (((double) random()) / MAX_RANDOM_VALUE)
-#define SeedRandom(seed) srandom(seed)
-#endif
-
-#define PgturbohybridGraphIsElementTuple(tup) ((tup)->type == PGTURBOHYBRID_GRAPH_ELEMENT_TUPLE_TYPE)
-#define PgturbohybridGraphIsNeighborTuple(tup) ((tup)->type == PGTURBOHYBRID_GRAPH_NEIGHBOR_TUPLE_TYPE)
-
 /* 2 * M connections for ground layer */
 #define PgturbohybridGraphGetLayerM(m, layer) (layer == 0 ? (m) * 2 : (m))
 
@@ -208,26 +171,7 @@ PgturbohybridCheckedArrayBytes(Size elemSize, Size count, const char *what)
 #define PgturbohybridGraphGetMl(m) (1 / log(m))
 
 /* Ensure fits on page and in uint8 */
-#define PgturbohybridGraphGetMaxLevel(m) Min(((BLCKSZ - MAXALIGN(SizeOfPageHeaderData) - MAXALIGN(sizeof(PgturbohybridGraphPageOpaqueData)) - offsetof(PgturbohybridGraphNeighborTupleData, indextids) - sizeof(ItemIdData)) / (sizeof(ItemPointerData)) / (m)) - 2, 255)
-
-#define PgturbohybridGraphGetSearchCandidate(membername, ptr) pairingheap_container(PgturbohybridGraphSearchCandidate, membername, ptr)
-#define PgturbohybridGraphGetSearchCandidateConst(membername, ptr) pairingheap_const_container(PgturbohybridGraphSearchCandidate, membername, ptr)
-
-#define PgturbohybridGraphGetValue(base, element) PointerGetDatum(PgturbohybridGraphPtrAccess(base, (element)->value))
-
-#if PG_VERSION_NUM < 140005
-#define relptr_offset(rp) ((rp).relptr_off - 1)
-#endif
-
-/* Pointer macros */
-#define PgturbohybridGraphPtrAccess(base, hp) ((base) == NULL ? (hp).ptr : relptr_access(base, (hp).relptr))
-#define PgturbohybridGraphPtrStore(base, hp, value) ((base) == NULL ? (void) ((hp).ptr = (value)) : (void) relptr_store(base, (hp).relptr, value))
-#define PgturbohybridGraphPtrIsNull(base, hp) ((base) == NULL ? (hp).ptr == NULL : relptr_is_null((hp).relptr))
-#define PgturbohybridGraphPtrEqual(base, hp1, hp2) ((base) == NULL ? (hp1).ptr == (hp2).ptr : relptr_offset((hp1).relptr) == relptr_offset((hp2).relptr))
-
-/* For code paths dedicated to each type */
-#define PgturbohybridGraphPtrPointer(hp) (hp).ptr
-#define PgturbohybridGraphPtrOffset(hp) relptr_offset((hp).relptr)
+#define PgturbohybridGraphGetMaxLevel(m) Min(((BLCKSZ - MAXALIGN(SizeOfPageHeaderData) - MAXALIGN(sizeof(PgturbohybridGraphPageOpaqueData)) - sizeof(uint32) - sizeof(ItemIdData)) / (sizeof(ItemPointerData)) / (m)) - 2, 255)
 
 /* Variables */
 extern int	pgturbohybrid_ef_search;
@@ -297,15 +241,6 @@ extern int	pgturbohybrid_final_diversity_payload_slot;
 extern double pgturbohybrid_final_diversity_lambda;
 extern int	pgturbohybrid_final_diversity_pool_multiplier;
 extern int	pgturbohybrid_graph_lock_tranche_id;
-
-typedef enum PgturbohybridRoutingMode
-{
-	PGTURBOHYBRID_ROUTING_AUTO = 0,
-	PGTURBOHYBRID_ROUTING_GRAPH = 1,
-	PGTURBOHYBRID_ROUTING_IVF = 2,
-	PGTURBOHYBRID_ROUTING_FLAT = 3,
-	PGTURBOHYBRID_ROUTING_LEGACY_GRAPH = 4
-}			PgturbohybridRoutingMode;
 
 typedef enum PgturbohybridGraphRescoreBand
 {
@@ -664,77 +599,11 @@ typedef enum PgturbohybridGraphIterativeScanMode
 	PGTURBOHYBRID_GRAPH_ITERATIVE_SCAN_STRICT
 }			PgturbohybridGraphIterativeScanMode;
 
-typedef struct PgturbohybridGraphElementData PgturbohybridGraphElementData;
-typedef struct PgturbohybridGraphNeighborArray PgturbohybridGraphNeighborArray;
-
-#define PgturbohybridGraphPtrDeclare(type, relptrtype, ptrtype) \
-	relptr_declare(type, relptrtype); \
-	typedef union { type *ptr; relptrtype relptr; } ptrtype
-
-/* Pointers that can be absolute or relative */
-/* Use char for DatumPtr so works with Pointer */
-PgturbohybridGraphPtrDeclare(PgturbohybridGraphElementData, PgturbohybridGraphElementRelptr, PgturbohybridGraphElementPtr);
-PgturbohybridGraphPtrDeclare(PgturbohybridGraphNeighborArray, PgturbohybridGraphNeighborArrayRelptr, PgturbohybridGraphNeighborArrayPtr);
-PgturbohybridGraphPtrDeclare(PgturbohybridGraphNeighborArrayPtr, PgturbohybridGraphNeighborsRelptr, PgturbohybridGraphNeighborsPtr);
-PgturbohybridGraphPtrDeclare(char, DatumRelptr, DatumPtr);
-
-struct PgturbohybridGraphElementData
-{
-	PgturbohybridGraphElementPtr next;
-	ItemPointerData heaptids[PGTURBOHYBRID_GRAPH_HEAPTIDS];
-	uint8		heaptidsLength;
-	uint8		level;
-	uint8		deleted;
-	uint8		version;
-	uint32		hash;
-	PgturbohybridGraphNeighborsPtr neighbors;
-	BlockNumber blkno;
-	OffsetNumber offno;
-	OffsetNumber neighborOffno;
-	BlockNumber neighborPage;
-	DatumPtr	value;
-	LWLock		lock;
-};
-
-typedef PgturbohybridGraphElementData * PgturbohybridGraphElement;
-
-typedef struct PgturbohybridGraphCandidate
-{
-	PgturbohybridGraphElementPtr element;
-	float		distance;
-	bool		closer;
-}			PgturbohybridGraphCandidate;
-
-struct PgturbohybridGraphNeighborArray
-{
-	int			length;
-	bool		closerSet;
-	PgturbohybridGraphCandidate items[FLEXIBLE_ARRAY_MEMBER];
-};
-
-typedef struct PgturbohybridGraphSearchCandidate
-{
-	pairingheap_node c_node;
-	pairingheap_node w_node;
-	PgturbohybridGraphElementPtr element;
-	double		distance;
-}			PgturbohybridGraphSearchCandidate;
-
-/* HNSW index options */
-typedef struct PgturbohybridGraphOptions
-{
-	int32		vl_len_;		/* varlena header (do not touch directly!) */
-	int			m;				/* number of connections */
-	int			efConstruction; /* size of dynamic candidate list */
-}			PgturbohybridGraphOptions;
-
-/* Keep the first fields layout-compatible with PgturbohybridGraphOptions */
 typedef struct TqOptions
 {
 	int32		vl_len_;		/* varlena header (do not touch directly!) */
 	int			m;				/* graph_m */
 	int			efConstruction; /* graph_ef_construction */
-	int			routing;
 	int			graphEfSearch;
 	int			graphOversampling;
 	int			graphRescoreBand;
@@ -765,65 +634,6 @@ typedef struct TqOptions
 	int			multivectorFieldMode;	/* multivector_field_mode */
 }			TqOptions;
 
-typedef struct PgturbohybridGraphGraph
-{
-	/* Graph state */
-	slock_t		lock;
-	PgturbohybridGraphElementPtr head;
-	double		indtuples;
-
-	/* Entry state */
-	LWLock		entryLock;
-	LWLock		entryWaitLock;
-	PgturbohybridGraphElementPtr entryPoint;
-
-	/* Allocations state */
-	LWLock		allocatorLock;
-	Size		memoryUsed;
-	Size		memoryTotal;
-
-	/* Flushed state */
-	LWLock		flushLock;
-	bool		flushed;
-}			PgturbohybridGraphGraph;
-
-typedef struct PgturbohybridGraphShared
-{
-	/* Immutable state */
-	Oid			heaprelid;
-	Oid			indexrelid;
-	bool		isconcurrent;
-
-	/* Worker progress */
-	ConditionVariable workersdonecv;
-
-	/* Mutex for mutable state */
-	slock_t		mutex;
-
-	/* Mutable state */
-	int			nparticipantsdone;
-	double		reltuples;
-	PgturbohybridGraphGraph	graphData;
-}			PgturbohybridGraphShared;
-
-#define ParallelTableScanFromPgturbohybridGraphShared(shared) \
-	(ParallelTableScanDesc) ((char *) (shared) + BUFFERALIGN(sizeof(PgturbohybridGraphShared)))
-
-typedef struct PgturbohybridGraphLeader
-{
-	ParallelContext *pcxt;
-	int			nparticipanttuplesorts;
-	PgturbohybridGraphShared *graphShared;
-	Snapshot	snapshot;
-	char	   *graphArea;
-}			PgturbohybridGraphLeader;
-
-typedef struct PgturbohybridGraphAllocator
-{
-	void	   *(*alloc) (Size size, void *state);
-	void	   *state;
-}			PgturbohybridGraphAllocator;
-
 typedef struct PgturbohybridGraphTypeInfo
 {
 	int			maxDimensions;
@@ -837,11 +647,6 @@ typedef struct PgturbohybridGraphSupport
 	FmgrInfo   *normprocinfo;
 	Oid			collation;
 }			PgturbohybridGraphSupport;
-
-typedef struct PgturbohybridGraphQuery
-{
-	Datum		value;
-}			PgturbohybridGraphQuery;
 
 /*
  * Per-query scoring representations, grouped so it is obvious which fields a
@@ -976,44 +781,6 @@ typedef struct PgturbohybridGraphTqQuery
 	bool		enabled;
 }			PgturbohybridGraphTqQuery;
 
-typedef struct PgturbohybridGraphBuildState
-{
-	/* Info */
-	Relation	heap;
-	Relation	index;
-	IndexInfo  *indexInfo;
-	ForkNumber	forkNum;
-	const		PgturbohybridGraphTypeInfo *typeInfo;
-
-	/* Settings */
-	int			dimensions;
-	int			m;
-	int			efConstruction;
-
-	/* Statistics */
-	double		indtuples;
-	double		reltuples;
-
-	/* Support functions */
-	PgturbohybridGraphSupport support;
-
-	/* Variables */
-	PgturbohybridGraphGraph	graphData;
-	PgturbohybridGraphGraph  *graph;
-	double		ml;
-	int			maxLevel;
-
-	/* Memory */
-	MemoryContext graphCtx;
-	MemoryContext tmpCtx;
-	PgturbohybridGraphAllocator allocator;
-
-	/* Parallel builds */
-	PgturbohybridGraphLeader *graphLeader;
-	PgturbohybridGraphShared *graphShared;
-	char	   *graphArea;
-}			PgturbohybridGraphBuildState;
-
 typedef struct PgturbohybridGraphSegmentMetaData
 {
 	uint32		startNodeId;
@@ -1102,43 +869,6 @@ typedef struct PgturbohybridGraphPageOpaqueData
 
 typedef PgturbohybridGraphPageOpaqueData * PgturbohybridGraphPageOpaque;
 
-typedef struct PgturbohybridGraphElementTupleData
-{
-	uint8		type;
-	uint8		level;
-	uint8		deleted;
-	uint8		version;
-	ItemPointerData heaptids[PGTURBOHYBRID_GRAPH_HEAPTIDS];
-	ItemPointerData neighbortid;
-	uint16		unused;
-	Vector		data;
-}			PgturbohybridGraphElementTupleData;
-
-typedef PgturbohybridGraphElementTupleData * PgturbohybridGraphElementTuple;
-
-typedef struct PgturbohybridGraphNeighborTupleData
-{
-	uint8		type;
-	uint8		version;
-	uint16		count;
-	ItemPointerData indextids[FLEXIBLE_ARRAY_MEMBER];
-}			PgturbohybridGraphNeighborTupleData;
-
-typedef PgturbohybridGraphNeighborTupleData * PgturbohybridGraphNeighborTuple;
-
-typedef union
-{
-	struct pgturbohybrid_pointerhash_hash *pointers;
-	struct pgturbohybrid_offsethash_hash *offsets;
-	struct pgturbohybrid_tidhash_hash *tids;
-}			visited_hash;
-
-typedef union
-{
-	PgturbohybridGraphElement element;
-	ItemPointerData indextid;
-}			PgturbohybridGraphUnvisited;
-
 /*
  * Which path the unsigned-codebook batch-of-4 scorer
  * (PgturbohybridGraphScoreNodeBatchU8Split) took during a scan, surfaced in
@@ -1202,12 +932,7 @@ typedef struct PgturbohybridGraphScanOpaqueData
 {
 	const		PgturbohybridGraphTypeInfo *typeInfo;
 	bool		first;
-	List	   *w;
-	visited_hash v;
-	pairingheap *discarded;
-	PgturbohybridGraphQuery	q;
 	PgturbohybridGraphTqQuery tq;
-	int			m;
 	int			efSearch;
 	int			graphM;
 	int			graphEfConstruction;
@@ -1397,7 +1122,6 @@ typedef struct PgturbohybridGraphScanOpaqueData
 	bool		graphBuildFastEdges;
 	int			graphBuildNeighborSelectReason;
 	bool		pgturbohybridGraphScan;
-	bool		pgturbohybridFlatScan;
 	void	   *tqGraphResults;
 	int			tqGraphResultCount;
 	int			tqGraphResultIndex;
@@ -1408,31 +1132,6 @@ typedef struct PgturbohybridGraphScanOpaqueData
 }			PgturbohybridGraphScanOpaqueData;
 
 typedef PgturbohybridGraphScanOpaqueData * PgturbohybridGraphScanOpaque;
-
-typedef struct PgturbohybridGraphVacuumState
-{
-	/* Info */
-	Relation	index;
-	IndexBulkDeleteResult *stats;
-	IndexBulkDeleteCallback callback;
-	void	   *callback_state;
-
-	/* Settings */
-	int			m;
-	int			efConstruction;
-
-	/* Support functions */
-	PgturbohybridGraphSupport support;
-
-	/* Variables */
-	struct pgturbohybrid_tidhash_hash *deleted;
-	BufferAccessStrategy bas;
-	PgturbohybridGraphNeighborTuple ntup;
-	PgturbohybridGraphElementData highestPoint;
-
-	/* Memory */
-	MemoryContext tmpCtx;
-}			PgturbohybridGraphVacuumState;
 
 /* Methods */
 int			PgturbohybridGraphGetM(Relation index);
@@ -1456,12 +1155,8 @@ const char *PgturbohybridGraphDenseUncertaintyRetryModeName(int mode);
 const char *PgturbohybridGraphDenseUncertaintyRetryReasonName(int reason);
 const char *PgturbohybridGraphExactRescoreSourceName(int source);
 bool		PgturbohybridGraphIspgturbohybridIndex(Relation index);
-bool		PgturbohybridGraphUseTqGraph(Relation index);
-bool		PgturbohybridGraphUseTqNativeGraph(Relation index);
-bool		PgturbohybridGraphUseTqFlat(Relation index);
 bool		PgturbohybridGraphUseTqCodes(Relation index);
 void		PgturbohybridGraphSetForcepgturbohybridIndex(bool force);
-Size		PgturbohybridGraphElementTupleSize(Relation index, Pointer value);
 FmgrInfo   *PgturbohybridGraphOptionalProcInfo(Relation index, uint16 procnum);
 void		PgturbohybridGraphInitSupport(PgturbohybridGraphSupport * support, Relation index);
 Datum		PgturbohybridGraphNormValue(const PgturbohybridGraphTypeInfo * typeInfo, Oid collation, Datum value);
@@ -1471,13 +1166,10 @@ void		PgturbohybridGraphInitPage(Buffer buf, Page page);
 void		PgturbohybridGraphInitPageKind(Buffer buf, Page page, uint16 pageKind);
 void		PgturbohybridGraphMarkPageGraphOp(Page page, uint16 graphOpKind);
 void		PgturbohybridGraphInit(void);
-void		PgturbohybridGraphControlInit(void);
 void		PgturbohybridGraphLogGraphWalRecord(Relation index, ForkNumber forkNum, BlockNumber blkno, uint16 graphOpKind);
 const char *PgturbohybridGraphGraphWalModeName(void);
 void		PgturbohybridGraphRecordGraphScanStats(PgturbohybridGraphScanOpaque so);
 void		PgturbohybridGraphRecordReturnedRows(int64 returnedRows);
-void		PgturbohybridGraphRecordNonGraphScanStats(void);
-void		PgturbohybridGraphRecordFlatScanStats(void);
 
 typedef struct PgturbohybridNativeBuildStatsSnapshot
 {
@@ -1656,62 +1348,13 @@ bool		PgturbohybridGraphTqCodeU8Simdx4Distance(const PgturbohybridGraphTqQuery *
 bool		PgturbohybridGraphTqCodeU8Simdx4Batch(const PgturbohybridGraphTqQuery *tq, const uint8 *codes[4], const float scales[4], double dist[4]);
 bool		PgturbohybridGraphTqCodeU8ScalarDistance(const PgturbohybridGraphTqQuery *tq, const uint8 *valueCode, float valueScale, double *distance);
 const char *PgturbohybridGraphU8SplitKernelName(void);
-int64		PgturbohybridGraphRescoreSearchCandidates(Relation index, PgturbohybridGraphSupport * support, PgturbohybridGraphQuery * q, List *items);
-List	   *PgturbohybridGraphSearchLayer(char *base, PgturbohybridGraphQuery * q, List *ep, int ef, int lc, Relation index, PgturbohybridGraphSupport * support, int m, bool inserting, PgturbohybridGraphElement skipElement, visited_hash * v, pairingheap **discarded, bool initVisited, int64 *tuples, int64 tupleLimit, int64 *scoredCodes, PgturbohybridGraphTqQuery * tq);
-PgturbohybridGraphElement PgturbohybridGraphGetEntryPoint(Relation index);
-void		PgturbohybridGraphGetMetaPageInfo(Relation index, int *m, PgturbohybridGraphElement * entryPoint);
-int			PgturbohybridGraphGetMetaPageStorageKind(Relation index);
-void	   *PgturbohybridGraphAlloc(PgturbohybridGraphAllocator * allocator, Size size);
-PgturbohybridGraphElement PgturbohybridGraphInitElement(char *base, ItemPointer tid, int m, double ml, int maxLevel, PgturbohybridGraphAllocator * alloc);
-PgturbohybridGraphElement PgturbohybridGraphInitElementFromBlock(BlockNumber blkno, OffsetNumber offno);
-void		PgturbohybridGraphFindElementNeighbors(char *base, PgturbohybridGraphElement element, PgturbohybridGraphElement entryPoint, Relation index, PgturbohybridGraphSupport * support, int m, int efConstruction, bool existing);
-PgturbohybridGraphSearchCandidate *PgturbohybridGraphEntryCandidate(char *base, PgturbohybridGraphElement entryPoint, PgturbohybridGraphQuery * q, Relation index, PgturbohybridGraphSupport * support, bool loadVec);
-void		PgturbohybridGraphUpdateMetaPage(Relation index, int updateEntry, PgturbohybridGraphElement entryPoint, BlockNumber insertPage, ForkNumber forkNum, bool building);
-void		PgturbohybridGraphSetNeighborTuple(char *base, PgturbohybridGraphNeighborTuple ntup, PgturbohybridGraphElement e, int m);
-void		PgturbohybridGraphAddHeapTid(PgturbohybridGraphElement element, ItemPointer heaptid);
-PgturbohybridGraphNeighborArray *PgturbohybridGraphInitNeighborArray(int lm, PgturbohybridGraphAllocator * allocator);
-void		PgturbohybridGraphInitNeighbors(char *base, PgturbohybridGraphElement element, int m, PgturbohybridGraphAllocator * alloc);
-bool		PgturbohybridGraphInsertTupleOnDisk(Relation index, PgturbohybridGraphSupport * support, Datum value, ItemPointer heaptid, bool building);
-void		PgturbohybridGraphUpdateNeighborsOnDisk(Relation index, PgturbohybridGraphSupport * support, PgturbohybridGraphElement e, int m, bool checkExisting, bool building);
-void		PgturbohybridGraphLoadElementFromTuple(PgturbohybridGraphElement element, PgturbohybridGraphElementTuple etup, bool loadHeaptids, bool loadVec);
-void		PgturbohybridGraphLoadElement(PgturbohybridGraphElement element, double *distance, PgturbohybridGraphQuery * q, Relation index, PgturbohybridGraphSupport * support, bool loadVec, double *maxDistance);
 bool		PgturbohybridGraphFormIndexValue(Datum *out, Datum *values, bool *isnull, const PgturbohybridGraphTypeInfo * typeInfo, PgturbohybridGraphSupport * support);
-void		PgturbohybridGraphSetElementTuple(Relation index, char *base, PgturbohybridGraphElementTuple etup, PgturbohybridGraphElement element);
-void		PgturbohybridGraphUpdateConnection(char *base, PgturbohybridGraphNeighborArray * neighbors, PgturbohybridGraphElement newElement, float distance, int lm, int *updateIdx, Relation index, PgturbohybridGraphSupport * support);
-bool		PgturbohybridGraphLoadNeighborTids(PgturbohybridGraphElement element, ItemPointerData *indextids, Relation index, int m, int lm, int lc);
 void		PgturbohybridGraphInitLockTranche(void);
 const		PgturbohybridGraphTypeInfo *PgturbohybridGraphGetTypeInfo(Relation index);
-PGDLLEXPORT void PgturbohybridParallelBuildMain(dsm_segment *seg, shm_toc *toc);
 PGDLLEXPORT void PgturbohybridNativeParallelBuildMain(dsm_segment *seg, shm_toc *toc);
 
 /* Index access methods */
-IndexBuildResult *pgturbohybrid_graph_build(Relation heap, Relation index, IndexInfo *indexInfo);
-IndexBuildResult *pgturbohybridbuild(Relation heap, Relation index, IndexInfo *indexInfo);
-void		pgturbohybrid_graph_build_empty(Relation index);
-void		pgturbohybridbuildempty(Relation index);
-bool		pgturbohybrid_graph_insert(Relation index, Datum *values, bool *isnull, ItemPointer heap_tid, Relation heap, IndexUniqueCheck checkUnique
-#if PG_VERSION_NUM >= 140000
-					   ,bool indexUnchanged
-#endif
-					   ,IndexInfo *indexInfo
-);
-bool		pgturbohybridinsert(Relation index, Datum *values, bool *isnull, ItemPointer heap_tid, Relation heap, IndexUniqueCheck checkUnique
-#if PG_VERSION_NUM >= 140000
-					   ,bool indexUnchanged
-#endif
-					   ,IndexInfo *indexInfo
-);
-IndexBulkDeleteResult *pgturbohybrid_graph_bulkdelete(IndexVacuumInfo *info, IndexBulkDeleteResult *stats, IndexBulkDeleteCallback callback, void *callback_state);
-IndexBulkDeleteResult *pgturbohybrid_graph_vacuum_cleanup(IndexVacuumInfo *info, IndexBulkDeleteResult *stats);
-IndexScanDesc pgturbohybrid_graph_begin_scan(Relation index, int nkeys, int norderbys);
-IndexScanDesc pgturbohybridbeginscan(Relation index, int nkeys, int norderbys);
-void		pgturbohybrid_graph_rescan(IndexScanDesc scan, ScanKey keys, int nkeys, ScanKey orderbys, int norderbys);
-void		pgturbohybridrescan(IndexScanDesc scan, ScanKey keys, int nkeys, ScanKey orderbys, int norderbys);
-bool		pgturbohybrid_graph_get_tuple(IndexScanDesc scan, ScanDirection dir);
-bool		pgturbohybridgettuple(IndexScanDesc scan, ScanDirection dir);
 bool		pgturbohybridamgettuple(IndexScanDesc scan, ScanDirection dir);
-void		pgturbohybrid_graph_end_scan(IndexScanDesc scan);
-void		pgturbohybridendscan(IndexScanDesc scan);
 
 IndexBuildResult *tqgraphbuild(Relation heap, Relation index, IndexInfo *indexInfo);
 void		tqgraphbuildempty(Relation index);
@@ -1747,16 +1390,6 @@ typedef struct PgturbohybridGraphDocInsertStats
 } PgturbohybridGraphDocInsertStats;
 
 void		PgturbohybridGraphRecordDocInsertStats(const PgturbohybridGraphDocInsertStats *stats);
-
-static inline PgturbohybridGraphNeighborArray *
-PgturbohybridGraphGetNeighbors(char *base, PgturbohybridGraphElement element, int lc)
-{
-	PgturbohybridGraphNeighborArrayPtr *neighborList = PgturbohybridGraphPtrAccess(base, element->neighbors);
-
-	Assert(element->level >= lc);
-
-	return PgturbohybridGraphPtrAccess(base, neighborList[lc]);
-}
 
 /* Hash tables */
 typedef struct TidHashEntry

@@ -44,42 +44,6 @@
 #define MarkGUCPrefixReserved(x) EmitWarningsOnPlaceholders(x)
 #endif
 
-static relopt_enum_elt_def pgturbohybrid_routing_relopt_options[] = {
-	{"auto", PGTURBOHYBRID_ROUTING_AUTO},
-	{"graph", PGTURBOHYBRID_ROUTING_GRAPH},
-	{"flat", PGTURBOHYBRID_ROUTING_FLAT},
-	{NULL, 0}
-};
-
-static relopt_enum_elt_def pgturbohybrid_entry_sidecar_strategy_relopt_options[] = {
-	{"hash", PGTURBOHYBRID_ENTRY_SIDECAR_HASH},
-	{"farthest_code", PGTURBOHYBRID_ENTRY_SIDECAR_FARTHEST_CODE},
-	{"level_covering", PGTURBOHYBRID_ENTRY_SIDECAR_LEVEL_COVERING},
-	{"hybrid_level_covering", PGTURBOHYBRID_ENTRY_SIDECAR_HYBRID_LEVEL_COVERING},
-	{NULL, 0}
-};
-
-static relopt_enum_elt_def pgturbohybrid_multivector_graph_relopt_options[] = {
-	{"token_nodes", PGTURBOHYBRID_MULTIVECTOR_GRAPH_TOKEN_NODES},
-	{"document_nodes", PGTURBOHYBRID_MULTIVECTOR_GRAPH_DOCUMENT_NODES},
-	{NULL, 0}
-};
-
-static relopt_enum_elt_def pgturbohybrid_multivector_doc_build_scorer_relopt_options[] = {
-	{"proxy", PGTURBOHYBRID_MULTIVECTOR_DOC_BUILD_SCORER_PROXY},
-	{"exact_symmetric", PGTURBOHYBRID_MULTIVECTOR_DOC_BUILD_SCORER_EXACT_SYMMETRIC},
-	{NULL, 0}
-};
-
-static relopt_enum_elt_def pgturbohybrid_multivector_doc_storage_relopt_options[] = {
-	{"f32", PGTURBOHYBRID_MULTIVECTOR_DOC_STORAGE_F32},
-	{"f16", PGTURBOHYBRID_MULTIVECTOR_DOC_STORAGE_F16},
-	{"sq8", PGTURBOHYBRID_MULTIVECTOR_DOC_STORAGE_SQ8},
-	{"centroid_only", PGTURBOHYBRID_MULTIVECTOR_DOC_STORAGE_CENTROID_ONLY},
-	{"proxy_only", PGTURBOHYBRID_MULTIVECTOR_DOC_STORAGE_PROXY_ONLY},
-	{NULL, 0}
-};
-
 static void
 PgturbohybridIndexStatsJsonbAddKey(PgturbohybridJsonbState *state, const char *key)
 {
@@ -157,24 +121,6 @@ PgturbohybridIndexStatsJsonbAddFloat8(PgturbohybridJsonbState *state, const char
 	value.val.numeric = DatumGetNumeric(DirectFunctionCall1(float8_numeric,
 															Float8GetDatum(val)));
 	PgturbohybridJsonbPush(state, WJB_VALUE, &value);
-}
-
-static const char *
-PgturbohybridRoutingName(int routing)
-{
-	switch (routing)
-	{
-		case PGTURBOHYBRID_ROUTING_AUTO:
-			return "auto";
-		case PGTURBOHYBRID_ROUTING_GRAPH:
-			return "graph";
-		case PGTURBOHYBRID_ROUTING_FLAT:
-			return "flat";
-		case PGTURBOHYBRID_ROUTING_LEGACY_GRAPH:
-			return "legacy_graph";
-		default:
-			return "unknown";
-	}
 }
 
 static const char *
@@ -292,8 +238,6 @@ int			pgturbohybrid_payload_entry_seeding = PGTURBOHYBRID_PAYLOAD_ENTRY_SEEDING_
 int			pgturbohybrid_payload_entry_seed_count =
 	PGTURBOHYBRID_DEFAULT_PAYLOAD_ENTRY_SEED_COUNT;
 int			pgturbohybrid_graph_lock_tranche_id;
-static relopt_kind pgturbohybrid_graph_relopt_kind;
-static relopt_kind pgturbohybrid_relopt_kind;
 
 const char *
 PgturbohybridDenseBuildNeighborSelectName(int mode)
@@ -627,76 +571,6 @@ PgturbohybridGraphInit(void)
 {
 	if (!process_shared_preload_libraries_in_progress)
 		PgturbohybridGraphInitLockTranche();
-
-	pgturbohybrid_graph_relopt_kind = add_reloption_kind();
-	add_int_reloption(pgturbohybrid_graph_relopt_kind, "m", "Max number of connections",
-					  PGTURBOHYBRID_GRAPH_DEFAULT_M, PGTURBOHYBRID_GRAPH_MIN_M, PGTURBOHYBRID_GRAPH_MAX_M, AccessExclusiveLock);
-	add_int_reloption(pgturbohybrid_graph_relopt_kind, "ef_construction", "Size of the dynamic candidate list for construction",
-					  PGTURBOHYBRID_GRAPH_DEFAULT_EF_CONSTRUCTION, PGTURBOHYBRID_GRAPH_MIN_EF_CONSTRUCTION, PGTURBOHYBRID_GRAPH_MAX_EF_CONSTRUCTION, AccessExclusiveLock);
-
-	pgturbohybrid_relopt_kind = add_reloption_kind();
-	add_enum_reloption(pgturbohybrid_relopt_kind, "routing", "pgturbohybrid routing mode",
-					   pgturbohybrid_routing_relopt_options, PGTURBOHYBRID_ROUTING_AUTO,
-					   "Valid values are \"auto\", \"graph\", and \"flat\".",
-					   AccessExclusiveLock);
-	add_int_reloption(pgturbohybrid_relopt_kind, "graph_m", "Max number of graph connections",
-					  PGTURBOHYBRID_DEFAULT_GRAPH_M, PGTURBOHYBRID_GRAPH_MIN_M, PGTURBOHYBRID_GRAPH_MAX_M, AccessExclusiveLock);
-	add_int_reloption(pgturbohybrid_relopt_kind, "graph_ef_construction", "Size of the dynamic graph candidate list for construction",
-					  PGTURBOHYBRID_DEFAULT_GRAPH_EF_CONSTRUCTION, PGTURBOHYBRID_GRAPH_MIN_EF_CONSTRUCTION, PGTURBOHYBRID_GRAPH_MAX_EF_CONSTRUCTION, AccessExclusiveLock);
-	add_int_reloption(pgturbohybrid_relopt_kind, "graph_ef_search", "Size of the dynamic graph candidate list for search",
-					  PGTURBOHYBRID_DEFAULT_GRAPH_EF_SEARCH, PGTURBOHYBRID_GRAPH_MIN_EF_SEARCH, PGTURBOHYBRID_GRAPH_MAX_EF_SEARCH, AccessExclusiveLock);
-	add_int_reloption(pgturbohybrid_relopt_kind, "graph_oversampling", "Candidate oversampling multiplier for graph scans",
-					  PGTURBOHYBRID_DEFAULT_GRAPH_OVERSAMPLING, 1, 1000, AccessExclusiveLock);
-	add_int_reloption(pgturbohybrid_relopt_kind, "quantization_bits", "pgturbohybrid code bit width",
-					  PGTURBOHYBRID_DEFAULT_INDEX_BITS, 1, PGTURBOHYBRID_DEFAULT_BITS, AccessExclusiveLock);
-	add_bool_reloption(pgturbohybrid_relopt_kind, "exact_storage",
-					   "Store exact vectors in native pgturbohybrid graph indexes for final exact rescoring. Set off for compact exact-free quantized-only storage.",
-					   PGTURBOHYBRID_DEFAULT_EXACT_STORAGE, AccessExclusiveLock);
-	add_bool_reloption(pgturbohybrid_relopt_kind, "entry_sidecar",
-					   "Store a small build-time list of data-aware representative entry node IDs.",
-					   PGTURBOHYBRID_DEFAULT_ENTRY_SIDECAR, AccessExclusiveLock);
-	add_int_reloption(pgturbohybrid_relopt_kind, "entry_sidecar_representatives",
-					  "Maximum representative node IDs stored when entry_sidecar is enabled.",
-					  PGTURBOHYBRID_DEFAULT_ENTRY_SIDECAR_REPRESENTATIVES, 0,
-					  PGTURBOHYBRID_GRAPH_MAX_ENTRY_SIDECAR_REPRESENTATIVES,
-					  AccessExclusiveLock);
-	add_enum_reloption(pgturbohybrid_relopt_kind, "entry_sidecar_strategy",
-					   "Representative selection strategy for entry_sidecar.",
-					   pgturbohybrid_entry_sidecar_strategy_relopt_options,
-					   PGTURBOHYBRID_DEFAULT_ENTRY_SIDECAR_STRATEGY,
-					   "Valid values are \"hash\", \"farthest_code\", \"level_covering\", and \"hybrid_level_covering\".",
-					   AccessExclusiveLock);
-	add_bool_reloption(pgturbohybrid_relopt_kind, "graph_backbone",
-					   "Force adjacent level-0 graph edges during experimental dense graph builds.",
-					   PGTURBOHYBRID_DEFAULT_GRAPH_BACKBONE, AccessExclusiveLock);
-	add_bool_reloption(pgturbohybrid_relopt_kind, "residual_rerank",
-					   "Store tiny per-vector sketches for experimental final-band dense reranking.",
-					   PGTURBOHYBRID_DEFAULT_RESIDUAL_RERANK, AccessExclusiveLock);
-	add_int_reloption(pgturbohybrid_relopt_kind, "residual_rerank_bytes",
-					  "Per-vector sketch bytes stored when residual_rerank is enabled.",
-					  PGTURBOHYBRID_DEFAULT_RESIDUAL_RERANK_BYTES, 0,
-					  PGTURBOHYBRID_GRAPH_MAX_RESIDUAL_RERANK_BYTES,
-					  AccessExclusiveLock);
-	add_enum_reloption(pgturbohybrid_relopt_kind, "multivector_graph",
-					   "Multivector graph node storage mode.",
-					   pgturbohybrid_multivector_graph_relopt_options,
-					   PGTURBOHYBRID_DEFAULT_MULTIVECTOR_GRAPH_MODE,
-					   "Valid values are \"token_nodes\" and \"document_nodes\". \"document_nodes\" stores one graph node per heap document with a versioned document multivector sidecar for MaxSim-aligned candidate generation.",
-					   AccessExclusiveLock);
-	add_enum_reloption(pgturbohybrid_relopt_kind, "multivector_doc_build_scorer",
-					   "Document-node multivector graph build distance scorer.",
-					   pgturbohybrid_multivector_doc_build_scorer_relopt_options,
-					   PGTURBOHYBRID_DEFAULT_MULTIVECTOR_DOC_BUILD_SCORER,
-					   "Valid values are \"proxy\" and \"exact_symmetric\". Only meaningful with multivector_graph = document_nodes.",
-					   AccessExclusiveLock);
-	add_enum_reloption(pgturbohybrid_relopt_kind, "multivector_doc_storage",
-					   "Document-node multivector sidecar storage mode.",
-					   pgturbohybrid_multivector_doc_storage_relopt_options,
-					   PGTURBOHYBRID_MULTIVECTOR_DOC_STORAGE_F32,
-					   "Valid values are \"f32\", \"f16\", \"sq8\", experimental \"centroid_only\", and experimental \"proxy_only\".",
-					   AccessExclusiveLock);
-
-	PgturbohybridGraphControlInit();
 }
 
 FUNCTION_PREFIX PG_FUNCTION_INFO_V1(pgturbohybrid_estimate_memory);
@@ -947,7 +821,6 @@ pgturbohybrid_index_stats(PG_FUNCTION_ARGS)
 	uint16		routingEntryCount;
 	uint16		routingEntryBytes;
 	uint16		residualRerankBytes;
-	int			routing;
 	BlockNumber tqBm25MetaStartBlkno;
 	bool		hasLexicalKey;
 	bool		hasBm25Meta = false;
@@ -1000,7 +873,6 @@ pgturbohybrid_index_stats(PG_FUNCTION_ARGS)
 	routingEntryCount = meta.tqRoutingEntryCount;
 	routingEntryBytes = meta.tqRoutingEntryBytes;
 	residualRerankBytes = meta.tqResidualRerankBytes;
-	routing = opts != NULL ? opts->routing : PGTURBOHYBRID_ROUTING_AUTO;
 	multivectorDocStorage = opts != NULL ? opts->multivectorDocStorage :
 		PGTURBOHYBRID_MULTIVECTOR_DOC_STORAGE_F32;
 	proxyOnlyIndex =
@@ -1322,8 +1194,6 @@ pgturbohybrid_index_stats(PG_FUNCTION_ARGS)
 										  meta.tqSegmentCount > 0 ? meta.tqSegmentCount : 1);
 	PgturbohybridIndexStatsJsonbAddUInt32(&jsonState, "native_segment_bytes",
 										  meta.tqSegmentBytes);
-	PgturbohybridIndexStatsJsonbAddString(&jsonState, "routing",
-										  PgturbohybridRoutingName(routing));
 	PgturbohybridIndexStatsJsonbAddUInt32(&jsonState, "quantization_bits", tqBits);
 	PgturbohybridIndexStatsJsonbAddBool(&jsonState, "exact_storage",
 										(tqFlags & PGTURBOHYBRID_GRAPH_EXACT_FREE) == 0);

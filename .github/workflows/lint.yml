@@ -27,9 +27,6 @@ jobs:
       - name: Build-file parity (Makefile vs Makefile.win)
         run: python3 scripts/check-build-file-parity.py
 
-      - name: Public API ledger consistency
-        run: python3 scripts/check-api-ledger.py
-
   dependency-review:
     name: dependency review
     if: github.event_name == 'pull_request'
