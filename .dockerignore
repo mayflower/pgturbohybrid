@@ -2,8 +2,6 @@
 .git
 .github
 .deps
-benchmarks/results
-benchmarks/output
 results
 dist
 tmp_check

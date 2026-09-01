@@ -245,42 +245,6 @@ PgturbohybridGraphTqScoreModeName(int scoreMode)
 	}
 }
 
-/*
- * Stable JSON names for the native scoring-kernel buckets (see
- * PgturbohybridGraphScoreKernelBucket).  Used by turbohybrid_last_scan_stats()
- * to report which kernel scored how many nodes.
- */
-const char *
-PgturbohybridGraphScoreKernelBucketName(int bucket)
-{
-	switch ((PgturbohybridGraphScoreKernelBucket) bucket)
-	{
-		case PGTURBOHYBRID_SCORE_KERNEL_BATCH_U8_SPLIT_AVX2:
-			return "batch_u8_split_avx2";
-		case PGTURBOHYBRID_SCORE_KERNEL_BATCH_U8_SPLIT_AVX512VNNI:
-			return "batch_u8_split_avx512vnni";
-		case PGTURBOHYBRID_SCORE_KERNEL_BATCH_SIGNED_SPLIT_AVX2:
-			return "batch_signed_split_avx2";
-		case PGTURBOHYBRID_SCORE_KERNEL_BATCH_SIGNED_SPLIT_AVXVNNI:
-			return "batch_signed_split_avxvnni";
-		case PGTURBOHYBRID_SCORE_KERNEL_BATCH_SIGNED_SPLIT_AVX512VNNI:
-			return "batch_signed_split_avx512vnni";
-		case PGTURBOHYBRID_SCORE_KERNEL_BATCH_1BIT_ASYM:
-			return "batch_1bit_asym";
-		case PGTURBOHYBRID_SCORE_KERNEL_BATCH_SCALAR_OR_LUT:
-			return "batch_scalar_or_lut";
-		case PGTURBOHYBRID_SCORE_KERNEL_SINGLE_U8_SPLIT:
-			return "single_u8_split";
-		case PGTURBOHYBRID_SCORE_KERNEL_SINGLE_SIGNED_SPLIT:
-			return "single_signed_split";
-		case PGTURBOHYBRID_SCORE_KERNEL_SINGLE_SCALAR_OR_LUT:
-			return "single_scalar_or_lut";
-		case PGTURBOHYBRID_SCORE_KERNEL_BUCKET_COUNT:
-			break;
-	}
-	return "unknown";
-}
-
 const char *
 PgturbohybridGraphTqSimdForceName(int force)
 {

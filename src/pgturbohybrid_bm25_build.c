@@ -20,12 +20,10 @@
 #include "pgturbohybrid_quant.h"
 #include "pgturbohybrid_am.h"
 #include "pgturbohybrid_bm25.h"
-#include "pgturbohybrid_sparse.h"
 
 /*
  * PgturbohybridTidNode / PgturbohybridNodeState and the PgturbohybridReadNodeMap
- * / PgturbohybridReadNodeStates helpers are declared in pgturbohybrid_quant.h so
- * the sparse branch can reuse the dense graph's node_id<->TID identity.
+ * / PgturbohybridReadNodeStates helpers are declared in pgturbohybrid_quant.h.
  */
 
 typedef struct PgturbohybridBm25Collector
@@ -1089,112 +1087,6 @@ PgturbohybridReadNodeMap(Relation index, uint32 *count)
 		return NULL;
 	}
 
-	/*
-	 * Sparse-primary indexes own node identity in a dedicated node-map chain
-	 * (no dense codes).  Walk that chain instead of the QUANT_CODE tuples.  A
-	 * node-map chain never starts at block 0 (the metapage), so 0 means "no node
-	 * map" -- matching the dense metapage, where this end-appended field is left
-	 * zero by the memset in the dense creators.
-	 */
-	if (meta.tqNodeMapStartBlkno != InvalidBlockNumber &&
-		meta.tqNodeMapStartBlkno != 0)
-	{
-		BlockNumber blkno = meta.tqNodeMapStartBlkno;
-		BlockNumber nblocks = RelationGetNumberOfBlocks(index);
-
-		map = palloc0(PgturbohybridCheckedArrayBytes(sizeof(PgturbohybridTidNode),
-													 meta.tqNodeCount,
-													 "pgturbohybrid sparse-primary TID map"));
-		while (BlockNumberIsValid(blkno))
-		{
-			Buffer		buf;
-			Page		page;
-			PgturbohybridGraphPageOpaque opaque;
-			OffsetNumber maxoff;
-			BlockNumber nextblkno;
-
-			/*
-			 * Validate the chain pointer before dereferencing it.  A node-map
-			 * chain only ever links forward to freshly-allocated data pages, so
-			 * a pointer that is out of range, or points back at the metapage
-			 * (block 0), can only be corruption -- and following it blindly
-			 * would either wild-read past EOF or, via a self/back link, loop
-			 * forever.  These bounds cannot trip for a validly-built index.
-			 */
-			if (blkno <= PGTURBOHYBRID_GRAPH_METAPAGE_BLKNO || blkno >= nblocks)
-				ereport(ERROR,
-						(errcode(ERRCODE_DATA_CORRUPTED),
-						 errmsg("pgturbohybrid node-map chain pointer is invalid in index \"%s\"",
-								RelationGetRelationName(index)),
-						 errdetail("Chain points to block %u, but the index has %u blocks.",
-								   blkno, nblocks),
-						 errhint("REINDEX the index to rebuild it.")));
-
-			buf = ReadBuffer(index, blkno);
-			LockBuffer(buf, BUFFER_LOCK_SHARE);
-			page = BufferGetPage(buf);
-			opaque = PgturbohybridGraphPageGetOpaque(page);
-			if ((opaque->pageKind & PGTURBOHYBRID_GRAPH_PAGE_KIND_MASK) !=
-				PGTURBOHYBRID_GRAPH_PAGE_KIND_NODEMAP)
-			{
-				UnlockReleaseBuffer(buf);
-				break;
-			}
-			nextblkno = opaque->nextblkno;
-			/* A page must never link to itself: that is a corrupt cycle. */
-			if (nextblkno == blkno)
-			{
-				UnlockReleaseBuffer(buf);
-				ereport(ERROR,
-						(errcode(ERRCODE_DATA_CORRUPTED),
-						 errmsg("pgturbohybrid node-map chain has a self-referential link at block %u in index \"%s\"",
-								blkno, RelationGetRelationName(index)),
-						 errhint("REINDEX the index to rebuild it.")));
-			}
-			maxoff = PageGetMaxOffsetNumber(page);
-			for (OffsetNumber off = FirstOffsetNumber; off <= maxoff;
-				 off = OffsetNumberNext(off))
-			{
-				ItemId		iid = PageGetItemId(page, off);
-				PgturbohybridSparseNodeMapTuple nmt;
-				uint32		entryCount;
-
-				if (!ItemIdIsUsed(iid))
-					continue;
-				nmt = (PgturbohybridSparseNodeMapTuple) PageGetItem(page, iid);
-				if (nmt->type != PGTURBOHYBRID_SPARSE_NODEMAP_TUPLE_TYPE)
-					continue;
-				/*
-				 * The tuple advertises nmt->count TIDs; we must not read past
-				 * the bytes the item line pointer actually covers.  The writer
-				 * sizes each tuple with PgturbohybridSparseNodeMapTupleSize(n),
-				 * so a tuple whose stored length cannot hold its count is
-				 * corrupt -- skip it rather than reading out of bounds.
-				 */
-				entryCount = nmt->count;
-				if (ItemIdGetLength(iid) <
-					PgturbohybridSparseNodeMapTupleSize(entryCount))
-					continue;
-				for (uint32 i = 0; i < entryCount; i++)
-				{
-					uint32		nid = nmt->firstNodeId + i;
-
-					if (nid >= meta.tqNodeCount || seen >= meta.tqNodeCount)
-						continue;
-					map[seen].tid = nmt->tids[i];
-					map[seen].nodeId = nid;
-					seen++;
-				}
-			}
-			UnlockReleaseBuffer(buf);
-			blkno = nextblkno;
-		}
-
-		qsort(map, seen, sizeof(PgturbohybridTidNode), PgturbohybridTidNodeCompare);
-		*count = seen;
-		return map;
-	}
-
 	if (!BlockNumberIsValid(meta.tqCodeStartBlkno))
 	{
 		*count = 0;
@@ -1285,102 +1177,6 @@ PgturbohybridReadNodeStates(Relation index, PgturbohybridGraphMetaPageData *meta
 	{
 		*count = 0;
 		return NULL;
-	}
-
-	/*
-	 * Sparse-primary indexes carry node identity in the node-map chain.  Every
-	 * mapped node is reported live; heap-tuple visibility (filtered by the
-	 * executor) is the correctness guarantee for deleted/updated rows.  Block 0
-	 * is the metapage, so a 0 anchor means "no node map" (dense indexes leave
-	 * this end-appended field zeroed).
-	 */
-	if (meta->tqNodeMapStartBlkno != InvalidBlockNumber &&
-		meta->tqNodeMapStartBlkno != 0)
-	{
-		BlockNumber blkno = meta->tqNodeMapStartBlkno;
-		BlockNumber nblocks = RelationGetNumberOfBlocks(index);
-
-		states = palloc0(PgturbohybridCheckedArrayBytes(sizeof(PgturbohybridNodeState),
-														meta->tqNodeCount,
-														"pgturbohybrid sparse-primary node state map"));
-		while (BlockNumberIsValid(blkno))
-		{
-			Buffer		buf;
-			Page		page;
-			PgturbohybridGraphPageOpaque opaque;
-			OffsetNumber maxoff;
-			BlockNumber nextblkno;
-
-			/*
-			 * Validate the chain pointer before dereferencing it (see the
-			 * matching guard in PgturbohybridReadNodeMap): out-of-range or a
-			 * back-pointer at the metapage is corruption, and following it
-			 * blindly risks a wild read or an infinite loop.  Cannot fire for
-			 * a validly-built index.
-			 */
-			if (blkno <= PGTURBOHYBRID_GRAPH_METAPAGE_BLKNO || blkno >= nblocks)
-				ereport(ERROR,
-						(errcode(ERRCODE_DATA_CORRUPTED),
-						 errmsg("pgturbohybrid node-map chain pointer is invalid in index \"%s\"",
-								RelationGetRelationName(index)),
-						 errdetail("Chain points to block %u, but the index has %u blocks.",
-								   blkno, nblocks),
-						 errhint("REINDEX the index to rebuild it.")));
-
-			buf = ReadBuffer(index, blkno);
-			LockBuffer(buf, BUFFER_LOCK_SHARE);
-			page = BufferGetPage(buf);
-			opaque = PgturbohybridGraphPageGetOpaque(page);
-			if ((opaque->pageKind & PGTURBOHYBRID_GRAPH_PAGE_KIND_MASK) !=
-				PGTURBOHYBRID_GRAPH_PAGE_KIND_NODEMAP)
-			{
-				UnlockReleaseBuffer(buf);
-				break;
-			}
-			nextblkno = opaque->nextblkno;
-			if (nextblkno == blkno)
-			{
-				UnlockReleaseBuffer(buf);
-				ereport(ERROR,
-						(errcode(ERRCODE_DATA_CORRUPTED),
-						 errmsg("pgturbohybrid node-map chain has a self-referential link at block %u in index \"%s\"",
-								blkno, RelationGetRelationName(index)),
-						 errhint("REINDEX the index to rebuild it.")));
-			}
-			maxoff = PageGetMaxOffsetNumber(page);
-			for (OffsetNumber off = FirstOffsetNumber; off <= maxoff;
-				 off = OffsetNumberNext(off))
-			{
-				ItemId		iid = PageGetItemId(page, off);
-				PgturbohybridSparseNodeMapTuple nmt;
-				uint32		entryCount;
-
-				if (!ItemIdIsUsed(iid))
-					continue;
-				nmt = (PgturbohybridSparseNodeMapTuple) PageGetItem(page, iid);
-				if (nmt->type != PGTURBOHYBRID_SPARSE_NODEMAP_TUPLE_TYPE)
-					continue;
-				/* Refuse to read more TIDs than the stored tuple can hold. */
-				entryCount = nmt->count;
-				if (ItemIdGetLength(iid) <
-					PgturbohybridSparseNodeMapTupleSize(entryCount))
-					continue;
-				for (uint32 i = 0; i < entryCount; i++)
-				{
-					uint32		nid = nmt->firstNodeId + i;
-
-					if (nid >= meta->tqNodeCount)
-						continue;
-					states[nid].tid = nmt->tids[i];
-					states[nid].live = true;
-				}
-			}
-			UnlockReleaseBuffer(buf);
-			blkno = nextblkno;
-		}
-
-		*count = meta->tqNodeCount;
-		return states;
 	}
 
 	if (!BlockNumberIsValid(meta->tqCodeStartBlkno))

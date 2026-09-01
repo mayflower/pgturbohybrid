@@ -34,7 +34,6 @@ typedef struct PgturbohybridGraphInsertStats
 	uint64		reciprocalAdjChainScans;
 	uint64		reciprocalAdjPagesScanned;
 	uint64		reciprocalUpdateUs;
-	PgturbohybridGraphDocInsertStats docInsertStats;
 } PgturbohybridGraphInsertStats;
 
 static inline int64
@@ -289,8 +288,6 @@ PgturbohybridGraphDocumentInsertDistance(const PgturbohybridMultiVector *a,
 	if (a == NULL || b == NULL || a->count <= 0 || b->count <= 0)
 		return DBL_MAX;
 	PgturbohybridCheckSameMultiVectorDims(a, b);
-	if (stats != NULL)
-		stats->docInsertStats.pairsScored++;
 	ab = TqMultiVectorMaxSim(a, b) / (double) a->count;
 	ba = TqMultiVectorMaxSim(b, a) / (double) b->count;
 	return -(0.5 * (ab + ba));
@@ -925,8 +922,6 @@ PgturbohybridGraphSelectInsertDocumentNeighbors(Relation index,
 				continue;
 
 			selected[level][selectedCounts[level]++] = nodeId;
-			if (stats != NULL)
-				stats->docInsertStats.fullMaxsimEdges++;
 		}
 
 		for (int i = 0; i < candidateCount &&
@@ -943,8 +938,6 @@ PgturbohybridGraphSelectInsertDocumentNeighbors(Relation index,
 				continue;
 
 			selected[level][selectedCounts[level]++] = nodeId;
-			if (stats != NULL)
-				stats->docInsertStats.fullMaxsimEdges++;
 		}
 	}
 }
@@ -1205,8 +1198,6 @@ PgturbohybridGraphUpdateReciprocalDocumentNeighbor(Relation index,
 	{
 		if (neighbors[i] == newNodeId)
 		{
-			if (stats != NULL)
-				stats->docInsertStats.fullMaxsimEdges++;
 			break;
 		}
 	}
@@ -2012,11 +2003,6 @@ PgturbohybridGraphInsertValueInPlaceInternal(Relation index, IndexInfo *indexInf
 						   insertStats.reciprocalAdjChainScans,
 						   insertStats.reciprocalAdjPagesScanned,
 						   insertStats.reciprocalUpdateUs)));
-	if (documentInsertNodes)
-		PgturbohybridGraphRecordDocInsertStats(&insertStats.docInsertStats);
-	else
-		PgturbohybridGraphRecordDocInsertStats(NULL);
-
 	codeStart = meta.tqCodeStartBlkno;
 	adjStart = meta.tqAdjStartBlkno;
 	exactStart = meta.tqExactStartBlkno;

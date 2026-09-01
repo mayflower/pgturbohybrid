@@ -1,12 +1,4 @@
-/*
- * pgturbohybrid_scan_stats.h
- *
- * Shared sub-struct types grouping the flat scan-stats fields that were
- * duplicated verbatim across the scan-stats god-structs
- * (PgturbohybridScanStatsSnapshot / PgturbohybridLastScanStats /
- * TqDenseCandidateStats).  Each group is defined once here and embedded as
- * a named member, so per-group marshaling collapses to struct assignment.
- */
+/* Statistics collected by dense candidate scans. */
 #ifndef PGTURBOHYBRID_SCAN_STATS_H
 #define PGTURBOHYBRID_SCAN_STATS_H
 

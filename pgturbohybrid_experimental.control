@@ -1,5 +1,0 @@
-comment = 'experimental sparse and multivector features for pgturbohybrid'
-default_version = '0.2.0'
-module_pathname = '$libdir/pgturbohybrid'
-requires = 'pgturbohybrid'
-relocatable = true

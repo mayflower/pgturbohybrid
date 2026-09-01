@@ -19,7 +19,6 @@ ERROR:  required extension "vector" is not installed
 HINT:  Use CREATE EXTENSION ... CASCADE to install required extensions too.
 CREATE EXTENSION vector;
 CREATE EXTENSION pgturbohybrid;
-CREATE EXTENSION pgturbohybrid_experimental;
 SELECT extname
 FROM pg_extension
 WHERE extname IN ('vector', 'pgturbohybrid')
@@ -38,7 +37,6 @@ WHERE extname = 'pgturbohybrid';
  0.2.0
 (1 row)
 
-DROP EXTENSION pgturbohybrid_experimental;
 DROP EXTENSION pgturbohybrid;
 SELECT extname
 FROM pg_extension

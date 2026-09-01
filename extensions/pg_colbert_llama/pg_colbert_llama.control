@@ -1,5 +1,5 @@
 comment = 'ColBERT embedding companion extension for pgturbohybrid'
 default_version = '0.1.0'
 module_pathname = '$libdir/pg_colbert_llama'
-requires = 'pgturbohybrid_experimental'
+requires = 'pgturbohybrid'
 relocatable = true

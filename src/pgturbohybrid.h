@@ -488,28 +488,6 @@ typedef enum TqScoringKernel
 }			TqScoringKernel;
 
 /*
- * Exact scoring-kernel paths inside PgturbohybridGraphScoreNodeBatch() and
- * PgturbohybridGraphScoreNode(), counted per native scan so the scan stats can
- * prove which kernel actually did the dense scoring work (and, when the slow
- * scalar/LUT path runs, make that obvious).  Order matters: it indexes the
- * counter arrays on the scan opaque and the name table in graph_utils.c.
- */
-typedef enum PgturbohybridGraphScoreKernelBucket
-{
-	PGTURBOHYBRID_SCORE_KERNEL_BATCH_U8_SPLIT_AVX2,
-	PGTURBOHYBRID_SCORE_KERNEL_BATCH_U8_SPLIT_AVX512VNNI,
-	PGTURBOHYBRID_SCORE_KERNEL_BATCH_SIGNED_SPLIT_AVX2,
-	PGTURBOHYBRID_SCORE_KERNEL_BATCH_SIGNED_SPLIT_AVXVNNI,
-	PGTURBOHYBRID_SCORE_KERNEL_BATCH_SIGNED_SPLIT_AVX512VNNI,
-	PGTURBOHYBRID_SCORE_KERNEL_BATCH_1BIT_ASYM,
-	PGTURBOHYBRID_SCORE_KERNEL_BATCH_SCALAR_OR_LUT,
-	PGTURBOHYBRID_SCORE_KERNEL_SINGLE_U8_SPLIT,
-	PGTURBOHYBRID_SCORE_KERNEL_SINGLE_SIGNED_SPLIT,
-	PGTURBOHYBRID_SCORE_KERNEL_SINGLE_SCALAR_OR_LUT,
-	PGTURBOHYBRID_SCORE_KERNEL_BUCKET_COUNT
-}			PgturbohybridGraphScoreKernelBucket;
-
-/*
  * Query-split representation for 4-bit dense scoring.  SIGNED is the original
  * signed-codebook split (HIGH_COEF 256); UNSIGNED is the x86 unsigned-codebook
  * split (maddubs/VPDPBUSD, HIGH_COEF 128); AUTO picks UNSIGNED on x86 when the
@@ -870,21 +848,7 @@ typedef struct PgturbohybridGraphPageOpaqueData
 typedef PgturbohybridGraphPageOpaqueData * PgturbohybridGraphPageOpaque;
 
 /*
- * Which path the unsigned-codebook batch-of-4 scorer
- * (PgturbohybridGraphScoreNodeBatchU8Split) took during a scan, surfaced in
- * turbohybrid_last_scan_stats() as graph_u8_batch_mode.  NONE means the u8 batch
- * scorer never scored a batch (e.g. scalar/LUT fallback, or a non-u8 build).
- */
-typedef enum PgturbohybridGraphU8BatchMode
-{
-	PGTURBOHYBRID_U8_BATCH_NONE = 0,
-	PGTURBOHYBRID_U8_BATCH_X4,
-	PGTURBOHYBRID_U8_BATCH_SINGLE
-}			PgturbohybridGraphU8BatchMode;
-
-/*
- * How the native dense scan's per-backend code/adjacency cache was satisfied
- * for this scan, surfaced as native_cache_mode in turbohybrid_last_scan_stats().
+ * How the native dense scan's per-backend code/adjacency cache was satisfied.
  * The native cache is process-local (one copy per backend), so under N
  * concurrent clients the per_backend footprint is duplicated N times -- this
  * mode is the first thing to check when explaining concurrent-client collapse.
@@ -953,17 +917,6 @@ typedef struct PgturbohybridGraphScanOpaqueData
 	MemoryContext tmpCtx;
 	int64		graphVisitedNodes;
 	int64		graphScoredCodes;
-	int64		graphBatchScoredCodes;
-	int64		graphScalarScoredCodes;
-	int			graphBatchKernel;
-	/* Path taken by the u8 batch-of-4 scorer (x4 kernel vs four single passes). */
-	PgturbohybridGraphU8BatchMode graphU8BatchMode;
-	/* Per-kernel scoring attribution (indexed by PgturbohybridGraphScoreKernelBucket). */
-	int64		graphScoreKernelNodes[PGTURBOHYBRID_SCORE_KERNEL_BUCKET_COUNT];
-	int64		graphScoreKernelCalls[PGTURBOHYBRID_SCORE_KERNEL_BUCKET_COUNT];
-	/* PgturbohybridGraphScoreNodeBatch() invocations and total nodes fed to them. */
-	int64		graphBatchCalls;
-	int64		graphBatchNodes;
 	/* Base-layer traversal counters (PgturbohybridGraphSearchBaseLayer). */
 	int64		graphBaseFrontierPushes;
 	int64		graphBaseFrontierPops;
@@ -976,13 +929,6 @@ typedef struct PgturbohybridGraphScanOpaqueData
 	/* True when the code arena exceeds CPU cache (scoring is RAM-bound) -> the
 	 * batch scorer prefetches whole codes, not just their first cache line. */
 	bool		graphLargeCodeArena;
-	/* Code-page cache effectiveness (PgturbohybridGraphLoadCodePage). */
-	int64		graphCodePageAttempts;
-	int64		graphCodePageHits;
-	int64		graphCodePageMisses;
-	int64		graphCodeTuplesCopied;
-	int64		graphCodeArenaAllocatedBytes;
-	int64		graphCodeArenaUsedBytes;
 	/* Estimated full code working set (tqNodeCount * tqCodeBytes) used to decide
 	 * graphLargeCodeArena.  Per-code width is so->tq.codeBytes. */
 	int64		graphCodeArenaEstimatedBytes;
@@ -1168,125 +1114,9 @@ void		PgturbohybridGraphMarkPageGraphOp(Page page, uint16 graphOpKind);
 void		PgturbohybridGraphInit(void);
 void		PgturbohybridGraphLogGraphWalRecord(Relation index, ForkNumber forkNum, BlockNumber blkno, uint16 graphOpKind);
 const char *PgturbohybridGraphGraphWalModeName(void);
-void		PgturbohybridGraphRecordGraphScanStats(PgturbohybridGraphScanOpaque so);
-void		PgturbohybridGraphRecordReturnedRows(int64 returnedRows);
-
-typedef struct PgturbohybridNativeBuildStatsSnapshot
-{
-	Oid			relid;
-	char		relationName[NAMEDATALEN];
-	char		indexShape[16];
-	uint64		nodeCount;
-	uint32		dimensions;
-	int			quantizationBits;
-	int			m;
-	int			efConstruction;
-	bool		exactStorage;
-	bool		buildCodeOnly;
-	bool		buildFastEdges;
-	int			buildDistanceMode;
-	int			buildNeighborSelectReason;
-	uint64		buildDistanceCalls;
-	uint64		buildDistanceQuerySplit;
-	uint64		buildDistancePacked;
-	uint64		buildDistanceWeighted;
-	uint64		buildDistanceCodeCode;
-	uint64		buildDistanceExact;
-	uint64		buildDistanceFallback;
-	uint64		multivectorDocExactBuildDistanceCalls;
-	uint64		multivectorDocExactBuildDistanceUs;
-	uint64		multivectorGraphNodeAssignmentUs;
-	uint64		multivectorGraphEntrySearchUs;
-	uint64		multivectorGraphNeighborSearchUs;
-	uint64		multivectorGraphNeighborSelectUs;
-	uint64		multivectorGraphLinkInsertUs;
-	uint64		multivectorGraphReciprocalPruneUs;
-	uint64		multivectorGraphSegmentWriteUs;
-	uint64		multivectorGraphWalUs;
-	uint64		multivectorGraphBuildDistanceProxyCalls;
-	uint64		multivectorGraphBuildDistanceExactCalls;
-	uint64		multivectorGraphBuildDistanceCacheHits;
-	uint64		multivectorGraphBuildDistanceCacheMisses;
-	uint64		multivectorCentroidBuildUs;
-	uint64		multivectorCentroidClusterUs;
-	uint64		multivectorCentroidResidualUs;
-	uint64		multivectorCentroidBuildDocs;
-	uint64		multivectorCentroidBuildVectors;
-	uint64		multivectorProxyBuildUs;
-	uint64		learnedProjectionDocEncodeBuildUs;
-	uint64		multivectorDocSidecarWriteUs;
-	uint64		multivectorCentroidSidecarWriteUs;
-	uint64		multivectorCentroidPostingWriteUs;
-	uint64		multivectorCentroidPostingCount;
-	uint64		multivectorDocVectorsPointerBytes;
-	uint64		multivectorDocVectorChunkRefBytes;
-	uint64		multivectorDocMapBytesEstimate;
-	uint64		multivectorCentroidVectorBytes;
-	uint64		multivectorCentroidResidualBytes;
-	uint64		multivectorCentroidPostingBytes;
-	uint64		graphNodeBytesEstimate;
-	uint64		graphNeighborBytesEstimate;
-	uint64		buildPeakMemoryContextBytes;
-	char		buildPeakMemoryPhase[64];
-	uint64		buildMemoryHeapScanDecodeBytes;
-	uint64		buildMemoryTokenPoolingBytes;
-	uint64		buildMemoryProxyEncodingBytes;
-	uint64		buildMemoryCentroidClusteringBytes;
-	uint64		buildMemoryCentroidResidualBytes;
-	uint64		buildMemorySidecarTupleBytes;
-	uint64		buildMemoryPostingTupleBytes;
-	uint64		buildMemoryGraphEdgeBytes;
-	uint64		buildMemoryPageWalBytes;
-	uint64		buildDistanceCacheHits;
-	uint64		buildDistanceCacheMisses;
-	uint64		buildDistanceCacheStores;
-	uint64		buildDistanceCacheCollisions;
-	uint64		buildEdgeDistanceCalls;
-	uint64		buildEdgeSearchLayerUs;
-	uint64		buildEdgeSelectNeighborUs;
-	uint64		buildEdgeAddNeighborUs;
-	uint64		buildEdgePruneNeighborUs;
-	uint64		buildEdgeEntryUpdateUs;
-	uint64		buildEdgeNearestTotal;
-	uint64		buildEdgeNearestSamples;
-	uint32		buildEdgeMaxFrontierSize;
-	uint64		fitCorrectionScanUs;
-	uint64		scanUs;
-	uint64		fitCorrectionUs;
-	uint64		encodeUs;
-	uint64		buildEdgesUs;
-	uint64		freeExactVectorsUs;
-	uint64		reorderNodesUs;
-	uint64		connectBackboneUs;
-	uint64		entrySidecarUs;
-	uint64		writePagesUs;
-	uint64		walUs;
-	uint64		totalUs;
-	uint32		workerCount;
-	uint32		nativeSegmentCount;
-	uint32		nativeSegmentBytes;
-	bool		parallelSegmentBuildEnabled;
-	char		segmentBuildMode[16];
-	uint32		nativeBuildWorkersRequested;
-	uint32		nativeBuildWorkersLaunched;
-	bool		parallelFitEnabled;
-	bool		parallelScanEnabled;
-	bool		parallelEncodeEnabled;
-	bool		parallelEdgeBuildEnabled;
-	int			parallelEdgeBuildDisabledReason;
-	uint32		parallelEdgeSegments;
-	uint32		parallelEdgeWorkersLaunched;
-	uint64		parallelEdgeRepairUs;
-	uint64		workerMergeUs;
-	uint32		workerScanUsCount;
-	uint64		workerScanUs[PGTURBOHYBRID_NATIVE_BUILD_STATS_MAX_WORKERS];
-} PgturbohybridNativeBuildStatsSnapshot;
-
-void		PgturbohybridGraphRecordNativeBuildStats(const PgturbohybridNativeBuildStatsSnapshot *stats);
 const char *PgturbohybridGraphTqScoringKernelName(int scoringKernel);
 const char *PgturbohybridGraphTqScoreModeName(int scoreMode);
 const char *PgturbohybridGraphRescoreBandName(int band);
-const char *PgturbohybridGraphScoreKernelBucketName(int bucket);
 const char *PgturbohybridGraphTqSimdForceName(int force);
 const char *PgturbohybridGraphTqExactSimdForceName(int force);
 const char *PgturbohybridGraphStorageKindName(int storageKind);
@@ -1371,26 +1201,9 @@ void		tqgraphrescan(IndexScanDesc scan, ScanKey keys, int nkeys, ScanKey orderby
 bool		tqgraphgettuple(IndexScanDesc scan, ScanDirection dir);
 void		tqgraphendscan(IndexScanDesc scan);
 
-FUNCTION_PREFIX Datum pgturbohybrid_last_scan_stats(PG_FUNCTION_ARGS);
-FUNCTION_PREFIX Datum pgturbohybrid_last_build_stats(PG_FUNCTION_ARGS);
 FUNCTION_PREFIX Datum pgturbohybrid_index_stats(PG_FUNCTION_ARGS);
 FUNCTION_PREFIX Datum pgturbohybrid_estimate_memory(PG_FUNCTION_ARGS);
-FUNCTION_PREFIX Datum pgturbohybrid_sparse_compact(PG_FUNCTION_ARGS);
 FUNCTION_PREFIX Datum pgturbohybrid_prewarm(PG_FUNCTION_ARGS);
-FUNCTION_PREFIX Datum pgturbohybrid_multivector_proxy_diagnostics(PG_FUNCTION_ARGS);
-FUNCTION_PREFIX Datum pgturbohybrid_simd_capabilities(PG_FUNCTION_ARGS);
-void		PgturbohybridGraphRecordExactVectorKernel(int kernel);
-void		PgturbohybridGraphRecordWeightedCodeCodeKernel(int kernel);
-
-typedef struct PgturbohybridGraphDocInsertStats
-{
-	uint64		fullMaxsimEdges;
-	uint64		representativeFallbacks;
-	uint64		pairsScored;
-} PgturbohybridGraphDocInsertStats;
-
-void		PgturbohybridGraphRecordDocInsertStats(const PgturbohybridGraphDocInsertStats *stats);
-
 /* Hash tables */
 typedef struct TidHashEntry
 {

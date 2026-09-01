@@ -1,10 +1,10 @@
-EXTENSION = pgturbohybrid pgturbohybrid_experimental
+EXTENSION = pgturbohybrid
 EXTVERSION = 0.2.0
 
 .DEFAULT_GOAL := all
 
 MODULE_big = pgturbohybrid
-DATA = sql/pgturbohybrid--0.1.0.sql sql/pgturbohybrid--0.1.1.sql sql/pgturbohybrid--0.1.2.sql sql/pgturbohybrid--0.2.0.sql sql/pgturbohybrid_experimental--0.2.0.sql sql/pgturbohybrid--0.1.0--0.1.1.sql sql/pgturbohybrid--0.1.1--0.1.2.sql sql/pgturbohybrid--0.1.2--0.2.0.sql
+DATA = sql/pgturbohybrid--0.2.0.sql
 
 PG_CONFIG ?= pg_config
 
@@ -31,13 +31,6 @@ OBJS = \
 	src/pgturbohybrid_quant_score_signed_x86.o \
 	src/pgturbohybrid_quant_storage.o \
 	src/pgturbohybrid_query.o \
-	src/pgturbohybrid_sparse_build.o \
-	src/pgturbohybrid_sparse_primary.o \
-	src/pgturbohybrid_sparse_query.o \
-	src/pgturbohybrid_sparse_score.o \
-	src/pgturbohybrid_sparse_simd_x86.o \
-	src/pgturbohybrid_sparse_simd_arm.o \
-	src/pgturbohybrid_diagnostics.o \
 	src/pgturbohybrid_validate.o \
 	src/pgturbohybrid_vector_compat.o
 
@@ -45,7 +38,7 @@ HEADERS =
 
 $(OBJS): $(wildcard src/*.h src/*.inc)
 
-REGRESS = extension pgturbohybrid pgturbohybrid_comments pgturbohybrid_gucs pgturbohybrid_guc_defaults pgturbohybrid_diagnostics pgturbohybrid_query pgturbohybrid_sparse pgturbohybrid_sparse_query pgturbohybrid_sparse_scan pgturbohybrid_sparse_fusion pgturbohybrid_sparse_quant pgturbohybrid_sparse_rerank pgturbohybrid_sparse_simd_parity pgturbohybrid_sparse_wand pgturbohybrid_sparse_cache pgturbohybrid_sparse_delta pgturbohybrid_sparse_primary pgturbohybrid_sparse_hardening pgturbohybrid_sparse_bitpacked pgturbohybrid_keymap pgturbohybrid_querysplit pgturbohybrid_multivector pgturbohybrid_multivector_many_moderate pgturbohybrid_codebook pgturbohybrid_u8split pgturbohybrid_nibble_guard pgturbohybrid_x4_safety pgturbohybrid_simd_parity pgturbohybrid_rescore pgturbohybrid_wrappers pgturbohybrid_fuzz security
+REGRESS = extension pgturbohybrid pgturbohybrid_query pgturbohybrid_multivector pgturbohybrid_wrappers pgturbohybrid_fuzz security
 REGRESS_OPTS = --inputdir=test
 REGRESS += pgturbohybrid_validate
 
@@ -113,13 +106,13 @@ prove_installcheck:
 
 .PHONY: recovery-check
 recovery-check:
-	$(MAKE) prove_installcheck PROVE_TESTS='test/t/002_wal_restart.pl test/t/009_shared_cache_identity.pl test/t/010_native_vacuum_crash.pl test/t/012_recovery_replication.pl'
+	$(MAKE) prove_installcheck PROVE_TESTS='test/t/002_wal_restart.pl test/t/010_native_vacuum_crash.pl test/t/012_recovery_replication.pl'
 
 .PHONY: dist
 
 dist:
 	@test -z "$$(git status --porcelain --untracked-files=all)" || (echo "make dist requires a clean working tree" >&2; git status --short --untracked-files=all >&2; exit 1)
-	@tracked_artifacts="$$(git ls-files | grep -E '(^|/)regression\.(diffs|out)$$|(^|/)\.DS_Store$$|(^|/)(benchmarks/(results|output)|results)/|(^|/)perf-smoke-results\.json$$|(^|/).*\.(o|so|bc|dll|dylib|obj|lib|exp|pyc)$$|(^|/)__pycache__/|^benchmarks/.*\.(csv|md|json)$$' | grep -v '^benchmarks/README\.md$$' | grep -v '^benchmarks/dev/README\.md$$' | grep -v '^benchmarks/dbpedia_openai3_large\.md$$' | grep -v '^benchmarks/config/.*\.json$$' || true)"; \
+	@tracked_artifacts="$$(git ls-files | grep -E '(^|/)regression\.(diffs|out)$$|(^|/)\.DS_Store$$|(^|/).*\.(o|so|bc|dll|dylib|obj|lib|exp|pyc)$$|(^|/)__pycache__/' || true)"; \
 	if test -n "$$tracked_artifacts"; then \
 		echo "make dist refuses to package generated artifacts:" >&2; \
 		printf '%s\n' "$$tracked_artifacts" >&2; \

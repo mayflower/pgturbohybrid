@@ -21,7 +21,6 @@
 #include "pgturbohybrid_bm25.h"
 #include "pgturbohybrid_jsonb_compat.h"
 #include "pgturbohybrid_quant.h"
-#include "pgturbohybrid_sparse.h"
 
 typedef struct PgturbohybridValidationIssue
 {
@@ -52,10 +51,8 @@ typedef struct PgturbohybridValidationState
 	bool		routingValid;
 	bool		segmentsValid;
 	bool		bm25Present;
-	bool		sparsePresent;
 	bool		multivectorPresent;
 	bool		densePresent;
-	uint64		nodeMapNodes;
 	bool	   *nodeSeen;
 	bool	   *nodeDead;
 	uint32	   *degree;
@@ -606,18 +603,6 @@ PgturbohybridValidateTupleTypeForPage(uint16 kind, uint8 type)
 		case PGTURBOHYBRID_GRAPH_PAGE_KIND_BM25_DELTA_TERM:
 			return type == PGTURBOHYBRID_BM25_DELTA_TERM_TUPLE_TYPE ||
 				type == PGTURBOHYBRID_BM25_DELTA_DIRECTORY_TUPLE_TYPE;
-		case PGTURBOHYBRID_GRAPH_PAGE_KIND_SPARSE_META:
-			return type == PGTURBOHYBRID_SPARSE_META_TUPLE_TYPE;
-		case PGTURBOHYBRID_GRAPH_PAGE_KIND_SPARSE_LEXICON:
-			return type == PGTURBOHYBRID_SPARSE_LEXICON_TUPLE_TYPE;
-		case PGTURBOHYBRID_GRAPH_PAGE_KIND_SPARSE_POSTINGS:
-			return type == PGTURBOHYBRID_SPARSE_POSTINGS_TUPLE_TYPE;
-		case PGTURBOHYBRID_GRAPH_PAGE_KIND_SPARSE_BLOCKMAX:
-			return type == PGTURBOHYBRID_SPARSE_BLOCKMAX_TUPLE_TYPE;
-		case PGTURBOHYBRID_GRAPH_PAGE_KIND_SPARSE_DELTA:
-			return type == PGTURBOHYBRID_SPARSE_DELTA_TUPLE_TYPE;
-		case PGTURBOHYBRID_GRAPH_PAGE_KIND_NODEMAP:
-			return type == PGTURBOHYBRID_SPARSE_NODEMAP_TUPLE_TYPE;
 		default:
 			return true;
 	}
@@ -646,18 +631,6 @@ PgturbohybridValidateMinimumTupleSize(uint16 kind)
 			return offsetof(PgturbohybridBm25ImpactTupleData, entries);
 		case PGTURBOHYBRID_GRAPH_PAGE_KIND_BM25_DELTA_TERM:
 			return offsetof(PgturbohybridBm25DeltaTermTupleData, postings);
-		case PGTURBOHYBRID_GRAPH_PAGE_KIND_SPARSE_META:
-			return sizeof(PgturbohybridSparseMetaTupleData);
-		case PGTURBOHYBRID_GRAPH_PAGE_KIND_SPARSE_LEXICON:
-			return offsetof(PgturbohybridSparseLexiconTupleData, entries);
-		case PGTURBOHYBRID_GRAPH_PAGE_KIND_SPARSE_POSTINGS:
-			return offsetof(PgturbohybridSparsePostingsTupleData, payload);
-		case PGTURBOHYBRID_GRAPH_PAGE_KIND_SPARSE_BLOCKMAX:
-			return offsetof(PgturbohybridSparseBlockMaxTupleData, entries);
-		case PGTURBOHYBRID_GRAPH_PAGE_KIND_SPARSE_DELTA:
-			return offsetof(PgturbohybridSparseDeltaTupleData, entries);
-		case PGTURBOHYBRID_GRAPH_PAGE_KIND_NODEMAP:
-			return offsetof(PgturbohybridSparseNodeMapTupleData, tids);
 		default:
 			return 1;
 	}
@@ -746,56 +719,6 @@ PgturbohybridValidateBranchTupleBounds(PgturbohybridValidationState *state,
 										 blkno, tuple->nodeId, offno);
 			break;
 		}
-		case PGTURBOHYBRID_GRAPH_PAGE_KIND_SPARSE_LEXICON:
-		{
-			PgturbohybridSparseLexiconTuple tuple =
-				(PgturbohybridSparseLexiconTuple) data;
-
-			count = tuple->count;
-			required = PgturbohybridSparseLexiconTupleSize(tuple->count);
-			break;
-		}
-		case PGTURBOHYBRID_GRAPH_PAGE_KIND_SPARSE_BLOCKMAX:
-		{
-			PgturbohybridSparseBlockMaxTuple tuple =
-				(PgturbohybridSparseBlockMaxTuple) data;
-
-			count = tuple->count;
-			required = PgturbohybridSparseBlockMaxTupleSize(tuple->count);
-			if (itemSize >= required)
-				for (uint16 i = 0; i < tuple->count; i++)
-					if (tuple->entries[i].firstNodeId > tuple->entries[i].lastNodeId ||
-						tuple->entries[i].lastNodeId >= meta->tqNodeCount)
-						PgturbohybridValidateAddIssue(state, false,
-							"sparse_blockmax_node_range", blkno,
-							tuple->entries[i].firstNodeId, offno);
-			break;
-		}
-		case PGTURBOHYBRID_GRAPH_PAGE_KIND_SPARSE_DELTA:
-		{
-			PgturbohybridSparseDeltaTuple tuple =
-				(PgturbohybridSparseDeltaTuple) data;
-
-			count = tuple->termCount;
-			required = PgturbohybridSparseDeltaTupleSize(tuple->termCount);
-			if (tuple->nodeId >= meta->tqNodeCount ||
-				!ItemPointerIsValid(&tuple->heaptid))
-				PgturbohybridValidateAddIssue(state, false, "sparse_delta_identity",
-										 blkno, tuple->nodeId, offno);
-			break;
-		}
-		case PGTURBOHYBRID_GRAPH_PAGE_KIND_SPARSE_POSTINGS:
-		{
-			PgturbohybridSparsePostingsTuple tuple =
-				(PgturbohybridSparsePostingsTuple) data;
-
-			count = tuple->count;
-			first = tuple->baseNodeId;
-			if (tuple->encoding > PGTURBOHYBRID_SPARSE_ENCODING_BITPACKED)
-				PgturbohybridValidateAddIssue(state, false,
-					"sparse_postings_encoding", blkno, tuple->baseNodeId, offno);
-			break;
-		}
 		default:
 			break;
 	}
@@ -803,8 +726,7 @@ PgturbohybridValidateBranchTupleBounds(PgturbohybridValidationState *state,
 		PgturbohybridValidateAddIssue(state, false, "branch_tuple_count_or_size",
 									 blkno, -1, offno);
 	if (count > 0 && first + count > meta->tqNodeCount &&
-		(kind == PGTURBOHYBRID_GRAPH_PAGE_KIND_BM25_DOCSTATS ||
-		 kind == PGTURBOHYBRID_GRAPH_PAGE_KIND_SPARSE_POSTINGS))
+		kind == PGTURBOHYBRID_GRAPH_PAGE_KIND_BM25_DOCSTATS)
 		PgturbohybridValidateAddIssue(state, false, "branch_node_range", blkno,
 									 first, offno);
 }
@@ -985,27 +907,7 @@ PgturbohybridValidateBranchTuples(PgturbohybridValidationState *state,
 										 blkno, -1, offno);
 			PgturbohybridValidateBranchTupleBounds(state, meta, kind, blkno,
 										 offno, data, itemSize);
-			if (kind == PGTURBOHYBRID_GRAPH_PAGE_KIND_NODEMAP)
-			{
-				PgturbohybridSparseNodeMapTuple tuple =
-					(PgturbohybridSparseNodeMapTuple) data;
-				uint64 end = (uint64) tuple->firstNodeId + tuple->count;
-
-				if (itemSize < PgturbohybridSparseNodeMapTupleSize(tuple->count) ||
-					tuple->count == 0 || end > meta->tqNodeCount)
-					PgturbohybridValidateAddIssue(state, false, "nodemap_bounds",
-										 blkno, tuple->firstNodeId, offno);
-				else
-				{
-					state->nodeMapNodes += tuple->count;
-					for (uint16 i = 0; i < tuple->count; i++)
-						if (!ItemPointerIsValid(&tuple->tids[i]))
-							PgturbohybridValidateAddIssue(state, false,
-								"nodemap_invalid_heap_tid", blkno,
-								tuple->firstNodeId + i, offno);
-				}
-			}
-			else if (kind == PGTURBOHYBRID_GRAPH_PAGE_KIND_BM25_META &&
+			if (kind == PGTURBOHYBRID_GRAPH_PAGE_KIND_BM25_META &&
 				itemSize >= sizeof(PgturbohybridBm25MetaTupleData))
 			{
 				PgturbohybridBm25MetaTuple tuple =
@@ -1014,19 +916,6 @@ PgturbohybridValidateBranchTuples(PgturbohybridValidationState *state,
 				if (tuple->bm25Version != PGTURBOHYBRID_BM25_VERSION ||
 					tuple->docCount > meta->tqNodeCount)
 					PgturbohybridValidateAddIssue(state, false, "bm25_meta_bounds",
-											 blkno, -1, offno);
-			}
-			else if (kind == PGTURBOHYBRID_GRAPH_PAGE_KIND_SPARSE_META &&
-					 itemSize >= sizeof(PgturbohybridSparseMetaTupleData))
-			{
-				PgturbohybridSparseMetaTuple tuple =
-					(PgturbohybridSparseMetaTuple) data;
-
-				if (tuple->sparseVersion != PGTURBOHYBRID_SPARSE_VERSION ||
-					tuple->docCount > meta->tqNodeCount ||
-					(tuple->quantBits != 0 && tuple->quantBits != 8 &&
-					 tuple->quantBits != 16))
-					PgturbohybridValidateAddIssue(state, false, "sparse_meta_bounds",
 											 blkno, -1, offno);
 			}
 		}
@@ -1087,7 +976,6 @@ PgturbohybridValidateMeta(PgturbohybridValidationState *state,
 		PgturbohybridValidateAddIssue(state, false, "segment_bounds", 0, -1, -1);
 	state->densePresent = densePresent;
 	state->bm25Present = BlockNumberIsValid(meta->tqBm25MetaStartBlkno);
-	state->sparsePresent = BlockNumberIsValid(meta->tqSparseMetaStartBlkno);
 	state->multivectorPresent = BlockNumberIsValid(meta->tqMultivectorDocMapStartBlkno);
 }
 
@@ -1239,13 +1127,6 @@ pgturbohybrid_validate_index(PG_FUNCTION_ARGS)
 			if (deep && list_length(state.errors) == 0)
 				PgturbohybridValidateReachability(&state, &meta);
 		}
-		else if (BlockNumberIsValid(meta.tqNodeMapStartBlkno))
-		{
-			state.liveNodes = state.nodeMapNodes;
-			if (state.nodeMapNodes != meta.tqNodeCount)
-				PgturbohybridValidateAddIssue(&state, false,
-					"nodemap_node_count_mismatch", InvalidBlockNumber, -1, -1);
-		}
 	}
 	reachableRatio = state.liveNodes == 0 ? 1.0 :
 		(double) state.reachableLiveNodes / (double) state.liveNodes;
@@ -1304,8 +1185,6 @@ pgturbohybrid_validate_index(PG_FUNCTION_ARGS)
 	PgturbohybridValidateBranchJson(&json, "dense", state.densePresent,
 		list_length(state.errors) == 0);
 	PgturbohybridValidateBranchJson(&json, "bm25", state.bm25Present,
-		list_length(state.errors) == 0);
-	PgturbohybridValidateBranchJson(&json, "sparse", state.sparsePresent,
 		list_length(state.errors) == 0);
 	PgturbohybridValidateBranchJson(&json, "multivector", state.multivectorPresent,
 		list_length(state.errors) == 0);

@@ -72,7 +72,6 @@ $node->safe_psql('postgres', 'CREATE DATABASE pg_colbert_llama_profile_stub;');
 $node->safe_psql('pg_colbert_llama_profile_stub', q(
 	CREATE EXTENSION vector;
 	CREATE EXTENSION pgturbohybrid;
-	CREATE EXTENSION pgturbohybrid_experimental;
 	CREATE EXTENSION pg_colbert_llama;
 ));
 $node->safe_psql('postgres', sprintf(q(

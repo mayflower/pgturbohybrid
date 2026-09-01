@@ -10,9 +10,7 @@ on an unmodified pgvector installation.
 
 Use the GitHub templates so reports carry enough context to reproduce:
 
-- [Bug report](.github/ISSUE_TEMPLATE/bug_report.yml) — PostgreSQL/pgvector/pgturbohybrid versions, OS/arch, `CREATE INDEX`, query, `EXPLAIN`, and `turbohybrid_last_scan_stats()`.
-- [Performance report](.github/ISSUE_TEMPLATE/performance_report.yml) — a suspected slowdown or regression.
-- [Benchmark report](.github/ISSUE_TEMPLATE/benchmark_report.yml) — contributing reproducible numbers (dataset, rows, dimensions, query count, hardware, cache state, warm-up policy, settings, baseline).
+- [Bug report](.github/ISSUE_TEMPLATE/bug_report.yml) — PostgreSQL/pgvector/pgturbohybrid versions, OS/arch, `CREATE INDEX`, query, and `EXPLAIN`.
 - [Feature request](.github/ISSUE_TEMPLATE/feature_request.yml).
 
 Pull requests use [the PR template](.github/PULL_REQUEST_TEMPLATE.md) checklist
@@ -66,13 +64,6 @@ th-test                                  # smoke + regression
 Test against pinned pgvector `master` with `nix develop .#pgvector-master`
 (then `th-pg-reset`). After changing extension C/SQL, re-enter the shell (or
 re-run `nix develop ... -c ...`) so PostgreSQL sees the rebuilt package.
-
-Deterministic local quality checks (synthetic data; do not commit output):
-`th-bench-retrieval-quality`, `th-bench-profile-grid`, `th-bench-tune-profile`.
-For Python / real-data benchmarks use the heavier shell `nix develop .#bench`
-(includes `uv`), e.g. `th-bench-concurrent-dense --help` or
-`FIQA_DATASET=/path/to/fiqa th-bench-fiqa-quick` (which defaults to the separate
-`pgturbohybrid_fiqa_quick` database).
 
 `nix flake check` is intentionally cheap: it builds the extension, the wrapped
 PostgreSQL, the pgvector-master variant, and a scalar `SIMD_BUILD=none` variant.

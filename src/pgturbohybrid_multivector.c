@@ -108,10 +108,8 @@ FUNCTION_PREFIX PG_FUNCTION_INFO_V1(pgturbohybrid_multivector_maxsim_blocked_sca
 FUNCTION_PREFIX PG_FUNCTION_INFO_V1(pgturbohybrid_multivector_maxsim_distance);
 FUNCTION_PREFIX PG_FUNCTION_INFO_V1(pgturbohybrid_multivector_query_distance);
 FUNCTION_PREFIX PG_FUNCTION_INFO_V1(pgturbohybrid_multivector_model_info);
-FUNCTION_PREFIX PG_FUNCTION_INFO_V1(pgturbohybrid_experimental_compact_code_score);
 
 static Oid	pgturbohybrid_multivector_type_oid = InvalidOid;
-static Oid	pgturbohybrid_sparse_vector_type_oid = InvalidOid;
 extern char *pgturbohybrid_multivector_model_name;
 extern int	pgturbohybrid_multivector_max_doc_vectors;
 extern int	pgturbohybrid_multivector_max_query_vectors;
@@ -132,9 +130,6 @@ static float4 TqMvParseFloat4(const char **cursor);
 static void TqMvExpectChar(const char **cursor, char expected);
 static void PgturbohybridMultiVectorRejectTextFallback(void);
 static int32 *PgturbohybridMultiVectorReadInt4Array(ArrayType *array,
-													const char *name,
-													int *nelems);
-static int16 *PgturbohybridMultiVectorReadInt2Array(ArrayType *array,
 													const char *name,
 													int *nelems);
 static float4 *PgturbohybridMultiVectorReadFloat4Array(ArrayType *array,
@@ -298,32 +293,6 @@ PgturbohybridMultiVectorModelJsonbAddInt32(PgturbohybridJsonbState *state,
 	PgturbohybridJsonbPush(state, WJB_VALUE, &value);
 }
 
-static void
-PgturbohybridMultiVectorModelJsonbAddInt64(PgturbohybridJsonbState *state,
-										   const char *key, int64 val)
-{
-	JsonbValue	value;
-
-	PgturbohybridMultiVectorModelJsonbAddKey(state, key);
-	value.type = jbvNumeric;
-	value.val.numeric = DatumGetNumeric(DirectFunctionCall1(int8_numeric,
-															Int64GetDatum(val)));
-	PgturbohybridJsonbPush(state, WJB_VALUE, &value);
-}
-
-static void
-PgturbohybridMultiVectorModelJsonbAddFloat8(PgturbohybridJsonbState *state,
-											const char *key, double val)
-{
-	JsonbValue	value;
-
-	PgturbohybridMultiVectorModelJsonbAddKey(state, key);
-	value.type = jbvNumeric;
-	value.val.numeric = DatumGetNumeric(DirectFunctionCall1(float8_numeric,
-															Float8GetDatum(val)));
-	PgturbohybridJsonbPush(state, WJB_VALUE, &value);
-}
-
 static Jsonb *
 PgturbohybridMultiVectorModelInfoJsonb(const PgturbohybridMultiVectorModelInfo *info,
 									   const char *requestedName)
@@ -444,38 +413,6 @@ PgturbohybridMultiVectorTypeOid(void)
 						CStringGetDatum("turbohybrid_multivector"),
 						ObjectIdGetDatum(schemaOid));
 	return pgturbohybrid_multivector_type_oid;
-}
-
-Oid
-PgturbohybridSparseVectorTypeOid(void)
-{
-	Oid			extensionOid;
-	Oid			schemaOid;
-
-	if (OidIsValid(pgturbohybrid_sparse_vector_type_oid))
-		return pgturbohybrid_sparse_vector_type_oid;
-
-	extensionOid = get_extension_oid("pgturbohybrid", true);
-	if (!OidIsValid(extensionOid))
-		return InvalidOid;
-
-	schemaOid = PgturbohybridExtensionSchema(extensionOid);
-	if (!OidIsValid(schemaOid))
-		return InvalidOid;
-
-	pgturbohybrid_sparse_vector_type_oid =
-		GetSysCacheOid2(TYPENAMENSP, Anum_pg_type_oid,
-						CStringGetDatum("turbohybrid_sparse_vector"),
-						ObjectIdGetDatum(schemaOid));
-	return pgturbohybrid_sparse_vector_type_oid;
-}
-
-bool
-PgturbohybridTypeIsSparseVector(Oid typeOid)
-{
-	Oid			sparseOid = PgturbohybridSparseVectorTypeOid();
-
-	return OidIsValid(sparseOid) && typeOid == sparseOid;
 }
 
 bool
@@ -920,42 +857,6 @@ PgturbohybridMultiVectorReadInt4Array(ArrayType *array, const char *name,
 					(errcode(ERRCODE_NULL_VALUE_NOT_ALLOWED),
 					 errmsg("%s array cannot contain null elements", name)));
 		values[i] = DatumGetInt32(elements[i]);
-	}
-	return values;
-}
-
-static int16 *
-PgturbohybridMultiVectorReadInt2Array(ArrayType *array, const char *name,
-									  int *nelems)
-{
-	Datum	   *elements;
-	bool	   *nulls;
-	int16	   *values;
-
-	if (array == NULL || ARR_NDIM(array) == 0)
-		ereport(ERROR,
-				(errcode(ERRCODE_DATA_EXCEPTION),
-				 errmsg("%s array cannot be empty", name)));
-	if (ARR_ELEMTYPE(array) != INT2OID)
-		ereport(ERROR,
-				(errcode(ERRCODE_DATATYPE_MISMATCH),
-				 errmsg("expected smallint[] input for %s", name)));
-
-	deconstruct_array(array, INT2OID, sizeof(int16), true, TYPALIGN_SHORT,
-					  &elements, &nulls, nelems);
-	if (*nelems <= 0)
-		ereport(ERROR,
-				(errcode(ERRCODE_DATA_EXCEPTION),
-				 errmsg("%s array cannot be empty", name)));
-
-	values = palloc(sizeof(int16) * (Size) *nelems);
-	for (int i = 0; i < *nelems; i++)
-	{
-		if (nulls[i])
-			ereport(ERROR,
-					(errcode(ERRCODE_NULL_VALUE_NOT_ALLOWED),
-					 errmsg("%s array cannot contain null elements", name)));
-		values[i] = DatumGetInt16(elements[i]);
 	}
 	return values;
 }
@@ -3906,80 +3807,6 @@ pgturbohybrid_multivector_maxsim_blocked_scalar(PG_FUNCTION_ARGS)
 	PgturbohybridMultiVector *doc = PG_GETARG_PGTURBOHYBRID_MULTIVECTOR_P(1);
 
 	PG_RETURN_FLOAT8(TqMultiVectorMaxSimBlockedScalar(query, doc));
-}
-
-Datum
-pgturbohybrid_experimental_compact_code_score(PG_FUNCTION_ARGS)
-{
-	ArrayType  *queryArray;
-	ArrayType  *docArray;
-	bool		experimental;
-	char	   *forceKernel = "auto";
-	int			queryCount;
-	int			docCount;
-	int16	   *queryCodes;
-	int16	   *docCodes;
-	TqCompactCodeScoreFunc scorer;
-	const char *kernelName;
-	instr_time	start;
-	instr_time	elapsed;
-	int64		score;
-	int64		scoreUs;
-	PgturbohybridJsonbState state;
-
-	if (PG_ARGISNULL(0) || PG_ARGISNULL(1))
-		ereport(ERROR,
-				(errcode(ERRCODE_NULL_VALUE_NOT_ALLOWED),
-				 errmsg("compact code arrays cannot be null")));
-	experimental = !PG_ARGISNULL(2) && PG_GETARG_BOOL(2);
-	if (!experimental)
-		ereport(ERROR,
-				(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
-				 errmsg("experimental compact-code scoring is disabled"),
-				 errhint("Pass experimental => true to call this diagnostic prototype. It is not used for final SQL ordering.")));
-	if (!PG_ARGISNULL(3))
-		forceKernel = text_to_cstring(PG_GETARG_TEXT_PP(3));
-
-	queryArray = PG_GETARG_ARRAYTYPE_P(0);
-	docArray = PG_GETARG_ARRAYTYPE_P(1);
-	queryCodes =
-		PgturbohybridMultiVectorReadInt2Array(queryArray, "query compact codes",
-											  &queryCount);
-	docCodes =
-		PgturbohybridMultiVectorReadInt2Array(docArray, "document compact codes",
-											  &docCount);
-	if (queryCount != docCount)
-		ereport(ERROR,
-				(errcode(ERRCODE_ARRAY_SUBSCRIPT_ERROR),
-				 errmsg("query and document compact code arrays must have the same length")));
-
-	scorer = TqResolveCompactCodeScoreKernel(forceKernel);
-	kernelName = TqCompactCodeScoreKernelName(scorer);
-	INSTR_TIME_SET_CURRENT(start);
-	score = scorer(queryCodes, docCodes, (int32) queryCount);
-	INSTR_TIME_SET_CURRENT(elapsed);
-	INSTR_TIME_SUBTRACT(elapsed, start);
-	scoreUs = (int64) INSTR_TIME_GET_MICROSEC(elapsed);
-
-	PgturbohybridJsonbStateInit(&state);
-	PgturbohybridJsonbBeginObject(&state);
-	PgturbohybridMultiVectorModelJsonbAddBool(&state, "experimental", true);
-	PgturbohybridMultiVectorModelJsonbAddString(&state,
-												"approximate_scoring_kernel",
-												kernelName);
-	PgturbohybridMultiVectorModelJsonbAddString(&state, "requested_kernel",
-												forceKernel);
-	PgturbohybridMultiVectorModelJsonbAddInt64(&state, "code_count",
-											   queryCount);
-	PgturbohybridMultiVectorModelJsonbAddFloat8(&state, "score",
-												(double) score);
-	PgturbohybridMultiVectorModelJsonbAddInt64(&state,
-											   "approximate_scoring_us",
-											   scoreUs);
-	PgturbohybridMultiVectorModelJsonbAddString(&state,
-												"final_sql_ordering",
-												"exact_heap_maxsim");
-	PG_RETURN_JSONB_P(PgturbohybridJsonbEndObject(&state));
 }
 
 Datum

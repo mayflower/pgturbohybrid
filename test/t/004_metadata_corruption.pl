@@ -34,7 +34,7 @@ my $DB = 'pgturbohybrid_corrupt';
 $node->safe_psql('postgres', "CREATE DATABASE $DB;");
 $node->safe_psql($DB, q(
 	CREATE EXTENSION vector;
-	CREATE EXTENSION pgturbohybrid; CREATE EXTENSION pgturbohybrid_experimental;
+	CREATE EXTENSION pgturbohybrid;
 ));
 
 # BLCKSZ default and the offset at which the graph metapage struct begins
@@ -262,68 +262,6 @@ assert_clean('hybrid bm25-clobber stats',
 $node->safe_psql($DB, 'REINDEX INDEX hybrid_idx;');
 is($node->safe_psql($DB, $hybrid_query), '5',
 	'hybrid index correct again after REINDEX');
-
-# ---------------------------------------------------------------------------
-# Shape (c): sparse-only index -- sparse node-map / sparse meta path.
-# ---------------------------------------------------------------------------
-$node->safe_psql($DB, q(
-	CREATE TABLE sparse_docs (id int, s turbohybrid_sparse_vector);
-	INSERT INTO sparse_docs
-	SELECT g, turbohybrid_sparse_vector_build(
-		ARRAY[1, (g % 5) + 2]::int4[], ARRAY[g::float4, 1.0::float4])
-	FROM generate_series(1, 60) g;
-	CREATE INDEX sparse_idx ON sparse_docs
-	USING turbohybrid (s sparse_ip_turbohybrid_ops)
-	WITH (sparse_quant_bits = 8, sparse_block_size = 8);
-));
-
-my $sparse_query = q(
-	SET enable_seqscan = off;
-	SELECT count(*) FROM (
-		SELECT id FROM sparse_docs
-		ORDER BY s <~*> turbohybrid_experimental_query(
-			sparse_query => turbohybrid_sparse_vector_build(
-				ARRAY[1]::int4[], ARRAY[1.0]::float4[]),
-			sparse_k => 5)
-		LIMIT 5) q;
-);
-my $sparse_before = $node->safe_psql($DB, $sparse_query);
-chomp $sparse_before;
-cmp_ok($sparse_before, '>', '0',
-	'sparse index returns rows before corruption');
-
-# Clobber the sparse-side data blocks (node-map chain + sparse meta + postings),
-# all of which live past the metapage (block 0).  Leave block 0 intact so the
-# scan reaches the sparse readers we hardened.
-my $sparse_path = index_file_path('sparse_idx');
-my $sparse_blocks = $node->safe_psql($DB,
-	"SELECT pg_relation_size('sparse_idx') / $BLCKSZ;");
-chomp $sparse_blocks;
-
-$node->stop;
-for (my $b = 1; $b < $sparse_blocks; $b++)
-{
-	scribble($sparse_path, $b, $META_OFFSET, 128, 0xFF);
-}
-$node->start;
-assert_clean('sparse node-map-clobber', $sparse_query, 0);
-assert_clean('sparse node-map-clobber stats',
-	"SELECT turbohybrid_index_stats('sparse_idx');", 0);
-$node->safe_psql($DB, 'REINDEX INDEX sparse_idx;');
-cmp_ok($node->safe_psql($DB, $sparse_query), '>', '0',
-	'sparse index returns rows again after REINDEX');
-
-# (c2) Also clobber the sparse metapage chain anchor / format region by zeroing
-# the whole metapage payload: exercises the dispatch-returns-false path for the
-# sparse-primary node-map anchor.  Must not crash.  Re-resolve the path (the
-# REINDEX above changed the relfilenode) while the node is still up.
-$sparse_path = index_file_path('sparse_idx');
-$node->stop;
-scribble($sparse_path, 0, $META_OFFSET, 200, 0x00);
-$node->start;
-assert_clean('sparse meta-zero', $sparse_query, 0);
-assert_clean('sparse meta-zero stats',
-	"SELECT turbohybrid_index_stats('sparse_idx');", 0);
 
 # Final sanity: the server survived every corruption case.
 is($node->safe_psql($DB, 'SELECT 1;'), '1',

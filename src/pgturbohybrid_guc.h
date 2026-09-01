@@ -18,14 +18,6 @@ typedef enum PgturbohybridBm25HeapTSVectorRerankMode
 	PGTURBOHYBRID_BM25_HEAP_TSVECTOR_RERANK_AUTO
 } PgturbohybridBm25HeapTSVectorRerankMode;
 
-typedef enum PgturbohybridSparseRerankMode
-{
-	PGTURBOHYBRID_SPARSE_RERANK_OFF,
-	PGTURBOHYBRID_SPARSE_RERANK_TOPK,
-	PGTURBOHYBRID_SPARSE_RERANK_BAND,
-	PGTURBOHYBRID_SPARSE_RERANK_AUTO
-} PgturbohybridSparseRerankMode;
-
 typedef enum PgturbohybridDbsfRobustMode
 {
 	PGTURBOHYBRID_DBSF_ROBUST_OFF,

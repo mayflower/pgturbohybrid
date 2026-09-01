@@ -8984,7 +8984,6 @@ PgturbohybridMultiVectorDocumentNodeScan(IndexScanDesc scan,
 	so->tqGraphResultCount = docCount;
 	so->tqGraphResultIndex = 0;
 	so->graphCandidateCount = docCount;
-	PgturbohybridGraphRecordGraphScanStats(so);
 	*outCandidates = candidates;
 	MemoryContextSwitchTo(oldCtx);
 	return docCount;
@@ -9635,7 +9634,6 @@ PgturbohybridGraphCollectMultiVectorDenseCandidates(IndexScanDesc scan,
 		so->tqGraphResultCount = fallbackCount;
 		so->tqGraphResultIndex = 0;
 		so->graphCandidateCount = fallbackCount;
-		PgturbohybridGraphRecordGraphScanStats(so);
 		MemoryContextSwitchTo(oldCtx);
 		return fallbackCount;
 	}
@@ -9891,7 +9889,6 @@ PgturbohybridGraphCollectMultiVectorDenseCandidates(IndexScanDesc scan,
 	so->tqGraphResultCount = docCount;
 	so->tqGraphResultIndex = 0;
 	so->graphCandidateCount = docCount;
-	PgturbohybridGraphRecordGraphScanStats(so);
 	*outCandidates = candidates;
 	MemoryContextSwitchTo(oldCtx);
 	return docCount;

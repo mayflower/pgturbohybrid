@@ -70,14 +70,6 @@ body:
     validations:
       required: false
   - type: textarea
-    id: scan-stats
-    attributes:
-      label: turbohybrid_last_scan_stats()
-      description: Paste the JSON output when available.
-      render: json
-    validations:
-      required: false
-  - type: textarea
     id: expected-behavior
     attributes:
       label: Expected behavior

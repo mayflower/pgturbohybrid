@@ -10,12 +10,10 @@
 #include "utils/rel.h"
 
 #include "pgturbohybrid_multivector.h"
-#include "pgturbohybrid_scan_stats.h"
 
 #define PGTURBOHYBRID_DEFAULT_FINAL_K 10
 #define PGTURBOHYBRID_MAX_DEFAULT_DENSE_K 10000
 #define PGTURBOHYBRID_MAX_DEFAULT_BM25_K 10000
-#define PGTURBOHYBRID_MAX_DEFAULT_SPARSE_K 10000
 #define PGTURBOHYBRID_MAX_RRF_K 100000
 #define PGTURBOHYBRID_MAX_UNION_CANDIDATES 1000000
 #define PGTURBOHYBRID_MAX_HOT_POSTINGS_CACHE_MB 1024
@@ -116,8 +114,6 @@ typedef struct PgturbohybridOptions
 	bool		sparseBlockMax;
 }			PgturbohybridOptions;
 
-#define PGTURBOHYBRID_BRANCH_PLAN_MAX_BRANCHES 8
-
 typedef enum PgturbohybridBranchPlanMode
 {
 	PGTURBOHYBRID_BRANCH_PLAN_AUTO,
@@ -125,95 +121,12 @@ typedef enum PgturbohybridBranchPlanMode
 	PGTURBOHYBRID_BRANCH_PLAN_QDRANT_LIKE
 }			PgturbohybridBranchPlanMode;
 
-typedef enum PgturbohybridBranchKind
-{
-	PGTURBOHYBRID_BRANCH_KIND_BM25,
-	PGTURBOHYBRID_BRANCH_KIND_DENSE_SINGLE,
-	PGTURBOHYBRID_BRANCH_KIND_PROXY_VECTOR,
-	PGTURBOHYBRID_BRANCH_KIND_DOCUMENT_NODES,
-	PGTURBOHYBRID_BRANCH_KIND_TOKEN_NODES,
-	PGTURBOHYBRID_BRANCH_KIND_EXACT_DOC_SCAN,
-	PGTURBOHYBRID_BRANCH_KIND_CENTROID_LITE,
-	PGTURBOHYBRID_BRANCH_KIND_QUANTIZED_INVERTED_EXPERIMENTAL
-}			PgturbohybridBranchKind;
-
-#define PGTURBOHYBRID_BRANCH_SOURCE_DENSE		(1U << 0)
-#define PGTURBOHYBRID_BRANCH_SOURCE_BM25		(1U << 1)
-#define PGTURBOHYBRID_BRANCH_SOURCE_MULTIVECTOR	(1U << 2)
-#define PGTURBOHYBRID_BRANCH_SOURCE_EXACT		(1U << 3)
-
-typedef struct PgturbohybridBranchPlanItem
-{
-	int			kind;
-	uint32		candidateLimit;
-	uint32		rescoreLimit;
-	uint32		branchRank;
-	double		branchScore;
-	uint32		sourceFlags;
-	uint32		candidateCount;
-	bool		truncated;
-	uint64		latencyUs;
-}			PgturbohybridBranchPlanItem;
-
-typedef struct PgturbohybridBranchPlan
-{
-	int			mode;
-	uint32		count;
-	char		fusionMode[32];
-	PgturbohybridBranchPlanItem items[PGTURBOHYBRID_BRANCH_PLAN_MAX_BRANCHES];
-}			PgturbohybridBranchPlan;
-
-typedef struct PgturbohybridScanStatsSnapshot
-{
-	char		indexShape[16];
-	PgturbohybridBm25SnapshotStats bm25;
-	PgturbohybridDenseSnapshotStats dense;
-	PgturbohybridMultivectorStats multivector;
-	PgturbohybridSparseSnapshotStats sparse;
-	PgturbohybridBranchPlan branchPlan;
-	PgturbohybridFastWeightedStats fastWeighted;
-	PgturbohybridCalibratedFusionStats calibratedFusion;
-	PgturbohybridDbsfStats dbsf;
-	PgturbohybridHybridBudgetStats hybrid;
-	PgturbohybridFusionSnapshotStats fusionStats;
-	PgturbohybridLearnedProjectionStats learnedProjection;
-	uint64		compactMaxsimScoreUs;
-	uint64		compactMaxsimPairs;
-	uint64		compactMaxsimCacheHits;
-	uint64		compactMaxsimCacheMisses;
-	uint64		compactMaxsimBoundChecks;
-	uint64		compactMaxsimDocsPruned;
-	uint64		compactMaxsimTokensSkipped;
-	PgturbohybridProxyStats proxy;
-	PgturbohybridCentroidStats centroid;
-	bool		fullMultivectorSidecarAvailable;
-	PgturbohybridQuantizedInvertedStats quantizedInverted;
-	PgturbohybridSidecarStats sidecar;
-	PgturbohybridLearnedSparseStats learnedSparse;
-	uint32		exactRerankCandidates;
-	uint64		exactRerankTokensEvaluated;
-	uint64		exactRerankTokensSkipped;
-	uint64		exactRerankPairsSaved;
-	bool		adaptiveRerankTopKChangedVsFull;
-	PgturbohybridFinalDiversitySnapshotStats finalDiversity;
-	uint64		elapsedUs;
-}			PgturbohybridScanStatsSnapshot;
-
 extern bool pgturbohybrid_enable_wand;
-extern bool pgturbohybrid_enable_sparse_wand;
-extern int	pgturbohybrid_sparse_hot_postings_cache_mb;
-extern int	pgturbohybrid_sparse_hot_postings_cache_min_df;
-extern int	pgturbohybrid_sparse_delta_compaction_threshold;
 extern int	pgturbohybrid_max_union_candidates;
 extern int	pgturbohybrid_default_dense_k;
 extern int	pgturbohybrid_default_bm25_k;
-extern int	pgturbohybrid_default_sparse_k;
 extern int	pgturbohybrid_default_rrf_k;
 extern uint64 pgturbohybrid_guc_generation;
-extern int	pgturbohybrid_last_final_k_requested;
-extern int	pgturbohybrid_last_final_k_effective;
-extern int	pgturbohybrid_last_sql_limit;
-extern bool pgturbohybrid_last_final_k_inferred;
 extern bool pgturbohybrid_simd;
 extern int	pgturbohybrid_force_fusion;
 extern int	pgturbohybrid_fusion_hash_threshold;
@@ -235,8 +148,6 @@ extern int	pgturbohybrid_bm25_hybrid_bound;
 extern int	pgturbohybrid_bm25_heap_tsvector_rerank;
 extern int	pgturbohybrid_bm25_heap_tsvector_rerank_multiplier;
 extern double pgturbohybrid_bm25_heap_tsvector_rerank_weight;
-extern int	pgturbohybrid_sparse_rerank;
-extern int	pgturbohybrid_sparse_rerank_k;
 extern bool pgturbohybrid_auto_budget;
 extern int	pgturbohybrid_auto_budget_min_dense_k;
 extern int	pgturbohybrid_auto_budget_min_bm25_k;
@@ -292,7 +203,6 @@ extern int	pgturbohybrid_multivector_candidate_reservoirs;
 extern int	pgturbohybrid_multivector_per_token_doc_reservoir_k;
 extern int	pgturbohybrid_multivector_coverage_reservoir_k;
 extern int	pgturbohybrid_multivector_bm25_candidate_injection;
-extern int	pgturbohybrid_multivector_sparse_candidate_source;
 extern int	pgturbohybrid_multivector_branch_plan;
 extern int	pgturbohybrid_multivector_centroid_lite_max_postings_per_token;
 extern int	pgturbohybrid_multivector_centroid_lite_probe_centroids_per_token;
@@ -470,13 +380,6 @@ typedef enum PgturbohybridMultiVectorBm25CandidateInjectionMode
 	PGTURBOHYBRID_MULTIVECTOR_BM25_CANDIDATE_INJECTION_DENSE_WITH_TEXT
 }			PgturbohybridMultiVectorBm25CandidateInjectionMode;
 
-typedef enum PgturbohybridMultiVectorSparseCandidateSource
-{
-	PGTURBOHYBRID_MULTIVECTOR_SPARSE_CANDIDATE_SOURCE_OFF,
-	PGTURBOHYBRID_MULTIVECTOR_SPARSE_CANDIDATE_SOURCE_BM25,
-	PGTURBOHYBRID_MULTIVECTOR_SPARSE_CANDIDATE_SOURCE_LEARNED_SPARSE
-}			PgturbohybridMultiVectorSparseCandidateSource;
-
 typedef enum PgturbohybridProfile
 {
 	PGTURBOHYBRID_PROFILE_LATENCY,
@@ -548,7 +451,6 @@ void		PgturbohybridAmExecutorEnd(QueryDesc *queryDesc);
 void		PgturbohybridAmExecutorAbort(void);
 PlannedStmt *PgturbohybridCurrentPlannedStmt(void);
 int			PgturbohybridCurrentLimit(void);
-void		PgturbohybridGetLastScanStatsSnapshot(PgturbohybridScanStatsSnapshot *stats);
 bool		PgturbohybridIndexHasLexical(Relation index);
 bool		PgturbohybridIndexGetLexicalDatum(Relation index, Datum *values,
 										bool *isnull, Datum *lexicalValue);

@@ -852,9 +852,7 @@ typedef struct PgturbohybridGraphNativeCache
 	/*
 	 * Diagnostics captured when this per-backend cache was built: how long the
 	 * one-time build took, and the resident footprint (code / adjacency / exact
-	 * arenas plus node + metadata) that this backend now holds.  Surfaced via
-	 * turbohybrid_last_scan_stats() so concurrent-client scaling can be reasoned
-	 * about (each backend duplicates residentTotalBytes).
+	 * arenas plus node + metadata) that this backend now holds.
 	 */
 	int64		buildUs;
 	Size		residentCodeBytes;

@@ -19,7 +19,6 @@ CREATE EXTENSION pgturbohybrid;
 
 CREATE EXTENSION vector;
 CREATE EXTENSION pgturbohybrid;
-CREATE EXTENSION pgturbohybrid_experimental;
 
 SELECT extname
 FROM pg_extension
@@ -30,7 +29,6 @@ SELECT extversion
 FROM pg_extension
 WHERE extname = 'pgturbohybrid';
 
-DROP EXTENSION pgturbohybrid_experimental;
 DROP EXTENSION pgturbohybrid;
 
 SELECT extname

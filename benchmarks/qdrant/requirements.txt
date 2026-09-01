@@ -1,5 +1,0 @@
-huggingface-hub>=0.30
-numpy>=1.26
-psycopg[binary]>=3.2
-pyarrow>=16
-qdrant-client>=1.14

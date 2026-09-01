@@ -7349,27 +7349,17 @@ tqgraphbuild(Relation heap, Relation index, IndexInfo *indexInfo)
 	IndexBuildResult *result;
 	instr_time	totalStart;
 	instr_time	phaseStart;
-	instr_time	mergeStart;
 	int64		fitCorrectionScanUs = 0;
 	int64		scanUs = 0;
 	int64		fitCorrectionUs = 0;
 	int64		encodeUs = 0;
 	int64		edgesUs = 0;
-	int64		freeExactVectorsUs = 0;
-	int64		reorderNodesUs = 0;
-	int64		connectBackboneUs = 0;
-	int64		entrySidecarUs = 0;
 	int64		writeUs = 0;
 	int64		walUs = 0;
 	int64		totalUs;
-	int64		workerMergeUs = 0;
 	int			workerCount = 0;
 	int			workerRequest = 0;
-	bool		parallelFitEnabled = false;
-	bool		parallelScanEnabled = false;
-	bool		parallelEncodeEnabled = false;
 	bool		parallelEdgeBuildEnabled = false;
-	uint16		parallelEdgeSegments = 0;
 	uint32		parallelEdgeWorkersLaunched = 0;
 	uint64		parallelEdgeRepairUs = 0;
 	uint32		workerScanUsCount = 0;
@@ -7482,7 +7472,6 @@ tqgraphbuild(Relation heap, Relation index, IndexInfo *indexInfo)
 				PgturbohybridNativeParallelCombineFit(&state, fitShared);
 				state.reltuples = fitShared->reltuples;
 				fitCorrectionScanUs = fitUs;
-				parallelFitEnabled = true;
 				PgturbohybridNativeFinishParallelPhase(fitPcxt, fitSnapshot);
 				PgturbohybridGraphDebugBuildPhaseDone(&state,
 													  "parallel_fit_count_scan",
@@ -7515,17 +7504,8 @@ tqgraphbuild(Relation heap, Relation index, IndexInfo *indexInfo)
 					for (int slot = 0; slot < encodeShared->participantCapacity; slot++)
 						encodeUs += (int64) encodeUsBySlot[slot];
 					state.reltuples = encodeShared->reltuples;
-					PgturbohybridGraphDebugBuildPhaseStart(&state,
-														  "parallel_worker_merge");
-					INSTR_TIME_SET_CURRENT(mergeStart);
 					PgturbohybridNativeParallelMergeRecords(&state, encodeShared);
-					workerMergeUs = PgturbohybridGraphElapsedUs(mergeStart);
-					PgturbohybridGraphDebugBuildPhaseDone(&state,
-														  "parallel_worker_merge",
-														  mergeStart);
 					workerCount = Max(encodeShared->nparticipants - 1, 0);
-					parallelScanEnabled = true;
-					parallelEncodeEnabled = true;
 					workerScanUsCount = Min(encodeShared->nparticipants,
 											PGTURBOHYBRID_NATIVE_BUILD_STATS_MAX_WORKERS);
 					memcpy(workerScanUs,
@@ -7656,7 +7636,6 @@ tqgraphbuild(Relation heap, Relation index, IndexInfo *indexInfo)
 				Max(state.buildEdgeMaxFrontierSize,
 					edgeShared->edgeMaxFrontierSize);
 			parallelEdgeBuildEnabled = true;
-			parallelEdgeSegments = edgeShared->edgeSegmentCount;
 			parallelEdgeWorkersLaunched = Max(edgeShared->nparticipants - 1, 0);
 			workerCount = Max(workerCount, (int) parallelEdgeWorkersLaunched);
 			state.parallelEdgeBuildDisabledReason =
@@ -7684,13 +7663,11 @@ tqgraphbuild(Relation heap, Relation index, IndexInfo *indexInfo)
 	PgturbohybridGraphDebugBuildPhaseStart(&state, "free_exact_build_vectors");
 	INSTR_TIME_SET_CURRENT(phaseStart);
 	PgturbohybridGraphFreeExactBuildVectors(&state);
-	freeExactVectorsUs = PgturbohybridGraphElapsedUs(phaseStart);
 	PgturbohybridGraphDebugBuildPhaseDone(&state, "free_exact_build_vectors", phaseStart);
 
 	PgturbohybridGraphDebugBuildPhaseStart(&state, "reorder_nodes");
 	INSTR_TIME_SET_CURRENT(phaseStart);
 	PgturbohybridGraphReorderBuildNodesForLocality(&state);
-	reorderNodesUs = PgturbohybridGraphElapsedUs(phaseStart);
 	PgturbohybridGraphDebugBuildPhaseDone(&state, "reorder_nodes", phaseStart);
 
 	if (state.graphBackbone && state.segmentCount <= 1)
@@ -7698,7 +7675,6 @@ tqgraphbuild(Relation heap, Relation index, IndexInfo *indexInfo)
 		PgturbohybridGraphDebugBuildPhaseStart(&state, "connect_backbone");
 		INSTR_TIME_SET_CURRENT(phaseStart);
 		PgturbohybridGraphEnsureLevel0Backbone(&state);
-		connectBackboneUs = PgturbohybridGraphElapsedUs(phaseStart);
 		PgturbohybridGraphDebugBuildPhaseDone(&state, "connect_backbone", phaseStart);
 	}
 
@@ -7706,7 +7682,6 @@ tqgraphbuild(Relation heap, Relation index, IndexInfo *indexInfo)
 	INSTR_TIME_SET_CURRENT(phaseStart);
 	PgturbohybridGraphBuildRoutingEntries(&state);
 	PgturbohybridGraphBuildEntrySidecar(&state);
-	entrySidecarUs = PgturbohybridGraphElapsedUs(phaseStart);
 	PgturbohybridGraphDebugBuildPhaseDone(&state, "entry_sidecar", phaseStart);
 
 	state.buildScanUs = scanUs;
@@ -7756,176 +7731,6 @@ tqgraphbuild(Relation heap, Relation index, IndexInfo *indexInfo)
 		 (unsigned long long) state.buildDistanceExact,
 		 (unsigned long long) state.buildDistanceFallback);
 
-	{
-		PgturbohybridNativeBuildStatsSnapshot buildStats;
-
-		memset(&buildStats, 0, sizeof(buildStats));
-		buildStats.relid = RelationGetRelid(index);
-		strlcpy(buildStats.relationName, RelationGetRelationName(index),
-				sizeof(buildStats.relationName));
-		strlcpy(buildStats.indexShape,
-				PgturbohybridIndexHasLexical(index) ? "hybrid" : "dense_only",
-				sizeof(buildStats.indexShape));
-		buildStats.nodeCount = state.nodeCount;
-		buildStats.dimensions = state.dimensions;
-		buildStats.quantizationBits = state.tqBits;
-		buildStats.m = state.m;
-		buildStats.efConstruction = state.efConstruction;
-		buildStats.exactStorage = state.tqExactStorage;
-		buildStats.buildCodeOnly = state.buildCodeOnly;
-		buildStats.buildFastEdges = state.buildFastEdges;
-		buildStats.buildDistanceMode = state.buildDistanceMode;
-		buildStats.buildNeighborSelectReason = state.buildNeighborSelectReason;
-		buildStats.buildDistanceCalls = state.buildDistanceCalls;
-		buildStats.buildDistanceQuerySplit = state.buildDistanceQuerySplit;
-		buildStats.buildDistancePacked = state.buildDistancePacked;
-		buildStats.buildDistanceWeighted = state.buildDistanceWeighted;
-		buildStats.buildDistanceCodeCode = state.buildDistanceCodeCode;
-		buildStats.buildDistanceExact = state.buildDistanceExact;
-		buildStats.buildDistanceFallback = state.buildDistanceFallback;
-		buildStats.multivectorDocExactBuildDistanceCalls =
-			state.multivectorDocExactBuildDistanceCalls;
-		buildStats.multivectorDocExactBuildDistanceUs =
-			state.multivectorDocExactBuildDistanceUs;
-		buildStats.multivectorGraphNodeAssignmentUs =
-			state.buildGraphNodeAssignmentUs;
-		buildStats.multivectorGraphEntrySearchUs =
-			state.buildEdgeEntrySearchUs;
-		buildStats.multivectorGraphNeighborSearchUs =
-			state.buildEdgeNeighborSearchUs;
-		buildStats.multivectorGraphNeighborSelectUs =
-			state.buildEdgeSelectNeighborUs;
-		buildStats.multivectorGraphLinkInsertUs =
-			state.buildEdgeAddNeighborUs;
-		buildStats.multivectorGraphReciprocalPruneUs =
-			state.buildEdgePruneNeighborUs;
-		buildStats.multivectorGraphSegmentWriteUs = writeUs;
-		buildStats.multivectorGraphWalUs = walUs;
-		buildStats.multivectorGraphBuildDistanceProxyCalls =
-			state.buildDistanceQuerySplit + state.buildDistancePacked +
-			state.buildDistanceWeighted + state.buildDistanceCodeCode;
-		buildStats.multivectorGraphBuildDistanceExactCalls =
-			state.buildDistanceExact + state.multivectorDocExactBuildDistanceCalls;
-		buildStats.multivectorGraphBuildDistanceCacheHits =
-			state.buildDistanceCacheHits;
-		buildStats.multivectorGraphBuildDistanceCacheMisses =
-			state.buildDistanceCacheMisses;
-		buildStats.multivectorCentroidBuildUs =
-			state.multivectorCentroidBuildUs;
-		buildStats.multivectorCentroidClusterUs =
-			state.multivectorCentroidClusterUs;
-		buildStats.multivectorCentroidResidualUs =
-			state.multivectorCentroidResidualUs;
-		buildStats.multivectorCentroidBuildDocs =
-			state.multivectorCentroidBuildDocs;
-		buildStats.multivectorCentroidBuildVectors =
-			state.multivectorCentroidBuildVectors;
-		buildStats.multivectorProxyBuildUs = state.multivectorProxyBuildUs;
-		buildStats.learnedProjectionDocEncodeBuildUs =
-			state.learnedProjectionDocEncodeBuildUs;
-		buildStats.multivectorDocSidecarWriteUs =
-			state.multivectorDocSidecarWriteUs;
-		buildStats.multivectorCentroidSidecarWriteUs =
-			state.multivectorCentroidSidecarWriteUs;
-		buildStats.multivectorCentroidPostingWriteUs =
-			state.multivectorCentroidPostingWriteUs;
-		buildStats.multivectorCentroidPostingCount =
-			state.multivectorCentroidPostingCount;
-		PgturbohybridGraphRefreshBuildMemoryEstimates(&state);
-		buildStats.multivectorDocVectorsPointerBytes =
-			state.multivectorDocVectorsPointerBytes;
-		buildStats.multivectorDocVectorChunkRefBytes =
-			state.multivectorDocVectorChunkRefBytes;
-		buildStats.multivectorDocMapBytesEstimate =
-			state.multivectorDocMapBytesEstimate;
-		buildStats.multivectorCentroidVectorBytes =
-			state.multivectorCentroidVectorBytes;
-		buildStats.multivectorCentroidResidualBytes =
-			state.multivectorCentroidResidualBytes;
-		buildStats.multivectorCentroidPostingBytes =
-			state.multivectorCentroidPostingBytes;
-		buildStats.graphNodeBytesEstimate = state.graphNodeBytesEstimate;
-		buildStats.graphNeighborBytesEstimate =
-			state.graphNeighborBytesEstimate;
-		buildStats.buildPeakMemoryContextBytes =
-			state.buildPeakMemoryContextBytes;
-		strlcpy(buildStats.buildPeakMemoryPhase,
-				state.buildPeakMemoryPhase[0] != '\0' ?
-				state.buildPeakMemoryPhase : "unavailable",
-				sizeof(buildStats.buildPeakMemoryPhase));
-		buildStats.buildMemoryHeapScanDecodeBytes =
-			state.buildMemoryHeapScanDecodeBytes;
-		buildStats.buildMemoryTokenPoolingBytes =
-			state.buildMemoryTokenPoolingBytes;
-		buildStats.buildMemoryProxyEncodingBytes =
-			state.buildMemoryProxyEncodingBytes;
-		buildStats.buildMemoryCentroidClusteringBytes =
-			state.buildMemoryCentroidClusteringBytes;
-		buildStats.buildMemoryCentroidResidualBytes =
-			state.buildMemoryCentroidResidualBytes;
-		buildStats.buildMemorySidecarTupleBytes =
-			state.buildMemorySidecarTupleBytes;
-		buildStats.buildMemoryPostingTupleBytes =
-			state.buildMemoryPostingTupleBytes;
-		buildStats.buildMemoryGraphEdgeBytes =
-			state.buildMemoryGraphEdgeBytes;
-		buildStats.buildMemoryPageWalBytes =
-			state.buildMemoryPageWalBytes;
-		buildStats.buildDistanceCacheHits = state.buildDistanceCacheHits;
-		buildStats.buildDistanceCacheMisses = state.buildDistanceCacheMisses;
-		buildStats.buildDistanceCacheStores = state.buildDistanceCacheStores;
-		buildStats.buildDistanceCacheCollisions =
-			state.buildDistanceCacheCollisions;
-		buildStats.buildEdgeDistanceCalls = state.buildEdgeDistanceCalls;
-		buildStats.buildEdgeSearchLayerUs =
-			state.buildEdgeEntrySearchUs + state.buildEdgeNeighborSearchUs;
-		buildStats.buildEdgeSelectNeighborUs = state.buildEdgeSelectNeighborUs;
-		buildStats.buildEdgeAddNeighborUs = state.buildEdgeAddNeighborUs;
-		buildStats.buildEdgePruneNeighborUs = state.buildEdgePruneNeighborUs;
-		buildStats.buildEdgeEntryUpdateUs = state.buildEdgeEntryUpdateUs;
-		buildStats.buildEdgeNearestTotal = state.buildEdgeNearestTotal;
-		buildStats.buildEdgeNearestSamples = state.buildEdgeNearestSamples;
-		buildStats.buildEdgeMaxFrontierSize = state.buildEdgeMaxFrontierSize;
-		buildStats.fitCorrectionScanUs = fitCorrectionScanUs;
-		buildStats.scanUs = scanUs;
-		buildStats.fitCorrectionUs = fitCorrectionUs;
-		buildStats.encodeUs = encodeUs;
-		buildStats.buildEdgesUs = edgesUs;
-		buildStats.freeExactVectorsUs = freeExactVectorsUs;
-		buildStats.reorderNodesUs = reorderNodesUs;
-		buildStats.connectBackboneUs = connectBackboneUs;
-		buildStats.entrySidecarUs = entrySidecarUs;
-		buildStats.writePagesUs = writeUs;
-		buildStats.walUs = walUs;
-		buildStats.totalUs = totalUs;
-		buildStats.workerCount = workerCount;
-		buildStats.nativeSegmentCount = state.segmentCount > 0 ? state.segmentCount : 1;
-		buildStats.nativeSegmentBytes =
-			buildStats.nativeSegmentCount * sizeof(PgturbohybridGraphSegmentMetaData);
-		buildStats.parallelSegmentBuildEnabled = false;
-		strlcpy(buildStats.segmentBuildMode,
-				parallelEdgeBuildEnabled ?
-				"parallel_batch" :
-				(buildStats.nativeSegmentCount > 1 ? "serial" : "single"),
-				sizeof(buildStats.segmentBuildMode));
-		buildStats.nativeBuildWorkersRequested = workerRequest;
-		buildStats.nativeBuildWorkersLaunched = workerCount;
-		buildStats.parallelFitEnabled = parallelFitEnabled;
-		buildStats.parallelScanEnabled = parallelScanEnabled;
-		buildStats.parallelEncodeEnabled = parallelEncodeEnabled;
-		buildStats.parallelSegmentBuildEnabled = parallelEdgeBuildEnabled;
-		buildStats.parallelEdgeBuildEnabled = parallelEdgeBuildEnabled;
-		buildStats.parallelEdgeBuildDisabledReason =
-			state.parallelEdgeBuildDisabledReason;
-		buildStats.parallelEdgeSegments = parallelEdgeSegments;
-		buildStats.parallelEdgeWorkersLaunched = parallelEdgeWorkersLaunched;
-		buildStats.parallelEdgeRepairUs = parallelEdgeRepairUs;
-		buildStats.workerMergeUs = workerMergeUs;
-		buildStats.workerScanUsCount = workerScanUsCount;
-		memcpy(buildStats.workerScanUs, workerScanUs,
-			   sizeof(uint64) * workerScanUsCount);
-		PgturbohybridGraphRecordNativeBuildStats(&buildStats);
-	}
 
 	result = palloc0(sizeof(IndexBuildResult));
 	result->heap_tuples = state.reltuples;
@@ -8025,13 +7830,6 @@ PgturbohybridGraphResetScan(PgturbohybridGraphScanOpaque so)
 	so->returnedRows = 0;
 	so->graphVisitedNodes = 0;
 	so->graphScoredCodes = 0;
-	so->graphBatchScoredCodes = 0;
-	so->graphScalarScoredCodes = 0;
-	so->graphBatchKernel = PGTURBOHYBRID_SCORING_SCALAR;
-	memset(so->graphScoreKernelNodes, 0, sizeof(so->graphScoreKernelNodes));
-	memset(so->graphScoreKernelCalls, 0, sizeof(so->graphScoreKernelCalls));
-	so->graphBatchCalls = 0;
-	so->graphBatchNodes = 0;
 	so->graphBaseFrontierPushes = 0;
 	so->graphBaseFrontierPops = 0;
 	so->graphBaseNearestOffers = 0;
@@ -8040,12 +7838,6 @@ PgturbohybridGraphResetScan(PgturbohybridGraphScanOpaque so)
 	so->graphBaseBatchCalls = 0;
 	so->graphBaseBatchNodes = 0;
 	so->graphBaseMaxFrontier = 0;
-	so->graphCodePageAttempts = 0;
-	so->graphCodePageHits = 0;
-	so->graphCodePageMisses = 0;
-	so->graphCodeTuplesCopied = 0;
-	so->graphCodeArenaAllocatedBytes = 0;
-	so->graphCodeArenaUsedBytes = 0;
 	so->graphCandidateCount = 0;
 	so->graphRescoreCount = 0;
 	so->graphRescorePages = 0;
@@ -10919,7 +10711,6 @@ PgturbohybridGraphCollectResults(IndexScanDesc scan, PgturbohybridGraphScanOpaqu
 			so->tqGraphResultCount = count;
 			so->tqGraphResultIndex = 0;
 			PgturbohybridGraphAddElapsedUs(&so->graphTotalUs, totalStart);
-			PgturbohybridGraphRecordGraphScanStats(so);
 			return;
 		}
 		payloadExactBandMissed = true;
@@ -11108,7 +10899,6 @@ PgturbohybridGraphCollectResults(IndexScanDesc scan, PgturbohybridGraphScanOpaqu
 		so->tqGraphResultCount = count;
 		so->tqGraphResultIndex = 0;
 		PgturbohybridGraphAddElapsedUs(&so->graphTotalUs, totalStart);
-		PgturbohybridGraphRecordGraphScanStats(so);
 		return;
 	}
 	(void) PgturbohybridGraphApplyUncertaintyRetry(scan, so, &meta, &storage,
@@ -11138,7 +10928,6 @@ PgturbohybridGraphCollectResults(IndexScanDesc scan, PgturbohybridGraphScanOpaqu
 	so->tqGraphResultCount = finalCount;
 	so->tqGraphResultIndex = 0;
 	PgturbohybridGraphAddElapsedUs(&so->graphTotalUs, totalStart);
-	PgturbohybridGraphRecordGraphScanStats(so);
 }
 
 int
@@ -11308,9 +11097,6 @@ void
 tqgraphendscan(IndexScanDesc scan)
 {
 	PgturbohybridGraphScanOpaque so = (PgturbohybridGraphScanOpaque) scan->opaque;
-
-	if (so->pgturbohybridGraphScan)
-		PgturbohybridGraphRecordReturnedRows(so->returnedRows);
 
 	MemoryContextDelete(so->tmpCtx);
 	pfree(so);

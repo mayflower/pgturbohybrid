@@ -1097,7 +1097,6 @@ PgturbohybridGraphBuildCodeCodeWeighted(PgturbohybridQuantBuildState *state, uin
 				rawI64 = PgturbohybridGraphCodeCode2WeightedRawAvx512(aNode->code, bNode->code,
 														   state->dPrimeSqI16,
 														   state->dimensions);
-			PgturbohybridGraphRecordWeightedCodeCodeKernel(PGTURBOHYBRID_SCORING_AVX512BW_DQ);
 			simdRan = true;
 		}
 #endif
@@ -1112,7 +1111,6 @@ PgturbohybridGraphBuildCodeCodeWeighted(PgturbohybridQuantBuildState *state, uin
 				rawI64 = PgturbohybridGraphCodeCode2WeightedRawNeonSdot(aNode->code, bNode->code,
 															  state->dPrimeSqI16,
 															  state->dimensions);
-			PgturbohybridGraphRecordWeightedCodeCodeKernel(PGTURBOHYBRID_SCORING_NEON);
 			simdRan = true;
 		}
 #endif
@@ -1127,7 +1125,6 @@ PgturbohybridGraphBuildCodeCodeWeighted(PgturbohybridQuantBuildState *state, uin
 				rawI64 = PgturbohybridGraphCodeCode2WeightedRawAvx2(aNode->code, bNode->code,
 														  state->dPrimeSqI16,
 														  state->dimensions);
-			PgturbohybridGraphRecordWeightedCodeCodeKernel(PGTURBOHYBRID_SCORING_AVX2);
 			simdRan = true;
 		}
 #endif
@@ -1136,7 +1133,6 @@ PgturbohybridGraphBuildCodeCodeWeighted(PgturbohybridQuantBuildState *state, uin
 			raw = (double) rawI64 / ((double) state->weightScale * codebookScaleSq);
 		else
 		{
-			PgturbohybridGraphRecordWeightedCodeCodeKernel(PGTURBOHYBRID_SCORING_SCALAR);
 			raw = PgturbohybridGraphCodeCodeWeightedRawScalar(aNode->code, bNode->code,
 												   state->dimensions, state->tqBits,
 												   state->ecScale);
@@ -1144,7 +1140,6 @@ PgturbohybridGraphBuildCodeCodeWeighted(PgturbohybridQuantBuildState *state, uin
 	}
 	else
 	{
-		PgturbohybridGraphRecordWeightedCodeCodeKernel(PGTURBOHYBRID_SCORING_SCALAR);
 		raw = PgturbohybridGraphCodeCodeWeightedRawScalar(aNode->code, bNode->code,
 											   state->dimensions, state->tqBits,
 											   state->ecScale);
@@ -1300,9 +1295,6 @@ PgturbohybridGraphExactVectorDistance(PgturbohybridGraphScanOpaque so, Datum que
 			ereport(ERROR,
 					(errcode(ERRCODE_INTERNAL_ERROR),
 					 errmsg("pgturbohybrid exact distance support function is missing")));
-		PgturbohybridGraphRecordExactVectorKernel(pgturbohybrid_dense_exact_simd_force == PGTURBOHYBRID_EXACT_SIMD_FORCE_SCALAR ?
-									PGTURBOHYBRID_EXACT_KERNEL_SCALAR :
-									PGTURBOHYBRID_EXACT_KERNEL_AUTOVEC_FMA);
 		return PgturbohybridGraphExactDistance(&so->support, query, PointerGetDatum(valuePtr));
 	}
 
@@ -1312,7 +1304,6 @@ PgturbohybridGraphExactVectorDistance(PgturbohybridGraphScanOpaque so, Datum que
 		PgturbohybridGraphAvx2Available() &&
 		PgturbohybridGraphExactVectorDistanceAvx2(so, queryVector, valueVector, &distance))
 	{
-		PgturbohybridGraphRecordExactVectorKernel(PGTURBOHYBRID_EXACT_KERNEL_AVX2);
 		return distance;
 	}
 #endif
@@ -1367,7 +1358,6 @@ PgturbohybridGraphExactVectorDistance(PgturbohybridGraphScanOpaque so, Datum que
 			distance += diff * diff;
 		}
 
-		PgturbohybridGraphRecordExactVectorKernel(PGTURBOHYBRID_EXACT_KERNEL_NEON);
 		return distance;
 	}
 
@@ -1440,7 +1430,6 @@ PgturbohybridGraphExactVectorDistance(PgturbohybridGraphScanOpaque so, Datum que
 		if (mode == PGTURBOHYBRID_SCORE_IP)
 			return -dot;
 
-		PgturbohybridGraphRecordExactVectorKernel(PGTURBOHYBRID_EXACT_KERNEL_NEON);
 		if (so->tq.queryNorm == 0 || valueNorm == 0)
 			return 1;
 
@@ -1474,28 +1463,22 @@ scalar_exact_distance:
 
 	if (mode == PGTURBOHYBRID_SCORE_L1 || mode == PGTURBOHYBRID_SCORE_L2)
 	{
-		PgturbohybridGraphRecordExactVectorKernel(PGTURBOHYBRID_EXACT_KERNEL_SCALAR);
 		return distance;
 	}
 
 	if (mode == PGTURBOHYBRID_SCORE_IP)
 	{
-		PgturbohybridGraphRecordExactVectorKernel(PGTURBOHYBRID_EXACT_KERNEL_SCALAR);
 		return -dot;
 	}
 
 	if (mode == PGTURBOHYBRID_SCORE_COSINE)
 	{
-		PgturbohybridGraphRecordExactVectorKernel(PGTURBOHYBRID_EXACT_KERNEL_SCALAR);
 		if (so->tq.queryNorm == 0 || valueNorm == 0)
 			return 1;
 
 		return 1 - (dot / sqrt(so->tq.queryNorm * valueNorm));
 	}
 
-	PgturbohybridGraphRecordExactVectorKernel(pgturbohybrid_dense_exact_simd_force == PGTURBOHYBRID_EXACT_SIMD_FORCE_SCALAR ?
-								PGTURBOHYBRID_EXACT_KERNEL_SCALAR :
-								PGTURBOHYBRID_EXACT_KERNEL_AUTOVEC_FMA);
 	return PgturbohybridGraphExactDistance(&so->support, query, PointerGetDatum(valuePtr));
 }
 
@@ -2595,52 +2578,6 @@ PgturbohybridGraphPrepareBuildQuery(PgturbohybridQuantBuildState *state, uint32 
 		state->buildTq.scoreMode == state->scoreMode;
 }
 
-/*
- * Attribute `nodes` scored codes to one scoring-kernel bucket for the current
- * native scan (one call per kernel invocation: 4 for a batch-of-4 kernel, 1
- * for a single-node kernel).  Cheap enough for the hot path; lets
- * turbohybrid_last_scan_stats() report exactly which kernel did the work.
- */
-static inline void
-PgturbohybridGraphRecordScoreKernel(PgturbohybridGraphScanOpaque so, int bucket, int nodes)
-{
-	so->graphScoreKernelCalls[bucket]++;
-	so->graphScoreKernelNodes[bucket] += nodes;
-}
-
-/* Map the selected signed query-split SIMD kernel to its batch bucket. */
-static inline int
-PgturbohybridGraphSignedSplitBatchBucket(int scoringKernel)
-{
-	switch ((TqScoringKernel) scoringKernel)
-	{
-		case PGTURBOHYBRID_SCORING_AVX512VNNI:
-			return PGTURBOHYBRID_SCORE_KERNEL_BATCH_SIGNED_SPLIT_AVX512VNNI;
-		case PGTURBOHYBRID_SCORING_AVXVNNI:
-			return PGTURBOHYBRID_SCORE_KERNEL_BATCH_SIGNED_SPLIT_AVXVNNI;
-		case PGTURBOHYBRID_SCORING_AVX2:
-			return PGTURBOHYBRID_SCORE_KERNEL_BATCH_SIGNED_SPLIT_AVX2;
-		default:
-			/* NEON/i8mm/scalar (non-x86 or forced): not one of the named split
-			 * buckets, so attribute to the catch-all rather than misreport. */
-			return PGTURBOHYBRID_SCORE_KERNEL_BATCH_SCALAR_OR_LUT;
-	}
-}
-
-/* The unsigned-codebook split runs the maddubs (AVX2) or VPDPBUSD
- * (AVX-512-VNNI) kernel; map by the selected SIMD kernel.  Gated to the AVX2
- * compile path -- its only caller is the U8-split batch scorer below, which is
- * AVX2-only -- so non-x86 builds don't carry it as an unused function. */
-#if PGTURBOHYBRID_GRAPH_COMPILE_AVX2
-static inline int
-PgturbohybridGraphU8SplitBatchBucket(int scoringKernel)
-{
-	return (TqScoringKernel) scoringKernel == PGTURBOHYBRID_SCORING_AVX512VNNI
-		? PGTURBOHYBRID_SCORE_KERNEL_BATCH_U8_SPLIT_AVX512VNNI
-		: PGTURBOHYBRID_SCORE_KERNEL_BATCH_U8_SPLIT_AVX2;
-}
-#endif
-
 double
 PgturbohybridGraphScoreNode(PgturbohybridGraphScanOpaque so, PgturbohybridGraphScanNode *node)
 {
@@ -2665,10 +2602,6 @@ PgturbohybridGraphScoreNode(PgturbohybridGraphScanOpaque so, PgturbohybridGraphS
 		double		dimSqrt = sqrt((double) so->tq.dimensions);
 		double		dot;
 
-		so->graphScalarScoredCodes++;
-		/* Single-node 1-bit asym has no dedicated single bucket; it is not a
-		 * split kernel, so it counts under single_scalar_or_lut. */
-		PgturbohybridGraphRecordScoreKernel(so, PGTURBOHYBRID_SCORE_KERNEL_SINGLE_SCALAR_OR_LUT, 1);
 		dot = so->tq.ecCorrection +
 			(double) PgturbohybridGraphAsymBit1Score(&so->tq, node->code);
 
@@ -2705,7 +2638,6 @@ PgturbohybridGraphScoreNode(PgturbohybridGraphScanOpaque so, PgturbohybridGraphS
 			PgturbohybridGraphPackedDistanceU8Split(&so->tq, node->code,
 													node->scale, &querySplitDistance))
 		{
-			PgturbohybridGraphRecordScoreKernel(so, PGTURBOHYBRID_SCORE_KERNEL_SINGLE_U8_SPLIT, 1);
 			return querySplitDistance;
 		}
 #endif
@@ -2714,14 +2646,11 @@ PgturbohybridGraphScoreNode(PgturbohybridGraphScanOpaque so, PgturbohybridGraphS
 			PgturbohybridGraphPackedDistanceQuerySplit2(&so->tq, node->code,
 												node->scale, &querySplitDistance))
 		{
-			PgturbohybridGraphRecordScoreKernel(so, PGTURBOHYBRID_SCORE_KERNEL_SINGLE_SIGNED_SPLIT, 1);
 			return querySplitDistance;
 		}
 	}
 #endif
 
-	so->graphScalarScoredCodes++;
-	PgturbohybridGraphRecordScoreKernel(so, PGTURBOHYBRID_SCORE_KERNEL_SINGLE_SCALAR_OR_LUT, 1);
 	return PgturbohybridGraphPackedDistance(&so->tq, node->code, node->scale,
 								 node->codeNorm, node->norm);
 }
@@ -2800,10 +2729,6 @@ PgturbohybridGraphScoreNodeBatchQuerySplit4(PgturbohybridGraphScanOpaque so,
 	}
 
 	so->graphScoredCodes += 4;
-	so->graphBatchScoredCodes += 4;
-	so->graphBatchKernel = so->tq.scoringKernel;
-	PgturbohybridGraphRecordScoreKernel(so,
-		PgturbohybridGraphSignedSplitBatchBucket(so->tq.scoringKernel), 4);
 	return true;
 }
 
@@ -2879,10 +2804,6 @@ PgturbohybridGraphScoreNodeBatchQuerySplit2(PgturbohybridGraphScanOpaque so,
 	}
 
 	so->graphScoredCodes += 4;
-	so->graphBatchScoredCodes += 4;
-	so->graphBatchKernel = so->tq.scoringKernel;
-	PgturbohybridGraphRecordScoreKernel(so,
-		PgturbohybridGraphSignedSplitBatchBucket(so->tq.scoringKernel), 4);
 	return true;
 }
 
@@ -2939,7 +2860,6 @@ PgturbohybridGraphScoreNodeBatchU8Split(PgturbohybridGraphScanOpaque so,
 		 * scattered codes. */
 		if (!PgturbohybridGraphPackedDistanceU8Splitx4(tq, codes, scales, distances))
 			return false;
-		so->graphU8BatchMode = PGTURBOHYBRID_U8_BATCH_X4;
 	}
 	else
 	{
@@ -2951,14 +2871,9 @@ PgturbohybridGraphScoreNodeBatchU8Split(PgturbohybridGraphScanOpaque so,
 														 &distances[j]))
 				return false;
 		}
-		so->graphU8BatchMode = PGTURBOHYBRID_U8_BATCH_SINGLE;
 	}
 
 	so->graphScoredCodes += 4;
-	so->graphBatchScoredCodes += 4;
-	so->graphBatchKernel = so->tq.scoringKernel;
-	PgturbohybridGraphRecordScoreKernel(so,
-		PgturbohybridGraphU8SplitBatchBucket(so->tq.scoringKernel), 4);
 	return true;
 }
 #endif
@@ -3037,9 +2952,6 @@ PgturbohybridGraphScoreNodeBatchPacked4(PgturbohybridGraphScanOpaque so, Pgturbo
 	}
 
 	so->graphScoredCodes += 4;
-	so->graphBatchScoredCodes += 4;
-	so->graphBatchKernel = PGTURBOHYBRID_SCORING_SCALAR;
-	PgturbohybridGraphRecordScoreKernel(so, PGTURBOHYBRID_SCORE_KERNEL_BATCH_SCALAR_OR_LUT, 4);
 	return true;
 }
 
@@ -3173,9 +3085,6 @@ PgturbohybridGraphScoreNodeBatchPackedLowBits(PgturbohybridGraphScanOpaque so,
 	}
 
 	so->graphScoredCodes += 4;
-	so->graphBatchScoredCodes += 4;
-	so->graphBatchKernel = PGTURBOHYBRID_SCORING_SCALAR;
-	PgturbohybridGraphRecordScoreKernel(so, PGTURBOHYBRID_SCORE_KERNEL_BATCH_SCALAR_OR_LUT, 4);
 	return true;
 }
 
@@ -3249,9 +3158,6 @@ PgturbohybridGraphScoreNodeBatchAsymBit1(PgturbohybridGraphScanOpaque so,
 	}
 
 	so->graphScoredCodes += 4;
-	so->graphBatchScoredCodes += 4;
-	so->graphBatchKernel = so->tq.scoringKernel;
-	PgturbohybridGraphRecordScoreKernel(so, PGTURBOHYBRID_SCORE_KERNEL_BATCH_1BIT_ASYM, 4);
 	return true;
 }
 
@@ -3306,9 +3212,6 @@ PgturbohybridGraphScoreNodeBatchPopcntLowBits(PgturbohybridGraphScanOpaque so,
 	}
 
 	so->graphScoredCodes += 4;
-	so->graphBatchScoredCodes += 4;
-	so->graphBatchKernel = PGTURBOHYBRID_SCORING_SCALAR;
-	PgturbohybridGraphRecordScoreKernel(so, PGTURBOHYBRID_SCORE_KERNEL_BATCH_SCALAR_OR_LUT, 4);
 	return true;
 }
 
@@ -3317,11 +3220,6 @@ PgturbohybridGraphScoreNodeBatch(PgturbohybridGraphScanOpaque so, PgturbohybridG
 					  uint32 *nodeIds, int nodeCount, double *distances,
 					  Datum query)
 {
-	/* Traversal-level batching metric: one call per ScoreNodeBatch invocation,
-	 * nodeCount nodes fed to it (graph_avg_batch_size = nodes / calls). */
-	so->graphBatchCalls++;
-	so->graphBatchNodes += nodeCount;
-
 	if (pgturbohybrid_dense_graph_batch_scoring == PGTURBOHYBRID_GRAPH_BATCH_OFF ||
 		pgturbohybrid_dense_graph_batch_size < 4)
 	{

@@ -11,38 +11,19 @@ USING turbohybrid (embedding vector_l2_turbohybrid_ops)
 WITH (exact_storage = on);
 DO $$
 DECLARE
-  shallow jsonb := turbohybrid_validate_index('validate_dense_idx'::regclass);
-  deep_result jsonb := turbohybrid_validate_index('validate_dense_idx'::regclass, true);
+	shallow jsonb := turbohybrid_validate_index('validate_dense_idx'::regclass);
+	deep_result jsonb := turbohybrid_validate_index('validate_dense_idx'::regclass, true);
 BEGIN
-  IF NOT (shallow->>'ok')::boolean OR shallow->>'scope' <> 'sampled' OR
-     (shallow->>'error_count')::int <> 0 OR
-     shallow->'branches'->'dense'->>'status' <> 'valid' THEN
-    RAISE EXCEPTION 'unexpected shallow validation: %', shallow;
-  END IF;
-  IF NOT (deep_result->>'ok')::boolean OR deep_result->>'scope' <> 'deep' OR
-     (deep_result->>'reachable_live_nodes')::int <> 24 OR
-     (deep_result->>'unreachable_live_nodes')::int <> 0 THEN
-    RAISE EXCEPTION 'unexpected deep validation: %', deep_result;
-  END IF;
-END $$;
-CREATE TABLE validate_sparse (id int, s turbohybrid_sparse_vector, body tsvector);
-INSERT INTO validate_sparse VALUES
-  (1, turbohybrid_sparse_vector_build(ARRAY[1]::int4[], ARRAY[1.0]::float4[]),
-      to_tsvector('simple', 'alpha beta')),
-  (2, turbohybrid_sparse_vector_build(ARRAY[2]::int4[], ARRAY[2.0]::float4[]),
-      to_tsvector('simple', 'beta gamma'));
-CREATE INDEX validate_sparse_idx ON validate_sparse USING turbohybrid
-  (s sparse_ip_turbohybrid_ops, body bm25_tsvector_turbohybrid_ops)
-  WITH (sparse_quant_bits = 0);
-DO $$
-DECLARE
-  result jsonb := turbohybrid_validate_index('validate_sparse_idx'::regclass, true);
-BEGIN
-  IF NOT (result->>'ok')::boolean OR (result->>'live_nodes')::int <> 2 OR
-     result->'branches'->'sparse'->>'status' <> 'valid' OR
-     result->'branches'->'bm25'->>'status' <> 'valid' THEN
-    RAISE EXCEPTION 'unexpected sparse-primary validation: %', result;
-  END IF;
-END $$;
+	IF NOT (shallow->>'ok')::boolean OR shallow->>'scope' <> 'sampled' OR
+	   (shallow->>'error_count')::int <> 0 OR
+	   shallow->'branches'->'dense'->>'status' <> 'valid' THEN
+		RAISE EXCEPTION 'unexpected shallow validation: %', shallow;
+	END IF;
+	IF NOT (deep_result->>'ok')::boolean OR deep_result->>'scope' <> 'deep' OR
+	   (deep_result->>'reachable_live_nodes')::int <> 24 OR
+	   (deep_result->>'unreachable_live_nodes')::int <> 0 THEN
+		RAISE EXCEPTION 'unexpected deep validation: %', deep_result;
+	END IF;
+END
+$$;
 DROP TABLE validate_dense;
-DROP TABLE validate_sparse;

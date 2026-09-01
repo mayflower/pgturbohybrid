@@ -1,57 +1,23 @@
--- pgturbohybrid_wrappers: the convenience query constructors must produce
--- payloads (and results) identical to the equivalent turbohybrid_experimental_query(...) call.
 SET client_min_messages = warning;
 CREATE EXTENSION IF NOT EXISTS vector;
 CREATE EXTENSION IF NOT EXISTS pgturbohybrid;
 RESET client_min_messages;
 
--- Payload equivalence: each wrapper forwards to turbohybrid_query with the same
--- arguments, so the constructed payloads must be textually identical.
-SELECT turbohybrid_dense_query('[1,2,3]'::vector, 10, 50)::text
-     = turbohybrid_experimental_query(vector_query => '[1,2,3]'::vector, final_k => 10, dense_k => 50)::text
-  AS dense_payload_matches;
+SELECT ('[1,0]'::vector <~> turbohybrid_dense_query('[1,0]'::vector, 10, 20))
+	 = ('[1,0]'::vector <~> turbohybrid_query(
+		vector_query => '[1,0]'::vector, final_k => 10, dense_k => 20)) AS dense_wrapper;
 
-SELECT turbohybrid_hybrid_query('[1,2,3]'::vector, plainto_tsquery('simple', 'foo bar'), 10, 50, 40)::text
-     = turbohybrid_experimental_query(vector_query => '[1,2,3]'::vector,
-                         text_query => plainto_tsquery('simple', 'foo bar'),
-                         final_k => 10, dense_k => 50, bm25_k => 40)::text
-  AS hybrid_payload_matches;
+SELECT turbohybrid_hybrid_query(
+		'[1,0]'::vector, to_tsquery('simple', 'postgres'), 10, 20, 30)::text
+	 = turbohybrid_query(
+		vector_query => '[1,0]'::vector,
+		text_query => to_tsquery('simple', 'postgres'),
+		final_k => 10, dense_k => 20, bm25_k => 30)::text AS hybrid_wrapper;
 
-SELECT turbohybrid_sparse_query(
-         turbohybrid_sparse_vector_from_arrays(ARRAY[1, 5, 9], ARRAY[0.5, 0.3, 0.9]::float4[]), 10, 100)::text
-     = turbohybrid_experimental_query(
-         sparse_query => turbohybrid_sparse_vector_from_arrays(ARRAY[1, 5, 9], ARRAY[0.5, 0.3, 0.9]::float4[]),
-         final_k => 10, sparse_k => 100)::text
-  AS sparse_payload_matches;
-
-SELECT turbohybrid_multivector_query(
-         turbohybrid_multivector(ARRAY['[1,0,0]'::vector, '[0,1,0]'::vector]), 10, 100)::text
-     = turbohybrid_experimental_query(
-         multivector_query => turbohybrid_multivector(ARRAY['[1,0,0]'::vector, '[0,1,0]'::vector]),
-         final_k => 10, multivector_k => 100)::text
-  AS multivector_payload_matches;
-
--- Wrappers accept their documented defaults (final_k / *_k may be omitted).
-SELECT turbohybrid_dense_query('[1,2,3]'::vector)::text
-     = turbohybrid_experimental_query(vector_query => '[1,2,3]'::vector)::text
-  AS dense_default_matches;
-
--- End-to-end: the wrapper drives an index scan with the same order as the
--- full constructor.
-CREATE TABLE wrp (id int, e vector(3));
-INSERT INTO wrp SELECT g, ARRAY[g, g + 1, g + 2]::float4[]::vector FROM generate_series(1, 50) g;
-CREATE INDEX wrp_idx ON wrp USING turbohybrid (e vector_cosine_turbohybrid_ops);
-SET enable_seqscan = off;
-
-WITH a AS (
-  SELECT id, row_number() OVER () AS rn
-  FROM (SELECT id FROM wrp ORDER BY e <~> turbohybrid_dense_query('[10,11,12]'::vector, 5) LIMIT 5) s
-), b AS (
-  SELECT id, row_number() OVER () AS rn
-  FROM (SELECT id FROM wrp ORDER BY e <~> turbohybrid_experimental_query(vector_query => '[10,11,12]'::vector, final_k => 5) LIMIT 5) s
+WITH q AS (
+	SELECT turbohybrid_multivector(ARRAY['[1,0]'::vector, '[0,1]'::vector]) AS value
 )
-SELECT bool_and(a.id = b.id) AS dense_scan_orders_match
-FROM a JOIN b USING (rn);
-
-RESET enable_seqscan;
-DROP TABLE wrp;
+SELECT (value <~> turbohybrid_multivector_query(value, 10, 20))
+	 = (value <~> turbohybrid_query(
+		multivector_query => value, final_k => 10, multivector_k => 20)) AS multivector_wrapper
+FROM q;

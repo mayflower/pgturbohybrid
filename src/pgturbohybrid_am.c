@@ -49,14 +49,12 @@
 #include "pgturbohybrid_quant_score.h"
 #include "pgturbohybrid_am.h"
 #include "pgturbohybrid_bm25.h"
-#include "pgturbohybrid_sparse.h"
 #include "pgturbohybrid_guc.h"
 
 #define PGTURBOHYBRID_DEFAULT_BM25_K1 1.2
 #define PGTURBOHYBRID_DEFAULT_BM25_B 0.75
 #define PGTURBOHYBRID_DEFAULT_DENSE_K 100
 #define PGTURBOHYBRID_DEFAULT_BM25_K 100
-#define PGTURBOHYBRID_DEFAULT_SPARSE_K 100
 #define PGTURBOHYBRID_DEFAULT_RRF_K 60
 #define PGTURBOHYBRID_FUSION_GENERATION_ARRAY_MAX_BYTES (16 * 1024 * 1024)
 
@@ -71,28 +69,6 @@ static relopt_enum_elt_def pgturbohybrid_native_segments_relopt_options[] = {
 	{"2", 2},
 	{"4", 4},
 	{"8", 8},
-	{NULL, 0}
-};
-
-/* Sparse-vector postings quantization mode. */
-#define PGTURBOHYBRID_SPARSE_QUANT_MODE_F32 0
-#define PGTURBOHYBRID_SPARSE_QUANT_MODE_PER_TERM_LINEAR 1
-static relopt_enum_elt_def pgturbohybrid_sparse_quant_mode_relopt_options[] = {
-	{"f32", PGTURBOHYBRID_SPARSE_QUANT_MODE_F32},
-	{"per_term_linear", PGTURBOHYBRID_SPARSE_QUANT_MODE_PER_TERM_LINEAR},
-	{NULL, 0}
-};
-
-/* Sparse-vector postings physical encoding (reloption; "auto" resolves at build). */
-#define PGTURBOHYBRID_SPARSE_ENCODING_OPT_AUTO 0
-#define PGTURBOHYBRID_SPARSE_ENCODING_OPT_OFFSET16_SOA 1
-#define PGTURBOHYBRID_SPARSE_ENCODING_OPT_VARINT 2
-#define PGTURBOHYBRID_SPARSE_ENCODING_OPT_BITPACKED 3
-static relopt_enum_elt_def pgturbohybrid_sparse_encoding_relopt_options[] = {
-	{"auto", PGTURBOHYBRID_SPARSE_ENCODING_OPT_AUTO},
-	{"offset16_soa", PGTURBOHYBRID_SPARSE_ENCODING_OPT_OFFSET16_SOA},
-	{"varint", PGTURBOHYBRID_SPARSE_ENCODING_OPT_VARINT},
-	{"bitpacked", PGTURBOHYBRID_SPARSE_ENCODING_OPT_BITPACKED},
 	{NULL, 0}
 };
 
@@ -224,16 +200,13 @@ typedef struct PgturbohybridResult
 	double		multivectorDistance;
 	double		multivectorSimilarity;
 	double		bm25Score;
-	double		sparseSimilarity;
 	double		fusedScore;
 	int32		denseRank;
 	int32		multivectorRank;
 	int32		bm25Rank;
-	int32		sparseRank;
 	bool		hasDense;
 	bool		hasMultivector;
 	bool		hasBm25;
-	bool		hasSparse;
 	bool		exactScored;
 } PgturbohybridResult;
 
@@ -266,499 +239,9 @@ typedef struct PgturbohybridScanState
 	bool		active;
 } PgturbohybridScanState;
 
-typedef struct PgturbohybridLastScanStats
-{
-	char		indexShape[16];
-	PgturbohybridBm25LastScanStats bm25;
-	PgturbohybridDenseLastScanStats dense;
-	PgturbohybridMultivectorStats multivector;
-	PgturbohybridSparseSnapshotStats sparse;
-	PgturbohybridBranchPlan branchPlan;
-	char		profile[16];
-	char		fusion[16];
-	uint32		rrfKRequested;
-	uint32		rrfKEffective;
-	bool		rrfKDefaulted;
-	uint32		finalKRequested;
-	uint32		finalKEffective;
-	uint32		detectedSqlLimit;
-	bool		finalKInferred;
-	uint32		autoBudgetLimit;
-	uint32		unionCandidates;
-	uint32		finalResults;
-	PgturbohybridFusionLastScanStats fusionStats;
-	PgturbohybridLearnedProjectionStats learnedProjection;
-	uint64		compactMaxsimScoreUs;
-	uint64		compactMaxsimPairs;
-	uint64		compactMaxsimCacheHits;
-	uint64		compactMaxsimCacheMisses;
-	uint64		compactMaxsimBoundChecks;
-	uint64		compactMaxsimDocsPruned;
-	uint64		compactMaxsimTokensSkipped;
-	PgturbohybridProxyStats proxy;
-	PgturbohybridCentroidStats centroid;
-		bool		fullMultivectorSidecarAvailable;
-	PgturbohybridQuantizedInvertedStats quantizedInverted;
-	PgturbohybridSidecarStats sidecar;
-	PgturbohybridLearnedSparseStats learnedSparse;
-	uint32		exactRerankCandidates;
-	uint64		exactRerankTokensEvaluated;
-	uint64		exactRerankTokensSkipped;
-	uint64		exactRerankPairsSaved;
-	bool		adaptiveRerankTopKChangedVsFull;
-	PgturbohybridFinalDiversityLastScanStats finalDiversity;
-	uint32		bothMatch;
-	uint64		graphVisitedNodes;
-	uint64		graphScoredCodes;
-	uint64		graphExactRescoreCount;
-	uint64		graphHeapRescoreCount;
-	uint64		graphHeapFetchUs;
-	uint64		graphHeapRescoreUs;
-	bool		graphHeapRescoreAutoEnabled;
-	int			graphHeapRescoreReason;
-	int			graphExactRescoreSource;
-	uint64		graphPrepareUs;
-	uint64		graphTraverseUs;
-	uint64		graphEntryUs;
-	uint64		graphBaseUs;
-	uint64		graphBatchUs;
-	uint64		graphHeapUs;
-	uint64		graphFillUs;
-	uint64		graphFillCandidateBandCalls;
-	int			graphFillCandidateBandReason;
-	uint64		graphFillCandidateBandVisited;
-	uint64		graphFillCandidateBandScored;
-	uint64		graphFillCandidateBandSelectedBefore;
-	uint64		graphFillCandidateBandSelectedAfter;
-	uint64		graphFillCandidateBandTarget;
-	bool		graphFillCandidateBandUsedPayloadRefs;
-	uint64		graphFillCandidateBandPayloadRefCount;
-	uint64		graphRescoreUs;
-	uint64		graphSortUs;
-	PgturbohybridFastWeightedStats fastWeighted;
-	PgturbohybridCalibratedFusionStats calibratedFusion;
-	PgturbohybridDbsfStats dbsf;
-	PgturbohybridHybridBudgetStats hybrid;
-	uint64		elapsedUs;
-} PgturbohybridLastScanStats;
 
-static PgturbohybridLastScanStats pgturbohybrid_last_scan_state;
 static PgturbohybridFusionGenerationArrayCache pgturbohybrid_fusion_generation_array_cache;
 
-void
-PgturbohybridGetLastScanStatsSnapshot(PgturbohybridScanStatsSnapshot *stats)
-{
-	memset(stats, 0, sizeof(*stats));
-	strlcpy(stats->indexShape,
-			pgturbohybrid_last_scan_state.indexShape,
-			sizeof(stats->indexShape));
-	stats->bm25.branchAvailable =
-		pgturbohybrid_last_scan_state.bm25.branchAvailable;
-	stats->dense.branchUsed =
-		pgturbohybrid_last_scan_state.dense.branchUsed;
-	stats->multivector.branchUsed =
-		pgturbohybrid_last_scan_state.multivector.branchUsed;
-	stats->bm25.branchUsed =
-		pgturbohybrid_last_scan_state.bm25.branchUsed;
-	stats->sparse = pgturbohybrid_last_scan_state.sparse;
-	stats->branchPlan = pgturbohybrid_last_scan_state.branchPlan;
-	stats->dense.candidatesEffective =
-		pgturbohybrid_last_scan_state.dense.candidatesEffective;
-	stats->multivector.candidatesEffective =
-		pgturbohybrid_last_scan_state.multivector.candidatesEffective;
-	stats->dense.kDefaulted = pgturbohybrid_last_scan_state.dense.kDefaulted;
-	stats->bm25.candidatesEffective =
-		pgturbohybrid_last_scan_state.bm25.candidatesEffective;
-	stats->bm25.kDefaulted = pgturbohybrid_last_scan_state.bm25.kDefaulted;
-	stats->bm25.cacheHit = pgturbohybrid_last_scan_state.bm25.cacheHit;
-	stats->bm25.cacheBuildUs = pgturbohybrid_last_scan_state.bm25.cacheBuildUs;
-	stats->bm25.docstatsLoadedThisQuery =
-		pgturbohybrid_last_scan_state.bm25.docstatsLoadedThisQuery;
-	stats->bm25.livenessLoadedThisQuery =
-		pgturbohybrid_last_scan_state.bm25.livenessLoadedThisQuery;
-	stats->bm25.docstatsBytes =
-		pgturbohybrid_last_scan_state.bm25.docstatsBytes;
-	stats->bm25.livenessBytes =
-		pgturbohybrid_last_scan_state.bm25.livenessBytes;
-	stats->bm25.coldCacheONWork =
-		pgturbohybrid_last_scan_state.bm25.coldCacheONWork;
-	stats->bm25.postingsDecodeRatio =
-		pgturbohybrid_last_scan_state.bm25.postingsDecodeRatio;
-	stats->bm25.commonTermFallback =
-		pgturbohybrid_last_scan_state.bm25.commonTermFallback;
-	stats->bm25.wandPruned =
-		pgturbohybrid_last_scan_state.bm25.wandPruned;
-	stats->bm25.hotPostingsCacheHits =
-		pgturbohybrid_last_scan_state.bm25.hotPostingsCacheHits;
-	stats->bm25.hotPostingsCacheMisses =
-		pgturbohybrid_last_scan_state.bm25.hotPostingsCacheMisses;
-	stats->bm25.terms = pgturbohybrid_last_scan_state.bm25.terms;
-	stats->bm25.fusedScoreBoundBlocksPruned =
-		pgturbohybrid_last_scan_state.bm25.fusedScoreBoundBlocksPruned;
-	stats->bm25.fusedScoreBoundCandidatesPruned =
-		pgturbohybrid_last_scan_state.bm25.fusedScoreBoundCandidatesPruned;
-	strlcpy(stats->bm25.heapTSVectorRerankMode,
-			PgturbohybridBm25HeapTSVectorRerankModeName(
-				pgturbohybrid_last_scan_state.bm25.heapTSVectorRerankMode),
-			sizeof(stats->bm25.heapTSVectorRerankMode));
-	stats->bm25.heapTSVectorRerankCount =
-		pgturbohybrid_last_scan_state.bm25.heapTSVectorRerankCount;
-	stats->bm25.heapTSVectorRerankFetchUs =
-		pgturbohybrid_last_scan_state.bm25.heapTSVectorRerankFetchUs;
-	stats->bm25.heapTSVectorRerankScoreUs =
-		pgturbohybrid_last_scan_state.bm25.heapTSVectorRerankScoreUs;
-	stats->bm25.heapTSVectorRerankTopKChanged =
-		pgturbohybrid_last_scan_state.bm25.heapTSVectorRerankTopKChanged;
-	stats->fastWeighted = pgturbohybrid_last_scan_state.fastWeighted;
-	stats->calibratedFusion = pgturbohybrid_last_scan_state.calibratedFusion;
-	stats->dbsf.enabled = pgturbohybrid_last_scan_state.dbsf.enabled;
-	memcpy(stats->dbsf.branchMean,
-		   pgturbohybrid_last_scan_state.dbsf.branchMean,
-		   sizeof(stats->dbsf.branchMean));
-	memcpy(stats->dbsf.branchStddev,
-		   pgturbohybrid_last_scan_state.dbsf.branchStddev,
-		   sizeof(stats->dbsf.branchStddev));
-	memcpy(stats->dbsf.branchMin,
-		   pgturbohybrid_last_scan_state.dbsf.branchMin,
-		   sizeof(stats->dbsf.branchMin));
-	memcpy(stats->dbsf.branchMax,
-		   pgturbohybrid_last_scan_state.dbsf.branchMax,
-		   sizeof(stats->dbsf.branchMax));
-	stats->dbsf.degenerateBranches =
-		pgturbohybrid_last_scan_state.dbsf.degenerateBranches;
-	strlcpy(stats->bm25.normMode,
-			pgturbohybrid_last_scan_state.bm25.normMode,
-			sizeof(stats->bm25.normMode));
-	strlcpy(stats->dense.normMode,
-			pgturbohybrid_last_scan_state.dense.normMode,
-			sizeof(stats->dense.normMode));
-	stats->hybrid = pgturbohybrid_last_scan_state.hybrid;
-	strlcpy(stats->fusionStats.strategy,
-			pgturbohybrid_last_scan_state.fusionStats.strategy,
-			sizeof(stats->fusionStats.strategy));
-	stats->fusionStats.candidatesSeen =
-		pgturbohybrid_last_scan_state.fusionStats.candidatesSeen;
-	stats->fusionStats.duplicates =
-		pgturbohybrid_last_scan_state.fusionStats.duplicates;
-	stats->fusionStats.heapReplacements =
-		pgturbohybrid_last_scan_state.fusionStats.heapReplacements;
-	stats->fusionStats.generationArrayReused =
-		pgturbohybrid_last_scan_state.fusionStats.generationArrayReused;
-	stats->fusionStats.generationArrayReset =
-		pgturbohybrid_last_scan_state.fusionStats.generationArrayReset;
-	stats->multivector.enabled =
-		pgturbohybrid_last_scan_state.multivector.enabled;
-	stats->multivector.queryVectors =
-		pgturbohybrid_last_scan_state.multivector.queryVectors;
-	stats->multivector.docVectorsLimit =
-		pgturbohybrid_last_scan_state.multivector.docVectorsLimit;
-	stats->multivector.subvectorSearches =
-		pgturbohybrid_last_scan_state.multivector.subvectorSearches;
-	stats->multivector.rawSubvectorHits =
-		pgturbohybrid_last_scan_state.multivector.rawSubvectorHits;
-	stats->multivector.adaptiveWideningTriggered =
-		pgturbohybrid_last_scan_state.multivector.adaptiveWideningTriggered;
-	stats->multivector.adaptiveInitialRawTarget =
-		pgturbohybrid_last_scan_state.multivector.adaptiveInitialRawTarget;
-	stats->multivector.adaptiveFinalRawTarget =
-		pgturbohybrid_last_scan_state.multivector.adaptiveFinalRawTarget;
-	strlcpy(stats->multivector.docMapSource,
-			pgturbohybrid_last_scan_state.multivector.docMapSource,
-			sizeof(stats->multivector.docMapSource));
-	strlcpy(stats->multivector.candidateSource,
-			pgturbohybrid_last_scan_state.multivector.candidateSource,
-			sizeof(stats->multivector.candidateSource));
-	strlcpy(stats->multivector.candidatePath,
-			pgturbohybrid_last_scan_state.multivector.candidatePath,
-			sizeof(stats->multivector.candidatePath));
-	strlcpy(stats->multivector.proxyEncoderKind,
-			pgturbohybrid_last_scan_state.multivector.proxyEncoderKind,
-			sizeof(stats->multivector.proxyEncoderKind));
-	stats->learnedProjection = pgturbohybrid_last_scan_state.learnedProjection;
-	strlcpy(stats->multivector.graphMode,
-			pgturbohybrid_last_scan_state.multivector.graphMode,
-			sizeof(stats->multivector.graphMode));
-	stats->multivector.proxyGraphSearches =
-		pgturbohybrid_last_scan_state.multivector.proxyGraphSearches;
-	stats->multivector.exactTokenScanEnabled =
-		pgturbohybrid_last_scan_state.multivector.exactTokenScanEnabled;
-	stats->multivector.exactTokenScanNodesScored =
-		pgturbohybrid_last_scan_state.multivector.exactTokenScanNodesScored;
-	stats->multivector.plainFallbackUsed =
-		pgturbohybrid_last_scan_state.multivector.plainFallbackUsed;
-	strlcpy(stats->multivector.plainFallbackReason,
-			pgturbohybrid_last_scan_state.multivector.plainFallbackReason,
-			sizeof(stats->multivector.plainFallbackReason));
-	stats->multivector.plainFallbackDocsScored =
-		pgturbohybrid_last_scan_state.multivector.plainFallbackDocsScored;
-	stats->multivector.plainFallbackPairs =
-		pgturbohybrid_last_scan_state.multivector.plainFallbackPairs;
-	stats->multivector.docGraphPrototypeEnabled =
-		pgturbohybrid_last_scan_state.multivector.docGraphPrototypeEnabled;
-	stats->multivector.docGraphNodes =
-		pgturbohybrid_last_scan_state.multivector.docGraphNodes;
-	stats->multivector.docGraphDocsScored =
-		pgturbohybrid_last_scan_state.multivector.docGraphDocsScored;
-	stats->multivector.docGraphEdgesVisited =
-		pgturbohybrid_last_scan_state.multivector.docGraphEdgesVisited;
-	stats->multivector.docGraphCandidates =
-		pgturbohybrid_last_scan_state.multivector.docGraphCandidates;
-	stats->multivector.docGraphSearchEf =
-		pgturbohybrid_last_scan_state.multivector.docGraphSearchEf;
-	stats->multivector.docGraphOversampling =
-		pgturbohybrid_last_scan_state.multivector.docGraphOversampling;
-	stats->multivector.docGraphRescoreK =
-		pgturbohybrid_last_scan_state.multivector.docGraphRescoreK;
-	stats->multivector.docGraphEntrySampleConfigured =
-		pgturbohybrid_last_scan_state.multivector.docGraphEntrySampleConfigured;
-	stats->multivector.docGraphEntrySampleEffective =
-		pgturbohybrid_last_scan_state.multivector.docGraphEntrySampleEffective;
-	stats->multivector.docGraphEntrySampleScored =
-		pgturbohybrid_last_scan_state.multivector.docGraphEntrySampleScored;
-	stats->multivector.docGraphQuantizedScores =
-		pgturbohybrid_last_scan_state.multivector.docGraphQuantizedScores;
-	stats->compactMaxsimScoreUs =
-		pgturbohybrid_last_scan_state.compactMaxsimScoreUs;
-	stats->compactMaxsimPairs =
-		pgturbohybrid_last_scan_state.compactMaxsimPairs;
-	stats->compactMaxsimCacheHits =
-		pgturbohybrid_last_scan_state.compactMaxsimCacheHits;
-	stats->compactMaxsimCacheMisses =
-		pgturbohybrid_last_scan_state.compactMaxsimCacheMisses;
-	stats->compactMaxsimBoundChecks =
-		pgturbohybrid_last_scan_state.compactMaxsimBoundChecks;
-	stats->compactMaxsimDocsPruned =
-		pgturbohybrid_last_scan_state.compactMaxsimDocsPruned;
-	stats->compactMaxsimTokensSkipped =
-		pgturbohybrid_last_scan_state.compactMaxsimTokensSkipped;
-	strlcpy(stats->multivector.docGraphStorageKind,
-			pgturbohybrid_last_scan_state.multivector.docGraphStorageKind,
-			sizeof(stats->multivector.docGraphStorageKind));
-	stats->proxy = pgturbohybrid_last_scan_state.proxy;
-	stats->centroid = pgturbohybrid_last_scan_state.centroid;
-	stats->fullMultivectorSidecarAvailable =
-		pgturbohybrid_last_scan_state.fullMultivectorSidecarAvailable;
-	stats->quantizedInverted = pgturbohybrid_last_scan_state.quantizedInverted;
-	strlcpy(stats->multivector.docGraphRescoreSource,
-			pgturbohybrid_last_scan_state.multivector.docGraphRescoreSource,
-			sizeof(stats->multivector.docGraphRescoreSource));
-	stats->multivector.docGraphExactRerankDocs =
-		pgturbohybrid_last_scan_state.multivector.docGraphExactRerankDocs;
-	stats->multivector.docGraphHeapFetches =
-		pgturbohybrid_last_scan_state.multivector.docGraphHeapFetches;
-	strlcpy(stats->multivector.docGraphWarning,
-			pgturbohybrid_last_scan_state.multivector.docGraphWarning,
-			sizeof(stats->multivector.docGraphWarning));
-	stats->multivector.proxyCandidateTarget =
-		pgturbohybrid_last_scan_state.multivector.proxyCandidateTarget;
-	stats->multivector.proxyCandidatesReturned =
-		pgturbohybrid_last_scan_state.multivector.proxyCandidatesReturned;
-	stats->multivector.exactRerankKEffective =
-		pgturbohybrid_last_scan_state.multivector.exactRerankKEffective;
-	strlcpy(stats->multivector.docStorageCacheRequested,
-			pgturbohybrid_last_scan_state.multivector.docStorageCacheRequested,
-			sizeof(stats->multivector.docStorageCacheRequested));
-	strlcpy(stats->multivector.docStorageCacheEffective,
-			pgturbohybrid_last_scan_state.multivector.docStorageCacheEffective,
-			sizeof(stats->multivector.docStorageCacheEffective));
-	stats->sidecar = pgturbohybrid_last_scan_state.sidecar;
-	stats->multivector.centroidCount =
-		pgturbohybrid_last_scan_state.multivector.centroidCount;
-	stats->multivector.centroidPrerankDocs =
-		pgturbohybrid_last_scan_state.multivector.centroidPrerankDocs;
-	stats->multivector.fullMaxsimRerankDocs =
-		pgturbohybrid_last_scan_state.multivector.fullMaxsimRerankDocs;
-	strlcpy(stats->multivector.docSidecarCacheMode,
-			pgturbohybrid_last_scan_state.multivector.docSidecarCacheMode,
-			sizeof(stats->multivector.docSidecarCacheMode));
-	stats->multivector.docSidecarPagesRead =
-		pgturbohybrid_last_scan_state.multivector.docSidecarPagesRead;
-	stats->multivector.docSidecarCacheHits =
-		pgturbohybrid_last_scan_state.multivector.docSidecarCacheHits;
-	stats->multivector.docSidecarCacheMisses =
-		pgturbohybrid_last_scan_state.multivector.docSidecarCacheMisses;
-	stats->multivector.docSidecarBytesTouched =
-		pgturbohybrid_last_scan_state.multivector.docSidecarBytesTouched;
-	stats->multivector.docSidecarVectorsLoaded =
-		pgturbohybrid_last_scan_state.multivector.docSidecarVectorsLoaded;
-	stats->multivector.docSidecarDocMapPagesRead =
-		pgturbohybrid_last_scan_state.multivector.docSidecarDocMapPagesRead;
-	stats->multivector.docSidecarDocMapBytesTouched =
-		pgturbohybrid_last_scan_state.multivector.docSidecarDocMapBytesTouched;
-	stats->multivector.docSidecarResidentVectorsLoaded =
-		pgturbohybrid_last_scan_state.multivector.docSidecarResidentVectorsLoaded;
-	stats->multivector.docSidecarResidentBytesLoaded =
-		pgturbohybrid_last_scan_state.multivector.docSidecarResidentBytesLoaded;
-	stats->multivector.docSidecarVectorChunkRefBytesTouched =
-		pgturbohybrid_last_scan_state.multivector.docSidecarVectorChunkRefBytesTouched;
-	stats->multivector.docSidecarPagedVectorPagesRead =
-		pgturbohybrid_last_scan_state.multivector.docSidecarPagedVectorPagesRead;
-	stats->multivector.docSidecarPagedVectorBytesTouched =
-		pgturbohybrid_last_scan_state.multivector.docSidecarPagedVectorBytesTouched;
-	stats->multivector.sidecarPageReadUs =
-		pgturbohybrid_last_scan_state.multivector.sidecarPageReadUs;
-	stats->multivector.sidecarVectorReconstructUs =
-		pgturbohybrid_last_scan_state.multivector.sidecarVectorReconstructUs;
-	stats->multivector.tokensOriginal =
-		pgturbohybrid_last_scan_state.multivector.tokensOriginal;
-	stats->multivector.tokensPooled =
-		pgturbohybrid_last_scan_state.multivector.tokensPooled;
-	stats->multivector.reservoirsEnabled =
-		pgturbohybrid_last_scan_state.multivector.reservoirsEnabled;
-	stats->multivector.reservoirScoreDocs =
-		pgturbohybrid_last_scan_state.multivector.reservoirScoreDocs;
-	stats->multivector.reservoirCoverageDocs =
-		pgturbohybrid_last_scan_state.multivector.reservoirCoverageDocs;
-	stats->multivector.reservoirMeanDocs =
-		pgturbohybrid_last_scan_state.multivector.reservoirMeanDocs;
-	stats->multivector.reservoirPerTokenDocs =
-		pgturbohybrid_last_scan_state.multivector.reservoirPerTokenDocs;
-	stats->multivector.reservoirBm25Docs =
-		pgturbohybrid_last_scan_state.multivector.reservoirBm25Docs;
-	stats->multivector.reservoirUnionDocs =
-		pgturbohybrid_last_scan_state.multivector.reservoirUnionDocs;
-	stats->multivector.reservoirDuplicates =
-		pgturbohybrid_last_scan_state.multivector.reservoirDuplicates;
-	stats->multivector.bm25InjectionEnabled =
-		pgturbohybrid_last_scan_state.multivector.bm25InjectionEnabled;
-	stats->multivector.bm25InjectionCandidates =
-		pgturbohybrid_last_scan_state.multivector.bm25InjectionCandidates;
-	stats->multivector.bm25InjectionCandidateLimit =
-		pgturbohybrid_last_scan_state.multivector.bm25InjectionCandidateLimit;
-	stats->multivector.bm25InjectionPoolSize =
-		pgturbohybrid_last_scan_state.multivector.bm25InjectionPoolSize;
-	strlcpy(stats->multivector.bm25InjectionLimitReason,
-			pgturbohybrid_last_scan_state.multivector.bm25InjectionLimitReason,
-			sizeof(stats->multivector.bm25InjectionLimitReason));
-	stats->multivector.bm25InjectionRetained =
-		pgturbohybrid_last_scan_state.multivector.bm25InjectionRetained;
-	stats->multivector.bm25InjectionExactReranked =
-		pgturbohybrid_last_scan_state.multivector.bm25InjectionExactReranked;
-	stats->learnedSparse = pgturbohybrid_last_scan_state.learnedSparse;
-	stats->multivector.docMapBytes =
-		pgturbohybrid_last_scan_state.multivector.docMapBytes;
-	stats->multivector.uniqueDocs =
-		pgturbohybrid_last_scan_state.multivector.uniqueDocs;
-	stats->multivector.duplicateDocHits =
-		pgturbohybrid_last_scan_state.multivector.duplicateDocHits;
-	stats->multivector.maxsimUpdates =
-		pgturbohybrid_last_scan_state.multivector.maxsimUpdates;
-	stats->multivector.docCandidates =
-		pgturbohybrid_last_scan_state.multivector.docCandidates;
-	stats->multivector.exactRerankEnabled =
-		pgturbohybrid_last_scan_state.multivector.exactRerankEnabled;
-	stats->multivector.exactRerankDocs =
-		pgturbohybrid_last_scan_state.multivector.exactRerankDocs;
-	stats->multivector.exactRerankPairs =
-		pgturbohybrid_last_scan_state.multivector.exactRerankPairs;
-	strlcpy(stats->multivector.exactRerankSource,
-			pgturbohybrid_last_scan_state.multivector.exactRerankSource,
-			sizeof(stats->multivector.exactRerankSource));
-	stats->multivector.exactRerankHeapFetches =
-		pgturbohybrid_last_scan_state.multivector.exactRerankHeapFetches;
-	stats->multivector.exactRerankSidecarReads =
-		pgturbohybrid_last_scan_state.multivector.exactRerankSidecarReads;
-	stats->multivector.exactRerankSidecarBytes =
-		pgturbohybrid_last_scan_state.multivector.exactRerankSidecarBytes;
-	stats->multivector.candidateSourceUs =
-		pgturbohybrid_last_scan_state.multivector.candidateSourceUs;
-	stats->multivector.docGraphTraversalUs =
-		pgturbohybrid_last_scan_state.multivector.docGraphTraversalUs;
-	stats->multivector.proxyCandidateUs =
-		pgturbohybrid_last_scan_state.multivector.proxyCandidateUs;
-	stats->multivector.proxyGraphTraversalUs =
-		pgturbohybrid_last_scan_state.multivector.proxyGraphTraversalUs;
-	stats->multivector.proxyScoringUs =
-		pgturbohybrid_last_scan_state.multivector.proxyScoringUs;
-	stats->multivector.centroidLitePostingUs =
-		pgturbohybrid_last_scan_state.multivector.centroidLitePostingUs;
-	stats->multivector.quantizedInvertedPostingUs =
-		pgturbohybrid_last_scan_state.multivector.quantizedInvertedPostingUs;
-	stats->multivector.sidecarLoadUs =
-		pgturbohybrid_last_scan_state.multivector.sidecarLoadUs;
-	stats->multivector.heapVisibilityUs =
-		pgturbohybrid_last_scan_state.multivector.heapVisibilityUs;
-	stats->multivector.exactHeapFetchUs =
-		pgturbohybrid_last_scan_state.multivector.exactHeapFetchUs;
-	stats->multivector.exactRerankUs =
-		pgturbohybrid_last_scan_state.multivector.exactRerankUs;
-	stats->multivector.finalSortUs =
-		pgturbohybrid_last_scan_state.multivector.finalSortUs;
-	stats->exactRerankCandidates =
-		pgturbohybrid_last_scan_state.exactRerankCandidates;
-	stats->exactRerankTokensEvaluated =
-		pgturbohybrid_last_scan_state.exactRerankTokensEvaluated;
-	stats->exactRerankTokensSkipped =
-		pgturbohybrid_last_scan_state.exactRerankTokensSkipped;
-	stats->exactRerankPairsSaved =
-		pgturbohybrid_last_scan_state.exactRerankPairsSaved;
-	stats->adaptiveRerankTopKChangedVsFull =
-		pgturbohybrid_last_scan_state.adaptiveRerankTopKChangedVsFull;
-	strlcpy(stats->multivector.exactKernel,
-			pgturbohybrid_last_scan_state.multivector.exactKernel,
-			sizeof(stats->multivector.exactKernel));
-	strlcpy(stats->multivector.accumulatorKind,
-			pgturbohybrid_last_scan_state.multivector.accumulatorKind,
-			sizeof(stats->multivector.accumulatorKind));
-	stats->multivector.memoryBytesEstimate =
-		pgturbohybrid_last_scan_state.multivector.memoryBytesEstimate;
-	stats->multivector.admissionDebugEnabled =
-		pgturbohybrid_last_scan_state.multivector.admissionDebugEnabled;
-	stats->multivector.admissionCandidatesBeforeRerank =
-		pgturbohybrid_last_scan_state.multivector.admissionCandidatesBeforeRerank;
-	stats->multivector.admissionCandidatesAfterTruncation =
-		pgturbohybrid_last_scan_state.multivector.admissionCandidatesAfterTruncation;
-	stats->multivector.admissionExactRerankDocs =
-		pgturbohybrid_last_scan_state.multivector.admissionExactRerankDocs;
-	stats->multivector.admissionTruncatedByDocCandidateK =
-		pgturbohybrid_last_scan_state.multivector.admissionTruncatedByDocCandidateK;
-	stats->multivector.admissionTruncatedByAccumulatorMemory =
-		pgturbohybrid_last_scan_state.multivector.admissionTruncatedByAccumulatorMemory;
-	stats->multivector.admissionTraceAvailable =
-		pgturbohybrid_last_scan_state.multivector.admissionTraceAvailable;
-	stats->multivector.admissionTraceCount =
-		pgturbohybrid_last_scan_state.multivector.admissionTraceCount;
-	if (stats->multivector.admissionTraceCount >
-		PGTURBOHYBRID_MULTIVECTOR_DEBUG_TRACE_LIMIT_MAX)
-		stats->multivector.admissionTraceCount =
-			PGTURBOHYBRID_MULTIVECTOR_DEBUG_TRACE_LIMIT_MAX;
-	if (stats->multivector.admissionTraceCount > 0)
-		memcpy(stats->multivector.admissionTrace,
-			   pgturbohybrid_last_scan_state.multivector.admissionTrace,
-			   sizeof(PgturbohybridMultiVectorAdmissionTraceEntry) *
-			   stats->multivector.admissionTraceCount);
-	stats->multivector.tokenStatsAvailable =
-		pgturbohybrid_last_scan_state.multivector.tokenStatsAvailable;
-	stats->multivector.tokenStatsCount =
-		pgturbohybrid_last_scan_state.multivector.tokenStatsCount;
-	if (stats->multivector.tokenStatsCount >
-		PGTURBOHYBRID_MULTIVECTOR_TOKEN_STATS_LIMIT_MAX)
-		stats->multivector.tokenStatsCount =
-			PGTURBOHYBRID_MULTIVECTOR_TOKEN_STATS_LIMIT_MAX;
-	if (stats->multivector.tokenStatsCount > 0)
-		memcpy(stats->multivector.tokenStats,
-			   pgturbohybrid_last_scan_state.multivector.tokenStats,
-			   sizeof(PgturbohybridMultiVectorTokenStatsEntry) *
-			   stats->multivector.tokenStatsCount);
-	strlcpy(stats->finalDiversity.mode,
-			PgturbohybridFinalDiversityName(
-				pgturbohybrid_last_scan_state.finalDiversity.mode),
-			sizeof(stats->finalDiversity.mode));
-	stats->finalDiversity.payloadSlot =
-		pgturbohybrid_last_scan_state.finalDiversity.payloadSlot;
-	stats->finalDiversity.poolSize =
-		pgturbohybrid_last_scan_state.finalDiversity.poolSize;
-	stats->finalDiversity.selected =
-		pgturbohybrid_last_scan_state.finalDiversity.selected;
-	stats->finalDiversity.duplicateGroupsSuppressed =
-		pgturbohybrid_last_scan_state.finalDiversity.duplicateGroupsSuppressed;
-	stats->finalDiversity.us =
-		pgturbohybrid_last_scan_state.finalDiversity.us;
-	stats->dense.elapsedUs = pgturbohybrid_last_scan_state.dense.elapsedUs;
-	stats->bm25.elapsedUs = pgturbohybrid_last_scan_state.bm25.elapsedUs;
-	stats->fusionStats.elapsedUs = pgturbohybrid_last_scan_state.fusionStats.elapsedUs;
-	stats->elapsedUs = pgturbohybrid_last_scan_state.elapsedUs;
-}
 
 static uint64
 PgturbohybridElapsedUs(instr_time start)
@@ -770,9 +253,6 @@ PgturbohybridElapsedUs(instr_time start)
 	return (uint64) INSTR_TIME_GET_MICROSEC(duration);
 }
 
-#ifdef PGTURBOHYBRID_DEV_DIAGNOSTICS
-static Datum PgturbohybridHybridLastScanStats(PG_FUNCTION_ARGS) pg_attribute_unused();
-#endif
 
 PlannedStmt *
 PgturbohybridCurrentPlannedStmt(void)
@@ -851,9 +331,7 @@ PgturbohybridSubXactCallback(SubXactEvent event, SubTransactionId mySubid,
 		PgturbohybridClearPlannedStmtStack();
 }
 
-/* Index-key position of the BM25 (tsvector) key, or -1.  Discovered by type so
- * it works whether bm25 is the 2nd key (dense+bm25) or a later key (e.g.
- * dense+sparse+bm25). */
+/* Index-key position of the BM25 (tsvector) key, or -1. */
 static int
 PgturbohybridIndexBm25KeyAttno(Relation index)
 {
@@ -886,22 +364,6 @@ PgturbohybridIndexGetLexicalDatum(Relation index, Datum *values, bool *isnull,
 	return true;
 }
 
-/* Sparse-vector index value for an inserted row (false if no sparse key / NULL). */
-static bool
-PgturbohybridIndexGetSparseDatum(Relation index, Datum *values, bool *isnull,
-								 Datum *sparseValue)
-{
-	PgturbohybridIndexKeyMap map;
-
-	if (index == NULL || index->rd_index == NULL || values == NULL || isnull == NULL)
-		return false;
-	PgturbohybridBuildIndexKeyMap(index, NULL, &map);
-	if (map.sparseKey < 0 || isnull[map.sparseKey])
-		return false;
-	*sparseValue = values[map.sparseKey];
-	return true;
-}
-
 static bool
 PgturbohybridIndexInfoHasLexical(Relation index, IndexInfo *indexInfo)
 {
@@ -923,11 +385,7 @@ PgturbohybridPathLexicalAttno(IndexPath *path)
 	PgturbohybridIndexKeyMap map;
 	int			bm25Key;
 
-	/*
-	 * Discover the bm25 (tsvector) key position by type rather than assuming the
-	 * second column: with dense+sparse+bm25 indexes the
-	 * bm25 key can be the third column, while the second is the sparse key.
-	 */
+	/* Discover the BM25 key by type rather than assuming a fixed position. */
 	if (path == NULL || path->indexinfo == NULL)
 		return InvalidAttrNumber;
 
@@ -956,9 +414,9 @@ PgturbohybridBuildIndexKeyMap(Relation index, IndexInfo *indexInfo,
 	Oid			vectorOid = PgturbohybridVectorTypeOid();
 	int			keyCount;
 
-	map->denseKey = map->multivectorKey = map->sparseKey = map->bm25Key = -1;
+	map->denseKey = map->multivectorKey = map->bm25Key = -1;
 	map->graphKey = map->primaryKey = -1;
-	map->hasDense = map->hasMultivector = map->hasSparse = map->hasBm25 = false;
+	map->hasDense = map->hasMultivector = map->hasBm25 = false;
 
 	if (indexInfo != NULL)
 	{
@@ -1007,15 +465,6 @@ PgturbohybridBuildIndexKeyMap(Relation index, IndexInfo *indexInfo,
 			map->multivectorKey = i;
 			map->hasMultivector = true;
 		}
-		else if (PgturbohybridTypeIsSparseVector(t))
-		{
-			if (map->hasSparse)
-				ereport(ERROR,
-						(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
-						 errmsg("pgturbohybrid index supports at most one sparse-vector key")));
-			map->sparseKey = i;
-			map->hasSparse = true;
-		}
 		else if (t == TSVECTOROID)
 		{
 			if (map->hasBm25)
@@ -1030,7 +479,7 @@ PgturbohybridBuildIndexKeyMap(Relation index, IndexInfo *indexInfo,
 					(errcode(ERRCODE_DATATYPE_MISMATCH),
 					 errmsg("pgturbohybrid index key %d has unsupported type %s",
 							i + 1, format_type_be(t)),
-					 errdetail("Supported key types: vector, multivector, turbohybrid_sparse_vector, tsvector.")));
+					 errdetail("Supported key types: vector, multivector, tsvector.")));
 	}
 
 	if (map->hasDense && map->hasMultivector)
@@ -1040,14 +489,12 @@ PgturbohybridBuildIndexKeyMap(Relation index, IndexInfo *indexInfo,
 
 	map->graphKey = map->hasDense ? map->denseKey :
 		(map->hasMultivector ? map->multivectorKey : -1);
-	map->primaryKey = map->graphKey >= 0 ? map->graphKey :
-		(map->hasSparse ? map->sparseKey :
-		 (map->hasBm25 ? map->bm25Key : -1));
+	map->primaryKey = map->graphKey >= 0 ? map->graphKey : map->bm25Key;
 
 	if (map->primaryKey < 0)
 		ereport(ERROR,
 				(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
-				 errmsg("pgturbohybrid index requires a vector, multivector, sparse-vector, or tsvector key")));
+				 errmsg("pgturbohybrid index requires a vector, multivector, or tsvector key")));
 }
 
 int
@@ -1066,27 +513,16 @@ PgturbohybridValidateIndex(Relation index, IndexInfo *indexInfo)
 
 	PgturbohybridBuildIndexKeyMap(index, indexInfo, &map);
 
-	/*
-	 * Sparse-primary: a sparse-vector key with no dense/multivector
-	 * graph (sparse-only or sparse+BM25).  Node identity then comes from the
-	 * sparse-primary node-map chain instead of the dense graph, so there is no
-	 * graph key to require or position.  BM25-only (tsvector without a sparse or
-	 * graph key) remains unsupported and falls through to the error below.
-	 */
 	if (map.graphKey < 0)
-	{
-		if (map.hasSparse)
-			return;
 		ereport(ERROR,
 				(errcode(ERRCODE_DATATYPE_MISMATCH),
-				 errmsg("pgturbohybrid index requires a vector, multivector, or sparse-vector key"),
-				 errhint("Add a vector or multivector key, or a turbohybrid_sparse_vector key, as an index column.")));
-	}
+				 errmsg("pgturbohybrid index requires a vector or multivector key"),
+				 errhint("Add a vector or multivector key as the first index column.")));
 
 	/*
 	 * The graph key must be the first index column.  The dense/multivector
-	 * build and scan paths read it from key position 0; secondary keys (sparse,
-	 * bm25) are discovered by type and may follow in any order.  (Fully
+	 * build and scan paths read it from key position 0; the secondary BM25 key
+	 * is discovered by type.  (Fully
 	 * arbitrary graph-key placement is a possible future extension.)
 	 */
 	if (map.graphKey != 0)
@@ -1376,21 +812,6 @@ PgturbohybridFinalTarget(PgturbohybridQueryHeader *query, int mergedCount, int l
 }
 
 static int
-PgturbohybridRequestedFinalK(PgturbohybridQueryHeader *query)
-{
-	if ((query->flags & PGTURBOHYBRID_QUERY_FLAG_FINAL_K_IS_SET) == 0)
-		return 0;
-	return query->finalK;
-}
-
-static bool
-PgturbohybridFinalKInferred(PgturbohybridQueryHeader *query, int limit)
-{
-	return (query->flags & PGTURBOHYBRID_QUERY_FLAG_FINAL_K_IS_SET) == 0 &&
-		limit > 0;
-}
-
-static int
 PgturbohybridConstLimitValue(Node *limitCount)
 {
 	Const	   *constant;
@@ -1565,10 +986,6 @@ PgturbohybridEffectiveQuery(PgturbohybridQueryHeader *query, int limit,
 											   pgturbohybrid_auto_budget_min_bm25_k,
 											   (query->flags & PGTURBOHYBRID_QUERY_FLAG_BM25_K_DEFAULTED) != 0,
 											   hasTsQuery);
-	effective->sparseK = PgturbohybridApplyAutoBudget(query->sparseK, limit,
-													  pgturbohybrid_auto_budget_min_bm25_k,
-													  (query->flags & PGTURBOHYBRID_QUERY_FLAG_SPARSE_K_DEFAULTED) != 0,
-													  PgturbohybridQueryHasSparse(query));
 	PgturbohybridCanonicalizeLatencyQuery(effective, limit);
 
 	return effective;
@@ -1598,25 +1015,6 @@ PgturbohybridDenseConfidence(const TqDenseCandidate *dense, int denseCount,
 	compareTarget = Max(finalTarget * 4, 2);
 	compareIndex = Min(compareTarget, denseCount) - 1;
 	return Max(dense[0].similarity - dense[compareIndex].similarity, 0.0);
-}
-
-static const char *
-PgturbohybridHybridQueryShapeName(int shape)
-{
-	switch ((PgturbohybridHybridAdaptiveShape) shape)
-	{
-		case PGTURBOHYBRID_HYBRID_SHAPE_FIXED:
-			return "fixed";
-		case PGTURBOHYBRID_HYBRID_SHAPE_NOT_HYBRID:
-			return "not_hybrid";
-		case PGTURBOHYBRID_HYBRID_SHAPE_RARE_IDENTIFIER:
-			return "rare_identifier";
-		case PGTURBOHYBRID_HYBRID_SHAPE_BROAD_NATURAL_LANGUAGE:
-			return "broad_natural_language";
-		case PGTURBOHYBRID_HYBRID_SHAPE_MIXED:
-		default:
-			return "mixed";
-	}
 }
 
 static int
@@ -1791,22 +1189,6 @@ PgturbohybridHybridShapeFromSignals(PgturbohybridQueryHeader *query,
 		return PGTURBOHYBRID_HYBRID_SHAPE_RARE_IDENTIFIER;
 	if (broad)
 		return PGTURBOHYBRID_HYBRID_SHAPE_BROAD_NATURAL_LANGUAGE;
-	return PGTURBOHYBRID_HYBRID_SHAPE_MIXED;
-}
-
-static int
-PgturbohybridHybridShapeFromName(const char *name)
-{
-	if (name == NULL || name[0] == '\0')
-		return PGTURBOHYBRID_HYBRID_SHAPE_MIXED;
-	if (strcmp(name, "rare_identifier") == 0)
-		return PGTURBOHYBRID_HYBRID_SHAPE_RARE_IDENTIFIER;
-	if (strcmp(name, "broad_natural_language") == 0)
-		return PGTURBOHYBRID_HYBRID_SHAPE_BROAD_NATURAL_LANGUAGE;
-	if (strcmp(name, "not_hybrid") == 0)
-		return PGTURBOHYBRID_HYBRID_SHAPE_NOT_HYBRID;
-	if (strcmp(name, "fixed") == 0)
-		return PGTURBOHYBRID_HYBRID_SHAPE_FIXED;
 	return PGTURBOHYBRID_HYBRID_SHAPE_MIXED;
 }
 
@@ -2079,234 +1461,6 @@ PgturbohybridMaybeApplyBm25HybridBound(PgturbohybridQueryHeader *query, int dens
 }
 
 static void
-PgturbohybridBranchPlanInit(PgturbohybridBranchPlan *plan, uint16 fusion)
-{
-	if (plan == NULL)
-		return;
-	memset(plan, 0, sizeof(*plan));
-	plan->mode = pgturbohybrid_multivector_branch_plan;
-	if (pgturbohybrid_multivector_branch_plan ==
-		PGTURBOHYBRID_BRANCH_PLAN_QDRANT_LIKE)
-	{
-		if (fusion == PGTURBOHYBRID_FUSION_RRF)
-			strlcpy(plan->fusionMode, "qdrant_like_rrf",
-					sizeof(plan->fusionMode));
-		else if (fusion == PGTURBOHYBRID_FUSION_DBSF)
-			strlcpy(plan->fusionMode, "qdrant_like_dbsf",
-					sizeof(plan->fusionMode));
-		else if (fusion == PGTURBOHYBRID_FUSION_FAST_WEIGHTED ||
-				 fusion == PGTURBOHYBRID_FUSION_CALIBRATED)
-			strlcpy(plan->fusionMode, "qdrant_like_normalized",
-					sizeof(plan->fusionMode));
-		else
-			strlcpy(plan->fusionMode, "qdrant_like_dense_only",
-					sizeof(plan->fusionMode));
-	}
-	else if (pgturbohybrid_multivector_branch_plan ==
-			 PGTURBOHYBRID_BRANCH_PLAN_DENSE_ONLY)
-		strlcpy(plan->fusionMode, "dense_only", sizeof(plan->fusionMode));
-	else
-		strlcpy(plan->fusionMode, PgturbohybridQueryFusionName(fusion),
-				sizeof(plan->fusionMode));
-}
-
-static void
-PgturbohybridBranchPlanAdd(PgturbohybridBranchPlan *plan,
-						   PgturbohybridBranchKind kind,
-						   uint32 candidateLimit,
-						   uint32 rescoreLimit,
-						   uint32 branchRank,
-						   double branchScore,
-						   uint32 sourceFlags,
-						   uint32 candidateCount,
-						   bool truncated,
-						   uint64 latencyUs)
-{
-	PgturbohybridBranchPlanItem *item;
-
-	if (plan == NULL ||
-		plan->count >= PGTURBOHYBRID_BRANCH_PLAN_MAX_BRANCHES)
-		return;
-	item = &plan->items[plan->count++];
-	item->kind = kind;
-	item->candidateLimit = candidateLimit;
-	item->rescoreLimit = rescoreLimit;
-	item->branchRank = branchRank;
-	item->branchScore = branchScore;
-	item->sourceFlags = sourceFlags;
-	item->candidateCount = candidateCount;
-	item->truncated = truncated;
-	item->latencyUs = latencyUs;
-}
-
-static PgturbohybridBranchKind
-PgturbohybridMultiVectorBranchKind(const TqDenseCandidateStats *denseStats)
-{
-	const char *source;
-
-	if (denseStats == NULL)
-		return PGTURBOHYBRID_BRANCH_KIND_TOKEN_NODES;
-	source = denseStats->multivector.candidateSource;
-	if (strcmp(source, "proxy_vector") == 0)
-		return PGTURBOHYBRID_BRANCH_KIND_PROXY_VECTOR;
-	if (strcmp(source, "centroid_lite") == 0)
-		return PGTURBOHYBRID_BRANCH_KIND_CENTROID_LITE;
-	if (strcmp(source, "quantized_inverted_experimental") == 0)
-		return PGTURBOHYBRID_BRANCH_KIND_QUANTIZED_INVERTED_EXPERIMENTAL;
-	if (strcmp(source, "document_nodes") == 0 ||
-		strcmp(source, "doc_graph_prototype") == 0)
-		return PGTURBOHYBRID_BRANCH_KIND_DOCUMENT_NODES;
-	if (strcmp(source, "exact_doc_scan") == 0)
-		return PGTURBOHYBRID_BRANCH_KIND_EXACT_DOC_SCAN;
-	return PGTURBOHYBRID_BRANCH_KIND_TOKEN_NODES;
-}
-
-static void
-PgturbohybridBuildBranchPlan(PgturbohybridBranchPlan *plan,
-							 const PgturbohybridQueryHeader *query,
-							 uint16 effectiveFusion,
-							 const TqDenseCandidate *dense,
-							 int denseCount,
-							 bool denseInputIsMultiVector,
-							 const PgturbohybridBm25Result *bm25,
-							 int bm25Count,
-							 const TqDenseCandidateStats *denseStats,
-							 uint64 denseElapsedUs,
-							 uint64 bm25ElapsedUs)
-{
-	bool		hasVector;
-	bool		hasMultivector;
-	bool		planDenseAsMultiVector;
-	bool		denseTruncated;
-	bool		bm25Injected;
-	bool		emitBm25Branch;
-	uint32		denseLimit;
-	uint32		denseRescoreLimit;
-	uint32		denseSourceFlags;
-	double		denseScore = 0.0;
-	double		bm25Score = 0.0;
-	PgturbohybridBranchKind denseKind;
-
-	PgturbohybridBranchPlanInit(plan, effectiveFusion);
-	if (plan == NULL || query == NULL)
-		return;
-
-	hasVector =
-		(query->flags & PGTURBOHYBRID_QUERY_FLAG_HAS_VECTOR) != 0;
-	hasMultivector =
-		(query->flags & PGTURBOHYBRID_QUERY_FLAG_HAS_MULTIVECTOR) != 0;
-	planDenseAsMultiVector = hasMultivector && denseInputIsMultiVector;
-	bm25Injected = denseStats != NULL &&
-		denseStats->multivector.bm25InjectionEnabled;
-	emitBm25Branch =
-		pgturbohybrid_multivector_branch_plan !=
-		PGTURBOHYBRID_BRANCH_PLAN_DENSE_ONLY;
-
-	if (dense != NULL && denseCount > 0)
-		denseScore = dense[0].similarity != 0.0 ?
-			dense[0].similarity : -dense[0].distance;
-	if (bm25 != NULL && bm25Count > 0)
-		bm25Score = bm25[0].bm25Score;
-
-	if ((hasVector || hasMultivector) &&
-		(planDenseAsMultiVector ? query->multivectorK : query->denseK) > 0)
-	{
-		int32		requestedK = planDenseAsMultiVector ?
-			query->multivectorK : query->denseK;
-
-		denseLimit = (uint32) Max(requestedK, 0);
-		denseRescoreLimit = denseLimit;
-		denseTruncated = denseCount >= requestedK && requestedK > 0;
-		denseKind = planDenseAsMultiVector ?
-			PgturbohybridMultiVectorBranchKind(denseStats) :
-			PGTURBOHYBRID_BRANCH_KIND_DENSE_SINGLE;
-
-		if (denseStats != NULL && planDenseAsMultiVector)
-		{
-			if (denseStats->effectiveResultTarget > 0)
-				denseLimit = denseStats->effectiveResultTarget;
-			if (denseStats->multivector.docGraphExactRerankDocs > 0)
-				denseRescoreLimit =
-					denseStats->multivector.docGraphExactRerankDocs;
-			else if (denseStats->multivector.exactRerankDocs > 0)
-				denseRescoreLimit = denseStats->multivector.exactRerankDocs;
-			denseTruncated =
-				denseStats->multivector.admissionTruncatedByDocCandidateK ||
-				denseStats->multivector.admissionTruncatedByAccumulatorMemory;
-		}
-
-		denseSourceFlags = PGTURBOHYBRID_BRANCH_SOURCE_DENSE |
-			(planDenseAsMultiVector ?
-			 PGTURBOHYBRID_BRANCH_SOURCE_MULTIVECTOR : 0) |
-			(bm25Injected ? PGTURBOHYBRID_BRANCH_SOURCE_BM25 : 0);
-
-		PgturbohybridBranchPlanAdd(plan, denseKind, denseLimit,
-								   denseRescoreLimit, 1, denseScore,
-								   denseSourceFlags,
-								   (uint32) Max(denseCount, 0),
-								   denseTruncated, denseElapsedUs);
-
-		if (planDenseAsMultiVector &&
-			pgturbohybrid_multivector_branch_plan ==
-			PGTURBOHYBRID_BRANCH_PLAN_QDRANT_LIKE &&
-			denseKind == PGTURBOHYBRID_BRANCH_KIND_PROXY_VECTOR &&
-			denseStats != NULL)
-		{
-			PgturbohybridBranchPlanAdd(plan,
-									   PGTURBOHYBRID_BRANCH_KIND_DOCUMENT_NODES,
-									   denseStats->multivector.docGraphCandidates,
-									   denseRescoreLimit, 2, denseScore,
-									   PGTURBOHYBRID_BRANCH_SOURCE_DENSE |
-									   PGTURBOHYBRID_BRANCH_SOURCE_MULTIVECTOR,
-									   denseStats->multivector.docGraphCandidates,
-									   denseTruncated, 0);
-			PgturbohybridBranchPlanAdd(plan,
-									   PGTURBOHYBRID_BRANCH_KIND_EXACT_DOC_SCAN,
-									   denseRescoreLimit, denseRescoreLimit,
-									   3, denseScore,
-									   PGTURBOHYBRID_BRANCH_SOURCE_DENSE |
-									   PGTURBOHYBRID_BRANCH_SOURCE_MULTIVECTOR |
-									   PGTURBOHYBRID_BRANCH_SOURCE_EXACT,
-									   denseStats->multivector.docGraphExactRerankDocs,
-									   false, denseStats->heapRescoreUs);
-		}
-	}
-
-	if (emitBm25Branch &&
-		(query->flags & PGTURBOHYBRID_QUERY_FLAG_HAS_TSQUERY) != 0 &&
-		query->bm25K > 0 && bm25Count > 0)
-	{
-		PgturbohybridBranchPlanAdd(plan, PGTURBOHYBRID_BRANCH_KIND_BM25,
-								   (uint32) query->bm25K, 0,
-								   plan->count + 1, bm25Score,
-								   PGTURBOHYBRID_BRANCH_SOURCE_BM25,
-								   (uint32) bm25Count,
-								   bm25Count >= query->bm25K,
-								   bm25ElapsedUs);
-		if (hasMultivector &&
-			pgturbohybrid_multivector_branch_plan ==
-			PGTURBOHYBRID_BRANCH_PLAN_QDRANT_LIKE)
-		{
-			uint32		exactCount = bm25Injected ?
-				denseStats->multivector.bm25InjectionExactReranked :
-				(uint32) bm25Count;
-
-			PgturbohybridBranchPlanAdd(plan,
-									   PGTURBOHYBRID_BRANCH_KIND_EXACT_DOC_SCAN,
-									   (uint32) bm25Count,
-									   exactCount,
-									   plan->count + 1,
-									   denseScore,
-									   PGTURBOHYBRID_BRANCH_SOURCE_BM25 |
-									   PGTURBOHYBRID_BRANCH_SOURCE_MULTIVECTOR |
-									   PGTURBOHYBRID_BRANCH_SOURCE_EXACT,
-									   exactCount,
-									   false, 0);
-		}
-	}
-}
-
-static void
 PgturbohybridTopNHeapSiftUp(PgturbohybridResult *heap, int index)
 {
 	while (index > 0)
@@ -2349,8 +1503,7 @@ PgturbohybridTopNHeapSiftDown(PgturbohybridResult *heap, int count, int index)
 static int
 PgturbohybridSelectTopN(PgturbohybridResult *items, int itemCount, int target,
 						PgturbohybridResult **topItems,
-						MemoryContext memoryContext,
-						uint64 *heapReplacements)
+						MemoryContext memoryContext)
 {
 	PgturbohybridResult *heap;
 	int			heapCount = 0;
@@ -2375,8 +1528,6 @@ PgturbohybridSelectTopN(PgturbohybridResult *items, int itemCount, int target,
 		{
 			heap[0] = items[i];
 			PgturbohybridTopNHeapSiftDown(heap, heapCount, 0);
-			if (heapReplacements != NULL)
-				(*heapReplacements)++;
 		}
 	}
 
@@ -2392,31 +1543,6 @@ typedef struct PgturbohybridFinalDiversityCandidate
 	int32		groupValue;
 	bool		selected;
 } PgturbohybridFinalDiversityCandidate;
-
-static int
-PgturbohybridFinalDiversityDuplicateCount(const PgturbohybridFinalDiversityCandidate *candidates,
-										  int count)
-{
-	int			duplicates = 0;
-
-	for (int i = 0; i < count; i++)
-	{
-		bool		seen = false;
-
-		for (int j = 0; j < i; j++)
-		{
-			if (candidates[j].groupValue == candidates[i].groupValue)
-			{
-				seen = true;
-				break;
-			}
-		}
-		if (seen)
-			duplicates++;
-	}
-
-	return duplicates;
-}
 
 static bool
 PgturbohybridFinalDiversityGroupSeen(const int32 *groups, int count,
@@ -2450,9 +1576,7 @@ PgturbohybridApplyFinalDiversity(IndexScanDesc scan,
 								 int selectionCount,
 								 int emitCount,
 								 MemoryContext memoryContext,
-								 PgturbohybridResult **finalResults,
-								 uint64 *heapReplacements,
-								 PgturbohybridLastScanStats *stats)
+								 PgturbohybridResult **finalResults)
 {
 	PgturbohybridGraphScanOpaque so = (PgturbohybridGraphScanOpaque) scan->opaque;
 	PgturbohybridGraphMetaPageData meta;
@@ -2469,14 +1593,8 @@ PgturbohybridApplyFinalDiversity(IndexScanDesc scan,
 	double		worstScore;
 	double		scoreRange;
 	double		lambda = pgturbohybrid_final_diversity_lambda;
-	int			beforeDuplicates;
-	int			afterDuplicates;
-	instr_time	start;
 	instr_time	lockStart;
 	volatile bool applied = false;
-
-	stats->finalDiversity.mode = pgturbohybrid_final_diversity;
-	stats->finalDiversity.payloadSlot = payloadSlot;
 
 	if (pgturbohybrid_final_diversity !=
 		PGTURBOHYBRID_FINAL_DIVERSITY_GROUP_PAYLOAD)
@@ -2486,28 +1604,19 @@ PgturbohybridApplyFinalDiversity(IndexScanDesc scan,
 	if (payloadSlot < 0 || so == NULL)
 		return false;
 
-	INSTR_TIME_SET_CURRENT(start);
-
 	if (!PgturbohybridGraphReadMeta(scan->indexRelation, &meta) ||
 		meta.tqNodeCount == 0 ||
 		payloadSlot >= (int) meta.tqPayloadCount)
-	{
-		stats->finalDiversity.us = PgturbohybridElapsedUs(start);
 		return false;
-	}
 
 	poolCount = (int) Min((int64) mergedCount,
 						  (int64) selectionCount * (int64) poolMultiplier);
 	if (poolCount <= selectionCount)
-	{
-		stats->finalDiversity.us = PgturbohybridElapsedUs(start);
 		return false;
-	}
 
 	if (poolCount < mergedCount)
 		poolCount = PgturbohybridSelectTopN(merged, mergedCount, poolCount,
-											&poolResults, memoryContext,
-											heapReplacements);
+											&poolResults, memoryContext);
 	else
 	{
 		if (mergedCount > 1)
@@ -2515,8 +1624,6 @@ PgturbohybridApplyFinalDiversity(IndexScanDesc scan,
 				  PgturbohybridScoreCompare);
 		poolResults = merged;
 	}
-
-	stats->finalDiversity.poolSize = poolCount;
 
 	candidates = MemoryContextAllocZero(memoryContext,
 										sizeof(*candidates) * Max(poolCount, 1));
@@ -2559,9 +1666,6 @@ PgturbohybridApplyFinalDiversity(IndexScanDesc scan,
 		scoreRange = bestScore - worstScore;
 		if (scoreRange <= 0.0 || isnan(scoreRange) || isinf(scoreRange))
 			scoreRange = 1.0;
-
-		beforeDuplicates =
-			PgturbohybridFinalDiversityDuplicateCount(candidates, selectionCount);
 
 		while (selectedCount < selectionCount)
 		{
@@ -2610,9 +1714,6 @@ PgturbohybridApplyFinalDiversity(IndexScanDesc scan,
 			int			outCount = Min(emitCount, mergedCount);
 			int			outIndex = 0;
 
-			afterDuplicates =
-				PgturbohybridFinalDiversityDuplicateCount(selectedCandidates,
-														  selectedCount);
 			out = MemoryContextAllocZero(memoryContext,
 										 sizeof(PgturbohybridResult) *
 										 Max(outCount, 1));
@@ -2635,10 +1736,6 @@ PgturbohybridApplyFinalDiversity(IndexScanDesc scan,
 			}
 			*finalResults = out;
 
-			stats->finalDiversity.selected = selectedCount;
-			stats->finalDiversity.duplicateGroupsSuppressed =
-				beforeDuplicates > afterDuplicates ?
-				(uint64) (beforeDuplicates - afterDuplicates) : 0;
 			applied = true;
 		}
 diversity_done:
@@ -2652,7 +1749,6 @@ diversity_done:
 	PG_END_TRY();
 	UnlockPage(scan->indexRelation, PGTURBOHYBRID_GRAPH_SCAN_LOCK, ShareLock);
 
-	stats->finalDiversity.us = PgturbohybridElapsedUs(start);
 	return applied;
 }
 
@@ -2716,43 +1812,6 @@ PgturbohybridMergeBm25ResultItem(PgturbohybridResult *item,
 	item->bm25Rank = bm25Item->bm25Rank;
 }
 
-static void
-PgturbohybridAddSparseCandidate(PgturbohybridResult *item,
-								const PgturbohybridSparseCandidate *candidate,
-								int rank)
-{
-	item->nodeId = candidate->nodeId;
-	item->heaptid = candidate->heaptid;
-	item->sparseSimilarity = candidate->score;
-	item->sparseRank = rank;
-	item->hasSparse = true;
-}
-
-static void
-PgturbohybridMergeSparseResultItem(PgturbohybridResult *item,
-								   const PgturbohybridResult *sparseItem)
-{
-	if (!item->hasDense && !item->hasMultivector && !item->hasBm25)
-		item->heaptid = sparseItem->heaptid;
-	item->hasSparse = true;
-	item->sparseSimilarity = sparseItem->sparseSimilarity;
-	item->sparseRank = sparseItem->sparseRank;
-}
-
-static void
-PgturbohybridRecordFusionClass(PgturbohybridLastScanStats *stats,
-							   const PgturbohybridResult *item)
-{
-	bool		hasDenseLike = item->hasDense || item->hasMultivector;
-
-	if (hasDenseLike && item->hasBm25)
-		stats->bothMatch++;
-	else if (hasDenseLike)
-		stats->dense.only++;
-	else if (item->hasBm25)
-		stats->bm25.only++;
-}
-
 static double
 PgturbohybridRrfScore(PgturbohybridQueryHeader *query,
 					  const PgturbohybridResult *item)
@@ -2762,9 +1821,7 @@ PgturbohybridRrfScore(PgturbohybridQueryHeader *query,
 		query->multivectorWeight *
 		(item->hasMultivector ? 1.0 / ((double) query->rrfK + item->multivectorRank) : 0.0) +
 		query->bm25Weight *
-		(item->hasBm25 ? 1.0 / ((double) query->rrfK + item->bm25Rank) : 0.0) +
-		query->sparseWeight *
-		(item->hasSparse ? 1.0 / ((double) query->rrfK + item->sparseRank) : 0.0);
+		(item->hasBm25 ? 1.0 / ((double) query->rrfK + item->bm25Rank) : 0.0);
 }
 
 static double
@@ -3370,307 +2427,6 @@ typedef struct PgturbohybridMultiVectorBm25InjectionCandidate
 } PgturbohybridMultiVectorBm25InjectionCandidate;
 
 static int
-PgturbohybridMultiVectorBm25InjectionCompare(const void *a, const void *b)
-{
-	const PgturbohybridMultiVectorBm25InjectionCandidate *ra =
-		(const PgturbohybridMultiVectorBm25InjectionCandidate *) a;
-	const PgturbohybridMultiVectorBm25InjectionCandidate *rb =
-		(const PgturbohybridMultiVectorBm25InjectionCandidate *) b;
-	int			cmp;
-
-	if (ra->candidate.distance < rb->candidate.distance)
-		return -1;
-	if (ra->candidate.distance > rb->candidate.distance)
-		return 1;
-	cmp = PgturbohybridItemPointerDataCompare(&ra->candidate.heaptid,
-											  &rb->candidate.heaptid);
-	if (cmp != 0)
-		return cmp;
-	return (ra->candidate.nodeId > rb->candidate.nodeId) -
-		(ra->candidate.nodeId < rb->candidate.nodeId);
-}
-
-static bool
-PgturbohybridDenseCandidatesContainHeapTid(const TqDenseCandidate *dense,
-										   int denseCount,
-										   const ItemPointerData *heaptid)
-{
-	for (int i = 0; i < denseCount; i++)
-	{
-		if (PgturbohybridItemPointerDataCompare(&dense[i].heaptid,
-												heaptid) == 0)
-			return true;
-	}
-	return false;
-}
-
-static bool
-PgturbohybridInjectionPoolContainsHeapTid(
-	PgturbohybridMultiVectorBm25InjectionCandidate *pool,
-	int poolCount, const ItemPointerData *heaptid)
-{
-	for (int i = 0; i < poolCount; i++)
-	{
-		if (PgturbohybridItemPointerDataCompare(&pool[i].candidate.heaptid,
-												heaptid) == 0)
-			return true;
-	}
-	return false;
-}
-
-static bool
-PgturbohybridShouldInjectMultiVectorBm25Candidates(PgturbohybridQueryHeader *query)
-{
-	if (pgturbohybrid_multivector_sparse_candidate_source ==
-		PGTURBOHYBRID_MULTIVECTOR_SPARSE_CANDIDATE_SOURCE_BM25 ||
-		pgturbohybrid_multivector_sparse_candidate_source ==
-		PGTURBOHYBRID_MULTIVECTOR_SPARSE_CANDIDATE_SOURCE_LEARNED_SPARSE)
-		return true;
-
-	switch ((PgturbohybridMultiVectorBm25CandidateInjectionMode)
-			pgturbohybrid_multivector_bm25_candidate_injection)
-	{
-		case PGTURBOHYBRID_MULTIVECTOR_BM25_CANDIDATE_INJECTION_DENSE_WITH_TEXT:
-			return true;
-		case PGTURBOHYBRID_MULTIVECTOR_BM25_CANDIDATE_INJECTION_HYBRID_ONLY:
-			return query != NULL && query->bm25Weight > 0.0;
-		case PGTURBOHYBRID_MULTIVECTOR_BM25_CANDIDATE_INJECTION_OFF:
-		default:
-			return false;
-	}
-}
-
-static bool
-PgturbohybridUsingLearnedSparseCandidateInjection(void)
-{
-	return pgturbohybrid_multivector_sparse_candidate_source ==
-		PGTURBOHYBRID_MULTIVECTOR_SPARSE_CANDIDATE_SOURCE_LEARNED_SPARSE;
-}
-
-static void
-PgturbohybridInjectMultiVectorBm25Candidates(IndexScanDesc scan,
-											 PgturbohybridQueryHeader *query,
-											 const PgturbohybridBm25Result *bm25,
-											 int bm25Count,
-											 TqDenseCandidate **dense,
-											 int *denseCount,
-											 int autoBudgetLimit,
-											 MemoryContext memoryContext,
-											 TqDenseCandidateStats *denseStats)
-{
-	Relation	heap;
-	TupleDesc	desc;
-	TupleTableSlot *slot;
-	AttrNumber	denseAttno;
-	PgturbohybridMultiVector *queryMv;
-	const float4 *queryWeights;
-	const bool *queryMask;
-	double		queryWeightSum;
-	PgturbohybridMultiVectorBm25InjectionCandidate *pool;
-	TqDenseCandidate *newDense;
-	int			poolCount;
-	int			candidateLimit;
-	int			newDenseCount;
-	uint32		exactReranked = 0;
-	uint32		retained = 0;
-	uint32		learnedSparseRetained = 0;
-	uint64		exactPairs = 0;
-	bool		learnedSparse =
-		PgturbohybridUsingLearnedSparseCandidateInjection();
-
-	if (denseStats == NULL)
-		return;
-	denseStats->multivector.bm25InjectionEnabled = false;
-	denseStats->multivector.bm25InjectionCandidates = 0;
-	denseStats->multivector.bm25InjectionCandidateLimit = 0;
-	denseStats->multivector.bm25InjectionPoolSize = 0;
-	strlcpy(denseStats->multivector.bm25InjectionLimitReason, "not_applicable",
-			sizeof(denseStats->multivector.bm25InjectionLimitReason));
-	denseStats->multivector.bm25InjectionRetained = 0;
-	denseStats->multivector.bm25InjectionExactReranked = 0;
-	denseStats->learnedSparse.candidates = 0;
-	denseStats->learnedSparse.retainedForMaxsim = 0;
-	denseStats->learnedSparse.branchLatencyUs = 0;
-
-	if (scan == NULL || scan->heapRelation == NULL ||
-		scan->indexRelation == NULL || scan->indexRelation->rd_index == NULL ||
-		query == NULL || bm25 == NULL || bm25Count <= 0 ||
-		dense == NULL || denseCount == NULL ||
-		!PgturbohybridShouldInjectMultiVectorBm25Candidates(query) ||
-		!PgturbohybridQueryHasMultiVector(query) ||
-		!PgturbohybridQueryHasText(query) ||
-		!PgturbohybridIndexIsMultiVector(scan->indexRelation))
-		return;
-
-	queryMv = PgturbohybridQueryGetMultiVector(query);
-	if (queryMv == NULL || queryMv->count <= 0)
-		return;
-	queryWeights = PgturbohybridQueryGetTokenWeights(query);
-	queryMask = PgturbohybridQueryGetTokenMask(query);
-	queryWeightSum = PgturbohybridQueryMultiVectorWeightSum(query);
-
-	denseAttno =
-		scan->indexRelation->rd_index->indkey.values[PGTURBOHYBRID_DENSE_KEY_INDEX];
-	heap = scan->heapRelation;
-	desc = RelationGetDescr(heap);
-	if (denseAttno <= 0 || denseAttno > desc->natts)
-		return;
-
-	denseStats->multivector.bm25InjectionEnabled = true;
-	denseStats->multivector.bm25InjectionCandidates = (uint32) bm25Count;
-	if (learnedSparse)
-		denseStats->learnedSparse.candidates = (uint32) bm25Count;
-
-	candidateLimit = PgturbohybridBudgetFinalTarget(query, autoBudgetLimit);
-	if (*denseCount >= candidateLimit)
-	{
-		candidateLimit = *denseCount;
-		strlcpy(denseStats->multivector.bm25InjectionLimitReason, "dense_count",
-				sizeof(denseStats->multivector.bm25InjectionLimitReason));
-	}
-	else
-		strlcpy(denseStats->multivector.bm25InjectionLimitReason,
-				"final_target",
-				sizeof(denseStats->multivector.bm25InjectionLimitReason));
-	if (candidateLimit <= 0)
-	{
-		candidateLimit = bm25Count;
-		strlcpy(denseStats->multivector.bm25InjectionLimitReason, "bm25_count",
-				sizeof(denseStats->multivector.bm25InjectionLimitReason));
-	}
-	if (pgturbohybrid_multivector_doc_candidate_k > 0)
-	{
-		if (candidateLimit > pgturbohybrid_multivector_doc_candidate_k)
-		{
-			candidateLimit = pgturbohybrid_multivector_doc_candidate_k;
-			strlcpy(denseStats->multivector.bm25InjectionLimitReason,
-					"doc_candidate_k",
-					sizeof(denseStats->multivector.bm25InjectionLimitReason));
-		}
-	}
-	if (pgturbohybrid_multivector_exact_rerank_k > 0)
-	{
-		if (candidateLimit > pgturbohybrid_multivector_exact_rerank_k)
-		{
-			candidateLimit = pgturbohybrid_multivector_exact_rerank_k;
-			strlcpy(denseStats->multivector.bm25InjectionLimitReason,
-					"exact_rerank_k",
-					sizeof(denseStats->multivector.bm25InjectionLimitReason));
-		}
-	}
-	candidateLimit = Max(candidateLimit, 1);
-	denseStats->multivector.bm25InjectionCandidateLimit = (uint32) candidateLimit;
-
-	pool = MemoryContextAllocZero(memoryContext,
-								  sizeof(*pool) *
-								  Max(*denseCount + bm25Count, 1));
-	poolCount = 0;
-	for (int i = 0; i < *denseCount; i++)
-	{
-		pool[poolCount].candidate = (*dense)[i];
-		pool[poolCount].injected = false;
-		poolCount++;
-	}
-
-	slot = table_slot_create(heap, NULL);
-	for (int i = 0; i < bm25Count; i++)
-	{
-		Datum		value;
-		bool		isnull;
-		bool		visible;
-		char	   *valuePtr;
-		PgturbohybridMultiVector *docMv;
-		double		maxsim;
-		ItemPointerData heapTid;
-
-		CHECK_FOR_INTERRUPTS();
-		if (PgturbohybridDenseCandidatesContainHeapTid(*dense, *denseCount,
-													   &bm25[i].heaptid) ||
-			PgturbohybridInjectionPoolContainsHeapTid(pool, poolCount,
-													  &bm25[i].heaptid))
-			continue;
-
-		heapTid = bm25[i].heaptid;
-		visible = table_tuple_fetch_row_version(heap, &heapTid,
-												scan->xs_snapshot, slot);
-		if (!visible)
-		{
-			ExecClearTuple(slot);
-			continue;
-		}
-
-		value = slot_getattr(slot, denseAttno, &isnull);
-		if (isnull)
-		{
-			ExecClearTuple(slot);
-			continue;
-		}
-
-		valuePtr = DatumGetPointer(value);
-		docMv = PgturbohybridDatumGetMultiVector(value);
-		maxsim = TqMultiVectorMaxSimWeighted(queryMv, docMv,
-											 queryWeights, queryMask);
-		pool[poolCount].candidate.nodeId = bm25[i].nodeId;
-		pool[poolCount].candidate.heaptid = bm25[i].heaptid;
-		pool[poolCount].candidate.distance = -maxsim;
-		pool[poolCount].candidate.similarity =
-			queryWeightSum > 0.0 ? maxsim / queryWeightSum : 0.0;
-		pool[poolCount].candidate.rank = 0;
-		pool[poolCount].candidate.exactScored = true;
-		pool[poolCount].injected = true;
-		poolCount++;
-		exactReranked++;
-		exactPairs += (uint64) queryMv->count * (uint64) docMv->count;
-
-		if ((char *) docMv != valuePtr)
-			pfree(docMv);
-		ExecClearTuple(slot);
-	}
-	ExecDropSingleTupleTableSlot(slot);
-
-	if (poolCount > 1)
-		qsort(pool, poolCount, sizeof(*pool),
-			  PgturbohybridMultiVectorBm25InjectionCompare);
-	denseStats->multivector.bm25InjectionPoolSize = (uint32) poolCount;
-
-	newDenseCount = Min(poolCount, candidateLimit);
-	newDense = MemoryContextAllocZero(memoryContext,
-									  sizeof(*newDense) *
-									  Max(newDenseCount, 1));
-	for (int i = 0; i < newDenseCount; i++)
-	{
-		newDense[i] = pool[i].candidate;
-		newDense[i].rank = i + 1;
-		if (pool[i].injected)
-			retained++;
-	}
-	if (learnedSparse)
-	{
-		for (int i = 0; i < bm25Count; i++)
-		{
-			if (PgturbohybridDenseCandidatesContainHeapTid(newDense,
-														  newDenseCount,
-														  &bm25[i].heaptid))
-				learnedSparseRetained++;
-		}
-	}
-
-	*dense = newDense;
-	*denseCount = newDenseCount;
-	denseStats->dense.candidatesReturned = (uint32) newDenseCount;
-	denseStats->multivector.docCandidates = (uint32) newDenseCount;
-	denseStats->multivector.exactRerankDocs += exactReranked;
-	denseStats->multivector.exactRerankPairs += exactPairs;
-	denseStats->exactRerankCandidates += exactReranked;
-	denseStats->exactRerankTokensEvaluated +=
-		(uint64) exactReranked * (uint64) queryMv->count;
-	denseStats->multivector.bm25InjectionRetained = retained;
-	denseStats->multivector.bm25InjectionExactReranked = exactReranked;
-	if (learnedSparse)
-		denseStats->learnedSparse.retainedForMaxsim = learnedSparseRetained;
-}
-
-static int
 PgturbohybridBm25HeapTSVectorRerankLimit(PgturbohybridQueryHeader *query,
 										 TSQuery tsquery, int count,
 										 int autoBudgetLimit)
@@ -3847,7 +2603,7 @@ PgturbohybridBm25HeapTSVectorRerank(IndexScanDesc scan,
 
 static void
 PgturbohybridScoreResults(PgturbohybridScanState *state, PgturbohybridResult *results,
-						  int count, PgturbohybridLastScanStats *stats)
+						  int count, int queryShape)
 {
 	PgturbohybridQueryHeader *query = state->query;
 	double		minDense = get_float8_infinity();
@@ -3864,40 +2620,8 @@ PgturbohybridScoreResults(PgturbohybridScanState *state, PgturbohybridResult *re
 	memset(&dbsfDense, 0, sizeof(dbsfDense));
 	memset(&dbsfBm25, 0, sizeof(dbsfBm25));
 
-	if (stats != NULL)
-	{
-		stats->calibratedFusion.enabled =
-			fusion == PGTURBOHYBRID_FUSION_CALIBRATED;
-		stats->dbsf.enabled = fusion == PGTURBOHYBRID_FUSION_DBSF;
-		stats->dbsf.degenerateBranches = 0;
-		memset(stats->dbsf.branchMean, 0, sizeof(stats->dbsf.branchMean));
-		memset(stats->dbsf.branchStddev, 0, sizeof(stats->dbsf.branchStddev));
-		memset(stats->dbsf.branchMin, 0, sizeof(stats->dbsf.branchMin));
-		memset(stats->dbsf.branchMax, 0, sizeof(stats->dbsf.branchMax));
-		stats->calibratedFusion.bothMatchBonus =
-			stats->calibratedFusion.enabled ?
-			PgturbohybridClampUnit(
-				pgturbohybrid_calibrated_fusion_both_match_bonus) : 0.0;
-		strlcpy(stats->calibratedFusion.denseNormMode,
-				stats->calibratedFusion.enabled ? "logistic" : "none",
-				sizeof(stats->calibratedFusion.denseNormMode));
-		strlcpy(stats->calibratedFusion.bm25NormMode,
-				stats->calibratedFusion.enabled ? "saturating" : "none",
-				sizeof(stats->calibratedFusion.bm25NormMode));
-		if (stats->calibratedFusion.enabled)
-		{
-			int			queryShape;
-
-			if (stats->calibratedFusion.queryShape[0] == '\0')
-				strlcpy(stats->calibratedFusion.queryShape, "mixed",
-						sizeof(stats->calibratedFusion.queryShape));
-			queryShape = PgturbohybridHybridShapeFromName(
-				stats->calibratedFusion.queryShape);
-			alpha = PgturbohybridCalibratedFusionAlpha(query, queryShape);
-		}
-		stats->calibratedFusion.alphaEffective =
-			stats->calibratedFusion.enabled ? alpha : 0.0;
-	}
+	if (fusion == PGTURBOHYBRID_FUSION_CALIBRATED)
+		alpha = PgturbohybridCalibratedFusionAlpha(query, queryShape);
 
 	if (fusion == PGTURBOHYBRID_FUSION_WEIGHTED)
 	{
@@ -3922,20 +2646,6 @@ PgturbohybridScoreResults(PgturbohybridScanState *state, PgturbohybridResult *re
 	{
 		PgturbohybridDbsfCollectBranch(results, count, true, &dbsfDense);
 		PgturbohybridDbsfCollectBranch(results, count, false, &dbsfBm25);
-		if (stats != NULL)
-		{
-			stats->dbsf.branchMean[0] = dbsfDense.mean;
-			stats->dbsf.branchMean[1] = dbsfBm25.mean;
-			stats->dbsf.branchStddev[0] = dbsfDense.stddev;
-			stats->dbsf.branchStddev[1] = dbsfBm25.stddev;
-			stats->dbsf.branchMin[0] = dbsfDense.min;
-			stats->dbsf.branchMin[1] = dbsfBm25.min;
-			stats->dbsf.branchMax[0] = dbsfDense.max;
-			stats->dbsf.branchMax[1] = dbsfBm25.max;
-			stats->dbsf.degenerateBranches =
-				(dbsfDense.degenerate ? 1 : 0) +
-				(dbsfBm25.degenerate ? 1 : 0);
-		}
 	}
 
 	for (int i = 0; i < count; i++)
@@ -4011,8 +2721,7 @@ PgturbohybridFinalizeFusedResults(IndexScanDesc scan,
 								  bool allowBm25OnlyExactRescore,
 								  MemoryContext memoryContext,
 								  PgturbohybridResult **finalResults,
-								  uint64 *heapReplacements,
-	PgturbohybridLastScanStats *stats)
+								  int queryShape)
 {
 	int			finalCount;
 
@@ -4032,21 +2741,19 @@ PgturbohybridFinalizeFusedResults(IndexScanDesc scan,
 			PgturbohybridApplyBm25OnlyExactRescore(scan, state, merged,
 												   mergedCount);
 	}
-	PgturbohybridScoreResults(state, merged, mergedCount, stats);
+	PgturbohybridScoreResults(state, merged, mergedCount, queryShape);
 
 	finalCount = PgturbohybridFinalTarget(state->query, mergedCount, limit);
 	if (PgturbohybridApplyFinalDiversity(scan, merged, mergedCount,
 										 PgturbohybridBudgetFinalTarget(state->query,
 																	   limit),
 										 finalCount,
-										 memoryContext, finalResults,
-										 heapReplacements, stats))
+										 memoryContext, finalResults))
 		return finalCount;
 
 	if (finalCount < mergedCount)
 		finalCount = PgturbohybridSelectTopN(merged, mergedCount, finalCount,
-											 finalResults, memoryContext,
-											 heapReplacements);
+											 finalResults, memoryContext);
 	else
 	{
 		if (mergedCount > 1)
@@ -4115,15 +2822,10 @@ PgturbohybridShouldUseGenerationArray(IndexScanDesc scan,
 
 static PgturbohybridFusionArrayEntry *
 PgturbohybridGetFusionGenerationArray(uint32 nodeCount,
-									  uint32 *generation,
-									  bool *reused,
-									  bool *reset)
+									  uint32 *generation)
 {
 	PgturbohybridFusionGenerationArrayCache *cache =
 		&pgturbohybrid_fusion_generation_array_cache;
-
-	*reused = false;
-	*reset = false;
 
 	if (cache->entries == NULL || cache->capacity < nodeCount)
 	{
@@ -4140,17 +2842,14 @@ PgturbohybridGetFusionGenerationArray(uint32 nodeCount,
 		cache->capacity = nodeCount;
 		cache->generation = 1;
 		*generation = cache->generation;
-		*reset = true;
 		return cache->entries;
 	}
 
-	*reused = true;
 	if (cache->generation == PG_UINT32_MAX)
 	{
 		memset(cache->entries, 0,
 			   sizeof(PgturbohybridFusionArrayEntry) * cache->capacity);
 		cache->generation = 1;
-		*reset = true;
 	}
 	else
 		cache->generation++;
@@ -4171,7 +2870,7 @@ PgturbohybridFuseGenerationArray(IndexScanDesc scan,
 								 MemoryContext memoryContext,
 								 PgturbohybridResult **finalResults,
 								 int *mergedCountOut,
-								 PgturbohybridLastScanStats *stats)
+								 int queryShape)
 {
 	uint32		generation;
 	uint32		fusionCandidatesSeen = denseCount + bm25Count;
@@ -4181,9 +2880,7 @@ PgturbohybridFuseGenerationArray(IndexScanDesc scan,
 	PgturbohybridResult *merged;
 	int			mergedCount = 0;
 
-	entries = PgturbohybridGetFusionGenerationArray(nodeCount, &generation,
-													&stats->fusionStats.generationArrayReused,
-													&stats->fusionStats.generationArrayReset);
+	entries = PgturbohybridGetFusionGenerationArray(nodeCount, &generation);
 	touched = MemoryContextAlloc(memoryContext,
 								 sizeof(uint32) * Max(fusionCandidatesSeen, 1));
 
@@ -4198,9 +2895,6 @@ PgturbohybridFuseGenerationArray(IndexScanDesc scan,
 			entry->result.nodeId = dense[i].nodeId;
 			touched[touchedCount++] = dense[i].nodeId;
 		}
-		else
-			stats->fusionStats.duplicates++;
-
 		PgturbohybridAddDenseCandidate(&entry->result, &dense[i]);
 	}
 
@@ -4215,9 +2909,6 @@ PgturbohybridFuseGenerationArray(IndexScanDesc scan,
 			entry->result.nodeId = bm25[i].nodeId;
 			touched[touchedCount++] = bm25[i].nodeId;
 		}
-		else
-			stats->fusionStats.duplicates++;
-
 		PgturbohybridMergeBm25Candidate(&entry->result, &bm25[i]);
 	}
 
@@ -4231,309 +2922,14 @@ PgturbohybridFuseGenerationArray(IndexScanDesc scan,
 		if ((state->query->flags & PGTURBOHYBRID_QUERY_FLAG_REQUIRE_BM25_MATCH) != 0 &&
 			!item.hasBm25)
 			continue;
-		PgturbohybridRecordFusionClass(stats, &item);
 		merged[mergedCount++] = item;
 	}
 
-	strlcpy(stats->fusionStats.strategy, "generation_array",
-			sizeof(stats->fusionStats.strategy));
 	if (mergedCountOut != NULL)
 		*mergedCountOut = mergedCount;
 	return PgturbohybridFinalizeFusedResults(scan, state, merged, mergedCount,
 											 limit, false, memoryContext,
-											 finalResults,
-											 &stats->fusionStats.heapReplacements,
-											 stats);
-}
-
-static int
-PgturbohybridSparseCandidateScoreCompare(const void *a, const void *b)
-{
-	const PgturbohybridSparseCandidate *ca = (const PgturbohybridSparseCandidate *) a;
-	const PgturbohybridSparseCandidate *cb = (const PgturbohybridSparseCandidate *) b;
-
-	if (ca->score != cb->score)
-		return ca->score > cb->score ? -1 : 1;	/* descending score */
-	if (ca->nodeId != cb->nodeId)
-		return ca->nodeId < cb->nodeId ? -1 : 1;	/* deterministic tiebreak */
-	return 0;
-}
-
-static int
-PgturbohybridSparseEntryTermCompare(const void *a, const void *b)
-{
-	const PgturbohybridSparseVectorEntry *ea = (const PgturbohybridSparseVectorEntry *) a;
-	const PgturbohybridSparseVectorEntry *eb = (const PgturbohybridSparseVectorEntry *) b;
-
-	if (ea->termId != eb->termId)
-		return ea->termId < eb->termId ? -1 : 1;
-	return 0;
-}
-
-/*
- * Exact f32 sparse rerank: for the top candidate band of a quantized
- * sparse scan, fetch the heap sparse column (MVCC-safe), recompute the exact
- * float32 sparse inner product against the query, then re-sort the candidates.
- * A no-op for f32 indexes under "auto"; mirrors PgturbohybridBm25HeapTSVectorRerank.
- */
-static void
-PgturbohybridSparseRerankCandidates(IndexScanDesc scan,
-									PgturbohybridQueryHeader *query,
-									PgturbohybridSparseCandidate *cands, int count,
-									int autoBudgetLimit, int quantBits,
-									PgturbohybridSparseScanStats *stats)
-{
-	int			mode = pgturbohybrid_sparse_rerank;
-	Relation	heap;
-	AttrNumber	sparseAttno;
-	PgturbohybridIndexKeyMap map;
-	struct varlena *qsv;
-	const PgturbohybridSparseVectorEntry *qEntriesRaw;
-	PgturbohybridSparseVectorEntry *qSorted;
-	uint32		qCount = 0;
-	int			band;
-	int			finalTarget;
-	int			rerankK;
-	TupleTableSlot *slot;
-	uint32	   *beforeTopK = NULL;
-	int			beforeTopKCount = 0;
-	int			rescored = 0;
-	instr_time	t;
-
-	if (stats != NULL)
-		stats->rerankMode = mode;
-	if (mode == PGTURBOHYBRID_SPARSE_RERANK_OFF || cands == NULL || count <= 0)
-		return;
-	/* "auto" reranks only quantized indexes; an f32 index is already exact. */
-	if (mode == PGTURBOHYBRID_SPARSE_RERANK_AUTO && quantBits == 0)
-		return;
-	if (scan == NULL || scan->heapRelation == NULL ||
-		scan->indexRelation == NULL || scan->indexRelation->rd_index == NULL)
-		return;
-
-	PgturbohybridBuildIndexKeyMap(scan->indexRelation, NULL, &map);
-	if (map.sparseKey < 0)
-		return;
-	sparseAttno = scan->indexRelation->rd_index->indkey.values[map.sparseKey];
-	heap = scan->heapRelation;
-	if (sparseAttno <= 0 || sparseAttno > RelationGetDescr(heap)->natts)
-		return;
-
-	qsv = PgturbohybridQueryGetSparseVector(query);
-	if (qsv == NULL)
-		return;
-	qEntriesRaw = PgturbohybridSparseVectorData(qsv, &qCount);
-	if (qCount == 0)
-		return;
-	qSorted = (PgturbohybridSparseVectorEntry *)
-		palloc(sizeof(PgturbohybridSparseVectorEntry) * qCount);
-	memcpy(qSorted, qEntriesRaw, sizeof(PgturbohybridSparseVectorEntry) * qCount);
-	qsort(qSorted, qCount, sizeof(PgturbohybridSparseVectorEntry),
-		  PgturbohybridSparseEntryTermCompare);
-
-	finalTarget = PgturbohybridBudgetFinalTarget(query, autoBudgetLimit);
-	rerankK = pgturbohybrid_sparse_rerank_k > 0 ?
-		pgturbohybrid_sparse_rerank_k : finalTarget;
-	band = mode == PGTURBOHYBRID_SPARSE_RERANK_BAND ? count : Min(count, rerankK);
-	if (band <= 0)
-	{
-		pfree(qSorted);
-		return;
-	}
-
-	beforeTopKCount = Min(finalTarget, count);
-	if (beforeTopKCount > 0)
-	{
-		beforeTopK = palloc(sizeof(uint32) * beforeTopKCount);
-		for (int i = 0; i < beforeTopKCount; i++)
-			beforeTopK[i] = cands[i].nodeId;
-	}
-
-	slot = table_slot_create(heap, NULL);
-	for (int i = 0; i < band; i++)
-	{
-		Datum		value;
-		bool		isnull;
-		bool		visible;
-		struct varlena *docDatum;
-		const PgturbohybridSparseVectorEntry *docEntries;
-		uint32		docN = 0;
-		double		dot = 0.0;
-
-		CHECK_FOR_INTERRUPTS();
-		INSTR_TIME_SET_CURRENT(t);
-		visible = table_tuple_fetch_row_version(heap, &cands[i].heaptid,
-												scan->xs_snapshot, slot);
-		if (stats != NULL)
-			stats->exactRerankFetchUs += PgturbohybridElapsedUs(t);
-		if (!visible)
-		{
-			ExecClearTuple(slot);
-			continue;
-		}
-		value = slot_getattr(slot, sparseAttno, &isnull);
-		if (isnull)
-		{
-			ExecClearTuple(slot);
-			continue;
-		}
-
-		INSTR_TIME_SET_CURRENT(t);
-		docDatum = (struct varlena *) PG_DETOAST_DATUM(value);
-		docEntries = PgturbohybridSparseVectorData(docDatum, &docN);
-		for (uint32 d = 0; d < docN; d++)
-		{
-			PgturbohybridSparseVectorEntry key;
-			const PgturbohybridSparseVectorEntry *found;
-
-			key.termId = docEntries[d].termId;
-			found = (const PgturbohybridSparseVectorEntry *)
-				bsearch(&key, qSorted, qCount,
-						sizeof(PgturbohybridSparseVectorEntry),
-						PgturbohybridSparseEntryTermCompare);
-			if (found != NULL)
-				dot += (double) found->weight * (double) docEntries[d].weight;
-		}
-		cands[i].score = dot;
-		if (docDatum != (struct varlena *) DatumGetPointer(value))
-			pfree(docDatum);
-		if (stats != NULL)
-			stats->exactRerankScoreUs += PgturbohybridElapsedUs(t);
-		rescored++;
-		ExecClearTuple(slot);
-	}
-	ExecDropSingleTupleTableSlot(slot);
-
-	if (rescored > 0)
-	{
-		qsort(cands, count, sizeof(PgturbohybridSparseCandidate),
-			  PgturbohybridSparseCandidateScoreCompare);
-		for (int i = 0; i < beforeTopKCount; i++)
-		{
-			if (beforeTopK[i] != cands[i].nodeId)
-			{
-				if (stats != NULL)
-					stats->exactRerankTopkChanged = true;
-				break;
-			}
-		}
-	}
-	if (stats != NULL)
-		stats->exactRerankCount = rescored;
-	if (beforeTopK != NULL)
-		pfree(beforeTopK);
-	pfree(qSorted);
-}
-
-/*
- * Sparse-as-sole-ORDER-BY scan: resolve the query's sparse_query
- * against the native sparse inverted index, exact-OR-accumulate over live nodes,
- * and fill state->results sorted by descending inner product.  fusedScore is set
- * to the sparse score so amgettuple returns -score as the ORDER BY distance,
- * matching turbohybrid_sparse_inner_product_distance().
- */
-static void
-PgturbohybridCollectSparseOnlyResults(IndexScanDesc scan,
-									  PgturbohybridScanState *state,
-									  PgturbohybridQueryHeader *scanQuery,
-									  PgturbohybridQueryHeader *originalQuery,
-									  int autoBudgetLimit,
-									  MemoryContext tmpCtx,
-									  PgturbohybridLastScanStats *lastStats)
-{
-	PgturbohybridSparseCandidate *cands = NULL;
-	PgturbohybridSparseScanStats sstats;
-	PgturbohybridResult *results;
-	int			finalTarget;
-	int			candidateK;
-	int			n;
-
-	finalTarget = (int) PgturbohybridEffectiveFinalK(originalQuery, autoBudgetLimit);
-	if (finalTarget < 1)
-		finalTarget = 1;
-	candidateK = scanQuery->sparseK > 0 ? scanQuery->sparseK : finalTarget;
-	if (candidateK < finalTarget)
-		candidateK = finalTarget;
-
-	n = PgturbohybridSparseCollectCandidates(scan->indexRelation, scanQuery,
-											 candidateK, pgturbohybrid_simd,
-											 pgturbohybrid_enable_sparse_wand, &cands,
-											 tmpCtx, &sstats);
-
-	/* Exact f32 rerank of the top band; no-op for f32 indexes. */
-	PgturbohybridSparseRerankCandidates(scan, scanQuery, cands, n, autoBudgetLimit,
-										sstats.quantBits, &sstats);
-
-	results = (PgturbohybridResult *) palloc0(sizeof(PgturbohybridResult) *
-											  Max(n, 1));
-	for (int i = 0; i < n; i++)
-	{
-		results[i].nodeId = cands[i].nodeId;
-		results[i].heaptid = cands[i].heaptid;
-		results[i].hasSparse = true;
-		results[i].sparseSimilarity = cands[i].score;
-		results[i].sparseRank = i + 1;
-		results[i].fusedScore = cands[i].score;
-	}
-
-	state->results = results;
-	state->resultCount = n;
-	state->resultIndex = 0;
-	state->collectDone = true;
-
-	strlcpy(lastStats->indexShape, "sparse", sizeof(lastStats->indexShape));
-	strlcpy(lastStats->profile, PgturbohybridProfileName(pgturbohybrid_profile),
-			sizeof(lastStats->profile));
-	strlcpy(lastStats->fusion, PgturbohybridQueryFusionName(scanQuery->fusion),
-			sizeof(lastStats->fusion));
-	lastStats->sparse.branchAvailable = sstats.branchAvailable;
-	lastStats->sparse.branchUsed = sstats.branchUsed;
-	lastStats->sparse.terms = sstats.terms;
-	lastStats->sparse.resolvedTerms = sstats.resolvedTerms;
-	lastStats->sparse.postingsTouched = sstats.postingsTouched;
-	lastStats->sparse.candidatesScored = sstats.candidatesScored;
-	lastStats->sparse.elapsedUs = sstats.elapsedUs;
-	lastStats->sparse.quantBits = sstats.quantBits;
-	lastStats->sparse.quantMode = sstats.quantMode;
-	lastStats->sparse.encoding = sstats.encoding;
-	lastStats->sparse.scalarTailPostings = sstats.scalarTailPostings;
-	lastStats->sparse.rerankMode = sstats.rerankMode;
-	lastStats->sparse.exactRerankCount = sstats.exactRerankCount;
-	lastStats->sparse.exactRerankFetchUs = sstats.exactRerankFetchUs;
-	lastStats->sparse.exactRerankScoreUs = sstats.exactRerankScoreUs;
-	lastStats->sparse.exactRerankTopkChanged = sstats.exactRerankTopkChanged;
-	lastStats->sparse.scoreKernel = sstats.scoreKernel;
-	lastStats->sparse.simdBlocks = sstats.simdBlocks;
-	lastStats->sparse.usedWand = sstats.usedWand;
-	lastStats->sparse.blocksVisited = sstats.blocksVisited;
-	lastStats->sparse.blocksSkipped = sstats.blocksSkipped;
-	lastStats->sparse.wandPruned = sstats.wandPruned;
-	lastStats->sparse.wandIterations = sstats.wandIterations;
-	lastStats->sparse.wandThresholdUpdates = sstats.wandThresholdUpdates;
-	lastStats->sparse.wandHeapUpdates = sstats.wandHeapUpdates;
-	lastStats->sparse.cacheHit = sstats.cacheHit;
-	lastStats->sparse.cacheBuildUs = sstats.cacheBuildUs;
-	lastStats->sparse.cacheBytes = sstats.cacheBytes;
-	lastStats->sparse.hotCacheHits = sstats.hotCacheHits;
-	lastStats->sparse.hotCacheMisses = sstats.hotCacheMisses;
-	lastStats->sparse.hotCacheBytes = sstats.hotCacheBytes;
-	lastStats->sparse.hotCacheEvictions = sstats.hotCacheEvictions;
-	lastStats->sparse.deltaPages = sstats.deltaPages;
-	lastStats->sparse.deltaTerms = sstats.deltaTerms;
-	lastStats->sparse.deltaPostingsDecoded = sstats.deltaPostingsDecoded;
-	lastStats->sparse.deltaCacheHit = sstats.deltaCacheHit;
-	lastStats->sparse.deltaGeneration = sstats.deltaGeneration;
-	lastStats->sparse.candidatesRequested = originalQuery->sparseK;
-	lastStats->sparse.candidatesEffective = scanQuery->sparseK;
-	lastStats->sparse.kDefaulted =
-		(originalQuery->flags & PGTURBOHYBRID_QUERY_FLAG_SPARSE_K_DEFAULTED) != 0;
-	lastStats->sparse.candidates = n;
-	lastStats->finalResults = n;
-	lastStats->unionCandidates = n;
-	lastStats->finalKRequested = PgturbohybridRequestedFinalK(originalQuery);
-	lastStats->finalKEffective = finalTarget;
-	lastStats->detectedSqlLimit = autoBudgetLimit;
-	lastStats->autoBudgetLimit = autoBudgetLimit;
+											 finalResults, queryShape);
 }
 
 static void
@@ -4559,13 +2955,9 @@ PgturbohybridCollectScanResults(IndexScanDesc scan, PgturbohybridScanState *stat
 	uint32		generationArrayNodeCount = 0;
 	uint16		effectiveFusion;
 	MemoryContext oldCtx;
-	PgturbohybridLastScanStats lastStats;
-	instr_time	totalStart;
-	instr_time	phaseStart;
 	PgturbohybridQueryHeader *originalQuery = state->query;
 	PgturbohybridQueryHeader *scanQuery;
 	int			autoBudgetLimit;
-	char		bm25BudgetReason[48];
 	double		bm25DenseConfidence = 0.0;
 	PgturbohybridBm25QuerySignals hybridSignals;
 	PgturbohybridHybridBudgetChoice hybridBudgetChoice;
@@ -4577,48 +2969,27 @@ PgturbohybridCollectScanResults(IndexScanDesc scan, PgturbohybridScanState *stat
 	bool		denseProbeReusable = false;
 	bool		denseProbeAvailable = false;
 	double		denseProbeGap = 0.0;
-	uint64		denseProbeElapsedUs = 0;
-	uint32		bm25HybridBoundStopRank = 0;
-	uint32		bm25HybridBoundSkippedEstimated = 0;
-	double		bm25HybridBoundThreshold = 0.0;
-	bool		bm25HybridBoundSafe = true;
-	int			bm25BudgetEffectiveK;
 	PgturbohybridBm25FusedScoreBoundContext fusedBound;
 	bool		hasLexicalKey;
-	bool		denseBranchUsed = false;
-	bool		bm25BranchUsed = false;
 	uint16		requestedFusion;
-	int			hybridQueryShapeForStats;
+	int			hybridQueryShape;
 	bool		hasMultivectorQuery;
 	bool		hasVectorQuery;
 	bool		hasTextQuery;
 	bool		indexIsMultiVector;
 	bool		canRunVectorBranch;
 	bool		useDocumentFusionKey;
-	bool		multivectorBranchUsed = false;
 	bool		multivectorMergedAsDense = false;
-	uint64		multivectorElapsedUs = 0;
-	PgturbohybridSparseCandidate *sparse = NULL;
-	int			sparseCount = 0;
-	PgturbohybridSparseScanStats sparseStats;
-	bool		sparseBranchUsed = false;
-	bool		hasSparseQuery;
 
 	if (state->collectDone)
 		return;
 
-	INSTR_TIME_SET_CURRENT(totalStart);
 	memset(&denseStats, 0, sizeof(denseStats));
 	memset(&multivectorStats, 0, sizeof(multivectorStats));
 	memset(&bm25Stats, 0, sizeof(bm25Stats));
-	memset(&sparseStats, 0, sizeof(sparseStats));
-	memset(&lastStats, 0, sizeof(lastStats));
-	lastStats.finalDiversity.mode = PGTURBOHYBRID_FINAL_DIVERSITY_OFF;
-	lastStats.finalDiversity.payloadSlot = -1;
 	memset(&fusedBound, 0, sizeof(fusedBound));
 	memset(&hybridSignals, 0, sizeof(hybridSignals));
 	memset(&denseProbeStats, 0, sizeof(denseProbeStats));
-	strlcpy(bm25BudgetReason, "not_evaluated", sizeof(bm25BudgetReason));
 	oldCtx = MemoryContextSwitchTo(so->tmpCtx);
 	autoBudgetLimit = PgturbohybridCurrentLimit();
 	scanQuery = PgturbohybridEffectiveQuery(originalQuery, autoBudgetLimit, so->tmpCtx);
@@ -4637,36 +3008,6 @@ PgturbohybridCollectScanResults(IndexScanDesc scan, PgturbohybridScanState *stat
 	indexIsMultiVector = PgturbohybridIndexIsMultiVector(scan->indexRelation);
 	canRunVectorBranch = hasVectorQuery && !indexIsMultiVector;
 	useDocumentFusionKey = hasMultivectorQuery;
-
-	/*
-	 * Sparse-as-sole-ORDER-BY: the query targets only the sparse
-	 * column.  Resolve it against the native sparse inverted index and return
-	 * candidates ranked by exact inner product, bypassing the dense/bm25 fusion
-	 * machinery.  Fusing sparse with dense/bm25 is handled by the RRF path.
-	 */
-	if (PgturbohybridQueryHasSparse(scanQuery) &&
-		!hasVectorQuery && !hasMultivectorQuery && !hasTextQuery)
-	{
-		PgturbohybridCollectSparseOnlyResults(scan, state, scanQuery,
-											  originalQuery, autoBudgetLimit,
-											  so->tmpCtx, &lastStats);
-		lastStats.elapsedUs = PgturbohybridElapsedUs(totalStart);
-		pgturbohybrid_last_scan_state = lastStats;
-		state->query = originalQuery;
-		MemoryContextSwitchTo(oldCtx);
-		return;
-	}
-
-	/*
-	 * Sparse-with-dense/bm25 fusion only supports RRF; the
-	 * weighted/fast_weighted/calibrated/dbsf modes are dense+bm25/maxsim only.
-	 */
-	hasSparseQuery = PgturbohybridQueryHasSparse(scanQuery);
-	if (hasSparseQuery && requestedFusion != PGTURBOHYBRID_FUSION_RRF)
-		ereport(ERROR,
-				(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
-				 errmsg("sparse_query fusion currently supports only the rrf fusion mode"),
-				 errhint("Use fusion => 'rrf' when combining sparse_query with dense or text retrieval.")));
 
 	PgturbohybridQueryValidateMultiVectorFusionSupport(scan->indexRelation,
 													   scanQuery);
@@ -4698,11 +3039,9 @@ PgturbohybridCollectScanResults(IndexScanDesc scan, PgturbohybridScanState *stat
 														  autoBudgetLimit) * 2,
 							  16));
 
-		INSTR_TIME_SET_CURRENT(phaseStart);
 		denseProbeCount = PgturbohybridGraphCollectDenseCandidates(scan, denseProbeK,
 														 &denseProbe, so->tmpCtx,
 														 &denseProbeStats);
-		denseProbeElapsedUs = PgturbohybridElapsedUs(phaseStart);
 		denseProbeAvailable = denseProbeCount > 1;
 		denseProbeGap = PgturbohybridDenseConfidence(denseProbe, denseProbeCount,
 											  PgturbohybridBudgetFinalTarget(scanQuery,
@@ -4714,47 +3053,32 @@ PgturbohybridCollectScanResults(IndexScanDesc scan, PgturbohybridScanState *stat
 											denseProbeAvailable,
 											autoBudgetLimit,
 											&hybridBudgetChoice);
-	hybridQueryShapeForStats = hybridBudgetChoice.queryShape;
+	hybridQueryShape = hybridBudgetChoice.queryShape;
 	if (!hybridBudgetChoice.adaptive &&
 		requestedFusion == PGTURBOHYBRID_FUSION_CALIBRATED)
-		hybridQueryShapeForStats =
+		hybridQueryShape =
 			PgturbohybridHybridShapeFromSignals(scanQuery, &hybridSignals,
 											denseProbeGap,
 											denseProbeAvailable);
-	strlcpy(lastStats.hybrid.queryShape,
-			PgturbohybridHybridQueryShapeName(hybridQueryShapeForStats),
-			sizeof(lastStats.hybrid.queryShape));
-	strlcpy(lastStats.calibratedFusion.queryShape,
-			PgturbohybridHybridQueryShapeName(hybridQueryShapeForStats),
-			sizeof(lastStats.calibratedFusion.queryShape));
 	if (denseProbe != NULL && denseProbeCount > 0 &&
 		denseProbeK >= scanQuery->denseK)
 	{
 		dense = denseProbe;
 		denseCount = denseProbeCount;
 		denseStats = denseProbeStats;
-		lastStats.dense.elapsedUs = denseProbeElapsedUs;
 		denseProbeReusable = true;
 	}
 
 	if (canRunVectorBranch &&
 		scanQuery->denseK > 0 && !denseProbeReusable)
 	{
-		denseBranchUsed = true;
-		INSTR_TIME_SET_CURRENT(phaseStart);
 		denseCount = PgturbohybridGraphCollectDenseCandidates(scan, scanQuery->denseK,
 												   &dense, so->tmpCtx,
 												   &denseStats);
-		lastStats.dense.elapsedUs = denseProbeElapsedUs +
-			PgturbohybridElapsedUs(phaseStart);
 	}
-	else if (denseProbeReusable)
-		denseBranchUsed = true;
 
 	if (hasMultivectorQuery && scanQuery->multivectorK > 0)
 	{
-		multivectorBranchUsed = true;
-		INSTR_TIME_SET_CURRENT(phaseStart);
 		multivectorCount =
 			PgturbohybridGraphCollectMultiVectorDenseCandidates(scan,
 																scanQuery,
@@ -4762,7 +3086,6 @@ PgturbohybridCollectScanResults(IndexScanDesc scan, PgturbohybridScanState *stat
 																&multivector,
 																so->tmpCtx,
 																&multivectorStats);
-		multivectorElapsedUs = PgturbohybridElapsedUs(phaseStart);
 		if (!canRunVectorBranch)
 		{
 			dense = multivector;
@@ -4775,9 +3098,8 @@ PgturbohybridCollectScanResults(IndexScanDesc scan, PgturbohybridScanState *stat
 	}
 
 	PgturbohybridMaybeApplyDenseBm25Budget(scanQuery, dense, denseCount,
-									  autoBudgetLimit, bm25BudgetReason,
-									  sizeof(bm25BudgetReason),
-									  &bm25DenseConfidence);
+										  autoBudgetLimit, NULL, 0,
+										  &bm25DenseConfidence);
 	if (hasMultivectorQuery)
 		PgturbohybridMaybeApplyMultiVectorAdmissionBudget(scanQuery, originalQuery,
 														  multivectorMergedAsDense ? &denseStats : &multivectorStats,
@@ -4785,13 +3107,9 @@ PgturbohybridCollectScanResults(IndexScanDesc scan, PgturbohybridScanState *stat
 														  autoBudgetLimit,
 														  hybridEffectiveBm25Ceiling,
 														  &hybridBudgetChoice);
-	bm25BudgetEffectiveK = scanQuery->bm25K;
 	PgturbohybridMaybeApplyBm25HybridBound(scanQuery, denseCount,
-									  autoBudgetLimit,
-									  &bm25HybridBoundStopRank,
-									  &bm25HybridBoundSkippedEstimated,
-									  &bm25HybridBoundThreshold,
-									  &bm25HybridBoundSafe);
+									  autoBudgetLimit, NULL, NULL,
+									  NULL, NULL);
 	PgturbohybridPrepareFastWeightedBound(scanQuery, dense, denseCount,
 										  autoBudgetLimit, so->tmpCtx,
 										  &fusedBound);
@@ -4804,8 +3122,6 @@ PgturbohybridCollectScanResults(IndexScanDesc scan, PgturbohybridScanState *stat
 		bool		useWand = pgturbohybrid_enable_wand &&
 			(opts == NULL || opts->bm25BlockMax);
 
-		INSTR_TIME_SET_CURRENT(phaseStart);
-		bm25BranchUsed = true;
 		bm25Count = PgturbohybridBm25TopK(scan->indexRelation,
 										 PgturbohybridQueryGetTsQuery(scanQuery),
 										 scanQuery->bm25K, useWand, so->tmpCtx,
@@ -4813,64 +3129,14 @@ PgturbohybridCollectScanResults(IndexScanDesc scan, PgturbohybridScanState *stat
 										 fusedBound.enabled ? &fusedBound : NULL);
 		PgturbohybridBm25HeapTSVectorRerank(scan, scanQuery, bm25, bm25Count,
 											autoBudgetLimit, &bm25Stats);
-		lastStats.bm25.elapsedUs = PgturbohybridElapsedUs(phaseStart);
 	}
 
-	if (multivectorMergedAsDense)
-		PgturbohybridInjectMultiVectorBm25Candidates(scan, scanQuery, bm25,
-													 bm25Count, &dense,
-													 &denseCount,
-													 autoBudgetLimit,
-													 so->tmpCtx, &denseStats);
-	else
-		PgturbohybridInjectMultiVectorBm25Candidates(scan, scanQuery, bm25,
-													 bm25Count, &multivector,
-													 &multivectorCount,
-													 autoBudgetLimit,
-													 so->tmpCtx, &multivectorStats);
-	if (PgturbohybridUsingLearnedSparseCandidateInjection())
-	{
-		if (multivectorMergedAsDense)
-			denseStats.learnedSparse.branchLatencyUs = lastStats.bm25.elapsedUs;
-		else
-			multivectorStats.learnedSparse.branchLatencyUs = lastStats.bm25.elapsedUs;
-	}
-
-	/* Sparse branch: exact f32 candidates fused via RRF below. */
-	if (hasSparseQuery && scanQuery->sparseK > 0)
-	{
-		INSTR_TIME_SET_CURRENT(phaseStart);
-		sparseBranchUsed = true;
-		sparseCount = PgturbohybridSparseCollectCandidates(scan->indexRelation,
-														   scanQuery,
-														   scanQuery->sparseK,
-														   pgturbohybrid_simd,
-														   pgturbohybrid_enable_sparse_wand,
-														   &sparse, so->tmpCtx,
-														   &sparseStats);
-		/* Exact f32 rerank before fusion so RRF ranks reflect exact scores. */
-		PgturbohybridSparseRerankCandidates(scan, scanQuery, sparse, sparseCount,
-											autoBudgetLimit, sparseStats.quantBits,
-											&sparseStats);
-		lastStats.sparse.elapsedUs = PgturbohybridElapsedUs(phaseStart);
-	}
-
-	INSTR_TIME_SET_CURRENT(phaseStart);
-	fusionCandidatesSeen = denseCount + multivectorCount + bm25Count + sparseCount;
-	lastStats.fusionStats.candidatesSeen = fusionCandidatesSeen;
+	fusionCandidatesSeen = denseCount + multivectorCount + bm25Count;
 	effectiveFusion = pgturbohybrid_force_fusion != 0 ?
 		pgturbohybrid_force_fusion : scanQuery->fusion;
 	useHashTopN = pgturbohybrid_fusion_hash_threshold >= 0 &&
 		fusionCandidatesSeen >= (uint32) pgturbohybrid_fusion_hash_threshold;
-	/*
-	 * The generation-array and hash fusion fast paths do not yet thread the
-	 * sparse branch; route sparse-present fusion through the general
-	 * sorted-merge path (correct, just unoptimized -- later prompts extend the
-	 * fast paths).
-	 */
-	if (hasSparseQuery)
-		useHashTopN = false;
-	if (!hasSparseQuery && !useDocumentFusionKey &&
+	if (!useDocumentFusionKey &&
 		PgturbohybridShouldUseGenerationArray(scan, effectiveFusion,
 											  fusionCandidatesSeen, dense,
 											  denseCount, bm25, bm25Count,
@@ -4880,11 +3146,10 @@ PgturbohybridCollectScanResults(IndexScanDesc scan, PgturbohybridScanState *stat
 													  denseCount, bm25,
 													  bm25Count,
 													  generationArrayNodeCount,
-													  autoBudgetLimit,
-													  so->tmpCtx, &merged,
-													  &mergedCount,
-													  &lastStats);
-		lastStats.fusionStats.heapSize = finalCount;
+											  autoBudgetLimit,
+											  so->tmpCtx, &merged,
+											  &mergedCount,
+											  hybridQueryShape);
 	}
 	else if (useHashTopN)
 	{
@@ -4902,8 +3167,6 @@ PgturbohybridCollectScanResults(IndexScanDesc scan, PgturbohybridScanState *stat
 													&dense[i].heaptid) :
 				PgturbohybridFindMergeSlot(slots, slotMask, dense[i].nodeId);
 
-			if (item->hasDense || item->hasMultivector || item->hasBm25)
-				lastStats.fusionStats.duplicates++;
 			if (multivectorMergedAsDense)
 				PgturbohybridAddMultiVectorCandidate(item, &dense[i]);
 			else
@@ -4918,8 +3181,6 @@ PgturbohybridCollectScanResults(IndexScanDesc scan, PgturbohybridScanState *stat
 				PgturbohybridFindMergeSlot(slots, slotMask,
 										   multivector[i].nodeId);
 
-			if (item->hasDense || item->hasMultivector || item->hasBm25)
-				lastStats.fusionStats.duplicates++;
 			PgturbohybridAddMultiVectorCandidate(item, &multivector[i]);
 		}
 		for (int i = 0; i < bm25Count; i++)
@@ -4930,8 +3191,6 @@ PgturbohybridCollectScanResults(IndexScanDesc scan, PgturbohybridScanState *stat
 													&bm25[i].heaptid) :
 				PgturbohybridFindMergeSlot(slots, slotMask, bm25[i].nodeId);
 
-			if (item->hasDense || item->hasMultivector || item->hasBm25)
-				lastStats.fusionStats.duplicates++;
 			PgturbohybridMergeBm25Candidate(item, &bm25[i]);
 		}
 
@@ -4947,20 +3206,14 @@ PgturbohybridCollectScanResults(IndexScanDesc scan, PgturbohybridScanState *stat
 			if ((scanQuery->flags & PGTURBOHYBRID_QUERY_FLAG_REQUIRE_BM25_MATCH) != 0 &&
 				!item.hasBm25)
 				continue;
-			PgturbohybridRecordFusionClass(&lastStats, &item);
 			merged[mergedCount++] = item;
 		}
 
 		finalCount = PgturbohybridFinalizeFusedResults(scan, state, merged,
 													   mergedCount,
-													   autoBudgetLimit, true,
-													   so->tmpCtx, &merged,
-													   &lastStats.fusionStats.heapReplacements,
-													   &lastStats);
-		strlcpy(lastStats.fusionStats.strategy,
-				useDocumentFusionKey ? "hash_doc" : "hash",
-				sizeof(lastStats.fusionStats.strategy));
-		lastStats.fusionStats.heapSize = finalCount;
+												   autoBudgetLimit, true,
+												   so->tmpCtx, &merged,
+												   hybridQueryShape);
 	}
 	else
 	{
@@ -4979,10 +3232,6 @@ PgturbohybridCollectScanResults(IndexScanDesc scan, PgturbohybridScanState *stat
 												 &multivector[i]);
 		for (int i = 0; i < bm25Count; i++)
 			PgturbohybridAddBm25Candidate(&items[itemCount++], &bm25[i]);
-		for (int i = 0; i < sparseCount; i++)
-			PgturbohybridAddSparseCandidate(&items[itemCount++], &sparse[i],
-											i + 1);
-
 		if (itemCount > 1)
 			qsort(items, itemCount, sizeof(PgturbohybridResult),
 				  useDocumentFusionKey ?
@@ -4999,7 +3248,6 @@ PgturbohybridCollectScanResults(IndexScanDesc scan, PgturbohybridScanState *stat
 														&item.heaptid) == 0 :
 					items[i].nodeId == item.nodeId))
 			{
-				lastStats.fusionStats.duplicates++;
 				if (items[i].hasDense)
 				{
 					item.hasDense = true;
@@ -5020,615 +3268,27 @@ PgturbohybridCollectScanResults(IndexScanDesc scan, PgturbohybridScanState *stat
 				}
 				if (items[i].hasBm25)
 					PgturbohybridMergeBm25ResultItem(&item, &items[i]);
-				if (items[i].hasSparse)
-					PgturbohybridMergeSparseResultItem(&item, &items[i]);
 				i++;
 			}
 
 			if ((scanQuery->flags & PGTURBOHYBRID_QUERY_FLAG_REQUIRE_BM25_MATCH) != 0 &&
 				!item.hasBm25)
 				continue;
-			if ((scanQuery->flags & PGTURBOHYBRID_QUERY_FLAG_REQUIRE_SPARSE_MATCH) != 0 &&
-				!item.hasSparse)
-				continue;
-			PgturbohybridRecordFusionClass(&lastStats, &item);
 			merged[mergedCount++] = item;
 		}
 
 		finalCount = PgturbohybridFinalizeFusedResults(scan, state, merged,
 													   mergedCount,
-													   autoBudgetLimit, true,
-													   so->tmpCtx, &merged,
-													   &lastStats.fusionStats.heapReplacements,
-													   &lastStats);
-		strlcpy(lastStats.fusionStats.strategy,
-				useDocumentFusionKey ? "sorted_merge_doc" : "sorted_merge",
-				sizeof(lastStats.fusionStats.strategy));
-		lastStats.fusionStats.heapSize = finalCount;
+												   autoBudgetLimit, true,
+												   so->tmpCtx, &merged,
+												   hybridQueryShape);
 	}
 
-	lastStats.fusionStats.elapsedUs = PgturbohybridElapsedUs(phaseStart);
 	state->results = merged;
 	state->resultCount = finalCount;
 	state->resultIndex = 0;
 	state->collectDone = true;
 
-	strlcpy(lastStats.indexShape, hasLexicalKey ? "hybrid" : "dense_only",
-			sizeof(lastStats.indexShape));
-	lastStats.bm25.branchAvailable = hasLexicalKey;
-	lastStats.dense.branchUsed = denseBranchUsed;
-	lastStats.multivector.branchUsed = multivectorBranchUsed;
-	lastStats.bm25.branchUsed = bm25BranchUsed;
-	lastStats.sparse.branchAvailable = sparseStats.branchAvailable;
-	lastStats.sparse.branchUsed = sparseBranchUsed;
-	lastStats.sparse.terms = sparseStats.terms;
-	lastStats.sparse.resolvedTerms = sparseStats.resolvedTerms;
-	lastStats.sparse.postingsTouched = sparseStats.postingsTouched;
-	lastStats.sparse.candidatesScored = sparseStats.candidatesScored;
-	lastStats.sparse.quantBits = sparseStats.quantBits;
-	lastStats.sparse.quantMode = sparseStats.quantMode;
-	lastStats.sparse.encoding = sparseStats.encoding;
-	lastStats.sparse.scalarTailPostings = sparseStats.scalarTailPostings;
-	lastStats.sparse.rerankMode = sparseStats.rerankMode;
-	lastStats.sparse.exactRerankCount = sparseStats.exactRerankCount;
-	lastStats.sparse.exactRerankFetchUs = sparseStats.exactRerankFetchUs;
-	lastStats.sparse.exactRerankScoreUs = sparseStats.exactRerankScoreUs;
-	lastStats.sparse.exactRerankTopkChanged = sparseStats.exactRerankTopkChanged;
-	lastStats.sparse.scoreKernel = sparseStats.scoreKernel;
-	lastStats.sparse.simdBlocks = sparseStats.simdBlocks;
-	lastStats.sparse.usedWand = sparseStats.usedWand;
-	lastStats.sparse.blocksVisited = sparseStats.blocksVisited;
-	lastStats.sparse.blocksSkipped = sparseStats.blocksSkipped;
-	lastStats.sparse.wandPruned = sparseStats.wandPruned;
-	lastStats.sparse.wandIterations = sparseStats.wandIterations;
-	lastStats.sparse.wandThresholdUpdates = sparseStats.wandThresholdUpdates;
-	lastStats.sparse.wandHeapUpdates = sparseStats.wandHeapUpdates;
-	lastStats.sparse.cacheHit = sparseStats.cacheHit;
-	lastStats.sparse.cacheBuildUs = sparseStats.cacheBuildUs;
-	lastStats.sparse.cacheBytes = sparseStats.cacheBytes;
-	lastStats.sparse.hotCacheHits = sparseStats.hotCacheHits;
-	lastStats.sparse.hotCacheMisses = sparseStats.hotCacheMisses;
-	lastStats.sparse.hotCacheBytes = sparseStats.hotCacheBytes;
-	lastStats.sparse.hotCacheEvictions = sparseStats.hotCacheEvictions;
-	lastStats.sparse.deltaPages = sparseStats.deltaPages;
-	lastStats.sparse.deltaTerms = sparseStats.deltaTerms;
-	lastStats.sparse.deltaPostingsDecoded = sparseStats.deltaPostingsDecoded;
-	lastStats.sparse.deltaCacheHit = sparseStats.deltaCacheHit;
-	lastStats.sparse.deltaGeneration = sparseStats.deltaGeneration;
-	if (hasSparseQuery)
-	{
-		lastStats.sparse.candidatesRequested = originalQuery->sparseK;
-		lastStats.sparse.candidatesEffective = scanQuery->sparseK;
-		lastStats.sparse.kDefaulted =
-			(originalQuery->flags & PGTURBOHYBRID_QUERY_FLAG_SPARSE_K_DEFAULTED) != 0;
-		lastStats.sparse.candidates = sparseCount;
-	}
-	strlcpy(lastStats.profile, PgturbohybridProfileName(pgturbohybrid_profile),
-			sizeof(lastStats.profile));
-	strlcpy(lastStats.fusion,
-			PgturbohybridQueryFusionName(pgturbohybrid_force_fusion != 0 ?
-								  pgturbohybrid_force_fusion : scanQuery->fusion),
-			sizeof(lastStats.fusion));
-	if (denseBranchUsed)
-	{
-		lastStats.dense.candidatesRequested = originalQuery->denseK;
-		lastStats.dense.candidatesEffective = scanQuery->denseK;
-		lastStats.dense.kDefaulted =
-			(originalQuery->flags & PGTURBOHYBRID_QUERY_FLAG_DENSE_K_DEFAULTED) != 0;
-		lastStats.dense.candidates = denseCount;
-		lastStats.dense.effectiveResultTarget = denseStats.effectiveResultTarget;
-		lastStats.dense.effectiveSearchEf = denseStats.effectiveSearchEf;
-		lastStats.dense.effectiveRescoreBand = denseStats.effectiveRescoreBand;
-		lastStats.dense.highdimWideningMultiplier =
-			denseStats.highdimWideningMultiplier;
-		lastStats.dense.wideningReason = denseStats.wideningReason;
-		lastStats.dense.budgetPolicy = denseStats.dense.budgetPolicy;
-		lastStats.dense.rescoreBandPolicy = denseStats.rescoreBandPolicy;
-	}
-	lastStats.multivector.candidatesRequested = originalQuery->multivectorK;
-	lastStats.multivector.candidatesEffective = scanQuery->multivectorK;
-	lastStats.multivector.candidates =
-		multivectorMergedAsDense ? denseCount : multivectorCount;
-	if (hasMultivectorQuery && !multivectorMergedAsDense)
-		denseStats = multivectorStats;
-	lastStats.bm25.candidatesRequested = originalQuery->bm25K;
-	lastStats.bm25.candidatesEffective = bm25BudgetEffectiveK;
-	lastStats.bm25.kDefaulted =
-		(originalQuery->flags & PGTURBOHYBRID_QUERY_FLAG_BM25_K_DEFAULTED) != 0;
-	lastStats.bm25.candidates = bm25Count;
-	strlcpy(lastStats.bm25.budgetReason, bm25BudgetReason,
-			sizeof(lastStats.bm25.budgetReason));
-	lastStats.bm25.denseConfidence = bm25DenseConfidence;
-	lastStats.bm25.hybridBoundMode = pgturbohybrid_bm25_hybrid_bound;
-	lastStats.bm25.hybridBoundStopRank = bm25HybridBoundStopRank;
-	lastStats.bm25.hybridBoundSkippedEstimated =
-		bm25HybridBoundSkippedEstimated;
-	lastStats.bm25.hybridBoundThreshold = bm25HybridBoundThreshold;
-	lastStats.bm25.hybridBoundSafe = bm25HybridBoundSafe;
-	lastStats.rrfKRequested = originalQuery->rrfK;
-	lastStats.rrfKEffective = scanQuery->rrfK;
-	lastStats.rrfKDefaulted =
-		(originalQuery->flags & PGTURBOHYBRID_QUERY_FLAG_RRF_K_DEFAULTED) != 0;
-	lastStats.finalKRequested = PgturbohybridRequestedFinalK(originalQuery);
-	lastStats.finalKEffective =
-		PgturbohybridEffectiveFinalK(originalQuery, autoBudgetLimit);
-	lastStats.detectedSqlLimit = autoBudgetLimit;
-	lastStats.finalKInferred =
-		PgturbohybridFinalKInferred(originalQuery, autoBudgetLimit);
-	pgturbohybrid_last_final_k_requested = lastStats.finalKRequested;
-	pgturbohybrid_last_final_k_effective = lastStats.finalKEffective;
-	pgturbohybrid_last_sql_limit = lastStats.detectedSqlLimit;
-	pgturbohybrid_last_final_k_inferred = lastStats.finalKInferred;
-	lastStats.autoBudgetLimit = autoBudgetLimit;
-	lastStats.unionCandidates = mergedCount;
-	lastStats.finalResults = finalCount;
-	lastStats.fusionStats.candidatesSeen = fusionCandidatesSeen;
-	lastStats.graphVisitedNodes = denseStats.visitedGraphNodes;
-	lastStats.graphScoredCodes = denseStats.scoredCodes;
-	lastStats.graphExactRescoreCount = denseStats.exactRescoreCount;
-	lastStats.graphHeapRescoreCount = denseStats.heapRescoreCount;
-	lastStats.graphHeapFetchUs = denseStats.heapFetchUs;
-	lastStats.graphHeapRescoreUs = denseStats.heapRescoreUs;
-	lastStats.graphHeapRescoreAutoEnabled =
-		denseStats.heapRescoreAutoEnabled;
-	lastStats.graphHeapRescoreReason = denseStats.heapRescoreReason;
-	lastStats.graphExactRescoreSource = denseStats.exactRescoreSource;
-	lastStats.graphPrepareUs = denseStats.prepareUs;
-	lastStats.graphTraverseUs = denseStats.traverseUs;
-	lastStats.graphEntryUs = denseStats.entryUs;
-	lastStats.graphBaseUs = denseStats.baseUs;
-	lastStats.graphBatchUs = denseStats.batchUs;
-	lastStats.graphHeapUs = denseStats.heapUs;
-	lastStats.graphFillUs = denseStats.fillUs;
-	lastStats.graphFillCandidateBandCalls = denseStats.fillCandidateBandCalls;
-	lastStats.graphFillCandidateBandReason = denseStats.fillCandidateBandReason;
-	lastStats.graphFillCandidateBandVisited = denseStats.fillCandidateBandVisited;
-	lastStats.graphFillCandidateBandScored = denseStats.fillCandidateBandScored;
-	lastStats.graphFillCandidateBandSelectedBefore =
-		denseStats.fillCandidateBandSelectedBefore;
-	lastStats.graphFillCandidateBandSelectedAfter =
-		denseStats.fillCandidateBandSelectedAfter;
-	lastStats.graphFillCandidateBandTarget = denseStats.fillCandidateBandTarget;
-	lastStats.graphFillCandidateBandUsedPayloadRefs =
-		denseStats.fillCandidateBandUsedPayloadRefs;
-	lastStats.graphFillCandidateBandPayloadRefCount =
-		denseStats.fillCandidateBandPayloadRefCount;
-	lastStats.graphRescoreUs = denseStats.rescoreUs;
-	lastStats.graphSortUs = denseStats.sortUs;
-	lastStats.multivector.enabled = denseStats.multivector.enabled;
-	lastStats.multivector.queryVectors = denseStats.multivector.queryVectors;
-	lastStats.multivector.docVectorsLimit =
-		denseStats.multivector.docVectorsLimit;
-	lastStats.multivector.subvectorSearches =
-		denseStats.multivector.subvectorSearches;
-	lastStats.multivector.rawSubvectorHits =
-		denseStats.multivector.rawSubvectorHits;
-	lastStats.multivector.adaptiveWideningTriggered =
-		denseStats.multivector.adaptiveWideningTriggered;
-	lastStats.multivector.adaptiveInitialRawTarget =
-		denseStats.multivector.adaptiveInitialRawTarget;
-	lastStats.multivector.adaptiveFinalRawTarget =
-		denseStats.multivector.adaptiveFinalRawTarget;
-	strlcpy(lastStats.multivector.candidateSource,
-			denseStats.multivector.candidateSource,
-			sizeof(lastStats.multivector.candidateSource));
-	strlcpy(lastStats.multivector.candidatePath,
-			denseStats.multivector.candidatePath,
-			sizeof(lastStats.multivector.candidatePath));
-	strlcpy(lastStats.multivector.proxyEncoderKind,
-			denseStats.multivector.proxyEncoderKind,
-			sizeof(lastStats.multivector.proxyEncoderKind));
-	lastStats.learnedProjection = denseStats.learnedProjection;
-	strlcpy(lastStats.multivector.graphMode,
-			denseStats.multivector.graphMode,
-			sizeof(lastStats.multivector.graphMode));
-	lastStats.multivector.proxyGraphSearches =
-		denseStats.multivector.proxyGraphSearches;
-	lastStats.multivector.exactTokenScanEnabled =
-		denseStats.multivector.exactTokenScanEnabled;
-	lastStats.multivector.exactTokenScanNodesScored =
-		denseStats.multivector.exactTokenScanNodesScored;
-	lastStats.multivector.plainFallbackUsed =
-		denseStats.multivector.plainFallbackUsed;
-	strlcpy(lastStats.multivector.plainFallbackReason,
-			denseStats.multivector.plainFallbackReason,
-			sizeof(lastStats.multivector.plainFallbackReason));
-	lastStats.multivector.plainFallbackDocsScored =
-		denseStats.multivector.plainFallbackDocsScored;
-	lastStats.multivector.plainFallbackPairs =
-		denseStats.multivector.plainFallbackPairs;
-	lastStats.multivector.docGraphPrototypeEnabled =
-		denseStats.multivector.docGraphPrototypeEnabled;
-	lastStats.multivector.docGraphNodes =
-		denseStats.multivector.docGraphNodes;
-	lastStats.multivector.docGraphDocsScored =
-		denseStats.multivector.docGraphDocsScored;
-	lastStats.multivector.docGraphEdgesVisited =
-		denseStats.multivector.docGraphEdgesVisited;
-	lastStats.multivector.docGraphCandidates =
-		denseStats.multivector.docGraphCandidates;
-	lastStats.multivector.docGraphSearchEf =
-		denseStats.multivector.docGraphSearchEf;
-	lastStats.multivector.docGraphOversampling =
-		denseStats.multivector.docGraphOversampling;
-	lastStats.multivector.docGraphRescoreK =
-		denseStats.multivector.docGraphRescoreK;
-	lastStats.multivector.docGraphEntrySampleConfigured =
-		denseStats.multivector.docGraphEntrySampleConfigured;
-	lastStats.multivector.docGraphEntrySampleEffective =
-		denseStats.multivector.docGraphEntrySampleEffective;
-	lastStats.multivector.docGraphEntrySampleScored =
-		denseStats.multivector.docGraphEntrySampleScored;
-	lastStats.multivector.docGraphQuantizedScores =
-		denseStats.multivector.docGraphQuantizedScores;
-	lastStats.compactMaxsimScoreUs =
-		denseStats.compactMaxsimScoreUs;
-	lastStats.compactMaxsimPairs =
-		denseStats.compactMaxsimPairs;
-	lastStats.compactMaxsimCacheHits =
-		denseStats.compactMaxsimCacheHits;
-	lastStats.compactMaxsimCacheMisses =
-		denseStats.compactMaxsimCacheMisses;
-	lastStats.compactMaxsimBoundChecks =
-		denseStats.compactMaxsimBoundChecks;
-	lastStats.compactMaxsimDocsPruned =
-		denseStats.compactMaxsimDocsPruned;
-	lastStats.compactMaxsimTokensSkipped =
-		denseStats.compactMaxsimTokensSkipped;
-	strlcpy(lastStats.multivector.docGraphStorageKind,
-			denseStats.multivector.docGraphStorageKind,
-			sizeof(lastStats.multivector.docGraphStorageKind));
-	lastStats.proxy = denseStats.proxy;
-	lastStats.centroid = denseStats.centroid;
-	lastStats.fullMultivectorSidecarAvailable =
-		denseStats.fullMultivectorSidecarAvailable;
-	lastStats.quantizedInverted = denseStats.quantizedInverted;
-	strlcpy(lastStats.multivector.docGraphRescoreSource,
-			denseStats.multivector.docGraphRescoreSource,
-			sizeof(lastStats.multivector.docGraphRescoreSource));
-	lastStats.multivector.docGraphExactRerankDocs =
-		denseStats.multivector.docGraphExactRerankDocs;
-	lastStats.multivector.docGraphHeapFetches =
-		denseStats.multivector.docGraphHeapFetches;
-	strlcpy(lastStats.multivector.docGraphWarning,
-			denseStats.multivector.docGraphWarning,
-			sizeof(lastStats.multivector.docGraphWarning));
-	lastStats.multivector.proxyCandidateTarget =
-		denseStats.multivector.proxyCandidateTarget;
-	lastStats.multivector.proxyCandidatesReturned =
-		denseStats.multivector.proxyCandidatesReturned;
-	lastStats.multivector.exactRerankKEffective =
-		denseStats.multivector.exactRerankKEffective;
-	strlcpy(lastStats.multivector.docStorageCacheRequested,
-			denseStats.multivector.docStorageCacheRequested,
-			sizeof(lastStats.multivector.docStorageCacheRequested));
-	strlcpy(lastStats.multivector.docStorageCacheEffective,
-			denseStats.multivector.docStorageCacheEffective,
-			sizeof(lastStats.multivector.docStorageCacheEffective));
-	lastStats.sidecar = denseStats.sidecar;
-	lastStats.multivector.centroidCount =
-		denseStats.multivector.centroidCount;
-	lastStats.multivector.centroidPrerankDocs =
-		denseStats.multivector.centroidPrerankDocs;
-	lastStats.multivector.fullMaxsimRerankDocs =
-		denseStats.multivector.fullMaxsimRerankDocs;
-	strlcpy(lastStats.multivector.docSidecarCacheMode,
-			denseStats.multivector.docSidecarCacheMode,
-			sizeof(lastStats.multivector.docSidecarCacheMode));
-	lastStats.multivector.docSidecarPagesRead =
-		denseStats.multivector.docSidecarPagesRead;
-	lastStats.multivector.docSidecarCacheHits =
-		denseStats.multivector.docSidecarCacheHits;
-	lastStats.multivector.docSidecarCacheMisses =
-		denseStats.multivector.docSidecarCacheMisses;
-	lastStats.multivector.docSidecarBytesTouched =
-		denseStats.multivector.docSidecarBytesTouched;
-	lastStats.multivector.docSidecarVectorsLoaded =
-		denseStats.multivector.docSidecarVectorsLoaded;
-	lastStats.multivector.docSidecarDocMapPagesRead =
-		denseStats.multivector.docSidecarDocMapPagesRead;
-	lastStats.multivector.docSidecarDocMapBytesTouched =
-		denseStats.multivector.docSidecarDocMapBytesTouched;
-	lastStats.multivector.docSidecarResidentVectorsLoaded =
-		denseStats.multivector.docSidecarResidentVectorsLoaded;
-	lastStats.multivector.docSidecarResidentBytesLoaded =
-		denseStats.multivector.docSidecarResidentBytesLoaded;
-	lastStats.multivector.docSidecarVectorChunkRefBytesTouched =
-		denseStats.multivector.docSidecarVectorChunkRefBytesTouched;
-	lastStats.multivector.docSidecarPagedVectorPagesRead =
-		denseStats.multivector.docSidecarPagedVectorPagesRead;
-	lastStats.multivector.docSidecarPagedVectorBytesTouched =
-		denseStats.multivector.docSidecarPagedVectorBytesTouched;
-	lastStats.multivector.sidecarPageReadUs =
-		denseStats.multivector.sidecarPageReadUs;
-	lastStats.multivector.sidecarVectorReconstructUs =
-		denseStats.multivector.sidecarVectorReconstructUs;
-	lastStats.multivector.tokensOriginal =
-		denseStats.multivector.tokensOriginal;
-	lastStats.multivector.tokensPooled =
-		denseStats.multivector.tokensPooled;
-	lastStats.multivector.reservoirsEnabled =
-		denseStats.multivector.reservoirsEnabled;
-	lastStats.multivector.reservoirScoreDocs =
-		denseStats.multivector.reservoirScoreDocs;
-	lastStats.multivector.reservoirCoverageDocs =
-		denseStats.multivector.reservoirCoverageDocs;
-	lastStats.multivector.reservoirMeanDocs =
-		denseStats.multivector.reservoirMeanDocs;
-	lastStats.multivector.reservoirPerTokenDocs =
-		denseStats.multivector.reservoirPerTokenDocs;
-	lastStats.multivector.reservoirBm25Docs =
-		denseStats.multivector.reservoirBm25Docs;
-	lastStats.multivector.reservoirUnionDocs =
-		denseStats.multivector.reservoirUnionDocs;
-	lastStats.multivector.reservoirDuplicates =
-		denseStats.multivector.reservoirDuplicates;
-	lastStats.multivector.bm25InjectionEnabled =
-		denseStats.multivector.bm25InjectionEnabled;
-	lastStats.multivector.bm25InjectionCandidates =
-		denseStats.multivector.bm25InjectionCandidates;
-	lastStats.multivector.bm25InjectionCandidateLimit =
-		denseStats.multivector.bm25InjectionCandidateLimit;
-	lastStats.multivector.bm25InjectionPoolSize =
-		denseStats.multivector.bm25InjectionPoolSize;
-	strlcpy(lastStats.multivector.bm25InjectionLimitReason,
-			denseStats.multivector.bm25InjectionLimitReason,
-			sizeof(lastStats.multivector.bm25InjectionLimitReason));
-	lastStats.multivector.bm25InjectionRetained =
-		denseStats.multivector.bm25InjectionRetained;
-	lastStats.multivector.bm25InjectionExactReranked =
-		denseStats.multivector.bm25InjectionExactReranked;
-	lastStats.learnedSparse = denseStats.learnedSparse;
-	switch ((PgturbohybridMultiVectorDocMapSource) denseStats.multivector.docMapSource)
-	{
-		case PGTURBOHYBRID_MULTIVECTOR_DOCMAP_SOURCE_SIDECAR:
-			strlcpy(lastStats.multivector.docMapSource, "sidecar",
-					sizeof(lastStats.multivector.docMapSource));
-			break;
-		case PGTURBOHYBRID_MULTIVECTOR_DOCMAP_SOURCE_HEAP_TID_HASH:
-			strlcpy(lastStats.multivector.docMapSource, "heap_tid_hash",
-					sizeof(lastStats.multivector.docMapSource));
-			break;
-		case PGTURBOHYBRID_MULTIVECTOR_DOCMAP_SOURCE_NONE:
-		default:
-			strlcpy(lastStats.multivector.docMapSource, "none",
-					sizeof(lastStats.multivector.docMapSource));
-			break;
-	}
-	lastStats.multivector.docMapBytes =
-		denseStats.multivector.docMapBytes;
-	lastStats.multivector.uniqueDocs = denseStats.multivector.uniqueDocs;
-	lastStats.multivector.duplicateDocHits =
-		denseStats.multivector.duplicateDocHits;
-	lastStats.multivector.maxsimUpdates =
-		denseStats.multivector.maxsimUpdates;
-	lastStats.multivector.docCandidates = denseStats.multivector.docCandidates;
-	lastStats.multivector.exactRerankEnabled =
-		denseStats.multivector.exactRerankEnabled;
-	lastStats.multivector.exactRerankDocs =
-		denseStats.multivector.exactRerankDocs;
-	lastStats.multivector.exactRerankPairs =
-		denseStats.multivector.exactRerankPairs;
-	strlcpy(lastStats.multivector.exactRerankSource,
-			PgturbohybridMultiVectorRerankSourceName(
-				denseStats.multivector.exactRerankSource),
-			sizeof(lastStats.multivector.exactRerankSource));
-	lastStats.multivector.exactRerankHeapFetches =
-		denseStats.multivector.exactRerankHeapFetches;
-	lastStats.multivector.exactRerankSidecarReads =
-		denseStats.multivector.exactRerankSidecarReads;
-	lastStats.multivector.exactRerankSidecarBytes =
-		denseStats.multivector.exactRerankSidecarBytes;
-	lastStats.multivector.candidateSourceUs =
-		denseStats.multivector.candidateSourceUs;
-	lastStats.multivector.docGraphTraversalUs =
-		denseStats.multivector.docGraphTraversalUs;
-	lastStats.multivector.proxyCandidateUs =
-		denseStats.multivector.proxyCandidateUs;
-	lastStats.multivector.proxyGraphTraversalUs =
-		denseStats.multivector.proxyGraphTraversalUs;
-	lastStats.multivector.proxyScoringUs =
-		denseStats.multivector.proxyScoringUs;
-	lastStats.multivector.centroidLitePostingUs =
-		denseStats.multivector.centroidLitePostingUs;
-	lastStats.multivector.quantizedInvertedPostingUs =
-		denseStats.multivector.quantizedInvertedPostingUs;
-	lastStats.multivector.sidecarLoadUs =
-		denseStats.multivector.sidecarLoadUs;
-	lastStats.multivector.heapVisibilityUs =
-		denseStats.multivector.heapVisibilityUs;
-	lastStats.multivector.exactHeapFetchUs =
-		denseStats.multivector.exactHeapFetchUs;
-	lastStats.multivector.exactRerankUs =
-		denseStats.multivector.exactRerankUs;
-	lastStats.multivector.finalSortUs =
-		denseStats.multivector.finalSortUs;
-	lastStats.exactRerankCandidates = denseStats.exactRerankCandidates;
-	lastStats.exactRerankTokensEvaluated =
-		denseStats.exactRerankTokensEvaluated;
-	lastStats.exactRerankTokensSkipped =
-		denseStats.exactRerankTokensSkipped;
-	lastStats.exactRerankPairsSaved = denseStats.exactRerankPairsSaved;
-	lastStats.adaptiveRerankTopKChangedVsFull =
-		denseStats.adaptiveRerankTopKChangedVsFull;
-	strlcpy(lastStats.multivector.exactKernel,
-			denseStats.multivector.exactKernel,
-			sizeof(lastStats.multivector.exactKernel));
-	strlcpy(lastStats.multivector.accumulatorKind,
-			denseStats.multivector.accumulatorKind,
-			sizeof(lastStats.multivector.accumulatorKind));
-	lastStats.multivector.memoryBytesEstimate =
-		denseStats.multivector.memoryBytesEstimate;
-	lastStats.multivector.admissionDebugEnabled =
-		denseStats.multivector.admissionDebugEnabled;
-	lastStats.multivector.admissionCandidatesBeforeRerank =
-		denseStats.multivector.admissionCandidatesBeforeRerank;
-	lastStats.multivector.admissionCandidatesAfterTruncation =
-		denseStats.multivector.admissionCandidatesAfterTruncation;
-	lastStats.multivector.admissionExactRerankDocs =
-		denseStats.multivector.admissionExactRerankDocs;
-	lastStats.multivector.admissionTruncatedByDocCandidateK =
-		denseStats.multivector.admissionTruncatedByDocCandidateK;
-	lastStats.multivector.admissionTruncatedByAccumulatorMemory =
-		denseStats.multivector.admissionTruncatedByAccumulatorMemory;
-	lastStats.multivector.admissionTraceAvailable =
-		denseStats.multivector.admissionTraceAvailable;
-	lastStats.multivector.admissionTraceCount =
-		denseStats.multivector.admissionTraceCount;
-	if (lastStats.multivector.admissionTraceCount >
-		PGTURBOHYBRID_MULTIVECTOR_DEBUG_TRACE_LIMIT_MAX)
-		lastStats.multivector.admissionTraceCount =
-			PGTURBOHYBRID_MULTIVECTOR_DEBUG_TRACE_LIMIT_MAX;
-	if (lastStats.multivector.admissionTraceCount > 0)
-		memcpy(lastStats.multivector.admissionTrace,
-			   denseStats.multivector.admissionTrace,
-			   sizeof(PgturbohybridMultiVectorAdmissionTraceEntry) *
-			   lastStats.multivector.admissionTraceCount);
-	lastStats.multivector.tokenStatsAvailable =
-		denseStats.multivector.tokenStatsAvailable;
-	lastStats.multivector.tokenStatsCount =
-		denseStats.multivector.tokenStatsCount;
-	if (lastStats.multivector.tokenStatsCount >
-		PGTURBOHYBRID_MULTIVECTOR_TOKEN_STATS_LIMIT_MAX)
-		lastStats.multivector.tokenStatsCount =
-			PGTURBOHYBRID_MULTIVECTOR_TOKEN_STATS_LIMIT_MAX;
-	if (lastStats.multivector.tokenStatsCount > 0)
-		memcpy(lastStats.multivector.tokenStats,
-			   denseStats.multivector.tokenStats,
-			   sizeof(PgturbohybridMultiVectorTokenStatsEntry) *
-			   lastStats.multivector.tokenStatsCount);
-	lastStats.bm25.terms = bm25Stats.queryTerms;
-	lastStats.bm25.postingsDecoded = bm25Stats.postingsDecoded;
-	lastStats.bm25.blocksVisited = bm25Stats.blocksVisited;
-	lastStats.bm25.blocksSkipped = bm25Stats.blocksSkipped;
-	lastStats.bm25.fusedScoreBoundBlocksPruned =
-		bm25Stats.fusedScoreBoundBlocksPruned;
-	lastStats.bm25.fusedScoreBoundCandidatesPruned =
-		bm25Stats.fusedScoreBoundCandidatesPruned;
-	lastStats.bm25.candidatesScored = bm25Stats.candidatesScored;
-	lastStats.bm25.heapTSVectorRerankMode = bm25Stats.heapTsvectorRerankMode;
-	lastStats.bm25.heapTSVectorRerankCount =
-		bm25Stats.heapTsvectorRerankCount;
-	lastStats.bm25.heapTSVectorRerankFetchUs =
-		bm25Stats.heapTsvectorRerankFetchUs;
-	lastStats.bm25.heapTSVectorRerankScoreUs =
-		bm25Stats.heapTsvectorRerankScoreUs;
-	lastStats.bm25.heapTSVectorRerankTopKChanged =
-		bm25Stats.heapTsvectorRerankTopKChanged;
-	lastStats.bm25.cacheBytes = bm25Stats.cacheBytes;
-	lastStats.bm25.cacheLexiconEntries = bm25Stats.cacheLexiconEntries;
-	lastStats.bm25.cacheHit = bm25Stats.cacheHit;
-	lastStats.bm25.cacheBuildUs = bm25Stats.cacheBuildUs;
-	lastStats.bm25.cacheDocstatsLoaded = bm25Stats.cacheDocstatsLoaded;
-	lastStats.bm25.cacheLivenessLoaded = bm25Stats.cacheLivenessLoaded;
-	lastStats.bm25.docstatsLoadedThisQuery =
-		bm25Stats.docstatsLoadedThisQuery;
-	lastStats.bm25.livenessLoadedThisQuery =
-		bm25Stats.livenessLoadedThisQuery;
-	lastStats.bm25.docstatsBytes = bm25Stats.docstatsBytes;
-	lastStats.bm25.livenessBytes = bm25Stats.livenessBytes;
-	lastStats.bm25.coldCacheONWork = bm25Stats.coldCacheONWork;
-	lastStats.bm25.postingsDecodeRatio = bm25Stats.postingsDecodeRatio;
-	lastStats.bm25.commonTermFallback = bm25Stats.commonTermFallback;
-	lastStats.bm25.wandPruned = bm25Stats.wandPruned;
-	lastStats.bm25.hotPostingsCacheHits = bm25Stats.hotPostingsCacheHits;
-	lastStats.bm25.hotPostingsCacheMisses = bm25Stats.hotPostingsCacheMisses;
-	lastStats.bm25.hotPostingsCacheBytes = bm25Stats.hotPostingsCacheBytes;
-	lastStats.bm25.hotPostingsCacheEvictions =
-		bm25Stats.hotPostingsCacheEvictions;
-	lastStats.bm25.deltaLookupMode = bm25Stats.deltaLookupMode;
-	lastStats.bm25.deltaPagesScanned = bm25Stats.deltaPagesScanned;
-	lastStats.bm25.deltaTermPagesRead = bm25Stats.deltaTermPagesRead;
-	lastStats.bm25.deltaBlocksVisited = bm25Stats.deltaBlocksVisited;
-	lastStats.bm25.deltaPostingsDecoded = bm25Stats.deltaPostingsDecoded;
-	lastStats.bm25.deltaCacheBytes = bm25Stats.deltaCacheBytes;
-	lastStats.bm25.deltaCacheTerms = bm25Stats.deltaCacheTerms;
-	lastStats.bm25.deltaCacheHit = bm25Stats.deltaCacheHit;
-	lastStats.bm25.wandIterations = bm25Stats.wandIterations;
-	lastStats.bm25.wandThresholdUpdates = bm25Stats.wandThresholdUpdates;
-	lastStats.bm25.wandActiveSorts = bm25Stats.wandActiveSorts;
-	lastStats.bm25.wandHeapUpdates = bm25Stats.wandHeapUpdates;
-	lastStats.bm25.wandFullReorders = bm25Stats.wandFullReorders;
-	lastStats.bm25.wandBoundTighteningHits = bm25Stats.wandBoundTighteningHits;
-	lastStats.bm25.wandBoundType = bm25Stats.wandBoundType;
-	lastStats.bm25.wandHeapReplacements = bm25Stats.wandHeapReplacements;
-	lastStats.bm25.strategy = bm25Stats.strategy;
-	lastStats.bm25.andDriverDf = bm25Stats.andDriverDf;
-	lastStats.bm25.andVerifiedCandidates = bm25Stats.andVerifiedCandidates;
-	lastStats.bm25.andRejectedCandidates = bm25Stats.andRejectedCandidates;
-	lastStats.bm25.impactTerms = bm25Stats.impactTerms;
-	lastStats.bm25.impactTiersRead = bm25Stats.impactTiersRead;
-	lastStats.bm25.impactPostingsRead = bm25Stats.impactPostingsRead;
-	lastStats.bm25.impactRemainingUpperBound =
-		bm25Stats.impactRemainingUpperBound;
-	lastStats.bm25.impactEarlyStop = bm25Stats.impactEarlyStop;
-	lastStats.bm25.impactExactSafe = bm25Stats.impactExactSafe;
-	lastStats.bm25.impactFullPostingsAvoided =
-		bm25Stats.impactFullPostingsAvoided;
-	lastStats.bm25.impactLoadedFromStorage =
-		bm25Stats.impactLoadedFromStorage;
-	lastStats.bm25.impactBuiltLazily = bm25Stats.impactBuiltLazily;
-	lastStats.bm25.impactLazyPostingsScanned =
-		bm25Stats.impactLazyPostingsScanned;
-	lastStats.bm25.accumulatorMode = bm25Stats.accumulatorMode;
-	lastStats.bm25.accumulatorHashLookups = bm25Stats.accumulatorHashLookups;
-	lastStats.bm25.accumulatorDenseUpdates = bm25Stats.accumulatorDenseUpdates;
-	lastStats.bm25.finalHeapReplacements = bm25Stats.finalHeapReplacements;
-	lastStats.bm25.finalSortedCount = bm25Stats.finalSortedCount;
-	lastStats.bm25.fullSortAvoided = bm25Stats.fullSortAvoided;
-	lastStats.bm25.queryShape = bm25Stats.queryShape;
-	lastStats.bm25.booleanEvalMode = bm25Stats.booleanEvalMode;
-	lastStats.bm25.booleanEvalCalls = bm25Stats.booleanEvalCalls;
-	lastStats.bm25.decodeKernel = bm25Stats.decodeKernel;
-	lastStats.bm25.scoreKernel = bm25Stats.scoreKernel;
-	lastStats.bm25.simdBlocks = bm25Stats.simdBlocks;
-	lastStats.bm25.scalarTailPostings = bm25Stats.scalarTailPostings;
-	lastStats.bm25.prefetches = bm25Stats.prefetches;
-	lastStats.fastWeighted.enabled =
-		effectiveFusion == PGTURBOHYBRID_FUSION_FAST_WEIGHTED;
-	lastStats.fastWeighted.alpha =
-		(scanQuery->flags & PGTURBOHYBRID_QUERY_FLAG_ALPHA_IS_SET) != 0 ?
-		scanQuery->alpha : 0.5;
-	lastStats.calibratedFusion.enabled =
-		effectiveFusion == PGTURBOHYBRID_FUSION_CALIBRATED;
-	lastStats.dbsf.enabled =
-		effectiveFusion == PGTURBOHYBRID_FUSION_DBSF;
-	strlcpy(lastStats.bm25.normMode,
-			lastStats.dbsf.enabled ? "dbsf" :
-			((lastStats.fastWeighted.enabled || lastStats.calibratedFusion.enabled) ?
-			 "saturating" : "none"),
-			sizeof(lastStats.bm25.normMode));
-	strlcpy(lastStats.dense.normMode,
-			lastStats.dbsf.enabled ? "dbsf" :
-			((lastStats.fastWeighted.enabled || lastStats.calibratedFusion.enabled) ?
-			 "logistic" : "none"),
-			sizeof(lastStats.dense.normMode));
-	strlcpy(lastStats.hybrid.budgetPolicy,
-			PgturbohybridHybridBudgetPolicyName(pgturbohybrid_hybrid_budget_policy),
-			sizeof(lastStats.hybrid.budgetPolicy));
-	strlcpy(lastStats.hybrid.queryShape,
-			PgturbohybridHybridQueryShapeName(hybridQueryShapeForStats),
-			sizeof(lastStats.hybrid.queryShape));
-	strlcpy(lastStats.calibratedFusion.queryShape,
-			PgturbohybridHybridQueryShapeName(hybridQueryShapeForStats),
-			sizeof(lastStats.calibratedFusion.queryShape));
-	lastStats.hybrid.denseKChosen = denseBranchUsed ? scanQuery->denseK : 0;
-	lastStats.hybrid.bm25KChosen = scanQuery->bm25K;
-	strlcpy(lastStats.hybrid.budgetReason, hybridBudgetChoice.reason,
-			sizeof(lastStats.hybrid.budgetReason));
-	PgturbohybridBuildBranchPlan(&lastStats.branchPlan, scanQuery,
-								 effectiveFusion,
-								 (hasMultivectorQuery && !multivectorMergedAsDense) ?
-								 multivector : dense,
-								 (hasMultivectorQuery && !multivectorMergedAsDense) ?
-								 multivectorCount : denseCount,
-								 hasMultivectorQuery,
-								 bm25, bm25Count, &denseStats,
-								 hasMultivectorQuery ? multivectorElapsedUs :
-								 lastStats.dense.elapsedUs,
-								 lastStats.bm25.elapsedUs);
-	lastStats.elapsedUs = PgturbohybridElapsedUs(totalStart);
-	pgturbohybrid_last_scan_state = lastStats;
 	state->query = originalQuery;
 	MemoryContextSwitchTo(oldCtx);
 }
@@ -5639,16 +3299,10 @@ pgturbohybridambuild(Relation heap, Relation index, IndexInfo *indexInfo)
 	IndexBuildResult *result;
 
 	PgturbohybridValidateIndex(index, indexInfo);
-	if (PgturbohybridSparseIsPrimary(index))
-		result = PgturbohybridSparsePrimaryBuild(heap, index, indexInfo);
-	else
-		result = tqgraphbuild(heap, index, indexInfo);
+	result = tqgraphbuild(heap, index, indexInfo);
 
 	if (PgturbohybridIndexInfoHasLexical(index, indexInfo))
 		PgturbohybridBm25BuildCollect(heap, index, indexInfo);
-
-	/* No-op unless the index has a sparse-vector key (self-guarded). */
-	PgturbohybridSparseBuildCollect(heap, index, indexInfo);
 
 	return result;
 }
@@ -5657,10 +3311,7 @@ static void
 pgturbohybridambuildempty(Relation index)
 {
 	PgturbohybridValidateIndex(index, NULL);
-	if (PgturbohybridSparseIsPrimary(index))
-		PgturbohybridSparsePrimaryBuildEmpty(index);
-	else
-		tqgraphbuildempty(index);
+	tqgraphbuildempty(index);
 	if (PgturbohybridIndexHasLexical(index))
 		PgturbohybridBm25BuildEmpty(index);
 }
@@ -5674,7 +3325,6 @@ pgturbohybridaminsert(Relation index, Datum *values, bool *isnull, ItemPointer h
 {
 	Datum		value;
 	Datum		lexicalValue;
-	Datum		sparseValue;
 	const PgturbohybridGraphTypeInfo *typeInfo;
 	PgturbohybridGraphSupport support;
 	uint32		nodeId;
@@ -5685,42 +3335,6 @@ pgturbohybridaminsert(Relation index, Datum *values, bool *isnull, ItemPointer h
 	(void) indexUnchanged;
 #endif
 	PgturbohybridValidateIndex(index, indexInfo);
-
-	/*
-	 * Sparse-primary: no dense graph.  Allocate a node_id from the
-	 * node-map chain (the heap TID is recorded there) and append the sparse /
-	 * BM25 deltas keyed on it.  Liveness comes from heap MVCC visibility.
-	 */
-	if (PgturbohybridSparseIsPrimary(index))
-	{
-		PgturbohybridIndexKeyMap map;
-
-		PgturbohybridBuildIndexKeyMap(index, indexInfo, &map);
-		if (isnull[map.primaryKey])
-			return false;
-
-		LockPage(index, PGTURBOHYBRID_GRAPH_UPDATE_LOCK, ExclusiveLock);
-		PG_TRY();
-		{
-			nodeId = PgturbohybridSparsePrimaryInsert(index, heap_tid);
-			if (PgturbohybridIndexGetLexicalDatum(index, values, isnull, &lexicalValue))
-				PgturbohybridBm25AppendDelta(index, nodeId, heap_tid, lexicalValue);
-			if (PgturbohybridIndexGetSparseDatum(index, values, isnull, &sparseValue))
-			{
-				PgturbohybridSparseAppendDelta(index, nodeId, heap_tid, sparseValue);
-				PgturbohybridSparseMaybeCompact(index, false);
-			}
-		}
-		PG_CATCH();
-		{
-			UnlockPage(index, PGTURBOHYBRID_GRAPH_UPDATE_LOCK, ExclusiveLock);
-			PG_RE_THROW();
-		}
-		PG_END_TRY();
-		UnlockPage(index, PGTURBOHYBRID_GRAPH_UPDATE_LOCK, ExclusiveLock);
-
-		return true;
-	}
 
 	if (isnull[0])
 		return false;
@@ -5741,12 +3355,6 @@ pgturbohybridaminsert(Relation index, Datum *values, bool *isnull, ItemPointer h
 			if (insertedNodes > 0 &&
 				PgturbohybridIndexGetLexicalDatum(index, values, isnull, &lexicalValue))
 				PgturbohybridBm25AppendDelta(index, nodeId, heap_tid, lexicalValue);
-			if (insertedNodes > 0 &&
-				PgturbohybridIndexGetSparseDatum(index, values, isnull, &sparseValue))
-			{
-				PgturbohybridSparseAppendDelta(index, nodeId, heap_tid, sparseValue);
-				PgturbohybridSparseMaybeCompact(index, false);
-			}
 		}
 		PG_CATCH();
 		{
@@ -5771,11 +3379,6 @@ pgturbohybridaminsert(Relation index, Datum *values, bool *isnull, ItemPointer h
 													  value, values, isnull);
 		if (PgturbohybridIndexGetLexicalDatum(index, values, isnull, &lexicalValue))
 			PgturbohybridBm25AppendDelta(index, nodeId, heap_tid, lexicalValue);
-		if (PgturbohybridIndexGetSparseDatum(index, values, isnull, &sparseValue))
-		{
-			PgturbohybridSparseAppendDelta(index, nodeId, heap_tid, sparseValue);
-			PgturbohybridSparseMaybeCompact(index, false);
-		}
 	}
 	PG_CATCH();
 	{
@@ -5793,24 +3396,8 @@ pgturbohybridambulkdelete(IndexVacuumInfo *info, IndexBulkDeleteResult *stats, I
 {
 	IndexBulkDeleteResult *result;
 
-	/*
-	 * Sparse-primary indexes have no flat/graph element storage to prune.  Node
-	 * liveness is delegated to heap-tuple MVCC visibility (the executor filters
-	 * dead TIDs), so bulkdelete is a no-op beyond cache invalidation; dead
-	 * node-map / posting entries are reclaimed by REINDEX or sparse compaction.
-	 */
-	if (PgturbohybridSparseIsPrimary(info->index))
-	{
-		if (stats == NULL)
-			stats = (IndexBulkDeleteResult *) palloc0(sizeof(IndexBulkDeleteResult));
-		PgturbohybridBm25InvalidateCache(info->index);
-		PgturbohybridSparseCacheInvalidate(RelationGetRelid(info->index));
-		return stats;
-	}
-
 	result = tqgraphbulkdelete(info, stats, callback, callback_state);
 	PgturbohybridBm25InvalidateCache(info->index);
-	PgturbohybridSparseCacheInvalidate(RelationGetRelid(info->index));
 
 	return result;
 }
@@ -5820,22 +3407,9 @@ pgturbohybridamvacuumcleanup(IndexVacuumInfo *info, IndexBulkDeleteResult *stats
 {
 	IndexBulkDeleteResult *result;
 
-	if (PgturbohybridSparseIsPrimary(info->index))
-	{
-		if (stats == NULL)
-			stats = (IndexBulkDeleteResult *) palloc0(sizeof(IndexBulkDeleteResult));
-		if (!info->estimated_count)
-			stats->num_pages = RelationGetNumberOfBlocks(info->index);
-		(void) PgturbohybridBm25MaybeCompact(info->index);
-		PgturbohybridBm25InvalidateCache(info->index);
-		PgturbohybridSparseCacheInvalidate(RelationGetRelid(info->index));
-		return stats;
-	}
-
 	result = tqgraphvacuumcleanup(info, stats);
 	(void) PgturbohybridBm25MaybeCompact(info->index);
 	PgturbohybridBm25InvalidateCache(info->index);
-	PgturbohybridSparseCacheInvalidate(RelationGetRelid(info->index));
 
 	return result;
 }
@@ -5843,28 +3417,8 @@ pgturbohybridamvacuumcleanup(IndexVacuumInfo *info, IndexBulkDeleteResult *stats
 static IndexScanDesc
 pgturbohybridambeginscan(Relation index, int nkeys, int norderbys)
 {
-	IndexScanDesc scan;
-
 	PgturbohybridValidateIndex(index, NULL);
-	if (PgturbohybridSparseIsPrimary(index))
-	{
-		PgturbohybridGraphScanOpaque so;
-
-		scan = RelationGetIndexScan(index, nkeys, norderbys);
-		so = palloc0(sizeof(PgturbohybridGraphScanOpaqueData));
-		so->tmpCtx = AllocSetContextCreate(CurrentMemoryContext,
-										   "pgturbohybrid sparse-primary scan context",
-										   0, 8 * 1024, 256 * 1024);
-		so->efSearch = PgturbohybridGraphGetEfSearch(index);
-		so->graphStorageKind = PGTURBOHYBRID_GRAPH_STORAGE_QUANT_GRAPH_NATIVE;
-		so->first = true;
-		so->previousDistance = -get_float8_infinity();
-		scan->opaque = so;
-	}
-	else
-		scan = tqgraphbeginscan(index, nkeys, norderbys);
-
-	return scan;
+	return tqgraphbeginscan(index, nkeys, norderbys);
 }
 
 static void
@@ -5875,7 +3429,6 @@ pgturbohybridamrescan(IndexScanDesc scan, ScanKey keys, int nkeys, ScanKey order
 	bool		hasTextQuery = false;
 	bool		hasVectorQuery = false;
 	bool		hasMultiVectorQuery = false;
-	bool		hasSparseQuery = false;
 	bool		useScalarVectorOrderby = false;
 
 	if (orderbys != NULL && norderbys > 0 &&
@@ -5887,8 +3440,6 @@ pgturbohybridamrescan(IndexScanDesc scan, ScanKey keys, int nkeys, ScanKey order
 		hasVectorQuery = (hybridQuery->flags & PGTURBOHYBRID_QUERY_FLAG_HAS_VECTOR) != 0;
 		hasMultiVectorQuery =
 			(hybridQuery->flags & PGTURBOHYBRID_QUERY_FLAG_HAS_MULTIVECTOR) != 0;
-		hasSparseQuery =
-			(hybridQuery->flags & PGTURBOHYBRID_QUERY_FLAG_HAS_SPARSE) != 0;
 	}
 
 	if (PgturbohybridIndexIsMultiVector(scan->indexRelation))
@@ -5915,40 +3466,11 @@ pgturbohybridamrescan(IndexScanDesc scan, ScanKey keys, int nkeys, ScanKey order
 				(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
 				 errmsg("text_query requires a turbohybrid index with a tsvector key")));
 
-	if (hasSparseQuery)
-	{
-		PgturbohybridIndexKeyMap sparseKeyMap;
+	tqgraphrescan(scan, keys, nkeys,
+				  useScalarVectorOrderby ? denseOrderbys : NULL,
+				  useScalarVectorOrderby ? norderbys : 0);
 
-		PgturbohybridBuildIndexKeyMap(scan->indexRelation, NULL, &sparseKeyMap);
-		if (!sparseKeyMap.hasSparse)
-			ereport(ERROR,
-					(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
-					 errmsg("sparse_query requires a turbohybrid index with a turbohybrid_sparse_vector key"),
-					 errhint("Add a turbohybrid_sparse_vector key to the index, or evaluate sparse_query with turbohybrid_query(...) for exact scoring without an index.")));
-	}
-
-	if (PgturbohybridSparseIsPrimary(scan->indexRelation))
-	{
-		PgturbohybridGraphScanOpaque so =
-			(PgturbohybridGraphScanOpaque) scan->opaque;
-
-		so->first = true;
-		so->returnedRows = 0;
-		so->previousDistance = -get_float8_infinity();
-		MemoryContextReset(so->tmpCtx);
-		if (keys && scan->numberOfKeys > 0)
-			memmove(scan->keyData, keys,
-					scan->numberOfKeys * sizeof(ScanKeyData));
-		if (orderbys && scan->numberOfOrderBys > 0)
-			memmove(scan->orderByData, orderbys,
-					scan->numberOfOrderBys * sizeof(ScanKeyData));
-	}
-	else
-		tqgraphrescan(scan, keys, nkeys,
-					  useScalarVectorOrderby ? denseOrderbys : NULL,
-					  useScalarVectorOrderby ? norderbys : 0);
-
-	if (hasTextQuery || hasVectorQuery || hasMultiVectorQuery || hasSparseQuery)
+	if (hasTextQuery || hasVectorQuery || hasMultiVectorQuery)
 	{
 		PgturbohybridGraphScanOpaque so = (PgturbohybridGraphScanOpaque) scan->opaque;
 		MemoryContext oldCtx = MemoryContextSwitchTo(so->tmpCtx);
@@ -6002,8 +3524,7 @@ pgturbohybridamgettuple(IndexScanDesc scan, ScanDirection dir)
 		return true;
 	}
 
-	result = PgturbohybridSparseIsPrimary(scan->indexRelation) ?
-		false : tqgraphgettuple(scan, dir);
+	result = tqgraphgettuple(scan, dir);
 
 	return result;
 }
@@ -6011,20 +3532,7 @@ pgturbohybridamgettuple(IndexScanDesc scan, ScanDirection dir)
 static void
 pgturbohybridamendscan(IndexScanDesc scan)
 {
-	if (PgturbohybridSparseIsPrimary(scan->indexRelation))
-	{
-		PgturbohybridGraphScanOpaque so =
-			(PgturbohybridGraphScanOpaque) scan->opaque;
-
-		if (so != NULL)
-		{
-			MemoryContextDelete(so->tmpCtx);
-			pfree(so);
-		}
-		scan->opaque = NULL;
-	}
-	else
-		tqgraphendscan(scan);
+	tqgraphendscan(scan);
 }
 
 static bool
@@ -6365,14 +3873,6 @@ pgturbohybridamcostestimate(PlannerInfo *root, IndexPath *path, double loop_coun
 		finalK = Max(denseK, 1);
 		termCount = 2;
 	}
-	/*
-	 * Sparse-primary indexes have no dense/multivector graph.  When the ORDER BY
-	 * query could not be const-folded (query == NULL), denseK defaults to a
-	 * positive value above; force it to zero here so the dense-graph work and
-	 * memory estimation (which assume a populated graph) are skipped.
-	 */
-	if (PgturbohybridSparseIsPrimary(index))
-		denseK = 0;
 	if (bm25K > 0)
 		(void) PgturbohybridBm25GetPlanningStats(index, &bm25Stats);
 	hasHeapFilter = PgturbohybridPathHasFilter(path);
@@ -6583,11 +4083,6 @@ pgturbohybridamoptions(Datum reloptions, bool validate)
 		PGTURBOHYBRID_RELOPT_PARSE("multivector_proxy_encoder", RELOPT_TYPE_ENUM, multivectorProxyEncoder),
 		PGTURBOHYBRID_RELOPT_PARSE("multivector_context_mode", RELOPT_TYPE_ENUM, multivectorContextMode),
 		PGTURBOHYBRID_RELOPT_PARSE("multivector_field_mode", RELOPT_TYPE_ENUM, multivectorFieldMode),
-		PGTURBOHYBRID_RELOPT_PARSE("sparse_quant_bits", RELOPT_TYPE_INT, sparseQuantBits),
-		PGTURBOHYBRID_RELOPT_PARSE("sparse_quant_mode", RELOPT_TYPE_ENUM, sparseQuantMode),
-		PGTURBOHYBRID_RELOPT_PARSE("sparse_postings_encoding", RELOPT_TYPE_ENUM, sparsePostingsEncoding),
-		PGTURBOHYBRID_RELOPT_PARSE("sparse_block_size", RELOPT_TYPE_INT, sparseBlockSize),
-		PGTURBOHYBRID_RELOPT_PARSE("sparse_block_max", RELOPT_TYPE_BOOL, sparseBlockMax),
 	};
 	PgturbohybridOptions *opts = (PgturbohybridOptions *) build_reloptions(reloptions, validate,
 																 pgturbohybrid_relopt_kind,
@@ -6626,14 +4121,6 @@ pgturbohybridamoptions(Datum reloptions, bool validate)
 				 errmsg("invalid value %d for option \"quantization_bits\"", opts->tqBits),
 				 errdetail("Valid values are \"1\", \"2\", \"4\", and \"8\".")));
 
-	if (validate && opts != NULL &&
-		opts->sparseQuantBits != 0 && opts->sparseQuantBits != 8 &&
-		opts->sparseQuantBits != 16)
-		ereport(ERROR,
-				(errcode(ERRCODE_INVALID_PARAMETER_VALUE),
-				 errmsg("invalid value %d for option \"sparse_quant_bits\"", opts->sparseQuantBits),
-				 errdetail("Valid values are \"0\", \"8\", and \"16\".")));
-
 	return (bytea *) opts;
 }
 
@@ -6661,8 +4148,6 @@ pgturbohybridamvalidate(Oid opclassoid)
 		valid = opclass->opcintype == PgturbohybridMultiVectorTypeOid();
 	else if (strcmp(opcname, "bm25_tsvector_turbohybrid_ops") == 0)
 		valid = opclass->opcintype == TSVECTOROID;
-	else if (strcmp(opcname, "sparse_ip_turbohybrid_ops") == 0)
-		valid = opclass->opcintype == PgturbohybridSparseVectorTypeOid();
 
 	ReleaseSysCache(opclasstuple);
 	return valid;
@@ -6786,29 +4271,6 @@ PgturbohybridInit(void)
 					   PGTURBOHYBRID_MULTIVECTOR_FIELD_MODE_OFF,
 					   "Valid values are \"off\" and \"weighted\".",
 					   AccessExclusiveLock);
-	add_int_reloption(pgturbohybrid_relopt_kind, "sparse_quant_bits",
-					  "Sparse-vector postings quantization bit width (0=f32, 8, 16).",
-					  PGTURBOHYBRID_SPARSE_DEFAULT_QUANT_BITS, 0, 16, AccessExclusiveLock);
-	add_enum_reloption(pgturbohybrid_relopt_kind, "sparse_quant_mode",
-					   "Sparse-vector postings quantization mode.",
-					   pgturbohybrid_sparse_quant_mode_relopt_options,
-					   PGTURBOHYBRID_SPARSE_QUANT_MODE_PER_TERM_LINEAR,
-					   "Valid values are \"f32\" and \"per_term_linear\".",
-					   AccessExclusiveLock);
-	add_enum_reloption(pgturbohybrid_relopt_kind, "sparse_postings_encoding",
-					   "Sparse-vector postings physical encoding.",
-					   pgturbohybrid_sparse_encoding_relopt_options,
-					   PGTURBOHYBRID_SPARSE_ENCODING_OPT_AUTO,
-					   "Valid values are \"auto\", \"offset16_soa\", and \"varint\".",
-					   AccessExclusiveLock);
-	add_int_reloption(pgturbohybrid_relopt_kind, "sparse_block_size",
-					  "Sparse-vector postings per chunk.",
-					  PGTURBOHYBRID_SPARSE_DEFAULT_BLOCK_SIZE, 1,
-					  PGTURBOHYBRID_SPARSE_MAX_BLOCK_SIZE, AccessExclusiveLock);
-	add_bool_reloption(pgturbohybrid_relopt_kind, "sparse_block_max",
-					   "Write a per-chunk block-max directory enabling sparse WAND pruning.",
-					   true, AccessExclusiveLock);
-
 	if (IsParallelWorker())
 		return;
 
@@ -6820,327 +4282,6 @@ PgturbohybridInit(void)
 	PgturbohybridRegisterGUCs();
 }
 
-#ifdef PGTURBOHYBRID_DEV_DIAGNOSTICS
-static Datum
-PgturbohybridHybridLastScanStats(PG_FUNCTION_ARGS)
-{
-	StringInfoData json;
-
-	initStringInfo(&json);
-	appendStringInfo(&json,
-						 "{\"profile\":\"%s\","
-						 "\"fusion\":\"%s\","
-						 "\"dense_candidates_requested\":%u,"
-						 "\"dense_candidates_effective\":%u,"
-						 "\"dense_k_defaulted\":%s,"
-						 "\"dense_candidates\":%u,"
-					 "\"dense_effective_result_target\":%u,"
-					 "\"dense_effective_search_ef\":%u,"
-					 "\"dense_effective_rescore_band\":%u,"
-					 "\"dense_highdim_widening_multiplier\":%.3f,"
-					 "\"dense_widening_reason\":\"%s\","
-						 "\"dense_budget_policy\":\"%s\","
-						 "\"dense_rescore_band_policy\":\"%s\","
-						 "\"bm25_candidates_requested\":%u,"
-						 "\"bm25_candidates_effective\":%u,"
-						 "\"bm25_k_defaulted\":%s,"
-						 "\"bm25_candidates\":%u,"
-						 "\"bm25_budget_reason\":\"%s\","
-						 "\"bm25_dense_confidence\":%.6f,"
-						 "\"bm25_hybrid_bound_mode\":\"%s\","
-						 "\"bm25_hybrid_bound_stop_rank\":%u,"
-						 "\"bm25_hybrid_bound_skipped_estimated\":%u,"
-						 "\"bm25_hybrid_bound_threshold\":%.6f,"
-						 "\"bm25_hybrid_bound_safe\":%s,"
-						 "\"rrf_k_requested\":%u,"
-						 "\"rrf_k_effective\":%u,"
-						 "\"rrf_k_defaulted\":%s,"
-						 "\"final_k_requested\":%u,"
-						 "\"final_k_effective\":%u,"
-						 "\"detected_sql_limit\":%u,"
-						 "\"final_k_inferred\":%s,"
-						 "\"auto_budget_limit\":%u,"
-						 "\"union_candidates\":%u,"
-					 "\"final_results\":%u,"
-					 "\"fusion_strategy\":\"%s\","
-					 "\"fusion_candidates_seen\":%u,"
-					 "\"fusion_heap_size\":%u,"
-					 "\"fusion_duplicates\":" UINT64_FORMAT ","
-					 "\"fusion_heap_replacements\":" UINT64_FORMAT ","
-					 "\"fusion_generation_array_reused\":%s,"
-					 "\"fusion_generation_array_reset\":%s,"
-					 "\"fast_weighted_enabled\":%s,"
-					 "\"fast_weighted_alpha\":%.6f,"
-					 "\"bm25_norm_mode\":\"%s\","
-					 "\"dense_norm_mode\":\"%s\","
-					 "\"hybrid_budget_policy\":\"%s\","
-					 "\"hybrid_query_shape\":\"%s\","
-					 "\"hybrid_dense_k_chosen\":%u,"
-					 "\"hybrid_bm25_k_chosen\":%u,"
-					 "\"hybrid_budget_reason\":\"%s\","
-					 "\"both_match\":%u,"
-					 "\"dense_only\":%u,"
-					 "\"bm25_only\":%u,"
-						 "\"graph_visited_nodes\":" UINT64_FORMAT ","
-						 "\"graph_scored_codes\":" UINT64_FORMAT ","
-						 "\"graph_exact_rescore_count\":" UINT64_FORMAT ","
-						 "\"heap_rescore_count\":" UINT64_FORMAT ","
-						 "\"heap_fetch_us\":" UINT64_FORMAT ","
-						 "\"heap_rescore_us\":" UINT64_FORMAT ","
-						 "\"heap_rescore_auto_enabled\":%s,"
-						 "\"heap_rescore_reason\":\"%s\","
-						 "\"exact_rescore_source\":\"%s\","
-						 "\"dense_prepare_us\":" UINT64_FORMAT ","
-					 "\"dense_traverse_us\":" UINT64_FORMAT ","
-					 "\"dense_entry_us\":" UINT64_FORMAT ","
-					 "\"dense_base_us\":" UINT64_FORMAT ","
-					 "\"dense_batch_us\":" UINT64_FORMAT ","
-					 "\"dense_heap_us\":" UINT64_FORMAT ","
-					 "\"dense_fill_us\":" UINT64_FORMAT ","
-					 "\"dense_rescore_us\":" UINT64_FORMAT ","
-					 "\"dense_sort_us\":" UINT64_FORMAT ","
-					 "\"bm25_terms\":%u,"
-					 "\"bm25_postings_decoded\":" UINT64_FORMAT ","
-					 "\"bm25_blocks_visited\":" UINT64_FORMAT ","
-					 "\"bm25_blocks_skipped\":" UINT64_FORMAT ","
-					 "\"bm25_blocks_pruned_by_fused_score_bound\":" UINT64_FORMAT ","
-					 "\"bm25_candidates_pruned_by_fused_score_bound\":" UINT64_FORMAT ","
-					 "\"bm25_candidates_scored\":%u,"
-					 "\"bm25_cache_bytes\":" UINT64_FORMAT ","
-					 "\"bm25_cache_lexicon_entries\":%u,"
-					 "\"bm25_cache_hit\":%s,"
-					 "\"bm25_cache_build_us\":" UINT64_FORMAT ","
-					 "\"bm25_cache_docstats_loaded\":%s,"
-					 "\"bm25_cache_liveness_loaded\":%s,"
-					 "\"bm25_docstats_loaded_this_query\":%s,"
-					 "\"bm25_liveness_loaded_this_query\":%s,"
-					 "\"bm25_docstats_bytes\":" UINT64_FORMAT ","
-					 "\"bm25_liveness_bytes\":" UINT64_FORMAT ","
-					 "\"bm25_cold_cache_o_n_work\":%s,"
-					 "\"bm25_postings_decode_ratio\":%.6f,"
-					 "\"bm25_common_term_fallback\":%s,"
-					 "\"bm25_wand_pruned\":" UINT64_FORMAT ","
-					 "\"bm25_hot_postings_cache_hit\":%s,"
-					 "\"bm25_hot_postings_cache_hits\":" UINT64_FORMAT ","
-					 "\"bm25_hot_postings_cache_misses\":" UINT64_FORMAT ","
-					 "\"bm25_hot_postings_cache_bytes\":" UINT64_FORMAT ","
-					 "\"bm25_hot_postings_cache_evictions\":" UINT64_FORMAT ","
-					 "\"bm25_delta_lookup_mode\":\"%s\","
-					 "\"bm25_delta_pages_scanned\":" UINT64_FORMAT ","
-					 "\"bm25_delta_term_pages_read\":" UINT64_FORMAT ","
-					 "\"bm25_delta_blocks_visited\":" UINT64_FORMAT ","
-					 "\"bm25_delta_postings_decoded\":" UINT64_FORMAT ","
-					 "\"bm25_delta_cache_bytes\":" UINT64_FORMAT ","
-					 "\"bm25_delta_cache_terms\":%u,"
-					 "\"bm25_delta_cache_hit\":%s,"
-					 "\"bm25_wand_iterations\":" UINT64_FORMAT ","
-					 "\"bm25_wand_threshold_updates\":" UINT64_FORMAT ","
-					 "\"bm25_wand_active_sorts\":" UINT64_FORMAT ","
-					 "\"bm25_wand_heap_updates\":" UINT64_FORMAT ","
-					 "\"bm25_wand_full_reorders\":" UINT64_FORMAT ","
-					 "\"bm25_wand_bound_type\":\"%s\","
-					 "\"bm25_wand_bound_tightening_hits\":" UINT64_FORMAT ","
-					 "\"bm25_wand_heap_replacements\":" UINT64_FORMAT ","
-					 "\"bm25_strategy\":\"%s\","
-					 "\"bm25_strategy_guc\":\"%s\","
-					 "\"bm25_and_driver_df\":%u,"
-					 "\"bm25_and_verified_candidates\":%u,"
-					 "\"bm25_and_rejected_candidates\":%u,"
-					 "\"bm25_impact_terms\":%u,"
-					 "\"bm25_impact_tiers_read\":%u,"
-					 "\"bm25_impact_postings_read\":" UINT64_FORMAT ","
-					 "\"bm25_impact_remaining_upper_bound\":%.6f,"
-					 "\"bm25_impact_early_stop\":%s,"
-					 "\"bm25_impact_exact_safe\":%s,"
-					 "\"bm25_impact_full_postings_avoided\":%s,"
-					 "\"bm25_impact_loaded_from_storage\":%s,"
-					 "\"bm25_impact_built_lazily\":%s,"
-					 "\"bm25_impact_lazy_postings_scanned\":" UINT64_FORMAT ","
-					 "\"bm25_accumulator_mode\":\"%s\","
-					 "\"bm25_accumulator_hash_lookups\":" UINT64_FORMAT ","
-					 "\"bm25_accumulator_dense_updates\":" UINT64_FORMAT ","
-					 "\"bm25_final_heap_replacements\":" UINT64_FORMAT ","
-					 "\"bm25_final_sorted_count\":%u,"
-					 "\"bm25_full_sort_avoided\":%s,"
-					 "\"bm25_query_shape\":\"%s\","
-					 "\"bm25_boolean_eval_mode\":\"%s\","
-					 "\"bm25_boolean_eval_calls\":" UINT64_FORMAT ","
-					 "\"bm25_decode_kernel\":\"%s\","
-					 "\"bm25_score_kernel\":\"%s\","
-					 "\"bm25_simd_force\":\"%s\","
-					 "\"bm25_simd_blocks\":" UINT64_FORMAT ","
-					 "\"bm25_scalar_tail_postings\":" UINT64_FORMAT ","
-					 "\"bm25_prefetches\":" UINT64_FORMAT ","
-					 "\"dense_simd_force\":\"%s\","
-					 "\"exact_simd_force\":\"%s\","
-					 "\"dense_elapsed_us\":" UINT64_FORMAT ","
-					 "\"bm25_elapsed_us\":" UINT64_FORMAT ","
-					 "\"fusion_elapsed_us\":" UINT64_FORMAT ","
-						 "\"elapsed_us\":" UINT64_FORMAT "}",
-						 pgturbohybrid_last_scan_state.profile[0] != '\0' ?
-						 pgturbohybrid_last_scan_state.profile :
-						 PgturbohybridProfileName(pgturbohybrid_profile),
-						 pgturbohybrid_last_scan_state.fusion[0] != '\0' ?
-						 pgturbohybrid_last_scan_state.fusion : "none",
-						 pgturbohybrid_last_scan_state.dense.candidatesRequested,
-						 pgturbohybrid_last_scan_state.dense.candidatesEffective,
-						 pgturbohybrid_last_scan_state.dense.kDefaulted ? "true" : "false",
-						 pgturbohybrid_last_scan_state.dense.candidates,
-					 pgturbohybrid_last_scan_state.dense.effectiveResultTarget,
-					 pgturbohybrid_last_scan_state.dense.effectiveSearchEf,
-					 pgturbohybrid_last_scan_state.dense.effectiveRescoreBand,
-					 pgturbohybrid_last_scan_state.dense.highdimWideningMultiplier,
-					 PgturbohybridGraphDenseWideningReasonName(pgturbohybrid_last_scan_state.dense.wideningReason),
-						 PgturbohybridGraphDenseBudgetPolicyNameExternal(pgturbohybrid_last_scan_state.dense.budgetPolicy),
-						 PgturbohybridGraphRescoreBandPolicyNameExternal(pgturbohybrid_last_scan_state.dense.rescoreBandPolicy),
-						 pgturbohybrid_last_scan_state.bm25.candidatesRequested,
-						 pgturbohybrid_last_scan_state.bm25.candidatesEffective,
-						 pgturbohybrid_last_scan_state.bm25.kDefaulted ? "true" : "false",
-						 pgturbohybrid_last_scan_state.bm25.candidates,
-						 pgturbohybrid_last_scan_state.bm25.budgetReason[0] != '\0' ?
-						 pgturbohybrid_last_scan_state.bm25.budgetReason : "unknown",
-						 pgturbohybrid_last_scan_state.bm25.denseConfidence,
-						 PgturbohybridBm25HybridBoundModeName(pgturbohybrid_last_scan_state.bm25.hybridBoundMode),
-						 pgturbohybrid_last_scan_state.bm25.hybridBoundStopRank,
-						 pgturbohybrid_last_scan_state.bm25.hybridBoundSkippedEstimated,
-						 pgturbohybrid_last_scan_state.bm25.hybridBoundThreshold,
-						 pgturbohybrid_last_scan_state.bm25.hybridBoundSafe ? "true" : "false",
-						 pgturbohybrid_last_scan_state.rrfKRequested,
-						 pgturbohybrid_last_scan_state.rrfKEffective,
-						 pgturbohybrid_last_scan_state.rrfKDefaulted ? "true" : "false",
-						 pgturbohybrid_last_scan_state.finalKRequested,
-						 pgturbohybrid_last_scan_state.finalKEffective,
-						 pgturbohybrid_last_scan_state.detectedSqlLimit,
-						 pgturbohybrid_last_scan_state.finalKInferred ? "true" : "false",
-						 pgturbohybrid_last_scan_state.autoBudgetLimit,
-						 pgturbohybrid_last_scan_state.unionCandidates,
-					 pgturbohybrid_last_scan_state.finalResults,
-					 pgturbohybrid_last_scan_state.fusionStats.strategy[0] != '\0' ?
-					 pgturbohybrid_last_scan_state.fusionStats.strategy : "none",
-					 pgturbohybrid_last_scan_state.fusionStats.candidatesSeen,
-					 pgturbohybrid_last_scan_state.fusionStats.heapSize,
-					 pgturbohybrid_last_scan_state.fusionStats.duplicates,
-					 pgturbohybrid_last_scan_state.fusionStats.heapReplacements,
-					 pgturbohybrid_last_scan_state.fusionStats.generationArrayReused ? "true" : "false",
-					 pgturbohybrid_last_scan_state.fusionStats.generationArrayReset ? "true" : "false",
-					 pgturbohybrid_last_scan_state.fastWeighted.enabled ? "true" : "false",
-					 pgturbohybrid_last_scan_state.fastWeighted.alpha,
-					 pgturbohybrid_last_scan_state.bm25.normMode[0] != '\0' ?
-					 pgturbohybrid_last_scan_state.bm25.normMode : "none",
-					 pgturbohybrid_last_scan_state.dense.normMode[0] != '\0' ?
-					 pgturbohybrid_last_scan_state.dense.normMode : "none",
-					 pgturbohybrid_last_scan_state.hybrid.budgetPolicy[0] != '\0' ?
-					 pgturbohybrid_last_scan_state.hybrid.budgetPolicy : "fixed",
-					 pgturbohybrid_last_scan_state.hybrid.queryShape[0] != '\0' ?
-					 pgturbohybrid_last_scan_state.hybrid.queryShape : "fixed",
-					 pgturbohybrid_last_scan_state.hybrid.denseKChosen,
-					 pgturbohybrid_last_scan_state.hybrid.bm25KChosen,
-					 pgturbohybrid_last_scan_state.hybrid.budgetReason[0] != '\0' ?
-					 pgturbohybrid_last_scan_state.hybrid.budgetReason : "fixed_policy",
-					 pgturbohybrid_last_scan_state.bothMatch,
-					 pgturbohybrid_last_scan_state.dense.only,
-					 pgturbohybrid_last_scan_state.bm25.only,
-						 pgturbohybrid_last_scan_state.graphVisitedNodes,
-						 pgturbohybrid_last_scan_state.graphScoredCodes,
-						 pgturbohybrid_last_scan_state.graphExactRescoreCount,
-						 pgturbohybrid_last_scan_state.graphHeapRescoreCount,
-						 pgturbohybrid_last_scan_state.graphHeapFetchUs,
-						 pgturbohybrid_last_scan_state.graphHeapRescoreUs,
-						 pgturbohybrid_last_scan_state.graphHeapRescoreAutoEnabled ? "true" : "false",
-						 PgturbohybridGraphDenseHeapRescoreReasonName(pgturbohybrid_last_scan_state.graphHeapRescoreReason),
-						 PgturbohybridGraphExactRescoreSourceName(pgturbohybrid_last_scan_state.graphExactRescoreSource),
-						 pgturbohybrid_last_scan_state.graphPrepareUs,
-					 pgturbohybrid_last_scan_state.graphTraverseUs,
-					 pgturbohybrid_last_scan_state.graphEntryUs,
-					 pgturbohybrid_last_scan_state.graphBaseUs,
-					 pgturbohybrid_last_scan_state.graphBatchUs,
-					 pgturbohybrid_last_scan_state.graphHeapUs,
-					 pgturbohybrid_last_scan_state.graphFillUs,
-					 pgturbohybrid_last_scan_state.graphRescoreUs,
-					 pgturbohybrid_last_scan_state.graphSortUs,
-					 pgturbohybrid_last_scan_state.bm25.terms,
-					 pgturbohybrid_last_scan_state.bm25.postingsDecoded,
-					 pgturbohybrid_last_scan_state.bm25.blocksVisited,
-					 pgturbohybrid_last_scan_state.bm25.blocksSkipped,
-					 pgturbohybrid_last_scan_state.bm25.fusedScoreBoundBlocksPruned,
-					 pgturbohybrid_last_scan_state.bm25.fusedScoreBoundCandidatesPruned,
-					 pgturbohybrid_last_scan_state.bm25.candidatesScored,
-					 pgturbohybrid_last_scan_state.bm25.cacheBytes,
-					 pgturbohybrid_last_scan_state.bm25.cacheLexiconEntries,
-					 pgturbohybrid_last_scan_state.bm25.cacheHit ? "true" : "false",
-					 pgturbohybrid_last_scan_state.bm25.cacheBuildUs,
-					 pgturbohybrid_last_scan_state.bm25.cacheDocstatsLoaded ? "true" : "false",
-					 pgturbohybrid_last_scan_state.bm25.cacheLivenessLoaded ? "true" : "false",
-					 pgturbohybrid_last_scan_state.bm25.docstatsLoadedThisQuery ? "true" : "false",
-					 pgturbohybrid_last_scan_state.bm25.livenessLoadedThisQuery ? "true" : "false",
-					 pgturbohybrid_last_scan_state.bm25.docstatsBytes,
-					 pgturbohybrid_last_scan_state.bm25.livenessBytes,
-					 pgturbohybrid_last_scan_state.bm25.coldCacheONWork ? "true" : "false",
-					 pgturbohybrid_last_scan_state.bm25.postingsDecodeRatio,
-					 pgturbohybrid_last_scan_state.bm25.commonTermFallback ? "true" : "false",
-					 pgturbohybrid_last_scan_state.bm25.wandPruned,
-					 pgturbohybrid_last_scan_state.bm25.hotPostingsCacheHits > 0 ?
-					 "true" : "false",
-					 pgturbohybrid_last_scan_state.bm25.hotPostingsCacheHits,
-					 pgturbohybrid_last_scan_state.bm25.hotPostingsCacheMisses,
-					 pgturbohybrid_last_scan_state.bm25.hotPostingsCacheBytes,
-					 pgturbohybrid_last_scan_state.bm25.hotPostingsCacheEvictions,
-					 PgturbohybridBm25DeltaLookupModeName(pgturbohybrid_last_scan_state.bm25.deltaLookupMode),
-					 pgturbohybrid_last_scan_state.bm25.deltaPagesScanned,
-					 pgturbohybrid_last_scan_state.bm25.deltaTermPagesRead,
-					 pgturbohybrid_last_scan_state.bm25.deltaBlocksVisited,
-					 pgturbohybrid_last_scan_state.bm25.deltaPostingsDecoded,
-					 pgturbohybrid_last_scan_state.bm25.deltaCacheBytes,
-					 pgturbohybrid_last_scan_state.bm25.deltaCacheTerms,
-					 pgturbohybrid_last_scan_state.bm25.deltaCacheHit ? "true" : "false",
-					 pgturbohybrid_last_scan_state.bm25.wandIterations,
-					 pgturbohybrid_last_scan_state.bm25.wandThresholdUpdates,
-					 pgturbohybrid_last_scan_state.bm25.wandActiveSorts,
-					 pgturbohybrid_last_scan_state.bm25.wandHeapUpdates,
-					 pgturbohybrid_last_scan_state.bm25.wandFullReorders,
-					 PgturbohybridBm25WandBoundTypeName(pgturbohybrid_last_scan_state.bm25.wandBoundType),
-					 pgturbohybrid_last_scan_state.bm25.wandBoundTighteningHits,
-					 pgturbohybrid_last_scan_state.bm25.wandHeapReplacements,
-					 PgturbohybridBm25RuntimeStrategyName(pgturbohybrid_last_scan_state.bm25.strategy),
-					 PgturbohybridBm25StrategyName(pgturbohybrid_bm25_strategy),
-					 pgturbohybrid_last_scan_state.bm25.andDriverDf,
-					 pgturbohybrid_last_scan_state.bm25.andVerifiedCandidates,
-					 pgturbohybrid_last_scan_state.bm25.andRejectedCandidates,
-					 pgturbohybrid_last_scan_state.bm25.impactTerms,
-					 pgturbohybrid_last_scan_state.bm25.impactTiersRead,
-					 pgturbohybrid_last_scan_state.bm25.impactPostingsRead,
-					 pgturbohybrid_last_scan_state.bm25.impactRemainingUpperBound,
-					 pgturbohybrid_last_scan_state.bm25.impactEarlyStop ? "true" : "false",
-					 pgturbohybrid_last_scan_state.bm25.impactExactSafe ? "true" : "false",
-					 pgturbohybrid_last_scan_state.bm25.impactFullPostingsAvoided ? "true" : "false",
-					 pgturbohybrid_last_scan_state.bm25.impactLoadedFromStorage ? "true" : "false",
-					 pgturbohybrid_last_scan_state.bm25.impactBuiltLazily ? "true" : "false",
-					 pgturbohybrid_last_scan_state.bm25.impactLazyPostingsScanned,
-					 PgturbohybridBm25AccumulatorModeName(pgturbohybrid_last_scan_state.bm25.accumulatorMode),
-					 pgturbohybrid_last_scan_state.bm25.accumulatorHashLookups,
-					 pgturbohybrid_last_scan_state.bm25.accumulatorDenseUpdates,
-					 pgturbohybrid_last_scan_state.bm25.finalHeapReplacements,
-					 pgturbohybrid_last_scan_state.bm25.finalSortedCount,
-					 pgturbohybrid_last_scan_state.bm25.fullSortAvoided ? "true" : "false",
-					 PgturbohybridBm25QueryShapeName(pgturbohybrid_last_scan_state.bm25.queryShape),
-					 PgturbohybridBm25BooleanEvalModeName(pgturbohybrid_last_scan_state.bm25.booleanEvalMode),
-					 pgturbohybrid_last_scan_state.bm25.booleanEvalCalls,
-					 PgturbohybridBm25KernelName(pgturbohybrid_last_scan_state.bm25.decodeKernel),
-					 PgturbohybridBm25KernelName(pgturbohybrid_last_scan_state.bm25.scoreKernel),
-					 PgturbohybridBm25SimdForceName(pgturbohybrid_bm25_simd_force),
-					 pgturbohybrid_last_scan_state.bm25.simdBlocks,
-					 pgturbohybrid_last_scan_state.bm25.scalarTailPostings,
-					 pgturbohybrid_last_scan_state.bm25.prefetches,
-					 PgturbohybridGraphTqSimdForceName(pgturbohybrid_dense_simd_force),
-					 PgturbohybridGraphTqExactSimdForceName(pgturbohybrid_dense_exact_simd_force),
-					 pgturbohybrid_last_scan_state.dense.elapsedUs,
-					 pgturbohybrid_last_scan_state.bm25.elapsedUs,
-					 pgturbohybrid_last_scan_state.fusionStats.elapsedUs,
-					 pgturbohybrid_last_scan_state.elapsedUs);
-
-	PG_RETURN_DATUM(DirectFunctionCall1(jsonb_in, CStringGetDatum(json.data)));
-}
-#endif
 
 FUNCTION_PREFIX PG_FUNCTION_INFO_V1(pgturbohybrid_handler);
 Datum

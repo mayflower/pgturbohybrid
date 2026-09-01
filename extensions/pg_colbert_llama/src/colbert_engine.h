@@ -20,8 +20,7 @@ typedef enum PgColbertRole
 typedef enum PgLlamaEmbedOutputMode
 {
 	PG_LLAMA_EMBED_OUTPUT_TOKENS = 0,
-	PG_LLAMA_EMBED_OUTPUT_DENSE = 1,
-	PG_LLAMA_EMBED_OUTPUT_SPARSE = 2
+	PG_LLAMA_EMBED_OUTPUT_DENSE = 1
 } PgLlamaEmbedOutputMode;
 
 typedef enum PgLlamaEmbedPooling
@@ -176,17 +175,6 @@ typedef struct PgColbertEngineOutput
 	PgColbertTokenDebug *tokenDebug;
 	int32	   *tokenIds;
 	float4	   *values;
-	/*
-	 * Sparse (SPLADE-style) output shape, populated only when the model spec's
-	 * outputMode is PG_LLAMA_EMBED_OUTPUT_SPARSE.  The engine emits raw
-	 * (term_id, weight) pairs (possibly with duplicate or non-positive terms);
-	 * the SQL layer applies top_k / min_weight / drop_non_positive / deduplicate
-	 * / normalize when building the turbohybrid_sparse_vector.
-	 */
-	int32		sparseCount;
-	int32		sparseVocabSize;
-	int32	   *sparseTermIds;
-	float4	   *sparseWeights;
 } PgColbertEngineOutput;
 
 typedef struct PgColbertEngineModelInfo
@@ -222,42 +210,5 @@ extern bool PgColbertEngineGetModelInfo(const PgColbertModelSpec *spec,
 										char **errorMessage);
 extern const char *PgColbertEngineName(void);
 extern bool PgColbertEngineImplemented(void);
-
-/*
- * Sparse (SPLADE-style) model backend seam.  This is a separate interface from
- * the dense/token/multivector colbert engine above so a real sparse model can be
- * plugged in (compile-time selected via PG_COLBERT_LLAMA_SPARSE_ENGINE) without
- * touching the colbert engine.  The default build links a deterministic stub
- * that emits reproducible output but reports implemented=false (no trained
- * model).  Encode/EncodeBatch populate the sparse* fields of
- * PgColbertEngineOutput.
- */
-typedef struct PgSparseEngineModelInfo
-{
-	const char *engine;
-	bool		implemented;	/* a real trained sparse model is compiled in */
-	bool		supportsSparse; /* this build can emit sparse output at all */
-	int32		vocabSize;		/* -1 if unknown */
-	const char *path;			/* model path/alias */
-	const char *limitations;
-} PgSparseEngineModelInfo;
-
-extern bool PgSparseEngineImplemented(void);
-extern const char *PgSparseEngineName(void);
-extern bool PgSparseEngineEncode(const PgColbertModelSpec *spec,
-								 const char *input,
-								 MemoryContext ctx,
-								 PgColbertEngineOutput *output,
-								 char **errorMessage);
-extern bool PgSparseEngineEncodeBatch(const PgColbertModelSpec *spec,
-									  const char *const *inputs,
-									  int32 inputCount,
-									  MemoryContext ctx,
-									  PgColbertEngineOutput *outputs,
-									  char **errorMessage);
-extern bool PgSparseEngineGetModelInfo(const PgColbertModelSpec *spec,
-									   MemoryContext ctx,
-									   PgSparseEngineModelInfo *info,
-									   char **errorMessage);
 
 #endif

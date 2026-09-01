@@ -55,22 +55,7 @@ RETURNS turbohybrid_multivector[]
 AS 'MODULE_PATHNAME', 'pg_colbert_llama_llama_embed_mv_batch'
 LANGUAGE C STABLE STRICT PARALLEL RESTRICTED;
 
-CREATE FUNCTION llama_embed_sparse(model pg_catalog.text, input pg_catalog.text, options pg_catalog.jsonb DEFAULT '{}'::pg_catalog.jsonb)
-RETURNS turbohybrid_sparse_vector
-AS 'MODULE_PATHNAME', 'pg_colbert_llama_llama_embed_sparse'
-LANGUAGE C STABLE STRICT PARALLEL RESTRICTED;
-
-CREATE FUNCTION llama_embed_sparse_batch(model pg_catalog.text, inputs pg_catalog.text[], options pg_catalog.jsonb DEFAULT '{}'::pg_catalog.jsonb)
-RETURNS turbohybrid_sparse_vector[]
-AS 'MODULE_PATHNAME', 'pg_colbert_llama_llama_embed_sparse_batch'
-LANGUAGE C STABLE STRICT PARALLEL RESTRICTED;
-
 CREATE FUNCTION llama_embed_model_info(model pg_catalog.text)
 RETURNS pg_catalog.jsonb
 AS 'MODULE_PATHNAME', 'pg_colbert_llama_llama_embed_model_info'
-LANGUAGE C STABLE STRICT PARALLEL RESTRICTED;
-
-CREATE FUNCTION llama_embed_sparse_model_info(model pg_catalog.text, options pg_catalog.jsonb DEFAULT '{}'::pg_catalog.jsonb)
-RETURNS pg_catalog.jsonb
-AS 'MODULE_PATHNAME', 'pg_colbert_llama_llama_embed_sparse_model_info'
 LANGUAGE C STABLE STRICT PARALLEL RESTRICTED;

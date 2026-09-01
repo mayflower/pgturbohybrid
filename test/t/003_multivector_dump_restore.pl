@@ -19,7 +19,7 @@ $node->start;
 $node->safe_psql('postgres', 'CREATE DATABASE pgturbohybrid_mv_dump_src;');
 $node->safe_psql('pgturbohybrid_mv_dump_src', q(
 	CREATE EXTENSION vector;
-	CREATE EXTENSION pgturbohybrid; CREATE EXTENSION pgturbohybrid_experimental;
+	CREATE EXTENSION pgturbohybrid;
 
 	CREATE TABLE mv_dump_docs (
 		id int PRIMARY KEY,
@@ -72,7 +72,7 @@ is($node->safe_psql('pgturbohybrid_mv_dump_dst', q(
 	SET enable_seqscan = off;
 	SELECT id
 	FROM mv_dump_docs
-	ORDER BY colbert <~> turbohybrid_experimental_query(
+	ORDER BY colbert <~> turbohybrid_query(
 		multivector_query => turbohybrid_multivector(ARRAY['[1,0]'::vector, '[0,1]'::vector]),
 		dense_k => 4,
 		final_k => 1

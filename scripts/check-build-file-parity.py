@@ -12,8 +12,7 @@ Fails if:
   - an OBJS entry has no matching src/<name>.c source file, or
   - Makefile.win runs a regression test the Unix Makefile does not.
 
-The Unix > Windows regression *reduction* is expected and is not flagged:
-Windows is a documented reduced-coverage build profile (see docs/compatibility.md).
+The Unix > Windows regression reduction is expected and is not flagged.
 """
 import re
 import sys
@@ -24,13 +23,11 @@ ROOT = Path(__file__).resolve().parent.parent
 # Architecture-specific SIMD kernels intentionally absent from the MSVC build.
 # These use GCC/clang __attribute__((target(...))) + __builtin_cpu_supports,
 # which MSVC does not support; their callers fall back to the scalar paths in
-# pgturbohybrid_quant_score / pgturbohybrid_sparse_score.
+# pgturbohybrid_quant_score.
 WINDOWS_OMITTED = {
     "pgturbohybrid_quant_score_u8_x86",
     "pgturbohybrid_quant_score_signed_x86",
     "pgturbohybrid_quant_score_arm",
-    "pgturbohybrid_sparse_simd_x86",
-    "pgturbohybrid_sparse_simd_arm",
 }
 
 

@@ -21,35 +21,7 @@
 #define PGTURBOHYBRID_QUERY_FLAG_HAS_MULTIVECTOR		0x0200
 #define PGTURBOHYBRID_QUERY_FLAG_HAS_TOKEN_WEIGHTS		0x0400
 #define PGTURBOHYBRID_QUERY_FLAG_HAS_TOKEN_MASK		0x0800
-#define PGTURBOHYBRID_QUERY_FLAG_HAS_SPARSE			0x1000
-#define PGTURBOHYBRID_QUERY_FLAG_REQUIRE_SPARSE_MATCH	0x2000
-#define PGTURBOHYBRID_QUERY_FLAG_SPARSE_K_DEFAULTED	0x4000
-
-#define PGTURBOHYBRID_SPARSE_VECTOR_VERSION 1
-#define PGTURBOHYBRID_SPARSE_VECTOR_FIELD_NONE (-1)
-
-/* On-disk turbohybrid_sparse_vector datum layout (defined here so the sparse
- * index branch can read entries; constructed/validated in pgturbohybrid_query.c). */
-typedef struct PgturbohybridSparseVectorEntry
-{
-	int32		termId;
-	float4		weight;
-	int16		fieldId;
-	uint16		reserved;
-} PgturbohybridSparseVectorEntry;
-
-typedef struct PgturbohybridSparseVector
-{
-	int32		vl_len_;
-	uint16		version;
-	uint16		flags;
-	uint32		count;
-	/* entries follow */
-} PgturbohybridSparseVector;
-
-/* Validate a detoasted sparse-vector datum and return its entries + count. */
-const PgturbohybridSparseVectorEntry *PgturbohybridSparseVectorData(struct varlena *sv,
-																	 uint32 *count);
+#define PGTURBOHYBRID_QUERY_FLAG_UNSUPPORTED_MASK		0x7000
 
 typedef enum PgturbohybridDenseQueryKind
 {
@@ -90,9 +62,10 @@ typedef struct PgturbohybridQueryHeader
 	int32		tsqueryBytes;
 	int32		multivectorDim;
 	int32		multivectorCount;
-	float8		sparseWeight;
-	int32		sparseBytes;
-	int32		sparseK;
+	/* Reserved to preserve the version 4 datum layout. */
+	float8		reservedWeight;
+	int32		reservedBytes;
+	int32		reservedK;
 	/* payload starts at MAXALIGN(sizeof(PgturbohybridQueryHeader)) */
 } PgturbohybridQueryHeader;
 
@@ -133,18 +106,6 @@ PgturbohybridQueryHasText(const PgturbohybridQueryHeader *query)
 	return (query->flags & PGTURBOHYBRID_QUERY_FLAG_HAS_TSQUERY) != 0;
 }
 
-static inline bool
-PgturbohybridQueryHasSparse(const PgturbohybridQueryHeader *query)
-{
-	return (query->flags & PGTURBOHYBRID_QUERY_FLAG_HAS_SPARSE) != 0;
-}
-
-static inline bool
-PgturbohybridQueryRequireSparseMatch(const PgturbohybridQueryHeader *query)
-{
-	return (query->flags & PGTURBOHYBRID_QUERY_FLAG_REQUIRE_SPARSE_MATCH) != 0;
-}
-
 Vector	   *PgturbohybridQueryGetVector(PgturbohybridQueryHeader *query);
 PgturbohybridMultiVector *PgturbohybridQueryGetMultiVector(PgturbohybridQueryHeader *query);
 const float4 *PgturbohybridQueryGetTokenWeights(PgturbohybridQueryHeader *query);
@@ -153,7 +114,6 @@ bool		PgturbohybridQueryHasTokenWeights(const PgturbohybridQueryHeader *query);
 bool		PgturbohybridQueryHasTokenMask(const PgturbohybridQueryHeader *query);
 double		PgturbohybridQueryMultiVectorWeightSum(PgturbohybridQueryHeader *query);
 TSQuery		PgturbohybridQueryGetTsQuery(PgturbohybridQueryHeader *query);
-struct varlena *PgturbohybridQueryGetSparseVector(PgturbohybridQueryHeader *query);
 void		PgturbohybridQueryValidate(PgturbohybridQueryHeader *query);
 void		PgturbohybridQueryValidateFast(PgturbohybridQueryHeader *query);
 const char *PgturbohybridQueryFusionName(uint16 fusion);

@@ -236,6 +236,7 @@
                   inherit name;
                   runtimeInputs = [
                     postgresWithExtensions
+                    postgresql.pg_config
                     pkgs.coreutils
                     pkgs.gnused
                     pkgs.gnugrep
@@ -301,7 +302,6 @@
                 psql --host="$PGHOST" --port="$TH_PGPORT" --username="$PGUSER" --dbname="$PGDATABASE" -v ON_ERROR_STOP=1 <<'SQL'
                 CREATE EXTENSION IF NOT EXISTS vector;
                 CREATE EXTENSION IF NOT EXISTS pgturbohybrid;
-                CREATE EXTENSION IF NOT EXISTS pgturbohybrid_experimental;
                 CREATE EXTENSION IF NOT EXISTS llama_embed;
                 CREATE EXTENSION IF NOT EXISTS pg_colbert_llama;
                 SQL
@@ -384,7 +384,6 @@
                 psql --host="$PGHOST" --port="$TH_PGPORT" --username="$PGUSER" --dbname="$PGDATABASE" -v ON_ERROR_STOP=1 <<'SQL'
                 CREATE EXTENSION IF NOT EXISTS vector;
                 CREATE EXTENSION IF NOT EXISTS pgturbohybrid;
-                CREATE EXTENSION IF NOT EXISTS pgturbohybrid_experimental;
                 CREATE EXTENSION IF NOT EXISTS llama_embed;
                 CREATE EXTENSION IF NOT EXISTS pg_colbert_llama;
                 SQL
@@ -444,98 +443,6 @@
                 ${smoke}/bin/th-smoke
                 ${installcheck}/bin/th-installcheck
               '';
-
-              benchRetrievalQuality = psqlFileScript "th-bench-retrieval-quality" "benchmarks/dev/retrieval_quality_grid.sql";
-
-              benchProfileGrid = psqlFileScript "th-bench-profile-grid" "benchmarks/dev/profile_recall_latency_grid.sql";
-
-              benchResidualRerank = psqlFileScript "th-bench-residual-rerank" "benchmarks/dev/residual_rerank_grid.sql";
-
-              benchBm25PhraseRerank = psqlFileScript "th-bench-bm25-phrase-rerank" "benchmarks/dev/bm25_phrase_rerank_grid.sql";
-
-              benchDenseCandidateMiss = psqlFileScript "th-bench-dense-candidate-miss" "benchmarks/dev/dense_candidate_miss_grid.sql";
-
-              benchNativeCache = psqlFileScript "th-bench-native-cache-memory" "benchmarks/dev/native_cache_memory_bench.sql";
-
-              benchTuneProfile = mkScript "th-bench-tune-profile" ''
-                ${pgInit}/bin/th-pg-init >/dev/null
-                exec psql \
-                  --host="$PGHOST" \
-                  --port="$TH_PGPORT" \
-                  --username="$PGUSER" \
-                  --dbname="$PGDATABASE" \
-                  -v ON_ERROR_STOP=1 \
-                  -v INDEX_NAME="''${INDEX_NAME:-documents_turbohybrid_idx}" \
-                  -v TABLE_NAME="''${TABLE_NAME:-documents}" \
-                  -v ID_COLUMN="''${ID_COLUMN:-id}" \
-                  -v LIMIT_K="''${LIMIT_K:-10}" \
-                  -v MAX_TRIALS="''${MAX_TRIALS:-96}" \
-                  -v EVAL_QUERY_TABLE="''${EVAL_QUERY_TABLE:-eval_queries}" \
-                  -v LATENCY_BUDGET_MS="''${LATENCY_BUDGET_MS:-20}" \
-                  "$@" \
-                  -f "$TH_ROOT/benchmarks/dev/tune_retrieval_profile.sql"
-              '';
-
-              benchFiqaQuick = mkScript "th-bench-fiqa-quick" ''
-                if [ "''${TH_PGDATABASE_WAS_EXPLICIT:-0}" != "1" ]; then
-                  export PGDATABASE="''${FIQA_PGDATABASE:-pgturbohybrid_fiqa_quick}"
-                fi
-                ${pgInit}/bin/th-pg-init >/dev/null
-                export PGHOST PGPORT PGUSER PGDATABASE PG_CONFIG VECTOR_INCLUDE
-                exec "$TH_ROOT/benchmarks/dev/run_fiqa_quick.sh" "$@"
-              '';
-
-              benchConcurrentDense = mkScriptWithInputs [ pkgs.uv ] "th-bench-concurrent-dense" ''
-                ${pgInit}/bin/th-pg-init >/dev/null
-                export PGHOST PGPORT PGUSER PGDATABASE
-                exec uv run "$TH_ROOT/benchmarks/concurrent_dense_bench.py" "$@"
-              '';
-
-              benchDbpediaColbert = mkScriptWithInputs [ pkgs.uv ] "th-bench-dbpedia-colbert" ''
-                for arg in "$@"; do
-                  case "$arg" in
-                    -h|--help)
-                      exec uv run "$TH_ROOT/benchmarks/dbpedia_colbert_multivector.py" "$@"
-                      ;;
-                  esac
-                done
-                if [ "''${TH_PGDATABASE_WAS_EXPLICIT:-0}" != "1" ]; then
-                  export PGDATABASE="''${DBPEDIA_COLBERT_PGDATABASE:-pgturbohybrid_dbpedia_colbert}"
-                fi
-                ${colbertLlamaEnv}
-                ${pgInitColbertLlama}/bin/th-pg-init-colbert-llama >/dev/null
-                export PGHOST PGPORT PGUSER PGDATABASE
-                exec uv run "$TH_ROOT/benchmarks/dbpedia_colbert_multivector.py" "$@"
-              '';
-
-              dbpediaColbertHfDataset = mkScriptWithInputs [ pkgs.uv ] "th-dbpedia-colbert-hf-dataset" ''
-                if [ "''${TH_PGDATABASE_WAS_EXPLICIT:-0}" != "1" ]; then
-                  export PGDATABASE="''${DBPEDIA_COLBERT_PGDATABASE:-pgturbohybrid_dbpedia_colbert}"
-                fi
-                ${colbertLlamaEnv}
-                ${pgInitColbertLlama}/bin/th-pg-init-colbert-llama >/dev/null
-                export PGHOST PGPORT PGUSER PGDATABASE
-                exec uv run "$TH_ROOT/benchmarks/dbpedia_colbert_hf_dataset.py" "$@"
-              '';
-
-              dbpediaColbertGenerateExport =
-                mkScriptWithInputs [ pkgs.uv ] "th-dbpedia-colbert-generate-export"
-                  ''
-                    for arg in "$@"; do
-                      case "$arg" in
-                        -h|--help)
-                          exec uv run "$TH_ROOT/benchmarks/dbpedia_colbert_generate_export.py" "$@"
-                          ;;
-                      esac
-                    done
-                    if [ "''${TH_PGDATABASE_WAS_EXPLICIT:-0}" != "1" ]; then
-                      export PGDATABASE="''${DBPEDIA_COLBERT_PGDATABASE:-pgturbohybrid_dbpedia_colbert}"
-                    fi
-                    ${colbertLlamaEnv}
-                    ${pgInitColbertLlama}/bin/th-pg-init-colbert-llama >/dev/null
-                    export PGHOST PGPORT PGUSER PGDATABASE
-                    exec uv run "$TH_ROOT/benchmarks/dbpedia_colbert_generate_export.py" "$@"
-                  '';
 
               colbertBuildStub = mkScript "th-colbert-build-stub" ''
                 make -C "$TH_ROOT/extensions/pg_colbert_llama" \
@@ -640,18 +547,6 @@
                 installcheck
                 proveInstallcheck
                 test
-                benchRetrievalQuality
-                benchProfileGrid
-                benchTuneProfile
-                benchResidualRerank
-                benchBm25PhraseRerank
-                benchDenseCandidateMiss
-                benchNativeCache
-                benchFiqaQuick
-                benchConcurrentDense
-                benchDbpediaColbert
-                dbpediaColbertHfDataset
-                dbpediaColbertGenerateExport
                 colbertBuildStub
                 colbertTestStub
                 colbertBuildLlama
@@ -790,18 +685,6 @@
                   th-colbert-build-llama build llama_embed against llama.cpp
                   th-colbert-live-test   run gated live llama_embed TAP tests
 
-                Deterministic benchmark helpers:
-                  th-bench-retrieval-quality
-                  th-bench-profile-grid
-                  th-bench-tune-profile
-                  th-bench-residual-rerank
-                  th-bench-bm25-phrase-rerank
-                  th-bench-dense-candidate-miss
-                  th-bench-native-cache-memory
-                  th-bench-dbpedia-colbert
-                  th-dbpedia-colbert-hf-dataset
-                  th-dbpedia-colbert-generate-export
-
                 Style helpers:
                   clang-format / clang-tidy C formatter and static checks
                   pg_format                SQL formatter
@@ -837,10 +720,6 @@
 
           devShells = {
             default = mkShell { devSet = stable; };
-            bench = mkShell {
-              devSet = stable;
-              includeBenchDeps = true;
-            };
             pgvector-master = mkShell { devSet = master; };
           };
 
@@ -869,27 +748,6 @@
               smoke = mkApp "Run the pgturbohybrid smoke test" (stableScript "th-smoke");
               installcheck = mkApp "Run SQL regression tests" (stableScript "th-installcheck");
               test = mkApp "Run smoke and SQL regression tests" (stableScript "th-test");
-              bench-retrieval-quality = mkApp "Run the deterministic retrieval quality grid" (
-                stableScript "th-bench-retrieval-quality"
-              );
-              bench-profile-grid = mkApp "Run the deterministic profile recall/latency grid" (
-                stableScript "th-bench-profile-grid"
-              );
-              bench-tune-profile = mkApp "Run the retrieval profile autotuning SQL harness" (
-                stableScript "th-bench-tune-profile"
-              );
-              bench-concurrent-dense = mkApp "Run the concurrent dense Python benchmark via uv" (
-                stableScript "th-bench-concurrent-dense"
-              );
-              bench-dbpedia-colbert = mkApp "Run the DBpedia ColBERT multivector benchmark via uv" (
-                stableScript "th-bench-dbpedia-colbert"
-              );
-              dbpedia-colbert-hf-dataset = mkApp "Export/import the DBpedia ColBERT multivector Hugging Face dataset" (
-                stableScript "th-dbpedia-colbert-hf-dataset"
-              );
-              dbpedia-colbert-generate-export = mkApp "Generate DBpedia ColBERT multivectors and export the Hugging Face dataset" (
-                stableScript "th-dbpedia-colbert-generate-export"
-              );
               colbert-build-stub = mkApp "Build llama_embed with the stub engine" (
                 stableScript "th-colbert-build-stub"
               );

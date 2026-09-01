@@ -42,20 +42,6 @@ Thumbs.db
 /extensions/pg_colbert_llama/tmp_check/
 /benchmarks/results/
 /benchmarks/output/
-/benchmarks/**/*.json
-!/benchmarks/config/*.json
-/benchmarks/**/*.csv
-/benchmarks/**/*.md
-!/benchmarks/README.md
-!/benchmarks/dev/README.md
-!/benchmarks/qdrant/README.md
-!/benchmarks/dbpedia_openai3_large.md
-/benchmarks/**/*.tq
-/benchmarks/**/*.tv
-/benchmarks/**/*.tvim
-/benchmarks/qdrant/results/
-/benchmarks/qdrant/data/
-/benchmarks/qdrant/qdrant-storage/
 /perf-smoke-results.json
 
 # Build artifacts

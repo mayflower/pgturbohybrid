@@ -311,7 +311,6 @@ $node->safe_psql('pg_colbert_llama_live', sprintf(q(
 	DO $$
 	DECLARE
 		top_id int;
-		stats jsonb;
 	BEGIN
 		SET LOCAL enable_seqscan = off;
 
@@ -327,14 +326,6 @@ $node->safe_psql('pg_colbert_llama_live', sprintf(q(
 		IF top_id IS NULL THEN
 			RAISE EXCEPTION 'expected live dense multivector search to return a row';
 		END IF;
-
-		stats := turbohybrid_last_scan_stats();
-		IF stats->>'multivector_enabled' <> 'true' OR
-		   stats->>'multivector_branch_used' <> 'true' OR
-		   stats->>'index_used' <> 'true' THEN
-			RAISE EXCEPTION 'expected live dense search to use multivector index, stats=%%',
-				stats;
-		END IF;
 	END
 	$$;
 ), sql_literal("$alias:query")));
@@ -344,7 +335,6 @@ $node->safe_psql('pg_colbert_llama_live', sprintf(q(
 	DO $$
 	DECLARE
 		top_id int;
-		stats jsonb;
 	BEGIN
 		SET LOCAL enable_seqscan = off;
 
@@ -362,14 +352,6 @@ $node->safe_psql('pg_colbert_llama_live', sprintf(q(
 
 		IF top_id <> 1 THEN
 			RAISE EXCEPTION 'expected live hybrid search to return id 1, got %%', top_id;
-		END IF;
-
-		stats := turbohybrid_last_scan_stats();
-		IF stats->>'multivector_enabled' <> 'true' OR
-		   stats->>'multivector_branch_used' <> 'true' OR
-		   stats->>'index_used' <> 'true' THEN
-			RAISE EXCEPTION 'expected live hybrid search to use multivector dense index, stats=%%',
-				stats;
 		END IF;
 	END
 	$$;
