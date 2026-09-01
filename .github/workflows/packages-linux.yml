@@ -61,7 +61,7 @@ jobs:
             --depends "postgresql-${{ matrix.pg_major }}-pgvector" \
             -C stage usr
 
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         with:
           name: deb-pg${{ matrix.pg_major }}
           path: ./*.deb
@@ -128,7 +128,7 @@ jobs:
             --depends "pgvector_${{ matrix.pg_major }}" \
             -C stage usr
 
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         with:
           name: rpm-pg${{ matrix.pg_major }}
           path: ./*.rpm
